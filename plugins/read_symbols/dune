@@ -7,7 +7,7 @@
    bap-main
    bap-relation
    bitvec
-   core_kernel))
+   core))
 
 (plugin
  (name read-symbols)

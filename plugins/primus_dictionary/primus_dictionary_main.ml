@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 open Bap_primus.Std
@@ -12,7 +12,7 @@ type t = {
 }
 
 let pair key data = {dict = Primus.Value.Map.singleton key data}
-let add key data s = {dict = Primus.Value.Map.set s.dict ~key ~data}
+let add key data s = {dict = Map.set s.dict ~key ~data}
 
 (* idea: initialize the dictionary with initial
    properties of a project and terms.

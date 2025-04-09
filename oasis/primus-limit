@@ -7,7 +7,7 @@ Library primus_limit
   Build$: flag(everything) || flag(primus_limit)
   FindlibName: bap-plugin-primus_limit
   CompiledObject: best
-  BuildDepends: bap, bap-primus, bap, core_kernel, monads, bap-future, regular
+  BuildDepends: bap, bap-primus, bap, core, monads, bap-future, regular
   XMETADescription: ensures termination by limiting Primus machines
   Modules: Primus_limit_main
   XMETAExtraLines: tags="primus"

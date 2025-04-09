@@ -3,7 +3,7 @@
  (public_name bap-raw.plugin)
  (preprocess (pps ppx_bap))
  (libraries bap bap-main bitvec
-            core_kernel core_kernel.caml_unix ogre))
+            core ogre))
 
 (plugin
  (name raw)

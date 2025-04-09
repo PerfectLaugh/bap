@@ -5,8 +5,7 @@
  (preprocess (pps ppx_bap))
  (libraries
    bap
-   core_kernel
-   core_kernel.caml_unix
+   core
    mmap
    monads
    ogre)

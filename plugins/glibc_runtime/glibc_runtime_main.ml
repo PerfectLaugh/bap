@@ -3,7 +3,7 @@ Enables ad-hoc support for glibc runtime code. In particular it
 detects the locations of $(b,main) and $(b,__libc_start_main)
 functions (and adds the latter if it is absent).
 "
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_main
 open Bap.Std
 open Bap_c.Std

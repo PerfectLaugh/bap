@@ -28,13 +28,13 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *)
-open Core_kernel[@@warning "-D"]
+open Core
 
 open Bitstring
 open Elf_types
 open Elf_internal_utils
 
-module Char = Caml.Char
+module Char = Stdlib.Char
 
 let elf_max_header_size = 64         (* no magick! *)
 
@@ -239,7 +239,7 @@ let parse_elf_ident bits =
      parse_e_osabi e_osabi,
      e_abiver,
      rest)
-[@@warning "-D"]
+
 
 (* elf header *)
 let parse_elf_hdr elf =
@@ -327,7 +327,7 @@ let parse_elf_hdr elf =
         } in
         elf, seg_table, sec_table
     )
-[@@warning "-D"]
+
 
 (* segment *)
 let parse_segment ei_class endian bit =
@@ -370,7 +370,7 @@ let parse_segment ei_class endian bit =
           p_filesz;
           p_offset;
         })
-[@@warning "-D"]
+
 
 (* section *)
 let parse_section ei_class endian bit =
@@ -422,7 +422,7 @@ let parse_section ei_class endian bit =
           sh_size;
           sh_offset;
         })
-[@@warning "-D"]
+
 
 let validate_offsets desc  ~pos ~len ~offset ~size : unit Or_error.t =
   Validate.(result @@ name_list desc [
@@ -435,13 +435,13 @@ let validate_offsets desc  ~pos ~len ~offset ~size : unit Or_error.t =
       Int.validate_ubound (size + offset)
         ~max:(Incl (pos + len))
     ])
-[@@warning "-D"]
+
 
 let split bits size : bitstring * bitstring =
   match%bitstring bits with
   | {|hd : size * 8 : bitstring;
       tl : -1       : bitstring|} -> hd,tl
-[@@warning "-D"]
+
 
 (* Bitlength needed that's why we multiply by 8 *)
 let bitstring_of_bytes b = b, 0, Bytes.length b * 8

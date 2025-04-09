@@ -1,6 +1,6 @@
 (** Regular Library.   *)
 
-open Core_kernel[@@warning "-D"]
+open Core
 
 (** Interface that should support any regular data type.
 
@@ -47,7 +47,7 @@ open Core_kernel[@@warning "-D"]
     functions.
 
     @see <
-    https://ocaml.janestreet.com/ocaml-core/latest/doc/core_kernel/>
+    https://ocaml.janestreet.com/ocaml-core/latest/doc/core/>
     Core Kernel Documentation
 *)
 module Std : sig
@@ -148,10 +148,10 @@ module Std : sig
 
   (** Lazy sequence.
 
-      This is the extension of Core_kernel[@@warning "-D"]'s [Sequence] module
+      This is the extension of Core's [Sequence] module
 
       @see
-      <https://ocaml.janestreet.com/ocaml-core/latest/doc/core_kernel/Std/Sequence.mod/>
+      <https://ocaml.janestreet.com/ocaml-core/latest/doc/core/Std/Sequence.mod/>
       [Sequence]
 
   *)
@@ -760,11 +760,11 @@ module Std : sig
       [str], [pps], [ppo].
 
       @see
-      <https://ocaml.janestreet.com/ocaml-core/latest/doc/core_kernel/Std/Comparable.mod/S_binable.modt/>
+      <https://ocaml.janestreet.com/ocaml-core/latest/doc/core/Std/Comparable.mod/S_binable.modt/>
       [Comparable.S_binable]
 
       @see
-      <https://ocaml.janestreet.com/ocaml-core/latest/doc/core_kernel/Hashable/S_binable.modt/>
+      <https://ocaml.janestreet.com/ocaml-core/latest/doc/core/Hashable/S_binable.modt/>
       [Hashable.S_binable]
 
 
@@ -807,11 +807,11 @@ module Std : sig
         pretty-printed.
 
         @see
-        <https://ocaml.janestreet.com/ocaml-core/latest/doc/core_kernel/Std/Comparable.mod/S.modt/>
+        <https://ocaml.janestreet.com/ocaml-core/latest/doc/core/Std/Comparable.mod/S.modt/>
         [Comparable.S]
 
         @see
-        <https://ocaml.janestreet.com/ocaml-core/latest/doc/core_kernel/Std/Hashable.mod/S.modt/>
+        <https://ocaml.janestreet.com/ocaml-core/latest/doc/core/Std/Hashable.mod/S.modt/>
         [Hashable.S]
     *)
     module type S = sig

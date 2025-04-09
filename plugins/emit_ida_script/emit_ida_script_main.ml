@@ -1,9 +1,9 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Format
 include Self()
 
-module Buffer = Caml.Buffer
+module Buffer = Stdlib.Buffer
 
 (** ida uses a strange color coding, bgr, IIRC  *)
 let idacode_of_color = function

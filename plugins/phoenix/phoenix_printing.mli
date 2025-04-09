@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 
 type 'a pp = Format.formatter -> 'a -> unit

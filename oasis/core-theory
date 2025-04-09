@@ -7,7 +7,7 @@ Library bap_core_theory
   Path: lib/bap_core_theory
   FindlibName: bap-core-theory
   CompiledObject: best
-  BuildDepends: bap-knowledge, core_kernel, core_kernel.caml_unix,
+  BuildDepends: bap-knowledge, core,
                 bitvec, bitvec-order, bitvec-sexp, bitvec-binprot, ppx_bap
   Modules: Bap_core_theory
   InternalModules:
@@ -30,7 +30,7 @@ Library core_theory_plugin
   Path:             plugins/core_theory
   FindlibName:      bap-plugin-core_theory
   BuildDepends:     bap-knowledge, bap-core-theory, bap-main,
-                    bitvec, core_kernel, monads, ppx_bap
+                    bitvec, core, monads, ppx_bap
   InternalModules:  Core_theory_main
   XMETADescription: provides core theory rules
   XMETAExtraLines:  tags="core-theory, semantics"

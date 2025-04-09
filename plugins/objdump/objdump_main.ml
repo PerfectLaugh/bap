@@ -26,7 +26,7 @@ $(b,bap-plugin-ida)(1)
 
 
 open Bap_core_theory
-open Core_kernel[@@warning "-D"]
+open Core
 open Objdump_config
 open Bap_main
 
@@ -46,7 +46,7 @@ let demangler = Extension.Configuration.parameter
 
 
 let objdump_cmds demangler=
-  String.Set.stable_dedup_list objdumps|>
+  List.stable_dedup ~compare: String.compare objdumps|>
   List.map ~f:(fun cmd ->
       sprintf "%s %s %s" cmd default_objdump_opts @@
       match demangler with

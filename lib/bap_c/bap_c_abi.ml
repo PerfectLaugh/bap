@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 open Bap_c_type
@@ -336,7 +336,7 @@ end
 
 
 module Arg = struct
-  open Core_kernel[@@warning "-D"]
+  open Core
   open Bap_core_theory
   open Bap.Std
   open Monads.Std

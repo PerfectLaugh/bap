@@ -8,7 +8,7 @@ Library primus_round_robin_scheduler_plugin
   Build$: flag(everything) || flag(primus_round_robin)
   FindlibName: bap-plugin-primus_round_robin
   CompiledObject: best
-  BuildDepends: bap, bap-primus, core_kernel, monads, bap-future
+  BuildDepends: bap, bap-primus, core, monads, bap-future
   XMETADescription: evaluates all machines in the BFS order
   Modules: Primus_round_robin_main
   XMETAExtraLines: tags="primus, scheduler"

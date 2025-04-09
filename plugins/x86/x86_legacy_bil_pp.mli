@@ -3,7 +3,7 @@
 module Bil = X86_legacy_bil
 open Bil
 
-module Core = Core_kernel[@@warning "-D"]
+module Core = Core
 
 module VH = Var.Table
 module F = Format

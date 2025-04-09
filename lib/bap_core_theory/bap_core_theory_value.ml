@@ -1,5 +1,5 @@
-open Core_kernel[@@warning "-D"]
-open Caml.Format
+open Core
+open Format
 
 open Bap_knowledge
 module KB = Knowledge
@@ -158,11 +158,12 @@ end
         let of_sexpable x = x
       end)
 
-    include Binable.Of_binable(Exp)(struct
+    include Binable.Of_binable_with_uuid(Exp)(struct
         type t = top
         let to_binable x = x
         let of_binable x = x
-      end)[@@warning "-D"]
+        let caller_identity = Bin_shape.Uuid.of_string "7afb196e-fb95-47d9-892d-043460269e1b"
+      end)
 
     include Base.Comparable.Inherit(Exp)(struct
         type t = top

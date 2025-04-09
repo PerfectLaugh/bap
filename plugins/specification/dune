@@ -1,7 +1,7 @@
 (library
   (name specification)
   (public_name bap-specification.plugin)
-  (libraries bap core_kernel bap-main ogre regular))
+  (libraries bap core bap-main ogre regular))
 
 (plugin
   (name specification)

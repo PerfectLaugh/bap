@@ -1,5 +1,5 @@
 open Bap_core_theory
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_demangle.Std
 open Bap.Std
 

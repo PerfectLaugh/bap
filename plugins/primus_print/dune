@@ -9,7 +9,7 @@
    bap-knowledge
    bap-primus
    bare
-   core_kernel
+   core
    monads))
 
 (plugin

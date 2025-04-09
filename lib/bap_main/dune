@@ -5,7 +5,7 @@
  (libraries stdlib-shims
             base stdio
             cmdliner
-            core_kernel
+            core
             core_kernel.caml_unix
             fileutils
             bap-future

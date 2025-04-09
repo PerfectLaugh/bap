@@ -1,5 +1,5 @@
 (** An abstraction of sizeof operator.*)
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Bap_c_data
 open Bap_c_type

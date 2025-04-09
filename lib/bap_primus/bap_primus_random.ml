@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 module Iterator = Bap_primus_iterator
 module type S = Iterator.Infinite.S
 

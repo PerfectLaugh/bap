@@ -9,7 +9,7 @@
    bap-c
    bap-core-theory
    bap-powerpc
-   core_kernel
+   core
    monads
    regular
    zarith))

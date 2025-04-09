@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Bap.Std
 open Format
@@ -7,7 +7,7 @@ open Bap_main
 
 include Self()
 
-module Filename = Caml.Filename
+module Filename = Stdlib.Filename
 module Cache = Bap_cache
 module Utils = Bap_cache_utils
 module GC = Bap_cache_gc

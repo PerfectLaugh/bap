@@ -6,8 +6,7 @@
     bap-core-theory
     bap-demangle
     bap-knowledge
-    core_kernel
-    core_kernel.caml_unix
+    core
     graphlib
     ogre
     regular

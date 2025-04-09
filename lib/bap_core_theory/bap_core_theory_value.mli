@@ -1,5 +1,5 @@
-open Core_kernel[@@warning "-D"]
-open Caml.Format
+open Core
+open Format
 open Bap_knowledge
 
 module KB = Knowledge

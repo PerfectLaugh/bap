@@ -1,6 +1,6 @@
 open Bap.Std
 open Bap_core_theory
-open Core_kernel[@@warning "-D"]
+open Core
 open Graphlib.Std
 open Regular.Std
 open Monads.Std

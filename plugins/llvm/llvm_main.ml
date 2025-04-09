@@ -5,7 +5,7 @@ let provides = [
   "llvm"
 ]
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Bap_llvm.Std
 open Bap_main

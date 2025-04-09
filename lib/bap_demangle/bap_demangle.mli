@@ -4,7 +4,7 @@
     restore the original source-language names of symbols, like
     removing leading underscores, or decoding C++ function names.
 *)
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 
 

@@ -46,11 +46,11 @@ $(b,:) instead of $(b,-) or $(b,--), e.g.,
 |}
 
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_main
 open Bap_knowledge
 open Bap.Std
-module Sys = Caml.Sys
+module Sys = Stdlib.Sys
 
 include Loggers()
 

@@ -179,7 +179,7 @@ when the $(b,--primus-promiscuous-mode) is enabled.
 
 |}
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap_main
 open Bap.Std

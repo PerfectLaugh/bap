@@ -6,7 +6,7 @@
     bap-demangle
     bap-knowledge
     bap-main
-    core_kernel))
+    core))
 
 (plugin
   (name demangle)

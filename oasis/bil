@@ -7,7 +7,7 @@ Library bil_plugin
   Path:             plugins/bil
   Build$:           flag(everything) || flag(bil)
   FindlibName:      bap-plugin-bil
-  BuildDepends:     bap, bap-core-theory, bap-knowledge, core_kernel,
+  BuildDepends:     bap, bap-core-theory, bap-knowledge, core,
                     ppx_bap, bap-future, monads, bitvec, bitvec-order, ogre, bap-main
   XMETAExtraLines:  tags="bil,analysis,semantics"
   InternalModules:  Bil_main, Bil_lifter, Bil_semantics, Bil_ir, Bil_float

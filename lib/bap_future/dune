@@ -2,4 +2,4 @@
   (name bap_future)
   (public_name bap-future)
   (wrapped false)
-  (libraries core_kernel monads))
+  (libraries core monads))

@@ -7,7 +7,7 @@ Library primus_exploring_scheduler_plugin
   Build$: flag(everything) || flag(primus_exploring)
   FindlibName: bap-plugin-primus_exploring
   CompiledObject: best
-  BuildDepends: bap, bap-primus, core_kernel, monads, bap-future
+  BuildDepends: bap, bap-primus, core, monads, bap-future
   XMETADescription: evaluates all machines, prioritizing the least visited
   Modules: Primus_exploring_main
   XMETAExtraLines: tags="primus, scheduler"

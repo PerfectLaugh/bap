@@ -4,7 +4,7 @@
     @author Ivan Jager
 *)
 
-open Core_kernel[@@warning "-D"]
+open Core
 
 (** Addresses are big_ints *)
 type addr = Big_int_Z.big_int

@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Mips_utils
 
@@ -195,7 +195,7 @@ module Exp = struct
     if width = e.width then e
     else
       match e.body with
-      | Vars (v,vars) when Caml.not (List.is_empty vars) ->
+      | Vars (v,vars) when Stdlib.not (List.is_empty vars) ->
         extract_of_vars e hi lo (v :: vars)
       | _ ->
         { sign=Unsigned; width; body = Extract (hi,lo,e.body) }

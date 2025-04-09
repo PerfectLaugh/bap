@@ -1,6 +1,6 @@
 (** Native lifter of x86 instructions to the BAP IL *)
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Format
 open Bil.Types

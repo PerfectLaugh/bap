@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_knowledge
 open Bap_core_theory
 open Bap.Std
@@ -7,7 +7,7 @@ open Or_error
 
 include Self()
 
-module Sys = Caml.Sys
+module Sys = Stdlib.Sys
 module Unix = Caml_unix
 
 module Ogre = struct
@@ -122,7 +122,7 @@ module LLVM = struct
       (scheme name $ addr $ size) Tuple.T3.create
 end
 
-module Filename = Caml.Filename
+module Filename = Stdlib.Filename
 
 open Image.Scheme
 open Ogre.Syntax
@@ -475,7 +475,7 @@ let map_file path =
     Unix.close fd;
     Or_error.errorf "unable to process file %s: %s"
       path (Exn.to_string exn)
-[@@warning "-D"]
+
 
 let from_file ~base ~pdb path =
   let open KB.Syntax in

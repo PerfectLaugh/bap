@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Format
 
 type range = Parsexp.Positions.range [@@deriving compare, sexp_of]

@@ -5,7 +5,7 @@ Displays information about the binary. The information is printed in
 the OGRE format.
 "
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_main
 open Bap.Std
 open Regular.Std

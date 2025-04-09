@@ -9,7 +9,7 @@
     bap_image
     bap-knowledge
     bap_types
-    core_kernel
+    core
     graphlib
     monads
     regular))

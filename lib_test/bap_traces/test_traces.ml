@@ -1,5 +1,5 @@
 open OUnit2
-open Core_kernel[@@warning "-D"]
+open Core
 open Or_error
 
 open Bap.Std

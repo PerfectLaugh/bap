@@ -10,7 +10,7 @@
    bap-c
    bap-core-theory
    bap-main
-   core_kernel
+   core
    monads))
 
 (plugin

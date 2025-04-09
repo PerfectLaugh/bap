@@ -1,13 +1,13 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Bap.Std
 open Bap_cache_types
 
 include Self ()
 
-module Filename = Caml.Filename
-module Random = Caml.Random
-module Sys = Caml.Sys
+module Filename = Stdlib.Filename
+module Random = Stdlib.Random
+module Sys = Stdlib.Sys
 module Unix = Caml_unix
 module Utils = Bap_cache_utils
 
@@ -56,7 +56,7 @@ end
 
 include Cfg
 
-let getenv opt = try Some (Sys.getenv opt) with Caml.Not_found -> None
+let getenv opt = try Some (Sys.getenv opt) with Stdlib.Not_found -> None
 
 let root () = match !default_root with
   | Some dir -> dir // ".cache" // "bap"

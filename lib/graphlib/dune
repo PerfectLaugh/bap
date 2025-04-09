@@ -8,5 +8,5 @@
                    graphlib_regular
                    graphlib_regular_intf
                    graphlib_pp)
-  (libraries core_kernel core_kernel.pairing_heap
+  (libraries core core_kernel.pairing_heap
              regular ocamlgraph))

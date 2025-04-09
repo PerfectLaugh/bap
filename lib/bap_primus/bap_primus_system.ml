@@ -1,7 +1,7 @@
 open Bap.Std
 open Bap_primus_types
 open Bap_knowledge
-open Core_kernel[@@warning "-D"]
+open Core
 
 module Name = Knowledge.Name
 module Info = Bap_primus_info

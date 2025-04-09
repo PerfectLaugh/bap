@@ -6,7 +6,7 @@ Library read_symbols_plugin
   Build$:           flag(everything) || flag(read_symbols)
   Path:             plugins/read_symbols
   FindlibName:      bap-plugin-read_symbols
-  BuildDepends:     bap-main, core_kernel, bap-core-theory, bap-knowledge,
+  BuildDepends:     bap-main, core, bap-core-theory, bap-knowledge,
                     bitvec, bap-relation
   Modules:          Read_symbols_main
   XMETADescription: read symbol information from file

@@ -3,4 +3,4 @@
   (public_name bap-knowledge)
   (wrapped false)
   (preprocess (pps ppx_bap))
-  (libraries core_kernel core_kernel.caml_unix monads))
+  (libraries core core_unix monads))

@@ -1,9 +1,9 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_bundle.Std
 open Format
 
 
-module Sys = Caml.Sys
+module Sys = Sys_unix
 
 open Manifest.Fields
 
@@ -63,13 +63,13 @@ let normalized x =
   let with_suffix name =
     if Filename.check_suffix name suffix then name
     else name ^ suffix in
-  let is_plugin x = Sys.file_exists (with_suffix x) in
+  let is_plugin x = Sys.file_exists_exn (with_suffix x) in
   if is_plugin x then with_suffix x else x
 
 let open_bundle () = match normalized (target.contents) with
   | "" -> raise Target_unspecified
-  | x when Sys.is_directory x -> raise Target_is_directory
-  | x when Sys.file_exists x -> Bundle.of_uri (Uri.of_string x)
+  | x when Sys.is_directory_exn x -> raise Target_is_directory
+  | x when Sys.file_exists_exn x -> Bundle.of_uri (Uri.of_string x)
   | x -> raise Target_doesn't_exist
 
 module Update = struct
@@ -206,12 +206,12 @@ module Install = struct
   let main () =
     if String.is_empty target.contents then raise Target_unspecified;
     target := normalized !target;
-    if not (Sys.file_exists !destdir)
+    if not (Sys.file_exists_exn !destdir)
     then FileUtil.mkdir ~parent:true !destdir;
-    if not (Sys.is_directory !destdir)
+    if not (Sys.is_directory_exn !destdir)
     then raise Destdir_is_not_a_dir;
-    if Sys.file_exists !target
-    then if Sys.is_directory !target
+    if Sys.file_exists_exn !target
+    then if Sys.is_directory_exn !target
       then raise Target_is_directory
       else FileUtil.cp [!target] !destdir
     else raise Target_doesn't_exist
@@ -222,7 +222,7 @@ module Remove = struct
   let main () =
     if String.is_empty target.contents then raise Target_unspecified;
     let file = normalized @@ Filename.concat !destdir !target in
-    if Sys.file_exists file
+    if Sys.file_exists_exn file
     then FileUtil.rm ~recurse:true [file]
     else raise Target_not_installed
 end

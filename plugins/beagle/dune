@@ -9,7 +9,7 @@
    bap-microx
    bap-primus
    bap-strings
-   core_kernel
+   core
    monads
    regular))
 

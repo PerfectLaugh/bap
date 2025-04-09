@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 open Bap_plugins_units_intf
 
@@ -99,7 +99,7 @@ module Dynlink = struct
 end
 
 
-let is_toplevel = Caml.Sys.interactive.contents
+let is_toplevel = Stdlib.Sys.interactive.contents
 
 module Make() =
   (val if is_toplevel

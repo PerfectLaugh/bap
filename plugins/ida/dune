@@ -7,8 +7,7 @@
    bap-future
    bap-ida
    bap-knowledge
-   core_kernel
-   core_kernel.caml_unix
+   core
    fileutils
    graphlib
    mmap

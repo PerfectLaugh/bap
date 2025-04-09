@@ -14,7 +14,7 @@
    bitvec
    bitvec-order
    camlzip
-   core_kernel
+   core
    graphlib
    monads
    ocamlgraph

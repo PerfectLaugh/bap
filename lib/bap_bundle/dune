@@ -3,7 +3,7 @@
   (public_name bap-bundle)
   (wrapped false)
   (preprocess (pps ppx_bap))
-  (libraries uri camlzip unix core_kernel core_kernel.caml_unix))
+  (libraries uri camlzip unix core core_kernel.caml_unix))
 
 (rule
   (target bap_bundle_config.ml)

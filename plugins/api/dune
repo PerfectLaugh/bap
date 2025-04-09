@@ -5,7 +5,7 @@
   (libraries
     bap
     bap-api
-    core_kernel
+    core
     fileutils
     regular))
 

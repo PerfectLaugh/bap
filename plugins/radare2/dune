@@ -10,8 +10,7 @@
    bap-knowledge
    bap-relation
    bitvec
-   core_kernel
-   core_kernel.caml_unix
+   core
    regular
    re.pcre
    yojson

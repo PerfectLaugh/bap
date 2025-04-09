@@ -1,7 +1,7 @@
 (library
  (name bap_primus_limit_plugin)
  (public_name bap-primus-limit.plugin)
- (libraries bap bap-primus bap-future monads core_kernel regular))
+ (libraries bap bap-primus bap-future monads core regular))
 
 (plugin
  (name primus-limit)

@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Bap_core_theory
 
@@ -63,7 +63,7 @@ module Std = struct
           sprintf "instruction %s doesn't have an operand with index %d"
             insn_name n in
         Error (Error.of_string str) in
-    match String.Table.find lifters (Insn.name insn) with
+    match Hashtbl.find lifters (Insn.name insn) with
     | None -> Ok []
     | Some lifter -> lift lifter
 

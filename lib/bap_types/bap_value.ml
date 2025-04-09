@@ -1,5 +1,5 @@
 open Bap_core_theory
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Format
 
@@ -21,9 +21,7 @@ type 'a tag = {
   slot : (Theory.program,'a option) KB.slot;
 }
 
-module Value = struct
-  type t = Univ_map.Packed.t = T : 'a Type_equal.Id.t * 'a -> t
-end
+module Value = Univ_map.Packed
 
 module Equal = struct
   type ('a,'b) t = ('a,'b) Type_equal.t = T : ('a,'a) t
@@ -147,7 +145,7 @@ module Univ = struct
     } [@@deriving bin_io]
   end
 
-  include Binable.Of_binable(Repr)(struct
+  include Binable.Of_binable_with_uuid(Repr)(struct
       type t = Value.t
       let to_binable x = Repr.{
           typeid = typeid x;
@@ -155,7 +153,9 @@ module Univ = struct
         }
       let of_binable {Repr.typeid; data} =
         (info typeid).of_string data
-    end) [@@warning "-D"]
+      let caller_identity = 
+        Bin_shape.Uuid.of_string "913162b9-e664-449f-ad92-c276625f01c7"
+    end) 
 end
 
 let create  {key} x = Value.T (key,x)
@@ -261,11 +261,13 @@ module Dict = struct
       List.fold ~init:empty ~f:(fun dict (Value.T (k,x)) ->
           Univ_map.set dict k x)
   end
-  include Binable.Of_binable(Data)(struct
+  include Binable.Of_binable_with_uuid(Data)(struct
       type t = Univ_map.t
       let to_binable = Data.of_dict
       let of_binable = Data.to_dict
-    end) [@@warning "-D"]
+      let caller_identity = 
+        Bin_shape.Uuid.of_string "24ff7880-bd9a-4c2b-bc85-3611a07b2fd5"
+    end) 
   include Sexpable.Of_sexpable(Data)(struct
       type t = Univ_map.t
       let to_sexpable = Data.of_dict

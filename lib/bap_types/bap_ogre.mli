@@ -1,5 +1,5 @@
 open Bap_core_theory
-open Core_kernel[@@warning "-D"]
+open Core
 
 type t = Ogre.doc [@@deriving bin_io, compare, sexp]
 val pp : Format.formatter -> t -> unit

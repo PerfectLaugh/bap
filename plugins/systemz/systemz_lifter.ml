@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 
@@ -97,7 +97,7 @@ end
 
    The return type [unit Theory.eff] is the denotation of effects that
    the instruction performs. The ['a Theory.eff] type is an
-   abbreviation for ['a Theory.effect], which, in turn, is an
+   abbreviation for ['a Theory.effect_], which, in turn, is an
    abbreviation to the knowledge base value of class
    [Theory.Effect.cls], therefore the fully de-abbreviated type of the
    return type is:

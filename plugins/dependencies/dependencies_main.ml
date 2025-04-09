@@ -54,11 +54,11 @@ bap dependency /bin/ls --root=/mnt/image --ldconfig='cat ld.so.cache'
 ```
 "
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Regular.Std
 open Bap_main
-module Sys = Caml.Sys
+module Sys = Stdlib.Sys
 
 include Loggers()
 
