@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Regular.Std
 open Bap.Std
@@ -77,10 +77,10 @@ type result = Result.t
 
 let propagate taints vars tid v r : taints =
   let ts = taints r in
-  Map.change vars tid (function
+  Map.change vars tid ~f:(function
       | None when Set.is_empty ts -> None
       | None -> Some (Var.Map.of_alist_exn [v, ts])
-      | Some vs -> Option.some @@ Map.change vs v (function
+      | Some vs -> Option.some @@ Map.change vs v ~f:(function
           | None when Set.is_empty ts -> None
           | None -> Some ts
           | Some ts' -> Some (Set.union ts ts')))

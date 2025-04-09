@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 
 open X86_types
@@ -160,7 +160,7 @@ module R32 = struct
   let nums = r
 
   (* Only 8 YMM/XMM registers in x86 32-bit mode *)
-  let ymms = Array.sub ymms 0 8
+  let ymms = Array.sub ymms ~pos:0 ~len:8
 
 end
 

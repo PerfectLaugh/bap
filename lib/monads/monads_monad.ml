@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 let ident = Fn.id
 
@@ -264,7 +264,7 @@ module Monad = struct
 
     let void t = Fn.ignore t
     let sequence = List.sequence
-    let rec forever t = bind t (fun _ -> forever t)
+    let rec forever t = bind t ~f:(fun _ -> forever t)
     include Syntax
     include Let
   end
@@ -510,12 +510,12 @@ module OptionT = struct
     module Basic = struct
       include T2(M)
       let return x = M.return (Some x)
-      let bind m f = M.bind m (function
+      let bind m f = M.bind m ~f:(function
           | Some r -> f r
           | None -> M.return None)
       [@@inline]
 
-      let map m ~f = M.bind m (function
+      let map m ~f = M.bind m ~f:(function
           | Some r -> M.return (Some (f r))
           | None -> M.return None)
       [@@inline]
@@ -584,8 +584,8 @@ module ResultT = struct
   = struct
 
     include struct
-      let (>>=) m f = M.bind m f [@@inline]
-      let (>>|) m f = M.map  m f [@@inline]
+      let (>>=) m f = M.bind m ~f [@@inline]
+      let (>>|) m f = M.map  m ~f [@@inline]
     end
 
     module Base = struct
@@ -651,7 +651,7 @@ module ResultT = struct
 
     module type S = sig
       include S
-      val failf : ('a, Caml.Format.formatter, unit, unit -> 'b t) format4 -> 'a
+      val failf : ('a, Stdlib.Format.formatter, unit, unit -> 'b t) format4 -> 'a
     end
     module Make(M : Monad.S) : S
       with type 'a t := 'a T(M).t
@@ -662,7 +662,7 @@ module ResultT = struct
       include Make(struct type t = Error.t end)(M)
 
       let failf fmt =
-        let open Caml.Format in
+        let open Stdlib.Format in
         let buf = Buffer.create 512 in
         let ppf = formatter_of_buffer buf in
         let kon ppf () =
@@ -1024,8 +1024,8 @@ module State = struct
      and type 'a env   := 'a Tp(T)(M).env
   = struct
     include struct
-      let (>>=) m f = M.bind m f [@@inline]
-      let (>>|) m f = M.map  m f [@@inline]
+      let (>>=) m f = M.bind m ~f [@@inline]
+      let (>>|) m f = M.map  m ~f [@@inline]
     end
 
     let make run = State run [@@inline]
@@ -1047,7 +1047,7 @@ module State = struct
     let run m s = M.(m => s >>| fun {x;s} -> (x,s))
     let eval m s = M.(run m s >>| fst)
     let exec m s = M.(run m s >>| snd)
-    let lift m = make @@ fun s -> M.bind m (fun x -> M.return {x;s}) [@@inline]
+    let lift m = make @@ fun s -> M.bind m ~f:(fun x -> M.return {x;s}) [@@inline]
     include Basic
     include Monad.Make2(Basic)
   end

@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap_main
 open Bap.Std
@@ -34,7 +34,7 @@ let build_library index =
                 Map.update cats cat ~f:(function
                     | None -> (name %: desc)
                     | Some elts ->
-                      Map.set elts name desc))))
+                      Map.set elts ~key:name ~data:desc))))
 
 let pp_source ppf desc =
   Format.fprintf ppf "\

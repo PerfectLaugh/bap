@@ -8,6 +8,6 @@
     bap-api
     bap-core-theory
     bap-knowledge
-    core_kernel
+    core
     monads
     regular))

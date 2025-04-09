@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open OUnit2
 open Or_error
 open Word_size

@@ -10,7 +10,7 @@
     bap-main
     bap-primus
     bitvec
-    core_kernel
+    core
     monads
     regular))
 

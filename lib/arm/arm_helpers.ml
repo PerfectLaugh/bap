@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 let sexpable_of_string t_of_sexp name =
   try Some (t_of_sexp @@ Sexp.of_string name)

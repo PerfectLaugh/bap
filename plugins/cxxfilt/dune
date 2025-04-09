@@ -1,7 +1,7 @@
 (library
  (name bap_cxxfilt_plugin)
  (public_name bap-cxxfilt.plugin)
- (libraries bap bap-demangle core_kernel core_kernel.caml_unix))
+ (libraries bap bap-demangle core))
 
 (plugin
  (name cxxfilt)

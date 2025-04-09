@@ -1,12 +1,11 @@
 (** Builds BAP Annotated Reference . *)
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Poly
 open Bap_plugins.Std
 
-module Sys = Caml.Sys
-module Unix = Caml_unix
-module Filename = Caml.Filename
+module Sys = Stdlib.Sys
+module Filename = Stdlib.Filename
 
 let libraries = [
   "Core libraries", [

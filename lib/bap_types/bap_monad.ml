@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 module Legacy = struct
   include Bap_monad_types
@@ -44,7 +44,7 @@ module T = struct
       include Monad.Make2(struct
           type nonrec ('a,'b) t = ('a,'b) t
           let return x = Or_error.return x |> M.return
-          let bind m f = M.bind m (function
+          let bind m f = M.bind m ~f:(function
               | Ok r -> f r
               | Error err -> M.return (Error err))
           let map = `Define_using_bind

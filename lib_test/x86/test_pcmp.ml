@@ -55,7 +55,7 @@
 
 *)
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open OUnit2
 
@@ -102,7 +102,7 @@ let test insn_name bytes x y ~expected _ctxt =
           insn_name (Word.to_string word) (Word.to_string expected);
       Word.equal word expected
     | _ -> false
-[@@warning "-D"]
+
 
 let test_eqb =
   let pcmpeqb = "\x66\x0f\x74\xc8" in (** pcmpeqb %xmm1, %xmm0 *)

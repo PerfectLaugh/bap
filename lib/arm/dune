@@ -11,6 +11,6 @@
    bap-traces
    bitvec
    bitvec-order
-   core_kernel
+   core
    ogre
    regular))

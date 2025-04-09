@@ -74,7 +74,7 @@ raw code (i.e., no meta information), then use the $(b,raw) loader.
 ```
 |}
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Format
 open Regular.Std
 open Bap.Std

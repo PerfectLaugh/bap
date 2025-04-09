@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Or_error
 
 open Bap_types.Std

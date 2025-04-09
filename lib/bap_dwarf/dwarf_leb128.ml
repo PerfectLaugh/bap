@@ -1,5 +1,5 @@
 (** The implementation can work with numbers of arbitrary length. *)
-open Core_kernel[@@warning "-D"]
+open Core
 
 module Bits = struct
   open Binary_packing
@@ -57,7 +57,7 @@ let pack7 ~negative (s : Bytes.t) =
       let bit0 = Cursor.bit0 cur in
       if cur.bit >= n * 8 then None
       else
-        let word = Bits.get_uint16 s cur.pos in
+        let word = Bits.get_uint16 ~buf:s ~pos:cur.pos in
         let mask = 0b0111_1111 lsl bit0 in
         let word = (word land mask) lsr bit0 in
         let word =
@@ -86,13 +86,13 @@ let decode (leb : t) buf ~off ~len : unit =
   let (_ : Cursor.t) = List.foldi leb.data ~init:(Cursor.init len)
       ~f:(fun i cur x ->
           let bit0 = Cursor.bit0 cur in
-          let word = Bits.get_uint16 buf cur.pos in
+          let word = Bits.get_uint16 ~buf ~pos:cur.pos in
           let word = word lor ((x land 0b0111_1111) lsl bit0) in
           let word =
             if leb.negative && i = m - 1
             then word lor (lnot 0 lsl (bit0 + 7)) else word in
           let word = word land 0xFFFF in
-          Bits.set_int16 buf cur.pos word;
+          Bits.set_int16 ~buf ~pos:cur.pos word;
           Cursor.next cur) in
   if leb.negative then begin
     for i = m to len - 1 do
@@ -110,7 +110,7 @@ let read_exn ?(signed=false) bits ~pos_ref =
   let s = Sequence.unfold ~init:(`Continue) ~f:(function
       | `Stop -> None
       | `Continue ->
-        let x = Bits.get_uint8 bits !pos_ref  in
+        let x = Bits.get_uint8 ~buf:bits ~pos:!pos_ref  in
         incr pos_ref;
         if x land (1 lsl 7) = 0 then Some (x,`Stop)
         else Some (x, `Continue)) in
@@ -128,7 +128,7 @@ let size t = max 1 @@ List.length t.data
 
 let write t bits ~pos : unit =
   List.iteri t.data ~f:(fun i x ->
-      Bits.set_int8 bits (pos + i) x)
+      Bits.set_int8 ~buf:bits ~pos:(pos + i) x)
 
 type 'a repr = {
   size : int;
@@ -148,7 +148,7 @@ let int =
       (fun buf -> Int32.to_int (get_int32 ~buf ~pos:0)),
       (fun buf x -> set_int32 ~buf ~pos:0 @@ safe Int32.of_int x)
     | W64 ->
-      (fun buf -> Int64.to_int (get_int64 buf 0)),
+      (fun buf -> Int64.to_int (get_int64 ~buf ~pos:0)),
       (fun buf x -> set_int64 ~buf ~pos:0 @@ Int64.of_int x) in
   {
     size = num_bits word_size / 8;
@@ -159,16 +159,16 @@ let int =
 
 let int32 = {
   size = 4;
-  read = (fun buf -> Some (Bits.get_int32 buf 0));
+  read = (fun buf -> Some (Bits.get_int32 ~buf ~pos:0));
   is_negative = Int32.is_negative;
-  write = (fun buf x -> Bits.set_int32 buf 0 x);
+  write = (fun buf x -> Bits.set_int32 ~buf ~pos:0 x);
 }
 
 let int64 = {
   size = 8;
-  read = (fun buf -> Some (Bits.get_int64 buf 0));
+  read = (fun buf -> Some (Bits.get_int64 ~buf ~pos:0));
   is_negative = Int64.is_negative;
-  write = (fun buf x -> Bits.set_int64 buf 0 x)
+  write = (fun buf x -> Bits.set_int64 ~buf ~pos:0 x)
 }
 
 let decoder (repr : 'a repr) x : 'a Or_error.t =

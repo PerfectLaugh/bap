@@ -3,4 +3,4 @@
  (public_name bap-dwarf)
  (preprocess (pps ppx_bap))
  (wrapped false)
- (libraries bap core_kernel core_kernel.binary_packing regular))
+ (libraries bap core core_kernel.binary_packing regular))

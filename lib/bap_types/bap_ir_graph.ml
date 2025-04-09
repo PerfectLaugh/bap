@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Graphlib.Std
 open Option.Monad_infix
@@ -17,7 +17,7 @@ module Pred = struct
   (** [remove src dst preds] remove a predecessor [src] from
       a set of predecessors of [dst] *)
   let remove src dst rdep =
-    Map.change rdep dst (function
+    Map.change rdep dst ~f:(function
         | None -> None
         | Some xs -> Some (Set.remove xs src))
 
@@ -25,7 +25,7 @@ module Pred = struct
     Map.map rdep ~f:(Set.filter ~f:(fun id -> Tid.(id <> src)))
 
   let update src dst rdep =
-    Map.change rdep dst (function
+    Map.change rdep dst ~f:(function
         | None -> None
         | Some xs -> Some (Set.add xs src))
 
@@ -362,14 +362,14 @@ let preds_of_sub sub : Tid.Set.t Tid.Map.t =
   Term.enum blk_t sub |>
   Seq.fold ~init:Tid.Map.empty ~f:(fun ins src ->
       let src_id = Term.tid src in
-      let ins = Map.change ins src_id (function
+      let ins = Map.change ins src_id ~f:(function
           | None -> Some Tid.Set.empty
           | other -> other) in
       Term.enum jmp_t src |>
       Seq.fold ~init:ins ~f:(fun ins jmp ->
           match succ_tid_of_jmp jmp with
           | None -> ins
-          | Some tid -> Map.change ins tid (function
+          | Some tid -> Map.change ins tid ~f:(function
               | None -> Some (Tid.Set.singleton src_id)
               | Some set -> Some (Set.add set src_id))))
 

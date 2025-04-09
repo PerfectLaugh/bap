@@ -2,4 +2,4 @@
   (name test_disasm)
   (preprocess (pps ppx_bap))
   (wrapped false)
-  (libraries bap core_kernel ounit2 str))
+  (libraries bap core ounit2 str))

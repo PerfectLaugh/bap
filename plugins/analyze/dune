@@ -8,7 +8,7 @@
    bap-knowledge
    bap-main
    bitvec
-   core_kernel
+   core
    linenoise
    monads))
 

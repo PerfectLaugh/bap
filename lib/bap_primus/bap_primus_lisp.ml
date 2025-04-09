@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 open Format
@@ -426,7 +426,7 @@ module Interpreter(Machine : Machine) = struct
       let msg = String.concat contents in
       Machine.Observation.make new_message msg >>= fun () ->
       Eval.const Word.b0 in
-    Machine.Local.update state (fun s -> {s with cur = exp.id}) >>= fun () ->
+    Machine.Local.update state ~f:(fun s -> {s with cur = exp.id}) >>= fun () ->
     eval exp
 
   let eval_signal name args : unit Machine.t =
@@ -772,7 +772,7 @@ module Make(Machine : Machine) = struct
         proj x >>= Self.eval_signal name) >>= fun sub ->
     Machine.Local.update state ~f:(fun s -> {
           s with program = Lisp.Program.add s.program signal r;
-                 signals = Map.add_exn s.signals name sub;
+                 signals = Map.add_exn s.signals ~key:name ~data:sub;
         })
 
 

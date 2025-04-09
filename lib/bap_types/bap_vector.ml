@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Format
 
@@ -142,7 +142,7 @@ let find = C.find
 let find_map = C.find_map
 
 let to_list vec =
-  List.init vec.size (fun i ->
+  List.init vec.size ~f:(fun i ->
       Array.unsafe_get vec.data i)
 
 let min_elt = C.min_elt

@@ -9,7 +9,7 @@
    bap_plugins_package
    bap_plugins_units)
  (preprocess (pps ppx_bap))
- (libraries core_kernel dynlink fileutils findlib uri
+ (libraries core dynlink fileutils findlib uri
             bap-bundle bap-common bap-future
             dune-site
             dune-site.plugins

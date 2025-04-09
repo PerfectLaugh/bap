@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Format
 
@@ -66,8 +66,15 @@ let no_optimizations : bool Config.param =
   Config.(flag "no-optimizations" ~doc)
 
 let create
-    a b c d e f g = Phoenix_options.Fields.create
-    a b c d e f g
+    output_folder cfg_format no_resolve keep_alive no_inline keep_consts no_optimizations = Phoenix_options.Fields.create 
+      ~output_folder
+      ~cfg_format
+      ~no_resolve
+      ~keep_alive
+      ~no_inline
+      ~keep_consts
+      ~no_optimizations
+
 
 let man = [
   `S "DESCRIPTION";

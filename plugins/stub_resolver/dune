@@ -12,7 +12,7 @@
    bitvec
    bitvec-order
    bitvec-sexp
-   core_kernel
+   core
    ogre))
 
 (plugin

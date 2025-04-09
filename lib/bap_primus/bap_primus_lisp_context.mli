@@ -234,7 +234,7 @@
           that we can use a much more concrete (call-the-advised)).
 *)
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 

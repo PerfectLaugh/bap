@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Bap_core_theory
 open Bap_knowledge
@@ -88,7 +88,7 @@ let update_units t sub =
   match Term.get_attr sub filename with
   | Some file -> in_file file @@ fun unit ->
     let tid = Term.tid sub in
-    !!{t with units = Map.add_exn t.units tid unit}
+    !!{t with units = Map.add_exn t.units ~key:tid ~data:unit}
   | None -> !!t
 
 let should_link aliases ~link_only ~no_link =
@@ -141,7 +141,7 @@ let find_pairs t =
       | 1 ->
         let impl = Set.min_elt_exn reals in
         Set.fold stubs ~init ~f:(fun links stub ->
-            Map.add_exn links stub impl)
+            Map.add_exn links ~key:stub ~data:impl)
       | 0 ->
         info "no implementations found in group %a" pp group;
         init

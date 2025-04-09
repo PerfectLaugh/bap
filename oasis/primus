@@ -9,7 +9,7 @@ Library bap_primus
   FindlibName: bap-primus
   CompiledObject: best
   BuildDepends: bap, bap-abi, bap-c, uuidm, bap-future, parsexp, bap-strings,
-                core_kernel, regular, monads, graphlib, bap-knowledge,
+                core, regular, monads, graphlib, bap-knowledge,
                 bap-core-theory, zarith, bitvec, zarith, ppx_bap,
                 bitvec-binprot
   Modules: Bap_primus

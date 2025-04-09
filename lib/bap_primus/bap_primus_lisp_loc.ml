@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Format
 
 type range = Parsexp.Positions.range [@@deriving compare, sexp_of]
@@ -37,8 +37,8 @@ let shift_pos p off = Parsexp.Positions.{
 
 let nth_char p off = Parsexp.Positions.{
     p with range = {
-    start_pos = shift_pos p.range.start_pos off;
-    end_pos = shift_pos p.range.end_pos (off + 1)}
+    start_pos = shift_pos p.range.start_pos ~cols:off;
+    end_pos = shift_pos p.range.end_pos ~cols:(off + 1)}
   }
 
 

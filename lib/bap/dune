@@ -21,8 +21,7 @@
    bitvec-binprot
    bitvec-order
    bitvec-sexp
-   core_kernel
-   core_kernel.caml_unix
+   core
    fileutils
    graphlib
    monads

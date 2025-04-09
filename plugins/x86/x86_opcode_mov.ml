@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 type mov_rr_ia32 = [
   | `MOV8rr

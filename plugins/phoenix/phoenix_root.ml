@@ -1,6 +1,6 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
-module Sys = Caml.Sys
+module Sys = Stdlib.Sys
 module Unix = Caml_unix
 
 exception Target_directory_is_a_file

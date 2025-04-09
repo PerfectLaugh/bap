@@ -1,5 +1,5 @@
 open Bap_core_theory
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_demangle.Std
 open Bap.Std
 
@@ -136,7 +136,7 @@ module M16 = struct
       vif;             (* 19 *)
       vip;             (* 20 *)
       id;              (* 21 *)
-    ] @ List.init 8 (fun i -> res (i+22)) @ [
+    ] @ List.init 8 ~f:(fun i -> res (i+22)) @ [
       aes;             (* 30 *)
       ai;              (* 31 *)
     ]

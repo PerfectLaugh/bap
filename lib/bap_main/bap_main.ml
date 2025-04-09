@@ -258,9 +258,9 @@ module Error = struct
   type t += Exit_requested of int
   type t += Bad_recipe of Bap_recipe.error
 
-  let register_printer = Caml.Printexc.register_printer
+  let register_printer = Stdlib.Printexc.register_printer
   let pp ppf e =
-    Format.pp_print_string ppf (Caml.Printexc.to_string e)
+    Format.pp_print_string ppf (Stdlib.Printexc.to_string e)
 
   let str fmt = Format.kasprintf Option.some fmt
 
@@ -454,11 +454,11 @@ module Context = struct
     List.iter plugins ~f:(fun (plugin,info) ->
         if not (Set.mem disabled plugin)
         then
-          Hashtbl.add_exn plugin_descriptions plugin info);
+          Hashtbl.add_exn plugin_descriptions ~key:plugin ~data:info);
     List.iter commands ~f:(fun (plugin,commands) ->
         if not (Set.mem disabled plugin)
         then Hashtbl.add_exn command_descriptions
-            plugin commands);
+            ~key:plugin ~data:commands);
 
     update @@ fun ctxt -> {
       env = Map.filter ctxt.env ~f:(fun {scope} ->
@@ -469,7 +469,7 @@ module Context = struct
             if Set.mem disabled name then plugins
             else
               let data = Set.of_list (module String) tags in
-              Map.add_exn plugins name data)
+              Map.add_exn plugins ~key:name ~data)
     }
 
   let request () =
@@ -531,7 +531,7 @@ module Context = struct
     Map.iteri ctxt.env ~f:(fun ~key ~data:{digest} ->
         Format.fprintf ppf "%s = %s@\n" key digest);
     Format.pp_print_flush ppf ();
-    Caml.Digest.string @@
+    Stdlib.Digest.string @@
     Buffer.contents buffer
 
   (* the info interface *)
@@ -897,13 +897,13 @@ end = struct
       Hashtbl.update plugin_pages name ~f:(function
           | None -> man
           | Some men -> men @ man);
-      Hashtbl.add_exn plugin_codes name !plugin_code;
-      Hashtbl.add_exn plugin_infos name info;
-      Hashtbl.add_exn plugins name p;
+      Hashtbl.add_exn plugin_codes ~key:name ~data:!plugin_code;
+      Hashtbl.add_exn plugin_infos ~key:name ~data:info;
+      Hashtbl.add_exn plugins ~key:name ~data:p;
       if not (List.is_empty !actions)
-      then Hashtbl.add_exn plugin_cmds name !actions;
+      then Hashtbl.add_exn plugin_cmds ~key:name ~data:!actions;
       reset_plugin ();
-      Hashtbl.add_exn plugin_specs name term;
+      Hashtbl.add_exn plugin_specs ~key:name ~data:term;
     | `Errored _ -> reset_plugin ()
     | _ -> ()
 
@@ -923,8 +923,8 @@ end = struct
 
   let get_from_env name =
     let name = env_var_for_option name in
-    try Some (Caml.Sys.getenv name)
-    with Caml.Not_found -> None
+    try Some (Stdlib.Sys.getenv name)
+    with Stdlib.Not_found -> None
 
   let get_from_config ctxt name =
     List.Assoc.find ~equal:String.equal ctxt.config name
@@ -1002,7 +1002,7 @@ end = struct
         t1 >>> t2)
 
   let progname =
-    Caml.Filename.basename (Caml.Sys.executable_name)
+    Stdlib.Filename.basename (Stdlib.Sys.executable_name)
 
 
   let with_context name ~f =
@@ -1011,7 +1011,7 @@ end = struct
   let try_eval f x = try f x with
     | Invalid_argument s -> Error (Error.Invalid s)
     | exn ->
-      let backtrace = Caml.Printexc.get_backtrace () in
+      let backtrace = Stdlib.Printexc.get_backtrace () in
       Error (Error.Bug (exn,backtrace))
 
 
@@ -1178,7 +1178,7 @@ module Extension = struct
       try Ok (f ctxt) with
       | Invalid_argument s -> Error (Error.Invalid s)
       | exn ->
-        let backtrace = Caml.Printexc.get_backtrace () in
+        let backtrace = Stdlib.Printexc.get_backtrace () in
         Error (Error.Bug (exn,backtrace))
 
     let doc_enum = Arg.doc_alts_enum

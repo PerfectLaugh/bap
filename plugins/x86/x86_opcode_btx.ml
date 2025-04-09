@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 (** BT *)
 type bt_rr_ia32 = [

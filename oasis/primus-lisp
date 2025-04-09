@@ -6,7 +6,7 @@ Flag primus_lisp
 Library primus_lisp_library_plugin
   Build$:       flag(everything) || flag(primus_lisp)
   Path:         plugins/primus_lisp
-  BuildDepends: bap-primus, core_kernel, bap, ppx_bap, monads, regular,
+  BuildDepends: bap-primus, core, bap, ppx_bap, monads, regular,
                 bap-knowledge, bap-core-theory, bitvec, bap-main
   FindlibName:     bap-plugin-primus_lisp
   CompiledObject:  best

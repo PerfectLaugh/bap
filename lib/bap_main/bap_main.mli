@@ -81,7 +81,7 @@
     dependencies, which leverages plugin portability, so that it can
     be loaded when the development environment is no longer
     available. (Note, by default all dependencies except the bap
-    library itself and core_kernel) are packed into the plugin.
+    library itself and core) are packed into the plugin.
 
     The [bapbuild] tool is used to build plugins from OCaml source
     code. The [bapbundle] tool could be used to deploy the plugin into
@@ -584,7 +584,7 @@ module Extension : sig
 
         Note, the examples below assume the following preamble:
         {[
-          open Core_kernel[@@warning "-D"]
+          open Core
           open Bap_main.Extension
         ]}
 
@@ -1035,7 +1035,7 @@ module Extension : sig
         Declaring a simple configuration parameter:
 
         {[
-          open Core_kernel[@@warning "-D"]
+          open Core
           open Bap_main.Extension
 
           let depth = Configuration.parameter Type.int "depth"
@@ -1051,7 +1051,7 @@ module Extension : sig
         example could be rewritten as:
 
         {[
-          open Core_kernel[@@warning "-D"]
+          open Core
           open Bap_main.Extension
           open Bap_main.Extension.Syntax
 

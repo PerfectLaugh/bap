@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Monads.Std
 open Bap_common_types
 open Bap_bil
@@ -70,7 +70,7 @@ module Make(SM : Monad.State.S2) = struct
         if Bitvector.(r = b0) then return () else
         if Bitvector.(r = b1)
         then self#eval body >>= fun () -> self#eval_while ~cond ~body
-        else self#type_error' @@ TE.bad_type bool_t (imm_t r)
+        else self#type_error' @@ TE.bad_type ~exp:bool_t ~got:(imm_t r)
 
     method eval_if ~cond ~yes ~no : 'a u =
       self#eval_exp cond >>| value >>= function
@@ -79,7 +79,7 @@ module Make(SM : Monad.State.S2) = struct
       | Imm r ->
         if Bitvector.(r = b0) then self#eval no  else
         if Bitvector.(r = b1) then self#eval yes
-        else self#type_error' @@ TE.bad_type bool_t (imm_t r)
+        else self#type_error' @@ TE.bad_type ~exp:bool_t ~got:(imm_t r)
   end
 end
 

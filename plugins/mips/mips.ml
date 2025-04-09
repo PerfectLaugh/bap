@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Bap_core_theory
 
@@ -42,8 +42,8 @@ module Std = struct
   let delayed_opcodes = Hashtbl.create (module String)
 
   let register ?delay name lifter =
-    Option.iter delay ~f:(fun d -> Hashtbl.add_exn delayed_opcodes name d);
-    Hashtbl.add_exn lifters name lifter
+    Option.iter delay ~f:(fun d -> Hashtbl.add_exn delayed_opcodes ~key:name ~data:d);
+    Hashtbl.add_exn lifters ~key:name ~data:lifter
 
   let (>>) = register
 
@@ -63,7 +63,7 @@ module Std = struct
           sprintf "instruction %s doesn't have an operand with index %d"
             insn_name n in
         Error (Error.of_string str) in
-    match String.Table.find lifters (Insn.name insn) with
+    match Hashtbl.find lifters (Insn.name insn) with
     | None -> Ok []
     | Some lifter -> lift lifter
 

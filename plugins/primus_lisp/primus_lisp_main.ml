@@ -1,10 +1,10 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 open Monads.Std
 open Bap_primus.Std
 open Format
-module Sys = Caml.Sys
+module Sys = Stdlib.Sys
 include Self()
 
 module Primitives = Primus_lisp_primitives

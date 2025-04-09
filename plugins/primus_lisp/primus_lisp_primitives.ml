@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 open Bap_primus.Std
@@ -11,7 +11,7 @@ let registers = Primus.Machine.State.declare
       Insn.ops insn |>
       Array.fold ~init:regs ~f:(fun regs -> function
           | Op.Reg r ->
-            Map.set regs (Reg.code r) (Reg.name r)
+            Map.set regs ~key:(Reg.code r) ~data:(Reg.name r)
           | _ -> regs))
 
 module Closure(Machine : Primus.Machine.S) = struct
@@ -136,7 +136,7 @@ module Closure(Machine : Primus.Machine.S) = struct
     let gen = match rest with
       | []  -> Ok None
       | [x] -> make_static_generator width (Value.to_word x)
-      | [min; max] -> make_uniform_generator width min max
+      | [min; max] -> make_uniform_generator ~width ~min ~max
       | _ -> Or_error.errorf "bad generator" in
     if Result.is_error gen
     then failf "memory-allocate: bad generator specification" ()

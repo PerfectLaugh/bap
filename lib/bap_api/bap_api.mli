@@ -13,7 +13,7 @@
 
 *)
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 
 type filename = string

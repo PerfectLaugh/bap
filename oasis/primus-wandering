@@ -8,7 +8,7 @@ Library primus_wandering_scheduler_plugin
   Build$: flag(everything) || flag(primus_wandering)
   FindlibName: bap-plugin-primus_wandering
   CompiledObject: best
-  BuildDepends: bap, bap-primus, core_kernel, monads, bap-future
+  BuildDepends: bap, bap-primus, core, monads, bap-future
   XMETADescription: evaluates all machines while
   Modules: Primus_wandering_main
   XMETAExtraLines: tags="primus, scheduler"

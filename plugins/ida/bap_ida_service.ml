@@ -1,13 +1,13 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_ida.Std
 open Bap.Std
 
 include Self ()
 
-module Buffer = Caml.Buffer
-module Filename = Caml.Filename
+module Buffer = Stdlib.Buffer
+module Filename = Stdlib.Filename
 module Unix = Caml_unix
-module Sys = Caml.Sys
+module Sys = Stdlib.Sys
 
 module Info = Bap_ida_info
 
@@ -63,7 +63,7 @@ let setup_headless_env path =
   let old_path,new_path =
     try
       Unix.getenv var, lib ^ ":" ^ Unix.getenv var
-    with Caml.Not_found -> "", lib in
+    with Stdlib.Not_found -> "", lib in
   Unix.putenv var new_path;
   fun () ->
     try
@@ -159,14 +159,14 @@ let close (self:ida) =
    64-bit libraries.
 *)
 let find_curses () =
-  let x86_64 = Re_posix.re ".*x86.64.*" |> Re.compile in
-  let curses = Re_posix.re ".*lib.curses\\.so.*" |> Re.compile in
+  let x86_64 = Re.Posix.re ".*x86.64.*" |> Re.compile in
+  let curses = Re.Posix.re ".*lib.curses\\.so.*" |> Re.compile in
   pread "ldconfig -p" |> List.filter ~f:(Fn.non (Re.execp x86_64)) |>
   List.filter ~f:(Re.execp curses) |> List.filter_map ~f:(fun s ->
       match String.split ~on:'>' s with
       | [_;path] -> Some (String.strip path)
       | _ -> None) |> List.filter ~f:Sys.file_exists |> List.hd
-[@@warning "-D"]
+
 
 let register ida_info mode : unit =
   let curses = if Info.require_ncurses ida_info then find_curses ()

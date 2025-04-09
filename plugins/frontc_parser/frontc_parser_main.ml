@@ -1,4 +1,4 @@
-open! Core_kernel[@@warning "-D"]
+open! Core
 open Bap.Std
 open Bap_c.Std
 include Self()

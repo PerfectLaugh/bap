@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Or_error
 open Bap.Std
@@ -303,9 +303,9 @@ let lift_bits mem ops (insn : bits_insn ) =
     let src1 = Env.of_reg src1 |> Bil.var in
     let src2 = Env.of_reg src2 |> Bil.var in
     exec Bil.([
-        assn temp (load (var Env.mem) src2 LittleEndian `r8);
+        assn temp (load ~mem:(var Env.mem) ~addr:src2 LittleEndian `r8);
         Env.mem :=
-          store (var Env.mem) src2 (extract 7 0 src1) LittleEndian `r8;
+          store ~mem:(var Env.mem) ~addr:src2 (extract ~hi:7 ~lo:0 src1) LittleEndian `r8;
         assn dest (cast unsigned 32 (var temp));
       ]) cond
 
@@ -317,23 +317,23 @@ let lift_bits mem ops (insn : bits_insn ) =
         ~shift:(exp_of_op shift) reg32_t in
     exec [
       assn (Env.of_reg dest)
-        Bil.(extract 31 16 (exp_of_op src1) ^
-             extract 15  0  shifted)
+        Bil.(extract ~hi:31 ~lo:16 (exp_of_op src1) ^
+             extract ~hi:15 ~lo:0  shifted)
     ] cond
   (* reverses *)
   | `REV, [|`Reg dest; src; cond; _|] ->
     let s = exp_of_op src in
-    let rev = Bil.(extract 7 0 s ^
-                   extract 15 8 s ^
-                   extract 23 16 s ^
-                   extract 31 24 s) in
+    let rev = Bil.(extract ~hi:7 ~lo:0 s ^
+                   extract ~hi:15 ~lo:8 s ^
+                   extract ~hi:23 ~lo:16 s ^
+                   extract ~hi:31 ~lo:24 s) in
     exec [assn (Env.of_reg dest) rev] cond
   | `REV16, [|`Reg dest; src; cond; _|] ->
     let s = exp_of_op src in
-    let rev = Bil.(extract 23 16 s ^
-                   extract 31 24 s ^
-                   extract 7 0 s ^
-                   extract 15 8 s) in
+    let rev = Bil.(extract ~hi:23 ~lo:16 s ^
+                   extract ~hi:31 ~lo:24 s ^
+                   extract ~hi:7 ~lo:0 s ^
+                   extract ~hi:15 ~lo:8 s) in
     exec [assn (Env.of_reg dest) rev] cond
   | insn,ops ->
     fail [%here] "ops %s doesn't match bits insn %s"
@@ -1019,7 +1019,7 @@ let lift_special ops insn =
    **)
   | `MSR, [|`Imm imm; `Reg src; cond; _|] ->
     let src = Bil.var (Env.of_reg src) in
-    let (:=) flag bit = Bil.move flag (Bil.extract bit bit src) in
+    let (:=) flag bit = Bil.move flag (Bil.extract ~hi:bit ~lo:bit src) in
     let s1 =
       if Word.(Int_exn.(imm land word 0x8) = word 0x8) then [
         Env.nf := 31;
@@ -1073,7 +1073,7 @@ module CPU = struct
       pc; spsr; cpsr; itstate;
     ]
 
-  let gpr = Var.Set.diff regs non_gpr
+  let gpr = Set.diff regs non_gpr
 
   let perms = Var.Set.of_list [
       r4; r5; r6; r7; r8; r9; r10; r11;

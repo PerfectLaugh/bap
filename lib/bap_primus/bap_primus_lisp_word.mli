@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_primus_lisp_types
 
 type t = word [@@deriving compare, sexp_of]

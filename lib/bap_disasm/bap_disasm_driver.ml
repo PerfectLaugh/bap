@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_types.Std
 open Bap_core_theory
 open Bap_image_std
@@ -213,7 +213,7 @@ end = struct
       when is_data s next || is_slot s next ->
       step @@ revert curr {s with work}
     | Dest {dst=next} as curr :: work ->
-      let s = {s with begs = Map.add_multi s.begs next curr} in
+      let s = {s with begs = Map.add_multi s.begs ~key:next ~data:curr} in
       if is_visited s next
       then step {s with work}
       else {s with work; addr=next; curr}
@@ -224,7 +224,7 @@ end = struct
         then step @@ revert curr {s with work}
         else if wrong_encoding s next encoding
         then step @@ revert curr {s with work}
-        else step {s with begs = Map.add_multi s.begs next curr; work}
+        else step {s with begs = Map.add_multi s.begs ~key:next ~data:curr; work}
       else if is_data s next then step @@ revert curr {s with work}
       else {s with work; addr=next; curr}
     | (Jump {src; dsts} as jump) :: ([] as work)
@@ -237,7 +237,7 @@ end = struct
         then step@@revert jump {s with work}
         else
           let dsts = {dsts with resolved} in
-          let init = {s with jmps = Map.add_exn s.jmps src dsts; work} in
+          let init = {s with jmps = Map.add_exn s.jmps ~key:src ~data:dsts; work} in
           step @@
           Set.fold resolved ~init ~f:(fun s next -> {
                 s with
@@ -269,9 +269,9 @@ end = struct
 
   let decoded s mem encoding =
     let addr = Memory.min_addr mem in {
-      s with code = Map.add_exn s.code addr encoding.coding;
+      s with code = Map.add_exn s.code ~key:addr ~data:encoding.coding;
              usat = Set.remove s.usat addr
-    } [@@inlined]
+    }
 
   let jumped s encoding mem dsts delay =
     let s = decoded s mem encoding in
@@ -747,7 +747,7 @@ let explore
             let mem = view ~len beg base in
             block mem insns >>= fun block ->
             let fall = Addr.succ (Memory.max_addr mem) in
-            let blocks = Map.add_exn blocks beg block in
+            let blocks = Map.add_exn blocks ~key:beg ~data:block in
             node block cfg >>= fun cfg ->
             match Map.find jmps fin with
             | None ->

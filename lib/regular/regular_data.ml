@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular_data_types
 open Regular_data_intf
 
@@ -117,7 +117,7 @@ module Class = struct
     {key = Type_equal.Id.create ~name sexp_of_opaque}
 
   let define key data =
-    registry := Registry.add_exn !registry key data
+    registry := Registry.add_exn !registry ~key ~data
 
   let refine cls ~f =
     registry := Registry.update !registry cls ~f:(function
@@ -133,7 +133,7 @@ module Class = struct
   let add_method field cls ?desc ~ver name met : unit =
     update field cls ~f:(fun mets -> Map.change mets name ~f:(function
         | None -> Some (Ver.Map.singleton ver {cls=met; desc})
-        | Some vs -> Some (Ver.Map.set vs ver {cls=met; desc})))
+        | Some vs -> Some (Map.set vs ~key:ver ~data:{cls=met; desc})))
 
 
   let find_with_ver (table : 'a table) ?ver name : (string * 'a) option =

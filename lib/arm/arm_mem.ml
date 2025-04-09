@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Bap.Std
 
@@ -50,8 +50,8 @@ let lift_r  ~(dst1 : Var.t) ?(dst2 : Var.t option) ~(base : Var.t)
     | H -> `r16
     | W | D -> `r32 in
 
-  let store m n v = Bil.(store m n v LittleEndian typ) in
-  let load  m n   = Bil.(load  m n LittleEndian typ) in
+  let store mem addr v = Bil.(store ~mem ~addr v LittleEndian typ) in
+  let load  mem addr   = Bil.(load ~mem ~addr LittleEndian typ) in
 
   let temp = match size with
     | B -> tmp reg8_t
@@ -127,9 +127,9 @@ let lift_m dest_list base mode update operation =
     let mem = Bil.var Env.mem in
     let addr = Bil.(var o_base + int offset_e) in
     match operation with
-    | Ld -> assn dest Bil.(load mem addr LittleEndian `r32)
+    | Ld -> assn dest Bil.(load ~mem ~addr LittleEndian `r32)
     | St -> Bil.move Env.mem
-              Bil.(store Env.(var mem) addr (var dest) LittleEndian `r32) in
+              Bil.(store ~mem:Env.(var mem) ~addr (var dest) LittleEndian `r32) in
   (* Jmps should always be the last statement *)
   let rec move_jump_to_end l =
     match l with

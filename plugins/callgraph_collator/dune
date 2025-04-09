@@ -2,7 +2,7 @@
  (name bap_callgraph_collator_plugin)
  (public_name bap-callgraph-collator.plugin)
  (preprocess (pps ppx_bap))
- (libraries bap bap-main core_kernel graphlib re.pcre))
+ (libraries bap bap-main core graphlib re.pcre))
 
 (plugin
  (name callgraph-collator)

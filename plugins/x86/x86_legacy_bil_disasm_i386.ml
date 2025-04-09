@@ -1,7 +1,7 @@
 (* Copyright (C) 2017 ForAllSecure, Inc. - All Rights Reserved. *)
 (** Native lifter of x86 instructions to the BAP IL *)
 module Bil = X86_legacy_bil
-module Core = Core_kernel[@@warning "-D"]
+module Core = Core
 
 open Big_int_Z
 open Bil
@@ -14,7 +14,7 @@ module Var_temp = X86_legacy_bil_var_temp
 open Big_int_convenience
 open X86_legacy_bil_convenience
 
-(* Note: remove these if we open Core_kernel[@@warning "-D"] here. *)
+(* Note: remove these if we open Core here. *)
 module List = Core.List
 module Int = Core.Int
 module Option = Core.Option

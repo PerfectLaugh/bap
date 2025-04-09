@@ -9,7 +9,7 @@
    bap-primus
    bap-primus-track-visited
    bitvec
-   core_kernel
+   core
    monads
    regular
    z3

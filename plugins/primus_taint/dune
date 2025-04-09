@@ -1,7 +1,7 @@
 (library
  (name bap_primus_taint_plugin)
  (public_name bap-primus-taint.plugin)
- (libraries bap bap-primus bap-taint core_kernel regular monads))
+ (libraries bap bap-primus bap-taint core regular monads))
 
 (plugin
  (name primus-taint)

@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open OUnit2
 
 module Leb128 = Dwarf_leb128

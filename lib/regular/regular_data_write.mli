@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular_data_types
 type 'a t
 

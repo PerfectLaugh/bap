@@ -13,7 +13,7 @@
    bitvec-binprot
    bitvec-order
    bitvec-sexp
-   core_kernel
+   core
    fileutils
    uri
    xmlm

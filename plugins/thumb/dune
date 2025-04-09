@@ -9,7 +9,7 @@
    bap-knowledge
    bap-main
    bitvec
-   core_kernel
+   core
    ogre))
 
 (plugin

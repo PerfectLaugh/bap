@@ -2,7 +2,7 @@
  (name bap_optimization_plugin)
  (public_name bap-optimization.plugin)
  (preprocess (pps ppx_bap))
- (libraries bap core_kernel graphlib regular))
+ (libraries bap core graphlib regular))
 
 (plugin
  (name optimization)

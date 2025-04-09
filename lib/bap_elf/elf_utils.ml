@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Elf_types
 open Elf_internal_utils
 open Or_error

@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 open Bap_c_type
@@ -193,7 +193,7 @@ let register_model target model =
   if Hashtbl.mem models target
   then invalid_argf "A data model for target %s is already set"
       (Theory.Target.to_string target) ();
-  Hashtbl.add_exn models target (model :> Bap_c_size.base)
+  Hashtbl.add_exn models ~key:target ~data:(model :> Bap_c_size.base)
 
 let model target = match Hashtbl.find models target with
   | Some m -> m
@@ -336,7 +336,7 @@ end
 
 
 module Arg = struct
-  open Core_kernel[@@warning "-D"]
+  open Core
   open Bap_core_theory
   open Bap.Std
   open Monads.Std
@@ -421,7 +421,7 @@ module Arg = struct
       | None -> singleton (info,size) stack
       | Some (k,(_,s)) ->
         let k' = stack.align info (k + bytes s) in
-        {stack with data = Map.add_exn stack.data k' (info,size)}
+        {stack with data = Map.add_exn stack.data ~key:k' ~data:(info,size)}
 
     let add ctype datum size = append (Some {ctype; datum},size)
     let skip size  = append (None,size)
@@ -465,12 +465,12 @@ module Arg = struct
           | _,None,_ -> None
           | _,_,rt when Map.is_empty rt -> None
           | _,Some (k',x),rt ->
-            Some ({self with args = Map.add_exn rt k' x},())
+            Some ({self with args = Map.add_exn rt ~key:k' ~data:x},())
 
     let available {args} = Map.length args
 
     let of_list =
-      List.foldi ~f:(fun pos regs reg -> Map.add_exn regs pos reg)
+      List.foldi ~f:(fun pos regs reg -> Map.add_exn regs ~key:pos ~data:reg)
         ~init:Int.Map.empty
 
 
@@ -533,7 +533,7 @@ module Arg = struct
         s with files = match Map.max_elt s.files with
           | None -> Map.singleton (module Int) 0 file
           | Some (k,_) ->
-            Map.add_exn s.files (k+1) file
+            Map.add_exn s.files ~key:(k+1) ~data:file
       } in
       let+ () = Arg.put s in
       fst (Map.max_elt_exn s.files)
@@ -568,7 +568,7 @@ module Arg = struct
     let update s n f = match f (get s n) with
       | None -> Arg.reject ()
       | Some (arena,res) ->
-        Arg.put {s with files = Map.set s.files n arena} >>= fun () ->
+        Arg.put {s with files = Map.set s.files ~key:n ~data:arena} >>= fun () ->
         Arg.return res
     let pop s n = update s n File.pop
     let popn ~n s a = update s a (File.popn n)
@@ -609,7 +609,7 @@ module Arg = struct
     push_arg t arg
 
   let discard ?(n=1) file =
-    Arg.get () >>= fun s -> Arena.popn n s file >>| fun _ -> ()
+    Arg.get () >>= fun s -> Arena.popn ~n s file >>| fun _ -> ()
 
   let registers_for_bits file bits =
     let+ s = Arg.get () in

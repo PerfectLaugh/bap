@@ -2,7 +2,7 @@
  (name bap_map_terms_plugin)
  (public_name bap-term-mapper.plugin)
  (preprocess (pps ppx_bap))
- (libraries bap bap-bml bap-main core_kernel regular))
+ (libraries bap bap-bml bap-main core regular))
 
 (plugin
  (name map-terms)

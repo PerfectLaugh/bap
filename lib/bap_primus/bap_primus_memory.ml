@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 open Format
@@ -46,7 +46,7 @@ module Descriptor = struct
   }
 
   let unknown ~addr_size ~data_size =
-    create addr_size data_size "unknown"
+    create ~addr_size ~data_size "unknown"
 
   let name d = d.name
   let addr_size d = d.addr
@@ -127,8 +127,8 @@ let virtual_memory target =
   let s = Theory.Var.sort mem in
   let ks = Theory.Mem.keys s and vs = Theory.Mem.vals s in
   Descriptor.create
-    (Theory.Bitv.size ks)
-    (Theory.Bitv.size vs)
+    ~addr_size:(Theory.Bitv.size ks)
+    ~data_size:(Theory.Bitv.size vs)
     (Theory.Var.name mem)
 
 let state = Bap_primus_machine.State.declare
@@ -255,7 +255,7 @@ module Make(Machine : Machine) = struct
   let remembered {values; layers} addr word =
     memory >>= fun {size} ->
     Machine.gets Project.arch >>= fun arch ->
-    store_word arch size addr word values >>= fun values ->
+    store_word arch size ~addr word values >>= fun values ->
     put_curr {layers; values} >>| fun () ->
     Map.find_exn values addr
 

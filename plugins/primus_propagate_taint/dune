@@ -10,7 +10,7 @@
    bap-microx
    bap-primus
    bap-taint
-   core_kernel
+   core
    graphlib
    monads
    regular))

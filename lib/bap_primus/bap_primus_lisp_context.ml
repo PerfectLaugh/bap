@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 
@@ -166,7 +166,7 @@ let order c1 c2 : KB.Order.partial =
 
 let merge xs ys : t = Map.merge xs ys ~f:(fun ~key:_ -> function
     | `Left v | `Right v -> Some v
-    | `Both (x,y) -> Some (Feature.Set.union x y) )
+    | `Both (x,y) -> Some (Set.union x y) )
 
 let join xs ys = Ok (merge xs ys)
 

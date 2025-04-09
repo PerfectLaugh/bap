@@ -6,7 +6,7 @@
    bap-core-theory
    bap-knowledge
    bap-primus
-   core_kernel
+   core
    graphlib
    monads
    regular))

@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Bap_llvm.Std
 open X86_asm.Reg
@@ -176,7 +176,7 @@ module Make(V : Version) = struct
     let module L = (val insn : S) in
     let module B = (val back : X86_backend.S) in
     let module S = (val sema : Semantics) in
-    List.iter L.all (fun op ->
+    List.iter L.all ~f:(fun op ->
         let f = S.lift (L.asm_of_t op) L.semantics V.allow_nil in
         let s = L.sexp_of_t op |> Sexp.to_string in
         B.register s f)
@@ -196,7 +196,7 @@ module Self = Self ()
 let normalize ver =
   match String.index ver '.' with
   | None -> ver
-  | Some i -> match String.sub ver 0 (i + 2) with
+  | Some i -> match String.sub ver ~pos:0 ~len:(i + 2) with
     | x -> x
     | exception _ -> ver
 

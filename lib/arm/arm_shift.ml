@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Or_error
 
@@ -29,9 +29,9 @@ let shift_c ~src shift_type ~shift t =
     shifted, carry
   | `LSL ->
     let shifted = Bil.(src lsl shift) in
-    let carry = Bil.(ite (shift <> int (Word.zero bits))
-                       (nth_bit Bil.(bits_e - shift) src)
-                       (var Env.cf)) in
+    let carry = Bil.(ite ~if_:(shift <> int (Word.zero bits))
+                       ~then_:(nth_bit Bil.(bits_e - shift) src)
+                       ~else_:(var Env.cf)) in
     shifted, carry
   | `LSR ->
     let shifted = Bil.(src lsr shift) in

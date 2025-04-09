@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Bap_knowledge
 open Bap_future.Std
@@ -80,10 +80,10 @@ let add_observer observers key obs =
   register_observer (name key);
   match Map.find observers key with
   | None ->
-    Map.add_exn observers key {last=1; subs=[1,obs]},
+    Map.add_exn observers ~key ~data:{last=1; subs=[1,obs]},
     Subs (key,1)
   | Some {last; subs} ->
-    Map.set observers key {
+    Map.set observers ~key ~data:{
       last = last + 1;
       subs = (last + 1, obs) :: subs
     },

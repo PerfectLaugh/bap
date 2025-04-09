@@ -10,7 +10,7 @@ Library bap_ida
   CompiledObject:   best
   Build$:           flag(everything) || flag(ida)
   Modules:          Bap_ida
-  BuildDepends:     fileutils, re.posix, core_kernel, ppx_bap
+  BuildDepends:     fileutils, re.posix, core, ppx_bap
   XMETADescription: make calls into IDA
 
 Library bap_ida_plugin
@@ -18,9 +18,8 @@ Library bap_ida_plugin
   Path:             plugins/ida
   FindlibName:      bap-plugin-ida
   CompiledObject:   best
-  BuildDepends:     bap, bap-ida, core_kernel, ppx_bap, fileutils,
-                    re.posix, bap-knowledge, graphlib, regular, bap-future, mmap,
-                    core_kernel.caml_unix
+  BuildDepends:     bap, bap-ida, core, ppx_bap, fileutils,
+                    re.posix, bap-knowledge, graphlib, regular, bap-future, mmap
   Modules:          Ida_main
   InternalModules:  Bap_ida_config, Bap_ida_service, Bap_ida_info
   XMETADescription: use ida to provide rooter, symbolizer and reconstructor

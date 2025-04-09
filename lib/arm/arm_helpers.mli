@@ -1,3 +1,3 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 val sexpable_of_string : (Sexp.t -> 'a) -> string -> 'a option

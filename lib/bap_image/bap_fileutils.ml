@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Option.Monad_infix
 module Unix = Caml_unix
 
@@ -13,7 +13,7 @@ let mapfile path : Bigstring.t option =
   with exn ->
     Unix.close fd;
     None
-[@@warning "-D"]
+
 
 let readfile path : Bigstring.t =
   match mapfile path with

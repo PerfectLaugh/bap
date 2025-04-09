@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Or_error
 
@@ -45,7 +45,7 @@ let bit_extract ~dest ~src sign ~lsb ~widthminus1 cond =
       Error.to_string_hum err  in
   let low = int_of_imm lsb in
   let high = low + (int_of_imm widthminus1) in
-  let extracted = Bil.extract high low (exp_of_op src) in
+  let extracted = Bil.extract ~hi:high ~lo:low (exp_of_op src) in
   let final = cast_of_sign sign 32 extracted in
   exec [assn (Env.of_reg dest) final] cond
 
@@ -65,9 +65,9 @@ let bit_field_insert ~dest ~src raw cond =
   let d   = Env.of_reg dest in
   let d_e = Bil.var d in
   let lsb, width = get_lsb_width raw in
-  let extracted = Bil.extract (width - 1) 0 (exp_of_op src) in
-  let ext_h b s = Bil.extract 31 b s in
-  let ext_l b s = Bil.extract b 0 s in
+  let extracted = Bil.extract ~hi:(width - 1) ~lo:0 (exp_of_op src) in
+  let ext_h b s = Bil.extract ~hi:31 ~lo:b s in
+  let ext_l b s = Bil.extract ~hi:b ~lo:0 s in
   let inst = match lsb + width - 1, lsb with
     | 31, 0 -> extracted
     | 31, l -> Bil.concat extracted (ext_l (l - 1) d_e)

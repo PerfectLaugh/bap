@@ -1,5 +1,5 @@
 open Bap_knowledge
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Bap_future.Std
 open Bap.Std
@@ -25,7 +25,7 @@ module type Target = sig
   val provide : Knowledge.agent -> t -> unit
 end
 
-let digest = Caml.Digest.file
+let digest = Stdlib.Digest.file
 
 let request =
   sprintf "
@@ -121,7 +121,7 @@ let mapfile path : Bigstring.t =
       fd Bigarray.char Bigarray.c_layout false [|size|] in
   Unix.close fd;
   Bigarray.array1_of_genarray data
-[@@warning "-D"]
+
 
 let loader path =
   let id = Data.Cache.digest ~namespace:"ida-loader" "%s"
@@ -179,7 +179,7 @@ end = struct
       List.fold flows ~init:[] ~f:(fun acc addr ->
           (Some !addr, `Jump)::acc) in
     let helper tab (addr,_normal_flow,other_flows) =
-      Addr.Table.add_exn tab ~key:!addr
+      Hashtbl.add_exn tab ~key:!addr
         ~data:(other_flows_to_dests other_flows);
       tab
     in
@@ -189,7 +189,7 @@ end = struct
 
   let resolve t mem _ =
     match
-      Addr.Table.find t (Memory.min_addr mem)
+      Hashtbl.find t (Memory.min_addr mem)
     with
     | Some dests -> dests
     | None -> []

@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 
 (* all the `mov` series, registers marked with `e` means extended *)

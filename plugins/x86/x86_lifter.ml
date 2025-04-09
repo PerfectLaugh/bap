@@ -1,6 +1,6 @@
 (** Native lifter of x86 instructions to the BAP IL *)
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Format
 open Bil.Types
@@ -609,8 +609,8 @@ module ToIR = struct
       List.concat Bil.[
           [tmp_dst := int zero_long];
           foreach_size (fun (i, left_bit, right_bit) -> [
-                elt_1 := extract right_bit left_bit src;
-                elt_2 := extract right_bit left_bit (op2e t vsrc);
+                elt_1 := extract ~hi:right_bit ~lo:left_bit src;
+                elt_2 := extract ~hi:right_bit ~lo:left_bit (op2e t vsrc);
                 iv := int i;
                 if_ (binop bop (var elt_1) (var elt_2)) [
                   elt := int _one;
@@ -852,7 +852,7 @@ module ToIR = struct
         | Bitmask -> Bil.(cast unsigned 128 e)
         | Bytemask ->
           let get_element i =
-            Bil.(cast unsigned !!elemt (extract i i e)) in
+            Bil.(cast unsigned !!elemt (extract ~hi:i ~lo:i e)) in
           let range = List.range ~stride:(-1)
               ~start:`exclusive ~stop:`inclusive nelem 0 in
           concat_explist (List.map ~f:get_element range) in
@@ -893,7 +893,7 @@ module ToIR = struct
           cf := var int_res_2 <> int_exp 0 16;
           zf := contains_null xmm2m128_e;
           sf := contains_null xmm1_e;
-          oF := extract 0 0 (var int_res_2);
+          oF := extract ~hi:0 ~lo:0 (var int_res_2);
           af := int_exp 0 1;
           pf := int_exp 0 1;
         ]
@@ -960,13 +960,13 @@ module ToIR = struct
         foreach_byte (fun i ->
             Bil.[
               iv := int (Word.of_int ~width:8 i);
-              mask_byte_i := extract 7 0 (src lsr (var iv * byte));
+              mask_byte_i := extract ~hi:7 ~lo:0 (src lsr (var iv * byte));
               if_ (msb_one land var mask_byte_i = msb_one) [
                 tmp_byte := zero;
               ] (* else *) [
-                ind := cast unsigned 8 (extract index_bits 0 (var mask_byte_i));
+                ind := cast unsigned 8 (extract ~hi:index_bits ~lo:0 (var mask_byte_i));
                 tmp_byte :=
-                  cast unsigned op_size (extract 7 0 (dst lsr (var ind * byte)))
+                  cast unsigned op_size (extract ~hi:7 ~lo:0 (dst lsr (var ind * byte)))
               ];
               tmp_dst := Bil.(var tmp_dst lor (var tmp_byte lsl (var iv * byte)));
             ]);

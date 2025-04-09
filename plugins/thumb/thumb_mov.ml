@@ -31,30 +31,30 @@ module Make(CT : Theory.Core) = struct
   let addi3 rd rn x = it_set rd (var rn + const x) @@ fun r -> [
       nf := msb (var r);
       zf := is_zero (var r);
-      cf := carry_from_add (var r) (var rn);
-      vf := overflow_from_add (var r) (var rn) (const x);
+      cf := carry_from_add ~r:(var r) ~rn:(var rn);
+      vf := overflow_from_add ~r:(var r) ~rn:(var rn) ~rm:(const x);
     ]
 
   let addi8 rd x = it_set rd (var rd + const x) @@ fun r -> [
       nf := msb (var r);
       zf := is_zero (var r);
-      cf := carry_from_add (var r) (var rd);
-      vf := overflow_from_add (var r) (var rd) (const x);
+      cf := carry_from_add ~r:(var r) ~rn:(var rd);
+      vf := overflow_from_add ~r:(var r) ~rn:(var rd) ~rm:(const x);
     ]
 
   let addrr rd rn rm = it_set rd (var rn + var rm) @@ fun r -> [
       nf := msb (var r);
       zf := is_zero (var r);
-      cf := carry_from_add (var r) (var rn);
-      vf := overflow_from_add (var r) (var rn) (var rm);
+      cf := carry_from_add ~r:(var r) ~rn:(var rn);
+      vf := overflow_from_add ~r:(var r) ~rn:(var rn) ~rm:(var rm);
     ]
 
   let adcs rd rn rm =
     it_set rd (var rn + var rm + CT.unsigned s32 (var cf)) @@ fun r -> [
       nf := msb (var r);
       zf := is_zero (var r);
-      cf := carry_from_add (var r) (var rn);
-      vf := overflow_from_add (var r) (var rn) (var rm);
+      cf := carry_from_add ~r:(var r) ~rn:(var rn);
+      vf := overflow_from_add ~r:(var r) ~rn:(var rn) ~rm:(var rm);
     ]
 
   let addspi off = sp <-? var sp + const off
@@ -64,8 +64,8 @@ module Make(CT : Theory.Core) = struct
   let cmp x y r = [
     nf := msb (var r);
     zf := is_zero (var r);
-    cf := lnot @@ borrow_from_sub x y;
-    vf := overflow_from_sub (var r) x y;
+    cf := lnot @@ borrow_from_sub ~rn:x ~rm:y;
+    vf := overflow_from_sub ~r:(var r) ~rn:x ~rm:y;
   ]
 
 

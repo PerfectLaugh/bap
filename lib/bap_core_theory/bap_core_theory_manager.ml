@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_knowledge
 
 open Bap_core_theory_definition
@@ -69,7 +69,7 @@ let declare
   let name = Name.create ?package name in
   let extends = List.map extends ~f:Name.read in
   check_uniqueness name;
-  Hashtbl.add_exn known_theories name {
+  Hashtbl.add_exn known_theories ~key:name ~data:{
     is_empty = false;
     name = names (name :: Empty.name :: extends);
     desugared = false;
@@ -267,8 +267,8 @@ let equal x y = Set.equal x.name y.name
 
 let set_inclusion_order x y : Knowledge.Order.partial =
   if Set.equal x y then EQ else
-  if Set.is_subset x y then LT else
-  if Set.is_subset y x then GT else NC
+  if Set.is_subset x ~of_:y then LT else
+  if Set.is_subset y ~of_:x then GT else NC
 
 let order t1 t2 = set_inclusion_order t1.name t2.name
 
@@ -328,7 +328,7 @@ let theories () =
     Knowledge.List.fold ~init ~f:(fun theories (name,def) ->
         Knowledge.Symbol.intern (Name.unqualified name) theory
           ~package:(Name.package name) >>| fun name ->
-        Map.add_exn theories name def) >>= fun r ->
+        Map.add_exn theories ~key:name ~data:def) >>= fun r ->
     KB.Context.set theories (Some r) >>| fun () ->
     r
 

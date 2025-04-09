@@ -1,5 +1,5 @@
 open Bap_knowledge
-open Core_kernel[@@warning "-D"]
+open Core
 
 module Name = Knowledge.Name
 

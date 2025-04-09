@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Bap_types.Std
 open Bap_core_theory
@@ -94,7 +94,7 @@ module Table = struct
   }
 
   let lookup t pos =
-    Int.Table.find_or_add t.cache pos ~default:(fun () ->
+    Hashtbl.find_or_add t.cache pos ~default:(fun () ->
         if pos < 0 || pos >= t.size then "ERROR"
         else match Bigstring.find ~pos '\x00' t.data with
           | None -> "ERROR"
@@ -367,7 +367,7 @@ module Insn = struct
             let id = v.data.imm_small in
             let sub = create ~parent:insn ~asm ~kinds dis ~insn:id in
             let pos = Hashtbl.length subs in
-            Hashtbl.add_exn subs pos sub;
+            Hashtbl.add_exn subs ~key:pos ~data:sub;
             Op.Imm {v with data = {imm_small=pos; imm_large=None}}) in
     let subs = Array.init (Hashtbl.length subs)
         ~f:(Hashtbl.find_exn subs) in
@@ -500,14 +500,14 @@ let push_pred s p =
 
 let reset_predicates s ps =
   C.predicates_clear !!(s.dis);
-  Preds.iter ps ~f:(push_pred s);
+  Set.iter ps ~f:(push_pred s);
   C.predicates_push !!(s.dis) Is_invalid
 
 let with_preds s (ps : pred list) =
   let ps = Preds.of_list ps in
-  let drop = Preds.diff s.current.preds ps in
-  if Preds.is_empty drop
-  then Preds.iter (Preds.diff ps s.current.preds) ~f:(push_pred s)
+  let drop = Set.diff s.current.preds ps in
+  if Set.is_empty drop
+  then Set.iter (Set.diff ps s.current.preds) ~f:(push_pred s)
   else reset_predicates s ps;
   {s with current = {s.current with preds = ps}}
 
@@ -519,7 +519,7 @@ let last s n =
   let n = min n m in
   List.init n ~f:(fun i -> s.insns.(m - i - 1))
 
-let preds s = Preds.to_list s.current.preds
+let preds s = Set.to_list s.current.preds
 
 let addr s = Addr.(Mem.min_addr s.current.mem ++ s.current.off)
 
@@ -628,7 +628,7 @@ let create ?(debug_level=0) ?(cpu="") ?(attrs="") ?(backend="llvm") triple =
   | None -> match Prim.create ~backend ~triple ~cpu ~attrs ~debug_level with
     | n when n >= 0 ->
       let disassembler = init @@ C.create (module Prim) n in
-      Hashtbl.add_exn disassemblers name disassembler;
+      Hashtbl.add_exn disassemblers ~key:name ~data:disassembler;
       Ok {name; asm = false; kinds = false; enc=name}
     | -2 -> errorf "Unknown backend: %s" backend
     | -3 -> errorf "Unsupported target: %s %s" triple cpu
@@ -642,7 +642,7 @@ let custom target encoding backend t =
     {name; asm=false; kinds=false; enc=encoding_name encoding}
   | None ->
     let disassembler = init @@ C.create backend t in
-    Hashtbl.add_exn disassemblers name disassembler;
+    Hashtbl.add_exn disassemblers ~key:name ~data:disassembler;
     {name; asm=false; kinds=false; enc=encoding_name encoding}
 
 let close dis =

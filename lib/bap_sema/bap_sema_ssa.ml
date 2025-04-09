@@ -12,7 +12,7 @@
     Basically they describe the same algorithm but in different
     flavors and levels of detail.
 *)
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_types.Std
 open Graphlib.Std
 open Format
@@ -112,7 +112,7 @@ let rename t =
     | None | Some [] -> v
     | Some (v :: _) -> v in
   let new_name x =
-    Hashtbl.change nums x (function
+    Hashtbl.change nums x ~f:(function
         | None -> Some 1
         | Some x -> Some (x + 1));
     let n = Hashtbl.find_exn nums x in
@@ -137,7 +137,7 @@ let rename t =
               Ir_phi.update phi tid (Bil.var (top v))
             | _ -> phi)) in
   let pop_defs blk =
-    let pop v = Hashtbl.change vars (Var.base v) (function
+    let pop v = Hashtbl.change vars (Var.base v) ~f:(function
         | Some (_::xs) -> Some xs
         | xs -> xs) in
     Term.enum phi_t blk |>

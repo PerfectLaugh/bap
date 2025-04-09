@@ -1,6 +1,6 @@
 let package = "bap"
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 open KB.Syntax
@@ -654,7 +654,7 @@ module Encodings = struct
     Seq.fold ~init:empty ~f:(fun symbols (addr,value) ->
         let addr = Bitvec.M32.int64 addr in
         if is_thumb value
-        then Map.set symbols addr llvm_t32
+        then Map.set symbols ~key:addr ~data:llvm_t32
         else Map.update symbols addr ~f:(function
             | None -> llvm_a32
             | Some t -> t))
@@ -675,7 +675,7 @@ module Encodings = struct
       | other ->
         Sigma.failp "unknown encoding %s, expects :T32 or :A32" other in
     let* encodings = unit-->slot in
-    let res = Map.set encodings addr lang in
+    let res = Map.set encodings ~key:addr ~data:lang in
     KB.catch (KB.provide slot unit res) (fun _ -> KB.return ()) >>|
     fun () -> Sigma.Effect.pure Sigma.Value.nil
 

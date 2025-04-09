@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Graphlib_intf
 open Format
@@ -402,7 +402,7 @@ module To_ocamlgraph(G : Graph) = struct
 
   let find_edge g x y = match G.Node.edge x y g with
     | Some e -> e
-    | None -> raise Caml.Not_found
+    | None -> raise Stdlib.Not_found
 
   let find_all_edges g x y = G.Node.edge x y g |> function
     | None -> []
@@ -482,7 +482,7 @@ module Of_ocamlgraph(G : Graph.Sig.P) = struct
     let remove n g = G.remove_vertex g n
     let has_edge x y g = G.mem_edge g x y
     let edge x y g =
-      try Some (G.find_edge g x y) with Caml.Not_found -> None
+      try Some (G.find_edge g x y) with Stdlib.Not_found -> None
 
     let degree ?dir n g =
       try match dir with
@@ -635,7 +635,7 @@ module Ordering(G : Graph) = struct
   let enter t u = {
     t with
     nodes_entered = t.nodes_entered + 1;
-    numbers = Map.change t.numbers u (fun _ -> Some {
+    numbers = Map.change t.numbers u ~f:(fun _ -> Some {
         pre = t.nodes_entered;
         rpost = 0;
       })
@@ -644,7 +644,7 @@ module Ordering(G : Graph) = struct
   let leave t u = {
     t with
     nodes_left = t.nodes_left - 1;
-    numbers = Map.change t.numbers u (function
+    numbers = Map.change t.numbers u ~f:(function
         | None -> assert false
         | Some n -> Some {n with rpost = t.nodes_left - 1})
   }, t.nodes_left - 1
@@ -795,9 +795,9 @@ let to_dot
 
   end in
   let module Dot = Graph.Graphviz.Dot(Dottable) in
-  Option.iter channel (fun chan -> Dot.output_graph chan g);
-  Option.iter formatter (fun ppf -> Dot.fprint_graph ppf g);
-  Option.iter filename (Out_channel.with_file ~f:(fun chan ->
+  Option.iter channel ~f:(fun chan -> Dot.output_graph chan g);
+  Option.iter formatter ~f:(fun ppf -> Dot.fprint_graph ppf g);
+  Option.iter filename ~f:(Out_channel.with_file ~f:(fun chan ->
       Dot.output_graph chan g))
 
 
@@ -908,7 +908,7 @@ module Dom_frontier_cooper(G:Graph) = struct
         let dom = idom n in
         Seq.fold adj ~init:G.Node.Set.empty ~f:(walk dom) |>
         Set.fold ~init:dfs ~f:(fun dfs visited ->
-            Map.change dfs visited (function
+            Map.change dfs visited ~f:(function
                 | None -> Some (G.Node.Set.singleton n)
                 | Some set -> Some (Set.add set n))))
 end
@@ -950,7 +950,7 @@ let strong_components
             if not (Hashtbl.mem comps w) then
               let min x y = if fst x < fst y then x else y in
               let data = min (root v) (root w) in
-              Hashtbl.change roots v (fun _ -> Some data));
+              Hashtbl.change roots v ~f:(fun _ -> Some data));
         if G.Node.(snd (root v) = v)
         then spill_comp v stack else stack) |> function
   | [] -> Partition.create (module G.Node) comps
@@ -1011,10 +1011,10 @@ let shortest_path
         match Hashtbl.find dist ev with
         | Some w when w < dev -> ()
         | _ ->
-          Hashtbl.set dist ev dev;
+          Hashtbl.set dist ~key:ev ~data:dev;
           Heap.add q (dev, ev, e :: p)) in
   Heap.add q (0, v1, []);
-  Hashtbl.set dist v1 0;
+  Hashtbl.set dist ~key:v1 ~data:0;
   loop ()
 
 let is_reachable graph ?rev g u v =
@@ -1409,7 +1409,7 @@ module Fixpoint = struct
         | Done approx -> make_solution iters approx
         | Step (visits,works,approx) -> loop visits (iters+1) works approx
       else make_solution iters approx in
-    let works = List.init (Array.length nodes) Fn.id in
+    let works = List.init (Array.length nodes) ~f:Fn.id in
     let approx = Map.fold init ~init:Int.Map.empty
         ~f:(fun ~key:node ~data approx ->
             match Map.find rnodes node with

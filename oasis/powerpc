@@ -6,7 +6,7 @@ Library "bap-powerpc"
  Build$:           flag(everything) || flag(powerpc)
  XMETADescription: common definitions for PowerPC targets
  Path: lib/bap_powerpc
- BuildDepends: core_kernel, ppx_bap,
+ BuildDepends: core, ppx_bap,
                ogre, bap-knowledge, bap-core-theory, bap
  FindlibName: bap-powerpc
  Modules: Bap_powerpc_target
@@ -15,7 +15,7 @@ Library powerpc_plugin
   XMETADescription: provide PowerPC lifter
   Path:             plugins/powerpc
   Build$:           flag(everything) || flag(powerpc)
-  BuildDepends:     bap, bap-abi, bap-c, zarith, monads, core_kernel,
+  BuildDepends:     bap, bap-abi, bap-c, zarith, monads, core,
                     ppx_bap, regular, bap-api, bap-powerpc, bap-core-theory
   FindlibName:      bap-plugin-powerpc
   InternalModules:  Powerpc,
@@ -47,7 +47,7 @@ Library powerpc_test
   Path:           lib_test/powerpc
   Build$:         flag(tests) && (flag(everything) || flag(powerpc))
   CompiledObject: best
-  BuildDepends:   bap, oUnit, core_kernel, ppx_bap
+  BuildDepends:   bap, oUnit, core, ppx_bap
   Install:        false
   Modules:        Powerpc_add_tests,
                   Powerpc_arith_tests,

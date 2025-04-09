@@ -3,4 +3,4 @@
   (public_name bap-beagle)
   (preprocess (pps ppx_bap))
   (wrapped false)
-  (libraries bap bap-primus core_kernel monads regular))
+  (libraries bap bap-primus core monads regular))
