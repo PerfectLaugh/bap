@@ -1,6 +1,6 @@
 (* Copyright (C) 2017 ForAllSecure, Inc. - All Rights Reserved. *)
 
-open Core_kernel[@@warning "-D"]
+open Core
 module Dis = Bap.Std.Disasm_expert.Basic
 module Insn = Dis.Insn
 val r :

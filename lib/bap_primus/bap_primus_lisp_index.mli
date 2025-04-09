@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 type ('a,'i,'e) interned = {
   data : 'a;

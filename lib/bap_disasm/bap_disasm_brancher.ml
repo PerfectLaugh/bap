@@ -1,5 +1,5 @@
 open Bap_core_theory
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_types.Std
 open Bap_image_std
 open Monads.Std

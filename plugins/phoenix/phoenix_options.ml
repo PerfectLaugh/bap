@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 
 type label_format = [ `with_asm | `with_bil | `with_name ]

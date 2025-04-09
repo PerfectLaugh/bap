@@ -1,16 +1,17 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Bap.Std
 
-module Bin = Bin_prot.Utils.Make_binable(struct
+module Bin = Bin_prot.Utils.Make_binable_with_uuid(struct
     module Binable = String
     type t = Uuidm.t
-    let to_binable = Uuidm.to_bytes
-    let of_binable s = match Uuidm.of_bytes s with
+    let to_binable = Uuidm.to_binary_string
+    let of_binable s = match Uuidm.of_binary_string s with
       | None -> invalid_arg "Bad UUID format"
       | Some uuid -> uuid
+    let caller_identity = Bin_shape.Uuid.of_string "82c292b4-04e0-4f92-957b-3755d74d5794"
   end)
-[@@warning "-D"]
+
 
 module Stringable = struct
   type t = Uuidm.t
@@ -33,7 +34,7 @@ include Regular.Make(struct
     let module_name = None
     let version = "1.0.0"
 
-    let pp ppf t = Uuidm.print ppf t[@@warning "-D"]
+    let pp ppf t = Uuidm.pp ppf t
   end)
 
 let of_string = Stringable.of_string

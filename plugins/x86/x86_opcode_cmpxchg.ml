@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 type cmpxchg_rr_ia32 = [
   | `CMPXCHG8rr

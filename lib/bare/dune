@@ -2,4 +2,4 @@
   (name bare)
   (public_name bare)
   (wrapped false)
-  (libraries core_kernel parsexp))
+  (libraries core parsexp))

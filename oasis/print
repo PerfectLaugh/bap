@@ -8,9 +8,9 @@ Library print_plugin
   Build$:           flag(everything) || flag(print)
   Path:             plugins/print
   FindlibName:      bap-plugin-print
-  BuildDepends:     bap, text-tags, bap-demangle, core_kernel,
+  BuildDepends:     bap, text-tags, bap-demangle, core,
                     bap-core-theory, regular, graphlib, re.pcre,
-                    ogre, bap-knowledge, core_kernel.caml_unix
+                    ogre, bap-knowledge
   InternalModules:  Print_main
   XMETADescription: print project in various formats
   XMETAExtraLines:  tags="printer"

@@ -1,6 +1,6 @@
 (** BAP Standard Library  *)
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Monads.Std
 open Regular.Std
 open Graphlib.Std
@@ -459,7 +459,7 @@ module Std : sig
       The following plugin prints all sections in a file:
 
       {[
-        open Core_kernel[@@warning "-D"]
+        open Core
         open Bap.Std
         open Format
 
@@ -628,7 +628,7 @@ module Std : sig
    **)
   module Legacy : sig
     module Monad : sig
-      open Core_kernel[@@warning "-D"]
+      open Core
       module type Basic = Monad.Basic
       module type Basic2 = Monad.Basic2
       module type Infix = Monad.Infix
@@ -1758,7 +1758,7 @@ module Std : sig
 
         Note, we're not including [With_zero] interface, since
         it refers to the `Sign` module, that is available only
-        in core_kernel >= 113.33.00.
+        in core >= 113.33.00.
     *)
 
     (** [validate_positive] validates that a value is positive.  *)

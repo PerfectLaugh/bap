@@ -7,8 +7,7 @@
    bap
    bap-core-theory
    bap-knowledge
-   core_kernel
-   core_kernel.caml_unix
+   core
    regular
    uri
    uuidm))

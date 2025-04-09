@@ -1,8 +1,8 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Monads.Std
 open Bap_primus.Std
-module Legacy_taint = Taint [@@warning "-D"]
+module Legacy_taint = Taint 
 open Bap_taint.Std
 
 include Self()

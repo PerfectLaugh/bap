@@ -6,7 +6,7 @@ Library bundle
   Build$:        flag(everything) || flag(bundle)
   Path:          lib/bap_bundle
   FindlibName:   bap-bundle
-  BuildDepends:  uri, camlzip, unix, core_kernel, core_kernel.caml_unix, ppx_bap
+  BuildDepends:  uri, camlzip, unix, core, ppx_bap
   Modules:       Bap_bundle
   InternalModules: Bap_bundle_config
 
@@ -16,4 +16,4 @@ Executable "bapbundle"
   MainIs:         bapbundle.ml
   Install:        true
   CompiledObject: best
-  BuildDepends:   core_kernel, bap-bundle, fileutils, uri
+  BuildDepends:   core, bap-bundle, fileutils, uri

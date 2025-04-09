@@ -6,7 +6,7 @@ Library strings_plugin
   Build$:       flag(everything) || flag(strings)
   Path:         plugins/strings
   FindlibName:  bap-plugin-strings
-  BuildDepends: bap, bap-strings, bap-beagle-prey, core_kernel, regular
+  BuildDepends: bap, bap-strings, bap-beagle-prey, core, regular
   InternalModules: Strings_main
   XMETAExtraLines:  tags="pass, strings"
   XMETADescription: find strings of characters

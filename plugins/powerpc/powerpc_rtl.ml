@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 
 open Powerpc_utils
@@ -49,10 +49,10 @@ let rec bil_exp = function
     List.fold vars ~init:(Bil.var v) ~f:(fun e v -> Bil.(e ^ var v))
   | Word w -> Bil.int w
   | Load (mem, addr, endian, size) ->
-    Bil.(load (var mem) (bil_exp addr) endian size)
+    Bil.(load ~mem:(var mem) ~addr:(bil_exp addr) endian size)
   | Concat (x, y) -> Bil.(bil_exp x ^ bil_exp y)
   | Binop (op, x, y) -> Bil.binop op (bil_exp x) (bil_exp y)
-  | Extract (hi, lo, x) -> Bil.extract hi lo (bil_exp x)
+  | Extract (hi, lo, x) -> Bil.extract ~hi ~lo (bil_exp x)
   | Cast (_, 1, x) -> Bil.(cast low 1 (bil_exp x))
   | Cast (Signed, width, x) -> Bil.(cast signed width (bil_exp x))
   | Cast (Unsigned, width, x) -> Bil.(cast unsigned width (bil_exp x))
@@ -222,7 +222,7 @@ module Exp = struct
     if width = e.width then { e with sign=Unsigned; }
     else
       match e.body with
-      | Vars (v,vars) when Caml.not (List.is_empty vars) ->
+      | Vars (v,vars) when Stdlib.not (List.is_empty vars) ->
         extract_of_vars e hi lo (v :: vars)
       | _ ->
         { sign=Unsigned; width; body = Extract (hi,lo,e.body) }
@@ -263,7 +263,7 @@ module Translate = struct
   let store mem addr data endian size =
     let addr = bil_exp addr.body in
     let data = bil_exp data.body in
-    Bil.[mem := store (var mem) addr data endian size]
+    Bil.[mem := store ~mem:(var mem) ~addr data endian size]
 
   let if_ probe then_ else_ =
     let probe = bil_exp (Exp.body probe) in
@@ -285,11 +285,11 @@ module Translate = struct
     let width_right = lo_var in
     let left =
       if width_left = 0 then None
-      else Some (Bil.extract (width - 1) (hi_var + 1) var) in
+      else Some (Bil.extract ~hi:(width - 1) ~lo:(hi_var + 1) var) in
     let middle = bil_exp (Exp.body rhs) in
     let right =
       if width_right = 0 then None
-      else Some (Bil.extract (lo_var - 1) 0 var) in
+      else Some (Bil.extract ~hi:(lo_var - 1) ~lo:0 var) in
     match left,right with
     | None, None -> Bil.[v := middle]
     | Some left, None -> Bil.[v := left ^ middle]

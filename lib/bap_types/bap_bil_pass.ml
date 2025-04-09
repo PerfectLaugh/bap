@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Bap_bil
 
@@ -14,7 +14,7 @@ let selected : (bil -> bil) list ref = ref []
 
 let register_pass ?(desc="No description provided") name body =
   let pass = {name;desc;body} in
-  Hashtbl.set passes name pass;
+  Hashtbl.set passes ~key:name ~data:pass;
   pass
 
 let select_passes ps = selected := List.map ps ~f:(fun x -> x.body)

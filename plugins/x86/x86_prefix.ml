@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Or_error
 open Bap.Std
 
@@ -34,8 +34,8 @@ let deref mem =
   Seq.unfold_step ~init:(Memory.min_addr mem)
     ~f:(fun addr ->
         match Memory.get ~addr mem with
-        | Ok word -> Seq.Step.Yield (word, Word.succ addr)
-        | Error _ -> Seq.Step.Done)
+      | Ok word -> Seq.Step.Yield { value = word; state = Word.succ addr }
+      | Error _ -> Seq.Step.Done)
 
 let get memory =
   Seq.(deref memory >>| Word.to_int >>| ok_exn >>| to_known_prefix

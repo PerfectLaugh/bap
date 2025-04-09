@@ -1,8 +1,8 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 let strip_version ver =
   if String.length ver <> 5 then ver
-  else String.sub ver 0 3
+  else String.sub ver ~pos:0 ~len:3
 
 
 module Std = struct

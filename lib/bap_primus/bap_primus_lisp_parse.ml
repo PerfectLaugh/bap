@@ -1,9 +1,9 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Format
 open Bap_core_theory
 
-module Sys = Caml.Sys
+module Sys = Stdlib.Sys
 
 open Bap_primus_lisp_types
 
@@ -660,7 +660,7 @@ module Load = struct
               match file_of_feature paths name with
               | None -> raise (Fail (Unresolved_feature (name,pos)))
               | Some file -> match Source.find p file with
-                | None -> Map.set required name pos
+                | None -> Map.set required ~key:name ~data:pos
                 | Some _ -> required))
 
   let transitive_closure paths p =

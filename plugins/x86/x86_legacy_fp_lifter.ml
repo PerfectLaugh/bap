@@ -5,7 +5,7 @@ module Bil = X86_legacy_bil
 open Bil
 open Bil.Ast
 open Bil.Type
-open Core_kernel[@@warning "-D"]
+open Core
 open X86_legacy_bil_convenience
 open X86_legacy_bil_disasm_i386
 

@@ -1,7 +1,7 @@
 open Bap.Std
 open Bap_primus_types
 open Bap_knowledge
-open Core_kernel[@@warning "-D"]
+open Core
 
 module Name = Knowledge.Name
 module Info = Bap_primus_info
@@ -43,7 +43,7 @@ module Repository = struct
     if Hashtbl.mem self sys.name
     then invalid_argf "System named %s is already present in the repository"
         (Name.show sys.name) ();
-    Hashtbl.add_exn self sys.name sys
+    Hashtbl.add_exn self ~key:sys.name ~data:sys
 
   let require name =
     match Hashtbl.find self name with
@@ -57,7 +57,7 @@ module Repository = struct
 
   let update ?package name ~f =
     let name = Name.create ?package name in
-    Hashtbl.set self name (f (require name))
+    Hashtbl.set self ~key:name ~data:(f (require name))
 
   let list () =
     Hashtbl.data self |> List.map ~f:(fun {desc; name}  ->
@@ -120,7 +120,7 @@ module Components = struct
     then invalid_argf
         "A %s component named %s is already registered, \
          please choose a unique name" ns (Name.show name) ();
-    Hashtbl.add_exn table name {init; desc; hide=internal}
+    Hashtbl.add_exn table ~key:name ~data:{init; desc; hide=internal}
 
 
   let register_generic = add_component "generic" generics

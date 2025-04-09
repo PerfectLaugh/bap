@@ -46,11 +46,11 @@ $(b,:) instead of $(b,-) or $(b,--), e.g.,
 |}
 
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_main
 open Bap_knowledge
 open Bap.Std
-module Sys = Caml.Sys
+module Sys = Stdlib.Sys
 
 include Loggers()
 
@@ -77,7 +77,7 @@ let collect_commands () =
   List.fold ~init:(Map.empty (module Knowledge.Name))
     ~f:(fun hints info ->
         let name = Project.Analysis.name info in
-        Map.add_exn hints name info)
+        Map.add_exn hints ~key:name ~data:info)
 
 
 let initial_ctxt ~history directives path = {
@@ -89,7 +89,7 @@ let initial_ctxt ~history directives path = {
   directives = List.fold directives
       ~init:String.Map.empty
       ~f:(fun dirs (name,_,desc) ->
-          Map.add_exn dirs name desc)
+          Map.add_exn dirs ~key:name ~data:desc)
 }
 
 let fail problem = Error (Fail problem)
@@ -344,7 +344,7 @@ let () =
   Analyze_core_commands.register ();
   if Sys.file_exists base
   then Toplevel.set @@ Knowledge.load base;
-  let ctxt = in_package (initial_ctxt history directives base) "bap" in
+  let ctxt = in_package (initial_ctxt ~history directives base) "bap" in
   match commands,script with
   | [], None ->
     load_history history;

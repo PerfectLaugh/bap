@@ -6,7 +6,7 @@ let () = Format.kasprintf Jbuild_plugin.V1.send {|
  (public_name bap-ghidra)
  (wrapped false)
  (preprocess (pps ppx_bap))
- (libraries bap core_kernel mmap)
+ (libraries bap core mmap)
  (foreign_stubs
   (language cxx)
   (names ghidra_disasm)

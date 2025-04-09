@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open OUnit2
 open Bap.Std
 
@@ -40,7 +40,7 @@ let assert_prg  value prg ctxt =
   assert_equal ~ctxt ~printer value @@
   let res = bili#eval prg >>= fun () -> bili#lookup r >>| Bil.Result.value in
   Monad.State.eval res (new Bili.context)
-[@@warning "-D"]
+
 
 let suite () =
   "Bili" >::: [

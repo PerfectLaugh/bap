@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Regular.Std
 open Bap_types.Std
@@ -32,7 +32,7 @@ module Repr = struct
   } [@@deriving bin_io]
 end
 
-include Binable.Of_binable(Repr)(struct
+include Binable.Of_binable_with_uuid(Repr)(struct
     type nonrec t = t
     let to_binable {endian; addr; data; off; size} : Repr.t = {
       endian;
@@ -47,8 +47,10 @@ include Binable.Of_binable(Repr)(struct
       off = 0;
       size = Bigstring.length data;
     }
+
+    let caller_identity = Bin_shape.Uuid.of_string "61de198b-c547-4250-ab5f-80c7d2518159"
   end)
-[@@warning "-D"]
+
 
 
 let sexp_of_t mem = Sexp.List [

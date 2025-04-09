@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Format
 
@@ -80,7 +80,7 @@ module BIR = struct
   let build_graph = List.fold
       ~init:Tid.Map.empty
       ~f:(fun blks blk ->
-          Map.add_exn blks blk.name blk)
+          Map.add_exn blks ~key:blk.name ~data:blk)
 
   let single_dst = function
     | [] | _ :: _ :: _ -> None

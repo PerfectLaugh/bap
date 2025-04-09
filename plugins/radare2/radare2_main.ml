@@ -1,5 +1,5 @@
 open Bap_core_theory
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_future.Std
 open Bap.Std
 include Self()
@@ -100,7 +100,7 @@ let provide_radare2 file =
           | Some name -> Bap_relation.add rels addr name
         else rels) in
   Bap_relation.matching rels ()
-    ~saturated:(fun addr name () -> Hashtbl.add_exn funcs addr name)
+    ~saturated:(fun addr name () -> Hashtbl.add_exn funcs ~key:addr ~data:name)
     ~unmatched:(fun reason () -> report_missing reason);
   if Hashtbl.length funcs = 0
   then warning "failed to obtain symbols";

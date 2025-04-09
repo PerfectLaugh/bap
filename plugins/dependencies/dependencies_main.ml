@@ -54,11 +54,11 @@ bap dependency /bin/ls --root=/mnt/image --ldconfig='cat ld.so.cache'
 ```
 "
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Regular.Std
 open Bap_main
-module Sys = Caml.Sys
+module Sys = Stdlib.Sys
 
 include Loggers()
 
@@ -90,7 +90,7 @@ end = struct
             match parse_line s with
             | None -> cache
             | Some path ->
-              Map.set cache (Filename.basename path) path)
+              Map.set cache ~key:(Filename.basename path) ~data:path)
           ~init:String.Map.empty)
       ~finally:(fun () ->
           match UnixLabels.close_process_in ldconfig with
@@ -311,7 +311,7 @@ module State = struct
       else
         let unit = load name in
         let state = {
-          state with units = Map.add_exn state.units name unit
+          state with units = Map.add_exn state.units ~key:name ~data:unit
         } in
         load_deps state unit
     and load_deps state unit =

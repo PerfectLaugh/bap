@@ -11,8 +11,7 @@ bug-reports: "https://github.com/BinaryAnalysisPlatform/bap/issues"
 depends: [
   "dune" {>= "3.1"}
   "bap-std" {= version}
-  "conf-bap-llvm" {>= "1.8"}
-  "core_kernel" {>= "v0.14" & < "v0.16"}
+  "core"
   "mmap"
   "monads" {= version}
   "bap-common" {= version}
@@ -25,7 +24,6 @@ build: [
   ["dune" "subst"] {dev}
   [
   "ocaml" "tools/configure.ml"
-  "--with-llvm-config=%{conf-bap-llvm:config}%"
   "--%{llvm-shared?disable:enable}%-llvm-static"
   ]
   [

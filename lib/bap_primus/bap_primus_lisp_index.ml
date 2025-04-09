@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 module type S = sig
   type t [@@deriving sexp_of]

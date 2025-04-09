@@ -13,7 +13,7 @@
    bitvec
    bitvec-order
    bitvec-sexp
-   core_kernel
+   core
    monads
    ogre))
 

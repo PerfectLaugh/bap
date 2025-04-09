@@ -2,7 +2,7 @@
  (name bap_taint_plugin)
  (public_name bap-taint.plugin)
  (preprocess (pps ppx_bap))
- (libraries bap core_kernel regular))
+ (libraries bap core regular))
 
 (plugin
  (name taint)

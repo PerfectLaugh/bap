@@ -1,5 +1,5 @@
 open Bap.Std
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_knowledge
 open Bap_core_theory
 

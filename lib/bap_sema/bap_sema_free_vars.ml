@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_types.Std
 open Graphlib.Std
 open Bap_ir
@@ -46,7 +46,7 @@ module Live = struct
   let block_transitions sub =
     Term.enum blk_t sub |>
     Seq.fold ~init:Tid.Map.empty ~f:(fun fs blk ->
-        Map.add_exn fs (Term.tid blk) {
+        Map.add_exn fs ~key:(Term.tid blk) ~data:{
           defs = blk_defs blk;
           uses = Ir_blk.free_vars blk;
         }) |> fun trans ->

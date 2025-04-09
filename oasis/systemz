@@ -6,7 +6,7 @@ Library "bap-systemz"
  Build$:           flag(everything) || flag(systemz)
  XMETADescription: common definitions for Systemz targets
  Path: lib/bap_systemz
- BuildDepends: core_kernel, bap-knowledge, bap-core-theory
+ BuildDepends: core, bap-knowledge, bap-core-theory
  FindlibName: bap-systemz
  Modules: Bap_systemz_target
 
@@ -14,7 +14,7 @@ Library systemz_plugin
   XMETADescription: provide Systemz lifter
   Path:             plugins/systemz
   Build$:           flag(everything) || flag(systemz)
-  BuildDepends:     core_kernel, ppx_bap, ogre,
+  BuildDepends:     core, ppx_bap, ogre,
                     bap-core-theory, bap-knowledge, bap-main,
                     bap, bap-systemz
   FindlibName:      bap-plugin-systemz

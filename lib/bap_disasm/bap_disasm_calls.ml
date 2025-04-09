@@ -1,6 +1,6 @@
 open Bap_core_theory
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Graphlib.Std
 
 open Bap_types.Std
@@ -93,7 +93,7 @@ end
 
 module Parents = struct
   type t = (word,Parent.t) Solution.t
-  include Binable.Of_binable(struct
+  include Binable.Of_binable_with_uuid(struct
       type t = (word * Parent.t) Seq.t [@@deriving bin_io]
     end)(struct
       type t = (word,Parent.t) Solution.t
@@ -103,8 +103,8 @@ module Parents = struct
           Map.of_increasing_sequence
             (module Word) xs in
         Solution.create init Parent.unknown
+      let caller_identity = Bin_shape.Uuid.of_string "cb921c64-00a1-4cd3-a219-a0e73f841169"
     end)
-  [@@warning "-D"]
 end
 
 type input = Driver.state

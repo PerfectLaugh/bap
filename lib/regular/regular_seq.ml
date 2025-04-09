@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Sequence
 
 
@@ -22,7 +22,7 @@ let is_empty : 'a Sequence.t -> bool = length_is_bounded_by ~max:0
 
 let filter s ~f = filteri s ~f:(fun _ x -> f x)
 
-(* honestly stolen from newer core_kernel, to
+(* honestly stolen from newer core, to
    get compatibility with older library versions *)
 let compare compare_a t1 t2 =
   with_return (fun r ->
@@ -35,12 +35,13 @@ let compare compare_a t1 t2 =
             then r.return c);
       0)
 
-module Binable = Bin_prot.Utils.Make_binable1(struct
+module Binable = Bin_prot.Utils.Make_binable1_with_uuid(struct
     module Binable = List
     type 'a t = 'a Sequence.t
     let to_binable = Sequence.to_list
     let of_binable = Sequence.of_list
-  end)[@@warning "-D"]
+    let caller_identity = Bin_shape.Uuid.of_string "57e090bd-189d-4bd1-a619-53e70d0baa16"
+  end)
 
 include Binable
 let compare_seq = compare

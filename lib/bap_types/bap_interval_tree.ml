@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Option.Monad_infix
 
 module Seq = Sequence
@@ -281,7 +281,7 @@ module Make(Interval : Interval) = struct
     start |> go |> run
 
   (* we do not use include Container.Make(...) per the jane street *)
-  (* `core_kernel` `container.ml` best practice documentation *)
+  (* `core` `container.ml` best practice documentation *)
   module C = Container.Make(
     struct
       type 'a t = 'a node option

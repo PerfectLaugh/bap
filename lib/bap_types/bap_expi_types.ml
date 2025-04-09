@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_result
 open Bap_common_types
 open Bap_bil

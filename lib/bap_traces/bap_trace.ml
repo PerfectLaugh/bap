@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Result.Monad_infix
 open Bap.Std
@@ -82,7 +82,7 @@ let protos : (module P) Tab.t = mk_tab ()
 let readers: (Uri.t -> id -> (reader, io_error) Result.t) Tab.t = mk_tab ()
 let writers: (Uri.t -> t -> (unit, io_error) Result.t) Tab.t = mk_tab ()
 
-let make_id () = Bap_trace_id.v `V4
+let make_id () = Bap_trace_id.v4_gen (Stdlib.Random.State.make_self_init ()) ()
 
 let make_error (#error as r) = Error r
 
@@ -164,8 +164,8 @@ let supports t tag = supports_by_tool t tag && supports_by_proto t tag
 
 let read_events t : event seq =
   let map e = match t.mapper e with
-    | None -> Seq.Step.Skip ()
-    | Some e -> Seq.Step.Yield (e,()) in
+    | None -> Seq.Step.Skip { state = () }
+    | Some e -> Seq.Step.Yield { state = (); value = e } in
   Seq.unfold_step ~init:() ~f:(fun () ->
       match t.reader.next () with
       | None -> Seq.Step.Done
@@ -173,8 +173,8 @@ let read_events t : event seq =
       | Some Error e -> match t.monitor e with
         | `Stop -> Seq.Step.Done
         | `Fail -> Error.raise e
-        | `Skip -> Seq.Step.Skip ()
-        | `Make e -> Seq.Step.Yield (e,()))
+      | `Skip -> Seq.Step.Skip { state = () }
+      | `Make e -> Seq.Step.Yield { state = (); value = e })
 
 let read_all t tag =
   read_events t |> Seq.filter_map ~f:(Value.get tag)

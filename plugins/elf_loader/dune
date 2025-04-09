@@ -2,7 +2,7 @@
  (name bap_elf_loader_plugin)
  (public_name bap-elf.plugin)
  (preprocess (pps ppx_bap))
- (libraries bap bap-elf bap-dwarf core_kernel regular))
+ (libraries bap bap-elf bap-dwarf core regular))
 
 (plugin
  (name elf-loader)

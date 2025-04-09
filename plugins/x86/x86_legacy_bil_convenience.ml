@@ -6,7 +6,7 @@ module Bil = X86_legacy_bil
 
 open Bil.Ast
 open Bil.Type
-open Core_kernel[@@warning "-D"]
+open Core
 
 module Arithmetic = X86_legacy_bil_arithmetic
 module Big_int_convenience = X86_legacy_bil_big_int_convenience

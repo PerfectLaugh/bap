@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Monads.Std
 open Bap_common_types
 open Bap_bil
@@ -57,7 +57,7 @@ module Propagate(SM : Monad.State.S2) = struct
 
     method update const v : unit r =
       SM.get () >>= fun ctxt ->
-      SM.put (update ctxt v const)
+      SM.put (update ctxt ~key:v ~data:const)
 
     method private update_var v e =
       let const = match e with
@@ -77,13 +77,13 @@ module Propagate(SM : Monad.State.S2) = struct
     method eval_load ~mem ~addr e s =
       self#eval_exp mem  >>= fun mem ->
       self#eval_exp addr >>= fun addr ->
-      SM.return (load mem addr e s)
+      SM.return (load ~mem ~addr e s)
 
     method eval_store ~mem ~addr data e s =
       self#eval_exp mem  >>= fun mem ->
       self#eval_exp addr >>= fun addr ->
       self#eval_exp data >>= fun data ->
-      SM.return (store mem addr data e s)
+      SM.return (store ~mem ~addr data e s)
 
     method eval_unop op e =
       self#eval_exp e >>= fun e ->
@@ -115,11 +115,11 @@ module Propagate(SM : Monad.State.S2) = struct
       self#eval_exp cond >>= fun cond ->
       self#eval_exp yes >>= fun yes ->
       self#eval_exp no  >>= fun no ->
-      SM.return (ite cond yes no)
+      SM.return (ite ~if_:cond ~then_:yes ~else_:no)
 
     method eval_extract hi lo e =
       self#eval_exp e >>= fun e ->
-      SM.return (extract hi lo e)
+      SM.return (extract ~hi ~lo e)
 
     method eval_concat x y =
       self#eval_exp x >>= fun x ->

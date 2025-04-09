@@ -8,7 +8,7 @@ Library primus_taint_plugin
   Build$: flag(everything) || flag(primus_taint)
   FindlibName: bap-plugin-primus_taint
   CompiledObject: best
-  BuildDepends: bap-primus, bap-taint, bap, core_kernel, regular, monads
+  BuildDepends: bap-primus, bap-taint, bap, core, regular, monads
   XMETADescription: a taint analysis control interface
   DataFiles:        lisp/*.lisp ($datadir/bap/primus/site-lisp)
   InternalModules: Primus_taint_main, Primus_taint_policies

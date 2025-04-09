@@ -1,8 +1,8 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 include Self()
 
-module Sys = Caml.Sys
+module Sys = Stdlib.Sys
 
 
 type version = Vold | Vnew [@@deriving sexp, equal]

@@ -7,7 +7,7 @@ Library primus_powerpc_plugin
   Build$: flag(everything) || flag(primus_powerpc)
   FindlibName: bap-plugin-primus_powerpc
   CompiledObject: best
-  BuildDepends: bap, bap-primus, core_kernel
+  BuildDepends: bap, bap-primus, core
   XMETADescription: powerpc support package
   Modules: Primus_powerpc_main
   XMETAExtraLines:  tags="primus, powerpc"

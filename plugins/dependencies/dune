@@ -2,7 +2,7 @@
  (name bap_dependencies_plugin)
  (public_name bap-dependencies.plugin)
  (preprocess (pps ppx_bap))
- (libraries bap bap-main core_kernel ogre regular))
+ (libraries bap bap-main core ogre regular))
 
 (plugin
  (name dependencies)

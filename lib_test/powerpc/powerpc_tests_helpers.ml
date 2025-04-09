@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open OUnit2
 
@@ -19,12 +19,12 @@ let make_regs typ ?alias prefix range =
   List.fold ~init:String.Map.empty ~f:(fun regs i ->
       let var = make_var_i typ prefix i in
       let name = Var.name var in
-      let regs = Map.set regs name var in
+      let regs = Map.set regs ~key:name ~data:var in
       match alias with
       | None -> regs
       | Some a ->
         let name = make_name a i in
-        Map.set regs name var) range
+        Map.set regs ~key:name ~data:var) range
 
 let flag name = Var.create name (Type.imm 1)
 
@@ -84,9 +84,9 @@ module Make(B : Bitwidth) = struct
     bits
 
   let crn =
-    Int.Map.fold cri ~init:String.Map.empty
+    Map.fold cri ~init:String.Map.empty
       ~f:(fun ~key:_ ~data:var acc ->
-          Map.set acc (Var.name var) var)
+          Map.set acc ~key:(Var.name var) ~data:var)
 
   let fields = [
     "CR0", 0, (cr28, cr29, cr30, cr31);
@@ -101,11 +101,11 @@ module Make(B : Bitwidth) = struct
 
   let cr_fields =
     List.fold fields ~init:String.Map.empty ~f:(fun fs (name, _, fd) ->
-        Map.set fs name fd)
+        Map.set fs ~key:name ~data:fd)
 
   let cri_fields =
     List.fold fields ~init:Int.Map.empty ~f:(fun fs (_, index, fd) ->
-        Map.set fs index fd)
+        Map.set fs ~key:index ~data:fd)
 
   (** fixed precision flags  *)
   let so = flag "SO" (** summary overflow *)
@@ -133,7 +133,7 @@ let raise_arch () =
   failwith "powerpc arch is the only expected"
 
 let cr_bit n =
-  Int.Map.find_exn Any_ppc.cri n
+  Map.find_exn Any_ppc.cri n
 
 let nf = cr_bit 0
 let pf = cr_bit 1
@@ -219,8 +219,8 @@ let lookup_var c var = match c#lookup var with
 let find_gpr arch name =
   try
     match arch with
-    | `ppc -> String.Map.find_exn P32.gpr name
-    | _ -> String.Map.find_exn P64.gpr name
+    | `ppc -> Map.find_exn P32.gpr name
+    | _ -> Map.find_exn P64.gpr name
   with _ ->
     sprintf "gpr %s not" name |> failwith
 

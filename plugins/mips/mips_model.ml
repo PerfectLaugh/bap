@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Mips_rtl
 
@@ -37,22 +37,22 @@ let make_regs_list typ prefix size =
 
 let reglist_to_map regs =
   List.fold ~init:String.Map.empty ~f:(fun regs var ->
-      String.Map.set regs (Var.name var) var) regs
+      Map.set regs ~key:(Var.name var) ~data:var) regs
 
 let make_regs typ ?alias prefix range =
   List.fold ~init:String.Map.empty ~f:(fun regs i ->
       let var = make_var_i typ prefix i in
       let name = Var.name var in
-      let regs = String.Map.set regs name var in
+      let regs = Map.set regs ~key:name ~data:var in
       match alias with
       | None -> regs
       | Some a ->
         let name = make_name a i in
-        String.Map.set regs name var) range
+        Map.set regs ~key:name ~data:var) range
 
 let make_regs_i typ prefix range =
   List.fold ~init:Int.Map.empty ~f:(fun regs i ->
-      Int.Map.set regs i (make_var_i typ prefix i)) range
+      Map.set regs ~key:i ~data:(make_var_i typ prefix i)) range
 
 let make_reg typ name = Var.create name typ
 let flag name = Var.create name (Type.imm 1)
@@ -140,10 +140,10 @@ module Make_MIPS(S: Spec) : MIPS = struct
         let names =
           if gpr_bitwidth = 64 then (name ^ "_64") :: names
           else names in
-        List.fold names ~init ~f:(fun regs name -> Map.set regs name reg))
+        List.fold names ~init ~f:(fun regs name -> Map.set regs ~key:name ~data:reg))
 
   let gpri = List.foldi ~init:Int.Map.empty ~f:(fun n regs (reg,_) ->
-      Map.set regs n reg) gprs
+      Map.set regs ~key:n ~data:reg) gprs
 
   let hi = make_reg (Type.imm gpr_bitwidth) "HI"
   let lo = make_reg (Type.imm gpr_bitwidth) "LO"
@@ -180,10 +180,10 @@ module Make_cpu(M : MIPS) : CPU = struct
   let gpr =
     let data = Map.data gpr in
     List.fold data ~init:Var.Set.empty
-      ~f:(fun regs v -> Var.Set.add regs v)
+      ~f:(fun regs v -> Set.add regs v)
 
-  let sp = Var.Set.find_exn gpr ~f:(fun v -> String.is_prefix ~prefix:"SP" (Var.name v))
-  let fp = Var.Set.find_exn gpr ~f:(fun v -> String.is_prefix ~prefix:"FP" (Var.name v))
+  let sp = Set.find_exn gpr ~f:(fun v -> String.is_prefix ~prefix:"SP" (Var.name v))
+  let fp = Set.find_exn gpr ~f:(fun v -> String.is_prefix ~prefix:"FP" (Var.name v))
 
   (* MIPS doesn't have flags, but structure requires them
    * We just make a stubs here *)

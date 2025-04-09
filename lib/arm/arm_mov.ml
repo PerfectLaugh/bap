@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Regular.Std
 open Bap.Std
@@ -84,7 +84,7 @@ let lift ?(encoding=Theory.Language.unknown)
     | `BIC, _,         Some (`Imm i64)
     | `EOR, _,         Some (`Imm i64)
     | `ORR, _,         Some (`Imm i64) ->
-      stmts, set_cf_data i64 raw :: set_nzf Bil.(var dest) reg32_t
+      stmts, set_cf_data ~imm:i64 ~data:raw :: set_nzf Bil.(var dest) reg32_t
     | #move, _, _ ->
       stmts, Bil.move Env.cf carry :: set_nzf Bil.(var dest) reg32_t
     | #arth as itype1, _, _ ->

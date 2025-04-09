@@ -6,7 +6,7 @@ Library "bap-riscv"
  Build$:           flag(everything) || flag(riscv)
  XMETADescription: common definitions for Riscv targets
  Path: lib/bap_riscv
- BuildDepends: core_kernel, bap-knowledge, bap-core-theory
+ BuildDepends: core, bap-knowledge, bap-core-theory
  FindlibName: bap-riscv
  Modules: Bap_riscv_target
 
@@ -14,7 +14,7 @@ Library riscv_plugin
   XMETADescription: provide Riscv target
   Path:             plugins/riscv
   Build$:           flag(everything) || flag(riscv)
-  BuildDepends:     core_kernel, ppx_bap, ogre,
+  BuildDepends:     core, ppx_bap, ogre,
                     bap-core-theory, bap-knowledge, bap-main,
                     bap, bap-riscv, bap-c, bap-abi, bap-api,
                     monads

@@ -1,8 +1,6 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Monads.Std
-
-[@@@warning "-D"]
 
 module SM = Monad.State
 open SM.Monad_infix
@@ -72,7 +70,7 @@ class context
       else {<
         cps = Map.update cps key ~f:(function
             | None -> Tid.Map.singleton p self
-            | Some ps -> Map.set ps p self)
+            | Some ps -> Map.set ps ~key:p ~data:self)
       >}
 
   method merge runner = {<

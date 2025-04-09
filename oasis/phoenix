@@ -6,8 +6,8 @@ Library phoenix_plugin
   Build$:           flag(everything) || flag(phoenix)
   Path:             plugins/phoenix
   FindlibName:      bap-plugin-phoenix
-  BuildDepends:     bap, text-tags, ocamlgraph, ezjsonm, core_kernel, graphlib,
-                    regular, ppx_bap, core_kernel.caml_unix
+  BuildDepends:     bap, text-tags, ocamlgraph, ezjsonm, core, graphlib,
+                    regular, ppx_bap
   InternalModules:  Phoenix_main,
                     Phoenix_dot,
                     Phoenix_helpers,

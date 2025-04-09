@@ -4,7 +4,7 @@
     modules for C language.
 *)
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 open Monads.Std

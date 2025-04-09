@@ -1,7 +1,7 @@
 (library
  (name bap_callsites_plugin)
  (public_name bap-callsites.plugin)
- (libraries bap core_kernel))
+ (libraries bap core))
 
 (plugin
  (name callsites)

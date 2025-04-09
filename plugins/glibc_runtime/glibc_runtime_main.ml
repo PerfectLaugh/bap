@@ -3,7 +3,7 @@ Enables ad-hoc support for glibc runtime code. In particular it
 detects the locations of $(b,main) and $(b,__libc_start_main)
 functions (and adds the latter if it is absent).
 "
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_main
 open Bap.Std
 open Bap_c.Std
@@ -59,7 +59,7 @@ let insert_call prog start entry jmp =
   let sub = Sub.create ~tid ~name () in
   let prog = Term.append sub_t prog sub in
   let entry = Term.remove jmp_t entry (Term.tid jmp) in
-  let call = Call.create (Direct (Term.tid sub)) () in
+  let call = Call.create ~target:(Direct (Term.tid sub)) () in
   let jmp = Jmp.create_call call in
   let entry = Term.prepend jmp_t entry jmp in
   let start = Term.update blk_t start entry in

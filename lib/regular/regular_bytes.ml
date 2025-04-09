@@ -1,14 +1,15 @@
 module Std_bytes = Bytes
 
-open Core_kernel[@@warning "-D"]
+open Core
 
-module Binable = Bin_prot.Utils.Make_binable(struct
+module Binable = Bin_prot.Utils.Make_binable_with_uuid(struct
     module Binable = String
     type t = Std_bytes.t
     let to_binable = Std_bytes.unsafe_to_string
     let of_binable = Std_bytes.of_string
+    let caller_identity = Bin_shape.Uuid.of_string "19071993-d15a-49be-b3a2-4ef4bacd3c0a"
   end)
-[@@warning "-D"]
+
 
 module Stringable = struct
   type t = Std_bytes.t

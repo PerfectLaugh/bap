@@ -84,11 +84,11 @@ bap \\$binary --read-symbols-from=mv.scm --read-symbols-when-matches
 
 "
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_main
 open Bap_core_theory
 open KB.Syntax
-module Sys = Caml.Sys
+module Sys = Stdlib.Sys
 include Bap_main.Loggers()
 
 let anonymous_prefix = "__anonymous_sub%"
@@ -120,7 +120,7 @@ let build_functions relation =
       let sexp_of_t x = Sexp.Atom (Bitvec.to_string x)
     end) in
   Bap_relation.matching relation ()
-    ~saturated:(fun addr name () -> Hashtbl.add_exn functions addr name)
+    ~saturated:(fun addr name () -> Hashtbl.add_exn functions ~key:addr ~data:name)
     ~unmatched:(fun problem () -> match problem with
         | Non_injective_bwd (names,addr) ->
           error "skipping names (%s) that has the same address %a"
@@ -128,7 +128,7 @@ let build_functions relation =
         | Non_injective_fwd (addrs,name) ->
           match List.min_elt addrs ~compare:Bitvec.compare with
           | None -> assert false
-          | Some addr -> Hashtbl.set functions addr name);
+          | Some addr -> Hashtbl.set functions ~key:addr ~data:name);
   functions
 
 let chop_suffix p = try Filename.chop_extension p with _ -> p

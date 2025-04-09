@@ -7,7 +7,7 @@ Library cache_plugin
   Path:             plugins/cache
   FindlibName:      bap-plugin-cache
   BuildDepends:     bap, bap-main, regular, ppx_bap, mmap, fileutils, uuidm,
-                    core_kernel, core_kernel.caml_unix
+                    core
   InternalModules:  Bap_cache, Bap_cache_gc, Bap_cache_main, Bap_cache_types, Bap_cache_utils
   XMETADescription: provide caching services
   XMETAExtraLines:  tags="cache"

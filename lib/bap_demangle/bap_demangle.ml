@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 
 module Std = struct
@@ -17,7 +17,7 @@ module Std = struct
       if Hashtbl.mem registry name
       then failwithf "The demangler %s is already registered, \
                       please pick a unique name" (KB.Name.show name) ();
-      Hashtbl.add_exn registry name run;
+      Hashtbl.add_exn registry ~key:name ~data:run;
       {name; run}
 
     let declare ?package name run = ignore (create ?package name run)
@@ -41,7 +41,7 @@ module Std = struct
       List.map ~f:(fun (name,run) -> {name; run})
 
     let install target demangler =
-      match Hashtbl.add selected target demangler with
+      match Hashtbl.add selected ~key:target ~data:demangler with
       | `Ok -> ()
       | `Duplicate ->
         let used = Hashtbl.find_exn selected target in

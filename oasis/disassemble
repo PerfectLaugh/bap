@@ -8,7 +8,7 @@ Library disassemble_plugin
   Path: plugins/disassemble
   FindlibName: bap-plugin-disassemble
   CompiledObject: best
-  BuildDepends: bap, bap-knowledge, bap-core-theory, bap-relation, core_kernel,
+  BuildDepends: bap, bap-knowledge, bap-core-theory, bap-relation, core,
                 ogre, regular, monads, bap-plugins, bap-bundle, bap-main,
                 ppx_bap, bitvec, bitvec-sexp, bitvec-order, bitvec-binprot
   InternalModules: Disassemble_main, Disassemble_main_rules

@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Format
 
 type stage = Working | Accepted | Finished [@@deriving equal]
@@ -111,8 +111,8 @@ let abort t =
 let run t =
   let open Sequence.Step in
   Sequence.unfold_with ~init:t ~f:(fun t (x,c) ->
-      let t = step t x c in
-      when_decided t (Skip t) ~f:(fun d -> Yield (d,t)))
+    let t = step t x c in
+    when_decided t (Skip { state = t }) ~f:(fun d -> Yield { value = d; state = t }))
 
 
 let rev_zip_skip skip xs ys =

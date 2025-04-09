@@ -1,7 +1,7 @@
 (library
   (name llvm_plugin)
   (public_name bap-llvm.plugin)
-  (libraries bap bap-llvm bap-main core_kernel))
+  (libraries bap bap-llvm bap-main core))
 
 (plugin
   (name llvm)

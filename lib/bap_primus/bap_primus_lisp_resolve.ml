@@ -1,5 +1,5 @@
 open Bap.Std
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Format
 open Bap_primus_lisp_types

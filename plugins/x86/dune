@@ -15,7 +15,7 @@
     bap-primus
     bap-x86
     bitvec
-    core_kernel
+    core
     ogre
     str
     zarith))

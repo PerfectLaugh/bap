@@ -1,5 +1,5 @@
 open Bap_core_theory
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Or_error
 open Format
@@ -133,9 +133,10 @@ end = struct
     type t = packed
     let to_string {packed} = Z.to_bits packed
     let of_string s = {packed = Z.of_bits s}
+    let caller_identity = Bin_shape.Uuid.of_string "18adbffd-ea55-4ff0-a377-0a7dbe15d1b1"
   end
 
-  include Binable.Of_stringable(Stringable) [@@warning "-D"]
+  include Binable.Of_stringable_with_uuid(Stringable)
   include Sexpable.Of_stringable(Stringable)
 end
 
@@ -684,14 +685,15 @@ let zero = Cons.zero
 (* old representation for backward compatibility. *)
 module V1 = struct
   module Bignum = struct
-    module Repr : Stringable with type t = Z.t = struct
+    module Repr = struct
       type t = Z.t
       let to_string z = sprintf "0x%s" (Z.format "%X" z)
       let of_string = Z.of_string
+      let caller_identity = Bin_shape.Uuid.of_string "32e96b23-cfee-470e-a99a-1be199b301d3"
     end
     include Z
     include Sexpable.Of_stringable(Repr)
-    include Binable.Of_stringable(Repr) [@@warning "-D"]
+    include Binable.Of_stringable_with_uuid(Repr)
   end
 
   type t = {
@@ -717,11 +719,12 @@ module Stable = struct
         signed = is_signed x;
       }
 
-    include Binable.Of_binable(V1)(struct
+    include Binable.Of_binable_with_uuid(V1)(struct
         type t = Packed.t
         let to_binable = to_legacy
         let of_binable = of_legacy
-      end) [@@warning "-D"]
+        let caller_identity = Bin_shape.Uuid.of_string "1d938f5b-1fe7-4db4-97ec-d4de3a8e29da"
+      end)
 
     include Sexpable.Of_sexpable(V1)(struct
         type t = Packed.t

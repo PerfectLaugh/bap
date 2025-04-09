@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Bap_knowledge
 open Bap_core_theory
@@ -12,7 +12,6 @@ include Self()
 let package = "bap"
 
 module Optimizer = Theory.Parser.Make(Theory.Pass.Desugar(Bil_semantics.Core))
-[@@inlined]
 
 let provide_bir () =
   KB.Rule.(declare ~package "reify-ir" |>
@@ -52,7 +51,7 @@ module Relocations = struct
 
     let external_symbols  =
       Fact.collect Ogre.Query.(select (from external_reference)) >>| fun s ->
-      Seq.fold s ~f:(fun addrs (addr, name) -> Map.set addrs addr name)
+      Seq.fold s ~f:(fun addrs (addr, name) -> Map.set addrs ~key:addr ~data:name)
         ~init:(Map.empty (module Int64))
   end
 
@@ -71,7 +70,7 @@ module Relocations = struct
     inherit [addr Var.Map.t * Addr.Set.t] Stmt.visitor
     method! enter_move var exp (vars,refs) =
       match exp with
-      | Bil.Int const -> Map.set vars var const,refs
+      | Bil.Int const -> Map.set vars ~key:var ~data:const, refs
       | _ -> vars,refs
     method! enter_load ~mem:_ ~addr _ _ (vars,refs) =
       let const = match addr with

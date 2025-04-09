@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_plugins.Std
 open Bap_future.Std
 open Bap.Std

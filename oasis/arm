@@ -6,7 +6,7 @@ Library "bap-arm"
  XMETADescription: arm lifting
  Path:             lib/arm
  Build$:           flag(everything) || flag(arm)
- BuildDepends:     bap, core_kernel, ppx_bap, regular,
+ BuildDepends:     bap, core, ppx_bap, regular,
                    bap-core-theory, bap-knowledge, ogre,
                    bitvec, bitvec-order, bap-primus, bap-traces
  FindlibName:      bap-arm
@@ -37,7 +37,7 @@ Library arm_plugin
   Path:             plugins/arm
   FindlibName:      bap-plugin-arm
   BuildDepends:     bap, bap-core-theory, bap-abi, bap-arm, bap-c,
-                    core_kernel, bap-main, bap-api, monads, ppx_bap
+                    core, bap-main, bap-api, monads, ppx_bap
   InternalModules:  Arm_main, Arm_gnueabi
   DataFiles:        semantics/*.lisp ($datadir/bap/primus/semantics)
   XMETADescription: provide ARM lifter

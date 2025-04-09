@@ -8,7 +8,7 @@
 
  *)
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Graphlib.Std
 open Bap.Std
 open OUnit2
@@ -79,7 +79,7 @@ module Test_algo(Gl : Graph_for_algo) = struct
     }
 
     let add_relation t ~parent ~child = {
-      children = Map.change t.children parent( function
+      children = Map.change t.children parent ~f:(function
           | None -> Some (Node.Set.singleton child)
           | Some cs when Set.mem cs child ->
             assert_failure "Child was already adopted"
@@ -605,7 +605,7 @@ module Test_partition = struct
     "Trivial invariant" >:: trivial (P.trivial s);
     "Discrete invariant" >:: discrete (P.discrete s);
     "Union invariant" >:: union (P.union (P.discrete s) 1 2) 1 2;
-    "Refine invariant" >:: refine (P.refine (P.trivial s) equiv cmp) equiv
+    "Refine invariant" >:: refine (P.refine (P.trivial s) ~equiv ~cmp) equiv
   ]
 end
 

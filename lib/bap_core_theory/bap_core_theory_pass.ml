@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_knowledge
 open Bap_core_theory_definition
 
@@ -33,8 +33,8 @@ let name_is_taken name =
 let register ?desc ?package name pass =
   let name = KB.Name.create ?package name in
   if Hashtbl.mem passes name then name_is_taken name;
-  Option.iter desc ~f:(fun desc -> Hashtbl.add_exn info name desc);
-  Hashtbl.add_exn passes name pass
+  Option.iter desc ~f:(fun desc -> Hashtbl.add_exn info ~key:name ~data:desc);
+  Hashtbl.add_exn passes ~key:name ~data:pass
 
 
 let lookup name = match Hashtbl.find passes name with

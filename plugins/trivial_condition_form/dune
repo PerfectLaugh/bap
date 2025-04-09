@@ -1,7 +1,7 @@
 (library
  (name bap_trivial_condition_form_plugin)
  (public_name bap-trivial-condition-form.plugin)
- (libraries bap core_kernel))
+ (libraries bap core))
 
 (plugin
  (name trivial-condition-form)

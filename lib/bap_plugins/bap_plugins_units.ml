@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 open Bap_plugins_units_intf
 
@@ -45,8 +45,8 @@ module Findlib = struct
   let extract_units_from_packages ~findlib_is_required =
     Findlib.(recorded_packages Record_core) |> List.iter ~f:(fun pkg ->
         Hashtbl.set units
-          (unit_of_package ~findlib_is_required pkg)
-          `In_core)
+          ~key:(unit_of_package ~findlib_is_required pkg)
+          ~data:`In_core)
 
   let init () =
     if not (Hashtbl.is_empty units)
@@ -55,7 +55,7 @@ module Findlib = struct
     extract_units_from_packages ~findlib_is_required:(Hashtbl.is_empty units)
 
   let record name reason =
-    Hashtbl.add_exn units name reason
+    Hashtbl.add_exn units ~key:name ~data:reason
 
   let lookup = Hashtbl.find units
 
@@ -79,11 +79,11 @@ module Dynlink = struct
   let copy_units_from_dynlink () =
     init_dynlink ();
     Dynlink.all_units () |>
-    List.iter ~f:(fun unit -> Hashtbl.add_exn units unit `In_core)
+    List.iter ~f:(fun unit -> Hashtbl.add_exn units ~key:unit ~data:`In_core)
 
   let init () = copy_units_from_dynlink ()
   let list () = Hashtbl.keys units
-  let record name reason = match Hashtbl.add units name reason with
+  let record name reason = match Hashtbl.add units ~key:name ~data:reason with
     | `Ok -> ()
     | `Duplicate ->
       failwithf "bap-plugins: internal error - \
@@ -92,14 +92,14 @@ module Dynlink = struct
   let lookup = Hashtbl.find units
   let handle_error name reason = function
     | Dynlink.Module_already_loaded _ ->
-      Hashtbl.set units name reason;
+      Hashtbl.set units ~key:name ~data:reason;
       Ok ()
     | other ->
       Or_error.error_string (Dynlink.error_message other)
 end
 
 
-let is_toplevel = Caml.Sys.interactive.contents
+let is_toplevel = Stdlib.Sys.interactive.contents
 
 module Make() =
   (val if is_toplevel

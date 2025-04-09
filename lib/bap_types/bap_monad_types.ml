@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 module type State = sig
   type ('a,'s) t

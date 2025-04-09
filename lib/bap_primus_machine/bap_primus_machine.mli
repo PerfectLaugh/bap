@@ -1,6 +1,6 @@
 (* Not yet released.
 
-   open Core_kernel[@@warning "-D"]
+   open Core
    open Monads.Std
    open Bap_knowledge
 

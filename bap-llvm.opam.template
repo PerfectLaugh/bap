@@ -2,7 +2,6 @@ build: [
   ["dune" "subst"] {dev}
   [
   "ocaml" "tools/configure.ml"
-  "--with-llvm-config=%{conf-bap-llvm:config}%"
   "--%{llvm-shared?disable:enable}%-llvm-static"
   ]
   [

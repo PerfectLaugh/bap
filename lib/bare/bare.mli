@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 
 (** Binary Analysis Rule Engine (BARE).

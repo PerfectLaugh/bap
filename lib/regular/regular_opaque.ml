@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular_regular
 open Regular_data_types
 open Regular_data_intf

@@ -1,6 +1,6 @@
 open Bap.Std
 open Bap_core_theory
-open Core_kernel[@@warning "-D"]
+open Core
 open Graphlib.Std
 open Regular.Std
 open Monads.Std
@@ -143,7 +143,7 @@ let (++) : 'a defs -> 'a defs -> 'a defs = fun xs ys ->
   let add ~key:name ~data:defs init =
     List.fold defs ~init ~f:(fun (set,defs) def ->
         if is_presented set def then set,defs
-        else remember set def, Map.add_multi defs name def) in
+        else remember set def, Map.add_multi defs ~key:name ~data:def) in
   let init = Map.empty (module String),nodefs in
   snd@@Map.fold ys ~f:add ~init:(Map.fold ~init xs ~f:add)
 
@@ -167,7 +167,7 @@ let merge_packages p1 p2 = {
 }
 
 let update_package_documentation prog package docs = {
-  prog with pkgdocs = Map.set prog.pkgdocs package docs;
+  prog with pkgdocs = Map.set prog.pkgdocs ~key:package ~data:docs;
 }
 
 let packages {library; pkgdocs} =
@@ -249,12 +249,12 @@ let add_to_package (fld : 'a item) x p =
   let defs = Field.get fld p
   and name = Def.name x in
   match Map.find defs name with
-  | None -> Field.fset fld p (Map.add_multi defs name x)
+  | None -> Field.fset fld p (Map.add_multi defs ~key:name ~data:x)
   | Some ds ->
     if List.exists ds ~f:(fun d ->
         String.equal name (Def.name d) &&
         Id.equal x.id d.id) then p
-    else Field.fset fld p (Map.add_multi defs name x)
+    else Field.fset fld p (Map.add_multi defs ~key:name ~data:x)
 
 let is_applicable {context=global} def =
   let def_ctxt =
@@ -320,7 +320,7 @@ module Places = struct
         Theory.Target.regs t |> Set.to_sequence |>
         Seq.fold ~init:regs ~f:(fun regs v ->
             let name = KB.Name.create ~package (Theory.Var.name v) in
-            Map.set regs name v))
+            Map.set regs ~key:name ~data:v))
       ~init:(Map.empty (module KB.Name))
 
 
@@ -737,7 +737,7 @@ end = struct
 
   let repack defs =
     List.fold defs ~f:(fun defs def ->
-        Map.add_multi defs (Def.name def) def)
+        Map.add_multi defs ~key:(Def.name def) ~data:def)
       ~init:nodefs
 
   let package prog macros pkgname =
@@ -747,7 +747,7 @@ end = struct
     {
       prog with
       sources;
-      library = Map.set prog.library pkgname {
+      library = Map.set prog.library ~key:pkgname ~data:{
           pkg with
           defs = repack defs;
           mets = repack mets;
@@ -763,7 +763,7 @@ end = struct
         {
           prog with
           sources;
-          library = Map.set prog.library package {
+          library = Map.set prog.library ~key:package ~data:{
               pkg with
               defs = repack defs;
               mets = repack mets;
@@ -999,10 +999,10 @@ module Typing = struct
       | Some v -> Map.find g.vals v
 
     let add_var x v g =
-      {g with vars = Map.add_exn g.vars x v}
+      {g with vars = Map.add_exn g.vars ~key:x ~data:v}
 
     let set_var x v g =
-      {g with vars = Map.set g.vars x v}
+      {g with vars = Map.set g.vars ~key:x ~data:v}
 
     let set_val v t g =
       {g with vals = Map.set g.vals ~key:v ~data:t}
@@ -1056,7 +1056,7 @@ module Typing = struct
       let g = add_var x u g in
       {g with vals = match Map.find g1.vals u with
            | None -> g.vals
-           | Some t -> Map.set g.vals u t}
+           | Some t -> Map.set g.vals ~key:u ~data:t}
 
     (* merges g2 into g1.
 
@@ -1125,7 +1125,7 @@ module Typing = struct
     let join_vars vars =
       let init = Tvar.Map.empty in
       Map.fold vars ~init ~f:(fun ~key:x ~data:u joined ->
-          Map.add_multi joined u x)
+          Map.add_multi joined ~key:u ~data:x)
 
     let partition {vars; vals} =
       join_vars vars |>
@@ -1406,7 +1406,7 @@ module Typing = struct
         | None -> ps
         | Some types ->
           let name = KB.Name.create ~package (Def.name def) in
-          Map.set ps name types)
+          Map.set ps ~key:name ~data:types)
 
 
   let make_prims program init =
@@ -1476,7 +1476,7 @@ module Typing = struct
   let make_defs = fold_library ~f:(fun ~package {defs} funcs ->
       fold_multi defs ~init:funcs ~f:(fun funcs def ->
           let name = KB.Name.read ~package (Def.name def) in
-          Map.add_multi funcs name def))
+          Map.add_multi funcs ~key:name ~data:def))
       ~init:empty_names
 
   let add_places prog =
@@ -1484,14 +1484,14 @@ module Typing = struct
         let name = KB.Name.read ~package (Def.name place) in
         let var = Var.reify@@Def.Place.location place in
         match Var.typ var with
-        | Type.Imm n -> Map.set vars name n
+        | Type.Imm n -> Map.set vars ~key:name ~data:n
         | _ -> vars)
       ~init:(Map.empty (module KB.Name))
 
   let make_externals =
     List.fold ~f:(fun exts (n,s) ->
         let n = KB.Name.create ~package:"external" n in
-        Map.set exts n s)
+        Map.set exts ~key:n ~data:s)
       ~init:(Map.empty (module KB.Name))
 
   let infer externals (p : program) :  Gamma.t =

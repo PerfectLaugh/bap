@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 open Bap_primus.Std
@@ -463,7 +463,7 @@ end = struct
     | Some x ->
       Machine.Local.put executor {
         s with
-        values = Map.add_exn s.values (id r) (f x)
+        values = Map.add_exn s.values ~key:(id r) ~data:(f x)
       }
 
   let lift2 x y r f =
@@ -475,7 +475,7 @@ end = struct
       and y = to_formula y fy in
       Machine.Local.put executor {
         s with
-        values = Map.add_exn s.values (id r) (f x y)
+        values = Map.add_exn s.values ~key:(id r) ~data:(f x y)
       }
 
   let lift3 x y z r f =
@@ -488,7 +488,7 @@ end = struct
       and z = to_formula z fz in
       Machine.Local.put executor {
         s with
-        values = Map.add_exn s.values (id r) (f x y z)
+        values = Map.add_exn s.values ~key:(id r) ~data:(f x y z)
       }
 
   let on_binop ((op,x,y),z) = lift2 x y z @@ SMT.binop op
@@ -504,7 +504,7 @@ end = struct
     let x = SMT.var (Input.to_symbol origin) size in
     Machine.Local.update executor ~f:(fun s -> {
           inputs = Set.add s.inputs origin;
-          values = Map.set s.values id x;
+          values = Map.set s.values ~key:id ~data:x;
         })
 
   let on_memory_input (p,x) =
@@ -669,8 +669,8 @@ let forker ctxt : Primus.component =
       is_visited visited dst
 
     let append xs x = match Map.max_elt xs with
-      | None -> Map.add_exn xs 0 x
-      | Some (k,_) -> Map.add_exn xs (k+1) x
+      | None -> Map.add_exn xs ~key:0 ~data:x
+      | Some (k,_) -> Map.add_exn xs ~key:(k+1) ~data:x
 
     let push_task task s = {
       s with tasks = append s.tasks task;

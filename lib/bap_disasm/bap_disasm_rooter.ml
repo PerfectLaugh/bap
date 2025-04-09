@@ -1,6 +1,6 @@
 open Bap_core_theory
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_types.Std
 open Bap_image_std
 
@@ -49,7 +49,7 @@ let of_image img = {
 let of_blocks blocks =
   let roots = String.Table.create () in
   Seq.iter blocks ~f:(fun (name,sa,_) ->
-      Hashtbl.change roots name (function
+      Hashtbl.change roots name ~f:(function
           | Some a when Addr.(a < sa) -> Some a
           | _ -> Some sa));
   create (Hashtbl.data roots |> Seq.of_list)

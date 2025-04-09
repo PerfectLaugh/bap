@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Regular.Std
 open Bap_common_types
@@ -115,11 +115,12 @@ module T = struct
       let of_sexpable = Repr.to_var
     end)
 
-  include Binable.Of_binable(Repr)(struct
+  include Binable.Of_binable_with_uuid(Repr)(struct
       type t = var
       let to_binable = Repr.of_var
       let of_binable = Repr.to_var
-    end) [@@warning "-D"]
+      let caller_identity = Bin_shape.Uuid.of_string "f5bbbd23-6f83-4ba6-9090-26e38c169526"
+    end)
 
   let compare x y =
     Theory.Var.Ident.compare (ident x) (ident y)

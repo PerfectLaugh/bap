@@ -6,7 +6,7 @@
    bap-primus
    bitvec
    bitvec-order
-   core_kernel
+   core
    monads
    regular
    zarith))

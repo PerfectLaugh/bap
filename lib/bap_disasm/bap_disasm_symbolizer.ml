@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap_types.Std
 open Bap_image_std
@@ -72,7 +72,7 @@ let of_image img =
       then Bap_relation.add rels addr name
       else rels) |> fun rels ->
   Bap_relation.matching rels ()
-    ~saturated:(fun addr name () -> Hashtbl.add_exn names addr name)
+    ~saturated:(fun addr name () -> Hashtbl.add_exn names ~key:addr ~data:name)
     ~unmatched:(fun reason () -> report_broken reason);
   {find = Hashtbl.find names; path=Image.filename img; biased=true}
 
@@ -80,14 +80,14 @@ let of_blocks seq =
   let names =
     let empty_rel = Bap_relation.empty Addr.compare String.compare in
     Seq.fold seq ~init:String.Map.empty ~f:(fun addrs (name,addr,_) ->
-        Map.update addrs name (function
+        Map.update addrs name ~f:(function
             | Some addr' -> Addr.min addr addr'
             | None -> addr)) |>
     Map.to_sequence |>
     Seq.fold ~init:empty_rel ~f:(fun rels (name,entry) ->
         Bap_relation.add rels entry name) |> fun rels ->
     Bap_relation.matching rels Addr.Map.empty
-      ~saturated:(fun addr name names -> Map.add_exn names addr name)
+      ~saturated:(fun addr name names -> Map.add_exn names ~key:addr ~data:name)
       ~unmatched:(fun reason names -> report_broken reason; names) in
   create @@ Map.find names
 

@@ -11,7 +11,7 @@
    bap-knowledge
    bap-main
    bap-riscv
-   core_kernel
+   core
    monads
    ogre))
 

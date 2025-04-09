@@ -1,7 +1,7 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
-module Sys = Caml.Sys
+module Sys = Stdlib.Sys
 
 module Config = Bap_main.Extension.Configuration
 
@@ -107,7 +107,7 @@ let update_or_fail ?compiler target data payload path =
         not (matching_entry ?compiler target data entry)) in
   with_output path @@ fun zip ->
   let path = make_entry ?compiler target data in
-  let data = Bytes.unsafe_to_string (data.save payload) in
+  let data = Bytes.unsafe_to_string ~no_mutation_while_string_reachable:(data.save payload) in
   Zip.add_entry data zip path;
   List.iter entries ~f:(fun ({Zip.filename; comment; mtime; _},data) ->
       Zip.add_entry data zip filename ~comment ~mtime)
@@ -122,7 +122,7 @@ let copy input output =
   loop ()
 
 let temporary_copy file =
-  let tmp,output = Caml.Filename.open_temp_file "byteweight" "copy" in
+  let tmp,output = Stdlib.Filename.open_temp_file "byteweight" "copy" in
   In_channel.with_file file ~f:(fun input -> copy input output);
   Out_channel.close output;
   tmp
@@ -169,8 +169,8 @@ let load_exn ?comp ?path ~mode arch =
   let entry_path = entry ?comp ~mode arch in
   let r = try
       let entry = Zip.find_entry zip entry_path in
-      Ok (Zip.read_entry zip entry |> Caml.Bytes.unsafe_of_string)
-    with Caml.Not_found -> fail (`No_entry entry_path)
+      Ok (Zip.read_entry zip entry |> Stdlib.Bytes.unsafe_of_string)
+    with Stdlib.Not_found -> fail (`No_entry entry_path)
        | Zip.Error (_,ent,err) -> zip_error ent err in
   Zip.close_in zip;
   r

@@ -10,7 +10,7 @@
      bitvec
      bitvec-order
      bitvec-sexp
-     core_kernel
+     core
      graphlib
      monads
      ogre

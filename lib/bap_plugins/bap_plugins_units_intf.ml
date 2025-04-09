@@ -1,6 +1,6 @@
 (** Internal module.  *)
 
-open Core_kernel[@@warning "-D"]
+open Core
 
 type reason = [
   | `In_core

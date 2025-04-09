@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Graphlib_intf
 open Graphlib_regular_intf
@@ -57,7 +57,7 @@ module Make(Node : Opaque.S)(Label : T) = struct
 
     let inputs  n = edges inc (fun dst src -> src,dst) n
     let outputs n = edges out (fun src dst -> src,dst) n
-    let insert n g = Map.change g n (function
+    let insert n g = Map.change g n ~f:(function
         | None -> Some empty_node
         | other -> other)
 
@@ -131,7 +131,7 @@ module Make(Node : Opaque.S)(Label : T) = struct
       | Some a -> Map.mem a.out e.dst
 
     let upsert_arrow src dst field e g =
-      Map.change g (src e) (function
+      Map.change g (src e) ~f:(function
           | None ->
             Some (Field.fset field empty_node
                     (Node.Map.singleton (dst e) e.data))
@@ -140,7 +140,7 @@ module Make(Node : Opaque.S)(Label : T) = struct
             Some (Field.fset field ns
                     (Map.set map ~key:(dst e) ~data:e.data)))
 
-    let remove_arrow field arr src g = Map.change g src (function
+    let remove_arrow field arr src g = Map.change g src ~f:(function
         | None -> None
         | Some ns ->
           let set = Field.get field ns in

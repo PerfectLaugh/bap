@@ -5,7 +5,7 @@ Flag ghidra
 Library bap_ghidra
   Path:          lib/bap_ghidra
   Build$:        flag(everything) || flag(ghidra)
-  BuildDepends:  bap, core_kernel, ppx_bap, mmap
+  BuildDepends:  bap, core, ppx_bap, mmap
   FindlibName:   bap-ghidra
   Modules:       Bap_ghidra
   CCOpt:         -fPIC
@@ -20,6 +20,6 @@ Library ghidra_plugin
   Build$:          flag(everything) || flag(ghidra)
   FindlibName:     bap-plugin-ghidra
   InternalModules: Ghidra_main
-  BuildDepends:    bap, bap-ghidra, bap-main, core_kernel
+  BuildDepends:    bap, bap-ghidra, bap-main, core
   DataFiles:        semantics/*.lisp ($datadir/bap/primus/semantics)
   XMETAExtraLines: tags="disassembler, ghidra, p-code, lifter, semantics"

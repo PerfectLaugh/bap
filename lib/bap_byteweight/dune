@@ -4,4 +4,4 @@
  (preprocess (pps ppx_bap))
  (wrapped false)
  (libraries bap bap-main bap-core-theory bap-knowledge
-            core_kernel uri camlzip))
+            core uri camlzip))

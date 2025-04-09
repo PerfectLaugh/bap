@@ -11,7 +11,7 @@
    bap-knowledge
    bap-main
    bap-mips
-   core_kernel
+   core
    regular
    zarith))
 

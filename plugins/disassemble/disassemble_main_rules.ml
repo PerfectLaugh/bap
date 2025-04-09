@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 open Bap_main
@@ -168,7 +168,7 @@ module Symbols = struct
         else add_alias tab addr name, rel) |> fun (table,rel) ->
     Bap_relation.matching rel table
       ~saturated:(fun k v t -> {
-            t with names = Map.add_exn t.names k v
+            t with names = Map.add_exn t.names ~key:k ~data:v
           })
       ~unmatched:(fun reason t -> match reason with
           | Non_injective_fwd (addrs,name) ->

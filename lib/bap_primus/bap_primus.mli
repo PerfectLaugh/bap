@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_knowledge
 open Regular.Std
 open Bap.Std
@@ -189,7 +189,7 @@ module Std : sig
         Machine run. That type is left abstract, and has no
         operations, as its purpose is to disallow running machine
         directly with a properly initialized system. *)
-    type 'a effect
+    type 'a effect_
 
     (** value generator  *)
     type generator
@@ -575,7 +575,7 @@ module Std : sig
                                            ?boot:unit t ->
                                            ?init:unit t ->
                                            ?fini:unit t ->
-                                           (exit_status * project) m effect
+                                           (exit_status * project) m effect_
 
         (** Local state of the machine.  *)
         module Local  : State with type 'a m := 'a t
@@ -4398,7 +4398,7 @@ text ::= ?any atom that is not recognized as a <word>?
 
       (* undocumented since it is deprecated *)
       module type Primitives = functor (Machine : Machine.S) ->  sig
-        val defs : unit -> value Machine.t Primitive.t list [@@warning "-D"]
+        val defs : unit -> value Machine.t Primitive.t list
       end [@@deprecated "[since 2018-03] use [Closure]"]
 
       (** a list of primitives.  *)

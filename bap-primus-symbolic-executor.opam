@@ -15,12 +15,12 @@ depends: [
   "bap-primus-track-visited" {= version}
   "bap-main" {= version}
   "bap-std" {= version}
-  "core_kernel" {>= "v0.14" & < "v0.16"}
+  "core"
   "monads" {= version}
   "regular" {= version}
   "bitvec" {= version}
   "zarith"
-  "z3" {>= "4.8.8-1"}
+  "z3"
   "odoc" {with-doc}
 ]
 build: [

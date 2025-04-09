@@ -7,9 +7,9 @@
     bap-core-theory
     bap-knowledge
     bap_types
-    core_kernel
-    core_kernel.caml_unix
+    core
     mmap
     monads
     ogre
     regular))
+

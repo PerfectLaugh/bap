@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 include Self()
 open Format
@@ -75,7 +75,7 @@ let mark unchecked proj =
   Project.map_program proj ~f:(marker unchecked)#run
 
 let taint proj =
-  Project.map_program proj taint
+  Project.map_program proj ~f:taint
 
 let run pass proj =
   let prog = Project.program proj in

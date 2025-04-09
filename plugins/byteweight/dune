@@ -10,7 +10,7 @@
    bap-main
    bitvec
    bitvec-order
-   core_kernel))
+   core))
 
 (plugin
  (name byteweight)

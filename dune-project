@@ -136,12 +136,12 @@
   (share signatures)
   (share site_lisp))
  (depends
-  (base (and (>= v0.14) (< v0.16)))
-   dune
-   dune-configurator
-   dune-site
-  (ocaml (> 4.08.0))
-  (stdio (and (>= v0.14) (< v0.16)))))
+  base
+  dune
+  dune-configurator
+  dune-site
+  ocaml
+  stdio))
 
 (package
  (name bap-primus-support)
@@ -176,7 +176,7 @@
  (depends
   (bap-main (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ppx_bap (= :version))
   (regular (= :version))))
@@ -191,7 +191,7 @@
   (bap-main (= :version))
   (bap-std (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (linenoise (and (>= 1.1.0) (< 2.0.0)))
   (monads (= :version))
   (bap-common (= :version))
@@ -204,7 +204,7 @@
  (depends (bap-common (= :version))
   (bap-main (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
    fileutils
   (ppx_bap (= :version))
   (regular (= :version))))
@@ -225,7 +225,7 @@
   (bap-traces (= :version))
   (bitvec-order (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))
   (bap-common (= :version))
   (ogre (= :version))
@@ -243,7 +243,7 @@
   (bap-primus (= :version))
   (bap-std (= :version))
   (bap-strings (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))
   (bap-common (= :version))
   (ppx_bap (= :version))
@@ -261,7 +261,7 @@
   (bap-std (= :version))
   (bitvec-order (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))
   (bap-common (= :version))
   (ogre (= :version))
@@ -273,7 +273,7 @@
  (tags (bap bap-library))
  (depends
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ppx_bap (= :version))))
 
@@ -285,7 +285,7 @@
   (bap-signatures (= :version))
   (bap-std (= :version))
   (camlzip (and (>= 1.0) (< 2.0)))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ppx_bap (= :version))
   (regular (= :version))
@@ -299,7 +299,7 @@
   (bap-byteweight (= :version))
   (bap-std (= :version))
   (cmdliner (and (>= 1.0) (< 2.0)))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
    fileutils
   (bap-common (= :version))
   (ocurl (>= 0.9.0))
@@ -311,7 +311,7 @@
  (synopsis "BAP Build Tool (ocamlbuild+bap)")
  (tags (bap bap-tool ocamlbuild))
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
    ocamlbuild
    ocamlfind
@@ -323,7 +323,8 @@
  (tags (bap bap-tool))
  (depends
   (camlzip (and (>= 1.0) (< 2.0)))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
+  core_kernel
    fileutils
   (bap-common (= :version))
   (ppx_bap (= :version))
@@ -339,7 +340,7 @@
   (bap-core-theory (= :version))
   (bap-knowledge (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ppx_bap (= :version))))
 
@@ -350,7 +351,7 @@
  (depends
   (bap-main (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
    fileutils
    mmap
   (bap-common (= :version))
@@ -365,7 +366,7 @@
  (depends
   (bap-main (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (graphlib (= :version))
   (bap-common (= :version))
   (ppx_bap (= :version))
@@ -378,7 +379,7 @@
  (tags (bap bap-plugin bap-pass))
  (depends
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))))
 
 (package
@@ -398,7 +399,7 @@ details of the program behavior.")
   (bitvec-binprot (= :version))
   (bitvec-order (= :version))
   (bitvec-sexp (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ppx_bap (= :version))))
 
@@ -409,7 +410,7 @@ details of the program behavior.")
  (depends
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))))
 
 (package
@@ -420,7 +421,7 @@ details of the program behavior.")
   (bap-demangle (= :version))
   (bap-std (= :version))
   (conf-binutils (>= 0.3))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))))
 
 (package
@@ -431,7 +432,7 @@ details of the program behavior.")
   (bap-core-theory (= :version))
   (bap-knowledge (= :version))
   (bap-main (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))))
 
 (package
@@ -441,7 +442,7 @@ details of the program behavior.")
  (depends
   (bap-main (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ogre (= :version))
   (ppx_bap (= :version))
@@ -461,7 +462,7 @@ details of the program behavior.")
   (bitvec-order (= :version))
   (bitvec-sexp (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))
   (bap-common (= :version))
   (ogre (= :version))
@@ -474,7 +475,7 @@ details of the program behavior.")
  (tags (bap bap-plugin))
  (depends
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (graphlib (= :version))
   (bap-common (= :version))
   (ppx_bap (= :version))
@@ -486,7 +487,7 @@ details of the program behavior.")
  (tags (bap bap-library dwarf))
  (depends
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ppx_bap (= :version))
   (regular (= :version))))
@@ -501,7 +502,7 @@ details of the program behavior.")
   (bap-knowledge (= :version))
   (bap-std (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))))
+  core))
 
 (package
  (name bap-elf)
@@ -510,7 +511,7 @@ details of the program behavior.")
  (depends
   (bap-dwarf (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ppx_bap (= :version))
   (ppx_bitstring (and (>= 4.0.0) (< 5.0.0)))
@@ -522,7 +523,7 @@ details of the program behavior.")
  (tags (bap bap-plugin))
  (depends
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))))
 
 (package
@@ -534,7 +535,7 @@ details of the program behavior.")
   (bap-knowledge (= :version))
   (bap-main (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
    ocamlfind
   (regular (= :version))))
@@ -546,7 +547,7 @@ details of the program behavior.")
  (depends
   (bap-c (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (FrontC (>= 4.1.0))
   (bap-common (= :version))))
 
@@ -558,7 +559,7 @@ A library for reasoning about state based dynamic systems. This can \
 be seen as a common denominator between Lwt and Async libraries.")
  (tags (bap future))
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))
   (bap-common (= :version))))
 
@@ -568,7 +569,7 @@ be seen as a common denominator between Lwt and Async libraries.")
  (tags (bap ghidra disassembler))
  (allow_empty)
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (ppx_bap (= :version))
   (bap-common (= :version))
   (bap-std (= :version))
@@ -583,7 +584,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-c (= :version))
   (bap-main (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ogre (= :version))))
 
@@ -591,7 +592,7 @@ be seen as a common denominator between Lwt and Async libraries.")
  (synopsis "BAP IDA Pro integration")
  (tags (bap bap-library ida-pro))
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (regular (= :version))
    fileutils
   (bap-common (= :version))
@@ -604,7 +605,7 @@ be seen as a common denominator between Lwt and Async libraries.")
  (tags (bap bap-plugin bap-ida ida-pro))
  (depends
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ppx_bap (= :version))
   (regular (= :version))))
@@ -614,7 +615,8 @@ be seen as a common denominator between Lwt and Async libraries.")
  (synopsis "Knowledge Reasoning and Representation Framework")
  (tags (bap bap-library knowledge))
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
+  core_unix
   (ppx_bap (= :version))
   (bap-common (= :version))
   (monads (= :version))))
@@ -625,9 +627,8 @@ be seen as a common denominator between Lwt and Async libraries.")
  (tags (bap bap-plugin llvm))
  (depends
   (bap-std (= :version))
-  (conf-bap-llvm (>= 1.8))
-  (core_kernel (and (>= v0.14) (< v0.16)))
-   mmap
+  core
+  mmap
   (monads (= :version))
   (bap-common (= :version))
   (ogre (= :version))
@@ -642,10 +643,11 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-future (= :version))
   (bap-plugins (= :version))
   (bap-recipe (= :version))
-  (base (and (>= v0.14) (< v0.16)))
+  base
+  core_kernel
   (cmdliner (and (>= 1.0) (< 2.0)))
   (bap-common (= :version))
-  (stdio (and (>= v0.14) (< v0.16)))))
+  stdio))
 
 (package
  (name bap-mc)
@@ -657,7 +659,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-main (= :version))
   (bap-std (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ogre (= :version))
   (ppx_bap (= :version))
@@ -669,7 +671,7 @@ be seen as a common denominator between Lwt and Async libraries.")
  (tags (bap bap-plugin))
  (depends
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))
   (bap-common (= :version))
   (ppx_bap (= :version))))
@@ -686,7 +688,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-knowledge (= :version))
   (bap-main (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ogre (= :version))
   (ppx_bap (= :version))
@@ -707,7 +709,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bitvec-sexp (= :version))
   (bitvec (= :version))
   (conf-binutils (>= 0.3))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ppx_bap (= :version))
   (re (and (>= 1.0) (< 2.0)))))
@@ -717,7 +719,7 @@ be seen as a common denominator between Lwt and Async libraries.")
  (synopsis "A BAP IR optimization pass")
  (tags (bap bap-plugin bap-pass))
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ppx_bap (= :version))
   (bap-std (= :version))
@@ -739,7 +741,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bitvec-order (= :version))
   (bitvec-sexp (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
    fileutils
   (bap-common (= :version))
   (ppx_bap (= :version))
@@ -755,22 +757,22 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-std (= :version))
    cmdliner
   (cmdliner (and (>= 1.0) (< 2.0)))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
    ezjsonm
   (graphlib (= :version))
   (ppx_bap (= :version))
   (regular (= :version))
   (text-tags (= :version))))
 
-(package
- (name bap-piqi)
- (synopsis "Serializes BAP Project in various formats using piqi")
- (tags (bap bap-plugin))
- (depends
-  (bap-common (= :version))
-  (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
-  (piqi (>= 0.7.8))))
+; (package
+;  (name bap-piqi)
+;  (synopsis "Serializes BAP Project in various formats using piqi")
+;  (tags (bap bap-plugin))
+;  (depends
+;   (bap-common (= :version))
+;   (bap-std (= :version))
+;   core
+;   (piqi (>= 0.7.8))))
 
 (package
  (name bap-plugins)
@@ -780,7 +782,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-bundle (= :version))
   (bap-future (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
    fileutils
    ocamlfind
   (ppx_bap (= :version))
@@ -799,7 +801,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-knowledge (= :version))
   (bap-main (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))
   (ogre (= :version))
   (ppx_bap (= :version))
@@ -821,10 +823,10 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-strings (= :version))
   (bitvec-binprot (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (graphlib (= :version))
   (monads (= :version))
-  (parsexp (and (>= v0.14) (< v0.16)))
+  parsexp
   (ppx_bap (= :version))
   (regular (= :version))
   (uuidm (>= 0.9.7))))
@@ -838,7 +840,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-core-theory (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))))
+  core))
 
 (package
  (name bap-primus-exploring-scheduler)
@@ -848,7 +850,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))))
 
 (package
@@ -859,7 +861,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))))
 
 (package
@@ -870,7 +872,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))))
+  core))
 
 (package
  (name bap-primus-lisp)
@@ -884,7 +886,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-primus (= :version))
   (bap-std (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))
   (regular (= :version))))
 
@@ -896,7 +898,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (ogre (= :version))))
 
 (package
@@ -908,7 +910,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-primus-track-visited (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))))
+  core))
 
 (package
  (name bap-primus-powerpc)
@@ -918,7 +920,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))))
+  core))
 
 (package
  (name bap-primus-print)
@@ -931,7 +933,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-primus (= :version))
   (bap-std (= :version))
   (bare (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))))
 
 (package
@@ -942,7 +944,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))))
 
 (package
@@ -954,7 +956,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-primus (= :version))
   (bap-std (= :version))
   (bap-taint (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))))
 
 (package
@@ -968,7 +970,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-std (= :version))
   (bitvec-sexp (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))
    zarith))
 
@@ -980,7 +982,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))))
 
 (package
@@ -991,7 +993,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))))
 
 (package
@@ -1005,12 +1007,12 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-primus-track-visited (= :version))
   (bap-main (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))
   (regular (= :version))
   (bitvec (= :version))
-   zarith
-  (z3 (>= 4.8.8-1))))
+  zarith
+  z3))
 
 (package
  (name bap-primus-systems)
@@ -1022,7 +1024,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-main (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))))
 
 (package
@@ -1033,7 +1035,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-taint (= :version))))
 
 (package
@@ -1044,7 +1046,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))))
+  core))
 
 (package
  (name bap-primus-track-visited)
@@ -1054,7 +1056,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))))
+  core))
 
 (package
  (name bap-primus-wandering-scheduler)
@@ -1064,7 +1066,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))))
 
 (package
@@ -1075,7 +1077,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-x86 (= :version))))
 
 (package
@@ -1087,7 +1089,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-demangle (= :version))
   (bap-knowledge (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (graphlib (= :version))
   (ogre (= :version))
   (ppx_bap (= :version))
@@ -1112,7 +1114,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-std (= :version))
   (bitvec (= :version))
    conf-radare2
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (ogre (= :version))
   (ppx_bap (= :version))
   (re (and (>= 1.0) (< 2.0)))
@@ -1124,7 +1126,7 @@ be seen as a common denominator between Lwt and Async libraries.")
  (synopsis "BAP raw files loader")
  (tags (bap bap-plugin))
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ppx_bap (= :version))
   (bap-std (= :version))
@@ -1140,9 +1142,9 @@ and support files if necessary.")
  (tags (bap bap-tool command-line))
  (depends
   (bap-common (= :version))
-  (parsexp (and (>= v0.14) (< v0.16)))
-  (stdio (and (>= v0.14) (< v0.16)))
-   stdlib-shims
+  parsexp
+  stdio
+  stdlib-shims
   (uuidm (>= 0.9.7))))
 
 (package
@@ -1153,7 +1155,7 @@ and support files if necessary.")
   (bap-common (= :version))
   (bap-main (= :version))
   (bap-recipe (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))))
+  core))
 
 (package
  (name bap-relation)
@@ -1184,7 +1186,7 @@ between the sets.")
   (bitvec-order (= :version))
   (bitvec-sexp (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))
   (ogre (= :version))
   (ppx_bap (= :version))))
@@ -1194,7 +1196,7 @@ between the sets.")
  (synopsis "BAP plugin for reporting progress bars and statuses")
  (tags (bap bap-plugin))
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (bap-std (= :version))))
 
@@ -1210,7 +1212,7 @@ between the sets.")
   (bap-c (= :version))
   (bap-knowledge (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))
   (ogre (= :version))
   (ppx_bap (= :version))))
@@ -1225,7 +1227,7 @@ between the sets.")
   (bap-knowledge (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (graphlib (= :version))
   (monads (= :version))
   (regular (= :version))))
@@ -1238,7 +1240,7 @@ between the sets.")
   (bap-common (= :version))
   (bap-main (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (ogre (= :version))))
 
 (package
@@ -1248,7 +1250,7 @@ between the sets.")
  (depends
   (bap-common (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))))
+  core))
 
 (package
  (name bap-std)
@@ -1268,7 +1270,7 @@ between the sets.")
   (bitvec (= :version))
   (camlzip (and (>= 1.07) (< 2.0)))
    cmdliner
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
    fileutils
   (graphlib (= :version))
    mmap
@@ -1301,7 +1303,7 @@ The library provides several algorithms:
 - Scanner - a generic algorithm for finding strings of characters (a
   library variant of strings tool)")
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ppx_bap (= :version))))
 
@@ -1310,7 +1312,7 @@ The library provides several algorithms:
  (synopsis "Finds strings in binaries using microexecution")
  (tags (bap bap-plugin))
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (bap-beagle (= :version))
   (ppx_bap (= :version))
@@ -1332,7 +1334,7 @@ The library provides several algorithms:
   (bitvec-order (= :version))
   (bitvec-sexp (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (ogre (= :version))
   (ppx_bap (= :version))))
 
@@ -1347,7 +1349,7 @@ The library provides several algorithms:
   (bap-main (= :version))
   (bap-relation (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))))
+  core))
 
 (package
  (name bap-systemz)
@@ -1360,7 +1362,7 @@ The library provides several algorithms:
   (bap-main (= :version))
   (bap-std (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (ogre (= :version))
   (ppx_bap (= :version))))
 
@@ -1373,7 +1375,7 @@ The library provides several algorithms:
   (bap-primus (= :version))
   (bap-std (= :version))
   (bap-strings (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (monads (= :version))
   (ppx_bap (= :version))
   (regular (= :version))))
@@ -1386,7 +1388,7 @@ The library provides several algorithms:
   (bap-common (= :version))
   (bap-core-theory (= :version))
   (bap-microx (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (graphlib (= :version))
   (monads (= :version))
   (regular (= :version))))
@@ -1400,7 +1402,7 @@ The library provides several algorithms:
   (bap-common (= :version))
   (bap-main (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (ppx_bap (= :version))
   (regular (= :version))))
 
@@ -1416,7 +1418,7 @@ The library provides several algorithms:
   (bap-main (= :version))
   (bap-std (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (ogre (= :version))
   (ppx_bap (= :version))))
 
@@ -1432,7 +1434,7 @@ as the interpreter for your BAP scripts, e.g., `baptop myprog.ml`")
  (depends
   (bap-common (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   ocamlfind))
 
 (package
@@ -1445,7 +1447,7 @@ as the interpreter for your BAP scripts, e.g., `baptop myprog.ml`")
   (bap-plugins (= :version))
   (bap-std (= :version))
   (bap-traces (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (ppx_bap (= :version))
   (regular (= :version))
    uri))
@@ -1457,7 +1459,7 @@ as the interpreter for your BAP scripts, e.g., `baptop myprog.ml`")
  (depends
   (bap-common (= :version))
   (bap-std (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (ppx_bap (= :version))
   (regular (= :version))
   (uri (>= 1.9.0))
@@ -1468,7 +1470,7 @@ as the interpreter for your BAP scripts, e.g., `baptop myprog.ml`")
  (synopsis "Eliminates complex branch conditions")
  (tags (bap bap-plugin))
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (bap-std (= :version))))
 
@@ -1477,7 +1479,7 @@ as the interpreter for your BAP scripts, e.g., `baptop myprog.ml`")
  (synopsis "Warns if an unused argument may cause an issue")
  (tags (bap bap-plugin))
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (bap-std (= :version))))
 
@@ -1500,7 +1502,7 @@ as the interpreter for your BAP scripts, e.g., `baptop myprog.ml`")
   (bap-primus (= :version))
   (bap-std (= :version))
   (bitvec (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (ogre (= :version))
   (ppx_bap (= :version))
   (regular (= :version))
@@ -1515,8 +1517,8 @@ of facts that are represented as s-expressions.")
  (tags (bap bap-library))
  (depends
   (bap-common (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
-  (parsexp (and (>= v0.14) (< v0.16)))))
+  core
+  parsexp))
 
 (package
  (name bitvec)
@@ -1529,7 +1531,7 @@ of facts that are represented as s-expressions.")
  (synopsis "Janestreet's Binprot serialization for Bitvec")
  (tags (bap))
  (depends
-  (bin_prot (and (>= v0.14) (< v0.16)))
+  bin_prot
   (bitvec (= :version))
   (ppx_bap (= :version))))
 
@@ -1564,7 +1566,7 @@ these functors, any algorithm written for OCamlGraph can be used on \
  (tags (bap graph))
  (depends
   (bap-common (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
    ocamlgraph
   (ppx_bap (= :version))
   (regular (= :version))))
@@ -1576,7 +1578,8 @@ these functors, any algorithm written for OCamlGraph can be used on \
  (tags (bap monad))
  (depends
   (bap-common (= :version))
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
+  jane_rope
   (ppx_bap (= :version))))
 
 (package
@@ -1588,7 +1591,7 @@ representation and provides a type safe monadic interface for quering \
 and updating documents")
  (tags (bap sexp))
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (monads (= :version))))
 
@@ -1597,22 +1600,22 @@ and updating documents")
  (synopsis "BAP-blessed ppx rewriters")
  (tags (bap ppx))
  (depends
-  (ppx_assert (and (>= v0.14) (< v0.16)))
-  (ppx_bench (and (>= v0.14) (< v0.16)))
-  (ppx_bin_prot (and (>= v0.14) (< v0.16)))
-  (ppx_cold (and (>= v0.14) (< v0.16)))
-  (ppx_compare (and (>= v0.14) (< v0.16)))
-  (ppx_enumerate (and (>= v0.14) (< v0.16)))
-  (ppx_fields_conv (and (>= v0.14) (< v0.16)))
-  (ppx_hash (and (>= v0.14) (< v0.16)))
-  (ppx_here (and (>= v0.14) (< v0.16)))
+  ppx_assert
+  ppx_bench
+  ppx_bin_prot
+  ppx_cold
+  ppx_compare
+  ppx_enumerate
+  ppx_fields_conv
+  ppx_hash
+  ppx_here
   (ppxlib (>= 0.15.0))
-  (ppx_optcomp (and (>= v0.14) (< v0.16)))
-  (ppx_expect (and (>= v0.14) (< v0.16)))
-  (ppx_inline_test (and (>= v0.14) (< v0.16)))
-  (ppx_sexp_conv (and (>= v0.14) (< v0.16)))
-  (ppx_sexp_value (and (>= v0.14) (< v0.16)))
-  (ppx_variants_conv (and (>= v0.14) (< v0.16)))))
+  ppx_optcomp
+  ppx_expect
+  ppx_inline_test
+  ppx_sexp_conv
+  ppx_sexp_value
+  ppx_variants_conv))
 
 (package
  (name regular)
@@ -1628,10 +1631,10 @@ In particular, the library includes: \
 - module Cache that adds caching service for data types \
 - module Regular that glues everything together \
 - module Opaque for regular but opaque data types \
-- module Seq that extends Core_kernel's sequence module \
+- module Seq that extends Core's sequence module \
 - module Bytes that provides a rich core-like interface for Bytes data type.")
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
   (bap-common (= :version))
   (ppx_bap (= :version))))
 
@@ -1640,7 +1643,8 @@ In particular, the library includes: \
  (synopsis "A library for rich formatting using semantic tags")
  (tags (bap))
  (depends
-  (core_kernel (and (>= v0.14) (< v0.16)))
+  core
+  core_kernel
   (bap-common (= :version))))
 
 (generate_opam_files true)

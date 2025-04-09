@@ -1,7 +1,7 @@
 (library
  (name bap_primus_greedy_plugin)
  (public_name bap-primus-greedy-scheduler.plugin)
- (libraries bap bap-primus monads core_kernel))
+ (libraries bap bap-primus monads core))
 
 (plugin
  (name primus-greedy)

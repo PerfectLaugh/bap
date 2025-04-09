@@ -1,7 +1,7 @@
 (library
  (name bap_primus_powerpc_plugin)
  (public_name bap-primus-powerpc.plugin)
- (libraries bap bap-primus core_kernel))
+ (libraries bap bap-primus core))
 
 (plugin
  (name primus-powerpc)

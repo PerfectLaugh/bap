@@ -1,6 +1,6 @@
 let package = "bap"
 open Bap_core_theory
-open Core_kernel[@@warning "-D"]
+open Core
 
 type t = Ogre.Doc.t [@@deriving compare]
 
@@ -12,11 +12,12 @@ module Stringable = struct
     | Error err ->
       failwithf "can't deserialize Ogre doc - %s"
         (Error.to_string_hum err) ()
+  let caller_identity = Bin_shape.Uuid.of_string "899cb8f5-8201-4e72-9e80-b13cf152ea6a"
 end
 
 let pp = Ogre.Doc.pp
 include Sexpable.Of_stringable(Stringable)
-include Binable.Of_stringable(Stringable) [@@warning "-D"]
+include Binable.Of_stringable_with_uuid(Stringable)
 
 type KB.Conflict.t += Spec_inconsistency of Error.t
 

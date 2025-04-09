@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Bap.Std
 
@@ -25,8 +25,8 @@ let lift_mull ~lodest ~hidest ~src1 ~src2 sign ?addend ~wflag cond =
     | None   -> Bil.(s1_64 * s2_64) in
   let insns = [
     Bil.move result opn;
-    Bil.move (Env.of_reg lodest) Bil.(extract 31 0 eres);
-    Bil.move (Env.of_reg hidest) Bil.(extract 63 32 eres);
+    Bil.move (Env.of_reg lodest) Bil.(extract ~hi:31 ~lo:0 eres);
+    Bil.move (Env.of_reg hidest) Bil.(extract ~hi:63 ~lo:32 eres);
   ] in
   exec insns ~flags ~wflag cond
 
@@ -34,7 +34,7 @@ let lift_smul ~dest ?hidest ~src1 ~src2 ?accum ?hiaccum ?q size cond =
   let dest = assert_reg [%here] dest in
   let src1 = exp_of_op src1 in
   let src2 = exp_of_op src2 in
-  let excast hi lo s = Bil.(cast signed 64 (extract hi lo s)) in
+  let excast hi lo s = Bil.(cast signed 64 (extract ~hi ~lo s)) in
   let top  = excast 31 16 in
   let bot  = excast 15 0 in
   let top32 = excast 47 16 in
@@ -66,12 +66,12 @@ let lift_smul ~dest ?hidest ~src1 ~src2 ?accum ?hiaccum ?q size cond =
     match hidest with
     | Some (`Reg hid) -> [
         Bil.move res result;
-        Bil.move (Env.of_reg hid)  Bil.(extract 63 32 (var res));
-        Bil.move (Env.of_reg dest) Bil.(extract 31 0  (var res));
+        Bil.move (Env.of_reg hid)  Bil.(extract ~hi:63 ~lo:32 (var res));
+        Bil.move (Env.of_reg dest) Bil.(extract ~hi:31 ~lo:0  (var res));
       ]
     | None -> [
         Bil.move res result;
-        Bil.move (Env.of_reg dest) Bil.(extract 31 0 (var res));
+        Bil.move (Env.of_reg dest) Bil.(extract ~hi:31 ~lo:0 (var res));
       ]
     | _ -> fail [%here] "unexpected operand type" in
   exec (instr @ qflag) cond

@@ -3,7 +3,7 @@
   (public_name bap-core-theory.plugin)
   (preprocess (pps ppx_bap))
   (libraries bap-core-theory bap-knowledge bap-main
-             bitvec core_kernel monads))
+             bitvec core monads))
 
 (plugin
   (name core-theory)

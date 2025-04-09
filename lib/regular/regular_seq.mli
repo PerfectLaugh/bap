@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Format
 
 type 'a seq = 'a Sequence.t [@@deriving bin_io, compare, sexp]

@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Bap_core_theory
 open Graphlib.Std
@@ -13,7 +13,7 @@ open Format
 
 module Driver = Bap_disasm_driver
 
-module Buffer = Caml.Buffer
+module Buffer = Stdlib.Buffer
 include Bap_self.Create()
 
 let query doc attr =
@@ -713,7 +713,7 @@ module Pass = struct
   let fail = function
     | Unsat_dep _ as err -> raise (Failed err)
     | Runtime_error (pass,exn) ->
-      let backtrace = Caml.Printexc.get_backtrace () in
+      let backtrace = Stdlib.Printexc.get_backtrace () in
       raise (Failed (Runtime_error (pass, Exn.Reraised (backtrace, exn))))
 
   let is_evaled pass proj =
@@ -768,7 +768,7 @@ module Registry(T : T)(I : T) = struct
       invalid_argf "An element with name %s is already registered \
                     please choose a unique name"
         (Knowledge.Name.show name) ();
-    Hashtbl.add_exn registry name (desc,entity,extra)
+    Hashtbl.add_exn registry ~key:name ~data:(desc,entity,extra)
 
   let find ?package name =
     let name = Knowledge.Name.read ?package name in

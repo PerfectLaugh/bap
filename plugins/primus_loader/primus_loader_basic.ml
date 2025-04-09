@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 open Bap_primus.Std
@@ -69,7 +69,6 @@ module Make(Param : Param)(Machine : Primus.Machine.S)  = struct
   let rec is set = function
     | Backend.Or (p1,p2) -> is set p1 || is set p2
     | bit -> [%compare.equal : Backend.perm] bit set
-  [@@warning "-D"]
 
   let segmentations =
     let open Image.Scheme in

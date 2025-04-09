@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 module Iterator = Bap_primus_iterator
 module type S = Iterator.Infinite.S
 
@@ -68,7 +68,7 @@ module MCG = struct
     let noise = Output.size - generators
 
     let create seed : t =
-      Array.init generators (fun salt ->
+      Array.init generators ~f:(fun salt ->
           Sub.create (seed + salt))
 
     let next = Array.map ~f:Sub.next

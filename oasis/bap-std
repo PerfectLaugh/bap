@@ -20,7 +20,7 @@ Library bap
                    bap-relation,
                    graphlib,
                    regular,
-                   core_kernel,
+                   core,
                    ppx_bap,
                    monads,
                    bitvec,
@@ -28,13 +28,12 @@ Library bap
                    bitvec-order,
                    bitvec-sexp,
                    ogre,
-                   fileutils,
-                   core_kernel.caml_unix
+                   fileutils
   Modules:         Bap
   InternalModules: Bap_project, Bap_self
 
 Library top
-  XMETADescription: Toplevel printers for bap-types and core_kernel
+  XMETADescription: Toplevel printers for bap-types and core
   Build$:          flag(everything) || flag(bap_std)
   Path: lib/bap
   FindLibParent: bap
@@ -64,7 +63,7 @@ Library types
                    bap-knowledge,
                    bap-core-theory,
                    bap-main,
-                   core_kernel,
+                   core,
                    ppx_bap
   InternalModules:
                    Bap_addr,
@@ -119,8 +118,8 @@ Library bap_image
   Build$:        flag(everything) || flag(bap_std)
   FindlibParent: bap
   FindlibName:   image
-  BuildDepends:  bap.types, ogre, mmap, monads, core_kernel, regular, bitvec,
-                 bap-core-theory, bap-knowledge, ppx_bap, core_kernel.caml_unix
+  BuildDepends:  bap.types, ogre, mmap, monads, core, regular, bitvec,
+                 bap-core-theory, bap-knowledge, ppx_bap
 
   InternalModules:
                  Bap_fileutils,
@@ -146,7 +145,7 @@ Library disasm
                  graphlib,
                  monads,
                  ogre,
-                 core_kernel,
+                 core,
                  regular,
                  bap-core-theory,
                  bap-knowledge,
@@ -193,7 +192,7 @@ Library sema
                  bap.types,
                  bap.image,
                  monads,
-                 core_kernel,
+                 core,
                  ppx_bap,
                  graphlib,
                  regular,

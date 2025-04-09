@@ -13,4 +13,4 @@
     regular_data_read
     regular_opaque
     regular_seq)
-  (libraries core_kernel))
+  (libraries core))

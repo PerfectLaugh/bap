@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 
 module type Interval = sig
   type t [@@deriving compare, sexp_of]

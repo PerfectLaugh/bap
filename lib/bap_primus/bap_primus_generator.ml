@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 
 open Bap_primus_types
@@ -147,7 +147,7 @@ module Make(Machine : Machine) = struct
           seed
         } in
       Machine.Local.put iterators {
-        iterators = Map.set iters gen.id next;
+        iterators = Map.set iters ~key:gen.id ~data:next;
         salt;
       } >>| fun () ->
       value
@@ -158,13 +158,13 @@ module Make(Machine : Machine) = struct
       | Const Iter it ->
         let iter = Iter {it with self = it.seed seed} in
         Machine.Local.put iterators {
-          iterators = Map.set iters gen.id iter;
+          iterators = Map.set iters ~key:gen.id ~data:iter;
           salt = salt + 1;
         } >>= fun () ->
         call gen
       | Seeded init ->
         Machine.Local.put iterators {
-          iterators = Map.set iters gen.id (init seed);
+          iterators = Map.set iters ~key:gen.id ~data:(init seed);
           salt;
         } >>= fun () ->
         call gen

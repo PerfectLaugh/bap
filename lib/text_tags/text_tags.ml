@@ -1,10 +1,13 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Format
 
 module Unix = Caml_unix
 
 type mode = string
 exception Unknown_mode of string
+
+let expect_stag () =
+  invalid_arg "Expected String_tag"
 
 let expect_tag () =
   invalid_arg "Expect: tag := (<name> [<arg> <arg>...]) | <name>"
@@ -16,23 +19,27 @@ let is_quoted = String.is_prefix ~prefix:"\""
 
 module Html = struct
   open Sexp
-  let mark_open_tag tag : string =
-    match Sexp.of_string tag with
-    | List (Atom tag :: attrs) ->
-      let attrs = List.map attrs ~f:(function
-          | List [Atom name; Atom value] ->
-            if is_quoted value
-            then sprintf "%s=%s" name value
-            else sprintf "%s=%S" name value
-          | other -> expect_arg ()) |> String.concat ~sep:" " in
-      sprintf "<%s %s>" tag attrs
-    | Atom tag -> sprintf "<%s>" tag
-    | _ -> expect_tag ()
+  let mark_open_stag = function
+    | String_tag tag ->
+      (match Sexp.of_string tag with
+      | List (Atom tag :: attrs) ->
+        let attrs = List.map attrs ~f:(function
+            | List [Atom name; Atom value] ->
+              if is_quoted value
+              then sprintf "%s=%s" name value
+              else sprintf "%s=%S" name value
+            | other -> expect_arg ()) |> String.concat ~sep:" " in
+        sprintf "<%s %s>" tag attrs
+      | Atom tag -> sprintf "<%s>" tag
+      | _ -> expect_tag ())
+    | _ -> expect_stag ()
 
-  let mark_close_tag tag : string =
-    match Sexp.of_string tag with
-    | List (Atom tag :: _) | Atom tag -> sprintf "</%s>" tag
-    | _ -> expect_tag ()
+  let mark_close_stag = function
+    | String_tag tag ->
+      (match Sexp.of_string tag with
+      | List (Atom tag :: _) | Atom tag -> sprintf "</%s>" tag
+      | _ -> expect_tag ())
+    | _ -> expect_stag ()
 
 
   let print_open_tag fmt  _ =  pp_open_vbox fmt 1; pp_print_cut fmt ()
@@ -41,39 +48,42 @@ module Html = struct
   let install fmt =
     pp_set_mark_tags  fmt true;
     pp_set_print_tags fmt true;
-    pp_set_formatter_tag_functions fmt {
-      mark_open_tag;
-      mark_close_tag;
-      print_open_tag = print_open_tag fmt;
-      print_close_tag = print_close_tag fmt;
+    pp_set_formatter_stag_functions fmt {
+      mark_open_stag;
+      mark_close_stag;
+      print_open_stag = print_open_tag fmt;
+      print_close_stag = print_close_tag fmt;
     }
-  [@@warning "-D"]
+  
 end
 
 module Blocks = struct
   open Sexp
 
-  let filter_attrs tag : string option =
-    match Sexp.of_string tag with
-    | List (Atom _ :: attrs) ->
-      List.filter_map attrs ~f:(function
-          | List [Atom "title"; Atom v] -> Some (`T v)
-          | List [Atom "id"; Atom v] -> Some (`I v)
-          | List [_;_] -> None
-          | _ -> expect_arg ()) |> (function
-          | [] -> None
-          | [`T v; _] | [_; `T v]
-          | [`T v] | [`I v] -> Some v
-          | _ -> None)
-    | Atom _ -> None
-    | _ -> expect_tag ()
+  let filter_attrs = function
+    | String_tag tag -> 
+      (match Sexp.of_string tag with
+      | List (Atom _ :: attrs) ->
+          List.filter_map attrs ~f:(function
+              | List [Atom "title"; Atom v] -> Some (`T v)
+              | List [Atom "id"; Atom v] -> Some (`I v)
+              | List [_;_] -> None
+              | _ -> expect_arg ()) |> (function
+              | [] -> None
+              | [`T v; _] | [_; `T v]
+              | [`T v] | [`I v] -> Some v
+              | _ -> None)
+      | Atom _ -> None
+      | _ -> expect_tag ())
 
-  let mark_open_tag tag : string =
-    filter_attrs tag |>
+    | _ -> expect_stag ()
+
+  let mark_open_stag stag : string =
+    filter_attrs stag |>
     Option.value_map ~default:"" ~f:(sprintf "begin(%s) ")
 
-  let mark_close_tag tag : string =
-    filter_attrs tag |>
+  let mark_close_stag stag : string =
+    filter_attrs stag |>
     Option.value_map ~default:"" ~f:(sprintf "end(%s)")
 
   let print_open_tag fmt tag : unit =
@@ -91,13 +101,13 @@ module Blocks = struct
   let install fmt =
     pp_set_mark_tags fmt true;
     pp_set_print_tags fmt true;
-    pp_set_formatter_tag_functions fmt {
-      mark_open_tag;
-      mark_close_tag;
-      print_open_tag = print_open_tag fmt;
-      print_close_tag = print_close_tag fmt;
+    pp_set_formatter_stag_functions fmt {
+      mark_open_stag;
+      mark_close_stag;
+      print_open_stag = print_open_tag fmt;
+      print_close_stag = print_close_tag fmt;
     }
-  [@@warning "-D"]
+  
 end
 
 module Attr = struct
@@ -136,22 +146,25 @@ module Attr = struct
     then pp_print_string ppf "\x1b[39;49m";
     clean := true
 
-  let print_open_tag ppf tag : unit =
-    if need_to_print tag then
-      match ascii_color tag with
-      | Some color when colorify.contents ->
-        pp_print_string ppf color;
-        clean := false
-      | _ ->
-        pp_print_string ppf tag;
-        pp_print_newline ppf ()
+  let print_open_stag ppf stag : unit = match stag with
+    | String_tag tag ->
+      if need_to_print tag then
+        (match ascii_color tag with
+        | Some color when colorify.contents ->
+          pp_print_string ppf color;
+          clean := false
+        | _ ->
+          pp_print_string ppf tag;
+          pp_print_newline ppf ())
+
+    | _ -> expect_stag ()
 
   let install ppf =
     pp_set_print_tags ppf true;
-    let tags = pp_get_formatter_tag_functions ppf () in
-    pp_set_formatter_tag_functions ppf {
+    let tags = pp_get_formatter_stag_functions ppf () in
+    pp_set_formatter_stag_functions ppf {
       tags with
-      print_open_tag = print_open_tag ppf;
+      print_open_stag = print_open_stag ppf;
     };
     let out = pp_get_formatter_out_functions ppf () in
     pp_set_formatter_out_functions ppf {
@@ -160,7 +173,7 @@ module Attr = struct
           reset ppf;
           out.out_newline ())
     }
-  [@@warning "-D"]
+  
 end
 
 module None_mode = struct
@@ -183,16 +196,16 @@ let install fmt mode =
   | None -> raise (Unknown_mode mode)
 
 let with_mode fmt mode =
-  let g = pp_get_formatter_tag_functions fmt () in
+  let g = pp_get_formatter_stag_functions fmt () in
   let mark = pp_get_mark_tags fmt () in
   let print = pp_get_print_tags fmt () in
   let finally () =
     pp_set_mark_tags fmt mark;
     pp_set_print_tags fmt print;
-    pp_set_formatter_tag_functions fmt g in
+    pp_set_formatter_stag_functions fmt g in
   install fmt mode;
   Exn.protect ~finally
-[@@warning "-D"]
+
 
 let () =
   register_mode "attr" Attr.install;

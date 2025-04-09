@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Monads.Std
 
 
@@ -885,7 +885,6 @@ module Knowledge : sig
 
     (** a witness of the ordering  *)
     type 'a ord
-    include Type_equal.Injective with type 'a t := 'a t
 
 
     (** [empty cls] the empty value of class [cls].
@@ -1471,7 +1470,7 @@ module Knowledge : sig
         return the least upper bound of [x] and [y], if it exists.
     *)
     val mapping :
-      ('a,'e) Map.comparator ->
+      (module Core.Comparator.S with type t = 'a and type comparator_witness = 'e) ->
       ?inspect:('d -> Base.Sexp.t) ->
       ?join:('d -> 'd -> ('d, conflict) result) ->
       equal:('d -> 'd -> bool) ->
@@ -1485,7 +1484,8 @@ module Knowledge : sig
         operator is the set union, and the order operator is the
         [is_subset] function.
     *)
-    val powerset : ('a,'e) Set.comparator ->
+    val powerset :
+      (module Core.Comparator.S with type t = 'a and type comparator_witness = 'e) ->
       ?inspect:('a -> Sexp.t) ->
       string ->
       ('a,'e) Set.t domain
@@ -1595,11 +1595,11 @@ module Knowledge : sig
     val array : 'a persistent -> 'a array persistent
 
     (** [set order t] derives persistent for a set.  *)
-    val set : ('a,'c) Set.comparator -> 'a t -> ('a,'c) Set.t persistent
+    val set : ('a,'c) Core.Comparator.Module.t -> 'a t -> ('a,'c) Set.t persistent
 
 
     (** [map order t] derives persistent for a map.  *)
-    val map : ('k,'c) Map.comparator -> 'k t -> 'd t -> ('k,'d,'c) Map.t persistent
+    val map : ('k,'c) Core.Comparator.Module.t -> 'k t -> 'd t -> ('k,'d,'c) Map.t persistent
   end
 
   (** Conflicting information.

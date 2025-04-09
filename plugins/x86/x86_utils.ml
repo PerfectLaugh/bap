@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 
 open X86_types
@@ -9,7 +9,7 @@ let tmp ?(name="v") ty =
 
 let index_ofq elt lst =
   match List.findi lst ~f:(fun _ e -> Var.equal e elt) with
-  | None -> raise Caml.Not_found
+  | None -> raise Stdlib.Not_found
   | Some (i,_) -> i
 
 let concat_explist elist =
@@ -55,7 +55,7 @@ let extract_byte_symbolic_with_width e n et =
  * not up to speed yet. *)
 let extract_element t e n =
   let nbits = t in
-  Bil.extract (n*nbits+(nbits-1)) (n*nbits) e
+  Bil.extract ~hi:(n*nbits+(nbits-1)) ~lo:(n*nbits) e
 
 let extract_byte e n = extract_element 8 e n
 
@@ -71,14 +71,14 @@ let min_symbolic ~is_signed e1 e2 =
   let cond = match is_signed with
     | true -> e1 <$ e2
     | false -> e1 < e2 in
-  ite cond e1 e2
+  ite ~if_:cond ~then_:e1 ~else_:e2
 
 let max_symbolic ~is_signed e1 e2 =
   let open Bil in
   let cond = match is_signed with
     | true -> e1 <$ e2
     | false -> e1 < e2 in
-  ite (lnot cond) e1 e2
+  ite ~if_:(lnot cond) ~then_:e1 ~else_:e2
 
 module Cpu_exceptions = struct
   let general_protection = Bil.cpuexn 0xd
@@ -158,7 +158,7 @@ let df_to_offset mode e =
   | Type.Mem _ | Type.Unk -> failwith "type_of_mode shouldn't be returning this"
   | Type.Imm t ->
     let open Exp in
-    Bil.(ite (e = exp_false) (int_exp 1 t) (int_exp (-1) t))
+    Bil.(ite ~if_:(e = exp_false) ~then_:(int_exp 1 t) ~else_:(int_exp (-1) t))
 
 let bap_to_rflags =
   let undefined d = Bil.unknown (Printf.sprintf "Undefined RFLAGS bit %d" d) bool_t in
@@ -267,8 +267,8 @@ let load_s mode s t a =
     | X8664 -> R64.mem in
   let mem_e = Bil.var mem in
   match s with
-  | None -> Bil.load mem_e a LittleEndian t
-  | Some v -> Bil.(load mem_e (var v + a) LittleEndian t)
+  | None -> Bil.load ~mem:mem_e ~addr:a LittleEndian t
+  | Some v -> Bil.(load ~mem:mem_e ~addr:(var v + a) LittleEndian t)
 
 let resize_word v width = Word.extract_exn ~hi:(width - 1) v
 

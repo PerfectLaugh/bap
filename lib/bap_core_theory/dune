@@ -3,5 +3,5 @@
   (public_name bap-core-theory)
   (wrapped false)
   (preprocess (pps ppx_bap))
-  (libraries bap-knowledge core_kernel core_kernel.caml_unix
+  (libraries bap-knowledge core
              bitvec bitvec-order bitvec-sexp bitvec-binprot))

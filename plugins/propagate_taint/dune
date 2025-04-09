@@ -6,7 +6,7 @@
    bap
    bap-core-theory
    bap-microx
-   core_kernel
+   core
    graphlib
    monads
    regular))

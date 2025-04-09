@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 
 open Powerpc_rtl
@@ -62,17 +62,17 @@ let make_regs typ ?alias prefix range =
   List.fold ~init:String.Map.empty ~f:(fun regs i ->
       let var = make_var_i typ prefix i in
       let name = Var.name var in
-      let regs = Map.set regs name var in
+      let regs = Map.set regs ~key:name ~data:var in
       match alias with
       | None -> regs
       | Some a ->
         let name = make_name a i in
-        Map.set regs name var) range
+        Map.set regs ~key:name ~data:var) range
 
 
 let make_regs_i typ prefix range =
   List.fold ~init:Int.Map.empty ~f:(fun regs i ->
-      Map.set regs i (make_var_i typ prefix i)) range
+      Map.set regs ~key:i ~data:(make_var_i typ prefix i)) range
 
 let flag name = Var.create name (Type.imm 1)
 
@@ -156,9 +156,9 @@ module Vars (B : Bitwidth) = struct
     bits
 
   let crn =
-    Int.Map.fold cri ~init:String.Map.empty
+    Map.fold cri ~init:String.Map.empty
       ~f:(fun ~key:_ ~data:var acc ->
-          Map.set acc (Var.name var) var)
+          Map.set acc ~key:(Var.name var) ~data:var)
 
   let fields = [
     "CR0", 0, (cr28, cr29, cr30, cr31);
@@ -173,11 +173,11 @@ module Vars (B : Bitwidth) = struct
 
   let cr_fields =
     List.fold fields ~init:String.Map.empty ~f:(fun fs (name, _, fd) ->
-        Map.set fs name fd)
+        Map.set fs ~key:name ~data:fd)
 
   let cri_fields =
     List.fold fields ~init:Int.Map.empty ~f:(fun fs (_, index, fd) ->
-        Map.set fs index fd)
+        Map.set fs ~key:index ~data:fd)
 
   (** fixed precision flags  *)
   let so = flag "SO" (** summary overflow *)
@@ -211,9 +211,9 @@ module Exps(B : Bitwidth) = struct
   let cri = Map.map cri ~f:(fun v -> Exp.of_var v)
 
   let crn =
-    Int.Map.fold Vars.cri ~init:String.Map.empty
+    Map.fold Vars.cri ~init:String.Map.empty
       ~f:(fun ~key:_ ~data:var acc ->
-          Map.set acc (Var.name var) (Exp.of_var var))
+          Map.set acc ~key:(Var.name var) ~data:(Exp.of_var var))
 
   let so  = Exp.of_var so
   let ca  = Exp.of_var ca
@@ -286,9 +286,9 @@ module Make_cpu(P : PowerPC) : CPU = struct
   let gpr =
     let data = Map.data gpr in
     List.fold data ~init:Var.Set.empty
-      ~f:(fun regs v -> Var.Set.add regs v)
+      ~f:(fun regs v -> Set.add regs v)
 
-  let sp = Var.Set.find_exn gpr ~f:(fun v -> String.equal (Var.name v) "R1")
+  let sp = Set.find_exn gpr ~f:(fun v -> String.equal (Var.name v) "R1")
   let vf = ov
   let cf = ca
   let nf = Map.find_exn cri 0

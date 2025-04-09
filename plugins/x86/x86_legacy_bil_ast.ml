@@ -16,7 +16,7 @@ open Big_int_Z
 module Type = X86_legacy_bil_type
 module Var = X86_legacy_bil_var
 
-module Core = Core_kernel[@@warning "-D"]
+module Core = Core
 
 
 (* TODO: remove if Core.Std is opened in this file. *)

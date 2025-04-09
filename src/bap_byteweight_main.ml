@@ -63,7 +63,7 @@ following interpretations:
 ```
 |}
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Result.Monad_infix
 open Format
@@ -71,9 +71,9 @@ open Bap_main
 
 module BW = Bap_byteweight.Bytes
 module Sigs = Bap_byteweight_signatures
-module Digest = Caml.Digest
+module Digest = Stdlib.Digest
 module Config = Extension.Configuration
-module Sys = Caml.Sys
+module Sys = Stdlib.Sys
 
 (* we still have to update this tool to support modern bap *)
 let sigs_load = Sigs.load[@warning "-D"]
@@ -242,14 +242,14 @@ let dump loader comp info min_length max_length threshold path input _ctxt =
       else BW.find_using_threshold bw threshold
           ~min_length ~max_length in
 
-    SymIO.write_addrs stdout @@ Addr.Set.to_list @@
+    SymIO.write_addrs stdout @@ Set.to_list @@
     Seq.fold (code_of_image img)
       ~init:Addr.Set.empty ~f:(fun starts mem ->
           List.fold (find mem) ~init:starts ~f:Set.add)
   | `SymTbl ->
     let syms = Image.symbols img in
     let mems = Table.regions syms in
-    SymIO.write_addrs stdout @@ Seq.to_list (Seq.map mems Memory.min_addr);
+    SymIO.write_addrs stdout @@ Seq.to_list (Seq.map mems ~f:Memory.min_addr);
     Ok ()
 
 let create_parent_dir dst =

@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Graphlib.Std
 open Bap.Std
 open Format

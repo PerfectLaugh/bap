@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Format
 
 type 'a t [@@deriving bin_io, compare, sexp]

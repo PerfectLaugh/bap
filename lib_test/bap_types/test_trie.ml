@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open OUnit2
 
@@ -7,9 +7,9 @@ module T = Trie.String.Prefix;;
 let longest_match _ =
   let (=) = Option.equal (fun (a,b) (c,d) -> a = c && b = d) in
   let t = T.create () in
-  T.add t "" 0;
-  T.add t "a" 1;
-  T.add t "abcde" 3;
+  T.add t ~key:"" ~data:0;
+  T.add t ~key:"a" ~data:1;
+  T.add t ~key:"abcde" ~data:3;
 
   assert_bool "1." (T.longest_match t "" = Some (0,0));
   assert_bool "1.a" (T.longest_match t "a" = Some (1,1));
@@ -20,7 +20,7 @@ let longest_match _ =
   assert_bool "1.abcdef" (T.longest_match t "abcdef" = Some (5,3));
   assert_bool "1.nothing" (T.longest_match t "nothing" = Some (0,0));
 
-  T.add t "abc" 2;
+  T.add t ~key:"abc" ~data:2;
 
   assert_bool "2." (T.longest_match t "" = Some (0,0));
   assert_bool "2.a" (T.longest_match t "a" = Some (1,1));
@@ -56,9 +56,9 @@ let longest_match _ =
 let find _ =
   let (=) = Option.equal (fun a b -> a = b) in
   let t = T.create () in
-  T.add t "a" 1;
-  T.add t "abcde" 3;
-  T.add t "abc" 2;
+  T.add t ~key:"a" ~data:1;
+  T.add t ~key:"abcde" ~data:3;
+  T.add t ~key:"abc" ~data:2;
   T.remove t "abc";
   T.remove t "";
 

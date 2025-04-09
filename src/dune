@@ -9,7 +9,7 @@
    bap-core-theory
    bap-knowledge
    bap-main
-   core_kernel
+   core
    findlib.dynload
    regular
    threads))

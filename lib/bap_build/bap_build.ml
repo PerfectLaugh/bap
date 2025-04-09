@@ -19,7 +19,7 @@ module Plugin_rules = struct
       "bap-main";
       "bap-core-theory";
       "bap-knowledge";
-      "core_kernel";
+      "core";
       "ppx_bap";
       "regular"
     ]

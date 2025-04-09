@@ -1,6 +1,6 @@
 let package = "core"
 
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_knowledge
 
 module KB = Knowledge
@@ -204,7 +204,7 @@ let collect_regs ?pred init roles =
   Map.fold roles ~init ~f:(fun ~key:_ ~data:vars' vars ->
       match pred with
       | None -> Set.union vars vars'
-      | Some pred -> Set.union vars (Set.filter vars' pred))
+      | Some pred -> Set.union vars (Set.filter vars' ~f:pred))
 
 module Alias = struct
   type t = unit Var.t * (int * unit Var.t) list
@@ -241,7 +241,7 @@ module Alias = struct
     }
 
   let add_sub sol lhs rhs = {
-    sol with subs = Map.set sol.subs lhs rhs;
+    sol with subs = Map.set sol.subs ~key:lhs ~data:rhs;
   }
 
   let pp_spec ppf spec =
@@ -474,7 +474,7 @@ let declare
   let info = extend ?bits ?byte ?data ?code
       ?data_alignment ?code_alignment ?vars ?regs ?aliasing ?endianness
       ?system ?abi ?fabi ?filetype ?options ?nicknames p parent in
-  Hashtbl.add_exn targets t info;
+  Hashtbl.add_exn targets ~key:t ~data:info;
   t
 
 
@@ -639,7 +639,7 @@ let partition xs =
     if is_known p && Set.mem universe p
     then grandest p else t in
   List.fold xs ~init:families ~f:(fun families t ->
-      Map.add_multi families (grandest t) t) |>
+      Map.add_multi families ~key:(grandest t) ~data:t) |>
   Map.data |>
   List.map ~f:sort_family_by_order |>
   sort_by_parent_name

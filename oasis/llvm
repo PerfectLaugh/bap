@@ -10,7 +10,7 @@ Flag llvm_static
 Library bap_llvm
   Path:          lib/bap_llvm
   Build$:        flag(everything) || flag(llvm)
-  BuildDepends:  bap, bap-core-theory, bap-knowledge, bitvec, ogre, monads, core_kernel, ppx_bap, mmap, core_kernel.caml_unix
+  BuildDepends:  bap, bap-core-theory, bap-knowledge, bitvec, ogre, monads, core, ppx_bap, mmap
   FindlibName:   bap-llvm
   Modules:       Bap_llvm,
                  Bap_llvm_loader
@@ -47,5 +47,5 @@ Library llvm_plugin
   Build$:          flag(everything) || flag(llvm)
   FindlibName:     bap-plugin-llvm
   InternalModules: Llvm_main
-  BuildDepends:    bap, bap-llvm, bap-main, core_kernel
+  BuildDepends:    bap, bap-llvm, bap-main, core
   XMETAExtraLines: tags="disassembler, llvm, loader, elf, macho, coff"

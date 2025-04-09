@@ -1,5 +1,5 @@
 open Bap_core_theory
-open Core_kernel[@@warning "-D"]
+open Core
 open Regular.Std
 open Graphlib.Std
 open Bap.Std
@@ -321,7 +321,7 @@ let print_bir_graph ~labeled patterns ppf proj =
         match Term.first blk_t sub with
         | None -> entries
         | Some entry ->
-          Map.add_exn entries (Term.tid sub) (Term.tid entry)) in
+          Map.add_exn entries ~key:(Term.tid sub) ~data:(Term.tid entry)) in
   fprintf ppf "digraph {@\nnode[shape=box];@\n";
   Term.enum sub_t prog |> Seq.iter ~f:(fun sub ->
       let name = Sub.name sub in

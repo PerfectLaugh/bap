@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap.Std
 open Bap_primus.Std
 open Monads.Std
@@ -178,7 +178,7 @@ module Location = struct
   let set_cls name id cls s = {
     s with incidents = Map.update s.incidents name ~f:(function
       | None -> Primus.Value.Map.singleton id cls
-      | Some classes -> Map.set classes id cls)
+      | Some classes -> Map.set classes ~key:id ~data:cls)
   }
 
 
@@ -284,7 +284,7 @@ module Incident = struct
             !!report_new_instance (name,id,locations) >>= fun () ->
             !!report_new_representative (name,id,locations) >>= fun () ->
             Machine.Global.update Location.state
-              (Location.set_cls name id cls))
+              ~f:(Location.set_cls name id cls))
         ~new_instance:(fun id ->
             !!report_new_instance (name,id,locations))
         ~new_class:(fun cls ->
@@ -292,7 +292,7 @@ module Incident = struct
             !!report_new_class (name,id,locations) >>= fun () ->
             !!report_new_instance (name,id,locations) >>= fun () ->
             Machine.Global.update Location.state
-              (Location.set_cls name id cls))
+              ~f:(Location.set_cls name id cls))
       >>= fun () ->
       Value.b1
 

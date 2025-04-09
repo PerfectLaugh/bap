@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_primus.Std
 open Bap.Std
 open Monads.Std

@@ -1,4 +1,4 @@
-open Core_kernel[@@warning "-D"]
+open Core
 open Bap_core_theory
 open Bap.Std
 open Bap_c.Std
@@ -483,7 +483,7 @@ module Make (Machine : Machine) = struct
   let memory typ name = match typ with
     | Type.Mem (ks,vs) ->
       let ks = Size.in_bits ks and vs = Size.in_bits vs in
-      Primus.Memory.Descriptor.create ks vs name
+      Primus.Memory.Descriptor.create ~addr_size:ks ~data_size:vs name
     | _ as t  -> failwithf "type error - load from %s:%a"  name Type.pps t ()
 
   let rec memory_of_storage : exp -> _ = function
@@ -724,7 +724,7 @@ module Make (Machine : Machine) = struct
     | Error err -> Machine.raise err
     | Ok curr ->
       update_pc t >>= fun () ->
-      Machine.Local.update state (fun s -> {s with curr}) >>= fun () ->
+      Machine.Local.update state ~f:(fun s -> {s with curr}) >>= fun () ->
       enter cls curr t >>= fun () ->
       f x t >>= fun r ->
       leave cls curr t >>= fun () ->
