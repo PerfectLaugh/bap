@@ -171,7 +171,7 @@ let declare
                      please choose a different name for your \
                      primitive"
       (KB.Name.show name) ();
-  Hashtbl.add_exn library name {
+  Hashtbl.add_exn library ~key:name ~data:{
     docs;
     types;
     body;
@@ -198,7 +198,7 @@ let signal ?params ?(docs="undocumented") property reflect =
     ] >>= fun () ->
     KB.collect Theory.Semantics.slot lbl >>| ignore
   end;
-  Hashtbl.add_exn library name {
+  Hashtbl.add_exn library ~key:name ~data:{
     docs;
     types;
     body=None;
@@ -337,7 +337,7 @@ module Env = struct
   let set v x =
     State.update @@ fun s -> {
       s with binds = Map.set s.binds
-                 (Theory.Var.forget v) x
+                 ~key:(Theory.Var.forget v) ~data:x
     }
 
   let del v =
@@ -359,7 +359,7 @@ module Env = struct
     let binds,old =
       List.fold bs ~init:(s.binds,[]) ~f:(fun (s,old) (v,x) ->
           let v = var ws v in
-          Map.set s v x,(v,Map.find s v) :: old) in
+          Map.set s ~key:v ~data:x,(v,Map.find s v) :: old) in
     State.set {s with binds} >>| fun () ->
     List.rev old
 
@@ -367,7 +367,7 @@ module Env = struct
       s with binds = List.fold bs ~init:s.binds ~f:(fun s (v,x) ->
       match x with
       | None -> Map.remove s v
-      | Some x -> Map.set s v x)
+      | Some x -> Map.set s ~key:v ~data:x)
     }
 end
 
@@ -734,7 +734,7 @@ let collect_names kind key prog =
       if Program.is_applicable prog def
       then
         let name = Def.name def in
-        Map.set names (KB.Name.create ~package name) kind
+        Map.set names ~key:(KB.Name.create ~package name) ~data:kind
       else names)
     ~init:(Map.empty (module KB.Name))
 
@@ -765,7 +765,7 @@ let obtain_typed_program unit =
     let places = Program.fold prog Key.place
         ~f:(fun ~package place places ->
             let name = KB.Name.create ~package (Def.name place) in
-            Map.set places name (Def.Place.location place))
+            Map.set places ~key:name ~data:(Def.Place.location place))
         ~init:(Map.empty (module KB.Name)) in
     let names = merge_names  [
         collect_names Defn Key.func prog;

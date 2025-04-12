@@ -141,7 +141,7 @@ module Upgrade = struct
 
   let get_version path =
     let file = Filename.basename path in
-    match String.chop_prefix file "index." with
+    match String.chop_prefix file ~prefix:"index." with
     | None -> Ok 1
     | Some v ->
       try Ok (int_of_string v)

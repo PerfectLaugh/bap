@@ -148,7 +148,7 @@ let add_description ?arg name descr  =
     | None -> name
     | Some arg -> sprintf "%s=%s" name arg in
   let name = "--" ^ name in
-  opts := Map.add_exn !opts name descr
+  opts := Map.add_exn !opts ~key:name ~data:descr
 
 let flag doc name =
   add_description name doc;

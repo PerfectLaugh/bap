@@ -42,8 +42,8 @@ module Std = struct
   let delayed_opcodes = Hashtbl.create (module String)
 
   let register ?delay name lifter =
-    Option.iter delay ~f:(fun d -> Hashtbl.add_exn delayed_opcodes name d);
-    Hashtbl.add_exn lifters name lifter
+    Option.iter delay ~f:(fun d -> Hashtbl.add_exn delayed_opcodes ~key:name ~data:d);
+    Hashtbl.add_exn lifters ~key:name ~data:lifter
 
   let (>>) = register
 

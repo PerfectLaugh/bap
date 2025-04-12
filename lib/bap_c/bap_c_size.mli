@@ -97,7 +97,6 @@ class base :  model -> object
     (** DEPRECATED. Use the [padding] function if you need to compute
         padding.  *)
     method padding : t -> bits -> size option
-    [@@deprecated "since [2021-05] this method is ignored"]
     (* this method was deprecated as
        1) it has an incorrect type (padding can have any number of bits)
        2) padding is fully defined by the alignemnt and there is no

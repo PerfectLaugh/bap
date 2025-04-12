@@ -110,7 +110,7 @@ let cdf entries =
   Array.foldi entries ~init:(Map.empty (module Int),0)
     ~f:(fun i (m,prev) e ->
         let f_i = prev + max min_entry_size e.size in
-        Map.add_exn m prev i, f_i)
+        Map.add_exn m ~key:prev ~data:i, f_i)
 
 let select entries total_size size_to_free =
   let cdf = cdf entries in

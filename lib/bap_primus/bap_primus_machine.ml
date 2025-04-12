@@ -149,7 +149,7 @@ module Make(M : Monad.S) = struct
   let get_global () : _ t = gets (fun s -> s.global)
 
   let set_local local = update @@ fun s -> {
-      s with local = Map.set s.local s.self local
+      s with local = Map.set s.local ~key:s.self ~data:local
     }
 
   let set_global global = update @@ fun s -> {
@@ -262,12 +262,12 @@ module Make(M : Monad.S) = struct
       local = Map.change s.local child ~f:(fun _ ->
           Map.find s.local s.self);
       self = child;
-      parent = Map.set s.parent child s.self;
+      parent = Map.set s.parent ~key:child ~data:s.self;
     }
 
   let switch_state self : unit t = update @@ fun s -> {s with self}
   let store_curr k = update @@ fun s -> {
-      s with conts = Map.set s.conts s.self k
+      s with conts = Map.set s.conts ~key:s.self ~data:k
     }
 
   let get_curr = gets @@ fun {conts; self} ->

@@ -355,7 +355,12 @@ module Cmdline = struct
     let doc = "Add a list of a paths where to store/search apis" in
     Config.(param (list dir) "path" ~doc ~default:[])
 
-  let create a b c d e = Api_options.Fields.create a b c d e
+  let create api_to_add api_to_rem list_paths show_apis api_paths = Api_options.Fields.create
+    ~api_to_add
+    ~api_to_rem
+    ~list_paths
+    ~show_apis
+    ~api_paths
 
   let dispatch_flags o =
     let open Api_options in

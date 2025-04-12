@@ -102,17 +102,17 @@ module LLVM = struct
       Tuple.T2.create
 
   (** elf program header as it is in file *)
-  let elf_program_header () = Ogre.declare "llvm:elf-program-header"
+  let elf_program_header () = Ogre.declare ~name:"llvm:elf-program-header"
       (scheme name $ off $ size) Tuple.T3.create
 
   (** elf program header as it is in memory *)
   let elf_virtual_program_header () =
-    Ogre.declare "llvm:elf-virtual-program-header"
+    Ogre.declare ~name:"llvm:elf-virtual-program-header"
       (scheme name $ addr $ size) Tuple.T3.create
 
   (** elf program header flags *)
   let elf_program_header_flags () =
-    Ogre.declare "llvm:elf-program-header-flags"
+    Ogre.declare ~name:"llvm:elf-program-header-flags"
       (scheme name $ ld $ readable $ writable $ executable)
       (fun name ld r w x -> name,ld,r,w,x)
 

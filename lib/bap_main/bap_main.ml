@@ -454,11 +454,11 @@ module Context = struct
     List.iter plugins ~f:(fun (plugin,info) ->
         if not (Set.mem disabled plugin)
         then
-          Hashtbl.add_exn plugin_descriptions plugin info);
+          Hashtbl.add_exn plugin_descriptions ~key:plugin ~data:info);
     List.iter commands ~f:(fun (plugin,commands) ->
         if not (Set.mem disabled plugin)
         then Hashtbl.add_exn command_descriptions
-            plugin commands);
+            ~key:plugin ~data:commands);
 
     update @@ fun ctxt -> {
       env = Map.filter ctxt.env ~f:(fun {scope} ->
@@ -469,7 +469,7 @@ module Context = struct
             if Set.mem disabled name then plugins
             else
               let data = Set.of_list (module String) tags in
-              Map.add_exn plugins name data)
+              Map.add_exn plugins ~key:name ~data)
     }
 
   let request () =
@@ -897,13 +897,13 @@ end = struct
       Hashtbl.update plugin_pages name ~f:(function
           | None -> man
           | Some men -> men @ man);
-      Hashtbl.add_exn plugin_codes name !plugin_code;
-      Hashtbl.add_exn plugin_infos name info;
-      Hashtbl.add_exn plugins name p;
+      Hashtbl.add_exn plugin_codes ~key:name ~data:!plugin_code;
+      Hashtbl.add_exn plugin_infos ~key:name ~data:info;
+      Hashtbl.add_exn plugins ~key:name ~data:p;
       if not (List.is_empty !actions)
-      then Hashtbl.add_exn plugin_cmds name !actions;
+      then Hashtbl.add_exn plugin_cmds ~key:name ~data:!actions;
       reset_plugin ();
-      Hashtbl.add_exn plugin_specs name term;
+      Hashtbl.add_exn plugin_specs ~key:name ~data:term;
     | `Errored _ -> reset_plugin ()
     | _ -> ()
 

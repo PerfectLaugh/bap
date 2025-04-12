@@ -125,15 +125,15 @@ let run ?(skip=false) name symbols expected should_fail _ctxt =
   let syms =
     List.fold symbols ~init:(Map.empty (module String))
       ~f:(fun syms (name,data) ->
-          Map.add_exn syms name data) in
+          Map.add_exn syms ~key:name ~data) in
   let prog = create_program syms in
   let expected =
     List.fold expected
       ~init:(Map.empty (module Tid))
       ~f:(fun tids (stub, impl) ->
           Map.add_exn tids
-            (tid_for_name_exn prog stub)
-            (tid_for_name_exn prog impl)) in
+            ~key:(tid_for_name_exn prog stub)
+            ~data:(tid_for_name_exn prog impl)) in
   let pairs = Stub_resolver.(links@@run prog) in
   let equal = Map.equal Tid.equal in
   let equal = if should_fail then fun x y -> not (equal x y) else equal in

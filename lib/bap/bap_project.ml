@@ -768,7 +768,7 @@ module Registry(T : T)(I : T) = struct
       invalid_argf "An element with name %s is already registered \
                     please choose a unique name"
         (Knowledge.Name.show name) ();
-    Hashtbl.add_exn registry name (desc,entity,extra)
+    Hashtbl.add_exn registry ~key:name ~data:(desc,entity,extra)
 
   let find ?package name =
     let name = Knowledge.Name.read ?package name in

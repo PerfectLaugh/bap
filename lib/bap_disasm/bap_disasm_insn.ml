@@ -146,8 +146,8 @@ module Slot = struct
       | None,_ | _,None -> NC
       | Some x, Some y ->
         if Set.equal x y then EQ else
-        if Set.is_subset x y then LT else
-        if Set.is_subset y x then GT else NC in
+        if Set.is_subset x ~of_:y then LT else
+        if Set.is_subset y ~of_:x then GT else NC in
     let join x y = match x,y with
       | None,None -> Ok None
       | None,Some x |Some x,None ->

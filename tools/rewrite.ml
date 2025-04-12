@@ -50,7 +50,7 @@ let () = Cfg.main ~args ~name:"bap-configurator" @@ fun self ->
 
   let prefix =
     let stdlib = Cfg.ocaml_config_var_exn self "standard_library" in
-    String.chop_suffix_exn stdlib "/lib/ocaml" in
+    String.chop_suffix_exn stdlib ~suffix:"/lib/ocaml" in
 
   let build_id =
     try Cfg.Process.run_capture_exn self "git" [

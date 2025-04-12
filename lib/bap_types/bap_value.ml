@@ -55,7 +55,7 @@ let register_slot (type a) ?uuid slot
   let name = KB.Name.show @@
     KB.Name.create ~package:uuid @@
     KB.Name.unqualified slot_name in
-  let key = Type_equal.Id.create name S.sexp_of_t in
+  let key = Type_equal.Id.create ~name S.sexp_of_t in
   let pp ppf (Value.T (k,x)) =
     let T = Equal.proof k key in
     S.pp ppf x in
@@ -79,7 +79,7 @@ let register_slot (type a) ?uuid slot
     let open KB.Syntax in
     KB.collect slot obj >>| function
     | None -> dict
-    | Some x -> Univ_map.set dict key x in
+    | Some x -> Univ_map.set dict ~key ~data:x in
   let info = {
     pp;
     of_sexp;
@@ -216,7 +216,7 @@ module Match = struct
   }
 
   let case t f (tab : 's t) =
-    let h = Map.set tab.handlers (Tag.uid t) (fun v -> f (get_exn t v)) in
+    let h = Map.set tab.handlers ~key:(Tag.uid t) ~data:(fun v -> f (get_exn t v)) in
     {tab with handlers = h}
 
   let run (Value.T (k,_) as v) tab =
@@ -232,11 +232,11 @@ module Dict = struct
   type t = Univ_map.t
   let empty = Univ_map.empty
   let is_empty = Univ_map.is_empty
-  let set dict {key} x = Univ_map.set dict key x
+  let set dict {key} x = Univ_map.set dict ~key ~data:x
   let remove dict {key} = Univ_map.remove dict key
   let mem dict {key} = Univ_map.mem dict key
   let find dict {key} = Univ_map.find dict key
-  let add dict {key} x = Univ_map.add dict key x
+  let add dict {key} x = Univ_map.add dict ~key ~data:x
   let change dict {key} f = Univ_map.change dict key ~f
   let data dict =
     Univ_map.to_alist dict |>
@@ -246,7 +246,7 @@ module Dict = struct
   let filter t ~f =
     data t |>
     Seq.fold ~init:empty ~f:(fun dict (Value.T (k,x) as v) ->
-        if f v then Univ_map.set dict k x else dict)
+        if f v then Univ_map.set dict ~key:k ~data:x else dict)
 
   let compare x y =
     compare_list
@@ -259,7 +259,7 @@ module Dict = struct
     let of_dict = Univ_map.to_alist
     let to_dict =
       List.fold ~init:empty ~f:(fun dict (Value.T (k,x)) ->
-          Univ_map.set dict k x)
+          Univ_map.set dict ~key:k ~data:x)
   end
   include Binable.Of_binable_with_uuid(Data)(struct
       type t = Univ_map.t

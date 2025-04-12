@@ -211,8 +211,8 @@ end
         else join t k' (Tip (k, f None)) k
       | Bin (k', l, r) -> match Key.compare k' k with
         | NA -> join (Tip (k,f None)) k t (Key.payload k')
-        | LB -> Bin (k', update l k f, r)
-        | RB -> Bin (k', l, update r k f)
+        | LB -> Bin (k', update l k ~f, r)
+        | RB -> Bin (k', l, update r k ~f)
     [@@specialise]
 
     let rec set t k v = match t with
@@ -470,7 +470,7 @@ end = struct
     let intern name =
       let id = hash_name name in
       match Hashtbl.find registry id with
-      | None -> Hashtbl.add_exn registry id name; id
+      | None -> Hashtbl.add_exn registry ~key:id ~data:name; id
       | Some name' ->
         if equal_fullname name name'
         then id
@@ -597,7 +597,7 @@ end = struct
     if Hashtbl.mem agents agent then
       failwithf "An agent with name `%a' already exists, \
                  please choose another name" Name.str name ();
-    Hashtbl.add_exn agents agent {
+    Hashtbl.add_exn agents ~key:agent ~data:{
       desc; name; rcls = reliability;
     };
     agent
@@ -777,8 +777,8 @@ module Domain = struct
     let empty = Set.empty (module S) in
     let order x y : Order.partial =
       if Set.equal x y then EQ else
-      if Set.is_subset x y then LT else
-      if Set.is_subset y x then GT else NC in
+      if Set.is_subset x ~of_:y then LT else
+      if Set.is_subset y ~of_:x then GT else NC in
     let join x y = Ok (Set.union x y) in
     let module Inspectable = struct
       include S
@@ -1050,11 +1050,11 @@ module Registry = struct
   let is_public cls = Hashtbl.mem public cls
 
   let public_class cls =
-    Hashtbl.add_exn public cls []
+    Hashtbl.add_exn public ~key:cls ~data:[]
 
   let update_class ~cls ~slot =
     if is_public cls
-    then Hashtbl.add_multi public cls slot
+    then Hashtbl.add_multi public ~key:cls ~data:slot
 
   let find namespace name =
     let names = Hashtbl.find_exn namespace (Name.package name) in
@@ -2364,7 +2364,7 @@ module Knowledge = struct
       let name = Registry.add_slot ?desc ?package name in
       let key = Dict.Key.create ~name dom.inspect in
       if public then Registry.update_class ~cls:cls.Class.name ~slot:name;
-      Option.iter persistent (Record.register_persistent key);
+      Option.iter persistent ~f:(Record.register_persistent key);
       Record.register_domain key dom;
       let promises = Hashtbl.create (module Pid) in
       let watchers = Hashtbl.create (module Pid) in
@@ -2537,7 +2537,7 @@ module Knowledge = struct
     let objs = f @@ match Map.find state.classes name with
       | None -> Env.empty_class
       | Some objs -> objs in
-    {state with classes = Map.set state.classes name objs}
+    {state with classes = Map.set state.classes ~key:name ~data:objs}
   [@@specialise]
 
   let map_update_objects {Class.name} f =
@@ -2546,7 +2546,7 @@ module Knowledge = struct
       | None -> Env.empty_class
       | Some objs -> objs in
     f objs @@ fun objs res ->
-    put {state with classes = Map.set state.classes name objs} >>| fun () ->
+    put {state with classes = Map.set state.classes ~key:name ~data:objs} >>| fun () ->
     res
   [@@specialise]
 
@@ -2611,11 +2611,11 @@ module Knowledge = struct
         let vals = Oid.Tree.update_with objects.vals obj
             ~has:(fun info -> {info with name = Some name})
             ~nil:(fun () -> {noinfo with name = Some name}) in
-        let objs = Map.add_exn objects.objs name obj in
+        let objs = Map.add_exn objects.objs ~key:name ~data:obj in
         let objects = {objects with objs; vals} in
         let objects = if public
           then publicize name obj objects else objects in
-        put {s with classes = Map.set classes clsid objects} >>| fun () ->
+        put {s with classes = Map.set classes ~key:clsid ~data:objects} >>| fun () ->
         obj in
 
       fun ?(public=false) ?desc:_ name {Class.name=id} ->
@@ -2630,7 +2630,7 @@ module Knowledge = struct
           if is_public name obj objects then unchanged obj
           else
             let objects = publicize name obj objects in
-            put {s with classes = Map.set classes id objects} >>| fun () ->
+            put {s with classes = Map.set classes ~key:id ~data:objects} >>| fun () ->
             obj
 
     (* any [:] in names here are never treated as separators,
@@ -2801,13 +2801,13 @@ module Knowledge = struct
   let register_watcher (type a b)(s : (a,b) slot) run =
     Pid.incr pids;
     let pid = !pids in
-    Hashtbl.add_exn s.watchers pid {run; pid};
+    Hashtbl.add_exn s.watchers ~key:pid ~data:{run; pid};
     pid
 
   let register_promise (type a b)(s : (a,b) slot) run =
     Pid.incr pids;
     let pid = !pids in
-    Hashtbl.add_exn s.promises pid {run; pid};
+    Hashtbl.add_exn s.promises ~key:pid ~data:{run; pid};
     pid
 
   let remove_promise (s : _ slot) pid =
@@ -2928,7 +2928,7 @@ module Knowledge = struct
     | Env.Work {waiting} ->
       let waiting = Pid.Tree.fold waiting ~init:[] ~f:(fun p () ps ->
           Hashtbl.find_exn s.Slot.promises p :: ps) in
-      let info = {info with comp=Map.set works (uid s) no_work} in
+      let info = {info with comp=Map.set works ~key:(uid s) ~data:no_work} in
       let objs = {objs with vals = Oid.Tree.set vals x info} in
       k objs waiting
 
@@ -3048,7 +3048,7 @@ module Knowledge = struct
     let intern_symbol name obj cls =
       Knowledge.return Env.{
           cls
-          with objs = Map.add_exn cls.objs name obj
+          with objs = Map.add_exn cls.objs ~key:name ~data:obj
         }
 
 
@@ -3122,7 +3122,7 @@ module Knowledge = struct
             ~f:(fun classes (clsid,objects) ->
                 import_class ~strict ~package ~needs_import objects
                 >>| fun objects ->
-                Map.set classes clsid objects))
+                Map.set classes ~key:clsid ~data:objects))
       >>= fun classes -> put {s with classes}
 
     let package = get () >>| fun {Env.package} -> package
@@ -3294,7 +3294,7 @@ module Knowledge = struct
       List.fold comp
         ~init:(Map.empty (module Name))
         ~f:(fun works slot ->
-            Map.add_exn works slot Env.Done)
+            Map.add_exn works ~key:slot ~data:Env.Done)
 
     let add_object
         ({Env.vals; objs} as self)
@@ -3310,7 +3310,7 @@ module Knowledge = struct
       | None -> self
       | Some s -> {
           self with
-          objs = Map.add_exn objs s key;
+          objs = Map.add_exn objs ~key:s ~data:key;
         }
 
     let names_in_syms = Oid.Tree.fold
@@ -3413,7 +3413,7 @@ module Knowledge = struct
         let data =
           Bigarray.array1_of_genarray @@
           Unix.map_file fd
-            Bigarray.char Bigarray.c_layout false [| -1 |]in
+            Bigarray.char Bigarray.c_layout ~shared:false [| -1 |]in
         let r = of_bigstring data in
         Unix.close fd;
         r
@@ -3443,7 +3443,7 @@ module Knowledge = struct
         let dim = [|size |]in
         let buf =
           Bigarray.array1_of_genarray @@
-          Unix.map_file fd Bigarray.char Bigarray.c_layout true dim in
+          Unix.map_file fd Bigarray.char Bigarray.c_layout ~shared:true dim in
         blit_canonical_to_bigstring repr buf;
         Unix.close fd
       with exn ->

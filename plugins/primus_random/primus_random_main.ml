@@ -417,7 +417,7 @@ let main ctxt =
                 let var = Arg.lhs arg in
                 match Generator.for_var ~seed ~width var generators with
                 | None -> {args}
-                | Some gen -> {args = Map.set args var gen})) in
+                | Some gen -> {args = Map.set args ~key:var ~data:gen})) in
   let module RandomizeEnvironment(Machine : Primus.Machine.S) = struct
     open Machine.Syntax
 

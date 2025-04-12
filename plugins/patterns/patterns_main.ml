@@ -1253,7 +1253,7 @@ end = struct
       names = Bap_relation.fold names
           ~init:(Map.empty (module Addr))
           ~f:(fun addr name names ->
-              Map.add_exn names addr name)
+              Map.add_exn names ~key:addr ~data:name)
     }
 
 

@@ -36,7 +36,7 @@ end
 let byte2hexchar = "0123456789abcdef"
 
 let hexstring_of_bytestring str =
-  String.init (String.length str * 2) (fun dstix ->
+  String.init (String.length str * 2) ~f:(fun dstix ->
       let srcix = dstix / 2 in
       let is_hi = dstix mod 2 = 0 in
       let b = Stdlib.Char.code (String.get str srcix) in

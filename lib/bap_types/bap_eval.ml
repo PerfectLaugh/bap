@@ -168,7 +168,7 @@ module Make2(State : Monad.S2) = struct
         then self#eval t
         else if Bitvector.(u = b0)
         then self#eval f
-        else self#type_error @@ TE.bad_type bool_t (imm_t u)
+        else self#type_error @@ TE.bad_type ~exp:bool_t ~got:(imm_t u)
 
     method eval_extract hi lo w =
       self#eval_imm w >>= function

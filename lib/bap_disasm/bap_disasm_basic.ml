@@ -367,7 +367,7 @@ module Insn = struct
             let id = v.data.imm_small in
             let sub = create ~parent:insn ~asm ~kinds dis ~insn:id in
             let pos = Hashtbl.length subs in
-            Hashtbl.add_exn subs pos sub;
+            Hashtbl.add_exn subs ~key:pos ~data:sub;
             Op.Imm {v with data = {imm_small=pos; imm_large=None}}) in
     let subs = Array.init (Hashtbl.length subs)
         ~f:(Hashtbl.find_exn subs) in
@@ -628,7 +628,7 @@ let create ?(debug_level=0) ?(cpu="") ?(attrs="") ?(backend="llvm") triple =
   | None -> match Prim.create ~backend ~triple ~cpu ~attrs ~debug_level with
     | n when n >= 0 ->
       let disassembler = init @@ C.create (module Prim) n in
-      Hashtbl.add_exn disassemblers name disassembler;
+      Hashtbl.add_exn disassemblers ~key:name ~data:disassembler;
       Ok {name; asm = false; kinds = false; enc=name}
     | -2 -> errorf "Unknown backend: %s" backend
     | -3 -> errorf "Unsupported target: %s %s" triple cpu
@@ -642,7 +642,7 @@ let custom target encoding backend t =
     {name; asm=false; kinds=false; enc=encoding_name encoding}
   | None ->
     let disassembler = init @@ C.create backend t in
-    Hashtbl.add_exn disassemblers name disassembler;
+    Hashtbl.add_exn disassemblers ~key:name ~data:disassembler;
     {name; asm=false; kinds=false; enc=encoding_name encoding}
 
 let close dis =

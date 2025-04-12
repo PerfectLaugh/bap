@@ -148,7 +148,7 @@ let img_of_elf data elf : Img.t Or_error.t =
     | EM_MIPS, LittleEndian, `r64 -> Ok `mips64el
     | _ -> errorf "can't load file, unsupported platform" in
   let segments,errors =
-    Seq.filter_mapi elf.e_segments (create_segment addr) |>
+    Seq.filter_mapi elf.e_segments ~f:(create_segment addr) |>
     Seq.to_list |>
     List.partition_map ~f:(function
         | Ok s    -> First s
@@ -157,7 +157,7 @@ let img_of_elf data elf : Img.t Or_error.t =
     match create_symtab data endian elf with
     | Ok syms -> syms,errors
     | Error err ->
-      [], Error.tag err "failed to read symbols" :: errors in
+      [], Error.tag err ~tag:"failed to read symbols" :: errors in
   arch >>= fun arch ->
   let sections = Seq.filter_map elf.e_sections ~f:(fun s ->
       match Elf.section_name data elf s with

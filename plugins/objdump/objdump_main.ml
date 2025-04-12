@@ -172,7 +172,7 @@ end = struct
       if Bap_relation.is_empty info
       then warning "failed to obtain symbols";
       let t = of_info info in
-      Hashtbl.set files path t;
+      Hashtbl.set files ~key:path ~data:t;
       t
 
   let to_real size = function

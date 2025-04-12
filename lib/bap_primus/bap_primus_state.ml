@@ -64,6 +64,6 @@ module Bag = struct
     {
       uids = Map.set t.uids ~key:state.uuid
           ~data:(Key.hash state.key);
-      dict = Dict.set t.dict state.key data;
+      dict = Dict.set t.dict ~key:state.key ~data:data;
     }
 end

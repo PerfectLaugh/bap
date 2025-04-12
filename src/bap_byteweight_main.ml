@@ -249,7 +249,7 @@ let dump loader comp info min_length max_length threshold path input _ctxt =
   | `SymTbl ->
     let syms = Image.symbols img in
     let mems = Table.regions syms in
-    SymIO.write_addrs stdout @@ Seq.to_list (Seq.map mems Memory.min_addr);
+    SymIO.write_addrs stdout @@ Seq.to_list (Seq.map mems ~f:Memory.min_addr);
     Ok ()
 
 let create_parent_dir dst =

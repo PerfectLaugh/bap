@@ -170,15 +170,15 @@ let collect_graphs disasm calls =
         else
           Symbolizer.get_name (Block.addr dst) >>| fun name ->
           if Addr.equal next dest
-          then {tab with icalls = Map.set tab.icalls from name},graphs
-          else {tab with ecalls = Map.set tab.ecalls from name},graphs)
+          then {tab with icalls = Map.set tab.icalls ~key:from ~data:name},graphs
+          else {tab with ecalls = Map.set tab.ecalls ~key:from ~data:name},graphs)
 
 let collect_externals disasm =
   Disasm.externals disasm |>
   Set.to_sequence |>
   KB.Seq.fold ~init:(Map.empty (module Theory.Label)) ~f:(fun extern label ->
       let+ insn = label-->Theory.Semantics.slot in
-      Map.set extern label insn)
+      Map.set extern ~key:label ~data:insn)
 
 let create disasm calls =
   let* (init,graphs) = collect_graphs disasm calls in

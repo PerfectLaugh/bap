@@ -1949,7 +1949,7 @@ module Ir_program = struct
   let get_and_cache (get : 'a getter) prog tid : 'a term option =
     let open Option.Monad_infix in
     get prog tid >>= fun (path,term) ->
-    Hashtbl.change prog.self.paths tid (fun _ -> Some path);
+    Hashtbl.change prog.self.paths tid ~f:(fun _ -> Some path);
     Some term
 
   type 'a entry = {

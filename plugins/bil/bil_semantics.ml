@@ -3,8 +3,6 @@ open Bap.Std
 open Bap_knowledge
 open Bap_core_theory
 
-[@@@warning "-40"]
-
 let exp = Exp.slot
 let stmt = Bil.slot
 
@@ -147,7 +145,7 @@ module Basic : Theory.Basic = struct
       else
         let ones = Word.ones (size xs) in
         let mask = Bil.(lnot (int ones lsr y)) in
-        Bil.(ite b ((x lsr y) lor mask) (x lsr y))
+        Bil.(ite ~if_:b ~then_:((x lsr y) lor mask) ~else_:(x lsr y))
 
     let shiftl b x y =
       b >>-> fun _s b ->
@@ -162,7 +160,7 @@ module Basic : Theory.Basic = struct
         let lhs = Bil.(x lsl y) in
         let yes = Bil.(lhs lor mask) in
         let nay = Bil.(x lsl y)  in
-        Bil.(ite b yes nay)
+        Bil.(ite ~if_:b ~then_:yes ~else_:nay)
 
     let app_bop lift op x y = lift (Bil.binop op) x y
     let arshift x y = app_bop sop Bil.arshift x y
@@ -179,9 +177,9 @@ module Basic : Theory.Basic = struct
         then exp s cnd
         else if Word.is_zero w && Word.is_one w'
         then exp s (Bil.lnot cnd)
-        else exp s (Bil.ite cnd yes nay)
+        else exp s (Bil.ite ~if_:cnd ~then_:yes ~else_:nay)
       | _ ->
-        exp s (Bil.ite cnd yes nay)
+        exp s (Bil.ite ~if_:cnd ~then_:yes ~else_:nay)
 
     let (>>:=) v f = v >>= fun v -> f (effect_ v)
 
@@ -265,7 +263,7 @@ module Basic : Theory.Basic = struct
       let vals = Theory.Mem.vals sort in
       match Size.of_int_opt (size vals) with
       | Some sz ->
-        exp vals Bil.(load mem key BigEndian sz)
+        exp vals Bil.(load ~mem ~addr:key BigEndian sz)
       | None -> unk vals
 
     let store m k d =
@@ -336,8 +334,8 @@ module Basic : Theory.Basic = struct
       key >>= fun key ->
       mem >>-> fun _ mem ->
       let dir = bool_exp cnd and key = bitv_exp key in
-      let bel = vec rs @@ Bil.load mem key BigEndian sz
-      and lel = vec rs @@ Bil.load mem key LittleEndian sz in
+      let bel = vec rs @@ Bil.load ~mem ~addr:key BigEndian sz
+      and lel = vec rs @@ Bil.load ~mem ~addr:key LittleEndian sz in
       match dir with
       | Int dir -> if Word.(dir = b1) then bel else lel
       | _ -> ite !!cnd bel lel
@@ -350,8 +348,8 @@ module Basic : Theory.Basic = struct
       cnd >>| value >>= fun dir ->
       key >>| value >>= fun key ->
       mem >>-> fun sort mem ->
-      let bes = exp sort @@ Bil.store mem key e BigEndian sz
-      and les = exp sort @@ Bil.store mem key e LittleEndian sz in
+      let bes = exp sort @@ Bil.store ~mem ~addr:key e BigEndian sz
+      and les = exp sort @@ Bil.store ~mem ~addr:key e LittleEndian sz in
       match dir with
       | Int dir -> if Word.(dir = b1) then bes else les
       | _ -> ite (bit dir) bes les
