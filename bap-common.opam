@@ -34,6 +34,3 @@ build: [
   ["dune" "install" "-p" name "--create-install-files" name]
 ]
 dev-repo: "git+https://github.com/BinaryAnalysisPlatform/bap.git"
-pin-depends: [
-  [ "typerep.v0.18~preview.130.05+548" "git+https://github.com/janestreet/typerep#8f80732f90256e2372e5e8ca2cc8b8e1dc448aac" ]
-]
