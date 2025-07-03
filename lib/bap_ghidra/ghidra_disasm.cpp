@@ -1,3 +1,5 @@
+#include <ghidra/error.hh>
+#include <ghidra/marshal.hh>
 #include <iostream>
 #include <memory>
 #include <algorithm>
@@ -16,6 +18,8 @@
 #include "ghidra_disasm.hpp"
 #include "disasm.hpp"
 
+
+using namespace ghidra;
 
 class Loader : public LoadImage {
     bap::memory mem;
@@ -378,7 +382,7 @@ public:
         , current()
         , builder(loader, regs, opcodes, translator) {
         load_document(paths, language.getProcessorSpec());
-        load_document(paths, language.getSlaFile());
+        load_sla(paths, language.getSlaFile());
         translator.initialize(specification);
         initialize_processor(err);
         opcodes.populate_opcodes(translator);
@@ -444,16 +448,38 @@ private:
         specification.registerTag(specification.openDocument(path)->getRoot());
     }
 
+    void load_sla(const FileManage &paths, const std::string &name) {
+        std::string path;
+        paths.findFile(path, name);
+        std::istringstream s("<sleigh>" + path + "</sleigh>");
+        specification.registerTag(specification.parseDocument(s)->getRoot());
+    }
+
     void initialize_processor(std::ostream &err) {
-        if (const Element *spec = specification.getTag("processor_spec")) {
-            for (auto elt : spec->getChildren()) {
-                if (elt->getName() == "context_data") {
-                    context.restoreFromSpec(elt, &translator);
-                }
-            }
-        } else {
-            err << "Warning: no processor specification was found\n";
+        const Element *el = specification.getTag("processor_spec");
+        if (el == nullptr) {
+            err << "No processor configuration tag found" << std::endl;
+            return;
         }
+        XmlDecode decoder(&translator, el);
+
+        auto elemId = decoder.openElement(ELEM_PROCESSOR_SPEC);
+        if (elemId == 0) {
+            err << "Warning: no processor specification was found" << std::endl;
+            return;
+        }
+
+        for (;;) {
+            auto subId = decoder.peekElement();
+            if (subId == 0) break;
+            if (subId == ELEM_CONTEXT_DATA) {
+                context.decodeFromSpec(decoder);
+            } else {
+                decoder.openElement();
+                decoder.closeElementSkipping(subId);
+            }
+        }
+        decoder.closeElement(elemId);
     }
 };
 
@@ -464,6 +490,8 @@ class Factory : public bap::disasm_factory {
 public:
     int init(const std::vector<std::string> &shares, bool print_targets) {
         try {
+            AttributeId::initialize();
+            ElementId::initialize();
             init_languages_path(shares);
             init_languages(print_targets);
         } catch (std::exception &e) {
@@ -530,7 +558,9 @@ private:
             for (const Element *child : doc->getRoot()->getChildren()) {
                 if (child->getName() == "language") {
                     LanguageDescription language;
-                    language.restoreXml(child);
+
+                    XmlDecode decoder(nullptr, child);
+                    language.decode(decoder);
                     languages[language.getId()] = language;
                     if (print_targets)
                         std::cout << "- " <<
