@@ -273,7 +273,7 @@ module Parser : sig
   val ignore : 'a t -> unit t
 
 
-  (** [choice [p; q; ...; z] is [p <|> q <|> ... z].  *)
+  (** [choice [p; q; ...; z] is [p <|> q <|> ... z]].  *)
   val choice : 'a t list -> 'a t
 
   (** [required p] rejects [p] if it's value is [None] *)

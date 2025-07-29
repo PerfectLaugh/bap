@@ -19,7 +19,7 @@ open Bap_primus.Std
 
     - Allocates a stack segment. The [stack_base] address points to
       the first byte beyond the end of the stack segment. The memory
-      region between [[stack_base - stack_size, stack_base)] is the
+      region between [(stack_base - stack_size, stack_base)] is the
       stack segment. Note, that the [stack_base] address doesn't
       belong to it. The memory is initialized to random values, and
       can be used to store automatic variables and pass arguments.
@@ -30,7 +30,7 @@ open Bap_primus.Std
     argument (program name), SP+8 to the first specified command line
     argument, and so on. A null will follow the last argument. After
     that the same null terminated table of environment variables will
-    follow. (It can be easy accessed via the [environ] symbol
+    follow. (It can be easy accessed via the [environ] symbol)
 
     Note: the layout of the main function stack frame is not
     standartized in the C standard, neither it is a part of any ABI. A

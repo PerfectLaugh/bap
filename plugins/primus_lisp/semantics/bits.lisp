@@ -9,7 +9,7 @@
   (select (- (word-width x) 1) x))
 
 (defun lsb (x)
-  "(msb X) is the least significant bit of X."
+  "(lsb X) is the least significant bit of X."
   (select 0 x))
 
 (defun carry (rd rn rm)
