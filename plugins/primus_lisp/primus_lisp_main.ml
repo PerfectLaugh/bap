@@ -5,8 +5,7 @@ open Monads.Std
 open Bap_primus.Std
 open Format
 module Sys = Stdlib.Sys
-include Self()
-
+include Self ()
 module Primitives = Primus_lisp_primitives
 module Semantics_primitives = Primus_lisp_semantic_primitives
 module Channels = Primus_lisp_io
@@ -16,14 +15,15 @@ module Local = Primus_lisp_config
 let is_folder p = Sys.file_exists p && Sys.is_directory p
 
 let library_paths =
-  let (/) = Filename.concat in
-  Local.Sites.lisp @
-  Local.Sites.site_lisp @
-  Configuration.[
-    datadir / "primus" / "lisp";
-    sysdatadir / "primus" / "site-lisp";
-    sysdatadir / "primus" / "lisp";
-  ] |> List.filter ~f:is_folder
+  let ( / ) = Filename.concat in
+  (Local.Sites.lisp @ Local.Sites.site_lisp
+  @ Configuration.
+      [
+        datadir / "primus" / "lisp";
+        sysdatadir / "primus" / "site-lisp";
+        sysdatadir / "primus" / "lisp";
+      ])
+  |> List.filter ~f:is_folder
 
 let dump_program prog =
   let margin = get_margin () in
@@ -34,144 +34,157 @@ let dump_program prog =
 let load_program paths features project =
   match Primus.Lisp.Load.program ~paths project features with
   | Ok prog ->
-    let context = Primus.Lisp.Context.of_program prog in
-    info "Loaded program in context:@\n@[<2>%a@]"
-      Primus.Lisp.Context.pp context;
-    prog
+      let context = Primus.Lisp.Context.of_program prog in
+      info "Loaded program in context:@\n@[<2>%a@]" Primus.Lisp.Context.pp
+        context;
+      prog
   | Error err ->
-    let err = asprintf "%a" Primus.Lisp.Load.pp_error err in
-    invalid_arg err
+      let err = asprintf "%a" Primus.Lisp.Load.pp_error err in
+      invalid_arg err
 
 module Documentation = struct
   let print proj =
     let module Machine = struct
       type 'a m = 'a
-      include Primus.Machine.Make(Monad.Ident)
+
+      include Primus.Machine.Make (Monad.Ident)
     end in
     let open Machine.Syntax in
-    let module Doc = Primus.Lisp.Doc.Make(Machine) in
-    let module Main = Primus.Machine.Main(Machine) in
-    let print =
-      Doc.generate_index >>|
-      Primus_lisp_documentation.print None in
+    let module Doc = Primus.Lisp.Doc.Make (Machine) in
+    let module Main = Primus.Machine.Main (Machine) in
+    let print = Doc.generate_index >>| Primus_lisp_documentation.print None in
     match Main.run proj print with
     | Normal, _ -> ()
     | Exn e, _ ->
-      eprintf "Failed to generate documentation: %s\n"
-        (Primus.Exn.to_string e);
-      exit 1
+        eprintf "Failed to generate documentation: %s\n"
+          (Primus.Exn.to_string e);
+        exit 1
 end
 
-module Signals(Machine : Primus.Machine.S) = struct
+module Signals (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
-  module Value = Primus.Value.Make(Machine)
-  module Eval = Primus.Interpreter.Make(Machine)
-  module Env = Primus.Env.Make(Machine)
-  module Lisp = Primus.Lisp.Make(Machine)
+  module Value = Primus.Value.Make (Machine)
+  module Eval = Primus.Interpreter.Make (Machine)
+  module Env = Primus.Env.Make (Machine)
+  module Lisp = Primus.Lisp.Make (Machine)
 
   let value = Machine.return
   let word = Value.of_word
+
   let int x =
     Machine.gets Project.target >>| Theory.Target.bits >>= fun width ->
     word (Word.of_int ~width x)
 
   let sym x = Value.Symbol.to_value x
   let var v = sym (Var.name v)
-  let unit f () = [f ()]
-  let one f x = [f x]
-  let pair (f,g) (x,y) = [f x; g y]
+  let unit f () = [ f () ]
+  let one f x = [ f x ]
+  let pair (f, g) (x, y) = [ f x; g y ]
   let cond j = Eval.exp (Jmp.cond j)
   let name = Value.b0
   let args = []
-
-  let parameters name args =
-    sym name ::
-    List.map args ~f:Machine.return
-
-  let call make_pars (name,args) = make_pars name args
+  let parameters name args = sym name :: List.map args ~f:Machine.return
+  let call make_pars (name, args) = make_pars name args
 
   let signal obs kind proj params doc =
-    Lisp.signal ~params ~doc obs @@ fun arg ->
-    Machine.List.all (proj kind arg)
+    Lisp.signal ~params ~doc obs @@ fun arg -> Machine.List.all (proj kind arg)
 
   let init =
     let module Type = Primus.Lisp.Type.Spec in
-    Machine.sequence Primus.Interpreter.[
-        signal loading value one Type.(one int)
-          {|(loading A) is emitted before load from A occurs|} ;
-        signal loaded (value,value) pair Type.(tuple [int; byte])
-          {|(loaded A X) is emitted when X is loaded from A|} ;
-        signal storing value one Type.(one int)
-          {|(storing A) is emitted before store to A occurs|};
-        signal stored (value,value) pair Type.(tuple [int; byte])
-          {|(stored A X) is emitted when X is stored to A|};
-        signal read  (var,value) pair Type.(tuple [sym; any])
-          {|(read V X) is emitted when X is read from V|};
-        signal written (var,value) pair Type.(tuple [sym; any])
-          {|(written V X) is emitted when X is written to V|};
-        signal pc_change word one Type.(one int)
-          {|(pc-change PC) is emitted when PC is updated|};
-        signal jumping (value,value) pair Type.(tuple [bool; int])
-          {|(jumping C D) is emitted before jump to D occurs under the
+    Machine.sequence
+      Primus.Interpreter.
+        [
+          signal loading value one
+            Type.(one int)
+            {|(loading A) is emitted before load from A occurs|};
+          signal loaded (value, value) pair
+            Type.(tuple [ int; byte ])
+            {|(loaded A X) is emitted when X is loaded from A|};
+          signal storing value one
+            Type.(one int)
+            {|(storing A) is emitted before store to A occurs|};
+          signal stored (value, value) pair
+            Type.(tuple [ int; byte ])
+            {|(stored A X) is emitted when X is stored to A|};
+          signal read (var, value) pair
+            Type.(tuple [ sym; any ])
+            {|(read V X) is emitted when X is read from V|};
+          signal written (var, value) pair
+            Type.(tuple [ sym; any ])
+            {|(written V X) is emitted when X is written to V|};
+          signal pc_change word one
+            Type.(one int)
+            {|(pc-change PC) is emitted when PC is updated|};
+          signal jumping (value, value) pair
+            Type.(tuple [ bool; int ])
+            {|(jumping C D) is emitted before jump to D occurs under the
           condition C|};
-        signal Primus.Linker.Trace.call parameters call
-          Type.(one sym // all any)
-          {|(call NAME X Y ...) is emitted when a call to a function with the
+          signal Primus.Linker.Trace.call parameters call
+            Type.(one sym // all any)
+            {|(call NAME X Y ...) is emitted when a call to a function with the
           symbolic NAME occurs with the specified list of arguments X,Y,...|};
-        signal Primus.Linker.Trace.return parameters call
-          Type.(one sym // all any)
-          {|(call-return NAME X Y ... R) is emitted when a call to a function with the
+          signal Primus.Linker.Trace.return parameters call
+            Type.(one sym // all any)
+            {|(call-return NAME X Y ... R) is emitted when a call to a function with the
           symbolic NAME returns with the specified list of arguments
           X,Y,... and return value R.|};
-        signal interrupt int one Type.(one int)
-          {|(interrupt N) is emitted when the hardware interrupt N occurs|};
-        signal Primus.System.stop sym one Type.(one sym)
-          "(system-stop NAME) occurs when the system with the given
-           name finished its execution. The machine is in the
-           restricted mode in the body of the methods" ;
-        Lisp.signal Primus.System.init (fun () -> Machine.return [])
-          ~doc: {|(init) occurs when the Primus Machine is initialized|}
-          ~params:Type.unit;
-        Lisp.signal Primus.System.fini (fun () -> Machine.return [])
-          ~doc:{|(fini) occurs when the Primus Machine is finished|}
-          ~params:Type.unit;
-        Lisp.signal Primus.Machine.kill (fun _ -> Machine.return [])
-          ~doc:"(machine-kill) occurs when Machine is killed and could be
-          used for machine cleanup/teardown and analysis summaries.
-          The machine is in the resticted mode in the body of the
-          methods."
-          ~params:Type.unit;
-      ]
+          signal interrupt int one
+            Type.(one int)
+            {|(interrupt N) is emitted when the hardware interrupt N occurs|};
+          signal Primus.System.stop sym one
+            Type.(one sym)
+            "(system-stop NAME) occurs when the system with the given\n\
+            \           name finished its execution. The machine is in the\n\
+            \           restricted mode in the body of the methods";
+          Lisp.signal Primus.System.init
+            (fun () -> Machine.return [])
+            ~doc:{|(init) occurs when the Primus Machine is initialized|}
+            ~params:Type.unit;
+          Lisp.signal Primus.System.fini
+            (fun () -> Machine.return [])
+            ~doc:{|(fini) occurs when the Primus Machine is finished|}
+            ~params:Type.unit;
+          Lisp.signal Primus.Machine.kill
+            (fun _ -> Machine.return [])
+            ~doc:
+              "(machine-kill) occurs when Machine is killed and could be\n\
+              \          used for machine cleanup/teardown and analysis \
+               summaries.\n\
+              \          The machine is in the resticted mode in the body of the\n\
+              \          methods."
+            ~params:Type.unit;
+        ]
 end
 
 let load_lisp_program dump paths features =
-  let module Loader(Machine : Primus.Machine.S) = struct
+  let module Loader (Machine : Primus.Machine.S) = struct
     open Machine.Syntax
-    module Lisp = Primus.Lisp.Make(Machine)
+    module Lisp = Primus.Lisp.Make (Machine)
+
     let init () =
       Machine.get () >>= fun project ->
       let prog = load_program paths features project in
       if dump then dump_program prog;
-      Lisp.link_program prog;
+      Lisp.link_program prog
   end in
   Primus.Machine.add_component (module Loader) [@warning "-D"];
-  Primus.Components.register_generic "load-lisp-library" (module Loader)
+  Primus.Components.register_generic "load-lisp-library"
+    (module Loader)
     ~package:"bap"
-    ~desc:"Loads the Primus Library. Links all functions defined as \
-           external into the Primus Machine. Symbols are assumed to \
-           be strong, i.e., if the symbol is already linked, then \
-           it will be overriden by the corresponding Lisp implemenetation"
+    ~desc:
+      "Loads the Primus Library. Links all functions defined as external into \
+       the Primus Machine. Symbols are assumed to be strong, i.e., if the \
+       symbol is already linked, then it will be overriden by the \
+       corresponding Lisp implemenetation"
 
-module LispCore(Machine : Primus.Machine.S) = struct
+module LispCore (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
-  module Signals = Signals(Machine)
-  let print_message msg =
-    Machine.return (info "%a" Primus.Lisp.Message.pp msg)
+  module Signals = Signals (Machine)
 
-  let init () = Machine.sequence [
-      Signals.init;
-      Primus.Lisp.message >>> print_message;
-    ]
+  let print_message msg = Machine.return (info "%a" Primus.Lisp.Message.pp msg)
+
+  let init () =
+    Machine.sequence [ Signals.init; Primus.Lisp.message >>> print_message ]
 end
 
 module Redirection = struct
@@ -179,68 +192,63 @@ module Redirection = struct
 
   let known_channels = Primus_lisp_io.standard_channels
 
-
   let make oldname newname =
-    if String.length oldname < 1 ||
-       String.length newname < 1
-    then `Error ("bad redirection: expected two non-empty names")
-    else if Char.equal (String.get oldname 0) '<'
-    then if List.mem known_channels ~equal:String.equal oldname
-      then `Ok (oldname,newname)
-      else `Error (sprintf "unknown channel %s, expected one of %s"
-                     oldname (String.concat ~sep:", " known_channels))
-    else `Ok (oldname,newname)
+    if String.length oldname < 1 || String.length newname < 1 then
+      `Error "bad redirection: expected two non-empty names"
+    else if Char.equal (String.get oldname 0) '<' then
+      if List.mem known_channels ~equal:String.equal oldname then
+        `Ok (oldname, newname)
+      else
+        `Error
+          (sprintf "unknown channel %s, expected one of %s" oldname
+             (String.concat ~sep:", " known_channels))
+    else `Ok (oldname, newname)
 
-  let parse str = match String.split str ~on:':' with
-    | [oldname; newname] -> make oldname newname
+  let parse str =
+    match String.split str ~on:':' with
+    | [ oldname; newname ] -> make oldname newname
     | _ -> `Error (sprintf "bad redirection, expected <old>:<new> got %s" str)
 
-  let print ppf (oldname,newname) =
-    Format.fprintf ppf "%s:%s" oldname newname
-
-  let convert = Config.converter parse print ("none","none")
+  let print ppf (oldname, newname) = Format.fprintf ppf "%s:%s" oldname newname
+  let convert = Config.converter parse print ("none", "none")
 end
 
-module TypeErrorSummary(Machine : Primus.Machine.S) = struct
+module TypeErrorSummary (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
-
-  module Lisp = Primus.Lisp.Make(Machine)
+  module Lisp = Primus.Lisp.Make (Machine)
 
   let init () =
     Primus.System.init >>> fun () ->
     Lisp.types >>| fun env ->
     let errors = List.length (Primus.Lisp.Type.errors env) in
-    if errors = 0
-    then Format.printf "Primus Lisp code is well-typed@\n%!"
-    else Format.printf "Primus Lisp code is ill-typed. Found %d error%s.@\n%!"
-        errors (if errors > 1 then "s" else "")
+    if errors = 0 then Format.printf "Primus Lisp code is well-typed@\n%!"
+    else
+      Format.printf "Primus Lisp code is ill-typed. Found %d error%s.@\n%!"
+        errors
+        (if errors > 1 then "s" else "")
 end
 
 let typecheck proj =
   let module Machine = struct
     type 'a m = 'a
-    include Primus.Machine.Make(Monad.Ident)
+
+    include Primus.Machine.Make (Monad.Ident)
   end in
-  let module Main = Primus.Machine.Main(Machine) in
-  let module Lisp = Primus.Lisp.Make(Machine) in
+  let module Main = Primus.Machine.Main (Machine) in
+  let module Lisp = Primus.Lisp.Make (Machine) in
   Primus.Machine.add_component (module TypeErrorSummary) [@warning "-D"];
   match Main.run proj @@ Machine.return () with
-  | Normal,_ -> ()
-  | Exn err,_ ->
-    warning "Primus Framework failed to initialize: %s@\n%!"
-      (Primus.Exn.to_string err)
+  | Normal, _ -> ()
+  | Exn err, _ ->
+      warning "Primus Framework failed to initialize: %s@\n%!"
+        (Primus.Exn.to_string err)
 
-
-module TypeErrorPrinter(Machine : Primus.Machine.S) = struct
+module TypeErrorPrinter (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
-  module Env = Primus.Env.Make(Machine)
+  module Env = Primus.Env.Make (Machine)
 
-  let report err =
-    Machine.return @@
-    error "%a" Primus.Lisp.Type.pp_error err
-
-  let init () =
-    Primus.Lisp.Type.error >>> report
+  let report err = Machine.return @@ error "%a" Primus.Lisp.Type.pp_error err
+  let init () = Primus.Lisp.Type.error >>> report
 end
 
 module Semantics = struct
@@ -249,57 +257,58 @@ module Semantics = struct
   module Lisp = Primus.Lisp
   module Insn = Disasm_expert.Basic.Insn
 
-  let (:=) p x v = KB.Value.put p v x
+  let ( := ) p x v = KB.Value.put p v x
   let empty = KB.Value.empty Theory.Source.cls
-  let pack prog = List.fold ~init:empty [
-      Theory.Source.language := Lisp.Unit.language;
-      Lisp.Semantics.program := prog;
-    ] ~f:(|>)
+
+  let pack prog =
+    List.fold ~init:empty
+      [
+        Theory.Source.language := Lisp.Unit.language;
+        Lisp.Semantics.program := prog;
+      ]
+      ~f:( |> )
 
   let load_lisp_unit ~paths ~features =
-    KB.Rule.(begin
-        declare "primus-lisp-program" |>
-        require Theory.Label.unit          |>
-        require Theory.Unit.target         |>
-        provide Lisp.Semantics.program |>
-        comment "loads a program to the Lisp unit"
-      end);
+    KB.Rule.(
+      declare "primus-lisp-program"
+      |> require Theory.Label.unit |> require Theory.Unit.target
+      |> provide Lisp.Semantics.program
+      |> comment "loads a program to the Lisp unit");
     KB.promise Theory.Unit.source @@ fun unit ->
     Lisp.Unit.is_lisp unit >>= function
     | false -> !!empty
     | true ->
-      KB.collect Theory.Unit.target unit >>| fun target ->
-      pack @@
-      load_program paths features @@
-      Project.empty target
+        KB.collect Theory.Unit.target unit >>| fun target ->
+        pack @@ load_program paths features @@ Project.empty target
 
   let args_of_ops (module CT : Theory.Core) target insn =
     let bits = Theory.Target.bits target in
     let word = Theory.Bitv.define bits in
     let bitv x = Bitvec.(int64 x mod modulus bits) in
-    Insn.ops insn |> Array.to_list |>
-    List.map ~f:(function
-        | Op.Fmm _ -> CT.unk word >>| Theory.Value.forget
-        | Op.Imm x ->
-          let x = bitv (Imm.to_int64 x) in
-          CT.int word x >>| Theory.Value.forget >>| fun v ->
-          KB.Value.put Lisp.Semantics.static v (Some x)
-        | Op.Reg v ->
-          let name = Reg.name v in
-          let reg = match Theory.Target.var target name with
-            | None -> Theory.Var.forget @@ Theory.Var.define word name
-            | Some v -> v in
-          CT.var reg >>| fun v ->
-          KB.Value.put Lisp.Semantics.symbol v (Some name)) |>
-    KB.List.all
+    Insn.ops insn |> Array.to_list
+    |> List.map ~f:(function
+         | Op.Fmm _ -> CT.unk word >>| Theory.Value.forget
+         | Op.Imm x ->
+             let x = bitv (Imm.to_int64 x) in
+             CT.int word x >>| Theory.Value.forget >>| fun v ->
+             KB.Value.put Lisp.Semantics.static v (Some x)
+         | Op.Reg v ->
+             let name = Reg.name v in
+             let reg =
+               match Theory.Target.var target name with
+               | None -> Theory.Var.forget @@ Theory.Var.define word name
+               | Some v -> v
+             in
+             CT.var reg >>| fun v ->
+             KB.Value.put Lisp.Semantics.symbol v (Some name))
+    |> KB.List.all
 
   let translate_ops_to_args () =
-    KB.Rule.(begin
-        declare "translate-ops-to-lisp-args" |>
-        require Insn.slot |>
-        provide Lisp.Semantics.args |>
-        comment "translates instruction operands to lisp arguments"
-      end);
+    KB.Rule.(
+      declare "translate-ops-to-lisp-args"
+      |> require Insn.slot
+      |> provide Lisp.Semantics.args
+      |> comment "translates instruction operands to lisp arguments");
     KB.promise Lisp.Semantics.args @@ fun this ->
     let*? insn = KB.collect Insn.slot this in
     Theory.current >>= fun theory ->
@@ -307,136 +316,147 @@ module Semantics = struct
     args_of_ops theory target insn >>| Option.some
 
   let translate_opcode_to_name () =
-    KB.Rule.(begin
-        declare "translate-opcode-to-lisp-name" |>
-        require Insn.slot |>
-        provide Lisp.Semantics.name |>
-        comment "translates opcode to the lisp definition name"
-      end);
+    KB.Rule.(
+      declare "translate-opcode-to-lisp-name"
+      |> require Insn.slot
+      |> provide Lisp.Semantics.name
+      |> comment "translates opcode to the lisp definition name");
     KB.promise Lisp.Semantics.name @@ fun this ->
     KB.collect Insn.slot this >>|? fun insn ->
-    KB.Name.create ~package:(Insn.encoding insn) (Insn.name insn) |>
-    Option.some
+    KB.Name.create ~package:(Insn.encoding insn) (Insn.name insn) |> Option.some
 
   let strip_lisp_extension = String.chop_suffix ~suffix:".lisp"
 
   let collect_features folder =
-    Sys.readdir folder |> Array.to_list |>
-    List.filter_map ~f:strip_lisp_extension
+    Sys.readdir folder |> Array.to_list
+    |> List.filter_map ~f:strip_lisp_extension
 
-  let default_paths = let (/) = Filename.concat in
-    Local.Sites.semantics @
-    Configuration.[
-      datadir / "primus" / "semantics";
-      sysdatadir / "primus" / "semantics";
-    ]
+  let default_paths =
+    let ( / ) = Filename.concat in
+    Local.Sites.semantics
+    @ Configuration.
+        [
+          datadir / "primus" / "semantics"; sysdatadir / "primus" / "semantics";
+        ]
 
   let check_user_provided paths =
     match List.find paths ~f:(Fn.non is_folder) with
     | None -> ()
     | Some path ->
-      invalid_argf "unable to load semantics from %S, \
-                    the path must exist and be a folder" path ()
+        invalid_argf
+          "unable to load semantics from %S, the path must exist and be a \
+           folder"
+          path ()
 
   let load_lisp_sources paths =
     check_user_provided paths;
     let paths = List.filter ~f:is_folder (paths @ default_paths) in
-    let features = "core"::List.concat_map ~f:collect_features paths in
+    let features = "core" :: List.concat_map ~f:collect_features paths in
     let paths = paths @ library_paths in
-    let prog t =
-      pack@@load_program paths features@@Project.empty t in
+    let prog t = pack @@ load_program paths features @@ Project.empty t in
     KB.promise Theory.Unit.source @@ fun this ->
     Primus.Lisp.Unit.is_lisp this >>= function
     | true -> !!empty
-    | false ->
-      KB.collect Theory.Unit.target this >>| prog
+    | false -> KB.collect Theory.Unit.target this >>| prog
 
   let enable_lifter sites =
     translate_ops_to_args ();
     translate_opcode_to_name ();
-    load_lisp_sources sites;
+    load_lisp_sources sites
 end
 
 let () =
-  Config.manpage [
-    `S "DESCRIPTION";
-    `P "Installs and registers the Primus Lisp library. The library
-      implements stdlib interface in Lisp. Only $(i,init) module is
-      loaded automatically.";
-    `P
-      "The plugin also provides an interface through which it is
-  possible to load new libraries and modules, or to load existing
-  modules.";
-
-    `S "SEE ALSO";
-    `P "$(b,bap-primus)(3) $(b,bap-run)(1)"
-  ];
+  Config.manpage
+    [
+      `S "DESCRIPTION";
+      `P
+        "Installs and registers the Primus Lisp library. The library\n\
+        \      implements stdlib interface in Lisp. Only $(i,init) module is\n\
+        \      loaded automatically.";
+      `P
+        "The plugin also provides an interface through which it is\n\
+        \  possible to load new libraries and modules, or to load existing\n\
+        \  modules.";
+      `S "SEE ALSO";
+      `P "$(b,bap-primus)(3) $(b,bap-run)(1)";
+    ];
 
   let documentation =
-    Config.(flag ~doc:"outputs Primus Lisp documentation") "documentation" in
+    Config.(flag ~doc:"outputs Primus Lisp documentation") "documentation"
+  in
 
-  let dump =
-    Config.(flag ~doc:"dumps generated AST" "dump") in
+  let dump = Config.(flag ~doc:"dumps generated AST" "dump") in
 
   let enable_typecheck =
-    Config.flag "typecheck"
-      ~synonyms:["type-check"]
-      ~doc:"typechecks the program and prints erros if they exist" in
+    Config.flag "typecheck" ~synonyms:[ "type-check" ]
+      ~doc:"typechecks the program and prints erros if they exist"
+  in
 
-  let libs =
-    Config.(param (list dir) ~doc:"paths to lisp libraries" "add") in
+  let libs = Config.(param (list dir) ~doc:"paths to lisp libraries" "add") in
 
   let features =
-    Config.(param_all (list string) ~doc:"load specified module" "load"
-              ~default:[["posix"]]) in
+    Config.(
+      param_all (list string) ~doc:"load specified module" "load"
+        ~default:[ [ "posix" ] ])
+  in
 
   let semantics =
-    let doc = sprintf "prepend the specified folders to the list of
-      folders where semantics files are searched. Every file that has
-      the $(b,.lisp) extension in these folders will be loaded and
-      linked to the Primus Lisp program that is used to define program
-      semantics. The initial list of folders contains $(b,%s) and
-      $(b,%s). When features are loaded, the first found file that has
-      the matching name is loaded, so it is possible to override
-      features stored in the system or local data directories. When
-      set to $(b,disable) this option disables the Primus Lisp lifter."
+    let doc =
+      sprintf
+        "prepend the specified folders to the list of\n\
+        \      folders where semantics files are searched. Every file that has\n\
+        \      the $(b,.lisp) extension in these folders will be loaded and\n\
+        \      linked to the Primus Lisp program that is used to define program\n\
+        \      semantics. The initial list of folders contains $(b,%s) and\n\
+        \      $(b,%s). When features are loaded, the first found file that has\n\
+        \      the matching name is loaded, so it is possible to override\n\
+        \      features stored in the system or local data directories. When\n\
+        \      set to $(b,disable) this option disables the Primus Lisp lifter."
         (List.nth_exn Semantics.default_paths 0)
-        (List.nth_exn Semantics.default_paths 1) in
-    Config.(param (list string) "semantics" ~doc) in
+        (List.nth_exn Semantics.default_paths 1)
+    in
+    Config.(param (list string) "semantics" ~doc)
+  in
 
   let semantics_stdout =
-    Config.(param (some string) "semantics-stdout"
-              ~doc:"redirects messages in the semantic definitions to \
-                    the specified file.") in
+    Config.(
+      param (some string) "semantics-stdout"
+        ~doc:
+          "redirects messages in the semantic definitions to the specified \
+           file.")
+  in
 
   let redirects =
-    let doc = sprintf
-        "establishes a redirection between an emulated file path and a
-       file path on a host system. Each redirection should be of form
-       <emu-name>:<real-name>, where <emu-name> could be a path or a
-       a name of one of the standard channels, i.e., %s."
-        (String.concat ~sep:" or " Redirection.known_channels) in
-    Config.(param (list Redirection.convert) ~doc "channel-redirect") in
+    let doc =
+      sprintf
+        "establishes a redirection between an emulated file path and a\n\
+        \       file path on a host system. Each redirection should be of form\n\
+        \       <emu-name>:<real-name>, where <emu-name> could be a path or a\n\
+        \       a name of one of the standard channels, i.e., %s."
+        (String.concat ~sep:" or " Redirection.known_channels)
+    in
+    Config.(param (list Redirection.convert) ~doc "channel-redirect")
+  in
 
-  Config.declare_extension
-    ~doc:"loads and manages Primus Lisp sources"
-    ~provides:["primus"; "lisp"; "semantics"; "lifter"]
-  @@ fun {Config.get=(!!)} ->
+  Config.declare_extension ~doc:"loads and manages Primus Lisp sources"
+    ~provides:[ "primus"; "lisp"; "semantics"; "lifter" ]
+  @@ fun { Config.get = ( !! ) } ->
   if !!documentation then
-    Project.register_pass' ~deps:["api"] ~autorun:true Documentation.print;
+    Project.register_pass' ~deps:[ "api" ] ~autorun:true Documentation.print;
   if !!enable_typecheck then
-    Project.register_pass' ~deps:["api"] ~autorun:true typecheck;
-  let paths = [Filename.current_dir_name] @ !!libs @ library_paths in
+    Project.register_pass' ~deps:[ "api" ] ~autorun:true typecheck;
+  let paths = [ Filename.current_dir_name ] @ !!libs @ library_paths in
   let features = "core" :: List.concat !!features in
   Primus.Components.register_generic ~package:"bap" "lisp-type-checker"
     (module TypeErrorSummary)
     ~desc:"Typechecks program and outputs the summary in the standard output.";
   Primus.Machine.add_component (module LispCore) [@warning "-D"];
-  Primus.Components.register_generic "lisp-core" (module LispCore)
+  Primus.Components.register_generic "lisp-core"
+    (module LispCore)
     ~package:"bap"
-    ~desc:"Initializes Primus Lisp core. Forwards Lisp message to \
-           the BAP log subsystem and enables propagation of \
-           observations to signals.";
+    ~desc:
+      "Initializes Primus Lisp core. Forwards Lisp message to the BAP log \
+       subsystem and enables propagation of observations to signals.";
   Primus.Machine.add_component (module TypeErrorPrinter) [@warning "-D"];
   Primus.Components.register_generic ~package:"bap" "lisp-type-error-printer"
     (module TypeErrorPrinter)
@@ -445,14 +465,16 @@ let () =
   Primitives.init ();
   Semantics_primitives.provide ();
   Semantics.load_lisp_unit ~paths ~features;
-  let stdout = Option.map !!semantics_stdout ~f:(fun file ->
-      let ch = Out_channel.create file in
-      let ppf = Format.formatter_of_out_channel ch in
-      at_exit (fun () ->
-          Format.pp_print_flush ppf ();
-          Out_channel.close ch);
-      ppf) in
+  let stdout =
+    Option.map !!semantics_stdout ~f:(fun file ->
+        let ch = Out_channel.create file in
+        let ppf = Format.formatter_of_out_channel ch in
+        at_exit (fun () ->
+            Format.pp_print_flush ppf ();
+            Out_channel.close ch);
+        ppf)
+  in
   Primus.Lisp.Semantics.enable ?stdout ();
-  if Poly.(!!semantics <> ["disable"])
-  then Semantics.enable_lifter !!semantics;
+  if Poly.(!!semantics <> [ "disable" ]) then
+    Semantics.enable_lifter !!semantics;
   load_lisp_program !!dump paths features

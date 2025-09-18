@@ -1,4 +1,5 @@
-let man = {|
+let man =
+  {|
   # DESCRIPTION
 
   Disassembles and analyzes the input file. This is the default
@@ -90,24 +91,23 @@ open Regular.Std
 open Monads.Std
 open Format
 open Bap_plugins.Std
-
 module Sys = Stdlib.Sys
-
-include Self()
+include Self ()
 open Bap_main
 
-let features_used = [
-  "semantics";
-  "function-starts";
-  "disassembler";
-  "lifter";
-  "symbolizer";
-  "rooter";
-  "reconstructor";
-  "brancher";
-  "loader";
-  "abi";
-]
+let features_used =
+  [
+    "semantics";
+    "function-starts";
+    "disassembler";
+    "lifter";
+    "symbolizer";
+    "rooter";
+    "reconstructor";
+    "brancher";
+    "loader";
+    "abi";
+  ]
 
 type failure =
   | Expects_a_regular_file of string
@@ -122,10 +122,9 @@ type failure =
   | Unknown_analysis of string
   | No_knowledge
 
-
 type Extension.Error.t += Fail of failure
 
-module Err = Monad.Result.Make(Extension.Error)(Monad.Ident)
+module Err = Monad.Result.Make (Extension.Error) (Monad.Ident)
 open Err.Syntax
 
 let pass_error = Result.map_error ~f:(fun err -> Fail (Pass err))
@@ -138,16 +137,19 @@ end = struct
   open KB.Syntax
   module Basic = Disasm_expert.Basic.Insn
 
-  let bool = KB.Domain.flat ~equal:Bool.equal "flat-bool"
-      ~inspect:sexp_of_bool ~empty:false
-  let has_semantics = KB.Class.property ~public:true ~package:"bap"
-      Theory.Semantics.cls "has-semantics" bool
+  let bool =
+    KB.Domain.flat ~equal:Bool.equal "flat-bool" ~inspect:sexp_of_bool
+      ~empty:false
 
-  let present eff =
-    eff >>| fun x -> KB.Value.put has_semantics x true
+  let has_semantics =
+    KB.Class.property ~public:true ~package:"bap" Theory.Semantics.cls
+      "has-semantics" bool
+
+  let present eff = eff >>| fun x -> KB.Value.put has_semantics x true
 
   module Present : Theory.Core = struct
     include Theory.Empty
+
     let blk lbl data ctrl = present @@ blk lbl data ctrl
     let perform s = present @@ perform s
     let seq x y = present @@ seq x y
@@ -157,99 +159,84 @@ end = struct
   let pp_code ppf code =
     let dom = KB.Slot.domain Theory.Semantics.code in
     match KB.Domain.inspect dom code with
-    | Sexp.List [Atom s] -> Format.fprintf ppf "%s" s
+    | Sexp.List [ Atom s ] -> Format.fprintf ppf "%s" s
     | _ -> Format.fprintf ppf "not disassembled"
 
   let pp_ops ppf ops =
     if Array.is_empty ops then Format.fprintf ppf ""
-    else Format.fprintf ppf " %s"
-        (String.concat_array ~sep:" " @@
-         Array.map ~f:Op.to_string ops)
+    else
+      Format.fprintf ppf " %s"
+        (String.concat_array ~sep:" " @@ Array.map ~f:Op.to_string ops)
 
   let pp_basic ppf insn =
-    Format.fprintf ppf "(%s:%s%a)"
-      (Basic.encoding insn)
-      (Basic.name insn)
+    Format.fprintf ppf "(%s:%s%a)" (Basic.encoding insn) (Basic.name insn)
       pp_ops (Basic.ops insn)
 
   let update_missing insn histo =
     Map.update histo (Basic.name insn) ~f:(function
-        | None -> 1
-        | Some c -> c + 1)
+      | None -> 1
+      | Some c -> c + 1)
 
   let build_histo =
     Map.fold ~init:Int.Map.empty ~f:(fun ~key ~data ->
         Map.add_multi ~key:data ~data:key)
 
   let pp_histo ppf stats =
-    build_histo stats |>
-    Map.to_sequence ~order:`Increasing_key |>
-    Seq.iter ~f:(fun (count,codes) ->
-        List.iter codes ~f:(Format.fprintf ppf "%-4d %s@\n" count))
+    build_histo stats
+    |> Map.to_sequence ~order:`Increasing_key
+    |> Seq.iter ~f:(fun (count, codes) ->
+           List.iter codes ~f:(Format.fprintf ppf "%-4d %s@\n" count))
 
   let print_missing () =
     let lifted = ref 0 and missed = ref 0 and failed = ref 0 in
-    KB.objects Theory.Program.cls >>=
-    KB.Seq.fold ~init:String.Map.empty ~f:(fun stats insn ->
-        let* sema = KB.collect Theory.Semantics.slot insn in
-        let code = KB.Value.get Theory.Semantics.code sema in
-        if Option.is_none code then KB.return stats
-        else KB.collect Theory.Label.addr insn >>= function
-          | None -> KB.return stats
-          | Some addr ->
-            KB.collect Basic.slot insn >>| function
-            | None ->
-              Format.printf "%a: %a ; not disassembled@\n" Bitvec.pp
-                addr pp_code code;
-              incr failed;
-              stats
-            | Some _ when KB.Value.get has_semantics sema ->
-              incr lifted;
-              stats
-            | Some basic ->
-              incr missed;
-              Format.printf "%a: %a ; %a ; %a@\n" Bitvec.pp addr
-                pp_code code Insn.pp sema
-                pp_basic basic;
-              update_missing basic stats) >>| fun stats ->
-    Format.printf "@\nHistogram:@\n%a@\n\
-                   %-8s %d@\n\
-                   %-8s %d@\n\
-                   %-8s %d@\n"
-      pp_histo stats "Lifted:" !lifted "Failed:" !failed "Missed:" !missed
+    KB.objects Theory.Program.cls
+    >>= KB.Seq.fold ~init:String.Map.empty ~f:(fun stats insn ->
+            let* sema = KB.collect Theory.Semantics.slot insn in
+            let code = KB.Value.get Theory.Semantics.code sema in
+            if Option.is_none code then KB.return stats
+            else
+              KB.collect Theory.Label.addr insn >>= function
+              | None -> KB.return stats
+              | Some addr -> (
+                  KB.collect Basic.slot insn >>| function
+                  | None ->
+                      Format.printf "%a: %a ; not disassembled@\n" Bitvec.pp
+                        addr pp_code code;
+                      incr failed;
+                      stats
+                  | Some _ when KB.Value.get has_semantics sema ->
+                      incr lifted;
+                      stats
+                  | Some basic ->
+                      incr missed;
+                      Format.printf "%a: %a ; %a ; %a@\n" Bitvec.pp addr pp_code
+                        code Insn.pp sema pp_basic basic;
+                      update_missing basic stats))
+    >>| fun stats ->
+    Format.printf "@\nHistogram:@\n%a@\n%-8s %d@\n%-8s %d@\n%-8s %d@\n" pp_histo
+      stats "Lifted:" !lifted "Failed:" !failed "Missed:" !missed
 
-  let print () =
-    Toplevel.exec @@ print_missing ()
+  let print () = Toplevel.exec @@ print_missing ()
 
   let declare_theory () =
-    Theory.declare
-      ~package:"bap"
-      ~name:"present"
+    Theory.declare ~package:"bap" ~name:"present"
       ~desc:"tracks the presence of semantics"
       (KB.return (module Present : Theory.Core))
 
-  let enable () =
-    declare_theory ()
+  let enable () = declare_theory ()
 end
 
 let run_passes base proj =
-  Err.List.fold ~init:(0,proj) ~f:(fun (step,proj) pass ->
-      report_progress
-        ~stage:(step+base)
-        ~note:(Project.Pass.name pass) ();
+  Err.List.fold ~init:(0, proj) ~f:(fun (step, proj) pass ->
+      report_progress ~stage:(step + base) ~note:(Project.Pass.name pass) ();
       Project.Pass.run pass proj |> pass_error >>= fun proj ->
-      Ok (step+1,proj))
+      Ok (step + 1, proj))
 
-let knowledge_reader = Data.Read.create
-    ~of_bigstring:Knowledge.of_bigstring ()
-
-let knowledge_writer = Data.Write.create
-    ~to_bigstring:Knowledge.to_bigstring ()
+let knowledge_reader = Data.Read.create ~of_bigstring:Knowledge.of_bigstring ()
+let knowledge_writer = Data.Write.create ~to_bigstring:Knowledge.to_bigstring ()
 
 let knowledge_cache () =
-  Data.Cache.Service.request
-    knowledge_reader
-    knowledge_writer
+  Data.Cache.Service.request knowledge_reader knowledge_writer
 
 let project_state_cache () =
   let module State = struct
@@ -263,39 +250,33 @@ let project_state_cache () =
 
 let import_knowledge_from_cache digest =
   let digest = digest ~namespace:"knowledge" in
-  info "looking for knowledge with digest %a"
-    Data.Cache.Digest.pp digest;
+  info "looking for knowledge with digest %a" Data.Cache.Digest.pp digest;
   let cache = knowledge_cache () in
   match Data.Cache.load cache digest with
   | None -> false
   | Some state ->
-    info "importing knowledge from cache";
-    Toplevel.set state;
-    true
+      info "importing knowledge from cache";
+      Toplevel.set state;
+      true
 
 let store_knowledge_in_cache digest =
   let digest = digest ~namespace:"knowledge" in
-  info "caching knowledge with digest %a"
-    Data.Cache.Digest.pp digest;
+  info "caching knowledge with digest %a" Data.Cache.Digest.pp digest;
   let cache = knowledge_cache () in
-  Toplevel.current () |>
-  Data.Cache.save cache digest
-
+  Toplevel.current () |> Data.Cache.save cache digest
 
 let process passes outputs project =
-  let autoruns = Project.passes () |>
-                 List.filter ~f:Project.Pass.autorun in
+  let autoruns = Project.passes () |> List.filter ~f:Project.Pass.autorun in
   let autos = List.length autoruns in
   let total = List.length passes + autos in
   report_progress ~note:"analyzing" ~total ();
-  run_passes 0 project autoruns >>= fun (step,proj) ->
-  run_passes step proj passes >>| fun (_,proj) ->
+  run_passes 0 project autoruns >>= fun (step, proj) ->
+  run_passes step proj passes >>| fun (_, proj) ->
   List.iter outputs ~f:(function
-      | `file dst,fmt,ver ->
+    | `file dst, fmt, ver ->
         Out_channel.with_file dst ~f:(fun ch ->
             Project.Io.save ~fmt ?ver ch proj)
-      | `stdout,fmt,ver ->
-        Project.Io.show ~fmt ?ver proj);
+    | `stdout, fmt, ver -> Project.Io.show ~fmt ?ver proj);
   proj
 
 let old_style_passes =
@@ -306,125 +287,131 @@ let old_style_passes =
 
 let passes =
   Extension.Command.parameters
-    ~doc:"Run the selected passes (in the specified order)"
-    ~aliases:["p"]
-    Extension.Type.("PASSES" %: list string) "passes"
+    ~doc:"Run the selected passes (in the specified order)" ~aliases:[ "p" ]
+    Extension.Type.("PASSES" %: list string)
+    "passes"
 
 let outputs =
   Extension.Command.parameters
-    ~doc:"Dumps the program to <FILE> (defaults to stdout) \
-          in the <FMT> format (defaults to bir)."
-    ~as_flag:"bir"
-    ~aliases:["d"]
+    ~doc:
+      "Dumps the program to <FILE> (defaults to stdout) in the <FMT> format \
+       (defaults to bir)."
+    ~as_flag:"bir" ~aliases:[ "d" ]
     Extension.Type.("[<FMT>[:<FILE>]]" %: string)
     "dump"
 
-let rw_file = Extension.Type.define
-    ~name:"<FILE>" ~print:Fn.id ~parse:Fn.id
+let rw_file =
+  Extension.Type.define ~name:"<FILE>" ~print:Fn.id ~parse:Fn.id
     ~digest:(fun path ->
-        if Sys.file_exists path
-        then Stdlib.Digest.file path
-        else Stdlib.Digest.string "empty")
+      if Sys.file_exists path then Stdlib.Digest.file path
+      else Stdlib.Digest.string "empty")
     ""
 
 let update =
-  Extension.Command.flag "update" ~aliases:["u"]
-    ~doc: "Preserve the knowledge base, i.e., do not change it."
+  Extension.Command.flag "update" ~aliases:[ "u" ]
+    ~doc:"Preserve the knowledge base, i.e., do not change it."
 
 let knowledge =
   Extension.Command.parameter
-    ~doc:"Import the knowledge to the provided knowledge base. \
-          If the $(b,--update) flag is set the the knowledge base \
-          will be also updated with the new information. If \
-          $(b,--update) is set, the the knowledge base might not \
-          exist and it will be created"
-    ~aliases:["k"; "knowledge-base";]
-    (Extension.Type.some rw_file) "project"
+    ~doc:
+      "Import the knowledge to the provided knowledge base. If the \
+       $(b,--update) flag is set the the knowledge base will be also updated \
+       with the new information. If $(b,--update) is set, the the knowledge \
+       base might not exist and it will be created"
+    ~aliases:[ "k"; "knowledge-base" ]
+    (Extension.Type.some rw_file)
+    "project"
 
 let print_missing =
   Extension.Command.flag
-    ~doc:"Print missing instructions. \
-          This option disables cache and redisassembles the binary \
-          from scratch. It then prints the list of all instructions \
-          that do not have a representable semantics, followed by \
-          the histogram of all missed opcodes, and finally prints \
-          the number of lifted opcodes, the number of addresses \
-          that wasn't disassembled at all, and the number of opcodes \
-          that do not have semantics." "print-missing"
+    ~doc:
+      "Print missing instructions. This option disables cache and \
+       redisassembles the binary from scratch. It then prints the list of all \
+       instructions that do not have a representable semantics, followed by \
+       the histogram of all missed opcodes, and finally prints the number of \
+       lifted opcodes, the number of addresses that wasn't disassembled at \
+       all, and the number of opcodes that do not have semantics."
+    "print-missing"
 
-let input = Extension.Command.argument
-    ~doc:"The input file" Extension.Type.("FILE" %: string =? "a.out")
+let input =
+  Extension.Command.argument ~doc:"The input file"
+    Extension.Type.("FILE" %: string =? "a.out")
 
-let libraries = Extension.Command.parameters
-    ~doc:"The input libraries to link with"
-    ~aliases:["l"]
+let libraries =
+  Extension.Command.parameters ~doc:"The input libraries to link with"
+    ~aliases:[ "l" ]
     Extension.Type.("FILES" %: list string)
     "libraries"
 
 let loader =
   Extension.Command.parameter
-    ~doc:"Use the specified loader.
-          The loader could be either an identifier or a filename. \
-          The filename has to be explicit, i.e., to start with an \
-          explicit reference to the root directory or to the current \
-          directory (e.g., $(b,./), or $(b,../), or $(b,/) in Unix). \
-          The contents of the file should be a well-formed OGRE \
-          document that contains the necessary meta-information \
-          about the binary. \
-          The default loader is named $(b,llvm) and uses LLVM loaders \
-          to parse the input binary and supports ELF, MachO, and COFF \
-          (including Windows PE), formats. \
-          To load unstructured files use the $(b,raw) loader and \
-          specify the loader parameters via the $(b,raw) plugin."
+    ~doc:
+      "Use the specified loader.\n\
+      \          The loader could be either an identifier or a filename. The \
+       filename has to be explicit, i.e., to start with an explicit reference \
+       to the root directory or to the current directory (e.g., $(b,./), or \
+       $(b,../), or $(b,/) in Unix). The contents of the file should be a \
+       well-formed OGRE document that contains the necessary meta-information \
+       about the binary. The default loader is named $(b,llvm) and uses LLVM \
+       loaders to parse the input binary and supports ELF, MachO, and COFF \
+       (including Windows PE), formats. To load unstructured files use the \
+       $(b,raw) loader and specify the loader parameters via the $(b,raw) \
+       plugin."
     Extension.Type.(string =? "llvm")
     "loader"
 
 let target =
-  let t = Extension.Type.define Theory.Target.unknown
-      ~name:"NAME"
+  let t =
+    Extension.Type.define Theory.Target.unknown ~name:"NAME"
       ~digest:(fun t ->
-          let r = Stdlib.Digest.string@@Theory.Target.to_string t in
-          Format.eprintf "target digest = %s@\n" (Stdlib.Digest.to_hex r);
-          r)
-      ~parse:(fun s -> match Theory.Target.lookup ~package:"bap" s with
-          | Some t -> t
-          | None ->
-            invalid_argf "unknown target %S, please see \
-                          `bap list targets' for the full list \
-                          of targets" s ())
-      ~print:Theory.Target.to_string in
+        let r = Stdlib.Digest.string @@ Theory.Target.to_string t in
+        Format.eprintf "target digest = %s@\n" (Stdlib.Digest.to_hex r);
+        r)
+      ~parse:(fun s ->
+        match Theory.Target.lookup ~package:"bap" s with
+        | Some t -> t
+        | None ->
+            invalid_argf
+              "unknown target %S, please see `bap list targets' for the full \
+               list of targets"
+              s ())
+      ~print:Theory.Target.to_string
+  in
   Extension.Command.parameter t "target"
-    ~doc:"Sets the target architecture of the binary. \
-          See `bap list targets` for the full hierarchy of targets."
+    ~doc:
+      "Sets the target architecture of the binary. See `bap list targets` for \
+       the full hierarchy of targets."
 
 let validate_input file =
   Result.ok_if_true (Sys.file_exists file)
     ~error:(Fail (Expects_a_regular_file file))
 
-let validate_knowledge update kb = match kb with
-  | None -> Result.ok_if_true (not update)
-              ~error:(Fail No_knowledge)
+let validate_knowledge update kb =
+  match kb with
+  | None -> Result.ok_if_true (not update) ~error:(Fail No_knowledge)
   | Some path ->
-    Result.ok_if_true (Sys.file_exists path || update)
-      ~error:(Fail No_knowledge)
+      Result.ok_if_true
+        (Sys.file_exists path || update)
+        ~error:(Fail No_knowledge)
 
 let validate_passes_style old_style_passes new_style_passes =
-  match old_style_passes, new_style_passes with
-  | xs,[] | [],xs -> Ok xs
+  match (old_style_passes, new_style_passes) with
+  | xs, [] | [], xs -> Ok xs
   | _ -> Error (Fail Old_and_new_style_passes)
 
 let validate_passes passes =
-  let known = Project.passes () |>
-              List.map ~f:(fun p -> Project.Pass.name p, p) |>
-              Map.of_alist_exn (module String) in
-  Result.all @@
-  List.map passes ~f:(fun p -> match Map.find known p with
-      | Some p -> Ok p
-      | None -> Error (Fail (Unknown_pass p)))
+  let known =
+    Project.passes ()
+    |> List.map ~f:(fun p -> (Project.Pass.name p, p))
+    |> Map.of_alist_exn (module String)
+  in
+  Result.all
+  @@ List.map passes ~f:(fun p ->
+         match Map.find known p with
+         | Some p -> Ok p
+         | None -> Error (Fail (Unknown_pass p)))
 
-let option_digest f = function
-  | None -> "none"
-  | Some s -> f s
+let option_digest f = function None -> "none" | Some s -> f s
 
 let make_digest inputs =
   let inputs = String.concat inputs in
@@ -435,82 +422,80 @@ let make_digest inputs =
 module Dump_formats = struct
   let parse_fmt fmt =
     match String.split ~on:'-' fmt with
-    | [fmt;ver] -> fmt, Some ver
-    | _ -> fmt,None
+    | [ fmt; ver ] -> (fmt, Some ver)
+    | _ -> (fmt, None)
 
-  let flatten (x,(y,z)) = x,y,z
+  let flatten (x, (y, z)) = (x, y, z)
 
-  let split str = match String.split ~on:':' str with
-    | [fmt;dst] -> flatten (`file dst,parse_fmt fmt)
-    | _ -> flatten (`stdout,parse_fmt str)
+  let split str =
+    match String.split ~on:':' str with
+    | [ fmt; dst ] -> flatten (`file dst, parse_fmt fmt)
+    | _ -> flatten (`stdout, parse_fmt str)
 
   let parse_format str =
-    let (_,fmt,ver) as r = split str in
+    let ((_, fmt, ver) as r) = split str in
     match Project.find_writer ?ver fmt with
     | Some _ -> Ok r
-    | None -> match Project.find_writer fmt with
-      | None -> Error (Fail (Unknown_format fmt))
-      | Some _ -> Error (Fail (Unavailable_format_version fmt))
+    | None -> (
+        match Project.find_writer fmt with
+        | None -> Error (Fail (Unknown_format fmt))
+        | Some _ -> Error (Fail (Unavailable_format_version fmt)))
 
-  let parse outputs =
-    Result.all @@
-    List.map outputs ~f:parse_format
+  let parse outputs = Result.all @@ List.map outputs ~f:parse_format
 end
 
 let setup_gc () =
   let opts = Stdlib.Gc.get () in
   info "Setting GC parameters";
-  Stdlib.Gc.set {
-    opts with
-    minor_heap_size = 2 * 1024 * 1024;
-    major_heap_increment = 64 * 1024 * 1024;
-  }
+  Stdlib.Gc.set
+    {
+      opts with
+      minor_heap_size = 2 * 1024 * 1024;
+      major_heap_increment = 64 * 1024 * 1024;
+    }
 
-let has_env var = match Sys.getenv var with
-  | exception _ -> false
-  | _ -> true
+let has_env var = match Sys.getenv var with exception _ -> false | _ -> true
 
 let setup_gc_unless_overriden () =
-  if not (has_env "OCAMLRUNPARAM" || has_env "CAMLRUNPARAM")
-  then setup_gc ()
+  if not (has_env "OCAMLRUNPARAM" || has_env "CAMLRUNPARAM") then setup_gc ()
   else info "GC parameters are overriden by a user"
 
 let load_knowledge disable digest = function
   | _ when disable -> false
   | None -> import_knowledge_from_cache digest
   | Some path when not (Sys.file_exists path) ->
-    import_knowledge_from_cache digest
+      import_knowledge_from_cache digest
   | Some path ->
-    info "importing knowledge from %S" path;
-    Toplevel.set @@ Knowledge.load path;
-    true
+      info "importing knowledge from %S" path;
+      Toplevel.set @@ Knowledge.load path;
+      true
 
 let save_knowledge ~had_knowledge ~update digest = function
-  | None ->
-    if not had_knowledge then store_knowledge_in_cache digest
+  | None -> if not had_knowledge then store_knowledge_in_cache digest
   | Some path when update ->
-    info "storing knowledge base to %S" path;
-    Knowledge.save (Toplevel.current ()) path
+      info "storing knowledge base to %S" path;
+      Knowledge.save (Toplevel.current ()) path
   | Some _ -> ()
 
-let create_and_process input libraries outputs passes loader target update
-    kb print_missing ctxt =
-  let uses_file_loader = Sys.file_exists loader &&
-                         Fn.non Filename.is_implicit loader in
+let create_and_process input libraries outputs passes loader target update kb
+    print_missing ctxt =
+  let uses_file_loader =
+    Sys.file_exists loader && Fn.non Filename.is_implicit loader
+  in
   let package = input in
   let digest =
-    let file      = Stdlib.Digest.file in
-    let config    = Extension.Configuration.digest ctxt in
-    let input     = file input in
+    let file = Stdlib.Digest.file in
+    let config = Extension.Configuration.digest ctxt in
+    let input = file input in
     let libraries = List.map libraries ~f:file in
-    let target    = Theory.Target.to_string target in
-    let loader    = if uses_file_loader then file loader else loader in
-    make_digest (config :: input :: libraries @ [target; loader]) in
+    let target = Theory.Target.to_string target in
+    let loader = if uses_file_loader then file loader else loader in
+    make_digest ((config :: input :: libraries) @ [ target; loader ])
+  in
   let had_knowledge = load_knowledge print_missing digest kb in
   let input = Project.Input.load ~target ~loader ~libraries package in
   if print_missing then Missing.enable ();
-  Project.create ~package
-    input |> proj_error >>= fun proj ->
+  Project.create ~package input |> proj_error >>= fun proj ->
   process passes outputs proj >>| fun proj ->
   if print_missing then Missing.print ();
   save_knowledge ~had_knowledge ~update digest kb;
@@ -519,37 +504,54 @@ let create_and_process input libraries outputs passes loader target update
 let _disassemble_command_registered : unit =
   let args =
     let open Extension.Command in
-    args $input $libraries $outputs $old_style_passes $passes $loader $target
-    $update $knowledge $print_missing in
-  Extension.Command.declare ~doc:man "disassemble"
-    ~requires:features_used args @@
-  fun input libraries outputs old_style_passes passes loader target update
-    kb print_missing ctxt ->
+    args $ input $ libraries $ outputs $ old_style_passes $ passes $ loader
+    $ target $ update $ knowledge $ print_missing
+  in
+  Extension.Command.declare ~doc:man "disassemble" ~requires:features_used args
+  @@
+  fun input
+    libraries
+    outputs
+    old_style_passes
+    passes
+    loader
+    target
+    update
+    kb
+    print_missing
+    ctxt
+  ->
   let libraries = List.concat libraries in
   setup_gc_unless_overriden ();
   validate_knowledge update kb >>= fun () ->
   validate_input input >>= fun () ->
   Err.List.iter libraries ~f:validate_input >>= fun () ->
-  validate_passes_style old_style_passes (List.concat passes) >>=
-  validate_passes >>= fun passes ->
+  validate_passes_style old_style_passes (List.concat passes)
+  >>= validate_passes
+  >>= fun passes ->
   Dump_formats.parse outputs >>= fun outputs ->
   create_and_process input libraries outputs passes loader target update kb
-    print_missing ctxt >>= fun _ ->
-  Ok ()
+    print_missing ctxt
+  >>= fun _ -> Ok ()
 
 let _compare_command_registered : unit =
-  let base = Extension.Command.argument
-      ~doc:"The base version."
-      Extension.Type.("BASE" %: string =? "a.out") in
+  let base =
+    Extension.Command.argument ~doc:"The base version."
+      Extension.Type.("BASE" %: string =? "a.out")
+  in
 
-  let inputs = Extension.Command.arguments
-      ~doc:"The alternative versions."
-      Extension.Type.("ALT" %: string =? "b.out") in
+  let inputs =
+    Extension.Command.arguments ~doc:"The alternative versions."
+      Extension.Type.("ALT" %: string =? "b.out")
+  in
 
-  let collator = Extension.Command.argument
-      ~doc:"The collator to use." Extension.Type.("COLLATOR" %: string) in
+  let collator =
+    Extension.Command.argument ~doc:"The collator to use."
+      Extension.Type.("COLLATOR" %: string)
+  in
 
-  let doc = {|
+  let doc =
+    {|
     # DESCRIPTION
 
     Compares several alternative versions of the binary with the base
@@ -561,74 +563,83 @@ let _compare_command_registered : unit =
 ```
     bap compare callgraph testsuite/bin/*-echo
 ```
-|} in
+|}
+  in
 
   let args =
     let open Extension.Command in
-    args
-    $collator
-    $base
-    $inputs
-    $outputs
-    $old_style_passes
-    $passes
-    $loader
-    $target
-    $update
-    $knowledge in
-  Extension.Command.declare "compare" ~doc ~requires:features_used args @@
-  fun collator input inputs outputs old_style_passes passes
-    loader target update kb ctxt ->
+    args $ collator $ base $ inputs $ outputs $ old_style_passes $ passes
+    $ loader $ target $ update $ knowledge
+  in
+  Extension.Command.declare "compare" ~doc ~requires:features_used args
+  @@
+  fun collator
+    input
+    inputs
+    outputs
+    old_style_passes
+    passes
+    loader
+    target
+    update
+    kb
+    ctxt
+  ->
   match Project.Collator.find ~package:"bap" collator with
   | None -> Error (Fail (Unknown_collator collator))
-  | Some collator ->
-    setup_gc_unless_overriden ();
-    Err.all_unit @@ List.map (input::inputs) ~f:validate_input >>= fun () ->
-    validate_passes_style old_style_passes (List.concat passes) >>=
-    validate_passes >>= fun passes ->
-    Dump_formats.parse outputs >>= fun outputs ->
-    let projs =
-      Seq.map (Seq.of_list (input::inputs)) ~f:(fun input ->
-          create_and_process input [] outputs passes loader target
-            update kb false ctxt) in
-    let exception Escape of Extension.Error.t in
-    try
-      let projs = Seq.map projs ~f:(function
-          | Ok proj -> proj
-          | Error e -> raise (Escape e))  in
-      Project.Collator.apply collator projs;
-      Ok ()
-    with Escape failed -> Error failed
+  | Some collator -> (
+      setup_gc_unless_overriden ();
+      Err.all_unit @@ List.map (input :: inputs) ~f:validate_input >>= fun () ->
+      validate_passes_style old_style_passes (List.concat passes)
+      >>= validate_passes
+      >>= fun passes ->
+      Dump_formats.parse outputs >>= fun outputs ->
+      let projs =
+        Seq.map
+          (Seq.of_list (input :: inputs))
+          ~f:(fun input ->
+            create_and_process input [] outputs passes loader target update kb
+              false ctxt)
+      in
+      let exception Escape of Extension.Error.t in
+      try
+        let projs =
+          Seq.map projs ~f:(function
+            | Ok proj -> proj
+            | Error e -> raise (Escape e))
+        in
+        Project.Collator.apply collator projs;
+        Ok ()
+      with Escape failed -> Error failed)
 
 let pp_guesses ppf badname =
-  let guess = String.map badname ~f:(function
-      | '_' -> '-'
-      | c -> Char.lowercase c) in
+  let guess =
+    String.map badname ~f:(function '_' -> '-' | c -> Char.lowercase c)
+  in
   let suffix = "-" ^ name in
   let good_guess name =
-    String.equal name guess || String.is_suffix ~suffix name in
+    String.equal name guess || String.is_suffix ~suffix name
+  in
   let guesses =
-    Project.passes () |>
-    List.filter_map ~f:(fun p ->
-        let name = Project.Pass.name p in
-        Option.some_if (good_guess name) name) in
+    Project.passes ()
+    |> List.filter_map ~f:(fun p ->
+           let name = Project.Pass.name p in
+           Option.some_if (good_guess name) name)
+  in
   let pp_sep ppf () = Format.pp_print_string ppf ", or" in
   match guesses with
   | [] -> Format.fprintf ppf "make sure that your plugin is installed"
   | guesses ->
-    Format.fprintf ppf "did you mean %a?"
-      (Format.pp_print_list ~pp_sep Format.pp_print_string) guesses
+      Format.fprintf ppf "did you mean %a?"
+        (Format.pp_print_list ~pp_sep Format.pp_print_string)
+        guesses
 
 let is_verbose = Option.is_some (Sys.getenv_opt "BAP_DEBUG")
-
-let pp_backtrace ppf bt =
-  if is_verbose then fprintf ppf "Backtrace:@\n%s" bt
+let pp_backtrace ppf bt = if is_verbose then fprintf ppf "Backtrace:@\n%s" bt
 
 let pp_exn ppf = function
-  | Invalid_argument s ->
-    fprintf ppf "%s" s
-  | Failure s ->
-    fprintf ppf "%s" s
+  | Invalid_argument s -> fprintf ppf "%s" s
+  | Failure s -> fprintf ppf "%s" s
   | other -> fprintf ppf "%a" Exn.pp other
 
 let nice_pp_error ppf er =
@@ -637,57 +648,54 @@ let nice_pp_error ppf er =
     let open R in
     match r with
     | With_backtrace (r, backtrace) ->
-      Format.fprintf ppf "%a@\n%a" pp r
-        pp_backtrace (String.strip backtrace);
-    | Sexp (Sexp.List [Atom "Invalid_argument"; Atom s])
-    | String s ->
-      Format.fprintf ppf "%a" pp_print_text s;
+        Format.fprintf ppf "%a@\n%a" pp r pp_backtrace (String.strip backtrace)
+    | Sexp (Sexp.List [ Atom "Invalid_argument"; Atom s ]) | String s ->
+        Format.fprintf ppf "%a" pp_print_text s
     | _ ->
-      let msg = Error.to_string_hum er in
-      Format.fprintf ppf "%s" msg  in
+        let msg = Error.to_string_hum er in
+        Format.fprintf ppf "%s" msg
+  in
   Format.fprintf ppf "%a" pp (R.of_info (Error.to_info er))
 
 let string_of_failure = function
-  | Expects_a_regular_file name ->
-    sprintf "Unable to open file `%s'." name
+  | Expects_a_regular_file name -> sprintf "Unable to open file `%s'." name
   | Old_and_new_style_passes ->
-    "Bad invocation: passes are specified in both old an new style, \
-     please switch to the new style, e.g., `-p<p1>,<p2>,<p3>'"
+      "Bad invocation: passes are specified in both old an new style, please \
+       switch to the new style, e.g., `-p<p1>,<p2>,<p3>'"
   | Unknown_pass name ->
-    asprintf "Bad invocation: failed to find the pass named %S, %a" name pp_guesses name
-  | Incompatible_options (o1,o2) ->
-    sprintf "Bad invocation: the options `%s' and `%s' can not be used together" o1 o2
+      asprintf "Bad invocation: failed to find the pass named %S, %a" name
+        pp_guesses name
+  | Incompatible_options (o1, o2) ->
+      sprintf
+        "Bad invocation: the options `%s' and `%s' can not be used together" o1
+        o2
   | Project err ->
-    asprintf "@[Failed to build the project:@ %a@]" nice_pp_error err
-  | Pass (Project.Pass.Unsat_dep (p,s)) ->
-    sprintf "Can't run passes - the dependency %S of pass %S is not available."
-      s (Project.Pass.name p)
-  | Pass (Project.Pass.Runtime_error (p, Exn.Reraised (bt,exn))) ->
-    asprintf "The pass %S failed with:@\n%a@\n%a"
-      (Project.Pass.name p) pp_exn exn pp_backtrace bt
+      asprintf "@[Failed to build the project:@ %a@]" nice_pp_error err
+  | Pass (Project.Pass.Unsat_dep (p, s)) ->
+      sprintf
+        "Can't run passes - the dependency %S of pass %S is not available." s
+        (Project.Pass.name p)
+  | Pass (Project.Pass.Runtime_error (p, Exn.Reraised (bt, exn))) ->
+      asprintf "The pass %S failed with:@\n%a@\n%a" (Project.Pass.name p) pp_exn
+        exn pp_backtrace bt
   | Pass (Project.Pass.Runtime_error (p, exn)) ->
-    asprintf "The pass %S failed with:@\n%a"
-      (Project.Pass.name p) pp_exn exn
-  | Unknown_format fmt ->
-    sprintf "The format %S is not known." fmt
+      asprintf "The pass %S failed with:@\n%a" (Project.Pass.name p) pp_exn exn
+  | Unknown_format fmt -> sprintf "The format %S is not known." fmt
   | Unavailable_format_version fmt ->
-    sprintf "The selected version of the format %S is not supported." fmt
-  | Unknown_collator "" ->
-    "Please specify the collator that you want to use."
-  | Unknown_collator s ->
-    sprintf "The collator `%s' is not registered." s
-  | Unknown_analysis s ->
-    sprintf "There is no analysis with the name `%s'" s
+      sprintf "The selected version of the format %S is not supported." fmt
+  | Unknown_collator "" -> "Please specify the collator that you want to use."
+  | Unknown_collator s -> sprintf "The collator `%s' is not registered." s
+  | Unknown_analysis s -> sprintf "There is no analysis with the name `%s'" s
   | No_knowledge ->
-    sprintf "Expected the path to an existing knowledge base \
-             (either add or remove the --update option)"
+      sprintf
+        "Expected the path to an existing knowledge base (either add or remove \
+         the --update option)"
 
-let () = Extension.Error.register_printer @@ function
+let () =
+  Extension.Error.register_printer @@ function
   | Fail err -> Some (string_of_failure err)
   | _ -> None
 
-
-let () = Extension.declare
-    ~doc:man
-    ~provides:["command"; "analysis"; "disassemble"]
+let () =
+  Extension.declare ~doc:man ~provides:[ "command"; "analysis"; "disassemble" ]
     (fun _ -> Ok ())

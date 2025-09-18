@@ -7,4 +7,5 @@
  (name strings)
  (package bap-beagle-strings)
  (libraries bap-beagle-strings.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

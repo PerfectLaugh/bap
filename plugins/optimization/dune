@@ -1,11 +1,13 @@
 (library
  (name bap_optimization_plugin)
  (public_name bap-optimization.plugin)
- (preprocess (pps ppx_bap))
+ (preprocess
+  (pps ppx_bap))
  (libraries bap core graphlib regular))
 
 (plugin
  (name optimization)
  (package bap-optimization)
  (libraries bap-optimization.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

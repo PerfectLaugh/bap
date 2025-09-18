@@ -237,24 +237,19 @@
 open Core
 open Bap_core_theory
 open Bap.Std
-
 module Attribute = Bap_primus_lisp_attribute
 
 type t [@@deriving bin_io]
 
 val t : t Attribute.t
 
-
-(** [of_project p] initializes a context from the project [p].  *)
 val of_project : project -> t
+(** [of_project p] initializes a context from the project [p]. *)
 
 val create : (string * string list) list -> t
-
 val empty : t
-
 val order : t -> t -> KB.Order.partial
-val (<=) : t -> t -> bool
+val ( <= ) : t -> t -> bool
 val pp : Format.formatter -> t -> unit
-
 val merge : t -> t -> t
 val slot : (Theory.Unit.cls, t) KB.slot

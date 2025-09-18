@@ -68,7 +68,9 @@ val uintmax64 : Z.t
 val sintmax64 : Z.t
 val addr_to_int64 : Z.t -> int64
 val addr_of_int64 : int64 -> Z.t
+
 type address = Big_int_Z.big_int
+
 val address_to_int64 : address -> int64
 val address_of_int64 : int64 -> address
 val big_int_to_hex : ?pad:int -> Z.t -> string

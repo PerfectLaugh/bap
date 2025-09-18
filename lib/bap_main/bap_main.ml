@@ -8,7 +8,6 @@ open Stdio
 open Bap_future.Std
 open Bap_plugins.Std
 open Bap_bundle.Std
-
 module Format = Stdlib.Format
 module Digest = Stdlib.Digest
 module Filename = Stdlib.Filename
@@ -18,38 +17,29 @@ module Loggers = Bap_main_event.Log.Create
 let fail fmt = Printf.ksprintf invalid_arg fmt
 let sprintf = Printf.sprintf
 
+type plugin_info = { cons : string list; tags : string list; docs : string }
 
-type plugin_info = {
-  cons : string list;
-  tags : string list;
-  docs : string;
-}
-
-(** A simple config file parser.
-    A config file is a list of <key> = <value> lines,
-    with '#' being the comment symbol
-    (everything after the comment character is ignored)
-    empty lines are also ignored.
-
-*)
+(** A simple config file parser. A config file is a list of <key> = <value>
+    lines, with '#' being the comment symbol (everything after the comment
+    character is ignored) empty lines are also ignored. *)
 module ConfigFile : sig
+  val read : unit -> (string * string) list
   (** reads the configuration from all configuration files.
 
-      The order of the paramaters in the returned mapping matters,
-      the first occurence comes from the most specific file and must
-      prevail over the later occurences.
-  *)
-  val read : unit -> (string * string) list
+      The order of the paramaters in the returned mapping matters, the first
+      occurence comes from the most specific file and must prevail over the
+      later occurences. *)
 end = struct
-  let conf_dirs = [
-    [`V "HOME"; `P ".config"; `P "bap"];
-    [`V "XDG_CONFIG_HOME"; `P "bap"];
-    [`P Bap_main_config.confdir];
-  ]
+  let conf_dirs =
+    [
+      [ `V "HOME"; `P ".config"; `P "bap" ];
+      [ `V "XDG_CONFIG_HOME"; `P "bap" ];
+      [ `P Bap_main_config.confdir ];
+    ]
 
-  let eval_parts xs = Option.all @@ List.map xs ~f:(function
-      | `P p -> Some p
-      | `V v -> Sys.getenv_opt v)
+  let eval_parts xs =
+    Option.all
+    @@ List.map xs ~f:(function `P p -> Some p | `V v -> Sys.getenv_opt v)
 
   let concat_parts xs =
     Option.(eval_parts xs >>= List.reduce ~f:Filename.concat)
@@ -62,151 +52,152 @@ end = struct
         fresh)
 
   let readdir dir =
-    let files = Sys.readdir dir |>
-                Array.map ~f:(Filename.concat dir) in
+    let files = Sys.readdir dir |> Array.map ~f:(Filename.concat dir) in
     Array.sort files ~compare:String.compare;
     Array.to_list files
 
   let files init =
-    List.filter_map init ~f:concat_parts |>
-    List.concat_map ~f:(fun dir ->
-        if Sys.file_exists dir &&
-           Sys.is_directory dir
-        then readdir dir
-        else [])
+    List.filter_map init ~f:concat_parts
+    |> List.concat_map ~f:(fun dir ->
+           if Sys.file_exists dir && Sys.is_directory dir then readdir dir
+           else [])
 
-  let is_empty =
-    String.for_all ~f:Char.is_whitespace
+  let is_empty = String.for_all ~f:Char.is_whitespace
 
   let drop_comment str =
-    match String.lsplit2 str ~on:'#' with
-    | None -> str
-    | Some (str,_) -> str
+    match String.lsplit2 str ~on:'#' with None -> str | Some (str, _) -> str
 
   exception Malformed_line of int * string
 
   let parse_config_entry line str =
     let str = drop_comment str in
     if is_empty str then None
-    else match String.lsplit2 ~on:'=' str with
-      | None -> raise (Malformed_line (line,str))
-      | Some (k,v) ->
-        Some (String.strip k, String.strip v)
+    else
+      match String.lsplit2 ~on:'=' str with
+      | None -> raise (Malformed_line (line, str))
+      | Some (k, v) -> Some (String.strip k, String.strip v)
 
   let read_or_fail filename =
-    if not (Sys.file_exists filename) ||
-       Sys.is_directory filename then []
-    else try In_channel.with_file filename ~f:(fun ch ->
-        In_channel.input_lines ch |>
-        List.filter_mapi ~f:parse_config_entry)
+    if (not (Sys.file_exists filename)) || Sys.is_directory filename then []
+    else
+      try
+        In_channel.with_file filename ~f:(fun ch ->
+            In_channel.input_lines ch |> List.filter_mapi ~f:parse_config_entry)
       with
-      | Sys_error msg ->
-        fail "can't access config file %S: %s\n%!" filename msg
-      | Malformed_line (linenum,str) ->
-        fail "File %S, line %d, characters %d-%d\n\
-              Syntax error: expects <parameter> = <value>"
-          filename (linenum+1) 1 (String.length str + 1)
+      | Sys_error msg -> fail "can't access config file %S: %s\n%!" filename msg
+      | Malformed_line (linenum, str) ->
+          fail
+            "File %S, line %d, characters %d-%d\n\
+             Syntax error: expects <parameter> = <value>"
+            filename (linenum + 1) 1
+            (String.length str + 1)
 
-  let read () =
-    List.concat_map (files conf_dirs) ~f:read_or_fail
+  let read () = List.concat_map (files conf_dirs) ~f:read_or_fail
 end
 
 module Type = struct
   open Cmdliner
+
   type 'a parser = string -> 'a
   type 'a printer = 'a -> string
+
   type 'a t = {
     name : string;
     default : 'a;
-    digest  : 'a -> string;
+    digest : 'a -> string;
     parse : string -> 'a;
     print : 'a -> string;
   }
 
   let atom x = x
-  let define ?(name="VAL") ?digest ~parse ~print default =
-    let digest = match digest with
-      | None -> fun x -> Digest.string (print x)
-      | Some f -> f in
-    {name; parse; print; default; digest}
 
-  let print {print=x} = x
-  let name {name=x} = x
-  let parse {parse=x} = x
-  let digest {digest=x} = x
-  let default {default=x} = x
+  let define ?(name = "VAL") ?digest ~parse ~print default =
+    let digest =
+      match digest with None -> fun x -> Digest.string (print x) | Some f -> f
+    in
+    { name; parse; print; default; digest }
 
-  let refine t validate = {
-    t with print = (fun x -> validate x; t.print x);
-           parse = (fun s -> let x = t.parse s in validate x; x);
-           default = (validate t.default; t.default);
-  }
+  let print { print = x } = x
+  let name { name = x } = x
+  let parse { parse = x } = x
+  let digest { digest = x } = x
+  let default { default = x } = x
 
-  let rename t name = {t with name}
+  let refine t validate =
+    {
+      t with
+      print =
+        (fun x ->
+          validate x;
+          t.print x);
+      parse =
+        (fun s ->
+          let x = t.parse s in
+          validate x;
+          x);
+      default =
+        (validate t.default;
+         t.default);
+    }
 
+  let rename t name = { t with name }
+  let ( =? ) t default = { t with default }
+  let ( |= ) = refine
+  let ( %: ) name t = rename t name
 
-  let (=?) t default = {t with default}
-  let (|=) = refine
-  let (%:) name t = rename t name
-
-  let converter {parse; print} : 'a Arg.converter =
-    let parser s = try `Ok (parse s) with exn ->
-      `Error (Exn.to_string exn) in
+  let converter { parse; print } : 'a Arg.converter =
+    let parser s = try `Ok (parse s) with exn -> `Error (Exn.to_string exn) in
     let printer ppf s = Format.fprintf ppf "%s" (print s) in
-    parser, printer
-  let default conv = conv.default
-  let redefault t default = {t with default}
+    (parser, printer)
 
-  let wrap ?digest (parser,printer) default =
-    let parse s = match parser s with
-      | `Ok s -> s
-      | `Error s -> invalid_arg s in
+  let default conv = conv.default
+  let redefault t default = { t with default }
+
+  let wrap ?digest (parser, printer) default =
+    let parse s =
+      match parser s with `Ok s -> s | `Error s -> invalid_arg s
+    in
     let print x = Format.asprintf "%a" printer x in
     define ?digest ~parse ~print default
 
-
   let path = wrap Arg.string ""
 
-  let digest_files ?(max_checks=4096) path =
-    let (++) init digest = Digest.string (init ^ digest) in
+  let digest_files ?(max_checks = 4096) path =
+    let ( ++ ) init digest = Digest.string (init ^ digest) in
     let digest_path path time =
-      Digest.string @@
-      sprintf "%s:%Ld" path (Int64.bits_of_float time) in
-    let new_digest input =
-      digest_path input @@ Unix.gettimeofday () in
+      Digest.string @@ sprintf "%s:%Ld" path (Int64.bits_of_float time)
+    in
+    let new_digest input = digest_path input @@ Unix.gettimeofday () in
     let exception Stopped_checking in
     let rec digest checked ~init path =
-      if checked < max_checks
-      then match Unix.stat path with
-        | {Unix.st_kind = S_REG; st_mtime} ->
-          checked+1,init ++ digest_path path st_mtime
-        | {Unix.st_kind = S_DIR; st_mtime} ->
-          let init = checked+1,init ++ digest_path path st_mtime in
-          Sys.readdir path |>
-          Array.fold ~init ~f:(fun (checked,init) entry ->
-              digest checked ~init @@ Filename.concat path entry)
+      if checked < max_checks then
+        match Unix.stat path with
+        | { Unix.st_kind = S_REG; st_mtime } ->
+            (checked + 1, init ++ digest_path path st_mtime)
+        | { Unix.st_kind = S_DIR; st_mtime } ->
+            let init = (checked + 1, init ++ digest_path path st_mtime) in
+            Sys.readdir path
+            |> Array.fold ~init ~f:(fun (checked, init) entry ->
+                   digest checked ~init @@ Filename.concat path entry)
         | _ -> raise Stopped_checking
         | exception _ -> raise Stopped_checking
-      else raise Stopped_checking in
+      else raise Stopped_checking
+    in
     match digest 0 ~init:"" path with
-    | exception Stopped_checking -> 0,new_digest path
+    | exception Stopped_checking -> (0, new_digest path)
     | r -> r
 
   let digest_path p =
     if Sys.file_exists p then
-      if Sys.is_directory p then snd (digest_files p)
-      else Digest.file p
+      if Sys.is_directory p then snd (digest_files p) else Digest.file p
     else Digest.string "no-file"
 
   let digest_file p =
-    if Sys.file_exists p
-    then Digest.file p
-    else Digest.string "no-file"
+    if Sys.file_exists p then Digest.file p else Digest.string "no-file"
 
   let file = wrap ~digest:digest_path Arg.file ""
   let dir = wrap ~digest:digest_path Arg.dir ""
   let non_dir_file = wrap ~digest:digest_file Arg.non_dir_file ""
-
 
   (* lift cmdliner into our converters *)
   let bool = wrap Arg.bool false
@@ -217,23 +208,30 @@ module Type = struct
   let int64 = wrap Arg.int64 Int64.zero
   let float = wrap Arg.float 0.
   let string = wrap Arg.string ""
+
   let enum x =
     let _, default = List.hd_exn x in
     wrap (Arg.enum x) default
+
   let list ?sep x = wrap (Arg.list ?sep (converter x)) []
+
   let array ?sep x =
-    let default = [| |] in
+    let default = [||] in
     wrap (Arg.array ?sep (converter x)) default
+
   let pair ?sep x y =
-    let default = x.default,y.default in
+    let default = (x.default, y.default) in
     wrap (Arg.pair ?sep (converter x) (converter y)) default
+
   let t2 = pair
+
   let t3 ?sep x y z =
     let a = converter x in
     let b = converter y in
     let c = converter z in
     let default = (default x, default y, default z) in
     wrap (Arg.t3 ?sep a b c) default
+
   let t4 ?sep w x y z =
     let a = converter w in
     let b = converter x in
@@ -241,9 +239,9 @@ module Type = struct
     let d = converter z in
     let default = (default w, default x, default y, default z) in
     wrap (Arg.t4 ?sep a b c d) default
+
   let some x = wrap (Arg.some (converter x)) None
 end
-
 
 module Error = struct
   type t = error = ..
@@ -259,45 +257,44 @@ module Error = struct
   type t += Bad_recipe of Bap_recipe.error
 
   let register_printer = Stdlib.Printexc.register_printer
-  let pp ppf e =
-    Format.pp_print_string ppf (Stdlib.Printexc.to_string e)
-
+  let pp ppf e = Format.pp_print_string ppf (Stdlib.Printexc.to_string e)
   let str fmt = Format.kasprintf Option.some fmt
 
-  let () = register_printer @@ function
+  let () =
+    register_printer @@ function
     | Configuration ->
-      str "Failed to process command-line options and configuration \
-           paratemers."
+        str
+          "Failed to process command-line options and configuration paratemers."
     | Invalid msg -> str "Invalid parameter: %s" msg
-    | Bug (exn,backtrace) ->
-      str "Internal error: %a@\nBacktrace:@\n%s"
-        Exn.pp exn backtrace
-    | Already_initialized ->
-      str "The system was already initialized"
+    | Bug (exn, backtrace) ->
+        str "Internal error: %a@\nBacktrace:@\n%s" Exn.pp exn backtrace
+    | Already_initialized -> str "The system was already initialized"
     | Already_failed e ->
-      str "The system was left in an inconsistent state after \
-           the last attempt to initialize, which failed \
-           with:@\n%a" pp e
+        str
+          "The system was left in an inconsistent state after the last attempt \
+           to initialize, which failed with:@\n\
+           %a"
+          pp e
     | Recursive_init ->
-      str "The system initialization procedure was called during \
-           the initialization. Aborting the infinite cycle."
+        str
+          "The system initialization procedure was called during the \
+           initialization. Aborting the infinite cycle."
     | Broken_plugins errors ->
-      let pp_error ppf (name,err) =
-        Format.fprintf ppf
-          "The plugin `%s' has failed with \
-           the following error:@\n%a@\n" name Error.pp err in
-      let pp_errors =
-        Format.pp_print_list ~pp_sep:Format.pp_print_newline pp_error in
-      str "Failed to load %d plugins, details follow:@\n%a"
-        (List.length errors)
-        pp_errors errors
-    | Unknown_plugin p ->
-      str "There is no plugin %S in the search path." p
+        let pp_error ppf (name, err) =
+          Format.fprintf ppf
+            "The plugin `%s' has failed with the following error:@\n%a@\n" name
+            Error.pp err
+        in
+        let pp_errors =
+          Format.pp_print_list ~pp_sep:Format.pp_print_newline pp_error
+        in
+        str "Failed to load %d plugins, details follow:@\n%a"
+          (List.length errors) pp_errors errors
+    | Unknown_plugin p -> str "There is no plugin %S in the search path." p
     | Exit_requested 0 -> str "All is good."
     | Exit_requested n -> str "Exiting with %d." n
     | Bad_recipe err ->
-      str "Can't load the specified recipe:@\n%a"
-        Bap_recipe.pp_error err
+        str "Can't load the specified recipe:@\n%a" Bap_recipe.pp_error err
     | _ -> None
 end
 
@@ -308,11 +305,14 @@ end = struct
     let s = String.strip s in
     let len = String.length s in
     let rec scan n =
-      if n < len then match s.[n] with
-        | '#' -> scan (n+1)
-        | _ -> if n = 0 || n = len - 1 then None
-          else Some (String.(strip @@ subo ~pos:n s))
-      else None in
+      if n < len then
+        match s.[n] with
+        | '#' -> scan (n + 1)
+        | _ ->
+            if n = 0 || n = len - 1 then None
+            else Some String.(strip @@ subo ~pos:n s)
+      else None
+    in
     scan 0
 
   let verbatim s =
@@ -320,74 +320,78 @@ end = struct
     let begs s = String.(chop_prefix (lstrip s) ~prefix:delimiter)
     and ends s = String.(chop_suffix (rstrip s) ~suffix:delimiter) in
     match begs s with
-    | None ->
-      begin match ends s with
-        | None -> `Nocode
-        | Some code -> `End code
-      end
-    | Some code ->
-      begin match ends code with
-        | None -> `Beg code
-        | Some code -> `Pre code
-      end
+    | None -> ( match ends s with None -> `Nocode | Some code -> `End code)
+    | Some code -> (
+        match ends code with None -> `Beg code | Some code -> `Pre code)
 
   let list_item s =
     let s = String.strip s in
     let len = String.length s in
     let rec scan_numeric n =
-      if n + 1 < len then match s.[n], s.[n+1] with
+      if n + 1 < len then
+        match (s.[n], s.[n + 1]) with
         | ('.' | ')'), ' ' ->
-          Some (String.subo ~len:n s,
-                String.subo ~pos:(n+1) s |> String.strip)
-        | d,_ when Char.is_digit d -> scan_numeric (n+1)
+            Some
+              (String.subo ~len:n s, String.subo ~pos:(n + 1) s |> String.strip)
+        | d, _ when Char.is_digit d -> scan_numeric (n + 1)
         | _ -> None
-      else None in
-    if len > 2 then match s.[0], s.[1] with
-      | ('*' | '+' | '-'),' ' ->
-        Some (String.subo ~len:1 s,
-              String.subo ~pos:2 s)
-      | x,_ -> if Char.is_digit x then scan_numeric 1 else None
+      else None
+    in
+    if len > 2 then
+      match (s.[0], s.[1]) with
+      | ('*' | '+' | '-'), ' ' ->
+          Some (String.subo ~len:1 s, String.subo ~pos:2 s)
+      | x, _ -> if Char.is_digit x then scan_numeric 1 else None
     else None
 
   let split input =
     let len = String.length input in
     let rec scan start curr paras =
-      if curr < len then match input.[curr] with
+      if curr < len then
+        match input.[curr] with
         | '\n' ->
-          if curr + 2 < len then match input.[curr+1] with
-            | '\n' ->
-              scan (curr+2) (curr+3) @@
-              String.sub ~pos:start ~len:(curr-start) input :: paras
-            | _ -> scan start (curr+2) paras
-          else scan start (curr+1) paras
-        | _ -> scan start (curr+1) paras
-      else if start < curr && curr - start <= String.length input
-      then List.rev @@
-        String.sub ~pos:start ~len:(curr-start) input :: paras
-      else List.rev paras in
+            if curr + 2 < len then
+              match input.[curr + 1] with
+              | '\n' ->
+                  scan (curr + 2) (curr + 3)
+                  @@ (String.sub ~pos:start ~len:(curr - start) input :: paras)
+              | _ -> scan start (curr + 2) paras
+            else scan start (curr + 1) paras
+        | _ -> scan start (curr + 1) paras
+      else if start < curr && curr - start <= String.length input then
+        List.rev @@ (String.sub ~pos:start ~len:(curr - start) input :: paras)
+      else List.rev paras
+    in
     scan 0 0 []
 
-  let to_manpage : string -> _ list = fun input ->
+  let to_manpage : string -> _ list =
+   fun input ->
     let rec build = function
       | [] -> []
-      | para :: paras -> match section para with
-        | Some name -> `S name :: build paras
-        | None -> match verbatim para with
-          | `Pre code -> `Pre code :: build paras
-          | `Beg code -> pre [code] paras
-          | `End para ->
-            `P ("ERROR: Unbalanced ```") ::
-            `P para :: build paras
-          | `Nocode -> match list_item para with
-            | Some (item,desc) -> `I (item,desc) :: build paras
-            | None -> `P (String.strip para) :: build paras
+      | para :: paras -> (
+          match section para with
+          | Some name -> `S name :: build paras
+          | None -> (
+              match verbatim para with
+              | `Pre code -> `Pre code :: build paras
+              | `Beg code -> pre [ code ] paras
+              | `End para ->
+                  `P "ERROR: Unbalanced ```" :: `P para :: build paras
+              | `Nocode -> (
+                  match list_item para with
+                  | Some (item, desc) -> `I (item, desc) :: build paras
+                  | None -> `P (String.strip para) :: build paras)))
     and pre codes = function
-      | [] -> [`P ("ERROR : unbalanced ```")]
-      | para :: paras -> match verbatim para with
-        | `End code | `Beg code ->
-          let code = String.concat ~sep:"\n\n" @@ List.rev (code::codes) in
-          `Pre code :: build paras
-        | _ -> pre (para::codes) paras in
+      | [] -> [ `P "ERROR : unbalanced ```" ]
+      | para :: paras -> (
+          match verbatim para with
+          | `End code | `Beg code ->
+              let code =
+                String.concat ~sep:"\n\n" @@ List.rev (code :: codes)
+              in
+              `Pre code :: build paras
+          | _ -> pre (para :: codes) paras)
+    in
     build (split input)
 end
 
@@ -396,150 +400,135 @@ let first_paragraph = function
   | _ -> None
 
 let first_sentence text =
-  List.hd @@ String.split_on_chars text ~on:[
-    '\n'; '.'
-  ]
+  List.hd @@ String.split_on_chars text ~on:[ '\n'; '.' ]
 
-let first_sentence_of_man man =
-  Option.(first_paragraph man >>= first_sentence)
+let first_sentence_of_man man = Option.(first_paragraph man >>= first_sentence)
 
-let short_description
-    ?(default="no description provided") input =
+let short_description ?(default = "no description provided") input =
   Option.(input >>| String.uncapitalize |> Option.value ~default)
 
-
 module Context = struct
-  type value = {
-    scope : string;
-    value : string;
-    digest : string;
-  } [@@deriving sexp]
+  type value = { scope : string; value : string; digest : string }
+  [@@deriving sexp]
+
   type t = {
-    env     : value Map.M(String).t;
+    env : value Map.M(String).t;
     plugins : Set.M(String).t Map.M(String).t;
   }
 
   type info = string * string
-
-  type builder =
-    | Building of t
-    | Sealed
-
+  type builder = Building of t | Sealed
   type error += Already_defined
 
-  let ready,seal = Future.create ()
-
+  let ready, seal = Future.create ()
   let plugin_descriptions = Hashtbl.create (module String)
   let command_descriptions = Hashtbl.create (module String)
 
-  let builder = ref @@ Building {
-      env = Map.empty (module String);
-      plugins = Map.empty (module String);
-    }
+  let builder =
+    ref
+    @@ Building
+         {
+           env = Map.empty (module String);
+           plugins = Map.empty (module String);
+         }
 
-  let update f = match builder.contents with
+  let update f =
+    match builder.contents with
     | Building ctxt ->
-      builder := Building (f ctxt);
-      Ok ()
+        builder := Building (f ctxt);
+        Ok ()
     | Sealed -> Error Already_defined
 
-  let set ~scope ~key ~value ~digest = update @@ fun ctxt -> {
-      ctxt with
-      env = Map.add_exn ctxt.env ~key ~data:{scope; value; digest}
-    }
+  let set ~scope ~key ~value ~digest =
+    update @@ fun ctxt ->
+    { ctxt with env = Map.add_exn ctxt.env ~key ~data:{ scope; value; digest } }
 
   let get _ x = snd (Future.peek_exn x)
 
   let set_plugins disabled plugins commands =
-    List.iter plugins ~f:(fun (plugin,info) ->
-        if not (Set.mem disabled plugin)
-        then
+    List.iter plugins ~f:(fun (plugin, info) ->
+        if not (Set.mem disabled plugin) then
           Hashtbl.add_exn plugin_descriptions ~key:plugin ~data:info);
-    List.iter commands ~f:(fun (plugin,commands) ->
-        if not (Set.mem disabled plugin)
-        then Hashtbl.add_exn command_descriptions
-            ~key:plugin ~data:commands);
+    List.iter commands ~f:(fun (plugin, commands) ->
+        if not (Set.mem disabled plugin) then
+          Hashtbl.add_exn command_descriptions ~key:plugin ~data:commands);
 
-    update @@ fun ctxt -> {
-      env = Map.filter ctxt.env ~f:(fun {scope} ->
-          not (Set.mem disabled scope));
+    update @@ fun ctxt ->
+    {
+      env =
+        Map.filter ctxt.env ~f:(fun { scope } -> not (Set.mem disabled scope));
       plugins =
-        let init = Map.empty (module String) in
-        List.fold ~init plugins ~f:(fun plugins (name,{tags}) ->
-            if Set.mem disabled name then plugins
-            else
-              let data = Set.of_list (module String) tags in
-              Map.add_exn plugins ~key:name ~data)
+        (let init = Map.empty (module String) in
+         List.fold ~init plugins ~f:(fun plugins (name, { tags }) ->
+             if Set.mem disabled name then plugins
+             else
+               let data = Set.of_list (module String) tags in
+               Map.add_exn plugins ~key:name ~data));
     }
 
   let request () =
-    if Promise.is_fulfilled seal
-    then Future.peek_exn ready
-    else match builder.contents with
+    if Promise.is_fulfilled seal then Future.peek_exn ready
+    else
+      match builder.contents with
       | Sealed -> assert false
       | Building ctxt ->
-        builder := Sealed;
-        Promise.fulfill seal ctxt;
-        ctxt
+          builder := Sealed;
+          Promise.fulfill seal ctxt;
+          ctxt
 
   let make_filter features exclude =
     let intersects xs =
       let xs = Set.of_list (module String) xs in
-      fun tags -> not @@ Set.is_empty (Set.inter tags xs) in
-    let selected = match features with
-      | None -> fun _ -> true
-      | Some xs -> intersects xs
-    and filtered = match exclude with
-      | None -> fun _ -> false
-      | Some xs -> intersects xs in
+      fun tags -> not @@ Set.is_empty (Set.inter tags xs)
+    in
+    let selected =
+      match features with None -> fun _ -> true | Some xs -> intersects xs
+    and filtered =
+      match exclude with None -> fun _ -> false | Some xs -> intersects xs
+    in
     fun tags -> selected tags && not (filtered tags)
 
-  let plugins {plugins} =
-    Map.to_sequence ~order:`Decreasing_key plugins |>
-    Sequence.fold ~init:[] ~f:(fun plugins (p,_) ->
-        let info = match Hashtbl.find plugin_descriptions p with
-          | None -> "no description provided"
-          | Some {docs} -> docs in
-        (p,info) :: plugins)
+  let plugins { plugins } =
+    Map.to_sequence ~order:`Decreasing_key plugins
+    |> Sequence.fold ~init:[] ~f:(fun plugins (p, _) ->
+           let info =
+             match Hashtbl.find plugin_descriptions p with
+             | None -> "no description provided"
+             | Some { docs } -> docs
+           in
+           (p, info) :: plugins)
 
-  let commands {plugins} =
-    Hashtbl.fold command_descriptions ~init:[]
-      ~f:(fun ~key:plugin ~data cmds ->
-          if Map.mem plugins plugin then data @ cmds else cmds)
-
+  let commands { plugins } =
+    Hashtbl.fold command_descriptions ~init:[] ~f:(fun ~key:plugin ~data cmds ->
+        if Map.mem plugins plugin then data @ cmds else cmds)
 
   let refine ?provides ?exclude ctxt =
     let is_selected = make_filter provides exclude in
     let plugins = Map.filter ctxt.plugins ~f:is_selected in
-    let env = Map.filter ctxt.env ~f:(fun {scope} ->
-        Map.mem plugins scope) in
-    {plugins; env}
+    let env = Map.filter ctxt.env ~f:(fun { scope } -> Map.mem plugins scope) in
+    { plugins; env }
 
-
-  let features {plugins} =
+  let features { plugins } =
     Set.to_list @@ Set.union_list (module String) (Map.data plugins)
 
-  let pp ppf {env} =
-    Map.iteri env ~f:(fun ~key ~data:{value} ->
+  let pp ppf { env } =
+    Map.iteri env ~f:(fun ~key ~data:{ value } ->
         Format.fprintf ppf "%s = %s@\n" key value)
-
 
   let digest ctxt =
     let buffer = Buffer.create 128 in
     let ppf = Format.formatter_of_buffer buffer in
     Map.iter_keys ctxt.plugins ~f:(Buffer.add_string buffer);
-    Map.iteri ctxt.env ~f:(fun ~key ~data:{digest} ->
+    Map.iteri ctxt.env ~f:(fun ~key ~data:{ digest } ->
         Format.fprintf ppf "%s = %s@\n" key digest);
     Format.pp_print_flush ppf ();
-    Stdlib.Digest.string @@
-    Buffer.contents buffer
+    Stdlib.Digest.string @@ Buffer.contents buffer
 
   (* the info interface *)
   let info_name = fst
+
   and info_doc x =
-    short_description @@
-    first_sentence_of_man @@
-    Markdown.to_manpage (snd x)
+    short_description @@ first_sentence_of_man @@ Markdown.to_manpage (snd x)
 end
 
 type ctxt = Context.t
@@ -550,57 +539,55 @@ module Pre = struct
   let logdir : string option Term.t =
     let doc = "A folder for log files." in
     let env = Term.env_info ~doc "BAP_LOG_DIR" in
-    Arg.(value & opt (some string) None & info ["logdir"; "log-dir"] ~env ~doc)
+    Arg.(
+      value & opt (some string) None & info [ "logdir"; "log-dir" ] ~env ~doc)
 
   let plugin_locations =
     let doc = "Adds folder to the list of plugins search paths" in
-    Arg.(value & opt_all string [] &
-         info ~doc ["L"; "plugin-path"; "load-path"])
+    Arg.(
+      value & opt_all string [] & info ~doc [ "L"; "plugin-path"; "load-path" ])
 
   let recipe =
     let doc = "Load the specified recipe" in
-    Arg.(value & opt (some string) None & info ~doc ["recipe"])
+    Arg.(value & opt (some string) None & info ~doc [ "recipe" ])
 
+  let extract ?env option argv = fst (Term.eval_peek_opts ?env ~argv option)
 
-
-  let extract ?env option argv =
-    fst (Term.eval_peek_opts ?env ~argv option)
-
-  let term = Term.(const (fun _ _ _ -> Ok ()) $ logdir $plugin_locations $recipe)
-
+  let term =
+    Term.(const (fun _ _ _ -> Ok ()) $ logdir $ plugin_locations $ recipe)
 end
-
 
 module Grammar : sig
   open Cmdliner
 
-  type ('a,'b) arity
-  val atom : ('a,'a) arity
-  val list : ('a,'a list) arity
+  type ('a, 'b) arity
 
-  type ('f,'r) spec
+  val atom : ('a, 'a) arity
+  val list : ('a, 'a list) arity
+
+  type ('f, 'r) spec
   type 'a param
 
   type 'a rule =
-    ?doc:string ->
-    ?aliases:string list -> string -> (ctxt * 'a) Future.t
+    ?doc:string -> ?aliases:string list -> string -> (ctxt * 'a) Future.t
 
-  (** [extend arity conv make_term] extends the grammar of the plugin
-      with a new term.
-
-      Creates a parameter specification function, taking care of
-      correct naming and defaulting. The user provided [make_term]
-      function is called as [make_term conv default info], where
-      [conv] is properly wrapped/to_converterped cmdliner converter,
-      [default] is the final default value (read from config, or env,
-      or provided by a user) and [info] is the argument information
-      data structure with all names properly prefixed.
-
-      The returned value must be a term built from these parts. It
-      will be eventualy added to the program cmdline grammar. *)
   val extend :
-    ('a,'b) arity -> 'a Type.t ->
-    ('a Arg.conv -> 'b -> Arg.info -> 'b Term.t) -> 'b rule
+    ('a, 'b) arity ->
+    'a Type.t ->
+    ('a Arg.conv -> 'b -> Arg.info -> 'b Term.t) ->
+    'b rule
+  (** [extend arity conv make_term] extends the grammar of the plugin with a new
+      term.
+
+      Creates a parameter specification function, taking care of correct naming
+      and defaulting. The user provided [make_term] function is called as
+      [make_term conv default info], where [conv] is properly
+      wrapped/to_converterped cmdliner converter, [default] is the final default
+      value (read from config, or env, or provided by a user) and [info] is the
+      argument information data structure with all names properly prefixed.
+
+      The returned value must be a term built from these parts. It will be
+      eventualy added to the program cmdline grammar. *)
 
   val describe : Manpage.block list -> unit
 
@@ -608,25 +595,21 @@ module Grammar : sig
     ?features:string list ->
     ?provides:string list ->
     ?doc:string ->
-    (ctxt -> (unit,Error.t) Result.t) -> unit
+    (ctxt -> (unit, Error.t) Result.t) ->
+    unit
 
   val action :
     ?doc:string ->
     ?requires:string list ->
     string ->
-    ('a,ctxt -> (unit,Error.t) Result.t) spec -> 'a -> unit
+    ('a, ctxt -> (unit, Error.t) Result.t) spec ->
+    'a ->
+    unit
 
-
-  val args : ('a,'a) spec
-  val ($) : ('a, 'b -> 'c) spec -> 'b param -> ('a,'c) spec
-
-  val argument :
-    ?doc:string ->
-    'a Type.t -> 'a param
-
-  val arguments :
-    ?doc:string ->
-    'a Type.t -> 'a list param
+  val args : ('a, 'a) spec
+  val ( $ ) : ('a, 'b -> 'c) spec -> 'b param -> ('a, 'c) spec
+  val argument : ?doc:string -> 'a Type.t -> 'a param
+  val arguments : ?doc:string -> 'a Type.t -> 'a list param
 
   val switch :
     ?doc:('a -> string) ->
@@ -658,15 +641,8 @@ module Grammar : sig
     string ->
     'a list param
 
-  val flag :
-    ?doc:string ->
-    ?aliases:string list ->
-    string -> bool param
-
-  val flags :
-    ?doc:string ->
-    ?aliases:string list ->
-    string -> int param
+  val flag : ?doc:string -> ?aliases:string list -> string -> bool param
+  val flags : ?doc:string -> ?aliases:string list -> string -> int param
 
   val dictionary :
     ?doc:('k -> string) ->
@@ -683,47 +659,40 @@ module Grammar : sig
     ?version:string ->
     ?env:(string -> string option) ->
     ?help:Format.formatter ->
-    ?default:(ctxt -> (unit,Error.t) Result.t) ->
+    ?default:(ctxt -> (unit, Error.t) Result.t) ->
     ?command:string ->
     ?err:Format.formatter ->
-    string array -> (unit, Error.t) Result.t
+    string array ->
+    (unit, Error.t) Result.t
 
   val load_plugins :
     ?env:string list ->
     ?provides:string list ->
-    library:string list -> unit -> (plugin, string * Base.Error.t) Result.t list
+    library:string list ->
+    unit ->
+    (plugin, string * Base.Error.t) Result.t list
 end = struct
   open Cmdliner
 
   type len = Fin of int | Inf
+
   type 'a param =
     | Pos : 'a Type.t * Arg.info -> 'a param
     | All : 'a Type.t * Arg.info -> 'a list param
     | Key : 'a Term.t -> 'a param
 
-  type ('a,'b) spec = {
-    run : 'a -> 'b Term.t;
-    len : len;
-  }
-
-  type plugin_ctxt = {
-    name : string;
-    config : (string * string) list;
-  }
+  type ('a, 'b) spec = { run : 'a -> 'b Term.t; len : len }
+  type plugin_ctxt = { name : string; config : (string * string) list }
 
   type command =
-    (ctxt -> (unit,Error.t) Result.t) Term.t *
-    Term.info *
-    string list option
+    (ctxt -> (unit, Error.t) Result.t) Term.t * Term.info * string list option
 
-  type ('a,'b) arity = 'a Type.t -> 'b Type.t
+  type ('a, 'b) arity = 'a Type.t -> 'b Type.t
 
   type 'a rule =
-    ?doc:string ->
-    ?aliases:string list -> string -> (ctxt * 'a) Future.t
+    ?doc:string -> ?aliases:string list -> string -> (ctxt * 'a) Future.t
 
   let unit = Term.const (Ok ())
-
   let plugin_specs = Hashtbl.create (module String)
   let plugin_pages = Hashtbl.create (module String)
   let plugin_codes = Hashtbl.create (module String)
@@ -737,21 +706,24 @@ end = struct
   let actions = ref []
   let commands : command list ref = ref []
 
-  let dictionary ?doc ?as_flag ?(aliases=fun _ -> []) keys data name =
+  let dictionary ?doc ?as_flag ?(aliases = fun _ -> []) keys data name =
     let docv = Type.name data in
     let init = Term.const [] in
-    Key (List.fold keys ~init ~f:(fun terms key ->
-        let name = name key in
-        let names = name :: aliases key in
-        let doc = match doc with
-          | None -> sprintf "sets `%s' to %s" name docv
-          | Some doc -> doc key in
-        let vopt = match as_flag with
-          | None -> None
-          | Some f -> Some (f key) in
-        let t = Type.converter data and d = Type.default data in
-        let term = Arg.(value & opt ?vopt t d & info ~docv ~doc names) in
-        Term.(const (fun xs x -> (key,x) :: xs) $ terms $ term)))
+    Key
+      (List.fold keys ~init ~f:(fun terms key ->
+           let name = name key in
+           let names = name :: aliases key in
+           let doc =
+             match doc with
+             | None -> sprintf "sets `%s' to %s" name docv
+             | Some doc -> doc key
+           in
+           let vopt =
+             match as_flag with None -> None | Some f -> Some (f key)
+           in
+           let t = Type.converter data and d = Type.default data in
+           let term = Arg.(value & opt ?vopt t d & info ~docv ~doc names) in
+           Term.(const (fun xs x -> (key, x) :: xs) $ terms $ term)))
 
   let argument (type a) ?doc t : a param =
     Pos (t, Arg.info ~docv:(Type.name t) ?doc [])
@@ -759,112 +731,112 @@ end = struct
   let arguments (type a) ?doc t : a list param =
     All (t, Arg.info ~docv:(Type.name t) ?doc [])
 
-  let switch ?doc ?(aliases=fun _ -> []) opts inj =
-    let doc = Option.value doc
-        ~default:(fun s -> sprintf "Select %s" (inj s)) in
-    let opts = List.map opts ~f:(fun x ->
-        Some x, Arg.info ~doc:(doc x) (inj x :: aliases x)) in
+  let switch ?doc ?(aliases = fun _ -> []) opts inj =
+    let doc =
+      Option.value doc ~default:(fun s -> sprintf "Select %s" (inj s))
+    in
+    let opts =
+      List.map opts ~f:(fun x ->
+          (Some x, Arg.info ~doc:(doc x) (inj x :: aliases x)))
+    in
     Key Arg.(value & vflag None opts)
 
-  let switches ?doc ?(aliases=fun _ -> []) opts inj =
-    let doc = Option.value doc
-        ~default:(fun s -> sprintf "Select %s" (inj s)) in
-    let opts = List.map opts ~f:(fun x ->
-        x, Arg.info ~doc:(doc x) (inj x :: aliases x) ) in
+  let switches ?doc ?(aliases = fun _ -> []) opts inj =
+    let doc =
+      Option.value doc ~default:(fun s -> sprintf "Select %s" (inj s))
+    in
+    let opts =
+      List.map opts ~f:(fun x ->
+          (x, Arg.info ~doc:(doc x) (inj x :: aliases x)))
+    in
     Key Arg.(value & vflag_all [] opts)
 
-  let names aliases name = match aliases with
-    | None -> [name]
-    | Some names -> name :: names
+  let names aliases name =
+    match aliases with None -> [ name ] | Some names -> name :: names
 
   let parameter ?doc ?as_flag:vopt ?aliases t name : 'a param =
-    let t = Type.converter t and d = Type.default t
-    and docv = Type.name t in
-    Key Arg.(value & opt ?vopt t d & info ~docv ?doc &
-             names aliases name)
+    let t = Type.converter t and d = Type.default t and docv = Type.name t in
+    Key Arg.(value & opt ?vopt t d & info ~docv ?doc & names aliases name)
 
   let parameters ?doc ?as_flag:vopt ?aliases t name : 'a param =
     let t = Type.converter t and docv = Type.name t in
-    Key Arg.(value & opt_all ?vopt t [] & info ~docv ?doc &
-             names aliases name)
+    Key Arg.(value & opt_all ?vopt t [] & info ~docv ?doc & names aliases name)
 
   let flag ?doc ?aliases name : bool param =
     Key Arg.(value & flag & info ?doc & names aliases name)
 
   let flags ?doc ?aliases name : int param =
-    let term = Arg.(value & flag_all & info ?doc &
-                    names aliases name) in
+    let term = Arg.(value & flag_all & info ?doc & names aliases name) in
     let count = Term.(const (List.count ~f:(fun x -> x)) $ term) in
     Key count
 
-  let add (type a) len (b : a param) = match len,b with
+  let add (type a) len (b : a param) =
+    match (len, b) with
     | Fin len, Pos _ -> Fin (len + 1)
     | Fin _, All _ -> Inf
-    | Inf, All _ ->
-      invalid_arg "can't add an argument after arguments"
+    | Inf, All _ -> invalid_arg "can't add an argument after arguments"
     | _ -> len
 
   let one t name p =
-    let d = Type.default t
-    and c = Type.converter t in
+    let d = Type.default t and c = Type.converter t in
     Arg.(value & pos p c d name)
 
   let all t name p =
     let c = Type.converter t in
     match p with
     | 0 -> Arg.(value & pos_all c [] name)
-    | p -> Arg.(value & pos_right (p-1) c [] name)
+    | p -> Arg.(value & pos_right (p - 1) c [] name)
 
-  let ($) (type a) args (b : a param) = {
-    len = add args.len b;
-    run = fun f -> Term.(args.run f $ match b with
-      | Key t -> t
-      | _ -> match args.len with
-        | Inf -> assert false
-        | Fin n -> match b with
-          | Pos (t,i) -> one t i n
-          | All (t,i) -> all t i n
-          | _ -> assert false)
-  }
+  let ( $ ) (type a) args (b : a param) =
+    {
+      len = add args.len b;
+      run =
+        (fun f ->
+          Term.(
+            args.run f
+            $
+            match b with
+            | Key t -> t
+            | _ -> (
+                match args.len with
+                | Inf -> assert false
+                | Fin n -> (
+                    match b with
+                    | Pos (t, i) -> one t i n
+                    | All (t, i) -> all t i n
+                    | _ -> assert false))));
+    }
 
-  let extension ?(features=[]) ?(provides=[]) ?(doc="") code =
-    plugin_info := Option.some @@
-      Option.value_map !plugin_info ~f:(fun {tags; cons; docs} -> {
-            tags = tags @ provides;
-            cons = cons @ features;
-            docs = docs ^ doc;
-          })
-        ~default:{
-          tags = provides;
-          cons = features;
-          docs = doc;
-        };
+  let extension ?(features = []) ?(provides = []) ?(doc = "") code =
+    plugin_info :=
+      Option.some
+      @@ Option.value_map !plugin_info
+           ~f:(fun { tags; cons; docs } ->
+             {
+               tags = tags @ provides;
+               cons = cons @ features;
+               docs = docs ^ doc;
+             })
+           ~default:{ tags = provides; cons = features; docs = doc };
     let code' = !plugin_code in
-    plugin_code := fun ctxt -> match code ctxt with
-      | Ok () -> code' ctxt
-      | Error _ as err -> err
+    plugin_code :=
+      fun ctxt ->
+        match code ctxt with Ok () -> code' ctxt | Error _ as err -> err
 
+  let args = { len = Fin 0; run = Term.const }
 
-  let args = {
-    len = Fin 0;
-    run = Term.const
-  }
-
-  let action ?(doc="no description provided") ?requires:deps
-      name {run} command =
+  let action ?(doc = "no description provided") ?requires:deps name { run }
+      command =
     let man = Markdown.to_manpage doc in
-    let doc =
-      short_description ~default:doc @@
-      first_sentence_of_man man in
-    let term = run @@ command
-    and info = Term.info ~doc ~man name in
-    actions := (name,doc) :: !actions;
-    commands := (term,info,deps) :: !commands
+    let doc = short_description ~default:doc @@ first_sentence_of_man man in
+    let term = run @@ command and info = Term.info ~doc ~man name in
+    actions := (name, doc) :: !actions;
+    commands := (term, info, deps) :: !commands
 
   let reset_plugin () =
-    plugin_spec := (fun _ -> unit);
+    (plugin_spec := fun _ -> unit);
     plugin_page := [];
-    plugin_code := (fun _ -> Ok ());
+    (plugin_code := fun _ -> Ok ());
     plugin_info := None;
     actions := []
 
@@ -873,111 +845,106 @@ end = struct
     and ys = Set.of_list (module String) ys in
     Set.(to_list @@ union xs ys)
 
-
   let update_from_bundle info plugin =
-    let {Manifest.tags; cons; desc} = Plugin.manifest plugin in
+    let { Manifest.tags; cons; desc } = Plugin.manifest plugin in
     match info with
-    | None -> {docs = desc; tags; cons}
-    | Some info -> {
-        docs = if String.is_empty info.docs then desc else info.docs;
-        tags = merge tags info.tags;
-        cons = merge cons info.cons
-      }
+    | None -> { docs = desc; tags; cons }
+    | Some info ->
+        {
+          docs = (if String.is_empty info.docs then desc else info.docs);
+          tags = merge tags info.tags;
+          cons = merge cons info.cons;
+        }
 
   let hook_plugin_loads () =
     let config = ConfigFile.read () in
     Stream.observe Plugins.events @@ function
     | `Loaded p ->
-      let name = Plugin.name p in
-      let term = !plugin_spec {name; config} in
-      let info = update_from_bundle !plugin_info p in
-      let man = match !plugin_page with
-        | [] -> Markdown.to_manpage info.docs
-        | page -> page in
-      Hashtbl.update plugin_pages name ~f:(function
+        let name = Plugin.name p in
+        let term = !plugin_spec { name; config } in
+        let info = update_from_bundle !plugin_info p in
+        let man =
+          match !plugin_page with
+          | [] -> Markdown.to_manpage info.docs
+          | page -> page
+        in
+        Hashtbl.update plugin_pages name ~f:(function
           | None -> man
           | Some men -> men @ man);
-      Hashtbl.add_exn plugin_codes ~key:name ~data:!plugin_code;
-      Hashtbl.add_exn plugin_infos ~key:name ~data:info;
-      Hashtbl.add_exn plugins ~key:name ~data:p;
-      if not (List.is_empty !actions)
-      then Hashtbl.add_exn plugin_cmds ~key:name ~data:!actions;
-      reset_plugin ();
-      Hashtbl.add_exn plugin_specs ~key:name ~data:term;
+        Hashtbl.add_exn plugin_codes ~key:name ~data:!plugin_code;
+        Hashtbl.add_exn plugin_infos ~key:name ~data:info;
+        Hashtbl.add_exn plugins ~key:name ~data:p;
+        if not (List.is_empty !actions) then
+          Hashtbl.add_exn plugin_cmds ~key:name ~data:!actions;
+        reset_plugin ();
+        Hashtbl.add_exn plugin_specs ~key:name ~data:term
     | `Errored _ -> reset_plugin ()
     | _ -> ()
 
-  let load_plugins ?env ?provides ~library ()=
+  let load_plugins ?env ?provides ~library () =
     hook_plugin_loads ();
     Plugins.load ?env ?provides ~library ()
 
   let option_name ctxt name = sprintf "%s-%s" ctxt.name name
-
-  let undashify = String.map ~f:(function
-      | '-' -> '_'
-      | x -> x)
+  let undashify = String.map ~f:(function '-' -> '_' | x -> x)
 
   let env_var_for_option name =
-    sprintf "BAP_%s" @@
-    String.uppercase (undashify name)
+    sprintf "BAP_%s" @@ String.uppercase (undashify name)
 
   let get_from_env name =
     let name = env_var_for_option name in
-    try Some (Stdlib.Sys.getenv name)
-    with Stdlib.Not_found -> None
+    try Some (Stdlib.Sys.getenv name) with Stdlib.Not_found -> None
 
   let get_from_config ctxt name =
     List.Assoc.find ~equal:String.equal ctxt.config name
 
-  let decide_default {Type.parse; default} name ctxt =
+  let decide_default { Type.parse; default } name ctxt =
     let name = option_name ctxt name in
-    let parse ~where what = match parse what with
+    let parse ~where what =
+      match parse what with
       | v -> v
       | exception exn ->
-        fail "the value %S for the parameter %S is malformed in the %s - %s"
-          what name where (Exn.to_string exn) in
+          fail "the value %S for the parameter %S is malformed in the %s - %s"
+            what name where (Exn.to_string exn)
+    in
     match get_from_env name with
     | Some v -> parse ~where:"process environment " v
-    | None -> match get_from_config ctxt name with
-      | None -> default
-      | Some v -> parse ~where:"configuration file" v
+    | None -> (
+        match get_from_config ctxt name with
+        | None -> default
+        | Some v -> parse ~where:"configuration file" v)
 
-  let plugin_section _ =
-    Manpage.s_common_options
+  let plugin_section _ = Manpage.s_common_options
 
-  let extend (type a b) (wrap : (a,b) arity) typ make_term =
-    fun ?(doc="Undocumented") ?(aliases=[]) name ->
+  let extend (type a b) (wrap : (a, b) arity) typ make_term =
+   fun ?(doc = "Undocumented") ?(aliases = []) name ->
     let value, ready = Future.create () in
     let rest = !plugin_spec in
-    plugin_spec := begin fun ctxt ->
-      let names = List.map (name::aliases) ~f:(option_name ctxt) in
-      let docs = plugin_section ctxt.name in
-      let docv = Type.name (wrap typ) in
-      let ainfo = Arg.info names ~docs ~doc ~docv in
-      let default = decide_default (wrap typ) name ctxt in
-      let conv = Type.converter typ in
-      let set_value x = function
-        | Error _ as err -> err
-        | Ok () ->
-          Promise.fulfill ready x;
-          Context.set
-            ~scope:ctxt.name
-            ~key:(option_name ctxt name)
-            ~value:(Type.print (wrap typ) x)
-            ~digest:(Type.digest (wrap typ) x) in
-      Term.(const set_value $
-            make_term conv default ainfo $ rest ctxt)
-    end;
+    (plugin_spec :=
+       fun ctxt ->
+         let names = List.map (name :: aliases) ~f:(option_name ctxt) in
+         let docs = plugin_section ctxt.name in
+         let docv = Type.name (wrap typ) in
+         let ainfo = Arg.info names ~docs ~doc ~docv in
+         let default = decide_default (wrap typ) name ctxt in
+         let conv = Type.converter typ in
+         let set_value x = function
+           | Error _ as err -> err
+           | Ok () ->
+               Promise.fulfill ready x;
+               Context.set ~scope:ctxt.name ~key:(option_name ctxt name)
+                 ~value:(Type.print (wrap typ) x)
+                 ~digest:(Type.digest (wrap typ) x)
+         in
+         Term.(const set_value $ make_term conv default ainfo $ rest ctxt));
     Future.both Context.ready value
 
   and list x = Type.list x
   and atom x = x
 
+  let describe man = plugin_page := man @ !plugin_page
 
-  let describe man =
-    plugin_page := man @ !plugin_page
-
-  type term = (unit,error) Result.t Term.t
+  type term = (unit, error) Result.t Term.t
 
   (* We can short-circuit the term evaluation, only
      via Term.(ret,term_result,cli_parse_result), which
@@ -989,31 +956,34 @@ end = struct
   let term_evaluation_result = ref (Ok ())
 
   (** [t1 >>> t2] evaluates [t1] and if succeeds evaluates [t2] *)
-  let (>>>) : term -> term -> term = fun t1 t2 ->
-    let f = Term.(const (function
-        | Error _ as err ->
-          term_evaluation_result := err;
-          Error (`Msg "this message is ignored")
-        | Ok () -> Ok (fun x -> x)) $ t1) in
+  let ( >>> ) : term -> term -> term =
+   fun t1 t2 ->
+    let f =
+      Term.(
+        const (function
+          | Error _ as err ->
+              term_evaluation_result := err;
+              Error (`Msg "this message is ignored")
+          | Ok () -> Ok (fun x -> x))
+        $ t1)
+    in
     Term.(term_result f $ t2)
 
   let concat_plugins () =
     Hashtbl.fold plugin_specs ~init:unit ~f:(fun ~key:_ ~data:t1 t2 ->
         t1 >>> t2)
 
-  let progname =
-    Stdlib.Filename.basename (Stdlib.Sys.executable_name)
-
+  let progname = Stdlib.Filename.basename Stdlib.Sys.executable_name
 
   let with_context name ~f =
     Plugin.with_context (Hashtbl.find_exn plugins name) ~f
 
-  let try_eval f x = try f x with
+  let try_eval f x =
+    try f x with
     | Invalid_argument s -> Error (Error.Invalid s)
     | exn ->
-      let backtrace = Stdlib.Printexc.get_backtrace () in
-      Error (Error.Bug (exn,backtrace))
-
+        let backtrace = Stdlib.Printexc.get_backtrace () in
+        Error (Error.Bug (exn, backtrace))
 
   let eval_plugins disabled plugins_term =
     let open Result in
@@ -1024,191 +994,215 @@ end = struct
     Context.set_plugins disabled plugins commands >>= fun () ->
     let ctxt = Context.request () in
     let init = Ok () in
-    Hashtbl.fold plugin_codes ~init ~f:(fun ~key:name ~data:code ->
-        function Error _ as err -> err
-               | Ok () ->
-                 if not (Set.mem disabled name)
-                 then
-                   with_context name ~f:(fun () ->
-                       try_eval code ctxt)
-                 else Ok ())
+    Hashtbl.fold plugin_codes ~init ~f:(fun ~key:name ~data:code -> function
+      | Error _ as err -> err
+      | Ok () ->
+          if not (Set.mem disabled name) then
+            with_context name ~f:(fun () -> try_eval code ctxt)
+          else Ok ())
 
   let no_plugin_options plugins =
     let init = Term.const [] in
     List.fold plugins ~init ~f:(fun names name ->
         let doc = "Disable the " ^ name ^ " plugin" in
         let docs = plugin_section name in
-        let plugin = Arg.(value & flag &
-                          info ~doc ~docs ["no-"^name]) in
-        let append selected names =
-          if selected then name :: names else names in
+        let plugin = Arg.(value & flag & info ~doc ~docs [ "no-" ^ name ]) in
+        let append selected names = if selected then name :: names else names in
         Term.(const append $ plugin $ names))
 
   let help_options ?version ppf plugins =
     let init = Term.const (Ok ()) in
-    let fmts = [
-      "auto", `Auto;
-      "pager", `Pager;
-      "groff", `Groff;
-      "plain", `Plain;
-    ] in
+    let fmts =
+      [
+        ("auto", `Auto); ("pager", `Pager); ("groff", `Groff); ("plain", `Plain);
+      ]
+    in
 
     (* Cmdliner doesn't give us an argument, but a term, so we
        can't use man_format with a term of our own name *)
     let make_help_option name =
-      let doc = sprintf "prints more information about the $(b,%s) plugin"
-          name in
+      let doc =
+        sprintf "prints more information about the $(b,%s) plugin" name
+      in
       let docs = plugin_section name in
-      Arg.(value & opt ~vopt:(Some `Auto)
-             (some (enum fmts)) None & info ~doc ~docs [name^"-help"]) in
+      Arg.(
+        value
+        & opt ~vopt:(Some `Auto) (some (enum fmts)) None
+        & info ~doc ~docs [ name ^ "-help" ])
+    in
 
-    let print_manpage fmt name = match Hashtbl.find plugin_pages name with
+    let print_manpage fmt name =
+      match Hashtbl.find plugin_pages name with
       | None -> Error (Error.Unknown_plugin name)
       | Some manpage ->
-        let left = match version with
-          | None -> ""
-          | Some v -> " " ^ v in
-        let caption = "BAP Programmer's Manual" in
-        let title = name, 3, "",left, caption in
-        let subst = function
-          | "tname" | "mname" -> Some name
-          | _ -> None in
-        Manpage.print ~subst fmt ppf (title,manpage);
-        Error (Error.Exit_requested 0) in
+          let left = match version with None -> "" | Some v -> " " ^ v in
+          let caption = "BAP Programmer's Manual" in
+          let title = (name, 3, "", left, caption) in
+          let subst = function "tname" | "mname" -> Some name | _ -> None in
+          Manpage.print ~subst fmt ppf (title, manpage);
+          Error (Error.Exit_requested 0)
+    in
 
     List.fold plugins ~init ~f:(fun served plugin ->
-        let serve_manpage served requested = match served with
+        let serve_manpage served requested =
+          match served with
           | Error _ as err -> err
-          | Ok () -> match requested with
-            | None -> Ok ()
-            | Some fmt -> print_manpage fmt plugin in
+          | Ok () -> (
+              match requested with
+              | None -> Ok ()
+              | Some fmt -> print_manpage fmt plugin)
+        in
         Term.(const serve_manpage $ served $ make_help_option plugin))
 
-  let eval ?(man="") ?(name=progname) ?version ?env
-      ?(help=Format.std_formatter) ?default ?command
-      ?err:(usr_err=Format.err_formatter) argv =
+  let eval ?(man = "") ?(name = progname) ?version ?env
+      ?(help = Format.std_formatter) ?default ?command
+      ?err:(usr_err = Format.err_formatter) argv =
     let plugin_names = Plugins.list () |> List.map ~f:Plugin.name in
     let disabled_plugins = no_plugin_options plugin_names in
     let plugin_options = concat_plugins () in
-    let man = (Markdown.to_manpage man :> Manpage.block list)  in
+    let man = (Markdown.to_manpage man :> Manpage.block list) in
     let main_info = Term.info ?version ~man name in
     let helps = help_options ?version help plugin_names in
-    let plugins = Pre.term >>> helps >>>
-      Term.(const eval_plugins $disabled_plugins $plugin_options) in
-    let commands = List.map !commands ~f:(fun (command,info,deps) ->
-        plugins >>> Term.(const (fun cmd ->
-            let ctxt =
-              Context.refine ?provides:deps @@
-              Context.request () in
-            cmd ctxt) $ command), info) in
-    let main = match default with
+    let plugins =
+      Pre.term >>> helps
+      >>> Term.(const eval_plugins $ disabled_plugins $ plugin_options)
+    in
+    let commands =
+      List.map !commands ~f:(fun (command, info, deps) ->
+          ( (plugins
+            >>> Term.(
+                  const (fun cmd ->
+                      let ctxt =
+                        Context.refine ?provides:deps @@ Context.request ()
+                      in
+                      cmd ctxt)
+                  $ command)),
+            info ))
+    in
+    let main =
+      match default with
       | None -> plugins
-      | Some f -> Term.(const (fun p -> match p with
-          | Error _ as err -> err
-          | Ok () -> f @@ Context.request ()) $ plugins) in
-    let argv = match command with
+      | Some f ->
+          Term.(
+            const (fun p ->
+                match p with
+                | Error _ as err -> err
+                | Ok () -> f @@ Context.request ())
+            $ plugins)
+    in
+    let argv =
+      match command with
       | None -> argv
-      | Some cmd -> match Array.to_list argv with
-        | prog :: arg :: rest ->
-          if List.exists commands ~f:(fun (_,info) ->
-              String.is_prefix ~prefix:arg (Term.name info))
-          then argv
-          else Array.of_list (prog::cmd::arg::rest)
-        | [_] | [] -> argv in
+      | Some cmd -> (
+          match Array.to_list argv with
+          | prog :: arg :: rest ->
+              if
+                List.exists commands ~f:(fun (_, info) ->
+                    String.is_prefix ~prefix:arg (Term.name info))
+              then argv
+              else Array.of_list (prog :: cmd :: arg :: rest)
+          | [ _ ] | [] -> argv)
+    in
     let buf = Buffer.create 64 in
     let err = Format.formatter_of_buffer buf in
-    match Term.eval_choice (main,main_info) commands
-            ?env ~help ~err ~argv ~catch:false with
+    match
+      Term.eval_choice (main, main_info) commands ?env ~help ~err ~argv
+        ~catch:false
+    with
     | `Error `Exn -> assert false (*^^^^^^^^^^^ that's why*)
     | `Ok (Ok ()) -> Ok ()
     | `Ok (Error _ as err) -> err
     | `Version | `Help -> Ok ()
-    | `Error (`Parse|`Term) -> match !term_evaluation_result with
-      | Ok () ->
-        Format.pp_print_flush err ();
-        Format.fprintf usr_err "%s@." (Buffer.contents buf);
-        Error Error.Configuration
-      | Error _ as err -> err
+    | `Error (`Parse | `Term) -> (
+        match !term_evaluation_result with
+        | Ok () ->
+            Format.pp_print_flush err ();
+            Format.fprintf usr_err "%s@." (Buffer.contents buf);
+            Error Error.Configuration
+        | Error _ as err -> err)
 end
 
 module Extension = struct
-
   module Type = Type
+
   type 'a typ = 'a Type.t
   type ctxt = Context.t
 
   let declare = Grammar.extension
-
   let manpage man = Grammar.describe (man :> Cmdliner.Manpage.block list)
-  let documentation doc =
-    manpage (Markdown.to_manpage doc)
+  let documentation doc = manpage (Markdown.to_manpage doc)
 
   module Configuration = struct
     open Cmdliner
 
     type 'a param = (ctxt * 'a) future
+
     let get _ x = snd (Future.peek_exn x)
 
-    let atom = Grammar.atom and list = Grammar.list
+    let atom = Grammar.atom
+    and list = Grammar.list
 
     let parameter ?as_flag conv =
       Grammar.extend atom conv @@ fun conv def info ->
       Arg.value @@ Arg.opt ?vopt:as_flag conv def info
 
-    let parameter ?doc ?as_flag ?aliases typ name
-      = parameter ?doc ?as_flag ?aliases typ name
+    let parameter ?doc ?as_flag ?aliases typ name =
+      parameter ?doc ?as_flag ?aliases typ name
 
     let parameters ?as_flag conv =
       Grammar.extend list conv @@ fun conv def info ->
       Arg.value @@ Arg.opt_all ?vopt:as_flag conv def info
 
-    let parameters ?doc ?as_flag ?aliases typ name
-      = parameters ?doc ?as_flag ?aliases typ name
-
+    let parameters ?doc ?as_flag ?aliases typ name =
+      parameters ?doc ?as_flag ?aliases typ name
 
     let flag conv =
       Grammar.extend atom conv @@ fun _ def docs ->
       Term.(const (fun x -> x || def) $ Arg.value (Arg.flag docs))
 
     let flag = flag Type.bool
+    let determined (p : 'a param) : 'a future = Future.map p ~f:snd
 
-    let determined (p:'a param) : 'a future = Future.map p ~f:snd
-
-    let when_ready f : unit = Grammar.extension @@ fun ctxt ->
+    let when_ready f : unit =
+      Grammar.extension @@ fun ctxt ->
       try Ok (f ctxt) with
       | Invalid_argument s -> Error (Error.Invalid s)
       | exn ->
-        let backtrace = Stdlib.Printexc.get_backtrace () in
-        Error (Error.Bug (exn,backtrace))
+          let backtrace = Stdlib.Printexc.get_backtrace () in
+          Error (Error.Bug (exn, backtrace))
 
     let doc_enum = Arg.doc_alts_enum
 
     include Bap_main_config
-    let sysdatadir = datadir
 
-    let (/) = Filename.concat
+    let sysdatadir = datadir
+    let ( / ) = Filename.concat
 
     let datadir =
       match Sys.getenv_opt "XDG_DATA_HOME" with
       | Some dir -> dir / "bap"
-      | None -> match Sys.getenv_opt "HOME" with
-        | Some dir -> dir / ".local" / "share" / "bap"
-        | None -> Sys.getcwd ()
+      | None -> (
+          match Sys.getenv_opt "HOME" with
+          | Some dir -> dir / ".local" / "share" / "bap"
+          | None -> Sys.getcwd ())
 
-    let cachedir = match Sys.getenv_opt "XDG_CACHE_HOME" with
+    let cachedir =
+      match Sys.getenv_opt "XDG_CACHE_HOME" with
       | Some dir -> dir / "bap"
-      | None -> match Sys.getenv_opt "HOME" with
-        | Some dir -> dir / ".cache" / "bap"
-        | None -> Filename.get_temp_dir_name () / "bap" / "cache"
+      | None -> (
+          match Sys.getenv_opt "HOME" with
+          | Some dir -> dir / ".cache" / "bap"
+          | None -> Filename.get_temp_dir_name () / "bap" / "cache")
 
     include Context
   end
 
   module Command = struct
-    type ('f,'r) t = ('f,'r) Grammar.spec
+    type ('f, 'r) t = ('f, 'r) Grammar.spec
     type 'a param = 'a Grammar.param
+
     let declare = Grammar.action
-    let ($) = Grammar.($)
+    let ( $ ) = Grammar.( $ )
     let args = Grammar.args
     let argument = Grammar.argument
     let arguments = Grammar.arguments
@@ -1222,8 +1216,9 @@ module Extension = struct
   end
 
   module Syntax = struct
-    let (-->) ctxt v = Configuration.get ctxt v
+    let ( --> ) ctxt v = Configuration.get ctxt v
   end
+
   module Error = Error
 end
 
@@ -1240,75 +1235,78 @@ let enable_logging = function
   | Some (`Dir logdir) -> Bap_main_log.in_directory ~logdir ()
   | None -> Bap_main_log.in_directory ()
 
-
 let load_recipe recipe =
-  let paths = [
-    Stdlib.Filename.current_dir_name;
-    Extension.Configuration.datadir;
-    Extension.Configuration.sysdatadir;
-  ] in
+  let paths =
+    [
+      Stdlib.Filename.current_dir_name;
+      Extension.Configuration.datadir;
+      Extension.Configuration.sysdatadir;
+    ]
+  in
   match Bap_recipe.load ~paths recipe with
   | Ok r ->
-    Stdlib.at_exit (fun () -> Bap_recipe.close r);
-    Ok r
+      Stdlib.at_exit (fun () -> Bap_recipe.close r);
+      Ok r
   | Error err -> Error (Error.Bad_recipe err)
 
-let (>>=) x f = Result.bind x ~f
+let ( >>= ) x f = Result.bind x ~f
 
-
-let init
-    ?features
-    ?requires
-    ?library ?(argv=[|Sys.executable_name |])
-    ?env ?log ?out ?err ?man
-    ?name ?(version=Bap_main_config.version)
-    ?default
-    ?default_command
-    () =
+let init ?features ?requires ?library ?(argv = [| Sys.executable_name |]) ?env
+    ?log ?out ?err ?man ?name ?(version = Bap_main_config.version) ?default
+    ?default_command () =
   match state.contents with
   | Loaded _ -> Error Error.Already_initialized
   | Failed err -> Error (Error.Already_failed err)
   | Initializing -> Error Error.Recursive_init
   | Uninitialized ->
-    let argv = match Pre.(extract ?env recipe argv) with
-      | None | Some None -> Ok argv
-      | Some (Some spec) ->
-        load_recipe spec >>= fun spec ->
-        Ok (Bap_recipe.argv ~argv spec) in
-    argv >>= fun argv ->
-    let log = match log with
-      | Some _ -> log
-      | None -> Option.(join @@ Pre.(extract ?env logdir argv) >>|
-                        fun x -> `Dir x) in
-    enable_logging log;
-    let library = match library with
-      | Some libs -> libs
-      | None -> match Pre.(extract ?env plugin_locations argv) with
-        | None -> []
-        | Some libs -> libs in
-    let result =
-      Grammar.load_plugins ()
-        ?env:features ?provides:requires ~library in
-    let plugins,failures =
-      List.partition_map result ~f:(function
+      let argv =
+        match Pre.(extract ?env recipe argv) with
+        | None | Some None -> Ok argv
+        | Some (Some spec) ->
+            load_recipe spec >>= fun spec -> Ok (Bap_recipe.argv ~argv spec)
+      in
+      argv >>= fun argv ->
+      let log =
+        match log with
+        | Some _ -> log
+        | None ->
+            Option.(
+              (join @@ Pre.(extract ?env logdir argv)) >>| fun x -> `Dir x)
+      in
+      enable_logging log;
+      let library =
+        match library with
+        | Some libs -> libs
+        | None -> (
+            match Pre.(extract ?env plugin_locations argv) with
+            | None -> []
+            | Some libs -> libs)
+      in
+      let result =
+        Grammar.load_plugins () ?env:features ?provides:requires ~library
+      in
+      let plugins, failures =
+        List.partition_map result ~f:(function
           | Ok p -> First p
-          | Error (p,e) -> Second (p,e)) in
-    let version = match Bap_main_config.build_id with
-      | "" -> version
-      | id -> sprintf "%s+%s" version id in
-    if List.is_empty failures
-    then match Grammar.eval argv
-                 ?name ~version ?env ?help:out
-                 ?err ?man ?default ?command:default_command
-      with
-      | Ok () ->
-        state := Loaded plugins;
-        Ok ()
-      | Error err ->
-        state := Failed err;
-        Error err
-    else begin
-      let problem = Error.Broken_plugins failures in
-      state := Failed problem;
-      Error problem
-    end
+          | Error (p, e) -> Second (p, e))
+      in
+      let version =
+        match Bap_main_config.build_id with
+        | "" -> version
+        | id -> sprintf "%s+%s" version id
+      in
+      if List.is_empty failures then (
+        match
+          Grammar.eval argv ?name ~version ?env ?help:out ?err ?man ?default
+            ?command:default_command
+        with
+        | Ok () ->
+            state := Loaded plugins;
+            Ok ()
+        | Error err ->
+            state := Failed err;
+            Error err)
+      else
+        let problem = Error.Broken_plugins failures in
+        state := Failed problem;
+        Error problem

@@ -1,1 +1,1 @@
-(** a fat cat on steroids - utility that concatenates files  *)
+(** a fat cat on steroids - utility that concatenates files *)

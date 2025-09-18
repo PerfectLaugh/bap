@@ -1,6 +1,7 @@
 (library
-  (name bap_api)
-  (public_name bap-api)
-  (wrapped false)
-  (preprocess (pps ppx_bap))
-  (libraries bap core))
+ (name bap_api)
+ (public_name bap-api)
+ (wrapped false)
+ (preprocess
+  (pps ppx_bap))
+ (libraries bap core))

@@ -1,61 +1,55 @@
 (** A representation of relations between two sets.
 
-    A relation between two sets is a set of pairs made from the
-    elements of these sets. The precise mathematical definition is given
-    below. This module implements a bidirectional mapping between two
-    sets and computes their matching that defines bijections between
-    the sets.
+    A relation between two sets is a set of pairs made from the elements of
+    these sets. The precise mathematical definition is given below. This module
+    implements a bidirectional mapping between two sets and computes their
+    matching that defines bijections between the sets.
 
     {2 Formal Definition and Notation}
 
-    Given two sets [K] and [S], with meta-variables [x,y,z] ranging
-    over [K] and meta-variables [r,s,t] ranging over [S] we will
-    denote a finitary relation [R] as a subset of the cartesian
-    product [K x S], which is a set of pairs [(x,r), ..., (z,t)],
-    which we represent as a bipartite graph [G = (K,S,R)].
+    Given two sets [K] and [S], with meta-variables [x,y,z] ranging over [K] and
+    meta-variables [r,s,t] ranging over [S] we will denote a finitary relation
+    [R] as a subset of the cartesian product [K x S], which is a set of pairs
+    [(x,r), ..., (z,t)], which we represent as a bipartite graph [G = (K,S,R)].
 *)
 
-(** the type for relation between ['k] and ['s].  *)
-type ('k,'s) t
+type ('k, 's) t
+(** the type for relation between ['k] and ['s]. *)
 
+val empty : ('k -> 'k -> int) -> ('s -> 's -> int) -> ('k, 's) t
 (** [empty compare_k compare_s] the empty relation between two sets.
 
-    - [compare_k] is the function that defines order of the elements
-      of the set [K].
+    - [compare_k] is the function that defines order of the elements of the set
+      [K].
 
-    - [compare_s] is the function that defines order of the elements
-      of the set [S].
+    - [compare_s] is the function that defines order of the elements of the set
+      [S].
 
     {3 Example}
     {[
-      let empty = Bap_relation.empty
-          Int.compare
-          String.compare
-    ]}
-*)
-val empty : ('k -> 'k -> int) -> ('s -> 's -> int) -> ('k,'s) t
+      let empty = Bap_relation.empty Int.compare String.compare
+    ]} *)
 
-(** [is_empty rel] is true if the relation [rel] is an empty set.  *)
-val is_empty : (_,_) t -> bool
+val is_empty : (_, _) t -> bool
+(** [is_empty rel] is true if the relation [rel] is an empty set. *)
 
-(** [add relation x s] establishes a relation between [x] and [s].  *)
-val add : ('k,'s) t -> 'k -> 's -> ('k,'s) t
+val add : ('k, 's) t -> 'k -> 's -> ('k, 's) t
+(** [add relation x s] establishes a relation between [x] and [s]. *)
 
+val mem : ('k, 's) t -> 'k -> 's -> bool
 (** [mem rel x s] is [true] if [(k,s)] is in the relation [rel]. *)
-val mem : ('k,'s) t -> 'k -> 's -> bool
 
-(** [findl rel x] finds all pairs in [rel] that have [x] on the left.  *)
-val findl : ('k,'s) t -> 'k -> 's list
+val findl : ('k, 's) t -> 'k -> 's list
+(** [findl rel x] finds all pairs in [rel] that have [x] on the left. *)
 
-(** [findr rel s] finds all pairs in [rel] that have [s] on the right.  *)
-val findr : ('k,'s) t -> 's -> 'k list
+val findr : ('k, 's) t -> 's -> 'k list
+(** [findr rel s] finds all pairs in [rel] that have [s] on the right. *)
 
-(** [fold rel init f] folds over all pairs in the relation [rel].  *)
-val fold : ('k,'s) t -> init:'a -> f:('k -> 's -> 'a -> 'a) -> 'a
+val fold : ('k, 's) t -> init:'a -> f:('k -> 's -> 'a -> 'a) -> 'a
+(** [fold rel init f] folds over all pairs in the relation [rel]. *)
 
-(** [iter rel f] iterates over all pairs in the relation [rel].   *)
-val iter : ('k,'s) t -> f:('k -> 's -> unit) -> unit
-
+val iter : ('k, 's) t -> f:('k -> 's -> unit) -> unit
+(** [iter rel f] iterates over all pairs in the relation [rel]. *)
 
 (** {2 Bijections and matching}
 
@@ -77,26 +71,27 @@ val iter : ('k,'s) t -> f:('k -> 's -> unit) -> unit
       [Non_injective_bwd ([r;s],x);
 *)
 
-(** the reason why the pair was left unmatched  *)
-type ('k,'s) non_injective =
-  | Non_injective_fwd of 'k list * 's (** Non-injective forward mapping.  *)
-  | Non_injective_bwd of 's list * 'k (** Non-injective backward mapping.  *)
+(** the reason why the pair was left unmatched *)
+type ('k, 's) non_injective =
+  | Non_injective_fwd of 'k list * 's  (** Non-injective forward mapping. *)
+  | Non_injective_bwd of 's list * 'k  (** Non-injective backward mapping. *)
 
+val matching :
+  ('k, 's) t ->
+  ?saturated:('k -> 's -> 'a -> 'a) ->
+  ?unmatched:(('k, 's) non_injective -> 'a -> 'a) ->
+  'a ->
+  'a
 (** [matching relation data] computes the matching for the given [relation].
 
-    Calls [saturated x s data] for each [(x,s)] in the matching
-    [M] (see the module description) and [unmatched z reason d] for
-    each [(z,t)] in the relation that are not matched, the reason
-    is one of the:
+    Calls [saturated x s data] for each [(x,s)] in the matching [M] (see the
+    module description) and [unmatched z reason d] for each [(z,t)] in the
+    relation that are not matched, the reason is one of the:
 
-    - [Non_injective_fwd (xs,s)] if the mapping [K -> S] that is
-      induced by the [relation] is non-injective, because the set of
-      values [xs] from [K] are mapped to the same value [s] in [S].
+    - [Non_injective_fwd (xs,s)] if the mapping [K -> S] that is induced by the
+      [relation] is non-injective, because the set of values [xs] from [K] are
+      mapped to the same value [s] in [S].
 
-    - [Non_injective_bwd (ss,x)] if the mapping [S -> K] that is
-      induced by the [relation] is non-injective, because the set of
-      values [ss] from [S] are mapped to the same value [x] in [K].
-*)
-val matching : ('k,'s) t ->
-  ?saturated : ('k -> 's -> 'a -> 'a) ->
-  ?unmatched : (('k,'s) non_injective -> 'a -> 'a) -> 'a -> 'a
+    - [Non_injective_bwd (ss,x)] if the mapping [S -> K] that is induced by the
+      [relation] is non-injective, because the set of values [ss] from [S] are
+      mapped to the same value [x] in [K]. *)

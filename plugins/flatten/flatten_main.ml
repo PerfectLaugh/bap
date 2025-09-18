@@ -1,12 +1,7 @@
-let provides = [
-  "pass";
-  "analysis";
-  "flatten";
-  "tac"; "3ac";
-  "unroll"
-]
+let provides = [ "pass"; "analysis"; "flatten"; "tac"; "3ac"; "unroll" ]
 
-let doc = {|
+let doc =
+  {|
 # DESCRIPTION
 
 Flatten all BIR in the program.
@@ -23,11 +18,11 @@ Flatten all BIR in the program.
 ```
 |}
 
-
 open Bap.Std
 
 let main = Project.map_program ~f:(Term.map sub_t ~f:Sub.flatten)
 
-let () = Bap_main.Extension.declare ~doc ~provides @@ fun _ ->
+let () =
+  Bap_main.Extension.declare ~doc ~provides @@ fun _ ->
   Project.register_pass main;
   Ok ()

@@ -1,11 +1,13 @@
 (library
  (name bap_taint_plugin)
  (public_name bap-taint.plugin)
- (preprocess (pps ppx_bap))
+ (preprocess
+  (pps ppx_bap))
  (libraries bap core regular))
 
 (plugin
  (name taint)
  (package bap-taint)
  (libraries bap-taint.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

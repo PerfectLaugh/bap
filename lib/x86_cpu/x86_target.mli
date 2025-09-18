@@ -1,14 +1,14 @@
-(** Declarations of some x86 targets.  *)
+(** Declarations of some x86 targets. *)
 
 open Bap_core_theory
 
+val parent : Theory.Target.t
 (** The parent of all x86 targets.
 
-    When a new target is declared it is advised to use any target from
-    this module as parent so that the newly declared target will be
-    included into the x86 Targets family.  The [parent] target is pure
-    abstract and doesn't have any propreties set.  *)
-val parent : Theory.Target.t
+    When a new target is declared it is advised to use any target from this
+    module as parent so that the newly declared target will be included into the
+    x86 Targets family. The [parent] target is pure abstract and doesn't have
+    any propreties set. *)
 
 val i86 : Theory.Target.t
 val i186 : Theory.Target.t
@@ -18,7 +18,6 @@ val i486 : Theory.Target.t
 val i586 : Theory.Target.t
 val i686 : Theory.Target.t
 val amd64 : Theory.Target.t
-
 
 (** The list of x86 abis.
 
@@ -36,14 +35,14 @@ module Abi : sig
   val sysv : Theory.abi
 end
 
+val load : ?abi:Theory.abi -> ?backend:string -> unit -> unit
 (** [load ()] loads the knowledge base rules for the x86 targets.
 
-    This includes parsing the loader output and enabling backward
-    compatibility with the old [Arch.t] representation.
+    This includes parsing the loader output and enabling backward compatibility
+    with the old [Arch.t] representation.
 
-    @param abi overrides the automatic selection of abi and use the
-    specified one.
+    @param abi
+      overrides the automatic selection of abi and use the specified one.
 
     @since 2.4.0 accepts the backend parameter.
     @since 2.5.0 accepts the abi parameter.*)
-val load : ?abi:Theory.abi -> ?backend:string -> unit -> unit

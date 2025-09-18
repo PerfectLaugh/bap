@@ -1,4 +1,6 @@
 (install
-  (files core.lisp init.lisp memory.lisp pointers.lisp)
-  (package bap-primus-lisp)
-  (section (site (bap-common lisp))))
+ (files core.lisp init.lisp memory.lisp pointers.lisp)
+ (package bap-primus-lisp)
+ (section
+  (site
+   (bap-common lisp))))

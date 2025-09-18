@@ -7,4 +7,5 @@
  (name primus-limit)
  (package bap-primus-limit)
  (libraries bap-primus-limit.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

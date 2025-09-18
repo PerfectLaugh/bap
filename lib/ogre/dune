@@ -1,6 +1,7 @@
 (library
-  (name ogre)
-  (public_name ogre)
-  (wrapped false)
-  (preprocess (pps ppx_bap))
-  (libraries core monads))
+ (name ogre)
+ (public_name ogre)
+ (wrapped false)
+ (preprocess
+  (pps ppx_bap))
+ (libraries core monads))

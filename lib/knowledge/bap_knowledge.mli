@@ -1,506 +1,460 @@
 open Core
 open Monads.Std
 
-
 (** The Knowledge Representation Library.
 
-    A library for building knowledge representation and
-    reasoning systems.
+    A library for building knowledge representation and reasoning systems. *)
 
-*)
-
-
-(** a knowledge dependent computation.  *)
 type 'a knowledge
-
+(** a knowledge dependent computation. *)
 
 (** The Knowledge Representation Library.
 
     {2 Introduction}
 
-    The library provides facilities for storing, accumulating, and
-    computing knowledge. The knowledge could be represented indirectly,
-    in the Knowledge Base, or directly as knowledge values. The
-    library focuses on representing knowledge that is partial and
-    provides mechanisms for knowledge accumulation and
-    refinement. The knowledge representation library leverages the
-    powerful type system of the OCaml language to facilitate
-    development of complex knowledge representation and reasoning systems.
+    The library provides facilities for storing, accumulating, and computing
+    knowledge. The knowledge could be represented indirectly, in the Knowledge
+    Base, or directly as knowledge values. The library focuses on representing
+    knowledge that is partial and provides mechanisms for knowledge accumulation
+    and refinement. The knowledge representation library leverages the powerful
+    type system of the OCaml language to facilitate development of complex
+    knowledge representation and reasoning systems.
 
     {2 Knowledge Taxonomy}
 
-    For a given knowledge system, the domain of discourse is a set of
-    objects, optionally partitioned into sorts. Therefore, an {i object}
-    is fundamental building block of a knowledge system.
+    For a given knowledge system, the domain of discourse is a set of objects,
+    optionally partitioned into sorts. Therefore, an {i object} is fundamental
+    building block of a knowledge system.
 
-    An object {i class} defines a set of possible properties
-    of that objects. A snapshot of all properties of an object is
-    called {i value}. A set of values belonging to a particular class
-    could be partitioned into sorts, to facilitate the design of
-    strongly typed interfaces.
+    An object {i class} defines a set of possible properties of that objects. A
+    snapshot of all properties of an object is called {i value}. A set of values
+    belonging to a particular class could be partitioned into sorts, to
+    facilitate the design of strongly typed interfaces.
 
-    Properties of objects and values are stored in {i slots}.
-    The data type of any property is required to be an instance of the
-    {i domain} structure, i.e., it should be a set with a special [empty]
-    value and the [order] operation, that orders elements of this set
-    by their informational content, so that [empty] is the least
-    element.
+    Properties of objects and values are stored in {i slots}. The data type of
+    any property is required to be an instance of the {i domain} structure,
+    i.e., it should be a set with a special [empty] value and the [order]
+    operation, that orders elements of this set by their informational content,
+    so that [empty] is the least element.
 
-    The knowledge could be represented directly as a value, or
-    indirectly as a set of objects in a knowledge base.
-
+    The knowledge could be represented directly as a value, or indirectly as a
+    set of objects in a knowledge base.
 
     {2 Values}
 
-    A value is an ordered tuple of slots that holds all properties of
-    an object with which this value is associated. Additionally, a
-    value is attributed with a sort value, which is shared by all
-    values belonging to that sort. The sort value could be a concrete
-    value, holding some information that is common for all elements of
-    the sort or it could be just a type index that witnesses that the
-    value belongs to a certain set of values.
+    A value is an ordered tuple of slots that holds all properties of an object
+    with which this value is associated. Additionally, a value is attributed
+    with a sort value, which is shared by all values belonging to that sort. The
+    sort value could be a concrete value, holding some information that is
+    common for all elements of the sort or it could be just a type index that
+    witnesses that the value belongs to a certain set of values.
 
-    Properties of a value could be accessed using the [Value.get]
-    operator. A new value of a property could be put into the slot
-    using the [Value.put] operator.
+    Properties of a value could be accessed using the [Value.get] operator. A
+    new value of a property could be put into the slot using the [Value.put]
+    operator.
 
-    Values are instances of the domain type class and therefore a
-    property of an object or another value could also be a value.
+    Values are instances of the domain type class and therefore a property of an
+    object or another value could also be a value.
 
-    The set of slots of a given value is defined by its class, and
-    this set is extensible, i.e., it is possible to add more slots.
+    The set of slots of a given value is defined by its class, and this set is
+    extensible, i.e., it is possible to add more slots.
 
     {2 Knowledge Base}
 
-    The knowledge base maintains a consistent set of facts about
-    object properties. An object is a unit of identity. The value of
-    an object is defined by its properties. However, the knowledge
-    base doesn't provide the direct access to the object value.
+    The knowledge base maintains a consistent set of facts about object
+    properties. An object is a unit of identity. The value of an object is
+    defined by its properties. However, the knowledge base doesn't provide the
+    direct access to the object value.
 
-    Object properties could be accessed using the [collect] operator
-    and set using the [provide] operator. The knowledge base maintains
-    the consistency by disallowing changing an object property to a
-    value that has less informational contents than the previous
-    value, so that no information is never lost.
+    Object properties could be accessed using the [collect] operator and set
+    using the [provide] operator. The knowledge base maintains the consistency
+    by disallowing changing an object property to a value that has less
+    informational contents than the previous value, so that no information is
+    never lost.
 
-    Object properties could also be computed on demand using the
-    [promise] operator, which effectively stores a procedure in the
-    knowledge base. Several procedures could be provided for a
-    property computation, and the procedures themselves could access
-    other properties, including the property being computed. The
-    knowledge base will ensure that the least fixed point of all
-    procedures involved in the property computation is reached.
+    Object properties could also be computed on demand using the [promise]
+    operator, which effectively stores a procedure in the knowledge base.
+    Several procedures could be provided for a property computation, and the
+    procedures themselves could access other properties, including the property
+    being computed. The knowledge base will ensure that the least fixed point of
+    all procedures involved in the property computation is reached.
 
-    All Knowledge Base operators return a computation of type
-    ['a knowledge] which is a monad, that denotes a computation that
-    is knowledge dependent, i.e., it either accesses the knowledge
-    base, or modifies it, or both.
+    All Knowledge Base operators return a computation of type ['a knowledge]
+    which is a monad, that denotes a computation that is knowledge dependent,
+    i.e., it either accesses the knowledge base, or modifies it, or both.
 
-    The knowledge computation may lead to an inconsistent state, in
-    other words, it is not guaranteed that the computation will reach
-    the normal form. A diverging computation will yield a value of
-    type [conflict] when run.
+    The knowledge computation may lead to an inconsistent state, in other words,
+    it is not guaranteed that the computation will reach the normal form. A
+    diverging computation will yield a value of type [conflict] when run.
 
-    To prevent unnecessary conflicts, it is possible to represent
-    object properties as opinions instead of facts. Opinions are facts
-    that are attributed with the name of an agent that provided this
-    fact. In case if mutiple agents provide conflicting opinions, the
-    [resolve] operator will compute the consensus, based on agents
-    predefined trustworthiness. Opinions are introduced using the
-    [suggest] operator or promised using the [propose] operator.
+    To prevent unnecessary conflicts, it is possible to represent object
+    properties as opinions instead of facts. Opinions are facts that are
+    attributed with the name of an agent that provided this fact. In case if
+    mutiple agents provide conflicting opinions, the [resolve] operator will
+    compute the consensus, based on agents predefined trustworthiness. Opinions
+    are introduced using the [suggest] operator or promised using the [propose]
+    operator.
 
-    Finally, the knowledge base is partially persistent. It is
-    possible to make some slots persistent, so that properties, stored
-    in them are preserved between program runs.
-
-*)
+    Finally, the knowledge base is partially persistent. It is possible to make
+    some slots persistent, so that properties, stored in them are preserved
+    between program runs. *)
 module Knowledge : sig
-
-  (** a knowledge monad  *)
   type 'a t = 'a knowledge
+  (** a knowledge monad *)
 
-  (** a sort ['s] of class ['k].   *)
-  type (+'k,+'s) cls
+  type (+'k, +'s) cls
+  (** a sort ['s] of class ['k]. *)
 
-  (** an object of class ['k]  *)
   type +'k obj
+  (** an object of class ['k] *)
 
-  (** a value of class ['c = ('k,'s) cls]  *)
   type +'c value
+  (** a value of class ['c = ('k,'s) cls] *)
 
+  type (+'k, 'p) slot
   (** a slot holding a property ['p] of a class ['k] object. *)
-  type (+'k,'p) slot
 
-  (** an instance of the domain type class  *)
   type 'p domain
+  (** an instance of the domain type class *)
 
-  (** an instance of the persistance type class  *)
   type 'a persistent
+  (** an instance of the persistance type class *)
 
-  (** the knowledge base state *)
   type state
+  (** the knowledge base state *)
 
-  (** a set of possible conflicts  *)
   type conflict = ..
+  (** a set of possible conflicts *)
 
-  (** an information provider  *)
   type agent
+  (** an information provider *)
 
-  (** an opinion based fact of type ['a]  *)
   type 'a opinions
+  (** an opinion based fact of type ['a] *)
 
-  (** a fully qualified name  *)
   type name
+  (** a fully qualified name *)
 
+  val objects : ('a, _) cls -> 'a obj Sequence.t t
   (** [objects cls] is a seqeuence of all objects of the class [cls].
-      @since 2.2.0  *)
-  val objects : ('a,_) cls -> 'a obj Sequence.t t
+      @since 2.2.0 *)
 
+  val collect : ('a, 'p) slot -> 'a obj -> 'p t
   (** [collect p x] collects the value of the property [p].
 
-      If the object [x] doesn't have a value for the property [p] and
-      there are promises registered in the knowledge system, to compute
-      the property [p] then they will be invoked, otherwise the empty
-      value of the property domain is returned as the result.  *)
-  val collect : ('a,'p) slot -> 'a obj -> 'p t
+      If the object [x] doesn't have a value for the property [p] and there are
+      promises registered in the knowledge system, to compute the property [p]
+      then they will be invoked, otherwise the empty value of the property
+      domain is returned as the result. *)
 
+  val require : ('a, 'p) slot -> 'a obj -> 'p t
   (** [require p x] collects the property [p] and fails if it is empty.
 
-      When [require p x] fails in the scope of a {!promise},
-      {!proposal}, or in the scope of [with_empty], then the scoped
-      computation immediately returns the empty value.
+      When [require p x] fails in the scope of a {!promise}, {!proposal}, or in
+      the scope of [with_empty], then the scoped computation immediately returns
+      the empty value.
 
-      @since 2.4.0
-  *)
-  val require : ('a,'p) slot -> 'a obj -> 'p t
+      @since 2.4.0 *)
 
-
+  val resolve : ('a, 'p opinions) slot -> 'a obj -> 'p t
   (** [resolve p x] resolves the multi-opinion property [p]
 
-      Finds a common resolution for the property [p] using
-      the current resolution strategy.
+      Finds a common resolution for the property [p] using the current
+      resolution strategy.
 
-      This function is the same as [collect] except it collects
-      a value from the opinions domain and computes the current
-      consensus.
-  *)
-  val resolve : ('a,'p opinions) slot -> 'a obj -> 'p t
+      This function is the same as [collect] except it collects a value from the
+      opinions domain and computes the current consensus. *)
 
+  val provide : ('a, 'p) slot -> 'a obj -> 'p -> unit t
   (** [provide p x v] provides the value [v] for the property [p].
 
-      If the object [x] already had a value [v'] then the provided
-      value [v] then the result value of [p] is [join v v'] provided
-      such exists, where [join] is [Domain.join (Slot.domain p)].
+      If the object [x] already had a value [v'] then the provided value [v]
+      then the result value of [p] is [join v v'] provided such exists, where
+      [join] is [Domain.join (Slot.domain p)].
 
-      If [join v v'] doesn't exist (i.e., it is [Error conflict])
-      then [provide p x v] diverges into a conflict.
-  *)
-  val provide : ('a,'p) slot -> 'a obj -> 'p -> unit t
+      If [join v v'] doesn't exist (i.e., it is [Error conflict]) then
+      [provide p x v] diverges into a conflict. *)
 
+  val suggest : agent -> ('a, 'p opinions) slot -> 'a obj -> 'p -> unit t
   (** [suggest a p x v] suggests [v] as the value for the property [p].
 
-      The same as [provide] except the provided value is predicated by
-      the agent identity.
-  *)
-  val suggest : agent -> ('a,'p opinions) slot -> 'a obj -> 'p -> unit t
+      The same as [provide] except the provided value is predicated by the agent
+      identity. *)
 
+  val promise : ('a, 'p) slot -> ('a obj -> 'p t) -> unit
   (** [promise p f] promises to compute the property [p].
 
-      If the property [p] of [x] is not provided, then [f x] is
-      invoked to provide the initial value, when [p] is collected.
+      If the property [p] of [x] is not provided, then [f x] is invoked to
+      provide the initial value, when [p] is collected.
 
-      If there are more than one promises, then they all must
-      provide a consistent answer. The function [f] may refer
-      to the property [p] directly or indirectly. In that case
-      the least fixed point solution of all functions [g] involved
-      in the property computation is computed.
+      If there are more than one promises, then they all must provide a
+      consistent answer. The function [f] may refer to the property [p] directly
+      or indirectly. In that case the least fixed point solution of all
+      functions [g] involved in the property computation is computed.
 
       @since 2.4.0 if [require] is called in the scope of the promise
-      and fails, the the whole promise immediately returns the empty
-      value of the property domain, i.e., [f] is wrapped into
-      [with_empty].
-  *)
-  val promise : ('a,'p) slot -> ('a obj -> 'p t) -> unit
 
-  (** [promising p ~promise f] evaluates [f ()] under [promise] and
-      retracts it after [f] is evaluated.
+      and fails, the the whole promise immediately returns the empty value of
+      the property domain, i.e., [f] is wrapped into [with_empty]. *)
 
-      The information provided by [promise] is only available during
-      evaluation of [f ()].
+  val promising :
+    ('a, 'p) slot -> promise:('a obj -> 'p t) -> (unit -> 's t) -> 's t
+  (** [promising p ~promise f] evaluates [f ()] under [promise] and retracts it
+      after [f] is evaluated.
+
+      The information provided by [promise] is only available during evaluation
+      of [f ()].
 
       @since 2.2.0
 
-
       @since 2.4.0 if [require] is called in the scope of the promise
-      and fails, the the whole promise immediately returns the empty
-      value of the property domain, i.e., [promise] (not [f]) wrapped
-      into [with_empty].
-  *)
-  val promising : ('a,'p) slot -> promise:('a obj -> 'p t) ->
-    (unit -> 's t) -> 's t
 
+      and fails, the the whole promise immediately returns the empty value of
+      the property domain, i.e., [promise] (not [f]) wrapped into [with_empty].
+  *)
+
+  val propose : agent -> ('a, 'p opinions) slot -> ('a obj -> 'p t) -> unit
   (** [propose p f] proposes the opinion computation.
 
-      The same as [promise] except that it promises a value for
-      an opinion-based property.
+      The same as [promise] except that it promises a value for an opinion-based
+      property.
 
       @since 2.4.0 if [require] is called in the scope of the promise
-      and fails, the the whole promise immediately returns the empty
-      value of the property domain, i.e., [f] is wrapped into
-      [with_empty].
 
-  *)
-  val propose : agent -> ('a, 'p opinions) slot -> ('a obj -> 'p t) -> unit
+      and fails, the the whole promise immediately returns the empty value of
+      the property domain, i.e., [f] is wrapped into [with_empty]. *)
 
+  val proposing :
+    agent ->
+    ('a, 'p opinions) slot ->
+    propose:('a obj -> 'p t) ->
+    (unit -> 's t) ->
+    's t
   (** [proposing a p ~propose f] a scope-limited proposal.
 
-      The proposal is active only during the evaluation of [f ()]. The
-      function is the same as {!proposing} except that it promises a
-      value for an opinion-based property.
+      The proposal is active only during the evaluation of [f ()]. The function
+      is the same as {!proposing} except that it promises a value for an
+      opinion-based property.
 
       @since 2.2.0
 
       @since 2.4.0 if [require] are called in the scope of the proposal
-      and fails, the the whole proposal immediately returns the empty
-      value of the property domain, i.e., [propose] (not [f]) wrapped
-      into [with_empty].
 
+      and fails, the the whole proposal immediately returns the empty value of
+      the property domain, i.e., [propose] (not [f]) wrapped into [with_empty].
   *)
-  val proposing : agent -> ('a, 'p opinions) slot ->
-    propose:('a obj -> 'p t) -> (unit -> 's t) -> 's t
 
+  val observe : ('a, 'p) slot -> ('a obj -> 'p -> unit knowledge) -> unit
   (** [observe property push] calls [push] when the [property] changes.
 
-      Dual to [promise], [observe] enables forward-chaining rules and
-      propagates knowledge whenever [property] value is refined.
+      Dual to [promise], [observe] enables forward-chaining rules and propagates
+      knowledge whenever [property] value is refined.
 
-      Calls [push x v] when the [property] value of an object [x] is
-      refined to [v]. It is guaranteed that [v] is never empty.
+      Calls [push x v] when the [property] value of an object [x] is refined to
+      [v]. It is guaranteed that [v] is never empty.
 
-      @since 2.4.0
-  *)
-  val observe : ('a,'p) slot -> ('a obj -> 'p -> unit knowledge) -> unit
+      @since 2.4.0 *)
 
-  (** [observing property ~observe:push scope] observes the property in a [scope].
+  val observing :
+    ('a, 'p) slot ->
+    observe:('a obj -> 'p -> unit knowledge) ->
+    (unit -> 'r knowledge) ->
+    'r knowledge
+  (** [observing property ~observe:push scope] observes the property in a
+      [scope].
 
-      This operation is dual to [promising] and it observes the
-      property only during the time when the [scope] computation is
-      evaluate and removes the observer after that.
+      This operation is dual to [promising] and it observes the property only
+      during the time when the [scope] computation is evaluate and removes the
+      observer after that.
 
-      @since 2.4.0
+      @since 2.4.0 *)
 
-  *)
-  val observing : ('a,'p) slot -> observe:('a obj -> 'p -> unit knowledge) ->
-    (unit -> 'r knowledge) -> 'r knowledge
-
+  val with_empty : missing:'r -> (unit -> 'r knowledge) -> 'r knowledge
   (** [with_empty ~missing f x] evaluates [f ()] and if it fails on an empty
       immediately evaluates to [return missing].
 
-      Inside of [with_empty] it is possible to use the choice monad
-      operations, like [reject], [guard], [on], and [unless], in
-      addition to the knowledge specialized choice operators, such
-      as [require] and various [*?] operators.
+      Inside of [with_empty] it is possible to use the choice monad operations,
+      like [reject], [guard], [on], and [unless], in addition to the knowledge
+      specialized choice operators, such as [require] and various [*?]
+      operators.
 
-      Note, that promised computations are invoked in the [with_empty]
-      scope.
+      Note, that promised computations are invoked in the [with_empty] scope.
 
-      @since 2.4.0
-  *)
-  val with_empty : missing:'r -> (unit -> 'r knowledge) -> 'r knowledge
+      @since 2.4.0 *)
 
-
+  val reject : unit -> 'a t
   (** [reject ()] rejects a promised computation.
 
-      When in the scope of the [with_empty] function, e.g., in a
-      promise or proposal, aborts the computation of the promise
-      and immediately returns an empty value.
+      When in the scope of the [with_empty] function, e.g., in a promise or
+      proposal, aborts the computation of the promise and immediately returns an
+      empty value.
 
       @since 2.5.0 *)
-  val reject : unit -> 'a t
 
+  val guard : bool -> unit t
   (** [guard cnd] rejects the rest of compuation if [cnd] is [false].
 
-      When in the scope of the [with_empty] function, e.g., in a
-      promise or proposal, aborts the computation of the promise
-      and immediately returns an empty value.
+      When in the scope of the [with_empty] function, e.g., in a promise or
+      proposal, aborts the computation of the promise and immediately returns an
+      empty value.
 
-      @since 2.5.0
-  *)
-  val guard : bool -> unit t
+      @since 2.5.0 *)
 
-
+  val proceed : unless:bool -> unit t
   (** [proceed ~unless:cnd] rejects the computation unless [cnd] holds.
 
       Dual to {!guard}, this operator rejects a promise (or any other
-      computation in the scope of the {!with_empty} operator) unless
-      the [cnd] holds, i.e., it is the same as [guard (not cnd)].
+      computation in the scope of the {!with_empty} operator) unless the [cnd]
+      holds, i.e., it is the same as [guard (not cnd)].
 
       @since 2.5.0 *)
-  val proceed : unless:bool -> unit t
 
-
+  val on : bool -> unit t -> unit t
   (** [on cnd x] evaluates to [x] if [cnd], otherwise rejects.
 
-      When in the scope of the [with_empty] function, e.g., in a
-      promise or proposal, aborts the computation of the promise
-      and immediately returns an empty value if [cnd] is [false].
-      If it is not, then evaluates to [x].
+      When in the scope of the [with_empty] function, e.g., in a promise or
+      proposal, aborts the computation of the promise and immediately returns an
+      empty value if [cnd] is [false]. If it is not, then evaluates to [x].
 
-      @since 2.5.0  *)
-  val on : bool -> unit t -> unit t
+      @since 2.5.0 *)
 
+  val unless : bool -> unit t -> unit t
   (** [unless cnd x] evaluates to [x] if [not cnd], otherwise rejects.
 
-      When in the scope of the [with_empty] function, e.g., in a
-      promise or proposal, aborts the computation of the promise
-      and immediately returns an empty value if [cnd] is [true].
-      If it is [false], then evaluates to [x].
+      When in the scope of the [with_empty] function, e.g., in a promise or
+      proposal, aborts the computation of the promise and immediately returns an
+      empty value if [cnd] is [true]. If it is [false], then evaluates to [x].
 
-      @since 2.5.0  *)
-  val unless : bool -> unit t -> unit t
+      @since 2.5.0 *)
 
-
-  (** state with no knowledge  *)
   val empty : state
+  (** state with no knowledge *)
 
-  (** [of_bigstring data] loads state from [data] *)
   val of_bigstring : Bigstring.t -> state
+  (** [of_bigstring data] loads state from [data] *)
 
-
-  (** [to_bigstring state] serializes state into a binary representation.  *)
   val to_bigstring : state -> Bigstring.t
+  (** [to_bigstring state] serializes state into a binary representation. *)
 
-  (** [load path] loads the knowledge base from the file at [path].
-      @since 2.2.0
-  *)
   val load : string -> state
+  (** [load path] loads the knowledge base from the file at [path].
+      @since 2.2.0 *)
 
-  (** [save state path] saves the knowledge base to the file at [path].
-      @since 2.2.0
-  *)
   val save : state -> string -> unit
-
+  (** [save state path] saves the knowledge base to the file at [path].
+      @since 2.2.0 *)
 
   (** Context variables.
 
-      Context variables could be used to implement stateful
-      analyses. They are not part of the knowledge base per se, but
-      enable convience that is otherwise achieavable through adding a
-      state to the knowledge monad using a monad transformer.
+      Context variables could be used to implement stateful analyses. They are
+      not part of the knowledge base per se, but enable convience that is
+      otherwise achieavable through adding a state to the knowledge monad using
+      a monad transformer.
 
-      It is important to keep in mind that the contex variables are
-      not a part of the knowledge and that every knowledge computation
-      starts with a fresh set of variables, i.e., variables are not
-      persistent.
+      It is important to keep in mind that the contex variables are not a part
+      of the knowledge and that every knowledge computation starts with a fresh
+      set of variables, i.e., variables are not persistent.
 
-      The data type of the context variable is not required to have
-      the domain structure or be comparable. The only requirement is
-      that when a variable is declared it should be initialized.
+      The data type of the context variable is not required to have the domain
+      structure or be comparable. The only requirement is that when a variable
+      is declared it should be initialized.
 
-      @since 2.4.0
-
-  *)
+      @since 2.4.0 *)
   module Context : sig
-
-
-    (** an abstract type denoting a context variable and its name.  *)
     type 'a var
+    (** an abstract type denoting a context variable and its name. *)
 
-
+    val declare :
+      ?inspect:('a -> Sexp.t) ->
+      ?package:string ->
+      string ->
+      'a knowledge ->
+      'a var
     (** [declare ~package name init] declares a new context variable.
 
-        The declared variable has the initial value [init]. The
-        [inspect] function could be used for debugging and
-        instrospection. *)
-    val declare : ?inspect:('a -> Sexp.t) -> ?package:string -> string ->
-      'a knowledge -> 'a var
+        The declared variable has the initial value [init]. The [inspect]
+        function could be used for debugging and instrospection. *)
 
-    (** [set v x] assings to the variable [v] a new value [x].  *)
     val set : 'a var -> 'a -> unit knowledge
+    (** [set v x] assings to the variable [v] a new value [x]. *)
 
-    (** [get v] is the current value assigned to [v]. *)
     val get : 'a var -> 'a knowledge
+    (** [get v] is the current value assigned to [v]. *)
 
-    (** [update v f] applies [f] to the current value of [v] and
-        assigns the result back.
-    *)
     val update : 'a var -> ('a -> 'a) -> unit knowledge
+    (** [update v f] applies [f] to the current value of [v] and assigns the
+        result back. *)
 
-
-    (** [with_var v x f] dynamically binds [v] to [x] while [f] is run.*)
     val with_var : 'a var -> 'a -> (unit -> 'b knowledge) -> 'b knowledge
+    (** [with_var v x f] dynamically binds [v] to [x] while [f] is run.*)
   end
 
-
-  (** prints the state of the knowledge base.  *)
   val pp_state : Format.formatter -> state -> unit
+  (** prints the state of the knowledge base. *)
 
-
+  val run :
+    ('k, 's) cls ->
+    'k obj t ->
+    state ->
+    (('k, 's) cls value * state, conflict) result
   (** [run cls comp init] computes the value of the object [obj] given
 
-      Evaluates the knowledge dependent computation [comp] using the
-      initial set of facts [init].
+      Evaluates the knowledge dependent computation [comp] using the initial set
+      of facts [init].
 
-      The computation must evaluate to an object [p] of the class
-      [cls]. The [run] function computes all properties of [p], which
-      will trigger all promises associated with the slots.
+      The computation must evaluate to an object [p] of the class [cls]. The
+      [run] function computes all properties of [p], which will trigger all
+      promises associated with the slots.
 
-      The result of evaluation is either a conflict, or a pair of
-      value, which contains all properties of the object, and the
-      knowledge accumulated during the computation.
-
-  *)
-  val run : ('k,'s) cls -> 'k obj t -> state -> (('k,'s) cls value * state, conflict) result
+      The result of evaluation is either a conflict, or a pair of value, which
+      contains all properties of the object, and the knowledge accumulated
+      during the computation. *)
 
   module Syntax : sig
     include Monad.Syntax.S with type 'a t := 'a t
 
-
+    include Monad.Syntax.Let.S with type 'a t := 'a t
     (** the monadic let-binding operators.
 
-        Brings [let*] for [bind] and [let+] for [map] to the scope
-        of the [Syntax] module.
+        Brings [let*] for [bind] and [let+] for [map] to the scope of the
+        [Syntax] module.
 
         @since 2.4.0 (before that an explicit [open Knowledge.Let] was
-        required.    *)
-    include Monad.Syntax.Let.S with type 'a t := 'a t
 
+        required. *)
 
+    val ( let*? ) : 'a option t -> ('a -> 'b option t) -> 'b option t
     (** [let*? v = x in f] evaluates to [f y] if [v] is [Some r].
 
         Otherwise evaluates to [return None].
 
         This let-binding operator is synonumous to [>>=?]
 
-        @since 2.4.0
-    *)
-    val (let*?) : 'a option t -> ('a -> 'b option t) -> 'b option t
+        @since 2.4.0 *)
 
+    val ( let+? ) : 'a option t -> ('a -> 'b option) -> 'b option t
     (** [let+? v = x in f] evaluates to [!!(f y)] if [v] is [Some r].
 
         Otherwise evaluates to [return None].
 
         This let-binding operator is synonumous to [>>|?]
 
-        @since 2.4.0
-    *)
-    val (let+?) : 'a option t -> ('a -> 'b option) -> 'b option t
+        @since 2.4.0 *)
 
+    val ( --> ) : 'a obj -> ('a, 'p) slot -> 'p t
     (** [x-->p] is [collect p x].
 
         Example,
         {[
           let* addr = label-->address in
           ...
-        ]}
-    *)
-    val (-->) : 'a obj -> ('a,'p) slot -> 'p t
+        ]} *)
 
-
+    val ( -->? ) : 'a obj -> ('a, 'p option) slot -> 'p t
     (** [x-->?p] returns property [p] if it is not empty.
 
-        Otherwise, if [x-->p] evaluates to empty or to [None]
-        fails with the empty value conflict.
+        Otherwise, if [x-->p] evaluates to empty or to [None] fails with the
+        empty value conflict.
 
         Example,
         {[
@@ -509,172 +463,144 @@ module Knowledge : sig
         ]}
 
         See also {!with_empty}. *)
-    val (-->?) : 'a obj -> ('a, 'p option) slot -> 'p t
 
+    val ( <-- ) : ('a, 'p) slot -> ('a obj -> 'p t) -> unit
+    (** [p <-- f] is [promise p f] *)
 
-    (** [p <-- f] is [promise p f]  *)
-    val (<--) : ('a,'p) slot -> ('a obj -> 'p t) -> unit
+    val ( // ) : ('a, _) cls -> string -> 'a obj t
+    (** [c // s] is [Object.read c s] *)
 
+    val ( >>=? ) : 'a option t -> ('a -> 'b option t) -> 'b option t
+    (** [x >>=? f] evaluates to [f y] if [x] evaluates to [Some y]. *)
 
-    (** [c // s] is [Object.read c s]  *)
-    val (//) : ('a,_) cls -> string -> 'a obj t
+    val ( >>|? ) : 'a option t -> ('a -> 'b option) -> 'b option t
+    (** [x >>|? f] evaluates to [f y] if [x] evaluates to [Some y]. *)
 
-
-    (** [x >>=? f] evaluates to [f y] if [x] evaluates to [Some y].  *)
-    val (>>=?) : 'a option t -> ('a -> 'b option t) -> 'b option t
-
-
-    (** [x >>|? f] evaluates to [f y] if [x] evaluates to [Some y].  *)
-    val (>>|?) : 'a option t -> ('a -> 'b option) -> 'b option t
-
-
+    val ( .$[] ) : ('a, _) cls value -> ('a, 'p) slot -> 'p
     (** [x.$[p]] is the propery [p] of [x].
 
-        @since 2.4.0
-    *)
-    val (.$[]) : ('a,_) cls value -> ('a,'p) slot -> 'p
+        @since 2.4.0 *)
 
-
+    val ( .$[]<- ) :
+      ('a, 'b) cls value -> ('a, 'p) slot -> 'p -> ('a, 'b) cls value
     (** [x.$[p] <- r] updates the property [p] of [x] to [r].
 
-        Returns the value [x] with the new property. The previous
-        value is ignored so there is no merging or monotonicity check
-        involved.
+        Returns the value [x] with the new property. The previous value is
+        ignored so there is no merging or monotonicity check involved.
 
         @since 2.4.0 *)
-    val (.$[]<-) : ('a,'b) cls value -> ('a,'p) slot -> 'p -> ('a,'b) cls value
 
-
+    val ( .?[] ) : ('a, _) cls value -> ('a, 'p option) slot -> 'p knowledge
     (** [x.?[p]] returns the non-[None] property [p] or fails.
 
-        The result is [return r] when [x.$[p]] is [Some r] or a
-        knowledge base conflict otherwise.
+        The result is [return r] when [x.$[p]] is [Some r] or a knowledge base
+        conflict otherwise.
 
-        @since 2.4.0
-    *)
-    val (.?[]) : ('a,_) cls value -> ('a,'p option) slot -> 'p knowledge
+        @since 2.4.0 *)
 
+    val ( .![] ) : ('a, _) cls value -> ('a, 'p) slot -> 'p knowledge
     (** [x.![p]] returns the property [p] or fails if it is empty.
 
-        The result is [return r] if not [Domain.is_empty dom r],
-        where [dom] is [Slot.domain p].
+        The result is [return r] if not [Domain.is_empty dom r], where [dom] is
+        [Slot.domain p].
 
-        @since 2.4.0
-    *)
-    val (.![]) : ('a,_) cls value -> ('a,'p) slot -> 'p knowledge
+        @since 2.4.0 *)
   end
 
-
-  include Monad.S with type 'a t := 'a t
-                   and module Syntax := Syntax
-
-  include Monad.Fail.S with type 'a t := 'a t
-                        and type 'a error = conflict
+  include Monad.S with type 'a t := 'a t and module Syntax := Syntax
+  include Monad.Fail.S with type 'a t := 'a t and type 'a error = conflict
 
   (** Orders knowledge by its information content.
 
-      [Order.partial] is a generalization of the total order,
-      which is used to compare the amount of information in two
-      specifications of knowledge.
+      [Order.partial] is a generalization of the total order, which is used to
+      compare the amount of information in two specifications of knowledge.
 
-      Note: The information content of a value ordering shall not be
-      confused with any other intrinsic ordering of the associated value
-      type. For example, if we will take age, measured in natural numbers,
-      then the order natural numbers has nothing to do with the amount
-      of information associated with each age. From the knowledge
-      representation perspective. We either do not know the age, or
-      know it to some certainty. Therefore, the domain representation
-      could be either [int option], with [None] being the minimal
-      element (denoting an absence of knowledge about the age of an
-      object) or [Some x], s.t.,
-      [order (Some x) (Some y) = NC iff x <> y], i.e., neither is
-      having more or less knowledge than another.
-
-  *)
+      Note: The information content of a value ordering shall not be confused
+      with any other intrinsic ordering of the associated value type. For
+      example, if we will take age, measured in natural numbers, then the order
+      natural numbers has nothing to do with the amount of information
+      associated with each age. From the knowledge representation perspective.
+      We either do not know the age, or know it to some certainty. Therefore,
+      the domain representation could be either [int option], with [None] being
+      the minimal element (denoting an absence of knowledge about the age of an
+      object) or [Some x], s.t., [order (Some x) (Some y) = NC iff x <> y],
+      i.e., neither is having more or less knowledge than another. *)
   module Order : sig
-
     (** partial ordering for two way comparison.
 
         The semantics of constructors:
         - [LT] - strictly less information
         - [GT] - strictly more information
         - [EQ] - equal informational content
-        - [NC] - non-comparable entities
-    *)
+        - [NC] - non-comparable entities *)
     type partial = LT | EQ | GT | NC
 
-
     module type S = sig
-
-      (** a partially ordered type  *)
       type t
+      (** a partially ordered type *)
 
+      val order : t -> t -> partial
       (** defines a partial order relationship between two entities.
 
           Given a partial ordering relation [<=]
           - [order x y = LT iff x <= y && not (y <= x)]
           - [order x y = GT iff y <= x && not (x <= y)]
           - [order x y = EQ iff x <= y && y <= x]
-          - [order x y = NC iff not (x <= y) && not (y <= x)]
-      *)
-      val order : t -> t -> partial
+          - [order x y = NC iff not (x <= y) && not (y <= x)] *)
     end
   end
 
-
   (** Class is a collection of sorts.
 
-      A class [k] is denoted by an indexed type [(k,s) cls], where
-      [s] is a sort.
+      A class [k] is denoted by an indexed type [(k,s) cls], where [s] is a
+      sort.
 
-      A class denotes a set of properties that describe objects and
-      values of the given class. Thus, a class fully defines the
-      structure of an object or a value. Sorts could be used to
-      further partition the class into subsets, if needed.
+      A class denotes a set of properties that describe objects and values of
+      the given class. Thus, a class fully defines the structure of an object or
+      a value. Sorts could be used to further partition the class into subsets,
+      if needed.
 
-      Classes are declarative and each class should have a unique
-      name. To prevent name clashing the Knowledge Library employs a
-      Common Lisp style namespaces, where each name belongs to a
-      package.
+      Classes are declarative and each class should have a unique name. To
+      prevent name clashing the Knowledge Library employs a Common Lisp style
+      namespaces, where each name belongs to a package.
 
-      The type index, associated with the class, should be protected
-      by the module that declares the class. For example, it is a bad
-      idea to use the [unit] type as an index of a class.
-
-  *)
+      The type index, associated with the class, should be protected by the
+      module that declares the class. For example, it is a bad idea to use the
+      [unit] type as an index of a class. *)
   module Class : sig
-    type (+'k,'s) t = ('k,'s) cls
+    type (+'k, 's) t = ('k, 's) cls
 
-
-    (** [declare name sort] declares a new
-        class with the given [name] and [sort] index.
-
-        Since classes are declarative each new declaration creates a
-        new class that is not equal to any other.
-
-        The [package] and [name] pair should be unique. If there is
-        already a class with the given [package:name] then the
-        declaration fails.
-
-        @param public (defaults to false) if specified, then the
-        class will referenced in the Knowledge documentation output.
-    *)
     val declare :
       ?public:bool ->
       ?desc:string ->
-      ?package:string -> string -> 's -> ('k,'s) cls
+      ?package:string ->
+      string ->
+      's ->
+      ('k, 's) cls
+    (** [declare name sort] declares a new class with the given [name] and
+        [sort] index.
 
+        Since classes are declarative each new declaration creates a new class
+        that is not equal to any other.
 
-    (** [refine cls s] refines the [sort] of class ['k] to [s].   *)
-    val refine : ('k,_) cls -> 's -> ('k,'s) cls
+        The [package] and [name] pair should be unique. If there is already a
+        class with the given [package:name] then the declaration fails.
 
+        @param public
+          (defaults to false) if specified, then the class will referenced in
+          the Knowledge documentation output. *)
+
+    val refine : ('k, _) cls -> 's -> ('k, 's) cls
+    (** [refine cls s] refines the [sort] of class ['k] to [s]. *)
+
+    val same : ('a, _) cls -> ('b, _) cls -> bool
     (** [same x y] is true if [x] and [y] denote the same class [k] *)
-    val same : ('a,_) cls -> ('b,_) cls -> bool
 
+    val equal :
+      ('a, _) cls -> ('b, _) cls -> ('a obj, 'b obj) Type_equal.t option
     (** [equal x y] constructs a type witness of classes equality.
 
-        The witness could be used to cast objects of the same class,
-        e.g.,
+        The witness could be used to cast objects of the same class, e.g.,
 
         {[
           match equal bitv abs with
@@ -682,700 +608,612 @@ module Knowledge : sig
           | _ -> ...
         ]}
 
-        Note that the equality is reflexive, so the obtained witness
-        could be used in both direction, for upcasting and downcasting.
-    *)
-    val equal : ('a,_) cls -> ('b,_) cls -> ('a obj, 'b obj) Type_equal.t option
+        Note that the equality is reflexive, so the obtained witness could be
+        used in both direction, for upcasting and downcasting. *)
 
-
+    val assert_equal :
+      ('a, _) cls -> ('b, _) cls -> ('a obj, 'b obj) Type_equal.t
     (** [assert_equal x y] asserts the equality of two classes.
 
-        Usefull, in the context where the class is known for sure,
-        (e.g., constrained by the module signature), but has to be
-        recreated. The [let T = assert_equal x y] expression,
-        establishes a type equality between objects in the typing
-        context, so there is no need to invoke [Object.cast].
+        Usefull, in the context where the class is known for sure, (e.g.,
+        constrained by the module signature), but has to be recreated. The
+        [let T = assert_equal x y] expression, establishes a type equality
+        between objects in the typing context, so there is no need to invoke
+        [Object.cast].
 
         {[
-          let add : value obj -> value obj -> value obj = fun x y ->
+          let add : value obj -> value obj -> value obj =
+           fun x y ->
             let T = assert_equal bitv value in
             x + y (* where (+) has type [bitv obj -> bitv obj -> bit obj] *)
-        ]}
-    *)
-    val assert_equal : ('a,_) cls -> ('b,_) cls -> ('a obj, 'b obj) Type_equal.t
+        ]} *)
 
-
-    (** [property cls name dom] declares
-        a new property of all instances of class [k].
-
-        Each property should have a unique name. If a property with
-        the given name was already, then the declaration fails.
-
-        The returned slot can be used to access the declarated
-        property. If the property is expected to be public then it
-        should be published via a library interface.
-
-        @param persistent is an instance of the [persistent] class that
-        will be used to persist the property.
-
-        @param desc is a property documentation.
-
-        @param public (defaults to false) if specified, then the
-        property will referenced in the Knowledge documentation output.
-    *)
     val property :
       ?public:bool ->
       ?desc:string ->
       ?persistent:'p persistent ->
       ?package:string ->
-      ('k,_) cls -> string -> 'p domain -> ('k,'p) slot
+      ('k, _) cls ->
+      string ->
+      'p domain ->
+      ('k, 'p) slot
+    (** [property cls name dom] declares a new property of all instances of
+        class [k].
 
-    (** [name cls] is the class name.  *)
-    val name : ('a,_) cls -> name
+        Each property should have a unique name. If a property with the given
+        name was already, then the declaration fails.
 
-    (** [sort cls] returns the sort index of the class [k].  *)
-    val sort : ('k,'s) cls -> 's
+        The returned slot can be used to access the declarated property. If the
+        property is expected to be public then it should be published via a
+        library interface.
+
+        @param persistent
+          is an instance of the [persistent] class that will be used to persist
+          the property.
+
+        @param desc is a property documentation.
+
+        @param public
+          (defaults to false) if specified, then the property will referenced in
+          the Knowledge documentation output. *)
+
+    val name : ('a, _) cls -> name
+    (** [name cls] is the class name. *)
+
+    val sort : ('k, 's) cls -> 's
+    (** [sort cls] returns the sort index of the class [k]. *)
   end
-
 
   (** Knowledge Base Objects.
 
-      The knowledge base stores object properties. The
-      object itself is an identifier, and could be seen as a pointer
-      or a database key.
-  *)
+      The knowledge base stores object properties. The object itself is an
+      identifier, and could be seen as a pointer or a database key. *)
   module Object : sig
     type 'a t = 'a obj
     type 'a ord
 
-    (** [create] is a fresh new object with an idefinite extent.  *)
-    val create : ('a,_) cls -> 'a obj knowledge
+    val create : ('a, _) cls -> 'a obj knowledge
+    (** [create] is a fresh new object with an idefinite extent. *)
 
+    val scoped : ('a, _) cls -> ('a obj -> 'b knowledge) -> 'b knowledge
     (** [scoped scope] pass a fresh new object to [scope].
 
-        The extent of the created object is limited with the extent
-        of the function [scope]. The object passed to the [scope]
-        function is automatically deleted after the computation,
-        returned by [scope] evaluates to a value. The identity of an
-        object could be reused, which may lead to hard detected bugs,
-        thus care should be taken to prevent the object value from
-        escaping the scope of the function.
-    *)
-    val scoped : ('a,_) cls -> ('a obj -> 'b knowledge) -> 'b knowledge
+        The extent of the created object is limited with the extent of the
+        function [scope]. The object passed to the [scope] function is
+        automatically deleted after the computation, returned by [scope]
+        evaluates to a value. The identity of an object could be reused, which
+        may lead to hard detected bugs, thus care should be taken to prevent the
+        object value from escaping the scope of the function. *)
 
-
+    val null : ('a, _) cls -> 'a obj
     (** [null cls] is the null object of the class [cls].
 
-        For each class [cls] there is [null] that represents an
-        absence of object. It is unique and is represented as zero.
+        For each class [cls] there is [null] that represents an absence of
+        object. It is unique and is represented as zero.
 
-        Dereference of the null object (e.g., using [collect]) always
-        returns an empty denotation. Any information stored in the
-        object is forgotten (discarded). Promises are never run on the
-        null object, therefore the promise will never receive the null
-        object as its input.
+        Dereference of the null object (e.g., using [collect]) always returns an
+        empty denotation. Any information stored in the object is forgotten
+        (discarded). Promises are never run on the null object, therefore the
+        promise will never receive the null object as its input.
 
-        @since 2.4.0
-    *)
-    val null : ('a,_) cls -> 'a obj
+        @since 2.4.0 *)
 
+    val is_null : _ obj -> bool
     (** [is_null obj] is [true] iff [obj] is the null object of its class.
 
         @since 2.4.0 *)
-    val is_null : _ obj -> bool
 
+    val repr : ('a, _) cls -> 'a t -> string knowledge
     (** [repr x] returns a textual representation of the object [x] *)
-    val repr : ('a,_) cls -> 'a t -> string knowledge
 
-    (** [read s] returns an object [x] such that [repr x = s].  *)
-    val read : ('a,_) cls -> string -> 'a t knowledge
+    val read : ('a, _) cls -> string -> 'a t knowledge
+    (** [read s] returns an object [x] such that [repr x = s]. *)
 
-
+    val cast : ('a obj, 'b obj) Type_equal.t -> 'a obj -> 'b obj
     (** [cast class_equality x] changes the type of an object.
 
-        Provided with an equality of two object types, returns
-        the same object [x] with a new type.
+        Provided with an equality of two object types, returns the same object
+        [x] with a new type.
 
-        The type equality of two object types could be obtained
-        through [Class.equal] or [Class.assert_equal]. Note, this
-        function doesn't do any magic, this is just the
-        [Type_equal.conv], lifted into the [Object] module for
-        covenience.
-    *)
-    val cast : ('a obj, 'b obj) Type_equal.t -> 'a obj -> 'b obj
+        The type equality of two object types could be obtained through
+        [Class.equal] or [Class.assert_equal]. Note, this function doesn't do
+        any magic, this is just the [Type_equal.conv], lifted into the [Object]
+        module for covenience. *)
 
-
-    (** [id obj] returns the internal representation of an object.   *)
     val id : 'a obj -> Int63.t
+    (** [id obj] returns the internal representation of an object. *)
 
-
-    (** Ordered and persistent data types.  *)
+    (** Ordered and persistent data types. *)
     module type S = sig
       type t [@@deriving sexp]
+
       include Base.Comparable.S with type t := t
       include Binable.S with type t := t
     end
 
-
+    val derive :
+      ('a, 'd) cls ->
+      (module S with type t = 'a obj and type comparator_witness = 'a ord)
     (** [derive cls] a module of type [S] for the given class [cls].*)
-    val derive : ('a,'d) cls -> (module S
-                                  with type t = 'a obj
-                                   and type comparator_witness = 'a ord)
   end
-
 
   (** Knowledge Values.
 
-      A value is a concrete representation of knowledge. It is a
-      snapshot of all properties associated with some object, i.e., an
-      ordered tuple of slots. The value has no identity and that
-      differs it from the object, as the value is essentially a
-      property of an object - not an object itself.
+      A value is a concrete representation of knowledge. It is a snapshot of all
+      properties associated with some object, i.e., an ordered tuple of slots.
+      The value has no identity and that differs it from the object, as the
+      value is essentially a property of an object - not an object itself.
 
-      From another perspective, a value is an extensible record, with
-      fields reified into first-class slots, the record type into the
-      [cls] values, and an additional constraint that all field types
-      must be an instance of the domain type class (i.e., have a
-      default and an ordering).
+      From another perspective, a value is an extensible record, with fields
+      reified into first-class slots, the record type into the [cls] values, and
+      an additional constraint that all field types must be an instance of the
+      domain type class (i.e., have a default and an ordering).
 
-      Each value has a class. The class value itself is indexed with
-      the class and sort indices. The first index denotes the set of
-      properties that could be associated with the value. The second
-      index further partitions values of that class into subsets, to
-      so that domain specific relations between values could be
-      expressed explicitly with the host language type system.
+      Each value has a class. The class value itself is indexed with the class
+      and sort indices. The first index denotes the set of properties that could
+      be associated with the value. The second index further partitions values
+      of that class into subsets, to so that domain specific relations between
+      values could be expressed explicitly with the host language type system.
 
-      The value sort is an arbitrary value, which can also be used to
-      store additional static information about the value, i.e., the
-      information that is common to all instances of the sort.
-
+      The value sort is an arbitrary value, which can also be used to store
+      additional static information about the value, i.e., the information that
+      is common to all instances of the sort.
 
       {3 Total ordering and age}
 
-      In addition to be partially ordered by their information
-      content, values are also totally ordered, so that they could be
-      organized into finite sets and maps.
+      In addition to be partially ordered by their information content, values
+      are also totally ordered, so that they could be organized into finite sets
+      and maps.
 
-      The total order is induced from the information order, so that
-      if a value [x] is ordered before [y] in the information order,
-      then it will be also ordered before [y] in the total order. And
-      if [x] and [y] have the same information content, then they are
-      considered equal. Values with non-comparable information content
-      are ordered by their time-stamp.
+      The total order is induced from the information order, so that if a value
+      [x] is ordered before [y] in the information order, then it will be also
+      ordered before [y] in the total order. And if [x] and [y] have the same
+      information content, then they are considered equal. Values with
+      non-comparable information content are ordered by their time-stamp.
 
-      Every time a new value created it is assigned a
-      time-stamp. A new value is created by all functions that has
-      ['a value] return type, except the [refine] function. Each
-      time-stamp is unique and no two values could have the same
-      time-stamps unless they are physically the same, or are
-      de-serializations of the same value, or are refinements of the
-      same value. In other words, values with equal time-stamps are
-      guaranteed to bear the same information.
+      Every time a new value created it is assigned a time-stamp. A new value is
+      created by all functions that has ['a value] return type, except the
+      [refine] function. Each time-stamp is unique and no two values could have
+      the same time-stamps unless they are physically the same, or are
+      de-serializations of the same value, or are refinements of the same value.
+      In other words, values with equal time-stamps are guaranteed to bear the
+      same information.
 
-      Time-stamp values correlate with the order of evaluation. A
-      value that was evaluated more recently will have a higher
-      time-stamp. Therefore time-stamps define an age of a value. A
-      value which has a smaller time-stamp is younger than a value
-      that has a larger time-stamp.
-
-  *)
+      Time-stamp values correlate with the order of evaluation. A value that was
+      evaluated more recently will have a higher time-stamp. Therefore
+      time-stamps define an age of a value. A value which has a smaller
+      time-stamp is younger than a value that has a larger time-stamp. *)
   module Value : sig
     type 'a t = 'a value
 
-
-    (** a witness of the ordering  *)
     type 'a ord
+    (** a witness of the ordering *)
 
-
+    val empty : ('a, 'b) cls -> ('a, 'b) cls value
     (** [empty cls] the empty value of class [cls].
 
-        The empty value has the least information content, i.e., all
-        slots are empty.
-    *)
-    val empty : ('a,'b) cls -> ('a,'b) cls value
+        The empty value has the least information content, i.e., all slots are
+        empty. *)
 
-
+    val is_empty : _ value -> bool
     (** [is_empty x] iff all properties of [x] are empty.
 
-        @since 2.5.0
-    *)
-    val is_empty : _ value -> bool
+        @since 2.5.0 *)
 
-
-    (** [order x y] orders [x] and [y] by their information content.  *)
     val order : 'a value -> 'a value -> Order.partial
+    (** [order x y] orders [x] and [y] by their information content. *)
 
-
+    val join : 'a value -> 'a value -> ('a value, conflict) result
     (** [join x y] joins pairwise all slots of [x] and [y].
 
-        Each slot of [x] and [y] are joined using the [Domain.join]
-        function. The result is either a pairwise join or a conflict
-        if any of the joins ended up with a conflict.
-    *)
-    val join : 'a value -> 'a value -> ('a value,conflict) result
+        Each slot of [x] and [y] are joined using the [Domain.join] function.
+        The result is either a pairwise join or a conflict if any of the joins
+        ended up with a conflict. *)
 
-
+    val merge :
+      ?on_conflict:[ `drop_old | `drop_new | `drop_right | `drop_left ] ->
+      'a value ->
+      'a value ->
+      'a value
     (** [merge x y] joins [x] and [y] and resolves conflicts.
 
-        Performs a pairwise join of [x] and [y] and in case if
-        any of the joins yields a conflict uses the provided strategy
-        to resolve it.
+        Performs a pairwise join of [x] and [y] and in case if any of the joins
+        yields a conflict uses the provided strategy to resolve it.
 
-        @param on_conflict specifies the conflict resolution strategy
-        (see below). Defaults to [`drop_old]
+        @param on_conflict
+          specifies the conflict resolution strategy (see below). Defaults to
+          [`drop_old]
 
         {3 Conflict resolution strategies}
 
-        The following conflict resolution strategies are currently
-        supported (more strategies could be added later):
+        The following conflict resolution strategies are currently supported
+        (more strategies could be added later):
 
-        - [`drop_old] a conflicting property of an older object is
-          ignored (an object is older if its time-stamp is less than
-          or equal the time-stamp of other object);
-        - [`drop_new] a conflicting property of the newer object is
-          ignored (an object is newer if its time-stamp is greater than
-          or equal the time-stamp of other object);
+        - [`drop_old] a conflicting property of an older object is ignored (an
+          object is older if its time-stamp is less than or equal the time-stamp
+          of other object);
+        - [`drop_new] a conflicting property of the newer object is ignored (an
+          object is newer if its time-stamp is greater than or equal the
+          time-stamp of other object);
         - [`drop_right] a conflicting property of [y] is ignored;
-        - [`drop_left] a conflicting property of [x] is ignored.
-    *)
-    val merge : ?on_conflict:[
-      | `drop_old
-      | `drop_new
-      | `drop_right
-      | `drop_left
-    ] -> 'a value -> 'a value -> 'a value
+        - [`drop_left] a conflicting property of [x] is ignored. *)
 
+    val cls : ('k, 's) cls value -> ('k, 's) cls
+    (** [cls x] is the class of [x]. *)
 
-    (** [cls x] is the class of [x].   *)
-    val cls : ('k,'s) cls value -> ('k,'s) cls
+    val get : ('k, 'p) slot -> ('k, _) cls value -> 'p
+    (** [get p v] gets a value of the property [p]. *)
 
+    val put : ('k, 'p) slot -> ('k, 's) cls value -> 'p -> ('k, 's) cls value
+    (** [put p v x] sets a value of the property [p]. *)
 
-    (** [get p v] gets a value of the property [p].  *)
-    val get : ('k,'p) slot -> ('k,_) cls value -> 'p
-
-
-    (** [put p v x] sets a value of the property [p].  *)
-    val put : ('k,'p) slot -> ('k,'s) cls value -> 'p -> ('k,'s) cls value
-
+    val has : ('k, 'p) slot -> ('k, 's) cls value -> bool
     (** [has p x] if property [p] of [x] is not empty.
 
-        @since 2.5.0
-    *)
-    val has : ('k,'p) slot -> ('k,'s) cls value -> bool
+        @since 2.5.0 *)
 
+    val refine : ('k, _) cls value -> 's -> ('k, 's) cls value
     (** [refine v s] refines the sort of [v] to [s].
 
-        Since, this function doesn't change the information stored in
-        the value, the time-stamp of the returned value is the same,
-        therefore [v = refine v s].
-    *)
-    val refine : ('k,_) cls value -> 's -> ('k,'s) cls value
+        Since, this function doesn't change the information stored in the value,
+        the time-stamp of the returned value is the same, therefore
+        [v = refine v s]. *)
 
     module type S = sig
       type t [@@deriving sexp]
+
       val empty : t
       val domain : t domain
+
       include Base.Comparable.S with type t := t
       include Binable.S with type t := t
     end
 
-
-    (** [derive cls] derives the implementation of the [S] structure.   *)
-    val derive : ('a,'s) cls ->
+    val derive :
+      ('a, 's) cls ->
       (module S
-        with type t = ('a,'s) cls t
-         and type comparator_witness = ('a,'s) cls ord)
+         with type t = ('a, 's) cls t
+          and type comparator_witness = ('a, 's) cls ord)
+    (** [derive cls] derives the implementation of the [S] structure. *)
 
-
+    val pp : Format.formatter -> 'a value -> unit
     (** [pp ppf v] outputs [v] to the formatter [ppf].
 
-        Prints all slots of the value [v].
-    *)
-    val pp : Format.formatter -> 'a value -> unit
+        Prints all slots of the value [v]. *)
 
-
+    val pp_slots : string list -> Format.formatter -> 'a value -> unit
     (** [pp_slots slots ppf v] prints the specified set of slots.
 
         Prints only slots that has a name in [slots].*)
-    val pp_slots : string list -> Format.formatter -> 'a value -> unit
   end
-
 
   (** Property accessor.
 
-      Properties are accessed by slots. A slot is a first-class
-      record field. Slots are declarative, each new declaration of
-      a slot creates a new instance. Slot names should be unique - it
-      is not allowed to have two slots with the same name, even if
-      they belong to different classes.
+      Properties are accessed by slots. A slot is a first-class record field.
+      Slots are declarative, each new declaration of a slot creates a new
+      instance. Slot names should be unique - it is not allowed to have two
+      slots with the same name, even if they belong to different classes.
 
-      To declare a new slot of a class use the [Class.property]
-      function. This module enables [slot] introspection.
-
-  *)
+      To declare a new slot of a class use the [Class.property] function. This
+      module enables [slot] introspection. *)
   module Slot : sig
-    type ('a,'p) t = ('a,'p) slot
+    type ('a, 'p) t = ('a, 'p) slot
 
-    (** [domain slot] the [slot] domain.  *)
-    val domain : ('a,'p) slot -> 'p domain
+    val domain : ('a, 'p) slot -> 'p domain
+    (** [domain slot] the [slot] domain. *)
 
-    (** [cls slot] slot's class.  *)
-    val cls : ('a,_) slot -> ('a, unit) cls
+    val cls : ('a, _) slot -> ('a, unit) cls
+    (** [cls slot] slot's class. *)
 
-    (** [name slot] the slot name.  *)
-    val name : ('a,'p) slot -> name
+    val name : ('a, 'p) slot -> name
+    (** [name slot] the slot name. *)
 
-    (** [desc slot] the slot documentation.  *)
-    val desc : ('a,'p) slot -> string
+    val desc : ('a, 'p) slot -> string
+    (** [desc slot] the slot documentation. *)
   end
-
 
   (** A symbol is an object with a unique name.
 
-      Sometimes it is necessary to refer to an object by name, so that
-      a chosen name will always identify the same object. Finding or
-      creating an object by name is called "interning" it. A symbol
-      that has a name is called an "interned symbol". However we
-      stretch the boundaries of the symbol idea, by treating all other
-      objects as "uninterned symbols". So that any object could be
-      treated as a symbol.
+      Sometimes it is necessary to refer to an object by name, so that a chosen
+      name will always identify the same object. Finding or creating an object
+      by name is called "interning" it. A symbol that has a name is called an
+      "interned symbol". However we stretch the boundaries of the symbol idea,
+      by treating all other objects as "uninterned symbols". So that any object
+      could be treated as a symbol.
 
-      To prevent name clashing, that introduces unwanted equalities,
-      we employ the system of packages, where each symbol belongs
-      to a package, called its home package. The large system design
-      is leveraged due to the mechanism of symbol importing, where the
-      same symbol could be referenced from different packages (see
-      [import] and [in_package] functions, for more information).
+      To prevent name clashing, that introduces unwanted equalities, we employ
+      the system of packages, where each symbol belongs to a package, called its
+      home package. The large system design is leveraged due to the mechanism of
+      symbol importing, where the same symbol could be referenced from different
+      packages (see [import] and [in_package] functions, for more information).
 
       {3 Symbol syntax}
 
       The [read] function enables translation of the symbol textual
-      representation to an object.  The symbol syntax is designed to
-      be verstatile so it can allow arbitrary sets of characters, to
-      enable support for modeling different knowledge domains. Only
-      two characters has the special meaning for the symbol reader,
-      the [:] character acts as a separator between the package and
-      the name constituent, and the [\\] symbol escapes any special
-      treatment of a symbol that follows it (including the [\\]
-      itself). When a symbol is read, an absence of the package is
-      treated the same as if the [package] parameter of the [create]
-      function wasn't set, e.g.,
-      [read c "x"] is the same as [create c "x"], while an empty package
-      denotes the [keyword] package, e.g.,
-      [read c ":x"] is the same as [create ~package:keyword c "x"].
-
+      representation to an object. The symbol syntax is designed to be
+      verstatile so it can allow arbitrary sets of characters, to enable support
+      for modeling different knowledge domains. Only two characters has the
+      special meaning for the symbol reader, the [:] character acts as a
+      separator between the package and the name constituent, and the ['\\']
+      symbol escapes any special treatment of a symbol that follows it
+      (including the ['\\'] itself). When a symbol is read, an absence of the
+      package is treated the same as if the [package] parameter of the [create]
+      function wasn't set, e.g., [read c "x"] is the same as [create c "x"],
+      while an empty package denotes the [keyword] package, e.g., [read c ":x"]
+      is the same as [create ~package:keyword c "x"].
 
       {3 Name equality}
 
-      The equality of two names is defined by equality of their
-      byte representation. Hence, symbols which differ in register
-      will be treated differently, e.g., [Foo <> foo].
-  *)
+      The equality of two names is defined by equality of their byte
+      representation. Hence, symbols which differ in register will be treated
+      differently, e.g., [Foo <> foo]. *)
   module Symbol : sig
+    val intern :
+      ?public:bool ->
+      ?desc:string ->
+      ?package:string ->
+      string ->
+      ('a, _) cls ->
+      'a obj knowledge
+    (** [intern ?public ?desc ?package name cls] interns a symbol in a package.
 
-    (** [intern ?public ?desc ?package name cls] interns a symbol in
-        a package.
+        If a symbol with the given name is already interned in a package, then
+        returns its value, otherwise creates a new object.
 
-        If a symbol with the given name is already interned in a
-        package, then returns its value, otherwise creates a new
-        object.
-
-        If symbol is [public] then it might be advertised and be
-        accessible during the introspection. It is recommeneded to
-        provide a description string if a symbol is public. Note, a
-        non-public symbol still could be obtained by anyone who knows
-        the name.
+        If symbol is [public] then it might be advertised and be accessible
+        during the introspection. It is recommeneded to provide a description
+        string if a symbol is public. Note, a non-public symbol still could be
+        obtained by anyone who knows the name.
 
         If the function is called in the scope of one or more
-        [in_package pkg<N>], then the [package] parameter defaults to
-        [pkg], otherwise it defaults to ["user"]. See also the
-        [keyword] package for the special package that holds constants
-        and keywords.
+        [in_package pkg<N>], then the [package] parameter defaults to [pkg],
+        otherwise it defaults to ["user"]. See also the [keyword] package for
+        the special package that holds constants and keywords.
 
-        The [desc], [package], and [name] parameters could be
-        arbitrary strings (including empty). Any occurence of the
-        package separator symbol ([:]) will be escaped and won't be
-        treated as a package/name separator.
-    *)
-    val intern : ?public:bool -> ?desc:string -> ?package:string -> string ->
-      ('a,_) cls -> 'a obj knowledge
+        The [desc], [package], and [name] parameters could be arbitrary strings
+        (including empty). Any occurence of the package separator symbol ([:])
+        will be escaped and won't be treated as a package/name separator. *)
 
-    (** [keyword = "keyword"] is the special name for the package
-        that contains keywords. Basically, keywords are special kinds
-        of symbols whose meaning is defined by their names and nothing
-        else. *)
     val keyword : string
+    (** [keyword = "keyword"] is the special name for the package that contains
+        keywords. Basically, keywords are special kinds of symbols whose meaning
+        is defined by their names and nothing else. *)
 
+    val in_package : string -> (unit -> 'a knowledge) -> 'a knowledge
     (** [in_package pkg f] makes [pkg] the default package in [f].
 
-        Every reference to an unqualified symbol in the scope of the
-        [f] function will be treated as it is qualified with the
-        package [pkg]. This function will affect both the reader and
-        the pretty printer, thus [in_package "pkg" @@ Obj.repr buf] will
-        yield something like [#<buf 123>], instead of [#<pkg:buf 123>].
-    *)
-    val in_package : string -> (unit -> 'a knowledge) -> 'a knowledge
+        Every reference to an unqualified symbol in the scope of the [f]
+        function will be treated as it is qualified with the package [pkg]. This
+        function will affect both the reader and the pretty printer, thus
+        [in_package "pkg" @@ Obj.repr buf] will yield something like
+        [#<buf 123>], instead of [#<pkg:buf 123>]. *)
 
-
+    val set_package : string -> unit knowledge
     (** [set_package pkg] makes the package named [pkg] the current package.
 
-        @since 2.2.0
-    *)
-    val set_package : string -> unit knowledge
+        @since 2.2.0 *)
 
+    val package : string knowledge
     (** [package] is the name of the current package.
 
-        @since 2.2.0
-    *)
-    val package : string knowledge
+        @since 2.2.0 *)
 
+    val import :
+      ?strict:bool -> ?package:string -> string list -> unit knowledge
     (** [import ?strict ?package:p names] imports all [names] into [p].
 
-        The [names] elements could be either package names or
-        qualified names. If an element is a package, then all public
-        names from this package are imported into the package [p]. If
-        an element is a qualified symbol then it is imported into [p],
-        even if it is not public in the package from which it is being
-        imported.
+        The [names] elements could be either package names or qualified names.
+        If an element is a package, then all public names from this package are
+        imported into the package [p]. If an element is a qualified symbol then
+        it is imported into [p], even if it is not public in the package from
+        which it is being imported.
 
-        If any of the elements of the [names] list doesn't represent a
-        known package or known symbol, then a conflict is raised,
-        either [Not_a_package] or [Not_a_symbol].
+        If any of the elements of the [names] list doesn't represent a known
+        package or known symbol, then a conflict is raised, either
+        [Not_a_package] or [Not_a_symbol].
 
-        If [strict] is [true] then no name can change its value during
-        the import. Otherwise, if the name is alredy in present in
-        package [p] with a different value, then it will be
-        overwritten with the new value, i.e., shadowed.
+        If [strict] is [true] then no name can change its value during the
+        import. Otherwise, if the name is alredy in present in package [p] with
+        a different value, then it will be overwritten with the new value, i.e.,
+        shadowed.
 
-        All names are processed in order, so names imported from
-        packages that are in the beginning of the list could be
-        shadowed by the names that are in the end of the list (unless
-        [strict] is [true], of course). Thus,
+        All names are processed in order, so names imported from packages that
+        are in the beginning of the list could be shadowed by the names that are
+        in the end of the list (unless [strict] is [true], of course). Thus,
         {[
-          import [x] >>= fun () ->
-          import [y]
+          import [ x ] >>= fun () -> import [ y ]
         ]}
 
         is the same as [import [x;y]].
 
         Note, all imported names are added as not public.
 
-        If the [package] parameter is not specified, then names are
-        imported into the current package, as set by the [in_package]
-        function.
-    *)
-    val import : ?strict:bool -> ?package:string -> string list -> unit knowledge
+        If the [package] parameter is not specified, then names are imported
+        into the current package, as set by the [in_package] function. *)
   end
 
   (** An information provider.
 
-      A piece of information could be predicated with its source to
-      denote the trustworthiness of the information an/or to
-      enable information provenance.
+      A piece of information could be predicated with its source to denote the
+      trustworthiness of the information an/or to enable information provenance.
 
-      An agent is a registry entity with associated name, description,
-      and reliability. The [name] and [description] are used for
-      introspection. The reliability could be used for conflict
-      resolution.
+      An agent is a registry entity with associated name, description, and
+      reliability. The [name] and [description] are used for introspection. The
+      reliability could be used for conflict resolution.
 
-      Using [Domain.opinions] it is easy to embed any data into the
-      domain structure, by pairing the elements of this set with the
-      information about its source, i.e., with the agent. *)
+      Using [Domain.opinions] it is easy to embed any data into the domain
+      structure, by pairing the elements of this set with the information about
+      its source, i.e., with the agent. *)
   module Agent : sig
     type t = agent
 
-
-    (** the agent's id.  *)
     type id
+    (** the agent's id. *)
 
-
-    (** abstract ordered type to quantify reliability of agents.*)
     type reliability
+    (** abstract ordered type to quantify reliability of agents.*)
 
-
-    (** [register name] registers a new agent.
-
-        The provided [package] and [name] pair should be unique. If
-        an agent with the given [package:name] is already registered,
-        the registration of the new agent will fail.
-
-        @param desc a description of the registered agent.
-        @param package a namespace of the registered agent.
-        @param reliability is the amount of agent's trustworthiness
-        (defaults to trustworthy).
-    *)
     val register :
       ?desc:string ->
       ?package:string ->
-      ?reliability:reliability -> string -> agent
+      ?reliability:reliability ->
+      string ->
+      agent
+    (** [register name] registers a new agent.
 
+        The provided [package] and [name] pair should be unique. If an agent
+        with the given [package:name] is already registered, the registration of
+        the new agent will fail.
 
+        @param desc a description of the registered agent.
+        @param package a namespace of the registered agent.
+        @param reliability
+          is the amount of agent's trustworthiness (defaults to trustworthy). *)
+
+    val registry : unit -> id list
     (** [registry ()] is the current registry of agents.
 
-        Each registered agent is represented by its ID, which could be
-        inspected or used to change the reliability.
-    *)
-    val registry : unit -> id list
+        Each registered agent is represented by its ID, which could be inspected
+        or used to change the reliability. *)
 
-
-    (** [name id] is the name of the agent.  *)
     val name : id -> name
+    (** [name id] is the name of the agent. *)
 
-
-    (** [desc id] is the overall description of the agent.  *)
     val desc : id -> string
+    (** [desc id] is the overall description of the agent. *)
 
-
-    (** [reliability id] is the current reliability of the agent  *)
     val reliability : id -> reliability
+    (** [reliability id] is the current reliability of the agent *)
 
-
-    (** [set_reliability id] changes the reliability of the agent.  *)
     val set_reliability : id -> reliability -> unit
-
+    (** [set_reliability id] changes the reliability of the agent. *)
 
     (** {3 Reliability Levels} *)
 
-
+    val authorative : reliability
     (** The highest level of reliability.
 
-        The information was obtained from a source in which we trust
-        absolutely. There are no possible doubts that this information
-        is incorrect.
+        The information was obtained from a source in which we trust absolutely.
+        There are no possible doubts that this information is incorrect.
 
-        The authorative source is definitional and is always
-        preferred to any other information.
+        The authorative source is definitional and is always preferred to any
+        other information.
 
-        It could be compared to the information obtained from the
-        official legislative document, mathematical textbook, etc.
+        It could be compared to the information obtained from the official
+        legislative document, mathematical textbook, etc. *)
 
-    *)
-    val authorative : reliability
-
-
+    val reliable : reliability
     (** A highly reliable source.
 
         This source rarely, if ever, provides inaccurate results.
 
-        It could be compared to the information obtained from a
-        well-known expert, peer-reviewed journal, etc. *)
-    val reliable    : reliability
+        It could be compared to the information obtained from a well-known
+        expert, peer-reviewed journal, etc. *)
 
-
+    val trustworthy : reliability
     (** A very reliable source.
 
-        This source provides accurate results most of the time. Only
-        in exceptional cases it could provide an inaccurate result.
+        This source provides accurate results most of the time. Only in
+        exceptional cases it could provide an inaccurate result.
 
-        It could be compared to the information obtained from a field
-        expert.
-    *)
-    val trustworthy : reliability
+        It could be compared to the information obtained from a field expert. *)
 
-
+    val doubtful : reliability
     (** Nearly reliable source.
 
-        This source sometimes provides inaccurate information or relies
-        on doubtful methods. It is still providing useful and accurate
-        information more often than not.
+        This source sometimes provides inaccurate information or relies on
+        doubtful methods. It is still providing useful and accurate information
+        more often than not.
 
-        It could be compared to the information obtained from a
-        knowledgeable person.
-    *)
-    val doubtful    : reliability
+        It could be compared to the information obtained from a knowledgeable
+        person. *)
 
-
+    val unreliable : reliability
     (** A not worthwhile source.
 
-        This source provides accurate information slightly more often
-        than inaccurate. Though it is a bad source of information,
-        many unreliable source could be combined to.
+        This source provides accurate information slightly more often than
+        inaccurate. Though it is a bad source of information, many unreliable
+        source could be combined to.
 
-        It could be compared to the knowledge obtained from gossips, i.e.,
-        from not knowledgeable persons close to the knowledge.
-    *)
-    val unreliable  : reliability
+        It could be compared to the knowledge obtained from gossips, i.e., from
+        not knowledgeable persons close to the knowledge. *)
 
-
-    (** prints the agent information.  *)
     val pp : Format.formatter -> t -> unit
+    (** prints the agent information. *)
 
-
-    (** prints the agent's id.  *)
     val pp_id : Format.formatter -> id -> unit
+    (** prints the agent's id. *)
 
-
-    (** prints the reliability level.  *)
     val pp_reliability : Format.formatter -> reliability -> unit
+    (** prints the reliability level. *)
   end
-
 
   (** Partially ordered sets with the least element.
 
-      The Domain is fundamental structure for the Knowledge
-      representation as domains are used to represent property
-      values. Basically, all information is represented with
-      domains. Domains capture the idea of partial information or
-      an approximation of information.
+      The Domain is fundamental structure for the Knowledge representation as
+      domains are used to represent property values. Basically, all information
+      is represented with domains. Domains capture the idea of partial
+      information or an approximation of information.
 
-      A domain is a set equipped with the partial order, which orders
-      elements of this set by their information content, and the least
-      element [empty] or [bot], which is not greater than any other
-      element of this set. The [empty] element indicates an absence of
-      knowledge.
+      A domain is a set equipped with the partial order, which orders elements
+      of this set by their information content, and the least element [empty] or
+      [bot], which is not greater than any other element of this set. The
+      [empty] element indicates an absence of knowledge.
 
-      The resulting structure is not strictly a domain, the only
-      missing element is the maximal element. The role of the is taken
-      by values of type conflict, which denote the [top] element
-      equipped with the diagnostic information. Therefore, type
-      [('a,conflict) result] is a directed-complete partial order, or
-      a Scott-Ershov domain, or just a domain..
+      The resulting structure is not strictly a domain, the only missing element
+      is the maximal element. The role of the is taken by values of type
+      conflict, which denote the [top] element equipped with the diagnostic
+      information. Therefore, type [('a,conflict) result] is a directed-complete
+      partial order, or a Scott-Ershov domain, or just a domain..
 
-      The domain structure is very general and the [join] operator is
-      induced by the specified [order]. However, it is possible to
-      upgrade the structure, used to represent a property, to lattice
-      or lattice-like structure, by providing a custom [join] function.
-
-  *)
+      The domain structure is very general and the [join] operator is induced by
+      the specified [order]. However, it is possible to upgrade the structure,
+      used to represent a property, to lattice or lattice-like structure, by
+      providing a custom [join] function. *)
   module Domain : sig
     type 'a t = 'a domain
 
-
-    (** [define ~inspect ~empty ~order name] defines a domain for the
-        type ['a].
+    val define :
+      ?inspect:('a -> Base.Sexp.t) ->
+      ?join:('a -> 'a -> ('a, conflict) result) ->
+      empty:'a ->
+      order:('a -> 'a -> Order.partial) ->
+      string ->
+      'a domain
+    (** [define ~inspect ~empty ~order name] defines a domain for the type ['a].
 
         The [empty] value denotes the representation of an absence of
-        information, or an undefined value, or the default value, or
-        the least possible value in the chain, etc. It's only required
-        that for all possible values [x], [empty <= x], where [<=]
-        is the partial order defined by the [order] parameter
+        information, or an undefined value, or the default value, or the least
+        possible value in the chain, etc. It's only required that for all
+        possible values [x], [empty <= x], where [<=] is the partial order
+        defined by the [order] parameter
 
-        The [order] function defines the partial order for the given
-        domain, such that
+        The [order] function defines the partial order for the given domain,
+        such that
         - [partial x y = LT] iff [x<=y && not(y <= x)]
         - [partial x y = EQ] iff [x <= y && y <= x]
         - [partial x y = GT] iff [not (x <= y) && (y <= x)]
         - [partial x y = NC] iff [not (x <= y) && not (y <= x)].
 
-        The optional [inspect] function enables introspection, and may
-        return any representation of the domain value.
+        The optional [inspect] function enables introspection, and may return
+        any representation of the domain value.
 
-        The returned value is an instance of the domain type class
-        that is used for declaration of a property. The instance is
-        not nominal and is purely structural, the [name] argument is
-        used only for introspection and better error messages.
-    *)
-    val define :
+        The returned value is an instance of the domain type class that is used
+        for declaration of a property. The instance is not nominal and is purely
+        structural, the [name] argument is used only for introspection and
+        better error messages. *)
+
+    val total :
       ?inspect:('a -> Base.Sexp.t) ->
-      ?join:('a -> 'a -> ('a,conflict) result) ->
+      ?join:('a -> 'a -> ('a, conflict) result) ->
       empty:'a ->
-      order:('a -> 'a -> Order.partial) -> string -> 'a domain
-
-
+      order:('a -> 'a -> int) ->
+      string ->
+      'a domain
     (** [total empty order name] defines a domain from the total [order].
 
-        Defines an ordinal domain, where the partial order is inferred
-        from the total order, so that [a <= b iff a < b].
+        Defines an ordinal domain, where the partial order is inferred from the
+        total order, so that [a <= b iff a < b].
 
         The Hasse diagram of the ordinal domain:
 
@@ -1389,21 +1227,20 @@ module Knowledge : sig
              o x1
              |
              o bot
-         v}
-    *)
-    val total :
+        v} *)
+
+    val flat :
       ?inspect:('a -> Base.Sexp.t) ->
-      ?join:('a -> 'a -> ('a,conflict) result) ->
+      ?join:('a -> 'a -> ('a, conflict) result) ->
       empty:'a ->
-      order:('a -> 'a -> int) ->
-      string -> 'a domain
-
-
+      equal:('a -> 'a -> bool) ->
+      string ->
+      'a domain
     (** [flat empty equal name] defines a flat domain.
 
-        A flat domain has one element that is less than all other
-        elements except itself and any other two elements that are
-        not empty are non-comparable.
+        A flat domain has one element that is less than all other elements
+        except itself and any other two elements that are not empty are
+        non-comparable.
 
         The Hasse diagram of the flat domain:
 
@@ -1415,48 +1252,45 @@ module Knowledge : sig
                   |
                   o
                  bot
-        v}
+        v} *)
 
-    *)
-    val flat :
+    val optional :
       ?inspect:('a -> Base.Sexp.t) ->
-      ?join:('a -> 'a -> ('a,conflict) result) ->
-      empty:'a ->
+      ?join:('a -> 'a -> ('a, conflict) result) ->
       equal:('a -> 'a -> bool) ->
-      string -> 'a domain
-
-
+      string ->
+      'a option domain
     (** [optional ~equal name] a flat domain with [None] as bot.
 
-        Wrapping any data type into the option data type yields a flat
-        domain. For example,
+        Wrapping any data type into the option data type yields a flat domain.
+        For example,
 
         {[
           let tribool = optional ~equal:bool_equal "tribool"
         ]}
 
-        is a tribool domain, where the property value could be either
-        unknown ([None]), true ([Some true]), or false ([Some false].
-    *)
-    val optional :
-      ?inspect:('a -> Base.Sexp.t) ->
-      ?join:('a -> 'a -> ('a,conflict) result) ->
-      equal:('a -> 'a -> bool) ->
-      string -> 'a option domain
+        is a tribool domain, where the property value could be either unknown
+        ([None]), true ([Some true]), or false ([Some false]. *)
 
-
+    val mapping :
+      (module Core.Comparator.S
+         with type t = 'a
+          and type comparator_witness = 'e) ->
+      ?inspect:('d -> Base.Sexp.t) ->
+      ?join:('d -> 'd -> ('d, conflict) result) ->
+      equal:('d -> 'd -> bool) ->
+      string ->
+      ('a, 'd, 'e) Map.t domain
     (** [mapping total_order ~equal ?join name] a point-wise mapping domain.
 
-        Finite mapping naturally form domains, if every key in the
-        mapping is considered an independent kind of information, and
-        an absence of a key indicates the absence of that kind of
-        information.
+        Finite mapping naturally form domains, if every key in the mapping is
+        considered an independent kind of information, and an absence of a key
+        indicates the absence of that kind of information.
 
-
-        The upper bound of two mapping is the point-wise union of
-        them, unless there is a key, which is present in both mapping
-        with different values (combined with [equal] by default). In
-        the latter case, the upper bound is the [conflict].
+        The upper bound of two mapping is the point-wise union of them, unless
+        there is a key, which is present in both mapping with different values
+        (combined with [equal] by default). In the latter case, the upper bound
+        is the [conflict].
 
         The partial order between [x] and [y] is defined as follows:
         - [EQ] iff mappings are structurally equal;
@@ -1465,198 +1299,170 @@ module Knowledge : sig
         - [NC] iff neither of the above rules applicable.
 
         @since 2.5.0, the optional [join] parameter is made available.
-        By default, it returns [Ok y] when two elements [x] and [y]
-        which share the same key are [equal]. Otherwise, it shall
-        return the least upper bound of [x] and [y], if it exists.
-    *)
-    val mapping :
-      (module Core.Comparator.S with type t = 'a and type comparator_witness = 'e) ->
-      ?inspect:('d -> Base.Sexp.t) ->
-      ?join:('d -> 'd -> ('d, conflict) result) ->
-      equal:('d -> 'd -> bool) ->
-      string ->
-      ('a,'d,'e) Map.t domain
 
+        By default, it returns [Ok y] when two elements [x] and [y] which share
+        the same key are [equal]. Otherwise, it shall return the least upper
+        bound of [x] and [y], if it exists. *)
 
-    (** [powerset total name] defines a set of all subsets domain.
-
-        Sets ordered by inclusion is a natural domain. The join
-        operator is the set union, and the order operator is the
-        [is_subset] function.
-    *)
     val powerset :
-      (module Core.Comparator.S with type t = 'a and type comparator_witness = 'e) ->
+      (module Core.Comparator.S
+         with type t = 'a
+          and type comparator_witness = 'e) ->
       ?inspect:('a -> Sexp.t) ->
       string ->
-      ('a,'e) Set.t domain
+      ('a, 'e) Set.t domain
+    (** [powerset total name] defines a set of all subsets domain.
 
+        Sets ordered by inclusion is a natural domain. The join operator is the
+        set union, and the order operator is the [is_subset] function. *)
 
-    (** [opinions empty equal name] defines an opinionated domain.
-
-        In the opinionated domain, the order of elements is defined by
-        the total reliability of agents that support this
-        information. The more trustworthy the agent and the more
-        agents support data, the higher the data will be in the chain.
-
-        See corresponding [suggest], [propose], and [resolve] operators.
-    *)
     val opinions :
       ?inspect:('a -> Sexp.t) ->
       empty:'a ->
       equal:('a -> 'a -> bool) ->
       string ->
       'a opinions domain
+    (** [opinions empty equal name] defines an opinionated domain.
 
+        In the opinionated domain, the order of elements is defined by the total
+        reliability of agents that support this information. The more
+        trustworthy the agent and the more agents support data, the higher the
+        data will be in the chain.
 
-    (** [string] is flat domain with an empty string at the bottom.  *)
+        See corresponding [suggest], [propose], and [resolve] operators. *)
+
     val string : string domain
+    (** [string] is flat domain with an empty string at the bottom. *)
 
-
-    (** [bool] is the tribool domain. *)
     val bool : bool option domain
+    (** [bool] is the tribool domain. *)
 
+    val obj : ('a, _) cls -> 'a obj domain
+    (** [obj] is a flat domain with a null object at the bottom. *)
 
-    (** [obj] is a flat domain with a null object at the bottom.  *)
-    val obj : ('a,_) cls -> 'a obj domain
-
-
-    (** [empty domain] is the bottom of the [domain].  *)
     val empty : 'a t -> 'a
+    (** [empty domain] is the bottom of the [domain]. *)
 
-
-    (** [is_empty domain x] is [true] if [x] is [empty domain].  *)
     val is_empty : 'a t -> 'a -> bool
+    (** [is_empty domain x] is [true] if [x] is [empty domain]. *)
 
-
-    (** [order domain x y] orders [x] and [y] according to the [domain] order.  *)
     val order : 'a t -> 'a -> 'a -> Order.partial
+    (** [order domain x y] orders [x] and [y] according to the [domain] order.
+    *)
 
+    val join : 'a t -> 'a -> 'a -> ('a, conflict) result
+    (** [join domain x y] is the upper bound of [x] and [y]. *)
 
-    (** [join domain x y] is the upper bound of [x] and [y].  *)
-    val join  : 'a t -> 'a -> 'a -> ('a,conflict) result
-
-
-    (** [inspect domain x] introspects [x].  *)
     val inspect : 'a t -> 'a -> Base.Sexp.t
+    (** [inspect domain x] introspects [x]. *)
 
-
-    (** [name domain] is the domain name.  *)
     val name : 'a t -> string
+    (** [name domain] is the domain name. *)
   end
-
 
   (** Persistence type class.
 
-      A instance of the Persistent type class could be provided to the
-      property declaration to make this property persistent. See the
-      [Class.property] function.
-  *)
+      A instance of the Persistent type class could be provided to the property
+      declaration to make this property persistent. See the [Class.property]
+      function. *)
   module Persistent : sig
     type 'a t = 'a persistent
 
-
+    val define :
+      to_string:('a -> string) -> of_string:(string -> 'a) -> 'a persistent
     (** [define to_string of_string] derives an instance of [persistent].
 
-        Uses the provided [of_string] and [to_string] to deserialize
-        and serialize properties.
-    *)
-    val define :
-      to_string:('a -> string) ->
-      of_string:(string -> 'a) ->
-      'a persistent
+        Uses the provided [of_string] and [to_string] to deserialize and
+        serialize properties. *)
 
-
-    (** [derive to_persistent of_persistent] derives an instance from
-        other instance. *)
     val derive :
       to_persistent:('a -> 'b) ->
       of_persistent:('b -> 'a) ->
-      'b persistent -> 'a persistent
+      'b persistent ->
+      'a persistent
+    (** [derive to_persistent of_persistent] derives an instance from other
+        instance. *)
 
-    (** [of_binable t] derives [persistent] from the binable instance [t].  *)
     val of_binable : (module Binable.S with type t = 'a) -> 'a persistent
+    (** [of_binable t] derives [persistent] from the binable instance [t]. *)
 
-
-    (** string is a persistent data type.  *)
     val string : string persistent
+    (** string is a persistent data type. *)
 
+    val name : name persistent
     (** names are persistent.
 
         @since 2.2.0 *)
-    val name : name persistent
 
-    (** [list t] derives persistence for a list.  *)
     val list : 'a persistent -> 'a list persistent
+    (** [list t] derives persistence for a list. *)
 
-    (** [sequence t] derives persistent for a sequence.  *)
     val sequence : 'a persistent -> 'a Sequence.t persistent
+    (** [sequence t] derives persistent for a sequence. *)
 
-    (** [array t] derives persistent for an array.  *)
     val array : 'a persistent -> 'a array persistent
+    (** [array t] derives persistent for an array. *)
 
-    (** [set order t] derives persistent for a set.  *)
-    val set : ('a,'c) Core.Comparator.Module.t -> 'a t -> ('a,'c) Set.t persistent
+    val set :
+      ('a, 'c) Core.Comparator.Module.t -> 'a t -> ('a, 'c) Set.t persistent
+    (** [set order t] derives persistent for a set. *)
 
-
-    (** [map order t] derives persistent for a map.  *)
-    val map : ('k,'c) Core.Comparator.Module.t -> 'k t -> 'd t -> ('k,'d,'c) Map.t persistent
+    val map :
+      ('k, 'c) Core.Comparator.Module.t ->
+      'k t ->
+      'd t ->
+      ('k, 'd, 'c) Map.t persistent
+    (** [map order t] derives persistent for a map. *)
   end
 
   (** Conflicting information.
 
-      Conflicts occur when two conflicting values are provided for a
-      property. When conflict happens the knowledge dependent
-      computation diverges and evaluation stops with the value of type
-      [conflict] (unless it is intercepted).
+      Conflicts occur when two conflicting values are provided for a property.
+      When conflict happens the knowledge dependent computation diverges and
+      evaluation stops with the value of type [conflict] (unless it is
+      intercepted).
 
-      The conflict value, essentially serves as the upper bound to all
-      user provided domains, thus closing the poset structure and
-      turning it into a real domain. Although there could be many
-      values of type [conflict] it is better to think of them as one
-      value [top], equipped with diagnostic information.
-  *)
+      The conflict value, essentially serves as the upper bound to all user
+      provided domains, thus closing the poset structure and turning it into a
+      real domain. Although there could be many values of type [conflict] it is
+      better to think of them as one value [top], equipped with diagnostic
+      information. *)
   module Conflict : sig
     type t = conflict = ..
 
+    val to_string : conflict -> string
     (** [to_string err] is the textual representation of the conflict [err]
 
-        @since 2.2.0  *)
-    val to_string : conflict -> string
+        @since 2.2.0 *)
 
-    (** prints the conflict  *)
     val pp : Format.formatter -> conflict -> unit
+    (** prints the conflict *)
 
-
-    (** the s-expression denoting the conflict. *)
     val sexp_of_t : t -> Sexp.t
+    (** the s-expression denoting the conflict. *)
 
-
+    val register_printer : (t -> string option) -> unit
     (** registers a printer for user specified extension of the conflict type.
 
-        The function shall return [Some s] for the variant added by
-        the user and [None] for all other variants.
-    *)
-    val register_printer : (t -> string option) -> unit
+        The function shall return [Some s] for the variant added by the user and
+        [None] for all other variants. *)
   end
 
-
-  (** Fully qualified names.  *)
+  (** Fully qualified names. *)
   module Name : sig
     type t = name [@@deriving bin_io, compare, sexp]
 
-
+    val create : ?package:string -> string -> t
     (** [create ?package name] creates a fully qualified name.
 
-        The [package] and [name] strings can contain any characters
-        all treated literally, e.g., the [:] character
-        won't be treated as a separator neither it will break
-        anything.
+        The [package] and [name] strings can contain any characters all treated
+        literally, e.g., the [:] character won't be treated as a separator
+        neither it will break anything.
 
-        If [package] is not specified, then it defaults to the
-        ["user"] package.
+        If [package] is not specified, then it defaults to the ["user"] package.
     *)
-    val create : ?package:string -> string -> t
 
+    val read : ?package:string -> string -> t
     (** [read ?package input] reads a full name from input.
 
         This function will parse the [input] and return a
@@ -1704,34 +1510,29 @@ module Knowledge : sig
 
         [show@@read "hello:cruel:world" = "hello:cruel\\:world"]
     *)
-    val read : ?package:string -> string -> t
 
-
+    val show : t -> string
     (** [show name] is the readable representation of [name].
 
-        The name is represented as [<package>:<name>], with all
-        special characters escaped. See the {!read} function for
-        more information.
-    *)
-    val show : t -> string
+        The name is represented as [<package>:<name>], with all special
+        characters escaped. See the {!read} function for more information. *)
 
+    val unqualified : t -> string
     (** [unqualified name] is the unqualified name.
 
-        Returns the name without the package specifier.
-    *)
-    val unqualified : t -> string
+        Returns the name without the package specifier. *)
 
-    (** [package name] is the package of the [name].  *)
     val package : t -> string
+    (** [package name] is the package of the [name]. *)
 
+    val str : unit -> t -> string
     (** [str () x = show x] shows [x].
 
-        This function is useful with printf-style functions that
-        output to a string. *)
-    val str : unit -> t -> string
+        This function is useful with printf-style functions that output to a
+        string. *)
 
-    (** [hash name] the [name] hash. *)
     val hash : t -> int
+    (** [hash name] the [name] hash. *)
 
     include Base.Comparable.S with type t := t
     include Binable.S with type t := t
@@ -1739,70 +1540,69 @@ module Knowledge : sig
     include Pretty_printer.S with type t := t
   end
 
-
   (** An extensible enumerated type.
 
-      An enumerated type is a set of names that are represented
-      underneath the hood using the [KB.Name.t].
+      An enumerated type is a set of names that are represented underneath the
+      hood using the [KB.Name.t].
 
-      The enumerated type had to be declared before used and is
-      commonly referenced as a module declared constant. It is
-      possible, however to reference the enumerated type value using
-      its string representation, via the [read] function.
+      The enumerated type had to be declared before used and is commonly
+      referenced as a module declared constant. It is possible, however to
+      reference the enumerated type value using its string representation, via
+      the [read] function.
 
       @since 2.3.0 (was introduced in 2.2.0 in the Bap_core_theory
-      interface as Theory.Enum, since then was moved here).
-  *)
-  module Enum : sig
 
-    (** The enumerated type interface  *)
+      interface as Theory.Enum, since then was moved here). *)
+  module Enum : sig
+    (** The enumerated type interface *)
     module type S = sig
       type t
+
+      val declare : ?package:string -> string -> t
       (** [declare ?package name] declares a new element of the enumeration.
 
           Fails if the name is already declared. *)
-      val declare : ?package:string -> string -> t
 
-      (** [read ?package name] reads the element from its textual representation.
-
-          Fails if the name doesn't represent a previously declared
-          element of the enumeration.
-
-          If [name] is unqualified then [package] is used as the
-          package name. The [package] itself defaults to ["user"].
-
-          See also [of_string s] from the [Stringable] interface which
-          is equal to [read s]
-      *)
       val read : ?package:string -> string -> t
+      (** [read ?package name] reads the element from its textual
+          representation.
 
-      (** [name x] is the name that corresponds to the element [x]  *)
+          Fails if the name doesn't represent a previously declared element of
+          the enumeration.
+
+          If [name] is unqualified then [package] is used as the package name.
+          The [package] itself defaults to ["user"].
+
+          See also [of_string s] from the [Stringable] interface which is equal
+          to [read s] *)
+
       val name : t -> Name.t
+      (** [name x] is the name that corresponds to the element [x] *)
 
-      (** [unknown] is the placeholder for unknown element.  *)
       val unknown : t
+      (** [unknown] is the placeholder for unknown element. *)
 
-      (** [is_unknown t] is true if [t] is [unknown].  *)
       val is_unknown : t -> bool
+      (** [is_unknown t] is true if [t] is [unknown]. *)
 
+      val domain : t domain
       (** [domain] the type class implementing the domain structure.
 
-          Each enumeration type forms a flat domain with the [unknown]
-          element at the bottom. *)
-      val domain : t domain
+          Each enumeration type forms a flat domain with the [unknown] element
+          at the bottom. *)
 
+      val persistent : t persistent
       (** [persistent] the persistance type class.
 
-          The enumeration types are persistent and are derived from
-          the [KB.Name.persistent] type class, i.e., they are
-          represented as 63-bit numbers. *)
-      val persistent : t persistent
+          The enumeration types are persistent and are derived from the
+          [KB.Name.persistent] type class, i.e., they are represented as 63-bit
+          numbers. *)
 
-      (** the hash value of the enum  *)
       val hash : t -> int
+      (** the hash value of the enum *)
 
-      (** [members ()] the list of all members of the enumeration type. *)
       val members : unit -> t list
+      (** [members ()] the list of all members of the enumeration type. *)
 
       include Base.Comparable.S with type t := t
       include Binable.S with type t := t
@@ -1811,12 +1611,12 @@ module Knowledge : sig
       include Sexpable.S with type t := t
     end
 
-    (** Creates a new enumerated type.  *)
-    module Make() : S
+    module Make () : S
+    (** Creates a new enumerated type. *)
   end
 
-  (** the s-expression denoting the conflict. *)
   val sexp_of_conflict : conflict -> Sexp.t
+  (** the s-expression denoting the conflict. *)
 
   (** {3 Rules}
 
@@ -1840,180 +1640,146 @@ module Knowledge : sig
         val first_name : (person, string option) slot
         val last_name : (person, string option) slot
         val full_name : (person, string option) slot
-
         val address : (person, address option) slot
         val phone : (person, phone option) slot
       ]}
 
-      The simplest and obvious rule would a derivation of the full
-      name from the first and last names. This derivation could be
-      encoded as a promise. To make this promise visible and known
-      to the users of the knowledge system we advertise it as a rule,
+      The simplest and obvious rule would a derivation of the full name from the
+      first and last names. This derivation could be encoded as a promise. To
+      make this promise visible and known to the users of the knowledge system
+      we advertise it as a rule,
 
       {[
-        Rule.(declare "full-name" |>
-              require first_name  |>
-              require last_name   |>
-              provide full_name   |>
-              comment "full = first last");
+        Rule.(
+          declare "full-name" |> require first_name |> require last_name
+          |> provide full_name
+          |> comment "full = first last");
         promise full_name @@ fun person ->
         collect first_name >>=? fun first ->
-        collect last_name >>|? fun last ->
-        first ^ " " ^ last
+        collect last_name >>|? fun last -> first ^ " " ^ last
       ]}
 
-
-      The rule above is a closed term, since it doesn't reference any
-      language variables, i.e., it derives its output directly from
-      the knowledge base. Such rules are called static as they are
-      always available. Contrary, dynamic rules are provide external
-      information to the knowledge system. For example, the following
-      rule extracts the phone number of a person from the online database,
+      The rule above is a closed term, since it doesn't reference any language
+      variables, i.e., it derives its output directly from the knowledge base.
+      Such rules are called static as they are always available. Contrary,
+      dynamic rules are provide external information to the knowledge system.
+      For example, the following rule extracts the phone number of a person from
+      the online database,
 
       {[
         let provide_phone_base =
-          Rule.(declare "lookup-phone-number" |>
-                dynamic ["phone-base"] |>
-                require full_name |>
-                provide phone |>
-                comment "lookups phone in the public database");
+          Rule.(
+            declare "lookup-phone-number"
+            |> dynamic [ "phone-base" ]
+            |> require full_name |> provide phone
+            |> comment "lookups phone in the public database");
           fun base ->
             promise phone @@ fun person ->
-            collect full_name >>| fun name ->
-            Phonebase.lookup base phone
+            collect full_name >>| fun name -> Phonebase.lookup base phone
       ]}
 
-      The [dynamic] operator of the specification accepts a list of
-      formal parameters of the rule. In theory, this list could be
-      empty. In that case, the rule will still be treated as dynamic.
+      The [dynamic] operator of the specification accepts a list of formal
+      parameters of the rule. In theory, this list could be empty. In that case,
+      the rule will still be treated as dynamic.
 
-      Note, that in the example above, the rule declaration is not
-      parametrized with the base. Otherwise, it will be only declared
-      after the base is available. Moreover, each new application will
-      create a new rule, which will end up in a runtime failure, since
-      the rule name should be unique.
+      Note, that in the example above, the rule declaration is not parametrized
+      with the base. Otherwise, it will be only declared after the base is
+      available. Moreover, each new application will create a new rule, which
+      will end up in a runtime failure, since the rule name should be unique.
 
-      This module defines an domain-specific language for specifying
-      rules. The [Documentation] and [Documentation.Rule] modules
-      could be used to introspect all available rules.
+      This module defines an domain-specific language for specifying rules. The
+      [Documentation] and [Documentation.Rule] modules could be used to
+      introspect all available rules.
 
-      @since 2.2.0
-  *)
+      @since 2.2.0 *)
   module Rule : sig
-
+    type def
     (** a term of type [def] expects either
 
         - [|> require <slot>], or
-        - [|> provide <slot>].
-    *)
-    type def
+        - [|> provide <slot>]. *)
 
-    (** a term of type [doc] expects [|> comment <doc>].
-        This is the only way to finish a rule definition. *)
     type doc
+    (** a term of type [doc] expects [|> comment <doc>]. This is the only way to
+        finish a rule definition. *)
 
-
+    val declare : ?package:string -> string -> def
     (** [declare ?package name] starts a rule definition.
 
-        The rule definition should be followed by zero or more
-        dependencies,
-        - [|> require <slot>],
-          zero or more dynamic parameters specifications,
-        - [|> dynamic <parameters>],
-          exactly one output specification,
-        - [|> provide <slot>], and
-          exactly one documentation string,
+        The rule definition should be followed by zero or more dependencies,
+        - [|> require <slot>], zero or more dynamic parameters specifications,
+        - [|> dynamic <parameters>], exactly one output specification,
+        - [|> provide <slot>], and exactly one documentation string,
         - [|> comment <comment>]
 
         {3 Example}
 
         {[
-          declare "rule-name"   |>
-          dynamic ["parameter"] |>
-          require slot1         |>
-          require slot2         |>
-          provide slot3         |>
-          comment "example rule"
-        ]}
-    *)
-    val declare : ?package:string -> string -> def
+          declare "rule-name" |> dynamic [ "parameter" ] |> require slot1
+          |> require slot2 |> provide slot3 |> comment "example rule"
+        ]} *)
 
-
-    (** [dynamic ps] declares that a rule is dynamic and lists formal parameters.
-    *)
     val dynamic : string list -> def -> def
+    (** [dynamic ps] declares that a rule is dynamic and lists formal
+        parameters. *)
 
+    val require : (_, _) slot -> def -> def
     (** [require p] declares a dependency on the property [p].
 
         Note: This function enables introspection of the rules that are
-        registered in the knowledge base. It doesn't affect the
-        semantics in any way.
-    *)
-    val require : (_,_) slot -> def -> def
+        registered in the knowledge base. It doesn't affect the semantics in any
+        way. *)
 
+    val provide : (_, _) slot -> def -> doc
+    (** [provide p] declares that a rule computes the property [p] *)
 
-    (** [provide p] declares that a rule computes the property [p]  *)
-    val provide : (_,_) slot -> def -> doc
-
-    (** [comment text] provides a documentation for a rule.
-    *)
     val comment : string -> doc -> unit
+    (** [comment text] provides a documentation for a rule. *)
   end
 
   (** Online Knowledge documentation.
 
-      Provides information about declared knowledge entities, such as
-      classes, properties, and agents.
-  *)
+      Provides information about declared knowledge entities, such as classes,
+      properties, and agents. *)
   module Documentation : sig
-
-
-    (** A documentation element.  *)
+    (** A documentation element. *)
     module type Element = sig
-
-      (** the type of the element  *)
       type t
+      (** the type of the element *)
 
-
-      (** [name elt] is the fully qualified element name.  *)
       val name : t -> name
+      (** [name elt] is the fully qualified element name. *)
 
-
-      (** [desc elt] is the text describing the element.  *)
       val desc : t -> string
+      (** [desc elt] is the text describing the element. *)
     end
 
-
-    (** Describes Knowledge agents.  *)
     module Agent : Element
+    (** Describes Knowledge agents. *)
 
-
-    (** Describes Knowledge classes.  *)
     module Class : Element
+    (** Describes Knowledge classes. *)
 
-
-    (** Describes Class properties.  *)
     module Property : Element
-
+    (** Describes Class properties. *)
 
     module Rule : sig
       include Element
+
       val requires : t -> Property.t list
       val provides : t -> Property.t
       val parameters : t -> string list list
       val pp : Format.formatter -> t -> unit
     end
 
-    (** [agents ()] is the list of currently registered agents.  *)
     val agents : unit -> Agent.t list
+    (** [agents ()] is the list of currently registered agents. *)
 
-
+    val classes : unit -> (Class.t * Property.t list) list
     (** [classes ()] public classes and their properties.
 
-        Only classes and properties that are declared [public] are
-        included in the list.
-    *)
-    val classes : unit -> (Class.t * Property.t list) list
+        Only classes and properties that are declared [public] are included in
+        the list. *)
 
     val rules : unit -> Rule.t list
   end

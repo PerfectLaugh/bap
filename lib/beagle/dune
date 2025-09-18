@@ -1,6 +1,7 @@
 (library
-  (name bap_beagle_prey)
-  (public_name bap-beagle)
-  (preprocess (pps ppx_bap))
-  (wrapped false)
-  (libraries bap bap-primus core monads regular))
+ (name bap_beagle_prey)
+ (public_name bap-beagle)
+ (preprocess
+  (pps ppx_bap))
+ (wrapped false)
+ (libraries bap bap-primus core monads regular))

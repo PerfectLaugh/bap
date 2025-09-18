@@ -2,30 +2,30 @@
  (name bap)
  (public_name bap-std)
  (wrapped false)
- (preprocess (pps ppx_bap))
+ (preprocess
+  (pps ppx_bap))
  (libraries
-   bap-bundle
-   bap-core-theory
-   bap_disasm
-   bap-future
-   bap_image
-   bap-knowledge
-   bap-main
-   bap_sema
-   bap_types
-   bitvec
-   bitvec-binprot
-   bitvec-order
-   bitvec-sexp
-   core
-   fileutils
-   graphlib
-   monads
-   ogre
-   regular)
+  bap-bundle
+  bap-core-theory
+  bap_disasm
+  bap-future
+  bap_image
+  bap-knowledge
+  bap-main
+  bap_sema
+  bap_types
+  bitvec
+  bitvec-binprot
+  bitvec-order
+  bitvec-sexp
+  core
+  fileutils
+  graphlib
+  monads
+  ogre
+  regular)
  (modules bap bap_project bap_self)
  (private_modules bap_project bap_self))
-
 
 (library
  (name bap_init_toplevel)
@@ -34,8 +34,8 @@
  (modules bap_init_toplevel)
  (optional)
  (libraries
-   bap
-   bap-main
-   dune-site.toplevel ; to disable when toplevel support is not present
-   compiler-libs
-   compiler-libs.common))
+  bap
+  bap-main
+  dune-site.toplevel ; to disable when toplevel support is not present
+  compiler-libs
+  compiler-libs.common))

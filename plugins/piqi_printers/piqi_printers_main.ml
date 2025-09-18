@@ -1,22 +1,22 @@
 open Core
 open Regular.Std
 open Bap.Std
-include Self()
+include Self ()
 
-
-let () = Config.manpage [
-    `S "DESCRIPTION";
-    `P
-      "Provide a serialization for BIR and BIL, using piqi
-      serialization files. The plugin provides five formats
-      of serialization: JSON, protobuf, textual, binary and XML.";
-    `P
-      "The serialization routines can be use programmatically, using
-      the Data interface, or from a print plugin";
-
-    `S "SEE ALSO";
-    `P "$(b,regular)(3), $(b,bap-plugin-print)(1), $(b,bap-piqi)(3)"
-  ]
+let () =
+  Config.manpage
+    [
+      `S "DESCRIPTION";
+      `P
+        "Provide a serialization for BIR and BIL, using piqi\n\
+        \      serialization files. The plugin provides five formats\n\
+        \      of serialization: JSON, protobuf, textual, binary and XML.";
+      `P
+        "The serialization routines can be use programmatically, using\n\
+        \      the Data interface, or from a print plugin";
+      `S "SEE ALSO";
+      `P "$(b,regular)(3), $(b,bap-plugin-print)(1), $(b,bap-piqi)(3)";
+    ]
 
 module Bil = struct
   open Bil_piqi
@@ -31,14 +31,15 @@ module Bil = struct
     Data.Read.create ~of_bytes ()
 
   let ver = "0.1"
+
   let desc_of_type = function
     | `json -> "JSON"
     | `pb -> "protobuf"
     | `piq -> "textual"
     | `pib -> "binary"
     | `xml -> "XML"
-  let s fmt =
-    sprintf "Piqi generated %s serializer" (desc_of_type fmt)
+
+  let s fmt = sprintf "Piqi generated %s serializer" (desc_of_type fmt)
 
   let register () =
     List.iter all_of_fmt ~f:(fun fmt ->
@@ -46,10 +47,10 @@ module Bil = struct
         let desc = s fmt in
         Stmt.add_reader ~desc ~ver name (reader stmt_of_string fmt);
         Stmt.add_writer ~desc ~ver name (writer string_of_stmt fmt);
-        Exp.add_reader  ~desc ~ver name (reader exp_of_string fmt);
-        Exp.add_writer  ~desc ~ver name (writer string_of_exp fmt);
-        Bil.add_reader  ~desc ~ver name (reader bil_of_string fmt);
-        Bil.add_writer  ~desc ~ver name (writer string_of_bil fmt);
+        Exp.add_reader ~desc ~ver name (reader exp_of_string fmt);
+        Exp.add_writer ~desc ~ver name (writer string_of_exp fmt);
+        Bil.add_reader ~desc ~ver name (reader bil_of_string fmt);
+        Bil.add_writer ~desc ~ver name (writer string_of_bil fmt);
         Sub.add_writer ~desc ~ver name (writer string_of_sub fmt);
         Sub.add_reader ~desc ~ver name (reader sub_of_string fmt);
         Blk.add_writer ~desc ~ver name (writer string_of_blk fmt);
@@ -62,10 +63,10 @@ module Bil = struct
         Def.add_reader ~desc ~ver name (reader def_of_string fmt);
         Program.add_writer ~desc ~ver name (writer string_of_program fmt);
         Program.add_reader ~desc ~ver name (reader program_of_string fmt))
-
 end
 
-let () = Config.declare_extension
+let () =
+  Config.declare_extension
     ~doc:"provides piqi-based serialization for BIL and BIR"
-    ~provides:["printer"; "serialization"; "xml"; "json"; "protobuf"]
+    ~provides:[ "printer"; "serialization"; "xml"; "json"; "protobuf" ]
   @@ fun _ -> Bil.register ()

@@ -1,7 +1,5 @@
-
 open OUnit2
 open Core
-
 open Bap_future.Std
 
 let magic_value = 42
@@ -24,7 +22,8 @@ let define_twice ctxt =
     try
       Promise.fulfill promise magic_value;
       false
-    with Invalid_argument _ -> true in
+    with Invalid_argument _ -> true
+  in
   assert_bool "define twice failed" result
 
 let upon ctxt =
@@ -54,7 +53,8 @@ let peek_exn ctxt =
     try
       let _ = Future.peek_exn future in
       false
-    with Invalid_argument  _ -> true in
+    with Invalid_argument _ -> true
+  in
   assert_bool "peek exn failed" result;
   Promise.fulfill promise magic_value;
   assert_equal ~ctxt magic_value (Future.peek_exn future)
@@ -64,7 +64,8 @@ let bind ctxt =
   let change x =
     let future', promise' = Future.create () in
     Promise.fulfill promise' (Int.succ x);
-    future' in
+    future'
+  in
   let future' = Future.bind future change in
   Promise.fulfill promise magic_value;
   assert_equal ~ctxt (Int.succ magic_value) (Future.peek_exn future')
@@ -80,16 +81,16 @@ let map ctxt =
   assert_equal ~ctxt (Int.succ magic_value) (Future.peek_exn future')
 
 let suite =
-  "Future" >:::
-  [
-    "fulfill"            >:: fulfill;
-    "is_fulfilled"       >:: is_fulfilled;
-    "define_twice"       >:: define_twice;
-    "upon"               >:: upon;
-    "is_decided"         >:: is_decided;
-    "peek"               >:: peek;
-    "peek_exn"           >:: peek_exn;
-    "bind"               >:: bind;
-    "map"                >:: map;
-    "return"             >:: return;
-  ]
+  "Future"
+  >::: [
+         "fulfill" >:: fulfill;
+         "is_fulfilled" >:: is_fulfilled;
+         "define_twice" >:: define_twice;
+         "upon" >:: upon;
+         "is_decided" >:: is_decided;
+         "peek" >:: peek;
+         "peek_exn" >:: peek_exn;
+         "bind" >:: bind;
+         "map" >:: map;
+         "return" >:: return;
+       ]

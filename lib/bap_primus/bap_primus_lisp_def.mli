@@ -1,14 +1,12 @@
 open Bap_primus_types
 open Bap_primus_lisp_types
 open Bap_core_theory
-
 module Attribute = Bap_primus_lisp_attribute
 module Type = Bap_primus_lisp_type
 
-module type Closure = functor(Machine : Machine) -> sig
+module type Closure = functor (Machine : Machine) -> sig
   val run : value list -> value Machine.t
 end
-
 
 type 'a spec
 type 'a t = 'a spec indexed
@@ -24,7 +22,6 @@ type closure = (module Closure)
 type 'a primitive
 type para
 type signal
-
 type attrs = Attribute.set
 
 val name : 'a t -> string
@@ -34,12 +31,13 @@ val attributes : 'a t -> attrs
 
 type 'a def = ?docs:string -> ?attrs:attrs -> string -> 'a
 
-
 module Sema : sig
-  type body = Theory.Label.t -> Theory.Value.Top.t list -> Theory.Semantics.t KB.t
-  val create : ?docs:string -> types:Type.signature ->
-    KB.Name.t -> body ->
-    sema t
+  type body =
+    Theory.Label.t -> Theory.Value.Top.t list -> Theory.Semantics.t KB.t
+
+  val create :
+    ?docs:string -> types:Type.signature -> KB.Name.t -> body -> sema t
+
   val apply : sema t -> body
   val types : sema t -> Type.signature
 end
@@ -70,13 +68,12 @@ module Macro : sig
   val body : macro t -> tree
   val bind : macro t -> tree list -> (int * (string * tree list) list) option
 
-  (** [apply m bs] returns the body of [m] where any occurrence of a
-      variable [x] is substituted with [y] if [x,[y]] is in the list
-      of bindings [bs].
-
-      The identity of the returned tree is the same as the identity of
-      the macro body.*)
   val apply : macro t -> (string * tree list) list -> tree
+  (** [apply m bs] returns the body of [m] where any occurrence of a variable
+      [x] is substituted with [y] if [x,[y]] is in the list of bindings [bs].
+
+      The identity of the returned tree is the same as the identity of the macro
+      body.*)
 end
 
 module Const : sig
@@ -96,14 +93,24 @@ end
 
 module Primitive : sig
   type nonrec 'a t = 'a primitive t
-  val create : ?docs:string -> ?package:string -> string -> (value list -> 'a) -> 'a t
-  val body : 'a t -> (value list -> 'a)
+
+  val create :
+    ?docs:string -> ?package:string -> string -> (value list -> 'a) -> 'a t
+
+  val body : 'a t -> value list -> 'a
 end
 
 module Closure : sig
   val of_primitive : 'a Primitive.t -> closure -> prim t
-  val create : ?types:Type.signature -> ?docs:string -> ?package:string
-    -> string -> closure -> prim t
+
+  val create :
+    ?types:Type.signature ->
+    ?docs:string ->
+    ?package:string ->
+    string ->
+    closure ->
+    prim t
+
   val signature : prim t -> Type.signature option
   val body : prim t -> closure
 end
@@ -113,7 +120,7 @@ module Signal : sig
   val signature : signal t -> Type.signature
 end
 
-module type Primitives = functor (Machine : Machine) ->  sig
+module type Primitives = functor (Machine : Machine) -> sig
   val defs : unit -> value Machine.t Primitive.t list
 end
 

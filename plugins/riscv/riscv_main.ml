@@ -4,31 +4,21 @@ open Bap.Std
 open Bap_core_theory
 open KB.Syntax
 module CT = Theory
-
-include Bap_main.Loggers()
-
+include Bap_main.Loggers ()
 module Target = Bap_riscv_target
 module Dis = Disasm_expert.Basic
 
 type Extension.Error.t += Unknown_backend of string
 
-let provides = [
-  "semantics";
-  "lifter";
-  "riscv";
-  "riscv64";
-  "riscv32";
-]
+let provides = [ "semantics"; "lifter"; "riscv"; "riscv64"; "riscv32" ]
 
 let use_llvm_decoding () =
   KB.promise CT.Label.encoding @@ fun label ->
   CT.Label.target label >>| fun t ->
-  if CT.Target.belongs Target.parent t
-  then if Theory.Target.belongs Target.riscv64 t
-    then Target.llvm64
+  if CT.Target.belongs Target.parent t then
+    if Theory.Target.belongs Target.riscv64 t then Target.llvm64
     else Target.llvm32
   else CT.Language.unknown
-
 
 let enable_llvm encoding triple =
   Dis.register encoding @@ fun _ ->
@@ -37,24 +27,21 @@ let enable_llvm encoding triple =
 let pcode = Theory.Language.declare ~package:"bap" "pcode-riscv"
 
 let enable_pcode () =
-  Dis.register pcode @@begin fun t ->
-    Dis.create ~backend:"ghidra" @@ sprintf "RISCV:LE:%d:default"
-      (Theory.Target.bits t)
-  end;
-  KB.promise Theory.Label.encoding @@begin fun label ->
-    Theory.Label.target label >>| fun t ->
-    if Theory.Target.belongs Target.parent t
-    then pcode
-    else Theory.Language.unknown
-  end
-
+  ( Dis.register pcode @@ fun t ->
+    Dis.create ~backend:"ghidra"
+    @@ sprintf "RISCV:LE:%d:default" (Theory.Target.bits t) );
+  KB.promise Theory.Label.encoding @@ fun label ->
+  Theory.Label.target label >>| fun t ->
+  if Theory.Target.belongs Target.parent t then pcode
+  else Theory.Language.unknown
 
 let enable_loader () =
   let request_arch doc =
     let open Ogre.Syntax in
     match Ogre.eval (Ogre.request Image.Scheme.arch) doc with
     | Error _ -> assert false
-    | Ok arch -> arch in
+    | Ok arch -> arch
+  in
   KB.promise CT.Unit.target @@ fun unit ->
   KB.collect Image.Spec.slot unit >>| request_arch >>| function
   | Some "riscv64" -> Target.riscv64
@@ -64,13 +51,12 @@ let enable_loader () =
 module Abi = struct
   open Bap_c.Std
   open Bap.Std
-
   module Arg = C.Abi.Arg
   open Arg.Let
   open Arg.Syntax
 
   let is_floating = function
-    | `Basic {C.Type.Spec.t=#C.Type.real} -> true
+    | `Basic { C.Type.Spec.t = #C.Type.real } -> true
     | _ -> false
 
   let data_model t =
@@ -79,7 +65,7 @@ module Abi = struct
 
   let define t =
     let model = data_model t in
-    C.Abi.define t model @@ fun _ {C.Type.Proto.return=r; args} ->
+    C.Abi.define t model @@ fun _ { C.Type.Proto.return = r; args } ->
     let* iargs = Arg.Arena.iargs t in
     let* irets = Arg.Arena.irets t in
     let* fargs = Arg.Arena.fargs t in
@@ -89,42 +75,35 @@ module Abi = struct
     let integer regs t =
       Arg.count regs t >>= function
       | None -> Arg.reject ()
-      | Some 1 -> Arg.choice [
-          Arg.register regs t;
-          Arg.memory t;
-        ]
-      | Some 2 -> Arg.choice [
-          Arg.sequence [
-            Arg.align_even regs;
-            Arg.registers ~limit:2 regs t;
-          ];
-          Arg.split_with_memory regs t;
-          Arg.memory t;
-        ]
-      | Some _ -> Arg.reference regs t in
+      | Some 1 -> Arg.choice [ Arg.register regs t; Arg.memory t ]
+      | Some 2 ->
+          Arg.choice
+            [
+              Arg.sequence
+                [ Arg.align_even regs; Arg.registers ~limit:2 regs t ];
+              Arg.split_with_memory regs t;
+              Arg.memory t;
+            ]
+      | Some _ -> Arg.reference regs t
+    in
 
     (* floating-point calling convention *)
     let float iregs fregs t =
       Arg.count fregs t >>= function
-      | Some 1 -> Arg.choice [
-          Arg.register fregs t;
-          Arg.register iregs t;
-          Arg.memory t;
-        ]
-      | _ -> integer iregs t in
+      | Some 1 ->
+          Arg.choice
+            [ Arg.register fregs t; Arg.register iregs t; Arg.memory t ]
+      | _ -> integer iregs t
+    in
 
     let arg iregs fregs r =
-      if is_floating r
-      then float iregs fregs r
-      else integer iregs r in
+      if is_floating r then float iregs fregs r else integer iregs r
+    in
 
-    Arg.define ?return:(match r with
-        | `Void -> None
-        | r -> Some (arg irets frets r))
-      (Arg.List.iter args ~f:(fun (_,t) ->
-           arg iargs fargs t));
+    Arg.define
+      ?return:(match r with `Void -> None | r -> Some (arg irets frets r))
+      (Arg.List.iter args ~f:(fun (_, t) -> arg iargs fargs t))
 end
-
 
 let backend =
   let open Extension in
@@ -136,15 +115,14 @@ let main ctxt =
   Abi.define Target.riscv64;
   match Extension.Configuration.get ctxt backend with
   | Some "llvm" | None ->
-    use_llvm_decoding ();
-    enable_llvm Target.llvm64 "riscv64";
-    enable_llvm Target.llvm32 "riscv32";
-    Ok ()
+      use_llvm_decoding ();
+      enable_llvm Target.llvm64 "riscv64";
+      enable_llvm Target.llvm32 "riscv32";
+      Ok ()
   | Some "ghidra" ->
-    enable_pcode ();
-    Ok ()
+      enable_pcode ();
+      Ok ()
   | Some s -> Error (Unknown_backend s)
 
-let () = Bap_main.Extension.declare main
-    ~doc:"provides RISCV semantics"
-    ~provides
+let () =
+  Bap_main.Extension.declare main ~doc:"provides RISCV semantics" ~provides

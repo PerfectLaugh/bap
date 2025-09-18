@@ -1,4 +1,6 @@
 (install
  (files bits.lisp dummy.lisp ieee754.lisp)
  (package bap-primus-lisp)
- (section (site (bap-common semantics))))
+ (section
+  (site
+   (bap-common semantics))))

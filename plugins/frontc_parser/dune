@@ -1,11 +1,13 @@
 (library
  (name bap_frontc_parser_plugin)
  (public_name bap-frontc.plugin)
- (preprocess (pps ppx_bap))
+ (preprocess
+  (pps ppx_bap))
  (libraries bap bap-c FrontC core))
 
 (plugin
  (name frontc-parser)
  (package bap-frontc)
  (libraries bap-frontc.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

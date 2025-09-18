@@ -1,13 +1,14 @@
 (library
-  (name bap_c)
-  (public_name bap-c)
-  (preprocess (pps ppx_bap))
-  (libraries
-    bap
-    bap-abi
-    bap-api
-    bap-core-theory
-    bap-knowledge
-    core
-    monads
-    regular))
+ (name bap_c)
+ (public_name bap-c)
+ (preprocess
+  (pps ppx_bap))
+ (libraries
+  bap
+  bap-abi
+  bap-api
+  bap-core-theory
+  bap-knowledge
+  core
+  monads
+  regular))

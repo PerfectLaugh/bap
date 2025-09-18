@@ -1,11 +1,13 @@
 (library
  (name bap_map_terms_plugin)
  (public_name bap-term-mapper.plugin)
- (preprocess (pps ppx_bap))
+ (preprocess
+  (pps ppx_bap))
  (libraries bap bap-bml bap-main core regular))
 
 (plugin
  (name map-terms)
  (package bap-term-mapper)
  (libraries bap-term-mapper.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

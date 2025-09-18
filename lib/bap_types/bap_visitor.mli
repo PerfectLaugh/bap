@@ -3,7 +3,7 @@ open Bap_common_types
 open Bap_bil
 
 class exp_state : object
-  val exps_stack  : exp  list
+  val exps_stack : exp list
   val under_condition : bool
 end
 
@@ -21,61 +21,54 @@ class ['a] exp_visitor : object
   method enter_exp : exp -> 'a -> 'a
   method visit_exp : exp -> 'a -> 'a
   method leave_exp : exp -> 'a -> 'a
-
   method enter_load : mem:exp -> addr:exp -> endian -> size -> 'a -> 'a
   method visit_load : mem:exp -> addr:exp -> endian -> size -> 'a -> 'a
   method leave_load : mem:exp -> addr:exp -> endian -> size -> 'a -> 'a
 
-  method enter_store : mem:exp -> addr:exp -> exp:exp -> endian -> size -> 'a -> 'a
-  method visit_store : mem:exp -> addr:exp -> exp:exp -> endian -> size -> 'a -> 'a
-  method leave_store : mem:exp -> addr:exp -> exp:exp -> endian -> size -> 'a -> 'a
+  method enter_store :
+    mem:exp -> addr:exp -> exp:exp -> endian -> size -> 'a -> 'a
+
+  method visit_store :
+    mem:exp -> addr:exp -> exp:exp -> endian -> size -> 'a -> 'a
+
+  method leave_store :
+    mem:exp -> addr:exp -> exp:exp -> endian -> size -> 'a -> 'a
 
   method enter_binop : binop -> exp -> exp -> 'a -> 'a
   method visit_binop : binop -> exp -> exp -> 'a -> 'a
   method leave_binop : binop -> exp -> exp -> 'a -> 'a
-
   method enter_unop : unop -> exp -> 'a -> 'a
   method visit_unop : unop -> exp -> 'a -> 'a
   method leave_unop : unop -> exp -> 'a -> 'a
-
   method enter_cast : cast -> nat1 -> exp -> 'a -> 'a
   method visit_cast : cast -> nat1 -> exp -> 'a -> 'a
   method leave_cast : cast -> nat1 -> exp -> 'a -> 'a
-
   method enter_let : var -> exp:exp -> body:exp -> 'a -> 'a
   method visit_let : var -> exp:exp -> body:exp -> 'a -> 'a
   method leave_let : var -> exp:exp -> body:exp -> 'a -> 'a
-
   method enter_ite : cond:exp -> yes:exp -> no:exp -> 'a -> 'a
   method visit_ite : cond:exp -> yes:exp -> no:exp -> 'a -> 'a
   method leave_ite : cond:exp -> yes:exp -> no:exp -> 'a -> 'a
-
   method enter_extract : hi:nat1 -> lo:nat1 -> exp -> 'a -> 'a
   method visit_extract : hi:nat1 -> lo:nat1 -> exp -> 'a -> 'a
   method leave_extract : hi:nat1 -> lo:nat1 -> exp -> 'a -> 'a
-
   method enter_concat : exp -> exp -> 'a -> 'a
   method visit_concat : exp -> exp -> 'a -> 'a
   method leave_concat : exp -> exp -> 'a -> 'a
-
   method enter_int : word -> 'a -> 'a
   method visit_int : word -> 'a -> 'a
   method leave_int : word -> 'a -> 'a
-
   method enter_var : var -> 'a -> 'a
   method visit_var : var -> 'a -> 'a
   method leave_var : var -> 'a -> 'a
-
   method enter_unknown : string -> typ -> 'a -> 'a
   method visit_unknown : string -> typ -> 'a -> 'a
   method leave_unknown : string -> typ -> 'a -> 'a
 end
 
-
 class ['a] bil_visitor : object
   inherit ['a] exp_visitor
   inherit stmt_state
-
   method run : bil -> 'a -> 'a
   method enter_stmt : stmt -> 'a -> 'a
   method visit_stmt : stmt -> 'a -> 'a
@@ -83,23 +76,18 @@ class ['a] bil_visitor : object
   method enter_move : var -> exp -> 'a -> 'a
   method visit_move : var -> exp -> 'a -> 'a
   method leave_move : var -> exp -> 'a -> 'a
-
   method enter_jmp : exp -> 'a -> 'a
   method visit_jmp : exp -> 'a -> 'a
   method leave_jmp : exp -> 'a -> 'a
-
   method enter_while : cond:exp -> bil -> 'a -> 'a
   method visit_while : cond:exp -> bil -> 'a -> 'a
   method leave_while : cond:exp -> bil -> 'a -> 'a
-
   method enter_if : cond:exp -> yes:bil -> no:bil -> 'a -> 'a
   method visit_if : cond:exp -> yes:bil -> no:bil -> 'a -> 'a
   method leave_if : cond:exp -> yes:bil -> no:bil -> 'a -> 'a
-
   method enter_cpuexn : int -> 'a -> 'a
   method visit_cpuexn : int -> 'a -> 'a
   method leave_cpuexn : int -> 'a -> 'a
-
   method enter_special : string -> 'a -> 'a
   method visit_special : string -> 'a -> 'a
   method leave_special : string -> 'a -> 'a
@@ -133,12 +121,10 @@ class exp_mapper : object
   method map_unknown : string -> typ -> exp
 end
 
-
 class bil_mapper : object
   inherit exp_mapper
   inherit stmt_state
   method run : bil -> bil
-
   method map_stmt : stmt -> bil
   method map_move : var -> exp -> bil
   method map_jmp : exp -> bil

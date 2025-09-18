@@ -17,7 +17,10 @@ module Disasm : sig
   module Subroutines = Bap_disasm_calls
 
   type t = disasm
-  type 'a disassembler = ?backend:string -> ?brancher:brancher -> ?rooter:rooter -> 'a
+
+  type 'a disassembler =
+    ?backend:string -> ?brancher:brancher -> ?rooter:rooter -> 'a
+
   val create : cfg -> disasm
   val of_mem : (arch -> mem -> disasm Or_error.t) disassembler
   val of_image : (image -> disasm Or_error.t) disassembler

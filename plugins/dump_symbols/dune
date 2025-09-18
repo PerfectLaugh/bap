@@ -1,11 +1,13 @@
 (library
  (name bap_dump_symbols_plugin)
  (public_name bap-dump-symbols.plugin)
- (preprocess (pps ppx_bap))
+ (preprocess
+  (pps ppx_bap))
  (libraries bap core graphlib regular))
 
 (plugin
  (name dump-symbols)
  (package bap-dump-symbols)
  (libraries bap-dump-symbols.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

@@ -16,19 +16,12 @@ module Toplevel : sig
 end
 
 val empty : t
-
 val set_path : t -> string -> t
-
 val path : t -> string option
-
 val create : (addr -> string option) -> t
-
 val of_blocks : (string * addr * addr) seq -> t
-
 val of_image : image -> t
-
 val resolve : t -> addr -> string
-
 val chain : t list -> t
 
 module Name : sig

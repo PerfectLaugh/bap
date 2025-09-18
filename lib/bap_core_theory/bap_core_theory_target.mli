@@ -1,6 +1,5 @@
 open Core
 open Bap_knowledge
-
 module KB = Knowledge
 module Bitv = Bap_core_theory_value.Bitv
 module Bool = Bap_core_theory_value.Bool
@@ -14,8 +13,10 @@ type abi
 type fabi
 type filetype
 type role
-type ('a,'k) origin
-type options = (options_cls,unit) KB.Class.t KB.Value.t and options_cls
+type ('a, 'k) origin
+
+type options = (options_cls, unit) KB.Class.t KB.Value.t
+and options_cls
 
 type alias
 
@@ -38,7 +39,8 @@ val declare :
   ?options:options ->
   ?nicknames:string list ->
   ?package:string ->
-  string -> t
+  string ->
+  t
 
 val register :
   ?systems:system list ->
@@ -47,7 +49,8 @@ val register :
   ?filetypes:filetype list ->
   ?options:options list ->
   ?package:string ->
-  t -> unit
+  t ->
+  unit
 
 val select :
   ?unique:bool ->
@@ -57,7 +60,9 @@ val select :
   ?abi:abi ->
   ?fabi:fabi ->
   ?filetype:filetype ->
-  ?options:options -> unit -> t
+  ?options:options ->
+  unit ->
+  t
 
 val filter :
   ?strict:bool ->
@@ -66,8 +71,9 @@ val filter :
   ?abi:abi ->
   ?fabi:fabi ->
   ?filetype:filetype ->
-  ?options:options -> unit -> t list
-
+  ?options:options ->
+  unit ->
+  t list
 
 val get : ?package:string -> string -> t
 val read : ?package:string -> string -> t
@@ -92,30 +98,26 @@ val data_addr_size : t -> int
 val code_addr_size : t -> int
 val data_alignment : t -> int
 val code_alignment : t -> int
-val data : t -> (unit,unit) Mem.t Var.t
-val code : t -> (unit,unit) Mem.t Var.t
+val data : t -> (unit, unit) Mem.t Var.t
+val code : t -> (unit, unit) Mem.t Var.t
 val vars : t -> Set.M(Var.Top).t
 val var : t -> string -> Var.Top.t option
-val regs :
-  ?exclude:role list ->
-  ?roles:role list ->
-  t -> Set.M(Var.Top).t
+val regs : ?exclude:role list -> ?roles:role list -> t -> Set.M(Var.Top).t
 val reg : ?exclude:role list -> ?unique:bool -> t -> role -> unit Var.t option
 val has_roles : t -> role list -> _ Var.t -> bool
-val unalias : t -> 'a Var.t -> ('b,unit) origin option
-
+val unalias : t -> 'a Var.t -> ('b, unit) origin option
 val endianness : t -> endianness
 val system : t -> system
 val abi : t -> abi
 val fabi : t -> fabi
 val filetype : t -> filetype
 val options : t -> options
-
 val domain : t KB.Domain.t
 val persistent : t KB.Persistent.t
 
 module Endianness : sig
   include KB.Enum.S with type t = endianness
+
   val le : endianness
   val eb : endianness
   val bi : endianness
@@ -123,6 +125,7 @@ end
 
 module Role : sig
   type t = role
+
   module Register : sig
     val general : t
     val special : t
@@ -158,10 +161,9 @@ module Role : sig
   include KB.Enum.S with type t := t
 end
 
-
-
 module System : sig
   include KB.Enum.S with type t = system
+
   val linux : system
   val darwin : system
   val vxworks : system
@@ -172,15 +174,19 @@ module System : sig
   val uefi : system
   val none : system
 end
+
 module Filetype : sig
   include KB.Enum.S with type t = filetype
+
   val elf : filetype
   val coff : filetype
   val macho : filetype
   val aout : filetype
 end
+
 module Abi : sig
   include KB.Enum.S with type t = abi
+
   val gnu : abi
   val eabi : abi
   val gnueabi : abi
@@ -192,7 +198,8 @@ module Abi : sig
 end
 
 module Fabi : sig
-  include  KB.Enum.S with type t = fabi
+  include KB.Enum.S with type t = fabi
+
   val hard : fabi
   val soft : fabi
 end
@@ -200,6 +207,7 @@ end
 module Alias : sig
   type t = alias
   type 'a part
+
   val def : 'a Bitv.t Var.t -> 'b part list -> alias
   val reg : 'a Bitv.t Var.t -> 'a part
   val bit : Bool.t Var.t -> Bool.t part
@@ -207,27 +215,29 @@ module Alias : sig
 end
 
 module Origin : sig
-  type ('s,'k) t = ('s,'k) origin
+  type ('s, 'k) t = ('s, 'k) origin
   type sub
   type sup
   type set
 
-  val cast_sub : ('a,unit) t -> ('a,sub) t option
-  val cast_sup : ('a,unit) t -> ('a,sup) t option
-  val cast_set : ('a,unit) t -> (Bool.t,set) t option
-  val reg : ('a,sub) t -> 'a Bitv.t Var.t
-  val is_alias : ('a,sub) t -> bool
-  val hi : ('a,sub) t -> int
-  val lo : ('a,sub) t -> int
-  val regs : ('a,sup) t -> 'a Bitv.t Var.t list
-  val bits : (Bool.t,set) t -> Bool.t Var.t list
+  val cast_sub : ('a, unit) t -> ('a, sub) t option
+  val cast_sup : ('a, unit) t -> ('a, sup) t option
+  val cast_set : ('a, unit) t -> (Bool.t, set) t option
+  val reg : ('a, sub) t -> 'a Bitv.t Var.t
+  val is_alias : ('a, sub) t -> bool
+  val hi : ('a, sub) t -> int
+  val lo : ('a, sub) t -> int
+  val regs : ('a, sup) t -> 'a Bitv.t Var.t list
+  val bits : (Bool.t, set) t -> Bool.t Var.t list
 end
 
 module Options : sig
   type cls = options_cls
+
   include KB.Value.S with type t = options
   include Binable.S with type t := t
   include Pretty_printer.S with type t := t
+
   val cls : (cls, unit) KB.cls
   val to_string : t -> string
 end
@@ -236,6 +246,7 @@ include Base.Comparable.S with type t := t
 include Binable.S with type t := t
 include Stringable.S with type t := t
 include Pretty_printer.S with type t := t
+
 val name : t -> KB.Name.t
 val hash : t -> int
 val unknown : t

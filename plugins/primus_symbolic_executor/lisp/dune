@@ -1,4 +1,6 @@
 (install
  (files symbolic-stdio.lisp symbolic-stdlib.lisp)
  (package bap-primus-symbolic-executor)
- (section (site (bap-common site_lisp))))
+ (section
+  (site
+   (bap-common site_lisp))))

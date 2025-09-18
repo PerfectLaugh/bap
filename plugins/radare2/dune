@@ -3,22 +3,23 @@
  (name bap_radare2_plugin)
  (public_name bap-radare2.plugin)
  (libraries
-   bap
-   bap-arm
-   bap-core-theory
-   bap-future
-   bap-knowledge
-   bap-relation
-   bitvec
-   core
-   regular
-   re.pcre
-   yojson
-   zarith))
+  bap
+  bap-arm
+  bap-core-theory
+  bap-future
+  bap-knowledge
+  bap-relation
+  bitvec
+  core
+  regular
+  re.pcre
+  yojson
+  zarith))
 
 (plugin
  (optional)
  (name radare2)
  (package bap-radare2)
  (libraries bap-radare2.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

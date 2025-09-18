@@ -7,247 +7,226 @@
 
     {2 Embedding BAP}
 
-    BAP is designed to be friendly and act as a library, so that it
-    can be seamlessly embedded into user applications, in cases when
-    the main frontend of BAP, the [bap] utility, couldn't suffice the
-    user requirements. Being a guest, BAP will act respectfully to its
-    host and won't interfere with system utilities, unless allowed to,
-    e.g., it won't terminate the program, hijack the control flow,
-    spam into channels and, in general, will keep quiet and minimize
-    possible side-effects.
+    BAP is designed to be friendly and act as a library, so that it can be
+    seamlessly embedded into user applications, in cases when the main frontend
+    of BAP, the [bap] utility, couldn't suffice the user requirements. Being a
+    guest, BAP will act respectfully to its host and won't interfere with system
+    utilities, unless allowed to, e.g., it won't terminate the program, hijack
+    the control flow, spam into channels and, in general, will keep quiet and
+    minimize possible side-effects.
 
-    Embedding is achieved by a simple call to the [Bap_main.init ()]
-    procedure which takes a few optional arguments. By default it will
-    just initialize plugins, peeking configuration from the predefined
-    locations and environment variables (which in turn, could be also
-    specified). If command line arguments are passed, the [init]
-    procedure will evaluate them. See the [bap] utility for the
-    description of the command line interface and semantics of command
-    line arguments.
+    Embedding is achieved by a simple call to the [Bap_main.init ()] procedure
+    which takes a few optional arguments. By default it will just initialize
+    plugins, peeking configuration from the predefined locations and environment
+    variables (which in turn, could be also specified). If command line
+    arguments are passed, the [init] procedure will evaluate them. See the [bap]
+    utility for the description of the command line interface and semantics of
+    command line arguments.
 
     {3 Warning}
 
-    Sine BAP is relying on dynamic loading, for correct behavior the
-    host program shall provide information to the dynamic loader
-    about the units that are linked into the host program. Failure to do
-    so may result in an undefined behavior with the segmentation fault
-    being the most favorable outcome.
+    Sine BAP is relying on dynamic loading, for correct behavior the host
+    program shall provide information to the dynamic loader about the units that
+    are linked into the host program. Failure to do so may result in an
+    undefined behavior with the segmentation fault being the most favorable
+    outcome.
 
-    This requirement could be achieved by using the [ocamlfind]
-    tool to build the host program and specifying
-    [-package findlib.dynload] in the linking command [1].
+    This requirement could be achieved by using the [ocamlfind] tool to build
+    the host program and specifying [-package findlib.dynload] in the linking
+    command [1].
 
-    Alternatively, if [dune] is used, then adding [findlib.dynload] to
-    the libraries dependencies of the host application (e.g.,
+    Alternatively, if [dune] is used, then adding [findlib.dynload] to the
+    libraries dependencies of the host application (e.g.,
     [(libraries findlib.dynload)] should also work) [2].
 
-    Finally, if neither of approaches suffice, the dependencies could
-    be manually set using the [Findlib.record_package] function.
+    Finally, if neither of approaches suffice, the dependencies could be
+    manually set using the [Findlib.record_package] function.
 
-    [1]: http://projects.camlcity.org/projects/dl/findlib-1.5.6/doc/ref-html/lib/Fl_dynload.html
-    [2]: https://jbuilder.readthedocs.io/en/latest/advanced-topics.html#dynamic-loading-of-packages
-
-
+    [1]:
+    http://projects.camlcity.org/projects/dl/findlib-1.5.6/doc/ref-html/lib/Fl_dynload.html
+    [2]:
+    https://jbuilder.readthedocs.io/en/latest/advanced-topics.html#dynamic-loading-of-packages
 
     {2 Extending BAP}
 
     It is much more common and recommended to use the [bap] utility to
-    initialize and run BAP. The user code could be injected in
-    predefined extension points, and will be called by the system with
-    all the necessary input parameters. This approach minimizes the amount of
-    the boilerplate that has to be written and lets an analyst to
-    inject its analysis in the right place of a pipeline.
+    initialize and run BAP. The user code could be injected in predefined
+    extension points, and will be called by the system with all the necessary
+    input parameters. This approach minimizes the amount of the boilerplate that
+    has to be written and lets an analyst to inject its analysis in the right
+    place of a pipeline.
 
-    There are plenty of extension points in BAP, too many to mention
-    here, but writing a disassembling pass would be a good
-    example. Using the [Project.register_pass] function an analyst can
-    get straight to the point and apply its analysis as a
-    transformation to the [project] data structure without being
-    obligated to create this structure on the first hand, thus
-    relinquishing to the BAP framework the responsibility of parsing
-    the command line arguments, selecting proper loaders and disassembler
-    parameters.
+    There are plenty of extension points in BAP, too many to mention here, but
+    writing a disassembling pass would be a good example. Using the
+    [Project.register_pass] function an analyst can get straight to the point
+    and apply its analysis as a transformation to the [project] data structure
+    without being obligated to create this structure on the first hand, thus
+    relinquishing to the BAP framework the responsibility of parsing the command
+    line arguments, selecting proper loaders and disassembler parameters.
 
-    This approach also establishes a unified interface to BAP making the
-    whole system easier to use and understand.
+    This approach also establishes a unified interface to BAP making the whole
+    system easier to use and understand.
 
     {3 Plugins}
 
-    A plugin is compiled and packed code that could be loaded in
-    runtime. A plugin is a bundle that in addition to the machine and
-    byte code of the extension itself, contains the meta information
-    that describes plugin properties, requirements, and provided
-    features. It may also optionally contain the code for
-    dependencies, which leverages plugin portability, so that it can
-    be loaded when the development environment is no longer
-    available. (Note, by default all dependencies except the bap
-    library itself and core) are packed into the plugin.
+    A plugin is compiled and packed code that could be loaded in runtime. A
+    plugin is a bundle that in addition to the machine and byte code of the
+    extension itself, contains the meta information that describes plugin
+    properties, requirements, and provided features. It may also optionally
+    contain the code for dependencies, which leverages plugin portability, so
+    that it can be loaded when the development environment is no longer
+    available. (Note, by default all dependencies except the bap library itself
+    and core) are packed into the plugin.
 
-    The [bapbuild] tool is used to build plugins from OCaml source
-    code. The [bapbundle] tool could be used to deploy the plugin into
-    a place where it will be automatically loaded by the framework. In
-    short, to build and deploy a plugin with OCaml code located in a
-    file named [example.ml] execute the following two commands:
+    The [bapbuild] tool is used to build plugins from OCaml source code. The
+    [bapbundle] tool could be used to deploy the plugin into a place where it
+    will be automatically loaded by the framework. In short, to build and deploy
+    a plugin with OCaml code located in a file named [example.ml] execute the
+    following two commands:
 
-    1. [bapbuild example.plugin]
-    2. [bapbundle install example.plugin]
+    1. [bapbuild example.plugin] 2. [bapbundle install example.plugin]
 
-    The [bapbuild] tool will scan the dependencies of the [example.ml]
-    file and build them automatically if they are present in the
-    current directory, e.g., if [example.ml] references the [Analysis]
-    module and [analysis.ml] is present in the current folder, then it
-    will be automatically built and linked into the final product. A
-    dependency on an external package could be specified using the
-    [-pkg] and [-pkgs] option (the latter accepts a comma separated
-    list of dependencies). Underneath the hood, [bapbuild] is the
-    standard OCaml [ocamlbuild] tool extended with a few rules that
-    are necessary to build and pack plugins.
+    The [bapbuild] tool will scan the dependencies of the [example.ml] file and
+    build them automatically if they are present in the current directory, e.g.,
+    if [example.ml] references the [Analysis] module and [analysis.ml] is
+    present in the current folder, then it will be automatically built and
+    linked into the final product. A dependency on an external package could be
+    specified using the [-pkg] and [-pkgs] option (the latter accepts a comma
+    separated list of dependencies). Underneath the hood, [bapbuild] is the
+    standard OCaml [ocamlbuild] tool extended with a few rules that are
+    necessary to build and pack plugins.
 
-    The [bapbuild] tool has its limitations, for example, only one
-    plugin per folder could be built. When the source base grows very
-    big it is becoming hard to manage it with [bapbuild], so using
-    some configuration system is advised, e.g., OASIS or dune. A
-    plugin, then, could be built as a normal OCaml library and later
-    packed with [bapbuild].
+    The [bapbuild] tool has its limitations, for example, only one plugin per
+    folder could be built. When the source base grows very big it is becoming
+    hard to manage it with [bapbuild], so using some configuration system is
+    advised, e.g., OASIS or dune. A plugin, then, could be built as a normal
+    OCaml library and later packed with [bapbuild].
 
     {3 Extensions}
 
-    After the plugin is deployed to the place where it could be found
-    by BAP, it will be loaded every time the [Bap_main.init] function
-    is called. All toplevel expressions of all modules constituting the
-    plugin will be evaluated, however, a well-behaving plugin shall
-    not evaluate any side-effectful expressions except those that are
-    provided by the [Extension] module.
+    After the plugin is deployed to the place where it could be found by BAP, it
+    will be loaded every time the [Bap_main.init] function is called. All
+    toplevel expressions of all modules constituting the plugin will be
+    evaluated, however, a well-behaving plugin shall not evaluate any
+    side-effectful expressions except those that are provided by the [Extension]
+    module.
 
     The [Extension] module let the extension to
 
-    1) declare configuration parameters;
-    2) declare command line arguments;
-    3) declare an extension;
-    4) declare a command;
-    5) specify meta attributes such as documentation, features, and
-    requirements.
+    1) declare configuration parameters; 2) declare command line arguments; 3)
+    declare an extension; 4) declare a command; 5) specify meta attributes such
+    as documentation, features, and requirements.
 
-    When an extension is enabled by the framework (see the {!features}
-    section which describes the process of selection), it will be
-    evaluated with the context, capturing the computation environment,
-    passed to it as function argument.
+    When an extension is enabled by the framework (see the {!features} section
+    which describes the process of selection), it will be evaluated with the
+    context, capturing the computation environment, passed to it as function
+    argument.
 
     {3 Commands}
 
-    Commands are special kinds of extensions which stand aside because
-    the play the role of the [main] function in BAP, i.e., a command
-    is an OCaml function which will be evaluated as the main function,
-    when BAP is run.
+    Commands are special kinds of extensions which stand aside because the play
+    the role of the [main] function in BAP, i.e., a command is an OCaml function
+    which will be evaluated as the main function, when BAP is run.
 
-    Commands can have their own command line arguments, which are then
-    reified into OCaml values and passed to the specified function as
-    arguments.
+    Commands can have their own command line arguments, which are then reified
+    into OCaml values and passed to the specified function as arguments.
 
     {2 Features and Requirements}
 
-    BAP employs a system of simple semantic tags to denote required and
-    provided capabilities of its various components. This system
-    facilitates fine granular selection of components that are
-    required for an application to satisfy it needs.
+    BAP employs a system of simple semantic tags to denote required and provided
+    capabilities of its various components. This system facilitates fine
+    granular selection of components that are required for an application to
+    satisfy it needs.
 
     {3 Features}
 
-    Both the main system and its extensions may explicitly state the
-    set of features that they provide or expect, as well as the set
-    of requirements that they require or implement.
+    Both the main system and its extensions may explicitly state the set of
+    features that they provide or expect, as well as the set of requirements
+    that they require or implement.
 
-    Both, features and requirements are intentionally denoted with
-    string tags with no specific requirements.
+    Both, features and requirements are intentionally denoted with string tags
+    with no specific requirements.
 
-    A feature is a high-level description of an application and its
-    environment. It is used to describe to the extensions what the
-    application is doing and what should be expected by an extension.
+    A feature is a high-level description of an application and its environment.
+    It is used to describe to the extensions what the application is doing and
+    what should be expected by an extension.
 
-    Features are specified by the application via the [init]
-    function. An extension may define a specific set of features that
-    it expects to be present and won't be loaded by application which
-    do not specify the expected features.
+    Features are specified by the application via the [init] function. An
+    extension may define a specific set of features that it expects to be
+    present and won't be loaded by application which do not specify the expected
+    features.
 
-    Some general examples of features are [user-interface],
-    [interactive], [toplevel].
+    Some general examples of features are [user-interface], [interactive],
+    [toplevel].
 
-    Another common use case of features is denoting an tag that is
-    specific to the given application or an organization, e.g.,
-    [my-verification-framework] or [cmu.edu], and specify them in
-    plugins to ensure that they are loaded only in the specified
-    environments, but not in more general.
+    Another common use case of features is denoting an tag that is specific to
+    the given application or an organization, e.g., [my-verification-framework]
+    or [cmu.edu], and specify them in plugins to ensure that they are loaded
+    only in the specified environments, but not in more general.
 
-    The more features an application specifies the more general it is,
-    i.e., more extensions will be available for it. The more features
-    an extension specifies, the less general it is, i.e., it could be
-    used in fewer applications.
+    The more features an application specifies the more general it is, i.e.,
+    more extensions will be available for it. The more features an extension
+    specifies, the less general it is, i.e., it could be used in fewer
+    applications.
 
-    The list of features known to the [bap] utility, could be obtained
-    by using the [bap list features] command.
+    The list of features known to the [bap] utility, could be obtained by using
+    the [bap list features] command.
 
     {3 Requirements}
 
-    The requirements are more fine granular descriptions of system
-    capabilities that are used to define system dependencies without
-    relying on concrete implementations. For example, if an application
-    needs to parse ELF files it may explicitly define this dependency
-    by adding the [elf] tag to the list of its requirements.
+    The requirements are more fine granular descriptions of system capabilities
+    that are used to define system dependencies without relying on concrete
+    implementations. For example, if an application needs to parse ELF files it
+    may explicitly define this dependency by adding the [elf] tag to the list of
+    its requirements.
 
-    By using requirements in this manner it is possible to build an
-    application that loads some minimal set of dependencies.
+    By using requirements in this manner it is possible to build an application
+    that loads some minimal set of dependencies.
 
     {3 Caching}
 
-    Requirements are also playing an important role in the caching
-    subsystem and in general leverage reproducibility of BAP
-    applications by enabling pure functional relationships between BAP
-    components.
+    Requirements are also playing an important role in the caching subsystem and
+    in general leverage reproducibility of BAP applications by enabling pure
+    functional relationships between BAP components.
 
-    Every BAP extension is evaluated in the context, which is captured
-    by a value of type [ctxt] that is passed to each extension
-    function. The context is an immutable value that fully describes
-    the set of configuration parameters, command line arguments, and
-    other descriptors of the environment in which the BAP subsystem is
-    evaluating.
+    Every BAP extension is evaluated in the context, which is captured by a
+    value of type [ctxt] that is passed to each extension function. The context
+    is an immutable value that fully describes the set of configuration
+    parameters, command line arguments, and other descriptors of the environment
+    in which the BAP subsystem is evaluating.
 
-    It is possible to reduce the context into its cryptographic
-    digest, which, in turn, could be used as key in some persistent
-    storage, which, useful for implementing caching. However,
-    computing a digest of the whole context could be overconservative,
-    since it may also capture variables that are irrelevant to a given
-    computation. For that reason, we provide a mechanism to refine the
-    context by specifying a set of tags that relate the computation to
-    the environment.
+    It is possible to reduce the context into its cryptographic digest, which,
+    in turn, could be used as key in some persistent storage, which, useful for
+    implementing caching. However, computing a digest of the whole context could
+    be overconservative, since it may also capture variables that are irrelevant
+    to a given computation. For that reason, we provide a mechanism to refine
+    the context by specifying a set of tags that relate the computation to the
+    environment.
 
-    For example, the disassembler command, provided by the
-    [disassemble.plugin] depends on a predefined set of features
-    provided by different plugins, namely, [disassembler], [lifter],
-    [symbolizer], [rooter], [reconstructor], [brancher], and
-    [loader][^1]. Therefore, it depends on extensions that provide
-    those features, and when parameters of those extensions change,
-    it is reflected by the context refinement that the disassemble
-    plugin is using to compute the key for storing the disassembled
-    program in the cache storage.
+    For example, the disassembler command, provided by the [disassemble.plugin]
+    depends on a predefined set of features provided by different plugins,
+    namely, [disassembler], [lifter], [symbolizer], [rooter], [reconstructor],
+    [brancher], and [loader][^1]. Therefore, it depends on extensions that
+    provide those features, and when parameters of those extensions change, it
+    is reflected by the context refinement that the disassemble plugin is using
+    to compute the key for storing the disassembled program in the cache
+    storage.
 
-    In other words, it is important to specify explicitly features of
-    your extensions, to ensure that any change in their configuration
-    is reflected and propagated to the components that may depend on
-    your extension.
+    In other words, it is important to specify explicitly features of your
+    extensions, to ensure that any change in their configuration is reflected
+    and propagated to the components that may depend on your extension.
 
-    Use the [bap list tags] command to list all semantics tags and
-    plugins that provide them.
+    Use the [bap list tags] command to list all semantics tags and plugins that
+    provide them.
 
-    [^1]: The list is not definitive and may change, consult the
-    plugin documentation for the exhaustive and up-to-date list.
-
+    [^1]: The list is not definitive and may change, consult the plugin
+    documentation for the exhaustive and up-to-date list.
 
     {2 The Command Line Interface}
 
-    The [Bap_main] library provides a few functions that could be used
-    to create composable command line interfaces. The final grammar
-    specification is build from pieces and is having the following
-    EBNF definition:
+    The [Bap_main] library provides a few functions that could be used to create
+    composable command line interfaces. The final grammar specification is build
+    from pieces and is having the following EBNF definition:
 
     {v
     G =
@@ -277,74 +256,78 @@
       | plugin1-grammar
       ...
       | pluginN-grammar
-  v}
+    v}
 
+    Each command can define its own syntax and use the full power of the command
+    line (including positional arguments and short keys) as long as it doesn't
+    introduce conflicts with the [common-options] grammar.
 
-    Each command can define its own syntax and use the full power of
-    the command line (including positional arguments and short keys)
-    as long as it doesn't introduce conflicts with the
-    [common-options] grammar.
+    The [common-options] grammar defines the syntax that is used to specify
+    plugin configuration parameters. Each plugin can register its own
+    parameters, but in a restricted way, e.g., no positional arguments, all
+    parameter names must be long and will be automatically prefixed with the
+    plugin name. Plugins configuration parameters form the configuration context
+    for each invocation of BAP. These parameters also do not need an access to
+    the command line, and could be specified via configuration files,
+    environment, etc.
 
-    The [common-options] grammar defines the syntax that is used to
-    specify plugin configuration parameters. Each plugin can register
-    its own parameters, but in a restricted way, e.g., no positional
-    arguments, all parameter names must be long and will be
-    automatically prefixed with the plugin name. Plugins configuration
-    parameters form the configuration context for each invocation of
-    BAP. These parameters also do not need an access to the command
-    line, and could be specified via configuration files, environment,
-    etc.
+    A couple of predefined rules are added to the [common-options] grammar.
+    First of all, for each registered [<plugin>] the ["--no-<plugin>"] option is
+    added, which if specified, will disable the plugin. A disabled plugin will
+    still contribute to the command line grammar, but the extensions which are
+    registered with it will not be loaded. Unless the extension is the command
+    itself, which will be still evaluated if selected on the command line.
 
-    A couple of predefined rules are added to the [common-options]
-    grammar. First of all, for each registered [<plugin>]  the
-    ["--no-<plugin>"] option is added, which if specified, will
-    disable the plugin. A disabled plugin will still contribute to
-    the command line grammar, but the extensions which are registered
-    with it will not be loaded. Unless the extension is the command
-    itself, which will be still evaluated if selected on the command
-    line.
+    Also, for each registered [<plugin>] an option [--<plugin>] will be added to
+    enable the backward compatibility with the old style of specifying passes.
 
-    Also, for each registered [<plugin>] an option [--<plugin>] will be
-    added to enable the backward compatibility with the old style of
-    specifying passes.
+    Another rule which is added on per plugin basis, is the [--help-<plugin>]
+    rule which will render a manual page for the given [<plugin>].
 
-    Another rule which is added on per plugin basis, is the
-    [--help-<plugin>] rule which will render a manual page for the
-    given [<plugin>].
+    The [-L] and [--logdir] options are preparsed on the command line and are
+    used to specify the plugins search path (which obviously should be specified
+    before we can load plugins) and the logging destination which we would like
+    to know as soon as possible.
 
-    The [-L] and [--logdir] options are preparsed on the command line
-    and are used to specify the plugins search path (which obviously
-    should be specified before we can load plugins) and the logging
-    destination which we would like to know as soon as possible.
+    The [--recipe] option is very special, as it changes the command line
+    itself. Every occurrence of the [--recipe] option will parse the provided
+    recipe, which will be evaluated to the list of arguments which will be
+    substituted instead of the specified [--recipe] option. See [bap recipes]
+    for more information about the recipes.
 
+    Finally, the common [--version] and [--help] options are added with an
+    expected semantics.
 
-    The [--recipe] option is very special, as it changes the command
-    line itself. Every occurrence of the [--recipe] option will parse
-    the provided recipe, which will be evaluated to the list of
-    arguments which will be substituted instead of the specified
-    [--recipe] option. See [bap recipes] for more information about
-    the recipes.
+    For the detailed description of the command line interface read the manual
+    page generated with [bap --help].
 
-    Finally, the common [--version] and [--help] options are added
-    with an expected semantics.
-
-    For the detailed description of the command line interface read
-    the manual page generated with [bap --help].
-
-    Note, the actual parser is less strict than the grammar and may
-    accepts inputs that are not recognized by the grammar.
-*)
+    Note, the actual parser is less strict than the grammar and may accepts
+    inputs that are not recognized by the grammar. *)
 
 open Bap_future.Std
 
-(** describes an error condition. *)
 type error = ..
+(** describes an error condition. *)
 
-
-(** captures the evaluation context. *)
 type ctxt
+(** captures the evaluation context. *)
 
-
+val init :
+  ?features:string list ->
+  ?requires:string list ->
+  ?library:string list ->
+  ?argv:string array ->
+  ?env:(string -> string option) ->
+  ?log:[ `Formatter of Format.formatter | `Dir of string ] ->
+  ?out:Format.formatter ->
+  ?err:Format.formatter ->
+  ?man:string ->
+  ?name:string ->
+  ?version:string ->
+  ?default:(ctxt -> (unit, error) result) ->
+  ?default_command:string ->
+  unit ->
+  (unit, error) result
 (** [init ()] initializes the BAP framework.
 
     Attention: function is only needed when BAP framework is
@@ -446,31 +429,18 @@ type ctxt
 
     @since 2.1.0.
 *)
-val init :
-  ?features:string list ->
-  ?requires:string list ->
-  ?library:string list ->
-  ?argv:string array ->
-  ?env:(string -> string option) ->
-  ?log:[`Formatter of Format.formatter | `Dir of string] ->
-  ?out:Format.formatter ->
-  ?err:Format.formatter ->
-  ?man:string ->
-  ?name:string ->
-  ?version:string ->
-  ?default:(ctxt -> (unit,error) result) ->
-  ?default_command:string ->
-  unit -> (unit, error) result
 
-
-(** Writing and declaring BAP extensions.  *)
+(** Writing and declaring BAP extensions. *)
 module Extension : sig
-
-
-  (** defines a data type for a parameter.  *)
   type 'a typ
+  (** defines a data type for a parameter. *)
 
-
+  val declare :
+    ?features:string list ->
+    ?provides:string list ->
+    ?doc:string ->
+    (ctxt -> (unit, error) result) ->
+    unit
   (** [declare extension] declares the [extension] function.
 
       The function is run when one of the features [provided] by the
@@ -509,14 +479,8 @@ module Extension : sig
       full manual written in the markdown syntax. See the
       corresponding [man] parameter of the [Bap_main.init] function.
   *)
-  val declare :
-    ?features:string list ->
-    ?provides:string list ->
-    ?doc:string ->
-    (ctxt -> (unit,error) result) -> unit
 
-
-
+  val documentation : string -> unit
   (** [documentation s] specifies plugin documentation.
 
       A non-declarative way of specifying documentation. Each
@@ -528,36 +492,41 @@ module Extension : sig
       !{Bap_main.init} functions for more information on the accepted
       formats.
   *)
-  val documentation : string -> unit
 
   (** Interface for specifying commands.*)
   module Command : sig
-
+    type ('f, 'r) t
     (** description of the command line syntax.
 
-        The ['f] parameter is the type of function that is evaluated
-        when the command is selected.
+        The ['f] parameter is the type of function that is evaluated when the
+        command is selected.
 
-        The ['r] is the value returned by ['f] (and so ['r] is always
-        included in ['f].
+        The ['r] is the value returned by ['f] (and so ['r] is always included
+        in ['f].
 
         For example,
         {[
           type s =
-            (int -> ctxt -> (unit,error) result,
-             ctxt -> (unit,error) result) t
+            ( int -> ctxt -> (unit, error) result,
+              ctxt -> (unit, error) result )
+            t
         ]}
 
-        is a type of a function that takes two input arguments of type
-        [int] and [ctxt] respectively, and must evaluate to a value of type
-        [unit,error] result
-    *)
-    type ('f,'r) t
+        is a type of a function that takes two input arguments of type [int] and
+        [ctxt] respectively, and must evaluate to a value of type [unit,error]
+        result *)
 
-    (** ['a param] command line parameter represented with the OCaml
-        value of type ['a].  *)
     type 'a param
+    (** ['a param] command line parameter represented with the OCaml value of
+        type ['a]. *)
 
+    val declare :
+      ?doc:string ->
+      ?requires:string list ->
+      string ->
+      ('f, ctxt -> (unit, error) result) t ->
+      'f ->
+      unit
     (** [declare grammar name command] declares a [command].
 
         Declares to BAP that a command with the given [name] should be
@@ -639,63 +608,55 @@ module Extension : sig
         the configuration parameters of extensions on which the
         command depends didn't change.
     *)
-    val declare :
-      ?doc:string ->
-      ?requires:string list -> string ->
-      ('f,ctxt -> (unit,error) result) t -> 'f -> unit
 
-
-    (** [args] is the empty grammar.
-        Useful to define commands that do not take arguments or
-        as the initial grammar which is later extended with parameters
-        using the [$] operator (see below).
-    *)
     val args : ('a, 'a) t
+    (** [args] is the empty grammar. Useful to define commands that do not take
+        arguments or as the initial grammar which is later extended with
+        parameters using the [$] operator (see below). *)
 
-
+    val ( $ ) : ('a, 'b -> 'c) t -> 'b param -> ('a, 'c) t
     (** [args t $ t'] extends the grammar specification [t] with [t'].*)
-    val ($) : ('a,'b -> 'c) t -> 'b param -> ('a,'c) t
 
-
+    val argument : ?doc:string -> 'a typ -> 'a param
     (** [argument t] declares a positional argument of type [t].
 
         The grammar of [args $ term $ argument t]:
         {v
           G = term, [t] | [t], term
-        v}
+        v} *)
 
-    *)
-    val argument : ?doc:string -> 'a typ -> 'a param
-
-
-    (** [arguments t] declares an infinite number of positional
-        arguments of type [t].
+    val arguments : ?doc:string -> 'a typ -> 'a list param
+    (** [arguments t] declares an infinite number of positional arguments of
+        type [t].
 
         The grammar of [args $ term $ arguments t]:
         {v
           G = term, {t} | {t}, term
         v}
 
-
-        Note, no positional arguments could be appended to the command
-        line specification after this one, e.g.,  the following is not
-        well formed:
+        Note, no positional arguments could be appended to the command line
+        specification after this one, e.g., the following is not well formed:
 
         {[
           (* Warning! Ill-formed code *)
 
           let inputs = Command.arguments Type.string
           let output = Command.parameter Type.string "output"
+
           let () =
-            Command.(declare "copy" (args $inputs $output)) @@
-            fun output inputs ->
+            Command.(declare "copy" (args $ inputs $ output))
+            @@ fun output inputs ->
             printf "copying %s inputs to %s\n"
-              (String.concat ~sep:" " inputs) output
-        ]}
-    *)
-    val arguments : ?doc:string -> 'a typ -> 'a list param
+              (String.concat ~sep:" " inputs)
+              output
+        ]} *)
 
-
+    val switch :
+      ?doc:('a -> string) ->
+      ?aliases:('a -> string list) ->
+      'a list ->
+      ('a -> string) ->
+      'a option param
     (** [switch values name] declares a switch-type parameter.
 
         The grammar of {args $ term $ switch values name}:
@@ -719,14 +680,13 @@ module Extension : sig
         line keys, i.e., non-empty strings that do not contain
         whitespaces.
     *)
-    val switch :
+
+    val switches :
       ?doc:('a -> string) ->
       ?aliases:('a -> string list) ->
       'a list ->
       ('a -> string) ->
-      'a option param
-
-
+      'a list param
     (** [switches values name] is multiple choice switch-type parameter.
 
         The grammar of [args $ term $ switches values name] is
@@ -735,33 +695,31 @@ module Extension : sig
           G' = {"--<name v0>" | .. | "--<name vN>"}
         v}
 
-        where [v1] .. [vN] are elements of [values], and [<name vK>]
-        is the result of application of the [name] function to the
-        [K]th element of the [values] list.
+        where [v1] .. [vN] are elements of [values], and [<name vK>] is the
+        result of application of the [name] function to the [K]th element of the
+        [values] list.
 
-        The switch-type parameters enables a selection from a list of
-        choices, however unlike it [switch] counterpart, the selector
-        can occur more than once on the command line.
-        For every occurrence [--<name vK>] on the command line, the
-        corresponding [vK] value will be added to the list that will
-        be passed as an argument to the command. The order of elements
-        in the list will match with the order of selectors on the
-        command line.
+        The switch-type parameters enables a selection from a list of choices,
+        however unlike it [switch] counterpart, the selector can occur more than
+        once on the command line. For every occurrence [--<name vK>] on the
+        command line, the corresponding [vK] value will be added to the list
+        that will be passed as an argument to the command. The order of elements
+        in the list will match with the order of selectors on the command line.
 
-        The [name] function could be non-injective, so that several
-        names can correspond to the same value in the choice list.
+        The [name] function could be non-injective, so that several names can
+        correspond to the same value in the choice list.
 
-        The [name] function shall return syntactically valid command
-        line keys, i.e., non-empty strings that do not contain
-        whitespaces.
-    *)
-    val switches :
-      ?doc:('a -> string) ->
-      ?aliases:('a -> string list) ->
-      'a list ->
-      ('a -> string) ->
-      'a list param
+        The [name] function shall return syntactically valid command line keys,
+        i.e., non-empty strings that do not contain whitespaces. *)
 
+    val dictionary :
+      ?doc:('k -> string) ->
+      ?as_flag:('k -> 'd) ->
+      ?aliases:('k -> string list) ->
+      'k list ->
+      'd typ ->
+      ('k -> string) ->
+      ('k * 'd) list param
     (** [dictionary keys t name] declares a dictionary-style parameter.
 
         The grammar of [args $ term $ dictionary keys t name] is
@@ -813,15 +771,14 @@ module Extension : sig
         @parameter doc if specified then [doc k] will be the
         documentation string for the [--<key k>] parameter.
     *)
-    val dictionary :
-      ?doc:('k -> string) ->
-      ?as_flag:('k -> 'd) ->
-      ?aliases:('k -> string list) ->
-      'k list ->
-      'd typ ->
-      ('k -> string) ->
-      ('k * 'd) list param
 
+    val parameter :
+      ?doc:string ->
+      ?as_flag:'a ->
+      ?aliases:string list ->
+      'a typ ->
+      string ->
+      'a param
     (** [parameter t name] declares a generic command line parameter.
 
         The grammar of [args $ term $ parameter t name]
@@ -867,15 +824,14 @@ module Extension : sig
         parameter.
 
     *)
-    val parameter :
+
+    val parameters :
       ?doc:string ->
       ?as_flag:'a ->
       ?aliases:string list ->
       'a typ ->
-      string -> 'a param
-
-
-
+      string ->
+      'a list param
     (** [parameters] declares a generic command line parameter.
 
         The grammar of [args $ term $ parameters t name]
@@ -885,26 +841,18 @@ module Extension : sig
         v}
 
         This command line parameter behaves the same as its [parameter]
-        counterpart, but it could be specified more than once on the
-        command line. For each occurrence of [--<name>=v], [v] will be
-        added to the list (in the order of occurrence), which will be
-        passed as an argument to the command.
+        counterpart, but it could be specified more than once on the command
+        line. For each occurrence of [--<name>=v], [v] will be added to the list
+        (in the order of occurrence), which will be passed as an argument to the
+        command.
 
-        See the {!parameter} function for more details.
-    *)
-    val parameters :
-      ?doc:string ->
-      ?as_flag:'a ->
-      ?aliases:string list ->
-      'a typ ->
-      string ->
-      'a list param
+        See the {!parameter} function for more details. *)
 
-
+    val flag : ?doc:string -> ?aliases:string list -> string -> bool param
     (** [flag name] declares a flag-style parameter.
 
-        The flag-style parameter is like a normal [parameter], except
-        that it is not possible to specify its value.
+        The flag-style parameter is like a normal [parameter], except that it is
+        not possible to specify its value.
 
         The grammar of [args $ term $ flag name] is
 
@@ -913,21 +861,13 @@ module Extension : sig
           G' = ["--<name>"]
         v}
 
-        The flag could be specified at most once on the command line,
-        and if specified then the [true] value will be passed to the
-        command.
+        The flag could be specified at most once on the command line, and if
+        specified then the [true] value will be passed to the command.
 
-        The rest of parameters of the [flag] function have the same
-        meaning as described in the {!parameter} function.
-    *)
-    val flag :
-      ?doc:string ->
-      ?aliases:string list ->
-      string ->
-      bool param
+        The rest of parameters of the [flag] function have the same meaning as
+        described in the {!parameter} function. *)
 
-
-
+    val flags : ?doc:string -> ?aliases:string list -> string -> int param
     (** [flags] declares a muti-occurring flag-style parameter.
 
         The grammar of [args $ term $ flag name] is
@@ -937,55 +877,48 @@ module Extension : sig
           G' = {"--<name>"}
         v}
 
-        Unlike it {!flag} counterparts parameters declared as [flags]
-        make occur more than once on the command line. The number of
-        occurrences will be passed to the command.
-    *)
-    val flags :
-      ?doc:string ->
-      ?aliases:string list ->
-      string ->
-      int param
+        Unlike it {!flag} counterparts parameters declared as [flags] make occur
+        more than once on the command line. The number of occurrences will be
+        passed to the command. *)
   end
-
 
   (** Configuration Parameters.
 
-      Use this module to declare and use configuration parameters for
-      your plugins. Although configuration parameters could be
-      specified via the command line, they are different from the
-      corresponding parameters of commands in several ways:
+      Use this module to declare and use configuration parameters for your
+      plugins. Although configuration parameters could be specified via the
+      command line, they are different from the corresponding parameters of
+      commands in several ways:
 
-      - configuration parameters could be still passed even when there
-        is no command line interface (via configuration files and
-        environment);
+      - configuration parameters could be still passed even when there is no
+        command line interface (via configuration files and environment);
 
-      - they are specific to plugins and are always prefixed with the
-        plugin name.
-  *)
+      - they are specific to plugins and are always prefixed with the plugin
+        name. *)
   module Configuration : sig
-
-    (** a configuration parameter  *)
     type 'a param
+    (** a configuration parameter *)
 
-
-    (** the current configuration.  *)
     type t = ctxt
+    (** the current configuration. *)
 
-    (** a piece of information about a system component. *)
     type info
+    (** a piece of information about a system component. *)
 
-
+    val get : ctxt -> 'a param -> 'a
     (** [get ctxt parameter] gets the value of the [parameter].
 
         Accesses the value of the previously defined [parameter].
 
-        The [Extension.Syntax] module also provides an infix version
-        of this function under the [-->] name.
-    *)
-    val get : ctxt -> 'a param -> 'a
+        The [Extension.Syntax] module also provides an infix version of this
+        function under the [-->] name. *)
 
-
+    val parameter :
+      ?doc:string ->
+      ?as_flag:'a ->
+      ?aliases:string list ->
+      'a typ ->
+      string ->
+      'a param
     (** [parameter t name] declares a configuration parameter.
 
         This declaration extends the [common-options] grammar by
@@ -1062,13 +995,14 @@ module Extension : sig
             printf "Will dive to depth %d\n" (ctxt-->depth)
         ]}
     *)
-    val parameter :
+
+    val parameters :
       ?doc:string ->
       ?as_flag:'a ->
       ?aliases:string list ->
-      'a typ -> string -> 'a param
-
-
+      'a typ ->
+      string ->
+      'a list param
     (** [parameters t name] declares a multi-occurring parameter.
 
         This declaration extends the [common-options] grammar by
@@ -1093,13 +1027,8 @@ module Extension : sig
         The rest of the parameters have the same meaning as in
         the {!parameter} function.
     *)
-    val parameters :
-      ?doc:string ->
-      ?as_flag:'a ->
-      ?aliases:string list ->
-      'a typ -> string -> 'a list param
 
-
+    val flag : ?doc:string -> ?aliases:string list -> string -> bool param
     (** [flag name] declares a parameter that can be used as a flag.
 
         This is a specialization of a more general {!parameter}
@@ -1122,82 +1051,65 @@ module Extension : sig
         line, or in the environment, then [get ctxt p] will evaluate
         to [true], where [p] is the declared parameter.
     *)
-    val flag :
-      ?doc:string ->
-      ?aliases:string list ->
-      string -> bool param
 
-
-    (** [determined p] is a future that becomes determined when
-        context is ready.  *)
     val determined : 'a param -> 'a future
+    (** [determined p] is a future that becomes determined when context is
+        ready. *)
 
-
-    (** [version] is the preconfigured application version.*)
     val version : string
+    (** [version] is the preconfigured application version.*)
 
-    (** [build_id] if bap is built from dev repository, contains
-        the short SHA of the git commit.
-
-        @since 2.6.0   *)
     val build_id : string
+    (** [build_id] if bap is built from dev repository, contains the short SHA
+        of the git commit.
 
+        @since 2.6.0 *)
 
+    val datadir : string
     (** [datadir] a directory for user-specific BAP readonly data.
 
-        The folder is either $XDG_DATA_HOME/bap or
-        $HOME/.local/share/bap if the former is not set.
+        The folder is either $XDG_DATA_HOME/bap or $HOME/.local/share/bap if the
+        former is not set.
 
-        If $HOME is also not set then it defaults just to the
-        current workding directory.
+        If $HOME is also not set then it defaults just to the current workding
+        directory.
 
-        Plugins are encouraged to use this folder as the base folder
-        and store their information in subfolders of it.
+        Plugins are encouraged to use this folder as the base folder and store
+        their information in subfolders of it.
 
-        before 2.3.0 the value of this parameter was equal to [sysconfdir]
-    *)
-    val datadir : string
+        before 2.3.0 the value of this parameter was equal to [sysconfdir] *)
 
-
-
+    val cachedir : string
     (** [cachedir] folder for user-specific non-essential data files.
 
-        It is either $XDG_CACHE_HOME/bap or $HOME/.cache/bap or
-        $TMP/bap/cache, depending on whether the corresponding
-        variables are set.
+        It is either $XDG_CACHE_HOME/bap or $HOME/.cache/bap or $TMP/bap/cache,
+        depending on whether the corresponding variables are set.
 
-        @since 2.3.0
-    *)
-    val cachedir : string
+        @since 2.3.0 *)
 
-
+    val sysdatadir : string
     (** [sysdatadir] a directory for system-specific BAP readonly data
 
-        @since 2.3.0 before that version it was named [datadir]  *)
-    val sysdatadir : string
+        @since 2.3.0 before that version it was named [datadir] *)
 
-    (** [libdir] a directory for BAP object files,
-        libraries, and internal binaries that are not intended to be
-        executed directly.  *)
     val libdir : string
+    (** [libdir] a directory for BAP object files, libraries, and internal
+        binaries that are not intended to be executed directly. *)
 
-
-    (** [confdir] a directory for BAP specific configuration files *)
     val confdir : string
+    (** [confdir] a directory for BAP specific configuration files *)
 
-
+    val bindir : string
     (** [bindir] the preconfigured directory for binaries.
 
-        @since 2.6.0  *)
-    val bindir : string
+        @since 2.6.0 *)
 
-
+    val plugindir : string
     (** [plugindir] the preconfigured path where to store BAP plugins.
 
         @since 2.6.0 *)
-    val plugindir : string
 
-
+    val refine : ?provides:string list -> ?exclude:string list -> ctxt -> ctxt
     (** [refine ~provides ~exclude ctxt] refines the context.
 
         Refine the context by excluding from it all parameters of the
@@ -1210,94 +1122,83 @@ module Extension : sig
         @parameter exclude (defaults to the empty set) the set of
         features that should be excluded.
     *)
-    val refine :
-      ?provides:string list ->
-      ?exclude:string list ->
-      ctxt -> ctxt
 
+    val plugins : ctxt -> info list
     (** [plugins ctxt] enumerates all enabled plugins.
 
-        If [provides] is specified, then enumerates only plugins
-        than provide at least one of specified feature.
+        If [provides] is specified, then enumerates only plugins than provide at
+        least one of specified feature.
 
-        If [exclude] is specified, then exclude from the list
-        plugins, that has one of the feature specified in the
-        [exclude] list.
+        If [exclude] is specified, then exclude from the list plugins, that has
+        one of the feature specified in the [exclude] list. *)
 
-    *)
-    val plugins : ctxt -> info list
-
-
+    val commands : ctxt -> info list
     (** [commands ctxt] enumerates all available commands.
 
-        If [features] and/or [exclude] are specified, then they have
-        the same meaning as in {!plugins ~features ~exclude}.*)
-    val commands : ctxt -> info list
+        If [features] and/or [exclude] are specified, then they have the same
+        meaning as in {!plugins ~features ~exclude}.*)
 
-    (** [name info] returns the name of a plugin or command. *)
     val info_name : info -> string
+    (** [name info] returns the name of a plugin or command. *)
 
-    (** [doc info] returns the short documentation.  *)
     val info_doc : info -> string
+    (** [doc info] returns the short documentation. *)
 
+    val digest : ctxt -> string
     (** [digest context] returns the [context] digest.
 
-        The digest is a 128-bit MD5 sum of all options of
-        all plugins that were selected in the context and match
-        the filters specified by the [features] and [exclude]
-        parameters.
-
-        See the {!plugins} function for the description of the
+        The digest is a 128-bit MD5 sum of all options of all plugins that were
+        selected in the context and match the filters specified by the
         [features] and [exclude] parameters.
 
-        Note: the digest doesn't include the command options and
-        arguments only plugins configuration options.
-    *)
-    val digest : ctxt -> string
+        See the {!plugins} function for the description of the [features] and
+        [exclude] parameters.
+
+        Note: the digest doesn't include the command options and arguments only
+        plugins configuration options. *)
 
     val features : ctxt -> string list
 
-    (** prints the context  *)
     val pp : Format.formatter -> ctxt -> unit
+    (** prints the context *)
   end
-
 
   (** A lightweight syntax for accessing configuration parameters.
 
-      Once this module is opened it is possible to access the
-      parameter value using the infix notation, e.g., [ctxt-->arch].
-  *)
+      Once this module is opened it is possible to access the parameter value
+      using the infix notation, e.g., [ctxt-->arch]. *)
   module Syntax : sig
-    val (-->) : ctxt -> 'a Configuration.param -> 'a
+    val ( --> ) : ctxt -> 'a Configuration.param -> 'a
   end
-
 
   (** Data types for parameters.
 
-      A data type defines the validation, parsing, and textual
-      representation of data used for command and
-      configuration parameters.
+      A data type defines the validation, parsing, and textual representation of
+      data used for command and configuration parameters.
 
-      Data types are not declarative, but structural, i.e., they define
-      a set of rules which describe the set of possible values and
-      mapping of those values to their OCaml representation.
+      Data types are not declarative, but structural, i.e., they define a set of
+      rules which describe the set of possible values and mapping of those
+      values to their OCaml representation.
 
-      Given that the textual representation of data could be non
-      structural itself, e.g., filenames do not define themselves but
-      act as a reference to some other data, it is also important to
-      correctly define the equality operator. We use the digest
-      function, that computes an md5 hash of the datum that
-      describes how it should be compared to other data of the same
-      type. This digests are approximations, which guarantee, that
-      data with equal digests are equal (modulo probability of md5
-      hash collision), but not always the vice verse (since
-      it is not always possible or feasible to compute the complete
-      digest, cf., digest of the [/dev] folder).
-  *)
+      Given that the textual representation of data could be non structural
+      itself, e.g., filenames do not define themselves but act as a reference to
+      some other data, it is also important to correctly define the equality
+      operator. We use the digest function, that computes an md5 hash of the
+      datum that describes how it should be compared to other data of the same
+      type. This digests are approximations, which guarantee, that data with
+      equal digests are equal (modulo probability of md5 hash collision), but
+      not always the vice verse (since it is not always possible or feasible to
+      compute the complete digest, cf., digest of the [/dev] folder). *)
   module Type : sig
     type 'a t = 'a typ
 
-
+    val define :
+      ?name:string ->
+      ?digest:('a -> string) ->
+      parse:(string -> 'a) ->
+      print:('a -> string) ->
+      'a ->
+      'a t
     (** [define ~parse ~print default] defines a data type.
 
         The [print x] is the textual representation of the value
@@ -1321,243 +1222,195 @@ module Extension : sig
         @parameter name is the variable name which is used to
         reference to elements of the type [t]. (defaults to ["VAL"]).
     *)
-    val define :
-      ?name:string ->
-      ?digest:('a -> string) ->
-      parse:(string -> 'a) ->
-      print:('a -> string) -> 'a -> 'a t
 
-
-
-    (** [refine t valid] narrows the set of [t], to those that [valid].
-        The [valid] function shall raise the [Invalid_arg] exception,
-        for all values that are not members of the newly defined data type.
-    *)
     val refine : 'a t -> ('a -> unit) -> 'a t
+    (** [refine t valid] narrows the set of [t], to those that [valid]. The
+        [valid] function shall raise the [Invalid_arg] exception, for all values
+        that are not members of the newly defined data type. *)
 
-
-    (** [renam t var] denotes elements of [t] with the new [var].  *)
     val rename : 'a t -> string -> 'a t
+    (** [renam t var] denotes elements of [t] with the new [var]. *)
 
-
-    (** [digest t x] is the digest of [x].  *)
     val digest : 'a t -> 'a -> string
+    (** [digest t x] is the digest of [x]. *)
 
+    val ( =? ) : 'a t -> 'a -> 'a t
     (** [t =? x] defines a new type with different default.
 
-        The new type has the same definition as [t] except the default
-        value is [x].
-    *)
-    val (=?) : 'a t -> 'a -> 'a t
+        The new type has the same definition as [t] except the default value is
+        [x]. *)
 
-
+    val ( |= ) : 'a t -> ('a -> unit) -> 'a t
     (** [t |? guard] is [refine t guard] *)
-    val (|=) : 'a t -> ('a -> unit) -> 'a t
 
+    val ( %: ) : string -> 'a t -> 'a t
     (** [name %: t] is [rename t name].
 
-        Note, operators [(=?)], [|?], and [(%:)] are designed to be
-        used together for easy definitions of new types, e.g.,
+        Note, operators [(=?)], [|?], and [(%:)] are designed to be used
+        together for easy definitions of new types, e.g.,
 
         {[
           let arch = Type.("code" %: arch_t =? `x86 |= only_x86)
-        ]}
+        ]} *)
 
-    *)
-    val (%:) : string -> 'a t -> 'a t
-
-
-    (** [print t x] is the textual representation of [x].  *)
     val print : 'a t -> 'a -> string
+    (** [print t x] is the textual representation of [x]. *)
 
-
+    val parse : 'a t -> string -> 'a
     (** [parse t s] is the OCaml value representing [s].
 
         Of those [s] which are not valid, raises the [Invalid_arg] exception.*)
-    val parse : 'a t -> string -> 'a
 
-
-    (** [name t] is the name of the var that ranges of [t].  *)
     val name : 'a t -> string
+    (** [name t] is the name of the var that ranges of [t]. *)
 
-
-    (** [default t] is the default value of [t].  *)
     val default : 'a t -> 'a
+    (** [default t] is the default value of [t]. *)
 
-    (** {3 Predefined data types}  *)
+    (** {3 Predefined data types} *)
 
-    (** [bool] is ["true" | "false"]  *)
     val bool : bool t
+    (** [bool] is ["true" | "false"] *)
 
-
-    (** [char] is a single character.  *)
     val char : char t
+    (** [char] is a single character. *)
 
+    val int : int t
     (** [int] is a sequence of digits.
 
-        Common OCaml syntax is supported, with binary, decimal,
-        and hexadecimal literals.
-    *)
-    val int : int t
+        Common OCaml syntax is supported, with binary, decimal, and hexadecimal
+        literals. *)
 
-
+    val nativeint : nativeint t
     (** [nativeint] is a sequence of digit.
 
-        This type uses processor-native integer as OCaml representation so it
-        is one bit wider than the [int] type.
-    *)
-    val nativeint : nativeint t
+        This type uses processor-native integer as OCaml representation so it is
+        one bit wider than the [int] type. *)
 
-
-    (** [int32] is a sequence of digits. *)
     val int32 : int32 t
+    (** [int32] is a sequence of digits. *)
 
-    (** [int64] is a sequence of digits. *)
     val int64 : int64 t
+    (** [int64] is a sequence of digits. *)
 
-    (** [float] is a floating point number. *)
     val float : float t
+    (** [float] is a floating point number. *)
 
-
+    val string : string t
     (** [string] is a sequence of bytes.
 
-        When the sequence contains whitespaces, delimit the whole
-        sequence with double or single quotes.*)
-    val string : string t
+        When the sequence contains whitespaces, delimit the whole sequence with
+        double or single quotes.*)
 
-
-    (** [some t] extends [t] with an empty string. *)
     val some : 'a t -> 'a option t
+    (** [some t] extends [t] with an empty string. *)
 
-
+    val enum : (string * 'a) list -> 'a t
     (** [enum repr] defines a type from the given representation.
 
-        Defines a type with such [print] and [parse], that for each
-        pair [(s,v)] in [repr], [print v = s] and [parse s = v].
+        Defines a type with such [print] and [parse], that for each pair [(s,v)]
+        in [repr], [print v = s] and [parse s = v].
 
         It is a configuration error, when [repr] is empty.
 
         If [repr] has repretitive keys, i.e., for the same textual
-        representation there are different values, then the result is
-        undefined.
+        representation there are different values, then the result is undefined.
     *)
-    val enum : (string * 'a) list -> 'a t
 
-
+    val path : string t
     (** [path] denotes a file path.
 
-        The path is suitable for denoting output paths and its digest
-        is the digest of the characters, which constitute the path.
-    *)
-    val path : string t
+        The path is suitable for denoting output paths and its digest is the
+        digest of the characters, which constitute the path. *)
 
-
+    val file : string t
     (** [file] the name of an input file or directory.
 
-        The file denoted by the name must exist and must be
-        accessible.
+        The file denoted by the name must exist and must be accessible.
 
         {3 Digesting paths}
 
-        The following rules describe how the digest of the path is
-        computed. It is assumed that the [file] type denotes the input
-        file, therefore the contents that is referenced by the path is
-        approximately digested. For the output destinations the [path]
-        type is more suitable.
+        The following rules describe how the digest of the path is computed. It
+        is assumed that the [file] type denotes the input file, therefore the
+        contents that is referenced by the path is approximately digested. For
+        the output destinations the [path] type is more suitable.
 
         1. If the name is a symbolic link then the digest of the link
         destination is computed.
 
-        2. If the name references to a regular file then the [digest]
-        of the file is the digest of its contents and the name itself
-        doesn't affect the digest value.
+        2. If the name references to a regular file then the [digest] of the
+        file is the digest of its contents and the name itself doesn't affect
+        the digest value.
 
-        3. If the name referenced to a directory, then a recursive
-        digest is computed, such that:
-        - if the directory contains a small number of regular files
-            and directories (less than 4k), then a cummulative digest
-            of its content built from all constituting path names and
-            modification times is computed;
-        - otherwise (if the directory is too large or contains non
-            regular files, e.g., sockets, fifo, devices), then a fresh
-            new random digest is created from the directory name and
-            the current time.
-    *)
-    val file : string t
+        3. If the name referenced to a directory, then a recursive digest is
+        computed, such that:
+        - if the directory contains a small number of regular files and
+          directories (less than 4k), then a cummulative digest of its content
+          built from all constituting path names and modification times is
+          computed;
+        - otherwise (if the directory is too large or contains non regular
+          files, e.g., sockets, fifo, devices), then a fresh new random digest
+          is created from the directory name and the current time. *)
 
-
+    val dir : string t
     (** [dir] denotes a file which must be a directory.
 
-        The directory denoted by the name must exist. See the [file]
-        type for more information about computing the digest.
-    *)
-    val dir : string t
+        The directory denoted by the name must exist. See the [file] type for
+        more information about computing the digest. *)
 
+    val non_dir_file : string t
     (** [dir] denotes a file which must not be a directory.
 
-        The directory denoted by the name must exist. See the [file]
-        type for more information about computing the digest.
-    *)
-    val non_dir_file : string t
+        The directory denoted by the name must exist. See the [file] type for
+        more information about computing the digest. *)
 
-
-    (** [list ~sep t] is a list of [t] elements, separated with [sep].   *)
     val list : ?sep:char -> 'a t -> 'a list t
+    (** [list ~sep t] is a list of [t] elements, separated with [sep]. *)
 
-
+    val array : ?sep:char -> 'a t -> 'a array t
     (** [array ~sep t] is an array of [t] elements, separated with [sep].
         @parameter sep defaults to [','].
     *)
-    val array : ?sep:char -> 'a t -> 'a array t
 
+    val pair : ?sep:char -> 'a t -> 'b t -> ('a * 'b) t
     (** [pair ~sep t1 t2] is a pair [t1] and [t2], separated with [sep].
 
         @parameter sep defaults to [',']. *)
-    val pair : ?sep:char -> 'a t -> 'b t -> ('a * 'b) t
 
+    val t2 : ?sep:char -> 'a t -> 'b t -> ('a * 'b) t
     (** [t2 ~sep t1 t2] is a pair [t1] and [t2], separated with [sep].
 
         @parameter sep defaults to [','].
     *)
-    val t2 : ?sep:char -> 'a t -> 'b t -> ('a * 'b) t
 
-
+    val t3 : ?sep:char -> 'a t -> 'b t -> 'c t -> ('a * 'b * 'c) t
     (** [t3 ~sep t1 t2 t3] is ([t1],[t2],[t3]), separated with [sep].
         @parameter sep defaults to [',']. *)
-    val t3 : ?sep:char -> 'a t -> 'b t -> 'c t -> ('a * 'b * 'c) t
 
+    val t4 : ?sep:char -> 'a t -> 'b t -> 'c t -> 'd t -> ('a * 'b * 'c * 'd) t
     (** [t4 ~sep t1 t2 t3 t4] is ([t1],[t2],[t3],[t4), separated with [sep].
         @parameter sep defaults to [',']. *)
-    val t4 : ?sep:char -> 'a t -> 'b t -> 'c t -> 'd t -> ('a * 'b * 'c * 'd) t
   end
 
-
-  (** An extensible set of possible errors  *)
+  (** An extensible set of possible errors *)
   module Error : sig
     type t = error = ..
-
-
     type t += Configuration
-
     type t += Invalid of string
-
     type t += Exit_requested of int
-
     type t += Unknown_plugin of string
-
     type t += Bug of exn * string
 
-
-    (** [pp ppf err] outputs a human readable description of [err]  *)
     val pp : Format.formatter -> t -> unit
+    (** [pp ppf err] outputs a human readable description of [err] *)
 
-    (** [register_printer to_string] registers a printer for a subset
-        of the errors. *)
     val register_printer : (t -> string option) -> unit
+    (** [register_printer to_string] registers a printer for a subset of the
+        errors. *)
   end
 end
 
-
+module Loggers = Bap_main_event.Log.Create
 (** Use this module to insert logging functions to your scope.
 
     E.g.,
@@ -1571,6 +1424,4 @@ end
         ...
     ]}
 
-    See the {!Bap_main_event.Log.Create} for more information.
-*)
-module Loggers = Bap_main_event.Log.Create
+    See the {!Bap_main_event.Log.Create} for more information. *)

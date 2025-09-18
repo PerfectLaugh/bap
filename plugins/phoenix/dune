@@ -1,18 +1,13 @@
 (library
  (name bap_phoenix_plugin)
  (public_name bap-phoenix.plugin)
- (preprocess (pps ppx_bap))
- (libraries
-   bap
-   core
-   ezjsonm
-   graphlib
-   ocamlgraph
-   regular
-   text-tags))
+ (preprocess
+  (pps ppx_bap))
+ (libraries bap core ezjsonm graphlib ocamlgraph regular text-tags))
 
 (plugin
  (name phoenix)
  (package bap-phoenix)
  (libraries bap-phoenix.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

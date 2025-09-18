@@ -1,11 +1,13 @@
 (library
  (name bap_emit_ida_script_plugin)
  (public_name bap-ida-plugin.plugin)
- (preprocess (pps ppx_bap))
+ (preprocess
+  (pps ppx_bap))
  (libraries bap core regular))
 
 (plugin
  (name emit-ida-script)
  (package bap-ida-plugin)
  (libraries bap-ida-plugin.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

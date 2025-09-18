@@ -1,6 +1,7 @@
 (library
-  (name knowledge)
-  (public_name bap-knowledge)
-  (wrapped false)
-  (preprocess (pps ppx_bap))
-  (libraries core core_unix monads))
+ (name knowledge)
+ (public_name bap-knowledge)
+ (wrapped false)
+ (preprocess
+  (pps ppx_bap))
+ (libraries core core_unix monads))

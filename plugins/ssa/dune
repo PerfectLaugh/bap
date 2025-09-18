@@ -7,4 +7,5 @@
  (name ssa)
  (package bap-ssa)
  (libraries bap-ssa.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

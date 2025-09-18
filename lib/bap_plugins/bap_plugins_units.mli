@@ -1,3 +1,3 @@
-(** Internal module.  *)
+(** Internal module. *)
 
-module Make() : Bap_plugins_units_intf.S
+module Make () : Bap_plugins_units_intf.S

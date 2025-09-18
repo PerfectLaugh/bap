@@ -1,12 +1,12 @@
-(** Extends [exp] interface.  *)
 open Core
+(** Extends [exp] interface. *)
+
 open Bap_core_theory
 open Regular.Std
 open Bap_knowledge
 open Bap_common_types
 open Bap_bil
 open Format
-
 include Regular.S with type t := exp
 
 module Cast : sig
@@ -30,7 +30,7 @@ module Binop : sig
   val rshift : binop
   val arshift : binop
   val bit_and : binop
-  val bit_or  : binop
+  val bit_or : binop
   val bit_xor : binop
   val eq : binop
   val neq : binop
@@ -69,39 +69,41 @@ module Exp : sig
 end
 
 module Infix : sig
+  val ( + ) : exp -> exp -> exp
   (** Arithmetic operations *)
-  val ( + )   : exp -> exp -> exp
-  val ( - )   : exp -> exp -> exp
-  val ( * )   : exp -> exp -> exp
-  val ( / )   : exp -> exp -> exp
-  val ( /$ )  : exp -> exp -> exp
-  val ( mod ) : exp -> exp -> exp
-  val ( %$ )  : exp -> exp -> exp
 
-  (** Bit operations *)
+  val ( - ) : exp -> exp -> exp
+  val ( * ) : exp -> exp -> exp
+  val ( / ) : exp -> exp -> exp
+  val ( /$ ) : exp -> exp -> exp
+  val ( mod ) : exp -> exp -> exp
+  val ( %$ ) : exp -> exp -> exp
+
   val ( lsl ) : exp -> exp -> exp
+  (** Bit operations *)
+
   val ( lsr ) : exp -> exp -> exp
   val ( asr ) : exp -> exp -> exp
-  val ( land) : exp -> exp -> exp
+  val ( land ) : exp -> exp -> exp
   val ( lor ) : exp -> exp -> exp
-  val ( lxor) : exp -> exp -> exp
-  val lnot    : exp -> exp
+  val ( lxor ) : exp -> exp -> exp
+  val lnot : exp -> exp
 
+  val ( = ) : exp -> exp -> exp
   (** Equality tests *)
-  val ( = )   : exp -> exp -> exp
-  val ( <> )   : exp -> exp -> exp
-  val ( < )   : exp -> exp -> exp
-  val ( > )   : exp -> exp -> exp
-  val ( <= )   : exp -> exp -> exp
-  val ( >= )   : exp -> exp -> exp
-  val ( <$ )  : exp -> exp -> exp
-  val ( >$ )  : exp -> exp -> exp
+
+  val ( <> ) : exp -> exp -> exp
+  val ( < ) : exp -> exp -> exp
+  val ( > ) : exp -> exp -> exp
+  val ( <= ) : exp -> exp -> exp
+  val ( >= ) : exp -> exp -> exp
+  val ( <$ ) : exp -> exp -> exp
+  val ( >$ ) : exp -> exp -> exp
   val ( <=$ ) : exp -> exp -> exp
   val ( >=$ ) : exp -> exp -> exp
 
-  (** Misc operations *)
-  (** [a ^ b] contatenate [a] and [b]  *)
-  val ( ^ )   : exp -> exp -> exp
+  val ( ^ ) : exp -> exp -> exp
+  (** Misc operations [a ^ b] contatenate [a] and [b] *)
 end
 
 module Apply : sig
@@ -115,6 +117,5 @@ module Type : sig
   val infer : exp -> (typ, Bap_type_error.t) Result.t
   val infer_exn : exp -> typ
 end
-
 
 val slot : (Theory.Value.cls, exp) Knowledge.slot

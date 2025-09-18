@@ -1,15 +1,11 @@
 (library
-  (name demangle)
-  (public_name bap-demangle.plugin)
-  (libraries
-    bap-core-theory
-    bap-demangle
-    bap-knowledge
-    bap-main
-    core))
+ (name demangle)
+ (public_name bap-demangle.plugin)
+ (libraries bap-core-theory bap-demangle bap-knowledge bap-main core))
 
 (plugin
-  (name demangle)
-  (package bap-demangle)
-  (libraries bap-demangle.plugin)
-  (site (bap-common plugins)))
+ (name demangle)
+ (package bap-demangle)
+ (libraries bap-demangle.plugin)
+ (site
+  (bap-common plugins)))

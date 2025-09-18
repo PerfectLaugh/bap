@@ -1,5 +1,6 @@
 (library
-  (name test_types)
-  (preprocess (pps ppx_bap))
-  (wrapped false)
-  (libraries bap core ounit2))
+ (name test_types)
+ (preprocess
+  (pps ppx_bap))
+ (wrapped false)
+ (libraries bap core ounit2))

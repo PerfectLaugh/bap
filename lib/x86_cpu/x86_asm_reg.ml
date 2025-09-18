@@ -1,6 +1,5 @@
 open Core
 open Bap.Std
-
 include X86_asm_reg_types
 
 let width = function
@@ -11,14 +10,12 @@ let width = function
   | #r128 -> `r128
   | #r256 -> `r256
 
-
 let bitwidth r = width r |> Size.in_bits
 
-type spec = [`Nil | t] [@@deriving sexp]
+type spec = [ `Nil | t ] [@@deriving sexp]
 
 let decode reg =
   match Reg.name reg |> Sexp.of_string |> spec_of_sexp with
   | `Nil -> None
   | #t as r -> Some r
-  | exception _ ->
-    failwithf "unknown register %s" (Reg.name reg) ()
+  | exception _ -> failwithf "unknown register %s" (Reg.name reg) ()

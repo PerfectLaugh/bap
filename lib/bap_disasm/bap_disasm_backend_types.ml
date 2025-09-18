@@ -16,15 +16,11 @@ type predicate =
   | May_load
 [@@deriving compare, sexp]
 
-type op =
-  | Reg
-  | Imm
-  | Fmm
-  | Insn
-[@@deriving compare, sexp]
+type op = Reg | Imm | Fmm | Insn [@@deriving compare, sexp]
 
 module type S = sig
   type t
+
   val delete : t -> unit
   val set_memory : t -> int64 -> Bigstring.t -> off:int -> len:int -> unit
   val store_predicates : t -> bool -> unit

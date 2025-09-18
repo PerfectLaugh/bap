@@ -7,4 +7,5 @@
  (name primus-exploring)
  (package bap-primus-exploring-scheduler)
  (libraries bap-primus-exploring-scheduler.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

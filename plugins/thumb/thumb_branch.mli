@@ -4,35 +4,35 @@ open Thumb_core
 open Thumb_opcodes
 
 type eff = unit effect_ KB.t
-module Make(CT : Theory.Core) : sig
 
-  (** [b <label>]  *)
+module Make (CT : Theory.Core) : sig
   val b : Bitvec.t -> int -> eff
+  (** [b <label>] *)
 
-  (** [bcc <label>]  *)
   val bcc : Bitvec.t -> cond -> int -> eff
+  (** [bcc <label>] *)
 
-  (** [bl <label>] *)
   val bli : Bitvec.t -> int -> eff
+  (** [bl <label>] *)
 
-  (** [blx <label>]  *)
   val blxi : Bitvec.t -> int -> eff
+  (** [blx <label>] *)
 
-  (** [blx rm]  *)
   val blxr : Bitvec.t -> r32 reg -> eff
+  (** [blx rm] *)
 
-  (** [bx rm]  *)
   val bxr : r32 reg -> eff
+  (** [bx rm] *)
 
-  (** [bx <label>]  *)
   val bxi : Bitvec.t -> int -> eff
+  (** [bx <label>] *)
 
-  (** [bl rm] or [blx rm]  *)
   val blr : Bitvec.t -> r32 reg -> eff
+  (** [bl rm] or [blx rm] *)
 
-  (** [cbnz rm <label>]  *)
   val cbnz : Bitvec.t -> r32 reg -> int -> eff
+  (** [cbnz rm <label>] *)
 
-  (** [cbz rm <label>]  *)
   val cbz : Bitvec.t -> r32 reg -> int -> eff
+  (** [cbz rm <label>] *)
 end

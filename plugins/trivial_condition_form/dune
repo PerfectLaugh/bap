@@ -7,4 +7,5 @@
  (name trivial-condition-form)
  (package bap-trivial-condition-form)
  (libraries bap-trivial-condition-form.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

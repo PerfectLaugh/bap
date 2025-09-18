@@ -1,18 +1,13 @@
 (library
  (name bap_trace_plugin)
  (public_name bap-trace.plugin)
- (preprocess (pps ppx_bap))
- (libraries
-   bap
-   bap-future
-   bap-plugins
-   bap-traces
-   core
-   regular
-   uri))
+ (preprocess
+  (pps ppx_bap))
+ (libraries bap bap-future bap-plugins bap-traces core regular uri))
 
 (plugin
  (name trace)
  (package bap-trace)
  (libraries bap-trace.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

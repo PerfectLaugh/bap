@@ -3,9 +3,7 @@ open Bap.Std
 open Bap_core_theory
 open KB.Syntax
 module CT = Theory
-
-include Bap_main.Loggers()
-
+include Bap_main.Loggers ()
 module Target = Bap_systemz_target
 module Dis = Disasm_expert.Basic
 
@@ -14,9 +12,7 @@ module Dis = Disasm_expert.Basic
 let map_arch () =
   KB.promise Arch.unit_slot @@ fun unit ->
   KB.collect Theory.Unit.target unit >>| fun t ->
-  if Theory.Target.belongs Target.parent t
-  then `systemz
-  else `unknown
+  if Theory.Target.belongs Target.parent t then `systemz else `unknown
 
 (* the same target may have different encodings
    or share encodings with other targets, in addition,
@@ -28,10 +24,8 @@ let map_arch () =
 let provide_decoding () =
   KB.promise CT.Label.encoding @@ fun label ->
   CT.Label.target label >>| fun t ->
-  if CT.Target.belongs Target.parent t
-  then Target.llvm_encoding
+  if CT.Target.belongs Target.parent t then Target.llvm_encoding
   else CT.Language.unknown
-
 
 (* following the dependency injection principal, we have to provide
    the disassembler instance for our encoding.
@@ -54,12 +48,12 @@ let enable_loader () =
     let open Ogre.Syntax in
     match Ogre.eval (Ogre.request Image.Scheme.arch) doc with
     | Error _ -> assert false (* nothing could go wrong here! *)
-    | Ok arch -> arch in
+    | Ok arch -> arch
+  in
   KB.promise CT.Unit.target @@ fun unit ->
   KB.collect Image.Spec.slot unit >>| request_arch >>| function
   | Some "systemz" -> Target.z9
   | _ -> CT.Target.unknown
-
 
 (* the main function registers all our providers right now,
    we may later add some command line options whose values
@@ -77,14 +71,8 @@ let main _ctxt =
    setting them is important not only for introspection but
    for the proper function of the cache subsystem.
 *)
-let provides = [
-  "systemz";
-  "lifter";
-  "semantics";
-]
-
+let provides = [ "systemz"; "lifter"; "semantics" ]
 
 (* finally, let's register our extension and call the main function  *)
-let () = Bap_main.Extension.declare main
-    ~doc:"provides the systemz lifter"
-    ~provides
+let () =
+  Bap_main.Extension.declare main ~doc:"provides the systemz lifter" ~provides

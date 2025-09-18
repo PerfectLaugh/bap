@@ -3,7 +3,6 @@ open Bap_types.Std
 open Bap_image_std
 open Bap_knowledge
 open Bap_core_theory
-
 module Insn = Bap_disasm_insn
 
 type state [@@deriving bin_io]
@@ -14,18 +13,15 @@ val init : state
 val equal : state -> state -> bool
 val scan : mem -> state -> state knowledge
 val merge : state -> state -> state
-
 val subroutines : state -> Set.M(Addr).t
 val externals : state -> Set.M(Theory.Label).t
 val blocks : state -> Set.M(Addr).t
 val jump : state -> addr -> jump option
-
 val is_data : state -> addr -> bool
 val is_subroutine : state -> addr -> bool
 val is_jump : state -> addr -> bool
 val is_block : state -> addr -> bool
 val forget_debt : state -> state
-
 val destinations : jump -> Set.M(Addr).t
 val is_call : jump -> bool
 val is_barrier : jump -> bool
@@ -38,8 +34,8 @@ val explore :
   node:('n -> 'c -> 'c knowledge) ->
   edge:('n -> 'n -> 'c -> 'c knowledge) ->
   init:'c ->
-  state -> 'c knowledge
-
+  state ->
+  'c knowledge
 
 val list_insns : ?rev:bool -> insns -> Theory.Label.t list
 val execution_order : insns -> Theory.Label.t list knowledge

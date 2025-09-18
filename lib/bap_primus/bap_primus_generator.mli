@@ -8,23 +8,27 @@ val of_iterator :
   ?width:int ->
   ?seed:(int -> 'a) ->
   to_bitvec:('d -> Bitvec.t) ->
-  (module Iterator.Infinite
-    with type t = 'a
-     and type dom = 'd) -> 'a ->
+  (module Iterator.Infinite with type t = 'a and type dom = 'd) ->
+  'a ->
   t
 
 val create :
   ?width:int ->
-  (module Iterator.Infinite
-    with type t = 'a
-     and type dom = int) -> 'a -> t
+  (module Iterator.Infinite with type t = 'a and type dom = int) ->
+  'a ->
+  t
 
 val static : ?width:int -> int -> t
-
 val width : t -> int
 
-val unfold : ?width:int -> ?min:int -> ?max:int -> ?seed:int ->
-  f:('a * int -> 'a * int) -> 'a -> t
+val unfold :
+  ?width:int ->
+  ?min:int ->
+  ?max:int ->
+  ?seed:int ->
+  f:('a * int -> 'a * int) ->
+  'a ->
+  t
 
 module Random : sig
   val lcg : ?width:int -> ?min:int -> ?max:int -> int -> t
@@ -37,7 +41,7 @@ module Random : sig
   end
 end
 
-module Make( Machine : Machine) : sig
+module Make (Machine : Machine) : sig
   val next : t -> int Machine.t
   val word : t -> int -> word Machine.t
 end

@@ -1,22 +1,23 @@
 (library
-  (name bap_primus)
-  (public_name bap-primus)
-  (preprocess (pps ppx_bap))
-  (wrapped false)
-  (libraries
-    bap
-    bap-abi
-    bap-c
-    bap-core-theory
-    bap-future
-    bap-knowledge
-    bap-strings
-    bitvec
-    bitvec-binprot
-    core
-    graphlib
-    monads
-    parsexp
-    regular
-    uuidm
-    zarith))
+ (name bap_primus)
+ (public_name bap-primus)
+ (preprocess
+  (pps ppx_bap))
+ (wrapped false)
+ (libraries
+  bap
+  bap-abi
+  bap-c
+  bap-core-theory
+  bap-future
+  bap-knowledge
+  bap-strings
+  bitvec
+  bitvec-binprot
+  core
+  graphlib
+  monads
+  parsexp
+  regular
+  uuidm
+  zarith))

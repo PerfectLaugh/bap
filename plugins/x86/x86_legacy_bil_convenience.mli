@@ -59,20 +59,28 @@ val fisinf : ?rm:Type.roundmode_type -> Ast.exp -> Ast.exp
 val fisnan : ?rm:Type.roundmode_type -> Ast.exp -> Ast.exp
 val fisneg : ?rm:Type.roundmode_type -> Ast.exp -> Ast.exp
 val fispos : ?rm:Type.roundmode_type -> Ast.exp -> Ast.exp
+
 val ftoubv :
   ?rm:Type.roundmode_type -> bv_size:Type.bv_size -> Ast.exp -> Ast.exp
+
 val ftosbv :
   ?rm:Type.roundmode_type -> bv_size:Type.bv_size -> Ast.exp -> Ast.exp
+
 val ftoieeebv :
   ?rm:Type.roundmode_type -> bv_size:Type.bv_size -> Ast.exp -> Ast.exp
+
 val bvtouf :
   ?rm:Type.roundmode_type -> float_size:Type.float_size -> Ast.exp -> Ast.exp
+
 val bvtosf :
   ?rm:Type.roundmode_type -> float_size:Type.float_size -> Ast.exp -> Ast.exp
+
 val ftof :
   ?rm:Type.roundmode_type -> float_size:Type.float_size -> Ast.exp -> Ast.exp
+
 val ieeebvtof :
   ?rm:Type.roundmode_type -> float_size:Type.float_size -> Ast.exp -> Ast.exp
+
 val fnan : ?rm:Type.roundmode_type -> float_size:Type.float_size -> Ast.exp
 val cast : Type.cast_type -> Type.typ -> Ast.exp -> Ast.exp
 val cast_low : Type.typ -> Ast.exp -> Ast.exp

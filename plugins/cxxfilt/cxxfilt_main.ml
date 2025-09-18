@@ -2,15 +2,16 @@ open Core
 open Bap.Std
 open Bap_demangle.Std
 open Cxxfilt_config
-include Self()
+include Self ()
 
-let () = Config.manpage [
-    `S "DESCRIPTION";
-    `P "A demangler that relies on a $(b,c++filt) utility";
-    `S "SEE ALSO";
-    `P "$(b,bap-plugin-demangle)(1), $(b,bap-demangle)(3)"
-
-  ]
+let () =
+  Config.manpage
+    [
+      `S "DESCRIPTION";
+      `P "A demangler that relies on a $(b,c++filt) utility";
+      `S "SEE ALSO";
+      `P "$(b,bap-plugin-demangle)(1), $(b,bap-demangle)(3)";
+    ]
 
 let demangle prog name =
   let command = sprintf "%s -p %s" prog name in
@@ -19,17 +20,15 @@ let demangle prog name =
   In_channel.close inp;
   String.strip r
 
-
 let run name =
   List.find_map cxxfilts ~f:(fun d ->
       let demangled = demangle d name in
-      Option.some_if String.(demangled <> name) demangled) |> function
+      Option.some_if String.(demangled <> name) demangled)
+  |> function
   | None -> name
   | Some name -> name
 
-
 let () =
-  Config.declare_extension
-    ~doc:"provides a demangler that uses c++filt"
-    ~provides:["c++"; "demangler"; "c++filt"] @@ fun _ ->
-  Demangler.declare ~package:"bap" "c++filt" run
+  Config.declare_extension ~doc:"provides a demangler that uses c++filt"
+    ~provides:[ "c++"; "demangler"; "c++filt" ]
+  @@ fun _ -> Demangler.declare ~package:"bap" "c++filt" run

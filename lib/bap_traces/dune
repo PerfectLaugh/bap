@@ -1,13 +1,7 @@
 (library
  (name bap_traces)
  (public_name bap-traces)
- (preprocess (pps ppx_bap))
+ (preprocess
+  (pps ppx_bap))
  (wrapped false)
- (libraries
-   bap
-   bap-core-theory
-   bap-knowledge
-   core
-   regular
-   uri
-   uuidm))
+ (libraries bap bap-core-theory bap-knowledge core regular uri uuidm))

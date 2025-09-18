@@ -1,6 +1,5 @@
 open Bap.Std
 open Bap_core_theory
-
 open Bap_primus_lisp_types
 open Bap_primus_lisp_type
 module Def = Bap_primus_lisp_def
@@ -16,8 +15,10 @@ val equal : t -> t -> bool
 val merge : t -> t -> t
 val add : t -> 'a item -> 'a Def.t -> t
 val get : ?name:string -> t -> 'a item -> 'a Def.t list
-val fold : t -> 'a item -> init:'s ->
-  f:(package:string -> 'a Def.t -> 's -> 's) -> 's
+
+val fold :
+  t -> 'a item -> init:'s -> f:(package:string -> 'a Def.t -> 's -> 's) -> 's
+
 val context : t -> Context.t
 val sources : t -> Source.t
 val package : t -> string
@@ -37,9 +38,9 @@ module Items : sig
   val subst : Def.subst item
   val const : Def.const item
   val place : Def.place item
-  val func  : Def.func  item
-  val meth  : Def.meth  item
-  val para  : Def.para item
+  val func : Def.func item
+  val meth : Def.meth item
+  val para : Def.para item
   val semantics : Def.sema item
   val primitive : Def.prim item
   val signal : Def.signal item
@@ -48,6 +49,7 @@ end
 module Type : sig
   type env
   type error
+
   val empty : env
   val equal : env -> env -> bool
   val merge : env -> env -> env

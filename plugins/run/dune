@@ -2,17 +2,18 @@
  (name bap_run_plugin)
  (public_name bap-run.plugin)
  (libraries
-   bap
-   bap-core-theory
-   bap-knowledge
-   bap-primus
-   core
-   graphlib
-   monads
-   regular))
+  bap
+  bap-core-theory
+  bap-knowledge
+  bap-primus
+  core
+  graphlib
+  monads
+  regular))
 
 (plugin
  (name run)
  (package bap-run)
  (libraries bap-run.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

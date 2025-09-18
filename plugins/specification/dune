@@ -1,10 +1,11 @@
 (library
-  (name specification)
-  (public_name bap-specification.plugin)
-  (libraries bap core bap-main ogre regular))
+ (name specification)
+ (public_name bap-specification.plugin)
+ (libraries bap core bap-main ogre regular))
 
 (plugin
-  (name specification)
-  (package bap-specification)
-  (libraries bap-specification.plugin)
-  (site (bap-common plugins)))
+ (name specification)
+ (package bap-specification)
+ (libraries bap-specification.plugin)
+ (site
+  (bap-common plugins)))

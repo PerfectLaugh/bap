@@ -2,72 +2,53 @@ open Bap.Std
 open Core
 open Bap_knowledge
 open Bap_core_theory
-
 module KB = Knowledge
 
 module Move = struct
-  type 'a t = {
-    cell : 'a;
-    data : word;
-  } [@@deriving bin_io, compare, fields, sexp]
+  type 'a t = { cell : 'a; data : word }
+  [@@deriving bin_io, compare, fields, sexp]
 end
 
 module Chunk = struct
-  type t = {
-    addr : addr;
-    data : string;
-  } [@@deriving bin_io, compare, fields, sexp]
+  type t = { addr : addr; data : string }
+  [@@deriving bin_io, compare, fields, sexp]
 end
 
 module Syscall = struct
-  type t = {
-    number : int;
-    args : word array;
-  } [@@deriving bin_io, compare, fields, sexp]
+  type t = { number : int; args : word array }
+  [@@deriving bin_io, compare, fields, sexp]
 end
 
 module Exn = struct
-  type t = {
-    number : int;
-    src : addr option;
-    dst : addr option;
-  } [@@deriving bin_io, compare, fields, sexp]
+  type t = { number : int; src : addr option; dst : addr option }
+  [@@deriving bin_io, compare, fields, sexp]
 end
 
 module Location = struct
-  type t = {
-    name : string option;
-    addr : addr;
-  } [@@deriving bin_io, compare, fields, sexp]
+  type t = { name : string option; addr : addr }
+  [@@deriving bin_io, compare, fields, sexp]
 end
 
 type location = Location.t [@@deriving bin_io, compare, sexp]
 
 module Call = struct
-  type t = {
-    caller : location;
-    callee : location;
-    args : word array;
-  } [@@deriving bin_io, compare, fields, sexp]
+  type t = { caller : location; callee : location; args : word array }
+  [@@deriving bin_io, compare, fields, sexp]
 end
 
 module Return = struct
-  type t = {
-    caller : string;
-    callee : string;
-  } [@@deriving bin_io, compare, fields, sexp]
+  type t = { caller : string; callee : string }
+  [@@deriving bin_io, compare, fields, sexp]
 end
 
 module Modload = struct
-  type t = {
-    name : string;
-    low : addr;
-    high : addr;
-  } [@@deriving bin_io, compare, fields, sexp]
+  type t = { name : string; low : addr; high : addr }
+  [@@deriving bin_io, compare, fields, sexp]
 end
 
 module Mode = struct
-  include KB.Enum.Make()
+  include KB.Enum.Make ()
+
   let slot = KB.Class.property ~package:"bap" Theory.Program.cls "mode" domain
 end
 

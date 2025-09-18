@@ -3,7 +3,6 @@ open Core
 open Bap_types.Std
 
 type mem = Bap_memory.t
-
 type 'a t [@@deriving sexp_of]
 
 val empty : 'a t
@@ -28,6 +27,8 @@ val remove : 'a t -> mem -> 'a t
 val remove_intersections : 'a t -> mem -> 'a t
 val remove_dominators : 'a t -> mem -> 'a t
 val to_sequence : 'a t -> (mem * 'a) Sequence.t
+
 include Container.S1 with type 'a t := 'a t
+
 val pp : (Format.formatter -> 'a -> unit) -> Format.formatter -> 'a t -> unit
 val domain : value t KB.domain

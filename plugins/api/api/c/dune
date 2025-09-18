@@ -5,4 +5,6 @@
   (windows.h as c/windows.h)
   (gnu.h as c/gnu.h))
  (package bap-api)
- (section (site (bap-common api))))
+ (section
+  (site
+   (bap-common api))))

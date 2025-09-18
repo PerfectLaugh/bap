@@ -1,11 +1,13 @@
 (library
  (name bap_primus_loader_plugin)
  (public_name bap-primus-loader.plugin)
- (preprocess (pps ppx_bap))
+ (preprocess
+  (pps ppx_bap))
  (libraries bap bap-core-theory bap-primus monads core ogre))
 
 (plugin
  (name primus-loader)
  (package bap-primus-loader)
  (libraries bap-primus-loader.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

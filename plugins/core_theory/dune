@@ -1,12 +1,13 @@
 (library
-  (name bap_core_theory_plugin)
-  (public_name bap-core-theory.plugin)
-  (preprocess (pps ppx_bap))
-  (libraries bap-core-theory bap-knowledge bap-main
-             bitvec core monads))
+ (name bap_core_theory_plugin)
+ (public_name bap-core-theory.plugin)
+ (preprocess
+  (pps ppx_bap))
+ (libraries bap-core-theory bap-knowledge bap-main bitvec core monads))
 
 (plugin
-  (name core-theory)
-  (package bap-core-theory)
-  (libraries bap-core-theory.plugin)
-  (site (bap-common plugins)))
+ (name core-theory)
+ (package bap-core-theory)
+ (libraries bap-core-theory.plugin)
+ (site
+  (bap-common plugins)))

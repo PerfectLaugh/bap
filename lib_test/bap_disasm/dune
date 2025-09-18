@@ -1,5 +1,6 @@
 (library
-  (name test_disasm)
-  (preprocess (pps ppx_bap))
-  (wrapped false)
-  (libraries bap core ounit2 str))
+ (name test_disasm)
+ (preprocess
+  (pps ppx_bap))
+ (wrapped false)
+ (libraries bap core ounit2 str))

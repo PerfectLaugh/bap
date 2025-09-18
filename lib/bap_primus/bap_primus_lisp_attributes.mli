@@ -1,7 +1,6 @@
 open Core
 open Bap_core_theory
 open Bap_primus_lisp_types
-
 module Attribute = Bap_primus_lisp_attribute
 
 module External : sig
@@ -16,12 +15,14 @@ end
 module Advice : sig
   type cmethod = Before | After
   type t
+
   val t : t Attribute.t
   val targets : t -> cmethod -> Set.M(KB.Name).t
 end
 
 module Visibility : sig
   type t
+
   val t : t Attribute.t
   val is_public : t -> bool
 end

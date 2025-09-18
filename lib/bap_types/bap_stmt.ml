@@ -6,7 +6,6 @@ open Bap_common_types
 open Format
 open Bap_bil
 
-
 module Attribute = struct
   type 'a t = {
     constr : KB.Name.t;
@@ -18,126 +17,115 @@ module Attribute = struct
 
   let declare ?package ~encode ~decode name =
     let constr = KB.Name.create ?package name in
-    if Hash_set.mem known constr
-    then failwithf "The BIL attribute %s is already \
-                    registered. Please choose another name."
+    if Hash_set.mem known constr then
+      failwithf
+        "The BIL attribute %s is already registered. Please choose another \
+         name."
         (KB.Name.show constr) ();
-    {encode; decode; constr}
+    { encode; decode; constr }
 end
 
 module Special = struct
-  let call = Attribute.declare "call"
-      ~encode:Fn.id
-      ~decode:Fn.id
-      ~package:"bap"
+  let call = Attribute.declare "call" ~encode:Fn.id ~decode:Fn.id ~package:"bap"
 
-  let intrinsic = Attribute.declare "intrinsic"
-      ~encode:Fn.id
-      ~decode:Fn.id
-      ~package:"bap"
+  let intrinsic =
+    Attribute.declare "intrinsic" ~encode:Fn.id ~decode:Fn.id ~package:"bap"
 
-  let label = Attribute.declare "label"
-      ~package:"bap"
-      ~encode:Fn.id
-      ~decode:Fn.id
+  let label =
+    Attribute.declare "label" ~package:"bap" ~encode:Fn.id ~decode:Fn.id
 
-  let goto = Attribute.declare "goto"
-      ~package:"bap"
-      ~encode:Fn.id
-      ~decode:Fn.id
-
+  let goto = Attribute.declare "goto" ~package:"bap" ~encode:Fn.id ~decode:Fn.id
   let prefix = "@attribute:"
 
-
-  let encode {Attribute.constr; encode} data =
+  let encode { Attribute.constr; encode } data =
     match encode data with
     | "" -> prefix ^ KB.Name.show constr
     | data ->
-      prefix ^
-      Sexp.to_string @@
-      Sexp.List [
-        Atom (KB.Name.show constr);
-        Atom data;
-      ]
+        prefix ^ Sexp.to_string
+        @@ Sexp.List [ Atom (KB.Name.show constr); Atom data ]
 
-  let decode_payload {Attribute.constr; decode} name data =
+  let decode_payload { Attribute.constr; decode } name data =
     let name = KB.Name.read name in
-    if KB.Name.equal name constr
-    then Some (decode data)
-    else None
+    if KB.Name.equal name constr then Some (decode data) else None
 
   let has_attribute = function
     | Stmt.Special s -> String.is_prefix ~prefix s
     | _ -> false
 
-  let decode attr s = match String.chop_prefix ~prefix s with
+  let decode attr s =
+    match String.chop_prefix ~prefix s with
     | None -> None
-    | Some payload -> match Sexp.of_string payload with
-      | exception _ -> None
-      | Sexp.Atom name -> decode_payload attr name ""
-      | Sexp.List [Atom name; Atom data] -> decode_payload attr name data
-      | _ -> None
+    | Some payload -> (
+        match Sexp.of_string payload with
+        | exception _ -> None
+        | Sexp.Atom name -> decode_payload attr name ""
+        | Sexp.List [ Atom name; Atom data ] -> decode_payload attr name data
+        | _ -> None)
 
   let pp_default ppf s = fprintf ppf "special@ @[<1>(%s)@]" s
 
   let pp_cons ppf s =
-    pp_print_string ppf @@ match String.chop_prefix s ~prefix:"bap:" with
-    | None ->  s
-    | Some s -> s
+    pp_print_string ppf
+    @@ match String.chop_prefix s ~prefix:"bap:" with None -> s | Some s -> s
 
-  let pp ppf s = match String.chop_prefix ~prefix s with
+  let pp ppf s =
+    match String.chop_prefix ~prefix s with
     | None -> pp_default ppf s
-    | Some data -> match Sexp.of_string data with
-      | exception _ -> pp_default ppf s
-      | Sexp.List (Atom cons::vals) ->
-        let pp_vals ppf xs = pp_print_list
-            ~pp_sep:(fun ppf () -> pp_print_string ppf ", ")
-            Sexp.pp_hum ppf xs in
-        fprintf ppf "%a(@[<hv2>%a@])" pp_cons cons pp_vals vals
-      | _ -> pp_default ppf s
+    | Some data -> (
+        match Sexp.of_string data with
+        | exception _ -> pp_default ppf s
+        | Sexp.List (Atom cons :: vals) ->
+            let pp_vals ppf xs =
+              pp_print_list
+                ~pp_sep:(fun ppf () -> pp_print_string ppf ", ")
+                Sexp.pp_hum ppf xs
+            in
+            fprintf ppf "%a(@[<hv2>%a@])" pp_cons cons pp_vals vals
+        | _ -> pp_default ppf s)
 end
 
 let rec pp fmt s =
-  let open Stmt in match s with
+  let open Stmt in
+  match s with
   | Move (var, exp) ->
-    fprintf fmt "@[<2>%a :=@ %a@]" Bap_var.pp var Bap_exp.pp exp
-  | Jmp (Exp.Var _ | Exp.Int _ as exp) ->
-    fprintf fmt "@[<2>jmp@ %a@]" Bap_exp.pp exp
+      fprintf fmt "@[<2>%a :=@ %a@]" Bap_var.pp var Bap_exp.pp exp
+  | Jmp ((Exp.Var _ | Exp.Int _) as exp) ->
+      fprintf fmt "@[<2>jmp@ %a@]" Bap_exp.pp exp
   | Jmp exp -> fprintf fmt "@[<2>jmp@ (%a)@]" Bap_exp.pp exp
   | Special s -> Special.pp fmt s
   | While (cond, body) ->
-    fprintf fmt "@[<v0>@[<v2>while (@[%a@]) {@;%a@]@;}@]"
-      Bap_exp.pp cond pp_list body
+      fprintf fmt "@[<v0>@[<v2>while (@[%a@]) {@;%a@]@;}@]" Bap_exp.pp cond
+        pp_list body
   | If (cond, ts, []) ->
-    fprintf fmt "@[<v0>@[<v2>if (@[%a@]) {@;%a@]@,}@]"
-      Bap_exp.pp cond pp_list ts
+      fprintf fmt "@[<v0>@[<v2>if (@[%a@]) {@;%a@]@,}@]" Bap_exp.pp cond pp_list
+        ts
   | If (cond, ts, fs) ->
-    fprintf fmt "@[<v0>@[<v2>if (@[%a@]) {@;%a@]@,}@;%a@]"
-      Bap_exp.pp cond pp_list ts pp_else fs
-  | CpuExn  n -> fprintf fmt "cpuexn (%d)" n
+      fprintf fmt "@[<v0>@[<v2>if (@[%a@]) {@;%a@]@,}@;%a@]" Bap_exp.pp cond
+        pp_list ts pp_else fs
+  | CpuExn n -> fprintf fmt "cpuexn (%d)" n
+
 and pp_list fmt = function
   | [] -> ()
   | x :: [] -> fprintf fmt "%a" pp x
   | x :: xs -> fprintf fmt "%a@;%a" pp x pp_list xs
+
 and pp_else fmt = function
   | [] -> ()
   | fs -> fprintf fmt "@[<v0>@[<v2>else {@;%a@]@;}@]" pp_list fs
 
-let pp_stmts fmt ss =
-  fprintf fmt "@[<v0>@[<v2>{@;%a@]@;}@]" pp_list ss
+let pp_stmts fmt ss = fprintf fmt "@[<v0>@[<v2>{@;%a@]@;}@]" pp_list ss
 
 module Stmt = struct
   open Bap_bil.Stmt
-  let move v x = Move (v,x)
+
+  let move v x = Move (v, x)
   let jmp x = Jmp x
   let special s = Special s
-  let while_ x s1  = While (x,s1)
-  let if_ x s1 s2 = If (x,s1,s2)
+  let while_ x s1 = While (x, s1)
+  let if_ x s1 s2 = If (x, s1, s2)
   let cpuexn n = CpuExn n
   let encode s xs = special @@ Special.encode s xs
-  let decode n = function
-    | Special s -> Special.decode n s
-    | _ -> None
+  let decode n = function Special s -> Special.decode n s | _ -> None
   let call = Special.call
   let intrinsic = Special.intrinsic
   let goto = Special.goto
@@ -145,40 +133,45 @@ module Stmt = struct
 end
 
 module Infix = struct
-  let (:=) v x = Bap_bil.Stmt.Move (v,x)
+  let ( := ) v x = Bap_bil.Stmt.Move (v, x)
 end
 
-include Regular.Make(struct
-    type t = Bap_bil.stmt [@@deriving bin_io, compare, sexp]
-    let hash = Hashtbl.hash
-    let module_name = Some "Bap.Std.Stmt"
-    let version = "1.0.0"
+include Regular.Make (struct
+  type t = Bap_bil.stmt [@@deriving bin_io, compare, sexp]
 
-    let pp = pp
-  end)
+  let hash = Hashtbl.hash
+  let module_name = Some "Bap.Std.Stmt"
+  let version = "1.0.0"
+  let pp = pp
+end)
 
 module Stmts_pp = struct
   type t = stmt list
-  include Printable.Make(struct
-      type nonrec t = t
-      let pp = pp_stmts
-      let module_name = Some "Bap.Std.Bil"
-    end)
+
+  include Printable.Make (struct
+    type nonrec t = t
+
+    let pp = pp_stmts
+    let module_name = Some "Bap.Std.Bil"
+  end)
 end
 
 module Stmts_data = struct
   module T = struct
     type t = stmt list [@@deriving bin_io, sexp]
+
     let version = "1.0.0"
   end
+
   include T
-  include Data.Make(T)
+  include Data.Make (T)
   open Data
+
   let bin_reader = bin_reader (module T)
   let bin_writer = bin_writer (module T)
   let sexp_reader = sexp_reader (module T)
   let sexp_writer = sexp_writer (module T)
-  let printer = (Data.pretty_writer (module Stmts_pp))
+  let printer = Data.pretty_writer (module Stmts_pp)
 
   let () =
     let ver = version in
@@ -193,26 +186,22 @@ module Stmts_data = struct
     set_default_reader "bin"
 end
 
-let domain = Knowledge.Domain.flat "bil"
-    ~empty:[]
+let domain =
+  Knowledge.Domain.flat "bil" ~empty:[]
     ~inspect:(function
-        | [] -> Sexp.List []
-        | bil -> Sexp.Atom (Stmts_pp.to_string bil))
-    ~equal:(fun x y ->
-        phys_equal x y ||
-        Int.(compare_bil x y = 0))
+      | [] -> Sexp.List [] | bil -> Sexp.Atom (Stmts_pp.to_string bil))
+    ~equal:(fun x y -> phys_equal x y || Int.(compare_bil x y = 0))
 
+let persistent =
+  Knowledge.Persistent.of_binable
+    (module struct
+      type t = stmt list [@@deriving bin_io]
+    end)
 
-let persistent = Knowledge.Persistent.of_binable (module struct
-    type t = stmt list [@@deriving bin_io]
-  end)
+let slot =
+  Knowledge.Class.property ~package:"bap" ~persistent Theory.Semantics.cls "bil"
+    domain ~public:true ~desc:"semantics of statements in BIL"
 
-let slot = Knowledge.Class.property ~package:"bap"
-    ~persistent Theory.Semantics.cls "bil" domain
-    ~public:true
-    ~desc:"semantics of statements in BIL"
-
-let code = KB.Class.property ~package:"bap"
-    ~persistent Theory.Program.cls "bil-code" domain
-    ~public:true
-    ~desc:"the code of the program in BIL"
+let code =
+  KB.Class.property ~package:"bap" ~persistent Theory.Program.cls "bil-code"
+    domain ~public:true ~desc:"the code of the program in BIL"

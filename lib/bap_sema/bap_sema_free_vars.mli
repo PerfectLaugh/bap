@@ -4,6 +4,7 @@ open Bap_ir
 
 module Live : sig
   type t
+
   val compute : ?keep:Var.Set.t -> sub term -> t
   val ins : t -> tid -> Var.Set.t
   val vars : t -> Var.Set.t

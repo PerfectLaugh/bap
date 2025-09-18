@@ -1,26 +1,23 @@
 open Core
 open Bap_core_theory
 open Bap.Std
-
 open KB.Syntax
-include Bap_main.Loggers()
-
+include Bap_main.Loggers ()
 module Target = Bap_systemz_target
 module MC = Disasm_expert.Basic
 
 let make_regs regs =
   let regs =
-    List.mapi regs ~f:(fun i r -> (i,r)) |>
-    Map.of_alist_exn (module Int) in
+    List.mapi regs ~f:(fun i r -> (i, r)) |> Map.of_alist_exn (module Int)
+  in
   Map.find_exn regs
 
 let gpr = make_regs Target.gpr
 let regnum s = Scanf.sscanf s "R%d" Fn.id
 
-(** [require_gpr insn n f] parses the machine instruction operands and
-    requires that the [n]th register should be a GPR register and if
-    it is, calls the action [f] with the variable that corresponds the register
-*)
+(** [require_gpr insn n f] parses the machine instruction operands and requires
+    that the [n]th register should be a GPR register and if it is, calls the
+    action [f] with the variable that corresponds the register *)
 let require_gpr insn pos f =
   match (MC.Insn.ops insn).(pos) with
   | Op.Reg r -> f (gpr (regnum (Reg.name r)))
@@ -32,7 +29,7 @@ let require_gpr insn pos f =
    the Core theory and extends it with operations specific to that
    target.
 *)
-module Systemz(CT : Theory.Core) = struct
+module Systemz (CT : Theory.Core) = struct
   open Target
 
   (* We commonly start with a set of helpers, which also comprise the
@@ -41,7 +38,7 @@ module Systemz(CT : Theory.Core) = struct
      functions...  *)
   let rec seq = function
     | [] -> CT.perform Theory.Effect.Sort.bot
-    | [x] -> x
+    | [ x ] -> x
     | x :: xs -> CT.seq x @@ seq xs
 
   (* ... for each sort of effects we will build a corresponding
@@ -52,8 +49,7 @@ module Systemz(CT : Theory.Core) = struct
     let lbl = KB.Object.null Theory.Program.cls in
     CT.blk lbl (seq xs) (seq [])
 
-  let (@) = CT.append r64
-
+  let ( @ ) = CT.append r64
 
   (* finally, we can build the semantics of our LR instruction, we use
      our parser function [parse_gpr] to parse operands to GPR
@@ -68,11 +64,8 @@ module Systemz(CT : Theory.Core) = struct
   let lr insn =
     require_gpr insn 0 @@ fun rd ->
     require_gpr insn 1 @@ fun rs ->
-    data CT.[
-        set rd (high r32 (var rd) @ low r32 (var rs))
-      ]
+    data CT.[ set rd (high r32 (var rd) @ low r32 (var rs)) ]
 end
-
 
 (* The lifter provides the instruction semantics and has type
    [Theory.program KB.obj -> unit Theory.eff], or, the same
@@ -128,22 +121,24 @@ end
 *)
 let lifter label : unit Theory.eff =
   let lift insn lifter =
-    lifter insn >>| fun sema -> Insn.with_basic sema insn in
+    lifter insn >>| fun sema -> Insn.with_basic sema insn
+  in
   Theory.Label.target label >>= fun t ->
   if Theory.Target.belongs Target.parent t then
     KB.collect MC.Insn.slot label >>= function
     | None -> KB.return Insn.empty
-    | Some insn ->
-      Theory.instance () >>= Theory.require >>= fun (module Core) ->
-      let module Systemz = Systemz(Core) in
-      let open Systemz in
-      lift insn @@ match MC.Insn.name insn with
-      | "LR" -> lr
-      | code ->
-        info "unsupported opcode: %s" code;
-        fun _ -> KB.return Insn.empty
+    | Some insn -> (
+        Theory.instance () >>= Theory.require >>= fun (module Core) ->
+        let module Systemz = Systemz (Core) in
+        let open Systemz in
+        lift insn
+        @@
+        match MC.Insn.name insn with
+        | "LR" -> lr
+        | code ->
+            info "unsupported opcode: %s" code;
+            fun _ -> KB.return Insn.empty)
   else !!Insn.empty
 
 (* a lifter is a promise to provide the instruction semantics.*)
-let load () =
-  KB.promise Theory.Semantics.slot lifter
+let load () = KB.promise Theory.Semantics.slot lifter

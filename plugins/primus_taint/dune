@@ -7,4 +7,5 @@
  (name primus-taint)
  (package bap-primus-taint)
  (libraries bap-primus-taint.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

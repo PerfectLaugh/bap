@@ -2,29 +2,31 @@
  (name bap_disasm)
  (public_name bap-std.disasm)
  (wrapped false)
- (preprocess (pps ppx_bap))
+ (preprocess
+  (pps ppx_bap))
  (libraries
-   bap-core-theory
-   bap-future
-   bap-knowledge
-   bap-main
-   bap-relation
-   bap_image
-   bap_types
-   bitvec
-   bitvec-order
-   camlzip
-   core
-   graphlib
-   monads
-   ocamlgraph
-   ogre
-   regular
-   zarith)
+  bap-core-theory
+  bap-future
+  bap-knowledge
+  bap-main
+  bap-relation
+  bap_image
+  bap_types
+  bitvec
+  bitvec-order
+  camlzip
+  core
+  graphlib
+  monads
+  ocamlgraph
+  ogre
+  regular
+  zarith)
  (foreign_stubs
   (language cxx)
   (names disasm)
-  (extra_deps (glob_files *.hpp))
+  (extra_deps
+   (glob_files *.hpp))
   (flags -std=c++11 -fPIC -O3))
  (foreign_stubs
   (language c)

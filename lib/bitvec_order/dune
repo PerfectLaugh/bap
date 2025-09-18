@@ -1,5 +1,5 @@
 (library
-  (name bitvec_order)
-  (public_name bitvec-order)
-  (wrapped false)
-  (libraries base bitvec bitvec-sexp))
+ (name bitvec_order)
+ (public_name bitvec-order)
+ (wrapped false)
+ (libraries base bitvec bitvec-sexp))

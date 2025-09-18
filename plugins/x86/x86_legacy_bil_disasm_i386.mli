@@ -5,28 +5,28 @@ open Bil
 exception Disasm_i386_exception of string
 
 type binopf = Ast.exp -> Ast.exp -> Ast.exp (* below: opcode *)
-
 type mode = [ `x86 | `x86_64 ]
+
 val type_of_mode : mode -> Type.typ (* ocaml/syscall_models.ml *)
 
-type order                      (* below: opcode *)
+type order (* below: opcode *)
 type direction
 type operand
 type jumptarget
-module Pcmpstr :
-sig
+
+module Pcmpstr : sig
   type imm8cb
   type pcmpinfo
 end
+
 type offsetinfo
+type prefix (* below: parse_instr *)
 
-type prefix                     (* below: parse_instr *)
-
-val regs_x86 : Var.t list      (* ocaml/asmir_vars.ml *)
+val regs_x86 : Var.t list (* ocaml/asmir_vars.ml *)
 val regs_x86_64 : Var.t list
 val regs_full : Var.t list
 
-module R64 :                    (* everywhere *)
+module R64 : (* everywhere *)
 sig
   val r8 : Var.t
   val r9 : Var.t
@@ -51,7 +51,6 @@ val gflags : mode -> Var.t
 val gfs_base : mode -> Var.t
 val ggs_base : mode -> Var.t
 val gmem : mode -> Var.t
-
 val st : Var.t array
 val cf : Var.t
 val pf : Var.t
@@ -60,7 +59,6 @@ val zf : Var.t
 val sf : Var.t
 val oF : Var.t
 val df : Var.t
-
 val cs : Var.t
 val ds : Var.t
 val es : Var.t
@@ -82,7 +80,6 @@ val x87_top : Var.t
 val x87_c3 : Var.t
 val x87_b : Var.t
 val x87_status_word : Ast.exp
-
 val x87_im : Var.t
 val x87_dm : Var.t
 val x87_zm : Var.t
@@ -98,17 +95,12 @@ val x87_13 : Var.t
 val x87_14 : Var.t
 val x87_15 : Var.t
 val x87_control_word : Ast.exp
-
-
 val gymms : mode -> Var.t array
-
 val mxcsr : Var.t
+val load_s : mode -> Var.t option -> Type.typ -> Ast.exp -> Ast.exp
 
-val load_s: mode -> Var.t option -> Type.typ -> Ast.exp -> Ast.exp
-
-module ToIR :
-sig
-    (*
+module ToIR : sig
+  (*
     val add_labels :            (* ocaml/asmir.ml *)
       ?asm:string ->
       address:Big_int_convenience.address ->
@@ -121,19 +113,17 @@ sig
      x87_bv_to_fp_pc and x87_fp_to_bv_pc. *)
   val bv_to_fp80 : convertable_bv -> Ast.exp -> Ast.exp
   val fp80_to_bv : convertable_bv -> Ast.exp -> Ast.exp
-
   val x87_bv_to_fp_pc : ?rm:Type.roundmode_type -> Ast.exp -> Ast.exp
   val x87_fp_to_bv_pc : ?rm:Type.roundmode_type -> Ast.exp -> Ast.exp
-
   val dec_x87_stack : Ast.stmt
   val set_x87_stack : index:int -> Ast.exp -> Ast.stmt list
   val get_x87_stack : index:int -> Ast.exp
-  val get_x87_tag   : index:int -> Ast.exp
+  val get_x87_tag : index:int -> Ast.exp
   val pop_x87_stack : Ast.stmt list
   val push_x87_stack : Ast.exp -> Ast.stmt list
 
-  val store_s : mode -> Var.t option -> Type.typ -> Ast.exp -> Ast.exp -> Ast.stmt
+  val store_s :
+    mode -> Var.t option -> Type.typ -> Ast.exp -> Ast.exp -> Ast.stmt
 
   val move : Var.t -> Ast.exp -> Ast.stmt
-
 end

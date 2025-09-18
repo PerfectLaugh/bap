@@ -2,23 +2,25 @@
  (optional)
  (name bap_primus_symbolic_executor_plugin)
  (public_name bap-primus-symbolic-executor.plugin)
- (preprocess (pps ppx_bap))
+ (preprocess
+  (pps ppx_bap))
  (libraries
-   bap
-   bap-main
-   bap-primus
-   bap-primus-track-visited
-   bitvec
-   core
-   monads
-   regular
-   z3
-   zarith
-   bap-core-theory))
+  bap
+  bap-main
+  bap-primus
+  bap-primus-track-visited
+  bitvec
+  core
+  monads
+  regular
+  z3
+  zarith
+  bap-core-theory))
 
 (plugin
  (optional)
  (name primus-symbolic-executor)
  (package bap-primus-symbolic-executor)
  (libraries bap-primus-symbolic-executor.plugin)
- (site (bap-common plugins)))
+ (site
+  (bap-common plugins)))

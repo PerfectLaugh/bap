@@ -2,7 +2,8 @@
  (name bap_x86)
  (public_name bap-x86)
  (wrapped false)
- (preprocess (pps ppx_bap))
+ (preprocess
+  (pps ppx_bap))
  (libraries bap bap-c bap-demangle core))
 
 (deprecated_library_name

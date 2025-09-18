@@ -1,16 +1,17 @@
 (library
  (name bap_arm)
  (public_name bap-arm)
- (preprocess (pps ppx_bap))
+ (preprocess
+  (pps ppx_bap))
  (wrapped false)
  (libraries
-   bap
-   bap-core-theory
-   bap-knowledge
-   bap-primus
-   bap-traces
-   bitvec
-   bitvec-order
-   core
-   ogre
-   regular))
+  bap
+  bap-core-theory
+  bap-knowledge
+  bap-primus
+  bap-traces
+  bitvec
+  bitvec-order
+  core
+  ogre
+  regular))

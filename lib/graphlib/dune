@@ -1,12 +1,13 @@
 (library
-  (name graphlib)
-  (public_name graphlib)
-  (wrapped false)
-  (preprocess (pps ppx_bap))
-  (private_modules graphlib_graph
-                   graphlib_intf
-                   graphlib_regular
-                   graphlib_regular_intf
-                   graphlib_pp)
-  (libraries core core_kernel.pairing_heap
-             regular ocamlgraph))
+ (name graphlib)
+ (public_name graphlib)
+ (wrapped false)
+ (preprocess
+  (pps ppx_bap))
+ (private_modules
+  graphlib_graph
+  graphlib_intf
+  graphlib_regular
+  graphlib_regular_intf
+  graphlib_pp)
+ (libraries core core_kernel.pairing_heap regular ocamlgraph))

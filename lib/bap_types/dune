@@ -1,19 +1,20 @@
 (library
-  (name bap_types)
-  (public_name bap-std.types)
-  (wrapped false)
-  (preprocess (pps ppx_bap))
-  (libraries
-     bap-core-theory
-     bap-knowledge
-     bap-main
-     bitvec
-     bitvec-order
-     bitvec-sexp
-     core
-     graphlib
-     monads
-     ogre
-     regular
-     uuidm
-     zarith))
+ (name bap_types)
+ (public_name bap-std.types)
+ (wrapped false)
+ (preprocess
+  (pps ppx_bap))
+ (libraries
+  bap-core-theory
+  bap-knowledge
+  bap-main
+  bitvec
+  bitvec-order
+  bitvec-sexp
+  core
+  graphlib
+  monads
+  ogre
+  regular
+  uuidm
+  zarith))

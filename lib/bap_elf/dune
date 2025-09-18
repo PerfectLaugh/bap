@@ -1,6 +1,7 @@
 (library
  (name bap_elf)
  (public_name bap-elf)
- (preprocess (pps ppx_bap ppx_bitstring))
+ (preprocess
+  (pps ppx_bap ppx_bitstring))
  (wrapped false)
  (libraries bap bitstring core regular))

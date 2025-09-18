@@ -2,111 +2,121 @@ open Bap_core_theory
 open Core
 open Bap_future.Std
 open Bap.Std
-include Self()
-
+include Self ()
 module Unix = Caml_unix
-
 open KB.Syntax
 
 let agent =
   KB.Agent.register ~package:"bap" "radare2-symbolizer"
-    ~reliability:KB.Agent.doubtful
-    ~desc:"extracts symbols radare2"
+    ~reliability:KB.Agent.doubtful ~desc:"extracts symbols radare2"
 
 let provide_roots file funcs =
   let promise_property slot =
     KB.promise slot @@ fun label ->
     Theory.Label.target label >>= fun t ->
-    if Theory.Target.belongs Arm_target.parent t
-    then !!None
+    if Theory.Target.belongs Arm_target.parent t then !!None
     else
-      let*? addr = label-->Theory.Label.addr in
-      let*? unit = label--> Theory.Label.unit in
-      let*? path = unit-->Theory.Unit.path in
-      let* bias = unit-->Theory.Unit.bias in
+      let*? addr = label --> Theory.Label.addr in
+      let*? unit = label --> Theory.Label.unit in
+      let*? path = unit --> Theory.Unit.path in
+      let* bias = unit --> Theory.Unit.bias in
       let+ bits =
-        KB.collect Theory.Unit.target unit >>|
-        Theory.Target.code_addr_size in
+        KB.collect Theory.Unit.target unit >>| Theory.Target.code_addr_size
+      in
       if String.equal path file then
         let bias = Option.value bias ~default:Bitvec.zero in
         let addr =
-          Bitvec.to_bigint @@
-          Bitvec.((addr - bias) mod modulus bits) in
+          Bitvec.to_bigint @@ Bitvec.((addr - bias) mod modulus bits)
+        in
         Option.some_if (Hashtbl.mem funcs addr) true
-      else None in
+      else None
+  in
   promise_property Theory.Label.is_subroutine
 
 let strip str =
   if String.is_prefix ~prefix:"func." str then None
-  else Option.some @@ match String.chop_prefix str ~prefix:"imp." with
+  else
+    Option.some
+    @@
+    match String.chop_prefix str ~prefix:"imp." with
     | Some str -> str
     | None -> str
 
 let to_zarith = function
   | `Int i -> Z.of_int i
   | `Intlit s -> Z.of_string s
-  | s -> invalid_argf "expected an address got %s"
-           (Yojson.Safe.to_string s) ()
+  | s -> invalid_argf "expected an address got %s" (Yojson.Safe.to_string s) ()
 
 let parse =
   let open Yojson.Safe.Util in
   convert_each @@ fun x ->
-  to_string @@ member "name" x,
-  to_zarith @@ member "vaddr" x,
-  to_string @@ member "type" x
+  ( to_string @@ member "name" x,
+    to_zarith @@ member "vaddr" x,
+    to_string @@ member "type" x )
 
 let extract_symbols file =
   let cmd = sprintf "radare2 -2 -q -c isj %s" file in
   let env = Unix.environment () in
-  let input,output,err = Unix.open_process_full cmd env in
-  let out = try parse@@Yojson.Safe.from_channel input with
-    | exn ->
+  let input, output, err = Unix.open_process_full cmd env in
+  let out =
+    try parse @@ Yojson.Safe.from_channel input
+    with exn ->
       warning "failed to extract symbols: %s" (Exn.to_string exn);
-      [] in
-  match Unix.close_process_full (input,output,err) with
+      []
+  in
+  match Unix.close_process_full (input, output, err) with
   | Unix.WEXITED 0 ->
-    info "radare2 invocation finished successfully";
-    out
+      info "radare2 invocation finished successfully";
+      out
   | WEXITED n ->
-    warning "radare2 failed with the exit code %d" n;
-    out
+      warning "radare2 failed with the exit code %d" n;
+      out
   | WSIGNALED _ | WSTOPPED _ ->
-    warning "radare2 was interrupted with a signal";
-    out
+      warning "radare2 was interrupted with a signal";
+      out
 
 let string_of_addr addrs =
-  List.map addrs ~f:(Z.format "0x%x") |>
-  String.concat ~sep:", "
+  List.map addrs ~f:(Z.format "0x%x") |> String.concat ~sep:", "
 
 let report_missing = function
-  | Bap_relation.Non_injective_fwd (addrs,name) ->
-    info "skipping (%s), as they all have the same name %s"
-      (string_of_addr addrs) name
-  | Bap_relation.Non_injective_bwd (names,addr) ->
-    info "skipping (%s), as they all have the same address %s"
-      (String.concat names ~sep:", ") (Z.format "0x%x" addr)
+  | Bap_relation.Non_injective_fwd (addrs, name) ->
+      info "skipping (%s), as they all have the same name %s"
+        (string_of_addr addrs) name
+  | Bap_relation.Non_injective_bwd (names, addr) ->
+      info "skipping (%s), as they all have the same address %s"
+        (String.concat names ~sep:", ")
+        (Z.format "0x%x" addr)
 
 let provide_radare2 file =
-  let funcs = Hashtbl.create (module struct
-      type t = Z.t
-      let compare = Z.compare and hash = Z.hash
-      let sexp_of_t x = Sexp.Atom (Z.to_string x)
-    end) in
+  let funcs =
+    Hashtbl.create
+      (module struct
+        type t = Z.t
+
+        let compare = Z.compare
+        and hash = Z.hash
+
+        let sexp_of_t x = Sexp.Atom (Z.to_string x)
+      end)
+  in
   let rels =
     let init = Bap_relation.empty Z.compare String.compare in
-    List.fold ~init (extract_symbols file) ~f: (fun rels (name,addr,typ) ->
-        if String.equal typ "FUNC" then match strip name with
+    List.fold ~init (extract_symbols file) ~f:(fun rels (name, addr, typ) ->
+        if String.equal typ "FUNC" then
+          match strip name with
           | None -> rels
           | Some name -> Bap_relation.add rels addr name
-        else rels) in
+        else rels)
+  in
   Bap_relation.matching rels ()
     ~saturated:(fun addr name () -> Hashtbl.add_exn funcs ~key:addr ~data:name)
     ~unmatched:(fun reason () -> report_missing reason);
-  if Hashtbl.length funcs = 0
-  then warning "failed to obtain symbols";
-  let symbolizer = Symbolizer.create @@ fun addr ->
+  if Hashtbl.length funcs = 0 then warning "failed to obtain symbols";
+  let symbolizer =
+    Symbolizer.create @@ fun addr ->
     let addr = Bitvec.to_bigint (Word.to_bitvec addr) in
-    Hashtbl.find funcs addr in
+    Hashtbl.find funcs addr
+  in
   let symbolizer = Symbolizer.set_path symbolizer file in
   Symbolizer.provide agent symbolizer;
   provide_roots file funcs
@@ -114,18 +124,18 @@ let provide_radare2 file =
 let main () = Stream.observe Project.Info.file @@ provide_radare2
 
 let () =
-  Config.manpage [
-    `S "DESCRIPTION";
-    `P "This plugin provides a symbolizer based on radare2.";
-    `S  "EXAMPLES";
-    `P  "To view the symbols after running the plugin:";
-    `P  "$(b, bap) $(i,executable) --dump-symbols ";
-    `P  "To view symbols without this plugin:";
-    `P  "$(b, bap) $(i,executable) --no-radare2 --dump-symbols";
-    `S  "SEE ALSO";
-    `P  "$(b,bap-plugin-objdump)(1)"
-  ];
+  Config.manpage
+    [
+      `S "DESCRIPTION";
+      `P "This plugin provides a symbolizer based on radare2.";
+      `S "EXAMPLES";
+      `P "To view the symbols after running the plugin:";
+      `P "$(b, bap) $(i,executable) --dump-symbols ";
+      `P "To view symbols without this plugin:";
+      `P "$(b, bap) $(i,executable) --no-radare2 --dump-symbols";
+      `S "SEE ALSO";
+      `P "$(b,bap-plugin-objdump)(1)";
+    ];
   Config.declare_extension
     ~doc:"extracts symbols and function starts using radare2"
-    ~provides:["symbolizer"; "radare2"]
-    (fun {get=_} -> main ())
+    ~provides:[ "symbolizer"; "radare2" ] (fun { get = _ } -> main ())

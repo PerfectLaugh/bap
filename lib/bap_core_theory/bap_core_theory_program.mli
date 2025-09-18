@@ -1,7 +1,6 @@
 open Core
 open Bap_knowledge
-
-module Value  = Bap_core_theory_value
+module Value = Bap_core_theory_value
 module Effect = Bap_core_theory_effect
 module Target = Bap_core_theory_target
 
@@ -9,17 +8,19 @@ type cls
 type program = cls
 type language
 type compiler
+type t = (program, unit) Knowledge.cls Knowledge.value
 
-type t = (program,unit) Knowledge.cls Knowledge.value
-val cls : (program,unit) Knowledge.cls
+val cls : (program, unit) Knowledge.cls
 
 module Semantics : sig
   type cls = Effect.cls
   type t = unit Effect.t
+
   val cls : (cls, unit Effect.sort) Knowledge.cls
   val slot : (program, t) Knowledge.slot
   val value : (cls, unit Value.t) Knowledge.slot
   val code : (cls, string option) Knowledge.slot
+
   include Knowledge.Value.S with type t := t
 end
 
@@ -27,16 +28,20 @@ include Knowledge.Value.S with type t := t
 
 module Source : sig
   open Knowledge
+
   type cls
-  include Knowledge.Value.S with type t = (cls,unit) Class.t Value.t
-  val cls : (cls,unit) Class.t
-  val language : (cls,language) slot
-  val code : (cls,string) slot
-  val file : (cls,string option) slot
+
+  include Knowledge.Value.S with type t = (cls, unit) Class.t Value.t
+
+  val cls : (cls, unit) Class.t
+  val language : (cls, language) slot
+  val code : (cls, string) slot
+  val file : (cls, string option) slot
 end
 
 module Language : sig
   include Knowledge.Enum.S with type t = language
+
   val c : language
   val cxx : language
   val ada : language
@@ -46,19 +51,15 @@ end
 
 module Unit : sig
   open Knowledge
-  type cls
 
+  type cls
   type t = cls obj
 
-  val cls : (cls,unit) Class.t
-
+  val cls : (cls, unit) Class.t
   val for_file : string -> t knowledge
-
   val for_region : lower:Bitvec.t -> upper:Bitvec.t -> t knowledge
-
   val path : (cls, string option) slot
   val bias : (cls, Bitvec.t option) slot
-
   val target : (cls, Target.t) slot
   val source : (cls, Source.t) slot
   val compiler : (cls, compiler option) slot
@@ -75,7 +76,9 @@ module Compiler : sig
     ?specs:(string * string) list ->
     ?version:string list ->
     ?options:string list ->
-    string -> compiler
+    string ->
+    compiler
+
   val name : compiler -> string
   val version : compiler -> string list
   val options : compiler -> string list
@@ -85,7 +88,9 @@ end
 
 module Label : sig
   open Knowledge
+
   type t = program obj
+
   val unit : (program, Unit.t option) slot
   val addr : (program, Bitvec.t option) slot
   val name : (program, string option) slot

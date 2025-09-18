@@ -11,7 +11,7 @@ val blk : cfg -> block -> blk term list
 val insn : ?addr:addr -> insn -> blk term list
 
 val insns :
-  ?fall:[`Inter of Ir_jmp.dst | `Intra of Ir_jmp.dst ] ->
+  ?fall:[ `Inter of Ir_jmp.dst | `Intra of Ir_jmp.dst ] ->
   ?addr:addr ->
   insn list ->
   blk term list
@@ -23,7 +23,7 @@ module KB : sig
   val insn : ?addr:addr -> insn -> blk term list knowledge
 
   val insns :
-    ?fall:[`Inter of Ir_jmp.dst | `Intra of Ir_jmp.dst ] ->
+    ?fall:[ `Inter of Ir_jmp.dst | `Intra of Ir_jmp.dst ] ->
     ?addr:addr ->
     insn list ->
     blk term list knowledge

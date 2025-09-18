@@ -1,10 +1,11 @@
 (library
-  (name llvm_plugin)
-  (public_name bap-llvm.plugin)
-  (libraries bap bap-llvm bap-main core))
+ (name llvm_plugin)
+ (public_name bap-llvm.plugin)
+ (libraries bap bap-llvm bap-main core))
 
 (plugin
-  (name llvm)
-  (package bap-llvm)
-  (libraries bap-llvm.plugin)
-  (site (bap-common plugins)))
+ (name llvm)
+ (package bap-llvm)
+ (libraries bap-llvm.plugin)
+ (site
+  (bap-common plugins)))
