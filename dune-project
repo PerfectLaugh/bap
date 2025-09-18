@@ -11,7 +11,6 @@
 
 
 (explicit_js_mode)
-(formatting disabled)
 
 (use_standard_c_and_cxx_flags false)
 
