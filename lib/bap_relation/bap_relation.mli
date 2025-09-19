@@ -53,23 +53,19 @@ val iter : ('k, 's) t -> f:('k -> 's -> unit) -> unit
 
 (** {2 Bijections and matching}
 
-    The set of independent edges [M] (the matching) of the graph [G]
-    forms a finite bijection between [K] and [S]. It is guaranteed
-    that for each pair [(x,s)] in [M] there is no other pair in [M],
-    that will include [x] or [s].
+    The set of independent edges [M] (the matching) of the graph [G] forms a
+    finite bijection between [K] and [S]. It is guaranteed that for each pair
+    [(x,s)] in [M] there is no other pair in [M], that will include [x] or [s].
 
-    Edges [R] that are not in the matching [M] represent a subset of
-    [R] that do not match because of one the two anomalies:
-    - A non-injective forward mapping occurs when the same value from
-      the set [S] is in relation with more than one value from the set
-      [K], e.g., [(x,s), (y,s)] is encoded as
-      [Non_injective_fwd ([x,y],s)];
+    Edges [R] that are not in the matching [M] represent a subset of [R] that do
+    not match because of one the two anomalies:
+    - A non-injective forward mapping occurs when the same value from the set
+      [S] is in relation with more than one value from the set [K], e.g.,
+      [(x,s), (y,s)] is encoded as [Non_injective_fwd ([x,y],s)];
 
-    - A non-injective backward mapping occurs when the same value from
-      the set [K] is in relation with more than one value from the set
-      [S], e.g., [(x,r), (x,s)] is encoded as
-      [Non_injective_bwd ([r;s],x);
-*)
+    - A non-injective backward mapping occurs when the same value from the set
+      [K] is in relation with more than one value from the set [S], e.g.,
+      [(x,r), (x,s)] is encoded as [Non_injective_bwd ([r;s],x)]; *)
 
 (** the reason why the pair was left unmatched *)
 type ('k, 's) non_injective =

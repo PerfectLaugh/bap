@@ -1,19 +1,17 @@
 open Bap.Std
 (** Byteweight library.
 
-    Byteweight is a function start identification algorithm [[1]]. This
-    library provides a functorized implementation.
+    Byteweight is a function start identification algorithm [[1]]. This library
+    provides a functorized implementation.
 
-    An auxiliary {!Bap_byteweight_signatures} library provides an
-    access to the repository of binary signatures.
+    An auxiliary {!Bap_byteweight_signatures} library provides an access to the
+    repository of binary signatures.
 
-    @see
-    <https://www.usenix.org/system/files/conference/usenixsecurity14/sec14-paper-bao.pdf>
-    {v
-    [1]: Bao, Tiffany, et al. "Byteweight: Learning to recognize functions in binary code."
-         23rd USENIX Security Symposium (USENIX Security 14). 2014.
-    v}
-*)
+    @see <https://www.usenix.org/system/files/conference/usenixsecurity14/sec14-paper-bao.pdf>
+      {v
+        [1]: Bao, Tiffany, et al. "Byteweight: Learning to recognize functions in binary code."
+            23rd USENIX Security Symposium (USENIX Security 14). 2014.
+      v} *)
 
 type stats
 

@@ -132,11 +132,8 @@ module Std : sig
 
       This is the extension of Core's [Sequence] module
 
-      @see
-      <https://ocaml.janestreet.com/ocaml-core/latest/doc/core/Std/Sequence.mod/>
-      [Sequence]
-
-  *)
+      @see <https://ocaml.janestreet.com/ocaml-core/latest/doc/core/Std/Sequence.mod/>
+        [Sequence] *)
   module Seq : sig
     type 'a t = 'a Sequence.t [@@deriving bin_io, compare, sexp]
 

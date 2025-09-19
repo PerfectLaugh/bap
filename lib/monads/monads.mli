@@ -24,10 +24,12 @@ open Core
          {- Monad Interfaces
             - {{!Std.Monad.S}Monad.S} the unary monad
             - {{!Std.Monad.S2}Monad.S2} the binary monad
-            - {{!modtype:Std.Monad.Minimal}Monad.Minimal} the minimal interface
-            - {{!modtype:Std.Monad.Minimal}Monad.Minimal2} the minimal interface
-            - {{!modtype:Std.Monad.Core}Monad.Core} the core interface
-            - {{!modtype:Std.Monad.Core2}Monad.Core2} the core interface
+            - {{!module-type:Std.Monad.Minimal}Monad.Minimal} the minimal
+              interface
+            - {{!module-type:Std.Monad.Minimal}Monad.Minimal2} the minimal
+              interface
+            - {{!module-type:Std.Monad.Core}Monad.Core} the core interface
+            - {{!module-type:Std.Monad.Core2}Monad.Core2} the core interface
             - {{!Std.Monad.Plus}Monad.Plus} a monad over a monoid interface
             - {{!Std.Monad.Fail}Monad.Fail} a failure monad interface
             - {{!Std.Monad.Choice}Monad.Choice} a choice monad interface
@@ -1385,20 +1387,20 @@ module Std : sig
         implementation *)
     module Make2 (M : Basic2) : S2 with type ('a, 's) t := ('a, 's) M.t
 
-    (** [Core(M)] derives {{!S}Monad.S} from the {{!modtype:Core}Core}
+    (** [Core(M)] derives {{!S}Monad.S} from the {{!module-type:Core}Core}
         implementation *)
     module Core (M : Core) : S with type 'a t = 'a M.t
 
-    (** [Core2(M)] derives {{!S2}Monad.S2} from the {{!modtype:Core2}Core}
+    (** [Core2(M)] derives {{!S2}Monad.S2} from the {{!module-type:Core2}Core}
         implementation *)
     module Core2 (M : Core2) : S2 with type ('a, 'e) t = ('a, 'e) M.t
 
-    (** [Minimal(M)] derives {{!S}Monad.S} from the {{!modtype:Minimal}Minimal}
-        implementation *)
+    (** [Minimal(M)] derives {{!S}Monad.S} from the
+        {{!module-type:Minimal}Minimal} implementation *)
     module Minimal (M : Minimal) : S with type 'a t = 'a M.t
 
     (** [Minimal2(M)] derives {{!S2}Monad.S2} from the
-        {{!modtype:Minimal2}Minimal} implementation *)
+        {{!module-type:Minimal2}Minimal} implementation *)
     module Minimal2 (M : Minimal2) : S2 with type ('a, 'e) t = ('a, 'e) M.t
 
     module type Monad = S

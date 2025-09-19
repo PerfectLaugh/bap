@@ -106,110 +106,103 @@ module Std : sig
 
   (** Variadic arguments.
 
-      [Variadic], abstracts a common idiom of a function applied to a
-      variable number of arguments. A common examples of such function
-      would be OCaml's standard [printf] and [scanf] functions. A more
-      general examples, are monadic parsers, such as [MParser],
-      command line parsers such as [Cmdliner] and [Core]'s
-      [Command]. They all are using the same trick to collect
-      arguments of different type and pass it to a function, s.t.
-      the function type actually defines the type of collected
-      arguments. Both [Cmdliner] and [Command] relies on [Applicative]
-      functor defined in [1]. However, it requires a [return]
-      function, that is not possible to provide in general for
-      co-inductive types, that can only be observed or mapped. It is
-      still possible to implement a variadic interface using the
-      restricted [Applicable] interface given only one restriction: it
-      is not possible to create an empty variadic list of arguments
-      (that can be considered as a benefit).
+      [Variadic], abstracts a common idiom of a function applied to a variable
+      number of arguments. A common examples of such function would be OCaml's
+      standard [printf] and [scanf] functions. A more general examples, are
+      monadic parsers, such as [MParser], command line parsers such as
+      [Cmdliner] and [Core]'s [Command]. They all are using the same trick to
+      collect arguments of different type and pass it to a function, s.t. the
+      function type actually defines the type of collected arguments. Both
+      [Cmdliner] and [Command] relies on [Applicative] functor defined in [1].
+      However, it requires a [return] function, that is not possible to provide
+      in general for co-inductive types, that can only be observed or mapped. It
+      is still possible to implement a variadic interface using the restricted
+      [Applicable] interface given only one restriction: it is not possible to
+      create an empty variadic list of arguments (that can be considered as a
+      benefit).
 
-
-      Here are some examples, that highlights common use cases of the
-      variadic structure. Suppose, we have several future values of
-      different types, that we would like to merge with some function
-      [f], to be concrete let's assume, that we're waiting for:
+      Here are some examples, that highlights common use cases of the variadic
+      structure. Suppose, we have several future values of different types, that
+      we would like to merge with some function [f], to be concrete let's
+      assume, that we're waiting for:
 
       [arch : arch future] - program architecture to be defined;
-      [lang : lang future] - a programming language;
-      [abi  : abi future]  - an ABI;
-      [api  : api future]  - an api specification
+      [lang : lang future] - a programming language; [abi  : abi future] - an
+      ABI; [api  : api future] - an api specification
 
       And we have a function [typecheck] of type
 
-      {[arch -> lang -> abi -> api -> pass future]},
+      {[
+        arch -> lang -> abi -> api -> pass future
+      ]}
+      ,
 
-      that will typecheck a binary program, according to the typing
-      rules of the specified programming [lang]uage, binary interface,
-      and type environment [api]. Given the [Variadic] interface we
-      can write it as
+      that will typecheck a binary program, according to the typing rules of the
+      specified programming [lang]uage, binary interface, and type environment
+      [api]. Given the [Variadic] interface we can write it as
 
-      [Future.Variadic.(apply (args arch $lang $abi $api) ~f:typecheck]
+      [Future.Variadic.(apply (args arch $lang $abi $api) ~f:typecheck)]
 
-      Note, since future implements a more powerful Monad interface,
-      it is still possible to apply a [typecheck] function without
-      using the variadic interface, e.g.,
+      Note, since future implements a more powerful Monad interface, it is still
+      possible to apply a [typecheck] function without using the variadic
+      interface, e.g.,
 
       {[
         arch >>= fun arch ->
         lang >>= fun lang ->
         abi >>= fun abi ->
-        api >>= fun api ->
-        typecheck arch lang abi api
+        api >>= fun api -> typecheck arch lang abi api
       ]}
 
-      However, this is less general, as it specifies a concrete order
-      of argument bindings, it is also requires a much less general
-      monad interface with bind and return operations, that are in
-      general not available for coinductive types, for example for
-      [stream] type. If we substitute [future] type constructor in the
-      above example with a [stream] constructor we will no be able to
-      implement the latter solution, as we lack the monad  interface.
+      However, this is less general, as it specifies a concrete order of
+      argument bindings, it is also requires a much less general monad interface
+      with bind and return operations, that are in general not available for
+      coinductive types, for example for [stream] type. If we substitute
+      [future] type constructor in the above example with a [stream] constructor
+      we will no be able to implement the latter solution, as we lack the monad
+      interface.
 
-      Using a stream for this particular example, makes sense, since,
-      the specified properties, can be defined on a module level, so
-      they can be defined multiple times for each project. In that
-      case function typecheck will be applied for each quartet of the
-      arguments.
+      Using a stream for this particular example, makes sense, since, the
+      specified properties, can be defined on a module level, so they can be
+      defined multiple times for each project. In that case function typecheck
+      will be applied for each quartet of the arguments.
 
-      When used with collections, such as list, sequences, sets, etc,
-      the pattern can be used to generalize cartesian product from a
-      function taking a pair of arguments, to a function taking
-      arbitrary amount of arguments.
+      When used with collections, such as list, sequences, sets, etc, the
+      pattern can be used to generalize cartesian product from a function taking
+      a pair of arguments, to a function taking arbitrary amount of arguments.
 
-      For collection, the Variadic can be used to generalize cartesian
-      product to [N] arguments:
+      For collection, the Variadic can be used to generalize cartesian product
+      to [N] arguments:
 
       {[
         module AList = struct
           include List
-          let apply fs xs =
-            cartesian_product fs xs >>| fun (f,x) -> f x
+
+          let apply fs xs = cartesian_product fs xs >>| fun (f, x) -> f x
         end
-        module Varags = Variadic.Make(AList)
+
+        module Varags = Variadic.Make (AList)
 
         let cartesian_product = Varags.apply
       ]}
 
-      For option and error monad, with the following definition of
-      [apply],
+      For option and error monad, with the following definition of [apply],
 
-      {[let apply f x = match f,x with
-          | Some f, Some x -> Some (f x)
-          | None -> None]}
+      {[
+        let apply f x =
+          match (f, x) with Some f, Some x -> Some (f x) | None -> None
+      ]}
 
-      The produced [Varargs.apply] will be a generalization of
-      [Option.merge], i.e., it will apply function [f] to [N]
-      arguments of different types, if all of them are not zero (i.e.,
-      [None], [Error].
+      The produced [Varargs.apply] will be a generalization of [Option.merge],
+      i.e., it will apply function [f] to [N] arguments of different types, if
+      all of them are not zero (i.e., [None], [Error].
 
-
-      @see <http://staff.city.ac.uk/~ross/papers/Applicative.pdf> {v
+      @see <http://staff.city.ac.uk/~ross/papers/Applicative.pdf>
+        {v
       [1]: Applicative Programming with Effects.
            Conor McBride and Ross Paterson.
            Journal of Functional Programming 18:1 (2008), pages 1-13.
-    v}
-
-  *)
+        v} *)
   module Variadic : sig
     (** Variadic argument list. *)
     module type S = sig

@@ -330,105 +330,106 @@ val init :
   (unit, error) result
 (** [init ()] initializes the BAP framework.
 
-    Attention: function is only needed when BAP framework is
-    embedded in another application. It shall not be called in BAP
-    plugins. If you're not sure whether you need to call it, then
-    don't call it.
+    Attention: function is only needed when BAP framework is embedded in another
+    application. It shall not be called in BAP plugins. If you're not sure
+    whether you need to call it, then don't call it.
 
-    The [init ()] expression evaluates to [Ok ()] if the system
-    initialization terminated normally and is fully complete. It returns
-    [Error condition] in case if the evaluation terminated abnormally
-    with the [condition] value that describes the reasons and
-    consequences of this abnormal termination (note, despite the name,
-    it is not always an error, e.g., a user may have requested the
-    help message, using the --help command).
+    The [init ()] expression evaluates to [Ok ()] if the system initialization
+    terminated normally and is fully complete. It returns [Error condition] in
+    case if the evaluation terminated abnormally with the [condition] value that
+    describes the reasons and consequences of this abnormal termination (note,
+    despite the name, it is not always an error, e.g., a user may have requested
+    the help message, using the --help command).
 
-    If [init ()] terminates with any value other that [Ok ()] the
-    BAP framework is considered to be unitialized and shouldn't be
-    used.
+    If [init ()] terminates with any value other that [Ok ()] the BAP framework
+    is considered to be unitialized and shouldn't be used.
 
-    The initialization procedure uses the provided parameters to
-    evaluate command line and environment arguments, loads the
-    requested plugins and dispatches commands if any are requested
-    through the command line.
+    The initialization procedure uses the provided parameters to evaluate
+    command line and environment arguments, loads the requested plugins and
+    dispatches commands if any are requested through the command line.
 
-    This function could be invoked only once per lifetime of a
-    process, and consecutive
+    This function could be invoked only once per lifetime of a process, and
+    consecutive
 
-    @parameter features, if specified, denotes a set of features of an
-    application that extensions can expect. Extensions that require a
-    feature which is not in the [features] provided by the application
-    will not be evaluated.
+    @param features
+      if specified, denotes a set of features of an application that extensions
+      can expect. Extensions that require a feature which is not in the
+      [features] provided by the application will not be evaluated.
 
-    @parameter requires if specified then only those extensions that
-    provide at least one feature in [requires] will be evaluated.
+    @param requires
+      if specified then only those extensions that provide at least one feature
+      in [requires] will be evaluated.
 
-    @parameter library specifies a list of folders that will be
-    prepended to the plugins search paths list (which already contains
-    some precompiled location and the value of the BAP_PLUGIN_PATH
-    environment variable, which in turn could also be a list).
+    @param library
+      specifies a list of folders that will be prepended to the plugins search
+      paths list (which already contains some precompiled location and the value
+      of the BAP_PLUGIN_PATH environment variable, which in turn could also be a
+      list).
 
-    @parameter argv is the array of command line arguments, with the first
-    value being the program name. If not specified, then it defaults
-    to [[|Sys.progname|]], i.e., no command line arguments will be
-    evaluated. If you want to let [init] process the command line
-    passed to the process, use the [Sys.argv] variable.
+    @param argv
+      is the array of command line arguments, with the first value being the
+      program name. If not specified, then it defaults to [[|Sys.progname|]],
+      i.e., no command line arguments will be evaluated. If you want to let
+      [init] process the command line passed to the process, use the [Sys.argv]
+      variable.
 
-    @parameter env, if specified, then this function will be used to
-    access environment variables. Otherwise, the environment variables
-    are looked up using the [Sys.getenv] function.
+    @param env
+      if specified, then this function will be used to access environment
+      variables. Otherwise, the environment variables are looked up using the
+      [Sys.getenv] function.
 
-    @parameter log, if specified, then the specified location will be
-    used for logging. If [`Formatter ppf] is passed then all log
-    messages will be printed into [ppf] (every message is flushed).
-    If [`Dir path] is passed, then all log messages will be printed in
-    the [Filename.concat path "log"] file. If such file exists, then
-    it will be renamed to "log~1", if "log~1", in turn, exists, it
-    will will be renamed to "log~2" and so on, until "log~99" is
-    reached, which will be discarded. If the [log] parameter is not
-    specified, then the logging will be performed in a directory which
-    name is obtained either from the command line (via the [--logdir]
-    parameter) or from the environment (using the [BAP_LOG_DIR]
-    variable). If neither is present then the logging will be
-    performed into a directory prescribed by the XDG standard for the
-    application - i.e., to the `$XDG_STATE_HOME/bap`, where the
-    environment variable [XDG_STATE_HOME] defaults to
-    [$HOME/.local/state]. If, for some reason, it wasn't possible to
-    create a log file, then logging will fallback to the [stderr]
-    channel. Note, a usual log rotating routine will be applied in the
-    log directory, as described above.
+    @param log
+      if specified, then the specified location will be used for logging. If
+      [`Formatter ppf] is passed then all log messages will be printed into
+      [ppf] (every message is flushed). If [`Dir path] is passed, then all log
+      messages will be printed in the [Filename.concat path "log"] file. If such
+      file exists, then it will be renamed to "log~1", if "log~1", in turn,
+      exists, it will will be renamed to "log~2" and so on, until "log~99" is
+      reached, which will be discarded. If the [log] parameter is not specified,
+      then the logging will be performed in a directory which name is obtained
+      either from the command line (via the [--logdir] parameter) or from the
+      environment (using the [BAP_LOG_DIR] variable). If neither is present then
+      the logging will be performed into a directory prescribed by the XDG
+      standard for the application - i.e., to the `$XDG_STATE_HOME/bap`, where
+      the environment variable [XDG_STATE_HOME] defaults to
+      [$HOME/.local/state]. If, for some reason, it wasn't possible to create a
+      log file, then logging will fallback to the [stderr] channel. Note, a
+      usual log rotating routine will be applied in the log directory, as
+      described above.
 
-    @parameter out if specified, then this channel will be used to report help
-    and other informational messages, if such are requested through
-    command line.
+    @param out
+      if specified, then this channel will be used to report help and other
+      informational messages, if such are requested through command line.
 
-    @parameter err if specified, then this channel will  be used to report error
-    and other diagnostic messages in case of configuration
-    problems. Nothing will be printed in this channel if the
-    initialization procedure went normally (and evaluated to [Ok ()]).
+    @param err
+      if specified, then this channel will be used to report error and other
+      diagnostic messages in case of configuration problems. Nothing will be
+      printed in this channel if the initialization procedure went normally (and
+      evaluated to [Ok ()]).
 
-    @parameter man is the manual describing the purposes and
-    basic usage of the utility in which bap is embedded. It is useful
-    if the host program is going to use BAP command line parsing
-    facilities, so it will be rendered when the [--help] option is
-    specified. A simple markdown syntax is understood, i.e.,
-    paragraphs, section headers, itemized lists, and verbatim code
-    sections.
+    @param man
+      is the manual describing the purposes and basic usage of the utility in
+      which bap is embedded. It is useful if the host program is going to use
+      BAP command line parsing facilities, so it will be rendered when the
+      [--help] option is specified. A simple markdown syntax is understood,
+      i.e., paragraphs, section headers, itemized lists, and verbatim code
+      sections.
 
-    @parameter name is used as the name of the process. If not
-    specified, then [Sys.progname] is used.
+    @param name
+      is used as the name of the process. If not specified, then [Sys.progname]
+      is used.
 
-    @parameter version defaults to the BAP Framework version.
+    @param version defaults to the BAP Framework version.
 
-    @parameter default, if specified, then this function will be invoked
-    when no command line arguments were provided.
+    @param default
+      if specified, then this function will be invoked when no command line
+      arguments were provided.
 
-    @parameter default_command, if specified, then this command will
-    be used when command line arguments are provided but do not
-    specify a command.
+    @param default_command
+      if specified, then this command will be used when command line arguments
+      are provided but do not specify a command.
 
-    @since 2.1.0.
-*)
+    @since 2.1.0. *)
 
 (** Writing and declaring BAP extensions. *)
 module Extension : sig
@@ -443,55 +444,50 @@ module Extension : sig
     unit
   (** [declare extension] declares the [extension] function.
 
-      The function is run when one of the features [provided] by the
-      [extension] is required by the call to [Bap_main.init] and all
-      [features] needed by the extension are present.
+      The function is run when one of the features [provided] by the [extension]
+      is required by the call to [Bap_main.init] and all [features] needed by
+      the extension are present.
 
-      If [extension] evaluates to [Error condition], then no other
-      extensions will be evaluated and the initialization procedure
-      will stop immediately with the [Error condition] as the final
-      result.
+      If [extension] evaluates to [Error condition], then no other extensions
+      will be evaluated and the initialization procedure will stop immediately
+      with the [Error condition] as the final result.
 
-      If [extension] raises an exception [e], then it will be caught, and
-      the initialization procedure will terminated immediately with
-      the [Error (Error.Bug (e,backtrace)].
+      If [extension] raises an exception [e], then it will be caught, and the
+      initialization procedure will terminated immediately with the
+      [Error (Error.Bug (e,backtrace))].
 
-      @parameter features is a set of application features that the
-      declared extension expects. If there is a feature that is
-      required but not provided by an application, then the extension
-      will not be evaluated. See the corresponding [features]
-      parameter of the [init] function, as well as the {!features}
-      section.
+      @param features
+        is a set of application features that the declared extension expects. If
+        there is a feature that is required but not provided by an application,
+        then the extension will not be evaluated. See the corresponding
+        [features] parameter of the [init] function, as well as the {!features}
+        section.
 
-      @parameter provides is a set of features that the extension
-      provides. During the initialization, only those extensions that
-      provide features that are requested by the application are
-      loaded. All configuration parameters of the extension will be
-      attributed with tags from the [provides] set, so that they will
-      only affect those components that explicitly depend on of the
-      specified features. Note that, the set of provided features is
-      shared by all extensions of a plugin, in other words it is an
-      attribute of a plugin rather than of a particular extension
-      function.
+      @param provides
+        is a set of features that the extension provides. During the
+        initialization, only those extensions that provide features that are
+        requested by the application are loaded. All configuration parameters of
+        the extension will be attributed with tags from the [provides] set, so
+        that they will only affect those components that explicitly depend on of
+        the specified features. Note that, the set of provided features is
+        shared by all extensions of a plugin, in other words it is an attribute
+        of a plugin rather than of a particular extension function.
 
-      @parameter doc is the documentation provided with the
-      extension. It can take a form of a one line description or a
-      full manual written in the markdown syntax. See the
-      corresponding [man] parameter of the [Bap_main.init] function.
+      @param doc
+        is the documentation provided with the extension. It can take a form of
+        a one line description or a full manual written in the markdown syntax.
+        See the corresponding [man] parameter of the [Bap_main.init] function.
   *)
 
   val documentation : string -> unit
   (** [documentation s] specifies plugin documentation.
 
-      A non-declarative way of specifying documentation. Each
-      occurrence of the [documentation s] appends [s] to the plugin
-      documentation, as well as each occurrence of the [doc] parameter
-      of the [Extension.declare] function.
+      A non-declarative way of specifying documentation. Each occurrence of the
+      [documentation s] appends [s] to the plugin documentation, as well as each
+      occurrence of the [doc] parameter of the [Extension.declare] function.
 
-      See the [doc] parameter of the {!Extension.declare} and
-      !{Bap_main.init} functions for more information on the accepted
-      formats.
-  *)
+      See the [doc] parameter of the {!Extension.declare} and {!Bap_main.init}
+      functions for more information on the accepted formats. *)
 
   (** Interface for specifying commands.*)
   module Command : sig
@@ -529,25 +525,23 @@ module Extension : sig
       unit
     (** [declare grammar name command] declares a [command].
 
-        Declares to BAP that a command with the given [name] should be
-        invoked when a user specifies the [name] or [:name] as the
-        first argument in the command line. The [grammar] defines
-        the command line grammar of this command.
+        Declares to BAP that a command with the given [name] should be invoked
+        when a user specifies the [name] or [:name] as the first argument in the
+        command line. The [grammar] defines the command line grammar of this
+        command.
 
+        where [<command1>] ... [<commandN>] are the names of declared commands,
+        [grammar1] ... [grammarN] are corresponding grammars for each command,
+        and [G'] is the global
 
-        where [<command1>] ... [<commandN>] are the names of declared
-        commands, [grammar1] ... [grammarN] are corresponding grammars
-        for each command, and [G'] is the global
+        When the command is selected and command line arguments are parsed
+        successfully, the [command] function is applied to the specified command
+        line arguments. The result of evaluation of the [command] will become
+        the result of the [Bap_main.init ()] expression in the host program.
 
-        When the command is selected and command line arguments are
-        parsed successfully, the [command] function is applied to the
-        specified command line arguments. The result of evaluation
-        of the [command] will become the result of the [Bap_main.init
-        ()] expression in the host program.
-
-        If the function with the given [name] is already registered,
-        then the command is not registered and BAP initialization will
-        terminate abnormally with the configuration error condition.
+        If the function with the given [name] is already registered, then the
+        command is not registered and BAP initialization will terminate
+        abnormally with the configuration error condition.
 
         {3 Examples}
 
@@ -560,54 +554,51 @@ module Extension : sig
         1) Declare a command with no arguments:
 
         {[
-
           let () =
-            Command.(declare "hello" args) @@
-            fun ctxt ->
+            Command.(declare "hello" args) @@ fun ctxt ->
             printf "the `hello' command is called\n";
             Ok ()
         ]}
-
 
         2) Declaring a command with one positional argument
 
         {[
           let input = Command.argument Type.int
+
           let () =
-            Command.(declare "hello" (args $input)) @@
-            fun input ctxt ->
+            Command.(declare "hello" (args $ input)) @@ fun input ctxt ->
             printf "called as `hello %d'\n" input
         ]}
 
-        3) Declaring a command with an optional named
-        parameter, and many positional arguments.
+        3) Declaring a command with an optional named parameter, and many
+        positional arguments.
 
         {[
           let inputs = Command.arguments Type.string
           let output = Command.parameter Type.string "output"
+
           let () =
-            Command.(declare "copy" (args $output $inputs)) @@
-            fun output inputs ->
+            Command.(declare "copy" (args $ output $ inputs))
+            @@ fun output inputs ->
             printf "copying %s inputs to %s\n"
-              (String.concat ~sep:" " inputs) output
+              (String.concat ~sep:" " inputs)
+              output
         ]}
 
+        @param doc
+          defines the documentation for the declared command, it could be as
+          simple one-line description or a full featured manual in the markdown
+          syntax. See the corresponding parameter in the {!Bap_main.init}
+          function for the description of the accepted.
 
-        @parameter doc defines the documentation for the declared
-        command, it could be as simple one-line description or a full
-        featured manual in the markdown syntax. See the corresponding
-        parameter in the {!Bap_main.init} function for the description
-        of the accepted.
-
-        @parameter requires defines the set of features that are
-        required by the implementation of this command. It defaults to
-        the set of all possible features. The context value passed to
-        the [command] function will be refined to the context of
-        extensions which are providing the specified features, i.e.,
-        between different invocations of BAP it will not change if
-        the configuration parameters of extensions on which the
-        command depends didn't change.
-    *)
+        @param requires
+          defines the set of features that are required by the implementation of
+          this command. It defaults to the set of all possible features. The
+          context value passed to the [command] function will be refined to the
+          context of extensions which are providing the specified features,
+          i.e., between different invocations of BAP it will not change if the
+          configuration parameters of extensions on which the command depends
+          didn't change. *)
 
     val args : ('a, 'a) t
     (** [args] is the empty grammar. Useful to define commands that do not take
@@ -659,27 +650,24 @@ module Extension : sig
       'a option param
     (** [switch values name] declares a switch-type parameter.
 
-        The grammar of {args $ term $ switch values name}:
+        The grammar of [{args $ term $ switch values name}] is:
         {v
           G  = term, G' | G', term
           G' = ["--<name v0>" | .. | "--<name vN>"]
         v}
 
-        where [<name vK>] is the result of application of the [name]
-        function to the [K]th element of the [values] list.
+        where [<name vK>] is the result of application of the [name] function to
+        the [K]th element of the [values] list.
 
-        The switch-type parameters enables a selection from a list of
-        choices. If [--<name vK>] is specified on the command line,
-        then [Some vK] will be passed to the command, otherwise,
-        the [None] value will be passed.
+        The switch-type parameters enables a selection from a list of choices.
+        If [--<name vK>] is specified on the command line, then [Some vK] will
+        be passed to the command, otherwise, the [None] value will be passed.
 
-        The [name] function could be non-injective, so that several
-        names can correspond to the same value in the choice list.
+        The [name] function could be non-injective, so that several names can
+        correspond to the same value in the choice list.
 
-        The [name] function shall return syntactically valid command
-        line keys, i.e., non-empty strings that do not contain
-        whitespaces.
-    *)
+        The [name] function shall return syntactically valid command line keys,
+        i.e., non-empty strings that do not contain whitespaces. *)
 
     val switches :
       ?doc:('a -> string) ->
@@ -728,31 +716,29 @@ module Extension : sig
           G' = ["--<name k0>" [=] t] | .. | ["--<name kN>" [=] t]
         v}
 
-        where [k0] .. [kN] are elements of the [keys] list and [<name
-        kN>] is the result of application of the [name] function to
-        the [kN] element of the [keys] list.
+        where [k0] .. [kN] are elements of the [keys] list and [<name kN>] is
+        the result of application of the [name] function to the [kN] element of
+        the [keys] list.
 
-        For each occurrence of [--<name k> [=] v] on the specified
-        command line a binding [(k,v)] will be added to the
-        dictionary, which is passed as an argument to the command.
+        For each occurrence of [--<name k> [=] v] on the specified command line
+        a binding [(k,v)] will be added to the dictionary, which is passed as an
+        argument to the command.
 
-        Each key-value pair can occur at most once on the command
-        line. If a key-value pair is omitted, then the [default t]
-        will be added to the dictionary for that key. The length of the
-        passed dictionary is the same as the length of the [keys] list.
+        Each key-value pair can occur at most once on the command line. If a
+        key-value pair is omitted, then the [default t] will be added to the
+        dictionary for that key. The length of the passed dictionary is the same
+        as the length of the [keys] list.
 
+        The [name] function could be non-injective, so that several names can
+        correspond to the same value in the choice list.
 
-        The [name] function could be non-injective, so that several
-        names can correspond to the same value in the choice list.
-
-        The [name] function shall return syntactically valid command
-        line keys, i.e., non-empty strings that do not contain
-        whitespaces.
+        The [name] function shall return syntactically valid command line keys,
+        i.e., non-empty strings that do not contain whitespaces.
 
         {3 Keys as flags}
 
-        When the [as_flag] option is specified makes the value part
-        of the grammar becomes optional, thus the grammar of
+        When the [as_flag] option is specified makes the value part of the
+        grammar becomes optional, thus the grammar of
         [args $ term $ dictionary ~as_flag:s keys t name] becomes
 
         {v
@@ -763,14 +749,15 @@ module Extension : sig
         If the value is omitted on the command line, by the key [k] is
         specified, then the [(k,s)] will be added to the dictionary.
 
-        @parameter as_flag enables the "Keys as flags" mode.
+        @param as_flag enables the "Keys as flags" mode.
 
-        @parameter docv is the name that will be used to reference
-        values in the documentation string.
+        @param docv
+          is the name that will be used to reference values in the documentation
+          string.
 
-        @parameter doc if specified then [doc k] will be the
-        documentation string for the [--<key k>] parameter.
-    *)
+        @param doc
+          if specified then [doc k] will be the documentation string for the
+          [--<key k>] parameter. *)
 
     val parameter :
       ?doc:string ->
@@ -787,23 +774,21 @@ module Extension : sig
           G' = ["--<name>" [=] t]
         v}
 
-        If [--<name>=v] is specified, then [v] will be passed to the
-        command, otherwise the [default t] value will be passed.
+        If [--<name>=v] is specified, then [v] will be passed to the command,
+        otherwise the [default t] value will be passed.
 
         {3 Parameters as flags}
 
-        When the [as_flag] option specified, then the value part of
-        becomes optional and the parameter could be specified without
-        it, as a flag, e.g., [--<name>], in that case the value passed
-        to the [as_flag] parameter will be passed as an argument to
-        the command.
+        When the [as_flag] option specified, then the value part of becomes
+        optional and the parameter could be specified without it, as a flag,
+        e.g., [--<name>], in that case the value passed to the [as_flag]
+        parameter will be passed as an argument to the command.
 
         {3 Short keys}
 
-        The [aliases] parameter may additionally contain
-        one-character-long names, which will be interpreted as short
-        keys, that should be specified with only one dash character,
-        i.e.,
+        The [aliases] parameter may additionally contain one-character-long
+        names, which will be interpreted as short keys, that should be specified
+        with only one dash character, i.e.,
 
         The grammar of [args $ term $ parameter ~aliases:["<k>"] t name]
         {v
@@ -813,17 +798,15 @@ module Extension : sig
 
         where [<k>] is a single character.
 
-        @parameter as_flag enables the "Parameters as flags" mode.
+        @param as_flag enables the "Parameters as flags" mode.
 
-        @parameter doc is the documentation string.
+        @param doc is the documentation string.
 
-        @parameter docv is the name used to reference the parameter
-        value in its documentation.
+        @param docv
+          is the name used to reference the parameter value in its
+          documentation.
 
-        @parameter aliases is a list of additional aliases of the
-        parameter.
-
-    *)
+        @param aliases is a list of additional aliases of the parameter. *)
 
     val parameters :
       ?doc:string ->
@@ -921,49 +904,48 @@ module Extension : sig
       'a param
     (** [parameter t name] declares a configuration parameter.
 
-        This declaration extends the [common-options] grammar by
-        adding the following rules
+        This declaration extends the [common-options] grammar by adding the
+        following rules
         {v
           common-options =
             ...
             | common-options, R | R, common-options
           R = ["--<plugin>-<name>", ["="], t]
-        v},
+        v}
+        ,
 
-        where [<plugin>] is the name of the plugin in which the
-        configuration parameter is specified. (Note, the name of a
-        plugin is the name of the file in which it is packed without
-        the extension, e.g., a plugin [foo.plugin] has name [foo]).
+        where [<plugin>] is the name of the plugin in which the configuration
+        parameter is specified. (Note, the name of a plugin is the name of the
+        file in which it is packed without the extension, e.g., a plugin
+        [foo.plugin] has name [foo]).
 
-        When the [--<plugin>-<name> v] is specified on the command
-        line, or a configuration file, or in the environment, then
-        [get ctxt p] will evaluate to [v], where [p] is the declared
-        parameter.
+        When the [--<plugin>-<name> v] is specified on the command line, or a
+        configuration file, or in the environment, then [get ctxt p] will
+        evaluate to [v], where [p] is the declared parameter.
 
-        The [as_flag] option makes the value part optional on the
-        command line, so that [declare ~as_flag=v t name] extends
-        the grammar by adding the following rules
+        The [as_flag] option makes the value part optional on the command line,
+        so that [declare ~as_flag=v t name] extends the grammar by adding the
+        following rules
         {v
           common-options =
             ...
             | common-options, R | R, common-options
           R = ["--<plugin>-<name>", [["="], t]]
-        v},
+        v}
+        ,
 
-        Then, if the parameter was specified on the command line
-        without an argument, then [v] will be used as the value of the
-        parameter.
+        Then, if the parameter was specified on the command line without an
+        argument, then [v] will be used as the value of the parameter.
 
-        When [aliases] are specified, then for each [name] in the
-        aliases a [--<plugin>-<name>] option will be added.
+        When [aliases] are specified, then for each [name] in the aliases a
+        [--<plugin>-<name>] option will be added.
 
-        Note, even if the name is short (i.e., consisting only of one
-        letter) it will still be prefixed with the plugin name and
-        interpreted as a long option, e.g., if name is ["k"] and the
-        plugin name is ["foo"], then the option name will be
-        ["--foo-k"].
+        Note, even if the name is short (i.e., consisting only of one letter) it
+        will still be prefixed with the plugin name and interpreted as a long
+        option, e.g., if name is ["k"] and the plugin name is ["foo"], then the
+        option name will be ["--foo-k"].
 
-        {Examples}
+        [Examples]
 
         Declaring a simple configuration parameter:
 
@@ -975,13 +957,12 @@ module Extension : sig
 
           let () =
             Bap_main.Extension.declare @@ fun ctxt ->
-            printf "Will dive to depth %d\n"
-              (Configuration.get ctxt depth)
+            printf "Will dive to depth %d\n" (Configuration.get ctxt depth)
         ]}
 
-        The [Extension.Syntax] module adds an infix [(-->)] operator
-        for the [get] function. Using this operator the previous
-        example could be rewritten as:
+        The [Extension.Syntax] module adds an infix [(-->)] operator for the
+        [get] function. Using this operator the previous example could be
+        rewritten as:
 
         {[
           open Core
@@ -992,9 +973,8 @@ module Extension : sig
 
           let () =
             Bap_main.Extension.declare @@ fun ctxt ->
-            printf "Will dive to depth %d\n" (ctxt-->depth)
-        ]}
-    *)
+            printf "Will dive to depth %d\n" (ctxt --> depth)
+        ]} *)
 
     val parameters :
       ?doc:string ->
@@ -1005,52 +985,50 @@ module Extension : sig
       'a list param
     (** [parameters t name] declares a multi-occurring parameter.
 
-        This declaration extends the [common-options] grammar by
-        adding the following rules
+        This declaration extends the [common-options] grammar by adding the
+        following rules
         {v
           common-options =
             ...
             | common-options, R | R, common-options
           R = {"--<plugin>-<name>", ["="], t}
-        v},
+        v}
+        ,
 
-        where [<plugin>] is the name of the plugin in which the
-        configuration parameter is specified. (Note, the name of a
-        plugin is the name of the file in which it is packed without
-        the extension, e.g., a plugin [foo.plugin] has name [foo]).
+        where [<plugin>] is the name of the plugin in which the configuration
+        parameter is specified. (Note, the name of a plugin is the name of the
+        file in which it is packed without the extension, e.g., a plugin
+        [foo.plugin] has name [foo]).
 
-        Every time the [--<plugin>-<name> v] is specified on the
-        command line, or a configuration file, or in the environment,
-        then [v] is added to the list to which [get ctxt p], where [p]
-        is the declared parameter.
+        Every time the [--<plugin>-<name> v] is specified on the command line,
+        or a configuration file, or in the environment, then [v] is added to the
+        list to which [get ctxt p], where [p] is the declared parameter.
 
-        The rest of the parameters have the same meaning as in
-        the {!parameter} function.
-    *)
+        The rest of the parameters have the same meaning as in the {!parameter}
+        function. *)
 
     val flag : ?doc:string -> ?aliases:string list -> string -> bool param
     (** [flag name] declares a parameter that can be used as a flag.
 
-        This is a specialization of a more general {!parameter}
-        function. The [common-options] grammar is extended with the
-        following rules:
+        This is a specialization of a more general {!parameter} function. The
+        [common-options] grammar is extended with the following rules:
 
         {v
           common-options =
             ...
             | common-options, R | R, common-options
           R = ["--<plugin>-<name>"]
-        v},
+        v}
+        ,
 
-        where [<plugin>] is the name of the plugin in which the
-        configuration parameter is specified. (Note, the name of a
-        plugin is the name of the file in which it is packed without
-        the extension, e.g., a plugin [foo.plugin] has name [foo]).
+        where [<plugin>] is the name of the plugin in which the configuration
+        parameter is specified. (Note, the name of a plugin is the name of the
+        file in which it is packed without the extension, e.g., a plugin
+        [foo.plugin] has name [foo]).
 
-        When the [--<plugin>-<name> v] is specified on the command
-        line, or in the environment, then [get ctxt p] will evaluate
-        to [true], where [p] is the declared parameter.
-    *)
+        When the [--<plugin>-<name> v] is specified on the command line, or in
+        the environment, then [get ctxt p] will evaluate to [true], where [p] is
+        the declared parameter. *)
 
     val determined : 'a param -> 'a future
     (** [determined p] is a future that becomes determined when context is
@@ -1112,16 +1090,17 @@ module Extension : sig
     val refine : ?provides:string list -> ?exclude:string list -> ctxt -> ctxt
     (** [refine ~provides ~exclude ctxt] refines the context.
 
-        Refine the context by excluding from it all parameters of the
-        plugins that do not provide a feature from [provides] or
-        provide a feature from [excluded].
+        Refine the context by excluding from it all parameters of the plugins
+        that do not provide a feature from [provides] or provide a feature from
+        [excluded].
 
-        @parameter provides (defaults to set of all features) the set
-        of features that should be left.
+        @param provides
+          (defaults to set of all features) the set of features that should be
+          left.
 
-        @parameter exclude (defaults to the empty set) the set of
-        features that should be excluded.
-    *)
+        @param exclude
+          (defaults to the empty set) the set of features that should be
+          excluded. *)
 
     val plugins : ctxt -> info list
     (** [plugins ctxt] enumerates all enabled plugins.
@@ -1201,27 +1180,26 @@ module Extension : sig
       'a t
     (** [define ~parse ~print default] defines a data type.
 
-        The [print x] is the textual representation of the value
-        [x]. For all [x] in the defined type, [x = parse (print x)].
+        The [print x] is the textual representation of the value [x]. For all
+        [x] in the defined type, [x = parse (print x)].
 
-        The [parse] function may raise the [Invalid_arg] exception
-        to indicate that the provided datum doesn't represent a valid
-        element of the type. It may raise any other exception to
-        indicate other possible errors. In any case, any exception
-        raised by the [parse], [print], or [digest] functions will be
-        caught and propagated to the [Bap_main.init] abnormal
+        The [parse] function may raise the [Invalid_arg] exception to indicate
+        that the provided datum doesn't represent a valid element of the type.
+        It may raise any other exception to indicate other possible errors. In
+        any case, any exception raised by the [parse], [print], or [digest]
+        functions will be caught and propagated to the [Bap_main.init] abnormal
         termination with a corresponding error condition.
 
-        @parameter digest if provided then [digest x], should
-        evaluate to an md5 hash of [x] such that if for all [y],
-        if [digest x = digest y mod md5] then [x = y]. I.e., if
-        digests are equal (modulo md5 collision) then the [x] and [y]
-        are also equal. The opposite is not guaranteed, but most of
-        the data types usually provide this guarantee.
+        @param digest
+          if provided then [digest x], should evaluate to an md5 hash of [x]
+          such that if for all [y], if [digest x = digest y mod md5] then
+          [x = y]. I.e., if digests are equal (modulo md5 collision) then the
+          [x] and [y] are also equal. The opposite is not guaranteed, but most
+          of the data types usually provide this guarantee.
 
-        @parameter name is the variable name which is used to
-        reference to elements of the type [t]. (defaults to ["VAL"]).
-    *)
+        @param name
+          is the variable name which is used to reference to elements of the
+          type [t]. (defaults to ["VAL"]). *)
 
     val refine : 'a t -> ('a -> unit) -> 'a t
     (** [refine t valid] narrows the set of [t], to those that [valid]. The
@@ -1369,27 +1347,25 @@ module Extension : sig
 
     val array : ?sep:char -> 'a t -> 'a array t
     (** [array ~sep t] is an array of [t] elements, separated with [sep].
-        @parameter sep defaults to [','].
-    *)
+        @param sep defaults to [',']. *)
 
     val pair : ?sep:char -> 'a t -> 'b t -> ('a * 'b) t
     (** [pair ~sep t1 t2] is a pair [t1] and [t2], separated with [sep].
 
-        @parameter sep defaults to [',']. *)
+        @param sep defaults to [',']. *)
 
     val t2 : ?sep:char -> 'a t -> 'b t -> ('a * 'b) t
     (** [t2 ~sep t1 t2] is a pair [t1] and [t2], separated with [sep].
 
-        @parameter sep defaults to [','].
-    *)
+        @param sep defaults to [',']. *)
 
     val t3 : ?sep:char -> 'a t -> 'b t -> 'c t -> ('a * 'b * 'c) t
     (** [t3 ~sep t1 t2 t3] is ([t1],[t2],[t3]), separated with [sep].
-        @parameter sep defaults to [',']. *)
+        @param sep defaults to [',']. *)
 
     val t4 : ?sep:char -> 'a t -> 'b t -> 'c t -> 'd t -> ('a * 'b * 'c * 'd) t
-    (** [t4 ~sep t1 t2 t3 t4] is ([t1],[t2],[t3],[t4), separated with [sep].
-        @parameter sep defaults to [',']. *)
+    (** [t4 ~sep t1 t2 t3 t4] is ([t1],[t2],[t3],[t4]), separated with [sep].
+        @param sep defaults to [',']. *)
   end
 
   (** An extensible set of possible errors *)

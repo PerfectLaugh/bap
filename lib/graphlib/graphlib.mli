@@ -4,22 +4,24 @@ open Regular.Std
 (** {3 Graph library}
 
     {!Graphlib} is a generic library that extends a OCamlGraph
-    library.{!Graphlib} uses its own and richer {!Graph} interface that is
+    library.{!Graphlib} uses its own and richer {!Std.Graph} interface that is
     isomorphic to OCamlGraph's [Sigs.P] signature for persistent graphs. Two
-    functors witnesses isomorphism of the interfaces: {!Graphlib.To_ocamlgraph}
-    and {!Graphlib.Of_ocamlgraph}. Thanks to these functors, any algorithm
-    written for OCamlGraph can be used on [Graphlibs] graph and vice versa.
+    functors witnesses isomorphism of the interfaces:
+    {!Std.Graphlib.To_ocamlgraph} and {!Std.Graphlib.Of_ocamlgraph}. Thanks to
+    these functors, any algorithm written for OCamlGraph can be used on
+    [Graphlibs] graph and vice versa.
 
-    The {!Graph} interface provides a richer interface in a Core style. Nodes
-    and Edges implements the {!Opaque} interface, i.e., they come with Maps,
-    Sets, Hashtbls, etc, (e.g., [G.Node.Set] is a set of node for graph
-    implementation, provided by a module named [G]). Graphs also implement
-    {!Printable} interface, that makes them much easier to debug.
+    The {!Std.Graph} interface provides a richer interface in a Core style.
+    Nodes and Edges implements the {!Regular.Std.Opaque} interface, i.e., they
+    come with Maps, Sets, Hashtbls, etc, (e.g., [G.Node.Set] is a set of node
+    for graph implementation, provided by a module named [G]). Graphs also
+    implement {!Regular.Std.Printable} interface, that makes them much easier to
+    debug.
 
     Along with graphs, auxiliary data structures are provided, like
-    {{!Path}path} to represent paths in graph, {{!Tree}tree} for representing
-    different graph spannings, {{!Partition}partition} for graph partitioning,
-    and more.
+    {{!Std.Path}path} to represent paths in graph, {{!Std.module-Tree}tree} for
+    representing different graph spannings, {{!Std.Partition}partition} for
+    graph partitioning, and more.
 
     The {!Graphlib} module provides a set of generic graph algorithms. Contrary
     to OCamlGraph, each {!Graphlib} interface is provided using functions rather
@@ -41,8 +43,8 @@ open Regular.Std
     This will bind [G] to a graph implementation that has [string] nodes with
     edges labeled by values of type [bool].
 
-    Graphs of type [G.t] could be created using the generic {!Graphlib.create}
-    function:
+    Graphs of type [G.t] could be created using the generic
+    {!Std.Graphlib.create} function:
 
     {[
       let g =
@@ -652,8 +654,8 @@ module Std : sig
         and has unlabeled nodes of type [Node.t] and edges labeled with [Edge.t]
 
         In [Core] basically any type that is reasonable to be used as a graph
-        node, satisfies the {!Opaque.S} interface. So, a new graph structure can
-        be implemented directly, e.g.,
+        node, satisfies the {!Regular.Std.Opaque.S} interface. So, a new graph
+        structure can be implemented directly, e.g.,
         {[
           module G = Graphlib.Make (Int64) (Unit)
         ]}
@@ -1084,7 +1086,7 @@ module Std : sig
          and type Node.label = G.V.label
          and type Edge.label = G.E.label
 
-    (** functorized version of a {!filter} function. *)
+    (** functorized version of a {!filtered} function. *)
     module Filtered
         (G : Graph)
         (P : Predicate with type node = G.node and type edge = G.edge) :
@@ -1347,7 +1349,7 @@ module Std : sig
         interval (usually up to infinitiy) and narrowing a widened interval
         based on some heurisitic.
 
-        {6 Using [fixpoint] for general iterative approximation}
+        {5 Using [fixpoint] for general iterative approximation}
 
         In a general case, the [fixpoint] function could be used to compute
         successive approximations of a solution to a system of (in)equations,

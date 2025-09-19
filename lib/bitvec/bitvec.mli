@@ -247,7 +247,7 @@ module type S = sig
   (** [(x + y) mod m] is [add x y mod m] *)
 
   val ( - ) : t -> t -> t m
-  (** [(x - y) mod m] is [sub x y mod m *)
+  (** [(x - y) mod m] is [sub x y mod m] *)
 
   val ( * ) : t -> t -> t m
   (** [(x * y) mod m] is [mul x y mod m] *)

@@ -10,7 +10,11 @@ type edge
 type node
 
 module Edge : sig
+  (**/**)
+
   include Edge with type graph = t and type node = node and type t = edge
+
+  (**/**)
 
   val jmps : [ `after | `before ] -> t -> graph -> jmp term Sequence.t
   val edges : [ `after | `before ] -> t -> graph -> t Sequence.t

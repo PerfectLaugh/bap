@@ -27,16 +27,14 @@ module Std = struct
   module type Trie = Trie
 
   module Legacy = struct
-    [@@@deprecated
-    "[since 2017-04] all definitions in this module are deprecated"]
-
     module Monad = struct
-      [@@@deprecated "[since 2017-04] use new monads library"]
-
       include Bap_monad [@@warning "-3"]
       include Bap_monad_types [@@warning "-3"]
     end
+    [@@alert deprecated "[since 2017-04] use new monads library"]
   end
+  [@@alert
+    deprecated "[since 2017-04] all definitions in this module are deprecated"]
 
   (** Target architecture. *)
   module Arch = struct

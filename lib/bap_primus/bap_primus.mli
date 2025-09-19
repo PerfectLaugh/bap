@@ -3941,7 +3941,6 @@ module Std : sig
       [@@deprecated "[since 2018-03] use [Closure]"]
 
       type primitives = (module Primitives)
-      [@@deprecated "[since 2018-03] use [Closure]"]
       (** a list of primitives. *)
 
       type exn += Runtime_error of string

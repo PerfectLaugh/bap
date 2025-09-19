@@ -189,7 +189,7 @@ module Std : sig
       The Foundation library also defines a prefix tree data structure that
       proves to be useful for binary analysis applications.
       {{!module:Trie}Trie}s in BAP is a functor that derives a polymorphic trie
-      data structure for a given {{!modtype:Trie.Key}Key}.
+      data structure for a given {{!module-type:Trie.Key}Key}.
 
       For convenience we support instantiating tries for most of our data
       structures. For example, {{!Bitvector}Word} has several
@@ -307,16 +307,15 @@ module Std : sig
 
   (** {2:sema Semantic Analysis}
 
-      On the semantic level the disassembled program is lifted into
-      the BAP Intermediate Representation (BIR). BIR is a
-      semi-graphical representation of BIL (where BIL represents a
-      program as Abstract Syntax Tree). The BIR provides mechanisms to
-      express richer relationships between program terms and it also
-      easier to use for most use cases, especially for data dependency
-      analysis.
+      On the semantic level the disassembled program is lifted into the BAP
+      Intermediate Representation (BIR). BIR is a semi-graphical representation
+      of BIL (where BIL represents a program as Abstract Syntax Tree). The BIR
+      provides mechanisms to express richer relationships between program terms
+      and it also easier to use for most use cases, especially for data
+      dependency analysis.
 
-      The program in IR is build of terms. In fact the program itself
-      is also a term. There're only 7 kinds of terms:
+      The program in IR is build of terms. In fact the program itself is also a
+      term. There're only 7 kinds of terms:
 
       - {{!Program}program} - the program in whole;
       - {{!Sub}sub} - subroutine;
@@ -326,33 +325,29 @@ module Std : sig
       - {{!Phi}phi} - phi-node in the SSA form;
       - {{!Jmp}jmp} - a transfer of control.
 
-      Unlike expressions and statements in BIL, IR's terms are {e
-      concrete entities}.  Concrete entity is such entity that can
-      change in time and space, as well as come in and out of
-      existence.  Contrary, {e abstract entity} is eternal and
-      unchangeable.  {e Identity} denotes the sameness of a concrete
-      entity as it changes in time.  Abstract entities don't have an
-      identity since they are immutable.  Program is built of concrete
-      entities called terms.  Terms have {e attributes} that can
-      change in time, without affecting the identity of a term.
-      Attributes are abstract entities.  In each particular point of
-      space and time a term is represented by a snapshot of all its
-      attributes, colloquially called {e value}.  Functions that
-      change the value of a term in fact return a new value with
-      different set of attributes.  For example, [def] term has two
-      attributes: left hand side (lhs), that associates definition
-      with abstract variable, and right hand side (rhs) that
-      associates [def] with an abstract expression. Suppose, that the
-      definition was:
+      Unlike expressions and statements in BIL, IR's terms are
+      {e concrete entities}. Concrete entity is such entity that can change in
+      time and space, as well as come in and out of existence. Contrary,
+      {e abstract entity} is eternal and unchangeable. {e Identity} denotes the
+      sameness of a concrete entity as it changes in time. Abstract entities
+      don't have an identity since they are immutable. Program is built of
+      concrete entities called terms. Terms have {e attributes} that can change
+      in time, without affecting the identity of a term. Attributes are abstract
+      entities. In each particular point of space and time a term is represented
+      by a snapshot of all its attributes, colloquially called {e value}.
+      Functions that change the value of a term in fact return a new value with
+      different set of attributes. For example, [def] term has two attributes:
+      left hand side (lhs), that associates definition with abstract variable,
+      and right hand side (rhs) that associates [def] with an abstract
+      expression. Suppose, that the definition was:
 
       {[
         # let d_1 = Def.create x Bil.(var y + var z);;
         val d_1 : Def.t = 00000001: x := y + z
       ]}
 
-      To change the right hand side of a definition we use
-      [Def.with_rhs] that returns the {e same} definition but with
-      {e different} value:
+      To change the right hand side of a definition we use [Def.with_rhs] that
+      returns the {e same} definition but with {e different} value:
 
       {[
         # let d_2 = Def.with_rhs d_1 Bil.(int Word.b1);;
@@ -364,25 +359,26 @@ module Std : sig
       {[
         # Def.equal d_1 d_2;;
         - : bool = false
-      ]}  of the same term {[
+      ]}
+      of the same term
+      {[
         # Term.same d_1 d_2;;
         - : bool = true
       ]}
 
-      The identity of this terms is denoted by the term identifier
-      ([tid]). In the textual representation term identifiers are
-      printed as ordinal numbers.
+      The identity of this terms is denoted by the term identifier ([tid]). In
+      the textual representation term identifiers are printed as ordinal
+      numbers.
 
-      Terms, can contain other terms. But unlike BIL expressions or
-      statements, this relation is not truly recursive, since the
-      structure of program term is fixed: [arg], [phi], [def], [jmp]
-      are leaf terms; [sub] can only contain [arg]'s or [blk]'s; [blk]
-      consists of [phi], [def] and [jmp] sequences of terms, as
-      pictured in the figure below.  Although, the term structure is
-      closed to changes, you still can extend particular term with
-      attributes, using [set_attr] and [get_attr] functions of the
-      {{!Term}Term} module. This functions are using {{!Value}extensible
-      variant} type to encode attributes.
+      Terms, can contain other terms. But unlike BIL expressions or statements,
+      this relation is not truly recursive, since the structure of program term
+      is fixed: [arg], [phi], [def], [jmp] are leaf terms; [sub] can only
+      contain [arg]'s or [blk]'s; [blk] consists of [phi], [def] and [jmp]
+      sequences of terms, as pictured in the figure below. Although, the term
+      structure is closed to changes, you still can extend particular term with
+      attributes, using [set_attr] and [get_attr] functions of the {{!Term}Term}
+      module. This functions are using {{!Value}extensible variant} type to
+      encode attributes.
 
       {v
         +--------------------------------------------------------+
@@ -406,9 +402,7 @@ module Std : sig
         |     |    phi    |   |    def    |   |   jmp    |       |
         |     +-----------+   +-----------+   +----------+       |
         +--------------------------------------------------------+
-      v}
-
-  *)
+      v} *)
 
   (** {2:project Working with project}
 
@@ -1071,107 +1065,102 @@ module Std : sig
 
   (** Bitvector -- an integer with modular arithmentics.
 
-      {2 Overview }
+      {2 Overview}
 
-      A numeric value with the 2-complement binary representation. It
-      is good for representing addresses, offsets and other arithmetic
-      values.
+      A numeric value with the 2-complement binary representation. It is good
+      for representing addresses, offsets and other arithmetic values.
 
-      Each value is attributed by a bitwidth and signedness. All
-      arithmetic operations over values are done modulo their
-      widths. It is an error to apply arithmetic operation to values
-      with different widths. Default implementations will raise a an
-      exception, however there exists a family of modules that provide
-      arithmetic operations lifted to an [Or_error.t] monad. It is
-      suggested to use them, if you know what kind of operands you're
-      expecting.
+      Each value is attributed by a bitwidth and signedness. All arithmetic
+      operations over values are done modulo their widths. It is an error to
+      apply arithmetic operation to values with different widths. Default
+      implementations will raise a an exception, however there exists a family
+      of modules that provide arithmetic operations lifted to an [Or_error.t]
+      monad. It is suggested to use them, if you know what kind of operands
+      you're expecting.
 
       {2:bv_signs Clarification on signs}
 
-      By default, all are numbers represented with bitvectors are
-      considered unsigned. This includes the ordering, e.g., [of_int
-      (-1) ~width:32] is greater than [of_int 0 ~width:32]. If you
-      need to perform a signed operation, you can use the [signed]
-      operator create a signed word with the same value.
+      By default, all are numbers represented with bitvectors are considered
+      unsigned. This includes the ordering, e.g., [of_int (-1) ~width:32] is
+      greater than [of_int 0 ~width:32]. If you need to perform a signed
+      operation, you can use the [signed] operator create a signed word with the
+      same value.
 
-      If any operand of a binary operation is signed, then a signed
-      version of an operation is used, i.e., the other operand is
-      upcasted to the signed kind.
+      If any operand of a binary operation is signed, then a signed version of
+      an operation is used, i.e., the other operand is upcasted to the signed
+      kind.
 
       Remember to use explicit casts, whenever you really need a signed
       representation. Examples:
       {[
         let x = of_int ~-6 ~width:8
-        let y = to_int x          (* y = 250 *)
+        let y = to_int x (* y = 250 *)
         let z = to_int (signed x) (* z = ~-6 *)
         let zero = of_int 0 ~width:8
-        let p = x < zero          (* p = false *)
-        let q = signed x < zero   (* p = true *)
+        let p = x < zero (* p = false *)
+        let q = signed x < zero (* p = true *)
       ]}
 
-      {2:bv_sizes Clarification on size-morphism }
+      {2:bv_sizes Clarification on size-morphism}
 
-      Size-monomorphic operations (as opposed to size-polymorphic)
-      expect operands of the same size. When applied to operands of
-      different sizes they either raise exceptions or return
-      an [Error] variant as the result. All arithmetic operations are
-      size-monomorphic and we provide interface that use either
-      exceptions or [Result.t] to indicate the outcome.
+      Size-monomorphic operations (as opposed to size-polymorphic) expect
+      operands of the same size. When applied to operands of different sizes
+      they either raise exceptions or return an [Error] variant as the result.
+      All arithmetic operations are size-monomorphic and we provide interface
+      that use either exceptions or [Result.t] to indicate the outcome.
 
-      The comparison operation is size-polymorphic by default and
-      takes the size of the bitvector into account. Bitvectors
-      with equal values but different sizes are unequal. The precise
-      order matches with the order of pairs, where the first
-      constituent is the bitvector value, and the second is its size,
-      for example, the following sequence is in an ascending order:
+      The comparison operation is size-polymorphic by default and takes the size
+      of the bitvector into account. Bitvectors with equal values but different
+      sizes are unequal. The precise order matches with the order of pairs,
+      where the first constituent is the bitvector value, and the second is its
+      size, for example, the following sequence is in an ascending order:
 
-      {[ 0x0:1, 0x0:32, 0x0:64, 0x1:1, 0x1:32, 0xD:4, 0xDEADBEEF:32]}.
+      {[
+        0x0:1, 0x0:32, 0x0:64, 0x1:1, 0x1:32, 0xD:4, 0xDEADBEEF:32
+      ]}
+      .
 
-      A size-monomorphic interfaced is exposed in a [Mono] submodule. So
-      if you want a monomorphic map, then just use [Mono.Map] module.
-      Note, [Mono] submodule doesn't provide [Table], since we cannot
-      guarantee that all keys in a hash-table have equal size. The
-      order functions provided by the Mono module will raise an
-      exception when applied to bitvectors with different sizes.
+      A size-monomorphic interfaced is exposed in a [Mono] submodule. So if you
+      want a monomorphic map, then just use [Mono.Map] module. Note, [Mono]
+      submodule doesn't provide [Table], since we cannot guarantee that all keys
+      in a hash-table have equal size. The order functions provided by the Mono
+      module will raise an exception when applied to bitvectors with different
+      sizes.
 
-      In the default and [Mono] orders, if either of two values is
-      signed (see {!bv_signs}) then the values will be ordered as
-      2-complement signed integers.
+      In the default and [Mono] orders, if either of two values is signed (see
+      {!bv_signs}) then the values will be ordered as 2-complement signed
+      integers.
 
       Another alternative orders are [Signed_value_order],
-      [Unsigned_value_order], and [Literal_order]. They will be
-      briefly described below.
+      [Unsigned_value_order], and [Literal_order]. They will be briefly
+      described below.
 
-      [Signed_value_order] is size-polymoprhic and it simply
-      ignores the sizes of bitvectors and orders them by values, e.g.,
-      the following bitvectors are ordered in the [Value.Signed]
-      order, [FF:8; 0:1; 0F:8; FF:32], and [0:1] is equal to
-      [0:32]. See {!bv_sizes} for more details on the signedness of
-      operations. Note, that the size of a word still affects the
+      [Signed_value_order] is size-polymoprhic and it simply ignores the sizes
+      of bitvectors and orders them by values, e.g., the following bitvectors
+      are ordered in the [Value.Signed] order, [FF:8; 0:1; 0F:8; FF:32], and
+      [0:1] is equal to [0:32]. See {!bv_sizes} for more details on the
+      signedness of operations. Note, that the size of a word still affects the
       order since it defines the position of the most significant bit.
 
-      [Unsigned_value_order] ignores the sign and the size of
-      words and compares them by the unsigned order of their values.
-      he following numbers are ordered with the [Unsigned_value_order]
-      order, [0:1, 1:32, 0F:8 FF:8], and [FF:32] is equal to [FF:8].
-      [Unsigned_value_order] is faster than then any previously
-      described order and is useful when the size of the words should
-      be ignored (or is known to be equal and therefore could be
-      ignored).
+      [Unsigned_value_order] ignores the sign and the size of words and compares
+      them by the unsigned order of their values. he following numbers are
+      ordered with the [Unsigned_value_order] order, [0:1, 1:32, 0F:8 FF:8], and
+      [FF:32] is equal to [FF:8]. [Unsigned_value_order] is faster than then any
+      previously described order and is useful when the size of the words should
+      be ignored (or is known to be equal and therefore could be ignored).
 
-      [Literal_order] is the fastest order that takes into account
-      all constituents of bitvectors, like if we will treat a
-      bitvector as triple of its value, size, and sign and order
-      bitvectors using the lexicographical order.
+      [Literal_order] is the fastest order that takes into account all
+      constituents of bitvectors, like if we will treat a bitvector as triple of
+      its value, size, and sign and order bitvectors using the lexicographical
+      order.
 
-
-      {2:bv_string Clarification on string representation }
+      {2:bv_string Clarification on string representation}
 
       As a part of [Identifiable] interface bitvector provides a pair of
       complement functions: [to_string] and [of_string], that provides
-      facilities to store bitvector as a human readable string, and to
-      restore it from string. The format of the representation is the
-      following (in EBNF):
+      facilities to store bitvector as a human readable string, and to restore
+      it from string. The format of the representation is the following (in
+      EBNF):
       {[
         repr  = [sign], [base], digit, {digit}, ":", size, [kind]
           sign  = "+" | "-";
@@ -1184,12 +1173,11 @@ module Std : sig
         kind  = u | s
       ]}
 
-      Examples:
-      [0x5D:32s, 0b0101:16u, 5:64, +5:8, +0x5D:16].
+      Examples: [0x5D:32s, 0b0101:16u, 5:64, +5:8, +0x5D:16].
 
-      If [base] is omitted base-10 is assumed. If the kind is omitted,
-      then the usigned kind is assumed. The output format is always in
-      a hex representation with a full prefix.  . *)
+      If [base] is omitted base-10 is assumed. If the kind is omitted, then the
+      usigned kind is assumed. The output format is always in a hex
+      representation with a full prefix. . *)
   module Bitvector : sig
     type t = word
     (** [word] is an abbreviation to [Bitvector.t] *)
@@ -1551,9 +1539,9 @@ module Std : sig
         [t] will be signed. *)
 
     val unsigned : t -> t
-    (** [unsigned t] casts [t] to an unsigned type, so that any
-        operations applied to it will interpret [t] as an unsigned
-        word. @since 1.3 *)
+    (** [unsigned t] casts [t] to an unsigned type, so that any operations
+        applied to it will interpret [t] as an unsigned word.
+        @since 1.3 *)
 
     val is_zero : t -> bool
     (** [is_zero bv] is true iff all bits are set to zero. *)
@@ -1821,43 +1809,43 @@ module Std : sig
         @param index defaults for [0]
         @param scale defaults to [`r8]
 
-        All operations are taken modulo {% $2^n$ %}, where [n = bitwidth base].
-    *)
+        All operations are taken modulo [$2^n$], where [n = bitwidth base]. *)
   end
 
   (** Main BIL module.
 
       The module specifies Binary Instruction Language (BIL). A language to
-      define a semantics of instructions. The semantics of the BIL
-      language is defined at [[1]].
+      define a semantics of instructions. The semantics of the BIL language is
+      defined at [[1]].
 
-      The language is defined using algebraic types. For each BIL
-      constructor a smart constructor is defined with the same (if
-      syntax allows) name. This allows to use BIL as a DSL embedded
-      into OCaml:
+      The language is defined using algebraic types. For each BIL constructor a
+      smart constructor is defined with the same (if syntax allows) name. This
+      allows to use BIL as a DSL embedded into OCaml:
 
-      {[Bil.([
-          v := src lsr i32 1;
-          r := src;
-          s := i32 31;
-          while_ (var v <> i32 0) [
-            r := var r lsl i32 1;
-            r := var r lor (var v land i32 1);
-            v := var v lsr i32 1;
-            s := var s - i32 1;
-          ];
-          dst := var r lsl var s;
-        ])]}
+      {[
+        Bil.
+          [
+            v := src lsr i32 1;
+            r := src;
+            s := i32 31;
+            while_
+              (var v <> i32 0)
+              [
+                r := var r lsl i32 1;
+                r := var r lor (var v land i32 1);
+                v := var v lsr i32 1;
+                s := var s - i32 1;
+              ];
+            dst := var r lsl var s;
+          ]
+      ]}
 
-      where [i32] is defined as
-      [let i32 x = Bil.int (Word.of_int ~width:32 x)]
-      and [v,r,s] are some variables of type [var]; and
-      [src, dst] are expressions of type [exp].
+      where [i32] is defined as [let i32 x = Bil.int (Word.of_int ~width:32 x)]
+      and [v,r,s] are some variables of type [var]; and [src, dst] are
+      expressions of type [exp].
 
-      @see
-      <https://github.com/BinaryAnalysisPlatform/bil/releases/download/v0.1/bil.pdf>
-      [[1]]: BIL Semantics.
-  *)
+      @see <https://github.com/BinaryAnalysisPlatform/bil/releases/download/v0.1/bil.pdf>
+        [[1]]: BIL Semantics. *)
   module Bil : sig
     module Types : sig
       type var
@@ -2378,14 +2366,13 @@ module Std : sig
       val binop : binop -> word -> word -> word
       (** [binop op x y] applies [op] to [x] and [y].
 
-          @before 2.5.0 precondition: the expression [BinOp(op,Intx,Int y)]
-          shall be well-typed.
+          @before 2.5.0
+            precondition: the expression [BinOp(op,Intx,Int y)] shall be
+            well-typed.
 
-          @after 2.5.0 if [x] and [y] have different widths then they
-          are extended to the same width, which is the width of the
-          largest operand. If an operator is signed, then it will be
-          correctly sign-extended.
-      *)
+          after 2.5.0 if [x] and [y] have different widths then they are
+          extended to the same width, which is the width of the largest operand.
+          If an operator is signed, then it will be correctly sign-extended. *)
 
       val unop : unop -> word -> word
       (** [unop op x] applies the unary operation [op] to [x]. *)
@@ -2397,7 +2384,6 @@ module Std : sig
     end
 
     type result
-    [@@deprecated "[since 2018-03] in favor of the Primus Framework"]
     (** Result of a computation.
         @deprecated Use the Primus Framework. *)
 
@@ -2416,7 +2402,7 @@ module Std : sig
 
       method save : addr -> word -> 's
       (** [save a w] stores byte [w] at address [a] *)
-    end [@@deprecated "[since 2018-03] in favor of the Primus Framework"]
+    end
 
     (** Predefined storage classes
         @deprecated Use the Primus Framework *)
@@ -2462,7 +2448,6 @@ module Std : sig
       | Imm of word  (** immediate value *)
       | Mem of storage  (** memory storage *)
       | Bot  (** undefined value *)
-    [@@deprecated "[since 2018-03] in favor of the Primus Framework"]
 
     (** Result of computation.
 
@@ -2990,20 +2975,16 @@ module Std : sig
       @deprecated Use the Primus Framework *)
   module Expi : sig
     open Bil.Result
-    (**
+    (** An extensible interpreter for BIL expressions.
 
-       An extensible interpreter for BIL expressions.
+        Note: before diving into the deepness of Expi module consider [Exp.eval]
+        function, that expose an easy interface to concrete evaluation of
+        expressions.
 
-       Note: before diving into the deepness of Expi module consider
-       [Exp.eval] function, that expose an easy interface to concrete
-       evaluation of expressions.
+        Expi implements an operational semantics described in [[1]].
 
-       Expi implements an operational semantics described in [[1]].
-
-       @see
-       <https://github.com/BinaryAnalysisPlatform/bil/releases/download/v0.1/bil.pdf>
-       [[1]]: BIL Semantics.
-    *)
+        @see <https://github.com/BinaryAnalysisPlatform/bil/releases/download/v0.1/bil.pdf>
+          [[1]]: BIL Semantics. *)
 
     (** Context for expression evaluation.
 
@@ -3045,8 +3026,8 @@ module Std : sig
           To create new interpreter use operator [new]:
 
           {v
-        let expi = new expi;;
-        val expi : _#Expi.context expi = <obj>
+            let expi = new expi;;
+            val expi : _#Expi.context expi = <obj>
           v}
 
           Note: The type [_#Expi.context] is weakly polymorphic subtype of
@@ -3054,8 +3035,8 @@ module Std : sig
           generalized and will be instantiated when used and fixed afterwards.
 
           {v
-        let r = expi#eval_exp Bil.(int Word.b0 lor int Word.b1);;
-        val r : _#Expi.context Bil.Result.r = <abstr>
+            let r = expi#eval_exp Bil.(int Word.b0 lor int Word.b1);;
+            val r : _#Expi.context Bil.Result.r = <abstr>
           v}
 
           The returned value is a state monad parametrized by a subtype of class
@@ -3070,8 +3051,8 @@ module Std : sig
           a first approximation:
 
           {v
-        let x = Monad.State.eval r (new Expi.context);;
-        val x : Bil.result = [0x3] true
+            let x = Monad.State.eval r (new Expi.context);;
+            val x : Bil.result = [0x3] true
           v}
 
           The expression evaluates to [true], and the result is tagged with an
@@ -3083,8 +3064,8 @@ module Std : sig
           then you can just use [Exp.eval] function:
 
           {v
-        Exp.eval Bil.(int Word.b0 lor int Word.b1);;
-        - : Bil.value = true
+            Exp.eval Bil.(int Word.b0 lor int Word.b1);;
+            - : Bil.value = true
           v}
 
           The main strength of [expi] is its extensibility. Let's write a
@@ -3128,16 +3109,16 @@ module Std : sig
           all):
 
           {v
-        let expi = new exp_tracer;;
-        val expi : _#context exp_tracer = <obj>
-        # let r = expi#eval_exp Bil.(int Word.b0 lor int Word.b1);;
-        val r : _#context Bil.Result.r = <abstr>
-        # let r,ctxt = Monad.State.run r (new context) ;;
-        val r : Bil.result = [0x3] true
-        val ctxt : context = <obj>
-        ctxt#events;;
-        - : (exp * Bil.result) list =
-        [(false, [0x1] false); (true, [0x2] true); (false | true, [0x3] true)]
+            let expi = new exp_tracer;;
+            val expi : _#context exp_tracer = <obj>
+            # let r = expi#eval_exp Bil.(int Word.b0 lor int Word.b1);;
+            val r : _#context Bil.Result.r = <abstr>
+            # let r,ctxt = Monad.State.run r (new context) ;;
+            val r : Bil.result = [0x3] true
+            val ctxt : context = <obj>
+            ctxt#events;;
+            - : (exp * Bil.result) list =
+            [(false, [0x1] false); (true, [0x2] true); (false | true, [0x3] true)]
           v}
 
           [1]: The weakness of the type variable is introduced by a value
@@ -3187,7 +3168,6 @@ module Std : sig
   [@@deprecated "[since 2018-03] in favor of the Primus Framework"]
 
   class ['a] expi : ['a] Expi.t
-    [@@deprecated "[since 2018-03] in favor of the Primus Framework"]
   (** Expression {{!Expi}interpreter}
       @deprecated Use the Primus Framework *)
 
@@ -3249,7 +3229,6 @@ module Std : sig
   [@@deprecated "[since 2018-03] in favor of the Primus Framework"]
 
   class ['a] bili : ['a] Bili.t
-    [@@deprecated "[since 2018-03] in favor of the Primus Framework"]
   (** BIL {{!Bili}interpreter}
       @deprecated Use the Primus Framework *)
 
@@ -3523,8 +3502,8 @@ module Std : sig
         {!Bil.map} *)
 
     val exists : unit #finder -> t -> bool
-    (** [exists finder exp] is [true] if [finder] finds
-        something. See also {!Bil.exists} and {Stmt.exists}  *)
+    (** [exists finder exp] is [true] if [finder] finds something. See also
+        {!Bil.exists} and {!Stmt.exists} *)
 
     val substitute : exp -> exp -> exp -> exp
     (** [substitute pat rep x] subsitutes each occurrence of an expression [pat]
@@ -3853,12 +3832,12 @@ module Std : sig
             and endianness can be ignored in analysis. During the normalization,
             the following rewrites are performed
             {v
-       let x = <expr> in ... x ... => ... <expr> ...
-       x[a,el]:n => x[a+n-1] @ ... @ x[a]
-       x[a,be]:n => x[a] @ ... @ x[a+n-1]
-       m[a,el]:n <- x => (...((m[a] <- x<0>)[a+1] <- x<1>)...)[a+n-1] <- x<n-1>
-       m[a,be]:n <- x => (...((m[a] <- x<n-1>)[a+1] <- x<n>)...)[a+n-1] <- x<0>
-       (x[a] <- b)[c] => m := x[a] <- b; m[c]
+              let x = <expr> in ... x ... => ... <expr> ...
+              x[a,el]:n => x[a+n-1] @ ... @ x[a]
+              x[a,be]:n => x[a] @ ... @ x[a+n-1]
+              m[a,el]:n <- x => (...((m[a] <- x<0>)[a+1] <- x<1>)...)[a+n-1] <- x<n-1>
+              m[a,be]:n <- x => (...((m[a] <- x<n-1>)[a+1] <- x<n>)...)[a+n-1] <- x<0>
+              (x[a] <- b)[c] => m := x[a] <- b; m[c]
             v}
          }
         }
@@ -3893,8 +3872,8 @@ module Std : sig
         @since 1.3 *)
 
     val fixpoint : (t -> t) -> t -> t
-    (** [fixpoint f x] applies transformation [f] until it reaches
-        fixpoint. See {!Bil.fixpoint} and {Exp.fixpoint}.  *)
+    (** [fixpoint f x] applies transformation [f] until it reaches fixpoint. See
+        {!Bil.fixpoint} and {!Exp.fixpoint}. *)
 
     val free_vars : t -> Var.Set.t
     (** [free_vars stmt] returns a set of all unbound variables, that occurs in
@@ -4004,16 +3983,17 @@ module Std : sig
 
   (** Universal Values.
 
-      This module creates an extensible variant type, that resembles
-      extensible variant types, introduced in 4.02, but even more safe
-      and more extensible, and, what really matters,
-      serializable. Basically you should think of [Value.t] as a union
-      type, aka sum type, that can be extended in any place, including
-      your plugin code. Where extending is adding new constructor. To
-      add new constructor, you need to register it, e.g.,
+      This module creates an extensible variant type, that resembles extensible
+      variant types, introduced in 4.02, but even more safe and more extensible,
+      and, what really matters, serializable. Basically you should think of
+      [Value.t] as a union type, aka sum type, that can be extended in any
+      place, including your plugin code. Where extending is adding new
+      constructor. To add new constructor, you need to register it, e.g.,
 
       {[
-        let function_signature = Value.Tag.register (module String)
+        let function_signature =
+          Value.Tag.register
+            (module String)
             ~name:"function_signature"
             ~uuid:"2175c28c-08ca-4052-8385-3a01e1c6ab6f"
       ]}
@@ -4024,22 +4004,22 @@ module Std : sig
         | Function_signature of string
       ]}
 
-      to existing union type. The main difference is that the [name]
-      shouldn't be unique (in fact [name] doesn't bear any semantic
-      meaning, it basically for pretty-printing). On the other hand
-      the [uuid] parameter must be unique across the universe, space
-      and time. To get the UUID with such properties, you can use
-      [uuidgen] program that is usually available on Linux and Mac OS.
+      to existing union type. The main difference is that the [name] shouldn't
+      be unique (in fact [name] doesn't bear any semantic meaning, it basically
+      for pretty-printing). On the other hand the [uuid] parameter must be
+      unique across the universe, space and time. To get the UUID with such
+      properties, you can use [uuidgen] program that is usually available on
+      Linux and Mac OS.
 
-      [name] and [uuid] must be strings, known at compile time, in
-      other words it must be string literal, not just an arbitrary
-      string, created dynamically. This is made intentionally, in
-      order to prevent the abuse of the system.
+      [name] and [uuid] must be strings, known at compile time, in other words
+      it must be string literal, not just an arbitrary string, created
+      dynamically. This is made intentionally, in order to prevent the abuse of
+      the system.
 
-      The [(module String)] syntax creates a value from the module
-      [String], (so called first-class module). The module should
-      implement [Value.S] signature, that requires pretty-printing,
-      comparison function and serialization.
+      The [(module String)] syntax creates a value from the module [String], (so
+      called first-class module). The module should implement [Value.S]
+      signature, that requires pretty-printing, comparison function and
+      serialization.
 
       {[
         module type S = sig
@@ -4049,11 +4029,10 @@ module Std : sig
         end
       ]}
 
-      The good news is that, most of the types in [Core] and [Bap] do
-      conform with the requirements. Usually, one can implement the
-      requirements very easily by using type-driven syntax extensions
-      (although, you still need to implement pretty-printing function
-      yourself):
+      The good news is that, most of the types in [Core] and [Bap] do conform
+      with the requirements. Usually, one can implement the requirements very
+      easily by using type-driven syntax extensions (although, you still need to
+      implement pretty-printing function yourself):
 
       {[
         module Loc = struct
@@ -4069,20 +4048,20 @@ module Std : sig
             ~uuid:"400e190e-ce21-488d-87b1-c101709621a8"
       ]}
 
-      The returned value, is a tag that can be used to constructed
-      values of that branch, and to deconstruct (extract) them. You
-      may think of it as a cipher key, that is used to package data
-      into the value container, and later to unpack it:
+      The returned value, is a tag that can be used to constructed values of
+      that branch, and to deconstruct (extract) them. You may think of it as a
+      cipher key, that is used to package data into the value container, and
+      later to unpack it:
 
       {[
         # let main_pos = Value.create loc ("test.c", 20, 2);;
         val main_pos : value = test.c:20:2
       ]}
 
-      You may see, that OCaml pretty-prints the value. That's neat!
-      Also, you may see, that the returned expression has type
-      [value]. That means that it can be used uniformly with other
-      values, for example, you can put them in one container, e.g.,
+      You may see, that OCaml pretty-prints the value. That's neat! Also, you
+      may see, that the returned expression has type [value]. That means that it
+      can be used uniformly with other values, for example, you can put them in
+      one container, e.g.,
 
       {[
         # let main_t = Value.create function_signature
@@ -4105,40 +4084,39 @@ module Std : sig
         - : Loc.t option = Some ("test.c", 20, 2)
       ]}
 
-      This will require an extra allocation of an [option] container,
-      and in a performance critical context it may be unacceptable.
-      For this special case you can use a more efficient:
+      This will require an extra allocation of an [option] container, and in a
+      performance critical context it may be unacceptable. For this special case
+      you can use a more efficient:
 
-      {[if Value.is loc then Value.get_exn loc main_pos]}.
+      {[
+        if Value.is loc then Value.get_exn loc main_pos
+      ]}
+      .
 
-      Underneath the hood, the values of type [value] is just a pair
-      of an original value and runtime type information.
+      Underneath the hood, the values of type [value] is just a pair of an
+      original value and runtime type information.
 
-      The comparison of two values of type [value] is actually a
-      multi-method, as it has the following behavior:
+      The comparison of two values of type [value] is actually a multi-method,
+      as it has the following behavior:
 
-      1. If both values has the same type, then use [compare]
-       function, that was provided for this type.
-      2. If values are of different types, that are known to
-       the type system, then compare them using RTTI, and ignore the
-       value.
-      3. If at least one of the values is of the unknown type,
-       (i.e., type wasn't registered in the type system), then
-       use polymorphic compare on a tuple of UUID and binary
-       representation of the values.
+      1. If both values has the same type, then use [compare] function, that was
+      provided for this type. 2. If values are of different types, that are
+      known to the type system, then compare them using RTTI, and ignore the
+      value. 3. If at least one of the values is of the unknown type, (i.e.,
+      type wasn't registered in the type system), then use polymorphic compare
+      on a tuple of UUID and binary representation of the values.
 
-      The rules above guarantee, that values with different RTTI id
-      are never equal. It also guarantees that the ordering will be
-      preserved between different builds of a program, and even
-      between different versions of the compiler.
+      The rules above guarantee, that values with different RTTI id are never
+      equal. It also guarantees that the ordering will be preserved between
+      different builds of a program, and even between different versions of the
+      compiler.
 
       {2 Thread safety}
 
-      The only thread unsafe function is [register], that should be
-      called in the module initialization time. In general programs
-      modules are initialized in a single thread, so this shouldn't be
-      an issue.  The implementation by itself doesn't call [register].
-  *)
+      The only thread unsafe function is [register], that should be called in
+      the module initialization time. In general programs modules are
+      initialized in a single thread, so this shouldn't be an issue. The
+      implementation by itself doesn't call [register]. *)
   module Value : sig
     type t = value [@@deriving bin_io, compare, sexp]
     (** a universal value *)
@@ -4618,7 +4596,6 @@ module Std : sig
   [@@deprecated "[since 2018-03] in favor of the Primus Framework"]
 
   class ['a] biri : ['a] Biri.t
-    [@@deprecated "[since 2018-03] in favor of the Primus Framework"]
   (** BIR {{!Biri}interpreter}
       @deprecated Use the Primus Framework *)
 
@@ -4785,18 +4762,22 @@ module Std : sig
         ending at [a1], bounds inclusive *)
 
     val merge : t -> t -> t Or_error.t
-    (** [merge m1 m2] takes two memory regions, that either intersects or
-        share edges (i.e., difference between [min_addr] of one of the
-        blocks and [max_addr] of another is less then or equal to one, and
-        returns memory blocks that spans memory starting from the address
-        {[min (min_addr m1) (min_addr m2)]} and ending with address
-        {[max (max_addr m1) (max_addr m2)]}.
+    (** [merge m1 m2] takes two memory regions, that either intersects or share
+        edges (i.e., difference between [min_addr] of one of the blocks and
+        [max_addr] of another is less then or equal to one, and returns memory
+        blocks that spans memory starting from the address
+        {[
+          min (min_addr m1) (min_addr m2)
+        ]}
+        and ending with address
+        {[
+          max (max_addr m1) (max_addr m2)
+        ]}
+        .
 
-        Will return an error, if either the above state precondition
-        doesn't hold, or if this two memory blocks doesn't share the same
-        underlying memory (i.e., bases), or if they have different
-        endianness.
-    *)
+        Will return an error, if either the above state precondition doesn't
+        hold, or if this two memory blocks doesn't share the same underlying
+        memory (i.e., bases), or if they have different endianness. *)
 
     val first_byte : t -> t
     (** [first_byte m] returns first byte of [m] as a memory *)
@@ -5513,7 +5494,7 @@ module Std : sig
     [@@deprecated "[since 2017-07] use register_loader instead"]
     (** [register_backend ~name backend] tries to register [backend] under the
         specified [name].
-        @deprecated use register_loader instead *)
+        @deprecated use {!register_loader} instead *)
 
     (** {2 Internals}
 
@@ -6236,11 +6217,11 @@ module Std : sig
 
           See {!Insn} module for a more detailed description.
 
-          @typevar 'a = {{!asm}asm} | {{!empty}empty}, denotes whether assembly
+          typevar 'a = {{!asm}asm} | {{!empty}empty}, denotes whether assembly
           representation is available for the given instruction.
 
-          @typevar 'k = {{!kind}kind} | {{!empty}empty}, denotes whether semantics
-          kinds are available for the given instruction.*)
+          typevar 'k = {{!kind}kind} | {{!empty}empty}, denotes whether
+          semantics kinds are available for the given instruction.*)
 
       type (+'a, +'k) insns = (mem * ('a, 'k) insn option) list
       (** [insns] is a list of pairs, where each pair consists of a memory
@@ -6973,7 +6954,11 @@ module Std : sig
       (** since in IR the order of edges defines semantics, we provide extra
           functions *)
       module Edge : sig
+        (**/**)
+
         include Edge with type graph = t and type node = node and type t = edge
+
+        (**/**)
 
         val jmps : [ `after | `before ] -> t -> graph -> jmp term seq
         (** [jmps dir e g] enumerates all jumps (including calls, interrupts,
@@ -6999,7 +6984,11 @@ module Std : sig
             term itself, it takes into account all conditions preceding the
             edge. *)
 
+        (**/**)
+
         include Printable.S with type t := t
+
+        (**/**)
       end
 
       (** IR Graph node.
@@ -7241,8 +7230,7 @@ module Std : sig
           that are subroutine entry points will have [is-subroutine] property
           set to [(true)].
 
-          See {! sec:Algorithm} for the detailed description of the algorithm.
-      *)
+          See {!Algorithm} for the detailed description of the algorithm. *)
 
       val explore :
         ?entries:addr Sequence.t ->
@@ -7869,8 +7857,8 @@ module Std : sig
         # let b = Blk.create ();;
       ]}
       {v
-val b : Blk.t =
-          00000003:
+        val b : Blk.t =
+                  00000003:
       v}
 
       We can append a definition to it with an overloaded [Term.append]
@@ -7879,9 +7867,9 @@ val b : Blk.t =
         # let b = Term.append def_t b d_1;;
       ]}
       {v
-val b : blk term =
-          00000003:
-          00000001: x := y + z
+        val b : blk term =
+                  00000003:
+                  00000001: x := y + z
       v}
 
       Update a value of a definition in the block:
@@ -7890,9 +7878,9 @@ val b : blk term =
         # let b = Term.update def_t b d_2;;
       ]}
       {v
-val b : blk term =
-          00000003:
-          00000001: x := true
+        val b : blk term =
+                  00000003:
+                  00000001: x := true
       v} *)
   module Term : sig
     type 'a t = 'a term
@@ -7990,10 +7978,10 @@ val b : blk term =
         is no term with a given [tid], then an empty sequence is returned. *)
 
     val before : ('a, 'b) cls -> ?rev:bool -> 'a t -> tid -> 'b t seq
-    (** [before t ?rev p tid] returns all term that occurs before
-        definition with a given [tid] in blk. If there is no such
-        definition, then the sequence will be empty.  @param rev has
-        the same meaning as in {!after}.  *)
+    (** [before t ?rev p tid] returns all term that occurs before definition
+        with a given [tid] in blk. If there is no such definition, then the
+        sequence will be empty.
+        @param rev has the same meaning as in {!after}. *)
 
     val append : ('a, 'b) cls -> ?after:tid -> 'a t -> 'b t -> 'a t
     (** [append t ~after:this p c] returns the [p] term with [c] appended after
@@ -8075,7 +8063,7 @@ val b : blk term =
     val del_attr : 'a t -> 'b tag -> 'a t
     (** [del_attr term attr] deletes attribute [attr] from [term] *)
 
-    (** {Predefined attributes}  *)
+    (** Predefined attributes *)
 
     val origin : tid tag
     (** a term was artificially produced from a term with a given tid. *)
@@ -8386,12 +8374,12 @@ val b : blk term =
 
         @since 2.1
         @since 2.5.0 supports SSA
-        @before 2.5.0 the subroutine must not be in the SSA form *)
+        @before 2.5.0 the subroutine must not be in the SSA form
+        @deprecated since 2022-03: use {!Live.compute} *)
 
     val flatten : t -> t
-    (** [flatten sub] returns [sub] in flattened form in which all
-        operands are trivial.
-        @see Blk.flatten for more information about flattening.
+    (** [flatten sub] returns [sub] in flattened form in which all operands are
+        trivial. see {!Blk.flatten} for more information about flattening.
 
         @since 2.5.0 *)
 
@@ -8484,12 +8472,11 @@ val b : blk term =
           @since 2.6.0 *)
 
       val flatten : t -> t knowledge
-      (** [flatten sub] returns [sub] in flattened form in which all
-          operands are trivial.
-          @see Blk.KB.flatten for more information about flattening.
+      (** [flatten sub] returns [sub] in flattened form in which all operands
+          are trivial. see {!Blk.KB.flatten} for more information about
+          flattening.
 
-          @since 2.6.0
-      *)
+          @since 2.6.0 *)
     end
 
     val pp_slots : string list -> Format.formatter -> t -> unit
@@ -8582,25 +8569,24 @@ val b : blk term =
       t
     (** [reify ()] reifies inputs into a jump term.
 
-        Calls and interrupt subroutines invocations are represented
-        with two edges: the normal edge (denoted [dst]) is the
-        intra-procedural edge which connects the callsite with the
-        fall-through destination (if such exists) and an alternative
-        destination (denoted with [alt]) which represents an
-        inter-procedural destination between the callsite and the
+        Calls and interrupt subroutines invocations are represented with two
+        edges: the normal edge (denoted [dst]) is the intra-procedural edge
+        which connects the callsite with the fall-through destination (if such
+        exists) and an alternative destination (denoted with [alt]) which
+        represents an inter-procedural destination between the callsite and the
         call destination.
 
-        @param cnd is a core theory term that denotes the
-        guard condition of a conditional jump.
+        @param cnd
+          is a core theory term that denotes the guard condition of a
+          conditional jump.
 
         @param alt is the alternative control flow destination.
 
         @param dst is the direct control flow destination
 
-        @tid is the jump identifier, if not specified a fresh
-        new identifier is created.
-
-    *)
+        @param tid
+          is the jump identifier, if not specified a fresh new identifier is
+          created. *)
 
     val guard : t -> Theory.Bool.t Theory.value option
     (** [guard jmp] if [jmp] is conditional, returns its condition. *)
@@ -8728,9 +8714,12 @@ val b : blk term =
     (** [values phi] enumerate all possible values. *)
 
     val free_vars : t -> Var.Set.t
-    (** [free_vars t] returns a set of variables that occur free on
-        the right hand side of the phi-node. See {Exp.free_vars} for
-        clarification on what variables are considered free.  *)
+    (** [free_vars t] returns a set of variables that occur free on the right
+        hand side of the phi-node. See
+        {[
+          Exp.free_vars
+        ]}
+        for clarification on what variables are considered free. *)
 
     val lhs : t -> var
     (** [lhs phi] returns a variable associated with a phi node *)
@@ -9314,30 +9303,30 @@ val b : blk term =
           exists a deriviation of the following rules, proving this fact.
 
           {v
-    *a ~> v
-    a -> t
-    ---------------- :: p_load
-    v -> t
+            *a ~> v
+            a -> t
+            ---------------- :: p_load
+            v -> t
 
-    *a <- v
-    v -> t
-    ---------------- :: p_store
-    a -> t
+            *a <- v
+            v -> t
+            ---------------- :: p_store
+            a -> t
 
-    v1 <bop> v2 ~> v3
-    v1 -> t
-    ----------------- :: p_bop_lhs
-    v3 -> t
+            v1 <bop> v2 ~> v3
+            v1 -> t
+            ----------------- :: p_bop_lhs
+            v3 -> t
 
-    v1 <bop> v2 ~> v3
-    v2 -> t
-    ----------------- :: p_bop_rhs
-    v3 -> t
+            v1 <bop> v2 ~> v3
+            v2 -> t
+            ----------------- :: p_bop_rhs
+            v3 -> t
 
-    <uop> v1 ~> v2
-    v1 -> t
-    ----------------- :: p_uop
-    v2 -> t
+            <uop> v1 ~> v2
+            v1 -> t
+            ----------------- :: p_uop
+            v2 -> t
           v}
 
           Note 1: this class overrides only methods, that computes non-leaf
@@ -9395,13 +9384,12 @@ val b : blk term =
       Knowledge.agent -> t -> (unit -> 'a knowledge) -> 'a knowledge
     (** [providing t scope] provides the information in the specified [scope],
 
-        After the [scope] function is evaluated the information source
-        is retracted from the knowledge base.
+        After the [scope] function is evaluated the information source is
+        retracted from the knowledge base.
 
-        See {!Bap_knowledge.Knowledge.proposing{proposing}}.
+        See {!Bap_knowledge.Knowledge.proposing} .
 
-        @since 2.2.0
-    *)
+        @since 2.2.0 *)
 
     val create : (addr -> string option) -> t
     (** [create fn] creates a symbolizer for a given function *)
@@ -9450,13 +9438,12 @@ val b : blk term =
     val providing : t -> (unit -> 'a knowledge) -> 'a knowledge
     (** [providing t scope] provides the information in the specified [scope],
 
-        After the [scope] function is evaluated the information source
-        is retracted from the knowledge base.
+        After the [scope] function is evaluated the information source is
+        retracted from the knowledge base.
 
-        See {!Bap_knowledge.Knowledge.promising{promising}}.
+        See {!Bap_knowledge.Knowledge.promising}.
 
-        @since 2.2.0
-    *)
+        @since 2.2.0 *)
 
     val set_path : t -> string -> t
     (** [set_path s] limits the symbolizer applicability only to addresses that
@@ -9534,13 +9521,12 @@ val b : blk term =
     val providing : t -> (unit -> 'a knowledge) -> 'a knowledge
     (** [providing t scope] provides the information in the specified [scope],
 
-        After the [scope] function is evaluated the information source
-        is retracted from the knowledge base.
+        After the [scope] function is evaluated the information source is
+        retracted from the knowledge base.
 
-        See {!Bap_knowledge.Knowledge.promising{promising}}.
+        See {!Bap_knowledge.Knowledge.promising}.
 
-        @since 2.2.0
-    *)
+        @since 2.2.0 *)
 
     module Factory : Source.Factory.S with type t = t
     [@@deprecated "[since 2019-05] use [provide]"]
@@ -9979,23 +9965,23 @@ val b : blk term =
         [Project.tag_memory project tained color red] *)
 
     val substitute : t -> mem -> string tag -> string -> t
-    (** [substitute p region tag value] is like
-        {{!tag_memory}tag_memory}, but it will also apply
-        substitutions in the provided string value, as per OCaml
-        standard library's [Buffer.add_substitute] function.
+    (** [substitute p region tag value] is like {{!tag_memory}tag_memory}, but
+        it will also apply substitutions in the provided string value, as per
+        OCaml standard library's [Buffer.add_substitute] function.
 
-        Example: {[
+        Example:
+        {[
           Project.substitute project comment "$symbol starts at $symbol_addr"
         ]}
 
         The following substitutions are supported:
 
         - [$section{_name,_addr,_min_addr,_max_addr}] - name of region of file
-          to which it belongs. For example, in ELF this name will
-          correspond to the section name
+          to which it belongs. For example, in ELF this name will correspond to
+          the section name
 
-        - [$symbol{_name,_addr,_min_addr,_max_addr}] - name or address
-          of the symbol to which this memory belongs
+        - [$symbol{_name,_addr,_min_addr,_max_addr}] - name or address of the
+          symbol to which this memory belongs
 
         - [$asm] - assembler listing of the memory region
 
@@ -10511,19 +10497,28 @@ val b : blk term =
       val args : 'a arg -> ('a -> 'b, 'b) args
       (** [args x] a unary signature.
 
-          Creates a signature of a function that takes one
-          argument. The type ['a] of the argument and its syntax
-          are represented by the value of type ['a arg].
+          Creates a signature of a function that takes one argument. The type
+          ['a] of the argument and its syntax are represented by the value of
+          type ['a arg].
 
           Examples,
 
-          - {[args empty]} -- a function of type [unit -> 'r]
-          - {[args string]} -- a function of type [string -> 'r].
+          {ul
+           {- {[
+                args empty
+              ]}
+              -- a function of type [unit -> 'r]
+           }
+           {- {[
+                args string
+              ]}
+              -- a function of type [string -> 'r].
+           }
+          }
 
-          Note, while the ['r] type is kept as a variable it will be
-          concretized to the [unit knowledge] when the function of
-          this type will be registered using the [register] function.
-      *)
+          Note, while the ['r] type is kept as a variable it will be concretized
+          to the [unit knowledge] when the function of this type will be
+          registered using the [register] function. *)
 
       val ( $ ) : ('a, 'b -> 'c) args -> 'b arg -> ('a, 'c) args
       (** [args $ arg] appends [arg] to [args].
@@ -10618,99 +10613,99 @@ val b : blk term =
       val optional : 'a arg -> 'a option arg
       (** [optional x] an optional argument [x].
 
-          The syntax of [args xs $ optional x] is [<xs> [<x>]], where
-          [<x>] denotes the syntax of the argument [x], [[]] indicates
-          that it can be omitted, and [<xs>] is the grammar of the
-          signature [xs]. An optional argument should be the last
-          argument in the signature, otherwise the resulting grammar
-          will be ambiguous.
-
+          The syntax of [args xs $ optional x] is [<xs> [<x>]], where [<x>]
+          denotes the syntax of the argument [x], [[]] indicates that it can be
+          omitted, and [<xs>] is the grammar of the signature [xs]. An optional
+          argument should be the last argument in the signature, otherwise the
+          resulting grammar will be ambiguous.
 
           Example, the grammar of
           {[
             args string $ optional bitvec
-          }],
+          ]}
+          ,
 
           recognizes the following strings,
-            - ["hello"]
-            - ["hello 0x42"]  *)
+          - ["hello"]
+          - ["hello 0x42"] *)
 
       val keyword : string -> 'a arg -> 'a option arg
       (** [keyword s x] an optional keyworded argument [x].
 
-          The syntax of [args xs $ keyword s x] is {[<xs> [:<s> <x>]]},
-          where [<x>] denotes the syntax of the argument [x], [[]]
-          indicates that it can be omitted, [:<s>] is the literal string
-          [":<s>"], where [<s>] is equal to [s], and [<xs>] is the
-          grammar of the signature [xs]. If a grammar includes several
-          keyworded arguments they may follow in an arbitrary order.
-
+          The syntax of [args xs $ keyword s x] is
+          {[
+            <xs> [:<s> <x>]
+          ]}
+          , where [<x>] denotes the syntax of the argument [x], [[]] indicates
+          that it can be omitted, [:<s>] is the literal string [":<s>"], where
+          [<s>] is equal to [s], and [<xs>] is the grammar of the signature
+          [xs]. If a grammar includes several keyworded arguments they may
+          follow in an arbitrary order.
 
           Example, the grammar of
           {[
-            args @@
-            keyword "foo" string $
-            keyword "bar" bitvec
-          }],
+            args @@ keyword "foo" string $ keyword "bar" bitvec
+          ]}
+          ,
 
           recognizes the following strings,
 
-            - [""]
-            - [":foo hello"]
-            - [":bar 0x42"]
-            - [":foo hello :bar 0x42"]
-            - [":bar 0x42 :foo hello"]
-      *)
+          - [""]
+          - [":foo hello"]
+          - [":bar 0x42"]
+          - [":foo hello :bar 0x42"]
+          - [":bar 0x42 :foo hello"] *)
 
       val flag : string -> bool arg
       (** [flag x] a keyword [x] without arguments.
 
-          The syntax of [args xs $ flag s] is {[<xs> [:<s>]]}, where
-          [[]] indicates that it can be omitted, [:s] is the literal
-          string [":<s>"], where [<s>] is equal to [s], and [<xs>] is
-          the grammar of the signature [xs]. If a grammar includes
-          several flags they may follow in an arbitrary order.
-
+          The syntax of [args xs $ flag s] is
+          {[
+            <xs> [:<s>]
+          ]}
+          , where [[]] indicates that it can be omitted, [:s] is the literal
+          string [":<s>"], where [<s>] is equal to [s], and [<xs>] is the
+          grammar of the signature [xs]. If a grammar includes several flags
+          they may follow in an arbitrary order.
 
           Example, the grammar of
           {[
-            args @@
-            flag "foo" $
-            flag "bar"
-          }],
+            args @@ flag "foo" $ flag "bar"
+          ]}
+          ,
 
           recognizes the following strings,
-            - [""]
-            - [":foo hello"]
-            - [":bar 0x42"]
-            - [":foo hello :bar 0x42"]
-            - [":bar 0x42 :foo hello"]
-            - and so on.
-
-      *)
+          - [""]
+          - [":foo hello"]
+          - [":bar 0x42"]
+          - [":foo hello :bar 0x42"]
+          - [":bar 0x42 :foo hello"]
+          - and so on. *)
 
       val rest : 'a arg -> 'a list arg
       (** [rest x] a zero or more [x] arguments.
 
-          The syntax of [args xs $ rest x] is {[<xs> [<x>]...]}, where
-          [[]...] indicates that an argument can be omitted or
-          repeated an arbitrary number of times, [<x>] is syntax of
-          the agument [x], and [<xs>] is the grammar of the signature
-          [xs].  The [rest x] argument should be the last argument in
-          the signature, and any extensions of the resulting signature
-          will lead to an ambiguous grammar.
+          The syntax of [args xs $ rest x] is
+          {[
+            <xs> [<x>]...
+          ]}
+          , where [[]...] indicates that an argument can be omitted or repeated
+          an arbitrary number of times, [<x>] is syntax of the agument [x], and
+          [<xs>] is the grammar of the signature [xs]. The [rest x] argument
+          should be the last argument in the signature, and any extensions of
+          the resulting signature will lead to an ambiguous grammar.
 
           Example, the grammar of
           {[
             args string $ rest bitvec
-          }],
+          ]}
+          ,
 
           recognizes the following strings,
-            - ["hello"]
-            - ["hello 0x42"]
-            - ["hello 0x42 42"]
-            - and so on
-      *)
+          - ["hello"]
+          - ["hello 0x42"]
+          - ["hello 0x42 42"]
+          - and so on *)
 
       (** Abstract Grammar descriptions.*)
       module Grammar : sig
@@ -10740,7 +10735,7 @@ val b : blk term =
       a standalone applications).
 
       If run in a standalone mode, then field [name] would be set to
-      [Sys.executable_name] and [argv] to [Sys.argv].
+      {!Sys.executable_name} and [argv] to {!Sys.argv}.
 
       Note: this module uses the [Event.Self()] module and extends it with
       several more fields, such as [name], [version], [doc], and [argv]. It is
@@ -11001,7 +10996,8 @@ val b : blk term =
       (** [when_ready f] requests the system to call function [f] once
           configuration parameters are established and stabilized. An access
           function will be passed to the function [f], that can be used to
-          safely dereference parameters. *)
+          safely dereference parameters.
+          @deprecated since 2022-09: use {!declare_extension} instead *)
 
       type manpage_block =
         [ `I of string * string
