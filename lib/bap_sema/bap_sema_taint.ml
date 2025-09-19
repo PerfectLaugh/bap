@@ -89,7 +89,7 @@ class context =
         {<tas = tas'>}
 
     method reg_taints r = get_taints tvs (Bil.Result.id r)
-    (** T(r) = { t : t |-> v}  *)
+    (** T(r) = [ t : t |-> v ] *)
 
     method ptr_taints r = get_taints tas r
     method all_taints = Set.union (collect_taints tvs) (collect_taints tas)

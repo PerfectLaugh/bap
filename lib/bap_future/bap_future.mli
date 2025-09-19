@@ -574,25 +574,33 @@ module Std : sig
 
     val foldw :
       ?stride:int -> 'a t -> int -> init:'b -> f:('b -> 'a -> 'b) -> 'b t
-    (** [foldw ss n ~init ~f] performs a windowed fold of the stream.
-        A function [f] is folded over [n] consecutive elements of [ss],
-        then the result is produced into the output stream, the window
-        is shifted by [stride] (defaults to one) and function [f]
-        applied to the next [n] elements. For example, if stream [ss]
-        produced the following sequence of elements:
+    (** [foldw ss n ~init ~f] performs a windowed fold of the stream. A function
+        [f] is folded over [n] consecutive elements of [ss], then the result is
+        produced into the output stream, the window is shifted by [stride]
+        (defaults to one) and function [f] applied to the next [n] elements. For
+        example, if stream [ss] produced the following sequence of elements:
 
-        {[1,2,3,4,5,6,7,8]}
+        {[
+          1, 2, 3, 4, 5, 6, 7, 8
+        ]}
 
-        and windows length [n] is equal to [3], then the function [f]
-        will be applied to a sequences:
-        {[[1,2,3], [2,3,4], [3,4,5], [4,5,6], [5,6,7], [6,7,8]]}.
+        and windows length [n] is equal to [3], then the function [f] will be
+        applied to a sequences:
+        {[
+          [ (1, 2, 3) ],
+          [ (2, 3, 4) ],
+          [ (3, 4, 5) ],
+          [ (4, 5, 6) ],
+          [ (5, 6, 7) ],
+          [ (6, 7, 8) ]
+        ]}
+        .
 
         Example, a moving average filter implemented with [foldw]:
 
         {[
           let moving_average ss n =
             Float.(foldw ss n ~init:zero ~f:(+) >>| fun s / of_int n)
-
         ]} *)
 
     val frame : clk:unit t -> 'a t -> init:'b -> f:('b -> 'a -> 'b) -> 'b t

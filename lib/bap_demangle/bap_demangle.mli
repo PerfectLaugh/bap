@@ -88,9 +88,9 @@ module Std : sig
     [@@deprecated "since 2022-07 use [create] and/or [install]"]
     (** [register demangler] DEPRECATED.
 
-        @before 2.5.0 registers new demangler.
-        @after 2.5.0 no longer needed and does nothing, all demanglers
-        are automatically registered on creation. *)
+        @before 2.5.0
+          registers new demangler. after 2.5.0 no longer needed and does
+          nothing, all demanglers are automatically registered on creation. *)
 
     val lookup : ?package:string -> string -> demangler option
     (** [lookup ?package name] lookups in the registry for the demangler with

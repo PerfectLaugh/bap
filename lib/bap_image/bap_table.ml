@@ -70,7 +70,7 @@ let pp_elt f fmt = function
   | None -> Format.fprintf fmt "None"
   | Some (x, _) -> Format.fprintf fmt "Some %a" Addr.pp (f x)
 
-(** @pre [x <= y] *)
+(** pre [x <= y] *)
 let intersects x y = Addr.(Mem.max_addr x >= Mem.min_addr y)
 
 let prev_key map key = Map.closest_key map `Less_than key

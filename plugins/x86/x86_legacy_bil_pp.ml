@@ -1,8 +1,7 @@
 (* Copyright (C) 2017 ForAllSecure, Inc. - All Rights Reserved.*)
 (** Pretty printing
 
-    @todo Write .mli
-*)
+    TODO: Write .mli *)
 
 module Bil = X86_legacy_bil
 open Big_int_Z
