@@ -9,11 +9,6 @@
 (maintainers "Ivan Gotovchits <ivg@ieee.org>")
 (source (github BinaryAnalysisPlatform/bap))
 
-
-(explicit_js_mode)
-
-(use_standard_c_and_cxx_flags false)
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;                          Package Descriptions                  ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
