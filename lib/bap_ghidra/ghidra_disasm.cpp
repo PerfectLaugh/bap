@@ -61,7 +61,7 @@ public:
     }
 
     bool is_mapped(uint64_t addr) const {
-        return addr >= mem.base && addr - mem.base < mem.loc.len;
+        return addr >= mem.base && (int)(addr - mem.base) < mem.loc.len;
     }
 };
 
@@ -81,6 +81,7 @@ enum ExtraOpCode {
 std::string get_extra_opname(ExtraOpCode op) {
     switch (op) {
     case CORE_SEQ: return "core:seq";
+    default: break;
     }
     return ":unk";
 }
@@ -109,7 +110,7 @@ public:
 
         std::vector<string> userops;
         translator.getUserOpNames(userops);
-        for (int op = 0; op < userops.size(); op++) {
+        for (size_t op = 0; op < userops.size(); op++) {
             user_offsets[op] = ss.tellp();
             ss << userops[op] << '\000';
         }
@@ -267,7 +268,7 @@ public:
             bap::insn insn;
             insn.code = CORE_SEQ;
             insn.name = opcodes.intern(insn.code);
-            for (int i = 0; i < insns.size(); i++) {
+            for (size_t i = 0; i < insns.size(); i++) {
                 bap::operand op;
                 op.type = bap_disasm_op_insn;
                 op.sub_val = &insns[i];
@@ -356,9 +357,11 @@ bool matches(const bap::insn &insn, bap_disasm_insn_p_type p) {
         case is_call:
             sat |= p != is_barrier && (op == CPUI_CALL || op == CPUI_CALLIND);
         case is_indirect_branch:
-            sat |= p != is_call && op == CPUI_BRANCHIND || op == CPUI_CALLIND;
+            sat |= p != is_call && (op == CPUI_BRANCHIND || op == CPUI_CALLIND);
         case is_return:
             sat |= p != is_call && op == CPUI_RETURN;
+        case is_invalid:
+            return false;
         }
         return sat;
     }
