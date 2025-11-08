@@ -1465,51 +1465,44 @@ module Knowledge : sig
     val read : ?package:string -> string -> t
     (** [read ?package input] reads a full name from input.
 
-        This function will parse the [input] and return a
-        fully-qualified name that corresponds to the input, using
-        [package] as the currently opened package. The input syntax
-        is {v
+        This function will parse the [input] and return a fully-qualified name
+        that corresponds to the input, using [package] as the currently opened
+        package. The input syntax is
+        {v
           name = string, ":", string
                | ":", string
                | string
           string = ?a sequence of any characters?
         v}
 
-
-        Not all characters in the [input] string are treated
-        literally, the following two characters have a special
-        interpretation:
+        Not all characters in the [input] string are treated literally, the
+        following two characters have a special interpretation:
         - ['\\'] the escape character;
         - [':'] the package separator character.
 
-        The escape character disables a special interpretation of the
-        consequent character. The package separator denotes the place
-        in the input where the package name ends and the name part
-        starts.
+        The escape character disables a special interpretation of the consequent
+        character. The package separator denotes the place in the input where
+        the package name ends and the name part starts.
 
-        If [package] is specified then it is treated literally (as in
-        the [create] function). The same as in [create] it defaults to
-        the ["user"] package.
+        If [package] is specified then it is treated literally (as in the
+        [create] function). The same as in [create] it defaults to the ["user"]
+        package.
 
-        If [input] doesn't denote a fully qualified name (i.e., there
-        is no [':'] special character in [input], then the read name
-        is qualified with the passed [package], otherwise the package
-        is defined by the [input].
+        If [input] doesn't denote a fully qualified name (i.e., there is no
+        [':'] special character in [input], then the read name is qualified with
+        the passed [package], otherwise the package is defined by the [input].
 
-        The function is expected to work with the output of the [show]
-        function, so that for all [n], [read (show n) = n]. However,
-        it is robust enough to accept any user inputs, even if it is
-        not a well-formed input, e.g., when an escape character is
-        used to escaped a non-special character or when input contains
-        more than one unescaped separators. In case of invalid input,
-        all special characters that doesn't make sense are treated
-        literally and the first special [':'] denotes the end of the
-        package field. If the input is not valid, then it is possible
-        that [show (read s) <> s], since the output of [show] is
-        always valid, e.g.
+        The function is expected to work with the output of the [show] function,
+        so that for all [n], [read (show n) = n]. However, it is robust enough
+        to accept any user inputs, even if it is not a well-formed input, e.g.,
+        when an escape character is used to escaped a non-special character or
+        when input contains more than one unescaped separators. In case of
+        invalid input, all special characters that doesn't make sense are
+        treated literally and the first special [':'] denotes the end of the
+        package field. If the input is not valid, then it is possible that
+        [show (read s) <> s], since the output of [show] is always valid, e.g.
 
-        [show@@read "hello:cruel:world" = "hello:cruel\\:world"]
-    *)
+        [show@@read "hello:cruel:world" = "hello:cruel\\:world"] *)
 
     val show : t -> string
     (** [show name] is the readable representation of [name].

@@ -218,7 +218,7 @@ module Std : sig
     (** [bin_writer (module T)] returns a writer in binprot format. *)
 
     val pretty_writer : (module Pretty_printer.S with type t = 'a) -> 'a writer
-    (** [pretty_printer (module T] creates a writer that uses [T.pp] function
+    (** [pretty_printer (module T)] creates a writer that uses [T.pp] function
         for outputting. *)
 
     (** Data type interface.
