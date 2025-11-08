@@ -508,7 +508,7 @@ details of the program behavior.")
   core
   (bap-common (= :version))
   (ppx_bap (= :version))
-  (ppx_bitstring (and (>= 4.0.0) (< 5.0.0)))
+  ppx_bitstring
   (regular (= :version))))
 
 (package
