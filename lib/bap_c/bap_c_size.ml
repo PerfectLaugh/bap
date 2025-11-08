@@ -12,7 +12,6 @@ let next_multitude_of ~n x = (x + (n - 1)) land lnot (n - 1)
 let padding alignment offset =
   let align = Size.in_bits alignment in
   (align - (offset mod align)) mod align
-[@@deprecated "since [2021-05] this method is ignored"]
 
 let max_enum_elt xs =
   List.fold xs ~init:None ~f:(fun m (_, x) ->

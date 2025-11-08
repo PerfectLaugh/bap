@@ -18,6 +18,7 @@ val padding : Size.t -> int -> int
     ensure the [alignment].
 
     @since 2.5.0 *)
+[@@deprecated "since [2021-05] this method is ignored"]
 
 val max_enum_elt : (string * int64 option) list -> int64
 (** [max_enum_elt enum] returns the maximum element in the enum specification.
