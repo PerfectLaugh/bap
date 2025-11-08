@@ -81,3 +81,5 @@ OMakefile
 /_opam/
 /plugins/api/api_sites.ml
 /plugins/stub_resolver/stub_resolver_sites.ml
+
+*.install
