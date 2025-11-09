@@ -639,12 +639,10 @@ module Encodings = struct
   let symbols_encoding spec =
     symbol_values spec
     |> Seq.fold ~init:empty ~f:(fun symbols (addr, value) ->
-           let addr = Bitvec.M32.int64 addr in
-           if is_thumb value then Map.set symbols ~key:addr ~data:llvm_t32
-           else
-             Map.update symbols addr ~f:(function
-               | None -> llvm_a32
-               | Some t -> t))
+        let addr = Bitvec.M32.int64 addr in
+        if is_thumb value then Map.set symbols ~key:addr ~data:llvm_t32
+        else
+          Map.update symbols addr ~f:(function None -> llvm_a32 | Some t -> t))
 
   let slot =
     KB.Class.property CT.Unit.cls ~package "symbols-encodings"

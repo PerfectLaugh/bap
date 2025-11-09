@@ -12,7 +12,7 @@ let ssa_free_vars sub =
   let is_undefined v = Var.index v = 0 in
   Term.enum blk_t sub
   |> Seq.fold ~init:Var.Set.empty ~f:(fun vars blk ->
-         vars ++ Set.filter (Ir_blk.free_vars blk) ~f:is_undefined)
+      vars ++ Set.filter (Ir_blk.free_vars blk) ~f:is_undefined)
 
 module Live = struct
   type tran = { defs : Var.Set.t; uses : Var.Set.t }
@@ -28,7 +28,7 @@ module Live = struct
   let blk_defs blk =
     Term.enum def_t blk
     |> Seq.fold ~init:Var.Set.empty ~f:(fun defs def ->
-           Set.add defs (Ir_def.lhs def))
+        Set.add defs (Ir_def.lhs def))
 
   let update blk trans ~f =
     Map.update trans blk ~f:(function
@@ -38,20 +38,20 @@ module Live = struct
   let block_transitions sub =
     Term.enum blk_t sub
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun fs blk ->
-           Map.add_exn fs ~key:(Term.tid blk)
-             ~data:{ defs = blk_defs blk; uses = Ir_blk.free_vars blk })
+        Map.add_exn fs ~key:(Term.tid blk)
+          ~data:{ defs = blk_defs blk; uses = Ir_blk.free_vars blk })
     |> fun trans ->
     Term.enum blk_t sub
     |> Seq.fold ~init:trans ~f:(fun init blk ->
-           Term.enum phi_t blk
-           |> Seq.fold ~init ~f:(fun init phi ->
-                  Ir_phi.values phi
-                  |> Seq.fold ~init ~f:(fun fs (src, exp) ->
-                         update src fs ~f:(fun { defs; uses } ->
-                             {
-                               defs = Set.add defs (Ir_phi.lhs phi);
-                               uses = uses ++ (Exp.free_vars exp -- defs);
-                             }))))
+        Term.enum phi_t blk
+        |> Seq.fold ~init ~f:(fun init phi ->
+            Ir_phi.values phi
+            |> Seq.fold ~init ~f:(fun fs (src, exp) ->
+                update src fs ~f:(fun { defs; uses } ->
+                    {
+                      defs = Set.add defs (Ir_phi.lhs phi);
+                      uses = uses ++ (Exp.free_vars exp -- defs);
+                    }))))
 
   let lookup blks n =
     match Map.find blks n with
@@ -67,9 +67,9 @@ module Live = struct
   let initialize ?(init = Var.Set.empty) sub =
     Tid.Map.singleton G.exit
     @@ Seq.fold (Term.enum arg_t sub) ~init ~f:(fun vars arg ->
-           match Ir_arg.intent arg with
-           | None | Some In -> vars
-           | Some (Out | Both) -> vars ++ Exp.free_vars (Ir_arg.rhs arg))
+        match Ir_arg.intent arg with
+        | None | Some In -> vars
+        | Some (Out | Both) -> vars ++ Exp.free_vars (Ir_arg.rhs arg))
 
   let compute ?keep:init sub =
     let g = G.create sub in

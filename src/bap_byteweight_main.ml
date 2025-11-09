@@ -132,7 +132,7 @@ let oracle_of_image img =
 let code_of_image img =
   Image.memory img |> Memmap.to_sequence
   |> Seq.filter_map ~f:(fun (mem, desc) ->
-         Option.some_if (Value.is Image.code_region desc) mem)
+      Option.some_if (Value.is Image.code_region desc) mem)
 
 let train_on_file loader comp operation max_length db path =
   create_image loader path >>= fun img ->
@@ -243,7 +243,7 @@ let dump loader comp info min_length max_length threshold path input _ctxt =
 
       SymIO.write_addrs stdout @@ Set.to_list
       @@ Seq.fold (code_of_image img) ~init:Addr.Set.empty ~f:(fun starts mem ->
-             List.fold (find mem) ~init:starts ~f:Set.add)
+          List.fold (find mem) ~init:starts ~f:Set.add)
   | `SymTbl ->
       let syms = Image.symbols img in
       let mems = Table.regions syms in

@@ -13,14 +13,14 @@ let create_mapping prog =
   let add t a = Hashtbl.set addrs ~key:a ~data:(Term.tid t) in
   Term.enum sub_t prog
   |> Seq.iter ~f:(fun sub ->
-         Term.enum blk_t sub
-         |> Seq.iter ~f:(fun blk ->
-                match Term.get_attr blk address with
-                | Some addr -> add blk addr
-                | None -> ());
-         match Term.get_attr sub address with
-         | Some addr -> add sub addr
-         | None -> ());
+      Term.enum blk_t sub
+      |> Seq.iter ~f:(fun blk ->
+          match Term.get_attr blk address with
+          | Some addr -> add blk addr
+          | None -> ());
+      match Term.get_attr sub address with
+      | Some addr -> add sub addr
+      | None -> ());
   Hashtbl.find addrs
 
 type 's checkpoint = tid * 's
@@ -162,12 +162,12 @@ class ['a] main ?(deterministic = false) p =
       | Some blk when not deterministic ->
           Term.enum jmp_t blk
           |> Seq.fold ~init:(SM.return ()) ~f:(fun m jmp ->
-                 m >>= fun () ->
-                 SM.update (fun ctxt -> ctxt#visit_term (Term.tid jmp))
-                 >>= fun () ->
-                 self#next_of_jmp jmp >>= function
-                 | None -> SM.return ()
-                 | Some tid -> SM.update (fun ctxt -> ctxt#add_checkpoint tid))
+              m >>= fun () ->
+              SM.update (fun ctxt -> ctxt#visit_term (Term.tid jmp))
+              >>= fun () ->
+              self#next_of_jmp jmp >>= function
+              | None -> SM.return ()
+              | Some tid -> SM.update (fun ctxt -> ctxt#add_checkpoint tid))
       | _ -> SM.return ()
 
     method private next_of_jmp jmp =

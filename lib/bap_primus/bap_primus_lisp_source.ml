@@ -210,17 +210,17 @@ let pp_underline ?(context = 4) { inputs } ppf
       let current = ref 0 in
       String.split_lines source
       |> List.iter ~f:(fun line ->
-             incr current;
-             if current.contents = end_pos.line + 1 then
-               pp_print_underline ppf (start_pos.col, end_pos.col);
-             let distance =
-               min
-                 (abs (!current - start_pos.line))
-                 (abs (!current - end_pos.line))
-             in
-             let bad = !current >= start_pos.line && !current <= end_pos.line in
-             if distance < context then
-               fprintf ppf "%c %s@\n" (if bad then '>' else '|') line);
+          incr current;
+          if current.contents = end_pos.line + 1 then
+            pp_print_underline ppf (start_pos.col, end_pos.col);
+          let distance =
+            min
+              (abs (!current - start_pos.line))
+              (abs (!current - end_pos.line))
+          in
+          let bad = !current >= start_pos.line && !current <= end_pos.line in
+          if distance < context then
+            fprintf ppf "%c %s@\n" (if bad then '>' else '|') line);
       (* in case if the error was on the last line in a file *)
       if current.contents = end_pos.line then
         pp_print_underline ppf (start_pos.col, end_pos.col)

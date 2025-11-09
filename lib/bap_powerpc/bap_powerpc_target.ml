@@ -33,8 +33,8 @@ let parent = Theory.Target.declare ~package "powerpc-family"
 let crflags =
   List.concat
   @@ List.init 8 ~f:(fun group ->
-         List.map [ "UN"; "EQ"; "GT"; "LT" ] ~f:(fun f ->
-             reg bool @@ sprintf "CR%d%s" group f))
+      List.map [ "UN"; "EQ"; "GT"; "LT" ] ~f:(fun f ->
+          reg bool @@ sprintf "CR%d%s" group f))
 
 let flags =
   List.map ~f:(reg bool)
@@ -186,10 +186,10 @@ let enable_loader () =
 let register_subtargets () =
   [ powerpc32eb; powerpc32le; powerpc64eb; powerpc64le ]
   |> List.iter ~f:(fun parent ->
-         Theory.Target.register parent
-           ~abis:Theory.Abi.[ unknown; gnu ]
-           ~systems:Theory.System.[ unknown; linux; freebsd; openbsd; vxworks ]
-           ~filetypes:Theory.Filetype.[ unknown; elf; macho ])
+      Theory.Target.register parent
+        ~abis:Theory.Abi.[ unknown; gnu ]
+        ~systems:Theory.System.[ unknown; linux; freebsd; openbsd; vxworks ]
+        ~filetypes:Theory.Filetype.[ unknown; elf; macho ])
 
 let map_powerpc () =
   let open KB.Syntax in

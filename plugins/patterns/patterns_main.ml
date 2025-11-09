@@ -915,16 +915,16 @@ module Rules = struct
     List.fold rules ~init:empty ~f:(fun rules (r : Rule.t) ->
         patterns_product r.prepatterns r.postpatterns
         |> List.fold ~init:rules ~f:(fun rules (pre, post) ->
-               if is_large_enough r.sizes pre post then
-                 let actions = Set.of_list (module Action) r.actions in
-                 let p = Pattern.concat pre post in
-                 {
-                   known = Set.union rules.known actions;
-                   cases =
-                     { actions; pattern = p; shifted = Pattern.length pre }
-                     :: rules.cases;
-                 }
-               else rules))
+            if is_large_enough r.sizes pre post then
+              let actions = Set.of_list (module Action) r.actions in
+              let p = Pattern.concat pre post in
+              {
+                known = Set.union rules.known actions;
+                cases =
+                  { actions; pattern = p; shifted = Pattern.length pre }
+                  :: rules.cases;
+              }
+            else rules))
 
   let apply addr case f x =
     let addr = Addr.nsucc addr case.shifted in
@@ -982,11 +982,11 @@ end = struct
   let collect roots =
     List.concat_map roots ~f:collect_patternconstraints
     |> List.concat_map ~f:(fun toc ->
-           let folder = FilePath.dirname toc in
-           parse_file toc Grammar.files
-           |> List.concat
-           |> List.map ~f:(fun (target, file) ->
-                  (Target.parse target, Filename.concat folder file)))
+        let folder = FilePath.dirname toc in
+        parse_file toc Grammar.files
+        |> List.concat
+        |> List.map ~f:(fun (target, file) ->
+            (Target.parse target, Filename.concat folder file)))
 
   let dedup selected =
     let empty = Set.empty (module String) in
@@ -999,10 +999,10 @@ end = struct
   let select roots target =
     collect roots
     |> List.filter_map ~f:(fun (t, file) ->
-           Option.some_if
-             (Target.matches target t && Sys.file_exists file
-             && not (Sys.is_directory file))
-             file)
+        Option.some_if
+          (Target.matches target t && Sys.file_exists file
+          && not (Sys.is_directory file))
+          file)
     |> dedup
 
   let load roots target =
@@ -1116,16 +1116,16 @@ end = struct
   let apply_actions unit actions =
     Map.to_sequence actions
     |> KB.Seq.iter ~f:(fun (addr, actions) ->
-           Set.to_sequence actions
-           |> KB.Seq.iter ~f:(fun action ->
-                  KB.Object.scoped Theory.Program.cls @@ fun lbl ->
-                  KB.sequence
-                    [
-                      KB.provide Lambda.unit lbl (Some unit);
-                      KB.provide Lambda.addr lbl (Some addr);
-                      KB.provide Action.property lbl (Some action);
-                    ]
-                  >>= fun () -> KB.collect Theory.Semantics.slot lbl >>| ignore))
+        Set.to_sequence actions
+        |> KB.Seq.iter ~f:(fun action ->
+            KB.Object.scoped Theory.Program.cls @@ fun lbl ->
+            KB.sequence
+              [
+                KB.provide Lambda.unit lbl (Some unit);
+                KB.provide Lambda.addr lbl (Some addr);
+                KB.provide Action.property lbl (Some action);
+              ]
+            >>= fun () -> KB.collect Theory.Semantics.slot lbl >>| ignore))
 
   let promise_outcome () =
     KB.promise slot @@ fun unit ->

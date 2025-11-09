@@ -47,7 +47,7 @@ let properties =
 let properties_description =
   String.concat ~sep:"; "
   @@ List.map properties ~f:(fun (name, { explain }) ->
-         sprintf "$(b,%s) - %s\n" name explain)
+      sprintf "$(b,%s) - %s\n" name explain)
 
 let matches patterns proj addr =
   List.for_all patterns ~f:(fun ({ extract }, pattern) ->
@@ -82,26 +82,26 @@ let print_symbols patterns demangler fmts ppf proj =
   let symtab = Project.symbols proj in
   Symtab.to_sequence symtab
   |> Seq.filter ~f:(fun (_, entry, _) ->
-         matches patterns proj (Some (Block.addr entry)))
+      matches patterns proj (Some (Block.addr entry)))
   |> Seq.iter ~f:(fun ((name, entry, _) as fn) ->
-         List.iter fmts ~f:(function
-           | `with_name -> fprintf ppf "%s " @@ demangle name
-           | `with_addr ->
-               let addr = Block.addr entry in
-               fprintf ppf "%s " @@ Addr.string_of_value addr
-           | `with_size ->
-               let size =
-                 Symtab.span fn |> Memmap.to_sequence
-                 |> Seq.fold ~init:0 ~f:(fun size (mem, _) ->
-                        Memory.length mem + size)
-               in
-               fprintf ppf "%2d " size);
-         fprintf ppf "@\n")
+      List.iter fmts ~f:(function
+        | `with_name -> fprintf ppf "%s " @@ demangle name
+        | `with_addr ->
+            let addr = Block.addr entry in
+            fprintf ppf "%s " @@ Addr.string_of_value addr
+        | `with_size ->
+            let size =
+              Symtab.span fn |> Memmap.to_sequence
+              |> Seq.fold ~init:0 ~f:(fun size (mem, _) ->
+                  Memory.length mem + size)
+            in
+            fprintf ppf "%2d " size);
+      fprintf ppf "@\n")
 
 let extract_program patterns proj =
   Project.program proj
   |> Term.filter sub_t ~f:(fun sub ->
-         matches patterns proj (Term.get_attr sub address))
+      matches patterns proj (Term.get_attr sub address))
 
 let print_bir patterns sema ppf proj =
   let pp =
@@ -213,9 +213,9 @@ module Adt = struct
     let sections =
       Memmap.to_sequence memmap
       |> Seq.filter_map ~f:(fun (mem, attr) ->
-             match Value.get Image.section attr with
-             | Some name -> Some (name, mem)
-             | None -> None)
+          match Value.get Image.section attr with
+          | Some name -> Some (name, mem)
+          | None -> None)
     in
     let pp_section ppf (name, mem) =
       fprintf ppf {|Section(%S, %a, "|} name pp_word (Memory.min_addr mem);
@@ -262,12 +262,12 @@ module Ir_pp = struct
     let jmps =
       Term.enum jmp_t blk
       |> Seq.filter_map ~f:(fun jmp ->
-             match Jmp.kind jmp with
-             | Call _ | Ret _ | Int (_, _) -> Some (Jmp.to_string jmp)
-             | Goto _ -> (
-                 match succ_tid_of_jmp jmp with
-                 | None -> Some (Jmp.to_string jmp)
-                 | Some _ -> None))
+          match Jmp.kind jmp with
+          | Call _ | Ret _ | Int (_, _) -> Some (Jmp.to_string jmp)
+          | Goto _ -> (
+              match succ_tid_of_jmp jmp with
+              | None -> Some (Jmp.to_string jmp)
+              | Some _ -> None))
     in
     let lines = List.concat @@ List.map [ phis; defs; jmps ] ~f:Seq.to_list in
     let body =
@@ -313,23 +313,23 @@ let print_bir_graph ~labeled patterns ppf proj =
   fprintf ppf "digraph {@\nnode[shape=box];@\n";
   Term.enum sub_t prog
   |> Seq.iter ~f:(fun sub ->
-         let name = Sub.name sub in
-         fprintf ppf "%a@." (pp_bir_cfg ~labeled name) (Sub.to_cfg sub);
-         Term.enum blk_t sub
-         |> Seq.iter ~f:(fun src ->
-                Term.enum jmp_t src
-                |> Seq.iter ~f:(fun jmp ->
-                       match Jmp.alt jmp with
-                       | None -> ()
-                       | Some dst -> (
-                           match Jmp.resolve dst with
-                           | Either.Second _ -> ()
-                           | Either.First dst -> (
-                               match Map.find entries dst with
-                               | None -> ()
-                               | Some dst ->
-                                   fprintf ppf "\"\\%a\" -> \"\\%a\";@\n" Tid.pp
-                                     (Term.tid src) Tid.pp dst)))));
+      let name = Sub.name sub in
+      fprintf ppf "%a@." (pp_bir_cfg ~labeled name) (Sub.to_cfg sub);
+      Term.enum blk_t sub
+      |> Seq.iter ~f:(fun src ->
+          Term.enum jmp_t src
+          |> Seq.iter ~f:(fun jmp ->
+              match Jmp.alt jmp with
+              | None -> ()
+              | Some dst -> (
+                  match Jmp.resolve dst with
+                  | Either.Second _ -> ()
+                  | Either.First dst -> (
+                      match Map.find entries dst with
+                      | None -> ()
+                      | Some dst ->
+                          fprintf ppf "\"\\%a\" -> \"\\%a\";@\n" Tid.pp
+                            (Term.tid src) Tid.pp dst)))));
   fprintf ppf "}"
 
 let pp_addr ppf a = Addr.pp_generic ~prefix:`none ~case:`lower ppf a
@@ -350,9 +350,9 @@ let sort_fns fns =
 let section_name memory start =
   Memmap.lookup memory start
   |> Seq.find_map ~f:(fun (mem, tag) ->
-         match Value.get Image.section tag with
-         | Some name when Addr.equal (Memory.min_addr mem) start -> Some name
-         | _ -> None)
+      match Value.get Image.section tag with
+      | Some name when Addr.equal (Memory.min_addr mem) start -> Some name
+      | _ -> None)
   |> function
   | Some name -> name
   | None -> Format.asprintf ".section@%a" Addr.pp start
@@ -365,21 +365,21 @@ let print_disasm pp_insn patterns ppf proj =
   Memmap.filter_map memory ~f:(Value.get Image.code_region)
   |> Memmap.to_sequence
   |> Seq.iter ~f:(fun (mem, ()) ->
-         let sec = section_name memory (Memory.min_addr mem) in
-         Symtab.intersecting syms mem
-         |> List.filter ~f:(fun (_, entry, _) ->
-                matches patterns proj (Some (Block.addr entry)))
-         |> function
-         | [] -> ()
-         | fns ->
-             fprintf ppf "@\nDisassembly of section %s@\n" sec;
-             Seq.iter (sort_fns fns) ~f:(fun (name, entry, cfg) ->
-                 fprintf ppf "@\n%a: <%s>@\n" pp_addr (Block.addr entry) name;
-                 sorted_blocks (Graphs.Cfg.nodes cfg)
-                 |> Seq.iter ~f:(fun blk ->
-                        let mem = Block.memory blk in
-                        fprintf ppf "%a:@\n" pp_addr (Memory.min_addr mem);
-                        Block.insns blk |> List.iter ~f:(pp_insn syms blk ppf))));
+      let sec = section_name memory (Memory.min_addr mem) in
+      Symtab.intersecting syms mem
+      |> List.filter ~f:(fun (_, entry, _) ->
+          matches patterns proj (Some (Block.addr entry)))
+      |> function
+      | [] -> ()
+      | fns ->
+          fprintf ppf "@\nDisassembly of section %s@\n" sec;
+          Seq.iter (sort_fns fns) ~f:(fun (name, entry, cfg) ->
+              fprintf ppf "@\n%a: <%s>@\n" pp_addr (Block.addr entry) name;
+              sorted_blocks (Graphs.Cfg.nodes cfg)
+              |> Seq.iter ~f:(fun blk ->
+                  let mem = Block.memory blk in
+                  fprintf ppf "%a:@\n" pp_addr (Memory.min_addr mem);
+                  Block.insns blk |> List.iter ~f:(pp_insn syms blk ppf))));
   pp_close_tbox ppf ()
 
 let pp_bil fmt _ _ ppf (mem, insn) =
@@ -419,17 +419,16 @@ let compile_patterns subs secs patterns =
   let secs = List.map secs ~f:(sprintf "section:%s") in
   List.concat_no_order [ subs; secs; patterns ]
   |> List.map ~f:(fun pattern ->
-         match String.index pattern ':' with
-         | None ->
-             invalid_argf "wrong pattern %S, expected `:`, none found" pattern
-               ()
-         | Some pos -> (
-             let property = String.sub ~pos:0 ~len:pos pattern in
-             let pattern = String.subo ~pos:(pos + 1) pattern in
-             let pattern = Re.Pcre.re pattern |> Re.compile in
-             match List.Assoc.find properties property ~equal:String.equal with
-             | None -> invalid_argf "unknown property %S" property ()
-             | Some property -> (property, pattern)))
+      match String.index pattern ':' with
+      | None ->
+          invalid_argf "wrong pattern %S, expected `:`, none found" pattern ()
+      | Some pos -> (
+          let property = String.sub ~pos:0 ~len:pos pattern in
+          let pattern = String.subo ~pos:(pos + 1) pattern in
+          let pattern = Re.Pcre.re pattern |> Re.compile in
+          match List.Assoc.find properties property ~equal:String.equal with
+          | None -> invalid_argf "unknown property %S" property ()
+          | Some property -> (property, pattern)))
 
 let main attrs ansi_colors demangle symbol_fmts subs secs patterns doms =
   let patterns = compile_patterns subs secs patterns in

@@ -70,14 +70,14 @@ let provide_sequence_semantics () =
           let subs =
             Array.to_list subs
             |> List.map ~f:(fun sub ->
-                   Insn.Seqnum.fresh >>| fun lbl -> (lbl, sub))
+                Insn.Seqnum.fresh >>| fun lbl -> (lbl, sub))
           in
           KB.all subs
           >>= KB.List.map ~f:(fun (obj, sub) ->
-                  KB.provide Basic.slot obj (Some sub) >>= fun () ->
-                  KB.collect Theory.Semantics.slot obj >>= fun sema ->
-                  let nil = Theory.Effect.empty Theory.Effect.Sort.bot in
-                  CT.seq (CT.blk obj !!nil !!nil) !!sema)
+              KB.provide Basic.slot obj (Some sub) >>= fun () ->
+              KB.collect Theory.Semantics.slot obj >>= fun sema ->
+              let nil = Theory.Effect.empty Theory.Effect.Sort.bot in
+              CT.seq (CT.blk obj !!nil !!nil) !!sema)
           >>= KB.List.reduce ~f:(fun s1 s2 -> CT.seq !!s1 !!s2)
           >>| function
           | None -> Insn.empty

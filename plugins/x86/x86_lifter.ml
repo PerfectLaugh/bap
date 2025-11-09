@@ -474,8 +474,8 @@ module ToIR = struct
           (* Extract the base *)
           concat_explist
             ((match mode with
-             | X86 -> []
-             | X8664 -> Bil.Extract (95, 64, table_entry) :: [])
+               | X86 -> []
+               | X8664 -> Bil.Extract (95, 64, table_entry) :: [])
             @ [
                 Bil.Extract (63, 56, table_entry);
                 Bil.Extract (39, 32, table_entry);

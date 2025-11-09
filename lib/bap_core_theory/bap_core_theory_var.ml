@@ -26,8 +26,8 @@ let valid_first_char = function '0' .. '9' | '#' | '$' -> false | _ -> true
 let escapeworthy =
   Char.all
   |> List.filter ~f:(function
-       | '.' -> true
-       | c -> Char.is_whitespace c || not (Char.is_print c))
+    | '.' -> true
+    | c -> Char.is_whitespace c || not (Char.is_print c))
 
 let escape_char = '\\'
 let escape = Staged.unstage @@ String.Escaping.escape ~escapeworthy ~escape_char

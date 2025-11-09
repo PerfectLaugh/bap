@@ -162,31 +162,31 @@ module Std = struct
       b >>> fun zip ->
       Zip.entries zip
       |> List.filter_map ~f:(fun e ->
-             let name = Zip.(e.filename) in
-             Option.some_if (not (String.equal name Nameof.manifest)) name)
+          let name = Zip.(e.filename) in
+          Option.some_if (not (String.equal name Nameof.manifest)) name)
 
     let transform files bundle ~f =
       let zin = open_in bundle.path in
       let store filename data = Hashtbl.set files ~key:filename ~data in
       Zip.entries zin
       |> List.iter ~f:(fun entry ->
-             let filename = Zip.(entry.filename) in
-             let process_file f =
-               let name, chan = Filename.open_temp_file "bundle" "entry" in
-               Zip.copy_entry_to_channel zin entry chan;
-               Out_channel.close chan;
-               f name;
-               store filename (`Move name)
-             in
-             let process_data f =
-               let data = Zip.read_entry zin entry in
-               store filename (`Data (f data))
-             in
-             match f filename with
-             | `Map f -> process_data f
-             | `Proc f -> process_file f
-             | `Copy -> process_file ignore
-             | `Drop -> ());
+          let filename = Zip.(entry.filename) in
+          let process_file f =
+            let name, chan = Filename.open_temp_file "bundle" "entry" in
+            Zip.copy_entry_to_channel zin entry chan;
+            Out_channel.close chan;
+            f name;
+            store filename (`Move name)
+          in
+          let process_data f =
+            let data = Zip.read_entry zin entry in
+            store filename (`Data (f data))
+          in
+          match f filename with
+          | `Map f -> process_data f
+          | `Proc f -> process_file f
+          | `Copy -> process_file ignore
+          | `Drop -> ());
       Zip.close_in zin;
       let zout = Zip.open_out bundle.path in
       Hashtbl.iteri files ~f:(fun ~key:name ~data ->

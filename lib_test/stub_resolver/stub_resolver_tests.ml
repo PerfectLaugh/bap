@@ -63,7 +63,7 @@ let cfg_of_block b = Cfg.Node.insert b Cfg.empty
 let tid_for_name_exn prog name =
   Term.to_sequence sub_t prog
   |> Seq.find_map ~f:(fun s ->
-         if String.equal (Sub.name s) name then Some (Term.tid s) else None)
+      if String.equal (Sub.name s) name then Some (Term.tid s) else None)
   |> function
   | None -> failwithf "no tid for name %s" name ()
   | Some s -> s
@@ -72,9 +72,9 @@ let provide_aliases prog syms =
   Toplevel.exec
     (Map.to_sequence syms
     |> KB.Seq.iter ~f:(fun (name, { aliases }) ->
-           let tid = tid_for_name_exn prog name in
-           let aliases = Set.of_list (module String) aliases in
-           KB.provide Theory.Label.aliases tid aliases))
+        let tid = tid_for_name_exn prog name in
+        let aliases = Set.of_list (module String) aliases in
+        KB.provide Theory.Label.aliases tid aliases))
 
 let create_program syms =
   let nop = "\x66\x90" in
@@ -94,7 +94,7 @@ let string_of_tids tids =
   let content =
     Map.to_alist tids
     |> List.map ~f:(fun (src, dst) ->
-           Format.asprintf "%s -> %s" (Tid.name src) (Tid.name dst))
+        Format.asprintf "%s -> %s" (Tid.name src) (Tid.name dst))
   in
   Format.asprintf "(%s)" (String.concat ~sep:", " content)
 

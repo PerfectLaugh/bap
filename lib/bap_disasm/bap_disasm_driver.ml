@@ -114,7 +114,7 @@ end = struct
   let init_work init roots =
     Set.to_sequence ~order:`Decreasing roots
     |> Seq.fold ~init ~f:(fun work root ->
-           Dest { dst = root; parent = None; encoding = unknown } :: work)
+        Dest { dst = root; parent = None; encoding = unknown } :: work)
 
   type state = {
     stop : bool;
@@ -236,17 +236,17 @@ end = struct
             in
             step
             @@ Set.fold resolved ~init ~f:(fun s next ->
-                   {
-                     s with
-                     work =
-                       Dest
-                         {
-                           dst = next;
-                           parent = Some jump;
-                           encoding = dsts.encoding;
-                         }
-                       :: s.work;
-                   })
+                {
+                  s with
+                  work =
+                    Dest
+                      {
+                        dst = next;
+                        parent = Some jump;
+                        encoding = dsts.encoding;
+                      }
+                    :: s.work;
+                })
     | (Jump jmp as self) :: Fall ({ dst = next } as slot) :: work ->
         let s = revert_incoming s next in
         let delay = if jmp.age = 1 then Ready (Some self) else Delay in
@@ -407,25 +407,25 @@ let collect_dests source code =
   | Some dests ->
       Set.to_sequence dests
       |> KB.Seq.fold ~init ~f:(fun dest label ->
-             get_encoding label >>= merge_encodings dest.encoding
-             >>= fun encoding ->
-             KB.collect Theory.Label.is_subroutine label >>= fun is_call ->
-             KB.collect Theory.Label.addr label >>| function
-             | Some d ->
-                 {
-                   dest with
-                   encoding;
-                   call = dest.call || Option.value is_call ~default:false;
-                   resolved =
-                     Set.add dest.resolved @@ Word.code_addr encoding.target d;
-                 }
-             | None ->
-                 {
-                   dest with
-                   indirect = true;
-                   unresolved = Set.add dest.unresolved label;
-                   encoding;
-                 })
+          get_encoding label >>= merge_encodings dest.encoding
+          >>= fun encoding ->
+          KB.collect Theory.Label.is_subroutine label >>= fun is_call ->
+          KB.collect Theory.Label.addr label >>| function
+          | Some d ->
+              {
+                dest with
+                encoding;
+                call = dest.call || Option.value is_call ~default:false;
+                resolved =
+                  Set.add dest.resolved @@ Word.code_addr encoding.target d;
+              }
+          | None ->
+              {
+                dest with
+                indirect = true;
+                unresolved = Set.add dest.unresolved label;
+                encoding;
+              })
       >>| fun dest ->
       if is_known dest.encoding then dest else { dest with encoding = source }
 
@@ -449,18 +449,18 @@ let classify mem =
   unit_for_mem mem >>= fun unit ->
   Seq.range 0 (Memory.length mem)
   |> KB.Seq.fold ~init:(empty, empty, empty) ~f:(fun (code, data, root) off ->
-         let addr = Addr.(nsucc base off) in
-         let slot = Some (Addr.to_bitvec addr) in
-         KB.Object.scoped Theory.Program.cls @@ fun label ->
-         KB.provide Theory.Label.addr label slot >>= fun () ->
-         KB.provide Theory.Label.unit label unit >>= fun () ->
-         KB.collect Theory.Label.is_valid label >>= function
-         | Some false -> KB.return (code, Set.add data addr, root)
-         | r -> (
-             let code = if Option.is_none r then code else Set.add code addr in
-             KB.collect Theory.Label.is_subroutine label >>| function
-             | Some true -> (code, data, Set.add root addr)
-             | _ -> (code, data, root)))
+      let addr = Addr.(nsucc base off) in
+      let slot = Some (Addr.to_bitvec addr) in
+      KB.Object.scoped Theory.Program.cls @@ fun label ->
+      KB.provide Theory.Label.addr label slot >>= fun () ->
+      KB.provide Theory.Label.unit label unit >>= fun () ->
+      KB.collect Theory.Label.is_valid label >>= function
+      | Some false -> KB.return (code, Set.add data addr, root)
+      | r -> (
+          let code = if Option.is_none r then code else Set.add code addr in
+          KB.collect Theory.Label.is_subroutine label >>| function
+          | Some true -> (code, data, Set.add root addr)
+          | _ -> (code, data, root)))
 
 let create_disassembler { target; coding } = Dis.lookup target coding
 
@@ -580,10 +580,10 @@ let is_barrier dsts = dsts.barrier
 let fold_calls field ~f ~init jmps =
   Map.to_sequence jmps
   |> KB.Seq.fold ~init ~f:(fun init (_, dsts) ->
-         if dsts.call then
-           Set.to_sequence (field dsts)
-           |> KB.Seq.fold ~init ~f:(fun calls addr -> f calls addr)
-         else KB.return init)
+      if dsts.call then
+        Set.to_sequence (field dsts)
+        |> KB.Seq.fold ~init ~f:(fun calls addr -> f calls addr)
+      else KB.return init)
 
 let commit_calls =
   fold_calls resolved ~init:Addr.Set.empty ~f:(fun calls addr ->

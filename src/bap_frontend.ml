@@ -223,64 +223,63 @@ let _list_command_declaration : unit =
   | `Tags ->
       Configuration.features ctxt
       |> List.iter ~f:(fun feature ->
-             let ctxt = Configuration.refine ~provides:[ feature ] ctxt in
-             let plugins =
-               Configuration.plugins ctxt |> List.map ~f:Configuration.info_name
-             in
-             Format.printf "  %-24s @[<hov>%a@]@\n%!" feature pp_strings plugins);
+          let ctxt = Configuration.refine ~provides:[ feature ] ctxt in
+          let plugins =
+            Configuration.plugins ctxt |> List.map ~f:Configuration.info_name
+          in
+          Format.printf "  %-24s @[<hov>%a@]@\n%!" feature pp_strings plugins);
       Ok ()
   | `Formats ->
       Data.all_writers ()
       |> List.iter ~f:(fun (typename, writers) ->
-             if selected typename then (
-               Format.printf "  %s:@\n" typename;
-               List.iter writers ~f:(fun (name, `Ver ver, desc) ->
-                   let name = sprintf "%s (%s)" name ver in
-                   let desc =
-                     Option.value desc ~default:"no description provided"
-                   in
-                   Format.printf "    %-22s %s@\n%!" name desc)));
+          if selected typename then (
+            Format.printf "  %s:@\n" typename;
+            List.iter writers ~f:(fun (name, `Ver ver, desc) ->
+                let name = sprintf "%s (%s)" name ver in
+                let desc =
+                  Option.value desc ~default:"no description provided"
+                in
+                Format.printf "    %-22s %s@\n%!" name desc)));
       Ok ()
   | `Classes ->
       let module Name = Bap_knowledge.Knowledge.Name in
       let open Bap_knowledge.Knowledge.Documentation in
       classes ()
       |> List.iter ~f:(fun (cls, properties) ->
-             let name = Name.show (Class.name cls) and desc = Class.desc cls in
-             if selected name then (
-               Format.printf "@\n  %-30s @[<hov>%s@]@\n" name desc;
-               List.iter properties ~f:(fun prop ->
-                   let name = Name.show (Property.name prop)
-                   and desc = Property.desc prop in
-                   Format.printf "    - %-26s @[<hov>%s@]@\n%!" name desc)));
+          let name = Name.show (Class.name cls) and desc = Class.desc cls in
+          if selected name then (
+            Format.printf "@\n  %-30s @[<hov>%s@]@\n" name desc;
+            List.iter properties ~f:(fun prop ->
+                let name = Name.show (Property.name prop)
+                and desc = Property.desc prop in
+                Format.printf "    - %-26s @[<hov>%s@]@\n%!" name desc)));
       Ok ()
   | `Theories ->
       let open Bap_core_theory.Theory.Documentation in
       let module Name = Bap_knowledge.Knowledge.Name in
       theories ()
       |> List.iter ~f:(fun theory ->
-             let name = Name.show (Theory.name theory)
-             and desc = Theory.desc theory
-             and requires = Theory.requires theory
-             and provides = Theory.provides theory in
-             if selected name then (
-               Format.printf "  %-24s @[<hov>%a@]@\n" name Format.pp_print_text
-                 desc;
-               Format.printf "    %-22s @[<hov>%a@]@\n" "requires:" pp_strings
-                 requires;
-               Format.printf "    %-22s @[<hov>%a@]@\n@\n%!" "provides:"
-                 pp_strings provides));
+          let name = Name.show (Theory.name theory)
+          and desc = Theory.desc theory
+          and requires = Theory.requires theory
+          and provides = Theory.provides theory in
+          if selected name then (
+            Format.printf "  %-24s @[<hov>%a@]@\n" name Format.pp_print_text
+              desc;
+            Format.printf "    %-22s @[<hov>%a@]@\n" "requires:" pp_strings
+              requires;
+            Format.printf "    %-22s @[<hov>%a@]@\n@\n%!" "provides:" pp_strings
+              provides));
       Ok ()
   | `Agents ->
       let open Bap_knowledge.Knowledge.Documentation in
       let module Name = Bap_knowledge.Knowledge.Name in
       agents ()
       |> List.iter ~f:(fun agent ->
-             let name = Name.show (Agent.name agent)
-             and desc = Agent.desc agent in
-             if selected name then
-               Format.printf "  %-32s @[<hov>%a@]@\n" name Format.pp_print_text
-                 desc);
+          let name = Name.show (Agent.name agent) and desc = Agent.desc agent in
+          if selected name then
+            Format.printf "  %-32s @[<hov>%a@]@\n" name Format.pp_print_text
+              desc);
       Ok ()
   | `Rules ->
       let open Bap_knowledge.Knowledge.Documentation in
@@ -290,11 +289,11 @@ let _list_command_declaration : unit =
       let module Name = Bap_knowledge.Knowledge.Name in
       Project.Collator.registered ()
       |> List.iter ~f:(fun collator ->
-             let name = Name.show (Project.Collator.name collator) in
-             let desc = Project.Collator.desc collator in
-             if selected name then
-               Format.printf "  %-32s @[<hov>%a@]@\n" name Format.pp_print_text
-                 desc);
+          let name = Name.show (Project.Collator.name collator) in
+          let desc = Project.Collator.desc collator in
+          if selected name then
+            Format.printf "  %-32s @[<hov>%a@]@\n" name Format.pp_print_text
+              desc);
       Ok ()
   | `Entities ->
       List.iter entity_desc ~f:(fun (entity, desc) ->
@@ -307,18 +306,17 @@ let _list_command_declaration : unit =
       let open Bap_core_theory in
       Theory.Target.families ()
       |> List.iter ~f:(function
-           | parent :: members ->
-               let package = KB.Name.package (Theory.Target.name parent) in
-               let name t =
-                 let n = Theory.Target.name t in
-                 if String.equal package (KB.Name.package n) then
-                   KB.Name.unqualified n
-                 else KB.Name.show n
-               in
-               Format.printf "  %s:@\n" (Theory.Target.to_string parent);
-               List.iter members ~f:(fun m ->
-                   Format.printf "   - %s@\n" (name m))
-           | _ -> ());
+        | parent :: members ->
+            let package = KB.Name.package (Theory.Target.name parent) in
+            let name t =
+              let n = Theory.Target.name t in
+              if String.equal package (KB.Name.package n) then
+                KB.Name.unqualified n
+              else KB.Name.show n
+            in
+            Format.printf "  %s:@\n" (Theory.Target.to_string parent);
+            List.iter members ~f:(fun m -> Format.printf "   - %s@\n" (name m))
+        | _ -> ());
       Ok ()
 
 let _config_command_declaration : unit =

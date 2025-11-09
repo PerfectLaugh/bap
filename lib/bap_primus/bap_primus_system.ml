@@ -113,9 +113,9 @@ module Components = struct
     let uses =
       Hashtbl.data Repository.self
       |> List.filter_map ~f:(fun sys ->
-             if Set.mem (components sys) name then
-               Some (Format.asprintf "- %a" Name.pp sys.name)
-             else None)
+          if Set.mem (components sys) name then
+            Some (Format.asprintf "- %a" Name.pp sys.name)
+          else None)
     in
     let pp_uses = Format.pp_print_list Format.pp_print_string in
     Format.asprintf "@[<v2>Used in the following systems:@\n%a@]" pp_uses uses
@@ -123,12 +123,12 @@ module Components = struct
   let info ~spec repo =
     Hashtbl.to_alist repo
     |> List.filter_map ~f:(fun (name, { desc; hide }) ->
-           if hide then None
-           else
-             let desc =
-               sprintf "[%s]\n%s" (if spec then "analysis" else "generic") desc
-             in
-             Some (Info.create ~desc name ~long:(fun () -> long name)))
+        if hide then None
+        else
+          let desc =
+            sprintf "[%s]\n%s" (if spec then "analysis" else "generic") desc
+          in
+          Some (Info.create ~desc name ~long:(fun () -> long name)))
 
   let list () = info ~spec:true analyses @ info ~spec:false generics
 
@@ -153,14 +153,13 @@ module Components = struct
       Lisp.refine context >>= fun () ->
       Set.to_list comps
       |> Machine.List.iter ~f:(fun name ->
-             match Hashtbl.find generics name with
-             | Some { init = (module Gen : Component) } ->
-                 let module Comp = Gen (Machine) in
-                 Comp.init ()
-             | None ->
-                 failwithf
-                   "failed to find a component %s required for system %s"
-                   (Name.show name) (Name.show s.name) ())
+          match Hashtbl.find generics name with
+          | Some { init = (module Gen : Component) } ->
+              let module Comp = Gen (Machine) in
+              Comp.init ()
+          | None ->
+              failwithf "failed to find a component %s required for system %s"
+                (Name.show name) (Name.show s.name) ())
 
     let init_system s = do_init s (Set.empty (module Name))
 

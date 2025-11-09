@@ -37,16 +37,16 @@ module Findlib = struct
   let extract_units_from_predicates () =
     Findlib.recorded_predicates ()
     |> List.iter ~f:(fun pred ->
-           match String.chop_prefix pred ~prefix:"used_" with
-           | None -> ()
-           | Some lib -> Hashtbl.set units ~key:lib ~data:`In_core)
+        match String.chop_prefix pred ~prefix:"used_" with
+        | None -> ()
+        | Some lib -> Hashtbl.set units ~key:lib ~data:`In_core)
 
   let extract_units_from_packages ~findlib_is_required =
     Findlib.(recorded_packages Record_core)
     |> List.iter ~f:(fun pkg ->
-           Hashtbl.set units
-             ~key:(unit_of_package ~findlib_is_required pkg)
-             ~data:`In_core)
+        Hashtbl.set units
+          ~key:(unit_of_package ~findlib_is_required pkg)
+          ~data:`In_core)
 
   let init () =
     if not (Hashtbl.is_empty units) then

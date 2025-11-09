@@ -287,20 +287,20 @@ module Semantics = struct
     let bitv x = Bitvec.(int64 x mod modulus bits) in
     Insn.ops insn |> Array.to_list
     |> List.map ~f:(function
-         | Op.Fmm _ -> CT.unk word >>| Theory.Value.forget
-         | Op.Imm x ->
-             let x = bitv (Imm.to_int64 x) in
-             CT.int word x >>| Theory.Value.forget >>| fun v ->
-             KB.Value.put Lisp.Semantics.static v (Some x)
-         | Op.Reg v ->
-             let name = Reg.name v in
-             let reg =
-               match Theory.Target.var target name with
-               | None -> Theory.Var.forget @@ Theory.Var.define word name
-               | Some v -> v
-             in
-             CT.var reg >>| fun v ->
-             KB.Value.put Lisp.Semantics.symbol v (Some name))
+      | Op.Fmm _ -> CT.unk word >>| Theory.Value.forget
+      | Op.Imm x ->
+          let x = bitv (Imm.to_int64 x) in
+          CT.int word x >>| Theory.Value.forget >>| fun v ->
+          KB.Value.put Lisp.Semantics.static v (Some x)
+      | Op.Reg v ->
+          let name = Reg.name v in
+          let reg =
+            match Theory.Target.var target name with
+            | None -> Theory.Var.forget @@ Theory.Var.define word name
+            | Some v -> v
+          in
+          CT.var reg >>| fun v ->
+          KB.Value.put Lisp.Semantics.symbol v (Some name))
     |> KB.List.all
 
   let translate_ops_to_args () =

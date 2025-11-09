@@ -54,10 +54,10 @@ end = struct
     let m = Bitvec.modulus (Theory.Target.code_addr_size t) in
     Ogre.collect Ogre.Query.(select (from src))
     >>| Seq.fold ~init ~f:(fun exts (addr, value) ->
-            Map.update exts
-              Bitvec.(int64 addr mod m)
-              ~f:(function
-                | None -> map m value | Some value' -> merge m value' value))
+        Map.update exts
+          Bitvec.(int64 addr mod m)
+          ~f:(function
+            | None -> map m value | Some value' -> merge m value' value))
 
   let name _ x = Ref (Name (chop_version x))
   and addr m x = Ref (Addr Bitvec.(int64 x mod m))
@@ -199,11 +199,11 @@ let resolve_stubs () =
       collect_insns size addr >>| fun bil ->
       find_references bil
       |> List.find_map ~f:(function
-           | Name s -> Some s
-           | Addr dst -> (
-               match References.lookup refs dst with
-               | Some (Name s) -> Some s
-               | _ -> None))
+        | Name s -> Some s
+        | Addr dst -> (
+            match References.lookup refs dst with
+            | Some (Name s) -> Some s
+            | _ -> None))
 
 let mark_mips_stubs_as_functions () : unit =
   KB.promise Theory.Label.is_subroutine @@ fun label ->

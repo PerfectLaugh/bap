@@ -9,10 +9,10 @@ let registers =
   @@ fun proj ->
   Project.disasm proj |> Disasm.insns
   |> Seq.fold ~init:Int.Map.empty ~f:(fun regs (_, insn) ->
-         Insn.ops insn
-         |> Array.fold ~init:regs ~f:(fun regs -> function
-              | Op.Reg r -> Map.set regs ~key:(Reg.code r) ~data:(Reg.name r)
-              | _ -> regs))
+      Insn.ops insn
+      |> Array.fold ~init:regs ~f:(fun regs -> function
+        | Op.Reg r -> Map.set regs ~key:(Reg.code r) ~data:(Reg.name r)
+        | _ -> regs))
 
 module Closure (Machine : Primus.Machine.S) = struct
   module Lisp = Primus.Lisp.Make (Machine)
@@ -210,9 +210,9 @@ module Closure (Machine : Primus.Machine.S) = struct
         Machine.get () >>= fun proj ->
         Term.enum sub_t (Project.program proj)
         |> Seq.find ~f:(fun sub ->
-               match Term.get_attr sub address with
-               | None -> false
-               | Some addr -> Word.(addr = Value.to_word sub_addr))
+            match Term.get_attr sub address with
+            | None -> false
+            | Some addr -> Word.(addr = Value.to_word sub_addr))
         |> function
         | None ->
             failf "invoke-subroutine: no function for %a" Value.pps sub_addr ()
@@ -221,9 +221,9 @@ module Closure (Machine : Primus.Machine.S) = struct
             allocate_stack_frame args >>= fun frame ->
             Seq.zip args (Seq.of_list sub_args)
             |> Machine.Seq.iter ~f:(fun (arg, x) ->
-                   let open Bil.Types in
-                   if not (is_out_intent arg) then Eval.assign (Arg.rhs arg) x
-                   else Machine.return ())
+                let open Bil.Types in
+                if not (is_out_intent arg) then Eval.assign (Arg.rhs arg) x
+                else Machine.return ())
             >>= fun () ->
             Linker.exec (`addr (Value.to_word sub_addr)) >>= fun () ->
             Machine.Seq.find_map args ~f:(fun arg ->

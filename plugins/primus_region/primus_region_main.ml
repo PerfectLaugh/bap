@@ -106,7 +106,7 @@ module Move (Machine : Primus.Machine.S) = struct
         let reg, reg', n =
           Regions.lookup reg addr
           |> Seq.fold ~init:(reg, reg', 0) ~f:(fun (reg, reg', n) (r, ()) ->
-                 (Regions.remove reg r, Regions.add reg' r (), n + 1))
+              (Regions.remove reg r, Regions.add reg' r (), n + 1))
         in
         let regions =
           Map.set (Map.set regions ~key:src ~data:reg) ~key:dst ~data:reg'

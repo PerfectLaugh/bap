@@ -156,9 +156,9 @@ let find_curses () =
   |> List.filter ~f:(Fn.non (Re.execp x86_64))
   |> List.filter ~f:(Re.execp curses)
   |> List.filter_map ~f:(fun s ->
-         match String.split ~on:'>' s with
-         | [ _; path ] -> Some (String.strip path)
-         | _ -> None)
+      match String.split ~on:'>' s with
+      | [ _; path ] -> Some (String.strip path)
+      | _ -> None)
   |> List.filter ~f:Sys.file_exists
   |> List.hd
 

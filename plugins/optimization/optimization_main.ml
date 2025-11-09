@@ -40,14 +40,14 @@ let compute_dead can_touch protected sub =
   let live v = not (Set.mem dead v) in
   Term.enum blk_t sub
   |> Seq.fold ~init:Tid.Set.empty ~f:(fun dead blk ->
-         Term.enum ~rev:true def_t blk
-         |> Seq.fold ~init:(protected, dead) ~f:(fun (protected, dead) def ->
-                let v = Def.lhs def in
-                if (not (can_touch v)) || live v then (protected, dead)
-                else if Set.mem protected (Var.base v) then
-                  (Set.remove protected (Var.base v), dead)
-                else (protected, Set.add dead (Term.tid def)))
-         |> snd)
+      Term.enum ~rev:true def_t blk
+      |> Seq.fold ~init:(protected, dead) ~f:(fun (protected, dead) def ->
+          let v = Def.lhs def in
+          if (not (can_touch v)) || live v then (protected, dead)
+          else if Set.mem protected (Var.base v) then
+            (Set.remove protected (Var.base v), dead)
+          else (protected, Set.add dead (Term.tid def)))
+      |> snd)
 
 let is_alive dead t = not (Set.mem dead (Term.tid t))
 let live_phi dead blk = Term.filter phi_t ~f:(is_alive dead) blk

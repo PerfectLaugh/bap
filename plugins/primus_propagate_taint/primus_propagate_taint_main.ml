@@ -107,17 +107,17 @@ module Mapper (Machine : Primus.Machine.S) = struct
         Machine.Local.get mapper >>= fun s ->
         Set.to_sequence (vars term)
         |> Machine.Seq.fold ~init:s ~f:(fun s var ->
-               Env.get var >>= fun v ->
-               Tracker.lookup v rel >>| remap s.tids >>| fun taints ->
-               if Set.is_empty taints || is_mem var then s
-               else
-                 Field.fset fld s
-                 @@ Map.update (Field.get fld s) (Term.tid term) ~f:(function
-                      | None -> Var.Map.singleton var taints
-                      | Some taints' ->
-                          Map.update taints' var ~f:(function
-                            | None -> taints
-                            | Some taints' -> Set.union taints taints')))
+            Env.get var >>= fun v ->
+            Tracker.lookup v rel >>| remap s.tids >>| fun taints ->
+            if Set.is_empty taints || is_mem var then s
+            else
+              Field.fset fld s
+              @@ Map.update (Field.get fld s) (Term.tid term) ~f:(function
+                | None -> Var.Map.singleton var taints
+                | Some taints' ->
+                    Map.update taints' var ~f:(function
+                      | None -> taints
+                      | Some taints' -> Set.union taints taints')))
         >>= Machine.Local.put mapper)
 
   let update_jmp = update Jmp.free_vars
@@ -139,8 +139,8 @@ module Marker (Machine : Primus.Machine.S) = struct
     | Some ts' ->
         Term.set_attr t tag
         @@ Map.merge ts ts' ~f:(fun ~key:_ -> function
-             | `Left ts | `Right ts -> Some ts
-             | `Both (ts, ts') -> Some (Set.union ts ts'))
+          | `Left ts | `Right ts -> Some ts
+          | `Both (ts, ts') -> Some (Set.union ts ts'))
 
   let mark tag taints t =
     match Map.find taints (Term.tid t) with
@@ -229,6 +229,7 @@ manpage
       \    contain values that are referencing directly or indirectly the\n\
       \    tainted object.";
   ]
+;;
 
 let injection_enabled =
   flag "from-attributes"

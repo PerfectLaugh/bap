@@ -136,8 +136,7 @@ let add t sub ~link_only ~no_link =
 let partition_group t group =
   Group.enum group
   |> Seq.fold ~init:Tid.Set.empty ~f:(fun default name ->
-         Map.find t.names name
-         |> Option.value_map ~default ~f:(Set.union default))
+      Map.find t.names name |> Option.value_map ~default ~f:(Set.union default))
   |> Set.partition_tf ~f:(Set.mem t.stubs)
 
 let find_pairs t =
@@ -145,18 +144,18 @@ let find_pairs t =
   Graphlib.strong_components (module G) t.graph
   |> Partition.groups
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun init group ->
-         let stubs, reals = partition_group t group in
-         match Set.length reals with
-         | 1 ->
-             let impl = Set.min_elt_exn reals in
-             Set.fold stubs ~init ~f:(fun links stub ->
-                 Map.add_exn links ~key:stub ~data:impl)
-         | 0 ->
-             info "no implementations found in group %a" pp group;
-             init
-         | n ->
-             info "ambiguous implementations (%d) found in group %a" n pp group;
-             init)
+      let stubs, reals = partition_group t group in
+      match Set.length reals with
+      | 1 ->
+          let impl = Set.min_elt_exn reals in
+          Set.fold stubs ~init ~f:(fun links stub ->
+              Map.add_exn links ~key:stub ~data:impl)
+      | 0 ->
+          info "no implementations found in group %a" pp group;
+          init
+      | n ->
+          info "ambiguous implementations (%d) found in group %a" n pp group;
+          init)
 
 let resolve prog ~link_only ~no_link =
   let f = add ~link_only ~no_link in
@@ -179,19 +178,19 @@ let unit_path units x =
 let log_stubs units stubs =
   Set.to_sequence stubs
   |> KB.Seq.iter ~f:(fun stub ->
-         label_name stub >>= fun name ->
-         unit_path units stub >>| fun path ->
-         info "identified stub %s in unit %s" name path)
+      label_name stub >>= fun name ->
+      unit_path units stub >>| fun path ->
+      info "identified stub %s in unit %s" name path)
 
 let log_links units links =
   Map.to_sequence links
   |> KB.Seq.iter ~f:(fun (x, y) ->
-         label_name x >>= fun xname ->
-         label_name y >>= fun yname ->
-         unit_path units x >>= fun xpath ->
-         unit_path units y >>| fun ypath ->
-         info "resolved stub %s in unit %s to implementation %s in unit %s%!"
-           xname xpath yname ypath)
+      label_name x >>= fun xname ->
+      label_name y >>= fun yname ->
+      unit_path units x >>= fun xpath ->
+      unit_path units y >>| fun ypath ->
+      info "resolved stub %s in unit %s to implementation %s in unit %s%!" xname
+        xpath yname ypath)
 
 let provide prog ~link_only ~no_link =
   Knowledge.Object.create Class.t >>= fun obj ->

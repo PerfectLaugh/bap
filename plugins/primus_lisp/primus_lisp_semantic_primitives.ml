@@ -881,8 +881,8 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
     let assign_inputs args =
       seq
       @@ List.mapi (inputs args) ~f:(fun i x ->
-             let s = Theory.Value.sort x in
-             CT.set (ivar i s) !!x)
+          let s = Theory.Value.sort x in
+          CT.set (ivar i s) !!x)
 
     let invoke_symbol name =
       let name =
@@ -912,9 +912,9 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
       let base = List.length (result xs) in
       seq
       @@ List.mapi (writes xs) ~f:(fun i -> function
-           | [ reg ] -> write_single t (base + i) reg
-           | [ reg; typ ] -> write_typed typ (base + i) reg
-           | _ -> illformed "incorrect :writes parameters")
+        | [ reg ] -> write_single t (base + i) reg
+        | [ reg; typ ] -> write_typed typ (base + i) reg
+        | _ -> illformed "incorrect :writes parameters")
 
     let mk_store size t i ptr =
       let s = Theory.Value.Sort.forget @@ Theory.Bitv.define size in
@@ -931,9 +931,9 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
       let base = List.length (result xs) + List.length (writes xs) in
       seq
       @@ List.mapi (stores xs) ~f:(fun i -> function
-           | [ ptr ] -> store_word t (base + i) ptr
-           | [ ptr; typ ] -> store t (base + i) ptr typ
-           | _ -> illformed "incorrect :stores parameters")
+        | [ ptr ] -> store_word t (base + i) ptr
+        | [ ptr; typ ] -> store t (base + i) ptr typ
+        | _ -> illformed "incorrect :stores parameters")
 
     let make_result size =
       let* size = static size in
@@ -1084,12 +1084,12 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
     | x :: xs ->
         forget
         @@ KB.List.fold xs ~init:x ~f:(fun x y ->
-               let sx = Theory.(Bitv.size @@ Value.sort x)
-               and sy = Theory.(Bitv.size @@ Value.sort y) in
-               let sz = Theory.Bitv.define (sx + sy) in
-               match (const x, const y) with
-               | Some x, Some y -> const_int sz @@ Bitvec.append sx sy x y
-               | _ -> CT.append sz !!x !!y)
+            let sx = Theory.(Bitv.size @@ Value.sort x)
+            and sy = Theory.(Bitv.size @@ Value.sort y) in
+            let sz = Theory.Bitv.define (sx + sy) in
+            match (const x, const y) with
+            | Some x, Some y -> const_int sz @@ Bitvec.append sx sy x y
+            | _ -> CT.append sz !!x !!y)
 
   let select s xs =
     match List.rev xs with

@@ -138,14 +138,14 @@ let () =
 
     Arg.read_arg "config.status.in"
     |> Array.iter ~f:(fun arg ->
-           match classify arg with
-           | Some (_, Help) -> Stdlib.exit 0
-           | Some (_, Comp _) -> ()
-           | Some (pref, With) ->
-               add_variable (String.subo arg ~pos:(String.length pref))
-           | None when String.is_prefix arg ~prefix:"--" ->
-               add_variable (String.subo ~pos:2 arg)
-           | None -> eprintf "Invalid ./configure argument %S\n" arg);
+        match classify arg with
+        | Some (_, Help) -> Stdlib.exit 0
+        | Some (_, Comp _) -> ()
+        | Some (pref, With) ->
+            add_variable (String.subo arg ~pos:(String.length pref))
+        | None when String.is_prefix arg ~prefix:"--" ->
+            add_variable (String.subo ~pos:2 arg)
+        | None -> eprintf "Invalid ./configure argument %S\n" arg);
     Format.printf "%a@." Sexp.pp_hum (sexp_of_cfg vars);
     Stdlib.exit 0);
 

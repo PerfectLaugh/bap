@@ -13,7 +13,7 @@ let data model =
 let arena t name ~from len =
   Arg.Arena.create
   @@ List.init len ~f:(fun i ->
-         Option.value_exn (Theory.Target.var t (sprintf "%s%d" name (from + i))))
+      Option.value_exn (Theory.Target.var t (sprintf "%s%d" name (from + i))))
 
 let define t =
   let bits = Theory.Target.bits t in

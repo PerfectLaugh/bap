@@ -702,7 +702,7 @@ module Ir_phi = struct
   let free_vars phi =
     values phi
     |> Seq.fold ~init:Bap_var.Set.empty ~f:(fun vars (_, e) ->
-           Set.union vars (Exp.free_vars e))
+        Set.union vars (Exp.free_vars e))
 
   let pp_self ppf { Phi.var; map } =
     Format.fprintf ppf "%s@ <-@ phi(%s)" (Theory.Var.name var)
@@ -872,7 +872,7 @@ module Ir_jmp = struct
   let free_vars jmp =
     exps jmp
     |> Seq.fold ~init:Bap_var.Set.empty ~f:(fun vars e ->
-           Set.union vars (Exp.free_vars e))
+        Set.union vars (Exp.free_vars e))
 
   let eval jmp bili =
     let eval_label = function
@@ -1527,11 +1527,10 @@ module Ir_blk = struct
     let init = (Bap_var.Set.empty, Bap_var.Set.empty) in
     fst
     @@ Seq.fold (elts blk) ~init ~f:(fun (vars, kill) -> function
-         | `Phi _ -> (vars, kill)
-         | `Def def ->
-             ( Ir_def.free_vars def -- kill ++ vars,
-               Set.add kill (Ir_def.lhs def) )
-         | `Jmp jmp -> (Ir_jmp.free_vars jmp -- kill ++ vars, kill))
+      | `Phi _ -> (vars, kill)
+      | `Def def ->
+          (Ir_def.free_vars def -- kill ++ vars, Set.add kill (Ir_def.lhs def))
+      | `Jmp jmp -> (Ir_jmp.free_vars jmp -- kill ++ vars, kill))
 
   let uses_var blk x = Set.mem (free_vars blk) x
 

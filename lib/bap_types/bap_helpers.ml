@@ -974,11 +974,11 @@ module Normalize = struct
       List.concat_map ~f:hoist_non_generative_expressions xs
       |> normalize_conditionals
       |> List.map ~f:(function
-           | Move (v, x) -> Move (v, normalize_exp x)
-           | Jmp x -> Jmp (normalize_exp x)
-           | If (c, xs, ys) -> If (normalize_exp c, run xs, run ys)
-           | While (c, xs) -> While (normalize_exp c, run xs)
-           | (Special _ | CpuExn _) as s -> s)
+        | Move (v, x) -> Move (v, normalize_exp x)
+        | Jmp x -> Jmp (normalize_exp x)
+        | If (c, xs, ys) -> If (normalize_exp c, run xs, run ys)
+        | While (c, xs) -> While (normalize_exp c, run xs)
+        | (Special _ | CpuExn _) as s -> s)
       |> hoist_stores
     in
     run xs
@@ -1053,9 +1053,8 @@ module Stmt = struct
     let update news vars kill = Set.union vars (Set.diff news kill) in
     fst
     @@ List.fold bil ~init:(VS.empty, VS.empty) ~f:(fun (vars, kill) -> function
-         | Stmt.Move (v, e) ->
-             (update (Exp.free_vars e) vars kill, Set.add kill v)
-         | stmt -> (update (free_vars stmt) vars kill, kill))
+      | Stmt.Move (v, e) -> (update (Exp.free_vars e) vars kill, Set.add kill v)
+      | stmt -> (update (free_vars stmt) vars kill, kill))
 
   class constant_folder = Constant_folder.main
 

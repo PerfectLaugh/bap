@@ -45,8 +45,8 @@ module Make (Node : Opaque.S) (Label : T) = struct
       | Some ns ->
           Map.to_sequence (dir ns)
           |> Seq.map ~f:(fun (m, data) ->
-                 let src, dst = reorder n m in
-                 { src; dst; data })
+              let src, dst = reorder n m in
+              { src; dst; data })
 
     let inputs n = edges inc (fun dst src -> (src, dst)) n
     let outputs n = edges out (fun src dst -> (src, dst)) n

@@ -286,9 +286,9 @@ module Interpreter (Machine : Machine) = struct
         let names = match stage with After -> after | Before -> before in
         Set.to_sequence names
         |> Machine.Seq.fold ~init ~f:(fun r name ->
-               match stage with
-               | After -> eval_lisp name (args @ [ r ])
-               | Before -> eval_lisp name args)
+            match stage with
+            | After -> eval_lisp name (args @ [ r ])
+            | Before -> eval_lisp name args)
 
   and eval_primitive name args =
     Machine.Local.get state >>= fun { program } ->
@@ -517,9 +517,9 @@ module Make (Machine : Machine) = struct
       else
         Term.enum ~rev:true arg_t sub
         |> Seq.fold ~init:([], Type.Spec.any) ~f:(fun (args, ret) arg ->
-               match Arg.intent arg with
-               | Some Out -> (args, lisp_type_of_arg arg)
-               | _ -> (lisp_type_of_arg arg :: args, ret))
+            match Arg.intent arg with
+            | Some Out -> (args, lisp_type_of_arg arg)
+            | _ -> (lisp_type_of_arg arg :: args, ret))
         |> fun (args, ret) -> Type.Spec.(tuple args @-> ret)
 
     let signatures_of_subs prog =
@@ -538,7 +538,7 @@ module Make (Machine : Machine) = struct
       let typeenv = Lisp.Program.Type.infer ~externals s.program in
       Lisp.Program.Type.errors typeenv
       |> Machine.List.iter ~f:(fun s ->
-             Machine.Observation.make Type.notify_error s)
+          Machine.Observation.make Type.notify_error s)
       >>= fun () -> Machine.Local.put state { s with typeenv }
   end
 
@@ -549,11 +549,11 @@ module Make (Machine : Machine) = struct
       ~f:(fun ~package:_ def prog ->
         Attribute.Set.get External.t (Lisp.Def.attributes def)
         |> Set.fold ~init:prog ~f:(fun prog name ->
-               let name =
-                 KB.Name.show @@ KB.Name.create ~package:"external" name
-               in
-               let def = Lisp.Def.rename def name in
-               Lisp.Program.add prog func def))
+            let name =
+              KB.Name.show @@ KB.Name.create ~package:"external" name
+            in
+            let def = Lisp.Def.rename def name in
+            Lisp.Program.add prog func def))
       ~init:program
 
   let link_global var =
@@ -751,19 +751,19 @@ module Make (Machine : Machine) = struct
     let module Unpacked = Library (Machine) in
     Unpacked.defs ()
     |> Machine.List.iter ~f:(fun def ->
-           let module Packed (M : Machine) = struct
-             module Unpacked = Library (M)
+        let module Packed (M : Machine) = struct
+          module Unpacked = Library (M)
 
-             let run =
-               Unpacked.defs ()
-               |> List.find ~f:(fun d ->
-                      String.equal (Lisp.Def.name d) (Lisp.Def.name def))
-               |> function
-               | Some code -> Lisp.Def.Primitive.body code
-               | _ -> assert false
-           end in
-           Lisp.Def.Closure.of_primitive def (module Packed : Lisp.Def.Closure)
-           |> link_primitive)
+          let run =
+            Unpacked.defs ()
+            |> List.find ~f:(fun d ->
+                String.equal (Lisp.Def.name d) (Lisp.Def.name def))
+            |> function
+            | Some code -> Lisp.Def.Primitive.body code
+            | _ -> assert false
+        end in
+        Lisp.Def.Closure.of_primitive def (module Packed : Lisp.Def.Closure)
+        |> link_primitive)
 
   let eval_method name = Self.eval_signal (KB.Name.read name)
   let eval_fun name = Self.eval_lisp (KB.Name.read name)

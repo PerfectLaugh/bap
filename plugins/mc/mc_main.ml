@@ -408,7 +408,7 @@ let validate_module kind formats =
   let name = module_of_kind kind in
   Data.all_writers ()
   |> List.find_map ~f:(fun (modname, fmts) ->
-         Option.some_if (String.equal modname name) fmts)
+      Option.some_if (String.equal modname name) fmts)
   |> function
   | None -> failwithf "Unable to find printers for module %s" name ()
   | Some fmts ->
@@ -416,28 +416,28 @@ let validate_module kind formats =
       let provided = Set.of_list (module String) fmts in
       Result.all_unit
       @@ List.map formats ~f:(fun fmt ->
-             if Set.mem provided fmt then Ok ()
-             else Error (Unknown_format (name, fmt, fmts)))
+          if Set.mem provided fmt then Ok ()
+          else Error (Unknown_format (name, fmt, fmts)))
 
 let validate_formats formats =
   Result.map_error ~f:(fun err -> Fail err)
   @@ Result.all_unit
   @@ List.map formats ~f:(function
-       | ((`insn | `bil | `bir) as kind), fmts -> validate_module kind fmts
-       | (`kinds | `size | `invalid | `addr | `memory | `knowledge), [] -> Ok ()
-       | (`kinds | `size | `invalid | `addr | `memory | `knowledge), [ opt ]
-         when String.equal enabled opt ->
-           Ok ()
-       | `kinds, _ -> Error (No_formats_expected "kinds")
-       | `size, _ -> Error (No_formats_expected "size")
-       | `addr, _ -> Error (No_formats_expected "addr")
-       | `memory, _ -> Error (No_formats_expected "memory")
-       | `knowledge, _ -> Error (No_formats_expected "knowledge")
-       | `invalid, _ -> Error (No_formats_expected "invalid")
-       | `sema, _ ->
-           (* no validation right now, since the knowledge introspection
+    | ((`insn | `bil | `bir) as kind), fmts -> validate_module kind fmts
+    | (`kinds | `size | `invalid | `addr | `memory | `knowledge), [] -> Ok ()
+    | (`kinds | `size | `invalid | `addr | `memory | `knowledge), [ opt ]
+      when String.equal enabled opt ->
+        Ok ()
+    | `kinds, _ -> Error (No_formats_expected "kinds")
+    | `size, _ -> Error (No_formats_expected "size")
+    | `addr, _ -> Error (No_formats_expected "addr")
+    | `memory, _ -> Error (No_formats_expected "memory")
+    | `knowledge, _ -> Error (No_formats_expected "knowledge")
+    | `invalid, _ -> Error (No_formats_expected "invalid")
+    | `sema, _ ->
+        (* no validation right now, since the knowledge introspection
            is not yet implemented *)
-           Ok ())
+        Ok ())
 
 let print_invalid _pos = Format.printf "<invalid>@\n"
 
@@ -602,9 +602,9 @@ let () =
       create_disassembler target >>= fun dis ->
       Image.memory img |> Memmap.to_sequence
       |> Seq.filter_map ~f:(fun (mem, data) ->
-             Option.some_if (Value.is Image.code_region data) mem)
+          Option.some_if (Value.is Image.code_region data) mem)
       |> Seq.map ~f:(fun mem ->
-             run ~stop_on_error dis target mem formats >>= fun _bytes -> Ok ())
+          run ~stop_on_error dis target mem formats >>= fun _bytes -> Ok ())
       |> Seq.to_list |> Result.all_unit
 
 let format_info get_fmts =

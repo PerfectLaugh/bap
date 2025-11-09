@@ -22,10 +22,10 @@ let suite () =
 let load_plugins () =
   Plugins.load ()
   |> List.iter ~f:(function
-       | Ok _ -> ()
-       | Error (p, e) ->
-           assert_string
-             ("failed to load plugin from " ^ p ^ ": " ^ Error.to_string_hum e))
+    | Ok _ -> ()
+    | Error (p, e) ->
+        assert_string
+          ("failed to load plugin from " ^ p ^ ": " ^ Error.to_string_hum e))
 
 let run_unit_tests () =
   match Bap_main.init () with

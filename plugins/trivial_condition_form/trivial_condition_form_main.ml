@@ -17,14 +17,14 @@ module TCF = struct
   let blk blk =
     Term.enum jmp_t blk
     |> Seq.fold ~init:(blk_without_jmps blk) ~f:(fun blk jmp ->
-           match Jmp.cond jmp with
-           | Bil.Int _ | Bil.Var _ -> Term.append jmp_t blk jmp
-           | cond ->
-               let var = new_var () in
-               let def = Def.create var cond in
-               let blk = Term.append def_t blk def in
-               let jmp = Jmp.with_cond jmp (Bil.var var) in
-               Term.append jmp_t blk jmp)
+        match Jmp.cond jmp with
+        | Bil.Int _ | Bil.Var _ -> Term.append jmp_t blk jmp
+        | cond ->
+            let var = new_var () in
+            let def = Def.create var cond in
+            let blk = Term.append def_t blk def in
+            let jmp = Jmp.with_cond jmp (Bil.var var) in
+            Term.append jmp_t blk jmp)
 
   let sub =
     Term.map blk_t ~f:(fun b -> if Term.length jmp_t b > 0 then blk b else b)
@@ -48,6 +48,7 @@ manpage
        (TCF). During the translation all complex condition expressions are\n\
        hoisted into the assignment section of a block.";
   ]
+;;
 
 let () =
   declare_extension ~doc:"eliminates complex conditional on branches"

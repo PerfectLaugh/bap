@@ -70,12 +70,12 @@ let neg = List.map ~f:(fun assn -> { assn with res = not assn.res })
 let assumptions blk =
   Term.enum jmp_t blk
   |> Seq.fold ~init:([], []) ~f:(fun (assns, assms) jmp ->
-         match Jmp.cond jmp with
-         | Bil.Var c ->
-             let assn = { use = Term.tid jmp; var = c; res = true } in
-             (assn :: assns, (assn :: neg assns) :: assms)
-         | Bil.Int _ -> (assns, neg assns :: assms)
-         | _ -> failwith "Not in TCF")
+      match Jmp.cond jmp with
+      | Bil.Var c ->
+          let assn = { use = Term.tid jmp; var = c; res = true } in
+          (assn :: assns, (assn :: neg assns) :: assms)
+      | Bil.Int _ -> (assns, neg assns :: assms)
+      | _ -> failwith "Not in TCF")
   |> snd
 
 module TrapPageFault (Machine : Primus.Machine.S) = struct
@@ -128,13 +128,12 @@ module Forker (Machine : Primus.Machine.S) = struct
   let fork blk =
     unsat_assumptions blk
     >>= Machine.List.iter ~f:(function
-          | [] -> Machine.return ()
-          | conflicts ->
-              Machine.ignore_m
-              @@ do_fork blk ~child:(fun () ->
-                     assume conflicts >>= fun () ->
-                     Machine.Local.update state ~f:(fun t ->
-                         { t with conflicts })))
+      | [] -> Machine.return ()
+      | conflicts ->
+          Machine.ignore_m
+          @@ do_fork blk ~child:(fun () ->
+              assume conflicts >>= fun () ->
+              Machine.Local.update state ~f:(fun t -> { t with conflicts })))
 
   let assume_returns blk call =
     match Call.return call with
@@ -221,6 +220,7 @@ manpage
       \  where each compound condition expression is trivialized to a\n\
       \  variable, that is bound earlier in the block.";
   ]
+;;
 
 let enabled = flag "mode" ~doc:"(DEPRECATED) Enable the mode."
 

@@ -81,8 +81,8 @@ let insert_defs prog sub =
   List.fold [ In; Out ] ~init:sub ~f:(fun sub intent ->
       Term.enum blk_t sub
       |> Seq.fold ~init:sub ~f:(fun sub blk ->
-             Term.enum jmp_t blk
-             |> Seq.fold ~init:sub ~f:(fun sub jmp -> insert intent blk jmp sub)))
+          Term.enum jmp_t blk
+          |> Seq.fold ~init:sub ~f:(fun sub jmp -> insert intent blk jmp sub)))
 
 let fill_calls program = Term.map sub_t program ~f:(insert_defs program)
 let main = Project.map_program ~f:fill_calls

@@ -44,7 +44,7 @@ module Rel_info = struct
       Fact.return
         (of_aseq
         @@ Seq.map s ~f:(fun (addr, data) ->
-               (Addr.of_int64 ~width addr, Addr.of_int64 ~width data)))
+            (Addr.of_int64 ~width addr, Addr.of_int64 ~width data)))
 
     let external_symbols =
       arch_width >>= fun width ->
@@ -173,12 +173,12 @@ let provide_brancher brancher label =
   if Context.is_applicable ctxt brancher.path then
     resolve brancher mem insn
     |> KB.List.fold ~init ~f:(fun dsts dst ->
-           match dst with
-           | Some addr, _ ->
-               let addr = Word.(addr + bias) in
-               Theory.Label.for_addr (Word.to_bitvec addr) >>| fun dst ->
-               Set.add dsts dst
-           | None, _ -> KB.return dsts)
+        match dst with
+        | Some addr, _ ->
+            let addr = Word.(addr + bias) in
+            Theory.Label.for_addr (Word.to_bitvec addr) >>| fun dst ->
+            Set.add dsts dst
+        | None, _ -> KB.return dsts)
     >>| fun dests -> KB.Value.put Insn.Slot.dests Insn.empty (Some dests)
   else KB.return Insn.empty
 

@@ -61,7 +61,7 @@ type program = {
 let typed =
   KB.Class.property Theory.Source.cls "typed-program" ~package
   @@ KB.Domain.optional "typed-lisp-program" ~equal:(fun x y ->
-         Program.equal x.prog y.prog)
+      Program.equal x.prog y.prog)
 
 type problem =
   | Resolution of Resolve.resolution
@@ -182,7 +182,7 @@ let create eff res = KB.Value.put Theory.Semantics.value eff (forget res)
 let symbol =
   KB.Class.property Theory.Value.cls "lisp-symbol"
   @@ KB.Domain.optional "symbol" ~equal:String.equal ~inspect:(fun x ->
-         Sexp.Atom x)
+      Sexp.Atom x)
 
 let static_slot =
   KB.Class.property Theory.Value.cls "static-value" ~package ~public:true
@@ -192,7 +192,7 @@ let static_slot =
            type t = Bitvec_binprot.t option [@@deriving bin_io]
          end))
   @@ KB.Domain.optional "bitvec" ~equal:Bitvec.equal ~inspect:(fun x ->
-         Sexp.Atom (Bitvec.to_string x))
+      Sexp.Atom (Bitvec.to_string x))
 
 let update_value r f =
   let v = KB.Value.get Theory.Semantics.value r in
@@ -631,22 +631,22 @@ let link_library target prog =
   let open KB.Let in
   Hashtbl.to_alist library
   |> KB.List.fold ~init:prog ~f:(fun prog (name, { types; docs; body; kind }) ->
-         let types = types target in
-         match kind with
-         | `meth ->
-             KB.return
-             @@ Program.add prog Program.Items.signal
-             @@ Def.Signal.create ~types ~docs (KB.Name.show name)
-         | `defn -> (
-             match body with
-             | None ->
-                 KB.return
-                 @@ Program.add prog Program.Items.semantics
-                 @@ Def.Sema.create ~docs ~types name (primitive name)
-             | Some body ->
-                 let+ fn = body target in
-                 Program.add prog Program.Items.semantics
-                 @@ Def.Sema.create ~docs ~types name fn))
+      let types = types target in
+      match kind with
+      | `meth ->
+          KB.return
+          @@ Program.add prog Program.Items.signal
+          @@ Def.Signal.create ~types ~docs (KB.Name.show name)
+      | `defn -> (
+          match body with
+          | None ->
+              KB.return
+              @@ Program.add prog Program.Items.semantics
+              @@ Def.Sema.create ~docs ~types name (primitive name)
+          | Some body ->
+              let+ fn = body target in
+              Program.add prog Program.Items.semantics
+              @@ Def.Sema.create ~docs ~types name fn))
 
 let collect_names kind key prog =
   Program.fold prog key
@@ -756,9 +756,9 @@ let provide_attributes () =
   Program.in_package package prog @@ fun prog ->
   Program.get ~name prog Key.func
   |> List.fold ~init:(Ok empty) ~f:(fun attrs fn ->
-         match attrs with
-         | Error c -> Error c
-         | Ok attrs -> KB.Value.join attrs (Def.attributes fn))
+      match attrs with
+      | Error c -> Error c
+      | Ok attrs -> KB.Value.join attrs (Def.attributes fn))
   |> function
   | Ok attrs -> !!attrs
   | Error conflict -> KB.fail conflict

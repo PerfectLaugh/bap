@@ -26,25 +26,23 @@ let sexp_of_values values =
   Sexp.List
     (Map.to_sequence values
     |> Seq.map ~f:(fun (v, { value }) ->
-           Sexp.List
-             [
-               Sexp.Atom "set-var";
-               Sexp.Atom (Var.name v);
-               Sexp.Atom (Type.to_string (Var.typ v));
-               Sexp.Atom (asprintf "%a" Word.pp_hex value);
-             ])
+        Sexp.List
+          [
+            Sexp.Atom "set-var";
+            Sexp.Atom (Var.name v);
+            Sexp.Atom (Type.to_string (Var.typ v));
+            Sexp.Atom (asprintf "%a" Word.pp_hex value);
+          ])
     |> Seq.to_list_rev)
 
 let sexp_of_random map =
   Sexp.List
     (Map.to_sequence map
     |> Seq.map ~f:(fun (v, gen) ->
-           Sexp.List
-             [
-               Sexp.Atom "gen-var";
-               Sexp.Atom (Var.name v);
-               Generator.sexp_of_t gen;
-             ])
+        Sexp.List
+          [
+            Sexp.Atom "gen-var"; Sexp.Atom (Var.name v); Generator.sexp_of_t gen;
+          ])
     |> Seq.to_list_rev)
 
 let sexp_of_env { values; random } =

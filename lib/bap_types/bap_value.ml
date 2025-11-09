@@ -229,7 +229,7 @@ module Dict = struct
   let filter t ~f =
     data t
     |> Seq.fold ~init:empty ~f:(fun dict (Value.T (k, x) as v) ->
-           if f v then Univ_map.set dict ~key:k ~data:x else dict)
+        if f v then Univ_map.set dict ~key:k ~data:x else dict)
 
   let compare x y =
     compare_list compare_value (Univ_map.to_alist x) (Univ_map.to_alist y)

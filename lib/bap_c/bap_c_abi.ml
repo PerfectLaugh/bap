@@ -425,9 +425,9 @@ module Arg = struct
     let slots stack =
       Map.to_alist stack.data
       |> List.filter_map ~f:(fun (off, (info, bits)) ->
-             match info with
-             | None -> None
-             | Some { datum } -> Some (off, datum, bits))
+          match info with
+          | None -> None
+          | Some { datum } -> Some (off, datum, bits))
 
     let singleton entry stack =
       { stack with data = Map.singleton (module Int) 0 entry }
@@ -793,7 +793,7 @@ module Arg = struct
               let base = Stack.base stack in
               Stack.slots stack
               |> List.map ~f:(fun (off, data, bits) ->
-                     (data, load target bits base off))
+                  (data, load target bits base off))
         in
         Some
           {

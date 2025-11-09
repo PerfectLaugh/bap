@@ -31,8 +31,8 @@ let taint prog =
                if
                  Term.enum arg_t sub
                  |> Seq.exists ~f:(fun arg ->
-                        Var.(Arg.lhs arg = Def.lhs def)
-                        && Term.has_attr arg Arg.warn_unused)
+                     Var.(Arg.lhs arg = Def.lhs def)
+                     && Term.has_attr arg Arg.warn_unused)
                then Term.set_attr def Taint.reg taint
                else def)
   end)

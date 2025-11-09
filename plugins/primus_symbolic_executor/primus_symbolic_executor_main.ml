@@ -766,15 +766,15 @@ let sexp_of_assert_failure (name, model, inputs) =
   Sexp.List
     (Atom name
     :: List.filter_map inputs ~f:(fun input ->
-           match SMT.Model.get model input with
-           | None -> None
-           | Some value ->
-               Option.some
-               @@ Sexp.List
-                    [
-                      Sexp.Atom (Input.to_symbol input);
-                      Sexp.Atom (SMT.Value.to_string value);
-                    ]))
+        match SMT.Model.get model input with
+        | None -> None
+        | Some value ->
+            Option.some
+            @@ Sexp.List
+                 [
+                   Sexp.Atom (Input.to_symbol input);
+                   Sexp.Atom (SMT.Value.to_string value);
+                 ]))
 
 let assert_failure, failed_assertion =
   Primus.Observation.provide "assert-failure" ~inspect:sexp_of_assert_failure

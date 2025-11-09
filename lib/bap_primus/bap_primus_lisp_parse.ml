@@ -369,7 +369,7 @@ module Parse = struct
   let use_package ?package prog packages =
     List.map packages ~f:atom
     |> List.fold ~init:prog ~f:(fun prog from ->
-           Program.use_package prog ?target:package from)
+        Program.use_package prog ?target:package from)
 
   let defpackage name prog trees =
     List.fold ~init:prog trees ~f:(fun prog -> function
@@ -710,8 +710,8 @@ module Load = struct
     List.find_map paths ~f:(fun path ->
         Sys.readdir path
         |> Array.find_map ~f:(fun file ->
-               if String.(file = name) then Some (Filename.concat path file)
-               else None))
+            if String.(file = name) then Some (Filename.concat path file)
+            else None))
 
   let is_loaded p name = Option.is_some (Source.find p name)
 

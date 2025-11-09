@@ -234,7 +234,7 @@ let all_paths o =
               ]);
        ]
   |> List.filter ~f:(fun p ->
-         match Api_path.is_dir p with Ok r -> r | Error _ -> false)
+      match Api_path.is_dir p with Ok r -> r | Error _ -> false)
 
 let get_file file = Some file
 

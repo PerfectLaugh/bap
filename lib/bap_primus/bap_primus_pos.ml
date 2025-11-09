@@ -66,7 +66,7 @@ let sexp_of_t = function
 let parent prog blk =
   Term.enum sub_t prog
   |> Seq.find ~f:(fun sub ->
-         Option.is_some @@ Term.find blk_t sub (Term.tid blk))
+      Option.is_some @@ Term.find blk_t sub (Term.tid blk))
   |> function
   | None -> assert false
   | Some sub -> sub

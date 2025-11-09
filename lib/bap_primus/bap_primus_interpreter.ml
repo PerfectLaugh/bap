@@ -784,9 +784,9 @@ module Make (Machine : Machine) = struct
   let get_args ~input sub =
     Term.enum arg_t sub
     |> Seq.filter ~f:(fun x ->
-           match input with
-           | true -> not @@ is_out_intent x
-           | false -> is_out_intent x)
+        match input with
+        | true -> not @@ is_out_intent x
+        | false -> is_out_intent x)
     |> Machine.Seq.map ~f:get_arg
 
   let iter_args t f = Machine.Seq.iter (Term.enum arg_t t) ~f

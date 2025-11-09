@@ -391,14 +391,14 @@ let suite () =
          >:: check "16x4_b_32LE" ~f:(assert_cont ~word_size:`r64);
          "max-min"
          >:: check "16x4_g_32LE" ~f:(fun img ->
-                 let words = Image.words img `r8 in
-                 let mx, mn =
-                   match (Table.max words, Table.min words) with
-                   | Some (mx, _), Some (mn, _) -> (mx, mn)
-                   | _ -> invalid_arg "empty table"
-                 in
-                 let mx, mn = Memory.(min_addr mx, min_addr mn) in
-                 let printer = Addr.to_string in
-                 assert_equal ~printer Addr.(mn ++ 0x336) mx;
-                 return ());
+             let words = Image.words img `r8 in
+             let mx, mn =
+               match (Table.max words, Table.min words) with
+               | Some (mx, _), Some (mn, _) -> (mx, mn)
+               | _ -> invalid_arg "empty table"
+             in
+             let mx, mn = Memory.(min_addr mx, min_addr mn) in
+             let printer = Addr.to_string in
+             assert_equal ~printer Addr.(mn ++ 0x336) mx;
+             return ());
        ]

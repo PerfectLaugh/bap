@@ -22,11 +22,11 @@ let sweep ?(backend = "llvm") arch mem : (mem * insn option) list Or_error.t =
       Dis.run dis mem ~init:[] ~return:Fn.id ~stopped:(fun s _ ->
           Dis.stop s (Dis.insns s))
       |> List.map ~f:(function
-           | mem, None -> (mem, None)
-           | mem, Some insn -> (
-               match lift mem insn with
-               | Ok bil -> (mem, Some (Insn.of_basic ~bil insn))
-               | _ -> (mem, Some (Insn.of_basic insn))))
+        | mem, None -> (mem, None)
+        | mem, Some insn -> (
+            match lift mem insn with
+            | Ok bil -> (mem, Some (Insn.of_basic ~bil insn))
+            | _ -> (mem, Some (Insn.of_basic insn))))
       |> Or_error.return)
 
 module With_exn = struct

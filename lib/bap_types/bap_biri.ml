@@ -46,12 +46,12 @@ module Make (SM : Monad.State.S2) = struct
     let open Bap_ir in
     Term.enum arg_t sub
     |> SM.Seq.iter ~f:(fun a ->
-           match (scope, Ir_arg.intent a) with
-           | _, None
-           | `enter, (Some In | Some Both)
-           | `leave, (Some Out | Some Both) ->
-               f a
-           | _ -> SM.return ())
+        match (scope, Ir_arg.intent a) with
+        | _, None
+        | `enter, (Some In | Some Both)
+        | `leave, (Some Out | Some Both) ->
+            f a
+        | _ -> SM.return ())
 
   let expect_bool w : Bap_type_error.t =
     let w = Word.bitwidth w in

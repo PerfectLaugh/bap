@@ -360,8 +360,8 @@ module Std : sig
   (** imm constructor - constructs an immediate from operand *)
 
   val imm_32 : (op -> exp) ec
-  (** imm_32 constructor - constructs an immediate from operand without trimming to 16 bits
-  *)
+  (** imm_32 constructor - constructs an immediate from operand without trimming
+      to 16 bits *)
 
   val var : (bitwidth -> exp) ec
   (** var constructor - constructs a variable of bitwidth *)

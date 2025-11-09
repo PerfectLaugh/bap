@@ -97,9 +97,9 @@ module Create () = struct
       Configuration.parameters ~doc ?as_flag ?aliases:synonyms t name
       |> Configuration.determined
       |> Future.map ~f:(fun res ->
-             match default with
-             | None -> res
-             | Some default -> ( match res with [] -> default | xs -> xs))
+          match default with
+          | None -> res
+          | Some default -> ( match res with [] -> default | xs -> xs))
 
     let flag ?deprecated ?docv:_ ?(doc = "Undocumented.") ?synonyms name =
       let doc = prepend_deprecation deprecated doc in

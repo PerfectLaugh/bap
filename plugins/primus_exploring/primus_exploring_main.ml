@@ -95,7 +95,7 @@ let register enabled =
 
 open Config;;
 
-manpage [ `S "DESCRIPTION"; `P desc ]
+manpage [ `S "DESCRIPTION"; `P desc ];;
 
 let enabled = flag "scheduler" ~doc:"Enable the scheduler."
 

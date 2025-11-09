@@ -232,9 +232,9 @@ let odig_pkgs () =
   let pkgs =
     In_channel.read_lines f
     |> List.filter_map ~f:(fun s ->
-           match String.split s ~on:'?' with
-           | x :: _ -> Some (String.strip x)
-           | _ -> None)
+        match String.split s ~on:'?' with
+        | x :: _ -> Some (String.strip x)
+        | _ -> None)
   in
   Sys.remove f;
   pkgs
@@ -244,7 +244,7 @@ let plugins =
   Plugins.list ()
   |> List.sort ~compare:by_plugin_name
   |> List.fold ~init:"" ~f:(fun s p ->
-         Format.sprintf "%s%-24s %s\n" s (Plugin.name p) (Plugin.desc p))
+      Format.sprintf "%s%-24s %s\n" s (Plugin.name p) (Plugin.desc p))
 
 let plugins_index = sprintf "\n\n{1 Plugins}\n{[%s]}\n" plugins
 

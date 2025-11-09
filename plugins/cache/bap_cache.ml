@@ -167,10 +167,10 @@ let size () =
   let size =
     Sys.readdir path
     |> Array.fold ~init:0L ~f:(fun s f ->
-           try
-             let file = path // f in
-             Int64.(s + Unix.LargeFile.((stat file).st_size))
-           with _ -> s)
+        try
+          let file = path // f in
+          Int64.(s + Unix.LargeFile.((stat file).st_size))
+        with _ -> s)
   in
   Int64.(to_int_exn (size / 1024L / 1024L))
 

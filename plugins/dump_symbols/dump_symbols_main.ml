@@ -11,12 +11,10 @@ let output oc syms =
   let word pro mem = ok_exn (Addr.to_int64 (pro mem)) in
   Symtab.to_sequence syms
   |> Seq.iter ~f:(fun (name, entry, cfg) ->
-         Graphlib.reverse_postorder_traverse
-           (module Graphs.Cfg)
-           ~start:entry cfg
-         |> Seq.iter ~f:(fun blk ->
-                let mem = Block.memory blk in
-                output (name, word Memory.min_addr mem, word Memory.max_addr mem)))
+      Graphlib.reverse_postorder_traverse (module Graphs.Cfg) ~start:entry cfg
+      |> Seq.iter ~f:(fun blk ->
+          let mem = Block.memory blk in
+          output (name, word Memory.min_addr mem, word Memory.max_addr mem)))
 
 let main file proj =
   let syms = Project.symbols proj in

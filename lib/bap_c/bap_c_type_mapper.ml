@@ -235,8 +235,8 @@ module Make (M : Monad.S2) = struct
       method private map_fields fields =
         M.all
         @@ List.map fields ~f:(fun (n, t) ->
-               self#map_name n >>= fun n ->
-               self#map_type t >>= fun t -> M.return (n, t))
+            self#map_name n >>= fun n ->
+            self#map_type t >>= fun t -> M.return (n, t))
 
       method private do_map_name = M.return
 

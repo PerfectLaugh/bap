@@ -104,11 +104,11 @@ let do_render_progress () =
   Hashtbl.keys tasks
   |> List.sort ~compare:String.compare
   |> List.iteri ~f:(fun line name ->
-         let level = level_of_name name in
-         let path = String.split name ~on:'/' in
-         match Hashtbl.find tasks name with
-         | None -> ()
-         | Some slot -> render_slot line level path slot);
+      let level = level_of_name name in
+      let path = String.split name ~on:'/' in
+      match Hashtbl.find tasks name with
+      | None -> ()
+      | Some slot -> render_slot line level path slot);
   pp "%!"
 
 let render_progress tick =

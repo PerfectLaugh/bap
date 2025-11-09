@@ -682,15 +682,15 @@ let filter ?(strict = false) ?(parent = Self.unknown) ?(system = System.unknown)
   let result =
     family parent
     |> List.filter ~f:(fun t ->
-           let i = info t in
-           List.for_all ~f:Fn.id
-             [
-               order (module System) i.system system;
-               order (module Abi) i.abi abi;
-               order (module Fabi) i.fabi fabi;
-               order (module Filetype) i.filetype filetype;
-               order (module Options) i.options options;
-             ])
+        let i = info t in
+        List.for_all ~f:Fn.id
+          [
+            order (module System) i.system system;
+            order (module Abi) i.abi abi;
+            order (module Fabi) i.fabi fabi;
+            order (module Filetype) i.filetype filetype;
+            order (module Options) i.options options;
+          ])
   in
   result
 

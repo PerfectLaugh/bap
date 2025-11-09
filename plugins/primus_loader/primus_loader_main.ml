@@ -43,6 +43,7 @@ Config.manpage
     `S "SEE ALSO";
     `P "$(b,bap-plugin-primus-x86)(1), $(b,brk)(2), $(b,end)(3)";
   ]
+;;
 
 let stack_size = Config.(param int ~default:(8 * 1024 * 1024) "stack-size" ~doc)
 

@@ -107,7 +107,7 @@ let compute_root_table path min_length max_length threshold compiler =
       in
       Memmap.to_sequence memory
       |> Seq.fold ~init:no_roots ~f:(fun roots (mem, _) ->
-             Set.union roots @@ of_addrs (find mem))
+          Set.union roots @@ of_addrs (find mem))
 
 let provide_roots () =
   KB.Rule.(

@@ -245,7 +245,7 @@ let stbrx name opt_opcode size arch ctxt =
   let expected =
     Seq.to_list_rev (Word.enum_bytes data BigEndian)
     |> List.fold ~init:None ~f:(fun acc b ->
-           match acc with None -> Some b | Some p -> Some (Word.concat p b))
+        match acc with None -> Some b | Some p -> Some (Word.concat p b))
     |> fun x ->
     Option.value_exn x
     |> Word.extract_exn ~hi:(width - 1) ~lo:(width - Size.in_bits size)

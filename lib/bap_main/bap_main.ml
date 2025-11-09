@@ -59,8 +59,7 @@ end = struct
   let files init =
     List.filter_map init ~f:concat_parts
     |> List.concat_map ~f:(fun dir ->
-           if Sys.file_exists dir && Sys.is_directory dir then readdir dir
-           else [])
+        if Sys.file_exists dir && Sys.is_directory dir then readdir dir else [])
 
   let is_empty = String.for_all ~f:Char.is_whitespace
 
@@ -178,7 +177,7 @@ module Type = struct
             let init = (checked + 1, init ++ digest_path path st_mtime) in
             Sys.readdir path
             |> Array.fold ~init ~f:(fun (checked, init) entry ->
-                   digest checked ~init @@ Filename.concat path entry)
+                digest checked ~init @@ Filename.concat path entry)
         | _ -> raise Stopped_checking
         | exception _ -> raise Stopped_checking
       else raise Stopped_checking
@@ -491,12 +490,12 @@ module Context = struct
   let plugins { plugins } =
     Map.to_sequence ~order:`Decreasing_key plugins
     |> Sequence.fold ~init:[] ~f:(fun plugins (p, _) ->
-           let info =
-             match Hashtbl.find plugin_descriptions p with
-             | None -> "no description provided"
-             | Some { docs } -> docs
-           in
-           (p, info) :: plugins)
+        let info =
+          match Hashtbl.find plugin_descriptions p with
+          | None -> "no description provided"
+          | Some { docs } -> docs
+        in
+        (p, info) :: plugins)
 
   let commands { plugins } =
     Hashtbl.fold command_descriptions ~init:[] ~f:(fun ~key:plugin ~data cmds ->

@@ -233,10 +233,10 @@ module Std = struct
          the loop body  *)
       Hashtbl.to_alist t.subs
       |> List.iter ~f:(fun (id, notify) ->
-             try notify id event
-             with exn ->
-               unsubscribe t id;
-               raise exn)
+          try notify id event
+          with exn ->
+            unsubscribe t id;
+            raise exn)
 
     let create () =
       let stream =

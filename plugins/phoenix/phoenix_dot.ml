@@ -80,10 +80,10 @@ struct
     let escape_label str =
       String.to_list_rev str
       |> List.rev_map ~f:(function
-           | '\n' | '\r' -> "\\l"
-           | ',' | ';' -> " "
-           | '\t' -> "<tabulation>"
-           | c -> String.of_char c)
+        | '\n' | '\r' -> "\\l"
+        | ',' | ';' -> " "
+        | '\t' -> "<tabulation>"
+        | c -> String.of_char c)
       |> String.concat
 
     let label_of_vertex (blk, name) =
@@ -94,9 +94,9 @@ struct
       let pr = asprintf in
       List.sort ~compare:label_order options.cfg_format
       |> List.map ~f:(function
-           | `with_name -> pr "«%s»\\n" name
-           | `with_asm -> pr "@[<v>%a@]@?" pp_blk_asm blk |> escape_label
-           | `with_bil -> pr "@[<v>%a@]@?" pp_blk_bil blk |> escape_label)
+        | `with_name -> pr "«%s»\\n" name
+        | `with_asm -> pr "@[<v>%a@]@?" pp_blk_asm blk |> escape_label
+        | `with_bil -> pr "@[<v>%a@]@?" pp_blk_bil blk |> escape_label)
       |> String.concat
 
     let vertex_attributes v = [ `Label (label_of_vertex v) ]

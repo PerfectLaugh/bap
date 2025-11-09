@@ -116,10 +116,10 @@ module Test_algo (Gl : Graph_for_algo) = struct
     let nodes = Map.to_sequence stamps in
     Seq.cartesian_product nodes nodes
     |> Seq.for_all ~f:(fun ((_, x), (_, y)) ->
-           is_sorted [ x.enter; x.leave; y.enter; y.leave ]
-           || is_sorted [ x.enter; y.enter; y.leave; x.leave ]
-           || is_sorted [ y.enter; x.enter; x.leave; y.leave ]
-           || is_sorted [ y.enter; y.leave; x.enter; x.leave ])
+        is_sorted [ x.enter; x.leave; y.enter; y.leave ]
+        || is_sorted [ x.enter; y.enter; y.leave; x.leave ]
+        || is_sorted [ y.enter; x.enter; x.leave; y.leave ]
+        || is_sorted [ y.enter; y.leave; x.enter; x.leave ])
 
   (** Lemma 1.4: pre[x] < pre[y] && rpost[x] < rpost[y] <=> x `is_ancestor_of` y
   *)
@@ -128,12 +128,12 @@ module Test_algo (Gl : Graph_for_algo) = struct
     let nodes = Map.to_sequence stamps in
     Seq.cartesian_product nodes nodes
     |> Seq.for_all ~f:(fun ((nx, x), (ny, y)) ->
-           prop x y ==> Set.mem (Span.ancestors tree ny) nx)
+        prop x y ==> Set.mem (Span.ancestors tree ny) nx)
     && Seq.for_all nodes ~f:(fun (ny, y) ->
-           Set.for_all (Span.ancestors tree ny) ~f:(fun nx ->
-               match Map.find stamps nx with
-               | None -> assert_failure "unstamped node"
-               | Some x -> prop x y))
+        Set.for_all (Span.ancestors tree ny) ~f:(fun nx ->
+            match Map.find stamps nx with
+            | None -> assert_failure "unstamped node"
+            | Some x -> prop x y))
 
   let theorem_1_5 stamps graph ctxt : bool =
     Graphlib.depth_first_search
@@ -189,13 +189,13 @@ module Test_algo (Gl : Graph_for_algo) = struct
     in
     Seq.range 0 size
     |> Seq.fold ~init:g ~f:(fun g i ->
-           if Float.(Random.float 1.0 < 0.3) then
-             let dst =
-               if Float.(Random.float 1.0 < 0.2) then Random.int (i + 1)
-               else i + Random.int (size - i)
-             in
-             Gl.Edge.insert (edge i dst) g
-           else g)
+        if Float.(Random.float 1.0 < 0.3) then
+          let dst =
+            if Float.(Random.float 1.0 < 0.2) then Random.int (i + 1)
+            else i + Random.int (size - i)
+          in
+          Gl.Edge.insert (edge i dst) g
+        else g)
 
   let compare_dom gr ctxt =
     let size = Gl.number_of_nodes gr in
@@ -208,7 +208,7 @@ module Test_algo (Gl : Graph_for_algo) = struct
     in
     Seq.range 1 size |> Seq.map ~f:node
     |> Seq.iter ~f:(fun n ->
-           assert_equal ~ctxt ~printer:node_printer (exp_idom n) (got_idom n))
+        assert_equal ~ctxt ~printer:node_printer (exp_idom n) (got_idom n))
 
   let compare_dom_frontier gr ctxt =
     let idom = Graphlib.dominators (module Gl) gr (node 0) in
@@ -220,9 +220,9 @@ module Test_algo (Gl : Graph_for_algo) = struct
     Seq.range 0 (Gl.number_of_nodes gr)
     |> Seq.map ~f:node
     |> Seq.iter ~f:(fun n ->
-           let exp = Node.Set.of_list (exp_dfrt n) in
-           let got = Node.Set.of_list (set_of_frontier n) in
-           assert_equal ~ctxt ~cmp:Node.Set.equal exp got)
+        let exp = Node.Set.of_list (exp_dfrt n) in
+        let got = Node.Set.of_list (set_of_frontier n) in
+        assert_equal ~ctxt ~cmp:Node.Set.equal exp got)
 
   let compare_scc gr ctxt =
     let scc = Graphlib.strong_components (module Gl) gr in
@@ -232,19 +232,19 @@ module Test_algo (Gl : Graph_for_algo) = struct
     let exp_equiv x y = comp_num x = comp_num y in
     Seq.cartesian_product (Gl.nodes gr) (Gl.nodes gr)
     |> Seq.iter ~f:(fun (x, y) ->
-           assert_equal ~ctxt ~printer:string_of_bool (exp_equiv x y)
-             (our_equiv x y))
+        assert_equal ~ctxt ~printer:string_of_bool (exp_equiv x y)
+          (our_equiv x y))
 
   let doms =
     List.concat
     @@ List.init 100 ~f:(fun n ->
-           let size = 1 + Random.int 200 in
-           let gr = random_flowgraph size in
-           [
-             sprintf "Dom.%d" n >:: compare_dom gr;
-             sprintf "DomF.%d" n >:: compare_dom_frontier gr;
-             sprintf "Scc.%d" n >:: compare_scc gr;
-           ])
+        let size = 1 + Random.int 200 in
+        let gr = random_flowgraph size in
+        [
+          sprintf "Dom.%d" n >:: compare_dom gr;
+          sprintf "DomF.%d" n >:: compare_dom_frontier gr;
+          sprintf "Scc.%d" n >:: compare_scc gr;
+        ])
 
   let nodes g = Gl.nodes g |> Seq.fold ~init:Gl.Node.Set.empty ~f:Set.add
   let edges g = Gl.edges g |> Seq.fold ~init:Gl.Edge.Set.empty ~f:Set.add
@@ -253,21 +253,21 @@ module Test_algo (Gl : Graph_for_algo) = struct
   let setops =
     List.concat
     @@ List.init 100 ~f:(fun n ->
-           let g1 = random_graph () in
-           let g2 = random_graph () in
-           let is elems op check ctxt =
-             let g = op g1 g2 in
-             let ns, n1, n2 = (elems g, elems g1, elems g2) in
-             assert_equal ~ctxt ~cmp:Set.equal ns (check n1 n2)
-           in
-           let union = Graphlib.union (module Gl) in
-           let inter = Graphlib.inter (module Gl) in
-           [
-             sprintf "Union.%d.nodes" n >:: is nodes union Set.union;
-             sprintf "Union.%d.edges" n >:: is edges union Set.union;
-             sprintf "Inter.%d.nodes" n >:: is nodes inter Set.inter;
-             sprintf "Inter.%d.edges" n >:: is edges inter Set.inter;
-           ])
+        let g1 = random_graph () in
+        let g2 = random_graph () in
+        let is elems op check ctxt =
+          let g = op g1 g2 in
+          let ns, n1, n2 = (elems g, elems g1, elems g2) in
+          assert_equal ~ctxt ~cmp:Set.equal ns (check n1 n2)
+        in
+        let union = Graphlib.union (module Gl) in
+        let inter = Graphlib.inter (module Gl) in
+        [
+          sprintf "Union.%d.nodes" n >:: is nodes union Set.union;
+          sprintf "Union.%d.edges" n >:: is edges union Set.union;
+          sprintf "Inter.%d.nodes" n >:: is nodes inter Set.inter;
+          sprintf "Inter.%d.edges" n >:: is edges inter Set.inter;
+        ])
 
   let suite name =
     name
@@ -592,8 +592,8 @@ let suite () =
   >::: [
          "Algo"
          >::: List.mapi graphs_for_algo ~f:(fun n (module G) ->
-                  let module Test = Test_algo (G) in
-                  Test.suite (sprintf "%d" n));
+             let module Test = Test_algo (G) in
+             Test.suite (sprintf "%d" n));
          "Construction" >::: [ Test_int100.suite ];
          "IR" >::: Test_IR.suite ();
          "Partition" >::: Test_partition.suite ();

@@ -11,9 +11,9 @@ module Unix = Caml_unix
 let print_meta trace =
   Trace.meta trace |> Dict.data |> Seq.to_list
   |> List.sort ~compare:(fun m1 m2 ->
-         if Value.is Meta.trace_stats m1 then -1
-         else if Value.is Meta.trace_stats m2 then 1
-         else Value.compare m1 m2)
+      if Value.is Meta.trace_stats m1 then -1
+      else if Value.is Meta.trace_stats m2 then 1
+      else Value.compare m1 m2)
   |> List.iter ~f:(printf "%a@." Value.pp)
 
 let try_dump uri =

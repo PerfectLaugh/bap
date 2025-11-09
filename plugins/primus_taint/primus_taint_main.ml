@@ -261,6 +261,7 @@ manpage
       \    and a boolean parameter that tells whether the taint was still\n\
       \    live or dead, when the finalization was called.";
   ]
+;;
 
 let policy =
   param string ~default:"propagate-by-computation" "default-policy"

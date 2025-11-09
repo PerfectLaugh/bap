@@ -176,7 +176,7 @@ let update_package_documentation prog package docs =
 let packages { library; pkgdocs } =
   Map.keys library
   |> List.map ~f:(fun pkg ->
-         (pkg, match Map.find pkgdocs pkg with None -> "" | Some docs -> docs))
+      (pkg, match Map.find pkgdocs pkg with None -> "" | Some docs -> docs))
 
 let use_package program ?(target = program.package) from =
   let program =
@@ -323,8 +323,8 @@ module Places = struct
         let package = KB.Name.unqualified (Theory.Target.name t) in
         Theory.Target.regs t |> Set.to_sequence
         |> Seq.fold ~init:regs ~f:(fun regs v ->
-               let name = KB.Name.create ~package (Theory.Var.name v) in
-               Map.set regs ~key:name ~data:v))
+            let name = KB.Name.create ~package (Theory.Var.name v) in
+            Map.set regs ~key:name ~data:v))
       ~init:(Map.empty (module KB.Name))
 
   let collect_globals target program =
@@ -451,7 +451,7 @@ module Callgraph = struct
     in
     G.nodes g
     |> Seq.fold ~init:g ~f:(fun g n ->
-           if G.Node.degree ~dir n g = 0 then fix n g else g)
+        if G.Node.degree ~dir n g = 0 then fix n g else g)
 
   let build library =
     close `Out (close `In (build_kernel library)) |> fun g ->
@@ -1076,12 +1076,12 @@ module Typing = struct
     let partition { vars; vals } =
       join_vars vars
       |> Map.fold ~init:[] ~f:(fun ~key ~data xs ->
-             {
-               var = key;
-               elements = Id.Set.of_list data;
-               values = Map.find vals key;
-             }
-             :: xs)
+          {
+            var = key;
+            elements = Id.Set.of_list data;
+            values = Map.find vals key;
+          }
+          :: xs)
 
     module Group = struct
       let elements g = g.elements
@@ -1300,7 +1300,7 @@ module Typing = struct
   let find_func funcs id =
     Map.to_sequence funcs
     |> Seq.find_map ~f:(fun (_, funcs) ->
-           List.find funcs ~f:(fun f -> Id.(f.id = id)))
+        List.find funcs ~f:(fun f -> Id.(f.id = id)))
 
   let transfer glob node gamma =
     match node with
@@ -1377,31 +1377,29 @@ module Typing = struct
   let check_methods glob { context; library } g =
     applicable context library
     |> fold_library ~init:g ~f:(fun ~package { mets } g ->
-           fold_multi mets ~init:g ~f:(fun g met ->
-               let name = Def.name met in
-               let fullname = KB.Name.read ~package name in
-               match find_signal library fullname with
-               | None ->
-                   Gamma.fail met.id (Unresolved_signal (met.id, name, None)) g
-               | Some s -> (
-                   let args = Def.Meth.args met in
-                   let pars = Def.Signal.signature s in
-                   match
-                     apply_signature ~allow_partial:true met.id args g pars
-                   with
-                   | None ->
-                       let problem =
-                         Unresolved_signal (met.id, name, Some pars)
-                       in
-                       Gamma.fail met.id problem g
-                   | Some g ->
-                       let init = Map.empty (module KB.Name) in
-                       let vars = List.fold args ~init ~f:push in
-                       let g =
-                         List.fold args ~init:g ~f:(fun g v ->
-                             Gamma.constr v.id v.data.typ g)
-                       in
-                       infer_ast glob vars (Def.Meth.body met) g)))
+        fold_multi mets ~init:g ~f:(fun g met ->
+            let name = Def.name met in
+            let fullname = KB.Name.read ~package name in
+            match find_signal library fullname with
+            | None ->
+                Gamma.fail met.id (Unresolved_signal (met.id, name, None)) g
+            | Some s -> (
+                let args = Def.Meth.args met in
+                let pars = Def.Signal.signature s in
+                match
+                  apply_signature ~allow_partial:true met.id args g pars
+                with
+                | None ->
+                    let problem = Unresolved_signal (met.id, name, Some pars) in
+                    Gamma.fail met.id problem g
+                | Some g ->
+                    let init = Map.empty (module KB.Name) in
+                    let vars = List.fold args ~init ~f:push in
+                    let g =
+                      List.fold args ~init:g ~f:(fun g v ->
+                          Gamma.constr v.id v.data.typ g)
+                    in
+                    infer_ast glob vars (Def.Meth.body met) g)))
 
   let make_defs =
     fold_library
@@ -1475,12 +1473,12 @@ module Typing = struct
     let errors { program = { sources }; gamma } =
       Gamma.partition gamma
       |> List.fold ~init:[] ~f:(fun errs g ->
-             match Gamma.Group.values g with
-             | None -> errs
-             | Some vals -> (
-                 match Tvals.result vals with
-                 | Ok _ -> errs
-                 | Error problem -> { sources; problem } :: errs))
+          match Gamma.Group.values g with
+          | None -> errs
+          | Some vals -> (
+              match Tvals.result vals with
+              | Ok _ -> errs
+              | Error problem -> { sources; problem } :: errs))
 
     let check _vars program : error list = errors (infer program)
 

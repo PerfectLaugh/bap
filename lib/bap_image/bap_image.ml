@@ -214,7 +214,9 @@ module Spec = struct
         Ogre.provide Field.bits bits;
         (Ogre.provide Field.is_little_endian
         @@
-        match Arch.endian arch with LittleEndian -> true | BigEndian -> false);
+        match Arch.endian arch with
+        | LittleEndian -> true
+        | BigEndian -> false);
       ]
 
   let from_arch arch =
@@ -550,10 +552,10 @@ module Derive = struct
         select ~where:(named_symbol.(addr) = int start) (from named_symbol))
       ~f:snd
     >>| Seq.fold ~init:None ~f:(fun name n ->
-            match name with
-            | None -> Some n
-            | Some name as r when String.length n < String.length name -> r
-            | _ -> Some n)
+        match name with
+        | None -> Some n
+        | Some name as r when String.length n < String.length name -> r
+        | _ -> Some n)
 
   let symbols =
     Fact.foreach
@@ -697,12 +699,12 @@ module Metaloader () = struct
   let load invoke =
     Hashtbl.data backends
     |> List.fold ~init:(Ok None) ~f:(fun doc loader ->
-           match (doc, invoke loader) with
-           | Ok None, doc | doc, Ok None -> doc
-           | Ok (Some doc), Error _ | Error _, Ok (Some doc) -> Ok (Some doc)
-           | Error e1, Error e2 -> Error (Error.of_list [ e1; e2 ])
-           | Ok (Some d1), Ok (Some d2) ->
-               merge_docs d1 d2 |> Or_error.map ~f:Option.some)
+        match (doc, invoke loader) with
+        | Ok None, doc | doc, Ok None -> doc
+        | Ok (Some doc), Error _ | Error _, Ok (Some doc) -> Ok (Some doc)
+        | Error e1, Error e2 -> Error (Error.of_list [ e1; e2 ])
+        | Ok (Some d1), Ok (Some d2) ->
+            merge_docs d1 d2 |> Or_error.map ~f:Option.some)
 
   let from_file name = load (fun (module Loader) -> Loader.from_file name)
   let from_data data = load (fun (module Loader) -> Loader.from_data data)

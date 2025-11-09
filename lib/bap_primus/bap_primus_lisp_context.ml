@@ -34,8 +34,8 @@ let of_project proj =
   let targets =
     t :: Theory.Target.parents t
     |> List.concat_map ~f:(fun t ->
-           KB.Name.unqualified (Theory.Target.name t)
-           :: Set.to_list (Theory.Target.nicknames t))
+        KB.Name.unqualified (Theory.Target.name t)
+        :: Set.to_list (Theory.Target.nicknames t))
   in
   Name.Map.of_alist_exn
     [

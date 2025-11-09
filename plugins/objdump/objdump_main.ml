@@ -47,12 +47,12 @@ let demangler =
 let objdump_cmds demangler =
   List.stable_dedup ~compare:String.compare objdumps
   |> List.map ~f:(fun cmd ->
-         sprintf "%s %s %s" cmd default_objdump_opts
-         @@
-         match demangler with
-         | Some "disabled" -> ""
-         | None -> "-C"
-         | Some other -> "--demangle=" ^ other)
+      sprintf "%s %s %s" cmd default_objdump_opts
+      @@
+      match demangler with
+      | Some "disabled" -> ""
+      | None -> "-C"
+      | Some other -> "--demangle=" ^ other)
 
 module Regexp = struct
   let parse =

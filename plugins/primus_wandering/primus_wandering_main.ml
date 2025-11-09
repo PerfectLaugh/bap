@@ -87,6 +87,7 @@ manpage
       "The round-robin scheduler will switch the context after each basic \
        block.";
   ]
+;;
 
 let enabled = flag "scheduler" ~doc:"Enable the scheduler."
 let seed = param ~doc:"random generator seed" int "seed"

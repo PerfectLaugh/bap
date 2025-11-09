@@ -384,9 +384,9 @@ module ElfDyn = struct
     | Some strtab ->
         dynamic_contents img >>| Seq.of_list
         >>= Ogre.Seq.iter ~f:(fun { tag; off } ->
-                match (Word.to_int tag, Word.to_int off) with
-                | Ok 1, Ok off -> Ogre.provide require (read ~strtab off)
-                | _ -> Ogre.return ())
+            match (Word.to_int tag, Word.to_int off) with
+            | Ok 1, Ok off -> Ogre.provide require (read ~strtab off)
+            | _ -> Ogre.return ())
 end
 
 let provide_elf_segmentation_and_libraries data =

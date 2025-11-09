@@ -45,13 +45,13 @@ let find_entry subrs name_or_addr =
   Disasm.Subroutines.entries subrs
   |> Set.to_sequence
   |> KB.Seq.find ~f:(fun addr ->
-         let addr = Word.to_bitvec addr in
-         if Poly.(Bitvec.to_string addr = name_or_addr) then KB.return true
-         else
-           Theory.Label.for_addr addr >>= fun label ->
-           KB.collect Theory.Label.name label >>| function
-           | None -> false
-           | Some name -> String.equal name name_or_addr)
+      let addr = Word.to_bitvec addr in
+      if Poly.(Bitvec.to_string addr = name_or_addr) then KB.return true
+      else
+        Theory.Label.for_addr addr >>= fun label ->
+        KB.collect Theory.Label.name label >>| function
+        | None -> false
+        | Some name -> String.equal name name_or_addr)
 
 let iter_subr entry subrs disasm ~f =
   Disasm.Driver.explore disasm ~entry ~init:()
@@ -64,9 +64,9 @@ let iter_subr entry subrs disasm ~f =
 let print_unit () =
   KB.objects Theory.Unit.cls
   >>= KB.Seq.iter ~f:(fun obj ->
-          KB.Object.repr Theory.Unit.cls obj >>= fun str ->
-          KB.collect Theory.Unit.target obj >>| fun triple ->
-          Format.printf "%-40s %a@\n" str Theory.Target.pp triple)
+      KB.Object.repr Theory.Unit.cls obj >>= fun str ->
+      KB.collect Theory.Unit.target obj >>| fun triple ->
+      Format.printf "%-40s %a@\n" str Theory.Target.pp triple)
 
 let ensure x yes = x >>= function true -> yes () | false -> KB.return ()
 
@@ -89,7 +89,7 @@ let print_insn ?package slots obj =
 let list_insns unit slots =
   KB.objects Theory.Program.cls
   >>= KB.Seq.iter ~f:(fun obj ->
-          ensure (belongs_to_unit unit obj) @@ fun () -> print_insn slots obj)
+      ensure (belongs_to_unit unit obj) @@ fun () -> print_insn slots obj)
 
 let print_subr unit name_or_addr slots =
   KB.collect Project.State.slot unit >>= fun state ->
@@ -110,19 +110,19 @@ let matches name filter =
 let list_subrs unit filter =
   KB.objects Theory.Program.cls
   >>= KB.Seq.iter ~f:(fun obj ->
-          belongs_to_unit unit obj >>= function
-          | false -> KB.return ()
-          | true -> (
-              KB.collect Theory.Label.is_subroutine obj >>= function
-              | None | Some false -> KB.return ()
-              | Some true -> (
-                  KB.Object.repr Theory.Program.cls obj >>= fun str ->
-                  KB.collect Theory.Label.name obj >>| function
-                  | None when Option.is_none filter ->
-                      Format.printf "%s: unresolved@\n" str
-                  | Some name when matches name filter ->
-                      Format.printf "%s: %s\n" str name
-                  | _ -> ())))
+      belongs_to_unit unit obj >>= function
+      | false -> KB.return ()
+      | true -> (
+          KB.collect Theory.Label.is_subroutine obj >>= function
+          | None | Some false -> KB.return ()
+          | Some true -> (
+              KB.Object.repr Theory.Program.cls obj >>= fun str ->
+              KB.collect Theory.Label.name obj >>| function
+              | None when Option.is_none filter ->
+                  Format.printf "%s: unresolved@\n" str
+              | Some name when matches name filter ->
+                  Format.printf "%s: %s\n" str name
+              | _ -> ())))
 
 let register () =
   let open Project.Analysis in

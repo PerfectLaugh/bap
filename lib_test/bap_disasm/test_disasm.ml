@@ -259,15 +259,15 @@ let unexpected_block mem =
 let addresses dis ctxt =
   Rec.cfg dis |> Cfg.nodes
   |> Seq.iter ~f:(fun blk ->
-         let mem = Block.memory blk in
-         match Array.find blocks ~f:(equal_addrs mem) with
-         | None -> unexpected_block mem
-         | Some mem' ->
-             let msg =
-               sprintf "Block at %s has incorrect size" (string_of_mem mem)
-             in
-             assert_equal ~ctxt ~printer:Int.to_string ~msg (Memory.length mem')
-               (Memory.length mem))
+      let mem = Block.memory blk in
+      match Array.find blocks ~f:(equal_addrs mem) with
+      | None -> unexpected_block mem
+      | Some mem' ->
+          let msg =
+            sprintf "Block at %s has incorrect size" (string_of_mem mem)
+          in
+          assert_equal ~ctxt ~printer:Int.to_string ~msg (Memory.length mem')
+            (Memory.length mem))
 
 let build_graph dis : graph =
   let blk_num blk =
@@ -279,14 +279,14 @@ let build_graph dis : graph =
   let cfg = Rec.cfg dis in
   Cfg.nodes cfg
   |> Seq.fold ~init:[] ~f:(fun graph blk ->
-         let preds =
-           Seq.map (Cfg.Node.preds blk cfg) ~f:(fun blk -> blk_num blk)
-         in
-         let dests =
-           Seq.map (Cfg.Node.outputs blk cfg) ~f:(fun e ->
-               (blk_num (Cfg.Edge.dst e), Cfg.Edge.label e))
-         in
-         (blk_num blk, Seq.to_list preds, Seq.to_list dests) :: graph)
+      let preds =
+        Seq.map (Cfg.Node.preds blk cfg) ~f:(fun blk -> blk_num blk)
+      in
+      let dests =
+        Seq.map (Cfg.Node.outputs blk cfg) ~f:(fun e ->
+            (blk_num (Cfg.Edge.dst e), Cfg.Edge.label e))
+      in
+      (blk_num blk, Seq.to_list preds, Seq.to_list dests) :: graph)
 
 let structure cfg ctxt =
   let sort x = List.sort ~compare:Poly.compare x in

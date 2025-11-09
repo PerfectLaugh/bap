@@ -44,7 +44,7 @@ type symtab = t [@@deriving compare, sexp_of]
 let span ((_name, _entry, cfg) as fn) =
   Cfg.nodes cfg
   |> Seq.fold ~init:Memmap.empty ~f:(fun map blk ->
-         Memmap.add map (Block.memory blk) fn)
+      Memmap.add map (Block.memory blk) fn)
 
 let empty =
   {
@@ -176,9 +176,9 @@ let create disasm calls =
   let init = { init with extern } in
   Map.to_sequence graphs
   |> KB.Seq.fold ~init ~f:(fun tab (addr, (entry, cfg)) ->
-         let+ name = Symbolizer.get_name addr in
-         let entry = Option.value_exn entry in
-         add_symbol tab (name, entry, cfg))
+      let+ name = Symbolizer.get_name addr in
+      let entry = Option.value_exn entry in
+      add_symbol tab (name, entry, cfg))
 
 let result = Toplevel.var "symtab"
 

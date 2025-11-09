@@ -15,8 +15,8 @@ let cat header inputs output =
   let ch = open_out output in
   data
   |> List.iter (fun (header, data) ->
-         output_string ch header;
-         output_string ch data);
+      output_string ch header;
+      output_string ch data);
   close_out ch
 
 let () =

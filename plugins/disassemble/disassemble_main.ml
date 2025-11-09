@@ -185,33 +185,33 @@ end = struct
     build_histo stats
     |> Map.to_sequence ~order:`Increasing_key
     |> Seq.iter ~f:(fun (count, codes) ->
-           List.iter codes ~f:(Format.fprintf ppf "%-4d %s@\n" count))
+        List.iter codes ~f:(Format.fprintf ppf "%-4d %s@\n" count))
 
   let print_missing () =
     let lifted = ref 0 and missed = ref 0 and failed = ref 0 in
     KB.objects Theory.Program.cls
     >>= KB.Seq.fold ~init:String.Map.empty ~f:(fun stats insn ->
-            let* sema = KB.collect Theory.Semantics.slot insn in
-            let code = KB.Value.get Theory.Semantics.code sema in
-            if Option.is_none code then KB.return stats
-            else
-              KB.collect Theory.Label.addr insn >>= function
-              | None -> KB.return stats
-              | Some addr -> (
-                  KB.collect Basic.slot insn >>| function
-                  | None ->
-                      Format.printf "%a: %a ; not disassembled@\n" Bitvec.pp
-                        addr pp_code code;
-                      incr failed;
-                      stats
-                  | Some _ when KB.Value.get has_semantics sema ->
-                      incr lifted;
-                      stats
-                  | Some basic ->
-                      incr missed;
-                      Format.printf "%a: %a ; %a ; %a@\n" Bitvec.pp addr pp_code
-                        code Insn.pp sema pp_basic basic;
-                      update_missing basic stats))
+        let* sema = KB.collect Theory.Semantics.slot insn in
+        let code = KB.Value.get Theory.Semantics.code sema in
+        if Option.is_none code then KB.return stats
+        else
+          KB.collect Theory.Label.addr insn >>= function
+          | None -> KB.return stats
+          | Some addr -> (
+              KB.collect Basic.slot insn >>| function
+              | None ->
+                  Format.printf "%a: %a ; not disassembled@\n" Bitvec.pp addr
+                    pp_code code;
+                  incr failed;
+                  stats
+              | Some _ when KB.Value.get has_semantics sema ->
+                  incr lifted;
+                  stats
+              | Some basic ->
+                  incr missed;
+                  Format.printf "%a: %a ; %a ; %a@\n" Bitvec.pp addr pp_code
+                    code Insn.pp sema pp_basic basic;
+                  update_missing basic stats))
     >>| fun stats ->
     Format.printf "@\nHistogram:@\n%a@\n%-8s %d@\n%-8s %d@\n%-8s %d@\n" pp_histo
       stats "Lifted:" !lifted "Failed:" !failed "Missed:" !missed
@@ -407,9 +407,9 @@ let validate_passes passes =
   in
   Result.all
   @@ List.map passes ~f:(fun p ->
-         match Map.find known p with
-         | Some p -> Ok p
-         | None -> Error (Fail (Unknown_pass p)))
+      match Map.find known p with
+      | Some p -> Ok p
+      | None -> Error (Fail (Unknown_pass p)))
 
 let option_digest f = function None -> "none" | Some s -> f s
 
@@ -623,8 +623,8 @@ let pp_guesses ppf badname =
   let guesses =
     Project.passes ()
     |> List.filter_map ~f:(fun p ->
-           let name = Project.Pass.name p in
-           Option.some_if (good_guess name) name)
+        let name = Project.Pass.name p in
+        Option.some_if (good_guess name) name)
   in
   let pp_sep ppf () = Format.pp_print_string ppf ", or" in
   match guesses with

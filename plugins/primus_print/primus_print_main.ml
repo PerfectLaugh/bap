@@ -10,7 +10,7 @@ include Self ()
 module Param = struct
   open Config;;
 
-  manpage [ `S "DESCRIPTION"; `P "Monitors a Lisp Machine execution." ]
+  manpage [ `S "DESCRIPTION"; `P "Monitors a Lisp Machine execution." ];;
 
   let monitors =
     param (list string) "observations"
@@ -81,14 +81,14 @@ let print_pos ppf pos =
 let rule_providers rule =
   Bare.Rule.lhs rule
   |> List.concat_map ~f:(function
-       | Sexp.Atom x | Sexp.List (Sexp.Atom x :: _) ->
-           if String.length x > 0 && Char.(x.[0] = '?') then
-             Primus.Observation.list_providers ()
-             |> List.map ~f:Primus.Observation.Provider.name
-           else [ x ]
-       | _ ->
-           warning "Rule %a won't match with any observation" Bare.Rule.pp rule;
-           [])
+    | Sexp.Atom x | Sexp.List (Sexp.Atom x :: _) ->
+        if String.length x > 0 && Char.(x.[0] = '?') then
+          Primus.Observation.list_providers ()
+          |> List.map ~f:Primus.Observation.Provider.name
+        else [ x ]
+    | _ ->
+        warning "Rule %a won't match with any observation" Bare.Rule.pp rule;
+        [])
 
 let print_trace ppf = List.iter ~f:(print_pos ppf)
 
@@ -110,9 +110,8 @@ let process_rule rule =
     Primus.Observation.list_providers ()
     |> List.filter ~f:(fun p -> Set.mem observing (Prov.name p))
     |> List.map ~f:(fun p ->
-           Prov.data p
-           |> Stream.map ~f:(fun ev ->
-                  Sexp.List [ Sexp.Atom (Prov.name p); ev ]))
+        Prov.data p
+        |> Stream.map ~f:(fun ev -> Sexp.List [ Sexp.Atom (Prov.name p); ev ]))
     |> concat
   in
   Stream.parse facts ~init:rule ~f:(fun rule ev ->
@@ -132,7 +131,7 @@ let setup_rules_processor out rules =
   |> List.concat_map ~f:read_rules
   |> List.map ~f:process_rule
   |> List.iter ~f:(fun facts ->
-         Stream.observe facts (List.iter ~f:(fprintf out "%a@\n%!" Sexp.pp_hum)))
+      Stream.observe facts (List.iter ~f:(fprintf out "%a@\n%!" Sexp.pp_hum)))
 
 let state =
   Primus.Machine.State.declare ~name:"primus-debug"
@@ -174,8 +173,8 @@ let start_monitoring { Config.get = ( ! ) } =
        primus-print plugin.";
   parse_monitors !Param.monitors
   |> List.iter ~f:(fun m ->
-         info "monitoring %s" (Primus.Observation.Provider.name m);
-         Stream.observe (Primus.Observation.Provider.data m) (print_event out m))
+      info "monitoring %s" (Primus.Observation.Provider.name m);
+      Stream.observe (Primus.Observation.Provider.data m) (print_event out m))
 
 let () =
   Config.declare_extension ~doc:"prints Primus states and observations"

@@ -226,14 +226,13 @@ end = struct
   let parse_file file =
     In_channel.read_lines file
     |> List.foldi ~init:Word.Set.empty ~f:(fun number words line ->
-           match parse_line line with
-           | Empty | Comment -> words
-           | Success word -> Set.add words word
-           | Failure msg ->
-               error
-                 "File %S, line %d:@\nFailed to parse the stub signature:@\n%s"
-                 file (number + 1) msg;
-               words)
+        match parse_line line with
+        | Empty | Comment -> words
+        | Success word -> Set.add words word
+        | Failure msg ->
+            error "File %S, line %d:@\nFailed to parse the stub signature:@\n%s"
+              file (number + 1) msg;
+            words)
 
   let parse_filename s =
     match String.split (Filename.basename s) ~on:'.' with
@@ -315,9 +314,9 @@ let find_mem target code addr =
   let addr = Word.code_addr target addr in
   Memmap.lookup code addr
   |> Seq.find_map ~f:(fun (mem, _) ->
-         match Memory.view ~from:addr mem with
-         | Ok view -> Some view
-         | Error _ -> None)
+      match Memory.view ~from:addr mem with
+      | Ok view -> Some view
+      | Error _ -> None)
 
 let detect_stubs_by_signatures () : unit =
   KB.Rule.(
@@ -330,9 +329,9 @@ let detect_stubs_by_signatures () : unit =
     let mem = word_of_memory mem in
     Set.mem sigs mem
     || Set.exists sigs ~f:(fun s ->
-           Word.bitwidth s < Word.bitwidth mem
-           && Word.equal s
-              @@ Word.extract_exn mem ~lo:(Word.bitwidth mem - Word.bitwidth s))
+        Word.bitwidth s < Word.bitwidth mem
+        && Word.equal s
+           @@ Word.extract_exn mem ~lo:(Word.bitwidth mem - Word.bitwidth s))
   in
   KB.promise (Value.Tag.slot Sub.stub) @@ fun label ->
   KB.collect Theory.Label.addr label >>=? fun addr ->
@@ -358,8 +357,7 @@ let update prog ~link_only ~no_link =
   let stub_names =
     Term.enum sub_t prog
     |> Seq.fold ~init:String.Set.empty ~f:(fun s sub ->
-           if Set.mem stubs @@ Term.tid sub then Set.add s @@ Sub.name sub
-           else s)
+        if Set.mem stubs @@ Term.tid sub then Set.add s @@ Sub.name sub else s)
   in
   (object
      inherit Term.mapper as super

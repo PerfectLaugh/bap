@@ -142,9 +142,9 @@ module IrBuilder = struct
         KB.List.fold ~init:[] blks ~f:(fun pads b ->
             Term.enum jmp_t b
             |> KB.Seq.fold ~init:pads ~f:(fun pads jmp ->
-                   landing_pad return jmp >>| function
-                   | Some pad -> pad :: pads
-                   | None -> pads))
+                landing_pad return jmp >>| function
+                | Some pad -> pad :: pads
+                | None -> pads))
         >>| fun pads -> b :: List.rev_append pads bs
 
   let resolves_equal x y =
@@ -258,8 +258,8 @@ module IrBuilder = struct
     let init = [ Ir_blk.create ~tid () ] in
     Block.insns block
     |> KB.List.fold ~init ~f:(fun blks (mem, insn) ->
-           let addr = Memory.min_addr mem in
-           lift_insn ~addr insn blks)
+        let addr = Memory.min_addr mem in
+        lift_insn ~addr insn blks)
     >>= fun blks ->
     fall_of_block symtab cfg block >>= fun fall ->
     let x = Block.terminator block in
@@ -389,20 +389,18 @@ let has_sub prog tid = Option.is_some (Term.find sub_t prog tid)
 let insert_synthetic prog =
   Term.enum sub_t prog
   |> KB.Seq.fold ~init:prog ~f:(fun prog sub ->
-         Term.enum blk_t sub
-         |> KB.Seq.fold ~init:prog ~f:(fun prog blk ->
-                Term.enum jmp_t blk
-                |> KB.Seq.fold ~init:prog ~f:(fun prog jmp ->
-                       match Ir_jmp.alt jmp with
-                       | None -> !!prog
-                       | Some dst -> (
-                           match Ir_jmp.resolve dst with
-                           | Second _ -> !!prog
-                           | First dst ->
-                               if has_sub prog dst then !!prog
-                               else
-                                 create_synthetic dst >>| Term.append sub_t prog
-                           ))))
+      Term.enum blk_t sub
+      |> KB.Seq.fold ~init:prog ~f:(fun prog blk ->
+          Term.enum jmp_t blk
+          |> KB.Seq.fold ~init:prog ~f:(fun prog jmp ->
+              match Ir_jmp.alt jmp with
+              | None -> !!prog
+              | Some dst -> (
+                  match Ir_jmp.resolve dst with
+                  | Second _ -> !!prog
+                  | First dst ->
+                      if has_sub prog dst then !!prog
+                      else create_synthetic dst >>| Term.append sub_t prog))))
 
 let lift_insn ?addr insn =
   tid_for_addr addr >>= fun tid ->
@@ -415,10 +413,10 @@ let lift_insn_nonempty insn =
 let reify_externals symtab prog =
   Symtab.externals symtab
   |> KB.Seq.fold ~init:prog ~f:(fun prog (tid, insn) ->
-         if has_sub prog tid then !!prog
-         else
-           lift_insn_nonempty insn >>= fun blks ->
-           create_synthetic ?blks tid >>| Term.append sub_t prog)
+      if has_sub prog tid then !!prog
+      else
+        lift_insn_nonempty insn >>= fun blks ->
+        create_synthetic ?blks tid >>| Term.append sub_t prog)
 
 let add_name tid name =
   KB.provide Theory.Label.aliases tid @@ Set.singleton (module String) name
@@ -452,14 +450,14 @@ let fix_names prog =
   let keep_name tids name tid = Map.set tids ~key:name ~data:tid in
   Term.enum sub_t prog
   |> KB.Seq.fold ~init:String.Map.empty ~f:(fun tids sub ->
-         let tid = Term.tid sub in
-         let name = Ir_sub.name sub in
-         match Map.find tids name with
-         | None -> !!(keep_name tids name tid)
-         | Some _ -> (
-             is_new tid name >>| function
-             | false -> keep_name tids name tid
-             | true -> tids))
+      let tid = Term.tid sub in
+      let name = Ir_sub.name sub in
+      match Map.find tids name with
+      | None -> !!(keep_name tids name tid)
+      | Some _ -> (
+          is_new tid name >>| function
+          | false -> keep_name tids name tid
+          | true -> tids))
   >>= fun tids ->
   if Term.length sub_t prog = Map.length tids then !!prog
   else
@@ -484,24 +482,24 @@ let program symtab =
   in
   Symtab.to_sequence symtab
   |> KB.Seq.iter ~f:(fun (name, entry, cfg) ->
-         let addr = Word.to_bitvec @@ Block.addr entry in
-         Theory.Label.for_addr addr >>= fun blk_tid ->
-         tid_for_sub name >>= fun sub_tid ->
-         KB.provide Theory.Label.addr sub_tid (Some addr) >>= fun () ->
-         lift_sub ~symtab ~tid:sub_tid entry cfg >>= fun (addr, blks, _) ->
-         add_name sub_tid name >>| fun () ->
-         let sub = Ir_sub.create () ~blks ~tid:sub_tid ~name in
-         let sub = Term.set_attr sub address addr in
-         Ir_program.Builder.add_sub b sub;
-         Hashtbl.add_exn sub_of_blk ~key:blk_tid ~data:sub_tid)
+      let addr = Word.to_bitvec @@ Block.addr entry in
+      Theory.Label.for_addr addr >>= fun blk_tid ->
+      tid_for_sub name >>= fun sub_tid ->
+      KB.provide Theory.Label.addr sub_tid (Some addr) >>= fun () ->
+      lift_sub ~symtab ~tid:sub_tid entry cfg >>= fun (addr, blks, _) ->
+      add_name sub_tid name >>| fun () ->
+      let sub = Ir_sub.create () ~blks ~tid:sub_tid ~name in
+      let sub = Term.set_attr sub address addr in
+      Ir_program.Builder.add_sub b sub;
+      Hashtbl.add_exn sub_of_blk ~key:blk_tid ~data:sub_tid)
   >>= fun () ->
   fix_names @@ Ir_program.Builder.result b
   >>= Term.KB.map sub_t ~f:(fun sub ->
-          Term.KB.map blk_t sub ~f:(fun blk ->
-              let addr = Term.get_attr blk address in
-              Term.KB.map jmp_t blk ~f:(fun jmp ->
-                  let jmp = alternate_nonlocal sub jmp in
-                  link_call symtab addr sub_of_blk jmp)))
+      Term.KB.map blk_t sub ~f:(fun blk ->
+          let addr = Term.get_attr blk address in
+          Term.KB.map jmp_t blk ~f:(fun jmp ->
+              let jmp = alternate_nonlocal sub jmp in
+              link_call symtab addr sub_of_blk jmp)))
   >>= reify_externals symtab >>= insert_synthetic
 
 let sub blk cfg =

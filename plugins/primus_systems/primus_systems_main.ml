@@ -76,17 +76,16 @@ let () =
   @ usr_paths
   @ Extension.Configuration.[ systems datadir; systems sysdatadir ])
   |> List.iter ~f:(fun path ->
-         if Sys.file_exists path && Sys.is_directory path then
-           Sys.readdir path
-           |> Array.iter ~f:(fun file ->
-                  if String.is_suffix file ~suffix:".asd" then
-                    let path = Filename.concat path file in
-                    match Primus.System.from_file path with
-                    | Error failed ->
-                        eprintf "Failed to parse system %s: %a@\n%!" file
-                          Primus.System.pp_parse_error failed
-                    | Ok systems ->
-                        List.iter systems ~f:Primus.System.Repository.add));
+      if Sys.file_exists path && Sys.is_directory path then
+        Sys.readdir path
+        |> Array.iter ~f:(fun file ->
+            if String.is_suffix file ~suffix:".asd" then
+              let path = Filename.concat path file in
+              match Primus.System.from_file path with
+              | Error failed ->
+                  eprintf "Failed to parse system %s: %a@\n%!" file
+                    Primus.System.pp_parse_error failed
+              | Ok systems -> List.iter systems ~f:Primus.System.Repository.add));
   Ok ()
 
 let names = Extension.(Command.argument Type.(list string))
@@ -104,9 +103,9 @@ let make_info_command list name =
   in
   list ()
   |> List.iter ~f:(fun info ->
-         if selected info then (
-           Format.printf "%a" Primus.Info.pp info;
-           if detailed then Format.printf "%s@\n" (Primus.Info.long info)));
+      if selected info then (
+        Format.printf "%a" Primus.Info.pp info;
+        if detailed then Format.printf "%s@\n" (Primus.Info.long info)));
   Ok ()
 
 let () =

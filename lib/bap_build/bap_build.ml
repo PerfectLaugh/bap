@@ -138,8 +138,8 @@ module Plugin_rules = struct
   let generate_plugins_for_packages () =
     packages ()
     |> concat_map ~f:(fun name ->
-           concat_map [ `native; `byte ] ~f:(fun code ->
-               generate_plugin_for_package code name))
+        concat_map [ `native; `byte ] ~f:(fun code ->
+            generate_plugin_for_package code name))
 
   let make_list_option option = function
     | [] -> N
@@ -151,12 +151,10 @@ module Plugin_rules = struct
     let requires =
       packages ()
       |> concat_map ~f:(fun pkg ->
-             findlibs ~dynamic:false pkg
-             |> List.map ~f:(fun path ->
-                    let name =
-                      path |> Filename.chop_extension |> Filename.basename
-                    in
-                    name ^ "=" ^ name ^ ".cmxs," ^ name ^ "=" ^ name ^ ".cma"))
+          findlibs ~dynamic:false pkg
+          |> List.map ~f:(fun path ->
+              let name = path |> Filename.chop_extension |> Filename.basename in
+              name ^ "=" ^ name ^ ".cmxs," ^ name ^ "=" ^ name ^ ".cma"))
       |> make_list_option "-requires"
     in
     let provides =

@@ -147,9 +147,9 @@ let list_commands =
   no_args "commands" @@ fun ctxt ->
   Project.Analysis.registered ()
   |> List.iter ~f:(fun analysis ->
-         let name = Project.Analysis.name analysis
-         and desc = short @@ Project.Analysis.desc analysis in
-         Format.printf "%-40s %s@\n%!" (Knowledge.Name.to_string name) desc);
+      let name = Project.Analysis.name analysis
+      and desc = short @@ Project.Analysis.desc analysis in
+      Format.printf "%-40s %s@\n%!" (Knowledge.Name.to_string name) desc);
   Ok ctxt
 
 let help_msg =
@@ -251,14 +251,14 @@ let complete ctxt prefix completions =
       if matches name then LNoise.add_completion completions name);
   Project.Analysis.registered ()
   |> List.iter ~f:(fun info ->
-         let name = Project.Analysis.name info in
-         let pkg = Knowledge.Name.package name in
-         let short = Knowledge.Name.unqualified name in
-         let full = Knowledge.Name.to_string name in
-         if String.equal pkg ctxt.package && matches short then
-           LNoise.add_completion completions short
-         else if matches full || matches short then
-           LNoise.add_completion completions full)
+      let name = Project.Analysis.name info in
+      let pkg = Knowledge.Name.package name in
+      let short = Knowledge.Name.unqualified name in
+      let full = Knowledge.Name.to_string name in
+      if String.equal pkg ctxt.package && matches short then
+        LNoise.add_completion completions short
+      else if matches full || matches short then
+        LNoise.add_completion completions full)
 
 let hint { package; commands } prefix =
   match break_line prefix with

@@ -52,15 +52,15 @@ struct
     let funcs =
       Symtab.to_sequence symbols
       |> Seq.fold ~init:[] ~f:(fun acc (parent, entry, cfg) ->
-             let children =
-               Graphlib.reverse_postorder_traverse
-                 (module Graphs.Cfg)
-                 ~start:entry cfg
-               |> Seq.map ~f:block_name
-               |> Seq.map ~f:(func ~parent false)
-               |> Seq.to_list
-             in
-             func ~children true parent :: acc)
+          let children =
+            Graphlib.reverse_postorder_traverse
+              (module Graphs.Cfg)
+              ~start:entry cfg
+            |> Seq.map ~f:block_name
+            |> Seq.map ~f:(func ~parent false)
+            |> Seq.to_list
+          in
+          func ~children true parent :: acc)
     in
     let children =
       `O
@@ -94,13 +94,13 @@ struct
     let functions =
       Symtab.to_sequence symbols
       |> Seq.fold ~init:[] ~f:(fun a ((name, entry, cfg) as fn) ->
-             let entry_mem = Block.memory entry in
-             let mem = Symtab.span fn in
-             let min_mem = Memmap.min_binding mem |> Option.map ~f:fst in
-             let max_mem = Memmap.max_binding mem |> Option.map ~f:fst in
-             let min = Option.value ~default:entry_mem min_mem in
-             let max = Option.value ~default:entry_mem max_mem in
-             func min max name :: a)
+          let entry_mem = Block.memory entry in
+          let mem = Symtab.span fn in
+          let min_mem = Memmap.min_binding mem |> Option.map ~f:fst in
+          let max_mem = Memmap.max_binding mem |> Option.map ~f:fst in
+          let min = Option.value ~default:entry_mem min_mem in
+          let max = Option.value ~default:entry_mem max_mem in
+          func min max name :: a)
     in
     let amount = Seq.length (Symtab.to_sequence symbols) in
     let document =

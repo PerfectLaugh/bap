@@ -14,8 +14,8 @@ let collect_plugins plugindir =
   if Sys.file_exists plugindir && Sys.is_directory plugindir then
     Sys.readdir plugindir |> Array.to_list
     |> List.filter_map ~f:(fun path ->
-           let meta = plugindir ^ "/" ^ path ^ "/" ^ "META" in
-           if Sys.file_exists meta then parse_meta meta else None)
+        let meta = plugindir ^ "/" ^ path ^ "/" ^ "META" in
+        if Sys.file_exists meta then parse_meta meta else None)
   else []
 
 module Plugins = struct

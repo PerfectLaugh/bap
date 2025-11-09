@@ -39,13 +39,13 @@ let find_by_name prog name =
 let find_first_caller prog tid =
   Term.enum sub_t prog
   |> Seq.find_map ~f:(fun sub ->
-         Term.enum blk_t sub
-         |> Seq.find ~f:(fun blk ->
-                Term.enum jmp_t blk
-                |> Seq.exists ~f:(fun jmp ->
-                       match Jmp.kind jmp with
-                       | Call c -> Label.equal (Call.target c) (Direct tid)
-                       | _ -> false)))
+      Term.enum blk_t sub
+      |> Seq.find ~f:(fun blk ->
+          Term.enum jmp_t blk
+          |> Seq.exists ~f:(fun jmp ->
+              match Jmp.kind jmp with
+              | Call c -> Label.equal (Call.target c) (Direct tid)
+              | _ -> false)))
 
 let proj_int = function Bil.Int x -> Some x | _ -> None
 let is_sub_exists prog name = Option.is_some @@ find_by_name prog name

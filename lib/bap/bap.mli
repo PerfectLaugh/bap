@@ -441,8 +441,8 @@ module Std : sig
         let print_sections p =
           Project.memory p |> Memmap.to_sequence
           |> Seq.iter ~f:(fun (mem, x) ->
-                 Option.iter (Value.get Image.section x) ~f:(fun name ->
-                     printf "Section: %s@.%a@." name Memory.pp mem))
+              Option.iter (Value.get Image.section x) ~f:(fun name ->
+                  printf "Section: %s@.%a@." name Memory.pp mem))
 
         let () = Project.register_pass' print_sections
       ]}
@@ -10828,9 +10828,8 @@ module Std : sig
             report_progress ~task:"discover" ~total:(Term.length sub_t prog) ();
             Term.enum sub_t prog
             |> Seq.concat_mapi ~f:(fun stage sub ->
-                   report_progress ~note:(Sub.name sub) ~task:"discover" ~stage
-                     ();
-                   interesting_points_of_sub sub)
+                report_progress ~note:(Sub.name sub) ~task:"discover" ~stage ();
+                interesting_points_of_sub sub)
 
           let check_interesting_points points =
             report_progress ~task:"checking" ~total:(Seq.length points) ();

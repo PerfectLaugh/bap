@@ -199,12 +199,12 @@ module Doc = struct
   let do_merge doc { scheme; entries } =
     Map.to_sequence scheme
     |> Error.Seq.fold ~init:doc ~f:(fun doc (name, sign) ->
-           update_scheme name sign doc)
+        update_scheme name sign doc)
     >>= fun doc ->
     Map.to_sequence entries
     |> Error.Seq.fold ~init:doc ~f:(fun doc (name, values) ->
-           Error.List.fold values ~init:doc ~f:(fun doc value ->
-               update_entries name value doc))
+        Error.List.fold values ~init:doc ~f:(fun doc value ->
+            update_entries name value doc))
 
   let merge d1 d2 =
     match (is_empty d1, is_empty d2) with
@@ -520,10 +520,10 @@ module Exp = struct
   let select names data =
     Seq.of_list names
     |> Seq.map ~f:(fun name ->
-           match Map.find data name with
-           | None -> failwithf "precondition fails for %s" name ()
-           | Some values ->
-               Seq.of_list values |> Seq.map ~f:(fun value -> (name, value)))
+        match Map.find data name with
+        | None -> failwithf "precondition fails for %s" name ()
+        | Some values ->
+            Seq.of_list values |> Seq.map ~f:(fun value -> (name, value)))
 
   let parser { Type.parse; typ } inj =
     ( typ,
@@ -659,8 +659,8 @@ module Exp = struct
     if has_all_attributes names entries then
       n_cross_product (select names entries)
       |> Seq.filter_map ~f:(fun row ->
-             let row = Seq.map row ~f:snd |> Seq.to_array in
-             if Array.length row > 0 && sat row exp then Some { row } else None)
+          let row = Seq.map row ~f:snd |> Seq.to_array in
+          if Array.length row > 0 && sat row exp then Some { row } else None)
     else Seq.empty
 
   include Syntax

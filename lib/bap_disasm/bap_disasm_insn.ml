@@ -195,9 +195,9 @@ module Slot = struct
             else
               Result.return
               @@ Array.map2_exn xs ys ~f:(fun x y ->
-                     match KB.Domain.join dom x y with
-                     | Ok z -> z
-                     | Error problem -> raise (Escape problem))
+                  match KB.Domain.join dom x y with
+                  | Ok z -> z
+                  | Error problem -> raise (Escape problem))
           with Escape problem -> Error problem)
     in
     let inspect xs =

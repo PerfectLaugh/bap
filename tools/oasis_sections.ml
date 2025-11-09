@@ -16,9 +16,9 @@ let feature enable arg =
 let everything_except disabled_args =
   Sys.readdir "oasis" |> Array.to_list
   |> List.filter (fun sec ->
-         sec <> header
-         && (not (has_extension sec))
-         && not (List.mem sec disabled_args))
+      sec <> header
+      && (not (has_extension sec))
+      && not (List.mem sec disabled_args))
 
 let selected enable args =
   args

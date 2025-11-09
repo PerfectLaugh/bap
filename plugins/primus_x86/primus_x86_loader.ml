@@ -26,9 +26,9 @@ module SetupPLT (Machine : Primus.Machine.S) = struct
     let+ prog = Machine.gets Project.program in
     Term.enum sub_t prog
     |> Seq.fold ~init:String.Set.empty ~f:(fun intrinsics sub ->
-           if Term.has_attr sub Sub.intrinsic then
-             Set.add intrinsics (Sub.name sub)
-           else intrinsics)
+        if Term.has_attr sub Sub.intrinsic then
+          Set.add intrinsics (Sub.name sub)
+        else intrinsics)
 
   let section_memory sec_name =
     Machine.get () >>| fun proj ->
@@ -46,7 +46,7 @@ module SetupPLT (Machine : Primus.Machine.S) = struct
     section_memory ".plt" >>= fun memory ->
     Machine.return
     @@ List.filter addrs ~f:(fun a ->
-           Seq.exists memory ~f:(fun mem -> Memory.contains mem a))
+        Seq.exists memory ~f:(fun mem -> Memory.contains mem a))
 
   let unlink addrs =
     Machine.List.iter addrs ~f:(fun addr ->

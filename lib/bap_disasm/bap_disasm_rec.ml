@@ -75,11 +75,11 @@ let global_cfg disasm =
     ~block:(fun mem insns ->
       Driver.execution_order insns
       >>= KB.List.filter_map ~f:(fun label ->
-              KB.collect Basic.Insn.slot label >>= fun basic ->
-              KB.collect Theory.Semantics.slot label >>= fun s ->
-              KB.collect Memory.slot label >>| function
-              | None -> None
-              | Some mem -> Some (mem, create_insn basic s))
+          KB.collect Basic.Insn.slot label >>= fun basic ->
+          KB.collect Theory.Semantics.slot label >>= fun s ->
+          KB.collect Memory.slot label >>| function
+          | None -> None
+          | Some mem -> Some (mem, create_insn basic s))
       >>| Block.create mem)
     ~node:(fun node cfg -> KB.return (Cfg.Node.insert node cfg))
     ~edge:(fun src dst g ->

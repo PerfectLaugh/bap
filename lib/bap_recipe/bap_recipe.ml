@@ -157,9 +157,9 @@ let unzip file dst =
   Zip.entries zip
   |> List.filter ~f:(fun entry -> not entry.Zip.is_directory)
   |> List.iter ~f:(fun ({ Zip.filename } as entry) ->
-         let path = dst / filename in
-         FileUtil.mkdir ~parent:true (Filename.dirname path);
-         Zip.copy_entry_to_file zip entry path);
+      let path = dst / filename in
+      FileUtil.mkdir ~parent:true (Filename.dirname path);
+      Zip.copy_entry_to_file zip entry path);
   Zip.close_in zip
 
 let is_zip path =
@@ -185,9 +185,9 @@ let check_vars env spec loads =
   let specs = spec :: List.map loads ~f:(fun s -> s.spec) in
   Map.keys env
   |> List.find ~f:(fun arg ->
-         not
-           (List.exists specs ~f:(fun { pars } ->
-                List.exists pars ~f:(fun par -> String.equal par.name arg))))
+      not
+        (List.exists specs ~f:(fun { pars } ->
+             List.exists pars ~f:(fun par -> String.equal par.name arg))))
   |> function
   | None -> Ok ()
   | Some x -> Error (Unbound_param x)
@@ -197,8 +197,8 @@ let search paths =
       if Sys.file_exists p && Sys.is_directory p then
         Array.to_list (Sys.readdir p)
         |> List.filter_map ~f:(fun file ->
-               if String.is_suffix file ~suffix:".recipe" then Some (p / file)
-               else None)
+            if String.is_suffix file ~suffix:".recipe" then Some (p / file)
+            else None)
       else [])
 
 let which paths name =

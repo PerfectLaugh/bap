@@ -179,12 +179,12 @@ let entries graph parents =
   let init = Set.empty (module Addr) in
   Callgraph.nodes graph
   |> Seq.fold ~init ~f:(fun entries n ->
-         if Word.equal n Callgraph.entry then entries
-         else
-           match Solution.get parents n with
-           | Parent.Top -> entries
-           | Set parents ->
-               if Set.is_empty parents then Set.add entries n else entries)
+      if Word.equal n Callgraph.entry then entries
+      else
+        match Solution.get parents n with
+        | Parent.Top -> entries
+        | Set parents ->
+            if Set.is_empty parents then Set.add entries n else entries)
 
 let update { parents } disasm =
   callgraph_of_disasm disasm >>| fun graph ->

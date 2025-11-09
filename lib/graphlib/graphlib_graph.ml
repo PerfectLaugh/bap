@@ -224,10 +224,10 @@ module Partition = struct
     let groups =
       elts |> Set.to_array
       |> Array.map ~f:(fun x ->
-             object
-               method enum = Seq.return x
-               method mem y = compare x y = 0
-             end)
+          object
+            method enum = Seq.return x
+            method mem y = compare x y = 0
+          end)
     in
     let find x = Array.binary_search roots ~compare `First_equal_to x in
     { roots; groups; find }
@@ -668,20 +668,20 @@ let depth_first_search (type g) (type n) (type e)
     let ord, state =
       adj u g
       |> Seq.fold ~init:(ord, state) ~f:(fun (ord, state) e ->
-             let v = dst e in
-             let kind =
-               match Order.number ord v with
-               | None -> `Tree
-               | Some { rpost = 0 } -> `Back
-               | Some t -> if pre < t.pre then `Forward else `Cross
-             in
-             let finish (ord, state) = (ord, leave_edge kind e state) in
-             let state = enter_edge kind e state in
-             if tailrec then
-               if is_tree kind then visit ord v state (fun s -> k (finish s))
-               else k (finish (ord, state))
-             else if is_tree kind then finish (visit ord v state k)
-             else finish (ord, state))
+          let v = dst e in
+          let kind =
+            match Order.number ord v with
+            | None -> `Tree
+            | Some { rpost = 0 } -> `Back
+            | Some t -> if pre < t.pre then `Forward else `Cross
+          in
+          let finish (ord, state) = (ord, leave_edge kind e state) in
+          let state = enter_edge kind e state in
+          if tailrec then
+            if is_tree kind then visit ord v state (fun s -> k (finish s))
+            else k (finish (ord, state))
+          else if is_tree kind then finish (visit ord v state k)
+          else finish (ord, state))
     in
     let ord, rpost = Order.leave ord u in
     (ord, leave_node rpost u state)
@@ -696,9 +696,9 @@ let depth_first_search (type g) (type n) (type e)
   in
   G.nodes g
   |> Seq.fold ~init ~f:(fun (ord, state) u ->
-         match Order.number ord u with
-         | None -> visit ord u (start_tree u state) Fn.id
-         | _ -> (ord, state))
+      match Order.number ord u with
+      | None -> visit ord u (start_tree u state) Fn.id
+      | _ -> (ord, state))
   |> snd
 
 let depth_first_visit graph ?rev ?start g ~init vis =
@@ -858,21 +858,21 @@ let idom (type t) (type n) (type e)
   let rec loop () =
     Seq.range 1 len
     |> Seq.fold ~init:false ~f:(fun changed i ->
-           let i = len - i - 1 in
-           let new_idom =
-             adj node.(i) g
-             |> Seq.fold ~init:(-1) ~f:(fun new_idom p ->
-                    try
-                      (* unreachable predeccessors are invisible *)
-                      let pn = pnum p in
-                      if doms.(pn) < 0 then new_idom
-                      else if new_idom < 0 then pn
-                      else intersect new_idom pn
-                    with Unreachable -> new_idom)
-           in
-           let changed' = doms.(i) <> new_idom in
-           if changed' then doms.(i) <- new_idom;
-           changed' || changed)
+        let i = len - i - 1 in
+        let new_idom =
+          adj node.(i) g
+          |> Seq.fold ~init:(-1) ~f:(fun new_idom p ->
+              try
+                (* unreachable predeccessors are invisible *)
+                let pn = pnum p in
+                if doms.(pn) < 0 then new_idom
+                else if new_idom < 0 then pn
+                else intersect new_idom pn
+              with Unreachable -> new_idom)
+        in
+        let changed' = doms.(i) <> new_idom in
+        if changed' then doms.(i) <- new_idom;
+        changed' || changed)
     && loop ()
   in
   loop () |> (ignore : bool -> _);
@@ -894,9 +894,9 @@ let dominators (type t) (type n) (type e)
   let children =
     G.nodes g
     |> Seq.fold ~init ~f:(fun tree n ->
-           match parent n with
-           | Some p -> Map.add_multi tree ~key:p ~data:n
-           | None -> tree)
+        match parent n with
+        | Some p -> Map.add_multi tree ~key:p ~data:n
+        | None -> tree)
     |> Map.map ~f:G.Node.Set.of_list
   in
   create_tree parent children
@@ -918,13 +918,13 @@ module Dom_frontier_cooper (G : Graph) = struct
     in
     G.nodes g
     |> Seq.fold ~init:G.Node.Map.empty ~f:(fun dfs n ->
-           let adj = adj n g in
-           let dom = idom n in
-           Seq.fold adj ~init:G.Node.Set.empty ~f:(walk dom)
-           |> Set.fold ~init:dfs ~f:(fun dfs visited ->
-                  Map.change dfs visited ~f:(function
-                    | None -> Some (G.Node.Set.singleton n)
-                    | Some set -> Some (Set.add set n))))
+        let adj = adj n g in
+        let dom = idom n in
+        Seq.fold adj ~init:G.Node.Set.empty ~f:(walk dom)
+        |> Set.fold ~init:dfs ~f:(fun dfs visited ->
+            Map.change dfs visited ~f:(function
+              | None -> Some (G.Node.Set.singleton n)
+              | Some set -> Some (Set.add set n))))
 end
 
 let dom_frontier_generic (type t) (type n) (type e)
@@ -961,11 +961,11 @@ let strong_components (type t) (type n) (type e)
     ~leave_node:(fun _ v stack ->
       G.Node.outputs v g
       |> Seq.iter ~f:(fun e ->
-             let w = G.Edge.dst e in
-             if not (Hashtbl.mem comps w) then
-               let min x y = if fst x < fst y then x else y in
-               let data = min (root v) (root w) in
-               Hashtbl.change roots v ~f:(fun _ -> Some data));
+          let w = G.Edge.dst e in
+          if not (Hashtbl.mem comps w) then
+            let min x y = if fst x < fst y then x else y in
+            let data = min (root v) (root w) in
+            Hashtbl.change roots v ~f:(fun _ -> Some data));
       if G.Node.(snd (root v) = v) then spill_comp v stack else stack)
   |> function
   | [] -> Partition.create (module G.Node) comps
@@ -1019,13 +1019,13 @@ let shortest_path (type t) (type n) (type e)
     Hash_set.add visited v;
     adj v g
     |> Seq.iter ~f:(fun e ->
-           let ev = dst e in
-           let dev = w + weight e in
-           match Hashtbl.find dist ev with
-           | Some w when w < dev -> ()
-           | _ ->
-               Hashtbl.set dist ~key:ev ~data:dev;
-               Heap.add q (dev, ev, e :: p))
+        let ev = dst e in
+        let dev = w + weight e in
+        match Hashtbl.find dist ev with
+        | Some w when w < dev -> ()
+        | _ ->
+            Hashtbl.set dist ~key:ev ~data:dev;
+            Heap.add q (dev, ev, e :: p))
   in
   Heap.add q (0, v1, []);
   Hashtbl.set dist ~key:v1 ~data:0;
@@ -1367,9 +1367,7 @@ module Fixpoint = struct
           let succs = if rev then G.Node.preds else G.Node.succs in
           succs n g
           |> Sequence.fold ~init:Int.Set.empty ~f:(fun ns n ->
-                 match Map.find rnodes n with
-                 | None -> ns
-                 | Some i -> Set.add ns i))
+              match Map.find rnodes n with None -> ns | Some i -> Set.add ns i))
     in
     let user_step =
       match step with

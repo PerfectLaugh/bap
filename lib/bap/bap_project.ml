@@ -256,7 +256,7 @@ module Input = struct
   let dedup xs =
     List.rev @@ fst
     @@ List.fold xs ~init:([], String.Set.empty) ~f:(fun (xs, mems) x ->
-           if Set.mem mems x then (xs, mems) else (x :: xs, Set.add mems x))
+        if Set.mem mems x then (xs, mems) else (x :: xs, Set.add mems x))
 
   let provide_bias = Toplevel.var "provide-bias"
 
@@ -470,7 +470,7 @@ let compute_unit ?package ?state input =
         if KB.Domain.is_empty (KB.Slot.domain State.slot) state then
           Memmap.to_sequence code |> Seq.to_list_rev
           |> KB.List.fold ~init:State.empty ~f:(fun k (mem, _) ->
-                 State.disassemble k mem)
+              State.disassemble k mem)
           >>= State.partition
           >>= fun state ->
           KB.provide State.slot unit state >>| fun () -> state
@@ -588,9 +588,7 @@ let substitute project mem tag value : t =
   let find_tag tag mem =
     Memmap.dominators (memory project) mem
     |> Seq.find_map ~f:(fun (mem, v) ->
-           match Value.get tag v with
-           | Some reg -> Some (mem, reg)
-           | None -> None)
+        match Value.get tag v with Some reg -> Some (mem, reg) | None -> None)
   in
   let find_section = find_tag Image.section in
   let find_symbol mem =
@@ -601,10 +599,10 @@ let substitute project mem tag value : t =
   let find_block mem =
     Symtab.dominators (symbols project) mem
     |> List.find_map ~f:(fun (_, _, cfg) ->
-           Seq.find_map (Cfg.nodes cfg) ~f:(fun block ->
-               if Addr.(Block.addr block = Memory.min_addr mem) then
-                 Some (Block.memory block, block)
-               else None))
+        Seq.find_map (Cfg.nodes cfg) ~f:(fun block ->
+            if Addr.(Block.addr block = Memory.min_addr mem) then
+              Some (Block.memory block, block)
+            else None))
   in
   let subst_section (mem, name) = function
     | #bound as b -> addr b mem

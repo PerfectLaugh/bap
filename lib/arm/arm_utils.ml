@@ -75,9 +75,9 @@ let exec (stmts : stmt list) ?(flags : stmt list option) ?(wflag : op option)
       let cond = Bil.var cvar in
       Bil.(cvar := cval)
       :: List.map stmts ~f:(function
-           | Bil.Move (v, _) as s when Var.is_virtual v -> s
-           | Bil.Move (v, x) -> Bil.(v := ite ~if_:cond ~then_:x ~else_:(var v))
-           | _ -> assert false)
+        | Bil.Move (v, _) as s when Var.is_virtual v -> s
+        | Bil.Move (v, x) -> Bil.(v := ite ~if_:cond ~then_:x ~else_:(var v))
+        | _ -> assert false)
   | _ -> [ Bil.If (set_cond cond, stmts, []) ]
 
 let exp_of_reg reg = Bil.var (Env.of_reg reg)

@@ -83,8 +83,8 @@ let emit_attr buf sub_name addr attr =
   @@ case foreground Py.foreground
   @@ case background Py.background
   @@ default (fun () ->
-         Buffer.add_substitute buf substitute (Py.comment attr);
-         Buffer.add_char buf '\n')
+      Buffer.add_substitute buf substitute (Py.comment attr);
+      Buffer.add_char buf '\n')
 
 let program_visitor buf attrs =
   object
@@ -96,9 +96,9 @@ let program_visitor buf attrs =
       | Some addr ->
           Term.attrs t |> Dict.to_sequence
           |> Seq.iter ~f:(fun (_, x) ->
-                 let attr = Value.tagname x in
-                 if List.mem ~equal:String.equal attrs attr then
-                   emit_attr buf name addr x);
+              let attr = Value.tagname x in
+              if List.mem ~equal:String.equal attrs attr then
+                emit_attr buf name addr x);
           (name, Some addr)
 
     method! enter_term _ t (name, _) = (name, Term.get_attr t address)
@@ -111,9 +111,9 @@ let extract_script data code attrs =
   Buffer.add_string buf Py.prologue;
   Memmap.to_sequence data
   |> Seq.iter ~f:(fun (mem, x) ->
-         switch x
-         @@ case python (fun line -> Buffer.add_string buf line)
-         @@ default ignore);
+      switch x
+      @@ case python (fun line -> Buffer.add_string buf line)
+      @@ default ignore);
   (program_visitor buf attrs)#run code ("", None) |> ignore;
   Buffer.add_string buf Py.epilogue;
   Buffer.contents buf

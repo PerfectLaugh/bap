@@ -95,24 +95,24 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
   let one_memmap m ~init =
     Memmap.to_sequence m
     |> Machine.Seq.fold ~init ~f:(fun endp (mem, tag) ->
-           match Value.get Image.segment tag with
-           | None -> Machine.return endp
-           | Some seg ->
-               let alloc =
-                 if Image.Segment.is_executable seg then Mem.add_text
-                 else Mem.add_data
-               in
-               let lower = Memory.min_addr mem in
-               let upper = Memory.max_addr mem in
-               info "mapping segment [%a, %a]" Addr.pp lower Addr.pp upper;
-               let update_ends =
-                 match Image.Segment.name seg with
-                 | ".text" -> set_word "etext" upper
-                 | ".data" -> set_word "edata" upper
-                 | _ -> Machine.return ()
-               in
-               alloc mem >>= fun () ->
-               update_ends >>| fun () -> Addr.max endp upper)
+        match Value.get Image.segment tag with
+        | None -> Machine.return endp
+        | Some seg ->
+            let alloc =
+              if Image.Segment.is_executable seg then Mem.add_text
+              else Mem.add_data
+            in
+            let lower = Memory.min_addr mem in
+            let upper = Memory.max_addr mem in
+            info "mapping segment [%a, %a]" Addr.pp lower Addr.pp upper;
+            let update_ends =
+              match Image.Segment.name seg with
+              | ".text" -> set_word "etext" upper
+              | ".data" -> set_word "edata" upper
+              | _ -> Machine.return ()
+            in
+            alloc mem >>= fun () ->
+            update_ends >>| fun () -> Addr.max endp upper)
 
   let map_segments () =
     Machine.project >>= fun proj ->
@@ -126,7 +126,7 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     let store = if force then Mem.store_never_fail else Mem.store in
     Word.enum_bytes word endian
     |> Machine.Seq.fold ~init:ptr ~f:(fun ptr byte ->
-           store ptr byte >>| fun () -> Word.succ ptr)
+        store ptr byte >>| fun () -> Word.succ ptr)
 
   let read_word endian ptr =
     let rec aux a s =
@@ -195,13 +195,13 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
   let save_string str ptr =
     String.to_list str
     |> Machine.List.fold ~init:ptr ~f:(fun ptr char ->
-           Mem.store ptr (word_of_char char) >>| fun () -> Word.succ ptr)
+        Mem.store ptr (word_of_char char) >>| fun () -> Word.succ ptr)
 
   let save_args array ptr =
     Seq.of_array array
     |> Machine.Seq.fold ~init:(ptr, []) ~f:(fun (ptr', ptrs) str ->
-           save_string str ptr' >>= save_string "\x00" >>| fun ptr ->
-           (ptr, ptr' :: ptrs))
+        save_string str ptr' >>= save_string "\x00" >>| fun ptr ->
+        (ptr, ptr' :: ptrs))
     >>| fun (ptr, ptrs) -> (ptr, List.rev ptrs)
 
   let save_table endian addrs ptr =

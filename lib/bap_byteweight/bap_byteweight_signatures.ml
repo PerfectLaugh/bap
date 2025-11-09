@@ -74,8 +74,8 @@ let default_paths = [ default_path; system_path ]
 let try_lookup ?(paths = []) ?compiler target data =
   paths @ default_paths
   |> List.find_map ~f:(fun path ->
-         if Sys.file_exists path then read_entry ?compiler target data path
-         else None)
+      if Sys.file_exists path then read_entry ?compiler target data path
+      else None)
 
 let of_exn = function
   | Sys_error msg -> Error (`Sys_error msg)
@@ -93,7 +93,7 @@ let update_or_fail ?compiler target data payload path =
   let entries =
     read_entries path
     |> List.filter ~f:(fun (entry, _) ->
-           not (matching_entry ?compiler target data entry))
+        not (matching_entry ?compiler target data entry))
   in
   with_output path @@ fun zip ->
   let path = make_entry ?compiler target data in

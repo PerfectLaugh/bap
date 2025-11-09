@@ -73,10 +73,10 @@ let insn_bil x =
   let mem, insn =
     Or_error.ok_exn
     @@ Dis.with_disasm ~backend:"llvm" (Arch.to_string arch) ~f:(fun dis ->
-           let dis = Dis.store_asm dis |> Dis.store_kinds in
-           match Dis.insn_of_mem dis mem with
-           | Ok (mem', Some insn, `finished) -> Ok (mem', insn)
-           | _ -> Error (Error.of_string "invalid insn"))
+        let dis = Dis.store_asm dis |> Dis.store_kinds in
+        match Dis.insn_of_mem dis mem with
+        | Ok (mem', Some insn, `finished) -> Ok (mem', insn)
+        | _ -> Error (Error.of_string "invalid insn"))
   in
   let module T = (val target_of_arch arch) in
   Or_error.ok_exn @@ T.lift mem insn

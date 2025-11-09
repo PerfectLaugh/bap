@@ -143,12 +143,12 @@ module BIR = struct
     else
       normalize entry blks
       |> List.fold ~init:(None, []) ~f:(fun (s, blks) b ->
-             match make_blk b with
-             | [] -> assert false
-             | blk :: blks' ->
-                 if Tid.equal entry (Term.tid blk) then
-                   (Some blk, List.rev_append blks' blks)
-                 else (s, List.rev_append (blk :: blks') blks))
+          match make_blk b with
+          | [] -> assert false
+          | blk :: blks' ->
+              if Tid.equal entry (Term.tid blk) then
+                (Some blk, List.rev_append blks' blks)
+              else (s, List.rev_append (blk :: blks') blks))
       |> function
       | None, [] -> []
       | None, _ -> failwith "No entry in IR builder"

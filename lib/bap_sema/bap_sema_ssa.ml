@@ -70,7 +70,7 @@ let succs cfg sub tid =
 let collect_vars sub =
   Term.enum blk_t sub
   |> Seq.fold ~init:Var.Set.empty ~f:(fun vars blk ->
-         Set.union vars @@ Ir_blk.free_vars blk)
+      Set.union vars @@ Ir_blk.free_vars blk)
 
 (** returns a list of blocks that contains [def] terms with lhs equal to [var]
 *)
@@ -131,10 +131,10 @@ let rename t =
     Term.map phi_t dst ~f:(fun phi ->
         Ir_phi.values phi
         |> Seq.fold ~init:phi ~f:(fun phi rhs ->
-               match rhs with
-               | id, Bil.Var v when Tid.(tid = id) ->
-                   Ir_phi.update phi tid (Bil.var (top v))
-               | _ -> phi))
+            match rhs with
+            | id, Bil.Var v when Tid.(tid = id) ->
+                Ir_phi.update phi tid (Bil.var (top v))
+            | _ -> phi))
   in
   let pop_defs blk =
     let pop v =
@@ -157,7 +157,7 @@ let rename t =
     let sub =
       succs t.cfg sub tid
       |> Seq.fold ~init:sub ~f:(fun sub dst ->
-             Term.update blk_t sub (update_phis tid dst))
+          Term.update blk_t sub (update_phis tid dst))
     in
     let children =
       Cfg.nodes t.cfg |> Seq.filter ~f:(Tree.is_child_of ~parent:tid t.dom)
@@ -186,18 +186,17 @@ let insert_phi_node ins blk x =
 let insert_phi_nodes t : sub term KB.t =
   Set.to_sequence t.vars
   |> KB.Seq.fold ~init:t.sub ~f:(fun sub x ->
-         let bs = blocks_that_define_var x sub in
-         iterated_frontier t.frontier (Cfg.start :: bs)
-         |> Set.to_sequence
-         |> KB.Seq.fold ~init:sub ~f:(fun sub tid ->
-                match blk_of_tid sub tid with
-                | None -> !!sub
-                | Some blk ->
-                    let ins =
-                      Cfg.Node.preds tid t.cfg
-                      |> Seq.filter_map ~f:(blk_of_tid sub)
-                    in
-                    insert_phi_node ins blk x >>| Term.update blk_t sub))
+      let bs = blocks_that_define_var x sub in
+      iterated_frontier t.frontier (Cfg.start :: bs)
+      |> Set.to_sequence
+      |> KB.Seq.fold ~init:sub ~f:(fun sub tid ->
+          match blk_of_tid sub tid with
+          | None -> !!sub
+          | Some blk ->
+              let ins =
+                Cfg.Node.preds tid t.cfg |> Seq.filter_map ~f:(blk_of_tid sub)
+              in
+              insert_phi_node ins blk x >>| Term.update blk_t sub))
 
 let is_transformed sub = Term.has_attr sub ssa_form
 

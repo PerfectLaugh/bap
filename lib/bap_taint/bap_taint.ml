@@ -247,11 +247,11 @@ module Taint = struct
       Machine.Local.get tainter >>= fun s ->
       Seq.range 0 len
       |> Machine.Seq.fold ~init:s.indirect ~f:(fun indirect off ->
-             Value.nsucc addr off >>= fun addr ->
-             report_attached Rel.indirect taint addr >>| fun () ->
-             Map.update indirect addr ~f:(function
-               | None -> Object.Set.singleton taint
-               | Some taints -> Set.add taints taint))
+          Value.nsucc addr off >>= fun addr ->
+          report_attached Rel.indirect taint addr >>| fun () ->
+          Map.update indirect addr ~f:(function
+            | None -> Object.Set.singleton taint
+            | Some taints -> Set.add taints taint))
       >>= fun indirect ->
       Machine.Local.put tainter { s with indirect } >>| fun () -> taint
 
@@ -265,9 +265,9 @@ module Taint = struct
       Machine.Global.get kinds >>= fun { objects } ->
       lookup v r
       >>| Set.filter ~f:(fun t ->
-              match Map.find objects t with
-              | None -> false
-              | Some k' -> Kind.(k <> k'))
+          match Map.find objects t with
+          | None -> false
+          | Some k' -> Kind.(k <> k'))
       >>= fun kill ->
       Machine.Local.update tainter ~f:(fun { direct; indirect } ->
           {
@@ -402,8 +402,8 @@ module Gc = struct
       let dying = Set.diff (objects old) (objects cur) in
       Machine.forks ()
       >>= Machine.Seq.fold ~init:dying ~f:(fun dying id ->
-              Machine.Other.get id tainter >>| fun taints ->
-              Set.diff dying (objects taints))
+          Machine.Other.get id tainter >>| fun taints ->
+          Set.diff dying (objects taints))
       >>= fun dead ->
       let live = Set.diff dying dead in
       Machine.sequence

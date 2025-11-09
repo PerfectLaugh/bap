@@ -445,7 +445,7 @@ let lbrx name opt_opcode size arch ctxt =
   let expected =
     Seq.to_list_rev (Word.enum_bytes data endian)
     |> List.fold ~init:None ~f:(fun acc b ->
-           match acc with None -> Some b | Some p -> Some (Word.concat p b))
+        match acc with None -> Some b | Some p -> Some (Word.concat p b))
     |> function
     | None -> assert false
     | Some x -> x

@@ -213,15 +213,15 @@ let create_intrinsic target mem insn =
   let pre =
     Insn.ops insn |> Array.to_list
     |> List.mapi ~f:(fun p op ->
-           let name = sprintf "insn:op%d" (p + 1) in
-           let v = Var.create name (Imm width) in
-           Bil.move v
-           @@
-           match op with
-           | Op.Imm x -> Bil.int (Option.value_exn (Imm.to_word ~width x))
-           | Op.Fmm x ->
-               Bil.int @@ Word.of_int64 @@ Int64.bits_of_float (Fmm.to_float x)
-           | Op.Reg r -> Bil.int (Word.of_int ~width (Reg.code r)))
+        let name = sprintf "insn:op%d" (p + 1) in
+        let v = Var.create name (Imm width) in
+        Bil.move v
+        @@
+        match op with
+        | Op.Imm x -> Bil.int (Option.value_exn (Imm.to_word ~width x))
+        | Op.Fmm x ->
+            Bil.int @@ Word.of_int64 @@ Int64.bits_of_float (Fmm.to_float x)
+        | Op.Reg r -> Bil.int (Word.of_int ~width (Reg.code r)))
   in
   pre
   @ Bil.

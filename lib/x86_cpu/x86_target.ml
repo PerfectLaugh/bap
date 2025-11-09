@@ -347,13 +347,13 @@ module Abi = struct
   let arena ?low t names =
     Arg.Arena.of_exps
     @@ List.map names ~f:(fun name ->
-           match Theory.Target.var t name with
-           | None -> failwithf "unknown register: %s" name ()
-           | Some reg -> (
-               let reg = Var.reify reg in
-               match low with
-               | None -> Bil.var reg
-               | Some bits -> Bil.(cast low bits (var reg))))
+        match Theory.Target.var t name with
+        | None -> failwithf "unknown register: %s" name ()
+        | Some reg -> (
+            let reg = Var.reify reg in
+            match low with
+            | None -> Bil.var reg
+            | Some bits -> Bil.(cast low bits (var reg))))
 
   let ia16 memory t =
     let data = new C.Size.base `LP32 in
@@ -594,8 +594,8 @@ module Abi = struct
         List.iter abis ~f:(fun (abi, install) ->
             Theory.Target.filter ~parent ~abi ()
             |> List.iter ~f:(fun t ->
-                   if Theory.Target.bits t = Theory.Target.bits parent then
-                     install t)));
+                if Theory.Target.bits t = Theory.Target.bits parent then
+                  install t)));
     List.iter default_calling_conventions ~f:(fun (targets, install) ->
         List.iter targets ~f:install)
 

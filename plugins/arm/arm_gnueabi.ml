@@ -110,8 +110,8 @@ let is_our_abi abi =
 let setup () =
   Theory.Target.family Arm_target.parent
   |> List.iter ~f:(fun t ->
-         if is_our_abi (Theory.Target.abi t) then
-           match Theory.Target.bits t with
-           | 64 -> Aapcs64.define t
-           | 32 -> Aapcs32.define t
-           | _ -> ())
+      if is_our_abi (Theory.Target.abi t) then
+        match Theory.Target.bits t with
+        | 64 -> Aapcs64.define t
+        | 32 -> Aapcs32.define t
+        | _ -> ())

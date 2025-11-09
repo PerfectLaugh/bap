@@ -262,17 +262,17 @@ module Plugins = struct
     let env = strset (Option.value env ~default:[]) in
     plugin_paths library
     |> List.concat_map ~f:(fun dir ->
-           Sys.readdir dir |> Array.to_list
-           |> List.filter_map ~f:(fun file ->
-                  let file = dir / file in
-                  if not (Filename.check_suffix file ".plugin") then None
-                  else
-                    try
-                      let p = Plugin.of_path file in
-                      Option.some_if (is_selected ~provides ~env p) (Ok p)
-                    with exn -> Some (Error (file, Error.of_exn exn))))
+        Sys.readdir dir |> Array.to_list
+        |> List.filter_map ~f:(fun file ->
+            let file = dir / file in
+            if not (Filename.check_suffix file ".plugin") then None
+            else
+              try
+                let p = Plugin.of_path file in
+                Option.some_if (is_selected ~provides ~env p) (Ok p)
+              with exn -> Some (Error (file, Error.of_exn exn))))
     |> List.sort ~compare:(fun x y ->
-           String.compare (plugin_name x) (plugin_name y))
+        String.compare (plugin_name x) (plugin_name y))
 
   let list_bundles ?env ?provides ?library () =
     collect_bundles ?env ?provides ?library ()
@@ -291,24 +291,24 @@ module Plugins = struct
     let digests name =
       Bap_common.Plugins.paths
       |> List.filter_map ~f:(fun dir ->
-             let path = Filename.concat dir name in
-             require (Sys.file_exists path) @@ fun () ->
-             require (Sys.is_directory path) @@ fun () ->
-             let contents =
-               Sys.readdir path |> Array.map ~f:(Filename.concat path)
-             in
-             require (Array.length contents > 0) @@ fun () ->
-             Option.return
-             @@ Array.sum ~f:Md5.digest_file_blocking
-                  (module struct
-                    type t = Md5.t
+          let path = Filename.concat dir name in
+          require (Sys.file_exists path) @@ fun () ->
+          require (Sys.is_directory path) @@ fun () ->
+          let contents =
+            Sys.readdir path |> Array.map ~f:(Filename.concat path)
+          in
+          require (Array.length contents > 0) @@ fun () ->
+          Option.return
+          @@ Array.sum ~f:Md5.digest_file_blocking
+               (module struct
+                 type t = Md5.t
 
-                    let zero = Md5.digest_string ""
+                 let zero = Md5.digest_string ""
 
-                    let ( + ) x y =
-                      Md5.digest_string (Md5.to_binary x ^ Md5.to_binary y)
-                  end)
-                  contents)
+                 let ( + ) x y =
+                   Md5.digest_string (Md5.to_binary x ^ Md5.to_binary y)
+               end)
+               contents)
     in
 
     (* removes duplicating names provided that they have the same
@@ -321,12 +321,11 @@ module Plugins = struct
             | None -> digests name
             | Some ds -> ds @ digests name))
       |> Map.filteri ~f:(fun ~key:name ~data:digests ->
-             match digests with
-             | [] -> false
-             | d :: ds when List.for_all ds ~f:(Md5.equal d) -> true
-             | _ ->
-                 invalid_argf "The plugin %S has ambiguous implementations" name
-                   ())
+          match digests with
+          | [] -> false
+          | d :: ds when List.for_all ds ~f:(Md5.equal d) -> true
+          | _ ->
+              invalid_argf "The plugin %S has ambiguous implementations" name ())
       |> Map.keys
     in
 
@@ -350,12 +349,12 @@ module Plugins = struct
       let r =
         collect ?env ?provides ?library ()
         |> List.filter_map ~f:(function
-             | Error err -> Some (Error err)
-             | Ok p when Set.mem excluded (Plugin.name p) -> None
-             | Ok p -> (
-                 match Plugin.load ?argv p with
-                 | Ok () -> Some (Ok p)
-                 | Error err -> Some (Error (Plugin.path p, err))))
+          | Error err -> Some (Error err)
+          | Ok p when Set.mem excluded (Plugin.name p) -> None
+          | Ok p -> (
+              match Plugin.load ?argv p with
+              | Ok () -> Some (Ok p)
+              | Error err -> Some (Error (Plugin.path p, err))))
       in
       Promise.fulfill finished ();
       r)
@@ -372,8 +371,7 @@ module Plugins = struct
             let backtrace =
               String.concat ~sep:"\n"
               @@ List.map !events_backtrace ~f:(fun ev ->
-                     Format.asprintf "%a" Sexp.pp
-                       (Plugin.sexp_of_system_event ev))
+                  Format.asprintf "%a" Sexp.pp (Plugin.sexp_of_system_event ev))
             in
             Format.eprintf
               "An error has occurred while loading `%s': %a\n\n\

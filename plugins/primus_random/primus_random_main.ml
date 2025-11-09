@@ -377,7 +377,7 @@ let main ctxt =
   let generators =
     (ctxt --> generators)
     @ List.concat_map (ctxt --> init) ~f:(fun files ->
-          List.concat_map files ~f:Generator.from_file)
+        List.concat_map files ~f:Generator.from_file)
     @ [ Generator.default ]
   in
   let seed = ctxt --> seed in
@@ -388,18 +388,17 @@ let main ctxt =
     let prog = Project.program proj in
     Term.enum sub_t prog
     |> Seq.fold ~init:{ args = Var.Map.empty } ~f:(fun init sub ->
-           Term.enum arg_t sub
-           |> Seq.fold ~init ~f:(fun { args } arg ->
-                  if Poly.(Arg.intent arg = Some In) then { args }
-                  else
-                    match Var.typ (Arg.lhs arg) with
-                    | Unk | Mem _ -> { args }
-                    | Imm width -> (
-                        let var = Arg.lhs arg in
-                        match Generator.for_var ~seed ~width var generators with
-                        | None -> { args }
-                        | Some gen -> { args = Map.set args ~key:var ~data:gen }
-                        )))
+        Term.enum arg_t sub
+        |> Seq.fold ~init ~f:(fun { args } arg ->
+            if Poly.(Arg.intent arg = Some In) then { args }
+            else
+              match Var.typ (Arg.lhs arg) with
+              | Unk | Mem _ -> { args }
+              | Imm width -> (
+                  let var = Arg.lhs arg in
+                  match Generator.for_var ~seed ~width var generators with
+                  | None -> { args }
+                  | Some gen -> { args = Map.set args ~key:var ~data:gen })))
   in
   let module RandomizeEnvironment (Machine : Primus.Machine.S) = struct
     open Machine.Syntax
@@ -416,12 +415,12 @@ let main ctxt =
       vars_collector#run (Project.program proj) Var.Set.empty
       |> Set.to_sequence
       |> Machine.Seq.iter ~f:(fun var ->
-             match Var.typ var with
-             | Mem _ | Unk -> Machine.return ()
-             | Imm width -> (
-                 match Generator.for_var ~seed ~width var generators with
-                 | None -> Machine.return ()
-                 | Some gen -> Env.add var gen))
+          match Var.typ var with
+          | Mem _ | Unk -> Machine.return ()
+          | Imm width -> (
+              match Generator.for_var ~seed ~width var generators with
+              | None -> Machine.return ()
+              | Some gen -> Env.add var gen))
 
     let init () = Primus.System.start >>> randomize_vars
   end in
@@ -454,22 +453,21 @@ let main ctxt =
       Machine.gets Project.target >>| Theory.Target.bits >>= fun width ->
       List.rev generators
       |> Machine.List.iter ~f:(function
-           | { Generator.predicate = Mem Default | Any } -> Machine.return ()
-           | { predicate = Mem region; distribution; parameters } ->
-               let generator =
-                 Generator.create ~seed ~width distribution parameters
-               in
-               let lower, upper =
-                 match region with
-                 | Address lower -> (lower, None)
-                 | Section name ->
-                     ( sprintf "bap%s-lower" name,
-                       Some (sprintf "bap%s-upper" name) )
-                 | Interval (lower, upper) -> (lower, Some upper)
-                 | Default -> assert false
-               in
-               allocate ~width lower ?upper generator
-           | _ -> Machine.return ())
+        | { Generator.predicate = Mem Default | Any } -> Machine.return ()
+        | { predicate = Mem region; distribution; parameters } ->
+            let generator =
+              Generator.create ~seed ~width distribution parameters
+            in
+            let lower, upper =
+              match region with
+              | Address lower -> (lower, None)
+              | Section name ->
+                  (sprintf "bap%s-lower" name, Some (sprintf "bap%s-upper" name))
+              | Interval (lower, upper) -> (lower, Some upper)
+              | Default -> assert false
+            in
+            allocate ~width lower ?upper generator
+        | _ -> Machine.return ())
 
     let default_page_size = 4096
 
@@ -549,14 +547,14 @@ let main ctxt =
           Machine.Local.get args >>= fun { args } ->
           Term.enum arg_t sub
           |> Machine.Seq.iter ~f:(fun arg ->
-                 match Map.find args (Arg.lhs arg) with
-                 | Some gen ->
-                     Debug.msg "pertubing argument %a" Arg.pp arg >>= fun () ->
-                     pertube gen (Arg.rhs arg)
-                 | None ->
-                     Debug.msg "skipping %a as there is no matching generator"
-                       Arg.pp arg
-                     >>= fun () -> Machine.return ())
+              match Map.find args (Arg.lhs arg) with
+              | Some gen ->
+                  Debug.msg "pertubing argument %a" Arg.pp arg >>= fun () ->
+                  pertube gen (Arg.rhs arg)
+              | None ->
+                  Debug.msg "skipping %a as there is no matching generator"
+                    Arg.pp arg
+                  >>= fun () -> Machine.return ())
       | p -> Debug.msg "called in a wrong position: %s" (Primus.Pos.to_string p)
   end in
   let module HandleUnresolvedCalls (Machine : Primus.Machine.S) = struct

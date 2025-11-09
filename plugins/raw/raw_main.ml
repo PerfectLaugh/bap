@@ -117,9 +117,9 @@ let register_loader ctxt =
         let ppf = Format.formatter_of_buffer buf in
         doc_template
         |> Buffer.add_substitute buf (fun var ->
-               match Map.find options var with
-               | None -> invalid_argf "bug: missed a var: %S" var ()
-               | Some v -> v);
+            match Map.find options var with
+            | None -> invalid_argf "bug: missed a var: %S" var ()
+            | Some v -> v);
         ctxt --> Spec.entry_points
         |> List.iter ~f:(Format.fprintf ppf "(code-start %a)@\n" Bitvec.pp);
         Format.pp_print_flush ppf ();

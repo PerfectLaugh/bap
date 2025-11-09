@@ -67,7 +67,7 @@ let of_blocks seq =
           | None -> addr))
     |> Map.to_sequence
     |> Seq.fold ~init:empty_rel ~f:(fun rels (name, entry) ->
-           Bap_relation.add rels entry name)
+        Bap_relation.add rels entry name)
     |> fun rels ->
     Bap_relation.matching rels Addr.Map.empty
       ~saturated:(fun addr name names -> Map.add_exn names ~key:addr ~data:name)

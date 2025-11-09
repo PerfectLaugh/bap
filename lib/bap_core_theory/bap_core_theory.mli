@@ -72,8 +72,8 @@
     {2 Hierarchy of Terms}
 
     Terms and operations of the Core Theory languages are typed to prevent the
-    creation of ill-formed programs. We use the word {i sort} to denote a set
-    of terms that share the same properties. The Core Theory comes with a
+    creation of ill-formed programs. We use the word {i sort} to denote a set of
+    terms that share the same properties. The Core Theory comes with a
     collection of predefined sorts, which are used to specify the Core language,
     but it is possible to define new sorts, to keep the theory extensible.
 

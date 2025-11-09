@@ -128,18 +128,18 @@ module Node = struct
     | Some ps ->
         blocks_of_tids t.sub ps
         |> Seq.concat_map ~f:(fun src ->
-               Term.enum jmp_t src
-               |> Seq.filter_mapi ~f:(fun pos jmp ->
-                      match succ_tid_of_jmp jmp with
-                      | None -> None
-                      | Some tid when Tid.(tid <> Term.tid dst) -> None
-                      | Some _ -> Some { src; pos; dst }))
+            Term.enum jmp_t src
+            |> Seq.filter_mapi ~f:(fun pos jmp ->
+                match succ_tid_of_jmp jmp with
+                | None -> None
+                | Some tid when Tid.(tid <> Term.tid dst) -> None
+                | Some _ -> Some { src; pos; dst }))
 
   let outputs src t : edge seq =
     Term.enum jmp_t src
     |> Seq.filter_mapi ~f:(fun pos jmp ->
-           succ_of_jmp t.sub jmp >>= fun dst ->
-           if mem src t && mem dst t then Some { src; pos; dst } else None)
+        succ_of_jmp t.sub jmp >>= fun dst ->
+        if mem src t && mem dst t then Some { src; pos; dst } else None)
 
   let in_degree blk t =
     match Map.find t.preds (Term.tid blk) with
@@ -174,9 +174,9 @@ module Node = struct
   let update_preds sub preds =
     Term.enum blk_t sub
     |> Seq.fold ~init:preds ~f:(fun preds blk ->
-           succs_of_blk blk
-           |> Seq.fold ~init:preds ~f:(fun preds dst ->
-                  Pred.update (Term.tid blk) dst preds))
+        succs_of_blk blk
+        |> Seq.fold ~init:preds ~f:(fun preds dst ->
+            Pred.update (Term.tid blk) dst preds))
 
   let do_insert blk t =
     let sub = if Sub.(t.sub = empty_sub) then Sub.create () else t.sub in
@@ -266,9 +266,9 @@ module Edge = struct
   let edges dir e g =
     jmps dir e g
     |> Seq.filter_mapi ~f:(fun pos jmp ->
-           match succ_tid_of_jmp jmp with
-           | None -> None
-           | Some _ -> Some { e with pos })
+        match succ_tid_of_jmp jmp with
+        | None -> None
+        | Some _ -> Some { e with pos })
 
   let jmp e = Term.nth_exn jmp_t e.src e.pos
   let tid e = Term.tid (jmp e)
@@ -305,7 +305,7 @@ module Edge = struct
     with_return (fun { return } ->
         Term.enum ~rev:true jmp_t blk
         |> Seq.fold ~init:0 ~f:(fun len jmp ->
-               if Term.same jmp dummy then len + 1 else return len))
+            if Term.same jmp dummy then len + 1 else return len))
 
   let remove e t =
     match Term.find blk_t t.sub (Term.tid e.src) with
@@ -344,20 +344,20 @@ let number_of_nodes t = Term.length blk_t t.sub
 let preds_of_sub sub : Tid.Set.t Tid.Map.t =
   Term.enum blk_t sub
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun ins src ->
-         let src_id = Term.tid src in
-         let ins =
-           Map.change ins src_id ~f:(function
-             | None -> Some Tid.Set.empty
-             | other -> other)
-         in
-         Term.enum jmp_t src
-         |> Seq.fold ~init:ins ~f:(fun ins jmp ->
-                match succ_tid_of_jmp jmp with
-                | None -> ins
-                | Some tid ->
-                    Map.change ins tid ~f:(function
-                      | None -> Some (Tid.Set.singleton src_id)
-                      | Some set -> Some (Set.add set src_id))))
+      let src_id = Term.tid src in
+      let ins =
+        Map.change ins src_id ~f:(function
+          | None -> Some Tid.Set.empty
+          | other -> other)
+      in
+      Term.enum jmp_t src
+      |> Seq.fold ~init:ins ~f:(fun ins jmp ->
+          match succ_tid_of_jmp jmp with
+          | None -> ins
+          | Some tid ->
+              Map.change ins tid ~f:(function
+                | None -> Some (Tid.Set.singleton src_id)
+                | Some set -> Some (Set.add set src_id))))
 
 let of_sub sub = { preds = preds_of_sub sub; sub }
 let to_sub t = t.sub
@@ -372,12 +372,12 @@ let pp_full ppf g =
     let jmps =
       Term.enum jmp_t blk
       |> Seq.filter_map ~f:(fun jmp ->
-             match Jmp.kind jmp with
-             | Call _ | Ret _ | Int (_, _) -> Some (Jmp.to_string jmp)
-             | Goto _ -> (
-                 match succ_tid_of_jmp jmp with
-                 | None -> Some (Jmp.to_string jmp)
-                 | Some _ -> None))
+          match Jmp.kind jmp with
+          | Call _ | Ret _ | Int (_, _) -> Some (Jmp.to_string jmp)
+          | Goto _ -> (
+              match succ_tid_of_jmp jmp with
+              | None -> Some (Jmp.to_string jmp)
+              | Some _ -> None))
     in
     let lines = List.concat @@ List.map [ phis; defs; jmps ] ~f:Seq.to_list in
     let body =

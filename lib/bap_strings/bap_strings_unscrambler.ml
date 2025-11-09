@@ -78,9 +78,9 @@ module Make (Alpha : Alphabet) = struct
       if i < Array.length count then
         Sequence.range 0 count.(i) ~stop:`inclusive
         |> Sequence.concat_map ~f:(fun cnt ->
-               match Map.find dict cnt with
-               | None -> Sequence.empty
-               | Some dict -> find dict (i + 1))
+            match Map.find dict cnt with
+            | None -> Sequence.empty
+            | Some dict -> find dict (i + 1))
       else Sequence.of_list data
     in
     find dict 0
@@ -91,9 +91,9 @@ module Make (Alpha : Alphabet) = struct
       i >= Array.length count
       || Sequence.range 0 count.(i) ~stop:`inclusive
          |> Sequence.exists ~f:(fun cnt ->
-                match Map.find dict cnt with
-                | None -> false
-                | Some dict -> find dict (i + 1))
+             match Map.find dict cnt with
+             | None -> false
+             | Some dict -> find dict (i + 1))
     in
     find dict 0
 

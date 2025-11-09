@@ -60,7 +60,7 @@ let seeded callgraph subs =
   in
   Seq.filter subs ~f:contains_seed
   |> Seq.fold ~init:Tid.Set.empty ~f:(fun subs sub ->
-         Set.add (Set.union subs @@ callers sub) (Term.tid sub))
+      Set.add (Set.union subs @@ callers sub) (Term.tid sub))
 
 let tids_of_sub sub =
   let terms t p =
@@ -71,7 +71,7 @@ let tids_of_sub sub =
   let init = terms arg_t sub in
   Term.enum blk_t sub
   |> Seq.fold ~init ~f:(fun sum blk ->
-         terms phi_t blk ++ terms def_t blk ++ terms jmp_t blk ++ sum)
+      terms phi_t blk ++ terms def_t blk ++ terms jmp_t blk ++ sum)
 
 module State = struct
   module Taints = Propagator.Result

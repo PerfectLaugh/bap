@@ -512,7 +512,9 @@ let buf = Buffer.create 57
 let ft =
   let out_string = Stdlib.Buffer.add_substring buf
   and out_spaces _ = Stdlib.Buffer.add_char buf ' '
-  and out_width : string -> pos:int -> len:int -> int = fun s ~pos ~len -> len in
+  and out_width : string -> pos:int -> len:int -> int =
+   fun s ~pos ~len -> len
+  in
   let ft = Format.formatter_of_buffer buf in
   Format.pp_set_formatter_out_functions ft
     {

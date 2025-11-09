@@ -67,10 +67,10 @@ let flatten_exp ?(before : tid option = None) (exp : exp) (blk : blk term) :
     | Bil.Let (v, x, y) ->
         aux x blk >>= fun (x, blk) ->
         (match x with
-        | Var v -> !!(v, blk)
-        | _ ->
-            new_var (Var.sort v) >>= fun var ->
-            new_def var x >>| fun def -> (var, insert blk def))
+          | Var v -> !!(v, blk)
+          | _ ->
+              new_var (Var.sort v) >>= fun var ->
+              new_def var x >>| fun def -> (var, insert blk def))
         >>= fun (var, blk) ->
         let y = (new substituter v var)#map_exp y in
         aux y blk

@@ -24,7 +24,7 @@ let scan (mem, value) =
   in
   Strings.Scanner.run ~read 0
   |> Seq.fold ~init:Addr.Map.empty ~f:(fun strs (off, str) ->
-         Map.set strs ~key:(Addr.nsucc (Memory.min_addr mem) off) ~data:str)
+      Map.set strs ~key:(Addr.nsucc (Memory.min_addr mem) off) ~data:str)
 
 let union =
   Map.merge ~f:(fun ~key -> function

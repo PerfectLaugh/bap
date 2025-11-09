@@ -322,9 +322,9 @@ let theories () =
       let init = Map.empty (module Theory) in
       Hashtbl.to_alist known_theories
       |> Knowledge.List.fold ~init ~f:(fun theories (name, def) ->
-             Knowledge.Symbol.intern (Name.unqualified name) theory
-               ~package:(Name.package name)
-             >>| fun name -> Map.add_exn theories ~key:name ~data:def)
+          Knowledge.Symbol.intern (Name.unqualified name) theory
+            ~package:(Name.package name)
+          >>| fun name -> Map.add_exn theories ~key:name ~data:def)
       >>= fun r ->
       KB.Context.set theories (Some r) >>| fun () -> r
 
@@ -342,14 +342,14 @@ let without_subsumptions theories =
   List.filter theories ~f:(fun t1 ->
       not
       @@ List.exists theories ~f:(fun t2 ->
-             match order t1 t2 with LT -> true | _ -> false))
+          match order t1 t2 with LT -> true | _ -> false))
 
 let refine ?(context = []) ?requires theories =
   let provided = features context
   and required = Option.map ~f:features requires in
   without_subsumptions
   @@ List.filter theories ~f:(fun { requires; provides } ->
-         is_applicable ~provided ~requires && is_required ~required ~provides)
+      is_applicable ~provided ~requires && is_required ~required ~provides)
 
 let theory_for_id id =
   let sym = sprintf "'%s" (List.to_string (Set.to_list id) ~f:Name.show) in

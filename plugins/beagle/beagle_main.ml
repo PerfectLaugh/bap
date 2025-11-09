@@ -37,6 +37,7 @@ module Param = struct
         \    procedure that doesn't depend on the size of a dictionary or the\n\
         \    size of a character sequence.  ";
     ]
+  ;;
 
   let no_strings =
     flag "ignore-strings"
@@ -92,9 +93,9 @@ end
 let make_alphabet (module A : Alphabet) =
   Seq.range 0 256
   |> Seq.fold ~init:Char.Set.empty ~f:(fun alpha c ->
-         let c = Char.of_int_exn c in
-         let i = A.index c in
-         if i < 0 || i >= A.length then alpha else Set.add alpha c)
+      let c = Char.of_int_exn c in
+      let i = A.index c in
+      if i < 0 || i >= A.length then alpha else Set.add alpha c)
 
 type prey = { chars : string list Tid.Map.t; strings : string list Tid.Map.t }
 
@@ -177,12 +178,12 @@ module Hunter (Machine : Primus.Machine.S) = struct
     Machine.Local.get beagle >>= fun (Beagle d) ->
     Word.enum_chars w LittleEndian
     |> Machine.Seq.fold ~init:d ~f:(fun d char ->
-           match char with
-           | '\255' | '\000' .. '\010' -> Machine.return d
-           | char ->
-               let d = Strings.Detector.step d curr char in
-               Strings.Detector.when_decided d (Machine.return ()) ~f:got_prey
-               >>= fun () -> Machine.return d)
+        match char with
+        | '\255' | '\000' .. '\010' -> Machine.return d
+        | char ->
+            let d = Strings.Detector.step d curr char in
+            Strings.Detector.when_decided d (Machine.return ()) ~f:got_prey
+            >>= fun () -> Machine.return d)
     >>= fun d -> Machine.Local.put beagle (Beagle d)
 
   let process_memory (a, w) = process_word (Value.to_word w)

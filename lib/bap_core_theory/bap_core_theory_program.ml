@@ -26,7 +26,7 @@ let hexcode =
     ~inspect:
       (Fn.compose sexp_of_string
       @@ String.concat_map ~sep:" " ~f:(fun c ->
-             Format.sprintf "%02x" @@ Char.to_int c))
+          Format.sprintf "%02x" @@ Char.to_int c))
 
 let name =
   Knowledge.Domain.optional "name" ~equal:String.equal ~inspect:sexp_of_string

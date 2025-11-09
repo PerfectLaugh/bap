@@ -23,6 +23,7 @@ module Param = struct
         \    obtained knowledge and passes the resulting project data structure\n\
         \    downstream.";
     ]
+  ;;
 
   let argv = param (array string) "argv" ~doc:"Process argument vector"
 
@@ -135,8 +136,7 @@ let callgraph start prog =
   let connect_inputs g =
     Callgraph.nodes g
     |> Seq.fold ~init:g ~f:(fun g n ->
-           if Callgraph.Node.degree ~dir:`In n g = 0 then mark_as_root n g
-           else g)
+        if Callgraph.Node.degree ~dir:`In n g = 0 then mark_as_root n g else g)
   in
   let connect_unreachable_scc g =
     Graphlib.depth_first_search
@@ -154,8 +154,8 @@ let all_subroutines ?(marked = false) prog =
     else
       Term.enum sub_t prog
       |> Seq.fold ~init:Tid.Set.empty ~f:(fun unmarked sub ->
-             if Term.has_attr sub mark then unmarked
-             else Set.add unmarked (Term.tid sub))
+          if Term.has_attr sub mark then unmarked
+          else Set.add unmarked (Term.tid sub))
   in
   let marked_non_root_to_entry t =
     if Set.mem roots t || Set.mem unmarked t then None else Some (`tid t)
@@ -285,17 +285,17 @@ let on_failure job conflict result : Primus.Jobs.action =
 let find_first_unvisited_sub prog =
   Term.enum sub_t prog
   |> Seq.find ~f:(fun sub ->
-         match Term.first blk_t sub with
-         | None -> false
-         | Some blk -> not (Term.has_attr blk Term.visited))
+      match Term.first blk_t sub with
+      | None -> false
+      | Some blk -> not (Term.has_attr blk Term.visited))
 
 let find_first_unvisited_blk prog =
   Term.enum sub_t prog
   |> Seq.find_map ~f:(fun sub ->
-         Graphlib.reverse_postorder_traverse (module Graphs.Ir) (Sub.to_cfg sub)
-         |> Seq.find_map ~f:(fun blk ->
-                let blk = Graphs.Ir.Node.label blk in
-                if not (Term.has_attr blk Term.visited) then Some blk else None))
+      Graphlib.reverse_postorder_traverse (module Graphs.Ir) (Sub.to_cfg sub)
+      |> Seq.find_map ~f:(fun blk ->
+          let blk = Graphs.Ir.Node.label blk in
+          if not (Term.has_attr blk Term.visited) then Some blk else None))
 
 let main { Config.get = ( ! ) } proj =
   let open Param in
@@ -307,10 +307,10 @@ let main { Config.get = ( ! ) } proj =
   let systems =
     List.concat !systems
     |> List.map ~f:(fun sys ->
-           let name = Knowledge.Name.read sys in
-           match Primus.System.Repository.find name with
-           | None -> invalid_argf "Unknown system: %s" sys ()
-           | Some sys -> sys)
+        let name = Knowledge.Name.read sys in
+        match Primus.System.Repository.find name with
+        | None -> invalid_argf "Unknown system: %s" sys ()
+        | Some sys -> sys)
   in
   List.iter systems ~f:(fun sys ->
       enqueue_jobs !with_repetitions !envp !argv sys inputs);

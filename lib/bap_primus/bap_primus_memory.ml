@@ -77,7 +77,7 @@ let inspect_state { values; layers } =
   let values =
     Map.to_sequence values
     |> Seq.map ~f:(fun (key, value) ->
-           Sexp.(List [ sexp_of_word key; sexp_of_value value ]))
+        Sexp.(List [ sexp_of_word key; sexp_of_value value ]))
     |> Seq.to_list_rev
   in
   let layers = List.map layers ~f:sexp_of_layer in

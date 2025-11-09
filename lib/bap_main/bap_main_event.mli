@@ -122,9 +122,8 @@ module Log : sig
             report_progress ~task:"discover" ~total:(Term.length sub_t prog) ();
             Term.enum sub_t prog
             |> Seq.concat_mapi ~f:(fun stage sub ->
-                   report_progress ~note:(Sub.name sub) ~task:"discover" ~stage
-                     ();
-                   interesting_points_of_sub sub)
+                report_progress ~note:(Sub.name sub) ~task:"discover" ~stage ();
+                interesting_points_of_sub sub)
 
           let check_interesting_points points =
             report_progress ~task:"checking" ~total:(Seq.length points) ();

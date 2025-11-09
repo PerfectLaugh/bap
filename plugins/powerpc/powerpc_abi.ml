@@ -8,13 +8,13 @@ open Arg.Language
 let arena t name ~from len =
   Arg.Arena.create
   @@ List.init len ~f:(fun i ->
-         let name = sprintf "%s%d" name (from + i) in
-         match Theory.Target.var t name with
-         | Some v -> v
-         | None ->
-             failwithf "Target %s doesn't have a register named %s"
-               (Theory.Target.to_string t)
-               name ())
+      let name = sprintf "%s%d" name (from + i) in
+      match Theory.Target.var t name with
+      | Some v -> v
+      | None ->
+          failwithf "Target %s doesn't have a register named %s"
+            (Theory.Target.to_string t)
+            name ())
 
 let sysv32 t =
   let rev = Theory.Endianness.(equal le) (Theory.Target.endianness t) in
@@ -41,5 +41,5 @@ let sysv32 t =
 let setup () =
   Theory.Target.family Bap_powerpc_target.parent
   |> List.iter ~f:(fun t ->
-         if Theory.Target.bits t = 32 && Theory.Abi.(Theory.Target.abi t = gnu)
-         then sysv32 t)
+      if Theory.Target.bits t = 32 && Theory.Abi.(Theory.Target.abi t = gnu)
+      then sysv32 t)

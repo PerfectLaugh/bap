@@ -7,16 +7,16 @@ module G = Graphlib.Make (Tid) (Tid)
 let of_sub sub =
   Term.enum blk_t sub
   |> Seq.fold ~init:G.empty ~f:(fun g src ->
-         let sid = Term.tid src in
-         let g = G.Node.insert sid g in
-         Term.enum jmp_t src
-         |> Seq.fold ~init:g ~f:(fun g jmp ->
-                match Bap_ir_graph.succ_tid_of_jmp jmp with
-                | None -> g
-                | Some did ->
-                    let jid = Term.tid jmp in
-                    let edge = G.Edge.create sid did jid in
-                    G.Edge.insert edge g))
+      let sid = Term.tid src in
+      let g = G.Node.insert sid g in
+      Term.enum jmp_t src
+      |> Seq.fold ~init:g ~f:(fun g jmp ->
+          match Bap_ir_graph.succ_tid_of_jmp jmp with
+          | None -> g
+          | Some did ->
+              let jid = Term.tid jmp in
+              let edge = G.Edge.create sid did jid in
+              G.Edge.insert edge g))
 
 let start = Tid.for_name ~package:"bap" "start-pseudo-node"
 let exit = Tid.for_name ~package:"bap" "exit-pseudo-node"
@@ -35,9 +35,9 @@ let create sub =
   let g = of_sub sub in
   G.nodes g
   |> Seq.fold ~init:g ~f:(fun g n ->
-         g
-         |> if_unreachable ~from:`In connect_with_start g n
-         |> if_unreachable ~from:`Out connect_with_exit g n)
+      g
+      |> if_unreachable ~from:`In connect_with_start g n
+      |> if_unreachable ~from:`Out connect_with_exit g n)
   |> fun g ->
   Graphlib.depth_first_search
     (module G)

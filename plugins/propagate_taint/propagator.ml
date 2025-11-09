@@ -79,9 +79,9 @@ let propagate taints vars tid v r : taints =
     | Some vs ->
         Option.some
         @@ Map.change vs v ~f:(function
-             | None when Set.is_empty ts -> None
-             | None -> Some ts
-             | Some ts' -> Some (Set.union ts ts')))
+          | None when Set.is_empty ts -> None
+          | None -> Some ts
+          | Some ts' -> Some (Set.union ts ts')))
 
 class context ?max_steps ?max_loop p =
   object (self : 's)

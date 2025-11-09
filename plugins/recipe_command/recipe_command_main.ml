@@ -168,9 +168,9 @@ let () =
       let open Result.Monad_infix in
       Result.all_unit
       @@ List.map recipes ~f:(fun r ->
-             Recipe.load ~paths:recipe_paths r
-             |> Result.map_error ~f:(fun err -> Recipe_error err)
-             >>| fun r -> print_recipe ~keep r)
+          Recipe.load ~paths:recipe_paths r
+          |> Result.map_error ~f:(fun err -> Recipe_error err)
+          >>| fun r -> print_recipe ~keep r)
 
 let () =
   Extension.Error.register_printer @@ function
