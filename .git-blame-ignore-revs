@@ -1,2 +1,8 @@
 # format all code
 59387eb56421aca501f92dd99cd147114e8fc19a
+# fix doc except bap.mli
+4b75e4d20472422cbd8f5e2fd0510ff3ab861dfd
+# fix doc and fmts
+13741ea5dbbc0d7b52d8d6b5b9db735566d4d9b6
+# chore(docs): fmt
+4d82d8c4b86e6db178594c55be7691cc6d138140
