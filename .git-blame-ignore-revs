@@ -6,3 +6,5 @@
 13741ea5dbbc0d7b52d8d6b5b9db735566d4d9b6
 # chore(docs): fmt
 4d82d8c4b86e6db178594c55be7691cc6d138140
+# use ocamlformat 0.28.1
+0d8443eb9283441c393161d8aa6b8eb4e0384e1c
