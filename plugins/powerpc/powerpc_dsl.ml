@@ -24,10 +24,12 @@ let int_of_imm = function
       | Some x -> x
       | None -> ppc_fail "failed to convert imm operand to int")
 
-let imm signed op =
-  let w = Word.of_int ~width:32 (int_of_imm op) in
+let imm' width signed op =
+  let w = Word.of_int ~width (int_of_imm op) in
   if signed then Exp.(signed @@ of_word w) else Exp.(unsigned @@ of_word w)
 
+let imm = imm' 16
+let imm_32 = imm' 32
 let signed f = f true
 let unsigned f = f false
 let apply_signess signed e = if signed then Exp.signed e else Exp.unsigned e

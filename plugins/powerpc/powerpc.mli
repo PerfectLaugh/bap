@@ -351,13 +351,17 @@ module Std : sig
   (** The type of lifter functions *)
 
   val signed : 'a ec -> 'a
-  (** [signed ec] - returnst a signed expression from given [ec] *)
+  (** [signed ec] - returns a signed expression from given [ec] *)
 
   val unsigned : 'a ec -> 'a
   (** [unsigned ec] - returns an unsigned expression from given [ec] *)
 
   val imm : (op -> exp) ec
   (** imm constructor - constructs an immediate from operand *)
+
+  val imm_32 : (op -> exp) ec
+  (** imm_32 constructor - constructs an immediate from operand without trimming to 16 bits
+  *)
 
   val var : (bitwidth -> exp) ec
   (** var constructor - constructs a variable of bitwidth *)

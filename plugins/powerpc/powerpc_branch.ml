@@ -7,13 +7,13 @@ let update_link_register cpu _ops =
     examples: 4b ff fe f0 b .+67108592 4b ff fe f2 ba 67108592 4b ff fe f1 bl
     .+67108592 4b ff fe f3 bla 67108592 *)
 let b cpu ops =
-  let im = signed imm ops.(0) in
+  let im = signed imm_32 ops.(0) in
   let tm = signed var cpu.word_width in
   let sh = unsigned const byte 2 in
   RTL.[ tm := last (im << sh) 26; cpu.jmp (cpu.pc + tm) ]
 
 let ba cpu ops =
-  let im = signed imm ops.(0) in
+  let im = signed imm_32 ops.(0) in
   let tm = signed var cpu.word_width in
   let sh = unsigned const byte 2 in
   RTL.[ tm := last (im << sh) 26; cpu.jmp tm ]
@@ -25,9 +25,9 @@ let bla = update_link_register ^ ba
     3.0 B examples: 42 9f 00 04 bc 20, 31, .+4 42 9f 00 06 bca 20, 31, 4 42 9f
     00 05 bcl 20, 31, .+4 42 9f 00 07 bcla 20, 31, 4 *)
 let bc cpu ops =
-  let bo = unsigned imm ops.(0) in
+  let bo = unsigned imm_32 ops.(0) in
   let bi = unsigned cpu.reg ops.(1) in
-  let bd = signed imm ops.(2) in
+  let bd = signed imm_32 ops.(2) in
   let sh = unsigned const byte 2 in
   let ctr_ok = unsigned var bit in
   let cond_ok = unsigned var bit in
@@ -44,9 +44,9 @@ let bc cpu ops =
     ]
 
 let bca cpu ops =
-  let bo = unsigned imm ops.(0) in
+  let bo = unsigned imm_32 ops.(0) in
   let bi = unsigned cpu.reg ops.(1) in
-  let bd = signed imm ops.(2) in
+  let bd = signed imm_32 ops.(2) in
   let sh = unsigned const byte 2 in
   let ctr_ok = unsigned var bit in
   let cond_ok = unsigned var bit in
@@ -66,7 +66,7 @@ let bcla = update_link_register ^ bca
 
 (** bdz target = bc 18,0, target *)
 let bdz cpu ops =
-  let bd = unsigned imm ops.(0) in
+  let bd = unsigned imm_32 ops.(0) in
   let sh = unsigned const byte 2 in
   let tm = signed var cpu.word_width in
   RTL.
@@ -79,7 +79,7 @@ let bdz cpu ops =
 
 (** bdnz target = bc 16,0, target *)
 let bdnz cpu ops =
-  let bd = unsigned imm ops.(0) in
+  let bd = unsigned imm_32 ops.(0) in
   let sh = unsigned const byte 2 in
   let tm = signed var cpu.word_width in
   RTL.
@@ -94,7 +94,7 @@ let bdnz cpu ops =
     Power ISATM Version 3.0 B examples: 4e 9f 00 20 bclr 20, 31 4e 9f 00 21
     bclrl 20, 31 *)
 let bclr cpu ops =
-  let bo = unsigned imm ops.(0) in
+  let bo = unsigned imm_32 ops.(0) in
   let bi = unsigned cpu.reg ops.(1) in
   let sh = unsigned const byte 2 in
   let ctr_ok = unsigned var bit in
@@ -111,7 +111,7 @@ let bclr cpu ops =
     ]
 
 let bclrl cpu ops =
-  let bo = unsigned imm ops.(0) in
+  let bo = unsigned imm_32 ops.(0) in
   let bi = unsigned cpu.reg ops.(1) in
   let sh = unsigned const byte 2 in
   let ctr_ok = unsigned var bit in
@@ -162,7 +162,7 @@ let bdnzlr cpu _ops =
     Power ISATM Version 3.0 B examples: 4d 5f 04 20 bcctr 10,31 4d 5f 04 21
     bcctrl 10,31 *)
 let bcctr cpu ops =
-  let bo = unsigned imm ops.(0) in
+  let bo = unsigned imm_32 ops.(0) in
   let bi = unsigned cpu.reg ops.(1) in
   let cond_ok = unsigned var bit in
   let x = unsigned var (bitwidth 5) in
@@ -189,7 +189,7 @@ let bctrl = update_link_register ^ bctr
     IBM Power ISATM Version 3.0 B examples: 4e 9f 04 60 bctar 4e 9f 04 61 bctarl
 *)
 let bctar cpu ops =
-  let bo = unsigned imm ops.(0) in
+  let bo = unsigned imm_32 ops.(0) in
   let bi = unsigned cpu.reg ops.(1) in
   let sh = unsigned const byte 2 in
   let cond_ok = unsigned var bit in

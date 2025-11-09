@@ -10,7 +10,7 @@ open Powerpc.Std
 let andi cpu ops =
   let ra = unsigned cpu.reg ops.(0) in
   let rs = unsigned cpu.reg ops.(1) in
-  let im = unsigned imm ops.(2) in
+  let im = unsigned imm_32 ops.(2) in
   RTL.[ ra := rs land im ]
 
 (** Fixed-point AND Immediate Shifted Pages 92-98 of IBM Power ISATM Version 3.0
@@ -18,7 +18,7 @@ let andi cpu ops =
 let andis cpu ops =
   let ra = unsigned cpu.reg ops.(0) in
   let rs = unsigned cpu.reg ops.(1) in
-  let im = unsigned imm ops.(2) in
+  let im = unsigned imm_32 ops.(2) in
   let sh = unsigned const byte 16 in
   RTL.[ ra := rs land (im << sh) ]
 
@@ -43,7 +43,7 @@ let andc cpu ops =
 let ori cpu ops =
   let ra = unsigned cpu.reg ops.(0) in
   let rs = unsigned cpu.reg ops.(1) in
-  let im = unsigned imm ops.(2) in
+  let im = unsigned imm_32 ops.(2) in
   RTL.[ ra := rs lor im ]
 
 (** 60 00 00 00 nop (equivalen to ori 0,0,0 *)
@@ -54,7 +54,7 @@ let nop cpu ops = []
 let oris cpu ops =
   let ra = unsigned cpu.reg ops.(0) in
   let rs = unsigned cpu.reg ops.(1) in
-  let im = unsigned imm ops.(2) in
+  let im = unsigned imm_32 ops.(2) in
   let sh = unsigned const byte 16 in
   RTL.[ ra := rs lor (im << sh) ]
 
@@ -79,7 +79,7 @@ let orc cpu ops =
 let xori cpu ops =
   let ra = unsigned cpu.reg ops.(0) in
   let rs = unsigned cpu.reg ops.(1) in
-  let im = unsigned imm ops.(2) in
+  let im = unsigned imm_32 ops.(2) in
   RTL.[ ra := rs lxor im ]
 
 (** Fixed-point XOR Immediate Shifted Pages 92-98 of IBM Power ISATM Version 3.0
@@ -87,7 +87,7 @@ let xori cpu ops =
 let xoris cpu ops =
   let ra = unsigned cpu.reg ops.(0) in
   let rs = unsigned cpu.reg ops.(1) in
-  let im = unsigned imm ops.(2) in
+  let im = unsigned imm_32 ops.(2) in
   let sh = unsigned const byte 16 in
   RTL.[ ra := rs lxor (im << sh) ]
 
