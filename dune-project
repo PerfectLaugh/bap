@@ -1640,5 +1640,3 @@ In particular, the library includes: \
   core
   core_kernel
   (bap-common (= :version))))
-
-(generate_opam_files true)
