@@ -29,11 +29,6 @@ jobs:
           repository: BinaryAnalysisPlatform/bap
           path: bap
 
-      - name: Install Ghidra
-        uses: ./bap/.github/actions/install-ghidra
-        with:
-          path: ./bap
-
       - name: Install Extra System Dependencies
         run: |
           sudo apt-get update -y

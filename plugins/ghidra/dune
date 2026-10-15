@@ -1,11 +1,9 @@
 (library
- (optional)
  (name bap_ghidra_plugin)
  (public_name bap-ghidra.plugin)
- (libraries bap bap-ghidra bap-main core))
+ (libraries bap bap-common bap-ghidra bap-main core))
 
 (plugin
- (optional)
  (name ghidra)
  (package bap-ghidra)
  (libraries bap-ghidra.plugin)

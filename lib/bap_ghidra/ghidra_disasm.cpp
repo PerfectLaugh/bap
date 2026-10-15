@@ -216,6 +216,13 @@ class InstructionBuilder : public PcodeEmit {
     const OpcodesTable &opcodes;
     const AddrSpaceManager &spaces;
     std::vector<bap::insn> insns;
+    // for each p-code op, true if it is a branch that doesn't leave
+    // the instruction, e.g., the loop of REP or the skip of a predicated
+    // instruction, such branches are not the instruction control flow
+    std::vector<bool> local;
+    // the destination of each branch op, unless it is in the constant space
+    std::vector<std::pair<bool, uintb>> dests;
+    uintb start = 0;
 public:
     InstructionBuilder(const Loader &loader_,
                        const RegistersTable &registers_,
@@ -230,7 +237,18 @@ public:
                       VarnodeData *invars,
                       int4 number_of_inputs) {
         insns.push_back(bap::insn());
+        local.push_back(false);
+        dests.push_back({false, 0});
         int p = insns.size() - 1;
+        start = addr.getOffset();
+        if ((opcode == CPUI_BRANCH || opcode == CPUI_CBRANCH) &&
+            number_of_inputs > 0) {
+            if (is_constant(invars[0].space)) {
+                local[p] = true;
+            } else {
+                dests[p] = {true, invars[0].offset};
+            }
+        }
         if (opcode == CPUI_CALLOTHER) {
             int opcode = invars[0].offset;
             insns[p].code = opcode;
@@ -256,11 +274,40 @@ public:
 
     void reset() {
         insns.clear();
+        local.clear();
+        dests.clear();
     }
 
-    bap::insn result(int len) {
+    // [insn] is either one of the ops or the copy of the only op
+    bool is_local(const bap::insn &insn) const {
+        if (insns.empty()) {
+            return false;
+        } else if (&insn >= insns.data() && &insn < insns.data() + insns.size()) {
+            return local[&insn - insns.data()];
+        } else {
+            return insns.size() == 1 && local[0];
+        }
+    }
+
+    bap::insn result(const Address &addr, int len) {
+        for (size_t i = 0; i < insns.size(); i++) {
+            if (dests[i].first) {
+                uintb dst = dests[i].second;
+                // a branch to itself is a loop only when it is not the
+                // whole instruction, e.g., `jmp .' is a real branch
+                local[i] = local[i] || dst == start + len ||
+                    (dst == start && insns.size() > 1);
+            }
+        }
         if (insns.size() == 0) {
-            return bap::insn();
+            // an instruction without any p-code, e.g., a nop, is
+            // represented as an empty sequence, not as an invalid one
+            bap::insn insn;
+            insn.code = CORE_SEQ;
+            insn.name = opcodes.intern(insn.code);
+            insn.loc.off = loader.offset(addr);
+            insn.loc.len = len;
+            return insn;
         } else if (insns.size() == 1) {
             insns[0].loc.len = len;
             return insns[0];
@@ -323,21 +370,29 @@ private:
     }
 };
 
-bool matches(const bap::insn &insn, bap_disasm_insn_p_type p) {
+bool matches(const InstructionBuilder &builder,
+             const bap::insn &insn, bap_disasm_insn_p_type p) {
     if (insn.code == 0) {
         return p == is_invalid;
     } else {
         std::vector<bap::operand> ops = insn.ops;
-        bool sat = std::any_of(ops.begin(), ops.end(), [p](bap::operand oper) {
+        bool sat = std::any_of(ops.begin(), ops.end(),
+                               [&builder, p](bap::operand oper) {
             return
                 oper.type == bap_disasm_op_insn &&
-                matches(*oper.sub_val, p);
+                matches(builder, *oper.sub_val, p);
         });
+
+        if (builder.is_local(insn)) {
+            return sat;
+        }
 
         OpCode op = static_cast<OpCode>(insn.code);
         switch (p) {
         case is_true:
-            sat = true;
+            return true;
+        case is_invalid:
+            return false;
         case may_store:
             sat |= op == CPUI_STORE;
             break;
@@ -350,18 +405,26 @@ bool matches(const bap::insn &insn, bap_disasm_insn_p_type p) {
         case may_affect_control_flow:
         case is_terminator:
         case is_branch:
-            sat |= op == CPUI_CBRANCH;
+            sat |= op == CPUI_CBRANCH || op == CPUI_BRANCH ||
+                op == CPUI_BRANCHIND || op == CPUI_CALL ||
+                op == CPUI_CALLIND || op == CPUI_RETURN;
+            break;
         case is_barrier:
+            sat |= op == CPUI_BRANCH || op == CPUI_BRANCHIND ||
+                op == CPUI_RETURN;
+            break;
         case is_unconditional_branch:
-            sat |= op == CPUI_BRANCH;
+            sat |= op == CPUI_BRANCH || op == CPUI_BRANCHIND;
+            break;
         case is_call:
-            sat |= p != is_barrier && (op == CPUI_CALL || op == CPUI_CALLIND);
+            sat |= op == CPUI_CALL || op == CPUI_CALLIND;
+            break;
         case is_indirect_branch:
-            sat |= p != is_call && (op == CPUI_BRANCHIND || op == CPUI_CALLIND);
+            sat |= op == CPUI_BRANCHIND || op == CPUI_CALLIND;
+            break;
         case is_return:
-            sat |= p != is_call && op == CPUI_RETURN;
-        case is_invalid:
-            return false;
+            sat |= op == CPUI_RETURN;
+            break;
         }
         return sat;
     }
@@ -411,7 +474,7 @@ public:
             if (loader.is_mapped(pc)) {
                 Address addr(translator.getDefaultCodeSpace(), pc);
                 int length = translator.oneInstruction(builder, addr);
-                current = builder.result(length);
+                current = builder.result(addr, length);
                 if (!loader.is_mapped(pc + current.loc.len - 1)) {
                     current = {};
                 }
@@ -437,7 +500,7 @@ public:
     }
 
     virtual bool satisfies(bap_disasm_insn_p_type p) const {
-        return matches(current, p);
+        return matches(builder, current, p);
     }
 
     virtual bool supports(bap_disasm_insn_p_type) const {

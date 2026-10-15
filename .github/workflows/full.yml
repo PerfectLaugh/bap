@@ -16,9 +16,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Install Ghidra
-        uses: ./.github/actions/install-ghidra
-
       - name: Install Dejagnu
         run: |
           sudo apt-get update -y
@@ -33,7 +30,6 @@ jobs:
           opam-repositories: |
             default: git+https://github.com/ocaml/opam-repository.git
             bap: git+https://github.com/BinaryAnalysisPlatform/opam-repository#testing
-
 
       - name: Install BAP Dependencies
         run: opam install . --deps-only

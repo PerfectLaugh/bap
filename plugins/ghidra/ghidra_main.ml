@@ -1,10 +1,16 @@
 open Core
 open Bap_main
 
+(* the processor specifications built together with the plugin take
+   precedence, mixing specifications of different Ghidra versions
+   is not supported *)
 let default_paths =
   let ( / ) = Filename.concat in
-  Extension.Configuration.
-    [ datadir / "ghidra"; sysdatadir / "ghidra"; "/usr/share/ghidra" ]
+  match List.filter (Bap_common.sites "ghidra") ~f:Stdlib.Sys.file_exists with
+  | [] ->
+      Extension.Configuration.
+        [ datadir / "ghidra"; sysdatadir / "ghidra"; "/usr/share/ghidra" ]
+  | bundled -> bundled
 
 let show_targets =
   Extension.Configuration.flag "list-targets" ~aliases:[ "targets" ]

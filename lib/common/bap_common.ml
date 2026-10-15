@@ -3,6 +3,7 @@ open Bap_common_private_sites.Sites
 
 let sites = function
   | "api" -> api
+  | "ghidra" -> ghidra
   | "lisp" -> lisp
   | "plugins" -> plugins
   | "primus" -> primus

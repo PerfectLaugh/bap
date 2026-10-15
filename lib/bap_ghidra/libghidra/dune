@@ -1,0 +1,25 @@
+; Builds the Ghidra decompiler library and the processor specifications
+; from the Ghidra sources. When installed with opam, the sources are
+; fetched as an extra-source to the root of the project, otherwise they
+; are downloaded by the build script.
+
+(rule
+ (targets
+  libdecomp.a
+  dlldecomp.so
+  (dir include)
+  (dir Processors))
+ (deps
+  build.sh
+  (:tarball
+   (glob_files %{project_root}/Ghidra_12.1.4_build.tar.gz)))
+ (action
+  (run sh %{dep:build.sh} %{tarball})))
+
+(install
+ (package bap-ghidra)
+ (section
+  (site
+   (bap-common ghidra)))
+ (dirs
+  (Processors as Ghidra/Processors)))

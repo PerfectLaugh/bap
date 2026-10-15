@@ -129,7 +129,8 @@
   (share primus)
   (share semantics)
   (share signatures)
-  (share site_lisp))
+  (share site_lisp)
+  (share ghidra))
  (depends
   dune-site))
 
@@ -554,7 +555,6 @@ be seen as a common denominator between Lwt and Async libraries.")
  (name bap-ghidra)
  (synopsis "The BAP NSA Ghidra backend")
  (tags (bap ghidra disassembler))
- (allow_empty)
  (depends
   core
   (ppx_bap (= :version))
