@@ -9,3 +9,18 @@
  (libraries bap-primus-systems.plugin)
  (site
   (bap-common plugins)))
+
+(rule
+ (target primus_systems_sites.ml)
+ (deps
+  (:input primus_systems_sites.ml.ab)
+  (alias ../../config)
+  ../../config.status)
+ (action
+  (with-stdin-from
+   %{input}
+   (with-stdout-to
+    %{target}
+    (chdir
+     %{workspace_root}
+     (run ./tools/rewrite.exe -filename %{input}))))))

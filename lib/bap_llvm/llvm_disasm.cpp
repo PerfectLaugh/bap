@@ -2,6 +2,7 @@
 #include <llvm/MC/MCContext.h>
 #include <llvm/MC/MCInstPrinter.h>
 #include <llvm/MC/MCInstrInfo.h>
+#include <llvm/MC/MCInstrAnalysis.h>
 #include <llvm/MC/MCRegisterInfo.h>
 #if LLVM_VERSION_MAJOR >= 15
 #include <llvm/MC/MCSubtargetInfo.h>
@@ -193,6 +194,7 @@ static const bap_disasm_insn_p_type supported[] = {
 class llvm_disassembler : public disassembler_interface {
     shared_ptr<const llvm::MCRegisterInfo>  reg_info;
     shared_ptr<const llvm::MCInstrInfo>     ins_info;
+    shared_ptr<const llvm::MCInstrAnalysis> ins_analysis;
     shared_ptr<const llvm::MCSubtargetInfo> sub_info;
     shared_ptr<const llvm::MCAsmInfo>       asm_info;
     shared_ptr<const llvm::MCContext>       ctx;
@@ -249,6 +251,10 @@ public:
                 output_error(triple, cpu, "failed to obtain instructions information");
             return {nullptr, {bap_disasm_unsupported_target} };
         }
+
+        // may be null, if the target doesn't provide the analysis
+        shared_ptr<const llvm::MCInstrAnalysis>
+            ins_analysis(target->createMCInstrAnalysis(ins_info.get()));
 
         shared_ptr<const llvm::MCSubtargetInfo>
             sub_info(target->createMCSubtargetInfo(triple, cpu, attrs));
@@ -337,6 +343,7 @@ public:
         self->printer  = printer;
         self->reg_info = reg_info;
         self->ins_info = ins_info;
+        self->ins_analysis = ins_analysis;
         self->sub_info = sub_info;
         self->asm_info = asm_info;
         self->ctx = ctx;
@@ -482,6 +489,12 @@ public:
 #endif
             if (p == may_affect_control_flow) {
                 return d.mayAffectControlFlow(mcinst, *reg_info);
+            } else if (p == is_call && ins_analysis) {
+                // some targets (e.g., RISC-V since LLVM 17) no longer
+                // mark jump-and-link instructions as calls in their
+                // descriptions and rely on the analysis instead, which
+                // inspects the operands (the link register)
+                return ins_analysis->isCall(mcinst);
             } else if (auto check = fun_of_pred(p)) {
                 return check(d);
             } else {

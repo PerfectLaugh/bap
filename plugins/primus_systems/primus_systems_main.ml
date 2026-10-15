@@ -74,6 +74,8 @@ let () =
   let usr_paths = Extension.Configuration.get ctxt paths |> List.concat in
   ([ Filename.current_dir_name ]
   @ usr_paths
+  @ List.map Primus_systems_sites.paths ~f:(fun root ->
+        Filename.concat root "systems")
   @ Extension.Configuration.[ systems datadir; systems sysdatadir ])
   |> List.iter ~f:(fun path ->
       if Sys.file_exists path && Sys.is_directory path then
