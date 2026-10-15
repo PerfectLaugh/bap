@@ -12,11 +12,9 @@ echo "version is $BAP_VERSION"
 GITHUB=https://github.com/BinaryAnalysisPlatform/
 SOURCE=$GITHUB/bap
 BINDINGS=$GITHUB/bap-bindings
-BINARIES="bap bapbundle bapbuild bap-mc"
 PREFIX=/usr/local
 ARCH=$(dpkg-architecture -qDEB_BUILD_ARCH)
 CONFDIR=$PREFIX/etc/bap
-TMPDIR=$(mktemp -d)
 
 eval $(opam config env)
 echo OCaml is at $(which ocaml)
@@ -31,12 +29,6 @@ opam pin remove bap
 
 echo "Cloning a fresh repo"
 [ -d bap-repo ] || git clone $SOURCE bap-repo
-echo "Installing ocamlfind to the system path"
-
-[ -f $PREFIX/bin/ocamlfind ] && cp $PREFIX/bin/ocamlfind $TMPDIR/stored-ocamlfind
-sudo cp $(which ocamlfind) $PREFIX/bin
-
-
 cd bap-repo
 LLVM_VERSION=$(opam config var conf-bap-llvm:package-version)
 LLVM_CONFIG=$(opam config var conf-bap-llvm:config)
@@ -46,19 +38,13 @@ SIGURL=https://github.com/BinaryAnalysisPlatform/bap/releases/download/v2.4.0-al
 echo BAP version is $BAP_VERSION
 echo LLVM is $LLVM_VERSION
 
-sed -i "s/-j 2/-j 4/" oasis/common
+ocaml tools/configure.ml \
+      --with-llvm-version=$LLVM_VERSION \
+      --with-llvm-config=$LLVM_CONFIG \
+      --prefix=$PREFIX \
+      --sysconfdir=$CONFDIR
 
-./configure --enable-everything \
-            --disable-ida \
-            --with-llvm-version=$LLVM_VERSION \
-            --with-llvm-config=$LLVM_CONFIG \
-            --libdir=$PREFIX/lib/bap \
-            --plugindir=$PREFIX/lib/bap \
-            --prefix=$PREFIX \
-            --sysconfdir=$CONFDIR
-
-make
-sudo sh -c "PATH=$PATH make reinstall"
+dune build --release --pkg=disabled
 cd ..
 
 echo "Packing a bap debian package"
@@ -67,22 +53,13 @@ sudo rm -rf bap
 
 mkdir -p bap/bap_$BAP_VERSION/DEBIAN
 
-SHARED=bap/bap_$BAP_VERSION/$PREFIX/share
-BINDIR=bap/bap_$BAP_VERSION/$PREFIX/bin
-LIBDIR=bap/bap_$BAP_VERSION/$PREFIX/lib/bap
-DEBIAN=bap/bap_$BAP_VERSION/DEBIAN
+STAGE=$(pwd)/bap/bap_$BAP_VERSION
+SHARED=$STAGE/$PREFIX/share
+DEBIAN=$STAGE/DEBIAN
 
 SIGDIR=$SHARED/bap/signatures/
 
-mkdir -p $SHARED $BINDIR $LIBDIR $DEBIAN
-
-cp -r $PREFIX/share/bap $SHARED/bap
-
-for binary in $BINARIES; do
-    cp $PREFIX/bin/$binary bap/bap_$BAP_VERSION/$PREFIX/bin
-done;
-
-cp $PREFIX/lib/bap/*.plugin $LIBDIR
+(cd bap-repo && dune install --release --pkg=disabled --prefix=$PREFIX --destdir=$STAGE)
 
 echo "Installing Byteweight signatures"
 mkdir -p $SIGDIR

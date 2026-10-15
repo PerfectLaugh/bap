@@ -7,8 +7,7 @@ type reason = [ `In_core | `Provided_by of string | `Requested_by of string ]
 module type S = sig
   val name : string
   (** the name of the selected backend. Currently, it should be [findlib] or
-      [dynlink], and is selected at configuration time via `./configure
-      --plugins-backend`. *)
+      [dynlink]. *)
 
   val init : unit -> unit
   (** initializes the unit system. May fail if the selected backend is unable to

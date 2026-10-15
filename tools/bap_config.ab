@@ -1,3 +1,0 @@
-PLUGINS_DIR="$plugindir"
-DATA_DIR="$datadir/bap"
-OS="$system"

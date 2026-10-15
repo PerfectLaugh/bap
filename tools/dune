@@ -20,18 +20,3 @@
  (package bap-bundle)
  (modules bapbundle)
  (libraries core core_unix.sys_unix bap-bundle fileutils uri))
-
-(rule
- (target bap_config)
- (deps
-  (:input bap_config.ab)
-  (alias ../config)
-  ../config.status)
- (action
-  (with-stdin-from
-   %{input}
-   (with-stdout-to
-    %{target}
-    (chdir
-     %{workspace_root}
-     (run ./tools/rewrite.exe -filename %{input}))))))

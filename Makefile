@@ -1,55 +1,30 @@
-ifeq (is$(BAP_DEBUG), $(filter is$(BAP_DEBUG),is is0 isno isdisable isfalse))
-SETUP = ./setup.exe -quiet
-else
-SETUP = ./setup.exe
-endif
-
-build: setup.ml
-	$(SETUP) -build $(BAPBUILDFLAGS)
+build:
+	dune build
 
 .PHONY: doc
 doc:
 	@ocamlfind ocamlopt -linkpkg -package bap-plugins,core_kernel,core_kernel.caml_unix tools/bapdoc.ml -o bapdoc.native
 	make -C doc
 
-all:
-	$(SETUP) -all $(BAPALLFLAGS)
-
-.PHONY: plugins
-install-plugins:
-	sh tools/build_plugins.sh
-	if [ -f ./postinstall.native ]; then ./postinstall.native; fi
-	if [ -f ./postinstall.byte ]; then ./postinstall.byte; fi
-	if [ -f ./postinstall ]; then ./postinstall; fi
-
-install-libs:
-	$(SETUP) -install $(BAPINSTALLFLAGS)
-
-reinstall-libs:
-	$(SETUP) -reinstall $(BAPINSTALLFLAGS)
+# dune refuses to install when the dune.lock package management is
+# active, so these targets expect the dependencies from an opam switch
+install:
+	dune install --pkg=disabled
 
 uninstall:
-	$(SETUP) -uninstall $(BAPUNINSTALLFLAGS)
-
-install: install-libs install-plugins
-reinstall: reinstall-libs install-plugins
+	dune uninstall --pkg=disabled
 
 clean:
-	$(SETUP) -clean $(BAPCLEANFLAGS)
+	dune clean
 
-distclean:
-	$(SETUP) -distclean $(BAPDISTCLEANFLAGS)
-
-.PHONY: clean disclean reinstall
+.PHONY: build install uninstall clean
 
 .PHONY: test
 
 .PHONY: check
 
-.PHONY: veri
-
-test: build
-	$(SETUP) -test $(BAPTESTFLAGS)
+test:
+	dune test
 
 testsuite:
 	git clone https://github.com/BinaryAnalysisPlatform/bap-testsuite.git testsuite

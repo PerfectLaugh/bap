@@ -1,2 +1,0 @@
-let () =
-  flag ["c++"; "compile"; "use_libllvm"] (Sh (expand "${llvm_cxxflags}"))

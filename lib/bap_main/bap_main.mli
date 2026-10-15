@@ -100,7 +100,7 @@
     The [bapbuild] tool has its limitations, for example, only one plugin per
     folder could be built. When the source base grows very big it is becoming
     hard to manage it with [bapbuild], so using some configuration system is
-    advised, e.g., OASIS or dune. A plugin, then, could be built as a normal
+    advised, e.g., dune. A plugin, then, could be built as a normal
     OCaml library and later packed with [bapbuild].
 
     {3 Extensions}

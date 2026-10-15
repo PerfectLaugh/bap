@@ -1,5 +1,0 @@
-let () =
-  add_variable  ~doc:"A list (OCaml syntax) of paths to all discovered objdumps" "objdump_paths"
-    ~define:(function
-        | None -> "[\"objdump\"]"
-        | Some xs -> xs)
