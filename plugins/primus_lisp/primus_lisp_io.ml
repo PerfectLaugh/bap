@@ -269,7 +269,8 @@ let init redirections =
             (channel-flush DESCR) is called. |};
         ]
   end in
-  Primus.Machine.add_component (module Primitives) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "lisp-basic-io");
   Primus.Components.register_generic "lisp-basic-io"
     (module Primitives)
     ~package:"bap" ~desc:"Provides basic IO primitives to Primus Lisp."

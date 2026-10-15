@@ -49,7 +49,8 @@ let () =
           init32 regs
       | _ -> Machine.return ()
   end in
-  Primus.Machine.add_component (module Component) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "powerpc-init");
   Primus.Components.register_generic "powerpc-init"
     (module Component)
     ~package:"bap" ~desc:"Initializes PPC registers."

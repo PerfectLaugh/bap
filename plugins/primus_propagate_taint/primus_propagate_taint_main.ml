@@ -2,7 +2,7 @@ open Core
 open Bap.Std
 open Monads.Std
 open Bap_primus.Std
-module Legacy_taint = Taint
+module Legacy_taint = Taint [@@alert "-deprecated"]
 open Bap_taint.Std
 include Self ()
 
@@ -177,11 +177,13 @@ let markers : (string * Primus.component * string) list =
   ]
 
 let enable_projection () =
-  List.iter markers ~f:(fun (_, comp, _) ->
-      (Primus.Machine.add_component comp [@warning "-D"]))
+  List.iter markers ~f:(fun (name, _, _) ->
+      Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+          Primus.System.add_component s ~package:"bap" name))
 
 let enable_injection () =
-  Primus.Machine.add_component (module Intro) [@warning "-D"]
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "taint-intro")
 
 open Config;;
 

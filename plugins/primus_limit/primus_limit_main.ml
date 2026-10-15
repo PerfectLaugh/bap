@@ -140,7 +140,9 @@ let () =
     ~provides:[ "termination"; "primus"; "microexecution"; "microx" ]
   @@ fun { get } ->
   if Option.is_some (get Cfg.max_length) || Option.is_some (get Cfg.max_visited)
-  then Primus.Machine.add_component (module Main) [@warning "-D"];
+  then
+    Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+        Primus.System.add_component s ~package:"bap" "limit");
   Primus.Components.register_generic "limit"
     (module Main)
     ~package:"bap"

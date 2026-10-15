@@ -1,0 +1,4 @@
+(library
+ (name primus_bil)
+ (wrapped false)
+ (libraries bap bap-core-theory bap-primus core monads))

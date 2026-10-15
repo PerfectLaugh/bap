@@ -164,7 +164,8 @@ let start_monitoring { Config.get = ( ! ) } =
 
     let init () = setup_tracing ()
   end in
-  Primus.Machine.add_component (module Monitor) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "observation-printer");
   Primus.Components.register_generic "observation-printer"
     (module Monitor)
     ~package:"bap"

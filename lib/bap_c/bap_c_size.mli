@@ -14,7 +14,6 @@ val next_multitude_of : n:int -> int -> int
     @since 2.5.0 *)
 
 val padding : Size.t -> int -> int
-[@@deprecated "since [2021-05] this method is ignored"]
 (** [padding alignment offset] computes the required padding at [offset] to
     ensure the [alignment].
 

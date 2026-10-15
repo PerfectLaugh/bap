@@ -218,7 +218,8 @@ let register_policy_selector name =
          name)
 
 let enable_policy_selectors name =
-  Primus.Machine.add_component (policy_selector name) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "select-default-taint-policy");
   Primus.Components.register_generic "select-default-taint-policy"
     (policy_selector name) ~package:"bap"
     ~desc:
@@ -278,13 +279,15 @@ let () =
   declare_extension ~doc:"manages the Primus Taint Analysis framework"
     ~provides:[ "dataflow"; "pass"; "taint"; "primus"; "primus-lisp" ]
   @@ fun { get = ( !! ) } ->
-  Primus.Machine.add_component (module Setup) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "taint-primitives");
   Primus.Components.register_generic "taint-primitives"
     (module Setup)
     ~package:"bap"
     ~desc:
       "Exposes Primus Lisp primitives that controls the Primus Taint Engine.";
-  Primus.Machine.add_component (module Signals) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "taint-signals");
   Primus.Components.register_generic ~package:"bap" "taint-signals"
     (module Signals)
     ~desc:"Reflects Primus Taint observations to Lisp signals.";
@@ -298,4 +301,6 @@ let () =
 
   enable_policy_selectors !!policy;
   if !!enable_gc then
-    Primus.Machine.add_component (module Taint.Gc.Conservative) [@warning "-D"]
+    Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+        Primus.System.add_component s ~package:"bap"
+          "conservative-garbage-collector")

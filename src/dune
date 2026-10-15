@@ -29,7 +29,16 @@
  (modules bap_byteweight_main)
  (preprocess
   (pps ppx_bap))
- (libraries bap bap-byteweight cmdliner curl fileutils re.posix threads))
+ (libraries
+  bap
+  bap-byteweight
+  bap-core-theory
+  bap-knowledge
+  cmdliner
+  curl
+  fileutils
+  re.posix
+  threads))
 
 (executable
  (name baptop)

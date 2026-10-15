@@ -87,7 +87,8 @@ let desc =
 
 let register enabled =
   if enabled then
-    Primus.Machine.add_component (module Scheduler) [@warning "-D"];
+    Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+        Primus.System.add_component s ~package:"bap" "exploring-scheduler");
   Primus.Components.register_generic "exploring-scheduler"
     (module Scheduler)
     ~package:"bap"

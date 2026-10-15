@@ -1,8 +1,6 @@
 open Core
 
-[@@@ocaml.warning "-3"]
-
-external init : unit -> int = "disasm_llvm_init_stub" "noalloc"
+external init : unit -> int = "disasm_llvm_init_stub" [@@noalloc]
 
 type x86_syntax = [ `att | `intel ] [@@deriving sexp]
 

@@ -47,15 +47,14 @@ val capitalize : t -> t
 val uncapitalize : t -> t
 
 module Unsafe : sig
-  [@@@ocaml.warning "-3"]
-
   val to_string : t -> string
   val of_string : string -> t
   external get : t -> int -> char = "%string_unsafe_get"
   external set : t -> int -> char -> unit = "%string_unsafe_set"
 
-  external blit : t -> int -> t -> int -> int -> unit
-    = "caml_blit_string" "noalloc"
+  external blit : t -> int -> t -> int -> int -> unit = "caml_blit_string"
+  [@@noalloc]
 
-  external fill : t -> int -> int -> char -> unit = "caml_fill_string" "noalloc"
+  external fill : t -> int -> int -> char -> unit = "caml_fill_string"
+  [@@noalloc]
 end

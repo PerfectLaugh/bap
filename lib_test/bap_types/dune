@@ -3,4 +3,4 @@
  (preprocess
   (pps ppx_bap))
  (wrapped false)
- (libraries bap core ounit2))
+ (libraries bap core ounit2 primus_bil))

@@ -26,6 +26,7 @@ type 'a data
 
 val lookup :
   ?paths:string list ->
+  ?defaults:bool ->
   ?compiler:Theory.compiler ->
   Theory.Target.t ->
   'a data ->
@@ -36,8 +37,8 @@ val lookup :
     The first matching entry is selected. If a file in the [paths] list doesn't
     exist then it is skipped. If it exists but unreadable an error is returned.
 
-    The paths list is always appended by [[default_path; system_path]], in that
-    specific order.
+    Unless [defaults] is [false] (it is [true] by default), the paths list is
+    appended by [[default_path; system_path]], in that specific order.
 
     If [compiler] is specified, then only entries that list matching compiler
     will be selected.

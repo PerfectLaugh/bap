@@ -304,8 +304,10 @@ module Lisp (Machine : Primus.Machine.S) = struct
 end
 
 let main () =
-  Primus.Machine.add_component (module Location.Record) [@warning "-D"];
-  Primus.Machine.add_component (module Lisp) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "incident-location-recorder");
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "lisp-incidents");
   Primus.Components.register_generic ~package:"bap" "incident-location-recorder"
     (module Location.Record)
     ~desc:"Records tracepoints for incident reporting.";

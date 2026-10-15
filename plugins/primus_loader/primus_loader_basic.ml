@@ -57,10 +57,6 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     Set.to_sequence (Theory.Target.vars t)
     |> Machine.Seq.iter ~f:(fun reg -> Env.add (Var.reify reg) zero)
 
-  let rec is set = function
-    | Backend.Or (p1, p2) -> is set p1 || is set p2
-    | bit -> [%compare.equal: Backend.perm] bit set
-
   let segmentations =
     let open Image.Scheme in
     Ogre.foreach Ogre.Query.(select (from segment)) ~f:Fn.id

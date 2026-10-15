@@ -91,15 +91,12 @@ let test_rr (mask, expected) ctxt =
   let bil =
     Bil.[ move xmm0 (int origin); move xmm1 (int mask) ] @ insn_bil pshufb_rr
   in
-  let c = Stmt.eval bil (new Bili.context) in
+  let c = Primus_bil.eval bil in
   assert_bool "pshufb: got wrong result"
   @@
-  match c#lookup xmm0 with
+  match Primus_bil.lookup c xmm0 with
   | None -> false
-  | Some r -> (
-      match Bil.Result.value r with
-      | Bil.Imm word -> Word.equal word expected
-      | _ -> false)
+  | Some word -> Word.equal word expected
 
 class exn_visitor =
   object

@@ -35,7 +35,7 @@ val check_gpr :
     concatenation of [init_bil] and code, obtained from lifting [bytes]. [addr]
     is an instruction address, 0 by default. *)
 
-val eval : ?addr:addr -> bil -> string -> arch -> Bili.context
+val eval : ?addr:addr -> bil -> string -> arch -> Primus_bil.t
 (** [eval ?addr init_bil bytes arch] - evaluates bil, that is a concatenation of
     [init_bil] and code, obtained from lifting [bytes]. [addr] is an instruction
     address, 0 by default. *)
@@ -56,7 +56,7 @@ val check_mem :
     bil, that is a concatenation of [init_bil] and code, obtained from lifting
     [bytes]. *)
 
-val lookup_var : Bili.context -> var -> word option
+val lookup_var : Primus_bil.t -> var -> word option
 (** [lookup_var context var] - returns a word, bound to [var] in [context] *)
 
 val make_bytes : word list -> string

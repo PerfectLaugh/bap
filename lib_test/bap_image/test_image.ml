@@ -1,36 +1,16 @@
 open Core
 open OUnit2
 open Or_error
-open Word_size
 open Bap.Std
-
-[@@@warning "-D"]
-
-open Backend
 
 let ident = Int64.of_int
 
-let create_addr = function
-  | `r32 -> Addr.of_int64 ~width:32
-  | `r64 -> Addr.of_int64 ~width:64
-
-let create_segment ?(name = ".test") ?(addr = 0) ?(perm = Or (R, X)) ~off ?size
-    ?data asize : Segment.t =
-  let size, data =
-    match (size, data) with
-    | None, None -> (4, Bytes.create 4)
-    | Some size, None -> (size, Bytes.create size)
-    | None, Some data -> (Bytes.length data, data)
-    | Some size, Some data -> (size, data)
-  in
-  let addr = create_addr asize (Int64.of_int addr) in
-  let location = Location.Fields.create ~addr ~len:size in
-  Segment.Fields.create ~name ~location ~perm ~off
+type segment = { addr : int; off : int; len : int }
 
 let create_file () = Bytes.create 0x1000
 let files : Bytes.t String.Table.t = String.Table.create ()
 
-let data ?(base = 0) ?(gap = 0) f ss asize name =
+let data ?(base = 0) ?(gap = 0) f ss name =
   let addr_ref = ref base in
   List.map ss ~f:(fun data ->
       let data = f data in
@@ -40,18 +20,24 @@ let data ?(base = 0) ?(gap = 0) f ss asize name =
       let off = addr - base in
       Bytes.blit ~src:data ~src_pos:0 ~dst ~dst_pos:off ~len;
       addr_ref := !addr_ref + len + gap;
-      create_segment ~off ~addr ~data asize)
+      { addr; off; len })
 
 let seq (n, m) : Bytes.t =
   Bytes.init (m - n + 1) ~f:(fun i -> Option.value_exn (Char.of_int (i + n)))
 
-let nonempty = function
-  | [] -> invalid_arg "list should be non empty"
-  | x :: xs -> (x, xs)
+(* a readable and executable segment named [.test] *)
+let provide_segment { addr; off; len } =
+  let addr = Int64.of_int addr
+  and size = Int64.of_int len
+  and off = Int64.of_int off in
+  Ogre.sequence
+    [
+      Ogre.provide Image.Scheme.segment addr size true false true;
+      Ogre.provide Image.Scheme.mapped addr size off;
+      Ogre.provide Image.Scheme.named_region addr size ".test";
+    ]
 
-let create ?(addr_size = `r32) ?(endian = LittleEndian) ~syms ss name =
-  let segments = nonempty (ss addr_size name) in
-  let symbols = syms in
+let create ?(addr_size = `r32) ?(endian = LittleEndian) ss name =
   let arch =
     match (addr_size, endian) with
     | `r32, LittleEndian -> `mipsel
@@ -59,41 +45,44 @@ let create ?(addr_size = `r32) ?(endian = LittleEndian) ~syms ss name =
     | `r64, LittleEndian -> `mips64el
     | `r64, BigEndian -> `mips64
   in
-  let entry = create_addr addr_size 0L in
-  let sections = [] in
-  let load _ =
-    Some (Img.Fields.create ~arch ~entry ~segments ~symbols ~sections)
+  let spec =
+    Ogre.sequence
+      [
+        Ogre.provide Image.Scheme.entry_point 0L;
+        Ogre.sequence (List.map (ss name) ~f:provide_segment);
+      ]
   in
-  load
+  let doc = ok_exn (Ogre.exec spec (Image.Spec.from_arch arch)) in
+  let module Loader = struct
+    let from_file _ = Ok (Some doc)
+    let from_data _ = Ok (Some doc)
+  end in
+  (module Loader : Image.Loader)
 
 let backends =
   let le = LittleEndian and be = BigEndian in
   List.fold ~init:[]
-    ~f:(fun acc (n, syms, secs) ->
-      (n ^ "_32LE", create ~addr_size:`r32 ~endian:le ~syms secs)
-      :: (n ^ "_32BE", create ~addr_size:`r32 ~endian:be ~syms secs)
-      :: (n ^ "_64LE", create ~addr_size:`r64 ~endian:le ~syms secs)
-      :: (n ^ "_64BE", create ~addr_size:`r64 ~endian:be ~syms secs)
+    ~f:(fun acc (n, secs) ->
+      (n ^ "_32LE", create ~addr_size:`r32 ~endian:le secs)
+      :: (n ^ "_32BE", create ~addr_size:`r32 ~endian:be secs)
+      :: (n ^ "_64LE", create ~addr_size:`r64 ~endian:le secs)
+      :: (n ^ "_64BE", create ~addr_size:`r64 ~endian:be secs)
       :: acc)
     [
-      ("0-15", [], data seq [ (0, 15) ]);
-      ("16x4", [], data seq [ (0, 15); (16, 31); (32, 47); (48, 63) ]);
-      ("0-15_b", [], data ~base:0x1000FF seq [ (0, 15) ]);
+      ("0-15", data seq [ (0, 15) ]);
+      ("16x4", data seq [ (0, 15); (16, 31); (32, 47); (48, 63) ]);
+      ("0-15_b", data ~base:0x1000FF seq [ (0, 15) ]);
       ( "16x4_b",
-        [],
         data ~base:0x1000FF seq [ (0, 15); (16, 31); (32, 47); (48, 63) ] );
-      ("0-15_g", [], data ~gap:0xFD seq [ (0, 15) ]);
-      ( "16x4_g",
-        [],
-        data ~gap:0xFD seq [ (0, 15); (16, 31); (32, 47); (48, 63) ] );
+      ("0-15_g", data ~gap:0xFD seq [ (0, 15) ]);
+      ("16x4_g", data ~gap:0xFD seq [ (0, 15); (16, 31); (32, 47); (48, 63) ]);
     ]
 
 let () =
   List.iter
     ~f:(fun (name, backend) ->
-      match Image.register_backend ~name (backend name) with
-      | `Ok -> ()
-      | `Duplicate -> failwith name)
+      if Option.is_some (Image.find_loader name) then failwith name;
+      Image.register_loader ~name (backend name))
     backends
 
 let print_list r =

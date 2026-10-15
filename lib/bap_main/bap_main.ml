@@ -1,8 +1,6 @@
 (* Base kills exn, so we have to do it before opening *)
 type error = exn = ..
 
-[@@@warning "-D"]
-
 open Base
 open Stdio
 open Bap_future.Std
@@ -144,10 +142,12 @@ module Type = struct
   let ( |= ) = refine
   let ( %: ) name t = rename t name
 
-  let converter { parse; print } : 'a Arg.converter =
-    let parser s = try `Ok (parse s) with exn -> `Error (Exn.to_string exn) in
+  let converter { parse; print } : 'a Arg.conv =
+    let parser s =
+      try Ok (parse s) with exn -> Error (`Msg (Exn.to_string exn))
+    in
     let printer ppf s = Format.fprintf ppf "%s" (print s) in
-    (parser, printer)
+    Arg.conv (parser, printer)
 
   let default conv = conv.default
   let redefault t default = { t with default }
@@ -537,7 +537,7 @@ module Pre = struct
 
   let logdir : string option Term.t =
     let doc = "A folder for log files." in
-    let env = Term.env_info ~doc "BAP_LOG_DIR" in
+    let env = Cmd.Env.info ~doc "BAP_LOG_DIR" in
     Arg.(
       value & opt (some string) None & info [ "logdir"; "log-dir" ] ~env ~doc)
 
@@ -550,7 +550,7 @@ module Pre = struct
     let doc = "Load the specified recipe" in
     Arg.(value & opt (some string) None & info ~doc [ "recipe" ])
 
-  let extract ?env option argv = fst (Term.eval_peek_opts ?env ~argv option)
+  let extract ?env option argv = fst (Cmd.eval_peek_opts ?env ~argv option)
 
   let term =
     Term.(const (fun _ _ _ -> Ok ()) $ logdir $ plugin_locations $ recipe)
@@ -684,7 +684,7 @@ end = struct
   type plugin_ctxt = { name : string; config : (string * string) list }
 
   type command =
-    (ctxt -> (unit, Error.t) Result.t) Term.t * Term.info * string list option
+    (ctxt -> (unit, Error.t) Result.t) Term.t * Cmd.info * string list option
 
   type ('a, 'b) arity = 'a Type.t -> 'b Type.t
 
@@ -828,7 +828,7 @@ end = struct
       command =
     let man = Markdown.to_manpage doc in
     let doc = short_description ~default:doc @@ first_sentence_of_man man in
-    let term = run @@ command and info = Term.info ~doc ~man name in
+    let term = run @@ command and info = Cmd.info ~doc ~man name in
     actions := (name, doc) :: !actions;
     commands := (term, info, deps) :: !commands
 
@@ -1060,7 +1060,7 @@ end = struct
     let disabled_plugins = no_plugin_options plugin_names in
     let plugin_options = concat_plugins () in
     let man = (Markdown.to_manpage man :> Manpage.block list) in
-    let main_info = Term.info ?version ~man name in
+    let main_info = Cmd.info ?version ~man name in
     let helps = help_options ?version help plugin_names in
     let plugins =
       Pre.term >>> helps
@@ -1068,15 +1068,15 @@ end = struct
     in
     let commands =
       List.map !commands ~f:(fun (command, info, deps) ->
-          ( (plugins
+          Cmd.v info
+            (plugins
             >>> Term.(
                   const (fun cmd ->
                       let ctxt =
                         Context.refine ?provides:deps @@ Context.request ()
                       in
                       cmd ctxt)
-                  $ command)),
-            info ))
+                  $ command)))
     in
     let main =
       match default with
@@ -1096,8 +1096,8 @@ end = struct
           match Array.to_list argv with
           | prog :: arg :: rest ->
               if
-                List.exists commands ~f:(fun (_, info) ->
-                    String.is_prefix ~prefix:arg (Term.name info))
+                List.exists commands ~f:(fun cmd ->
+                    String.is_prefix ~prefix:arg (Cmd.name cmd))
               then argv
               else Array.of_list (prog :: cmd :: arg :: rest)
           | [ _ ] | [] -> argv)
@@ -1105,14 +1105,14 @@ end = struct
     let buf = Buffer.create 64 in
     let err = Format.formatter_of_buffer buf in
     match
-      Term.eval_choice (main, main_info) commands ?env ~help ~err ~argv
-        ~catch:false
+      Cmd.eval_value ?env ~help ~err ~argv ~catch:false
+        (Cmd.group ~default:main main_info commands)
     with
-    | `Error `Exn -> assert false (*^^^^^^^^^^^ that's why*)
-    | `Ok (Ok ()) -> Ok ()
-    | `Ok (Error _ as err) -> err
-    | `Version | `Help -> Ok ()
-    | `Error (`Parse | `Term) -> (
+    | Error `Exn -> assert false (*^^^^^^^^^^^ that's why*)
+    | Ok (`Ok (Ok ())) -> Ok ()
+    | Ok (`Ok (Error _ as err)) -> err
+    | Ok (`Version | `Help) -> Ok ()
+    | Error (`Parse | `Term) -> (
         match !term_evaluation_result with
         | Ok () ->
             Format.pp_print_flush err ();

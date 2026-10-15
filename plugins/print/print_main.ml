@@ -407,7 +407,7 @@ let print_jmp_dst tab blk ppf insn =
 
 let pp_insn fmt tab blk ppf (mem, insn) =
   Memory.pp ppf mem;
-  pp_print_tab ppf () [@ocaml.warning "-3"];
+  pp_print_tab ppf ();
   Insn.Io.print ~fmt ppf insn;
   if phys_equal insn (Block.terminator blk) then print_jmp_dst tab blk ppf insn;
   fprintf ppf "@\n"

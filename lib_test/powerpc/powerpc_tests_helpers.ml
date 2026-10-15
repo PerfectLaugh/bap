@@ -1,9 +1,6 @@
 open Core
 open Bap.Std
 open OUnit2
-
-[@@@warning "-D"]
-
 module Dis = Disasm_expert.Basic
 
 module type Bitwidth = sig
@@ -212,13 +209,7 @@ let get_insn ?addr arch bytes =
   | Error err ->
       failwithf "Diassembler failed with: %s" (Error.to_string_hum err) ()
 
-let lookup_var c var =
-  match c#lookup var with
-  | None -> None
-  | Some r -> (
-      match Bil.Result.value r with
-      | Bil.Imm word -> Some word
-      | Bil.Bot | Bil.Mem _ -> None)
+let lookup_var = Primus_bil.lookup
 
 let find_gpr arch name =
   try
@@ -249,7 +240,7 @@ let check_gpr ?addr init bytes var expected arch _ctxt =
   let mem, insn, insn_name = get_insn ?addr arch bytes in
   let bil = Or_error.ok_exn @@ to_bil arch mem insn in
   check_bil (init @ bil);
-  let c = Stmt.eval (init @ bil) (new Bili.context) in
+  let c = Primus_bil.eval (init @ bil) in
   match lookup_var c var with
   | None -> assert_bool "var not found OR it's result not Imm" false
   | Some w ->
@@ -268,23 +259,22 @@ let eval ?addr init bytes arch =
   let mem, insn, _ = get_insn ?addr arch bytes in
   let bil = Or_error.ok_exn @@ to_bil arch mem insn in
   check_bil (init @ bil);
-  Stmt.eval (init @ bil) (new Bili.context)
+  Primus_bil.eval (init @ bil)
 
-let load_word ctxt mem addr endian size =
+(* evaluates [bil] followed by the load of the word at [addr] *)
+let load_word bil mem addr endian size =
   let bits = Size.in_bits size in
   let tmp = Var.create ~fresh:true "tmp" (Type.imm bits) in
-  let bil = Bil.[ tmp := load ~mem:(var mem) ~addr:(int addr) endian size ] in
-  check_bil bil;
-  let ctxt = Stmt.eval bil ctxt in
-  lookup_var ctxt tmp
+  let load = Bil.[ tmp := load ~mem:(var mem) ~addr:(int addr) endian size ] in
+  check_bil load;
+  lookup_var (Primus_bil.eval (bil @ load)) tmp
 
 let check_mem init bytes mem ~addr ~size expected ?(endian = BigEndian) arch
     _ctxt =
   let memory, insn, insn_name = get_insn arch bytes in
   let bil = Or_error.ok_exn @@ to_bil arch memory insn in
   check_bil (init @ bil);
-  let c = Stmt.eval (init @ bil) (new Bili.context) in
-  match load_word c mem addr endian size with
+  match load_word (init @ bil) mem addr endian size with
   | None -> assert_bool "word not found OR it's result not Imm" false
   | Some w ->
       if not (Word.equal w expected) then

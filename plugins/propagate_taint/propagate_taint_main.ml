@@ -162,8 +162,6 @@ let digest_project proj =
     (Project.program proj)
     (Data.Cache.Digest.create ~namespace:"propagate_taint")
 
-let digest_args args = sexp_of_args args |> Sexp.to_string_mach |> Digest.string
-
 let digest args proj =
   Data.Cache.Digest.(add_sexp (digest_project proj) sexp_of_args args)
 

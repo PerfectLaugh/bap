@@ -115,5 +115,6 @@ let components : (string * Primus.Machine.component * string) list =
 
 let init () =
   List.iter components ~f:(fun (name, comp, desc) ->
-      Primus.Machine.add_component comp [@warning "-D"];
+      Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+          Primus.System.add_component s ~package:"bap" name);
       Primus.Components.register_generic name comp ~package:"bap" ~desc)

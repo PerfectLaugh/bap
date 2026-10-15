@@ -38,9 +38,9 @@ struct
 
   let pp_insn_line fmt (mem, insn) =
     pp_print_cut fmt ();
-    pp_print_tab fmt () [@ocaml.warning "-3"];
+    pp_print_tab fmt ();
     Memory.pp fmt mem;
-    pp_print_tab fmt () [@ocaml.warning "-3"];
+    pp_print_tab fmt ();
     Insn.pp fmt insn
 
   let pp_nothing _ () = ()
@@ -77,17 +77,17 @@ struct
 
   let setup_tab_stops fmt =
     pp_print_as fmt 6 "";
-    pp_set_tab fmt () [@ocaml.warning "-3"];
+    pp_set_tab fmt ();
     pp_print_as fmt 25 "";
-    pp_set_tab fmt () [@ocaml.warning "-3"];
+    pp_set_tab fmt ();
     pp_print_as fmt 20 "";
-    pp_set_tab fmt () [@ocaml.warning "-3"]
+    pp_set_tab fmt ()
 
   (** prints a code as html document *)
   let pp_code pp fmt v =
     pp_print_cut fmt ();
     pp_open_vbox fmt 0;
-    pp_open_tbox fmt () [@ocaml.warning "-3"];
+    pp_open_tbox fmt ();
     setup_tab_stops fmt;
     fprintf fmt
       "@;\
@@ -97,7 +97,7 @@ struct
       \       (href ../../../css/code-panel.css))>@}@}@{<body>%a@;\
        @}@}"
       pp v;
-    pp_close_tbox fmt () [@ocaml.warning "-3"];
+    pp_close_tbox fmt ();
     pp_close_box fmt ();
     pp_print_flush fmt ()
 end

@@ -14,7 +14,7 @@ results.
 Signatures are stored in an archive, which is managed by the
 bap-byteweight library. The archive consists of several independent
 entries, for each combination of an architecture, compiler, and matching
-mode, having the following name $(b,<arch>/<comp>/<mode>). The
+mode, having the following name $(b,<target>/<comp>/<mode>). The
 $(b,default) name is used as a catch all compiler. The only mode
 currently supported is the $(b,byte) mode (i.e., matching on bytes).
 
@@ -65,6 +65,7 @@ following interpretations:
 |}
 
 open Core
+open Bap_core_theory
 open Bap.Std
 open Result.Monad_infix
 open Format
@@ -74,10 +75,6 @@ module Sigs = Bap_byteweight_signatures
 module Digest = Stdlib.Digest
 module Config = Extension.Configuration
 module Sys = Stdlib.Sys
-
-(* we still have to update this tool to support modern bap *)
-let sigs_load = Sigs.load [@warning "-D"]
-let sigs_save = Sigs.save [@warning "-D"]
 
 type failure =
   | Image of Error.t
@@ -114,12 +111,25 @@ let create_image loader input =
 
 let with_sigs_error = Result.map_error ~f:(fun err -> bw_failure (Sigs err))
 
-let load_or_create_signatures ?comp ?path operation arch =
+let target_of_image img =
+  let open KB.Syntax in
+  Toplevel.eval Theory.Unit.target
+    ( KB.Object.create Theory.Unit.cls >>= fun unit ->
+      KB.provide Image.Spec.slot unit (Image.spec img) >>| fun () -> unit )
+
+let compiler = Option.map ~f:Theory.Compiler.create
+
+(* if [path] is specified then only it is searched *)
+let load_or_create_signatures ?comp ?path operation target =
   match operation with
   | `rewrite -> Ok (BW.create ())
   | operation -> (
-      match (sigs_load ?comp ?path ~mode:"bytes" arch, operation) with
-      | Ok s, _ -> Ok (Binable.of_string (module BW) (Bytes.to_string s))
+      let paths = Option.to_list path and defaults = Option.is_none path in
+      match
+        ( Sigs.lookup ~paths ~defaults ?compiler:(compiler comp) target BW.t,
+          operation )
+      with
+      | Ok s, _ -> Ok s
       | Error (`No_entry _ | `No_signatures), `update -> Ok (BW.create ())
       | Error e, _ -> fail (Sigs e))
 
@@ -136,14 +146,11 @@ let code_of_image img =
 
 let train_on_file loader comp operation max_length db path =
   create_image loader path >>= fun img ->
-  let arch = Image.arch img in
+  let target = target_of_image img in
   let oracle = oracle_of_image img in
-  load_or_create_signatures ?comp ~path:db operation arch >>= fun bw ->
+  load_or_create_signatures ?comp ~path:db operation target >>= fun bw ->
   Seq.iter (code_of_image img) ~f:(BW.train bw ~max_length oracle);
-  with_sigs_error
-  @@ sigs_save ?comp ~mode:"bytes" ~path:db arch
-  @@ Bytes.of_string
-  @@ Binable.to_string (module BW) bw
+  with_sigs_error @@ Sigs.update ?compiler:(compiler comp) target BW.t bw db
 
 let add_file files path = Map.set files ~key:(Digest.file path) ~data:path
 
@@ -177,8 +184,8 @@ let train loader operation length comp db paths _ctxt =
 
 let find loader threshold min_length max_length comp path input _ctxt =
   create_image loader input >>= fun img ->
-  let arch = Image.arch img in
-  load_or_create_signatures ?comp ?path `load arch >>| fun bw ->
+  let target = target_of_image img in
+  load_or_create_signatures ?comp ?path `load target >>| fun bw ->
   let find =
     if Float.(threshold > 1.) then
       BW.find_using_bayes_factor bw threshold ~min_length ~max_length
@@ -231,10 +238,10 @@ end
 
 let dump loader comp info min_length max_length threshold path input _ctxt =
   create_image loader input >>= fun img ->
-  let arch = Image.arch img in
   match info with
   | `BW ->
-      load_or_create_signatures ?comp ?path `load arch >>| fun bw ->
+      let target = target_of_image img in
+      load_or_create_signatures ?comp ?path `load target >>| fun bw ->
       let find =
         if Float.(threshold > 1.) then
           BW.find_using_bayes_factor bw threshold ~min_length ~max_length
@@ -455,8 +462,8 @@ Commands:
 let () =
   match
     Bap_main.init () ~features:[ "byteweight-frontend" ]
-      ~requires:[ "loader"; "byteweight" ] ~argv:Sys.argv ~man ~default
-      ~name:"bap-byteweight"
+      ~requires:[ "loader"; "lifter"; "byteweight" ]
+      ~argv:Sys.argv ~man ~default ~name:"bap-byteweight"
   with
   | Ok () -> ()
   | Error err ->

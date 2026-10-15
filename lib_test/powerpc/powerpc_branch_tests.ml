@@ -8,18 +8,18 @@ let typecheck bytes arch _ctxt =
   assert_bool "typecheck failed" (Result.is_ok bil)
 
 let check_pc name c expected =
-  match c#pc with
-  | Bil.Imm a ->
+  match Primus_bil.pc c with
+  | Some a ->
       assert_bool
         (sprintf "%s fail: addr is not equal to expected: %s <> %s" name
            (Addr.to_string a) (Addr.to_string expected))
         (Addr.equal a expected)
-  | _ -> assert_bool (sprintf "%s fail: pc is not a word" name) false
-
-let is_bot = function Bil.Bot -> true | _ -> false
+  | None -> assert_bool (sprintf "%s fail: no jump occurred" name) false
 
 let check_jmp_absence name c =
-  assert_bool (sprintf "%s fail: jmp occurred" name) (is_bot c#pc)
+  assert_bool
+    (sprintf "%s fail: jmp occurred" name)
+    (Option.is_none (Primus_bil.pc c))
 
 let addr_of_arch = function
   | `ppc -> Word.of_int64 ~width:32 0xABCD42AAL

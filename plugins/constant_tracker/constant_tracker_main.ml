@@ -103,7 +103,8 @@ let () =
   Config.declare_extension ~doc:"a constant tracking analysis based on Primus"
     ~provides:[ "primus"; "lisp"; "analysis" ]
   @@ fun { Config.get } ->
-  Primus.Machine.add_component (module Primitives) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "constant-tracker-primitives");
   Primus.Components.register_generic "constant-tracker-primitives"
     (module Primitives)
     ~package:"bap"
@@ -116,4 +117,5 @@ let () =
        constant if it was initialized from a constant value or computed from \
        static constant values. ";
   if get enable then
-    Primus.Machine.add_component (module Tracker) [@warning "-D"]
+    Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+        Primus.System.add_component s ~package:"bap" "constant-tracker")

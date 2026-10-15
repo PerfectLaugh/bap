@@ -191,7 +191,8 @@ let () =
     ~doc:"provides a Primus Lisp key-value storage library"
     ~provides:[ "primus"; "primus-library"; "dictionary" ]
   @@ fun _ ->
-  Primus.Machine.add_component (module Main) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "lisp-dictionary");
   Primus.Components.register_generic "lisp-dictionary"
     (module Main)
     ~package:"bap" ~desc

@@ -24,5 +24,6 @@ let () =
   Primus.Components.register_generic ~package:"bap" "report-visited"
     (module ReportProgress)
     ~desc:"Reports progress when a new basic block is discovered.";
-  Primus.Machine.add_component (module ReportProgress) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "report-visited");
   Ok ()

@@ -51,9 +51,10 @@ module Documentation = struct
     end in
     let open Machine.Syntax in
     let module Doc = Primus.Lisp.Doc.Make (Machine) in
-    let module Main = Primus.Machine.Main (Machine) in
+    let module System = Primus.System.Generic (Machine) in
     let print = Doc.generate_index >>| Primus_lisp_documentation.print None in
-    match Main.run proj print with
+    let main = Primus.System.Repository.get ~package:"bap" "legacy-main" in
+    match System.run ~start:print main proj with
     | Normal, _ -> ()
     | Exn e, _ ->
         eprintf "Failed to generate documentation: %s\n"
@@ -167,7 +168,8 @@ let load_lisp_program dump paths features =
       if dump then dump_program prog;
       Lisp.link_program prog
   end in
-  Primus.Machine.add_component (module Loader) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "load-lisp-library");
   Primus.Components.register_generic "load-lisp-library"
     (module Loader)
     ~package:"bap"
@@ -234,10 +236,13 @@ let typecheck proj =
 
     include Primus.Machine.Make (Monad.Ident)
   end in
-  let module Main = Primus.Machine.Main (Machine) in
-  let module Lisp = Primus.Lisp.Make (Machine) in
-  Primus.Machine.add_component (module TypeErrorSummary) [@warning "-D"];
-  match Main.run proj @@ Machine.return () with
+  let module System = Primus.System.Generic (Machine) in
+  let system =
+    Primus.System.add_component ~package:"bap"
+      (Primus.System.Repository.get ~package:"bap" "legacy-main")
+      "lisp-type-checker"
+  in
+  match System.run ~start:(Machine.return ()) system proj with
   | Normal, _ -> ()
   | Exn err, _ ->
       warning "Primus Framework failed to initialize: %s@\n%!"
@@ -450,14 +455,16 @@ let () =
   Primus.Components.register_generic ~package:"bap" "lisp-type-checker"
     (module TypeErrorSummary)
     ~desc:"Typechecks program and outputs the summary in the standard output.";
-  Primus.Machine.add_component (module LispCore) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "lisp-core");
   Primus.Components.register_generic "lisp-core"
     (module LispCore)
     ~package:"bap"
     ~desc:
       "Initializes Primus Lisp core. Forwards Lisp message to the BAP log \
        subsystem and enables propagation of observations to signals.";
-  Primus.Machine.add_component (module TypeErrorPrinter) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "lisp-type-error-printer");
   Primus.Components.register_generic ~package:"bap" "lisp-type-error-printer"
     (module TypeErrorPrinter)
     ~desc:"Prints Primus Lisp type errors into the standard output.";

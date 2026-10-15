@@ -51,7 +51,9 @@ module RR (Machine : Primus.Machine.S) = struct
 end
 
 let register enabled =
-  if enabled then Primus.Machine.add_component (module RR) [@warning "-D"];
+  if enabled then
+    Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+        Primus.System.add_component s ~package:"bap" "round-robin-scheduler");
   Primus.Components.register_generic "round-robin-scheduler"
     (module RR)
     ~package:"bap" ~desc:"Enables the round-robin scheduler (experimental)."

@@ -9,7 +9,8 @@ let init s b =
     let stack_base = b
   end in
   let module Loader = Primus_loader_basic.Make (Param) in
-  Primus.Machine.add_component (module Loader) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "program-loader");
   Primus.Components.register_generic ~package:"bap" "program-loader"
     (module Loader)
     ~desc:

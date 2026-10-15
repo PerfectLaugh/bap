@@ -64,7 +64,9 @@ let desc =
    basic block is evaluated."
 
 let register enabled =
-  if enabled then Primus.Machine.add_component (module Greedy) [@warning "-D"];
+  if enabled then
+    Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+        Primus.System.add_component s ~package:"bap" "greedy-scheduler");
   Primus.Components.register_generic "greedy-scheduler"
     (module Greedy)
     ~package:"bap"

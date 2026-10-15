@@ -125,4 +125,5 @@ let init () =
       "Marks visited (by Primus) program terms with the [Term.visited] \
        attribute and unvisited with the [Term.dead] attribute. Note, that the \
        attributes are attached only when the system exits";
-  Primus.Machine.add_component (module Tracker) [@warning "-D"]
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "mark-visited")

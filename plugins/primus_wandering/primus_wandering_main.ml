@@ -69,7 +69,8 @@ let register enabled seed =
   let module Scheduler = Make (Random) in
   if enabled then (
     info "enabling the scheduler, using %d as the seed" seed;
-    Primus.Machine.add_component (module Scheduler) [@warning "-D"]);
+    Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+        Primus.System.add_component s ~package:"bap" "wondering-scheduler"));
   Primus.Components.register_generic "wondering-scheduler"
     (module Scheduler)
     ~package:"bap"

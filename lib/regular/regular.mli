@@ -1055,13 +1055,11 @@ module Std : sig
 
       external set : t -> int -> char -> unit = "%string_unsafe_set"
 
-      [@@@ocaml.warning "-3"]
+      external blit : t -> int -> t -> int -> int -> unit = "caml_blit_string"
+      [@@noalloc]
 
-      external blit : t -> int -> t -> int -> int -> unit
-        = "caml_blit_string" "noalloc"
-
-      external fill : t -> int -> int -> char -> unit
-        = "caml_fill_string" "noalloc"
+      external fill : t -> int -> int -> char -> unit = "caml_fill_string"
+      [@@noalloc]
 
       (**/**)
     end

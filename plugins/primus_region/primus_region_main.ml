@@ -202,7 +202,8 @@ let () =
     ~doc:"provides Primus Lisp library for manipulating program regions"
     ~provides:[ "primus"; "primus-library"; "regions"; "interval-trees" ]
   @@ fun _ ->
-  Primus.Machine.add_component (module Main) [@warning "-D"];
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "lisp-regions");
   Primus.Components.register_generic "lisp-regions"
     (module Main)
     ~package:"bap" ~desc

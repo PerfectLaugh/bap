@@ -144,8 +144,6 @@ include Identifiable.Make_and_derive_hash_fold_t (struct
 end)
 
 module Unsafe = struct
-  [@@@ocaml.warning "-3"]
-
   let of_string = T.unsafe_of_string
   let to_string = T.unsafe_to_string
 
@@ -154,9 +152,9 @@ module Unsafe = struct
 
   external set : T.t -> int -> char -> unit = "%string_unsafe_set"
 
-  external blit : T.t -> int -> T.t -> int -> int -> unit
-    = "caml_blit_string" "noalloc"
+  external blit : T.t -> int -> T.t -> int -> int -> unit = "caml_blit_string"
+  [@@noalloc]
 
-  external fill : T.t -> int -> int -> char -> unit
-    = "caml_fill_string" "noalloc"
+  external fill : T.t -> int -> int -> char -> unit = "caml_fill_string"
+  [@@noalloc]
 end

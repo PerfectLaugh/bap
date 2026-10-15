@@ -32,5 +32,5 @@ module Std = struct
   type project = Project.t
   type event = Event.t = ..
 
-  module Monad = Legacy.Monad
+  module Monad = Legacy.Monad [@@alert "-deprecated"]
 end

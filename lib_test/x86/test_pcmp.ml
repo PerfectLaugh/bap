@@ -69,19 +69,16 @@ let test insn_name bytes x y ~expected _ctxt =
   let xmm0 = Env.ymms.(0) in
   let xmm1 = Env.ymms.(1) in
   let bil = Bil.[ move xmm0 (int x); move xmm1 (int y) ] @ insn_bil bytes in
-  let c = Stmt.eval bil (new Bili.context) in
+  let c = Primus_bil.eval bil in
   assert_bool ("got wrong result for " ^ insn_name)
   @@
-  match c#lookup xmm1 with
+  match Primus_bil.lookup c xmm1 with
   | None -> false
-  | Some r -> (
-      match Bil.Result.value r with
-      | Bil.Imm word ->
-          if not (Word.equal word expected) then
-            printf "%s: got %s, expected %s\n" insn_name (Word.to_string word)
-              (Word.to_string expected);
-          Word.equal word expected
-      | _ -> false)
+  | Some word ->
+      if not (Word.equal word expected) then
+        printf "%s: got %s, expected %s\n" insn_name (Word.to_string word)
+          (Word.to_string expected);
+      Word.equal word expected
 
 let test_eqb =
   let pcmpeqb = "\x66\x0f\x74\xc8" in

@@ -2,8 +2,6 @@ open Core
 open OUnit2
 open Bap.Std
 
-[@@@warning "-D"]
-
 let width = 8
 let typ = Type.imm width
 let int x = Bil.int (Word.of_int ~width x)
@@ -61,19 +59,13 @@ let eval bil bil' =
     Hash_set.fold all_vars ~init:[] ~f:(fun bil v ->
         Bil.(v := random ()) :: bil)
   in
-  let c1 = Stmt.eval (init @ bil) (new Bili.context) in
-  let c2 = Stmt.eval (init @ bil') (new Bili.context) in
+  let c1 = Primus_bil.eval (init @ bil) in
+  let c2 = Primus_bil.eval (init @ bil') in
   Hash_set.iter all_vars ~f:(fun v ->
       if Var.is_physical v then
         let res =
-          match (c1#lookup v, c2#lookup v) with
-          | None, None -> true
-          | None, Some _ | Some _, None -> false
-          | Some r1, Some r2 -> (
-              match (Bil.Result.value r1, Bil.Result.value r2) with
-              | Bil.Imm w1, Bil.Imm w2 -> Word.equal w1 w2
-              | Bil.Bot, Bil.Bot | Bil.Mem _, Bil.Mem _ -> true
-              | _ -> false)
+          Option.equal Word.equal (Primus_bil.lookup c1 v)
+            (Primus_bil.lookup c2 v)
         in
         assert_bool ("random: " ^ error_of_bil bil bil' None) res)
 

@@ -71,8 +71,8 @@ let default_path =
 
 let default_paths = [ default_path; system_path ]
 
-let try_lookup ?(paths = []) ?compiler target data =
-  paths @ default_paths
+let try_lookup ?(paths = []) ?(defaults = true) ?compiler target data =
+  (if defaults then paths @ default_paths else paths)
   |> List.find_map ~f:(fun path ->
       if Sys.file_exists path then read_entry ?compiler target data path
       else None)
@@ -83,8 +83,8 @@ let of_exn = function
   | Failed er -> Error er
   | other -> raise other
 
-let lookup ?paths ?compiler target data =
-  match try_lookup ?paths ?compiler target data with
+let lookup ?paths ?defaults ?compiler target data =
+  match try_lookup ?paths ?defaults ?compiler target data with
   | exception exn -> of_exn exn
   | None -> Error (`No_entry (target_name target))
   | Some data -> Ok data
@@ -121,14 +121,24 @@ let temporary_copy file =
   Out_channel.close output;
   tmp
 
+let restore ~backup path =
+  match backup with
+  | None -> if Sys.file_exists path then Sys.remove path
+  | Some tmp ->
+      In_channel.with_file tmp ~f:(fun input ->
+          Out_channel.with_file path ~f:(fun output -> copy input output));
+      Sys.remove tmp
+
 let update ?compiler target data payload path =
-  let tmp = temporary_copy path in
+  let backup =
+    if Sys.file_exists path then Some (temporary_copy path) else None
+  in
   try
     update_or_fail ?compiler target data payload path;
-    Sys.rename tmp path;
+    Option.iter backup ~f:Sys.remove;
     Ok ()
   with exn ->
-    Sys.remove tmp;
+    restore ~backup path;
     of_exn exn
 
 module Data = struct

@@ -7,8 +7,6 @@ open Bap_strings.Std
 open Bap_future.Std
 open Format
 
-[@@@warning "-D"]
-
 module type Alphabet = Strings.Unscrambler.Alphabet
 
 include Self ()
@@ -101,7 +99,7 @@ type prey = { chars : string list Tid.Map.t; strings : string list Tid.Map.t }
 
 type hunters_club = {
   addrs : Addr.Set.t;
-  checked : Bil.Result.Id.Set.t;
+  checked : Primus.Value.Id.Set.t;
   cache : String.Set.t String.Map.t;
 }
 (** global info for all hunters, don't hunt for addresses! *)
@@ -114,7 +112,7 @@ let hunters_club =
     ~name:"beagle-hunters-club" (fun _ ->
       {
         addrs = Addr.Set.empty;
-        checked = Bil.Result.Id.Set.empty;
+        checked = Primus.Value.Id.Set.empty;
         cache = String.Map.empty;
       })
 
@@ -188,17 +186,14 @@ module Hunter (Machine : Primus.Machine.S) = struct
 
   let process_memory (a, w) = process_word (Value.to_word w)
 
-  let process_variable (_, r) =
-    match Bil.Result.value r with
-    | Bil.Mem _ | Bil.Bot -> Machine.return ()
-    | Bil.Imm w ->
-        let id = Bil.Result.id r in
-        Machine.Global.get hunters_club >>= fun { checked } ->
-        if Set.mem checked id then Machine.return ()
-        else
-          process_word w >>= fun () ->
-          Machine.Global.update hunters_club ~f:(fun club ->
-              { club with checked = Set.add club.checked id })
+  let process_variable (_, v) =
+    let id = Primus.Value.id v in
+    Machine.Global.get hunters_club >>= fun { checked } ->
+    if Set.mem checked id then Machine.return ()
+    else
+      process_word (Value.to_word v) >>= fun () ->
+      Machine.Global.update hunters_club ~f:(fun club ->
+          { club with checked = Set.add club.checked id })
 
   let hunt prey =
     let key = Beagle_prey.data prey in
@@ -235,7 +230,9 @@ module Hunter (Machine : Primus.Machine.S) = struct
         ]
 end
 
-let main _proj = Primus.Machine.add_component (module Hunter) [@warning "-D"]
+let main _proj =
+  Primus.System.Repository.update ~package:"bap" "legacy-main" ~f:(fun s ->
+      Primus.System.add_component s ~package:"bap" "beagle-hunter")
 
 let () =
   Config.declare_extension ~doc:"microx-powered obfuscated string solver"
