@@ -13,13 +13,14 @@
 (rule
  (target cxxfilt_config.ml)
  (deps
-  cxxfilt_config.ml.ab
-  (alias ../../config))
+  (:input cxxfilt_config.ml.ab)
+  (alias ../../config)
+  ../../config.status)
  (action
   (with-stdin-from
-   %{deps}
+   %{input}
    (with-stdout-to
     %{target}
     (chdir
      %{workspace_root}
-     (run ./tools/rewrite.exe -filename %{deps}))))))
+     (run ./tools/rewrite.exe -filename %{input}))))))

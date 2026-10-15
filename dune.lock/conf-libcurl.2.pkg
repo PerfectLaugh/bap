@@ -1,0 +1,42 @@
+(version 2)
+
+(build
+ (all_platforms ((action (run curl-config --libs)))))
+
+(depexts
+ ((libcurl4-gnutls-dev)
+  (= %{os_family} debian))
+ ((libcurl4-gnutls-dev)
+  (= %{os_family} ubuntu))
+ ((libcurl-devel)
+  (= %{os_distribution} mageia))
+ ((openssl-devel libcurl-devel)
+  (= %{os_distribution} centos))
+ ((curl)
+  (= %{os_distribution} nixos))
+ ((curl)
+  (= %{os_distribution} arch))
+ ((curl)
+  (and_absorb_undefined_var
+   (= %{os} win32)
+   (= %{os_distribution} cygwinports)))
+ ((curl-dev)
+  (= %{os_distribution} alpine))
+ ((libcurl-devel)
+  (or_absorb_undefined_var
+   (= %{os_family} suse)
+   (= %{os_family} opensuse)))
+ ((libcurl-devel)
+  (= %{os_family} fedora))
+ ((libcurl-devel)
+  (= %{os_distribution} ol))
+ ((curl)
+  (and_absorb_undefined_var
+   (= %{os_distribution} homebrew)
+   (= %{os} macos)))
+ ((curl)
+  (and_absorb_undefined_var
+   (= %{os_distribution} macports)
+   (= %{os} macos)))
+ ((curl)
+  (= %{os} freebsd)))

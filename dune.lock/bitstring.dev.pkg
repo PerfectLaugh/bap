@@ -1,0 +1,15 @@
+(version dev)
+
+(build
+ (all_platforms ((dune))))
+
+(depends
+ (all_platforms
+  (ocaml stdlib-shims)))
+
+(source
+ (fetch
+  (url
+   git+https://github.com/xguerin/bitstring.git#c74a424c43be6c500a8466d823221436bc79598f)))
+
+(dev)

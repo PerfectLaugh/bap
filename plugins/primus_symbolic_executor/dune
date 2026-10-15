@@ -2,6 +2,7 @@
  (optional)
  (name bap_primus_symbolic_executor_plugin)
  (public_name bap-primus-symbolic-executor.plugin)
+ (modules primus_symbolic_executor_main)
  (preprocess
   (pps ppx_bap))
  (libraries
@@ -25,23 +26,62 @@
  (site
   (bap-common plugins)))
 
-(rule
-  (action (chdir z3 (run python scripts/mk_make.py --ml --staticlib)))
-  (deps (source_tree z3))
-  (alias z3_mk_make))
+;; Z3 is vendored (git submodule) and built from source. Its own `--ml`
+;; bindings target (`make ml`) hard-depends on a global, writable ocamlfind
+;; destdir (it shells out to `ocamlfind install`/`ocamlfind printconf`), which
+;; doesn't exist under dune's package management. So we only use Z3's own
+;; build to produce the native static library, and compile the vendored
+;; OCaml binding sources (and C stub) ourselves as an ordinary local dune
+;; library below -- no ocamlfind install step needed at all.
+;;
+;; Z3's configure/build scripts write all over their own source tree, not
+;; just into declared targets, which dune's read-only mirroring of
+;; source_tree dependencies doesn't allow. So we copy the vendored checkout
+;; into a dune-owned, writable directory target (z3_workdir) and build it
+;; there instead, using dune's native directory-targets support (part of
+;; the language itself since lang dune 3.24).
 
 (rule
-  (action
-    (chdir z3
-      (run make -C build -j4)))
-  (deps
-    (alias z3_mk_make)
-    (package zarith))
-  (alias z3_make))
+ (targets (dir z3_workdir))
+ (deps
+  (source_tree z3)
+  (package zarith))
+ (action
+  (progn
+   (run cp -rL z3/. z3_workdir)
+   (run chmod -R u+w z3_workdir)
+   (chdir z3_workdir
+    (run env CXXFLAGS=-fPIC python scripts/mk_make.py --ml --staticlib))
+   (chdir z3_workdir (run make -C build -j4 libz3-static.a)))))
 
 (rule
-  (action
-    (chdir z3
-      (run ocamlfind install z3 build/api/ml/* build/libz3-static.a)))
-  (deps (alias z3_make))
-  (alias z3_install))
+ (targets
+  z3enums.ml
+  z3native.ml
+  z3.ml
+  z3.mli
+  z3native_stubs.c
+  z3native_stubs.h)
+ (action
+  (progn
+   (copy z3_workdir/src/api/ml/z3enums.ml z3enums.ml)
+   (copy z3_workdir/src/api/ml/z3native.ml z3native.ml)
+   (copy z3_workdir/src/api/ml/z3.ml z3.ml)
+   (copy z3_workdir/src/api/ml/z3.mli z3.mli)
+   (copy z3_workdir/src/api/ml/z3native_stubs.c z3native_stubs.c)
+   (copy z3_workdir/src/api/ml/z3native_stubs.h z3native_stubs.h))))
+
+(library
+ (name z3)
+ (public_name bap-primus-symbolic-executor.z3)
+ (wrapped false)
+ (modules z3enums z3native z3)
+ (libraries zarith)
+ (foreign_stubs
+  (language c)
+  (names z3native_stubs)
+  (flags -fPIC -I. -Iz3_workdir/src/api))
+ (c_library_flags
+  (-Lplugins/primus_symbolic_executor/z3_workdir/build
+   -lz3-static
+   -lstdc++)))

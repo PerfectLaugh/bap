@@ -5,13 +5,14 @@
 (rule
  (target llvm_config.ml)
  (deps
-  llvm_config.ml.ab
-  (alias ../../../config))
+  (:input llvm_config.ml.ab)
+  (alias ../../../config)
+  ../../../config.status)
  (action
   (with-stdin-from
-   %{deps}
+   %{input}
    (with-stdout-to
     %{target}
     (chdir
      %{workspace_root}
-     (run ./tools/rewrite.exe -filename %{deps}))))))
+     (run ./tools/rewrite.exe -filename %{input}))))))

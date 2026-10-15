@@ -9,7 +9,7 @@ tags: ["bap" "bap-plugin"]
 homepage: "https://github.com/BinaryAnalysisPlatform/bap"
 bug-reports: "https://github.com/BinaryAnalysisPlatform/bap/issues"
 depends: [
-  "dune" {>= "3.20"}
+  "dune" {>= "3.24"}
   "bap-demangle" {= version}
   "bap-std" {= version}
   "conf-binutils" {>= "0.3"}

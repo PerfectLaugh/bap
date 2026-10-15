@@ -1,0 +1,10 @@
+(lang dune 3.24)
+
+(repository
+ (name bap-testing)
+ (url "git+https://github.com/BinaryAnalysisPlatform/opam-repository.git#testing"))
+
+(lock_dir
+ (repositories bap-testing :standard))
+
+(pkg enabled)

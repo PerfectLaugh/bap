@@ -1,0 +1,19 @@
+(version 4.1.0)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs} @install))))))
+
+(depends
+ (all_platforms
+  (ocaml dune menhir)))
+
+(source
+ (fetch
+  (url
+   https://github.com/BinaryAnalysisPlatform/FrontC/archive/refs/tags/v4.1.0.tar.gz)
+  (checksum
+   sha256=f70063a72a39cb9192069ce3b1a20dd28f7e1c2ef6a56bbfbf7079533f2210e4)))

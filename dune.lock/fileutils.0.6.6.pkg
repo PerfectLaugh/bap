@@ -1,0 +1,34 @@
+(version 0.6.6)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run
+      dune
+      build
+      -p
+      %{pkg-self:name}
+      -j
+      %{jobs}
+      --promote-install-files=false
+      @install)
+     (run
+      dune
+      install
+      -p
+      %{pkg-self:name}
+      --create-install-files
+      %{pkg-self:name}))))))
+
+(depends
+ (all_platforms
+  (dune base-unix ocaml)))
+
+(source
+ (fetch
+  (url
+   https://github.com/gildor478/ocaml-fileutils/releases/download/v0.6.6/fileutils-0.6.6.tbz)
+  (checksum
+   sha512=ecc38b1577ab108bd24d1e9f0e83596254e542eefb37020dedcff7ca0109e562411cbb9806fbc6f88f4166569bf061a444971388c26950ec02dfc48b35daed90)))

@@ -26,13 +26,14 @@
 (rule
  (target stub_resolver_sites.ml)
  (deps
-  stub_resolver_sites.ml.ab
-  (alias ../../config))
+  (:input stub_resolver_sites.ml.ab)
+  (alias ../../config)
+  ../../config.status)
  (action
   (with-stdin-from
-   %{deps}
+   %{input}
    (with-stdout-to
     %{target}
     (chdir
      %{workspace_root}
-     (run ./tools/rewrite.exe -filename %{deps}))))))
+     (run ./tools/rewrite.exe -filename %{input}))))))

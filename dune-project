@@ -1,4 +1,4 @@
-(lang dune 3.20)
+(lang dune 3.24)
 (using dune_site 0.1)
 
 (name bap)
@@ -288,7 +288,7 @@
  (depends
   (bap-byteweight (= :version))
   (bap-std (= :version))
-  cmdliner
+  (cmdliner (and (>= 1.0) (< 2.0)))
   core
   fileutils
   (bap-common (= :version))
@@ -632,7 +632,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-recipe (= :version))
   base
   core_kernel
-  cmdliner
+  (cmdliner (and (>= 1.0) (< 2.0)))
   (bap-common (= :version))
   stdio))
 
@@ -742,7 +742,7 @@ be seen as a common denominator between Lwt and Async libraries.")
  (depends
   (bap-common (= :version))
   (bap-std (= :version))
-  cmdliner
+  (cmdliner (and (>= 1.0) (< 2.0)))
   core
    ezjsonm
   (graphlib (= :version))
@@ -1253,7 +1253,7 @@ between the sets.")
   (bitvec-order (= :version))
   (bitvec (= :version))
   (camlzip (and (>= 1.07) (< 2.0)))
-  cmdliner
+  (cmdliner (and (>= 1.0) (< 2.0)))
   core
    fileutils
   (graphlib (= :version))

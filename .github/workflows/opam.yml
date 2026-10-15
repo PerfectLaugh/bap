@@ -34,13 +34,9 @@ jobs:
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
           dune-cache: true
-          opam-disable-sandboxing: true
-          opam-repositories: |
-            default: git+https://github.com/ocaml/opam-repository.git
-            bap: git+https://github.com/BinaryAnalysisPlatform/opam-repository#testing
 
-      - name: Install bap-extra
-        run: opam install bap-extra
+      - name: Build BAP
+        run: opam exec -- dune build
 
       - name: Run functional tests
         run: opam exec -- make check

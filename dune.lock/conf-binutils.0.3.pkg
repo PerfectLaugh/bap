@@ -1,0 +1,29 @@
+(version 0.3)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (substitute find-binutils.ml.in find-binutils.ml)
+     (run ocaml unix.cma find-binutils.ml))))))
+
+(depends
+ (all_platforms
+  (ocaml base-unix)))
+
+(depexts
+ ((binutils-multiarch)
+  (= %{os_family} debian))
+ ((binutils)
+  (and_absorb_undefined_var
+   (= %{os} macos)
+   (= %{os_distribution} homebrew)))
+ ((x86_64-elf-binutils
+   i386-mingw32-binutils
+   i386-elf-binutils
+   arm-none-eabi-binutils
+   arm-elf-binutils
+   arm-aout-binutils)
+  (and_absorb_undefined_var
+   (= %{os} macos)
+   (= %{os_distribution} macports))))

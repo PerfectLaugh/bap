@@ -45,20 +45,9 @@ jobs:
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
           dune-cache: ${{  matrix.os != 'macos-latest' }}
-          opam-disable-sandboxing: true
-          opam-local-packages: |
-            *.opam
-            !bap-extra.opam
-            !bap-radare2.opam
-            !bap-ghidra.opam
-            !bap-primus-symbolic-executor.opam
-            !bap-ida.opam
-          opam-repositories: |
-            default: git+https://github.com/ocaml/opam-repository.git
-            bap: git+https://github.com/BinaryAnalysisPlatform/opam-repository#testing
 
       - name: Build BAP
-        run: opam install bap.dev
+        run: opam exec -- dune build
 
       - name: Run MC Functional Tests
         run: |

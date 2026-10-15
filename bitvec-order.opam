@@ -9,7 +9,7 @@ tags: ["bap"]
 homepage: "https://github.com/BinaryAnalysisPlatform/bap"
 bug-reports: "https://github.com/BinaryAnalysisPlatform/bap/issues"
 depends: [
-  "dune" {>= "3.20"}
+  "dune" {>= "3.24"}
   "base" {>= "v0.14"}
   "bitvec-sexp" {= version}
   "bitvec" {= version}

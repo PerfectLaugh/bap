@@ -24,13 +24,14 @@
 (rule
  (target bap_config)
  (deps
-  bap_config.ab
-  (alias ../config))
+  (:input bap_config.ab)
+  (alias ../config)
+  ../config.status)
  (action
   (with-stdin-from
-   %{deps}
+   %{input}
    (with-stdout-to
     %{target}
     (chdir
      %{workspace_root}
-     (run ./tools/rewrite.exe -filename %{deps}))))))
+     (run ./tools/rewrite.exe -filename %{input}))))))
