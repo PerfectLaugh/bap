@@ -49,13 +49,13 @@ let inspect_conflict assn = Sexp.List (List.map assn ~f:inspect_assn)
 let inspect_conflicts cs = Sexp.List (List.map ~f:inspect_conflict cs)
 
 let init_visited prog =
-  (object
-     inherit [Tid.Set.t] Term.visitor
+  object
+    inherit [Tid.Set.t] Term.visitor
 
-     method! enter_blk blk visited =
-       if Term.has_attr blk Term.visited then Set.add visited (Term.tid blk)
-       else visited
-  end)
+    method! enter_blk blk visited =
+      if Term.has_attr blk Term.visited then Set.add visited (Term.tid blk)
+      else visited
+  end
     #run
     prog Tid.Set.empty
 

@@ -42,7 +42,8 @@
 ;; the language itself since lang dune 3.24).
 
 (rule
- (targets (dir z3_workdir))
+ (targets
+  (dir z3_workdir))
  (deps
   (source_tree z3)
   (package zarith))
@@ -50,9 +51,12 @@
   (progn
    (run cp -rL z3/. z3_workdir)
    (run chmod -R u+w z3_workdir)
-   (chdir z3_workdir
+   (chdir
+    z3_workdir
     (run env CXXFLAGS=-fPIC python scripts/mk_make.py --ml --staticlib))
-   (chdir z3_workdir (run make -C build -j4 libz3-static.a)))))
+   (chdir
+    z3_workdir
+    (run make -C build -j4 libz3-static.a)))))
 
 (rule
  (targets
@@ -82,6 +86,4 @@
   (names z3native_stubs)
   (flags -fPIC -I. -Iz3_workdir/src/api))
  (c_library_flags
-  (-Lplugins/primus_symbolic_executor/z3_workdir/build
-   -lz3-static
-   -lstdc++)))
+  (-Lplugins/primus_symbolic_executor/z3_workdir/build -lz3-static -lstdc++)))

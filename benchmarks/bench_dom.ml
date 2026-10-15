@@ -18,8 +18,8 @@ let syms = Project.symbols proj
     $f(x) = ax + b$ such that:
 
     {[
-      f x1 = y1;
-      f x2 = y2
+    f x1 = y1;
+    f x2 = y2
     ]} *)
 let scale_linear ~input:(x1, x2) ~output:(y1, y2) =
   let open Float in

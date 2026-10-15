@@ -202,12 +202,10 @@
     the denotations of its inputs, e.g.,
 
     {[
-      let add x y =
-        x >>-> fun x ->
-        y >>-> fun y ->
-        match (x, y) with
-        | Some x, Some y -> const Bitvec.(x + y)
-        | _ -> nonconst
+    let add x y =
+      x >>-> fun x ->
+      y >>-> fun y ->
+      match (x, y) with Some x, Some y -> const Bitvec.(x + y) | _ -> nonconst
     ]}
 
     Where [>>->] extracts the module specific denotation and [const], [noncost]
@@ -425,24 +423,24 @@ module Theory : sig
         refinining function, and [let|] glues several cases together. Let's
         start with a simple example,
         {[
-          let f x =
-            Match.(
-              let| x =
-                can Bool.refine x @@ fun x ->
-                (* here x has type [Bool.t value] *)
-                `Bool x
-              in
-              let| x =
-                can Bitv.refine x @@ fun x ->
-                (* and here x is ['a Bitv.t value] *)
-                `Bitv x
-              in
-              let| x =
-                can Mem.refine x @@ fun x ->
-                (* and now x is [('a,'b) Mem.t value] *)
-                `Mem x
-              in
-              `Other x)
+        let f x =
+          Match.(
+            let| x =
+              can Bool.refine x @@ fun x ->
+              (* here x has type [Bool.t value] *)
+              `Bool x
+            in
+            let| x =
+              can Bitv.refine x @@ fun x ->
+              (* and here x is ['a Bitv.t value] *)
+              `Bitv x
+            in
+            let| x =
+              can Mem.refine x @@ fun x ->
+              (* and now x is [('a,'b) Mem.t value] *)
+              `Mem x
+            in
+            `Other x)
         ]}
 
         In general, the syntax is
@@ -514,9 +512,7 @@ module Theory : sig
 
         This module defines a simple DSL for specifying sorts, the DSL grammar
         is made only from three rules:
-        {v
-           sort = sym | int | sort(sort)
-        v}
+        {v    sort = sym | int | sort(sort) v}
 
         The DSL is embedded into the host language with an infix operator [@->]
         for application, e.g., OCaml grammar for sorts is:
@@ -527,9 +523,9 @@ module Theory : sig
         Both symbols and numbers are indexed with a type index, which serves as
         a witness of the sort value, e.g.,
         {[
-          type int8
+        type int8
 
-          let int8 : int8 num sort = Sort.int 8
+        let int8 : int8 num sort = Sort.int 8
         ]}
 
         Type indices enable explicit reflection of the target language type
@@ -558,37 +554,37 @@ module Theory : sig
         untyped sort to its type representation, essentially proving that the
         sort is a valid fixpoint sort.
         {[
-          module Fixpoint : sig
-            type ('p, 's) t
+        module Fixpoint : sig
+          type ('p, 's) t
 
-            val define : int -> 's Bitv.t sort -> ('p, 's) t sort
-            val refine : unit sort -> ('p, 's) t sort option
-            val bits : ('p, 's) t sort -> 's Bitv.t sort
-            val logscale : ('p, 's) t sort -> int
-          end = struct
-            type fixpoint
+          val define : int -> 's Bitv.t sort -> ('p, 's) t sort
+          val refine : unit sort -> ('p, 's) t sort option
+          val bits : ('p, 's) t sort -> 's Bitv.t sort
+          val logscale : ('p, 's) t sort -> int
+        end = struct
+          type fixpoint
 
-            type ('m, 's) t =
-              'm Value.Sort.num -> 's Bitv.t -> fixpoint Value.Sort.sym
+          type ('m, 's) t =
+            'm Value.Sort.num -> 's Bitv.t -> fixpoint Value.Sort.sym
 
-            let fixpoint = Value.Sort.Name.declare "FixPoint"
-            let define p s = Value.Sort.(int p @-> s @-> sym fixpoint)
-            let refine s = Value.Sort.refine fixpoint s
-            let bits s = Value.Sort.(hd (tl s))
-            let logscale s = Value.Sort.(hd s)
-          end
+          let fixpoint = Value.Sort.Name.declare "FixPoint"
+          let define p s = Value.Sort.(int p @-> s @-> sym fixpoint)
+          let refine s = Value.Sort.refine fixpoint s
+          let bits s = Value.Sort.(hd (tl s))
+          let logscale s = Value.Sort.(hd s)
+        end
 
-          (* Example of usage: *)
+        (* Example of usage: *)
 
-          type ('m, 's) fixpoint = Fixpoint.t Value.sort
-          type u32 (* type index for 32 bit ints *)
-          type p8 (* type index for points at 8th bit *)
+        type ('m, 's) fixpoint = Fixpoint.t Value.sort
+        type u32 (* type index for 32 bit ints *)
+        type p8 (* type index for points at 8th bit *)
 
-          (* a sort of 32-bit bitvectors, usually provided by the CPU model *)
-          let u32 : u32 Bitv.t Value.sort = Bitv.define 32
+        (* a sort of 32-bit bitvectors, usually provided by the CPU model *)
+        let u32 : u32 Bitv.t Value.sort = Bitv.define 32
 
-          (* a sort of 8.32 fixed-point numbers. *)
-          let fp8_32 : (p8, u32) fixpoint = Fixpoint.define 8 u32
+        (* a sort of 8.32 fixed-point numbers. *)
+        let fp8_32 : (p8, u32) fixpoint = Fixpoint.define 8 u32
         ]} *)
     module Sort : sig
       type +'a t = 'a sort
@@ -1279,15 +1275,15 @@ module Theory : sig
         is used,
 
         {v
-<name>-<system>-<abi><fabi>-<format>+<option>...v}
+        <name>-<system>-<abi><fabi>-<format>+<option>...v}
 
-        where if a property is [:unknown] then it is not listed in
-        the name (including the separator, if necessary).
+                where if a property is [:unknown] then it is not listed in
+                the name (including the separator, if necessary).
 
-        E.g.,
-        {v
-        arm-linux-gnueabihf-elf
-        armv7-linux-gnueabihf+m3
+                E.g.,
+                {v
+                arm-linux-gnueabihf-elf
+                armv7-linux-gnueabihf+m3
         v}
 
         @since 2.5.0 *)
@@ -1848,9 +1844,9 @@ module Theory : sig
       For example, given the following system,
 
       {[
-        def r25r24 [ reg 25; reg r24 ];
-        def w [ reg r25r24 ];
-        def w [ reg whi; reg wlo ]
+      def r25r24 [ reg 25; reg r24 ];
+      def w [ reg r25r24 ];
+      def w [ reg whi; reg wlo ]
       ]}
 
       And assuming that [r25] and [r24] are basis registers, it will be inferred
@@ -1886,11 +1882,11 @@ module Theory : sig
         Example,
 
         {[
-          [
-            def rax [ unk; reg eax ];
-            def eax [ unk; reg ax ];
-            def ax [ reg ah; reg al ];
-          ]
+        [
+          def rax [ unk; reg eax ];
+          def eax [ unk; reg ax ];
+          def ax [ reg ah; reg al ];
+        ]
         ]} *)
 
     val reg : 'a Bitv.t Var.t -> 'a part
@@ -1929,7 +1925,7 @@ module Theory : sig
 
       Example, given the aliasing definition,
       {[
-        [ def rax [ unk; reg eax ]; def eax [ unk; reg ax ]; def ax [ ah; al ] ]
+      [ def rax [ unk; reg eax ]; def eax [ unk; reg ax ]; def ax [ ah; al ] ]
       ]}
 
       the [unalias ah] will retun the [origin] of [sub]-kind, so that
@@ -3201,9 +3197,9 @@ module Theory : sig
       An example of usage,
 
       {[
-        let add x y =
-          let* (module CT) = current in
-          CT.add x y
+      let add x y =
+        let* (module CT) = current in
+        CT.add x y
       ]}
 
       @since 2.4.0 *)
@@ -3482,8 +3478,8 @@ module Theory : sig
         Example,
 
         {[
-          val add : exp -> exp -> t
-          (** [add x y] is [add (bitv x) (bitv y)]. *)
+        val add : exp -> exp -> t
+        (** [add x y] is [add (bitv x) (bitv y)]. *)
         ]}
 
         says that the grammar rule [add] interprets its arguments in the [bitv]

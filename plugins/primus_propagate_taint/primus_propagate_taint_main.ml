@@ -148,14 +148,14 @@ module Marker (Machine : Primus.Machine.S) = struct
     | _ -> t
 
   let mark_terms { regs; ptrs } =
-    (object
-       inherit Term.mapper as super
+    object
+      inherit Term.mapper as super
 
-       method! map_term cls t =
-         super#map_term cls t
-         |> mark Legacy_taint.regs regs
-         |> mark Legacy_taint.ptrs ptrs
-    end)
+      method! map_term cls t =
+        super#map_term cls t
+        |> mark Legacy_taint.regs regs
+        |> mark Legacy_taint.ptrs ptrs
+    end
       #run
 
   let mark _ =

@@ -151,9 +151,9 @@ type attributes = Attributes.t
     For example,
 
     {[
-      let foo = element "foo" >>$ `foo
-      let bar = return `bar
-      let exp = foo <|> bar
+    let foo = element "foo" >>$ `foo
+    let bar = return `bar
+    let exp = foo <|> bar
     ]}
 
     when [exp] matches a sequence of tokens it could either use the [foo] or
@@ -161,7 +161,7 @@ type attributes = Attributes.t
     following example,
 
     {[
-      let start = exp >>= function `bar -> return 1 | `foo -> return 2
+    let start = exp >>= function `bar -> return 1 | `foo -> return 2
     ]}
 
     the produced parser [start] will consume tokens if [foo] is in the

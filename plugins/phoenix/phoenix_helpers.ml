@@ -25,53 +25,52 @@ struct
       match Arch.addr_size arch with `r32 -> reg32_t | `r64 -> reg64_t
     in
     let make_var name = Bil.var (Var.create name jump_type) in
-    (object
-       inherit Stmt.mapper
+    object
+      inherit Stmt.mapper
 
-       method! map_int addr =
-         Symtab.owners syms addr |> List.hd |> function
-         | Some (sym, entry, _) ->
-             let start = Block.addr entry in
-             if Addr.(start = addr) then make_var sym
-             else
-               let off = Addr.Int_exn.(addr - start) in
-               Bil.(make_var sym + int off)
-         | None -> Bil.Int addr
-    end)
+      method! map_int addr =
+        Symtab.owners syms addr |> List.hd |> function
+        | Some (sym, entry, _) ->
+            let start = Block.addr entry in
+            if Addr.(start = addr) then make_var sym
+            else
+              let off = Addr.Int_exn.(addr - start) in
+              Bil.(make_var sym + int off)
+        | None -> Bil.Int addr
+    end
       #run
 
   (** substitute loads with the value of corresponding memory *)
   let resolve_indirects =
     Stmt.map
-      (object
-         inherit Stmt.mapper as super
+      object
+        inherit Stmt.mapper as super
 
-         method! map_load ~mem ~addr endian scale =
-           let exp = super#map_load ~mem ~addr endian scale in
-           match addr with
-           | Bil.Int addr ->
-               let exp =
-                 Memmap.lookup memory addr |> Seq.hd |> function
-                 | None -> exp
-                 | Some (mem, _) -> (
-                     match Memory.get ~scale ~addr mem with
-                     | Ok w -> Bil.int w
-                     | _ -> exp)
-               in
-               exp
-           | _ -> exp
-      end)
+        method! map_load ~mem ~addr endian scale =
+          let exp = super#map_load ~mem ~addr endian scale in
+          match addr with
+          | Bil.Int addr ->
+              let exp =
+                Memmap.lookup memory addr |> Seq.hd |> function
+                | None -> exp
+                | Some (mem, _) -> (
+                    match Memory.get ~scale ~addr mem with
+                    | Ok w -> Bil.int w
+                    | _ -> exp)
+              in
+              exp
+          | _ -> exp
+      end
 
   (* we're very conservative here *)
   let has_side_effect e scope =
-    (object
-       inherit [bool] Exp.visitor
-       method! enter_load ~mem:_ ~addr:_ _e _s _r = true
-       method! enter_store ~mem:_ ~addr:_ ~exp:_ _e _s _r = true
-       method! enter_var v r = r || Bil.is_assigned v scope
-    end)
-      #visit_exp
-      e false
+    object
+      inherit [bool] Exp.visitor
+      method! enter_load ~mem:_ ~addr:_ _e _s _r = true
+      method! enter_store ~mem:_ ~addr:_ ~exp:_ _e _s _r = true
+      method! enter_var v r = r || Bil.is_assigned v scope
+    end
+      #visit_exp e false
 
   (** This optimization will inline temporary variables that occurres inside the
       instruction definition if the right hand side of the variable definition

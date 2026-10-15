@@ -118,18 +118,18 @@ module Log : sig
 
         Example:
         {[
-          let find_interesting_points prog =
-            report_progress ~task:"discover" ~total:(Term.length sub_t prog) ();
-            Term.enum sub_t prog
-            |> Seq.concat_mapi ~f:(fun stage sub ->
-                report_progress ~note:(Sub.name sub) ~task:"discover" ~stage ();
-                interesting_points_of_sub sub)
+        let find_interesting_points prog =
+          report_progress ~task:"discover" ~total:(Term.length sub_t prog) ();
+          Term.enum sub_t prog
+          |> Seq.concat_mapi ~f:(fun stage sub ->
+              report_progress ~note:(Sub.name sub) ~task:"discover" ~stage ();
+              interesting_points_of_sub sub)
 
-          let check_interesting_points points =
-            report_progress ~task:"checking" ~total:(Seq.length points) ();
-            Seq.iteri ~f:(fun stage p ->
-                report_progress ~note:(Point.name p) ~task:"checking" ~stage ();
-                check_point p)
+        let check_interesting_points points =
+          report_progress ~task:"checking" ~total:(Seq.length points) ();
+          Seq.iteri ~f:(fun stage p ->
+              report_progress ~note:(Point.name p) ~task:"checking" ~stage ();
+              check_point p)
         ]} *)
 
     val debug_formatter : formatter

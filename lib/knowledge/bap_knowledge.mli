@@ -622,10 +622,10 @@ module Knowledge : sig
         [Object.cast].
 
         {[
-          let add : value obj -> value obj -> value obj =
-           fun x y ->
-            let T = assert_equal bitv value in
-            x + y (* where (+) has type [bitv obj -> bitv obj -> bit obj] *)
+        let add : value obj -> value obj -> value obj =
+         fun x y ->
+          let T = assert_equal bitv value in
+          x + y (* where (+) has type [bitv obj -> bitv obj -> bit obj] *)
         ]} *)
 
     val property :
@@ -1021,7 +1021,7 @@ module Knowledge : sig
         are in the beginning of the list could be shadowed by the names that are
         in the end of the list (unless [strict] is [true], of course). Thus,
         {[
-          import [ x ] >>= fun () -> import [ y ]
+        import [ x ] >>= fun () -> import [ y ]
         ]}
 
         is the same as [import [x;y]].
@@ -1266,7 +1266,7 @@ module Knowledge : sig
         For example,
 
         {[
-          let tribool = optional ~equal:bool_equal "tribool"
+        let tribool = optional ~equal:bool_equal "tribool"
         ]}
 
         is a tribool domain, where the property value could be either unknown
@@ -1627,14 +1627,14 @@ module Knowledge : sig
       Suppose, we have a system that describes personal information,
 
       {[
-        type person
-        type address
+      type person
+      type address
 
-        val first_name : (person, string option) slot
-        val last_name : (person, string option) slot
-        val full_name : (person, string option) slot
-        val address : (person, address option) slot
-        val phone : (person, phone option) slot
+      val first_name : (person, string option) slot
+      val last_name : (person, string option) slot
+      val full_name : (person, string option) slot
+      val address : (person, address option) slot
+      val phone : (person, phone option) slot
       ]}
 
       The simplest and obvious rule would a derivation of the full name from the
@@ -1643,13 +1643,13 @@ module Knowledge : sig
       we advertise it as a rule,
 
       {[
-        Rule.(
-          declare "full-name" |> require first_name |> require last_name
-          |> provide full_name
-          |> comment "full = first last");
-        promise full_name @@ fun person ->
-        collect first_name >>=? fun first ->
-        collect last_name >>|? fun last -> first ^ " " ^ last
+      Rule.(
+        declare "full-name" |> require first_name |> require last_name
+        |> provide full_name
+        |> comment "full = first last");
+      promise full_name @@ fun person ->
+      collect first_name >>=? fun first ->
+      collect last_name >>|? fun last -> first ^ " " ^ last
       ]}
 
       The rule above is a closed term, since it doesn't reference any language
@@ -1660,15 +1660,14 @@ module Knowledge : sig
       the online database,
 
       {[
-        let provide_phone_base =
-          Rule.(
-            declare "lookup-phone-number"
-            |> dynamic [ "phone-base" ]
-            |> require full_name |> provide phone
-            |> comment "lookups phone in the public database");
-          fun base ->
-            promise phone @@ fun person ->
-            collect full_name >>| fun name -> Phonebase.lookup base phone
+      let provide_phone_base =
+        Rule.(
+          declare "lookup-phone-number"
+          |> dynamic [ "phone-base" ] |> require full_name |> provide phone
+          |> comment "lookups phone in the public database");
+        fun base ->
+          promise phone @@ fun person ->
+          collect full_name >>| fun name -> Phonebase.lookup base phone
       ]}
 
       The [dynamic] operator of the specification accepts a list of formal
@@ -1708,8 +1707,8 @@ module Knowledge : sig
         {3 Example}
 
         {[
-          declare "rule-name" |> dynamic [ "parameter" ] |> require slot1
-          |> require slot2 |> provide slot3 |> comment "example rule"
+        declare "rule-name" |> dynamic [ "parameter" ] |> require slot1
+        |> require slot2 |> provide slot3 |> comment "example rule"
         ]} *)
 
     val dynamic : string list -> def -> def

@@ -104,18 +104,18 @@ module Relocations = struct
 
   let override_internal dst =
     Stmt.map
-      (object
-         inherit Stmt.mapper
-         method! map_jmp _ = [ Bil.Jmp (Int dst) ]
-      end)
+      object
+        inherit Stmt.mapper
+        method! map_jmp _ = [ Bil.Jmp (Int dst) ]
+      end
 
   let override_external is_stub name =
     let name = if is_stub then name ^ ":external" else name in
     Stmt.map
-      (object
-         inherit Stmt.mapper
-         method! map_jmp _ = [ Bil.(encode call name) ]
-      end)
+      object
+        inherit Stmt.mapper
+        method! map_jmp _ = [ Bil.(encode call name) ]
+      end
 
   let relocations_slot =
     KB.Class.property Theory.Unit.cls "bil-relocations" ~package:"bap"

@@ -359,36 +359,36 @@ let update prog ~link_only ~no_link =
     |> Seq.fold ~init:String.Set.empty ~f:(fun s sub ->
         if Set.mem stubs @@ Term.tid sub then Set.add s @@ Sub.name sub else s)
   in
-  (object
-     inherit Term.mapper as super
+  object
+    inherit Term.mapper as super
 
-     method! map_sub sub =
-       let tid = Term.tid sub in
-       let sub =
-         if Set.mem stubs tid then Term.set_attr sub Sub.stub ()
-         else if Set.mem impls tid then
-           let name = Sub.name sub in
-           if Set.mem stub_names name then (
-             let addr = Term.get_attr sub address in
-             let new_name = mangle_name addr tid name in
-             info "mangling implementation %s to %s" name new_name;
-             Sub.with_name sub new_name)
-           else sub
-         else sub
-       in
-       super#map_sub sub
+    method! map_sub sub =
+      let tid = Term.tid sub in
+      let sub =
+        if Set.mem stubs tid then Term.set_attr sub Sub.stub ()
+        else if Set.mem impls tid then
+          let name = Sub.name sub in
+          if Set.mem stub_names name then (
+            let addr = Term.get_attr sub address in
+            let new_name = mangle_name addr tid name in
+            info "mangling implementation %s to %s" name new_name;
+            Sub.with_name sub new_name)
+          else sub
+        else sub
+      in
+      super#map_sub sub
 
-     method! map_jmp jmp =
-       match Jmp.alt jmp with
-       | None -> jmp
-       | Some alt -> (
-           match Jmp.resolve alt with
-           | Second _ -> jmp
-           | First tid -> (
-               match Map.find links tid with
-               | Some tid' -> Jmp.with_alt jmp (Some (Jmp.resolved tid'))
-               | None -> jmp))
-  end)
+    method! map_jmp jmp =
+      match Jmp.alt jmp with
+      | None -> jmp
+      | Some alt -> (
+          match Jmp.resolve alt with
+          | Second _ -> jmp
+          | First tid -> (
+              match Map.find links tid with
+              | Some tid' -> Jmp.with_alt jmp (Some (Jmp.resolved tid'))
+              | None -> jmp))
+  end
     #run
     prog
 

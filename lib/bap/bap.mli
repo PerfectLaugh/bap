@@ -434,17 +434,17 @@ module Std : sig
       The following plugin prints all sections in a file:
 
       {[
-        open Core
-        open Bap.Std
-        open Format
+      open Core
+      open Bap.Std
+      open Format
 
-        let print_sections p =
-          Project.memory p |> Memmap.to_sequence
-          |> Seq.iter ~f:(fun (mem, x) ->
-              Option.iter (Value.get Image.section x) ~f:(fun name ->
-                  printf "Section: %s@.%a@." name Memory.pp mem))
+      let print_sections p =
+        Project.memory p |> Memmap.to_sequence
+        |> Seq.iter ~f:(fun (mem, x) ->
+            Option.iter (Value.get Image.section x) ~f:(fun name ->
+                printf "Section: %s@.%a@." name Memory.pp mem))
 
-        let () = Project.register_pass' print_sections
+      let () = Project.register_pass' print_sections
       ]}
 
       Note: this functionality is provided by the [print] plugin.
@@ -1093,12 +1093,12 @@ module Std : sig
       Remember to use explicit casts, whenever you really need a signed
       representation. Examples:
       {[
-        let x = of_int ~-6 ~width:8
-        let y = to_int x (* y = 250 *)
-        let z = to_int (signed x) (* z = ~-6 *)
-        let zero = of_int 0 ~width:8
-        let p = x < zero (* p = false *)
-        let q = signed x < zero (* p = true *)
+      let x = of_int ~-6 ~width:8
+      let y = to_int x (* y = 250 *)
+      let z = to_int (signed x) (* z = ~-6 *)
+      let zero = of_int 0 ~width:8
+      let p = x < zero (* p = false *)
+      let q = signed x < zero (* p = true *)
       ]}
 
       {2:bv_sizes Clarification on size-morphism}
@@ -1823,21 +1823,21 @@ module Std : sig
       allows to use BIL as a DSL embedded into OCaml:
 
       {[
-        Bil.
-          [
-            v := src lsr i32 1;
-            r := src;
-            s := i32 31;
-            while_
-              (var v <> i32 0)
-              [
-                r := var r lsl i32 1;
-                r := var r lor (var v land i32 1);
-                v := var v lsr i32 1;
-                s := var s - i32 1;
-              ];
-            dst := var r lsl var s;
-          ]
+      Bil.
+        [
+          v := src lsr i32 1;
+          r := src;
+          s := i32 31;
+          while_
+            (var v <> i32 0)
+            [
+              r := var r lsl i32 1;
+              r := var r lor (var v land i32 1);
+              v := var v lsr i32 1;
+              s := var s - i32 1;
+            ];
+          dst := var r lsl var s;
+        ]
       ]}
 
       where [i32] is defined as [let i32 x = Bil.int (Word.of_int ~width:32 x)]
@@ -2355,8 +2355,8 @@ module Std : sig
           theory terms. To reflect a bil program [prog] into the theory
           [Theory], use
           {[
-            let module Parser = Theory.Parser.Make (Theory) in
-            Parser.run Bil.Theory.parser bil
+          let module Parser = Theory.Parser.Make (Theory) in
+          Parser.run Bil.Theory.parser bil
           ]} *)
     end
 
@@ -2423,9 +2423,7 @@ module Std : sig
         allowing a user to provide its own storage implementation.
 
         In operational semantics a storage is represented syntactically as
-        {v
-            v1 with [v2,ed] : nat <- v3,
-        v}
+        {v     v1 with [v2,ed] : nat <- v3, v}
         where v1 may be either a [Bot] value, representing an empty memory (or
         an absence of knowledge), or another storage. So a well typed memory
         object is defined inductively as:
@@ -3072,27 +3070,27 @@ module Std : sig
           expression evaluator that will record a trace of evaluation:
 
           {[
-            class context =
-              object
-                inherit Expi.context
-                val events : (exp * Bil.result) list = []
-                method add_event exp res = {<events = (exp, res) :: events>}
-                method show_events = List.rev events
-              end
+          class context =
+            object
+              inherit Expi.context
+              val events : (exp * Bil.result) list = []
+              method add_event exp res = {<events = (exp, res) :: events>}
+              method show_events = List.rev events
+            end
           ]}
 
           {[
-            class ['a] exp_tracer =
-              object
-                constraint 'a = #context
-                inherit ['a] expi as super
+          class ['a] exp_tracer =
+            object
+              constraint 'a = #context
+              inherit ['a] expi as super
 
-                method! eval_exp e =
-                  let open Monad.State in
-                  super#eval_exp e >>= fun r ->
-                  get () >>= fun ctxt ->
-                  put (ctxt#add_event e r) >>= fun () -> return r
-              end
+              method! eval_exp e =
+                let open Monad.State in
+                super#eval_exp e >>= fun r ->
+                get () >>= fun ctxt ->
+                put (ctxt#add_event e r) >>= fun () -> return r
+            end
           ]}
 
           Note : We made our [exp_tracer] class polymorphic as a courtesy to our
@@ -3454,13 +3452,13 @@ module Std : sig
 
         A usual template for method overriding is:
         {[
-          object (self)
-            inherit mapper as super
+        object (self)
+          inherit mapper as super
 
-            method map_X arg =
-              let x = super#map_X arg in
-              do_mapping x
-          end
+          method map_X arg =
+            let x = super#map_X arg in
+            do_mapping x
+        end
         ]} *)
     class mapper : object
       inherit state
@@ -3644,13 +3642,12 @@ module Std : sig
         function:
 
         {[
-          let collect_calls bil =
-            (object (self)
-               inherit [Word.t list] visitor
-               method! enter_int x js = if in_jmp then x :: js else js
-            end)
-              #run
-              bil []
+        let collect_calls bil =
+          object (self)
+            inherit [Word.t list] visitor
+            method! enter_int x js = if in_jmp then x :: js else js
+          end
+            #run bil []
         ]}
 
         The default entry point of the visitor is method [run], but you can use
@@ -3716,15 +3713,15 @@ module Std : sig
         assigned (i.e., occurs on the left of the assignment operator) in the
         provided scope.
         {[
-          let is_assigned x =
-            find
-              (object (self)
-                 inherit [unit] finder
+        let is_assigned x =
+          find
+            object (self)
+              inherit [unit] finder
 
-                 method! enter_move y _rhs cc =
-                   if Var.(x = y) then cc.return (Some ());
-                   cc
-              end)
+              method! enter_move y _rhs cc =
+                if Var.(x = y) then cc.return (Some ());
+                cc
+            end
         ]}
 
         There're three [find] functions in the library, that accepts an object
@@ -3966,12 +3963,12 @@ module Std : sig
         Example,
 
         {[
-          let target = Theory.Target.declare ~package:"foo" "r600"
+        let target = Theory.Target.declare ~package:"foo" "r600"
 
-          let () =
-            KB.promise Arch.unit_slot @@ fun unit ->
-            KB.collect Theory.Unit.target >>| fun t ->
-            if Theory.Target.equal t target then `r600 else `unknown
+        let () =
+          KB.promise Arch.unit_slot @@ fun unit ->
+          KB.collect Theory.Unit.target >>| fun t ->
+          if Theory.Target.equal t target then `r600 else `unknown
         ]} *)
 
     include Regular.S with type t := t
@@ -3991,11 +3988,11 @@ module Std : sig
       constructor. To add new constructor, you need to register it, e.g.,
 
       {[
-        let function_signature =
-          Value.Tag.register
-            (module String)
-            ~name:"function_signature"
-            ~uuid:"2175c28c-08ca-4052-8385-3a01e1c6ab6f"
+      let function_signature =
+        Value.Tag.register
+          (module String)
+          ~name:"function_signature"
+          ~uuid:"2175c28c-08ca-4052-8385-3a01e1c6ab6f"
       ]}
 
       This is merely equivalent to adding a branch
@@ -4089,7 +4086,7 @@ module Std : sig
       you can use a more efficient:
 
       {[
-        if Value.is loc then Value.get_exn loc main_pos
+      if Value.is loc then Value.get_exn loc main_pos
       ]}
       .
 
@@ -4243,13 +4240,13 @@ module Std : sig
           The combinators in the module are designed to be used as follows:
 
           {[
-            let lift v =
-              Match.(
-                switch v
-                @@ case memory_load (fun x -> `Load x)
-                @@ case memory_store (fun x -> `Store x)
-                @@ case register_read (fun x -> `Read x)
-                @@ default (fun () -> `Unknown))
+          let lift v =
+            Match.(
+              switch v
+              @@ case memory_load (fun x -> `Load x)
+              @@ case memory_store (fun x -> `Store x)
+              @@ case register_read (fun x -> `Read x)
+              @@ default (fun () -> `Unknown))
           ]}
 
           Note: in the example, the whole expression will build and then match.
@@ -4259,13 +4256,13 @@ module Std : sig
           combinator:
 
           {[
-            let lift =
-              Match.(
-                select
-                @@ case memory_load (fun x -> `Load x)
-                @@ case memory_store (fun x -> `Store x)
-                @@ case register_read (fun x -> `Read x)
-                @@ default (fun () -> `Unknown))
+          let lift =
+            Match.(
+              select
+              @@ case memory_load (fun x -> `Load x)
+              @@ case memory_store (fun x -> `Store x)
+              @@ case register_read (fun x -> `Read x)
+              @@ default (fun () -> `Unknown))
           ]} *)
 
       val switch : value -> 's t -> 's
@@ -4767,11 +4764,11 @@ module Std : sig
         [max_addr] of another is less then or equal to one, and returns memory
         blocks that spans memory starting from the address
         {[
-          min (min_addr m1) (min_addr m2)
+        min (min_addr m1) (min_addr m2)
         ]}
         and ending with address
         {[
-          max (max_addr m1) (max_addr m2)
+        max (max_addr m1) (max_addr m2)
         ]}
         .
 
@@ -5958,10 +5955,10 @@ module Std : sig
         [Basic.custom], e.g.,
 
         {[
-          let () =
-            Basic.register encoding @@ fun target ->
-            let dis = create_custom target in
-            Ok (Basic.custom ?target encoding backend)
+        let () =
+          Basic.register encoding @@ fun target ->
+          let dis = create_custom target in
+          Ok (Basic.custom ?target encoding backend)
         ]}
 
         where [create_custom] is a user function that creates the custom backend
@@ -6843,12 +6840,12 @@ module Std : sig
       {{!Graphlib.Std}graphlib} library, e.g.,
 
       {[
-        module G = Graphs.Cfg
+      module G = Graphs.Cfg
 
-        let insns cfg =
-          Graphlib.reverse_postorder_traverse (module G) cfg
-          |> Seq.map ~f:Block.insns
-          |> Seq.concat_map ~f:Seq.of_list
+      let insns cfg =
+        Graphlib.reverse_postorder_traverse (module G) cfg
+        |> Seq.map ~f:Block.insns
+        |> Seq.concat_map ~f:Seq.of_list
       ]} *)
   module Graphs : sig
     (** Control Flow Graph with a machine basic block as a node. *)
@@ -8717,7 +8714,7 @@ module Std : sig
     (** [free_vars t] returns a set of variables that occur free on the right
         hand side of the phi-node. See
         {[
-          Exp.free_vars
+        Exp.free_vars
         ]}
         for clarification on what variables are considered free. *)
 
@@ -8956,9 +8953,7 @@ module Std : sig
     (** [flatten blk] translates [blk] into the flattened form. In the flattened
         form, all operations are applied to variables, constants, or unknowns,
         i.e., the operands could not be compound expressions. E.g.,
-        {v
-           #10 := 11 * (#9 + 13) - 17
-        v}
+        {v    #10 := 11 * (#9 + 13) - 17 v}
         is translated to,
         {v
            #11 := #9 + 13
@@ -9066,9 +9061,7 @@ module Std : sig
       (** [flatten blk] translates [blk] into the flattened form. In the
           flattened form, all operations are applied to variables, constants, or
           unknowns, i.e., the operands could not be compound expressions. E.g.,
-          {v
-           #10 := 11 * (#9 + 13) - 17
-          v}
+          {v  #10 := 11 * (#9 + 13) - 17 v}
           is translated to,
           {v
            #11 := #9 + 13
@@ -9657,18 +9650,18 @@ module Std : sig
       [analysis] is a function of type [unit -> my knowledge]
 
       {[
-        let result : my var = Toplevel.var "my-property"
+      let result : my var = Toplevel.var "my-property"
 
-        let run analysis : my =
-          Toplevel.put result (analysis ());
-          Toplevel.get result
+      let run analysis : my =
+        Toplevel.put result (analysis ());
+        Toplevel.get result
       ]}
 
       There are also [eval] and [exec] functions that could be used to extract
       values from the existing properties, e.g.,
 
       {[
-        let get_unit tid = eval Theory.Label.unit (KB.return tid)
+      let get_unit tid = eval Theory.Label.unit (KB.return tid)
       ]}
 
       Finally, the interface provides functions to control the inner state of
@@ -9971,7 +9964,7 @@ module Std : sig
 
         Example:
         {[
-          Project.substitute project comment "$symbol starts at $symbol_addr"
+        Project.substitute project comment "$symbol starts at $symbol_addr"
         ]}
 
         The following substitutions are supported:
@@ -10004,7 +9997,7 @@ module Std : sig
         Project can also be viewed as an extensible record, where one can store
         arbitrary values. Example,
         {[
-          let p = Project.set project color `green
+        let p = Project.set project color `green
         ]}
         This will set field [color] to a value [`green].*)
 
@@ -10423,10 +10416,10 @@ module Std : sig
         use the following code
 
         {[
-          let open Project.Analysis in
-          register ~package "subroutine"
-            (args @@ unit $ string $ bitvec)
-            print_subr
+        let open Project.Analysis in
+        register ~package "subroutine"
+          (args @@ unit $ string $ bitvec)
+          print_subr
         ]}
 
         The registered analyses could be invoked directly, using the
@@ -10505,12 +10498,12 @@ module Std : sig
 
           {ul
            {- {[
-                args empty
+              args empty
               ]}
               -- a function of type [unit -> 'r]
            }
            {- {[
-                args string
+              args string
               ]}
               -- a function of type [string -> 'r].
            }
@@ -10621,7 +10614,7 @@ module Std : sig
 
           Example, the grammar of
           {[
-            args string $ optional bitvec
+          args string $ optional bitvec
           ]}
           ,
 
@@ -10644,7 +10637,7 @@ module Std : sig
 
           Example, the grammar of
           {[
-            args @@ keyword "foo" string $ keyword "bar" bitvec
+          args @@ keyword "foo" string $ keyword "bar" bitvec
           ]}
           ,
 
@@ -10670,7 +10663,7 @@ module Std : sig
 
           Example, the grammar of
           {[
-            args @@ flag "foo" $ flag "bar"
+          args @@ flag "foo" $ flag "bar"
           ]}
           ,
 
@@ -10697,7 +10690,7 @@ module Std : sig
 
           Example, the grammar of
           {[
-            args string $ rest bitvec
+          args string $ rest bitvec
           ]}
           ,
 
@@ -10824,18 +10817,18 @@ module Std : sig
 
         Example:
         {[
-          let find_interesting_points prog =
-            report_progress ~task:"discover" ~total:(Term.length sub_t prog) ();
-            Term.enum sub_t prog
-            |> Seq.concat_mapi ~f:(fun stage sub ->
-                report_progress ~note:(Sub.name sub) ~task:"discover" ~stage ();
-                interesting_points_of_sub sub)
+        let find_interesting_points prog =
+          report_progress ~task:"discover" ~total:(Term.length sub_t prog) ();
+          Term.enum sub_t prog
+          |> Seq.concat_mapi ~f:(fun stage sub ->
+              report_progress ~note:(Sub.name sub) ~task:"discover" ~stage ();
+              interesting_points_of_sub sub)
 
-          let check_interesting_points points =
-            report_progress ~task:"checking" ~total:(Seq.length points) ();
-            Seq.iteri ~f:(fun stage p ->
-                report_progress ~note:(Point.name p) ~task:"checking" ~stage ();
-                check_point p)
+        let check_interesting_points points =
+          report_progress ~task:"checking" ~total:(Seq.length points) ();
+          Seq.iteri ~f:(fun stage p ->
+              report_progress ~note:(Point.name p) ~task:"checking" ~stage ();
+              check_point p)
         ]} *)
 
     (** This module allows plugins to access BAP configuration variables.
@@ -10850,17 +10843,17 @@ module Std : sig
         Example usage:
 
         {[
-          let path =
-            Config.(
-              param string ~doc:"a path to file" ~default:"input.txt" "path")
+        let path =
+          Config.(
+            param string ~doc:"a path to file" ~default:"input.txt" "path")
 
-          let debug = Config.(flag (* ... *))
+        let debug = Config.(flag (* ... *))
 
-          (* ... *)
+        (* ... *)
 
-          let main () =
-            Config.when_ready (fun { Config.get = ( ! ) } ->
-                do_stuff !path !debug (* ... *))
+        let main () =
+          Config.when_ready (fun { Config.get = ( ! ) } ->
+              do_stuff !path !debug (* ... *))
         ]} *)
     module Config : sig
       val version : string

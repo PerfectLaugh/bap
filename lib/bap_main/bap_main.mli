@@ -503,10 +503,8 @@ module Extension : sig
 
         For example,
         {[
-          type s =
-            ( int -> ctxt -> (unit, error) result,
-              ctxt -> (unit, error) result )
-            t
+        type s =
+          (int -> ctxt -> (unit, error) result, ctxt -> (unit, error) result) t
         ]}
 
         is a type of a function that takes two input arguments of type [int] and
@@ -548,42 +546,42 @@ module Extension : sig
 
         Note, the examples below assume the following preamble:
         {[
-          open Core
-          open Bap_main.Extension
+        open Core
+        open Bap_main.Extension
         ]}
 
         1) Declare a command with no arguments:
 
         {[
-          let () =
-            Command.(declare "hello" args) @@ fun ctxt ->
-            printf "the `hello' command is called\n";
-            Ok ()
+        let () =
+          Command.(declare "hello" args) @@ fun ctxt ->
+          printf "the `hello' command is called\n";
+          Ok ()
         ]}
 
         2) Declaring a command with one positional argument
 
         {[
-          let input = Command.argument Type.int
+        let input = Command.argument Type.int
 
-          let () =
-            Command.(declare "hello" (args $ input)) @@ fun input ctxt ->
-            printf "called as `hello %d'\n" input
+        let () =
+          Command.(declare "hello" (args $ input)) @@ fun input ctxt ->
+          printf "called as `hello %d'\n" input
         ]}
 
         3) Declaring a command with an optional named parameter, and many
         positional arguments.
 
         {[
-          let inputs = Command.arguments Type.string
-          let output = Command.parameter Type.string "output"
+        let inputs = Command.arguments Type.string
+        let output = Command.parameter Type.string "output"
 
-          let () =
-            Command.(declare "copy" (args $ output $ inputs))
-            @@ fun output inputs ->
-            printf "copying %s inputs to %s\n"
-              (String.concat ~sep:" " inputs)
-              output
+        let () =
+          Command.(declare "copy" (args $ output $ inputs))
+          @@ fun output inputs ->
+          printf "copying %s inputs to %s\n"
+            (String.concat ~sep:" " inputs)
+            output
         ]}
 
         @param doc
@@ -613,34 +611,30 @@ module Extension : sig
     (** [argument t] declares a positional argument of type [t].
 
         The grammar of [args $ term $ argument t]:
-        {v
-          G = term, [t] | [t], term
-        v} *)
+        {v   G = term, [t] | [t], term v} *)
 
     val arguments : ?doc:string -> 'a typ -> 'a list param
     (** [arguments t] declares an infinite number of positional arguments of
         type [t].
 
         The grammar of [args $ term $ arguments t]:
-        {v
-          G = term, {t} | {t}, term
-        v}
+        {v   G = term, {t} | {t}, term v}
 
         Note, no positional arguments could be appended to the command line
         specification after this one, e.g., the following is not well formed:
 
         {[
-          (* Warning! Ill-formed code *)
+        (* Warning! Ill-formed code *)
 
-          let inputs = Command.arguments Type.string
-          let output = Command.parameter Type.string "output"
+        let inputs = Command.arguments Type.string
+        let output = Command.parameter Type.string "output"
 
-          let () =
-            Command.(declare "copy" (args $ inputs $ output))
-            @@ fun output inputs ->
-            printf "copying %s inputs to %s\n"
-              (String.concat ~sep:" " inputs)
-              output
+        let () =
+          Command.(declare "copy" (args $ inputs $ output))
+          @@ fun output inputs ->
+          printf "copying %s inputs to %s\n"
+            (String.concat ~sep:" " inputs)
+            output
         ]} *)
 
     val switch :
@@ -951,14 +945,14 @@ module Extension : sig
         Declaring a simple configuration parameter:
 
         {[
-          open Core
-          open Bap_main.Extension
+        open Core
+        open Bap_main.Extension
 
-          let depth = Configuration.parameter Type.int "depth"
+        let depth = Configuration.parameter Type.int "depth"
 
-          let () =
-            Bap_main.Extension.declare @@ fun ctxt ->
-            printf "Will dive to depth %d\n" (Configuration.get ctxt depth)
+        let () =
+          Bap_main.Extension.declare @@ fun ctxt ->
+          printf "Will dive to depth %d\n" (Configuration.get ctxt depth)
         ]}
 
         The [Extension.Syntax] module adds an infix [(-->)] operator for the
@@ -966,15 +960,15 @@ module Extension : sig
         rewritten as:
 
         {[
-          open Core
-          open Bap_main.Extension
-          open Bap_main.Extension.Syntax
+        open Core
+        open Bap_main.Extension
+        open Bap_main.Extension.Syntax
 
-          let depth = Configuration.parameter Type.int "depth"
+        let depth = Configuration.parameter Type.int "depth"
 
-          let () =
-            Bap_main.Extension.declare @@ fun ctxt ->
-            printf "Will dive to depth %d\n" (ctxt --> depth)
+        let () =
+          Bap_main.Extension.declare @@ fun ctxt ->
+          printf "Will dive to depth %d\n" (ctxt --> depth)
         ]} *)
 
     val parameters :
@@ -1229,7 +1223,7 @@ module Extension : sig
         together for easy definitions of new types, e.g.,
 
         {[
-          let arch = Type.("code" %: arch_t =? `x86 |= only_x86)
+        let arch = Type.("code" %: arch_t =? `x86 |= only_x86)
         ]} *)
 
     val print : 'a t -> 'a -> string

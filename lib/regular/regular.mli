@@ -98,8 +98,7 @@ module Std : sig
           ('a,unit,string,...) formatN`. Example:
 
           {[
-            Or_error.errorf "type %a is not valid for %a" Type.str ty Exp.str
-              exp
+          Or_error.errorf "type %a is not valid for %a" Type.str ty Exp.str exp
           ]} *)
 
       val pps : unit -> t -> string
@@ -244,7 +243,7 @@ module Std : sig
         to read a value of type [Bil.t] as simple, as:
 
         {[
-          let prog = Bil.Io.read filename
+        let prog = Bil.Io.read filename
         ]} *)
     module type S = sig
       type t
@@ -382,14 +381,14 @@ module Std : sig
           argument.
 
           {[
-            let compute_graph ?(debug = false) x y : Graphs.Cfg.t =
-              let digest = Data.Cache.digest ~namespace:"example" "%s%d" x y in
-              match Graphs.Cfg.Cache.load digest with
-              | Some g -> g
-              | None ->
-                  let g = build_graph ?debug x y in
-                  Graphs.Cfg.Cache.save digest g;
-                  g
+          let compute_graph ?(debug = false) x y : Graphs.Cfg.t =
+            let digest = Data.Cache.digest ~namespace:"example" "%s%d" x y in
+            match Graphs.Cfg.Cache.load digest with
+            | Some g -> g
+            | None ->
+                let g = build_graph ?debug x y in
+                Graphs.Cfg.Cache.save digest g;
+                g
           ]}
 
           Note: it is only reasonable to use caching for data types, that take
@@ -605,10 +604,10 @@ module Std : sig
       (** [digest ~namespace fmt x y z ...] a variadic function to create data
           digests. Use it like a printf, e.g.,
           {[
-            type t = { name : string; parent : string; lang : string }
+          type t = { name : string; parent : string; lang : string }
 
-            let digest t =
-              Data.Cache.digest ~namespace:"student" "%s%s" t.name t.parent
+          let digest t =
+            Data.Cache.digest ~namespace:"student" "%s%s" t.name t.parent
           ]}
 
           In the example, we created a digest that will ignore [lang] field of
@@ -963,12 +962,12 @@ module Std : sig
           is never changed after initialization is performed.
 
           {[
-            let string_init len f : string =
-              let s = Bytes.create len in
-              for i = 0 to len - 1 do
-                Bytes.set s i (f i)
-              done;
-              Bytes.Unsafe.to_string s
+          let string_init len f : string =
+            let s = Bytes.create len in
+            for i = 0 to len - 1 do
+              Bytes.set s i (f i)
+            done;
+            Bytes.Unsafe.to_string s
           ]}
 
           This function is safe because the byte sequence [s] will never be
@@ -990,8 +989,8 @@ module Std : sig
           can mutate the sequence again after the call ended.
 
           {[
-            let bytes_length (s : bytes) =
-              String.length (Bytes.Unsafe.to_string s)
+          let bytes_length (s : bytes) =
+            String.length (Bytes.Unsafe.to_string s)
           ]}
 
           In this use-case, we do not promise that [s] will never be mutated
@@ -1025,8 +1024,8 @@ module Std : sig
           you never uniquely own them.
 
           {[
-            let incorrect = Bytes.Unsafe.of_string "hello"
-            let s = Bytes.of_string "hello"
+          let incorrect = Bytes.Unsafe.of_string "hello"
+          let s = Bytes.of_string "hello"
           ]}
 
           The first declaration is incorrect, because the string literal

@@ -11,7 +11,7 @@
     So proposed usage is just to open at the very beginning of your module:
 
     {[
-      open Powerpc.Std
+    open Powerpc.Std
     ]}
 
     {2 RTL}
@@ -57,13 +57,13 @@
     Immediate instructions operands are constructed in the same way:
 
     {[
-      let im = signed imm op.(1)
+    let im = signed imm op.(1)
     ]}
 
     Also one may create variables for convenience:
 
     {[
-      let x = unsigned var halfword
+    let x = unsigned var halfword
     ]}
 
     that is a creation of variable of bitwidth 16. Other useful bitwidthes are
@@ -71,19 +71,19 @@
     variable of arbitrary bitwidth:
 
     {[
-      let x = signed var (bitwidth 10)
+    let x = signed var (bitwidth 10)
     ]}
 
     It's also possible to create an epxression from integer constant:
 
     {[
-      let x = unsigned const word 42
+    let x = unsigned const word 42
     ]}
 
     And create an expression from string:
 
     {[
-      let x = unsigned of_string "0xFFFF_FFFF_FFFF"
+    let x = unsigned of_string "0xFFFF_FFFF_FFFF"
     ]}
 
     {4 Extraction}
@@ -108,17 +108,17 @@
 
     Example 1. Apply extract explicitly. The result is 0x0000_FFFF.
     {[
-      let x = signed const halfword 0xFFFF in
-      let y = signed var word in
-      RTL.[ y := last word x ]
+    let x = signed const halfword 0xFFFF in
+    let y = signed var word in
+    RTL.[ y := last word x ]
     ]}
 
     Example 2. Assignment to signed, without extraction. The result is
     0xFFFF_FFFF.
     {[
-      let x = signed const halfword 0xFFFF in
-      let y = signed var word in
-      RTL.[ y := x ]
+    let x = signed const halfword 0xFFFF in
+    let y = signed var word in
+    RTL.[ y := x ]
     ]}
 
     {4 Concatenation}
@@ -136,9 +136,9 @@
     is a signed comparison:
 
     {[
-      let x = signed const halfword 0xFAAA in
-      let y = unsigned var bit in
-      RTL.[ y := x < zero ]
+    let x = signed const halfword 0xFAAA in
+    let y = unsigned var bit in
+    RTL.[ y := x < zero ]
     ]}
 
     The result is true (1), since [x] is signed. But if we will replace x
@@ -150,10 +150,10 @@
     And otherwise, shift is an arithmetical one if operand is signed.
 
     {[
-      let x = signed const halfword 0xFAAA in
-      let s = unsigned const halfword 4 in
-      let y = unsigned var halfword in
-      RTL.[ y := x >> s ]
+    let x = signed const halfword 0xFAAA in
+    let s = unsigned const halfword 4 in
+    let y = unsigned var halfword in
+    RTL.[ y := x >> s ]
     ]}
     If [x] is signed, like in example above, then shift is arithmetical, and
     result is 0xFFAA. If [x] is unsigned, then shift is logical and result is
@@ -166,8 +166,8 @@
     right-hand side of an assignment is always treated to have the same sign and
     width as a left one:
     {[
-      ra := zero;
-      rb := rc ^ rd
+    ra := zero;
+    rb := rc ^ rd
     ]}
     Assuming, that [zero] is just one bit and all [ra], [rb], [rc], [rd] are
     32-bit expressions we will get [ra], with all bits set to zero, and [rb]
@@ -182,9 +182,9 @@
       of correct assignment:
 
     {[
-      low byte rt := ra + rb;
-      cpu.cr := zero;
-      nbit cpu.cr 1 := one
+    low byte rt := ra + rb;
+    cpu.cr := zero;
+    nbit cpu.cr 1 := one
     ]}
 
     {2 Bit,byte,whatever Order}
@@ -195,24 +195,24 @@
 
     Example 1. [y] will be set to 0xAB, because first byte requested:
     {[
-      let x = unsigned const halfword 0xABCD in
-      let y = unsigned var byte in
-      RTL.[ y := first byte x ]
+    let x = unsigned const halfword 0xABCD in
+    let y = unsigned var byte in
+    RTL.[ y := first byte x ]
     ]}
 
     Example 2. [y] will be set to 0xCD, because last byte requested:
     {[
-      let x = unsigned const halfword 0xABCD in
-      let y = unsigned var byte in
-      RTL.[ y := last byte x ]
+    let x = unsigned const halfword 0xABCD in
+    let y = unsigned var byte in
+    RTL.[ y := last byte x ]
     ]}
 
     Example 3. [y] will be set to one, because second bit requested (numeration
     starts from zero):
     {[
-      let x = unsigned of_string "0b010000" in
-      let y = unsigned var bit in
-      RTL.[ y := nth bit x 1 ]
+    let x = unsigned of_string "0b010000" in
+    let y = unsigned var bit in
+    RTL.[ y := nth bit x 1 ]
     ]}
 
     {2 Lifter}
@@ -225,10 +225,10 @@
     target register, the second operand is a source register, and the third
     operand is an immediate:
     {[
-      let tar = signed cpu.reg ops.(0) in
-      let src = signed cpu.reg ops.(1) in
-      let imm = unsigned imm ops.(2) in
-      RTL.[ tar := src + imm ]
+    let tar = signed cpu.reg ops.(0) in
+    let src = signed cpu.reg ops.(1) in
+    let imm = unsigned imm ops.(2) in
+    RTL.[ tar := src + imm ]
     ]}
 
     {2 Misc}

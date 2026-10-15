@@ -83,12 +83,12 @@ let blocks_that_define_var var sub : tid list =
     variable in an expression [exp] perform a substitution of the variable to a
     top value of a stack for this variable, if it is not empty *)
 let substitute vars =
-  (object
-     inherit Exp.mapper
+  object
+    inherit Exp.mapper
 
-     method! map_sym z =
-       match Hashtbl.find vars z with None | Some [] -> z | Some (d :: _) -> d
-  end)
+    method! map_sym z =
+      match Hashtbl.find vars z with None | Some [] -> z | Some (d :: _) -> d
+  end
     #map_exp
 
 (** [rename t] performs a renaming of variables in a subroutine [t.sub]. An

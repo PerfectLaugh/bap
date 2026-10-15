@@ -73,9 +73,9 @@ module Std : sig
       bundle, use the {!main_bundle} function, e.g.,
 
       {[
-        open Bap_bundle.Std
+      open Bap_bundle.Std
 
-        let bundle = main_bundle ()
+      let bundle = main_bundle ()
       ]} *)
   module Bundle : sig
     type t = bundle

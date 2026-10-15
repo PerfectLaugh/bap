@@ -260,15 +260,15 @@ module Query : sig
       selected attributes. Given a concrete select query:
 
       {[
-        select (from student $ teacher) ~join:[ [ field classid ] ]
+      select (from student $ teacher) ~join:[ [ field classid ] ]
       ]}
 
       a constraint [student.(classid) = teacher.(classid)] is constructed.
       Another way to construct the same selection is:
 
       {[
-        select (from student $ teacher) ~where:student.(classid)
-        = teacher.(classid)
+      select (from student $ teacher) ~where:student.(classid)
+      = teacher.(classid)
       ]} *)
 
   type 'a tables
@@ -292,17 +292,17 @@ module Query : sig
 
       Select all students that has the GPA rate greater than 3.8.
       {[
-        select ~where:(student.(gpa) > float 3.8) (from students)
+      select ~where:(student.(gpa) > float 3.8) (from students)
       ]}
 
       Select all students and their corresponding teachers, that have a GPA
       greater than 3.8 (assuming that teacher is a foreign key to the table of
       teachers).
       {[
-        select
-          ~where:(student.(gpa) > float 3.8)
-          ~join:[ [ field teacher ~from:student; field id ~from:teacher ] ]
-          (from students)
+      select
+        ~where:(student.(gpa) > float 3.8)
+        ~join:[ [ field teacher ~from:student; field id ~from:teacher ] ]
+        (from students)
       ]}
 
       You may notice, that the [select] query lacks the SQL's [WHAT] clause,
@@ -314,9 +314,9 @@ module Query : sig
       {v SELECT name FROM students WHERE gpa > 3.5 v}
 
       {[
-        foreach
-          Query.(select ~where:(student.(gpa) > float 3.8) (from students))
-          ~f:(fun s -> return (Student.name s))
+      foreach
+        Query.(select ~where:(student.(gpa) > float 3.8) (from students))
+        ~f:(fun s -> return (Student.name s))
       ]}
 
       It is nearly three times as long, but in return it is type-safe, and
@@ -358,10 +358,10 @@ module Query : sig
       number in the selection. For example, in a query
 
       {[
-        select
-          (from students $ students)
-          ~join:[ [ field name ] ]
-          ~where:(id.[0] <> id.[1])
+      select
+        (from students $ students)
+        ~join:[ [ field name ] ]
+        ~where:(id.[0] <> id.[1])
       ]}
 
       a variable [id.[0]] will be bound to the field [id] of the first column of
@@ -547,18 +547,18 @@ module type S = sig
       similar to SQL, and has join and where clauses, e.g.,
 
       {[
-        let better_than_average_students =
-          foreach
-            Query.(
-              select
-                ~where:(students.(gpa) > float 3.5)
-                ~join:
-                  [
-                    [ field classid ];
-                    [ field teacher ~from:students; field id ~from:teachers ];
-                  ]
-                (from students $ teachers))
-            ~f:(fun s t -> return (s, t))
+      let better_than_average_students =
+        foreach
+          Query.(
+            select
+              ~where:(students.(gpa) > float 3.5)
+              ~join:
+                [
+                  [ field classid ];
+                  [ field teacher ~from:students; field id ~from:teachers ];
+                ]
+              (from students $ teachers))
+          ~f:(fun s t -> return (s, t))
       ]}
 
       The type of the [query] value encodes the type of the function [f]. A well
@@ -589,7 +589,7 @@ module type S = sig
       [fmt] and arguments, terminated by the unit value [()]. Example:
 
       {[
-        failf "the file type %s is unsupported" name ()
+      failf "the file type %s is unsupported" name ()
       ]}
 
       Note: don't forget to terminate a sequence of arguments with an extra unit
@@ -604,16 +604,16 @@ module type S = sig
       For example, given the property [names_of_best_students], defined as,
 
       {[
-        let names_of_best_students =
-          foreach
-            Query.(select (from students) ~where:(students.(gpa) > float 3.8))
-            ~f:(fun s -> return (Student.name s))
+      let names_of_best_students =
+        foreach
+          Query.(select (from students) ~where:(students.(gpa) > float 3.8))
+          ~f:(fun s -> return (Student.name s))
       ]}
 
       we can evaluate this property, with
 
       {[
-        eval names_of_best_students
+      eval names_of_best_students
       ]}
 
       to get a sequence (possibly empty) of all students that have the GPA score

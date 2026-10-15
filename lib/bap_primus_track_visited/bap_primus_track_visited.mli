@@ -43,9 +43,9 @@ val progress : (int * int) Primus.observation
     {3 Example}
 
     {[
-      module Visited = Bap_primus_track_visited.Set.Make (Machine)
+    module Visited = Bap_primus_track_visited.Set.Make (Machine)
 
-      let term_is_visited t = Visited.mem (Term.tid t)
+    let term_is_visited t = Visited.mem (Term.tid t)
     ]} *)
 module Set : sig
   module Make (Machine : Primus.Machine.S) : sig

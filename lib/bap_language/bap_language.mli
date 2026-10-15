@@ -18,16 +18,16 @@ open Bap.Std
     hypothetical pass that resolves [applyN] function calls into regular calls:
 
     {[
-      open Language.Std
-      open OCaml.Std
+    open Language.Std
+    open OCaml.Std
 
-      let resolve_apply proj = (* do something with proj *) proj
+    let resolve_apply proj = (* do something with proj *) proj
 
-      let () =
-        Future.upon Language.chosen @@ fun lang ->
-        match Language.name lang with
-        | OCaml -> Project.register_pass ~autorun:true ~f:resolve_apply
-        | _ -> ()
+    let () =
+      Future.upon Language.chosen @@ fun lang ->
+      match Language.name lang with
+      | OCaml -> Project.register_pass ~autorun:true ~f:resolve_apply
+      | _ -> ()
     ]}
 
     The example, assumes that there exists a library that defines module
@@ -66,32 +66,32 @@ open Bap.Std
     Example, lets assume that with every language there is a pass:
 
     {[
-      module Passes = Language.Property (struct
-        type 'a t = 'a -> project -> project
-      end)
+    module Passes = Language.Property (struct
+      type 'a t = 'a -> project -> project
+    end)
     ]}
 
     and that every language may have some frontend (i.e., a parser):
 
     {[
-      module Frontends = Language.Property (struct
-        type 'a t = string -> 'a
-      end)
+    module Frontends = Language.Property (struct
+      type 'a t = string -> 'a
+    end)
     ]}
 
     Then given a language [lang] it is possible to write a generic function:
 
     {[
-      let frontends = Frontends.create ()
-      let passes = Passes.create ()
+    let frontends = Frontends.create ()
+    let passes = Passes.create ()
 
-      let pass lang input proj =
-        match Frontends.get frontends lang with
-        | None -> proj
-        | Some parse -> (
-            match Passes.get passes lang with
-            | None -> proj
-            | Some pass -> pass (parse input) proj)
+    let pass lang input proj =
+      match Frontends.get frontends lang with
+      | None -> proj
+      | Some parse -> (
+          match Passes.get passes lang with
+          | None -> proj
+          | Some pass -> pass (parse input) proj)
     ]}
 
     Where [frontends] and [passes] are static tables, that can be dynamically

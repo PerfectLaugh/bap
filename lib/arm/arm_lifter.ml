@@ -915,16 +915,16 @@ end
 (** Substitute PC with its value *)
 let resolve_pc mem =
   Stmt.map
-    (object
-       inherit Stmt.mapper as super
+    object
+      inherit Stmt.mapper as super
 
-       method! map_var var =
-         if Var.(equal var CPU.pc) then Bil.int (CPU.addr_of_pc mem)
-         else super#map_var var
+      method! map_var var =
+        if Var.(equal var CPU.pc) then Bil.int (CPU.addr_of_pc mem)
+        else super#map_var var
 
-       method! map_move v x =
-         if Var.(equal v CPU.pc) then super#map_jmp x else super#map_move v x
-    end)
+      method! map_move v x =
+        if Var.(equal v CPU.pc) then super#map_jmp x else super#map_move v x
+    end
 
 let insn_exn mem insn : bil Or_error.t =
   let encoding =

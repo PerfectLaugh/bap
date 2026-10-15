@@ -30,16 +30,15 @@ module Finder : S with type ('a, 'e) m = ('a, 'e) Search.t
     For example, the following code will find the first pointer:
 
     {[
-      module Search = C.Type.Mapper.Search
+    module Search = C.Type.Mapper.Search
 
-      let find_pointer t =
-        Search.result
-        @@ (object
-              inherit [C.Type.t] C.Type.Mapper.Finder.base
-              method! enter_pointer = Search.finished
-           end)
-             #run
-             t
+    let find_pointer t =
+      Search.result
+      @@ object
+           inherit [C.Type.t] C.Type.Mapper.Finder.base
+           method! enter_pointer = Search.finished
+         end
+           #run t
     ]} *)
 
 (** [Make(M)] lifts the visitor into monad [M]. *)

@@ -27,7 +27,7 @@ val empty : ('k -> 'k -> int) -> ('s -> 's -> int) -> ('k, 's) t
 
     {3 Example}
     {[
-      let empty = Bap_relation.empty Int.compare String.compare
+    let empty = Bap_relation.empty Int.compare String.compare
     ]} *)
 
 val is_empty : (_, _) t -> bool

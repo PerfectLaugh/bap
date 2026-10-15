@@ -37,7 +37,7 @@ open Regular.Std
     implementation to some short name, usually [G] would be a good choice:
 
     {[
-      module G = Graphlib.Make (String) (Bool)
+    module G = Graphlib.Make (String) (Bool)
     ]}
 
     This will bind [G] to a graph implementation that has [string] nodes with
@@ -47,16 +47,16 @@ open Regular.Std
     {!Std.Graphlib.create} function:
 
     {[
-      let g =
-        Graphlib.create
-          (module G)
-          ~edges:
-            [
-              ("entry", "loop", true);
-              ("loop", "exit", true);
-              ("loop", "loop", false);
-            ]
-          ()
+    let g =
+      Graphlib.create
+        (module G)
+        ~edges:
+          [
+            ("entry", "loop", true);
+            ("loop", "exit", true);
+            ("loop", "loop", false);
+          ]
+        ()
     ]}
 
     This will create an instance of type [G.t]. Of course, it is still possible
@@ -122,9 +122,7 @@ module Std : sig
         {!update} to change existing nodes.
 
         Postconditions:
-        {v
-          - N(g') = N(g) ∪ {n}.
-        v} *)
+        {v   - N(g') = N(g) ∪ {n}. v} *)
 
     val update : t -> label -> graph -> graph
     (** [update n l g] for a graph with labeled nodes if node [n] is not in
@@ -194,9 +192,7 @@ module Std : sig
         extended as well, so that axioms of graph are preserved.
 
         Postconditions:
-        {v
-          - E(g') = E(g) ∪ {e}.
-        v} *)
+        {v   - E(g') = E(g) ∪ {e}. v} *)
 
     val update : t -> label -> graph -> graph
     (** [update e l g] if edge [e] exists in graph [g] then return a new graph
@@ -215,9 +211,7 @@ module Std : sig
     (** [remove e g] returns a graph [g'] that doesn't contain edge [e].
 
         Postconditions:
-        {v
-          - E(g') = E(g) \ {e}.
-        v} *)
+        {v   - E(g') = E(g) \ {e}. v} *)
 
     include Opaque.S with type t := t
   end
@@ -393,7 +387,7 @@ module Std : sig
         pretty-printer [pp_elt]. The tree is printed in a dot format, for the
         ease of visualization. Example:
         {[
-          let pp_int_tree = Tree.pp Int.pp
+        let pp_int_tree = Tree.pp Int.pp
         ]}
         Note: For all instatiations of [Graph] interface in the [Graphlib]
         library printable versions of [tree], [partition], [group] etc are
@@ -657,7 +651,7 @@ module Std : sig
         node, satisfies the {!Regular.Std.Opaque.S} interface. So, a new graph
         structure can be implemented directly, e.g.,
         {[
-          module G = Graphlib.Make (Int64) (Unit)
+        module G = Graphlib.Make (Int64) (Unit)
         ]}
 
         If a type doesn't satisfy the [Opaque] interface, then it can be easily
@@ -689,18 +683,18 @@ module Std : sig
     (** [create (module G) ~nodes ~edges ()] creates a graph using
         implementation provided by [module G]. Example:
         {[
-          module G = Graphlib.String.Bool
+        module G = Graphlib.String.Bool
 
-          let g =
-            Graphlib.create
-              (module G)
-              ~edges:
-                [
-                  ("entry", "loop", true);
-                  ("loop", "exit", false);
-                  ("loop", "loop", true);
-                ]
-              ()
+        let g =
+          Graphlib.create
+            (module G)
+            ~edges:
+              [
+                ("entry", "loop", true);
+                ("loop", "exit", false);
+                ("loop", "loop", true);
+              ]
+            ()
         ]} *)
 
     val union :
@@ -1130,9 +1124,7 @@ module Std : sig
 
         The general representation of the fixpoint equation is
 
-        {v
-          x(i) = f(i) (a(1,i) x(1) %  ... % a(n,i) x(n)),
-        v}
+        {v   x(i) = f(i) (a(1,i) x(1) %  ... % a(n,i) x(n)), v}
 
         where
         - [x(i)] is the value of the [i]'th variable (node);

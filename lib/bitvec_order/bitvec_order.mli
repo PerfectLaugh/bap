@@ -21,13 +21,13 @@ type t = Bitvec.t
     For example, an empty set is created as
 
     {[
-      let words = Set.empty Bitvec_order.natural
+    let words = Set.empty Bitvec_order.natural
     ]}
 
     , and it has type
 
     {[
-      (Bitvec.t, Bitvec_order.natural) set
+    (Bitvec.t, Bitvec_order.natural) set
     ]}
 
     (See the note on comparators below for the old style comparators)
@@ -49,7 +49,7 @@ type t = Bitvec.t
     And to instantiate the [Comparable.S] interface,
 
     {[
-      include Comparable.Make (Bitvec_order)
+    include Comparable.Make (Bitvec_order)
     ]}
     .
 
@@ -61,13 +61,13 @@ type t = Bitvec.t
     that the above examples could be expressed
 
     {[
-      open Bitvec_order.Comparators
+    open Bitvec_order.Comparators
 
-      let words = Set.empty bitvec_order
+    let words = Set.empty bitvec_order
 
-      type words = (bitvec, bitvec_order) Set.t
+    type words = (bitvec, bitvec_order) Set.t
 
-      let decreasing x y = bitvec_descending.compare x y
+    let decreasing x y = bitvec_descending.compare x y
     ]}
 
     {2 The old style comparators}
@@ -87,13 +87,13 @@ type t = Bitvec.t
     as a record, so instead of writing
 
     {[
-      Set.empty Bitvec_order.natural
+    Set.empty Bitvec_order.natural
     ]}
 
     the following notation should be used
 
     {[
-      Set.empty Bitvec_order.Natural.comparator
+    Set.empty Bitvec_order.Natural.comparator
     ]} *)
 
 val compare : t -> t -> int

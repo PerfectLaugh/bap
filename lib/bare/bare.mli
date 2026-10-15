@@ -114,9 +114,7 @@ open Core
     v}
 
     Example:
-    {v
-    (((duck ?name) (does ?action)) ((looks like ?name did ?action)))
-    v}
+    {v (((duck ?name) (does ?action)) ((looks like ?name did ?action))) v}
 
     This rule contains two patterns [(duck ?name)] and [(does ?action)] and one
     production fact [(looks like ?name did ?action)].

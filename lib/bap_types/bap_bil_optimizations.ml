@@ -135,12 +135,11 @@ module Propagate (SM : Monad.State.S2) = struct
       | _ -> Some Const.top)
 
   let defs bil =
-    (object
-       inherit [Var.t list] bil_visitor
-       method! enter_move v _ defs = v :: defs
-    end)
-      #run
-      bil []
+    object
+      inherit [Var.t list] bil_visitor
+      method! enter_move v _ defs = v :: defs
+    end
+      #run bil []
 
   let has_unconditional_jmps bil =
     List.exists bil ~f:(function Jmp _ -> true | _ -> false)

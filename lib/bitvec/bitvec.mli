@@ -327,7 +327,7 @@ val pp : Format.formatter -> t -> unit
     e.g.,
 
     {[
-      Format.fprintf "0xBEEF != %a" Bitvec.pp !$"0xBEAF"
+    Format.fprintf "0xBEEF != %a" Bitvec.pp !$"0xBEAF"
     ]} *)
 
 val to_binary : t -> string

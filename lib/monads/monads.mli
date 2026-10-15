@@ -166,12 +166,12 @@ open Core
     following OCaml signature:
 
     {[
-      module type Monad = sig
-        type 'a t
+    module type Monad = sig
+      type 'a t
 
-        val return : 'a -> 'a t
-        val bind : 'a t -> ('a -> 'b t) -> 'b t
-      end
+      val return : 'a -> 'a t
+      val bind : 'a t -> ('a -> 'b t) -> 'b t
+    end
     ]}
 
     We also use [>>=] operator as an alias to the [bind] function. Thus
@@ -179,14 +179,14 @@ open Core
     to parametrize algorithms with signatures, e.g.,
 
     {[
-      module Algorithm (M : Monad) = struct
-        open R
-        open M
+    module Algorithm (M : Monad) = struct
+      open R
+      open M
 
-        let run a b =
-          f a >>= fun x ->
-          f b >>= fun y -> return (x + y)
-      end
+      let run a b =
+        f a >>= fun x ->
+        f b >>= fun y -> return (x + y)
+    end
     ]}
 
     Basically, whenever you see [c1 >>= fun v -> c2] you should understand it as
@@ -235,17 +235,17 @@ open Core
     inside a writer monad, you can do the following.
 
     {[
-      module St = struct
-        module Env = struct
-          type t = int
-        end
-
-        include Monad.State.T1 (Env) (Monad.Ident) (* adds types *)
-        include Monad.State.Make (Env) (Monad.Ident)
-        (* adds functions and modules *)
+    module St = struct
+      module Env = struct
+        type t = int
       end
 
-      module W = Monad.Writer.Make (Monoid.String) (St)
+      include Monad.State.T1 (Env) (Monad.Ident) (* adds types *)
+      include Monad.State.Make (Env) (Monad.Ident)
+      (* adds functions and modules *)
+    end
+
+    module W = Monad.Writer.Make (Monoid.String) (St)
     ]} *)
 
 module Std : sig
@@ -446,7 +446,7 @@ module Std : sig
         Example:
 
         {[
-          let sqrt x = guard (x > 0.) >>| fun () -> sqrt x
+        let sqrt x = guard (x > 0.) >>| fun () -> sqrt x
         ]}
 
         Implemented by:
@@ -1022,14 +1022,14 @@ module Std : sig
           This operators allows to write
 
           {[
-            let* r = computation x in
-            body
+          let* r = computation x in
+          body
           ]}
 
           instead of the old infix style
 
           {[
-            computation x >>= fun r -> body
+          computation x >>= fun r -> body
           ]}
 
           The [let*] and [and*] operators stand for the monad part of the

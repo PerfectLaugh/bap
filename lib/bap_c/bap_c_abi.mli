@@ -136,7 +136,7 @@ end
     previous sequence had never happend.
 
     {[
-      choice [ sequence [ e1; e2; e3; reject () ]; option2 ]
+    choice [ sequence [ e1; e2; e3; reject () ]; option2 ]
     ]}
 
     Since the purpose of this DSL is to describe how the passed arguments are
@@ -498,31 +498,30 @@ module Arg : sig
           convention AAPCS32,
 
           {[
-            let define t =
-              install t model @@ fun describe ->
-              let* iargs = Arg.Arena.iargs t in
-              let* irets = Arg.Arena.irets t in
-              let rev = Theory.Endianness.(Theory.Target.endianness t = le) in
-              let return ~alignment:_ size =
-                select
-                  [
-                    ( C.Type.is_basic,
-                      select
-                        [
-                          (is (size <= 32 * 2), Arg.registers ~rev irets);
-                          (otherwise, Arg.reference iargs);
-                        ] );
-                    (is (size <= 32), Arg.register irets);
-                    (otherwise, Arg.reference iargs);
-                  ]
-              in
-              describe ~return @@ fun ~alignment _ ->
-              sequence
+          let define t =
+            install t model @@ fun describe ->
+            let* iargs = Arg.Arena.iargs t in
+            let* irets = Arg.Arena.irets t in
+            let rev = Theory.Endianness.(Theory.Target.endianness t = le) in
+            let return ~alignment:_ size =
+              select
                 [
-                  (is (alignment = 64), const (Arg.align_even iargs));
-                  ( always,
-                    choose [ Arg.split_with_memory ~rev iargs; Arg.memory ] );
+                  ( C.Type.is_basic,
+                    select
+                      [
+                        (is (size <= 32 * 2), Arg.registers ~rev irets);
+                        (otherwise, Arg.reference iargs);
+                      ] );
+                  (is (size <= 32), Arg.register irets);
+                  (otherwise, Arg.reference iargs);
                 ]
+            in
+            describe ~return @@ fun ~alignment _ ->
+            sequence
+              [
+                (is (alignment = 64), const (Arg.align_even iargs));
+                (always, choose [ Arg.split_with_memory ~rev iargs; Arg.memory ]);
+              ]
           ]} *)
 
       val sequence : commands -> statement
@@ -578,7 +577,7 @@ module Arg : sig
 
           Example,
           {[
-            [ (is (size > 64), memory); (otherwise, registers) ]
+          [ (is (size > 64), memory); (otherwise, registers) ]
           ]} *)
 
       val otherwise : predicate
@@ -590,12 +589,12 @@ module Arg : sig
           the last, catch-all, predicate, e.g.,
 
           {[
-            select arg
-              [
-                (is_fundamental, pass_fundamental);
-                (is_floating, pass_floating);
-                (otherwise, pass_memory);
-              ]
+          select arg
+            [
+              (is_fundamental, pass_fundamental);
+              (is_floating, pass_floating);
+              (otherwise, pass_memory);
+            ]
           ]} *)
 
       val always : predicate
@@ -612,11 +611,10 @@ module Arg : sig
           [select], e.g.,
 
           {[
-            select arg
-              [
-                (p1, choose [ (o1, o2) ]);
-                (either [ p2; p3 ], choose [ (o3, o4) ]);
-              ]
+          select arg
+            [
+              (p1, choose [ (o1, o2) ]); (either [ p2; p3 ], choose [ (o3, o4) ]);
+            ]
           ]} *)
 
       val combine : statements -> statement

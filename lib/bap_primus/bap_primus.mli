@@ -487,10 +487,10 @@ module Std : sig
               The function [k] receives a [provide] function that could be used
               to provide observation once it is ready, e.g.,
               {[
-                Observation.post big_thing ~f:(fun provide ->
-                    some_costly_function1 >>= fun x ->
-                    some_costly_function2 >>= fun y ->
-                    some_costly_function3 >>= fun z -> provide (x, y, z))
+              Observation.post big_thing ~f:(fun provide ->
+                  some_costly_function1 >>= fun x ->
+                  some_costly_function2 >>= fun y ->
+                  some_costly_function3 >>= fun z -> provide (x, y, z))
               ]}
 
               Note: even for observations that are tuples this function is
@@ -2805,7 +2805,7 @@ module Std : sig
         During parsing, every occurrence of the term {b <name>} (that should be
         an atom), will be rewritten with a sequence of values
         {[
-          {<value>}
+        {<value>}
         ]}
         .
 
@@ -2847,9 +2847,9 @@ module Std : sig
         will be expanded with
 
         {[
-          write
-          - block SP 0x68 0x65 0x6c 0x6c 0x6f 0x2c 0x20 0x63 0x72 0x75 0x65 0x6c
-              0x20 0x77 0x6f 0x72 0x6c 0x64 0x0a 0x00
+        write
+        - block SP 0x68 0x65 0x6c 0x6c 0x6f 0x2c 0x20 0x63 0x72 0x75 0x65 0x6c
+            0x20 0x77 0x6f 0x72 0x6c 0x64 0x0a 0x00
         ]}
 
         In the [:hex] syntax the sequence of atoms is split into two-characters
@@ -2864,13 +2864,13 @@ module Std : sig
         an application
 
         {[
-          write - block SP example
+        write - block SP example
         ]}
 
         will be expanded into
 
         {[
-          write - block SP 0x68 0x65 0x6c 0x6c 0x6f 0x2c 0x20 0x63
+        write - block SP 0x68 0x65 0x6c 0x6c 0x6f 0x2c 0x20 0x63
         ]}
 
         {3 Macro}
@@ -3015,9 +3015,7 @@ module Std : sig
         The context declaration limits an associated definition to the specified
         type class(es), and has the following syntax:
 
-        {v
-          (declare (context (<type-class> <feature> ...) ...))
-        v}
+        {v   (declare (context (<type-class> <feature> ...) ...)) v}
 
         Let's use the following two definitions for a concrete example,
 
@@ -3103,9 +3101,7 @@ module Std : sig
         It is also possible to make all definitions in a feature private by
         default using a global visibility declaration, e.g.,
 
-        {v
-        (declare (visibility :private))
-        v}
+        {v (declare (visibility :private)) v}
 
         and make some definitions public by adding corresponding public
         declarations.
@@ -3448,7 +3444,7 @@ module Std : sig
             with the [@->] operator:
 
             {[
-              params @-> return
+            params @-> return
             ]}
 
             The list of parameters can be specified as a tuple, a variable
@@ -3462,10 +3458,10 @@ module Std : sig
             Examples:
 
             {[
-              one int @-> byte;
-              tuple [ int; byte ] @-> int;
-              all a @-> bool;
-              (tuple [ sym; int ] // all byte) @-> bool
+            one int @-> byte;
+            tuple [ int; byte ] @-> int;
+            all a @-> bool;
+            (tuple [ sym; int ] // all byte) @-> bool
             ]} *)
         module Spec : sig
           val any : t
@@ -3645,11 +3641,11 @@ module Std : sig
             into a [Theory.Semantics] value, use the following code,
 
             {[
-              let reify_def name : unit Theory.eff =
-                Theory.Label.for_name name >>= fun obj ->
-                Unit.create Theory.Target.unknown >>= fun unit ->
-                KB.provide Theory.Label.unit obj (Some unit) >>= fun () ->
-                KB.collect Theory.Semantics.slot obj
+            let reify_def name : unit Theory.eff =
+              Theory.Label.for_name name >>= fun obj ->
+              Unit.create Theory.Target.unknown >>= fun unit ->
+              KB.provide Theory.Label.unit obj (Some unit) >>= fun () ->
+              KB.collect Theory.Semantics.slot obj
             ]}
 
             Note, if you don't want to use the program loader provided by the

@@ -5,21 +5,20 @@ open Bap_primus.Std
 type state = { visited : Tid.Set.t; total : int }
 
 let count_blks p =
-  (object
-     inherit [int] Term.visitor
-     method! enter_blk _ bs = bs + 1
-  end)
-    #run
-    p 0
+  object
+    inherit [int] Term.visitor
+    method! enter_blk _ bs = bs + 1
+  end
+    #run p 0
 
 let init_visited prog =
-  (object
-     inherit [Tid.Set.t] Term.visitor
+  object
+    inherit [Tid.Set.t] Term.visitor
 
-     method! enter_blk blk visited =
-       if Term.has_attr blk Term.visited then Set.add visited (Term.tid blk)
-       else visited
-  end)
+    method! enter_blk blk visited =
+      if Term.has_attr blk Term.visited then Set.add visited (Term.tid blk)
+      else visited
+  end
     #run
     prog Tid.Set.empty
 

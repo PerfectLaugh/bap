@@ -76,10 +76,10 @@ open Monads.Std
     function (or [upon] function for [Async]'s [Deferred]):
 
     {[
-      let future_of_thread t =
-        let future, promise = Future.create () in
-        Lwt.on_success t (Promise.fulfill promise);
-        future
+    let future_of_thread t =
+      let future, promise = Future.create () in
+      Lwt.on_success t (Promise.fulfill promise);
+      future
     ]} *)
 module Std : sig
   type 'a future
@@ -148,10 +148,10 @@ module Std : sig
       interface, e.g.,
 
       {[
-        arch >>= fun arch ->
-        lang >>= fun lang ->
-        abi >>= fun abi ->
-        api >>= fun api -> typecheck arch lang abi api
+      arch >>= fun arch ->
+      lang >>= fun lang ->
+      abi >>= fun abi ->
+      api >>= fun api -> typecheck arch lang abi api
       ]}
 
       However, this is less general, as it specifies a concrete order of
@@ -175,22 +175,22 @@ module Std : sig
       to [N] arguments:
 
       {[
-        module AList = struct
-          include List
+      module AList = struct
+        include List
 
-          let apply fs xs = cartesian_product fs xs >>| fun (f, x) -> f x
-        end
+        let apply fs xs = cartesian_product fs xs >>| fun (f, x) -> f x
+      end
 
-        module Varags = Variadic.Make (AList)
+      module Varags = Variadic.Make (AList)
 
-        let cartesian_product = Varags.apply
+      let cartesian_product = Varags.apply
       ]}
 
       For option and error monad, with the following definition of [apply],
 
       {[
-        let apply f x =
-          match (f, x) with Some f, Some x -> Some (f x) | None -> None
+      let apply f x =
+        match (f, x) with Some f, Some x -> Some (f x) | None -> None
       ]}
 
       The produced [Varargs.apply] will be a generalization of [Option.merge],
@@ -199,9 +199,9 @@ module Std : sig
 
       @see <http://staff.city.ac.uk/~ross/papers/Applicative.pdf>
         {v
-      [1]: Applicative Programming with Effects.
-           Conor McBride and Ross Paterson.
-           Journal of Functional Programming 18:1 (2008), pages 1-13.
+        [1]: Applicative Programming with Effects.
+             Conor McBride and Ross Paterson.
+             Journal of Functional Programming 18:1 (2008), pages 1-13.
         v} *)
   module Variadic : sig
     (** Variadic argument list. *)
@@ -248,10 +248,10 @@ module Std : sig
       monadic interface, e.g.,
 
       {[
-        let first_insn mem pc : mem Or_error.t future =
-          Future.(
-            Stream.nth pc 0 >>= fun fst ->
-            Stream.nth pc 1 >>= fun snd -> return (Memory.range mem fst snd))
+      let first_insn mem pc : mem Or_error.t future =
+        Future.(
+          Stream.nth pc 0 >>= fun fst ->
+          Stream.nth pc 1 >>= fun snd -> return (Memory.range mem fst snd))
       ]}
 
       Note: the future is a common denominator between lwt thread, async
@@ -581,18 +581,18 @@ module Std : sig
         example, if stream [ss] produced the following sequence of elements:
 
         {[
-          1, 2, 3, 4, 5, 6, 7, 8
+        1, 2, 3, 4, 5, 6, 7, 8
         ]}
 
         and windows length [n] is equal to [3], then the function [f] will be
         applied to a sequences:
         {[
-          [ (1, 2, 3) ],
-          [ (2, 3, 4) ],
-          [ (3, 4, 5) ],
-          [ (4, 5, 6) ],
-          [ (5, 6, 7) ],
-          [ (6, 7, 8) ]
+        [ (1, 2, 3) ],
+        [ (2, 3, 4) ],
+        [ (3, 4, 5) ],
+        [ (4, 5, 6) ],
+        [ (5, 6, 7) ],
+        [ (6, 7, 8) ]
         ]}
         .
 

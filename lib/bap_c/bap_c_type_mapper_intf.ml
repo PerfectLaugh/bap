@@ -23,12 +23,12 @@ open Bap_c_type
     pattern would be:
 
     {[
-      class my_mapper =
-        object (self)
-          inherit base as super
-          method map_T t = super#map_T t >>| self#my_transformation
-          method private my_transformation t = t
-        end
+    class my_mapper =
+      object (self)
+        inherit base as super
+        method map_T t = super#map_T t >>| self#my_transformation
+        method private my_transformation t = t
+      end
     ]}
 
     All method calls are bound with monadic operations. This makes it possible

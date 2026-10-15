@@ -24,14 +24,14 @@ let ism1 x = Word.is_zero (Word.lnot x)
 
 let is_assigned ?(strict = false) x =
   exists
-    (object
-       inherit [unit] bil_finder
+    object
+      inherit [unit] bil_finder
 
-       method! enter_move y _ cc =
-         if Bap_var.(x = y) && not (strict && under_condition) then
-           cc.return (Some ());
-         cc
-    end)
+      method! enter_move y _ cc =
+        if Bap_var.(x = y) && not (strict && under_condition) then
+          cc.return (Some ());
+        cc
+    end
 
 class exp_reference_finder x =
   object
@@ -462,19 +462,19 @@ module Trie = struct
 
   let normalize_values =
     map
-      (object
-         inherit bil_mapper
+      object
+        inherit bil_mapper
 
-         method! map_sym var =
-           let name = Bap_var.name var in
-           let ty = Bap_var.typ var in
-           Hashtbl.find_or_add vars name ~default:(fun () ->
-               Bap_var.create name ty)
+        method! map_sym var =
+          let name = Bap_var.name var in
+          let ty = Bap_var.typ var in
+          Hashtbl.find_or_add vars name ~default:(fun () ->
+              Bap_var.create name ty)
 
-         method! map_int w =
-           let ty = Type.Imm (Word.bitwidth w) in
-           pruned ty
-      end)
+        method! map_int w =
+          let ty = Type.Imm (Word.bitwidth w) in
+          pruned ty
+      end
 
   let prune x = prune_unreferenced ~virtuals:true x
 
@@ -938,34 +938,33 @@ module Normalize = struct
   *)
   let rec split_ite bil =
     map
-      (object (self)
-         inherit bil_mapper
-         method! map_move v e = self#split @@ Move (v, e)
-         method! map_jmp e = self#split @@ Jmp e
+      object (self)
+        inherit bil_mapper
+        method! map_move v e = self#split @@ Move (v, e)
+        method! map_jmp e = self#split @@ Jmp e
 
-         method private split stmt =
-           match find_cond_in_stmt stmt with
-           | None -> [ stmt ]
-           | Some x ->
-               split_ite [ If (x, [ with_true x stmt ], [ with_false x stmt ]) ]
-      end)
+        method private split stmt =
+          match find_cond_in_stmt stmt with
+          | None -> [ stmt ]
+          | Some x ->
+              split_ite [ If (x, [ with_true x stmt ], [ with_false x stmt ]) ]
+      end
       bil
 
   let rec hoist_stores bil =
     map
-      (object (self)
-         inherit bil_mapper
-         method! map_move v e = self#hoist e @@ Move (v, e)
-         method! map_jmp e = self#hoist e @@ Jmp e
+      object (self)
+        inherit bil_mapper
+        method! map_move v e = self#hoist e @@ Move (v, e)
+        method! map_jmp e = self#hoist e @@ Jmp e
 
-         method private hoist e stmt =
-           match find_non_generative_mem e with
-           | None -> [ stmt ]
-           | Some store ->
-               let v = memory_of_store store in
-               hoist_stores
-                 (Move (v, store) :: substitute store (Var v) [ stmt ])
-      end)
+        method private hoist e stmt =
+          match find_non_generative_mem e with
+          | None -> [ stmt ]
+          | Some store ->
+              let v = memory_of_store store in
+              hoist_stores (Move (v, store) :: substitute store (Var v) [ stmt ])
+      end
       bil
 
   let bil ?normalize_exp:(ne = false) xs =
@@ -1007,20 +1006,20 @@ module Exp = struct
   let free_vars exp =
     fst
     @@ fold ~init:(VS.empty, [])
-         (object
-            inherit [VS.t * var list] visitor
+         object
+           inherit [VS.t * var list] visitor
 
-            method! enter_var var (vars, stack) =
-              if List.exists stack ~f:(fun x -> Bap_var.(x = var)) then
-                (vars, stack)
-              else (Set.add vars var, stack)
+           method! enter_var var (vars, stack) =
+             if List.exists stack ~f:(fun x -> Bap_var.(x = var)) then
+               (vars, stack)
+             else (Set.add vars var, stack)
 
-            method! enter_let var ~exp:_ ~body:_ (vars, stack) =
-              (vars, var :: stack)
+           method! enter_let var ~exp:_ ~body:_ (vars, stack) =
+             (vars, var :: stack)
 
-            method! leave_let _var ~exp:_ ~body:_ (vars, stack) =
-              (vars, List.tl_exn stack)
-         end)
+           method! leave_let _var ~exp:_ ~body:_ (vars, stack) =
+             (vars, List.tl_exn stack)
+         end
          exp
 end
 

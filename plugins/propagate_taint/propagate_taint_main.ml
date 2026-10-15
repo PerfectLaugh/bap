@@ -148,16 +148,16 @@ let digest_project proj =
     | None -> dst
     | Some v -> Digest.add dst "%a" Tid.pp v
   in
-  (object
-     inherit [Digest.t] Term.visitor
+  object
+    inherit [Digest.t] Term.visitor
 
-     method! enter_term cls t dst =
-       add_taint Taint.reg t dst |> add_taint Taint.ptr t
+    method! enter_term cls t dst =
+      add_taint Taint.reg t dst |> add_taint Taint.ptr t
 
-     method! enter_arg t dst = Digest.add dst "%a" Arg.pp t
-     method! enter_def t dst = Digest.add dst "%a" Def.pp t
-     method! enter_jmp t dst = Digest.add dst "%a" Jmp.pp t
-  end)
+    method! enter_arg t dst = Digest.add dst "%a" Arg.pp t
+    method! enter_def t dst = Digest.add dst "%a" Def.pp t
+    method! enter_jmp t dst = Digest.add dst "%a" Jmp.pp t
+  end
     #run
     (Project.program proj)
     (Data.Cache.Digest.create ~namespace:"propagate_taint")

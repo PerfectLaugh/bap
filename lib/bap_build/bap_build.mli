@@ -9,13 +9,13 @@
     rules in the [Before_rules] phases, e.g.,
 
     {[
-      open Bap_build.Std
+    open Bap_build.Std
 
-      let () =
-        Plugin_options.set ();
-        Ocamlbuild_plugin.dispatch (function
-          | Before_rules -> Plugin_rules.install ()
-          | _ -> ())
+    let () =
+      Plugin_options.set ();
+      Ocamlbuild_plugin.dispatch (function
+        | Before_rules -> Plugin_rules.install ()
+        | _ -> ())
     ]} *)
 module Std : sig
   module Plugin_rules : sig

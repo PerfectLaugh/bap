@@ -42,7 +42,8 @@ let by_given_order (type a) (init, next) compare nodes =
       let compare = compare
       let sexp_of_t = sexp_of_opaque
     end)
-  end in
+  end
+  in
   Seq.fold nodes
     ~init:(Map.empty (module T), init)
     ~f:(fun (names, name) node ->
@@ -59,7 +60,8 @@ let by_natural_order (type a) variant compare nodes =
       let compare = compare
       let sexp_of_t = sexp_of_opaque
     end)
-  end in
+  end
+  in
   Seq.fold nodes ~init:(Set.empty (module T)) ~f:Set.add
   |> Set.to_sequence
   |> by_given_order variant compare

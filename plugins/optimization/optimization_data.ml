@@ -16,10 +16,10 @@ let mark_updated t = Term.set_attr t updated_term ()
 let is_updated t = Option.is_some (Term.get_attr t updated_term)
 
 let drop_index =
-  (object
-     inherit Exp.mapper
-     method! map_sym var = Var.base var
-  end)
+  object
+    inherit Exp.mapper
+    method! map_sym var = Var.base var
+  end
     #map_exp
 
 let updates_of_sub sub =

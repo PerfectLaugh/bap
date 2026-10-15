@@ -105,10 +105,10 @@ let kind_of_branches t f =
 
 let has_jumps =
   Bil.exists
-    (object
-       inherit [unit] Stmt.finder
-       method! enter_jmp _ r = r.return (Some ())
-    end)
+    object
+      inherit [unit] Stmt.finder
+      method! enter_jmp _ r = r.return (Some ())
+    end
 
 let rec dests_of_bil bil : dests = List.concat_map ~f:dests_of_stmt bil
 

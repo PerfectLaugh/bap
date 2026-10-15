@@ -6,48 +6,48 @@ open Format
 [@@@warning "-D"]
 
 let taint prog =
-  (object (self)
-     inherit Term.mapper as super
+  object (self)
+    inherit Term.mapper as super
 
-     method! map_def def =
-       let def = super#map_def def in
-       match Term.get_attr def Term.origin with
-       | None -> def
-       | Some tid -> (
-           match Program.lookup jmp_t prog tid with
-           | None -> def
-           | Some jmp -> (
-               match Jmp.kind jmp with
-               | Call c -> self#process def (Term.tid jmp) c
-               | _ -> def))
+    method! map_def def =
+      let def = super#map_def def in
+      match Term.get_attr def Term.origin with
+      | None -> def
+      | Some tid -> (
+          match Program.lookup jmp_t prog tid with
+          | None -> def
+          | Some jmp -> (
+              match Jmp.kind jmp with
+              | Call c -> self#process def (Term.tid jmp) c
+              | _ -> def))
 
-     method private process def taint call =
-       match Call.target call with
-       | Indirect _ -> def
-       | Direct callee -> (
-           match Term.find sub_t prog callee with
-           | None -> def
-           | Some sub ->
-               if
-                 Term.enum arg_t sub
-                 |> Seq.exists ~f:(fun arg ->
-                     Var.(Arg.lhs arg = Def.lhs def)
-                     && Term.has_attr arg Arg.warn_unused)
-               then Term.set_attr def Taint.reg taint
-               else def)
-  end)
+    method private process def taint call =
+      match Call.target call with
+      | Indirect _ -> def
+      | Direct callee -> (
+          match Term.find sub_t prog callee with
+          | None -> def
+          | Some sub ->
+              if
+                Term.enum arg_t sub
+                |> Seq.exists ~f:(fun arg ->
+                    Var.(Arg.lhs arg = Def.lhs def)
+                    && Term.has_attr arg Arg.warn_unused)
+              then Term.set_attr def Taint.reg taint
+              else def)
+  end
     #run
     prog
 
 let collect_seeds prog =
-  (object
-     inherit [Tid.Set.t] Term.visitor
+  object
+    inherit [Tid.Set.t] Term.visitor
 
-     method! enter_term cls t seeds =
-       match Term.get_attr t Taint.reg with
-       | Some seed when Term.has_attr t Term.visited -> Set.add seeds seed
-       | _ -> seeds
-  end)
+    method! enter_term cls t seeds =
+      match Term.get_attr t Taint.reg with
+      | Some seed when Term.has_attr t Term.visited -> Set.add seeds seed
+      | _ -> seeds
+  end
     #run
     prog Tid.Set.empty
 
@@ -61,13 +61,12 @@ let sanitize t seeds =
             Set.diff seeds taints)
 
 let solve prog seeds =
-  (object
-     inherit [Tid.Set.t] Term.visitor
-     method! enter_def = sanitize
-     method! enter_jmp = sanitize
-  end)
-    #run
-    prog seeds
+  object
+    inherit [Tid.Set.t] Term.visitor
+    method! enter_def = sanitize
+    method! enter_jmp = sanitize
+  end
+    #run prog seeds
 
 let marker unchecked =
   object

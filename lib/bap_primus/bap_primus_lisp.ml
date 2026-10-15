@@ -567,12 +567,11 @@ module Make (Machine : Machine) = struct
   let reflect v = Theory.Var.define (Var.sort v) (Var.name v)
 
   let collect_program_vars prog =
-    (object
-       inherit [Var.Set.t] Term.visitor
-       method! enter_var v vs = Set.add vs v
-    end)
-      #run
-      prog Var.Set.empty
+    object
+      inherit [Var.Set.t] Term.visitor
+      method! enter_var v vs = Set.add vs v
+    end
+      #run prog Var.Set.empty
     |> Set.to_sequence
 
   let add_places =

@@ -935,9 +935,9 @@ let dom_frontier_generic (type t) (type n) (type e)
   let frontier = Algo.compute ?rev g idom in
   let frontier = Map.map frontier ~f:create_set in
   Frontier.create (Map.keys frontier)
-    (object
-       method find = Map.find frontier
-    end)
+    object
+      method find = Map.find frontier
+    end
 
 let dom_frontier g = dom_frontier_generic (module Dom_frontier_cooper) g
 
@@ -1107,8 +1107,7 @@ let filtered (type t) (type n) (type e)
 
         let edge e = not (skip_edge e)
         let node n = not (skip_node n)
-      end)
-  in
+      end) in
   (module R)
 
 module type Morph = Isomorphism
