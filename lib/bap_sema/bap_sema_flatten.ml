@@ -84,13 +84,32 @@ let flatten_exp ?(before : tid option = None) (exp : exp) (blk : blk term) :
         new_def var e >>| fun def -> (Bil.Var var, insert blk def)
     | Bil.Extract (n, p, x) ->
         aux x blk >>= fun (x, blk) ->
-        new_var (Var.sort_of_typ (get_direct_typ x)) >>= fun var ->
+        let res_typ = Type.Imm (n - p + 1) in
+        new_var (Var.sort_of_typ res_typ) >>= fun var ->
         let e = Bil.Extract (n, p, x) in
         new_def var e >>| fun def -> (Bil.Var var, insert blk def)
     | Bil.Concat (x, y) ->
         aux x blk >>= fun (x, blk) ->
         aux y blk >>= fun (y, blk) ->
-        new_var (Var.sort_of_typ (get_direct_typ y)) >>= fun var ->
+        let exp_size (e : exp) : int option =
+          let typ_size (typ : Type.t) : int option =
+            match typ with
+            | Type.Imm i -> Some i
+            | Type.Unk -> None
+            | _ -> failwith "concating non-immediates"
+          in
+          match e with
+          | Bil.Var v -> typ_size (Var.typ v)
+          | Bil.Unknown (_, t) -> typ_size t
+          | Bil.Int w -> Some (Word.bitwidth w)
+          | _ -> failwith "the expression is not flattened"
+        in
+        let res_typ =
+          Option.both (exp_size x) (exp_size y)
+          |> Option.value_map ~default:Type.Unk ~f:(fun (x_size, y_size) ->
+              Type.Imm (x_size + y_size))
+        in
+        new_var (Var.sort_of_typ res_typ) >>= fun var ->
         let e = Bil.Concat (x, y) in
         new_def var e >>| fun def -> (Bil.Var var, insert blk def)
   in
