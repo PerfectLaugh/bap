@@ -37,7 +37,7 @@
 (defun fopen (path mode)
   (declare (external "fopen" "open" "fdopen"))
   (let ((file (channel-open path)))
-    (if (< file 0) 0 file)))
+    (if (is-negative file) 0 file)))
 
 (defun fileno (stream)
   (declare (external "fileno"))
