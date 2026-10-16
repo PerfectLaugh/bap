@@ -22,7 +22,7 @@ depends: [
   "bitvec-order" {= version}
   "bitvec" {= version}
   "camlzip" {>= "1.07" & < "2.0"}
-  "cmdliner" {>= "1.0" & < "2.0"}
+  "cmdliner" {>= "2.0.0"}
   "core"
   "fileutils"
   "graphlib" {= version}

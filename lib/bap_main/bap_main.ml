@@ -144,19 +144,21 @@ module Type = struct
 
   let converter { parse; print } : 'a Arg.conv =
     let parser s =
-      try Ok (parse s) with exn -> Error (`Msg (Exn.to_string exn))
+      try Ok (parse s) with
+      | Invalid_argument msg -> Error msg
+      | exn -> Error (Exn.to_string exn)
     in
-    let printer ppf s = Format.fprintf ppf "%s" (print s) in
-    Arg.conv (parser, printer)
+    let pp ppf s = Format.fprintf ppf "%s" (print s) in
+    Arg.Conv.make ~docv:"VALUE" ~parser ~pp ()
 
   let default conv = conv.default
   let redefault t default = { t with default }
 
-  let wrap ?digest (parser, printer) default =
+  let wrap ?digest conv default =
     let parse s =
-      match parser s with `Ok s -> s | `Error s -> invalid_arg s
+      match Arg.Conv.parser conv s with Ok s -> s | Error s -> invalid_arg s
     in
-    let print x = Format.asprintf "%a" printer x in
+    let print x = Format.asprintf "%a" (Arg.Conv.pp conv) x in
     define ?digest ~parse ~print default
 
   let path = wrap Arg.string ""

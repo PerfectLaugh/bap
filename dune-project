@@ -289,7 +289,7 @@
  (depends
   (bap-byteweight (= :version))
   (bap-std (= :version))
-  (cmdliner (and (>= 1.0) (< 2.0)))
+  (cmdliner (>= 2.0.0))
   core
   fileutils
   (bap-common (= :version))
@@ -632,7 +632,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-recipe (= :version))
   base
   core_kernel
-  (cmdliner (and (>= 1.0) (< 2.0)))
+  (cmdliner (>= 2.0.0))
   (bap-common (= :version))
   stdio))
 
@@ -742,7 +742,7 @@ be seen as a common denominator between Lwt and Async libraries.")
  (depends
   (bap-common (= :version))
   (bap-std (= :version))
-  (cmdliner (and (>= 1.0) (< 2.0)))
+  (cmdliner (>= 2.0.0))
   core
    ezjsonm
   (graphlib (= :version))
@@ -1253,7 +1253,7 @@ between the sets.")
   (bitvec-order (= :version))
   (bitvec (= :version))
   (camlzip (and (>= 1.07) (< 2.0)))
-  (cmdliner (and (>= 1.0) (< 2.0)))
+  (cmdliner (>= 2.0.0))
   core
    fileutils
   (graphlib (= :version))
