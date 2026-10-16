@@ -87,7 +87,7 @@ let riscv t =
           ([ function_return ], x (10 -- 12) @ f (10 -- 12));
           ([ link ], x [ 1 ]);
           ([ stack_pointer ], x [ 2 ]);
-          ([ thread ], x [ 3 ]);
+          ([ thread ], x [ 4 ]);
           ( [ caller_saved ],
             x [ 1 ]
             @ x (5 -- 7)
