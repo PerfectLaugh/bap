@@ -563,13 +563,36 @@ let disassemble ~code ~data ~funs debt base : Machine.state KB.t =
 
 type insns = Theory.Label.t list
 
+(* a scanned memory region *)
+type region = {
+  mem : mem;
+  rank : int;  (** the regions are ranked in the order of scanning *)
+  owed : Machine.task list;
+      (** the destinations in the region that were found after it was scanned
+          and are not explored yet *)
+}
+[@@deriving bin_io]
+
+(* The destinations that a scan can't explore, because they are outside
+   of the scanned region, are its debt. A destination in a scanned region
+   is owed by that region and is explored when the region is scanned
+   again, a destination elsewhere is unowned and is explored when the
+   region that contains it is scanned. *)
 type state = {
   funs : Addr.Set.t;
   begs : Addr.Set.t;
   jmps : jump Addr.Map.t;
   data : Addr.Set.t;
-  mems : mem list;
-  debt : Machine.task list;
+  regions : region Addr.Map.t;  (** the scanned regions by their starts *)
+  owing : Addr.t Int.Map.t;
+      (** the starts of the regions that owe destinations, by their ranks *)
+  unowned : Machine.task list Addr.Map.t;
+      (** the unowned destinations by their addresses, the last found first *)
+  scanned : int;  (** the number of the scanned regions *)
+  overlapping : Machine.task list option;
+      (** [Some debt] if some regions intersect, then all destinations are kept
+          in the [debt] list and every scan explores all of them, as the regions
+          can't be indexed *)
   exts : Set.M(Theory.Label).t;
 }
 [@@deriving bin_io]
@@ -580,12 +603,42 @@ let init =
     begs = Set.empty (module Addr);
     jmps = Map.empty (module Addr);
     data = Set.empty (module Addr);
-    mems = [];
-    debt = [];
+    regions = Map.empty (module Addr);
+    owing = Map.empty (module Int);
+    unowned = Map.empty (module Addr);
+    scanned = 0;
+    overlapping = None;
     exts = Set.empty (module Theory.Label);
   }
 
-let forget_debt s = { s with debt = [] }
+let forget_debt s =
+  {
+    s with
+    regions = Map.map s.regions ~f:(fun r -> { r with owed = [] });
+    owing = Map.empty (module Int);
+    unowned = Map.empty (module Addr);
+    overlapping = Option.map s.overlapping ~f:(fun _ -> []);
+  }
+
+(* the region that contains [addr], the last scanned one if several
+   regions contain it *)
+let region_of s addr =
+  match s.overlapping with
+  | None -> (
+      match Map.closest_key s.regions `Less_or_equal_to addr with
+      | Some (_, r) when Memory.contains r.mem addr -> Some r
+      | _ -> None)
+  | Some _ ->
+      Map.fold s.regions ~init:None ~f:(fun ~key:_ ~data:r last ->
+          if Memory.contains r.mem addr then
+            match last with Some l when l.rank > r.rank -> last | _ -> Some r
+          else last)
+
+(* the scanned memory, the last scanned first *)
+let scanned_mems s =
+  Map.data s.regions
+  |> List.sort ~compare:(fun x y -> Int.compare y.rank x.rank)
+  |> List.map ~f:(fun r -> r.mem)
 
 let equal x y =
   phys_equal x y
@@ -624,8 +677,8 @@ let commit_externals =
     ~f:(fun exts dst ->
       KB.return @@ if KB.Object.is_null dst then exts else Set.add exts dst)
 
-let owns mem s =
-  List.exists s.debt ~f:(function
+let owns mem debt =
+  List.exists debt ~f:(function
     | Machine.Dest { dst } -> Memory.contains mem dst
     | _ -> false)
 
@@ -649,46 +702,175 @@ let valid_dsts data dsts =
   if Set.is_empty resolved && not dsts.indirect then None
   else Some { dsts with resolved }
 
-let scan_step ?(code = empty) ?(data = empty) ?(funs = empty) s mem =
-  disassemble ~code ~data ~funs s.debt mem
-  >>= fun { Machine.begs; jmps; data; debt; dels } ->
-  let data = Set.union s.data data in
+(* explores [mem] starting from the destinations [debt], returns the
+   new state and the destinations that it couldn't explore *)
+let scan_step ?(code = empty) ?(data = empty) ?(funs = empty) s debt mem =
+  disassemble ~code ~data ~funs debt mem
+  >>= fun { Machine.begs; jmps; data = found; debt; dels } ->
+  let data = Set.union s.data found in
   let jmps = Map.filter_map jmps ~f:(valid_dsts data) in
   commit_externals jmps >>= fun exts ->
   commit_calls jmps >>| fun funs' ->
   let jmps =
-    Map.merge s.jmps jmps ~f:(fun ~key:_ -> function
-      | `Left dsts -> valid_dsts data dsts
-      | `Right dsts -> Some dsts
-      | `Both (d1, d2) -> valid_dsts data (merge_dests d1 d2))
+    (* the known jumps are valid with respect to the known data, so they
+       are revalidated only when new data are found *)
+    if Set.is_subset found ~of_:s.data then
+      Map.fold jmps ~init:s.jmps ~f:(fun ~key ~data:dsts jmps ->
+          Map.change jmps key ~f:(function
+            | None -> Some dsts
+            | Some known -> valid_dsts data (merge_dests known dsts)))
+    else
+      Map.merge s.jmps jmps ~f:(fun ~key:_ -> function
+        | `Left dsts -> valid_dsts data dsts
+        | `Right dsts -> Some dsts
+        | `Both (d1, d2) -> valid_dsts data (merge_dests d1 d2))
   in
   let begs = Set.of_map_keys begs -- data in
   let funs = s.funs ++ funs ++ funs' -- data -- dels in
   let begs = Set.union s.begs begs -- dels in
-  { funs; begs; data; jmps; mems = s.mems; debt; exts = s.exts ++ exts }
+  ({ s with funs; begs; data; jmps; exts = s.exts ++ exts }, debt)
 
-let already_scanned mem s =
-  let start = Memory.min_addr mem in
-  List.exists s.mems ~f:(fun mem -> Memory.contains mem start)
+let already_scanned mem s = Option.is_some (region_of s (Memory.min_addr mem))
 
+let intersects s mem =
+  let lower = Memory.min_addr mem and upper = Memory.max_addr mem in
+  (match Map.closest_key s.regions `Less_or_equal_to lower with
+    | Some (_, r) -> Addr.(Memory.max_addr r.mem >= lower)
+    | None -> false)
+  ||
+  match Map.closest_key s.regions `Greater_or_equal_to lower with
+  | Some (start, _) -> Addr.(start <= upper)
+  | None -> false
+
+let add_region s mem =
+  let rank = s.scanned in
+  let region = { mem; rank; owed = [] } in
+  ( {
+      s with
+      regions = Map.set s.regions ~key:(Memory.min_addr mem) ~data:region;
+      scanned = rank + 1;
+    },
+    rank )
+
+(* assigns the destinations to the regions that own them *)
+let distribute s debt =
+  match s.overlapping with
+  | Some _ -> { s with overlapping = Some debt }
+  | None ->
+      let owed, unowned =
+        List.fold debt
+          ~init:(Map.empty (module Addr), s.unowned)
+          ~f:(fun (owed, unowned) task ->
+            match task with
+            | Machine.Dest { dst } -> (
+                match region_of s dst with
+                | Some r ->
+                    ( Map.add_multi owed ~key:(Memory.min_addr r.mem) ~data:task,
+                      unowned )
+                | None -> (owed, Map.add_multi unowned ~key:dst ~data:task))
+            | _ -> (owed, unowned))
+      in
+      Map.fold owed ~init:{ s with unowned } ~f:(fun ~key ~data:tasks s ->
+          let r = Map.find_exn s.regions key in
+          let r = { r with owed = r.owed @ List.rev tasks } in
+          {
+            s with
+            regions = Map.set s.regions ~key ~data:r;
+            owing = Map.set s.owing ~key:r.rank ~data:key;
+          })
+
+(* the unowned destinations in [mem], by their addresses *)
+let take_unowned s mem =
+  let lower = Memory.min_addr mem and upper = Memory.max_addr mem in
+  Map.fold_range_inclusive s.unowned ~min:lower ~max:upper ~init:([], s.unowned)
+    ~f:(fun ~key ~data:tasks (debt, unowned) ->
+      (List.rev_append tasks debt, Map.remove unowned key))
+  |> fun (debt, unowned) -> (List.rev debt, { s with unowned })
+
+(* scans again the regions that owe destinations, starting from the
+   last scanned one below [rank], as long as there are such regions *)
+let rec rescan s ~below =
+  match Map.closest_key s.owing `Less_than below with
+  | None -> KB.return s
+  | Some (rank, start) ->
+      let r = Map.find_exn s.regions start in
+      let s =
+        {
+          s with
+          regions = Map.set s.regions ~key:start ~data:{ r with owed = [] };
+          owing = Map.remove s.owing rank;
+        }
+      in
+      scan_step s r.owed r.mem >>= fun (s, debt) ->
+      rescan (distribute s debt) ~below:rank
+
+(* all destinations in a list, when the regions can't be indexed *)
+let to_overlapping s =
+  match s.overlapping with
+  | Some _ -> s
+  | None ->
+      let owed =
+        Map.data s.regions
+        |> List.sort ~compare:(fun x y -> Int.compare y.rank x.rank)
+        |> List.concat_map ~f:(fun r -> r.owed)
+      in
+      let unowned = Map.data s.unowned |> List.concat_map ~f:List.rev in
+      {
+        s with
+        regions = Map.map s.regions ~f:(fun r -> { r with owed = [] });
+        owing = Map.empty (module Int);
+        unowned = Map.empty (module Addr);
+        overlapping = Some (owed @ unowned);
+      }
+
+(* every scan explores all destinations, and the scanned regions that
+   contain some of them are scanned again, the last scanned first *)
+let scan_overlapping mem s =
+  let s = to_overlapping s in
+  let mems = scanned_mems s in
+  let debt = Option.value_exn s.overlapping in
+  classify mem >>= fun (code, data, funs) ->
+  scan_step ~code ~data ~funs s debt mem >>= fun (s, debt) ->
+  let s, _ = add_region { s with overlapping = Some debt } mem in
+  KB.List.fold mems ~init:s ~f:(fun s mem ->
+      let debt = Option.value_exn s.overlapping in
+      if owns mem debt then
+        scan_step s debt mem >>| fun (s, debt) ->
+        { s with overlapping = Some debt }
+      else KB.return s)
+
+(* Scans [mem], and then scans again the previously scanned regions that
+   own the destinations that the scan found, from the last scanned to the
+   first, as long as there are such regions. *)
 let scan mem s =
-  let open KB.Syntax in
   if already_scanned mem s then KB.return s
+  else if Option.is_some s.overlapping || intersects s mem then
+    scan_overlapping mem s
   else
     classify mem >>= fun (code, data, funs) ->
-    scan_step ~code ~data ~funs s mem >>= fun s ->
-    KB.List.fold s.mems
-      ~f:(fun s mem -> if owns mem s then scan_step s mem else !!s)
-      ~init:{ s with mems = mem :: s.mems }
+    let debt, s = take_unowned s mem in
+    scan_step ~code ~data ~funs s debt mem >>= fun (s, debt) ->
+    let s, rank = add_region s mem in
+    rescan (distribute s debt) ~below:rank
 
+(* the regions of [t2] are ranked after the regions of [t1] *)
 let merge t1 t2 =
+  let t1 = to_overlapping t1 and t2 = to_overlapping t2 in
+  let shift r = { r with rank = r.rank + t1.scanned } in
   {
     funs = Set.union t1.funs t2.funs;
     exts = Set.union t1.exts t2.exts;
     begs = Set.union t1.begs t2.begs;
     data = Set.union t1.data t2.data;
-    mems = List.rev_append t2.mems t1.mems;
-    debt = List.rev_append t2.debt t1.debt;
+    regions =
+      Map.merge t1.regions t2.regions ~f:(fun ~key:_ -> function
+        | `Left r -> Some r
+        | `Right r | `Both (_, r) -> Some (shift r));
+    owing = Map.empty (module Int);
+    unowned = Map.empty (module Addr);
+    scanned = t1.scanned + t2.scanned;
+    overlapping =
+      Some (Option.value_exn t2.overlapping @ Option.value_exn t1.overlapping);
     jmps =
       Map.merge t1.jmps t2.jmps ~f:(fun ~key:_ -> function
         | `Left dsts | `Right dsts -> Some dsts
@@ -721,10 +903,10 @@ let with_disasm beg blocks cfg f =
   | Ok dis -> f encoding dis
 
 let explore ?entries ?entry:start ?(follow = always) ~block ~node ~edge ~init
-    ({ begs; jmps; data; mems } as state) =
+    ({ begs; jmps; data } as state) =
   let find_base addr =
     if Set.mem data addr then None
-    else List.find mems ~f:(fun mem -> Memory.contains mem addr)
+    else Option.map (region_of state addr) ~f:(fun r -> r.mem)
   in
   let edge_insert cfg src dst =
     match dst with None -> KB.return cfg | Some dst -> edge src dst cfg
