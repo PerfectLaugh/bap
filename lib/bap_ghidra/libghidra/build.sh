@@ -59,13 +59,13 @@ tar xzf ghidra.tar.gz \
     "${GHIDRA_ROOT}/Ghidra/Processors"
 
 # the generated parsers are shipped with the sources, make sure that
-# make doesn't try to regenerate them (and require bison and flex)
-for f in xml grammar slghparse slghscan pcodeparse; do
-    touch "${DECOMPILER}/$f.cc"
-done
-for f in xml grammar slghparse pcodeparse; do
-    touch "${DECOMPILER}/$f.hh"
-done
+# make doesn't try to regenerate them (and require bison and flex), the
+# files are touched in the order of the Makefile dependencies, i.e., the
+# headers are generated with the parsers and the scanner needs them
+(cd "${DECOMPILER}" &&
+     touch xml.cc grammar.cc pcodeparse.cc slghparse.cc &&
+     touch xml.hh grammar.hh pcodeparse.hh slghparse.hh &&
+     touch slghscan.cc)
 
 # the modules that depend on the GNU BFD library, they are only used by
 # the command-line decompiler, so they are left out to avoid requiring
