@@ -57,6 +57,13 @@ module LLVM = struct
         (** name, addr, size *)
     relocation : (int64 * int64) list;  (** at, addr *)
     relative_relocation : int64 list;
+    elf_relative_addend : (int64 * int64) list;  (** off, addend *)
+    relative_target : int64 list;
+    irelative_relocation : (int64 * int64) list;  (** at, resolver *)
+    elf_tls : (int64 * int64 * int64 * int64) list;
+        (** addr, size, init size, align *)
+    elf_program_header_table : (int64 * int64 * int64) list;
+        (** addr, entry size, count *)
     name_reference : (int64 * string) list;
     elf_header : (int64 * int64 * int64) list;  (** type, machine, flags *)
   }
@@ -129,6 +136,25 @@ module LLVM = struct
     let* relative_relocation =
       rows doc "llvm:relative-relocation" [ Int ] (fun t r -> int t r 0)
     in
+    let* elf_relative_addend =
+      rows doc "llvm:elf-relative-addend" [ Int; Int ] (fun t r ->
+          (int t r 0, int t r 1))
+    in
+    let* relative_target =
+      rows doc "llvm:relative-target" [ Int ] (fun t r -> int t r 0)
+    in
+    let* irelative_relocation =
+      rows doc "llvm:irelative-relocation" [ Int; Int ] (fun t r ->
+          (int t r 0, int t r 1))
+    in
+    let* elf_tls =
+      rows doc "llvm:elf-tls" [ Int; Int; Int; Int ] (fun t r ->
+          (int t r 0, int t r 1, int t r 2, int t r 3))
+    in
+    let* elf_program_header_table =
+      rows doc "llvm:elf-program-header-table" [ Int; Int; Int ] (fun t r ->
+          (int t r 0, int t r 1, int t r 2))
+    in
     let* name_reference =
       rows doc "llvm:name-reference" [ Int; Str ] (fun t r ->
           (int t r 0, str t r 1))
@@ -155,6 +181,11 @@ module LLVM = struct
         coff_virtual_section_header;
         relocation;
         relative_relocation;
+        elf_relative_addend;
+        relative_target;
+        irelative_relocation;
+        elf_tls;
+        elf_program_header_table;
         name_reference;
         elf_header;
       }
@@ -442,62 +473,44 @@ let overload file_type info =
   Ogre.require format >>= fun file ->
   Ogre.sequence @@ provide_if (String.equal file file_type) info
 
-module ElfDyn = struct
-  type dyn = { tag : word; off : word }
-  type img = { data : Bigstring.t; endian : Word.endian; width : int }
+(* the bytes encoded with two hexadecimal digits each, as in patches *)
+let to_hex bytes =
+  let digits = "0123456789abcdef" in
+  String.init
+    (2 * String.length bytes)
+    ~f:(fun i ->
+      let b = Char.to_int bytes.[i / 2] in
+      digits.[if i % 2 = 0 then b lsr 4 else b land 0xf])
 
-  let required attr k =
-    Ogre.request attr >>= function None -> Ogre.return () | Some x -> k x
-
-  let section_by_name (llvm : LLVM.t) { data; endian; width } sec_name =
-    List.find llvm.section_entry ~f:(fun (name, _, _, _) ->
-        String.equal name sec_name)
-    |> function
-    | None -> None
-    | Some (_, addr, len, pos) -> (
-        let len = Int64.to_int_trunc len and pos = Int64.to_int_trunc pos in
-        let addr = Addr.of_int64 ~width addr in
-        match Memory.create ~pos ~len endian addr data with
-        | Ok mem -> Some mem
-        | _ -> None)
-
-  let word_size img = Size.of_int_exn img.width
-
-  let dynamic_contents llvm img =
-    match section_by_name llvm img ".dynamic" with
-    | None -> []
-    | Some mem -> (
-        Memory.fold ~word_size:(word_size img) mem
-          ~f:(fun data (acc, dyn) ->
-            match dyn with
-            | None -> (acc, Some data)
-            | Some tag -> ({ tag; off = data } :: acc, None))
-          ~init:([], None)
-        |> function
-        | acc, _ -> List.rev acc)
-
-  let read ~strtab pos =
-    let strtab = Memory.to_buffer strtab in
-    let rec loop off =
-      if Char.equal (Bigsubstring.get strtab off) '\x00' then
-        Bigsubstring.sub strtab ~pos ~len:(off - pos)
-      else loop (off + 1)
-    in
-    Bigsubstring.to_string @@ loop pos
-
-  let libraries llvm data =
-    required is_little_endian @@ fun is_little ->
-    required bits @@ fun bits ->
-    let endian = if is_little then LittleEndian else BigEndian in
-    let img = { endian; data; width = Int64.to_int_exn bits } in
-    match section_by_name llvm img ".dynstr" with
-    | None -> Ogre.return ()
-    | Some strtab ->
-        Ogre.List.iter (dynamic_contents llvm img) ~f:(fun { tag; off } ->
-            match (Word.to_int tag, Word.to_int off) with
-            | Ok 1, Ok off -> Ogre.provide require (read ~strtab off)
-            | _ -> Ogre.return ())
-end
+(* The explicit addends of the relative relocations, which the static
+   linker didn't store in their places, as the patches of the file. A
+   patched place holds the link-time address that it refers to, as do
+   the places of the relocations with implicit addends, so the image
+   shows the pointers and the relocation adds the bias to them. The
+   adjacent words, e.g., of a table of pointers, make one patch. *)
+let provide_relative_addends (llvm : LLVM.t) =
+  Ogre.require bits >>= fun bits ->
+  Ogre.require is_little_endian >>= fun little ->
+  let size = Int64.to_int_exn bits / 8 in
+  let word value =
+    String.init size ~f:(fun i ->
+        let shift = 8 * if little then i else size - i - 1 in
+        Char.of_int_exn Int64.(to_int_exn ((value lsr shift) land 0xffL)))
+  in
+  (* the runs of the adjacent words as [(start, next, words)], with the
+     words in the reverse order *)
+  let runs =
+    List.sort llvm.elf_relative_addend ~compare:(fun (x, _) (y, _) ->
+        Int64.compare x y)
+    |> List.fold ~init:[] ~f:(fun runs (off, value) ->
+        match runs with
+        | (start, next, words) :: rest when Int64.(next = off) ->
+            (start, Int64.(next + of_int size), word value :: words) :: rest
+        | (_, next, _) :: _ when Int64.(off < next) -> runs
+        | _ -> (off, Int64.(off + of_int size), [ word value ]) :: runs)
+  in
+  iter runs @@ fun (start, _, words) ->
+  [ Ogre.provide patch start (to_hex (String.concat (List.rev words))) ]
 
 (** links a relocatable file, see {!Bap_llvm_elf_linker}. *)
 module Relocatable = struct
@@ -589,14 +602,6 @@ module Relocatable = struct
     ]
     @ provide_if Int64.(size > 0L) [ Ogre.provide symbol_chunk addr size addr ]
 
-  let to_hex bytes =
-    let digits = "0123456789abcdef" in
-    String.init
-      (2 * String.length bytes)
-      ~f:(fun i ->
-        let b = Char.to_int bytes.[i / 2] in
-        digits.[if i % 2 = 0 then b lsr 4 else b land 0xf])
-
   let provide { Linker.regions; functions; references; patches; warnings } =
     List.iter warnings ~f:(fun msg -> warning "%s" msg);
     Ogre.sequence
@@ -614,9 +619,77 @@ module Relocatable = struct
     | _ -> Ogre.return ()
 end
 
-let provide_elf_segmentation_and_libraries llvm data =
-  (Relocatable.link llvm data :: provide_elf_segmentation llvm)
-  @ [ ElfDyn.libraries llvm data ]
+(* the facts that a program loader needs: the resolvers of the indirect
+   functions, the thread-local storage template, and the address of
+   the program headers. The resolvers are also the starts of code. *)
+let provide_elf_runtime (llvm : LLVM.t) =
+  Ogre.require bias >>= fun bias ->
+  let biased x = Int64.(x + bias) in
+  Ogre.sequence
+  @@ List.concat_map llvm.irelative_relocation ~f:(fun (addr, resolver) ->
+      [
+        Ogre.provide irelative_relocation (biased addr) (biased resolver);
+        Ogre.provide code_start (biased resolver);
+      ])
+  @ List.map llvm.elf_tls ~f:(fun (addr, size, init, align) ->
+      Ogre.provide tls_template (biased addr) size init align)
+  @ List.map llvm.elf_program_header_table ~f:(fun (addr, size, count) ->
+      Ogre.provide program_headers (biased addr) size count)
+
+let em_arm = 40L
+let em_aarch64 = 183L
+
+(* The pointers to code in data, i.e., the targets of the relative
+   relocations that are in the executable sections (or segments, if
+   there are no sections), are the starts of code, e.g., the functions
+   in tables of function pointers or virtual tables, which could be
+   referenced nowhere else. This is what makes the static functions of a
+   file without section headers and symbols visible. The targets that
+   are misaligned for the machine are ignored, and the Thumb bit of an
+   ARM pointer is passed as the value of the code start. *)
+let provide_pointed_code (llvm : LLVM.t) =
+  Ogre.require bias >>= fun bias ->
+  maybe "llvm:elf-header" llvm.elf_header >>= fun header ->
+  let machine = Option.value_map header ~default:0L ~f:(fun (_, m, _) -> m) in
+  let ranges =
+    if List.is_empty llvm.section_entry then
+      List.filter_map (elf_program_headers llvm)
+        ~f:(fun (_, (_, addr, size), (_, ld, (_, _, x))) ->
+          Option.some_if (ld && x) (addr, size))
+    else
+      join_by_name llvm.section_entry ~name:fst4 llvm.section_flags ~name:fst
+      |> List.filter_map ~f:(fun ((_, addr, size, _), (_, (_, _, x))) ->
+          Option.some_if x (addr, size))
+  in
+  let is_code x =
+    List.exists ranges ~f:(fun (addr, size) ->
+        Int64.(x >= addr && x - addr < size))
+  in
+  let aligned x =
+    if Int64.(machine = em_aarch64) then Int64.(x land 3L = 0L)
+    else if Int64.(machine = em_arm) then
+      Int64.(x land 1L = 1L || x land 3L = 0L)
+    else true
+  in
+  List.dedup_and_sort llvm.relative_target ~compare:Int64.compare
+  |> List.filter ~f:aligned
+  |> List.filter_map ~f:(fun value ->
+      let addr =
+        if Int64.(machine = em_arm) then Int64.(value land lnot 1L) else value
+      in
+      Option.some_if (is_code addr) (Int64.(addr + bias), Int64.(value + bias)))
+  |> fun targets ->
+  iter targets @@ fun (addr, value) ->
+  Ogre.provide code_start addr
+  :: provide_if
+       Int64.(machine = em_arm)
+       [ Ogre.provide symbol_value addr value ]
+
+let provide_elf_segmentation_and_patches llvm data =
+  Relocatable.link llvm data
+  :: provide_relative_addends llvm
+  :: provide_elf_runtime llvm :: provide_pointed_code llvm
+  :: provide_elf_segmentation llvm
 
 (** translates the facts of the native loader into the image specification *)
 let translate ?file data user_base (llvm : LLVM.t) =
@@ -627,7 +700,7 @@ let translate ?file data user_base (llvm : LLVM.t) =
       provide_entry llvm;
       Ogre.sequence
         [
-          overload "elf" @@ provide_elf_segmentation_and_libraries llvm data;
+          overload "elf" @@ provide_elf_segmentation_and_patches llvm data;
           overload "coff" @@ provide_coff_segmentation llvm;
           overload "macho" @@ provide_macho_segmentation llvm;
         ];

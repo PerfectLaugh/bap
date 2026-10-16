@@ -143,6 +143,11 @@ module Scheme = struct
   let flag = "flag" %: bool
   let fixup = "fixup" %: int
   let data = "data" %: str
+  let resolver = "resolver" %: int
+  let init_size = "init-size" %: int
+  let align = "align" %: int
+  let entry_size = "entry-size" %: int
+  let count = "count" %: int
   let location () = scheme addr $ size
   let declare name scheme f = Ogre.declare ~name scheme f
   let named n scheme f = declare n (scheme $ name) f
@@ -192,6 +197,17 @@ module Scheme = struct
     declare "symbol-value" (scheme addr $ value) Tuple.T2.create
 
   let patch () = declare "patch" (scheme off $ data) Tuple.T2.create
+
+  let irelative_relocation () =
+    declare "irelative-relocation" (scheme fixup $ resolver) Tuple.T2.create
+
+  let tls_template () =
+    declare "tls-template"
+      (scheme addr $ size $ init_size $ align)
+      (fun addr size init align -> (addr, size, init, align))
+
+  let program_headers () =
+    declare "program-headers" (scheme addr $ entry_size $ count) Tuple.T3.create
 end
 
 module Spec = struct

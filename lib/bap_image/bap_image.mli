@@ -149,4 +149,15 @@ module Scheme : sig
 
   val symbol_value : (addr * value, (addr -> value -> 'a) -> 'a) Ogre.attribute
   val patch : (off * string, (off -> string -> 'a) -> 'a) Ogre.attribute
+
+  val irelative_relocation :
+    (addr * addr, (addr -> addr -> 'a) -> 'a) Ogre.attribute
+
+  val tls_template :
+    ( addr * size * size * int64,
+      (addr -> size -> size -> int64 -> 'a) -> 'a )
+    Ogre.attribute
+
+  val program_headers :
+    (addr * size * int64, (addr -> size -> int64 -> 'a) -> 'a) Ogre.attribute
 end

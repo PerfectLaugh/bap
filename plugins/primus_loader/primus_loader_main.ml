@@ -20,11 +20,12 @@ let init s b =
        variables (see any unix man page for the description of these symbols). \
        Note that ([edata] and [etext] are not guaranteed, while [end] and \
        [brk] are). The loader also initializes all CPU registers to zero, \
-       allocates TLS for targets with a thread register, and sets up the main \
+       allocates TLS for targets with a thread register, resolves the \
+       indirect functions, and sets up the main \
        stack frame (copies arguments from the \
        ctxt to the stack), and points the stack-pointer register to the \
-       command line arguments. (The environment variables follows the \
-       arguments)."
+       command line arguments. (The environment variables and the auxiliary \
+       vector follow the arguments)."
 ;;
 
 Config.manpage

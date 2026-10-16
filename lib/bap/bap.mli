@@ -5668,8 +5668,8 @@ module Std : sig
 
       val relative_relocation : (addr, (addr -> 'a) -> 'a) Ogre.attribute
       (** [relative_relocation fixup] a value referenced at the code has address
-          [fixup] and refers to a pointer [p], which is relocated to
-          [p + base_address]. *)
+          [fixup] and refers to a pointer [p], which is relocated to [p + bias],
+          where [p] is the link-time address. *)
 
       val external_reference :
         (addr * string, (addr -> string -> 'a) -> 'a) Ogre.attribute
@@ -5702,6 +5702,37 @@ module Std : sig
 
           Loaders use patches to apply relocations, e.g., when they link a
           relocatable object file. *)
+
+      val irelative_relocation :
+        (addr * addr, (addr -> addr -> 'a) -> 'a) Ogre.attribute
+      (** [irelative_relocation fixup resolver] the pointer at [fixup] is the
+          address that the function at [resolver] returns, e.g., the
+          implementation of an indirect function (STT_GNU_IFUNC) that is
+          selected at load time.
+
+          @since 2.6.0 *)
+
+      val tls_template :
+        ( addr * size * size * int64,
+          (addr -> size -> size -> int64 -> 'a) -> 'a )
+        Ogre.attribute
+      (** [tls_template addr size init_size align] the thread-local storage of
+          the image occupies [size] bytes aligned to [align], and the first
+          [init_size] bytes of it are initialized with the bytes at [addr] (the
+          rest are zeros), e.g., the PT_TLS segment of an ELF file.
+
+          @since 2.6.0 *)
+
+      val program_headers :
+        ( addr * size * int64,
+          (addr -> size -> int64 -> 'a) -> 'a )
+        Ogre.attribute
+      (** [program_headers addr entry_size count] the table of [count] program
+          headers, of [entry_size] bytes each, is loaded at [addr], as passed to
+          a program in its AT_PHDR, AT_PHENT, and AT_PHNUM auxiliary vector
+          entries.
+
+          @since 2.6.0 *)
     end
   end
 

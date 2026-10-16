@@ -17,6 +17,7 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
   module Env = Primus.Env.Make (Machine)
   module Mem = Primus.Memory.Make (Machine)
   module Val = Primus.Value.Make (Machine)
+  module Linker = Primus.Linker.Make (Machine)
 
   let make_word addr =
     Machine.gets Project.target >>| Theory.Target.code_addr_size
@@ -63,13 +64,78 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     | None -> None
     | Some tp -> Some (Var.reify tp)
 
+  let main_spec () =
+    Machine.get () >>| fun proj -> Project.get proj Image.specification
+
+  (* the only value of the attribute in the specification of the main
+     image, if any *)
+  let request attr =
+    main_spec () >>| function
+    | None -> None
+    | Some spec -> (
+        match Ogre.eval (Ogre.request attr) spec with
+        | Ok x -> x
+        | Error _ -> None)
+
+  let align_up x align =
+    if align <= 1 then x else (x + align - 1) / align * align
+
+  (* the bytes below the thread pointer that are reserved for the slots
+     of the thread control block that a libc keeps at negative offsets,
+     e.g., bionic keeps one there *)
+  let tcb_reserve = 0x100
+
+  (* The TLS layout is the variant I, where the thread pointer points to
+     the thread control block (TCB), which is followed by the TLS block
+     of the executable. The TCB takes two words, e.g., on AArch64, but
+     RISC-V has none. *)
+  let tcb_size target =
+    if
+      String.is_substring
+        (asprintf "%a" Theory.Target.pp target)
+        ~substring:"riscv"
+    then 0
+    else 2 * Theory.Target.code_addr_size target / 8
+
+  (* allocates the TLS area after [endp] and points the thread register
+     to its TCB. The TLS block of the executable is initialized from its
+     template (the first [init] bytes are copied from it and the rest are
+     zeros), as in the main thread of the program, so that the code that
+     accesses the thread-local variables of the executable (the
+     local-exec model) finds their initial values. *)
   let setup_tls endp =
     thread_pointer >>= function
     | None -> Machine.return endp
     | Some tp ->
-        Val.of_word endp >>= Env.set tp >>= fun () ->
-        Mem.allocate ~readonly:false ~executable:false endp 0x1000
-        >>| fun () -> Addr.nsucc endp 0x1000
+        Machine.gets Project.target >>= fun target ->
+        request Image.Scheme.tls_template >>= fun template ->
+        let image, size, init, align =
+          match template with
+          | None -> (0L, 0, 0, 1)
+          | Some (addr, size, init, align) ->
+              Int64.(addr, to_int_exn size, to_int_exn init, to_int_exn align)
+        in
+        let align = Int.max align 16 in
+        let start = Word.to_int64_exn endp in
+        let tp_addr =
+          Int64.of_int (align_up (Int64.to_int_exn start + tcb_reserve) align)
+        in
+        let block =
+          Int64.(tp_addr + of_int (align_up (tcb_size target) align))
+        in
+        let total =
+          align_up Int64.(to_int_exn (block - start)) 1 + size |> fun n ->
+          align_up (Int.max n 1) 0x1000
+        in
+        Mem.allocate ~readonly:false ~executable:false
+          ~generator:(Generator.static 0) endp total
+        >>= fun () ->
+        make_word tp_addr >>= Val.of_word >>= Env.set tp >>= fun () ->
+        make_word image >>= fun image ->
+        make_word block >>= fun block ->
+        Machine.Seq.iter (Seq.range 0 init) ~f:(fun i ->
+            Mem.load (Addr.nsucc image i) >>= Mem.store (Addr.nsucc block i))
+        >>| fun () -> Addr.nsucc endp total
 
   let segmentations =
     let open Image.Scheme in
@@ -157,19 +223,22 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     Ogre.(collect Query.(select @@ from Image.Scheme.relocation))
     |> or_empty doc
 
-  let base_address = Ogre.require Image.Scheme.base_address
+  (* the difference between the addresses of the image and the
+     addresses that it was linked at, i.e., the B of B + A *)
+  let bias doc =
+    match Ogre.eval (Ogre.request Image.Scheme.bias) doc with
+    | Ok (Some bias) -> bias
+    | Ok None | Error _ -> 0L
 
   let relative_relocations doc endian width =
-    match Ogre.eval base_address doc with
-    | Error _ -> !!Seq.empty
-    | Ok base ->
-        let rels =
-          Ogre.(collect Query.(select @@ from Image.Scheme.relative_relocation))
-          |> or_empty doc
-        in
-        Machine.Seq.map rels ~f:(fun addr ->
-            read_word endian (Word.of_int64 ~width addr) >>| fun v ->
-            (addr, Int64.(base + Word.to_int64_exn v)))
+    let bias = bias doc in
+    let rels =
+      Ogre.(collect Query.(select @@ from Image.Scheme.relative_relocation))
+      |> or_empty doc
+    in
+    Machine.Seq.map rels ~f:(fun addr ->
+        read_word endian (Word.of_int64 ~width addr) >>| fun v ->
+        (addr, Int64.(bias + Word.to_int64_exn v)))
 
   let endian_of_target target =
     let endianness = Theory.Target.endianness target in
@@ -197,6 +266,119 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     let specs = spec :: List.map libs ~f:Project.Library.specification in
     Machine.List.iter specs ~f:(fixup_relocs_of_doc target)
 
+  let irelative_relocations doc =
+    Ogre.(collect Query.(select @@ from Image.Scheme.irelative_relocation))
+    |> or_empty doc
+
+  let link_register =
+    Machine.gets Project.target >>| fun t ->
+    Option.map ~f:Var.reify (Theory.Target.reg t Theory.Role.Register.link)
+
+  (* the register that holds the address that a resolver returns, the
+     first integer return register, as the targets that don't describe
+     their return registers are x86 *)
+  let return_register target =
+    let name v = Theory.Var.name v in
+    let by_order x y =
+      Tuple2.compare ~cmp1:Int.compare ~cmp2:String.compare
+        (String.length (name x), name x)
+        (String.length (name y), name y)
+    in
+    let regs =
+      Theory.Target.regs target
+        ~roles:Theory.Role.Register.[ function_return; integer ]
+      |> Set.to_list
+      |> List.sort ~compare:by_order
+    in
+    match regs with
+    | reg :: _ -> Some (Var.reify reg)
+    | [] ->
+        List.find_map [ "RAX"; "EAX" ] ~f:(Theory.Target.var target)
+        |> Option.map ~f:Var.reify
+
+  (* the code at the return address of a resolver, it does nothing, so
+     the resolver returns to the loader *)
+  module Return (Machine : Primus.Machine.S) = struct
+    let exec = Machine.return ()
+  end
+
+  let save_registers =
+    Env.all >>= fun vars ->
+    Machine.Seq.filter_map vars ~f:(fun var ->
+        Env.is_set var >>= function
+        | false -> Machine.return None
+        | true -> Env.get var >>| fun x -> Some (var, x))
+    >>| Seq.to_list
+
+  let restore_registers saved =
+    Env.all >>= fun vars ->
+    Machine.Seq.iter vars ~f:(fun var ->
+        if List.Assoc.mem saved var ~equal:Var.equal then Machine.return ()
+        else Env.del var)
+    >>= fun () -> Machine.List.iter saved ~f:(fun (var, x) -> Env.set var x)
+
+  (* passes control to the resolver with the return address [ret], in
+     the link register, or on the stack, if there is none *)
+  let call_resolver endian ret resolver =
+    ( link_register >>= function
+      | Some lr -> Val.of_word ret >>= Env.set lr
+      | None -> (
+          stack_pointer >>= function
+          | None -> Machine.return ()
+          | Some sp ->
+              Env.get sp >>= fun top ->
+              let width = Word.bitwidth ret in
+              let size = Word.of_int ~width (width / 8) in
+              let top = Word.(Primus.Value.to_word top - size) in
+              save_word endian ret top >>= fun _ ->
+              Val.of_word top >>= Env.set sp) )
+    >>= fun () -> Linker.exec (`addr resolver)
+
+  (* The IRELATIVE relocations store the address that the resolver of an
+     indirect function returns, as the dynamic linker does at load time.
+     A resolver is called with the arguments zeroed (no hardware
+     capabilities), and the registers are restored after it returns, so
+     a failed resolver leaves the place as it is. *)
+  let resolve_indirect_functions ret () =
+    Machine.get () >>= fun project ->
+    let target = Project.target project in
+    let endian = endian_of_target target in
+    let width = Theory.Target.code_addr_size target in
+    let specs =
+      Project.specification project
+      :: List.map (Project.libraries project) ~f:Project.Library.specification
+    in
+    match return_register target with
+    | None -> Machine.return ()
+    | Some result ->
+        let rels =
+          Seq.concat_map (Seq.of_list specs) ~f:irelative_relocations
+        in
+        if Seq.is_empty rels then Machine.return ()
+        else
+          Linker.link ~addr:ret (module Return) >>= fun () ->
+          Machine.Seq.iter rels ~f:(fun (fixup, resolver) ->
+              let fixup = Addr.of_int64 ~width fixup in
+              let resolver = Addr.of_int64 ~width resolver in
+              save_registers >>= fun saved ->
+              Machine.catch
+                ( call_resolver endian ret resolver >>= fun () ->
+                  Env.get result >>| fun x -> Some (Primus.Value.to_word x) )
+                (fun exn ->
+                  warning "the resolver at %a for %a failed: %s" Addr.pp
+                    resolver Addr.pp fixup (Primus.Exn.to_string exn);
+                  Machine.return None)
+              >>= fun value ->
+              restore_registers saved >>= fun () ->
+              match value with
+              | None -> Machine.return ()
+              | Some value ->
+                  let value = Word.extract_exn ~hi:(width - 1) value in
+                  debug "writing %a for the indirect function at %a" Word.pp
+                    value Addr.pp fixup;
+                  Machine.ignore_m @@ save_word ~force:true endian value fixup)
+          >>= fun () -> Linker.unlink (`addr ret)
+
   let bytes_in_array =
     Array.fold ~init:0 ~f:(fun sum str -> sum + String.length str + 1)
 
@@ -218,6 +400,57 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     Machine.List.fold addrs ~init:ptr ~f:(fun ptr addr ->
         save_word endian addr ptr)
 
+  (* the types of the auxiliary vector entries, see <elf.h> *)
+  let at_null = 0
+  let at_phdr = 3
+  let at_phent = 4
+  let at_phnum = 5
+  let at_pagesz = 6
+  let at_base = 7
+  let at_flags = 8
+  let at_entry = 9
+  let at_uid = 11
+  let at_euid = 12
+  let at_gid = 13
+  let at_egid = 14
+  let at_hwcap = 16
+  let at_clktck = 17
+  let at_secure = 23
+  let at_random = 25
+  let at_hwcap2 = 26
+
+  (* the bytes that AT_RANDOM points to *)
+  let random_size = 16
+
+  (* The auxiliary vector, which the kernel passes to a program after
+     its environment, as [(type, value)] pairs. There is no dynamic
+     linker (AT_BASE is 0), the hardware capabilities are empty, and
+     [random] is the address of the AT_RANDOM bytes. *)
+  let auxiliary_vector random =
+    request Image.Scheme.program_headers >>= fun phdrs ->
+    request Image.Scheme.entry_point >>| fun entry ->
+    List.concat
+      [
+        (match phdrs with
+        | None -> []
+        | Some (addr, size, count) ->
+            [ (at_phdr, addr); (at_phent, size); (at_phnum, count) ]);
+        [ (at_pagesz, 4096L); (at_base, 0L); (at_flags, 0L) ];
+        Option.value_map entry ~default:[] ~f:(fun e -> [ (at_entry, e) ]);
+        [
+          (at_uid, 0L);
+          (at_euid, 0L);
+          (at_gid, 0L);
+          (at_egid, 0L);
+          (at_hwcap, 0L);
+          (at_hwcap2, 0L);
+          (at_clktck, 100L);
+          (at_secure, 0L);
+          (at_random, random);
+          (at_null, 0L);
+        ];
+      ]
+
   let setup_main_frame () =
     Machine.gets Project.target >>= fun target ->
     Machine.args >>= fun argv ->
@@ -230,14 +463,19 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     let null = String.make bytes_in_addr '\x00' in
     let frame_size args = bytes_in_array args in
     let table_size args = bytes_in_addr * (Array.length args + 1) in
-    let total_size =
-      bytes_in_addr
-      +
-      (* argc *)
-      table_size argv + table_size envp + frame_size argv + frame_size envp
-    in
-    let argv_frame_ptr =
+    let auxv_ptr =
       bytes_in_addr + table_size argv + table_size envp |> Addr.nsucc sp
+    in
+    (* the size of the auxiliary vector doesn't depend on the address of
+       the random bytes *)
+    auxiliary_vector 0L >>= fun auxv ->
+    let auxv_size = 2 * bytes_in_addr * List.length auxv in
+    let random_ptr = Addr.nsucc auxv_ptr auxv_size in
+    auxiliary_vector (Word.to_int64_exn random_ptr) >>= fun auxv ->
+    let argv_frame_ptr = Addr.nsucc random_ptr random_size in
+    let total_size =
+      Word.(to_int_exn (argv_frame_ptr - sp))
+      + frame_size argv + frame_size envp
     in
     let argv_table_ptr = Addr.nsucc sp bytes_in_addr in
     Mem.allocate ~readonly:false ~executable:false sp total_size >>= fun () ->
@@ -246,7 +484,15 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     save_table endian argv_table argv_table_ptr >>= fun end_of_argv_table ->
     save_string null end_of_argv_table >>= fun envp_table_ptr ->
     save_table endian envp_table envp_table_ptr >>= fun end_of_envp_table ->
-    save_string null end_of_envp_table >>= fun _argv_frame_ptr ->
+    save_string null end_of_envp_table >>= fun _auxv_ptr ->
+    assert (Word.(auxv_ptr = _auxv_ptr));
+    Machine.List.fold auxv ~init:auxv_ptr ~f:(fun ptr (typ, value) ->
+        save_word endian (Word.of_int ~width typ) ptr
+        >>= save_word endian (Word.of_int64 ~width value))
+    >>= fun _random_ptr ->
+    assert (Word.(random_ptr = _random_ptr));
+    save_string (String.make random_size '\x00') random_ptr
+    >>= fun _argv_frame_ptr ->
     assert (Word.(argv_frame_ptr = _argv_frame_ptr));
     save_word endian argc sp >>= fun _ ->
     set_word "posix:environ" envp_table_ptr
@@ -290,5 +536,8 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     set_word "posix:endp" endp >>= fun () ->
     set_word "posix:brk" endp >>= fun () ->
     debug "initializing names";
-    init_names ()
+    init_names () >>= fun () ->
+    (* the resolvers are run when the code is linked, and they return
+       to the first address past the loaded memory *)
+    Primus.System.init >>> resolve_indirect_functions endp
 end
