@@ -142,6 +142,7 @@ module Scheme = struct
   let executable = "x" %: bool
   let flag = "flag" %: bool
   let fixup = "fixup" %: int
+  let data = "data" %: str
   let location () = scheme addr $ size
   let declare name scheme f = Ogre.declare ~name scheme f
   let named n scheme f = declare n (scheme $ name) f
@@ -190,7 +191,7 @@ module Scheme = struct
   let symbol_value () =
     declare "symbol-value" (scheme addr $ value) Tuple.T2.create
 
-  let patch () = declare "patch" (scheme off $ size $ value) Tuple.T3.create
+  let patch () = declare "patch" (scheme off $ data) Tuple.T2.create
 end
 
 module Spec = struct
@@ -401,6 +402,25 @@ let create_segment_of_symbol_table syms secs =
       | Some (_, sec) -> Hashtbl.add_exn tab ~key:sym ~data:sec);
   Hashtbl.find_exn tab
 
+(* [of_hex s] the bytes encoded in [s] with two hexadecimal digits each *)
+let of_hex s =
+  let digit c =
+    match c with
+    | '0' .. '9' -> Some (Char.to_int c - Char.to_int '0')
+    | 'a' .. 'f' -> Some (Char.to_int c - Char.to_int 'a' + 10)
+    | 'A' .. 'F' -> Some (Char.to_int c - Char.to_int 'A' + 10)
+    | _ -> None
+  in
+  let n = String.length s in
+  if n = 0 || n % 2 <> 0 then None
+  else
+    with_return (fun { return } ->
+        Some
+          (String.init (n / 2) ~f:(fun i ->
+               match (digit s.[2 * i], digit s.[(2 * i) + 1]) with
+               | Some hi, Some lo -> Char.of_int_exn ((hi lsl 4) lor lo)
+               | _ -> return None)))
+
 (* applies the patches of the specification to the input data, the
    data past the end of the input is zero-filled. The input is only
    extended to back the mapped regions, so a patch must lie inside
@@ -409,8 +429,7 @@ let apply_patches doc data =
   let patches =
     let open Fact.Syntax in
     Fact.collect Ogre.Query.(select (from Scheme.patch)) >>= fun patches ->
-    Fact.collect Ogre.Query.(select (from Scheme.mapped)) >>= fun mapped ->
-    Fact.request Scheme.is_little_endian >>| fun little ->
+    Fact.collect Ogre.Query.(select (from Scheme.mapped)) >>| fun mapped ->
     let limit =
       Seq.fold mapped
         ~init:(Int64.of_int (Bigstring.length data))
@@ -419,36 +438,36 @@ let apply_patches doc data =
             Int64.max limit Int64.(off + size)
           else limit)
     in
-    (Seq.to_list patches, limit, Option.value little ~default:false)
+    (Seq.to_list patches, limit)
   in
-  let valid limit (off, size, _) =
-    Int64.(
-      off >= 0L && size > 0L && size <= 8L
-      && off + size > off
-      && off + size <= limit)
+  let decode limit (off, hex) =
+    match of_hex hex with
+    | Some bytes
+      when Int64.(
+             off >= 0L
+             && off + of_int (String.length bytes) <= limit
+             && off + of_int (String.length bytes) > off) ->
+        Some (Int64.to_int_exn off, bytes)
+    | _ -> None
   in
   Fact.eval patches doc >>= function
-  | [], _, _ -> Ok data
-  | patches, limit, _ when not (List.for_all patches ~f:(valid limit)) ->
-      Or_error.errorf "malformed patch in the image specification"
-  | patches, _, little ->
-      let input = Bigstring.length data in
-      let length =
-        List.fold patches ~init:input ~f:(fun len (off, size, _) ->
-            max len Int64.(to_int_exn (off + size)))
-      in
-      let data' = Bigstring.create length in
-      Bigstring.blit ~src:data ~src_pos:0 ~dst:data' ~dst_pos:0 ~len:input;
-      Bigstring.memset data' ~pos:input ~len:(length - input) '\000';
-      List.iter patches ~f:(fun (off, size, value) ->
-          let off = Int64.to_int_exn off and size = Int64.to_int_exn size in
-          for i = 0 to size - 1 do
-            let shift = 8 * if little then i else size - i - 1 in
-            Int64.(shift_right_logical value shift land 0xffL)
-            |> Int64.to_int_exn |> Char.of_int_exn
-            |> Bigstring.set data' (off + i)
-          done);
-      Ok data'
+  | [], _ -> Ok data
+  | patches, limit -> (
+      match Option.all (List.map patches ~f:(decode limit)) with
+      | None -> Or_error.errorf "malformed patch in the image specification"
+      | Some patches ->
+          let input = Bigstring.length data in
+          let length =
+            List.fold patches ~init:input ~f:(fun len (off, bytes) ->
+                max len (off + String.length bytes))
+          in
+          let data' = Bigstring.create length in
+          Bigstring.blit ~src:data ~src_pos:0 ~dst:data' ~dst_pos:0 ~len:input;
+          Bigstring.memset data' ~pos:input ~len:(length - input) '\000';
+          List.iter patches ~f:(fun (off, bytes) ->
+              Bigstring.From_string.blit ~src:bytes ~src_pos:0 ~dst:data'
+                ~dst_pos:off ~len:(String.length bytes));
+          Ok data')
 
 let from_spec query base doc =
   apply_patches doc base >>= fun base ->

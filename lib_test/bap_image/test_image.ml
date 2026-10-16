@@ -87,7 +87,8 @@ let () =
 
 (* an image of eight bytes with a patch inside the file, a patch past
    its end that backs a synthesized segment, and a zero-filled segment
-   that has no contents in the file *)
+   that has no contents in the file. The patches are bytes, so they
+   don't depend on the endianness of the image. *)
 let patched_name endian =
   match endian with LittleEndian -> "patched_LE" | BigEndian -> "patched_BE"
 
@@ -106,8 +107,8 @@ let patched endian =
         Ogre.provide named_region 0x200L 4L "%got";
         Ogre.provide segment 0x300L 16L true true false;
         Ogre.provide named_region 0x300L 16L ".bss";
-        Ogre.provide patch 2L 2L 0xBEEFL;
-        Ogre.provide patch 16L 4L 0xDEADBEEFL;
+        Ogre.provide patch 2L "beef";
+        Ogre.provide patch 16L "DEADbeef";
       ]
   in
   let doc = ok_exn (Ogre.exec spec (Image.Spec.from_arch arch)) in
@@ -137,16 +138,26 @@ let check_patches endian ~expect ctxt =
       let printer xs = String.concat ~sep:" " (List.map xs ~f:(sprintf "%x")) in
       assert_equal ~ctxt ~printer expect bytes
 
-(* a patch that lies past the end of the input, but not in a mapped
-   region, is rejected instead of extending the input up to it *)
-let stray_patch =
+(* the malformed patches are rejected, a patch that lies past the end
+   of the input, but not in a mapped region, is rejected instead of
+   extending the input up to it *)
+let bad_patches =
+  [
+    ("stray", 0x1_0000_0000L, "00");
+    ("empty", 0L, "");
+    ("odd", 0L, "abc");
+    ("not hex", 0L, "zz");
+    ("negative offset", -1L, "00");
+  ]
+
+let bad_patch (_, offset, bytes) =
   let open Image.Scheme in
   let spec =
     Ogre.sequence
       [
         Ogre.provide segment 0x100L 8L true false true;
         Ogre.provide mapped 0x100L 8L 0L;
-        Ogre.provide patch 0x1_0000_0000L 4L 0L;
+        Ogre.provide patch offset bytes;
       ]
   in
   let doc = ok_exn (Ogre.exec spec (Image.Spec.from_arch `mipsel)) in
@@ -156,13 +167,17 @@ let stray_patch =
   end in
   (module Loader : Image.Loader)
 
-let () = Image.register_loader ~name:"stray_patch" stray_patch
+let bad_patch_name (name, _, _) = "bad_patch/" ^ name
 
-let check_stray_patch _ =
+let () =
+  List.iter bad_patches ~f:(fun patch ->
+      Image.register_loader ~name:(bad_patch_name patch) (bad_patch patch))
+
+let check_bad_patch patch _ =
   let data = String.make 8 '\000' in
-  match Image.of_string ~backend:"stray_patch" data with
+  match Image.of_string ~backend:(bad_patch_name patch) data with
   | Error _ -> ()
-  | Ok _ -> assert_failure "a patch outside of the mapped regions is applied"
+  | Ok _ -> assert_failure "a malformed patch is applied"
 
 let print_list r =
   let sexp_of_addr_list = sexp_of_list sexp_of_addr in
@@ -471,9 +486,10 @@ let suite () =
              return ());
          "patches/LE"
          >:: check_patches LittleEndian
-               ~expect:[ 0; 1; 0xef; 0xbe; 4; 5; 6; 7; 0xef; 0xbe; 0xad; 0xde ];
+               ~expect:[ 0; 1; 0xbe; 0xef; 4; 5; 6; 7; 0xde; 0xad; 0xbe; 0xef ];
          "patches/BE"
          >:: check_patches BigEndian
                ~expect:[ 0; 1; 0xbe; 0xef; 4; 5; 6; 7; 0xde; 0xad; 0xbe; 0xef ];
-         "patches/stray" >:: check_stray_patch;
        ]
+       @ List.map bad_patches ~f:(fun patch ->
+           bad_patch_name patch >:: check_bad_patch patch)

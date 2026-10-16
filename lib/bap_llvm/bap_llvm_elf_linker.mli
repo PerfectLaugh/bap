@@ -75,9 +75,10 @@ type output = {
           machine specific bits, e.g., the Thumb bit *)
   references : (int64 * string) list;
       (** [(fixup, name)] the relocated place references an external symbol *)
-  patches : (int64 * int * int64) list;
-      (** [(off, size, value)] the [value] encoded in [size] bytes using the
-          input endianness should be stored at the offset [off] *)
+  patches : (int64 * string) list;
+      (** [(off, bytes)] the [bytes] should be stored at the offset [off]. The
+          patches are ordered by their offsets and don't intersect, a patch may
+          contain unmodified bytes between the modified ones. *)
   warnings : string list;
 }
 

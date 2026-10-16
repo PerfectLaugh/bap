@@ -509,6 +509,14 @@ module Relocatable = struct
     ]
     @ provide_if Int64.(size > 0L) [ Ogre.provide symbol_chunk addr size addr ]
 
+  let to_hex bytes =
+    let digits = "0123456789abcdef" in
+    String.init
+      (2 * String.length bytes)
+      ~f:(fun i ->
+        let b = Char.to_int bytes.[i / 2] in
+        digits.[if i % 2 = 0 then b lsr 4 else b land 0xf])
+
   let provide { Linker.regions; functions; references; patches; warnings } =
     List.iter warnings ~f:(fun msg -> warning "%s" msg);
     Ogre.sequence
@@ -516,8 +524,8 @@ module Relocatable = struct
     @ List.concat_map functions ~f:provide_function
     @ List.map references ~f:(fun (addr, name) ->
         Ogre.provide external_reference addr name)
-    @ List.map patches ~f:(fun (off, size, value) ->
-        Ogre.provide patch off (Int64.of_int size) value)
+    @ List.map patches ~f:(fun (off, bytes) ->
+        Ogre.provide patch off (to_hex bytes))
 
   let link data =
     Ogre.request LLVM.elf_header >>= function

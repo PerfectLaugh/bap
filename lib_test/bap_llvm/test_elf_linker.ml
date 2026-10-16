@@ -32,21 +32,17 @@ let link ?(little = true) ?(width = 64) ~machine ~base ~bytes sections symbols
     }
 
 (* the input with the patches applied *)
-let patched ~little bytes { Linker.patches } =
+let patched bytes { Linker.patches } =
   let length =
-    List.fold patches ~init:(String.length bytes) ~f:(fun len (off, size, _) ->
-        max len (Int64.to_int_exn off + size))
+    List.fold patches ~init:(String.length bytes) ~f:(fun len (off, data) ->
+        max len (Int64.to_int_exn off + String.length data))
   in
   let data = Bytes.make length '\000' in
   Bytes.From_string.blit ~src:bytes ~src_pos:0 ~dst:data ~dst_pos:0
     ~len:(String.length bytes);
-  List.iter patches ~f:(fun (off, size, value) ->
-      for i = 0 to size - 1 do
-        let shift = 8 * if little then i else size - i - 1 in
-        Int64.(shift_right_logical value shift land 0xffL)
-        |> Int64.to_int_exn |> Char.of_int_exn
-        |> Bytes.set data (Int64.to_int_exn off + i)
-      done);
+  List.iter patches ~f:(fun (off, patch) ->
+      Bytes.From_string.blit ~src:patch ~src_pos:0 ~dst:data
+        ~dst_pos:(Int64.to_int_exn off) ~len:(String.length patch));
   data
 
 let word ~little data off size =
@@ -85,7 +81,7 @@ let x86_64 ctxt =
       ]
   in
   assert_no_warnings out;
-  let data = patched ~little:true bytes out in
+  let data = patched bytes out in
   let assert_word = assert_word ~ctxt ~little:true data in
   assert_word ~msg:"PLT32" 0x41 4 0x13L;
   assert_word ~msg:"REX_GOTPCRELX" 0x48 4 0x14L;
@@ -123,7 +119,7 @@ let mips_hi_lo ctxt =
       [ rel_implicit 1 0L 5 1; rel_implicit 1 4L 6 1 ]
   in
   assert_no_warnings out;
-  let data = patched ~little:false bytes out in
+  let data = patched bytes out in
   let assert_word = assert_word ~ctxt ~little:false data in
   assert_word ~msg:"HI16" 0x40 4 0x3c020002L;
   assert_word ~msg:"LO16" 0x44 4 0x24428008L
@@ -145,7 +141,7 @@ let riscv_pcrel ctxt =
       [ rel 1 0L 23 1; rel 1 0L 51 0; rel 1 4L 24 2; rel 1 4L 51 0 ]
   in
   assert_no_warnings out;
-  let data = patched ~little:true bytes out in
+  let data = patched bytes out in
   let assert_word = assert_word ~ctxt ~little:true data in
   assert_word ~msg:"PCREL_HI20" 0x40 4 0x00002517L;
   assert_word ~msg:"PCREL_LO12_I" 0x44 4 0x90050513L
@@ -167,7 +163,7 @@ let aarch64 ctxt =
       [ rel 1 0L 0x113 1; rel 1 4L 0x115 1; rel 1 8L 0x11b 2 ]
   in
   assert_no_warnings out;
-  let data = patched ~little:true bytes out in
+  let data = patched bytes out in
   let assert_word = assert_word ~ctxt ~little:true data in
   assert_word ~msg:"ADR_PREL_PG_HI21" 0x40 4 0xb0000000L;
   assert_word ~msg:"ADD_ABS_LO12_NC" 0x44 4 0x91004000L;
@@ -185,7 +181,7 @@ let outside_of_section ctxt =
       [ rel 1 4L 9 1 ~addend:(-4L); rel 1 6L 1 1 ]
   in
   assert_equal ~ctxt ~printer:Int.to_string 1 (List.length out.warnings);
-  let data = patched ~little:true bytes out in
+  let data = patched bytes out in
   let assert_word = assert_word ~ctxt ~little:true data in
   assert_word ~msg:"GOTPCREL" 0x44 4 0x8L;
   assert_word ~msg:"GOT entry" 0x48 8 0x1008L;
@@ -209,10 +205,35 @@ let extended_index ctxt =
       [ rel 1 0L 1 1; rel shn_abs 0L 1 2 ]
   in
   assert_no_warnings out;
-  let data = patched ~little:true bytes out in
+  let data = patched bytes out in
   let assert_word = assert_word ~ctxt ~little:true data in
   assert_word ~msg:"extended" 0x40 8 0x100cL;
   assert_word ~msg:"absolute" 0x48 8 0x4L
+
+(* the modified bytes that are close to each other are emitted as one
+   patch, with the unmodified bytes between them, the distant ones as
+   separate patches *)
+let merged_patches ctxt =
+  let bytes = String.make 0x140 '\xaa' in
+  let out =
+    link ~machine:62 ~base:0x1000L ~bytes
+      [ data 1 ".data" ~off:0x40L ~size:0x100L ~align:8L ]
+      [ (1, symbol "" 1 ~typ:3 ~bind:0) ]
+      [ rel 1 0L 10 1; rel 1 8L 10 1; rel 1 0x80L 10 1 ]
+  in
+  assert_no_warnings out;
+  let printer patches =
+    List.map patches ~f:(fun (off, data) ->
+        sprintf "%#Lx:%s" off
+          (String.concat_map data ~f:(fun c -> sprintf "%02x" (Char.to_int c))))
+    |> String.concat ~sep:" "
+  in
+  assert_equal ~ctxt ~printer
+    [
+      (0x40L, "\x00\x10\x00\x00\xaa\xaa\xaa\xaa\x00\x10\x00\x00");
+      (0xc0L, "\x00\x10\x00\x00");
+    ]
+    out.patches
 
 let unsupported_machine ctxt =
   let out =
@@ -233,6 +254,7 @@ let suite =
          "aarch64" >:: aarch64;
          "outside of section" >:: outside_of_section;
          "extended section index" >:: extended_index;
+         "merged patches" >:: merged_patches;
          "unsupported machine" >:: unsupported_machine;
        ]
 

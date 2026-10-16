@@ -55,7 +55,7 @@ type output = {
   regions : region list;
   functions : (string * int64 * int64 * int64) list;
   references : (int64 * string) list;
-  patches : (int64 * int * int64) list;
+  patches : (int64 * string) list;
   warnings : string list;
 }
 
@@ -110,27 +110,58 @@ let bits x lo n = Int64.((x lsr lo) land mask n)
 let set_bits x lo n v =
   Int64.(x land lnot (mask n lsl lo) lor ((v land mask n) lsl lo))
 
-(* The contents of the file with the relocations applied. The file
-   isn't copied, the modified bytes are stored on top of it. The bytes
-   past the end of the file are zeros. *)
+(* The contents of the file with the relocations applied. It is a copy
+   of the file, extended with zeros when the bytes past its end are
+   written, and a bitmap of the modified bytes. *)
 module Memory = struct
   type t = {
-    data : Bigstring.t;  (** the file, never modified *)
-    modified : (int64, int) Hashtbl.t;  (** the modified bytes *)
+    length : int;  (** the length of the file *)
+    mutable data : Bytes.t;
+    mutable modified : Bytes.t;  (** a bit per byte of [data] *)
   }
 
-  let create data = { data; modified = Hashtbl.create (module Int64) }
-  let length t = Int64.of_int (Bigstring.length t.data)
-  let inside t off = Int64.(off >= 0L && off < length t)
+  let create data =
+    let length = Bigstring.length data in
+    {
+      length;
+      data = Bigstring.to_bytes data;
+      modified = Bytes.make ((length + 7) / 8) '\000';
+    }
+
+  let length t = Int64.of_int t.length
+
+  (* the bytes past the end of the file are only written when the GOT
+     is filled, so the buffer grows geometrically *)
+  let reserve t off =
+    let size = Bytes.length t.data in
+    if off >= size then begin
+      let size = Int.max (off + 1) (2 * size) in
+      let data = Bytes.make size '\000' in
+      Bytes.blito ~src:t.data ~dst:data ();
+      let modified = Bytes.make ((size + 7) / 8) '\000' in
+      Bytes.blito ~src:t.modified ~dst:modified ();
+      t.data <- data;
+      t.modified <- modified
+    end
+
+  let is_modified t off =
+    Char.to_int (Bytes.unsafe_get t.modified (off lsr 3))
+    land (1 lsl (off land 7))
+    <> 0
 
   let get t off =
-    match Hashtbl.find t.modified off with
-    | Some b -> b
-    | None when inside t off ->
-        Char.to_int (Bigstring.get t.data (Int64.to_int_exn off))
-    | None -> 0
+    let off = Int64.to_int_exn off in
+    if off < 0 || off >= Bytes.length t.data then 0
+    else Char.to_int (Bytes.get t.data off)
 
-  let set t off b = Hashtbl.set t.modified ~key:off ~data:(b land 0xff)
+  let set t off b =
+    let off = Int64.to_int_exn off in
+    reserve t off;
+    Bytes.set t.data off (Char.unsafe_of_int (b land 0xff));
+    let bits = Char.to_int (Bytes.get t.modified (off lsr 3)) in
+    Bytes.set t.modified (off lsr 3)
+      (Char.unsafe_of_int (bits lor (1 lsl (off land 7))))
+
   let shift ~little n i = 8 * if little then i else n - i - 1
 
   let read t ~little off n =
@@ -147,20 +178,37 @@ module Memory = struct
       set t Int64.(off + of_int i) (Int64.to_int_exn b)
     done
 
-  (* groups the modified bytes into runs of at most eight bytes *)
-  let patches t ~little =
-    let emit (start, len) = (start, len, read t ~little start len) in
-    Hashtbl.keys t.modified
-    |> List.sort ~compare:Int64.compare
-    |> List.fold ~init:([], None) ~f:(fun (acc, run) off ->
+  (* Two runs of modified bytes that are at most this far apart are
+     emitted as one patch, together with the unmodified bytes between
+     them. A patch costs more than a few dozen bytes of data, and the
+     relocations of code are usually a few bytes apart. *)
+  let max_gap = 32
+
+  (* the runs of the modified bytes, as [(off, bytes)] *)
+  let patches t =
+    let size = Bytes.length t.data in
+    let emit acc start stop =
+      ( Int64.of_int start,
+        Bytes.To_string.sub t.data ~pos:start ~len:(stop - start) )
+      :: acc
+    in
+    (* [run] is the current run [start, stop), if any *)
+    let rec scan acc run off =
+      if off >= size then
+        match run with None -> acc | Some (start, stop) -> emit acc start stop
+      else if
+        off land 7 = 0 && Char.equal (Bytes.get t.modified (off lsr 3)) '\000'
+      then scan acc run (off + 8)
+      else if not (is_modified t off) then scan acc run (off + 1)
+      else
         match run with
-        | Some (start, len) when len < 8 && Int64.(start + of_int len = off) ->
-            (acc, Some (start, len + 1))
-        | Some run -> (emit run :: acc, Some (off, 1))
-        | None -> (acc, Some (off, 1)))
-    |> function
-    | acc, None -> List.rev acc
-    | acc, Some run -> List.rev (emit run :: acc)
+        | Some (start, stop) when off - stop <= max_gap ->
+            scan acc (Some (start, off + 1)) (off + 1)
+        | Some (start, stop) ->
+            scan (emit acc start stop) (Some (off, off + 1)) (off + 1)
+        | None -> scan acc (Some (off, off + 1)) (off + 1)
+    in
+    List.rev (scan [] None 0)
 end
 
 (* a relocated place *)
@@ -972,6 +1020,6 @@ let link input =
       @ List.filter_opt [ commons_region; externals_region; got_region ];
     functions;
     references = List.rev !references;
-    patches = Memory.patches mem ~little:input.little;
+    patches = Memory.patches mem;
     warnings = List.rev !warnings;
   }

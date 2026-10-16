@@ -148,7 +148,5 @@ module Scheme : sig
     (addr * size * off, (addr -> size -> off -> 'a) -> 'a) Ogre.attribute
 
   val symbol_value : (addr * value, (addr -> value -> 'a) -> 'a) Ogre.attribute
-
-  val patch :
-    (off * size * value, (off -> size -> value -> 'a) -> 'a) Ogre.attribute
+  val patch : (off * string, (off -> string -> 'a) -> 'a) Ogre.attribute
 end
