@@ -57,6 +57,20 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     Set.to_sequence (Theory.Target.vars t)
     |> Machine.Seq.iter ~f:(fun reg -> Env.add (Var.reify reg) zero)
 
+  let thread_pointer =
+    Machine.gets Project.target >>| fun t ->
+    match Theory.Target.reg t Theory.Role.Register.thread with
+    | None -> None
+    | Some tp -> Some (Var.reify tp)
+
+  let setup_tls endp =
+    thread_pointer >>= function
+    | None -> Machine.return endp
+    | Some tp ->
+        Val.of_word endp >>= Env.set tp >>= fun () ->
+        Mem.allocate ~readonly:false ~executable:false endp 0x1000
+        >>| fun () -> Addr.nsucc endp 0x1000
+
   let segmentations =
     let open Image.Scheme in
     Ogre.foreach Ogre.Query.(select (from segment)) ~f:Fn.id
@@ -270,9 +284,11 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     fixup_relocs () >>= fun () ->
     debug "setting up registers";
     let endp = Addr.max e1 e2 in
+    setup_registers () >>= fun () ->
+    debug "setting up thread-local storage";
+    setup_tls endp >>= fun endp ->
     set_word "posix:endp" endp >>= fun () ->
     set_word "posix:brk" endp >>= fun () ->
-    setup_registers () >>= fun () ->
     debug "initializing names";
     init_names ()
 end

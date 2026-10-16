@@ -143,6 +143,7 @@ let sp32 = reg r32 "WSP" (* W31 *)
 let zr = reg r64 "ZR"
 let zr64 = reg r64 "XZR"
 let zr32 = reg r32 "WZR"
+let tpidr_el0 = reg r64 "TPIDR_EL0"
 let memsv8 = CT.Mem.define r64 r8
 let datav8 = CT.Var.define memsv8 "mem"
 let flagsv8 = [ reg bool "NF"; reg bool "ZF"; reg bool "CF"; reg bool "VF" ]
@@ -152,7 +153,7 @@ let aliases =
   xs @< ws @< qs @< ds @< ss @< hs @< bs @< [ fp64; lr64; sp64; zr64 ]
   @< [ sp32; zr32 ]
 
-let varsv8 = rs @< flagsv8 @< [ datav8 ]
+let varsv8 = rs @< flagsv8 @< [ datav8 ] @< [ tpidr_el0 ]
 
 let regsv8 =
   Theory.Role.Register.
@@ -166,6 +167,7 @@ let regsv8 =
       ([ constant; zero; pseudo ], untyped [ reg r64 "XZR"; reg r64 "ZR" ]);
       ([ constant; zero; pseudo ], untyped [ reg r32 "WZR" ]);
       ([ link ], untyped [ reg r64 "R30" ]);
+      ([ thread ], untyped [ tpidr_el0 ]);
       ([ alias ], aliases);
     ]
   @ status_regs

@@ -27,3 +27,10 @@
 
 (defun UDF (exn)
   (intrinsic 'undefined-instruction))
+
+(in-package llvm-aarch64)
+
+(defun MRS (dst reg)
+  (if (= reg 0xde82)
+      (set$ dst TPIDR_EL0)
+    (empty)))

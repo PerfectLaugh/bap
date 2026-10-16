@@ -19,8 +19,9 @@ let init s b =
        virtual,  sets up [brk], [end], [edata], [etext], and [environ] \
        variables (see any unix man page for the description of these symbols). \
        Note that ([edata] and [etext] are not guaranteed, while [end] and \
-       [brk] are). The loader also initializes all CPU registers to zero and \
-       setups and alloocates the main stack frame (copies arguments from the \
+       [brk] are). The loader also initializes all CPU registers to zero, \
+       allocates TLS for targets with a thread register, and sets up the main \
+       stack frame (copies arguments from the \
        ctxt to the stack), and points the stack-pointer register to the \
        command line arguments. (The environment variables follows the \
        arguments)."
@@ -36,7 +37,8 @@ Config.manpage
       \  necessary.  The loader setups stack, prepares a callframe for the\n\
       \  main function, fills it the environment and command line\n\
       \  arguments. Finally it loads memory segments and allocates BSS\n\
-      \  sections. It also initializes several variables, that are usually\n\
+      \  sections and, for targets with a thread register, allocates TLS. It\n\
+      \  also initializes several variables, that are usually\n\
       \  defined by C programs - the $(b,environ) variable points to the list\n\
       \  of environment variables, $(b,endp) points to the first address past\n\
       \  the end of the last loaded segment, and $(b,brk) is the program\n\

@@ -12,6 +12,9 @@ open Bap_primus.Std
 
     - Adds CPU registers to the environment and initializes them with zero.
 
+    - Allocates a thread-local storage region and initializes the target's
+      thread register, if the target defines one.
+
     - Set's the main frame (copies arguments from the ctxt to the stack)
 
     - Allocates a stack segment. The [stack_base] address points to the first
