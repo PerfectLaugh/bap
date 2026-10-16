@@ -35,6 +35,8 @@ struct operand;
 // If current instruction is invalid, then results of all other calls
 // to disassembler, that involves the instruction are undefined.
 struct disassembler_interface {
+    virtual ~disassembler_interface() = default;
+
     // disassemble one instruction, starting from address \a pc.
     virtual void step(uint64_t pc) = 0;
 
@@ -118,6 +120,8 @@ struct result {
 
 // a first class contstructor for disassemblers.
 struct disasm_factory {
+    virtual ~disasm_factory() = default;
+
     virtual result<disassembler_interface>
     create(const char *triple, const char *cpu, int debug_level) = 0;
 

@@ -10,6 +10,8 @@
   (names ghidra_disasm)
   (extra_deps
    (glob_files *.hpp)
+   ; dune tracks only the *.h headers of the dependencies
+   ../bap_disasm/disasm.hpp
    libghidra/include)
   (flags :standard -fPIC -isystem libghidra/include))
  (foreign_stubs

@@ -72,13 +72,17 @@ tar xzf ghidra.tar.gz \
 # the binutils development files
 NO_BFD='analyzesigs bfd_arch codedata loadimage_bfd'
 
+# the Makefile hardcodes `-arch x86_64` on macOS, which produces objects
+# that can't be linked on arm64, so build for the native architecture
+ARCH_TYPE=
+
 # the two targets share object directories, so they can't be built
 # in the same parallel make invocation
-quietly make -s -j"$JOBS" -C "${DECOMPILER}" \
+quietly make -s -j"$JOBS" -C "${DECOMPILER}" ARCH_TYPE="$ARCH_TYPE" \
         OPT_CXXFLAGS="-O2 -std=c++11 -fPIC" \
         EXTRA="\$(filter-out \$(CORE) \$(DECCORE) \$(SLEIGH) \$(GHIDRA) \$(SLACOMP) \$(SPECIAL) $NO_BFD,\$(ALL_NAMES))" \
         libdecomp.a
-quietly make -s -j"$JOBS" -C "${DECOMPILER}" sleigh_opt
+quietly make -s -j"$JOBS" -C "${DECOMPILER}" ARCH_TYPE="$ARCH_TYPE" sleigh_opt
 quietly "${DECOMPILER}/sleigh_opt" -a "${GHIDRA_ROOT}/Ghidra"
 
 cp "${DECOMPILER}/libdecomp.a" "$OUT/libdecomp.a"

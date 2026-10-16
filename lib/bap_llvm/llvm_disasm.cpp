@@ -53,10 +53,6 @@
 
 template <typename T>
 using smart_ptr = std::unique_ptr<T>;
-template <class T>
-typename std::remove_reference<T>::type&& move(smart_ptr<T>&& t) {
-    return std::move(t);
-}
 
 template <typename T>
 using shared_ptr = std::shared_ptr<T>;
@@ -216,6 +212,12 @@ public:
         std::string error;
         llvm::Triple t(llvm::Triple::normalize(name));
         std::string triple = t.getTriple();
+#if LLVM_VERSION_MAJOR >= 21
+        // the target registry takes llvm::Triple instead of strings
+        const llvm::Triple &target_triple = t;
+#else
+        const std::string &target_triple = triple;
+#endif
 
         // returned value is not allocated
         const llvm::Target *target =
@@ -235,7 +237,7 @@ public:
         // cf., Target/X86/MCTargetDesc/X86MCTargetDesc.cpp
 
         shared_ptr<const llvm::MCRegisterInfo>
-            reg_info(target->createMCRegInfo(triple));
+            reg_info(target->createMCRegInfo(target_triple));
 
         if (!reg_info) {
             if (debug_level > 0)
@@ -257,7 +259,7 @@ public:
             ins_analysis(target->createMCInstrAnalysis(ins_info.get()));
 
         shared_ptr<const llvm::MCSubtargetInfo>
-            sub_info(target->createMCSubtargetInfo(triple, cpu, attrs));
+            sub_info(target->createMCSubtargetInfo(target_triple, cpu, attrs));
 
         if (!sub_info) {
             if (debug_level > 0)
@@ -269,7 +271,7 @@ public:
 #if LLVM_VERSION_MAJOR >= 10
         llvm::MCTargetOptions mcopts;
         shared_ptr<const llvm::MCAsmInfo>
-            asm_info(target->createMCAsmInfo(*reg_info, triple, mcopts));
+            asm_info(target->createMCAsmInfo(*reg_info, target_triple, mcopts));
 #else
         shared_ptr<const llvm::MCAsmInfo>
             asm_info(target->createMCAsmInfo(*reg_info, triple));
@@ -282,7 +284,9 @@ public:
         }
 
         shared_ptr<llvm::MCContext> ctx
-#if LLVM_VERSION_MAJOR >= 13
+#if LLVM_VERSION_MAJOR >= 23
+            (new llvm::MCContext(t, *asm_info, *reg_info, *sub_info));
+#elif LLVM_VERSION_MAJOR >= 13
             (new llvm::MCContext(t, &*asm_info, &*reg_info, 0));
 #else
             (new llvm::MCContext(&*asm_info, &*reg_info, 0));
@@ -294,7 +298,7 @@ public:
         }
 
         smart_ptr<llvm::MCRelocationInfo>
-            rel_info(target->createMCRelocationInfo(triple, *ctx));
+            rel_info(target->createMCRelocationInfo(target_triple, *ctx));
 
         if (!rel_info) {
             if (debug_level > 0)
@@ -304,11 +308,11 @@ public:
 
         smart_ptr<llvm::MCSymbolizer>
             symbolizer(target->createMCSymbolizer(
-                           triple,
+                           target_triple,
                            nullptr, // getOpInfo
                            nullptr, // SymbolLookUp
                            nullptr, // DisInfo
-                           &*ctx, move(rel_info)));
+                           &*ctx, std::move(rel_info)));
 
         if (!symbolizer) {
             if (debug_level > 0)
@@ -337,7 +341,7 @@ public:
             return {nullptr, {bap_disasm_unsupported_target} };
         }
 
-        dis->setSymbolizer(move(symbolizer));
+        dis->setSymbolizer(std::move(symbolizer));
 
         shared_ptr<llvm_disassembler> self(new llvm_disassembler(debug_level));
         self->printer  = printer;

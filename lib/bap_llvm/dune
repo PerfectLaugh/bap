@@ -18,7 +18,9 @@
    llvm_macho_loader
    llvm_pdb_loader)
   (extra_deps
-   (glob_files *.hpp))
+   (glob_files *.hpp)
+   ; dune tracks only the *.h headers of the dependencies
+   ../bap_disasm/disasm.hpp)
   (flags
    -I.
    :standard
@@ -31,6 +33,10 @@
 
 (rule
  (targets cxx.flags link.flags bap_llvm_config.ml)
- (deps bap_llvm_config.ml.ab)
+ (deps
+  (:input bap_llvm_config.ml.ab)
+  ; llvm-config output depends on the installed LLVM, which can change
+  ; (e.g., package upgrades) without anything dune tracks changing
+  (universe))
  (action
-  (run ./config/llvm_configurator.exe -filename %{deps})))
+  (run ./config/llvm_configurator.exe -filename %{input})))
