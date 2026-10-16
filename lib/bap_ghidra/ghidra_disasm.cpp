@@ -136,32 +136,53 @@ public:
     }
 };
 
-// In pcode aliasing is represented by registers that have the same
-// space and offset (aka address) but different sizes. The ordering of
-// varnodes (see pcoderaw.hh) is defined in a such way that registers
-// with higher sizes precede registers with lower sizes, provided that
-// they have the same addresses.
+// In pcode aliasing is represented by registers that overlap in the
+// register space, e.g., XMM0_Db occupies the second four bytes of XMM0,
+// which in turn occupies the lower sixteen bytes of ZMM0. We represent
+// every register varnode as a slice of its container, i.e., of the
+// register that contains it and is not contained in any other register,
+// so that all aliases of a register share the same variable.
 class RegistersTable {
+    struct Container {
+        uintb offset;
+        uint4 size;
+        int name;
+    };
+
     std::string regnames;
-    std::map<Address,int> offsets;
+    // containers indexed by their space and the start offset
+    std::map<std::pair<int,uintb>, Container> containers;
+    uint4 max_size = 0;
     std::set<int> known_spaces;
 public:
-    RegistersTable() : regnames(), offsets() {}
+    RegistersTable() : regnames(), containers() {}
 
     void populate_registers(const Translate& translator) {
-        offsets = {};
+        containers = {};
+        max_size = 0;
         std::map<VarnodeData,std::string> registers;
         std::stringstream ss;
         ss << "Nil" << '\000';
         translator.getAllRegisters(registers);
-        for (const auto& elt : registers) {
-            VarnodeData node = elt.first;
-            std::string name = elt.second;
-            Address addr = node.getAddr();
-            if (offsets.find(addr) == offsets.end()) {
-                known_spaces.insert(node.space->getIndex());
-                offsets[addr] = ss.tellp();
-                ss << name << '\000';
+        std::vector<std::pair<VarnodeData,std::string>> sorted(
+            registers.begin(), registers.end());
+        // larger registers first, so that containers are found before
+        // the registers that they contain
+        std::stable_sort(sorted.begin(), sorted.end(),
+                         [](const std::pair<VarnodeData,std::string> &x,
+                            const std::pair<VarnodeData,std::string> &y) {
+                             return x.first.size > y.first.size;
+                         });
+        for (const auto& elt : sorted) {
+            const VarnodeData &node = elt.first;
+            known_spaces.insert(node.space->getIndex());
+            if (find_container(node) == nullptr) {
+                Container c = {node.offset, node.size, (int)ss.tellp()};
+                containers[{node.space->getIndex(), node.offset}] = c;
+                max_size = std::max(max_size, node.size);
+                // the width is passed with the name, using the Primus
+                // Lisp notation, since the target may not know it
+                ss << elt.second << ':' << node.size * 8 << '\000';
             }
         }
         regnames = ss.str();
@@ -175,21 +196,53 @@ public:
         bap::reg reg = {};
         if (is_virtual(node)) {
             reg.code = -node.offset;
-            reg.name = node.space->getShortcut();
-        } else {
-            auto pos = offsets.find(node.getAddr());
-            if (pos != offsets.end()) {
-                reg.code = pos->second;
-                reg.name = pos->second;
-            }
+            // the shortcut character followed by the size in bytes
+            reg.name = node.space->getShortcut() | (node.size << 8);
+        } else if (const Container *c = find_container(node)) {
+            reg.code = c->name;
+            reg.name = c->name;
         }
         return reg;
+    }
+
+    // the position of the least significant bit of the varnode in its
+    // container, zero if the varnode is not a register
+    int lsb(const VarnodeData &node) const {
+        const Container *c = is_virtual(node) ? nullptr : find_container(node);
+        if (c == nullptr) {
+            return 0;
+        } else if (node.space->isBigEndian()) {
+            return (c->offset + c->size - (node.offset + node.size)) * 8;
+        } else {
+            return (node.offset - c->offset) * 8;
+        }
     }
 
     bap::reg nil() const {
         return {0, 0};
     }
 private:
+    // the container that includes the varnode, only containers that
+    // start less than the maximal register size before the varnode
+    // could include it
+    const Container *find_container(const VarnodeData &node) const {
+        int space = node.space->getIndex();
+        auto it = containers.upper_bound({space, node.offset});
+        while (it != containers.begin()) {
+            --it;
+            const Container &c = it->second;
+            if (it->first.first != space ||
+                c.offset + max_size <= node.offset) {
+                break;
+            }
+            if (c.offset <= node.offset &&
+                node.offset + node.size <= c.offset + c.size) {
+                return &c;
+            }
+        }
+        return nullptr;
+    }
+
     bool is_virtual(const VarnodeData &node) const {
         return known_spaces.find(node.space->getIndex()) ==
             known_spaces.end();
@@ -347,8 +400,12 @@ private:
             result.type = bap_disasm_op_reg;
             result.reg_val = registers.nil();
         } else {
+            // the size in bits and, for a register that is a part of
+            // a larger register, the position of its least significant
+            // bit in that register (see `bits#' and `lsb#' in pcode.lisp)
             result.type = bap_disasm_op_imm;
-            result.imm_val = node.size * 8 /*bits in byte*/;
+            result.imm_val = node.size * 8 /*bits in byte*/ +
+                ((int64_t)registers.lsb(node) << 16);
         }
         return result;
     }

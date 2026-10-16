@@ -6,7 +6,7 @@
 (defmacro cpuid-subr (name tr r tx x)
   (set# tr r (intrinsic name
                         (get# tx x)
-                        :result tr)))
+                        :result (bits# tr))))
 
 (defun cpuid (tr r tx x)
   (cpuid-subr 'cpuid tr r tx x))

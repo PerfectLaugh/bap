@@ -122,7 +122,15 @@ module Reg = struct
         if reg_code = 0 then "Nil"
         else
           let off = C.insn_op_reg_name !!dis ~insn ~oper in
-          if reg_code < 0 then sprintf "%c%d" (Char.of_int_exn off) ~-reg_code
+          (* a virtual register, the name is its space shortcut,
+             optionally followed by its size in bytes *)
+          if reg_code < 0 then
+            let base =
+              sprintf "%c%d" (Char.of_int_exn (off land 0xFF)) ~-reg_code
+            in
+            match off lsr 8 with
+            | 0 -> base
+            | size -> sprintf "%s:%d" base (size * 8)
           else Table.lookup (get dis).reg_table off
       in
       { reg_code; reg_name }

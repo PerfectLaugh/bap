@@ -286,6 +286,16 @@ module Semantics = struct
         KB.collect Theory.Unit.target unit >>| fun target ->
         pack @@ load_program paths features @@ Project.empty target
 
+  (* a backend may specify the width of a register that is not known
+     to the target, using the typed variable notation, e.g., ZMM0:512 *)
+  let parse_reg_name name =
+    match String.rsplit2 name ~on:':' with
+    | Some (base, width) when not (String.is_empty base) -> (
+        match Int.of_string_opt width with
+        | Some w when w > 0 -> (base, Some w)
+        | _ -> (name, None))
+    | _ -> (name, None)
+
   let args_of_ops (module CT : Theory.Core) target insn =
     let bits = Theory.Target.bits target in
     let word = Theory.Bitv.define bits in
@@ -298,11 +308,15 @@ module Semantics = struct
           CT.int word x >>| Theory.Value.forget >>| fun v ->
           KB.Value.put Lisp.Semantics.static v (Some x)
       | Op.Reg v ->
-          let name = Reg.name v in
+          let name, width = parse_reg_name (Reg.name v) in
           let reg =
             match Theory.Target.var target name with
-            | None -> Theory.Var.forget @@ Theory.Var.define word name
             | Some v -> v
+            | None ->
+                let sort =
+                  Option.value_map width ~default:word ~f:Theory.Bitv.define
+                in
+                Theory.Var.forget @@ Theory.Var.define sort name
           in
           CT.var reg >>| fun v ->
           KB.Value.put Lisp.Semantics.symbol v (Some name))

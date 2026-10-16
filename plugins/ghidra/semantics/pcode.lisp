@@ -5,18 +5,40 @@
 
 (defmacro cast-word (x) (cast word-width x))
 
+;; A type operand of a register or a temporary is its size in bits,
+;; with the position of its least significant bit in the containing
+;; register stored above the 16th bit. The position is non-zero only
+;; for registers that are parts of larger registers, e.g., XMM0_Db is
+;; the 32-bit slice of ZMM0 that starts at the 32nd bit. Type operands
+;; of memory locations are symbols.
+
+(defmacro bits# (typ)
+  "the size in bits"
+  (logand typ 0xffff))
+
+(defmacro lsb# (typ)
+  "the position of the least significant bit in the container"
+  (rshift typ 16))
+
 (defun set# (typ dst src)
   (if (is-symbol typ)
       (store-word (cast-word dst) src)
-    (let ((dtyp (max typ (word-width dst)))
-          (mask (coerce dtyp (- (lshift 1 typ) 1))))
+    (let ((bits (bits# typ))
+          (lsb (lsb# typ))
+          (dtyp (max (+ bits lsb) (word-width dst)))
+          ;; the mask is computed in the destination width, otherwise
+          ;; it overflows when [bits] is not less than the width of
+          ;; the literals
+          (one (coerce dtyp 1))
+          (ones (- (lshift one bits) one))
+          (mask (lshift ones lsb)))
       (set$ dst (logor
                  (logandnot dst mask)
-                 (cast-unsigned (word-width dst) src))))))
+                 (lshift (logand (cast-unsigned dtyp src) ones) lsb))))))
 
 (defmacro get# (typ src)
   (if (is-symbol typ) (load-word (cast-word src))
-    (coerce typ src)))
+    (coerce (bits# typ) (rshift src (lsb# typ)))))
 
 (defmacro get# (op typ src)
   (op (get# typ src)))
@@ -24,14 +46,18 @@
 (defmacro get# (op tx x ty y)
   (op (get# tx x) (get# ty y)))
 
+(defun target# (typ dst)
+  "the destination of an indirect branch"
+  (if (is-symbol typ) dst (get# typ dst)))
+
 (defun COPY (td d ts s)
   (set# td d (get# ts s)))
 
-(defun STORE (_ _ _ ptr typ val)
-  (store-word ptr (get# typ val)))
+(defun STORE (_ _ tp ptr typ val)
+  (store-word (get# tp ptr) (get# typ val)))
 
-(defun LOAD (td dst _ _ _ ptr)
-  (set# td dst (load-bits td ptr)))
+(defun LOAD (td dst _ _ tp ptr)
+  (set# td dst (load-bits (bits# td) (get# tp ptr))))
 
 (defun branch (typ dst)
   (if (is-symbol typ)
@@ -44,17 +70,17 @@
 (defun CBRANCH (typ dst tc cnd)
   (when (get# tc cnd) (branch typ dst)))
 
-(defun BRANCHIND (_ dst)
-  (exec-addr dst))
+(defun BRANCHIND (typ dst)
+  (exec-addr (target# typ dst)))
 
 (defun CALL (typ dst)
   (exec-addr dst))
 
 (defun CALLIND (typ dst)
-  (exec-addr dst))
+  (exec-addr (target# typ dst)))
 
 (defun RETURN (typ dst)
-  (exec-addr dst))
+  (exec-addr (target# typ dst)))
 
 (defun PIECE (tr r tx x ty y)
   (set# tr r (get# concat tx x ty y)))
@@ -81,10 +107,10 @@
   (set# tr r (get# s<= tx x ty y)))
 
 (defun INT_ZEXT (tr r tx x)
-  (set# tr r (cast-unsigned tr (get# tx x))))
+  (set# tr r (cast-unsigned (bits# tr) (get# tx x))))
 
 (defun INT_SEXT (tr r tx x)
-  (set# tr r (cast-signed tr (get# tx x))))
+  (set# tr r (cast-signed (bits# tr) (get# tx x))))
 
 (defun INT_ADD (tr r tx x ty y)
   (set# tr r (get# + tx x ty y)))
@@ -96,19 +122,19 @@
   (let ((x (get# tx x))
         (y (get# ty y))
         (z (+ x y)))
-    (set# tr r (coerce tr (carry z x y)))))
+    (set# tr r (coerce (bits# tr) (carry z x y)))))
 
 (defun INT_SCARRY (tr r tx x ty y)
   (let ((x (get# tx x))
         (y (get# ty y))
         (z (+ x y)))
-    (set# tr r (coerce tr (overflow z x y)))))
+    (set# tr r (coerce (bits# tr) (overflow z x y)))))
 
 (defun INT_SBORROW (tr r tx x ty y)
   (let ((x (get# tx x))
         (y (get# ty y))
         (z (- x y)))
-    (set# tr r (coerce tr (overflow z x (- y))))))
+    (set# tr r (coerce (bits# tr) (overflow z x (- y))))))
 
 (defun INT_2COMP (tr r tx x)
   (set# tr r (get# - tx x)))
@@ -174,24 +200,24 @@
          (symbol-concat name fp-rmode fp-format :sep '_)
          (get# tx x)
          (get# ty y)
-         :result tr)))
+         :result (bits# tr))))
 
 (defmacro fp-unary (name tr r tx x)
   (set# tr r
         (intrinsic
          (symbol-concat name fp-format :sep '_)
          (get# tx x)
-         :result tr)))
+         :result (bits# tr))))
 
 (defmacro fp-unary/rmode (name tr r tx x)
   (set# tr r
         (intrinsic
          (symbol-concat name fp-rmode fp-format :sep '_)
          (get# tx x)
-         :result tr)))
+         :result (bits# tr))))
 
 (defmacro fp-predicate (name tr r tx x)
-  (set$ r
+  (set# tr r
         (intrinsic
          (symbol-concat 'is name fp-format :sep '_)
          (get# tx x)
@@ -201,34 +227,34 @@
   (intrinsic 'forder_ieee754_binary
              (get# tx x)
              (get# ty y)
-             :result tr))
+             :result (bits# tr)))
 
 (defun fp-round (tr tx x)
   (intrinsic
    (symbol-concat 'fround fp-rmode fp-format :sep '_)
    (get# tx x)
-   :result tr))
+   :result (bits# tr)))
 
 (defun INT2FLOAT (tr r tx x)
   (set# tr r
         (intrinsic
          (symbol-concat 'cast_sfloat fp-rmode fp-format :sep '_)
          (get# tx x)
-         :result tr)))
+         :result (bits# tr))))
 
 (defun TRUNC (tr r tx x)
   (set# tr r
         (intrinsic
          (symbol-concat 'cast_sint 'rtz fp-format :sep '_)
          (get# tx x)
-         :result tr)))
+         :result (bits# tr))))
 
 (defun FLOAT2FLOAT (tr r tx x)
   (set# tr r
         (intrinsic
          (symbol-concat 'fconvert fp-rmode fp-format)
          (get# tx x)
-         :result tr)))
+         :result (bits# tr))))
 
 (defun FLOAT_ADD (tr r tx x ty y)
   (fp-binary 'fadd tr r tx x ty y))
@@ -257,18 +283,18 @@
 (defun FLOAT_EQUAL (tr r tx x ty y)
   (let ((x<y (fp-order tr tx x ty y))
         (y<x (fp-order tr ty y tx x)))
-    (set$ r (not x<y y<x))))
+    (set# tr r (not x<y y<x))))
 
 (defun FLOAT_NOTEQUAL (tr r tx x ty y)
   (let ((x<y (fp-order tr tx x ty y))
         (y<x (fp-order tr ty y tx x)))
-    (set$ r (or x<y y<x))))
+    (set# tr r (or x<y y<x))))
 
 (defun FLOAT_LESS (tr r tx x ty y)
-  (set$ r (fp-order tr tx x ty y)))
+  (set# tr r (fp-order tr tx x ty y)))
 
 (defun FLOAT_LESSEQUAL (tr r tx x ty y)
-  (set$ r (not (fp-order tr ty y tx x))))
+  (set# tr r (not (fp-order tr ty y tx x))))
 
 (defun FLOAT_ROUND (tr r tx x)
   (set# tr r (fp-round tr tx x)))
