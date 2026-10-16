@@ -35,10 +35,10 @@ check: testsuite
 .PHONY: indent check-style status-clean
 
 indent:
-	sh tools/ocp-indent-all.sh
+	dune fmt
 
 status-clean:
 	git diff --quiet --exit-code
 
-check-style: status-clean indent
-	git diff --exit-code
+check-style:
+	dune build @fmt

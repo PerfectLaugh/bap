@@ -1,0 +1,6 @@
+_build
+_opam
+.git
+.jj
+testsuite
+Ghidra_*_build.tar.gz

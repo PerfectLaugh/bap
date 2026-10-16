@@ -4,25 +4,30 @@ run-name: Linting ${{ github.ref }}
 on:
   - pull_request
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DUNE_VERSION: 3.24.2
+
 jobs:
   check:
     runs-on: ubuntu-latest
 
-    env:
-      OPAMJOBS: 2
-      OPAMRETRES: 8
-
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Setup OCaml
-        uses: ocaml/setup-ocaml@v3
+      - name: Install dune
+        uses: ocaml-dune/setup-dune@v2
         with:
-          ocaml-compiler: 4.14.x
-          opam-pin: false
-          opam-depext: false
-          dune-cache: true
+          version: ${{ env.DUNE_VERSION }}
+          steps: install-dune enable-pkg
 
-      - name: Check the Style
-        run: opam install -y ocp-indent && opam exec -- make check-style
+      # the ocamlformat version is taken from .ocamlformat
+      - name: Check the formatting
+        run: dune build @fmt

@@ -1,13 +1,18 @@
-# runs the latest release version
+# runs the latest release version, installed from opam
 name: weekly-regression-tests
 
 on:
   schedule:
     - cron: "0 0 * * SUN" # Every Sunday at 00:00 UTC */
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         ocaml-compiler:
           - 4.14.x
@@ -17,7 +22,7 @@ jobs:
 
     env:
       OPAMJOBS: 2
-      OPAMRETRES: 8
+      OPAMRETRIES: 8
 
     steps:
       - name: Use OCaml ${{ matrix.ocaml-compiler }}
@@ -25,46 +30,37 @@ jobs:
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
           dune-cache: true
-          opam-pin: false
 
-      - name: Install System Dependencies
-        run: opam depext -y bap
-
-      - name: Install radare2 Dependencies
-        run: opam depext -u bap-radare2
-
-      - name: Cleanup the Caches
-        run: sudo apt clean --yes
-
+      # opam installs the system dependencies as well
       - name: Build and Install BAP
-        run: opam install bap bap-radare2
+        run: opam install --confirm-level=unsafe-yes bap.2.5.0 bap-radare2.2.5.0
 
       - name: Checkout the Tests
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: BinaryAnalysisPlatform/bap
           path: bap
           ref: v2.5.0
 
-      - name: Install Extra System Dependencies
-        run: sudo apt-get install dejagnu --yes
+      - name: Install DejaGnu
+        run: sudo apt-get install -y dejagnu
 
       - name: Run Functional Tests
         run: opam exec -- make -C bap check
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ always() }}
         with:
           name: opam-log-weekly-${{ matrix.ocaml-compiler }}
           path: ~/.opam/log
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ always() }}
         with:
           name: bap-log-weekly-${{ matrix.ocaml-compiler }}
           path: ~/.local/state/bap
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ always() }}
         with:
           name: fun-tests-log-weekly-${{ matrix.ocaml-compiler }}

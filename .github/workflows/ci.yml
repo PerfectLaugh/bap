@@ -1,0 +1,56 @@
+# builds and tests all packages with dune package management
+name: ci
+run-name: Testing ${{ github.ref }}
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DUNE_VERSION: 3.24.2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install LLVM and DejaGnu
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y llvm-dev dejagnu
+
+      - name: Build and test BAP
+        uses: ocaml-dune/setup-dune@v2
+        with:
+          version: ${{ env.DUNE_VERSION }}
+          steps: install-dune enable-pkg install-depexts build-deps build runtest
+
+      - name: Run functional tests
+        run: dune exec -- make check
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: bap-log
+          path: ~/.local/state/bap
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: functional-tests-log
+          path: |
+            testsuite/*.log
+            testsuite/logs

@@ -3,7 +3,7 @@
 set -e
 
 sudo apt-get update
-sudo apt-get install alien autoconf --yes
+sudo apt-get install alien autoconf llvm-dev --yes
 
 BAP_VERSION=$1
 echo "version is $BAP_VERSION"
@@ -16,22 +16,20 @@ PREFIX=/usr/local
 ARCH=$(dpkg-architecture -qDEB_BUILD_ARCH)
 CONFDIR=$PREFIX/etc/bap
 
-eval $(opam config env)
+eval $(opam env)
 echo OCaml is at $(which ocaml)
 echo "Looking in the dev-repo for the current list of dependencies"
 opam pin add bap --dev-repo --yes -n
-echo "Installing System dependenices"
-opam depext bap --yes
-echo "Installing OCaml dependenices"
-opam install --yes --deps-only bap
+echo "Installing the dependencies"
+opam install --yes --confirm-level=unsafe-yes --deps-only bap
 echo "Installed dependencies. Cleaning up..."
 opam pin remove bap
 
 echo "Cloning a fresh repo"
 [ -d bap-repo ] || git clone $SOURCE bap-repo
 cd bap-repo
-LLVM_VERSION=$(opam config var conf-bap-llvm:package-version)
-LLVM_CONFIG=$(opam config var conf-bap-llvm:config)
+LLVM_CONFIG=$(command -v llvm-config)
+LLVM_VERSION=$($LLVM_CONFIG --version)
 
 # this is a bit recursive...
 SIGURL=https://github.com/BinaryAnalysisPlatform/bap/releases/download/v2.4.0-alpha
@@ -69,7 +67,7 @@ cat > $DEBIAN/control <<EOF
 Package: bap
 Architecture: $ARCH
 Maintainer: Ivan Gotovchits
-Depends: libgmp10, zlib1g, libstdc++6, libtinfo5
+Depends: libgmp10, zlib1g, libstdc++6, libtinfo6
 Priority: optional
 Version: $BAP_VERSION
 Description: Binary Analysis Platform
@@ -107,7 +105,7 @@ cat > $DEBIAN/control <<EOF
 Package: libbap
 Architecture: $ARCH
 Maintainer: Ivan Gotovchits
-Depends: libgmp10, zlib1g, libstdc++6, libffi6, libtinfo5
+Depends: libgmp10, zlib1g, libstdc++6, libffi8, libtinfo6
 Priority: optional
 Version: $BAP_VERSION
 Description: Binary Analysis Platform C Library

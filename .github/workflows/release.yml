@@ -1,3 +1,6 @@
+# builds the binary packages of the development version, the packages
+# need an installation of BAP, so they are built with opam, as dune
+# doesn't install packages built with dune package management
 name: release
 
 on:
@@ -5,23 +8,26 @@ on:
     - cron: "0 0 * * SAT" # every Saturday
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     env:
       OPAMJOBS: 2
-      OPAMRETRES: 8
+      OPAMRETRIES: 8
       VERSION: 2.6.0
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install OCaml
         uses: ocaml/setup-ocaml@v3
         with:
-          ocaml-compiler: ocaml-variants.4.14.2+flambda
+          ocaml-compiler: ocaml-variants.5.5.1+options,ocaml-option-flambda
           dune-cache: true
 
       - name: Add the testing Repository
@@ -30,13 +36,16 @@ jobs:
       - name: Build deb packages
         run: ./tools/release.sh ${{ env.VERSION }}
 
-        # caution: this action overwrite the tag and deletes
-        # releases that are associated with it
-      - name: Create a new prerelease
-        uses: "marvinpinto/action-automatic-releases@latest"
+      - name: Move the development tag to this commit
+        run: |
+          git tag -f "v$VERSION-alpha"
+          git push --force origin "refs/tags/v$VERSION-alpha"
+
+      - name: Publish the development prerelease
+        uses: softprops/action-gh-release@v3
         with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          automatic_release_tag: v${{ env.VERSION }}-alpha
+          tag_name: v${{ env.VERSION }}-alpha
+          name: Development Build
           prerelease: true
-          title: "Development Build"
+          overwrite_files: true
           files: bap/*
