@@ -17,7 +17,7 @@ module Plugin_rules = struct
   let default_packages =
     List.filter ~f:is_installed
       [
-        "bap";
+        "bap-std";
         "bap-main";
         "bap-core-theory";
         "bap-knowledge";

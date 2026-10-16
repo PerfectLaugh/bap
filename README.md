@@ -32,14 +32,14 @@ wget https://github.com/BinaryAnalysisPlatform/bap/releases/download/v2.5.0/{bap
 sudo dpkg -i {bap,libbap,libbap-dev}_2.5.0.deb
 ```
 
-### From sources
+### Using opam
 
-Our binary packages do not include the OCaml development environment. If you are going to write an analysis in OCaml you need to install BAP from the source code using either [opam][opam-install] or by cloning and building this repository directly. The opam method is the recommended one. Once it is installed the following three commands should install the platform in a newly created switch.
+Our binary packages do not include the OCaml development environment. If you are going to write an analysis in OCaml you need to install BAP from the source code using either [opam][opam-install] or by cloning and building this repository directly. The following three commands install the latest stable release (2.5.0) in a newly created switch.
 
 ```bash
 opam init --comp=4.14.1   # inits opam and install the OCaml compiler
 opam install bap          # installs bap and its dependencies
-eval $(opam env)`         # activates opam environment
+eval $(opam env)          # activates opam environment
 ```
 
 Or, if you already have a switch where you would like install bap, then just do
@@ -52,39 +52,29 @@ The `opam install bap` command will also try to install the system dependencies 
 The instruction above will get you the latest stable release of BAP. If you're interested in our rolling releases, which are automatically updated every time a commit to the master branch happens, then you can create a new switch that uses our testing repository
 ```bash
 opam switch create bap-testing --repos \
-    default,bap=git+https://github.com/BinaryAnalysisPlatform/opam-repository#testing 4.14.1
+    default,bap=git+https://github.com/BinaryAnalysisPlatform/opam-repository#testing 5.5.1
 opam install bap
 ```
 
-After it is added, the `bap` repository will take precedence over the stable repository and you will get the freshly picked BAP packages straight from the farm.
+After it is added, the `bap` repository will take precedence over the stable repository and you will get the freshly picked BAP packages straight from the farm. Note that the development version of BAP requires OCaml 5.
 
-If you want to build BAP manually or just want to tackle with BAP internals, then you can clone this repository and build it manually. We suggest your starting with a fresh environment without BAP being installed, to prevent clashes, or even better to use a local switch, e.g.,
+### From sources
+
+If you want to build BAP manually or just want to tackle with BAP internals, then clone this repository and build it with [dune package management][dune-pkg]. You don't need opam or a switch for that: dune fetches the OCaml compiler and all OCaml dependencies at the versions pinned in `dune.lock`. You need [dune][dune-install] 3.24 or newer, LLVM development files (`llvm-config` must be in the path), and a few system libraries. The Z3 solver is vendored as a git submodule, so clone with submodules,
+
 ```bash
-git clone git@github.com:BinaryAnalysisPlatform/bap.git && cd bap
-opam switch create . --deps-only
-dune build && dune install
+git clone --recurse-submodules https://github.com/BinaryAnalysisPlatform/bap.git && cd bap
+dune show depexts         # lists the system packages to install with your package manager
+dune build                # fetches the dependencies and builds BAP
 ```
 
-The snippet above will clone bap, create a fresh local switch, install the necessary dependencies, including the system one, and, finally, build and install bap with dune. Alternatively, if you already have a switch where you want to build and install bap, you can use
-```
-git clone git@github.com:BinaryAnalysisPlatform/bap.git && cd bap
-opam install . --deps-only
-dune build && dune install
-```
-to install bap and its dependencies into the currently selected switch.
+Once it is built, run `bap` and the other tools through `dune exec`, e.g., `dune exec -- bap /bin/echo -d`, so that they can find the plugins in the build tree. Use `dune test` to run the unit tests and `dune exec -- make check` to run the functional test suite.
 
-The above command will build all packages available in bap, including experimental packages like Ghidra or Radare (included in the bap-extra) meta-package. To prepare development envionment that excludes these packages (or any other packages) just remove corresponding .opam files (don't worry, opam will regenerate them later), before creating a switch e.g.,
-```
-rm bap-{extra,radare2,ghidra,primus-symbolic-executor,ida}.opam
-opam switch create . --deps-only
-dune build && dune install
-```
+If `llvm-config` is not in the path, or you want to use a different LLVM, then point BAP to it before building, e.g.,
 
-Note, if you don't have the `llvm-config` executable in the path, then run
+```bash
+dune exec -- ocaml tools/configure.ml --with-llvm-config=llvm-config-18
 ```
-ocaml tools/configure.ml --with-llvm-config=<path-to-you-llvm-config>
-```
-where `<path-to-your-llvm-config>` is usually `llvm-config-<ver>`, e.g., `llvm-config-11`.
 
 ## Using
 
@@ -118,7 +108,7 @@ bap mc --show-{insn=asm,bil} -- 48 83 ec 08
 ```
 or
 ```
-bap mc --show-{insn=asm,bil} "\x48\x83\xec\x08"
+bap mc --show-{insn=asm,bil} -- "\x48\x83\xec\x08"
 ```
 
 It recognizes a few input formats (including `llvm-mc` is using for its `-show-encoding` option). Consult the documentation for more detailed information.
@@ -130,7 +120,7 @@ It recognizes a few input formats (including `llvm-mc` is using for its `-show-e
 BAP is a plugin-based framework and if you want to develop a new analysis you can write a plugin, build it, install, and it will work with the rest of the BAP without any recompilation. There are many extension points that you could use to add new analysis, change existing, or even build your own applications. We will start with a simple example, that registers a disassembling pass to the disassemble command. Suppose that we want to write an analysis that estimates the ratio of jump instructions to the total number of instructions in the binary. We will start by creating an empty file named `jmp.ml` in an empty folder (the folder name doesn't matter). Next, using our favorite text [editor][emacs] we will put the following code into it:
 
 ```ocaml
-open Core_kernel
+open Core
 open Bap_main
 open Bap.Std
 
@@ -167,7 +157,7 @@ You can also build and install bap plugins using dune. For that, you need to def
 (library
  (name FOO)
  (public_name OUR-FOO.plugin)
- (libraries bap bap-main))
+ (libraries bap-std bap-main))
 
 (plugin
  (name FOO)
@@ -228,6 +218,8 @@ Please, [contact us][contact-us] if you would like to become a sponsor or are se
 [cwe-checker]: https://github.com/fkie-cad/cwe_checker
 [cgc]: https://www.darpa.mil/program/cyber-grand-challenge
 [opam-install]: https://opam.ocaml.org/doc/Install.html
+[dune-install]: https://dune.build/install
+[dune-pkg]: https://dune.readthedocs.io/en/stable/tutorials/dune-package-management/index.html
 [contact-us]: https://www.cylab.cmu.edu/partners/index.html
 [gitter]: https://gitter.im/BinaryAnalysisPlatform/bap
 [travis]: https://travis-ci.org/BinaryAnalysisPlatform/bap
