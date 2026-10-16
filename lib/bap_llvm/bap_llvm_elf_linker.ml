@@ -58,18 +58,33 @@ type output = {
   warnings : string list;
 }
 
+(* The constants of the ELF generic ABI (gABI) that the linker uses,
+   named as in <elf.h> without the prefix. *)
 module Elf = struct
-  let shf_write = 0x1L
-  let shf_alloc = 0x2L
-  let shf_execinstr = 0x4L
+  (* section flags (sh_flags) *)
+  let shf_write = 0x1L (* writable at run time *)
+  let shf_alloc = 0x2L (* occupies memory at run time *)
+  let shf_execinstr = 0x4L (* contains executable code *)
+
+  (* section type (sh_type) of a section with no file contents (.bss) *)
   let sht_nobits = 8
-  let shn_undef = 0
-  let shn_loreserve = 0xff00
-  let shn_abs = 0xfff1
+
+  (* special section indices (st_shndx) *)
+  let shn_undef = 0 (* the symbol is undefined *)
+  let shn_loreserve = 0xff00 (* the start of the reserved indices *)
+  let shn_abs = 0xfff1 (* the value is an absolute address *)
+
+  (* a common block, the value is its alignment *)
   let shn_common = 0xfff2
+
+  (* symbol types (st_info & 0xf) *)
   let stt_func = 2
-  let stt_gnu_ifunc = 10
+  let stt_gnu_ifunc = 10 (* a function resolved at load time *)
+
+  (* symbol binding (st_info >> 4) *)
   let stb_local = 0
+
+  (* machines (e_machine) *)
   let em_386 = 3
   let em_mips = 8
   let em_arm = 40
@@ -194,84 +209,110 @@ let update_insn site f =
   site.sti 0 4 (f (site.ldi 0 4));
   Done
 
+(* The relocation types below are the numbers of the R_<ARCH>_* constants
+   of each processor's psABI. Their names are given next to each case, and
+   in the formulas S is the symbol address ([s]), A the addend ([a]), P the
+   address of the place ([p]), GOT the address of the GOT ([env.got_base]),
+   and G(x) the address of the GOT entry of x ([env.got x]). There are no
+   PLT entries, so the PLT relocations are resolved directly to the symbol. *)
+
+(* x86-64 psABI, all relocations are RELA *)
 let x86_64 env =
   simple @@ fun ({ rel; sym; p; s; a; _ } as site) ->
   let open Int64 in
   let store = store site in
   match rel.typ with
-  | 0 -> Done
-  | 1 -> store 8 (s + a)
-  | 2 | 4 -> store 4 (s + a - p)
-  | 3 -> store 4 (env.got s - env.got_base + a)
+  | 0 -> Done (* NONE *)
+  | 1 -> store 8 (s + a) (* 64 *)
+  | 2 | 4 -> store 4 (s + a - p) (* PC32, PLT32 *)
+  | 3 -> store 4 (env.got s - env.got_base + a) (* GOT32 *)
+  (* GOTPCREL, GOTPCRELX, REX_GOTPCRELX, CODE_4_GOTPCRELX. The GOTPCRELX
+     variants let the linker relax the load into a lea, we don't. *)
   | 9 | 41 | 42 | 43 -> store 4 (env.got s + a - p)
-  | 10 | 11 -> store 4 (s + a)
-  | 12 -> store 2 (s + a)
-  | 13 -> store 2 (s + a - p)
-  | 14 -> store 1 (s + a)
-  | 15 -> store 1 (s + a - p)
-  | 24 -> store 8 (s + a - p)
-  | 25 -> store 8 (s + a - env.got_base)
-  | 26 -> store 4 (env.got_base + a - p)
-  | 27 -> store 8 (env.got s - env.got_base + a)
-  | 28 -> store 8 (env.got s + a - p)
-  | 29 -> store 8 (env.got_base + a - p)
-  | 32 -> store 4 (sym.size + a)
-  | 33 -> store 8 (sym.size + a)
+  | 10 | 11 -> store 4 (s + a) (* 32, 32S *)
+  | 12 -> store 2 (s + a) (* 16 *)
+  | 13 -> store 2 (s + a - p) (* PC16 *)
+  | 14 -> store 1 (s + a) (* 8 *)
+  | 15 -> store 1 (s + a - p) (* PC8 *)
+  | 24 -> store 8 (s + a - p) (* PC64 *)
+  | 25 -> store 8 (s + a - env.got_base) (* GOTOFF64 *)
+  | 26 -> store 4 (env.got_base + a - p) (* GOTPC32 *)
+  | 27 -> store 8 (env.got s - env.got_base + a) (* GOT64 *)
+  | 28 -> store 8 (env.got s + a - p) (* GOTPCREL64 *)
+  | 29 -> store 8 (env.got_base + a - p) (* GOTPC64 *)
+  | 32 -> store 4 (sym.size + a) (* SIZE32 *)
+  | 33 -> store 8 (sym.size + a) (* SIZE64 *)
   | _ -> Unsupported
 
+(* i386 psABI, the relocations are REL, so the addend is the
+   sign-extended contents of the place *)
 let i386 env =
   simple @@ fun ({ rel; p; s; _ } as site) ->
   let open Int64 in
   let store = store site in
   let a n = if rel.explicit then site.a else sext (site.ld 0 n) Int.(8 * n) in
   match rel.typ with
-  | 0 -> Done
-  | 1 -> store 4 (s + a 4)
-  | 2 | 4 -> store 4 (s + a 4 - p)
-  | 3 | 43 -> store 4 (env.got s + a 4 - env.got_base)
-  | 9 -> store 4 (s + a 4 - env.got_base)
-  | 10 -> store 4 (env.got_base + a 4 - p)
-  | 20 -> store 2 (s + a 2)
-  | 21 -> store 2 (s + a 2 - p)
-  | 22 -> store 1 (s + a 1)
-  | 23 -> store 1 (s + a 1 - p)
+  | 0 -> Done (* NONE *)
+  | 1 -> store 4 (s + a 4) (* 32 *)
+  | 2 | 4 -> store 4 (s + a 4 - p) (* PC32, PLT32 *)
+  | 3 | 43 -> store 4 (env.got s + a 4 - env.got_base) (* GOT32, GOT32X *)
+  | 9 -> store 4 (s + a 4 - env.got_base) (* GOTOFF *)
+  | 10 -> store 4 (env.got_base + a 4 - p) (* GOTPC *)
+  | 20 -> store 2 (s + a 2) (* 16 *)
+  | 21 -> store 2 (s + a 2 - p) (* PC16 *)
+  | 22 -> store 1 (s + a 1) (* 8 *)
+  | 23 -> store 1 (s + a 1 - p) (* PC8 *)
   | _ -> Unsupported
 
+(* AArch64 ELF ABI (AAELF64), all relocations are RELA *)
 let aarch64 env =
   simple @@ fun ({ rel; p; s; a; _ } as site) ->
   let open Int64 in
   let store = store site and update = update_insn site in
+  (* the 4KiB page of an address, as computed by ADRP *)
   let page x = x land lnot 0xfffL in
+  (* the 21-bit immediate of ADR/ADRP: immlo at 29-30, immhi at 5-23 *)
   let adr v insn = set_bits (set_bits insn 29 2 v) 5 19 (v asr 2) in
+  (* the 12-bit immediate (at 10-21) of ADD and of the loads and stores,
+     which is scaled by the access size, 2^shift bytes *)
   let lo12 shift v =
     update (fun insn -> set_bits insn 10 12 ((v land 0xfffL) asr shift))
   in
   let x = s + a in
   match rel.typ with
-  | 0 -> Done
-  | 0x101 -> store 8 x
-  | 0x102 -> store 4 x
-  | 0x103 -> store 2 x
-  | 0x104 -> store 8 (x - p)
-  | 0x105 | 0x13a -> store 4 (x - p)
-  | 0x106 -> store 2 (x - p)
+  | 0 -> Done (* NONE *)
+  | 0x101 -> store 8 x (* ABS64 *)
+  | 0x102 -> store 4 x (* ABS32 *)
+  | 0x103 -> store 2 x (* ABS16 *)
+  | 0x104 -> store 8 (x - p) (* PREL64 *)
+  | 0x105 | 0x13a -> store 4 (x - p) (* PREL32, PLT32 *)
+  | 0x106 -> store 2 (x - p) (* PREL16 *)
+  (* MOVW_UABS_G0 (0x107), G0_NC, G1, G1_NC, G2, G2_NC, and G3 (0x10d):
+     the 16-bit immediate (at 5-20) of MOVZ/MOVK is the n-th halfword of
+     the value, where n = (type - 0x107) / 2 *)
   | t when Int.(t >= 0x107 && t <= 0x10d) ->
       let shift = Int.((t - 0x107) / 2 * 16) in
       update (fun insn -> set_bits insn 5 16 (x asr shift))
+  (* LD_PREL_LO19, CONDBR19: the 19-bit word offset at 5-23 *)
   | 0x111 | 0x118 -> update (fun insn -> set_bits insn 5 19 ((x - p) asr 2))
-  | 0x112 -> update (adr (x - p))
+  | 0x112 -> update (adr (x - p)) (* ADR_PREL_LO21 *)
+  (* ADR_PREL_PG_HI21, ADR_PREL_PG_HI21_NC *)
   | 0x113 | 0x114 -> update (adr ((page x - page p) asr 12))
-  | 0x115 | 0x116 -> lo12 0 x
+  | 0x115 | 0x116 -> lo12 0 x (* ADD_ABS_LO12_NC, LDST8_ABS_LO12_NC *)
+  (* TSTBR14: the 14-bit word offset of TBZ/TBNZ at 5-18 *)
   | 0x117 -> update (fun insn -> set_bits insn 5 14 ((x - p) asr 2))
+  (* JUMP26, CALL26: the 26-bit word offset of B/BL at 0-25 *)
   | 0x11a | 0x11b -> update (fun insn -> set_bits insn 0 26 ((x - p) asr 2))
-  | 0x11c -> lo12 1 x
-  | 0x11d -> lo12 2 x
-  | 0x11e -> lo12 3 x
-  | 0x12b -> lo12 4 x
+  | 0x11c -> lo12 1 x (* LDST16_ABS_LO12_NC *)
+  | 0x11d -> lo12 2 x (* LDST32_ABS_LO12_NC *)
+  | 0x11e -> lo12 3 x (* LDST64_ABS_LO12_NC *)
+  | 0x12b -> lo12 4 x (* LDST128_ABS_LO12_NC *)
+  (* GOT_LD_PREL19 *)
   | 0x135 -> update (fun insn -> set_bits insn 5 19 ((env.got x - p) asr 2))
+  (* ADR_GOT_PAGE *)
   | 0x137 -> update (adr ((page (env.got x) - page p) asr 12))
-  | 0x138 -> lo12 3 (env.got x)
-  | 0x13b -> store 4 (env.got s + a - p)
+  | 0x138 -> lo12 3 (env.got x) (* LD64_GOT_LO12_NC *)
+  | 0x13b -> store 4 (env.got s + a - p) (* GOTPCREL32 *)
   | _ -> Unsupported
 
 let is_function (sym : symbol) =
@@ -279,6 +320,10 @@ let is_function (sym : symbol) =
 
 let is_thumb (sym : symbol) = is_function sym && Int64.(sym.value land 1L = 1L)
 
+(* ARM ELF ABI (AAELF32). The relocations are usually REL, so the addend
+   is decoded from the place. T is 1 when the target is a Thumb function
+   (bit 0 of its value is set), and it is ORed into the addresses that
+   are used for interworking. *)
 let arm env =
   simple @@ fun ({ rel; sym; p; ld; _ } as site) ->
   let open Int64 in
@@ -288,7 +333,8 @@ let arm env =
   let s = site.s land lnot t in
   let addend decoded = if rel.explicit then site.a else decoded in
   let a32 () = addend (sext (ld 0 4) 32) in
-  (* the 16-bit immediate of MOVW/MOVT *)
+  (* the 16-bit immediate of MOVW/MOVT, the lo variants store the low
+     halfword of the value and the hi variants the high one *)
   let movw typ imm =
     let a = addend (sext imm 16) in
     let v =
@@ -300,6 +346,8 @@ let arm env =
     in
     v land 0xffffL
   in
+  (* A32 MOVW/MOVT: imm16 is split into imm4 at 16-19 and imm12 at 0-11,
+     the mask 0xfff0f000 keeps the condition, the opcode, and Rd *)
   let arm_movw typ =
     let insn = ld 0 4 in
     let imm = (insn lsr 4) land 0xf000L lor (insn land 0xfffL) in
@@ -307,6 +355,9 @@ let arm env =
     store 4
       (insn land 0xfff0f000L lor ((v land 0xf000L) lsl 4) lor (v land 0xfffL))
   in
+  (* T32 MOVW/MOVT: imm16 is split into imm4 (hw1 0-3), i (hw1 10),
+     imm3 (hw2 12-14), and imm8 (hw2 0-7). The masks 0xfbf0 and 0x8f00
+     clear these fields and keep the opcode and Rd. *)
   let thumb_movw typ =
     let hw1 = ld 0 2 and hw2 = ld 2 2 in
     let imm =
@@ -320,6 +371,10 @@ let arm env =
     site.st 2 2 (hw2 land 0x8f00L lor (bits v 8 3 lsl 12) lor bits v 0 8);
     Done
   in
+  (* A32 B, BL, and BLX: the 24-bit word offset at 0-23. A call (CALL,
+     0x1c) is rewritten for interworking: a BL to Thumb code becomes BLX
+     (immediate) 0xfa000000, whose H bit (24) holds bit 1 of the offset,
+     and a BLX to ARM code becomes BL with the AL condition 0xeb000000. *)
   let arm_branch () =
     let insn = ld 0 4 in
     let a = addend (sext ((insn land 0xffffffL) lsl 2) 26) in
@@ -331,7 +386,13 @@ let arm env =
     then store 4 (0xeb000000L lor imm24)
     else store 4 (insn land 0xff000000L lor imm24)
   in
-  (* BL, BLX, and B.W *)
+  (* T32 BL, BLX, and B.W: the 25-bit offset is S:I1:I2:imm10:imm11:0,
+     where S is at hw1 10, imm10 at hw1 0-9, imm11 at hw2 0-10, and
+     I1 = not (J1 xor S), I2 = not (J2 xor S) with J1 at hw2 13 and J2
+     at hw2 11. Bit 12 of hw2 is set for BL and clear for BLX. The masks
+     0xf800 and 0xd000 keep the opcode bits. A call (THM_CALL, 0xa) is
+     rewritten into BL or BLX depending on the mode of the target, and
+     BLX is relative to the word-aligned P. *)
   let thumb_branch () =
     let hw1 = ld 0 2 and hw2 = ld 2 2 in
     let sign = bits hw1 10 1 in
@@ -363,7 +424,10 @@ let arm env =
       (hw2 land 0xd000L lor (j1 lsl 13) lor (j2 lsl 11) lor bits v 1 11);
     Done
   in
-  (* the conditional B.W *)
+  (* the conditional T32 B.W: the 21-bit offset is S:J2:J1:imm6:imm11:0,
+     where S is at hw1 10, imm6 at hw1 0-5, J1 at hw2 13, J2 at hw2 11,
+     and imm11 at hw2 0-10. The mask 0xfbc0 keeps the opcode and the
+     condition (hw1 6-9). *)
   let thumb_jump19 () =
     let hw1 = ld 0 2 and hw2 = ld 2 2 in
     let a =
@@ -385,44 +449,55 @@ let arm env =
       lor bits v 1 11);
     Done
   in
+  (* T16 B and B<cond>: the n-bit halfword offset in the low bits *)
   let thumb_short_branch n =
     let hw = ld 0 2 in
     let a = addend (sext ((hw land mask n) lsl 1) Int.(n + 1)) in
     store 2 (hw land lnot (mask n) lor bits (s + a - p) 1 n)
   in
   match rel.typ with
+  (* NONE, V4BX (marks a BX for ARMv4 patching, which isn't needed) *)
   | 0 | 0x28 -> Done
-  | 1 | 0x1c | 0x1d -> arm_branch ()
-  | 2 | 0x26 -> store 4 ((s + a32 ()) lor t)
-  | 3 | 0x29 -> store 4 (((s + a32 ()) lor t) - p)
-  | 5 -> store 2 (s + addend (sext (ld 0 2) 16))
-  | 8 -> store 1 (s + addend (sext (ld 0 1) 8))
-  | 0xa | 0x1e -> thumb_branch ()
-  | 0x18 -> store 4 (s + a32 () - env.got_base)
-  | 0x19 -> store 4 (env.got_base + a32 () - p)
-  | 0x1a -> store 4 (env.got (s lor t) + a32 () - env.got_base)
+  | 1 | 0x1c | 0x1d -> arm_branch () (* PC24, CALL, JUMP24 *)
+  | 2 | 0x26 -> store 4 ((s + a32 ()) lor t) (* ABS32, TARGET1 *)
+  | 3 | 0x29 -> store 4 (((s + a32 ()) lor t) - p) (* REL32, TARGET2 *)
+  | 5 -> store 2 (s + addend (sext (ld 0 2) 16)) (* ABS16 *)
+  | 8 -> store 1 (s + addend (sext (ld 0 1) 8)) (* ABS8 *)
+  | 0xa | 0x1e -> thumb_branch () (* THM_CALL, THM_JUMP24 *)
+  | 0x18 -> store 4 (s + a32 () - env.got_base) (* GOTOFF32 *)
+  | 0x19 -> store 4 (env.got_base + a32 () - p) (* BASE_PREL *)
+  | 0x1a -> store 4 (env.got (s lor t) + a32 () - env.got_base) (* GOT_BREL *)
+  (* PREL31: the low 31 bits hold the offset, bit 31 is kept, as used in
+     the exception index tables (.ARM.exidx) *)
   | 0x2a ->
       let old = ld 0 4 in
       let a = addend (sext (old land 0x7fffffffL) 31) in
       store 4 (old land 0x80000000L lor ((((s + a) lor t) - p) land 0x7fffffffL))
-  | 0x2b -> arm_movw `abs_lo
-  | 0x2c -> arm_movw `abs_hi
-  | 0x2d -> arm_movw `rel_lo
-  | 0x2e -> arm_movw `rel_hi
-  | 0x2f -> thumb_movw `abs_lo
-  | 0x30 -> thumb_movw `abs_hi
-  | 0x31 -> thumb_movw `rel_lo
-  | 0x32 -> thumb_movw `rel_hi
-  | 0x33 -> thumb_jump19 ()
-  | 0x60 -> store 4 (env.got (s lor t) + a32 () - p)
-  | 0x66 -> thumb_short_branch 11
-  | 0x67 -> thumb_short_branch 8
+  | 0x2b -> arm_movw `abs_lo (* MOVW_ABS_NC *)
+  | 0x2c -> arm_movw `abs_hi (* MOVT_ABS *)
+  | 0x2d -> arm_movw `rel_lo (* MOVW_PREL_NC *)
+  | 0x2e -> arm_movw `rel_hi (* MOVT_PREL *)
+  | 0x2f -> thumb_movw `abs_lo (* THM_MOVW_ABS_NC *)
+  | 0x30 -> thumb_movw `abs_hi (* THM_MOVT_ABS *)
+  | 0x31 -> thumb_movw `rel_lo (* THM_MOVW_PREL_NC *)
+  | 0x32 -> thumb_movw `rel_hi (* THM_MOVT_PREL *)
+  | 0x33 -> thumb_jump19 () (* THM_JUMP19 *)
+  | 0x60 -> store 4 (env.got (s lor t) + a32 () - p) (* GOT_PREL *)
+  | 0x66 -> thumb_short_branch 11 (* THM_JUMP11 *)
+  | 0x67 -> thumb_short_branch 8 (* THM_JUMP8 *)
   | _ -> Unsupported
 
+(* The offset of the global pointer ($gp, _gp) from the start of the
+   GOT. The GOT is accessed through signed 16-bit offsets from $gp, so
+   pointing $gp 0x7ff0 bytes into the GOT makes 64KiB of it reachable. *)
 let mips_gp_offset = 0x7ff0L
 
-(* MIPS o32: the HI16 (and local GOT16) relocations are applied when
-   the matching LO16 relocation is found, since they share the addend. *)
+(* MIPS o32 (SYSV ABI MIPS supplement), the relocations are REL. The
+   HI16 (and local GOT16) relocations are applied when the matching LO16
+   relocation is found, since they share the addend AHL = (AHI << 16) +
+   ALO. The HI16 values are rounded by 0x8000 to compensate for the sign
+   extension of the low 16 bits by the paired instruction. GP is the
+   value of $gp. *)
 let mips env =
   let open Int64 in
   let gp = env.got_base + mips_gp_offset in
@@ -461,8 +536,13 @@ let mips env =
       Done
     in
     match rel.typ with
+    (* NONE, JALR (a hint that allows turning JALR into BAL) *)
     | 0 | 37 -> Done
-    | 2 -> store 4 (s + a32 ())
+    | 2 -> store 4 (s + a32 ()) (* 32 *)
+    (* 26: the 26-bit word index of J/JAL at 0-25. The jump stays in the
+       256MiB region of P + 4, so for a local symbol the addend is an
+       index in that region (hence 0xf0000000), and for an external one
+       it is a sign-extended offset. *)
     | 4 ->
         let insn = ld 0 4 in
         let a = if rel.explicit then site.a else (insn land 0x3ffffffL) lsl 2 in
@@ -471,23 +551,30 @@ let mips env =
           else sext a 28 + s
         in
         store 4 (set_bits insn 0 26 (target lsr 2))
-    | 5 -> defer ()
+    | 5 -> defer () (* HI16 *)
+    (* GOT16 of a local symbol: the GOT entry holds the 64KiB page of the
+       address, and the paired LO16 adds the rest *)
     | 9 when is_local sym -> defer ()
+    (* GOT16 of a global symbol, CALL16: G(S) - GP *)
     | 9 | 11 -> store 4 (set_lo16 (ld 0 4) (env.got s - gp))
+    (* LO16. For _gp_disp the HI16/LO16 pair loads GP - P relative to the
+       HI16 (lui) instruction, which is 4 bytes before the LO16 one. *)
     | 6 ->
         let lo = a16 () in
         flush ~lo rel.symbol;
         let s = if is_gp_disp sym then gp - p + 4L else s in
         store 4 (set_lo16 (ld 0 4) (s + lo))
-    | 7 -> store 4 (set_lo16 (ld 0 4) (s + a16 () - gp))
+    | 7 -> store 4 (set_lo16 (ld 0 4) (s + a16 () - gp)) (* GPREL16 *)
+    (* PC16: the 16-bit word offset of the branches *)
     | 10 ->
         let insn = ld 0 4 in
         let a = sext ((insn land 0xffffL) lsl 2) 18 in
         store 4 (set_lo16 insn ((s + a - p) asr 2))
-    | 12 -> store 4 (s + a32 () - gp)
-    | 248 -> store 4 (s + a32 () - p)
+    | 12 -> store 4 (s + a32 () - gp) (* GPREL32 *)
+    | 248 -> store 4 (s + a32 () - p) (* PC32 *)
     | _ -> Unsupported
   in
+  (* the HI16 relocations without a matching LO16 use ALO = 0 *)
   let finish () =
     List.map !pending ~f:(fun (site, _) -> site.rel.symbol)
     |> List.dedup_and_sort ~compare:Int.compare
@@ -495,20 +582,35 @@ let mips env =
   in
   { prescan = ignore; apply; finish }
 
+(* RISC-V ELF psABI, all relocations are RELA. Linker relaxation is not
+   done, so the code keeps its size and R_RISCV_RELAX and R_RISCV_ALIGN
+   are ignored. *)
 let riscv env =
   let open Int64 in
-  (* the pc-relative values of the AUIPC instructions by their addresses *)
+  (* The pc-relative values of the AUIPC instructions by their addresses.
+     A PCREL_LO12 relocation refers to the label of its AUIPC rather than
+     to the target, so they are collected before the relocations are
+     applied. *)
   let hi = Hashtbl.create (module Int64) in
   let prescan { rel; p; s; a; _ } =
     match rel.typ with
-    | 20 -> Hashtbl.set hi ~key:p ~data:(env.got s + a - p)
-    | 23 -> Hashtbl.set hi ~key:p ~data:(s + a - p)
+    | 20 -> Hashtbl.set hi ~key:p ~data:(env.got s + a - p) (* GOT_HI20 *)
+    | 23 -> Hashtbl.set hi ~key:p ~data:(s + a - p) (* PCREL_HI20 *)
     | _ -> ()
   in
   let bit x n = bits x n 1 in
+  (* The immediates of the instruction formats, see the "Base Instruction
+     Formats" of the unprivileged ISA. The masks keep the opcode and the
+     register fields. *)
+  (* U (LUI, AUIPC): imm[31:12] at 12-31. 0x800 rounds the upper part
+     to compensate for the sign extension of the paired 12-bit low part. *)
   let utype v insn = set_bits insn 12 20 ((v + 0x800L) asr 12) in
+  (* I (ADDI, loads, JALR): imm[11:0] at 20-31 *)
   let itype v insn = set_bits insn 20 12 v in
+  (* S (stores): imm[11:5] at 25-31, imm[4:0] at 7-11 *)
   let stype v insn = set_bits (set_bits insn 25 7 (v lsr 5)) 7 5 v in
+  (* B (branches): imm[12|10:5] at 25-31, imm[4:1|11] at 7-11, the mask
+     0x1fff07f keeps rs2, rs1, funct3, and the opcode *)
   let btype v insn =
     insn land 0x1fff07fL
     lor (bit v 12 lsl 31)
@@ -516,6 +618,8 @@ let riscv env =
     lor (bits v 1 4 lsl 8)
     lor (bit v 11 lsl 7)
   in
+  (* J (JAL): imm[20|10:1|11|19:12] at 12-31, the mask 0xfff keeps rd and
+     the opcode *)
   let jtype v insn =
     insn land 0xfffL
     lor (bit v 20 lsl 31)
@@ -523,6 +627,8 @@ let riscv env =
     lor (bit v 11 lsl 20)
     lor (bits v 12 8 lsl 12)
   in
+  (* CB (C.BEQZ, C.BNEZ): offset[8|4:3] at 10-12, offset[7:6|2:1|5] at
+     2-6, the mask 0xe383 keeps funct3, rs1', and the opcode *)
   let cbtype v insn =
     insn land 0xe383L
     lor (bit v 8 lsl 12)
@@ -531,6 +637,8 @@ let riscv env =
     lor (bits v 1 2 lsl 3)
     lor (bit v 5 lsl 2)
   in
+  (* CJ (C.J, C.JAL): offset[11|4|9:8|10|6|7|3:1|5] at 2-12, the mask
+     0xe003 keeps funct3 and the opcode *)
   let cjtype v insn =
     insn land 0xe003L
     lor (bit v 11 lsl 12)
@@ -542,6 +650,8 @@ let riscv env =
     lor (bits v 1 3 lsl 3)
     lor (bit v 5 lsl 2)
   in
+  (* rewrites the ULEB128 number at the place in its existing length, a
+     64-bit number takes at most 10 bytes *)
   let uleb site f =
     let rec length n =
       if Int.(n >= 10) || site.ld n 1 land 0x80L = 0L then Int.(n + 1)
@@ -566,6 +676,7 @@ let riscv env =
       site.sti 0 2 (f (site.ldi 0 2));
       Done
     in
+    (* here S is the address of the AUIPC that computes the high part *)
     let pcrel_lo f =
       match Hashtbl.find hi s with
       | Some v -> update (f v)
@@ -573,22 +684,26 @@ let riscv env =
     in
     let x = s + a in
     match rel.typ with
-    | 0 | 43 | 51 -> Done
-    | 1 -> store 4 x
-    | 2 -> store 8 x
-    | 16 -> update (btype (x - p))
-    | 17 -> update (jtype (x - p))
+    | 0 | 43 | 51 -> Done (* NONE, ALIGN, RELAX *)
+    | 1 -> store 4 x (* 32 *)
+    | 2 -> store 8 x (* 64 *)
+    | 16 -> update (btype (x - p)) (* BRANCH *)
+    | 17 -> update (jtype (x - p)) (* JAL *)
+    (* CALL, CALL_PLT: an AUIPC and JALR pair *)
     | 18 | 19 ->
         let v = x - p in
         site.sti 0 4 (utype v (site.ldi 0 4));
         site.sti 4 4 (itype v (site.ldi 4 4));
         Done
-    | 20 | 23 -> update (utype (Hashtbl.find_exn hi p))
-    | 24 -> pcrel_lo itype
-    | 25 -> pcrel_lo stype
-    | 26 -> update (utype x)
-    | 27 -> update (itype x)
-    | 28 -> update (stype x)
+    | 20 | 23 ->
+        update (utype (Hashtbl.find_exn hi p)) (* GOT_HI20, PCREL_HI20 *)
+    | 24 -> pcrel_lo itype (* PCREL_LO12_I *)
+    | 25 -> pcrel_lo stype (* PCREL_LO12_S *)
+    | 26 -> update (utype x) (* HI20 *)
+    | 27 -> update (itype x) (* LO12_I *)
+    | 28 -> update (stype x) (* LO12_S *)
+    (* ADD8, ADD16, ADD32, ADD64, SUB8, SUB16, SUB32, SUB64: they come in
+       pairs that compute the difference of two symbols in place *)
     | 33 -> store 1 (ld 0 1 + x)
     | 34 -> store 2 (ld 0 2 + x)
     | 35 -> store 4 (ld 0 4 + x)
@@ -597,17 +712,19 @@ let riscv env =
     | 38 -> store 2 (ld 0 2 - x)
     | 39 -> store 4 (ld 0 4 - x)
     | 40 -> store 8 (ld 0 8 - x)
-    | 41 -> store 4 (env.got s + a - p)
-    | 44 -> update16 (cbtype (x - p))
-    | 45 -> update16 (cjtype (x - p))
+    | 41 -> store 4 (env.got s + a - p) (* GOT32_PCREL *)
+    | 44 -> update16 (cbtype (x - p)) (* RVC_BRANCH *)
+    | 45 -> update16 (cjtype (x - p)) (* RVC_JUMP *)
+    (* SUB6, SET6: the low 6 bits of a byte, as used in DWARF call frame
+       instructions *)
     | 52 -> store 1 (set_bits (ld 0 1) 0 6 (ld 0 1 - x))
     | 53 -> store 1 (set_bits (ld 0 1) 0 6 x)
-    | 54 -> store 1 x
-    | 55 -> store 2 x
-    | 56 -> store 4 x
-    | 57 | 59 -> store 4 (x - p)
-    | 60 -> uleb site (fun _ -> x)
-    | 61 -> uleb site (fun old -> old - x)
+    | 54 -> store 1 x (* SET8 *)
+    | 55 -> store 2 x (* SET16 *)
+    | 56 -> store 4 x (* SET32 *)
+    | 57 | 59 -> store 4 (x - p) (* 32_PCREL, PLT32 *)
+    | 60 -> uleb site (fun _ -> x) (* SET_ULEB128 *)
+    | 61 -> uleb site (fun old -> old - x) (* SUB_ULEB128 *)
     | _ -> Unsupported
   in
   { prescan; apply; finish = Fn.id }
