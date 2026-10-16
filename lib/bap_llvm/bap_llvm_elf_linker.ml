@@ -98,26 +98,43 @@ let set_bits x lo n v =
    the modified bytes are stored. The bytes past the end of the
    file are zeros. *)
 module Memory = struct
-  type t = { data : Bigstring.t; bytes : (int64, int) Hashtbl.t }
+  type t = {
+    data : Bigstring.t;  (** a copy of the file *)
+    extra : (int64, int) Hashtbl.t;  (** the bytes past the end of the file *)
+    mutable modified : int64 list;
+  }
 
-  let create data = { data; bytes = Hashtbl.create (module Int64) }
+  let create data =
+    {
+      data = Bigstring.sub data ~pos:0 ~len:(Bigstring.length data);
+      extra = Hashtbl.create (module Int64);
+      modified = [];
+    }
+
   let length t = Int64.of_int (Bigstring.length t.data)
+  let inside t off = Int64.(off >= 0L && off < length t)
 
   let get t off =
-    match Hashtbl.find t.bytes off with
-    | Some b -> b
-    | None when Int64.(off >= 0L && off < length t) ->
-        Char.to_int (Bigstring.get t.data (Int64.to_int_exn off))
-    | None -> 0
+    if inside t off then
+      Char.to_int (Bigstring.get t.data (Int64.to_int_exn off))
+    else Option.value (Hashtbl.find t.extra off) ~default:0
 
-  let set t off b = Hashtbl.set t.bytes ~key:off ~data:(b land 0xff)
+  let set t off b =
+    t.modified <- off :: t.modified;
+    if inside t off then
+      Bigstring.set t.data (Int64.to_int_exn off)
+        (Char.of_int_exn (b land 0xff))
+    else Hashtbl.set t.extra ~key:off ~data:(b land 0xff)
+
   let shift ~little n i = 8 * if little then i else n - i - 1
 
   let read t ~little off n =
-    List.init n ~f:Fn.id
-    |> List.fold ~init:0L ~f:(fun acc i ->
-        let b = Int64.of_int (get t Int64.(off + of_int i)) in
-        Int64.(acc lor (b lsl shift ~little n i)))
+    let x = ref 0L in
+    for i = 0 to n - 1 do
+      let b = Int64.of_int (get t Int64.(off + of_int i)) in
+      x := Int64.(!x lor (b lsl shift ~little n i))
+    done;
+    !x
 
   let write t ~little off n v =
     for i = 0 to n - 1 do
@@ -128,8 +145,7 @@ module Memory = struct
   (* groups the modified bytes into runs of at most eight bytes *)
   let patches t ~little =
     let emit (start, len) = (start, len, read t ~little start len) in
-    Hashtbl.keys t.bytes
-    |> List.sort ~compare:Int64.compare
+    List.dedup_and_sort t.modified ~compare:Int64.compare
     |> List.fold ~init:([], None) ~f:(fun (acc, run) off ->
         match run with
         | Some (start, len) when len < 8 && Int64.(start + of_int len = off) ->

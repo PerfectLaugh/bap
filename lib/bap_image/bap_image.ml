@@ -577,42 +577,44 @@ module Derive = struct
         location ~addr ~size >>| fun locn -> { locn; name; info = () })
     >>= Fact.Seq.all
 
-  let symbol_locations start =
-    Fact.foreach
-      Ogre.Query.(
-        select ~where:(symbol_chunk.(root) = int start) (from symbol_chunk))
-      ~f:(fun { addr; size } -> location ~addr ~size)
-    >>= Fact.Seq.all
+  (* the rows of [attr] grouped by [key], in the order of the
+     document *)
+  let index attr ~key =
+    Fact.collect Ogre.Query.(select (from attr)) >>| fun rows ->
+    Seq.fold rows ~init:Int64.Map.empty ~f:(fun rows row ->
+        Map.add_multi rows ~key:(key row) ~data:row)
+    |> Map.map ~f:List.rev
 
-  let symbol_name start =
-    Fact.foreach
-      Ogre.Query.(
-        select ~where:(named_symbol.(addr) = int start) (from named_symbol))
-      ~f:snd
-    >>| Seq.fold ~init:None ~f:(fun name n ->
+  let symbol_locations chunks start =
+    Map.find_multi chunks start
+    |> Fact.List.map ~f:(fun { addr; size } -> location ~addr ~size)
+
+  let symbol_name names start =
+    Map.find_multi names start
+    |> List.fold ~init:None ~f:(fun name (_, n) ->
         match name with
         | None -> Some n
         | Some name as r when String.length n < String.length name -> r
         | _ -> Some n)
 
   let symbols =
+    index named_symbol ~key:fst >>= fun names ->
+    index symbol_chunk ~key:(fun { info = root } -> root) >>= fun chunks ->
     Fact.foreach
       Ogre.Query.(select ~join:[ [ field addr ] ] (from code_start))
       ~f:(fun start ->
-        symbol_name start >>= function
+        match symbol_name names start with
         | None -> Fact.return None
         | Some name -> (
-            symbol_locations start >>= fun locations ->
-            match Seq.to_list locations with
-            | [] -> Fact.return None
+            symbol_locations chunks start >>| function
+            | [] -> None
             | locn :: locns ->
-                Fact.return
-                  (Some
-                     {
-                       name;
-                       locn;
-                       info = { kinds = [ `Code ]; extra_locns = locns };
-                     })))
+                Some
+                  {
+                    name;
+                    locn;
+                    info = { kinds = [ `Code ]; extra_locns = locns };
+                  }))
     >>= Fact.Seq.all >>| Seq.filter_opt
 
   let code =
