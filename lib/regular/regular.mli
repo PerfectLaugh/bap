@@ -25,11 +25,11 @@ open Core
     So what the library actually provides. First of all it defines the
     {!Regular} interface, that each regular data type is expected to implement.
     This includes a full set of [Io] functions, that allows one to read, write
-    and serialize values of the type (see {!Data} interface). It also provides
-    an interface for creating different collections from the values of that
-    type, including trees, hashtables, maps, sets, etc. Also, it describes the
-    whole algebra of comparison functions. For the opaque data types an
-    interface called {!Opaque} is provided, that is a proper subset of the
+    and serialize values of the type (see {!Std.Data} interface). It also
+    provides an interface for creating different collections from the values of
+    that type, including trees, hashtables, maps, sets, etc. Also, it describes
+    the whole algebra of comparison functions. For the opaque data types an
+    interface called {!Std.Opaque} is provided, that is a proper subset of the
     {!Regular}. It doesn't provide printing and serialization, but has
     everything that can be derived for a type with a total order (e.g.,
     containers, comparison function, etc).
@@ -37,9 +37,9 @@ open Core
     A functor is provided for each interface, that requires the minimal
     implementation, and derives the rest.
 
-    Finally, a {!Bytes} module is provided that facilitates the transfer from
-    mutable to immutable {!Strings}. It is the extension of OCaml standard Bytes
-    module, enhanced with the expected set of functions.
+    Finally, a {!Std.Bytes} module is provided that facilitates the transfer
+    from mutable to immutable strings. It is the extension of OCaml standard
+    Bytes module, enhanced with the expected set of functions.
 
     @see <
     https://ocaml.janestreet.com/ocaml-core/latest/doc/core/>
@@ -163,8 +163,8 @@ module Std : sig
       representation. Otherwise, any OCaml value is suitable for this module.
 
       The module defines interfaces {!Data.S} that describes the expected set of
-      functions for data. It also defines a {!Cache.S} interface, that is useful
-      for caching data that is hard to obtain.*)
+      functions for data. It also defines a {!Data.Cache} interface, that is
+      useful for caching data that is hard to obtain.*)
   module Data : sig
     type ('a, 'b) copy = 'b -> 'a -> int -> unit
     (** [copy buf obj pos] is a method to copy object [obj] into a buffer [buf],

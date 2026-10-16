@@ -1,11 +1,13 @@
-open Core
 (** C Data model.
 
     This module defines abstractions for C values.
 
     A value is backed by a datum - a sequence of bits that represents the value.
-    This module also defines models for integer representation. *)
+    This module also defines models for integer representation.
 
+    @canonical Bap_c.Std.C.Data *)
+
+open Core
 open Bap.Std
 
 type model32 = [ `LP32 | `ILP32 ]

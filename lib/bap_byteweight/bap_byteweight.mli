@@ -31,8 +31,9 @@ module type Corpus = sig
       [key] can be unified, and the [look] function is just a regular substring
       extraction function.
 
-      Note 2 - the key type is unified with the [key] of {!Trie} data structure,
-      so one will need to implement the {!Trie.Key} interface. *)
+      Note 2 - the key type is unified with the [key] of {!Bap.Std.Trie} data
+      structure, so one will need to implement the {!Bap.Std.Trie.Key}
+      interface. *)
 end
 
 (** Byteweight algorithm interface.

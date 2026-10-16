@@ -44,7 +44,7 @@ module Std : sig
     val bundle : t -> bundle
     (** [bundle p] returns the plugin [p] bundle.
 
-        @raise Invalid_arg if not [is_bundled p].
+        @raise Assert_failure if not [is_bundled p].
         @since 2.6.0 raises an exception for packaged plugins *)
 
     val manifest : t -> manifest

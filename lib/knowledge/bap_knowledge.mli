@@ -150,7 +150,7 @@ module Knowledge : sig
   val require : ('a, 'p) slot -> 'a obj -> 'p t
   (** [require p x] collects the property [p] and fails if it is empty.
 
-      When [require p x] fails in the scope of a {!promise}, {!proposal}, or in
+      When [require p x] fails in the scope of a {!promise}, {!propose}, or in
       the scope of [with_empty], then the scoped computation immediately returns
       the empty value.
 
@@ -233,7 +233,7 @@ module Knowledge : sig
   (** [proposing a p ~propose f] a scope-limited proposal.
 
       The proposal is active only during the evaluation of [f ()]. The function
-      is the same as {!proposing} except that it promises a value for an
+      is the same as {!promising} except that it promises a value for an
       opinion-based property.
 
       @since 2.2.0

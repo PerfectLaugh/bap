@@ -335,7 +335,7 @@ module Query : sig
   (** [field name] creates an unqualified join variable. [field name ~from:attr]
       creates a qualified join variable.
 
-      See the {!join} type description, for the explanation of the [join]
+      See the {!type-join} type description, for the explanation of the [join]
       expressions and joining. *)
 
   (** Defines a subscripting syntax for creating field variables.

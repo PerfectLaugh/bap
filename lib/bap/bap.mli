@@ -176,8 +176,8 @@ module Std : sig
 
       Like {{!Value}value} is an extensible sum type, {{!Dict}dict} can be
       viewed as an extensible product type. Dict is a sequence of values of type
-      {!value}, with {{!Value.Tag}tags} used as field names. Of course, fields
-      are unique.
+      {!type-value}, with {{!Value.Tag}tags} used as field names. Of course,
+      fields are unique.
 
       {3:vector Vector}
 
@@ -302,8 +302,8 @@ module Std : sig
       brings [CPU] and [ABI] together. To get an instance of this module, you
       can use the {{!target_of_arch}target_of_arch} function. Architecture
       specific implementations of the [Target] interface may (and usually do)
-      provide more information, see corresponding support libraries for {!ARM}
-      and {{!X86_cpu}x86} architectures. *)
+      provide more information, see the corresponding support libraries, e.g.,
+      [ARM] (bap-arm) and [X86_cpu] (bap-x86). *)
 
   (** {2:sema Semantic Analysis}
 
@@ -469,9 +469,10 @@ module Std : sig
         memory object, then the overall memory will be marked as a ["bap.user"]
         section.
 
-      - {{!Image.segment}segment} -- if the binary data was loaded from a binary
-        format that contains segments, then the corresponding memory regions are
-        be marked. Segments provide access to permission information. *)
+      - {{!Image.type-segment}segment} -- if the binary data was loaded from a
+        binary format that contains segments, then the corresponding memory
+        regions are be marked. Segments provide access to permission
+        information. *)
 
   (** {1:api BAP API} *)
 
@@ -2290,7 +2291,7 @@ module Std : sig
         meaning of the [attr] and [values] is specific to the user domain.
 
         Example, [encode call "malloc"], where [call] is the BIL attribute that
-        denotes a call to a function. See {!call} for more information. *)
+        denotes a call to a function. See {!val-call} for more information. *)
 
     (** BIL attributes.
 
@@ -3349,7 +3350,7 @@ module Std : sig
         It is recommended to override [enter_C] method if you only need to visit
         [C] constructor without changing a way you're visiting the tree.
 
-        See also {!Bil.visitor} and {!Term.visitor} for visiting a program in
+        See also {!Stmt.visitor} and {!Term.visitor} for visiting a program in
         AST and Graph representation, respectively. *)
     class ['a] visitor : object
       inherit state
@@ -3485,23 +3486,23 @@ module Std : sig
         [{ let collect_load_addresses = Exp.fold ~init:[] (object inherit [word
          list] Bil.visitor method! enter_load ~mem ~addr _ _  addrs = match addr
          with | Bil.Int addr -> addr :: addrs | _ -> addrs end) }] See also
-        {!Bil.fold} and {!Stmt.fold} *)
+        {!Stmt.fold} *)
 
     val iter : unit #visitor -> t -> unit
     (** [iter visitor exp] iterates over all terms of the [exp] using provided
-        visitor. See also {!Bil.iter} and {!Stmt.iter} *)
+        visitor. See also {!Stmt.iter} *)
 
     val find : 'a #finder -> t -> 'a option
     (** [find finder exp] returns [Some thing] if finder finds some [thing]. See
-        also {!Bil.find} and {!Stmt.find} *)
+        also {!Stmt.find} *)
 
     val map : #mapper -> t -> t
     (** [map mapper exp] maps [exp] tree using provided [mapper]. See also
-        {!Bil.map} *)
+        {!Stmt.map} *)
 
     val exists : unit #finder -> t -> bool
     (** [exists finder exp] is [true] if [finder] finds something. See also
-        {!Bil.exists} and {!Stmt.exists} *)
+        {!Stmt.exists} *)
 
     val substitute : exp -> exp -> exp -> exp
     (** [substitute pat rep x] subsitutes each occurrence of an expression [pat]
@@ -3764,23 +3765,23 @@ module Std : sig
     (** [constant_folder] is a class that implements the [fold_consts] *)
 
     val fold : 'a #visitor -> init:'a -> t -> 'a
-    (** [fold ~init visitor stmt] folds a [stmt] with a visitor. See {!Bil.fold}
-        and {!Exp.fold} for more details. *)
+    (** [fold ~init visitor stmt] folds a [stmt] with a visitor. See {!Exp.fold}
+        for more details. *)
 
     val iter : unit #visitor -> t -> unit
-    (** [iter visitor stmt] iters over a [stmt] with a visitor. See {!Bil.iter}
-        and {!Exp.iter} for more details. *)
+    (** [iter visitor stmt] iters over a [stmt] with a visitor. See {!Exp.iter}
+        for more details. *)
 
     val map : #mapper -> t list -> t list
     (** [map mapper bil] applies [mapper] to the program [bil] *)
 
     val find : 'a #finder -> t -> 'a option
     (** [find finder stmt] performs a lookup into the Bil statement. See
-        {!Bil.find} and {!Exp.find} for more details. *)
+        {!Exp.find} for more details. *)
 
     val exists : unit #finder -> t -> bool
     (** [exists finder stmt] is [true] iff [find finder stmt <> None]. See
-        {!Bil.exists} and {!Exp.exists} for more details. *)
+        {!Exp.exists} for more details. *)
 
     val is_referenced : var -> t -> bool
     (** [is_referenced x stmt] is true is [x] is used in the [stmt] in any place
@@ -4749,7 +4750,7 @@ module Std : sig
     (** [view_exn mem] is the same as [ok_exn @@view_exn mem] but is slightly
         more efficient.
 
-        @raise Invalid_arg
+        @raise Invalid_argument
           in case if the arguments are not fitting into the memory.
 
         @since 2.2.0 *)
@@ -6578,9 +6579,9 @@ module Std : sig
 
           @param backend a backend name (default is implementation defined).
           @param brancher
-            what {{!Brancher}brancher} to use (defaults to {!Brancher.of_bil}.
+            what {{!Brancher}brancher} to use (defaults to an empty brancher).
           @param rooter
-            what {{!Rooter}rooter} to use (defaults to {!Rooter.empty}). *)
+            what {{!Rooter}rooter} to use (defaults to an empty rooter). *)
 
       val cfg : t -> cfg
       (** [cfg t] returns a control flow graph, representing the code in the
@@ -6876,12 +6877,13 @@ module Std : sig
         auxiliary data structures, that performs most of the operations in
         O(log(N)) time.
 
-        Although this implements all operations of {!Graph} interface it is
-        recommended to use {!Term} or [Builder] interfaces to build and modify
-        underlying terms. The next few sections will clarify the behavior of a
-        graph when it is modified using {!Graph} interface. If you do not want
-        to read the following sections, then better do not use this module to
-        build your terms.
+        Although this implements all operations of
+        {!Graphlib.Std.module-type-Graph} interface it is recommended to use
+        {!Term} or [Builder] interfaces to build and modify underlying terms.
+        The next few sections will clarify the behavior of a graph when it is
+        modified using {!Graphlib.Std.module-type-Graph} interface. If you do
+        not want to read the following sections, then better do not use this
+        module to build your terms.
 
         {2 Inserting nodes}
 
@@ -7118,7 +7120,7 @@ module Std : sig
         something more conservative, e.g., speculative, superset, shingled, or
         even probabilistic disassembler.
 
-        {3 Algorithm}
+        {3:algorithm Algorithm}
 
         {4 Memory Classification}
 
@@ -7227,7 +7229,8 @@ module Std : sig
           that are subroutine entry points will have [is-subroutine] property
           set to [(true)].
 
-          See {!Algorithm} for the detailed description of the algorithm. *)
+          See {!section-algorithm} for the detailed description of the
+          algorithm. *)
 
       val explore :
         ?entries:addr Sequence.t ->
@@ -7598,7 +7601,7 @@ module Std : sig
       the implementation use {{!target_of_arch}target_of_arch} function. Code
       written using this interface is cross-platform, i.e., target agnostic. If
       you want to write target-specific code, then use directly corresponding
-      libraries: {{!ARM}ARM}, {{!IA32}IA32}, {{!AMD64}AMD64}. *)
+      libraries: [ARM], [X86_cpu.IA32], [X86_cpu.AMD64]. *)
   module type Target = sig
     module CPU : CPU
     (** access to the CPU variables. *)
@@ -8224,7 +8227,7 @@ module Std : sig
     (** [to_graph program] creates a callgraph of a [program] *)
 
     val lookup : (_, 'b) cls -> t -> tid -> 'b term option
-    (** [lookup t program id] is like {{!find}find} but performs deep lookup in
+    (** [lookup t program id] is like {!Term.find} but performs deep lookup in
         the whole [program] for a term with a given [id]. This function is
         memoized, so it has amortized O(1) complexity, with a wostcase
         complexity of $O(N)$, where $N$ is the total amount of terms in program.
@@ -8345,11 +8348,11 @@ module Std : sig
     val to_cfg : t -> Graphs.Ir.t
     (** [to_cfg sub] builds a graph representation of a subroutine [sub]. All
         graph operations are mapped to corresponding [Term] operations. See
-        {!Graphlib.Ir} for more information.*)
+        {!Graphs.Ir} for more information.*)
 
     val of_cfg : Graphs.Ir.t -> t
     (** [of_cfg cfg] extracts a [sub term] from a given graph [cfg]. Since
-        {!Graphlib.Ir} module builds term incrementally this operation is just a
+        {!Graphs.Ir} module builds term incrementally this operation is just a
         projection, i.e., it has O(0) complexity. *)
 
     val compute_liveness : t -> (tid, Var.Set.t) Solution.t
@@ -10099,7 +10102,7 @@ module Std : sig
         @since 2.2.0 *)
     module State : sig
       type t = state
-      (** the abstract type for the project state. See {!Project.state}. *)
+      (** the abstract type for the project state. See {!Project.type-state}. *)
 
       val disassembly : t -> Disasm.Driver.state
       (** [disassembly state] contains all disassembled instructions, as well as
@@ -10133,7 +10136,7 @@ module Std : sig
 
           If [loader] is not specified then all image loaders are used and the
           information from the is merged, otherwise only the selected loaded is
-          used. See {!Image.available_backend}.
+          used. See {!Image.available_backends}.
 
           The [target] could be used to override the target information derived
           from the input file.
@@ -10335,11 +10338,10 @@ module Std : sig
           some topological order. *)
 
       val run_exn : t -> project -> project
-      (** [run_pass_exn proj] is the same as {!run_pass}, but raises an
-          exception on error. Useful to provide custom error handling/printing.
+      (** [run_pass_exn proj] is the same as {!run}, but raises an exception on
+          error. Useful to provide custom error handling/printing.
 
-          @raise Pass_failed if failed to load, or if plugin failed at runtime.
-      *)
+          @raise Failed if failed to load, or if plugin failed at runtime. *)
 
       val name : t -> string
       (** [name pass] is a pass name *)
@@ -10570,8 +10572,8 @@ module Std : sig
       (** [program] a program label.
 
           The syntax is a textual representation of the knowledge base symbol
-          ({!Knowledge.Symbol}). Unqualified names are read in the current
-          package.
+          ({!Bap_knowledge.Knowledge.Symbol}). Unqualified names are read in the
+          current package.
 
           Examples, [0x88f0] or [bin/arm-linux-gnueabi-echo:0x88f0]. *)
 
@@ -10579,8 +10581,8 @@ module Std : sig
       (** [unit] a program unit.
 
           The syntax is a textual representation of the knowledge base symbol
-          ({!Knowledge.Symbol}). Unqualified names are read in the current
-          package.
+          ({!Bap_knowledge.Knowledge.Symbol}). Unqualified names are read in the
+          current package.
 
           Examples, [file:/bin/ls] or [my-unit]. *)
 
@@ -11041,8 +11043,7 @@ module Std : sig
       (** [enum l] converts values such that unambiguous prefixes of string
           names in [l] map to the corresponding value of type ['a].
 
-          {b Warning.} The type ['a] must be comparable with
-          {!Pervasives.compare}.
+          {b Warning.} The type ['a] must be comparable with {!Stdlib.compare}.
 
           @raise Invalid_argument if [l] is empty. *)
 

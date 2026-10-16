@@ -163,7 +163,7 @@ module Std : sig
   (** Interface that every Graph edge should provide *)
   module type Edge = sig
     (** Semantics of operations is denoted using mathematical model, described
-        in {!Graph} interface. *)
+        in [Graph] interface. *)
 
     type t
     type node

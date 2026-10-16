@@ -1098,19 +1098,15 @@ module Extension : sig
           excluded. *)
 
     val plugins : ctxt -> info list
-    (** [plugins ctxt] enumerates all enabled plugins.
+    (** [plugins ctxt] enumerates all plugins selected in the context.
 
-        If [provides] is specified, then enumerates only plugins than provide at
-        least one of specified feature.
-
-        If [exclude] is specified, then exclude from the list plugins, that has
-        one of the feature specified in the [exclude] list. *)
+        Use {!refine} to select plugins by the features they provide. *)
 
     val commands : ctxt -> info list
-    (** [commands ctxt] enumerates all available commands.
+    (** [commands ctxt] enumerates all commands provided by the plugins selected
+        in the context.
 
-        If [features] and/or [exclude] are specified, then they have the same
-        meaning as in {!plugins ~features ~exclude}.*)
+        Use {!refine} to select plugins by the features they provide. *)
 
     val info_name : info -> string
     (** [name info] returns the name of a plugin or command. *)
@@ -1122,11 +1118,8 @@ module Extension : sig
     (** [digest context] returns the [context] digest.
 
         The digest is a 128-bit MD5 sum of all options of all plugins that were
-        selected in the context and match the filters specified by the
-        [features] and [exclude] parameters.
-
-        See the {!plugins} function for the description of the [features] and
-        [exclude] parameters.
+        selected in the context. Use {!refine} to select plugins by the features
+        they provide.
 
         Note: the digest doesn't include the command options and arguments only
         plugins configuration options. *)

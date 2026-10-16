@@ -1,4 +1,3 @@
-open Core
 (** C Type System.
 
     We represent a C type structurally, i.e., the type representation is
@@ -8,7 +7,11 @@ open Core
     groups.
 
     The type system is extended with attributes, i.e., it is possible to attach
-    attributes of the form [attr(args)] to C type declarations. *)
+    attributes of the form [attr(args)] to C type declarations.
+
+    @canonical Bap_c.Std.C.Type *)
+
+open Core
 
 type char = [ `schar | `char | `uchar ]
 [@@deriving bin_io, compare, sexp, enumerate]

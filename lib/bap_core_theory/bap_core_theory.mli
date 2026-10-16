@@ -392,7 +392,7 @@ module Theory : sig
         The returned value has the monomorphized [Top.t] type and can be stored
         in containers, serialized, etc.
 
-        To restore the type index use the {!refine} function.
+        To restore the type index use the {!resort} function.
 
         @since 2.3.0
 
@@ -504,9 +504,9 @@ module Theory : sig
         This module is mostly needed when a new sort is defined. The Core Theory
         provides a predefined collection of sorts, here is the list:
 
-        - {!Bitv} - bitvectors, e.g., [BitVec(i)]
+        - {!module-Bitv} - bitvectors, e.g., [BitVec(i)]
         - {!Mem} - memories, e.g., [Mem(BitVec(i), BitVec(j)]
-        - {!Float} - floating-points, e.g.,
+        - {!module-Float} - floating-points, e.g.,
           [Float(IEEE754(2, 8, 23), BitVec(32)];
         - {!Rmode} - rounding mode, e.g., [Rmode].
 
@@ -1424,7 +1424,7 @@ module Theory : sig
         @since 2.5.0 *)
 
     val matches : t -> string -> bool
-    (** [matches t name] when {!matching t name} is not [None].
+    (** [matches t name] when [matching t name] is not [None].
 
         [matching t name] is true when [name] matches either the unqualified
         name of the target itsef or one of its ancestors; or if the name matches

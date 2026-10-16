@@ -1,7 +1,9 @@
 (** C language ABI.
 
     This module provides a common interface for building ABI support modules for
-    C language. *)
+    C language.
+
+    @canonical Bap_c.Std.C.Abi *)
 
 open Core
 open Bap_core_theory

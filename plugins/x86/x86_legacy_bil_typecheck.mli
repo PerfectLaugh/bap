@@ -46,14 +46,14 @@ val index_type_of : Type.typ -> Type.typ
 (** [index_type_of t] returns the index type for memory loads and stores in a
     memory of type [t].
 
-    @raise Invalid_arg if [t] is a non-memory type. *)
+    @raise Invalid_argument if [t] is a non-memory type. *)
 
 val value_type_of : Type.typ -> Type.typ
 (** [value_type_of t] returns the value type for memory loads and stores in a
     memory of type [t]. For instance, a value type of [Reg 8] means the memory
     is byte addressable.
 
-    @raise Invalid_arg if [t] is a non-memory type. *)
+    @raise Invalid_argument if [t] is a non-memory type. *)
 
 val bits_of_width : Type.typ -> int
 (** [bits_of_width t] returns the number of bits in the register type [t].
