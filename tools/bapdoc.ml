@@ -1,4 +1,7 @@
-(** Builds BAP Annotated Reference . *)
+(** Builds BAP Annotated Reference.
+
+    The API reference is taken from the odoc output of [dune build @doc], which
+    must be built before running this tool. *)
 
 open Core
 open Poly
@@ -16,7 +19,7 @@ let libraries =
           "Bap_knowledge",
           "The Knowledge Representation library" );
         ("bap-core-theory", "Bap_core_theory", "", "The Core Theory Library");
-        ("bap", "Bap.Std", "", "The Standard Library");
+        ("bap-std", "Bap.Std", "", "The Standard Library");
         ( "bap-taint",
           "Bap_taint.Std",
           "Bap_taint",
@@ -50,7 +53,7 @@ let libraries =
     ( "Hardware Specific Libraries",
       [
         ("bap-arm", "ARM", "", "ARM definitions");
-        ("bap-x86-cpu", "X86_cpu", "", "x86/x86-64 definitions");
+        ("bap-x86", "X86_cpu", "", "x86/x86-64 definitions");
         ("bap-mips", "Bap_mips_target", "", "MIPS definitions");
         ("bap-powerpc", "Bap_powerpc_target", "", "PowerPC definitions");
         ("bap-riscv", "Bap_riscv_target", "", "RISCV definitions");
@@ -68,8 +71,8 @@ let libraries =
           "Bap_primus_track_visited",
           "",
           "The interface to the Primus coverage monitoring component" );
-        ( "bap-beagle-prey",
-          "Bap_beagle_prey",
+        ( "bap-beagle",
+          "Beagle_prey",
           "",
           "An interface to the Beagle string deobfuscation analysis" );
       ] );
@@ -130,24 +133,25 @@ let frontends =
 
 let introduction =
   {|
-{2 Introduction}
+<h2>Introduction</h2>
 
+<p>
 The Carnegie Mellon University Binary Analysis Platform (CMU BAP) is a
 suite of utilities and libraries that enables analysis of programs in
 their machine representation. BAP is written in OCaml, relies on
 dynamically loaded plugins for extensibility, and is widely used for
-security analysis, program verification, and reverse engineering.
+security analysis, program verification, and reverse engineering.</p>
 
-The framework consists of a bunch of libraries, plugins and
+<p>The framework consists of a bunch of libraries, plugins and
 frontends. The libraries provide code reusability, plugins facilitate
-extensibility and frontends serve as entry points.
+extensibility and frontends serve as entry points.</p>
 
-Frontends come with comprehensive manuals,
-that can be accessed by using [--help] command line options, or via
-the [man] command, if the manpath is configured correctly.
+<p>Frontends come with comprehensive manuals,
+that can be accessed by using <code>--help</code> command line options, or via
+the <code>man</code> command, if the manpath is configured correctly.
 Finally, you can access a man page for a plugin using
-[--<PLUGIN>-help] command line option of a frontend, e.g., [bap --map-terms-help].
-
+<code>--&lt;PLUGIN&gt;-help</code> command line option of a frontend, e.g.,
+<code>bap --map-terms-help</code>.</p>
 |}
 
 let packages =
@@ -155,7 +159,7 @@ let packages =
     ~f:(fun (_, ps) -> List.map ~f:(fun (p, _, _, _) -> p) ps)
     libraries
 
-let mkdir path = if not (Sys.file_exists path) then Unix.mkdir path 0o770
+let mkdir path = if not (Sys.file_exists path) then Caml_unix.mkdir path 0o770
 
 let run fmt =
   let cmd c =
@@ -164,12 +168,25 @@ let run fmt =
   in
   ksprintf cmd fmt
 
-let render_entry (_, entry, short, desc) =
+(* the odoc output of [dune build @doc], relative to the doc folder *)
+let odoc_html = "../_build/default/_doc/_html"
+
+let escape_html s =
+  String.concat_map s ~f:(function
+    | '<' -> "&lt;"
+    | '>' -> "&gt;"
+    | '&' -> "&amp;"
+    | '"' -> "&quot;"
+    | c -> String.of_char c)
+
+let render_entry (pkg, entry, short, desc) =
   let name_to_display = match short with "" -> entry | _ -> short in
-  sprintf "- {{!%s}%s} - %s" entry name_to_display desc
+  let path = String.substr_replace_all entry ~pattern:"." ~with_:"/" in
+  sprintf {|<li><a href="%s/%s/index.html"><code>%s</code></a> - %s</li>|} pkg
+    path name_to_display (escape_html desc)
 
 let render_section (name, entries) =
-  sprintf "{1 %s}\n%s" name
+  sprintf "<h3>%s</h3>\n<ul>\n%s\n</ul>" name
     (String.concat ~sep:"\n" @@ List.map ~f:render_entry entries)
 
 type info = { man : string -> string; help : string -> string }
@@ -226,19 +243,6 @@ let generate_manual () =
   in
   List.iter packages ~f:generate_man3_redirection
 
-let odig_pkgs () =
-  let f = Filename.temp_file "odig" ".pkgs" in
-  run "odig pkg > %s" f;
-  let pkgs =
-    In_channel.read_lines f
-    |> List.filter_map ~f:(fun s ->
-        match String.split s ~on:'?' with
-        | x :: _ -> Some (String.strip x)
-        | _ -> None)
-  in
-  Sys.remove f;
-  pkgs
-
 let plugins =
   let by_plugin_name p1 p2 = String.compare (Plugin.name p1) (Plugin.name p2) in
   Plugins.list ()
@@ -246,28 +250,39 @@ let plugins =
   |> List.fold ~init:"" ~f:(fun s p ->
       Format.sprintf "%s%-24s %s\n" s (Plugin.name p) (Plugin.desc p))
 
-let plugins_index = sprintf "\n\n{1 Plugins}\n{[%s]}\n" plugins
+let plugins_index =
+  sprintf "\n<h2>Plugins</h2>\n<pre>%s</pre>\n" (escape_html plugins)
 
 let library_index =
-  sprintf "\n{2 Libraries}\n%s"
+  sprintf "\n<h2>Libraries</h2>\n%s"
     (List.map ~f:render_section libraries |> String.concat ~sep:"\n\n")
 
-let remove_unresolved pkgs =
-  let pkgs_known_to_odig = odig_pkgs () in
-  List.filter pkgs ~f:(fun p -> List.mem pkgs_known_to_odig p ~equal:( = ))
+let index_page =
+  sprintf
+    {|<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>BAP API</title>
+<link rel="stylesheet" href="odoc.support/odoc.css">
+</head>
+<body class="odoc">
+<header class="odoc-preamble"><h1>BAP API</h1></header>
+<div class="odoc-content">
+%s
+%s
+%s
+</div>
+</body>
+</html>
+|}
+    introduction library_index plugins_index
 
+(* copies the API reference built by odoc and adds the index page *)
 let generate () =
-  let intro, out = Filename.open_temp_file "intro" ".mld" in
-  Out_channel.output_string out introduction;
-  Out_channel.output_string out library_index;
-  Out_channel.output_string out plugins_index;
-  Out_channel.close out;
-  let pkgs = remove_unresolved packages |> String.concat ~sep:" " in
-  run
-    {|odig odoc --odoc-theme=odoc.default --index-title="BAP API" --no-tag-index --no-pkg-deps --index-intro=%s %s|}
-    intro pkgs;
-  run @@ "ln -s $(odig cache path)/html odoc";
-  Sys.remove intro
+  run "rm -rf odoc";
+  run "cp -R %s odoc" odoc_html;
+  Out_channel.write_all "odoc/index.html" ~data:index_page
 
 let install_handwritten_manpages () =
   mkdir "man1";
@@ -305,8 +320,9 @@ let check () =
   check_installed "bap";
   check_installed "emacs";
   check_installed "man2html";
-  check_installed "odig";
-  check_installed "sed"
+  check_installed "sed";
+  if not (Sys.file_exists odoc_html) then
+    failwithf "%s is not found, run `dune build @doc` first\n" odoc_html ()
 
 let () =
   check ();

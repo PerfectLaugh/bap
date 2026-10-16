@@ -20,3 +20,8 @@
  (package bap-bundle)
  (modules bapbundle)
  (libraries core core_unix.sys_unix bap-bundle fileutils uri))
+
+(executable
+ (name bapdoc)
+ (modules bapdoc)
+ (libraries core core_kernel.caml_unix bap-plugins))
