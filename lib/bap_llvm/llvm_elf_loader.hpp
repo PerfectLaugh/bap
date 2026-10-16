@@ -262,6 +262,161 @@ void emit_relocations(const ELFObjectFile<T> &obj, ogre_doc &s) {
 
 
 
+// Relocatable files have no layout, so instead of interpreting them
+// we describe their sections, symbols, and relocations as they are
+// and leave the linking to the OCaml side.
+
+template <typename T>
+bool is_relocatable(const ELFObjectFile<T> &obj) {
+#if LLVM_VERSION_MAJOR >= 12
+    auto hdr = &obj.getELFFile().getHeader();
+#else
+    auto hdr = obj.getELFFile()->getHeader();
+#endif
+    return hdr->e_type == ELF::ET_REL;
+}
+
+template <typename T>
+void emit_elf_header(const ELFObjectFile<T> &obj, ogre_doc &s) {
+#if LLVM_VERSION_MAJOR >= 12
+    auto hdr = &obj.getELFFile().getHeader();
+#else
+    auto hdr = obj.getELFFile()->getHeader();
+#endif
+    s.entry("llvm:elf-header")
+        << uint64_t(hdr->e_type)
+        << uint64_t(hdr->e_machine)
+        << uint64_t(hdr->e_flags);
+}
+
+template <typename T>
+error_or<std::string> raw_section_name(const ELFFile<T> &elf,
+                                       const typename ELFFile<T>::Elf_Shdr &sec) {
+#if LLVM_VERSION_MAJOR >= 12
+    auto name = elf.getSectionName(sec);
+#else
+    auto name = elf.getSectionName(&sec);
+#endif
+    if (!name) return failure(toString(name.takeError()));
+    return success(name->str());
+}
+
+template <typename T>
+void emit_raw_sections(const ELFFile<T> &elf, ogre_doc &s) {
+    auto secs = prim::elf_sections(elf);
+    for (std::size_t i = 0; i < secs.size(); ++i) {
+        auto &sec = secs[i];
+        auto name = raw_section_name(elf, sec);
+        s.entry("llvm:elf-section")
+            << uint64_t(i)
+            << (name ? *name : std::string(""))
+            << uint64_t(sec.sh_type)
+            << uint64_t(sec.sh_flags)
+            << uint64_t(sec.sh_offset)
+            << uint64_t(sec.sh_size)
+            << uint64_t(sec.sh_addralign);
+    }
+}
+
+template <typename T>
+void emit_raw_symbols(const ELFFile<T> &elf,
+                      const typename ELFFile<T>::Elf_Shdr &symtab,
+                      ogre_doc &s) {
+    auto syms = elf.symbols(&symtab);
+    if (!syms) {
+        consumeError(syms.takeError());
+        return;
+    }
+    auto strtab = elf.getStringTableForSymtab(symtab);
+    if (!strtab) {
+        consumeError(strtab.takeError());
+        return;
+    }
+    uint64_t index = 0;
+    for (auto &sym : *syms) {
+        std::string name;
+        auto er_name = sym.getName(*strtab);
+        if (er_name) name = er_name->str();
+        else consumeError(er_name.takeError());
+        s.entry("llvm:elf-symbol")
+            << index++
+            << name
+            << uint64_t(sym.st_shndx)
+            << uint64_t(sym.st_value)
+            << uint64_t(sym.st_size)
+            << uint64_t(sym.getType())
+            << uint64_t(sym.getBinding());
+    }
+}
+
+template <typename R>
+void emit_raw_relocation(uint64_t &index, uint64_t section, const R &rel,
+                         bool mips64el, int64_t addend, bool explicit_addend,
+                         ogre_doc &s) {
+    s.entry("llvm:elf-relocation")
+        << index++
+        << section
+        << uint64_t(rel.r_offset)
+        << uint64_t(rel.getType(mips64el))
+        << uint64_t(rel.getSymbol(mips64el))
+        << uint64_t(addend)
+        << explicit_addend;
+}
+
+// emits the relocations of the relocation section [sec]. A relocatable
+// file has only one symbol table, so the symbol indices are not
+// qualified with the symbol table of the relocation section.
+template <typename T>
+void emit_raw_relocations(const ELFFile<T> &elf,
+                          const typename ELFFile<T>::Elf_Shdr &sec,
+                          uint64_t &index,
+                          ogre_doc &s) {
+    bool mips64el = elf.isMips64EL();
+    uint64_t target = sec.sh_info;
+    if (sec.sh_type == ELF::SHT_RELA) {
+#if LLVM_VERSION_MAJOR >= 12
+        auto rels = elf.relas(sec);
+#else
+        auto rels = elf.relas(&sec);
+#endif
+        if (!rels) {
+            consumeError(rels.takeError());
+            return;
+        }
+        for (auto &rel : *rels)
+            emit_raw_relocation(index, target, rel, mips64el,
+                                int64_t(rel.r_addend), true, s);
+    } else if (sec.sh_type == ELF::SHT_REL) {
+#if LLVM_VERSION_MAJOR >= 12
+        auto rels = elf.rels(sec);
+#else
+        auto rels = elf.rels(&sec);
+#endif
+        if (!rels) {
+            consumeError(rels.takeError());
+            return;
+        }
+        for (auto &rel : *rels)
+            emit_raw_relocation(index, target, rel, mips64el, 0, false, s);
+    }
+}
+
+template <typename T>
+void emit_relocatable(const ELFObjectFile<T> &obj, ogre_doc &s) {
+#if LLVM_VERSION_MAJOR >= 12
+    auto &elf = obj.getELFFile();
+#else
+    auto &elf = *obj.getELFFile();
+#endif
+    emit_raw_sections(elf, s);
+    uint64_t index = 0;
+    for (auto &sec : prim::elf_sections(elf)) {
+        if (sec.sh_type == ELF::SHT_SYMTAB)
+            emit_raw_symbols(elf, sec, s);
+        emit_raw_relocations(elf, sec, index, s);
+    }
+}
+
 } // namespace elf_loader
 
 template <typename T>
@@ -270,11 +425,16 @@ error_or<std::string> load(ogre_doc &s, const llvm::object::ELFObjectFile<T> &ob
     s.raw_entry("(format elf)");
     s.entry("llvm:base-address") << base_address(obj);
     s.entry("is-executable") << is_executable(obj);
+    emit_elf_header(obj, s);
     emit_entry_point(obj, s);
     emit_program_headers(obj, s);
-    emit_section_headers(obj, s);
-    emit_symbol_entries(obj, s);
-    emit_relocations(obj, s);
+    if (is_relocatable(obj)) {
+        emit_relocatable(obj, s);
+    } else {
+        emit_section_headers(obj, s);
+        emit_symbol_entries(obj, s);
+        emit_relocations(obj, s);
+    }
     return s.str();
 }
 

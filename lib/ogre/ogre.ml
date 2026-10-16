@@ -4,6 +4,43 @@ open Format
 
 type entry = { fields : string String.Map.t } [@@deriving bin_io, compare, sexp]
 type row = { row : entry array } [@@deriving sexp]
+
+(* the values of an attribute in the reverse order of their addition,
+   the set keeps them unique without a linear search *)
+module Entries = struct
+  module Entry = struct
+    type t = entry [@@deriving compare, sexp_of]
+
+    include (val Comparator.make ~compare ~sexp_of_t)
+  end
+
+  type t = { list : entry list; set : Set.M(Entry).t }
+
+  let to_list t = t.list
+  let of_list list = { list; set = Set.of_list (module Entry) list }
+  let singleton x = of_list [ x ]
+
+  let add t x =
+    if Set.mem t.set x then t else { list = x :: t.list; set = Set.add t.set x }
+
+  let compare x y = [%compare: entry list] x.list y.list
+
+  include
+    Binable.Of_binable_with_uuid
+      (struct
+        type t = entry list [@@deriving bin_io]
+      end)
+      (struct
+        type nonrec t = t
+
+        let to_binable = to_list
+        let of_binable = of_list
+
+        let caller_identity =
+          Bin_prot.Shape.Uuid.of_string "cb5a334c-8166-419e-8885-708231ec8e98"
+      end)
+end
+
 type 'a seq = 'a Sequence.t
 
 module Type = struct
@@ -138,7 +175,7 @@ module Doc = struct
 
   type t = {
     scheme : Type.signature String.Map.t;
-    entries : entry list String.Map.t;
+    entries : Entries.t String.Map.t;
   }
   [@@deriving bin_io, compare]
 
@@ -187,12 +224,10 @@ module Doc = struct
   let update_entries name packed doc =
     typecheck_entry name packed doc >>| fun () ->
     let packed = { fields = normalize_entry name packed doc } in
-    let equal e e' = compare_entry e e' = 0 in
     let entries =
       Map.update doc.entries name ~f:(function
-        | None -> [ packed ]
-        | Some data ->
-            if List.mem ~equal data packed then data else packed :: data)
+        | None -> Entries.singleton packed
+        | Some data -> Entries.add data packed)
     in
     { doc with entries }
 
@@ -203,7 +238,7 @@ module Doc = struct
     >>= fun doc ->
     Map.to_sequence entries
     |> Error.Seq.fold ~init:doc ~f:(fun doc (name, values) ->
-        Error.List.fold values ~init:doc ~f:(fun doc value ->
+        Error.List.fold (Entries.to_list values) ~init:doc ~f:(fun doc value ->
             update_entries name value doc))
 
   let merge d1 d2 =
@@ -228,7 +263,7 @@ module Doc = struct
     let { Attribute.name; read; sign } = attr () in
     match Map.find entries name with
     | None -> Ok []
-    | Some entries -> Ok (List.filter_map ~f:read entries)
+    | Some entries -> Ok (List.filter_map ~f:read (Entries.to_list entries))
 
   let tabulate xs = List.mapi xs ~f:(fun i x -> (i, x))
 
@@ -333,7 +368,7 @@ module Doc = struct
   let pp_body ppf { scheme; entries } =
     fprintf ppf "@[<v>";
     Map.iteri entries ~f:(fun ~key:n ~data:vs ->
-        List.iter vs ~f:(fun v ->
+        List.iter (Entries.to_list vs) ~f:(fun v ->
             fprintf ppf "@[%a@]@;" Sexp.pp_hum (sexp_of_attr scheme n v)));
     fprintf ppf "@]"
 
@@ -361,7 +396,7 @@ module Doc = struct
     let pp_body ppf { scheme; entries } =
       Map.iteri entries ~f:(fun ~key:name ~data:entries ->
           fprintf ppf "%S:@\n" name;
-          List.iter entries ~f:(fun { fields } ->
+          List.iter (Entries.to_list entries) ~f:(fun { fields } ->
               let objects =
                 List.map (Map.find_exn scheme name) ~f:(fun { fname; ftype } ->
                     let v = Map.find_exn fields fname in
@@ -400,7 +435,7 @@ module Doc = struct
   let sexps_of_t { scheme; entries } =
     let attrs =
       Map.fold entries ~init:[] ~f:(fun ~key:n ~data:vs sexps ->
-          List.fold vs ~init:sexps ~f:(fun sexps v ->
+          List.fold (Entries.to_list vs) ~init:sexps ~f:(fun sexps v ->
               sexp_of_attr scheme n v :: sexps))
     in
     Map.fold scheme ~init:attrs ~f:(fun ~key:n ~data:s xs ->
@@ -523,7 +558,8 @@ module Exp = struct
         match Map.find data name with
         | None -> failwithf "precondition fails for %s" name ()
         | Some values ->
-            Seq.of_list values |> Seq.map ~f:(fun value -> (name, value)))
+            Seq.of_list (Entries.to_list values)
+            |> Seq.map ~f:(fun value -> (name, value)))
 
   let parser { Type.parse; typ } inj =
     ( typ,

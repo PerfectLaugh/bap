@@ -5690,6 +5690,17 @@ module Std : sig
         (addr * value, (addr -> value -> 'a) -> 'a) Ogre.attribute
       (** [symbol_value addr value] the symbol at address the specified [value].
       *)
+
+      val patch :
+        (off * size * value, (off -> size -> value -> 'a) -> 'a) Ogre.attribute
+      (** [patch off size value] the [size] bytes of the input data that start
+          at the offset [off] are replaced with [value], encoded with the
+          endianness of the image. A patch may lie past the end of the input, in
+          which case the input is extended with zeros, so that a loader can back
+          synthesized regions (e.g., a global offset table) with data.
+
+          Loaders use patches to apply relocations, e.g., when they link a
+          relocatable object file. *)
     end
   end
 

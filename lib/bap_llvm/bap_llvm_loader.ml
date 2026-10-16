@@ -121,6 +121,68 @@ module LLVM = struct
     Ogre.declare ~name:"llvm:coff-virtual-section-header"
       (scheme name $ addr $ size)
       Tuple.T3.create
+
+  let index = "index" %: int
+  let typ = "type" %: int
+  let machine = "machine" %: int
+  let flags = "flags" %: int
+  let align = "align" %: int
+  let section_index = "section" %: int
+  let bind = "bind" %: int
+  let symbol = "symbol" %: int
+  let addend = "addend" %: int
+  let explicit = "explicit" %: bool
+
+  (** elf file type, machine, and flags *)
+  let elf_header () =
+    Ogre.declare ~name:"llvm:elf-header"
+      (scheme typ $ machine $ flags)
+      Tuple.T3.create
+
+  (** a section header of a relocatable file, as it is in the file *)
+  let elf_section () =
+    Ogre.declare ~name:"llvm:elf-section"
+      (scheme index $ name $ typ $ flags $ off $ size $ align)
+      (fun index name typ flags off size align ->
+        {
+          Bap_llvm_elf_linker.index = Int64.to_int_trunc index;
+          name;
+          typ = Int64.to_int_trunc typ;
+          flags;
+          off;
+          size;
+          align;
+        })
+
+  (** a symbol of a relocatable file, as it is in the file *)
+  let elf_symbol () =
+    Ogre.declare ~name:"llvm:elf-symbol"
+      (scheme index $ name $ section_index $ value $ size $ typ $ bind)
+      (fun index name shndx value size typ bind ->
+        ( Int64.to_int_trunc index,
+          {
+            Bap_llvm_elf_linker.name;
+            shndx = Int64.to_int_trunc shndx;
+            value;
+            size;
+            typ = Int64.to_int_trunc typ;
+            bind = Int64.to_int_trunc bind;
+          } ))
+
+  (** a relocation of a relocatable file, as it is in the file *)
+  let elf_relocation () =
+    Ogre.declare ~name:"llvm:elf-relocation"
+      (scheme index $ section_index $ off $ typ $ symbol $ addend $ explicit)
+      (fun index section offset typ symbol addend explicit ->
+        ( index,
+          {
+            Bap_llvm_elf_linker.section = Int64.to_int_trunc section;
+            offset;
+            typ = Int64.to_int_trunc typ;
+            symbol = Int64.to_int_trunc symbol;
+            addend;
+            explicit;
+          } ))
 end
 
 module Filename = Stdlib.Filename
@@ -247,7 +309,9 @@ let derive_code_regions_of_segments =
       from LLVM.elf_program_header
       $ LLVM.elf_virtual_program_header $ LLVM.elf_program_header_flags)
   @@ fun (_, off, size) (_, addr, _) (_, _, _, _, x) ->
-  provide_if x [ Ogre.provide code_region Int64.(addr + bias) size off ]
+  provide_if
+    (x && Int64.(size <> 0L))
+    [ Ogre.provide code_region Int64.(addr + bias) size off ]
 
 let map_segments_to_sections =
   iter_rows LLVM.elf_virtual_program_header @@ fun bias (_, addr, size) ->
@@ -288,13 +352,15 @@ let provide_elf_segments =
       $ LLVM.elf_virtual_program_header $ LLVM.elf_program_header_flags)
   @@ fun (name, off, size) (_, addr, vsize) (_, ld, r, w, x) ->
   let addr = Int64.(addr + bias) in
+  (* a segment without file contents, e.g., the one that holds .bss,
+     is zero-filled, so it is not mapped to the file *)
   provide_if
-    (ld && Int64.(size <> 0L))
+    (ld && Int64.(vsize <> 0L))
     [
       Ogre.provide segment addr vsize r w x;
-      Ogre.provide mapped addr size off;
       Ogre.provide named_region addr vsize name;
     ]
+  @ provide_if (ld && Int64.(size <> 0L)) [ Ogre.provide mapped addr size off ]
 
 let provide_elf_segmentation =
   [
@@ -389,8 +455,77 @@ module ElfDyn = struct
             | _ -> Ogre.return ())
 end
 
+(** links a relocatable file, see {!Bap_llvm_elf_linker}. *)
+module Relocatable = struct
+  module Linker = Bap_llvm_elf_linker
+
+  let et_rel = 1L
+  let collect attr = Ogre.collect Ogre.Query.(select (from attr))
+
+  let input data machine =
+    Ogre.require base_address >>= fun base ->
+    Ogre.require bits >>= fun width ->
+    Ogre.require is_little_endian >>= fun little ->
+    collect LLVM.elf_section >>= fun sections ->
+    collect LLVM.elf_symbol >>= fun symbols ->
+    collect LLVM.elf_relocation >>| fun relocations ->
+    {
+      Linker.machine = Int64.to_int_trunc machine;
+      width = Int64.to_int_trunc width;
+      little;
+      base;
+      data;
+      sections = Seq.to_list sections;
+      symbols =
+        Seq.fold symbols ~init:Int.Map.empty ~f:(fun syms (key, data) ->
+            Map.set syms ~key ~data);
+      relocations =
+        Seq.to_list relocations
+        |> List.sort ~compare:(fun (x, _) (y, _) -> Int64.compare x y)
+        |> List.map ~f:snd;
+    }
+
+  let provide_region { Linker.name; addr; size; off; r; w; x; is_section } =
+    [
+      Ogre.provide segment addr size r w x;
+      Ogre.provide named_region addr size name;
+    ]
+    @
+    match off with
+    | None -> []
+    | Some off ->
+        Ogre.provide mapped addr size off
+        :: provide_if is_section [ Ogre.provide section addr size ]
+        @ provide_if x [ Ogre.provide code_region addr size off ]
+
+  let provide_function (name, addr, size, value) =
+    [
+      Ogre.provide named_symbol addr name;
+      Ogre.provide symbol_value addr value;
+      Ogre.provide code_start addr;
+    ]
+    @ provide_if Int64.(size > 0L) [ Ogre.provide symbol_chunk addr size addr ]
+
+  let provide { Linker.regions; functions; references; patches; warnings } =
+    List.iter warnings ~f:(fun msg -> warning "%s" msg);
+    Ogre.sequence
+    @@ List.concat_map regions ~f:provide_region
+    @ List.concat_map functions ~f:provide_function
+    @ List.map references ~f:(fun (addr, name) ->
+        Ogre.provide external_reference addr name)
+    @ List.map patches ~f:(fun (off, size, value) ->
+        Ogre.provide patch off (Int64.of_int size) value)
+
+  let link data =
+    Ogre.request LLVM.elf_header >>= function
+    | Some (typ, machine, _) when Int64.equal typ et_rel ->
+        input data machine >>| Linker.link >>= provide
+    | _ -> Ogre.return ()
+end
+
 let provide_elf_segmentation_and_libraries data =
-  provide_elf_segmentation @ [ ElfDyn.libraries data ]
+  (Relocatable.link data :: provide_elf_segmentation)
+  @ [ ElfDyn.libraries data ]
 
 (** translates llvm-specific specification into the image specification *)
 let translate ?file data user_base =

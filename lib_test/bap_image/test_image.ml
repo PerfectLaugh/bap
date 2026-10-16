@@ -85,6 +85,58 @@ let () =
       Image.register_loader ~name (backend name))
     backends
 
+(* an image of eight bytes with a patch inside the file, a patch past
+   its end that backs a synthesized segment, and a zero-filled segment
+   that has no contents in the file *)
+let patched_name endian =
+  match endian with LittleEndian -> "patched_LE" | BigEndian -> "patched_BE"
+
+let patched endian =
+  let open Image.Scheme in
+  let arch = match endian with LittleEndian -> `mipsel | BigEndian -> `mips in
+  let spec =
+    Ogre.sequence
+      [
+        Ogre.provide entry_point 0x100L;
+        Ogre.provide segment 0x100L 8L true false true;
+        Ogre.provide mapped 0x100L 8L 0L;
+        Ogre.provide named_region 0x100L 8L ".text";
+        Ogre.provide segment 0x200L 4L true true false;
+        Ogre.provide mapped 0x200L 4L 16L;
+        Ogre.provide named_region 0x200L 4L "%got";
+        Ogre.provide segment 0x300L 16L true true false;
+        Ogre.provide named_region 0x300L 16L ".bss";
+        Ogre.provide patch 2L 2L 0xBEEFL;
+        Ogre.provide patch 16L 4L 0xDEADBEEFL;
+      ]
+  in
+  let doc = ok_exn (Ogre.exec spec (Image.Spec.from_arch arch)) in
+  let module Loader = struct
+    let from_file _ = Ok (Some doc)
+    let from_data _ = Ok (Some doc)
+  end in
+  (module Loader : Image.Loader)
+
+let () =
+  List.iter [ LittleEndian; BigEndian ] ~f:(fun endian ->
+      Image.register_loader ~name:(patched_name endian) (patched endian))
+
+let check_patches endian ~expect ctxt =
+  let data = String.init 8 ~f:Char.of_int_exn in
+  match Image.of_string ~backend:(patched_name endian) data with
+  | Error err -> assert_failure (Error.to_string_hum err)
+  | Ok (img, warns) ->
+      assert_bool "patches: no warnings" (List.is_empty warns);
+      assert_equal ~ctxt ~printer:Int.to_string 2
+        (Table.length (Image.segments img));
+      let bytes =
+        Table.to_sequence (Image.words img `r8)
+        |> Seq.map ~f:(fun (_, w) -> Word.to_int_exn w)
+        |> Seq.to_list
+      in
+      let printer xs = String.concat ~sep:" " (List.map xs ~f:(sprintf "%x")) in
+      assert_equal ~ctxt ~printer expect bytes
+
 let print_list r =
   let sexp_of_addr_list = sexp_of_list sexp_of_addr in
   Sexp.to_string_hum @@ Or_error.sexp_of_t sexp_of_addr_list r
@@ -390,4 +442,10 @@ let suite () =
              let printer = Addr.to_string in
              assert_equal ~printer Addr.(mn ++ 0x336) mx;
              return ());
+         "patches/LE"
+         >:: check_patches LittleEndian
+               ~expect:[ 0; 1; 0xef; 0xbe; 4; 5; 6; 7; 0xef; 0xbe; 0xad; 0xde ];
+         "patches/BE"
+         >:: check_patches BigEndian
+               ~expect:[ 0; 1; 0xbe; 0xef; 4; 5; 6; 7; 0xde; 0xad; 0xbe; 0xef ];
        ]

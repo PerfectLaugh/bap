@@ -1,0 +1,6 @@
+(test
+ (name test_elf_linker)
+ (package bap-llvm)
+ (preprocess
+  (pps ppx_bap))
+ (libraries bap-llvm core ounit2))

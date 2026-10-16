@@ -189,6 +189,8 @@ module Scheme = struct
 
   let symbol_value () =
     declare "symbol-value" (scheme addr $ value) Tuple.T2.create
+
+  let patch () = declare "patch" (scheme off $ size $ value) Tuple.T3.create
 end
 
 module Spec = struct
@@ -399,7 +401,43 @@ let create_segment_of_symbol_table syms secs =
       | Some (_, sec) -> Hashtbl.add_exn tab ~key:sym ~data:sec);
   Hashtbl.find_exn tab
 
+(* applies the patches of the specification to the input data, the
+   data past the end of the input is zero-filled. *)
+let apply_patches doc data =
+  let patches =
+    let open Fact.Syntax in
+    Fact.collect Ogre.Query.(select (from Scheme.patch)) >>= fun patches ->
+    Fact.request Scheme.is_little_endian >>| fun little ->
+    (Seq.to_list patches, Option.value little ~default:false)
+  in
+  let valid (off, size, _) =
+    Int64.(off >= 0L && size > 0L && size <= 8L && off + size > off)
+  in
+  Fact.eval patches doc >>= function
+  | [], _ -> Ok data
+  | patches, _ when not (List.for_all patches ~f:valid) ->
+      Or_error.errorf "malformed patch in the image specification"
+  | patches, little ->
+      let input = Bigstring.length data in
+      let length =
+        List.fold patches ~init:input ~f:(fun len (off, size, _) ->
+            max len Int64.(to_int_exn (off + size)))
+      in
+      let data' = Bigstring.create length in
+      Bigstring.blit ~src:data ~src_pos:0 ~dst:data' ~dst_pos:0 ~len:input;
+      Bigstring.memset data' ~pos:input ~len:(length - input) '\000';
+      List.iter patches ~f:(fun (off, size, value) ->
+          let off = Int64.to_int_exn off and size = Int64.to_int_exn size in
+          for i = 0 to size - 1 do
+            let shift = 8 * if little then i else size - i - 1 in
+            Int64.(shift_right_logical value shift land 0xffL)
+            |> Int64.to_int_exn |> Char.of_int_exn
+            |> Bigstring.set data' (off + i)
+          done);
+      Ok data'
+
 let from_spec query base doc =
+  apply_patches doc base >>= fun base ->
   Fact.eval query doc >>= function
   | { Spec.segments; symbols; sections; code } as spec ->
       let memory = Memmap.empty in

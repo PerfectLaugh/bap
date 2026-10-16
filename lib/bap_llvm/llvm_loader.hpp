@@ -36,7 +36,11 @@ static std::string scheme =
     "(declare llvm:elf-virtual-program-header (name str) (addr int) (size int))\n"
     "(declare llvm:coff-virtual-section-header (name str) (addr int) (size int))\n"
     "(declare llvm:virtual-segment-command (name str) (addr int) (size int))\n"
-    "(declare llvm:coff-import-library (name str))\n";
+    "(declare llvm:coff-import-library (name str))\n"
+    "(declare llvm:elf-header (type int) (machine int) (flags int))\n"
+    "(declare llvm:elf-section (index int) (name str) (type int) (flags int) (off int) (size int) (align int))\n"
+    "(declare llvm:elf-symbol (index int) (name str) (section int) (value int) (size int) (type int) (bind int))\n"
+    "(declare llvm:elf-relocation (index int) (section int) (off int) (type int) (symbol int) (addend int) (explicit bool))\n";
 
 
 namespace loader {

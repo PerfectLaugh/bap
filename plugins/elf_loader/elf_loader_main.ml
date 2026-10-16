@@ -107,17 +107,23 @@ let has_flag flag es = List.mem es.p_flags flag ~equal:[%compare.equal: p_flag]
 (* only loadable segments with a valid set of permissions are mapped *)
 let provide_segment elf i es =
   let r = has_flag PF_R es and w = has_flag PF_W es and x = has_flag PF_X es in
-  if (not ([%compare.equal: p_type] es.p_type PT_LOAD)) || not (r || w || x)
+  if
+    (not ([%compare.equal: p_type] es.p_type PT_LOAD))
+    || (not (r || w || x))
+    || Int64.(norm elf es.p_memsz = 0L)
   then Ogre.return ()
   else
     let addr = norm elf es.p_vaddr
     and vsize = norm elf es.p_memsz
     and fsize = norm elf es.p_filesz
     and off = norm elf es.p_offset in
+    (* a segment without file contents (e.g., .bss) is zero-filled,
+       so it is not mapped to the file *)
     Ogre.sequence
       [
         Ogre.provide segment addr vsize r w x;
-        Ogre.provide mapped addr fsize off;
+        (if Int64.(fsize = 0L) then Ogre.return ()
+         else Ogre.provide mapped addr fsize off);
         Ogre.provide named_region addr vsize (sprintf "%02d" i);
       ]
 
