@@ -67,10 +67,17 @@ for f in xml grammar slghparse pcodeparse; do
     touch "${DECOMPILER}/$f.hh"
 done
 
+# the modules that depend on the GNU BFD library, they are only used by
+# the command-line decompiler, so they are left out to avoid requiring
+# the binutils development files
+NO_BFD='analyzesigs bfd_arch codedata loadimage_bfd'
+
 # the two targets share object directories, so they can't be built
 # in the same parallel make invocation
 quietly make -s -j"$JOBS" -C "${DECOMPILER}" \
-        OPT_CXXFLAGS="-O2 -std=c++11 -fPIC" libdecomp.a
+        OPT_CXXFLAGS="-O2 -std=c++11 -fPIC" \
+        EXTRA="\$(filter-out \$(CORE) \$(DECCORE) \$(SLEIGH) \$(GHIDRA) \$(SLACOMP) \$(SPECIAL) $NO_BFD,\$(ALL_NAMES))" \
+        libdecomp.a
 quietly make -s -j"$JOBS" -C "${DECOMPILER}" sleigh_opt
 quietly "${DECOMPILER}/sleigh_opt" -a "${GHIDRA_ROOT}/Ghidra"
 

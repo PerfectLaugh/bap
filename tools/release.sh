@@ -26,7 +26,7 @@ echo "Installed dependencies. Cleaning up..."
 opam pin remove bap
 
 echo "Cloning a fresh repo"
-[ -d bap-repo ] || git clone $SOURCE bap-repo
+[ -d bap-repo ] || git clone --recursive $SOURCE bap-repo
 cd bap-repo
 LLVM_CONFIG=$(command -v llvm-config)
 LLVM_VERSION=$($LLVM_CONFIG --version)

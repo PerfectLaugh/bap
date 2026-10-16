@@ -83,3 +83,7 @@ OMakefile
 /plugins/stub_resolver/stub_resolver_sites.ml
 # fetched by opam as an extra-source of bap-ghidra
 Ghidra_*_build.tar.gz
+
+# the lock directory is source, even if its files match the patterns above
+# (e.g., `*.ba*` matches base-unix.base.pkg)
+!/dune.lock/**

@@ -37,7 +37,10 @@ let () =
        [
          llvm self [ linkmode; "--ldflags" ];
          llvm self ([ linkmode; "--libs" ] @ llvm_components);
-         [ "-lstdc++"; "-lcurses"; "-lzstd" ];
+         (* the system libraries depend on the link mode and on how
+            LLVM was configured, e.g., a shared LLVM needs none *)
+         llvm self [ linkmode; "--system-libs" ];
+         [ "-lstdc++" ];
        ];
   C.Flags.write_sexp "cxx.flags"
   @@ List.concat [ [ "-fPIC" ]; llvm self [ "--cxxflags" ] ];

@@ -53,7 +53,7 @@
    (run chmod -R u+w z3_workdir)
    (chdir
     z3_workdir
-    (run env CXXFLAGS=-fPIC python scripts/mk_make.py --ml --staticlib))
+    (run env CXXFLAGS=-fPIC python3 scripts/mk_make.py --ml --staticlib))
    (chdir
     z3_workdir
     (run make -C build -j4 libz3-static.a)))))
