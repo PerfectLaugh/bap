@@ -13,15 +13,15 @@ let doc =
    is stored in the file $(b,demo.lisp) that is located in the current\n\
    folder, use the following parameters to print the reification,\n\n\n\
    ```\n\
-   bap show foo --primus-lisp-load=demo -tarmv5+le\n\
+   bap show-lisp foo --primus-lisp-load=demo -tarmv5+le\n\
    ```\n\n\
    Notice, that the target specification is necessary when a definition\n\
    is not closed, i.e., when it references global variables (registers).\n\n\
-   To print only specific slot of the value, use $(b,--slot) (short\n\
-   version $(b,o)), e.g., the following will print only the BIL \
+   To print only specific slot of the value, use $(b,--slots) (short\n\
+   version $(b,-o)), e.g., the following will print only the BIL \
    representation,\n\n\
    ```\n\
-   bap show foo --primus-lisp-load=demo -tarmv5+le -obap:bil\n\
+   bap show-lisp foo --primus-lisp-load=demo -tarmv5+le -obap:bil\n\
    ```\n\n"
 
 open Core

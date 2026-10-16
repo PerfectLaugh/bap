@@ -142,7 +142,7 @@ Now we can build, install, and run our analysis using the following commands:
 ```
 bapbuild jmp.plugin
 bapbundle install jmp.plugin
-bap /bin/echo --pass=jmp
+bap /bin/echo --passes=jmp
 ```
 
 Let's briefly go through the code. The `counter` object is a visitor that has the state consisting of a pair of counters. The first counter keeps track of the number of jmp terms, and the second counter is incremented every time we enter any term.  The `main` function just runs the counter and prints the output. We declare our extension use the [Extension.declare][extension-declare] function from the [Bap_main][bap-main] library. An extension is just a function that receives the context (which could be used to obtain configuration parameters). In this function, we register our `main` function as a pass using the `Project.register_pass` function.

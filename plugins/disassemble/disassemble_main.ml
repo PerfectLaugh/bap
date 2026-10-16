@@ -14,7 +14,7 @@ let man =
 
   # PASSES
 
-  The passes are specified by the $(b,--pass) option and are run in the
+  The passes are specified by the $(b,--passes) option and are run in the
   order in which they specified. In addition, all passes that are
   flagged with `autorun' are run before the explicitly specified
   passes. Finally, if a pass specifies other passes as its
@@ -68,7 +68,7 @@ let man =
   option, e.g.,
 
   ```
-  bap dis /bin/echo --pass=my-analysis
+  bap disassemble /bin/echo --passes=my-analysis
   ```
 
   Please note, that the name of the pass is automatically derived from
@@ -79,7 +79,7 @@ let man =
   # EXAMPLES
 
 ```
-  bap dis /bin/echo --passes=run,check -dbir:out.bir -dasm:out.asm
+  bap disassemble /bin/echo --passes=run,check -dbir:out.bir -dasm:out.asm
 ```
 |}
 

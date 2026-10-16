@@ -13,7 +13,7 @@ and analyzes the specified file.
 The BAP frontend does nothing by itself and all the functionality
 comes from various BAP plugins. There are many extension points in
 BAP, but writing a disassembler pass is probably the easiest to start
-with. See $(b,bap dis --help) for more details.
+with. See $(b,bap disassemble --help) for more details.
 
 # BUGS
 

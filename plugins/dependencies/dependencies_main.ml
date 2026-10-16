@@ -8,7 +8,7 @@ let doc =
    set of imported and exported symbols. The information could be\n\
    collected recursively, when the $(b,--recursive) option is\n\
    specified. In a recursive mode, the list of paths where to search for\n\
-   libraries could be specified with the $(b,--library-path) option that\n\
+   libraries could be specified with the $(b,--library-paths) option that\n\
    accepts a list of paths. It is also possible to use the host ldconfig\n\
    cache (or specify custom library config) via the $(b,ldconfig)\n\
    parameter. Information about each individual dependency is cached, so\n\

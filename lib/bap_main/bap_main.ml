@@ -534,19 +534,6 @@ end
 
 type ctxt = Context.t
 
-(* cmdliner 2 no longer accepts unambiguous prefixes of option and
-   command names (e.g., [--pass] for [--passes] or [dis] for
-   [disassemble]) unless CMDLINER_LEGACY_PREFIXES is set. We keep them
-   enabled by default, so that existing command lines continue to work,
-   but still let users disable them explicitly. *)
-let with_legacy_prefixes env =
-  let getenv = Option.value env ~default:Stdlib.Sys.getenv_opt in
-  Some
-    (fun var ->
-      match getenv var with
-      | None when String.equal var "CMDLINER_LEGACY_PREFIXES" -> Some "true"
-      | value -> value)
-
 module Pre = struct
   open Cmdliner
 
@@ -565,9 +552,7 @@ module Pre = struct
     let doc = "Load the specified recipe" in
     Arg.(value & opt (some string) None & info ~doc [ "recipe" ])
 
-  let extract ?env option argv =
-    let env = with_legacy_prefixes env in
-    fst (Cmd.eval_peek_opts ?env ~argv option)
+  let extract ?env option argv = fst (Cmd.eval_peek_opts ?env ~argv option)
 
   let term =
     Term.(const (fun _ _ _ -> Ok ()) $ logdir $ plugin_locations $ recipe)
@@ -1114,7 +1099,7 @@ end = struct
           | prog :: arg :: rest ->
               if
                 List.exists commands ~f:(fun cmd ->
-                    String.is_prefix ~prefix:arg (Cmd.name cmd))
+                    String.equal arg (Cmd.name cmd))
               then argv
               else Array.of_list (prog :: cmd :: arg :: rest)
           | [ _ ] | [] -> argv)
@@ -1122,8 +1107,7 @@ end = struct
     let buf = Buffer.create 64 in
     let err = Format.formatter_of_buffer buf in
     match
-      Cmd.eval_value ?env:(with_legacy_prefixes env) ~help ~err ~argv
-        ~catch:false
+      Cmd.eval_value ?env ~help ~err ~argv ~catch:false
         (Cmd.group ~default:main main_info commands)
     with
     | Error `Exn -> assert false (*^^^^^^^^^^^ that's why*)

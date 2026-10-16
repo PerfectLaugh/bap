@@ -7,8 +7,16 @@ include Self ()
 
 type kind = Legacy | Modern | Merge [@@deriving equal]
 
+(* the common ABIs (ms, gnu, cdecl, ...) are declared by the Core
+   Theory in the [core] package, while the x86-specific ones (pascal,
+   thiscall, ...) are declared in the [bap] package, so we look up
+   unqualified names in both. *)
+let read_abi name =
+  try Theory.Abi.read ~package:"core" name
+  with Invalid_argument _ -> Theory.Abi.read ~package:"bap" name
+
 let main backend kind abi =
-  let abi = Option.map ~f:(Theory.Abi.read ~package:"bap") abi in
+  let abi = Option.map ~f:read_abi abi in
   X86_target.load ?abi ?backend ();
   let kind = if backend = Some "ghidra" then Modern else kind in
   let ia32, amd64 =
@@ -41,7 +49,7 @@ let () =
         `P
           "To choose a correct ABI for a binary compiled for MS Windows\n\
           \    x64 target, use the following:";
-        `P "$(b,bap) FILE --x86-64=ms";
+        `P "$(b,bap) FILE --x86-64-abi=ms";
         `S "SEE ALSO";
         `P "$(b,bap-x86-cpu)(3), $(b,bap-plugin-abi)(1), $(b,bap-plugin-arm)(1)";
       ]
