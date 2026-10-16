@@ -9,7 +9,7 @@ let text = section ~flags:6L
 let data = section ~flags:3L
 
 let symbol ?(value = 0L) ?(size = 0L) ?(typ = 0) ?(bind = 1) name shndx =
-  { Linker.name; shndx; value; size; typ; bind }
+  { Linker.name; shndx; extended = false; value; size; typ; bind }
 
 let rel ?(addend = 0L) section offset typ symbol =
   { Linker.section; offset; typ; symbol; addend; explicit = true }
@@ -173,6 +173,47 @@ let aarch64 ctxt =
   assert_word ~msg:"ADD_ABS_LO12_NC" 0x44 4 0x91004000L;
   assert_word ~msg:"CALL26" 0x48 4 0x97fffffeL
 
+(* a relocation that starts inside of the section but ends past it is
+   not applied, it would otherwise overwrite the GOT, which is stored
+   right after the end of the file *)
+let outside_of_section ctxt =
+  let bytes = String.make 0x48 '\000' in
+  let out =
+    link ~machine:62 ~base:0x1000L ~bytes
+      [ text 1 ".text" ~off:0x40L ~size:8L ]
+      [ (1, symbol "puts" 0) ]
+      [ rel 1 4L 9 1 ~addend:(-4L); rel 1 6L 1 1 ]
+  in
+  assert_equal ~ctxt ~printer:Int.to_string 1 (List.length out.warnings);
+  let data = patched ~little:true bytes out in
+  let assert_word = assert_word ~ctxt ~little:true data in
+  assert_word ~msg:"GOTPCREL" 0x44 4 0x8L;
+  assert_word ~msg:"GOT entry" 0x48 8 0x1008L;
+  assert_word ~msg:"the last bytes of .text" 0x46 2 0x0L
+
+(* an extended section index that coincides with SHN_ABS refers to a
+   section, not to an absolute value *)
+let extended_index ctxt =
+  let bytes = String.make 0x50 '\000' in
+  let shn_abs = 0xfff1 in
+  let out =
+    link ~machine:62 ~base:0x1000L ~bytes
+      [
+        text 1 ".text" ~off:0x40L ~size:8L;
+        data shn_abs ".data" ~off:0x48L ~size:8L ~align:8L;
+      ]
+      [
+        (1, { (symbol "x" shn_abs ~value:4L) with extended = true });
+        (2, symbol "y" shn_abs ~value:4L);
+      ]
+      [ rel 1 0L 1 1; rel shn_abs 0L 1 2 ]
+  in
+  assert_no_warnings out;
+  let data = patched ~little:true bytes out in
+  let assert_word = assert_word ~ctxt ~little:true data in
+  assert_word ~msg:"extended" 0x40 8 0x100cL;
+  assert_word ~msg:"absolute" 0x48 8 0x4L
+
 let unsupported_machine ctxt =
   let out =
     link ~machine:21 ~base:0L ~bytes:(String.make 0x48 '\000')
@@ -190,6 +231,8 @@ let suite =
          "mips/hi-lo" >:: mips_hi_lo;
          "riscv/pcrel" >:: riscv_pcrel;
          "aarch64" >:: aarch64;
+         "outside of section" >:: outside_of_section;
+         "extended section index" >:: extended_index;
          "unsupported machine" >:: unsupported_machine;
        ]
 

@@ -25,7 +25,11 @@ type section = {
 
 type symbol = {
   name : string;
-  shndx : int;  (** st_shndx *)
+  shndx : int;
+      (** st_shndx, or the extended section index if st_shndx is SHN_XINDEX *)
+  extended : bool;
+      (** [true] if [shndx] is an extended section index, which is never one of
+          the special indices (e.g., SHN_ABS) *)
   value : int64;
   size : int64;
   typ : int;  (** the symbol type, e.g., STT_FUNC *)

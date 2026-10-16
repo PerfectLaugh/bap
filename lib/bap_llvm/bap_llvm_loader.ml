@@ -132,6 +132,7 @@ module LLVM = struct
   let symbol = "symbol" %: int
   let addend = "addend" %: int
   let explicit = "explicit" %: bool
+  let extended = "extended" %: bool
 
   (** elf file type, machine, and flags *)
   let elf_header () =
@@ -157,12 +158,14 @@ module LLVM = struct
   (** a symbol of a relocatable file, as it is in the file *)
   let elf_symbol () =
     Ogre.declare ~name:"llvm:elf-symbol"
-      (scheme index $ name $ section_index $ value $ size $ typ $ bind)
-      (fun index name shndx value size typ bind ->
+      (scheme index $ name $ section_index $ extended $ value $ size $ typ
+     $ bind)
+      (fun index name shndx extended value size typ bind ->
         ( Int64.to_int_trunc index,
           {
             Bap_llvm_elf_linker.name;
             shndx = Int64.to_int_trunc shndx;
+            extended;
             value;
             size;
             typ = Int64.to_int_trunc typ;

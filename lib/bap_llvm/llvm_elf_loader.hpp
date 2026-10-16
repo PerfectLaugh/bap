@@ -318,9 +318,38 @@ void emit_raw_sections(const ELFFile<T> &elf, ogre_doc &s) {
     }
 }
 
+// the extended section indices of the symbols of the symbol table
+// [symtab], stored in the SHT_SYMTAB_SHNDX section that is linked to it.
+// They are used when there are too many sections and the index of a
+// symbol's section doesn't fit into st_shndx, which is then SHN_XINDEX.
+template <typename T>
+std::vector<uint64_t> extended_indices(const ELFFile<T> &elf,
+                                       uint64_t symtab) {
+    std::vector<uint64_t> indices;
+    for (auto &sec : prim::elf_sections(elf)) {
+        if (sec.sh_type != ELF::SHT_SYMTAB_SHNDX || sec.sh_link != symtab)
+            continue;
+        typedef typename ELFFile<T>::Elf_Word word;
+#if LLVM_VERSION_MAJOR >= 12
+        auto table = elf.template getSectionContentsAsArray<word>(sec);
+#else
+        auto table = elf.template getSectionContentsAsArray<word>(&sec);
+#endif
+        if (!table) {
+            consumeError(table.takeError());
+            return indices;
+        }
+        for (auto &index : *table)
+            indices.push_back(uint64_t(index));
+        return indices;
+    }
+    return indices;
+}
+
 template <typename T>
 void emit_raw_symbols(const ELFFile<T> &elf,
                       const typename ELFFile<T>::Elf_Shdr &symtab,
+                      uint64_t symtab_index,
                       ogre_doc &s) {
     auto syms = elf.symbols(&symtab);
     if (!syms) {
@@ -332,16 +361,23 @@ void emit_raw_symbols(const ELFFile<T> &elf,
         consumeError(strtab.takeError());
         return;
     }
+    auto xindices = extended_indices(elf, symtab_index);
     uint64_t index = 0;
     for (auto &sym : *syms) {
         std::string name;
         auto er_name = sym.getName(*strtab);
         if (er_name) name = er_name->str();
         else consumeError(er_name.takeError());
+        uint64_t shndx = sym.st_shndx;
+        bool extended =
+            sym.st_shndx == ELF::SHN_XINDEX && index < xindices.size();
+        if (extended)
+            shndx = xindices[index];
         s.entry("llvm:elf-symbol")
             << index++
             << name
-            << uint64_t(sym.st_shndx)
+            << shndx
+            << extended
             << uint64_t(sym.st_value)
             << uint64_t(sym.st_size)
             << uint64_t(sym.getType())
@@ -368,11 +404,19 @@ void emit_raw_relocation(uint64_t &index, uint64_t section, const R &rel,
 // qualified with the symbol table of the relocation section.
 template <typename T>
 void emit_raw_relocations(const ELFFile<T> &elf,
+                          const std::vector<typename ELFFile<T>::Elf_Shdr> &sections,
                           const typename ELFFile<T>::Elf_Shdr &sec,
                           uint64_t &index,
                           ogre_doc &s) {
     bool mips64el = elf.isMips64EL();
     uint64_t target = sec.sh_info;
+    if (sec.sh_type != ELF::SHT_RELA && sec.sh_type != ELF::SHT_REL)
+        return;
+    // the relocations of the sections that are not loaded into memory,
+    // e.g., the debug information, are ignored by the linker
+    if (target >= sections.size() ||
+        !(sections[target].sh_flags & ELF::SHF_ALLOC))
+        return;
     if (sec.sh_type == ELF::SHT_RELA) {
 #if LLVM_VERSION_MAJOR >= 12
         auto rels = elf.relas(sec);
@@ -409,11 +453,13 @@ void emit_relocatable(const ELFObjectFile<T> &obj, ogre_doc &s) {
     auto &elf = *obj.getELFFile();
 #endif
     emit_raw_sections(elf, s);
+    auto sections = prim::elf_sections(elf);
     uint64_t index = 0;
-    for (auto &sec : prim::elf_sections(elf)) {
+    for (std::size_t i = 0; i < sections.size(); ++i) {
+        auto &sec = sections[i];
         if (sec.sh_type == ELF::SHT_SYMTAB)
-            emit_raw_symbols(elf, sec, s);
-        emit_raw_relocations(elf, sec, index, s);
+            emit_raw_symbols(elf, sec, i, s);
+        emit_raw_relocations(elf, sections, sec, index, s);
     }
 }
 

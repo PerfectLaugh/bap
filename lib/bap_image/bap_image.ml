@@ -402,22 +402,36 @@ let create_segment_of_symbol_table syms secs =
   Hashtbl.find_exn tab
 
 (* applies the patches of the specification to the input data, the
-   data past the end of the input is zero-filled. *)
+   data past the end of the input is zero-filled. The input is only
+   extended to back the mapped regions, so a patch must lie inside
+   the input or inside a mapped region. *)
 let apply_patches doc data =
   let patches =
     let open Fact.Syntax in
     Fact.collect Ogre.Query.(select (from Scheme.patch)) >>= fun patches ->
+    Fact.collect Ogre.Query.(select (from Scheme.mapped)) >>= fun mapped ->
     Fact.request Scheme.is_little_endian >>| fun little ->
-    (Seq.to_list patches, Option.value little ~default:false)
+    let limit =
+      Seq.fold mapped
+        ~init:(Int64.of_int (Bigstring.length data))
+        ~f:(fun limit { Scheme.size; info = off; _ } ->
+          if Int64.(off >= 0L && size >= 0L && off + size >= off) then
+            Int64.max limit Int64.(off + size)
+          else limit)
+    in
+    (Seq.to_list patches, limit, Option.value little ~default:false)
   in
-  let valid (off, size, _) =
-    Int64.(off >= 0L && size > 0L && size <= 8L && off + size > off)
+  let valid limit (off, size, _) =
+    Int64.(
+      off >= 0L && size > 0L && size <= 8L
+      && off + size > off
+      && off + size <= limit)
   in
   Fact.eval patches doc >>= function
-  | [], _ -> Ok data
-  | patches, _ when not (List.for_all patches ~f:valid) ->
+  | [], _, _ -> Ok data
+  | patches, limit, _ when not (List.for_all patches ~f:(valid limit)) ->
       Or_error.errorf "malformed patch in the image specification"
-  | patches, little ->
+  | patches, _, little ->
       let input = Bigstring.length data in
       let length =
         List.fold patches ~init:input ~f:(fun len (off, size, _) ->

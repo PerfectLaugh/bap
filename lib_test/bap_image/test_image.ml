@@ -137,6 +137,33 @@ let check_patches endian ~expect ctxt =
       let printer xs = String.concat ~sep:" " (List.map xs ~f:(sprintf "%x")) in
       assert_equal ~ctxt ~printer expect bytes
 
+(* a patch that lies past the end of the input, but not in a mapped
+   region, is rejected instead of extending the input up to it *)
+let stray_patch =
+  let open Image.Scheme in
+  let spec =
+    Ogre.sequence
+      [
+        Ogre.provide segment 0x100L 8L true false true;
+        Ogre.provide mapped 0x100L 8L 0L;
+        Ogre.provide patch 0x1_0000_0000L 4L 0L;
+      ]
+  in
+  let doc = ok_exn (Ogre.exec spec (Image.Spec.from_arch `mipsel)) in
+  let module Loader = struct
+    let from_file _ = Ok (Some doc)
+    let from_data _ = Ok (Some doc)
+  end in
+  (module Loader : Image.Loader)
+
+let () = Image.register_loader ~name:"stray_patch" stray_patch
+
+let check_stray_patch _ =
+  let data = String.make 8 '\000' in
+  match Image.of_string ~backend:"stray_patch" data with
+  | Error _ -> ()
+  | Ok _ -> assert_failure "a patch outside of the mapped regions is applied"
+
 let print_list r =
   let sexp_of_addr_list = sexp_of_list sexp_of_addr in
   Sexp.to_string_hum @@ Or_error.sexp_of_t sexp_of_addr_list r
@@ -448,4 +475,5 @@ let suite () =
          "patches/BE"
          >:: check_patches BigEndian
                ~expect:[ 0; 1; 0xbe; 0xef; 4; 5; 6; 7; 0xde; 0xad; 0xbe; 0xef ];
+         "patches/stray" >:: check_stray_patch;
        ]

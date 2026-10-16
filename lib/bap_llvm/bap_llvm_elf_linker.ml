@@ -13,6 +13,7 @@ type section = {
 type symbol = {
   name : string;
   shndx : int;
+  extended : bool;
   value : int64;
   size : int64;
   typ : int;
@@ -109,38 +110,27 @@ let bits x lo n = Int64.((x lsr lo) land mask n)
 let set_bits x lo n v =
   Int64.(x land lnot (mask n lsl lo) lor ((v land mask n) lsl lo))
 
-(* The contents of the file with the relocations applied, only
-   the modified bytes are stored. The bytes past the end of the
-   file are zeros. *)
+(* The contents of the file with the relocations applied. The file
+   isn't copied, the modified bytes are stored on top of it. The bytes
+   past the end of the file are zeros. *)
 module Memory = struct
   type t = {
-    data : Bigstring.t;  (** a copy of the file *)
-    extra : (int64, int) Hashtbl.t;  (** the bytes past the end of the file *)
-    mutable modified : int64 list;
+    data : Bigstring.t;  (** the file, never modified *)
+    modified : (int64, int) Hashtbl.t;  (** the modified bytes *)
   }
 
-  let create data =
-    {
-      data = Bigstring.sub data ~pos:0 ~len:(Bigstring.length data);
-      extra = Hashtbl.create (module Int64);
-      modified = [];
-    }
-
+  let create data = { data; modified = Hashtbl.create (module Int64) }
   let length t = Int64.of_int (Bigstring.length t.data)
   let inside t off = Int64.(off >= 0L && off < length t)
 
   let get t off =
-    if inside t off then
-      Char.to_int (Bigstring.get t.data (Int64.to_int_exn off))
-    else Option.value (Hashtbl.find t.extra off) ~default:0
+    match Hashtbl.find t.modified off with
+    | Some b -> b
+    | None when inside t off ->
+        Char.to_int (Bigstring.get t.data (Int64.to_int_exn off))
+    | None -> 0
 
-  let set t off b =
-    t.modified <- off :: t.modified;
-    if inside t off then
-      Bigstring.set t.data (Int64.to_int_exn off)
-        (Char.of_int_exn (b land 0xff))
-    else Hashtbl.set t.extra ~key:off ~data:(b land 0xff)
-
+  let set t off b = Hashtbl.set t.modified ~key:off ~data:(b land 0xff)
   let shift ~little n i = 8 * if little then i else n - i - 1
 
   let read t ~little off n =
@@ -160,7 +150,8 @@ module Memory = struct
   (* groups the modified bytes into runs of at most eight bytes *)
   let patches t ~little =
     let emit (start, len) = (start, len, read t ~little start len) in
-    List.dedup_and_sort t.modified ~compare:Int64.compare
+    Hashtbl.keys t.modified
+    |> List.sort ~compare:Int64.compare
     |> List.fold ~init:([], None) ~f:(fun (acc, run) off ->
         match run with
         | Some (start, len) when len < 8 && Int64.(start + of_int len = off) ->
@@ -192,6 +183,10 @@ type env = {
 }
 
 type result = Done | Unsupported
+
+(* [Outside_of_section (p, name)] the relocation at [p] accesses bytes
+   outside of the section [name] *)
+exception Outside_of_section of int64 * string
 
 type handler = {
   prescan : site -> unit;
@@ -654,7 +649,7 @@ let riscv env =
      64-bit number takes at most 10 bytes *)
   let uleb site f =
     let rec length n =
-      if Int.(n >= 10) || site.ld n 1 land 0x80L = 0L then Int.(n + 1)
+      if Int.(n >= 9) || site.ld n 1 land 0x80L = 0L then Int.(n + 1)
       else length Int.(n + 1)
     in
     let n = length 0 in
@@ -740,7 +735,19 @@ let handler { machine; width; _ } =
   | _ -> None
 
 let null_symbol =
-  { name = ""; shndx = Elf.shn_undef; value = 0L; size = 0L; typ = 0; bind = 0 }
+  {
+    name = "";
+    shndx = Elf.shn_undef;
+    extended = false;
+    value = 0L;
+    size = 0L;
+    typ = 0;
+    bind = 0;
+  }
+
+(* [special sym shn] the symbol has the special section index [shn],
+   an extended index is never special *)
+let special (sym : symbol) shn = (not sym.extended) && sym.shndx = shn
 
 (* the offsets from the GOT of the symbols defined by the linker *)
 let linker_symbol machine (sym : symbol) =
@@ -751,7 +758,7 @@ let linker_symbol machine (sym : symbol) =
   | _ -> None
 
 let is_external machine (sym : symbol) =
-  sym.shndx = Elf.shn_undef
+  special sym Elf.shn_undef
   && (not (String.is_empty sym.name))
   && Option.is_none (linker_symbol machine sym)
 
@@ -813,7 +820,7 @@ let link input =
   let commons_start = !cursor in
   let commons = Hashtbl.create (module Int) in
   Map.iteri input.symbols ~f:(fun ~key ~data:sym ->
-      if Int.(sym.shndx = Elf.shn_common) then
+      if special sym Elf.shn_common then
         Hashtbl.set commons ~key ~data:(place sym.size sym.value));
   let commons_region = synthetic ~w:true "%common" commons_start in
   cursor := align_up !cursor wordsize;
@@ -836,23 +843,26 @@ let link input =
         slot)
   in
   let resolve index (sym : symbol) =
-    if Int.(sym.shndx = Elf.shn_undef) then
+    if special sym Elf.shn_undef then
       if String.is_empty sym.name then Some 0L
       else
         match linker_symbol input.machine sym with
         | Some off -> Some (got_base + off)
         | None -> Hashtbl.find externals sym.name
-    else if Int.(sym.shndx = Elf.shn_abs) then Some sym.value
-    else if Int.(sym.shndx = Elf.shn_common) then Hashtbl.find commons index
-    else if Int.(sym.shndx >= Elf.shn_loreserve) then None
+    else if special sym Elf.shn_abs then Some sym.value
+    else if special sym Elf.shn_common then Hashtbl.find commons index
+    else if (not sym.extended) && Int.(sym.shndx >= Elf.shn_loreserve) then None
     else
       Hashtbl.find section_addrs sym.shndx
       |> Option.map ~f:(fun addr -> addr + sym.value)
   in
+  (* the relocated sections, i.e., the allocated sections with contents *)
   let section_table =
     let table = Hashtbl.create (module Int) in
     List.iter sections ~f:(fun sec ->
-        Hashtbl.set table ~key:sec.index ~data:sec);
+        if
+          Hashtbl.mem section_addrs sec.index && Int.(sec.typ <> Elf.sht_nobits)
+        then Hashtbl.set table ~key:sec.index ~data:sec);
     table
   in
   let references = ref [] in
@@ -862,7 +872,7 @@ let link input =
           ( Hashtbl.find section_table rel.section,
             Hashtbl.find section_addrs rel.section )
         with
-        | Some sec, Some base when Int.(sec.typ <> Elf.sht_nobits) -> (
+        | Some sec, Some base -> (
             let sym =
               Map.find input.symbols rel.symbol
               |> Option.value ~default:null_symbol
@@ -880,8 +890,23 @@ let link input =
             | Some s ->
                 if is_external input.machine sym then
                   references := (p, sym.name) :: !references;
-                let ld little at n = Memory.read mem ~little (off + of_int at) n
+                (* the accessed bytes must lie inside of the section and
+                   of the file, otherwise they would clobber the
+                   neighboring section or the GOT, which is stored past
+                   the end of the file *)
+                let check at n =
+                  let at = rel.offset + of_int at in
+                  if
+                    at < 0L
+                    || at + of_int n > sec.size
+                    || sec.off + at + of_int n > Memory.length mem
+                  then raise (Outside_of_section (p, sec.name))
+                in
+                let ld little at n =
+                  check at n;
+                  Memory.read mem ~little (off + of_int at) n
                 and st little at n x =
+                  check at n;
                   Memory.write mem ~little (off + of_int at) n x
                 in
                 Some
@@ -907,13 +932,21 @@ let link input =
   | None -> ()
   | Some create ->
       let h = create { got; got_base } in
-      List.iter sites ~f:h.prescan;
+      let guard f x =
+        try f x
+        with Outside_of_section (p, name) ->
+          warn "relocation at %Lx accesses data outside of the section %s" p
+            name
+      in
+      List.iter sites ~f:(guard h.prescan);
       let unsupported = Hashtbl.create (module Int) in
-      List.iter sites ~f:(fun site ->
-          match h.apply site with
-          | Done -> ()
-          | Unsupported -> Hashtbl.incr unsupported site.rel.typ);
-      h.finish ();
+      List.iter sites
+        ~f:
+          (guard (fun site ->
+               match h.apply site with
+               | Done -> ()
+               | Unsupported -> Hashtbl.incr unsupported site.rel.typ));
+      guard h.finish ();
       Hashtbl.iteri unsupported ~f:(fun ~key ~data ->
           warn "%d relocations of type %d (machine %d) were not applied" data
             key input.machine));
@@ -922,7 +955,10 @@ let link input =
     Map.fold_right input.symbols ~init:[] ~f:(fun ~key ~data:sym acc ->
         let is_code = is_function sym && not (String.is_empty sym.name) in
         match resolve key sym with
-        | Some value when is_code && Hashtbl.mem section_addrs sym.shndx ->
+        | Some value
+          when is_code
+               && (sym.extended || Int.(sym.shndx < Elf.shn_loreserve))
+               && Hashtbl.mem section_addrs sym.shndx ->
             let addr =
               if Int.(input.machine = Elf.em_arm) then value land lnot 1L
               else value
