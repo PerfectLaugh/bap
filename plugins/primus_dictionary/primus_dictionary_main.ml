@@ -23,83 +23,92 @@ module Pre (Machine : Primus.Machine.S) = struct
 
   let nil = Value.b0
   let bool = function false -> nil | true -> Value.b1
+
+  module Closure = Primus.Lisp.Closure.Make (Machine)
+
+  (* a closure is applied to as many arguments as its type declares,
+     unless the program is ill-typed (the type errors don't stop it) *)
+  let wrong_arity () =
+    Closure.name >>= fun name ->
+    Machine.raise
+      (Primus.Lisp.Runtime_error (sprintf "%s: wrong number of arguments" name))
 end
 
 module Add (Machine : Primus.Machine.S) = struct
-  [@@@warning "-P"]
-
   include Pre (Machine)
 
-  let run [ dic; key; data ] =
-    Machine.Local.update state ~f:(fun s ->
-        {
-          dicts =
-            Map.update s.dicts dic ~f:(function
-              | None -> pair key data
-              | Some dict -> add key data dict);
-        })
-    >>| fun () -> key
+  let run = function
+    | [ dic; key; data ] ->
+        Machine.Local.update state ~f:(fun s ->
+            {
+              dicts =
+                Map.update s.dicts dic ~f:(function
+                  | None -> pair key data
+                  | Some dict -> add key data dict);
+            })
+        >>| fun () -> key
+    | _ -> wrong_arity ()
 end
 
 module Get (Machine : Primus.Machine.S) = struct
-  [@@@warning "-P"]
-
   include Pre (Machine)
 
-  let run [ dic; key ] =
-    Machine.Local.get state >>= fun s ->
-    match Map.find s.dicts dic with
-    | None -> nil
-    | Some { dict } -> (
-        match Map.find dict key with None -> nil | Some x -> Machine.return x)
+  let run = function
+    | [ dic; key ] -> (
+        Machine.Local.get state >>= fun s ->
+        match Map.find s.dicts dic with
+        | None -> nil
+        | Some { dict } -> (
+            match Map.find dict key with
+            | None -> nil
+            | Some x -> Machine.return x))
+    | _ -> wrong_arity ()
 end
 
 module Next (Machine : Primus.Machine.S) = struct
-  [@@@warning "-P"]
-
   include Pre (Machine)
 
-  let run [ dic; key ] =
-    Machine.Local.get state >>= fun s ->
-    match Map.find s.dicts dic with
-    | None -> nil
-    | Some { dict } -> (
-        match Map.closest_key dict `Greater_than key with
+  let run = function
+    | [ dic; key ] -> (
+        Machine.Local.get state >>= fun s ->
+        match Map.find s.dicts dic with
         | None -> nil
-        | Some (x, _) -> Machine.return x)
+        | Some { dict } -> (
+            match Map.closest_key dict `Greater_than key with
+            | None -> nil
+            | Some (x, _) -> Machine.return x))
+    | _ -> wrong_arity ()
 end
 
 module First (Machine : Primus.Machine.S) = struct
-  [@@@warning "-P"]
-
   include Pre (Machine)
 
-  let run [ dic ] =
-    Machine.Local.get state >>= fun s ->
-    match Map.find s.dicts dic with
-    | None -> nil
-    | Some { dict } -> (
-        match Map.min_elt dict with
+  let run = function
+    | [ dic ] -> (
+        Machine.Local.get state >>= fun s ->
+        match Map.find s.dicts dic with
         | None -> nil
-        | Some (x, _) -> Machine.return x)
+        | Some { dict } -> (
+            match Map.min_elt dict with
+            | None -> nil
+            | Some (x, _) -> Machine.return x))
+    | _ -> wrong_arity ()
 end
 
 module Length (Machine : Primus.Machine.S) = struct
-  [@@@warning "-P"]
-
   include Pre (Machine)
 
-  let run [ dic ] =
-    Machine.gets Project.target >>| Theory.Target.bits >>= fun width ->
-    Machine.Local.get state >>= fun s ->
-    match Map.find s.dicts dic with
-    | None -> nil
-    | Some { dict } -> Value.of_int ~width (Map.length dict)
+  let run = function
+    | [ dic ] -> (
+        Machine.gets Project.target >>| Theory.Target.bits >>= fun width ->
+        Machine.Local.get state >>= fun s ->
+        match Map.find s.dicts dic with
+        | None -> nil
+        | Some { dict } -> Value.of_int ~width (Map.length dict))
+    | _ -> wrong_arity ()
 end
 
 module Del (Machine : Primus.Machine.S) = struct
-  [@@@warning "-P"]
-
   include Pre (Machine)
 
   let run = function
@@ -116,18 +125,19 @@ module Del (Machine : Primus.Machine.S) = struct
                   | Some { dict } -> Some { dict = Map.remove dict key });
             })
         >>= fun () -> nil
+    | _ -> wrong_arity ()
 end
 
 module Has (Machine : Primus.Machine.S) = struct
-  [@@@warning "-P"]
-
   include Pre (Machine)
 
-  let run [ dic; key ] =
-    Machine.Local.get state >>= fun { dicts } ->
-    match Map.find dicts dic with
-    | None -> nil
-    | Some { dict } -> bool (Map.mem dict key)
+  let run = function
+    | [ dic; key ] -> (
+        Machine.Local.get state >>= fun { dicts } ->
+        match Map.find dicts dic with
+        | None -> nil
+        | Some { dict } -> bool (Map.mem dict key))
+    | _ -> wrong_arity ()
 end
 
 module Main (Machine : Primus.Machine.S) = struct

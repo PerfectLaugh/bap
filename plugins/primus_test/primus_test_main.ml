@@ -266,24 +266,37 @@ module Incident = struct
           | None -> Value.of_int 1 ~width:63
           | Some (k, _) -> Value.succ k)
 
-    [@@@warning "-P"]
+    module Closure = Primus.Lisp.Closure.Make (Machine)
 
-    let run (name :: locations) =
-      Value.Symbol.of_value name >>= fun name ->
-      !!report (name, locations) >>= fun () ->
-      Machine.Global.get Location.state >>= fun s ->
-      Location.classify s name locations
-        ~new_representative:(fun id cls ->
-          !!report_new_instance (name, id, locations) >>= fun () ->
-          !!report_new_representative (name, id, locations) >>= fun () ->
-          Machine.Global.update Location.state ~f:(Location.set_cls name id cls))
-        ~new_instance:(fun id -> !!report_new_instance (name, id, locations))
-        ~new_class:(fun cls ->
-          next name s.incidents >>= fun id ->
-          !!report_new_class (name, id, locations) >>= fun () ->
-          !!report_new_instance (name, id, locations) >>= fun () ->
-          Machine.Global.update Location.state ~f:(Location.set_cls name id cls))
-      >>= fun () -> Value.b1
+    (* a closure is applied to as many arguments as its type declares,
+       unless the program is ill-typed (the type errors don't stop it) *)
+    let wrong_arity () =
+      Closure.name >>= fun name ->
+      Machine.raise
+        (Primus.Lisp.Runtime_error
+           (sprintf "%s: wrong number of arguments" name))
+
+    let run = function
+      | name :: locations ->
+          Value.Symbol.of_value name >>= fun name ->
+          !!report (name, locations) >>= fun () ->
+          Machine.Global.get Location.state >>= fun s ->
+          Location.classify s name locations
+            ~new_representative:(fun id cls ->
+              !!report_new_instance (name, id, locations) >>= fun () ->
+              !!report_new_representative (name, id, locations) >>= fun () ->
+              Machine.Global.update Location.state
+                ~f:(Location.set_cls name id cls))
+            ~new_instance:(fun id ->
+              !!report_new_instance (name, id, locations))
+            ~new_class:(fun cls ->
+              next name s.incidents >>= fun id ->
+              !!report_new_class (name, id, locations) >>= fun () ->
+              !!report_new_instance (name, id, locations) >>= fun () ->
+              Machine.Global.update Location.state
+                ~f:(Location.set_cls name id cls))
+          >>= fun () -> Value.b1
+      | _ -> wrong_arity ()
   end
 end
 

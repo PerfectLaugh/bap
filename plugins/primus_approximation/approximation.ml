@@ -209,29 +209,38 @@ module Approximate (Machine : Primus.Machine.S) = struct
 
   let int_of_value x = Primus.Value.to_word x |> Word.to_int_exn
 
-  [@@@warning "-P"]
+  module Closure = Primus.Lisp.Closure.Make (Machine)
 
-  let run [ name; size; x ] =
-    let open Machine.Syntax in
-    let size = int_of_value size in
-    Value.Symbol.of_value name >>= fun name ->
-    let elementry_function =
-      match parse_op name with Some op -> op | _ -> assert false
-    in
-    let coefficients =
-      let name = match elementry_function with Sin | Cos -> "sin" in
-      match Hashtbl.find table name with
-      | Some coefs -> coefs
-      | _ -> assert false
-    in
-    let vx = Bap.Std.Var.create "v" (Type.imm size) in
-    let exp = Horner.build elementry_function vx coefficients in
-    match exp with
-    | None -> assert false
-    | Some e ->
-        Eval.set vx x >>= fun () ->
-        printf "%a\n" Exp.ppo e;
-        Eval.exp e
+  (* a closure is applied to as many arguments as its type declares,
+     unless the program is ill-typed (the type errors don't stop it) *)
+  let wrong_arity () =
+    Closure.name >>= fun name ->
+    Machine.raise
+      (Primus.Lisp.Runtime_error (sprintf "%s: wrong number of arguments" name))
+
+  let run = function
+    | [ name; size; x ] -> (
+        let open Machine.Syntax in
+        let size = int_of_value size in
+        Value.Symbol.of_value name >>= fun name ->
+        let elementry_function =
+          match parse_op name with Some op -> op | _ -> assert false
+        in
+        let coefficients =
+          let name = match elementry_function with Sin | Cos -> "sin" in
+          match Hashtbl.find table name with
+          | Some coefs -> coefs
+          | _ -> assert false
+        in
+        let vx = Bap.Std.Var.create "v" (Type.imm size) in
+        let exp = Horner.build elementry_function vx coefficients in
+        match exp with
+        | None -> assert false
+        | Some e ->
+            Eval.set vx x >>= fun () ->
+            printf "%a\n" Exp.ppo e;
+            Eval.exp e)
+    | _ -> wrong_arity ()
 end
 
 module Main (Machine : Primus.Machine.S) = struct

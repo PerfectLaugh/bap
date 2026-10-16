@@ -96,100 +96,111 @@ let init redirections =
         else Value.succ ptr >>= loop (c :: chars)
       in
       loop [] ptr
+
+    module Closure = Primus.Lisp.Closure.Make (Machine)
+
+    (* a closure is applied to as many arguments as its type declares,
+       unless the program is ill-typed (the type errors don't stop it) *)
+    let wrong_arity () =
+      Closure.name >>= fun name ->
+      Machine.raise
+        (Primus.Lisp.Runtime_error
+           (sprintf "%s: wrong number of arguments" name))
   end in
   let module Open (Machine : Primus.Machine.S) = struct
     include Lib (Machine)
 
-    [@@@warning "-P"]
-
-    let run [ path ] =
-      string_of_charp path >>= fun path ->
-      Machine.Local.get state >>= fun { redirections } ->
-      match Map.find redirections path with
-      | None -> error
-      | Some path -> (
-          match try_open path with
-          | Error _ -> error
-          | Ok channel ->
-              Machine.Local.get state >>= fun s ->
-              let fd = next_fd s.channels in
-              Machine.Local.put state
-                {
-                  s with
-                  channels =
-                    Map.set s.channels ~key:(next_fd s.channels) ~data:channel;
-                }
-              >>= fun () ->
-              addr_width >>= fun width -> Value.of_int ~width fd)
+    let run = function
+      | [ path ] -> (
+          string_of_charp path >>= fun path ->
+          Machine.Local.get state >>= fun { redirections } ->
+          match Map.find redirections path with
+          | None -> error
+          | Some path -> (
+              match try_open path with
+              | Error _ -> error
+              | Ok channel ->
+                  Machine.Local.get state >>= fun s ->
+                  let fd = next_fd s.channels in
+                  Machine.Local.put state
+                    {
+                      s with
+                      channels =
+                        Map.set s.channels ~key:(next_fd s.channels)
+                          ~data:channel;
+                    }
+                  >>= fun () ->
+                  addr_width >>= fun width -> Value.of_int ~width fd))
+      | _ -> wrong_arity ()
   end in
   let module Close (Machine : Primus.Machine.S) = struct
     include Lib (Machine)
 
-    [@@@warning "-P"]
-
-    let run [ fd ] =
-      value_to_fd fd |> function
-      | None -> error
-      | Some fd ->
-          Machine.Local.get state >>= fun s ->
-          if Map.mem s.channels fd then
-            Machine.Local.put state
-              { s with channels = Map.remove s.channels fd }
-            >>= fun () -> ok
-          else error
+    let run = function
+      | [ fd ] -> (
+          value_to_fd fd |> function
+          | None -> error
+          | Some fd ->
+              Machine.Local.get state >>= fun s ->
+              if Map.mem s.channels fd then
+                Machine.Local.put state
+                  { s with channels = Map.remove s.channels fd }
+                >>= fun () -> ok
+              else error)
+      | _ -> wrong_arity ()
   end in
   let module Output (Machine : Primus.Machine.S) = struct
     include Lib (Machine)
 
-    [@@@warning "-P"]
-
-    let run (fd :: xs) =
-      value_to_fd fd |> function
-      | None -> error
-      | Some fd -> (
-          Machine.Local.get state >>= fun { channels } ->
-          match Map.find channels fd with
-          | Some { output = Some ch } ->
-              List.iter xs ~f:(fun w ->
-                  Word.enum_chars (Value.to_word w) LittleEndian
-                  |> Seq.hd
-                  |> Option.iter ~f:(Out_channel.output_char ch));
-              ok
-          | _ -> error)
+    let run = function
+      | fd :: xs -> (
+          value_to_fd fd |> function
+          | None -> error
+          | Some fd -> (
+              Machine.Local.get state >>= fun { channels } ->
+              match Map.find channels fd with
+              | Some { output = Some ch } ->
+                  List.iter xs ~f:(fun w ->
+                      Word.enum_chars (Value.to_word w) LittleEndian
+                      |> Seq.hd
+                      |> Option.iter ~f:(Out_channel.output_char ch));
+                  ok
+              | _ -> error))
+      | _ -> wrong_arity ()
   end in
   let module Flush (Machine : Primus.Machine.S) = struct
     include Lib (Machine)
 
-    [@@@warning "-P"]
-
-    let run [ fd ] =
-      value_to_fd fd |> function
-      | None -> error
-      | Some fd -> (
-          Machine.Local.get state >>= fun s ->
-          match Map.find s.channels fd with
+    let run = function
+      | [ fd ] -> (
+          value_to_fd fd |> function
           | None -> error
-          | Some chan -> (
-              match try_flush chan with Error _ -> error | Ok () -> ok))
+          | Some fd -> (
+              Machine.Local.get state >>= fun s ->
+              match Map.find s.channels fd with
+              | None -> error
+              | Some chan -> (
+                  match try_flush chan with Error _ -> error | Ok () -> ok)))
+      | _ -> wrong_arity ()
   end in
   let module Input (Machine : Primus.Machine.S) = struct
     include Lib (Machine)
 
-    [@@@warning "-P"]
-
-    let run [ fd ] =
-      value_to_fd fd |> function
-      | None -> error
-      | Some fd -> (
-          Machine.Local.get state >>= fun s ->
-          match Map.find s.channels fd with
+    let run = function
+      | [ fd ] -> (
+          value_to_fd fd |> function
           | None -> error
-          | Some { input = None } -> error
-          | Some { input = Some ch } -> (
-              match input_byte ch with
-              | Error _ -> error
-              | Ok None -> error
-              | Ok (Some ch) -> int ch))
+          | Some fd -> (
+              Machine.Local.get state >>= fun s ->
+              match Map.find s.channels fd with
+              | None -> error
+              | Some { input = None } -> error
+              | Some { input = Some ch } -> (
+                  match input_byte ch with
+                  | Error _ -> error
+                  | Ok None -> error
+                  | Ok (Some ch) -> int ch)))
+      | _ -> wrong_arity ()
   end in
   let module Primitives (Machine : Primus.Machine.S) = struct
     open Machine.Syntax

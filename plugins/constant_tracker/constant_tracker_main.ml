@@ -37,10 +37,19 @@ module IsConstBuffer (Machine : Primus.Machine.S) = struct
     in
     check (Value.to_word ptr) (Value.to_word len)
 
-  [@@@warning "-P"]
+  module Closure = Primus.Lisp.Closure.Make (Machine)
 
-  let run [ ptr; len ] =
-    Machine.Local.get state >>= fun s -> points_to_static_data s ptr len
+  (* a closure is applied to as many arguments as its type declares,
+     unless the program is ill-typed (the type errors don't stop it) *)
+  let wrong_arity () =
+    Closure.name >>= fun name ->
+    Machine.raise
+      (Primus.Lisp.Runtime_error (sprintf "%s: wrong number of arguments" name))
+
+  let run = function
+    | [ ptr; len ] ->
+        Machine.Local.get state >>= fun s -> points_to_static_data s ptr len
+    | _ -> wrong_arity ()
 end
 
 module Primitives (Machine : Primus.Machine.S) = struct

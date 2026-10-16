@@ -27,91 +27,101 @@ module Pre (Machine : Primus.Machine.S) = struct
   let nil = Value.zero 1
   let bool = function true -> nil | false -> Value.one 1_
   let failf = Lisp.failf
+
+  module Closure = Primus.Lisp.Closure.Make (Machine)
+
+  (* a closure is applied to as many arguments as its type declares,
+     unless the program is ill-typed (the type errors don't stop it) *)
+  let wrong_arity () =
+    Closure.name >>= fun name ->
+    Machine.raise
+      (Primus.Lisp.Runtime_error (sprintf "%s: wrong number of arguments" name))
 end
 
 module Create (Machine : Primus.Machine.S) = struct
   include Pre (Machine)
 
-  [@@@warning "-P"]
-
-  let run [ reg; lower; upper ] =
-    Machine.Local.update state ~f:(fun { regions } ->
-        {
-          regions =
-            Map.update regions reg ~f:(function
-              | None -> Regions.singleton { lower; upper } ()
-              | Some regs -> Regions.add regs { lower; upper } ());
-        })
-    >>| fun () -> reg
+  let run = function
+    | [ reg; lower; upper ] ->
+        Machine.Local.update state ~f:(fun { regions } ->
+            {
+              regions =
+                Map.update regions reg ~f:(function
+                  | None -> Regions.singleton { lower; upper } ()
+                  | Some regs -> Regions.add regs { lower; upper } ());
+            })
+        >>| fun () -> reg
+    | _ -> wrong_arity ()
 end
 
 module Lower (Machine : Primus.Machine.S) = struct
   include Pre (Machine)
 
-  [@@@warning "-P"]
-
-  let run [ reg; addr ] =
-    Machine.Local.get state >>= fun { regions } ->
-    match Map.find regions reg with
-    | None -> nil
-    | Some map -> (
-        match Seq.hd (Regions.lookup map addr) with
+  let run = function
+    | [ reg; addr ] -> (
+        Machine.Local.get state >>= fun { regions } ->
+        match Map.find regions reg with
         | None -> nil
-        | Some ({ lower }, ()) -> Machine.return lower)
+        | Some map -> (
+            match Seq.hd (Regions.lookup map addr) with
+            | None -> nil
+            | Some ({ lower }, ()) -> Machine.return lower))
+    | _ -> wrong_arity ()
 end
 
 module Upper (Machine : Primus.Machine.S) = struct
   include Pre (Machine)
 
-  [@@@warning "-P"]
-
-  let run [ reg; addr ] =
-    Machine.Local.get state >>= fun { regions } ->
-    match Map.find regions reg with
-    | None -> nil
-    | Some map -> (
-        match Seq.to_list_rev (Regions.lookup map addr) with
-        | [] -> nil
-        | ({ upper }, ()) :: _ -> Machine.return upper)
+  let run = function
+    | [ reg; addr ] -> (
+        Machine.Local.get state >>= fun { regions } ->
+        match Map.find regions reg with
+        | None -> nil
+        | Some map -> (
+            match Seq.to_list_rev (Regions.lookup map addr) with
+            | [] -> nil
+            | ({ upper }, ()) :: _ -> Machine.return upper))
+    | _ -> wrong_arity ()
 end
 
 module Count (Machine : Primus.Machine.S) = struct
   include Pre (Machine)
 
-  [@@@warning "-P"]
-
-  let run [ reg ] =
-    Machine.gets Project.target >>| Theory.Target.bits >>= fun width ->
-    Machine.Local.get state >>= fun { regions } ->
-    match Map.find regions reg with
-    | None -> nil
-    | Some map -> Value.of_int ~width (Regions.length map)
+  let run = function
+    | [ reg ] -> (
+        Machine.gets Project.target >>| Theory.Target.bits >>= fun width ->
+        Machine.Local.get state >>= fun { regions } ->
+        match Map.find regions reg with
+        | None -> nil
+        | Some map -> Value.of_int ~width (Regions.length map))
+    | _ -> wrong_arity ()
 end
 
 module Move (Machine : Primus.Machine.S) = struct
   include Pre (Machine)
 
-  [@@@warning "-P"]
-
-  let run [ dst; src; addr ] =
-    Machine.Local.get state >>= fun { regions } ->
-    match Map.find regions src with
-    | None -> nil
-    | Some reg ->
-        let reg' =
-          match Map.find regions dst with
-          | None -> Regions.empty
-          | Some reg' -> reg'
-        in
-        let reg, reg', n =
-          Regions.lookup reg addr
-          |> Seq.fold ~init:(reg, reg', 0) ~f:(fun (reg, reg', n) (r, ()) ->
-              (Regions.remove reg r, Regions.add reg' r (), n + 1))
-        in
-        let regions =
-          Map.set (Map.set regions ~key:src ~data:reg) ~key:dst ~data:reg'
-        in
-        Machine.Local.put state { regions } >>= fun () -> Value.of_bool (n > 0)
+  let run = function
+    | [ dst; src; addr ] -> (
+        Machine.Local.get state >>= fun { regions } ->
+        match Map.find regions src with
+        | None -> nil
+        | Some reg ->
+            let reg' =
+              match Map.find regions dst with
+              | None -> Regions.empty
+              | Some reg' -> reg'
+            in
+            let reg, reg', n =
+              Regions.lookup reg addr
+              |> Seq.fold ~init:(reg, reg', 0) ~f:(fun (reg, reg', n) (r, ()) ->
+                  (Regions.remove reg r, Regions.add reg' r (), n + 1))
+            in
+            let regions =
+              Map.set (Map.set regions ~key:src ~data:reg) ~key:dst ~data:reg'
+            in
+            Machine.Local.put state { regions } >>= fun () ->
+            Value.of_bool (n > 0))
+    | _ -> wrong_arity ()
 end
 
 module Main (Machine : Primus.Machine.S) = struct

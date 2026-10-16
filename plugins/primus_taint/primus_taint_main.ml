@@ -26,33 +26,42 @@ module Pre (Machine : Primus.Machine.S) = struct
 
   let kind = Kind.to_value
   let taint = Object.to_value
+
+  module Closure = Primus.Lisp.Closure.Make (Machine)
+
+  (* a closure is applied to as many arguments as its type declares,
+     unless the program is ill-typed (the type errors don't stop it) *)
+  let wrong_arity () =
+    Closure.name >>= fun name ->
+    Machine.raise
+      (Primus.Lisp.Runtime_error (sprintf "%s: wrong number of arguments" name))
 end
 
 module IntroDirect (Machine : Primus.Machine.S) = struct
   include Pre (Machine)
 
-  [@@@warning "-P"]
-
-  let run [ k; v ] = Kind.of_value k >>= Tracker.new_direct v >>= taint
+  let run = function
+    | [ k; v ] -> Kind.of_value k >>= Tracker.new_direct v >>= taint
+    | _ -> wrong_arity ()
 end
 
 module IntroIndirect (Machine : Primus.Machine.S) = struct
   include Pre (Machine)
 
-  [@@@warning "-P"]
-
-  let run [ k; v; n ] =
-    Kind.of_value k >>= Tracker.new_indirect ~addr:v ~len:n >>= taint
+  let run = function
+    | [ k; v; n ] ->
+        Kind.of_value k >>= Tracker.new_indirect ~addr:v ~len:n >>= taint
+    | _ -> wrong_arity ()
 end
 
 module Get (Machine : Primus.Machine.S) = struct
   include Pre (Machine)
 
-  [@@@warning "-P"]
-
-  let run rel [ k; v ] =
-    Kind.of_value k >>= fun k ->
-    Tracker.lookup v rel >>= optional taint first_of_kind k
+  let run rel = function
+    | [ k; v ] ->
+        Kind.of_value k >>= fun k ->
+        Tracker.lookup v rel >>= optional taint first_of_kind k
+    | _ -> wrong_arity ()
 end
 
 module GetDirect (Machine : Primus.Machine.S) = struct
@@ -70,11 +79,11 @@ end
 module Sanitize (Machine : Primus.Machine.S) = struct
   include Pre (Machine)
 
-  [@@@warning "-P"]
-
-  let run rel [ k; v ] =
-    Kind.of_value k >>= fun k ->
-    Tracker.sanitize v rel k >>| fun () -> v
+  let run rel = function
+    | [ k; v ] ->
+        Kind.of_value k >>= fun k ->
+        Tracker.sanitize v rel k >>| fun () -> v
+    | _ -> wrong_arity ()
 end
 
 module SanitizeDirect (Machine : Primus.Machine.S) = struct
@@ -92,32 +101,30 @@ end
 module TaintKind (Machine : Primus.Machine.S) = struct
   include Pre (Machine)
 
-  [@@@warning "-P"]
-
-  let run [ t ] = Object.of_value t >>= Object.kind >>= Kind.to_value
+  let run = function
+    | [ t ] -> Object.of_value t >>= Object.kind >>= Kind.to_value
+    | _ -> wrong_arity ()
 end
 
 module PolicySelect (Machine : Primus.Machine.S) = struct
   include Pre (Machine)
-
-  [@@@warning "-P"]
-
   module Policy = Taint.Propagation.Policy.Make (Machine)
 
-  let run [ k; p ] =
-    Kind.of_value k >>= fun k ->
-    Policy.of_value p >>= fun p ->
-    Policy.select p k >>= fun () -> nil
+  let run = function
+    | [ k; p ] ->
+        Kind.of_value k >>= fun k ->
+        Policy.of_value p >>= fun p ->
+        Policy.select p k >>= fun () -> nil
+    | _ -> wrong_arity ()
 end
 
 module PolicySetDefault (Machine : Primus.Machine.S) = struct
   include Pre (Machine)
-
-  [@@@warning "-P"]
-
   module Policy = Taint.Propagation.Policy.Make (Machine)
 
-  let run [ p ] = Policy.of_value p >>= Policy.set_default >>= fun () -> nil
+  let run = function
+    | [ p ] -> Policy.of_value p >>= Policy.set_default >>= fun () -> nil
+    | _ -> wrong_arity ()
 end
 
 module Setup (Machine : Primus.Machine.S) = struct
