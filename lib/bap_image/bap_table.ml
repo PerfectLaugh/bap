@@ -250,17 +250,17 @@ let find_map ?start ?until tab ~f =
 let find_if ?start ?until tab ~f =
   find_map ?start ?until tab ~f:(fun x -> if f x then Some x else None)
 
-(** TODO: this very inefficient implementation uses O(N) time, but we should
-    provide this, or users will create their own implementations. Later, this
-    should be optimized using interval tree. *)
+(* the regions of a table don't intersect and are ordered by their
+   lowest addresses, so the only region that may contain [addr] is the
+   last one that starts at or below it *)
 let find_addr tab (addr : addr) : (mem * 'a) option =
-  with_return (fun cc ->
-      iteri tab ~f:(fun mem x ->
-          match Mem.compare_with mem addr with
-          | `addr_is_inside -> cc.return (Some (mem, x))
-          | `addr_is_below -> cc.return None
-          | `addr_is_above -> ());
-      None)
+  Map.binary_search tab.map
+    ~compare:(fun ~key ~data:_ addr -> Addr.compare (Mem.min_addr key) addr)
+    `Last_less_than_or_equal_to addr
+  |> Option.filter ~f:(fun (mem, _) ->
+      match Mem.compare_with mem addr with
+      | `addr_is_inside -> true
+      | `addr_is_below | `addr_is_above -> false)
 
 let make_map map add ?start ?until tab ~f =
   if Option.is_none start && Option.is_none until then

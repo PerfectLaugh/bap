@@ -64,6 +64,14 @@ let test_intersections ctxt ~start_addr ~size ~expect =
   let printer l = Sexp.to_string_hum (sexp_of_list sexp_of_string l) in
   assert_equal ~ctxt ~printer expect regions
 
+(* the table [tab] maps [0x10,0x1f] to "lo" and [0x30,0x3f] to "hi" *)
+let test_find_addr ctxt ~addr ~expect =
+  let result =
+    Table.find_addr tab (create_addr W32 addr) |> Option.map ~f:snd
+  in
+  let printer = Option.value_map ~default:"None" ~f:Fn.id in
+  assert_equal ~ctxt ~printer expect result
+
 let str_printer expect_err = Sexp.to_string_hum (sexp_of_string expect_err)
 
 let test_next ctxt =
@@ -128,6 +136,16 @@ let suite () =
          >:: test_intersections ~start_addr:0x0 ~size:0x11 ~expect:[ "lo" ];
          "intersections9"
          >:: test_intersections ~start_addr:0x0 ~size:0x21 ~expect:[ "lo" ];
+         "find_addr 0x0" >:: test_find_addr ~addr:0x0 ~expect:None;
+         "find_addr 0xf" >:: test_find_addr ~addr:0xf ~expect:None;
+         "find_addr 0x10" >:: test_find_addr ~addr:0x10 ~expect:(Some "lo");
+         "find_addr 0x18" >:: test_find_addr ~addr:0x18 ~expect:(Some "lo");
+         "find_addr 0x1f" >:: test_find_addr ~addr:0x1f ~expect:(Some "lo");
+         "find_addr 0x20" >:: test_find_addr ~addr:0x20 ~expect:None;
+         "find_addr 0x2f" >:: test_find_addr ~addr:0x2f ~expect:None;
+         "find_addr 0x30" >:: test_find_addr ~addr:0x30 ~expect:(Some "hi");
+         "find_addr 0x3f" >:: test_find_addr ~addr:0x3f ~expect:(Some "hi");
+         "find_addr 0x40" >:: test_find_addr ~addr:0x40 ~expect:None;
          "next" >:: test_next;
          "prev" >:: test_prev;
          "min" >:: test_min;

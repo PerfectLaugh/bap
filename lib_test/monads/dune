@@ -1,0 +1,4 @@
+(test
+ (name test_monads)
+ (package monads)
+ (libraries core monads ounit2))

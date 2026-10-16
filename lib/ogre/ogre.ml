@@ -543,23 +543,7 @@ module Exp = struct
 
   module Seq = Sequence
 
-  let rec n_cross_product xs =
-    let open Seq in
-    match next xs with
-    | None -> singleton empty
-    | Some (row, rows) ->
-        row >>= fun elt -> n_cross_product rows >>| append (singleton elt)
-
   let has_all_attributes names data = List.for_all names ~f:(Map.mem data)
-
-  let select names data =
-    Seq.of_list names
-    |> Seq.map ~f:(fun name ->
-        match Map.find data name with
-        | None -> failwithf "precondition fails for %s" name ()
-        | Some values ->
-            Seq.of_list (Entries.to_list values)
-            |> Seq.map ~f:(fun value -> (name, value)))
 
   let parser { Type.parse; typ } inj =
     ( typ,
@@ -687,16 +671,69 @@ module Exp = struct
     List.fold joins ~init:True ~f:(fun cs cls ->
         Syntax.(cs && unify_class names scheme cls))
 
+  (* [join_keys names scheme joins] for each joined attribute (by its
+     position) the field and the earlier attribute's field that it is
+     equal to, so that the attribute could be looked up by that field
+     instead of being enumerated *)
+  let join_keys names scheme joins =
+    let pos = names_index names in
+    List.fold joins ~init:Int.Map.empty ~f:(fun keys cls ->
+        let vars =
+          List.concat_map cls ~f:(vars_of_join names scheme)
+          |> List.map ~f:(fun { attr; field = { Type.fname } } ->
+              (pos attr, fname))
+        in
+        List.fold vars ~init:keys ~f:(fun keys (i, field) ->
+            match List.find vars ~f:(fun (j, _) -> j < i) with
+            | Some earlier when Stdlib.not (Map.mem keys i) ->
+                Map.set keys ~key:i ~data:(field, earlier)
+            | _ -> keys))
+
+  (* An index of entries by the value of a field, each bucket keeps
+     the order of the entries. The join constraints compare the field
+     values as strings, so the index is exact. *)
+  let index_by field entries =
+    let index = Hashtbl.create (module String) in
+    List.iter (List.rev entries) ~f:(fun entry ->
+        Hashtbl.add_multi index
+          ~key:(Map.find_exn entry.fields field)
+          ~data:entry);
+    index
+
+  (* the rows of the cross product of the attributes that satisfy the
+     join constraints, in the order of the cross product. The joined
+     attributes are looked up in an index instead of being enumerated,
+     the other constraints are checked by the caller. *)
+  let joined_rows names scheme joins entries =
+    let keys = join_keys names scheme joins in
+    let tables =
+      List.mapi names ~f:(fun i name ->
+          let entries = Entries.to_list (Map.find_exn entries name) in
+          match Map.find keys i with
+          | None -> fun _ -> entries
+          | Some (field, (j, field')) ->
+              let index = lazy (index_by field entries) in
+              fun prev ->
+                (* [prev] is the partial row in the reverse order *)
+                let earlier = List.nth_exn prev (i - j - 1) in
+                Hashtbl.find_multi (force index)
+                  (Map.find_exn earlier.fields field'))
+    in
+    let rec rows prev = function
+      | [] -> Seq.singleton (Array.of_list_rev prev)
+      | table :: tables ->
+          Seq.of_list (table prev)
+          |> Seq.concat_map ~f:(fun entry -> rows (entry :: prev) tables)
+    in
+    rows [] tables
+
   let eval names joins exp { Doc.scheme; entries } : row seq =
-    let module Error = Monad.Result.Error in
-    let open Error.Syntax in
     let cs = unify names scheme joins in
     let exp = normalize_vars names Syntax.(cs && exp) |> simpl |> lambda in
-    if has_all_attributes names entries then
-      n_cross_product (select names entries)
+    if Stdlib.not (List.is_empty names) && has_all_attributes names entries then
+      joined_rows names scheme joins entries
       |> Seq.filter_map ~f:(fun row ->
-          let row = Seq.map row ~f:snd |> Seq.to_array in
-          if Array.length row > 0 && sat row exp then Some { row } else None)
+          if sat row exp then Some { row } else None)
     else Seq.empty
 
   include Syntax

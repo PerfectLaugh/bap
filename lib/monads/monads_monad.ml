@@ -274,16 +274,32 @@ module Monad = struct
       let plus = ( @ )
     end)
 
-    module Seq = Collection.Delay (struct
-      type 'a t = 'a Sequence.t
+    module Seq = struct
+      include Collection.Delay (struct
+        type 'a t = 'a Sequence.t
 
-      let fold xs ~init ~f finish =
-        Sequence.delayed_fold xs ~init ~f:(fun a x ~k -> f a x k) ~finish
+        let fold xs ~init ~f finish =
+          Sequence.delayed_fold xs ~init ~f:(fun a x ~k -> f a x k) ~finish
 
-      let zero () = Sequence.empty [@@inline]
-      let return x = Sequence.return x [@@inline]
-      let plus = Sequence.append
-    end)
+        let zero () = Sequence.empty [@@inline]
+        let return x = Sequence.return x [@@inline]
+        let plus = Sequence.append
+      end)
+
+      (* The generic implementations build the result by prepending
+         each element with [Sequence.append], which nests the sequence
+         as deep as it is long, so that taking its n-th element costs
+         O(n) and the stack. They are computed on lists instead, with
+         the same order of effects. *)
+      let map xs ~f = List.map (Sequence.to_list xs) ~f >>| Sequence.of_list
+      let all xs = map xs ~f:ident
+
+      let filter_map xs ~f =
+        List.filter_map (Sequence.to_list xs) ~f >>| Sequence.of_list
+
+      let filter xs ~f =
+        List.filter (Sequence.to_list xs) ~f >>| Sequence.of_list
+    end
 
     let void t = Fn.ignore t
     let sequence = List.sequence
