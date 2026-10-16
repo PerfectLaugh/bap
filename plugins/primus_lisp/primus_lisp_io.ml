@@ -202,6 +202,40 @@ let init redirections =
                   | Ok (Some ch) -> int ch)))
       | _ -> wrong_arity ()
   end in
+  let module Seek (Machine : Primus.Machine.S) = struct
+    include Lib (Machine)
+
+    let run = function
+      | [ fd; offset; whence ] -> (
+          match
+            ( value_to_fd fd,
+              Word.to_int64 (Value.to_word offset),
+              Word.to_int (Value.to_word whence) )
+          with
+          | Some fd, Ok offset, Ok whence -> (
+              Machine.Local.get state >>= fun s ->
+              match Map.find s.channels fd with
+              | Some { input = Some ch; _ } -> (
+                  let origin =
+                    match whence with
+                    | 0 -> Some 0L
+                    | 1 -> Some (In_channel.pos ch)
+                    | 2 -> Some (In_channel.length ch)
+                    | _ -> None
+                  in
+                  match origin with
+                  | None -> error
+                  | Some origin -> (
+                      match
+                        Or_error.try_with (fun () ->
+                            In_channel.seek ch Int64.(origin + offset))
+                      with
+                      | Error _ -> error
+                      | Ok () -> ok))
+              | _ -> error)
+          | _ -> error)
+      | _ -> wrong_arity ()
+  end in
   let module Primitives (Machine : Primus.Machine.S) = struct
     open Machine.Syntax
     module Lisp = Primus.Lisp.Make (Machine)
@@ -267,6 +301,13 @@ let init redirections =
             has the descriptor DESC. Returns -1 if no such channel
             exists, or if any IO error occurs, if the channel is not
             readable, or if the channel is in the end-of-file condition.|};
+          def "channel-seek"
+            (tuple [ int; int; int ] @-> int)
+            (module Seek)
+            {|(channel-seek DESC OFFSET WHENCE) changes the current position
+            of a readable channel. WHENCE is interpreted as in fseek: zero
+            seeks from the beginning, one from the current position, and two
+            from the end. Returns zero on success and -1 on failure.|};
           def "channel-output"
             ((one int // all byte) @-> int)
             (module Output)
