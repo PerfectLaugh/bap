@@ -1,5 +1,5 @@
-(test
- (name test_elf_linker)
+(tests
+ (names test_elf_linker test_tables)
  (package bap-llvm)
  (preprocess
   (pps ppx_bap))

@@ -8,41 +8,6 @@
 #include "llvm_elf_loader.hpp"
 #include "llvm_macho_loader.hpp"
 
-static std::string scheme =
-    "(declare abi (name str))\n"
-    "(declare arch (name str))\n"
-    "(declare bits (size int))\n"
-    "(declare is-little-endian (flag bool))\n"
-    "(declare is-executable (flag bool))"
-    "(declare format (name str))\n"
-    "(declare subarch (name str))\n"
-    "(declare system (name str))\n"
-    "(declare vendor (name str))\n"
-    "(declare require (name str))\n"
-    "(declare llvm:code-entry (name str) (off int) (size int))\n"
-    "(declare llvm:base-address (addr int))\n"
-    "(declare llvm:entry-point (addr int))\n"
-    "(declare llvm:macho-symbol (name str) (value int))\n"
-    "(declare llvm:elf-program-header-flags (name str) (ld bool) (r bool) (w bool) (x bool))\n"
-    "(declare llvm:elf-program-header (name str) (off int) (size int))\n"
-    "(declare llvm:name-reference (at int) (name str))\n"
-    "(declare llvm:relocation (at int) (addr int))\n"
-    "(declare llvm:relative-relocation (at int))\n"
-    "(declare llvm:section-entry (name str) (addr int) (size int) (off int))\n"
-    "(declare llvm:section-flags (name str) (r bool) (w bool) (x bool))\n"
-    "(declare llvm:segment-command-flags (name str) (r bool) (w bool) (x bool))\n"
-    "(declare llvm:segment-command (name str) (off int) (size int))\n"
-    "(declare llvm:symbol-entry (name str) (addr int) (size int) (off int) (value int))\n"
-    "(declare llvm:elf-virtual-program-header (name str) (addr int) (size int))\n"
-    "(declare llvm:coff-virtual-section-header (name str) (addr int) (size int))\n"
-    "(declare llvm:virtual-segment-command (name str) (addr int) (size int))\n"
-    "(declare llvm:coff-import-library (name str))\n"
-    "(declare llvm:elf-header (type int) (machine int) (flags int))\n"
-    "(declare llvm:elf-section (index int) (name str) (type int) (flags int) (off int) (size int) (align int))\n"
-    "(declare llvm:elf-symbol (index int) (name str) (section int) (extended bool) (value int) (size int) (type int) (bind int))\n"
-    "(declare llvm:elf-relocation (index int) (section int) (off int) (type int) (symbol int) (addend int) (explicit bool))\n";
-
-
 namespace loader {
 
 using namespace llvm;
@@ -61,14 +26,14 @@ error_or<object::Binary> get_binary(const char* data, std::size_t size) {
 error_or<std::string> unsupported_filetype() { return success(std::string("")); }
 
 template <typename T>
-error_or<std::string> load_base(ogre_doc &s, const object::Binary *binary) {
+error_or<std::string> load_base(tables &s, const object::Binary *binary) {
     if (auto bin = llvm::dyn_cast<T>(binary))
         return load(s, *bin);
     else
         return unsupported_filetype();
 }
 
-error_or<std::string> load_elf(ogre_doc &s, const object::Binary *binary) {
+error_or<std::string> load_elf(tables &s, const object::Binary *binary) {
     if (isa<ELF32LEObjectFile>(*binary))
         return load_base<ELF32LEObjectFile>(s, binary);
     else if (isa<ELF32BEObjectFile>(*binary))
@@ -81,14 +46,14 @@ error_or<std::string> load_elf(ogre_doc &s, const object::Binary *binary) {
         return unsupported_filetype();
 }
 
-error_or<std::string> load_coff(ogre_doc &s,const object::Binary *binary, const char * pdb_path) {
+error_or<std::string> load_coff(tables &s,const object::Binary *binary, const char * pdb_path) {
      if (auto bin = llvm::dyn_cast<COFFObjectFile>(binary))
          return load(s, *bin, pdb_path);
     else
         return unsupported_filetype();
 }
 
-error_or<std::string> load_macho(ogre_doc &s, const object::Binary *binary) {
+error_or<std::string> load_macho(tables &s, const object::Binary *binary) {
     return load_base<MachOObjectFile>(s, binary);
 }
 
@@ -115,8 +80,7 @@ int addr_size(const Triple &target, const object::ObjectFile *obj) {
     }
 }
 
-void emit_common_header(ogre_doc &s, const object::ObjectFile *obj) {
-    s.raw_entry(scheme);
+void emit_common_header(tables &s, const object::ObjectFile *obj) {
     auto target = obj->makeTriple();
     s.entry("arch") << Triple::getArchTypeName(target.getArch());
     s.entry("subarch") << prim::string_of_subarch(target.getSubArch());
@@ -132,7 +96,7 @@ error_or<std::string> load(const char* data, std::size_t size, const char * pdb_
     if (!result) { verbose_fails(result); return unsupported_filetype(); }
     auto object = llvm::dyn_cast<object::ObjectFile>(result.get());
     if (!object) return unsupported_filetype();
-    ogre_doc s;
+    tables s;
     emit_common_header(s, object);
     if (object->isCOFF())   return load_coff(s, object, pdb_path);
     else if (object->isELF())    return load_elf(s, object);

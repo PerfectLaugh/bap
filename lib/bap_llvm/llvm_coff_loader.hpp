@@ -27,7 +27,7 @@ bool is_code_section(const coff_section &sec) {
             sec.Characteristics & COFF::IMAGE_SCN_CNT_CODE);
 }
 
-void emit_section(const coff_section &sec, uint64_t base, bool is_rel, ogre_doc &s) {
+void emit_section(const coff_section &sec, uint64_t base, bool is_rel, tables &s) {
     bool r = static_cast<bool>(sec.Characteristics & COFF::IMAGE_SCN_MEM_READ);
     bool w = static_cast<bool>(sec.Characteristics & COFF::IMAGE_SCN_MEM_WRITE);
     bool x = is_code_section(sec);
@@ -69,7 +69,7 @@ const coff_section * get_coff_section(const coff_obj &obj, std::size_t index) {
 #endif
 
 
-void emit_base_address(const coff_obj &obj, ogre_doc &s) {
+void emit_base_address(const coff_obj &obj, tables &s) {
     s.entry("llvm:base-address") << obj.getImageBase();
 }
 
@@ -111,7 +111,7 @@ bool is_executable(const COFFObjectFile &obj) {
 }
 
 
-void emit_entry_point(const coff_obj &obj, ogre_doc &s) {
+void emit_entry_point(const coff_obj &obj, tables &s) {
     auto entry = 0L;
     if (obj.getBytesInAddress() == 4) {
         if (auto hdr = get_pe32_header(obj))
@@ -128,7 +128,7 @@ uint64_t section_offset(const coff_obj &obj, section_iterator sec) {
     return coff_sec->PointerToRawData;
 }
 
-void emit_relocation(const coff_obj &obj, const RelocationRef &rel, section_iterator sec, ogre_doc &s) {
+void emit_relocation(const coff_obj &obj, const RelocationRef &rel, section_iterator sec, tables &s) {
     auto sym = rel.getSymbol();
     if (sym != prim::end_symbols(obj)) {
         if (auto saddr = prim::section_address(*sec)) {
@@ -141,7 +141,7 @@ void emit_relocation(const coff_obj &obj, const RelocationRef &rel, section_iter
     }
 }
 
-void emit_sections(const coff_obj &obj, ogre_doc &s) {
+void emit_sections(const coff_obj &obj, tables &s) {
     uint64_t base = obj.getImageBase();
     bool is_rel = obj.isRelocatableObject();
     for (auto sec : prim::sections(obj))
@@ -159,7 +159,7 @@ uint64_t get_symbol_value(const SymbolRef &sym) {
 }
 #endif
 
-void emit_symbols(const coff_obj &obj, ogre_doc &s) {
+void emit_symbols(const coff_obj &obj, tables &s) {
     for (auto sized_sym : prim::get_symbols_sizes(obj)) {
         auto sym = sized_sym.first;
         auto name = prim::symbol_name(sym);
@@ -178,7 +178,7 @@ void emit_symbols(const coff_obj &obj, ogre_doc &s) {
     }
 }
 
-void emit_relocations(const coff_obj &obj, ogre_doc &s) {
+void emit_relocations(const coff_obj &obj, tables &s) {
     for (auto sec : prim::sections(obj))
         for (auto rel : prim::relocations(sec)) {
             if (auto rel_sec = prim::relocated_section(sec))
@@ -242,7 +242,7 @@ bool same_sections(const coff_obj &obj, const exported_sym &sym1, const exported
     return (c1 == c2);
 }
 
-void emit_exported_symbols(const coff_obj &obj, exports &syms, ogre_doc &s) {
+void emit_exported_symbols(const coff_obj &obj, exports &syms, tables &s) {
     uint64_t base = obj.getImageBase();
     std::sort(syms.begin(), syms.end(),
               [](const exported_sym &x, const exported_sym &y)
@@ -280,7 +280,7 @@ const data_directory *get_export_table(const coff_obj &obj) {
 }
 #endif // llvm >= 11
 
-void emit_exported_symbols(const coff_obj &obj, ogre_doc &s) {
+void emit_exported_symbols(const coff_obj &obj, tables &s) {
 
     uintptr_t ptr = 0;
     const data_directory *data_entry = get_export_table(obj);
@@ -345,7 +345,7 @@ error_or<uint64_t> symbol_file_offset(const coff_obj &obj, const SymbolRef &sym)
     }
 }
 
-void emit_import_directories(const coff_obj &obj, ogre_doc &s) {
+void emit_import_directories(const coff_obj &obj, tables &s) {
     for (auto dir : obj.import_directories()) {
         StringRef name;
         if (!dir.getName(name))
@@ -355,9 +355,9 @@ void emit_import_directories(const coff_obj &obj, ogre_doc &s) {
 
 } // namespace coff_loader
 
-error_or<std::string> load(ogre_doc &s, const llvm::object::COFFObjectFile &obj, const char* pdb_path) {
+error_or<std::string> load(tables &s, const llvm::object::COFFObjectFile &obj, const char* pdb_path) {
     using namespace coff_loader;
-    s.raw_entry("(format coff)");
+    s.entry("format") << "coff";
     s.entry("is-executable") << is_executable(obj);
     emit_base_address(obj, s);
     emit_entry_point(obj, s);

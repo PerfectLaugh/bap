@@ -111,7 +111,7 @@ coff_sections collect_sections(const object::COFFObjectFile &obj) {
 
 struct symbol_visitor : public codeview::SymbolVisitorCallbacks {
 
-    symbol_visitor(const coff_sections &secs, ogre_doc &s) : sections(secs), doc(s) {}
+    symbol_visitor(const coff_sections &secs, tables &s) : sections(secs), doc(s) {}
 
     // S_GPROC32, S_LPROC32, S_GPROC32_ID, S_LPROC32_ID, S_LPROC32_DPC or
     // S_LPROC32_DPC_ID
@@ -126,7 +126,8 @@ struct symbol_visitor : public codeview::SymbolVisitorCallbacks {
         doc.entry("llvm:symbol-entry") << proc.Name.str()
                                        << addr
                                        << proc.CodeSize
-                                       << off;
+                                       << off
+                                       << addr;
         doc.entry("llvm:code-entry") << proc.Name.str() << off << proc.CodeSize;
 
         return Error::success();
@@ -134,11 +135,11 @@ struct symbol_visitor : public codeview::SymbolVisitorCallbacks {
 
 private:
     const coff_sections &sections;
-    ogre_doc &doc;
+    tables &doc;
 
 };
 
-void load(const llvm::object::COFFObjectFile &obj, const std::string &path, ogre_doc &s) {
+void load(const llvm::object::COFFObjectFile &obj, const std::string &path, tables &s) {
     std::unique_ptr<pdb::IPDBSession> Session;
     if (auto er = loadDataForPDB(pdb::PDB_ReaderType::Native, path, Session))
         return;

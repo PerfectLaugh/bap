@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <string.h>
 
 #include <caml/memory.h>
@@ -29,13 +30,21 @@ value bap_llvm_load_stub(value arg, value pdb_path) {
     char * pdb = strdup(String_val(pdb_path));
     const struct bap_llvm_loader *loader =
         bap_llvm_loader_create((const char*)(array->data), array->dim[0], pdb);
+    free(pdb);
     if (bap_llvm_file_not_supported(loader))
         loader_fail(loader, 2);
     if (bap_llvm_loader_failed(loader))
         loader_fail(loader, 1);
-    const char *d = bap_llvm_loader_data(loader);
-    result = caml_copy_string(d);
+    /* the document is binary, see llvm_loader_utils.hpp */
+    size_t size = bap_llvm_loader_size(loader);
+    void *data = malloc(size);
+    if (!data) {
+        bap_llvm_loader_destroy(loader);
+        caml_raise_out_of_memory();
+    }
+    memcpy(data, bap_llvm_loader_data(loader), size);
     bap_llvm_loader_destroy(loader);
-    free(pdb);
+    result = caml_ba_alloc_dims(CAML_BA_CHAR | CAML_BA_C_LAYOUT | CAML_BA_MANAGED,
+                                1, data, (intnat) size);
     CAMLreturn(result);
 }

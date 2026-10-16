@@ -25,7 +25,7 @@ typedef std::vector<command_info> commands;
 typedef SymbolRef::Type sym_type;
 
 template <typename T>
-void emit_segment_command(const T &cmd, ogre_doc &s) {
+void emit_segment_command(const T &cmd, tables &s) {
     bool r = static_cast<bool>(cmd.initprot & MachO::VM_PROT_READ);
     bool w = static_cast<bool>(cmd.initprot & MachO::VM_PROT_WRITE);
     bool x = static_cast<bool>(cmd.initprot & MachO::VM_PROT_EXECUTE);
@@ -86,9 +86,9 @@ uint64_t image_base(const macho &obj) {
         return 0L;
 }
 
-void emit_dynamic_relocations(const macho &obj, command_info &info, ogre_doc &s);
+void emit_dynamic_relocations(const macho &obj, command_info &info, tables &s);
 
-void emit_macho_command(const macho &obj, command_info &info, ogre_doc &s) {
+void emit_macho_command(const macho &obj, command_info &info, tables &s) {
     if (info.C.cmd == MachO::LoadCommandType::LC_SEGMENT_64)
         emit_segment_command(obj.getSegment64LoadCommand(info), s);
     if (info.C.cmd == MachO::LoadCommandType::LC_SEGMENT)
@@ -156,32 +156,32 @@ error_or<uint64_t> entry_of_sections(const macho &obj) {
         return failure("entry not found");
 }
 
-void entry_point(const macho &obj, ogre_doc &s) {
+void entry_point(const macho &obj, tables &s) {
     if (auto entry = entry_of_commands(obj))
         s.entry("llvm:entry-point") << *entry;
     else if (auto entry = entry_of_sections(obj))
         s.entry("llvm:entry-point") << *entry;
 }
 
-void emit_image_info(const macho &obj, ogre_doc &s) {
+void emit_image_info(const macho &obj, tables &s) {
     bool is_exec = is_executable(obj);
     s.entry("is-executable") << is_exec;
     if (is_exec)
         entry_point(obj, s);
     else
-        s.raw_entry("(llvm:entry-point 0)");
+        s.entry("llvm:entry-point") << uint64_t(0);
 }
 
 uint32_t section_type(const macho &obj, SectionRef sec) {
     return section_flags(obj, sec) & MachO::SECTION_TYPE;
 }
 
-void section(const std::string &name, uint64_t rel_addr, uint64_t size, uint64_t off, ogre_doc &s) {
+void section(const std::string &name, uint64_t rel_addr, uint64_t size, uint64_t off, tables &s) {
     s.entry("llvm:section-entry") << name << rel_addr << size << off;
 }
 
 
-void macho_symbol(const std::string &name, uint64_t value, ogre_doc &s) {
+void macho_symbol(const std::string &name, uint64_t value, tables &s) {
     s.entry("llvm:macho-symbol") << name << value;
 }
 
@@ -213,7 +213,7 @@ error_or<uint64_t> symbol_file_offset(const macho &obj, const SymbolRef &sym) {
 }
 
 
-void emit_relocation(const macho &obj, uint64_t off, symbol_iterator sym, section_iterator sec, ogre_doc &s) {
+void emit_relocation(const macho &obj, uint64_t off, symbol_iterator sym, section_iterator sec, tables &s) {
     if (sec != prim::end_sections(obj)) {
         if (auto saddr = prim::section_address(*sec) && sym != prim::end_symbols(obj)) {
             auto raddr = saddr + off;
@@ -226,11 +226,11 @@ void emit_relocation(const macho &obj, uint64_t off, symbol_iterator sym, sectio
 }
 
 
-void emit_relocation(const macho &obj, const RelocationRef &rel, section_iterator sec, ogre_doc &s) {
+void emit_relocation(const macho &obj, const RelocationRef &rel, section_iterator sec, tables &s) {
     emit_relocation(obj, prim::relocation_offset(rel), rel.getSymbol(), sec, s);
 }
 
-void emit_libraries(const macho &obj, ogre_doc &s) {
+void emit_libraries(const macho &obj, tables &s) {
   for (const auto &entry : obj.load_commands()) {
     if (entry.C.cmd == MachO::LC_LOAD_DYLIB ||
         entry.C.cmd == MachO::LC_ID_DYLIB ||
@@ -249,7 +249,7 @@ void emit_libraries(const macho &obj, ogre_doc &s) {
 
 symbol_iterator get_symbol(const macho &obj, std::size_t index);
 
-void emit_dyn_relocation(const macho &obj, uint32_t sym_num, uint64_t off, ogre_doc &s) {
+void emit_dyn_relocation(const macho &obj, uint32_t sym_num, uint64_t off, tables &s) {
     auto sym = get_symbol(obj, sym_num);
     if (sym != prim::end_symbols(obj)) {
         auto name = prim::symbol_name(*sym);
@@ -279,7 +279,7 @@ bool is_in_section(const macho &obj, const SymbolRef &sym) {
 }
 
 
-void emit_relocations(const macho &obj, ogre_doc &s) {
+void emit_relocations(const macho &obj, tables &s) {
     for (auto sec : prim::sections(obj))
         for (auto rel : prim::relocations(sec))
             if (auto rel_sec = prim::relocated_section(sec))
@@ -293,7 +293,7 @@ bool is_code_section(const macho &obj, const SectionRef &sec) {
          flags & MachO::S_ATTR_SOME_INSTRUCTIONS);
 }
 
-void emit_sections(const macho &obj, ogre_doc &s) {
+void emit_sections(const macho &obj, tables &s) {
     for (auto sec : prim::sections(obj)) {
         auto addr = prim::section_address(sec);
         auto size = prim::section_size(sec);
@@ -307,7 +307,7 @@ void emit_sections(const macho &obj, ogre_doc &s) {
     }
 }
 
-void emit_symbols(const macho &obj, const prim::symbols_sizes &sizes, ogre_doc &s) {
+void emit_symbols(const macho &obj, const prim::symbols_sizes &sizes, tables &s) {
     for (auto sized_sym : sizes) {
         auto sym = sized_sym.first;
         auto size = sized_sym.second;
@@ -334,7 +334,7 @@ void emit_symbols(const macho &obj, const prim::symbols_sizes &sizes, ogre_doc &
     }
 }
 
-void emit_macho_commands(const macho &obj, ogre_doc &s) {
+void emit_macho_commands(const macho &obj, tables &s) {
     auto cmds = macho_commands(obj);
     for (auto cmd : cmds)
         emit_macho_command(obj, cmd, s);
@@ -375,7 +375,7 @@ error_or<MachO::any_relocation_info> get_rel(const macho &obj, uint64_t pos) {
 
 // Note, that if r_extern is set to 1, then r_symbolnum contains an index in symbtab, and
 // section index otherwise.
-void emit_dyn_relocations(const macho &obj, uint64_t file_pos, uint32_t num, ogre_doc &s) {
+void emit_dyn_relocations(const macho &obj, uint64_t file_pos, uint32_t num, tables &s) {
     for (std::size_t i = 0; i < num; ++i) {
         auto rel = get_rel(obj, file_pos + i * sizeof(MachO::any_relocation_info));
         if (rel && is_rel_extern(obj, *rel))
@@ -419,7 +419,7 @@ bool contains_sym_stubs(const macho &obj, const SectionRef &sec) {
     }
 }
 
-void emit_indirect_symbols(const macho &obj, const MachO::dysymtab_command &dlc, ogre_doc &s) {
+void emit_indirect_symbols(const macho &obj, const MachO::dysymtab_command &dlc, tables &s) {
     for (auto sec : prim::sections(obj)) {
         auto stride = indirect_symbols_stride(obj, sec);
         if (contains_sym_stubs(obj, sec) && stride != 0) {
@@ -446,7 +446,7 @@ void emit_indirect_symbols(const macho &obj, const MachO::dysymtab_command &dlc,
 // does not perform a lot of job about them, so let's do the same. One can take
 // a look at implementation of MachOObjectFile::getRelocationSymbol to get the
 // whole picture about how llvm tries to get symbol iterator from relocation,
-void emit_dynamic_relocations(const macho &obj, command_info &info, ogre_doc &s) {
+void emit_dynamic_relocations(const macho &obj, command_info &info, tables &s) {
     if (info.C.cmd == MachO::LoadCommandType::LC_DYSYMTAB) {
         MachO::dysymtab_command cmd = obj.getDysymtabLoadCommand();
         emit_indirect_symbols(obj, cmd, s);
@@ -462,7 +462,7 @@ commands macho_commands(const macho &obj) {
     return cmds;
 }
 
-void emit_symbols(const macho &obj, ogre_doc &s) {
+void emit_symbols(const macho &obj, tables &s) {
     auto sizes = prim::get_symbols_sizes(obj);
     emit_symbols(obj, sizes, s);
 }
@@ -478,9 +478,9 @@ symbol_iterator get_symbol(const macho &obj, std::size_t index) {
 }
 } // namespace macho_loader
 
-error_or<std::string> load(ogre_doc &s, const llvm::object::MachOObjectFile &obj) {
+error_or<std::string> load(tables &s, const llvm::object::MachOObjectFile &obj) {
     using namespace macho_loader;
-    s.raw_entry("(format macho)");
+    s.entry("format") << "macho";
     s.entry("llvm:base-address") << image_base(obj);
     emit_image_info(obj, s);
     emit_macho_commands(obj, s);

@@ -11,6 +11,10 @@ extern "C" {
         return loader->get()->c_str();
     }
 
+    size_t bap_llvm_loader_size(const loader::bap_llvm_loader *loader) {
+        return loader->get()->size();
+    }
+
     bool bap_llvm_loader_failed(const loader::bap_llvm_loader *loader) {
         return loader->has_error();
     }

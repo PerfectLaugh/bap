@@ -84,7 +84,7 @@ uint64_t minimal_progbits_offset(const ELFObjectFile<T> &obj) {
 }
 
 template <typename T>
-void emit_entry_point(const ELFObjectFile<T> &obj, ogre_doc &s) {
+void emit_entry_point(const ELFObjectFile<T> &obj, tables &s) {
 #if LLVM_VERSION_MAJOR >= 12
     auto hdr = &obj.getELFFile().getHeader();
 #else
@@ -100,7 +100,7 @@ std::string name_of_index(std::size_t i) {
 }
 
 template <typename T>
-void emit_program_headers(const ELFObjectFile<T> &obj, ogre_doc &s) {
+void emit_program_headers(const ELFObjectFile<T> &obj, tables &s) {
 #if LLVM_VERSION_MAJOR >= 12
     auto hdrs = prim::elf_program_headers(obj.getELFFile());
 #else
@@ -160,7 +160,7 @@ error_or<uint64_t> symbol_file_offset(const ELFObjectFile<T> &obj, const SymbolR
 template <typename T>
 void emit_section(const ELFObjectFile<T> &obj,
                   const SectionRef& sec,
-                  ogre_doc &s) {
+                  tables &s) {
     uint64_t addr = section_address(obj, sec);
     auto hdr = obj.getSection(sec.getRawDataRefImpl());
     if (auto name = prim::section_name(sec)) {
@@ -176,7 +176,7 @@ void emit_section(const ELFObjectFile<T> &obj,
 }
 
 template <typename T>
-void emit_section_headers(const ELFObjectFile<T> &obj, ogre_doc &s) {
+void emit_section_headers(const ELFObjectFile<T> &obj, tables &s) {
     for (auto sec : prim::sections(obj))
         emit_section(obj, sec, s);
 }
@@ -186,7 +186,7 @@ bool is_external(uint64_t addr, uint64_t offset, uint64_t size) {
 }
 
 template <typename T>
-void emit_symbol_entry(const ELFObjectFile<T> &obj, const SymbolRef &sym, ogre_doc &s) {
+void emit_symbol_entry(const ELFObjectFile<T> &obj, const SymbolRef &sym, tables &s) {
 #if LLVM_VERSION_MAJOR >= 12
     auto sym_elf_or_error = obj.getSymbol(sym.getRawDataRefImpl());
     if (!sym_elf_or_error)
@@ -213,13 +213,13 @@ void emit_symbol_entry(const ELFObjectFile<T> &obj, const SymbolRef &sym, ogre_d
 }
 
 template <typename T>
-void emit_symbol_entries(const ELFObjectFile<T> &obj, symbol_iterator begin, symbol_iterator end, ogre_doc &s) {
+void emit_symbol_entries(const ELFObjectFile<T> &obj, symbol_iterator begin, symbol_iterator end, tables &s) {
     for (auto it = begin; it != end; ++it)
         emit_symbol_entry(obj, *it, s);
 }
 
 template <typename T>
-void emit_symbol_entries(const ELFObjectFile<T> &obj, ogre_doc &s) {
+void emit_symbol_entries(const ELFObjectFile<T> &obj, tables &s) {
 #if LLVM_VERSION_MAJOR >= 12
     auto elf = &obj.getELFFile();
 #else
@@ -231,7 +231,7 @@ void emit_symbol_entries(const ELFObjectFile<T> &obj, ogre_doc &s) {
 }
 
 template <typename T>
-void emit_relocations(const ELFObjectFile<T> &obj, ogre_doc &s) {
+void emit_relocations(const ELFObjectFile<T> &obj, tables &s) {
 #if LLVM_VERSION_MAJOR >= 12
     auto rel_reloc = obj.getELFFile().getRelativeRelocationType();
 #else
@@ -277,7 +277,7 @@ bool is_relocatable(const ELFObjectFile<T> &obj) {
 }
 
 template <typename T>
-void emit_elf_header(const ELFObjectFile<T> &obj, ogre_doc &s) {
+void emit_elf_header(const ELFObjectFile<T> &obj, tables &s) {
 #if LLVM_VERSION_MAJOR >= 12
     auto hdr = &obj.getELFFile().getHeader();
 #else
@@ -302,7 +302,7 @@ error_or<std::string> raw_section_name(const ELFFile<T> &elf,
 }
 
 template <typename T>
-void emit_raw_sections(const ELFFile<T> &elf, ogre_doc &s) {
+void emit_raw_sections(const ELFFile<T> &elf, tables &s) {
     auto secs = prim::elf_sections(elf);
     for (std::size_t i = 0; i < secs.size(); ++i) {
         auto &sec = secs[i];
@@ -350,7 +350,7 @@ template <typename T>
 void emit_raw_symbols(const ELFFile<T> &elf,
                       const typename ELFFile<T>::Elf_Shdr &symtab,
                       uint64_t symtab_index,
-                      ogre_doc &s) {
+                      tables &s) {
     auto syms = elf.symbols(&symtab);
     if (!syms) {
         consumeError(syms.takeError());
@@ -388,7 +388,7 @@ void emit_raw_symbols(const ELFFile<T> &elf,
 template <typename R>
 void emit_raw_relocation(uint64_t &index, uint64_t section, const R &rel,
                          bool mips64el, int64_t addend, bool explicit_addend,
-                         ogre_doc &s) {
+                         tables &s) {
     s.entry("llvm:elf-relocation")
         << index++
         << section
@@ -407,7 +407,7 @@ void emit_raw_relocations(const ELFFile<T> &elf,
                           const std::vector<typename ELFFile<T>::Elf_Shdr> &sections,
                           const typename ELFFile<T>::Elf_Shdr &sec,
                           uint64_t &index,
-                          ogre_doc &s) {
+                          tables &s) {
     bool mips64el = elf.isMips64EL();
     uint64_t target = sec.sh_info;
     if (sec.sh_type != ELF::SHT_RELA && sec.sh_type != ELF::SHT_REL)
@@ -446,7 +446,7 @@ void emit_raw_relocations(const ELFFile<T> &elf,
 }
 
 template <typename T>
-void emit_relocatable(const ELFObjectFile<T> &obj, ogre_doc &s) {
+void emit_relocatable(const ELFObjectFile<T> &obj, tables &s) {
 #if LLVM_VERSION_MAJOR >= 12
     auto &elf = obj.getELFFile();
 #else
@@ -466,9 +466,9 @@ void emit_relocatable(const ELFObjectFile<T> &obj, ogre_doc &s) {
 } // namespace elf_loader
 
 template <typename T>
-error_or<std::string> load(ogre_doc &s, const llvm::object::ELFObjectFile<T> &obj) {
+error_or<std::string> load(tables &s, const llvm::object::ELFObjectFile<T> &obj) {
     using namespace elf_loader;
-    s.raw_entry("(format elf)");
+    s.entry("format") << "elf";
     s.entry("llvm:base-address") << base_address(obj);
     s.entry("is-executable") << is_executable(obj);
     emit_elf_header(obj, s);
