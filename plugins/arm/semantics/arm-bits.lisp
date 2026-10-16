@@ -33,8 +33,15 @@
 
 (defun add-with-carry/clear-base (rd x y c)
   "(add-with-carry/clear-base rd x y c) sets rd to the result of adding x and y
-   with carry bit c after clearing the base register rd, and sets processor flags."
-  (let ((r (+ c y x)))
+   with carry bit c after clearing the base register rd, and sets processor flags.
+   The arithmetic and the flags are computed at the width of the base register x
+   (e.g. 32 bits for an AArch64 W-form), so y and the carry input c are first
+   cast to that width to stop a wider immediate or literal from promoting the
+   sum to a larger width (which would misplace the N/C/V flags)."
+  (let ((w (word-width x))
+        (y (cast-low w y))
+        (c (cast-unsigned w c))
+        (r (+ c y x)))
     (set-nzcv-from-registers r y x)
     (setw rd r)))
 
@@ -86,6 +93,11 @@
 (defmacro setw (reg val)
   "(set Wx V) sets a Wx register clearing the upper 32 bits."
   (set$ (alias-base-register reg) val))
+
+(defmacro setd (reg val)
+  "(setd Dx V) sets a Dx register clearing the upper 64 bits of the
+   vector register it belongs to."
+  (set$ (alias-base-register reg) (cast-unsigned 128 val)))
 
 (defun replicate-to-fill (bitv n)
   "(replicate-to-fill bitv n) returns the result of repeating bitv

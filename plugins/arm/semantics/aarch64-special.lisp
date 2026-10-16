@@ -22,5 +22,8 @@
 (defun HINT (_)
   (empty))
 
+(defun NOP ()
+  (empty))
+
 (defun UDF (exn)
   (intrinsic 'undefined-instruction))

@@ -83,6 +83,56 @@
         (clz/rec x)
       (clz/small x))))
 
+(defun reverse-bits (x)
+  "(reverse-bits X) reverses the order of the bits in X, so that the least
+   significant bit becomes the most significant one. Works for 8-, 16-, 32-
+   and 64-bit inputs."
+  (case (word-width x)
+    8  (reverse-bits8  x)
+    16 (reverse-bits16 x)
+    32 (reverse-bits32 x)
+    64 (reverse-bits64 x)
+    x))
+
+(defun reverse-bits/step (x m sh)
+  (declare (visibility :private))
+  (logor (lshift (logand x m) sh)
+         (logand (rshift x sh) m)))
+
+(defun reverse-bits8 (x)
+  (declare (visibility :private))
+  (let ((x x))
+    (set x (reverse-bits/step x 0x55:8 1))
+    (set x (reverse-bits/step x 0x33:8 2))
+    (reverse-bits/step x 0x0f:8 4)))
+
+(defun reverse-bits16 (x)
+  (declare (visibility :private))
+  (let ((x x))
+    (set x (reverse-bits/step x 0x5555:16 1))
+    (set x (reverse-bits/step x 0x3333:16 2))
+    (set x (reverse-bits/step x 0x0f0f:16 4))
+    (reverse-bits/step x 0x00ff:16 8)))
+
+(defun reverse-bits32 (x)
+  (declare (visibility :private))
+  (let ((x x))
+    (set x (reverse-bits/step x 0x55555555:32 1))
+    (set x (reverse-bits/step x 0x33333333:32 2))
+    (set x (reverse-bits/step x 0x0f0f0f0f:32 4))
+    (set x (reverse-bits/step x 0x00ff00ff:32 8))
+    (reverse-bits/step x 0x0000ffff:32 16)))
+
+(defun reverse-bits64 (x)
+  (declare (visibility :private))
+  (let ((x x))
+    (set x (reverse-bits/step x 0x5555555555555555:64 1))
+    (set x (reverse-bits/step x 0x3333333333333333:64 2))
+    (set x (reverse-bits/step x 0x0f0f0f0f0f0f0f0f:64 4))
+    (set x (reverse-bits/step x 0x00ff00ff00ff00ff:64 8))
+    (set x (reverse-bits/step x 0x0000ffff0000ffff:64 16))
+    (reverse-bits/step x 0x00000000ffffffff:64 32)))
+
 (defun popcount (x)
   "(popcount X) computes the total number of 1 bits in X."
   (if (> (word-width x) 64)

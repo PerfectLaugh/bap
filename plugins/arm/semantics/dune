@@ -12,6 +12,7 @@
   aarch64.lisp
   aarch64-logical.lisp
   aarch64-pstate.lisp
+  aarch64-simd.lisp
   aarch64-special.lisp
   arm-bits.lisp
   arm.lisp

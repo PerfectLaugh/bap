@@ -15,6 +15,46 @@
 (defun ORNWrs (rd rn rm is) (ORN*rs setw rd rn rm is))
 (defun ORNXrs (rd rn rm is) (ORN*rs set$ rd rn rm is))
 
+(defmacro BIC*rs (set rd rn rm is)
+  "(BIC*rs set rd rn rm is) implements AND NOT (bit clear) of a shifted
+   register, accepting either a W or X register."
+  (set rd (logand rn (lnot (shift-encoded rm is)))))
+
+(defun BICWrs (rd rn rm is) (BIC*rs setw rd rn rm is))
+(defun BICXrs (rd rn rm is) (BIC*rs set$ rd rn rm is))
+
+(defun set-nz-clear-cv (r)
+  "Sets N and Z from the result r of a logical operation and clears C and V,
+   as the flag-setting logical instructions (ANDS, BICS) do."
+  (set NF (msb r))
+  (set ZF (is-zero r))
+  (set CF 0:1)
+  (set VF 0:1))
+
+(defmacro BICS*rs (set rd rn rm is)
+  (let ((r (logand rn (lnot (shift-encoded rm is)))))
+    (set rd r)
+    (set-nz-clear-cv r)))
+
+(defun BICSWrs (rd rn rm is) (BICS*rs setw rd rn rm is))
+(defun BICSXrs (rd rn rm is) (BICS*rs set$ rd rn rm is))
+
+(defmacro ANDS*ri (set op rd rn imm register-width)
+  (let ((r (op rn (immediate-from-bitmask imm register-width))))
+    (set rd r)
+    (set-nz-clear-cv r)))
+
+(defun ANDSWri (rd rn imm) (ANDS*ri setw logand rd rn imm 32))
+(defun ANDSXri (rd rn imm) (ANDS*ri set$ logand rd rn imm 64))
+
+(defmacro ANDS*rs (set rd rn rm is)
+  (let ((r (logand rn (shift-encoded rm is))))
+    (set rd r)
+    (set-nz-clear-cv r)))
+
+(defun ANDSWrs (rd rn rm is) (ANDS*rs setw rd rn rm is))
+(defun ANDSXrs (rd rn rm is) (ANDS*rs set$ rd rn rm is))
+
 (defmacro log*rs (set op rd rn rm is)
   "(log*rs set op rd rn is) implements the logical operation (shift) instruction
    accepting either a W or X register. op is the binary logical operation."
