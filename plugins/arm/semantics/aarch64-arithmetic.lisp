@@ -23,6 +23,10 @@
              (logand (get-program-counter) (lshift -1 12))
              (cast-signed (word) (lshift imm 12)))))
 
+;; the immediate of ADR is the byte offset from the instruction
+(defun ADR (dst imm)
+  (set$ dst (+ (get-program-counter) (cast-signed (word) imm))))
+
 (defmacro SUB*r* (set shift-function rd rn imm-or-rm off)
   "Implements SUB*ri and SUB*rs by specifying the shift function."
   (set rd (- rn (shift-function imm-or-rm off))))

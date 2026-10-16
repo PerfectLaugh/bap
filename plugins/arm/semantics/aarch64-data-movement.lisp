@@ -84,6 +84,85 @@
 (defun LDRXroX (rt rn rm _ shift)
   (set$ rt (load-word (+ rn (lshift rm (* shift 3))))))
 
+;; Register-offset loads and stores. The address is the base plus the
+;; index, which is shifted by the log2 of the access size (scale) when
+;; the S bit (shift) is set. The index of the ro*W forms is a W register
+;; that is sign-extended (SXTW) when the option bit (signed) is set and
+;; zero-extended (UXTW) otherwise. The index of the ro*X forms is used
+;; as is (LSL or SXTX).
+
+(defun roW-address (rn rm signed shift scale)
+  (+ rn (lshift (if signed (signed-extend 32 rm) (unsigned-extend 32 rm))
+                (* shift scale))))
+
+(defun roX-address (rn rm shift scale)
+  (+ rn (lshift rm (* shift scale))))
+
+(defun LDRXroW (rt rn rm signed shift)
+  (set$ rt (load-word (roW-address rn rm signed shift 3))))
+
+(defun LDRWroW (rt rn rm signed shift)
+  (setw rt (cast-unsigned (word) (load-hword (roW-address rn rm signed shift 2)))))
+
+(defun LDRHHroW (rt rn rm signed shift)
+  (setw rt (cast-unsigned (word) (load-bits 16 (roW-address rn rm signed shift 1)))))
+
+(defun LDRHHroX (rt rn rm _ shift)
+  (setw rt (cast-unsigned (word) (load-bits 16 (roX-address rn rm shift 1)))))
+
+(defun LDRSWroW (rt rn rm signed shift)
+  (set$ rt (cast-signed (word) (load-hword (roW-address rn rm signed shift 2)))))
+
+(defun LDRSWroX (rt rn rm _ shift)
+  (set$ rt (cast-signed (word) (load-hword (roX-address rn rm shift 2)))))
+
+(defun LDRSHXroW (rt rn rm signed shift)
+  (set$ rt (cast-signed (word) (load-bits 16 (roW-address rn rm signed shift 1)))))
+
+(defun LDRSHXroX (rt rn rm _ shift)
+  (set$ rt (cast-signed (word) (load-bits 16 (roX-address rn rm shift 1)))))
+
+(defun LDRSHWroW (rt rn rm signed shift)
+  (setw rt (cast-unsigned (word)
+                          (cast-signed 32 (load-bits 16 (roW-address rn rm signed shift 1))))))
+
+(defun LDRSHWroX (rt rn rm _ shift)
+  (setw rt (cast-unsigned (word)
+                          (cast-signed 32 (load-bits 16 (roX-address rn rm shift 1))))))
+
+(defun LDRSBXroW (rt rn rm signed shift)
+  (set$ rt (cast-signed (word) (load-byte (roW-address rn rm signed shift 0)))))
+
+(defun LDRSBXroX (rt rn rm _ shift)
+  (set$ rt (cast-signed (word) (load-byte (roX-address rn rm shift 0)))))
+
+(defun LDRSBWroW (rt rn rm signed shift)
+  (setw rt (cast-unsigned (word)
+                          (cast-signed 32 (load-byte (roW-address rn rm signed shift 0))))))
+
+(defun LDRSBWroX (rt rn rm _ shift)
+  (setw rt (cast-unsigned (word)
+                          (cast-signed 32 (load-byte (roX-address rn rm shift 0))))))
+
+(defun STRXroW (rt rn rm signed shift)
+  (store-word (roW-address rn rm signed shift 3) rt))
+
+(defun STRWroW (rt rn rm signed shift)
+  (store-word (roW-address rn rm signed shift 2) (cast-low 32 rt)))
+
+(defun STRWroX (rt rn rm _ shift)
+  (store-word (roX-address rn rm shift 2) (cast-low 32 rt)))
+
+(defun STRHHroW (rt rn rm signed shift)
+  (store-word (roW-address rn rm signed shift 1) (cast-low 16 rt)))
+
+(defun STRHHroX (rt rn rm _ shift)
+  (store-word (roX-address rn rm shift 1) (cast-low 16 rt)))
+
+;; the prefetch hints have no effect on the semantics
+(defun PRFMroW (_ _ _ _ _) (empty))
+(defun PRFMroX (_ _ _ _ _) (empty))
+
 ;; MOV...
 
 (defmacro MOVZ*i (set dst imm off)
@@ -168,6 +247,60 @@
 
 (defun STRQroX (rt rn rm _ shift)
   (store-word (+ rn (lshift rm (* shift 4))) (cast-low 128 rt)))
+
+(defun LDRQroW (rt rn rm signed shift)
+  (set$ rt (load-bits 128 (roW-address rn rm signed shift 4))))
+
+(defun STRQroW (rt rn rm signed shift)
+  (store-word (roW-address rn rm signed shift 4) (cast-low 128 rt)))
+
+(defun LDRDroW (rt rn rm signed shift)
+  (setd rt (load-word (roW-address rn rm signed shift 3))))
+
+(defun LDRDroX (rt rn rm _ shift)
+  (setd rt (load-word (roX-address rn rm shift 3))))
+
+(defun LDRSroW (rt rn rm signed shift)
+  (setd rt (load-hword (roW-address rn rm signed shift 2))))
+
+(defun LDRSroX (rt rn rm _ shift)
+  (setd rt (load-hword (roX-address rn rm shift 2))))
+
+(defun LDRHroW (rt rn rm signed shift)
+  (setd rt (load-bits 16 (roW-address rn rm signed shift 1))))
+
+(defun LDRHroX (rt rn rm _ shift)
+  (setd rt (load-bits 16 (roX-address rn rm shift 1))))
+
+(defun LDRBroW (rt rn rm signed shift)
+  (setd rt (load-byte (roW-address rn rm signed shift 0))))
+
+(defun LDRBroX (rt rn rm _ shift)
+  (setd rt (load-byte (roX-address rn rm shift 0))))
+
+(defun STRDroW (rt rn rm signed shift)
+  (store-word (roW-address rn rm signed shift 3) (cast-low 64 rt)))
+
+(defun STRDroX (rt rn rm _ shift)
+  (store-word (roX-address rn rm shift 3) (cast-low 64 rt)))
+
+(defun STRSroW (rt rn rm signed shift)
+  (store-word (roW-address rn rm signed shift 2) (cast-low 32 rt)))
+
+(defun STRSroX (rt rn rm _ shift)
+  (store-word (roX-address rn rm shift 2) (cast-low 32 rt)))
+
+(defun STRHroW (rt rn rm signed shift)
+  (store-word (roW-address rn rm signed shift 1) (cast-low 16 rt)))
+
+(defun STRHroX (rt rn rm _ shift)
+  (store-word (roX-address rn rm shift 1) (cast-low 16 rt)))
+
+(defun STRBroW (rt rn rm signed shift)
+  (store-word (roW-address rn rm signed shift 0) (cast-low 8 rt)))
+
+(defun STRBroX (rt rn rm _ shift)
+  (store-word (roX-address rn rm shift 0) (cast-low 8 rt)))
 
 (defun LDRDui (dst reg off)
   (setd dst (load-word (+ reg (lshift off 3)))))
