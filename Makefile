@@ -35,11 +35,26 @@ clean:
 test:
 	dune test
 
-testsuite:
-	git clone https://github.com/BinaryAnalysisPlatform/bap-testsuite.git testsuite
+TESTSUITE_URL = https://github.com/PerfectLaugh/bap-testsuite.git
+TESTSUITE_REV = 44cea2f4814bed7166e3a585fa240074c8aeaac6
 
+testsuite:
+	git clone $(TESTSUITE_URL) testsuite
+
+# runs under dune exec, so that it tests bap and the plugins built in
+# this tree instead of whatever bap is first on PATH, and with TERM=dumb,
+# so that the output the tests match doesn't depend on the terminal
 check: testsuite
-	$(MAKE) REVISION=5c65cc07c48ff738e843c0fc6dfb16a0eeb572c3 -C testsuite
+	git -C testsuite cat-file -e $(TESTSUITE_REV)^{commit} 2>/dev/null || \
+	  git -C testsuite fetch $(TESTSUITE_URL)
+	TERM=dumb dune exec -- $(MAKE) REVISION=$(TESTSUITE_REV) -C testsuite
+
+# runs the micro-benchmarks in benchmarks/. Pass core_bench options in
+# BENCH_ARGS (e.g., BENCH_ARGS="-quota 1" or BENCH_ARGS=-help) and set
+# BAP_BENCH_BINARY to choose the binary whose functions are analyzed
+.PHONY: bench
+bench: testsuite
+	dune exec -- ./benchmarks/run_benchmarks.exe $(BENCH_ARGS)
 
 .PHONY: indent check-style status-clean
 

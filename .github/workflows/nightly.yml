@@ -46,7 +46,7 @@ jobs:
         run: dune runtest
 
       - name: Run functional tests
-        run: dune exec -- make check
+        run: make check
 
       - uses: actions/upload-artifact@v7
         if: ${{ always() }}

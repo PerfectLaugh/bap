@@ -1,5 +1,5 @@
 open Core
-open Core_bench.Std
+open Core_bench
 open Or_error
 open Bap.Std
 

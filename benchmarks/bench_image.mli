@@ -1,3 +1,3 @@
-open Core_bench.Std
+open Core_bench
 
 val tests : Bench.Test.t list

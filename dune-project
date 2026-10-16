@@ -1255,6 +1255,7 @@ between the sets.")
   (camlzip (and (>= 1.07) (< 2.0)))
   (cmdliner (>= 2.0.0))
   core
+  (core_bench :with-test)
    fileutils
   (graphlib (= :version))
    mmap

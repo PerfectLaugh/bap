@@ -1,18 +1,21 @@
 open Core
-open Core_bench.Std
+open Core_bench
 open Bap.Std
+open Graphlib.Std
 open Format
 
-let filename = "arm-binaries/coreutils/coreutils_O1_ls"
+(* the binary whose functions are used as the input graphs *)
+let filename =
+  Option.value
+    (Sys.getenv "BAP_BENCH_BINARY")
+    ~default:"testsuite/bin/arm-linux-gnueabi-echo"
+
 let sizes_to_test = 10
 
-module Cfg = Graphlib.Ir
+module Cfg = Graphs.Ir
 module CFG = Graphlib.To_ocamlgraph (Cfg)
 module DOM = Graph.Dominator.Make (CFG)
 module SCC = Graph.Components.Make (CFG)
-
-let proj = Project.from_file filename |> ok_exn
-let syms = Project.symbols proj
 
 (** [scale_linear ~input:(x1,x2) ~output:(y1,y2)] will return a linear function
     $f(x) = ax + b$ such that:
@@ -28,13 +31,16 @@ let scale_linear ~input:(x1, x2) ~output:(y1, y2) =
   let b = y1 - (x1 * (y1 - y2) / (x1 - x2)) in
   fun x -> to_int (round ((a * float x) + b))
 
-let functions, sizes, index =
+let load () =
+  let proj =
+    Project.create (Project.Input.load ~loader:"llvm" filename) |> ok_exn
+  in
   let functions =
     Term.enum sub_t (Project.program proj)
-    |> Seq.map ~f:Cfg.of_sub |> Seq.to_array
+    |> Seq.map ~f:Sub.to_cfg |> Seq.to_array
   in
   let size g = Cfg.number_of_nodes g + Cfg.number_of_edges g in
-  Array.sort functions ~cmp:(fun x y -> Int.compare (size x) (size y));
+  Array.sort functions ~compare:(fun x y -> Int.compare (size x) (size y));
   let max_idx = Array.length functions - 1 in
   let min_size = size functions.(0) in
   let max_size = min 1000 @@ size functions.(max_idx) in
@@ -51,7 +57,6 @@ let graphlib cfg entry =
   Tree.parent (Graphlib.dominators (module Cfg) cfg entry)
 
 let dom algo cfg = algo cfg (Seq.hd_exn @@ Cfg.nodes cfg)
-let run f size = stage (fun () -> f functions.(index size))
 
 let graphlib_scc cfg =
   Graphlib.strong_components (module Cfg) cfg |> Partition.equiv
@@ -60,20 +65,21 @@ let ocamlgraph_scc cfg =
   let _, get = SCC.scc cfg in
   fun x y -> get x = get y
 
-let indexed = Bench.Test.create_indexed ~args:sizes
-
-let dom_test =
-  Bench.Test.create_group ~name:"dom"
-    [
-      indexed ~name:"ocamlgraph" (run (dom ocamlgraph));
-      indexed ~name:"graphlib" (run (dom graphlib));
-    ]
-
-let scc_test =
-  Bench.Test.create_group ~name:"scc"
-    [
-      indexed ~name:"graphlib" (run graphlib_scc);
-      indexed ~name:"ocamlgraph" (run ocamlgraph_scc);
-    ]
-
-let tests = [ dom_test; scc_test ]
+(* the project is loaded only when the tests are created, as it needs
+   bap to be initialized first *)
+let tests () =
+  let functions, sizes, index = load () in
+  let run f size = stage (fun () -> f functions.(index size)) in
+  let indexed = Bench.Test.create_indexed ~args:sizes in
+  [
+    Bench.Test.create_group ~name:"dom"
+      [
+        indexed ~name:"ocamlgraph" (run (dom ocamlgraph));
+        indexed ~name:"graphlib" (run (dom graphlib));
+      ];
+    Bench.Test.create_group ~name:"scc"
+      [
+        indexed ~name:"graphlib" (run graphlib_scc);
+        indexed ~name:"ocamlgraph" (run ocamlgraph_scc);
+      ];
+  ]

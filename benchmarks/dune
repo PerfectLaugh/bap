@@ -1,0 +1,12 @@
+; run with `make bench`, see the Makefile
+
+(executable
+ (name run_benchmarks)
+ (libraries
+  bap
+  bap-main
+  core
+  core_bench
+  core_unix.command_unix
+  graphlib
+  ocamlgraph))
