@@ -2210,6 +2210,7 @@ module Knowledge = struct
     let domain x = x.dom
     let name { name } = name
     let desc x = match x.desc with None -> "no description" | Some s -> s
+    let promises x = Hashtbl.length x.promises
   end
 
   type (+'a, 'p) slot = ('a, 'p) Slot.t

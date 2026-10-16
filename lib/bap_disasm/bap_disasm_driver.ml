@@ -443,10 +443,10 @@ let unit_for_mem mem =
   KB.provide Theory.Label.addr label (Some addr) >>= fun () ->
   KB.collect Theory.Label.unit label
 
-let classify mem =
+(* queries the properties of each address of the region *)
+let classify_bytes mem unit =
   let empty = Set.empty (module Addr) in
   let base = Memory.min_addr mem in
-  unit_for_mem mem >>= fun unit ->
   Seq.range 0 (Memory.length mem)
   |> KB.Seq.fold ~init:(empty, empty, empty) ~f:(fun (code, data, root) off ->
       let addr = Addr.(nsucc base off) in
@@ -461,6 +461,32 @@ let classify mem =
           KB.collect Theory.Label.is_subroutine label >>| function
           | Some true -> (code, data, Set.add root addr)
           | _ -> (code, data, root)))
+
+(* the entry points of the region are known for the whole unit, if
+   all providers of the is-subroutine property know them, and if no one
+   provides the is-valid property, which is then unknown everywhere *)
+let can_classify_units () =
+  Theory.Label.has_bulk_subroutines ()
+  && KB.Slot.promises Theory.Label.is_valid = 0
+
+let classify_unit mem unit =
+  let empty = Set.empty (module Addr) in
+  let lower = Memory.min_addr mem and upper = Memory.max_addr mem in
+  let width = Addr.bitwidth lower in
+  KB.collect Theory.Unit.subroutines unit >>| fun starts ->
+  let roots =
+    Set.to_sequence starts ~greater_or_equal_to:(Addr.to_bitvec lower)
+      ~less_or_equal_to:(Addr.to_bitvec upper)
+    |> Seq.fold ~init:empty ~f:(fun roots addr ->
+        Set.add roots (Addr.create addr width))
+  in
+  (empty, empty, roots)
+
+let classify mem =
+  unit_for_mem mem >>= fun unit ->
+  match unit with
+  | Some unit when can_classify_units () -> classify_unit mem unit
+  | _ -> classify_bytes mem unit
 
 let create_disassembler { target; coding } = Dis.lookup target coding
 

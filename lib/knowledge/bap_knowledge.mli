@@ -910,6 +910,13 @@ module Knowledge : sig
 
     val desc : ('a, 'p) slot -> string
     (** [desc slot] the slot documentation. *)
+
+    val promises : ('a, 'p) slot -> int
+    (** [promises slot] the number of promises currently registered for the
+        [slot], including the ones registered with {!promising} in the scopes
+        that are being evaluated.
+
+        @since 2.6.0 *)
   end
 
   (** A symbol is an object with a unique name.

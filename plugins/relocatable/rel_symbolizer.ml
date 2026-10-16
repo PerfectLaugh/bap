@@ -29,6 +29,10 @@ module References : sig
   val slot : (Theory.Unit.cls, t) KB.slot
   val lookup : t -> Bitvec.t -> ref option
   val search : t -> Word.t -> ref option
+
+  val referenced : t -> Set.M(Bitvec_order).t
+  (** the addresses with references, which [lookup] finds *)
+
   val prepare : unit -> unit
 end = struct
   open Image.Scheme
@@ -86,6 +90,11 @@ end = struct
     | Error err ->
         warning "Failed to obtain external references: %a" Error.pp err;
         empty
+
+  let referenced exts =
+    Map.fold exts ~init:(Set.empty (module Bitvec_order))
+      ~f:(fun ~key ~data addrs ->
+        match data with Ref _ -> Set.add addrs key | Bad -> addrs)
 
   let lookup exts addr =
     match Map.find exts addr with
@@ -206,13 +215,11 @@ let resolve_stubs () =
             | _ -> None))
 
 let mark_mips_stubs_as_functions () : unit =
-  KB.promise Theory.Label.is_subroutine @@ fun label ->
-  let* unit = label -->? Theory.Label.unit in
+  Theory.Label.promise_subroutines @@ fun unit ->
   let* target = unit --> Theory.Unit.target in
-  KB.guard (Theory.Target.matches target "mips-family") >>= fun () ->
-  let* addr = label -->? Theory.Label.addr in
-  KB.collect References.slot unit >>| fun refs ->
-  Option.(some_if (is_some (References.lookup refs addr))) true
+  if Theory.Target.matches target "mips-family" then
+    KB.collect References.slot unit >>| References.referenced
+  else KB.return (Set.empty (module Bitvec_order))
 
 let () =
   Extension.declare ~doc @@ fun _ctxt ->
@@ -223,8 +230,10 @@ let () =
     declare ~package:"bap" "roots-for-mips"
     |> require Theory.Label.addr |> require Theory.Label.unit
     |> require Theory.Unit.target |> require References.slot
-    |> provide Theory.Label.is_subroutine
-    |> comment "marks external-references as function starts on MIPS");
+    |> provide Theory.Unit.subroutines
+    |> comment
+         "marks external-references as function starts (and is-subroutine) on \
+          MIPS");
   KB.Rule.(
     declare ~package:"bap" "resolve-stubs"
     |> require Theory.Label.addr |> require Theory.Label.unit

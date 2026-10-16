@@ -1696,6 +1696,20 @@ module Theory : sig
     val compiler : (cls, compiler option) KB.slot
     (** [compiler] the program that translated the unit from the [source]. *)
 
+    val subroutines : (cls, Set.M(Bitvec_order).t) KB.slot
+    (** [subroutines] the addresses of the subroutine entry points of the unit.
+
+        The addresses are the addresses of the labels of the unit, i.e., they
+        are biased as the {!Label.addr} property. A provider of the
+        {!Label.is_subroutine} property that knows all entry points of a unit
+        at once shall also provide this property, see
+        {!Label.promise_subroutines}. The disassembler uses it to find the
+        entry points of a memory region without querying each of its
+        addresses, which is only possible when all providers of the
+        {!Label.is_subroutine} property also provide this property.
+
+        @since 2.6.0 *)
+
     include Knowledge.Object.S with type t := t
   end
 
@@ -1755,6 +1769,48 @@ module Theory : sig
 
     val is_subroutine : (program, bool option) KB.slot
     (** a link is subroutine if it is an entry point to a subroutine. *)
+
+    val promise_subroutines :
+      ?per_label:(t -> bool option knowledge) ->
+      (Unit.t -> Set.M(Bitvec_order).t knowledge) ->
+      unit
+    (** [promise_subroutines ?per_label starts] promises the entry points
+        [starts unit] of each unit, i.e., the {!Unit.subroutines} property, as
+        well as the {!is_subroutine} property of their labels.
+
+        Without [per_label], the {!is_subroutine} property of a label is [Some
+        true] if the address of the label belongs to the {!Unit.subroutines}
+        of its unit, otherwise the property is computed by [per_label], which
+        must agree with [starts]: for any label of a unit [u] at an address
+        [a], [per_label] must evaluate to [Some true] if [a] belongs to
+        [starts u] and to [None] otherwise.
+
+        The disassembler classifies a memory region with the
+        {!Unit.subroutines} property, instead of querying the
+        {!is_subroutine} property of each of its addresses, only if all
+        promises of the {!is_subroutine} property are made with this function
+        (or with {!promising_subroutines}), see {!has_bulk_subroutines}.
+
+        @since 2.6.0 *)
+
+    val promising_subroutines :
+      ?per_label:(t -> bool option knowledge) ->
+      promise:(Unit.t -> Set.M(Bitvec_order).t knowledge) ->
+      (unit -> 'a knowledge) ->
+      'a knowledge
+    (** [promising_subroutines ?per_label ~promise scope] makes the same
+        promises as [promise_subroutines ?per_label promise] for the duration
+        of [scope ()].
+
+        @since 2.6.0 *)
+
+    val has_bulk_subroutines : unit -> bool
+    (** [has_bulk_subroutines ()] is [true] if all promises of the
+        {!is_subroutine} property are also promises of the {!Unit.subroutines}
+        property, i.e., they were made with {!promise_subroutines} or
+        {!promising_subroutines}.
+
+        @since 2.6.0 *)
 
     val fresh : t knowledge
     (** [fresh] a fresh label (a shortcut for [KB.create cls]).

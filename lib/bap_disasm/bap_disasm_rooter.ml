@@ -58,17 +58,49 @@ let make_provider rooter =
       Option.some_if (Set.mem roots addr) true
     else None
 
+(* the starts of the unit, i.e., the label addresses that [make_provider]
+   accepts: a label address [a] is accepted if [a - bias] (computed in
+   the code address size, with [bias] only for unbiased rooters) is a
+   root of that size, so the starts are the roots of that size plus
+   [bias] *)
+let make_starts rooter =
+  let roots = roots rooter |> Seq.to_list in
+  fun unit ->
+    KB.collect Theory.Unit.path unit >>= fun path ->
+    KB.collect Theory.Unit.bias unit >>= fun bias ->
+    KB.collect Theory.Unit.target unit >>| fun target ->
+    let size = Theory.Target.code_addr_size target in
+    (* as [Context.is_applicable] *)
+    let applicable =
+      match (rooter.path, path) with
+      | None, _ -> true
+      | Some _, None -> false
+      | Some p1, Some p2 -> String.equal p1 p2
+    in
+    if not applicable then Set.empty (module Bitvec_order)
+    else
+      let bias =
+        match bias with
+        | Some bias when not rooter.biased -> Word.create bias size
+        | _ -> Word.zero size
+      in
+      List.fold roots ~init:(Set.empty (module Bitvec_order))
+        ~f:(fun starts root ->
+          if Int.equal (Word.bitwidth root) size then
+            Set.add starts (Word.to_bitvec Word.(root + bias))
+          else starts)
+
 let provide =
   KB.Rule.(
     declare ~package:"bap" "reflect-rooter"
     |> dynamic [ "rooter" ] |> require Theory.Label.addr
     |> require Theory.Label.unit |> require Theory.Unit.path
-    |> provide Theory.Label.is_subroutine
-    |> comment "[Rooter.provide r] provides [r] to KB.");
+    |> provide Theory.Unit.subroutines
+    |> comment "[Rooter.provide r] provides [r] to KB (and is-subroutine).");
   fun rooter ->
-    let rooter = make_provider rooter in
-    KB.promise Theory.Label.is_subroutine @@ rooter
+    Theory.Label.promise_subroutines ~per_label:(make_provider rooter)
+      (make_starts rooter)
 
-let providing =
- fun rooter ->
-  KB.promising Theory.Label.is_subroutine ~promise:(make_provider rooter)
+let providing rooter =
+  Theory.Label.promising_subroutines ~per_label:(make_provider rooter)
+    ~promise:(make_starts rooter)

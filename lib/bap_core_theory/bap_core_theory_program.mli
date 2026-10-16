@@ -63,6 +63,7 @@ module Unit : sig
   val target : (cls, Target.t) slot
   val source : (cls, Source.t) slot
   val compiler : (cls, compiler option) slot
+  val subroutines : (cls, Set.M(Bitvec_order).t) slot
 
   include Knowledge.Object.S with type t := t
 end
@@ -100,6 +101,19 @@ module Label : sig
   val possible_name : (program, string option opinions) slot
   val is_valid : (program, bool option) slot
   val is_subroutine : (program, bool option) slot
+
+  val promise_subroutines :
+    ?per_label:(t -> bool option knowledge) ->
+    (Unit.t -> Set.M(Bitvec_order).t knowledge) ->
+    unit
+
+  val promising_subroutines :
+    ?per_label:(t -> bool option knowledge) ->
+    promise:(Unit.t -> Set.M(Bitvec_order).t knowledge) ->
+    (unit -> 'a knowledge) ->
+    'a knowledge
+
+  val has_bulk_subroutines : unit -> bool
   val fresh : t knowledge
   val null : t
   val for_addr : ?package:string -> Bitvec.t -> t knowledge

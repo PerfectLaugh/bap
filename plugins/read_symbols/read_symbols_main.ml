@@ -167,8 +167,10 @@ let get_entry label =
   KB.collect data unit >>|? fun data -> Hashtbl.find data addr
 
 let provide_starts () =
-  KB.promise Theory.Label.is_subroutine @@ fun label ->
-  get_entry label >>|? fun _ -> Some true
+  Theory.Label.promise_subroutines @@ fun unit ->
+  KB.collect data unit >>| function
+  | None -> Set.empty (module Bitvec_order)
+  | Some data -> Set.of_list (module Bitvec_order) (Hashtbl.keys data)
 
 let provide_names () =
   KB.propose agent Theory.Label.possible_name @@ fun label ->

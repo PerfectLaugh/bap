@@ -174,6 +174,15 @@ module Unit = struct
       ~persistent:Compiler.persistent ~public:true
       ~desc:"the compiler that compiles/compiled the unit"
 
+  let subroutines =
+    Knowledge.Class.property ~package cls "unit-subroutines"
+      (Knowledge.Domain.powerset (module Bitvec_order) "addresses"
+         ~inspect:Bitvec_sexp.sexp_of_t)
+      ~public:true
+      ~desc:
+        "the addresses of the subroutine entry points of the unit that are \
+         known to the providers of [is-subroutine]"
+
   include (val Knowledge.Object.derive cls)
 end
 
@@ -201,6 +210,7 @@ module Label = struct
   let is_subroutine =
     attr "is-subroutine" "is the program a subroutine entry point"
 
+
   let encoding =
     Knowledge.Class.property ~package cls "encoding" Language.domain
       ~persistent:Language.persistent ~public:true
@@ -223,6 +233,54 @@ module Label = struct
              type t = Bitvec_binprot.t option [@@deriving bin_io]
            end))
       ~public:true ~desc:"the program virtual address"
+
+  (* the number of the promises of [is_subroutine] whose answers are
+     also provided for the whole unit with [Unit.subroutines] *)
+  let mirrored = ref 0
+  let derived = ref false
+
+  (* the derived promise of [is_subroutine], which is shared by all
+     providers that don't have their own promise *)
+  let derive_subroutine () =
+    if not !derived then begin
+      derived := true;
+      incr mirrored;
+      let open Knowledge.Syntax in
+      Knowledge.promise is_subroutine @@ fun label ->
+      Knowledge.collect addr label >>= function
+      | None -> Knowledge.return None
+      | Some addr -> (
+          Knowledge.collect unit label >>= function
+          | None -> Knowledge.return None
+          | Some unit ->
+              Knowledge.collect Unit.subroutines unit >>| fun starts ->
+              Option.some_if (Set.mem starts addr) true)
+    end
+
+  let promise_subroutines ?per_label per_unit =
+    Knowledge.promise Unit.subroutines per_unit;
+    match per_label with
+    | None -> derive_subroutine ()
+    | Some per_label ->
+        Knowledge.promise is_subroutine per_label;
+        incr mirrored
+
+  let promising_subroutines ?per_label ~promise:per_unit scoped =
+    let open Knowledge.Syntax in
+    Knowledge.promising Unit.subroutines ~promise:per_unit @@ fun () ->
+    match per_label with
+    | None ->
+        derive_subroutine ();
+        scoped ()
+    | Some per_label ->
+        incr mirrored;
+        Knowledge.promising is_subroutine ~promise:per_label scoped
+        >>| fun r ->
+        decr mirrored;
+        r
+
+  let has_bulk_subroutines () =
+    Knowledge.Slot.promises is_subroutine = !mirrored
 
   let name = string_property cls "label-name" ~desc:"the program linkage name"
 

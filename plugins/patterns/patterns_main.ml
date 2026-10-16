@@ -1145,11 +1145,8 @@ end = struct
     reset_context >>| fun () -> result
 
   let promise_roots () =
-    KB.promise Theory.Label.is_subroutine @@ fun lbl ->
-    KB.collect Theory.Label.addr lbl >>=? fun addr ->
-    KB.collect Theory.Label.unit lbl >>=? fun unit ->
-    KB.collect slot unit >>| fun { roots } ->
-    Option.some_if (Set.mem roots addr) true
+    Theory.Label.promise_subroutines @@ fun unit ->
+    KB.collect slot unit >>| fun { roots } -> roots
 
   let setup_context () =
     KB.promise Primus.Lisp.Semantics.context @@ fun _ ->

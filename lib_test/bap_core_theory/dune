@@ -1,0 +1,4 @@
+(test
+ (name test_subroutines)
+ (package bap-core-theory)
+ (libraries bap-core-theory bap-knowledge bitvec bitvec-order core ounit2))

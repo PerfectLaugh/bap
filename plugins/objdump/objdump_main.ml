@@ -113,6 +113,10 @@ module Repository : sig
   val name :
     t -> ?size:int -> ?bias:Bitvec.t -> path:string -> Bitvec.t -> string option
 
+  val starts :
+    t -> size:int -> bias:Bitvec.t option -> path:string -> Set.M(Bitvec_order).t
+  (** the addresses for which [name] finds a name *)
+
   val aliases :
     t ->
     ?size:int ->
@@ -194,6 +198,19 @@ end = struct
   let name repo ?(size = 32) ?bias ~path addr =
     Map.find (lookup repo path).names (to_real size bias addr)
 
+  (* [to_real] is a bijection on the addresses of the given size, so a
+     name of a real address [x] is found only at [of_real x], and only if
+     [x] is an address of that size when the addresses are biased *)
+  let starts repo ~size ~bias ~path =
+    let fits x = Bitvec.equal x Bitvec.((x + zero) mod modulus size) in
+    Map.fold (lookup repo path).names
+      ~init:(Set.empty (module Bitvec_order))
+      ~f:(fun ~key ~data:_ starts ->
+        match bias with
+        | None -> Set.add starts key
+        | Some _ when fits key -> Set.add starts (of_real size bias key)
+        | Some _ -> starts)
+
   let aliases repo ?(size = 32) ?bias ~path addr =
     Map.find (lookup repo path).aliases (to_real size bias addr)
 end
@@ -221,11 +238,17 @@ let provide_function_starts_and_names repo =
     KB.collect key_slot label >>|? fun key ->
     f (Repository.name repo ~size ?bias ~path key)
   in
-  let is_known = function None -> None | Some _ -> Some true in
   let open Theory.Label in
-  declare "subroutines" addr is_subroutine;
+  declare "subroutines" addr Theory.Unit.subroutines;
   declare "names" addr possible_name;
-  property KB.promise is_subroutine addr is_known;
+  promise_subroutines (fun unit ->
+      KB.collect Theory.Unit.path unit >>= function
+      | None -> KB.return (Set.empty (module Bitvec_order))
+      | Some path ->
+          KB.collect Theory.Unit.bias unit >>= fun bias ->
+          KB.collect Theory.Unit.target unit >>| fun target ->
+          let size = Theory.Target.code_addr_size target in
+          Repository.starts repo ~size ~bias ~path);
   property (KB.propose agent) possible_name addr Fn.id
 
 let provide_aliases repo =

@@ -10,28 +10,27 @@ let agent =
   KB.Agent.register ~package:"bap" "radare2-symbolizer"
     ~reliability:KB.Agent.doubtful ~desc:"extracts symbols radare2"
 
+(* a label at [addr] is a function start if [(addr - bias) mod 2^bits]
+   is a key of [funcs], so the starts are the keys that are addresses of
+   that size, biased back *)
 let provide_roots file funcs =
-  let promise_property slot =
-    KB.promise slot @@ fun label ->
-    Theory.Label.target label >>= fun t ->
-    if Theory.Target.belongs Arm_target.parent t then !!None
-    else
-      let*? addr = label --> Theory.Label.addr in
-      let*? unit = label --> Theory.Label.unit in
-      let*? path = unit --> Theory.Unit.path in
-      let* bias = unit --> Theory.Unit.bias in
-      let+ bits =
-        KB.collect Theory.Unit.target unit >>| Theory.Target.code_addr_size
-      in
-      if String.equal path file then
+  let none = Set.empty (module Bitvec_order) in
+  Theory.Label.promise_subroutines @@ fun unit ->
+  let* target = unit --> Theory.Unit.target in
+  if Theory.Target.belongs Arm_target.parent target then !!none
+  else
+    unit --> Theory.Unit.path >>= function
+    | Some path when String.equal path file ->
+        let+ bias = unit --> Theory.Unit.bias in
         let bias = Option.value bias ~default:Bitvec.zero in
-        let addr =
-          Bitvec.to_bigint @@ Bitvec.((addr - bias) mod modulus bits)
-        in
-        Option.some_if (Hashtbl.mem funcs addr) true
-      else None
-  in
-  promise_property Theory.Label.is_subroutine
+        let bits = Theory.Target.code_addr_size target in
+        let limit = Z.shift_left Z.one bits in
+        Hashtbl.fold funcs ~init:none ~f:(fun ~key ~data:_ starts ->
+            if Z.geq key Z.zero && Z.lt key limit then
+              let real = Bitvec.(bigint key mod modulus bits) in
+              Set.add starts Bitvec.((real + bias) mod modulus bits)
+            else starts)
+    | _ -> !!none
 
 let strip str =
   if String.is_prefix ~prefix:"func." str then None

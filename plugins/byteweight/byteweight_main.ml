@@ -113,13 +113,9 @@ let provide_roots () =
   KB.Rule.(
     declare ~package:"bap" "byteweight"
     |> require roots
-    |> provide Theory.Label.is_subroutine
-    |> comment "uses byteweight to find function starts");
-  KB.promise Theory.Label.is_subroutine @@ fun program ->
-  let*? unit = program --> Theory.Label.unit in
-  let*? addr = program --> Theory.Label.addr in
-  let+ roots = unit --> roots in
-  Option.some_if (Set.mem roots addr) true
+    |> provide Theory.Unit.subroutines
+    |> comment "uses byteweight to find function starts (and is-subroutine)");
+  Theory.Label.promise_subroutines @@ fun unit -> unit --> roots
 
 let enable path min_length max_length threshold comp =
   compute_root_table path min_length max_length threshold comp;

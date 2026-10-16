@@ -204,11 +204,11 @@ module Symbols = struct
   let promise_roots () : unit =
     KB.Rule.(
       declare "provides roots" |> require Image.Spec.slot
-      |> provide Theory.Label.is_subroutine
-      |> comment "computes roots from spec");
-    KB.promise Theory.Label.is_subroutine @@ fun obj ->
-    collect_inputs slot obj @@ fun { roots } addr ->
-    Option.some_if (Set.mem roots addr) true
+      |> provide Theory.Unit.subroutines
+      |> comment "computes roots (and is-subroutine) from spec");
+    Theory.Label.promise_subroutines @@ fun unit ->
+    let+ { roots } = KB.collect slot unit in
+    roots
 
   let names_agent =
     KB.Agent.register ~package:"bap" "specification-provider"
