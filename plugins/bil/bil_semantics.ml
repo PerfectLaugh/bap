@@ -429,6 +429,7 @@ module Emulator = struct
     float xs (op s rm !!x)
 
   let fsqrt rm x = fuop Float.fsqrt rm x
+  let fround rm x = fuop Float.fround rm x
 
   let fconvert : type f.
       f Theory.Float.t Theory.Value.sort ->
@@ -471,10 +472,10 @@ module Emulator = struct
   let cast_float s m v = make_cast_float Float.cast_float s m v
   let cast_sfloat s m v = make_cast_float Float.cast_float_signed s m v
 
-  let cast_int ts _ v =
+  let cast_int ts rm v =
     v >>= fun v ->
     with_fsort ~unk_s:ts (sort v) @@ fun bs s ->
-    Float.cast_int s ts !!(resort bs v)
+    Float.cast_int s rm ts !!(resort bs v)
 
   let cast_sint = cast_int
 

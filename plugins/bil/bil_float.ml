@@ -315,11 +315,16 @@ module Make (B : Theory.Core) = struct
     let size = Bits.size xsort |> B.of_int nsort in
     ite (!!n = size) !!x (!!x land not mask)
 
+  (* [is_round_up] is true if the magnitude is rounded up, which the
+     directed modes do when the result is inexact and their direction is
+     away from zero *)
   let is_round_up rm sign last guard round sticky =
     let open B in
     let case m t f = ite (requal rm m) t f and default = Fn.id in
-    case rtn (inv sign)
-    @@ case rtz sign @@ case rna guard
+    let inexact = guard || round || sticky in
+    case rtn (inexact && sign)
+    @@ case rtp (inexact && inv sign)
+    @@ case rna guard
     @@ case rne (guard && (round || sticky || last))
     @@ default b0
 
@@ -870,17 +875,39 @@ module Make (B : Theory.Core) = struct
     let bitv = ite sign (neg bitv) bitv in
     gen_cast_float fsort rmode sign bitv
 
-  let cast_int (fsort : _ fsort) outs bitv =
+  (* the value is the coefficient shifted by the exponent less the
+     position of the point, the bits shifted out are rounded with [rm];
+     the result is undefined if the value does not fit [outs] *)
+  let cast_int (fsort : _ fsort) rm outs bitv =
     let open B in
     let open IEEE754 in
     let { p; bias } = Sort.spec fsort in
     let exps = exps fsort in
     let sigs = Bits.define p in
     unpack fsort bitv @@ fun sign expn coef ->
-    expn - of_int exps bias + one exps >>>= fun bits ->
-    of_int sigs p - unsigned sigs bits >>>= fun bits ->
-    coef lsr unsigned sigs bits >>>= fun coef ->
-    unsigned outs coef >>>= fun coef -> ite sign (neg coef) coef
+    of_int exps Stdlib.(bias + p - 1) >>>= fun point ->
+    ite (expn >= point)
+      (unsigned outs coef >>>= fun c -> c lsl unsigned outs (expn - point))
+      ( point - expn >>>= fun s ->
+        coef lsr unsigned sigs s >>>= fun q ->
+        round rm sign q coef s @@ fun q _ -> unsigned outs q )
+    >>>= fun mag -> ite sign (neg mag) mag
+
+  (* the numbers with exponents not less than the position of the point
+     are integral, as are the infinities and NaNs, the others are rounded
+     with [rm] through an integer of the size of the format, which they
+     fit, and keep their sign *)
+  let fround fsort rm x =
+    let to_int = cast_int and of_int_signed = cast_float_signed in
+    let open B in
+    let open IEEE754 in
+    let { p; bias } = Sort.spec fsort in
+    x >>>= fun x ->
+    exponent fsort x >>>= fun expn ->
+    of_int (exps fsort) Stdlib.(bias + p - 1) >>>= fun point ->
+    ite (expn >= point) x
+      ( to_int fsort rm (bits fsort) x >>>= fun n ->
+        with_sign (fsign x) (of_int_signed fsort rne n) )
 
   (* returns x in range [1.0; 2.0] *)
   let range_reduction fsort x f =
