@@ -44,22 +44,24 @@ let bit_extract ~dest ~src sign ~lsb ~widthminus1 cond =
   let final = cast_of_sign sign 32 extracted in
   exec [ assn (Env.of_reg dest) final ] cond
 
-let get_lsb_width instr : int * int =
-  let open Word.Int_exn in
-  let width = Word.bitwidth instr in
-  let ( !$ ) = Word.of_int ~width in
-  let lsb = (instr lsr !$7) land !$0x1f in
-  let msb = (instr lsr !$16) land !$0x1f in
-  let width = abs (msb - lsb + !$1) in
-  match Word.(to_int lsb, to_int width) with
-  | Ok lsb, Ok width -> (lsb, width)
-  | _ -> fail [%here] "failed to get_lsb_width"
+(* the lowest bit and the width of the field of BFI and BFC from the
+   inverted mask operand, which is the same in the A32 and T32
+   encodings, unlike the fields of the instruction *)
+let get_lsb_width bmask : int * int =
+  let mask =
+    lnot (Word.to_int_exn (assert_imm [%here] bmask)) land 0xffffffff
+  in
+  if mask = 0 then fail [%here] "BFI and BFC need a non-empty field";
+  let rec lsb n = if mask land (1 lsl n) <> 0 then n else lsb (n + 1) in
+  let rec msb n = if mask land (1 lsl n) <> 0 then n else msb (n - 1) in
+  let lsb = lsb 0 in
+  (lsb, msb 31 - lsb + 1)
 
-let bit_field_insert ~dest ~src raw cond =
+let bit_field_insert ~dest ~src bmask cond =
   let dest = assert_reg [%here] dest in
   let d = Env.of_reg dest in
   let d_e = Bil.var d in
-  let lsb, width = get_lsb_width raw in
+  let lsb, width = get_lsb_width bmask in
   let extracted = Bil.extract ~hi:(width - 1) ~lo:0 (exp_of_op src) in
   let ext_h b s = Bil.extract ~hi:31 ~lo:b s in
   let ext_l b s = Bil.extract ~hi:b ~lo:0 s in

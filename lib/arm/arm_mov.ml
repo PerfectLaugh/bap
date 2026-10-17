@@ -91,7 +91,8 @@ let lift ?(encoding = Theory.Language.unknown) ?dest src1 ?src2 itype ?sreg
     | `BIC, _, Some (`Imm i64)
     | `EOR, _, Some (`Imm i64)
     | `ORR, _, Some (`Imm i64) ->
-        (stmts, set_cf_data ~imm:i64 ~data:raw :: set_nzf Bil.(var dest) reg32_t)
+        let t32 = Theory.Language.equal encoding Arm_target.llvm_t32 in
+        (stmts, set_cf_data ~t32 ~imm:i64 :: set_nzf Bil.(var dest) reg32_t)
     | #move, _, _ ->
         (stmts, Bil.move Env.cf carry :: set_nzf Bil.(var dest) reg32_t)
     | (#arth as itype1), _, _ ->

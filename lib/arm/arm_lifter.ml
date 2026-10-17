@@ -191,10 +191,10 @@ let lift_bits mem ops (insn : bits_insn) =
   | `SBFX, [| dest; src; lsb; widthminus1; cond; _ |] ->
       bit_extract ~dest ~src Signed ~lsb ~widthminus1 cond
   (* bit field *)
-  | `BFI, [| dest; _unknown; src; _bmask; cond; _ |] ->
-      bit_field_insert ~dest ~src mem cond
-  | `BFC, [| dest; _unknown; _bmask; cond; _ |] ->
-      bit_field_insert ~dest ~src:(`Imm (word 0)) mem cond
+  | `BFI, [| dest; _unknown; src; bmask; cond; _ |] ->
+      bit_field_insert ~dest ~src bmask cond
+  | `BFC, [| dest; _unknown; bmask; cond; _ |] ->
+      bit_field_insert ~dest ~src:(`Imm (word 0)) bmask cond
   (* bit reverse *)
   | `RBIT, [| dest; src; cond; _ |] ->
       let dest = assert_reg [%here] dest in

@@ -25,14 +25,26 @@ let set_adc s1 s2 r t =
 
 let set_sbc s1 s2 r t = set_adc s1 Bil.(lnot s2) r t
 
-let set_cf_data ~imm ~data =
-  let value =
-    let width = Word.bitwidth imm in
-    if Word.(of_int ~width 255 >= imm && imm >= zero width) then
-      let width = Word.bitwidth data in
-      if Word.(Int_exn.(data land of_int ~width 0xf00) = zero width) then
-        Bil.unknown "undefined" bool_t
-      else Bil.int Word.b0
-    else msb Bil.(int imm)
+(* the carry out of a modified immediate is the bit 31 of its value
+   when it is rotated, and the carry is not changed otherwise. The A32
+   immediate [imm] is encoded, the rotation is in the bits 11-8 and the
+   value in the bits 7-0, the T32 one is decoded, it is rotated if it
+   is neither a byte nor a replicated byte pattern. *)
+let set_cf_data ~t32 ~imm =
+  let v = Word.to_int_exn imm land 0xffffffff in
+  let byte k = (v lsr (8 * k)) land 0xff in
+  let rotated, carry =
+    if t32 then
+      let plain =
+        v <= 0xff
+        || (byte 1 = 0 && byte 3 = 0 && byte 0 = byte 2)
+        || (byte 0 = 0 && byte 2 = 0 && byte 1 = byte 3)
+        || (byte 0 = byte 1 && byte 1 = byte 2 && byte 2 = byte 3)
+      in
+      (not plain, (v lsr 31) land 1 = 1)
+    else
+      let r = 2 * ((v lsr 8) land 0xf) in
+      (r <> 0, r <> 0 && (byte 0 lsr (r - 1)) land 1 = 1)
   in
-  Bil.move Env.cf value
+  if rotated then Bil.move Env.cf (Bil.int (Word.of_bool carry))
+  else Bil.move Env.cf (Bil.var Env.cf)

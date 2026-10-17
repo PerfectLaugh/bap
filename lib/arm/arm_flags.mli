@@ -9,4 +9,4 @@ val set_sub : exp -> exp -> exp -> typ -> stmt list
 val set_vnzf_sub : exp -> exp -> exp -> typ -> stmt list
 val set_adc : exp -> exp -> exp -> typ -> stmt list
 val set_sbc : exp -> exp -> exp -> typ -> stmt list
-val set_cf_data : imm:word -> data:word -> stmt
+val set_cf_data : t32:bool -> imm:word -> stmt
