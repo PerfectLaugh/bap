@@ -177,7 +177,7 @@ module Thumb (CT : Theory.Core) = struct
     match (opcode, (MC.Insn.ops insn : Op.t array)) with
     | `tB, [| Imm dst; _; _ |] -> b pc (imm dst)
     | `tBcc, [| Imm dst; Imm c; _ |] -> bcc pc (cnd c) (imm dst)
-    | `tBL, [| _; _; Imm dst; _ |]
+    | `tBL, ([| _; _; Imm dst |] | [| _; _; Imm dst; _ |])
     | `tBLXi, ([| _; _; Imm dst |] | [| _; _; Imm dst; _ |]) ->
         bli pc (imm dst)
     | `tBLXr, [| _; _; Reg dst |] when is_pc (reg dst) ->
