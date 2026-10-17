@@ -98,7 +98,7 @@ let cancel (Subs (key, id)) observers =
 let add_watcher observers { key } obs = add_observer observers key obs
 
 let callbacks os key =
-  match Map.find_exn os key with exception _ -> [] | { subs } -> subs
+  match Map.find os key with None -> [] | Some { subs } -> subs
 
 module Make (Machine : Monad.S) = struct
   open Machine.Syntax
