@@ -703,7 +703,19 @@ module Make (Machine : Machine) = struct
   let link_program program =
     Machine.sequence [ set_program program; link_features; link_advisors ]
 
-  let typecheck = Machine.sequence [ link_places (); Typechecker.run ]
+  (* the registers of the target and its parents are zero, as the places
+     of the program, which is not typed if it is empty *)
+  let link_registers () =
+    Machine.gets Project.target >>= fun t ->
+    t :: Theory.Target.parents t
+    |> List.concat_map ~f:(fun t -> Set.to_list (Theory.Target.regs t))
+    |> Machine.List.iter ~f:(fun v -> link_global (Bap.Std.Var.reify v))
+
+  let typecheck =
+    Machine.Local.get state >>= fun s ->
+    if Lisp.Program.is_empty s.program then link_registers ()
+    else Machine.sequence [ link_places (); Typechecker.run ]
+
   let program = Machine.Local.get state >>| fun s -> s.program
 
   let link_primitive p =
