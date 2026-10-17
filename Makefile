@@ -41,13 +41,17 @@ TESTSUITE_REV = 44cea2f4814bed7166e3a585fa240074c8aeaac6
 testsuite:
 	git clone $(TESTSUITE_URL) testsuite
 
+# the number of test files of the testsuite that run in parallel
+TESTSUITE_JOBS ?= 8
+
 # runs under dune exec, so that it tests bap and the plugins built in
 # this tree instead of whatever bap is first on PATH, and with TERM=dumb,
 # so that the output the tests match doesn't depend on the terminal
 check: testsuite
 	git -C testsuite cat-file -e $(TESTSUITE_REV)^{commit} 2>/dev/null || \
 	  git -C testsuite fetch $(TESTSUITE_URL)
-	TERM=dumb dune exec -- $(MAKE) REVISION=$(TESTSUITE_REV) -C testsuite
+	git -C testsuite checkout -q $(TESTSUITE_REV)
+	TERM=dumb dune exec -- bash tools/run-testsuite.sh $(TESTSUITE_JOBS)
 
 # runs the micro-benchmarks in benchmarks/. Pass core_bench options in
 # BENCH_ARGS (e.g., BENCH_ARGS="-quota 1" or BENCH_ARGS=-help) and set
