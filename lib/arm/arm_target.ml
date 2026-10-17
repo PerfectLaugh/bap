@@ -170,7 +170,7 @@ let regsv8 =
       ([ stack_pointer ], untyped [ reg r64 "R31" ]);
       ([ frame_pointer ], untyped [ reg r64 "R29" ]);
       ( [ function_argument; function_return ],
-        array r64 "R" 8 @< array r64 "V" 8 );
+        array r64 "R" 8 @< array r128 "V" 8 );
       ([ constant; zero; pseudo ], untyped [ reg r64 "XZR"; reg r64 "ZR" ]);
       ([ constant; zero; pseudo ], untyped [ reg r32 "WZR" ]);
       ([ link ], untyped [ reg r64 "R30" ]);
@@ -280,7 +280,10 @@ module Family (Order : Endianness) = struct
 
   let v4t = def "armv4t" ~parent:v4 ~code_alignment:16
   let v5 = v4 <: "armv5"
-  let v5t = v5 <: "armv5t"
+
+  (* the code of the targets with the Thumb instructions is aligned on
+     halfwords, the later targets inherit it from armv5t *)
+  let v5t = def "armv5t" ~parent:v5 ~code_alignment:16
   let v5te = v5t <: "armv5te"
   let v5tej = v5te <: "armv5tej"
   let v6 = v5tej <: "armv6"
@@ -665,6 +668,43 @@ module Encodings = struct
          (module Bitvec_order)
          "encodings" ~equal:CT.Language.equal
 
+  (* the code of each symbol, from its start to its end and with its
+     encoding, which the encodings guessed from patterns do not
+     override *)
+  let chunks =
+    KB.Class.property CT.Unit.cls ~package "symbols-chunks"
+    @@ KB.Domain.mapping
+         (module Bitvec_order)
+         "chunks"
+         ~equal:(fun (e1, l1) (e2, l2) ->
+           Bitvec.equal e1 e2 && CT.Language.equal l1 l2)
+
+  let symbols_chunks spec =
+    let open Ogre.Let in
+    let open Image.Scheme in
+    let query =
+      let* chunks = Ogre.(collect Query.(select (from symbol_chunk))) in
+      let+ values = Ogre.(collect Query.(select (from symbol_value))) in
+      let values =
+        Seq.fold values ~init:Int64.Map.empty ~f:(fun m (addr, value) ->
+            Map.set m ~key:addr ~data:value)
+      in
+      Seq.fold chunks ~init:empty ~f:(fun m { addr; size; info = root } ->
+          match Map.find values root with
+          | None -> m
+          | Some value ->
+              let lang = if is_thumb value then llvm_t32 else llvm_a32 in
+              let fin = Bitvec.M32.int64 Int64.(addr + size) in
+              Map.set m ~key:(Bitvec.M32.int64 addr) ~data:(fin, lang))
+    in
+    match Ogre.eval query spec with Ok m -> m | Error _ -> empty
+
+  let in_other_chunk chunks addr lang =
+    match Map.closest_key chunks `Less_or_equal_to addr with
+    | Some (_, (fin, lang')) ->
+        Bitvec.compare addr fin < 0 && not (CT.Language.equal lang lang')
+    | None -> false
+
   let set_encoding label x y =
     let* addr = x.?[Sigma.static] in
     let* code = y.?[Sigma.symbol] in
@@ -675,10 +715,14 @@ module Encodings = struct
       | ":a32" | ":A32" -> !!llvm_a32
       | other -> Sigma.failp "unknown encoding %s, expects :T32 or :A32" other
     in
-    let* encodings = unit --> slot in
-    let res = Map.set encodings ~key:addr ~data:lang in
-    KB.catch (KB.provide slot unit res) (fun _ -> KB.return ()) >>| fun () ->
-    Sigma.Effect.pure Sigma.Value.nil
+    let* chunks = unit --> chunks in
+    if in_other_chunk chunks addr lang then
+      !!(Sigma.Effect.pure Sigma.Value.nil)
+    else
+      let* encodings = unit --> slot in
+      let res = Map.set encodings ~key:addr ~data:lang in
+      KB.catch (KB.provide slot unit res) (fun _ -> KB.return ()) >>| fun () ->
+      Sigma.Effect.pure Sigma.Value.nil
 
   let provide_primitive () =
     let types = Lambda.Type.Spec.(tuple [ int; sym ] @-> sym) in
@@ -694,8 +738,10 @@ module Encodings = struct
 
   let provide_encodings () =
     let open KB.Syntax in
-    KB.promise slot @@ fun label ->
-    KB.collect Image.Spec.slot label >>| symbols_encoding
+    KB.promise slot (fun label ->
+        KB.collect Image.Spec.slot label >>| symbols_encoding);
+    KB.promise chunks @@ fun label ->
+    KB.collect Image.Spec.slot label >>| symbols_chunks
 
   let provide () =
     provide_encodings ();
@@ -788,11 +834,16 @@ let normalize_features xs =
   List.map xs ~f:(fun x -> if is_normal_feature x then x else "+" ^ x)
   |> String.concat ~sep:","
 
+(* the AArch32 decoders also decode the optional integer division and
+   the VFPv4 extensions, the encodings of which are undefined without
+   them *)
+let a32_extensions = [ "hwdiv"; "hwdiv-arm"; "vfp4" ]
+
 let enable_llvm ?(features = []) ?interworking () =
   let open KB.Syntax in
   let features xs = normalize_features (xs @ features) in
-  register llvm_a32 "armv7" ~attrs:(features []);
-  register llvm_t32 "thumbv7" ~attrs:(features [ "thumb2" ]);
+  register llvm_a32 "armv7" ~attrs:(features a32_extensions);
+  register llvm_t32 "thumbv7" ~attrs:(features ("thumb2" :: a32_extensions));
   register llvm_a64 "aarch64" ~attrs:(features v8aversions);
   KB.promise CT.Label.encoding @@ fun label ->
   let* target = CT.Label.target label in
