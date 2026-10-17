@@ -628,7 +628,8 @@ private:
                 q = r;
         }
 
-        std::size_t size = q - p + std::strlen(q);
+        // including the terminating null of the last name
+        std::size_t size = q - p + std::strlen(q) + 1;
 
         return {p, size};
     }
