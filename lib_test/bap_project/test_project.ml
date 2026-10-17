@@ -21,7 +21,7 @@ let arm =
     arch = `armv7;
     addr = 16;
     code = "\x1e\xff\x2f\xe1";
-    bil = "jmp LR";
+    bil = "jmp (LR & 0xFFFFFFFE)";
     asm = "bx lr";
   }
 

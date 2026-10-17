@@ -306,7 +306,7 @@
 (defun MVNr (rd rm cnd _ s) (a32-logical second-not rd 0 (a32-reg rm) CF cnd s))
 (defun MVNsi (rd rm sh cnd _ s) (a32-logical second-not rd 0 (a32-op2-rsi rm sh) (shifter-carry (a32-reg rm) sh) cnd s))
 (defun MVNsr (rd rm rs typ cnd _ s) (a32-logical second-not rd 0 (a32-op2-rsr rm rs typ) (a32-reg-carry rm rs typ) cnd s))
-(defun MOVPCLR (cnd _) (when (condition-holds cnd) (exec-addr LR)))
+(defun MOVPCLR (cnd _) (when (condition-holds cnd) (a32-write-pc LR)))
 (defun MOVi16 (rd imm cnd _) (when (condition-holds cnd) (set$ rd imm)))
 (defun MOVTi16 (rd rn imm cnd _)
   (when (condition-holds cnd)
@@ -469,8 +469,8 @@
                         (a32-s64 (* (a32-half rn false) (a32-half rm true)))))))
 
 ;; branches, BX and BLX may change the instruction set, which is
-;; chosen by the label of the destination, they jump to the register
-;; as it is, the bit 0 included
+;; chosen by the label of the destination, the bit 0 of the register
+;; is not a part of the address, as in the writes to PC
 
 (defun a32-branch (off) (exec-addr (+ (a32-pc) off)))
 (defun a32-link () (set LR (a32-next)))
@@ -479,12 +479,12 @@
 (defun BL (off) (a32-link) (a32-branch off))
 (defun BL_pred (off cnd _) (a32-cond cnd (prog (a32-link) (a32-branch off))))
 (defun BLXi (off) (a32-link) (a32-branch off))
-(defun BX (rm) (exec-addr rm))
-(defun BX_pred (rm cnd _) (a32-cond cnd (exec-addr rm)))
-(defun BX_RET (cnd _) (a32-cond cnd (exec-addr LR)))
-(defun BLX (rm) (let ((dst rm)) (a32-link) (exec-addr dst)))
+(defun BX (rm) (a32-write-pc rm))
+(defun BX_pred (rm cnd _) (a32-cond cnd (a32-write-pc rm)))
+(defun BX_RET (cnd _) (a32-cond cnd (a32-write-pc LR)))
+(defun BLX (rm) (let ((dst rm)) (a32-link) (a32-write-pc dst)))
 (defun BLX_pred (rm cnd _)
-  (a32-cond cnd (let ((dst rm)) (a32-link) (exec-addr dst))))
+  (a32-cond cnd (let ((dst rm)) (a32-link) (a32-write-pc dst))))
 
 ;; the status register, the GE flags are not modeled and the mode bits
 ;; read as the user mode
