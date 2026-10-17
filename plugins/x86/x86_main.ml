@@ -1,11 +1,9 @@
 open Core
 open Bap_core_theory
-open Poly
 open Bap.Std
-open X86_targets
+open Bap_primus.Std
+open KB.Syntax
 include Self ()
-
-type kind = Legacy | Modern | Merge [@@deriving equal]
 
 (* the common ABIs (ms, gnu, cdecl, ...) are declared by the Core
    Theory in the [core] package, while the x86-specific ones (pascal,
@@ -15,99 +13,102 @@ let read_abi name =
   try Theory.Abi.read ~package:"core" name
   with Invalid_argument _ -> Theory.Abi.read ~package:"bap" name
 
-let main backend kind abi =
-  let abi = Option.map ~f:read_abi abi in
-  X86_target.load ?abi ?backend ();
-  let kind = if backend = Some "ghidra" then Modern else kind in
-  let ia32, amd64 =
-    match kind with
-    | Legacy -> ((module IA32L : Target), (module AMD64L : Target))
-    | Modern -> ((module IA32 : Target), (module AMD64 : Target))
-    | Merge -> ((module IA32M : Target), (module AMD64M : Target))
-  in
-  register_target `x86 ia32;
-  register_target `x86_64 amd64
+(* (x86-prefix BYTE) is true if BYTE is a legacy prefix of the
+   instruction, e.g., 0xf3 (REP), as LLVM doesn't keep them in the
+   opcodes of the string instructions *)
+let declare_prefix_primitive () =
+  let types = Primus.Lisp.Type.Spec.(one int @-> bool) in
+  Primus.Lisp.Semantics.declare ~types ~package:"x86-common" "x86-prefix"
+    ~docs:
+      "(x86-prefix BYTE) is true if BYTE, e.g., 0xf3, is a legacy prefix of \
+       the instruction" ~body:(fun _ ->
+      Theory.instance () >>= Theory.require >>= fun (module CT) ->
+      KB.return @@ fun lbl args ->
+      let* mem = KB.collect Memory.slot lbl in
+      let byte =
+        match args with
+        | [ x ] -> KB.Value.get Primus.Lisp.Semantics.static x
+        | _ -> None
+      in
+      let present =
+        match (mem, byte) with
+        | Some mem, Some byte ->
+            X86_prefix.get mem
+            |> List.exists ~f:(fun p ->
+                X86_prefix.to_int p = Bitvec.to_int byte)
+        | _ -> false
+      in
+      let* r = if present then CT.b1 else CT.b0 in
+      let r =
+        KB.Value.put Primus.Lisp.Semantics.static r
+          (Some (if present then Bitvec.one else Bitvec.zero))
+      in
+      let+ eff = CT.perform Theory.Effect.Sort.bot in
+      KB.Value.put Theory.Semantics.value eff (Theory.Value.forget r))
 
 let () =
-  let () =
-    Config.manpage
-      [
-        `S "SYNOPSIS";
-        `P "$(b,bap) FILE [--x86-abi=ABI]";
-        `P "$(b,bap) FILE [--x86-64-abi=ABI]";
-        `S "DESCRIPTION";
-        `P
-          "Provides lifter and implements a set of ABI for x86 and\n\
-          \    x86-64 architectures. No parameters are usually required. Once \
-           the\n\
-          \    plugin is installed it will automatically provide it\n\
-          \    services. However it is possible to override default abi, e.g.,\n\
-          \    when working with an executable compiled for MS Windows\n\
-          \    platform. For a full set of supported ABI use corresponding list\n\
-          \    option.";
-        `S "EXAMPLE";
-        `P
-          "To choose a correct ABI for a binary compiled for MS Windows\n\
-          \    x64 target, use the following:";
-        `P "$(b,bap) FILE --x86-64-abi=ms";
-        `S "SEE ALSO";
-        `P "$(b,bap-x86-cpu)(3), $(b,bap-plugin-abi)(1), $(b,bap-plugin-arm)(1)";
-      ]
-  in
-  let abi =
-    let doc = "Override the ABI detection and use the selected ABI." in
-    Config.(param (some string) "abi" ~synonyms:[ "64-abi" ] ~doc)
-  in
-  let fp_lifter = Config.flag "with-floating-points" ~doc:"DEPRECATED" in
-  let legacy_lifter =
-    Config.flag "with-legacy-floating-points"
-      ~doc:
-        "Enables the legacy floating-point lifter and disables the intrinsic \
-         semantics of floating-point operations"
-  in
-  let disable_intrinsics =
-    Config.flag "disable-floating-point-intrinsics"
-      ~doc:
-        "Disables translation of floating-point instructions into calls to \
-         intrinsic functions."
-  in
-  let backend =
-    Config.param Config.(some string) "backend" ~synonyms:[ "64-backend" ]
-  in
-  let kind =
-    let kinds = [ ("legacy", Legacy); ("modern", Modern); ("merge", Merge) ] in
-    let default = Merge in
-    let doc =
-      sprintf
-        "Debug purpose only. The $(docv) must be %s. Default: $(docv) = %s."
-        (Config.doc_enum kinds)
-        (List.find_map_exn kinds ~f:(fun (name, kind) ->
-             Option.some_if (equal_kind kind default) name))
-    in
-    Config.(param (enum kinds) "lifter" ~doc ~default)
-  in
+  Config.manpage
+    [
+      `S "SYNOPSIS";
+      `P "$(b,bap) FILE [--x86-abi=ABI]";
+      `P "$(b,bap) FILE [--x86-64-abi=ABI]";
+      `S "DESCRIPTION";
+      `P
+        "Provides the x86 and x86-64 targets, decoders and ABIs. The semantics \
+         of the instructions is in the Primus Lisp files of the x86 packages. \
+         No parameters are usually required, though it is possible to override \
+         the detected ABI, e.g., when working with an executable compiled for \
+         the MS Windows platform. For a full set of supported ABI use the \
+         corresponding list option.";
+      `S "EXAMPLE";
+      `P
+        "To choose a correct ABI for a binary compiled for MS Windows x64 \
+         target, use the following:";
+      `P "$(b,bap) FILE --x86-64-abi=ms";
+      `S "SEE ALSO";
+      `P "$(b,bap-x86-cpu)(3), $(b,bap-plugin-abi)(1), $(b,bap-plugin-arm)(1)";
+    ]
+
+let abi =
+  let doc = "Override the ABI detection and use the selected ABI." in
+  Config.(param (some string) "abi" ~synonyms:[ "64-abi" ] ~doc)
+
+let fp_lifter = Config.flag "with-floating-points" ~doc:"DEPRECATED"
+
+let legacy_lifter =
+  Config.flag "with-legacy-floating-points"
+    ~doc:"DEPRECATED, the legacy floating-point lifter was removed"
+
+let disable_intrinsics =
+  Config.flag "disable-floating-point-intrinsics"
+    ~doc:
+      "Disables translation of floating-point instructions into calls to \
+       intrinsic functions."
+
+let cet_enabled =
+  Config.flag "cet-enabled" ~synonyms:[ "endbr-enabled" ]
+    ~doc:
+      "When enabled, translate all endbr instruction into intrinsic calls. \
+       Otherwise treat them as nops"
+
+let backend =
+  Config.param Config.(some string) "backend" ~synonyms:[ "64-backend" ]
+
+let () =
   Config.declare_extension ~doc:"provides x86/x86-64 semantics"
     ~provides:[ "disassembler"; "lifter"; "semantics"; "x86"; "abi" ]
   @@ fun { Config.get = ( !! ) } ->
-  let open Bap_core_theory in
-  let open Bap_primus.Std in
-  main !!backend !!kind !!abi;
-  if !!fp_lifter || !!legacy_lifter then (
-    let open Bap_core_theory in
-    let open Bap_primus.Std in
-    if !!fp_lifter then
-      Format.eprintf
-        "The --with-floating-points flag is deprecated and will be removed in \
-         the following versions of bap. This flag enables the legacy lifter \
-         that is incomplete and disables the new version that translates \
-         floating-point operations into the intrinsic calls. If you still need \
-         the legacy lifter use the --x86-with-legacy-floating-points option \
-         instead.@\n\
-         %!";
-    X86_legacy_bil_lifter.init ();
-    X86_legacy_bil_semantics.init ())
-  else if not !!disable_intrinsics then
-    KB.promise Primus.Lisp.Semantics.context @@ fun _ ->
-    KB.return
-    @@ Primus.Lisp.Context.create
-         [ ("x86-floating-points", [ "intrinsic-semantics" ]) ]
+  X86_target.load ?abi:(Option.map ~f:read_abi !!abi) ?backend:!!backend ();
+  if !!fp_lifter || !!legacy_lifter then
+    warning
+      "the legacy x87 floating-point lifter was removed, the \
+       --x86-with-floating-points and --x86-with-legacy-floating-points \
+       options are ignored";
+  declare_prefix_primitive ();
+  let features =
+    (if !!disable_intrinsics then []
+     else [ ("x86-floating-points", [ "intrinsic-semantics" ]) ])
+    @ if !!cet_enabled then [ ("x86-cet", [ "enabled" ]) ] else []
+  in
+  KB.promise Primus.Lisp.Semantics.context @@ fun _ ->
+  KB.return @@ Primus.Lisp.Context.create features

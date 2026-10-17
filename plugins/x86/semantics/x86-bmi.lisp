@@ -24,9 +24,6 @@
 (defun andn (rd rn rm)
   (bmi-result rd (logand (lnot rn) rm) 0:1))
 
-(defun one-of (x)
-  "(one-of X) is 1 of the size of X"
-  (cast-unsigned (word-width x) 1:1))
 
 (defun blsi (rd rn)
   (bmi-result rd (logand (neg rn) rn) (not (is-zero rn))))
@@ -152,31 +149,3 @@
 (defun ADCX64rr (rd rn rm) (set CF (adx rd rn rm CF)))
 (defun ADOX32rr (rd rn rm) (set OF (adx rd rn rm OF)))
 (defun ADOX64rr (rd rn rm) (set OF (adx rd rn rm OF)))
-
-;; LODS loads from [RSI] and moves RSI by the size of the load, forward
-;; if DF is clear
-(defun lods-next (rsi n)
-  (set$ rsi (if DF (- rsi n) (+ rsi n))))
-
-(defun LODSB (rsi _)
-  (set AL (load-byte rsi))
-  (lods-next rsi 1))
-
-(defun LODSW (rsi _)
-  (set AX (cast-low 16 (load-bits 16 rsi)))
-  (lods-next rsi 2))
-
-(defun LODSL (rsi _)
-  (declare (context (bits 32)))
-  (set EAX (cast-low 32 (load-bits 32 rsi)))
-  (lods-next rsi 4))
-
-(defun LODSL (rsi _)
-  (declare (context (bits 64)))
-  (set RAX (cast-unsigned 64 (load-bits 32 rsi)))
-  (lods-next rsi 4))
-
-(defun LODSQ (rsi _)
-  (declare (context (bits 64)))
-  (set RAX (load-bits 64 rsi))
-  (lods-next rsi 8))

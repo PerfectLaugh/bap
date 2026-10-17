@@ -1,6 +1,6 @@
 /* runs the code at the address in the second argument with the machine
    state at the first: 8 general purpose registers in the order of their
-   numbers, eflags at 32, and 8 xmm registers at 48 */
+   numbers, eflags at 32, 8 ymm registers at 48 and 8 mm registers at 304 */
         .text
         .globl run_code, run_back
 run_code:
@@ -11,7 +11,10 @@ run_code:
         mov %eax, state
         mov %ecx, code
         .irp i, 0,1,2,3,4,5,6,7
-        movdqu 48+\i*16(%eax), %xmm\i
+        vmovdqu 48+\i*32(%eax), %ymm\i
+        .endr
+        .irp i, 0,1,2,3,4,5,6,7
+        movq 304+\i*8(%eax), %mm\i
         .endr
         pushl 32(%eax)
         popfl
@@ -32,8 +35,12 @@ run_back:
         mov scratch, %ecx
         mov %ecx, 0(%eax)
         .irp i, 0,1,2,3,4,5,6,7
-        movdqu %xmm\i, 48+\i*16(%eax)
+        vmovdqu %ymm\i, 48+\i*32(%eax)
         .endr
+        .irp i, 0,1,2,3,4,5,6,7
+        movq %mm\i, 304+\i*8(%eax)
+        .endr
+        emms
         pop %edi; pop %esi; pop %ebp; pop %ebx
         ret
         .data

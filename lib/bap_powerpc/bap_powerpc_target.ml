@@ -5,6 +5,7 @@ open Bap.Std
 let package = "bap"
 
 type r128
+and r4
 and r80
 and r64
 and r32
@@ -41,17 +42,42 @@ let flags =
     [ "SO"; "CA"; "OV"; "CA32"; "OV32"; "C"; "FL"; "FE"; "FG"; "FU" ]
   @ crflags
 
+let r4 : r4 bitv = Theory.Bitv.define 4
+
+(* the fields of the condition register, as LLVM names them, e.g., CR0 *)
+let crfields = List.init 8 ~f:(fun i -> reg r4 (sprintf "CR%d" i))
+
+let crfield_aliases =
+  List.mapi crfields ~f:(fun i field ->
+      List.map [ "LT"; "GT"; "EQ"; "UN" ] ~f:(fun f ->
+          Theory.Alias.bit (reg bool (sprintf "CR%d%s" i f)))
+      |> Theory.Alias.def field)
+
 let define ?(parent = parent) ?nicknames name bits endianness =
   let size = Theory.Bitv.size bits in
   let mems = Theory.Mem.define bits r8 in
   let data = Theory.Var.define mems "mem" in
+  let gprs = array bits "R%d" 32 in
+  (* LLVM names the registers of the 64-bit operations, e.g., X3 *)
+  let xregs = if size = 64 then array bits "X%d" 32 else [] in
+  let aliasing =
+    crfield_aliases
+    @
+    if size = 64 then
+      List.map2_exn gprs xregs ~f:(fun r x -> Theory.Alias.(def r [ reg x ]))
+    else []
+  in
+  (* the base register 0 of the addresses is read as zero *)
+  let zeros =
+    reg bits "ZERO" :: (if size = 64 then [ reg bits "ZERO8" ] else [])
+  in
   let vars =
-    array bits "R%d" 32 @< array r64 "F%d" 32 @< array r128 "V%d" 32 @< flags
+    gprs @< array r64 "F%d" 32 @< array r128 "V%d" 32 @< flags
     @< [ reg bits "CTR"; reg bits "LR"; reg bits "TAR" ]
-    @< [ data ]
+    @< zeros @< [ data ]
   in
   Theory.Target.declare ~package name ~parent ?nicknames ~bits:size ~endianness
-    ~vars ~code:data ~data
+    ~vars ~code:data ~data ~aliasing
     ~regs:
       Theory.Role.Register.
         [
@@ -60,8 +86,9 @@ let define ?(parent = parent) ?nicknames name bits endianness =
           ([ general; vector ], untyped @@ array r128 "V%d" 32);
           ([ stack_pointer ], untyped @@ [ reg bits "R1" ]);
           ([ link ], untyped @@ [ reg bits "LR" ]);
+          ([ special; integer ], untyped [ reg bits "CTR"; reg bits "TAR" ]);
           ([ status ], untyped flags);
-          ([ constant; zero ], untyped @@ [ reg bits "ZERO" ]);
+          ([ constant; zero ], untyped zeros);
           ([ zero_flag ], untyped @@ array bool "CR%dEQ" 8);
           ([ sign_flag ], untyped @@ array bool "CR%dLT" 8);
           ([ carry_flag ], untyped @@ [ reg bool "CA"; reg bool "CA32" ]);
@@ -83,6 +110,7 @@ let define ?(parent = parent) ?nicknames name bits endianness =
             untyped [ reg bits "R3"; reg bits "R4" ] );
           ([ function_return; floating ], untyped [ reg r64 "F0" ]);
           ([ reserved ], untyped @@ [ reg bits "R2" ]);
+          ([ alias ], untyped crfields @ untyped xregs);
         ]
 
 let powerpc32bi =
@@ -208,20 +236,29 @@ let map_powerpc () =
 module Dis = Disasm_expert.Basic
 
 let llvm_powerpc32 = Theory.Language.declare ~package "llvm-powerpc32"
+let llvm_powerpc32le = Theory.Language.declare ~package "llvm-powerpc32le"
 let llvm_powerpc64 = Theory.Language.declare ~package "llvm-powerpc64"
+let llvm_powerpc64le = Theory.Language.declare ~package "llvm-powerpc64le"
 
 let register encoding triple =
   Dis.register encoding @@ fun _ -> Dis.create ~backend:"llvm" triple
 
+(* the byte order of the instructions is the byte order of the triple *)
 let enable_llvm_decoder () =
   let open KB.Syntax in
   register llvm_powerpc32 "powerpc";
+  register llvm_powerpc32le "powerpcle";
   register llvm_powerpc64 "powerpc64";
+  register llvm_powerpc64le "powerpc64le";
   KB.promise Theory.Label.encoding @@ fun label ->
   Theory.Label.target label >>| fun t ->
   if Theory.Target.belongs parent t then
-    if Theory.Target.belongs powerpc32bi t then llvm_powerpc32
-    else llvm_powerpc64
+    let le = Theory.Endianness.(Theory.Target.endianness t = le) in
+    match (Theory.Target.bits t, le) with
+    | 32, false -> llvm_powerpc32
+    | 32, true -> llvm_powerpc32le
+    | _, false -> llvm_powerpc64
+    | _, true -> llvm_powerpc64le
   else Theory.Language.unknown
 
 let pcode = Theory.Language.declare ~package "pcode-powerpc"

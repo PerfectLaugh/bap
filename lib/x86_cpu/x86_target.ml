@@ -164,7 +164,9 @@ module M16 = struct
     lo_bits_of main are lregs @ hi_bits_of main are hregs
     @ lo_bits_of index are index8
     @ Theory.Alias.[ def iopl [ bit ioplh; bit iopll ] ]
-    @ Theory.Alias.[ def eflags (List.map flags ~f:bit) ]
+    (* the flags are listed from the bit 0, the parts of an alias from
+       the most significant one *)
+    @ Theory.Alias.[ def eflags (List.rev_map flags ~f:bit) ]
 end
 
 module M32 = struct
@@ -182,7 +184,14 @@ module M32 = struct
     ]
 
   let flags = M16.flags
+
+  (* the bases of the FS and GS segments, the other bases are zero *)
+  let bases = [ reg r32 "FS_BASE"; reg r32 "GS_BASE" ]
   let stx = array r80 "ST" 8
+
+  (* the control words of x87 and SSE *)
+  let fpcw = reg r16 "FPU_CONTROL"
+  let mxsr = reg r32 "MXCSR"
   let mmx = array r64 "MM" 8
   let xmmx = array r128 "XMM" 8
 
@@ -191,16 +200,17 @@ module M32 = struct
   let ymmx = array r256 "YMM" 8
   let mems = Theory.Mem.define r32 r8
   let data = Theory.Var.define mems "mem"
-  let i386 = main @< index @< segment @< flags @< [ data ]
-  let i486 = i386 @< stx
+  let i386 = main @< index @< segment @< flags @< bases @< [ data ]
+  let i486 = i386 @< stx @< [ fpcw ]
   let i586 = i486 @< mmx
-  let i686 = i586 @< ymmx
+  let i686 = i586 @< ymmx @< [ mxsr ]
   let aliases = M16.main @< M16.index @< M16.aliases
 
   let i386regs =
     Theory.Role.Register.
       [
         ([ general; integer ], main @< index @< segment);
+        ([ special; integer ], untyped bases);
         ([ stack_pointer ], untyped [ reg r32 "ESP" ]);
         ([ frame_pointer ], untyped [ reg r32 "EBP" ]);
         ([ Role.index ], untyped index);
@@ -210,7 +220,9 @@ module M32 = struct
     @ M16.flag_roles
 
   let i486regs =
-    i386regs @ Theory.Role.Register.[ ([ general; floating ], untyped stx) ]
+    i386regs
+    @ Theory.Role.Register.
+        [ ([ general; floating ], untyped stx); ([ status ], untyped [ fpcw ]) ]
 
   let i586regs =
     i486regs @ Theory.Role.Register.[ ([ general; floating ], untyped mmx) ]
@@ -218,7 +230,11 @@ module M32 = struct
   let i686regs =
     i586regs
     @ Theory.Role.Register.
-        [ ([ general; floating ], untyped ymmx); ([ alias ], untyped xmmx) ]
+        [
+          ([ general; floating ], untyped ymmx);
+          ([ alias ], untyped xmmx);
+          ([ status ], untyped [ mxsr ]);
+        ]
 
   let aliasing =
     M16.aliasing @ lo_bits_of main are M16.main @ lo_bits_of index are M16.index
@@ -229,33 +245,43 @@ end
 module M64 = struct
   let main = [ reg r64 "RAX"; reg r64 "RBX"; reg r64 "RCX"; reg r64 "RDX" ]
   let index = [ reg r64 "RSI"; reg r64 "RDI"; reg r64 "RBP"; reg r64 "RSP" ]
-  let segment = [ reg r16 "CS"; reg r16 "DS"; reg r16 "ES"; reg r16 "SS" ]
+  let segment = M32.segment
+  let bases = [ reg r64 "FS_BASE"; reg r64 "GS_BASE" ]
   let rx = array r64 "R" 8 ~index:(fun i -> string_of_int (i + 8))
+
+  (* the low parts of R8-R15, as LLVM names them, e.g., R8D, R8W, R8B *)
+  let rxd = array r32 "R" 8 ~index:(fun i -> sprintf "%dD" (i + 8))
+  let rxw = array r16 "R" 8 ~index:(fun i -> sprintf "%dW" (i + 8))
+  let rxb = array r8 "R" 8 ~index:(fun i -> sprintf "%dB" (i + 8))
   let stx = M32.stx
   let mmx = M32.mmx
   let xmmx = array r128 "XMM" 16
   let ymmx = array r256 "YMM" 16
-  let mxsr = reg r32 "MXCSR"
+  let mxsr = M32.mxsr
+  let fpcw = M32.fpcw
   let flags = M32.flags
-  let rflags = reg r64 "RFLAGS"
   let mems = Theory.Mem.define r64 r8
   let data = Theory.Var.define mems "mem"
-  let aliases = M32.aliases @< M32.main @< M32.index @< xmmx
+
+  let aliases =
+    M32.aliases @< M32.main @< M32.index @< xmmx @< M16.index8 @< rxd @< rxw
+    @< rxb
 
   let vars =
     main @< index @< segment @< rx @< stx @< mmx @< ymmx @< flags @< [ data ]
-    @< [ mxsr ]
+    @< [ mxsr ] @< [ fpcw ] @< bases
 
   let regs =
     Theory.Role.Register.
       [
         ([ general; integer ], main @< index @< segment @< rx);
+        ([ special; integer ], untyped bases);
         ([ general; floating ], stx @< mmx @< ymmx);
         ([ stack_pointer ], untyped [ reg r64 "RSP" ]);
         ([ frame_pointer ], untyped [ reg r64 "RBP" ]);
         ([ Role.index ], untyped index);
         ([ Role.segment ], untyped segment);
-        ([ status ], untyped [ mxsr ]);
+        ([ status ], untyped [ mxsr ] @ untyped [ fpcw ]);
         ([ alias ], aliases);
       ]
     @ M16.flag_roles
@@ -264,8 +290,8 @@ module M64 = struct
     M32.aliasing
     @ lo_bits_of main are M32.main
     @ lo_bits_of index are M32.index
-    @ lo_bits_of ymmx are xmmx
-    @ lo_bits_of [ rflags ] are [ M16.eflags ]
+    @ lo_bits_of ymmx are xmmx @ lo_bits_of rx are rxd @ lo_bits_of rxd are rxw
+    @ lo_bits_of rxw are rxb
 end
 
 let parent = Theory.Target.declare ~package "x86" ~bits:16 ~byte:8

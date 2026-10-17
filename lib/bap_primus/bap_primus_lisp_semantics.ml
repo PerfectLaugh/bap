@@ -484,16 +484,47 @@ module Prelude (CT : Theory.Core) = struct
             let* reff = rep cnd body in
             full [ !!beff; !!reff ] !!(res reff)
       | None ->
+          (* the variables that the body assigns may have static values,
+             which the condition can't use, so they are assigned before
+             the loop and the condition is computed after the body *)
+          let* pre = materialize (assigned body) in
           let* body = eval body in
+          let* r = eval cnd in
           let* head = fresh and* loop = fresh and* tail = fresh in
           coerce_bool (res r) @@ fun cres ->
           full
             [
+              !!pre;
               blk head [ ctrl [ CT.goto tail ] ];
               blk loop [ !!body ];
-              blk tail [ !!r; ctrl [ CT.branch !cres (CT.goto head) skip ] ];
+              blk tail [ !!r; ctrl [ CT.branch !cres (CT.goto loop) skip ] ];
             ]
             !!cres
+    and materialize vars =
+      KB.List.fold vars ~init:[] ~f:(fun effs v ->
+          let* v = Scope.lookup v >>| Option.value ~default:v in
+          Env.lookup v >>= function
+          | None -> !!effs
+          | Some x -> Env.del v >>= fun () -> !!(data [ v := !x ] :: effs))
+      >>= fun effs -> seq (List.rev effs)
+    and assigned body =
+      let rec collect vars : ast -> _ = function
+        | { data = Set ({ data = { exp = n; typ = Type t } }, x) } ->
+            collect (var ~t n :: vars) x
+        | { data = Set ({ data = { exp = n } }, x) } ->
+            collect (var n :: vars) x
+        | { data = Ite (c, x, y) } -> collect (collect (collect vars c) x) y
+        | { data = Let (_, x, y) } | { data = Rep (x, y) } ->
+            collect (collect vars x) y
+        | { data = App (Static (_, b), xs) } ->
+            List.fold xs ~init:(collect vars b) ~f:collect
+        | { data = App (Dynamic _, xs) }
+        | { data = Seq xs }
+        | { data = Msg (_, xs) } ->
+            List.fold xs ~init:vars ~f:collect
+        | { data = Int _ | Var _ | Sym _ | Err _ } -> vars
+      in
+      collect [] body
     and call ?(toplevel = false) name xs =
       match Map.find program.names name with
       | None when toplevel -> !!Insn.empty

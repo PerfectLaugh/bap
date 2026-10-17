@@ -173,7 +173,9 @@ let check_typed asm bil =
         (sprintf "%s: the lifted code is not well-typed: %s%s" asm
            (Type.Error.to_string err) (debug bil))
 
-let check mode asm code (init, expect) =
+(* [size] is the size of the instruction, so that PC is the address of the
+   next instruction if the instruction doesn't jump *)
+let check mode asm ~size code (init, expect) =
   let bil = List.map init ~f:(initialize mode) @ code in
   check_typed asm bil;
   (* the expected memory words are loaded into fresh variables *)
@@ -198,7 +200,9 @@ let check mode asm code (init, expect) =
       let got, width =
         match loc with
         | Reg v -> (Primus_bil.lookup state v, width_of_var v)
-        | Pc -> (Primus_bil.pc state, bits mode)
+        | Pc ->
+            let next = Word.of_int ~width:(bits mode) (mode.addr + size) in
+            (Some (Option.value (Primus_bil.pc state) ~default:next), bits mode)
         | Mem _ -> assert false
       in
       let expected = word width value in
@@ -211,10 +215,28 @@ let check mode asm code (init, expect) =
                (Option.value_map got ~default:"not set" ~f:Word.to_string)
                (Word.to_string expected) (debug code)))
 
+(* The labels of the addresses are shared by the targets, e.g., the label
+   of a branch destination, so each target has its own knowledge base,
+   which starts as the knowledge base before the first test. *)
+let initial_state = lazy (Toplevel.current ())
+let states = Hashtbl.create (module String)
+
+let with_state_of mode f =
+  let name = Theory.Target.to_string (target mode) in
+  let state =
+    Hashtbl.find_or_add states name ~default:(fun () ->
+        Lazy.force initial_state)
+  in
+  Toplevel.set state;
+  Exn.protect ~f ~finally:(fun () ->
+      Hashtbl.set states ~key:name ~data:(Toplevel.current ()))
+
 let case mode asm code vectors =
   OUnit2.( >:: ) asm @@ fun _ctxt ->
+  with_state_of mode @@ fun () ->
   let bil = lift mode code in
-  List.iter vectors ~f:(check mode asm bil)
+  let size = String.length (bytes_of_hex code) in
+  List.iter vectors ~f:(check mode asm ~size bil)
 
 let bindings s =
   String.split s ~on:' '

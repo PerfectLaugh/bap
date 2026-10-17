@@ -95,16 +95,17 @@ module Desugar (CT : Core) : Core = struct
     let assign_multi size cast lhs rhs =
       rhs >>= fun rhs ->
       let total = Val.(Bitv.size (sort rhs)) in
+      (* the first part is the most significant *)
       fst
       @@ List.fold lhs
-           ~init:(!!pass, total + 1)
+           ~init:(!!pass, total - 1)
            ~f:(fun (data, hi) lhs ->
              let s = Var.sort lhs in
              let bits = size s in
-             let lo = hi - bits in
+             let lo = hi - bits + 1 in
              let s' = Val.Bitv.define bits in
              let rhs = cast (CT.extract s' (pos hi) (pos lo) !!rhs) in
-             CT.(seq data (set lhs rhs), hi - bits))
+             CT.(seq data (set lhs rhs), lo - 1))
 
     let assign_regs lhs rhs = assign_multi Val.Bitv.size Fn.id lhs rhs
 

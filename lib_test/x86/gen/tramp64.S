@@ -1,6 +1,6 @@
 /* runs the code at the address in rsi with the machine state at rdi:
    16 general purpose registers in the order of their numbers, rflags at
-   128, and 16 xmm registers at 144; the code jumps back to run_back */
+   128, 16 ymm registers at 144 and 8 mm registers at 656; the code jumps back to run_back */
         .text
         .globl run_code, run_back
 run_code:
@@ -9,7 +9,10 @@ run_code:
         mov %rdi, state(%rip)
         mov %rsi, code(%rip)
         .irp i, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-        movdqu 144+\i*16(%rdi), %xmm\i
+        vmovdqu 144+\i*32(%rdi), %ymm\i
+        .endr
+        .irp i, 0,1,2,3,4,5,6,7
+        movq 656+\i*8(%rdi), %mm\i
         .endr
         pushq 128(%rdi)
         popfq
@@ -35,8 +38,12 @@ run_back:
         mov scratch(%rip), %rcx
         mov %rcx, 0(%rax)
         .irp i, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-        movdqu %xmm\i, 144+\i*16(%rax)
+        vmovdqu %ymm\i, 144+\i*32(%rax)
         .endr
+        .irp i, 0,1,2,3,4,5,6,7
+        movq %mm\i, 656+\i*8(%rax)
+        .endr
+        emms
         pop %r15; pop %r14; pop %r13; pop %r12; pop %rbp; pop %rbx
         ret
         .data

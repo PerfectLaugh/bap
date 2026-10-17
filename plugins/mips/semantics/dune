@@ -1,0 +1,6 @@
+(install
+ (section
+  (site
+   (bap-common semantics)))
+ (package bap-mips)
+ (files mips.lisp))

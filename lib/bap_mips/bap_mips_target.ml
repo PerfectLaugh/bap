@@ -93,14 +93,25 @@ let define ?(parent = parent) ?nicknames bits endianness =
   let fprs = array bits "F" 32 in
   let mems = Theory.Mem.define bits r8 in
   let data = Theory.Var.define mems "mem" in
-  let vars = gprs @< fprs @< [ data ] in
+  let hilo = [ reg bits "HI"; reg bits "LO" ] in
+  let vars = gprs @< fprs @< hilo @< [ data ] in
   let regs = List.map ~f:(fun name -> Theory.Var.forget (reg bits name)) in
   let aliases = List.map gpr_names ~f:(reg bits) in
+  (* LLVM names the registers of the 64-bit operations, e.g., V0_64 *)
+  let aliases64 =
+    if size = 64 then List.map gpr_names ~f:(fun n -> reg bits (n ^ "_64"))
+    else []
+  in
   let args = if size = 32 then 4 else 8 in
   let iargs = array bits "R" ~from:4 args in
   let fargs = array bits "F" ~from:1 args in
   let aliasing =
     List.map2_exn gprs aliases ~f:(fun r p -> Theory.Alias.(def r [ reg p ]))
+    @
+    if size = 64 then
+      List.map2_exn gprs aliases64 ~f:(fun r p ->
+          Theory.Alias.(def r [ reg p ]))
+    else []
   in
   Theory.Target.declare ~package (name size endianness) ~parent ?nicknames
     ~bits:size ~endianness ~aliasing ~code:data ~data ~vars
@@ -109,7 +120,9 @@ let define ?(parent = parent) ?nicknames bits endianness =
         [
           ([ general; integer ], regs gpr_names);
           ([ general; floating ], untyped fprs);
-          ([ constant; zero; pseudo ], regs [ "ZERO"; "R0 " ]);
+          ([ special; integer ], untyped hilo);
+          ( [ constant; zero; pseudo ],
+            regs ([ "ZERO"; "R0" ] @ if size = 64 then [ "ZERO_64" ] else []) );
           ([ function_argument; integer ], untyped iargs);
           ([ function_argument; floating ], untyped fargs);
           ([ function_return; integer ], regs [ "R2" ]);
@@ -117,7 +130,7 @@ let define ?(parent = parent) ?nicknames bits endianness =
           ([ stack_pointer ], regs [ "R29" ]);
           ([ frame_pointer ], regs [ "R30" ]);
           ([ link ], regs [ "R31" ]);
-          ([ alias ], untyped aliases);
+          ([ alias ], untyped aliases @ untyped aliases64);
         ]
 
 let mips32bi =
@@ -233,15 +246,16 @@ let llvm_mips64 = Theory.Language.declare ~package "llvm-mips64"
 let llvm_mips32le = Theory.Language.declare ~package "llvm-mips32le"
 let llvm_mips64le = Theory.Language.declare ~package "llvm-mips64le"
 
-let register encoding triple =
-  Dis.register encoding @@ fun _ -> Dis.create ~backend:"llvm" triple
+(* the release 2 instructions, e.g., ROTR, EXT and SEB, are decoded *)
+let register encoding triple cpu =
+  Dis.register encoding @@ fun _ -> Dis.create ~cpu ~backend:"llvm" triple
 
 let enable_llvm_decoder () =
   let open KB.Syntax in
-  register llvm_mips32 "mips";
-  register llvm_mips64 "mips64";
-  register llvm_mips32le "mipsel";
-  register llvm_mips64le "mips64el";
+  register llvm_mips32 "mips" "mips32r2";
+  register llvm_mips64 "mips64" "mips64r2";
+  register llvm_mips32le "mipsel" "mips32r2";
+  register llvm_mips64le "mips64el" "mips64r2";
   KB.promise Theory.Label.encoding @@ fun label ->
   Theory.Label.target label >>| fun t ->
   if Theory.Target.belongs parent t then

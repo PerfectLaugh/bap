@@ -57,9 +57,21 @@ let init bil =
       | Type.Mem _ | Type.Unk -> Env.add v (Primus.Generator.static 0))
   >>= fun () -> Set.to_sequence (memories bil) |> Machine.Seq.iter ~f:map_memory
 
-let rec stmts pc = Machine.List.iter ~f:(stmt pc)
+(* A goto to a label of the instruction, e.g., in the loops of the Lisp
+   semantics, stops the statements that follow it, and the evaluation
+   continues at the label, which is a top-level statement. *)
+let pending = ref None
+let steps = ref 0
 
-and stmt pc = function
+let rec stmts pc = function
+  | [] -> Machine.return ()
+  | _ when Option.is_some !pending -> Machine.return ()
+  | s :: ss -> stmt pc s >>= fun () -> stmts pc ss
+
+and stmt pc s =
+  incr steps;
+  if !steps > 1_000_000 then failwith "BIL evaluation doesn't terminate";
+  match s with
   | Bil.Move (v, x) -> Eval.exp x >>= Eval.set v
   | Bil.Jmp dst -> Eval.exp dst >>| fun dst -> pc := Some (Value.to_word dst)
   | Bil.If (cond, yes, no) ->
@@ -70,7 +82,26 @@ and stmt pc = function
       if Word.is_one (Value.to_word c) then
         stmts pc body >>= fun () -> stmt pc loop
       else Machine.return ()
-  | Bil.Special _ | Bil.CpuExn _ -> Machine.return ()
+  | Bil.Special _ as s -> (
+      match Bil.decode Bil.goto s with
+      | Some dst -> Machine.return (pending := Some dst)
+      | None -> Machine.return ())
+  | Bil.CpuExn _ -> Machine.return ()
+
+let is_label dst s =
+  match Bil.decode Bil.label s with
+  | Some l -> String.equal l dst
+  | None -> false
+
+let rec program pc bil ss =
+  stmts pc ss >>= fun () ->
+  match !pending with
+  | None -> Machine.return ()
+  | Some dst -> (
+      pending := None;
+      match List.drop_while bil ~f:(Fn.non (is_label dst)) with
+      | [] -> failwithf "BIL evaluation: no label %s" dst ()
+      | rest -> program pc bil rest)
 
 let assigned bil =
   object
@@ -92,7 +123,9 @@ let eval ?(target = Theory.Target.unknown) bil =
   let module System = Primus.System.Generic (Machine) in
   let start =
     init bil >>= fun () ->
-    stmts pc bil >>= fun () ->
+    pending := None;
+    steps := 0;
+    program pc bil bil >>= fun () ->
     collect bil >>| fun vars -> result := Some { vars; pc = !pc }
   in
   let system = Primus.System.define "bil-evaluator" ~package:"bap-test" in

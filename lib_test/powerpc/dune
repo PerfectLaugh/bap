@@ -1,4 +1,59 @@
 (test
  (name run_powerpc_tests)
  (package bap)
- (libraries bap bap-plugins ounit2 primus_bil threads))
+ (libraries bap bap-main ounit2 primus_bil lifter_test threads))
+
+; the tests are generated from the specs, with the expected values
+; computed by executing the instructions under QEMU, see
+; lib_test/cross/gen.sh, the instructions of words are also tested in the
+; 64-bit modes
+
+(rule
+ (target test_ppc32.ml)
+ (deps
+  (glob_files gen/*)
+  (glob_files %{project_root}/lib_test/cross/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash %{project_root}/lib_test/cross/generate.sh gen/ppc.conf gen/ppc32.spec PPC32))))
+
+(rule
+ (target test_ppc64eb.ml)
+ (deps
+  (glob_files gen/*)
+  (glob_files %{project_root}/lib_test/cross/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash %{project_root}/lib_test/cross/generate.sh gen/ppc64.conf gen/ppc32.spec PPC64eb))))
+
+(rule
+ (target test_ppc64le.ml)
+ (deps
+  (glob_files gen/*)
+  (glob_files %{project_root}/lib_test/cross/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash %{project_root}/lib_test/cross/generate.sh gen/ppc64le.conf gen/ppc32.spec PPC64le))))
+
+(rule
+ (target test_ppc64eb_64.ml)
+ (deps
+  (glob_files gen/*)
+  (glob_files %{project_root}/lib_test/cross/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash %{project_root}/lib_test/cross/generate.sh gen/ppc64.conf gen/ppc64.spec PPC64eb_64))))
+
+(rule
+ (target test_ppc64le_64.ml)
+ (deps
+  (glob_files gen/*)
+  (glob_files %{project_root}/lib_test/cross/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash %{project_root}/lib_test/cross/generate.sh gen/ppc64le.conf gen/ppc64.spec PPC64le_64))))

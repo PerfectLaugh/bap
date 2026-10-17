@@ -276,7 +276,7 @@ let export =
         \    takes form :sep SEP, where SEP is the separator that is\n\
         \    used to concatenate symbols" );
       ( "alias-base-register",
-        one int @-> int,
+        one any @-> any,
         "(alias-base-register x) if X has a symbolic value that is an\n\
         \     aliased register returns the base register" );
       ( "cast-low",
@@ -1424,8 +1424,8 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
     | "s>", _ -> pure @@ order SBitvec.( > ) CT.sgt args
     | "<=", _ -> pure @@ order Bitvec.( <= ) CT.ule args
     | ">=", _ -> pure @@ order Bitvec.( >= ) CT.uge args
-    | "s<=", _ -> pure @@ order SBitvec.( <= ) CT.ule args
-    | "s>=", _ -> pure @@ order SBitvec.( >= ) CT.uge args
+    | "s<=", _ -> pure @@ order SBitvec.( <= ) CT.sle args
+    | "s>=", _ -> pure @@ order SBitvec.( >= ) CT.sge args
     | "/=", _ | "distinct", _ -> pure @@ forget @@ distinct args
     | "is-zero", _ | "not", _ -> pure @@ all s join s_is_zero CT.is_zero args
     | "is-finite", _ -> pure @@ all s join F.Z.is_finite F.is_finite args

@@ -933,20 +933,59 @@ module Typing = struct
        - val[u] is a total mapping represented with a finite mapping
          vals[u] s.t., val[u] is vals[u] if u in vals, otherwise T,
          where T is the set of all sets excluding T itself.
+
+       [mems] is the inverse of [vars], it maps each type variable to
+       the terms of its class, so that a unification visits only the
+       terms of the class that it renames. It is a function of [vars],
+       so it is not compared.
     *)
-    type t = { vars : tvar Id.Map.t; vals : Tvals.t Tvar.Map.t }
+    type t = {
+      vars : tvar Id.Map.t;
+      vals : Tvals.t Tvar.Map.t;
+      mems : (Id.Set.t Tvar.Map.t[@compare.ignore] [@sexp_of.opaque]);
+    }
     [@@deriving compare, sexp_of]
 
     type rule = t -> t
     type group = { var : tvar; values : Tvals.t option; elements : Id.Set.t }
 
-    let empty = { vars = Id.Map.empty; vals = Tvar.Map.empty }
+    let empty =
+      { vars = Id.Map.empty; vals = Tvar.Map.empty; mems = Tvar.Map.empty }
 
     let get g x =
       match Map.find g.vars x with None -> None | Some v -> Map.find g.vals v
 
-    let add_var x v g = { g with vars = Map.add_exn g.vars ~key:x ~data:v }
-    let set_var x v g = { g with vars = Map.set g.vars ~key:x ~data:v }
+    let add_mem x v mems =
+      Map.update mems v ~f:(function
+        | None -> Id.Set.singleton x
+        | Some xs -> Set.add xs x)
+
+    let del_mem x v mems =
+      Map.change mems v ~f:(function
+        | None -> None
+        | Some xs ->
+            let xs = Set.remove xs x in
+            if Set.is_empty xs then None else Some xs)
+
+    let members vars =
+      Map.fold vars ~init:Tvar.Map.empty ~f:(fun ~key:x ~data:v mems ->
+          add_mem x v mems)
+
+    let add_var x v g =
+      {
+        g with
+        vars = Map.add_exn g.vars ~key:x ~data:v;
+        mems = add_mem x v g.mems;
+      }
+
+    let set_var x v g =
+      let mems =
+        match Map.find g.vars x with
+        | None -> g.mems
+        | Some u -> del_mem x u g.mems
+      in
+      { g with vars = Map.set g.vars ~key:x ~data:v; mems = add_mem x v mems }
+
     let set_val v t g = { g with vals = Map.set g.vals ~key:v ~data:t }
     let del_val v g = { g with vals = Map.remove g.vals v }
 
@@ -965,8 +1004,9 @@ module Typing = struct
     let unify_types x u v g =
       let u, v = if Tvar.(u < v) then (u, v) else (v, u) in
       let init = del_val v (meet_types x u v g) in
-      Map.fold g.vars ~init ~f:(fun ~key:z ~data:w g ->
-          if Tvar.equal v w then set_var z u g else g)
+      match Map.find g.mems v with
+      | None -> init
+      | Some zs -> Set.fold zs ~init ~f:(fun g z -> set_var z u g)
 
     (* if x <> y then
           let w = min var[x] var[y]
@@ -1022,18 +1062,21 @@ module Typing = struct
 
     let merge g1 g2 =
       (* first we merge parts that do not conflict *)
+      let vars =
+        Map.merge g1.vars g2.vars ~f:(fun ~key:_ -> function
+          | `Left u | `Right u -> Some u
+          | `Both (u, v) when Tvar.equal u v -> Some u
+          | `Both _ -> None)
+      in
       let g =
         {
-          vars =
-            Map.merge g1.vars g2.vars ~f:(fun ~key:_ -> function
-              | `Left u | `Right u -> Some u
-              | `Both (u, v) when Tvar.equal u v -> Some u
-              | `Both _ -> None);
+          vars;
           vals =
             Map.merge g1.vals g2.vals ~f:(fun ~key:_ -> function
               | `Left t | `Right t -> Some t
               | `Both (u, v) when Tvals.compare u v = 0 -> Some u
               | `Both _ -> None);
+          mems = members vars;
         }
       in
       (* then resolve the intersections *)
@@ -1073,7 +1116,7 @@ module Typing = struct
       Map.fold vars ~init ~f:(fun ~key:x ~data:u joined ->
           Map.add_multi joined ~key:u ~data:x)
 
-    let partition { vars; vals } =
+    let partition { vars; vals; _ } =
       join_vars vars
       |> Map.fold ~init:[] ~f:(fun ~key ~data xs ->
           {
@@ -1114,12 +1157,12 @@ module Typing = struct
           | Error (Unresolved_parameter (_, s)) ->
               fprintf ppf "ill-typed(unresolved-parameter %s)" s)
 
-    let pp ppf { vars; vals } =
+    let pp ppf { vars; vals; _ } =
       Map.iteri (join_vars vars) ~f:(fun ~key:u ~data:xs ->
           fprintf ppf "(%a)[%a] : %a@\n" pp_exps xs pp_tvar u pp_vals
             (Map.find vals u))
 
-    let exps { vars } = Map.keys vars
+    let exps { vars; _ } = Map.keys vars
   end
 
   type t = {
@@ -1300,16 +1343,16 @@ module Typing = struct
     in
     infer bindings ast
 
-  let find_func funcs id =
-    Map.to_sequence funcs
-    |> Seq.find_map ~f:(fun (_, funcs) ->
-        List.find funcs ~f:(fun f -> Id.(f.id = id)))
+  let index_funcs funcs =
+    Map.fold funcs ~init:Id.Map.empty ~f:(fun ~key:_ ~data:funcs index ->
+        List.fold funcs ~init:index ~f:(fun index (f : Def.func Def.t) ->
+            Map.set index ~key:f.id ~data:f))
 
-  let transfer glob node gamma =
+  let transfer glob funcs node gamma =
     match node with
     | Entry | Exit -> gamma
     | Defun id -> (
-        match find_func glob.funcs id with
+        match Map.find funcs id with
         | None -> gamma
         | Some f ->
             let args = Def.Func.args f in
@@ -1442,16 +1485,26 @@ module Typing = struct
       }
     in
     let g = Callgraph.build library in
-    let init = Solution.create Callgraph.Node.Map.empty Gamma.empty in
-    let equal = gamma_equal in
-    let fp =
-      Graphlib.fixpoint
+    let funcs = index_funcs glob.funcs in
+    (* the constraints of the functions only refine the typing
+       environment, so they are applied to a single environment, the
+       callees first, until it doesn't change, which is the solution
+       at the entry of the fixpoint over the callgraph without the
+       merges of the environments of its nodes *)
+    let order =
+      Graphlib.reverse_postorder_traverse
         (module Callgraph)
-        ~rev:true ~start:Exit ~equal ~merge:Gamma.merge ~init ~f:(transfer glob)
-        g
+        ~rev:true ~start:Exit g
+      |> Seq.to_list
     in
-    let g = Solution.get fp Entry in
-    check_methods glob p g
+    let rec solve gamma =
+      let gamma' =
+        List.fold order ~init:gamma ~f:(fun gamma node ->
+            transfer glob funcs node gamma)
+      in
+      if gamma_equal gamma gamma' then gamma else solve gamma'
+    in
+    check_methods glob p (solve Gamma.empty)
 
   (* The public interface  *)
   module Type = struct

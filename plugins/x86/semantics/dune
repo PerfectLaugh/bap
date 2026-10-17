@@ -3,7 +3,8 @@
   (site
    (bap-common semantics)))
  (package bap-x86)
- (files x86-32.lisp x86-64.lisp x86-sse-intrinsics.lisp x86-common.lisp
+ (files x86-32.lisp x86-64.lisp x86-sse-intrinsics.lisp x86-common.lisp x86-arith.lisp x86-shift.lisp x86-bits.lisp x86-move.lisp
+  x86-control.lisp x86-simd.lisp x86-pcmpstr.lisp
   x86-bmi.lisp x86-sse.lisp))
 
 (env

@@ -1,40 +1,67 @@
 open Core
 open Bap.Std
-open Mips.Std
+open Bap_core_theory
 include Self ()
 
 let () =
   Config.manpage
-    [ `S "DESCRIPTION"; `P "Provides lifter for MIPS architecture" ]
+    [
+      `S "DESCRIPTION";
+      `P
+        "Provides the MIPS targets, decoders and ABI. The semantics of the \
+         instructions is in the Primus Lisp files of the mips package.";
+    ]
 
-module Make (T : Target) : Target = struct
-  open Format
-  include T
+(* the branches and jumps that are followed by a delay slot *)
+let delayed =
+  Set.of_list
+    (module String)
+    [
+      "BEQ";
+      "BNE";
+      "BGEZ";
+      "BGTZ";
+      "BLEZ";
+      "BLTZ";
+      "BGEZAL";
+      "BLTZAL";
+      "BEQL";
+      "BNEL";
+      "BGEZL";
+      "BGTZL";
+      "BLEZL";
+      "BLTZL";
+      "BGEZALL";
+      "BLTZALL";
+      "J";
+      "JAL";
+      "JR";
+      "JALR";
+      "JR_HB";
+      "JALR_HB";
+      "BEQ64";
+      "BNE64";
+      "BGEZ64";
+      "BGTZ64";
+      "BLEZ64";
+      "BLTZ64";
+      "JR64";
+      "JALR64";
+    ]
 
-  let pp_insn ppf (mem, insn) =
-    fprintf ppf "%a: %s" Addr.pp_hex (Memory.min_addr mem)
-      (Disasm_expert.Basic.Insn.asm insn)
-
-  let lift mem insn =
-    match lift mem insn with
-    | Error err as failed ->
-        warning "can't lift instruction %a - %a" pp_insn (mem, insn) Error.pp
-          err;
-        failed
-    | Ok bil as ok -> (
-        match Type.check bil with
-        | Ok () -> ok
-        | Error te ->
-            warning "BIL doesn't type check %a - %a" pp_insn (mem, insn)
-              Type.Error.pp te;
-            Error (Error.of_string "type error"))
-end
-
-(* For now take the most popular - 32bit big endian *)
-module MIPS32 = Make (M32BE)
-module MIPS32_le = Make (M32LE)
-module MIPS64 = Make (M64BE)
-module MIPS64_le = Make (M64LE)
+let promise_delay_slots () =
+  KB.Rule.(
+    declare ~package:"mips" "delay-slot"
+    |> require Insn.Slot.name |> provide Insn.Slot.delay
+    |> comment "provides the delay slot length for branches");
+  KB.promise Theory.Semantics.slot @@ fun obj ->
+  let open KB.Syntax in
+  Theory.Label.target obj >>= fun target ->
+  KB.guard (Theory.Target.belongs Bap_mips_target.parent target) >>= fun () ->
+  KB.collect Theory.Semantics.slot obj >>| fun insn ->
+  let name = KB.Value.get Insn.Slot.name insn in
+  if Set.mem delayed name then KB.Value.put Insn.Slot.delay insn (Some 1)
+  else Insn.empty
 
 let backend =
   Config.param
@@ -45,9 +72,5 @@ let () =
   Config.declare_extension ~doc:"provides MIPS semantics"
     ~provides:[ "semantics"; "lifter"; "mips" ] (fun { get } ->
       Bap_mips_target.load ?backend:(get backend) ();
-      register_target `mips (module MIPS32);
-      register_target `mipsel (module MIPS32_le);
-      register_target `mips64 (module MIPS64);
-      register_target `mips64el (module MIPS64_le);
-      Mips.promise_delay_slots ();
+      promise_delay_slots ();
       Mips_abi.setup ())

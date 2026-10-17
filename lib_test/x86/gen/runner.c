@@ -1,10 +1,15 @@
 /* runner: executes x86 instructions natively and prints their results.
 
-   Each input line is "CODE | INPUTS | OUTPUTS", where CODE is the encoding
-   in hex bytes, INPUTS are NAME=VALUE bindings and OUTPUTS are names. A
-   name is a general purpose register, XMM<n>, a flag (CF, PF, AF, ZF, SF,
-   DF, OF), or M<n>@ADDR, the n-byte little-endian word at ADDR in the data
-   region. The instruction runs at CODE_ADDR. For each line, the runner
+   Each input line is "CODE | INPUTS | OUTPUTS" or "CODE | INPUTS | OUTPUTS
+   | LANDINGS", where CODE is the encoding in hex bytes, INPUTS are
+   NAME=VALUE bindings, OUTPUTS are names and LANDINGS are offsets from the
+   instruction where a branch may land, e.g., -0x400. A name is a general
+   purpose register, XMM<n>, the low half of YMM<n>, YMM<n>, MM<n>, a flag
+   (CF, PF, AF, ZF, SF, IF, DF, OF), IF is set in the user mode, M<n>@ADDR, the n-byte little-endian word at
+   ADDR in the data region, or PC, the address where the execution
+   continued after the instruction. The instruction runs at CODE_ADDR, it is
+   followed by a stub that records where the execution continued and jumps
+   back to the trampoline, as is each landing. For each line, the runner
    prints "INPUTS | OUTPUTS" with the values of the outputs, or FAULT if the
    instruction raised a signal. */
 #define _GNU_SOURCE
@@ -16,7 +21,12 @@
 #include <string.h>
 #include <sys/mman.h>
 
-#define CODE_ADDR 0x10000
+#define CODE_ADDR 0x20000
+/* the code region around CODE_ADDR, where the landings are */
+#define REGION_ADDR 0x1e000
+#define REGION_SIZE 0x5000
+/* the offset of the landing is stored at LAND_ADDR */
+#define LAND_ADDR 0x300000
 #define DATA_ADDR 0x200000
 #define DATA_SIZE 0x10000
 #define DEFAULT_SP 0x208000
@@ -32,7 +42,8 @@ struct state {
   reg gpr[NGPR];
   reg flags;
   reg pad;
-  uint8_t xmm[NXMM][16];
+  uint8_t ymm[NXMM][32];
+  uint8_t mm[8][8];
 };
 #else
 #define NGPR 8
@@ -44,7 +55,8 @@ struct state {
   reg gpr[NGPR];
   reg flags;
   reg pad[3];
-  uint8_t xmm[NXMM][16];
+  uint8_t ymm[NXMM][32];
+  uint8_t mm[8][8];
 };
 #endif
 #define SP 4
@@ -53,7 +65,7 @@ static const struct {
   const char *name;
   int bit;
 } flags[] = {{"CF", 0}, {"PF", 2}, {"AF", 4},  {"ZF", 6},
-             {"SF", 7}, {"DF", 10}, {"OF", 11}};
+             {"SF", 7}, {"IF", 9}, {"DF", 10}, {"OF", 11}};
 #define NFLAGS (sizeof flags / sizeof flags[0])
 
 void run_code(struct state *, void *);
@@ -113,7 +125,11 @@ static void set(struct state *s, char *name, const char *value) {
   else if ((i = flag_index(name)) >= 0) {
     if (strtoul(value, 0, 0)) s->flags |= (reg)1 << flags[i].bit;
   } else if (sscanf(name, "XMM%d", &i) == 1 && i < NXMM)
-    parse_value(value, s->xmm[i], 16);
+    parse_value(value, s->ymm[i], 16);
+  else if (sscanf(name, "YMM%d", &i) == 1 && i < NXMM)
+    parse_value(value, s->ymm[i], 32);
+  else if (sscanf(name, "MM%d", &i) == 1 && i < 8)
+    parse_value(value, s->mm[i], 8);
   else if (sscanf(name, "M%d@%li", &n, &addr) == 2)
     parse_value(value, (uint8_t *)addr, n);
   else
@@ -128,19 +144,48 @@ static void get(const struct state *s, const char *name) {
   else if ((i = flag_index(name)) >= 0)
     printf("%d", (int)((s->flags >> flags[i].bit) & 1));
   else if (sscanf(name, "XMM%d", &i) == 1 && i < NXMM)
-    print_value(s->xmm[i], 16);
+    print_value(s->ymm[i], 16);
+  else if (sscanf(name, "YMM%d", &i) == 1 && i < NXMM)
+    print_value(s->ymm[i], 32);
+  else if (sscanf(name, "MM%d", &i) == 1 && i < 8)
+    print_value(s->mm[i], 8);
+  else if (!strcmp(name, "PC"))
+    printf("0x%lx", (unsigned long)(CODE_ADDR + *(volatile int32_t *)LAND_ADDR));
   else if (sscanf(name, "M%d@%li", &n, &addr) == 2)
     print_value((const uint8_t *)addr, n);
   else
     unknown(name);
 }
 
+/* places the stub that stores off at LAND_ADDR and jumps back to the
+   trampoline at the offset off from the instruction */
+static void place(uint8_t *code, long off) {
+  uint8_t *p = code + off;
+#ifdef __x86_64__
+  static const uint8_t mov[] = {0xc7, 0x04, 0x25, LAND_ADDR & 0xff, (LAND_ADDR >> 8) & 0xff,
+                                (LAND_ADDR >> 16) & 0xff, LAND_ADDR >> 24};
+#else
+  static const uint8_t mov[] = {0xc7, 0x05, LAND_ADDR & 0xff, (LAND_ADDR >> 8) & 0xff,
+                                (LAND_ADDR >> 16) & 0xff, LAND_ADDR >> 24};
+#endif
+  int32_t v = (int32_t)off;
+  memcpy(p, mov, sizeof mov);
+  memcpy(p + sizeof mov, &v, 4);
+  p += sizeof mov + 4;
+  int32_t rel = (int32_t)((uintptr_t)run_back - (uintptr_t)(p + 5));
+  p[0] = 0xe9;
+  memcpy(p + 1, &rel, 4);
+}
+
 int main(void) {
-  uint8_t *code = mmap((void *)CODE_ADDR, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+  uint8_t *region = mmap((void *)REGION_ADDR, REGION_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
   uint8_t *data = mmap((void *)DATA_ADDR, DATA_SIZE, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-  if (code == MAP_FAILED || data == MAP_FAILED) {
+  uint8_t *land = mmap((void *)LAND_ADDR, 0x1000, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+  uint8_t *code = (uint8_t *)CODE_ADDR;
+  if (region == MAP_FAILED || data == MAP_FAILED || land == MAP_FAILED) {
     perror("mmap");
     return 1;
   }
@@ -162,17 +207,22 @@ int main(void) {
       fprintf(stderr, "bad line: %s\n", line);
       return 1;
     }
+    char *bar3 = strchr(bar2 + 1, '|');
     *bar1 = *bar2 = 0;
-    char *inputs = bar1 + 1, *outputs = bar2 + 1;
+    if (bar3) *bar3 = 0;
+    char *inputs = bar1 + 1, *outputs = bar2 + 1, *landings = bar3 ? bar3 + 1 : "";
 
-    /* the code is followed by a jump back to the trampoline */
+    /* the code is followed by a stub, the region is filled with int3 */
+    memset(region, 0xcc, REGION_SIZE);
     int len = 0;
     for (char *t = strtok(line, " "); t; t = strtok(0, " "))
       code[len++] = strtoul(t, 0, 16);
-    int32_t rel = (int32_t)((uintptr_t)run_back - (uintptr_t)(code + len + 5));
-    code[len] = 0xe9;
-    memcpy(code + len + 1, &rel, 4);
-    __builtin___clear_cache((char *)code, (char *)code + len + 5);
+    place(code, len);
+    char lands[1024];
+    strcpy(lands, landings);
+    for (char *t = strtok(lands, " "); t; t = strtok(0, " ")) place(code, strtol(t, 0, 0));
+    __builtin___clear_cache((char *)region, (char *)region + REGION_SIZE);
+    *(volatile int32_t *)LAND_ADDR = 0;
 
     struct state s;
     memset(&s, 0, sizeof s);

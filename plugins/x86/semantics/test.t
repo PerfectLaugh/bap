@@ -95,7 +95,8 @@ and the same for a memory operand
   xchgb %cl, %ah
   {
     #0 := 15:8[RAX]
-    RAX := high:48[RAX].7:0[RCX].low:8[RAX]
+    #1 := 7:0[RCX]
+    RAX := high:48[RAX].#1.low:8[RAX]
     RCX := high:56[RCX].#0
   }
 
@@ -103,10 +104,10 @@ and the same for a memory operand
   $ mc 0x86,0x4f,0x12
   xchgb %cl, 0x12(%rdi)
   {
-    #0 := RDI + 0x12
-    #1 := mem[#0]
-    mem := mem with [#0] <- 7:0[RCX]
-    RCX := high:56[RCX].#1
+    #1 := RDI + 0x12
+    #2 := mem[#1]
+    mem := mem with [#1] <- 7:0[RCX]
+    RCX := high:56[RCX].#2
   }
 
 

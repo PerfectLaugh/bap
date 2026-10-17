@@ -30,6 +30,19 @@ let to_known_prefix = function
   | 0x67 -> Some `x67
   | _ -> None
 
+let to_int : t -> int = function
+  | `xF0 -> 0xF0
+  | `xF2 -> 0xF2
+  | `xF3 -> 0xF3
+  | `x2E -> 0x2E
+  | `x36 -> 0x36
+  | `x3E -> 0x3E
+  | `x26 -> 0x26
+  | `x64 -> 0x64
+  | `x65 -> 0x65
+  | `x66 -> 0x66
+  | `x67 -> 0x67
+
 let deref mem =
   Seq.unfold_step ~init:(Memory.min_addr mem) ~f:(fun addr ->
       match Memory.get ~addr mem with

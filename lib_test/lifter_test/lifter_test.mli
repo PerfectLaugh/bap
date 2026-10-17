@@ -44,8 +44,12 @@ val case :
     The [init] and [expect] lists bind locations to values given as hex or
     decimal numbers. A location is a register name, e.g., [RAX], a flag, e.g.,
     [CF], a memory word [M<n>@<addr>] of [n] bytes at [addr], or [PC], the
-    destination of the jump. The unbound registers and memory are initialized to
-    zero. *)
+    destination of the jump, or the address of the next instruction if the
+    instruction doesn't jump. The unbound registers and memory are initialized
+    to zero.
+
+    The instructions of each target are lifted in a knowledge base of their own,
+    so the modes may put the instructions at the same addresses. *)
 
 val vectors : string -> ((string * string) list * (string * string) list) list
 (** [vectors s] parses the vectors in [s], one per line, as space-separated

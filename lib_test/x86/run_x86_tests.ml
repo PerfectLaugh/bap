@@ -2,11 +2,7 @@ open Core
 open OUnit2
 open Bap_plugins.Std
 
-let suite =
-  "X86"
-  >::: [
-         Test_pshufb.suite; Test_pcmp.suite; Test_x86_64.suite; Test_i686.suite;
-       ]
+let suite = "X86" >::: [ Test_x86_64.suite; Test_i686.suite ]
 
 let () =
   match Bap_main.init () with

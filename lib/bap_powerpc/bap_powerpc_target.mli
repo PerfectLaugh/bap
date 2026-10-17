@@ -35,7 +35,9 @@ val powerpc64le : Theory.Target.t
 (** {2 The PowerPC encodings} *)
 
 val llvm_powerpc32 : Theory.language
+val llvm_powerpc32le : Theory.language
 val llvm_powerpc64 : Theory.language
+val llvm_powerpc64le : Theory.language
 
 val load : ?backend:string -> unit -> unit
 (** [load ()] loads the knowledge base rules for the PowerPC targets.

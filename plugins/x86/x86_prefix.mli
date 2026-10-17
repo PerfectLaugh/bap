@@ -15,6 +15,9 @@ type t =
   | `x67  (** address override *) ]
 [@@deriving bin_io, sexp, compare, enumerate]
 
+val to_int : t -> int
+(** [to_int prefix] is the byte of [prefix] *)
+
 val get : mem -> t list
 (** [get mem] - returns a list of prefixes, if any *)
 

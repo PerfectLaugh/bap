@@ -1,0 +1,76 @@
+(test
+ (name run_mips_tests)
+ (package bap)
+ (libraries
+  bap
+  bap-plugins
+  bap-main
+  ounit2
+  primus_bil
+  lifter_test
+  threads))
+
+; the tests are generated from the specs, with the expected values
+; computed by executing the instructions under QEMU, see
+; lib_test/cross/gen.sh, the 32-bit instructions are also tested in the
+; 64-bit modes, with sign-extended operands
+
+(rule
+ (target test_mips32eb.ml)
+ (deps
+  (glob_files gen/*)
+  (glob_files %{project_root}/lib_test/cross/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash %{project_root}/lib_test/cross/generate.sh gen/mips.conf gen/mips32.spec MIPS32eb))))
+
+(rule
+ (target test_mips32le.ml)
+ (deps
+  (glob_files gen/*)
+  (glob_files %{project_root}/lib_test/cross/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash %{project_root}/lib_test/cross/generate.sh gen/mipsel.conf gen/mips32.spec MIPS32le))))
+
+(rule
+ (target test_mips64eb.ml)
+ (deps
+  (glob_files gen/*)
+  (glob_files %{project_root}/lib_test/cross/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash %{project_root}/lib_test/cross/generate.sh gen/mips64_32.conf gen/mips32.spec MIPS64eb))))
+
+(rule
+ (target test_mips64le.ml)
+ (deps
+  (glob_files gen/*)
+  (glob_files %{project_root}/lib_test/cross/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash %{project_root}/lib_test/cross/generate.sh gen/mips64el_32.conf gen/mips32.spec MIPS64le))))
+
+(rule
+ (target test_mips64eb_64.ml)
+ (deps
+  (glob_files gen/*)
+  (glob_files %{project_root}/lib_test/cross/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash %{project_root}/lib_test/cross/generate.sh gen/mips64.conf gen/mips64.spec MIPS64eb_64))))
+
+(rule
+ (target test_mips64le_64.ml)
+ (deps
+  (glob_files gen/*)
+  (glob_files %{project_root}/lib_test/cross/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash %{project_root}/lib_test/cross/generate.sh gen/mips64el.conf gen/mips64.spec MIPS64le_64))))
