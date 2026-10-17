@@ -1,4 +1,4 @@
 (library
  (name lifter_test)
  (wrapped false)
- (libraries bap bap-core-theory bap-knowledge ounit2 primus_bil core))
+ (libraries bap bap-core-theory bap-knowledge ounit2 core))

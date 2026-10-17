@@ -122,7 +122,16 @@ let typ mode name =
 let width_of_var v =
   match Var.typ v with Type.Imm w -> w | _ -> failwith "not a register"
 
+(* the variables are created once for each target, as their creation
+   validates the names *)
+let vars = Hashtbl.create (module String)
+
+let cached mode name create =
+  let key = Theory.Target.to_string (target mode) ^ ":" ^ name in
+  Hashtbl.find_or_add vars key ~default:create
+
 let mem mode =
+  cached mode "mem" @@ fun () ->
   let data = Theory.Target.data (target mode) in
   let v = Var.reify data in
   Var.create (Var.name v) (Var.typ v)
@@ -139,7 +148,7 @@ let location mode name =
   | Some (n, a) when String.is_prefix n ~prefix:"M" ->
       Mem (Int.of_string (String.drop_prefix n 1), Int.of_string a)
   | _ when String.equal name "PC" -> Pc
-  | _ -> Reg (Var.create name (typ mode name))
+  | _ -> Reg (cached mode name @@ fun () -> Var.create name (typ mode name))
 
 let size_of_bytes n = Size.of_int_exn (8 * n)
 
@@ -173,11 +182,10 @@ let check_typed asm bil =
         (sprintf "%s: the lifted code is not well-typed: %s%s" asm
            (Type.Error.to_string err) (debug bil))
 
-(* [size] is the size of the instruction, so that PC is the address of the
-   next instruction if the instruction doesn't jump *)
-let check mode asm ~size code (init, expect) =
+(* the program that evaluates the instruction [code] with the inputs
+   [init], and the expected outputs *)
+let prepare mode code (init, expect) =
   let bil = List.map init ~f:(initialize mode) @ code in
-  check_typed asm bil;
   (* the expected memory words are loaded into fresh variables *)
   let loads, expect =
     List.fold_map expect ~init:[] ~f:(fun loads (name, value) ->
@@ -195,14 +203,19 @@ let check mode asm ~size code (init, expect) =
             (load :: loads, (name, Reg v, value))
         | loc -> (loads, (name, loc, value)))
   in
-  let state = Primus_bil.eval ~target:(target mode) (bil @ List.rev loads) in
+  (bil @ List.rev loads, expect)
+
+(* [size] is the size of the instruction, so that PC is the address of the
+   next instruction if the instruction doesn't jump *)
+let check mode asm ~size code (init, _) expect state =
   List.iter expect ~f:(fun (name, loc, value) ->
       let got, width =
         match loc with
-        | Reg v -> (Primus_bil.lookup state v, width_of_var v)
+        | Reg v -> (Lifter_test_eval.lookup state v, width_of_var v)
         | Pc ->
             let next = Word.of_int ~width:(bits mode) (mode.addr + size) in
-            (Some (Option.value (Primus_bil.pc state) ~default:next), bits mode)
+            ( Some (Option.value (Lifter_test_eval.pc state) ~default:next),
+              bits mode )
         | Mem _ -> assert false
       in
       let expected = word width value in
@@ -217,26 +230,37 @@ let check mode asm ~size code (init, expect) =
 
 (* The labels of the addresses are shared by the targets, e.g., the label
    of a branch destination, so each target has its own knowledge base,
-   which starts as the knowledge base before the first test. *)
+   which starts as the knowledge base before the first test. The knowledge
+   base after the first test of a target, which has the Lisp program of
+   the target, is the knowledge base of the following tests, which don't
+   keep what they add to it, so that it doesn't grow with each test. *)
 let initial_state = lazy (Toplevel.current ())
 let states = Hashtbl.create (module String)
 
 let with_state_of mode f =
   let name = Theory.Target.to_string (target mode) in
-  let state =
-    Hashtbl.find_or_add states name ~default:(fun () ->
-        Lazy.force initial_state)
-  in
-  Toplevel.set state;
-  Exn.protect ~f ~finally:(fun () ->
-      Hashtbl.set states ~key:name ~data:(Toplevel.current ()))
+  match Hashtbl.find states name with
+  | Some state ->
+      Toplevel.set state;
+      f ()
+  | None ->
+      Toplevel.set (Lazy.force initial_state);
+      Exn.protect ~f ~finally:(fun () ->
+          Hashtbl.set states ~key:name ~data:(Toplevel.current ()))
 
 let case mode asm code vectors =
   OUnit2.( >:: ) asm @@ fun _ctxt ->
   with_state_of mode @@ fun () ->
   let bil = lift mode code in
   let size = String.length (bytes_of_hex code) in
-  List.iter vectors ~f:(check mode asm ~size bil)
+  (* the code and the inputs are typed once, the inputs of the vectors
+     have the same types *)
+  (match vectors with
+  | (init, _) :: _ -> check_typed asm (List.map init ~f:(initialize mode) @ bil)
+  | [] -> check_typed asm bil);
+  List.iter vectors ~f:(fun vector ->
+      let program, expect = prepare mode bil vector in
+      check mode asm ~size bil vector expect (Lifter_test_eval.eval program))
 
 let bindings s =
   String.split s ~on:' '

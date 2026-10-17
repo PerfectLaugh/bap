@@ -83,9 +83,14 @@
     PPC64le_64))))
 
 ; the instruction tests are slow, so they don't run with dune test, run
-; them with dune build @instruction-tests
+; them with dune build @instruction-tests. OUnit collects the heap after
+; each test, which is the most of the time of the tests, as the heap has
+; the knowledge base of the lifters, the tests don't need it
 
 (rule
  (alias instruction-tests)
  (action
-  (run %{exe:run_powerpc_tests.exe})))
+  (setenv
+   OUNIT_RUN_GC_FULL_MAJOR
+   false
+   (run %{exe:run_powerpc_tests.exe}))))
