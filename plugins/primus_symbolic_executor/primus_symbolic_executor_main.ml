@@ -212,14 +212,23 @@ end = struct
     | NEQ -> fun ctxt x y -> Bitv.mk_redor ctxt @@ Bitv.mk_xor ctxt x y
 
   let do_simpl x = try Expr.simplify x None with Z3.Error "canceled" -> x
+  let is_literal x = Expr.is_numeral x || Bool.is_true x || Bool.is_false x
+
+  (* simplifies [x] only when all its operands are literals, i.e., folds
+     constants. Simplifying a term with symbolic operands rewrites the
+     whole term anew on each operation, so they are simplified only
+     when they become formulae. *)
+  let fold x =
+    if List.for_all (Expr.get_args x) ~f:is_literal then do_simpl x else x
+
   let bit0 = Expr.mk_numeral_int ctxt 0 (Bitv.mk_sort ctxt 1)
   let bit1 = Expr.mk_numeral_int ctxt 1 (Bitv.mk_sort ctxt 1)
   let is_bool = Bool.is_bool
 
   let bit_of_bool x =
-    if Bool.is_bool x then do_simpl @@ Bool.mk_ite ctxt x bit1 bit0 else x
+    if Bool.is_bool x then fold @@ Bool.mk_ite ctxt x bit1 bit0 else x
 
-  let bool_of_bit x = do_simpl @@ Bool.mk_eq ctxt x bit1
+  let bool_of_bit x = fold @@ Bool.mk_eq ctxt x bit1
 
   let z3_of_unop : unop -> _ = function
     | NEG -> Bitv.mk_neg
@@ -227,7 +236,7 @@ end = struct
 
   let coerce_to_bit x = if is_bool x then bit_of_bool x else x
   let coerce_to_bool x = if is_bool x then x else bool_of_bit x
-  let simpl x = do_simpl x |> coerce_to_bit
+  let simpl x = fold x |> coerce_to_bit
   let binop op x y = simpl (z3_of_binop op ctxt x y)
   let unop op x = simpl (z3_of_unop op ctxt x)
 
