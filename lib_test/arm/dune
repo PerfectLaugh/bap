@@ -1,0 +1,12 @@
+(test
+ (name run_arm_tests)
+ (package bap)
+ (libraries
+  bap
+  bap-core-theory
+  bap-knowledge
+  bap-plugins
+  bap-main
+  ounit2
+  primus_bil
+  threads))
