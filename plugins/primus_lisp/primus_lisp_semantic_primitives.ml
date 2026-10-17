@@ -366,6 +366,10 @@ let export =
         tuple [ sym; int; any ] @-> any,
         "(cast-float M S X) converts a floating-point number X to the nearest\n\
         \    signed integer with the size S using the rounding mode M " );
+      ( "fconvert",
+        tuple [ sym; int; any ] @-> any,
+        "(fconvert M S X) converts a floating-point number X to the nearest\n\
+        \    floating-point number with the size S using the rounding mode M" );
     ]
 
 type KB.conflict +=
@@ -1274,7 +1278,7 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
           forget @@ const_int s (sf sm x)
       | _ ->
           let* fs = fsort ds in
-          forget @@ df fs rm !!x
+          forget @@ prj (df fs rm !!x)
 
     let cast_int sf df xs =
       with_rmode xs @@ fun sm rm xs ->
@@ -1285,6 +1289,12 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
       match const x with
       | Some x when ds = 64 && size sx = 64 -> forget @@ const_int s (sf sm x)
       | _ -> forget @@ df is rm (inj fs !!x)
+
+    let fconvert xs =
+      with_rmode xs @@ fun _ rm xs ->
+      with_cast_ops xs @@ fun ds x ->
+      let* xs = fsort (size (sort x)) and* fs = fsort ds in
+      forget @@ prj (CT.fconvert fs rm (inj xs !!x))
 
     let const x fs s rmode =
       forget @@ CT.fbits (CT.cast_float fs rmode (const_int s x))
@@ -1377,6 +1387,7 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
         pure @@ F.cast_float F.Z.cast_float CT.cast_sfloat args
     | "cast-int", _ -> pure @@ F.cast_int F.Z.cast_int CT.cast_int args
     | "cast-sint", _ -> pure @@ F.cast_int F.Z.cast_int CT.cast_sint args
+    | "fconvert", _ -> pure @@ F.fconvert args
     | "<.", _ | "forder", _ -> pure @@ order F.Z.lt F.lt args
     | "<=.", _ -> pure @@ order F.Z.le F.le args
     | ">.", _ -> pure @@ order F.Z.gt F.gt args
