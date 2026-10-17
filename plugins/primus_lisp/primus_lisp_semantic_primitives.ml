@@ -800,13 +800,20 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
     | Some name -> k name
     | None -> illformed "not a symbolic value"
 
+  (* a register that is not a variable of the target, e.g., the base
+     of an alias that [alias-base-register] returned, has the sort of
+     its value, a plain symbol is a word *)
   let possibly_register target v =
+    let sort = Theory.Value.sort v in
     require_symbol v @@ fun v ->
     match Theory.Target.var target v with
     | Some v -> !!v
-    | None ->
-        let s = Theory.Bitv.define (Theory.Target.bits target) in
-        KB.return @@ Theory.Var.forget (Theory.Var.define s v)
+    | None -> (
+        match Theory.Bitv.refine sort with
+        | Some s -> KB.return @@ Theory.Var.forget (Theory.Var.define s v)
+        | None ->
+            let s = Theory.Bitv.define (Theory.Target.bits target) in
+            KB.return @@ Theory.Var.forget (Theory.Var.define s v))
 
   let set_symbol t v x =
     let* var = possibly_register t v in
@@ -1010,7 +1017,7 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
         @@
         match t with
         | `hi -> Bitvec.extract ~hi:(w - 1) ~lo:(w - r) v
-        | `lo -> Bitvec.extract ~hi:r ~lo:0 v
+        | `lo -> Bitvec.extract ~hi:(r - 1) ~lo:0 v
         | `se ->
             let signed = Bitvec.(msb v mod modulus w) in
             if signed && w < r then
@@ -1018,7 +1025,7 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
                 let modulus = Bitvec.modulus r
               end) in
               (ones lsl int w) lor v
-            else Bitvec.extract ~hi:r ~lo:0 v)
+            else Bitvec.extract ~hi:(r - 1) ~lo:0 v)
 
   let signed = mk_cast `se CT.signed
   let unsigned = mk_cast `lo CT.unsigned
@@ -1076,10 +1083,13 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
         if hi < lo then illformed "extract: high must be no les the low"
         else
           let s = Theory.Bitv.define (hi - lo + 1) in
+          (* the bit numbers are words of the size of x, as the size of
+             the result may be too small to represent them *)
+          let sx = Theory.Value.sort x in
           forget
           @@
           match const x with
-          | None -> CT.extract s (int s hi) (int s lo) !!x
+          | None -> CT.extract s (int sx hi) (int sx lo) !!x
           | Some x -> const_int s @@ Bitvec.extract ~hi ~lo x)
 
   let concat xs =

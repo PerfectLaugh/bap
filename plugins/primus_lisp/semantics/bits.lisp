@@ -44,27 +44,25 @@
 (defun rotate-right (bitv n)
   "(rotate-right bitv n) rotates bitv to the right by n positions.
     Carry-out is ignored."
-  (if (= n 0)
-    bitv
-    (let ((bitv-length (word-width bitv))
-          (m (mod n bitv-length)))
-      ; need to trim the result of logor.
-      (extract (- bitv-length 1) 0
-        (logor
-          (rshift bitv m)
-          (lshift bitv (- bitv-length m)))))))
+  ;; no branch on n = 0, the shift by the width is then 0, a dynamic
+  ;; if would assign m on one path only
+  (let ((bitv-length (word-width bitv))
+        (m (mod n bitv-length)))
+    ; need to trim the result of logor.
+    (extract (- bitv-length 1) 0
+      (logor
+        (rshift bitv m)
+        (lshift bitv (- bitv-length m))))))
 
 (defun rotate-left (bitv n)
-  "(rotate-right bitv n) rotates bitv to the right by n positions.
+  "(rotate-left bitv n) rotates bitv to the left by n positions.
     Carry-out is ignored."
-  (if (= n 0)
-    bitv
-    (let ((bitv-length (word-width bitv))
-          (m (mod n bitv-length)))
-      (extract (- bitv-length 1) 0
-        (logor
-          (lshift bitv m)
-          (rshift bitv (- bitv-length m)))))))
+  (let ((bitv-length (word-width bitv))
+        (m (mod n bitv-length)))
+    (extract (- bitv-length 1) 0
+      (logor
+        (lshift bitv m)
+        (rshift bitv (- bitv-length m))))))
 
 (defun clz (x)
   "(clz X) counts leading zeros in X.
