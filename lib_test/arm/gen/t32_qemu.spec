@@ -118,3 +118,10 @@ nop.w | R0=1 | R0
 dmb ish | R0=1 | R0
 dsb sy | R0=1 | R0
 pld [r1, #4] | R0=1 R1=0x200000 | R0
+# the branches to the A32 state
+bx r1 | R1=0x20100 | PC | *0x100
+bx lr | LR=0x1fc00 | PC | *-0x400
+blx r1 | R1=0x20100 | PC LR | *0x100
+blx .+0x100 | | PC LR | *0x100
+ldr.w pc, [r1, #4] | R1=0x200000 M4@0x200004=0x20100 | PC | *0x100
+ldm.w r1!, {r2, pc} | R1=0x200000 M4@0x200000=1 M4@0x200004=0x1fc00 | R2 R1 PC | *-0x400

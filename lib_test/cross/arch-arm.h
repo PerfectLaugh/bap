@@ -14,6 +14,10 @@
 #define SLOT_CODE 19
 #define STATE_SIZE 24
 
+/* the A32 and T32 runners have an epilogue in the other state, see
+   runner.c */
+#define ALT_EPILOGUE 1
+
 #define SYS_fork 2
 #define SYS_read 3
 #define SYS_write 4

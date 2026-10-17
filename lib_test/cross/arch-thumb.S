@@ -49,10 +49,10 @@ run_code:
         .thumb
         .globl epi_start, epi_mark, epi_end
 epi_start:
-        stm sp, {r0-r12}
-        str lr, [sp, #SLOT(SLOT_LR)]
+        stm.w sp, {r0-r12}
+        str.w lr, [sp, #SLOT(SLOT_LR)]
         mrs r0, APSR
-        str r0, [sp, #SLOT(SLOT_APSR)]
+        str.w r0, [sp, #SLOT(SLOT_APSR)]
         mov lr, pc @ reads as the address of the mov plus 4
         nop
 epi_mark:
@@ -60,3 +60,22 @@ epi_mark:
         ldr sp, [sp, #SLOT(SLOT_NSP)]
         pop {r4-r11, pc}
 epi_end:
+
+/* the alternative epilogue, in the A32 state, for the branches to it,
+   the mark is at the offset of epi_mark */
+        .arm
+        .globl alt_start, alt_end
+alt_start:
+        stm sp, {r0-r12}
+        str lr, [sp, #SLOT(SLOT_LR)]
+        mrs r0, APSR
+        str r0, [sp, #SLOT(SLOT_APSR)]
+        bl alt_mark
+alt_mark:
+        str lr, [sp, #SLOT(SLOT_LAND)]
+        ldr sp, [sp, #SLOT(SLOT_NSP)]
+        pop {r4-r11, pc}
+alt_end:
+        .if (alt_mark - alt_start) - (epi_mark - epi_start)
+        .error "the marks of the epilogues are at different offsets"
+        .endif

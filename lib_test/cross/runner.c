@@ -6,7 +6,10 @@
    LANDINGS", where CODE is the encoding in hex bytes, in memory order,
    INPUTS are NAME=VALUE bindings, OUTPUTS are names and LANDINGS are offsets
    from the instruction, at INSN_ADDR, where a branch may land, e.g.,
-   -0x400. A name is a register of the architecture, see arch-*.h, or a
+   -0x400. An architecture file that defines ALT_EPILOGUE has a second
+   epilogue, in the other instruction set, e.g., T32 for A32, which is
+   copied at the landings prefixed with *, e.g., *0x100, for the branches
+   that change the instruction set. A name is a register of the architecture, see arch-*.h, or a
    flag, a bit of a register, e.g., of the condition register of PowerPC,
    M<n>@ADDR, the n-byte word at ADDR in the data region, in the byte order
    of the architecture, or PC, the address where the execution continued
@@ -41,6 +44,10 @@ typedef unsigned char u8;
 long sys(long n, long a, long b, long c, long d, long e, long f);
 void run_code(word *state);
 extern u8 epi_start[], epi_mark[], epi_end[];
+#ifdef ALT_EPILOGUE
+/* the mark of the alternative epilogue is at the offset of epi_mark */
+extern u8 alt_start[], alt_end[];
+#endif
 
 static word state[STATE_SIZE];
 
@@ -264,10 +271,11 @@ static void copy(u8 *dst, const u8 *src, long n) {
   for (long i = 0; i < n; i++) dst[i] = src[i];
 }
 
-/* copies the epilogue at the offset off from the instruction, which must not
-   overlap the instruction or the other copies */
-static void place(u8 *insn, long off, long placed[][2], long *n) {
-  long epi = epi_end - epi_start;
+/* copies the epilogue from start to end at the offset off from the
+   instruction, which must not overlap the instruction or the other copies */
+static void place(u8 *start, u8 *end, u8 *insn, long off, long placed[][2],
+                  long *n) {
+  long epi = end - start;
   u8 *at = insn + off;
   if (at < (u8 *)CODE_ADDR || at + epi > (u8 *)(CODE_ADDR + CODE_SIZE))
     die("the landing is out of the code region");
@@ -277,7 +285,7 @@ static void place(u8 *insn, long off, long placed[][2], long *n) {
   if (*n == 64) die("too many landings");
   placed[*n][0] = off;
   placed[(*n)++][1] = off + epi;
-  copy(at, epi_start, epi);
+  copy(at, start, epi);
 }
 
 static void run_line(char *line) {
@@ -299,10 +307,18 @@ static void run_line(char *line) {
   }
   placed[nplaced][0] = 0;
   placed[nplaced++][1] = len;
-  place(insn, len, placed, &nplaced);
+  place(epi_start, epi_end, insn, len, placed, &nplaced);
   while (landings && (t = token(&landings))) {
+    u8 *start = epi_start, *end = epi_end;
+    if (t[0] == '*') {
+#ifdef ALT_EPILOGUE
+      start = alt_start, end = alt_end, t++;
+#else
+      die("the architecture has no alternative epilogue");
+#endif
+    }
     long off = t[0] == '-' ? -(long)parse_u64(t + 1) : (long)parse_u64(t);
-    place(insn, off, placed, &nplaced);
+    place(start, end, insn, off, placed, &nplaced);
   }
   flush_icache(code, CODE_SIZE);
 

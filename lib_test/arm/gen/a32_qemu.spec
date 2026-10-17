@@ -308,6 +308,18 @@ bx lr | LR=0x20100 | PC | 0x100
 bxne lr | LR=0x20100 ZF | PC | 0x100
 blx r1 | R1=0x20100 | PC LR | 0x100
 blxeq r1 | R1=0x1fc00 ZF LR=0x55 | PC LR | -0x400
+# the branches to the T32 state, the bit 0 of the destination is not a
+# part of the address
+bx r1 | R1=0x20101 | PC | *0x100
+bxeq r1 | R1=0x1fc01 ZF | PC | *-0x400
+bx lr | LR=0x20101 | PC | *0x100
+blx r1 | R1=0x20101 | PC LR | *0x100
+blxne r1 | R1=0x1fc01 ZF LR=0x55 | PC LR | *-0x400
+blx .+0x100 | | PC LR | *0x100
+mov pc, lr | LR=0x20101 | PC | *0x100
+mov pc, r1 | R1=0x1fc01 | PC | *-0x400
+ldr pc, [r1] | R1=0x200000 M4@0x200000=0x20101 | PC | *0x100
+ldm r1, {r2, pc} | R1=0x200000 M4@0x200000=1 M4@0x200004=0x1fc01 | R2 PC | *-0x400
 # the status register and the other system instructions
 mrs r0, apsr | NF ZF CF VF QF | R0
 msr apsr_nzcvq, r0 | R0@flags | NF ZF CF VF QF

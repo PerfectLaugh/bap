@@ -53,3 +53,24 @@ epi_mark:
         ldr sp, [sp, #SLOT(SLOT_NSP)]
         pop {r4-r11, pc}
 epi_end:
+
+/* the alternative epilogue, in the T32 state, for the branches to it,
+   PC reads as the address of the instruction plus 4, the mark is at the
+   offset of epi_mark and the return to run_code leaves the T32 state */
+        .thumb
+        .globl alt_start, alt_end
+alt_start:
+        stm.w sp, {r0-r12}
+        str.w lr, [sp, #SLOT(SLOT_LR)]
+        mrs r0, APSR
+        str.w r0, [sp, #SLOT(SLOT_APSR)]
+        mov lr, pc
+        nop
+alt_mark:
+        str.w lr, [sp, #SLOT(SLOT_LAND)]
+        ldr.w sp, [sp, #SLOT(SLOT_NSP)]
+        pop {r4-r11, pc}
+alt_end:
+        .if (alt_mark - alt_start) - (epi_mark - epi_start)
+        .error "the marks of the epilogues are at different offsets"
+        .endif
