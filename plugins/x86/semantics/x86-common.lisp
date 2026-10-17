@@ -49,8 +49,17 @@
    the next instruction"
   (+ (if (= (symbol base) 'Nil) 0
        (if (= (symbol base) 'RIP) (get-next-program-counter) base))
-     (if (= (symbol index) 'Nil) 0 (* scale index))
+     (if (= (symbol index) 'Nil) 0 (scaled-index scale index))
      off))
+
+(defun scaled-index (scale index)
+  "(scaled-index SCALE INDEX) is INDEX times SCALE, which is 1, 2, 4 or
+   8, as a shift"
+  (case scale
+    2 (lshift index 1)
+    4 (lshift index 2)
+    8 (lshift index 3)
+    index))
 
 ;;; MEMORY OPERANDS
 ;;
@@ -64,8 +73,9 @@
     0))
 
 (defun ea (base scale index off seg)
-  "(ea BASE SCALE INDEX OFF SEG) is the address of a memory operand"
-  (+ (operand-address base scale index off) (segment-base seg)))
+  "(ea BASE SCALE INDEX OFF SEG) is the address of a memory operand,
+   the segment base is the first term"
+  (+ (segment-base seg) (operand-address base scale index off)))
 
 (defun load-n (n addr)
   "(load-n N ADDR) is the N-bit word at ADDR"
