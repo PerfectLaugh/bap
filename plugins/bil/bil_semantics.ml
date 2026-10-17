@@ -212,14 +212,24 @@ module Basic : Theory.Basic = struct
       ey >>= fun ey ->
       let sx = sort ex and sy = sort ey in
       let x = bitv_exp ex and y = bitv_exp ey in
-      match compare (size sx + size sy) (size s) with
-      | 0 -> vec s (Bil.concat x y)
-      | 1 ->
-          let extra = size s - size sx - size sy in
-          vec s @@ Bil.(cast unsigned extra (concat x y))
-      | _ ->
-          if size s < size sx then vec s Bil.(cast low (size s) x)
-          else vec s Bil.(cast low (size s) (concat x y))
+      (* an empty part has no bits, the other part is fitted to s *)
+      let fit e se =
+        match compare (size se) (size s) with
+        | 0 -> vec s e
+        | 1 -> vec s Bil.(cast low (size s) e)
+        | _ -> vec s Bil.(cast unsigned (size s) e)
+      in
+      if size sx = 0 then fit y sy
+      else if size sy = 0 then fit x sx
+      else
+        match compare (size sx + size sy) (size s) with
+        | 0 -> vec s (Bil.concat x y)
+        | 1 ->
+            let extra = size s - size sx - size sy in
+            vec s @@ Bil.(cast unsigned extra (concat x y))
+        | _ ->
+            if size s < size sx then vec s Bil.(cast low (size s) x)
+            else vec s Bil.(cast low (size s) (concat x y))
 
     let rec uncat acc : Bil.exp -> Bil.exp list = function
       | Concat (Concat (x, y), z) -> uncat (y :: z :: acc) x
@@ -229,11 +239,19 @@ module Basic : Theory.Basic = struct
     let concat s vs =
       match vs with
       | [] -> unk s
-      | _ ->
+      | _ -> (
           Knowledge.List.all vs >>= fun vs ->
-          let sz = List.fold ~init:0 vs ~f:(fun sz x -> sz + size (sort x)) in
-          let x = List.reduce_exn ~f:Bil.concat @@ List.map vs ~f:bitv_exp in
-          cast s b0 (vec (bits sz) x)
+          (* the empty parts have no bits *)
+          match List.filter vs ~f:(fun x -> size (sort x) > 0) with
+          | [] -> unk s
+          | vs ->
+              let sz =
+                List.fold ~init:0 vs ~f:(fun sz x -> sz + size (sort x))
+              in
+              let x =
+                List.reduce_exn ~f:Bil.concat @@ List.map vs ~f:bitv_exp
+              in
+              cast s b0 (vec (bits sz) x))
 
     let load mem key =
       mem >>-> fun sort mem ->
@@ -325,8 +343,9 @@ module Basic : Theory.Basic = struct
     match (value hi, value lo) with
     | Int h, Int l ->
         let h = Word.to_int_exn h and l = Word.to_int_exn l in
-        (* the lower bits are a cast, which is printed as low:N *)
-        if h - l + 1 = size s && l = 0 then
+        (* the lower bits are a cast, which is printed as low:N, an empty
+           extraction is not a cast *)
+        if h - l + 1 = size s && l = 0 && h >= 0 then
           let n = h + 1 in
           vec s @@ Bil.(cast low n (value e))
         else if h - l + 1 = size s then
