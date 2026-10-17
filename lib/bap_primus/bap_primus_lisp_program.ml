@@ -327,6 +327,18 @@ module Places = struct
             Map.set regs ~key:name ~data:v))
       ~init:(Map.empty (module KB.Name))
 
+  (* the registers of the target by their names, a register of a target
+     overrides the registers of its parents with the same name, e.g., the
+     64-bit GS_BASE of x86_64 overrides the 32-bit one of i686 *)
+  let target_registers target =
+    List.rev (target :: Theory.Target.parents target)
+    |> List.fold
+         ~init:(Map.empty (module String))
+         ~f:(fun regs t ->
+           Theory.Target.regs t
+           |> Set.fold ~init:regs ~f:(fun regs v ->
+               Map.set regs ~key:(Theory.Var.name v) ~data:v))
+
   let collect_globals target program =
     let open Lisp.Attributes in
     let var v =
@@ -376,8 +388,8 @@ module Places = struct
         add_registers target;
         add_globals target;
         add_vars ~package:"program" globals;
-        add_vars ~package:"target" @@ Seq.map ~f:snd
-        @@ Map.to_sequence (collect_registers target);
+        add_vars ~package:"target" @@ Seq.of_list @@ Map.data
+        @@ target_registers target;
       ]
 end
 
