@@ -159,10 +159,17 @@ module Forker (Machine : Primus.Machine.S) = struct
 
   let has_no_def blk = Term.length def_t blk = 0
 
-  let step level =
+  (* a block without definitions forks when it is entered, its jumps
+     are taken before the block is left *)
+  let enter level =
     let open Primus.Pos in
     match level with
     | Blk { me = blk } when has_no_def blk -> fork blk
+    | _ -> Machine.return ()
+
+  let step level =
+    let open Primus.Pos in
+    match level with
     | Def { up = { me = blk }; me = def } when is_last blk def -> fork blk
     | Jmp { up = { me = blk }; me = jmp } -> fork_on_calls blk jmp
     | _ -> Machine.return ()
@@ -174,6 +181,7 @@ module Forker (Machine : Primus.Machine.S) = struct
   let init () =
     Machine.sequence
       [
+        Primus.Interpreter.enter_pos >>> enter;
         Primus.Interpreter.leave_pos >>> step;
         Primus.Interpreter.leave_blk >>> mark_visited;
       ]
