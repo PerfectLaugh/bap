@@ -254,6 +254,10 @@ let export =
       ( "get-current-program-counter",
         unit @-> int,
         "(get-current-program-counter) is an alias to (get-program-counter)" );
+      ( "get-next-program-counter",
+        unit @-> int,
+        "(get-next-program-counter) returns the address of the instruction\n\
+        \     that follows the current one" );
       ( "set-symbol-value",
         tuple [ any; a ] @-> a,
         "(set-symbol-value S X) sets the value of the symbol S to X.\n\
@@ -795,6 +799,13 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
     | None -> !!(empty s)
     | Some addr -> forget @@ const_int s addr
 
+  let get_next_pc s lbl =
+    KB.collect Bap.Std.Memory.slot lbl >>= function
+    | None -> !!(empty s)
+    | Some mem ->
+        let next = Bap.Std.(Addr.succ (Memory.max_addr mem)) in
+        forget @@ const_int s (Bap.Std.Word.to_bitvec next)
+
   let require_symbol v k =
     match symbol v with
     | Some name -> k name
@@ -946,10 +957,13 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
         | [ ptr; typ ] -> store t (base + i) ptr typ
         | _ -> illformed "incorrect :stores parameters")
 
-    let make_result size =
+    (* the result is copied, as the next call to an intrinsic overwrites
+       its output variable *)
+    let make_result eff size =
       let* size = static size in
       let s = Theory.Value.Sort.forget @@ Theory.Bitv.define size in
-      CT.var @@ ovar 0 s
+      let* r = Theory.Var.fresh s in
+      full (seq [ eff; data @@ CT.set r (CT.var (ovar 0 s)) ]) (CT.var r)
 
     let call t name args =
       require_symbol name @@ fun name ->
@@ -965,7 +979,7 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
       in
       match result args with
       | [] -> eff
-      | [ [ t ] ] -> full eff (make_result t)
+      | [ [ t ] ] -> make_result eff t
       | _ -> illformed ":result may occur once and with a single argument"
   end
 
@@ -1435,6 +1449,7 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
     | "store-word", _ -> data @@ store_word t args
     | "get-program-counter", [] | "get-current-program-counter", [] ->
         pure @@ get_pc s lbl
+    | "get-next-program-counter", [] -> pure @@ get_next_pc s lbl
     | "set-symbol-value", [ sym; x ] -> data @@ set_symbol t sym x
     | "symbol-concat", syms -> pure @@ symbol_concat s syms
     | "symbol", [ x ] -> pure @@ mksymbol s x

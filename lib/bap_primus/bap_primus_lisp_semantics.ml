@@ -261,11 +261,19 @@ let machine_var_by_name t name =
   Set.find (Theory.Target.vars t) ~f:(fun v ->
       String.equal (Theory.Var.name v) name)
 
+(* an explicit size of a variable overrides the size of the place with
+   its name *)
 let make_var ?t:constr places target name =
   let word = Theory.Target.bits target in
-  match Map.find places name with
-  | Some v -> v
-  | None ->
+  let size v =
+    match Theory.Bitv.refine (Theory.Var.sort v) with
+    | Some s -> Theory.Bitv.size s
+    | None -> word
+  in
+  match (Map.find places name, constr) with
+  | Some v, None -> v
+  | Some v, Some t when size v = t -> v
+  | _ ->
       let t = Option.value constr ~default:word in
       Theory.Var.forget @@ Theory.Var.define (bits t) (KB.Name.to_string name)
 
@@ -470,7 +478,11 @@ module Prelude (CT : Theory.Core) = struct
       match static r with
       | Some x ->
           if Bitvec.(equal x zero) then !!r
-          else eval body >>= fun _ -> rep cnd body
+          else
+            (* the loop is unrolled keeping the effects of its body *)
+            let* beff = eval body in
+            let* reff = rep cnd body in
+            full [ !!beff; !!reff ] !!(res reff)
       | None ->
           let* body = eval body in
           let* head = fresh and* loop = fresh and* tail = fresh in

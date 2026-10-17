@@ -1229,7 +1229,10 @@ module Typing = struct
 
   let constr_glob { globs; paras } vars var gamma =
     let name = var.data.exp in
+    (* an explicit size overrides the size of the global *)
+    let sized = match var.data.typ with Type _ -> true | _ -> false in
     if Map.mem vars name then gamma
+    else if sized && Map.mem globs name then gamma
     else
       match Map.find globs name with
       | Some n -> Gamma.constr var.id (Type n) gamma
