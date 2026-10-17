@@ -46,6 +46,18 @@
 (defun VNMLSD (rd ra rn rm cnd _) (vfp cnd (set$ rd (-. :rne (*. :rne rn rm) ra))))
 (defun VNMLSS (rd ra rn rm cnd _) (vfp cnd (set$ rd (-. :rne (*. :rne rn rm) ra))))
 
+;; the fused multiply-add instructions (VFPv4) round only once, but the
+;; semantics rounds the product first, so the result may differ from
+;; the hardware in the last bit
+(defun VFMAD (rd ra rn rm cnd _) (vfp cnd (set$ rd (+. :rne ra (*. :rne rn rm)))))
+(defun VFMAS (rd ra rn rm cnd _) (vfp cnd (set$ rd (+. :rne ra (*. :rne rn rm)))))
+(defun VFMSD (rd ra rn rm cnd _) (vfp cnd (set$ rd (-. :rne ra (*. :rne rn rm)))))
+(defun VFMSS (rd ra rn rm cnd _) (vfp cnd (set$ rd (-. :rne ra (*. :rne rn rm)))))
+(defun VFNMAD (rd ra rn rm cnd _) (vfp cnd (set$ rd (fp-neg (+. :rne ra (*. :rne rn rm))))))
+(defun VFNMAS (rd ra rn rm cnd _) (vfp cnd (set$ rd (fp-neg (+. :rne ra (*. :rne rn rm))))))
+(defun VFNMSD (rd ra rn rm cnd _) (vfp cnd (set$ rd (-. :rne (*. :rne rn rm) ra))))
+(defun VFNMSS (rd ra rn rm cnd _) (vfp cnd (set$ rd (-. :rne (*. :rne rn rm) ra))))
+
 (defun VNEGD (rd rn cnd _) (vfp cnd (set$ rd (fp-neg rn))))
 (defun VNEGS (rd rn cnd _) (vfp cnd (set$ rd (fp-neg rn))))
 (defun VABSD (rd rn cnd _) (vfp cnd (set$ rd (fp-abs rn))))
@@ -95,15 +107,18 @@
 (defun VTOSIZS (sd sm cnd _) (vfp cnd (set$ sd (fp-to-int true 32 sm 8 23))))
 (defun VTOUIZS (sd sm cnd _) (vfp cnd (set$ sd (fp-to-int false 32 sm 8 23))))
 
+;; the literals are words, so a double is made from its upper word
+(defun vfp-double-hi (hi) (lshift (cast-unsigned 64 hi) 32))
+
 (defmacro VTO*IR (signed sd x one half e f cnd)
   (vfp cnd (set$ sd (fp-to-int signed 32
                                (fp-round-integral 'n x one half e f)
                                e f))))
 
 (defun VTOSIRD (sd dm cnd _)
-  (VTO*IR true sd dm 0x3ff0000000000000 0x3fe0000000000000 11 52 cnd))
+  (VTO*IR true sd dm (vfp-double-hi 0x3ff00000) (vfp-double-hi 0x3fe00000) 11 52 cnd))
 (defun VTOUIRD (sd dm cnd _)
-  (VTO*IR false sd dm 0x3ff0000000000000 0x3fe0000000000000 11 52 cnd))
+  (VTO*IR false sd dm (vfp-double-hi 0x3ff00000) (vfp-double-hi 0x3fe00000) 11 52 cnd))
 (defun VTOSIRS (sd sm cnd _)
   (VTO*IR true sd sm (cast-low 32 0x3f800000) (cast-low 32 0x3f000000) 8 23 cnd))
 (defun VTOUIRS (sd sm cnd _)

@@ -4,6 +4,7 @@
 
 (require bits)
 (require arm-vfp)
+(require arm-a32)
 
 (defun CLZ (rd rn pre _)
   (when (condition-holds pre)

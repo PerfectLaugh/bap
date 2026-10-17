@@ -1,7 +1,6 @@
 (require bits)
 (require arm-bits)
 
-
 ;; Note: page references are from ARM DDI 0403E.b
 
 (declare (context (target arm-family)))
@@ -31,11 +30,6 @@
 
 (defun tEOR (rd _ rn rm cnd _)
   (tLOGs logxor rd rn rm cnd))
-
-(defun t2EORrs (rd rn rm simm cnd _ _)
-  "eor.w rd, rn, rm, simm"
-  (when (condition-holds cnd)
-    (set$ rd (logxor rn (i-shift rm simm)))))
 
 (defun tAND (rd _ rn rm cnd _)
   (tLOGs logand rd rn rm cnd))
@@ -67,24 +61,6 @@
               (extract 7 0 rm)
               (extract 15 8 rm)))))
 
-(defun tLSLrr (rd _ rn rm cnd _)
-  "lsls rd, rn, rm"
-  (shift-with-carry lshift rd rn rm cnd))
-
-(defun t2LSLri (rd rm imm cnd _ _)
-  "lsl.w rd, rm, #imm"
-  (when (condition-holds cnd)
-    (set$ rd (lshift rm imm))))
-
-(defun tLSRrr (rd _ rn rm cnd _)
-  "lsrs rd, rn, rm"
-  (shift-with-carry rshift rd rn rm cnd))
-
-(defun t2LSRri (rd rm imm cnd _ _)
-  "lsr.w rd, rm, #imm"
-  (when (condition-holds cnd)
-    (set$ rd (rshift rm imm))))
-
 (defun tTST (rn rm _ _)
   "tst rn, rm"
   (let ((rd (logand rn rm)))
@@ -95,22 +71,12 @@
   (when (condition-holds cnd)
     (set$ rd (+ rn (t2reg rm)))))
 
-(defun t2ADDrs (rd rn rm simm cnd _ _)
-  "add.w rd, rn, rm, simm"
-  (when (condition-holds cnd)
-    (set$ rd (+ rn (i-shift rm simm)))))
-
 (defun tSBC (rd _ rn rm cnd _)
   (add-with-carry/it-block rd rn (lnot rm) CF cnd))
 
 (defun tRSB (rd _ rn cnd _)
   "rsbs	r3, r2, #0"
   (add-with-carry/it-block rd 0 (lnot rn) 1 cnd))
-
-(defun t2RSBrs (rd rn rm simm cnd _ _)
-  "rsb rd, rn, rm, simm"
-  (when (condition-holds cnd)
-    (set$ rd (- (i-shift rm simm) rn))))
 
 (defun tMUL (rd _ rn rm cnd _)
   (when (condition-holds cnd)
@@ -178,10 +144,12 @@
     (set$ rt (load-word (+ rn imm)))))
 
 (defun t2LDRDi8 (rt rt2 rn imm cnd _)
-  "ldrd rt, rt2, [rn, #imm]"
+  "ldrd rt, rt2, [rn, #imm]; the address is computed before rt,
+   which may be the base, is written"
   (when (condition-holds cnd)
-    (set$ rt (load-word (+ rn imm)))
-    (set$ rt2 (load-word (+ rn imm 4)))))
+    (let ((addr (+ rn imm)))
+      (set$ rt (load-word addr))
+      (set$ rt2 (load-word (+ addr 4))))))
 
 (defun t2LDR_POST (rt _ rn off cnd _)
   "ldr rt, [rn], #imm"

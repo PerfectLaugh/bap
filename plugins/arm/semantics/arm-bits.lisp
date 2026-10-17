@@ -54,18 +54,6 @@
         (set-nzcv-from-registers r x y))
       (set$ rd r))))
 
-(defmacro shift-with-carry (shift rd rn rm cnd)
-  "(shift-with-carry shift rd rn rm cnd) sets rd to the shifted
-   value of rn and rm, and relevant processor flags, when cnd holds.
-   The overflow flag is not changed."
-  (when (condition-holds cnd)
-    (let ((r (cast-signed (word-width) rn)))
-      (when (is-unconditional cnd)
-        (set CF (msb r))
-        (set$ rd (shift r rm))
-        (set ZF (is-zero rd))
-        (set NF (msb rd))))))
-
 (defun condition-holds (cnd)
   "(condition-holds cnd) calculates the result of the given condition cnd
    based on the values of processor flags."

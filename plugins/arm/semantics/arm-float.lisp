@@ -46,7 +46,9 @@
   "(fp-exponent X E F) is the biased exponent of X as a 64-bit word"
   (cast-unsigned 64 (extract (+ e f -1) f x)))
 
-(defun fp-bias (e) (- (lshift 1 (- e 1)) 1))
+(defun fp-bias (e)
+  "(fp-bias E) is the exponent bias as a 64-bit word, as the exponents"
+  (- (lshift (cast-unsigned 64 1) (- e 1)) 1))
 
 ;; FPMin and FPMax. A NaN operand is returned quieted, and of equal
 ;; operands -0.0 is the smaller one. The NaN of the first operand is
@@ -125,18 +127,18 @@
   (let ((bias (fp-bias e))
         (expn (fp-exponent x e f))
         (coef (cast-unsigned 64 (concat (cast-low 1 1) (cast-low f x))))
-        (mag (fp-select (< expn bias) 0
+        (mag (fp-select (< expn bias) (cast-unsigned 64 0)
                         (fp-select (>= expn (+ bias f))
                                    (lshift coef (- expn (+ bias f)))
                                    (rshift coef (- (+ bias f) expn)))))
         (top (lshift (cast-unsigned 64 1) (- n 1))))
     (cast-low n
-              (fp-select (is-nan x) 0
+              (fp-select (is-nan x) (cast-unsigned 64 0)
                 (if signed
-                    (fp-select (>= expn (+ bias n -1))
+                    (fp-select (>= expn (- (+ bias n) 1))
                                (fp-select (msb x) top (- top 1))
                                (fp-select (msb x) (neg mag) mag))
-                  (fp-select (msb x) 0
+                  (fp-select (msb x) (cast-unsigned 64 0)
                              (fp-select (>= expn (+ bias n))
                                         (lnot (cast-unsigned 64 0))
                                         mag)))))))

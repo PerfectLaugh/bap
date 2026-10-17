@@ -15,10 +15,12 @@
   aarch64-pstate.lisp
   aarch64-simd.lisp
   aarch64-special.lisp
+  arm-a32.lisp
   arm-bits.lisp
   arm-float.lisp
   arm-vfp.lisp
   arm.lisp
   thumb.lisp
   thumb-patterns.lisp
+  thumb2.lisp
   thumb-vfp.lisp))
