@@ -18,6 +18,22 @@ type region = Dynamic of dynamic | Static of mem
 type perms = { readonly : bool; executable : bool }
 type layer = { mem : region; perms : perms }
 
+(* a segment [lo,hi] of the address space, which starts at its key in
+   the index, and the topmost layer that covers it, which is the
+   [seq]th added layer *)
+type segment = { hi : Bitvec.t; seq : int; layer : layer }
+
+(* the index of layers: the layers whose bounds are unsigned words of
+   the same width, with [lower <= upper], are split into disjoint
+   segments, by the address width, so that the layer of an address is
+   found by one lookup and without allocations. The [others] are
+   searched linearly, newest first, using the generic comparison. *)
+type index = {
+  segments : segment Map.M(Bitvec_order).t Map.M(Int).t;
+  others : (int * layer) list;
+  count : int;
+}
+
 type memory = { name : string; addr : int; size : int }
 [@@deriving bin_io, sexp]
 
@@ -39,7 +55,7 @@ module Descriptor = struct
   end)
 end
 
-type state = { values : value Addr.Map.t; layers : layer list }
+type state = { values : value Addr.Map.t; layers : layer list; index : index }
 type t = { curr : Descriptor.t; mems : state Descriptor.Map.t }
 
 let sexp_of_word w = Sexp.Atom (asprintf "%a" Word.pp_hex w)
@@ -114,15 +130,104 @@ let inside { lower; upper } addr =
   if Addr.(lower <= upper) then Addr.(addr >= lower) && Addr.(addr <= upper)
   else Addr.(addr >= upper) || Addr.(addr <= lower)
 
-let find_layer addr =
-  List.find ~f:(function
-    | { mem = Dynamic mem } -> inside mem addr
-    | { mem = Static mem } -> Memory.contains mem addr)
+let inside_region region addr =
+  match region with
+  | Dynamic mem -> inside mem addr
+  | Static mem -> Memory.contains mem addr
 
-let is_mapped addr { layers; values } =
-  Map.mem values addr || (Option.is_some @@ find_layer addr layers)
+let is_unsigned x = phys_equal (Word.unsigned x) x
 
-let empty_state = { values = Addr.Map.empty; layers = [] }
+(* for unsigned words of the same width the generic comparison is the
+   comparison of their bitvectors, and a region with [lower <= upper]
+   contains only the addresses of its width *)
+let bounds_of_region region =
+  let lower, upper =
+    match region with
+    | Dynamic { lower; upper } -> (lower, upper)
+    | Static mem -> (Memory.min_addr mem, Memory.max_addr mem)
+  in
+  let width = Addr.bitwidth lower in
+  let lo = Word.to_bitvec lower and hi = Word.to_bitvec upper in
+  if
+    width = Addr.bitwidth upper
+    && is_unsigned lower && is_unsigned upper
+    && Bitvec.compare lo hi <= 0
+  then Some (width, lo, hi)
+  else None
+
+(* puts the [seq]th layer over the segments that [lo,hi] overlaps *)
+let cover segments ~width ~lo ~hi seq layer =
+  let m = Bitvec.modulus width in
+  let below =
+    match Map.closest_key segments `Less_than lo with
+    | Some (key, seg) when Bitvec.compare seg.hi lo >= 0 -> [ (key, seg) ]
+    | _ -> []
+  in
+  let overlapping =
+    Map.fold_range_inclusive segments ~min:lo ~max:hi ~init:below
+      ~f:(fun ~key ~data segs -> (key, data) :: segs)
+  in
+  List.fold overlapping ~init:segments ~f:(fun segments (key, seg) ->
+      let segments = Map.remove segments key in
+      let segments =
+        if Bitvec.compare key lo < 0 then
+          Map.set segments ~key ~data:{ seg with hi = Bitvec.(pred lo mod m) }
+        else segments
+      in
+      if Bitvec.compare seg.hi hi > 0 then
+        Map.set segments ~key:Bitvec.(succ hi mod m) ~data:seg
+      else segments)
+  |> Map.set ~key:lo ~data:{ hi; seq; layer }
+
+let add_layer layer ({ layers; index } as s) =
+  let seq = index.count in
+  let index =
+    match bounds_of_region layer.mem with
+    | None -> { index with others = (seq, layer) :: index.others }
+    | Some (width, lo, hi) ->
+        let segments =
+          Map.update index.segments width ~f:(fun segments ->
+              let segments =
+                Option.value segments ~default:(Map.empty (module Bitvec_order))
+              in
+              cover segments ~width ~lo ~hi seq layer)
+        in
+        { index with segments }
+  in
+  { s with layers = layer :: layers; index = { index with count = seq + 1 } }
+
+(* the most recently added layer that contains [addr] *)
+let find_layer addr { layers; index } =
+  if not (is_unsigned addr) then
+    List.find layers ~f:(fun { mem } -> inside_region mem addr)
+  else
+    let x = Word.to_bitvec addr in
+    let segment =
+      match Map.find index.segments (Addr.bitwidth addr) with
+      | None -> None
+      | Some segments -> (
+          match Map.closest_key segments `Less_or_equal_to x with
+          | Some (_, seg) when Bitvec.compare x seg.hi <= 0 -> Some seg
+          | _ -> None)
+    in
+    let other =
+      List.find index.others ~f:(fun (_, { mem }) -> inside_region mem addr)
+    in
+    match (segment, other) with
+    | Some { seq; layer }, Some (seq', layer') ->
+        Some (if seq > seq' then layer else layer')
+    | Some { layer }, None | None, Some (_, layer) -> Some layer
+    | None, None -> None
+
+let is_mapped addr s =
+  Map.mem s.values addr || Option.is_some (find_layer addr s)
+
+let empty_state =
+  {
+    values = Addr.Map.empty;
+    layers = [];
+    index = { segments = Map.empty (module Int); others = []; count = 0 };
+  }
 
 module Make (Machine : Machine) = struct
   open Machine.Syntax
@@ -211,25 +316,24 @@ module Make (Machine : Machine) = struct
     in
     loop 0 ~key:addr word values
 
-  let remembered { values; layers } addr word =
+  let remembered s addr word =
     memory >>= fun { size } ->
     Machine.gets Project.arch >>= fun arch ->
-    store_word arch size ~addr word values >>= fun values ->
-    put_curr { layers; values } >>| fun () -> Map.find_exn values addr
+    store_word arch size ~addr word s.values >>= fun values ->
+    put_curr { s with values } >>| fun () -> Map.find_exn values addr
 
-  let read addr { values; layers } =
+  let read addr ({ values } as s) =
     match Map.find values addr with
     | Some v -> Machine.return v
     | None -> (
-        match find_layer addr layers with
+        match find_layer addr s with
         | None -> pagefault addr
         | Some layer -> (
             memory >>= fun { size } ->
             match layer.mem with
             | Static mem -> Value.of_word (read_word mem addr size)
             | Dynamic { value = g } ->
-                Generate.word g (Generator.width g)
-                >>= remembered { values; layers } addr))
+                Generate.word g (Generator.width g) >>= remembered s addr))
 
   let set_value addr value s =
     { s with values = Map.set s.values ~key:addr ~data:value }
@@ -237,12 +341,11 @@ module Make (Machine : Machine) = struct
   let write addr value s =
     if Map.mem s.values addr then Machine.return @@ set_value addr value s
     else
-      match find_layer addr s.layers with
+      match find_layer addr s with
       | None -> pagefault addr
       | Some { perms = { readonly = true } } -> pagefault addr
       | Some _ -> Machine.return @@ set_value addr value s
 
-  let add_layer layer t = { t with layers = layer :: t.layers }
   let ( ++ ) = add_layer
 
   let initialize values lower upper f =
@@ -299,9 +402,9 @@ module Make (Machine : Machine) = struct
   let is_mapped addr = get_curr >>| is_mapped addr
 
   let is_writable addr =
-    get_curr >>| fun { layers; values } ->
-    Map.mem values addr
-    || find_layer addr layers |> function
+    get_curr >>| fun s ->
+    Map.mem s.values addr
+    || find_layer addr s |> function
        | Some { perms = { readonly } } -> not readonly
        | None -> false
 end
