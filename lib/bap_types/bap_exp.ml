@@ -431,7 +431,7 @@ module Exp = struct
   let extract ~hi ~lo x =
     match x with
     | Int w -> Int (Word.extract_exn ~hi ~lo w)
-    | Extract (p, q, x) when hi <= p && lo >= q -> Extract (hi, lo, x)
+    | Extract (p, q, x) when hi + q <= p -> Extract (hi + q, lo + q, x)
     | x when lo = 0 && has_width (hi + 1) x -> x
     | x -> Extract (hi, lo, x)
 

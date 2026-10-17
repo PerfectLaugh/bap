@@ -538,6 +538,19 @@ let all_together =
     ]
   => Bil.[ x := eight; y := four; z := two; x := two ]
 
+(* the bits of a nested extract are relative to the inner one *)
+let nested_extract _ =
+  let x = Var.create "x" (Type.imm 64) in
+  let check expected got =
+    assert_equal ~cmp:Exp.equal ~printer:Exp.to_string expected got
+  in
+  check
+    (Bil.extract ~hi:47 ~lo:47 (Bil.var x))
+    (Bil.extract ~hi:31 ~lo:31 (Bil.extract ~hi:47 ~lo:16 (Bil.var x)));
+  check
+    (Bil.extract ~hi:13 ~lo:10 (Bil.var x))
+    (Bil.extract ~hi:5 ~lo:2 (Bil.extract ~hi:15 ~lo:8 (Bil.var x)))
+
 let suite () =
   "Bil_optimizations"
   >::: [
@@ -586,4 +599,5 @@ let suite () =
          "different input: x = 4" >:: with_various_input four (Bil.var y);
          "different input: x = v" >:: with_various_input (Bil.var v) (Bil.var y);
          "all together" >:: all_together;
+         "nested extract" >:: nested_extract;
        ]
