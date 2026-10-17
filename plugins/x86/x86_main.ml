@@ -94,6 +94,14 @@ let cet_enabled =
 let backend =
   Config.param Config.(some string) "backend" ~synonyms:[ "64-backend" ]
 
+(* the lifters were merged, the option is kept so that the scripts that
+   select one still work *)
+let lifter : [ `legacy | `modern | `merge ] Config.param =
+  let kinds = [ ("legacy", `legacy); ("modern", `modern); ("merge", `merge) ] in
+  Config.(
+    param (enum kinds) "lifter" ~default:`merge
+      ~doc:"DEPRECATED, the semantics is in the Primus Lisp files only")
+
 let () =
   Config.declare_extension ~doc:"provides x86/x86-64 semantics"
     ~provides:[ "disassembler"; "lifter"; "semantics"; "x86"; "abi" ]
@@ -104,6 +112,9 @@ let () =
       "the legacy x87 floating-point lifter was removed, the \
        --x86-with-floating-points and --x86-with-legacy-floating-points \
        options are ignored";
+  if Poly.equal !!lifter `legacy then
+    warning
+      "the legacy x86 lifter was removed, the --x86-lifter option is ignored";
   declare_prefix_primitive ();
   let features =
     (if !!disable_intrinsics then []
