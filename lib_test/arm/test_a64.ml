@@ -249,4 +249,34 @@ let suite =
       case A64 "stxp w0, x1, x3, [x2]" "41 0c 20 c8"
         ~init:[ ("R0", "5"); ("R1", "1"); ("R3", "2"); ("R2", "0x2000") ]
         ~expect:[ ("R0", "0"); ("M8@0x2000", "1"); ("M8@0x2008", "2") ];
+      (* vector immediates *)
+      case A64 "movi v0.2d, #0" "00 e4 00 6f"
+        ~init:[ ("V0", "0xffffffffffffffffffffffffffffffff") ]
+        ~expect:[ ("V0", "0") ];
+      case A64 "movi v0.2d, #0xff00ff00ff00ff00" "40 e5 05 6f" ~init:[]
+        ~expect:[ ("V0", "0xff00ff00ff00ff00ff00ff00ff00ff00") ];
+      case A64 "movi v0.8b, #0x41" "20 e4 02 0f"
+        ~init:[ ("V0", "0xffffffffffffffffffffffffffffffff") ]
+        ~expect:[ ("V0", "0x4141414141414141") ];
+      case A64 "movi v0.4s, #0x41, lsl #8" "20 24 02 4f" ~init:[]
+        ~expect:[ ("V0", "0x00004100000041000000410000004100") ];
+      case A64 "movi v0.4h, #0x41" "20 84 02 0f" ~init:[]
+        ~expect:[ ("V0", "0x0041004100410041") ];
+      case A64 "movi v0.2s, #0x41, msl #8" "20 c4 02 0f" ~init:[]
+        ~expect:[ ("V0", "0x000041ff000041ff") ];
+      case A64 "mvni v0.8h, #0x41, lsl #8" "20 a4 02 6f" ~init:[]
+        ~expect:[ ("V0", "0xbeffbeffbeffbeffbeffbeffbeffbeff") ];
+      case A64 "mvni v0.4s, #0x41, msl #16" "20 d4 02 6f" ~init:[]
+        ~expect:[ ("V0", "0xffbe0000ffbe0000ffbe0000ffbe0000") ];
+      (* pointer authentication keeps LR, and exceptions *)
+      case A64 "paciasp" "3f 23 03 d5"
+        ~init:[ ("R30", "0x401000") ]
+        ~expect:[ ("R30", "0x401000") ];
+      case A64 "autiasp" "bf 23 03 d5"
+        ~init:[ ("R30", "0x401000") ]
+        ~expect:[ ("R30", "0x401000") ];
+      case A64 "xpaclri" "ff 20 03 d5"
+        ~init:[ ("R30", "0x401000") ]
+        ~expect:[ ("R30", "0x401000") ];
+      case A64 "brk #1" "20 00 20 d4" ~init:[] ~expect:[ ("intrinsic:x0", "1") ];
     ]

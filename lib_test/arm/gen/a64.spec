@@ -75,3 +75,17 @@ A64 | stlr w1, [x2] | R1=0xffffffff12345678 R2=0x2000 | M8@0x2000=0x12345678
 A64 | ldarb w0, [x1] | R1=0x2000 M1@0x2000=0xff | R0=0xff
 A64 | ldxp x0, x1, [x2] | R2=0x2000 M8@0x2000=1 M8@0x2008=2 | R0=1 R1=2
 A64 | stxp w0, x1, x3, [x2] | R0=5 R1=1 R3=2 R2=0x2000 | R0=0 M8@0x2000=1 M8@0x2008=2
+# vector immediates
+A64 | movi v0.2d, #0 | V0=0xffffffffffffffffffffffffffffffff | V0=0
+A64 | movi v0.2d, #0xff00ff00ff00ff00 | | V0=0xff00ff00ff00ff00ff00ff00ff00ff00
+A64 | movi v0.8b, #0x41 | V0=0xffffffffffffffffffffffffffffffff | V0=0x4141414141414141
+A64 | movi v0.4s, #0x41, lsl #8 | | V0=0x00004100000041000000410000004100
+A64 | movi v0.4h, #0x41 | | V0=0x0041004100410041
+A64 | movi v0.2s, #0x41, msl #8 | | V0=0x000041ff000041ff
+A64 | mvni v0.8h, #0x41, lsl #8 | | V0=0xbeffbeffbeffbeffbeffbeffbeffbeff
+A64 | mvni v0.4s, #0x41, msl #16 | | V0=0xffbe0000ffbe0000ffbe0000ffbe0000
+# pointer authentication keeps LR, and exceptions
+A64 | paciasp | R30=0x401000 | R30=0x401000
+A64 | autiasp | R30=0x401000 | R30=0x401000
+A64 | xpaclri | R30=0x401000 | R30=0x401000
+A64 | brk #1 | | intrinsic:x0=1

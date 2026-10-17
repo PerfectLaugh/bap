@@ -122,14 +122,7 @@
 
 (defun MOVID (rd imm)
   "movi Dd, #imm sets each byte of Dd to the replicated bit of imm"
-  (setd rd (concat (replicate-to-fill (select 7 imm) 8)
-                   (replicate-to-fill (select 6 imm) 8)
-                   (replicate-to-fill (select 5 imm) 8)
-                   (replicate-to-fill (select 4 imm) 8)
-                   (replicate-to-fill (select 3 imm) 8)
-                   (replicate-to-fill (select 2 imm) 8)
-                   (replicate-to-fill (select 1 imm) 8)
-                   (replicate-to-fill (select 0 imm) 8))))
+  (setd rd (movi-byte-mask imm)))
 
 ;; CONVERSIONS
 
