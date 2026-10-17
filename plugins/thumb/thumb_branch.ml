@@ -31,10 +31,12 @@ module Make (CT : Theory.Core) = struct
     | `AL -> b pc dst
     | cnd -> CT.branch (holds cnd) (goto (pc +> dst)) (seq [])
 
-  let next pc = bitv (pc +> 0)
+  (* the link is the address of the next instruction, of the given size,
+     with the bit 0 set, as the T32 state is kept on the return *)
+  let link pc size = bitv W32.((pc + int size) lor int 1)
 
   let bli pc dst =
-    seq [ data @@ [ lr := next pc ]; (goto @@ W32.((pc +> dst) land mask)) ]
+    seq [ data @@ [ lr := link pc 4 ]; (goto @@ W32.((pc +> dst) land mask)) ]
 
   let blxi pc dst = bli pc dst >>= switch_encoding (pc +> dst)
   let bxr dst = ctrl @@ CT.jmp (var dst land bitv mask)
@@ -43,7 +45,7 @@ module Make (CT : Theory.Core) = struct
     goto W32.((pc +> off) land mask) >>= switch_encoding (pc +> off)
 
   let blr pc dst =
-    seq CT.[ data @@ [ lr := next pc ]; ctrl @@ jmp (var dst land bitv mask) ]
+    seq CT.[ data @@ [ lr := link pc 2 ]; ctrl @@ jmp (var dst land bitv mask) ]
 
   let blxr pc dst = blr pc dst
 
