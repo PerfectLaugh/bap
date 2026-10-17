@@ -67,9 +67,13 @@ let lift_r ~(dst1 : Var.t) ?(dst2 : Var.t option) ~(base : Var.t)
       let loads =
         let mem = Bil.var Env.mem in
         if [%compare.equal: size] size D then
+          (* the address is computed before dst1 is written, as dst1
+             may be the base register *)
+          let addr = tmp reg32_t in
           [
-            Bil.move dst1 (load mem address);
-            Bil.move (Option.value_exn dst2) (load mem Bil.(address + four));
+            Bil.move addr address;
+            Bil.move dst1 (load mem Bil.(var addr));
+            Bil.move (Option.value_exn dst2) (load mem Bil.(var addr + four));
           ]
         else [ assn temp (load mem address) ]
       in
