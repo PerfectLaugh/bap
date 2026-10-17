@@ -11,22 +11,6 @@ let package = "bap"
 
 module Optimizer = Theory.Parser.Make (Theory.Pass.Desugar (Bil_semantics.Core))
 
-let provide_bir () =
-  KB.Rule.(
-    declare ~package "reify-ir"
-    |> require Theory.Semantics.slot
-    |> require Bil_ir.slot
-    |> provide Theory.Semantics.slot
-    |> comment "reifies IR");
-  KB.promise Theory.Semantics.slot @@ fun obj ->
-  KB.collect Theory.Semantics.slot obj >>= fun sema ->
-  KB.proceed ~unless:(KB.Value.has Term.slot sema) >>= fun () ->
-  KB.return
-  @@
-  match Bil_ir.reify @@ KB.Value.get Bil_ir.slot sema with
-  | [] -> Insn.empty
-  | bir -> KB.Value.put Term.slot sema bir
-
 module Relocations = struct
   type t = { rels : Int64.t Map.M(Int64).t; exts : string Map.M(Int64).t }
   [@@deriving equal]
@@ -139,6 +123,22 @@ module Relocations = struct
             | Some name -> override_external is_stub name bil
             | None -> bil))
 
+  (* the IR of the instruction with the relocations applied, or None if
+     there is no relocation, the BIL of the legacy lifters is already
+     fixed up, but the other lifters, e.g., the Primus Lisp ones, don't
+     apply them *)
+  let relocated obj sema =
+    KB.collect Memory.slot obj >>= function
+    | None -> KB.return None
+    | Some mem ->
+        let bil = Insn.bil sema in
+        fixup obj mem bil >>= fun fixed ->
+        if List.equal Stmt.equal bil fixed then KB.return None
+        else
+          let module Ir = Theory.Parser.Make (Bil_ir.Theory) in
+          Ir.run Bil.Theory.parser fixed >>| fun eff ->
+          Some (KB.Value.get Bil_ir.slot eff)
+
   let fixup_agent = KB.Agent.register ~package "bil-fixup-relocator"
 
   let resolve_external (k, n) =
@@ -159,6 +159,23 @@ module Relocations = struct
     let+ exts = resolve_externals rels.exts in
     { rels with exts }
 end
+
+let provide_bir () =
+  KB.Rule.(
+    declare ~package "reify-ir"
+    |> require Theory.Semantics.slot
+    |> require Bil_ir.slot
+    |> require Memory.slot
+    |> provide Theory.Semantics.slot
+    |> comment "reifies IR, with the relocations applied");
+  KB.promise Theory.Semantics.slot @@ fun obj ->
+  KB.collect Theory.Semantics.slot obj >>= fun sema ->
+  KB.proceed ~unless:(KB.Value.has Term.slot sema) >>= fun () ->
+  Relocations.relocated obj sema >>| fun ir ->
+  let ir = Option.value ir ~default:(KB.Value.get Bil_ir.slot sema) in
+  match Bil_ir.reify ir with
+  | [] -> Insn.empty
+  | bir -> KB.Value.put Term.slot sema bir
 
 module Brancher = struct
   include Theory.Empty
