@@ -430,6 +430,17 @@ module Emulator = struct
 
   let fsqrt rm x = fuop Float.fsqrt rm x
 
+  let fconvert : type f.
+      f Theory.Float.t Theory.Value.sort ->
+      _ ->
+      _ Theory.float ->
+      f Theory.float =
+   fun s rm x ->
+    x >>= fun x ->
+    with_fsort ~unk_s:s (sort x) @@ fun bs xs ->
+    with_fsort ~unk_s:s s @@ fun _ fs ->
+    float s (Float.convert xs !!(resort bs x) rm fs)
+
   open CT
 
   let small s x =
@@ -493,7 +504,7 @@ module Emulator = struct
         let expn v = extract ws (small ws (t + w - 1)) (small ws t) v in
         let frac v = extract fs (small fs (t - 1)) (small fs 0) v in
         let magn v = extract ms (small ms (k - 2)) (small ms 0) v in
-        let not_nan v = or_ (neq (expn v) ones) (neq (frac v) zero) in
+        let not_nan v = or_ (neq (expn v) ones) (eq (frac v) zero) in
         tmp (magn !!x) @@ fun mx ->
         tmp (magn !!y) @@ fun my ->
         tmp (msb !!x) @@ fun x_is_neg ->

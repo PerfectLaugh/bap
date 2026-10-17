@@ -524,7 +524,6 @@ module Make (B : Theory.Core) = struct
 
   let fsum_special fsort is_sub x y =
     let open B in
-    let not = inv in
     let ( lxor ) = xor in
     let s1 = is_sub in
     let s2 = fsign x in
@@ -534,14 +533,13 @@ module Make (B : Theory.Core) = struct
     with_special fsort y @@ fun ~is_inf:yinf ~is_snan:ysnan ~is_qnan:yqnan ->
     (xsnan || xqnan) >>>= fun xnan ->
     (ysnan || yqnan) >>>= fun ynan ->
-    (xinf && yinf) >>>= fun is_inf ->
     match_
       [
-        (is_sub && is_inf) --> qnan fsort;
-        (xinf && yinf) --> x;
-        (xnan && not ynan) --> transform_to_quite fsort x;
-        (ynan && not xnan) --> transform_to_quite fsort y;
-        anything_else --> transform_to_quite fsort x;
+        xnan --> transform_to_quite fsort x;
+        ynan --> transform_to_quite fsort y;
+        (xinf && yinf && is_sub) --> qnan fsort;
+        xinf --> x;
+        anything_else --> with_sign (s1 lxor s3) y;
       ]
 
   let add_or_sub ~is_sub fsort rm x y =
@@ -620,19 +618,18 @@ module Make (B : Theory.Core) = struct
     pack fsort sign expn coef
 
   let fmul_special fsort x y =
+    let xzero = is_zero x and yzero = is_zero y in
     let open B in
     with_special fsort x @@ fun ~is_inf:xinf ~is_snan:xsnan ~is_qnan:xqnan ->
-    with_special fsort y @@ fun ~is_inf:yinf ~is_snan:_ysnan ~is_qnan:_yqnan ->
+    with_special fsort y @@ fun ~is_inf:yinf ~is_snan:ysnan ~is_qnan:yqnan ->
     fsign x >>>= fun xsign ->
     fsign y >>>= fun ysign ->
-    (xinf && yinf) >>>= fun is_inf ->
     match_
       [
-        (is_zero x && yinf) --> qnan fsort;
-        (is_zero y && xinf) --> qnan fsort;
-        is_inf --> with_sign (xor xsign ysign) x;
         (xsnan || xqnan) --> transform_to_quite fsort x;
-        anything_else --> transform_to_quite fsort y;
+        (ysnan || yqnan) --> transform_to_quite fsort y;
+        ((xzero && yinf) || (yzero && xinf)) --> qnan fsort;
+        anything_else --> inf fsort (xor xsign ysign);
       ]
 
   let fmul fsort rm x y =
@@ -725,24 +722,20 @@ module Make (B : Theory.Core) = struct
           norm expn coef @@ fun expn coef -> pack fsort sign expn coef )
 
   let fdiv_special fsort x y =
+    let xzero = is_zero x and yzero = is_zero y in
     let open B in
     with_special fsort x @@ fun ~is_inf:xinf ~is_snan:xsnan ~is_qnan:xqnan ->
-    with_special fsort y @@ fun ~is_inf:yinf ~is_snan:ysnan ~is_qnan:_yqnan ->
+    with_special fsort y @@ fun ~is_inf:yinf ~is_snan:ysnan ~is_qnan:yqnan ->
     fsign x >>>= fun xsign ->
     fsign y >>>= fun ysign ->
-    (xinf && yinf) >>>= fun is_inf ->
-    inv (xinf || xsnan || xsnan) >>>= fun is_finx ->
-    inv (yinf || ysnan || ysnan) >>>= fun is_finy ->
     xor xsign ysign >>>= fun sign ->
     match_
       [
-        (is_zero x && is_zero y) --> qnan fsort;
-        (is_zero x && is_finy) --> fzero fsort sign;
-        (is_zero y && is_finx) --> inf fsort sign;
-        (xinf && yinf) --> qnan fsort;
-        is_inf --> with_sign (xor xsign ysign) x;
         (xsnan || xqnan) --> transform_to_quite fsort x;
-        anything_else --> transform_to_quite fsort y;
+        (ysnan || yqnan) --> transform_to_quite fsort y;
+        ((xinf && yinf) || (xzero && yzero)) --> qnan fsort;
+        (xinf || yzero) --> inf fsort sign;
+        anything_else --> fzero fsort sign;
       ]
 
   let fdiv fsort rm x y =
@@ -766,26 +759,43 @@ module Make (B : Theory.Core) = struct
         ( low (exps fsort') expn >>>= fun expn ->
           high (sigs fsort') coef >>>= fun coef -> pack fsort' sign expn coef )
       ~else_:
-        ( expn - of_int (exps fsort) d_bias >>>= fun expn ->
-          if_
-            (expn > of_int (exps fsort) dst_maxe)
-            ~then_:(inf fsort' sign)
-            ~else_:
-              ( low (exps fsort') expn >>>= fun expn ->
-                coef lsl of_int (sigs fsort) sigs_sh >>>= fun truncated ->
-                high (sigs fsort') truncated >>>= fun truncated ->
-                high (sigs fsort') coef >>>= fun coef ->
-                lsb coef >>>= fun last ->
-                msb truncated >>>= fun guard ->
-                truncated lsl one (sigs fsort') >>>= fun truncated ->
-                msb truncated >>>= fun round ->
-                truncated lsl one (sigs fsort') >>>= fun truncated ->
-                non_zero truncated >>>= fun sticky ->
-                is_round_up rm sign last guard round sticky >>>= fun up ->
-                ite (is_all_ones coef && up) (succ expn) expn >>>= fun expn ->
-                ite up (succ coef) coef >>>= fun coef ->
-                ite (is_all_ones expn) (inf fsort' sign)
-                  (pack fsort' sign expn coef) ) )
+        (if_
+           (expn <= of_int (exps fsort) d_bias)
+           ~then_:
+             ((* the result is zero or subnormal, its significand is
+                 the coefficient shifted right by s and rounded, a
+                 carry out of it makes the smallest normal number *)
+              let t = (IEEE754.Sort.spec fsort).t
+              and t' = (IEEE754.Sort.spec fsort').t in
+              of_int (sigs fsort) Stdlib.(t - t' + d_bias + 1)
+              - unsigned (sigs fsort) expn
+              >>>= fun s ->
+              coef lsr s >>>= fun q ->
+              round rm sign q coef s @@ fun q _ ->
+              unsigned (IEEE754.Sort.bits fsort') q >>>= fun r ->
+              with_sign sign r)
+           ~else_:
+             ( expn - of_int (exps fsort) d_bias >>>= fun expn ->
+               if_
+                 (expn > of_int (exps fsort) dst_maxe)
+                 ~then_:(inf fsort' sign)
+                 ~else_:
+                   ( low (exps fsort') expn >>>= fun expn ->
+                     coef lsl of_int (sigs fsort) sigs_sh >>>= fun truncated ->
+                     high (sigs fsort') truncated >>>= fun truncated ->
+                     high (sigs fsort') coef >>>= fun coef ->
+                     lsb coef >>>= fun last ->
+                     msb truncated >>>= fun guard ->
+                     truncated lsl one (sigs fsort') >>>= fun truncated ->
+                     msb truncated >>>= fun round ->
+                     truncated lsl one (sigs fsort') >>>= fun truncated ->
+                     non_zero truncated >>>= fun sticky ->
+                     is_round_up rm sign last guard round sticky >>>= fun up ->
+                     ite (is_all_ones coef && up) (succ expn) expn
+                     >>>= fun expn ->
+                     ite up (succ coef) coef >>>= fun coef ->
+                     ite (is_all_ones expn) (inf fsort' sign)
+                       (pack fsort' sign expn coef) ) ))
 
   (* pre: fsort "<=" fsort' *)
   let extend fsort x fsort' =
@@ -793,14 +803,20 @@ module Make (B : Theory.Core) = struct
     let d_sigs = Stdlib.(Bits.size (sigs fsort') - Bits.size (sigs fsort)) in
     let d_bias = Stdlib.(bias fsort' - bias fsort) in
     unpack fsort x @@ fun sign expn coef ->
+    (* subnormals are normal in the wider format, the shift is zero
+       for the other numbers as their leading bit is set *)
+    clz coef >>>= fun shift ->
     match_
       [
         is_all_ones expn --> ones (exps fsort');
-        (expn = min_exponent (exps fsort)) --> min_exponent (exps fsort');
+        is_zero coef --> zero (exps fsort');
         anything_else
-        --> (unsigned (exps fsort') expn + of_int (exps fsort') d_bias);
+        --> (unsigned (exps fsort') expn
+            + of_int (exps fsort') d_bias
+            - unsigned (exps fsort') shift);
       ]
     >>>= fun expn ->
+    coef lsl shift >>>= fun coef ->
     unsigned (sigs fsort') coef >>>= fun coef ->
     coef lsl of_int (sigs fsort') d_sigs >>>= fun coef ->
     pack fsort' sign expn coef
@@ -835,7 +851,8 @@ module Make (B : Theory.Core) = struct
           msbn - one sigs >>>= fun hi ->
           hi - prec + one sigs >>>= fun lo ->
           extract sigs hi lo !!bitv >>>= fun coef ->
-          extract sigs (pred lo) (zero sigs) !!bitv >>>= fun loss ->
+          (* more than p bits may be lost *)
+          extract inps (pred lo) (zero sigs) !!bitv >>>= fun loss ->
           round rne sign coef loss lo @@ fun coef rnd_overflow ->
           ite rnd_overflow (not (ones sigs lsr one sigs)) coef >>>= fun coef ->
           ite rnd_overflow (succ expn) expn >>>= fun expn ->
@@ -967,7 +984,8 @@ module Make (B : Theory.Core) = struct
         "0x3fff0000000000000000000000000000";
       ]
 
-  let fsqrt fsort rm x =
+  (* pre: x is positive and finite *)
+  let fsqrt_positive fsort rm x =
     let fsort' = double_precision fsort in
     B.ite (is_zero x) (fzero fsort B.b0)
       ( normalize_subnormal fsort x @@ fun x clz ->
@@ -979,6 +997,29 @@ module Make (B : Theory.Core) = struct
         B.unsigned (exps fsort') d_expn >>>= fun d_expn ->
         range_reconstruction fsort' y d_expn clz increase >>>= fun r ->
         truncate fsort' r rm fsort )
+
+  (* the polynomial approximation has only the coefficients for the
+     binary128 intermediate, so the narrower formats are computed in
+     binary64, rounding that root again gives the correctly rounded
+     root of the narrower format *)
+  let fsqrt fsort rm x =
+    let xzero = is_zero x in
+    let open B in
+    with_special fsort x @@ fun ~is_inf ~is_snan ~is_qnan ->
+    match_
+      [
+        (is_snan || is_qnan) --> transform_to_quite fsort x;
+        xzero --> x;
+        fsign x --> qnan fsort;
+        is_inf --> x;
+        (anything_else
+        -->
+        if Stdlib.(Bits.size (bits fsort) < 64) then
+          let fsort' = IEEE754.Sort.define IEEE754.binary64 in
+          extend fsort x fsort' >>>= fun x ->
+          fsqrt_positive fsort' rm x >>>= fun r -> truncate fsort' r rm fsort
+        else fsqrt_positive fsort rm x);
+      ]
 
   let test fsort x =
     let fsort' = double_precision fsort in
