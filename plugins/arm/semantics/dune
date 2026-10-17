@@ -8,6 +8,7 @@
   aarch64-atomic.lisp
   aarch64-branch.lisp
   aarch64-data-movement.lisp
+  aarch64-float.lisp
   aarch64-helper.lisp
   aarch64.lisp
   aarch64-logical.lisp
@@ -15,6 +16,9 @@
   aarch64-simd.lisp
   aarch64-special.lisp
   arm-bits.lisp
+  arm-float.lisp
+  arm-vfp.lisp
   arm.lisp
   thumb.lisp
-  thumb-patterns.lisp))
+  thumb-patterns.lisp
+  thumb-vfp.lisp))

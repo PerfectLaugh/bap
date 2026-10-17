@@ -123,10 +123,17 @@ let regs32 =
 let vfp2regs =
   Theory.Role.Register.[ ([ general; floating ], untyped @@ array r64 "D" 16) ]
 
-let vfp3regs =
-  Theory.Role.Register.[ ([ general; floating ], untyped @@ array r64 "D" 32) ]
+let fpscr = reg r32 "FPSCR"
 
-let vars32_fp = vars32 @ untyped @@ array r64 "D" 16
+let vfp3regs =
+  Theory.Role.Register.
+    [
+      ([ general; floating ], untyped @@ array r64 "D" 32);
+      ([ special; floating ], untyped [ fpscr ]);
+      ([ alias ], untyped @@ array r32 "S" 32);
+    ]
+
+let vars32_fp = vars32 @ untyped (array r64 "D" 32) @ untyped [ fpscr ]
 let rs = array r64 "R" 32
 let xs = array r64 "X" 32
 let ws = array r32 "W" 32
@@ -200,6 +207,11 @@ let aliasing =
       lower hs are bs;
     ]
   |> List.concat
+
+(* VFP, S2n and S2n+1 are the lower and upper halves of Dn, for n < 16 *)
+let vfp_aliasing =
+  List.init 16 ~f:(fun i ->
+      Theory.Alias.(def ds.$(i) [ reg ss.$((2 * i) + 1); reg ss.$(2 * i) ]))
 
 let parent = CT.Target.declare ~package "arm-family"
 let is_arm = CT.Target.belongs parent
@@ -288,14 +300,15 @@ module Family (Order : Endianness) = struct
 
   let v7fp =
     CT.Target.declare ~package (ordered "armv7+fp") ~parent:v7
-      ~nicknames:[ "armv7+fp" ] ~vars:vars32_fp ~regs:(regs32 @ vfp3regs)
+      ~nicknames:[ "armv7+fp" ] ~vars:vars32_fp ~aliasing:vfp_aliasing
+      ~regs:(regs32 @ vfp3regs)
 
   let v7a = v7 <: "armv7-a"
 
   let v7afp =
     CT.Target.declare ~package (ordered "armv7-a+fp")
       ~nicknames:[ "armv7-a+fp" ] ~parent:v7a ~vars:vars32_fp
-      ~regs:(regs32 @ vfp3regs)
+      ~aliasing:vfp_aliasing ~regs:(regs32 @ vfp3regs)
 
   (* the generic final v7 incorporating all 32-bit targets *)
   let aarch32 =

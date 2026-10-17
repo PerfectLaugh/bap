@@ -3,6 +3,7 @@
 (in-package arm)
 
 (require bits)
+(require arm-vfp)
 
 (defun CLZ (rd rn pre _)
   (when (condition-holds pre)
