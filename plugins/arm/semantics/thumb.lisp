@@ -191,8 +191,10 @@
   (if (is-pc r) (t2pc) r))
 
 (defun t2set (reg val)
+  "a write to PC branches to the address without the bit 0, which
+   selects the instruction set"
   (if (is-pc reg)
-      (exec-addr val)
+      (exec-addr (logand val 0xfffffffe))
     (set$ reg val)))
 
 ;; the supervisor call, as in AArch64, the condition is the one of the

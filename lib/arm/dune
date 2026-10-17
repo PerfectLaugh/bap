@@ -13,5 +13,4 @@
   bitvec
   bitvec-order
   core
-  ogre
-  regular))
+  ogre))

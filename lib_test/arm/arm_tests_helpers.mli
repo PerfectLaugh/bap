@@ -25,3 +25,10 @@ val case :
 
 val lift : mode -> string -> bil
 (** [lift mode code] is the BIL of the instruction [code] at {!addr}. *)
+
+val a32_qemu : Lifter_test.mode
+(** the A32 instructions at [0x20000], the address of the tests that
+    [lib_test/cross/gen.sh] generates. *)
+
+val t32_qemu : Lifter_test.mode
+(** the T32 instructions at [0x20000], as {!a32_qemu}. *)

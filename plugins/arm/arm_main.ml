@@ -43,9 +43,6 @@ include struct
         \            to its name."
 end
 
-type arms = [ Arch.arm | Arch.armeb | Arch.thumb | Arch.thumbeb ]
-[@@deriving enumerate]
-
 let () =
   Bap_main.Extension.declare ~doc @@ fun ctxt ->
   let interworking = ctxt --> interworking in
@@ -53,6 +50,4 @@ let () =
   let features = List.concat (ctxt --> features) in
   Arm_target.load ~features ?backend ?interworking ();
   Arm_gnueabi.setup ();
-  List.iter all_of_arms ~f:(fun arch ->
-      register_target (arch :> arch) (module ARM));
   Ok ()

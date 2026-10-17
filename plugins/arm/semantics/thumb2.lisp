@@ -3,79 +3,17 @@
 
 (require thumb)
 (require arm-a32)
+(require arm-a32-mem)
 
 (in-package thumb)
 
 ;;; THUMB-2 INSTRUCTIONS
 ;;
-;; The 32-bit T32 instructions that are not recoded as A32 ones. The
+;; The 32-bit T32 instructions. The
 ;; last operand of a flag-setting instruction is CPSR when it sets the
 ;; flags. The shifted register operands encode the shift as in
 ;; i-shift, the type in the lowest three bits and the amount above. As
 ;; in arm-float, the values are computed without dynamic if.
-
-(defun sets-flags (s) (= (symbol s) 'CPSR))
-
-(defun bit-of (x n)
-  "(bit-of X N) is the bit N of X as a boolean, N may be dynamic and
-   is 0 if it is out of the range"
-  (not (is-zero (logand (rshift x n) 1))))
-
-(defun shift-amount (simm)
-  "the amount of the encoded immediate shift, lsr and asr #0 are #32"
-  (let ((typ (logand simm 7))
-        (amt (rshift simm 3)))
-    (if (and (= amt 0) (or (= typ 1) (= typ 3))) 32 amt)))
-
-(defun shifted (x simm)
-  "(shifted X SIMM) is X shifted by the static encoded shift SIMM"
-  (let ((typ (logand simm 7))
-        (amt (shift-amount simm)))
-    (case typ
-      1 (arshift x (if (= amt 32) 31 amt))
-      2 (lshift x amt)
-      3 (if (= amt 32) (cast-unsigned 32 0) (rshift x amt))
-      4 (rotate-right x amt)
-      5 (logor (rshift x 1) (lshift (cast-unsigned 32 CF) 31)))))
-
-(defun shifter-carry (x simm)
-  "(shifter-carry X SIMM) is the carry out of the static shift SIMM"
-  (let ((typ (logand simm 7))
-        (amt (shift-amount simm)))
-    (case typ
-      1 (bit-of x (- amt 1))
-      2 (if (= amt 0) CF (bit-of x (- 32 amt)))
-      3 (bit-of x (- amt 1))
-      4 (if (= amt 0) CF (bit-of x (- amt 1)))
-      5 (bit-of x 0))))
-
-;; register-specified shifts, the amount is the lowest byte of n
-
-(defun reg-shifted (typ x n)
-  (let ((n (logand n 0xff)))
-    (case typ
-      'lsl (lshift x n)
-      'lsr (rshift x n)
-      'asr (arshift x (a32-mux (< n 32) n 31))
-      'ror (rotate-right x n))))
-
-(defun bool-mux (c x y)
-  "(bool-mux C X Y) is the boolean X if C is true and Y otherwise"
-  (logor (logand c x) (logand (not c) y)))
-
-(defun reg-shifter-carry (typ x n)
-  (let ((n (logand n 0xff))
-        (m (logand n 31)))
-    (bool-mux (is-zero n) CF
-      (case typ
-        'lsl (bit-of x (- 32 n))
-        'lsr (bit-of x (- n 1))
-        'asr (bool-mux (< n 32) (bit-of x (- n 1)) (msb x))
-        'ror (bool-mux (is-zero m) (msb x) (bit-of x (- m 1)))))))
-
-(defun set-nz (r)
-  (set NF (msb r))
-  (set ZF (is-zero r)))
 
 (defmacro t2-logical (op rd rn y c cnd s)
   "sets rd to (op rn y) and the N, Z and C flags if s is CPSR, where c
@@ -107,10 +45,7 @@
   (when (condition-holds cnd)
     (set-nzcv-from-registers (+ x y c) x y)))
 
-(defun logornot (x y) (logor x (lnot y)))
-(defun logandnot2 (x y) (logand x (lnot y)))
-(defun second (_ y) y)
-(defun second-not (_ y) (lnot y))
+
 
 (defun t2ANDrs (rd rn rm sh cnd _ s)
   (t2-logical logand rd rn (shifted rm sh) (shifter-carry rm sh) cnd s))
@@ -201,12 +136,6 @@
 (defmacro t2-post (load rt wb rn off)
   (let ((a rn)) (set$ rt (load a)) (set$ wb (+ a off))))
 
-(defun load-word32 (a) (load-word a))
-(defun load-byte32 (a) (cast-unsigned 32 (load-byte a)))
-(defun load-half32 (a) (cast-unsigned 32 (load-bits 16 a)))
-(defun load-sbyte32 (a) (cast-signed 32 (load-byte a)))
-(defun load-shalf32 (a) (cast-signed 32 (load-bits 16 a)))
-
 (defun t2LDR_PRE (rt wb rn off cnd _) (when (condition-holds cnd) (t2-pre load-word32 rt wb rn off)))
 (defun t2LDRB_POST (rt wb rn off cnd _) (when (condition-holds cnd) (t2-post load-byte32 rt wb rn off)))
 (defun t2LDRH_PRE (rt wb rn off cnd _) (when (condition-holds cnd) (t2-pre load-half32 rt wb rn off)))
@@ -281,3 +210,121 @@
 (defun tASRrr (rd s rn rm cnd _) (t2-shift-reg 'asr rd rn rm cnd s))
 (defun tROR (rd s rn rm cnd _) (t2-shift-reg 'ror rd rn rm cnd s))
 (defun tCMNz (rn rm cnd _) (t2-compare rn rm (cast-unsigned 32 0) cnd))
+
+;; THE T32 INSTRUCTIONS OF THE A32 ONES
+;;
+;; The T32 versions of the A32 instructions in arm-a32 and arm-a32-mem,
+;; which have the same operands, except that the modified immediates
+;; are decoded and the multiplications have no flag-setting operand.
+
+(defun t2-imm-carry (v)
+  "(t2-imm-carry V) is the carry out of the decoded modified immediate
+   V, it is not changed if V is a byte or a replicated byte pattern"
+  (let ((b0 (extract 7 0 v))
+        (b1 (extract 15 8 v))
+        (b2 (extract 23 16 v))
+        (b3 (extract 31 24 v)))
+    (if (or (< v 0x100)
+            (and (= b1 0) (= b3 0) (= b0 b2))
+            (and (= b0 0) (= b2 0) (= b1 b3))
+            (and (= b0 b1) (= b1 b2) (= b2 b3)))
+        CF
+      (msb v))))
+
+(defun t2ANDri (rd rn imm cnd _ s) (t2-logical logand rd rn imm (t2-imm-carry imm) cnd s))
+(defun t2ANDrr (rd rn rm cnd _ s) (t2-logical logand rd rn rm CF cnd s))
+(defun t2ORRri (rd rn imm cnd _ s) (t2-logical logor rd rn imm (t2-imm-carry imm) cnd s))
+(defun t2ORRrr (rd rn rm cnd _ s) (t2-logical logor rd rn rm CF cnd s))
+(defun t2EORri (rd rn imm cnd _ s) (t2-logical logxor rd rn imm (t2-imm-carry imm) cnd s))
+(defun t2EORrr (rd rn rm cnd _ s) (t2-logical logxor rd rn rm CF cnd s))
+(defun t2BICri (rd rn imm cnd _ s) (t2-logical logandnot2 rd rn imm (t2-imm-carry imm) cnd s))
+(defun t2BICrr (rd rn rm cnd _ s) (t2-logical logandnot2 rd rn rm CF cnd s))
+(defun t2MOVi (rd imm cnd _ s) (t2-logical second rd imm imm (t2-imm-carry imm) cnd s))
+(defun t2MOVr (rd rm cnd _ s) (t2-logical second rd rm rm CF cnd s))
+(defun t2MVNi (rd imm cnd _ s) (t2-logical second-not rd imm imm (t2-imm-carry imm) cnd s))
+(defun t2MVNr (rd rm cnd _ s) (t2-logical second-not rd rm rm CF cnd s))
+(defun t2TSTri (rn imm cnd _) (t2-test logand rn imm (t2-imm-carry imm) cnd))
+(defun t2TSTrr (rn rm cnd _) (t2-test logand rn rm CF cnd))
+(defun t2TEQri (rn imm cnd _) (t2-test logxor rn imm (t2-imm-carry imm) cnd))
+(defun t2TEQrr (rn rm cnd _) (t2-test logxor rn rm CF cnd))
+
+(defun t2ADDri (rd rn imm cnd _ s) (t2-arith rd rn imm (cast-unsigned 32 0) cnd s))
+(defun t2ADDrr (rd rn rm cnd _ s) (t2-arith rd rn rm (cast-unsigned 32 0) cnd s))
+(defun t2SUBri (rd rn imm cnd _ s) (t2-arith rd rn (lnot imm) (cast-unsigned 32 1) cnd s))
+(defun t2SUBrr (rd rn rm cnd _ s) (t2-arith rd rn (lnot rm) (cast-unsigned 32 1) cnd s))
+(defun t2RSBri (rd rn imm cnd _ s) (t2-arith rd imm (lnot rn) (cast-unsigned 32 1) cnd s))
+(defun t2RSBrr (rd rn rm cnd _ s) (t2-arith rd rm (lnot rn) (cast-unsigned 32 1) cnd s))
+(defun t2ADCri (rd rn imm cnd _ s) (t2-arith rd rn imm (cast-unsigned 32 CF) cnd s))
+(defun t2ADCrr (rd rn rm cnd _ s) (t2-arith rd rn rm (cast-unsigned 32 CF) cnd s))
+(defun t2SBCri (rd rn imm cnd _ s) (t2-arith rd rn (lnot imm) (cast-unsigned 32 CF) cnd s))
+(defun t2SBCrr (rd rn rm cnd _ s) (t2-arith rd rn (lnot rm) (cast-unsigned 32 CF) cnd s))
+(defun t2CMPri (rn imm cnd _) (t2-compare rn (lnot imm) (cast-unsigned 32 1) cnd))
+(defun t2CMPrr (rn rm cnd _) (t2-compare rn (lnot rm) (cast-unsigned 32 1) cnd))
+(defun t2CMNri (rn imm cnd _) (t2-compare rn imm (cast-unsigned 32 0) cnd))
+(defun t2CMNzrr (rn rm cnd _) (t2-compare rn rm (cast-unsigned 32 0) cnd))
+
+(defun t2MOVi16 (rd imm cnd _) (MOVi16 rd imm cnd _))
+(defun t2MOVTi16 (rd rn imm cnd _) (MOVTi16 rd rn imm cnd _))
+
+(defun t2BFC (rd rn mask cnd _) (BFC rd rn mask cnd _))
+(defun t2BFI (rd rd0 rn mask cnd _) (BFI rd rd0 rn mask cnd _))
+(defun t2UBFX (rd rn lsb w cnd _) (UBFX rd rn lsb w cnd _))
+(defun t2SBFX (rd rn lsb w cnd _) (SBFX rd rn lsb w cnd _))
+(defun t2RBIT (rd rm cnd _) (RBIT rd rm cnd _))
+(defun t2REV (rd rm cnd _) (REV rd rm cnd _))
+(defun t2REV16 (rd rm cnd _) (REV16 rd rm cnd _))
+(defun t2PKHTB (rd rn rm sh cnd _) (PKHTB rd rn rm sh cnd _))
+(defun t2PKHBT (rd rn rm sh cnd _) (PKHBT rd rn rm sh cnd _))
+(defun t2UXTB (rd rm rot cnd _) (UXTB rd rm rot cnd _))
+(defun t2UXTH (rd rm rot cnd _) (UXTH rd rm rot cnd _))
+(defun t2SXTB (rd rm rot cnd _) (SXTB rd rm rot cnd _))
+(defun t2SXTH (rd rm rot cnd _) (SXTH rd rm rot cnd _))
+(defun t2UXTAB (rd rn rm rot cnd _) (UXTAB rd rn rm rot cnd _))
+(defun t2UXTAH (rd rn rm rot cnd _) (UXTAH rd rn rm rot cnd _))
+(defun t2SXTAB (rd rn rm rot cnd _) (SXTAB rd rn rm rot cnd _))
+(defun t2SXTAH (rd rn rm rot cnd _) (SXTAH rd rn rm rot cnd _))
+
+(defun t2MUL (rd rn rm cnd _) (when (condition-holds cnd) (set$ rd (* rn rm))))
+(defun t2MLA (rd rn rm ra cnd _) (when (condition-holds cnd) (set$ rd (+ ra (* rn rm)))))
+(defun t2MLS (rd rn rm ra cnd _) (MLS rd rn rm ra cnd _))
+(defun t2UMULL (lo hi rn rm cnd _)
+  (when (condition-holds cnd) (a32-set64 lo hi (* (a32-u64 rn) (a32-u64 rm)))))
+(defun t2SMULL (lo hi rn rm cnd _)
+  (when (condition-holds cnd) (a32-set64 lo hi (* (a32-s64 rn) (a32-s64 rm)))))
+(defun t2UMLAL (lo hi rn rm lo0 hi0 cnd _)
+  (when (condition-holds cnd)
+    (a32-set64 lo hi (+ (concat hi0 lo0) (* (a32-u64 rn) (a32-u64 rm))))))
+(defun t2SMLAL (lo hi rn rm lo0 hi0 cnd _)
+  (when (condition-holds cnd)
+    (a32-set64 lo hi (+ (concat hi0 lo0) (* (a32-s64 rn) (a32-s64 rm))))))
+(defun t2SMULBB (rd rn rm cnd _) (SMULBB rd rn rm cnd _))
+(defun t2SMLABB (rd rn rm ra cnd _) (SMLABB rd rn rm ra cnd _))
+(defun t2SMLAWB (rd rn rm ra cnd _) (SMLAWB rd rn rm ra cnd _))
+(defun t2SMUAD (rd rn rm cnd _) (SMUAD rd rn rm cnd _))
+(defun t2SMLAD (rd rn rm ra cnd _) (SMLAD rd rn rm ra cnd _))
+(defun t2SMLALBT (lo hi rn rm lo0 hi0 cnd _) (SMLALBT lo hi rn rm lo0 hi0 cnd _))
+
+(defun t2LDRi12 (rt rn off cnd _) (when (condition-holds cnd) (t2set rt (load-word (+ rn off)))))
+(defun t2LDRBi12 (rt rn off cnd _) (when (condition-holds cnd) (set$ rt (load-byte32 (+ rn off)))))
+(defun t2STRi12 (rt rn off cnd _) (when (condition-holds cnd) (store-word (+ rn off) rt)))
+(defun t2STRBi12 (rt rn off cnd _) (when (condition-holds cnd) (store-byte (+ rn off) rt)))
+
+(defun t2STRD_PRE (wb rt rt2 rn off cnd _)
+  (when (condition-holds cnd)
+    (let ((a (+ rn off))) (a32-store-pair rt rt2 a) (set$ wb a))))
+(defun t2STRD_POST (wb rt rt2 rn off cnd _)
+  (when (condition-holds cnd)
+    (let ((a rn)) (a32-store-pair rt rt2 a) (set$ wb (+ a off)))))
+
+(defun t2LDREXD (rt rt2 rn cnd _) (when (condition-holds cnd) (a32-load-pair rt rt2 rn)))
+(defun t2STREXD (rd rt rt2 rn cnd _)
+  (when (condition-holds cnd) (a32-store-pair rt rt2 rn) (set$ rd 0)))
+
+(defun t2CPS1p (_) (empty))
+(defun t2CPS2p (_ _) (empty))
+(defun t2CPS3p (_ _ _) (empty))
+(defun t2DMB (_ _ _) (empty))
+(defun t2DSB (_ _ _) (empty))
+(defun t2ISB (_ _ _) (empty))
+(defun t2HINT (_ _ _) (empty))
+(defun t2PLDi12 (_ _ _ _) (empty))

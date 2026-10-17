@@ -5,6 +5,8 @@
 (require bits)
 (require arm-vfp)
 (require arm-a32)
+(require arm-a32-mem)
+(require arm-a32-multiple)
 
 (defun CLZ (rd rn pre _)
   (when (condition-holds pre)

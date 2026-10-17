@@ -16,6 +16,8 @@
   aarch64-simd.lisp
   aarch64-special.lisp
   arm-a32.lisp
+  arm-a32-mem.lisp
+  arm-a32-multiple.lisp
   arm-bits.lisp
   arm-float.lisp
   arm-vfp.lisp

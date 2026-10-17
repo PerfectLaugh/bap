@@ -32,47 +32,48 @@ let array ?(index = string_of_int) t pref size =
   List.init size ~f:(fun i -> reg t (pref ^ index i))
 
 let mems = CT.Mem.define r32 r8
-let data = CT.Var.define mems (Var.name Arm_env.mem)
-let of_bil v = CT.Var.define (Var.sort v) (Var.name v)
-let regs xs = untyped @@ List.map ~f:of_bil xs
+let data = CT.Var.define mems "mem"
+
+module Gpr32 = struct
+  let gpr n = reg r32 n
+  let r0 = gpr "R0"
+  let r1 = gpr "R1"
+  let r2 = gpr "R2"
+  let r3 = gpr "R3"
+  let r4 = gpr "R4"
+  let r5 = gpr "R5"
+  let r6 = gpr "R6"
+  let r7 = gpr "R7"
+  let r8 = gpr "R8"
+  let r9 = gpr "R9"
+  let r10 = gpr "R10"
+  let r11 = gpr "R11"
+  let r12 = gpr "R12"
+  let sp = gpr "SP"
+  let lr = gpr "LR"
+  let nf = reg bool "NF"
+  let zf = reg bool "ZF"
+  let cf = reg bool "CF"
+  let vf = reg bool "VF"
+  let qf = reg bool "QF"
+end
 
 let vars32 =
-  regs
-    Arm_env.
-      [
-        r0;
-        r1;
-        r2;
-        r3;
-        r4;
-        r5;
-        r6;
-        r7;
-        r8;
-        r9;
-        r10;
-        r11;
-        r12;
-        sp;
-        lr;
-        mem;
-        nf;
-        zf;
-        cf;
-        vf;
-        qf;
-      ]
+  untyped
+    Gpr32.[ r0; r1; r2; r3; r4; r5; r6; r7; r8; r9; r10; r11; r12; sp; lr ]
+  @ untyped [ data ]
+  @ untyped Gpr32.[ nf; zf; cf; vf; qf ]
 
 let thumb = Theory.Role.declare ~package:"arm" "thumb"
 
 let status_regs =
   Theory.Role.Register.
     [
-      ([ status; integer ], regs Arm_env.[ nf; zf; cf; vf; qf ]);
-      ([ carry_flag ], regs Arm_env.[ cf ]);
-      ([ sign_flag ], regs Arm_env.[ nf ]);
-      ([ zero_flag ], regs Arm_env.[ zf ]);
-      ([ overflow_flag ], regs Arm_env.[ vf ]);
+      ([ status; integer ], untyped Gpr32.[ nf; zf; cf; vf; qf ]);
+      ([ carry_flag ], untyped Gpr32.[ cf ]);
+      ([ sign_flag ], untyped Gpr32.[ nf ]);
+      ([ zero_flag ], untyped Gpr32.[ zf ]);
+      ([ overflow_flag ], untyped Gpr32.[ vf ]);
     ]
 
 (* AACPS, §5.1.1 Core registers:
@@ -106,17 +107,17 @@ let regs32 =
   Theory.Role.Register.
     [
       ( [ general; integer ],
-        regs
-          Arm_env.
+        untyped
+          Gpr32.
             [ r0; r1; r2; r3; r4; r5; r6; r7; r8; r9; r10; r11; r12; sp; lr ] );
-      ([ stack_pointer ], regs Arm_env.[ sp ]);
-      ([ frame_pointer ], regs Arm_env.[ r11 ]);
-      ([ link ], regs Arm_env.[ lr ]);
-      ([ thumb ], regs Arm_env.[ r0; r1; r2; r3; r4; r5; r6; r7; sp; lr ]);
-      ([ function_argument ], regs Arm_env.[ r0; r1; r2; r3 ]);
-      ([ function_return ], regs Arm_env.[ r0; r1 ]);
-      ([ caller_saved ], regs Arm_env.[ r0; r1; r2; r3; r12; lr ]);
-      ([ callee_saved ], regs Arm_env.[ r4; r5; r6; r7; r8; r9; r10; r11; sp ]);
+      ([ stack_pointer ], untyped Gpr32.[ sp ]);
+      ([ frame_pointer ], untyped Gpr32.[ r11 ]);
+      ([ link ], untyped Gpr32.[ lr ]);
+      ([ thumb ], untyped Gpr32.[ r0; r1; r2; r3; r4; r5; r6; r7; sp; lr ]);
+      ([ function_argument ], untyped Gpr32.[ r0; r1; r2; r3 ]);
+      ([ function_return ], untyped Gpr32.[ r0; r1 ]);
+      ([ caller_saved ], untyped Gpr32.[ r0; r1; r2; r3; r12; lr ]);
+      ([ callee_saved ], untyped Gpr32.[ r4; r5; r6; r7; r8; r9; r10; r11; sp ]);
     ]
   @ status_regs
 

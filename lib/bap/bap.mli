@@ -303,7 +303,7 @@ module Std : sig
       can use the {{!target_of_arch}target_of_arch} function. Architecture
       specific implementations of the [Target] interface may (and usually do)
       provide more information, see the corresponding support libraries, e.g.,
-      [ARM] (bap-arm) and [X86_cpu] (bap-x86). *)
+      [X86_cpu] (bap-x86). *)
 
   (** {2:sema Semantic Analysis}
 
@@ -7644,7 +7644,7 @@ module Std : sig
       the implementation use {{!target_of_arch}target_of_arch} function. Code
       written using this interface is cross-platform, i.e., target agnostic. If
       you want to write target-specific code, then use directly corresponding
-      libraries: [ARM], [X86_cpu.IA32], [X86_cpu.AMD64]. *)
+      libraries, e.g., [X86_cpu.IA32] and [X86_cpu.AMD64]. *)
   module type Target = sig
     module CPU : CPU
     (** access to the CPU variables. *)

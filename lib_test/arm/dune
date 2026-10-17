@@ -19,3 +19,25 @@
  (action
   (run %{exe:run_arm_tests.exe})))
 
+; the A32 tests with the expected values computed by executing the
+; instructions under QEMU, see lib_test/cross/gen.sh
+
+(rule
+ (target test_a32_qemu.ml)
+ (deps
+  (glob_files gen/*)
+  (glob_files %{project_root}/lib_test/cross/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash %{project_root}/lib_test/cross/generate.sh gen/a32.conf gen/a32_qemu.spec A32_QEMU))))
+
+(rule
+ (target test_t32_qemu.ml)
+ (deps
+  (glob_files gen/*)
+  (glob_files %{project_root}/lib_test/cross/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash %{project_root}/lib_test/cross/generate.sh gen/t32.conf gen/t32_qemu.spec T32_QEMU))))
