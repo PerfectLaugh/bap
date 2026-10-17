@@ -9,4 +9,5 @@
   bap-main
   ounit2
   primus_bil
+  lifter_test
   threads))
