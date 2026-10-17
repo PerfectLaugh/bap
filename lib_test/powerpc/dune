@@ -1,6 +1,5 @@
-(test
+(executable
  (name run_powerpc_tests)
- (package bap)
  (libraries bap bap-main ounit2 primus_bil lifter_test threads))
 
 ; the tests are generated from the specs, with the expected values
@@ -57,3 +56,11 @@
   (with-stdout-to
    %{target}
    (run bash %{project_root}/lib_test/cross/generate.sh gen/ppc64le.conf gen/ppc64.spec PPC64le_64))))
+
+; the instruction tests are slow, so they don't run with dune test, run
+; them with dune build @instruction-tests
+
+(rule
+ (alias instruction-tests)
+ (action
+  (run %{exe:run_powerpc_tests.exe})))

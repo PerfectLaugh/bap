@@ -1,6 +1,5 @@
-(test
+(executable
  (name run_x86_tests)
- (package bap)
  (libraries
   bap
   bap-x86
@@ -31,3 +30,11 @@
   (with-stdout-to
    %{target}
    (run bash gen/generate.sh 32 gen/i686.spec I686))))
+
+; the instruction tests are slow, so they don't run with dune test, run
+; them with dune build @instruction-tests
+
+(rule
+ (alias instruction-tests)
+ (action
+  (run %{exe:run_x86_tests.exe})))

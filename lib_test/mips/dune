@@ -1,6 +1,5 @@
-(test
+(executable
  (name run_mips_tests)
- (package bap)
  (libraries
   bap
   bap-plugins
@@ -74,3 +73,11 @@
   (with-stdout-to
    %{target}
    (run bash %{project_root}/lib_test/cross/generate.sh gen/mips64el.conf gen/mips64.spec MIPS64le_64))))
+
+; the instruction tests are slow, so they don't run with dune test, run
+; them with dune build @instruction-tests
+
+(rule
+ (alias instruction-tests)
+ (action
+  (run %{exe:run_mips_tests.exe})))

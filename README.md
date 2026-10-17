@@ -68,7 +68,7 @@ dune show depexts         # lists the system packages to install with your packa
 dune build                # fetches the dependencies and builds BAP
 ```
 
-Once it is built, run `bap` and the other tools through `dune exec`, e.g., `dune exec -- bap /bin/echo -d`, so that they can find the plugins in the build tree. Use `dune test` to run the unit tests, `make check` to run the functional test suite, and `make bench` to run the micro-benchmarks.
+Once it is built, run `bap` and the other tools through `dune exec`, e.g., `dune exec -- bap /bin/echo -d`, so that they can find the plugins in the build tree. Use `dune test` to run the unit tests, `make test-instructions` to run the slower tests of the instruction lifters, `make check` to run the functional test suite, and `make bench` to run the micro-benchmarks.
 
 If `llvm-config` is not in the path, or you want to use a different LLVM, then point BAP to it before building, e.g.,
 
