@@ -194,3 +194,9 @@
   (if (is-pc reg)
       (exec-addr val)
     (set$ reg val)))
+
+;; the supervisor call, as in AArch64, the condition is the one of the
+;; IT block
+(defun tSVC (imm cnd _)
+  (when (condition-holds cnd)
+    (intrinsic 'svc imm)))

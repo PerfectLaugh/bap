@@ -32,6 +32,9 @@
 (defun BRK (imm) (intrinsic 'breakpoint imm))
 (defun HLT (imm) (intrinsic 'halt imm))
 
+;; the supervisor call
+(defun SVC (imm) (intrinsic 'svc imm))
+
 ;; The pointer authentication is not modeled, the instructions that
 ;; sign, authenticate or strip the authentication code of LR or X17
 ;; keep the register, so that a signed and authenticated return

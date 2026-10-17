@@ -787,15 +787,9 @@ let lift_branch mem ops insn =
 
 let lift_special ops insn =
   match (insn, ops) with
-  (* supervisor call *)
-  | `SVC, [| `Imm word; cond; _ |] ->
-      let num = Word.extract_exn ~hi:23 word in
-      exec
-        [
-          (let dst = Format.asprintf "__svc(%a)" Addr.pp num in
-           Bil.(encode call) dst);
-        ]
-        cond
+  (* the supervisor call is an intrinsic of the Lisp semantics, as in
+     AArch64 and Thumb *)
+  | `SVC, _ -> []
   | `MRS, [| `Reg dest; cond; _ |] ->
       let get_bits flag src lsb =
         Bil.(src lor (cast unsigned 32 (var flag) lsl int32 lsb))

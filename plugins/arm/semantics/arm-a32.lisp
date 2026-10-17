@@ -104,3 +104,6 @@
 (defun SMMLA (rd rn rm ra cnd _) (a32-cond cnd (set$ rd (a32-mla-high rn rm ra))))
 (defun SMMLS (rd rn rm ra cnd _) (a32-cond cnd (set$ rd (a32-mls-high rn rm ra))))
 (defun REVSH (rd rm cnd _) (a32-cond cnd (set$ rd (a32-revsh rm))))
+
+;; the supervisor call, as in AArch64
+(defun SVC (imm cnd _) (a32-cond cnd (intrinsic 'svc imm)))
