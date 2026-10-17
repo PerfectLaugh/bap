@@ -43,14 +43,12 @@ module Make (Tools : X86_tools.S) (Backend : X86_backend.S) = struct
         let size = RR.width base in
         let w = offset_width size in
         let o = local_var "o" w in
-        let base = RR.var base in
         let offset = RR.var offset in
         let bil =
           let off = Bil.(o := cast low w (var offset)) in
-          let flag = set_flags op (Bil.var base) (Bil.var o) in
+          let flag = set_flags op (RR.get base) (Bil.var o) in
           let side =
-            side_effect op (Bil.var base) (mask_reg RR.size o) (fun exp ->
-                Bil.(base := exp))
+            side_effect op (RR.get base) (mask_reg size o) (RR.set base)
           in
           List.concat [ off :: flag; side ]
         in
@@ -63,12 +61,10 @@ module Make (Tools : X86_tools.S) (Backend : X86_backend.S) = struct
         let o =
           Option.value_exn (Imm.to_word offset ~width:(offset_width size))
         in
-        let base = RR.var base in
         let bil =
-          let flags = set_flags op (Bil.var base) (Bil.int o) in
+          let flags = set_flags op (RR.get base) (Bil.int o) in
           let side =
-            side_effect op (Bil.var base) (mask_imm RR.size o) (fun exp ->
-                Bil.(base := exp))
+            side_effect op (RR.get base) (mask_imm size o) (RR.set base)
           in
           List.concat [ flags; side ]
         in

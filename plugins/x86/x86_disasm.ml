@@ -72,8 +72,14 @@ let parse_instr mode mem addr =
       rex_b = i land 0x1 = 0x1;
     }
   in
+  (* in the 32-bit mode C4 and C5 are VEX prefixes only if the two top
+     bits of the next byte are set, they are LES and LDS otherwise *)
   let get_vex a =
-    if [%compare.equal: mode] mode X86 then (None, a)
+    let is_vex32 () =
+      let b0 = Char.to_int (g a) in
+      (b0 = 0xc4 || b0 = 0xc5) && Char.to_int (g (s a)) land 0xc0 = 0xc0
+    in
+    if [%compare.equal: mode] mode X86 && not (is_vex32 ()) then (None, a)
     else
       match Char.to_int (g a) with
       (* 3-byte prefix *)
@@ -716,15 +722,8 @@ let parse_instr mode mem addr =
         (* Grp 2 *)
         | 0 -> (Rotate (LSHIFT, opsize, rm, amt, false), na)
         | 1 -> (Rotate (RSHIFT, opsize, rm, amt, false), na)
-        (* SWXXX Implement these *)
-        | 2 ->
-            unimplemented
-              (* (Rotate(LSHIFT, opsize, rm, amt, true),na) *)
-              (Printf.sprintf "unsupported opcode: %02x/%d" b1 r)
-        | 3 ->
-            unimplemented
-              (* (Rotate(RSHIFT, opsize, rm, amt, true),na) *)
-              (Printf.sprintf "unsupported opcode: %02x/%d" b1 r)
+        | 2 -> (Rotate (LSHIFT, opsize, rm, amt, true), na)
+        | 3 -> (Rotate (RSHIFT, opsize, rm, amt, true), na)
         | 4 -> (Shift (LSHIFT, opsize, rm, amt), na)
         | 5 -> (Shift (RSHIFT, opsize, rm, amt), na)
         | 7 -> (Shift (ARSHIFT, opsize, rm, amt), na)
@@ -1253,7 +1252,11 @@ let parse_instr mode mem addr =
                        i)
               | _ -> disfailwith "impossible"
             in
-            (Ppackedbinop (t, et, fbop, str, rm, i, rv), na)
+            (* with VEX the destination is vvvv and the source is rm *)
+            let dst, src =
+              match rv with Some rv -> (rv, Some rm) | None -> (rm, None)
+            in
+            (Ppackedbinop (t, et, fbop, str, dst, i, src), na)
         | 0x80 | 0x81 | 0x82 | 0x83 | 0x84 | 0x85 | 0x86 | 0x87 | 0x88 | 0x89
         | 0x8a | 0x8b | 0x8c | 0x8d | 0x8e | 0x8f ->
             let t = expanded_jump_type prefix.opsize in
@@ -1326,7 +1329,8 @@ let parse_instr mode mem addr =
             (Movsx (prefix.opsize, r, st, rm), na)
         | 0xc1 ->
             let r, rm, na = parse_modrm_addr None na in
-            (Xadd (prefix.opsize, r, rm), na)
+            (* xadd r/m, r *)
+            (Xadd (prefix.opsize, rm, r), na)
         | 0xc7 -> (
             let r, rm, na = parse_modrmext_addr None na in
             match r with
@@ -1391,8 +1395,13 @@ let parse_instr mode mem addr =
               | 0x03 -> reg16_t
               | _ -> disfailwith "invalid"
             in
-            let one = int_exp 1 !!et in
-            let average x y = Bil.((x + y + one) lsr one) in
+            (* the sum is one bit wider than the elements *)
+            let w = !!et + 1 in
+            let one = int_exp 1 w in
+            let average x y =
+              let x = Bil.(cast unsigned w x) and y = Bil.(cast unsigned w y) in
+              Bil.(cast low !!et ((x + y + one) lsr one))
+            in
             (Ppackedbinop (prefix.mopsize, et, average, "pavg", r, rm, rv), na)
         | 0xea ->
             let r, rm, rv, na = parse_modrm_vec None na in

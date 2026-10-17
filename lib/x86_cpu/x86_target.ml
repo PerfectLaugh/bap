@@ -185,12 +185,16 @@ module M32 = struct
   let stx = array r80 "ST" 8
   let mmx = array r64 "MM" 8
   let xmmx = array r128 "XMM" 8
+
+  (* the XMM registers are the low halves of the YMM registers, as in
+     amd64, which the lifters write *)
+  let ymmx = array r256 "YMM" 8
   let mems = Theory.Mem.define r32 r8
   let data = Theory.Var.define mems "mem"
   let i386 = main @< index @< segment @< flags @< [ data ]
   let i486 = i386 @< stx
   let i586 = i486 @< mmx
-  let i686 = i586 @< xmmx
+  let i686 = i586 @< ymmx
   let aliases = M16.main @< M16.index @< M16.aliases
 
   let i386regs =
@@ -212,10 +216,14 @@ module M32 = struct
     i486regs @ Theory.Role.Register.[ ([ general; floating ], untyped mmx) ]
 
   let i686regs =
-    i586regs @ Theory.Role.Register.[ ([ general; floating ], untyped xmmx) ]
+    i586regs
+    @ Theory.Role.Register.
+        [ ([ general; floating ], untyped ymmx); ([ alias ], untyped xmmx) ]
 
   let aliasing =
     M16.aliasing @ lo_bits_of main are M16.main @ lo_bits_of index are M16.index
+
+  let i686aliasing = aliasing @ lo_bits_of ymmx are xmmx
 end
 
 module M64 = struct
@@ -293,7 +301,7 @@ let i586 =
 let i686 =
   Theory.Target.declare ~package "i686" ~parent:i586
     ~nicknames:[ "686"; "80686"; "p6" ] ~vars:M32.i686 ~regs:M32.i686regs
-    ~aliasing:M32.aliasing
+    ~aliasing:M32.i686aliasing
 
 let amd64 =
   Theory.Target.declare ~package "x86_64" ~parent:i686

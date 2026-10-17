@@ -3,18 +3,19 @@
 --------------------------------------------------------------------------------
 #                            Testing SHUFPS                                    #
 
-The control is zero so we take the first word and spread it over the destination
+The control is zero so we take the first word of xmm1 into the two high words
+of the destination and the first word of xmm0 into the two low words
   $ mc 0x0f,0xc6,0xc1,0x00
   shufps $0x0, %xmm1, %xmm0
   {
-    YMM0 := high:128[YMM0].31:0[YMM1].31:0[YMM1].31:0[YMM1].31:0[YMM1]
+    YMM0 := high:128[YMM0].31:0[YMM1].31:0[YMM1].31:0[YMM0].31:0[YMM0]
   }
 
-In this case the control is all ones so we spread the last word of xmm1 over xmm0
+In this case the control is all ones so we take the last words of xmm1 and xmm0
   $ mc 0x0f,0xc6,0xc1,0xff
   shufps $0xff, %xmm1, %xmm0
   {
-    YMM0 := high:128[YMM0].127:96[YMM1].127:96[YMM1].127:96[YMM1].127:96[YMM1]
+    YMM0 := high:128[YMM0].127:96[YMM1].127:96[YMM1].127:96[YMM0].127:96[YMM0]
   }
 
 Now let's reverse the xmm0 register, the control is {0,1,2,3}=0b_00_01_10_11=0x1b
@@ -29,7 +30,7 @@ Let's try the above with a memory argument
   shufps $0x1b, 0x10(%rax), %xmm0
   {
     #0 := mem[RAX + 0x10, el]:u128
-    YMM0 := high:128[YMM0].31:0[#0].63:32[#0].95:64[#0].127:96[#0]
+    YMM0 := high:128[YMM0].31:0[#0].63:32[#0].95:64[YMM0].127:96[YMM0]
   }
 
 ----------------------------------------------------------------------------------
@@ -72,17 +73,17 @@ and the same for a memory operand
   $ mc 0xc5,0xe1,0xf4,0xcc
   vpmuludq %xmm4, %xmm3, %xmm1
   {
-    #0 := pad:64[95:64[YMM1]] * pad:64[95:64[YMM4]]
-    #1 := pad:64[31:0[YMM1]] * pad:64[31:0[YMM4]]
+    #0 := pad:64[95:64[YMM3]] * pad:64[95:64[YMM4]]
+    #1 := pad:64[31:0[YMM3]] * pad:64[31:0[YMM4]]
     YMM1 := 0.#0.#1
   }
   $ mc 0xc5,0xe5,0xf4,0xcc
   vpmuludq %ymm4, %ymm3, %ymm1
   {
-    #0 := pad:64[223:192[YMM1]] * pad:64[223:192[YMM4]]
-    #1 := pad:64[159:128[YMM1]] * pad:64[159:128[YMM4]]
-    #2 := pad:64[95:64[YMM1]] * pad:64[95:64[YMM4]]
-    #3 := pad:64[31:0[YMM1]] * pad:64[31:0[YMM4]]
+    #0 := pad:64[223:192[YMM3]] * pad:64[223:192[YMM4]]
+    #1 := pad:64[159:128[YMM3]] * pad:64[159:128[YMM4]]
+    #2 := pad:64[95:64[YMM3]] * pad:64[95:64[YMM4]]
+    #3 := pad:64[31:0[YMM3]] * pad:64[31:0[YMM4]]
     YMM1 := #0.#1.#2.#3
   }
 
@@ -1525,55 +1526,55 @@ and the same for a memory operand
   $ mc 0x0f,0x55,0xca
   andnps %xmm2, %xmm1
   {
-    YMM1 := high:128[YMM1].~(127:0[YMM1] & 127:0[YMM2])
+    YMM1 := high:128[YMM1].~127:0[YMM1] & 127:0[YMM2]
   }
   $ mc 0x66,0x0f,0x55,0xca
   andnpd %xmm2, %xmm1
   {
-    YMM1 := high:128[YMM1].~(127:0[YMM1] & 127:0[YMM2])
+    YMM1 := high:128[YMM1].~127:0[YMM1] & 127:0[YMM2]
   }
   $ mc 0xc5,0xf0,0x55,0xc2
   vandnps %xmm2, %xmm1, %xmm0
   {
-    YMM0 := 0.~(127:0[YMM1] & 127:0[YMM2])
+    YMM0 := 0.~127:0[YMM1] & 127:0[YMM2]
   }
   $ mc 0xc5,0xf1,0x55,0xc2
   vandnpd %xmm2, %xmm1, %xmm0
   {
-    YMM0 := 0.~(127:0[YMM1] & 127:0[YMM2])
+    YMM0 := 0.~127:0[YMM1] & 127:0[YMM2]
   }
   $ mc 0x0f,0x55,0x4e,0x2a
   andnps 0x2a(%rsi), %xmm1
   {
-    YMM1 := high:128[YMM1].~(127:0[YMM1] & mem[RSI + 0x2A, el]:u128)
+    YMM1 := high:128[YMM1].~127:0[YMM1] & mem[RSI + 0x2A, el]:u128
   }
   $ mc 0x0f,0x55,0x4e,0x2a
   andnps 0x2a(%rsi), %xmm1
   {
-    YMM1 := high:128[YMM1].~(127:0[YMM1] & mem[RSI + 0x2A, el]:u128)
+    YMM1 := high:128[YMM1].~127:0[YMM1] & mem[RSI + 0x2A, el]:u128
   }
   $ mc 0x66,0x0f,0x55,0x4e,0x2a
   andnpd 0x2a(%rsi), %xmm1
   {
-    YMM1 := high:128[YMM1].~(127:0[YMM1] & mem[RSI + 0x2A, el]:u128)
+    YMM1 := high:128[YMM1].~127:0[YMM1] & mem[RSI + 0x2A, el]:u128
   }
   $ mc 0xc5,0xf0,0x55,0x46,0x2a
   vandnps 0x2a(%rsi), %xmm1, %xmm0
   {
-    YMM0 := 0.~(127:0[YMM1] & mem[RSI + 0x2A, el]:u128)
+    YMM0 := 0.~127:0[YMM1] & mem[RSI + 0x2A, el]:u128
   }
   $ mc 0xc5,0xf1,0x55,0x46,0x2a
   vandnpd 0x2a(%rsi), %xmm1, %xmm0
   {
-    YMM0 := 0.~(127:0[YMM1] & mem[RSI + 0x2A, el]:u128)
+    YMM0 := 0.~127:0[YMM1] & mem[RSI + 0x2A, el]:u128
   }
   $ mc 0xc5,0xf4,0x55,0x46,0x2a
   vandnps 0x2a(%rsi), %ymm1, %ymm0
   {
-    YMM0 := ~(YMM1 & mem[RSI + 0x2A, el]:u256)
+    YMM0 := ~YMM1 & mem[RSI + 0x2A, el]:u256
   }
   $ mc 0xc5,0xf5,0x55,0x46,0x2a
   vandnpd 0x2a(%rsi), %ymm1, %ymm0
   {
-    YMM0 := ~(YMM1 & mem[RSI + 0x2A, el]:u256)
+    YMM0 := ~YMM1 & mem[RSI + 0x2A, el]:u256
   }

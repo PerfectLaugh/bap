@@ -1,4 +1,33 @@
 (test
  (name run_x86_tests)
  (package bap)
- (libraries bap bap-x86 bap-plugins ounit2 primus_bil threads))
+ (libraries
+  bap
+  bap-x86
+  bap-plugins
+  bap-main
+  ounit2
+  primus_bil
+  lifter_test
+  threads))
+
+; the tests are generated from the specs, with the expected values
+; computed by executing the instructions, see gen/gen.sh
+
+(rule
+ (target test_x86_64.ml)
+ (deps
+  (glob_files gen/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash gen/generate.sh 64 gen/x86_64.spec X86_64))))
+
+(rule
+ (target test_i686.ml)
+ (deps
+  (glob_files gen/*))
+ (action
+  (with-stdout-to
+   %{target}
+   (run bash gen/generate.sh 32 gen/i686.spec I686))))

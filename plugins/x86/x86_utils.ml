@@ -141,9 +141,8 @@ let df_to_offset mode e =
         ite ~if_:(e = exp_false) ~then_:(int_exp 1 t) ~else_:(int_exp (-1) t))
 
 let bap_to_rflags =
-  let undefined d =
-    Bil.unknown (Printf.sprintf "Undefined RFLAGS bit %d" d) bool_t
-  in
+  (* the reserved bits, the bit 1 is set and the others are clear *)
+  let undefined d = Bil.int (if d = 1 then Word.b1 else Word.b0) in
   let unmodeled s = Bil.unknown ("Unmodeled RFLAGS bit " ^ s) bool_t in
   List.map ~f:undefined (List.range ~stride:(-1) ~stop:`inclusive 63 32)
   @ [

@@ -596,25 +596,47 @@ module ToIR = struct
         in
         let dest = match vs with None -> d | Some vdst -> vdst in
         [ Bil.Move (st, se); Bil.Move (dt, de); assn t dest e ]
-    | Ppackedbinop (t, et, fbop, _, d, s, vs) ->
+    | Ppackedbinop (t, et, fbop, str, d, s, vs) ->
         let t_width = bitwidth_of_type t in
         let e_width = bitwidth_of_type et in
         let nops = t_width / e_width in
         let byte = 8 in
         let tmp_dst = tmp t in
-        let vdst = Option.value ~default:d vs in
+        let src = Option.value ~default:d vs in
         let iv = tmp (Type.imm byte) in
         let elt = tmp et in
         let zero = Word.zero t_width in
         let bits = Word.of_int ~width:byte e_width in
 
         let foreach_size f = List.concat @@ List.init nops ~f in
+        let is_shift =
+          List.mem [ "psrl"; "psra"; "psll" ] str ~equal:String.equal
+        in
         let getelement o i =
           (* assumption: immediate operands are repeated for all vector
            elements *)
           match o with
           | Oimm _ -> op2e et o
           | _ -> extract_element !!et (op2e t o) i
+        in
+        (* the shift count is the low quadword of the operand, the
+           arithmetic shifts by more than the size of the elements fill
+           them with the sign and the logical shifts clear them, the
+           count is saturated to the size of the elements *)
+        let getcount o i =
+          match o with
+          | (Ovec _ | Oimm _) when is_shift ->
+              let c =
+                match o with
+                | Oimm _ -> op2e reg64_t o
+                | _ -> Bil.(cast low 64 (op2e t o))
+              in
+              let top =
+                if String.equal str "psra" then e_width - 1 else e_width
+              in
+              let top = Bil.int (Word.of_int ~width:64 top) in
+              Bil.(cast low e_width (ite ~if_:(c > top) ~then_:top ~else_:c))
+          | _ -> getelement o i
         in
 
         List.concat
@@ -623,14 +645,14 @@ module ToIR = struct
               [ tmp_dst := int zero ];
               foreach_size (fun i ->
                   [
-                    elt := fbop (getelement d i) (getelement s i);
+                    elt := fbop (getelement src i) (getcount s i);
                     iv := int @@ Word.of_int ~width:byte i;
                     tmp_dst :=
                       var tmp_dst
                       lor cast unsigned t_width (var elt)
                           lsl (var iv * int bits);
                   ]);
-              [ assn t vdst (var tmp_dst) ];
+              [ assn t d (var tmp_dst) ];
             ]
     | Pbinop (t, fbop, _s, o1, o2, vop) -> (
         match vop with
@@ -1082,8 +1104,8 @@ module ToIR = struct
         let foreach_byte f = List.concat @@ List.init (op_size / 8) ~f in
 
         let src = op2e exp_type src_op in
-        let dst = op2e exp_type dst_op in
-        let dst_op = Option.value ~default:dst_op vsrc in
+        (* with VEX the bytes are selected from vvvv *)
+        let dst = op2e exp_type (Option.value ~default:dst_op vsrc) in
         let zero = Bil.int (Word.zero op_size) in
         let msb_one = Bil.int (Word.of_int ~width:8 0x80) in
 
@@ -1119,9 +1141,13 @@ module ToIR = struct
                       [ tmp_byte := zero ]
                       (* else *)
                       [
+                        (* the index selects a byte of the same 128-bit lane *)
                         ind :=
-                          cast unsigned 8
-                            (extract ~hi:index_bits ~lo:0 (var mask_byte_i));
+                          int (Word.of_int ~width:8 Int.(i land lnot 15))
+                          + cast unsigned 8
+                              (extract
+                                 ~hi:Int.(index_bits - 1)
+                                 ~lo:0 (var mask_byte_i));
                         tmp_byte :=
                           cast unsigned op_size
                             (extract ~hi:7 ~lo:0 (dst lsr (var ind * byte)));
@@ -1180,7 +1206,9 @@ module ToIR = struct
             | _ -> disfailwith "invalid shift type")
         in
         let dste = op2e s dst in
-        let count_mask = Bil.(size - int_exp 1 s') in
+        (* the count is masked to 5 bits, or to 6 bits for 64-bit operands,
+           whatever the size of the operand is *)
+        let count_mask = int_exp (if s' = 64 then 0x3f else 0x1f) s' in
         let count = Bil.(op2e s shift land count_mask) in
         let new_of =
           match st with
@@ -1270,60 +1298,65 @@ module ToIR = struct
               [];
           ]
     | Rotate (shift_type, exp_type, dst_op, shift_op, use_cf) ->
-        if use_cf then unimplemented "rotate use_vf";
-        let word_size = bitwidth_of_type exp_type in
-        let mask_size = word_size - 1 in
-        let count_var = tmp exp_type in
-        let count = Bil.var count_var in
-        let zero = int_exp 0 word_size in
-        let one = int_exp 1 word_size in
+        (* The count is masked to 5 bits, or to 6 bits for 64-bit
+           operands, the flags are not changed when it is zero. ROL and
+           ROR rotate by the count modulo the size, RCL and RCR rotate
+           the operand with CF on top by the count modulo the size plus
+           one. CF is the bit rotated last, OF is defined for the count
+           of one only. *)
+        let size = bitwidth_of_type exp_type in
+        let i n = int_exp n size in
+        let mask = if size = 64 then 0x3f else 0x1f in
+        let count = tmp exp_type in
         let dst = op2e exp_type dst_op in
-        let shift_mask = int_exp mask_size word_size in
-        let size = int_exp word_size word_size in
         let shift = op2e exp_type shift_op in
-
-        if [%compare.equal: binop] shift_type LSHIFT then
-          Bil.
-            [
-              count_var := shift land shift_mask mod size;
-              assn exp_type dst_op ((dst lsl count) lor (dst lsr (size - count)));
-              if_ (count = zero)
-                [ cf := cast low 1 dst ]
-                (* else *)
-                [
-                  if_ (count = one)
-                    [ oF := cf_e lxor cast high 1 dst ]
-                    (* else  *)
-                    [
-                      oF :=
-                        unknown "OF undefined after rotate of more then 1 bit"
-                          bool_t;
-                    ];
-                ];
-            ]
-        else
-          Bil.
-            [
-              count_var := shift land shift_mask mod size;
-              assn exp_type dst_op ((dst lsr count) lor (dst lsl (size - count)));
-              if_ (count = zero)
-                [ cf := cast high 1 dst ]
-                (* else *)
-                [
-                  if_ (count = one)
-                    [
-                      oF :=
-                        cast high 1 dst
-                        lxor cast high 1 (dst lsl int_exp 1 word_size);
-                    ]
-                    (* else  *)
-                    [
-                      oF :=
-                        unknown "OF undefined after rotate of more then 1 bit"
-                          bool_t;
-                    ];
-                ];
-            ]
+        let width = if use_cf then size + 1 else size in
+        let w n = int_exp n width in
+        let wide = tmp (Type.imm width) in
+        let rot = tmp (Type.imm width) in
+        let rotated =
+          match shift_type with
+          | LSHIFT ->
+              Bil.(
+                (var wide lsl var rot) lor (var wide lsr (w width - var rot)))
+          | _ ->
+              Bil.(
+                (var wide lsr var rot) lor (var wide lsl (w width - var rot)))
+        in
+        let result = tmp (Type.imm width) in
+        let new_cf =
+          match (shift_type, use_cf) with
+          | _, true -> Bil.(cast high 1 (var result))
+          | LSHIFT, false -> Bil.(cast low 1 dst)
+          | _, false -> Bil.(cast high 1 dst)
+        in
+        let new_of =
+          match shift_type with
+          | LSHIFT -> Bil.(cast high 1 dst lxor cf_e)
+          | _ -> Bil.(cast high 1 dst lxor cast high 1 (dst lsl i 1))
+        in
+        Bil.
+          [
+            count := shift land i mask;
+            (wide := if use_cf then cf_e ^ dst else dst);
+            rot := cast unsigned width (var count mod i width);
+            result := rotated;
+            assn exp_type dst_op (cast low size (var result));
+            if_
+              (var count <> i 0)
+              [
+                cf := new_cf;
+                if_
+                  (var count = i 1)
+                  [ oF := new_of ]
+                  [
+                    oF :=
+                      unknown "OF undefined after rotate of more then 1 bit"
+                        bool_t;
+                  ];
+              ]
+              [];
+          ]
     | Bt (t, bitoffset, bitbase) ->
         let t' = !!t in
         let offset = op2e t bitoffset in
@@ -1698,7 +1731,7 @@ module ToIR = struct
             tmp_src := src;
             tmp_dst := dst;
             tmp_res := src + dst;
-            assn t src_op dst;
+            assn t src_op (var tmp_dst);
             assn t dst_op (var tmp_res);
           ]
         @ set_flags_add !!t (Bil.var tmp_dst) (Bil.var tmp_src) dst
@@ -1808,11 +1841,9 @@ module ToIR = struct
                     * Cast (SIGNED, !!new_t, op2e t src2))
               in
               let flag =
-                (* Intel checks if EAX == EDX:EAX.  Instead of doing this, we are just
-                going to check if the upper bits are != 0 *)
-                let highbit = !!new_t - 1 in
-                let lowbit = !!new_t / 2 in
-                Bil.(Extract (highbit, lowbit, assne) <> int_exp 0 !!t)
+                (* the flags are set if the product is not the sign
+                   extension of its lower half *)
+                Bil.(assne <> Cast (SIGNED, !!new_t, Cast (LOW, !!t, assne)))
               in
               assnstmts @ [ Bil.Move (oF, flag); Bil.Move (cf, flag) ]
           | false ->
@@ -1891,7 +1922,9 @@ module ToIR = struct
               (* else *)
               [
                 tdiv := var dividend /$ var divisor;
-                trem := var dividend %$ var divisor;
+                (* the remainder has the sign of the dividend, unlike the
+                   signed modulus of BIL, which has the sign of the divisor *)
+                trem := var dividend - (var divisor * var tdiv);
                 if_
                   ((var tdiv >$ int ubound) lor (var tdiv <$ int lbound))
                   [ Cpu_exceptions.divide_by_zero ] (* else *)

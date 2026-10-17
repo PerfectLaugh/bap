@@ -33,3 +33,24 @@
   (let ((x dst))
     (set$ dst src)
     (set$ src x)))
+
+(defun set-gpr (rd x)
+  "(set-gpr RD X) sets the general purpose register RD to X, a 32-bit
+   register clears the upper half of its 64-bit base"
+  (declare (context (bits 64)))
+  (if (= (word-width x) 32)
+      (set$ (alias-base-register rd) (cast-unsigned 64 x))
+    (set$ rd x)))
+
+(defun set-gpr (rd x)
+  (declare (context (bits 32)))
+  (set$ rd x))
+
+(defun operand-address (base scale index off)
+  "(operand-address BASE SCALE INDEX OFF) is the address of a memory
+   operand, BASE and INDEX may be absent, the base RIP is the address of
+   the next instruction"
+  (+ (if (= (symbol base) 'Nil) 0
+       (if (= (symbol base) 'RIP) (get-next-program-counter) base))
+     (if (= (symbol index) 'Nil) 0 (* scale index))
+     off))
