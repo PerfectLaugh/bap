@@ -13,15 +13,15 @@ open Bap_primus.Std
     - Adds CPU registers to the environment and initializes them with zero.
 
     - Allocates a thread-local storage region and initializes the target's
-      thread register, if the target defines one. The thread register points
-      to the thread control block, which is followed by the TLS block of the
+      thread register, if the target defines one. The thread register points to
+      the thread control block, which is followed by the TLS block of the
       executable (the variant I of the TLS layout), initialized from its TLS
       template, if the executable has one.
 
     - Applies the relocations, including the relative ones, whose values are
-      biased, and, after all components are initialized, the relocations of
-      the indirect functions (IRELATIVE), whose values are computed by calling
-      their resolvers.
+      biased, and, after all components are initialized, the relocations of the
+      indirect functions (IRELATIVE), whose values are computed by calling their
+      resolvers.
 
     - Set's the main frame (copies arguments from the ctxt to the stack)
 
@@ -37,12 +37,12 @@ open Bap_primus.Std
     bytes, then SP+4 will point to the first argument (program name), SP+8 to
     the first specified command line argument, and so on. A null will follow the
     last argument. After that the same null terminated table of environment
-    variables will follow. (It can be easy accessed via the [environ] symbol)
-    It is followed by the auxiliary vector, a table of type and value pairs
-    that ends with AT_NULL, which describes the program headers (AT_PHDR,
-    AT_PHENT, AT_PHNUM), the entry point (AT_ENTRY), the page size, and points
-    to 16 bytes of zeros (AT_RANDOM). The strings of the arguments and of the
-    environment are stored after the 16 bytes.
+    variables will follow. (It can be easy accessed via the [environ] symbol) It
+    is followed by the auxiliary vector, a table of type and value pairs that
+    ends with AT_NULL, which describes the program headers (AT_PHDR, AT_PHENT,
+    AT_PHNUM), the entry point (AT_ENTRY), the page size, and points to 16 bytes
+    of zeros (AT_RANDOM). The strings of the arguments and of the environment
+    are stored after the 16 bytes.
 
     Note: the layout of the main function stack frame is not standartized in the
     C standard, neither it is a part of any ABI. A system loader may put

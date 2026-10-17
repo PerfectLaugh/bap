@@ -1,13 +1,6 @@
 (executable
  (name run_mips_tests)
- (libraries
-  bap
-  bap-plugins
-  bap-main
-  ounit2
-  primus_bil
-  lifter_test
-  threads))
+ (libraries bap bap-plugins bap-main ounit2 primus_bil lifter_test threads))
 
 ; the tests are generated from the specs, with the expected values
 ; computed by executing the instructions under QEMU, see
@@ -22,7 +15,12 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash %{project_root}/lib_test/cross/generate.sh gen/mips.conf gen/mips32.spec MIPS32eb))))
+   (run
+    bash
+    %{project_root}/lib_test/cross/generate.sh
+    gen/mips.conf
+    gen/mips32.spec
+    MIPS32eb))))
 
 (rule
  (target test_mips32le.ml)
@@ -32,7 +30,12 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash %{project_root}/lib_test/cross/generate.sh gen/mipsel.conf gen/mips32.spec MIPS32le))))
+   (run
+    bash
+    %{project_root}/lib_test/cross/generate.sh
+    gen/mipsel.conf
+    gen/mips32.spec
+    MIPS32le))))
 
 (rule
  (target test_mips64eb.ml)
@@ -42,7 +45,12 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash %{project_root}/lib_test/cross/generate.sh gen/mips64_32.conf gen/mips32.spec MIPS64eb))))
+   (run
+    bash
+    %{project_root}/lib_test/cross/generate.sh
+    gen/mips64_32.conf
+    gen/mips32.spec
+    MIPS64eb))))
 
 (rule
  (target test_mips64le.ml)
@@ -52,7 +60,12 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash %{project_root}/lib_test/cross/generate.sh gen/mips64el_32.conf gen/mips32.spec MIPS64le))))
+   (run
+    bash
+    %{project_root}/lib_test/cross/generate.sh
+    gen/mips64el_32.conf
+    gen/mips32.spec
+    MIPS64le))))
 
 (rule
  (target test_mips64eb_64.ml)
@@ -62,7 +75,12 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash %{project_root}/lib_test/cross/generate.sh gen/mips64.conf gen/mips64.spec MIPS64eb_64))))
+   (run
+    bash
+    %{project_root}/lib_test/cross/generate.sh
+    gen/mips64.conf
+    gen/mips64.spec
+    MIPS64eb_64))))
 
 (rule
  (target test_mips64le_64.ml)
@@ -72,7 +90,12 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash %{project_root}/lib_test/cross/generate.sh gen/mips64el.conf gen/mips64.spec MIPS64le_64))))
+   (run
+    bash
+    %{project_root}/lib_test/cross/generate.sh
+    gen/mips64el.conf
+    gen/mips64.spec
+    MIPS64le_64))))
 
 ; the instruction tests are slow, so they don't run with dune test, run
 ; them with dune build @instruction-tests

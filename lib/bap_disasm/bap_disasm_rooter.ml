@@ -84,7 +84,8 @@ let make_starts rooter =
         | Some bias when not rooter.biased -> Word.create bias size
         | _ -> Word.zero size
       in
-      List.fold roots ~init:(Set.empty (module Bitvec_order))
+      List.fold roots
+        ~init:(Set.empty (module Bitvec_order))
         ~f:(fun starts root ->
           if Int.equal (Word.bitwidth root) size then
             Set.add starts (Word.to_bitvec Word.(root + bias))

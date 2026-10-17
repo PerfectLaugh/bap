@@ -15,7 +15,12 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash %{project_root}/lib_test/cross/generate.sh gen/ppc.conf gen/ppc32.spec PPC32))))
+   (run
+    bash
+    %{project_root}/lib_test/cross/generate.sh
+    gen/ppc.conf
+    gen/ppc32.spec
+    PPC32))))
 
 (rule
  (target test_ppc64eb.ml)
@@ -25,7 +30,12 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash %{project_root}/lib_test/cross/generate.sh gen/ppc64.conf gen/ppc32.spec PPC64eb))))
+   (run
+    bash
+    %{project_root}/lib_test/cross/generate.sh
+    gen/ppc64.conf
+    gen/ppc32.spec
+    PPC64eb))))
 
 (rule
  (target test_ppc64le.ml)
@@ -35,7 +45,12 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash %{project_root}/lib_test/cross/generate.sh gen/ppc64le.conf gen/ppc32.spec PPC64le))))
+   (run
+    bash
+    %{project_root}/lib_test/cross/generate.sh
+    gen/ppc64le.conf
+    gen/ppc32.spec
+    PPC64le))))
 
 (rule
  (target test_ppc64eb_64.ml)
@@ -45,7 +60,12 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash %{project_root}/lib_test/cross/generate.sh gen/ppc64.conf gen/ppc64.spec PPC64eb_64))))
+   (run
+    bash
+    %{project_root}/lib_test/cross/generate.sh
+    gen/ppc64.conf
+    gen/ppc64.spec
+    PPC64eb_64))))
 
 (rule
  (target test_ppc64le_64.ml)
@@ -55,7 +75,12 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash %{project_root}/lib_test/cross/generate.sh gen/ppc64le.conf gen/ppc64.spec PPC64le_64))))
+   (run
+    bash
+    %{project_root}/lib_test/cross/generate.sh
+    gen/ppc64le.conf
+    gen/ppc64.spec
+    PPC64le_64))))
 
 ; the instruction tests are slow, so they don't run with dune test, run
 ; them with dune build @instruction-tests

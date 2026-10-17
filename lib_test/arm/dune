@@ -30,7 +30,12 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash %{project_root}/lib_test/cross/generate.sh gen/a32.conf gen/a32_qemu.spec A32_QEMU))))
+   (run
+    bash
+    %{project_root}/lib_test/cross/generate.sh
+    gen/a32.conf
+    gen/a32_qemu.spec
+    A32_QEMU))))
 
 (rule
  (target test_t32_qemu.ml)
@@ -40,4 +45,9 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash %{project_root}/lib_test/cross/generate.sh gen/t32.conf gen/t32_qemu.spec T32_QEMU))))
+   (run
+    bash
+    %{project_root}/lib_test/cross/generate.sh
+    gen/t32.conf
+    gen/t32_qemu.spec
+    T32_QEMU))))

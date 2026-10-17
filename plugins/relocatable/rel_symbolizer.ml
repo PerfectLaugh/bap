@@ -92,7 +92,8 @@ end = struct
         empty
 
   let referenced exts =
-    Map.fold exts ~init:(Set.empty (module Bitvec_order))
+    Map.fold exts
+      ~init:(Set.empty (module Bitvec_order))
       ~f:(fun ~key ~data addrs ->
         match data with Ref _ -> Set.add addrs key | Bad -> addrs)
 

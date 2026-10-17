@@ -176,8 +176,9 @@ module Unit = struct
 
   let subroutines =
     Knowledge.Class.property ~package cls "unit-subroutines"
-      (Knowledge.Domain.powerset (module Bitvec_order) "addresses"
-         ~inspect:Bitvec_sexp.sexp_of_t)
+      (Knowledge.Domain.powerset
+         (module Bitvec_order)
+         "addresses" ~inspect:Bitvec_sexp.sexp_of_t)
       ~public:true
       ~desc:
         "the addresses of the subroutine entry points of the unit that are \
@@ -209,7 +210,6 @@ module Label = struct
 
   let is_subroutine =
     attr "is-subroutine" "is the program a subroutine entry point"
-
 
   let encoding =
     Knowledge.Class.property ~package cls "encoding" Language.domain
@@ -274,8 +274,7 @@ module Label = struct
         scoped ()
     | Some per_label ->
         incr mirrored;
-        Knowledge.promising is_subroutine ~promise:per_label scoped
-        >>| fun r ->
+        Knowledge.promising is_subroutine ~promise:per_label scoped >>| fun r ->
         decr mirrored;
         r
 

@@ -114,7 +114,11 @@ module Repository : sig
     t -> ?size:int -> ?bias:Bitvec.t -> path:string -> Bitvec.t -> string option
 
   val starts :
-    t -> size:int -> bias:Bitvec.t option -> path:string -> Set.M(Bitvec_order).t
+    t ->
+    size:int ->
+    bias:Bitvec.t option ->
+    path:string ->
+    Set.M(Bitvec_order).t
   (** the addresses for which [name] finds a name *)
 
   val aliases :
