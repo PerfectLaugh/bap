@@ -120,3 +120,78 @@
 
 (defun RBITWr (rd rn) (setw rd (reverse-bits (cast-low 32 rn))))
 (defun RBITXr (rd rn) (set$ rd (reverse-bits rn)))
+
+(defun CLSWr (rd rn)
+  (setw rd (- (cast-unsigned 32 (clz (logxor rn (arshift rn 1)))) 1)))
+(defun CLSXr (rd rn)
+  (set$ rd (- (cast-unsigned 64 (clz (logxor rn (arshift rn 1)))) 1)))
+
+(defun reverse-bytes (x)
+  "(reverse-bytes X) reverses the order of the bytes of X"
+  (if (= (word-width x) 8) x
+    (concat (reverse-bytes (cast-low (- (word-width x) 8) x))
+            (cast-high 8 x))))
+
+(defun REVWr (rd rn) (setw rd (reverse-bytes (cast-low 32 rn))))
+(defun REVXr (rd rn) (set$ rd (reverse-bytes rn)))
+(defun REV16Wr (rd rn)
+  (setw rd (concat (reverse-bytes (extract 31 16 rn))
+                   (reverse-bytes (extract 15 0 rn)))))
+(defun REV16Xr (rd rn)
+  (set$ rd (concat (reverse-bytes (extract 63 48 rn))
+                   (reverse-bytes (extract 47 32 rn))
+                   (reverse-bytes (extract 31 16 rn))
+                   (reverse-bytes (extract 15 0 rn)))))
+(defun REV32Xr (rd rn)
+  (set$ rd (concat (reverse-bytes (extract 63 32 rn))
+                   (reverse-bytes (extract 31 0 rn)))))
+
+;; extr extracts a register from the pair rn:rm starting at the bit lsb
+(defun EXTRWrri (rd rn rm lsb)
+  (setw rd (cast-low 32 (rshift (concat rn rm) lsb))))
+(defun EXTRXrri (rd rn rm lsb)
+  (set$ rd (cast-low 64 (rshift (concat rn rm) lsb))))
+
+;;; ARITHMETIC WITH CARRY, the carry flag is the carry in
+
+(defun ADCWr (rd rn rm) (setw rd (+ rn rm (cast-unsigned 32 CF))))
+(defun ADCXr (rd rn rm) (set$ rd (+ rn rm (cast-unsigned 64 CF))))
+(defun SBCWr (rd rn rm) (setw rd (+ rn (lnot rm) (cast-unsigned 32 CF))))
+(defun SBCXr (rd rn rm) (set$ rd (+ rn (lnot rm) (cast-unsigned 64 CF))))
+(defun ADCSWr (rd rn rm) (add-with-carry/clear-base rd rn rm CF))
+(defun ADCSXr (rd rn rm) (add-with-carry rd rn rm (cast-unsigned 64 CF)))
+(defun SBCSWr (rd rn rm) (add-with-carry/clear-base rd rn (lnot rm) CF))
+(defun SBCSXr (rd rn rm) (add-with-carry rd rn (lnot rm) (cast-unsigned 64 CF)))
+
+;; the extended register forms, see ADDXrx
+(defun SUBWrx (rd rn rm off)
+  (setw rd (- rn (cast-low 32 (extended rm off)))))
+(defun SUBXrx (rd rn rm off)
+  (set$ rd (- rn (extended rm off))))
+(defun ADDSWrx (rd rn rm off)
+  (add-with-carry/clear-base rd rn (extended rm off) 0))
+(defun ADDSXrx (rd rn rm off)
+  (add-with-carry rd rn (extended rm off) 0))
+(defun ADDSXrx64 (rd rn rm off)
+  (add-with-carry rd rn (extended rm off) 0))
+(defun SUBSWrx (rd rn rm off)
+  (add-with-carry/clear-base rd rn (lnot (extended rm off)) 1))
+(defun SUBSXrx (rd rn rm off)
+  (add-with-carry rd rn (lnot (extended rm off)) 1))
+(defun SUBSXrx64 (rd rn rm off)
+  (add-with-carry rd rn (lnot (extended rm off)) 1))
+
+;;; LONG AND HIGH MULTIPLICATION
+
+(defun SMADDLrrr (rd rn rm ra)
+  (set$ rd (+ ra (* (cast-signed 64 rn) (cast-signed 64 rm)))))
+(defun SMSUBLrrr (rd rn rm ra)
+  (set$ rd (- ra (* (cast-signed 64 rn) (cast-signed 64 rm)))))
+(defun UMADDLrrr (rd rn rm ra)
+  (set$ rd (+ ra (* (cast-unsigned 64 rn) (cast-unsigned 64 rm)))))
+(defun UMSUBLrrr (rd rn rm ra)
+  (set$ rd (- ra (* (cast-unsigned 64 rn) (cast-unsigned 64 rm)))))
+(defun SMULHrr (rd rn rm)
+  (set$ rd (cast-high 64 (* (cast-signed 128 rn) (cast-signed 128 rm)))))
+(defun UMULHrr (rd rn rm)
+  (set$ rd (cast-high 64 (* (cast-unsigned 128 rn) (cast-unsigned 128 rm)))))

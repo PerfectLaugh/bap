@@ -81,3 +81,52 @@
 (defun CSINVXr (rd rn rm cnd) (CSop*r set$ lnot rd rn rm cnd))
 (defun CSNEGWr (rd rn rm cnd) (CSop*r setw neg  rd rn rm cnd))  ;; 2's complement negation
 (defun CSNEGXr (rd rn rm cnd) (CSop*r set$ neg  rd rn rm cnd))  ;; 2's complement negation
+
+;;; EXCLUSIVE AND ACQUIRE-RELEASE LOADS AND STORES
+;;
+;; The exclusive monitor is not modeled, an exclusive store always
+;; succeeds and writes 0 to its status register. The memory ordering
+;; has no effect on a single thread.
+
+(defun LDXRX (rt rn) (ld-x rt rn))
+(defun LDXRW (rt rn) (ld-w rt rn))
+(defun LDXRH (rt rn) (ld-h rt rn))
+(defun LDXRB (rt rn) (ld-b rt rn))
+(defun LDAXRX (rt rn) (ld-x rt rn))
+(defun LDAXRW (rt rn) (ld-w rt rn))
+(defun LDAXRH (rt rn) (ld-h rt rn))
+(defun LDAXRB (rt rn) (ld-b rt rn))
+(defun LDARX (rt rn) (ld-x rt rn))
+(defun LDARW (rt rn) (ld-w rt rn))
+(defun LDARH (rt rn) (ld-h rt rn))
+(defun LDARB (rt rn) (ld-b rt rn))
+(defun LDAPRX (rt rn) (ld-x rt rn))
+(defun LDAPRW (rt rn) (ld-w rt rn))
+(defun LDAPRH (rt rn) (ld-h rt rn))
+(defun LDAPRB (rt rn) (ld-b rt rn))
+
+(defun STLRX (rt rn) (st-x rt rn))
+(defun STLRW (rt rn) (st-w rt rn))
+(defun STLRH (rt rn) (st-h rt rn))
+(defun STLRB (rt rn) (st-b rt rn))
+
+(defmacro STXR* (st rs rt rn) (prog (st rt rn) (setw rs 0)))
+(defun STXRX (rs rt rn) (STXR* st-x rs rt rn))
+(defun STXRW (rs rt rn) (STXR* st-w rs rt rn))
+(defun STXRH (rs rt rn) (STXR* st-h rs rt rn))
+(defun STXRB (rs rt rn) (STXR* st-b rs rt rn))
+(defun STLXRX (rs rt rn) (STXR* st-x rs rt rn))
+(defun STLXRW (rs rt rn) (STXR* st-w rs rt rn))
+(defun STLXRH (rs rt rn) (STXR* st-h rs rt rn))
+(defun STLXRB (rs rt rn) (STXR* st-b rs rt rn))
+
+(defun LDXPX (r1 r2 rn) (LDST*pair ld-x r1 r2 rn 8))
+(defun LDXPW (r1 r2 rn) (LDST*pair ld-w r1 r2 rn 4))
+(defun LDAXPX (r1 r2 rn) (LDST*pair ld-x r1 r2 rn 8))
+(defun LDAXPW (r1 r2 rn) (LDST*pair ld-w r1 r2 rn 4))
+(defun STXPX (rs r1 r2 rn) (prog (LDST*pair st-x r1 r2 rn 8) (setw rs 0)))
+(defun STXPW (rs r1 r2 rn) (prog (LDST*pair st-w r1 r2 rn 4) (setw rs 0)))
+(defun STLXPX (rs r1 r2 rn) (prog (LDST*pair st-x r1 r2 rn 8) (setw rs 0)))
+(defun STLXPW (rs r1 r2 rn) (prog (LDST*pair st-w r1 r2 rn 4) (setw rs 0)))
+
+(defun CLREX (_) (empty))

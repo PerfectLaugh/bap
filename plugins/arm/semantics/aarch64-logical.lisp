@@ -10,10 +10,18 @@
 (defmacro ORN*rs (set rd rn rm is)
   "(ORN*rs set rd rn rm is) implements the OR NOT instruction
    accepting either a W or X register."
-  (set rd (logor rn (lnot (lshift rm is)))))
+  (set rd (logor rn (lnot (shift-encoded rm is)))))
 
 (defun ORNWrs (rd rn rm is) (ORN*rs setw rd rn rm is))
 (defun ORNXrs (rd rn rm is) (ORN*rs set$ rd rn rm is))
+
+(defmacro EON*rs (set rd rn rm is)
+  "(EON*rs set rd rn rm is) implements the exclusive OR NOT of a shifted
+   register, accepting either a W or X register."
+  (set rd (logxor rn (lnot (shift-encoded rm is)))))
+
+(defun EONWrs (rd rn rm is) (EON*rs setw rd rn rm is))
+(defun EONXrs (rd rn rm is) (EON*rs set$ rd rn rm is))
 
 (defmacro BIC*rs (set rd rn rm is)
   "(BIC*rs set rd rn rm is) implements AND NOT (bit clear) of a shifted
@@ -106,17 +114,24 @@
   (make-eBFM setw cast-signed xd xr ir is))
 
 (defmacro BFM (set rd rn r s)
+  "(BFM set rd rn r s) is the bitfield move with the static immr r and
+   imms s. If s >= r, the bits s..r of rn replace the lowest bits of rd
+   (bfxil), otherwise the lowest s+1 bits of rn replace the bits from
+   size-r of rd upward (bfi), where size is the width of rd."
   (let ((size (word-width rd)))
     (if (>= s r)
-      (set rd (concat 
-               (cast-high (- size (+1 (- s r))) rd)
-               (if (= r 0)
-                 (cast-low (+1 s) rn) 
-                 (extract s r rn))))
-      (set rd (concat
-               (cast-high (- r s) rd)
-               (cast-low (+1 s) rn)
-               (cast-low (-1 (- size r)) rd))))))
+        (let ((width (+ (- s r) 1)))
+          (if (= width size)
+              (set rd rn)
+            (set rd (concat (cast-high (- size width) rd)
+                            (extract s r rn)))))
+      (let ((high (- r s 1)))
+        (if (= high 0)
+            (set rd (concat (cast-low (+ s 1) rn)
+                            (cast-low (- size r) rd)))
+          (set rd (concat (cast-high high rd)
+                          (cast-low (+ s 1) rn)
+                          (cast-low (- size r) rd))))))))
 
 (defun BFMXri (_ xd xr ir is)
   (BFM set$ xd xr ir is))

@@ -91,8 +91,9 @@
   (= cnd 0b1110))
 
 (defmacro setw (reg val)
-  "(set Wx V) sets a Wx register clearing the upper 32 bits."
-  (set$ (alias-base-register reg) val))
+  "(set Wx V) sets a Wx register to the lower 32 bits of V clearing the
+   upper 32 bits, V may be wider when an operand promoted it."
+  (set$ (alias-base-register reg) (cast-unsigned 64 (cast-low 32 val))))
 
 (defmacro setd (reg val)
   "(setd Dx V) sets a Dx register clearing the upper 64 bits of the
