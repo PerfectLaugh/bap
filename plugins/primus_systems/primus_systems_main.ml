@@ -62,9 +62,11 @@ let command what =
 
 let paths =
   Extension.Configuration.parameters
-    Extension.Type.(list dir)
+    Extension.Type.(list path)
     "add-path"
-    ~doc:"adds the path to the list of paths where Primus systems are searched"
+    ~doc:
+      "adds the path to the list of paths where Primus systems are searched, \
+       or loads the systems from the path, if it is a file"
 
 let provides = [ "primus"; "primus-systems" ]
 let systems root = Filename.of_parts [ root; "primus"; "systems" ]
@@ -77,17 +79,19 @@ let () =
   @ List.map Primus_systems_sites.paths ~f:(fun root ->
       Filename.concat root "systems")
   @ Extension.Configuration.[ systems datadir; systems sysdatadir ])
-  |> List.iter ~f:(fun path ->
+  |> List.concat_map ~f:(fun path ->
       if Sys.file_exists path && Sys.is_directory path then
-        Sys.readdir path
-        |> Array.iter ~f:(fun file ->
-            if String.is_suffix file ~suffix:".asd" then
-              let path = Filename.concat path file in
-              match Primus.System.from_file path with
-              | Error failed ->
-                  eprintf "Failed to parse system %s: %a@\n%!" file
-                    Primus.System.pp_parse_error failed
-              | Ok systems -> List.iter systems ~f:Primus.System.Repository.add));
+        Sys.readdir path |> Array.to_list
+        |> List.filter ~f:(String.is_suffix ~suffix:".asd")
+        |> List.map ~f:(Filename.concat path)
+      else if Sys.file_exists path then [ path ]
+      else [])
+  |> List.iter ~f:(fun path ->
+      match Primus.System.from_file path with
+      | Error failed ->
+          eprintf "Failed to parse system %s: %a@\n%!" (Filename.basename path)
+            Primus.System.pp_parse_error failed
+      | Ok systems -> List.iter systems ~f:Primus.System.Repository.add);
   Ok ()
 
 let names = Extension.(Command.argument Type.(list string))

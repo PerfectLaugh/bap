@@ -80,12 +80,12 @@
     and core) are packed into the plugin.
 
     The [bapbuild] tool is used to build plugins from OCaml source code. The
-    [bapbundle] tool could be used to deploy the plugin into a place where it
-    will be automatically loaded by the framework. In short, to build and deploy
-    a plugin with OCaml code located in a file named [example.ml] execute the
-    following two commands:
+    plugin is loaded from its file with the [--plugin] option, or from a folder
+    added to the plugins search paths with the [-L] option. In short, to build
+    and run a plugin with OCaml code located in a file named [example.ml]
+    execute the following two commands:
 
-    1. [bapbuild example.plugin] 2. [bapbundle install example.plugin]
+    1. [bapbuild example.plugin] 2. [bap --plugin=example.plugin ...]
 
     The [bapbuild] tool will scan the dependencies of the [example.ml] file and
     build them automatically if they are present in the current directory, e.g.,

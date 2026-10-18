@@ -61,6 +61,7 @@ Usage:
 Common options:
   --version                prints the version number and exits;
   --plugin-path <DIR>      adds <DIR> to the plugins search path;
+  --plugin <FILE>          loads the plugin from <FILE>;
   --logdir <DIR>           creates a log file in <DIR>;
   --recipe <VAL>           extracts command line arguments from the recipe.
 

@@ -75,14 +75,16 @@ module Std : sig
       This module handles the set of plugins, visible to the platform.
 
       Plugins are looked at the following locations:
-      - paths explicitly specified by a user (via [library] parameter);
+      - paths explicitly specified by a user (via [library] parameter), which
+        are folders with plugins, or plugin files;
       - paths specified by the [BAP_PLUGIN_PATH] environment variable (same
         syntax as PATH variable);
       - $prefix/lib/bap, where $prefix is the installation prefix, specified
         during the installation.
 
-      The latter destination is used by the [bapbundle install] command, so this
-      is the default repository of plugins.
+      The latter destination is the default repository of plugins, a plugin
+      found earlier in the paths takes precedence over the plugins with the same
+      name found later.
 
       The plugin loader is an event driven system. Once, [Plugins.run] function
       is called, events of type [Plugins.events] will start to fire. By default
@@ -127,9 +129,11 @@ module Std : sig
           therefore all are selected.
 
         @param library
-          is the list of additional directories in which plugins are searched.
-          If specified then it is prepended to the default search path that
-          contains (in that order):
+          is the list of additional directories in which plugins are searched,
+          and of plugin files, which are loaded. If specified then it is
+          prepended to the default search path, and its plugins take precedence
+          over the plugins with the same name in it, that contains (in that
+          order):
           - the list of paths specified by the BAP_PLUGIN_PATH environment
             variable;
           - the [Plugins.directory] constant.
@@ -207,7 +211,7 @@ module Std : sig
 
   val setup_package_loader : (string -> unit) -> unit
   (** [setup_package_loader loader] installs the [loader] of the plugins that
-      are packages, which takes the name of a plugin and loads it, e.g., in
-      the toplevel, which loads them with topfind, so that the libraries
-      that are already loaded aren't loaded again. *)
+      are packages, which takes the name of a plugin and loads it, e.g., in the
+      toplevel, which loads them with topfind, so that the libraries that are
+      already loaded aren't loaded again. *)
 end

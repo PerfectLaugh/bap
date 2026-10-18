@@ -550,6 +550,13 @@ module Pre = struct
     Arg.(
       value & opt_all string [] & info ~doc [ "L"; "plugin-path"; "load-path" ])
 
+  let plugin_files =
+    let doc =
+      "Loads the plugin from the specified file, which takes precedence over \
+       the plugins with the same name in the plugins search paths"
+    in
+    Arg.(value & opt_all string [] & info ~doc [ "plugin" ])
+
   let recipe =
     let doc = "Load the specified recipe" in
     Arg.(value & opt (some string) None & info ~doc [ "recipe" ])
@@ -557,7 +564,9 @@ module Pre = struct
   let extract ?env option argv = fst (Cmd.eval_peek_opts ?env ~argv option)
 
   let term =
-    Term.(const (fun _ _ _ -> Ok ()) $ logdir $ plugin_locations $ recipe)
+    Term.(
+      const (fun _ _ _ _ -> Ok ())
+      $ logdir $ plugin_locations $ plugin_files $ recipe)
 end
 
 module Grammar : sig
@@ -1290,6 +1299,9 @@ let init ?features ?requires ?library ?(argv = [| Sys.executable_name |]) ?env
             match Pre.(extract ?env plugin_locations argv) with
             | None -> []
             | Some libs -> libs)
+      in
+      let library =
+        Option.value ~default:[] Pre.(extract ?env plugin_files argv) @ library
       in
       let result =
         Grammar.load_plugins () ?env:features ?provides:requires ~library

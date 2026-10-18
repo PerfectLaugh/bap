@@ -6,20 +6,16 @@ include Self ()
 module Configuration = Bap_main.Extension.Configuration
 module Sites = Api_sites
 
-let try_with f =
-  match Result.try_with f with Ok r -> Ok r | Error exn -> Error (`Fail exn)
-
 let try_with_default ~default f =
-  match try_with f with Ok r -> r | Error _ -> default
+  match Result.try_with f with Ok r -> r | Error _ -> default
 
 let getenv v = try Some (Sys.getenv v) with Stdlib.Not_found -> None
 
 module Path = FilePath.DefaultPath.Abstract
 
 type path = Path.filename
-type api_descr = { lang : string; name : string } [@@deriving equal]
+type api_descr = { lang : string; name : string }
 type api = { desc : api_descr; path : path }
-type no_access = [ `No_access ]
 
 module Api_path = struct
   type t = path
@@ -36,8 +32,6 @@ module Api_path = struct
           Some Path.(filename_of_string h / filename_of_string p) ))
 
   let of_string x = expand_home @@ Path.reduce @@ Path.filename_of_string x
-  let basename = Path.basename
-  let basename' x = to_string @@ basename @@ of_string x
   let is_apiable = FileUtil.(Or (Is_file, Is_link))
   let try_with_access f p = try Ok (f p) with _ -> Error `No_access
   let exists p = try_with_access FileUtil.(test Exists) (to_string p)
@@ -58,7 +52,6 @@ module Api_path = struct
           (fun acc f -> of_string f :: acc)
           [])
 
-  let path_of_desc desc = of_string desc.lang / of_string desc.name
   let with_lang path lang = path / of_string lang
   let lang_of_path path = to_string Path.(path |> reduce |> dirname |> basename)
   let name_of_path p = to_string @@ Path.basename p
@@ -68,25 +61,15 @@ module Api_path = struct
     if is_apiable_path path then Some { desc = desc_of_path path; path }
     else None
 
-  let is_api_at_path desc path = is_apiable_path @@ (path / path_of_desc desc)
-  let find_all_paths paths desc = List.filter ~f:(is_api_at_path desc) paths
-  let find_path paths desc = List.find ~f:(is_api_at_path desc) paths
-
   let find_apis ?lang path =
     let path' =
       match lang with Some lang -> with_lang path lang | None -> path
     in
     find_files path' |> List.filter_map ~f:api_of_path
-
-  let pp fmt p = Format.fprintf fmt "%s" (to_string p)
 end
 
 module Api = struct
   type t = api
-  type op_err = [ no_access | `No_dst | `Fail of exn ]
-
-  let lang t = t.desc.lang
-  let name t = t.desc.name
 
   let create lang path =
     let path = Api_path.of_string path in
@@ -94,119 +77,11 @@ module Api = struct
       let name = Api_path.name_of_path path in
       Some { desc = { lang; name }; path }
     else None
-
-  let ok_if_true2 f x ~error = f x >>= fun r -> Result.ok_if_true r ~error
-
-  let cp api dest =
-    ok_if_true2 Api_path.exists dest ~error:`No_dst >>= fun () ->
-    ok_if_true2 Api_path.is_dir dest ~error:`No_dst >>= fun () ->
-    let dest = Api_path.with_lang dest (lang api) in
-    try_with (fun () ->
-        let dest = Api_path.to_string dest in
-        FileUtil.mkdir ~parent:true dest;
-        FileUtil.cp [ Api_path.to_string api.path ] dest)
-
-  let rm path desc =
-    let path = Api_path.(path / path_of_desc desc) in
-    ok_if_true2 Api_path.exists path ~error:`No_dst >>= fun () ->
-    try_with (fun () -> FileUtil.rm [ Api_path.to_string path ])
 end
-
-module Api_error = struct
-  let exit_with () = exit 1
-
-  let api_exists path desc =
-    exit_with
-    @@ eprintf
-         "Will not overwrite an API named %s at %s. Remove it before the \
-          updating.\n"
-         desc.name (Api_path.to_string path)
-
-  let api_not_exists ?path desc =
-    match path with
-    | Some path ->
-        exit_with
-        @@ eprintf "Can't find api %s:%s at %s\n" desc.lang desc.name
-             (Api_path.to_string path)
-    | None -> exit_with @@ eprintf "Can't find api %s:%s\n" desc.lang desc.name
-
-  let no_path api =
-    exit_with @@ eprintf "Can't store an api %s: permission denied\n" api.name
-
-  let fail descr exn = exit_with @@ eprintf "%s: %s\n" descr (Exn.to_string exn)
-
-  let sanity_fail api api' =
-    exit_with
-    @@ eprintf
-         "Sanitization error: there are conflicting specifications for the \
-          same API(s):\n\
-          %s:%s at %s, %s\n\
-          Each API should be specified only once. Please resolve the conflict \
-          manually,\n\
-          either by removing the conflicting files or by renaming them.\n"
-         api.desc.lang api.desc.name
-         (Api_path.to_string api.path)
-         (Api_path.to_string api'.path)
-end
-
-let add_api paths api =
-  match Api_path.find_path paths api.desc with
-  | Some path -> Api_error.api_exists path api.desc
-  | None ->
-      let rec add = function
-        | [] -> Api_error.no_path api.desc
-        | p :: paths' -> (
-            match Api.cp api p with
-            | Ok () ->
-                info "wrote %s:%s to %s" api.desc.lang api.desc.name
-                  (Api_path.to_string p)
-            | Error `No_dst | Error `No_access ->
-                info "Api.cp: skipping a non-writable destination %a"
-                  Api_path.pp p;
-                add paths'
-            | Error (`Fail exn) ->
-                info "failed to write at %s path: %s" (Api_path.to_string p)
-                  (Exn.to_string exn);
-                add paths')
-      in
-      add paths
-
-let rem_api paths desc =
-  let is_no_path ers =
-    List.for_all
-      ~f:(fun (er, _) -> match er with Error `No_dst -> true | _ -> false)
-      ers
-    && List.length ers = List.length paths
-  in
-  let rm_api ers path =
-    match Api.rm path desc with
-    | Ok () ->
-        info "removed api %s:%s from %s" desc.lang desc.name
-          (Api_path.to_string path);
-        ers
-    | er -> (er, path) :: ers
-  in
-  let ers = List.fold ~f:rm_api ~init:[] paths in
-  if is_no_path ers then Api_error.api_not_exists desc
-  else
-    List.iter
-      ~f:(function
-        | Error (`Fail exn), _ ->
-            error "didn't removed api: %s" (Exn.to_string exn);
-            Api_error.fail "can'remove api" exn
-        | Error `No_access, p ->
-            info "can't inspect path %s: permission denied"
-              (Api_path.to_string p)
-        | _ -> ())
-      ers
-
-let add_files apis paths = List.iter ~f:(add_api paths) apis
-let rem_files descrs paths = List.iter ~f:(rem_api paths) descrs
 
 module Api_options = struct
   type t = {
-    api_to_add : api list;
-    api_to_rem : api_descr list;
+    api_files : api list;
     list_paths : bool;
     show_apis : bool;
     api_paths : string list;
@@ -237,19 +112,36 @@ let all_paths o =
   |> List.filter ~f:(fun p ->
       match Api_path.is_dir p with Ok r -> r | Error _ -> false)
 
+(* the files specified with [--api-file] are used in place, and replace
+   the files with the same name in the API paths *)
+let all_apis ?lang paths files =
+  let files =
+    match lang with
+    | None -> files
+    | Some lang ->
+        List.filter files ~f:(fun api -> String.(api.desc.lang = lang))
+  in
+  let is_replaced api =
+    List.exists files ~f:(fun file ->
+        String.(
+          file.desc.lang = api.desc.lang && file.desc.name = api.desc.name))
+  in
+  List.concat_map paths ~f:(Api_path.find_apis ?lang)
+  |> List.filter ~f:(Fn.non is_replaced)
+  |> fun apis -> apis @ files
+
 let get_file file = Some file
 
-let files paths lang =
-  List.(
-    paths >>| Api_path.find_apis ~lang |> join >>| fun api ->
-    Api_path.to_string api.path)
-
-let mapper paths (module Api : Bap_api.S) =
-  let files = files paths Api.language in
+let mapper paths files (module Api : Bap_api.S) =
+  let files =
+    all_apis ~lang:Api.language paths files
+    |> List.map ~f:(fun api -> Api_path.to_string api.path)
+  in
   Result.(Api.parse get_file files >>| Api.mapper)
 
-let main paths proj =
-  Bap_api.processors () |> List.map ~f:(mapper paths) |> Result.all |> function
+let main paths files proj =
+  Bap_api.processors () |> List.map ~f:(mapper paths files) |> Result.all
+  |> function
   | Error e ->
       error "api wasn't applied: %a" Error.pp e;
       exit 1
@@ -260,9 +152,7 @@ let main paths proj =
 let list_of_paths paths =
   List.iter ~f:(fun p -> Format.printf "%s\n" (Api_path.to_string p)) paths
 
-let api_of_paths paths = List.map ~f:Api_path.find_apis paths |> List.concat
-
-let show_all_apis paths =
+let show_all_apis paths files =
   let open Format in
   let pp_api api =
     printf "   %s : %s@." api.desc.name (Api_path.to_string api.path)
@@ -277,8 +167,9 @@ let show_all_apis paths =
         print_newline ()
   in
   let apis =
-    api_of_paths paths
-    |> List.sort ~compare:(fun x y -> String.compare x.desc.lang y.desc.lang)
+    all_apis paths files
+    |> List.stable_sort ~compare:(fun x y ->
+        String.compare x.desc.lang y.desc.lang)
   in
   List.iter ~f:print_lang
     (List.group ~break:(fun x y -> String.(x.desc.lang <> y.desc.lang)) apis);
@@ -293,25 +184,11 @@ module Cmdline = struct
       `P "$(b,bap-api)(3), $(b,bap-plugin-frontc-parser)(1)";
     ]
 
-  module Api_desc = struct
-    type t = api_descr
-
-    let empty = { lang = ""; name = "" }
-
-    let parser str =
-      (* the name may be a Windows path, e.g., [c:C:\api.h] *)
-      match String.lsplit2 str ~on:':' with
-      | Some (lang, name) -> `Ok { lang; name = Api_path.basename' name }
-      | None -> `Error "expected <lang>:<name>"
-
-    let printer ppf t = Format.fprintf ppf "%s:%s" t.lang t.name
-    let t = Config.converter parser printer empty
-  end
-
   module Api = struct
     type t = api
 
     let parser str =
+      (* the file may be a Windows path, e.g., [c:C:\api.h] *)
       match String.lsplit2 str ~on:':' with
       | Some (lang, file) -> (
           match Api.create lang file with
@@ -324,31 +201,20 @@ module Cmdline = struct
 
     let t =
       Config.converter parser printer
-        { desc = Api_desc.empty; path = Api_path.of_string "" }
+        { desc = { lang = ""; name = "" }; path = Api_path.of_string "" }
   end
 
-  let add_api : Api.t list Config.param =
+  let api_files : Api.t list list Config.param =
     let doc =
-      "Add specified api module(s) and exit. Each module\n\
-      \      should be of the form <lang>:<file>, where <lang> is the\n\
-      \      language in which API is written, and <file> is a path to\n\
-      \      the specification. Multiple modules can be added by specifying\n\
-      \      this option several times."
+      "Use the specified api module(s), which are read from their\n\
+      \      files, without installing them. Each module should be of the\n\
+      \      form <lang>:<file>, where <lang> is the language in which API\n\
+      \      is written, and <file> is a path to the specification. A module\n\
+      \      replaces the module with the same name in the api paths.\n\
+      \      Multiple modules can be used by specifying this option several\n\
+      \      times."
     in
-    Config.(
-      param ~deprecated:"will be removed in 2.0.0" (list Api.t) "add" ~doc)
-
-  let remove_api : Api_desc.t list Config.param =
-    let doc =
-      "Removed specified api module and exit. Each module\n\
-      \      should be of the form <lang>:<file>, where <lang> is the\n\
-      \      language in which API is written, and <file> is a filename\n\
-      \      of api module in the $(b,api-list-paths) option. Multiple\n\
-      \      modules can be added by specifying this option several times."
-    in
-    Config.(
-      param ~deprecated:"will be removed in 2.0.0" (list Api_desc.t) "remove"
-        ~synonyms:[ "rem" ] ~doc)
+    Config.(param_all (list Api.t) "file" ~doc)
 
   let list_paths =
     let doc = "List of all registered paths" in
@@ -359,12 +225,11 @@ module Cmdline = struct
     Config.(flag "show" ~doc)
 
   let path =
-    let doc = "Add a list of a paths where to store/search apis" in
+    let doc =
+      "Add a list of a paths where to search apis, each api is stored\n\
+      \      in the folder named after its language, e.g., $(b,PATH/c/api.h)"
+    in
     Config.(param (list dir) "path" ~doc ~default:[])
-
-  let create api_to_add api_to_rem list_paths show_apis api_paths =
-    Api_options.Fields.create ~api_to_add ~api_to_rem ~list_paths ~show_apis
-      ~api_paths
 
   let dispatch_flags o =
     let open Api_options in
@@ -373,25 +238,14 @@ module Cmdline = struct
     | show_paths, show_apis ->
         let paths = all_paths o in
         if show_paths then list_of_paths paths;
-        if show_apis then show_all_apis paths;
-        exit 0
-
-  let dispatch_api_ops o =
-    let open Api_options in
-    match (o.api_to_add, o.api_to_rem) with
-    | [], [] -> ()
-    | _add, _rem ->
-        let paths = all_paths o in
-        add_files o.api_to_add paths;
-        rem_files o.api_to_rem paths;
+        if show_apis then show_all_apis paths o.api_files;
         exit 0
 
   let dispatch o =
-    let open Api_options in
     let paths = all_paths o in
-    dispatch_api_ops o;
     dispatch_flags o;
-    Project.register_pass ~autorun:true ~deps:[ "abi" ] (main paths)
+    Project.register_pass ~autorun:true ~deps:[ "abi" ]
+      (main paths (Api_options.api_files o))
 
   let normalize_paths ps =
     let norm p = if String.equal p "." then Sys.getcwd () else p in
@@ -402,7 +256,8 @@ module Cmdline = struct
     Config.declare_extension ~doc:"inserts subroutines arg terms"
       ~provides:[ "abi"; "api"; "pass" ]
     @@ fun { Config.get = ( ! ) } ->
-    let paths = normalize_paths !path in
-    let o = create !add_api !remove_api !list_paths !show_apis paths in
-    dispatch o
+    let api_paths = normalize_paths !path in
+    dispatch
+      (Api_options.Fields.create ~api_files:(List.concat !api_files)
+         ~list_paths:!list_paths ~show_apis:!show_apis ~api_paths)
 end

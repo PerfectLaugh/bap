@@ -89,7 +89,9 @@ let compute_root_table path min_length max_length threshold compiler =
   | Error `No_signatures ->
       warning "The signatures database is empty.";
       info "install the signatures with `opam install bap-signatures'";
-      info "alternatively use `bap-byteweight update'";
+      info
+        "alternatively fetch them with `bap-byteweight fetch -o FILE' and use \
+         --byteweight-sigs=FILE";
       no_roots
   | Error (`No_entry s) ->
       info "no signatures for %s" s;

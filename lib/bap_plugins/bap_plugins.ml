@@ -95,6 +95,12 @@ module Plugin = struct
   let loaded p = p.loaded
   let do_if_not_debugging f x = if is_debugging () then () else f x
 
+  (* The unit is extracted from the bundle into a temporary file, which is
+     removed after it is loaded. Windows doesn't remove the DLLs that are
+     loaded, so there the unit is extracted into a file named after the
+     digest of the bundle, which the next loads reuse, e.g., by another
+     bap, which may have it loaded. *)
+
   (** [load_entry plugin name] loads a compilation unit with the specified
       [name] required by [plugin]. The compilation unit should not be already
       linked to the main program. The unit is looked in the plugin bundle first
@@ -114,11 +120,6 @@ module Plugin = struct
       same compilation unit twice, as if that happens a memory of a unit is
       corrupted (the global roots are overwritten). This is a known bug/issue in
       the OCaml runtime that we need to workaround. *)
-  (* The unit is extracted from the bundle into a temporary file, which is
-     removed after it is loaded. Windows doesn't remove the DLLs that are
-     loaded, so there the unit is extracted into a file named after the
-     digest of the bundle, which the next loads reuse, e.g., by another
-     bap, which may have it loaded. *)
   let extracted_unit plugin name suffix =
     if not Sys.win32 then Filename.temp_file name suffix
     else
@@ -259,12 +260,14 @@ module Plugins = struct
     with Stdlib.Not_found -> []
 
   let path = Bap_plugins_config.plugindir
+  let is_bundle file = Filename.check_suffix file ".plugin"
 
+  (* the library may contain plugin files, besides the directories *)
   let plugin_paths library =
     [ library; paths_of_env (); [ path ] ]
     |> List.concat
     |> List.filter ~f:Sys.file_exists
-    |> List.filter ~f:Sys.is_directory
+    |> List.filter ~f:(fun p -> Sys.is_directory p || is_bundle p)
 
   let has_feature requested features =
     match requested with
@@ -286,17 +289,26 @@ module Plugins = struct
     let env = strset (Option.value env ~default:[]) in
     plugin_paths library
     |> List.concat_map ~f:(fun dir ->
-        Sys.readdir dir |> Array.to_list
+        (if Sys.is_directory dir then
+           Sys.readdir dir |> Array.to_list
+           |> List.map ~f:(fun file -> dir / file)
+         else [ dir ])
         |> List.filter_map ~f:(fun file ->
-            let file = dir / file in
-            if not (Filename.check_suffix file ".plugin") then None
+            if not (is_bundle file) then None
             else
               try
                 let p = Plugin.of_path file in
                 Option.some_if (is_selected ~provides ~env p) (Ok p)
               with exn -> Some (Error (file, Error.of_exn exn))))
-    |> List.sort ~compare:(fun x y ->
+    |> List.stable_sort ~compare:(fun x y ->
         String.compare (plugin_name x) (plugin_name y))
+    (* a plugin in the library takes precedence over the plugins with the
+       same name that are found after it *)
+    |> List.remove_consecutive_duplicates ~which_to_keep:`First
+         ~equal:(fun x y ->
+           match (x, y) with
+           | Ok x, Ok y -> String.equal (Plugin.name x) (Plugin.name y)
+           | _ -> false)
 
   let list_bundles ?env ?provides ?library () =
     collect_bundles ?env ?provides ?library ()

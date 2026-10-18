@@ -61,14 +61,13 @@ let man =
 
   ```
   bapbuild my_analysis.plugin
-  bapbundle install my_analysis.plugin
   ```
 
   The analysis is ready and could be run using the `$(b,--passes)
-  option, e.g.,
+  option, after loading the plugin with the $(b,--plugin) option, e.g.,
 
   ```
-  bap disassemble /bin/echo --passes=my-analysis
+  bap disassemble /bin/echo --plugin=my_analysis.plugin --passes=my-analysis
   ```
 
   Please note, that the name of the pass is automatically derived from

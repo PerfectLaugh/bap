@@ -192,10 +192,17 @@ module Show = struct
     show_files `libraries m bundle
 end
 
+let deprecated command =
+  eprintf
+    "warning: `bapbundle %s' is deprecated, load the plugin with `bap \
+     --plugin=FILE', or add its folder to the search paths with `bap -L DIR'@."
+    command
+
 module Install = struct
   let args = [ destdir_arg ]
 
   let main () =
+    deprecated "install";
     if String.is_empty target.contents then raise Target_unspecified;
     target := normalized !target;
     if not (Sys.file_exists !destdir) then FileUtil.mkdir ~parent:true !destdir;
@@ -210,6 +217,7 @@ module Remove = struct
   let args = [ destdir_arg ]
 
   let main () =
+    deprecated "remove";
     if String.is_empty target.contents then raise Target_unspecified;
     let file = normalized @@ Filename.concat !destdir !target in
     if Sys.file_exists file then FileUtil.rm ~recurse:true [ file ]

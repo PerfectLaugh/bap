@@ -85,121 +85,63 @@ let with_exit_code env name args expected status =
     (out.status = Exited status);
   contains env ("got the right message for the " ^ name) out expected
 
-(* adds and removes the API files in the installed API directories, which
-   it makes unreadable, so it runs alone *)
-let api_options _ =
+(* the API files are searched in the API paths, or read in place, when
+   they are specified with [--api-file] *)
+let api_options data =
   [
-    case ~serial:true "api-options" (fun env ->
-        let data_dirs =
-          (bap env [ "--api-list-paths" ]).text |> String.split_on_char '\n'
-          |> List.map String.trim
-          |> List.filter (( <> ) "")
-        in
-        let api_name = "api-options.h" in
-        let api_file = write env api_name "" in
+    case "api-options" (fun env ->
         let api_path = file env "api" in
         Sys.mkdir api_path 0o755;
         Sys.mkdir (Filename.concat api_path "c") 0o755;
         ignore (write env "api/c/api-options.h" "");
-        (* the link in the working directory to the file in the temporary
-           directory, which can't be created on Windows without privileges *)
-        let link = "link-" ^ api_name in
-        let links = not Sys.win32 in
-        let tmp = Filename.temp_file "api-options" ".h" in
-        if links then Unix.symlink tmp (file env link);
-        let cases =
+        Sys.mkdir (file env "own") 0o755;
+        let own = write env "own/api-options.h" "" in
+        let api_file =
+          write env "api-file.h" "int print_strings(char *a, int n);\n"
+        in
+        let echo = path data (echo "x86_64-linux-gnu") in
+        List.iter
+          (fun (name, args, expected, status) ->
+            with_exit_code env name args expected status)
           [
-            ("api_show", "show", api_path, api_name, 0, "", false, true);
-            ("list-paths", "list-paths", api_path, api_path, 0, "", false, true);
-            ("add api", "add", "", "", 0, "c:" ^ api_file, false, true);
-            ( "add duplicate",
-              "add",
-              "",
-              "Will not overwrite",
-              1,
-              "c:" ^ api_file,
-              false,
-              true );
-            ( "add not existed",
-              "add",
-              "",
+            ( "api-show",
+              [ "--api-path"; api_path; "--api-show" ],
+              "api-options.h",
+              0 );
+            ( "list-paths",
+              [ "--api-path"; api_path; "--api-list-paths" ],
+              api_path,
+              0 );
+            ( "show api file",
+              [ "--api-file"; "c:" ^ api_file; "--api-show" ],
+              api_file,
+              0 );
+            ( "api file replaces api in path",
+              [ "--api-path"; api_path; "--api-file"; "c:" ^ own; "--api-show" ],
+              own,
+              0 );
+            ( "api file not existed",
+              [ "--api-file"; "c:some_file" ],
               "can't find api",
-              1,
-              "c:some_file",
-              false,
-              true );
-            ("remove api", "rem", "", "", 0, "c:" ^ api_file, false, true);
-            ( "remove api at path",
-              "rem",
-              api_path,
-              "",
-              0,
-              "c:" ^ api_file,
-              false,
-              true );
-            ( "remove not existed",
-              "rem",
-              "",
-              "Can't find api",
-              1,
-              "c:some_file",
-              false,
-              true );
-            ("add api as a link", "add", "", "", 0, "c:" ^ link, false, links);
-            ("rem api as a link", "rem", "", "", 0, "c:" ^ link, false, links);
-            ( "link as direcory",
-              "add",
-              link,
-              "not a directory",
-              1,
-              "c:" ^ api_file,
-              false,
-              links );
-            (* the permissions of the directories are POSIX *)
-            ( "add to denied path",
-              "add",
-              "",
-              "permission denied",
-              1,
-              "c:" ^ api_file,
-              true,
-              not Sys.win32 );
-            ( "add to next path",
-              "add",
-              api_path,
-              "",
-              0,
-              "c:" ^ api_file,
-              true,
-              not Sys.win32 );
-          ]
+              1 );
+            ( "api file without language",
+              [ "--api-file"; api_file ],
+              "expected <lang>:<file>",
+              1 );
+            ( "api file applied",
+              [ echo; "--dump=bir"; "--api-file"; "c:" ^ api_file ],
+              "print_strings_a :: in out u64 = RDI",
+              0 );
+          ];
+        let out =
+          bap env
+            [ "--api-path"; api_path; "--api-file"; "c:" ^ own; "--api-show" ]
         in
-        let perms =
-          List.map (fun dir -> (dir, (Unix.stat dir).st_perm)) data_dirs
-        in
-        let deny () =
-          List.iter
-            (fun (dir, perm) -> Unix.chmod dir (perm land lnot 0o100))
-            perms
-        and allow () =
-          List.iter (fun (dir, perm) -> Unix.chmod dir perm) perms
-        in
-        Fun.protect
-          ~finally:(fun () -> Sys.remove tmp)
-          (fun () ->
-            List.iter
-              (fun (name, cmd, path, expected, status, file, denied, enabled) ->
-                if enabled then
-                  let args =
-                    (if path = "" then [] else [ "--api-path"; path ])
-                    @ (("--api-" ^ cmd) :: (if file = "" then [] else [ file ]))
-                  in
-                  if denied then (
-                    deny ();
-                    Fun.protect ~finally:allow (fun () ->
-                        with_exit_code env name args expected status))
-                  else with_exit_code env name args expected status)
-              cases));
+        check env "the replaced api in path isn't shown"
+          (not
+             (Re.execp
+                (Re.compile (Re.str (Filename.concat api_path "c")))
+                out.text)));
   ]
 
 let byteweight data =
@@ -456,6 +398,46 @@ let plugins _ =
           plugins);
   ]
 
+(* the recipes, the Primus Lisp files, and the Primus systems are used from
+   their files, without installing them *)
+let uninstalled data =
+  let echo = path data (echo "x86_64-linux-gnu") in
+  [
+    case "uninstalled/recipe" (fun env ->
+        let recipe = write env "dump.recipe" "(option dump bir)\n" in
+        has env "the recipe at an absolute path is loaded"
+          (bap env [ echo; "--recipe=" ^ recipe ])
+          "sub main");
+    case "uninstalled/lisp" (fun env ->
+        let lisp =
+          write env "uninstalled.lisp"
+            "(defun uninstalled-lisp-function ()\n\
+            \  \"is loaded from its file\"\n\
+            \  0)\n"
+        in
+        has env "the lisp file is loaded"
+          (bap env
+             [
+               echo;
+               "--primus-lisp-load=posix," ^ lisp;
+               "--primus-lisp-documentation";
+             ])
+          "uninstalled-lisp-function";
+        has env "the missing lisp file is reported"
+          (bap env [ echo; "--primus-lisp-load=missing.lisp" ])
+          "unable to load the Primus Lisp file");
+    case "uninstalled/systems" (fun env ->
+        let asd =
+          write env "uninstalled.asd"
+            "(defsystem uninstalled:executor\n\
+            \  :description \"is loaded from its file\"\n\
+            \  :depends-on (bap:stubbed-executor))\n"
+        in
+        has env "the systems file is loaded"
+          (bap env [ "primus-systems"; "--primus-systems-add-path=" ^ asd ])
+          "uninstalled:executor");
+  ]
+
 let source_type _ =
   [
     case "source-type" (fun env ->
@@ -509,5 +491,6 @@ let tests =
     plugins;
     source_type;
     symbols;
+    uninstalled;
     version;
   ]

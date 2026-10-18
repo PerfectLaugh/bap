@@ -415,8 +415,12 @@ let () =
 
   let features =
     Config.(
-      param_all (list string) ~doc:"load specified module" "load"
-        ~default:[ [ "posix" ] ])
+      param_all (list string)
+        ~doc:
+          "load specified module, which is either a name of a module in\n\
+          \      the paths of the lisp libraries, or a path to a file with the\n\
+          \      $(b,.lisp) extension, whose folder is then searched first"
+        "load" ~default:[ [ "posix" ] ])
   in
 
   let semantics =
@@ -464,8 +468,24 @@ let () =
     Project.register_pass' ~deps:[ "api" ] ~autorun:true Documentation.print;
   if !!enable_typecheck then
     Project.register_pass' ~deps:[ "api" ] ~autorun:true typecheck;
-  let paths = [ Filename.current_dir_name ] @ !!libs @ library_paths in
-  let features = "core" :: List.concat !!features in
+  (* a feature may be specified by its file, whose folder is searched first *)
+  let features = List.concat !!features in
+  let files = List.filter features ~f:(String.is_suffix ~suffix:".lisp") in
+  List.iter files ~f:(fun file ->
+      if not (Sys.file_exists file) then
+        invalid_argf "unable to load the Primus Lisp file %S" file ());
+  let paths =
+    List.map files ~f:Filename.dirname
+    @ [ Filename.current_dir_name ]
+    @ !!libs @ library_paths
+  in
+  let features =
+    "core"
+    :: List.map features ~f:(fun feature ->
+        Option.value_map ~default:feature
+          (String.chop_suffix feature ~suffix:".lisp")
+          ~f:Filename.basename)
+  in
   Primus.Components.register_generic ~package:"bap" "lisp-type-checker"
     (module TypeErrorSummary)
     ~desc:"Typechecks program and outputs the summary in the standard output.";

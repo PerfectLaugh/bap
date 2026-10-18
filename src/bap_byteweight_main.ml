@@ -294,6 +294,11 @@ let fetch fname url version _ctxt =
       if Result.is_ok result then fail (Http code) else result
 
 let install src dst _ctxt =
+  eprintf
+    "warning: `install' is deprecated, pass the signatures to bap with \
+     --byteweight-sigs=%s instead\n\
+     %!"
+    src;
   try
     create_parent_dir dst;
     FileUtil.cp [ src ] dst;
@@ -425,7 +430,10 @@ let () =
     fetch ~doc:"Downloads signatures from to the current folder.";
   declare "install"
     (args $ src $ dst)
-    install ~doc:"Copies signatures to the predefined location.";
+    install
+    ~doc:
+      "Copies signatures to the predefined location. Deprecated, use \
+       $(b,--byteweight-sigs) of bap instead.";
   declare "update"
     (args $ url $ dst $ version)
     update ~doc:"Downloads and installs signatures.";
