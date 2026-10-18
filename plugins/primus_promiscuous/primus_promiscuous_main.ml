@@ -195,28 +195,12 @@ module EnableDivisionByZero (Machine : Primus.Machine.S) = struct
       (module DoNothing)
 end
 
-let legacy_promiscous_mode_components =
-  [
-    "var-randomizer";
-    "mem-randomizer";
-    "arg-randomizer";
-    "promiscuous-path-explorer";
-    "division-by-zero-handler";
-    "limit";
-  ]
-
-let enable_legacy_promiscuous_mode () =
-  Primus.System.Repository.update ~package "legacy-main" ~f:(fun init ->
-      List.fold legacy_promiscous_mode_components ~init
-        ~f:(fun system component ->
-          Primus.System.add_component system ~package component))
-
 open Config
 
 let desc =
-  "When this mode is enabled the Primus Machine will venture into paths with \
-   unsatisfied constraints. Basically, it means that on every branch the state \
-   is duplicated."
+  "Provides the components with which the Primus Machine ventures into paths \
+   with unsatisfied constraints, e.g., in the $(b,bap:promiscuous-executor) \
+   system. Basically, it means that on every branch the state is duplicated."
 ;;
 
 manpage
@@ -230,11 +214,9 @@ manpage
   ]
 ;;
 
-let enabled = flag "mode" ~doc:"(DEPRECATED) Enable the mode."
-
 let () =
   declare_extension ~doc:"enables the promiscuous mode of execution"
-    ~provides:[ "primus"; "fuzzer" ] (fun { get = ( !! ) } ->
+    ~provides:[ "primus"; "fuzzer" ] (fun _ ->
       Primus.Components.register_generic "promiscuous-path-explorer"
         (module Forker)
         ~package
@@ -243,6 +225,4 @@ let () =
            flipping the branch conditions.";
       Primus.Components.register_generic "division-by-zero-handler"
         (module EnableDivisionByZero)
-        ~package ~desc:"Disables division by zero errors.";
-
-      if !!enabled then enable_legacy_promiscuous_mode ())
+        ~package ~desc:"Disables division by zero errors.")

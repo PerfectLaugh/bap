@@ -279,40 +279,11 @@ let projection_enabled =
       "Reflects the state of the taint propagation engine to the\n\
       \    $(b,tainted-ptrs) and $(b,tainted-regs) term attributes."
 
-let soft_deprecation_notice =
-  {|
-This option is left for compatibility with the old interface and
-is not compatible with the $(b,from-attributes) or
-$(b,to-attrbutes) options. It is an error to mix options from the
-new and old interfaces.
-|}
-
-let enabled =
-  flag "run"
-    ~doc:
-      ("Enables propagating taint from term attributes and back to attributes, \
-        unless the latter is disabled with the\n\
-       \           $(b,no-marks) option. " ^ soft_deprecation_notice)
-
-let marking_disabled =
-  flag "no-marks"
-    ~doc:
-      ("Disables the projection of the taint engine state to term\n\
-       \    attributes. The option is only valid when the $(b,run) option is\n\
-       \    specified. " ^ soft_deprecation_notice)
-
 let () =
   declare_extension
     ~doc:"compatibility layer for the old traint propagation framework"
     ~provides:[ "dataflow"; "pass"; "analysis"; "taint"; "primus" ]
   @@ fun { get = is } ->
-  if is injection_enabled || is projection_enabled then
-    if is enabled || is marking_disabled then
-      invalid_arg "Incorrect mix of old and new parameters";
-  if is marking_disabled && not (is enabled) then
-    invalid_arg
-      "The no-marks option is only valid if the run option is specified";
-
   List.iter markers ~f:(fun (name, comp, desc) ->
       Primus.Components.register_generic name comp ~package:"bap" ~desc);
 
@@ -323,11 +294,5 @@ let () =
       "Introduces a taint when a term marked with tainted-reg or tainted-ptr \
        is entered.";
 
-  (* Modern interface *)
   if is injection_enabled then enable_injection ();
-  if is projection_enabled then enable_projection ();
-
-  (* Legacy interface *)
-  if is enabled then (
-    enable_injection ();
-    if not (is marking_disabled) then enable_projection ())
+  if is projection_enabled then enable_projection ()

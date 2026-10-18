@@ -6,8 +6,6 @@ bapbundle \- manages BAP bundles.
 .nf
 \fBbapbundle\fR \-help
 \fBbapbundle\fR \fICOMMAND\fR \-help
-\fBbapbundle\fR \fBinstall\fR [\fIOPTION\fR]...  \fIBUNDLE\fR
-\fBbapbundle\fR \fBremove\fR  [\fIOPTION\fR]...  \fIBUNDLE\fR
 \fBbapbundle\fR \fBshow\fR    [\fIOPTION\fR]...  \fIBUNDLE\fR
 \fBbapbundle\fR \fBupdate\fR  [\fIOPTION\fR]...  \fIBUNDLE\fR
 \fBbapbundle\fR \fBpack\fR    [\fIOPTION\fR]...  \fIBUNDLE\fR
@@ -18,23 +16,15 @@ bapbundle \- manages BAP bundles.
 
 A bundle is an opaque package containing anything that is requested for a
 program to work in a standalone mode. The \fBbapbundle\fR tool allows a user
-to create bundles, update meta information and pack resources. It also can
-install and remove bundles into the designated bundle repository, where they
-can be found by a main BAP program without extra options.
+to create bundles, update meta information and pack resources. A bundle
+is loaded by a main BAP program from its file with the \fB\-\-plugin\fR
+option, or from a folder of bundles added to the plugins search paths with
+the \fB\-L\fR option.
 
 Usually the \fBbapbundle\fR command is used implicitly by the
 \fBbapbuild\fR, so there is no need to use the \fBpack\fR command
 directly. A user can, however, add some resource files or update meta
 information, using the \fBupdate\fR command.
-
-The \fBinstall\fR command copies a \fIBUNDLE\fR to a known
-destination, that is seearched by a main program, when plugins are
-loaded automatically. The default destination is specified at program
-configuration time and usually works out of box. The destination can
-be overridden in the runtime, however.
-
-The \fBremove\fR command removes a previously installed \fIBUNDLE\fR
-from a given destination.
 
 .SH ARGUMENTS
 .TP 4
@@ -73,15 +63,6 @@ Sets the \fITEXT\fR as a package description. The text should consist
 of a one line short description, followed by an optional detailed
 multiline description. The detailed description should be separated
 from the short one by a new line symbol.
-
-.SH INSTALL AND REMOVE OPTIONS
-
-.TP
-\fB\-destdir\fR \fIDIR\f
-
-Specifies a directory for \fBinstall\fR and \fBremove\fR commands.
-If unspecified, then a default directory specified at configuration
-time will be used.
 
 .SH SHOW OPTIONS
 

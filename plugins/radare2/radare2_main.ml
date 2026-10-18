@@ -131,9 +131,9 @@ let () =
       `P "This plugin provides a symbolizer based on radare2.";
       `S "EXAMPLES";
       `P "To view the symbols after running the plugin:";
-      `P "$(b, bap) $(i,executable) --dump-symbols ";
+      `P "$(b, bap) $(i,executable) --passes=dump-symbols";
       `P "To view symbols without this plugin:";
-      `P "$(b, bap) $(i,executable) --no-radare2 --dump-symbols";
+      `P "$(b, bap) $(i,executable) --no-radare2 --passes=dump-symbols";
       `S "SEE ALSO";
       `P "$(b,bap-plugin-objdump)(1)";
     ];

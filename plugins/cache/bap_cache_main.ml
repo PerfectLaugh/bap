@@ -114,16 +114,8 @@ let cache_dir =
 
 let () =
   documentation doc;
-  let clean =
-    Configuration.flag
-      ~doc:
-        "Cleanup all caches.\n\
-        \         Deprecated, use $(b, bap cache --clean) instead"
-      "clean"
-  in
   Bap_main.Extension.declare @@ fun ctxt ->
   init (ctxt --> cache_dir);
-  if ctxt --> clean then run_and_exit GC.clean;
   provide_service ();
   Ok ()
 

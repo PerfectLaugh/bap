@@ -8,19 +8,10 @@ exception Provides_field_syntax_error
 exception Target_unspecified
 exception Target_is_directory
 exception Target_doesn't_exist
-exception Destdir_is_not_a_dir
-exception Target_not_installed
 
 let target = ref ""
 let manifest = ref (Manifest.create "")
 let modified = String.Hash_set.create ()
-let destdir = ref Bap_bundle_config.plugindir
-
-let destdir_arg =
-  ( "-destdir",
-    Arg.Set_string destdir,
-    sprintf "DIR Set the destination directory (default: %s)" !destdir )
-
 let field_modified field = Hash_set.add modified (Field.name field)
 let is_field_modified field = Hash_set.mem modified (Field.name field)
 
@@ -192,38 +183,6 @@ module Show = struct
     show_files `libraries m bundle
 end
 
-let deprecated command =
-  eprintf
-    "warning: `bapbundle %s' is deprecated, load the plugin with `bap \
-     --plugin=FILE', or add its folder to the search paths with `bap -L DIR'@."
-    command
-
-module Install = struct
-  let args = [ destdir_arg ]
-
-  let main () =
-    deprecated "install";
-    if String.is_empty target.contents then raise Target_unspecified;
-    target := normalized !target;
-    if not (Sys.file_exists !destdir) then FileUtil.mkdir ~parent:true !destdir;
-    if not (Sys.is_directory !destdir) then raise Destdir_is_not_a_dir;
-    if Sys.file_exists !target then
-      if Sys.is_directory !target then raise Target_is_directory
-      else FileUtil.cp [ !target ] !destdir
-    else raise Target_doesn't_exist
-end
-
-module Remove = struct
-  let args = [ destdir_arg ]
-
-  let main () =
-    deprecated "remove";
-    if String.is_empty target.contents then raise Target_unspecified;
-    let file = normalized @@ Filename.concat !destdir !target in
-    if Sys.file_exists file then FileUtil.rm ~recurse:true [ file ]
-    else raise Target_not_installed
-end
-
 let args = ref []
 let parse = ref ignore
 let main = ref Fn.id
@@ -243,8 +202,6 @@ let select arg =
   | "pack" -> switch (module Pack)
   | "update" -> switch (module Update)
   | "show" -> switch (module Show)
-  | "install" -> switch (module Install)
-  | "remove" -> switch (module Remove)
   | msg -> raise (Arg.Bad ("Unknown command: " ^ msg))
 
 let dispatch arg = !parse arg
@@ -253,8 +210,6 @@ let usage_msg =
   "USAGE\n\n\
   \  bapbundle -help\n\
   \  bapbundle <command> -help\n\
-  \  bapbundle install [<install-options>] <bundle>\n\
-  \  bapbundle remove  [<remove-options>]  <bundle>\n\
   \  bapbundle show    [<show-options>]    <bundle>\n\
   \  bapbundle update  [<update-options>]  <bundle>\n\
   \  bapbundle pack    [<pack-options>]    <bundle>\n\n\
@@ -294,8 +249,5 @@ let () =
       error "Can't open the specified bundle file, it doesn't exist"
   | Not_a_bundle ->
       error "The provided bundle file is either malformed or is not a bundle"
-  | Destdir_is_not_a_dir ->
-      error "The destination should be a directory, not a file"
-  | Target_not_installed -> error "The specified plugin is not installed"
   | Sys_error err -> error "%s" err
   | exn -> error "Unexpected error: %s\nPlease report" @@ Exn.to_string exn

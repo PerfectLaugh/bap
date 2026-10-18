@@ -173,11 +173,6 @@ effect on user generators) or generators created by other plugins (for
 example primus-loader and architecture specific plugins may have their
 own randomization policies).
 
-For backward compatibility the
-$(b,bap:var-randomizer),$(b,bap:mem-randomizer), and
-$(b,bap:arg-randomizer) are added to the $(b,bap:legacy-main) system
-when the $(b,--primus-promiscuous-mode) is enabled.
-
 |}
 
 open Core

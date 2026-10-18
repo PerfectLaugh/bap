@@ -104,50 +104,39 @@ module Cmdline = struct
       `S "SYNOPSIS";
       `Pre
         "\n\
-        \    $(b,--)$(mname)\n\
-        \    $(b,--)$(mname)$(b,-taint)\n\
-        \    $(b,--)$(mname)$(b,-print)\n\
-        \    $(b,--)$(mname)$(b,-mark)";
+        \    $(b,--passes=)$(mname)\n\
+        \    $(b,--passes=)$(mname)$(b,-taint)\n\
+        \    $(b,--passes=)$(mname)$(b,-print)\n\
+        \    $(b,--passes=)$(mname)$(b,-mark)";
       `S "DESCRIPTION";
       `P
         "If a subroutine has GNU attribute $(b,warn_unused_result) and\n\
         \  its result is not used, then print a warning message.";
       `S "PASSES";
       `I
-        ( "$(b,--)$(mname)$(b,-taint)",
+        ( "$(mname)$(b,-taint)",
           "Taint all values defined by functions that are marked with\n\
           \     $(b,warn_unused_result) attribute. Will run $(b,callsites) as a\n\
           \     dependency." );
-      `I ("$(b,--)$(mname)$(b,-print)", "Print all calls that weren't checked.");
+      `I ("$(mname)$(b,-print)", "Print all calls that weren't checked.");
       `I
-        ( "$(b,--)$(mname)$(b,-mark)",
+        ( "$(mname)$(b,-mark)",
           "Mark all unchecked calls with $(b,Term.dead) attribute" );
       `I
-        ( "$(b,--)$(mname)",
-          "Same as $(b,--)$(mname)$(b,-taint) $(b,--propagate-taint \
-           --)$(mname)$(b,-print)" );
+        ( "$(mname)",
+          "Same as $(mname)$(b,-taint),$(b,propagate-taint),$(mname)$(b,-print)"
+        );
       `S "SEE ALSO";
       `P
         "$(b,bap-api)(1), $(b,bap-plugin-propagate-taint)(1), \
          $(b,bap-plugin-taint)(1)";
     ]
 
-  let passes = [ name; "--taint"; "--mark"; "--print" ]
-
-  let pass name =
-    let doc = sprintf "run $(mname)$(b,-%s) pass" name in
-    Config.(flag name ~doc)
-
-  let taint_p = pass "taint"
-  let print_p = pass "print"
-  let mark_p = pass "mark"
-  let passes { Config.get = ( ! ) } = (ignore !taint_p, !print_p, !mark_p)
-
   let () =
     Config.manpage man;
     Config.declare_extension ~doc:"the legacy warn-unused analysis"
       ~provides:[ "pass"; "analysis" ]
-    @@ fun { Config.get = ( ! ) } ->
+    @@ fun _ ->
     Project.register_pass ~deps:[ "callsites" ] ~name:"taint" taint;
     Project.register_pass' ~name:"print" (run print);
     Project.register_pass ~name:"mark" (run mark);

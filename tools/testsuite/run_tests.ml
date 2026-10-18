@@ -17,10 +17,7 @@ let floats name args data =
   ]
 
 let sse = floats "llvm-x86-64-sse" []
-
-let x86_floats =
-  floats "x86-floats"
-    [ "--bil-enable-fp-emulation"; "--x86-with-legacy-floating-points" ]
+let x86_floats = floats "x86-floats" [ "--bil-enable-fp-emulation" ]
 
 (* the api of PowerPC is not the default one *)
 let api data file =
@@ -54,7 +51,9 @@ let run data =
               let out =
                 bap env
                   ([ path data file; "--run-argv=hello,cruel,world" ]
-                  @ [ "--primus-lisp-type-check"; "--run"; "--no-objdump" ]
+                  @ [
+                      "--primus-lisp-type-check"; "--passes=run"; "--no-objdump";
+                    ]
                   @ api data file
                   @ [ "--run-systems=" ^ system ])
               in
@@ -89,13 +88,26 @@ let contains_any subs name =
 (* the binaries of mingw have the most code, so they are the slowest *)
 let mingw = contains_any [ "mingw" ]
 
+(* the legacy main system that explores all paths, as the promiscuous
+   executor does *)
+let promiscuous_main =
+  {|(defsystem test:promiscuous-legacy-main
+  :description "The legacy main system in the promiscuous mode."
+  :depends-on (bap:legacy-main)
+  :components (bap:var-randomizer
+               bap:mem-randomizer
+               bap:arg-randomizer
+               bap:promiscuous-path-explorer
+               bap:division-by-zero-handler
+               bap:limit))
+|}
+
 let taint data =
   let opts =
     [
-      "--run";
+      "--passes=run";
       "--run-entry-points=all-subroutines";
       "--primus-limit-max-length=4096";
-      "--primus-promiscuous-mode";
       "--primus-greedy-scheduler";
       "--primus-propagate-taint-from-attributes";
       "--primus-propagate-taint-to-attributes";
@@ -114,10 +126,15 @@ let taint data =
             Printf.sprintf "taint/%s/%s" system (Filename.basename file)
           in
           case ~slow:(mingw file) name (fun env ->
+              let systems = write env "promiscuous-main.asd" promiscuous_main in
               let out =
                 bap env
                   ((path data file :: opts) @ api data file
-                  @ [ "--dump=bir"; "--run-systems=" ^ system ])
+                  @ [
+                      "--dump=bir";
+                      "--primus-systems-add-path=" ^ systems;
+                      "--run-systems=" ^ system;
+                    ])
               in
               has env ("introduce in " ^ system) out {|\.tainted-reg|};
               has env ("propagate in " ^ system) out {|\.tainted-regs|};
@@ -125,7 +142,7 @@ let taint data =
               (* the code of these binaries isn't reachable from the entries *)
               if not (contains_any [ "android"; "mips"; "w64-mingw" ] file) then
                 lacks env "no-dead-code" out {|\.dead|})))
-    [ "bap:legacy-main"; "bap:reflective-taint-analyzer" ]
+    [ "test:promiscuous-legacy-main"; "bap:reflective-taint-analyzer" ]
 
 (* the symbolic executor finds the input that makes a binary print access *)
 let symexec data =
@@ -138,7 +155,7 @@ let symexec data =
             bap env ~timeout:240. ~until:"access"
               ((path data file :: api data file)
               @ [
-                  "--run";
+                  "--passes=run";
                   "--run-systems=bap:symbolic-executor";
                   "--primus-lisp-load=symbolic-stdio,posix";
                   "--primus-symbolic-executor-cutoff-level=16";

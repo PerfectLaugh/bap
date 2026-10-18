@@ -6,8 +6,8 @@ let man =
   command of the bap frontend which is assumed when no other command
   was specified.
 
-  The input file is automatically parsed (unless the $(b,--raw) or
-  $(b,--loader) options were specified), then the extracted code, if
+  The input file is automatically parsed (unless the $(b,--loader)
+  option was specified), then the extracted code, if
   any, is disassembled, and the `Bap.Std.project` data structure is
   built, on which the specified passes are run.
 
@@ -110,7 +110,6 @@ let features_used =
 
 type failure =
   | Expects_a_regular_file of string
-  | Old_and_new_style_passes
   | Unknown_pass of string
   | Incompatible_options of string * string
   | Project of Error.t
@@ -278,12 +277,6 @@ let process passes outputs project =
     | `stdout, fmt, ver -> Project.Io.show ~fmt ?ver proj);
   proj
 
-let old_style_passes =
-  Extension.Command.switches
-    ~doc:(sprintf "Enables the pass %s in the old style (DEPRECATED)")
-    (Plugins.list () |> List.map ~f:Plugin.name)
-    Fn.id
-
 let passes =
   Extension.Command.parameters
     ~doc:"Run the selected passes (in the specified order)" ~aliases:[ "p" ]
@@ -393,11 +386,6 @@ let validate_knowledge update kb =
         (Sys.file_exists path || update)
         ~error:(Fail No_knowledge)
 
-let validate_passes_style old_style_passes new_style_passes =
-  match (old_style_passes, new_style_passes) with
-  | xs, [] | [], xs -> Ok xs
-  | _ -> Error (Fail Old_and_new_style_passes)
-
 let validate_passes passes =
   let known =
     Project.passes ()
@@ -503,15 +491,14 @@ let create_and_process input libraries outputs passes loader target update kb
 let _disassemble_command_registered : unit =
   let args =
     let open Extension.Command in
-    args $ input $ libraries $ outputs $ old_style_passes $ passes $ loader
-    $ target $ update $ knowledge $ print_missing
+    args $ input $ libraries $ outputs $ passes $ loader $ target $ update
+    $ knowledge $ print_missing
   in
   Extension.Command.declare ~doc:man "disassemble" ~requires:features_used args
   @@
   fun input
     libraries
     outputs
-    old_style_passes
     passes
     loader
     target
@@ -525,9 +512,7 @@ let _disassemble_command_registered : unit =
   validate_knowledge update kb >>= fun () ->
   validate_input input >>= fun () ->
   Err.List.iter libraries ~f:validate_input >>= fun () ->
-  validate_passes_style old_style_passes (List.concat passes)
-  >>= validate_passes
-  >>= fun passes ->
+  validate_passes (List.concat passes) >>= fun passes ->
   Dump_formats.parse outputs >>= fun outputs ->
   create_and_process input libraries outputs passes loader target update kb
     print_missing ctxt
@@ -567,31 +552,17 @@ let _compare_command_registered : unit =
 
   let args =
     let open Extension.Command in
-    args $ collator $ base $ inputs $ outputs $ old_style_passes $ passes
-    $ loader $ target $ update $ knowledge
+    args $ collator $ base $ inputs $ outputs $ passes $ loader $ target
+    $ update $ knowledge
   in
   Extension.Command.declare "compare" ~doc ~requires:features_used args
-  @@
-  fun collator
-    input
-    inputs
-    outputs
-    old_style_passes
-    passes
-    loader
-    target
-    update
-    kb
-    ctxt
-  ->
+  @@ fun collator input inputs outputs passes loader target update kb ctxt ->
   match Project.Collator.find ~package:"bap" collator with
   | None -> Error (Fail (Unknown_collator collator))
   | Some collator -> (
       setup_gc_unless_overriden ();
       Err.all_unit @@ List.map (input :: inputs) ~f:validate_input >>= fun () ->
-      validate_passes_style old_style_passes (List.concat passes)
-      >>= validate_passes
-      >>= fun passes ->
+      validate_passes (List.concat passes) >>= fun passes ->
       Dump_formats.parse outputs >>= fun outputs ->
       let projs =
         Seq.map
@@ -658,9 +629,6 @@ let nice_pp_error ppf er =
 
 let string_of_failure = function
   | Expects_a_regular_file name -> sprintf "Unable to open file `%s'." name
-  | Old_and_new_style_passes ->
-      "Bad invocation: passes are specified in both old an new style, please \
-       switch to the new style, e.g., `-p<p1>,<p2>,<p3>'"
   | Unknown_pass name ->
       asprintf "Bad invocation: failed to find the pass named %S, %a" name
         pp_guesses name

@@ -15,18 +15,6 @@ let run options project =
   let dest = Phoenix.store () in
   printf "Stored data to %s@." dest
 
-(* Deprecated since, by design choice, this no longer maintains order
-   of input. However, the [--label-with] will maintain order of
-   input. *)
-let dep_label_with x y =
-  let name = sprintf "labels-with-%s" x in
-  let doc = sprintf "Put %s on graph labels" y in
-  Config.(flag ~deprecated:"Use --label-with=.. instead." name ~doc)
-
-let with_name = dep_label_with "name" "block name"
-let with_asm = dep_label_with "asm" "assembler instructions"
-let with_bil = dep_label_with "bil" "bil instructions"
-
 let labels_with : _ Config.param =
   let doc =
     "Put block name, assembler instructions, or bil instructions on\n\
@@ -85,19 +73,8 @@ let () =
   Config.manpage man;
   Config.declare_extension ~doc:"outputs the project in a phoenix format"
     ~provides:[ "printer" ] (fun { Config.get = ( ! ) } ->
-      let cfg_format =
-        let deprecated_options =
-          [
-            (`with_name, !with_name);
-            (`with_asm, !with_asm);
-            (`with_bil, !with_bil);
-          ]
-          |> List.filter ~f:snd |> List.map ~f:fst
-        in
-        deprecated_options @ !labels_with
-      in
       let options =
-        create !output_folder cfg_format !no_resolve !keep_alive !no_inline
+        create !output_folder !labels_with !no_resolve !keep_alive !no_inline
           !keep_consts !no_optimizations
       in
       Project.register_pass' (run options))

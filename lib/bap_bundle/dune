@@ -5,18 +5,3 @@
  (preprocess
   (pps ppx_bap))
  (libraries uri camlzip unix core core_kernel.caml_unix))
-
-(rule
- (target bap_bundle_config.ml)
- (deps
-  (:input bap_bundle_config.ml.ab)
-  (alias ../../config)
-  ../../config.status)
- (action
-  (with-stdin-from
-   %{input}
-   (with-stdout-to
-    %{target}
-    (chdir
-     %{workspace_root}
-     (run ./tools/rewrite.exe -filename %{input}))))))

@@ -6,8 +6,7 @@ A utitilty to manipulate Byteweight function start signatures. This
 utility is not needed for Byteweight to function properly, for that
 you need the byteweight plugin. The utility is used to update
 signatures, using new training corpora, fetch the existing signatures
-from the Internet, install it into proper locations, and test the
-results.
+from the Internet, and test the results.
 
 # TRAINING
 
@@ -293,19 +292,6 @@ let fetch fname url version _ctxt =
       FileUtil.rm [ tmp ];
       if Result.is_ok result then fail (Http code) else result
 
-let install src dst _ctxt =
-  eprintf
-    "warning: `install' is deprecated, pass the signatures to bap with \
-     --byteweight-sigs=%s instead\n\
-     %!"
-    src;
-  try
-    create_parent_dir dst;
-    FileUtil.cp [ src ] dst;
-    printf "Installed signatures to %s\n" dst;
-    Ok ()
-  with exn -> fail (Unknown exn)
-
 let update url dst version ctxt =
   let old = Filename.temp_file "bap_old_sigs" ".zip" in
   if Sys.file_exists dst then FileUtil.cp [ dst ] old;
@@ -389,11 +375,6 @@ module Parameters = struct
       "from-version" ~aliases:[ "v"; "for-version" ]
       ~doc:"fetch signatures for the specified version"
 
-  let src =
-    Command.argument
-      Type.("SRC" %: non_dir_file =? "sigs.zip")
-      ~doc:"Signatures file"
-
   let dst = Command.argument Type.(path =? Sigs.default_path) ~doc:"Destination"
 
   let output =
@@ -428,12 +409,6 @@ let () =
   declare "fetch"
     (args $ output $ url $ version)
     fetch ~doc:"Downloads signatures from to the current folder.";
-  declare "install"
-    (args $ src $ dst)
-    install
-    ~doc:
-      "Copies signatures to the predefined location. Deprecated, use \
-       $(b,--byteweight-sigs) of bap instead.";
   declare "update"
     (args $ url $ dst $ version)
     update ~doc:"Downloads and installs signatures.";
