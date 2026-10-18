@@ -353,6 +353,10 @@
 (defun CMNzrr (rn rm cnd _) (a32-CMN (a32-reg rn) (a32-op2-rr rm) cnd))
 (defun CMNzrsi (rn rm sh cnd _) (a32-CMN (a32-reg rn) (a32-op2-rsi rm sh) cnd))
 (defun CMNzrsr (rn rm rs typ cnd _) (a32-CMN rn (a32-op2-rsr rm rs typ) cnd))
+;; LLVM 23 names the register forms of CMN without z
+(defun CMNrr (rn rm cnd _) (CMNzrr rn rm cnd _))
+(defun CMNrsi (rn rm sh cnd _) (CMNzrsi rn rm sh cnd _))
+(defun CMNrsr (rn rm rs typ cnd _) (CMNzrsr rn rm rs typ cnd _))
 
 ;; bit fields, extensions and reversals
 

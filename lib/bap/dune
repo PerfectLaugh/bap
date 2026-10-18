@@ -35,7 +35,9 @@
  (optional)
  (libraries
   bap
+  bap-common
   bap-main
+  findlib.top ; loads the plugins, see bap_init_toplevel.ml
   dune-site.toplevel ; to disable when toplevel support is not present
   compiler-libs
   compiler-libs.common))

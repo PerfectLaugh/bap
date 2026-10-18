@@ -204,4 +204,10 @@ module Std : sig
   (** [setup_dynamic_loader loader] installs [loader] program. The [loader]
       takes a filename and loads it. This function is used internally, for
       different modes of execution (native, byte, topleve) *)
+
+  val setup_package_loader : (string -> unit) -> unit
+  (** [setup_package_loader loader] installs the [loader] of the plugins that
+      are packages, which takes the name of a plugin and loads it, e.g., in
+      the toplevel, which loads them with topfind, so that the libraries
+      that are already loaded aren't loaded again. *)
 end

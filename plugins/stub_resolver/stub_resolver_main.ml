@@ -240,10 +240,13 @@ end = struct
     | [ name; "stubs" ] -> Some name
     | _ -> None
 
+  (* the signatures of the sites, e.g., powerpc.stubs, which are
+     installed with the plugin, as the documentation of the option says *)
   let paths ctxt =
     Filename.current_dir_name
     :: List.concat (Extension.Configuration.get ctxt signatures)
     @ [ user_signatures_folder; system_signatures_folder ]
+    @ sites
 
   let collect ctxt target =
     let paths = paths ctxt in
