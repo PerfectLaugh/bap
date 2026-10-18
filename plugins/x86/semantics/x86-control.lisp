@@ -208,7 +208,7 @@
     (set-eax (cast-low 32 r))))
 
 (defun INT (n) (intrinsic 'interrupt (cast-low 8 n)))
-(defun INT3 () (intrinsic 'breakpoint))
+(defun INT3 () (intrinsic 'breakpoint :aborts))
 (defun SYSCALL () (intrinsic 'syscall))
 (defun SYSENTER () (intrinsic 'sysenter))
 (defun TRAP () (intrinsic '__ud2 :aborts))

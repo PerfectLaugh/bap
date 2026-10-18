@@ -942,3 +942,18 @@ module Arg = struct
 end
 
 let define = Arg.install
+
+(* the data model doesn't change the attributes, so any is used *)
+let noreturn_functions file =
+  let is_noreturn = function
+    | `Function { Spec.attrs } ->
+        List.exists attrs ~f:(fun { Attr.name } -> String.equal name "noreturn")
+    | _ -> false
+  in
+  Bap_c_parser.run (new Bap_c_size.base `LP64) file
+  |> Or_error.map
+       ~f:
+         (List.filter_map ~f:(fun (name, t) ->
+              Option.some_if (is_noreturn t) name))
+
+let () = Bap_api.provide_noreturn ~language:"c" noreturn_functions

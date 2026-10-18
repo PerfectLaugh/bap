@@ -58,6 +58,8 @@ module Machine : sig
 
   and slot = private Ready of task option | Delay [@@deriving bin_io]
 
+  type origin
+
   type state = private {
     stop : bool; (* true if finished *)
     work : task list; (* work list*)
@@ -70,6 +72,8 @@ module Machine : sig
     code : Theory.language Map.M(Addr).t; (* all valid instructions *)
     data : Set.M(Addr).t; (* all non-instructions *)
     usat : Set.M(Addr).t; (* unsatisfied constraints *)
+    insns : (int * origin) Map.M(Addr).t; (* the sizes and origins of insns *)
+    spec : Set.M(Addr).t Map.M(Addr).t; (* the fall-throughs of barriers *)
   }
 
   val start :
@@ -111,6 +115,12 @@ end = struct
 
   and slot = Ready of task option | Delay [@@deriving bin_io]
 
+  (* the origin of the straight-line run of instructions that contains
+     an instruction: either a start, i.e., a root or a destination of a
+     jump, or the fall-through of a jump, which starts at the address and
+     whose destinations are in the set *)
+  type origin = Start of addr | Fall_of of addr * Set.M(Addr).t
+
   let init_work init roots =
     Set.to_sequence ~order:`Decreasing roots
     |> Seq.fold ~init ~f:(fun work root ->
@@ -128,6 +138,8 @@ end = struct
     code : Theory.language Map.M(Addr).t;
     data : Set.M(Addr).t;
     usat : Set.M(Addr).t;
+    insns : (int * origin) Map.M(Addr).t;
+    spec : Set.M(Addr).t Map.M(Addr).t;
   }
 
   let is_code s addr = Map.mem s.code addr
@@ -190,6 +202,7 @@ end = struct
       usat = Set.remove s.usat addr;
       code = Map.remove s.code addr;
       jmps = Map.remove s.jmps addr;
+      insns = Map.remove s.insns addr;
     }
 
   let is_slot s addr = Set.mem s.dels addr
@@ -275,48 +288,132 @@ end = struct
           ];
       }
 
+  (* the origin of the instruction of the task [t] is computed from the
+     task and the origin of the preceding instruction *)
+  let origin s t =
+    let preceding addr ~default =
+      match Map.find s.insns addr with Some (_, o) -> o | None -> default
+    in
+    match t with
+    | Dest { dst; parent = None } -> (
+        match Map.find s.spec dst with
+        | Some dsts -> Fall_of (dst, dsts)
+        | None -> Start dst)
+    | Dest { dst } -> Start dst
+    | Fall { dst; delay = Ready (Some (Jump { dsts })) }
+    | Fall { dst; parent = Jump { dsts }; delay = Ready None } ->
+        Fall_of (dst, dsts.resolved)
+    | Fall { dst; parent = Jump { src }; delay = Delay } ->
+        preceding src ~default:(Start dst)
+    | Fall { dst; parent = Fall { dst = prev } | Dest { dst = prev } } ->
+        preceding prev ~default:(Start dst)
+    | Fall { dst } -> Start dst
+    | Jump { src } -> preceding src ~default:(Start src)
+
   let decoded s mem encoding =
     let addr = Memory.min_addr mem in
     {
       s with
       code = Map.add_exn s.code ~key:addr ~data:encoding.coding;
       usat = Set.remove s.usat addr;
+      insns =
+        Map.set s.insns ~key:addr ~data:(Memory.length mem, origin s s.curr);
     }
 
-  let jumped s encoding mem dsts delay =
-    let s = decoded s mem encoding in
-    let parent = s.curr in
-    let src = Memory.min_addr mem in
-    let jump = Jump { src; age = delay; dsts; parent; encoding } in
-    let dst = Addr.succ (Memory.max_addr mem) in
-    let next =
-      if dsts.barrier && delay = 0 then
-        Dest { dst; parent = None; encoding = unknown }
-      else Fall { dst; parent = jump; delay = Ready None; encoding }
+  (* [prefers ~dst ~over] if [over] continues the fall-through of a jump
+     and [dst] continues the code at a destination of this jump, i.e.,
+     the jump is not followed by the code that it jumps over *)
+  let prefers ~dst ~over =
+    match (over, dst) with
+    | Fall_of (_, dsts), Start addr -> Set.mem dsts addr
+    | _ -> false
+
+  (* the instructions that overlap with the instruction in [mem] *)
+  let overlapping s mem =
+    let addr = Memory.min_addr mem and last = Memory.max_addr mem in
+    let before =
+      match Map.closest_key s.insns `Less_than addr with
+      | Some (start, (size, origin)) when Addr.(nsucc start size > addr) ->
+          [ (start, origin) ]
+      | _ -> []
     in
-    step { s with work = jump :: next :: s.work }
+    if Addr.(last <= addr) then before
+    else
+      Map.fold_range_inclusive s.insns ~min:(Addr.succ addr) ~max:last
+        ~init:before ~f:(fun ~key ~data:(_, origin) insns ->
+          (key, origin) :: insns)
+
+  (* deletes the fall-through run of the instruction at [addr], from its
+     start up to the instruction *)
+  let cancel_run s addr = function
+    | Start _ -> s
+    | Fall_of (start, _) ->
+        Map.fold_range_inclusive s.insns ~min:start ~max:addr ~init:[]
+          ~f:(fun ~key ~data:(_, origin) run ->
+            match origin with
+            | Fall_of (start', _) when Addr.equal start start' -> key :: run
+            | _ -> run)
+        |> List.fold ~init:s ~f:delete
+
+  (* the instruction of the current task is rejected if it overlaps
+     with the code at a destination of the jump whose fall-through it
+     continues, and the overlapping instructions that continue the
+     fall-through of a jump to the current one are cancelled *)
+  let resolve_overlaps s mem =
+    let current = origin s s.curr in
+    List.fold (overlapping s mem) ~init:(Some s) ~f:(fun s (addr, other) ->
+        match s with
+        | None -> None
+        | Some s ->
+            if prefers ~dst:other ~over:current then None
+            else if prefers ~dst:current ~over:other then
+              Some (cancel_run s addr other)
+            else Some s)
+
+  let jumped s encoding mem dsts delay =
+    match resolve_overlaps s mem with
+    | None -> step @@ cancel s.curr s
+    | Some s ->
+        let s = decoded s mem encoding in
+        let parent = s.curr in
+        let src = Memory.min_addr mem in
+        let jump = Jump { src; age = delay; dsts; parent; encoding } in
+        let dst = Addr.succ (Memory.max_addr mem) in
+        let next, spec =
+          if dsts.barrier && delay = 0 then
+            ( Dest { dst; parent = None; encoding = unknown },
+              Map.set s.spec ~key:dst ~data:dsts.resolved )
+          else
+            (Fall { dst; parent = jump; delay = Ready None; encoding }, s.spec)
+        in
+        step { s with work = jump :: next :: s.work; spec }
 
   let insert_delayed t = function x :: xs -> x :: t :: xs | [] -> [ t ]
 
   let moved s encoding mem =
-    let parent =
-      match s.curr with
-      | Fall { delay = Ready (Some parent) } -> parent
-      | _ -> s.curr
-    in
-    let next = Addr.succ (Memory.max_addr mem) in
-    let next =
-      match parent with
-      | Jump { dsts = { barrier = true } } ->
-          Dest { dst = next; parent = None; encoding = unknown }
-      | parent -> Fall { dst = next; parent; delay = Ready None; encoding }
-    in
-    let work =
-      match s.curr with
-      | Fall { delay = Delay } -> insert_delayed next s.work
-      | _ -> next :: s.work
-    in
-    step @@ decoded { s with work } mem encoding
+    match resolve_overlaps s mem with
+    | None -> step @@ cancel s.curr s
+    | Some s ->
+        let parent =
+          match s.curr with
+          | Fall { delay = Ready (Some parent) } -> parent
+          | _ -> s.curr
+        in
+        let dst = Addr.succ (Memory.max_addr mem) in
+        let next, spec =
+          match parent with
+          | Jump { dsts = { barrier = true; resolved } } ->
+              ( Dest { dst; parent = None; encoding = unknown },
+                Map.set s.spec ~key:dst ~data:resolved )
+          | parent ->
+              (Fall { dst; parent; delay = Ready None; encoding }, s.spec)
+        in
+        let work =
+          match s.curr with
+          | Fall { delay = Delay } -> insert_delayed next s.work
+          | _ -> next :: s.work
+        in
+        step @@ decoded { s with work; spec } mem encoding
 
   let failed s _ _ = step @@ cancel s.curr s
   let skipped s addr = step { s with usat = Set.remove s.usat addr }
@@ -366,6 +463,8 @@ end = struct
         begs = Map.empty (module Addr);
         jmps = Map.empty (module Addr);
         code = Map.empty (module Addr);
+        insns = Map.empty (module Addr);
+        spec = Map.empty (module Addr);
       }
       mem
 end
@@ -406,27 +505,44 @@ let collect_dests source code =
   | None -> KB.return { init with encoding = source }
   | Some dests ->
       Set.to_sequence dests
-      |> KB.Seq.fold ~init ~f:(fun dest label ->
+      |> KB.Seq.fold ~init:(init, true) ~f:(fun (dest, noreturn) label ->
           get_encoding label >>= merge_encodings dest.encoding
           >>= fun encoding ->
           KB.collect Theory.Label.is_subroutine label >>= fun is_call ->
-          KB.collect Theory.Label.addr label >>| function
+          KB.collect Theory.Label.addr label >>= function
           | Some d ->
-              {
-                dest with
-                encoding;
-                call = dest.call || Option.value is_call ~default:false;
-                resolved =
-                  Set.add dest.resolved @@ Word.code_addr encoding.target d;
-              }
+              (* a subroutine at an address is known to be noreturn by its
+                 name, which can't be computed before its code is
+                 disassembled, so it is decided by [explore] *)
+              KB.return
+                ( {
+                    dest with
+                    encoding;
+                    call = dest.call || Option.value is_call ~default:false;
+                    resolved =
+                      Set.add dest.resolved @@ Word.code_addr encoding.target d;
+                  },
+                  false )
           | None ->
-              {
-                dest with
-                indirect = true;
-                unresolved = Set.add dest.unresolved label;
-                encoding;
-              })
-      >>| fun dest ->
+              KB.collect Theory.Label.is_noreturn label >>| fun is_noreturn ->
+              ( {
+                  dest with
+                  indirect = true;
+                  unresolved = Set.add dest.unresolved label;
+                  encoding;
+                },
+                noreturn && Option.value is_noreturn ~default:false ))
+      >>| fun (dest, noreturn) ->
+      (* an unconditional call to intrinsics that never return, e.g., the
+         one of an undefined instruction, has no fall-through *)
+      let dest =
+        if
+          noreturn && dest.call
+          && (not (Set.is_empty dests))
+          && not Insn.(is conditional insn)
+        then { dest with barrier = true }
+        else dest
+      in
       if is_known dest.encoding then dest else { dest with encoding = source }
 
 let pp_addr_opt ppf = function
@@ -896,6 +1012,26 @@ let execution_order stack =
 
 let always _ = KB.return true
 
+(* [is_noreturn_call src jump] is true if [jump] at [src] is an
+   unconditional call to subroutines that never return, e.g., to
+   [abort], i.e., it doesn't fall through *)
+let is_noreturn_call src { call; barrier; resolved; unresolved } =
+  let is_noreturn label =
+    KB.collect Theory.Label.is_noreturn label >>| Option.value ~default:false
+  in
+  if (not call) || barrier || (Set.is_empty resolved && Set.is_empty unresolved)
+  then KB.return false
+  else
+    Theory.Label.for_addr (Word.to_bitvec src) >>= fun insn ->
+    KB.collect Theory.Semantics.slot insn >>= fun sema ->
+    if Insn.(is conditional sema) then KB.return false
+    else
+      KB.Seq.for_all (Set.to_sequence unresolved) ~f:is_noreturn >>= function
+      | false -> KB.return false
+      | true ->
+          KB.Seq.for_all (Set.to_sequence resolved) ~f:(fun dst ->
+              Theory.Label.for_addr (Word.to_bitvec dst) >>= is_noreturn)
+
 let with_disasm beg blocks cfg f =
   Theory.Label.for_addr (Word.to_bitvec beg) >>= get_encoding
   >>= fun encoding ->
@@ -953,8 +1089,11 @@ let explore ?entries ?entry:start ?(follow = always) ~block ~node ~edge ~init
                       build blocks cfg fall >>= fun (blocks, cfg, dst) ->
                       edge_insert cfg block dst >>| fun cfg ->
                       (blocks, cfg, Some block)
-                  | Some { resolved = dsts; barrier } ->
-                      let dsts = if barrier then dsts else Set.add dsts fall in
+                  | Some ({ resolved = dsts; barrier } as jump) ->
+                      is_noreturn_call fin jump >>= fun noreturn ->
+                      let dsts =
+                        if barrier || noreturn then dsts else Set.add dsts fall
+                      in
                       Set.to_sequence dsts
                       |> KB.Seq.fold ~init:(blocks, cfg)
                            ~f:(fun (blocks, cfg) dst ->

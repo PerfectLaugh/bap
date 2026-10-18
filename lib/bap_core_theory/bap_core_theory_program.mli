@@ -101,6 +101,7 @@ module Label : sig
   val possible_name : (program, string option opinions) slot
   val is_valid : (program, bool option) slot
   val is_subroutine : (program, bool option) slot
+  val is_noreturn : (program, bool option) slot
 
   val promise_subroutines :
     ?per_label:(t -> bool option knowledge) ->

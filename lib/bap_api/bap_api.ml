@@ -17,3 +17,9 @@ type t = (module S)
 let registry = ref []
 let process api = registry := api :: !registry
 let processors () = !registry
+let noreturn_readers = String.Table.create ()
+
+let provide_noreturn ~language read =
+  Hashtbl.set noreturn_readers ~key:language ~data:read
+
+let noreturn_reader language = Hashtbl.find noreturn_readers language

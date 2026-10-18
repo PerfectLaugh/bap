@@ -211,6 +211,9 @@ module Label = struct
   let is_subroutine =
     attr "is-subroutine" "is the program a subroutine entry point"
 
+  let is_noreturn =
+    attr "is-noreturn" "is the program a subroutine that never returns"
+
   let encoding =
     Knowledge.Class.property ~package cls "encoding" Language.domain
       ~persistent:Language.persistent ~public:true

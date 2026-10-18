@@ -1770,6 +1770,16 @@ module Theory : sig
     val is_subroutine : (program, bool option) KB.slot
     (** a link is subroutine if it is an entry point to a subroutine. *)
 
+    val is_noreturn : (program, bool option) KB.slot
+    (** a link is noreturn if it references a subroutine that never returns,
+        e.g., [abort], or an intrinsic function that traps, e.g., the one of an
+        undefined instruction.
+
+        The disassembler doesn't follow the fall-through of a call whose
+        destinations are all noreturn.
+
+        @since 2.6.0 *)
+
     val promise_subroutines :
       ?per_label:(t -> bool option knowledge) ->
       (Unit.t -> Set.M(Bitvec_order).t knowledge) ->

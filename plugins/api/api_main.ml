@@ -1,5 +1,6 @@
 open Core
 open Result.Monad_infix
+open Bap_core_theory
 open Bap.Std
 module Sys = Stdlib.Sys
 include Self ()
@@ -139,6 +140,37 @@ let mapper paths files (module Api : Bap_api.S) =
   in
   Result.(Api.parse get_file files >>| Api.mapper)
 
+(* the names of the functions that never return, from the api files of
+   the languages that have a reader of them *)
+let noreturn_functions paths files =
+  all_apis paths files
+  |> List.concat_map ~f:(fun api ->
+      match Bap_api.noreturn_reader api.desc.lang with
+      | None -> []
+      | Some read -> (
+          let file = Api_path.to_string api.path in
+          match read file with
+          | Ok names -> names
+          | Error err ->
+              info "can't find the noreturn functions in %s: %a" file Error.pp
+                err;
+              []))
+  |> String.Set.of_list
+
+(* a label is noreturn if it is a name, possibly versioned, e.g.,
+   [exit@GLIBC_2.2.5], of a noreturn function *)
+let promise_noreturn paths files =
+  let open KB.Syntax in
+  let names = lazy (noreturn_functions paths files) in
+  KB.promise Theory.Label.is_noreturn @@ fun label ->
+  KB.collect Theory.Label.name label >>| function
+  | None -> None
+  | Some name ->
+      let name =
+        Option.value_map ~default:name ~f:fst (String.lsplit2 name ~on:'@')
+      in
+      Option.some_if (Set.mem (Lazy.force names) name) true
+
 let main paths files proj =
   Bap_api.processors () |> List.map ~f:(mapper paths files) |> Result.all
   |> function
@@ -244,6 +276,7 @@ module Cmdline = struct
   let dispatch o =
     let paths = all_paths o in
     dispatch_flags o;
+    promise_noreturn paths (Api_options.api_files o);
     Project.register_pass ~autorun:true ~deps:[ "abi" ]
       (main paths (Api_options.api_files o))
 

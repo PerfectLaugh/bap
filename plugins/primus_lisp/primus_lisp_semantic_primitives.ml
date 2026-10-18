@@ -335,7 +335,9 @@ let export =
         \     :stores PTR SIZE? denotes that the intrinsic is storing output of\n\
         \     the given SIZE in bits at the memory location pointer by PTR.\n\
         \     When SIZE is omitted, it defaults to the data address size of the\n\
-        \     target. The :result parameter may occur at most once. All other\n\
+        \     target. The :aborts parameter denotes that the intrinsic never\n\
+        \     returns, e.g., it traps, so the instruction has no fall-through.\n\
+        \     The :result parameter may occur at most once. All other\n\
         \     parameters can be repeated. The intrinisic output is passed via\n\
         \     the intrinisic:y0,...,intrinisic:yM vector, with the first\n\
         \     element assigned to the :result, then to all :writes registers,\n\
@@ -896,6 +898,7 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
     let writes x = get writes x
     let stores x = get stores x
     let inputs x = List.concat @@ get inputs x
+    let is_aborting x = List.exists x ~f:(fun (k, _) -> equal_param k Aborts)
     let mk_var d i s = Theory.Var.define s (sprintf "intrinsic:%c%d" d i)
     let ivar = mk_var 'x'
     let ovar = mk_var 'y'
@@ -906,14 +909,16 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
           let s = Theory.Value.sort x in
           CT.set (ivar i s) !!x)
 
-    let invoke_symbol name =
+    let invoke_symbol ~aborts name =
       let name =
         KB.Name.create ~package:"intrinsic" KB.Name.(unqualified @@ read name)
       in
       let* dst = Theory.Label.for_name (KB.Name.show name) in
       KB.provide Primus.Lisp.Semantics.name dst (Some name) >>= fun () ->
       KB.provide Theory.Label.is_subroutine dst (Some true) >>= fun () ->
-      CT.goto dst
+      (if aborts then KB.provide Theory.Label.is_noreturn dst (Some true)
+       else KB.return ())
+      >>= fun () -> CT.goto dst
 
     let write_single t i v =
       require_symbol v @@ fun v ->
@@ -972,7 +977,7 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
         seq
           [
             data @@ assign_inputs args;
-            ctrl @@ invoke_symbol name;
+            ctrl @@ invoke_symbol ~aborts:(is_aborting args) name;
             data @@ assign_writes t args;
             data @@ assign_stores t args;
           ]

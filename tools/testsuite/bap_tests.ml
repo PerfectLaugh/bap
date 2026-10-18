@@ -400,6 +400,60 @@ let plugins _ =
 
 (* the recipes, the Primus Lisp files, and the Primus systems are used from
    their files, without installing them *)
+(* the code after the jumps that never fall through, e.g., the junk
+   after the traps, the calls to noreturn functions, and the jumps over
+   the junk that overlaps their destinations, isn't disassembled *)
+let branches data =
+  let raw name arch code ~junk ~real =
+    case ("branches/" ^ name) (fun env ->
+        let file = write env (name ^ ".bin") code in
+        let out =
+          bap env
+            [
+              file;
+              "--loader=raw";
+              "--raw-arch=" ^ arch;
+              "--raw-entry-point=0";
+              "--dump=asm";
+            ]
+        in
+        has env (name ^ " keeps the destination") out real;
+        lacks env (name ^ " drops the junk") out junk)
+  in
+  (* mov x0, #1; bl L; udf #0; udf #0; add x1, x1, #1; L: ret *)
+  [
+    raw "aarch64-udf" "aarch64"
+      "\x20\x00\x80\xd2\x04\x00\x00\x94\x00\x00\x00\x00\x00\x00\x00\x00\x21\x04\x00\x91\xc0\x03\x5f\xd6"
+      ~junk:"add x1" ~real:"ret";
+    (* mov x0, #1; b.eq L; brk #1; add x1, x1, #1; add x1, x1, #1; L: ret *)
+    raw "aarch64-brk" "aarch64"
+      "\x20\x00\x80\xd2\x80\x00\x00\x54\x20\x00\x20\xd4\x21\x04\x00\x91\x21\x04\x00\x91\xc0\x03\x5f\xd6"
+      ~junk:"add x1" ~real:"ret";
+    (* movl $1, %eax; call L; ud2; addq %rcx, %rax; L: retq *)
+    raw "x86-ud2" "x86_64"
+      "\xb8\x01\x00\x00\x00\xe8\x05\x00\x00\x00\x0f\x0b\x48\x01\xc8\xc3"
+      ~junk:"addq" ~real:"retq";
+    (* call L; the junk movl that overlaps L; L: addq %rcx, %rax; retq *)
+    raw "x86-call-overlap" "x86_64"
+      "\xe8\x01\x00\x00\x00\xb8\x48\x01\xc8\xc3\xc3" ~junk:"movl" ~real:"addq";
+    (* jne L; the junk movl that overlaps L; L: addq %rcx, %rax; retq *)
+    raw "x86-jne-overlap" "x86_64" "\x75\x01\xb8\x48\x01\xc8\xc3\xc3"
+      ~junk:"movl" ~real:"addq";
+    (* je L; jne L; the junk movl that overlaps L; L: addq; retq *)
+    raw "x86-je-jne-overlap" "x86_64" "\x74\x03\x75\x01\xb8\x48\x01\xc8\xc3\xc3"
+      ~junk:"movl" ~real:"addq";
+    (* jmp L; the junk movl that overlaps L; L: addq %rcx, %rax; retq *)
+    raw "x86-jmp-overlap" "x86_64" "\xeb\x01\xb8\x48\x01\xc8\xc3\xc3"
+      ~junk:"movl" ~real:"addq";
+    case "branches/noreturn-calls" (fun env ->
+        let out =
+          bap env [ path data (echo "aarch64-linux-gnu"); "--dump=bir" ]
+        in
+        has env "abort doesn't return" out "call @abort with noreturn";
+        has env "__stack_chk_fail doesn't return" out
+          "call @__stack_chk_fail with noreturn");
+  ]
+
 let uninstalled data =
   let echo = path data (echo "x86_64-linux-gnu") in
   [
@@ -474,6 +528,7 @@ let tests =
   [
     api_main;
     api_options;
+    branches;
     byteweight;
     cache;
     collator;

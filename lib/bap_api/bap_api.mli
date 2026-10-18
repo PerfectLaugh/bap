@@ -42,3 +42,17 @@ val process : t -> unit
 
 val processors : unit -> t list
 (** enumerate all registered language processors *)
+
+val provide_noreturn :
+  language:string -> (filename -> string list Or_error.t) -> unit
+(** [provide_noreturn ~language read] registers [read], such that [read file]
+    lists the names of the functions in the api [file] in the [language] that
+    never return.
+
+    @since 2.6.0 *)
+
+val noreturn_reader : string -> (filename -> string list Or_error.t) option
+(** [noreturn_reader language] is the reader of the names of the functions that
+    never return in the api files in the [language], if one is registered.
+
+    @since 2.6.0 *)

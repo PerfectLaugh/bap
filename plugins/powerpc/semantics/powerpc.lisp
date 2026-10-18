@@ -772,13 +772,13 @@
                (logand (bit-set to 4) (= x y))
                (logand (bit-set to 2) (< x y))
                (logand (bit-set to 1) (> x y)))
-    (intrinsic 'trap)))
+    (intrinsic 'trap :aborts)))
 
 (defun TW (to ra rb) (trap-if to (low32 ra) (low32 rb)))
 (defun TWI (to ra imm) (trap-if to (low32 ra) (low32 imm)))
 (defun TD (to ra rb) (trap-if to ra rb))
 (defun TDI (to ra imm) (trap-if to ra imm))
-(defun TRAP () (intrinsic 'trap))
+(defun TRAP () (intrinsic 'trap :aborts))
 (defun SC (lev) (intrinsic 'syscall lev))
 
 (defun SYNC (_) (empty))

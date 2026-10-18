@@ -26,10 +26,10 @@
   (empty))
 
 (defun UDF (exn)
-  (intrinsic 'undefined-instruction))
+  (intrinsic 'undefined-instruction :aborts))
 
 ;; the breakpoint and the halting debug exceptions
-(defun BRK (imm) (intrinsic 'breakpoint imm))
+(defun BRK (imm) (intrinsic 'breakpoint imm :aborts))
 (defun HLT (imm) (intrinsic 'halt imm))
 
 ;; the supervisor call
