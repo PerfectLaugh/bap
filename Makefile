@@ -49,6 +49,10 @@ testsuite:
 # the number of test files of the testsuite that run in parallel
 TESTSUITE_JOBS ?= 8
 
+# the test files that run, all of them by default, e.g.,
+# make check TESTS="mc:x86-mov.exp bap:api-main.exp"
+TESTS ?=
+
 # runs under dune exec, so that it tests bap and the plugins built in
 # this tree instead of whatever bap is first on PATH, and with TERM=dumb,
 # so that the output the tests match doesn't depend on the terminal
@@ -56,7 +60,7 @@ check: testsuite
 	git -C testsuite cat-file -e $(TESTSUITE_REV)^{commit} 2>/dev/null || \
 	  git -C testsuite fetch $(TESTSUITE_URL)
 	git -C testsuite checkout -q $(TESTSUITE_REV)
-	TERM=dumb dune exec -- bash tools/run-testsuite.sh $(TESTSUITE_JOBS)
+	TERM=dumb dune exec -- bash tools/run-testsuite.sh $(TESTSUITE_JOBS) $(TESTS)
 
 # runs the micro-benchmarks in benchmarks/. Pass core_bench options in
 # BENCH_ARGS (e.g., BENCH_ARGS="-quota 1" or BENCH_ARGS=-help) and set

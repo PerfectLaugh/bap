@@ -1,16 +1,20 @@
 #!/bin/bash
-# run-testsuite.sh [JOBS]: runs the tests of the bap and mc tools of the
-# testsuite in testsuite/, JOBS test files at a time (8 by default).
+# run-testsuite.sh [JOBS [TOOL:FILE...]]: runs the tests of the bap and mc
+# tools of the testsuite in testsuite/, JOBS test files at a time (8 by
+# default). If test files are given, e.g., mc:x86-mov.exp, only they run.
 #
 # Each test file runs in its own directory, which links to the entries of
 # the testsuite, since the tests write their outputs in the current
 # directory, and with its own cache and log directories, since the tests
-# change the cache. The test files that change the files of the
-# installation run alone, after the others.
+# change the cache. The outputs of the commands, *-result, are not
+# linked, since each test file writes its own. The test files that
+# change the files of the installation run alone, after the others.
 # The directories are removed if all tests pass, and kept and printed
 # otherwise.
 set -u
 jobs=${1:-8}
+shift $(($# > 0 ? 1 : 0))
+only="$*"
 root=$(cd "$(dirname "$0")/.." && pwd)
 ts=$root/testsuite
 tools="bap mc"
@@ -37,7 +41,7 @@ run_one() {
   mkdir -p "$dir"/xdg/cache "$dir"/xdg/state
   for entry in "$ts"/*; do
     case ${entry##*/} in
-      logs | *.log | *.sum) ;;
+      logs | *.log | *.sum | *-result) ;;
       *) ln -s "$entry" "$dir"/ ;;
     esac
   done
@@ -52,16 +56,26 @@ is_in() {
   case " $1 " in *" $2:$3 "*) true ;; *) false ;; esac
 }
 
+# the test files that run, all of them if none are given
+selected() {
+  [ -z "$only" ] || is_in "$only" "$1" "$2"
+}
+
 {
-  for test in $slow; do echo "${test%%:*} ${test#*:}"; done
+  for test in $slow; do
+    selected ${test%%:*} ${test#*:} || continue
+    echo "${test%%:*} ${test#*:}"
+  done
   for tool in $tools; do
     for exp in "$ts/$tool.tests"/*.exp; do
-      is_in "$serial $slow" $tool ${exp##*/} || echo "$tool ${exp##*/}"
+      is_in "$serial $slow" $tool ${exp##*/} && continue
+      selected $tool ${exp##*/} && echo "$tool ${exp##*/}"
     done
   done
 } | xargs -P "$jobs" -L 1 bash -c 'run_one "$@"' run_one
 
 for test in $serial; do
+  selected ${test%%:*} ${test#*:} || continue
   (run_one ${test%%:*} ${test#*:})
 done
 
@@ -70,7 +84,7 @@ for tool in $tools; do
   echo
   echo "		=== $tool Summary ==="
   echo
-  cat "$work/$tool"-*/"$tool".sum |
+  cat "$work/$tool"-*/"$tool".sum 2> /dev/null |
     grep -oE '^(PASS|FAIL|XPASS|XFAIL|UNRESOLVED|UNTESTED|UNSUPPORTED|ERROR|WARNING)' |
     sort | uniq -c | while read -r n result; do
       printf '# of %-20s %d\n' "$result" "$n"
