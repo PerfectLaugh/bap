@@ -1,7 +1,7 @@
 (library
  (name bap_primus_systems_plugin)
  (public_name bap-primus-systems.plugin)
- (libraries bap-knowledge bap-main bap-primus core))
+ (libraries bap-knowledge bap-main bap-primus core core_kernel.caml_unix))
 
 (plugin
  (name primus-systems)

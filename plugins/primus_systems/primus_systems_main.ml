@@ -86,6 +86,13 @@ let () =
         |> List.map ~f:(Filename.concat path)
       else if Sys.file_exists path then [ path ]
       else [])
+  (* a file is loaded once, even if it is in several paths, e.g., in the
+     current folder and specified by its path *)
+  |> List.fold ~init:([], String.Set.empty) ~f:(fun (paths, seen) path ->
+      let real = Caml_unix.realpath path in
+      if Set.mem seen real then (paths, seen)
+      else (path :: paths, Set.add seen real))
+  |> fst |> List.rev
   |> List.iter ~f:(fun path ->
       match Primus.System.from_file path with
       | Error failed ->
