@@ -134,7 +134,7 @@ let quit = no_args "quit" @@ fun ctxt -> Ok { ctxt with quit = true }
 
 let clear =
   no_args "clear" @@ fun ctxt ->
-  LNoise.clear_screen ();
+  Line_editor.clear_screen ();
   Ok ctxt
 
 let short str =
@@ -233,22 +233,22 @@ let report_error err = Format.eprintf "%a@\n%!" Extension.Error.pp err
 
 let load_history filename =
   if Sys.file_exists filename then
-    match LNoise.history_load ~filename with
+    match Line_editor.history_load ~filename with
     | Ok () -> ()
     | Error msg -> Format.eprintf "Failed to load the history file: %s@\n%!" msg
 
 let remember ctxt input =
-  match LNoise.history_add input with
+  match Line_editor.history_add input with
   | Error msg -> warning "failed to remember the input: %s" msg
   | Ok () -> (
-      match LNoise.history_save ~filename:ctxt.history with
+      match Line_editor.history_save ~filename:ctxt.history with
       | Ok () -> ()
       | Error msg -> warning "failed to write history: %s" msg)
 
 let complete ctxt prefix completions =
   let matches = String.is_prefix ~prefix in
   List.iter directives ~f:(fun (name, _, _) ->
-      if matches name then LNoise.add_completion completions name);
+      if matches name then Line_editor.add_completion completions name);
   Project.Analysis.registered ()
   |> List.iter ~f:(fun info ->
       let name = Project.Analysis.name info in
@@ -256,9 +256,9 @@ let complete ctxt prefix completions =
       let short = Knowledge.Name.unqualified name in
       let full = Knowledge.Name.to_string name in
       if String.equal pkg ctxt.package && matches short then
-        LNoise.add_completion completions short
+        Line_editor.add_completion completions short
       else if matches full || matches short then
-        LNoise.add_completion completions full)
+        Line_editor.add_completion completions full)
 
 let hint { package; commands } prefix =
   match break_line prefix with
@@ -277,13 +277,13 @@ let hint { package; commands } prefix =
           | [] | [ "" ] -> None
           | xs ->
               Option.return
-                (" " ^ String.concat ~sep:" " xs, LNoise.Yellow, false)))
+                (" " ^ String.concat ~sep:" " xs, Line_editor.Yellow, false)))
 
 let rec interactive_loop ctxt =
   Format.printf "%!";
-  LNoise.set_completion_callback (complete ctxt);
-  LNoise.set_hints_callback (hint ctxt);
-  match LNoise.linenoise (ctxt.package ^ "> ") with
+  Line_editor.set_completion_callback (complete ctxt);
+  Line_editor.set_hints_callback (hint ctxt);
+  match Line_editor.linenoise (ctxt.package ^ "> ") with
   | exception Sys.Break -> interactive_loop ctxt
   | None -> Ok ()
   | Some input -> (

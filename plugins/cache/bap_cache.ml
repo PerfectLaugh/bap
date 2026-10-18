@@ -100,6 +100,9 @@ let mkdir_from_tmp ~target ~f path =
       | Unix.(Unix_error (EEXIST, _, _)) | Unix.(Unix_error (ENOTEMPTY, _, _))
         ->
           ()
+      (* and Windows reports that the access is denied *)
+      | Unix.(Unix_error (EACCES, _, _)) when Sys.win32 && dir_exists target ->
+          ()
       | exn -> raise exn)
 
 let init_cache_dir path =
@@ -112,7 +115,11 @@ let init_cache_dir () =
   if not (dir_exists data) then (
     let parent = Filename.dirname root in
     mkdir parent;
-    mkdir_from_tmp ~target:root ~f:init_cache_dir parent)
+    mkdir_from_tmp ~target:root ~f:init_cache_dir parent;
+    (* the root may exist without the cache, e.g., with the processor
+       specifications that the ghidra plugin extracts into it, then the
+       temporary directory isn't renamed onto it *)
+    if not (dir_exists data) then init_cache_dir root)
 
 let config_file () = config_file @@ root ()
 let data () = data @@ root ()
@@ -140,7 +147,7 @@ module Upgrade = struct
     let open Compatibility.V2 in
     let rename from to_ =
       Sys.rename from to_;
-      Unix.chmod to_ 0o444
+      Utils.make_read_only to_
     in
     try
       let idx = Utils.binable_from_file (module Compatibility.V2) index in

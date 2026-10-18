@@ -61,7 +61,7 @@ let open_bundle () =
   match normalized target.contents with
   | "" -> raise Target_unspecified
   | x when Sys.is_directory x -> raise Target_is_directory
-  | x when Sys.file_exists x -> Bundle.of_uri (Uri.of_string x)
+  | x when Sys.file_exists x -> Bundle.of_uri (Uri.make ~path:x ())
   | x -> raise Target_doesn't_exist
 
 module Update = struct
@@ -97,7 +97,7 @@ module Update = struct
         let b = List.fold [ author; name; desc ] ~init ~f:update in
         List.fold [ cons; tags ] ~init:b ~f:update);
     List.map !resources ~f:named_resource
-    |> List.map ~f:(fun (name, path) -> (name, Uri.of_string path))
+    |> List.map ~f:(fun (name, path) -> (name, Uri.make ~path ()))
     |> Bundle.insert_files bundle
 end
 
@@ -110,7 +110,7 @@ module Pack = struct
     | _ -> None
 
   let bundle_file (name, uri) =
-    Bundle.Builder.put_file pack ?name (Uri.of_string uri)
+    Bundle.Builder.put_file pack ?name (Uri.make ~path:uri ())
 
   let bundle_files files = List.iter files ~f:bundle_file
 
@@ -151,7 +151,7 @@ module Pack = struct
       else target.contents
     in
     if String.is_empty target then raise Target_unspecified;
-    let uri = Uri.of_string target in
+    let uri = Uri.make ~path:target () in
     Bundle.Builder.embed_manifest pack manifest;
     Bundle.Builder.flush pack uri
 end

@@ -1,10 +1,11 @@
 open Bap_plugins.Std
 
+(* the printer is the name of a function, e.g., Bap.Std.Word.pp *)
 let install_printer printer =
   Topdirs.dir_install_printer Format.err_formatter
-    (Option.get @@ Longident.unflatten printer)
+    (Option.get @@ Longident.unflatten (String.split_on_char '.' printer))
 
-let install_printers () = Core.Pretty_printer.all () |> install_printer
+let install_printers () = List.iter install_printer (Core.Pretty_printer.all ())
 
 let main () =
   let module Bap_std_is_required = Bap.Std in

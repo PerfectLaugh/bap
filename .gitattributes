@@ -1,0 +1,4 @@
+# the lock and the patches of opam-overlay keep their line endings on
+# Windows, as the patches and the checksums of the files depend on them
+/dune.lock/** -text
+/opam-overlay/** -text

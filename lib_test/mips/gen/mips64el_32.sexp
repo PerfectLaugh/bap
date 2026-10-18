@@ -1,0 +1,7 @@
+; mips64el for the 32-bit instructions, whose operands must be sign-extended
+; 32-bit words, see lib_test/cross/lifter_gen.ml
+(include mips64el.sexp)
+(gpr (0 1 0x7f 0x80 0x7fff 0x8000 0x7fffffff 0xffffffff80000000 0xffffffffffffffff 0x12345678 0xfffffffffedcba98))
+(gpr2 (0 1 0x80 0x7fff 0xffffffff80000000 0xffffffffffffffff 0x7fffffff 0x12345678))
+(sets
+ (nz (1 2 0x7f 0x80 0x7fffffff 0xffffffff80000000 0xffffffffffffffff 0xfffffffffffffffe 0x12345678 0x10)))

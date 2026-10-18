@@ -3222,7 +3222,13 @@ module Knowledge = struct
           of_canonical_v2
             { version; payload = bin_read_payload bin_read_v2 data ~pos_ref }
 
+    (* Windows keeps a mapped file locked until the mapping is collected,
+       so there the knowledge base is read and written without mapping
+       it, as it is often saved over the file it was loaded from *)
     let load path =
+      if Stdlib.Sys.win32 then
+        of_bigstring @@ Bigstring.of_string @@ In_channel.read_all path
+      else
       let fd = Unix.openfile path Unix.[ O_RDONLY ] 0o400 in
       try
         let data =
@@ -3250,6 +3256,10 @@ module Knowledge = struct
       data
 
     let save state path =
+      if Stdlib.Sys.win32 then
+        Out_channel.write_all path
+          ~data:(Bigstring.to_string (to_bigstring state))
+      else
       let repr = to_canonical state in
       let size = String.length magic + bin_size_canonical bin_size_v2 repr in
       let fd = Unix.openfile path Unix.[ O_RDWR; O_CREAT; O_TRUNC ] 0o660 in

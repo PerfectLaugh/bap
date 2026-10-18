@@ -11,7 +11,7 @@
   threads))
 
 ; the tests are generated from the specs, with the expected values
-; computed by executing the instructions, see gen/gen.sh
+; computed by executing the instructions, see lib_test/cross/lifter_gen.ml
 
 (rule
  (target test_x86_64.ml)
@@ -20,7 +20,13 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash gen/generate.sh 64 gen/x86_64.spec X86_64))))
+   (run
+    %{exe:../cross/lifter_gen.exe}
+    -runner
+    gen
+    gen/x86_64.sexp
+    gen/x86_64.spec
+    X86_64))))
 
 (rule
  (target test_i686.ml)
@@ -29,7 +35,13 @@
  (action
   (with-stdout-to
    %{target}
-   (run bash gen/generate.sh 32 gen/i686.spec I686))))
+   (run
+    %{exe:../cross/lifter_gen.exe}
+    -runner
+    gen
+    gen/i686.sexp
+    gen/i686.spec
+    I686))))
 
 ; the instruction tests are slow, so they don't run with dune test, run
 ; them with dune build @instruction-tests, in 4 processes, each loads the
@@ -40,8 +52,22 @@
 
 (rule
  (alias instruction-tests)
+ (enabled_if
+  (<> %{os_type} Win32))
  (action
   (setenv
    OUNIT_RUN_GC_FULL_MAJOR
    false
    (run %{exe:run_x86_tests.exe} -runner processes -shards 4))))
+
+; the processes runner of OUnit forks, which Windows can't do
+
+(rule
+ (alias instruction-tests)
+ (enabled_if
+  (= %{os_type} Win32))
+ (action
+  (setenv
+   OUNIT_RUN_GC_FULL_MAJOR
+   false
+   (run %{exe:run_x86_tests.exe} -runner sequential))))

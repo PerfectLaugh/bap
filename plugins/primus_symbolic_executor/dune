@@ -26,37 +26,28 @@
  (site
   (bap-common plugins)))
 
-;; Z3 is vendored (git submodule) and built from source. Its own `--ml`
-;; bindings target (`make ml`) hard-depends on a global, writable ocamlfind
-;; destdir (it shells out to `ocamlfind install`/`ocamlfind printconf`), which
-;; doesn't exist under dune's package management. So we only use Z3's own
-;; build to produce the native static library, and compile the vendored
-;; OCaml binding sources (and C stub) ourselves as an ordinary local dune
-;; library below -- no ocamlfind install step needed at all.
-;;
-;; Z3's configure/build scripts write all over their own source tree, not
-;; just into declared targets, which dune's read-only mirroring of
-;; source_tree dependencies doesn't allow. So we copy the vendored checkout
-;; into a dune-owned, writable directory target (z3_workdir) and build it
-;; there instead, using dune's native directory-targets support (part of
-;; the language itself since lang dune 3.24).
+;; Z3 is vendored (git submodule) and built from its sources with its CMake
+;; build by build-z3.cmake, which also generates the sources of its OCaml
+;; bindings, whose own build requires a global ocamlfind, so they are an
+;; ordinary local library below. Z3 is linked statically, and on Windows
+;; the runtime of C++ too, see build-z3.cmake.
 
 (rule
  (targets
-  (dir z3_workdir))
+  (dir libz3))
  (deps
-  (source_tree z3)
-  (package zarith))
+  build-z3.cmake
+  (source_tree z3))
  (action
-  (progn
-   (run cp -rL z3/. z3_workdir)
-   (run chmod -R u+w z3_workdir)
-   (chdir
-    z3_workdir
-    (run env CXXFLAGS=-fPIC python3 scripts/mk_make.py --ml --staticlib))
-   (chdir
-    z3_workdir
-    (run make -C build -j4 libz3-static.a)))))
+  (run
+   cmake
+   -DSRC=z3
+   -DOUT=libz3
+   -DLINK_PREFIX=plugins/primus_symbolic_executor/libz3
+   "-DCC=%{cc}"
+   "-DCXX=%{cxx}"
+   -P
+   %{dep:build-z3.cmake})))
 
 (rule
  (targets
@@ -65,15 +56,20 @@
   z3.ml
   z3.mli
   z3native_stubs.c
-  z3native_stubs.h)
+  z3native_stubs.h
+  c.flags
+  link.flags)
+ (deps libz3)
  (action
   (progn
-   (copy z3_workdir/src/api/ml/z3enums.ml z3enums.ml)
-   (copy z3_workdir/src/api/ml/z3native.ml z3native.ml)
-   (copy z3_workdir/src/api/ml/z3.ml z3.ml)
-   (copy z3_workdir/src/api/ml/z3.mli z3.mli)
-   (copy z3_workdir/src/api/ml/z3native_stubs.c z3native_stubs.c)
-   (copy z3_workdir/src/api/ml/z3native_stubs.h z3native_stubs.h))))
+   (copy libz3/ml/z3enums.ml z3enums.ml)
+   (copy libz3/ml/z3native.ml z3native.ml)
+   (copy libz3/ml/z3.ml z3.ml)
+   (copy libz3/ml/z3.mli z3.mli)
+   (copy libz3/ml/z3native_stubs.c z3native_stubs.c)
+   (copy libz3/ml/z3native_stubs.h z3native_stubs.h)
+   (copy libz3/c.flags c.flags)
+   (copy libz3/link.flags link.flags))))
 
 (library
  (name z3)
@@ -84,6 +80,10 @@
  (foreign_stubs
   (language c)
   (names z3native_stubs)
-  (flags -fPIC -I. -Iz3_workdir/src/api))
+  (flags
+   :standard
+   -I.
+   -Ilibz3/include
+   (:include c.flags)))
  (c_library_flags
-  (-Lplugins/primus_symbolic_executor/z3_workdir/build -lz3-static -lstdc++)))
+  (:include link.flags)))

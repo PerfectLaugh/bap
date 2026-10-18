@@ -33,7 +33,7 @@ module Log = Bap_main_event.Log
 module Unix = Caml_unix
 open KB.Syntax
 
-let default_objdump_opts = "-rd --no-show-raw-insn"
+let default_objdump_opts = [ "-rd"; "--no-show-raw-insn" ]
 
 include Bap_main_event.Log.Create ()
 
@@ -44,15 +44,16 @@ let demangler =
     ~doc:
       "Specify the demangler name. Set to $(i,disabled) to disable demangling."
 
+(* the objdump commands with their options, without the file *)
 let objdump_cmds demangler =
+  let demangle =
+    match demangler with
+    | Some "disabled" -> []
+    | None -> [ "-C" ]
+    | Some other -> [ "--demangle=" ^ other ]
+  in
   List.stable_dedup ~compare:String.compare objdumps
-  |> List.map ~f:(fun cmd ->
-      sprintf "%s %s %s" cmd default_objdump_opts
-      @@
-      match demangler with
-      | Some "disabled" -> ""
-      | None -> "-C"
-      | Some other -> "--demangle=" ^ other)
+  |> List.map ~f:(fun cmd -> (cmd, default_objdump_opts @ demangle))
 
 module Regexp = struct
   let parse =
@@ -94,8 +95,9 @@ let run cmd ~f ~init : _ Base.Continue_or_stop.t =
 let with_objdump_output demangler ~file ~f ~init =
   objdump_cmds demangler
   |> List.fold_until ~init
-       ~f:(fun data objdump ->
-         let cmd = sprintf "%s %S" objdump file in
+       ~f:(fun data (objdump, opts) ->
+         (* the command runs in the shell, cmd.exe on Windows *)
+         let cmd = Stdlib.Filename.quote_command objdump (opts @ [ file ]) in
          run cmd ~f ~init:data)
        ~finish:Fn.id
 

@@ -1,18 +1,3 @@
 (executable
  (name llvm_configurator)
  (libraries base stdio dune-configurator))
-
-(rule
- (target llvm_config.ml)
- (deps
-  (:input llvm_config.ml.ab)
-  (alias ../../../config)
-  ../../../config.status)
- (action
-  (with-stdin-from
-   %{input}
-   (with-stdout-to
-    %{target}
-    (chdir
-     %{workspace_root}
-     (run ./tools/rewrite.exe -filename %{input}))))))

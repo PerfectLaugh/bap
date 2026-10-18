@@ -31,6 +31,8 @@ end = struct
   let conf_dirs =
     [
       [ `V "HOME"; `P ".config"; `P "bap" ];
+      (* Windows has no HOME *)
+      [ `V "USERPROFILE"; `P ".config"; `P "bap" ];
       [ `V "XDG_CONFIG_HOME"; `P "bap" ];
       [ `P Bap_main_config.confdir ];
     ]

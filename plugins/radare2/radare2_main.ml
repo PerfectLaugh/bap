@@ -54,7 +54,9 @@ let parse =
     to_string @@ member "type" x )
 
 let extract_symbols file =
-  let cmd = sprintf "radare2 -2 -q -c isj %s" file in
+  let cmd =
+    Stdlib.Filename.quote_command "radare2" [ "-2"; "-q"; "-c"; "isj"; file ]
+  in
   let env = Unix.environment () in
   let input, output, err = Unix.open_process_full cmd env in
   let out =

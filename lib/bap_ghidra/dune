@@ -14,7 +14,21 @@
    ../bap_disasm/disasm.hpp
    libghidra/include)
   (flags :standard -fPIC -isystem libghidra/include))
+ ; the stubs that call the program, see ghidra_register.cpp
+ (foreign_stubs
+  (language cxx)
+  (names ghidra_register)
+  (extra_deps ../bap_disasm/disasm.hpp)
+  (flags
+   :standard
+   -fPIC
+   (:include libghidra/c.flags)))
  (foreign_stubs
   (language c)
-  (names ghidra_stubs))
- (foreign_archives libghidra/decomp))
+  (names ghidra_stubs)
+  (flags
+   :standard
+   (:include libghidra/c.flags)))
+ ; the decompiler is linked statically, see libghidra/build.cmake
+ (c_library_flags
+  (:include libghidra/link.flags)))

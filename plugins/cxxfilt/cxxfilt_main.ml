@@ -14,7 +14,7 @@ let () =
     ]
 
 let demangle prog name =
-  let command = sprintf "%s -p %s" prog name in
+  let command = Stdlib.Filename.quote_command prog [ "-p"; name ] in
   let inp = Caml_unix.open_process_in command in
   let r = In_channel.input_all inp in
   In_channel.close inp;

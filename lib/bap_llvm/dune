@@ -25,18 +25,42 @@
    -I.
    :standard
    (:include cxx.flags)))
+ ; the stubs that call the program, see llvm_register.cpp
+ (foreign_stubs
+  (language cxx)
+  (names llvm_register)
+  (extra_deps ../bap_disasm/disasm.hpp)
+  (flags
+   -I.
+   :standard
+   (:include cxx.flags)
+   (:include c.flags)))
  (foreign_stubs
   (language c)
-  (names llvm_stubs llvm_loader_stubs))
+  (names llvm_stubs llvm_loader_stubs)
+  (flags
+   :standard
+   (:include c.flags)))
  (c_library_flags
-  (:include link.flags)))
+  (:include link.flags)
+  (:include ../bap_disasm/cxx_runtime.flags)))
 
+; the flags of the LLVM that libllvm builds from its sources, with its
+; paths relative to the directory of the library, where the stubs are
+; compiled, and to the root of the build context, where they are linked
 (rule
- (targets cxx.flags link.flags bap_llvm_config.ml)
+ (targets c.flags cxx.flags link.flags bap_llvm_config.ml)
  (deps
   (:input bap_llvm_config.ml.ab)
-  ; llvm-config output depends on the installed LLVM, which can change
-  ; (e.g., package upgrades) without anything dune tracks changing
-  (universe))
+  libllvm/llvm)
  (action
-  (run ./config/llvm_configurator.exe -filename %{input})))
+  (run
+   ./config/llvm_configurator.exe
+   -filename
+   %{input}
+   -llvm-config
+   libllvm/llvm/bin/llvm-config%{ext_exe}
+   -compile-prefix
+   libllvm/llvm
+   -link-prefix
+   lib/bap_llvm/libllvm/llvm)))

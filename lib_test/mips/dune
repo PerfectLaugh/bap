@@ -4,7 +4,7 @@
 
 ; the tests are generated from the specs, with the expected values
 ; computed by executing the instructions under QEMU, see
-; lib_test/cross/gen.sh, the 32-bit instructions are also tested in the
+; lib_test/cross/lifter_gen.ml, the 32-bit instructions are also tested in the
 ; 64-bit modes, with sign-extended operands
 
 (rule
@@ -16,9 +16,10 @@
   (with-stdout-to
    %{target}
    (run
-    bash
-    %{project_root}/lib_test/cross/generate.sh
-    gen/mips.conf
+    %{exe:../cross/lifter_gen.exe}
+    -runner
+    %{project_root}/lib_test/cross
+    gen/mips.sexp
     gen/mips32.spec
     MIPS32eb))))
 
@@ -31,9 +32,10 @@
   (with-stdout-to
    %{target}
    (run
-    bash
-    %{project_root}/lib_test/cross/generate.sh
-    gen/mipsel.conf
+    %{exe:../cross/lifter_gen.exe}
+    -runner
+    %{project_root}/lib_test/cross
+    gen/mipsel.sexp
     gen/mips32.spec
     MIPS32le))))
 
@@ -46,9 +48,10 @@
   (with-stdout-to
    %{target}
    (run
-    bash
-    %{project_root}/lib_test/cross/generate.sh
-    gen/mips64_32.conf
+    %{exe:../cross/lifter_gen.exe}
+    -runner
+    %{project_root}/lib_test/cross
+    gen/mips64_32.sexp
     gen/mips32.spec
     MIPS64eb))))
 
@@ -61,9 +64,10 @@
   (with-stdout-to
    %{target}
    (run
-    bash
-    %{project_root}/lib_test/cross/generate.sh
-    gen/mips64el_32.conf
+    %{exe:../cross/lifter_gen.exe}
+    -runner
+    %{project_root}/lib_test/cross
+    gen/mips64el_32.sexp
     gen/mips32.spec
     MIPS64le))))
 
@@ -76,9 +80,10 @@
   (with-stdout-to
    %{target}
    (run
-    bash
-    %{project_root}/lib_test/cross/generate.sh
-    gen/mips64.conf
+    %{exe:../cross/lifter_gen.exe}
+    -runner
+    %{project_root}/lib_test/cross
+    gen/mips64.sexp
     gen/mips64.spec
     MIPS64eb_64))))
 
@@ -91,9 +96,10 @@
   (with-stdout-to
    %{target}
    (run
-    bash
-    %{project_root}/lib_test/cross/generate.sh
-    gen/mips64el.conf
+    %{exe:../cross/lifter_gen.exe}
+    -runner
+    %{project_root}/lib_test/cross
+    gen/mips64el.sexp
     gen/mips64.spec
     MIPS64le_64))))
 

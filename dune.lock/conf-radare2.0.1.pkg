@@ -1,15 +1,31 @@
 (version 0.1)
 
 (build
- (all_platforms
-  ((action
-    (progn
-     (substitute find-radare2.ml.in find-radare2.ml)
-     (run ocaml unix.cma find-radare2.ml))))))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   ((action
+     (progn
+      (substitute find-radare2.ml.in find-radare2.ml)
+      (run ocaml unix.cma find-radare2.ml)))))))
 
 (depends
- (all_platforms
-  (ocaml base-unix conf-which)))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   (ocaml base-unix conf-which))))
 
 (depexts
  ((radare2)
@@ -40,3 +56,14 @@
     https://raw.githubusercontent.com/ocaml/opam-source-archives/main/patches/conf-radare2/find-radare2.ml.in)
    (checksum
     sha256=729155faf47b7f915b155036e83a773e70ec49beb0708b05fbc4036268da7b6d))))
+
+(enabled_on_platforms
+ (only
+  ((arch x86_64)
+   (os linux))
+  ((arch arm64)
+   (os linux))
+  ((arch x86_64)
+   (os macos))
+  ((arch arm64)
+   (os macos))))

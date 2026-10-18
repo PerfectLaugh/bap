@@ -16,7 +16,7 @@ depends: [
   "bap-std" {= version}
   "bitvec" {= version}
   "core"
-  "linenoise" {>= "1.1.0" & < "2.0.0"}
+  "linenoise" {>= "1.1.0" & < "2.0.0" & os != "win32"}
   "monads" {= version}
   "bap-common" {= version}
   "ppx_bap" {= version}

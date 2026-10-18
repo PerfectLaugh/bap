@@ -20,7 +20,7 @@ depends: [
   "bap-relation" {= version}
   "bap-std" {= version}
   "bitvec" {= version}
-  "conf-radare2"
+  "conf-radare2" {os != "win32"}
   "core"
   "ogre" {= version}
   "ppx_bap" {= version}

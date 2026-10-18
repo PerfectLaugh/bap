@@ -1,12 +1,29 @@
 (version 1.5.1)
 
 (build
- (all_platforms
-  ((action (run dune build @install -p %{pkg-self:name} -j %{jobs})))))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   ((action
+     (run dune build @install -p %{pkg-self:name} -j %{jobs}))))))
 
 (depends
- (all_platforms
-  (dune ocaml)))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   (dune ocaml))))
 
 (source
  (fetch
@@ -14,3 +31,14 @@
    https://github.com/ocaml-community/ocaml-linenoise/releases/download/v1.5.1/linenoise-1.5.1.tbz)
   (checksum
    sha512=b316b034ba712f13c8727a890c5356a52119d6f5e7040273259109bfac6813c383670295942d39441b9b9e792f3b53250400da000bbe0c6848df5643e27018ac)))
+
+(enabled_on_platforms
+ (only
+  ((arch x86_64)
+   (os linux))
+  ((arch arm64)
+   (os linux))
+  ((arch x86_64)
+   (os macos))
+  ((arch arm64)
+   (os macos))))

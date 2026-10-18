@@ -1,0 +1,8 @@
+depexts: [
+  ["cmake" "ninja-build" "python3"] {os-family = "debian"}
+  ["cmake" "samurai" "python3"] {os-distribution = "alpine"}
+  ["cmake" "ninja-build" "python3"] {os-distribution = "fedora"}
+  ["cmake" "ninja" "python"] {os-distribution = "arch"}
+  ["cmake" "ninja" "python"] {os = "macos" & os-distribution = "homebrew"}
+  ["mingw-w64-x86_64-cmake" "mingw-w64-x86_64-ninja" "mingw-w64-x86_64-python"] {os = "win32" & os-distribution = "msys2"}
+]

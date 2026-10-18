@@ -84,12 +84,19 @@ let open_log_channel user_dir =
     let log_folder = log_folder user_dir in
     let file = log_folder / "log" in
     let lock = lock (lock_filename log_folder) in
-    protect
-      ~f:(fun () ->
-        mkdir log_folder;
-        if Sys.file_exists file then rotate max_logs file)
-      ~finally:(fun () -> unlock lock);
-    let ch = Out_channel.create file in
+    (* Windows doesn't rename or remove the log while another process
+       has it open, e.g., another bap, then the log is appended to *)
+    let rotated =
+      protect
+        ~f:(fun () ->
+          mkdir log_folder;
+          try
+            if Sys.file_exists file then rotate max_logs file;
+            true
+          with _ when Sys.win32 -> false)
+        ~finally:(fun () -> unlock lock)
+    in
+    let ch = Out_channel.create ~append:(not rotated) file in
     formatter_of_out_channel ch
   with exn ->
     eprintf "unable to open log file: %a@." Exn.pp exn;

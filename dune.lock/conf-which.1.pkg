@@ -1,7 +1,17 @@
 (version 1)
 
 (build
- (all_platforms ((action (run which which)))))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   ((action
+     (run which which))))))
 
 (depexts
  ((which)
@@ -24,3 +34,14 @@
   (= %{os_family} arch))
  ((which)
   (= %{os_family} altlinux)))
+
+(enabled_on_platforms
+ (only
+  ((arch x86_64)
+   (os linux))
+  ((arch arm64)
+   (os linux))
+  ((arch x86_64)
+   (os macos))
+  ((arch arm64)
+   (os macos))))

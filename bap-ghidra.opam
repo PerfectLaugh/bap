@@ -10,7 +10,9 @@ homepage: "https://github.com/BinaryAnalysisPlatform/bap"
 bug-reports: "https://github.com/BinaryAnalysisPlatform/bap/issues"
 depends: [
   "dune" {>= "3.24"}
+  "camlzip" {>= "1.07" & < "2.0"}
   "core"
+  "fileutils"
   "ppx_bap" {= version}
   "bap-common" {= version}
   "bap-std" {= version}
@@ -41,3 +43,12 @@ extra-source "Ghidra_12.1.4_build.tar.gz" {
   checksum:
     "sha256=2a858300c350f05ae2e729dff86b4f584d0b9a6b398879c55025574e67696cec"
 }
+
+depexts: [
+  ["cmake" "ninja-build"] {os-family = "debian"}
+  ["cmake" "samurai"] {os-distribution = "alpine"}
+  ["cmake" "ninja-build"] {os-distribution = "fedora"}
+  ["cmake" "ninja"] {os-distribution = "arch"}
+  ["cmake" "ninja"] {os = "macos" & os-distribution = "homebrew"}
+  ["mingw-w64-x86_64-cmake" "mingw-w64-x86_64-ninja"] {os = "win32" & os-distribution = "msys2"}
+]

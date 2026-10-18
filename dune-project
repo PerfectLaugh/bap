@@ -183,7 +183,7 @@
   (bap-std (= :version))
   (bitvec (= :version))
   core
-  (linenoise (and (>= 1.1.0) (< 2.0.0)))
+  (linenoise (and (>= 1.1.0) (< 2.0.0) (<> :os win32)))
   (monads (= :version))
   (bap-common (= :version))
   (ppx_bap (= :version))))
@@ -293,7 +293,7 @@
   core
   fileutils
   (bap-common (= :version))
-  (ocurl (>= 0.9.0))
+  (curl (>= 0.10.0))
   (ppx_bap (= :version))
   (re (and (>= 1.0) (< 2.0)))))
 
@@ -556,7 +556,9 @@ be seen as a common denominator between Lwt and Async libraries.")
  (synopsis "The BAP NSA Ghidra backend")
  (tags (bap ghidra disassembler))
  (depends
+  (camlzip (and (>= 1.07) (< 2.0)))
   core
+  fileutils
   (ppx_bap (= :version))
   (bap-common (= :version))
   (bap-std (= :version))
@@ -1097,7 +1099,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-relation (= :version))
   (bap-std (= :version))
   (bitvec (= :version))
-   conf-radare2
+  (conf-radare2 (<> :os win32))
   core
   (ogre (= :version))
   (ppx_bap (= :version))

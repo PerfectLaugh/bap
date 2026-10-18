@@ -1,7 +1,7 @@
 (library
  (name bap_ghidra_plugin)
  (public_name bap-ghidra.plugin)
- (libraries bap bap-common bap-ghidra bap-main core))
+ (libraries bap bap-common bap-ghidra bap-main camlzip core fileutils))
 
 (plugin
  (name ghidra)

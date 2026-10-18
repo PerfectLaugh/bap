@@ -65,7 +65,16 @@ module Cmdline = struct
         `P "$(b,bap-trace)(3)";
       ]
 
+  (* [C:\trace.binprot] is a path on Windows, not a URI with the [c] scheme *)
+  let is_drive_path str =
+    Stdlib.Sys.win32
+    && String.length str >= 2
+    && Char.is_alpha str.[0]
+    && Char.equal str.[1] ':'
+
   let uri_of_string str =
+    if is_drive_path str then Uri.make ~scheme:"file" ~path:str ()
+    else
     let uri = Uri.of_string str in
     match Uri.scheme uri with
     | None -> Uri.with_scheme uri (Some "file")

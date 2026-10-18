@@ -1,25 +1,50 @@
-; Builds the Ghidra decompiler library and the processor specifications
-; from the Ghidra sources. When installed with opam, the sources are
-; fetched as an extra-source to the root of the project, otherwise they
-; are downloaded by the build script.
+; Builds the static Ghidra decompiler library and the processor
+; specifications from the Ghidra sources, see build.cmake. When installed
+; with opam, the sources are fetched as an extra-source to the root of the
+; project, otherwise they are downloaded by the build script.
 
 (rule
  (targets
   libdecomp.a
-  dlldecomp.so
+  c.flags
+  link.flags
+  Processors.zip
   (dir include)
   (dir Processors))
  (deps
-  build.sh
+  build.cmake
   (:tarball
    (glob_files %{project_root}/Ghidra_12.1.4_build.tar.gz)))
  (action
-  (run sh %{dep:build.sh} %{tarball})))
+  (run
+   cmake
+   -DLINK_PREFIX=lib/bap_ghidra/libghidra
+   -DTARBALL=%{tarball}
+   "-DCC=%{cc}"
+   "-DCXX=%{cxx}"
+   -P
+   %{dep:build.cmake})))
 
 (install
+ (enabled_if
+  (<> %{os_type} Win32))
  (package bap-ghidra)
  (section
   (site
    (bap-common ghidra)))
  (dirs
   (Processors as Ghidra/Processors)))
+
+; dune can't install directories on Windows, where it copies them as files,
+; so the specifications are installed in an archive, which the plugin
+; extracts, see plugins/ghidra/ghidra_main.ml
+
+(install
+ (enabled_if
+  (= %{os_type} Win32))
+ (package bap-ghidra)
+ (section
+  (site
+   (bap-common ghidra)))
+ (files
+  (Processors.zip as Ghidra/Processors.zip)))

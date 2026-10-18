@@ -41,7 +41,7 @@ module Plugin = struct
   let of_path path =
     try
       notify (`Opening path);
-      let bundle = Bundle.of_uri (Uri.of_string path) in
+      let bundle = Bundle.of_uri (Uri.make ~path ()) in
       let name = Bundle.manifest bundle |> Manifest.name in
       let loaded, finish = Future.create () in
       { name; body = Bundle { path; bundle }; loaded; finish }
@@ -109,19 +109,37 @@ module Plugin = struct
       same compilation unit twice, as if that happens a memory of a unit is
       corrupted (the global roots are overwritten). This is a known bug/issue in
       the OCaml runtime that we need to workaround. *)
+  (* The unit is extracted from the bundle into a temporary file, which is
+     removed after it is loaded. Windows doesn't remove the DLLs that are
+     loaded, so there the unit is extracted into a file named after the
+     digest of the bundle, which the next loads reuse, e.g., by another
+     bap, which may have it loaded. *)
+  let extracted_unit plugin name suffix =
+    if not Sys.win32 then Filename.temp_file name suffix
+    else
+      let dir = Filename.concat (Filename.get_temp_dir_name ()) "bap-plugins" in
+      (try Sys.mkdir dir 0o700 with Sys_error _ -> ());
+      let digest = Stdlib.Digest.(to_hex (file (path plugin))) in
+      Filename.concat dir (sprintf "%s-%s%s" name digest suffix)
+
   let load_entry ?(main = false) plugin name =
     let suffix = if Dynlink.is_native then ".cmxs" else ".cma" in
     let name = Filename.basename name in
-    let dst = Filename.(temp_file name suffix) in
-    let path = Uri.of_string (name ^ suffix) in
+    let dst = extracted_unit plugin name suffix in
+    let entry = Uri.make ~path:(name ^ suffix) () in
     let reason =
       if main then `Provided_by plugin.name else `Requested_by plugin.name
     in
-    Bundle.get_file ~name:dst (bundle plugin) path |> function
-    | Some uri ->
-        let path = Uri.to_string uri in
+    let extracted =
+      if Sys.win32 && Sys.file_exists dst then Some dst
+      else
+        Bundle.get_file ~name:dst (bundle plugin) entry
+        |> Option.map ~f:(fun uri -> Uri.(pct_decode (path uri)))
+    in
+    match extracted with
+    | Some path ->
         let result = load_unit ~reason ~name path in
-        do_if_not_debugging Sys.remove path;
+        if not Sys.win32 then do_if_not_debugging Sys.remove path;
         result
     | None -> (
         match Package.resolve name with
@@ -231,7 +249,8 @@ end
 
 module Plugins = struct
   let paths_of_env () =
-    try Sys.getenv "BAP_PLUGIN_PATH" |> String.split ~on:':'
+    let sep = if Sys.win32 then ';' else ':' in
+    try Sys.getenv "BAP_PLUGIN_PATH" |> String.split ~on:sep
     with Stdlib.Not_found -> []
 
   let path = Bap_plugins_config.plugindir

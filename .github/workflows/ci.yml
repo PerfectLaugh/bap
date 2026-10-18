@@ -29,10 +29,11 @@ jobs:
         with:
           submodules: true
 
-      - name: Install LLVM
+      # BAP builds LLVM from its sources with CMake
+      - name: Install CMake and Ninja
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y llvm-dev
+          sudo apt-get install -y cmake ninja-build
 
       - name: Build and test BAP
         uses: ocaml-dune/setup-dune@v2
@@ -58,58 +59,41 @@ jobs:
           path: |
             testsuite-results
 
-  # builds all packages on Windows with the mingw-w64 toolchain of MSYS2
+  # builds all packages on Windows with opam and its mingw-w64 toolchain, as
+  # dune has no binary for Windows and its package management doesn't build
+  # the OCaml compiler there yet, so the dependencies come from opam, with
+  # the packages of opam-overlay, and dune builds BAP with --pkg=disabled
   windows:
     runs-on: windows-latest
 
-    defaults:
-      run:
-        shell: msys2 {0}
-
     steps:
-      # the patches and the lock files must keep their line endings
-      - name: Keep the line endings
-        shell: pwsh
-        run: git config --global core.autocrlf false
-
       - name: Checkout code
         uses: actions/checkout@v7
         with:
           submodules: true
 
-      - name: Install the toolchain and the libraries
-        uses: msys2/setup-msys2@v2
+      - name: Install OCaml
+        uses: ocaml/setup-ocaml@v3
         with:
-          msystem: MINGW64
-          path-type: inherit
-          install: >-
-            git
-            make
-            patch
-            unzip
-          pacboy: >-
-            binutils:p
-            curl:p
-            gcc:p
-            gmp:p
-            llvm:p
-            pkgconf:p
-            zlib:p
+          ocaml-compiler: 5.5
 
-      - name: Install dune
-        uses: ocaml-dune/setup-dune@v2
-        with:
-          version: ${{ env.DUNE_VERSION }}
-          steps: install-dune enable-pkg
+      # BAP builds LLVM from its sources with CMake and Ninja
+      - name: Install Ninja
+        run: choco install -y ninja
+
+      - name: Install the dependencies
+        run: |
+          opam repo add bap-overlay ./opam-overlay --this-switch --rank=1
+          opam install . --deps-only -y
 
       - name: Build BAP
-        run: dune build
+        run: opam exec -- dune build --pkg=disabled
 
       - name: Run unit tests
-        run: dune runtest
+        run: opam exec -- dune runtest --pkg=disabled
 
       - name: Run functional tests
-        run: dune build @testsuite
+        run: opam exec -- dune build --pkg=disabled @testsuite
         env:
           BAP_TESTSUITE_WORK: ${{ github.workspace }}/testsuite-results
 

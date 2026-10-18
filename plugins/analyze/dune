@@ -10,8 +10,13 @@
   bap-main
   bitvec
   core
-  linenoise
-  monads))
+  monads
+  ; Windows has no linenoise, see line_editor.plain.ml
+  (select
+   line_editor.ml
+   from
+   (linenoise -> line_editor.linenoise.ml)
+   (-> line_editor.plain.ml))))
 
 (plugin
  (name analyze)

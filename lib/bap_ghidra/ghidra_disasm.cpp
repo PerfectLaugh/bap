@@ -700,11 +700,15 @@ std::vector<std::string> split_path(const char *input) {
     std::stringstream ss(input);
     std::string path;
     std::vector<std::string> paths;
-    while (std::getline(ss, path, ':')) {
+    // the paths are separated by newlines, as Windows paths have colons
+    while (std::getline(ss, path, '\n')) {
         paths.push_back(path);
     }
     return paths;
 }
+
+// see ghidra_register.cpp
+int ghidra_register_disassembler(std::shared_ptr<bap::disasm_factory> f);
 
 int disasm_ghidra_init (const char *path, int print_targets) {
     std::vector<std::string> roots = split_path(path);
@@ -714,7 +718,7 @@ int disasm_ghidra_init (const char *path, int print_targets) {
         factory->dump_errors();
         return result;
     } else {
-        bap::register_disassembler("ghidra", factory);
+        ghidra_register_disassembler(factory);
         return 0;
     }
 }

@@ -4,6 +4,10 @@ open Regular.Std
 val binable_from_file : (module Binable.S with type t = 't) -> string -> 't
 val read_from_file : 'a Data.Read.t -> string -> 'a
 
+val make_read_only : string -> unit
+(** [make_read_only file] makes [file] read-only, except on Windows, which
+    doesn't rename files onto the read-only ones. *)
+
 val binable_to_file :
   ?temp_dir:string ->
   (module Binable.S with type t = 't) ->

@@ -1,5 +1,5 @@
-; run with `make bench`, see the Makefile; core_bench isn't available on
-; Windows
+; run with dune exec -- ./benchmarks/run_benchmarks.exe, after checking out
+; the testsuite, see README.md; core_bench isn't available on Windows
 
 (executable
  (name run_benchmarks)

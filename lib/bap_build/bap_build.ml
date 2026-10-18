@@ -83,8 +83,10 @@ module Plugin_rules = struct
 
   let packages () = externals !Options.ocaml_pkgs
 
+  (* links the plugin into the directory of the sources, except on Windows,
+     which has no ln, where it is copied, see [register_plugin_rule] *)
   let symlink env =
-    if Options.make_links.contents then
+    if Options.make_links.contents && not Sys.win32 then
       Cmd
         (S
            [
@@ -192,7 +194,19 @@ module Plugin_rules = struct
   let register_plugin_rule () =
     rule "bap: cmxs & cma & bundle -> plugin" ~prods:[ "%.plugin" ]
       ~deps:[ "%.bundle"; "%.cmxs"; "%.cma" ] (fun env _ ->
-        Seq [ bundle env; symlink env ])
+        if Sys.win32 then begin
+          (* the plugin is copied into the directory of the sources, as
+             Windows has no ln, after it is bundled, by the rule itself *)
+          Command.execute (bundle env);
+          if Options.make_links.contents then begin
+            let plugin = env "%.plugin" in
+            Ocamlbuild.My_std.copy_file
+              (!Options.build_dir / plugin)
+              (Pathname.parent_dir_name / Filename.basename plugin)
+          end;
+          Nop
+        end
+        else Seq [ bundle env; symlink env ])
 
   let pass_pp_to_link_phase () =
     pflag [ "ocaml"; "link" ] "pp" (fun s -> S [ A "-pp"; A s ])

@@ -754,7 +754,10 @@ let map_file path =
   let fd = Unix.(openfile path [ O_RDONLY ] 0o400) in
   try
     let data =
-      Unix.map_file fd Bigarray.char Bigarray.c_layout false [| -1 |]
+      (* Windows doesn't map empty files, whose data is empty anyway *)
+      if (Unix.fstat fd).st_size = 0 then
+        Bigarray.Genarray.create Bigarray.char Bigarray.c_layout [| 0 |]
+      else Unix.map_file fd Bigarray.char Bigarray.c_layout false [| -1 |]
     in
     Unix.close fd;
     Ok (Bigarray.array1_of_genarray data)

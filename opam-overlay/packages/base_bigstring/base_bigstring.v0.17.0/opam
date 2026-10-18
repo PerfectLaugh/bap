@@ -7,6 +7,10 @@ dev-repo: "git+https://github.com/janestreet/base_bigstring.git"
 doc: "https://ocaml.janestreet.com/ocaml-core/latest/doc/base_bigstring/index.html"
 license: "MIT"
 patches: ["windows-memmem.patch"]
+extra-files: [
+  ["windows-memmem.patch"
+   "sha256=ed88e77f85c44e96c88a67b03a8c151b75652005a356f78c2a7ac804624b5f40"]
+]
 build: [
   ["dune" "build" "-p" name "-j" jobs]
 ]

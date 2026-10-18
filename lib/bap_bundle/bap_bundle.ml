@@ -106,10 +106,10 @@ module Std = struct
       let put_data b ~name ~data = b.data <- (`Name name, data) :: b.data
 
       let flush b uri =
-        let path = Uri.path uri in
+        let path = Uri.(pct_decode (path uri)) in
         let zip = Zip.open_out path in
         List.iter b.files ~f:(fun (name, uri) ->
-            let path = Uri.path uri in
+            let path = Uri.(pct_decode (path uri)) in
             let name = Option.value name ~default:path in
             Zip.copy_file_to_entry path zip name);
         List.iter b.data ~f:(fun (`Name name, data) ->
@@ -135,8 +135,10 @@ module Std = struct
       let data = Zip.read_entry zip (Zip.find_entry zip Nameof.manifest) in
       Manifest.of_string data
 
+    (* the paths of the URIs are percent-encoded, e.g., the backslashes
+       of the Windows paths are %5C, so they are decoded *)
     let of_uri uri =
-      let path = Uri.path uri in
+      let path = Uri.(pct_decode (path uri)) in
       let base = Filename.basename path in
       let name =
         if String.mem base '.' then Filename.chop_extension base else base
@@ -146,11 +148,11 @@ module Std = struct
     let get_file ?name b uri =
       b >>> fun zip ->
       try
-        let path = Uri.path uri in
+        let path = Uri.(pct_decode (path uri)) in
         let entry = Zip.find_entry zip path in
         let name = Option.value name ~default:path in
         Zip.copy_entry_to_file zip entry name;
-        Some (Uri.of_string name)
+        Some (Uri.make ~path:name ())
       with Stdlib.Not_found -> None
 
     let get_data b name =
@@ -207,7 +209,7 @@ module Std = struct
     let insert_files bundle files =
       insert bundle
         (List.map files ~f:(fun (name, uri) ->
-             let path = Uri.path uri in
+             let path = Uri.(pct_decode (path uri)) in
              let name = Option.value name ~default:path in
              (name, `Copy path)))
 

@@ -32,7 +32,14 @@
   (language c)
   (names disasm_stubs)
   (flags -O3))
- (c_library_flags -lstdc++))
+ ; the runtime of C++, static on Windows, see config/cxx_runtime.ml
+ (c_library_flags
+  (:include cxx_runtime.flags)))
+
+(rule
+ (target cxx_runtime.flags)
+ (action
+  (run ./config/cxx_runtime.exe)))
 
 (install
  (package bap-std)

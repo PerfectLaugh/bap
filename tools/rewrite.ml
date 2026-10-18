@@ -42,9 +42,16 @@ let () =
     (Option.value name ~default:var, Cfg.ocaml_config_var_exn self var)
   in
 
+  (* the paths are substituted into OCaml string literals, so on Windows
+     they use forward slashes, which its file APIs accept, instead of
+     the backslashes, which would be escape sequences *)
+  let slashify path =
+    if Sys.win32 then String.tr path ~target:'\\' ~replacement:'/' else path
+  in
+
   let prefix =
     let stdlib = Cfg.ocaml_config_var_exn self "standard_library" in
-    String.chop_suffix_exn stdlib ~suffix:"/lib/ocaml"
+    slashify @@ Stdlib.Filename.(dirname @@ dirname stdlib)
   in
 
   let build_id =
@@ -92,7 +99,6 @@ let () =
           ("debug", "true");
           ("profile", "false");
           ("build_id", build_id);
-          ("llvm-config", "llvm-config");
           ("cxxfilt_paths", "[]");
           ("ida_path", "");
           ("ida_headless", "false");
@@ -110,7 +116,8 @@ let () =
           ocamlc "architecture";
           ocamlc "host";
           ocamlc "target";
-          ocamlc "standard_library";
+          (let name, path = ocamlc "standard_library" in
+           (name, slashify path));
           ocamlc ~name:"suffix_program" "ext_exe";
         ]
     in
@@ -153,13 +160,21 @@ let () =
     cfg_of_sexp @@ Sexp.of_string @@ In_channel.read_all "config.status"
   in
 
+  (* the variables whose values are OCaml expressions, not strings *)
+  let is_expression var =
+    String.is_prefix var ~prefix:"site_"
+    || String.is_suffix var ~suffix:"_paths"
+    || String.equal var "ida_headless"
+  in
+
   let rewrite_var var =
     match Hashtbl.find vars var with
     | None ->
         eprintf "Warning %s: unknown variable %S in %s\n" Sys.argv.(0) var
           !filename;
         var
-    | Some s -> s
+    | Some s when is_expression var -> s
+    | Some s -> slashify s
   in
 
   let substitute_one str =

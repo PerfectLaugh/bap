@@ -161,12 +161,40 @@ let packages =
 
 let mkdir path = if not (Sys.file_exists path) then Caml_unix.mkdir path 0o770
 
-let run fmt =
-  let cmd c =
-    let res = Sys.command c in
-    if res <> 0 then failwith ("Command: '" ^ c ^ "' failed")
+(* runs the program, without a shell, with the files as its standard input
+   and output, and returns its exit code *)
+let exec ?input ?output ?(append = false) prog args =
+  let open Caml_unix in
+  let fin = Option.map input ~f:(fun f -> openfile f [ O_RDONLY ] 0) in
+  let flags = if append then [ O_APPEND ] else [ O_TRUNC ] in
+  let fout =
+    Option.map output ~f:(fun f -> openfile f ([ O_WRONLY; O_CREAT ] @ flags) 0o644)
   in
-  ksprintf cmd fmt
+  let close () =
+    Option.iter fin ~f:close;
+    Option.iter fout ~f:close
+  in
+  match
+    create_process prog
+      (Array.of_list (prog :: args))
+      (Option.value fin ~default:Caml_unix.stdin)
+      (Option.value fout ~default:Caml_unix.stdout)
+      Caml_unix.stderr
+  with
+  | exception exn ->
+      close ();
+      raise exn
+  | pid -> (
+      close ();
+      match snd (waitpid [] pid) with WEXITED n -> n | _ -> 1)
+
+let run ?input ?output ?append prog args =
+  if exec ?input ?output ?append prog args <> 0 then
+    failwithf "Command: '%s' failed" (String.concat ~sep:" " (prog :: args)) ()
+
+let append_to_file file data =
+  Out_channel.with_file ~append:true file ~f:(fun ch ->
+      Out_channel.output_string ch data)
 
 (* the odoc output of [dune build @doc], relative to the doc folder *)
 let odoc_html = "../_build/default/_doc/_html"
@@ -189,12 +217,16 @@ let render_section (name, entries) =
   sprintf "<h3>%s</h3>\n<ul>\n%s\n</ul>" name
     (String.concat ~sep:"\n" @@ List.map ~f:render_entry entries)
 
-type info = { man : string -> string; help : string -> string }
+(* the name of the manual page of a tool and the command of its help *)
+type info = { man : string -> string; help : string -> string * string list }
 
-let program = { man = Fn.id; help = sprintf "%s --help=groff" }
+let program = { man = Fn.id; help = (fun tool -> (tool, [ "--help=groff" ])) }
 
 let plugin =
-  { man = sprintf "bap-plugin-%s"; help = sprintf "bap --%s-help=groff" }
+  {
+    man = sprintf "bap-plugin-%s";
+    help = (fun name -> ("bap", [ sprintf "--%s-help=groff" name ]));
+  }
 
 let generate_man3_redirection lib =
   mkdir "man3";
@@ -213,25 +245,35 @@ let generate_man3_redirection lib =
   let name = sprintf "man3/%s.3.html" lib in
   Out_channel.write_all name ~data:redirection
 
-let connect_with_pipes cmds = String.concat cmds ~sep:" | "
-let dump_to_file f cmd = sprintf "%s > %s" cmd f
-let repair_links = {|sed "s/\\\N'45'/-/g"|}
-let redirect_index = sprintf {|sed "s#../index.html#../odoc/index.html#g"|}
-let man2html = sprintf "man2html -r"
-
+(* renders the help of the tool, in groff, with man2html *)
 let build_manual { man; help } tool =
   mkdir "man1";
-  match Sys.command @@ sprintf "%s >/dev/null" (help tool) with
-  | 0 ->
-      let out = sprintf "man1/%s.1.html" (man tool) in
-      run "%s" @@ dump_to_file out
-      @@ connect_with_pipes
-           [ help tool; repair_links; man2html; redirect_index ]
-  | _ ->
-      eprintf "Warning: can't render manpage for %s\n" tool;
-      eprintf "Called as %S, got:\n" (help tool);
-      ignore (Sys.command @@ sprintf "%s >&2" (help tool));
-      eprintf "\n%!"
+  let prog, args = help tool in
+  let groff = Filename.temp_file "bapdoc" ".groff"
+  and html = Filename.temp_file "bapdoc" ".html" in
+  protect
+    ~finally:(fun () ->
+      Sys.remove groff;
+      Sys.remove html)
+    ~f:(fun () ->
+      match exec ~output:groff prog args with
+      | 0 ->
+          (* the minus signs, which groff writes as \N'45', are hyphens *)
+          In_channel.read_all groff
+          |> String.substr_replace_all ~pattern:{|\N'45'|} ~with_:"-"
+          |> fun data ->
+          Out_channel.write_all groff ~data;
+          run ~input:groff ~output:html "man2html" [ "-r" ];
+          In_channel.read_all html
+          |> String.substr_replace_all ~pattern:"../index.html"
+               ~with_:"../odoc/index.html"
+          |> fun data ->
+          Out_channel.write_all (sprintf "man1/%s.1.html" (man tool)) ~data
+      | _ ->
+          eprintf "Warning: can't render manpage for %s\n" tool;
+          eprintf "Called as %S, got:\n%s\n%!"
+            (String.concat ~sep:" " (prog :: args))
+            (In_channel.read_all groff))
 
 let generate_manual () =
   let _frontends =
@@ -280,38 +322,49 @@ let index_page =
 
 (* copies the API reference built by odoc and adds the index page *)
 let generate () =
-  run "rm -rf odoc";
-  run "cp -R %s odoc" odoc_html;
+  if Sys.file_exists "odoc" then FileUtil.rm ~recurse:true [ "odoc" ];
+  FileUtil.cp ~recurse:true [ odoc_html ] "odoc";
   Out_channel.write_all "odoc/index.html" ~data:index_page
 
 let install_handwritten_manpages () =
   mkdir "man1";
-  run "cp ../man/* man1/"
+  Sys.readdir "../man"
+  |> Array.iter ~f:(fun page ->
+      FileUtil.cp [ Filename.concat "../man" page ] (Filename.concat "man1" page))
 
 (* by default, title is the buffer/file name with no extension,
    that's why we need override it with an empty title *)
 let html_of_org file =
-  run "echo \"#+TITLE: Primus Lisp Documentation\n\" >> %s" file;
-  run "emacs %s --batch --eval '(org-html-export-to-html)'" file;
+  append_to_file file "#+TITLE: Primus Lisp Documentation\n\n";
+  run "emacs" [ file; "--batch"; "--eval"; "(org-html-export-to-html)" ];
   Sys.remove file
 
 let install_lisp_documentation ?(option = "") target =
   let file = Filename.concat target "index.org" in
   mkdir target;
-  run "bap primus-lisp-documentation %s > %s" option file;
+  let options = if String.is_empty option then [] else [ option ] in
+  run ~output:file "bap" ("primus-lisp-documentation" :: options);
   html_of_org file
 
 let install_primus_api () =
   let file = "primus/index.org" in
   let add x =
-    run "echo '* %s' >> %s" (String.capitalize x) file;
-    run "bap primus-%s >> %s" x file
+    append_to_file file (sprintf "* %s\n" (String.capitalize x));
+    run ~output:file ~append:true "bap" [ "primus-" ^ x ]
   in
   mkdir "primus";
   List.iter ~f:add [ "systems"; "components"; "observations" ];
   html_of_org file
 
-let is_installed x = Sys.command (sprintf "which %s" x) = 0
+(* the program is in PATH, with an executable suffix on Windows *)
+let is_installed x =
+  let sep = if Sys.win32 then ';' else ':' in
+  let suffixes = if Sys.win32 then [ ""; ".exe"; ".cmd"; ".bat" ] else [ "" ] in
+  Option.value (Sys.getenv_opt "PATH") ~default:""
+  |> String.split ~on:sep
+  |> List.exists ~f:(fun dir ->
+      List.exists suffixes ~f:(fun suffix ->
+          Sys.file_exists (Filename.concat dir (x ^ suffix))))
 
 let check_installed x =
   if not (is_installed x) then failwith (sprintf "%s is not installed\n" x)
@@ -320,11 +373,16 @@ let check () =
   check_installed "bap";
   check_installed "emacs";
   check_installed "man2html";
-  check_installed "sed";
   if not (Sys.file_exists odoc_html) then
     failwithf "%s is not found, run `dune build @doc` first\n" odoc_html ()
 
 let () =
+  (* the website is generated in doc/, when the tool is run from the root
+     of the repository, as dune exec -- ./tools/bapdoc.exe *)
+  if Sys.file_exists "dune-project" then begin
+    mkdir "doc";
+    Sys.chdir "doc"
+  end;
   check ();
   generate_manual ();
   install_handwritten_manpages ();

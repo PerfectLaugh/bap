@@ -6,6 +6,10 @@ module Unix = Caml_unix
 
 let ( / ) = Filename.concat
 
+(* Windows doesn't rename a file onto a read-only one, so the cache files
+   are writable there *)
+let make_read_only file = if not Sys.win32 then Unix.chmod file 0o444
+
 let write_to_file ?temp_dir writer file data =
   let temp_dir = Option.value ~default:(Filename.dirname file) temp_dir in
   let tmp, ch = Filename.open_temp_file ~temp_dir "tmp" "" in
@@ -13,7 +17,7 @@ let write_to_file ?temp_dir writer file data =
     ~f:(fun () -> Data.Write.to_channel writer ch data)
     ~finally:(fun () ->
       Out_channel.close ch;
-      Unix.chmod tmp 0o444;
+      make_read_only tmp;
       Sys.rename tmp file)
 
 let open_temp temp_dir =
@@ -23,6 +27,20 @@ let open_temp temp_dir =
     Sys.remove tmp;
     raise e
 
+(* Windows keeps a mapped file locked until the mapping is collected, so
+   there the cache files, which the cache renames, removes, and
+   overwrites, are read and written without mapping them *)
+let binable_to_file_unmapped ?temp_dir b file data =
+  let temp_dir = Option.value ~default:(Filename.dirname file) temp_dir in
+  let tmp, ch =
+    Filename.open_temp_file ~mode:[ Open_binary ] ~temp_dir "tmp" ""
+  in
+  protect
+    ~f:(fun () -> Out_channel.output_string ch (Binable.to_string b data))
+    ~finally:(fun () ->
+      Out_channel.close ch;
+      Sys.rename tmp file)
+
 let binable_to_file : type t.
     ?temp_dir:string ->
     (module Binable.S with type t = t) ->
@@ -30,6 +48,8 @@ let binable_to_file : type t.
     t ->
     unit =
  fun ?temp_dir b file data ->
+  if Sys.win32 then binable_to_file_unmapped ?temp_dir b file data
+  else
   let module T = (val b) in
   let temp_dir = Option.value ~default:(Filename.dirname file) temp_dir in
   let tmp, fd = open_temp temp_dir in
@@ -42,12 +62,14 @@ let binable_to_file : type t.
       ignore @@ T.bin_write_t (Bigarray.array1_of_genarray buf) ~pos:0 data)
     ~finally:(fun () ->
       Unix.close fd;
-      Unix.chmod tmp 0o444;
+      make_read_only tmp;
       Sys.rename tmp file)
 
 let binable_from_file : type t.
     (module Binable.S with type t = t) -> string -> t =
  fun b file ->
+  if Sys.win32 then Binable.of_string b (In_channel.read_all file)
+  else
   let module T = (val b) in
   let fd = Unix.(openfile file [ O_RDONLY ] 0o400) in
   let data =

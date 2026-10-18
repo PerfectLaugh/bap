@@ -233,9 +233,21 @@ let parse_vars ?(env = []) vars =
   | `Ok v -> Ok v
   | `Duplicate_key s -> Error (Duplicate_var s)
 
+(* on Windows, the name may start with a drive, e.g., [C:\recipe.zip:x=1] *)
+let split_name name =
+  match String.split name ~on:':' with
+  | drive :: path :: vars
+    when Stdlib.Sys.win32
+         && String.length drive = 1
+         && Char.is_alpha drive.[0]
+         && (String.is_prefix path ~prefix:"\\"
+            || String.is_prefix path ~prefix:"/") ->
+      (drive ^ ":" ^ path) :: vars
+  | parts -> parts
+
 let load_exn ?(paths = []) ?env name =
   let name, vars =
-    match String.split name ~on:':' with
+    match split_name name with
     | [] -> failwith "Recipe.load: an empty name was passed"
     | name :: vars -> (String.strip name, vars)
   in

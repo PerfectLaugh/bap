@@ -1,0 +1,6 @@
+; generates the lifter tests of the architectures, see lifter_gen.ml
+
+(executable
+ (name lifter_gen)
+ (modules lifter_gen)
+ (libraries sexplib unix))

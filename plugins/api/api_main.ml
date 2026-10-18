@@ -299,9 +299,10 @@ module Cmdline = struct
     let empty = { lang = ""; name = "" }
 
     let parser str =
-      match String.split str ~on:':' with
-      | [ lang; name ] -> `Ok { lang; name = Api_path.basename' name }
-      | _ -> `Error "expected <lang>:<name>"
+      (* the name may be a Windows path, e.g., [c:C:\api.h] *)
+      match String.lsplit2 str ~on:':' with
+      | Some (lang, name) -> `Ok { lang; name = Api_path.basename' name }
+      | None -> `Error "expected <lang>:<name>"
 
     let printer ppf t = Format.fprintf ppf "%s:%s" t.lang t.name
     let t = Config.converter parser printer empty
@@ -311,12 +312,12 @@ module Cmdline = struct
     type t = api
 
     let parser str =
-      match String.split str ~on:':' with
-      | [ lang; file ] -> (
+      match String.lsplit2 str ~on:':' with
+      | Some (lang, file) -> (
           match Api.create lang file with
           | None -> `Error (sprintf "can't find api at %s" file)
           | Some api -> `Ok api)
-      | _ -> `Error "expected <lang>:<file>"
+      | None -> `Error "expected <lang>:<file>"
 
     let printer ppf t =
       Format.fprintf ppf "%s:%s" t.desc.lang (Api_path.to_string t.path)

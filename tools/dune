@@ -24,4 +24,4 @@
 (executable
  (name bapdoc)
  (modules bapdoc)
- (libraries core core_kernel.caml_unix bap-plugins))
+ (libraries core core_kernel.caml_unix bap-plugins fileutils))

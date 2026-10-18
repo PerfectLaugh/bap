@@ -1,0 +1,21 @@
+; arm, T32, see lib_test/cross/lifter_gen.ml
+(toolchain cross)
+(cc_target armv7a-linux-gnueabi)
+(cc_flags (-marm))
+(qemu qemu-arm)
+(qemu_cpu cortex-a15)
+(mc_triple thumbv7)
+(mc_flags (-mcpu=cortex-a15))
+(arch thumb)
+(prelude ".syntax unified\n.thumb")
+(mode t32_qemu)
+(helpers Arm_tests_helpers)
+(gpr (0 1 0x7f 0x80 0x7fff 0x8000 0x7fffffff 0x80000000 0xffffffff 0x12345678 0xfedcba98))
+(gpr2 (0 1 0x80 0x7fff 0x80000000 0xffffffff 0x7fffffff 0x12345678))
+(sets
+ (flag (0 1))
+ (count (0 1 7 31 32 33 0xff 0x100))
+ (flags (0 0xf8000000 0x50000000 0xa8000000 0x08000000))
+ (nz (1 2 0x7f 0x80 0x7fffffff 0x80000000 0xffffffff 0xfffffffe 0x12345678 0x10)))
+(kinds
+ ((?F) flag))

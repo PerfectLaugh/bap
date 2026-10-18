@@ -21,10 +21,11 @@ jobs:
         with:
           submodules: true
 
-      - name: Install LLVM
+      # BAP builds LLVM from its sources with CMake
+      - name: Install CMake and Ninja
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y llvm-dev
+          sudo apt-get install -y cmake ninja-build
 
       - name: Install dune
         uses: ocaml-dune/setup-dune@v2

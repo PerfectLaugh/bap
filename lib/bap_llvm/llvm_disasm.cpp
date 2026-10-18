@@ -706,9 +706,12 @@ static void parse_environment_options(const char *prog_name, const char *env_var
 #endif
 }
 
+// see llvm_register.cpp
+int llvm_register_disassembler(std::shared_ptr<bap::disasm_factory> f);
+
 int disasm_llvm_init() {
     parse_environment_options("bap", "BAP_LLVM_OPTIONS");
     bap::initialize_llvm();
     auto f = std::make_shared<bap::create_llvm_disassembler>();
-    return bap::register_disassembler("llvm", f);
+    return llvm_register_disassembler(f);
 }

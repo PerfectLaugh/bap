@@ -243,12 +243,16 @@ let parse (size : C.Size.base) parse lexbuf =
 
 exception Cpp_failed
 
+(* the headers are read in the text mode, so that the lexer doesn't get
+   the carriage returns of their lines on Windows, where they are common *)
 let with_file cpp name f =
   match cpp with
-  | None -> In_channel.with_file name ~f
+  | None -> In_channel.with_file ~binary:false name ~f
   | Some cpp ->
-      let cmd = sprintf "%s %S" cpp name in
+      (* cpp is a command line, with its options, so only the file is quoted *)
+      let cmd = sprintf "%s %s" cpp (Stdlib.Filename.quote name) in
       let input = Caml_unix.open_process_in cmd in
+      Stdlib.set_binary_mode_in input false;
       protect
         ~f:(fun () -> f input)
         ~finally:(fun () ->

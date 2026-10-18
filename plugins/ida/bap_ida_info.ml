@@ -36,6 +36,11 @@ type failure =
 let ( / ) = Filename.concat
 let string_of_kind k = Sexp.to_string (sexp_of_ida_kind k)
 
+(* the file of the IDA executable of the kind [k] *)
+let executable path k =
+  let exe = path / string_of_kind k in
+  if Sys.win32 then exe ^ ".exe" else exe
+
 let code_of_failure = function
   | Ida_not_exists -> 0
   | Non_dir_path -> 1
@@ -68,7 +73,7 @@ module Check = struct
       (path / "plugins" / "plugin_loader_bap.py")
 
   let require_kind path k =
-    let file = path / string_of_kind k in
+    let file = executable path k in
     require_path ~error:(File_not_found file) file
 
   let run { path; ida } =
@@ -108,7 +113,7 @@ let check ida =
       Or_error.errorf "IDA check failed with error code %d"
         (code_of_failure fail)
 
-let exists_kind path kind = Sys.file_exists (path / string_of_kind kind)
+let exists_kind path kind = Sys.file_exists (executable path kind)
 
 let create_ida path =
   let find_kind ~is_headless mode =
