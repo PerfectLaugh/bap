@@ -1,0 +1,4 @@
+(test
+ (name test_unicorn)
+ (package bap-primus-unicorn)
+ (libraries bap-primus-unicorn.unicorn))

@@ -1,0 +1,33 @@
+; The bindings to the Unicorn that libunicorn builds from its sources.
+; The include path is relative to the directory of the library, where
+; the stubs are compiled, and the archive is relative to the root of the
+; build context, where they are linked.
+
+(library
+ (name bap_unicorn)
+ (public_name bap-primus-unicorn.unicorn)
+ (foreign_stubs
+  (language c)
+  (names unicorn_stubs unicorn_regs)
+  (extra_deps unicorn_regs.h ../libunicorn/unicorn)
+  (flags :standard -I../libunicorn/unicorn/include))
+ (c_library_flags
+  plugins/primus_unicorn/libunicorn/unicorn/lib/libunicorn.a
+  -lpthread
+  -lm))
+
+(rule
+ (targets unicorn_regs.c)
+ (deps ../libunicorn/unicorn)
+ (action
+  (with-stdout-to
+   %{targets}
+   (run
+    gen/gen_regs.exe
+    ../libunicorn/unicorn/include/unicorn
+    x86:x86.h:UC_X86_REG_
+    arm:arm.h:UC_ARM_REG_
+    arm64:arm64.h:UC_ARM64_REG_
+    mips:mips.h:UC_MIPS_REG_
+    ppc:ppc.h:UC_PPC_REG_
+    riscv:riscv.h:UC_RISCV_REG_))))

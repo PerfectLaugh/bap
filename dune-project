@@ -1045,6 +1045,20 @@ be seen as a common denominator between Lwt and Async libraries.")
   core))
 
 (package
+ (name bap-primus-unicorn)
+ (synopsis "Runs the code in Primus with the Unicorn CPU emulator")
+ (description
+  "Links the Unicorn emulator engine, which is licensed under GPL-2.0,
+so this package is distributed under GPL-2.0, unlike the rest of BAP.")
+ (license GPL-2.0-only)
+ (tags (bap bap-primus unicorn))
+ (depends
+  (bap-common (= :version))
+  (bap-primus (= :version))
+  (bap-std (= :version))
+  core))
+
+(package
  (name bap-primus-wandering-scheduler)
  (synopsis "A BAP Primus scheduler")
  (tags (bap bap-primus))

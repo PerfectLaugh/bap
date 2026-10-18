@@ -1,0 +1,20 @@
+; Builds Unicorn from its sources with the compiler of OCaml, see
+; build.cmake. When installed with opam, the sources are fetched as an
+; extra-source to the root of the project, otherwise they are downloaded
+; by the script.
+
+(rule
+ (targets
+  (dir unicorn))
+ (deps
+  build.cmake
+  (:tarball
+   (glob_files %{project_root}/unicorn-2.1.4.tar.gz)))
+ (action
+  (run
+   cmake
+   -DOUT=unicorn
+   -DTARBALL=%{tarball}
+   "-DCC=%{cc}"
+   -P
+   %{dep:build.cmake})))

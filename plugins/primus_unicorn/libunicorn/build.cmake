@@ -1,0 +1,146 @@
+# Builds the static Unicorn library that the primus-unicorn plugin links.
+#
+# usage: cmake -DOUT=<dir> [-DTARBALL=<file>] [-DCC=<cc>] [-DJOBS=<n>]
+#              -P build.cmake
+#
+# Installs into OUT:
+#   include/unicorn/ - the Unicorn headers
+#   lib/libunicorn.a - the library with the engines of the architectures
+#                      that BAP lifts
+#
+# The Unicorn sources are taken from TARBALL, if it is specified (e.g.,
+# when opam has already fetched it as an extra-source), otherwise they
+# are downloaded from GitHub. In both cases the checksum is verified.
+#
+# CC is the command of the C compiler, e.g., the %{cc} of dune, whose
+# flags are ignored, so that Unicorn is built with the compiler of OCaml.
+# The build uses Ninja if it is installed, otherwise make, except on
+# Windows, where it needs Ninja.
+
+cmake_minimum_required(VERSION 3.20)
+
+set(UNICORN_VERSION 2.1.4)
+set(UNICORN_SHA256
+  ea8863f095a0136388694e5a6063afd9bb7650e30243dd6251af59c5ce5601f4)
+set(UNICORN_ROOT unicorn-${UNICORN_VERSION})
+set(UNICORN_URL
+  https://github.com/unicorn-engine/unicorn/archive/refs/tags/${UNICORN_VERSION}.tar.gz)
+
+# the engines of the architectures that BAP lifts
+set(UNICORN_ARCHES x86 arm aarch64 mips ppc riscv)
+
+if(NOT OUT)
+  message(FATAL_ERROR "build.cmake: OUT is not specified")
+endif()
+get_filename_component(OUT "${OUT}" ABSOLUTE)
+
+if(NOT JOBS)
+  cmake_host_system_information(RESULT JOBS QUERY NUMBER_OF_LOGICAL_CORES)
+endif()
+
+# the build directory is outside of the dune tree, as its paths are long
+if(CMAKE_HOST_WIN32)
+  file(TO_CMAKE_PATH "$ENV{TEMP}" TMP)
+elseif(DEFINED ENV{TMPDIR})
+  set(TMP "$ENV{TMPDIR}")
+else()
+  set(TMP /tmp)
+endif()
+string(RANDOM LENGTH 8 SUFFIX)
+set(WORK "${TMP}/bap-unicorn-${SUFFIX}")
+file(MAKE_DIRECTORY "${WORK}")
+
+function(fail)
+  file(REMOVE_RECURSE "${WORK}")
+  message(FATAL_ERROR ${ARGN})
+endfunction()
+
+# runs the command quietly, but shows the end of its output if it fails
+function(quietly name)
+  execute_process(
+    COMMAND ${ARGN}
+    OUTPUT_FILE "${WORK}/${name}.log"
+    ERROR_FILE "${WORK}/${name}.log"
+    RESULT_VARIABLE status)
+  if(NOT status EQUAL 0)
+    file(STRINGS "${WORK}/${name}.log" lines)
+    list(LENGTH lines total)
+    if(total GREATER 100)
+      math(EXPR first "${total} - 100")
+      list(SUBLIST lines ${first} 100 lines)
+    endif()
+    list(JOIN lines "\n" tail)
+    fail("${name} of Unicorn failed (${status}):\n${tail}")
+  endif()
+endfunction()
+
+if(TARBALL)
+  file(SHA256 "${TARBALL}" sum)
+  if(NOT sum STREQUAL UNICORN_SHA256)
+    fail("checksum mismatch for ${TARBALL}: got ${sum}")
+  endif()
+else()
+  set(TARBALL "${WORK}/${UNICORN_ROOT}.tar.gz")
+  file(DOWNLOAD "${UNICORN_URL}" "${TARBALL}"
+    EXPECTED_HASH SHA256=${UNICORN_SHA256}
+    TLS_VERIFY ON
+    STATUS status)
+  list(GET status 0 code)
+  if(NOT code EQUAL 0)
+    fail("failed to download ${UNICORN_URL}: ${status}")
+  endif()
+endif()
+
+file(ARCHIVE_EXTRACT INPUT "${TARBALL}" DESTINATION "${WORK}")
+
+# the first word of a dune compiler command, without its flags
+function(compiler var cmd default)
+  if(cmd)
+    separate_arguments(words NATIVE_COMMAND "${cmd}")
+    list(GET words 0 cmd)
+  else()
+    set(cmd ${default})
+  endif()
+  set(${var} ${cmd} PARENT_SCOPE)
+endfunction()
+
+compiler(CC "${CC}" cc)
+
+find_program(NINJA ninja)
+if(NINJA)
+  set(GENERATOR Ninja)
+elseif(CMAKE_HOST_WIN32)
+  fail("building Unicorn on Windows requires Ninja")
+else()
+  set(GENERATOR "Unix Makefiles")
+endif()
+
+# the list is passed in an initial cache, as its semicolons would split
+# it into several arguments of the commands
+set(INITIAL_CACHE "${WORK}/cache.cmake")
+file(WRITE "${INITIAL_CACHE}"
+  "set(UNICORN_ARCH \"${UNICORN_ARCHES}\" CACHE STRING \"\")\n")
+
+set(CONFIGURE
+  -G ${GENERATOR}
+  -C "${INITIAL_CACHE}"
+  -S "${WORK}/${UNICORN_ROOT}"
+  -B "${WORK}/build"
+  -DCMAKE_BUILD_TYPE=Release
+  "-DCMAKE_INSTALL_PREFIX=${OUT}"
+  -DCMAKE_INSTALL_LIBDIR=lib
+  -DCMAKE_C_COMPILER=${CC}
+  # one static archive, which is linked into the plugin, so its code
+  # must be position independent
+  -DBUILD_SHARED_LIBS=OFF
+  -DUNICORN_LEGACY_STATIC_ARCHIVE=ON
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+  -DUNICORN_BUILD_TESTS=OFF
+  -DUNICORN_INSTALL=ON)
+
+message(STATUS "Building Unicorn ${UNICORN_VERSION} with ${CC} in ${WORK}")
+quietly(configure "${CMAKE_COMMAND}" ${CONFIGURE})
+quietly(build "${CMAKE_COMMAND}" --build "${WORK}/build" --parallel ${JOBS})
+quietly(install "${CMAKE_COMMAND}" --install "${WORK}/build")
+
+file(REMOVE_RECURSE "${WORK}")
