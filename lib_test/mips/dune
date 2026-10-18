@@ -98,9 +98,10 @@
     MIPS64le_64))))
 
 ; the instruction tests are slow, so they don't run with dune test, run
-; them with dune build @instruction-tests. OUnit collects the heap after
-; each test, which is the most of the time of the tests, as the heap has
-; the knowledge base of the lifters, the tests don't need it
+; them with dune build @instruction-tests, in one process, as the most of
+; the time of a process is loading the semantics of its targets. OUnit collects the heap after each test, which is the
+; most of the time of the tests, as the heap has the knowledge base of the
+; lifters, the tests don't need it
 
 (rule
  (alias instruction-tests)
@@ -108,4 +109,4 @@
   (setenv
    OUNIT_RUN_GC_FULL_MAJOR
    false
-   (run %{exe:run_mips_tests.exe}))))
+   (run %{exe:run_mips_tests.exe} -runner sequential))))

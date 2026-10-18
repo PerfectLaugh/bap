@@ -38,7 +38,7 @@ test:
 # the lifter tests of the instructions of x86, ARM, MIPS and PowerPC,
 # which are slow and do not run with dune test
 test-instructions:
-	dune build @instruction-tests
+	dune build --force @instruction-tests
 
 TESTSUITE_URL = https://github.com/PerfectLaugh/bap-testsuite.git
 TESTSUITE_REV = 44cea2f4814bed7166e3a585fa240074c8aeaac6
