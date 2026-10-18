@@ -30,6 +30,17 @@ module State = struct
     }
 
   let var = KB.Context.declare ~package:"bap" "lisp-interpter-state" !!empty
+
+  (* the arithmetic modulo 2^bits, which is created once for each width, as
+     each instruction of a target uses the same *)
+  let arith =
+    let arith = Hashtbl.create (module Int) in
+    fun bits ->
+      Hashtbl.find_or_add arith bits ~default:(fun () ->
+          (module Bitvec.Make (struct
+            let modulus = Bitvec.modulus bits
+          end) : Bitvec.S))
+
   let get = KB.Context.get var
   let set = KB.Context.set var
   let update = KB.Context.update var
@@ -774,10 +785,7 @@ let provide_semantics ?(stdout = Format.std_formatter) () =
       {
         binds = Map.empty (module Theory.Var.Top);
         scope = Map.empty (module Theory.Var.Top);
-        arith =
-          (module Bitvec.Make (struct
-            let modulus = Bitvec.modulus bits
-          end));
+        arith = State.arith bits;
       }
   >>= fun () ->
   let* (module Core) = Theory.current in
