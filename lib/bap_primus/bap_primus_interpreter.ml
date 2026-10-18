@@ -709,18 +709,22 @@ module Make (Machine : Machine) = struct
 
   let call cond call =
     Machine.Local.get state >>= fun { addr = callsite } ->
-    resolve_return call >>= fun ret ->
-    push_prompt ret >>= fun () ->
-    label cond (Call.target call) >>= fun () ->
-    Machine.Local.get state >>= function
-    | { prompts = [] } -> Machine.return ()
-    | { prompts = p :: _ } -> (
-        match ret with
-        | None -> Machine.return ()
-        | Some p' when Tid.(p <> p') ->
-            trap_cfi_violation callsite >>= fun () ->
-            pop_prompt >>= fun () -> label cond (Direct p')
-        | Some p -> pop_prompt >>= fun () -> label cond (Direct p))
+    resolve_return call >>= function
+    (* a call that doesn't return is a tail call, so that a loop of
+       them, e.g., a PLT entry jumping to itself, runs in constant space *)
+    | None -> label cond (Call.target call)
+    | ret -> (
+        push_prompt ret >>= fun () ->
+        label cond (Call.target call) >>= fun () ->
+        Machine.Local.get state >>= function
+        | { prompts = [] } -> Machine.return ()
+        | { prompts = p :: _ } -> (
+            match ret with
+            | None -> Machine.return ()
+            | Some p' when Tid.(p <> p') ->
+                trap_cfi_violation callsite >>= fun () ->
+                pop_prompt >>= fun () -> label cond (Direct p')
+            | Some p -> pop_prompt >>= fun () -> label cond (Direct p)))
 
   let goto cond c = label cond c
   let interrupt n = !!will_interrupt n
