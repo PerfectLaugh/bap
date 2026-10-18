@@ -80,8 +80,19 @@ module Create () = struct
           match parser x with `Ok x -> x | `Error err -> failwith err)
         ~print:(fun x -> Format.asprintf "%a" printer x)
 
+    let plugin = name
+
     let prepend_deprecation dep doc =
       match dep with None -> doc | Some dep -> sprintf "%s %s" dep doc
+
+    (* a deprecated option is reported when it is used, with the message
+       that names its replacement *)
+    let report_deprecated deprecated name ~is_used value =
+      Option.iter deprecated ~f:(fun msg ->
+          Future.upon value (fun x ->
+              if is_used x then
+                warning "the option --%s-%s is deprecated: %s" plugin name msg));
+      value
 
     let param t ?deprecated ?default:(d = Type.default t) ?as_flag
         ?(docv = Type.name t) ?(doc = "Undocumented.") ?synonyms name =
@@ -89,6 +100,9 @@ module Create () = struct
       let doc = prepend_deprecation deprecated doc in
       Configuration.parameter ~doc ?as_flag ?aliases:synonyms t name
       |> Configuration.determined
+      |> report_deprecated deprecated name ~is_used:(fun x ->
+          (* the values that can't be compared are taken as defaults *)
+          try not (Poly.equal x d) with _ -> false)
 
     let param_all t ?deprecated ?default ?as_flag ?(docv = Type.name t)
         ?(doc = "Undocumented.") ?synonyms name =
@@ -96,6 +110,7 @@ module Create () = struct
       let doc = prepend_deprecation deprecated doc in
       Configuration.parameters ~doc ?as_flag ?aliases:synonyms t name
       |> Configuration.determined
+      |> report_deprecated deprecated name ~is_used:(Fn.non List.is_empty)
       |> Future.map ~f:(fun res ->
           match default with
           | None -> res
@@ -103,7 +118,9 @@ module Create () = struct
 
     let flag ?deprecated ?docv:_ ?(doc = "Undocumented.") ?synonyms name =
       let doc = prepend_deprecation deprecated doc in
-      Configuration.flag ~doc ?aliases:synonyms name |> Configuration.determined
+      Configuration.flag ~doc ?aliases:synonyms name
+      |> Configuration.determined
+      |> report_deprecated deprecated name ~is_used:Fn.id
 
     let determined x = x
 
