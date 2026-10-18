@@ -165,7 +165,7 @@ endif()
 list(GET library 0 library)
 file(COPY_FILE "${library}" "${OUT}/lib/libz3.a")
 file(GLOB headers "${SRC}/src/api/z3*.h")
-file(COPY ${headers} DESTINATION "${OUT}/include")
+file(COPY ${headers} DESTINATION "${OUT}/include" FOLLOW_SYMLINK_CHAIN)
 
 # the bindings, as the OCaml bindings of the CMake build of Z3 require
 # ocamlfind and install them with it, see src/api/ml/CMakeLists.txt
@@ -180,7 +180,7 @@ file(COPY
   "${SRC}/src/api/ml/z3.ml"
   "${SRC}/src/api/ml/z3.mli"
   "${SRC}/src/api/ml/z3native_stubs.h"
-  DESTINATION "${OUT}/ml")
+  DESTINATION "${OUT}/ml" FOLLOW_SYMLINK_CHAIN)
 
 # writes the list of flags as an s-expression for dune's :include
 function(write_flags file)

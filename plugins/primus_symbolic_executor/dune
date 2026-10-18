@@ -59,7 +59,6 @@
   z3native_stubs.h
   c.flags
   link.flags)
- (deps libz3)
  (action
   (progn
    (copy libz3/ml/z3enums.ml z3enums.ml)

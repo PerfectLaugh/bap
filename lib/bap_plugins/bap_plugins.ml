@@ -36,6 +36,11 @@ module Plugin = struct
   let notify (value : system_event) = Signal.send event value
   let load = Bap_plugins_loader_backend.load
   let setup_dynamic_loader = Bap_plugins_loader_backend.install
+
+  (* loads the plugins that are packages, i.e., not bundles, by their
+     names, the toplevel loads them with topfind, see bap_init_toplevel *)
+  let package_loader = ref Bap_common.Plugins.load
+  let setup_package_loader load = package_loader := load
   let init = lazy (Units.init ())
 
   let of_path path =
@@ -215,7 +220,7 @@ module Plugin = struct
         try
           notify (`Loading plugin);
           with_context plugin ~f:(fun () ->
-              Bap_common.Plugins.load plugin.name;
+              !package_loader plugin.name;
               Promise.fulfill plugin.finish ();
               notify (`Loaded plugin);
               Ok ())
@@ -423,5 +428,6 @@ module Std = struct
   module Plugins = Plugins
 
   let setup_dynamic_loader = Plugin.setup_dynamic_loader
+  let setup_package_loader = Plugin.setup_package_loader
   let list_loaded_units () = Units.list ()
 end

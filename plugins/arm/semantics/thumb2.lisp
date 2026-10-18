@@ -82,6 +82,7 @@
   (t2-compare rn (lnot (shifted rm sh)) (cast-unsigned 32 1) cnd))
 (defun t2CMNzrs (rn rm sh cnd _)
   (t2-compare rn (shifted rm sh) (cast-unsigned 32 0) cnd))
+(defun t2CMNrs (rn rm sh cnd _) (t2CMNzrs rn rm sh cnd _))
 
 ;; the immediate shifts
 (defmacro t2-shift-imm (typ rd rm imm cnd s)
@@ -210,6 +211,8 @@
 (defun tASRrr (rd s rn rm cnd _) (t2-shift-reg 'asr rd rn rm cnd s))
 (defun tROR (rd s rn rm cnd _) (t2-shift-reg 'ror rd rn rm cnd s))
 (defun tCMNz (rn rm cnd _) (t2-compare rn rm (cast-unsigned 32 0) cnd))
+;; LLVM 23 names the register forms of CMN without z
+(defun tCMN (rn rm cnd _) (tCMNz rn rm cnd _))
 
 ;; THE T32 INSTRUCTIONS OF THE A32 ONES
 ;;
@@ -262,6 +265,7 @@
 (defun t2CMPrr (rn rm cnd _) (t2-compare rn (lnot rm) (cast-unsigned 32 1) cnd))
 (defun t2CMNri (rn imm cnd _) (t2-compare rn imm (cast-unsigned 32 0) cnd))
 (defun t2CMNzrr (rn rm cnd _) (t2-compare rn rm (cast-unsigned 32 0) cnd))
+(defun t2CMNrr (rn rm cnd _) (t2CMNzrr rn rm cnd _))
 
 (defun t2MOVi16 (rd imm cnd _) (MOVi16 rd imm cnd _))
 (defun t2MOVTi16 (rd rn imm cnd _) (MOVTi16 rd rn imm cnd _))
