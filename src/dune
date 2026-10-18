@@ -2,7 +2,7 @@
  (name bap_frontend)
  (public_name bap)
  (package bap-frontend)
- (modules bap_frontend)
+ (modules bap_frontend bap_memprof)
  (preprocess
   (pps ppx_bap))
  (libraries

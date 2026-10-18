@@ -15,6 +15,15 @@ comes from various BAP plugins. There are many extension points in
 BAP, but writing a disassembler pass is probably the easiest to start
 with. See $(b,bap disassemble --help) for more details.
 
+# ENVIRONMENT
+
+$(b,BAP_DEBUG), if set and not 0, records the backtraces of exceptions.
+
+$(b,BAP_MEMPROF), if set to a sampling rate, e.g., 1e-4, samples the
+allocations and prints, when bap exits, the code that allocated the
+sampled values that are still live, as the estimated megabytes of each
+call site.
+
 # BUGS
 
 Report bugs to
@@ -348,6 +357,7 @@ let _config_command_declaration : unit =
 
 let () =
   let _unused : (module unit) = (module Bap.Std) in
+  Bap_memprof.start ();
   let () =
     try
       if String.(Sys.getenv "BAP_DEBUG" <> "0") then
