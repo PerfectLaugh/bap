@@ -87,3 +87,4 @@ Ghidra_*_build.tar.gz
 # the lock directory is source, even if its files match the patterns above
 # (e.g., `*.ba*` matches base-unix.base.pkg)
 !/dune.lock/**
+/testsuite-results/

@@ -1,0 +1,24 @@
+; the functional tests of bap and bap-mc, which run them on the binaries of
+; the testsuite repository, checked out in testsuite/ at the revision of
+; REVISION. They are slow, so they don't run with dune test, run them with
+;
+;   dune build @testsuite
+;
+; and select the cases whose names contain one of the words of BAP_TESTS,
+; e.g., BAP_TESTS="taint mc/" dune build @testsuite, see run.exe --help.
+
+(executable
+ (name run)
+ (libraries re spawn threads.posix unix))
+
+; the cases test the plugins that are built in this tree, and run every
+; time, since they depend on the testsuite
+
+(rule
+ (alias testsuite)
+ (deps
+  (alias_rec %{workspace_root}/install)
+  REVISION
+  (universe))
+ (action
+  (run %{exe:run.exe} --bap %{bin:bap} --mc %{bin:bap-mc})))

@@ -40,27 +40,15 @@ test:
 test-instructions:
 	dune build --force @instruction-tests
 
-TESTSUITE_URL = https://github.com/PerfectLaugh/bap-testsuite.git
-TESTSUITE_REV = 4e3ef9f8965b9c589a20a73c288c017d3c2e2d82
+# the functional tests, see tools/testsuite/dune; TESTS selects the cases
+# whose names contain one of its words, e.g., make check TESTS="taint mc/"
+check:
+	BAP_TESTS="$(TESTS)" dune build @testsuite
 
+# checks out the testsuite at the revision of tools/testsuite/REVISION
+.PHONY: testsuite
 testsuite:
-	git clone $(TESTSUITE_URL) testsuite
-
-# the number of test files of the testsuite that run in parallel
-TESTSUITE_JOBS ?= 8
-
-# the test files that run, all of them by default, e.g.,
-# make check TESTS="mc:x86-mov.exp bap:api-main.exp"
-TESTS ?=
-
-# runs under dune exec, so that it tests bap and the plugins built in
-# this tree instead of whatever bap is first on PATH, and with TERM=dumb,
-# so that the output the tests match doesn't depend on the terminal
-check: testsuite
-	git -C testsuite cat-file -e $(TESTSUITE_REV)^{commit} 2>/dev/null || \
-	  git -C testsuite fetch $(TESTSUITE_URL)
-	git -C testsuite checkout -q $(TESTSUITE_REV)
-	TERM=dumb dune exec -- bash tools/run-testsuite.sh $(TESTSUITE_JOBS) $(TESTS)
+	dune exec -- ./tools/testsuite/run.exe --fetch-only
 
 # runs the micro-benchmarks in benchmarks/. Pass core_bench options in
 # BENCH_ARGS (e.g., BENCH_ARGS="-quota 1" or BENCH_ARGS=-help) and set

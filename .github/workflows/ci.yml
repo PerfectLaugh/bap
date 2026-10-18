@@ -29,10 +29,10 @@ jobs:
         with:
           submodules: true
 
-      - name: Install LLVM and DejaGnu
+      - name: Install LLVM
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y llvm-dev dejagnu
+          sudo apt-get install -y llvm-dev
 
       - name: Build and test BAP
         uses: ocaml-dune/setup-dune@v2
@@ -41,7 +41,9 @@ jobs:
           steps: install-dune enable-pkg install-depexts build-deps build runtest
 
       - name: Run functional tests
-        run: make check
+        run: dune build @testsuite
+        env:
+          BAP_TESTSUITE_WORK: ${{ github.workspace }}/testsuite-results
 
       - uses: actions/upload-artifact@v7
         if: ${{ always() }}
@@ -54,5 +56,4 @@ jobs:
         with:
           name: functional-tests-log
           path: |
-            testsuite/*.log
-            testsuite/logs
+            testsuite-results
