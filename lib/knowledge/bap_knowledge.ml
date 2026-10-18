@@ -146,24 +146,23 @@ end = struct
     let[@inline] is_empty = function Nil -> true | _ -> false
     let branching_bit a b = highest_bit (a lxor b)
 
-    let rec find_exn t k =
+    let rec find t k =
       match t with
-      | Nil -> raise Stdlib.Not_found
-      | Tip (k', v) when k = k' -> v
-      | Tip _ -> raise Stdlib.Not_found
+      | Nil -> None
+      | Tip (k', v) when k = k' -> Some v
+      | Tip _ -> None
       | Bin (k', l, r) -> (
           match Key.compare k' k with
-          | NA -> raise Stdlib.Not_found
-          | LB -> find_exn l k
-          | RB -> find_exn r k)
+          | NA -> None
+          | LB -> find l k
+          | RB -> find r k)
 
-    let find t k = try Some (find_exn t k) with Stdlib.Not_found -> None
+    (* the callers catch Not_found, which is raised without a backtrace, as
+       the backtraces, which Core records, cost more than the lookup *)
+    let find_exn t k =
+      match find t k with Some v -> v | None -> raise_notrace Stdlib.Not_found
 
-    let mem k t =
-      try
-        ignore (find_exn k t);
-        true
-      with Stdlib.Not_found -> false
+    let mem k t = Option.is_some (find k t)
 
     let node payload branching l r =
       match (l, r) with
