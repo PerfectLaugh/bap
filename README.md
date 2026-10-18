@@ -68,7 +68,7 @@ dune show depexts         # lists the system packages to install with your packa
 dune build                # fetches the dependencies and builds BAP
 ```
 
-Once it is built, run `bap` and the other tools through `dune exec`, e.g., `dune exec -- bap /bin/echo -d`, so that they can find the plugins in the build tree. The build needs no shell or make, all tasks are dune commands (add `--pkg=disabled` when the dependencies come from an opam switch, e.g., on Windows):
+Once it is built, run `bap` and the other tools through `dune exec`, e.g., `dune exec -- bap /bin/echo -d`, so that they can find the plugins in the build tree. BAP's own build needs no shell scripts or Makefiles, all tasks are dune commands, though dune still needs `make` to build some of the dependencies pinned in `dune.lock`, the OCaml compiler among them (add `--pkg=disabled` when the dependencies come from an opam switch, e.g., on Windows):
 
 | Task | Command |
 |------|---------|
