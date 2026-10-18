@@ -8,3 +8,5 @@
 4d82d8c4b86e6db178594c55be7691cc6d138140
 # use ocamlformat 0.28.1
 0d8443eb9283441c393161d8aa6b8eb4e0384e1c
+# build: format the code with dune fmt
+ccda6e28a32658acd0a1f950f53f118021fbebe8
