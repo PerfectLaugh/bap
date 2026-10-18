@@ -548,14 +548,18 @@ let disassemble ~code ~data ~funs debt base : Machine.state KB.t =
                   >>= fun () ->
                   collect_dests encoding label >>= fun dests ->
                   if Set.is_empty dests.resolved && not dests.indirect then
-                    step d @@ Machine.moved s encoding mem
+                    KB.return (Machine.moved s encoding mem)
                   else
-                    delay label >>= fun delay ->
-                    step d @@ Machine.jumped s encoding mem dests delay )
-              @@ fun problem ->
-              warning "rejecting %a due to a conflict %a" Memory.pp mem
-                KB.Conflict.pp problem;
-              step d (Machine.failed s encoding s.addr))
+                    delay label >>| fun delay ->
+                    Machine.jumped s encoding mem dests delay )
+                (fun problem ->
+                  warning "rejecting %a due to a conflict %a" Memory.pp mem
+                    KB.Conflict.pp problem;
+                  KB.return (Machine.failed s encoding s.addr))
+              (* only the instruction is in the scope of its handler, which
+                 otherwise would keep each state of the disassembler until
+                 the end of the memory *)
+              >>= step d)
             ~invalid:(fun d mem s ->
               info "rejecting %a as an invalid instruction" Memory.pp mem;
               step d (Machine.failed s encoding s.addr)))
