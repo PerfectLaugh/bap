@@ -765,10 +765,15 @@ module Load = struct
     List.fold ~init:String.Map.empty ~f:(fun fs f ->
         Map.set fs ~key:f ~data:Cmdline)
 
+  (* the sources of the features don't depend on the project, so they
+     are read once, e.g., for each target of a project *)
+  let sources = Hashtbl.Poly.create ()
+
   let features ?(paths = [ Filename.current_dir_name ]) proj fs =
     let source =
-      load_trees paths Source.empty (features_of_list fs)
-      |> transitive_closure paths
+      Hashtbl.find_or_add sources (paths, fs) ~default:(fun () ->
+          load_trees paths Source.empty (features_of_list fs)
+          |> transitive_closure paths)
     in
     try Parse.source (Context.of_project proj) source
     with Parse_error (err, trees) ->

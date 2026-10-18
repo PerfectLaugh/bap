@@ -68,6 +68,12 @@ val fold : t -> init:'a -> f:(string -> tree list -> 'a -> 'a) -> 'a
     repository. *)
 
 val derived : t -> from:Id.t -> Id.t -> t
+
+val derived_all : t -> (Id.t * Id.t) list -> t
+(** [derived_all p ids] is [p] with each [(id, from)] of [ids] derived as
+    [derived p ~from id], the [ids] must be increasing and greater than
+    the last identifier of [p]. *)
+
 val lastid : t -> Id.t
 val lasteq : t -> Eq.t
 val pp_error : Format.formatter -> error -> unit

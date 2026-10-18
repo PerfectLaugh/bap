@@ -189,6 +189,24 @@ let derived p ~from id =
       rclass = Map.set p.rclass ~key:id ~data:from;
     }
 
+(* the derived identifiers are above the identifiers of the source, so
+   their map is built in a linear time and appended *)
+let derived_all p ids =
+  match List.last ids with
+  | None -> p
+  | Some (last, _) ->
+      let upper_part =
+        List.filter ids ~f:(fun (_, from) -> not Id.(Id.null = from))
+        |> Array.of_list |> Id.Map.of_sorted_array_unchecked
+      in
+      let rclass =
+        match Map.append ~lower_part:p.rclass ~upper_part with
+        | `Ok rclass -> rclass
+        | `Overlapping_key_ranges ->
+            Map.merge_skewed p.rclass upper_part ~combine:(fun ~key:_ _ x -> x)
+      in
+      { p with lastid = Id.max last p.lastid; rclass }
+
 let pp_error ppf (Bad_sexp (filename, err)) =
   Parsexp.Parse_error.report ppf ~filename err
 

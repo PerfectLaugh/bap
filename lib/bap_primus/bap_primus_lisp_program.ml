@@ -307,10 +307,9 @@ let in_package package p f = f { p with package }
 let with_context p context = { p with context }
 let with_sources p sources = { p with sources }
 
-let ( ++ ) =
-  Map.merge ~f:(fun ~key:_ -> function
-    | `Both (id, _) | `Left id | `Right id -> Some id)
-
+(* the definitions of the left side are kept, the smaller side is merged
+   into the larger one *)
+let ( ++ ) x y = Map.merge_skewed x y ~combine:(fun ~key:_ x _ -> x)
 let union init xs ~f = List.fold xs ~init ~f:(fun vs x -> vs ++ f x)
 
 module Places = struct
@@ -644,11 +643,6 @@ end
 module Reindex : sig
   val program : program -> program
 end = struct
-  module State = Monad.State.Make (Source) (Monad.Ident)
-  open State.Syntax
-
-  type 'a m = 'a Monad.State.T1(Source)(Monad.Ident).t
-
   let rec ids_of_trees trees =
     List.fold trees ~init:Id.Set.empty ~f:(fun xs t ->
         match t with
@@ -674,88 +668,99 @@ end = struct
           ])
       ~init:Id.Set.empty
 
-  let derive from =
-    State.get () >>= fun src ->
-    let nextid = Id.next (Source.lastid src) in
-    State.put (Source.derived src ~from nextid) >>| fun () -> nextid
+  (* the new identifiers are generated after the last identifier of the
+     source, and the derivations are added to the source in bulk, the
+     trees are traversed from the left to the right, and a tree that
+     doesn't change is kept *)
+  type gen = { mutable last : Id.t; mutable derived : (Id.t * Id.t) list }
 
-  let reindex (get, set) macros def =
-    let rename t =
-      if Set.mem macros t.id || Id.(null = t.id) then
-        derive t.id >>| fun id -> { t with id }
-      else State.return t
+  let rename src macros (t : 'a indexed) : 'a indexed =
+    if Set.mem macros t.id || Id.(null = t.id) then (
+      let id = Id.next src.last in
+      src.last <- id;
+      src.derived <- (id, t.id) :: src.derived;
+      { t with id })
+    else t
+
+  let map_list f xs =
+    let ys = List.rev (List.rev_map xs ~f) in
+    if List.for_all2_exn xs ys ~f:phys_equal then xs else ys
+
+  let reindex src macros (get, set) def =
+    let rename_ast : ast -> ast = rename src macros in
+    let rec map (t0 : ast) : ast =
+      let t = rename_ast t0 in
+      let data =
+        match t.data with
+        | Err _ -> t.data
+        | Int x ->
+            let x' = rename src macros x in
+            if phys_equal x x' then t.data else Int x'
+        | Sym s ->
+            let s' = rename src macros s in
+            if phys_equal s s' then t.data else Sym s'
+        | Var v ->
+            let v' = rename src macros v in
+            if phys_equal v v' then t.data else Var v'
+        | Ite (x, y, z) ->
+            let x' = map x in
+            let y' = map y in
+            let z' = map z in
+            if phys_equal x x' && phys_equal y y' && phys_equal z z' then t.data
+            else Ite (x', y', z')
+        | Let (c, x, y) ->
+            let c' = rename src macros c in
+            let x' = map x in
+            let y' = map y in
+            if phys_equal c c' && phys_equal x x' && phys_equal y y' then t.data
+            else Let (c', x', y')
+        | Rep (x, y) ->
+            let x' = map x in
+            let y' = map y in
+            if phys_equal x x' && phys_equal y y' then t.data else Rep (x', y')
+        | App (b, xs) ->
+            let xs' = map_list map xs in
+            if phys_equal xs xs' then t.data else App (b, xs')
+        | Msg (f, xs) ->
+            let xs' = map_list map xs in
+            if phys_equal xs xs' then t.data else Msg (f, xs')
+        | Seq xs ->
+            let xs' = map_list map xs in
+            if phys_equal xs xs' then t.data else Seq xs'
+        | Set (v, x) ->
+            let v' = rename src macros v in
+            let x' = map x in
+            if phys_equal v v' && phys_equal x x' then t.data else Set (v', x')
+      in
+      if phys_equal t t0 && phys_equal data t.data then t0 else { t with data }
     in
-    let rec map : ast -> ast m =
-     fun t ->
-      rename t >>= fun t ->
-      match t.data with
-      | Err _ -> State.return t
-      | Int x -> rename x >>| fun x -> { t with data = Int x }
-      | Sym s -> rename s >>| fun s -> { t with data = Sym s }
-      | Var v -> rename v >>| fun v -> { t with data = Var v }
-      | Ite (x, y, z) ->
-          map x >>= fun x ->
-          map y >>= fun y ->
-          map z >>| fun z -> { t with data = Ite (x, y, z) }
-      | Let (c, x, y) ->
-          rename c >>= fun c ->
-          map x >>= fun x ->
-          map y >>| fun y -> { t with data = Let (c, x, y) }
-      | Rep (x, y) ->
-          map x >>= fun x ->
-          map y >>| fun y -> { t with data = Rep (x, y) }
-      | App (b, xs) -> map_all xs >>| fun xs -> { t with data = App (b, xs) }
-      | Msg (f, xs) -> map_all xs >>| fun xs -> { t with data = Msg (f, xs) }
-      | Seq xs -> map_all xs >>| fun xs -> { t with data = Seq xs }
-      | Set (v, x) ->
-          rename v >>= fun v ->
-          map x >>| fun x -> { t with data = Set (v, x) }
-    and map_all xs = State.List.map xs ~f:map in
-    map (get def) >>| set def
+    let body = get def in
+    let body' = map body in
+    if phys_equal body body' then def else set def body'
 
-  let reindex_package macros p =
+  let reindex_package src macros p =
     let def = (Def.Func.body, Def.Func.with_body) in
     let met = (Def.Meth.body, Def.Meth.with_body) in
     let par = (Def.Para.default, Def.Para.with_default) in
-    State.List.map (items p.defs) ~f:(reindex def macros) >>= fun defs ->
-    State.List.map (items p.mets) ~f:(reindex met macros) >>= fun mets ->
-    State.List.map (items p.pars) ~f:(reindex par macros) >>= fun pars ->
-    State.return (defs, mets, pars)
+    let defs = List.map (items p.defs) ~f:(reindex src macros def) in
+    let mets = List.map (items p.mets) ~f:(reindex src macros met) in
+    let pars = List.map (items p.pars) ~f:(reindex src macros par) in
+    (defs, mets, pars)
 
   let repack defs =
     List.fold defs
       ~f:(fun defs def -> Map.add_multi defs ~key:(Def.name def) ~data:def)
       ~init:nodefs
 
-  let package prog macros pkgname =
-    let pkg = get_package prog pkgname in
-    let (defs, mets, pars), sources =
-      State.run (reindex_package macros pkg) prog.sources
-    in
-    {
-      prog with
-      sources;
-      library =
-        Map.set prog.library ~key:pkgname
-          ~data:
-            {
-              pkg with
-              defs = repack defs;
-              mets = repack mets;
-              pars = repack pars;
-            };
-    }
-
   let program prog =
     let macros = macro_ids prog.library in
     fold_library prog.library
       ~f:(fun ~package pkg prog ->
-        let (defs, mets, pars), sources =
-          State.run (reindex_package macros pkg) prog.sources
-        in
+        let src = { last = Source.lastid prog.sources; derived = [] } in
+        let defs, mets, pars = reindex_package src macros pkg in
         {
           prog with
-          sources;
+          sources = Source.derived_all prog.sources (List.rev src.derived);
           library =
             Map.set prog.library ~key:package
               ~data:
