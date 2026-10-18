@@ -12,7 +12,14 @@ let package = "bap"
 module Optimizer = Theory.Parser.Make (Theory.Pass.Desugar (Bil_semantics.Core))
 
 module Relocations = struct
-  type t = { rels : Int64.t Map.M(Int64).t; exts : string Map.M(Int64).t }
+  (* the relocations and the external references, and whether the file is
+     executable, the relocations of an executable file are applied when
+     it is loaded *)
+  type t = {
+    rels : Int64.t Map.M(Int64).t;
+    exts : string Map.M(Int64).t;
+    executable : bool;
+  }
   [@@deriving equal]
 
   module Fact = Ogre
@@ -35,16 +42,21 @@ module Relocations = struct
       Seq.fold s
         ~f:(fun addrs (addr, name) -> Map.set addrs ~key:addr ~data:name)
         ~init:(Map.empty (module Int64))
+
+    let executable = Fact.request is_executable >>| Option.value ~default:false
   end
 
   let relocations = Fact.eval Request.relocations
   let external_symbols = Fact.eval Request.external_symbols
-  let empty = { rels = Int64.Map.empty; exts = Int64.Map.empty }
+  let executable = Fact.eval Request.executable
+
+  let empty =
+    { rels = Int64.Map.empty; exts = Int64.Map.empty; executable = false }
 
   let of_spec spec =
-    match (relocations spec, external_symbols spec) with
-    | Ok rels, Ok exts -> { rels; exts }
-    | Error e, _ | _, Error e -> Error.raise e
+    match (relocations spec, external_symbols spec, executable spec) with
+    | Ok rels, Ok exts, Ok executable -> { rels; exts; executable }
+    | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error.raise e
 
   let reference_analyzer =
     object
@@ -126,18 +138,30 @@ module Relocations = struct
   (* the IR of the instruction with the relocations applied, or None if
      there is no relocation, the BIL of the legacy lifters is already
      fixed up, but the other lifters, e.g., the Primus Lisp ones, don't
-     apply them *)
+     apply them. Only the relocatable files are fixed up, the relocations
+     of an executable, e.g., of its calls through the GOT, are applied
+     when it is loaded *)
+  let is_relocatable obj =
+    KB.collect Theory.Label.unit obj >>= function
+    | None -> KB.return false
+    | Some unit ->
+        KB.collect relocations_slot unit >>| fun { executable } ->
+        not executable
+
   let relocated obj sema =
     KB.collect Memory.slot obj >>= function
     | None -> KB.return None
     | Some mem ->
-        let bil = Insn.bil sema in
-        fixup obj mem bil >>= fun fixed ->
-        if List.equal Stmt.equal bil fixed then KB.return None
+        is_relocatable obj >>= fun relocatable ->
+        if not relocatable then KB.return None
         else
-          let module Ir = Theory.Parser.Make (Bil_ir.Theory) in
-          Ir.run Bil.Theory.parser fixed >>| fun eff ->
-          Some (KB.Value.get Bil_ir.slot eff)
+          let bil = Insn.bil sema in
+          fixup obj mem bil >>= fun fixed ->
+          if List.equal Stmt.equal bil fixed then KB.return None
+          else
+            let module Ir = Theory.Parser.Make (Bil_ir.Theory) in
+            Ir.run Bil.Theory.parser fixed >>| fun eff ->
+            Some (KB.Value.get Bil_ir.slot eff)
 
   let fixup_agent = KB.Agent.register ~package "bil-fixup-relocator"
 
@@ -164,8 +188,7 @@ let provide_bir () =
   KB.Rule.(
     declare ~package "reify-ir"
     |> require Theory.Semantics.slot
-    |> require Bil_ir.slot
-    |> require Memory.slot
+    |> require Bil_ir.slot |> require Memory.slot
     |> provide Theory.Semantics.slot
     |> comment "reifies IR, with the relocations applied");
   KB.promise Theory.Semantics.slot @@ fun obj ->
