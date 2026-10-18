@@ -18,11 +18,11 @@ let static_runtime self =
       (* the compilers of the mingw-w64 toolchain of opam are Cygwin
          programs, which print the paths of Cygwin *)
       let path =
-        if String.is_prefix path ~prefix:"/" then (
+        if String.is_prefix path ~prefix:"/" then
           match C.Process.run self "cygpath" [ "-m"; path ] with
           | { C.Process.exit_code = 0; stdout; _ } -> String.strip stdout
           | _ -> path
-          | exception _ -> path)
+          | exception _ -> path
         else path
       in
       Option.some_if

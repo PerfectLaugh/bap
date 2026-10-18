@@ -49,8 +49,7 @@ let llvm ?prefix self opts =
         @@ C.Process.run_capture_exn self !llvm_config [ "--prefix" ]
       in
       List.map flags ~f:(fun flag ->
-          String.substr_replace_all (slashify flag) ~pattern:llvm
-            ~with_:prefix)
+          String.substr_replace_all (slashify flag) ~pattern:llvm ~with_:prefix)
 
 let filename = ref ""
 

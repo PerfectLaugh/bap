@@ -343,8 +343,7 @@ module Basic : Theory.Basic = struct
     match (value hi, value lo) with
     | Int h, Int l ->
         let h = Word.to_int_exn h and l = Word.to_int_exn l in
-        if h - l + 1 = size s then
-          vec s @@ Bil.(extract ~hi:h ~lo:l (value e))
+        if h - l + 1 = size s then vec s @@ Bil.(extract ~hi:h ~lo:l (value e))
         else extract s !!hi !!lo !!e
     | _ -> extract s !!hi !!lo !!e
 

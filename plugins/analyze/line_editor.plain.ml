@@ -14,9 +14,7 @@ let history_add _ = Ok ()
 let history_save ~filename:_ = Ok ()
 let add_completion () _ = ()
 let set_completion_callback (_ : string -> completions -> unit) = ()
-
-let set_hints_callback (_ : string -> (string * hint_color * bool) option) =
-  ()
+let set_hints_callback (_ : string -> (string * hint_color * bool) option) = ()
 
 let linenoise prompt =
   print_string prompt;

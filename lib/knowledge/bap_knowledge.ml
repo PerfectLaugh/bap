@@ -3229,18 +3229,18 @@ module Knowledge = struct
       if Stdlib.Sys.win32 then
         of_bigstring @@ Bigstring.of_string @@ In_channel.read_all path
       else
-      let fd = Unix.openfile path Unix.[ O_RDONLY ] 0o400 in
-      try
-        let data =
-          Bigarray.array1_of_genarray
-          @@ Unix.map_file fd Bigarray.char Bigarray.c_layout false [| -1 |]
-        in
-        let r = of_bigstring data in
-        Unix.close fd;
-        r
-      with exn ->
-        Unix.close fd;
-        raise exn
+        let fd = Unix.openfile path Unix.[ O_RDONLY ] 0o400 in
+        try
+          let data =
+            Bigarray.array1_of_genarray
+            @@ Unix.map_file fd Bigarray.char Bigarray.c_layout false [| -1 |]
+          in
+          let r = of_bigstring data in
+          Unix.close fd;
+          r
+        with exn ->
+          Unix.close fd;
+          raise exn
 
     let blit_canonical_to_bigstring repr buf =
       Bigstring.From_string.blito ~src:magic ~dst:buf ();
@@ -3260,20 +3260,20 @@ module Knowledge = struct
         Out_channel.write_all path
           ~data:(Bigstring.to_string (to_bigstring state))
       else
-      let repr = to_canonical state in
-      let size = String.length magic + bin_size_canonical bin_size_v2 repr in
-      let fd = Unix.openfile path Unix.[ O_RDWR; O_CREAT; O_TRUNC ] 0o660 in
-      try
-        let dim = [| size |] in
-        let buf =
-          Bigarray.array1_of_genarray
-          @@ Unix.map_file fd Bigarray.char Bigarray.c_layout true dim
-        in
-        blit_canonical_to_bigstring repr buf;
-        Unix.close fd
-      with exn ->
-        Unix.close fd;
-        raise exn
+        let repr = to_canonical state in
+        let size = String.length magic + bin_size_canonical bin_size_v2 repr in
+        let fd = Unix.openfile path Unix.[ O_RDWR; O_CREAT; O_TRUNC ] 0o660 in
+        try
+          let dim = [| size |] in
+          let buf =
+            Bigarray.array1_of_genarray
+            @@ Unix.map_file fd Bigarray.char Bigarray.c_layout true dim
+          in
+          blit_canonical_to_bigstring repr buf;
+          Unix.close fd
+        with exn ->
+          Unix.close fd;
+          raise exn
   end
 
   let save = Io.save

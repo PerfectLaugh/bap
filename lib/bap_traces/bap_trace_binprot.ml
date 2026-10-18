@@ -11,7 +11,8 @@ module Proto = struct
 
   let probe uri =
     match Uri.scheme uri with
-    | Some "file" -> Filename.check_suffix (Uri.(pct_decode (path uri))) ".binprot"
+    | Some "file" ->
+        Filename.check_suffix Uri.(pct_decode (path uri)) ".binprot"
     | _ -> false
 
   let supports : 'a tag -> bool = fun _ -> true
@@ -51,7 +52,7 @@ module TraceWriter = struct
     with Unix.Unix_error (er, _, _) -> Error (`System_error er)
 
   let write uri t =
-    make_channel (Uri.(pct_decode (path uri))) >>= fun ch ->
+    make_channel Uri.(pct_decode (path uri)) >>= fun ch ->
     Proto.write_tool (Trace.tool t) ch;
     Proto.write_meta (Trace.meta t) ch;
     Trace.read_events t |> Seq.iter ~f:(fun ev -> Proto.write_event ev ch);
@@ -88,7 +89,7 @@ module TraceReader = struct
     Ok Trace.Reader.{ tool; meta; next }
 
   let read uri id =
-    make_channel (Uri.(pct_decode (path uri))) >>= fun ch ->
+    make_channel Uri.(pct_decode (path uri)) >>= fun ch ->
     match make_reader ch with
     | Ok r as res -> res
     | Error er -> Error (`Protocol_error er)

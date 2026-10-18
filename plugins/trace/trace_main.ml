@@ -75,10 +75,10 @@ module Cmdline = struct
   let uri_of_string str =
     if is_drive_path str then Uri.make ~scheme:"file" ~path:str ()
     else
-    let uri = Uri.of_string str in
-    match Uri.scheme uri with
-    | None -> Uri.with_scheme uri (Some "file")
-    | Some _ -> uri
+      let uri = Uri.of_string str in
+      match Uri.scheme uri with
+      | None -> Uri.with_scheme uri (Some "file")
+      | Some _ -> uri
 
   let uri =
     Config.converter (fun s -> `Ok (uri_of_string s)) Uri.pp_hum Uri.empty

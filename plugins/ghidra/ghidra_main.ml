@@ -36,26 +36,24 @@ let extracted_archive site =
       in
       mkdir (Filename.dirname root);
       let tmp =
-        Stdlib.Filename.temp_dir ~temp_dir:(Filename.dirname root)
-          "ghidra-" ".tmp"
+        Stdlib.Filename.temp_dir ~temp_dir:(Filename.dirname root) "ghidra-"
+          ".tmp"
       in
       let zip = Zip.open_in archive in
-      begin
-        try
-          Exn.protect
-            ~finally:(fun () -> Zip.close_in zip)
-            ~f:(fun () ->
-              List.iter (Zip.entries zip) ~f:(fun entry ->
-                  let name = entry.Zip.filename in
-                  if (not entry.Zip.is_directory) && is_processor_data name
-                  then begin
-                    let file = tmp / name in
-                    mkdir (Filename.dirname file);
-                    Zip.copy_entry_to_file zip entry file
-                  end))
-        with exn ->
-          FileUtil.rm ~recurse:true [ tmp ];
-          raise exn
+      begin try
+        Exn.protect
+          ~finally:(fun () -> Zip.close_in zip)
+          ~f:(fun () ->
+            List.iter (Zip.entries zip) ~f:(fun entry ->
+                let name = entry.Zip.filename in
+                if (not entry.Zip.is_directory) && is_processor_data name then begin
+                  let file = tmp / name in
+                  mkdir (Filename.dirname file);
+                  Zip.copy_entry_to_file zip entry file
+                end))
+      with exn ->
+        FileUtil.rm ~recurse:true [ tmp ];
+        raise exn
       end;
       try Stdlib.Sys.rename tmp root
       with Sys_error _ when Stdlib.Sys.file_exists root ->

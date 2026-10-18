@@ -48,6 +48,7 @@
 ; the flags of the LLVM that libllvm builds from its sources, with its
 ; paths relative to the directory of the library, where the stubs are
 ; compiled, and to the root of the build context, where they are linked
+
 (rule
  (targets c.flags cxx.flags link.flags bap_llvm_config.ml)
  (deps

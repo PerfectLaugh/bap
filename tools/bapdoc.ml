@@ -168,7 +168,8 @@ let exec ?input ?output ?(append = false) prog args =
   let fin = Option.map input ~f:(fun f -> openfile f [ O_RDONLY ] 0) in
   let flags = if append then [ O_APPEND ] else [ O_TRUNC ] in
   let fout =
-    Option.map output ~f:(fun f -> openfile f ([ O_WRONLY; O_CREAT ] @ flags) 0o644)
+    Option.map output ~f:(fun f ->
+        openfile f ([ O_WRONLY; O_CREAT ] @ flags) 0o644)
   in
   let close () =
     Option.iter fin ~f:close;
@@ -330,7 +331,9 @@ let install_handwritten_manpages () =
   mkdir "man1";
   Sys.readdir "../man"
   |> Array.iter ~f:(fun page ->
-      FileUtil.cp [ Filename.concat "../man" page ] (Filename.concat "man1" page))
+      FileUtil.cp
+        [ Filename.concat "../man" page ]
+        (Filename.concat "man1" page))
 
 (* by default, title is the buffer/file name with no extension,
    that's why we need override it with an empty title *)

@@ -33,8 +33,8 @@ let plugin_packages name =
       |> List.concat_map (fun line ->
           let line = String.trim line in
           match (String.index_opt line '"', String.rindex_opt line '"') with
-          | Some i, Some j when j > i && String.starts_with ~prefix:"requires" line
-            ->
+          | Some i, Some j
+            when j > i && String.starts_with ~prefix:"requires" line ->
               String.sub line (i + 1) (j - i - 1)
               |> String.map (function ',' -> ' ' | c -> c)
               |> String.split_on_char ' '
