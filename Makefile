@@ -41,7 +41,7 @@ test-instructions:
 	dune build --force @instruction-tests
 
 TESTSUITE_URL = https://github.com/PerfectLaugh/bap-testsuite.git
-TESTSUITE_REV = 44cea2f4814bed7166e3a585fa240074c8aeaac6
+TESTSUITE_REV = 4e3ef9f8965b9c589a20a73c288c017d3c2e2d82
 
 testsuite:
 	git clone $(TESTSUITE_URL) testsuite

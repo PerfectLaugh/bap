@@ -26,5 +26,10 @@
 (cram
  (deps
   (package bap)
+  (package bap-bil)
+  (package bap-llvm)
+  (package bap-mc)
+  (package bap-primus-lisp)
+  (package bap-x86)
   (glob_files *.lisp)
   %{bin:run}))
