@@ -202,11 +202,15 @@ let search paths =
       else [])
 
 let which paths name =
-  List.find_map paths ~f:(fun p ->
-      if Sys.file_exists p && Sys.is_directory p then
-        List.find ~f:Sys.file_exists
-          [ p / name; (p / name) ^ ".scm"; (p / name) ^ ".recipe" ]
-      else None)
+  let candidates name = [ name; name ^ ".scm"; name ^ ".recipe" ] in
+  (* an absolute path isn't relative to the recipe paths *)
+  if not (Filename.is_relative name) then
+    List.find ~f:Sys.file_exists (candidates name)
+  else
+    List.find_map paths ~f:(fun p ->
+        if Sys.file_exists p && Sys.is_directory p then
+          List.find ~f:Sys.file_exists (candidates (p / name))
+        else None)
 
 let rec load_path env path =
   let root = read path in
