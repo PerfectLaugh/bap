@@ -93,12 +93,20 @@ type case
 (** a case of a test *)
 
 val case : ?serial:bool -> ?slow:bool -> string -> (env -> unit) -> case
-(** [case name run] is the case [name], which is run by [run].
+(** [case name run] is the case [name], which is run by [run]. The parts of
+    [name], separated by slashes, are the labels of the OUnit test of the case
+    and its groups, e.g., ["taint/bap:legacy-main/x86-linux-gnu-echo"].
 
     The cases that are [serial] run alone, after the others, since they change
     the installation of bap, and the [slow] cases start first. An exception that
     [run] raises fails the case. *)
 
 val main : (data -> case list) list -> unit
-(** [main tests] runs the cases of [tests], which the command line selects, and
-    exits with 1 if any of them fails. *)
+(** [main tests] runs the cases of [tests] as OUnit tests, in threads, and exits
+    with 1 if any of them fails.
+
+    The words of BAP_TESTS select the cases whose names contain one of them. The
+    testsuite is checked out in ROOT/testsuite, or BAP_TESTSUITE, unless
+    BAP_TESTSUITE_NO_FETCH is set, and the argument [--fetch-only] only checks
+    it out. The outputs of the failed cases are kept in BAP_TESTSUITE_WORK, or a
+    temporary directory. *)

@@ -1,15 +1,22 @@
 ; the functional tests of bap and bap-mc, which run them on the binaries of
 ; the testsuite repository, checked out in testsuite/ at the revision of
-; REVISION. They are slow, so they don't run with dune test, run them with
+; REVISION. They are OUnit tests, which are slow, so they don't run with
+; dune test, run them with
 ;
 ;   dune build @testsuite
 ;
 ; and select the cases whose names contain one of the words of BAP_TESTS,
-; e.g., BAP_TESTS="taint mc/" dune build @testsuite, see run.exe --help.
+; e.g., BAP_TESTS="taint mc/" dune build @testsuite. The cases run in 16
+; threads, OUNIT_SHARDS sets their number, and BAP_TESTSUITE_WORK keeps
+; the outputs of the failed cases in its directory. Run
+;
+;   dune build @install && dune exec -- tools/testsuite/run.exe -help
+;
+; for the OUnit options, e.g., -list-test and -only-test.
 
 (executable
  (name run)
- (libraries re spawn threads.posix unix))
+ (libraries ounit2 ounit2.threads re spawn threads.posix unix))
 
 ; the cases test the plugins that are built in this tree, and run every
 ; time, since they depend on the testsuite
@@ -21,4 +28,4 @@
   REVISION
   (universe))
  (action
-  (run %{exe:run.exe} --bap %{bin:bap} --mc %{bin:bap-mc})))
+  (run %{exe:run.exe} -bap %{bin:bap} -mc %{bin:bap-mc})))

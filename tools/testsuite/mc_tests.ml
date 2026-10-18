@@ -175,10 +175,10 @@ let addressing _ =
       let name = "mc/x86-addressing/" ^ arch in
       (* each instruction relative to the instruction pointer runs alone,
          since it is at the address 0 *)
-      batch name arch stores
+      batch (name ^ "/stores") arch stores
       :: List.map
            (fun (code, asm, bil) ->
-             let name = Printf.sprintf "%s/[%s] -> %s" name asm code in
+             let name = Printf.sprintf "%s/rip/[%s] -> %s" name asm code in
              case name (fun env ->
                  has env name
                    (mc env (lift_opts arch @ [ code ]))
