@@ -51,7 +51,7 @@ let new_insn mode mem insn =
   KB.provide Dis.Insn.slot code (Some insn) >>= fun () ->
   KB.collect Theory.Semantics.slot code >>| fun _ -> code
 
-let lift mode code =
+let semantics mode code =
   let data = Bigstring.of_string (bytes_of_hex code) in
   let base = Addr.of_int ~width:(bits mode) mode.addr in
   let mem = Or_error.ok_exn (Memory.create (endian mode) base data) in
@@ -67,7 +67,9 @@ let lift mode code =
       failwithf "%s: the lifters failed: %s" code
         (Format.asprintf "%a" KB.Conflict.pp conflict)
         ()
-  | Ok sema -> Insn.bil sema
+  | Ok sema -> sema
+
+let lift mode code = Insn.bil (semantics mode code)
 
 (* A call to an intrinsic function is a special statement, the semantics
    of the intrinsic is the semantics of the label with its name, which is

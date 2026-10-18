@@ -1,3 +1,6 @@
+; OUnit collects the heap after each test, which takes the most of the time
+; of the tests when the plugins are loaded, the tests don't need it
+
 (test
  (name run_stub_resolver_tests)
  (package bap-stub-resolver)
@@ -7,4 +10,9 @@
   bap-core-theory
   bap-stub-resolver.plugin
   ounit2
-  threads))
+  threads)
+ (action
+  (setenv
+   OUNIT_RUN_GC_FULL_MAJOR
+   false
+   (run %{test}))))

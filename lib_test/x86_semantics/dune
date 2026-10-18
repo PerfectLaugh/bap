@@ -1,0 +1,15 @@
+; the expect tests of the semantics of the x86 instructions, which depend on
+; the plugins that lift them, so they run again when the plugins change; run
+; dune promote to accept a new output
+
+(library
+ (name test_x86_semantics)
+ (inline_tests
+  (deps
+   (package bap-bil)
+   (package bap-llvm)
+   (package bap-primus-lisp)
+   (package bap-x86)))
+ (preprocess
+  (pps ppx_expect))
+ (libraries bap bap_init lifter_test))

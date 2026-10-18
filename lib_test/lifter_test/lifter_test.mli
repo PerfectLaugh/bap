@@ -28,6 +28,11 @@ val mode :
 
 val target : mode -> Theory.Target.t
 
+val semantics : mode -> string -> insn
+(** [semantics mode code] is the instruction with the encoding [code], the bytes
+    in hex separated by spaces, at the address of the [mode], with the semantics
+    that the lifters give it, as [bap mc] prints it. *)
+
 val lift : mode -> string -> bil
 (** [lift mode code] is the BIL of the instruction with the encoding [code], the
     bytes in hex separated by spaces, at the address of the [mode]. *)

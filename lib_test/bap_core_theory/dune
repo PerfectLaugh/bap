@@ -1,4 +1,12 @@
+; OUnit collects the heap after each test, which takes the most of the time
+; of the tests when the plugins are loaded, the tests don't need it
+
 (test
  (name test_subroutines)
  (package bap-core-theory)
- (libraries bap-core-theory bap-knowledge bitvec bitvec-order core ounit2))
+ (libraries bap-core-theory bap-knowledge bitvec bitvec-order core ounit2)
+ (action
+  (setenv
+   OUNIT_RUN_GC_FULL_MAJOR
+   false
+   (run %{test}))))

@@ -1,6 +1,14 @@
+; OUnit collects the heap after each test, which takes the most of the time
+; of the tests when the plugins are loaded, the tests don't need it
+
 (tests
  (names test_elf_linker test_tables)
  (package bap-llvm)
  (preprocess
   (pps ppx_bap))
- (libraries bap-llvm core ounit2))
+ (libraries bap-llvm core ounit2)
+ (action
+  (setenv
+   OUNIT_RUN_GC_FULL_MAJOR
+   false
+   (run %{test}))))
