@@ -24,6 +24,16 @@ let mapper =
         tids = Taint.Object.Map.empty;
       })
 
+(* the taints of the mapper that are marked in the project *)
+let marked =
+  Primus.Machine.State.declare ~name:"primus-taint-marked"
+    ~uuid:"6501f85f-4fed-464e-a29c-24a6f42a9b76" (fun _ ->
+      {
+        regs = Tid.Map.empty;
+        ptrs = Tid.Map.empty;
+        tids = Taint.Object.Map.empty;
+      })
+
 let is_mem v = match Var.typ v with Type.Mem _ -> true | _ -> false
 
 module Intro (Machine : Primus.Machine.S) = struct
@@ -147,20 +157,44 @@ module Marker (Machine : Primus.Machine.S) = struct
     | Some ts when not (Map.is_empty ts) -> update_taints t tag ts
     | _ -> t
 
-  let mark_terms { regs; ptrs } =
-    object
-      inherit Term.mapper as super
+  let mark_term { regs; ptrs } t =
+    t |> mark Legacy_taint.regs regs |> mark Legacy_taint.ptrs ptrs
 
-      method! map_term cls t =
-        super#map_term cls t
-        |> mark Legacy_taint.regs regs
-        |> mark Legacy_taint.ptrs ptrs
-    end
-      #run
+  (* the terms whose taints changed, the taints are only added, and only to
+     the definitions and the jumps *)
+  let changed old taints =
+    Map.symmetric_diff old taints ~data_equal:phys_equal |> Sequence.map ~f:fst
 
+  (* [update cls prog t] is [prog] with [t], a term of a block, instead of
+     the term with its identifier *)
+  let update cls prog t =
+    match Program.parent cls prog (Term.tid t) with
+    | None -> prog
+    | Some blk -> (
+        match Program.parent blk_t prog (Term.tid blk) with
+        | None -> prog
+        | Some sub ->
+            Term.update sub_t prog
+              (Term.update blk_t sub (Term.update cls blk t)))
+
+  let mark_changed s prog tid =
+    match Program.lookup def_t prog tid with
+    | Some def -> update def_t prog (mark_term s def)
+    | None -> (
+        match Program.lookup jmp_t prog tid with
+        | Some jmp -> update jmp_t prog (mark_term s jmp)
+        | None -> prog)
+
+  (* marks the terms whose taints changed since the previous marking, instead
+     of the whole program, which marking after each block made quadratic *)
   let mark _ =
     Machine.Local.get mapper >>= fun s ->
-    Machine.update (Project.map_program ~f:(mark_terms s))
+    Machine.Local.get marked >>= fun old ->
+    Machine.Local.put marked s >>= fun () ->
+    Machine.update
+      (Project.map_program ~f:(fun prog ->
+           Sequence.append (changed old.regs s.regs) (changed old.ptrs s.ptrs)
+           |> Sequence.fold ~init:prog ~f:(mark_changed s)))
 
   let init () = Primus.Interpreter.leave_blk >>> mark
 end
