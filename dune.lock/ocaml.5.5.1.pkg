@@ -24,7 +24,19 @@
       ""))))))
 
 (depends
- (all_platforms (ocaml-base-compiler)))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   (ocaml-base-compiler))
+  ((((arch x86_64)
+     (os win32)))
+   (ocaml-base-compiler ocaml-env-mingw64))))
 
 (exported_env
  (+= OCAMLTOP_INCLUDE_PATH "\%{toplevel}%")

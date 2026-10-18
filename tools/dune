@@ -19,7 +19,7 @@
  (public_name bapbundle)
  (package bap-bundle)
  (modules bapbundle)
- (libraries core core_unix.sys_unix bap-bundle fileutils uri))
+ (libraries core bap-bundle fileutils uri))
 
 (executable
  (name bapdoc)

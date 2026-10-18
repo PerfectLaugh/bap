@@ -57,3 +57,66 @@ jobs:
           name: functional-tests-log
           path: |
             testsuite-results
+
+  # builds all packages on Windows with the mingw-w64 toolchain of MSYS2
+  windows:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      # the patches and the lock files must keep their line endings
+      - name: Keep the line endings
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Install the toolchain and the libraries
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          install: >-
+            git
+            make
+            patch
+            unzip
+          pacboy: >-
+            binutils:p
+            curl:p
+            gcc:p
+            gmp:p
+            llvm:p
+            pkgconf:p
+            zlib:p
+
+      - name: Install dune
+        uses: ocaml-dune/setup-dune@v2
+        with:
+          version: ${{ env.DUNE_VERSION }}
+          steps: install-dune enable-pkg
+
+      - name: Build BAP
+        run: dune build
+
+      - name: Run unit tests
+        run: dune runtest
+
+      - name: Run functional tests
+        run: dune build @testsuite
+        env:
+          BAP_TESTSUITE_WORK: ${{ github.workspace }}/testsuite-results
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: functional-tests-log-windows
+          path: |
+            testsuite-results
+            _build/log

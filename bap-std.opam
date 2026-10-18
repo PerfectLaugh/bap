@@ -24,7 +24,7 @@ depends: [
   "camlzip" {>= "1.07" & < "2.0"}
   "cmdliner" {>= "2.0.0"}
   "core"
-  "core_bench" {with-test}
+  "core_bench" {with-test & os != "win32"}
   "fileutils"
   "graphlib" {= version}
   "mmap"

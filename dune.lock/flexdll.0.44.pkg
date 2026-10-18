@@ -1,0 +1,12 @@
+(version 0.44)
+
+(source
+ (fetch
+  (url https://github.com/ocaml/flexdll/archive/refs/tags/0.44.tar.gz)
+  (checksum
+   sha512=87c5e38810dcf4bba43472e6c4e2ea25081a92664e37269f782ef9412e81d37d53edbbeb0acbf5eb821cc5105085a99337b30e55409057121a68472eb51db7c8)))
+
+(enabled_on_platforms
+ (only
+  ((arch x86_64)
+   (os win32))))

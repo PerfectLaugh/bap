@@ -339,7 +339,10 @@ let () =
   in
   let history =
     let history_location =
-      match Sys.getenv_opt "HOME" with
+      (* Windows has no HOME *)
+      match
+        Option.first_some (Sys.getenv_opt "HOME") (Sys.getenv_opt "USERPROFILE")
+      with
       | None | Some "" -> ".bap_history"
       | Some home -> Filename.concat home ".bap_history"
     in

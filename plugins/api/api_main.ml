@@ -31,7 +31,8 @@ module Api_path = struct
     Option.(
       value_map ~default:path ~f:Fn.id
         ( String.chop_prefix ~prefix:"~" (to_string path) >>= fun p ->
-          getenv "HOME" >>= fun h ->
+          (* Windows has no HOME *)
+          first_some (getenv "HOME") (getenv "USERPROFILE") >>= fun h ->
           Some Path.(filename_of_string h / filename_of_string p) ))
 
   let of_string x = expand_home @@ Path.reduce @@ Path.filename_of_string x

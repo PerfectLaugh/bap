@@ -1,7 +1,10 @@
-; run with `make bench`, see the Makefile
+; run with `make bench`, see the Makefile; core_bench isn't available on
+; Windows
 
 (executable
  (name run_benchmarks)
+ (enabled_if
+  (<> %{os_type} Win32))
  (libraries
   bap
   bap-main

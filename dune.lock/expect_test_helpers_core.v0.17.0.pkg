@@ -1,11 +1,29 @@
 (version v0.17.0)
 
 (build
- (all_platforms ((action (run dune build -p %{pkg-self:name} -j %{jobs})))))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   ((action
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
 
 (depends
- (all_platforms
-  (ocaml base base_quickcheck core ppx_jane sexp_pretty stdio dune re)))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   (ocaml base base_quickcheck core ppx_jane sexp_pretty stdio dune re))))
 
 (source
  (fetch
@@ -13,3 +31,14 @@
    https://github.com/janestreet/expect_test_helpers_core/archive/refs/tags/v0.17.0.tar.gz)
   (checksum
    sha256=c8380970589385b459413824ea3b2c959ed0a6600fe088f56eda0e16070880bf)))
+
+(enabled_on_platforms
+ (only
+  ((arch x86_64)
+   (os linux))
+  ((arch arm64)
+   (os linux))
+  ((arch x86_64)
+   (os macos))
+  ((arch arm64)
+   (os macos))))

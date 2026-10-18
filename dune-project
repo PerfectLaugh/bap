@@ -603,7 +603,7 @@ be seen as a common denominator between Lwt and Async libraries.")
  (tags (bap bap-library knowledge))
  (depends
   core
-  core_unix
+  base-unix
   (ppx_bap (= :version))
   (bap-common (= :version))
   (monads (= :version))))
@@ -1255,7 +1255,7 @@ between the sets.")
   (camlzip (and (>= 1.07) (< 2.0)))
   (cmdliner (>= 2.0.0))
   core
-  (core_bench :with-test)
+  (core_bench (and :with-test (<> :os win32)))
    fileutils
   (graphlib (= :version))
    mmap

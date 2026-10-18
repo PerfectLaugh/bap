@@ -1,11 +1,11 @@
 (lang package 0.1)
 
-(dependency_hash 482497bc9d0d64a79bc158197aea8ad6)
+(dependency_hash b6b482de1afcf077535a70eb48567824)
 
 (ocaml ocaml-base-compiler)
 
 (repositories
- (complete true)
+ (complete false)
  (used
   ((source
     https://github.com/BinaryAnalysisPlatform/opam-repository.git#e40ab0575e4068b355191012b6d6f6617cd83c70))
@@ -32,4 +32,6 @@
  ((arch x86_64)
   (os macos))
  ((arch arm64)
-  (os macos)))
+  (os macos))
+ ((arch x86_64)
+  (os win32)))

@@ -1,7 +1,40 @@
 (version 2)
 
 (build
- (all_platforms ((action (run curl-config --libs)))))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   ((action
+     (run curl-config --libs))))
+  ((((arch x86_64) (os win32)))
+   ((action
+     (run
+      (when
+       (catch_undefined_var (<> %{os_distribution} cygwinports) false)
+       sh)
+      curl-config
+      --libs))))))
+
+(depends
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   ())
+  ((((arch x86_64)
+     (os win32)))
+   (host-arch-x86_64 conf-mingw-w64-gcc-x86_64 conf-mingw-w64-curl-x86_64))))
 
 (depexts
  ((libcurl4-gnutls-dev)

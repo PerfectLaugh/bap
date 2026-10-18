@@ -1,6 +1,6 @@
 open Core
 open Monads.Std
-module Unix = Core_unix
+module Unix = Caml_unix
 
 type ('a, 'b) eq = ('a, 'b) Type_equal.t = T : ('a, 'a) eq
 
@@ -3224,12 +3224,11 @@ module Knowledge = struct
             { version; payload = bin_read_payload bin_read_v2 data ~pos_ref }
 
     let load path =
-      let fd = Unix.openfile path ~mode:Unix.[ O_RDONLY ] ~perm:0o400 in
+      let fd = Unix.openfile path Unix.[ O_RDONLY ] 0o400 in
       try
         let data =
           Bigarray.array1_of_genarray
-          @@ Unix.map_file fd Bigarray.char Bigarray.c_layout ~shared:false
-               [| -1 |]
+          @@ Unix.map_file fd Bigarray.char Bigarray.c_layout false [| -1 |]
         in
         let r = of_bigstring data in
         Unix.close fd;
@@ -3254,14 +3253,12 @@ module Knowledge = struct
     let save state path =
       let repr = to_canonical state in
       let size = String.length magic + bin_size_canonical bin_size_v2 repr in
-      let fd =
-        Unix.openfile path ~mode:Unix.[ O_RDWR; O_CREAT; O_TRUNC ] ~perm:0o660
-      in
+      let fd = Unix.openfile path Unix.[ O_RDWR; O_CREAT; O_TRUNC ] 0o660 in
       try
         let dim = [| size |] in
         let buf =
           Bigarray.array1_of_genarray
-          @@ Unix.map_file fd Bigarray.char Bigarray.c_layout ~shared:true dim
+          @@ Unix.map_file fd Bigarray.char Bigarray.c_layout true dim
         in
         blit_canonical_to_bigstring repr buf;
         Unix.close fd

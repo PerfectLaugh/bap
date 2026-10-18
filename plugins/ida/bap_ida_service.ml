@@ -65,7 +65,10 @@ let setup_headless_env path =
 
 let cleanup_minidump () =
   let is_dump x = Filename.check_suffix x ".dmp" in
-  let dump_path = "/tmp/ida" in
+  let dump_path =
+    if Sys.win32 then Filename.concat (Filename.get_temp_dir_name ()) "ida"
+    else "/tmp/ida"
+  in
   if Sys.file_exists dump_path && Sys.is_directory dump_path then (
     FileUtil.ls dump_path |> List.filter ~f:is_dump |> function
     | [] -> ()

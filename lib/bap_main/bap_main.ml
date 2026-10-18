@@ -1179,11 +1179,17 @@ module Extension = struct
     let sysdatadir = datadir
     let ( / ) = Filename.concat
 
+    (* Windows has no HOME *)
+    let home =
+      match Sys.getenv_opt "HOME" with
+      | None -> Sys.getenv_opt "USERPROFILE"
+      | home -> home
+
     let datadir =
       match Sys.getenv_opt "XDG_DATA_HOME" with
       | Some dir -> dir / "bap"
       | None -> (
-          match Sys.getenv_opt "HOME" with
+          match home with
           | Some dir -> dir / ".local" / "share" / "bap"
           | None -> Sys.getcwd ())
 
@@ -1191,7 +1197,7 @@ module Extension = struct
       match Sys.getenv_opt "XDG_CACHE_HOME" with
       | Some dir -> dir / "bap"
       | None -> (
-          match Sys.getenv_opt "HOME" with
+          match home with
           | Some dir -> dir / ".cache" / "bap"
           | None -> Filename.get_temp_dir_name () / "bap" / "cache")
 

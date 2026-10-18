@@ -1,0 +1,24 @@
+--- a/src/base_bigstring_stubs.c
++++ b/src/base_bigstring_stubs.c
+@@ -64,6 +64,21 @@
+ #define bswap_64 bswap64
+ #endif
+ 
++#ifdef _WIN32
++/* the C runtime of Windows has no memmem */
++static void *memmem(const void *haystack, size_t haystack_len,
++                    const void *needle, size_t needle_len)
++{
++  const char *h = haystack;
++  size_t i;
++  if (needle_len == 0) return (void *)haystack;
++  if (haystack_len < needle_len) return NULL;
++  for (i = 0; i <= haystack_len - needle_len; i++)
++    if (memcmp(h + i, needle, needle_len) == 0) return (void *)(h + i);
++  return NULL;
++}
++#endif
++
+ #include <caml/alloc.h>
+ #include <caml/memory.h>
+ #include <caml/fail.h>

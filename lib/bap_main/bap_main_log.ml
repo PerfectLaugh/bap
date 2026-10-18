@@ -24,7 +24,8 @@ let log_folder user =
       match getenv "XDG_STATE_HOME" with
       | Some dir -> dir / "bap"
       | None -> (
-          match getenv "HOME" with
+          (* Windows has no HOME *)
+          match Option.first_some (getenv "HOME") (getenv "USERPROFILE") with
           | None -> Filename.get_temp_dir_name () / "bap.log"
           | Some home -> home / ".local" / "state" / "bap"))
 

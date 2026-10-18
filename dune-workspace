@@ -1,10 +1,46 @@
 (lang dune 3.24)
 
+; the repositories are at the revisions of the lock, so that solving it for
+; another platform doesn't upgrade the packages
+
 (repository
  (name bap-testing)
- (url "git+https://github.com/BinaryAnalysisPlatform/opam-repository.git#testing"))
+ (url
+  "git+https://github.com/BinaryAnalysisPlatform/opam-repository.git#e40ab0575e4068b355191012b6d6f6617cd83c70"))
+
+(repository
+ (name dune-overlays)
+ (url
+  "git+https://github.com/ocaml-dune/opam-overlays.git#99fc2e18c45b4761ed5f6d282910c03c97e32bce"))
+
+(repository
+ (name dune-relocatable)
+ (url
+  "git+https://github.com/ocaml-dune/opam-repository-relocatable.git#d64df82c7e16de819a770cabf4066a06243ed80b"))
+
+(repository
+ (name opam-upstream)
+ (url
+  "git+https://github.com/ocaml/opam-repository.git#7b5e9a2b084fe7ff750c4a9449289065ef9f9216"))
+
+; the packages patched for BAP, see opam-overlay/README.md
+
+(repository
+ (name bap-overlay)
+ (url "file://opam-overlay"))
 
 (lock_dir
- (repositories bap-testing :standard))
+ (repositories bap-overlay bap-testing dune-overlays dune-relocatable opam-upstream)
+ (solve_for_platforms
+  ((arch x86_64)
+   (os linux))
+  ((arch arm64)
+   (os linux))
+  ((arch x86_64)
+   (os macos))
+  ((arch arm64)
+   (os macos))
+  ((arch x86_64)
+   (os win32))))
 
 (pkg enabled)

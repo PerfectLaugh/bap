@@ -1,11 +1,29 @@
 (version v0.17.0)
 
 (build
- (all_platforms ((action (run dune build -p %{pkg-self:name} -j %{jobs})))))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   ((action
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
 
 (depends
- (all_platforms
-  (ocaml core ppx_jane dune)))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   (ocaml core ppx_jane dune))))
 
 (source
  (fetch
@@ -13,3 +31,14 @@
    https://github.com/janestreet/timezone/archive/refs/tags/v0.17.0.tar.gz)
   (checksum
    sha256=43026ee35551b996c627b0759e20da1a01609a3fd999eb6ba3149632dd625adf)))
+
+(enabled_on_platforms
+ (only
+  ((arch x86_64)
+   (os linux))
+  ((arch arm64)
+   (os linux))
+  ((arch x86_64)
+   (os macos))
+  ((arch arm64)
+   (os macos))))

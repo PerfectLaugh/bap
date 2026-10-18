@@ -1,0 +1,35 @@
+(version 1)
+
+(build
+ (choice
+  ((((arch x86_64) (os win32)))
+   ((action (run x86_64-w64-mingw32-gcc --version))))))
+
+(depends
+ (choice
+  ((((arch x86_64) (os win32))) (host-arch-x86_64))))
+
+(depexts
+ ((mingw64-x86_64-gcc-core)
+  (and_absorb_undefined_var
+   (= %{os} win32)
+   (= %{os_distribution} cygwin)))
+ ((mingw-w64-x86_64-gcc)
+  (and_absorb_undefined_var
+   (= %{os} win32)
+   (= %{os_distribution} msys2))))
+
+(source
+ (fetch
+  (url
+   https://github.com/dra27/mingw-w64-shims/archive/refs/tags/1.0.1.tar.gz)
+  (checksum
+   sha512=892c4b5d7eaab6ce846fe8fe2756f23c61c654605b6c3bf8698db392725b3be81d015536230dc8305e7d17eb451beae5c21f705237523c79cc11e99c17cbed95)))
+
+(exported_env
+ (+= PATH "\%{_:runtime}%"))
+
+(enabled_on_platforms
+ (only
+  ((arch x86_64)
+   (os win32))))

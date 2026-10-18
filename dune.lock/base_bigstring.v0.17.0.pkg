@@ -1,7 +1,11 @@
 (version v0.17.0)
 
 (build
- (all_platforms ((action (run dune build -p %{pkg-self:name} -j %{jobs})))))
+ (all_platforms
+  ((action
+    (progn
+     (patch windows-memmem.patch)
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
 
 (depends
  (all_platforms

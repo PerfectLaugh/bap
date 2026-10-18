@@ -49,7 +49,41 @@
          (= %{os_distribution} homebrew)
          false)
         pkgconf)
-       EOL)))))))
+       EOL)))))
+  ((((arch x86_64) (os win32)))
+   ((action
+     (progn
+      (when (<> %{os_distribution} msys2) (run pkgconf --version))
+      (run
+       sh
+       ./write-config.sh
+       %{pkg-self:name}
+       -v
+       command:list
+       EOL
+       (when
+        (catch_undefined_var (<> %{os_distribution} msys2) false)
+        pkgconf)
+       (when false "")
+       (when false "")
+       (when
+        (catch_undefined_var
+         (and_absorb_undefined_var
+          (= %{os_distribution} msys2)
+          %{pkg:host-arch-x86_64:installed})
+         false)
+        x86_64-w64-mingw32-pkgconf)
+       (when
+        (catch_undefined_var
+         (and_absorb_undefined_var
+          (= %{os_distribution} cygwin)
+          %{pkg:host-arch-x86_64:installed})
+         false)
+        --personality=x86_64-w64-mingw32)
+       EOL)
+      (when
+       (= %{os_distribution} cygwin)
+       (run sh ./install-shim.sh %{pkg-self:name} pkgconf %{bin}))))))))
 
 (depexts
  ((pkg-config)

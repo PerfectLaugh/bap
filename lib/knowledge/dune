@@ -4,4 +4,4 @@
  (wrapped false)
  (preprocess
   (pps ppx_bap))
- (libraries core core_unix monads))
+ (libraries core core_kernel.caml_unix monads))
