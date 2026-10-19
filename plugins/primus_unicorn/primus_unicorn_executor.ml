@@ -359,31 +359,49 @@ module Make (Machine : Primus.Machine.S) = struct
         e.owner <- Some id;
         true
 
+  (* the byte and its protection, if it is mapped, a byte that is not
+     readable is zero *)
   let load_byte addr =
-    let* mapped = Memory.is_mapped addr in
-    if mapped then
-      let+ x = Memory.load addr in
-      Some (Char.of_int_exn (Word.to_int_exn x))
-    else Machine.return None
+    Memory.protection addr >>= function
+    | None -> Machine.return None
+    | Some (p : Primus.Memory.protection) when not p.readable ->
+        Machine.return (Some ('\000', p))
+    | Some p ->
+        let+ x = Memory.load addr in
+        Some (Char.of_int_exn (Word.to_int_exn x), p)
 
+  let union (p : Primus.Memory.protection) (q : Primus.Memory.protection) :
+      Primus.Memory.protection =
+    {
+      readable = p.readable || q.readable;
+      writable = p.writable || q.writable;
+      executable = p.executable || q.executable;
+    }
+
+  (* the page has the access of all its bytes, as Unicorn protects the
+     whole pages *)
   let map_page e page =
     let base = word e page in
-    let* writable = Memory.is_writable base in
     let bytes = Bytes.make (Int64.to_int_exn page_size) '\000' in
-    let* holes =
+    let none : Primus.Memory.protection =
+      { readable = false; writable = false; executable = false }
+    in
+    let* holes, access =
       Machine.List.fold
         (List.init (Bytes.length bytes) ~f:Fn.id)
-        ~init:[]
-        ~f:(fun holes i ->
+        ~init:([], none)
+        ~f:(fun (holes, access) i ->
           load_byte Word.(base ++ i) >>| function
-          | Some c ->
+          | Some (c, p) ->
               Bytes.set bytes i c;
-              holes
+              (holes, union access p)
           | None -> (
               match holes with
-              | (first, last) :: holes when last + 1 = i -> (first, i) :: holes
-              | holes -> (i, i) :: holes))
+              | (first, last) :: holes when last + 1 = i ->
+                  ((first, i) :: holes, access)
+              | holes -> ((i, i) :: holes, access)))
     in
+    let writable = access.writable in
     List.iter (Hashtbl.find_multi e.slots page) ~f:(fun (off, addr) ->
         if off + e.bytes <= Bytes.length bytes then
           List.iteri (List.init e.bytes ~f:Fn.id) ~f:(fun i _ ->
@@ -394,7 +412,12 @@ module Make (Machine : Primus.Machine.S) = struct
               Bytes.set bytes (off + i)
                 (Char.of_int_exn (Int64.to_int_exn byte))));
     let data = Bytes.to_string bytes in
-    let perm = Uc.Perm.(read + exec + if writable then write else none) in
+    let perm =
+      Uc.Perm.(
+        (if access.readable then read else none)
+        + (if writable then write else none)
+        + if access.executable then exec else none)
+    in
     Uc.mem_map e.uc page page_size perm;
     Uc.mem_write e.uc page data;
     Hashtbl.set e.pages ~key:page
@@ -536,6 +559,28 @@ module Make (Machine : Primus.Machine.S) = struct
           Hashtbl.remove e.pages page);
         Machine.return ())
 
+  (* the pages, whose protection changes, are copied anew *)
+  let protected (lower, upper, _) =
+    match !active with
+    | None -> Machine.return ()
+    | Some e ->
+        let+ id = Machine.current () in
+        let owned =
+          match e.owner with
+          | Some owner -> Monads.Std.Monad.State.Multi.Id.equal owner id
+          | None -> false
+        in
+        if owned then
+          let first = page_of (int64_of_word lower)
+          and last = page_of (int64_of_word upper) in
+          Hashtbl.filter_keys_inplace e.pages ~f:(fun page ->
+              let inside =
+                Int64.(page >= first && page <= last)
+                || Int64.(first > last && (page >= first || page <= last))
+              in
+              if inside then Uc.mem_unmap e.uc page page_size;
+              not inside)
+
   (* the bytes that Primus stores go to the copied pages *)
   let stored (addr, x) =
     match !active with
@@ -587,21 +632,48 @@ module Make (Machine : Primus.Machine.S) = struct
   let address e { ret; _ } =
     match e.arch with Arm -> Int64.(ret land lnot 1L) | _ -> ret
 
+  let drop_page e page =
+    if Hashtbl.mem e.pages page then (
+      Uc.mem_unmap e.uc page page_size;
+      Hashtbl.remove e.pages page)
+
+  (* repeats the access, that Unicorn denied, in Primus, which signals
+     the pagefault trap, as the interpreter does, and raises the
+     segmentation fault, unless the pagefault handler fixes the access,
+     after which the page is copied anew *)
+  let repeat e access addr =
+    let a = word e addr in
+    let* () = pull e in
+    let* v = Value.of_word a in
+    let* () =
+      match (access : Uc.access) with
+      | Write_unmapped | Write_prot ->
+          let* x =
+            Memory.protection a >>= function
+            | Some p when p.readable -> Memory.get a
+            | _ -> Value.zero 8
+          in
+          Interpreter.store v x LittleEndian `r8
+      | Fetch_unmapped | Fetch_prot ->
+          (* Primus doesn't fetch the code, so it checks only the access *)
+          let* _ = Interpreter.load v LittleEndian `r8 in
+          let* executable = Memory.is_executable a in
+          if executable then Machine.return ()
+          else Machine.raise (Primus.Interpreter.Segmentation_fault a)
+      | _ -> Interpreter.load v LittleEndian `r8 >>| ignore
+    in
+    drop_page e (page_of addr);
+    Machine.return `Continue
+
   let fault e access addr =
     match (access : Uc.access) with
     | Read_unmapped | Write_unmapped | Fetch_unmapped ->
         let* mapped = Memory.is_mapped (word e addr) in
         if mapped then map_page e (page_of addr) >>| fun () -> `Continue
-        else
-          (* raises the Primus page fault *)
-          pull e >>= fun () ->
-          Memory.get (word e addr) >>= fun _ -> fail "page fault at %Lx" addr
-    | Write_prot ->
-        pull e >>= fun () ->
-        let* x = Memory.get (word e addr) in
-        Memory.set (word e addr) x >>= fun () ->
-        fail "write to the read-only memory at %Lx" addr
-    | _ -> pull e >>= fun () -> fail "access to %Lx is denied" addr
+        else repeat e access addr
+    | Read_prot | Write_prot | Fetch_prot -> repeat e access addr
+    | Read | Write | Fetch | Read_after ->
+        pull e >>= fun () -> fail "access to %Lx is denied" addr
 
   let call_foreign e addr =
     let* () = pull e in
@@ -850,5 +922,6 @@ module Loader (Machine : Primus.Machine.S) = struct
         Primus.System.init >>> create_engine;
         Primus.Interpreter.stored >>> Exec.stored;
         Primus.Interpreter.written >>> Exec.written;
+        Primus.Memory.protected >>> Exec.protected;
       ]
 end

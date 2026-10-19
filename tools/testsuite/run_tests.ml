@@ -162,6 +162,33 @@ let timeout data =
         contains env "prints A" out "A");
   ]
 
+(* the program makes its code executable and then read-only with
+   mprotect, the interpreter can't run the code that it writes, but
+   both executors deny the store to the read-only memory *)
+let mprotect data =
+  List.map
+    (fun system ->
+      case ("run/mprotect/" ^ system) (fun env ->
+          let out =
+            bap env
+              [
+                path data "bin/x86_64-linux-gnu-mprotect";
+                "--passes=run";
+                "--no-objdump";
+                "--run-systems=" ^ system;
+                "--primus-print-observations=exception";
+              ]
+          in
+          if String.equal system "bap:unicorn-executor" then
+            contains env "runs the code" out "42";
+          sequence env out
+            [
+              ("prints W", "\\bW\\b");
+              ("denies the store", "Segmentation fault at 0x405000");
+            ];
+          lacks env "stops" out "\\bX\\b"))
+    [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
+
 let contains_any subs name =
   List.exists
     (fun sub ->
@@ -255,4 +282,5 @@ let symexec data =
           | Timeout -> check env (file ^ " run out of time.") false
           | _ -> check env (file ^ " withhold the attack.") false))
 
-let tests = [ sse; x86_floats; run; unicorn; syscall; timeout; taint; symexec ]
+let tests =
+  [ sse; x86_floats; run; unicorn; syscall; timeout; mprotect; taint; symexec ]
