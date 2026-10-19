@@ -4104,6 +4104,12 @@ module Std : sig
 
             @since 1.5 *)
 
+        val say : ('a, unit, string, unit Machine.t) format4 -> 'a
+        (** [say fmt a1 ... am] sends the message, as the [msg] form does, which
+            posts the {!message} observation.
+
+            @since 2.6.0 *)
+
         val link_primitives : primitives -> unit Machine.t
         [@@deprecated "[since 2018-03] use link_primitive instead"]
         (** [link_primitives prims] provides the primitives [prims] *)

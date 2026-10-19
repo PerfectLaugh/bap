@@ -148,6 +148,7 @@ module Make (Machine : Machine) : sig
 
   val eval_fun : string -> value list -> value Machine.t
   val eval_method : string -> value list -> unit Machine.t
+  val say : ('a, unit, string, unit Machine.t) format4 -> 'a
   val optimize : unit -> unit Machine.t
   val refine : Bap_primus_lisp_context.t -> unit Machine.t
 

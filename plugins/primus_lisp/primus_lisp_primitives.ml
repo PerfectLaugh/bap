@@ -20,6 +20,7 @@ module Closure (Machine : Primus.Machine.S) = struct
   module Eval = Primus.Interpreter.Make (Machine)
   module Closure = Primus.Lisp.Closure.Make (Machine)
   module Linker = Primus.Linker.Make (Machine)
+  module Memory = Primus.Memory.Make (Machine)
 
   type value = Value.t
   type 'a m = 'a Machine.t
@@ -95,6 +96,46 @@ module Closure (Machine : Primus.Machine.S) = struct
 
   let exit_with _ =
     Eval.halt >>| Nothing.unreachable_code >>= fun () -> Value.b0
+
+  (* the byte in hex, or ?? if it is not mapped, or -- if it is not
+     readable, as its load would be a page fault *)
+  let dump_byte addr =
+    Memory.protection addr >>= function
+    | None -> Machine.return ("??", '.')
+    | Some { readable = false; _ } -> Machine.return ("--", '.')
+    | Some _ ->
+        Memory.load addr >>| fun x ->
+        let c = Word.to_int_exn x in
+        let c = Char.of_int_exn c in
+        (sprintf "%02x" (Char.to_int c), if Char.is_print c then c else '.')
+
+  (* sends the lines of 16 bytes, like hexdump -C *)
+  let dump_memory_region addr len =
+    let* len = to_int len in
+    let addr = Value.to_word addr in
+    let rec lines off =
+      if off >= len then Machine.return ()
+      else
+        let base = Word.(addr ++ off) in
+        let n = Int.min 16 (len - off) in
+        let* bytes =
+          Machine.List.map (List.init n ~f:Fn.id) ~f:(fun i ->
+              dump_byte Word.(base ++ i))
+        in
+        let hex = List.map bytes ~f:fst |> String.concat ~sep:" " in
+        let text = List.map bytes ~f:snd |> String.of_char_list in
+        let* () = Lisp.say "%a: %-47s |%s|" Addr.pps base hex text in
+        lines (off + 16)
+    in
+    let* () = lines 0 in
+    Value.b0
+
+  (* the outputs, e.g., of the observations, are flushed, as [exit]
+     flushes all channels *)
+  let bap_exit code =
+    let* code = to_int code in
+    let* () = Lisp.say "bap exits with %d" code in
+    Stdlib.exit code
 
   let negone = Value.one 8
   let zero = Value.zero 8
@@ -278,6 +319,8 @@ module Closure (Machine : Primus.Machine.S) = struct
     | "is-negative", args -> all msb args
     | "word-width", args -> word_width args
     | "exit-with", [ arg ] -> exit_with arg
+    | "bap-exit", [ arg ] -> bap_exit arg
+    | "dump-memory-region", [ addr; len ] -> dump_memory_region addr len
     | "memory-allocate", x :: y :: rest -> memory_allocate x y rest
     | "memory-protect", [ a; n; p ] -> memory_protect a n p
     | "memory-read", [ x ] -> memory_read x
@@ -345,6 +388,18 @@ module Primitives (Machine : Primus.Machine.S) = struct
         def "exit-with"
           (one int @-> any)
           "(exit-with N) terminates program with the exit codeN";
+        def "bap-exit"
+          (one int @-> any)
+          "(bap-exit N) exits bap with the exit code N at once, after it sends \
+           the message, so the other machines and the next passes don't run, \
+           and the outputs, e.g., of the observations, are flushed";
+        def "dump-memory-region"
+          (tuple [ int; int ] @-> any)
+          "(dump-memory-region P N) sends the messages with the bytes of the \
+           memory [P,P+N), 16 in a line, like hexdump -C, where ?? is a byte \
+           that is not mapped, and -- a byte that is not readable. The bytes \
+           of the allocated memory, which were never written, are generated, \
+           as a load does";
         def "memory-protect"
           (tuple [ int; int; int ] @-> byte)
           "(memory-protect P N A) sets the access to the memory [P,P+N) to A, \

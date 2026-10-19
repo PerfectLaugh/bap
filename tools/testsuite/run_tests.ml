@@ -222,6 +222,65 @@ let limit data =
           else lacks env "stops before it prints" out "hello"))
     [ (100, false); (1_000_000, true) ]
 
+(* the primitives of Primus Lisp for debugging, in the advice of strcpy,
+   which echo calls for its argument *)
+let debugging data =
+  let run env system lisp args =
+    let _ = write env "debug.lisp" lisp in
+    bap ~timeout:120. env
+      ([
+         path data "bin/x86_64-linux-gnu-echo";
+         "--run-argv=hello";
+         "--passes=run";
+         "--no-objdump";
+         "--run-systems=" ^ system;
+         "--primus-lisp-add=" ^ dir env;
+         "--primus-lisp-load=posix,debug";
+         "--primus-lisp-type-check";
+       ]
+      @ args)
+  in
+  let advice body =
+    Printf.sprintf
+      "(defun debug (dst src)\n  (declare (advice :before strcpy))\n  %s)\n"
+      body
+  in
+  List.concat_map
+    (fun system ->
+      [
+        case ("lisp/dump-memory-region/" ^ system) (fun env ->
+            let out =
+              run env system
+                (advice
+                   "(memory-allocate 0x50000000 32 0x41)\n\
+                   \  (memory-protect 0x50000010 16 0)\n\
+                   \  (dump-memory-region 0x50000000 34)")
+                [ "--primus-print-observations=lisp-message" ]
+            in
+            lacks env "well-typed" out "ill-typed";
+            sequence env out
+              [
+                ("dumps the bytes", "0x50000000: (41 ){16}\\|A{16}\\|");
+                ("protects the bytes", "0x50000010: (-- ){16}");
+                ("unmapped bytes", "0x50000020: \\?\\? \\?\\? +\\|\\.\\.\\|");
+                ("continues", "hello");
+              ]);
+        case ("lisp/bap-exit/" ^ system) (fun env ->
+            let obs = file env "observations" in
+            let out =
+              run env system (advice "(bap-exit 7)")
+                [
+                  "--primus-print-observations=lisp-message";
+                  "--primus-print-output=" ^ obs;
+                ]
+            in
+            check env "exits bap with the code" (out.status = Exited 7);
+            let text = In_channel.with_open_bin obs In_channel.input_all in
+            contains env "flushes the observations" { out with text }
+              "bap exits with 7");
+      ])
+    [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
+
 (* the CRC programs save the checkpoint at an instruction of the loop
    that prints the digits, from which another run continues, and the
    run that continues from the checkpoint saves it, when it reaches the
@@ -451,6 +510,7 @@ let tests =
     checkpoint;
     unresolved;
     limit;
+    debugging;
     mprotect;
     mmap;
     pages;

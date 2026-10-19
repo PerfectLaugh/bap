@@ -778,6 +778,7 @@ module Make (Machine : Machine) = struct
 
   let eval_method name = Self.eval_signal (KB.Name.read name)
   let eval_fun name = Self.eval_lisp (KB.Name.read name)
+  let say fmt = ksprintf (Machine.Observation.make new_message) fmt
 
   let optimize () =
     Machine.Local.get state >>= fun s ->
