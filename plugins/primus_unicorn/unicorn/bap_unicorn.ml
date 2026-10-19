@@ -84,7 +84,9 @@ let reg arch name =
   let name = String.uppercase_ascii name in
   List.assoc_opt name (regs arch)
 
-let start ?(until = 0L) ?(timeout = 0) ?(count = 0) uc pc =
+(* Unicorn stops at [until], which is never reached by default, as the
+   program counter, even of 64 bits, is never all ones *)
+let start ?(until = -1L) ?(timeout = 0) ?(count = 0) uc pc =
   emu_start uc pc until (Int64.of_int timeout) count
 
 type hook = int64
