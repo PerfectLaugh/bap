@@ -216,6 +216,27 @@ let mmap data =
         lacks env "stops" out "\\bX\\b");
   ]
 
+(* the rules of Linux for the pages, see src/pages.c *)
+let pages data =
+  List.map
+    (fun system ->
+      case ("run/pages/" ^ system) (fun env ->
+          let out =
+            bap env
+              [
+                path data "bin/x86_64-linux-gnu-pages";
+                "--passes=run";
+                "--no-objdump";
+                "--run-systems=" ^ system;
+                "--primus-print-observations=exception";
+              ]
+          in
+          contains env "returns the errors" out
+            "4096\n0\n-1\n22\n-1\n22\n-1\n22\n-1\n19\n0\n0\nW\n";
+          contains env "protects the page" out
+            "Segmentation fault at 0x7F0000000FA0"))
+    [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
+
 let contains_any subs name =
   List.exists
     (fun sub ->
@@ -319,6 +340,7 @@ let tests =
     timeout;
     mprotect;
     mmap;
+    pages;
     taint;
     symexec;
   ]

@@ -10,39 +10,64 @@
 (defun ioctl (_ _ _ _ _) (declare (external "ioctl")) 0)
 (defun ioctl (_ _ _ _ _ _) (declare (external "ioctl")) 0)
 
+(defparameter *page-size* 4096
+  "the size of a page, which is 4096 on Linux on the most targets")
+
 (defun getpagesize ()
   (declare (external "getpagesize"))
-  (* 64 1024))
+  *page-size*)
+
+(defun mman/fail (code)
+  "sets errno to the code and returns -1"
+  (declare (visibility :private))
+  (write-word int (errno-location) code)
+  -1)
+
+(defun mman/einval ()
+  (declare (visibility :private))
+  (mman/fail 22))
+
+(defun mman/is-aligned (addr)
+  (declare (visibility :private))
+  (= 0 (logand addr (- *page-size* 1))))
+
+(defun mman/round (len)
+  "rounds the length up to the pages"
+  (declare (visibility :private))
+  (logand (+ len (- *page-size* 1)) (lnot (- *page-size* 1))))
 
 (defun mprotect (addr len prot)
-  "sets the access to the memory [addr,addr+len)"
+  "sets the access to the pages of [addr,addr+len), addr is aligned
+   to a page"
   (declare (external "mprotect"))
-  (memory-protect addr len prot))
+  (if (not (mman/is-aligned addr)) (mman/einval)
+    (memory-protect addr (mman/round len) prot)))
 
 (defparameter *mmap/next* nil
   "the address of the next anonymous mapping, above the stack")
 
-(defun mmap/round (len)
-  (declare (visibility :private))
-  (logand (+ len 0xfff) (lnot 0xfff)))
-
 (defun mmap (addr len prot flags fd off)
-  "maps the anonymous memory, which is the memory of a file descriptor
-   -1, filled with zeros, at addr, if flags has MAP_FIXED (0x10), or
-   above the stack, otherwise the files are not mapped"
+  "maps the anonymous pages, which are of the file descriptor -1,
+   filled with zeros, at addr, if flags has MAP_FIXED (0x10), which is
+   aligned to a page, or above the stack, the files are not mapped"
   (declare (external "mmap"))
-  (if (not (is-negative fd)) -1
-    (let ((len (mmap/round len))
-          (ptr (if (/= 0 (logand flags 0x10)) addr
-                 (or *mmap/next*
-                     (if (= (word-width) 64) 0x7f0000000000 0x60000000)))))
-      (when (= 0 (logand flags 0x10))
-        (set *mmap/next* (+ ptr len)))
-      (memory-allocate ptr len 0)
-      (memory-protect ptr len prot)
-      ptr)))
+  (let ((fixed (/= 0 (logand flags 0x10))))
+    (if (not (is-negative fd)) (mman/fail 19) ; ENODEV
+      (if (or (= len 0) (and fixed (not (mman/is-aligned addr))))
+          (mman/einval)
+      (let ((len (mman/round len))
+            (ptr (if fixed addr
+                   (or *mmap/next*
+                       (if (= (word-width) 64) 0x7f0000000000 0x60000000)))))
+        (when (not fixed)
+          (set *mmap/next* (+ ptr len)))
+        (memory-allocate ptr len 0)
+        (memory-protect ptr len prot)
+        ptr)))))
 
 (defun munmap (addr len)
-  "denies the access to the memory, which stays mapped"
+  "denies the access to the pages of [addr,addr+len), which stay
+   mapped, as Primus doesn't unmap the memory, addr is aligned to a page"
   (declare (external "munmap"))
-  (memory-protect addr (mmap/round len) 0))
+  (if (or (= len 0) (not (mman/is-aligned addr))) (mman/einval)
+    (memory-protect addr (mman/round len) 0)))
