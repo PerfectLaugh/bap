@@ -162,6 +162,32 @@ let timeout data =
         contains env "prints A" out "A");
   ]
 
+(* without the stubs of posix, strchr is not defined, and the stub of
+   PLT, which jumps back to the trampoline in Unicorn, is interpreted,
+   so the machine stops at the unresolved call, as the interpreter does,
+   instead of calling the stub forever *)
+let unresolved data =
+  [
+    case "run/unicorn/unresolved" (fun env ->
+        let out =
+          bap ~timeout:60. env
+            [
+              path data "bin/x86_64-linux-gnu-echo";
+              "--passes=run";
+              "--no-objdump";
+              "--run-systems=bap:unicorn-executor";
+              "--primus-lisp-load=stdio";
+              "--primus-print-observations=call,exception";
+            ]
+        in
+        check env "terminates" (out.status = Exited 0);
+        sequence env out
+          [
+            ("calls strchr", "\\(call \\(strchr");
+            ("doesn't resolve it", "unbound function");
+          ]);
+  ]
+
 (* the CRC programs save the checkpoint at an instruction of the loop
    that prints the digits, from which another run continues, and the
    run that continues from the checkpoint saves it, when it reaches the
@@ -389,6 +415,7 @@ let tests =
     syscall;
     timeout;
     checkpoint;
+    unresolved;
     mprotect;
     mmap;
     pages;

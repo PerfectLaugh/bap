@@ -144,6 +144,10 @@ let recipe : (Theory.Target.t * int64 list * (int64 * string) list) option ref =
 (* the code that runs the subroutines in Unicorn, see [Loader] *)
 let own_code : Primus.Linker.code Addr.Table.t = Addr.Table.create ()
 
+(* the stubs of the external functions, e.g., in PLT, which jump through
+   their slots to the trampolines, interpreted, see [call_foreign] *)
+let stubs : Primus.Linker.code Addr.Table.t = Addr.Table.create ()
+
 (* The instructions, e.g., the system calls, which the lifters represent
    as the calls to the intrinsic functions, e.g., intrinsic:syscall, with
    the inputs in the variables intrinsic:x0, intrinsic:x1, etc., are run
@@ -750,6 +754,21 @@ module Make (Machine : Primus.Machine.S) = struct
     | Read | Write | Fetch | Read_after ->
         pull e >>= fun () -> fail "access to %Lx is denied" addr
 
+  (* the interpreted stub, if the function is linked to the stub of the
+     program, which nothing replaced *)
+  let unreplaced_stub name =
+    let* code = Linker.lookup name in
+    let+ addr = Linker.resolve_addr name in
+    match (code, addr) with
+    | Some code, Some addr -> (
+        match (Hashtbl.find own_code addr, Hashtbl.find stubs addr) with
+        | Some own, Some stub when phys_equal own code -> Some stub
+        | _ -> None)
+    | _ -> None
+
+  (* the stub of the program, which runs in Unicorn, would jump back to
+     the trampoline, so it is interpreted, as load-binary does, which
+     calls the function, that nothing defines, by its address *)
   let call_foreign e addr =
     let* () = pull e in
     let* frame = frame e in
@@ -758,7 +777,13 @@ module Make (Machine : Primus.Machine.S) = struct
       | Some name -> `symbol name
       | None -> `addr (word e addr)
     in
-    let* () = Linker.exec name in
+    let* () =
+      unreplaced_stub name >>= function
+      | Some (module Stub : Primus.Linker.Code) ->
+          let module Stub = Stub (Machine) in
+          Stub.exec
+      | None -> Linker.exec name
+    in
     let* () = push_owned e in
     (* the return address is popped on x86, if the stub did not *)
     if Option.is_none e.link then
@@ -1006,6 +1031,14 @@ module Loader (Machine : Primus.Machine.S) = struct
           end in
           let code : Primus.Linker.code = (module Code) in
           Hashtbl.set own_code ~key:addr ~data:code;
+          if Term.has_attr sub Sub.stub then begin
+            let module Stub (Machine : Primus.Machine.S) = struct
+              module Interp = Primus.Interpreter.Make (Machine)
+
+              let exec = Interp.sub sub
+            end in
+            Hashtbl.set stubs ~key:addr ~data:(module Stub)
+          end;
           if is_thumb sub then Hash_set.add thumb addr;
           Linker.link ~addr ~name:(Sub.name sub) ~tid:(Term.tid sub) code
 
@@ -1111,6 +1144,7 @@ module Loader (Machine : Primus.Machine.S) = struct
 
   let init () =
     Hashtbl.clear own_code;
+    Hashtbl.clear stubs;
     Hash_set.clear thumb;
     checkpoint_addr := None;
     checkpointed := false;
