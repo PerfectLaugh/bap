@@ -1,7 +1,4 @@
 ; The bindings to the Unicorn that libunicorn builds from its sources.
-; The include path is relative to the directory of the library, where
-; the stubs are compiled, and the archive is relative to the root of the
-; build context, where they are linked.
 
 (library
  (name bap_unicorn)
@@ -11,10 +8,34 @@
   (names unicorn_stubs unicorn_regs)
   (extra_deps unicorn_regs.h ../libunicorn/unicorn)
   (flags :standard -I../libunicorn/unicorn/include))
+ ; the archive of Unicorn, which it also installs as unicorn.o, so that it
+ ; is a dependency of the links, and they are redone when it changes; it is
+ ; linked from the flags too, which the linker sees before the extra objects,
+ ; so that the runtime that follows it in the flags resolves its symbols
+ (extra_objects ../libunicorn/unicorn/lib/unicorn)
  (c_library_flags
   plugins/primus_unicorn/libunicorn/unicorn/lib/libunicorn.a
-  -lpthread
+  (:include runtime.flags)
   -lm))
+
+; the threads and the runtime of the compiler that Unicorn uses, which on
+; Windows are linked statically, as for C++, see
+; lib/bap_disasm/config/cxx_runtime.ml, so that the plugin doesn't depend
+; on the DLLs of the mingw-w64 toolchain, which are not in the path
+
+(rule
+ (enabled_if
+  (<> %{os_type} Win32))
+ (action
+  (with-stdout-to
+   runtime.flags
+   (echo "(-lpthread)"))))
+
+(rule
+ (enabled_if
+  (= %{os_type} Win32))
+ (action
+  (copy %{project_root}/lib/bap_disasm/cxx_runtime.flags runtime.flags)))
 
 (rule
  (targets unicorn_regs.c)

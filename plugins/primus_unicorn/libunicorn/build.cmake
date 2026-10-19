@@ -106,6 +106,69 @@ endfunction()
 
 compiler(CC "${CC}" cc)
 
+# replaces the text in a file of the Unicorn sources, and fails if it is
+# not there, e.g., when the version of Unicorn changes
+function(patch file text replacement)
+  set(path "${WORK}/${UNICORN_ROOT}/${file}")
+  file(READ "${path}" contents)
+  string(REPLACE "${text}" "${replacement}" patched "${contents}")
+  if(patched STREQUAL contents)
+    fail("failed to patch ${file} of Unicorn")
+  endif()
+  file(WRITE "${path}" "${patched}")
+endfunction()
+
+if(CMAKE_HOST_WIN32)
+  execute_process(COMMAND ${CC} -dumpmachine
+    OUTPUT_VARIABLE machine
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT machine MATCHES "^x86_64-.*mingw")
+    fail("building Unicorn on Windows requires x86_64 mingw-w64, got ${CC}")
+  endif()
+  # the winpthreads of mingw-w64 no longer defines it, and Windows has no
+  # signals to mask
+  set(UNICORN_C_FLAGS "-Dpthread_sigmask(how,set,old)=0")
+  # the archive is also linked as unicorn.o, which Windows can't do without
+  # the privilege of symbolic links, so it is copied there
+  patch(cmake/bundle_static.cmake
+    "-E create_symlink \"$<TARGET_FILE_NAME:"
+    "-E copy \"$<TARGET_FILE:")
+  # the CPUs of some targets, e.g., MIPS and RISC-V, are allocated with the
+  # alignment of 8, which mingw-w64 honors exactly, but the compiler aligns
+  # them to 16, as the allocators of the other systems do, and its SSE
+  # stores to them fault
+  patch(qemu/util/oslib-posix.c
+    "__mingw_aligned_malloc(size, alignment)"
+    "__mingw_aligned_malloc(size, alignment < 16 ? 16 : alignment)")
+endif()
+
+# On Windows, Unicorn generates its configuration headers with the
+# configure script of QEMU, which needs a POSIX shell, and when there is
+# none it leaves them empty. So after it is configured, we write the
+# headers that configure generates for mingw-w64 ourselves. The headers of
+# the targets don't depend on the compiler, so they are the ones that
+# Unicorn ships for MSVC.
+function(write_config_headers)
+  file(WRITE "${WORK}/build/config-host.h"
+    "#define HOST_X86_64 1\n"
+    "#define CONFIG_WIN32 1\n"
+    "#define CONFIG_SEM_TIMEDWAIT 1\n"
+    "#define CONFIG_TCG 1\n"
+    "#define CONFIG_AVX2_OPT 1\n"
+    "#define CONFIG_PRAGMA_DIAGNOSTIC_AVAILABLE 1\n"
+    "#define CONFIG_CPUID_H 1\n"
+    "#define CONFIG_INT128 1\n"
+    "#define CONFIG_CMPXCHG128 1\n"
+    "#define CONFIG_ATOMIC64 1\n"
+    "#define CONFIG_ATTRIBUTE_ALIAS 1\n"
+    "#define CONFIG_STATIC_ASSERT 1\n"
+    "#define CONFIG_THREAD_SETNAME_BYTHREAD 1\n"
+    "#define CONFIG_PTHREAD_SETNAME_NP_W_TID 1\n")
+  file(GLOB targets LIST_DIRECTORIES true
+    "${WORK}/${UNICORN_ROOT}/msvc/*-softmmu")
+  file(COPY ${targets} DESTINATION "${WORK}/build")
+endfunction()
+
 find_program(NINJA ninja)
 if(NINJA)
   set(GENERATOR Ninja)
@@ -120,6 +183,10 @@ endif()
 set(INITIAL_CACHE "${WORK}/cache.cmake")
 file(WRITE "${INITIAL_CACHE}"
   "set(UNICORN_ARCH \"${UNICORN_ARCHES}\" CACHE STRING \"\")\n")
+if(UNICORN_C_FLAGS)
+  file(APPEND "${INITIAL_CACHE}"
+    "set(CMAKE_C_FLAGS \"${UNICORN_C_FLAGS}\" CACHE STRING \"\")\n")
+endif()
 
 set(CONFIGURE
   -G ${GENERATOR}
@@ -140,6 +207,9 @@ set(CONFIGURE
 
 message(STATUS "Building Unicorn ${UNICORN_VERSION} with ${CC} in ${WORK}")
 quietly(configure "${CMAKE_COMMAND}" ${CONFIGURE})
+if(CMAKE_HOST_WIN32)
+  write_config_headers()
+endif()
 quietly(build "${CMAKE_COMMAND}" --build "${WORK}/build" --parallel ${JOBS})
 quietly(install "${CMAKE_COMMAND}" --install "${WORK}/build")
 
