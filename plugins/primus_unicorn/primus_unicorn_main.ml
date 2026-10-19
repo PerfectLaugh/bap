@@ -13,12 +13,41 @@ let timeout =
        number of seconds. The bap:limit component limits only the code that \
        Primus interprets."
 
+let checkpoint =
+  Extension.Configuration.parameter
+    Extension.Type.(some string)
+    "checkpoint"
+    ~doc:
+      "Saves the state of the Primus machine to the given file, when the code \
+       at $(b,--primus-unicorn-checkpoint-at) runs in Unicorn for the first \
+       time. The machine continues to run after that."
+
+let checkpoint_at =
+  Extension.Configuration.parameter
+    Extension.Type.(some string)
+    "checkpoint-at"
+    ~doc:
+      "The address, or the name of the subroutine, at which the checkpoint of \
+       $(b,--primus-unicorn-checkpoint) is saved."
+
+let restore =
+  Extension.Configuration.parameter
+    Extension.Type.(some string)
+    "restore"
+    ~doc:
+      "Continues from the checkpoint in the given file, which was saved with \
+       $(b,--primus-unicorn-checkpoint) for the same program, instead of the \
+       first subroutine that the machine runs, e.g., the entry point. The \
+       machine stops when the subroutine, in which the checkpoint was saved, \
+       returns, as the code that called it, e.g., a Lisp stub, is not saved."
+
 let () =
   Extension.declare ~doc:"runs the binary programs in Primus with Unicorn"
     ~provides:[ "primus"; "unicorn" ]
   @@ fun ctxt ->
-  Bap_primus_unicorn_plugin.Primus_unicorn_executor.timeout :=
-    Extension.Configuration.get ctxt timeout;
+  let module Executor = Bap_primus_unicorn_plugin.Primus_unicorn_executor in
+  Executor.timeout := Extension.Configuration.get ctxt timeout;
+  Executor.restore := Extension.Configuration.get ctxt restore;
   Primus.Components.register_generic ~package "load-binary-unicorn"
     (module Bap_primus_unicorn_plugin.Primus_unicorn_executor.Loader)
     ~desc:
@@ -50,4 +79,19 @@ let () =
            Primus.System.depends_on ~package "unicorn-binary-executor";
            Primus.System.depends_on ~package "base-lisp-machine";
          ];
-  Ok ()
+  match
+    ( Extension.Configuration.get ctxt checkpoint,
+      Extension.Configuration.get ctxt checkpoint_at )
+  with
+  | Some file, Some point ->
+      Executor.checkpoint := Some (file, point);
+      Ok ()
+  | None, None -> Ok ()
+  | Some _, None ->
+      Error
+        (Extension.Error.Invalid
+           "--primus-unicorn-checkpoint requires --primus-unicorn-checkpoint-at")
+  | None, Some _ ->
+      Error
+        (Extension.Error.Invalid
+           "--primus-unicorn-checkpoint-at requires --primus-unicorn-checkpoint")

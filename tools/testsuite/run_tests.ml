@@ -162,6 +162,56 @@ let timeout data =
         contains env "prints A" out "A");
   ]
 
+(* the CRC programs save the checkpoint at an instruction of the loop
+   that prints the digits, from which another run continues, and the
+   run that continues from the checkpoint saves it, when it reaches the
+   instruction again, i.e., after the next digit *)
+let checkpoint data =
+  let unicorn env bin args =
+    bap env
+      ([
+         path data ("bin/" ^ bin);
+         "--passes=run";
+         "--no-objdump";
+         "--run-systems=bap:unicorn-executor";
+       ]
+      @ args)
+  in
+  let save file at =
+    [
+      "--primus-unicorn-checkpoint=" ^ file;
+      "--primus-unicorn-checkpoint-at=" ^ at;
+    ]
+  in
+  let restore file = [ "--primus-unicorn-restore=" ^ file ] in
+  List.map
+    (fun (bin, at) ->
+      case ("run/unicorn/checkpoint/" ^ bin) (fun env ->
+          let file = file env "checkpoint" in
+          let out = unicorn env bin (save file at) in
+          contains env "prints the CRC" out "1635920155";
+          let out = unicorn env bin (restore file) in
+          contains env "prints the other digits" out "635920155";
+          lacks env "skips the loop" out "1635920155"))
+    (* the instructions after the first call of putchar *)
+    [
+      ("x86_64-linux-gnu-crc-loop", "0x40055b");
+      ("arm-linux-gnueabihf-thumb-crc-loop", "0x202d4");
+    ]
+  @ [
+      (* the load of the digit, which faults, as the restored machine
+         copies the pages anew *)
+      case "run/unicorn/checkpoint/again" (fun env ->
+          let bin = "x86_64-linux-gnu-crc-loop" in
+          let first = file env "first" and second = file env "second" in
+          let _ = unicorn env bin (save first "0x40054c") in
+          let out = unicorn env bin (restore first @ save second "0x40054c") in
+          contains env "prints the CRC" out "1635920155";
+          let out = unicorn env bin (restore second) in
+          contains env "prints the other digits" out "635920155";
+          lacks env "skips the first digit" out "1635920155");
+    ]
+
 (* the program makes its code executable and then read-only with
    mprotect, the interpreter can't run the code that it writes, but
    both executors deny the store to the read-only memory *)
@@ -338,6 +388,7 @@ let tests =
     unicorn;
     syscall;
     timeout;
+    checkpoint;
     mprotect;
     mmap;
     pages;

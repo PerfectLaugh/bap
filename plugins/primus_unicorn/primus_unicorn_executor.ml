@@ -16,7 +16,12 @@
      linker, after which Unicorn continues from the return address.
 
    A run ends when the subroutine returns, i.e., when the code reaches
-   its return address with the stack pointer of the caller. *)
+   its return address with the stack pointer of the caller.
+
+   A checkpoint of the machine is saved when Unicorn reaches its address
+   for the first time, and a machine that restores it continues from
+   there, instead of the first subroutine that it runs, e.g., the entry
+   point, see [Primus_unicorn_checkpoint]. *)
 
 open Core
 open Bap_core_theory
@@ -24,6 +29,7 @@ open Bap.Std
 open Bap_primus.Std
 module Uc = Bap_unicorn
 module Target = Primus_unicorn_target
+module Checkpoint = Primus_unicorn_checkpoint
 include Bap_main.Loggers ()
 
 type Primus.exn += Unicorn_failure of string
@@ -44,6 +50,7 @@ type reason =
   | Fault of Uc.access * int64
   | Interrupt of int  (** an interrupt or a system call *)
   | Invalid
+  | Checkpoint
 
 (* a pending return of a run *)
 type frame = { ret : int64; sp : int64 }
@@ -102,6 +109,30 @@ let elapsed =
 let frames =
   Primus.Machine.State.declare ~uuid:"d47083aa-ead6-439d-8a0c-6bc2bbcc9d6e"
     ~name:"unicorn-frames" (fun _ -> [])
+
+(* the file of the checkpoint and the address or the name of the
+   subroutine, at which it is saved *)
+let checkpoint : (string * string) option ref = ref None
+
+(* the address of the checkpoint, and whether it was saved, as it is
+   saved once *)
+let checkpoint_addr : int64 option ref = ref None
+let checkpointed = ref false
+
+(* the checkpoint is not saved at the address, from which the machine
+   continues, as it was saved there, until its instruction runs, which
+   it does, unless it faults, after Unicorn has skipped the checkpoint *)
+let resumed_at : int64 option ref = ref None
+let skipped = ref false
+
+(* the file of the checkpoint, from which the machines continue *)
+let restore : string option ref = ref None
+let restored_from : Checkpoint.t option ref = ref None
+
+(* a machine restores the checkpoint once, and its forks don't *)
+let restored =
+  Primus.Machine.State.declare ~uuid:"8c3f7a52-1d4e-4b9a-9f0e-6a2d5c7b8e41"
+    ~name:"unicorn-restored" (fun _ -> false)
 
 (* the engine of the machines *)
 let active : engine option ref = ref None
@@ -306,6 +337,17 @@ let create target ~foreign ~externals =
     e.reason <- Some reason;
     Uc.stop uc
   in
+  (* the first hook of an address that stops Unicorn is the last one
+     called, so the checkpoint goes before the foreign code, which runs
+     after it is saved *)
+  Option.iter !checkpoint_addr ~f:(fun addr ->
+      ignore
+      @@ Uc.on_code uc ~first:addr ~last:addr (fun _ _ ->
+          match !resumed_at with
+          | Some at when Int64.(at = addr) ->
+              resumed_at := None;
+              skipped := true
+          | _ -> if not !checkpointed then stop Checkpoint));
   List.iter foreign ~f:(fun addr ->
       ignore
       @@ Uc.on_code uc ~first:addr ~last:addr (fun _ _ -> stop (Foreign addr)));
@@ -355,17 +397,20 @@ module Make (Machine : Primus.Machine.S) = struct
     | Some owner -> Monads.Std.Monad.State.Multi.Id.equal owner id
     | None -> false
 
+  (* drops the pages, which are copied anew *)
+  let forget e =
+    Hashtbl.iter_keys e.pages ~f:(fun page -> Uc.mem_unmap e.uc page page_size);
+    Hashtbl.clear e.pages;
+    e.unchecked <- [];
+    e.written <- []
+
   (* the pages and the registers of another machine are not valid *)
   let claim e =
     let* owned = owns e in
     if owned then Machine.return false
     else
       let+ id = Machine.current () in
-      Hashtbl.iter_keys e.pages ~f:(fun page ->
-          Uc.mem_unmap e.uc page page_size);
-      Hashtbl.clear e.pages;
-      e.unchecked <- [];
-      e.written <- [];
+      forget e;
       e.owner <- Some id;
       true
 
@@ -731,6 +776,10 @@ module Make (Machine : Primus.Machine.S) = struct
         else pc
     | _ -> pc
 
+  (* the address of the instruction at [pc] *)
+  let code_addr e pc =
+    match e.arch with Arm -> Int64.(pc land lnot 1L) | _ -> pc
+
   let call_intrinsic e { name; inputs } =
     let* () = pull e in
     let* () =
@@ -739,6 +788,36 @@ module Make (Machine : Primus.Machine.S) = struct
     in
     let* () = Linker.exec (`symbol name) in
     push_owned e
+
+  (* saves the state of the machine, which is in Primus, after it is
+     copied from Unicorn, and the innermost run, from which Unicorn
+     continues *)
+  let save e pc =
+    let* () = pull e in
+    let* target = Machine.gets Project.target in
+    let* vars = Env.all in
+    let* vars =
+      Seq.to_list vars
+      |> List.dedup_and_sort ~compare:Var.compare
+      |> Machine.List.filter ~f:Env.is_set
+    in
+    let* vars =
+      Machine.List.map vars ~f:(fun v ->
+          let+ x = Env.get v in
+          (v, Primus.Value.to_word x))
+    in
+    let* memory = Memory.snapshot in
+    checkpointed := true;
+    let file, _ = Option.value_exn !checkpoint in
+    let { ret; sp } = List.hd_exn e.frames in
+    match
+      Checkpoint.save file
+        { target = Theory.Target.to_string target; pc; ret; sp; vars; memory }
+    with
+    | Ok () ->
+        info "saved the checkpoint at %Lx to %s" pc file;
+        Machine.return ()
+    | Error msg -> fail "can't save the checkpoint: %s" msg
 
   let terminate e =
     let* () = pull e in
@@ -786,6 +865,7 @@ module Make (Machine : Primus.Machine.S) = struct
     | Some t when Float.(t <= 0.) -> terminate e
     | _ -> (
         e.reason <- None;
+        skipped := false;
         let started = Stdlib.Sys.time () in
         let error =
           try
@@ -800,6 +880,13 @@ module Make (Machine : Primus.Machine.S) = struct
           Machine.Local.put elapsed (used +. Stdlib.Sys.time () -. started)
         in
         let pc = current_pc e in
+        (match e.reason with
+        | Some (Fault _)
+          when !skipped
+               && Option.equal Int64.equal !checkpoint_addr
+                    (Some (code_addr e pc)) ->
+            resumed_at := !checkpoint_addr
+        | _ -> ());
         match (e.reason, error) with
         | None, None when Option.is_some remaining -> loop pc
         | Some Returned, _ | None, None -> pull e
@@ -807,14 +894,12 @@ module Make (Machine : Primus.Machine.S) = struct
         | Some (Fault (access, addr)), _ -> (
             fault e access addr >>= function `Continue -> loop pc)
         | Some (Interrupt n), _ -> (
-            let addr =
-              match e.arch with Arm -> Int64.(pc land lnot 1L) | _ -> pc
-            in
-            match intrinsic_before addr with
+            match intrinsic_before (code_addr e pc) with
             | Some site -> call_intrinsic e site >>= fun () -> loop pc
             | None ->
                 pull e >>= fun () ->
                 fail "an unhandled interrupt %d at %Lx" n pc)
+        | Some Checkpoint, _ -> save e pc >>= fun () -> loop pc
         | Some Invalid, _ ->
             pull e >>= fun () -> fail "an invalid instruction at %Lx" pc
         | None, Some msg -> pull e >>= fun () -> fail "%s at %Lx" msg pc)
@@ -825,18 +910,47 @@ module Make (Machine : Primus.Machine.S) = struct
     | Arm when Hash_set.mem thumb addr -> Int64.(pc lor 1L)
     | _ -> pc
 
-  let run addr =
+  (* the run continues from the checkpoint, and ends when it returns,
+     see [Checkpoint] *)
+  let resume (cp : Checkpoint.t) =
+    let* () = Machine.Local.put restored true in
+    let* () = Memory.restore cp.memory in
+    let* () =
+      Machine.List.iter cp.vars ~f:(fun (v, x) -> Value.of_word x >>= Env.set v)
+    in
     let* e = engine () in
-    let* claimed = claim e in
-    let* () = if claimed then map_code e else Machine.return () in
+    let* id = Machine.current () in
+    forget e;
+    e.owner <- Some id;
+    let* () = map_code e in
     let* () = push e in
-    let* frame = frame e in
+    if Option.equal Int64.equal !checkpoint_addr (Some (code_addr e cp.pc)) then
+      resumed_at := !checkpoint_addr;
+    info "continues from the checkpoint at %Lx" cp.pc;
     let* pending = Machine.Local.get frames in
     let* () =
-      Machine.Local.put frames ({ frame with ret = address e frame } :: pending)
+      Machine.Local.put frames ({ ret = cp.ret; sp = cp.sp } :: pending)
     in
-    let* () = loop (start e addr) in
+    let* () = loop cp.pc in
     Machine.Local.put frames pending
+
+  let run addr =
+    let* restored = Machine.Local.get restored in
+    match !restored_from with
+    | Some cp when not restored -> resume cp
+    | _ ->
+        let* e = engine () in
+        let* claimed = claim e in
+        let* () = if claimed then map_code e else Machine.return () in
+        let* () = push e in
+        let* frame = frame e in
+        let* pending = Machine.Local.get frames in
+        let* () =
+          Machine.Local.put frames
+            ({ frame with ret = address e frame } :: pending)
+        in
+        let* () = loop (start e addr) in
+        Machine.Local.put frames pending
 end
 
 (* links the program, as load-binary does, except that its subroutines
@@ -933,10 +1047,50 @@ module Loader (Machine : Primus.Machine.S) = struct
         @@ Seq.filter refs ~f:(fun (addr, name) ->
             Set.mem functions name && not (is_code addr))
 
+  (* the address, or the name of the subroutine, as its address *)
+  let resolve point =
+    match Int64.of_string point with
+    | addr -> Machine.return addr
+    | exception _ -> (
+        let* prog = Machine.gets Project.program in
+        let sub =
+          Term.enum sub_t prog
+          |> Seq.find ~f:(fun sub -> String.equal (Sub.name sub) point)
+        in
+        match Option.bind sub ~f:(fun sub -> Term.get_attr sub address) with
+        | Some addr -> Machine.return (int64_of_word addr)
+        | None ->
+            Machine.raise
+              (Unicorn_failure
+                 (sprintf "the checkpoint is at %s, which is not found" point)))
+
+  let load_checkpoint target =
+    match !restore with
+    | None -> Machine.return None
+    | Some file -> (
+        match Checkpoint.load file with
+        | Error msg -> Machine.raise (Unicorn_failure msg)
+        | Ok cp when String.equal cp.target (Theory.Target.to_string target) ->
+            Machine.return (Some cp)
+        | Ok cp ->
+            Machine.raise
+              (Unicorn_failure
+                 (sprintf "the checkpoint %s is of the target %s" file cp.target))
+        )
+
   (* the subroutines, whose code the other components replaced, stop
      Unicorn *)
   let create_engine () =
     let* target = Machine.gets Project.target in
+    let* () =
+      match !checkpoint with
+      | None -> Machine.return ()
+      | Some (_, point) ->
+          let+ addr = resolve point in
+          checkpoint_addr := Some addr
+    in
+    let* cp = load_checkpoint target in
+    restored_from := cp;
     let* foreign =
       Hashtbl.keys own_code
       |> Machine.List.filter_map ~f:(fun addr ->
@@ -958,6 +1112,9 @@ module Loader (Machine : Primus.Machine.S) = struct
   let init () =
     Hashtbl.clear own_code;
     Hash_set.clear thumb;
+    checkpoint_addr := None;
+    checkpointed := false;
+    resumed_at := None;
     let module Exec = Make (Machine) in
     Machine.sequence
       [
