@@ -402,6 +402,102 @@ let () =
         has env "tells the line of the script" out "script\\.ml\", line 2");
   ]
 
+(* the scripts stop the machines with Bap_script_debugger, and see and
+   change them in their handlers, the same in the interpreter and in
+   Unicorn *)
+let script_debugger data =
+  let script env source args =
+    bap ~timeout:300. env ("script" :: write env "script.ml" source :: args)
+  in
+  case "script/debugger/bap:unicorn-executor/x86_64-linux-gnu-crc-loop"
+    (fun env ->
+      let out =
+        script env
+          {|#require "bap-primus, bap-frontend.script-debugger"
+
+open Bap.Std
+open Bap_primus.Std
+module Debugger = Bap_script_debugger
+
+(* zeroes the CRC, at the breakpoint, and shows the next instruction *)
+module Zero (Machine : Primus.Machine.S) = struct
+  open Machine.Syntax
+  module Eval = Primus.Interpreter.Make (Machine)
+
+  let rax = Var.create "RAX" (Type.imm 64)
+  let steps = ref 0
+
+  let stopped addr =
+    if !steps = 0 then begin
+      incr steps;
+      Debugger.step true;
+      Eval.get rax >>= fun x ->
+      Printf.printf "at %s RAX = %s, zeroing it\n%!" (Addr.string_of_value addr)
+        (Word.string_of_value (Primus.Value.to_word x));
+      Eval.const (Word.zero 64) >>= Eval.set rax
+    end
+    else begin
+      Debugger.step false;
+      Primus.Interpreter.Stops.remove (Addr.of_int64 ~width:64 0x4004c0L);
+      Printf.printf "stepped to %s\n%!" (Addr.string_of_value addr);
+      Machine.return ()
+    end
+end
+
+let () =
+  Debugger.break "0x4004c0";
+  Debugger.on_stop (module Zero);
+  Bap_script.init ~options:[ "--run-systems=bap:unicorn-executor" ] ();
+  ignore
+    (Bap_script.run_pass "run"
+       (Bap_script.project (List.hd (Bap_script.args ()))))
+|}
+          [ path data "bin/x86_64-linux-gnu-crc-loop" ]
+      in
+      sequence env out
+        [
+          ("stops", "at 4004c0 RAX = 9e7dd6e4");
+          ("steps", "stepped to 4004c2");
+          ("prints the CRC of zero", "4294967295");
+        ])
+  :: List.map
+       (fun system ->
+         case
+           ("script/debugger/" ^ system ^ "/x86_64-linux-gnu-echo")
+           (fun env ->
+             let out =
+               script env
+                 {|#require "bap-primus, bap-frontend.script-debugger"
+
+open Bap_primus.Std
+module Debugger = Bap_script_debugger
+
+let calls = ref 0
+
+module Count (Machine : Primus.Machine.S) = struct
+  let stopped _ =
+    incr calls;
+    Machine.return ()
+end
+
+let () =
+  let system, file =
+    match Bap_script.args () with
+    | [ system; file ] -> (system, file)
+    | _ -> failwith "expected SYSTEM FILE"
+  in
+  Debugger.break "print_endline";
+  Debugger.on_stop (module Count);
+  Bap_script.init ~options:[ "--run-systems=" ^ system; "--run-argv=hello" ] ();
+  ignore (Bap_script.run_pass "run" (Bap_script.project file));
+  Printf.printf "print_endline was called %d times\n" !calls
+|}
+                 [ system; path data "bin/x86_64-linux-gnu-echo" ]
+             in
+             contains env "stops at each call" out
+               "print_endline was called 9 times"))
+       [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
+
 (* the CRC programs save the checkpoint at an instruction of the loop
    that prints the digits, from which another run continues, and the
    run that continues from the checkpoint saves it, when it reaches the
@@ -638,6 +734,7 @@ let tests =
     debugging;
     debugger;
     scripts;
+    script_debugger;
     mprotect;
     mmap;
     pages;

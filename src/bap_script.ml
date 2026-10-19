@@ -6,6 +6,10 @@ let set_args args = arguments := args
 let args () = !arguments
 let initialized = ref false
 
+(* the options of the libraries of the script, e.g., of the debugger *)
+let required = ref []
+let require_options options = required := !required @ options
+
 let fail fmt =
   Format.kasprintf
     (fun msg ->
@@ -19,7 +23,9 @@ let init ?(options = []) () =
   if !initialized then fail "bap is already initialized";
   initialized := true;
   match
-    Bap_main.init ~name:"bap" ~argv:(Array.of_list ("bap" :: "." :: options)) ()
+    Bap_main.init ~name:"bap"
+      ~argv:(Array.of_list (("bap" :: "." :: !required) @ options))
+      ()
   with
   | Ok () -> ()
   | Error (Bap_main.Extension.Error.Exit_requested code) -> Stdlib.exit code

@@ -525,6 +525,7 @@ details of the program behavior.")
   (bap-knowledge (= :version))
   (bap-main (= :version))
   (bap-std (= :version))
+  (bap-primus (= :version))
   core
   (bap-common (= :version))
   (regular (= :version))))

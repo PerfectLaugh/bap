@@ -30,6 +30,11 @@ val run_pass : string -> project -> project
 (** [run_pass name project] runs the pass, e.g., ["run"], after its
     dependencies. *)
 
+val require_options : string list -> unit
+(** [require_options options] adds the [options] to the options of {!init},
+    which a library of the scripts, e.g., the debugger, requires. It must be
+    called before {!init}, e.g., when the library is loaded. *)
+
 (**/**)
 
 val set_args : string list -> unit

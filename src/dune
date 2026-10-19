@@ -4,6 +4,12 @@
  (modules bap_script)
  (libraries bap bap-core-theory bap-main core))
 
+(library
+ (name bap_script_debugger)
+ (public_name bap-frontend.script-debugger)
+ (modules bap_script_debugger)
+ (libraries bap bap-core-theory bap-frontend.script bap-primus core))
+
 (executable
  (name bap_frontend)
  (public_name bap)
