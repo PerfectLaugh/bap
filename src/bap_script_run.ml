@@ -59,7 +59,7 @@ let cache_dir () =
       dir)
 
 let unit_name ~libs source =
-  let bap = Core_unix.stat Stdlib.Sys.executable_name in
+  let bap = Caml_unix.LargeFile.stat Stdlib.Sys.executable_name in
   let key =
     String.concat ~sep:"\000"
       (sprintf "%Ld:%f" bap.st_size bap.st_mtime :: source :: libs)
@@ -77,7 +77,7 @@ let remove_dir dir =
 (* the script is compiled in a directory of its own, and the plugin is
    moved to the cache, once it is complete *)
 let compile ~cache ~unit ~libs source =
-  let dir = Filename_unix.temp_dir ~in_dir:cache "build" "" in
+  let dir = Stdlib.Filename.temp_dir ~temp_dir:cache "build" "" in
   at_exit (fun () -> remove_dir dir);
   let ml = Filename.concat dir (unit ^ ".ml") in
   Out_channel.write_all ml ~data:source;
@@ -88,10 +88,15 @@ let compile ~cache ~unit ~libs source =
       (Filename.concat dir "includes")
     |> String.split_lines |> String.concat ~sep:" "
   in
-  let built = Filename.concat dir (unit ^ ".cmxs") in
   command ~error:"can't compile the script"
-    (sprintf "ocamlopt -shared %s -o %s %s" includes (Filename.quote built)
-       (Filename.quote ml));
+    (sprintf "ocamlopt -c %s %s" includes (Filename.quote ml));
+  (* the plugin is linked without the includes, which the libraries,
+     loaded by bap, don't need, as ocamlopt passes them to the linker,
+     whose command they make longer than Windows allows *)
+  let built = Filename.concat dir (unit ^ ".cmxs") in
+  command ~error:"can't link the script"
+    (sprintf "ocamlopt -shared -o %s %s" (Filename.quote built)
+       (Filename.quote (Filename.concat dir (unit ^ ".cmx"))));
   let cmxs = Filename.concat cache (unit ^ ".cmxs") in
   Stdlib.Sys.rename built cmxs;
   cmxs
