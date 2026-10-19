@@ -94,13 +94,20 @@ type engine = {
           created anew *)
 }
 
-(* the seconds of the emulation that a machine may run, as the limit
-   component counts only the code that Primus interprets *)
+(* the seconds that a machine may run, in Unicorn and in Primus, e.g.,
+   in the Lisp stubs *)
 let timeout : float option ref = ref None
 
+(* the seconds that the machine has run *)
 let elapsed =
   Primus.Machine.State.declare ~uuid:"ccde44e4-b82f-4627-80ff-8f5ea918e960"
     ~name:"unicorn-elapsed" (fun _ -> 0.)
+
+(* the processor time, which the machines have accounted for, see
+   [account], and the clock ticks of Primus since the time was last
+   checked, see [clocked] *)
+let accounted = ref 0.
+let ticks = ref 0
 
 (* the pending returns of the runs of a machine, the innermost first,
    which are of the machine, as the machines may switch, while a stub
@@ -867,13 +874,40 @@ module Make (Machine : Primus.Machine.S) = struct
         Machine.return ()
     | Error msg -> fail "can't save the checkpoint: %s" msg
 
-  let terminate e =
-    let* () = pull e in
+  (* the time since it was last accounted for goes to the machine that
+     runs, which is the machine that spent it, as they switch rarely *)
+  let account () =
+    let now = Stdlib.Sys.time () in
+    let spent = now -. !accounted in
+    accounted := now;
+    Machine.Local.update elapsed ~f:(fun t -> t +. spent)
+
+  let halt () =
     let* id = Machine.current () in
-    info "terminating machine %a, which has run in Unicorn for %g seconds"
+    info "terminating machine %a, which has run for %g seconds"
       Monads.Std.Monad.State.Multi.Id.pp id
       (Option.value_exn !timeout);
     Interpreter.halt >>= never_returns
+
+  let terminate e =
+    let* () = pull e in
+    halt ()
+
+  (* the time of the code that Primus runs, e.g., of the Lisp stubs, is
+     checked every few thousand ticks of its clock, as the time is not
+     free to get *)
+  let clocked _ =
+    match !timeout with
+    | None -> Machine.return ()
+    | Some limit ->
+        incr ticks;
+        if !ticks < 4096 then Machine.return ()
+        else begin
+          ticks := 0;
+          let* () = account () in
+          let* used = Machine.Local.get elapsed in
+          if Float.(used >= limit) then halt () else Machine.return ()
+        end
 
   (* stops Unicorn at the return address of the innermost run *)
   let ensure_return e ret =
@@ -907,6 +941,7 @@ module Make (Machine : Primus.Machine.S) = struct
     let* e = prepare () in
     check_pages e >>= fun () ->
     ensure_page e pc >>= fun () ->
+    let* () = account () in
     let* used = Machine.Local.get elapsed in
     let remaining = Option.map !timeout ~f:(fun t -> t -. used) in
     match remaining with
@@ -914,7 +949,6 @@ module Make (Machine : Primus.Machine.S) = struct
     | _ -> (
         e.reason <- None;
         skipped := false;
-        let started = Stdlib.Sys.time () in
         let error =
           try
             Uc.start e.uc pc
@@ -924,9 +958,7 @@ module Make (Machine : Primus.Machine.S) = struct
             None
           with Uc.Error (_, msg) -> Some msg
         in
-        let* () =
-          Machine.Local.put elapsed (used +. Stdlib.Sys.time () -. started)
-        in
+        let* () = account () in
         let pc = current_pc e in
         (match e.reason with
         | Some (Fault _)
@@ -1172,6 +1204,8 @@ module Loader (Machine : Primus.Machine.S) = struct
     checkpoint_addr := None;
     checkpointed := false;
     resumed_at := None;
+    accounted := Stdlib.Sys.time ();
+    ticks := 0;
     let module Exec = Make (Machine) in
     Machine.sequence
       [
@@ -1180,5 +1214,6 @@ module Loader (Machine : Primus.Machine.S) = struct
         Primus.Interpreter.stored >>> Exec.stored;
         Primus.Interpreter.written >>> Exec.written;
         Primus.Memory.protected >>> Exec.protected;
+        Primus.Interpreter.clock >>> Exec.clocked;
       ]
 end

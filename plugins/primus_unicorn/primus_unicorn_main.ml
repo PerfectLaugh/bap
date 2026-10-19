@@ -9,9 +9,9 @@ let timeout =
     Extension.Type.(some float)
     "timeout"
     ~doc:
-      "Terminates a Primus machine, after it has run in Unicorn for the given \
-       number of seconds. The bap:limit component limits only the code that \
-       Primus interprets."
+      "Terminates a Primus machine, after it has run for the given number of \
+       seconds of the processor time, both in Unicorn and in Primus, e.g., in \
+       the Lisp stubs."
 
 let checkpoint =
   Extension.Configuration.parameter
