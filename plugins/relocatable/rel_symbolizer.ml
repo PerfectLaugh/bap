@@ -222,11 +222,66 @@ let mark_mips_stubs_as_functions () : unit =
     KB.collect References.slot unit >>| References.referenced
   else KB.return (Set.empty (module Bitvec_order))
 
+(* the call stubs of 32-bit PowerPC, which load the address of an external
+   function from its slot and jump to it,
+
+     lis r11, hi; lwz r11, lo(r11); mtctr r11; bctr
+
+   are functions, as they may be reached only by jumps, e.g., by the tail
+   call of [__libc_start_main] in [_start], so that they aren't parts of
+   the functions that jump to them. A stub is recognized only when its
+   slot, [hi << 16 + lo], has an external reference. *)
+let powerpc_stubs refs memory =
+  let word mem addr =
+    match Memory.get ~scale:`r32 ~addr mem with
+    | Ok w -> Word.to_int64 w |> Result.ok
+    | Error _ -> None
+  in
+  let is_stub mem addr =
+    let at n = word mem (Addr.nsucc addr (4 * n)) in
+    match (at 0, at 1, at 2, at 3) with
+    | Some lis, Some lwz, Some 0x7d6903a6L, Some 0x4e800420L
+      when Int64.(lis land 0xffff0000L = 0x3d600000L)
+           && Int64.(lwz land 0xffff0000L = 0x816b0000L) ->
+        let hi = Int64.(lis land 0xffffL)
+        and lo = Int64.(lwz land 0xffffL) in
+        let lo = if Int64.(lo >= 0x8000L) then Int64.(lo - 0x10000L) else lo in
+        let slot = Int64.((hi * 0x10000L) + lo) in
+        let slot = Bitvec.(int64 slot mod modulus 32) in
+        Option.is_some (References.lookup refs slot)
+    | _ -> false
+  in
+  Memmap.to_sequence memory
+  |> Seq.fold
+       ~init:(Set.empty (module Bitvec_order))
+       ~f:(fun stubs (mem, tag) ->
+         if not (Value.is Image.code_region tag) then stubs
+         else
+           let start = Memory.min_addr mem in
+           Seq.range 0 (Memory.length mem / 4)
+           |> Seq.fold ~init:stubs ~f:(fun stubs n ->
+               let addr = Addr.nsucc start (4 * n) in
+               if is_stub mem addr then Set.add stubs (Word.to_bitvec addr)
+               else stubs))
+
+let mark_powerpc_stubs_as_functions () : unit =
+  Theory.Label.promise_subroutines @@ fun unit ->
+  let* target = unit --> Theory.Unit.target in
+  if
+    Theory.Target.belongs Bap_powerpc_target.parent target
+    && Theory.Target.code_addr_size target = 32
+  then
+    let* refs = unit --> References.slot in
+    let+ memory = unit --> Project.memory_slot in
+    powerpc_stubs refs memory
+  else KB.return (Set.empty (module Bitvec_order))
+
 let () =
   Extension.declare ~doc @@ fun _ctxt ->
   References.prepare ();
   resolve_stubs ();
   mark_mips_stubs_as_functions ();
+  mark_powerpc_stubs_as_functions ();
   KB.Rule.(
     declare ~package:"bap" "roots-for-mips"
     |> require Theory.Label.addr |> require Theory.Label.unit
@@ -235,6 +290,14 @@ let () =
     |> comment
          "marks external-references as function starts (and is-subroutine) on \
           MIPS");
+  KB.Rule.(
+    declare ~package:"bap" "roots-for-powerpc-stubs"
+    |> require Theory.Unit.target |> require References.slot
+    |> require Project.memory_slot
+    |> provide Theory.Unit.subroutines
+    |> comment
+         "marks the call stubs of external functions as function starts on \
+          32-bit PowerPC");
   KB.Rule.(
     declare ~package:"bap" "resolve-stubs"
     |> require Theory.Label.addr |> require Theory.Label.unit
