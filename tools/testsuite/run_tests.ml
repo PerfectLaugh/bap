@@ -341,6 +341,67 @@ let debugger data =
                "stopped at 0x4006ed.*stopped at 0x4006ed"))
        [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
 
+(* bap script compiles the OCaml scripts, which start bap with their
+   options, and use its API, e.g., to add a Primus component *)
+let scripts data =
+  let crc = path data "bin/x86_64-linux-gnu-crc-loop" in
+  let script env source =
+    bap ~timeout:300. env [ "script"; write env "script.ml" source; crc ]
+  in
+  [
+    case "script/run" (fun env ->
+        let out =
+          script env
+            {|let () =
+  let file = List.hd (Bap_script.args ()) in
+  Bap_script.init ~options:[ "--run-systems=bap:unicorn-executor" ] ();
+  ignore (Bap_script.run_pass "run" (Bap_script.project file))
+|}
+        in
+        check env "exits" (out.status = Exited 0);
+        contains env "runs the program" out "1635920155");
+    case "script/primus" (fun env ->
+        let out =
+          script env
+            {|#require "bap-primus"
+
+open Bap.Std
+open Bap_primus.Std
+
+module Watch (Machine : Primus.Machine.S) = struct
+  open Machine.Syntax
+  module Env = Primus.Env.Make (Machine)
+
+  let stopped addr =
+    if Primus.Interpreter.Stops.mem addr then
+      Env.get (Var.create "RAX" (Type.imm 64)) >>| fun x ->
+      Printf.printf "RAX = %s\n%!"
+        (Word.string_of_value (Primus.Value.to_word x))
+    else Machine.return ()
+
+  let init () = Primus.Interpreter.pc_change >>> stopped
+end
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  Bap_script.init
+    ~options:
+      [ "--run-systems=bap:unicorn-executor"; "--run-components=script:watch" ]
+    ();
+  Primus.Components.register_generic ~package:"script" "watch" (module Watch);
+  Primus.Interpreter.Stops.add (Addr.of_int64 ~width:64 0x4004c0L);
+  ignore (Bap_script.run_pass "run" (Bap_script.project file))
+|}
+        in
+        lacks env "loads the plugins" out "Failed to load";
+        sequence env out
+          [ ("stops", "RAX = 9e7dd6e4"); ("runs the program", "1635920155") ]);
+    case "script/error" (fun env ->
+        let out = script env "let () =\n  print_endline 42\n" in
+        check env "fails" (out.status = Exited 1);
+        has env "tells the line of the script" out "script\\.ml\", line 2");
+  ]
+
 (* the CRC programs save the checkpoint at an instruction of the loop
    that prints the digits, from which another run continues, and the
    run that continues from the checkpoint saves it, when it reaches the
@@ -572,6 +633,7 @@ let tests =
     limit;
     debugging;
     debugger;
+    scripts;
     mprotect;
     mmap;
     pages;

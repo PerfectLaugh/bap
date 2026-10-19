@@ -367,6 +367,9 @@ let () =
   in
   Sys.(set_signal sigint (Signal_handle exit));
   at_exit Format.(pp_print_flush err_formatter);
+  (match Array.to_list Sys.argv with
+  | _ :: "script" :: file :: args -> Bap_script_run.run file args
+  | _ -> ());
   match
     Bap_main.init ~default:print_info ~default_command:"disassemble" ~name:"bap"
       ~man ~argv:Sys.argv ()
