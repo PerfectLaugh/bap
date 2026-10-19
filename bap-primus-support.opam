@@ -10,6 +10,7 @@ homepage: "https://github.com/BinaryAnalysisPlatform/bap"
 bug-reports: "https://github.com/BinaryAnalysisPlatform/bap/issues"
 depends: [
   "dune" {>= "3.24"}
+  "bap-primus-debugger" {= version}
   "bap-primus-exploring-scheduler" {= version}
   "bap-primus-greedy-scheduler" {= version}
   "bap-primus-limit" {= version}

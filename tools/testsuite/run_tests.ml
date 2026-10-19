@@ -281,6 +281,66 @@ let debugging data =
       ])
     [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
 
+(* the debugger stops the machines at the breakpoints and runs the
+   commands of a file, the same in the interpreter and in Unicorn *)
+let debugger data =
+  let run env system bin commands args =
+    let commands = write env "commands" commands in
+    bap ~timeout:120. env
+      ([
+         path data ("bin/" ^ bin);
+         "--passes=run";
+         "--no-objdump";
+         "--run-systems=" ^ system;
+         "--run-components=bap:debugger";
+         "--primus-debugger-commands=" ^ commands;
+       ]
+      @ args)
+  in
+  case "debugger/bap:unicorn-executor/x86_64-linux-gnu-crc-loop" (fun env ->
+      let out =
+        run env "bap:unicorn-executor" "x86_64-linux-gnu-crc-loop"
+          "reg RAX\nset RAX 0\nstep\nstep\nc\n"
+          [ "--primus-debugger-break=0x4004c0" ]
+      in
+      sequence env out
+        [
+          ("stops at the breakpoint", "stopped at 0x4004c0");
+          ("shows the register", "RAX = 0x9E7DD6E4");
+          ("steps", "stopped at 0x4004c2");
+          ("steps again", "stopped at 0x4004c7");
+          ("prints the CRC of zero", "4294967295");
+        ])
+  :: List.map
+       (fun system ->
+         case
+           ("debugger/" ^ system ^ "/x86_64-linux-gnu-echo")
+           (fun env ->
+             let _ =
+               write env "helpers.lisp"
+                 "(defun arg-length ()\n  (strlen RDI))\n"
+             in
+             let out =
+               run env system "x86_64-linux-gnu-echo"
+                 "call arg-length\nstep\nd print_endline\nc\n"
+                 [
+                   "--run-argv=hello";
+                   "--primus-debugger-break=print_endline";
+                   "--primus-lisp-add=" ^ dir env;
+                   "--primus-lisp-load=posix,helpers";
+                 ]
+             in
+             sequence env out
+               [
+                 ("stops at the subroutine", "stopped at 0x4006ed");
+                 ("calls the Lisp function", "\\(bap\\) call arg-length\n5\n");
+                 ("steps", "stopped at 0x4006ee");
+                 ("continues", "hello\nwe\n");
+               ];
+             lacks env "deletes the breakpoint" out
+               "stopped at 0x4006ed.*stopped at 0x4006ed"))
+       [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
+
 (* the CRC programs save the checkpoint at an instruction of the loop
    that prints the digits, from which another run continues, and the
    run that continues from the checkpoint saves it, when it reaches the
@@ -511,6 +571,7 @@ let tests =
     unresolved;
     limit;
     debugging;
+    debugger;
     mprotect;
     mmap;
     pages;

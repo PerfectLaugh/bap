@@ -1,0 +1,11 @@
+(library
+ (name bap_primus_debugger_plugin)
+ (public_name bap-primus-debugger.plugin)
+ (libraries bap bap-core-theory bap-main bap-primus core monads))
+
+(plugin
+ (name primus-debugger)
+ (package bap-primus-debugger)
+ (libraries bap-primus-debugger.plugin)
+ (site
+  (bap-common plugins)))

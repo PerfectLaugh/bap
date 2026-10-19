@@ -140,6 +140,7 @@
  (tags (bap meta))
  (allow_empty)
  (depends
+  (bap-primus-debugger (= :version))
   (bap-primus-exploring-scheduler (= :version))
   (bap-primus-greedy-scheduler (= :version))
   (bap-primus-limit (= :version))
@@ -860,6 +861,19 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-primus (= :version))
   (bap-std (= :version))
   core))
+
+(package
+ (name bap-primus-debugger)
+ (synopsis "Debugs the BAP Primus machines")
+ (tags (bap bap-primus))
+ (depends
+  (bap-common (= :version))
+  (bap-core-theory (= :version))
+  (bap-main (= :version))
+  (bap-primus (= :version))
+  (bap-std (= :version))
+  core
+  (monads (= :version))))
 
 (package
  (name bap-primus-lisp)
