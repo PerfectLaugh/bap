@@ -219,14 +219,23 @@ module Cmdline = struct
   module Api = struct
     type t = api
 
+    (* a path that starts with a drive of Windows, e.g., [C:\api.h], which
+       has no language *)
+    let is_drive_path str =
+      Stdlib.Sys.win32
+      && String.length str > 2
+      && Char.is_alpha str.[0]
+      && Char.equal str.[1] ':'
+      && (Char.equal str.[2] '\\' || Char.equal str.[2] '/')
+
     let parser str =
       (* the file may be a Windows path, e.g., [c:C:\api.h] *)
       match String.lsplit2 str ~on:':' with
-      | Some (lang, file) -> (
+      | Some (lang, file) when not (is_drive_path str) -> (
           match Api.create lang file with
           | None -> `Error (sprintf "can't find api at %s" file)
           | Some api -> `Ok api)
-      | None -> `Error "expected <lang>:<file>"
+      | Some _ | None -> `Error "expected <lang>:<file>"
 
     let printer ppf t =
       Format.fprintf ppf "%s:%s" t.desc.lang (Api_path.to_string t.path)
