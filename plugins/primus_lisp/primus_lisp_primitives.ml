@@ -208,12 +208,22 @@ module Closure (Machine : Primus.Machine.S) = struct
     | [] -> failf "invoke-subroutine: requires at least one argument" ()
     | sub_addr :: sub_args -> (
         Machine.get () >>= fun proj ->
-        Term.enum sub_t (Project.program proj)
-        |> Seq.find ~f:(fun sub ->
-            match Term.get_attr sub address with
-            | None -> false
-            | Some addr -> Word.(addr = Value.to_word sub_addr))
-        |> function
+        let find addr =
+          Term.enum sub_t (Project.program proj)
+          |> Seq.find ~f:(fun sub ->
+              match Term.get_attr sub address with
+              | None -> false
+              | Some x -> Word.(x = addr))
+        in
+        let addr = Value.to_word sub_addr in
+        (* the pointers to the Thumb code of ARM have the lower bit set *)
+        let found =
+          match find addr with
+          | None when Word.(is_one (extract_exn ~hi:0 ~lo:0 addr)) ->
+              find Word.(addr - one (bitwidth addr))
+          | found -> found
+        in
+        match found with
         | None ->
             failf "invoke-subroutine: no function for %a" Value.pps sub_addr ()
         | Some sub -> (
@@ -225,7 +235,8 @@ module Closure (Machine : Primus.Machine.S) = struct
                 if not (is_out_intent arg) then Eval.assign (Arg.rhs arg) x
                 else Machine.return ())
             >>= fun () ->
-            Linker.exec (`addr (Value.to_word sub_addr)) >>= fun () ->
+            Linker.exec (`addr (Option.value_exn (Term.get_attr sub address)))
+            >>= fun () ->
             Machine.Seq.find_map args ~f:(fun arg ->
                 if is_out_intent arg then Eval.get (Arg.lhs arg) >>| Option.some
                 else Machine.return None)
