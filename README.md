@@ -88,13 +88,16 @@ To build without network access, put [llvm-project-23.1.3.src.tar.xz][llvm-src] 
 
 BAP builds natively on Windows with the mingw-w64 toolchain of [opam][opam-windows]. Dune has no binary for Windows and its package management can't build the OCaml compiler there yet, so the dependencies come from an opam switch, with the patched packages of `opam-overlay`, and dune builds BAP with `--pkg=disabled`. You need [CMake][cmake], [Ninja][ninja], and Python 3 (for Z3) in the path,
 
-```bash
+```powershell
 opam switch create bap 5.5.0
 opam repo add bap-overlay ./opam-overlay --this-switch --rank=1
 opam install . --deps-only
 opam exec -- dune build --pkg=disabled
+opam exec -- dune test --pkg=disabled
 opam exec -- dune exec --pkg=disabled -- bap C:\Windows\System32\find.exe -d
 ```
+
+The other tasks in the table above run the same way, through `opam exec --` and with `--pkg=disabled`.
 
 LLVM, Ghidra, Z3, and the runtime of C++ are linked statically into the plugins and programs, and the interactive mode of `bap analyze` has no line editing.
 

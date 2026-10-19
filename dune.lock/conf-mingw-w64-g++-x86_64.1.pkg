@@ -1,0 +1,29 @@
+(version 1)
+
+(build
+ (choice
+  ((((arch x86_64) (os win32)))
+   ((action (run x86_64-w64-mingw32-g++ --version))))))
+
+(depends
+ (choice
+  ((((arch x86_64) (os win32))) (conf-mingw-w64-gcc-x86_64))))
+
+(depexts
+ ((mingw64-x86_64-gcc-g++)
+  (and_absorb_undefined_var
+   (= %{os} win32)
+   (= %{os_distribution} cygwin))))
+
+(extra_sources
+ (install-shim.sh
+  (fetch
+   (url
+    https://raw.githubusercontent.com/dra27/mingw-w64-shims/refs/tags/1.0.1/install-shim.sh)
+   (checksum
+    sha512=0b76a529454b00027b5768fa6ead1b8dda6bc3adab55f4288a702f4cc5d7b280be938cced6841b1556e8cf98f56ecc95b7b22006859d7a91f0ef852aea74e88c))))
+
+(enabled_on_platforms
+ (only
+  ((arch x86_64)
+   (os win32))))

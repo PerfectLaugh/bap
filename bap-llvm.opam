@@ -11,6 +11,7 @@ bug-reports: "https://github.com/BinaryAnalysisPlatform/bap/issues"
 depends: [
   "dune" {>= "3.24"}
   "bap-std" {= version}
+  "conf-mingw-w64-g++-x86_64" {os = "win32"}
   "core"
   "mmap"
   "monads" {= version}

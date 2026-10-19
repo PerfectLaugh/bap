@@ -15,6 +15,7 @@ depends: [
   "bap-primus-track-visited" {= version}
   "bap-main" {= version}
   "bap-std" {= version}
+  "conf-mingw-w64-g++-x86_64" {os = "win32"}
   "core"
   "monads" {= version}
   "regular" {= version}

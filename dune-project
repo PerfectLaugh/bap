@@ -559,6 +559,7 @@ be seen as a common denominator between Lwt and Async libraries.")
  (tags (bap ghidra disassembler))
  (depends
   (camlzip (and (>= 1.07) (< 2.0)))
+  (conf-mingw-w64-g++-x86_64 (= :os win32))
   core
   fileutils
   (ppx_bap (= :version))
@@ -618,6 +619,7 @@ be seen as a common denominator between Lwt and Async libraries.")
  (tags (bap bap-plugin llvm))
  (depends
   (bap-std (= :version))
+  (conf-mingw-w64-g++-x86_64 (= :os win32))
   core
   mmap
   (monads (= :version))
@@ -1009,6 +1011,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-primus-track-visited (= :version))
   (bap-main (= :version))
   (bap-std (= :version))
+  (conf-mingw-w64-g++-x86_64 (= :os win32))
   core
   (monads (= :version))
   (regular (= :version))
@@ -1295,6 +1298,7 @@ between the sets.")
   (bitvec (= :version))
   (camlzip (and (>= 1.07) (< 2.0)))
   (cmdliner (>= 2.0.0))
+  (conf-mingw-w64-g++-x86_64 (= :os win32))
   core
   (core_bench (and :with-test (<> :os win32)))
    fileutils
