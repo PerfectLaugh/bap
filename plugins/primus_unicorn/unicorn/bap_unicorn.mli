@@ -158,6 +158,10 @@ val on_block :
 val on_interrupt : t -> (int -> unit) -> hook
 (** [on_interrupt uc f] calls [f intno] on interrupts and system calls. *)
 
+val on_x86_syscall : t -> (unit -> unit) -> hook list
+(** [on_x86_syscall uc f] calls [f ()] on the syscall and sysenter instructions
+    of x86, which are not interrupts. *)
+
 val on_invalid_insn : t -> (unit -> bool) -> hook
 (** [on_invalid_insn uc f] calls [f ()] on an invalid instruction, the emulation
     continues if it returns [true]. *)

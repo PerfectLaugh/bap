@@ -4,10 +4,21 @@ open Bap_primus.Std
 
 let package = "bap"
 
+let timeout =
+  Extension.Configuration.parameter
+    Extension.Type.(some float)
+    "timeout"
+    ~doc:
+      "Terminates a Primus machine, after it has run in Unicorn for the given \
+       number of seconds. The bap:limit component limits only the code that \
+       Primus interprets."
+
 let () =
   Extension.declare ~doc:"runs the binary programs in Primus with Unicorn"
     ~provides:[ "primus"; "unicorn" ]
-  @@ fun _ ->
+  @@ fun ctxt ->
+  Bap_primus_unicorn_plugin.Primus_unicorn_executor.timeout :=
+    Extension.Configuration.get ctxt timeout;
   Primus.Components.register_generic ~package "load-binary-unicorn"
     (module Bap_primus_unicorn_plugin.Primus_unicorn_executor.Loader)
     ~desc:

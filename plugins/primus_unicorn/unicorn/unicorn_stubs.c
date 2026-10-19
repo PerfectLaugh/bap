@@ -428,8 +428,16 @@ static bool on_mem_event(uc_engine *uc, uc_mem_type type, uint64_t addr,
     CAMLreturnT(bool, r != Val_unit && Bool_val(r));
 }
 
+static void on_insn(uc_engine *uc, void *data) {
+    CAMLparam0();
+    CAMLlocalN(args, 1);
+    args[0] = Val_unit;
+    call(data, 1, args);
+    CAMLreturn0;
+}
+
 enum hook_kind { HOOK_CODE, HOOK_BLOCK, HOOK_INTR, HOOK_INSN_INVALID,
-                 HOOK_MEM, HOOK_MEM_EVENT };
+                 HOOK_MEM, HOOK_MEM_EVENT, HOOK_INSN };
 
 /* the kind of the hook, the type mask of Unicorn, and the closure */
 value bap_uc_hook_add(value v, value kind, value types, value start,
@@ -450,6 +458,8 @@ value bap_uc_hook_add(value v, value kind, value types, value start,
         break;
     case HOOK_MEM: callback = on_mem; break;
     case HOOK_MEM_EVENT: callback = on_mem_event; break;
+    /* the types are the instruction of x86, e.g., UC_X86_INS_SYSCALL */
+    case HOOK_INSN: callback = on_insn; type = UC_HOOK_INSN; break;
     default: caml_invalid_argument("Unicorn.hook_add");
     }
     struct hook *h = malloc(sizeof(struct hook));
@@ -459,8 +469,12 @@ value bap_uc_hook_add(value v, value kind, value types, value start,
     h->closure = closure;
     h->engine = e;
     caml_register_generational_global_root(&h->closure);
-    uc_err err = uc_hook_add(uc, &h->handle, type, callback, h,
-                             Int64_val(start), Int64_val(stop));
+    uc_err err =
+        Int_val(kind) == HOOK_INSN
+            ? uc_hook_add(uc, &h->handle, type, callback, h, Int64_val(start),
+                          Int64_val(stop), Int_val(types))
+            : uc_hook_add(uc, &h->handle, type, callback, h, Int64_val(start),
+                          Int64_val(stop));
     if (err != UC_ERR_OK) {
         caml_remove_generational_global_root(&h->closure);
         free(h);
@@ -474,6 +488,15 @@ value bap_uc_hook_add(value v, value kind, value types, value start,
 value bap_uc_hook_add_bytecode(value *argv, int argn) {
     return bap_uc_hook_add(argv[0], argv[1], argv[2], argv[3], argv[4],
                            argv[5]);
+}
+
+value bap_uc_x86_syscalls(value unit) {
+    CAMLparam1(unit);
+    CAMLlocal1(r);
+    r = caml_alloc_tuple(2);
+    Store_field(r, 0, Val_int(UC_X86_INS_SYSCALL));
+    Store_field(r, 1, Val_int(UC_X86_INS_SYSENTER));
+    CAMLreturn(r);
 }
 
 value bap_uc_hook_del(value v, value handle) {

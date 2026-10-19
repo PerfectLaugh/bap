@@ -102,6 +102,66 @@ let unicorn data =
         crc data (Printf.sprintf "run/%s/%s" system bin) bin system "1489580789")
       [ "bap:stubbed-executor"; "bap:legacy-main"; "bap:unicorn-executor" ]
 
+(* the write system calls of Linux, which Primus Lisp doesn't model, so
+   the cases define the intrinsics of the system calls *)
+let syscalls =
+  [
+    ( "x86_64-linux-gnu-syscall-crc",
+      {|(require stdio)
+(defun syscall ()
+  (declare (external "intrinsic:syscall"))
+  (set RAX (if (= RAX 1) (write RDI RSI RDX) -1)))
+|}
+    );
+    ( "aarch64-linux-gnu-svc-crc",
+      {|(require stdio)
+(defun svc ()
+  (declare (external "intrinsic:svc"))
+  (set R0 (if (= R8 64) (write R0 R1 R2) -1)))
+|}
+    );
+  ]
+
+let syscall data =
+  List.concat_map
+    (fun (bin, lisp) ->
+      List.map
+        (fun system ->
+          case (Printf.sprintf "run/syscall/%s/%s" system bin) (fun env ->
+              ignore (write env "syscalls.lisp" lisp);
+              let out =
+                bap env
+                  [
+                    path data ("bin/" ^ bin);
+                    "--passes=run";
+                    "--no-objdump";
+                    "--run-systems=" ^ system;
+                    "--primus-lisp-add=" ^ dir env;
+                    "--primus-lisp-load=syscalls";
+                  ]
+              in
+              contains env "prints the CRC" out "1489580789"))
+        [ "bap:stubbed-executor"; "bap:unicorn-executor" ])
+    syscalls
+
+(* a program that never ends is terminated after the time in Unicorn *)
+let timeout data =
+  [
+    case "run/unicorn/timeout" (fun env ->
+        let out =
+          bap ~timeout:120. env
+            [
+              path data "bin/x86_64-linux-gnu-forever";
+              "--passes=run";
+              "--no-objdump";
+              "--run-systems=bap:unicorn-executor";
+              "--primus-unicorn-timeout=1";
+            ]
+        in
+        check env "terminates" (out.status = Exited 0);
+        contains env "prints A" out "A");
+  ]
+
 let contains_any subs name =
   List.exists
     (fun sub ->
@@ -195,4 +255,4 @@ let symexec data =
           | Timeout -> check env (file ^ " run out of time.") false
           | _ -> check env (file ^ " withhold the attack.") false))
 
-let tests = [ sse; x86_floats; run; unicorn; taint; symexec ]
+let tests = [ sse; x86_floats; run; unicorn; syscall; timeout; taint; symexec ]

@@ -102,7 +102,7 @@ type access =
   | Read_after
 
 (* the kinds of the hooks in unicorn_stubs.c *)
-type kind = Code | Block | Intr | Insn_invalid | Mem | Mem_event
+type kind = Code | Block | Intr | Insn_invalid | Mem | Mem_event | Insn
 
 external hook_add : t -> kind -> int -> int64 -> int64 -> 'f -> int64
   = "bap_uc_hook_add_bytecode" "bap_uc_hook_add"
@@ -118,6 +118,13 @@ let on_block ?first ?last uc (f : int64 -> int -> unit) =
   hook ?first ?last uc Block 0 f
 
 let on_interrupt uc (f : int -> unit) = hook uc Intr 0 f
+
+external x86_syscalls : unit -> int * int = "bap_uc_x86_syscalls"
+
+let on_x86_syscall uc (f : unit -> unit) =
+  let syscall, sysenter = x86_syscalls () in
+  [ hook uc Insn syscall f; hook uc Insn sysenter f ]
+
 let on_invalid_insn uc (f : unit -> bool) = hook uc Insn_invalid 0 f
 
 (* the values of uc_hook_type *)

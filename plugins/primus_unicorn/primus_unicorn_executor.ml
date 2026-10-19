@@ -24,6 +24,7 @@ open Bap.Std
 open Bap_primus.Std
 module Uc = Bap_unicorn
 module Target = Primus_unicorn_target
+include Bap_main.Loggers ()
 
 type Primus.exn += Unicorn_failure of string
 
@@ -41,7 +42,7 @@ type reason =
   | Returned
   | Foreign of int64
   | Fault of Uc.access * int64
-  | Interrupt of int
+  | Interrupt of int  (** an interrupt or a system call *)
   | Invalid
 
 (* a pending return of a run *)
@@ -82,6 +83,14 @@ type engine = {
           created anew *)
 }
 
+(* the seconds of the emulation that a machine may run, as the limit
+   component counts only the code that Primus interprets *)
+let timeout : float option ref = ref None
+
+let elapsed =
+  Primus.Machine.State.declare ~uuid:"ccde44e4-b82f-4627-80ff-8f5ea918e960"
+    ~name:"unicorn-elapsed" (fun _ -> 0.)
+
 (* the engine of the machines *)
 let active : engine option ref = ref None
 
@@ -91,6 +100,61 @@ let recipe : (Theory.Target.t * int64 list * (int64 * string) list) option ref =
 
 (* the code that runs the subroutines in Unicorn, see [Loader] *)
 let own_code : Primus.Linker.code Addr.Table.t = Addr.Table.create ()
+
+(* The instructions, e.g., the system calls, which the lifters represent
+   as the calls to the intrinsic functions, e.g., intrinsic:syscall, with
+   the inputs in the variables intrinsic:x0, intrinsic:x1, etc., are run
+   by the Primus linker, as the interpreter does, when they stop Unicorn
+   with an interrupt, at the address of their next instruction. *)
+type intrinsic = { name : string; inputs : (var * exp) list }
+
+let intrinsics : intrinsic Int64.Map.t ref = ref Int64.Map.empty
+
+let index_intrinsics prog =
+  let callee jmp =
+    match Jmp.kind jmp with
+    | Call call -> (
+        match Call.target call with
+        | Direct tid ->
+            let name =
+              match Term.find sub_t prog tid with
+              | Some sub -> Sub.name sub
+              | None -> String.chop_prefix_if_exists (Tid.name tid) ~prefix:"@"
+            in
+            Option.some_if (String.is_prefix name ~prefix:"intrinsic:") name
+        | Indirect _ -> None)
+    | Goto _ | Ret _ | Int _ -> None
+  in
+  intrinsics :=
+    Term.enum sub_t prog
+    |> Seq.concat_map ~f:(Term.enum blk_t)
+    |> Seq.fold ~init:Int64.Map.empty ~f:(fun sites blk ->
+        Term.enum jmp_t blk
+        |> Seq.fold ~init:sites ~f:(fun sites jmp ->
+            match (callee jmp, Term.get_attr jmp address) with
+            | Some name, Some addr ->
+                let inputs =
+                  Term.enum def_t blk
+                  |> Seq.filter ~f:(fun def ->
+                      String.is_prefix
+                        (Var.name (Def.lhs def))
+                        ~prefix:"intrinsic:"
+                      && Option.equal Addr.equal
+                           (Term.get_attr def address)
+                           (Some addr))
+                  |> Seq.map ~f:(fun def -> (Def.lhs def, Def.rhs def))
+                  |> Seq.to_list
+                in
+                Map.set sites
+                  ~key:(Bitvec.to_int64 (Word.to_bitvec addr))
+                  ~data:{ name; inputs }
+            | _ -> sites))
+
+(* the intrinsic, whose instruction precedes [pc] *)
+let intrinsic_before pc =
+  match Map.closest_key !intrinsics `Less_than pc with
+  | Some (addr, site) when Int64.(pc - addr <= 16L) -> Some site
+  | _ -> None
 
 (* the subroutines in the Thumb encoding, which Unicorn runs from their
    addresses with the lower bit set *)
@@ -251,6 +315,9 @@ let create target ~foreign ~externals =
          | _ -> ());
          false);
   ignore @@ Uc.on_interrupt uc (fun n -> stop (Interrupt n));
+  (match arch with
+  | X86 -> ignore @@ Uc.on_x86_syscall uc (fun () -> stop (Interrupt (-1)))
+  | _ -> ());
   ignore
   @@ Uc.on_invalid_insn uc (fun () ->
       e.reason <- Some Invalid;
@@ -264,6 +331,7 @@ module Make (Machine : Primus.Machine.S) = struct
   module Memory = Primus.Memory.Make (Machine)
   module Value = Primus.Value.Make (Machine)
   module Linker = Primus.Linker.Make (Machine)
+  module Interpreter = Primus.Interpreter.Make (Machine)
 
   let fail fmt = ksprintf (fun msg -> Machine.raise (Unicorn_failure msg)) fmt
   let word e x = Word.of_int64 ~width:(e.bytes * 8) x
@@ -561,27 +629,64 @@ module Make (Machine : Primus.Machine.S) = struct
         else pc
     | _ -> pc
 
+  let call_intrinsic e { name; inputs } =
+    let* () = pull e in
+    let* () =
+      Machine.List.iter inputs ~f:(fun (var, exp) ->
+          Interpreter.exp exp >>= Interpreter.set var)
+    in
+    let* () = Linker.exec (`symbol name) in
+    push_written e
+
+  let terminate e =
+    let* () = pull e in
+    let* id = Machine.current () in
+    info "terminating machine %a, which has run in Unicorn for %g seconds"
+      Monads.Std.Monad.State.Multi.Id.pp id
+      (Option.value_exn !timeout);
+    Interpreter.halt >>= never_returns
+
   let rec loop e pc =
     check_pages e >>= fun () ->
     ensure_page e pc >>= fun () ->
-    e.reason <- None;
-    let error =
-      try
-        Uc.start e.uc pc;
-        None
-      with Uc.Error (_, msg) -> Some msg
-    in
-    let pc = current_pc e in
-    match (e.reason, error) with
-    | Some Returned, _ | None, None -> pull e
-    | Some (Foreign addr), _ -> call_foreign e addr >>= loop e
-    | Some (Fault (access, addr)), _ -> (
-        fault e access addr >>= function `Continue -> loop e pc)
-    | Some (Interrupt n), _ ->
-        pull e >>= fun () -> fail "an unhandled interrupt %d at %Lx" n pc
-    | Some Invalid, _ ->
-        pull e >>= fun () -> fail "an invalid instruction at %Lx" pc
-    | None, Some msg -> pull e >>= fun () -> fail "%s at %Lx" msg pc
+    let* used = Machine.Local.get elapsed in
+    let remaining = Option.map !timeout ~f:(fun t -> t -. used) in
+    match remaining with
+    | Some t when Float.(t <= 0.) -> terminate e
+    | _ -> (
+        e.reason <- None;
+        let started = Stdlib.Sys.time () in
+        let error =
+          try
+            Uc.start e.uc pc
+              ?timeout:
+                (Option.map remaining ~f:(fun t ->
+                     Int.max 1 (Float.iround_up_exn (t *. 1e6))));
+            None
+          with Uc.Error (_, msg) -> Some msg
+        in
+        let* () =
+          Machine.Local.put elapsed (used +. Stdlib.Sys.time () -. started)
+        in
+        let pc = current_pc e in
+        match (e.reason, error) with
+        | None, None when Option.is_some remaining -> loop e pc
+        | Some Returned, _ | None, None -> pull e
+        | Some (Foreign addr), _ -> call_foreign e addr >>= loop e
+        | Some (Fault (access, addr)), _ -> (
+            fault e access addr >>= function `Continue -> loop e pc)
+        | Some (Interrupt n), _ -> (
+            let addr =
+              match e.arch with Arm -> Int64.(pc land lnot 1L) | _ -> pc
+            in
+            match intrinsic_before addr with
+            | Some site -> call_intrinsic e site >>= fun () -> loop e pc
+            | None ->
+                pull e >>= fun () ->
+                fail "an unhandled interrupt %d at %Lx" n pc)
+        | Some Invalid, _ ->
+            pull e >>= fun () -> fail "an invalid instruction at %Lx" pc
+        | None, Some msg -> pull e >>= fun () -> fail "%s at %Lx" msg pc)
 
   let start e addr =
     let pc = int64_of_word addr in
@@ -677,6 +782,7 @@ module Loader (Machine : Primus.Machine.S) = struct
 
   let link_program =
     let* prog = Machine.gets Project.program in
+    index_intrinsics prog;
     Term.enum sub_t prog |> Seq.to_list
     |> Machine.List.iter ~f:(fun sub ->
         let* () = link_sub sub in
