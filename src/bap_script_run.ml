@@ -40,12 +40,47 @@ let output ~error cmd file =
   command ~error (sprintf "%s > %s" cmd (Filename.quote file));
   In_channel.read_all file
 
-let compile ~dir ~libs file source =
-  let digest = Stdlib.Digest.(to_hex (string source)) in
-  (* the name of the unit, which is unique, as Dynlink loads a unit once *)
-  let unit = "bap_script_" ^ digest in
+(* the compiled scripts are cached by the digest of their source, their
+   libraries, and the bap that runs them, whose libraries they are
+   compiled with, which is told by the size and the time of its
+   executable *)
+let cache_dir () =
+  let base =
+    match Sys.getenv "XDG_CACHE_HOME" with
+    | Some dir when not (String.is_empty dir) -> dir
+    | _ -> (
+        match Sys.getenv "HOME" with
+        | Some home -> Filename.concat home ".cache"
+        | None -> Filename.temp_dir_name)
+  in
+  List.fold [ "bap"; "scripts" ] ~init:base ~f:(fun dir sub ->
+      let dir = Filename.concat dir sub in
+      (try Stdlib.Sys.mkdir dir 0o755 with Sys_error _ -> ());
+      dir)
+
+let unit_name ~libs source =
+  let bap = Core_unix.stat Stdlib.Sys.executable_name in
+  let key =
+    String.concat ~sep:"\000"
+      (sprintf "%Ld:%f" bap.st_size bap.st_mtime :: source :: libs)
+  in
+  (* the name is unique, as Dynlink loads a unit once *)
+  "bap_script_" ^ Stdlib.Digest.(to_hex (string key))
+
+let remove_dir dir =
+  if Stdlib.Sys.file_exists dir then begin
+    Stdlib.Sys.readdir dir
+    |> Array.iter ~f:(fun f -> Stdlib.Sys.remove (Filename.concat dir f));
+    Stdlib.Sys.rmdir dir
+  end
+
+(* the script is compiled in a directory of its own, and the plugin is
+   moved to the cache, once it is complete *)
+let compile ~cache ~unit ~libs source =
+  let dir = Filename_unix.temp_dir ~in_dir:cache "build" "" in
+  at_exit (fun () -> remove_dir dir);
   let ml = Filename.concat dir (unit ^ ".ml") in
-  Out_channel.write_all ml ~data:(sprintf "# 1 %S\n%s" file source);
+  Out_channel.write_all ml ~data:source;
   let includes =
     output ~error:"can't find the libraries"
       (sprintf "ocamlfind query -r -i-format %s"
@@ -53,25 +88,42 @@ let compile ~dir ~libs file source =
       (Filename.concat dir "includes")
     |> String.split_lines |> String.concat ~sep:" "
   in
-  let cmxs = Filename.concat dir (unit ^ ".cmxs") in
-  command ~error:("can't compile " ^ file)
-    (sprintf "ocamlopt -shared %s -o %s %s" includes (Filename.quote cmxs)
+  let built = Filename.concat dir (unit ^ ".cmxs") in
+  command ~error:"can't compile the script"
+    (sprintf "ocamlopt -shared %s -o %s %s" includes (Filename.quote built)
        (Filename.quote ml));
+  let cmxs = Filename.concat cache (unit ^ ".cmxs") in
+  Stdlib.Sys.rename built cmxs;
   cmxs
+
+(* a cached script, which the libraries of a new bap don't fit, is
+   compiled anew *)
+let rec load ~recompile file cmxs =
+  match Dynlink.loadfile cmxs with
+  | () -> Stdlib.exit 0
+  | exception Dynlink.Error (Library's_module_initializers_failed exn) ->
+      fail "%s failed: %s" file (Exn.to_string exn)
+  | exception Dynlink.Error err -> (
+      match recompile with
+      | Some compile ->
+          Stdlib.Sys.remove cmxs;
+          load ~recompile:None file (compile ())
+      | None -> fail "%s" (Dynlink.error_message err))
 
 let run file args =
   let source =
     try In_channel.read_all file with Sys_error msg -> fail "%s" msg
   in
   let required, source = requires source in
-  let dir = Filename_unix.temp_dir "bap-script" "" in
-  (* the files of the script, which are loaded, are removed at the exit *)
-  at_exit (fun () ->
-      Stdlib.Sys.readdir dir
-      |> Array.iter ~f:(fun f -> Stdlib.Sys.remove (Filename.concat dir f));
-      Stdlib.Sys.rmdir dir);
-  let cmxs =
-    compile ~dir ~libs:("bap-frontend.script" :: required) file source
+  let source = sprintf "# 1 %S\n%s" file source in
+  let libs = "bap-frontend.script" :: required in
+  let cache = cache_dir () in
+  let unit = unit_name ~libs source in
+  let compile () = compile ~cache ~unit ~libs source in
+  let cached = Filename.concat cache (unit ^ ".cmxs") in
+  let cmxs, recompile =
+    if Stdlib.Sys.file_exists cached then (cached, Some compile)
+    else (compile (), None)
   in
   Bap_script.set_args args;
   (* the libraries are loaded, as the plugins are, so that the plugins,
@@ -79,9 +131,4 @@ let run file args =
   List.iter required ~f:(fun lib ->
       try Dune_site_plugins.V1.load lib
       with exn -> fail "can't load %s: %s" lib (Exn.to_string exn));
-  let loaded = Result.try_with (fun () -> Dynlink.loadfile cmxs) in
-  match Result.ok_exn loaded with
-  | () -> Stdlib.exit 0
-  | exception Dynlink.Error (Library's_module_initializers_failed exn) ->
-      fail "%s failed: %s" file (Exn.to_string exn)
-  | exception Dynlink.Error err -> fail "%s" (Dynlink.error_message err)
+  load ~recompile file cmxs

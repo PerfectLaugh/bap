@@ -18,6 +18,7 @@
   bap-knowledge
   bap-main
   core
+  core_unix
   core_unix.filename_unix
   dune-site.plugins
   dynlink
