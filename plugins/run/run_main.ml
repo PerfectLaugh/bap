@@ -85,6 +85,13 @@ module Param = struct
         "Runs the specified Primus systems. If several systems are specified \
          then runs all entry points for each specified system."
 
+  let components =
+    param_all (list string) "components" ~default:[]
+      ~doc:
+        "Adds the specified Primus components to each of the systems, e.g., \
+         bap:debugger, so that a system runs with them, without a new system \
+         that depends on it."
+
   let until_visited =
     flag "until-visited-all"
       ~doc:
@@ -311,6 +318,13 @@ let main { Config.get = ( ! ) } proj =
         match Primus.System.Repository.find name with
         | None -> invalid_argf "Unknown system: %s" sys ()
         | Some sys -> sys)
+    |> List.map ~f:(fun sys ->
+        List.concat !components
+        |> List.fold ~init:sys ~f:(fun sys comp ->
+            let name = Knowledge.Name.read comp in
+            Primus.System.add_component sys
+              ~package:(Knowledge.Name.package name)
+              (Knowledge.Name.unqualified name)))
   in
   List.iter systems ~f:(fun sys ->
       enqueue_jobs !with_repetitions !envp !argv sys inputs);
