@@ -556,8 +556,19 @@ module Loader (Machine : Primus.Machine.S) = struct
     with
     | Error _ -> Machine.return []
     | Ok refs ->
+        (* some loaders refer to the code, e.g., to the PLT entries, which
+           are not the slots *)
+        let width = Theory.Target.code_addr_size (Project.target proj) in
+        let is_code addr =
+          Memmap.lookup (Project.memory proj) (Word.of_int64 ~width addr)
+          |> Seq.exists ~f:(fun (_, tag) ->
+              match Bap.Std.Value.get Image.segment tag with
+              | Some seg -> Image.Segment.is_executable seg
+              | None -> false)
+        in
         Machine.return @@ Seq.to_list
-        @@ Seq.filter refs ~f:(fun (_, name) -> Set.mem functions name)
+        @@ Seq.filter refs ~f:(fun (addr, name) ->
+            Set.mem functions name && not (is_code addr))
 
   (* the subroutines, whose code the other components replaced, stop
      Unicorn *)

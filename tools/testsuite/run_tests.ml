@@ -62,7 +62,7 @@ let run data =
                 (name ^ " outputs everything")
                 out
                 (String.concat ".*" expected)))
-        [ "bap:stubbed-executor"; "bap:legacy-main" ])
+        [ "bap:stubbed-executor"; "bap:legacy-main"; "bap:unicorn-executor" ])
     [
       "arm-linux-gnueabi-echo";
       "x86-linux-gnu-echo";
@@ -73,6 +73,23 @@ let run data =
       "mips64-linux-gnueabi-echo";
       "powerpc32-linux-gnu-echo";
     ]
+
+(* runs a loop of a million iterations, which takes hours in the
+   interpreter, so the code must run in Unicorn *)
+let unicorn data =
+  [
+    case "run/unicorn/x86_64-linux-gnu-crc-loop" (fun env ->
+        let out =
+          bap ~timeout:300. env
+            [
+              path data "bin/x86_64-linux-gnu-crc-loop";
+              "--passes=run";
+              "--no-objdump";
+              "--run-systems=bap:unicorn-executor";
+            ]
+        in
+        contains env "prints the CRC" out "1635920155");
+  ]
 
 let contains_any subs name =
   List.exists
@@ -167,4 +184,4 @@ let symexec data =
           | Timeout -> check env (file ^ " run out of time.") false
           | _ -> check env (file ^ " withhold the attack.") false))
 
-let tests = [ sse; x86_floats; run; taint; symexec ]
+let tests = [ sse; x86_floats; run; unicorn; taint; symexec ]
