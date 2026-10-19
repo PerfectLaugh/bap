@@ -708,6 +708,10 @@ let symexec data =
                   "--run-systems=bap:symbolic-executor";
                   "--primus-lisp-load=symbolic-stdio,posix";
                   "--primus-symbolic-executor-cutoff-level=16";
+                  (* the solver has 16 ms by default, which the
+                     cases, that run in parallel, may exceed, and then
+                     bap exits without finding the input *)
+                  "--primus-symbolic-executor-timeout=1000";
                   "--run-in-isolation";
                 ])
           in
