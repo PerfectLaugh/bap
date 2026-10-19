@@ -79,6 +79,16 @@ let () =
            Primus.System.depends_on ~package "unicorn-binary-executor";
            Primus.System.depends_on ~package "base-lisp-machine";
          ];
+  (* bap:terminating-stubbed-executor with Unicorn *)
+  Primus.System.Repository.add
+  @@ Primus.System.define ~package "terminating-unicorn-executor"
+       ~desc:
+         "Executes a binary in Unicorn together with the Lisp Machine, and \
+          limits the machines with bap:limit, see --primus-limit-max-length \
+          and --primus-limit-max-visited, which count only the code that \
+          Primus runs, e.g., the Lisp stubs, not the code in Unicorn."
+       ~depends_on:[ Primus.System.depends_on ~package "unicorn-executor" ]
+       ~components:[ component "limit" ];
   match
     ( Extension.Configuration.get ctxt checkpoint,
       Extension.Configuration.get ctxt checkpoint_at )

@@ -200,6 +200,28 @@ let unresolved data =
         [ ("jumps to the zero slot", "Segmentation fault at 0\\b") ] );
     ]
 
+(* bap:terminating-unicorn-executor limits the code that Primus runs,
+   e.g., the Lisp stubs, which a small limit stops before they print *)
+let limit data =
+  List.map
+    (fun (n, prints) ->
+      case (Printf.sprintf "run/unicorn/limit/%d" n) (fun env ->
+          let out =
+            bap ~timeout:60. env
+              [
+                path data "bin/x86_64-linux-gnu-echo";
+                "--run-argv=hello,cruel,world";
+                "--passes=run";
+                "--no-objdump";
+                "--run-systems=bap:terminating-unicorn-executor";
+                Printf.sprintf "--primus-limit-max-length=%d" n;
+              ]
+          in
+          check env "terminates" (out.status = Exited 0);
+          if prints then contains env "prints everything" out "course"
+          else lacks env "stops before it prints" out "hello"))
+    [ (100, false); (1_000_000, true) ]
+
 (* the CRC programs save the checkpoint at an instruction of the loop
    that prints the digits, from which another run continues, and the
    run that continues from the checkpoint saves it, when it reaches the
@@ -428,6 +450,7 @@ let tests =
     timeout;
     checkpoint;
     unresolved;
+    limit;
     mprotect;
     mmap;
     pages;
