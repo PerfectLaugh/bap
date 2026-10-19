@@ -91,6 +91,28 @@ let recipe : (Theory.Target.t * int64 list * (int64 * string) list) option ref =
 
 (* the code that runs the subroutines in Unicorn, see [Loader] *)
 let own_code : Primus.Linker.code Addr.Table.t = Addr.Table.create ()
+
+(* the subroutines in the Thumb encoding, which Unicorn runs from their
+   addresses with the lower bit set *)
+let thumb : Addr.Hash_set.t = Addr.Hash_set.create ()
+
+(* the names of the Thumb instructions of LLVM start with t, e.g., tMOVi8
+   or t2STRDi8, unlike the names of the ARM instructions *)
+let is_thumb sub =
+  match Term.first blk_t sub with
+  | None -> false
+  | Some blk -> (
+      let insn =
+        match Term.first def_t blk with
+        | Some def -> Term.get_attr def Disasm.insn
+        | None ->
+            Option.bind (Term.first jmp_t blk) ~f:(fun jmp ->
+                Term.get_attr jmp Disasm.insn)
+      in
+      match insn with
+      | Some insn -> String.is_prefix (Insn.name insn) ~prefix:"t"
+      | None -> false)
+
 let int64_of_word w = Bitvec.to_int64 (Word.to_bitvec w)
 
 let var_of_reg v =
@@ -528,6 +550,17 @@ module Make (Machine : Primus.Machine.S) = struct
       ignore (Target.Regs.write e.regs e.sp (word e frame.sp));
     Machine.return frame.ret
 
+  (* the address, from which Unicorn continues, with the lower bit set in
+     the Thumb state of ARM *)
+  let current_pc e =
+    let pc = Uc.reg_read e.uc e.pc in
+    match e.arch with
+    | Arm ->
+        let cpsr = Option.value_exn (Uc.reg Arm "CPSR") in
+        if Int64.(Uc.reg_read e.uc cpsr land 0x20L <> 0L) then Int64.(pc lor 1L)
+        else pc
+    | _ -> pc
+
   let rec loop e pc =
     check_pages e >>= fun () ->
     ensure_page e pc >>= fun () ->
@@ -538,7 +571,7 @@ module Make (Machine : Primus.Machine.S) = struct
         None
       with Uc.Error (_, msg) -> Some msg
     in
-    let pc = Uc.reg_read e.uc e.pc in
+    let pc = current_pc e in
     match (e.reason, error) with
     | Some Returned, _ | None, None -> pull e
     | Some (Foreign addr), _ -> call_foreign e addr >>= loop e
@@ -549,6 +582,12 @@ module Make (Machine : Primus.Machine.S) = struct
     | Some Invalid, _ ->
         pull e >>= fun () -> fail "an invalid instruction at %Lx" pc
     | None, Some msg -> pull e >>= fun () -> fail "%s at %Lx" msg pc
+
+  let start e addr =
+    let pc = int64_of_word addr in
+    match e.arch with
+    | Arm when Hash_set.mem thumb addr -> Int64.(pc lor 1L)
+    | _ -> pc
 
   let run addr =
     let* e = engine () in
@@ -574,7 +613,7 @@ module Make (Machine : Primus.Machine.S) = struct
       Uc.delete e.uc hook
     in
     Machine.catch
-      (loop e (int64_of_word addr) >>| finish)
+      (loop e (start e addr) >>| finish)
       (fun exn ->
         finish ();
         Machine.raise exn)
@@ -633,6 +672,7 @@ module Loader (Machine : Primus.Machine.S) = struct
           end in
           let code : Primus.Linker.code = (module Code) in
           Hashtbl.set own_code ~key:addr ~data:code;
+          if is_thumb sub then Hash_set.add thumb addr;
           Linker.link ~addr ~name:(Sub.name sub) ~tid:(Term.tid sub) code
 
   let link_program =
@@ -696,6 +736,7 @@ module Loader (Machine : Primus.Machine.S) = struct
 
   let init () =
     Hashtbl.clear own_code;
+    Hash_set.clear thumb;
     let module Exec = Make (Machine) in
     Machine.sequence
       [

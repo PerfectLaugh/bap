@@ -74,22 +74,33 @@ let run data =
       "powerpc32-linux-gnu-echo";
     ]
 
-(* runs a loop of a million iterations, which takes hours in the
-   interpreter, so the code must run in Unicorn *)
+(* computes the CRC of the bytes and checks the printed value *)
+let crc ?(timeout = 300.) data name bin system expected =
+  case name (fun env ->
+      let out =
+        bap ~timeout env
+          [
+            path data ("bin/" ^ bin);
+            "--passes=run";
+            "--no-objdump";
+            "--run-systems=" ^ system;
+          ]
+      in
+      contains env "prints the CRC" out expected)
+
+(* the loops of a million iterations take hours in the interpreter, so
+   the code must run in Unicorn; the Thumb code calls the PLT with blx,
+   which switches to the A32 code at the word-aligned address *)
 let unicorn data =
-  [
-    case "run/unicorn/x86_64-linux-gnu-crc-loop" (fun env ->
-        let out =
-          bap ~timeout:300. env
-            [
-              path data "bin/x86_64-linux-gnu-crc-loop";
-              "--passes=run";
-              "--no-objdump";
-              "--run-systems=bap:unicorn-executor";
-            ]
-        in
-        contains env "prints the CRC" out "1635920155");
-  ]
+  List.map
+    (fun bin ->
+      crc data ("run/unicorn/" ^ bin) bin "bap:unicorn-executor" "1635920155")
+    [ "x86_64-linux-gnu-crc-loop"; "arm-linux-gnueabihf-thumb-crc-loop" ]
+  @ List.map
+      (fun system ->
+        let bin = "arm-linux-gnueabihf-thumb-crc" in
+        crc data (Printf.sprintf "run/%s/%s" system bin) bin system "1489580789")
+      [ "bap:stubbed-executor"; "bap:legacy-main"; "bap:unicorn-executor" ]
 
 let contains_any subs name =
   List.exists
