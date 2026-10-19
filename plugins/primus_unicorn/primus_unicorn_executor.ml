@@ -2,12 +2,14 @@
 
    The machine state stays in Primus, Unicorn borrows it while it runs:
 
-   - the registers are written to Unicorn before it starts and are read
-     back when it stops;
+   - the registers are written to Unicorn before it starts, the changed
+     ones are read back when it stops, and the ones that Primus writes
+     meanwhile are written to Unicorn before it continues;
 
    - the memory pages are copied from Primus when Unicorn faults on
-     them, and the writable pages are copied back, if they were changed,
-     and dropped when Unicorn stops, since Primus may change them;
+     them, the changed bytes of the writable pages are copied back when
+     Unicorn stops, and the bytes that Primus stores meanwhile are
+     copied to Unicorn;
 
    - the code that Primus links instead of the program, e.g., the Lisp
      stubs, stops Unicorn at its address and is called by the Primus
@@ -44,7 +46,11 @@ type reason =
 
 (* a pending return of a run *)
 type frame = { ret : int64; sp : int64 }
-type page = { mutable snapshot : string option }
+
+(* the copied page, with the contents of a writable page that Primus
+   has, and the ranges of the bytes that Primus did not have, which it
+   may allocate later, so the page is dropped, if it does *)
+type page = { snapshot : Bytes.t option; holes : (int * int) list }
 
 type engine = {
   uc : Uc.t;
@@ -65,12 +71,19 @@ type engine = {
   mutable owner : Primus.Machine.id option;
   mutable reason : reason option;
   mutable frames : frame list;
+  synced : word String.Table.t;
+      (** the values of the registers that Primus and Unicorn agree on *)
+  mutable unchecked : (int64 * (int * int) list) list;
+      (** the pages with holes, which Primus may have allocated *)
+  mutable written : var list;
+      (** the registers that Primus has written since Unicorn stopped *)
   mutable broken : bool;
       (** Unicorn 2.1.4 crashes on MIPS after a fetch fault, so the engine is
           created anew *)
 }
 
-let engine : engine option ref = ref None
+(* the engine of the machines *)
+let active : engine option ref = ref None
 
 (* the arguments of [create] *)
 let recipe : (Theory.Target.t * int64 list * (int64 * string) list) option ref =
@@ -153,6 +166,9 @@ let create target ~foreign ~externals =
       owner = None;
       reason = None;
       frames = [];
+      synced = String.Table.create ();
+      written = [];
+      unchecked = [];
       broken = false;
       trampolines = Int64.Table.create ();
       slots = Int64.Table.create ();
@@ -231,12 +247,12 @@ module Make (Machine : Primus.Machine.S) = struct
   let word e x = Word.of_int64 ~width:(e.bytes * 8) x
 
   let engine () =
-    match (!engine, !recipe) with
+    match (!active, !recipe) with
     | Some e, Some (target, foreign, externals)
       when e.broken && List.is_empty e.frames ->
         Uc.close e.uc;
         let e = create target ~foreign ~externals in
-        engine := Some e;
+        active := Some e;
         Machine.return e
     | Some e, _ -> Machine.return e
     | None, _ -> fail "the engine is not initialized"
@@ -257,19 +273,26 @@ module Make (Machine : Primus.Machine.S) = struct
     let* mapped = Memory.is_mapped addr in
     if mapped then
       let+ x = Memory.load addr in
-      Char.of_int_exn (Word.to_int_exn x)
-    else Machine.return '\000'
+      Some (Char.of_int_exn (Word.to_int_exn x))
+    else Machine.return None
 
   let map_page e page =
     let base = word e page in
     let* writable = Memory.is_writable base in
-    let bytes = Bytes.create (Int64.to_int_exn page_size) in
-    let* () =
-      Machine.List.iter
+    let bytes = Bytes.make (Int64.to_int_exn page_size) '\000' in
+    let* holes =
+      Machine.List.fold
         (List.init (Bytes.length bytes) ~f:Fn.id)
-        ~f:(fun i ->
-          let+ c = load_byte Word.(base ++ i) in
-          Bytes.set bytes i c)
+        ~init:[]
+        ~f:(fun holes i ->
+          load_byte Word.(base ++ i) >>| function
+          | Some c ->
+              Bytes.set bytes i c;
+              holes
+          | None -> (
+              match holes with
+              | (first, last) :: holes when last + 1 = i -> (first, i) :: holes
+              | holes -> (i, i) :: holes))
     in
     List.iter (Hashtbl.find_multi e.slots page) ~f:(fun (off, addr) ->
         if off + e.bytes <= Bytes.length bytes then
@@ -285,7 +308,11 @@ module Make (Machine : Primus.Machine.S) = struct
     Uc.mem_map e.uc page page_size perm;
     Uc.mem_write e.uc page data;
     Hashtbl.set e.pages ~key:page
-      ~data:{ snapshot = (if writable then Some data else None) };
+      ~data:
+        {
+          snapshot = (if writable then Some (Bytes.of_string data) else None);
+          holes;
+        };
     Machine.return ()
 
   let ensure_page e addr =
@@ -318,53 +345,127 @@ module Make (Machine : Primus.Machine.S) = struct
             Machine.List.iter pages ~f:(ensure_page e))
     | _ -> Machine.return ()
 
+  (* copies the registers that changed in Unicorn to Primus *)
+  let pull_regs e =
+    Machine.List.iter e.basis ~f:(fun v ->
+        match Target.Regs.read e.regs v with
+        | Some x
+          when not
+                 (Option.equal Word.equal
+                    (Hashtbl.find e.synced (Var.name v))
+                    (Some x)) ->
+            Hashtbl.set e.synced ~key:(Var.name v) ~data:x;
+            Value.of_word x >>= Env.set v
+        | _ -> Machine.return ())
+
   (* copies the registers from Primus, the aliases go first, so that
-     the registers of the program win *)
-  let push e =
-    let* vars = Env.all in
-    let vars = Seq.to_list vars |> List.filter ~f:(Target.Regs.mem e.regs) in
+     the registers of the program win, and then the registers, which the
+     aliases changed, go back to Primus *)
+  let push_vars e vars =
+    let vars = List.filter vars ~f:(Target.Regs.mem e.regs) in
     let is_basis v = List.mem e.basis v ~equal:Var.equal in
     let aliases, basis = List.partition_tf vars ~f:(Fn.non is_basis) in
-    Machine.List.iter (aliases @ basis) ~f:(fun v ->
-        let+ x = Env.get v in
-        ignore (Target.Regs.write e.regs v (Primus.Value.to_word x)))
+    let* () =
+      Machine.List.iter (aliases @ basis) ~f:(fun v ->
+          let+ x = Env.get v in
+          ignore (Target.Regs.write e.regs v (Primus.Value.to_word x)))
+    in
+    e.written <- [];
+    pull_regs e
+
+  (* copies all registers from Primus *)
+  let push e =
+    Hashtbl.clear e.synced;
+    let* vars = Env.all in
+    push_vars e (Seq.to_list vars)
+
+  (* copies the registers that Primus has written *)
+  let push_written e = push_vars e (List.rev e.written)
+
+  let written (v, _) =
+    (match !active with
+    | Some e when Target.Regs.mem e.regs v -> e.written <- v :: e.written
+    | _ -> ());
+    Machine.return ()
 
   let store_page e page snapshot =
     let data = Uc.mem_read e.uc page (Int64.to_int_exn page_size) in
-    if String.equal data snapshot then Machine.return ()
+    if String.equal data (Bytes.unsafe_to_string snapshot) then
+      Machine.return ()
     else
       let base = word e page in
-      Machine.List.iter
-        (List.init (String.length data) ~f:Fn.id)
-        ~f:(fun i ->
-          if Char.equal data.[i] snapshot.[i] then Machine.return ()
-          else
-            Memory.store_never_fail
-              Word.(base ++ i)
-              (Word.of_int ~width:8 (Char.to_int data.[i])))
+      let changed =
+        List.filter
+          (List.init (String.length data) ~f:Fn.id)
+          ~f:(fun i -> not (Char.equal data.[i] (Bytes.get snapshot i)))
+      in
+      Machine.List.iter changed ~f:(fun i ->
+          Bytes.set snapshot i data.[i];
+          Memory.store_never_fail
+            Word.(base ++ i)
+            (Word.of_int ~width:8 (Char.to_int data.[i])))
 
   (* copies the registers and the changed memory to Primus and drops
-     the writable pages *)
+     the writable pages, that Primus may extend, see [page] *)
   let pull e =
-    let* () =
-      Machine.List.iter e.basis ~f:(fun v ->
-          match Target.Regs.read e.regs v with
-          | None -> Machine.return ()
-          | Some x -> Value.of_word x >>= Env.set v)
-    in
+    let* () = pull_regs e in
     let writable =
       Hashtbl.fold e.pages ~init:[] ~f:(fun ~key ~data acc ->
           match data.snapshot with
-          | Some snapshot -> (key, snapshot) :: acc
+          | Some snapshot -> (key, snapshot, data.holes) :: acc
           | None -> acc)
     in
-    let+ () =
-      Machine.List.iter writable ~f:(fun (page, snapshot) ->
+    let* () =
+      Machine.List.iter writable ~f:(fun (page, snapshot, _) ->
           store_page e page snapshot)
     in
-    List.iter writable ~f:(fun (page, _) ->
-        Uc.mem_unmap e.uc page page_size;
-        Hashtbl.remove e.pages page)
+    (* a page, which Primus may change, is checked before Unicorn runs *)
+    e.unchecked <-
+      List.filter_map writable ~f:(fun (page, _, holes) ->
+          if List.is_empty holes then None else Some (page, holes))
+      @ e.unchecked;
+    Machine.return ()
+
+  (* drops the pages, in which Primus has allocated memory, see [page] *)
+  let check_pages e =
+    let pages = e.unchecked in
+    e.unchecked <- [];
+    Machine.List.iter pages ~f:(fun (page, holes) ->
+        let* allocated =
+          Machine.List.exists holes ~f:(fun (first, last) ->
+              let* first =
+                Memory.is_mapped (word e Int64.(page + of_int first))
+              in
+              let+ last =
+                Memory.is_mapped (word e Int64.(page + of_int last))
+              in
+              first || last)
+        in
+        if allocated && Hashtbl.mem e.pages page then (
+          Uc.mem_unmap e.uc page page_size;
+          Hashtbl.remove e.pages page);
+        Machine.return ())
+
+  (* the bytes that Primus stores go to the copied pages *)
+  let stored (addr, x) =
+    match !active with
+    | None -> Machine.return ()
+    | Some e -> (
+        let+ id = Machine.current () in
+        let owned =
+          match e.owner with
+          | Some owner -> Monads.Std.Monad.State.Multi.Id.equal owner id
+          | None -> false
+        in
+        let addr = int64_of_word (Primus.Value.to_word addr) in
+        match Hashtbl.find e.pages (page_of addr) with
+        | Some { snapshot = Some snapshot; _ } when owned ->
+            let c =
+              Char.of_int_exn (Word.to_int_exn (Primus.Value.to_word x))
+            in
+            Bytes.set snapshot Int64.(to_int_exn (addr - page_of addr)) c;
+            Uc.mem_write e.uc addr (String.of_char c)
+        | _ -> ())
 
   let load_word e addr =
     let+ bytes =
@@ -421,13 +522,14 @@ module Make (Machine : Primus.Machine.S) = struct
       | None -> `addr (word e addr)
     in
     let* () = Linker.exec name in
-    let* () = push e in
+    let* () = push_written e in
     (* the return address is popped on x86, if the stub did not *)
     if Option.is_none e.link then
       ignore (Target.Regs.write e.regs e.sp (word e frame.sp));
     Machine.return frame.ret
 
   let rec loop e pc =
+    check_pages e >>= fun () ->
     ensure_page e pc >>= fun () ->
     e.reason <- None;
     let error =
@@ -582,17 +684,24 @@ module Loader (Machine : Primus.Machine.S) = struct
               None
           | _ -> Some (int64_of_word addr))
     in
-    (match !engine with Some e -> Uc.close e.uc | None -> ());
-    engine := None;
+    (match !active with Some e -> Uc.close e.uc | None -> ());
+    active := None;
     let* externals = externals () in
     recipe := Some (target, foreign, externals);
     match create target ~foreign ~externals with
     | exception Unsupported msg -> Machine.raise (Unicorn_failure msg)
     | e ->
-        engine := Some e;
+        active := Some e;
         Machine.return ()
 
   let init () =
     Hashtbl.clear own_code;
-    Machine.sequence [ link_program; Primus.System.init >>> create_engine ]
+    let module Exec = Make (Machine) in
+    Machine.sequence
+      [
+        link_program;
+        Primus.System.init >>> create_engine;
+        Primus.Interpreter.stored >>> Exec.stored;
+        Primus.Interpreter.written >>> Exec.written;
+      ]
 end
