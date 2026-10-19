@@ -26,7 +26,14 @@ type env = {
 }
 
 let dir env = env.dir
-let file env name = Filename.concat env.dir name
+(* the names are relative to the directory of the case, with the native
+   separators, as bap prints them *)
+let file env name =
+  let name =
+    if Sys.win32 then String.map (function '/' -> '\\' | c -> c) name
+    else name
+  in
+  Filename.concat env.dir name
 
 let write env name data =
   let name = file env name in
@@ -34,6 +41,14 @@ let write env name data =
   name
 
 let read name = In_channel.with_open_bin name In_channel.input_all
+
+(* the output of a command, whose lines end with \r\n on Windows, as the
+   programs print in the text mode, and with \n in the patterns *)
+let read_output name =
+  let text = read name in
+  if Sys.win32 then
+    Re.replace_string (Re.compile (Re.str "\r\n")) ~by:"\n" text
+  else text
 let null = if Sys.win32 then "NUL" else "/dev/null"
 
 (* the variables that make the commands use the directories of the case *)
@@ -90,7 +105,9 @@ let run_command ?(timeout = 600.) ?until ?(env = []) case prog args =
     match waitpid [ Unix.WNOHANG ] pid with
     | 0, _ ->
         let matched =
-          match until with Some re -> Re.execp re (read out) | None -> false
+          match until with
+          | Some re -> Re.execp re (read_output out)
+          | None -> false
         in
         if matched then (
           kill pid;
@@ -106,7 +123,7 @@ let run_command ?(timeout = 600.) ?until ?(env = []) case prog args =
   in
   let status = wait 0.001 in
   case.calls <- { command = prog :: args; out; result = status } :: case.calls;
-  { text = read out; status }
+  { text = read_output out; status }
 
 let bap ?timeout ?until ?env case args =
   run_command ?timeout ?until ?env case case.tools.bap args
