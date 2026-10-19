@@ -29,7 +29,41 @@
   findlib.dynload
   regular
   threads
-  unix))
+  unix)
+ (link_deps
+  (glob_files longpaths.o))
+ (link_flags
+  (:include longpaths.flags)))
+
+; On Windows, bap.exe and the testsuite are linked with longpaths.manifest,
+; which tells that they are aware of the long paths, so that their limit of
+; 260 characters is lifted, when they are enabled in Windows, e.g., for the
+; specifications of Ghidra, which are extracted into the cache, see
+; plugins/ghidra. The flags link the manifest, and are empty elsewhere.
+
+(rule
+ (enabled_if
+  (= %{os_type} Win32))
+ (targets longpaths.o)
+ (deps longpaths.rc longpaths.manifest)
+ (action
+  (run x86_64-w64-mingw32-windres longpaths.rc -O coff -o %{targets})))
+
+(rule
+ (enabled_if
+  (= %{os_type} Win32))
+ (action
+  (with-stdout-to
+   longpaths.flags
+   (echo "(\"src/longpaths.o\")"))))
+
+(rule
+ (enabled_if
+  (<> %{os_type} Win32))
+ (action
+  (with-stdout-to
+   longpaths.flags
+   (echo "()"))))
 
 (executable
  (name bap_mc)

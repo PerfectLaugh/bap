@@ -14,9 +14,16 @@
 ;
 ; for the OUnit options, e.g., -list-test and -only-test.
 
+; the cases make and remove the paths of bap, which can be longer than
+; Windows allows, unless the program is aware of the long paths, see src/dune
+
 (executable
  (name run)
- (libraries ounit2 ounit2.threads re spawn threads.posix unix))
+ (libraries ounit2 ounit2.threads re spawn threads.posix unix)
+ (link_deps
+  (glob_files %{project_root}/src/longpaths.o))
+ (link_flags
+  (:include %{project_root}/src/longpaths.flags)))
 
 ; the cases test the plugins that are built in this tree, and run every
 ; time, since they depend on the testsuite
