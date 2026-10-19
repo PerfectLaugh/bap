@@ -19,6 +19,10 @@ val create :
   t
 
 val static : ?width:int -> int -> t
+
+val fill : t -> Bitvec.t option
+(** [fill gen] the value of [gen], if it is {!static} *)
+
 val width : t -> int
 
 val unfold :

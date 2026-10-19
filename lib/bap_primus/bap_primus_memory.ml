@@ -7,10 +7,17 @@ module Generator = Bap_primus_generator
 open Bap_primus_sexp
 
 type exn += Pagefault of addr
+type exn += Unknown_segment of addr * addr
 
 let () =
   Exn.add_printer (function
     | Pagefault here -> Some (asprintf "Page fault at %a" Addr.pp_hex here)
+    | Unknown_segment (lower, upper) ->
+        Some
+          (asprintf
+             "The snapshot has the segment [%a,%a] of another program, which \
+              is not mapped"
+             Addr.pp_hex lower Addr.pp_hex upper)
     | _ -> None)
 
 type dynamic = { lower : addr; upper : addr; value : Generator.t }
@@ -18,7 +25,7 @@ type region = Dynamic of dynamic | Static of mem
 type perms = { readonly : bool; executable : bool }
 
 type protection = { readable : bool; writable : bool; executable : bool }
-[@@deriving equal]
+[@@deriving bin_io, equal]
 
 type layer = { mem : region; perms : perms }
 
@@ -290,6 +297,98 @@ let add_layer layer s =
   let lower, upper = bounds layer.mem in
   add_layer layer (unprotect lower upper s)
 
+(* The state of the memory, in which the static layers, which are of
+   the program, are kept by their bounds, the dynamic layers by their
+   bounds and the value of their generator, if it is static, and the
+   stored values by their words. *)
+module Snapshot = struct
+  (* the segments of the program and the allocated regions *)
+  type kind = Program | Allocated of { width : int; fill : Word.t option }
+  [@@deriving bin_io]
+
+  type area = {
+    lower : Addr.t;
+    upper : Addr.t;
+    readonly : bool;
+    executable : bool;
+    kind : kind;
+  }
+  [@@deriving bin_io]
+
+  type mem = {
+    layers : area list;  (** the oldest first *)
+    values : (Addr.t * Word.t) list;
+    protections : (Addr.t * Addr.t * protection) list;
+  }
+  [@@deriving bin_io]
+
+  type t = { curr : Descriptor.t; mems : (Descriptor.t * mem) list }
+  [@@deriving bin_io]
+
+  let of_layer ({ mem; perms = { readonly; executable } } : layer) : area =
+    let lower, upper = bounds mem in
+    let kind =
+      match mem with
+      | Static _ -> Program
+      | Dynamic { value } ->
+          let width = Generator.width value in
+          Allocated
+            {
+              width;
+              fill =
+                Option.map (Generator.fill value) ~f:(fun x ->
+                    Word.create x width);
+            }
+    in
+    { lower; upper; readonly; executable; kind }
+
+  let of_state ({ values; layers; protections; _ } : state) : mem =
+    {
+      layers = List.rev_map layers ~f:of_layer;
+      values =
+        Map.to_alist values
+        |> List.map ~f:(fun (addr, x) -> (addr, Bap_primus_value.to_word x));
+      protections;
+    }
+
+  (* the layer, which [l] stands for, in the [layers] of the machine
+     that restores the snapshot, which mapped the program, as the
+     machine that made it *)
+  let find_layer layers (l : area) =
+    List.find layers ~f:(fun { mem; perms } ->
+        let lower, upper = bounds mem in
+        Addr.equal lower l.lower && Addr.equal upper l.upper
+        && Bool.equal perms.readonly l.readonly
+        && Bool.equal perms.executable l.executable
+        &&
+        match (mem, l.kind) with
+        | Static _, Program -> true
+        | Dynamic { value }, Allocated { width; fill } ->
+            Generator.width value = width
+            && Option.equal Word.equal fill
+                 (Option.map (Generator.fill value) ~f:(fun x ->
+                      Word.create x width))
+        | _ -> false)
+
+  (* the dynamic layer, which is not found, is mapped anew, with the
+     default generator, unless its generator was static *)
+  let to_layer layers (l : area) =
+    match (find_layer layers l, l.kind) with
+    | Some layer, _ -> Ok layer
+    | None, Program -> Error (Unknown_segment (l.lower, l.upper))
+    | None, Allocated { width; fill } ->
+        let value =
+          match fill with
+          | Some x -> Generator.static ~width (Bitvec.to_int (Word.to_bitvec x))
+          | None -> Generator.Random.Seeded.lcg ~width ()
+        in
+        Ok
+          {
+            mem = Dynamic { lower = l.lower; upper = l.upper; value };
+            perms = { readonly = l.readonly; executable = l.executable };
+          }
+end
+
 module Make (Machine : Machine) = struct
   open Machine.Syntax
   module Generate = Generator.Make (Machine)
@@ -502,4 +601,40 @@ module Make (Machine : Machine) = struct
         { s with protections = (lower, upper, protection) :: s.protections })
     >>= fun () ->
     Machine.Observation.make on_protected (lower, upper, protection)
+
+  let snapshot =
+    Machine.Local.get state >>| fun { curr; mems } ->
+    {
+      Snapshot.curr;
+      mems =
+        Map.to_alist mems
+        |> List.map ~f:(fun (desc, s) -> (desc, Snapshot.of_state s));
+    }
+
+  let restore_state current (m : Snapshot.mem) =
+    match
+      Result.all (List.map m.layers ~f:(Snapshot.to_layer current.layers))
+    with
+    | Error exn -> Machine.raise exn
+    | Ok layers ->
+        Machine.List.map m.values ~f:(fun (addr, x) ->
+            Value.of_word x >>| fun x -> (addr, x))
+        >>| fun values ->
+        let s = List.fold layers ~init:empty_state ~f:(Fn.flip add_layer) in
+        {
+          s with
+          values = Addr.Map.of_alist_exn values;
+          protections = m.protections;
+        }
+
+  (* the layers of the program are those of the machine, see
+     [Snapshot.find_layer] *)
+  let restore (snapshot : Snapshot.t) =
+    Machine.Local.get state >>= fun { mems = current } ->
+    Machine.List.map snapshot.mems ~f:(fun (desc, m) ->
+        let s = Option.value (Map.find current desc) ~default:empty_state in
+        restore_state s m >>| fun s -> (desc, s))
+    >>= fun mems ->
+    Machine.Local.put state
+      { curr = snapshot.curr; mems = Descriptor.Map.of_alist_exn mems }
 end

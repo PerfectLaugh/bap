@@ -2293,6 +2293,23 @@ module Std : sig
 
           @since 2.6.0 *)
 
+      type exn +=
+        | Unknown_segment of addr * addr
+              (** [Unknown_segment (lower, upper)] occurs when a snapshot, which
+                  is restored, has a segment of the program from [lower] to
+                  [upper], which the machine has not mapped, see
+                  {!Make.restore}.
+
+                  @since 2.6.0 *)
+
+      (** The state of all memories of a machine, which another machine of the
+          same program may restore, e.g., after it is read from a file.
+
+          @since 2.6.0 *)
+      module Snapshot : sig
+        type t [@@deriving bin_io]
+      end
+
       (** [Make(Machine)] lifts the memory interface into the [Machine] monad.
       *)
       module Make (Machine : Machine.S) : sig
@@ -2436,6 +2453,22 @@ module Std : sig
             and a store to a byte that is not writable raise [Pagefault]. The
             protection holds until the next one, or until a new segment is
             mapped over the addresses. Posts the {!protected} observation.
+
+            @since 2.6.0 *)
+
+        val snapshot : Snapshot.t Machine.t
+        (** [snapshot] the state of the memories of the machine: their segments,
+            the stored values, and the protections.
+
+            @since 2.6.0 *)
+
+        val restore : Snapshot.t -> unit Machine.t
+        (** [restore snapshot] replaces the state of the memories of the machine
+            with [snapshot]. The segments of the program are not stored in the
+            snapshot, so they must be mapped in the machine, otherwise
+            [Unknown_segment] is raised. A dynamic region, which the machine has
+            not mapped, is mapped anew, its values that were never stored are
+            generated anew, unless it was filled with a constant.
 
             @since 2.6.0 *)
       end

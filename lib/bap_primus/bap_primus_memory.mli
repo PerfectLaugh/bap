@@ -11,6 +11,7 @@ type protection = { readable : bool; writable : bool; executable : bool }
 val protected : (addr * addr * protection) Bap_primus_observation.t
 
 type exn += Pagefault of addr
+type exn += Unknown_segment of addr * addr
 type memory
 
 module Descriptor : sig
@@ -23,6 +24,10 @@ module Descriptor : sig
   val data_size : memory -> int
 
   include Comparable.S with type t := memory
+end
+
+module Snapshot : sig
+  type t [@@deriving bin_io]
 end
 
 module Make (Machine : Machine) : sig
@@ -63,4 +68,6 @@ module Make (Machine : Machine) : sig
   val is_executable : addr -> bool Machine.t
   val protection : addr -> protection option Machine.t
   val protect : lower:addr -> upper:addr -> protection -> unit Machine.t
+  val snapshot : Snapshot.t Machine.t
+  val restore : Snapshot.t -> unit Machine.t
 end

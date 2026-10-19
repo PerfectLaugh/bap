@@ -18,7 +18,9 @@ let iterators =
   @@ fun _ -> { iterators = Int.Map.empty; salt = 1 }
 
 type constructor = Const of iterator | Seeded of (int -> iterator)
-type t = { size : int; init : constructor; id : int }
+
+(* [fill] is the value of a static generator *)
+type t = { size : int; init : constructor; id : int; fill : Bitvec.t option }
 
 let last_id = ref 0
 let width x = x.size
@@ -40,6 +42,7 @@ let of_iterator (type dom) (type t) ?(width = 8) ?seed ~to_bitvec
   {
     size = width;
     id = !last_id;
+    fill = None;
     init =
       Const
         (Iter
@@ -70,17 +73,22 @@ let unfold (type gen) ?width ?(min = Int.min_value) ?(max = Int.max_value)
 
 let static ?(width = 8) value =
   let value = Bitvec.(int value mod modulus width) in
-  of_iterator ~width ~to_bitvec:Fn.id
-    (module struct
-      type t = Bitvec.t
-      type dom = Bitvec.t
+  let gen =
+    of_iterator ~width ~to_bitvec:Fn.id
+      (module struct
+        type t = Bitvec.t
+        type dom = Bitvec.t
 
-      let min = value
-      let max = value
-      let next _ = value
-      let value _ = value
-    end)
-    value
+        let min = value
+        let max = value
+        let next _ = value
+        let value _ = value
+      end)
+      value
+  in
+  { gen with fill = Some value }
+
+let fill gen = gen.fill
 
 module Random = struct
   module MCG = Bap_primus_random.MCG
@@ -101,7 +109,7 @@ module Random = struct
         | { init = Const iter } -> iter
         | { init = Seeded init } -> init seed
       in
-      { size = width; init = Seeded init; id = !last_id }
+      { size = width; init = Seeded init; id = !last_id; fill = None }
 
     let lcg ?width ?min ?max () = create_lcg ?width ?min ?max 0
     let byte = lcg ()
