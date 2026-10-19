@@ -123,9 +123,9 @@ let inspect_generated (ptr, x) = Sexp.List [ sexp_of_addr ptr; sexp_of_value x ]
 let string_of_protection { readable; writable; executable } =
   String.concat
     [
-      (if readable then "R" else "");
-      (if writable then "W" else "");
-      (if executable then "X" else "");
+      (if readable then "R" else "-");
+      (if writable then "W" else "-");
+      (if executable then "X" else "-");
     ]
 
 let inspect_protected (lower, upper, protection) =

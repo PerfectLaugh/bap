@@ -189,6 +189,33 @@ let mprotect data =
           lacks env "stops" out "\\bX\\b"))
     [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
 
+(* the program maps an anonymous page with mmap, runs the code that it
+   writes there, after it makes it executable, and reads from the page,
+   after it unmaps it, the interpreter can't run the code that it writes *)
+let mmap data =
+  [
+    case "run/mmap/bap:unicorn-executor" (fun env ->
+        let out =
+          bap env
+            [
+              path data "bin/x86_64-linux-gnu-mmap";
+              "--passes=run";
+              "--no-objdump";
+              "--primus-lisp-type-check";
+              "--run-systems=bap:unicorn-executor";
+              "--primus-print-observations=exception";
+            ]
+        in
+        lacks env "well-typed" out "ill-typed";
+        sequence env out
+          [
+            ("runs the code", "\\b42\\b");
+            ("unmaps the page", "\\bU\\b");
+            ("denies the load", "Segmentation fault at 0x7F0000000000");
+          ];
+        lacks env "stops" out "\\bX\\b");
+  ]
+
 let contains_any subs name =
   List.exists
     (fun sub ->
@@ -283,4 +310,15 @@ let symexec data =
           | _ -> check env (file ^ " withhold the attack.") false))
 
 let tests =
-  [ sse; x86_floats; run; unicorn; syscall; timeout; mprotect; taint; symexec ]
+  [
+    sse;
+    x86_floats;
+    run;
+    unicorn;
+    syscall;
+    timeout;
+    mprotect;
+    mmap;
+    taint;
+    symexec;
+  ]
