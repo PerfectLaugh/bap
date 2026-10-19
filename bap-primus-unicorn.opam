@@ -14,9 +14,16 @@ bug-reports: "https://github.com/BinaryAnalysisPlatform/bap/issues"
 depends: [
   "dune" {>= "3.24"}
   "bap-common" {= version}
+  "bap-core-theory" {= version}
   "bap-primus" {= version}
   "bap-std" {= version}
   "core"
+  "ppx_bap" {= version}
+  "bap-arm" {with-test & = version}
+  "bap-mips" {with-test & = version}
+  "bap-powerpc" {with-test & = version}
+  "bap-riscv" {with-test & = version}
+  "bap-x86" {with-test & = version}
   "odoc" {with-doc}
 ]
 dev-repo: "git+https://github.com/BinaryAnalysisPlatform/bap.git"

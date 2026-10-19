@@ -1054,9 +1054,16 @@ so this package is distributed under GPL-2.0, unlike the rest of BAP.")
  (tags (bap bap-primus unicorn))
  (depends
   (bap-common (= :version))
+  (bap-core-theory (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  core))
+  core
+  (ppx_bap (= :version))
+  (bap-arm (and :with-test (= :version)))
+  (bap-mips (and :with-test (= :version)))
+  (bap-powerpc (and :with-test (= :version)))
+  (bap-riscv (and :with-test (= :version)))
+  (bap-x86 (and :with-test (= :version)))))
 
 (package
  (name bap-primus-wandering-scheduler)

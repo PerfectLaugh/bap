@@ -1,4 +1,14 @@
-(test
- (name test_unicorn)
+(tests
+ (names test_unicorn test_regs)
  (package bap-primus-unicorn)
- (libraries bap-primus-unicorn.unicorn))
+ (libraries
+  bap
+  bap-arm
+  bap-core-theory
+  bap-mips
+  bap-powerpc
+  bap-primus-unicorn.plugin
+  bap-primus-unicorn.unicorn
+  bap-riscv
+  bap-x86
+  core))
