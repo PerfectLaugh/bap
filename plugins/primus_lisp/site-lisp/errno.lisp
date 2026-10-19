@@ -8,6 +8,7 @@
 
 (defmethod init ()
   (set errno-location brk)
+  (memory-allocate errno-location (sizeof int) 0)
   (+= brk (sizeof int)))
 
 (defun errno-location ()
