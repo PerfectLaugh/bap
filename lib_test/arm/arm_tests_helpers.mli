@@ -32,3 +32,7 @@ val a32_qemu : Lifter_test.mode
 
 val t32_qemu : Lifter_test.mode
 (** the T32 instructions at [0x20000], as {!a32_qemu}. *)
+
+val t32_at : int -> Lifter_test.mode
+(** [t32_at addr] the T32 instructions at [addr], e.g., at an address that is
+    not word-aligned. *)

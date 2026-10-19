@@ -38,3 +38,6 @@ let a32_qemu =
 let t32_qemu =
   Lifter_test.mode ~typ ~addr:0x20000 ~target:"armv7-a+fp+le"
     ~encoding:"llvm-thumb" ()
+
+let t32_at addr =
+  Lifter_test.mode ~typ ~addr ~target:"armv7-a+fp+le" ~encoding:"llvm-thumb" ()

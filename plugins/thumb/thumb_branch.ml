@@ -38,7 +38,12 @@ module Make (CT : Theory.Core) = struct
   let bli pc dst =
     seq [ data @@ [ lr := link pc 4 ]; (goto @@ W32.((pc +> dst) land mask)) ]
 
-  let blxi pc dst = bli pc dst >>= switch_encoding (pc +> dst)
+  (* the A32 code is word-aligned, so the target is relative to the
+     word-aligned pc, Align(PC, 4) *)
+  let blxi pc dst =
+    let dst = W32.(((pc + int 4) land int32 0xffff_fffcl) + int dst) in
+    seq [ data @@ [ lr := link pc 4 ]; goto dst ] >>= switch_encoding dst
+
   let bxr dst = ctrl @@ CT.jmp (var dst land bitv mask)
 
   let bxi pc off : eff =
