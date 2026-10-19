@@ -262,6 +262,23 @@ let trampolines_base target =
 
 let trampoline_size = 16L
 
+(* the instruction that does nothing, which fills the trampolines, since
+   Unicorn raises an interrupt, before it calls the hooks of the address,
+   if the instruction is invalid, as the zeros are on RISC-V *)
+let nop (arch : Uc.arch) ~big_endian =
+  let word ~big x =
+    String.init 4 ~f:(fun i ->
+        let i = if big then 3 - i else i in
+        Char.of_int_exn ((x lsr (8 * i)) land 0xFF))
+  in
+  match arch with
+  | X86 -> "\x90"
+  (* andeq r0, r0, r0 and sll $0, $0, 0 *)
+  | Arm | Mips -> "\000\000\000\000"
+  | Arm64 -> word ~big:false 0xD503201F
+  | Ppc -> word ~big:big_endian 0x60000000
+  | Riscv -> word ~big:false 0x13
+
 let create target ~foreign ~externals =
   let arch, mode =
     match Target.engine target with
@@ -330,6 +347,12 @@ let create target ~foreign ~externals =
           ((of_int (Hashtbl.length addrs) * trampoline_size) + page_size - 1L))
     in
     Uc.mem_map uc base size Uc.Perm.(read + exec);
+    let nop = nop arch ~big_endian:e.big_endian in
+    Uc.mem_write uc base
+      (String.concat
+         (List.init
+            (Int64.to_int_exn size / String.length nop)
+            ~f:(fun _ -> nop)));
     ignore
     @@ Uc.on_code uc ~first:base
          ~last:Int64.(base + size - 1L)

@@ -162,31 +162,43 @@ let timeout data =
         contains env "prints A" out "A");
   ]
 
-(* without the stubs of posix, strchr is not defined, and the stub of
-   PLT, which jumps back to the trampoline in Unicorn, is interpreted,
-   so the machine stops at the unresolved call, as the interpreter does,
-   instead of calling the stub forever *)
+(* without the stubs of posix, strchr is not defined, and the machine
+   stops at its call, as the interpreter does: the stub of PLT, which
+   jumps back to the trampoline in Unicorn, is interpreted instead of
+   calling itself forever, the trampolines stop Unicorn on RISC-V, where
+   the zeros are invalid, and on MIPS, whose slot of GOT is zero, the
+   jump to zero faults, instead of ending the run *)
 let unresolved data =
-  [
-    case "run/unicorn/unresolved" (fun env ->
-        let out =
-          bap ~timeout:60. env
-            [
-              path data "bin/x86_64-linux-gnu-echo";
-              "--passes=run";
-              "--no-objdump";
-              "--run-systems=bap:unicorn-executor";
-              "--primus-lisp-load=stdio";
-              "--primus-print-observations=call,exception";
-            ]
-        in
-        check env "terminates" (out.status = Exited 0);
-        sequence env out
-          [
-            ("calls strchr", "\\(call \\(strchr");
-            ("doesn't resolve it", "unbound function");
-          ]);
-  ]
+  List.map
+    (fun (bin, checks) ->
+      case ("run/unicorn/unresolved/" ^ bin) (fun env ->
+          let out =
+            bap ~timeout:60. env
+              [
+                path data ("bin/" ^ bin);
+                "--passes=run";
+                "--no-objdump";
+                "--run-systems=bap:unicorn-executor";
+                "--primus-lisp-load=stdio";
+                "--primus-print-observations=call,exception";
+              ]
+          in
+          check env "terminates" (out.status = Exited 0);
+          sequence env out checks))
+    [
+      ( "x86_64-linux-gnu-echo",
+        [
+          ("calls strchr", "\\(call \\(strchr");
+          ("doesn't resolve it", "unbound function");
+        ] );
+      ( "riscv64-linux-gnu-echo",
+        [
+          ("calls strchr", "\\(call \\(strchr");
+          ("doesn't resolve it", "unbound function");
+        ] );
+      ( "mips-linux-gnu-echo",
+        [ ("jumps to the zero slot", "Segmentation fault at 0\\b") ] );
+    ]
 
 (* the CRC programs save the checkpoint at an instruction of the loop
    that prints the digits, from which another run continues, and the
