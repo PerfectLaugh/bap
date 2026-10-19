@@ -72,6 +72,10 @@ type engine = {
   mutable owner : Primus.Machine.id option;
   mutable reason : reason option;
   mutable frames : frame list;
+      (** the pending returns of the machine that runs, see [frames] *)
+  returns : unit Int64.Table.t;
+      (** the addresses of the hooks of the returns, which stay, as the
+          addresses are few *)
   synced : word String.Table.t;
       (** the values of the registers that Primus and Unicorn agree on *)
   mutable unchecked : (int64 * (int * int) list) list;
@@ -90,6 +94,14 @@ let timeout : float option ref = ref None
 let elapsed =
   Primus.Machine.State.declare ~uuid:"ccde44e4-b82f-4627-80ff-8f5ea918e960"
     ~name:"unicorn-elapsed" (fun _ -> 0.)
+
+(* the pending returns of the runs of a machine, the innermost first,
+   which are of the machine, as the machines may switch, while a stub
+   runs, and stay when a machine raises an exception, which it doesn't
+   survive, as the Primus exceptions are not handled *)
+let frames =
+  Primus.Machine.State.declare ~uuid:"d47083aa-ead6-439d-8a0c-6bc2bbcc9d6e"
+    ~name:"unicorn-frames" (fun _ -> [])
 
 (* the engine of the machines *)
 let active : engine option ref = ref None
@@ -252,6 +264,7 @@ let create target ~foreign ~externals =
       owner = None;
       reason = None;
       frames = [];
+      returns = Int64.Table.create ();
       synced = String.Table.create ();
       written = [];
       unchecked = [];
@@ -336,28 +349,25 @@ module Make (Machine : Primus.Machine.S) = struct
   let fail fmt = ksprintf (fun msg -> Machine.raise (Unicorn_failure msg)) fmt
   let word e x = Word.of_int64 ~width:(e.bytes * 8) x
 
-  let engine () =
-    match (!active, !recipe) with
-    | Some e, Some (target, foreign, externals)
-      when e.broken && List.is_empty e.frames ->
-        Uc.close e.uc;
-        let e = create target ~foreign ~externals in
-        active := Some e;
-        Machine.return e
-    | Some e, _ -> Machine.return e
-    | None, _ -> fail "the engine is not initialized"
-
-  (* the pages of the memory of another machine are not valid *)
-  let claim e =
+  let owns e =
     let+ id = Machine.current () in
     match e.owner with
-    | Some owner when Monads.Std.Monad.State.Multi.Id.equal owner id -> false
-    | _ ->
-        Hashtbl.iter_keys e.pages ~f:(fun page ->
-            Uc.mem_unmap e.uc page page_size);
-        Hashtbl.clear e.pages;
-        e.owner <- Some id;
-        true
+    | Some owner -> Monads.Std.Monad.State.Multi.Id.equal owner id
+    | None -> false
+
+  (* the pages and the registers of another machine are not valid *)
+  let claim e =
+    let* owned = owns e in
+    if owned then Machine.return false
+    else
+      let+ id = Machine.current () in
+      Hashtbl.iter_keys e.pages ~f:(fun page ->
+          Uc.mem_unmap e.uc page page_size);
+      Hashtbl.clear e.pages;
+      e.unchecked <- [];
+      e.written <- [];
+      e.owner <- Some id;
+      true
 
   (* the byte and its protection, if it is mapped, a byte that is not
      readable is zero *)
@@ -495,6 +505,12 @@ module Make (Machine : Primus.Machine.S) = struct
   (* copies the registers that Primus has written *)
   let push_written e = push_vars e (List.rev e.written)
 
+  (* the registers that Primus has written go to Unicorn, unless another
+     machine has run in it, as then all registers go there, see [loop] *)
+  let push_owned e =
+    let* owned = owns e in
+    if owned then push_written e else Machine.return ()
+
   let written (v, _) =
     (match !active with
     | Some e when Target.Regs.mem e.regs v -> e.written <- v :: e.written
@@ -602,6 +618,20 @@ module Make (Machine : Primus.Machine.S) = struct
             Uc.mem_write e.uc addr (String.of_char c)
         | _ -> ())
 
+  (* the engine, which is created anew, if it is broken, after its state
+     goes to Primus *)
+  let engine () =
+    match (!active, !recipe) with
+    | Some e, Some (target, foreign, externals) when e.broken ->
+        let* owned = owns e in
+        let* () = if owned then pull e else Machine.return () in
+        Uc.close e.uc;
+        let e = create target ~foreign ~externals in
+        active := Some e;
+        Machine.return e
+    | Some e, _ -> Machine.return e
+    | None, _ -> fail "the engine is not initialized"
+
   let load_word e addr =
     let+ bytes =
       Machine.List.map (List.init e.bytes ~f:Fn.id) ~f:(fun i ->
@@ -684,7 +714,7 @@ module Make (Machine : Primus.Machine.S) = struct
       | None -> `addr (word e addr)
     in
     let* () = Linker.exec name in
-    let* () = push_written e in
+    let* () = push_owned e in
     (* the return address is popped on x86, if the stub did not *)
     if Option.is_none e.link then
       ignore (Target.Regs.write e.regs e.sp (word e frame.sp));
@@ -708,7 +738,7 @@ module Make (Machine : Primus.Machine.S) = struct
           Interpreter.exp exp >>= Interpreter.set var)
     in
     let* () = Linker.exec (`symbol name) in
-    push_written e
+    push_owned e
 
   let terminate e =
     let* () = pull e in
@@ -718,7 +748,36 @@ module Make (Machine : Primus.Machine.S) = struct
       (Option.value_exn !timeout);
     Interpreter.halt >>= never_returns
 
-  let rec loop e pc =
+  (* stops Unicorn at the return address of the innermost run *)
+  let ensure_return e ret =
+    if not (Hashtbl.mem e.returns ret) then (
+      Hashtbl.set e.returns ~key:ret ~data:();
+      ignore
+      @@ Uc.on_code e.uc ~first:ret ~last:ret (fun _ _ ->
+          match e.frames with
+          | top :: _ when Int64.(top.ret = ret) -> (
+              match Target.Regs.read e.regs e.sp with
+              | Some sp when Int64.(int64_of_word sp = top.sp) ->
+                  e.reason <- Some Returned;
+                  Uc.stop e.uc
+              | _ -> ())
+          | _ -> ()))
+
+  (* the engine may be created anew, see [broken], and another machine
+     may have run in it, see [claim] *)
+  let prepare () =
+    let* e = engine () in
+    let* claimed = claim e in
+    let* () =
+      if claimed then map_code e >>= fun () -> push e else Machine.return ()
+    in
+    let+ pending = Machine.Local.get frames in
+    e.frames <- pending;
+    (match pending with top :: _ -> ensure_return e top.ret | [] -> ());
+    e
+
+  let rec loop pc =
+    let* e = prepare () in
     check_pages e >>= fun () ->
     ensure_page e pc >>= fun () ->
     let* used = Machine.Local.get elapsed in
@@ -742,17 +801,17 @@ module Make (Machine : Primus.Machine.S) = struct
         in
         let pc = current_pc e in
         match (e.reason, error) with
-        | None, None when Option.is_some remaining -> loop e pc
+        | None, None when Option.is_some remaining -> loop pc
         | Some Returned, _ | None, None -> pull e
-        | Some (Foreign addr), _ -> call_foreign e addr >>= loop e
+        | Some (Foreign addr), _ -> call_foreign e addr >>= loop
         | Some (Fault (access, addr)), _ -> (
-            fault e access addr >>= function `Continue -> loop e pc)
+            fault e access addr >>= function `Continue -> loop pc)
         | Some (Interrupt n), _ -> (
             let addr =
               match e.arch with Arm -> Int64.(pc land lnot 1L) | _ -> pc
             in
             match intrinsic_before addr with
-            | Some site -> call_intrinsic e site >>= fun () -> loop e pc
+            | Some site -> call_intrinsic e site >>= fun () -> loop pc
             | None ->
                 pull e >>= fun () ->
                 fail "an unhandled interrupt %d at %Lx" n pc)
@@ -772,28 +831,12 @@ module Make (Machine : Primus.Machine.S) = struct
     let* () = if claimed then map_code e else Machine.return () in
     let* () = push e in
     let* frame = frame e in
-    let ret = address e frame in
-    let hook =
-      Uc.on_code e.uc ~first:ret ~last:ret (fun _ _ ->
-          match e.frames with
-          | top :: _ when Int64.(top.ret = ret) -> (
-              match Target.Regs.read e.regs e.sp with
-              | Some sp when Int64.(int64_of_word sp = top.sp) ->
-                  e.reason <- Some Returned;
-                  Uc.stop e.uc
-              | _ -> ())
-          | _ -> ())
+    let* pending = Machine.Local.get frames in
+    let* () =
+      Machine.Local.put frames ({ frame with ret = address e frame } :: pending)
     in
-    e.frames <- { frame with ret } :: e.frames;
-    let finish () =
-      e.frames <- List.tl_exn e.frames;
-      Uc.delete e.uc hook
-    in
-    Machine.catch
-      (loop e (start e addr) >>| finish)
-      (fun exn ->
-        finish ();
-        Machine.raise exn)
+    let* () = loop (start e addr) in
+    Machine.Local.put frames pending
 end
 
 (* links the program, as load-binary does, except that its subroutines
