@@ -615,8 +615,12 @@ let symexec data =
                   "--run-in-isolation";
                 ])
           in
+          (* bap may print access and exit, before its output is
+             checked, so that it is not stopped *)
           match out.status with
           | Stopped -> check env (file ^ " was hacked!") true
+          | Exited _ when matches out "access" ->
+              check env (file ^ " was hacked!") true
           | Timeout -> check env (file ^ " run out of time.") false
           | _ -> check env (file ^ " withhold the attack.") false))
 
