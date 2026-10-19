@@ -51,6 +51,7 @@ type reason =
   | Interrupt of int  (** an interrupt or a system call *)
   | Invalid
   | Checkpoint
+  | Stop of int64  (** a stop of Primus, see [Primus.Interpreter.Stops] *)
 
 (* a pending return of a run *)
 type frame = { ret : int64; sp : int64 }
@@ -92,6 +93,12 @@ type engine = {
   mutable broken : bool;
       (** Unicorn 2.1.4 crashes on MIPS after a fetch fault, so the engine is
           created anew *)
+  hooked : Int64.Hash_set.t;
+      (** the addresses of the checkpoint and of the stops, which have the hook,
+          see [dispatch] *)
+  mutable stops : int;  (** the version of the stops, which are hooked *)
+  mutable stepper : Uc.hook option;
+      (** the hook of every address, while the stepping is on *)
 }
 
 (* the seconds that a machine may run, in Unicorn and in Primus, e.g.,
@@ -126,11 +133,11 @@ let checkpoint : (string * string) option ref = ref None
 let checkpoint_addr : int64 option ref = ref None
 let checkpointed = ref false
 
-(* the checkpoint is not saved at the address, from which the machine
-   continues, as it was saved there, until its instruction runs, which
-   it does, unless it faults, after Unicorn has skipped the checkpoint *)
+(* the machine doesn't stop at the address, from which it continues,
+   e.g., after a stop or a checkpoint, until its instruction runs, which
+   it does, unless it faults, after the hook has skipped the address *)
 let resumed_at : int64 option ref = ref None
-let skipped = ref false
+let skipped_at : int64 option ref = ref None
 
 (* the file of the checkpoint, from which the machines continue *)
 let restore : string option ref = ref None
@@ -286,6 +293,63 @@ let nop (arch : Uc.arch) ~big_endian =
   | Ppc -> word ~big:big_endian 0x60000000
   | Riscv -> word ~big:false 0x13
 
+let halt_at e reason =
+  e.reason <- Some reason;
+  Uc.stop e.uc
+
+let is_stop e addr =
+  let open Primus.Interpreter.Stops in
+  stepping () || mem (Word.of_int64 ~width:(e.bytes * 8) addr)
+
+(* the hook of the address of the checkpoint or of a stop, which skips
+   the address, from which the machine continues, see [resumed_at], and,
+   while stepping, the next hook of the same instruction, which is the
+   hook of every address *)
+let dispatch e addr =
+  let stepping = Primus.Interpreter.Stops.stepping () in
+  (match !skipped_at with
+  | Some at when stepping && Int64.(at <> addr) -> skipped_at := None
+  | _ -> ());
+  match !resumed_at with
+  | Some at when Int64.(at = addr) ->
+      resumed_at := None;
+      skipped_at := Some addr
+  | _ when stepping && Option.equal Int64.equal !skipped_at (Some addr) -> ()
+  | _ ->
+      if
+        Option.equal Int64.equal !checkpoint_addr (Some addr)
+        && not !checkpointed
+      then halt_at e Checkpoint
+      else if is_stop e addr then halt_at e (Stop addr)
+
+let hook_stop e addr =
+  if not (Hash_set.mem e.hooked addr) then begin
+    Hash_set.add e.hooked addr;
+    ignore
+    @@ Uc.on_code e.uc ~first:addr ~last:addr (fun _ _ -> dispatch e addr)
+  end
+
+(* the stops, which changed, are hooked, and the hook of every address
+   is added or deleted, as the stepping is on or off, after which the
+   translated code is dropped, as the hooks apply only to the code that
+   Unicorn translates after them *)
+let sync_stops e =
+  let open Primus.Interpreter in
+  let version = Stops.version () in
+  if e.stops <> version then begin
+    e.stops <- version;
+    List.iter (Stops.to_list ()) ~f:(fun addr ->
+        hook_stop e (int64_of_word addr));
+    (match (Stops.stepping (), e.stepper) with
+    | true, None ->
+        e.stepper <- Some (Uc.on_code e.uc (fun addr _ -> dispatch e addr))
+    | false, Some hook ->
+        Uc.delete e.uc hook;
+        e.stepper <- None
+    | _ -> ());
+    Uc.flush_tb e.uc
+  end
+
 let create target ~foreign ~externals =
   let arch, mode =
     match Target.engine target with
@@ -332,6 +396,9 @@ let create target ~foreign ~externals =
       slots = Int64.Table.create ();
       big_endian =
         Theory.Endianness.(equal eb) (Theory.Target.endianness target);
+      hooked = Int64.Hash_set.create ();
+      stops = -1;
+      stepper = None;
     }
   in
   let base = trampolines_base target in
@@ -374,14 +441,7 @@ let create target ~foreign ~externals =
   (* the first hook of an address that stops Unicorn is the last one
      called, so the checkpoint goes before the foreign code, which runs
      after it is saved *)
-  Option.iter !checkpoint_addr ~f:(fun addr ->
-      ignore
-      @@ Uc.on_code uc ~first:addr ~last:addr (fun _ _ ->
-          match !resumed_at with
-          | Some at when Int64.(at = addr) ->
-              resumed_at := None;
-              skipped := true
-          | _ -> if not !checkpointed then stop Checkpoint));
+  Option.iter !checkpoint_addr ~f:(hook_stop e);
   List.iter foreign ~f:(fun addr ->
       ignore
       @@ Uc.on_code uc ~first:addr ~last:addr (fun _ _ -> stop (Foreign addr)));
@@ -807,6 +867,12 @@ module Make (Machine : Primus.Machine.S) = struct
       | Some name -> `symbol name
       | None -> `addr (word e addr)
     in
+    (* the code that Primus runs instead stops at its address *)
+    let* () =
+      if (not (Hashtbl.mem e.trampolines addr)) && is_stop e addr then
+        Interpreter.set_pc (word e addr)
+      else Machine.return ()
+    in
     let* () =
       unreplaced_stub name >>= function
       | Some (module Stub : Primus.Linker.Code) ->
@@ -948,7 +1014,8 @@ module Make (Machine : Primus.Machine.S) = struct
     | Some t when Float.(t <= 0.) -> terminate e
     | _ -> (
         e.reason <- None;
-        skipped := false;
+        skipped_at := None;
+        sync_stops e;
         let error =
           try
             Uc.start e.uc pc
@@ -962,10 +1029,8 @@ module Make (Machine : Primus.Machine.S) = struct
         let pc = current_pc e in
         (match e.reason with
         | Some (Fault _)
-          when !skipped
-               && Option.equal Int64.equal !checkpoint_addr
-                    (Some (code_addr e pc)) ->
-            resumed_at := !checkpoint_addr
+          when Option.equal Int64.equal !skipped_at (Some (code_addr e pc)) ->
+            resumed_at := !skipped_at
         | _ -> ());
         match (e.reason, error) with
         | None, None when Option.is_some remaining -> loop pc
@@ -980,9 +1045,20 @@ module Make (Machine : Primus.Machine.S) = struct
                 pull e >>= fun () ->
                 fail "an unhandled interrupt %d at %Lx" n pc)
         | Some Checkpoint, _ -> save e pc >>= fun () -> loop pc
+        | Some (Stop addr), _ -> stopped e addr >>= fun () -> loop pc
         | Some Invalid, _ ->
             pull e >>= fun () -> fail "an invalid instruction at %Lx" pc
         | None, Some msg -> pull e >>= fun () -> fail "%s at %Lx" msg pc)
+
+  (* the stop, at which the observers of the program counter, e.g., a
+     debugger, see the state of the machine, and may change it, after
+     which Unicorn continues from the address *)
+  and stopped e addr =
+    let* () = pull e in
+    let* () = Interpreter.set_pc (word e addr) in
+    let* () = push_owned e in
+    resumed_at := Some addr;
+    Machine.return ()
 
   let start e addr =
     let pc = int64_of_word addr in
@@ -1004,8 +1080,9 @@ module Make (Machine : Primus.Machine.S) = struct
     e.owner <- Some id;
     let* () = map_code e in
     let* () = push e in
-    if Option.equal Int64.equal !checkpoint_addr (Some (code_addr e cp.pc)) then
-      resumed_at := !checkpoint_addr;
+    (let addr = code_addr e cp.pc in
+     if Option.equal Int64.equal !checkpoint_addr (Some addr) || is_stop e addr
+     then resumed_at := Some addr);
     info "continues from the checkpoint at %Lx" cp.pc;
     let* pending = Machine.Local.get frames in
     let* () =
@@ -1204,6 +1281,7 @@ module Loader (Machine : Primus.Machine.S) = struct
     checkpoint_addr := None;
     checkpointed := false;
     resumed_at := None;
+    skipped_at := None;
     accounted := Stdlib.Sys.time ();
     ticks := 0;
     let module Exec = Make (Machine) in
