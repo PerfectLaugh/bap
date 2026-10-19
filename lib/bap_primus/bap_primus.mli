@@ -2280,6 +2280,19 @@ module Std : sig
 
       val generated : (addr * value) observation
 
+      type protection = { readable : bool; writable : bool; executable : bool }
+      [@@deriving equal]
+      (** the access to the memory, which a program may change, e.g., with the
+          [mprotect] system call of POSIX.
+
+          @since 2.6.0 *)
+
+      val protected : (addr * addr * protection) observation
+      (** [protected] occurs when the protection of the range [(lower,upper)]
+          changes, see {!Make.protect}.
+
+          @since 2.6.0 *)
+
       (** [Make(Machine)] lifts the memory interface into the [Machine] monad.
       *)
       module Make (Machine : Machine.S) : sig
@@ -2401,6 +2414,30 @@ module Std : sig
         val is_writable : addr -> bool Machine.t
         (** [is_writable addr] is a computation that evaluates to [true] if
             [addr] is writable. *)
+
+        val is_executable : addr -> bool Machine.t
+        (** [is_executable addr] is a computation that evaluates to [true] if
+            [addr] is executable.
+
+            @since 2.6.0 *)
+
+        val protection : addr -> protection option Machine.t
+        (** [protection addr] is the access to [addr], if it is mapped, which is
+            the one that {!protect} has set, otherwise the one of the segment of
+            [addr]. A read-only byte is writable after it was stored, as
+            {!is_writable} tells.
+
+            @since 2.6.0 *)
+
+        val protect : lower:addr -> upper:addr -> protection -> unit Machine.t
+        (** [protect ~lower ~upper protection] sets the access to the mapped
+            addresses from [lower] to [upper], inclusive, as the [mprotect]
+            system call does, so that a load from a byte that is not readable
+            and a store to a byte that is not writable raise [Pagefault]. The
+            protection holds until the next one, or until a new segment is
+            mapped over the addresses. Posts the {!protected} observation.
+
+            @since 2.6.0 *)
       end
     end
 

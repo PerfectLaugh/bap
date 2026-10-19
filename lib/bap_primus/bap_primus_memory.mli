@@ -5,6 +5,11 @@ module Generator = Bap_primus_generator
 
 val generated : (addr * value) Bap_primus_observation.t
 
+type protection = { readable : bool; writable : bool; executable : bool }
+[@@deriving equal]
+
+val protected : (addr * addr * protection) Bap_primus_observation.t
+
 type exn += Pagefault of addr
 type memory
 
@@ -55,4 +60,7 @@ module Make (Machine : Machine) : sig
   val map : ?readonly:bool -> ?executable:bool -> mem -> unit Machine.t
   val is_mapped : addr -> bool Machine.t
   val is_writable : addr -> bool Machine.t
+  val is_executable : addr -> bool Machine.t
+  val protection : addr -> protection option Machine.t
+  val protect : lower:addr -> upper:addr -> protection -> unit Machine.t
 end

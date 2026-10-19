@@ -461,6 +461,10 @@ int *__errno_location(void);
 int brk(void *addr);
 void *sbrk(int increment);
 
+// sys/mman.h
+
+int mprotect(void *addr, size_t len, int prot);
+
 
 // ctypes.h
 int isalnum(int c);

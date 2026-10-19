@@ -16,6 +16,10 @@ let () =
 type dynamic = { lower : addr; upper : addr; value : Generator.t }
 type region = Dynamic of dynamic | Static of mem
 type perms = { readonly : bool; executable : bool }
+
+type protection = { readable : bool; writable : bool; executable : bool }
+[@@deriving equal]
+
 type layer = { mem : region; perms : perms }
 
 (* a segment [lo,hi] of the address space, which starts at its key in
@@ -55,7 +59,15 @@ module Descriptor = struct
   end)
 end
 
-type state = { values : value Addr.Map.t; layers : layer list; index : index }
+(* the protections of the ranges [lower,upper], that override the
+   permissions of their layers, the newest first, they don't overlap *)
+type state = {
+  values : value Addr.Map.t;
+  layers : layer list;
+  index : index;
+  protections : (addr * addr * protection) list;
+}
+
 type t = { curr : Descriptor.t; mems : state Descriptor.Map.t }
 
 let sexp_of_word w = Sexp.Atom (asprintf "%a" Word.pp_hex w)
@@ -107,6 +119,27 @@ let inspect_memory { curr; mems } =
   Sexp.List [ Sexp.Atom curr.name; Descriptor.Map.sexp_of_t inspect_state mems ]
 
 let inspect_generated (ptr, x) = Sexp.List [ sexp_of_addr ptr; sexp_of_value x ]
+
+let string_of_protection { readable; writable; executable } =
+  String.concat
+    [
+      (if readable then "R" else "");
+      (if writable then "W" else "");
+      (if executable then "X" else "");
+    ]
+
+let inspect_protected (lower, upper, protection) =
+  Sexp.List
+    [
+      sexp_of_addr lower;
+      sexp_of_addr upper;
+      Sexp.Atom (string_of_protection protection);
+    ]
+
+let protected, on_protected =
+  Bap_primus_observation.provide "memory-protected" ~inspect:inspect_protected
+    ~package:"bap"
+    ~desc:"Occurs when the protection of a range of the memory changes"
 
 let generated, on_generated =
   Bap_primus_observation.provide "load-generated" ~inspect:inspect_generated
@@ -222,12 +255,40 @@ let find_layer addr { layers; index } =
 let is_mapped addr s =
   Map.mem s.values addr || Option.is_some (find_layer addr s)
 
+let mapped = is_mapped
+
 let empty_state =
   {
     values = Addr.Map.empty;
     layers = [];
     index = { segments = Map.empty (module Int); others = []; count = 0 };
+    protections = [];
   }
+
+let find_protection addr { protections } =
+  List.find_map protections ~f:(fun (lower, upper, protection) ->
+      Option.some_if Addr.(addr >= lower && addr <= upper) protection)
+
+(* removes the range [lower,upper] from the protected ranges, as a new
+   protection or a new layer replaces their protections *)
+let unprotect lower upper s =
+  let protections =
+    List.concat_map s.protections ~f:(fun ((lo, hi, p) as range) ->
+        if Addr.(hi < lower || lo > upper) then [ range ]
+        else
+          (if Addr.(lo < lower) then [ (lo, Addr.pred lower, p) ] else [])
+          @ if Addr.(hi > upper) then [ (Addr.succ upper, hi, p) ] else [])
+  in
+  { s with protections }
+
+let bounds = function
+  | Dynamic { lower; upper } -> (lower, upper)
+  | Static mem -> (Memory.min_addr mem, Memory.max_addr mem)
+
+(* a new layer replaces the protections of its addresses *)
+let add_layer layer s =
+  let lower, upper = bounds layer.mem in
+  add_layer layer (unprotect lower upper s)
 
 module Make (Machine : Machine) = struct
   open Machine.Syntax
@@ -323,28 +384,36 @@ module Make (Machine : Machine) = struct
     put_curr { s with values } >>| fun () -> Map.find_exn values addr
 
   let read addr ({ values } as s) =
-    match Map.find values addr with
-    | Some v -> Machine.return v
-    | None -> (
-        match find_layer addr s with
-        | None -> pagefault addr
-        | Some layer -> (
-            memory >>= fun { size } ->
-            match layer.mem with
-            | Static mem -> Value.of_word (read_word mem addr size)
-            | Dynamic { value = g } ->
-                Generate.word g (Generator.width g) >>= remembered s addr))
+    match find_protection addr s with
+    | Some { readable = false } when is_mapped addr s -> pagefault addr
+    | _ -> (
+        match Map.find values addr with
+        | Some v -> Machine.return v
+        | None -> (
+            match find_layer addr s with
+            | None -> pagefault addr
+            | Some layer -> (
+                memory >>= fun { size } ->
+                match layer.mem with
+                | Static mem -> Value.of_word (read_word mem addr size)
+                | Dynamic { value = g } ->
+                    Generate.word g (Generator.width g) >>= remembered s addr)))
 
   let set_value addr value s =
     { s with values = Map.set s.values ~key:addr ~data:value }
 
   let write addr value s =
-    if Map.mem s.values addr then Machine.return @@ set_value addr value s
-    else
-      match find_layer addr s with
-      | None -> pagefault addr
-      | Some { perms = { readonly = true } } -> pagefault addr
-      | Some _ -> Machine.return @@ set_value addr value s
+    match find_protection addr s with
+    | Some { writable = false } when is_mapped addr s -> pagefault addr
+    | Some { writable = true } when is_mapped addr s ->
+        Machine.return @@ set_value addr value s
+    | _ -> (
+        if Map.mem s.values addr then Machine.return @@ set_value addr value s
+        else
+          match find_layer addr s with
+          | None -> pagefault addr
+          | Some { perms = { readonly = true } } -> pagefault addr
+          | Some _ -> Machine.return @@ set_value addr value s)
 
   let ( ++ ) = add_layer
 
@@ -401,10 +470,36 @@ module Make (Machine : Machine) = struct
   let store_never_fail addr value = Value.of_word value >>= set_never_fail addr
   let is_mapped addr = get_curr >>| is_mapped addr
 
+  (* the permissions of the layer, a byte that was stored without a layer is
+     writable, as well as a byte of a read-only layer that was stored *)
+  let protection_of addr s =
+    match find_protection addr s with
+    | Some p when mapped addr s -> Some p
+    | _ -> (
+        match find_layer addr s with
+        | Some { perms = { readonly; executable } } ->
+            Some
+              {
+                readable = true;
+                writable = (not readonly) || Map.mem s.values addr;
+                executable;
+              }
+        | None when Map.mem s.values addr ->
+            Some { readable = true; writable = true; executable = false }
+        | None -> None)
+
+  let protection addr = get_curr >>| protection_of addr
+
   let is_writable addr =
-    get_curr >>| fun s ->
-    Map.mem s.values addr
-    || find_layer addr s |> function
-       | Some { perms = { readonly } } -> not readonly
-       | None -> false
+    protection addr >>| function Some p -> p.writable | None -> false
+
+  let is_executable addr =
+    protection addr >>| function Some p -> p.executable | None -> false
+
+  let protect ~lower ~upper protection =
+    update (fun s ->
+        let s = unprotect lower upper s in
+        { s with protections = (lower, upper, protection) :: s.protections })
+    >>= fun () ->
+    Machine.Observation.make on_protected (lower, upper, protection)
 end

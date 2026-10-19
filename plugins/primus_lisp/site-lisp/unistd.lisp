@@ -13,3 +13,8 @@
 (defun getpagesize ()
   (declare (external "getpagesize"))
   (* 64 1024))
+
+(defun mprotect (addr len prot)
+  "sets the access to the memory [addr,addr+len)"
+  (declare (external "mprotect"))
+  (memory-protect addr len prot))

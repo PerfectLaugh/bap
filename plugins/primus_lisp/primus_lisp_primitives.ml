@@ -138,6 +138,22 @@ module Closure (Machine : Primus.Machine.S) = struct
       let upper = Word.(lower + pred (Value.to_word size)) in
       Memory.add_region ?generator ~lower ~upper () >>= fun () -> zero
 
+  (* the protection is the PROT_READ, PROT_WRITE, and PROT_EXEC bits of
+     POSIX, 1, 2, and 4 *)
+  let memory_protect addr len prot =
+    let module Memory = Primus.Memory.Make (Machine) in
+    let len = Value.to_word len and prot = Value.to_word prot in
+    if Word.is_zero len then zero
+    else
+      let has bit =
+        not Word.(is_zero (prot land of_int ~width:(bitwidth prot) bit))
+      in
+      let lower = Value.to_word addr in
+      let upper = Word.(lower + pred len) in
+      Memory.protect ~lower ~upper
+        { readable = has 1; writable = has 2; executable = has 4 }
+      >>= fun () -> zero
+
   let memory_read addr = Eval.load addr BigEndian `r8
   let memory_write a x = Eval.store a x BigEndian `r8 >>= fun () -> Value.succ a
 
@@ -263,6 +279,7 @@ module Closure (Machine : Primus.Machine.S) = struct
     | "word-width", args -> word_width args
     | "exit-with", [ arg ] -> exit_with arg
     | "memory-allocate", x :: y :: rest -> memory_allocate x y rest
+    | "memory-protect", [ a; n; p ] -> memory_protect a n p
     | "memory-read", [ x ] -> memory_read x
     | "memory-write", [ a; x ] -> memory_write a x
     | "get-current-program-counter", [] -> Eval.pc >>= Value.of_word
@@ -328,6 +345,12 @@ module Primitives (Machine : Primus.Machine.S) = struct
         def "exit-with"
           (one int @-> any)
           "(exit-with N) terminates program with the exit codeN";
+        def "memory-protect"
+          (tuple [ int; int; int ] @-> byte)
+          "(memory-protect P N A) sets the access to the memory [P,P+N) to A, \
+           the bits PROT_READ (1), PROT_WRITE (2), and PROT_EXEC (4) of POSIX, \
+           so that a load from the memory that is not readable, or a store to \
+           the memory that is not writable is a segmentation fault";
         def "memory-read"
           (one int @-> byte)
           "(memory-read A) loads one byte from the address A";
