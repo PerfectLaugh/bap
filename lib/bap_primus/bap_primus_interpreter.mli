@@ -69,12 +69,23 @@ val division_by_zero_handler : string
 val pagefault_handler : string
 val cfi_violation_handler : string
 
+module Stops : sig
+  val add : addr -> unit
+  val remove : addr -> unit
+  val mem : addr -> bool
+  val to_list : unit -> addr list
+  val set_stepping : bool -> unit
+  val stepping : unit -> bool
+  val version : unit -> int
+end
+
 module Make (Machine : Machine) : sig
   type 'a m = 'a Machine.t
 
   val halt : never_returns m
   val interrupt : int -> unit m
   val pc : addr m
+  val set_pc : addr -> unit m
   val pos : pos m
   val sub : sub term -> unit m
   val blk : blk term -> unit m

@@ -122,6 +122,33 @@ let pc_change, pc_changed =
   Observation.provide ~inspect:sexp_of_word "pc-changed"
     ~desc:"Occurs after the program counter is changed."
 
+(* the addresses, at which the executors, that run the code outside of
+   the interpreter, stop and tell the address with [Make.set_pc] *)
+module Stops = struct
+  let addrs = Hash_set.create (module Addr)
+  let stepping = ref false
+  let version = ref 0
+  let changed () = incr version
+
+  let add addr =
+    Hash_set.add addrs addr;
+    changed ()
+
+  let remove addr =
+    Hash_set.remove addrs addr;
+    changed ()
+
+  let mem addr = Hash_set.mem addrs addr
+  let to_list () = Hash_set.to_list addrs |> List.sort ~compare:Addr.compare
+
+  let set_stepping x =
+    stepping := x;
+    changed ()
+
+  let stepping () = !stepping
+  let version () = !version
+end
+
 let halting, will_halt =
   Observation.provide ~inspect:sexp_of_unit "halting"
     ~desc:"Occurs before the halt operation is posted."
@@ -815,6 +842,10 @@ module Make (Machine : Machine) = struct
   let sub = term normal sub_t sub ()
   let pos = Machine.Local.get state >>| fun { curr } -> curr
   let pc = Machine.Local.get state >>| fun { addr } -> addr
+
+  let set_pc addr =
+    Machine.Local.update state ~f:(fun s -> { s with addr }) >>= fun () ->
+    !!pc_changed addr
 end
 
 module LinkBinaryProgram (Machine : Machine) = struct

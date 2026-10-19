@@ -1517,6 +1517,40 @@ module Std : sig
       val pc_change : addr observation
       (** [pc_change x] happens every time a code at address [x] is executed. *)
 
+      (** The addresses at which the code is observed by the executors that run
+          it outside of the interpreter, e.g., in an emulator.
+
+          The interpreter posts {!pc_change} for every address, an emulator
+          can't afford it, so it posts {!pc_change}, with {!Make.set_pc}, only
+          at the addresses of the stops, or at every address, while the stepping
+          is on, e.g., for a debugger. The stops are global, as they are of the
+          user, not of a machine.
+
+          @since 2.6.0 *)
+      module Stops : sig
+        val add : addr -> unit
+        (** [add addr] stops the code at [addr] *)
+
+        val remove : addr -> unit
+        (** [remove addr] stops the code at [addr] no more *)
+
+        val mem : addr -> bool
+        (** [mem addr] if the code stops at [addr] *)
+
+        val to_list : unit -> addr list
+        (** [to_list ()] the addresses of the stops, in the ascending order *)
+
+        val set_stepping : bool -> unit
+        (** [set_stepping on] stops the code at every address, while [on] *)
+
+        val stepping : unit -> bool
+        (** [stepping ()] if the code stops at every address *)
+
+        val version : unit -> int
+        (** [version ()] changes, whenever the stops change, so that the
+            executors know when to update their hooks *)
+      end
+
       val loading : value observation
       (** [loading x] happens before a value from the address [x] is loaded by
           the interpreter from the memory. *)
@@ -1760,6 +1794,13 @@ module Std : sig
 
         val pc : addr m
         (** [pc] current value of a program counter.*)
+
+        val set_pc : addr -> unit m
+        (** [set_pc addr] tells that the code at [addr] runs next, outside of
+            the interpreter, e.g., in an emulator, which sets {!pc} and posts
+            {!pc_change}, even if [addr] is the same, see {!Stops}.
+
+            @since 2.6.0 *)
 
         val pos : pos m
         (** [pos m] current program position. *)
