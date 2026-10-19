@@ -52,6 +52,8 @@ external supported_code : int -> bool = "bap_uc_arch_supported"
 external create_code : int -> Mode.t -> t = "bap_uc_open"
 external close : t -> unit = "bap_uc_close"
 external set_cpu_model : t -> int -> unit = "bap_uc_set_cpu_model"
+external flush_tb : t -> unit = "bap_uc_flush_tb"
+external set_tlb_virtual : t -> unit = "bap_uc_set_tlb_virtual"
 external mem_map : t -> int64 -> int64 -> Perm.t -> unit = "bap_uc_mem_map"
 external mem_unmap : t -> int64 -> int64 -> unit = "bap_uc_mem_unmap"
 

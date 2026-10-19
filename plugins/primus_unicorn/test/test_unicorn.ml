@@ -77,6 +77,19 @@ let exn () =
   | exception Stop ->
       if !count <> 2 then failwith "exn: the emulation is not stopped"
 
+(* a hook that stops the emulation stops it before the instruction *)
+let stop () =
+  with_engine X86 Uc.Mode.mode32 "\x41\x41\x41\x41" @@ fun uc ->
+  let ecx = reg X86 "ecx" and eip = reg X86 "eip" in
+  Uc.reg_write uc ecx 0L;
+  let _ = Uc.on_code uc ~first:0x1002L ~last:0x1002L (fun _ _ -> Uc.stop uc) in
+  Uc.start uc code ~until:(Int64.add code 4L);
+  check "ecx" 2L (Uc.reg_read uc ecx);
+  check "eip" 0x1002L (Uc.reg_read uc eip);
+  (* and it can be resumed from there *)
+  Uc.start uc 0x1003L ~until:(Int64.add code 4L);
+  check "resumed ecx" 3L (Uc.reg_read uc ecx)
+
 let error () =
   let uc = Uc.create X86 Uc.Mode.mode64 in
   match Uc.mem_map uc 0x1001L 0x1000L Uc.Perm.all with
@@ -90,6 +103,7 @@ let () =
   x86 ();
   arm64 ();
   exn ();
+  stop ();
   error ();
   let major, minor = Uc.version () in
   Printf.printf "Unicorn %d.%d: ok\n" major minor

@@ -33,6 +33,9 @@ module Regs : sig
   (** [write regs v x] writes [x] to the counterpart of [v], if [v] has one,
       otherwise does nothing and returns [false]. *)
 
+  val basis : t -> var list
+  (** the mapped registers that are not aliases *)
+
   val unmapped : t -> string list
   (** the registers of the target that have no counterparts *)
 end

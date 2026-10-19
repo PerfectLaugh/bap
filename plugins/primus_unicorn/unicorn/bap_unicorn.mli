@@ -66,6 +66,14 @@ val set_cpu_model : t -> int -> unit
 (** [set_cpu_model uc model] selects the CPU, one of the UC_CPU_* constants of
     the architecture. It must be done before the first other operation. *)
 
+val set_tlb_virtual : t -> unit
+(** [set_tlb_virtual uc] maps the virtual addresses to the same physical
+    addresses, bypassing the MMU of the CPU, e.g., the TLB of MIPS. It must be
+    done before the first other operation. *)
+
+val flush_tb : t -> unit
+(** [flush_tb uc] drops the translated code. *)
+
 (** {2 Memory} *)
 
 val mem_map : t -> int64 -> int64 -> Perm.t -> unit

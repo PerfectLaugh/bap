@@ -203,7 +203,12 @@ let width_of_var v =
       Option.map (Theory.Bool.refine (Theory.Var.sort v)) ~f:(fun _ -> 1)
 
 module Regs = struct
-  type t = { uc : Uc.t; locs : loc String.Map.t; unmapped : string list }
+  type t = {
+    uc : Uc.t;
+    locs : loc String.Map.t;
+    basis : var list;
+    unmapped : string list;
+  }
 
   let size uc id = try Some (Uc.reg_size uc id) with Uc.Error _ -> None
 
@@ -270,7 +275,38 @@ module Regs = struct
               in
               (locs, unmapped))
     in
-    { uc; locs; unmapped = List.rev unmapped }
+    (* the registers of the table, that the target may not declare, e.g.,
+       the registers of MIPS that are the origins of the ABI names *)
+    let bits = Theory.Target.bits target in
+    let extra =
+      Map.fold parts ~init:[] ~f:(fun ~key ~data acc ->
+          if Map.mem locs key then acc
+          else
+            match data with
+            | Reg _ -> (key, bits) :: acc
+            | Bit _ -> (key, 1) :: acc
+            | Same | Bits _ | Skip -> acc)
+    in
+    let locs =
+      List.fold extra ~init:locs ~f:(fun locs (name, width) ->
+          match basis name width with
+          | Some loc -> Map.set locs ~key:name ~data:loc
+          | None -> locs)
+    in
+    let is_alias name =
+      match Theory.Target.var target name with
+      | Some v ->
+          Theory.Target.has_roles target [ Theory.Role.Register.alias ] v
+      | None -> false
+    in
+    let basis =
+      Map.fold locs ~init:[] ~f:(fun ~key ~data acc ->
+          if is_alias key then acc
+          else Var.create key (Type.imm data.width) :: acc)
+    in
+    { uc; locs; basis; unmapped = List.rev unmapped }
+
+  let basis t = t.basis
 
   let find { locs; _ } v =
     match Map.find locs (Var.name v) with

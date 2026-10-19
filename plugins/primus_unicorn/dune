@@ -1,6 +1,27 @@
 (library
  (name bap_primus_unicorn_plugin)
  (public_name bap-primus-unicorn.plugin)
+ (modules primus_unicorn_target primus_unicorn_executor)
  (preprocess
   (pps ppx_bap))
- (libraries bap bap-core-theory bap-primus bap-primus-unicorn.unicorn core))
+ (libraries
+  bap
+  bap-core-theory
+  bap-primus
+  bap-primus-unicorn.unicorn
+  bitvec
+  core
+  monads))
+
+(library
+ (name bap_primus_unicorn_main)
+ (public_name bap-primus-unicorn.main)
+ (modules primus_unicorn_main)
+ (libraries bap-main bap-primus bap-primus-unicorn.plugin core))
+
+(plugin
+ (name primus-unicorn)
+ (package bap-primus-unicorn)
+ (libraries bap-primus-unicorn.main)
+ (site
+  (bap-common plugins)))

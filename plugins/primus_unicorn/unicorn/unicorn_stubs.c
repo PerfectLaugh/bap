@@ -155,6 +155,16 @@ value bap_uc_set_cpu_model(value v, value model) {
     return Val_unit;
 }
 
+value bap_uc_set_tlb_virtual(value v) {
+    check(uc_ctl_tlb_mode(engine_uc(v), UC_TLB_VIRTUAL));
+    return Val_unit;
+}
+
+value bap_uc_flush_tb(value v) {
+    check(uc_ctl_flush_tb(engine_uc(v)));
+    return Val_unit;
+}
+
 value bap_uc_mem_map(value v, value addr, value size, value perms) {
     check(uc_mem_map(engine_uc(v), Int64_val(addr), Int64_val(size),
                      Int_val(perms)));

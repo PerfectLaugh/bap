@@ -15,9 +15,12 @@ depends: [
   "dune" {>= "3.24"}
   "bap-common" {= version}
   "bap-core-theory" {= version}
+  "bap-main" {= version}
   "bap-primus" {= version}
   "bap-std" {= version}
+  "bitvec" {= version}
   "core"
+  "monads" {= version}
   "ppx_bap" {= version}
   "bap-arm" {with-test & = version}
   "bap-mips" {with-test & = version}
