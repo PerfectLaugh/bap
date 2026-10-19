@@ -26,6 +26,7 @@ type env = {
 }
 
 let dir env = env.dir
+
 (* the names are relative to the directory of the case, with the native
    separators, as bap prints them *)
 let file env name =
@@ -46,9 +47,9 @@ let read name = In_channel.with_open_bin name In_channel.input_all
    programs print in the text mode, and with \n in the patterns *)
 let read_output name =
   let text = read name in
-  if Sys.win32 then
-    Re.replace_string (Re.compile (Re.str "\r\n")) ~by:"\n" text
+  if Sys.win32 then Re.replace_string (Re.compile (Re.str "\r\n")) ~by:"\n" text
   else text
+
 let null = if Sys.win32 then "NUL" else "/dev/null"
 
 (* the variables that make the commands use the directories of the case *)

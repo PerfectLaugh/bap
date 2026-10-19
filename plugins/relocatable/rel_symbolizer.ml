@@ -243,8 +243,7 @@ let powerpc_stubs refs memory =
     | Some lis, Some lwz, Some 0x7d6903a6L, Some 0x4e800420L
       when Int64.(lis land 0xffff0000L = 0x3d600000L)
            && Int64.(lwz land 0xffff0000L = 0x816b0000L) ->
-        let hi = Int64.(lis land 0xffffL)
-        and lo = Int64.(lwz land 0xffffL) in
+        let hi = Int64.(lis land 0xffffL) and lo = Int64.(lwz land 0xffffL) in
         let lo = if Int64.(lo >= 0x8000L) then Int64.(lo - 0x10000L) else lo in
         let slot = Int64.((hi * 0x10000L) + lo) in
         let slot = Bitvec.(int64 slot mod modulus 32) in
