@@ -369,6 +369,11 @@ let thumb_symbols : Int64.Hash_set.t = Int64.Hash_set.create ()
 
 let index_thumb_symbols spec =
   Hash_set.clear thumb_symbols;
+  (* the entry point, which the stripped program has no symbol for *)
+  (match Ogre.eval (Ogre.request Image.Scheme.entry_point) spec with
+  | Ok (Some entry) when Int64.(entry land 1L = 1L) ->
+      Hash_set.add thumb_symbols Int64.(entry land lnot 1L)
+  | _ -> ());
   match
     Ogre.eval
       (Ogre.collect Ogre.Query.(select (from Image.Scheme.symbol_value)))
@@ -1909,6 +1914,32 @@ module Loader (Machine : Primus.Machine.S) = struct
         let* () = link_sub sub in
         Term.enum blk_t sub |> Seq.to_list |> Machine.List.iter ~f:link_blk)
 
+  (* the code at an address, that nothing is linked to, e.g., of a
+     function of the stripped program, runs in Unicorn, from the address
+     without the lower bit in the Thumb state of ARM *)
+  let link_unresolved : Primus.Linker.name -> unit Machine.t = function
+    | `addr addr -> (
+        let* proj = Machine.get () in
+        let start =
+          match Project.arch proj with
+          | (#Arch.arm | #Arch.thumb)
+            when Word.(is_one (extract_exn ~hi:0 addr)) ->
+              let start = Word.(addr - one (bitwidth addr)) in
+              Hash_set.add thumb start;
+              start
+          | _ -> addr
+        in
+        match Lift.code proj start with
+        | None -> Machine.return ()
+        | Some _ ->
+            let module Code (Machine : Primus.Machine.S) = struct
+              module Exec = Make (Machine)
+
+              let exec = Exec.run start
+            end in
+            Linker.link ~addr (module Code))
+    | `symbol _ | `tid _ -> Machine.return ()
+
   (* the references to the external functions of the program *)
   let externals () =
     let* proj = Machine.get () in
@@ -2031,6 +2062,7 @@ module Loader (Machine : Primus.Machine.S) = struct
         link_program;
         Primus.System.init >>> create_engine;
         Primus.Machine.fork >>> Exec.forked;
+        Primus.Linker.unresolved >>> link_unresolved;
         ( Primus.Interpreter.exited >>> fun code ->
           exit_code :=
             Some

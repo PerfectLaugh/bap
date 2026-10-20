@@ -6,6 +6,7 @@
  (inline_tests)
  (libraries
   bap
+  bap-c
   bap-core-theory
   bap-knowledge
   bap-main

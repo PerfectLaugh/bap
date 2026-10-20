@@ -2,6 +2,7 @@ open Core
 open Bap_core_theory
 open Bap.Std
 open Bap_primus.Std
+open Bap_c.Std
 
 let registers =
   Primus.Machine.State.declare ~uuid:"3dd2b905-c019-4466-800f-95b13d7da85e"
@@ -280,7 +281,26 @@ module Closure (Machine : Primus.Machine.S) = struct
               find Word.(addr - one (bitwidth addr))
           | found -> found
         in
-        match found with
+        (* the function, that the program has no subroutine for, e.g.,
+           the stripped one, takes the words, as the C ABI passes them *)
+        let anonymous () =
+          let target = Project.target proj in
+          match C.Abi.lookup target with
+          | None -> None
+          | Some abi ->
+              let word = C.Type.basic `slong in
+              let proto : C.Type.proto =
+                {
+                  return = word;
+                  args =
+                    List.mapi sub_args ~f:(fun i _ -> (sprintf "x%d" i, word));
+                  variadic = false;
+                }
+              in
+              let sub = Term.set_attr (Sub.create ()) address addr in
+              Some (C.Abi.apply abi (C.Abi.model target) [] proto sub)
+        in
+        match Option.first_some found (anonymous ()) with
         | None ->
             failf "invoke-subroutine: no function for %a" Value.pps sub_addr ()
         | Some sub -> (

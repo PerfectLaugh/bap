@@ -139,12 +139,17 @@ module Make (Machine : Machine) = struct
     let module Code = Code (Machine) in
     Machine.Observation.make will_exec name >>= fun () -> Code.exec
 
+  (* the observers of the unresolved name may link its code, e.g., an
+     emulator, that runs the code at any address *)
   let fail name =
     Machine.Observation.make will_fail name >>= fun () ->
     Machine.Local.get state >>= fun s ->
-    match code_of_name (`symbol unresolved_handler) s with
-    | None -> do_fail name
+    match code_of_name name s with
     | Some code -> run name code
+    | None -> (
+        match code_of_name (`symbol unresolved_handler) s with
+        | None -> do_fail name
+        | Some code -> run name code)
 
   let make_refs term name addr = { term; name; addr }
 

@@ -74,7 +74,6 @@ let synthesize_program proj =
       (* the subroutines are by their addresses, as the names of the
          static functions of different files may be the same *)
       match Toplevel.get result with
-      | [] -> proj
       | symbols ->
           (* the external functions are subroutines without addresses, so
              that the Lisp machine finds their prototypes, e.g., from the
@@ -145,7 +144,14 @@ let synthesize_program proj =
                 (Ogre.request Image.Scheme.entry_point)
                 (Project.specification proj)
             with
-            | Ok (Some addr) -> Some Bitvec.(int64 addr mod modulus width)
+            | Ok (Some addr) ->
+                (* the lower bit of the entry of ARM is the Thumb state *)
+                let addr =
+                  match Project.arch proj with
+                  | #Arch.arm | #Arch.thumb -> Int64.(addr land lnot 1L)
+                  | _ -> addr
+                in
+                Some Bitvec.(int64 addr mod modulus width)
             | _ -> None
           in
           let symbols =
