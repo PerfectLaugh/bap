@@ -28,6 +28,7 @@ type t
 (** the state of the program *)
 type status =
   | Paused  (** the program pauses, e.g., at the address of [until] *)
+  | Running  (** the program runs, e.g., in a hook, which may only {!stop} it *)
   | Exited of int option  (** the program exited, with the code, if known *)
   | Failed of string  (** the program or the emulator failed *)
 
@@ -208,7 +209,10 @@ val restore : t -> snapshot -> unit
 module Taint : sig
   (** the place of the values, whose taint is introduced or queried *)
   type place =
-    | Reg of string  (** the value of the register, e.g., [RAX] *)
+    | Reg of string
+        (** the value of the register, e.g., [RAX], or of its base register, if
+            it is an alias, e.g., the whole [R0] for [X0] or [W0] of AArch64, or
+            for [V0] of MIPS, as the code reads the base registers *)
     | Mem of int64 * int
         (** the values of the bytes of the memory from the address *)
 

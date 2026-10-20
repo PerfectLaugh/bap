@@ -292,6 +292,16 @@ let pause = ref false
    runs again, e.g., after its fault, from the next one *)
 let starts = ref 0
 
+(* the address of the code, at which Unicorn stopped last, before it ran
+   the instruction there, whose hooks may have run, e.g., when they
+   stopped it *)
+let stopped_at : int64 option ref = ref None
+
+(* the address of the code, at which Unicorn starts again, after it
+   stopped there, so that the hooks of the instruction, which ran in the
+   previous start, run again, e.g., of the calls, see [Bap_emu.on_call] *)
+let restarted_at : int64 option ref = ref None
+
 (* what a hook of a call does: the function runs, or returns the value
    at once *)
 type action = Default | Return of int64
@@ -1876,6 +1886,10 @@ module Make (Machine : Primus.Machine.S) = struct
     e.reason <- None;
     skipped_at := None;
     incr starts;
+    restarted_at :=
+      if Option.equal Int64.equal !stopped_at (Some (code_addr e pc)) then
+        !stopped_at
+      else None;
     let error =
       try
         Uc.start e.uc pc
@@ -1887,6 +1901,7 @@ module Make (Machine : Primus.Machine.S) = struct
       with Uc.Error (_, msg) -> Some msg
     in
     e.runs <- e.runs + 1;
+    stopped_at := Some (code_addr e (current_pc e));
     match e.reason with
     | Some (Fault (Write_prot, addr)) when written_page e addr ->
         let pc = current_pc e in
@@ -2032,13 +2047,16 @@ module Make (Machine : Primus.Machine.S) = struct
   (* the instruction at [pc], which Primus interprets after the one it
      interpreted, as it uses a tracked register, or the memory, while a
      location is tracked, unless it is a stop of the run, e.g., the
-     return of the run, a trampoline, or a stop of Primus *)
+     return of the run, a trampoline, a stop of Primus, or the entry of a
+     function, whose calls the script hooks *)
   let continues e pc =
     let addr = code_addr e pc in
     if
       Hashtbl.mem e.trampolines addr
       || Hash_set.mem e.foreign addr
       || is_stop e addr
+      (* the hooks of the calls run in Unicorn, see [call_returns] *)
+      || Option.exists (function_name e addr) ~f:(Hashtbl.mem call_hooks)
       || Option.equal Int64.equal !checkpoint_addr (Some addr)
       || (!driven && !pause)
       ||

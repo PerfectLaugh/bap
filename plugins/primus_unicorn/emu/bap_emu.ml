@@ -8,7 +8,7 @@ module Target = Bap_primus_unicorn_plugin.Primus_unicorn_target
 module Uc = Bap_unicorn
 module Io = Primus_lisp_library_plugin.Primus_lisp_io
 
-type status = Paused | Exited of int option | Failed of string
+type status = Paused | Running | Exited of int option | Failed of string
 type action = Default | Return of int64
 
 (* the system, which runs in the fiber of the script, either paused,
@@ -22,8 +22,13 @@ type state =
       result
   | Crashed of exn
   | Ended of Primus.exit_status * (X.request, state) Effect.Deep.continuation
+  | Running  (** the program runs, e.g., in a hook *)
 
-type t = { mutable state : state; mutable call : string option }
+type t = {
+  mutable state : state;
+  mutable call : string option;
+  target : Bap_core_theory.Theory.Target.t;
+}
 
 let engine () =
   match !X.active with
@@ -52,7 +57,7 @@ let fiber f =
 let finish t state =
   t.state <- state;
   match state with
-  | Suspended _ | Ended _ -> ()
+  | Suspended _ | Ended _ | Running -> ()
   | Finished (Ok (_, _, kb)) ->
       Toplevel.set kb;
       X.driven := false
@@ -61,13 +66,17 @@ let finish t state =
 (* continues the paused system with the request *)
 let resume t request =
   match t.state with
-  | Suspended (_, _, k) -> finish t (Effect.Deep.continue k request)
-  | Ended (_, k) -> finish t (Effect.Deep.continue k request)
+  | Suspended (_, _, k) | Ended (_, k) ->
+      (* the hooks see, that the program runs, and its continuation is
+         not resumed again *)
+      t.state <- Running;
+      finish t (Effect.Deep.continue k request)
   | _ -> invalid_arg "Bap_emu: the program is not paused"
 
 let status t =
   match t.state with
   | Suspended _ -> Paused
+  | Running -> Running
   | Ended ((Primus.Normal | Exn Primus.Interpreter.Halt), _) ->
       Exited !X.exit_code
   | Ended (Exn exn, _) -> Failed (Primus.Exn.to_string exn)
@@ -148,7 +157,13 @@ let create ?(system = "bap:unicorn-executor") ?(components = []) ?(init = [])
   X.exit_code := None;
   X.engine_hooks := [];
   Hashtbl.clear X.call_hooks;
-  let t = { state = Crashed (Failure "not started"); call = None } in
+  let t =
+    {
+      state = Crashed (Failure "not started");
+      call = None;
+      target = Project.target proj;
+    }
+  in
   finish t
     (fiber (fun () ->
          Primus.System.run system proj (Toplevel.current ())
@@ -345,13 +360,24 @@ let on_call t name f =
         String.equal data name && not (List.mem foreign addr ~equal:Int64.equal)
       then
         installed (fun e ->
+            (* the call is seen once, as the first instruction of the
+               function runs again, when Unicorn starts at it again,
+               after the hook saw it, and Unicorn stopped there, e.g., as
+               the hook stops it *)
+            let seen = ref (-1) in
             ignore
-              (Uc.on_code e.uc ~first:addr ~last:addr (fun _ _ ->
-                   match X.call_returns e name with
-                   | Some ret ->
-                       e.reason <- Some (X.Jump ret);
-                       Uc.stop e.uc
-                   | None -> ()))))
+              (Uc.on_code e.uc ~first:addr ~last:addr (fun addr _ ->
+                   let again =
+                     Option.equal Int64.equal !X.restarted_at (Some addr)
+                     && !seen = !X.starts - 1
+                   in
+                   seen := !X.starts;
+                   if not again then
+                     match X.call_returns e name with
+                     | Some ret ->
+                         e.reason <- Some (X.Jump ret);
+                         Uc.stop e.uc
+                     | None -> ()))))
 
 let arg t n =
   let name =
@@ -382,13 +408,29 @@ module Taint = struct
   let components =
     [ "bap:propagate-taint-by-computation"; "bap:select-default-taint-policy" ]
 
-  (* the variable of the register of the target *)
+  (* the variable of the register of the target, or of its base
+     register, e.g., R0 for X0 or W0 of AArch64, as the code reads it *)
   let var target name =
     match Theory.Target.var target name with
-    | Some v -> Var.reify v
-    | None -> invalid_argf "Bap_emu.Taint: unknown register %s" name ()
+    | None -> invalid_argf "Bap_emu: unknown register %s" name ()
+    | Some v -> (
+        match
+          Option.bind (Theory.Target.unalias target v) ~f:Theory.Origin.cast_sub
+        with
+        | Some origin -> Var.reify (Theory.Origin.reg origin)
+        | None -> Var.reify v)
+
+  (* the place is checked, before the component runs, as its exceptions
+     end the program *)
+  let checked t place =
+    match place with
+    | Reg name -> ignore (var t.target name : Var.t)
+    | Mem (_, len) when len < 0 ->
+        invalid_argf "Bap_emu: the negative length %d" len ()
+    | Mem _ -> ()
 
   let introduce t ~kind place =
+    checked t place;
     let module Introduce (Machine : Primus.Machine.S) = struct
       open Machine.Syntax
       module Env = Primus.Env.Make (Machine)
@@ -414,6 +456,7 @@ module Taint = struct
 
   (* the kinds of the taints of the place *)
   let kinds t place =
+    checked t place;
     let result = ref [] in
     let module Kinds (Machine : Primus.Machine.S) = struct
       open Machine.Syntax
@@ -449,6 +492,7 @@ module Taint = struct
     List.mem (kinds t place) kind ~equal:String.equal
 
   let sanitize t ~kind place =
+    checked t place;
     let module Sanitize (Machine : Primus.Machine.S) = struct
       open Machine.Syntax
       module Env = Primus.Env.Make (Machine)
@@ -530,6 +574,7 @@ module Symbolic = struct
     List.init len ~f:(fun i -> Word.of_int64 ~width Int64.(addr + of_int i))
 
   let symbolize t place =
+    Taint.checked t place;
     let module Symbolize (Machine : Primus.Machine.S) = struct
       open Machine.Syntax
       module Env = Primus.Env.Make (Machine)
@@ -558,6 +603,7 @@ module Symbolic = struct
     primus t (module Symbolize)
 
   let formula t place =
+    Taint.checked t place;
     let result = ref [] in
     let module Formula (Machine : Primus.Machine.S) = struct
       open Machine.Syntax
