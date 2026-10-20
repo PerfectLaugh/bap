@@ -221,17 +221,19 @@ let config data =
   let file = path data (echo "x86-linux-gnu") in
   [
     case "config" (fun env ->
-        let dir = Filename.concat (Suite.file env "config") "bap" in
-        Sys.mkdir dir 0o755;
+        let dir = Suite.file env "config" in
         Out_channel.with_open_bin (Filename.concat dir "config") (fun ch ->
             output_string ch
               "# this is a testing configuration file\n\
                print-symbol = print_strings # this is an example of parameter\n");
-        let out = bap env [ file; "--dump=bir" ] in
+        let out = bap env [ file; "--dump=bir"; "--config-dir=" ^ dir ] in
         lacks env "main is unexpected because not set in conf file" out
           "sub main";
         has env "reading parameters from conf file" out "sub print_strings";
-        let out = bap env [ file; "--dump=bir"; "--print-symbol=main" ] in
+        let out =
+          bap env
+            [ file; "--dump=bir"; "--config-dir=" ^ dir; "--print-symbol=main" ]
+        in
         lacks env "print_strings is unexpected" out "sub print_strings";
         has env "overriding parameters in conf file" out "sub main");
   ]

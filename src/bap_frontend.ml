@@ -64,6 +64,7 @@ Common options:
   --plugin <FILE>          loads the plugin from <FILE>;
   --log-dir <DIR>          creates a log file in <DIR>;
   --cache-dir <DIR>        caches the results in <DIR>;
+  --config-dir <DIR>       reads the configuration files in <DIR>;
   --recipe <VAL>           extracts command line arguments from the recipe.
 
 Commands:

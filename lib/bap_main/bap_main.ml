@@ -66,7 +66,11 @@ end = struct
             filename (linenum + 1) 1
             (String.length str + 1)
 
-  let read () = List.concat_map (files Bap_main_dirs.config) ~f:read_or_fail
+  (* the files of the user prevail over the installed ones *)
+  let read () =
+    Option.to_list !Bap_main_dirs.user_config @ [ Bap_main_dirs.config ]
+    |> List.concat_map ~f:files
+    |> List.concat_map ~f:read_or_fail
 end
 
 module Type = struct
@@ -527,6 +531,14 @@ module Pre = struct
     let env = Cmd.Env.info ~doc "BAP_CACHE_DIR" in
     Arg.(value & opt (some string) None & info [ "cache-dir" ] ~env ~doc)
 
+  let configdir : string option Term.t =
+    let doc =
+      "A folder with the configuration files, whose parameters prevail over \
+       the installed ones."
+    in
+    let env = Cmd.Env.info ~doc "BAP_CONFIG_DIR" in
+    Arg.(value & opt (some string) None & info [ "config-dir" ] ~env ~doc)
+
   let plugin_locations =
     let doc = "Adds folder to the list of plugins search paths" in
     Arg.(
@@ -547,8 +559,8 @@ module Pre = struct
 
   let term =
     Term.(
-      const (fun _ _ _ _ _ -> Ok ())
-      $ logdir $ cachedir $ plugin_locations $ plugin_files $ recipe)
+      const (fun _ _ _ _ _ _ -> Ok ())
+      $ logdir $ cachedir $ configdir $ plugin_locations $ plugin_files $ recipe)
 end
 
 module Grammar : sig
@@ -1255,6 +1267,8 @@ let init ?features ?requires ?library ?(argv = [| Sys.executable_name |]) ?env
       in
       enable_logging log;
       Bap_main_dirs.cache := Option.join Pre.(extract ?env cachedir argv);
+      Bap_main_dirs.user_config :=
+        Option.join Pre.(extract ?env configdir argv);
       let library =
         match library with
         | Some libs -> libs

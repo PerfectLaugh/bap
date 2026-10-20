@@ -243,6 +243,7 @@
       | {"--plugin-path", [=], string}
       | "--log-dir", [=], string
       | "--cache-dir", [=], string
+      | "--config-dir", [=], string
       | "--recipe", recipe-grammar
       | "--version"
       | "--help", [[=], help-format]
@@ -286,11 +287,11 @@
     Another rule which is added on per plugin basis, is the [--help-<plugin>]
     rule which will render a manual page for the given [<plugin>].
 
-    The [-L], [--log-dir], and [--cache-dir] options are preparsed on the
-    command line and are used to specify the plugins search path (which
-    obviously should be specified before we can load plugins), the logging
-    destination, and the cache, which we would like to know as soon as
-    possible.
+    The [-L], [--log-dir], [--cache-dir], and [--config-dir] options are
+    preparsed on the command line and are used to specify the plugins search
+    path (which obviously should be specified before we can load plugins),
+    the logging destination, the cache, and the configuration files, which we
+    would like to know as soon as possible.
 
     The [--recipe] option is very special, as it changes the command line
     itself. Every occurrence of the [--recipe] option will parse the provided
@@ -1069,7 +1070,9 @@ module Extension : sig
 
     val confdir : string
     (** [confdir] a directory for BAP specific configuration files, the
-        [config] subdirectory of {!sysdatadir}. *)
+        [config] subdirectory of {!sysdatadir}. The files of the folder of
+        the [--config-dir] option or the BAP_CONFIG_DIR variable prevail over
+        its files. *)
 
     val bindir : string
     (** [bindir] the preconfigured directory for binaries.

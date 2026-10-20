@@ -274,7 +274,7 @@ let run_case ~work n case ctxt =
   mkdir dir;
   List.iter
     (fun sub -> mkdir (Filename.concat dir sub))
-    [ "cache"; "config"; "state"; "log" ];
+    [ "cache"; "config"; "log" ];
   let env = { dir; tools; calls = []; failed = [] } in
   let start = Unix.gettimeofday () in
   let error =
