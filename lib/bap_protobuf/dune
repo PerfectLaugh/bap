@@ -1,0 +1,16 @@
+; The serializers of BIL and BIR in protobuf and JSON, whose codecs
+; ocaml-protoc generates from bap_protobuf_ir.proto.
+
+(library
+ (name bap_protobuf)
+ (public_name bap-protobuf)
+ (wrapped false)
+ (preprocess
+  (pps ppx_bap))
+ (libraries bap bap-core-theory core pbrt pbrt_yojson yojson))
+
+(rule
+ (targets bap_protobuf_ir.ml bap_protobuf_ir.mli)
+ (deps bap_protobuf_ir.proto)
+ (action
+  (run ocaml-protoc --binary --yojson --ml_out . bap_protobuf_ir.proto)))

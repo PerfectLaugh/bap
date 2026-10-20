@@ -1,0 +1,264 @@
+// The representation of BIL and BIR in protobuf, which is also the
+// schema of its JSON format.
+
+syntax = "proto3";
+
+package bap;
+
+message Unit {}
+
+// the sizes are in bits
+message Mem_type {
+  int32 addr_size = 1;
+  int32 elt_size = 2;
+}
+
+message Typ {
+  oneof typ {
+    int32 imm = 1;
+    Mem_type mem = 2;
+    Unit unk = 3;
+  }
+}
+
+message Var {
+  string name = 1;
+  int32 index = 2;
+  Typ typ = 3;
+  bool is_virtual = 4;
+}
+
+enum Endian {
+  LITTLE_ENDIAN = 0;
+  BIG_ENDIAN = 1;
+}
+
+enum Cast_type {
+  UNSIGNED = 0;
+  SIGNED = 1;
+  HIGH = 2;
+  LOW = 3;
+}
+
+enum Binop_type {
+  PLUS = 0;
+  MINUS = 1;
+  TIMES = 2;
+  DIVIDE = 3;
+  SDIVIDE = 4;
+  MOD = 5;
+  SMOD = 6;
+  LSHIFT = 7;
+  RSHIFT = 8;
+  ARSHIFT = 9;
+  AND = 10;
+  OR = 11;
+  XOR = 12;
+  EQ = 13;
+  NEQ = 14;
+  LT = 15;
+  LE = 16;
+  SLT = 17;
+  SLE = 18;
+}
+
+enum Unop_type {
+  NEG = 0;
+  NOT = 1;
+}
+
+message Load {
+  Expr memory = 1;
+  Expr address = 2;
+  Endian endian = 3;
+  int32 size = 4;
+}
+
+message Store {
+  Expr memory = 1;
+  Expr address = 2;
+  Expr value = 3;
+  Endian endian = 4;
+  int32 size = 5;
+}
+
+message Binop {
+  Binop_type op = 1;
+  Expr lhs = 2;
+  Expr rhs = 3;
+}
+
+message Unop {
+  Unop_type op = 1;
+  Expr arg = 2;
+}
+
+message Cast {
+  Cast_type kind = 1;
+  int32 size = 2;
+  Expr arg = 3;
+}
+
+message Let_exp {
+  Var bound = 1;
+  Expr definition = 2;
+  Expr body = 3;
+}
+
+message Unknown {
+  string descr = 1;
+  Typ typ = 2;
+}
+
+message Ite {
+  Expr cond = 1;
+  Expr if_true = 2;
+  Expr if_false = 3;
+}
+
+message Extract {
+  int32 hi = 1;
+  int32 lo = 2;
+  Expr arg = 3;
+}
+
+message Concat {
+  Expr lhs = 1;
+  Expr rhs = 2;
+}
+
+// the words are in the format of Bitvector.to_string, e.g., 0x2a:32
+message Expr {
+  oneof expr {
+    Var var = 1;
+    string word = 2;
+    Load load = 3;
+    Store store = 4;
+    Binop binop = 5;
+    Unop unop = 6;
+    Cast cast = 7;
+    Let_exp let_exp = 8;
+    Unknown unknown = 9;
+    Ite ite = 10;
+    Extract extract = 11;
+    Concat concat = 12;
+  }
+}
+
+message Move {
+  Var lhs = 1;
+  Expr rhs = 2;
+}
+
+message While_stmt {
+  Expr cond = 1;
+  repeated Stmt body = 2;
+}
+
+message If_stmt {
+  Expr cond = 1;
+  repeated Stmt yes = 2;
+  repeated Stmt no = 3;
+}
+
+message Stmt {
+  oneof stmt {
+    Move move = 1;
+    Expr jmp = 2;
+    string special = 3;
+    While_stmt while_stmt = 4;
+    If_stmt if_stmt = 5;
+    int32 cpuexn = 6;
+  }
+}
+
+message Bil {
+  repeated Stmt stmts = 1;
+}
+
+// the terms are identified by their tids, in the format of
+// Tid.to_string, e.g., %00000042
+
+message Label {
+  oneof label {
+    string direct = 1;
+    Expr indirect = 2;
+  }
+}
+
+message Call {
+  Label target = 1;
+  Label return_label = 2;
+}
+
+// the vector is the destination of the jump to the handler of the
+// interrupt
+message Interrupt {
+  int32 number = 1;
+  string return_tid = 2;
+  string vector_tid = 3;
+}
+
+message Jump {
+  oneof jump {
+    Call call = 1;
+    Label goto = 2;
+    Label ret = 3;
+    Interrupt interrupt = 4;
+  }
+}
+
+enum Intent {
+  IN = 0;
+  OUT = 1;
+  BOTH = 2;
+}
+
+message Arg {
+  string tid = 1;
+  Var lhs = 2;
+  Expr rhs = 3;
+  optional Intent intent = 4;
+}
+
+message Phi_value {
+  string tid = 1;
+  Expr exp = 2;
+}
+
+message Phi {
+  string tid = 1;
+  Var lhs = 2;
+  repeated Phi_value values = 3;
+}
+
+message Def {
+  string tid = 1;
+  Var lhs = 2;
+  Expr rhs = 3;
+}
+
+message Jmp {
+  string tid = 1;
+  Expr cond = 2;
+  Jump kind = 3;
+}
+
+message Blk {
+  string tid = 1;
+  repeated Phi phis = 2;
+  repeated Def defs = 3;
+  repeated Jmp jmps = 4;
+}
+
+message Sub {
+  string tid = 1;
+  string name = 2;
+  repeated Arg args = 3;
+  repeated Blk blks = 4;
+}
+
+message Program {
+  string tid = 1;
+  repeated Sub subs = 2;
+}

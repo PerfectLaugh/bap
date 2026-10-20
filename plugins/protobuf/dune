@@ -1,0 +1,13 @@
+(library
+ (name bap_protobuf_plugin)
+ (public_name bap-protobuf.plugin)
+ (preprocess
+  (pps ppx_bap))
+ (libraries bap bap-main bap-protobuf core regular))
+
+(plugin
+ (name protobuf)
+ (package bap-protobuf)
+ (libraries bap-protobuf.plugin)
+ (site
+  (bap-common plugins)))

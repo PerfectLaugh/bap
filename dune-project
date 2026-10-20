@@ -79,6 +79,7 @@
   (bap-optimization (= :version))
   (bap-patterns (= :version))
   (bap-plugins (= :version))
+  (bap-protobuf (= :version))
   (bap-powerpc (= :version))
   (bap-primus-lisp (= :version))
   (bap-primus (= :version))
@@ -720,6 +721,23 @@ be seen as a common denominator between Lwt and Async libraries.")
   (ppx_bap (= :version))
   (regular (= :version))
   (text-tags (= :version))))
+
+(package
+ (name bap-protobuf)
+ (synopsis "Serializes BIL and BIR to protobuf and JSON")
+ (tags (bap bap-plugin))
+ (depends
+  (bap-common (= :version))
+  (bap-core-theory (= :version))
+  (bap-main (= :version))
+  (bap-std (= :version))
+  core
+  (ocaml-protoc (and :build (>= 4.0)))
+  (ounit2 :with-test)
+  (pbrt (>= 4.0))
+  (pbrt_yojson (>= 4.0))
+  (regular (= :version))
+  yojson))
 
 (package
  (name bap-plugins)

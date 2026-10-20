@@ -11,6 +11,12 @@ to the repositories of the lock.
   programs of BAP don't depend on the libgmp of the system (except on
   Windows, where the package is unchanged).
 
+- pbrt.4.1 compiles its stubs in the large model on Windows, where it is
+  loaded with the protobuf plugin, as BAP compiles the stubs of its
+  plugins, see files/windows-large-model.patch: flexdll can't relocate
+  the relative calls of the stubs to the runtime of OCaml in the program,
+  when the plugin is loaded further than 2 GB from it.
+
 Keep the files with LF line endings (see /.gitattributes), as the checksums
 in extra-files and the patches depend on them.
 

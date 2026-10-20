@@ -1,0 +1,34 @@
+--- a/src/runtime/dune
++++ b/src/runtime/dune
+@@ -11,12 +11,30 @@
+ (rule
+  (target compile-flags.sexp)
+  (enabled_if
+-  (<> %{ocaml-config:ccomp_type} "msvc"))
++  (and
++   (<> %{ocaml-config:ccomp_type} "msvc")
++   (<> %{os_type} "Win32")))
+  (action
+   (with-stdout-to
+    %{target}
+    (echo "(-std=c99 -O2)"))))
+ 
++; the stubs call the runtime of OCaml in the program, which flexdll can't
++; relocate when the library is loaded as a plugin further than 2 GB from
++; the program, as the calls are relative, so they are absolute in the
++; large model
++
++(rule
++ (target compile-flags.sexp)
++ (enabled_if
++  (and
++   (<> %{ocaml-config:ccomp_type} "msvc")
++   (= %{os_type} "Win32")))
++ (action
++  (with-stdout-to
++   %{target}
++   (echo "(-std=c99 -O2 -mcmodel=large)"))))
++
+ (library
+  (name pbrt)
+  (public_name pbrt)
