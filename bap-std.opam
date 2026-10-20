@@ -34,12 +34,10 @@ depends: [
   "mmap"
   "monads" {= version}
   "ogre" {= version}
-  "ounit"
+  "ounit2" {with-test}
   "ppx_bap" {= version}
   "regular" {= version}
-  "result"
   "uri"
-  "utop" {>= "2.0.0"}
   "uuidm"
   "zarith"
   "odoc" {with-doc}

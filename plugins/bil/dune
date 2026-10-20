@@ -6,11 +6,11 @@
  (libraries
   bap
   bap-core-theory
-  bap-future
+  
   bap-knowledge
   bap-main
   bitvec
-  bitvec-order
+  
   core
   monads
   ogre))

@@ -14,7 +14,6 @@ depends: [
   "bap-std" {= version}
   "conf-mingw-w64-g++-x86_64" {os = "win32"}
   "core"
-  "mmap"
   "monads" {= version}
   "bap-common" {= version}
   "ogre" {= version}

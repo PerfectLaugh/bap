@@ -3,7 +3,7 @@
  (public_name bap-trace.plugin)
  (preprocess
   (pps ppx_bap))
- (libraries bap bap-future bap-plugins bap-traces core regular uri))
+ (libraries bap bap-future bap-plugins bap-traces core  uri))
 
 (plugin
  (name trace)

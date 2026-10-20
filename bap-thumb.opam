@@ -18,7 +18,6 @@ depends: [
   "bap-std" {= version}
   "bitvec" {= version}
   "core"
-  "ogre" {= version}
   "ppx_bap" {= version}
   "odoc" {with-doc}
 ]

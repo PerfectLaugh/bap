@@ -10,7 +10,7 @@
   bap-main
   bitvec
   core
-  monads
+  
   ; Windows has no linenoise, see line_editor.plain.ml
   (select
    line_editor.ml

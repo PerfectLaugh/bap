@@ -4,4 +4,4 @@
  (preprocess
   (pps ppx_bap))
  (wrapped false)
- (libraries bap bap-primus core monads regular))
+ (libraries bap bap-primus core  ))

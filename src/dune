@@ -91,7 +91,7 @@
   bap-byteweight
   bap-core-theory
   bap-knowledge
-  cmdliner
+  
   ; loads the plugins, e.g., the loaders
   dune-site.plugins
   findlib.dynload

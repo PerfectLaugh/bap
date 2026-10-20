@@ -23,7 +23,6 @@ depends: [
   "ogre" {= version}
   "ppx_bap" {= version}
   "regular" {= version}
-  "zarith"
   "odoc" {with-doc}
 ]
 build: [

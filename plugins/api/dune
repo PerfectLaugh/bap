@@ -3,7 +3,7 @@
  (public_name bap-api.plugin)
  (preprocess
   (pps ppx_bap))
- (libraries bap bap-api bap-core-theory bap-knowledge core fileutils regular))
+ (libraries bap bap-api bap-core-theory bap-knowledge core fileutils ))
 
 (plugin
  (name api)

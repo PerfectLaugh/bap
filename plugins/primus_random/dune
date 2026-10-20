@@ -8,7 +8,7 @@
   bap-main
   bap-primus
   bitvec
-  bitvec-sexp
+  
   core
   zarith
   bap-core-theory))

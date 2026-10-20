@@ -2,9 +2,9 @@
  (name run_arm_tests)
  (libraries
   bap
-  bap-core-theory
-  bap-knowledge
-  bap-plugins
+  
+  
+  
   bap-main
   ounit2
   primus_bil

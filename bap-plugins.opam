@@ -14,7 +14,6 @@ depends: [
   "bap-bundle" {= version}
   "bap-future" {= version}
   "core"
-  "fileutils"
   "ppx_bap" {= version}
   "uri"
   "odoc" {with-doc}

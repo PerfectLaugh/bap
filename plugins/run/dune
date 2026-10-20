@@ -9,7 +9,7 @@
   core
   graphlib
   monads
-  regular))
+  ))
 
 (plugin
  (name run)

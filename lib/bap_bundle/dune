@@ -4,4 +4,4 @@
  (wrapped false)
  (preprocess
   (pps ppx_bap))
- (libraries uri zipc unix core core_kernel.caml_unix))
+ (libraries uri zipc  core core_kernel.caml_unix))

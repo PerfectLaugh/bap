@@ -17,7 +17,6 @@ depends: [
   "bap-common" {= version}
   "ppx_bap" {= version}
   "regular" {= version}
-  "uri" {>= "4.2.0"}
   "odoc" {with-doc}
 ]
 build: [

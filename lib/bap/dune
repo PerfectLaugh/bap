@@ -15,11 +15,11 @@
   bap_sema
   bap_types
   bitvec
-  bitvec-binprot
-  bitvec-order
-  bitvec-sexp
+  
+  
+  
   core
-  fileutils
+  
   graphlib
   monads
   ogre

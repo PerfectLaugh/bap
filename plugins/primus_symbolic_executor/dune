@@ -14,7 +14,7 @@
   bitvec
   core
   monads
-  regular
+  
   zarith
   z3))
 
@@ -34,7 +34,7 @@
   bitvec
   core
   monads
-  regular
+  
   zarith
   z3
   bap-core-theory))

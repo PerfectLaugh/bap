@@ -5,15 +5,15 @@
   (pps ppx_bap))
  (libraries
   bap
-  bap-abi
-  bap-api
+  
+  
   bap-c
   bap-core-theory
   bap-powerpc
   core
-  monads
-  regular
-  zarith))
+  
+  
+  ))
 
 (plugin
  (name powerpc)

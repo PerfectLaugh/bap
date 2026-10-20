@@ -14,7 +14,7 @@
   bitvec
   core
   monads
-  regular))
+  ))
 
 (plugin
  (name primus-lisp)

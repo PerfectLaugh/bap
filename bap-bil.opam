@@ -15,7 +15,6 @@ depends: [
   "bap-knowledge" {= version}
   "bap-main" {= version}
   "bap-std" {= version}
-  "bitvec-order" {= version}
   "bitvec" {= version}
   "core"
   "monads" {= version}

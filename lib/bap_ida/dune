@@ -4,4 +4,4 @@
  (preprocess
   (pps ppx_bap))
  (wrapped false)
- (libraries core fileutils re.posix))
+ (libraries core  ))

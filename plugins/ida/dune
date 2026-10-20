@@ -10,7 +10,7 @@
   bap-knowledge
   core
   fileutils
-  graphlib
+  
   mmap
   regular
   re.posix))

@@ -249,7 +249,6 @@
   (bap-knowledge (= :version))
   (bap-main (= :version))
   (bap-std (= :version))
-  (bitvec-order (= :version))
   (bitvec (= :version))
   core
   (monads (= :version))
@@ -278,8 +277,7 @@
   core
   (bap-common (= :version))
   (ppx_bap (= :version))
-  (regular (= :version))
-  (uri (>= 4.2.0))))
+  (regular (= :version))))
 
 (package
  (name bap-byteweight-frontend)
@@ -609,7 +607,6 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-std (= :version))
   (conf-mingw-w64-g++-x86_64 (= :os win32))
   core
-  mmap
   (monads (= :version))
   (bap-common (= :version))
   (ogre (= :version))
@@ -673,8 +670,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (ogre (= :version))
   (ppx_bap (= :version))
-  (regular (= :version))
-   zarith))
+  (regular (= :version))))
 
 (package
  (name bap-optimization)
@@ -725,16 +721,6 @@ be seen as a common denominator between Lwt and Async libraries.")
   (regular (= :version))
   (text-tags (= :version))))
 
-; (package
-;  (name bap-piqi)
-;  (synopsis "Serializes BAP Project in various formats using piqi")
-;  (tags (bap bap-plugin))
-;  (depends
-;   (bap-common (= :version))
-;   (bap-std (= :version))
-;   core
-;   (piqi (>= 0.7.8))))
-
 (package
  (name bap-plugins)
  (synopsis "BAP Plugin management library")
@@ -744,7 +730,6 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-bundle (= :version))
   (bap-future (= :version))
   core
-   fileutils
   (ppx_bap (= :version))
    uri))
 
@@ -765,8 +750,7 @@ be seen as a common denominator between Lwt and Async libraries.")
   (monads (= :version))
   (ogre (= :version))
   (ppx_bap (= :version))
-  (regular (= :version))
-   zarith))
+  (regular (= :version))))
 
 (package
  (name bap-primus)
@@ -941,7 +925,6 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-main (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))
-  (bitvec-sexp (= :version))
   (bitvec (= :version))
   core
   (monads (= :version))
@@ -1255,12 +1238,10 @@ between the sets.")
    mmap
   (monads (= :version))
   (ogre (= :version))
-  ounit
+  (ounit2 :with-test)
   (ppx_bap (= :version))
   (regular (= :version))
-   result
    uri
-  (utop (>= 2.0.0))
    uuidm
    zarith))
 
@@ -1309,7 +1290,6 @@ The library provides several algorithms:
   (bap-knowledge (= :version))
   (bap-relation (= :version))
   (bap-std (= :version))
-  (bitvec-order (= :version))
   (bitvec-sexp (= :version))
   (bitvec (= :version))
   core
@@ -1397,7 +1377,6 @@ The library provides several algorithms:
   (bap-std (= :version))
   (bitvec (= :version))
   core
-  (ogre (= :version))
   (ppx_bap (= :version))))
 
 (package
@@ -1412,7 +1391,8 @@ as the interpreter for your BAP scripts, e.g., `baptop myprog.ml`")
  (depends
   (bap-common (= :version))
   (bap-std (= :version))
-  core))
+  core
+  (utop (>= 2.0.0))))
 
 (package
  (name bap-trace)
@@ -1482,8 +1462,7 @@ as the interpreter for your BAP scripts, e.g., `baptop myprog.ml`")
   core
   (ogre (= :version))
   (ppx_bap (= :version))
-  (regular (= :version))
-   zarith))
+  (regular (= :version))))
 
 (package
  (name bare)
@@ -1580,7 +1559,6 @@ and updating documents")
   ppx_assert
   ppx_bench
   ppx_bin_prot
-  ppx_cold
   ppx_compare
   ppx_enumerate
   ppx_fields_conv

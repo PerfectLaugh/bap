@@ -5,16 +5,16 @@
   (pps ppx_bap))
  (libraries
   bap
-  bap-core-theory
-  bap-future
-  bap-knowledge
-  bap-microx
+  
+  
+  
+  
   bap-primus
   bap-taint
   core
-  graphlib
+  
   monads
-  regular))
+  ))
 
 (plugin
  (name primus-propagate-taint)

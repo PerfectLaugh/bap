@@ -9,12 +9,12 @@
   bap-knowledge
   bap-main
   bitvec
-  bitvec-order
-  bitvec-sexp
+  
+  
   core
   graphlib
   monads
   ogre
   regular
-  uuidm
+  
   zarith))

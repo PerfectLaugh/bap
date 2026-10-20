@@ -5,14 +5,14 @@
   (pps ppx_bap))
  (libraries
   bap
-  bap-abi
-  bap-api
+  
+  
   bap-arm
   bap-c
   bap-core-theory
   bap-main
   core
-  monads))
+  ))
 
 (plugin
  (name arm)
