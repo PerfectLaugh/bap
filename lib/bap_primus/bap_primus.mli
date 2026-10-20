@@ -2654,6 +2654,7 @@ module Std : sig
 
       val insn :
         ?disassembled_only:bool ->
+        ?encoding:Theory.language ->
         project ->
         read:(int64 -> int -> string) ->
         int64 ->
@@ -2671,16 +2672,21 @@ module Std : sig
           If [disassembled_only], then only the former are used, and [None]
           isn't cached.
 
-          The instruction has the encoding, that the disassembler found at
-          [addr], e.g., Thumb of ARM, otherwise the default one of the target,
-          e.g., A32, so the Thumb code, that the program writes, e.g., on the
-          heap, is not decoded right. The jumps of a call, which the IR of the
-          instruction has, are the calls, that return to the next instruction,
-          as the program has them. *)
+          The instruction has the [encoding], e.g., Thumb of ARM, that the
+          caller knows, e.g., from the mode of the machine, otherwise the one,
+          that the disassembler found at [addr], otherwise the one, that the
+          target guesses, e.g., from the symbols. The jumps of a call, which the
+          IR of the instruction has, are the calls, that return to the next
+          instruction, as the program has them. *)
 
       val code : project -> int64 -> string option
       (** [code proj addr] the bytes of the instruction at [addr], that [insn]
           lifted last. *)
+
+      val encoding : project -> int64 -> Theory.language option
+      (** [encoding proj addr] the encoding of the instruction at [addr], that
+          [insn] lifted last, e.g., Thumb of ARM, which the disassembler found
+          there, or which the caller asked for. *)
     end
 
     (** The values and the locations of the memory, that the analyses track.

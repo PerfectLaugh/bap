@@ -48,22 +48,25 @@ let unit_of_file file =
     copy Arch.unit_slot >>= fun () ->
     copy Image.Spec.slot >>| fun () -> unit
 
-let decode unit mem =
+let decode ?encoding unit mem =
   let open KB.Syntax in
   let addr = Word.to_bitvec (Memory.min_addr mem) in
   KB.Object.create Theory.Program.cls >>= fun label ->
   KB.provide Theory.Label.addr label (Some addr) >>= fun () ->
   KB.provide Theory.Label.unit label (Some unit) >>= fun () ->
   Theory.Label.target label >>= fun target ->
-  (* the encoding, that the disassembler found for the address, e.g.,
-     of the Thumb code of ARM, which the label of the address has *)
-  Theory.Label.for_addr addr >>= fun known ->
-  KB.collect Theory.Label.encoding known >>= fun disassembled ->
-  (if Theory.Language.is_unknown disassembled then
+  (* the encoding, that the caller knows, e.g., from the mode of the
+     machine, or that the disassembler found for the address, e.g., of
+     the Thumb code of ARM, which the label of the address has *)
+  (match encoding with
+    | Some coding -> KB.return coding
+    | None ->
+        Theory.Label.for_addr addr >>= fun known ->
+        KB.collect Theory.Label.encoding known)
+  >>= fun known ->
+  (if Theory.Language.is_unknown known then
      KB.collect Theory.Label.encoding label
-   else
-     KB.provide Theory.Label.encoding label disassembled >>| fun () ->
-     disassembled)
+   else KB.provide Theory.Label.encoding label known >>| fun () -> known)
   >>= fun coding ->
   match Dis.lookup target coding with
   | Error _ -> KB.return (label, None)
@@ -72,7 +75,7 @@ let decode unit mem =
         ~hit:(fun _ mem insn _ ->
           KB.provide Memory.slot label (Some mem) >>= fun () ->
           KB.provide Dis.Insn.slot label (Some insn) >>| fun () ->
-          Some (Memory.length mem))
+          Some (Memory.length mem, coding))
       >>| fun size -> (label, size)
 
 (* the jumps to the labels of the addresses, which are outside of the
@@ -105,29 +108,31 @@ let addressed width blks =
 (* the IR, that the disassembler computed for the instruction at
    [addr], if it has the bytes, that [code] starts with, which spares
    the loading of the program of the semantics, see above *)
-let disassembled addr code =
+let disassembled ?encoding addr code =
   let result = Toplevel.var "unicorn-disassembled-insn" in
   match
     Toplevel.put result
       (let open KB.Syntax in
        Theory.Label.for_addr (Word.to_bitvec addr) >>= fun label ->
+       KB.collect Theory.Label.encoding label >>= fun coding ->
        KB.collect Memory.slot label >>= function
        | Some mem
          when String.is_prefix code
-                ~prefix:(Bigsubstring.to_string (Memory.to_buffer mem)) ->
+                ~prefix:(Bigsubstring.to_string (Memory.to_buffer mem))
+              && Option.for_all encoding ~f:(Theory.Language.equal coding) ->
            KB.collect Theory.Semantics.slot label >>| fun insn ->
-           Some (Memory.length mem, insn)
+           Some (Memory.length mem, coding, insn)
        | _ -> KB.return None)
   with
   | exception _ -> None
   | () -> (
       match Toplevel.get result with
-      | Some (size, insn) ->
+      | Some (size, coding, insn) ->
           let blks = Blk.from_insn ~addr insn in
           if
             List.exists blks ~f:(fun blk ->
                 Term.length def_t blk + Term.length jmp_t blk > 0)
-          then Some (size, insn)
+          then Some (size, coding, insn)
           else None
       | None | (exception _) -> None)
 
@@ -159,7 +164,7 @@ let ir ~width ~addr ~size insn =
 
 (* the size and the IR of the instruction at [addr], if [code], the
    bytes from [addr], has it *)
-let lift proj addr code =
+let lift ?encoding proj addr code =
   match Project.get proj filename with
   | None -> None
   | Some file -> (
@@ -171,8 +176,9 @@ let lift proj addr code =
           BigEndian
         else LittleEndian
       in
-      match disassembled addr code with
-      | Some (size, insn) -> Some (size, ir ~width ~addr ~size insn)
+      match disassembled ?encoding addr code with
+      | Some (size, coding, insn) ->
+          Some (size, coding, ir ~width ~addr ~size insn)
       | None -> (
           match Memory.create endian addr (Bigstring.of_string code) with
           | Error _ -> None
@@ -188,23 +194,29 @@ let lift proj addr code =
                    KB.promising Theory.Label.unit ~promise:(fun _ ->
                        KB.return (Some unit))
                    @@ fun () ->
-                   decode unit mem >>= fun (label, size) ->
+                   decode ?encoding unit mem >>= fun (label, size) ->
                    match size with
                    | None -> KB.return None
-                   | Some size ->
+                   | Some (size, coding) ->
                        KB.collect Theory.Semantics.slot label >>| fun insn ->
-                       Some (size, insn))
+                       Some (size, coding, insn))
               with
               | exception _ -> None
               | () -> (
                   match Toplevel.get result with
-                  | Some (size, insn) -> Some (size, ir ~width ~addr ~size insn)
+                  | Some (size, coding, insn) ->
+                      Some (size, coding, ir ~width ~addr ~size insn)
                   | None | (exception _) -> None))))
 
 (* the instructions, that x86 has, are at most 15 bytes long *)
 let max_size = 16
 
-type entry = { code : string; insn : (int * blk term list) option }
+type entry = {
+  code : string;
+  encoding : Theory.language option;  (** that the caller asked for *)
+  used : Theory.language;  (** that the instruction has *)
+  insn : (int * blk term list) option;
+}
 
 (* the instructions, which are lifted, with their bytes, so that the
    instruction, whose bytes change, is lifted anew *)
@@ -214,34 +226,45 @@ let lifted : entry Int64.Table.t String.Table.t = String.Table.create ()
    that [read addr n] reads, which are at most [n], or only the one,
    that the disassembler computed, if [disassembled_only], which costs
    less, if it is not cached, e.g., for the guesses of [trap] *)
-let insn ?(disassembled_only = false) proj ~read addr =
+let insn ?(disassembled_only = false) ?encoding proj ~read addr =
   let file = Option.value (Project.get proj filename) ~default:"" in
   let insns = Hashtbl.find_or_add lifted file ~default:Int64.Table.create in
   let bytes = read addr max_size in
-  let remember insn =
-    let code =
-      match insn with
-      | Some (size, _) -> String.prefix bytes size
-      | None -> bytes
+  let remember lifted =
+    let code, used, insn =
+      match lifted with
+      | Some (size, used, blks) ->
+          (String.prefix bytes size, used, Some (size, blks))
+      | None -> (bytes, Theory.Language.unknown, None)
     in
-    Hashtbl.set insns ~key:addr ~data:{ code; insn };
+    Hashtbl.set insns ~key:addr ~data:{ code; encoding; used; insn };
     insn
   in
+  let same = Option.equal Theory.Language.equal in
   match Hashtbl.find insns addr with
-  | Some { code; insn } when String.is_prefix bytes ~prefix:code -> insn
+  | Some { code; encoding = cached; insn; _ }
+    when String.is_prefix bytes ~prefix:code
+         && (Option.is_none encoding || same cached encoding) ->
+      insn
   | _ when String.is_empty bytes -> remember None
   | _ when disassembled_only -> (
       let target = Project.target proj in
       let width = Theory.Target.code_addr_size target in
-      match disassembled (Word.of_int64 ~width addr) bytes with
-      | Some (size, insn) ->
+      match disassembled ?encoding (Word.of_int64 ~width addr) bytes with
+      | Some (size, coding, insn) ->
           let addr = Word.of_int64 ~width addr in
-          remember (Some (size, ir ~width ~addr ~size insn))
+          remember (Some (size, coding, ir ~width ~addr ~size insn))
       | None -> None)
-  | _ -> remember (lift proj addr bytes)
+  | _ -> remember (lift ?encoding proj addr bytes)
 
 (* the bytes of the instruction at [addr], which is lifted *)
 let code proj addr =
   let file = Option.value (Project.get proj filename) ~default:"" in
   Option.bind (Hashtbl.find lifted file) ~f:(fun insns ->
       Option.map (Hashtbl.find insns addr) ~f:(fun { code; _ } -> code))
+
+(* the encoding of the instruction at [addr], which is lifted *)
+let encoding proj addr =
+  let file = Option.value (Project.get proj filename) ~default:"" in
+  Option.bind (Hashtbl.find lifted file) ~f:(fun insns ->
+      Option.map (Hashtbl.find insns addr) ~f:(fun { used; _ } -> used))

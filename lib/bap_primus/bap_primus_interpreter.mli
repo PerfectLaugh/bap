@@ -114,7 +114,3 @@ module Make (Machine : Machine) : sig
   val tick : unit m
   val time : Time.t m
 end
-
-module LinkBinaryProgram (Machine : Machine) : sig
-  val init : unit -> unit Machine.t
-end

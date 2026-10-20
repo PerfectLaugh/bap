@@ -370,7 +370,7 @@ let raised_at (arch : Uc.arch) n =
    see [Lift.insn]. The instruction is at [pc], or ends there, as Unicorn
    raises the interrupt, see [raised_at], and returns the address, from
    which Unicorn continues. *)
-let trap proj ~read (arch : Uc.arch) ~thumb n pc =
+let trap proj ~read ?encoding (arch : Uc.arch) ~thumb n pc =
   let sizes =
     match arch with
     | X86 -> List.range 1 16
@@ -378,7 +378,7 @@ let trap proj ~read (arch : Uc.arch) ~thumb n pc =
     | _ -> [ 4 ]
   in
   let at () =
-    Option.bind (Lift.insn proj ~read pc) ~f:(fun (size, blks) ->
+    Option.bind (Lift.insn ?encoding proj ~read pc) ~f:(fun (size, blks) ->
         Option.map (site_of_blocks blks) ~f:(fun site ->
             (site, Int64.(pc + of_int size))))
   and before () =
@@ -387,7 +387,8 @@ let trap proj ~read (arch : Uc.arch) ~thumb n pc =
     List.find_map [ true; false ] ~f:(fun disassembled_only ->
         List.find_map sizes ~f:(fun size ->
             match
-              Lift.insn ~disassembled_only proj ~read Int64.(pc - of_int size)
+              Lift.insn ~disassembled_only ?encoding proj ~read
+                Int64.(pc - of_int size)
             with
             | Some (n, blks) when n = size ->
                 Option.map (site_of_blocks blks) ~f:(fun site -> (site, pc))
@@ -1751,6 +1752,17 @@ module Make (Machine : Primus.Machine.S) = struct
         else pc
     | _ -> pc
 
+  (* the Thumb code of ARM, see [Lift.insn] *)
+  let thumb_encoding =
+    lazy
+      (match Theory.Language.read ~package:"bap" "llvm-thumb" with
+      | language -> Some language
+      | exception _ -> None)
+
+  (* the address of the code in the Thumb state of ARM, see [current_pc] *)
+  let in_thumb (e : engine) pc =
+    match e.arch with Arm -> Int64.(pc land 1L = 1L) | _ -> false
+
   (* the address of the instruction at [pc] *)
   let code_addr e pc =
     match e.arch with Arm -> Int64.(pc land lnot 1L) | _ -> pc
@@ -1994,15 +2006,18 @@ module Make (Machine : Primus.Machine.S) = struct
       String.of_char_list (List.rev (bytes 0 []))
 
   (* the instruction at [addr], decoded from its current bytes *)
-  let lift e addr =
+  (* the instruction at [addr], decoded from its current bytes, in
+     the Thumb mode, if Unicorn runs the Thumb code *)
+  let lift ?(thumb = false) e addr =
     let* proj = Machine.get () in
     let+ read = code_reader e addr in
-    Lift.insn proj ~read addr
+    let encoding = if thumb then Lazy.force thumb_encoding else None in
+    Lift.insn ?encoding proj ~read addr
 
   (* the accesses of the instruction at [addr], which are analyzed
      anew, if its bytes changed *)
-  let analyze e addr =
-    let* insn = lift e addr in
+  let analyze ?thumb e addr =
+    let* insn = lift ?thumb e addr in
     let+ proj = Machine.get () in
     let code = Option.value (Lift.code proj addr) ~default:"" in
     match Hashtbl.find e.accesses addr with
@@ -2034,7 +2049,7 @@ module Make (Machine : Primus.Machine.S) = struct
       | [] -> false
     then Machine.return false
     else
-      let* { uses; memory; _ } = analyze e addr in
+      let* { uses; memory; _ } = analyze ~thumb:(in_thumb e pc) e addr in
       if List.exists uses ~f:(Hash_set.mem e.tracked) then Machine.return true
       else if memory then Track.has_marks
       else Machine.return false
@@ -2046,7 +2061,7 @@ module Make (Machine : Primus.Machine.S) = struct
   let interpret e pc =
     let* () = pull e in
     let rec run pc n =
-      lift e (code_addr e pc) >>= function
+      lift ~thumb:(in_thumb e pc) e (code_addr e pc) >>= function
       | None -> fail "can't interpret the instruction at %Lx" pc
       | Some (size, blks) ->
           let next = Int64.(pc + of_int size) in
@@ -2165,13 +2180,19 @@ module Make (Machine : Primus.Machine.S) = struct
               | `Continue -> loop pc
               | `Interpret -> interpret e pc >>= loop)
           | Some (Interpret _), _ -> interpret e pc >>= loop
-          | Some (Unknown addr), _ -> analyze e addr >>= fun _ -> loop pc
+          | Some (Unknown addr), _ ->
+              analyze ~thumb:(in_thumb e pc) e addr >>= fun _ -> loop pc
           | Some (Interrupt n), _ -> (
               let* () = Interpreter.interrupt n in
               let* proj = Machine.get () in
               let thumb = Int64.(pc land 1L = 1L) in
               let* read = code_reader e (code_addr e pc) in
-              match trap proj ~read e.arch ~thumb n (code_addr e pc) with
+              let encoding =
+                if in_thumb e pc then Lazy.force thumb_encoding else None
+              in
+              match
+                trap proj ~read ?encoding e.arch ~thumb n (code_addr e pc)
+              with
               | Some (site, next) ->
                   call_intrinsic e site >>= fun () ->
                   loop (if thumb then Int64.(next lor 1L) else next)

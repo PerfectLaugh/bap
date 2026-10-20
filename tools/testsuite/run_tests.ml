@@ -1030,8 +1030,76 @@ let patched_code data =
           contains env "interprets the return of print" out
             "interpreted jump to 0x202FB")
   in
+  (* the Thumb code, that the program writes, as print calls it, after
+     the first call of putchar, instead of its putchar of the newline,
+     through the address with the Thumb bit, which calls putchar with +,
+     whose return Primus interprets, if the stack is tainted:
+
+     0x8000: push {lr}; movs r0, #0x2b; blx putchar; pop {pc}
+     0x202d0: movw r3, #0x8001; blx r3 *)
+  let generated ~taint system =
+    let name =
+      "run/generated-code/" ^ system
+      ^ (if taint then "/tainted/" else "/")
+      ^ "arm-linux-gnueabihf-thumb-crc"
+    in
+    case name (fun env ->
+        ignore
+          (write env "generating.lisp"
+             (Printf.sprintf
+                {|(defparameter *patched* nil)
+
+(defmethod call (name c)
+  (when (and (= name 'putchar) (not *patched*))
+    (set *patched* true)
+    %s
+    (memory-allocate 0x8000 0x1000)
+    (memory-write (memory-write (memory-write (memory-write (memory-write
+      (memory-write (memory-write (memory-write (memory-write (memory-write
+        0x8000 0x00:8) 0xb5:8) 0x2b:8) 0x20:8) 0x18:8) 0xf0:8) 0x8c:8) 0xe9:8)
+        0x00:8) 0xbd:8)
+    (memory-protect 0x8000 0x1000 5)
+    (memory-protect 0x202d0 6 7)
+    (memory-write (memory-write (memory-write (memory-write (memory-write
+      (memory-write 0x202d0 0x48:8) 0xf2:8) 0x01:8) 0x03:8) 0x98:8) 0x47:8)
+    (memory-protect 0x202d0 6 5)))
+
+%s
+|}
+                (if taint then
+                   "(taint-introduce-indirectly 'stack (- SP 64) 128)"
+                 else "")
+                (if taint then
+                   {|(defmethod jumping (c dst) (msg "interpreted jump to $0" dst))|}
+                 else "")));
+        let out =
+          bap env
+            ([
+               path data "bin/arm-linux-gnueabihf-thumb-crc";
+               "--passes=run";
+               "--no-objdump";
+               "--run-systems=" ^ system;
+               "--primus-lisp-add=" ^ dir env;
+               "--primus-lisp-load=posix,generating";
+               "--primus-print-observations=lisp-message,exception";
+             ]
+            @
+            if taint then
+              [
+                "--run-components=bap:taint-primitives,bap:propagate-taint-by-computation,bap:select-default-taint-policy";
+              ]
+            else [])
+        in
+        contains env "prints + from the generated code" out "1489580789+";
+        lacks env "returns from print" out "Segmentation fault";
+        if taint then
+          contains env "interprets the return of the generated code" out
+            "interpreted jump to 0x202D7")
+  in
   let systems = [ "bap:stubbed-executor"; "bap:unicorn-executor" ] in
   List.map taint systems @ List.map thumb systems
+  @ List.map (generated ~taint:false) systems
+  @ [ generated ~taint:true "bap:unicorn-executor" ]
   @ List.concat_map
       (fun system -> List.map (fun e -> echo e system) echos)
       systems

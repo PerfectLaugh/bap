@@ -416,7 +416,7 @@ let from_file = Parser.from_file
 
 let () =
   Components.register_generic "load-binary"
-    (module Bap_primus_interpreter.LinkBinaryProgram)
+    (module Bap_primus_dynamic.LinkBinaryProgram)
     ~package:"bap"
     ~desc:
       "Links the binary program into the Primus machine. All symbols of the \
@@ -425,5 +425,6 @@ let () =
        changes, or writes, e.g., on the heap, runs as it is in the memory, \
        lifted when it runs, except that a block, that changes, while it runs, \
        runs as it was until the program jumps to it again, a subroutine, whose \
-       code changed, posts no call observations, and the code of ARM, that has \
-       no known encoding, e.g., on the heap, is decoded as A32, not Thumb."
+       code changed, posts no call observations, and the dynamic code of ARM \
+       enters Thumb by the jumps to the odd addresses, and stays in the mode \
+       of the code, that jumps directly, e.g., by [blx label] to the A32 code."
