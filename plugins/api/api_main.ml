@@ -171,7 +171,15 @@ let promise_noreturn paths files =
       in
       Option.some_if (Set.mem (Lazy.force names) name) true
 
+(* the folders of the project, see [Bap_api.with_paths], are searched
+   after those of the options *)
 let main paths files proj =
+  let paths =
+    paths
+    @ List.filter_map (Bap_api.paths proj) ~f:(fun p ->
+        let p = Api_path.of_string p in
+        match Api_path.is_dir p with Ok true -> Some p | _ -> None)
+  in
   Bap_api.processors () |> List.map ~f:(mapper paths files) |> Result.all
   |> function
   | Error e ->

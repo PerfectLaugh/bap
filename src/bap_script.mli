@@ -41,6 +41,7 @@ val project :
   ?bare:bool ->
   ?loader:string ->
   ?target:Bap_core_theory.Theory.Target.t ->
+  ?api:string list ->
   ?lisp:lisp ->
   string ->
   project
@@ -50,8 +51,10 @@ val project :
     [~bare:true] the disassembly and the lifting are skipped: the program
     contains only the subroutines that the knowledge base knows, e.g., from the
     symbols of the file, for the executors that run the code natively, e.g., the
-    [bap:unicorn-executor] system. The Primus machines, that run the program,
-    load the [lisp] program, see [Primus.Lisp.Load.with_features]. *)
+    [bap:unicorn-executor] system. The api pass applies the api files of the
+    folders [api] too, see [Bap_api.with_paths], e.g., the prototypes of the
+    functions of a target, and the Primus machines, that run the program, load
+    the [lisp] program, see [Primus.Lisp.Load.with_features]. *)
 
 val run_pass : string -> project -> project
 (** [run_pass name project] runs the pass, e.g., ["api"], after its

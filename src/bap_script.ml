@@ -183,13 +183,14 @@ type lisp = { paths : string list; features : string list }
    that are flagged with autorun, e.g., the api pass, first; with [~bare]
    the disassembly and the lifting are skipped, for the executors that
    run the code natively *)
-let project ?(bare = false) ?(loader = "llvm") ?target ?lisp file =
+let project ?(bare = false) ?(loader = "llvm") ?target ?(api = []) ?lisp file =
   init ();
   let state = if bare then Some Project.empty_state else None in
   match Project.create ?state (Project.Input.load ~loader ?target file) with
   | Error err -> fail "can't load %s: %a" file Error.pp err
   | Ok proj ->
       let proj = if bare then synthesize_program proj else proj in
+      let proj = Bap_api.with_paths proj api in
       let proj =
         match lisp with
         | None -> proj

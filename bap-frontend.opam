@@ -10,6 +10,7 @@ homepage: "https://github.com/BinaryAnalysisPlatform/bap"
 bug-reports: "https://github.com/BinaryAnalysisPlatform/bap/issues"
 depends: [
   "dune" {>= "3.24"}
+  "bap-api" {= version}
   "bap-core-theory" {= version}
   "bap-knowledge" {= version}
   "bap-main" {= version}

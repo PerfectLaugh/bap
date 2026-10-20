@@ -56,3 +56,16 @@ val noreturn_reader : string -> (filename -> string list Or_error.t) option
     never return in the api files in the [language], if one is registered.
 
     @since 2.6.0 *)
+
+val with_paths : project -> string list -> project
+(** [with_paths project paths] the [project], to which the api pass applies the
+    api files of the folders [paths] too, e.g., [api/powerpc], whose files are
+    in the folders of their languages, e.g., [api/powerpc/c/powerpc.h], besides
+    the folders of the options.
+
+    @since 2.6.0 *)
+
+val paths : project -> string list
+(** [paths project] the folders, that {!with_paths} added to the [project]
+
+    @since 2.6.0 *)

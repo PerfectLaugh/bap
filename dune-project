@@ -521,6 +521,7 @@ details of the program behavior.")
  (synopsis "The main BAP command-line tool")
  (tags (bap bap-command))
  (depends
+  (bap-api (= :version))
   (bap-core-theory (= :version))
   (bap-knowledge (= :version))
   (bap-main (= :version))
