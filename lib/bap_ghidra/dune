@@ -13,7 +13,9 @@
    ; dune tracks only the *.h headers of the dependencies
    ../bap_disasm/disasm.hpp
    libghidra/include)
-  (flags :standard -fPIC -isystem libghidra/include))
+  ; the headers of the library include its bundled zlib, see
+  ; libghidra/build.cmake, as the library is built with it
+  (flags :standard -fPIC -DLOCAL_ZLIB -isystem libghidra/include))
  ; the stubs that call the program, see ghidra_register.cpp
  (foreign_stubs
   (language cxx)

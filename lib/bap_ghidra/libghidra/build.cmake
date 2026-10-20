@@ -6,6 +6,8 @@
 # Produces in the current directory:
 #   libdecomp.a     - the static decompiler library
 #   include/ghidra/ - its headers
+#   include/zlib/   - the headers of the zlib, that it bundles, which its
+#                     headers include with LOCAL_ZLIB, as the stubs do
 #   Processors/     - the compiled processor specifications
 #   Processors.zip  - the same, installed on Windows instead
 #   c.flags         - the flags of the stubs that call the library
@@ -158,7 +160,8 @@ list(TRANSFORM SLEIGH_COMPILER REPLACE "(.+)" "${SRC}/\\1.cc")
 # the sources of zlib, which the decompiler bundles and selects with
 # LOCAL_ZLIB, are compiled into the library, so that it doesn't depend
 # on the zlib of the system
-file(GLOB ZLIB "${WORK}/${ZLIB}/*.c")
+set(ZLIB_SRC "${WORK}/${ZLIB}")
+file(GLOB ZLIB "${ZLIB_SRC}/*.c")
 
 # the first word of a dune compiler command, without its flags
 function(compiler var cmd default)
@@ -257,6 +260,12 @@ file(COPY_FILE "${WORK}/build/libdecomp.a" "${OUT}/libdecomp.a")
 file(MAKE_DIRECTORY "${OUT}/include/ghidra")
 file(GLOB headers "${SRC}/*.h" "${SRC}/*.hh")
 file(COPY ${headers} DESTINATION "${OUT}/include/ghidra")
+# the headers of the library include the headers of the bundled zlib as
+# ../zlib/zlib.h, see compression.hh, so that the stubs don't need the
+# zlib of the system, which the mingw-w64 toolchain of Windows lacks
+file(MAKE_DIRECTORY "${OUT}/include/zlib")
+file(GLOB zlib_headers "${ZLIB_SRC}/*.h")
+file(COPY ${zlib_headers} DESTINATION "${OUT}/include/zlib")
 file(COPY "${WORK}/${GHIDRA_ROOT}/Ghidra/Processors" DESTINATION "${OUT}")
 
 # dune can't install directories on Windows, where it copies them as
