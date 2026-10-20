@@ -1,0 +1,415 @@
+# exited with 0
+sub _start(_start_result)
+  calls exit main
+sub answer(answer_result)
+sub exit(exit_code)
+sub fgetc(fgetc_stream, fgetc_result)
+sub getchar(getchar_result)
+sub main(main_argc, main_argv, main_result)
+  calls answer putchar
+sub putchar(putchar_c, putchar_result)
+sub sub_2016e(sub_2016e_result)
+  calls intrinsic:breakpoint
+sub sub_2016f(sub_2016f_result)
+  calls intrinsic:breakpoint
+sub sub_20174(sub_20174_result)
+  calls intrinsic:breakpoint
+sub sub_20175(sub_20175_result)
+  calls intrinsic:breakpoint
+sub sub_20176(sub_20176_result)
+  calls intrinsic:breakpoint
+sub sub_20177(sub_20177_result)
+  calls intrinsic:breakpoint
+sub sub_20178(sub_20178_result)
+  calls intrinsic:breakpoint
+sub sub_20179(sub_20179_result)
+  calls intrinsic:breakpoint
+sub sub_2017a(sub_2017a_result)
+  calls intrinsic:breakpoint
+sub sub_2017b(sub_2017b_result)
+  calls intrinsic:breakpoint
+sub sub_2017c(sub_2017c_result)
+  calls intrinsic:breakpoint
+sub sub_2017d(sub_2017d_result)
+  calls intrinsic:breakpoint
+sub sub_2017e(sub_2017e_result)
+  calls intrinsic:breakpoint
+sub sub_2017f(sub_2017f_result)
+  calls intrinsic:breakpoint
+sub intrinsic:breakpoint()
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = mem[ESP + 4, el]:u32
+#2: main_argv :: in out u32 = mem[ESP + 8, el]:u32
+#3: main_result :: out u32 = EAX
+
+#4:
+#5: ESP := ESP - 4
+#6: mem := mem with [ESP, el]:u32 <- EBP
+#7: EBP := ESP
+#8: ESP := ESP - 4
+#9: mem := mem with [ESP, el]:u32 <- EBX
+#10: ESP := ESP - 4
+#11: mem := mem with [ESP, el]:u32 <- EDI
+#12: ESP := ESP - 4
+#13: mem := mem with [ESP, el]:u32 <- ESI
+#14: CF := 0
+#15: OF := 0
+#16: SF := 31:31[ESP & 0xFFFFFFF0]
+#17: ZF := (ESP & 0xFFFFFFF0) = 0
+#18: #30 := low:8[ESP & 0xFFFFFFF0]
+#19: #31 := #30 ^ #30 >> 4
+#20: #32 := #31 ^ #31 >> 2
+#21: #33 := #32 ^ #32 >> 1
+#22: PF := ~0:0[#33]
+#23: ESP := ESP & 0xFFFFFFF0
+#24: #34 := ESP - 0x20
+#25: CF := 31:31[~ESP & 0x20 | ~(ESP ^ 0x20) & #34]
+#26: OF := 31:31[(ESP ^ 0x20) & (ESP ^ #34)]
+#27: AF := 0:0[(#34 ^ ESP ^ 0x20) >> 4]
+#28: SF := 31:31[#34]
+#29: ZF := #34 = 0
+#30: #35 := low:8[#34]
+#31: #36 := #35 ^ #35 >> 4
+#32: #37 := #36 ^ #36 >> 2
+#33: #38 := #37 ^ #37 >> 1
+#34: PF := ~0:0[#38]
+#35: ESP := #34
+#36: EBX := high:24[EBX].0x62
+#37: EDI := 0xFFFFFFFA
+#38: ESP := ESP - 4
+#39: mem := mem with [ESP, el]:u32 <- 0x20038
+#40: call @answer with return %#41
+
+#41:
+#42: ESI := EAX
+#43: goto %#44
+
+#44:
+#45: EAX := extend:32[7:0[EBX]]
+#46: mem := mem with [ESP, el]:u32 <- EAX
+#47: ESP := ESP - 4
+#48: mem := mem with [ESP, el]:u32 <- 0x2004B
+#49: call @putchar with return %#50
+
+#50:
+#51: EBX := pad:32[mem[EDI + 0x201D6]]
+#52: #66 := CF
+#53: #67 := EDI + 1
+#54: CF := 31:31[EDI] & ~31:31[#67]
+#55: OF := ~31:31[EDI] & 31:31[#67]
+#56: AF := 0:0[(#67 ^ EDI ^ 1) >> 4]
+#57: SF := 31:31[#67]
+#58: ZF := #67 = 0
+#59: #68 := low:8[#67]
+#60: #69 := #68 ^ #68 >> 4
+#61: #70 := #69 ^ #69 >> 2
+#62: #71 := #70 ^ #70 >> 1
+#63: PF := ~0:0[#71]
+#64: #72 := #67
+#65: CF := #66
+#66: EDI := #72
+#67: #74 := ~ZF
+#68: when #74 goto %#44
+#69: goto %#70
+
+#70:
+#71: mem := mem with [ESP, el]:u32 <- 0x20
+#72: ESP := ESP - 4
+#73: mem := mem with [ESP, el]:u32 <- 0x20061
+#74: call @putchar with return %#75
+
+#75:
+#76: mem := mem with [ESP + 0x1B] <- 0
+#77: EDI := ESP + 0x1C
+#78: goto %#79
+
+#79:
+#80: EAX := ESI
+#81: CF := 0
+#82: OF := 0
+#83: SF := 31:31[EAX & 0xF]
+#84: ZF := (EAX & 0xF) = 0
+#85: #78 := low:8[EAX & 0xF]
+#86: #79 := #78 ^ #78 >> 4
+#87: #80 := #79 ^ #79 >> 2
+#88: #81 := #80 ^ #80 >> 1
+#89: PF := ~0:0[#81]
+#90: EAX := EAX & 0xF
+#91: EAX := pad:32[mem[EAX + 0x201D6]]
+#92: mem := mem with [EDI - 2] <- 7:0[EAX]
+#93: #86 := ESI >> 4
+#94: CF := 31:31[ESI << 0x1C]
+#95: SF := 31:31[#86]
+#96: ZF := #86 = 0
+#97: #87 := low:8[#86]
+#98: #88 := #87 ^ #87 >> 4
+#99: #89 := #88 ^ #88 >> 2
+#100: #90 := #89 ^ #89 >> 1
+#101: PF := ~0:0[#90]
+#102: ESI := #86
+#103: #91 := CF
+#104: #92 := EDI - 1
+#105: CF := 31:31[~EDI & 1 | ~(EDI ^ 1) & #92]
+#106: OF := 31:31[(EDI ^ 1) & (EDI ^ #92)]
+#107: AF := 0:0[(#92 ^ EDI ^ 1) >> 4]
+#108: SF := 31:31[#92]
+#109: ZF := #92 = 0
+#110: #93 := low:8[#92]
+#111: #94 := #93 ^ #93 >> 4
+#112: #95 := #94 ^ #94 >> 2
+#113: #96 := #95 ^ #95 >> 1
+#114: PF := ~0:0[#96]
+#115: #97 := #92
+#116: CF := #91
+#117: EDI := #97
+#118: CF := 0
+#119: OF := 0
+#120: SF := 31:31[ESI]
+#121: ZF := ESI = 0
+#122: #98 := low:8[ESI]
+#123: #99 := #98 ^ #98 >> 4
+#124: #100 := #99 ^ #99 >> 2
+#125: #101 := #100 ^ #100 >> 1
+#126: PF := ~0:0[#101]
+#127: #103 := ~ZF
+#128: when #103 goto %#79
+#129: goto %#130
+
+#130:
+#131: goto %#132
+
+#132:
+#133: EAX := extend:32[7:0[EAX]]
+#134: mem := mem with [ESP, el]:u32 <- EAX
+#135: ESP := ESP - 4
+#136: mem := mem with [ESP, el]:u32 <- 0x2009B
+#137: call @putchar with return %#138
+
+#138:
+#139: EAX := pad:32[mem[EDI]]
+#140: #107 := CF
+#141: #108 := EDI + 1
+#142: CF := 31:31[EDI] & ~31:31[#108]
+#143: OF := ~31:31[EDI] & 31:31[#108]
+#144: AF := 0:0[(#108 ^ EDI ^ 1) >> 4]
+#145: SF := 31:31[#108]
+#146: ZF := #108 = 0
+#147: #109 := low:8[#108]
+#148: #110 := #109 ^ #109 >> 4
+#149: #111 := #110 ^ #110 >> 2
+#150: #112 := #111 ^ #111 >> 1
+#151: PF := ~0:0[#112]
+#152: #113 := #108
+#153: CF := #107
+#154: EDI := #113
+#155: CF := 0
+#156: OF := 0
+#157: SF := 7:7[EAX]
+#158: ZF := 7:0[EAX] = 0
+#159: #114 := 7:0[EAX]
+#160: #115 := #114 ^ #114 >> 4
+#161: #116 := #115 ^ #115 >> 2
+#162: #117 := #116 ^ #116 >> 1
+#163: PF := ~0:0[#117]
+#164: #119 := ~ZF
+#165: when #119 goto %#132
+#166: goto %#167
+
+#167:
+#168: mem := mem with [ESP, el]:u32 <- 0xA
+#169: ESP := ESP - 4
+#170: mem := mem with [ESP, el]:u32 <- 0x200AF
+#171: call @putchar with return %#172
+
+#172:
+#173: #124 := CF
+#174: #125 := mem[0x20170, el]:u32 + 1
+#175: CF := 31:31[mem[0x20170, el]:u32] & ~31:31[#125]
+#176: OF := ~31:31[mem[0x20170, el]:u32] & 31:31[#125]
+#177: AF := 0:0[(#125 ^ mem[0x20170, el]:u32 ^ 1) >> 4]
+#178: SF := 31:31[#125]
+#179: ZF := #125 = 0
+#180: #126 := low:8[#125]
+#181: #127 := #126 ^ #126 >> 4
+#182: #128 := #127 ^ #127 >> 2
+#183: #129 := #128 ^ #128 >> 1
+#184: PF := ~0:0[#129]
+#185: #130 := #125
+#186: CF := #124
+#187: mem := mem with [0x20170, el]:u32 <- #130
+#188: EBX := high:24[EBX].0x61
+#189: EDI := 0xFFFFFFFB
+#190: ESP := ESP - 4
+#191: mem := mem with [ESP, el]:u32 <- 0x200C1
+#192: call @answer with return %#193
+
+#193:
+#194: ESI := EAX
+#195: goto %#196
+
+#196:
+#197: EAX := extend:32[7:0[EBX]]
+#198: mem := mem with [ESP, el]:u32 <- EAX
+#199: ESP := ESP - 4
+#200: mem := mem with [ESP, el]:u32 <- 0x200DB
+#201: call @putchar with return %#202
+
+#202:
+#203: EBX := pad:32[mem[EDI + 0x201ED]]
+#204: #135 := CF
+#205: #136 := EDI + 1
+#206: CF := 31:31[EDI] & ~31:31[#136]
+#207: OF := ~31:31[EDI] & 31:31[#136]
+#208: AF := 0:0[(#136 ^ EDI ^ 1) >> 4]
+#209: SF := 31:31[#136]
+#210: ZF := #136 = 0
+#211: #137 := low:8[#136]
+#212: #138 := #137 ^ #137 >> 4
+#213: #139 := #138 ^ #138 >> 2
+#214: #140 := #139 ^ #139 >> 1
+#215: PF := ~0:0[#140]
+#216: #141 := #136
+#217: CF := #135
+#218: EDI := #141
+#219: #143 := ~ZF
+#220: when #143 goto %#196
+#221: goto %#222
+
+#222:
+#223: mem := mem with [ESP, el]:u32 <- 0x20
+#224: ESP := ESP - 4
+#225: mem := mem with [ESP, el]:u32 <- 0x200F1
+#226: call @putchar with return %#227
+
+#227:
+#228: mem := mem with [ESP + 0x1B] <- 0
+#229: EDI := ESP + 0x1C
+#230: goto %#231
+
+#231:
+#232: EAX := ESI
+#233: CF := 0
+#234: OF := 0
+#235: SF := 31:31[EAX & 0xF]
+#236: ZF := (EAX & 0xF) = 0
+#237: #147 := low:8[EAX & 0xF]
+#238: #148 := #147 ^ #147 >> 4
+#239: #149 := #148 ^ #148 >> 2
+#240: #150 := #149 ^ #149 >> 1
+#241: PF := ~0:0[#150]
+#242: EAX := EAX & 0xF
+#243: EAX := pad:32[mem[EAX + 0x201D6]]
+#244: mem := mem with [EDI - 2] <- 7:0[EAX]
+#245: #155 := ESI >> 4
+#246: CF := 31:31[ESI << 0x1C]
+#247: SF := 31:31[#155]
+#248: ZF := #155 = 0
+#249: #156 := low:8[#155]
+#250: #157 := #156 ^ #156 >> 4
+#251: #158 := #157 ^ #157 >> 2
+#252: #159 := #158 ^ #158 >> 1
+#253: PF := ~0:0[#159]
+#254: ESI := #155
+#255: #160 := CF
+#256: #161 := EDI - 1
+#257: CF := 31:31[~EDI & 1 | ~(EDI ^ 1) & #161]
+#258: OF := 31:31[(EDI ^ 1) & (EDI ^ #161)]
+#259: AF := 0:0[(#161 ^ EDI ^ 1) >> 4]
+#260: SF := 31:31[#161]
+#261: ZF := #161 = 0
+#262: #162 := low:8[#161]
+#263: #163 := #162 ^ #162 >> 4
+#264: #164 := #163 ^ #163 >> 2
+#265: #165 := #164 ^ #164 >> 1
+#266: PF := ~0:0[#165]
+#267: #166 := #161
+#268: CF := #160
+#269: EDI := #166
+#270: CF := 0
+#271: OF := 0
+#272: SF := 31:31[ESI]
+#273: ZF := ESI = 0
+#274: #167 := low:8[ESI]
+#275: #168 := #167 ^ #167 >> 4
+#276: #169 := #168 ^ #168 >> 2
+#277: #170 := #169 ^ #169 >> 1
+#278: PF := ~0:0[#170]
+#279: #172 := ~ZF
+#280: when #172 goto %#231
+#281: goto %#282
+
+#282:
+#283: goto %#284
+
+#284:
+#285: EAX := extend:32[7:0[EAX]]
+#286: mem := mem with [ESP, el]:u32 <- EAX
+#287: ESP := ESP - 4
+#288: mem := mem with [ESP, el]:u32 <- 0x2012B
+#289: call @putchar with return %#290
+
+#290:
+#291: EAX := pad:32[mem[EDI]]
+#292: #176 := CF
+#293: #177 := EDI + 1
+#294: CF := 31:31[EDI] & ~31:31[#177]
+#295: OF := ~31:31[EDI] & 31:31[#177]
+#296: AF := 0:0[(#177 ^ EDI ^ 1) >> 4]
+#297: SF := 31:31[#177]
+#298: ZF := #177 = 0
+#299: #178 := low:8[#177]
+#300: #179 := #178 ^ #178 >> 4
+#301: #180 := #179 ^ #179 >> 2
+#302: #181 := #180 ^ #180 >> 1
+#303: PF := ~0:0[#181]
+#304: #182 := #177
+#305: CF := #176
+#306: EDI := #182
+#307: CF := 0
+#308: OF := 0
+#309: SF := 7:7[EAX]
+#310: ZF := 7:0[EAX] = 0
+#311: #183 := 7:0[EAX]
+#312: #184 := #183 ^ #183 >> 4
+#313: #185 := #184 ^ #184 >> 2
+#314: #186 := #185 ^ #185 >> 1
+#315: PF := ~0:0[#186]
+#316: #188 := ~ZF
+#317: when #188 goto %#284
+#318: goto %#319
+
+#319:
+#320: mem := mem with [ESP, el]:u32 <- 0xA
+#321: ESP := ESP - 4
+#322: mem := mem with [ESP, el]:u32 <- 0x2013F
+#323: call @putchar with return %#324
+
+#324:
+#325: CF := 0
+#326: OF := 0
+#327: SF := 0
+#328: ZF := 1
+#329: #191 := 0
+#330: #192 := #191 ^ #191 >> 4
+#331: #193 := #192 ^ #192 >> 2
+#332: #194 := #193 ^ #193 >> 1
+#333: PF := ~0:0[#194]
+#334: EAX := 0
+#335: ESP := EBP - 0xC
+#336: #195 := mem[ESP, el]:u32
+#337: ESP := ESP + 4
+#338: ESI := #195
+#339: #196 := mem[ESP, el]:u32
+#340: ESP := ESP + 4
+#341: EDI := #196
+#342: #197 := mem[ESP, el]:u32
+#343: ESP := ESP + 4
+#344: EBX := #197
+#345: #198 := mem[ESP, el]:u32
+#346: ESP := ESP + 4
+#347: EBP := #198
+#348: #199 := mem[ESP, el]:u32
+#349: ESP := ESP + 4
+#350: call #199 with noreturn
+

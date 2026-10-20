@@ -1,0 +1,21 @@
+# exited with 0
+sub sub_3d(sub_3d_result)
+  calls sub_4b sum_internal_1
+sub sub_4b(sub_4b_result)
+sub sub_8e(sub_8e_result)
+  calls sub_c3
+sub sub_ad(sub_ad_result)
+  calls sub_c3
+sub sub_c0(sub_c0_result)
+  calls sub_c3
+sub sub_c3(sub_c3_result)
+sub sum_internal_1(sum_internal_1_result)
+sub sum_internal_2(sum_internal_2_result)
+  calls sub_3d sum_internal_3
+sub sum_internal_3(sum_internal_3_result)
+  calls sub_8e sub_ad sub_c0 sum_external sum_internal_1 sum_internal_2
+sub sum_external(sum_external_result)
+sub _sum_external(_sum_external_result)
+sub _sum_internal_1(_sum_internal_1_result)
+sub _sum_internal_2(_sum_internal_2_result)
+sub _sum_internal_3(_sum_internal_3_result)

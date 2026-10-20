@@ -1,0 +1,10 @@
+# exited with 0
+sub exit(exit_code)
+sub fgetc(fgetc_stream, fgetc_result)
+  calls putchar
+sub putchar(putchar_c, putchar_result)
+  calls exit
+sub sub_1416(sub_1416_result)
+  calls fgetc putchar
+sub sub_149a(sub_149a_result)
+  calls exit sub_1416

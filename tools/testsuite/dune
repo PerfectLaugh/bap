@@ -13,6 +13,15 @@
 ;   dune build @install && dune exec -- tools/testsuite/run.exe -help
 ;
 ; for the OUnit options, e.g., -list-test and -only-test.
+;
+; The golden cases compare the specifications that the loaders make of the
+; files of the testsuite, and the summaries of the programs that bap lifts
+; from them, with the files of the golden folder, and keep the actual ones
+; in the outputs of the failed cases. After an intended change, update them with
+;
+;   BAP_TESTSUITE_PROMOTE=1 BAP_TESTS=golden/ dune build @testsuite
+;
+; and review their diff.
 
 ; the cases make and remove the paths of bap, which can be longer than
 ; Windows allows, unless the program is aware of the long paths, see src/dune

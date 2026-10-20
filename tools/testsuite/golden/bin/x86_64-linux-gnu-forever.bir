@@ -1,0 +1,69 @@
+# exited with 0
+sub __do_global_dtors_aux(__do_global_dtors_aux_result)
+  calls deregister_tm_clones
+sub _dl_relocate_static_pie(_dl_relocate_static_pie_result)
+sub _fini(_fini_result)
+sub _init(_init_result)
+sub _start(_start_result)
+  calls __libc_start_main _dl_relocate_static_pie intrinsic:hlt
+sub deregister_tm_clones(deregister_tm_clones_result)
+sub frame_dummy(frame_dummy_result)
+  calls register_tm_clones
+sub main(main_argc, main_argv, main_result)
+  calls putc
+sub putc(putc_c, putc_stream, putc_result)
+sub register_tm_clones(register_tm_clones_result)
+sub intrinsic:hlt()
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[RDI]
+#2: main_argv :: in out u64 = RSI
+#3: main_result :: out u32 = low:32[RAX]
+
+#4:
+#5: #82 := RSP - 0x18
+#6: CF := 63:63[~RSP & 0x18 | ~(RSP ^ 0x18) & #82]
+#7: OF := 63:63[(RSP ^ 0x18) & (RSP ^ #82)]
+#8: AF := 0:0[(#82 ^ RSP ^ 0x18) >> 4]
+#9: SF := 63:63[#82]
+#10: ZF := #82 = 0
+#11: #83 := low:8[#82]
+#12: #84 := #83 ^ #83 >> 4
+#13: #85 := #84 ^ #84 >> 2
+#14: #86 := #85 ^ #85 >> 1
+#15: PF := ~0:0[#86]
+#16: RSP := #82
+#17: mem := mem with [RSP + 0xC, el]:u32 <- 0
+#18: RSI := mem[0x403010, el]:u64
+#19: RDI := 0x41
+#20: RSP := RSP - 8
+#21: mem := mem with [RSP, el]:u64 <- 0x400485
+#22: call @putc with return %#23
+
+#23:
+#24: RSI := mem[0x403010, el]:u64
+#25: RDI := 0xA
+#26: RSP := RSP - 8
+#27: mem := mem with [RSP, el]:u64 <- 0x400496
+#28: call @putc with return %#29
+
+#29:
+#30: goto %#31
+
+#31:
+#32: #93 := RSP + 0xC
+#33: #94 := mem[#93, el]:u32 + 1
+#34: CF := 31:31[mem[#93, el]:u32] & ~31:31[#94]
+#35: OF := ~31:31[mem[#93, el]:u32] & 31:31[#94]
+#36: AF := 0:0[(#94 ^ mem[#93, el]:u32 ^ 1) >> 4]
+#37: SF := 31:31[#94]
+#38: ZF := #94 = 0
+#39: #95 := low:8[#94]
+#40: #96 := #95 ^ #95 >> 4
+#41: #97 := #96 ^ #96 >> 2
+#42: #98 := #97 ^ #97 >> 1
+#43: PF := ~0:0[#98]
+#44: mem := mem with [#93, el]:u32 <- #94
+#45: goto %#31
+

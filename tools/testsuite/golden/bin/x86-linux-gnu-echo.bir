@@ -1,0 +1,77 @@
+# exited with 0
+sub __do_global_dtors_aux(__do_global_dtors_aux_result)
+  calls sub_80484f9 sub_804850c
+sub __libc_csu_fini(__libc_csu_fini_result)
+sub __libc_csu_init(__libc_csu_init_result)
+  calls _init sub_8048470
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+sub _fini(_fini_result)
+  calls sub_8048470
+sub _init(_init_result)
+  calls sub_80483f0 sub_8048470
+sub _start(_start_result)
+  calls __libc_start_main intrinsic:hlt sub_8048470
+sub deregister_tm_clones(deregister_tm_clones_result)
+  calls sub_8048499
+sub frame_dummy(frame_dummy_result)
+  calls register_tm_clones sub_8048522
+sub free(free_ptr)
+sub main(main_argc, main_argv, main_result)
+  calls sub_80485ae
+sub malloc(malloc_size, malloc_result)
+sub memmove(memmove_dst, memmove_src, memmove_n, memmove_result)
+sub print_endline(print_endline_result)
+  calls putchar
+sub print_strings(print_strings_result)
+  calls print_endline
+sub putchar(putchar_c, putchar_result)
+sub register_tm_clones(register_tm_clones_result)
+  calls sub_80484d2
+sub strchr(strchr_s, strchr_c, strchr_result)
+sub strcpy(strcpy_dst, strcpy_src, strcpy_result)
+sub strlen(strlen_s, strlen_result)
+sub sub_80483f0(sub_80483f0_result)
+sub sub_8048470(sub_8048470_result)
+sub sub_8048499(sub_8048499_result)
+sub sub_80484d2(sub_80484d2_result)
+sub sub_80484f9(sub_80484f9_result)
+  calls deregister_tm_clones sub_804850c
+sub sub_804850c(sub_804850c_result)
+sub sub_8048522(sub_8048522_result)
+  calls register_tm_clones
+sub sub_80485ae(sub_80485ae_result)
+  calls free malloc memmove print_strings strchr strcpy strlen
+sub sub_80485d1(sub_80485d1_result)
+  calls intrinsic:breakpoint
+sub sub_80485d4(sub_80485d4_result)
+  calls intrinsic:breakpoint
+sub sub_80485dd(sub_80485dd_result)
+  calls intrinsic:breakpoint
+sub sub_8048716(sub_8048716_result)
+  calls intrinsic:breakpoint
+sub sub_8048752(sub_8048752_result)
+  calls intrinsic:breakpoint
+sub intrinsic:hlt()
+sub intrinsic:breakpoint()
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = mem[ESP + 4, el]:u32
+#2: main_argv :: in out u32 = mem[ESP + 8, el]:u32
+#3: main_result :: out u32 = EAX
+
+#4:
+#5: ECX := ESP + 4
+#6: CF := 0
+#7: OF := 0
+#8: SF := 31:31[ESP & 0xFFFFFFF0]
+#9: ZF := (ESP & 0xFFFFFFF0) = 0
+#10: #199 := low:8[ESP & 0xFFFFFFF0]
+#11: #200 := #199 ^ #199 >> 4
+#12: #201 := #200 ^ #200 >> 2
+#13: #202 := #201 ^ #201 >> 1
+#14: PF := ~0:0[#202]
+#15: ESP := ESP & 0xFFFFFFF0
+#16: ESP := ESP - 4
+#17: mem := mem with [ESP, el]:u32 <- mem[ECX - 4, el]:u32
+#18: call @sub_80485ae with noreturn
+

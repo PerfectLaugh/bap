@@ -1,0 +1,5 @@
+# exited with 0
+sub sub_7ff000001000(sub_7ff000001000_result)
+sub intrinsic:breakpoint()
+sub ExitProcess(ExitProcess_code)
+sub putchar(putchar_c, putchar_result)

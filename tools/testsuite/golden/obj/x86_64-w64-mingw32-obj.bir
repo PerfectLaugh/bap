@@ -1,0 +1,12 @@
+# exited with 0
+sub sub_91(sub_91_result)
+  calls sub_a0
+sub sub_a0(sub_a0_result)
+sub sum_internal_1(sum_internal_1_result)
+sub sum_internal_2(sum_internal_2_result)
+  calls sum_internal_1 sum_internal_3
+sub sum_internal_3(sum_internal_3_result)
+  calls sub_91 sub_a0 sum_external sum_internal_1 sum_internal_2
+sub sum_external(sum_external_result)
+sub .text(\.text_result)
+sub .xdata(\.xdata_result)

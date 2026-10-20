@@ -147,6 +147,121 @@ let many _ =
   in
   assert_equal ~printer:Int.to_string (n * (n + 1) / 2) r
 
+(* a direct-style promise is awaited in another direct computation *)
+let reentrant _ =
+  let w = int "w" in
+  Knowledge.promise w (fun obj ->
+      Knowledge.direct @@ fun () ->
+      Option.map (Knowledge.await (Knowledge.collect x obj)) ~f:(fun v -> v + 1));
+  let r =
+    eval @@ fun obj ->
+    Knowledge.direct @@ fun () ->
+    Knowledge.await (Knowledge.provide x obj (Some 1));
+    Knowledge.await (Knowledge.collect w obj)
+  in
+  assert_equal ~printer:opt (Some 2) r
+
+(* a rejected proposal is the same as no opinion, so it doesn't shadow the
+   opinions of the less reliable agents *)
+let proposal _ =
+  let agent reliability name =
+    Knowledge.Agent.register ~package ~reliability name
+  in
+  let slot =
+    Knowledge.Class.property ~package cls "opinion"
+      (Knowledge.Domain.opinions ~empty:0 ~equal:Int.equal "opinion")
+  in
+  Knowledge.propose (agent Knowledge.Agent.authorative "authority") slot
+    (fun obj ->
+      Knowledge.direct @@ fun () ->
+      Knowledge.await_some (Knowledge.collect x obj) * 100);
+  Knowledge.propose (agent Knowledge.Agent.doubtful "doubter") slot (fun _ ->
+      Knowledge.direct @@ fun () -> 5);
+  let r = eval @@ fun obj -> Knowledge.resolve slot obj in
+  assert_equal ~printer:Int.to_string 5 r;
+  let r =
+    eval @@ fun obj ->
+    Knowledge.provide x obj (Some 2) >>= fun () -> Knowledge.resolve slot obj
+  in
+  assert_equal ~printer:Int.to_string 200 r
+
+(* the objects that a direct computation creates stay in the state *)
+let objects _ =
+  let r =
+    eval @@ fun _ ->
+    ( Knowledge.direct @@ fun () ->
+      let obj = Knowledge.await (Knowledge.Object.create cls) in
+      Knowledge.await (Knowledge.provide x obj (Some 8));
+      obj )
+    >>= fun obj -> Knowledge.collect x obj
+  in
+  assert_equal ~printer:opt (Some 8) r
+
+(* the conflicts of a direct computation are caught outside of it *)
+let caught_outside _ =
+  let r =
+    eval @@ fun _ ->
+    Knowledge.catch
+      ( Knowledge.direct @@ fun () ->
+        ignore (Knowledge.await (Knowledge.fail Bad));
+        0 )
+      (function Bad -> !!9 | other -> Knowledge.fail other)
+  in
+  assert_equal ~printer:Int.to_string 9 r
+
+(* the callbacks of the knowledge functions need their own direct *)
+let callback _ =
+  let r =
+    eval @@ fun obj ->
+    Knowledge.direct @@ fun () ->
+    Knowledge.await (Knowledge.provide x obj (Some 3));
+    let sum = ref 0 in
+    Knowledge.await
+    @@ Knowledge.List.iter [ 1; 2; 3 ] ~f:(fun i ->
+        Knowledge.direct @@ fun () ->
+        sum := !sum + (i * Knowledge.await_some (Knowledge.collect x obj)));
+    !sum
+  in
+  assert_equal ~printer:Int.to_string 18 r
+
+(* the effects and the side effects happen in the order of the program *)
+let order _ =
+  let log = ref [] in
+  let say s = log := s :: !log in
+  let r =
+    eval @@ fun obj ->
+    Knowledge.direct @@ fun () ->
+    say "a";
+    Knowledge.await (Knowledge.provide x obj (Some 1) >>| fun () -> say "b");
+    say "c";
+    let v =
+      Knowledge.await
+        ( Knowledge.collect x obj >>| fun v ->
+          say "d";
+          v )
+    in
+    say "e";
+    v
+  in
+  assert_equal ~printer:opt (Some 1) r;
+  assert_equal ~printer:(String.concat ~sep:" ")
+    [ "a"; "b"; "c"; "d"; "e" ]
+    (List.rev !log)
+
+(* the recursion of the direct functions, e.g., over the instructions of a
+   stub, is as deep as in the monadic style *)
+let deep _ =
+  let rec sum n = if n = 0 then 0 else Knowledge.await !!n + sum (n - 1) in
+  let rec nest n =
+    if n = 0 then 0
+    else Knowledge.await (Knowledge.direct @@ fun () -> nest (n - 1)) + 1
+  in
+  let r =
+    eval @@ fun _ ->
+    Knowledge.direct @@ fun () -> (sum 10_000, nest 1_000)
+  in
+  assert_equal (50_005_000, 1_000) r
+
 let () =
   run_test_tt_main
     ("direct"
@@ -161,4 +276,11 @@ let () =
            "some" >:: some;
            "unhandled" >:: unhandled;
            "many" >:: many;
+           "reentrant" >:: reentrant;
+           "proposal" >:: proposal;
+           "objects" >:: objects;
+           "caught-outside" >:: caught_outside;
+           "callback" >:: callback;
+           "order" >:: order;
+           "deep" >:: deep;
          ])

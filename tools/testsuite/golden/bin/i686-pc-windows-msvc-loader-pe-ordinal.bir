@@ -1,0 +1,6 @@
+# exited with 0
+sub sub_401000(sub_401000_result)
+  calls sub_4010fb
+sub sub_4010fb(sub_4010fb_result)
+sub ExitProcess(ExitProcess_code)
+sub putchar(putchar_c, putchar_result)

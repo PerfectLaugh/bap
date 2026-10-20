@@ -1,0 +1,332 @@
+# exited with 0
+sub __do_global_ctors_aux(__do_global_ctors_aux_result)
+sub __do_global_dtors_aux(__do_global_dtors_aux_result)
+  calls deregister_tm_clones
+sub __libc_csu_fini(__libc_csu_fini_result)
+sub __libc_csu_init(__libc_csu_init_result)
+  calls _init
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+sub __stack_chk_fail()
+sub _fini(_fini_result)
+  calls __do_global_dtors_aux
+sub _init(_init_result)
+  calls __do_global_ctors_aux frame_dummy sub_10000bc0
+sub _start(_start_result)
+  calls __libc_start_main
+sub call___do_global_ctors_aux(call___do_global_ctors_aux_result)
+sub call___do_global_dtors_aux(call___do_global_dtors_aux_result)
+sub call_frame_dummy(call_frame_dummy_result)
+sub deregister_tm_clones(deregister_tm_clones_result)
+sub frame_dummy(frame_dummy_result)
+  calls register_tm_clones
+sub free(free_ptr)
+sub main(main_argc, main_argv, main_result)
+  calls __stack_chk_fail free malloc memmove print_strings strchr strcpy strlen
+sub malloc(malloc_size, malloc_result)
+sub memmove(memmove_dst, memmove_src, memmove_n, memmove_result)
+sub print_endline(print_endline_result)
+  calls putchar
+sub print_strings(print_strings_result)
+  calls print_endline
+sub putchar(putchar_c, putchar_result)
+sub register_tm_clones(register_tm_clones_result)
+sub strchr(strchr_s, strchr_c, strchr_result)
+sub strcpy(strcpy_dst, strcpy_src, strcpy_result)
+sub strlen(strlen_s, strlen_result)
+sub sub_10000bc0(sub_10000bc0_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = R3
+#2: main_argv :: in out u32 = R4
+#3: main_result :: out u32 = R3
+
+#4:
+#5: #67 := R1 - 0x50
+#6: mem := mem with [#67, be]:u32 <- R1
+#7: R1 := #67
+#8: R0 := LR
+#9: mem := mem with [R1 + 0x54, be]:u32 <- R0
+#10: mem := mem with [R1 + 0x48, be]:u32 <- R30
+#11: mem := mem with [R1 + 0x4C, be]:u32 <- R31
+#12: R31 := R1
+#13: mem := mem with [R31 + 0xC, be]:u32 <- R3
+#14: mem := mem with [R31 + 8, be]:u32 <- R4
+#15: R9 := mem[R2 - 0x7008, be]:u32
+#16: mem := mem with [R31 + 0x3C, be]:u32 <- R9
+#17: R9 := 0
+#18: R4 := R1
+#19: R30 := R4
+#20: R4 := 8
+#21: mem := mem with [R31 + 0x1C, be]:u32 <- R4
+#22: R3 := mem[R31 + 0xC, be]:u32
+#23: R4 := mem[R31 + 0x1C, be]:u32
+#24: R4 := R3 + R4
+#25: R4 := R4 + 1
+#26: mem := mem with [R31 + 0x20, be]:u32 <- R4
+#27: R4 := mem[R31 + 0x20, be]:u32
+#28: R4 := R4 - 1
+#29: mem := mem with [R31 + 0x24, be]:u32 <- R4
+#30: R4 := mem[R31 + 0x20, be]:u32
+#31: R8 := R4
+#32: R7 := 0
+#33: #68 := R8
+#34: R4 := low:32[((#68.#68) << 5 | (#68.#68) >> 0x3B) & 0x1F]
+#35: #73 := R7
+#36: R11 := low:32[((#73.#73) << 5 | (#73.#73) >> 0x3B) & 0xFFFFFFE0]
+#37: R11 := R4 | R11
+#38: #78 := R8
+#39: R12 := low:32[((#78.#78) << 5 | (#78.#78) >> 0x3B) & 0xFFFFFFE0]
+#40: R8 := mem[R31 + 0x20, be]:u32
+#41: R10 := R8
+#42: R9 := 0
+#43: #83 := R10
+#44: R8 := low:32[((#83.#83) << 5 | (#83.#83) >> 0x3B) & 0x1F]
+#45: #88 := R9
+#46: R5 := low:32[((#88.#88) << 5 | (#88.#88) >> 0x3B) & 0xFFFFFFE0]
+#47: R5 := R8 | R5
+#48: #93 := R10
+#49: R6 := low:32[((#93.#93) << 5 | (#93.#93) >> 0x3B) & 0xFFFFFFE0]
+#50: R9 := mem[R31 + 0x20, be]:u32
+#51: #98 := R9
+#52: R9 := low:32[((#98.#98) << 2 | (#98.#98) >> 0x3E) & 0xFFFFFFFC]
+#53: R9 := R9 + 3
+#54: R9 := R9 + 0xF
+#55: #103 := R9
+#56: R9 := low:32[((#103.#103) << 0x1C | (#103.#103) >> 0x24) &
+          0xFFFFFFF]
+#57: #108 := R9
+#58: R9 := low:32[((#108.#108) << 4 | (#108.#108) >> 0x3C) & 0xFFFFFFF0]
+#59: R10 := mem[R1, be]:u32
+#60: R9 := -R9
+#61: #113 := R1 + R9
+#62: mem := mem with [#113, be]:u32 <- R10
+#63: R1 := #113
+#64: R9 := R1 + 8
+#65: R9 := R9 + 3
+#66: #114 := R9
+#67: R9 := low:32[((#114.#114) << 0x1E | (#114.#114) >> 0x22) &
+          0x3FFFFFFF]
+#68: #119 := R9
+#69: R9 := low:32[((#119.#119) << 2 | (#119.#119) >> 0x3E) & 0xFFFFFFFC]
+#70: mem := mem with [R31 + 0x28, be]:u32 <- R9
+#71: R9 := 0
+#72: mem := mem with [R31 + 0x14, be]:u32 <- R9
+#73: goto %#74
+
+#74:
+#75: R10 := mem[R31 + 0x14, be]:u32
+#76: R9 := mem[R31 + 0xC, be]:u32
+#77: CR7LT := 3:3[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
+#78: CR7GT := 2:2[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
+#79: CR7EQ := 1:1[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
+#80: CR7UN := 0:0[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
+#81: #125 := CR7LT <> 0
+#82: when #125 goto %#83
+#84: goto %#85
+
+#85:
+#86: R9 := 0
+#87: mem := mem with [R31 + 0x18, be]:u32 <- R9
+#88: goto %#89
+
+#89:
+#90: R10 := mem[R31 + 0x18, be]:u32
+#91: R9 := mem[R31 + 0x1C, be]:u32
+#92: CR7LT := 3:3[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
+#93: CR7GT := 2:2[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
+#94: CR7EQ := 1:1[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
+#95: CR7UN := 0:0[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
+#96: #142 := CR7LT <> 0
+#97: when #142 goto %#98
+#99: goto %#100
+
+#100:
+#101: R9 := mem[R31 + 0x20, be]:u32
+#102: R9 := R9 - 1
+#103: R10 := mem[R31 + 0x28, be]:u32
+#104: #153 := R9
+#105: R9 := low:32[((#153.#153) << 2 | (#153.#153) >> 0x3E) & 0xFFFFFFFC]
+#106: R9 := R10 + R9
+#107: R10 := 0
+#108: mem := mem with [R9, be]:u32 <- R10
+#109: R9 := mem[R31 + 0x28, be]:u32
+#110: R3 := R9
+#111: LR := 0x10000960
+#112: call @print_strings with return %#113
+
+#113:
+#114: R9 := 0
+#115: mem := mem with [R31 + 0x14, be]:u32 <- R9
+#116: goto %#117
+
+#117:
+#118: R10 := mem[R31 + 0x14, be]:u32
+#119: R9 := mem[R31 + 0x20, be]:u32
+#120: CR7LT := 3:3[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
+#121: CR7GT := 2:2[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
+#122: CR7EQ := 1:1[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
+#123: CR7UN := 0:0[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
+#124: #159 := CR7LT <> 0
+#125: when #159 goto %#126
+#127: goto %#128
+
+#128:
+#129: R10 := 0
+#130: R9 := mem[R1, be]:u32
+#131: mem := mem with [R30, be]:u32 <- R9
+#132: R1 := R30
+#133: R9 := R10
+#134: R3 := R9
+#135: R10 := mem[R31 + 0x3C, be]:u32
+#136: R9 := mem[R2 - 0x7008, be]:u32
+#137: CR7LT := 3:3[R10 < R9.R9 < R10.R10 = R9.SO] <> 0
+#138: CR7GT := 2:2[R10 < R9.R9 < R10.R10 = R9.SO] <> 0
+#139: CR7EQ := 1:1[R10 < R9.R9 < R10.R10 = R9.SO] <> 0
+#140: CR7UN := 0:0[R10 < R9.R9 < R10.R10 = R9.SO] <> 0
+#141: R10 := 0
+#142: R9 := 0
+#143: #166 := CR7EQ <> 0
+#144: when #166 goto %#145
+#146: goto %#147
+
+#145:
+#148: R11 := R31 + 0x50
+#149: R0 := mem[R11 + 4, be]:u32
+#150: LR := R0
+#151: R30 := mem[R11 - 8, be]:u32
+#152: R31 := mem[R11 - 4, be]:u32
+#153: R1 := R11
+#154: call LR & 0xFFFFFFFC with noreturn
+
+#147:
+#155: LR := 0x100009D8
+#156: call @__stack_chk_fail with noreturn
+
+#126:
+#157: R10 := mem[R31 + 0x28, be]:u32
+#158: R9 := mem[R31 + 0x14, be]:u32
+#159: #160 := R9
+#160: R9 := low:32[((#160.#160) << 2 | (#160.#160) >> 0x3E) & 0xFFFFFFFC]
+#161: R9 := R10 + R9
+#162: R9 := mem[R9, be]:u32
+#163: R3 := R9
+#164: LR := 0x10000988
+#165: call @free with return %#166
+
+#166:
+#167: R9 := mem[R31 + 0x14, be]:u32
+#168: R9 := R9 + 1
+#169: mem := mem with [R31 + 0x14, be]:u32 <- R9
+#170: goto %#117
+
+#98:
+#171: R9 := 0x10020000
+#172: R10 := R9 + 0x30
+#173: R9 := mem[R31 + 0x18, be]:u32
+#174: #143 := R9
+#175: R9 := low:32[((#143.#143) << 2 | (#143.#143) >> 0x3E) & 0xFFFFFFFC]
+#176: R9 := R10 + R9
+#177: R9 := mem[R9, be]:u32
+#178: R3 := R9
+#179: R4 := 0x20
+#180: LR := 0x10000888
+#181: call @strchr with return %#182
+
+#182:
+#183: R9 := R3
+#184: R9 := R9 + 1
+#185: mem := mem with [R31 + 0x2C, be]:u32 <- R9
+#186: R3 := mem[R31 + 0x2C, be]:u32
+#187: R4 := 0x20
+#188: LR := 0x100008A0
+#189: call @strchr with return %#190
+
+#190:
+#191: mem := mem with [R31 + 0x30, be]:u32 <- R3
+#192: R10 := mem[R31 + 0x30, be]:u32
+#193: R9 := mem[R31 + 0x2C, be]:u32
+#194: R9 := R10 - R9
+#195: R9 := R9 + 1
+#196: mem := mem with [R31 + 0x34, be]:u32 <- R9
+#197: R9 := mem[R31 + 0x34, be]:u32
+#198: R3 := R9
+#199: LR := 0x100008C4
+#200: call @malloc with return %#201
+
+#201:
+#202: R9 := R3
+#203: mem := mem with [R31 + 0x38, be]:u32 <- R9
+#204: R9 := mem[R31 + 0x34, be]:u32
+#205: R3 := mem[R31 + 0x38, be]:u32
+#206: R4 := mem[R31 + 0x2C, be]:u32
+#207: R5 := R9
+#208: LR := 0x100008E0
+#209: call @memmove with return %#210
+
+#210:
+#211: R9 := mem[R31 + 0x34, be]:u32
+#212: R9 := R9 - 1
+#213: R10 := mem[R31 + 0x38, be]:u32
+#214: R9 := R10 + R9
+#215: R10 := 0
+#216: mem := mem with [R9] <- low:8[R10]
+#217: R10 := mem[R31 + 0x28, be]:u32
+#218: R9 := mem[R31 + 0x14, be]:u32
+#219: #148 := R9
+#220: R9 := low:32[((#148.#148) << 2 | (#148.#148) >> 0x3E) & 0xFFFFFFFC]
+#221: R9 := R10 + R9
+#222: R10 := mem[R31 + 0x38, be]:u32
+#223: mem := mem with [R9, be]:u32 <- R10
+#224: R9 := mem[R31 + 0x18, be]:u32
+#225: R9 := R9 + 1
+#226: mem := mem with [R31 + 0x18, be]:u32 <- R9
+#227: R9 := mem[R31 + 0x14, be]:u32
+#228: R9 := R9 + 1
+#229: mem := mem with [R31 + 0x14, be]:u32 <- R9
+#230: goto %#89
+
+#83:
+#231: R9 := mem[R31 + 0x14, be]:u32
+#232: #126 := R9
+#233: R9 := low:32[((#126.#126) << 2 | (#126.#126) >> 0x3E) & 0xFFFFFFFC]
+#234: R10 := mem[R31 + 8, be]:u32
+#235: R9 := R10 + R9
+#236: R9 := mem[R9, be]:u32
+#237: R3 := R9
+#238: LR := 0x100007EC
+#239: call @strlen with return %#240
+
+#240:
+#241: R9 := R3
+#242: R9 := R9 + 1
+#243: R3 := R9
+#244: LR := 0x100007FC
+#245: call @malloc with return %#246
+
+#246:
+#247: R9 := R3
+#248: R8 := R9
+#249: R9 := mem[R31 + 0x14, be]:u32
+#250: #131 := R9
+#251: R9 := low:32[((#131.#131) << 2 | (#131.#131) >> 0x3E) & 0xFFFFFFFC]
+#252: R10 := mem[R31 + 8, be]:u32
+#253: R9 := R10 + R9
+#254: R9 := mem[R9, be]:u32
+#255: R3 := R8
+#256: R4 := R9
+#257: LR := 0x10000824
+#258: call @strcpy with return %#259
+
+#259:
+#260: R8 := R3
+#261: R10 := mem[R31 + 0x28, be]:u32
+#262: R9 := mem[R31 + 0x14, be]:u32
+#263: #136 := R9
+#264: R9 := low:32[((#136.#136) << 2 | (#136.#136) >> 0x3E) & 0xFFFFFFFC]
+#265: R9 := R10 + R9
+#266: mem := mem with [R9, be]:u32 <- R8
+#267: R9 := mem[R31 + 0x14, be]:u32
+#268: R9 := R9 + 1
+#269: mem := mem with [R31 + 0x14, be]:u32 <- R9
+#270: goto %#74
+

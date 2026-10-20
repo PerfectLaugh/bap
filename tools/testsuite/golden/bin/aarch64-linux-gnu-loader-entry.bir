@@ -1,0 +1,101 @@
+# exited with 0
+sub _start(_start_result)
+  calls exit main
+sub exit(exit_code)
+  calls exit
+sub fgetc(fgetc_stream, fgetc_result)
+sub getchar(getchar_result)
+sub helper(helper_result)
+sub main(main_argc, main_argv, main_result)
+  calls helper putchar
+sub putchar(putchar_c, putchar_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[R0]
+#2: main_argv :: in out u64 = R1
+#3: main_result :: out u32 = low:32[R0]
+
+#4:
+#5: R31 := R31 - 0x40
+#6: mem := mem with [R31 + 0x30, el]:u64 <- R20
+#7: mem := mem with [R31 + 0x38, el]:u64 <- R19
+#8: R0 := 0x65
+#9: R19 := 1
+#10: R20 := 0x300D4
+#11: mem := mem with [R31 + 0x20, el]:u64 <- R29
+#12: mem := mem with [R31 + 0x28, el]:u64 <- R30
+#13: R29 := R31 + 0x20
+#14: goto %#15
+
+#15:
+#16: R30 := 0x3002C
+#17: call @putchar with return %#18
+
+#18:
+#19: R0 := high:32[R0].pad:64[mem[R20 + R19]]
+#20: R19 := R19 + 1
+#21: #15 := 0xFFFFFFFFFFFFFFFA + R19
+#22: NF := 63:63[#15]
+#23: VF := 63:63[R19] & ~63:63[#15]
+#24: ZF := #15 = 0
+#25: CF := 63:63[R19] | ~63:63[#15] | 63:63[R19] & ~63:63[#15]
+#26: #17 := ~ZF <> 0
+#27: when #17 goto %#15
+#28: goto %#29
+
+#29:
+#30: R0 := 0xE
+#31: R30 := 0x30044
+#32: call @helper with return %#33
+
+#33:
+#34: R20 := extend:64[31:0[R0]]
+#35: R0 := 0x20
+#36: R30 := 0x30050
+#37: call @putchar with return %#38
+
+#38:
+#39: R8 := R31 + 0xF
+#40: mem := mem with [R31 + 0x1F] <- 0
+#41: R19 := R8 + 0x11
+#42: R8 := 0x30000
+#43: R8 := R8 + 0xDA
+#44: goto %#45
+
+#45:
+#46: R9 := R20 & 0xF
+#47: R20 := pad:64[63:4[R20]]
+#48: R0 := high:32[R0].pad:64[mem[R8 + R9]]
+#49: mem := mem with [R19 - 2] <- low:8[31:0[R0]]
+#50: R19 := R19 - 1
+#51: #44 := ~R20 = 0
+#52: when #44 goto %#45
+#53: goto %#54
+
+#54:
+#55: R30 := 0x30080
+#56: call @putchar with return %#57
+
+#57:
+#58: R0 := pad:64[low:32[pad:64[mem[R19]]]]
+#59: R19 := R19 + 1
+#60: #45 := ~31:0[R0] = 0
+#61: when #45 goto %#54
+#62: goto %#63
+
+#63:
+#64: R0 := 0xA
+#65: R30 := 0x30090
+#66: call @putchar with return %#67
+
+#67:
+#68: #46 := R31 + 0x30
+#69: R20 := mem[#46, el]:u64
+#70: R19 := mem[#46 + 8, el]:u64
+#71: R0 := 0
+#72: #50 := R31 + 0x20
+#73: R29 := mem[#50, el]:u64
+#74: R30 := mem[#50 + 8, el]:u64
+#75: R31 := R31 + 0x40
+#76: call R30 with noreturn
+

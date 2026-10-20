@@ -1,0 +1,243 @@
+# exited with 0
+sub _start(_start_result)
+  calls exit main
+sub exit(exit_code)
+  calls exit
+sub fgetc(fgetc_stream, fgetc_result)
+sub getchar(getchar_result)
+sub main(main_argc, main_argv, main_result)
+  calls putchar
+sub putchar(putchar_c, putchar_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = R4
+#2: main_argv :: in out u32 = R5
+#3: main_result :: out u32 = R2
+
+#4:
+#5: R29 := R29 - 0x40
+#6: mem := mem with [R29 + 0x3C, be]:u32 <- R31
+#7: mem := mem with [R29 + 0x38, be]:u32 <- R21
+#8: mem := mem with [R29 + 0x34, be]:u32 <- R20
+#9: mem := mem with [R29 + 0x30, be]:u32 <- R19
+#10: mem := mem with [R29 + 0x2C, be]:u32 <- R18
+#11: mem := mem with [R29 + 0x28, be]:u32 <- R17
+#12: mem := mem with [R29 + 0x24, be]:u32 <- R16
+#13: R1 := 0
+#14: R1 := R1 - 0x7000
+#15: R3 := USERLOCAL
+#16: R17 := R3 + R1
+#17: R18 := mem[R17, be]:u32
+#18: R1 := 0x10000
+#19: R1 := R1 + 0x1E8
+#20: R16 := R1 + 1
+#21: R2 := 0x69
+#22: R19 := R1 + 0xC
+#23: goto %#24
+
+#24:
+#25: R4 := extend:32[low:8[R2]]
+#26: R31 := 0x20270
+#27: call @putchar with return %#28
+
+#28:
+#29: R1 := R16 + 1
+#30: R2 := pad:32[mem[R16]]
+#31: R16 := R1
+#32: #1 := R1 <> R19
+#33: when #1 goto %#24
+#34: goto %#35
+
+#35:
+#36: R4 := 0x20
+#37: R31 := 0x20288
+#38: call @putchar with return %#39
+
+#39:
+#40: mem := mem with [R29 + 0x23] <- 0
+#41: R16 := R29 + 0x13
+#42: R19 := R16 + 0x11
+#43: R1 := 0x10000
+#44: R3 := R1 + 0x203
+#45: goto %#46
+
+#46:
+#47: R1 := R18 & 0xF
+#48: R1 := R3 + R1
+#49: R2 := pad:32[mem[R1]]
+#50: mem := mem with [R19 - 2] <- low:8[R2]
+#51: R18 := R18 >> 4
+#52: R19 := R19 - 1
+#53: #2 := R18 <> 0
+#54: when #2 goto %#46
+#55: goto %#56
+
+#56:
+#57: R4 := extend:32[low:8[R2]]
+#58: R31 := 0x202C0
+#59: call @putchar with return %#60
+
+#60:
+#61: R1 := R19 + 1
+#62: R2 := pad:32[mem[R19]]
+#63: R19 := R1
+#64: #3 := R2 <> 0
+#65: when #3 goto %#56
+#66: goto %#67
+
+#67:
+#68: R4 := 0xA
+#69: R31 := 0x202D8
+#70: call @putchar with return %#71
+
+#71:
+#72: R1 := 0
+#73: R1 := R1 - 0x6FFC
+#74: R3 := USERLOCAL
+#75: R18 := R3 + R1
+#76: R19 := mem[R18, be]:u32
+#77: R1 := 0x10000
+#78: R1 := R1 + 0x1F4
+#79: R20 := R1 + 1
+#80: R2 := 0x7A
+#81: R21 := R1 + 7
+#82: goto %#83
+
+#83:
+#84: R4 := extend:32[low:8[R2]]
+#85: R31 := 0x20308
+#86: call @putchar with return %#87
+
+#87:
+#88: R1 := R20 + 1
+#89: R2 := pad:32[mem[R20]]
+#90: R20 := R1
+#91: #4 := R1 <> R21
+#92: when #4 goto %#83
+#93: goto %#94
+
+#94:
+#95: R4 := 0x20
+#96: R31 := 0x20320
+#97: call @putchar with return %#98
+
+#98:
+#99: mem := mem with [R29 + 0x23] <- 0
+#100: R20 := R16 + 0x11
+#101: R1 := 0x10000
+#102: R3 := R1 + 0x203
+#103: goto %#104
+
+#104:
+#105: R1 := R19 & 0xF
+#106: R1 := R3 + R1
+#107: R2 := pad:32[mem[R1]]
+#108: mem := mem with [R20 - 2] <- low:8[R2]
+#109: R19 := R19 >> 4
+#110: R20 := R20 - 1
+#111: #5 := R19 <> 0
+#112: when #5 goto %#104
+#113: goto %#114
+
+#114:
+#115: R4 := extend:32[low:8[R2]]
+#116: R31 := 0x20354
+#117: call @putchar with return %#118
+
+#118:
+#119: R1 := R20 + 1
+#120: R2 := pad:32[mem[R20]]
+#121: R20 := R1
+#122: #6 := R2 <> 0
+#123: when #6 goto %#114
+#124: goto %#125
+
+#125:
+#126: R4 := 0xA
+#127: R31 := 0x2036C
+#128: call @putchar with return %#129
+
+#129:
+#130: R17 := mem[R17, be]:u32
+#131: R1 := R17 + 1
+#132: mem := mem with [R18, be]:u32 <- R1
+#133: R1 := 0
+#134: R1 := R1 - 0x6FF8
+#135: R3 := USERLOCAL
+#136: R1 := R3 + R1
+#137: R2 := 9
+#138: mem := mem with [R1 + 0x3F] <- low:8[R2]
+#139: R1 := 0x10000
+#140: R1 := R1 + 0x1FB
+#141: R18 := R1 + 1
+#142: R2 := 0x77
+#143: R19 := R1 + 8
+#144: goto %#145
+
+#145:
+#146: R4 := extend:32[low:8[R2]]
+#147: R31 := 0x203AC
+#148: call @putchar with return %#149
+
+#149:
+#150: R1 := R18 + 1
+#151: R2 := pad:32[mem[R18]]
+#152: R18 := R1
+#153: #7 := R1 <> R19
+#154: when #7 goto %#145
+#155: goto %#156
+
+#156:
+#157: R4 := 0x20
+#158: R31 := 0x203C4
+#159: call @putchar with return %#160
+
+#160:
+#161: mem := mem with [R29 + 0x23] <- 0
+#162: R16 := R16 + 0x11
+#163: R3 := R17 + 0xA
+#164: R1 := 0x10000
+#165: R4 := R1 + 0x203
+#166: goto %#167
+
+#167:
+#168: R1 := R3 & 0xF
+#169: R1 := R4 + R1
+#170: R2 := pad:32[mem[R1]]
+#171: mem := mem with [R16 - 2] <- low:8[R2]
+#172: R3 := R3 >> 4
+#173: R16 := R16 - 1
+#174: #8 := R3 <> 0
+#175: when #8 goto %#167
+#176: goto %#177
+
+#177:
+#178: R4 := extend:32[low:8[R2]]
+#179: R31 := 0x203FC
+#180: call @putchar with return %#181
+
+#181:
+#182: R1 := R16 + 1
+#183: R2 := pad:32[mem[R16]]
+#184: R16 := R1
+#185: #9 := R2 <> 0
+#186: when #9 goto %#177
+#187: goto %#188
+
+#188:
+#189: R4 := 0xA
+#190: R31 := 0x20414
+#191: call @putchar with return %#192
+
+#192:
+#193: R2 := 0
+#194: R16 := mem[R29 + 0x24, be]:u32
+#195: R17 := mem[R29 + 0x28, be]:u32
+#196: R18 := mem[R29 + 0x2C, be]:u32
+#197: R19 := mem[R29 + 0x30, be]:u32
+#198: R20 := mem[R29 + 0x34, be]:u32
+#199: R21 := mem[R29 + 0x38, be]:u32
+#200: R31 := mem[R29 + 0x3C, be]:u32
+#201: R29 := R29 + 0x40
+#202: call R31 with noreturn
+

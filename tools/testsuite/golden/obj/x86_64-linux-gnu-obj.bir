@@ -1,0 +1,7 @@
+# exited with 0
+sub sum_internal_1(sum_internal_1_result)
+sub sum_internal_2(sum_internal_2_result)
+  calls sum_internal_1 sum_internal_3
+sub sum_internal_3(sum_internal_3_result)
+  calls sum_external sum_internal_1 sum_internal_2
+sub sum_external(sum_external_result)

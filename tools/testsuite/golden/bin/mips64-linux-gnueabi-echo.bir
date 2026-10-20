@@ -1,0 +1,311 @@
+# exited with 0
+sub __do_global_ctors_aux(__do_global_ctors_aux_result)
+sub __do_global_dtors_aux(__do_global_dtors_aux_result)
+  calls deregister_tm_clones
+sub __libc_csu_fini(__libc_csu_fini_result)
+sub __libc_csu_init(__libc_csu_init_result)
+  calls _init
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+  calls putchar
+sub __start(__start_result)
+  calls sub_120000afc
+sub _fini(_fini_result)
+  calls sub_120001350
+sub _init(_init_result)
+  calls sub_120000aa0
+sub deregister_tm_clones(deregister_tm_clones_result)
+sub frame_dummy(frame_dummy_result)
+  calls print_endline register_tm_clones
+sub free(free_ptr)
+  calls strcpy
+sub main(main_argc, main_argv, main_result)
+  calls print_strings
+sub malloc(malloc_size, malloc_result)
+  calls strchr
+sub memmove(memmove_dst, memmove_src, memmove_n, memmove_result)
+  calls free
+sub print_endline(print_endline_result)
+sub print_strings(print_strings_result)
+  calls print_endline
+sub putchar(putchar_c, putchar_result)
+sub register_tm_clones(register_tm_clones_result)
+sub strchr(strchr_s, strchr_c, strchr_result)
+  calls strlen
+sub strcpy(strcpy_dst, strcpy_src, strcpy_result)
+  calls malloc
+sub strlen(strlen_s, strlen_result)
+  calls __libc_start_main
+sub sub_120000aa0(sub_120000aa0_result)
+  calls frame_dummy sub_120000ac4
+sub sub_120000ac4(sub_120000ac4_result)
+  calls __do_global_ctors_aux
+sub sub_120000afc(sub_120000afc_result)
+  calls deregister_tm_clones
+sub sub_120001350(sub_120001350_result)
+  calls __do_global_dtors_aux
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u64 = R4
+#2: main_argv :: in out u64 = R5
+#3: main_result :: out u64 = R2
+
+#4:
+#5: R29 := R29 - 0x70
+#6: mem := mem with [R29 + 0x68, be]:u64 <- R31
+#7: mem := mem with [R29 + 0x60, be]:u64 <- R30
+#8: mem := mem with [R29 + 0x58, be]:u64 <- R28
+#9: mem := mem with [R29 + 0x50, be]:u64 <- R16
+#10: R30 := R29
+#11: R28 := 0x20000
+#12: R28 := R28 + R25
+#13: R28 := R28 - 0x6DF8
+#14: mem := mem with [R30 + 0x48, be]:u64 <- R5
+#15: R4 := extend:64[low:32[R4]]
+#16: mem := mem with [R30 + 0x40, be]:u32 <- low:32[R4]
+#17: R4 := R29
+#18: R16 := R4
+#19: R4 := 8
+#20: mem := mem with [R30 + 8, be]:u32 <- low:32[R4]
+#21: R5 := extend:64[mem[R30 + 0x40, be]:u32]
+#22: R4 := extend:64[mem[R30 + 8, be]:u32]
+#23: R4 := extend:64[low:32[R5 + R4]]
+#24: R4 := extend:64[low:32[R4 + 1]]
+#25: mem := mem with [R30 + 0xC, be]:u32 <- low:32[R4]
+#26: R4 := extend:64[mem[R30 + 0xC, be]:u32]
+#27: R4 := R4 - 1
+#28: mem := mem with [R30 + 0x10, be]:u64 <- R4
+#29: R4 := extend:64[mem[R30 + 0xC, be]:u32]
+#30: R11 := R4
+#31: R10 := 0
+#32: R4 := R11 >> 0x3A
+#33: R6 := R10 << 6
+#34: R6 := R4 | R6
+#35: R7 := R11 << 6
+#36: R4 := extend:64[mem[R30 + 0xC, be]:u32]
+#37: R9 := R4
+#38: R8 := 0
+#39: R4 := R9 >> 0x3A
+#40: R2 := R8 << 6
+#41: R2 := R4 | R2
+#42: R3 := R9 << 6
+#43: R2 := extend:64[mem[R30 + 0xC, be]:u32]
+#44: R2 := R2 << 3
+#45: R2 := R2 + 7
+#46: R2 := R2 + 0xF
+#47: R2 := R2 >> 4
+#48: R2 := R2 << 4
+#49: R29 := R29 - R2
+#50: R2 := R29
+#51: R2 := R2 + 7
+#52: R2 := R2 >> 3
+#53: R2 := R2 << 3
+#54: mem := mem with [R30 + 0x18, be]:u64 <- R2
+#55: mem := mem with [R30, be]:u32 <- 0
+#56: #39 := 1
+#57: when #39 goto %#58
+#59: goto %#60
+
+#60:
+#61: R2 := extend:64[mem[R30, be]:u32]
+#62: R2 := R2 << 3
+#63: R3 := mem[R30 + 0x48, be]:u64
+#64: R2 := R3 + R2
+#65: R2 := mem[R2, be]:u64
+#66: R4 := R2
+#67: R2 := mem[R28 - 0x7F28, be]:u64
+#68: R25 := R2
+#69: #40 := R25
+#70: R31 := 0x120000F44
+#71: call #40 with return %#72
+
+#72:
+#73: R2 := R2 + 1
+#74: R4 := R2
+#75: R2 := mem[R28 - 0x7F10, be]:u64
+#76: R25 := R2
+#77: #41 := R25
+#78: R31 := 0x120000F5C
+#79: call #41 with return %#80
+
+#80:
+#81: R4 := R2
+#82: R2 := extend:64[mem[R30, be]:u32]
+#83: R2 := R2 << 3
+#84: R3 := mem[R30 + 0x48, be]:u64
+#85: R2 := R3 + R2
+#86: R2 := mem[R2, be]:u64
+#87: R5 := R2
+#88: R2 := mem[R28 - 0x7F08, be]:u64
+#89: R25 := R2
+#90: #42 := R25
+#91: R31 := 0x120000F88
+#92: call #42 with return %#93
+
+#93:
+#94: R4 := R2
+#95: R3 := mem[R30 + 0x18, be]:u64
+#96: R2 := extend:64[mem[R30, be]:u32]
+#97: R2 := R2 << 3
+#98: R2 := R3 + R2
+#99: mem := mem with [R2, be]:u64 <- R4
+#100: R2 := extend:64[mem[R30, be]:u32]
+#101: R2 := extend:64[low:32[R2 + 1]]
+#102: mem := mem with [R30, be]:u32 <- low:32[R2]
+#103: goto %#58
+
+#58:
+#104: R3 := extend:64[mem[R30, be]:u32]
+#105: R2 := extend:64[mem[R30 + 0x40, be]:u32]
+#106: R2 := pad:64[R3 <$ R2]
+#107: #43 := R2 <> 0
+#108: when #43 goto %#60
+#109: goto %#110
+
+#110:
+#111: mem := mem with [R30 + 4, be]:u32 <- 0
+#112: #44 := 1
+#113: when #44 goto %#114
+#115: goto %#116
+
+#116:
+#117: R3 := mem[R28 - 0x7F90, be]:u64
+#118: R2 := extend:64[mem[R30 + 4, be]:u32]
+#119: R2 := R2 << 3
+#120: R2 := R3 + R2
+#121: R2 := mem[R2, be]:u64
+#122: R5 := 0x20
+#123: R4 := R2
+#124: R2 := mem[R28 - 0x7F20, be]:u64
+#125: R25 := R2
+#126: #45 := R25
+#127: R31 := 0x120000FF8
+#128: call #45 with return %#129
+
+#129:
+#130: R2 := R2 + 1
+#131: mem := mem with [R30 + 0x20, be]:u64 <- R2
+#132: R5 := 0x20
+#133: R4 := mem[R30 + 0x20, be]:u64
+#134: R2 := mem[R28 - 0x7F20, be]:u64
+#135: R25 := R2
+#136: #46 := R25
+#137: R31 := 0x120001018
+#138: call #46 with return %#139
+
+#139:
+#140: mem := mem with [R30 + 0x28, be]:u64 <- R2
+#141: R3 := mem[R30 + 0x28, be]:u64
+#142: R2 := mem[R30 + 0x20, be]:u64
+#143: R2 := R3 - R2
+#144: R2 := extend:64[low:32[R2]]
+#145: R2 := extend:64[low:32[R2 + 1]]
+#146: mem := mem with [R30 + 0x30, be]:u32 <- low:32[R2]
+#147: R2 := extend:64[mem[R30 + 0x30, be]:u32]
+#148: R4 := R2
+#149: R2 := mem[R28 - 0x7F10, be]:u64
+#150: R25 := R2
+#151: #47 := R25
+#152: R31 := 0x12000104C
+#153: call #47 with return %#154
+
+#154:
+#155: mem := mem with [R30 + 0x38, be]:u64 <- R2
+#156: R2 := extend:64[mem[R30 + 0x30, be]:u32]
+#157: R6 := R2
+#158: R5 := mem[R30 + 0x20, be]:u64
+#159: R4 := mem[R30 + 0x38, be]:u64
+#160: R2 := mem[R28 - 0x7EF8, be]:u64
+#161: R25 := R2
+#162: #48 := R25
+#163: R31 := 0x120001070
+#164: call #48 with return %#165
+
+#165:
+#166: R2 := extend:64[mem[R30 + 0x30, be]:u32]
+#167: R2 := R2 - 1
+#168: R3 := mem[R30 + 0x38, be]:u64
+#169: R2 := R3 + R2
+#170: mem := mem with [R2] <- 0
+#171: R3 := mem[R30 + 0x18, be]:u64
+#172: R2 := extend:64[mem[R30, be]:u32]
+#173: R2 := R2 << 3
+#174: R2 := R3 + R2
+#175: R3 := mem[R30 + 0x38, be]:u64
+#176: mem := mem with [R2, be]:u64 <- R3
+#177: R2 := extend:64[mem[R30 + 4, be]:u32]
+#178: R2 := extend:64[low:32[R2 + 1]]
+#179: mem := mem with [R30 + 4, be]:u32 <- low:32[R2]
+#180: R2 := extend:64[mem[R30, be]:u32]
+#181: R2 := extend:64[low:32[R2 + 1]]
+#182: mem := mem with [R30, be]:u32 <- low:32[R2]
+#183: goto %#114
+
+#114:
+#184: R3 := extend:64[mem[R30 + 4, be]:u32]
+#185: R2 := extend:64[mem[R30 + 8, be]:u32]
+#186: R2 := pad:64[R3 <$ R2]
+#187: #49 := R2 <> 0
+#188: when #49 goto %#116
+#189: goto %#190
+
+#190:
+#191: R2 := extend:64[mem[R30 + 0xC, be]:u32]
+#192: R2 := extend:64[low:32[R2 - 1]]
+#193: R3 := mem[R30 + 0x18, be]:u64
+#194: R2 := R2 << 3
+#195: R2 := R3 + R2
+#196: mem := mem with [R2, be]:u64 <- 0
+#197: R2 := mem[R30 + 0x18, be]:u64
+#198: R4 := R2
+#199: R2 := mem[R28 - 0x7F88, be]:u64
+#200: R25 := R2
+#201: #50 := 1
+#202: R31 := 0x1200010F8
+#203: #51 := #50
+#204: when #51 call @print_strings with noreturn
+#205: goto %#206
+
+#206:
+#207: mem := mem with [R30, be]:u32 <- 0
+#208: #52 := 1
+#209: when #52 goto %#210
+#211: goto %#212
+
+#212:
+#213: R3 := mem[R30 + 0x18, be]:u64
+#214: R2 := extend:64[mem[R30, be]:u32]
+#215: R2 := R2 << 3
+#216: R2 := R3 + R2
+#217: R2 := mem[R2, be]:u64
+#218: R4 := R2
+#219: R2 := mem[R28 - 0x7F00, be]:u64
+#220: R25 := R2
+#221: #53 := R25
+#222: R31 := 0x12000112C
+#223: call #53 with return %#224
+
+#224:
+#225: R2 := extend:64[mem[R30, be]:u32]
+#226: R2 := extend:64[low:32[R2 + 1]]
+#227: mem := mem with [R30, be]:u32 <- low:32[R2]
+#228: goto %#210
+
+#210:
+#229: R3 := extend:64[mem[R30, be]:u32]
+#230: R2 := extend:64[mem[R30 + 0xC, be]:u32]
+#231: R2 := pad:64[R3 <$ R2]
+#232: #54 := R2 <> 0
+#233: when #54 goto %#212
+#234: goto %#235
+
+#235:
+#236: R2 := 0
+#237: R29 := R16
+#238: R29 := R30
+#239: R31 := mem[R29 + 0x68, be]:u64
+#240: R30 := mem[R29 + 0x60, be]:u64
+#241: R28 := mem[R29 + 0x58, be]:u64
+#242: R16 := mem[R29 + 0x50, be]:u64
+#243: R29 := R29 + 0x70
+#244: call R31 with noreturn
+

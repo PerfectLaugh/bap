@@ -1,0 +1,98 @@
+# exited with 0
+sub _start(_start_result)
+  calls exit main
+sub exit(exit_code)
+  calls exit
+sub fgetc(fgetc_stream, fgetc_result)
+sub getchar(getchar_result)
+sub helper(helper_result)
+sub main(main_argc, main_argv, main_result)
+  calls helper putchar
+sub putchar(putchar_c, putchar_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = R4
+#2: main_argv :: in out u32 = R5
+#3: main_result :: out u32 = R2
+
+#4:
+#5: R29 := R29 - 0x30
+#6: mem := mem with [R29 + 0x2C, be]:u32 <- R31
+#7: mem := mem with [R29 + 0x28, be]:u32 <- R17
+#8: mem := mem with [R29 + 0x24, be]:u32 <- R16
+#9: R1 := 0x30000
+#10: R1 := R1 + 0x114
+#11: R16 := R1 + 1
+#12: R2 := 0x65
+#13: R17 := R1 + 6
+#14: goto %#15
+
+#15:
+#16: R4 := extend:32[low:8[R2]]
+#17: R31 := 0x30038
+#18: call @putchar with return %#19
+
+#19:
+#20: R1 := R16 + 1
+#21: R2 := pad:32[mem[R16]]
+#22: R16 := R1
+#23: #2 := R1 <> R17
+#24: when #2 goto %#15
+#25: goto %#26
+
+#26:
+#27: R4 := 0xE
+#28: R31 := 0x30050
+#29: call @helper with return %#30
+
+#30:
+#31: R16 := R2
+#32: R4 := 0x20
+#33: R31 := 0x3005C
+#34: call @putchar with return %#35
+
+#35:
+#36: mem := mem with [R29 + 0x23] <- 0
+#37: R1 := R29 + 0x13
+#38: R17 := R1 + 0x11
+#39: R1 := 0x30000
+#40: R3 := R1 + 0x11A
+#41: goto %#42
+
+#42:
+#43: R1 := R16 & 0xF
+#44: R1 := R3 + R1
+#45: R2 := pad:32[mem[R1]]
+#46: mem := mem with [R17 - 2] <- low:8[R2]
+#47: R16 := R16 >> 4
+#48: R17 := R17 - 1
+#49: #3 := R16 <> 0
+#50: when #3 goto %#42
+#51: goto %#52
+
+#52:
+#53: R4 := extend:32[low:8[R2]]
+#54: R31 := 0x30094
+#55: call @putchar with return %#56
+
+#56:
+#57: R1 := R17 + 1
+#58: R2 := pad:32[mem[R17]]
+#59: R17 := R1
+#60: #4 := R2 <> 0
+#61: when #4 goto %#52
+#62: goto %#63
+
+#63:
+#64: R4 := 0xA
+#65: R31 := 0x300AC
+#66: call @putchar with return %#67
+
+#67:
+#68: R2 := 0
+#69: R16 := mem[R29 + 0x24, be]:u32
+#70: R17 := mem[R29 + 0x28, be]:u32
+#71: R31 := mem[R29 + 0x2C, be]:u32
+#72: R29 := R29 + 0x30
+#73: call R31 with noreturn
+

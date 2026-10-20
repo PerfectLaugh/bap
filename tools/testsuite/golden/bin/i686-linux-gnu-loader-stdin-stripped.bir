@@ -1,0 +1,15 @@
+# exited with 0
+sub sub_1270(sub_1270_result)
+  calls sub_1281
+sub sub_1281(sub_1281_result)
+  calls sub_1370 sub_1380
+sub sub_1330(sub_1330_result)
+  calls sub_133f
+sub sub_133f(sub_133f_result)
+  calls sub_1270 sub_1390
+sub sub_1370(sub_1370_result)
+sub sub_1380(sub_1380_result)
+sub sub_1390(sub_1390_result)
+sub exit(exit_code)
+sub fgetc(fgetc_stream, fgetc_result)
+sub putchar(putchar_c, putchar_result)

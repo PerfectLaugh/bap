@@ -1,0 +1,208 @@
+# exited with 0
+sub __stack_chk_fail()
+sub __strcpy_chk(__strcpy_chk_result)
+sub main(main_argc, main_argv, main_result)
+  calls __stack_chk_fail __strcpy_chk malloc print_strings strlen
+sub malloc(malloc_size, malloc_result)
+sub print_strings(print_strings_result)
+  calls printf
+sub printf(printf_format, printf_result)
+sub strlen(strlen_s, strlen_result)
+sub ___stack_chk_fail(___stack_chk_fail_result)
+sub ___stack_chk_guard(___stack_chk_guard_result)
+sub ___strcpy_chk(___strcpy_chk_result)
+sub _malloc(_malloc_result)
+sub _printf(_printf_result)
+sub _strlen(_strlen_result)
+sub dyld_stub_binder(dyld_stub_binder_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[RDI]
+#2: main_argv :: in out u64 = RSI
+#3: main_result :: out u32 = low:32[RAX]
+
+#4:
+#5: RSP := RSP - 8
+#6: mem := mem with [RSP, el]:u64 <- RBP
+#7: RBP := RSP
+#8: #32 := RSP - 0x40
+#9: CF := 63:63[~RSP & 0x40 | ~(RSP ^ 0x40) & #32]
+#10: OF := 63:63[(RSP ^ 0x40) & (RSP ^ #32)]
+#11: AF := 0:0[(#32 ^ RSP ^ 0x40) >> 4]
+#12: SF := 63:63[#32]
+#13: ZF := #32 = 0
+#14: #33 := low:8[#32]
+#15: #34 := #33 ^ #33 >> 4
+#16: #35 := #34 ^ #34 >> 2
+#17: #36 := #35 ^ #35 >> 1
+#18: PF := ~0:0[#36]
+#19: RSP := #32
+#20: RAX := mem[0x100001000, el]:u64
+#21: RAX := mem[RAX, el]:u64
+#22: mem := mem with [RBP - 8, el]:u64 <- RAX
+#23: mem := mem with [RBP - 0xC, el]:u32 <- 0
+#24: mem := mem with [RBP - 0x10, el]:u32 <- 31:0[RDI]
+#25: mem := mem with [RBP - 0x18, el]:u64 <- RSI
+#26: RDI := pad:64[mem[RBP - 0x10, el]:u32]
+#27: #44 := CF
+#28: #45 := 31:0[RDI] + 1
+#29: CF := 31:31[RDI] & ~31:31[#45]
+#30: OF := ~31:31[RDI] & 31:31[#45]
+#31: AF := 0:0[(#45 ^ 31:0[RDI] ^ 1) >> 4]
+#32: SF := 31:31[#45]
+#33: ZF := #45 = 0
+#34: #46 := low:8[#45]
+#35: #47 := #46 ^ #46 >> 4
+#36: #48 := #47 ^ #47 >> 2
+#37: #49 := #48 ^ #48 >> 1
+#38: PF := ~0:0[#49]
+#39: #50 := #45
+#40: CF := #44
+#41: RDI := pad:64[#50]
+#42: RAX := pad:64[31:0[RDI]]
+#43: RSI := RSP
+#44: mem := mem with [RBP - 0x28, el]:u64 <- RSI
+#45: RAX := (RAX << 3) + 0xF
+#46: RSI := 0xFFFFFFFF0
+#47: CF := 0
+#48: OF := 0
+#49: SF := 63:63[RAX & RSI]
+#50: ZF := (RAX & RSI) = 0
+#51: #53 := low:8[RAX & RSI]
+#52: #54 := #53 ^ #53 >> 4
+#53: #55 := #54 ^ #54 >> 2
+#54: #56 := #55 ^ #55 >> 1
+#55: PF := ~0:0[#56]
+#56: RAX := RAX & RSI
+#57: RSI := RSP
+#58: #57 := RSI - RAX
+#59: CF := 63:63[~RSI & RAX | ~(RSI ^ RAX) & #57]
+#60: OF := 63:63[(RSI ^ RAX) & (RSI ^ #57)]
+#61: AF := 0:0[(#57 ^ RSI ^ RAX) >> 4]
+#62: SF := 63:63[#57]
+#63: ZF := #57 = 0
+#64: #58 := low:8[#57]
+#65: #59 := #58 ^ #58 >> 4
+#66: #60 := #59 ^ #59 >> 2
+#67: #61 := #60 ^ #60 >> 1
+#68: PF := ~0:0[#61]
+#69: RSI := #57
+#70: RSP := RSI
+#71: mem := mem with [RBP - 0x1C, el]:u32 <- 0
+#72: mem := mem with [RBP - 0x30, el]:u64 <- RSI
+#73: goto %#74
+
+#74:
+#75: RAX := pad:64[mem[RBP - 0x1C, el]:u32]
+#76: #66 := 31:0[RAX] - mem[RBP - 0x10, el]:u32
+#77: CF := 31:31[~31:0[RAX] & mem[RBP - 0x10, el]:u32 |
+          ~(31:0[RAX] ^ mem[RBP - 0x10, el]:u32) & #66]
+#78: OF := 31:31[(31:0[RAX] ^ mem[RBP - 0x10, el]:u32) &
+          (31:0[RAX] ^ #66)]
+#79: AF := 0:0[(#66 ^ 31:0[RAX] ^ mem[RBP - 0x10, el]:u32) >> 4]
+#80: SF := 31:31[#66]
+#81: ZF := #66 = 0
+#82: #67 := low:8[#66]
+#83: #68 := #67 ^ #67 >> 4
+#84: #69 := #68 ^ #68 >> 2
+#85: #70 := #69 ^ #69 >> 1
+#86: PF := ~0:0[#70]
+#87: #72 := SF = OF
+#88: when #72 goto %#89
+#90: goto %#91
+
+#89:
+#92: RAX := extend:64[mem[RBP - 0x10, el]:u32]
+#93: RCX := mem[RBP - 0x30, el]:u64
+#94: mem := mem with [RCX + (RAX << 3), el]:u64 <- 0
+#95: RDI := RCX
+#96: RSP := RSP - 8
+#97: mem := mem with [RSP, el]:u64 <- 0x100000F1D
+#98: call @print_strings with return %#99
+
+#99:
+#100: RCX := mem[0x100001000, el]:u64
+#101: RDI := mem[RBP - 0x28, el]:u64
+#102: RSP := RDI
+#103: RDX := pad:64[mem[RBP - 0xC, el]:u32]
+#104: RCX := mem[RCX, el]:u64
+#105: #83 := RCX - mem[RBP - 8, el]:u64
+#106: CF := 63:63[~RCX & mem[RBP - 8, el]:u64 |
+          ~(RCX ^ mem[RBP - 8, el]:u64) & #83]
+#107: OF := 63:63[(RCX ^ mem[RBP - 8, el]:u64) & (RCX ^ #83)]
+#108: AF := 0:0[(#83 ^ RCX ^ mem[RBP - 8, el]:u64) >> 4]
+#109: SF := 63:63[#83]
+#110: ZF := #83 = 0
+#111: #84 := low:8[#83]
+#112: #85 := #84 ^ #84 >> 4
+#113: #86 := #85 ^ #85 >> 2
+#114: #87 := #86 ^ #86 >> 1
+#115: PF := ~0:0[#87]
+#116: mem := mem with [RBP - 0x34, el]:u32 <- 31:0[RAX]
+#117: mem := mem with [RBP - 0x38, el]:u32 <- 31:0[RDX]
+#118: #91 := ~ZF
+#119: when #91 goto %#120
+#121: goto %#122
+
+#120:
+#123: RSP := RSP - 8
+#124: mem := mem with [RSP, el]:u64 <- 0x100000F4E
+#125: call @__stack_chk_fail with return %#126
+
+#126:
+#127: call @__stack_chk_fail with noreturn
+
+#122:
+#128: RAX := pad:64[mem[RBP - 0x38, el]:u32]
+#129: RSP := RBP
+#130: #94 := mem[RSP, el]:u64
+#131: RSP := RSP + 8
+#132: RBP := #94
+#133: #95 := mem[RSP, el]:u64
+#134: RSP := RSP + 8
+#135: call #95 with noreturn
+
+#91:
+#136: RAX := extend:64[mem[RBP - 0x1C, el]:u32]
+#137: RCX := mem[RBP - 0x18, el]:u64
+#138: RDI := mem[RCX + (RAX << 3), el]:u64
+#139: RSP := RSP - 8
+#140: mem := mem with [RSP, el]:u64 <- 0x100000EC8
+#141: call @strlen with return %#142
+
+#142:
+#143: RDI := RAX
+#144: RSP := RSP - 8
+#145: mem := mem with [RSP, el]:u64 <- 0x100000ED0
+#146: call @malloc with return %#147
+
+#147:
+#148: RDX := 0xFFFFFFFFFFFFFFFF
+#149: RCX := extend:64[mem[RBP - 0x1C, el]:u32]
+#150: RDI := mem[RBP - 0x18, el]:u64
+#151: RSI := mem[RDI + (RCX << 3), el]:u64
+#152: RDI := RAX
+#153: RSP := RSP - 8
+#154: mem := mem with [RSP, el]:u64 <- 0x100000EEB
+#155: call @__strcpy_chk with return %#156
+
+#156:
+#157: RCX := extend:64[mem[RBP - 0x1C, el]:u32]
+#158: RDX := mem[RBP - 0x30, el]:u64
+#159: mem := mem with [RDX + (RCX << 3), el]:u64 <- RAX
+#160: RAX := pad:64[mem[RBP - 0x1C, el]:u32]
+#161: #112 := 31:0[RAX] + 1
+#162: CF := 31:31[RAX] & ~31:31[#112]
+#163: OF := ~31:31[RAX] & 31:31[#112]
+#164: AF := 0:0[(#112 ^ 31:0[RAX] ^ 1) >> 4]
+#165: SF := 31:31[#112]
+#166: ZF := #112 = 0
+#167: #113 := low:8[#112]
+#168: #114 := #113 ^ #113 >> 4
+#169: #115 := #114 ^ #114 >> 2
+#170: #116 := #115 ^ #115 >> 1
+#171: PF := ~0:0[#116]
+#172: RAX := pad:64[#112]
+#173: mem := mem with [RBP - 0x1C, el]:u32 <- 31:0[RAX]
+#174: goto %#74
+

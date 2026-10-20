@@ -1,0 +1,114 @@
+# exited with 0
+sub _start(_start_result)
+  calls main
+sub main(main_argc, main_argv, main_result)
+sub exit(exit_code)
+sub fgetc(fgetc_stream, fgetc_result)
+sub putchar(putchar_c, putchar_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = R4
+#2: main_argv :: in out u32 = R5
+#3: main_result :: out u32 = R2
+
+#4:
+#5: R2 := 0x20000
+#6: R2 := R2 - 0x7EC0
+#7: R29 := R29 - 0x38
+#8: mem := mem with [R29 + 0x34, be]:u32 <- R31
+#9: mem := mem with [R29 + 0x30, be]:u32 <- R19
+#10: mem := mem with [R29 + 0x2C, be]:u32 <- R18
+#11: mem := mem with [R29 + 0x28, be]:u32 <- R17
+#12: mem := mem with [R29 + 0x24, be]:u32 <- R16
+#13: R16 := R2 + R25
+#14: R1 := mem[R16 - 0x7FDC, be]:u32
+#15: R4 := mem[R1, be]:u32
+#16: R25 := mem[R16 - 0x7FD8, be]:u32
+#17: R28 := R16
+#18: #0 := R25
+#19: R31 := 0x10358
+#20: call #0 with return %#21
+
+#21:
+#22: R17 := R2
+#23: R1 := mem[R16 - 0x7FE8, be]:u32
+#24: R1 := R1 + 0x305
+#25: R18 := R1 + 1
+#26: R2 := 0x72
+#27: R19 := R1 + 5
+#28: goto %#29
+
+#29:
+#30: R4 := extend:32[low:8[R2]]
+#31: R25 := mem[R16 - 0x7FD4, be]:u32
+#32: R28 := R16
+#33: #1 := R25
+#34: R31 := 0x10380
+#35: call #1 with return %#36
+
+#36:
+#37: R1 := R18 + 1
+#38: R2 := pad:32[mem[R18]]
+#39: R18 := R1
+#40: #2 := R1 <> R19
+#41: when #2 goto %#29
+#42: goto %#43
+
+#43:
+#44: R25 := mem[R16 - 0x7FD4, be]:u32
+#45: R4 := 0x20
+#46: #3 := R25
+#47: R31 := 0x1039C
+#48: call #3 with return %#49
+
+#49:
+#50: mem := mem with [R29 + 0x23] <- 0
+#51: R1 := R29 + 0x13
+#52: R18 := R1 + 0x11
+#53: R1 := mem[R16 - 0x7FE8, be]:u32
+#54: R3 := R1 + 0x30A
+#55: goto %#56
+
+#56:
+#57: R1 := R17 & 0xF
+#58: R1 := R3 + R1
+#59: R2 := pad:32[mem[R1]]
+#60: mem := mem with [R18 - 2] <- low:8[R2]
+#61: R17 := R17 >> 4
+#62: R18 := R18 - 1
+#63: #4 := R17 <> 0
+#64: when #4 goto %#56
+#65: goto %#66
+
+#66:
+#67: R25 := mem[R16 - 0x7FD4, be]:u32
+#68: R4 := extend:32[low:8[R2]]
+#69: #5 := R25
+#70: R31 := 0x103D8
+#71: call #5 with return %#72
+
+#72:
+#73: R1 := R18 + 1
+#74: R2 := pad:32[mem[R18]]
+#75: R18 := R1
+#76: #6 := R2 <> 0
+#77: when #6 goto %#66
+#78: goto %#79
+
+#79:
+#80: R25 := mem[R16 - 0x7FD4, be]:u32
+#81: R4 := 0xA
+#82: #7 := R25
+#83: R31 := 0x103F4
+#84: call #7 with return %#85
+
+#85:
+#86: R2 := 0
+#87: R16 := mem[R29 + 0x24, be]:u32
+#88: R17 := mem[R29 + 0x28, be]:u32
+#89: R18 := mem[R29 + 0x2C, be]:u32
+#90: R19 := mem[R29 + 0x30, be]:u32
+#91: R31 := mem[R29 + 0x34, be]:u32
+#92: R29 := R29 + 0x38
+#93: call R31 with noreturn
+

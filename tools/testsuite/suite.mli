@@ -47,6 +47,7 @@ val bap :
   ?timeout:float ->
   ?until:string ->
   ?env:(string * string) list ->
+  ?unset:string list ->
   env ->
   string list ->
   output
@@ -54,7 +55,8 @@ val bap :
 
     The command is killed after [timeout] seconds (600 by default) or as soon as
     its output matches the regular expression [until]. The variables [env] are
-    added to the environment of the command. *)
+    added to the environment of the command, and the variables [unset], which
+    the command would inherit or get from the case, are removed from it. *)
 
 val mc : env -> string list -> output
 (** [mc env args] runs bap-mc with the arguments [args]. *)
@@ -75,6 +77,20 @@ val lacks : env -> string -> output -> string -> unit
 val contains : env -> string -> output -> string -> unit
 (** [contains env name output str] checks that [str] is a substring of [output].
 *)
+
+val source : string -> string
+(** [source name] is the absolute name of [name], a path relative to the root of
+    the source tree of bap. *)
+
+val golden : env -> string -> string -> unit
+(** [golden env name text] checks that [text] is the contents of the golden file
+    [name] in [tools/testsuite/golden], and keeps [text] in [dir env] otherwise,
+    which is kept, since the case fails. With BAP_TESTSUITE_PROMOTE set, it
+    writes [text] to the golden file instead, e.g., run
+
+    {v BAP_TESTSUITE_PROMOTE=1 BAP_TESTS=golden/ dune build @testsuite v}
+
+    and review the changes of the golden files. *)
 
 val matches : output -> string -> bool
 (** [matches output regexp] is [true] if [regexp] matches [output]. *)

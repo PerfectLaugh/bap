@@ -1,0 +1,156 @@
+# exited with 0
+sub _start(_start_result)
+  calls main sub_20520
+sub main(main_argc, main_argv, main_result)
+  calls sub_20500 sub_20510
+sub sub_20500(sub_20500_result)
+sub sub_20510(sub_20510_result)
+sub sub_20520(sub_20520_result)
+sub exit(exit_code)
+sub putchar(putchar_c, putchar_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = R4
+#2: main_argv :: in out u32 = R5
+#3: main_result :: out u32 = R2
+
+#4:
+#5: R29 := R29 - 0x38
+#6: mem := mem with [R29 + 0x34, be]:u32 <- R31
+#7: mem := mem with [R29 + 0x30, be]:u32 <- R18
+#8: mem := mem with [R29 + 0x2C, be]:u32 <- R17
+#9: mem := mem with [R29 + 0x28, be]:u32 <- R16
+#10: R1 := 0x10000
+#11: R1 := R1 + 0x350
+#12: R16 := R1 + 1
+#13: R2 := 0x66
+#14: R17 := R1 + 9
+#15: goto %#16
+
+#16:
+#17: R4 := extend:32[low:8[R2]]
+#18: R31 := 0x203A0
+#19: call @sub_20500 with return %#20
+
+#20:
+#21: R1 := R16 + 1
+#22: R2 := pad:32[mem[R16]]
+#23: R16 := R1
+#24: #4 := R1 <> R17
+#25: when #4 goto %#16
+#26: goto %#27
+
+#27:
+#28: R4 := 0x20
+#29: R31 := 0x203B8
+#30: call @sub_20500 with return %#31
+
+#31:
+#32: R1 := 0x10000
+#33: R1 := R1 + 0x35E
+#34: R2 := 0
+#35: R2 := R2
+#36: R2 := pad:32[0 < R2]
+#37: mem := mem with [R29 + 0x27] <- 0
+#38: R1 := R1 + R2
+#39: R2 := pad:32[mem[R1]]
+#40: mem := mem with [R29 + 0x26] <- low:8[R2]
+#41: R16 := R29 + 0x17
+#42: R17 := R16 + 0x10
+#43: goto %#44
+
+#44:
+#45: R4 := extend:32[low:8[R2]]
+#46: R31 := 0x203EC
+#47: call @sub_20500 with return %#48
+
+#48:
+#49: R1 := R17 + 1
+#50: R2 := pad:32[mem[R17]]
+#51: R17 := R1
+#52: #5 := R2 <> 0
+#53: when #5 goto %#44
+#54: goto %#55
+
+#55:
+#56: R4 := 0xA
+#57: R31 := 0x20404
+#58: call @sub_20500 with return %#59
+
+#59:
+#60: R1 := 0x10000
+#61: R1 := R1 + 0x359
+#62: R17 := R1 + 1
+#63: R2 := 0x64
+#64: R18 := R1 + 5
+#65: goto %#66
+
+#66:
+#67: R4 := extend:32[low:8[R2]]
+#68: R31 := 0x20420
+#69: call @sub_20500 with return %#70
+
+#70:
+#71: R1 := R17 + 1
+#72: R2 := pad:32[mem[R17]]
+#73: R17 := R1
+#74: #6 := R1 <> R18
+#75: when #6 goto %#66
+#76: goto %#77
+
+#77:
+#78: R4 := 0x20
+#79: R31 := 0x20438
+#80: call @sub_20500 with return %#81
+
+#81:
+#82: R1 := 0x10000
+#83: R1 := R1 + 0x35E
+#84: R2 := 0
+#85: R2 := R2
+#86: R2 := pad:32[0 < R2]
+#87: mem := mem with [R29 + 0x27] <- 0
+#88: R1 := R1 + R2
+#89: R2 := pad:32[mem[R1]]
+#90: mem := mem with [R29 + 0x26] <- low:8[R2]
+#91: R16 := R16 + 0x10
+#92: goto %#93
+
+#93:
+#94: R4 := extend:32[low:8[R2]]
+#95: R31 := 0x20468
+#96: call @sub_20500 with return %#97
+
+#97:
+#98: R1 := R16 + 1
+#99: R2 := pad:32[mem[R16]]
+#100: R16 := R1
+#101: #7 := R2 <> 0
+#102: when #7 goto %#93
+#103: goto %#104
+
+#104:
+#105: R4 := 0xA
+#106: R31 := 0x20480
+#107: call @sub_20500 with return %#108
+
+#108:
+#109: R1 := 0
+#110: R1 := R1
+#111: #8 := R1 = 0
+#112: when #8 goto %#113
+#114: goto %#115
+
+#115:
+#116: R31 := 0x20498
+#117: call @sub_20510 with return %#113
+
+#113:
+#118: R2 := 0
+#119: R16 := mem[R29 + 0x28, be]:u32
+#120: R17 := mem[R29 + 0x2C, be]:u32
+#121: R18 := mem[R29 + 0x30, be]:u32
+#122: R31 := mem[R29 + 0x34, be]:u32
+#123: R29 := R29 + 0x38
+#124: call R31 with noreturn
+

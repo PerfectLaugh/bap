@@ -62,8 +62,8 @@ let variables env =
     ("TERM", "dumb");
   ]
 
-let environment vars =
-  let names = List.map fst vars in
+let environment ?(unset = []) vars =
+  let names = List.map fst vars @ unset in
   Unix.environment () |> Array.to_list
   |> List.filter (fun var ->
       match String.index_opt var '=' with
@@ -81,7 +81,11 @@ let kill pid =
   (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
   ignore (waitpid [] pid)
 
-let run_command ?(timeout = 600.) ?until ?(env = []) case prog args =
+let run_command ?(timeout = 600.) ?until ?(env = []) ?(unset = []) case prog
+    args =
+  let variables =
+    List.filter (fun (name, _) -> not (List.mem name unset)) (variables case)
+  in
   let n = List.length case.calls + 1 in
   let out = file case (sprintf "%d.out" n) in
   let fd =
@@ -94,7 +98,7 @@ let run_command ?(timeout = 600.) ?until ?(env = []) case prog args =
         Unix.close stdin)
       (fun () ->
         Spawn.spawn ~prog ~argv:(prog :: args)
-          ~env:(Spawn.Env.of_list (environment (variables case @ env)))
+          ~env:(Spawn.Env.of_list (environment ~unset (variables @ env)))
           ~cwd:(Spawn.Working_dir.Path case.dir) ~stdin ~stdout:fd ~stderr:fd ())
   in
   let until = Option.map regexp until in
@@ -123,14 +127,39 @@ let run_command ?(timeout = 600.) ?until ?(env = []) case prog args =
   case.calls <- { command = prog :: args; out; result = status } :: case.calls;
   { text = read_output out; status }
 
-let bap ?timeout ?until ?env case args =
-  run_command ?timeout ?until ?env case case.tools.bap args
+let bap ?timeout ?until ?env ?unset case args =
+  run_command ?timeout ?until ?env ?unset case case.tools.bap args
 
 let mc case args = run_command case case.tools.mc args
 let check env name ok = if not ok then env.failed <- name :: env.failed
 let matches output re = Re.execp (regexp re) output.text
 let has env name output re = check env name (matches output re)
 let lacks env name output re = check env name (not (matches output re))
+
+(* the root of the source tree, which [main] finds *)
+let root = ref (Sys.getcwd ())
+let source name = Filename.concat !root name
+
+(* the golden files may have \r\n, when git converts the ends of lines *)
+let unix_lines text = String.concat "" (String.split_on_char '\r' text)
+
+let golden env name text =
+  let expected = source ("tools/testsuite/golden/" ^ name) in
+  if Sys.getenv_opt "BAP_TESTSUITE_PROMOTE" <> None then (
+    let rec mkdir dir =
+      if not (Sys.file_exists dir) then (
+        mkdir (Filename.dirname dir);
+        (* the cases run in parallel and make the same directories *)
+        try Sys.mkdir dir 0o755
+        with Sys_error _ when Sys.is_directory dir -> ())
+    in
+    mkdir (Filename.dirname expected);
+    Out_channel.with_open_bin expected (fun ch -> output_string ch text))
+  else
+    let actual = write env (Filename.basename name) text in
+    check env
+      (sprintf "%s is the same as %s" actual expected)
+      (Sys.file_exists expected && unix_lines (read expected) = text)
 
 let find str sub start =
   let n = String.length sub in
@@ -364,9 +393,8 @@ let set_default var value =
   if Sys.getenv_opt var = None then Unix.putenv var value
 
 let main tests =
-  let root =
-    Option.value (source_root (Sys.getcwd ())) ~default:(Sys.getcwd ())
-  in
+  root := Option.value (source_root (Sys.getcwd ())) ~default:(Sys.getcwd ());
+  let root = !root in
   let dir =
     match Sys.getenv_opt "BAP_TESTSUITE" with
     | Some dir -> absolute dir

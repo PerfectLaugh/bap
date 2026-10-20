@@ -1,0 +1,11 @@
+# exited with 0
+sub sub_8b(sub_8b_result)
+  calls sub_9f
+sub sub_9f(sub_9f_result)
+sub sum_internal_1(sum_internal_1_result)
+sub sum_internal_2(sum_internal_2_result)
+  calls sum_internal_1 sum_internal_3
+sub sum_internal_3(sum_internal_3_result)
+  calls sub_8b sub_9f sum_external sum_internal_1 sum_internal_2
+sub sum_external(sum_external_result)
+sub _sum_external(_sum_external_result)

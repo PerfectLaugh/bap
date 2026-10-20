@@ -1,0 +1,155 @@
+# exited with 0
+sub _start(_start_result)
+  calls exit main
+sub bump(bump_result)
+sub exit(exit_code)
+  calls exit
+sub fgetc(fgetc_stream, fgetc_result)
+sub getchar(getchar_result)
+sub main(main_argc, main_argv, main_result)
+  calls bump putchar
+sub putchar(putchar_c, putchar_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[X10]
+#2: main_argv :: in out u64 = X11
+#3: main_result :: out u32 = low:32[X10]
+
+#4:
+#5: X2 := X2 - 0x40
+#6: mem := mem with [X2 + 0x38, el]:u64 <- X1
+#7: mem := mem with [X2 + 0x30, el]:u64 <- X8
+#8: mem := mem with [X2 + 0x28, el]:u64 <- X9
+#9: mem := mem with [X2 + 0x20, el]:u64 <- X18
+#10: X18 := 0x10000
+#11: X18 := X18 + 0x102
+#12: X9 := X18 + 1
+#13: X1 := 0x1002A
+#14: call @bump with return %#15
+
+#15:
+#16: X8 := X10
+#17: X10 := 0x63
+#18: X18 := X18 + 8
+#19: goto %#20
+
+#20:
+#21: X1 := 0x10036
+#22: call @putchar with return %#23
+
+#23:
+#24: X10 := pad:64[mem[X9]]
+#25: X9 := X9 + 1
+#26: #3 := X9 <> X18
+#27: when #3 goto %#20
+#28: goto %#29
+
+#29:
+#30: X10 := 0x20
+#31: X1 := 0x10048
+#32: call @putchar with return %#33
+
+#33:
+#34: mem := mem with [X2 + 0x1F] <- 0
+#35: X9 := X2 + 0x20
+#36: X18 := 0x10000
+#37: X18 := X18 + 0x113
+#38: goto %#39
+
+#39:
+#40: X10 := X8 & 0xF
+#41: X10 := X10 + X18
+#42: X10 := pad:64[mem[X10]]
+#43: X8 := X8 >> 4
+#44: mem := mem with [X9 - 2] <- low:8[X10]
+#45: X9 := X9 - 1
+#46: #6 := ~X8 = 0
+#47: when #6 goto %#39
+#48: goto %#49
+
+#49:
+#50: X1 := 0x1006E
+#51: call @putchar with return %#52
+
+#52:
+#53: X10 := pad:64[mem[X9]]
+#54: X9 := X9 + 1
+#55: #9 := ~X10 = 0
+#56: when #9 goto %#49
+#57: goto %#58
+
+#58:
+#59: X10 := 0xA
+#60: X1 := 0x1007C
+#61: call @putchar with return %#62
+
+#62:
+#63: X9 := 0x10000
+#64: X9 := X9 + 0x10A
+#65: X10 := 0x63
+#66: X8 := X9 + 1
+#67: X9 := X9 + 9
+#68: goto %#69
+
+#69:
+#70: X1 := 0x10092
+#71: call @putchar with return %#72
+
+#72:
+#73: X10 := pad:64[mem[X8]]
+#74: X8 := X8 + 1
+#75: #13 := X8 <> X9
+#76: when #13 goto %#69
+#77: goto %#78
+
+#78:
+#79: X10 := 0x20
+#80: X1 := 0x100A4
+#81: call @putchar with return %#82
+
+#82:
+#83: mem := mem with [X2 + 0x1F] <- 0
+#84: X10 := 0x63
+#85: X8 := X2 + 0x20
+#86: goto %#87
+
+#87:
+#88: X11 := X10 & 0xF
+#89: X11 := X11 + X18
+#90: X11 := pad:64[mem[X11]]
+#91: X10 := X10 >> 4
+#92: mem := mem with [X8 - 2] <- low:8[X11]
+#93: X8 := X8 - 1
+#94: #16 := ~X10 = 0
+#95: when #16 goto %#87
+#96: goto %#97
+
+#97:
+#98: X10 := 0x36
+#99: goto %#100
+
+#100:
+#101: X1 := 0x100CA
+#102: call @putchar with return %#103
+
+#103:
+#104: X10 := pad:64[mem[X8]]
+#105: X8 := X8 + 1
+#106: #19 := ~X10 = 0
+#107: when #19 goto %#100
+#108: goto %#109
+
+#109:
+#110: X10 := 0xA
+#111: X1 := 0x100D8
+#112: call @putchar with return %#113
+
+#113:
+#114: X10 := 0
+#115: X1 := mem[X2 + 0x38, el]:u64
+#116: X8 := mem[X2 + 0x30, el]:u64
+#117: X9 := mem[X2 + 0x28, el]:u64
+#118: X18 := mem[X2 + 0x20, el]:u64
+#119: X2 := X2 + 0x40
+#120: call X1 with noreturn
+

@@ -522,8 +522,213 @@ let version _ =
         has env "bap version" out "1|2");
   ]
 
+(* the commands of analyze query the knowledge base of a project *)
+let analyze data =
+  let binary = path data (echo "x86_64-linux-gnu") in
+  [
+    case "analyze" (fun env ->
+        let project = file env "echo.proj" in
+        let out =
+          bap env [ "disassemble"; binary; "--project=" ^ project; "--update" ]
+        in
+        check env "disassembled the project" (out.status = Exited 0);
+        let analyze command =
+          let out = bap env [ "analyze"; "--project=" ^ project; command ] in
+          check env (command ^ " exited with 0") (out.status = Exited 0);
+          lacks env (command ^ " has no errors") out "[Ee]rror";
+          out
+        in
+        let out = analyze "units" in
+        has env "units" out "file:.*x86_64-linux-gnu-echo bap:x86_64-gnu-elf";
+        let unit =
+          match String.split_on_char ' ' (String.trim out.text) with
+          | unit :: _ -> unit
+          | [] -> "file:" ^ binary
+        in
+        let out = analyze "subroutines" in
+        List.iter
+          (fun sub -> has env ("subroutines has " ^ sub) out (":0x" ^ sub))
+          [ "40076b: main"; "400733: print_strings"; "400570: free" ];
+        let out = analyze "subroutines :matches ma" in
+        has env "matches main" out ":0x40076b: main";
+        has env "matches malloc" out ":0x4005e0: malloc";
+        lacks env "doesn't match free" out ": free";
+        let out = analyze ("subroutine " ^ unit ^ " main") in
+        sequence env out
+          [
+            ("the entry of main", ":0x40076b\n");
+            ("the second instruction of main", ":0x40076c\n");
+          ];
+        lacks env "main doesn't have the instructions of free" out ":0x400570";
+        let out = analyze ("subroutine " ^ unit ^ " main :semantics bap:bil") in
+        sequence env out
+          [
+            ("the entry of main", ":0x40076b\n");
+            ( "push rbp",
+              "RSP := RSP - 8.*mem := mem with \\[RSP, el\\]:u64 <- RBP" );
+            ("the second instruction of main", ":0x40076c\n");
+            ("mov rbp, rsp", "RBP := RSP");
+          ];
+        let out = analyze "instructions" in
+        has env "instructions of main" out ":main\n";
+        has env "instructions of print_strings" out ":print_strings\n");
+  ]
+
+(* bap writes its cache and log only to the directories of the options, or
+   of the variables, whose options prevail, and nothing to the home *)
+let directories data =
+  let binary = path data (echo "x86_64-linux-gnu") in
+  let variables =
+    [
+      "BAP_CACHE_DIR";
+      "BAP_LOG_DIR";
+      "BAP_CONFIG_DIR";
+      "XDG_CACHE_HOME";
+      "XDG_CONFIG_HOME";
+      "XDG_DATA_HOME";
+      "XDG_STATE_HOME";
+    ]
+  in
+  [
+    case "directories" (fun env ->
+        let dir name =
+          let dir = file env name in
+          Sys.mkdir dir 0o755;
+          dir
+        in
+        let empty name dir = check env name (Sys.readdir dir = [||]) in
+        let full name dir = check env name (Sys.readdir dir <> [||]) in
+        let home = dir "home" in
+        let homes =
+          [
+            ("HOME", home);
+            ("USERPROFILE", home);
+            ("APPDATA", home);
+            ("LOCALAPPDATA", home);
+          ]
+        in
+        let run ?(env' = []) args =
+          let out =
+            bap env ~env:(homes @ env') ~unset:variables (binary :: args)
+          in
+          check env
+            ("bap " ^ String.concat " " args ^ " exited with 0")
+            (out.status = Exited 0);
+          has env "the output has main" out "sub main"
+        in
+        run [ "--dump=bir" ];
+        empty "nothing is written to the home without directories" home;
+        let cache = dir "cache-option" and log = dir "log-option" in
+        let cache' = dir "cache-variable" and log' = dir "log-variable" in
+        run
+          ~env':[ ("BAP_CACHE_DIR", cache'); ("BAP_LOG_DIR", log') ]
+          [ "--dump=bir"; "--cache-dir=" ^ cache; "--log-dir=" ^ log ];
+        full "the cache is in the directory of the option" cache;
+        full "the log is in the directory of the option" log;
+        empty "the options prevail over the cache variable" cache';
+        empty "the options prevail over the log variable" log';
+        run
+          ~env':[ ("BAP_CACHE_DIR", cache'); ("BAP_LOG_DIR", log') ]
+          [ "--dump=bir" ];
+        full "the cache is in the directory of the variable" cache';
+        full "the log is in the directory of the variable" log';
+        empty "nothing is written to the home with directories" home);
+  ]
+
+(* the identifiers of terms, which are numbered in their order, so that
+   the summaries don't depend on the identifiers *)
+let renumber text =
+  let ids = Hashtbl.create 64 in
+  let re =
+    Re.(
+      compile
+        (seq [ alt [ bol; char '%' ]; group (repn xdigit 8 (Some 8)); eow ]))
+  in
+  Re.replace re text ~f:(fun group ->
+      let tid = Re.Group.get group 1 in
+      let id =
+        match Hashtbl.find_opt ids tid with
+        | Some id -> id
+        | None ->
+            let id = Hashtbl.length ids + 1 in
+            Hashtbl.add ids tid id;
+            id
+      in
+      let prefix = if (Re.Group.get group 0).[0] = '%' then "%" else "" in
+      Printf.sprintf "%s#%d" prefix id)
+
+(* the summary of a program: its subroutines, with their arguments and the
+   subroutines that they call, and the whole body of main *)
+let summary text =
+  let sub = Re.(compile (seq [ bol; repn xdigit 8 (Some 8); str ": sub " ])) in
+  let call =
+    Re.(compile (seq [ str "call @"; group (rep1 (diff any (set " \n"))) ]))
+  in
+  let subs =
+    Re.split_delim sub text |> List.tl
+    |> List.map (fun body ->
+        let header = List.hd (String.split_on_char '\n' body) in
+        let callees =
+          Re.all call body
+          |> List.map (fun group -> Re.Group.get group 1)
+          |> List.sort_uniq String.compare
+        in
+        (header, body, callees))
+  in
+  let buf = Buffer.create 4096 in
+  List.iter
+    (fun (header, _, callees) ->
+      Printf.bprintf buf "sub %s\n" header;
+      if callees <> [] then
+        Printf.bprintf buf "  calls %s\n" (String.concat " " callees))
+    subs;
+  List.iter
+    (fun (header, body, _) ->
+      if String.starts_with ~prefix:"main(" header then
+        Printf.bprintf buf "\nsub %s" (renumber body))
+    subs;
+  Buffer.contents buf
+
+let status = function
+  | Exited code -> Printf.sprintf "exited with %d" code
+  | Signaled -> "was signaled"
+  | Timeout -> "timed out"
+  | Stopped -> "was stopped"
+
+(* the golden summaries of the files of the testsuite, i.e., the
+   specifications that the loaders make of them, and the programs that the
+   lifters make, which detect the changes of the loaders, the lifters, the
+   symbolizers, the stub resolvers, and the API. The files are the edge
+   cases of the loaders and lifters: the layouts of src/loader, e.g., the
+   images at the top of the address space, packed, PIE, TLS, weak, RWX and
+   BSS segments, and the PE files, the stripped binaries, the object files,
+   the shared libraries, the kernel modules, Mach-O, and the targets with
+   their instruction sets, e.g., Thumb, and SSE *)
+let golden data =
+  List.concat_map
+    (fun dir ->
+      (* the programs of symexec differ only in main from the others *)
+      files data dir (fun name ->
+          not (Re.execp (Re.compile (Re.str "-symexec-")) name)))
+    [ "bin"; "dyn"; "ko"; "obj"; "sse" ]
+  |> List.map (fun name ->
+      case ("golden/" ^ name) (fun env ->
+          let file = path data name in
+          (* the messages may have the name of the file *)
+          let relative text =
+            Re.replace_string (Re.compile (Re.str file)) ~by:name text
+          in
+          let out = bap env [ "specification"; file ] in
+          golden env (name ^ ".spec")
+            (Printf.sprintf "# %s\n%s" (status out.status) (relative out.text));
+          let out = bap env [ file; "--dump=bir" ] in
+          golden env (name ^ ".bir")
+            (Printf.sprintf "# %s\n%s" (status out.status)
+               (summary (relative out.text)))))
+
 let tests =
   [
+    analyze;
     api_main;
     api_options;
     branches;
@@ -532,8 +737,10 @@ let tests =
     collator;
     config;
     dasm_sec;
+    directories;
     dyn;
     echo_main;
+    golden;
     improper_feed;
     internal_plt;
     kernel;

@@ -1,0 +1,15 @@
+# exited with 0
+sub __do_global_dtors_aux(__do_global_dtors_aux_result)
+  calls deregister_tm_clones sub_4b0
+sub _fini(_fini_result)
+sub _init(_init_result)
+sub bar(bar_result)
+  calls foo
+sub deregister_tm_clones(deregister_tm_clones_result)
+sub foo(foo_result)
+  calls sub_4a0
+sub frame_dummy(frame_dummy_result)
+  calls register_tm_clones
+sub register_tm_clones(register_tm_clones_result)
+sub sub_4a0(sub_4a0_result)
+sub sub_4b0(sub_4b0_result)

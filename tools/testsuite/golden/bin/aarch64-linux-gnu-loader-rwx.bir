@@ -1,0 +1,177 @@
+# exited with 0
+sub _start(_start_result)
+  calls exit main
+sub answer(answer_result)
+sub exit(exit_code)
+  calls exit
+sub fgetc(fgetc_stream, fgetc_result)
+sub getchar(getchar_result)
+sub main(main_argc, main_argv, main_result)
+  calls answer putchar
+sub putchar(putchar_c, putchar_result)
+sub intrinsic:undefined-instruction()
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[R0]
+#2: main_argv :: in out u64 = R1
+#3: main_result :: out u32 = low:32[R0]
+
+#4:
+#5: R31 := R31 - 0x50
+#6: mem := mem with [R31 + 0x20, el]:u64 <- R29
+#7: mem := mem with [R31 + 0x28, el]:u64 <- R30
+#8: R29 := R31 + 0x20
+#9: mem := mem with [R31 + 0x30, el]:u64 <- R22
+#10: mem := mem with [R31 + 0x38, el]:u64 <- R21
+#11: mem := mem with [R31 + 0x40, el]:u64 <- R20
+#12: mem := mem with [R31 + 0x48, el]:u64 <- R19
+#13: R20 := 1
+#14: R30 := 0x2002C
+#15: call @answer with return %#16
+
+#16:
+#17: R19 := pad:64[31:0[R0]]
+#18: R0 := 0x62
+#19: R21 := 0x20168
+#20: goto %#21
+
+#21:
+#22: R30 := 0x20040
+#23: call @putchar with return %#24
+
+#24:
+#25: R0 := high:32[R0].pad:64[mem[R21 + R20]]
+#26: R20 := R20 + 1
+#27: #11 := 0xFFFFFFFFFFFFFFF9 + R20
+#28: NF := 63:63[#11]
+#29: VF := 63:63[R20] & ~63:63[#11]
+#30: ZF := #11 = 0
+#31: CF := 63:63[R20] | ~63:63[#11] | 63:63[R20] & ~63:63[#11]
+#32: #13 := ~ZF <> 0
+#33: when #13 goto %#21
+#34: goto %#35
+
+#35:
+#36: R0 := 0x20
+#37: R21 := extend:64[31:0[R19]]
+#38: R30 := 0x2005C
+#39: call @putchar with return %#40
+
+#40:
+#41: R8 := R31 + 0xF
+#42: R20 := 0x20000
+#43: R20 := R20 + 0x16F
+#44: R19 := R8 + 0x11
+#45: mem := mem with [R31 + 0x1F] <- 0
+#46: goto %#47
+
+#47:
+#48: R8 := R21 & 0xF
+#49: R21 := pad:64[63:4[R21]]
+#50: R0 := high:32[R0].pad:64[mem[R20 + R8]]
+#51: mem := mem with [R19 - 2] <- low:8[31:0[R0]]
+#52: R19 := R19 - 1
+#53: #40 := ~R21 = 0
+#54: when #40 goto %#47
+#55: goto %#56
+
+#56:
+#57: R30 := 0x2008C
+#58: call @putchar with return %#59
+
+#59:
+#60: R0 := pad:64[low:32[pad:64[mem[R19]]]]
+#61: R19 := R19 + 1
+#62: #41 := ~31:0[R0] = 0
+#63: when #41 goto %#56
+#64: goto %#65
+
+#65:
+#66: R0 := 0xA
+#67: R30 := 0x2009C
+#68: call @putchar with return %#69
+
+#69:
+#70: R8 := 0x20000
+#71: R21 := 1
+#72: R9 := pad:64[low:32[pad:64[mem[R8 + 0x14C, el]:u32]]]
+#73: R9 := pad:64[low:32[extend:64[31:0[R9]] + 1]]
+#74: mem := mem with [R8 + 0x14C, el]:u32 <- 31:0[R9]
+#75: R30 := 0x200B4
+#76: call @answer with return %#77
+
+#77:
+#78: R19 := pad:64[31:0[R0]]
+#79: R0 := 0x61
+#80: R22 := 0x20000
+#81: R22 := R22 + 0x180
+#82: goto %#83
+
+#83:
+#84: R30 := 0x200C8
+#85: call @putchar with return %#86
+
+#86:
+#87: R0 := high:32[R0].pad:64[mem[R22 + R21]]
+#88: R21 := R21 + 1
+#89: #46 := 0xFFFFFFFFFFFFFFFA + R21
+#90: NF := 63:63[#46]
+#91: VF := 63:63[R21] & ~63:63[#46]
+#92: ZF := #46 = 0
+#93: CF := 63:63[R21] | ~63:63[#46] | 63:63[R21] & ~63:63[#46]
+#94: #48 := ~ZF <> 0
+#95: when #48 goto %#83
+#96: goto %#97
+
+#97:
+#98: R0 := 0x20
+#99: R21 := extend:64[31:0[R19]]
+#100: R30 := 0x200E4
+#101: call @putchar with return %#102
+
+#102:
+#103: R8 := R31 + 0xF
+#104: mem := mem with [R31 + 0x1F] <- 0
+#105: R19 := R8 + 0x11
+#106: goto %#107
+
+#107:
+#108: R8 := R21 & 0xF
+#109: R21 := pad:64[63:4[R21]]
+#110: R0 := high:32[R0].pad:64[mem[R20 + R8]]
+#111: mem := mem with [R19 - 2] <- low:8[31:0[R0]]
+#112: R19 := R19 - 1
+#113: #75 := ~R21 = 0
+#114: when #75 goto %#107
+#115: goto %#116
+
+#116:
+#117: R30 := 0x2010C
+#118: call @putchar with return %#119
+
+#119:
+#120: R0 := pad:64[low:32[pad:64[mem[R19]]]]
+#121: R19 := R19 + 1
+#122: #76 := ~31:0[R0] = 0
+#123: when #76 goto %#116
+#124: goto %#125
+
+#125:
+#126: R0 := 0xA
+#127: R30 := 0x2011C
+#128: call @putchar with return %#129
+
+#129:
+#130: #77 := R31 + 0x40
+#131: R20 := mem[#77, el]:u64
+#132: R19 := mem[#77 + 8, el]:u64
+#133: R0 := 0
+#134: #81 := R31 + 0x30
+#135: R22 := mem[#81, el]:u64
+#136: R21 := mem[#81 + 8, el]:u64
+#137: #82 := R31 + 0x20
+#138: R29 := mem[#82, el]:u64
+#139: R30 := mem[#82 + 8, el]:u64
+#140: R31 := R31 + 0x50
+#141: call R30 with noreturn
+

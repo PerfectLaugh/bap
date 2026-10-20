@@ -1,0 +1,132 @@
+# exited with 0
+sub bcm_can_tx(bcm_can_tx_result)
+  calls __alloc_skb can_send dev_get_by_index skb_put
+sub bcm_connect(bcm_connect_result)
+  calls dev_get_by_index proc_create_data sock_i_ino sprintf
+sub bcm_init(bcm_init_result)
+  calls register_netdevice_notifier
+sub bcm_notifier(bcm_notifier_result)
+  calls bcm_rx_unreg lock_sock_nested release_sock
+sub bcm_proc_open(bcm_proc_open_result)
+  calls PDE_DATA single_open
+sub bcm_proc_show(bcm_proc_show_result)
+  calls __aeabi_uidiv seq_printf seq_putc sub_1eb8
+sub bcm_read_op(bcm_read_op_result)
+  calls bcm_send_to_user
+sub bcm_recvmsg(bcm_recvmsg_result)
+  calls __sock_recv_ts_and_drops memcpy_toiovec skb_free_datagram skb_recv_datagram
+sub bcm_release(bcm_release_result)
+  calls _raw_write_lock_bh _raw_write_unlock_bh bcm_remove_op bcm_rx_unreg can_rx_unregister dev_get_by_index lock_sock_nested release_sock remove_proc_entry sk_free unregister_netdevice_notifier
+sub bcm_remove_op(bcm_remove_op_result)
+  calls hrtimer_cancel kfree tasklet_kill
+sub bcm_rx_changed(bcm_rx_changed_result)
+  calls bcm_send_to_user
+sub bcm_rx_cmp_to_index(bcm_rx_cmp_to_index_result)
+  calls bcm_rx_update_and_send
+sub bcm_rx_handler(bcm_rx_handler_result)
+  calls bcm_can_tx bcm_rx_cmp_to_index bcm_rx_update_and_send hrtimer_cancel hrtimer_start
+sub bcm_rx_thr_flush(bcm_rx_thr_flush_result)
+  calls bcm_rx_changed
+sub bcm_rx_thr_handler(bcm_rx_thr_handler_result)
+  calls __tasklet_schedule _test_and_set_bit bcm_rx_thr_flush hrtimer_forward ktime_get
+sub bcm_rx_thr_tsklet(bcm_rx_thr_tsklet_result)
+  calls bcm_rx_thr_flush
+sub bcm_rx_timeout_handler(bcm_rx_timeout_handler_result)
+  calls __memzero __tasklet_hi_schedule _test_and_set_bit
+sub bcm_rx_timeout_tsklet(bcm_rx_timeout_tsklet_result)
+  calls bcm_send_to_user
+sub bcm_rx_unreg(bcm_rx_unreg_result)
+  calls can_rx_unregister printk
+sub bcm_rx_update_and_send(bcm_rx_update_and_send_result)
+  calls bcm_rx_changed hrtimer_start ktime_get
+sub bcm_send_to_user(bcm_send_to_user_result)
+  calls __alloc_skb __memzero kfree_skb memcpy skb_put sock_queue_rcv_skb
+sub bcm_sendmsg(bcm_sendmsg_result)
+  calls dev_get_by_index lock_sock_nested memcpy_fromiovec release_sock
+sub bcm_tx_start_timer(bcm_tx_start_timer_result)
+  calls hrtimer_start ktime_get
+sub bcm_tx_timeout_handler(bcm_tx_timeout_handler_result)
+  calls __tasklet_schedule _test_and_set_bit
+sub bcm_tx_timeout_tsklet(bcm_tx_timeout_tsklet_result)
+  calls bcm_can_tx bcm_send_to_user bcm_tx_start_timer
+sub can_skb_destructor(can_skb_destructor_result)
+  calls sk_free
+sub sub_1eb8(sub_1eb8_result)
+  calls dev_get_by_index_rcu lock_acquire lock_release strcpy
+sub sub_2438(sub_2438_result)
+  calls can_proto_register printk proc_mkdir
+sub sub_24a0(sub_24a0_result)
+  calls can_proto_unregister remove_proc_entry
+sub dev_get_by_index(dev_get_by_index_result)
+sub __alloc_skb(__alloc_skb_result)
+sub skb_put(skb_put_result)
+sub can_send(can_send_result)
+sub sock_i_ino(sock_i_ino_result)
+sub sprintf(sprintf_str, sprintf_format, sprintf_result)
+sub proc_create_data(proc_create_data_result)
+sub register_netdevice_notifier(register_netdevice_notifier_result)
+sub lock_sock_nested(lock_sock_nested_result)
+sub release_sock(release_sock_result)
+sub PDE_DATA(PDE_DATA_result)
+sub single_open(single_open_result)
+sub seq_printf(seq_printf_result)
+sub __aeabi_uidiv(__aeabi_uidiv_result)
+sub seq_putc(seq_putc_result)
+sub skb_recv_datagram(skb_recv_datagram_result)
+sub memcpy_toiovec(memcpy_toiovec_result)
+sub skb_free_datagram(skb_free_datagram_result)
+sub __sock_recv_ts_and_drops(__sock_recv_ts_and_drops_result)
+sub unregister_netdevice_notifier(unregister_netdevice_notifier_result)
+sub can_rx_unregister(can_rx_unregister_result)
+sub remove_proc_entry(remove_proc_entry_result)
+sub _raw_write_lock_bh(_raw_write_lock_bh_result)
+sub _raw_write_unlock_bh(_raw_write_unlock_bh_result)
+sub sk_free(sk_free_result)
+sub hrtimer_cancel(hrtimer_cancel_result)
+sub tasklet_kill(tasklet_kill_result)
+sub kfree(kfree_result)
+sub hrtimer_start(hrtimer_start_result)
+sub _test_and_set_bit(_test_and_set_bit_result)
+sub __tasklet_schedule(__tasklet_schedule_result)
+sub ktime_get(ktime_get_result)
+sub hrtimer_forward(hrtimer_forward_result)
+sub __tasklet_hi_schedule(__tasklet_hi_schedule_result)
+sub __memzero(__memzero_result)
+sub printk(printk_result)
+sub memcpy(memcpy_dst, memcpy_src, memcpy_n, memcpy_result)
+sub sock_queue_rcv_skb(sock_queue_rcv_skb_result)
+sub kfree_skb(kfree_skb_result)
+sub memcpy_fromiovec(memcpy_fromiovec_result)
+sub lock_acquire(lock_acquire_result)
+sub dev_get_by_index_rcu(dev_get_by_index_rcu_result)
+sub strcpy(strcpy_dst, strcpy_src, strcpy_result)
+sub lock_release(lock_release_result)
+sub can_proto_register(can_proto_register_result)
+sub proc_mkdir(proc_mkdir_result)
+sub can_proto_unregister(can_proto_unregister_result)
+sub __aeabi_unwind_cpp_pr0(__aeabi_unwind_cpp_pr0_result)
+sub __aeabi_unwind_cpp_pr1(__aeabi_unwind_cpp_pr1_result)
+sub __kmalloc(__kmalloc_result)
+sub __per_cpu_offset(__per_cpu_offset_result)
+sub can_ioctl(can_ioctl_result)
+sub can_rx_register(can_rx_register_result)
+sub datagram_poll(datagram_poll_result)
+sub hrtimer_init(hrtimer_init_result)
+sub init_net(init_net_result)
+sub kmalloc_caches(kmalloc_caches_result)
+sub kmem_cache_alloc_trace(kmem_cache_alloc_trace_result)
+sub rcu_lock_map(rcu_lock_map_result)
+sub seq_lseek(seq_lseek_result)
+sub seq_read(seq_read_result)
+sub single_release(single_release_result)
+sub sock_no_accept(sock_no_accept_result)
+sub sock_no_bind(sock_no_bind_result)
+sub sock_no_getname(sock_no_getname_result)
+sub sock_no_getsockopt(sock_no_getsockopt_result)
+sub sock_no_listen(sock_no_listen_result)
+sub sock_no_mmap(sock_no_mmap_result)
+sub sock_no_sendpage(sock_no_sendpage_result)
+sub sock_no_setsockopt(sock_no_setsockopt_result)
+sub sock_no_shutdown(sock_no_shutdown_result)
+sub sock_no_socketpair(sock_no_socketpair_result)
+sub tasklet_init(tasklet_init_result)

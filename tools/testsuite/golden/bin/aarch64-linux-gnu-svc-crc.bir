@@ -1,0 +1,94 @@
+# exited with 0
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+sub _start(_start_result)
+  calls __libc_start_main
+sub main(main_argc, main_argv, main_result)
+  calls intrinsic:svc
+sub sub_210404(sub_210404_result)
+sub intrinsic:svc()
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[R0]
+#2: main_argv :: in out u64 = R1
+#3: main_result :: out u32 = low:32[R0]
+
+#4:
+#5: R10 := 0x8320
+#6: R9 := 0
+#7: R8 := 0xFFFFFFFF
+#8: R10 := pad:64[31:0[R10] & 0xFFFF | 0xEDB80000]
+#9: goto %#10
+
+#10:
+#11: R8 := pad:64[31:0[R9] ^ 31:0[R8]]
+#12: R11 := 8
+#13: goto %#14
+
+#14:
+#15: R12 := pad:64[extend:32[0:0[R8]]]
+#16: #15 := 0xFFFFFFFF + 31:0[R11]
+#17: NF := 31:31[#15]
+#18: VF := 31:31[R11] & ~31:31[#15]
+#19: ZF := #15 = 0
+#20: CF := 31:31[R11] | 31:31[R11] & ~31:31[#15] | ~31:31[#15]
+#21: R11 := pad:64[#15]
+#22: R12 := pad:64[31:0[R12] & 31:0[R10]]
+#23: R8 := pad:64[31:0[R12] ^ 31:0[R8] >> 1]
+#24: #23 := ~ZF <> 0
+#25: when #23 goto %#14
+#26: goto %#27
+
+#27:
+#28: R9 := pad:64[low:32[extend:64[31:0[R9]] + 1]]
+#29: #27 := 0xFFFFFF9C + 31:0[R9]
+#30: NF := 31:31[#27]
+#31: VF := 31:31[R9] & ~31:31[#27]
+#32: ZF := #27 = 0
+#33: CF := 31:31[R9] | 31:31[R9] & ~31:31[#27] | ~31:31[#27]
+#34: #29 := ~ZF <> 0
+#35: when #29 goto %#10
+#36: goto %#37
+
+#37:
+#38: R31 := R31 - 0x10
+#39: R10 := R31
+#40: R11 := 0xCCCD
+#41: R9 := 0xA
+#42: R8 := pad:64[~31:0[R8]]
+#43: R1 := R10 + 0xF
+#44: R10 := R10 + 0xE
+#45: R2 := 1
+#46: R11 := pad:64[31:0[R11] & 0xFFFF | 0xCCCC0000]
+#47: mem := mem with [R31 + 0xF] <- low:8[31:0[R9]]
+#48: goto %#49
+
+#49:
+#50: R12 := pad:64[31:0[R8]]
+#51: R8 := pad:64[31:0[R8]] * pad:64[31:0[R11]]
+#52: R2 := R2 + 1
+#53: #40 := 0xFFFFFFF7 + 31:0[R12]
+#54: NF := 31:31[#40]
+#55: VF := 31:31[R12] & ~31:31[#40]
+#56: ZF := #40 = 0
+#57: CF := 31:31[R12] | 31:31[R12] & ~31:31[#40] | ~31:31[#40]
+#58: R1 := R1 - 1
+#59: R8 := pad:64[63:35[R8]]
+#60: R13 := pad:64[31:0[R12] - 31:0[R8] * 31:0[R9]]
+#61: R13 := pad:64[31:0[R13] | 0x30]
+#62: mem := mem with [R10] <- low:8[31:0[R13]]
+#63: R10 := R10 - 1
+#64: #67 := (CF & ~ZF) <> 0
+#65: when #67 goto %#49
+#66: goto %#67
+
+#67:
+#68: R0 := 1
+#69: R8 := 0x40
+#70: intrinsic:x0 := 0
+#71: call @intrinsic:svc with return %#72
+
+#72:
+#73: R0 := pad:64[63:63[R0]]
+#74: R31 := R31 + 0x10
+#75: call R30 with noreturn
+

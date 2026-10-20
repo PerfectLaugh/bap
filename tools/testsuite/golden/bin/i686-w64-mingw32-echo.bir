@@ -1,0 +1,283 @@
+# exited with 0
+sub WinMainCRTStartup(WinMainCRTStartup_result)
+  calls __security_init_cookie __tmainCRTStartup
+sub _FindPESection(_FindPESection_result)
+sub _FindPESectionByName(_FindPESectionByName_result)
+  calls strlen strncmp sub_402560
+sub _FindPESectionExec(_FindPESectionExec_result)
+  calls sub_402560
+sub _GetPEImageBase(_GetPEImageBase_result)
+  calls sub_402560
+sub _IsNonwritableInCurrentImage(_IsNonwritableInCurrentImage_result)
+  calls _FindPESection sub_402560
+sub _ValidateImageBase(_ValidateImageBase_result)
+  calls sub_402560
+sub ___w64_mingwthr_add_key_dtor(___w64_mingwthr_add_key_dtor_result)
+  calls calloc
+sub ___w64_mingwthr_remove_key_dtor(___w64_mingwthr_remove_key_dtor_result)
+  calls free
+sub __chkstk_ms(__chkstk_ms_result)
+sub __dllonexit(__dllonexit_func, __dllonexit_begin, __dllonexit_end, __dllonexit_result)
+sub __do_global_ctors(__do_global_ctors_result)
+  calls atexit
+sub __do_global_dtors(__do_global_dtors_result)
+sub __gcc_deregister_frame(__gcc_deregister_frame_result)
+sub __gcc_register_frame(__gcc_register_frame_result)
+  calls sub_401509 sub_40154c
+sub __getmainargs(__getmainargs_argc, __getmainargs_argv, __getmainargs_envp, __getmainargs_wildcard, __getmainargs_info, __getmainargs_result)
+sub __main(__main_result)
+  calls __do_global_ctors
+sub __mingw_GetSectionCount(__mingw_GetSectionCount_result)
+  calls sub_402560
+sub __mingw_GetSectionForAddress(__mingw_GetSectionForAddress_result)
+  calls _FindPESection sub_402560
+sub __mingw_TLScallback(__mingw_TLScallback_result)
+  calls sub_402310
+sub __mingw_enum_import_library_names(__mingw_enum_import_library_names_result)
+  calls _FindPESection sub_402560
+sub __mingw_invalidParameterHandler(__mingw_invalidParameterHandler_result)
+sub __mingw_raise_matherr(__mingw_raise_matherr_result)
+sub __mingw_setusermatherr(__mingw_setusermatherr_result)
+  calls __setusermatherr
+sub __report_error(__report_error_result)
+  calls abort fwrite vfprintf
+sub __report_gsfailure(__report_gsfailure_result)
+  calls abort
+sub __security_init_cookie()
+sub __set_app_type(__set_app_type_type)
+sub __setusermatherr(__setusermatherr_handler)
+sub __tlregdtor(__tlregdtor_result)
+sub __tmainCRTStartup(__tmainCRTStartup_result)
+  calls __chkstk_ms _amsg_exit _imp___set_invalid_parameter_handler _initterm _pei386_runtime_relocator sub_4012ac
+sub _amsg_exit(_amsg_exit_code)
+sub _cexit()
+sub _decode_pointer(_decode_pointer_result)
+sub _encode_pointer(_encode_pointer_result)
+sub _fu0___set_invalid_parameter_handler(_fu0___set_invalid_parameter_handler_result)
+  calls sub_4012ac
+sub _initterm(_initterm_begin, _initterm_end)
+sub _lock(_lock_lock)
+sub _matherr(_matherr_result)
+  calls fprintf
+sub _pei386_runtime_relocator(_pei386_runtime_relocator_result)
+  calls sub_401e60
+sub _setargv(_setargv_result)
+sub _unlock(_unlock_lock)
+sub abort()
+sub atexit(atexit_callback, atexit_result)
+  calls mingw_onexit
+sub calloc(calloc_nmemb, calloc_size, calloc_result)
+sub exit(exit_code)
+sub fprintf(fprintf_stream, fprintf_format, fprintf_result)
+sub free(free_ptr)
+sub fwrite(fwrite_ptr, fwrite_size, fwrite_nmemb, fwrite_stream, fwrite_result)
+sub main(main_argc, main_argv, main_result)
+  calls sub_4015d1
+sub mainCRTStartup(mainCRTStartup_result)
+  calls __security_init_cookie __tmainCRTStartup
+sub malloc(malloc_size, malloc_result)
+sub memcpy(memcpy_dst, memcpy_src, memcpy_n, memcpy_result)
+sub memmove(memmove_dst, memmove_src, memmove_n, memmove_result)
+sub mingw_get_invalid_parameter_handler(mingw_get_invalid_parameter_handler_result)
+sub mingw_onexit(mingw_onexit_result)
+  calls __dllonexit _decode_pointer _encode_pointer _lock _unlock
+sub mingw_set_invalid_parameter_handler(mingw_set_invalid_parameter_handler_result)
+sub my_lconv_init(my_lconv_init_result)
+sub pre_c_init(pre_c_init_result)
+  calls __mingw_setusermatherr __set_app_type _encode_pointer _setargv
+sub pre_cpp_init(pre_cpp_init_result)
+  calls __getmainargs
+sub print_endline(print_endline_result)
+  calls putchar
+sub print_strings(print_strings_result)
+  calls print_endline
+sub putchar(putchar_c, putchar_result)
+sub register_frame_ctor(register_frame_ctor_result)
+  calls __gcc_register_frame atexit
+sub signal(signal_signum, signal_handler, signal_result)
+sub strchr(strchr_s, strchr_c, strchr_result)
+sub strcpy(strcpy_dst, strcpy_src, strcpy_result)
+sub strlen(strlen_s, strlen_result)
+sub strncmp(strncmp_s1, strncmp_s2, strncmp_n, strncmp_result)
+sub sub_4011a9(sub_4011a9_result)
+  calls intrinsic:breakpoint
+sub sub_4011aa(sub_4011aa_result)
+  calls intrinsic:breakpoint
+sub sub_4011ab(sub_4011ab_result)
+  calls intrinsic:breakpoint
+sub sub_4011ac(sub_4011ac_result)
+  calls intrinsic:breakpoint
+sub sub_4011b0(sub_4011b0_result)
+  calls intrinsic:breakpoint
+sub sub_4011b1(sub_4011b1_result)
+  calls intrinsic:breakpoint
+sub sub_4011b2(sub_4011b2_result)
+  calls intrinsic:breakpoint
+sub sub_4011b3(sub_4011b3_result)
+  calls intrinsic:breakpoint
+sub sub_4011b7(sub_4011b7_result)
+  calls intrinsic:breakpoint
+sub sub_4011b8(sub_4011b8_result)
+  calls intrinsic:breakpoint
+sub sub_4011b9(sub_4011b9_result)
+  calls intrinsic:breakpoint
+sub sub_4011ba(sub_4011ba_result)
+  calls intrinsic:breakpoint
+sub sub_4011be(sub_4011be_result)
+  calls intrinsic:breakpoint
+sub sub_4011bf(sub_4011bf_result)
+  calls intrinsic:breakpoint
+sub sub_4011c0(sub_4011c0_result)
+  calls intrinsic:breakpoint
+sub sub_4011c1(sub_4011c1_result)
+  calls intrinsic:breakpoint
+sub sub_4011c5(sub_4011c5_result)
+  calls intrinsic:breakpoint
+sub sub_4011c6(sub_4011c6_result)
+  calls intrinsic:breakpoint
+sub sub_4011c7(sub_4011c7_result)
+  calls intrinsic:breakpoint
+sub sub_4011c8(sub_4011c8_result)
+  calls intrinsic:breakpoint
+sub sub_4011cc(sub_4011cc_result)
+  calls intrinsic:breakpoint
+sub sub_4011cd(sub_4011cd_result)
+  calls intrinsic:breakpoint
+sub sub_4011ce(sub_4011ce_result)
+  calls intrinsic:breakpoint
+sub sub_4011cf(sub_4011cf_result)
+  calls intrinsic:breakpoint
+sub sub_4011d3(sub_4011d3_result)
+  calls intrinsic:breakpoint
+sub sub_4011d4(sub_4011d4_result)
+  calls intrinsic:breakpoint
+sub sub_4011d5(sub_4011d5_result)
+  calls intrinsic:breakpoint
+sub sub_4011d6(sub_4011d6_result)
+  calls intrinsic:breakpoint
+sub sub_4011da(sub_4011da_result)
+  calls intrinsic:breakpoint
+sub sub_4011db(sub_4011db_result)
+  calls intrinsic:breakpoint
+sub sub_4011dc(sub_4011dc_result)
+  calls intrinsic:breakpoint
+sub sub_4011dd(sub_4011dd_result)
+  calls intrinsic:breakpoint
+sub sub_4012ac(sub_4012ac_result)
+  calls __main _cexit exit main malloc memcpy strlen sub_402120
+sub sub_4012b8(sub_4012b8_result)
+  calls intrinsic:breakpoint
+sub sub_401509(sub_401509_result)
+  calls sub_40154c
+sub sub_40154c(sub_40154c_result)
+sub sub_4015d1(sub_4015d1_result)
+  calls __chkstk_ms __main free malloc memmove print_strings strchr strcpy strlen
+sub sub_4016c5(sub_4016c5_result)
+  calls intrinsic:breakpoint
+sub sub_4016d0(sub_4016d0_result)
+  calls intrinsic:breakpoint
+sub sub_4016e1(sub_4016e1_result)
+  calls intrinsic:breakpoint
+sub sub_401703(sub_401703_result)
+  calls intrinsic:breakpoint
+sub sub_4017a0(sub_4017a0_result)
+  calls __mingw_TLScallback
+sub sub_4017f0(sub_4017f0_result)
+  calls __mingw_TLScallback
+sub sub_401990(sub_401990_result)
+  calls signal sub_402120
+sub sub_401c10(sub_401c10_result)
+  calls _GetPEImageBase __mingw_GetSectionForAddress __report_error _pei386_runtime_relocator memcpy
+sub sub_401c8c(sub_401c8c_result)
+  calls intrinsic:breakpoint
+sub sub_401d22(sub_401d22_result)
+  calls intrinsic:breakpoint
+sub sub_401d34(sub_401d34_result)
+  calls intrinsic:breakpoint
+sub sub_401d53(sub_401d53_result)
+  calls intrinsic:breakpoint
+sub sub_401d93(sub_401d93_result)
+  calls intrinsic:breakpoint
+sub sub_401dc7(sub_401dc7_result)
+  calls intrinsic:breakpoint
+sub sub_401e60(sub_401e60_result)
+  calls __chkstk_ms __mingw_GetSectionCount __report_error sub_401c10 sub_402120
+sub sub_401f47(sub_401f47_result)
+  calls intrinsic:breakpoint
+sub sub_401f68(sub_401f68_result)
+  calls intrinsic:breakpoint
+sub sub_401f8c(sub_401f8c_result)
+  calls intrinsic:breakpoint
+sub sub_402014(sub_402014_result)
+  calls intrinsic:breakpoint
+sub sub_402061(sub_402061_result)
+  calls intrinsic:breakpoint
+sub sub_40206d(sub_40206d_result)
+  calls intrinsic:breakpoint
+sub sub_402077(sub_402077_result)
+  calls intrinsic:breakpoint
+sub sub_4020b6(sub_4020b6_result)
+  calls intrinsic:breakpoint
+sub sub_4020bb(sub_4020bb_result)
+  calls intrinsic:breakpoint
+sub sub_4020d1(sub_4020d1_result)
+  calls intrinsic:breakpoint
+sub sub_4020e0(sub_4020e0_result)
+  calls intrinsic:breakpoint
+sub sub_4020e3(sub_4020e3_result)
+  calls intrinsic:breakpoint
+sub sub_402120(sub_402120_result)
+sub sub_402310(sub_402310_result)
+sub sub_402560(sub_402560_result)
+sub sub_40297a(sub_40297a_result)
+  calls intrinsic:breakpoint
+sub sub_4029b8(sub_4029b8_result)
+  calls register_frame_ctor
+sub vfprintf(vfprintf_result)
+sub intrinsic:breakpoint()
+sub _imp___set_invalid_parameter_handler(_imp___set_invalid_parameter_handler_result)
+sub DeleteCriticalSection(DeleteCriticalSection_section)
+sub EnterCriticalSection(EnterCriticalSection_section)
+sub GetCurrentProcess(GetCurrentProcess_result)
+sub GetCurrentProcessId(GetCurrentProcessId_result)
+sub GetCurrentThreadId(GetCurrentThreadId_result)
+sub GetLastError(GetLastError_result)
+sub GetModuleHandleA(GetModuleHandleA_result)
+sub GetProcAddress(GetProcAddress_result)
+sub GetStartupInfoA(GetStartupInfoA_info)
+sub GetSystemTimeAsFileTime(GetSystemTimeAsFileTime_time)
+sub GetTickCount(GetTickCount_result)
+sub InitializeCriticalSection(InitializeCriticalSection_section)
+sub LeaveCriticalSection(LeaveCriticalSection_section)
+sub QueryPerformanceCounter(QueryPerformanceCounter_count, QueryPerformanceCounter_result)
+sub SetUnhandledExceptionFilter(SetUnhandledExceptionFilter_filter, SetUnhandledExceptionFilter_result)
+sub Sleep(Sleep_milliseconds)
+sub TerminateProcess(TerminateProcess_process, TerminateProcess_code, TerminateProcess_result)
+sub TlsGetValue(TlsGetValue_index, TlsGetValue_result)
+sub UnhandledExceptionFilter(UnhandledExceptionFilter_info, UnhandledExceptionFilter_result)
+sub VirtualProtect(VirtualProtect_addr, VirtualProtect_size, VirtualProtect_protect, VirtualProtect_old, VirtualProtect_result)
+sub VirtualQuery(VirtualQuery_addr, VirtualQuery_buffer, VirtualQuery_length, VirtualQuery_result)
+sub __lconv_init(__lconv_init_result)
+sub _onexit(_onexit_func, _onexit_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = mem[ESP + 4, el]:u32
+#2: main_argv :: in out u32 = mem[ESP + 8, el]:u32
+#3: main_result :: out u32 = EAX
+
+#4:
+#5: ECX := ESP + 4
+#6: CF := 0
+#7: OF := 0
+#8: SF := 31:31[ESP & 0xFFFFFFF0]
+#9: ZF := (ESP & 0xFFFFFFF0) = 0
+#10: #232 := low:8[ESP & 0xFFFFFFF0]
+#11: #233 := #232 ^ #232 >> 4
+#12: #234 := #233 ^ #233 >> 2
+#13: #235 := #234 ^ #234 >> 1
+#14: PF := ~0:0[#235]
+#15: ESP := ESP & 0xFFFFFFF0
+#16: ESP := ESP - 4
+#17: mem := mem with [ESP, el]:u32 <- mem[ECX - 4, el]:u32
+#18: call @sub_4015d1 with noreturn
+

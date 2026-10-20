@@ -1,0 +1,254 @@
+# exited with 0
+sub _start(_start_result)
+  calls exit main
+sub exit(exit_code)
+  calls exit
+sub fgetc(fgetc_stream, fgetc_result)
+sub getchar(getchar_result)
+sub main(main_argc, main_argv, main_result)
+  calls putchar
+sub putchar(putchar_c, putchar_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[R0]
+#2: main_argv :: in out u64 = R1
+#3: main_result :: out u32 = low:32[R0]
+
+#4:
+#5: R31 := R31 - 0x60
+#6: mem := mem with [R31 + 0x50, el]:u64 <- R20
+#7: mem := mem with [R31 + 0x58, el]:u64 <- R19
+#8: R20 := 0
+#9: R8 := 0x2203E8
+#10: R9 := 0x3011
+#11: mem := mem with [R31 + 0x20, el]:u64 <- R29
+#12: mem := mem with [R31 + 0x28, el]:u64 <- R30
+#13: mem := mem with [R31 + 0x30, el]:u64 <- R23
+#14: R29 := R31 + 0x20
+#15: mem := mem with [R31 + 0x40, el]:u64 <- R22
+#16: mem := mem with [R31 + 0x48, el]:u64 <- R21
+#17: goto %#18
+
+#18:
+#19: R10 := pad:64[low:32[pad:64[mem[R8]]]]
+#20: R8 := R8 + 1
+#21: #9 := 0xFFFFFFFFFFFFFFFF + R9
+#22: NF := 63:63[#9]
+#23: VF := 63:63[R9] & ~63:63[#9]
+#24: ZF := #9 = 0
+#25: CF := 63:63[R9] | ~63:63[#9] | 63:63[R9] & ~63:63[#9]
+#26: R9 := #9
+#27: R20 := R20 + R10
+#28: #14 := ~ZF <> 0
+#29: when #14 goto %#18
+#30: goto %#31
+
+#31:
+#32: R0 := 0x62
+#33: R19 := 1
+#34: R21 := 0x2001B4
+#35: goto %#36
+
+#36:
+#37: R30 := 0x21022C
+#38: call @putchar with return %#39
+
+#39:
+#40: R0 := high:32[R0].pad:64[mem[R21 + R19]]
+#41: R19 := R19 + 1
+#42: #15 := 0xFFFFFFFFFFFFFFF4 + R19
+#43: NF := 63:63[#15]
+#44: VF := 63:63[R19] & ~63:63[#15]
+#45: ZF := #15 = 0
+#46: CF := 63:63[R19] | ~63:63[#15] | 63:63[R19] & ~63:63[#15]
+#47: #17 := ~ZF <> 0
+#48: when #17 goto %#36
+#49: goto %#50
+
+#50:
+#51: R0 := 0x20
+#52: R30 := 0x210244
+#53: call @putchar with return %#54
+
+#54:
+#55: R8 := R31 + 0xF
+#56: R19 := 0x200000
+#57: R19 := R19 + 0x1CD
+#58: R21 := R8 + 0x11
+#59: mem := mem with [R31 + 0x1F] <- 0
+#60: goto %#61
+
+#61:
+#62: R8 := R20 & 0xF
+#63: R20 := pad:64[63:4[R20]]
+#64: R0 := high:32[R0].pad:64[mem[R19 + R8]]
+#65: mem := mem with [R21 - 2] <- low:8[31:0[R0]]
+#66: R21 := R21 - 1
+#67: #43 := ~R20 = 0
+#68: when #43 goto %#61
+#69: goto %#70
+
+#70:
+#71: R30 := 0x210274
+#72: call @putchar with return %#73
+
+#73:
+#74: R0 := pad:64[low:32[pad:64[mem[R21]]]]
+#75: R21 := R21 + 1
+#76: #44 := ~31:0[R0] = 0
+#77: when #44 goto %#70
+#78: goto %#79
+
+#79:
+#80: R0 := 0xA
+#81: R30 := 0x210284
+#82: call @putchar with return %#83
+
+#83:
+#84: R8 := 0x223000
+#85: R9 := 0x5A
+#86: R0 := 0x62
+#87: R20 := 1
+#88: R21 := 0x200000
+#89: R21 := R21 + 0x1C0
+#90: mem := mem with [R8 + 0x3F8] <- low:8[31:0[R9]]
+#91: goto %#92
+
+#92:
+#93: R30 := 0x2102A4
+#94: call @putchar with return %#95
+
+#95:
+#96: R0 := high:32[R0].pad:64[mem[R21 + R20]]
+#97: R20 := R20 + 1
+#98: #45 := 0xFFFFFFFFFFFFFFF8 + R20
+#99: NF := 63:63[#45]
+#100: VF := 63:63[R20] & ~63:63[#45]
+#101: ZF := #45 = 0
+#102: CF := 63:63[R20] | ~63:63[#45] | 63:63[R20] & ~63:63[#45]
+#103: #47 := ~ZF <> 0
+#104: when #47 goto %#92
+#105: goto %#106
+
+#106:
+#107: R0 := 0x20
+#108: R30 := 0x2102BC
+#109: call @putchar with return %#110
+
+#110:
+#111: R8 := R31 + 0xF
+#112: R9 := 0x5A
+#113: mem := mem with [R31 + 0x1F] <- 0
+#114: R8 := R8 + 0xF
+#115: goto %#116
+
+#116:
+#117: R10 := R9 & 0xF
+#118: R9 := pad:64[63:4[R9]]
+#119: R10 := high:32[R10].pad:64[mem[R19 + R10]]
+#120: mem := mem with [R8] <- low:8[31:0[R10]]
+#121: R8 := R8 - 1
+#122: #73 := ~R9 = 0
+#123: when #73 goto %#116
+#124: goto %#125
+
+#125:
+#126: R8 := R31 + 0xF
+#127: R0 := 0x35
+#128: R20 := R8 + 0xF
+#129: goto %#130
+
+#130:
+#131: R30 := 0x2102F0
+#132: call @putchar with return %#133
+
+#133:
+#134: R0 := pad:64[low:32[pad:64[mem[R20]]]]
+#135: R20 := R20 + 1
+#136: #74 := ~31:0[R0] = 0
+#137: when #74 goto %#130
+#138: goto %#139
+
+#139:
+#140: R0 := 0xA
+#141: R30 := 0x210300
+#142: call @putchar with return %#143
+
+#143:
+#144: R8 := 0x220000
+#145: R21 := 0
+#146: R0 := 0x64
+#147: R20 := pad:64[low:32[pad:64[mem[R8 + 0x3C0]]]]
+#148: R22 := 0x200000
+#149: R22 := R22 + 0x1C8
+#150: goto %#151
+
+#151:
+#152: R23 := R22 + R21
+#153: R21 := R21 + 1
+#154: R30 := 0x210324
+#155: call @putchar with return %#156
+
+#156:
+#157: R0 := pad:64[low:32[pad:64[mem[R23 + 1]]]]
+#158: #81 := 0xFFFFFFFFFFFFFFFC + R21
+#159: NF := 63:63[#81]
+#160: VF := 63:63[R21] & ~63:63[#81]
+#161: ZF := #81 = 0
+#162: CF := 63:63[R21] | ~63:63[#81] | 63:63[R21] & ~63:63[#81]
+#163: #83 := ~ZF <> 0
+#164: when #83 goto %#151
+#165: goto %#166
+
+#166:
+#167: R0 := 0x20
+#168: R30 := 0x210338
+#169: call @putchar with return %#170
+
+#170:
+#171: R8 := R31 + 0xF
+#172: mem := mem with [R31 + 0x1F] <- 0
+#173: R21 := R8 + 0x11
+#174: goto %#175
+
+#175:
+#176: R8 := R20 & 0xF
+#177: R20 := pad:64[63:4[R20]]
+#178: R0 := high:32[R0].pad:64[mem[R19 + R8]]
+#179: mem := mem with [R21 - 2] <- low:8[31:0[R0]]
+#180: R21 := R21 - 1
+#181: #109 := ~R20 = 0
+#182: when #109 goto %#175
+#183: goto %#184
+
+#184:
+#185: R30 := 0x210360
+#186: call @putchar with return %#187
+
+#187:
+#188: R0 := pad:64[low:32[pad:64[mem[R21]]]]
+#189: R21 := R21 + 1
+#190: #110 := ~31:0[R0] = 0
+#191: when #110 goto %#184
+#192: goto %#193
+
+#193:
+#194: R0 := 0xA
+#195: R30 := 0x210370
+#196: call @putchar with return %#197
+
+#197:
+#198: #111 := R31 + 0x50
+#199: R20 := mem[#111, el]:u64
+#200: R19 := mem[#111 + 8, el]:u64
+#201: R0 := 0
+#202: #115 := R31 + 0x40
+#203: R22 := mem[#115, el]:u64
+#204: R21 := mem[#115 + 8, el]:u64
+#205: R23 := mem[R31 + 0x30, el]:u64
+#206: #116 := R31 + 0x20
+#207: R29 := mem[#116, el]:u64
+#208: R30 := mem[#116 + 8, el]:u64
+#209: R31 := R31 + 0x60
+#210: call R30 with noreturn
+

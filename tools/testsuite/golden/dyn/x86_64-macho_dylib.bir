@@ -1,0 +1,10 @@
+# exited with 0
+sub my_fun(my_fun_result)
+  calls my_print
+sub my_print(my_print_result)
+  calls printf
+sub printf(printf_format, printf_result)
+  calls printf:external
+sub printf:external(printf:external_result)
+sub _printf(_printf_result)
+sub dyld_stub_binder(dyld_stub_binder_result)

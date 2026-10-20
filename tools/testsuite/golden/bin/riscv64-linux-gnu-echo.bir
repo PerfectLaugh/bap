@@ -1,0 +1,275 @@
+# exited with 0
+sub __do_global_dtors_aux(__do_global_dtors_aux_result)
+  calls deregister_tm_clones
+sub __libc_csu_fini(__libc_csu_fini_result)
+sub __libc_csu_init(__libc_csu_init_result)
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+  calls strchr
+sub __stack_chk_fail()
+  calls memmove
+sub _start(_start_result)
+  calls __libc_start_main sub_1067c
+sub deregister_tm_clones(deregister_tm_clones_result)
+sub frame_dummy(frame_dummy_result)
+  calls register_tm_clones
+sub free(free_ptr)
+sub main(main_argc, main_argv, main_result)
+  calls __stack_chk_fail free malloc memmove print_strings strchr strcpy strlen
+sub malloc(malloc_size, malloc_result)
+  calls __libc_start_main
+sub memmove(memmove_dst, memmove_src, memmove_n, memmove_result)
+  calls strlen
+sub print_endline(print_endline_result)
+  calls putchar
+sub print_strings(print_strings_result)
+  calls print_endline
+sub putchar(putchar_c, putchar_result)
+  calls __stack_chk_fail
+sub register_tm_clones(register_tm_clones_result)
+sub strchr(strchr_s, strchr_c, strchr_result)
+  calls putchar
+sub strcpy(strcpy_dst, strcpy_src, strcpy_result)
+  calls free
+sub strlen(strlen_s, strlen_result)
+  calls strcpy
+sub sub_1067c(sub_1067c_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[X10]
+#2: main_argv :: in out u64 = X11
+#3: main_result :: out u32 = low:32[X10]
+
+#4:
+#5: X2 := X2 - 0x80
+#6: mem := mem with [X2 + 0x78, el]:u64 <- X1
+#7: mem := mem with [X2 + 0x70, el]:u64 <- X8
+#8: mem := mem with [X2 + 0x68, el]:u64 <- X9
+#9: X8 := X2 + 0x80
+#10: X15 := X10
+#11: mem := mem with [X8 - 0x80, el]:u64 <- X11
+#12: mem := mem with [X8 - 0x74, el]:u32 <- low:32[X15]
+#13: X15 := 0x12000
+#14: X15 := mem[X15 - 0x1E8, el]:u64
+#15: mem := mem with [X8 - 0x28, el]:u64 <- X15
+#16: X15 := X2
+#17: X9 := X15
+#18: X15 := 8
+#19: mem := mem with [X8 - 0x5C, el]:u32 <- low:32[X15]
+#20: X14 := extend:64[mem[X8 - 0x74, el]:u32]
+#21: X15 := extend:64[mem[X8 - 0x5C, el]:u32]
+#22: X15 := extend:64[low:32[X15 + X14]]
+#23: X15 := extend:64[low:32[X15]]
+#24: X15 := extend:64[low:32[X15 + 1]]
+#25: mem := mem with [X8 - 0x58, el]:u32 <- low:32[X15]
+#26: X15 := extend:64[mem[X8 - 0x58, el]:u32]
+#27: X15 := X15 - 1
+#28: mem := mem with [X8 - 0x50, el]:u64 <- X15
+#29: X15 := extend:64[mem[X8 - 0x58, el]:u32]
+#30: X15 := X15 << 3
+#31: X15 := X15 + 7
+#32: X15 := X15 + 0xF
+#33: X15 := X15 >> 4
+#34: X15 := X15 << 4
+#35: X2 := X2 - X15
+#36: X15 := X2
+#37: X15 := X15 + 7
+#38: X15 := X15 >> 3
+#39: X15 := X15 << 3
+#40: mem := mem with [X8 - 0x48, el]:u64 <- X15
+#41: mem := mem with [X8 - 0x60, el]:u32 <- 0
+#42: goto %#43
+
+#43:
+#44: X14 := extend:64[mem[X8 - 0x60, el]:u32]
+#45: X15 := extend:64[mem[X8 - 0x74, el]:u32]
+#46: X14 := extend:64[low:32[X14]]
+#47: X15 := extend:64[low:32[X15]]
+#48: #16 := X14 <$ X15
+#49: when #16 goto %#50
+#51: goto %#52
+
+#52:
+#53: mem := mem with [X8 - 0x64, el]:u32 <- 0
+#54: goto %#55
+
+#55:
+#56: X14 := extend:64[mem[X8 - 0x64, el]:u32]
+#57: X15 := extend:64[mem[X8 - 0x5C, el]:u32]
+#58: X14 := extend:64[low:32[X14]]
+#59: X15 := extend:64[low:32[X15]]
+#60: #21 := X14 <$ X15
+#61: when #21 goto %#62
+#63: goto %#64
+
+#64:
+#65: X15 := extend:64[mem[X8 - 0x58, el]:u32]
+#66: X15 := extend:64[low:32[X15 - 1]]
+#67: X15 := extend:64[low:32[X15]]
+#68: X14 := mem[X8 - 0x48, el]:u64
+#69: X15 := X15 << 3
+#70: X15 := X15 + X14
+#71: mem := mem with [X15, el]:u64 <- 0
+#72: X15 := mem[X8 - 0x48, el]:u64
+#73: X10 := X15
+#74: X1 := 0x10920
+#75: call @print_strings with return %#76
+
+#76:
+#77: mem := mem with [X8 - 0x60, el]:u32 <- 0
+#78: goto %#79
+
+#79:
+#80: X14 := extend:64[mem[X8 - 0x60, el]:u32]
+#81: X15 := extend:64[mem[X8 - 0x58, el]:u32]
+#82: X14 := extend:64[low:32[X14]]
+#83: X15 := extend:64[low:32[X15]]
+#84: #28 := X14 <$ X15
+#85: when #28 goto %#86
+#87: goto %#88
+
+#88:
+#89: X15 := 0
+#90: X2 := X9
+#91: X10 := X15
+#92: X15 := 0x12000
+#93: X14 := mem[X8 - 0x28, el]:u64
+#94: X15 := mem[X15 - 0x1E8, el]:u64
+#95: #31 := X14 = X15
+#96: when #31 goto %#97
+#98: goto %#99
+
+#97:
+#100: X2 := X8 - 0x80
+#101: X1 := mem[X2 + 0x78, el]:u64
+#102: X8 := mem[X2 + 0x70, el]:u64
+#103: X9 := mem[X2 + 0x68, el]:u64
+#104: X2 := X2 + 0x80
+#105: call X1 with noreturn
+
+#99:
+#106: X1 := 0x1096C
+#107: call @__stack_chk_fail with noreturn
+
+#86:
+#108: X14 := mem[X8 - 0x48, el]:u64
+#109: X15 := extend:64[mem[X8 - 0x60, el]:u32]
+#110: X15 := X15 << 3
+#111: X15 := X15 + X14
+#112: X15 := mem[X15, el]:u64
+#113: X10 := X15
+#114: X1 := 0x1093A
+#115: call @free with return %#116
+
+#116:
+#117: X15 := extend:64[mem[X8 - 0x60, el]:u32]
+#118: X15 := extend:64[low:32[X15 + 1]]
+#119: mem := mem with [X8 - 0x60, el]:u32 <- low:32[X15]
+#120: goto %#79
+
+#62:
+#121: X15 := 0x12000
+#122: X14 := extend:64[mem[X8 - 0x64, el]:u32]
+#123: X14 := X14 << 3
+#124: X15 := X15
+#125: X15 := X15 + X14
+#126: X15 := mem[X15, el]:u64
+#127: X11 := 0x20
+#128: X10 := X15
+#129: X1 := 0x1086C
+#130: call @strchr with return %#131
+
+#131:
+#132: X15 := X10
+#133: X15 := X15 + 1
+#134: mem := mem with [X8 - 0x40, el]:u64 <- X15
+#135: X11 := 0x20
+#136: X10 := mem[X8 - 0x40, el]:u64
+#137: X1 := 0x10880
+#138: call @strchr with return %#139
+
+#139:
+#140: mem := mem with [X8 - 0x38, el]:u64 <- X10
+#141: X14 := mem[X8 - 0x38, el]:u64
+#142: X15 := mem[X8 - 0x40, el]:u64
+#143: X15 := X14 - X15
+#144: X15 := extend:64[low:32[X15]]
+#145: X15 := extend:64[low:32[X15 + 1]]
+#146: X15 := extend:64[low:32[X15]]
+#147: mem := mem with [X8 - 0x54, el]:u32 <- low:32[X15]
+#148: X15 := extend:64[mem[X8 - 0x54, el]:u32]
+#149: X10 := X15
+#150: X1 := 0x108A4
+#151: call @malloc with return %#152
+
+#152:
+#153: X15 := X10
+#154: mem := mem with [X8 - 0x30, el]:u64 <- X15
+#155: X15 := extend:64[mem[X8 - 0x54, el]:u32]
+#156: X12 := X15
+#157: X11 := mem[X8 - 0x40, el]:u64
+#158: X10 := mem[X8 - 0x30, el]:u64
+#159: X1 := 0x108BC
+#160: call @memmove with return %#161
+
+#161:
+#162: X15 := extend:64[mem[X8 - 0x54, el]:u32]
+#163: X15 := X15 - 1
+#164: X14 := mem[X8 - 0x30, el]:u64
+#165: X15 := X15 + X14
+#166: mem := mem with [X15] <- 0
+#167: X14 := mem[X8 - 0x48, el]:u64
+#168: X15 := extend:64[mem[X8 - 0x60, el]:u32]
+#169: X15 := X15 << 3
+#170: X15 := X15 + X14
+#171: X14 := mem[X8 - 0x30, el]:u64
+#172: mem := mem with [X15, el]:u64 <- X14
+#173: X15 := extend:64[mem[X8 - 0x64, el]:u32]
+#174: X15 := extend:64[low:32[X15 + 1]]
+#175: mem := mem with [X8 - 0x64, el]:u32 <- low:32[X15]
+#176: X15 := extend:64[mem[X8 - 0x60, el]:u32]
+#177: X15 := extend:64[low:32[X15 + 1]]
+#178: mem := mem with [X8 - 0x60, el]:u32 <- low:32[X15]
+#179: goto %#55
+
+#50:
+#180: X15 := extend:64[mem[X8 - 0x60, el]:u32]
+#181: X15 := X15 << 3
+#182: X14 := mem[X8 - 0x80, el]:u64
+#183: X15 := X15 + X14
+#184: X15 := mem[X15, el]:u64
+#185: X10 := X15
+#186: X1 := 0x107FE
+#187: call @strlen with return %#188
+
+#188:
+#189: X15 := X10
+#190: X15 := X15 + 1
+#191: X10 := X15
+#192: X1 := 0x10808
+#193: call @malloc with return %#194
+
+#194:
+#195: X15 := X10
+#196: X13 := X15
+#197: X15 := extend:64[mem[X8 - 0x60, el]:u32]
+#198: X15 := X15 << 3
+#199: X14 := mem[X8 - 0x80, el]:u64
+#200: X15 := X15 + X14
+#201: X15 := mem[X15, el]:u64
+#202: X11 := X15
+#203: X10 := X13
+#204: X1 := 0x10822
+#205: call @strcpy with return %#206
+
+#206:
+#207: X13 := X10
+#208: X14 := mem[X8 - 0x48, el]:u64
+#209: X15 := extend:64[mem[X8 - 0x60, el]:u32]
+#210: X15 := X15 << 3
+#211: X15 := X15 + X14
+#212: mem := mem with [X15, el]:u64 <- X13
+#213: X15 := extend:64[mem[X8 - 0x60, el]:u32]
+#214: X15 := extend:64[low:32[X15 + 1]]
+#215: mem := mem with [X8 - 0x60, el]:u32 <- low:32[X15]
+#216: goto %#43
+
