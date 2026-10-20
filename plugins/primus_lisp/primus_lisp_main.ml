@@ -157,6 +157,19 @@ module Signals (Machine : Primus.Machine.S) = struct
         ]
 end
 
+(* a feature may be specified by its file, whose folder is searched first *)
+let feature_name feature =
+  Option.value_map ~default:feature
+    (String.chop_suffix feature ~suffix:".lisp")
+    ~f:Filename.basename
+
+(* the features, that the project requests, see
+   [Primus.Lisp.Load.with_features], are loaded with those of the options *)
+let requested paths features requested =
+  let files = List.filter requested ~f:(String.is_suffix ~suffix:".lisp") in
+  ( List.map files ~f:Filename.dirname @ paths,
+    features @ List.map requested ~f:feature_name )
+
 let load_lisp_program dump paths features =
   let module Loader (Machine : Primus.Machine.S) = struct
     open Machine.Syntax
@@ -164,6 +177,8 @@ let load_lisp_program dump paths features =
 
     let init () =
       Machine.get () >>= fun project ->
+      let paths', features' = Primus.Lisp.Load.requested project in
+      let paths, features = requested (paths' @ paths) features features' in
       let prog = load_program paths features project in
       if dump then dump_program prog;
       Lisp.link_program prog
@@ -479,13 +494,7 @@ let () =
     @ [ Filename.current_dir_name ]
     @ !!libs @ library_paths
   in
-  let features =
-    "core"
-    :: List.map features ~f:(fun feature ->
-        Option.value_map ~default:feature
-          (String.chop_suffix feature ~suffix:".lisp")
-          ~f:Filename.basename)
-  in
+  let features = "core" :: List.map features ~f:feature_name in
   Primus.Components.register_generic ~package:"bap" "lisp-type-checker"
     (module TypeErrorSummary)
     ~desc:"Typechecks program and outputs the summary in the standard output.";

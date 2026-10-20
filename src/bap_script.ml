@@ -1,15 +1,13 @@
 open Core
 open Bap.Std
+open Bap_knowledge
 open Bap_core_theory
+open Bap_primus.Std
 
 let arguments = ref []
 let set_args args = arguments := args
 let args () = !arguments
 let initialized = ref false
-
-(* the options of the libraries of the script, e.g., of the debugger *)
-let required = ref []
-let require_options options = required := !required @ options
 
 let fail fmt =
   Format.kasprintf
@@ -18,19 +16,18 @@ let fail fmt =
       Stdlib.exit 1)
     fmt
 
-(* the options are of the command ".", which does nothing, see
-   bap_frontend.ml, so that bap only loads the plugins *)
-let init ?(options = []) () =
-  if !initialized then fail "bap is already initialized";
-  initialized := true;
-  match
-    Bap_main.init ~name:"bap"
-      ~argv:(Array.of_list (("bap" :: "." :: !required) @ options))
-      ()
-  with
-  | Ok () -> ()
-  | Error (Bap_main.Extension.Error.Exit_requested code) -> Stdlib.exit code
-  | Error err -> fail "%a" Bap_main.Extension.Error.pp err
+(* the plugins are loaded once, with their defaults, as the command ".",
+   which does nothing, see bap_frontend.ml, so that bap only loads them;
+   the scripts configure the analyses with the arguments of the
+   functions, that they call *)
+let init () =
+  if not !initialized then begin
+    initialized := true;
+    match Bap_main.init ~name:"bap" ~argv:[| "bap"; "." |] () with
+    | Ok () -> ()
+    | Error (Bap_main.Extension.Error.Exit_requested code) -> Stdlib.exit code
+    | Error err -> fail "%a" Bap_main.Extension.Error.pp err
+  end
 
 let run pass proj =
   match Project.Pass.run pass proj with
@@ -180,17 +177,25 @@ let synthesize_program proj =
           in
           Project.with_program proj (Program.create ~subs ()))
 
+type lisp = { paths : string list; features : string list }
+
 (* the default loader of the disassemble command, which runs the passes
    that are flagged with autorun, e.g., the api pass, first; with [~bare]
    the disassembly and the lifting are skipped, for the executors that
    run the code natively *)
-let project ?(bare = false) ?(loader = "llvm") ?target file =
-  if not !initialized then init ();
+let project ?(bare = false) ?(loader = "llvm") ?target ?lisp file =
+  init ();
   let state = if bare then Some Project.empty_state else None in
   match Project.create ?state (Project.Input.load ~loader ?target file) with
   | Error err -> fail "can't load %s: %a" file Error.pp err
   | Ok proj ->
       let proj = if bare then synthesize_program proj else proj in
+      let proj =
+        match lisp with
+        | None -> proj
+        | Some { paths; features } ->
+            Primus.Lisp.Load.with_features ~paths proj features
+      in
       Project.passes ()
       |> List.filter ~f:Project.Pass.autorun
       |> List.fold ~init:proj ~f:(Fn.flip run)
@@ -199,3 +204,61 @@ let run_pass name proj =
   match Project.find_pass name with
   | None -> fail "unknown pass %s" name
   | Some pass -> run pass proj
+
+(* the entry point of the program, as the run pass finds it *)
+let entry_point proj = function
+  | Some name -> `symbol name
+  | None -> (
+      match
+        Term.enum sub_t (Project.program proj)
+        |> Seq.find ~f:(fun sub -> Term.has_attr sub Sub.entry_point)
+      with
+      | Some sub -> `tid (Term.tid sub)
+      | None -> `symbol "_start")
+
+let system_of ?(components = []) name =
+  match Primus.System.Repository.find (Knowledge.Name.read name) with
+  | None -> fail "unknown system %s" name
+  | Some sys ->
+      List.fold components ~init:sys ~f:(fun sys comp ->
+          let name = Knowledge.Name.read comp in
+          Primus.System.add_component sys
+            ~package:(Knowledge.Name.package name)
+            (Knowledge.Name.unqualified name))
+
+let pass name proj =
+  match Project.find_pass name with None -> proj | Some pass -> run pass proj
+
+(* the components of [init] run in the machine,
+   after the components of the system, before the program starts *)
+let run ?(system = "bap:legacy-main") ?components ?(init = []) ?(args = [])
+    ?(envp = []) ?entry proj =
+  let module Machine = Primus.Analysis in
+  let module Linker = Primus.Linker.Make (Machine) in
+  let open Machine.Syntax in
+  let proj = pass "trivial-condition-form" proj in
+  let start =
+    Machine.List.iter init ~f:(fun component ->
+        let module Component = (val component : Primus.Machine.Component) in
+        let module Component = Component (Machine) in
+        Component.init ())
+    >>= fun () -> Linker.exec (entry_point proj entry)
+  in
+  let program = Option.value (Project.get proj filename) ~default:"a.out" in
+  match
+    Primus.System.run
+      (system_of ?components system)
+      proj (Toplevel.current ())
+      ~args:(Array.of_list (program :: args))
+      ~envp:(Array.of_list envp) ~start
+  with
+  | Error conflict ->
+      fail "the program failed: %a" Knowledge.Conflict.pp conflict
+  | Ok (status, proj, state) ->
+      Toplevel.set state;
+      (match status with
+      | Primus.Normal | Exn Primus.Interpreter.Halt -> ()
+      | Exn exn ->
+          Format.eprintf "bap script: the program failed: %s@."
+            (Primus.Exn.to_string exn));
+      proj

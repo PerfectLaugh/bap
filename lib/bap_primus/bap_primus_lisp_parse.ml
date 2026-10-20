@@ -780,6 +780,31 @@ module Load = struct
       raise (Fail (Parse_error (err, loc source trees)))
 end
 
+(* the features, that the project requests, besides the features of the
+   options, which the Lisp plugin loads with them *)
+module Request = struct
+  type t = { paths : string list; features : string list }
+  [@@deriving bin_io, compare, sexp]
+
+  let pp ppf { features } =
+    Format.pp_print_string ppf (String.concat ~sep:" " features)
+end
+
+let request =
+  Value.Tag.register
+    (module Request)
+    ~uuid:"5d0e3e0e-8f59-4e57-b6a4-0b8f1c3a2f41" ~name:"primus-lisp-request"
+
+let requested proj =
+  match Project.get proj request with
+  | None -> ([], [])
+  | Some { paths; features } -> (paths, features)
+
+let with_features ?(paths = []) proj features =
+  let paths', features' = requested proj in
+  Project.set proj request
+    { paths = paths @ paths'; features = features' @ features }
+
 let program ?paths proj features =
   try Ok (Load.features ?paths proj features) with Fail e -> Error e
 

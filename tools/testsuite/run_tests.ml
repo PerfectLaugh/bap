@@ -354,8 +354,8 @@ let scripts data =
           script env
             {|let () =
   let file = List.hd (Bap_script.args ()) in
-  Bap_script.init ~options:[ "--run-systems=bap:unicorn-executor" ] ();
-  ignore (Bap_script.run_pass "run" (Bap_script.project file))
+  ignore
+    (Bap_script.run ~system:"bap:unicorn-executor" (Bap_script.project file))
 |}
         in
         check env "exits" (out.status = Exited 0);
@@ -384,13 +384,10 @@ end
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  Bap_script.init
-    ~options:
-      [ "--run-systems=bap:unicorn-executor"; "--run-components=script:watch" ]
-    ();
-  Primus.Components.register_generic ~package:"script" "watch" (module Watch);
   Primus.Interpreter.Stops.add (Addr.of_int64 ~width:64 0x4004c0L);
-  ignore (Bap_script.run_pass "run" (Bap_script.project file))
+  ignore
+    (Bap_script.run ~system:"bap:unicorn-executor" ~init:[ (module Watch) ]
+       (Bap_script.project file))
 |}
         in
         lacks env "loads the plugins" out "Failed to load";
@@ -468,8 +465,18 @@ module Fork (Machine : Primus.Machine.S) = struct
     | other :: _ -> Machine.switch other
     | [] -> Machine.return ()
 
-  let call (name, _) =
-    if String.equal name "putchar" then begin
+  (* the calls are counted after the name of the program, argv[0] *)
+  let started = ref false
+
+  let call (name, args) =
+    if String.equal name "putchar" && not !started then begin
+      (match args with
+      | [ c ] when Word.to_int_exn (Primus.Value.to_word c) = 10 ->
+          started := true
+      | _ -> ());
+      Machine.return ()
+    end
+    else if String.equal name "putchar" then begin
       incr calls;
       if !calls = 3 then
         Machine.current () >>= fun parent ->
@@ -490,16 +497,10 @@ end
 
 let () =
   let file = List.hd_exn (Bap_script.args ()) in
-  Bap_script.init
-    ~options:
-      [
-        "--run-systems=bap:unicorn-executor";
-        "--run-components=script:fork";
-        "--run-argv=hello,cruel,world";
-      ]
-    ();
-  Primus.Components.register_generic ~package:"script" "fork" (module Fork);
-  ignore (Bap_script.run_pass "run" (Bap_script.project file))
+  ignore
+    (Bap_script.run ~system:"bap:unicorn-executor" ~init:[ (module Fork) ]
+       ~args:[ "hello"; "cruel"; "world" ]
+       (Bap_script.project file))
 |};
               path data "bin/x86_64-linux-gnu-echo";
             ]
@@ -523,14 +524,7 @@ let () =
    functions in the Thumb encoding from the symbol table, and the system
    calls lifted on demand *)
 let bare data =
-  let run env ?(options = []) bin =
-    let options =
-      List.map (Printf.sprintf "%S")
-        ([
-           "--run-systems=bap:unicorn-executor"; "--run-argv=hello,cruel,world";
-         ]
-        @ options)
-    in
+  let run env ?(lisp = "None") bin =
     bap ~timeout:300. env
       [
         "script";
@@ -538,10 +532,12 @@ let bare data =
           (Printf.sprintf
              {|let () =
   let file = List.hd (Bap_script.args ()) in
-  Bap_script.init ~options:[ %s ] ();
-  ignore (Bap_script.run_pass "run" (Bap_script.project ~bare:true file))
+  ignore
+    (Bap_script.run ~system:"bap:unicorn-executor"
+       ~args:[ "hello"; "cruel"; "world" ]
+       (Bap_script.project ~bare:true ?lisp:%s file))
 |}
-             (String.concat "; " options));
+             lisp);
         path data ("bin/" ^ bin);
       ]
   in
@@ -559,8 +555,11 @@ let bare data =
              (List.assoc "aarch64-linux-gnu-svc-crc" syscalls));
         let out =
           run env "aarch64-linux-gnu-svc-crc"
-            ~options:
-              [ "--primus-lisp-add=" ^ dir env; "--primus-lisp-load=syscalls" ]
+            ~lisp:
+              (Printf.sprintf
+                 "(Some { Bap_script.paths = [ %S ]; features = [ \"syscalls\" \
+                  ] })"
+                 (dir env))
         in
         contains env "prints the CRC" out "1489580789");
     case "script/unicorn/bare/mips-linux-gnu-echo" (fun env ->
@@ -573,8 +572,11 @@ let bare data =
              (List.assoc "x86_64-linux-gnu-syscall-crc" syscalls));
         let out =
           run env "x86_64-linux-gnu-syscall-crc"
-            ~options:
-              [ "--primus-lisp-add=" ^ dir env; "--primus-lisp-load=syscalls" ]
+            ~lisp:
+              (Printf.sprintf
+                 "(Some { Bap_script.paths = [ %S ]; features = [ \"syscalls\" \
+                  ] })"
+                 (dir env))
         in
         contains env "prints the CRC" out "1489580789");
   ]
@@ -603,7 +605,6 @@ let word emu addr =
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  Bap_script.init ();
   let emu = Emu.create ~args:[ "hello"; "cruel"; "world" ] (Bap_script.project ~bare:true file) in
   Printf.printf "paused at the entry %Lx\n%!" (Emu.pc emu);
   (match Emu.run emu ~until:0x40076bL with
@@ -647,7 +648,6 @@ let show emu = function
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  Bap_script.init ();
   let emu = Emu.create ~args:[ "hello"; "cruel" ] (Bap_script.project ~bare:true file) in
   (* three steps from the entry *)
   for _ = 1 to 3 do show emu (Emu.step emu) done;
@@ -685,7 +685,6 @@ module Emu = Bap_emu
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  Bap_script.init ();
   let emu = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true file) in
   ignore (Emu.run emu ~until:0x40076bL);
   let argc = ref Word.b0 in
@@ -718,8 +717,10 @@ module Emu = Bap_emu
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  Bap_script.init ~options:[ "--primus-lisp-channel-redirect=<stdin>:%s" ] ();
-  let emu = Emu.create ~components:Emu.Taint.components (Bap_script.project file) in
+  let emu =
+    Emu.create ~components:Emu.Taint.components ~redirects:[ ("<stdin>", "%s") ]
+      (Bap_script.project file)
+  in
   (match Emu.run emu ~until:0x80cL with
    | Paused -> ()
    | _ -> failwith "fgets didn't return");
@@ -762,8 +763,10 @@ let model = function
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  Bap_script.init ~options:[ "--primus-lisp-channel-redirect=<stdin>:%s" ] ();
-  let emu = Emu.create ~components:Sym.components (Bap_script.project file) in
+  let emu =
+    Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", "%s") ]
+      (Bap_script.project file)
+  in
   (match Emu.run emu ~until:0x693L with
    | Paused -> ()
    | _ -> failwith "getchar didn't return");
@@ -793,10 +796,10 @@ module Sym = Emu.Symbolic
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  Bap_script.init
-    ~options:[ "--primus-lisp-channel-redirect=<stdin>:%s";
-               "--primus-symbolic-executor-timeout=10000" ] ();
-  let emu = Emu.create ~components:Sym.components (Bap_script.project file) in
+  let emu =
+    Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", "%s") ]
+      (Bap_script.project file)
+  in
   (match Emu.run emu ~until:0x80cL with
    | Paused -> ()
    | _ -> failwith "fgets didn't return");
@@ -808,7 +811,7 @@ let () =
   Printf.printf "branches:";
   List.iter (fun b -> Printf.printf " %%Lx" (Sym.addr b)) (List.rev !branches);
   print_newline ();
-  match Sym.flip (List.hd !branches) with
+  match Sym.flip ~timeout:10_000 (List.hd !branches) with
   | None -> print_endline "no collision"
   | Some m ->
       print_string "collision: ";
@@ -833,7 +836,6 @@ let status = function
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  Bap_script.init ();
   let emu = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true file) in
   ignore (Emu.run emu ~until:0x40076bL);
   (* mov $0xa, %edi, which prints the newline, prints + instead *)
@@ -870,7 +872,6 @@ let show emu = function
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  Bap_script.init ();
   let emu = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true file) in
   show emu (Emu.run emu ~until:0x40076bL);
   let snap = Emu.snapshot emu in
@@ -911,7 +912,6 @@ module Emu = Bap_emu
 let () =
   let file = List.hd (Bap_script.args ()) in
   let bare = Sys.getenv_opt "BARE" <> Some "0" in
-  Bap_script.init ();
   let emu = Emu.create ~args:[ "hi" ] (Bap_script.project ~bare file) in
   let pcs = List.init 3 (fun _ -> ignore (Emu.step emu); Printf.sprintf "%Lx" (Emu.pc emu)) in
   Printf.printf "steps: %s\n%!" (String.concat " " pcs);
@@ -1339,9 +1339,8 @@ end
 let () =
   Debugger.break "0x4004c0";
   Debugger.on_stop (module Zero);
-  Bap_script.init ~options:[ "--run-systems=bap:unicorn-executor" ] ();
   ignore
-    (Bap_script.run_pass "run"
+    (Bap_script.run ~system:"bap:unicorn-executor" ~init:[ Debugger.component ]
        (Bap_script.project (List.hd (Bap_script.args ()))))
 |}
           [ path data "bin/x86_64-linux-gnu-crc-loop" ]
@@ -1380,8 +1379,9 @@ let () =
   in
   Debugger.break "print_endline";
   Debugger.on_stop (module Count);
-  Bap_script.init ~options:[ "--run-systems=" ^ system; "--run-argv=hello" ] ();
-  ignore (Bap_script.run_pass "run" (Bap_script.project file));
+  ignore
+    (Bap_script.run ~system ~init:[ Debugger.component ]
+       (Bap_script.project file));
   Printf.printf "print_endline was called %d times\n" !calls
 |}
                  [ system; path data "bin/x86_64-linux-gnu-echo" ]

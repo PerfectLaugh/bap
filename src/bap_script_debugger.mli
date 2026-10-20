@@ -1,7 +1,8 @@
 (** The debugger of the scripts.
 
-    [#require "bap-frontend.script-debugger"] adds the component of the debugger
-    to the systems that the script runs, which stops the machines at the
+    The {!component} of the debugger, which the script adds to the system, that
+    it runs, e.g., [Bap_script.run ~init:[ Bap_script_debugger.component ]], or
+    the component [script:debugger] of the repository, stops the machines at the
     breakpoints, or at every instruction, while stepping, see
     [Primus.Interpreter.Stops], and calls the handlers of the script, which see
     and change the machine with the API of Primus.
@@ -29,3 +30,8 @@ end
 val on_stop : (module Handler) -> unit
 (** [on_stop handler] calls the [handler] at the stops, after the handlers that
     were added before it. *)
+
+val component : Primus.Machine.component
+(** the debugger, which the systems, that the script runs, need, e.g.,
+    [Bap_script.run ~init:[ component ]], or
+    [Bap_emu.create ~init:[ component ]] *)

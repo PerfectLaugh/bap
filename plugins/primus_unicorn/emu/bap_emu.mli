@@ -39,6 +39,8 @@ type action =
 val create :
   ?system:string ->
   ?components:string list ->
+  ?init:Bap_primus.Std.Primus.Machine.component list ->
+  ?redirects:(string * string) list ->
   ?args:string list ->
   ?envp:string list ->
   ?entry:string ->
@@ -49,7 +51,12 @@ val create :
     [bap:unicorn-executor], with the [components], e.g., [bap:debugger], the
     program arguments [args], without the name of the program, and the
     environment [envp], and pauses it before its first instruction runs in
-    Unicorn. *)
+    Unicorn.
+
+    The components of [init], e.g., [Bap_script_debugger.component], and the
+    [redirects] of the channels of the program, e.g.,
+    [[ ("<stdin>", "input.txt") ]], run in the machine after the components of
+    the system, before the program starts. *)
 
 val run : ?until:int64 -> t -> status
 (** [run emu] continues the program, until it pauses, e.g., before the
@@ -251,8 +258,8 @@ end
     ]}
 
     The functions, except the callbacks and {!flip}, run, when the program is
-    paused, or ended, see {!primus}. The time, that the solver has, is the
-    option [--primus-symbolic-executor-timeout]. *)
+    paused, or ended, see {!primus}. The solver has the [timeout] milliseconds,
+    by default 16, to find a model. *)
 module Symbolic : sig
   (** the place of the values, see {!Taint.place} *)
   type place = Taint.place = Reg of string | Mem of int64 * int
@@ -277,7 +284,7 @@ module Symbolic : sig
   (** [formula emu place] the formulas of the values of the [place], one for a
       register, and one per byte of the memory, [None] for a concrete value. *)
 
-  val solve : t -> model option
+  val solve : ?timeout:int -> t -> model option
   (** [solve emu] a model of the constraints of the path, that the program took,
       [None], if the solver finds none, e.g., in time. *)
 
@@ -295,7 +302,7 @@ module Symbolic : sig
   val condition : branch -> string
   (** the formula of the condition *)
 
-  val flip : branch -> model option
+  val flip : ?timeout:int -> branch -> model option
   (** [flip branch] a model of the inputs, with which the program takes the path
       to the branch, and decides the branch otherwise, [None], if the solver
       finds none. *)

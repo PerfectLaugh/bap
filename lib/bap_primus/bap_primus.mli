@@ -3711,6 +3711,22 @@ module Std : sig
             into the Lisp machine, or an error if the program is not
             well-formed. *)
 
+        val with_features :
+          ?paths:string list -> project -> string list -> project
+        (** [with_features ?paths project features] the [project], whose program
+            the Lisp plugin loads with the [features] too, e.g., [syscalls],
+            besides the features of its options, searching the [paths] first. A
+            feature may be a file, e.g., [dir/syscalls.lisp], whose folder is
+            searched first.
+
+            @since 2.6.0 *)
+
+        val requested : project -> string list * string list
+        (** [requested project] the paths and the features, that
+            {!with_features} added to the [project]
+
+            @since 2.6.0 *)
+
         val pp_error : Format.formatter -> error -> unit
         (** [pp_error ppf err] outputs error information into the
             pretty-printing formatter [ppf]. *)
@@ -4337,8 +4353,8 @@ module Std : sig
           [Machine]. *)
       module Make (Machine : Machine.S) : sig
         val link_program : program -> unit Machine.t
-        (** [link_program p] links the program [p] into the Lisp Machine.
-            Previous program, if any, is discarded. *)
+        (** [link_program p] links the program [p] into the Lisp Machine, merged
+            with the previous program, if any, e.g., with the primitives. *)
 
         val program : program Machine.t
         (** [program] is the current Machine program. *)

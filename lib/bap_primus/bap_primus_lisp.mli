@@ -14,6 +14,8 @@ module Load : sig
   val program :
     ?paths:string list -> Project.t -> string list -> (program, error) result
 
+  val with_features : ?paths:string list -> project -> string list -> project
+  val requested : project -> string list * string list
   val pp_program : formatter -> program -> unit
   val pp_error : formatter -> error -> unit
 end

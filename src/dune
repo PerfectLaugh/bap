@@ -2,7 +2,7 @@
  (name bap_script)
  (public_name bap-frontend.script)
  (modules bap_script)
- (libraries bap bap-core-theory bap-main core))
+ (libraries bap bap-core-theory bap-knowledge bap-main bap-primus core))
 
 (library
  (name bap_script_debugger)

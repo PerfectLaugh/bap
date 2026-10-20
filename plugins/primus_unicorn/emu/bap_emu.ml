@@ -6,6 +6,7 @@ module X = Bap_primus_unicorn_plugin.Primus_unicorn_executor
 module Native = Bap_primus_unicorn_plugin.Primus_unicorn_native
 module Target = Bap_primus_unicorn_plugin.Primus_unicorn_target
 module Uc = Bap_unicorn
+module Io = Primus_lisp_library_plugin.Primus_lisp_io
 
 type status = Paused | Exited of int option | Failed of string
 type action = Default | Return of int64
@@ -82,10 +83,15 @@ let paused t = match t.state with Suspended _ -> true | _ -> false
 (* the program runs from the entry, and, when it ends, the script may
    restore a snapshot, after which the machine, that ended, is killed,
    and the snapshot continues, which ends here too *)
-let start (entry : Primus.Linker.name) =
+let start init (entry : Primus.Linker.name) =
   let module Machine = Primus.Analysis in
   let module Linker = Primus.Linker.Make (Machine) in
   let open Machine.Syntax in
+  Machine.List.iter init ~f:(fun component ->
+      let module Component = (val component : Primus.Machine.Component) in
+      let module Component = Component (Machine) in
+      Component.init ())
+  >>= fun () ->
   Machine.catch
     (Linker.exec entry >>| fun () -> Primus.Normal)
     (fun exn -> Machine.return (Primus.Exn exn))
@@ -103,8 +109,14 @@ let start (entry : Primus.Linker.name) =
   in
   ended ()
 
-let create ?(system = "bap:unicorn-executor") ?(components = []) ?(args = [])
-    ?(envp = []) ?entry proj =
+(* the components of [init], and the redirections run
+   in the machine, after the components of the system, before the
+   program starts *)
+let create ?(system = "bap:unicorn-executor") ?(components = []) ?(init = [])
+    ?(redirects = []) ?(args = []) ?(envp = []) ?entry proj =
+  let init =
+    init @ if List.is_empty redirects then [] else [ Io.redirect redirects ]
+  in
   (* the entry point of the program, as the run pass finds it *)
   let entry =
     match entry with
@@ -141,7 +153,7 @@ let create ?(system = "bap:unicorn-executor") ?(components = []) ?(args = [])
     (fiber (fun () ->
          Primus.System.run system proj (Toplevel.current ())
            ~args:(Array.of_list (program :: args))
-           ~envp:(Array.of_list envp) ~start:(start entry)));
+           ~envp:(Array.of_list envp) ~start:(start init entry)));
   t
 
 let pc t =
@@ -569,7 +581,7 @@ module Symbolic = struct
     primus t (module Formula);
     !result
 
-  let solve t =
+  let solve ?timeout t =
     let result = ref None in
     let module Solve (Machine : Primus.Machine.S) = struct
       open Machine.Syntax
@@ -581,7 +593,7 @@ module Symbolic = struct
         Constraints.get S.Context.Scope.path >>= fun path ->
         Executor.inputs >>| fun inputs ->
         result :=
-          S.SMT.check (Set.to_list (Set.union user path))
+          S.SMT.check ?timeout (Set.to_list (Set.union user path))
           |> Option.map ~f:(model (Seq.to_list inputs))
     end in
     primus t (module Solve);
@@ -624,7 +636,7 @@ module Symbolic = struct
   let taken b = b.taken
   let condition b = b.condition
 
-  let flip b =
-    S.SMT.check (S.SMT.inverse b.formula :: b.path)
+  let flip ?timeout b =
+    S.SMT.check ?timeout (S.SMT.inverse b.formula :: b.path)
     |> Option.map ~f:(model b.inputs)
 end

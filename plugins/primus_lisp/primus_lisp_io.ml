@@ -326,3 +326,15 @@ let init redirections =
   Primus.Components.register_generic "lisp-basic-io"
     (module Primitives)
     ~package:"bap" ~desc:"Provides basic IO primitives to Primus Lisp."
+
+(* the redirections of the machine, instead of those of the options *)
+let redirect redirections =
+  let module Redirect (Machine : Primus.Machine.S) = struct
+    let init () =
+      Machine.Local.put state
+        {
+          redirections = init_redirections redirections;
+          channels = init_channels redirections;
+        }
+  end in
+  (module Redirect : Primus.Machine.Component)

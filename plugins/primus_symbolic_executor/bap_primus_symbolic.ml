@@ -128,7 +128,7 @@ module SMT : sig
   val concat : expr -> expr -> expr
   val ite : expr -> expr -> expr -> expr
   val cast : cast -> int -> expr -> expr
-  val check : formula list -> model option
+  val check : ?timeout:int -> formula list -> model option
 
   module Model : sig
     type t = model
@@ -164,8 +164,10 @@ end = struct
 
   let () = Z3.set_global_param "parallel.enable" "true"
   let ctxt = Z3.mk_context [ ("model", "true"); ("timeout", "16") ]
+  let timeout = ref 16
 
   let set_timeout ms =
+    timeout := ms;
     Z3.Params.update_param_value ctxt "timeout" (string_of_int ms)
 
   let to_string = Expr.to_string
@@ -290,7 +292,11 @@ end = struct
 
   let solver = Z3.Solver.mk_simple_solver ctxt
 
-  let check assertions =
+  (* the [timeout] is of this check, after which the timeout of the
+     options is restored *)
+  let check ?timeout:ms assertions =
+    let default = !timeout in
+    Option.iter ms ~f:set_timeout;
     Z3.Solver.push solver;
     Z3.Solver.add solver assertions;
     let result =
@@ -303,6 +309,7 @@ end = struct
           | Some model -> Some { model })
     in
     Z3.Solver.pop solver 1;
+    if Option.is_some ms then set_timeout default;
     result
 
   module Formula = struct

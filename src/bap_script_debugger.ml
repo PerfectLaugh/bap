@@ -62,5 +62,6 @@ end
 let () =
   Primus.Components.register_generic ~package:"script" "debugger"
     (module Debugger)
-    ~desc:"Calls the handlers of the script at the stops.";
-  Bap_script.require_options [ "--run-components=script:debugger" ]
+    ~desc:"Calls the handlers of the script at the stops."
+
+let component : Primus.Machine.component = (module Debugger)
