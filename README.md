@@ -68,7 +68,7 @@ dune show depexts         # lists the system packages to install with your packa
 dune build                # fetches the dependencies and builds BAP
 ```
 
-Once it is built, run `bap` and the other tools through `dune exec`, e.g., `dune exec -- bap /bin/echo -d`, so that they can find the plugins in the build tree. BAP's own build needs no shell scripts or Makefiles, all tasks are dune commands, though dune still needs `make` to build some of the dependencies pinned in `dune.lock`, the OCaml compiler among them (add `--pkg=disabled` when the dependencies come from an opam switch, e.g., on Windows):
+Once it is built, run `bap` and the other tools through `dune exec`, e.g., `dune exec -- bap /bin/echo -d`, so that they can find the plugins in the build tree. BAP's own build needs no shell scripts or Makefiles, all tasks are dune commands, though dune still needs `make` to build some of the dependencies pinned in `dune.lock`, the OCaml compiler among them (add `--pkg=disabled` when the dependencies come from an opam switch, e.g., on Windows, see below):
 
 | Task | Command |
 |------|---------|
@@ -86,10 +86,10 @@ To build without network access, put [llvm-project-23.1.4.src.tar.xz][llvm-src] 
 
 #### On Windows
 
-BAP builds natively on Windows with the mingw-w64 toolchain of [opam][opam-windows]. Dune has no binary for Windows and its package management can't build the OCaml compiler there yet, so the dependencies come from an opam switch, with the patched packages of `opam-overlay`, and dune builds BAP with `--pkg=disabled`. You need [CMake][cmake], [Ninja][ninja], and Python 3 (for Z3) in the path,
+BAP builds natively on Windows with the mingw-w64 toolchain of [opam][opam-windows]. The dependencies come from an opam switch, with the patched packages of `opam-overlay`, and dune builds BAP with `--pkg=disabled`, as the package management of dune is still experimental there (see below). You need [CMake][cmake], [Ninja][ninja], and Python 3 (for Z3) in the path,
 
 ```powershell
-opam switch create bap 5.5.0
+opam switch create bap 5.5.1
 opam repo add bap-overlay ./opam-overlay --this-switch --rank=1
 opam install . --deps-only
 opam exec -- dune build --pkg=disabled
@@ -98,6 +98,14 @@ opam exec -- dune exec --pkg=disabled -- bap C:\Windows\System32\find.exe -d
 ```
 
 The other tasks in the table above run the same way, through `opam exec --` and with `--pkg=disabled`.
+
+Building with the package management of dune instead, i.e., without `--pkg=disabled`, is experimental on Windows. The lock is solved for Windows, but the dependencies, the OCaml compiler among them, are built with `sh`, `make`, and the mingw-w64 toolchain, which dune takes from the path, so the `bin` folder of [Cygwin][cygwin] (or the one that opam installs in `%LOCALAPPDATA%\opam\.cygwin\root`) must be in the path, before the other folders, with the `make`, `pkgconf`, `mingw64-x86_64-gcc-core`, `mingw64-x86_64-gcc-g++`, and `mingw64-x86_64-gmp` packages of Cygwin installed. Dune recognizes Cygwin by `uname`, and builds the compiler for mingw-w64 then,
+
+```powershell
+$env:PATH = "C:\cygwin64\bin;" + $env:PATH
+dune show depexts
+dune build
+```
 
 LLVM, Ghidra, Z3, and the runtime of C++ are linked statically into the plugins and programs, and the interactive mode of `bap analyze` has no line editing.
 
@@ -138,6 +146,24 @@ bap mc --show-{insn=asm,bil} -- "\x48\x83\xec\x08"
 
 It recognizes a few input formats (including `llvm-mc` is using for its `-show-encoding` option). Consult the documentation for more detailed information.
 
+### Directories
+
+BAP doesn't use the directories of the user, i.e., it neither reads nor writes anything in the home folder. Its data, e.g., the plugins, the Primus Lisp libraries, and the default configuration, are in the sites of the `bap-common` package, and anything that BAP writes goes only to the directories specified on the command line, which every command accepts:
+
+| Option | Environment variable | Without it |
+|--------|----------------------|------------|
+| `--cache-dir=DIR`, where BAP keeps the knowledge of the disassembled binaries and the results of the other analyses between runs; `bap cache` manages it | `BAP_CACHE_DIR` | nothing is cached |
+| `--log-dir=DIR`, where BAP writes its log | `BAP_LOG_DIR` | only the errors are printed to stderr |
+| `--config-dir=DIR`, whose configuration files take precedence over the default ones | `BAP_CONFIG_DIR` | only the default configuration is read |
+
+For example, to cache the disassembled binaries, which makes the subsequent runs on the same binary much faster,
+
+```bash
+bap /bin/echo -d --cache-dir=$HOME/.cache/bap
+```
+
+The `bap script` command, which runs before the other options are parsed, takes its own `--cache-dir` option, where it keeps the compiled scripts, e.g., `bap script --cache-dir=DIR script.ml`, and the history of `bap analyze` is kept only when its `--history` option is specified.
+
 ## Extending
 
 ### Writing your own analysis
@@ -173,6 +199,20 @@ The `--plugin` option loads the plugin from its file, and `-L DIR` adds a folder
 Let's briefly go through the code. The `counter` object is a visitor that has the state consisting of a pair of counters. The first counter keeps track of the number of jmp terms, and the second counter is incremented every time we enter any term.  The `main` function just runs the counter and prints the output. We declare our extension use the [Extension.declare][extension-declare] function from the [Bap_main][bap-main] library. An extension is just a function that receives the context (which could be used to obtain configuration parameters). In this function, we register our `main` function as a pass using the `Project.register_pass` function.
 
 A little bit more complex example, as well as an example that uses Python, can be found in our [tutorial][bap-tutorial].
+
+### Writing knowledge computations in the direct style
+
+The computations of the knowledge base, e.g., the promises that provide the properties of the program, are monadic. A long computation can instead be written in the direct style with `KB.direct` and `KB.await`, which suspend the computation with the effects of OCaml 5 until the awaited computation is done, and `KB.await_some`, which rejects the computation when the awaited option is `None`, e.g.,
+
+```ocaml
+KB.promise Theory.Label.name @@ fun label ->
+KB.direct @@ fun () ->
+let unit = KB.await_some (KB.collect Theory.Label.unit label) in
+let addr = KB.await_some (KB.collect Theory.Label.addr label) in
+...
+```
+
+A failure of the awaited computation aborts the function with an exception, so the function shouldn't catch all exceptions, e.g., with `try ... with _`, and the functions that it passes to the monadic functions, e.g., to `KB.List.iter`, need their own `KB.direct`. The short computations and the implementations of the Core Theory are better left monadic, as each `KB.await` costs more than a bind.
 
 
 ### Building a plugin with dune
@@ -244,6 +284,7 @@ Please, [contact us][contact-us] if you would like to become a sponsor or are se
 [cgc]: https://www.darpa.mil/program/cyber-grand-challenge
 [opam-install]: https://opam.ocaml.org/doc/Install.html
 [opam-windows]: https://opam.ocaml.org/blog/opam-2-2-0-windows/
+[cygwin]: https://www.cygwin.com/
 [cmake]: https://cmake.org/download/
 [ninja]: https://ninja-build.org/
 [llvm-src]: https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/llvm-project-23.1.4.src.tar.xz
