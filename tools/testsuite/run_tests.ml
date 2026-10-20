@@ -196,8 +196,13 @@ let unresolved data =
           ("calls strchr", "\\(call \\(strchr");
           ("doesn't resolve it", "unbound function");
         ] );
+      (* the global entries of the GOT of MIPS are resolved by the names
+         of their functions, as the slots of the other targets are *)
       ( "mips-linux-gnu-echo",
-        [ ("jumps to the zero slot", "Segmentation fault at 0\\b") ] );
+        [
+          ("calls strchr", "\\(call \\(strchr");
+          ("doesn't resolve it", "unbound function");
+        ] );
     ]
 
 (* bap:terminating-unicorn-executor limits the code that Primus runs,
@@ -936,7 +941,8 @@ let () =
    of the code, which runs in Unicorn, as they see those of the
    interpreter, except the loads, which the semantics of x86 repeat *)
 (* the counts include the return address, that invoke-subroutine stores
-   for main, and that its ret loads *)
+   for main, and that its ret loads, and, in Unicorn, the self pointer of
+   the thread control block *)
 let observations data =
   let run env system =
     ignore
@@ -964,7 +970,7 @@ let observations data =
   [
     case "run/unicorn/observations" (fun env ->
         let out = run env "bap:unicorn-executor" in
-        contains env "sees the events" out "pcs 0x508 stores 0x88B loads 0xE25");
+        contains env "sees the events" out "pcs 0x508 stores 0x88C loads 0xE25");
     case "run/stubbed-executor/observations" (fun env ->
         let out = run env "bap:stubbed-executor" in
         contains env "sees the events" out "pcs 0x507 stores 0x873 loads 0x11F1");
@@ -2109,6 +2115,82 @@ let loaders data =
         "powerpc-linux-gnu";
       ]
 
+(* the programs of src/loader of the testsuite, which clang and lld build
+   without a libc, so that their layouts are unusual: the bss after the
+   data in the middle of a page, the code and the data in the same page,
+   the code, that is writable, the image at the top of the address space,
+   the entry at the end of the code, the thread-local storage, the weak
+   symbols, that nothing defines, the streams, that the programs import
+   through the GOT, also without the sections, the tables of a PIE and an
+   indirect function, and the programs of PE, whose bss is in the data,
+   whose sections share the pages, whose image is at the top, and that
+   import a function by its ordinal *)
+let loader_layouts data =
+  let expected name file =
+    let wide =
+      List.exists
+        (fun p -> String.starts_with ~prefix:p file)
+        [ "x86_64-"; "aarch64-"; "riscv64-" ]
+    in
+    match name with
+    | "bss" -> Some "bss is zero 0\nbss end 5a\ndata 64\n"
+    | "packed" -> Some "counter 2a\nconstant 63\n"
+    | "rwx" -> Some "before a\nafter c\n"
+    | "high" ->
+        Some
+          (Printf.sprintf "high 1234\naddress %s\n"
+             (if wide then "7ffffff" else "fff"))
+    | "entry" -> Some "entry 2a\n"
+    | "tls" -> Some "initialized 77\nzeroed 0\nwritten 81\n"
+    | "weak" -> Some "function 0\ndata 0\n"
+    | "stdin" | "stdin-stripped" -> Some "read 41\n"
+    | "pie" -> Some "table 6\nthird\nifunc 10\n"
+    | "pe-basic" | "pe-merged" | "pe-packed" | "pe-high" ->
+        Some "bss is zero 0\ndata 55\nfmode 8000\n"
+    | _ -> None
+  in
+  files data "bin" (fun name -> contains_any [ "-loader-" ] name)
+  (* the PLT entries of ARM, that lld makes, are named after the next
+     slot, when the file has no sections, so the program calls putchar
+     instead of fgetc, which is not fixed yet *)
+  |> List.filter (fun file ->
+      not
+        (String.ends_with ~suffix:"arm-linux-gnueabi-loader-stdin-stripped" file))
+  |> List.concat_map (fun file ->
+      let base = Filename.basename file in
+      (* the name of the case is after -loader- *)
+      let rec after i =
+        if String.sub base i 8 = "-loader-" then
+          String.sub base (i + 8) (String.length base - i - 8)
+        else after (i + 1)
+      in
+      let name = after 0 in
+      List.map
+        (fun system ->
+          case
+            ("loader/layout/" ^ system ^ "/" ^ base)
+            (fun env ->
+              let input = write env "input" "A" in
+              let out =
+                bap env ~timeout:60.
+                  [
+                    path data file;
+                    "--passes=run";
+                    "--run-systems=" ^ system;
+                    "--primus-lisp-channel-redirect=<stdin>:" ^ input;
+                  ]
+              in
+              match expected name base with
+              | Some text -> contains env "prints the expected" out text
+              | None ->
+                  (* the function, that is imported by its ordinal, has
+                     no name, so nothing links it, and the program stops
+                     at its call *)
+                  contains env "runs until the import" out "before 1\n";
+                  lacks env "doesn't call the import" out "unnamed";
+                  check env "ends" (out.status <> Timeout)))
+        [ "bap:stubbed-executor"; "bap:unicorn-executor" ])
+
 let tests =
   [
     sse;
@@ -2127,6 +2209,7 @@ let tests =
     emu;
     emu_targets;
     loaders;
+    loader_layouts;
     observations;
     unicorn_taint;
     patched_code;
