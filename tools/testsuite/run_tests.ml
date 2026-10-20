@@ -935,6 +935,8 @@ let () =
 (* the observers of Lisp see the instructions, the loads and the stores
    of the code, which runs in Unicorn, as they see those of the
    interpreter, except the loads, which the semantics of x86 repeat *)
+(* the counts include the return address, that invoke-subroutine stores
+   for main, and that its ret loads *)
 let observations data =
   let run env system =
     ignore
@@ -962,10 +964,10 @@ let observations data =
   [
     case "run/unicorn/observations" (fun env ->
         let out = run env "bap:unicorn-executor" in
-        contains env "sees the events" out "pcs 0x508 stores 0x883 loads 0xE1D");
+        contains env "sees the events" out "pcs 0x508 stores 0x88B loads 0xE25");
     case "run/stubbed-executor/observations" (fun env ->
         let out = run env "bap:stubbed-executor" in
-        contains env "sees the events" out "pcs 0x507 stores 0x86B loads 0x11E9");
+        contains env "sees the events" out "pcs 0x507 stores 0x873 loads 0x11F1");
   ]
 
 (* the taint of the input, which Lisp introduces, propagates through
@@ -1643,7 +1645,6 @@ let taint data =
 (* the symbolic executor finds the input that makes a binary print access *)
 let symexec data =
   files data "bin" (fun name -> contains_any [ "-symexec-" ] name)
-  |> List.filter (fun file -> not (contains_any [ "mingw" ] file))
   |> List.map (fun file ->
       let name = "symexec/" ^ Filename.basename file in
       case ~slow:true name (fun env ->
@@ -1695,6 +1696,8 @@ let emu_targets data =
       ("arm-linux-gnueabi", "0x1043c", "R0", "R0", "10444");
       ("mips-linux-gnu", "0x40077c", "V0", "R2", "400788");
       ("powerpc-linux-gnu", "0x100004e4", "R3", "R3", "100004ec");
+      ("x86_64-w64-mingw32", "0x401572", "EAX", "RAX", "401575");
+      ("i686-w64-mingw32", "0x401543", "EAX", "EAX", "401546");
     ]
   in
   let guess =
@@ -2026,6 +2029,58 @@ let loaders data =
       ("x86_64-w64-mingw32-symexec-guess", 0x407000, 0x990);
       ("i686-w64-mingw32-symexec-guess", 0x405000, 0x3f0);
     ]
+  @ List.map
+      (fun (file, image, iat) ->
+        case ("loader/pe-imports/" ^ file) (fun env ->
+            let out = bap env [ "specification"; path data ("bin/" ^ file) ] in
+            contains env "maps the headers at the image base" out
+              (Printf.sprintf "(segment %d " image);
+            contains env "references the slots of the imports" out
+              (Printf.sprintf "(external-reference %d DeleteCriticalSection)"
+                 iat)))
+      [
+        ("x86_64-w64-mingw32-symexec-guess", 0x400000, 0x4081f4);
+        ("i686-w64-mingw32-symexec-guess", 0x400000, 0x406104);
+      ]
+  @ List.concat_map
+      (fun target ->
+        List.concat_map
+          (fun system ->
+            [
+              case
+                ("loader/pe/" ^ system ^ "/" ^ target ^ "-symexec-guess")
+                (fun env ->
+                  let input = write env "input" "A" in
+                  let out =
+                    bap env ~timeout:120.
+                      [
+                        path data ("bin/" ^ target ^ "-symexec-guess");
+                        "--passes=run";
+                        "--run-systems=" ^ system;
+                        "--primus-lisp-channel-redirect=<stdin>:" ^ input;
+                      ]
+                  in
+                  contains env "runs the program of PE" out "access granted");
+              case
+                ("loader/pe/" ^ system ^ "/" ^ target ^ "-echo")
+                (fun env ->
+                  let out =
+                    bap env ~timeout:120.
+                      [
+                        path data ("bin/" ^ target ^ "-echo");
+                        "--passes=run";
+                        "--run-systems=" ^ system;
+                        "--run-argv=echo,hello,cruel,world";
+                      ]
+                  in
+                  sequence env out
+                    [
+                      ("gets the arguments", "echo\nhello\ncruel\nworld");
+                      ("ends", "course");
+                    ]);
+            ])
+          [ "bap:stubbed-executor"; "bap:unicorn-executor" ])
+      [ "x86_64-w64-mingw32"; "i686-w64-mingw32" ]
   @ List.concat_map
       (fun target ->
         List.map
