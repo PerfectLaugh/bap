@@ -832,6 +832,7 @@ module Make (Machine : Machine) = struct
         | Conj u -> Value.of_word next >>= leave_insn u
         | Init | Disj _ -> Value.of_word next)
     | b :: rest -> (
+        enter_insn >>= fun () ->
         term Machine.return blk_t blk_body () b >>= function
         | (Init | Conj _) as c ->
             let c = match (c, constr) with Init, c -> c | c, _ -> c in
@@ -853,7 +854,11 @@ module Make (Machine : Machine) = struct
                   | None -> (
                       Code.resolve_addr (`tid dst) >>= function
                       | Some addr -> Value.of_word addr >>= leave_insn cond
-                      | None -> Value.of_word next))
+                      (* the code without an address, e.g., an intrinsic,
+                         runs, as the jump of the program runs it *)
+                      | None ->
+                          Code.exec (`tid dst) >>= fun () -> Value.of_word next)
+                  )
             in
             match Jmp.kind t with
             | Goto l | Ret l -> goto l
@@ -864,7 +869,23 @@ module Make (Machine : Machine) = struct
                 | Some blks' -> step_from ~next blks Init blks'
                 | None -> Value.of_word next)))
 
-  let step ~next blks = enter_insn >>= fun () -> step_from ~next blks Init blks
+  (* the position after the instruction is not a block, e.g., of an
+     empty block, from which no term is entered *)
+  let step ~next blks =
+    step_from ~next blks Init blks >>= fun dst ->
+    enter_insn >>| fun () -> dst
+
+  let continue_at dst =
+    Code.resolve_tid (`addr dst) >>= function
+    | None -> Code.exec (`addr dst)
+    | Some dst -> exec_to_prompt dst
+
+  let call_at dst ~return =
+    push_prompt (Some return) >>= fun () ->
+    continue_at dst >>= fun () ->
+    Machine.Local.get state >>= function
+    | { prompts = p :: _ } when Tid.equal p return -> pop_prompt
+    | _ -> Machine.return ()
 
   let arg_def () t =
     match Arg.intent t with
@@ -918,9 +939,201 @@ module Make (Machine : Machine) = struct
     !!pc_changed addr
 end
 
+(* The code, that the program changes or writes, e.g., on the heap,
+   which the disassembly of the program doesn't have, runs as it is in
+   the memory of the machine: the instructions are lifted, when they run,
+   see [Bap_primus_lift], until the program jumps to the code, that it
+   didn't change. A basic block of the program, that the program stores
+   to, and its subroutine, which starts there, are linked to the dynamic
+   code, as well as the executable address, that nothing is linked to.
+   The block, that the program changes, while it runs, runs as it was,
+   until the program jumps to it. *)
+
+(* the basic blocks of the disassembly, their last addresses, and the
+   blocks and the subroutines of the program, that start there, which are
+   indexed, when the program first stores to the executable segments *)
+type blocks = {
+  blocks : addr Addr.Map.t;
+  blks : tid list Addr.Map.t;
+  subs : (tid * string) Addr.Map.t;
+}
+
+type code = { segments : (addr * addr) list; index : blocks Lazy.t }
+
+let index proj =
+  let blocks =
+    Graphs.Cfg.nodes (Disasm.cfg (Project.disasm proj))
+    |> Seq.fold ~init:Addr.Map.empty ~f:(fun blocks blk ->
+        let mem = Block.memory blk in
+        Map.set blocks
+          ~key:(Bap.Std.Memory.min_addr mem)
+          ~data:(Bap.Std.Memory.max_addr mem))
+  in
+  let prog = Project.program proj in
+  let blks =
+    Term.enum sub_t prog
+    |> Seq.concat_map ~f:(Term.enum blk_t)
+    |> Seq.fold ~init:Addr.Map.empty ~f:(fun blks blk ->
+        match Term.get_attr blk address with
+        | Some addr -> Map.add_multi blks ~key:addr ~data:(Term.tid blk)
+        | None -> blks)
+  and subs =
+    Term.enum sub_t prog
+    |> Seq.fold ~init:Addr.Map.empty ~f:(fun subs sub ->
+        match Term.get_attr sub address with
+        | Some addr -> Map.set subs ~key:addr ~data:(Term.tid sub, Sub.name sub)
+        | None -> subs)
+  in
+  { blocks; blks; subs }
+
+let code =
+  Primus.Machine.State.declare ~uuid:"5b9e0d3a-7c1f-4e2b-9a6d-3f8c1e0b2d47"
+    ~name:"program-code" (fun proj ->
+      let segments =
+        Memmap.to_sequence (Project.memory proj)
+        |> Seq.filter_map ~f:(fun (mem, tag) ->
+            match Bap.Std.Value.get Image.segment tag with
+            | Some seg when Image.Segment.is_executable seg ->
+                Some (Bap.Std.Memory.min_addr mem, Bap.Std.Memory.max_addr mem)
+            | _ -> None)
+        |> Seq.to_list
+      in
+      { segments; index = lazy (index proj) })
+
+(* the addresses, that are linked to the dynamic code *)
+let dynamic =
+  Primus.Machine.State.declare ~uuid:"e1a4c7f2-3b5d-4c8e-8f0a-6d2b9c4e1f73"
+    ~name:"dynamic-code" (fun _ -> Addr.Set.empty)
+
+module Dynamic (Machine : Machine) = struct
+  open Machine.Syntax
+  open Machine.Let
+  module Memory = Primus.Memory.Make (Machine)
+  module Interp = Make (Machine)
+  module Code = Linker.Make (Machine)
+
+  let int64 x = Bitvec.to_int64 (Word.to_bitvec x)
+
+  (* the bytes from [addr], while they are executable *)
+  let fetch addr =
+    let+ loaded = Memory.load_bytes addr Bap_primus_lift.max_size in
+    let rec bytes i acc =
+      if i = Array.length loaded then acc
+      else
+        match loaded.(i) with
+        | Some (c, { Primus.Memory.executable = true; _ }) ->
+            bytes (i + 1) (c :: acc)
+        | _ -> acc
+    in
+    String.of_char_list (List.rev (bytes 0 []))
+
+  let is_call blks =
+    List.exists blks ~f:(fun blk ->
+        Term.enum jmp_t blk
+        |> Seq.exists ~f:(fun jmp ->
+            match Jmp.kind jmp with Call _ -> true | _ -> false))
+
+  (* the return of a call, which the code at [addr] calls, is linked
+     with the term, which the callee returns to, as the interpreter
+     does, see [call], and from which the code continues *)
+  let return_of ~link addr =
+    let* linked = Machine.Local.get dynamic in
+    let* tid = Code.resolve_tid (`addr addr) in
+    match tid with
+    | Some tid when Set.mem linked addr -> Machine.return tid
+    | _ ->
+        let tid = Tid.create () in
+        let+ () = link ~tid addr in
+        tid
+
+  (* runs the code from [addr], see above, the code, that is linked
+     to the address, see [link], runs as the code of the program *)
+  let rec run ~link addr =
+    let* proj = Machine.get () in
+    let* bytes = fetch addr in
+    let read _ n = String.prefix bytes n in
+    match Bap_primus_lift.insn proj ~read (int64 addr) with
+    | None -> Machine.raise (Segmentation_fault addr)
+    | Some (size, blks) ->
+        let next = Word.(addr ++ size) in
+        let* dst = Interp.step ~next blks in
+        let dst = Value.to_word dst in
+        if is_call blks && not (Word.equal dst next) then
+          let* return = return_of ~link next in
+          let* () = Interp.call_at dst ~return in
+          run ~link next
+        else
+          let* linked = Machine.Local.get dynamic in
+          if Set.mem linked dst then run ~link dst else Interp.continue_at dst
+end
+
+(* the code, that runs the dynamic code from [addr] *)
+let rec dynamic_code addr : Linker.code =
+  let module Code (Machine : Machine) = struct
+    open Machine.Syntax
+    module Dynamic = Dynamic (Machine)
+    module Linker = Linker.Make (Machine)
+
+    let link ~tid addr =
+      Machine.Local.update dynamic ~f:(fun linked -> Set.add linked addr)
+      >>= fun () -> Linker.link ~addr ~tid (dynamic_code addr)
+
+    let exec = Dynamic.run ~link addr
+  end in
+  (module Code)
+
 module LinkBinaryProgram (Machine : Machine) = struct
   open Machine.Syntax
   module Linker = Linker.Make (Machine)
+  module Memory = Primus.Memory.Make (Machine)
+
+  let link_dynamic ?tid ?name addr =
+    Machine.Local.update dynamic ~f:(fun linked -> Set.add linked addr)
+    >>= fun () -> Linker.link ~addr ?tid ?name (dynamic_code addr)
+
+  (* the block of the program, that the program stores to, in the
+     virtual memory, not in another memory, e.g., of the symbolic
+     executor, whose addresses are not of the code *)
+  let changed (a, _) =
+    let addr = Value.to_word a in
+    Machine.Global.get code >>= fun { segments; index } ->
+    Memory.memory >>= fun memory ->
+    Machine.gets Project.target >>= fun target ->
+    let virtual_memory () =
+      String.equal
+        (Primus.Memory.Descriptor.name memory)
+        (Theory.Var.name (Theory.Target.data target))
+    in
+    if
+      (not
+         (List.exists segments ~f:(fun (lower, upper) ->
+              Addr.(lower <= addr && addr <= upper))))
+      || not (virtual_memory ())
+    then Machine.return ()
+    else
+      let { blocks; blks; subs } = Lazy.force index in
+      match Map.closest_key blocks `Less_or_equal_to addr with
+      | Some (start, last) when Addr.(addr <= last) -> (
+          Machine.Local.get dynamic >>= fun linked ->
+          if Set.mem linked start then Machine.return ()
+          else
+            let tids = Map.find_multi blks start in
+            (if List.is_empty tids then link_dynamic start
+             else Machine.List.iter tids ~f:(fun tid -> link_dynamic ~tid start))
+            >>= fun () ->
+            match Map.find subs start with
+            | Some (tid, name) -> link_dynamic ~tid ~name start
+            | None -> Machine.return ())
+      | _ -> Machine.return ()
+
+  (* the executable address, that nothing is linked to, see the
+     [unresolved] observation of the linker *)
+  let unresolved = function
+    | `addr addr -> (
+        Memory.is_executable addr >>= function
+        | true -> link_dynamic addr
+        | false -> Machine.return ())
+    | `symbol _ | `tid _ -> Machine.return ()
 
   let is_linked name t =
     [
@@ -982,6 +1195,11 @@ module LinkBinaryProgram (Machine : Machine) = struct
     let prog = Project.program proj in
     info "Linking binary program%!";
     collector#run prog !!Tid.Set.empty >>= fun linked ->
-    (linker linked)#run prog !!() >>| fun () ->
-    info "Finished linking binary program%!"
+    (linker linked)#run prog !!() >>= fun () ->
+    info "Finished linking binary program%!";
+    Machine.sequence
+      [
+        Machine.Observation.observe stored changed;
+        Machine.Observation.observe Primus.Linker.unresolved unresolved;
+      ]
 end

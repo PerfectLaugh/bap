@@ -34,7 +34,7 @@ module Uc = Bap_unicorn
 module Target = Primus_unicorn_target
 module Checkpoint = Primus_unicorn_checkpoint
 module Native = Primus_unicorn_native
-module Lift = Primus_unicorn_lift
+module Lift = Primus.Lift
 include Bap_main.Loggers ()
 
 type Primus.exn += Unicorn_failure of string

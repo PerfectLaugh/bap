@@ -1,7 +1,7 @@
 (* Disassembles and lifts the instructions, which the program has at
    run time, e.g., of a bare project, which has no disassembly, or of
-   the code, that the program writes, as the disassembler does, so that
-   the lifters see them as the instructions of the program.
+   the code, that the program writes or changes, as the disassembler
+   does, so that the lifters see them as the instructions of the program.
 
    An instruction is decoded from the bytes, that the caller reads from
    the memory of the machine, into a fresh label with the address of the
@@ -118,9 +118,35 @@ let disassembled addr code =
           if
             List.exists blks ~f:(fun blk ->
                 Term.length def_t blk + Term.length jmp_t blk > 0)
-          then Some (size, blks)
+          then Some (size, insn)
           else None
       | None | (exception _) -> None)
+
+(* the jumps of the call, that leave it, are the calls, that return
+   to the next instruction, as the program has them, while the IR of the
+   instruction has the jumps, e.g., of x86 and ARM *)
+let calls ~next blks =
+  let inside tid = List.exists blks ~f:(fun b -> Tid.equal (Term.tid b) tid) in
+  let leaves : label -> bool = function
+    | Direct tid -> not (inside tid)
+    | Indirect _ -> true
+  in
+  List.map blks ~f:(fun blk ->
+      Term.map jmp_t blk ~f:(fun jmp ->
+          match Jmp.kind jmp with
+          | Goto l when leaves l ->
+              Jmp.with_kind jmp
+                (Call (Call.create ~return:(Indirect next) ~target:l ()))
+          | _ -> jmp))
+
+(* the IR of the instruction of [size] bytes at [addr] *)
+let ir ~width ~addr ~size insn =
+  let blks = Blk.from_insn ~addr insn in
+  let blks =
+    if Insn.(is call) insn then calls ~next:(Bil.int Word.(addr ++ size)) blks
+    else blks
+  in
+  addressed width blks
 
 (* the size and the IR of the instruction at [addr], if [code], the
    bytes from [addr], has it *)
@@ -137,7 +163,7 @@ let lift proj addr code =
         else LittleEndian
       in
       match disassembled addr code with
-      | Some (size, blks) -> Some (size, addressed width blks)
+      | Some (size, insn) -> Some (size, ir ~width ~addr ~size insn)
       | None -> (
           match Memory.create endian addr (Bigstring.of_string code) with
           | Error _ -> None
@@ -163,8 +189,7 @@ let lift proj addr code =
               | exception _ -> None
               | () -> (
                   match Toplevel.get result with
-                  | Some (size, insn) ->
-                      Some (size, addressed width (Blk.from_insn ~addr insn))
+                  | Some (size, insn) -> Some (size, ir ~width ~addr ~size insn)
                   | None | (exception _) -> None))))
 
 (* the instructions, that x86 has, are at most 15 bytes long *)
@@ -200,7 +225,9 @@ let insn ?(disassembled_only = false) proj ~read addr =
       let target = Project.target proj in
       let width = Theory.Target.code_addr_size target in
       match disassembled (Word.of_int64 ~width addr) bytes with
-      | Some (size, blks) -> remember (Some (size, addressed width blks))
+      | Some (size, insn) ->
+          let addr = Word.of_int64 ~width addr in
+          remember (Some (size, ir ~width ~addr ~size insn))
       | None -> None)
   | _ -> remember (lift proj addr bytes)
 

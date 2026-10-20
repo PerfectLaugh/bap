@@ -5,7 +5,6 @@
   primus_unicorn_target
   primus_unicorn_checkpoint
   primus_unicorn_native
-  primus_unicorn_lift
   primus_unicorn_executor)
  (preprocess
   (pps ppx_bap))

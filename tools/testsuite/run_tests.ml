@@ -871,13 +871,15 @@ let unicorn_taint data =
     [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
 
 (* the code, which the program changes, is decoded anew: the first
-   tainted jump of the loop of the CRC, which Primus interprets, changes
-   the jne, that continues the loop, to je, so the loop ends after the
-   first byte of the first line, and before the first byte of the second
-   one, as the bytes are not zeros *)
-let unicorn_patched_code data =
-  [
-    case "taint/bap:unicorn-executor/patched-code" (fun env ->
+   tainted jump of the loop of the CRC changes the jne, that continues
+   the loop, to je, so the loop ends after the first byte of the first
+   line, and before the first byte of the second one, as the bytes are
+   not zeros, in Unicorn and in the interpreter *)
+let patched_code data =
+  let taint system =
+    case
+      ("taint/" ^ system ^ "/patched-code")
+      (fun env ->
         let input = write env "input" "abc\nabd\n" in
         ignore
           (write env "patching.lisp"
@@ -902,7 +904,7 @@ let unicorn_patched_code data =
               path data "bin/x86_64-linux-gnu-symexec-crc32";
               "--passes=run";
               "--no-objdump";
-              "--run-systems=bap:unicorn-executor";
+              "--run-systems=" ^ system;
               "--primus-lisp-channel-redirect=<stdin>:" ^ input;
               "--run-components=bap:taint-primitives,bap:propagate-taint-by-computation,bap:select-default-taint-policy";
               "--primus-lisp-add=" ^ dir env;
@@ -917,8 +919,68 @@ let unicorn_patched_code data =
             ("runs the je again", "tainted jump to 0x7B8");
             ("compares the CRCs", "tainted jump to 0x83B");
           ];
-        lacks env "runs the jne once" out {|0x752[^\n]*\n[^\n]*0x752|});
-  ]
+        lacks env "runs the jne once" out {|0x752[^\n]*\n[^\n]*0x752|})
+  in
+  (* the instruction of print_endline, that passes the newline to
+     putchar, passes + instead, or the tab on RISC-V, whose short
+     instruction has no room for +, which the first call of strlen
+     patches, as the call is a stub of Lisp *)
+  let echo (arch, addr, bytes, sep) system =
+    case
+      ("run/patched-code/" ^ system ^ "/" ^ arch ^ "-echo")
+      (fun env ->
+        let patch =
+          List.fold_left
+            (fun dst byte ->
+              Printf.sprintf "(memory-write %s 0x%02x:8)" dst byte)
+            addr bytes
+        in
+        ignore
+          (write env "patching.lisp"
+             (Printf.sprintf
+                {|(defparameter *patched* nil)
+
+(defmethod call-return (name s n)
+  (when (and (= name 'strlen) (not *patched*))
+    (set *patched* true)
+    (memory-protect %s 4 7)
+    %s
+    (memory-protect %s 4 5)))
+|}
+                addr patch addr));
+        let out =
+          bap env
+            ([ path data ("bin/" ^ arch ^ "-echo") ]
+            @ api data arch
+            @ [
+                "--passes=run";
+                "--no-objdump";
+                "--run-argv=echo,hello,world";
+                "--run-systems=" ^ system;
+                "--primus-lisp-add=" ^ dir env;
+                "--primus-lisp-load=posix,patching";
+              ])
+        in
+        contains env "prints the patched separator" out
+          (String.concat sep [ "echo"; "hello"; "world"; "we" ]))
+  in
+  let echos =
+    [
+      ("x86_64-linux-gnu", "0x400728", [ 0x2b ], "+");
+      ("x86-linux-gnu", "0x804856f", [ 0x2b ], "+");
+      ("aarch64-linux-gnu", "0xaa0", [ 0x60; 0x05; 0x80; 0x52 ], "+");
+      ("arm-linux-gnueabi", "0x85b4", [ 0x2b ], "+");
+      ("mips-linux-gnu", "0x4008fb", [ 0x2b ], "+");
+      ("mips64-linux-gnueabi", "0x120000d8b", [ 0x2b ], "+");
+      ("powerpc32-linux-gnu", "0x10000673", [ 0x2b ], "+");
+      ("riscv64-linux-gnu", "0x10734", [ 0x25; 0x45 ], "\t");
+    ]
+  in
+  let systems = [ "bap:stubbed-executor"; "bap:unicorn-executor" ] in
+  List.map taint systems
+  @ List.concat_map
+      (fun system -> List.map (fun e -> echo e system) echos)
+      systems
 
 (* the symbolic executor finds the input, as the code that uses the
    symbolic values is interpreted, and the rest runs in Unicorn *)
@@ -1125,7 +1187,7 @@ let mprotect data =
 
 (* the program maps an anonymous page with mmap, runs the code that it
    writes there, after it makes it executable, and reads from the page,
-   after it unmaps it, the interpreter can't run the code that it writes *)
+   after it unmaps it *)
 let mmap data =
   [
     case "run/mmap/bap:unicorn-executor" (fun env ->
@@ -1141,6 +1203,26 @@ let mmap data =
             ]
         in
         lacks env "well-typed" out "ill-typed";
+        sequence env out
+          [
+            ("runs the code", "\\b42\\b");
+            ("unmaps the page", "\\bU\\b");
+            ("denies the load", "Segmentation fault at 0x7F0000000000");
+          ];
+        lacks env "stops" out "\\bX\\b");
+    (* the interpreter runs the code, that the program writes, as it is
+       in the memory, see Primus.Lift *)
+    case "run/mmap/bap:stubbed-executor" (fun env ->
+        let out =
+          bap env
+            [
+              path data "bin/x86_64-linux-gnu-mmap";
+              "--passes=run";
+              "--no-objdump";
+              "--run-systems=bap:stubbed-executor";
+              "--primus-print-observations=exception";
+            ]
+        in
         sequence env out
           [
             ("runs the code", "\\b42\\b");
@@ -1315,7 +1397,7 @@ let tests =
     emu;
     observations;
     unicorn_taint;
-    unicorn_patched_code;
+    patched_code;
     unicorn_symexec;
     script_debugger;
     mprotect;

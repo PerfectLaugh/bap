@@ -1845,6 +1845,21 @@ module Std : sig
 
             @since 2.6.0 *)
 
+        val continue_at : addr -> unit m
+        (** [continue_at addr] continues the program at [addr], as the jump to
+            [addr] does, without the observation of the jump, e.g., after
+            {!step}, that returned [addr]: the code, that is linked to [addr],
+            runs, or the program returns from a call, if [addr] is its return.
+
+            @since 2.6.0 *)
+
+        val call_at : addr -> return:tid -> unit m
+        (** [call_at addr ~return] calls the code at [addr], as the call of the
+            program does, which returns, when the callee jumps to the term
+            [return], or when the callee, e.g., a stub, finishes.
+
+            @since 2.6.0 *)
+
         val exp : exp -> value m
         (** [exp x] returns a value of [x]. *)
 
@@ -2623,6 +2638,42 @@ module Std : sig
 
             @since 2.6.0 *)
       end
+    end
+
+    (** The instructions, that the program has at run time.
+
+        Disassembles and lifts the instructions on demand, from the bytes, that
+        the machine has in its memory, e.g., of the code, that the program
+        writes or changes, or of a bare project, which has no disassembly, so
+        that the interpreter runs them, see {!Interpreter.Make.step}.
+
+        @since 2.6.0 *)
+    module Lift : sig
+      val max_size : int
+      (** the maximal size of an instruction, in bytes, that is read *)
+
+      val insn :
+        ?disassembled_only:bool ->
+        project ->
+        read:(int64 -> int -> string) ->
+        int64 ->
+        (int * blk term list) option
+      (** [insn proj ~read addr] the size and the IR of the instruction at
+          [addr], decoded from the bytes, that [read addr n] reads, at most [n]
+          of them, fewer, if the rest is not readable.
+
+          The jumps to the addresses outside of the instruction are the indirect
+          jumps to the constant addresses. The instructions are cached by their
+          addresses and bytes, so the instruction, whose bytes change, is lifted
+          anew. The semantics, that the disassembler computed, are used, if the
+          bytes are the same, otherwise the lifting loads the semantics, e.g.,
+          the Primus Lisp program of x86, once per process, which takes seconds.
+          If [disassembled_only], then only the former are used, and [None]
+          isn't cached. *)
+
+      val code : project -> int64 -> string option
+      (** [code proj addr] the bytes of the instruction at [addr], that [insn]
+          lifted last. *)
     end
 
     (** The values and the locations of the memory, that the analyses track.
