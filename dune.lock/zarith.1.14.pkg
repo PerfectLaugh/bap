@@ -28,9 +28,7 @@
     ((arch arm64)
      (os macos)))
    ((action
-     (progn
-      (run sh static-gmp.sh %{jobs})
-      (run %{make})))))
+     (run sh static-gmp.sh %{jobs}))))
   ((((arch x86_64) (os win32)))
    ((action (progn (run ./configure) (run %{make})))))))
 
