@@ -211,6 +211,8 @@ module M32 = struct
       [
         ([ general; integer ], main @< index @< segment);
         ([ special; integer ], untyped bases);
+        (* the thread pointer of Linux, which keeps FS for Windows *)
+        ([ thread ], untyped [ reg r32 "GS_BASE" ]);
         ([ stack_pointer ], untyped [ reg r32 "ESP" ]);
         ([ frame_pointer ], untyped [ reg r32 "EBP" ]);
         ([ Role.index ], untyped index);
@@ -276,6 +278,8 @@ module M64 = struct
       [
         ([ general; integer ], main @< index @< segment @< rx);
         ([ special; integer ], untyped bases);
+        (* the thread pointer of the System V ABI, Windows uses GS *)
+        ([ thread ], untyped [ reg r64 "FS_BASE" ]);
         ([ general; floating ], stx @< mmx @< ymmx);
         ([ stack_pointer ], untyped [ reg r64 "RSP" ]);
         ([ frame_pointer ], untyped [ reg r64 "RBP" ]);

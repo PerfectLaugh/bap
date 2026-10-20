@@ -346,10 +346,22 @@
     (set RA (link))
     (branch cnd off)))
 
-(defun J (target) (exec-addr target))
+(defun region (target)
+  "the target of J and JAL, whose upper bits are of the address of the
+   delay slot, as the instruction encodes only the lower 28 bits, e.g.,
+   of the code at the top of the address space"
+  (logor (logand (+ (get-program-counter) 4) (lnot 0x0fffffff)) target))
+
+(defun RDHWR (rt hwr sel)
+  "reads the hardware register 29, UserLocal, e.g., the thread pointer
+   of Linux, the other hardware registers are not modeled"
+  (when (= (symbol hwr) 'HWR29)
+    (set$ rt USERLOCAL)))
+
+(defun J (target) (exec-addr (region target)))
 (defun JAL (target)
   (set RA (link))
-  (exec-addr target))
+  (exec-addr (region target)))
 
 (defun JR (rs) (exec-addr rs))
 (defun JALR (rd rs)

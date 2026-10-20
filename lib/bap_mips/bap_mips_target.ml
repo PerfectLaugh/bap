@@ -94,7 +94,10 @@ let define ?(parent = parent) ?nicknames bits endianness =
   let mems = Theory.Mem.define bits r8 in
   let data = Theory.Var.define mems "mem" in
   let hilo = [ reg bits "HI"; reg bits "LO" ] in
-  let vars = gprs @< fprs @< hilo @< [ data ] in
+  (* the hardware register 29, which rdhwr reads, e.g., the thread
+     pointer of Linux *)
+  let userlocal = reg bits "USERLOCAL" in
+  let vars = gprs @< fprs @< hilo @< [ userlocal ] @< [ data ] in
   let regs = List.map ~f:(fun name -> Theory.Var.forget (reg bits name)) in
   let aliases = List.map gpr_names ~f:(reg bits) in
   (* LLVM names the registers of the 64-bit operations, e.g., V0_64 *)
@@ -130,6 +133,7 @@ let define ?(parent = parent) ?nicknames bits endianness =
           ([ stack_pointer ], regs [ "R29" ]);
           ([ frame_pointer ], regs [ "R30" ]);
           ([ link ], regs [ "R31" ]);
+          ([ thread ], untyped [ userlocal ]);
           ([ alias ], untyped aliases @ untyped aliases64);
         ]
 

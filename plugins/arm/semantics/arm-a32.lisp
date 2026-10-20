@@ -308,6 +308,20 @@
 (defun MVNsr (rd rm rs typ cnd _ s) (a32-logical second-not rd 0 (a32-op2-rsr rm rs typ) (a32-reg-carry rm rs typ) cnd s))
 (defun MOVPCLR (cnd _) (when (condition-holds cnd) (a32-write-pc LR)))
 (defun MOVi16 (rd imm cnd _) (when (condition-holds cnd) (set$ rd imm)))
+
+(defun read-coprocessor (rt cop opc1 crn crm opc2 cnd)
+  "reads the thread ID register of the user (TPIDRURO), which is the
+   register c13, c0, 3 of the system control coprocessor, p15, e.g., the
+   thread pointer of Linux, the other registers are not modeled"
+  (when (and (condition-holds cnd)
+             (= cop 15) (= opc1 0) (= crn 13) (= crm 0) (= opc2 3))
+    (set$ rt TPIDRURO)))
+
+(defun MRC (rt cop opc1 crn crm opc2 cnd _)
+  (read-coprocessor rt cop opc1 crn crm opc2 cnd))
+
+(defun t2MRC (rt cop opc1 crn crm opc2 cnd _)
+  (read-coprocessor rt cop opc1 crn crm opc2 cnd))
 (defun MOVTi16 (rd rn imm cnd _)
   (when (condition-holds cnd)
     (set$ rd (logor (logand rn 0xffff) (lshift imm 16)))))

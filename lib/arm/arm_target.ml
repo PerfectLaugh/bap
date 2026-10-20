@@ -58,10 +58,15 @@ module Gpr32 = struct
   let qf = reg bool "QF"
 end
 
+(* the thread ID register of the user, read-only (TPIDRURO), which the
+   code reads with mrc p15, 0, Rt, c13, c0, 3, e.g., the address of the
+   thread-local storage of Linux *)
+let tpidruro = reg r32 "TPIDRURO"
+
 let vars32 =
   untyped
     Gpr32.[ r0; r1; r2; r3; r4; r5; r6; r7; r8; r9; r10; r11; r12; sp; lr ]
-  @ untyped [ data ]
+  @ untyped [ tpidruro ] @ untyped [ data ]
   @ untyped Gpr32.[ nf; zf; cf; vf; qf ]
 
 let thumb = Theory.Role.declare ~package:"arm" "thumb"
@@ -118,6 +123,7 @@ let regs32 =
       ([ function_return ], untyped Gpr32.[ r0; r1 ]);
       ([ caller_saved ], untyped Gpr32.[ r0; r1; r2; r3; r12; lr ]);
       ([ callee_saved ], untyped Gpr32.[ r4; r5; r6; r7; r8; r9; r10; r11; sp ]);
+      ([ thread ], untyped [ tpidruro ]);
     ]
   @ status_regs
 
