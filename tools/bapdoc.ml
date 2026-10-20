@@ -98,7 +98,6 @@ let libraries =
           "writing name demanglers" );
         ("bap-dwarf", "Bap_dwarf.Std", "Bap_dwarf", "a native DWARF parser");
         ("bap-elf", "Bap_elf.Std", "Bap_elf", "a native ELF parser");
-        ("bap-ida", "Bap_ida.Std", "Bap_ida", "an interface to IDA Pro");
         ( "bap-llvm",
           "Bap_llvm.Std",
           "Bap_llvm",

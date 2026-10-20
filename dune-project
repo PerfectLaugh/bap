@@ -566,28 +566,6 @@ be seen as a common denominator between Lwt and Async libraries.")
   (bap-common (= :version))
   (ogre (= :version))))
 
-(package (name bap-ida)
- (synopsis "BAP IDA Pro integration")
- (tags (bap bap-library ida-pro))
- (depends
-  core
-  (regular (= :version))
-   fileutils
-  (bap-common (= :version))
-  (bap-std (= :version))
-  (re (and (>= 1.0) (< 2.0)))))
-
-(package
- (name bap-ida-plugin)
- (synopsis "BAP IDA Pro integration")
- (tags (bap bap-plugin bap-ida ida-pro))
- (depends
-  (bap-std (= :version))
-  core
-  (bap-common (= :version))
-  (ppx_bap (= :version))
-  (regular (= :version))))
-
 (package
  (name bap-knowledge)
  (synopsis "Knowledge Reasoning and Representation Framework")

@@ -39,7 +39,7 @@ Security 14). 2014.
 
 # SEE ALSO
 
-$(b,bap-byteweight)(1), $(b,bap-plugin-ida)(1), $(b,bap-plugin-read-symbols)(1)
+$(b,bap-byteweight)(1), $(b,bap-plugin-read-symbols)(1)
 |}
 
 open Core

@@ -99,8 +99,6 @@ let () =
           ("debug", "true");
           ("profile", "false");
           ("build_id", build_id);
-          ("ida_path", "");
-          ("ida_headless", "false");
           site "api";
           site "lisp";
           site "plugins";
@@ -162,7 +160,6 @@ let () =
   let is_expression var =
     String.is_prefix var ~prefix:"site_"
     || String.is_suffix var ~suffix:"_paths"
-    || String.equal var "ida_headless"
   in
 
   let rewrite_var var =
