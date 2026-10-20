@@ -21,10 +21,18 @@ val init : ?options:string list -> unit -> unit
     script did not. *)
 
 val project :
-  ?loader:string -> ?target:Bap_core_theory.Theory.Target.t -> string -> project
+  ?bare:bool ->
+  ?loader:string ->
+  ?target:Bap_core_theory.Theory.Target.t ->
+  string ->
+  project
 (** [project file] disassembles the [file], as the disassemble command does,
     with the [loader], llvm by default, and runs the passes that run
-    automatically, e.g., api, without the cache of the knowledge. *)
+    automatically, e.g., api, without the cache of the knowledge. With
+    [~bare:true] the disassembly and the lifting are skipped: the program
+    contains only the subroutines that the knowledge base knows, e.g., from
+    --read-symbols-from, for the executors that run the code natively, e.g., the
+    [bap:unicorn-executor] system. *)
 
 val run_pass : string -> project -> project
 (** [run_pass name project] runs the pass, e.g., ["run"], after its

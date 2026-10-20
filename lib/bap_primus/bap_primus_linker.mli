@@ -41,6 +41,8 @@ module Make (Machine : Machine) : sig
   val unlink : name -> unit m
   val exec : name -> unit m
   val is_linked : name -> bool m
+  val linked_symbols : string list m
+  val linked_addrs : addr list m
   val resolve_addr : name -> addr option m
   val resolve_symbol : name -> string option m
   val resolve_tid : name -> tid option m

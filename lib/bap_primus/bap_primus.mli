@@ -2061,6 +2061,14 @@ module Std : sig
             some code.
 
             @since 1.5.0 *)
+
+        val linked_symbols : string list m
+        (** [linked_symbols] is the list of the symbolic names, under which code
+            is currently linked. *)
+
+        val linked_addrs : addr list m
+        (** [linked_addrs] is the list of the addresses, under which code is
+            currently linked. *)
       end
     end
 
@@ -2351,32 +2359,30 @@ module Std : sig
         type t [@@deriving bin_io]
       end
 
-      (** [Make(Machine)] lifts the memory interface into the [Machine] monad.
-      *)
-      (** The memory, whose bytes are elsewhere, e.g., in an emulator, until
-          a machine accesses them.
+      (** The memory, whose bytes are elsewhere, e.g., in an emulator, until a
+          machine accesses them.
 
           A machine fetches the bytes, which are pending, before it loads or
-          stores them, takes the snapshot of its memory, or loads or stores
-          the bytes of a range, and the backing learns the bytes that the
-          machine stores, except the fetched ones, so that it may keep its
-          copy of them. Only the memory, whose name is [memory], is backed,
-          and its data are bytes.
+          stores them, takes the snapshot of its memory, or loads or stores the
+          bytes of a range, and the backing learns the bytes that the machine
+          stores, except the fetched ones, so that it may keep its copy of them.
+          Only the memory, whose name is [memory], is backed, and its data are
+          bytes.
 
-          The backing is global, so a component, that sets it, unsets it,
-          when its system stops.
+          The backing is global, so a component, that sets it, unsets it, when
+          its system stops.
 
           @since 2.6.0 *)
       module Backing : sig
         type t = {
           memory : string;  (** the name of the backed memory *)
           pending : Machine.id -> addr -> bool;
-              (** [pending id addr] if the byte at [addr] of the machine [id]
-                  is elsewhere *)
+              (** [pending id addr] if the byte at [addr] of the machine [id] is
+                  elsewhere *)
           fetch : Machine.id -> addr -> (addr * string) list;
               (** [fetch id addr] the bytes, at least the byte at [addr], that
-                  the machine [id] stores, as they are, after which they are
-                  not pending *)
+                  the machine [id] stores, as they are, after which they are not
+                  pending *)
           fetch_all : Machine.id -> (addr * string) list;
               (** [fetch_all id] all pending bytes of the machine [id] *)
           stored : Machine.id -> addr -> string -> unit;
@@ -2388,6 +2394,8 @@ module Std : sig
         (** [set backing] backs the memory, or stops backing it with [None] *)
       end
 
+      (** [Make(Machine)] lifts the memory interface into the [Machine] monad.
+      *)
       module Make (Machine : Machine.S) : sig
         val switch : memory -> unit Machine.t
         (** [switch memory] switches the memory module to [memory].

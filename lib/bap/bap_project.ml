@@ -499,6 +499,8 @@ let compute_units ?package ?state main libs =
   in
   set_package package >>| fun () -> (main, List.rev libs, prog)
 
+let empty_state = State.empty
+
 let create ?package ?state ?disassembler:p1 ?brancher:p2 ?symbolizer:p3
     ?rooter:p4 ?reconstructor:p5 (read : input) =
   try

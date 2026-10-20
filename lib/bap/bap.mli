@@ -9963,6 +9963,13 @@ module Std : sig
 
         @since 2.0.0 *)
 
+    val empty_state : state
+    (** [empty_state] is the state of a project that was not disassembled.
+        Passing it as [~state] to {!create} skips the disassembly and the
+        lifting, so the project has an empty program, which is useful for the
+        executors that run the code of the binary natively, e.g., in Unicorn,
+        and do not need its representation. *)
+
     val disasm : t -> disasm
     (** [disasm project] returns results of disassembling *)
 

@@ -216,6 +216,10 @@ let names : string Int64.Table.t = Int64.Table.create ()
    their slots to the trampolines, interpreted, see [call_foreign] *)
 let stubs : Primus.Linker.code Addr.Table.t = Addr.Table.create ()
 
+(* the machine runs without the disassembled program, which the bare
+   project does not have, see [Bap_script.project ~bare] *)
+let bare_mode = ref false
+
 (* The instructions, e.g., the system calls, which the lifters represent
    as the calls to the intrinsic functions, e.g., intrinsic:syscall, with
    the inputs in the variables intrinsic:x0, intrinsic:x1, etc., are run
@@ -1334,6 +1338,7 @@ module Make (Machine : Primus.Machine.S) = struct
       | Some name -> `symbol name
       | None -> `addr (word e addr)
     in
+
     (* the code that Primus runs instead stops at its address *)
     let* () =
       if (not (Hashtbl.mem e.trampolines addr)) && is_stop e addr then
@@ -1530,9 +1535,22 @@ module Make (Machine : Primus.Machine.S) = struct
         | Some (Interrupt n), _ -> (
             match intrinsic_before (code_addr e pc) with
             | Some site -> call_intrinsic e site >>= fun () -> loop pc
-            | None ->
-                pull e >>= fun () ->
-                fail "an unhandled interrupt %d at %Lx" n pc)
+            | None -> (
+                (* the bare loader has no program, so the intrinsics are
+                   not indexed, and any interrupt is tried as the svc *)
+                match !bare_mode with
+                | false ->
+                    pull e >>= fun () ->
+                    fail "an unhandled interrupt %d at %Lx" n pc
+                | true -> (
+                    Linker.is_linked (`symbol "intrinsic:svc") >>= function
+                    | false ->
+                        pull e >>= fun () ->
+                        fail "an unhandled interrupt %d at %Lx" n pc
+                    | true ->
+                        pull e >>= fun () ->
+                        Linker.exec (`symbol "intrinsic:svc") >>= fun () ->
+                        push_owned e >>= fun () -> loop pc)))
         | Some Checkpoint, _ -> save e pc >>= fun () -> loop pc
         | Some (Stop addr), _ -> stopped e addr >>= fun () -> loop pc
         | Some Invalid, _ ->
@@ -1593,6 +1611,7 @@ module Make (Machine : Primus.Machine.S) = struct
         let* claimed = claim e in
         let* () = if claimed then map_code e else Machine.return () in
         let* () = push e in
+
         let* frame = frame e in
         let* pending = Machine.Local.get frames in
         let* () =
@@ -1684,12 +1703,17 @@ module Loader (Machine : Primus.Machine.S) = struct
     else
       match Term.get_attr sub address with
       | None ->
-          let module Code (Machine : Primus.Machine.S) = struct
-            module Interp = Primus.Interpreter.Make (Machine)
+          (* the subs of the bare project are synthetic, their terms have
+             no code and their arg terms must not be evaluated; what is
+             not replaced, e.g., by the Lisp stubs, is unresolved *)
+          if !bare_mode then Machine.return ()
+          else
+            let module Code (Machine : Primus.Machine.S) = struct
+              module Interp = Primus.Interpreter.Make (Machine)
 
-            let exec = Interp.sub sub
-          end in
-          Linker.link ~name:(Sub.name sub) ~tid:(Term.tid sub) (module Code)
+              let exec = Interp.sub sub
+            end in
+            Linker.link ~name:(Sub.name sub) ~tid:(Term.tid sub) (module Code)
       | Some addr ->
           let module Code (Machine : Primus.Machine.S) = struct
             module Exec = Make (Machine)
@@ -1721,10 +1745,17 @@ module Loader (Machine : Primus.Machine.S) = struct
   (* the references to the external functions of the program *)
   let externals () =
     let* proj = Machine.get () in
+    let* linked = Linker.linked_symbols >>| String.Set.of_list in
     let prog = Project.program proj in
     let functions =
       Term.enum sub_t prog |> Seq.map ~f:Sub.name |> Seq.to_list
       |> String.Set.of_list
+    in
+    (* the bare project has no subroutines for the external functions,
+       so the functions that the components, e.g., the Lisp machine,
+       link, e.g., the stubs, are the functions there *)
+    let is_function name =
+      Set.mem functions name || (!bare_mode && Set.mem linked name)
     in
     match
       Ogre.eval
@@ -1746,7 +1777,7 @@ module Loader (Machine : Primus.Machine.S) = struct
         in
         Machine.return @@ Seq.to_list
         @@ Seq.filter refs ~f:(fun (addr, name) ->
-            Set.mem functions name && not (is_code addr))
+            is_function name && not (is_code addr))
 
   (* the address, or the name of the subroutine, as its address *)
   let resolve point =
@@ -1828,6 +1859,10 @@ module Loader (Machine : Primus.Machine.S) = struct
     let module Exec = Make (Machine) in
     Machine.sequence
       [
+        ( Machine.gets Project.program >>| fun prog ->
+          bare_mode :=
+            Term.enum sub_t prog
+            |> Seq.for_all ~f:(fun sub -> Term.length blk_t sub = 0) );
         link_program;
         Primus.System.init >>> create_engine;
         Primus.Machine.fork >>> Exec.forked;

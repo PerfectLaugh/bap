@@ -18,6 +18,7 @@ type second = float
 
 val state : t -> state
 val empty : Theory.Target.t -> t
+val empty_state : state
 
 val create :
   ?package:string ->
