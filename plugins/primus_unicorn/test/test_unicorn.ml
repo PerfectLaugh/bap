@@ -90,6 +90,58 @@ let stop () =
   Uc.start uc 0x1003L ~until:(Int64.add code 4L);
   check "resumed ecx" 3L (Uc.reg_read uc ecx)
 
+(* a store to a read-only page faults and stops the emulation at the
+   store, which, after the page is writable, runs again, as the executor
+   tells the pages that the code wrote; the page that is read-only again
+   faults again. Unicorn loses the store, if the hook makes the page
+   writable and continues. *)
+let dirty (arch : Uc.arch) mode insn (value, addr, pc) =
+  with_engine arch mode insn @@ fun uc ->
+  let data = 0x10000L in
+  Uc.mem_map uc data 0x1000L Uc.Perm.read;
+  Uc.reg_write uc (reg arch value) 0x11223344L;
+  Uc.reg_write uc (reg arch addr) data;
+  let faults = ref [] in
+  let _ =
+    Uc.on_mem_invalid uc [ `write ] [ `prot ] (fun access addr _ _ ->
+        assert (access = Write_prot);
+        faults := addr :: !faults;
+        false)
+  in
+  let until = Int64.add code 4L in
+  let run expected =
+    (try Uc.start uc code ~until with Uc.Error _ -> ());
+    (match !faults with
+    | [ addr ] ->
+        check "the store" code (Uc.reg_read uc (reg arch pc));
+        Uc.mem_protect uc
+          (Int64.logand addr (-4096L))
+          0x1000L
+          Uc.Perm.(read + write);
+        Uc.start uc code ~until
+    | _ -> ());
+    if List.length !faults <> expected then
+      failwith
+        (Printf.sprintf "dirty: %d faults instead of %d" (List.length !faults)
+           expected);
+    faults := []
+  in
+  run 1;
+  let stored = Uc.mem_read uc data 4 in
+  if stored <> "\x44\x33\x22\x11" && stored <> "\x11\x22\x33\x44" then
+    failwith "dirty: the store is lost";
+  run 0;
+  Uc.mem_protect uc data 0x1000L Uc.Perm.read;
+  run 1
+
+let dirty () =
+  dirty X86 Uc.Mode.mode32 "\x89\x0b\x90\x90" ("ecx", "ebx", "eip");
+  dirty Arm64 Uc.Mode.arm "\x41\x00\x00\xf9" ("x1", "x2", "pc");
+  dirty Arm Uc.Mode.arm "\x00\x10\x82\xe5" ("r1", "r2", "pc");
+  dirty Mips Uc.Mode.(mips32 + big_endian) "\xac\xc5\x00\x00" ("a1", "a2", "pc");
+  dirty Ppc Uc.Mode.(ppc32 + big_endian) "\x90\x85\x00\x00" ("4", "5", "pc");
+  dirty Riscv Uc.Mode.riscv64 "\x23\x30\xb6\x00" ("a1", "a2", "pc")
+
 let error () =
   let uc = Uc.create X86 Uc.Mode.mode64 in
   match Uc.mem_map uc 0x1001L 0x1000L Uc.Perm.all with
@@ -104,6 +156,7 @@ let () =
   arm64 ();
   exn ();
   stop ();
+  dirty ();
   error ();
   let major, minor = Uc.version () in
   Printf.printf "Unicorn %d.%d: ok\n" major minor

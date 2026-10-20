@@ -47,6 +47,10 @@ module Perm : sig
   type t = private int
 
   val ( + ) : t -> t -> t
+
+  val ( - ) : t -> t -> t
+  (** [p - q] the access of [p] without the access of [q] *)
+
   val none : t
   val read : t
   val write : t

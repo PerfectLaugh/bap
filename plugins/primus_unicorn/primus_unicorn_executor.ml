@@ -7,9 +7,9 @@
      meanwhile are written to Unicorn before it continues;
 
    - the memory pages are copied from Primus when Unicorn faults on
-     them, the changed bytes of the writable pages are copied back when
-     Unicorn stops, and the bytes that Primus stores meanwhile are
-     copied to Unicorn;
+     them, the changed bytes of the pages, that the code wrote, are
+     copied back when Unicorn stops, and the bytes that Primus stores
+     meanwhile are copied to Unicorn;
 
    - the code that Primus links instead of the program, e.g., the Lisp
      stubs, stops Unicorn at its address and is called by the Primus
@@ -58,8 +58,18 @@ type frame = { ret : int64; sp : int64 }
 
 (* the copied page, with the contents of a writable page that Primus
    has, and the ranges of the bytes that Primus did not have, which it
-   may allocate later, so the page is dropped, if it does *)
-type page = { snapshot : Bytes.t option; holes : (int * int) list }
+   may allocate later, so the page is dropped, if it does. A writable
+   page is read-only in Unicorn, until the code writes it, which makes
+   it dirty and writable, see [written_page], so that only the dirty
+   pages are copied back. A dirty page stays writable, while the code
+   changes it between the stops, as changing the protection costs more
+   than comparing the page, e.g., of the stack *)
+type page = {
+  snapshot : Bytes.t option;
+  holes : (int * int) list;
+  perm : Uc.Perm.t;  (** the access to the page in Primus *)
+  mutable dirty : bool;
+}
 
 type engine = {
   uc : Uc.t;
@@ -88,6 +98,7 @@ type engine = {
       (** the values of the registers that Primus and Unicorn agree on *)
   mutable unchecked : (int64 * (int * int) list) list;
       (** the pages with holes, which Primus may have allocated *)
+  mutable dirty : int64 list;  (** the dirty pages *)
   mutable written : var list;
       (** the registers that Primus has written since Unicorn stopped *)
   mutable broken : bool;
@@ -391,6 +402,7 @@ let create target ~foreign ~externals =
       synced = String.Table.create ();
       written = [];
       unchecked = [];
+      dirty = [];
       broken = false;
       trampolines = Int64.Table.create ();
       slots = Int64.Table.create ();
@@ -496,6 +508,7 @@ module Make (Machine : Primus.Machine.S) = struct
     Hashtbl.iter_keys e.pages ~f:(fun page -> Uc.mem_unmap e.uc page page_size);
     Hashtbl.clear e.pages;
     e.unchecked <- [];
+    e.dirty <- [];
     e.written <- []
 
   (* the pages and the registers of another machine are not valid *)
@@ -553,13 +566,15 @@ module Make (Machine : Primus.Machine.S) = struct
         + (if writable then write else none)
         + if access.executable then exec else none)
     in
-    Uc.mem_map e.uc page page_size perm;
+    Uc.mem_map e.uc page page_size Uc.Perm.(perm - write);
     Uc.mem_write e.uc page data;
     Hashtbl.set e.pages ~key:page
       ~data:
         {
           snapshot = (if writable then Some (Bytes.of_string data) else None);
           holes;
+          perm;
+          dirty = false;
         }
 
   let ensure_page e addr =
@@ -641,10 +656,11 @@ module Make (Machine : Primus.Machine.S) = struct
     | _ -> ());
     Machine.return ()
 
+  (* copies the changed bytes of the page to Primus, if any changed *)
   let store_page e page snapshot =
     let data = Uc.mem_read e.uc page (Int64.to_int_exn page_size) in
     if String.equal data (Bytes.unsafe_to_string snapshot) then
-      Machine.return ()
+      Machine.return false
     else
       let base = word e page in
       (* the runs of the changed bytes *)
@@ -665,30 +681,39 @@ module Make (Machine : Primus.Machine.S) = struct
       let changed = runs 0 [] in
       Bytes.From_string.blit ~src:data ~src_pos:0 ~dst:snapshot ~dst_pos:0
         ~len:(String.length data);
-      Machine.List.iter changed ~f:(fun (i, j) ->
-          Memory.store_bytes
-            Word.(base ++ i)
-            (String.sub data ~pos:i ~len:(j - i + 1)))
+      let+ () =
+        Machine.List.iter changed ~f:(fun (i, j) ->
+            Memory.store_bytes
+              Word.(base ++ i)
+              (String.sub data ~pos:i ~len:(j - i + 1)))
+      in
+      true
 
-  (* copies the registers and the changed memory to Primus and drops
-     the writable pages, that Primus may extend, see [page] *)
+  (* copies the registers and the dirty pages to Primus, the pages that
+     didn't change are clean again, and checks the writable pages, that
+     Primus may extend, see [page] *)
   let pull e =
     let* () = pull_regs e in
-    let writable =
-      Hashtbl.fold e.pages ~init:[] ~f:(fun ~key ~data acc ->
-          match data.snapshot with
-          | Some snapshot -> (key, snapshot, data.holes) :: acc
-          | None -> acc)
+    let* dirty =
+      Machine.List.filter e.dirty ~f:(fun page ->
+          match Hashtbl.find e.pages page with
+          | Some ({ snapshot = Some snapshot; perm; _ } as p) ->
+              let+ changed = store_page e page snapshot in
+              if not changed then begin
+                p.dirty <- false;
+                Uc.mem_protect e.uc page page_size Uc.Perm.(perm - write)
+              end;
+              changed
+          | _ -> Machine.return false)
     in
-    let* () =
-      Machine.List.iter writable ~f:(fun (page, snapshot, _) ->
-          store_page e page snapshot)
-    in
+    e.dirty <- dirty;
     (* a page, which Primus may change, is checked before Unicorn runs *)
     e.unchecked <-
-      List.filter_map writable ~f:(fun (page, _, holes) ->
-          if List.is_empty holes then None else Some (page, holes))
-      @ e.unchecked;
+      Hashtbl.fold e.pages ~init:e.unchecked ~f:(fun ~key ~data acc ->
+          match data with
+          | { snapshot = Some _; holes = _ :: _ as holes; _ } ->
+              (key, holes) :: acc
+          | _ -> acc);
     Machine.return ()
 
   (* drops the pages, in which Primus has allocated memory, see [page] *)
@@ -831,8 +856,20 @@ module Make (Machine : Primus.Machine.S) = struct
     drop_page e (page_of addr);
     Machine.return `Continue
 
+  (* the first write of the code to a writable page, which is read-only
+     in Unicorn, until it is dirty *)
+  let written_page e addr =
+    match Hashtbl.find e.pages (page_of addr) with
+    | Some ({ snapshot = Some _; dirty = false; perm; _ } as p) ->
+        p.dirty <- true;
+        e.dirty <- page_of addr :: e.dirty;
+        Uc.mem_protect e.uc (page_of addr) page_size perm;
+        true
+    | _ -> false
+
   let fault e access addr =
     match (access : Uc.access) with
+    | Write_prot when written_page e addr -> Machine.return `Continue
     | Read_unmapped | Write_unmapped | Fetch_unmapped ->
         let* mapped = Memory.is_mapped (word e addr) in
         if mapped then map_page e (page_of addr) >>| fun () -> `Continue
@@ -1000,6 +1037,31 @@ module Make (Machine : Primus.Machine.S) = struct
     (match pending with top :: _ -> ensure_return e top.ret | [] -> ());
     e
 
+  (* runs Unicorn from [pc], and runs it again after the first writes of
+     the pages, see [written_page], which are frequent, so they don't go
+     through [loop]; the stop at the instruction, which wrote, is skipped
+     again, as in [loop] *)
+  let rec start_uc e pc deadline =
+    e.reason <- None;
+    skipped_at := None;
+    let error =
+      try
+        Uc.start e.uc pc
+          ?timeout:
+            (Option.map deadline ~f:(fun t ->
+                 Int.max 1
+                   (Float.iround_up_exn ((t -. Stdlib.Sys.time ()) *. 1e6))));
+        None
+      with Uc.Error (_, msg) -> Some msg
+    in
+    match e.reason with
+    | Some (Fault (Write_prot, addr)) when written_page e addr ->
+        let pc = current_pc e in
+        if Option.equal Int64.equal !skipped_at (Some (code_addr e pc)) then
+          resumed_at := !skipped_at;
+        start_uc e pc deadline
+    | _ -> error
+
   let rec loop pc =
     let* e = prepare () in
     check_pages e >>= fun () ->
@@ -1010,17 +1072,10 @@ module Make (Machine : Primus.Machine.S) = struct
     match remaining with
     | Some t when Float.(t <= 0.) -> terminate e
     | _ -> (
-        e.reason <- None;
-        skipped_at := None;
         sync_stops e;
         let error =
-          try
-            Uc.start e.uc pc
-              ?timeout:
-                (Option.map remaining ~f:(fun t ->
-                     Int.max 1 (Float.iround_up_exn (t *. 1e6))));
-            None
-          with Uc.Error (_, msg) -> Some msg
+          start_uc e pc
+            (Option.map remaining ~f:(fun t -> Stdlib.Sys.time () +. t))
         in
         let* () = account () in
         let pc = current_pc e in

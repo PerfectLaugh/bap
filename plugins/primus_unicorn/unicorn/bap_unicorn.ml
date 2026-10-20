@@ -39,6 +39,7 @@ module Perm = struct
   type t = int
 
   let ( + ) = ( lor )
+  let ( - ) x y = x land lnot y
   let none = 0
   let read = 1
   let write = 2
