@@ -324,6 +324,8 @@ let index_page =
 let generate () =
   if Sys.file_exists "odoc" then FileUtil.rm ~recurse:true [ "odoc" ];
   FileUtil.cp ~recurse:true [ odoc_html ] "odoc";
+  (* the copy of the index of odoc is read-only, as the files of dune *)
+  FileUtil.rm [ "odoc/index.html" ];
   Out_channel.write_all "odoc/index.html" ~data:index_page
 
 let install_handwritten_manpages () =
