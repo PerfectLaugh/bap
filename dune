@@ -3,7 +3,36 @@
   (flags
    (:standard -warn-error -A -w -6-9-27-32..34-37-50-58))
   (ocamlopt_flags
-   (:standard -O3))))
+   (:standard -O3))
+  (link_flags
+   (:standard
+    (:include %{project_root}/link_flags.sexp))))
+ (_
+  (link_flags
+   (:standard
+    (:include %{project_root}/link_flags.sexp)))))
+
+; the flags of the linker of all programs, see tools/link-flags.ocaml,
+; which on macOS keep the linker of Xcode 15 from warning about the
+; libraries, that the libraries of OCaml pass to it more than once
+
+(rule
+ (target link_flags.sexp)
+ (enabled_if
+  (<> %{system} macosx))
+ (action
+  (with-stdout-to
+   %{target}
+   (echo "()"))))
+
+(rule
+ (target link_flags.sexp)
+ (enabled_if
+  (= %{system} macosx))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{bin:ocaml} %{dep:tools/link-flags.ocaml} %{cc}))))
 
 (rule
  (target config.status.in)
