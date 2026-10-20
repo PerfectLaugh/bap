@@ -13,7 +13,10 @@
 
    - the code that Primus links instead of the program, e.g., the Lisp
      stubs, stops Unicorn at its address and is called by the Primus
-     linker, after which Unicorn continues from the return address.
+     linker, after which Unicorn continues from the return address,
+     except the functions of libc that run on the state of Unicorn,
+     e.g., memcpy, see [Primus_unicorn_native], which don't copy it to
+     Primus.
 
    A run ends when the subroutine returns, i.e., when the code reaches
    its return address with the stack pointer of the caller.
@@ -30,6 +33,7 @@ open Bap_primus.Std
 module Uc = Bap_unicorn
 module Target = Primus_unicorn_target
 module Checkpoint = Primus_unicorn_checkpoint
+module Native = Primus_unicorn_native
 include Bap_main.Loggers ()
 
 type Primus.exn += Unicorn_failure of string
@@ -168,6 +172,20 @@ let recipe : (Theory.Target.t * int64 list * (int64 * string) list) option ref =
 
 (* the code that runs the subroutines in Unicorn, see [Loader] *)
 let own_code : Primus.Linker.code Addr.Table.t = Addr.Table.create ()
+
+(* the functions of libc that run natively, see [Native] *)
+let native_stubs : String.Set.t ref = ref (String.Set.of_list Native.names)
+
+(* the call of a native function: the expressions of its arguments and
+   of its result, which are registers, their parts, or the words on
+   the stack, see [Make.eval_uc] *)
+type native = { fn : Native.fn; args : exp list; result : (exp * int) option }
+
+(* the native functions that the program calls, by their names *)
+let natives : native String.Table.t = String.Table.create ()
+
+(* the names of the subroutines of the program, by their addresses *)
+let names : string Int64.Table.t = Int64.Table.create ()
 
 (* the stubs of the external functions, e.g., in PLT, which jump through
    their slots to the trampolines, interpreted, see [call_foreign] *)
@@ -493,6 +511,7 @@ module Make (Machine : Primus.Machine.S) = struct
   module Value = Primus.Value.Make (Machine)
   module Linker = Primus.Linker.Make (Machine)
   module Interpreter = Primus.Interpreter.Make (Machine)
+  module Lisp = Primus.Lisp.Make (Machine)
 
   let fail fmt = ksprintf (fun msg -> Machine.raise (Unicorn_failure msg)) fmt
   let word e x = Word.of_int64 ~width:(e.bytes * 8) x
@@ -890,6 +909,189 @@ module Make (Machine : Primus.Machine.S) = struct
         | _ -> None)
     | _ -> None
 
+  (* the number of the bytes from [addr], at most [n], that Primus has
+     and may read, which are in Unicorn, raises [Missing] for the first
+     address of a page that is not copied yet, see [Native] *)
+  let uc_readable e addr n =
+    let rec count addr n acc =
+      if n = 0 then acc
+      else
+        let page = page_of addr in
+        let off = Int64.(to_int_exn (addr - page)) in
+        let len = Int.min n (Int64.to_int_exn page_size - off) in
+        match Hashtbl.find e.pages page with
+        | None -> raise (Native.Missing addr)
+        | Some { perm; _ } when not (Uc.Perm.mem perm Uc.Perm.read) -> acc
+        | Some { holes; _ } -> (
+            let hole =
+              List.filter_map holes ~f:(fun (lo, hi) ->
+                  if hi >= off && lo < off + len then Some (Int.max lo off)
+                  else None)
+              |> List.min_elt ~compare:Int.compare
+            in
+            match hole with
+            | Some first -> acc + first - off
+            | None -> count Int64.(addr + of_int len) (n - len) (acc + len))
+    in
+    count addr n 0
+
+  let uc_read e addr n =
+    if uc_readable e addr n < n then raise Native.Denied
+    else if n = 0 then ""
+    else Uc.mem_read e.uc addr n
+
+  let uc_prefix e addr n =
+    match uc_readable e addr n with 0 -> "" | n -> Uc.mem_read e.uc addr n
+
+  let uc_memory e : Native.memory = { read = uc_read e; prefix = uc_prefix e }
+
+  (* the bytes may be written by a native function, as Primus may
+     write them *)
+  let uc_check_write e addr n =
+    if uc_readable e addr n < n then raise Native.Denied;
+    let last = Int64.(addr + of_int n - 1L) in
+    let rec check page =
+      if Int64.(page <= last) then begin
+        (match Hashtbl.find e.pages page with
+        | Some { snapshot = Some _; _ } -> ()
+        | _ -> raise Native.Denied);
+        check Int64.(page + page_size)
+      end
+    in
+    if n > 0 then check (page_of addr)
+
+  let uc_write e addr data =
+    let n = String.length data in
+    if n > 0 then begin
+      let last = Int64.(addr + of_int n - 1L) in
+      let rec dirty page =
+        if Int64.(page <= last) then begin
+          ignore (written_page e page : bool);
+          dirty Int64.(page + page_size)
+        end
+      in
+      dirty (page_of addr);
+      Uc.mem_write e.uc addr data
+    end
+
+  (* the value of an expression in Unicorn *)
+  let rec eval_uc e (exp : exp) =
+    match exp with
+    | Var v -> (
+        match Target.Regs.read e.regs v with
+        | Some x -> x
+        | None -> raise Native.Denied)
+    | Int x -> x
+    | Cast (kind, n, x) -> Bil.Apply.cast kind n (eval_uc e x)
+    | Extract (hi, lo, x) -> Word.extract_exn ~hi ~lo (eval_uc e x)
+    | BinOp (((PLUS | MINUS) as op), x, y) ->
+        Bil.Apply.binop op (eval_uc e x) (eval_uc e y)
+    | Load (_, addr, endian, size) ->
+        let addr = int64_of_word (eval_uc e addr) in
+        Word.of_binary ~width:(Size.in_bits size) endian
+          (uc_read e addr (Size.in_bytes size))
+    | _ -> raise Native.Denied
+
+  (* writes the result to a register, the result in the lower part of a
+     register is sign-extended to the whole register, as the ABIs of
+     RISC-V and MIPS64 want for the 32-bit results, and the others leave
+     the upper bits undefined *)
+  let assign_uc e (exp : exp) x =
+    match exp with
+    | Var v -> Target.Regs.write e.regs v x
+    | Cast (LOW, _, Var v) | Extract (_, 0, Var v) -> (
+        match Var.typ v with
+        | Imm width ->
+            Target.Regs.write e.regs v (Bil.Apply.cast SIGNED width x)
+        | _ -> false)
+    | _ -> false
+
+  (* the return address of the call, which just started, and the stack
+     pointer after the return, in Unicorn *)
+  let frame_uc e =
+    let sp = int64_of_word (eval_uc e (Var e.sp)) in
+    match e.link with
+    | Some lr -> { ret = int64_of_word (eval_uc e (Var lr)); sp }
+    | None ->
+        (* the return address on the stack of x86 *)
+        let ret =
+          Word.of_binary ~width:(e.bytes * 8) LittleEndian
+            (uc_read e sp e.bytes)
+        in
+        { ret = int64_of_word ret; sp = Int64.(sp + of_int e.bytes) }
+
+  (* runs the native function at the address, unless the code at the
+     address is stopped at, the function is linked to the stub of the
+     program, which nothing replaced, or Lisp advises the function, and
+     returns the address, from
+     which Unicorn continues, or [None], if the function can't run, e.g.,
+     when it would fault, so that the stub runs, as the faults are of
+     Primus *)
+  let native e addr =
+    let name =
+      match Hashtbl.find e.trampolines addr with
+      | Some name -> Some name
+      | None -> Hashtbl.find names addr
+    in
+    match
+      Option.bind name ~f:(fun name ->
+          Option.map (Hashtbl.find natives name) ~f:(fun call -> (name, call)))
+    with
+    | None -> Machine.return None
+    | Some _ when is_stop e addr -> Machine.return None
+    | Some (name, call) ->
+        let* linked = Linker.is_linked (`symbol name) in
+        let* unreplaced = unreplaced_stub (`symbol name) in
+        let* advised = Lisp.advised name in
+        if (not linked) || Option.is_some unreplaced || advised then
+          Machine.return None
+        else
+          let rec attempt tries =
+            match
+              let args = List.map call.args ~f:(eval_uc e) in
+              let frame = frame_uc e in
+              let r = call.fn (uc_memory e) (List.map args ~f:int64_of_word) in
+              List.iter r.writes ~f:(fun (addr, data) ->
+                  uc_check_write e addr (String.length data));
+              (args, frame, r)
+            with
+            | exception Native.Missing addr when tries > 0 ->
+                let* () = ensure_page e addr in
+                if Hashtbl.mem e.pages (page_of addr) then attempt (tries - 1)
+                else Machine.return None
+            | exception (Native.Missing _ | Native.Denied) ->
+                Machine.return None
+            | args, frame, r ->
+                let* () =
+                  Machine.Observation.post Primus.Linker.Trace.call_entered
+                    ~f:(fun notify ->
+                      let* args = Machine.List.map args ~f:Value.of_word in
+                      notify (name, args))
+                in
+                List.iter r.writes ~f:(fun (addr, data) -> uc_write e addr data);
+                let result =
+                  Option.map call.result ~f:(fun (exp, width) ->
+                      let x = Word.of_int64 ~width r.value in
+                      ignore (assign_uc e exp x : bool);
+                      x)
+                in
+                if Option.is_none e.link then
+                  ignore
+                    (Target.Regs.write e.regs e.sp (word e frame.sp) : bool);
+                let+ () =
+                  Machine.Observation.post Primus.Linker.Trace.call_returned
+                    ~f:(fun notify ->
+                      let* args =
+                        Machine.List.map
+                          (args @ Option.to_list result)
+                          ~f:Value.of_word
+                      in
+                      notify (name, args))
+                in
+                Some frame.ret
+          in
+          attempt 64
+
   (* the stub of the program, which runs in Unicorn, would jump back to
      the trampoline, so it is interpreted, as load-binary does, which
      calls the function, that nothing defines, by its address *)
@@ -1087,7 +1289,10 @@ module Make (Machine : Primus.Machine.S) = struct
         match (e.reason, error) with
         | None, None when Option.is_some remaining -> loop pc
         | Some Returned, _ | None, None -> pull e
-        | Some (Foreign addr), _ -> call_foreign e addr >>= loop
+        | Some (Foreign addr), _ -> (
+            native e addr >>= function
+            | Some pc -> loop pc
+            | None -> call_foreign e addr >>= loop)
         | Some (Fault (access, addr)), _ -> (
             fault e access addr >>= function `Continue -> loop pc)
         | Some (Interrupt n), _ -> (
@@ -1195,6 +1400,48 @@ module Loader (Machine : Primus.Machine.S) = struct
         ?addr:(Term.get_attr blk address)
         (module Code)
 
+  (* the native functions, whose arguments are evaluated in Unicorn, and
+     whose result is written to a register, see [Make.eval_uc] *)
+  let index_natives prog =
+    Hashtbl.clear natives;
+    Term.enum sub_t prog
+    |> Seq.iter ~f:(fun sub ->
+        let name = Sub.name sub in
+        Option.iter (Term.get_attr sub address) ~f:(fun addr ->
+            Hashtbl.set names ~key:(int64_of_word addr) ~data:name);
+        match Native.find name with
+        | Some fn when Set.mem !native_stubs name -> (
+            let args = Term.enum arg_t sub |> Seq.to_list in
+            let outs, ins =
+              List.partition_tf args ~f:(fun arg ->
+                  match Arg.intent arg with Some Out -> true | _ -> false)
+            in
+            let width arg =
+              match Var.typ (Arg.lhs arg) with Imm n -> Some n | _ -> None
+            in
+            let assignable (exp : exp) =
+              match exp with
+              | Var _ | Cast (LOW, _, Var _) | Extract (_, 0, Var _) -> true
+              | _ -> false
+            in
+            match outs with
+            | [] when not (List.is_empty ins) ->
+                Hashtbl.set natives ~key:name
+                  ~data:{ fn; args = List.map ins ~f:Arg.rhs; result = None }
+            | [ out ] when assignable (Arg.rhs out) -> (
+                match width out with
+                | Some n ->
+                    Hashtbl.set natives ~key:name
+                      ~data:
+                        {
+                          fn;
+                          args = List.map ins ~f:Arg.rhs;
+                          result = Some (Arg.rhs out, n);
+                        }
+                | None -> ())
+            | _ -> ())
+        | _ -> ())
+
   let link_sub sub =
     let* linked = is_linked Sub.name sub in
     if linked then Machine.return ()
@@ -1229,6 +1476,7 @@ module Loader (Machine : Primus.Machine.S) = struct
   let link_program =
     let* prog = Machine.gets Project.program in
     index_intrinsics prog;
+    index_natives prog;
     Term.enum sub_t prog |> Seq.to_list
     |> Machine.List.iter ~f:(fun sub ->
         let* () = link_sub sub in
@@ -1329,6 +1577,7 @@ module Loader (Machine : Primus.Machine.S) = struct
   let init () =
     Hashtbl.clear own_code;
     Hashtbl.clear stubs;
+    Hashtbl.clear names;
     Hash_set.clear thumb;
     checkpoint_addr := None;
     checkpointed := false;

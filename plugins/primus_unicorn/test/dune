@@ -1,6 +1,8 @@
 (tests
- (names test_unicorn test_regs)
+ (names test_unicorn test_regs test_native)
  (package bap-primus-unicorn)
+ (preprocess
+  (pps ppx_bap))
  (libraries
   bap
   bap-arm

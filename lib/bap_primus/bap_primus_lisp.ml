@@ -780,6 +780,12 @@ module Make (Machine : Machine) = struct
   let eval_fun name = Self.eval_lisp (KB.Name.read name)
   let say fmt = ksprintf (Machine.Observation.make new_message) fmt
 
+  let advised name =
+    Machine.Local.get state >>| fun { advices } ->
+    Map.existsi advices ~f:(fun ~key ~data ->
+        String.equal (KB.Name.unqualified key) name
+        && not (Set.is_empty data.before && Set.is_empty data.after))
+
   let optimize () =
     Machine.Local.get state >>= fun s ->
     let known_methods =

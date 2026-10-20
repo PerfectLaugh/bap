@@ -4171,6 +4171,14 @@ module Std : sig
 
             @since 2.6.0 *)
 
+        val advised : string -> bool Machine.t
+        (** [advised name] if a definition of the program advises the function
+            [name], of any package, before or after it, so that a component,
+            which implements the function otherwise, e.g., natively, leaves it
+            to Lisp.
+
+            @since 2.6.0 *)
+
         val link_primitives : primitives -> unit Machine.t
         [@@deprecated "[since 2018-03] use link_primitive instead"]
         (** [link_primitives prims] provides the primitives [prims] *)
