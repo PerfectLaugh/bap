@@ -128,7 +128,6 @@ module Make (Machine : Machine) = struct
     Machine.Local.get state >>| code_of_name name >>| Option.is_some
 
   let linked_symbols = Machine.Local.get state >>| fun s -> Map.keys s.names
-  let linked_addrs = Machine.Local.get state >>| fun s -> Map.keys s.addrs
 
   let do_fail name =
     Machine.Local.get state >>= fun s ->

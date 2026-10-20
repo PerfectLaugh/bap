@@ -217,7 +217,8 @@ let names : string Int64.Table.t = Int64.Table.create ()
 let stubs : Primus.Linker.code Addr.Table.t = Addr.Table.create ()
 
 (* the machine runs without the disassembled program, which the bare
-   project does not have, see [Bap_script.project ~bare] *)
+   project does not have, see [Bap_script.project ~bare], set from the
+   project of the machine, see [Loader.init] *)
 let bare_mode = ref false
 
 (* The instructions, e.g., the system calls, which the lifters represent
@@ -275,15 +276,108 @@ let intrinsic_before pc =
   | Some (addr, site) when Int64.(pc - addr <= 16L) -> Some site
   | _ -> None
 
+(* The intrinsic of the system call, which ends at [pc], decoded from
+   its bytes, as the lifters represent it, when the program doesn't
+   have it, e.g., when it is not disassembled, see [bare_mode]. The
+   interrupt [n] is the exception of Unicorn, which tells the kind of
+   the instruction, e.g., 2, the supervisor call of ARM, or -1, the
+   syscall or the sysenter of x86, and [read addr n] reads the code. *)
+let decode_intrinsic (arch : Uc.arch) ~bits ~big_endian ~thumb ~read n pc =
+  let word ~big s =
+    String.foldi s ~init:0L ~f:(fun i acc c ->
+        let shift = if big then 8 * (String.length s - 1 - i) else 8 * i in
+        Int64.(acc lor shift_left (of_int (Char.to_int c)) shift))
+  in
+  let insn size =
+    Option.map (read Int64.(pc - of_int size) size) ~f:(word ~big:false)
+  in
+  let insn_be size =
+    Option.map (read Int64.(pc - of_int size) size) ~f:(word ~big:big_endian)
+  in
+  let site name ?(width = bits) input =
+    let inputs =
+      match input with
+      | None -> []
+      | Some x ->
+          [
+            ( Var.create "intrinsic:x0" (Type.imm width),
+              Bil.int (Word.of_int64 ~width x) );
+          ]
+    in
+    Some { name = "intrinsic:" ^ name; inputs }
+  in
+  let open Int64 in
+  match (arch, n) with
+  | X86, -1 -> (
+      match insn 2 with
+      | Some 0x050FL -> site "syscall" None
+      | Some 0x340FL -> site "sysenter" None
+      | _ -> None)
+  | X86, 3 when Option.equal Int64.equal (insn 1) (Some 0xCCL) ->
+      site "breakpoint" None
+  | X86, n -> (
+      match insn 2 with
+      | Some w when w land 0xFFL = 0xCDL && w lsr 8 = Int64.of_int n ->
+          site "interrupt" ~width:8 (Some (Int64.of_int n))
+      | _ -> None)
+  | Arm, 2 when thumb -> (
+      match insn 2 with
+      | Some w when w lsr 8 = 0xDFL -> site "svc" (Some (w land 0xFFL))
+      | _ -> None)
+  | Arm, 2 -> (
+      match insn 4 with
+      | Some w when (w lsr 24) land 0xFL = 0xFL ->
+          site "svc" (Some (w land 0xFFFFFFL))
+      | _ -> None)
+  | Arm64, 2 -> (
+      match insn 4 with
+      | Some w when w land 0xFFE0001FL = 0xD4000001L ->
+          site "svc" (Some ((w lsr 5) land 0xFFFFL))
+      | _ -> None)
+  | Mips, 17 -> (
+      match insn_be 4 with
+      | Some w when w land 0xFC00003FL = 0xCL ->
+          site "syscall" (Some ((w lsr 6) land 0xFFFFFL))
+      | _ -> None)
+  | Ppc, 8 -> (
+      match insn_be 4 with
+      | Some w when w land 0xFC000002L = 0x44000002L ->
+          site "syscall" (Some ((w lsr 5) land 0x7FL))
+      | _ -> None)
+  | _ -> None
+
 (* the subroutines in the Thumb encoding, which Unicorn runs from their
    addresses with the lower bit set *)
 let thumb : Addr.Hash_set.t = Addr.Hash_set.create ()
 
 (* the names of the Thumb instructions of LLVM start with t, e.g., tMOVi8
    or t2STRDi8, unlike the names of the ARM instructions *)
+(* the addresses of the symbols in the Thumb encoding, whose values have
+   the lower bit set, which tell the encoding of the subroutines without
+   the code, e.g., of the bare project *)
+let thumb_symbols : Int64.Hash_set.t = Int64.Hash_set.create ()
+
+let index_thumb_symbols spec =
+  Hash_set.clear thumb_symbols;
+  match
+    Ogre.eval
+      (Ogre.collect Ogre.Query.(select (from Image.Scheme.symbol_value)))
+      spec
+  with
+  | Error _ -> ()
+  | Ok values ->
+      Seq.iter values ~f:(fun (addr, value) ->
+          if Int64.(value land 1L = 1L) then
+            Hash_set.add thumb_symbols Int64.(addr land lnot 1L))
+
 let is_thumb sub =
   match Term.first blk_t sub with
-  | None -> false
+  | None -> (
+      match Term.get_attr sub address with
+      | Some addr ->
+          Hash_set.mem thumb_symbols
+            Int64.(Bitvec.to_int64 (Word.to_bitvec addr) land lnot 1L)
+      | None -> false)
   | Some blk -> (
       let insn =
         match Term.first def_t blk with
@@ -1536,21 +1630,19 @@ module Make (Machine : Primus.Machine.S) = struct
             match intrinsic_before (code_addr e pc) with
             | Some site -> call_intrinsic e site >>= fun () -> loop pc
             | None -> (
-                (* the bare loader has no program, so the intrinsics are
-                   not indexed, and any interrupt is tried as the svc *)
-                match !bare_mode with
-                | false ->
+                let read addr n =
+                  try Some (Uc.mem_read e.uc addr n) with Uc.Error _ -> None
+                in
+                match
+                  decode_intrinsic e.arch ~bits:(e.bytes * 8)
+                    ~big_endian:e.big_endian
+                    ~thumb:Int64.(pc land 1L = 1L)
+                    ~read n (code_addr e pc)
+                with
+                | Some site -> call_intrinsic e site >>= fun () -> loop pc
+                | None ->
                     pull e >>= fun () ->
-                    fail "an unhandled interrupt %d at %Lx" n pc
-                | true -> (
-                    Linker.is_linked (`symbol "intrinsic:svc") >>= function
-                    | false ->
-                        pull e >>= fun () ->
-                        fail "an unhandled interrupt %d at %Lx" n pc
-                    | true ->
-                        pull e >>= fun () ->
-                        Linker.exec (`symbol "intrinsic:svc") >>= fun () ->
-                        push_owned e >>= fun () -> loop pc)))
+                    fail "an unhandled interrupt %d at %Lx" n pc))
         | Some Checkpoint, _ -> save e pc >>= fun () -> loop pc
         | Some (Stop addr), _ -> stopped e addr >>= fun () -> loop pc
         | Some Invalid, _ ->
@@ -1745,18 +1837,17 @@ module Loader (Machine : Primus.Machine.S) = struct
   (* the references to the external functions of the program *)
   let externals () =
     let* proj = Machine.get () in
-    let* linked = Linker.linked_symbols >>| String.Set.of_list in
-    let prog = Project.program proj in
-    let functions =
-      Term.enum sub_t prog |> Seq.map ~f:Sub.name |> Seq.to_list
-      |> String.Set.of_list
+    (* the bare project has subroutines for all imports, e.g., of the
+       data objects, so the functions there are those, that the
+       components, e.g., the Lisp machine, link, e.g., the stubs *)
+    let* functions =
+      if !bare_mode then Linker.linked_symbols >>| String.Set.of_list
+      else
+        Machine.return
+          (Term.enum sub_t (Project.program proj)
+          |> Seq.map ~f:Sub.name |> Seq.to_list |> String.Set.of_list)
     in
-    (* the bare project has no subroutines for the external functions,
-       so the functions that the components, e.g., the Lisp machine,
-       link, e.g., the stubs, are the functions there *)
-    let is_function name =
-      Set.mem functions name || (!bare_mode && Set.mem linked name)
-    in
+    let is_function = Set.mem functions in
     match
       Ogre.eval
         (Ogre.collect
@@ -1859,10 +1950,9 @@ module Loader (Machine : Primus.Machine.S) = struct
     let module Exec = Make (Machine) in
     Machine.sequence
       [
-        ( Machine.gets Project.program >>| fun prog ->
-          bare_mode :=
-            Term.enum sub_t prog
-            |> Seq.for_all ~f:(fun sub -> Term.length blk_t sub = 0) );
+        ( Machine.get () >>| fun proj ->
+          bare_mode := not (Project.disassembled proj);
+          index_thumb_symbols (Project.specification proj) );
         link_program;
         Primus.System.init >>> create_engine;
         Primus.Machine.fork >>> Exec.forked;

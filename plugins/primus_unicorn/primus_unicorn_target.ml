@@ -75,9 +75,6 @@ let parts ~bits : Uc.arch -> (string * part) list = function
       numbered "R" 30 (fun n -> Reg (sprintf "X%d" n))
       @ [
           ("R31", Reg "SP");
-          (* the stack pointer of the arm target is SP, with R31 as the
-             alias, see arm_target.ml *)
-          ("SP", Reg "SP");
           ("ZR", Skip);
           ("XZR", Skip);
           ("WZR", Skip);

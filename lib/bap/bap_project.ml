@@ -461,11 +461,13 @@ let compute_unit ?package ?state input =
   Theory.with_current theory @@ fun () ->
   compute_target target spec >>= fun target ->
   Theory.Unit.for_file file >>= fun unit ->
+  (* the unit is described, e.g., its path and bias, which the symbol
+     providers need, also when the given state skips the disassembly *)
   let* state =
+    with_filename spec target code memory file @@ fun () ->
     match state with
     | Some state -> !!state
     | None ->
-        with_filename spec target code memory file @@ fun () ->
         KB.collect State.slot unit >>= fun state ->
         if KB.Domain.is_empty (KB.Slot.domain State.slot) state then
           Memmap.to_sequence code |> Seq.to_list_rev
@@ -500,6 +502,7 @@ let compute_units ?package ?state main libs =
   set_package package >>| fun () -> (main, List.rev libs, prog)
 
 let empty_state = State.empty
+let disassembled t = not (State.equal t.main.state State.empty)
 
 let create ?package ?state ?disassembler:p1 ?brancher:p2 ?symbolizer:p3
     ?rooter:p4 ?reconstructor:p5 (read : input) =

@@ -2064,11 +2064,9 @@ module Std : sig
 
         val linked_symbols : string list m
         (** [linked_symbols] is the list of the symbolic names, under which code
-            is currently linked. *)
+            is currently linked.
 
-        val linked_addrs : addr list m
-        (** [linked_addrs] is the list of the addresses, under which code is
-            currently linked. *)
+            @since 2.6.0 *)
       end
     end
 

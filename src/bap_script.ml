@@ -56,27 +56,32 @@ let synthesize_program proj =
          Theory.Unit.for_file file >>= fun unit ->
          KB.collect Theory.Unit.subroutines unit >>= fun starts ->
          Set.to_list starts
-         |> KB.List.fold ~init:String.Map.empty ~f:(fun symbols addr ->
+         |> KB.List.filter_map ~f:(fun addr ->
              Theory.Label.for_addr addr >>= fun label ->
              (* the fresh label has no unit, which the symbol
-                   providers need, e.g., to find the symbols of the
-                   file that the label is in *)
-             KB.provide Theory.Label.unit label (Some unit) >>= fun () ->
+                providers need, e.g., to find the symbols of the file
+                that the label is in, and the label, that has one,
+                e.g., of another file at the same address, keeps it *)
+             ( KB.collect Theory.Label.unit label >>= function
+               | Some _ -> KB.return ()
+               | None -> KB.provide Theory.Label.unit label (Some unit) )
+             >>= fun () ->
              KB.collect Theory.Label.name label >>= fun name ->
              (match name with
                | Some _ -> KB.return name
                | None -> KB.resolve Theory.Label.possible_name label)
-             >>| function
-             | None -> symbols
-             | Some name -> Map.set symbols ~key:name ~data:addr));
+             >>| Option.map ~f:(fun name -> (name, addr))));
+      (* the subroutines are by their addresses, as the names of the
+         static functions of different files may be the same *)
       match Toplevel.get result with
-      | symbols when Map.is_empty symbols -> proj
+      | [] -> proj
       | symbols ->
           (* the external functions are subroutines without addresses, so
              that the Lisp machine finds their prototypes, e.g., from the
              api files, and links their stubs, which the GOT slots of the
              program are then patched to; the well-known data objects of
              libc are excepted, as their slots must keep their values *)
+          let defined = String.Set.of_list (List.map symbols ~f:fst) in
           let data_objects =
             String.Set.of_list
               [
@@ -111,7 +116,7 @@ let synthesize_program proj =
             | Ok refs ->
                 Seq.to_list refs
                 |> List.filter_map ~f:(fun (_, name) ->
-                    if Set.mem data_objects name || Map.mem symbols name then
+                    if Set.mem data_objects name || Set.mem defined name then
                       None
                     else Some name)
                 |> List.dedup_and_sort ~compare:String.compare
@@ -119,7 +124,7 @@ let synthesize_program proj =
           let width = Theory.Target.bits (Project.target proj) in
           let subs =
             List.map imports ~f:(fun name -> Sub.create ~name ())
-            @ List.map (Map.to_alist symbols) ~f:(fun (name, addr) ->
+            @ List.map symbols ~f:(fun (name, addr) ->
                 Term.set_attr (Sub.create ~name ()) address
                   (Word.create addr width))
           in

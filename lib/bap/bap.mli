@@ -9968,7 +9968,15 @@ module Std : sig
         Passing it as [~state] to {!create} skips the disassembly and the
         lifting, so the project has an empty program, which is useful for the
         executors that run the code of the binary natively, e.g., in Unicorn,
-        and do not need its representation. *)
+        and do not need its representation.
+
+        @since 2.6.0 *)
+
+    val disassembled : t -> bool
+    (** [disassembled project] if the code of the [project] was disassembled,
+        i.e., the project was not created with {!empty_state}.
+
+        @since 2.6.0 *)
 
     val disasm : t -> disasm
     (** [disasm project] returns results of disassembling *)

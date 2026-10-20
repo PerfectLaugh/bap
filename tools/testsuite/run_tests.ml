@@ -518,6 +518,53 @@ let () =
         has env "tells the line of the script" out "script\\.ml\", line 2");
   ]
 
+(* the bare projects of the scripts, which are not disassembled, run in
+   Unicorn as the disassembled ones: the functions in the Thumb encoding
+   from the symbol table, and the system calls, that the program doesn't
+   have, as the lifters represent them *)
+let bare data =
+  let run env ?(options = []) bin =
+    let options =
+      List.map (Printf.sprintf "%S")
+        ([
+           "--run-systems=bap:unicorn-executor"; "--run-argv=hello,cruel,world";
+         ]
+        @ options)
+    in
+    bap ~timeout:300. env
+      [
+        "script";
+        write env "script.ml"
+          (Printf.sprintf
+             {|let () =
+  let file = List.hd (Bap_script.args ()) in
+  Bap_script.init ~options:[ %s ] ();
+  ignore (Bap_script.run_pass "run" (Bap_script.project ~bare:true file))
+|}
+             (String.concat "; " options));
+        path data ("bin/" ^ bin);
+      ]
+  in
+  [
+    case "script/unicorn/bare/x86_64-linux-gnu-echo" (fun env ->
+        let out = run env "x86_64-linux-gnu-echo" in
+        sequence env out
+          [ ("prints the arguments", "hello"); ("ends", "course") ]);
+    case "script/unicorn/bare/arm-linux-gnueabihf-thumb-crc" (fun env ->
+        let out = run env "arm-linux-gnueabihf-thumb-crc" in
+        contains env "prints the CRC" out "1489580789");
+    case "script/unicorn/bare/x86_64-linux-gnu-syscall-crc" (fun env ->
+        ignore
+          (write env "syscalls.lisp"
+             (List.assoc "x86_64-linux-gnu-syscall-crc" syscalls));
+        let out =
+          run env "x86_64-linux-gnu-syscall-crc"
+            ~options:
+              [ "--primus-lisp-add=" ^ dir env; "--primus-lisp-load=syscalls" ]
+        in
+        contains env "prints the CRC" out "1489580789");
+  ]
+
 (* the scripts stop the machines with Bap_script_debugger, and see and
    change them in their handlers, the same in the interpreter and in
    Unicorn *)
@@ -854,6 +901,7 @@ let tests =
     debugging;
     debugger;
     scripts;
+    bare;
     script_debugger;
     mprotect;
     mmap;
