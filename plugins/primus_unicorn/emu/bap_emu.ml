@@ -13,12 +13,14 @@ type action = Default | Return of int64
 (* the system, which runs in the fiber of the script, either paused,
    with the address, from which it continues, or finished *)
 type state =
-  | Suspended of int64 * (X.request, state) Effect.Deep.continuation
+  | Suspended of
+      int64 * Primus.Machine.id * (X.request, state) Effect.Deep.continuation
   | Finished of
       ( Primus.exit_status * project * Knowledge.state,
         Knowledge.conflict )
       result
   | Crashed of exn
+  | Ended of Primus.exit_status * (X.request, state) Effect.Deep.continuation
 
 type t = { mutable state : state; mutable call : string option }
 
@@ -35,17 +37,21 @@ let fiber f =
       effc =
         (fun (type a) (eff : a Effect.t) ->
           match eff with
-          | X.Paused pc ->
+          | X.Paused (pc, id) ->
               Some
                 (fun (k : (a, state) Effect.Deep.continuation) ->
-                  Suspended (pc, k))
+                  Suspended (pc, id, k))
+          | X.Ended status ->
+              Some
+                (fun (k : (a, state) Effect.Deep.continuation) ->
+                  Ended (status, k))
           | _ -> None);
     }
 
 let finish t state =
   t.state <- state;
   match state with
-  | Suspended _ -> ()
+  | Suspended _ | Ended _ -> ()
   | Finished (Ok (_, _, kb)) ->
       Toplevel.set kb;
       X.driven := false
@@ -54,12 +60,16 @@ let finish t state =
 (* continues the paused system with the request *)
 let resume t request =
   match t.state with
-  | Suspended (_, k) -> finish t (Effect.Deep.continue k request)
+  | Suspended (_, _, k) -> finish t (Effect.Deep.continue k request)
+  | Ended (_, k) -> finish t (Effect.Deep.continue k request)
   | _ -> invalid_arg "Bap_emu: the program is not paused"
 
 let status t =
   match t.state with
   | Suspended _ -> Paused
+  | Ended ((Primus.Normal | Exn Primus.Interpreter.Halt), _) ->
+      Exited !X.exit_code
+  | Ended (Exn exn, _) -> Failed (Primus.Exn.to_string exn)
   | Finished (Ok ((Primus.Normal | Exn Primus.Interpreter.Halt), _, _)) ->
       Exited !X.exit_code
   | Finished (Ok (Exn exn, _, _)) -> Failed (Primus.Exn.to_string exn)
@@ -68,6 +78,23 @@ let status t =
   | Crashed exn -> Failed (Exn.to_string exn)
 
 let paused t = match t.state with Suspended _ -> true | _ -> false
+
+(* the program runs from the entry, and, when it ends, the script may
+   restore a snapshot, after which the machine, that ended, is killed,
+   and the snapshot continues, which ends here too *)
+let start entry =
+  let module Machine = Primus.Analysis in
+  let module Linker = Primus.Linker.Make (Machine) in
+  let open Machine.Syntax in
+  Machine.catch
+    (Linker.exec (`symbol entry) >>| fun () -> Primus.Normal)
+    (fun exn -> Machine.return (Primus.Exn exn))
+  >>= fun status ->
+  match Effect.perform (X.Ended status) with
+  | X.Restore snapshot ->
+      Machine.current () >>= fun id ->
+      Machine.kill id >>= fun () -> Machine.switch snapshot
+  | X.Continue _ | X.Map _ | X.Snapshot -> Machine.return ()
 
 let create ?(system = "bap:unicorn-executor") ?(components = []) ?(args = [])
     ?(envp = []) ?(entry = "_start") proj =
@@ -95,19 +122,36 @@ let create ?(system = "bap:unicorn-executor") ?(components = []) ?(args = [])
     (fiber (fun () ->
          Primus.System.run system proj (Toplevel.current ())
            ~args:(Array.of_list (program :: args))
-           ~envp:(Array.of_list envp)
-           ~start:(Linker.exec (`symbol entry))));
+           ~envp:(Array.of_list envp) ~start:(start entry)));
   t
 
 let pc t =
   match t.state with
-  | Suspended (pc, _) -> pc
+  | Suspended (pc, _, _) -> pc
   | _ -> invalid_arg "Bap_emu: the program is not paused"
 
 let set_pc t addr =
   match t.state with
-  | Suspended (_, k) -> t.state <- Suspended (addr, k)
+  | Suspended (_, id, k) -> t.state <- Suspended (addr, id, k)
   | _ -> invalid_arg "Bap_emu: the program is not paused"
+
+type snapshot = Primus.Machine.id
+
+let machine t =
+  match t.state with
+  | Suspended (_, id, _) -> id
+  | _ -> invalid_arg "Bap_emu: the program is not paused"
+
+(* the machine, that takes the snapshot, forks, and stays paused, as the
+   snapshot, and its fork continues *)
+let snapshot t =
+  let id = machine t in
+  resume t X.Snapshot;
+  id
+
+let restore t snapshot =
+  X.exit_code := None;
+  resume t (X.Restore snapshot)
 
 (* pauses the program before the next instruction, from a hook *)
 let stop _ =

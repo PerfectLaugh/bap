@@ -185,6 +185,10 @@ let parked : parked Int64.Table.t Monads.Std.Monad.State.Multi.Id.Table.t =
 
 let parked_pages = ref 0
 
+(* the killed machines, whose pages are not parked *)
+let dead : Monads.Std.Monad.State.Multi.Id.Hash_set.t =
+  Monads.Std.Monad.State.Multi.Id.Hash_set.create ()
+
 (* the number of the pages, that are parked, after which only the
    pending pages are, as the forks may be many *)
 let parked_limit = 16384
@@ -222,8 +226,17 @@ let signatures : signature String.Table.t = String.Table.create ()
    the requests of the script, e.g., to copy a page to Unicorn, until
    the script continues it, from an address. The machines run in the
    fiber of the script, which they pause with the [Paused] effect. *)
-type request = Continue of int64 | Map of int64
-type _ Effect.t += Paused : int64 -> request Effect.t
+type request =
+  | Continue of int64
+  | Map of int64
+  | Snapshot  (** the machine forks, and its parent stays, see [Make.serve] *)
+  | Restore of Primus.Machine.id
+      (** the machine is killed, and a fork of the snapshot continues *)
+
+type _ Effect.t +=
+  | Paused : int64 * Primus.Machine.id -> request Effect.t
+  | Ended : Primus.exit_status -> request Effect.t
+        (** the program ended, and the script may restore a snapshot *)
 
 let driven = ref false
 let pause = ref false
@@ -1009,23 +1022,24 @@ module Make (Machine : Primus.Machine.S) = struct
      many are parked *)
   let park e =
     Option.iter e.owner ~f:(fun owner ->
-        let pages =
-          Hashtbl.find_or_add parked owner ~default:Int64.Table.create
-        in
-        Hashtbl.iteri e.pages ~f:(fun ~key:page ~data:copy ->
-            let unfetched = pending e copy in
-            if unfetched || !parked_pages < parked_limit then begin
-              let data = read_page e page in
-              let unfetched =
-                unfetched
-                &&
-                match copy.snapshot with
-                | Some known -> not (Bytes.equal data known)
-                | None -> false
-              in
-              if not (Hashtbl.mem pages page) then incr parked_pages;
-              Hashtbl.set pages ~key:page ~data:{ data; copy; unfetched }
-            end))
+        if not (Hash_set.mem dead owner) then
+          let pages =
+            Hashtbl.find_or_add parked owner ~default:Int64.Table.create
+          in
+          Hashtbl.iteri e.pages ~f:(fun ~key:page ~data:copy ->
+              let unfetched = pending e copy in
+              if unfetched || !parked_pages < parked_limit then begin
+                let data = read_page e page in
+                let unfetched =
+                  unfetched
+                  &&
+                  match copy.snapshot with
+                  | Some known -> not (Bytes.equal data known)
+                  | None -> false
+                in
+                if not (Hashtbl.mem pages page) then incr parked_pages;
+                Hashtbl.set pages ~key:page ~data:{ data; copy; unfetched }
+              end))
 
   (* the parked pages of the machine go to Unicorn, with the pending
      ones writable and dirty *)
@@ -1294,6 +1308,7 @@ module Make (Machine : Primus.Machine.S) = struct
 
   let killed id =
     unpark_all id;
+    Hash_set.add dead id;
     Machine.return ()
 
   (* the memory of the machine, that finishes the system, is in Primus *)
@@ -1664,73 +1679,92 @@ module Make (Machine : Primus.Machine.S) = struct
         start_uc e pc deadline
     | _ -> error
 
-  (* the machine, which the script drives, pauses, and serves the
-     requests of the script, until it continues *)
-  let rec serve e pc =
+  (* The machine, which the script drives, pauses, and serves the
+     requests of the script, until it continues. The machine, which
+     takes a snapshot, forks, and its parent stays paused, as the
+     snapshot, which the script restores, after which the snapshot forks
+     again, so that it stays, and its fork continues. The machine, which
+     serves, owns Unicorn, as the script accesses its state there. *)
+  let rec serve pc =
     pause := false;
-    match Effect.perform (Paused pc) with
+    let* e = prepare () in
+    let* id = Machine.current () in
+    match Effect.perform (Paused (pc, id)) with
     | Continue pc -> Machine.return pc
-    | Map addr -> ensure_page e addr >>= fun () -> serve e pc
+    | Map addr -> ensure_page e addr >>= fun () -> serve pc
+    | Snapshot -> pull e >>= fun () -> snapshot id pc
+    | Restore snapshot ->
+        let* () = Machine.kill id in
+        let* () = Machine.switch snapshot in
+        (* the killed machine never continues *)
+        serve pc
+
+  and snapshot id pc =
+    let* () = Machine.fork () in
+    let* self = Machine.current () in
+    if Monads.Std.Monad.State.Multi.Id.equal self id then snapshot id pc
+    else serve pc
 
   let rec loop pc =
     let* e = prepare () in
-    let* pc = if !driven && !pause then serve e pc else Machine.return pc in
-    check_pages e >>= fun () ->
-    ensure_page e pc >>= fun () ->
-    let* () = account () in
-    let* used = Machine.Local.get elapsed in
-    let remaining = Option.map !timeout ~f:(fun t -> t -. used) in
-    match remaining with
-    | Some t when Float.(t <= 0.) -> terminate e
-    | _ -> (
-        sync_stops e;
-        let error =
-          start_uc e pc
-            (Option.map remaining ~f:(fun t -> Stdlib.Sys.time () +. t))
-        in
-        let* () = account () in
-        let pc = current_pc e in
-        (match e.reason with
-        | Some (Fault _)
-          when Option.equal Int64.equal !skipped_at (Some (code_addr e pc)) ->
-            resumed_at := !skipped_at
-        | _ -> ());
-        match (e.reason, error) with
-        | None, None when Option.is_some remaining -> loop pc
-        | Some Returned, _ | None, None -> pull e
-        | Some (Foreign addr), _ -> (
-            match Option.bind (function_name e addr) ~f:(call_returns e) with
-            | Some pc -> loop pc
-            | None -> (
-                native e addr >>= function
-                | Some pc -> loop pc
-                | None -> call_foreign e addr >>= loop))
-        | Some Pause, _ -> loop pc
-        | Some (Jump pc), _ -> loop pc
-        | Some (Fault (access, addr)), _ -> (
-            fault e access addr >>= function `Continue -> loop pc)
-        | Some (Interrupt n), _ -> (
-            match intrinsic_before (code_addr e pc) with
-            | Some site -> call_intrinsic e site >>= fun () -> loop pc
-            | None -> (
-                let read addr n =
-                  try Some (Uc.mem_read e.uc addr n) with Uc.Error _ -> None
-                in
-                match
-                  decode_intrinsic e.arch ~bits:(e.bytes * 8)
-                    ~big_endian:e.big_endian
-                    ~thumb:Int64.(pc land 1L = 1L)
-                    ~read n (code_addr e pc)
-                with
-                | Some site -> call_intrinsic e site >>= fun () -> loop pc
-                | None ->
-                    pull e >>= fun () ->
-                    fail "an unhandled interrupt %d at %Lx" n pc))
-        | Some Checkpoint, _ -> save e pc >>= fun () -> loop pc
-        | Some (Stop addr), _ -> stopped e addr >>= fun () -> loop pc
-        | Some Invalid, _ ->
-            pull e >>= fun () -> fail "an invalid instruction at %Lx" pc
-        | None, Some msg -> pull e >>= fun () -> fail "%s at %Lx" msg pc)
+    if !driven && !pause then serve pc >>= loop
+    else
+      check_pages e >>= fun () ->
+      ensure_page e pc >>= fun () ->
+      let* () = account () in
+      let* used = Machine.Local.get elapsed in
+      let remaining = Option.map !timeout ~f:(fun t -> t -. used) in
+      match remaining with
+      | Some t when Float.(t <= 0.) -> terminate e
+      | _ -> (
+          sync_stops e;
+          let error =
+            start_uc e pc
+              (Option.map remaining ~f:(fun t -> Stdlib.Sys.time () +. t))
+          in
+          let* () = account () in
+          let pc = current_pc e in
+          (match e.reason with
+          | Some (Fault _)
+            when Option.equal Int64.equal !skipped_at (Some (code_addr e pc)) ->
+              resumed_at := !skipped_at
+          | _ -> ());
+          match (e.reason, error) with
+          | None, None when Option.is_some remaining -> loop pc
+          | Some Returned, _ | None, None -> pull e
+          | Some (Foreign addr), _ -> (
+              match Option.bind (function_name e addr) ~f:(call_returns e) with
+              | Some pc -> loop pc
+              | None -> (
+                  native e addr >>= function
+                  | Some pc -> loop pc
+                  | None -> call_foreign e addr >>= loop))
+          | Some Pause, _ -> loop pc
+          | Some (Jump pc), _ -> loop pc
+          | Some (Fault (access, addr)), _ -> (
+              fault e access addr >>= function `Continue -> loop pc)
+          | Some (Interrupt n), _ -> (
+              match intrinsic_before (code_addr e pc) with
+              | Some site -> call_intrinsic e site >>= fun () -> loop pc
+              | None -> (
+                  let read addr n =
+                    try Some (Uc.mem_read e.uc addr n) with Uc.Error _ -> None
+                  in
+                  match
+                    decode_intrinsic e.arch ~bits:(e.bytes * 8)
+                      ~big_endian:e.big_endian
+                      ~thumb:Int64.(pc land 1L = 1L)
+                      ~read n (code_addr e pc)
+                  with
+                  | Some site -> call_intrinsic e site >>= fun () -> loop pc
+                  | None ->
+                      pull e >>= fun () ->
+                      fail "an unhandled interrupt %d at %Lx" n pc))
+          | Some Checkpoint, _ -> save e pc >>= fun () -> loop pc
+          | Some (Stop addr), _ -> stopped e addr >>= fun () -> loop pc
+          | Some Invalid, _ ->
+              pull e >>= fun () -> fail "an invalid instruction at %Lx" pc
+          | None, Some msg -> pull e >>= fun () -> fail "%s at %Lx" msg pc)
 
   (* the stop, at which the observers of the program counter, e.g., a
      debugger, see the state of the machine, and may change it, after

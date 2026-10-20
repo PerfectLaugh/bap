@@ -117,3 +117,16 @@ val arg : t -> int -> int64
 
 val exit_code : t -> int option
 (** the code, with which the program exited *)
+
+type snapshot
+(** the saved state of the paused program, its registers and its memory *)
+
+val snapshot : t -> snapshot
+(** [snapshot emu] saves the state of the paused program, which the program
+    continues from, when it is restored, as many times, as the script restores
+    it. *)
+
+val restore : t -> snapshot -> unit
+(** [restore emu snapshot] drops the state of the paused program, which
+    continues from the [snapshot], paused at its address. The hooks of the
+    script stay. *)
