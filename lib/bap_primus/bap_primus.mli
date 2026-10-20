@@ -1707,6 +1707,12 @@ module Std : sig
       val halting : unit observation
       (** occurs on [halt] operation *)
 
+      val exited : value observation
+      (** [exited code] occurs when the program exits with the [code], see
+          {!Make.exit}.
+
+          @since 2.6.0 *)
+
       val interrupt : int observation
       (** [interrupt n] occurs on the machine interrupt [n] (aka CPU exception)
       *)
@@ -1788,6 +1794,12 @@ module Std : sig
 
         val halt : never_returns m
         (** [halt] halts the machine by raise the [Halt] exception. *)
+
+        val exit : value -> never_returns m
+        (** [exit code] posts the {!exited} observation, as the program exits
+            with the [code], and halts the machine.
+
+            @since 2.6.0 *)
 
         val interrupt : int -> unit m
         (** [interrupt n] interrupts the computation with cpuexn [n] *)

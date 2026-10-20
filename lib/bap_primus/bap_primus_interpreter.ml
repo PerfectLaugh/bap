@@ -153,6 +153,10 @@ let halting, will_halt =
   Observation.provide ~inspect:sexp_of_unit "halting"
     ~desc:"Occurs before the halt operation is posted."
 
+let exited, will_exit =
+  Observation.provide ~inspect:sexp_of_value "exited"
+    ~desc:"Occurs when the program exits with the code."
+
 let division_by_zero, will_divide_by_zero =
   Observation.provide ~inspect:sexp_of_unit "division-by-zero"
     ~desc:"Occurs before the division by zero happens."
@@ -683,6 +687,7 @@ module Make (Machine : Machine) = struct
 
   let normal = Machine.return
   let halt = !!will_halt () >>= fun () -> Machine.raise Halt
+  let exit code = !!will_exit code >>= fun () -> halt
   let ( := ) v x = eval_exp x >>= set v
   let def () t = Def.lhs t := Def.rhs t
   let def = term normal def_t def ()

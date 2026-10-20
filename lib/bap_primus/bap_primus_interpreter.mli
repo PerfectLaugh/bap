@@ -16,6 +16,7 @@ end
 val clock : Time.t observation
 val pc_change : addr observation
 val halting : unit observation
+val exited : value observation
 val interrupt : int observation
 val division_by_zero : unit observation
 val segfault : addr observation
@@ -83,6 +84,7 @@ module Make (Machine : Machine) : sig
   type 'a m = 'a Machine.t
 
   val halt : never_returns m
+  val exit : value -> never_returns m
   val interrupt : int -> unit m
   val pc : addr m
   val set_pc : addr -> unit m

@@ -56,6 +56,8 @@ type reason =
   | Invalid
   | Checkpoint
   | Stop of int64  (** a stop of Primus, see [Primus.Interpreter.Stops] *)
+  | Pause  (** the script, that drives the machine, asks it to pause *)
+  | Jump of int64  (** a call hook returned, see [call_hooks] *)
 
 (* a pending return of a run *)
 type frame = { ret : int64; sp : int64 }
@@ -208,6 +210,42 @@ type native = { fn : Native.fn; args : exp list; result : (exp * int) option }
 
 (* the native functions that the program calls, by their names *)
 let natives : native String.Table.t = String.Table.create ()
+
+(* the arguments and the result of a function, see [native] *)
+type signature = { inputs : exp list; output : (exp * int) option }
+
+(* the signatures of the functions of the program, by their names *)
+let signatures : signature String.Table.t = String.Table.create ()
+
+(* The script, that drives the machines, see [Primus_unicorn_emu]. A
+   machine pauses before Unicorn runs, when the script asks, and serves
+   the requests of the script, e.g., to copy a page to Unicorn, until
+   the script continues it, from an address. The machines run in the
+   fiber of the script, which they pause with the [Paused] effect. *)
+type request = Continue of int64 | Map of int64
+type _ Effect.t += Paused : int64 -> request Effect.t
+
+let driven = ref false
+let pause = ref false
+
+(* the number of the starts of Unicorn, which tells the instruction that
+   runs again, e.g., after its fault, from the next one *)
+let starts = ref 0
+
+(* what a hook of a call does: the function runs, or returns the value
+   at once *)
+type action = Default | Return of int64
+
+(* the hooks of the calls of the functions, by their names, the latest
+   first *)
+let call_hooks : (unit -> action) list String.Table.t = String.Table.create ()
+
+(* the code, with which the program exited *)
+let exit_code : int option ref = ref None
+
+(* the hooks of the script, which every new engine gets, as the engine
+   may be created anew, see [broken] *)
+let engine_hooks : (engine -> unit) list ref = ref []
 
 (* the names of the subroutines of the program, by their addresses *)
 let names : string Int64.Table.t = Int64.Table.create ()
@@ -625,6 +663,7 @@ let create target ~foreign ~externals =
   @@ Uc.on_invalid_insn uc (fun () ->
       e.reason <- Some Invalid;
       false);
+  List.iter (List.rev !engine_hooks) ~f:(fun install -> install e);
   e
 
 let is_owner e id =
@@ -787,6 +826,158 @@ let backing memory : Primus.Memory.Backing.t =
                             Bytes.set known off c)
                     | None -> ())));
   }
+
+(* the first write of the code to a writable page, which is read-only
+   in Unicorn, until it is dirty *)
+let written_page e addr =
+  match Hashtbl.find e.pages (page_of addr) with
+  | Some ({ snapshot = Some _; dirty = false; perm; _ } as p) ->
+      p.dirty <- true;
+      e.dirty <- page_of addr :: e.dirty;
+      Uc.mem_protect e.uc (page_of addr) page_size perm;
+      true
+  | _ -> false
+
+(* the number of the bytes from [addr], at most [n], that Primus has
+   and may read, which are in Unicorn, raises [Missing] for the first
+   address of a page that is not copied yet, see [Native] *)
+let uc_readable e addr n =
+  let rec count addr n acc =
+    if n = 0 then acc
+    else
+      let page = page_of addr in
+      let off = Int64.(to_int_exn (addr - page)) in
+      let len = Int.min n (Int64.to_int_exn page_size - off) in
+      match Hashtbl.find e.pages page with
+      | None -> raise (Native.Missing addr)
+      | Some { perm; _ } when not (Uc.Perm.mem perm Uc.Perm.read) -> acc
+      | Some { holes; _ } -> (
+          let hole =
+            List.filter_map holes ~f:(fun (lo, hi) ->
+                if hi >= off && lo < off + len then Some (Int.max lo off)
+                else None)
+            |> List.min_elt ~compare:Int.compare
+          in
+          match hole with
+          | Some first -> acc + first - off
+          | None -> count Int64.(addr + of_int len) (n - len) (acc + len))
+  in
+  count addr n 0
+
+let uc_read e addr n =
+  if uc_readable e addr n < n then raise Native.Denied
+  else if n = 0 then ""
+  else Uc.mem_read e.uc addr n
+
+let uc_prefix e addr n =
+  match uc_readable e addr n with 0 -> "" | n -> Uc.mem_read e.uc addr n
+
+let uc_memory e : Native.memory = { read = uc_read e; prefix = uc_prefix e }
+
+(* the bytes may be written by a native function, as Primus may
+   write them *)
+let uc_check_write e addr n =
+  if uc_readable e addr n < n then raise Native.Denied;
+  let last = Int64.(addr + of_int n - 1L) in
+  let rec check page =
+    if Int64.(page <= last) then begin
+      (match Hashtbl.find e.pages page with
+      | Some { snapshot = Some _; _ } -> ()
+      | _ -> raise Native.Denied);
+      check Int64.(page + page_size)
+    end
+  in
+  if n > 0 then check (page_of addr)
+
+let uc_write e addr data =
+  let n = String.length data in
+  if n > 0 then begin
+    let last = Int64.(addr + of_int n - 1L) in
+    let rec dirty page =
+      if Int64.(page <= last) then begin
+        ignore (written_page e page : bool);
+        Option.iter (Hashtbl.find e.pages page) ~f:(fun p -> p.fetched <- -1);
+        dirty Int64.(page + page_size)
+      end
+    in
+    dirty (page_of addr);
+    Uc.mem_write e.uc addr data
+  end
+
+(* the value of an expression in Unicorn *)
+let rec eval_uc e (exp : exp) =
+  match exp with
+  | Var v -> (
+      match Target.Regs.read e.regs v with
+      | Some x -> x
+      | None -> raise Native.Denied)
+  | Int x -> x
+  | Cast (kind, n, x) -> Bil.Apply.cast kind n (eval_uc e x)
+  | Extract (hi, lo, x) -> Word.extract_exn ~hi ~lo (eval_uc e x)
+  | BinOp (((PLUS | MINUS) as op), x, y) ->
+      Bil.Apply.binop op (eval_uc e x) (eval_uc e y)
+  | Load (_, addr, endian, size) ->
+      let addr = int64_of_word (eval_uc e addr) in
+      Word.of_binary ~width:(Size.in_bits size) endian
+        (uc_read e addr (Size.in_bytes size))
+  | _ -> raise Native.Denied
+
+(* writes the result to a register, the result in the lower part of a
+   register is sign-extended to the whole register, as the ABIs of
+   RISC-V and MIPS64 want for the 32-bit results, and the others leave
+   the upper bits undefined *)
+let assign_uc e (exp : exp) x =
+  match exp with
+  | Var v -> Target.Regs.write e.regs v x
+  | Cast (LOW, _, Var v) | Extract (_, 0, Var v) -> (
+      match Var.typ v with
+      | Imm width -> Target.Regs.write e.regs v (Bil.Apply.cast SIGNED width x)
+      | _ -> false)
+  | _ -> false
+
+(* the return address of the call, which just started, and the stack
+   pointer after the return, in Unicorn *)
+let frame_uc e =
+  let sp = int64_of_word (eval_uc e (Var e.sp)) in
+  match e.link with
+  | Some lr -> { ret = int64_of_word (eval_uc e (Var lr)); sp }
+  | None ->
+      (* the return address on the stack of x86 *)
+      let ret =
+        Word.of_binary ~width:(e.bytes * 8) LittleEndian (uc_read e sp e.bytes)
+      in
+      { ret = int64_of_word ret; sp = Int64.(sp + of_int e.bytes) }
+
+(* the name of the function at the address, which Unicorn calls *)
+let function_name e addr =
+  match Hashtbl.find e.trampolines addr with
+  | Some name -> Some name
+  | None -> Hashtbl.find names addr
+
+(* runs the hooks of the call of the function, the first of which, that
+   returns a value, returns it from the call, so that Unicorn continues
+   from the return address, which is the result *)
+let call_returns e name =
+  match Hashtbl.find call_hooks name with
+  | None -> None
+  | Some hooks -> (
+      match
+        List.find_map (List.rev hooks) ~f:(fun hook ->
+            match hook () with Return x -> Some x | Default -> None)
+      with
+      | None -> None
+      | Some x ->
+          let frame = frame_uc e in
+          (match Hashtbl.find signatures name with
+          | Some { output = Some (exp, width); _ } ->
+              ignore (assign_uc e exp (Word.of_int64 ~width x) : bool)
+          | _ -> ());
+          if Option.is_none e.link then
+            ignore
+              (Target.Regs.write e.regs e.sp
+                 (Word.of_int64 ~width:(e.bytes * 8) frame.sp)
+                : bool);
+          Some frame.ret)
 
 module Make (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
@@ -1199,17 +1390,6 @@ module Make (Machine : Primus.Machine.S) = struct
     drop_page e (page_of addr);
     `Continue
 
-  (* the first write of the code to a writable page, which is read-only
-     in Unicorn, until it is dirty *)
-  let written_page e addr =
-    match Hashtbl.find e.pages (page_of addr) with
-    | Some ({ snapshot = Some _; dirty = false; perm; _ } as p) ->
-        p.dirty <- true;
-        e.dirty <- page_of addr :: e.dirty;
-        Uc.mem_protect e.uc (page_of addr) page_size perm;
-        true
-    | _ -> false
-
   let fault e access addr =
     match (access : Uc.access) with
     | Write_prot when written_page e addr -> Machine.return `Continue
@@ -1232,118 +1412,6 @@ module Make (Machine : Primus.Machine.S) = struct
         | Some own, Some stub when phys_equal own code -> Some stub
         | _ -> None)
     | _ -> None
-
-  (* the number of the bytes from [addr], at most [n], that Primus has
-     and may read, which are in Unicorn, raises [Missing] for the first
-     address of a page that is not copied yet, see [Native] *)
-  let uc_readable e addr n =
-    let rec count addr n acc =
-      if n = 0 then acc
-      else
-        let page = page_of addr in
-        let off = Int64.(to_int_exn (addr - page)) in
-        let len = Int.min n (Int64.to_int_exn page_size - off) in
-        match Hashtbl.find e.pages page with
-        | None -> raise (Native.Missing addr)
-        | Some { perm; _ } when not (Uc.Perm.mem perm Uc.Perm.read) -> acc
-        | Some { holes; _ } -> (
-            let hole =
-              List.filter_map holes ~f:(fun (lo, hi) ->
-                  if hi >= off && lo < off + len then Some (Int.max lo off)
-                  else None)
-              |> List.min_elt ~compare:Int.compare
-            in
-            match hole with
-            | Some first -> acc + first - off
-            | None -> count Int64.(addr + of_int len) (n - len) (acc + len))
-    in
-    count addr n 0
-
-  let uc_read e addr n =
-    if uc_readable e addr n < n then raise Native.Denied
-    else if n = 0 then ""
-    else Uc.mem_read e.uc addr n
-
-  let uc_prefix e addr n =
-    match uc_readable e addr n with 0 -> "" | n -> Uc.mem_read e.uc addr n
-
-  let uc_memory e : Native.memory = { read = uc_read e; prefix = uc_prefix e }
-
-  (* the bytes may be written by a native function, as Primus may
-     write them *)
-  let uc_check_write e addr n =
-    if uc_readable e addr n < n then raise Native.Denied;
-    let last = Int64.(addr + of_int n - 1L) in
-    let rec check page =
-      if Int64.(page <= last) then begin
-        (match Hashtbl.find e.pages page with
-        | Some { snapshot = Some _; _ } -> ()
-        | _ -> raise Native.Denied);
-        check Int64.(page + page_size)
-      end
-    in
-    if n > 0 then check (page_of addr)
-
-  let uc_write e addr data =
-    let n = String.length data in
-    if n > 0 then begin
-      let last = Int64.(addr + of_int n - 1L) in
-      let rec dirty page =
-        if Int64.(page <= last) then begin
-          ignore (written_page e page : bool);
-          Option.iter (Hashtbl.find e.pages page) ~f:(fun p -> p.fetched <- -1);
-          dirty Int64.(page + page_size)
-        end
-      in
-      dirty (page_of addr);
-      Uc.mem_write e.uc addr data
-    end
-
-  (* the value of an expression in Unicorn *)
-  let rec eval_uc e (exp : exp) =
-    match exp with
-    | Var v -> (
-        match Target.Regs.read e.regs v with
-        | Some x -> x
-        | None -> raise Native.Denied)
-    | Int x -> x
-    | Cast (kind, n, x) -> Bil.Apply.cast kind n (eval_uc e x)
-    | Extract (hi, lo, x) -> Word.extract_exn ~hi ~lo (eval_uc e x)
-    | BinOp (((PLUS | MINUS) as op), x, y) ->
-        Bil.Apply.binop op (eval_uc e x) (eval_uc e y)
-    | Load (_, addr, endian, size) ->
-        let addr = int64_of_word (eval_uc e addr) in
-        Word.of_binary ~width:(Size.in_bits size) endian
-          (uc_read e addr (Size.in_bytes size))
-    | _ -> raise Native.Denied
-
-  (* writes the result to a register, the result in the lower part of a
-     register is sign-extended to the whole register, as the ABIs of
-     RISC-V and MIPS64 want for the 32-bit results, and the others leave
-     the upper bits undefined *)
-  let assign_uc e (exp : exp) x =
-    match exp with
-    | Var v -> Target.Regs.write e.regs v x
-    | Cast (LOW, _, Var v) | Extract (_, 0, Var v) -> (
-        match Var.typ v with
-        | Imm width ->
-            Target.Regs.write e.regs v (Bil.Apply.cast SIGNED width x)
-        | _ -> false)
-    | _ -> false
-
-  (* the return address of the call, which just started, and the stack
-     pointer after the return, in Unicorn *)
-  let frame_uc e =
-    let sp = int64_of_word (eval_uc e (Var e.sp)) in
-    match e.link with
-    | Some lr -> { ret = int64_of_word (eval_uc e (Var lr)); sp }
-    | None ->
-        (* the return address on the stack of x86 *)
-        let ret =
-          Word.of_binary ~width:(e.bytes * 8) LittleEndian
-            (uc_read e sp e.bytes)
-        in
-        { ret = int64_of_word ret; sp = Int64.(sp + of_int e.bytes) }
 
   (* runs the native function at the address, unless the code at the
      address is stopped at, the function is linked to the stub of the
@@ -1576,6 +1644,7 @@ module Make (Machine : Primus.Machine.S) = struct
   let rec start_uc e pc deadline =
     e.reason <- None;
     skipped_at := None;
+    incr starts;
     let error =
       try
         Uc.start e.uc pc
@@ -1595,8 +1664,17 @@ module Make (Machine : Primus.Machine.S) = struct
         start_uc e pc deadline
     | _ -> error
 
+  (* the machine, which the script drives, pauses, and serves the
+     requests of the script, until it continues *)
+  let rec serve e pc =
+    pause := false;
+    match Effect.perform (Paused pc) with
+    | Continue pc -> Machine.return pc
+    | Map addr -> ensure_page e addr >>= fun () -> serve e pc
+
   let rec loop pc =
     let* e = prepare () in
+    let* pc = if !driven && !pause then serve e pc else Machine.return pc in
     check_pages e >>= fun () ->
     ensure_page e pc >>= fun () ->
     let* () = account () in
@@ -1621,9 +1699,14 @@ module Make (Machine : Primus.Machine.S) = struct
         | None, None when Option.is_some remaining -> loop pc
         | Some Returned, _ | None, None -> pull e
         | Some (Foreign addr), _ -> (
-            native e addr >>= function
+            match Option.bind (function_name e addr) ~f:(call_returns e) with
             | Some pc -> loop pc
-            | None -> call_foreign e addr >>= loop)
+            | None -> (
+                native e addr >>= function
+                | Some pc -> loop pc
+                | None -> call_foreign e addr >>= loop))
+        | Some Pause, _ -> loop pc
+        | Some (Jump pc), _ -> loop pc
         | Some (Fault (access, addr)), _ -> (
             fault e access addr >>= function `Continue -> loop pc)
         | Some (Interrupt n), _ -> (
@@ -1751,14 +1834,17 @@ module Loader (Machine : Primus.Machine.S) = struct
      whose result is written to a register, see [Make.eval_uc] *)
   let index_natives prog =
     Hashtbl.clear natives;
+    Hashtbl.clear signatures;
     Term.enum sub_t prog
     |> Seq.iter ~f:(fun sub ->
         let name = Sub.name sub in
         Option.iter (Term.get_attr sub address) ~f:(fun addr ->
             Hashtbl.set names ~key:(int64_of_word addr) ~data:name);
-        match Native.find name with
-        | Some fn when Set.mem !native_stubs name -> (
-            let args = Term.enum arg_t sub |> Seq.to_list in
+        let args = Term.enum arg_t sub |> Seq.to_list in
+        match args with
+        | [] -> ()
+        | _ ->
+            let args = args in
             let outs, ins =
               List.partition_tf args ~f:(fun arg ->
                   match Arg.intent arg with Some Out -> true | _ -> false)
@@ -1771,23 +1857,26 @@ module Loader (Machine : Primus.Machine.S) = struct
               | Var _ | Cast (LOW, _, Var _) | Extract (_, 0, Var _) -> true
               | _ -> false
             in
-            match outs with
-            | [] when not (List.is_empty ins) ->
-                Hashtbl.set natives ~key:name
-                  ~data:{ fn; args = List.map ins ~f:Arg.rhs; result = None }
-            | [ out ] when assignable (Arg.rhs out) -> (
-                match width out with
-                | Some n ->
+            let signature =
+              match outs with
+              | [] -> Some { inputs = List.map ins ~f:Arg.rhs; output = None }
+              | [ out ] when assignable (Arg.rhs out) ->
+                  Option.map (width out) ~f:(fun n ->
+                      {
+                        inputs = List.map ins ~f:Arg.rhs;
+                        output = Some (Arg.rhs out, n);
+                      })
+              | _ -> None
+            in
+            Option.iter signature ~f:(fun { inputs; output } ->
+                Hashtbl.set signatures ~key:name ~data:{ inputs; output };
+                match Native.find name with
+                | Some fn
+                  when Set.mem !native_stubs name && not (List.is_empty inputs)
+                  ->
                     Hashtbl.set natives ~key:name
-                      ~data:
-                        {
-                          fn;
-                          args = List.map ins ~f:Arg.rhs;
-                          result = Some (Arg.rhs out, n);
-                        }
-                | None -> ())
-            | _ -> ())
-        | _ -> ())
+                      ~data:{ fn; args = inputs; result = output }
+                | _ -> ()))
 
   let link_sub sub =
     let* linked = is_linked Sub.name sub in
@@ -1956,6 +2045,12 @@ module Loader (Machine : Primus.Machine.S) = struct
         link_program;
         Primus.System.init >>> create_engine;
         Primus.Machine.fork >>> Exec.forked;
+        ( Primus.Interpreter.exited >>> fun code ->
+          exit_code :=
+            Some
+              (Word.to_int_exn
+                 (Word.extract_exn ~hi:7 (Primus.Value.to_word code)));
+          Machine.return () );
         Primus.Machine.kill >>> Exec.killed;
         Primus.System.fini >>> Exec.finished;
         Primus.System.stop >>> Exec.system_stopped;

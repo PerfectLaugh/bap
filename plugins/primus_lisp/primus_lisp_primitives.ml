@@ -94,8 +94,8 @@ module Closure (Machine : Primus.Machine.S) = struct
     | None -> Value.of_int ~width width
     | Some x -> Value.of_int ~width x
 
-  let exit_with _ =
-    Eval.halt >>| Nothing.unreachable_code >>= fun () -> Value.b0
+  let exit_with code =
+    Eval.exit code >>| Nothing.unreachable_code >>= fun () -> Value.b0
 
   (* the byte in hex, or ?? if it is not mapped, or -- if it is not
      readable, as its load would be a page fault *)

@@ -1,0 +1,14 @@
+; The library, with which the scripts run the programs in Unicorn, see
+; bap_emu.mli.
+
+(library
+ (name bap_emu)
+ (public_name bap-primus-unicorn.emu)
+ (libraries
+  bap
+  bap-core-theory
+  bap-knowledge
+  bap-primus
+  bap-primus-unicorn.plugin
+  bap-primus-unicorn.unicorn
+  core))

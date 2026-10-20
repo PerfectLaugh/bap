@@ -328,4 +328,14 @@ module Regs = struct
         true
 
   let unmapped t = t.unmapped
+  let read_name t name = Option.map (Map.find t.locs name) ~f:(read_loc t.uc)
+
+  let write_name t name x =
+    match Map.find t.locs name with
+    | None -> false
+    | Some loc ->
+        write_loc t.uc loc (Word.extract_exn ~hi:(loc.width - 1) x);
+        true
+
+  let names t = Map.keys t.locs
 end

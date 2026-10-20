@@ -38,4 +38,14 @@ module Regs : sig
 
   val unmapped : t -> string list
   (** the registers of the target that have no counterparts *)
+
+  val read_name : t -> string -> word option
+  (** [read_name regs name] reads the register of the target by its name. *)
+
+  val write_name : t -> string -> word -> bool
+  (** [write_name regs name x] writes [x], extended or truncated to the width of
+      the register, if the register has a counterpart. *)
+
+  val names : t -> string list
+  (** the names of the registers that have counterparts *)
 end

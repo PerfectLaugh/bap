@@ -565,6 +565,125 @@ let bare data =
         contains env "prints the CRC" out "1489580789");
   ]
 
+(* the scripts run the programs with Bap_emu, pause them, see and change
+   their registers and memory, and hook their instructions, stores and
+   calls *)
+let emu data =
+  let script env bin source =
+    bap ~timeout:300. env
+      [ "script"; write env "script.ml" source; path data ("bin/" ^ bin) ]
+  in
+  [
+    case "emu/x86_64-linux-gnu-echo/main" (fun env ->
+        let out =
+          script env "x86_64-linux-gnu-echo"
+            {|#require "bap-primus-unicorn.emu"
+open Bap.Std
+module Emu = Bap_emu
+
+let word emu addr =
+  let s = Emu.read emu addr 8 in
+  let r = ref 0L in
+  for i = 7 downto 0 do r := Int64.(logor (shift_left !r 8) (of_int (Char.code s.[i]))) done;
+  !r
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  Bap_script.init ();
+  let emu = Emu.create ~args:[ "hello"; "cruel"; "world" ] (Bap_script.project ~bare:true file) in
+  Printf.printf "paused at the entry %Lx\n%!" (Emu.pc emu);
+  (match Emu.run emu ~until:0x40076bL with
+  | Paused -> Printf.printf "paused at main %Lx, argc = %Ld\n%!" (Emu.pc emu) (Emu.reg emu "RDI")
+  | _ -> failwith "main is not reached");
+  let argv = Emu.reg emu "RSI" in
+  let arg1 = word emu Int64.(add argv 8L) in
+  Printf.printf "argv[1] = %s\n%!" (Emu.read emu arg1 5);
+  Emu.write emu arg1 "HELLO";
+  let stores = ref 0 in
+  Emu.on_write emu (fun _ _ _ _ -> incr stores);
+  Emu.on_call emu "putchar" (fun emu ->
+      if Emu.arg emu 0 = Int64.of_int (Char.code 'l') then Return 108L else Default);
+  (match Emu.run emu with
+  | Exited code ->
+      Printf.printf "exited with %s after %d stores\n"
+        (match code with Some c -> string_of_int c | None -> "?") !stores
+  | Paused -> print_endline "paused"
+  | Failed msg -> print_endline ("failed: " ^ msg))
+|}
+        in
+        sequence env out
+          [
+            ("pauses at the entry", "paused at the entry 400600");
+            ("runs until main", "paused at main 40076b, argc = 4");
+            ("reads the memory", "argv\\[1\\] = hello");
+            ("writes the memory", "HELLO");
+            ("replaces the calls", "crue\nword");
+            ("exits", "exited with 0 after [0-9]+ stores");
+          ]);
+    case "emu/x86_64-linux-gnu-echo/step" (fun env ->
+        let out =
+          script env "x86_64-linux-gnu-echo"
+            {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+
+let show emu = function
+  | Emu.Paused -> Printf.printf "paused at %Lx\n%!" (Emu.pc emu)
+  | Exited c -> Printf.printf "exited %s\n%!" (match c with Some c -> string_of_int c | None -> "?")
+  | Failed m -> Printf.printf "failed %s\n%!" m
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  Bap_script.init ();
+  let emu = Emu.create ~args:[ "hello"; "cruel" ] (Bap_script.project ~bare:true file) in
+  (* three steps from the entry *)
+  for _ = 1 to 3 do show emu (Emu.step emu) done;
+  (* the first instruction of print_strings stops the program *)
+  let stopped = ref false in
+  Emu.on_code emu ~first:0x400733L ~last:0x400733L (fun emu _ ->
+      if not !stopped then (stopped := true; Emu.stop emu));
+  show emu (Emu.run emu);
+  (* print_endline, a function of the program, prints nothing for the
+     arguments, but the strings of the program *)
+  let calls = ref 0 in
+  Emu.on_call emu "print_endline" (fun _ ->
+      incr calls; if !calls <= 3 then Return 0L else Default);
+  show emu (Emu.run emu);
+  Printf.printf "print_endline was called %d times\n" !calls
+|}
+        in
+        sequence env out
+          [
+            ("steps", "paused at 400602\npaused at 400605\npaused at 400606");
+            ("stops in a hook", "paused at 400733");
+            ("replaces a function of the program", "\nwe\n");
+            ("calls it", "print_endline was called 11 times");
+          ]);
+    case "emu/arm-linux-gnueabihf-thumb-crc" (fun env ->
+        let out =
+          script env "arm-linux-gnueabihf-thumb-crc"
+            {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  let bare = Sys.getenv_opt "BARE" <> Some "0" in
+  Bap_script.init ();
+  let emu = Emu.create ~args:[ "hi" ] (Bap_script.project ~bare file) in
+  let pcs = List.init 3 (fun _ -> ignore (Emu.step emu); Printf.sprintf "%Lx" (Emu.pc emu)) in
+  Printf.printf "steps: %s\n%!" (String.concat " " pcs);
+  match Emu.run emu with
+  | Exited c -> Printf.printf "exited %s\n" (match c with Some c -> string_of_int c | None -> "?")
+  | Paused -> print_endline "paused"
+  | Failed m -> print_endline ("failed: " ^ m)
+|}
+        in
+        sequence env out
+          [
+            ("steps the Thumb code", "steps: 202df 202e1 202e3");
+            ("prints the CRC", "1489580789");
+            ("exits", "exited 0");
+          ]);
+  ]
+
 (* the scripts stop the machines with Bap_script_debugger, and see and
    change them in their handlers, the same in the interpreter and in
    Unicorn *)
@@ -902,6 +1021,7 @@ let tests =
     debugger;
     scripts;
     bare;
+    emu;
     script_debugger;
     mprotect;
     mmap;
