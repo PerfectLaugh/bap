@@ -89,7 +89,28 @@ val read : t -> int64 -> int -> string
 
 val write : t -> int64 -> string -> unit
 (** [write emu addr data] writes the bytes, also to the code, as the debuggers
-    do, raises [Invalid_argument] as {!read} does. *)
+    do, raises [Invalid_argument] as {!read} does.
+
+    {b Warning:} the bytes of a read-only page, e.g., of the code, go only to
+    the copy of the page in Unicorn, not to the memory of the machine in Primus,
+    so they are lost, when Unicorn copies the page anew, e.g., after
+    {!snapshot}, which forks the machine, or after the protection of the page
+    changes, and Primus doesn't see them, e.g., when it interprets the code of
+    the page, see the taint and the symbolic execution. Use {!patch} for the
+    code, that must stay patched. It is the only write in the hooks.
+
+    The writable pages have no such problem, as their changes go to Primus. *)
+
+val patch : t -> int64 -> string -> unit
+(** [patch emu addr data] stores the bytes to the memory of the machine in
+    Primus, also to the read-only pages, e.g., to the code, from which they go
+    to Unicorn, which translates the changed code anew, so that they stay, as
+    the program changed them, e.g., after {!snapshot} or {!restore} of a later
+    snapshot, and the instructions, that Primus interprets, or whose registers
+    the executor tracks, are decoded and lifted anew from them.
+
+    Raises [Invalid_argument] as {!read} does, or if the program is not paused,
+    e.g., in a hook. *)
 
 val on_code : ?first:int64 -> ?last:int64 -> t -> (t -> int64 -> unit) -> unit
 (** [on_code emu f] calls [f emu addr] before each instruction from [first] to

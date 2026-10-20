@@ -672,6 +672,39 @@ let () =
             ("replaces a function of the program", "\nwe\n");
             ("calls it", "print_endline was called 11 times");
           ]);
+    (* the patched code stays, after the snapshot forks the machine, and
+       after it is restored, which Bap_emu.write doesn't guarantee *)
+    case "emu/x86_64-linux-gnu-echo/patch" (fun env ->
+        let out =
+          script env "x86_64-linux-gnu-echo"
+            {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+
+let status = function
+  | Emu.Exited _ -> print_endline "exited"
+  | Paused -> print_endline "paused"
+  | Failed m -> print_endline ("failed: " ^ m)
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  Bap_script.init ();
+  let emu = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true file) in
+  ignore (Emu.run emu ~until:0x40076bL);
+  (* mov $0xa, %edi, which prints the newline, prints + instead *)
+  Emu.patch emu 0x400727L "\xbf\x2b";
+  let snapshot = Emu.snapshot emu in
+  status (Emu.run emu);
+  Emu.restore emu snapshot;
+  status (Emu.run emu)
+|}
+        in
+        sequence env out
+          [
+            ("runs the patched code", "hello\\+");
+            ("exits", "exited");
+            ("runs it after the restore", "hello\\+");
+            ("exits again", "exited");
+          ]);
     case "emu/x86_64-linux-gnu-echo/snapshot" (fun env ->
         let out =
           script env "x86_64-linux-gnu-echo"

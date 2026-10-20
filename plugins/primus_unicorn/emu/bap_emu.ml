@@ -94,7 +94,7 @@ let start (entry : Primus.Linker.name) =
   | X.Restore snapshot ->
       Machine.current () >>= fun id ->
       Machine.kill id >>= fun () -> Machine.switch snapshot
-  | X.Continue _ | X.Map _ | X.Snapshot -> Machine.return ()
+  | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ -> Machine.return ()
 
 let create ?(system = "bap:unicorn-executor") ?(components = []) ?(args = [])
     ?(envp = []) ?entry proj =
@@ -274,6 +274,15 @@ let write t addr data =
             | None -> false)
       in
       if code then Uc.flush_tb e.uc)
+
+(* the bytes go to Primus, from which they go to Unicorn, see
+   [X.backing], and the code, that it translated, is translated anew *)
+let patch t addr data =
+  if not (paused t) then
+    invalid_arg "Bap_emu.patch: the program is not paused, e.g., in a hook";
+  (* the bytes are mapped and readable *)
+  ignore (read t addr (String.length data) : string);
+  resume t (X.Store (addr, data))
 
 let on_code ?first ?last t f =
   installed (fun e ->

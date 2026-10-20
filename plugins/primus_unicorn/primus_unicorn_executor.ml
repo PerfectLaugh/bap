@@ -275,6 +275,8 @@ type request =
   | Snapshot  (** the machine forks, and its parent stays, see [Make.serve] *)
   | Restore of Primus.Machine.id
       (** the machine is killed, and a fork of the snapshot continues *)
+  | Store of int64 * string
+      (** the bytes are stored to the memory of Primus, see [Bap_emu.patch] *)
 
 type _ Effect.t +=
   | Paused : int64 * Primus.Machine.id -> request Effect.t
@@ -920,12 +922,17 @@ let backing memory : Primus.Memory.Backing.t =
             let code = ref false in
             String.iteri data ~f:(fun i c ->
                 let addr = Int64.(addr + of_int i) in
+                (* the copies of the read-only pages too, e.g., of the
+                   code, that a script patches, see [Bap_emu.patch] *)
                 match Hashtbl.find e.pages (page_of addr) with
-                | Some { snapshot = Some known; perm; _ } ->
-                    Bytes.set known Int64.(to_int_exn (addr - page_of addr)) c;
+                | Some { snapshot; perm; _ } ->
+                    Option.iter snapshot ~f:(fun known ->
+                        Bytes.set known
+                          Int64.(to_int_exn (addr - page_of addr))
+                          c);
                     Uc.mem_write e.uc addr (String.of_char c);
                     if Uc.Perm.mem perm Uc.Perm.exec then code := true
-                | _ -> ());
+                | None -> ());
             (* the code, which Unicorn translated, is translated anew *)
             if !code then Uc.flush_tb e.uc
         | _ -> (
@@ -2075,6 +2082,21 @@ module Make (Machine : Primus.Machine.S) = struct
     match Effect.perform (Paused (pc, id)) with
     | Continue pc -> Machine.return pc
     | Map addr -> ensure_page e addr >>= fun () -> serve pc
+    | Store (addr, data) ->
+        (* the stored bytes of a read-only segment would be writable, so
+           they keep their protection *)
+        let bytes =
+          List.init (String.length data) ~f:(fun i ->
+              word e Int64.(addr + of_int i))
+        in
+        let* protections = Machine.List.map bytes ~f:Memory.protection in
+        let* () = Memory.store_bytes (word e addr) data in
+        let* () =
+          Machine.List.iter (List.zip_exn bytes protections) ~f:(function
+            | a, Some p -> Memory.protect ~lower:a ~upper:a p
+            | _, None -> Machine.return ())
+        in
+        serve pc
     | Snapshot -> pull e >>= fun () -> snapshot id pc
     | Restore snapshot ->
         let* () = Machine.kill id in
