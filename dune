@@ -12,7 +12,7 @@
    (:standard
     (:include %{project_root}/link_flags.sexp)))))
 
-; the flags of the linker of all programs, see tools/link-flags.ocaml,
+; the flags of the linker of all programs, see tools/link_flags,
 ; which on macOS keep the linker of Xcode 15 from warning about the
 ; libraries, that the libraries of OCaml pass to it more than once
 
@@ -30,9 +30,7 @@
  (enabled_if
   (= %{system} macosx))
  (action
-  (with-stdout-to
-   %{target}
-   (run %{bin:ocaml} %{dep:tools/link-flags.ocaml} %{cc}))))
+  (run %{exe:tools/link_flags/link_flags.exe})))
 
 (rule
  (target config.status.in)

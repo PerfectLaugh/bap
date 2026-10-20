@@ -1,0 +1,10 @@
+; the program, that writes the flags of the linker of all programs, see
+; the root dune file, is linked without them, as they are its output
+
+(env
+ (_
+  (link_flags ())))
+
+(executable
+ (name link_flags)
+ (libraries dune-configurator))
