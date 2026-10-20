@@ -195,8 +195,15 @@ module Taint = struct
     module Value = Primus.Value.Make (Machine)
     module Taint = Object.Make (Machine)
     open Machine.Syntax
+    module Track = Primus.Track.Make (Machine)
 
     let report_attached r t v = Machine.Observation.make attach (r, t, v)
+
+    (* the tainted values and locations are left to the interpreter *)
+    let track (Rel { kind }) v =
+      match kind with
+      | Direct -> Track.track v
+      | Indirect -> Track.mark (Primus.Value.to_word v)
 
     let change v (Rel { field; key }) ~f =
       Machine.Local.update tainter ~f:(fun t ->
@@ -207,6 +214,7 @@ module Taint = struct
         | None -> Some ts
         | Some ts' -> Some (Set.union ts ts'))
       >>= fun () ->
+      (if Set.is_empty ts then Machine.return () else track r v) >>= fun () ->
       Machine.Observation.post attach ~f:(fun report ->
           Set.to_sequence ts |> Machine.Seq.iter ~f:(fun o -> report (r, o, v)))
 
@@ -239,6 +247,7 @@ module Taint = struct
                 | Some taints -> Set.add taints taint);
           })
       >>= fun () ->
+      Track.track value >>= fun () ->
       report_attached Rel.direct taint value >>| fun () -> taint
 
     let new_indirect ~addr ~len kind =
@@ -248,6 +257,7 @@ module Taint = struct
       Seq.range 0 len
       |> Machine.Seq.fold ~init:s.indirect ~f:(fun indirect off ->
           Value.nsucc addr off >>= fun addr ->
+          Track.mark (Primus.Value.to_word addr) >>= fun () ->
           report_attached Rel.indirect taint addr >>| fun () ->
           Map.update indirect addr ~f:(function
             | None -> Object.Set.singleton taint

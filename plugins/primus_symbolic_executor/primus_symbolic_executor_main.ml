@@ -433,6 +433,7 @@ end = struct
   module Mems = Primus.Memory.Make (Machine)
   module Debug = Debug (Machine)
   module Ctxt = Context.Make (Machine)
+  module Track = Primus.Track.Make (Machine)
 
   let id = Primus.Value.id
   let value s x = Map.find s.values (id x)
@@ -446,6 +447,7 @@ end = struct
     | Some x ->
         Machine.Local.put executor
           { s with values = Map.add_exn s.values ~key:(id r) ~data:(f x) }
+        >>= fun () -> Track.track r
 
   let lift2 x y r f =
     Machine.Local.get executor >>= fun s ->
@@ -455,6 +457,7 @@ end = struct
         let x = to_formula x fx and y = to_formula y fy in
         Machine.Local.put executor
           { s with values = Map.add_exn s.values ~key:(id r) ~data:(f x y) }
+        >>= fun () -> Track.track r
 
   let lift3 x y z r f =
     Machine.Local.get executor >>= fun s ->
@@ -466,6 +469,7 @@ end = struct
         and z = to_formula z fz in
         Machine.Local.put executor
           { s with values = Map.add_exn s.values ~key:(id r) ~data:(f x y z) }
+        >>= fun () -> Track.track r
 
   let on_binop ((op, x, y), z) = lift2 x y z @@ SMT.binop op
   let on_unop ((op, x), z) = lift1 x z @@ SMT.unop op
@@ -474,8 +478,8 @@ end = struct
   let on_ite ((c, x, y), z) = lift3 c x y z @@ SMT.ite
   let on_cast ((c, w, x), z) = lift1 x z @@ SMT.cast c w
 
-  let set_input origin x =
-    let id = Primus.Value.id x in
+  let set_input origin v =
+    let id = Primus.Value.id v in
     let size = Input.size origin in
     let x = SMT.var (Input.to_symbol origin) size in
     Machine.Local.update executor ~f:(fun s ->
@@ -483,6 +487,7 @@ end = struct
           inputs = Set.add s.inputs origin;
           values = Map.set s.values ~key:id ~data:x;
         })
+    >>= fun () -> Track.track v
 
   let on_memory_input (p, x) =
     Mems.memory >>= fun desc -> set_input (Input.ptr desc p) x

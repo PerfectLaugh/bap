@@ -36,6 +36,10 @@ module Regs : sig
   val basis : t -> var list
   (** the mapped registers that are not aliases *)
 
+  val owner : t -> string -> string option
+  (** [owner regs name] the register of the basis, which holds the register
+      [name], e.g., itself, or the origin of an alias. *)
+
   val unmapped : t -> string list
   (** the registers of the target that have no counterparts *)
 

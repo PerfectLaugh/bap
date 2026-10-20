@@ -1830,6 +1830,21 @@ module Std : sig
         val blk : blk term -> unit m
         (** [blk x] interprets the block [x]. *)
 
+        val step : next:addr -> blk term list -> value m
+        (** [step ~next blks] interprets the blocks of one instruction, e.g., of
+            [Blk.from_insn], which are not a part of the program, and returns
+            the address of the instruction, that runs next, which is [next], if
+            the instruction falls through.
+
+            The jumps between the blocks continue in them, and the jump, which
+            leaves the blocks, is not taken, but its destination is returned.
+            The observations are the same as of [blk], the interrupts are
+            signaled, and the instruction, that falls through after its
+            conditional jumps are not taken, jumps to [next], as the program
+            does.
+
+            @since 2.6.0 *)
+
         val exp : exp -> value m
         (** [exp x] returns a value of [x]. *)
 
@@ -2566,7 +2581,9 @@ module Std : sig
             protections, which are [None] for the bytes that are not mapped. A
             byte that is not readable is ['\000'], instead of a [Pagefault], and
             a byte of a dynamic region, which is not stored yet, is generated,
-            as {!load} does.
+            as {!load} does, but the {!generated} observation is not posted, as
+            the bytes are copies, e.g., for an emulator, not the inputs of the
+            program.
 
             Precondition: the data of the current [memory] are bytes.
 
@@ -2605,6 +2622,59 @@ module Std : sig
             generated anew, unless it was filled with a constant.
 
             @since 2.6.0 *)
+      end
+    end
+
+    (** The values and the locations of the memory, that the analyses track.
+
+        The analyses, that attach the information to the identities of the
+        values, e.g., taint or symbolic execution, track them, so that the
+        executors, which compute the concrete values outside of the interpreter,
+        e.g., Unicorn, leave the code, which uses them, to the interpreter. A
+        store of a tracked value to the virtual memory marks its location, and a
+        store of a value, which is not tracked, unmarks it.
+
+        @since 2.6.0 *)
+    module Track : sig
+      val marked : addr observation
+      (** occurs when a location of the memory becomes marked *)
+
+      module Make (Machine : Machine.S) : sig
+        val track : value -> unit Machine.t
+        (** [track v] tracks the value [v] *)
+
+        val untrack : value -> unit Machine.t
+        (** [untrack v] stops tracking [v] *)
+
+        val is_tracked : value -> bool Machine.t
+        (** [is_tracked v] if [v] is tracked *)
+
+        val mark : addr -> unit Machine.t
+        (** [mark addr] marks the location [addr], e.g., which is tainted
+            indirectly. *)
+
+        val unmark : addr -> unit Machine.t
+        (** [unmark addr] unmarks the location [addr] *)
+
+        val is_marked : addr -> bool Machine.t
+        (** [is_marked addr] if [addr] is marked *)
+
+        val page_marked : addr -> bool Machine.t
+        (** [page_marked addr] if a location of the page of [addr], of 4096
+            bytes, is marked *)
+
+        val stored : addr -> value -> unit Machine.t
+        (** [stored addr v] marks [addr], if [v] is tracked, otherwise unmarks
+            it, as the stores to the virtual memory do. *)
+
+        val active : bool Machine.t
+        (** [active] if any value or location is tracked *)
+
+        val has_marks : bool Machine.t
+        (** [has_marks] if any location is marked *)
+
+        val version : int Machine.t
+        (** [version] changes, when the tracked values or locations change *)
       end
     end
 

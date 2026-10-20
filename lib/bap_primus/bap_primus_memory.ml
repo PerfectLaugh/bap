@@ -406,8 +406,24 @@ module Make (Machine : Machine) = struct
   open Machine.Syntax
   module Generate = Generator.Make (Machine)
   module Value = Bap_primus_value.Make (Machine)
+  module Tracked = Bap_primus_track.Make (Machine)
 
   let memory = Machine.Local.get state >>| fun s -> s.curr
+
+  (* the locations of the virtual memory, that hold the tracked values,
+     are marked, see [Bap_primus_track] *)
+  module Track = struct
+    let stored addr value =
+      Tracked.active >>= function
+      | false -> Machine.return ()
+      | true ->
+          memory >>= fun curr ->
+          Machine.gets Project.target >>= fun target ->
+          if String.equal curr.name (virtual_memory target).name then
+            Tracked.stored addr value
+          else Machine.return ()
+  end
+
   let switch curr = Machine.Local.update state ~f:(fun s -> { s with curr })
 
   let get_curr =
@@ -460,7 +476,7 @@ module Make (Machine : Machine) = struct
     in
     if size >= 8 then read start size else read_small mem base size
 
-  let store_word arch bytesize ~addr word values =
+  let store_word ?(notify = true) arch bytesize ~addr word values =
     let bytes = (Word.bitwidth word + bytesize - 1) / bytesize in
     let bite x = Word.extract_exn ~hi:(bytesize - 1) x in
     let shift =
@@ -473,11 +489,11 @@ module Make (Machine : Machine) = struct
       | BigEndian -> (Addr.nsucc addr (bytes - 1), Addr.pred)
     in
     let notify_if_generated key x values =
-      if not (Map.mem values key) then
+      if notify && not (Map.mem values key) then
         Machine.Observation.make on_generated (key, x)
       else Machine.return ()
     in
-    let rec loop written ~key word values =
+    let rec loop written ~key word values keys =
       if written < bytes then
         Value.of_word (bite word) >>= fun data ->
         notify_if_generated key data values >>= fun () ->
@@ -485,15 +501,21 @@ module Make (Machine : Machine) = struct
           (Map.update values key ~f:(function
             | None -> data
             | Some data -> data))
-      else Machine.return values
+          (key :: keys)
+      else Machine.return (values, keys)
     in
-    loop 0 ~key:addr word values
+    loop 0 ~key:addr word values []
 
-  let remembered s addr word =
+  (* the generated values, which the analyses track, e.g., the symbolic
+     ones, mark their locations *)
+  let remembered ?notify s addr word =
     memory >>= fun { size } ->
     Machine.gets Project.arch >>= fun arch ->
-    store_word arch size ~addr word s.values >>= fun values ->
-    put_curr { s with values } >>| fun () -> Map.find_exn values addr
+    store_word ?notify arch size ~addr word s.values >>= fun (values, keys) ->
+    put_curr { s with values } >>= fun () ->
+    Machine.List.iter keys ~f:(fun key ->
+        Track.stored key (Map.find_exn values key))
+    >>| fun () -> Map.find_exn values addr
 
   let read addr ({ values } as s) =
     match find_protection addr s with
@@ -628,12 +650,12 @@ module Make (Machine : Machine) = struct
   let set addr value =
     fetch addr 1 >>= fun () ->
     get_curr >>= write addr value >>= put_curr >>= fun () ->
-    stored_value addr value
+    stored_value addr value >>= fun () -> Track.stored addr value
 
   let set_never_fail addr value =
     fetch addr 1 >>= fun () ->
     get_curr >>| set_value addr value >>= put_curr >>= fun () ->
-    stored_value addr value
+    stored_value addr value >>= fun () -> Track.stored addr value
 
   let del addr =
     fetch addr 1 >>= fun () ->
@@ -677,7 +699,8 @@ module Make (Machine : Machine) = struct
         size ()
 
   (* the byte at [addr], which is mapped and readable, the generated
-     value is remembered, as [read] does *)
+     value is remembered, as [read] does, but it is not an input, e.g.,
+     of the symbolic executor, as it is a copy of the memory *)
   let read_byte s addr =
     match Map.find s.values addr with
     | Some v -> Machine.return (Value.to_word v, s)
@@ -685,7 +708,8 @@ module Make (Machine : Machine) = struct
         match find_layer addr s with
         | Some { mem = Static mem } -> Machine.return (read_word mem addr 8, s)
         | Some { mem = Dynamic { value = g } } ->
-            Generate.word g (Generator.width g) >>= remembered s addr
+            Generate.word g (Generator.width g)
+            >>= remembered ~notify:false s addr
             >>= fun v ->
             get_curr >>| fun s -> (Value.to_word v, s)
         | None -> assert false)

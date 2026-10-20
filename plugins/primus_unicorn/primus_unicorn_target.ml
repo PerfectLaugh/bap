@@ -207,6 +207,7 @@ module Regs = struct
     uc : Uc.t;
     locs : loc String.Map.t;
     basis : var list;
+    owners : string String.Map.t;
     unmapped : string list;
   }
 
@@ -304,9 +305,22 @@ module Regs = struct
           if is_alias key then acc
           else Var.create key (Type.imm data.width) :: acc)
     in
-    { uc; locs; basis; unmapped = List.rev unmapped }
+    (* the register of the basis, which holds the register *)
+    let owners =
+      Map.filter_map locs ~f:(fun loc ->
+          List.find_map basis ~f:(fun b ->
+              let name = Var.name b in
+              match Map.find locs name with
+              | Some b
+                when b.id = loc.id && b.lo <= loc.lo
+                     && loc.lo + loc.width <= b.lo + b.width ->
+                  Some name
+              | _ -> None))
+    in
+    { uc; locs; basis; owners; unmapped = List.rev unmapped }
 
   let basis t = t.basis
+  let owner t name = Map.find t.owners name
 
   let find { locs; _ } v =
     match Map.find locs (Var.name v) with

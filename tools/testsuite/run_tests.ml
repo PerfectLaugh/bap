@@ -786,6 +786,87 @@ let observations data =
         contains env "sees the events" out "pcs 0x507 stores 0x86B loads 0x11E9");
   ]
 
+(* the taint of the input, which Lisp introduces, propagates through
+   the code, that uses it, which Primus interprets, while the rest runs
+   in Unicorn, so the observers see the same tainted jumps, i.e., of
+   the loop of the CRC, which ends after the 4 bytes of each line, and
+   of the comparison of the CRCs *)
+let unicorn_taint data =
+  let run env system =
+    let input = write env "input" "abc\nabd\n" in
+    ignore
+      (write env "tainting.lisp"
+         {|(defparameter *tainted* 0)
+
+(defmethod call-return (name buf n _ ret)
+  (when (= name 'fgets)
+    (taint-introduce-indirectly 'input buf n)))
+
+(defmethod jumping (c dst)
+  (when (taint-get-direct 'input c)
+    (msg "tainted jump to $0" dst)
+    (incr *tainted*)))
+
+(defmethod fini () (msg "tainted $0 jumps" *tainted*))
+|});
+    bap env
+      [
+        path data "bin/x86_64-linux-gnu-symexec-crc32";
+        "--passes=run";
+        "--no-objdump";
+        "--run-systems=" ^ system;
+        "--primus-lisp-channel-redirect=<stdin>:" ^ input;
+        "--run-components=bap:taint-primitives,bap:propagate-taint-by-computation,bap:select-default-taint-policy";
+        "--primus-lisp-add=" ^ dir env;
+        "--primus-lisp-load=posix,tainting";
+        "--primus-print-observations=lisp-message";
+      ]
+  in
+  List.map
+    (fun system ->
+      case
+        ("taint/" ^ system ^ "/x86_64-linux-gnu-symexec-crc32")
+        (fun env ->
+          let out = run env system in
+          sequence env out
+            [
+              ("taints the loop", "tainted jump to 0x752");
+              ("taints its exit", "tainted jump to 0x7B8");
+              ("taints the comparison", "tainted jump to 0x83B");
+              ("counts the tainted jumps", "tainted 0xB jumps");
+            ]))
+    [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
+
+(* the symbolic executor finds the input, as the code that uses the
+   symbolic values is interpreted, and the rest runs in Unicorn *)
+let unicorn_symexec data =
+  List.map
+    (fun name ->
+      case ~slow:true ("symexec/bap:unicorn-executor/" ^ name) (fun env ->
+          let out =
+            bap env ~timeout:120. ~until:"access"
+              [
+                path data ("bin/" ^ name);
+                "--passes=run";
+                "--run-systems=bap:unicorn-executor";
+                "--run-components=bap:greedy-scheduler,bap:symbolic-computer,bap:symbolic-path-explorer,bap:symbolic-path-constraints,bap:symbolic-lisp-primitives";
+                "--primus-lisp-load=symbolic-stdio,posix";
+                "--primus-symbolic-executor-cutoff-level=16";
+                "--primus-symbolic-executor-timeout=1000";
+                "--run-in-isolation";
+              ]
+          in
+          match out.status with
+          | Stopped -> check env (name ^ " was hacked!") true
+          | Exited _ when matches out "access" ->
+              check env (name ^ " was hacked!") true
+          | _ -> check env (name ^ " withhold the attack.") false))
+    [
+      "x86_64-linux-gnu-symexec-simple";
+      "x86_64-linux-gnu-symexec-input";
+      "x86_64-linux-gnu-symexec-guess";
+    ]
+
 (* the scripts stop the machines with Bap_script_debugger, and see and
    change them in their handlers, the same in the interpreter and in
    Unicorn *)
@@ -1125,6 +1206,8 @@ let tests =
     bare;
     emu;
     observations;
+    unicorn_taint;
+    unicorn_symexec;
     script_debugger;
     mprotect;
     mmap;

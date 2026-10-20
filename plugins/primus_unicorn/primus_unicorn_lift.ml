@@ -42,8 +42,35 @@ let decode file mem =
           Some (Memory.length mem))
       >>| fun size -> (label, size)
 
+(* the jumps to the labels of the addresses, which are outside of the
+   instruction, jump to the addresses, which the interpreter takes,
+   instead of the labels, which the linker doesn't know *)
+let addressed width blks =
+  let inside tid = List.exists blks ~f:(fun b -> Tid.equal (Term.tid b) tid) in
+  let resolve : label -> label = function
+    | Direct tid when not (inside tid) -> (
+        match Toplevel.eval Theory.Label.addr (KB.return tid) with
+        | Some addr -> Indirect (Bil.int (Word.create addr width))
+        | None | (exception _) -> Direct tid)
+    | label -> label
+  in
+  List.map blks ~f:(fun blk ->
+      Term.map jmp_t blk ~f:(fun jmp ->
+          match Jmp.kind jmp with
+          | Goto l -> Jmp.with_kind jmp (Goto (resolve l))
+          | Ret l -> Jmp.with_kind jmp (Ret (resolve l))
+          | Call c ->
+              let c = Call.with_target c (resolve (Call.target c)) in
+              let c =
+                match Call.return c with
+                | Some r -> Call.with_return c (resolve r)
+                | None -> c
+              in
+              Jmp.with_kind jmp (Call c)
+          | Int _ -> jmp))
+
 (* the size and the IR of the instruction at [addr], if it is decoded *)
-let insn proj addr =
+let lift proj addr =
   match Project.get proj filename with
   | None -> None
   | Some file -> (
@@ -66,5 +93,16 @@ let insn proj addr =
           | exception _ -> None
           | () -> (
               match Toplevel.get result with
-              | Some (size, insn) -> Some (size, Blk.from_insn ~addr insn)
+              | Some (size, insn) ->
+                  Some (size, addressed width (Blk.from_insn ~addr insn))
               | None -> None)))
+
+(* the instructions, which are interpreted, are lifted once, as the
+   code of the image doesn't change *)
+let lifted : (int * blk term list) option Int64.Table.t String.Table.t =
+  String.Table.create ()
+
+let insn proj addr =
+  let file = Option.value (Project.get proj filename) ~default:"" in
+  let insns = Hashtbl.find_or_add lifted file ~default:Int64.Table.create in
+  Hashtbl.find_or_add insns addr ~default:(fun () -> lift proj addr)

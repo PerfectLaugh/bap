@@ -797,7 +797,7 @@ module Make (Machine : Machine) = struct
 
   let jmp = term normal jmp_t jmp
 
-  let blk () t =
+  let blk_body () t =
     Machine.Seq.iter (Term.enum def_t t) ~f:def >>= fun () ->
     Machine.Seq.fold ~init:Init (Term.enum jmp_t t) ~f:jmp
 
@@ -805,7 +805,66 @@ module Make (Machine : Machine) = struct
     | Init | Conj _ -> Machine.return () (* return from sub *)
     | Disj (cond, code) -> jump cond code
 
-  let blk : blk term -> unit m = term finish blk_t blk ()
+  let blk : blk term -> unit m = term finish blk_t blk_body ()
+
+  (* the instruction, which is not a part of the program, is a part of
+     the subroutine, that runs it *)
+  let insn_sub = Sub.create ~name:"insn" ()
+
+  let enter_insn =
+    Machine.Local.update state ~f:(fun s ->
+        match s.curr with
+        | Top up -> { s with curr = Sub { me = insn_sub; up } }
+        | Blk { up } -> { s with curr = Sub up }
+        | _ -> s)
+
+  (* the destination of the jump, that leaves the instruction *)
+  let leave_insn cond dst =
+    tick >>= fun () ->
+    post will_jump ~f:(fun k -> k (cond, dst)) >>| fun () -> dst
+
+  (* the instruction, whose jumps are not taken, falls through, and the
+     jump to the next instruction is taken, if they are conditional, as
+     the program has it *)
+  let rec step_from ~next blks constr = function
+    | [] -> (
+        match constr with
+        | Conj u -> Value.of_word next >>= leave_insn u
+        | Init | Disj _ -> Value.of_word next)
+    | b :: rest -> (
+        term Machine.return blk_t blk_body () b >>= function
+        | (Init | Conj _) as c ->
+            let c = match (c, constr) with Init, c -> c | c, _ -> c in
+            step_from ~next blks c rest
+        | Disj (cond, t) -> (
+            let inside dst =
+              match
+                List.drop_while blks ~f:(fun b ->
+                    not (Tid.equal (Term.tid b) dst))
+              with
+              | [] -> None
+              | blks -> Some blks
+            in
+            let goto : label -> _ = function
+              | Indirect x -> eval_exp x >>= leave_insn cond
+              | Direct dst -> (
+                  match inside dst with
+                  | Some blks' -> step_from ~next blks Init blks'
+                  | None -> (
+                      Code.resolve_addr (`tid dst) >>= function
+                      | Some addr -> Value.of_word addr >>= leave_insn cond
+                      | None -> Value.of_word next))
+            in
+            match Jmp.kind t with
+            | Goto l | Ret l -> goto l
+            | Call c -> goto (Call.target c)
+            | Int (n, r) -> (
+                interrupt n >>= fun () ->
+                match inside r with
+                | Some blks' -> step_from ~next blks Init blks'
+                | None -> Value.of_word next)))
+
+  let step ~next blks = enter_insn >>= fun () -> step_from ~next blks Init blks
 
   let arg_def () t =
     match Arg.intent t with

@@ -10,6 +10,7 @@ module Std = struct
     module Linker = Bap_primus_linker
     module Value = Bap_primus_value
     module Memory = Bap_primus_memory
+    module Track = Bap_primus_track
     module Observation = Bap_primus_observation
     module Lisp = Bap_primus_lisp
     module Analysis = Bap_primus_analysis.Machine

@@ -89,11 +89,12 @@
 
 ;; we return 0 for all unassociated streams thus treating
 ;; them as stdin. We could, instead, open some symbolic
-;; file for an unknown stream.
+;; file for an unknown stream. The stream 0 is stdin too,
+;; as the program reads it from the stdin variable, that
+;; the loader doesn't initialize.
 (defun fileno (stream)
   (declare (external "fileno"))
-  (if (= stream 0) -1
-    (or (dict-get 'symbolic-streams stream) 0)))
+  (or (dict-get 'symbolic-streams stream) 0))
 
 (defun fgetc (file)
   (declare (external "fgetc" "getc"))

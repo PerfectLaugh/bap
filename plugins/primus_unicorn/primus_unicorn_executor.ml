@@ -62,6 +62,11 @@ type reason =
   | Observe of int64
       (** the observers see the events of the code before the address, see
           [watch] *)
+  | Interpret of int64
+      (** the instruction at the address uses a tracked register, see [trace] *)
+  | Unknown of int64
+      (** the registers of the instruction at the address are not known yet, see
+          [trace] *)
 
 (* a pending return of a run *)
 type frame = { ret : int64; sp : int64 }
@@ -89,6 +94,10 @@ type page = {
    machine runs in Unicorn, unless Primus drops the page meanwhile, see
    [Make.protected]. The page is pending, until Primus fetches it *)
 type parked = { data : Bytes.t; copy : page; mutable unfetched : bool }
+
+(* the registers of the basis, that the instruction reads, and the ones
+   that it writes whole, unless it writes them conditionally *)
+type access = { uses : string list; defs : string list; memory : bool }
 
 type engine = {
   uc : Uc.t;
@@ -134,6 +143,17 @@ type engine = {
   mutable watchers : Uc.hook list;  (** the hooks of the events *)
   mutable observed : (int64 * int) option;
       (** the address of the last observation and the start of Unicorn *)
+  accesses : access Int64.Table.t;  (** the accesses of the instructions *)
+  foreign : Int64.Hash_set.t;
+      (** the addresses of the code, that Primus runs instead *)
+  tracked : String.Hash_set.t;
+      (** the registers of the basis, whose values Primus tracks, see
+          [Primus.Track] *)
+  mutable clobbered : string list;
+      (** the tracked registers, that the code in Unicorn wrote *)
+  mutable tracer : Uc.hook option;
+      (** the hook of every address, while a register is tracked *)
+  mutable seen : int;  (** the version of [Primus.Track], that is seen *)
 }
 
 (* the events of the code, that the observers of the machine see, which
@@ -162,6 +182,12 @@ let ticks = ref 0
 let frames =
   Primus.Machine.State.declare ~uuid:"d47083aa-ead6-439d-8a0c-6bc2bbcc9d6e"
     ~name:"unicorn-frames" (fun _ -> [])
+
+(* if the slots of the external functions refer to their trampolines
+   in the memory of the machine, see [Make.link_slots] *)
+let slotted =
+  Primus.Machine.State.declare ~uuid:"0c7f3d55-2b8e-4f4a-9a5e-62f1d1b0e7a4"
+    ~name:"unicorn-slotted" (fun _ -> false)
 
 (* the file of the checkpoint and the address or the name of the
    subroutine, at which it is saved *)
@@ -501,6 +527,86 @@ let dispatch e addr =
         (* the observers of every address see the stops too, see [watch] *)
       else if is_stop e addr && not e.watching.pcs then halt_at e (Stop addr)
 
+(* The instructions, which read the tracked registers, are interpreted
+   by Primus, as the analyses, that track them, e.g., taint, see their
+   computations, so Unicorn stops before them, and before the ones, which
+   it didn't see yet, after which they are analyzed, see [Make.analyze].
+   The tracked registers, that the code writes, are not tracked anymore,
+   and Primus gets their values, see [Make.pull_regs] *)
+let trace e addr =
+  match Hashtbl.find e.accesses addr with
+  | None -> halt_at e (Unknown addr)
+  | Some { uses; defs } ->
+      if List.exists uses ~f:(Hash_set.mem e.tracked) then
+        halt_at e (Interpret addr)
+      else
+        List.iter defs ~f:(fun r ->
+            if Hash_set.mem e.tracked r then begin
+              Hash_set.remove e.tracked r;
+              e.clobbered <- r :: e.clobbered
+            end)
+
+(* the hook of every address is installed, while a register is tracked,
+   and the translated code is dropped, see [sync_stops] *)
+let sync_tracer e =
+  match (Hash_set.is_empty e.tracked, e.tracer) with
+  | false, None ->
+      e.tracer <- Some (Uc.on_code e.uc (fun addr _ -> trace e addr));
+      Uc.flush_tb e.uc
+  | true, Some hook ->
+      Uc.delete e.uc hook;
+      e.tracer <- None;
+      Uc.flush_tb e.uc
+  | _ -> ()
+
+(* the registers of the basis, that the instruction reads and writes *)
+let access_of_blocks regs blks =
+  let owner v =
+    if Var.is_physical v then Target.Regs.owner regs (Var.name v) else None
+  in
+  let exps =
+    List.concat_map blks ~f:(fun blk ->
+        (Term.enum def_t blk |> Seq.map ~f:Def.rhs |> Seq.to_list)
+        @ (Term.enum jmp_t blk |> Seq.to_list
+          |> List.concat_map ~f:(fun jmp ->
+              let labels =
+                match Jmp.kind jmp with
+                | Goto l | Ret l -> [ l ]
+                | Call c -> Call.target c :: Option.to_list (Call.return c)
+                | Int _ -> []
+              in
+              Jmp.cond jmp
+              :: List.filter_map labels ~f:(function
+                | Indirect x -> Some x
+                | Direct _ -> None))))
+  in
+  let memory =
+    List.exists exps ~f:(fun x ->
+        object
+          inherit [bool] Exp.visitor
+          method! enter_load ~mem:_ ~addr:_ _ _ _ = true
+          method! enter_store ~mem:_ ~addr:_ ~exp:_ _ _ _ = true
+        end
+          #visit_exp x false)
+  in
+  let uses =
+    List.concat_map exps ~f:(fun x -> Set.to_list (Exp.free_vars x))
+    |> List.filter_map ~f:owner
+    |> List.dedup_and_sort ~compare:String.compare
+  in
+  let defs =
+    match blks with
+    | [ blk ] ->
+        Term.enum def_t blk |> Seq.to_list
+        |> List.filter_map ~f:(fun def ->
+            let v = Def.lhs def in
+            match owner v with
+            | Some r when String.equal r (Var.name v) -> Some r
+            | _ -> None)
+    | _ -> []
+  in
+  { uses; defs; memory }
+
 let hook_stop e addr =
   if not (Hash_set.mem e.hooked addr) then begin
     Hash_set.add e.hooked addr;
@@ -583,6 +689,12 @@ let create target ~foreign ~externals =
       watching = { pcs = false; reads = false; writes = false };
       watchers = [];
       observed = None;
+      accesses = Int64.Table.create ();
+      foreign = Int64.Hash_set.of_list foreign;
+      tracked = String.Hash_set.create ();
+      clobbered = [];
+      tracer = None;
+      seen = -1;
     }
   in
   let base = trampolines_base target in
@@ -1024,6 +1136,7 @@ module Make (Machine : Primus.Machine.S) = struct
   module Linker = Primus.Linker.Make (Machine)
   module Interpreter = Primus.Interpreter.Make (Machine)
   module Lisp = Primus.Lisp.Make (Machine)
+  module Track = Primus.Track.Make (Machine)
 
   let fail fmt = ksprintf (fun msg -> Machine.raise (Unicorn_failure msg)) fmt
   let word e x = Word.of_int64 ~width:(e.bytes * 8) x
@@ -1038,7 +1151,10 @@ module Make (Machine : Primus.Machine.S) = struct
     Hashtbl.clear e.pages;
     e.unchecked <- [];
     e.dirty <- [];
-    e.written <- []
+    e.written <- [];
+    Hash_set.clear e.tracked;
+    e.clobbered <- [];
+    e.seen <- -1
 
   (* the pages of the owner, which another machine claims, are parked,
      until the owner claims Unicorn again, or the pending ones, if too
@@ -1166,12 +1282,15 @@ module Make (Machine : Primus.Machine.S) = struct
           fetched = 0;
         }
 
+  (* the page, which has a tracked location, stays in Primus, so that
+     the code, which accesses it, faults, and is interpreted *)
   let ensure_page e addr =
     let page = page_of addr in
     if Hashtbl.mem e.pages page then Machine.return ()
     else
       let* mapped = Memory.is_mapped (word e addr) in
-      if mapped then map_page e page else Machine.return ()
+      let* marked = Track.page_marked (word e addr) in
+      if mapped && not marked then map_page e page else Machine.return ()
 
   (* maps the code, so that it is never fetched from unmapped pages,
      see [broken] *)
@@ -1196,16 +1315,22 @@ module Make (Machine : Primus.Machine.S) = struct
             Machine.List.iter pages ~f:(ensure_page e))
     | _ -> Machine.return ()
 
-  (* copies the registers that changed in Unicorn to Primus *)
+  (* copies the registers that changed in Unicorn to Primus, and the
+     tracked ones, that it wrote, see [trace], which are not tracked
+     anymore *)
   let pull_regs e =
+    let clobbered = e.clobbered in
+    e.clobbered <- [];
     Machine.List.iter e.basis ~f:(fun v ->
         match Target.Regs.read e.regs v with
         | Some x
-          when not
-                 (Option.equal Word.equal
-                    (Hashtbl.find e.synced (Var.name v))
-                    (Some x)) ->
+          when List.mem clobbered (Var.name v) ~equal:String.equal
+               || not
+                    (Option.equal Word.equal
+                       (Hashtbl.find e.synced (Var.name v))
+                       (Some x)) ->
             Hashtbl.set e.synced ~key:(Var.name v) ~data:x;
+            Hash_set.remove e.tracked (Var.name v);
             Value.of_word x >>= Env.set v
         | _ -> Machine.return ())
 
@@ -1228,11 +1353,13 @@ module Make (Machine : Primus.Machine.S) = struct
        status register, go back to Primus *)
     if List.is_empty aliases then Machine.return () else pull_regs e
 
-  (* copies all registers from Primus *)
+  (* copies all registers from Primus, that are set, as the others are
+     generated, when they are read, e.g., as the symbolic inputs *)
   let push e =
     Hashtbl.clear e.synced;
     let* vars = Env.all in
-    push_vars e (Seq.to_list vars)
+    let* vars = Machine.List.filter (Seq.to_list vars) ~f:Env.is_set in
+    push_vars e vars
 
   (* copies the registers that Primus has written *)
   let push_written e = push_vars e (List.rev e.written)
@@ -1243,11 +1370,20 @@ module Make (Machine : Primus.Machine.S) = struct
     let* owned = owns e in
     if owned then push_written e else Machine.return ()
 
-  let written (v, _) =
-    (match !active with
-    | Some e when Target.Regs.mem e.regs v -> e.written <- v :: e.written
-    | _ -> ());
-    Machine.return ()
+  (* the registers, that Primus writes, go to Unicorn, and they are
+     tracked, if their values are, see [trace] *)
+  let written (v, x) =
+    match !active with
+    | Some e when Target.Regs.mem e.regs v -> (
+        e.written <- v :: e.written;
+        match Target.Regs.owner e.regs (Var.name v) with
+        | None -> Machine.return ()
+        | Some r ->
+            let+ tracked = Track.is_tracked x in
+            if tracked then Hash_set.add e.tracked r
+            else if String.equal r (Var.name v) then Hash_set.remove e.tracked r
+        )
+    | _ -> Machine.return ()
 
   (* copies the pending page to Primus *)
   let sync_page e page = store_changes e (fetch_page e page)
@@ -1292,7 +1428,13 @@ module Make (Machine : Primus.Machine.S) = struct
 
   (* the pages, whose protection changes, are copied anew, after their
      changes go to Primus *)
-  let protected (lower, upper, _) =
+  let rec protected (lower, upper, _) = drop lower upper
+
+  (* the page, which has a tracked location, goes to Primus, see
+     [ensure_page] *)
+  and marked addr = drop addr addr
+
+  and drop lower upper =
     match !active with
     | None -> Machine.return ()
     | Some e -> (
@@ -1437,7 +1579,9 @@ module Make (Machine : Primus.Machine.S) = struct
     | Write_prot when written_page e addr -> Machine.return `Continue
     | Read_unmapped | Write_unmapped | Fetch_unmapped ->
         let* mapped = Memory.is_mapped (word e addr) in
-        if mapped then map_page e (page_of addr) >>| fun () -> `Continue
+        let* marked = Track.page_marked (word e addr) in
+        if mapped && marked then Machine.return `Interpret
+        else if mapped then map_page e (page_of addr) >>| fun () -> `Continue
         else repeat e access addr
     | Read_prot | Write_prot | Fetch_prot -> repeat e access addr
     | Read | Write | Fetch | Read_after ->
@@ -1454,6 +1598,15 @@ module Make (Machine : Primus.Machine.S) = struct
         | Some own, Some stub when phys_equal own code -> Some stub
         | _ -> None)
     | _ -> None
+
+  (* the registers of the expressions are tracked, see [trace] *)
+  let reads_tracked e exps =
+    (not (Hash_set.is_empty e.tracked))
+    && List.exists exps ~f:(fun x ->
+        Set.exists (Exp.free_vars x) ~f:(fun v ->
+            match Target.Regs.owner e.regs (Var.name v) with
+            | Some r -> Hash_set.mem e.tracked r
+            | None -> false))
 
   (* runs the native function at the address, unless the code at the
      address is stopped at, the loads or the stores are observed, the
@@ -1477,6 +1630,8 @@ module Make (Machine : Primus.Machine.S) = struct
     | Some _ when is_stop e addr -> Machine.return None
     (* the native functions access the memory without its events *)
     | Some _ when e.watching.reads || e.watching.writes -> Machine.return None
+    (* the native functions compute the concrete values *)
+    | Some (_, call) when reads_tracked e call.args -> Machine.return None
     | Some (name, call) ->
         let* linked = Linker.is_linked (`symbol name) in
         let* unreplaced = unreplaced_stub (`symbol name) in
@@ -1758,6 +1913,101 @@ module Make (Machine : Primus.Machine.S) = struct
       in
       push_owned e
 
+  (* the registers, whose values Primus tracks, after the tracked
+     values change, e.g., when taint is introduced, see [trace] *)
+  let tracking e =
+    let* version = Track.version in
+    let* () =
+      if version = e.seen then Machine.return ()
+      else
+        let* () = pull_regs e in
+        e.seen <- version;
+        Hash_set.clear e.tracked;
+        let* active = Track.active in
+        if not active then Machine.return ()
+        else
+          let* vars = Env.all in
+          Machine.Seq.iter vars ~f:(fun v ->
+              match Target.Regs.owner e.regs (Var.name v) with
+              | None -> Machine.return ()
+              | Some r ->
+                  let* set = Env.is_set v in
+                  if not set then Machine.return ()
+                  else
+                    let* x = Env.get v in
+                    let+ tracked = Track.is_tracked x in
+                    if tracked then Hash_set.add e.tracked r)
+    in
+    sync_tracer e;
+    Machine.return ()
+
+  let analyze e addr =
+    let+ proj = Machine.get () in
+    let access =
+      match Lift.insn proj addr with
+      | Some (_, blks) -> access_of_blocks e.regs blks
+      | None -> { uses = []; defs = []; memory = false }
+    in
+    Hashtbl.set e.accesses ~key:addr ~data:access
+
+  (* the instruction at [pc], which Primus interprets after the one it
+     interpreted, as it uses a tracked register, or the memory, while a
+     location is tracked, unless it is a stop of the run, e.g., the
+     return of the run, a trampoline, or a stop of Primus *)
+  let continues e pc =
+    let addr = code_addr e pc in
+    if
+      Hashtbl.mem e.trampolines addr
+      || Hash_set.mem e.foreign addr
+      || is_stop e addr
+      || Option.equal Int64.equal !checkpoint_addr (Some addr)
+      || (!driven && !pause)
+      ||
+      match e.frames with
+      | { ret; _ } :: _ -> Int64.(ret = addr)
+      | [] -> false
+    then Machine.return false
+    else
+      let* () =
+        if Hashtbl.mem e.accesses addr then Machine.return ()
+        else analyze e addr
+      in
+      let { uses; memory; _ } = Hashtbl.find_exn e.accesses addr in
+      if List.exists uses ~f:(Hash_set.mem e.tracked) then Machine.return true
+      else if memory then Track.has_marks
+      else Machine.return false
+
+  (* Primus interprets the instructions from [pc], see [trace], while
+     they continue, see [continues], and returns the address of the next
+     one, which on ARM stays in the Thumb state, unless the jump sets the
+     lower bit *)
+  let interpret e pc =
+    let* () = pull e in
+    let* proj = Machine.get () in
+    let rec run pc n =
+      match Lift.insn proj (code_addr e pc) with
+      | None -> fail "can't interpret the instruction at %Lx" pc
+      | Some (size, blks) ->
+          let next = Int64.(pc + of_int size) in
+          let* pc =
+            match site_of_blocks blks with
+            | Some site -> call_intrinsic e site >>| fun () -> next
+            | None -> (
+                let+ dst =
+                  Interpreter.step ~next:(word e (code_addr e next)) blks
+                in
+                let dst = int64_of_word (Primus.Value.to_word dst) in
+                match e.arch with
+                | Arm when Int64.(pc land 1L = 1L) -> Int64.(dst lor 1L)
+                | _ -> dst)
+          in
+          let* more = if n > 1 then continues e pc else Machine.return false in
+          if more then run pc (n - 1) else Machine.return pc
+    in
+    let* pc = run pc 4096 in
+    let+ () = push_owned e in
+    pc
+
   (* The machine, which the script drives, pauses, and serves the
      requests of the script, until it continues. The machine, which
      takes a snapshot, forks, and its parent stays paused, as the
@@ -1797,6 +2047,7 @@ module Make (Machine : Primus.Machine.S) = struct
       | Some t when Float.(t <= 0.) -> terminate e
       | _ -> (
           sync_stops e;
+          let* () = tracking e in
           let* () = watching e in
           let error =
             start_uc e pc
@@ -1806,7 +2057,7 @@ module Make (Machine : Primus.Machine.S) = struct
           let* () = observe e in
           let pc = current_pc e in
           (match e.reason with
-          | Some (Fault _)
+          | Some (Fault _ | Unknown _)
             when Option.equal Int64.equal !skipped_at (Some (code_addr e pc)) ->
               resumed_at := !skipped_at
           | _ -> ());
@@ -1834,7 +2085,11 @@ module Make (Machine : Primus.Machine.S) = struct
               loop pc
           | Some (Jump pc), _ -> loop pc
           | Some (Fault (access, addr)), _ -> (
-              fault e access addr >>= function `Continue -> loop pc)
+              fault e access addr >>= function
+              | `Continue -> loop pc
+              | `Interpret -> interpret e pc >>= loop)
+          | Some (Interpret _), _ -> interpret e pc >>= loop
+          | Some (Unknown addr), _ -> analyze e addr >>= fun () -> loop pc
           | Some (Interrupt n), _ -> (
               let* () = Interpreter.interrupt n in
               let* proj = Machine.get () in
@@ -1897,7 +2152,30 @@ module Make (Machine : Primus.Machine.S) = struct
     let* () = loop cp.pc in
     Machine.Local.put frames pending
 
+  (* the slots of the external functions refer to their trampolines in
+     Primus too, as the code, that Primus interprets, see [interpret],
+     calls them through the slots *)
+  let link_slots e =
+    let* linked = Machine.Local.get slotted in
+    if linked then Machine.return ()
+    else
+      let* () = Machine.Local.put slotted true in
+      Hashtbl.to_alist e.slots
+      |> Machine.List.iter ~f:(fun (page, slots) ->
+          Machine.List.iter slots ~f:(fun (off, addr) ->
+              let data =
+                String.init e.bytes ~f:(fun i ->
+                    let shift = if e.big_endian then e.bytes - 1 - i else i in
+                    Char.of_int_exn
+                      Int64.(
+                        to_int_exn
+                          (shift_right_logical addr Int.(8 * shift) land 0xFFL)))
+              in
+              Memory.store_bytes (word e Int64.(page + of_int off)) data))
+
   let run addr =
+    let* e = engine () in
+    let* () = link_slots e in
     let* restored = Machine.Local.get restored in
     match !restored_from with
     | Some cp when not restored -> resume cp
@@ -2203,6 +2481,7 @@ module Loader (Machine : Primus.Machine.S) = struct
         Primus.System.stop >>> Exec.system_stopped;
         Primus.Interpreter.written >>> Exec.written;
         Primus.Memory.protected >>> Exec.protected;
+        Primus.Track.marked >>> Exec.marked;
         Primus.Interpreter.clock >>> Exec.clocked;
       ]
 end

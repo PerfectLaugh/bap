@@ -91,6 +91,7 @@ module Make (Machine : Machine) : sig
   val pos : pos m
   val sub : sub term -> unit m
   val blk : blk term -> unit m
+  val step : next:addr -> blk term list -> value m
   val exp : exp -> value m
   val get : var -> value m
   val set : var -> value -> unit m
