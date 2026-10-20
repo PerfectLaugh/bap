@@ -296,9 +296,10 @@ let mark_plt_as_stub () : unit =
     |> provide (Value.Tag.slot Sub.stub)
     |> comment "marks code in the specially named sections as stubs");
   KB.promise (Value.Tag.slot Sub.stub) @@ fun label ->
-  KB.collect Theory.Label.addr label >>=? fun addr ->
-  KB.collect Theory.Label.unit label >>=? fun unit ->
-  KB.collect Stubs.slot unit >>| fun stubs ->
+  KB.direct @@ fun () ->
+  let addr = KB.await_some (KB.collect Theory.Label.addr label) in
+  let unit = KB.await_some (KB.collect Theory.Label.unit label) in
+  let stubs = KB.await (KB.collect Stubs.slot unit) in
   Option.some_if (Stubs.mem stubs addr) ()
 
 let bitvec_of_memory mem =
@@ -337,13 +338,14 @@ let detect_stubs_by_signatures () : unit =
            @@ Word.extract_exn mem ~lo:(Word.bitwidth mem - Word.bitwidth s))
   in
   KB.promise (Value.Tag.slot Sub.stub) @@ fun label ->
-  KB.collect Theory.Label.addr label >>=? fun addr ->
-  KB.collect Theory.Label.unit label >>=? fun unit ->
-  KB.collect Signatures.slot unit >>= fun sigs ->
-  KB.collect Project.memory_slot unit >>= fun code ->
-  if Set.is_empty sigs then !!None
+  KB.direct @@ fun () ->
+  let addr = KB.await_some (KB.collect Theory.Label.addr label) in
+  let unit = KB.await_some (KB.collect Theory.Label.unit label) in
+  let sigs = KB.await (KB.collect Signatures.slot unit) in
+  let code = KB.await (KB.collect Project.memory_slot unit) in
+  if Set.is_empty sigs then None
   else
-    KB.collect Theory.Unit.target unit >>| fun target ->
+    let target = KB.await (KB.collect Theory.Unit.target unit) in
     Option.bind (find_mem target code addr) ~f:(fun mem ->
         Option.some_if (matches sigs mem) ())
 

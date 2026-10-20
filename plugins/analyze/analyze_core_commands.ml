@@ -6,37 +6,38 @@ open Bap.Std
 open KB.Syntax
 include Loggers ()
 
+(* the commands are in the direct style, see [KB.direct] *)
+
 let read_name name =
-  KB.Symbol.package >>| fun package ->
+  let package = KB.await KB.Symbol.package in
   KB.Name.to_string (KB.Name.read ~package name)
 
 let print_semantics label slots =
-  KB.collect Theory.Semantics.slot label >>= fun sema ->
-  KB.List.map slots ~f:read_name >>| fun slots ->
-  match slots with
+  let sema = KB.await (KB.collect Theory.Semantics.slot label) in
+  match List.map slots ~f:read_name with
   | [] -> Format.printf "%a@\n" KB.Value.pp sema
   | slots -> Format.printf "%a@\n" (KB.Value.pp_slots slots) sema
 
 let require prop label has =
-  KB.collect prop label >>= function None -> KB.return false | Some p -> has p
+  match KB.await (KB.collect prop label) with None -> false | Some p -> has p
 
 let belongs_to_unit unit insn =
   match unit with
-  | None -> KB.return true
+  | None -> true
   | Some unit ->
       require Theory.Label.unit insn @@ fun unit' ->
-      KB.return @@ Theory.Unit.equal unit unit'
+      Theory.Unit.equal unit unit'
 
 let belongs_to_subr subr insn =
   match subr with
-  | None -> KB.return true
+  | None -> true
   | Some subr ->
       require Theory.Label.addr subr @@ fun subr ->
       require Theory.Label.unit insn @@ fun unit ->
       require Theory.Label.addr insn @@ fun insn ->
-      KB.collect Theory.Unit.target unit >>| Theory.Target.code_addr_size
-      >>= fun bits ->
-      KB.collect Project.State.slot unit >>| fun state ->
+      let target = KB.await (KB.collect Theory.Unit.target unit) in
+      let bits = Theory.Target.code_addr_size target in
+      let state = KB.await (KB.collect Project.State.slot unit) in
       let subrs = Project.State.subroutines state in
       let insn = Word.create insn bits and subr = Word.create subr bits in
       Disasm.Subroutines.belongs subrs ~entry:subr insn
@@ -44,62 +45,58 @@ let belongs_to_subr subr insn =
 let find_entry subrs name_or_addr =
   Disasm.Subroutines.entries subrs
   |> Set.to_sequence
-  |> KB.Seq.find ~f:(fun addr ->
+  |> Seq.find ~f:(fun addr ->
       let addr = Word.to_bitvec addr in
-      if Poly.(Bitvec.to_string addr = name_or_addr) then KB.return true
-      else
-        Theory.Label.for_addr addr >>= fun label ->
-        KB.collect Theory.Label.name label >>| function
-        | None -> false
-        | Some name -> String.equal name name_or_addr)
+      Poly.(Bitvec.to_string addr = name_or_addr)
+      ||
+      let label = KB.await (Theory.Label.for_addr addr) in
+      match KB.await (KB.collect Theory.Label.name label) with
+      | None -> false
+      | Some name -> String.equal name name_or_addr)
 
+(* the callbacks of the monadic functions run outside of [KB.direct] *)
 let iter_subr entry subrs disasm ~f =
-  Disasm.Driver.explore disasm ~entry ~init:()
-    ~follow:(fun next ->
-      KB.return @@ Disasm.Subroutines.belongs subrs ~entry next)
-    ~block:(fun _mem -> Disasm.Driver.execution_order)
-    ~node:(fun insns () -> KB.List.iter insns ~f)
-    ~edge:(fun _ _ _ -> KB.return ())
+  KB.await
+  @@ Disasm.Driver.explore disasm ~entry ~init:()
+       ~follow:(fun next ->
+         KB.return @@ Disasm.Subroutines.belongs subrs ~entry next)
+       ~block:(fun _mem -> Disasm.Driver.execution_order)
+       ~node:(fun insns () -> KB.direct @@ fun () -> List.iter insns ~f)
+       ~edge:(fun _ _ _ -> KB.return ())
 
 let print_unit () =
-  KB.objects Theory.Unit.cls
-  >>= KB.Seq.iter ~f:(fun obj ->
-      KB.Object.repr Theory.Unit.cls obj >>= fun str ->
-      KB.collect Theory.Unit.target obj >>| fun triple ->
+  KB.await (KB.objects Theory.Unit.cls)
+  |> Seq.iter ~f:(fun obj ->
+      let str = KB.await (KB.Object.repr Theory.Unit.cls obj) in
+      let triple = KB.await (KB.collect Theory.Unit.target obj) in
       Format.printf "%-40s %a@\n" str Theory.Target.pp triple)
-
-let ensure x yes = x >>= function true -> yes () | false -> KB.return ()
 
 let in_package package f =
   match package with
   | None -> f ()
-  | Some package -> KB.Symbol.in_package package f
+  | Some package ->
+      KB.await (KB.Symbol.in_package package @@ fun () -> KB.direct f)
 
 let print_insn ?package slots obj =
   in_package package @@ fun () ->
-  KB.Object.repr Theory.Program.cls obj >>= fun str ->
-  match slots with
-  | None ->
-      Format.printf "%s@\n" str;
-      KB.return ()
-  | Some slots ->
-      Format.printf "%s@\n" str;
-      print_semantics obj slots
+  let str = KB.await (KB.Object.repr Theory.Program.cls obj) in
+  Format.printf "%s@\n" str;
+  Option.iter slots ~f:(print_semantics obj)
 
 let list_insns unit slots =
-  KB.objects Theory.Program.cls
-  >>= KB.Seq.iter ~f:(fun obj ->
-      ensure (belongs_to_unit unit obj) @@ fun () -> print_insn slots obj)
+  KB.await (KB.objects Theory.Program.cls)
+  |> Seq.iter ~f:(fun obj ->
+      if belongs_to_unit unit obj then print_insn slots obj)
 
 let print_subr unit name_or_addr slots =
-  KB.collect Project.State.slot unit >>= fun state ->
-  KB.Symbol.package >>= fun current ->
-  KB.collect Theory.Unit.path unit >>= fun package ->
+  let state = KB.await (KB.collect Project.State.slot unit) in
+  let current = KB.await KB.Symbol.package in
+  let package = KB.await (KB.collect Theory.Unit.path unit) in
   in_package package @@ fun () ->
   let sub = Project.State.subroutines state
   and dis = Project.State.disassembly state in
-  find_entry sub name_or_addr >>= function
-  | None -> KB.return ()
+  match find_entry sub name_or_addr with
+  | None -> ()
   | Some entry -> iter_subr entry sub dis ~f:(print_insn ~package:current slots)
 
 let matches name filter =
@@ -107,22 +104,19 @@ let matches name filter =
   | None -> true
   | Some prefix -> String.is_prefix ~prefix name
 
+let is_subroutine obj = require Theory.Label.is_subroutine obj Fn.id
+
 let list_subrs unit filter =
-  KB.objects Theory.Program.cls
-  >>= KB.Seq.iter ~f:(fun obj ->
-      belongs_to_unit unit obj >>= function
-      | false -> KB.return ()
-      | true -> (
-          KB.collect Theory.Label.is_subroutine obj >>= function
-          | None | Some false -> KB.return ()
-          | Some true -> (
-              KB.Object.repr Theory.Program.cls obj >>= fun str ->
-              KB.collect Theory.Label.name obj >>| function
-              | None when Option.is_none filter ->
-                  Format.printf "%s: unresolved@\n" str
-              | Some name when matches name filter ->
-                  Format.printf "%s: %s\n" str name
-              | _ -> ())))
+  KB.await (KB.objects Theory.Program.cls)
+  |> Seq.iter ~f:(fun obj ->
+      if belongs_to_unit unit obj && is_subroutine obj then
+        let str = KB.await (KB.Object.repr Theory.Program.cls obj) in
+        match KB.await (KB.collect Theory.Label.name obj) with
+        | None when Option.is_none filter ->
+            Format.printf "%s: unresolved@\n" str
+        | Some name when matches name filter ->
+            Format.printf "%s: %s\n" str name
+        | _ -> ())
 
 let register () =
   let open Project.Analysis in
@@ -130,7 +124,7 @@ let register () =
 
   register ~package "instruction"
     (args program $ rest string)
-    print_semantics
+    (fun label slots -> KB.direct @@ fun () -> print_semantics label slots)
     ~desc:
       "Prints the instruction semantics. Prints the semantics of an \
        instruction with the given label. If no fields are specified, then \
@@ -139,7 +133,7 @@ let register () =
 
   register ~package "instructions"
     (args @@ keyword "unit" unit $ keyword "semantics" (rest string))
-    list_insns
+    (fun unit slots -> KB.direct @@ fun () -> list_insns unit slots)
     ~desc:
       "Prints all instructions. If :unit is specified then prints only \
        instructions that belong to that unit. If :semantics is specified then \
@@ -148,12 +142,13 @@ let register () =
        then all properties of an instruction will be printed, otherwise only \
        those that are specified will be printed.";
 
-  register ~package "units" (args empty) print_unit
+  register ~package "units" (args empty)
+    (fun () -> KB.direct print_unit)
     ~desc:"Prints all units. Prints all units stored in the knowledge base.";
 
   register ~package "subroutines"
     (args @@ keyword "unit" unit $ keyword "matches" string)
-    list_subrs
+    (fun unit filter -> KB.direct @@ fun () -> list_subrs unit filter)
     ~desc:
       "Prints all subroutines. If :unit is specified, then prints only \
        subroutines of that unit. If :matches is specified, then prints only \
@@ -161,7 +156,7 @@ let register () =
 
   register ~package "subroutine"
     (args @@ unit $ string $ keyword "semantics" (rest string))
-    print_subr
+    (fun unit name slots -> KB.direct @@ fun () -> print_subr unit name slots)
     ~desc:
       "Prints a subroutine. Prints the subroutine in the specified unit with \
        the given name or address. If :semantics is specified, then prints the \

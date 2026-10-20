@@ -130,24 +130,26 @@ open KB.Syntax
 
 let optimize = Bil.fixpoint @@ Fn.compose Bil.propagate_consts Bil.fold_consts
 
+(* the functions below, which return plain values, are in the direct
+   style and are called in [KB.direct] *)
+
 let collect_insns number_of_instructions entry =
-  let return bils = KB.return @@ optimize @@ List.(concat @@ rev bils) in
   let rec collect bils addr collected =
-    if collected < number_of_instructions then
-      Theory.Label.for_addr addr >>= fun label ->
-      KB.collect Theory.Semantics.slot label >>= fun insn ->
+    if collected >= number_of_instructions then bils
+    else
+      let label = KB.await (Theory.Label.for_addr addr) in
+      let insn = KB.await (KB.collect Theory.Semantics.slot label) in
       match Insn.bil insn with
       | [ Bil.Jmp (Int next) ] as bil ->
           collect (bil :: bils) (Addr.to_bitvec next) (collected + 1)
-      | _ -> (
-          KB.collect Memory.slot label >>= function
+      | bil -> (
+          match KB.await (KB.collect Memory.slot label) with
           | Some mem ->
               let next = Addr.to_bitvec @@ Addr.succ @@ Memory.max_addr mem in
-              collect (Insn.bil insn :: bils) next (collected + 1)
-          | None -> return bils)
-    else return bils
+              collect (bil :: bils) next (collected + 1)
+          | None -> bils)
   in
-  collect [] entry 0
+  optimize @@ List.(concat @@ rev (collect [] entry 0))
 
 let plt_sizes =
   [
@@ -236,30 +238,28 @@ let has_sections unit =
    function, e.g., the PLT entries, whose layout depends on the linker,
    e.g., lld makes larger entries than GNU ld. *)
 let resolve_unmarked_stub label refs =
-  KB.collect Theory.Label.unit label >>=? fun unit ->
-  has_sections unit >>= fun sections ->
-  KB.guard (not sections) >>= fun () ->
-  KB.collect Theory.Label.addr label >>=? fun addr ->
-  plt_size label >>=? fun size ->
-  collect_insns size addr >>| fun bil ->
+  let unit = KB.await_some (KB.collect Theory.Label.unit label) in
+  KB.await (KB.guard (not (KB.await (has_sections unit))));
+  let addr = KB.await_some (KB.collect Theory.Label.addr label) in
+  let bil = collect_insns (KB.await_some (plt_size label)) addr in
   match Option.bind (slot_of_jump bil) ~f:(References.lookup refs) with
   | Some (Name s) -> Some s
   | _ -> None
 
 let resolve_stubs () =
   KB.propose plt_agent Theory.Label.possible_name @@ fun label ->
-  KB.collect Theory.Label.unit label >>=? fun unit ->
-  KB.collect References.slot unit >>= fun refs ->
-  KB.collect Theory.Label.addr label >>=? fun addr ->
-  KB.collect (Value.Tag.slot Sub.stub) label >>= fun is_stub ->
+  KB.direct @@ fun () ->
+  let unit = KB.await_some (KB.collect Theory.Label.unit label) in
+  let refs = KB.await (KB.collect References.slot unit) in
+  let addr = KB.await_some (KB.collect Theory.Label.addr label) in
+  let is_stub = KB.await (KB.collect (Value.Tag.slot Sub.stub) label) in
   if Option.is_none is_stub then resolve_unmarked_stub label refs
   else
     match References.lookup refs addr with
-    | Some (Name s) -> KB.return (Some s)
+    | Some (Name s) -> Some s
     | _ ->
-        plt_size label >>=? fun size ->
-        collect_insns size addr >>| fun bil ->
-        find_references bil
+        collect_insns (KB.await_some (plt_size label)) addr
+        |> find_references
         |> List.find_map ~f:(function
           | Name s -> Some s
           | Addr dst -> (

@@ -4,7 +4,6 @@ open Bap_knowledge
 open Knowledge.Syntax
 
 let opt = function None -> "None" | Some x -> Int.to_string x
-
 let package = "test-direct"
 let cls = Knowledge.Class.declare ~package "test" ()
 
@@ -32,7 +31,10 @@ let eval k =
   | Error conflict -> assert_failure (Knowledge.Conflict.to_string conflict)
 
 let fails k =
-  let obj = Knowledge.Object.create cls >>= fun obj -> k obj >>| fun _ -> obj in
+  let obj =
+    Knowledge.Object.create cls >>= fun obj ->
+    k obj >>| fun _ -> obj
+  in
   match Knowledge.run cls obj Knowledge.empty with
   | Ok _ -> None
   | Error conflict -> Some conflict
@@ -113,6 +115,20 @@ let exn _ =
   ignore (Knowledge.await (Knowledge.collect x obj));
   failwith "boom"
 
+let some _ =
+  let r =
+    eval @@ fun obj ->
+    Knowledge.direct @@ fun () ->
+    Knowledge.await (Knowledge.provide x obj (Some 3));
+    Knowledge.await_some (Knowledge.collect x obj)
+  in
+  assert_equal ~printer:Int.to_string 3 r;
+  Knowledge.promise z (fun obj ->
+      Knowledge.direct @@ fun () ->
+      Some (Knowledge.await_some (Knowledge.collect y obj) + 1));
+  let r = eval @@ fun obj -> Knowledge.collect z obj in
+  assert_equal ~printer:opt None r
+
 let unhandled _ =
   match Knowledge.await (Knowledge.return 1) with
   | _ -> assert_failure "await outside of direct"
@@ -142,6 +158,7 @@ let () =
            "caught" >:: caught;
            "nested" >:: nested;
            "exn" >:: exn;
+           "some" >:: some;
            "unhandled" >:: unhandled;
            "many" >:: many;
          ])

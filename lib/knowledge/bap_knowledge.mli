@@ -328,9 +328,9 @@ module Knowledge : sig
       @since 2.5.0 *)
 
   val direct : (unit -> 'a) -> 'a t
-  (** [direct f] is the knowledge computation of [f ()], which is written in
-      the direct style, i.e., [f] calls {!await} instead of binding the
-      knowledge computations, e.g.,
+  (** [direct f] is the knowledge computation of [f ()], which is written in the
+      direct style, i.e., [f] calls {!await} instead of binding the knowledge
+      computations, e.g.,
 
       {[
         KB.promise Theory.Semantics.slot @@ fun label ->
@@ -344,17 +344,36 @@ module Knowledge : sig
       exception, which [f] shouldn't catch, so that the computation of
       [direct f] fails with the same conflict, e.g., a promise of [f] is
       rejected when it awaits [reject ()]. Use {!Syntax.(>>=)} or {!catch}
-      inside of [await] to handle the failures, and don't catch all
-      exceptions, e.g., with [try ... with _ ->], in [f].
+      inside of [await] to handle the failures, and don't catch all exceptions,
+      e.g., with [try ... with _ ->], in [f].
 
       The other exceptions of [f] are raised, as from the monadic code. *)
 
   val await : 'a t -> 'a
-  (** [await x] evaluates [x] in the current knowledge computation of
-      {!direct} and returns its result.
+  (** [await x] evaluates [x] in the current knowledge computation of {!direct}
+      and returns its result.
 
-      Must be called during [f ()] of [direct f], but not inside of a C
-      callback in it, otherwise raises [Effect.Unhandled]. *)
+      Must be called during [f ()] of [direct f], but not inside of a C callback
+      in it, otherwise raises [Effect.Unhandled]. The functions, which [f]
+      passes to the knowledge computations, e.g., to [KB.List.iter], are called
+      by these computations, outside of [f ()], so they need their own [direct].
+  *)
+
+  val await_some : 'a option t -> 'a
+  (** [await_some x] is [y] if [await x] is [Some y], otherwise rejects.
+
+      In a promise, or another computation in the scope of {!with_empty},
+      [await_some x] aborts the computation when [x] evaluates to [None], which
+      then evaluates to the empty value, e.g.,
+
+      {[
+      KB.promise Theory.Label.addr @@ fun label ->
+      KB.direct @@ fun () ->
+      let mem = KB.await_some (KB.collect Memory.slot label) in
+      Some (Addr.to_bitvec (Memory.min_addr mem))
+      ]}
+
+      Outside of the scope of [with_empty] the computation fails. *)
 
   val empty : state
   (** state with no knowledge *)

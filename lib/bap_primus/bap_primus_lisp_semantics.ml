@@ -771,29 +771,30 @@ let provide_semantics ?(stdout = Format.std_formatter) () =
     |> require Theory.Unit.target |> require program
     |> provide Theory.Semantics.slot
     |> comment "reifies Primus Lisp definitions");
-  let require p k = if p then k () else !!Insn.empty in
   KB.promise Theory.Semantics.slot @@ fun obj ->
-  let* unit = obj -->? Theory.Label.unit in
-  let* name = obj -->? Property.name in
-  let* prog = obtain_typed_program unit in
-  require (Map.mem prog.names name) @@ fun () ->
-  let* args = obj --> Property.args in
-  let* target = KB.collect Theory.Unit.target unit in
-  let bits = Theory.Target.bits target in
-  KB.Context.set State.var
-    State.
-      {
-        binds = Map.empty (module Theory.Var.Top);
-        scope = Map.empty (module Theory.Var.Top);
-        arith = State.arith bits;
-      }
-  >>= fun () ->
-  let* (module Core) = Theory.current in
-  let open Prelude (Core) in
-  let* res = reify stdout prog obj target name args in
-  KB.collect Disasm_expert.Basic.Insn.slot obj >>| function
-  | Some basic when Insn.(res <> empty) -> Insn.with_basic res basic
-  | _ -> res
+  KB.direct @@ fun () ->
+  let unit = KB.await (obj -->? Theory.Label.unit) in
+  let name = KB.await (obj -->? Property.name) in
+  let prog = KB.await (obtain_typed_program unit) in
+  if not (Map.mem prog.names name) then Insn.empty
+  else
+    let args = KB.await (obj --> Property.args) in
+    let target = KB.await (KB.collect Theory.Unit.target unit) in
+    let bits = Theory.Target.bits target in
+    KB.await
+      (KB.Context.set State.var
+         State.
+           {
+             binds = Map.empty (module Theory.Var.Top);
+             scope = Map.empty (module Theory.Var.Top);
+             arith = State.arith bits;
+           });
+    let (module Core) = KB.await Theory.current in
+    let open Prelude (Core) in
+    let res = KB.await (reify stdout prog obj target name args) in
+    match KB.await (KB.collect Disasm_expert.Basic.Insn.slot obj) with
+    | Some basic when Insn.(res <> empty) -> Insn.with_basic res basic
+    | _ -> res
 
 let provide_attributes () =
   let open KB.Syntax in

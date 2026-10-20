@@ -58,28 +58,26 @@ let provide_sequence_semantics () =
     |> provide Theory.Semantics.slot
     |> comment "computes sequential instructions semantics");
   KB.promise Theory.Semantics.slot @@ fun obj ->
-  KB.collect Basic.slot obj >>= function
-  | None -> !!Theory.Semantics.empty
+  KB.direct @@ fun () ->
+  match KB.await (KB.collect Basic.slot obj) with
+  | None -> Theory.Semantics.empty
   | Some insn when not (String.equal (Basic.name insn) "seq") ->
-      !!Theory.Semantics.empty
+      Theory.Semantics.empty
   | Some insn -> (
       match Basic.subs insn with
-      | [||] -> !!Theory.Semantics.empty
+      | [||] -> Theory.Semantics.empty
       | subs -> (
-          Theory.instance () >>= Theory.require >>= fun (module CT) ->
-          let subs =
-            Array.to_list subs
-            |> List.map ~f:(fun sub ->
-                Insn.Seqnum.fresh >>| fun lbl -> (lbl, sub))
-          in
-          KB.all subs
-          >>= KB.List.map ~f:(fun (obj, sub) ->
-              KB.provide Basic.slot obj (Some sub) >>= fun () ->
-              KB.collect Theory.Semantics.slot obj >>= fun sema ->
-              let nil = Theory.Effect.empty Theory.Effect.Sort.bot in
-              CT.seq (CT.blk obj !!nil !!nil) !!sema)
-          >>= KB.List.reduce ~f:(fun s1 s2 -> CT.seq !!s1 !!s2)
-          >>| function
+          let (module CT) = KB.await (Theory.instance () >>= Theory.require) in
+          let nil = Theory.Effect.empty Theory.Effect.Sort.bot in
+          (* the labels of all parts are created before their semantics *)
+          Array.map subs ~f:(fun sub -> (KB.await Insn.Seqnum.fresh, sub))
+          |> Array.to_list
+          |> List.map ~f:(fun (obj, sub) ->
+              KB.await (KB.provide Basic.slot obj (Some sub));
+              let sema = KB.await (KB.collect Theory.Semantics.slot obj) in
+              KB.await (CT.seq (CT.blk obj !!nil !!nil) !!sema))
+          |> List.reduce ~f:(fun s1 s2 -> KB.await (CT.seq !!s1 !!s2))
+          |> function
           | None -> Insn.empty
           | Some sema -> Insn.with_basic sema insn))
 

@@ -2699,7 +2699,14 @@ module Knowledge = struct
             | _ -> None);
       }
     in
-    { run = (fun ~reject ~accept s -> (match_with f () handler).run ~reject ~accept s) }
+    {
+      run =
+        (fun ~reject ~accept s ->
+          (match_with f () handler).run ~reject ~accept s);
+    }
+
+  let await_some x =
+    match await x with Some x -> x | None -> await (reject ())
 
   let register_watcher (type a b) (s : (a, b) slot) run =
     Pid.incr pids;
