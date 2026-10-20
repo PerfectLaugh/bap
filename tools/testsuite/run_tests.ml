@@ -397,7 +397,9 @@ let () =
         sequence env out
           [ ("stops", "RAX = 9e7dd6e4"); ("runs the program", "1635920155") ]);
     (* the machines take Unicorn from each other, while their bytes are
-       in Unicorn, see Primus.Memory.Backing, and print the same *)
+       in Unicorn, see Primus.Memory.Backing, and print the same, except
+       the argument, that one of them changes, while its pages are
+       parked *)
     case "script/unicorn/fork" (fun env ->
         let out =
           bap ~timeout:300. env
@@ -412,12 +414,47 @@ open Bap_primus.Std
 
 (* forks the machine at the third putchar, and then switches between
    the parent and the child at each putchar, so that they take Unicorn
-   from each other in the middle of their runs *)
+   from each other in the middle of their runs, and the parent, which
+   doesn't run in Unicorn, capitalizes its argument world *)
 module Fork (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
+  module Env = Primus.Env.Make (Machine)
+  module Memory = Primus.Memory.Make (Machine)
 
   let calls = ref 0
   let machines = ref []
+  let patched = ref false
+
+  (* the string, to which a word of the stack points, e.g., the copy of
+     the argument in the heap, which echo prints *)
+  let find_string sp text =
+    Memory.load_bytes sp 0x1000 >>= fun bytes ->
+    let word i =
+      List.init 8 ~f:(fun k ->
+          match bytes.(i + k) with Some (c, _) -> Char.to_int c | None -> 0)
+      |> List.foldi ~init:0L ~f:(fun k acc b ->
+          Int64.(acc lor shift_left (of_int b) Int.(8 * k)))
+    in
+    let pointers =
+      List.init (0x1000 / 8) ~f:(fun i -> Addr.of_int64 ~width:64 (word (i * 8)))
+    in
+    Machine.List.find pointers ~f:(fun p ->
+        Memory.load_bytes p (String.length text) >>| fun bytes ->
+        String.equal text
+          (String.of_array
+             (Array.map bytes ~f:(function Some (c, _) -> c | None -> '?'))))
+
+  let capitalize () =
+    Machine.current () >>= fun self ->
+    match !machines with
+    | parent :: _
+      when Monads.Std.Monad.State.Multi.Id.equal parent self && not !patched ->
+        patched := true;
+        Env.get (Var.create "RSP" (Type.imm 64)) >>= fun sp ->
+        find_string (Primus.Value.to_word sp) "world\000" >>= (function
+        | Some p -> Memory.store p (Word.of_int ~width:8 (Char.to_int 'W'))
+        | None -> Machine.return ())
+    | _ -> Machine.return ()
 
   let switch () =
     Machine.forks () >>= fun alive ->
@@ -443,7 +480,7 @@ module Fork (Machine : Primus.Machine.S) = struct
           machines := [ parent; self ];
           Machine.return ()
         end
-      else if !calls > 3 then switch ()
+      else if !calls > 3 then switch () >>= capitalize
       else Machine.return ()
     end
     else Machine.return ()
@@ -472,6 +509,7 @@ let () =
           [
             ("forks the machine", "helllloo");
             ("switches the machines", "ccrruueell");
+            ("keeps the stores of the parked machine", "(wW|Ww)oorrlldd");
             ("runs both machines to the end", "ccoouurrssee");
           ]);
     case "script/error" (fun env ->

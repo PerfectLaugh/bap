@@ -78,9 +78,11 @@ type page = {
   mutable fetched : int;  (** the run of Unicorn, after which it is fetched *)
 }
 
-(* the pending page of a machine, that doesn't run in Unicorn, with
-   the contents that the machine has in Unicorn and in Primus *)
-type parked = { data : Bytes.t; known : Bytes.t }
+(* the page of a machine, that doesn't run in Unicorn, with the
+   contents that it had in Unicorn, which go there again, when the
+   machine runs in Unicorn, unless Primus drops the page meanwhile, see
+   [Make.protected]. The page is pending, until Primus fetches it *)
+type parked = { data : Bytes.t; copy : page; mutable unfetched : bool }
 
 type engine = {
   uc : Uc.t;
@@ -174,10 +176,20 @@ let restored =
 (* the engine of the machines *)
 let active : engine option ref = ref None
 
-(* the pending pages of the machines, that don't run in Unicorn, see
-   [Make.park] *)
+(* the pages of the machines, that don't run in Unicorn, see
+   [Make.park], and their number *)
 let parked : parked Int64.Table.t Monads.Std.Monad.State.Multi.Id.Table.t =
   Monads.Std.Monad.State.Multi.Id.Table.create ()
+
+let parked_pages = ref 0
+
+(* the number of the pages, that are parked, after which only the
+   pending pages are, as the forks may be many *)
+let parked_limit = 16384
+
+let unpark_all id =
+  Option.iter (Hashtbl.find_and_remove parked id) ~f:(fun pages ->
+      parked_pages := !parked_pages - Hashtbl.length pages)
 
 (* the arguments of [create] *)
 let recipe : (Theory.Target.t * int64 list * (int64 * string) list) option ref =
@@ -574,9 +586,25 @@ let fetch_page e page =
       changed
   | _ -> []
 
-let parked_changes pages =
-  Hashtbl.fold pages ~init:[] ~f:(fun ~key ~data:{ data; known } acc ->
-      changes key data known @ acc)
+let parked_changes page { data; copy; unfetched } =
+  match copy.snapshot with
+  | Some known when unfetched -> changes page data known
+  | _ -> []
+
+(* the changed bytes of the parked page, which Primus fetches *)
+let fetch_parked page stash =
+  let changed = parked_changes page stash in
+  (match stash.copy.snapshot with
+  | Some known when stash.unfetched ->
+      Bytes.blit ~src:stash.data ~src_pos:0 ~dst:known ~dst_pos:0
+        ~len:(Bytes.length known)
+  | _ -> ());
+  stash.unfetched <- false;
+  changed
+
+let all_parked_changes pages =
+  Hashtbl.fold pages ~init:[] ~f:(fun ~key ~data acc ->
+      parked_changes key data @ acc)
 
 (* The memory of Primus, whose pages are in Unicorn, or are parked. The
    bytes of the machine, that runs in Unicorn, are fetched from it, and
@@ -601,7 +629,10 @@ let backing memory : Primus.Memory.Backing.t =
               | None -> false
             else
               match Hashtbl.find parked id with
-              | Some pages -> Hashtbl.mem pages page
+              | Some pages -> (
+                  match Hashtbl.find pages page with
+                  | Some stash -> stash.unfetched
+                  | None -> false)
               | None -> false));
     fetch =
       (fun id addr ->
@@ -615,8 +646,8 @@ let backing memory : Primus.Memory.Backing.t =
                  match Hashtbl.find parked id with
                  | None -> []
                  | Some pages -> (
-                     match Hashtbl.find_and_remove pages page with
-                     | Some { data; known } -> changes page data known
+                     match Hashtbl.find pages page with
+                     | Some stash -> fetch_parked page stash
                      | None -> [])));
     fetch_all =
       (fun id ->
@@ -626,8 +657,10 @@ let backing memory : Primus.Memory.Backing.t =
             words e
               (if is_owner e id then List.concat_map e.dirty ~f:(fetch_page e)
                else
-                 match Hashtbl.find_and_remove parked id with
-                 | Some pages -> parked_changes pages
+                 match Hashtbl.find parked id with
+                 | Some pages ->
+                     Hashtbl.fold pages ~init:[] ~f:(fun ~key ~data acc ->
+                         fetch_parked key data @ acc)
                  | None -> []));
     stored =
       (fun id addr data ->
@@ -641,7 +674,20 @@ let backing memory : Primus.Memory.Backing.t =
                     Bytes.set known Int64.(to_int_exn (addr - page_of addr)) c;
                     Uc.mem_write e.uc addr (String.of_char c)
                 | _ -> ())
-        | _ -> ());
+        | _ -> (
+            match Hashtbl.find parked id with
+            | None -> ()
+            | Some pages ->
+                let addr = int64_of_word addr in
+                String.iteri data ~f:(fun i c ->
+                    let addr = Int64.(addr + of_int i) in
+                    match Hashtbl.find pages (page_of addr) with
+                    | Some { data; copy; _ } ->
+                        let off = Int64.(to_int_exn (addr - page_of addr)) in
+                        Bytes.set data off c;
+                        Option.iter copy.snapshot ~f:(fun known ->
+                            Bytes.set known off c)
+                    | None -> ())));
   }
 
 module Make (Machine : Primus.Machine.S) = struct
@@ -669,42 +715,72 @@ module Make (Machine : Primus.Machine.S) = struct
     e.dirty <- [];
     e.written <- []
 
-  (* the pending pages of the owner, which another machine claims, are
-     parked, until the owner fetches them, or claims Unicorn again *)
+  (* the pages of the owner, which another machine claims, are parked,
+     until the owner claims Unicorn again, or the pending ones, if too
+     many are parked *)
   let park e =
     Option.iter e.owner ~f:(fun owner ->
         let pages =
           Hashtbl.find_or_add parked owner ~default:Int64.Table.create
         in
-        List.iter e.dirty ~f:(fun page ->
-            match Hashtbl.find e.pages page with
-            | Some ({ snapshot = Some known; _ } as p) when pending e p ->
-                let data = read_page e page in
-                if not (Bytes.equal data known) then
-                  Hashtbl.set pages ~key:page
-                    ~data:{ data; known = Bytes.copy known }
-            | _ -> ()))
+        Hashtbl.iteri e.pages ~f:(fun ~key:page ~data:copy ->
+            let unfetched = pending e copy in
+            if unfetched || !parked_pages < parked_limit then begin
+              let data = read_page e page in
+              let unfetched =
+                unfetched
+                &&
+                match copy.snapshot with
+                | Some known -> not (Bytes.equal data known)
+                | None -> false
+              in
+              if not (Hashtbl.mem pages page) then incr parked_pages;
+              Hashtbl.set pages ~key:page ~data:{ data; copy; unfetched }
+            end))
+
+  (* the parked pages of the machine go to Unicorn, with the pending
+     ones writable and dirty *)
+  let unpark e id =
+    Option.iter (Hashtbl.find parked id) ~f:(fun pages ->
+        unpark_all id;
+        Hashtbl.iteri pages ~f:(fun ~key:page ~data:{ data; copy; unfetched } ->
+            let perm =
+              if unfetched then copy.perm else Uc.Perm.(copy.perm - write)
+            in
+            Uc.mem_map e.uc page page_size perm;
+            Uc.mem_write e.uc page (Bytes.to_string data);
+            copy.dirty <- unfetched;
+            copy.fetched <- -1;
+            if unfetched then e.dirty <- page :: e.dirty;
+            (match copy with
+            | { snapshot = Some _; holes = _ :: _ as holes; _ } ->
+                e.unchecked <- (page, holes) :: e.unchecked
+            | _ -> ());
+            Hashtbl.set e.pages ~key:page ~data:copy))
 
   let store_changes e =
     Machine.List.iter ~f:(fun (addr, data) ->
         Memory.store_bytes (word e addr) data)
 
-  (* the parked pages of the machine go to its memory *)
-  let unpark e id =
-    match Hashtbl.find_and_remove parked id with
+  (* the pending parked pages of the machine go to its memory *)
+  let materialize e id =
+    match Hashtbl.find parked id with
     | None -> Machine.return ()
-    | Some pages -> store_changes e (parked_changes pages)
+    | Some pages ->
+        store_changes e
+          (Hashtbl.fold pages ~init:[] ~f:(fun ~key ~data acc ->
+               fetch_parked key data @ acc))
 
   (* the pages and the registers of another machine are not valid *)
   let claim e =
     let* owned = owns e in
     if owned then Machine.return false
     else
-      let* id = Machine.current () in
+      let+ id = Machine.current () in
       park e;
       forget e;
       e.owner <- Some id;
-      let+ () = unpark e id in
+      unpark e id;
       true
 
   let union (p : Primus.Memory.protection) (q : Primus.Memory.protection) :
@@ -910,8 +986,9 @@ module Make (Machine : Primus.Machine.S) = struct
               Hashtbl.keys pages |> List.filter ~f:inside
               |> Machine.List.iter ~f:(fun page ->
                   match Hashtbl.find_and_remove pages page with
-                  | Some { data; known } ->
-                      store_changes e (changes page data known)
+                  | Some stash ->
+                      decr parked_pages;
+                      store_changes e (parked_changes page stash)
                   | None -> Machine.return ()))
 
   (* the fork has the bytes, that its parent has in Unicorn, or parked *)
@@ -923,11 +1000,11 @@ module Make (Machine : Primus.Machine.S) = struct
           (if is_owner e parent then pending_changes e
            else
              match Hashtbl.find parked parent with
-             | Some pages -> parked_changes pages
+             | Some pages -> all_parked_changes pages
              | None -> [])
 
   let killed id =
-    Hashtbl.remove parked id;
+    unpark_all id;
     Machine.return ()
 
   (* the memory of the machine, that finishes the system, is in Primus *)
@@ -936,22 +1013,23 @@ module Make (Machine : Primus.Machine.S) = struct
     | None -> Machine.return ()
     | Some e ->
         let* id = Machine.current () in
-        if is_owner e id then sync e else unpark e id
+        if is_owner e id then sync e else materialize e id
 
   let system_stopped _ =
     Primus.Memory.Backing.set None;
     Hashtbl.clear parked;
+    parked_pages := 0;
     Machine.return ()
 
-  (* the engine, which is created anew, if it is broken, after its state
-     goes to Primus *)
+  (* the engine, which is created anew, if it is broken, after its
+     registers go to Primus, and its pages are parked *)
   let engine () =
     match (!active, !recipe) with
     | Some e, Some (target, foreign, externals) when e.broken ->
         let* owned = owns e in
-        let* () =
-          if owned then pull e >>= fun () -> sync e else Machine.return (park e)
-        in
+        let* () = if owned then pull e else Machine.return () in
+        (* the pages go to the new engine, when their machine claims it *)
+        park e;
         Uc.close e.uc;
         let e = create target ~foreign ~externals in
         active := Some e;
@@ -1491,7 +1569,7 @@ module Make (Machine : Primus.Machine.S) = struct
        another machine, that owns Unicorn, are kept *)
     if not (is_owner e id) then park e;
     forget e;
-    Hashtbl.remove parked id;
+    unpark_all id;
     e.owner <- Some id;
     let* () = map_code e in
     let* () = push e in
@@ -1731,6 +1809,7 @@ module Loader (Machine : Primus.Machine.S) = struct
     | e ->
         active := Some e;
         Hashtbl.clear parked;
+        parked_pages := 0;
         Primus.Memory.Backing.set
           (Some (backing (Theory.Var.name (Theory.Target.data target))));
         Machine.return ()
