@@ -595,6 +595,59 @@ module Make (Machine : Machine) = struct
   let is_executable addr =
     protection addr >>| function Some p -> p.executable | None -> false
 
+  let check_bytes name =
+    memory >>| fun { size } ->
+    if size <> 8 then
+      invalid_argf "Memory.%s: the data of the memory are %d bits wide" name
+        size ()
+
+  (* the byte at [addr], which is mapped and readable, the generated
+     value is remembered, as [read] does *)
+  let read_byte s addr =
+    match Map.find s.values addr with
+    | Some v -> Machine.return (Value.to_word v, s)
+    | None -> (
+        match find_layer addr s with
+        | Some { mem = Static mem } -> Machine.return (read_word mem addr 8, s)
+        | Some { mem = Dynamic { value = g } } ->
+            Generate.word g (Generator.width g) >>= remembered s addr
+            >>= fun v ->
+            get_curr >>| fun s -> (Value.to_word v, s)
+        | None -> assert false)
+
+  let load_bytes addr len =
+    check_bytes "load_bytes" >>= fun () ->
+    get_curr >>= fun s ->
+    let bytes = Array.create ~len None in
+    let rec loop i s =
+      if i = len then Machine.return bytes
+      else
+        let a = Addr.nsucc addr i in
+        match protection_of a s with
+        | None -> loop (i + 1) s
+        | Some p when not p.readable ->
+            bytes.(i) <- Some ('\000', p);
+            loop (i + 1) s
+        | Some p ->
+            read_byte s a >>= fun (x, s) ->
+            bytes.(i) <- Some (Char.of_int_exn (Word.to_int_exn x), p);
+            loop (i + 1) s
+    in
+    loop 0 s
+
+  let store_bytes addr data =
+    check_bytes "store_bytes" >>= fun () ->
+    Value.of_words
+      (Array.init (String.length data) ~f:(fun i ->
+           Word.of_int ~width:8 (Char.to_int data.[i])))
+    >>= fun xs ->
+    update @@ fun s ->
+    let values =
+      Array.foldi xs ~init:s.values ~f:(fun i values x ->
+          Map.set values ~key:(Addr.nsucc addr i) ~data:x)
+    in
+    { s with values }
+
   let protect ~lower ~upper protection =
     update (fun s ->
         let s = unprotect lower upper s in

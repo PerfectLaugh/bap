@@ -2487,6 +2487,26 @@ module Std : sig
 
             @since 2.6.0 *)
 
+        val load_bytes :
+          addr -> int -> (char * protection) option array Machine.t
+        (** [load_bytes addr n] the [n] bytes from [addr] with their
+            protections, which are [None] for the bytes that are not mapped. A
+            byte that is not readable is ['\000'], instead of a [Pagefault], and
+            a byte of a dynamic region, which is not stored yet, is generated,
+            as {!load} does.
+
+            Precondition: the data of the current [memory] are bytes.
+
+            @since 2.6.0 *)
+
+        val store_bytes : addr -> string -> unit Machine.t
+        (** [store_bytes addr data] stores the bytes of [data] from [addr],
+            bypassing any checks, as {!store_never_fail} does for each of them.
+
+            Precondition: the data of the current [memory] are bytes.
+
+            @since 2.6.0 *)
+
         val protect : lower:addr -> upper:addr -> protection -> unit Machine.t
         (** [protect ~lower ~upper protection] sets the access to the mapped
             addresses from [lower] to [upper], inclusive, as the [mprotect]

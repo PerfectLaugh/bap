@@ -76,6 +76,13 @@ module Make (Machine : Machine) = struct
     Machine.Global.get state >>= fun id ->
     Machine.Global.put state (Int63.succ id) >>| fun () -> { id; value }
 
+  let of_words words =
+    Machine.Global.get state >>= fun first ->
+    let n = Array.length words in
+    Machine.Global.put state Int63.(first + of_int n) >>| fun () ->
+    Array.mapi words ~f:(fun i value ->
+        { id = Int63.(first + of_int i); value })
+
   let to_word = to_word
   let inj f x = of_word (f x)
   let proj f { value } = f value

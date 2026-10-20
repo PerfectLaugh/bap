@@ -508,17 +508,6 @@ module Make (Machine : Primus.Machine.S) = struct
       e.owner <- Some id;
       true
 
-  (* the byte and its protection, if it is mapped, a byte that is not
-     readable is zero *)
-  let load_byte addr =
-    Memory.protection addr >>= function
-    | None -> Machine.return None
-    | Some (p : Primus.Memory.protection) when not p.readable ->
-        Machine.return (Some ('\000', p))
-    | Some p ->
-        let+ x = Memory.load addr in
-        Some (Char.of_int_exn (Word.to_int_exn x), p)
-
   let union (p : Primus.Memory.protection) (q : Primus.Memory.protection) :
       Primus.Memory.protection =
     {
@@ -535,20 +524,17 @@ module Make (Machine : Primus.Machine.S) = struct
     let none : Primus.Memory.protection =
       { readable = false; writable = false; executable = false }
     in
-    let* holes, access =
-      Machine.List.fold
-        (List.init (Bytes.length bytes) ~f:Fn.id)
-        ~init:([], none)
-        ~f:(fun (holes, access) i ->
-          load_byte Word.(base ++ i) >>| function
-          | Some (c, p) ->
-              Bytes.set bytes i c;
-              (holes, union access p)
-          | None -> (
-              match holes with
-              | (first, last) :: holes when last + 1 = i ->
-                  ((first, i) :: holes, access)
-              | holes -> ((i, i) :: holes, access)))
+    let+ loaded = Memory.load_bytes base (Bytes.length bytes) in
+    let holes, access =
+      Array.foldi loaded ~init:([], none) ~f:(fun i (holes, access) -> function
+        | Some (c, p) ->
+            Bytes.set bytes i c;
+            (holes, union access p)
+        | None -> (
+            match holes with
+            | (first, last) :: holes when last + 1 = i ->
+                ((first, i) :: holes, access)
+            | holes -> ((i, i) :: holes, access)))
     in
     let writable = access.writable in
     List.iter (Hashtbl.find_multi e.slots page) ~f:(fun (off, addr) ->
@@ -574,8 +560,7 @@ module Make (Machine : Primus.Machine.S) = struct
         {
           snapshot = (if writable then Some (Bytes.of_string data) else None);
           holes;
-        };
-    Machine.return ()
+        }
 
   let ensure_page e addr =
     let page = page_of addr in
@@ -662,16 +647,28 @@ module Make (Machine : Primus.Machine.S) = struct
       Machine.return ()
     else
       let base = word e page in
-      let changed =
-        List.filter
-          (List.init (String.length data) ~f:Fn.id)
-          ~f:(fun i -> not (Char.equal data.[i] (Bytes.get snapshot i)))
+      (* the runs of the changed bytes *)
+      let rec runs i acc =
+        if i = String.length data then List.rev acc
+        else if Char.equal data.[i] (Bytes.get snapshot i) then runs (i + 1) acc
+        else
+          let rec last j =
+            if
+              j + 1 < String.length data
+              && not (Char.equal data.[j + 1] (Bytes.get snapshot (j + 1)))
+            then last (j + 1)
+            else j
+          in
+          let j = last i in
+          runs (j + 1) ((i, j) :: acc)
       in
-      Machine.List.iter changed ~f:(fun i ->
-          Bytes.set snapshot i data.[i];
-          Memory.store_never_fail
+      let changed = runs 0 [] in
+      Bytes.From_string.blit ~src:data ~src_pos:0 ~dst:snapshot ~dst_pos:0
+        ~len:(String.length data);
+      Machine.List.iter changed ~f:(fun (i, j) ->
+          Memory.store_bytes
             Word.(base ++ i)
-            (Word.of_int ~width:8 (Char.to_int data.[i])))
+            (String.sub data ~pos:i ~len:(j - i + 1)))
 
   (* copies the registers and the changed memory to Primus and drops
      the writable pages, that Primus may extend, see [page] *)

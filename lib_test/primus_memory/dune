@@ -1,0 +1,4 @@
+(test
+ (name test_primus_memory)
+ (package bap-primus)
+ (libraries bap bap-core-theory bap-primus core monads))

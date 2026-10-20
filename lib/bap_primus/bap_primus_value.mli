@@ -26,6 +26,10 @@ module Make (Machine : Machine) : sig
   val id : t -> id
   val to_word : t -> word
   val of_word : word -> t m
+
+  val of_words : word array -> t array m
+  (** [of_words xs] the values of [xs], as [of_word] makes them, in one step. *)
+
   val of_string : string -> t m
   val of_bool : bool -> t m
   val of_int : width:int -> int -> t m
