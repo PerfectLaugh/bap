@@ -623,6 +623,7 @@ let () =
       Printf.printf "exited with %s after %d stores\n"
         (match code with Some c -> string_of_int c | None -> "?") !stores
   | Paused -> print_endline "paused"
+  | Running -> print_endline "running"
   | Failed msg -> print_endline ("failed: " ^ msg))
 |}
         in
@@ -832,6 +833,7 @@ module Emu = Bap_emu
 let status = function
   | Emu.Exited _ -> print_endline "exited"
   | Paused -> print_endline "paused"
+  | Running -> print_endline "running"
   | Failed m -> print_endline ("failed: " ^ m)
 
 let () =
@@ -918,6 +920,7 @@ let () =
   match Emu.run emu with
   | Exited c -> Printf.printf "exited %s\n" (match c with Some c -> string_of_int c | None -> "?")
   | Paused -> print_endline "paused"
+  | Running -> print_endline "running"
   | Failed m -> print_endline ("failed: " ^ m)
 |}
         in
@@ -1272,27 +1275,34 @@ let unicorn_symexec data =
       case ~slow:true ("symexec/bap:unicorn-executor/" ^ name) (fun env ->
           let out =
             bap env ~timeout:120. ~until:"access"
-              [
-                path data ("bin/" ^ name);
-                "--passes=run";
-                "--run-systems=bap:unicorn-executor";
-                "--run-components=bap:greedy-scheduler,bap:symbolic-computer,bap:symbolic-path-explorer,bap:symbolic-path-constraints,bap:symbolic-lisp-primitives";
-                "--primus-lisp-load=symbolic-stdio,posix";
-                "--primus-symbolic-executor-cutoff-level=16";
-                "--primus-symbolic-executor-timeout=1000";
-                "--run-in-isolation";
-              ]
+              ((path data ("bin/" ^ name) :: api data name)
+              @ [
+                  "--passes=run";
+                  "--run-systems=bap:unicorn-executor";
+                  "--run-components=bap:greedy-scheduler,bap:symbolic-computer,bap:symbolic-path-explorer,bap:symbolic-path-constraints,bap:symbolic-lisp-primitives";
+                  "--primus-lisp-load=symbolic-stdio,posix";
+                  "--primus-symbolic-executor-cutoff-level=16";
+                  "--primus-symbolic-executor-timeout=1000";
+                  "--run-in-isolation";
+                ])
           in
           match out.status with
           | Stopped -> check env (name ^ " was hacked!") true
           | Exited _ when matches out "access" ->
               check env (name ^ " was hacked!") true
           | _ -> check env (name ^ " withhold the attack.") false))
-    [
-      "x86_64-linux-gnu-symexec-simple";
-      "x86_64-linux-gnu-symexec-input";
-      "x86_64-linux-gnu-symexec-guess";
-    ]
+    (List.concat_map
+       (fun target ->
+         List.map
+           (fun program -> target ^ "-symexec-" ^ program)
+           [ "simple"; "input"; "guess" ])
+       [
+         "x86_64-linux-gnu";
+         "aarch64-linux-gnu";
+         "arm-linux-gnueabi";
+         "mips-linux-gnu";
+         "powerpc-linux-gnu";
+       ])
 
 (* the scripts stop the machines with Bap_script_debugger, and see and
    change them in their handlers, the same in the interpreter and in
@@ -1633,7 +1643,7 @@ let taint data =
 (* the symbolic executor finds the input that makes a binary print access *)
 let symexec data =
   files data "bin" (fun name -> contains_any [ "-symexec-" ] name)
-  |> List.filter (fun file -> not (contains_any [ "mingw"; "mips" ] file))
+  |> List.filter (fun file -> not (contains_any [ "mingw" ] file))
   |> List.map (fun file ->
       let name = "symexec/" ^ Filename.basename file in
       case ~slow:true name (fun env ->
@@ -1661,6 +1671,389 @@ let symexec data =
           | Timeout -> check env (file ^ " run out of time.") false
           | _ -> check env (file ^ " withhold the attack.") false))
 
+(* the scripts on every target, that the testsuite has the binaries of:
+   the symbolic and the tainted registers and memory, the branches and
+   their flips, the hooks, the snapshots, and the misuses, e.g., of the
+   aliases of the registers, e.g., W0 of AArch64 or V0 of MIPS, which the
+   code doesn't read, as it reads their base registers *)
+let emu_targets data =
+  let api file =
+    if String.starts_with ~prefix:"powerpc" file then
+      [ path data "api/powerpc" ]
+    else []
+  in
+  let script env name source args =
+    bap ~timeout:300. env ("script" :: write env name source :: args)
+  in
+  (* the target, the address after getchar returns, the register, that
+     holds its result, the base register, that the code reads, and the
+     branch on it, see symexec-guess.c *)
+  let guesses =
+    [
+      ("x86_64-linux-gnu", "0x693", "EAX", "RAX", "696");
+      ("aarch64-linux-gnu", "0x780", "W0", "R0", "784");
+      ("arm-linux-gnueabi", "0x1043c", "R0", "R0", "10444");
+      ("mips-linux-gnu", "0x40077c", "V0", "R2", "400788");
+      ("powerpc-linux-gnu", "0x100004e4", "R3", "R3", "100004ec");
+    ]
+  in
+  let guess =
+    {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+module Sym = Emu.Symbolic
+
+let model = function
+  | None -> "unsat"
+  | Some m ->
+      String.concat ","
+        (List.map (fun (n, v) -> Printf.sprintf "%s=%Lx" n (Int64.logand v 0xffL)) m)
+
+let formulas emu place =
+  String.concat ","
+    (List.map (function Some f -> f | None -> "-") (Sym.formula emu place))
+
+let status = function
+  | Emu.Exited c ->
+      Printf.sprintf "exited %s" (match c with Some c -> string_of_int c | None -> "?")
+  | Paused -> "paused"
+  | Running -> "running"
+  | Failed m -> "failed " ^ m
+
+let () =
+  match Bap_script.args () with
+  | file :: input :: until :: reg :: api ->
+      let emu =
+        Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", input) ]
+          (Bap_script.project ~api file)
+      in
+      (match Emu.run emu ~until:(Int64.of_string until) with
+       | Paused -> ()
+       | s -> failwith ("getchar didn't return: " ^ status s));
+      Printf.printf "before: %s\n%!" (formulas emu (Reg reg));
+      (try Sym.symbolize emu (Reg "NO-SUCH-REGISTER")
+       with Invalid_argument _ -> print_endline "rejects the unknown register");
+      Sym.symbolize emu (Reg reg);
+      Printf.printf "after: %s\n%!" (formulas emu (Reg reg));
+      Printf.printf "unsolved: %s\n%!" (model (Sym.solve emu));
+      let branches = ref [] in
+      Sym.on_branch emu (fun emu b ->
+          (try Sym.symbolize emu (Reg reg)
+           with Invalid_argument _ -> print_endline "rejects the hook");
+          branches := b :: !branches);
+      let s = status (Emu.run emu) in
+      Printf.printf "%s\n" s;
+      List.iter
+        (fun b ->
+          Printf.printf "branch %Lx %s flips with %s\n" (Sym.addr b)
+            (if Sym.taken b then "taken" else "fell") (model (Sym.flip b)))
+        (List.rev !branches);
+      Printf.printf "branches %d\n" (List.length !branches);
+      Printf.printf "solved: %s\n" (model (Sym.solve emu));
+      Printf.printf "ended: %s\n" (formulas emu (Reg reg))
+  | _ -> failwith "expected FILE INPUT UNTIL REG [API]"
+|}
+  in
+  let crc32 =
+    {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+module Sym = Emu.Symbolic
+module Taint = Emu.Taint
+
+let status = function
+  | Emu.Exited c ->
+      Printf.sprintf "exited %s" (match c with Some c -> string_of_int c | None -> "?")
+  | Paused -> "paused"
+  | Running -> "running"
+  | Failed m -> "failed " ^ m
+
+(* the program pauses, when it calls crc32 first, after it read both
+   lines with fgets, whose first argument is the buffer *)
+let () =
+  match Bap_script.args () with
+  | file :: input :: api ->
+      let emu =
+        Emu.create ~components:(Sym.components @ Taint.components)
+          ~redirects:[ ("<stdin>", input) ] (Bap_script.project ~api file)
+      in
+      let buffers = ref [] and crcs = ref 0 in
+      Emu.on_call emu "fgets" (fun emu ->
+          buffers := Emu.arg emu 0 :: !buffers;
+          Default);
+      Emu.on_call emu "crc32" (fun emu ->
+          incr crcs;
+          if !crcs = 1 then Emu.stop emu;
+          Default);
+      let s = status (Emu.run emu) in
+      Printf.printf "at crc32: %s after %d reads\n%!" s (List.length !buffers);
+      let buf1 = List.nth !buffers 1 and buf2 = List.nth !buffers 0 in
+      Printf.printf "buf1 %S, buf2 %S\n%!" (Emu.read emu buf1 4) (Emu.read emu buf2 4);
+      Sym.symbolize emu (Mem (buf1, 4));
+      Taint.introduce emu ~kind:"input" (Mem (buf1, 4));
+      Printf.printf "symbolic: %s\n%!"
+        (String.concat ""
+           (List.map (function Some _ -> "S" | None -> "-") (Sym.formula emu (Mem (buf1, 5)))));
+      Printf.printf "tainted: %b %b\n%!"
+        (Taint.is_tainted emu ~kind:"input" (Mem (buf1, 4)))
+        (Taint.is_tainted emu ~kind:"input" (Mem (buf2, 4)));
+      let branches = ref [] and jumps = ref 0 in
+      Sym.on_branch emu (fun _ b -> branches := b :: !branches);
+      Taint.on_jump emu (fun _ ~kinds _ -> if List.mem "input" kinds then incr jumps);
+      let s = status (Emu.run emu) in
+      let crcs = !crcs in
+      Printf.printf "%s, crc32 called %d times\n" s crcs;
+      Printf.printf "symbolic branches: %b, tainted jumps: %b\n"
+        (List.length !branches > 4) (!jumps > 4);
+      (match Sym.flip ~timeout:30_000 (List.hd !branches) with
+       | None -> print_endline "no collision"
+       | Some m ->
+           Printf.printf "collision %S\n"
+             (String.concat "" (List.map (fun (_, v) -> String.make 1 (Char.chr (Int64.to_int v))) m)));
+      Taint.sanitize emu ~kind:"input" (Mem (buf1, 4));
+      Printf.printf "sanitized: %b\n" (Taint.is_tainted emu ~kind:"input" (Mem (buf1, 4)))
+  | _ -> failwith "expected FILE INPUT [API]"
+|}
+  in
+  let echo =
+    {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+
+let status = function
+  | Emu.Exited c ->
+      Printf.sprintf "exited %s" (match c with Some c -> string_of_int c | None -> "?")
+  | Paused -> "paused"
+  | Running -> "running"
+  | Failed m -> "failed " ^ m
+
+let () =
+  match Bap_script.args () with
+  | file :: api ->
+      let emu =
+        Emu.create ~args:[ "hello"; "cruel"; "world" ]
+          (Bap_script.project ~api ~bare:true file)
+      in
+      let entry = Emu.pc emu in
+      Printf.printf "registers: %b\n%!" (List.length (Emu.registers emu) > 16);
+      let stepped = status (Emu.step emu) in
+      Printf.printf "step: %s, moved %b\n%!" stepped (Emu.pc emu <> entry);
+      (try ignore (Emu.arg emu 0)
+       with Invalid_argument _ -> print_endline "no argument outside of a call");
+      let chars = Buffer.create 64 and first = ref true in
+      Emu.on_call emu "putchar" (fun emu ->
+          let c = Char.chr (Int64.to_int (Int64.logand (Emu.arg emu 0) 0xffL)) in
+          (try Emu.patch emu 0L "x" with Invalid_argument _ ->
+             if !first then print_endline "no patch in the hook");
+          if !first then begin
+            first := false;
+            Emu.stop emu
+          end;
+          (* the program prints the vowels of the arguments, as Q *)
+          if c = 'e' then Return 101L
+          else begin
+            Buffer.add_char chars c;
+            Default
+          end);
+      Printf.printf "first putchar: %s\n%!" (status (Emu.run emu));
+      let snapshot = Emu.snapshot emu in
+      let s1 = status (Emu.run emu) in
+      let out1 = Buffer.contents chars in
+      Buffer.clear chars;
+      Emu.restore emu snapshot;
+      Printf.printf "restored: %s\n%!" (status (Emu.status emu));
+      let s2 = status (Emu.run emu) in
+      let replays =
+        String.equal (String.sub out1 1 (String.length out1 - 1)) (Buffer.contents chars)
+      in
+      Printf.printf "%s, %s, replays %b, exit code %s\n" s1 s2 replays
+        (match Emu.exit_code emu with Some c -> string_of_int c | None -> "?");
+      Printf.printf "printed %S\n" out1
+  | _ -> failwith "expected FILE [API]"
+|}
+  in
+  let run =
+    {|#require "bap-primus"
+open Bap_primus.Std
+
+let calls = ref 0
+
+module Count (Machine : Primus.Machine.S) = struct
+  let call (name, _) =
+    if String.equal name "putchar" then incr calls;
+    Machine.return ()
+
+  let init () = Machine.Observation.observe Primus.Linker.Trace.call call
+end
+
+let () =
+  match Bap_script.args () with
+  | system :: file :: api ->
+      ignore
+        (Bap_script.run ~system ~init:[ (module Count) ]
+           ~args:[ "hello"; "cruel"; "world" ]
+           (Bap_script.project ~api file));
+      Printf.printf "\nputchar was called %b\n" (!calls > 20)
+  | _ -> failwith "expected SYSTEM FILE [API]"
+|}
+  in
+  let echos =
+    [
+      "x86_64-linux-gnu";
+      "x86-linux-gnu";
+      "aarch64-linux-gnu";
+      "arm-linux-gnueabi";
+      "mips-linux-gnu";
+      "mips64-linux-gnueabi";
+      "powerpc32-linux-gnu";
+      "riscv64-linux-gnu";
+    ]
+  in
+  List.concat_map
+    (fun (target, until, reg, base, branch) ->
+      let file = "bin/" ^ target ^ "-symexec-guess" in
+      let run env input =
+        script env "guess.ml" guess
+          ([ path data file; write env "input" input; until; reg ] @ api target)
+      in
+      [
+        case
+          ("emu/" ^ target ^ "-symexec-guess/flip")
+          (fun env ->
+            let out = run env "Z" in
+            sequence env out
+              [
+                ("the register is concrete", "before: -\n");
+                ("rejects the unknown register", "rejects the unknown register");
+                ("symbolizes the base register", "after: " ^ base ^ "\n");
+                ("solves no constraints", "unsolved: \n");
+                ("rejects the symbolization in the hook", "rejects the hook");
+                ("exits", "exited 0");
+                ( "flips the branch to A",
+                  "branch " ^ branch ^ " taken flips with " ^ base ^ "=41\n" );
+                ("sees one branch", "branches 1\n");
+                ("solves the path", "solved: " ^ base ^ "=");
+                ("keeps the formula after the exit", "ended: ");
+              ];
+            lacks env "the path avoids A" out ("solved: " ^ base ^ "=41\n"));
+        case
+          ("emu/" ^ target ^ "-symexec-guess/granted")
+          (fun env ->
+            let out = run env "A" in
+            sequence env out
+              [
+                ("grants the access", "access granted");
+                ("exits", "exited 0");
+                ( "falls through the branch",
+                  "branch " ^ branch ^ " fell flips with " ^ base ^ "=" );
+              ];
+            lacks env "flips away from A" out "fell flips with [A-Z0-9]+=41\n");
+      ])
+    guesses
+  @ List.map
+      (fun target ->
+        case ~slow:true
+          ("emu/" ^ target ^ "-symexec-crc32/collision")
+          (fun env ->
+            let input = write env "input" "abc\nabd\n" in
+            let out =
+              script env "crc32.ml" crc32
+                ([ path data ("bin/" ^ target ^ "-symexec-crc32"); input ]
+                @ api target)
+            in
+            sequence env out
+              [
+                ("pauses at crc32", "at crc32: paused after 2 reads");
+                ("reads the lines", "buf1 \"abc\\\\n\", buf2 \"abd\\\\n\"");
+                ("symbolizes the bytes", "symbolic: SSSS-");
+                ("taints the bytes", "tainted: true false");
+                ("exits", "exited 0, crc32 called 2 times");
+                ( "sees the branches and the jumps",
+                  "symbolic branches: true, tainted jumps: true" );
+                ("finds the collision of the CRC", "collision \"abd\\\\n\"");
+                ("sanitizes the bytes", "sanitized: false");
+              ]))
+      (List.map (fun (target, _, _, _, _) -> target) guesses)
+  @ List.concat_map
+      (fun target ->
+        let file = path data ("bin/" ^ target ^ "-echo") in
+        [
+          case
+            ("emu/" ^ target ^ "-echo/hooks")
+            (fun env ->
+              let out = script env "echo.ml" echo (file :: api target) in
+              sequence env out
+                [
+                  ("has the registers", "registers: true");
+                  ("steps", "step: paused, moved true");
+                  ( "has no argument outside of a call",
+                    "no argument outside of a call" );
+                  ("has no patch in the hook", "no patch in the hook");
+                  ("pauses at putchar", "first putchar: paused");
+                  ("restores the paused program", "restored: paused");
+                  ( "replays the program",
+                    "exited 0, exited 0, replays true, exit code 0" );
+                  ("replaces the calls", "hllo\\\\ncrul\\\\nworld");
+                ]);
+          case
+            ("script/unicorn/run/" ^ target ^ "-echo")
+            (fun env ->
+              let out =
+                script env "run.ml" run
+                  ("bap:unicorn-executor" :: file :: api target)
+              in
+              sequence env out
+                [
+                  ("prints the arguments", "hello\ncruel\nworld");
+                  ( "runs the components of the script",
+                    "putchar was called true" );
+                ]);
+        ])
+      echos
+
+(* the loaders: the sections of PE without the contents, e.g., .bss, are
+   zero-filled segments, and the data objects, that the programs import,
+   e.g., stdin, through the slots of the GOT, which the GLOB_DAT
+   relocations, or the global entries of the GOT of MIPS, fill, have
+   their storage, as the programs read them through the slots *)
+let loaders data =
+  List.map
+    (fun (file, bss, size) ->
+      case ("loader/pe-bss/" ^ file) (fun env ->
+          let out = bap env [ "specification"; path data ("bin/" ^ file) ] in
+          contains env "the .bss is a segment" out
+            (Printf.sprintf "(segment %d %d true true false)" bss size);
+          lacks env "the .bss is not in the file" out
+            (Printf.sprintf "\\(mapped %d " bss)))
+    [
+      ("x86_64-w64-mingw32-symexec-guess", 0x407000, 0x990);
+      ("i686-w64-mingw32-symexec-guess", 0x405000, 0x3f0);
+    ]
+  @ List.concat_map
+      (fun target ->
+        List.map
+          (fun system ->
+            let name = target ^ "-symexec-crc32" in
+            case
+              ("loader/imports/" ^ system ^ "/" ^ name)
+              (fun env ->
+                let input = write env "input" "abc\nabc\n" in
+                let out =
+                  bap env ~timeout:120.
+                    ((path data ("bin/" ^ name) :: api data name)
+                    @ [
+                        "--passes=run";
+                        "--run-systems=" ^ system;
+                        "--primus-lisp-channel-redirect=<stdin>:" ^ input;
+                      ])
+                in
+                contains env "reads stdin through the GOT" out "access granted"))
+          [ "bap:stubbed-executor"; "bap:unicorn-executor" ])
+      [
+        "x86_64-linux-gnu";
+        "aarch64-linux-gnu";
+        "arm-linux-gnueabi";
+        "mips-linux-gnu";
+        "powerpc-linux-gnu";
+      ]
+
 let tests =
   [
     sse;
@@ -1677,6 +2070,8 @@ let tests =
     scripts;
     bare;
     emu;
+    emu_targets;
+    loaders;
     observations;
     unicorn_taint;
     patched_code;
