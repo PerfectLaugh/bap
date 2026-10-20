@@ -946,8 +946,26 @@ end
    didn't change. A basic block of the program, that the program stores
    to, and its subroutine, which starts there, are linked to the dynamic
    code, as well as the executable address, that nothing is linked to.
-   The block, that the program changes, while it runs, runs as it was,
-   until the program jumps to it. *)
+
+   Limits:
+
+   - the block, that the program changes, while it runs, e.g., the next
+     instructions of the block, that stores to them, runs as it was,
+     until the program jumps to it again, as the interpreter runs the
+     blocks, not the instructions;
+
+   - the dynamic code of a subroutine, that the program calls, e.g., as
+     it changed its first block, posts no [call] and [call-return]
+     observations, which the interpreter posts for the subroutines of the
+     program, as the dynamic code has no arguments, and neither do the
+     calls, that the dynamic code makes;
+
+   - the code, that has no encoding yet, e.g., the code of ARM, that the
+     program writes on the heap, is decoded in the default encoding of
+     the target, e.g., A32 of ARM, not Thumb, while the changed code of
+     the program has the encoding, that the disassembler found, and the
+     jumps of ARM, whose addresses have the Thumb bit, jump to the even
+     addresses. *)
 
 (* the basic blocks of the disassembly, their last addresses, and the
    blocks and the subroutines of the program, that start there, which are
@@ -1057,7 +1075,14 @@ module Dynamic (Machine : Machine) = struct
     | Some (size, blks) ->
         let next = Word.(addr ++ size) in
         let* dst = Interp.step ~next blks in
+        (* the lower bit of the address of ARM tells the Thumb code, which
+           the program has at the even address *)
         let dst = Value.to_word dst in
+        let dst =
+          match Project.arch proj with
+          | #Arch.arm | #Arch.thumb -> Word.(dst land lnot (one (bitwidth dst)))
+          | _ -> dst
+        in
         if is_call blks && not (Word.equal dst next) then
           let* return = return_of ~link next in
           let* () = Interp.call_at dst ~return in

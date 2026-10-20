@@ -2669,7 +2669,14 @@ module Std : sig
           bytes are the same, otherwise the lifting loads the semantics, e.g.,
           the Primus Lisp program of x86, once per process, which takes seconds.
           If [disassembled_only], then only the former are used, and [None]
-          isn't cached. *)
+          isn't cached.
+
+          The instruction has the encoding, that the disassembler found at
+          [addr], e.g., Thumb of ARM, otherwise the default one of the target,
+          e.g., A32, so the Thumb code, that the program writes, e.g., on the
+          heap, is not decoded right. The jumps of a call, which the IR of the
+          instruction has, are the calls, that return to the next instruction,
+          as the program has them. *)
 
       val code : project -> int64 -> string option
       (** [code proj addr] the bytes of the instruction at [addr], that [insn]

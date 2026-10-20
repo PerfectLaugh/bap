@@ -55,7 +55,16 @@ let decode unit mem =
   KB.provide Theory.Label.addr label (Some addr) >>= fun () ->
   KB.provide Theory.Label.unit label (Some unit) >>= fun () ->
   Theory.Label.target label >>= fun target ->
-  KB.collect Theory.Label.encoding label >>= fun coding ->
+  (* the encoding, that the disassembler found for the address, e.g.,
+     of the Thumb code of ARM, which the label of the address has *)
+  Theory.Label.for_addr addr >>= fun known ->
+  KB.collect Theory.Label.encoding known >>= fun disassembled ->
+  (if Theory.Language.is_unknown disassembled then
+     KB.collect Theory.Label.encoding label
+   else
+     KB.provide Theory.Label.encoding label disassembled >>| fun () ->
+     disassembled)
+  >>= fun coding ->
   match Dis.lookup target coding with
   | Error _ -> KB.return (label, None)
   | Ok dis ->

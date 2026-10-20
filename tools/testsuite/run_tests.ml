@@ -976,8 +976,62 @@ let patched_code data =
       ("riscv64-linux-gnu", "0x10734", [ 0x25; 0x45 ], "\t");
     ]
   in
+  (* the Thumb code of ARM, whose newline of print is +, after the first
+     call of putchar, which also taints the stack in Unicorn, so that
+     Primus interprets the Thumb code of print, which reads its buffer
+     there, and returns from print, with the Thumb bit *)
+  let thumb system =
+    case
+      ("run/patched-code/" ^ system ^ "/arm-linux-gnueabihf-thumb-crc")
+      (fun env ->
+        let taint = String.equal system "bap:unicorn-executor" in
+        ignore
+          (write env "patching.lisp"
+             (Printf.sprintf
+                {|(defparameter *patched* nil)
+
+(defmethod call (name c)
+  (when (and (= name 'putchar) (not *patched*))
+    (set *patched* true)
+    %s
+    (memory-protect 0x202d0 2 7)
+    (memory-write 0x202d0 0x2b:8)
+    (memory-protect 0x202d0 2 5)))
+
+%s
+|}
+                (if taint then
+                   "(taint-introduce-indirectly 'stack (- SP 64) 128)"
+                 else "")
+                (if taint then
+                   {|(defmethod jumping (c dst) (msg "interpreted jump to $0" dst))|}
+                 else "")));
+        let out =
+          bap env
+            ([
+               path data "bin/arm-linux-gnueabihf-thumb-crc";
+               "--passes=run";
+               "--no-objdump";
+               "--run-systems=" ^ system;
+               "--primus-lisp-add=" ^ dir env;
+               "--primus-lisp-load=posix,patching";
+               "--primus-print-observations=lisp-message,exception";
+             ]
+            @
+            if taint then
+              [
+                "--run-components=bap:taint-primitives,bap:propagate-taint-by-computation,bap:select-default-taint-policy";
+              ]
+            else [])
+        in
+        contains env "prints the patched newline" out "1489580789+";
+        lacks env "returns from print" out "Segmentation fault";
+        if taint then
+          contains env "interprets the return of print" out
+            "interpreted jump to 0x202FB")
+  in
   let systems = [ "bap:stubbed-executor"; "bap:unicorn-executor" ] in
-  List.map taint systems
+  List.map taint systems @ List.map thumb systems
   @ List.concat_map
       (fun system -> List.map (fun e -> echo e system) echos)
       systems
