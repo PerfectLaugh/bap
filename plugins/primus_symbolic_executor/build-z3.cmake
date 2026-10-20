@@ -149,6 +149,15 @@ set(CONFIGURE
   -DZ3_INCLUDE_GIT_HASH=OFF
   -DZ3_INCLUDE_GIT_DESCRIBE=OFF)
 
+# GCC defines the functions, whose mangling changed between the versions
+# of its ABI, e.g., of the lambdas of the inline variables, that register
+# the tactics of Z3, with the aliases of their old names, which on
+# Windows, that has no strong aliases, are the weak externals, that
+# flexlink exports, but can't link the plugin with, so they are not made
+if(CMAKE_HOST_WIN32)
+  list(APPEND CONFIGURE -DCMAKE_CXX_FLAGS=-fabi-compat-version=0)
+endif()
+
 message(STATUS "Building Z3 with ${CXX} in ${WORK}")
 quietly(configure "${CMAKE_COMMAND}" ${CONFIGURE})
 quietly(build "${CMAKE_COMMAND}" --build "${WORK}/build"
