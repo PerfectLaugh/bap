@@ -56,10 +56,7 @@ let null = if Sys.win32 then "NUL" else "/dev/null"
 let variables env =
   let dir name = file env name in
   [
-    ("HOME", env.dir);
-    ("XDG_CACHE_HOME", dir "cache");
-    ("XDG_CONFIG_HOME", dir "config");
-    ("XDG_STATE_HOME", dir "state");
+    ("BAP_CACHE_DIR", dir "cache");
     ("BAP_LOG_DIR", dir "log");
     (* the messages are plain text *)
     ("TERM", "dumb");

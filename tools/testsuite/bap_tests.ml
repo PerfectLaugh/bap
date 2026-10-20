@@ -169,9 +169,7 @@ let cache _ =
                  "--cache-dir=" ^ dir;
                  "--disable-gc";
                ]);
-          let data =
-            List.fold_left Filename.concat dir [ ".cache"; "bap"; "data" ]
-          in
+          let data = Filename.concat dir "data" in
           for x = 0 to 9 do
             Out_channel.with_open_bin
               (Filename.concat data (Printf.sprintf "entry.%d" x))

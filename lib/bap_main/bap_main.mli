@@ -241,7 +241,8 @@
       | {"-L", [=], string}
       | {"--load-path", [=], string}
       | {"--plugin-path", [=], string}
-      | ["--log-dir", [=], string | "--log-dir", [=], string]
+      | "--log-dir", [=], string
+      | "--cache-dir", [=], string
       | "--recipe", recipe-grammar
       | "--version"
       | "--help", [[=], help-format]
@@ -285,10 +286,11 @@
     Another rule which is added on per plugin basis, is the [--help-<plugin>]
     rule which will render a manual page for the given [<plugin>].
 
-    The [-L] and [--logdir] options are preparsed on the command line and are
-    used to specify the plugins search path (which obviously should be specified
-    before we can load plugins) and the logging destination which we would like
-    to know as soon as possible.
+    The [-L], [--log-dir], and [--cache-dir] options are preparsed on the
+    command line and are used to specify the plugins search path (which
+    obviously should be specified before we can load plugins), the logging
+    destination, and the cache, which we would like to know as soon as
+    possible.
 
     The [--recipe] option is very special, as it changes the command line
     itself. Every occurrence of the [--recipe] option will parse the provided
@@ -388,13 +390,10 @@ val init :
       exists, it will will be renamed to "log~2" and so on, until "log~99" is
       reached, which will be discarded. If the [log] parameter is not specified,
       then the logging will be performed in a directory which name is obtained
-      either from the command line (via the [--logdir] parameter) or from the
-      environment (using the [BAP_LOG_DIR] variable). If neither is present then
-      the logging will be performed into a directory prescribed by the XDG
-      standard for the application - i.e., to the `$XDG_STATE_HOME/bap`, where
-      the environment variable [XDG_STATE_HOME] defaults to
-      [$HOME/.local/state]. If, for some reason, it wasn't possible to create a
-      log file, then logging will fallback to the [stderr] channel. Note, a
+      either from the command line (via the [--log-dir] parameter) or from the
+      environment (using the [BAP_LOG_DIR] variable). If neither is present
+      then only the errors will be printed into [stderr]. If, for some reason,
+      it wasn't possible to create a log file, then logging will fallback to the [stderr] channel. Note, a
       usual log rotating routine will be applied in the log directory, as
       described above.
 
@@ -1039,29 +1038,28 @@ module Extension : sig
         @since 2.6.0 *)
 
     val datadir : string
-    (** [datadir] a directory for user-specific BAP readonly data.
+    (** [datadir] a directory for BAP readonly data.
 
-        The folder is either $XDG_DATA_HOME/bap or $HOME/.local/share/bap if the
-        former is not set.
-
-        If $HOME is also not set then it defaults just to the current workding
-        directory.
+        BAP doesn't depend on the directories of the user, it is the directory
+        of the sites of bap-common, the same as {!sysdatadir}.
 
         Plugins are encouraged to use this folder as the base folder and store
         their information in subfolders of it.
 
         before 2.3.0 the value of this parameter was equal to [sysconfdir] *)
 
-    val cachedir : string
-    (** [cachedir] folder for user-specific non-essential data files.
+    val cachedir : unit -> string option
+    (** [cachedir ()] folder for non-essential data files.
 
-        It is either $XDG_CACHE_HOME/bap or $HOME/.cache/bap or $TMP/bap/cache,
-        depending on whether the corresponding variables are set.
+        It is the folder of the [--cache-dir] option or the BAP_CACHE_DIR
+        variable, and [None], i.e., nothing is cached, if neither is
+        specified.
 
-        @since 2.3.0 *)
+        @since 2.3.0, a function since 2.6.0 *)
 
     val sysdatadir : string
-    (** [sysdatadir] a directory for system-specific BAP readonly data
+    (** [sysdatadir] a directory for system-specific BAP readonly data, the
+        directory of the sites of bap-common.
 
         @since 2.3.0 before that version it was named [datadir] *)
 
@@ -1070,7 +1068,8 @@ module Extension : sig
         binaries that are not intended to be executed directly. *)
 
     val confdir : string
-    (** [confdir] a directory for BAP specific configuration files *)
+    (** [confdir] a directory for BAP specific configuration files, the
+        [config] subdirectory of {!sysdatadir}. *)
 
     val bindir : string
     (** [bindir] the preconfigured directory for binaries.

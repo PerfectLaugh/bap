@@ -51,8 +51,6 @@ let provide_service () =
   info "caching to %s" (Cache.root ());
   Data.Cache.Service.provide { Data.Cache.create }
 
-let set_dir dir = match dir with None -> () | Some dir -> Cache.set_root dir
-
 let run clean show_info gc =
   if clean then run_and_exit GC.clean;
   if show_info then run_and_exit print_info;
@@ -75,19 +73,19 @@ let update_config sz ov no_gc gc =
     Cache.write_config cfg';
     exit 0)
 
-let init dir =
-  set_dir dir;
+let init () =
   Cache.init ();
   run_gc_with_threshold ()
 
 open Extension
-open Syntax
 
 let doc =
   "\n\
    # DESCRIPTION\n\n\
    Provide caching service for all data types. The caching entry\n\
    point is defined in the [Data] module of the [Regular] library.\n\n\
+   The cache is in the folder of the $(b,--cache-dir) option or the\n\
+   $(b,BAP_CACHE_DIR) variable, and nothing is cached without it.\n\n\
    The cache plugin implements lock-free store/loading operations with\n\
    O(1) complexity: the same cache folder can be safely shared\n\
    between different processes without any performance impact and\n\
@@ -107,16 +105,15 @@ let doc =
    # SEE ALSO\n\n\
    $(b,regular)(3)\n"
 
-let cache_dir =
-  Configuration.parameter ~doc:"Use provided folder as a cache directory"
-    Extension.Type.("DIR" %: some string)
-    "dir"
-
+(* the cache is in the directory of the --cache-dir option, and nothing
+   is cached without it *)
 let () =
   documentation doc;
-  Bap_main.Extension.declare @@ fun ctxt ->
-  init (ctxt --> cache_dir);
-  provide_service ();
+  Bap_main.Extension.declare @@ fun _ ->
+  if Cache.enabled () then begin
+    init ();
+    provide_service ()
+  end;
   Ok ()
 
 let opts = ref String.Map.empty
@@ -195,9 +192,14 @@ let _cmd =
     declare ~doc "cache"
       (args $ clean $ capacity $ overhead $ run_gc $ disable_gc $ enable_gc
      $ info)
-      (fun clean capacity overhead run_gc disable_gc enable_gc info ctxt ->
-        init (ctxt --> cache_dir);
-        update_config capacity overhead disable_gc enable_gc;
-        run clean info run_gc;
-        print_command_options ();
-        Ok ()))
+      (fun clean capacity overhead run_gc disable_gc enable_gc info _ctxt ->
+        if not (Cache.enabled ()) then
+          Error
+            (Error.Invalid "no cache directory is specified, see --cache-dir")
+        else begin
+          init ();
+          update_config capacity overhead disable_gc enable_gc;
+          run clean info run_gc;
+          print_command_options ();
+          Ok ()
+        end))

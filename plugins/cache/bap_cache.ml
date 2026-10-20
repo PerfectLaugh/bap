@@ -31,8 +31,6 @@ module Cfg = struct
   let config_file path = path // config_file
   let data path = path // cache_data
   let gc_threshold c = c.capacity + (c.capacity * c.overhead / 100)
-  let default_root = ref None
-  let set_root dir = default_root := Some dir
 
   let write path cfg =
     try Utils.binable_to_file (module T) path cfg
@@ -47,12 +45,12 @@ end
 
 include Cfg
 
-let getenv opt = try Some (Sys.getenv opt) with Stdlib.Not_found -> None
+let enabled () = Option.is_some (Bap_main.Extension.Configuration.cachedir ())
 
 let root () =
-  match !default_root with
-  | Some dir -> dir // ".cache" // "bap"
-  | None -> Bap_main.Extension.Configuration.cachedir
+  match Bap_main.Extension.Configuration.cachedir () with
+  | Some dir -> dir
+  | None -> invalid_arg "no cache directory is specified, see --cache-dir"
 
 let ensure_dir_exists path =
   try Unix.mkdir path 0o700 with

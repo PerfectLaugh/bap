@@ -1,4 +1,4 @@
-(* [bap script FILE.ml ARG...] compiles the script to a plugin of the
+(* [bap script [--cache-dir=DIR] FILE.ml ARG...] compiles the script to a plugin of the
    native code with the compiler of bap, which is the ocamlopt of the
    environment, as in opam or in dune exec, loads the libraries that it
    requires, and then the script, which starts bap, see Bap_script. *)
@@ -40,23 +40,33 @@ let output ~error cmd file =
   command ~error (sprintf "%s > %s" cmd (Filename.quote file));
   In_channel.read_all file
 
+let remove_dir dir =
+  if Stdlib.Sys.file_exists dir then begin
+    Stdlib.Sys.readdir dir
+    |> Array.iter ~f:(fun f -> Stdlib.Sys.remove (Filename.concat dir f));
+    Stdlib.Sys.rmdir dir
+  end
+
 (* the compiled scripts are cached by the digest of their source, their
    libraries, and the bap that runs them, whose libraries they are
    compiled with, which is told by the size and the time of its
-   executable *)
-let cache_dir () =
-  let base =
-    match Sys.getenv "XDG_CACHE_HOME" with
-    | Some dir when not (String.is_empty dir) -> dir
-    | _ -> (
-        match Sys.getenv "HOME" with
-        | Some home -> Filename.concat home ".cache"
-        | None -> Filename.temp_dir_name)
-  in
-  List.fold [ "bap"; "scripts" ] ~init:base ~f:(fun dir sub ->
-      let dir = Filename.concat dir sub in
-      (try Stdlib.Sys.mkdir dir 0o755 with Sys_error _ -> ());
-      dir)
+   executable, and without the cache, i.e., the --cache-dir option, they
+   are compiled into a temporary directory *)
+let cache_dir = function
+  | None ->
+      let dir = Stdlib.Filename.temp_dir "bap-script-" "" in
+      at_exit (fun () -> remove_dir dir);
+      dir
+  | Some cache ->
+      let dir = Filename.concat cache "scripts" in
+      let rec mkdir dir =
+        if not (Stdlib.Sys.file_exists dir) then begin
+          mkdir (Filename.dirname dir);
+          try Stdlib.Sys.mkdir dir 0o755 with Sys_error _ -> ()
+        end
+      in
+      mkdir dir;
+      dir
 
 let unit_name ~libs source =
   let bap = Caml_unix.LargeFile.stat Stdlib.Sys.executable_name in
@@ -66,13 +76,6 @@ let unit_name ~libs source =
   in
   (* the name is unique, as Dynlink loads a unit once *)
   "bap_script_" ^ Stdlib.Digest.(to_hex (string key))
-
-let remove_dir dir =
-  if Stdlib.Sys.file_exists dir then begin
-    Stdlib.Sys.readdir dir
-    |> Array.iter ~f:(fun f -> Stdlib.Sys.remove (Filename.concat dir f));
-    Stdlib.Sys.rmdir dir
-  end
 
 (* the script is compiled in a directory of its own, and the plugin is
    moved to the cache, once it is complete *)
@@ -115,14 +118,14 @@ let rec load ~recompile file cmxs =
           load ~recompile:None file (compile ())
       | None -> fail "%s" (Dynlink.error_message err))
 
-let run file args =
+let run ?cache file args =
   let source =
     try In_channel.read_all file with Sys_error msg -> fail "%s" msg
   in
   let required, source = requires source in
   let source = sprintf "# 1 %S\n%s" file source in
   let libs = "bap-frontend.script" :: required in
-  let cache = cache_dir () in
+  let cache = cache_dir cache in
   let unit = unit_name ~libs source in
   let compile () = compile ~cache ~unit ~libs source in
   let cached = Filename.concat cache (unit ^ ".cmxs") in
@@ -137,3 +140,15 @@ let run file args =
       try Dune_site_plugins.V1.load lib
       with exn -> fail "can't load %s: %s" lib (Exn.to_string exn));
   load ~recompile file cmxs
+
+let usage = "usage: bap script [--cache-dir=DIR] FILE.ml [ARG]..."
+
+let rec main ?cache = function
+  | "--cache-dir" :: dir :: args -> main ~cache:dir args
+  | opt :: args when String.is_prefix opt ~prefix:"--cache-dir=" ->
+      main ~cache:(String.chop_prefix_exn opt ~prefix:"--cache-dir=") args
+  | ("-h" | "--help") :: _ ->
+      print_endline usage;
+      Stdlib.exit 0
+  | file :: args -> run ?cache file args
+  | [] -> fail "%s" usage

@@ -17,18 +17,6 @@ let rec mkdir path =
 
 let ( / ) = Filename.concat
 
-let log_folder user =
-  match user with
-  | Some dir -> dir
-  | None -> (
-      match getenv "XDG_STATE_HOME" with
-      | Some dir -> dir / "bap"
-      | None -> (
-          (* Windows has no HOME *)
-          match Option.first_some (getenv "HOME") (getenv "USERPROFILE") with
-          | None -> Filename.get_temp_dir_name () / "bap.log"
-          | Some home -> home / ".local" / "state" / "bap"))
-
 let max_logs =
   match getenv "BAP_BACKLOG" with
   | None -> 99
@@ -79,9 +67,8 @@ let unlock lock =
   Unix.lockf lock Unix.F_ULOCK 0;
   Unix.close lock
 
-let open_log_channel user_dir =
+let open_log_channel log_folder =
   try
-    let log_folder = log_folder user_dir in
     let file = log_folder / "log" in
     let lock = lock (lock_filename log_folder) in
     (* Windows doesn't rename or remove the log while another process
@@ -124,4 +111,8 @@ let process_events ppf =
     | _ -> ());
   log_plugin_events ()
 
-let in_directory ?logdir () = process_events (open_log_channel logdir)
+let in_directory ~logdir = process_events (open_log_channel logdir)
+
+(* without the log, the errors are still printed, see print_message *)
+let only_errors () =
+  process_events (make_formatter (fun _ _ _ -> ()) (fun () -> ()))

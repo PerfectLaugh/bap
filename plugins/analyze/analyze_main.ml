@@ -21,10 +21,10 @@ delimited with quotes, e.g.,
     bap analyze --project=test.proj 'subroutines :unit file:echo'
 ```
 
-All commands are stored in the history file that persists between
-invocations of bap. The location of the file could be specified with
-the $(b,--history) option, which could also be used to interactively
-create the script files.
+The commands are stored in the history file, which persists between
+invocations of bap, when its location is specified with the
+$(b,--history) option, which could also be used to interactively create
+the script files.
 
 # GRAMMAR
 
@@ -64,7 +64,7 @@ type Extension.Error.t += Fail of problem
 type ctxt = {
   path : string;
   package : string;
-  history : string;
+  history : string option;
   quit : bool;
   commands : Project.Analysis.info Map.M(Knowledge.Name).t;
   directives : string Map.M(String).t;
@@ -231,19 +231,24 @@ let dispatch str ctxt =
 
 let report_error err = Format.eprintf "%a@\n%!" Extension.Error.pp err
 
-let load_history filename =
-  if Sys.file_exists filename then
+let load_history = function
+  | None -> ()
+  | Some filename when not (Sys.file_exists filename) -> ()
+  | Some filename -> (
     match Line_editor.history_load ~filename with
     | Ok () -> ()
-    | Error msg -> Format.eprintf "Failed to load the history file: %s@\n%!" msg
+    | Error msg -> Format.eprintf "Failed to load the history file: %s@\n%!" msg)
 
 let remember ctxt input =
   match Line_editor.history_add input with
   | Error msg -> warning "failed to remember the input: %s" msg
   | Ok () -> (
-      match Line_editor.history_save ~filename:ctxt.history with
-      | Ok () -> ()
-      | Error msg -> warning "failed to write history: %s" msg)
+      match ctxt.history with
+      | None -> ()
+      | Some filename -> (
+          match Line_editor.history_save ~filename with
+          | Ok () -> ()
+          | Error msg -> warning "failed to write history: %s" msg))
 
 let complete ctxt prefix completions =
   let matches = String.is_prefix ~prefix in
@@ -338,17 +343,11 @@ let () =
       "script" ~aliases:[ "s" ] ~doc:"The path to a script file with commands."
   in
   let history =
-    let history_location =
-      (* Windows has no HOME *)
-      match
-        Option.first_some (Sys.getenv_opt "HOME") (Sys.getenv_opt "USERPROFILE")
-      with
-      | None | Some "" -> ".bap_history"
-      | Some home -> Filename.concat home ".bap_history"
-    in
     parameter
-      Type.("path" %: file =? history_location)
+      Type.("path" %: some file)
       "history" ~aliases:[ "H" ]
+      ~doc:"The path to the history file, which is kept only in memory, if \
+            it isn't specified."
   in
   declare "analyze" ~doc (args $ knowledge $ commands $ script $ history)
   @@ fun base commands script history _ctxt ->

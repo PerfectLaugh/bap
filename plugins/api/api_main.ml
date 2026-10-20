@@ -24,15 +24,7 @@ module Api_path = struct
   let ( / ) = Path.concat
   let to_string = Path.string_of_filename
 
-  let expand_home path =
-    Option.(
-      value_map ~default:path ~f:Fn.id
-        ( String.chop_prefix ~prefix:"~" (to_string path) >>= fun p ->
-          (* Windows has no HOME *)
-          first_some (getenv "HOME") (getenv "USERPROFILE") >>= fun h ->
-          Some Path.(filename_of_string h / filename_of_string p) ))
-
-  let of_string x = expand_home @@ Path.reduce @@ Path.filename_of_string x
+  let of_string x = Path.reduce @@ Path.filename_of_string x
   let is_apiable = FileUtil.(Or (Is_file, Is_link))
   let try_with_access f p = try Ok (f p) with _ -> Error `No_access
   let exists p = try_with_access FileUtil.(test Exists) (to_string p)

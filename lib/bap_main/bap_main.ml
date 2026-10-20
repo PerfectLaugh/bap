@@ -28,38 +28,13 @@ module ConfigFile : sig
       occurence comes from the most specific file and must prevail over the
       later occurences. *)
 end = struct
-  let conf_dirs =
-    [
-      [ `V "HOME"; `P ".config"; `P "bap" ];
-      (* Windows has no HOME *)
-      [ `V "USERPROFILE"; `P ".config"; `P "bap" ];
-      [ `V "XDG_CONFIG_HOME"; `P "bap" ];
-      [ `P Bap_main_config.confdir ];
-    ]
-
-  let eval_parts xs =
-    Option.all
-    @@ List.map xs ~f:(function `P p -> Some p | `V v -> Sys.getenv_opt v)
-
-  let concat_parts xs =
-    Option.(eval_parts xs >>= List.reduce ~f:Filename.concat)
-
-  let dedup xs =
-    let elts = Hash_set.of_list (module String) xs in
-    List.filter xs ~f:(fun elt ->
-        let fresh = Hash_set.mem elts elt in
-        if fresh then Hash_set.remove elts elt;
-        fresh)
-
   let readdir dir =
     let files = Sys.readdir dir |> Array.map ~f:(Filename.concat dir) in
     Array.sort files ~compare:String.compare;
     Array.to_list files
 
-  let files init =
-    List.filter_map init ~f:concat_parts
-    |> List.concat_map ~f:(fun dir ->
-        if Sys.file_exists dir && Sys.is_directory dir then readdir dir else [])
+  let files dir =
+    if Sys.file_exists dir && Sys.is_directory dir then readdir dir else []
 
   let is_empty = String.for_all ~f:Char.is_whitespace
 
@@ -91,7 +66,7 @@ end = struct
             filename (linenum + 1) 1
             (String.length str + 1)
 
-  let read () = List.concat_map (files conf_dirs) ~f:read_or_fail
+  let read () = List.concat_map (files Bap_main_dirs.config) ~f:read_or_fail
 end
 
 module Type = struct
@@ -543,7 +518,14 @@ module Pre = struct
     let doc = "A folder for log files." in
     let env = Cmd.Env.info ~doc "BAP_LOG_DIR" in
     Arg.(
-      value & opt (some string) None & info [ "logdir"; "log-dir" ] ~env ~doc)
+      value & opt (some string) None & info [ "log-dir" ] ~env ~doc)
+
+  let cachedir : string option Term.t =
+    let doc =
+      "A folder for the cache, which is disabled, if no folder is specified."
+    in
+    let env = Cmd.Env.info ~doc "BAP_CACHE_DIR" in
+    Arg.(value & opt (some string) None & info [ "cache-dir" ] ~env ~doc)
 
   let plugin_locations =
     let doc = "Adds folder to the list of plugins search paths" in
@@ -565,8 +547,8 @@ module Pre = struct
 
   let term =
     Term.(
-      const (fun _ _ _ _ -> Ok ())
-      $ logdir $ plugin_locations $ plugin_files $ recipe)
+      const (fun _ _ _ _ _ -> Ok ())
+      $ logdir $ cachedir $ plugin_locations $ plugin_files $ recipe)
 end
 
 module Grammar : sig
@@ -1187,30 +1169,10 @@ module Extension = struct
 
     include Bap_main_config
 
-    let sysdatadir = datadir
-    let ( / ) = Filename.concat
-
-    (* Windows has no HOME *)
-    let home =
-      match Sys.getenv_opt "HOME" with
-      | None -> Sys.getenv_opt "USERPROFILE"
-      | home -> home
-
-    let datadir =
-      match Sys.getenv_opt "XDG_DATA_HOME" with
-      | Some dir -> dir / "bap"
-      | None -> (
-          match home with
-          | Some dir -> dir / ".local" / "share" / "bap"
-          | None -> Sys.getcwd ())
-
-    let cachedir =
-      match Sys.getenv_opt "XDG_CACHE_HOME" with
-      | Some dir -> dir / "bap"
-      | None -> (
-          match home with
-          | Some dir -> dir / ".cache" / "bap"
-          | None -> Filename.get_temp_dir_name () / "bap" / "cache")
+    let sysdatadir = Bap_main_dirs.share
+    let confdir = Bap_main_dirs.config
+    let datadir = Bap_main_dirs.share
+    let cachedir () = !Bap_main_dirs.cache
 
     include Context
   end
@@ -1250,8 +1212,8 @@ let state = ref Uninitialized
 
 let enable_logging = function
   | Some (`Formatter fmt) -> Bap_main_log.process_events fmt
-  | Some (`Dir logdir) -> Bap_main_log.in_directory ~logdir ()
-  | None -> Bap_main_log.in_directory ()
+  | Some (`Dir logdir) -> Bap_main_log.in_directory ~logdir
+  | None -> Bap_main_log.only_errors ()
 
 let load_recipe recipe =
   let paths =
@@ -1292,6 +1254,7 @@ let init ?features ?requires ?library ?(argv = [| Sys.executable_name |]) ?env
               (join @@ Pre.(extract ?env logdir argv)) >>| fun x -> `Dir x)
       in
       enable_logging log;
+      Bap_main_dirs.cache := Option.join Pre.(extract ?env cachedir argv);
       let library =
         match library with
         | Some libs -> libs

@@ -12,9 +12,10 @@
   fileutils
   bap-future
   bap-bundle
+  bap-common
   bap-plugins
   bap-recipe)
- (private_modules bap_main_log))
+ (private_modules bap_main_dirs bap_main_log))
 
 (rule
  (target bap_main_config.ml)

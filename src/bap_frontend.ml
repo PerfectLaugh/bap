@@ -62,7 +62,8 @@ Common options:
   --version                prints the version number and exits;
   --plugin-path <DIR>      adds <DIR> to the plugins search path;
   --plugin <FILE>          loads the plugin from <FILE>;
-  --logdir <DIR>           creates a log file in <DIR>;
+  --log-dir <DIR>          creates a log file in <DIR>;
+  --cache-dir <DIR>        caches the results in <DIR>;
   --recipe <VAL>           extracts command line arguments from the recipe.
 
 Commands:
@@ -336,7 +337,7 @@ let _config_command_declaration : unit =
         ("version", version);
         ("build_id", build_id);
         ("datadir", datadir);
-        ("cachedir", cachedir);
+        ("cachedir", Option.value (cachedir ()) ~default:"");
         ("sysdatadir", sysdatadir);
         ("libdir", libdir);
         ("confdir", confdir);
@@ -368,7 +369,7 @@ let () =
   Sys.(set_signal sigint (Signal_handle exit));
   at_exit Format.(pp_print_flush err_formatter);
   (match Array.to_list Sys.argv with
-  | _ :: "script" :: file :: args -> Bap_script_run.run file args
+  | _ :: "script" :: args -> Bap_script_run.main args
   | _ -> ());
   match
     Bap_main.init ~default:print_info ~default_command:"disassemble" ~name:"bap"
