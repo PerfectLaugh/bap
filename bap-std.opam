@@ -25,7 +25,10 @@ depends: [
   "cmdliner" {>= "2.0.0"}
   "conf-mingw-w64-g++-x86_64" {os = "win32"}
   "core"
-  "core_bench" {with-test & os != "win32"}
+  "eio" {with-test & >= "1.0"}
+  "eio_main" {with-test & >= "1.0"}
+  "mtime" {with-test & >= "2.0"}
+  "spawn" {with-test}
   "fileutils"
   "graphlib" {= version}
   "mmap"

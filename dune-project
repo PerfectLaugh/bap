@@ -64,7 +64,6 @@
   (bap-callgraph-collator (= :version))
   (bap-callsites (= :version))
   (bap-c (= :version))
-  (bap-cxxfilt (= :version))
   (bap-demangle (= :version))
   (bap-dependencies (= :version))
   (bap-disassemble (= :version))
@@ -77,7 +76,6 @@
   (bap-llvm (= :version))
   (bap-mc (= :version))
   (bap-mips (= :version))
-  (bap-objdump (= :version))
   (bap-optimization (= :version))
   (bap-patterns (= :version))
   (bap-plugins (= :version))
@@ -115,8 +113,7 @@
   (bap-primus-symbolic-executor (= :version))
   (bap-ghidra (= :version))
   (bap-trace (= :version))
-  (bap-traces (= :version))
-  (bap-radare2 (= :version))))
+  (bap-traces (= :version))))
 
 (package
  (name bap-common)
@@ -404,17 +401,6 @@ details of the program behavior.")
   (bap-common (= :version))))
 
 (package
- (name bap-cxxfilt)
- (synopsis "A name demangler that uses system's c++filt")
- (tags (bap bap-plugin))
- (depends
-  (bap-demangle (= :version))
-  (bap-std (= :version))
-  (conf-binutils (>= 0.3))
-  core
-  (bap-common (= :version))))
-
-(package
  (name bap-demangle)
  (synopsis "Provides names service and demangling facilities for BAP")
  (tags (bap bap-library))
@@ -619,6 +605,7 @@ be seen as a common denominator between Lwt and Async libraries.")
  (synopsis "BAP LLVM backend")
  (tags (bap bap-plugin llvm))
  (depends
+  (bap-demangle (= :version))
   (bap-std (= :version))
   (conf-mingw-w64-g++-x86_64 (= :os win32))
   core
@@ -688,25 +675,6 @@ be seen as a common denominator between Lwt and Async libraries.")
   (ppx_bap (= :version))
   (regular (= :version))
    zarith))
-
-(package
- (name bap-objdump)
- (synopsis "Extracts symbols from a binary using binutils objdump")
- (tags (bap bap-plugin))
- (depends
-  (bap-core-theory (= :version))
-  (bap-knowledge (= :version))
-  (bap-main (= :version))
-  (bap-relation (= :version))
-  (bap-std (= :version))
-  (bitvec-order (= :version))
-  (bitvec-sexp (= :version))
-  (bitvec (= :version))
-  (conf-binutils (>= 0.3))
-  core
-  (bap-common (= :version))
-  (ppx_bap (= :version))
-  (re (and (>= 1.0) (< 2.0)))))
 
 (package
  (name bap-optimization)
@@ -1127,30 +1095,6 @@ so this package is distributed under GPL-2.0, unlike the rest of BAP.")
   (text-tags (= :version))))
 
 (package
- (name bap-radare2)
- (synopsis "BAP Radare2 integration")
- (tags (bap bap-plugin radare2))
- (allow_empty)
- (depends
-  (bap-abi (= :version))
-  (bap-arm (= :version))
-  (bap-common (= :version))
-  (bap-core-theory (= :version))
-  (bap-future (= :version))
-  (bap-knowledge (= :version))
-  (bap-main (= :version))
-  (bap-relation (= :version))
-  (bap-std (= :version))
-  (bitvec (= :version))
-  (conf-radare2 (<> :os win32))
-  core
-  (ogre (= :version))
-  (ppx_bap (= :version))
-  (re (and (>= 1.0) (< 2.0)))
-   yojson
-   zarith))
-
-(package
  (name bap-raw)
  (synopsis "BAP raw files loader")
  (tags (bap bap-plugin))
@@ -1210,6 +1154,7 @@ between the sets.")
   (bap-main (= :version))
   (bap-powerpc (= :version))
   (bap-relation (= :version))
+  (bap-riscv (= :version))
   (bap-std (= :version))
   (bap-x86 (= :version))
   (bitvec-order (= :version))
@@ -1301,7 +1246,10 @@ between the sets.")
   (cmdliner (>= 2.0.0))
   (conf-mingw-w64-g++-x86_64 (= :os win32))
   core
-  (core_bench (and :with-test (<> :os win32)))
+  (eio (and :with-test (>= 1.0)))
+  (eio_main (and :with-test (>= 1.0)))
+  (mtime (and :with-test (>= 2.0)))
+  (spawn :with-test)
    fileutils
   (graphlib (= :version))
    mmap

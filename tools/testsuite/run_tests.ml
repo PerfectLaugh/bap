@@ -51,9 +51,7 @@ let run data =
               let out =
                 bap env
                   ([ path data file; "--run-argv=hello,cruel,world" ]
-                  @ [
-                      "--primus-lisp-type-check"; "--passes=run"; "--no-objdump";
-                    ]
+                  @ [ "--primus-lisp-type-check"; "--passes=run" ]
                   @ api data file
                   @ [ "--run-systems=" ^ system ])
               in
@@ -80,10 +78,7 @@ let crc ?(timeout = 300.) data name bin system expected =
       let out =
         bap ~timeout env
           [
-            path data ("bin/" ^ bin);
-            "--passes=run";
-            "--no-objdump";
-            "--run-systems=" ^ system;
+            path data ("bin/" ^ bin); "--passes=run"; "--run-systems=" ^ system;
           ]
       in
       contains env "prints the CRC" out expected)
@@ -134,7 +129,6 @@ let syscall data =
                   [
                     path data ("bin/" ^ bin);
                     "--passes=run";
-                    "--no-objdump";
                     "--run-systems=" ^ system;
                     "--primus-lisp-add=" ^ dir env;
                     "--primus-lisp-load=syscalls";
@@ -153,7 +147,6 @@ let timeout data =
             [
               path data "bin/x86_64-linux-gnu-forever";
               "--passes=run";
-              "--no-objdump";
               "--run-systems=bap:unicorn-executor";
               "--primus-unicorn-timeout=1";
             ]
@@ -177,7 +170,6 @@ let unresolved data =
               [
                 path data ("bin/" ^ bin);
                 "--passes=run";
-                "--no-objdump";
                 "--run-systems=bap:unicorn-executor";
                 "--primus-lisp-load=stdio";
                 "--primus-print-observations=call,exception";
@@ -217,7 +209,6 @@ let limit data =
                 path data "bin/x86_64-linux-gnu-echo";
                 "--run-argv=hello,cruel,world";
                 "--passes=run";
-                "--no-objdump";
                 "--run-systems=bap:terminating-unicorn-executor";
                 Printf.sprintf "--primus-limit-max-length=%d" n;
               ]
@@ -237,7 +228,6 @@ let debugging data =
          path data "bin/x86_64-linux-gnu-echo";
          "--run-argv=hello";
          "--passes=run";
-         "--no-objdump";
          "--run-systems=" ^ system;
          "--primus-lisp-add=" ^ dir env;
          "--primus-lisp-load=posix,debug";
@@ -295,7 +285,6 @@ let debugger data =
       ([
          path data ("bin/" ^ bin);
          "--passes=run";
-         "--no-objdump";
          "--run-systems=" ^ system;
          "--run-components=bap:debugger";
          "--primus-debugger-commands=" ^ commands;
@@ -959,7 +948,6 @@ let observations data =
       [
         path data "bin/x86_64-linux-gnu-echo";
         "--passes=run";
-        "--no-objdump";
         "--run-argv=echo,hello";
         "--run-systems=" ^ system;
         "--primus-lisp-add=" ^ dir env;
@@ -1003,7 +991,6 @@ let unicorn_taint data =
       [
         path data "bin/x86_64-linux-gnu-symexec-crc32";
         "--passes=run";
-        "--no-objdump";
         "--run-systems=" ^ system;
         "--primus-lisp-channel-redirect=<stdin>:" ^ input;
         "--run-components=bap:taint-primitives,bap:propagate-taint-by-computation,bap:select-default-taint-policy";
@@ -1060,7 +1047,6 @@ let patched_code data =
             [
               path data "bin/x86_64-linux-gnu-symexec-crc32";
               "--passes=run";
-              "--no-objdump";
               "--run-systems=" ^ system;
               "--primus-lisp-channel-redirect=<stdin>:" ^ input;
               "--run-components=bap:taint-primitives,bap:propagate-taint-by-computation,bap:select-default-taint-policy";
@@ -1111,7 +1097,6 @@ let patched_code data =
             @ api data arch
             @ [
                 "--passes=run";
-                "--no-objdump";
                 "--run-argv=echo,hello,world";
                 "--run-systems=" ^ system;
                 "--primus-lisp-add=" ^ dir env;
@@ -1168,7 +1153,6 @@ let patched_code data =
             ([
                path data "bin/arm-linux-gnueabihf-thumb-crc";
                "--passes=run";
-               "--no-objdump";
                "--run-systems=" ^ system;
                "--primus-lisp-add=" ^ dir env;
                "--primus-lisp-load=posix,patching";
@@ -1241,7 +1225,6 @@ let patched_code data =
             ([
                path data "bin/arm-linux-gnueabihf-thumb-crc";
                "--passes=run";
-               "--no-objdump";
                "--run-systems=" ^ system;
                "--primus-lisp-add=" ^ dir env;
                "--primus-lisp-load=posix,generating";
@@ -1418,7 +1401,6 @@ let checkpoint data =
       ([
          path data ("bin/" ^ bin);
          "--passes=run";
-         "--no-objdump";
          "--run-systems=bap:unicorn-executor";
        ]
       @ args)
@@ -1470,7 +1452,6 @@ let mprotect data =
               [
                 path data "bin/x86_64-linux-gnu-mprotect";
                 "--passes=run";
-                "--no-objdump";
                 "--run-systems=" ^ system;
                 "--primus-print-observations=exception";
               ]
@@ -1496,7 +1477,6 @@ let mmap data =
             [
               path data "bin/x86_64-linux-gnu-mmap";
               "--passes=run";
-              "--no-objdump";
               "--primus-lisp-type-check";
               "--run-systems=bap:unicorn-executor";
               "--primus-print-observations=exception";
@@ -1518,7 +1498,6 @@ let mmap data =
             [
               path data "bin/x86_64-linux-gnu-mmap";
               "--passes=run";
-              "--no-objdump";
               "--run-systems=bap:stubbed-executor";
               "--primus-print-observations=exception";
             ]
@@ -1544,7 +1523,6 @@ let mmap data =
             [
               path data "bin/x86_64-linux-gnu-mmap";
               "--passes=run";
-              "--no-objdump";
               "--run-systems=bap:unicorn-executor";
               "--run-components=bap:taint-primitives,bap:propagate-taint-by-computation,bap:select-default-taint-policy";
               "--primus-lisp-add=" ^ dir env;
@@ -1567,7 +1545,6 @@ let pages data =
               [
                 path data "bin/x86_64-linux-gnu-pages";
                 "--passes=run";
-                "--no-objdump";
                 "--run-systems=" ^ system;
                 "--primus-print-observations=exception";
               ]

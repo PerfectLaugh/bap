@@ -99,10 +99,8 @@ let () =
           ("debug", "true");
           ("profile", "false");
           ("build_id", build_id);
-          ("cxxfilt_paths", "[]");
           ("ida_path", "");
           ("ida_headless", "false");
-          ("objdump_paths", "[]");
           site "api";
           site "lisp";
           site "plugins";

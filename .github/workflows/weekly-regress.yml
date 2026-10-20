@@ -33,7 +33,7 @@ jobs:
 
       # opam installs the system dependencies as well
       - name: Build and Install BAP
-        run: opam install --confirm-level=unsafe-yes bap.2.5.0 bap-radare2.2.5.0
+        run: opam install --confirm-level=unsafe-yes bap.2.5.0
 
       - name: Checkout the Tests
         uses: actions/checkout@v7

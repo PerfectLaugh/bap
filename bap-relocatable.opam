@@ -18,6 +18,7 @@ depends: [
   "bap-main" {= version}
   "bap-powerpc" {= version}
   "bap-relation" {= version}
+  "bap-riscv" {= version}
   "bap-std" {= version}
   "bap-x86" {= version}
   "bitvec-order" {= version}

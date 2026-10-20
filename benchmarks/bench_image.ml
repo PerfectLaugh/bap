@@ -1,5 +1,4 @@
 open Core
-open Core_bench
 open Or_error
 open Bap.Std
 
@@ -53,13 +52,13 @@ let sum_fold_tab () =
   ()
 
 let test =
-  Bench.Test.create_group ~name:"image"
+  Bench.create_group ~name:"image"
     [
-      Bench.Test.create ~name:"Bap_image.map_sum_direct" sum_while;
-      Bench.Test.create ~name:"Bap_image.map_sum_fold" sum_fold;
-      Bench.Test.create ~name:"Bap_image.map_sum_foldi" sum_foldi;
-      Bench.Test.create ~name:"Bap_image.map_sum_foldm" sum_foldm;
-      Bench.Test.create ~name:"Bap_image.map_sum_table" sum_fold_tab;
+      Bench.create ~name:"Bap_image.map_sum_direct" sum_while;
+      Bench.create ~name:"Bap_image.map_sum_fold" sum_fold;
+      Bench.create ~name:"Bap_image.map_sum_foldi" sum_foldi;
+      Bench.create ~name:"Bap_image.map_sum_foldm" sum_foldm;
+      Bench.create ~name:"Bap_image.map_sum_table" sum_fold_tab;
     ]
 
 let tests = [ test ]

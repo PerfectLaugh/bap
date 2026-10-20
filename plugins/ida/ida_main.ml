@@ -273,9 +273,7 @@ module Cmdline = struct
             "If IDA instance is found on the machine, or specified by a\n\
             \        user, it will be queried for the specified information.";
           `S "SEE ALSO";
-          `P
-            "$(b,bap-ida)(3), $(b,regular)(3),$(b,bap-plugin-byteweight)(1), \
-             $(b,bap-plugin-objdump)(1)";
+          `P "$(b,bap-ida)(3), $(b,regular)(3), $(b,bap-plugin-byteweight)(1)";
         ]
     in
 

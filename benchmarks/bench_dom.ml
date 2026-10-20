@@ -1,5 +1,4 @@
 open Core
-open Core_bench
 open Bap.Std
 open Graphlib.Std
 open Format
@@ -69,15 +68,15 @@ let ocamlgraph_scc cfg =
    bap to be initialized first *)
 let tests () =
   let functions, sizes, index = load () in
-  let run f size = stage (fun () -> f functions.(index size)) in
-  let indexed = Bench.Test.create_indexed ~args:sizes in
+  let run f size () = f functions.(index size) in
+  let indexed = Bench.create_indexed ~args:sizes in
   [
-    Bench.Test.create_group ~name:"dom"
+    Bench.create_group ~name:"dom"
       [
         indexed ~name:"ocamlgraph" (run (dom ocamlgraph));
         indexed ~name:"graphlib" (run (dom graphlib));
       ];
-    Bench.Test.create_group ~name:"scc"
+    Bench.create_group ~name:"scc"
       [
         indexed ~name:"graphlib" (run graphlib_scc);
         indexed ~name:"ocamlgraph" (run ocamlgraph_scc);

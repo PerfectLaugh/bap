@@ -347,9 +347,7 @@ let macho_loader data =
   |> List.map (fun (file, expected) ->
       let name = "macho-loader/" ^ Filename.basename file in
       case name (fun env ->
-          has env name
-            (bap env [ path data file; "--dump=ogre"; "--no-objdump" ])
-            expected))
+          has env name (bap env [ path data file; "--dump=ogre" ]) expected))
 
 let mangling data =
   [

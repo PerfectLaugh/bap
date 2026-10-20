@@ -14,6 +14,13 @@ module Std : sig
   (** [init_disassembler ()] initializes and registers the LLVM based
       disassembler. *)
 
+  val demangle : string -> string
+  (** [demangle name] demangles the [name] with the demangler of LLVM, which
+      knows the manglings of Itanium, e.g., of GCC and Clang, of MSVC, of Rust,
+      and of D, or is the [name], if it is not mangled.
+
+      @since 2.6.0 *)
+
   val init_loader : ?base:int64 -> ?pdb_path:string -> unit -> unit
   (** [init-loader ()] initializes and registers the LLVM based loader.
 

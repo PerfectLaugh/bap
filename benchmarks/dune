@@ -1,15 +1,15 @@
-; run with dune exec -- ./benchmarks/run_benchmarks.exe, after checking out
-; the testsuite, see README.md; core_bench isn't available on Windows
+; run with dune exec -- ./benchmarks/run_benchmarks.exe [NAME...], after
+; checking out the testsuite, see README.md
 
 (executable
  (name run_benchmarks)
- (enabled_if
-  (<> %{os_type} Win32))
  (libraries
   bap
   bap-main
   core
-  core_bench
-  core_unix.command_unix
+  dune-site.plugins
+  eio
+  eio_main
   graphlib
+  mtime
   ocamlgraph))

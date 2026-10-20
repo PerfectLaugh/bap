@@ -1,9 +1,6 @@
 # Builds BAP from this source tree with dune package management.
 #
 # docker build -f docker/debian/testing/Dockerfile -t bap .
-#
-# Debian doesn't package radare2, so the radare2 plugin is built
-# but radare2 itself is not installed.
 
 FROM debian:testing
 
@@ -29,7 +26,7 @@ COPY --chown=bap:bap . .
 # the system packages required by the locked dependencies
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      $(dune show depexts | grep -vx radare2) \
+      $(dune show depexts) \
  && rm -rf /var/lib/apt/lists/* _build
 
 USER bap

@@ -16,7 +16,8 @@
    llvm_coff_loader
    llvm_elf_loader
    llvm_macho_loader
-   llvm_pdb_loader)
+   llvm_pdb_loader
+   llvm_demangle)
   (extra_deps
    (glob_files *.hpp)
    ; dune tracks only the *.h headers of the dependencies

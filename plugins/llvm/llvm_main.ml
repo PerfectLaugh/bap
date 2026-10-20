@@ -1,4 +1,5 @@
-let provides = [ "disassembler"; "loader"; "elf"; "macho"; "coff"; "llvm" ]
+let provides =
+  [ "disassembler"; "loader"; "elf"; "macho"; "coff"; "llvm"; "demangler" ]
 
 open Core
 open Bap.Std
@@ -64,4 +65,6 @@ let () =
   if !version then print_version ();
   init_loader ?base:!base_addr ?pdb_path:!pdb_path ();
   disasm_init !x86_syntax;
+  (* the demangler of C++, Rust, and D, e.g., --demangle-with=llvm *)
+  Bap_demangle.Std.Demangler.declare ~package:"bap" "llvm" demangle;
   Ok ()

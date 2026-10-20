@@ -1,3 +1,1 @@
-open Core_bench
-
-val tests : unit -> Bench.Test.t list
+val tests : unit -> Bench.t list

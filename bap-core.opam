@@ -23,7 +23,6 @@ depends: [
   "bap-callgraph-collator" {= version}
   "bap-callsites" {= version}
   "bap-c" {= version}
-  "bap-cxxfilt" {= version}
   "bap-demangle" {= version}
   "bap-dependencies" {= version}
   "bap-disassemble" {= version}
@@ -36,7 +35,6 @@ depends: [
   "bap-llvm" {= version}
   "bap-mc" {= version}
   "bap-mips" {= version}
-  "bap-objdump" {= version}
   "bap-optimization" {= version}
   "bap-patterns" {= version}
   "bap-plugins" {= version}

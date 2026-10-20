@@ -18,6 +18,7 @@ let llvm_components =
   [
     "binaryformat";
     "core";
+    "demangle";
     "mc";
     "debuginfodwarf";
     "debuginfomsf";
