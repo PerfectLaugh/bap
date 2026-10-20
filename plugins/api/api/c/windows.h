@@ -18,6 +18,7 @@ void *TlsGetValue(unsigned int index);
 void *SetUnhandledExceptionFilter(void *filter);
 int UnhandledExceptionFilter(void *info);
 int TerminateProcess(void *process, unsigned int code);
+void ExitProcess(unsigned int code) __attribute__((noreturn));
 unsigned long VirtualQuery(const void *addr, void *buffer, unsigned long length);
 int VirtualProtect(void *addr, unsigned long size, unsigned int protect, unsigned int *old);
 int RtlAddFunctionTable(void *table, unsigned int count, unsigned long base);

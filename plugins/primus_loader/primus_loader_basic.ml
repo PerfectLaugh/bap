@@ -100,7 +100,9 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
   (* The TLS layout is the variant I, where the thread pointer points to
      the thread control block (TCB), which is followed by the TLS block
      of the executable. The TCB takes two words, e.g., on AArch64, but
-     RISC-V has none. *)
+     RISC-V has none. On x86, the layout is the variant II, where the
+     TLS block of the executable precedes the TCB, to which the thread
+     pointer points, and whose first word points to itself. *)
   let tcb_size target =
     if
       String.is_substring
@@ -109,12 +111,26 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     then 0
     else 2 * Theory.Target.code_addr_size target / 8
 
+  (* the thread pointer of MIPS is 0x7000 bytes after the TLS block of
+     the executable, as the local-exec model of its ABI tells *)
+  let is_mips target =
+    List.exists (target :: Theory.Target.parents target) ~f:(fun t ->
+        String.is_prefix (Theory.Target.to_string t) ~prefix:"bap:mips")
+
+  let mips_tp_offset = 0x7000
+
+  let is_x86 target =
+    List.exists (target :: Theory.Target.parents target) ~f:(fun t ->
+        String.equal (Theory.Target.to_string t) "bap:x86")
+
   (* allocates the TLS area after [endp] and points the thread register
      to its TCB. The TLS block of the executable is initialized from its
      template (the first [init] bytes are copied from it and the rest are
      zeros), as in the main thread of the program, so that the code that
      accesses the thread-local variables of the executable (the
-     local-exec model) finds their initial values. *)
+     local-exec model) finds their initial values. The area is zeroed,
+     not generated, as the generated values are the inputs, e.g., of the
+     symbolic executor. *)
   let setup_tls endp =
     thread_pointer >>= function
     | None -> Machine.return endp
@@ -127,22 +143,48 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
           | Some (addr, size, init, align) ->
               Int64.(addr, to_int_exn size, to_int_exn init, to_int_exn align)
         in
-        let align = Int.max align 16 in
+        (* the TLS block follows the TCB at the alignment of the TLS
+           segment, e.g., 8 bytes after the thread pointer on ARM, which
+           is aligned to 16 bytes *)
+        let align = Int.max align 1 in
+        let tp_align = Int.max align 16 in
         let start = Word.to_int64_exn endp in
-        let tp_addr =
-          Int64.of_int (align_up (Int64.to_int_exn start + tcb_reserve) align)
-        in
-        let block =
-          Int64.(tp_addr + of_int (align_up (tcb_size target) align))
+        let tp_addr, block =
+          if is_mips target then
+            let block = align_up (Int64.to_int_exn start) align in
+            (Int64.of_int (block + mips_tp_offset), Int64.of_int block)
+          else if is_x86 target then
+            let tp =
+              align_up (Int64.to_int_exn start + align_up size align) tp_align
+            in
+            (Int64.of_int tp, Int64.of_int (tp - align_up size align))
+          else
+            let tp =
+              Int64.of_int
+                (align_up (Int64.to_int_exn start + tcb_reserve) tp_align)
+            in
+            (tp, Int64.(tp + of_int (align_up (tcb_size target) align)))
         in
         let total =
-          align_up Int64.(to_int_exn (block - start)) 1 + size |> fun n ->
-          align_up (Int.max n 1) 0x1000
+          let last =
+            Int64.(max (block + of_int size) (tp_addr + of_int tcb_reserve))
+          in
+          align_up (Int.max (Int64.to_int_exn Int64.(last - start)) 1) 0x1000
         in
         Mem.allocate ~readonly:false ~executable:false
-          ~generator:(Generator.static 0) endp total
+          ~init:(fun _ -> Machine.return (Word.zero 8))
+          endp total
         >>= fun () ->
-        make_word tp_addr >>= Val.of_word >>= Env.set tp >>= fun () ->
+        make_word tp_addr >>= fun tp_word ->
+        Val.of_word tp_word >>= Env.set tp >>= fun () ->
+        (* the self pointer of the TCB of x86, which is little-endian *)
+        (if is_x86 target then
+           Word.enum_bytes tp_word LittleEndian
+           |> Machine.Seq.fold ~init:tp_word ~f:(fun ptr byte ->
+               Mem.store ptr byte >>| fun () -> Word.succ ptr)
+           |> Machine.ignore_m
+         else Machine.return ())
+        >>= fun () ->
         make_word image >>= fun image ->
         make_word block >>= fun block ->
         Machine.Seq.iter (Seq.range 0 init) ~f:(fun i ->
@@ -186,9 +228,12 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
         match Value.get Image.segment tag with
         | None -> Machine.return endp
         | Some seg ->
+            (* the segment keeps its permissions, e.g., the code, that is
+               writable, which add_text would make read-only *)
             let alloc =
-              if Image.Segment.is_executable seg then Mem.add_text
-              else Mem.add_data
+              Mem.map
+                ~readonly:(not (Image.Segment.is_writable seg))
+                ~executable:(Image.Segment.is_executable seg)
             in
             let lower = Memory.min_addr mem in
             let upper = Memory.max_addr mem in
@@ -305,24 +350,58 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     | Some (name, _) -> name
     | None -> name
 
-  (* the slots are in the GOT, while the reference of a copy relocation,
-     e.g., of stdin on x86-64, is the object itself, e.g., in .bss *)
+  (* the slots, e.g., of the GOT, have contents in the file, while the
+     reference of a copy relocation, e.g., of stdin on x86-64, is the
+     object itself, e.g., in .bss, which the file doesn't contain, so the
+     slots are found also, when the file has no sections *)
   let imported_data doc =
-    let got =
-      Ogre.(collect Query.(select @@ from Image.Scheme.named_region))
-      |> or_empty doc
-      |> Seq.filter ~f:(fun { Image.Scheme.info; _ } ->
-          String.is_prefix info ~prefix:".got")
-      |> Seq.to_list
+    let contents =
+      Ogre.(collect Query.(select @@ from Image.Scheme.mapped))
+      |> or_empty doc |> Seq.to_list
     in
-    let in_got addr =
-      List.exists got ~f:(fun { Image.Scheme.addr = lower; size; _ } ->
+    let in_file addr =
+      List.exists contents ~f:(fun { Image.Scheme.addr = lower; size; _ } ->
           Int64.(lower <= addr && addr < lower + size))
     in
     Ogre.(collect Query.(select @@ from Image.Scheme.external_reference))
     |> or_empty doc
     |> Seq.filter ~f:(fun (addr, name) ->
-        Set.mem imported_data_objects (unversioned name) && in_got addr)
+        Set.mem imported_data_objects (unversioned name) && in_file addr)
+
+  (* The slots of the functions, that the ELF file imports, e.g., the
+     JUMP_SLOT relocations of the PLT, which hold the addresses of the
+     lazy binding in the file, are resolved, as the dynamic linker does,
+     to the code, that calls the functions by their names, e.g., their
+     stubs, also when the PLT entries have no names, e.g., the PLT of
+     MIPS, that lld makes, or the global entries of the GOT of MIPS. The
+     weak functions, that nothing defines, have no references, see the
+     ELF loader, so their slots stay null. *)
+  let imported_functions doc =
+    let contents =
+      Ogre.(collect Query.(select @@ from Image.Scheme.mapped))
+      |> or_empty doc |> Seq.to_list
+    in
+    let in_file addr =
+      List.exists contents ~f:(fun { Image.Scheme.addr = lower; size; _ } ->
+          Int64.(lower <= addr && addr < lower + size))
+    in
+    let code =
+      Ogre.(collect Query.(select @@ from Image.Scheme.code_region))
+      |> or_empty doc |> Seq.to_list
+    in
+    let in_code addr =
+      List.exists code ~f:(fun (lower, size, _) ->
+          Int64.(lower <= addr && addr < lower + size))
+    in
+    Ogre.(collect Query.(select @@ from Image.Scheme.external_reference))
+    |> or_empty doc |> Seq.to_list
+    |> List.map ~f:(fun (slot, name) -> (slot, unversioned name))
+    |> List.dedup_and_sort ~compare:[%compare: int64 * string]
+    |> List.filter ~f:(fun (slot, name) ->
+        (not (Set.mem imported_data_objects name))
+        && in_file slot
+        && not (in_code slot))
+    |> List.dedup_and_sort ~compare:(fun (x, _) (y, _) -> Int64.compare x y)
 
   let is_coff doc =
     match Ogre.eval (Ogre.request Image.Scheme.format) doc with
@@ -359,11 +438,18 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     else
       Machine.gets Project.target >>= fun target ->
       let endian = endian_of_target target in
-      imported_data doc |> Seq.to_list
-      |> Machine.List.filter_map ~f:(fun (slot, _) ->
-          make_word slot >>= fun slot ->
-          read_word endian slot >>| fun value ->
-          Option.some_if (Word.is_zero value) (Object (slot, "")))
+      let objects =
+        imported_data doc |> Seq.to_list
+        |> Machine.List.filter_map ~f:(fun (slot, _) ->
+            make_word slot >>= fun slot ->
+            read_word endian slot >>| fun value ->
+            Option.some_if (Word.is_zero value) (Object (slot, "")))
+      in
+      objects >>= fun objects ->
+      imported_functions doc
+      |> Machine.List.map ~f:(fun (slot, name) ->
+          make_word slot >>| fun slot -> Function (slot, name))
+      >>| fun functions -> objects @ functions
 
   (* the code, that calls the function by its name *)
   let call name : Primus.Linker.code =
@@ -442,6 +528,22 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
             make_word Int64.(stack_base - 0x88L) >>= Val.of_word >>= Env.set sp
       )
       >>| fun () -> Addr.nsucc endp size
+
+  (* the dynamic linker of MIPS enters the program with the address of
+     the entry in $t9 (R25), from which the position-independent code
+     computes $gp *)
+  let setup_entry_register () =
+    Machine.gets Project.target >>= fun target ->
+    let is_mips =
+      List.exists (target :: Theory.Target.parents target) ~f:(fun t ->
+          String.is_prefix (Theory.Target.to_string t) ~prefix:"bap:mips")
+    in
+    request Image.Scheme.entry_point >>= function
+    | Some entry when is_mips ->
+        let width = Theory.Target.code_addr_size target in
+        Val.of_word (Word.of_int64 ~width entry)
+        >>= Env.set (Var.create "R25" (Type.imm width))
+    | _ -> Machine.return ()
 
   let irelative_relocations doc =
     Ogre.(collect Query.(select @@ from Image.Scheme.irelative_relocation))
@@ -708,6 +810,7 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     debug "setting up registers";
     let endp = Addr.max e1 e2 in
     setup_registers () >>= fun () ->
+    setup_entry_register () >>= fun () ->
     debug "setting up thread-local storage";
     setup_tls endp >>= fun endp ->
     debug "setting up the imports";

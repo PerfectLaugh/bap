@@ -2528,9 +2528,25 @@ module Loader (Machine : Primus.Machine.S) = struct
               | Some seg -> Image.Segment.is_executable seg
               | None -> false)
         in
+        (* the slot, that is null in the file, of a function, that
+           nothing links, e.g., the weak one, that nothing defines, stays
+           null, as the programs test it, e.g., __gmon_start__ *)
+        let* linked = Linker.linked_symbols >>| String.Set.of_list in
+        let is_null addr =
+          let addr = Word.of_int64 ~width addr in
+          Memmap.lookup (Project.memory proj) addr
+          |> Seq.exists ~f:(fun (mem, _) ->
+              match
+                Bap.Std.Memory.get ~addr ~scale:(Size.of_int_exn width) mem
+              with
+              | Ok x -> Word.is_zero x
+              | Error _ -> false)
+        in
         Machine.return @@ Seq.to_list
         @@ Seq.filter refs ~f:(fun (addr, name) ->
-            is_function name && not (is_code addr))
+            is_function name
+            && (not (is_code addr))
+            && (Set.mem linked name || not (is_null addr)))
 
   (* the address, or the name of the subroutine, as its address *)
   let resolve point =

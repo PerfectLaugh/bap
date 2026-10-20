@@ -71,7 +71,6 @@
   (declare (external "__libc_start_main")
            (context (target "mips") (abi "gnu")))
   (set R25 main)
-  (set R31 @__libc_csu_fini)
   (exit-with (invoke-subroutine main argc argv)))
 
 (defun init (main argc argv auxv)
@@ -79,5 +78,4 @@
   (declare (external "__libc_start_main")
            (context (target "mips64") (abi "gnu")))
   (set R25 main)
-  (set R31 @__libc_csu_fini)
   (exit-with (invoke-subroutine main argc argv)))

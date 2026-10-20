@@ -67,6 +67,10 @@
   (declare (external "UnhandledExceptionFilter"))
   0)
 
+(defun ExitProcess (code)
+  (declare (external "ExitProcess"))
+  (exit-with code))
+
 (defun TerminateProcess (process code)
   (declare (external "TerminateProcess"))
   (exit-with code))

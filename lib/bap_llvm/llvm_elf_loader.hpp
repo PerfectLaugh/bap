@@ -716,7 +716,12 @@ bool emit_dynamic_relocations(const ELFObjectFile<T> &obj, tables &s) {
             typ != ELF::STT_FUNC && typ != ELF::STT_COMMON)
             continue;
         auto name = string_at(sym->st_name);
-        if (!name.empty())
+        // the weak symbol, that the file doesn't define, stays null, as
+        // the dynamic linker leaves it, when no library defines it, so
+        // it is not referenced, e.g., __gmon_start__
+        bool weak_undefined = sym->st_shndx == ELF::SHN_UNDEF &&
+            sym->getBinding() == ELF::STB_WEAK;
+        if (!name.empty() && !weak_undefined)
             s.entry("llvm:name-reference") << rel.offset << name;
         if (sym->st_shndx == ELF::SHN_UNDEF) continue;
         auto kind = kind_of_relocation(machine, rel.type, T::Is64Bits);
@@ -735,8 +740,10 @@ bool emit_dynamic_relocations(const ELFObjectFile<T> &obj, tables &s) {
     // the global entries of the GOT of MIPS, which the dynamic linker
     // fills without relocations, are of the dynamic symbols from
     // DT_MIPS_GOTSYM on, after the DT_MIPS_LOCAL_GOTNO local entries;
-    // those of the data objects, that the file imports, e.g., stdin, are
-    // their references, as the slots of GLOB_DAT are on the other targets
+    // those of the symbols, that the file imports, e.g., stdin, or the
+    // functions, that the position-independent code calls through them,
+    // are their references, as the slots of GLOB_DAT are on the other
+    // targets, except the weak ones, which stay null
     uint64_t pltgot, local_gotno, gotsym, symtabno;
     if (machine == ELF::EM_MIPS && img.tag(ELF::DT_PLTGOT, pltgot) &&
         img.tag(ELF::DT_MIPS_LOCAL_GOTNO, local_gotno) &&
@@ -745,7 +752,11 @@ bool emit_dynamic_relocations(const ELFObjectFile<T> &obj, tables &s) {
         for (uint64_t i = gotsym; i < symtabno; ++i) {
             auto sym = symbol_at(i);
             if (!sym) break;
-            if (sym->st_shndx != ELF::SHN_UNDEF || sym->getType() != ELF::STT_OBJECT)
+            auto typ = sym->getType();
+            if (sym->st_shndx != ELF::SHN_UNDEF ||
+                sym->getBinding() == ELF::STB_WEAK ||
+                (typ != ELF::STT_OBJECT && typ != ELF::STT_FUNC &&
+                 typ != ELF::STT_NOTYPE))
                 continue;
             auto name = string_at(sym->st_name);
             if (!name.empty())

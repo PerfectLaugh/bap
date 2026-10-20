@@ -87,6 +87,7 @@ let parts ~bits : Uc.arch -> (string * part) list = function
   | Arm ->
       (* APSR holds only the flags, so writing it keeps the mode *)
       [
+        ("TPIDRURO", Reg "C13_C0_3");
         ("NF", Bit ("APSR", 31));
         ("ZF", Bit ("APSR", 30));
         ("CF", Bit ("APSR", 29));
@@ -134,7 +135,9 @@ let parts ~bits : Uc.arch -> (string * part) list = function
             "AI";
           ]
   | Mips ->
-      (("R0", Skip) :: numbered "R" ~first:1 31 (fun n -> Reg (Int.to_string n)))
+      ("R0", Skip)
+      :: ("USERLOCAL", Reg "CP0_USERLOCAL")
+      :: numbered "R" ~first:1 31 (fun n -> Reg (Int.to_string n))
       @ [ ("ZERO", Skip); ("ZERO_64", Skip) ]
   | Ppc ->
       let cr =
