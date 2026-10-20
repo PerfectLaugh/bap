@@ -154,6 +154,8 @@ let plt_sizes =
     (Arm_target.parent, 4);
     (X86_target.parent, 1);
     (Bap_powerpc_target.parent, 4);
+    (* auipc t3, %hi; ld t3, %lo(t3); jalr t1, t3; nop *)
+    (Bap_riscv_target.parent, 4);
   ]
 
 let plt_size label =
@@ -195,25 +197,75 @@ let matches refs ref mem =
       Seq.append addr (addresses mem)
       |> Seq.find_map ~f:(References.lookup refs)
 
+(* the slot, through which the code jumps, i.e., from which it loads
+   the target of its jump, e.g., ldr pc, [ip, #off]! of ARM, or through
+   the variables, that it computes from the loaded target, e.g., the
+   target of jalr of RISC-V, whose lower bit is cleared *)
+let slot_of_jump bil =
+  let slot_of slots exp =
+    match exp with
+    | Bil.Load (_, Int dst, _, _) -> Some (Word.to_bitvec dst)
+    | exp ->
+        Set.to_list (Exp.free_vars exp) |> List.find_map ~f:(Map.find slots)
+  in
+  List.fold_until bil ~init:Var.Map.empty
+    ~f:(fun slots -> function
+      | Bil.Move (v, exp) -> (
+          match slot_of slots exp with
+          | Some slot -> Continue (Map.set slots ~key:v ~data:slot)
+          | None -> Continue (Map.remove slots v))
+      | Bil.Jmp dst -> Stop (slot_of slots dst)
+      | _ -> Continue slots)
+    ~finish:(fun _ -> None)
+
+let has_sections unit =
+  KB.collect Image.Spec.slot unit >>| fun spec ->
+  match
+    Ogre.eval
+      (Ogre.collect Ogre.Query.(select (from Image.Scheme.named_region)))
+      spec
+  with
+  | Ok regions ->
+      Seq.exists regions ~f:(fun { Image.Scheme.info; _ } ->
+          String.is_prefix info ~prefix:".")
+  | Error _ -> true
+
+(* The stubs are the code in the stub sections, e.g., .plt, see the
+   stub_resolver plugin, or, when the file has no sections, e.g., it is
+   stripped of them, the code, that jumps through a slot of an external
+   function, e.g., the PLT entries, whose layout depends on the linker,
+   e.g., lld makes larger entries than GNU ld. *)
+let resolve_unmarked_stub label refs =
+  KB.collect Theory.Label.unit label >>=? fun unit ->
+  has_sections unit >>= fun sections ->
+  KB.guard (not sections) >>= fun () ->
+  KB.collect Theory.Label.addr label >>=? fun addr ->
+  plt_size label >>=? fun size ->
+  collect_insns size addr >>| fun bil ->
+  match Option.bind (slot_of_jump bil) ~f:(References.lookup refs) with
+  | Some (Name s) -> Some s
+  | _ -> None
+
 let resolve_stubs () =
   KB.propose plt_agent Theory.Label.possible_name @@ fun label ->
   KB.collect Theory.Label.unit label >>=? fun unit ->
   KB.collect References.slot unit >>= fun refs ->
   KB.collect Theory.Label.addr label >>=? fun addr ->
   KB.collect (Value.Tag.slot Sub.stub) label >>= fun is_stub ->
-  KB.guard (Option.is_some is_stub) >>= fun () ->
-  match References.lookup refs addr with
-  | Some (Name s) -> KB.return (Some s)
-  | _ ->
-      plt_size label >>=? fun size ->
-      collect_insns size addr >>| fun bil ->
-      find_references bil
-      |> List.find_map ~f:(function
-        | Name s -> Some s
-        | Addr dst -> (
-            match References.lookup refs dst with
-            | Some (Name s) -> Some s
-            | _ -> None))
+  if Option.is_none is_stub then resolve_unmarked_stub label refs
+  else
+    match References.lookup refs addr with
+    | Some (Name s) -> KB.return (Some s)
+    | _ ->
+        plt_size label >>=? fun size ->
+        collect_insns size addr >>| fun bil ->
+        find_references bil
+        |> List.find_map ~f:(function
+          | Name s -> Some s
+          | Addr dst -> (
+              match References.lookup refs dst with
+              | Some (Name s) -> Some s
+              | _ -> None))
 
 let mark_mips_stubs_as_functions () : unit =
   Theory.Label.promise_subroutines @@ fun unit ->
