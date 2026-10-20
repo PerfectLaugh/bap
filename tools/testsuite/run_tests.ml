@@ -743,6 +743,83 @@ let () =
         contains env "sees the tainted jumps" out
           "jumps: 752:input 752:input 752:input 752:input 7b8:input 752:input \
            752:input 752:input 752:input 7b8:input 83b:input");
+    (* the scripts make the registers and the memory symbolic, and the
+       solver finds the inputs, that flip the branches *)
+    case "emu/x86_64-linux-gnu-symexec-guess/symbolic" (fun env ->
+        let input = write env "input" "Z" in
+        let out =
+          script env "x86_64-linux-gnu-symexec-guess"
+            (Printf.sprintf
+               {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+module Sym = Emu.Symbolic
+
+let model = function
+  | None -> "unsat"
+  | Some m ->
+      String.concat ","
+        (List.map (fun (n, v) -> Printf.sprintf "%%s=%%Lx" n (Int64.logand v 0xffL)) m)
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  Bap_script.init ~options:[ "--primus-lisp-channel-redirect=<stdin>:%s" ] ();
+  let emu = Emu.create ~components:Sym.components (Bap_script.project file) in
+  (match Emu.run emu ~until:0x693L with
+   | Paused -> ()
+   | _ -> failwith "getchar didn't return");
+  Sym.symbolize emu (Reg "RAX");
+  Printf.printf "RAX %%s, RBX %%s\n%%!"
+    (String.concat "," (List.map (Option.value ~default:"-") (Sym.formula emu (Reg "RAX"))))
+    (String.concat "," (List.map (Option.value ~default:"-") (Sym.formula emu (Reg "RBX"))));
+  let branches = ref [] in
+  Sym.on_branch emu (fun _ b -> branches := b :: !branches);
+  ignore (Emu.run emu);
+  List.iter (fun b ->
+      Printf.printf "branch %%Lx %%b flips with %%s\n" (Sym.addr b) (Sym.taken b)
+        (model (Sym.flip b))) (List.rev !branches)
+|}
+               input)
+        in
+        contains env "makes RAX symbolic" out "RAX RAX, RBX -\n";
+        contains env "flips the branch" out "branch 696 true flips with RAX=41");
+    case "emu/x86_64-linux-gnu-symexec-crc32/symbolic" (fun env ->
+        let input = write env "input" "abc\nabd\n" in
+        let out =
+          script env "x86_64-linux-gnu-symexec-crc32"
+            (Printf.sprintf
+               {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+module Sym = Emu.Symbolic
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  Bap_script.init
+    ~options:[ "--primus-lisp-channel-redirect=<stdin>:%s";
+               "--primus-symbolic-executor-timeout=10000" ] ();
+  let emu = Emu.create ~components:Sym.components (Bap_script.project file) in
+  (match Emu.run emu ~until:0x80cL with
+   | Paused -> ()
+   | _ -> failwith "fgets didn't return");
+  let buf1 = Int64.sub (Emu.reg emu "RBP") 0x40L in
+  Sym.symbolize emu (Mem (buf1, 4));
+  let branches = ref [] in
+  Sym.on_branch emu (fun _ b -> branches := b :: !branches);
+  ignore (Emu.run emu);
+  Printf.printf "branches:";
+  List.iter (fun b -> Printf.printf " %%Lx" (Sym.addr b)) (List.rev !branches);
+  print_newline ();
+  match Sym.flip (List.hd !branches) with
+  | None -> print_endline "no collision"
+  | Some m ->
+      print_string "collision: ";
+      List.iter (fun (_, v) -> print_char (Char.chr (Int64.to_int v))) m;
+      print_newline ()
+|}
+               input)
+        in
+        contains env "sees the symbolic branches" out
+          "branches: 7b6 7b6 7b6 7b6 82d\n";
+        contains env "finds the collision of the CRC" out "collision: abd\n");
     case "emu/x86_64-linux-gnu-echo/patch" (fun env ->
         let out =
           script env "x86_64-linux-gnu-echo"

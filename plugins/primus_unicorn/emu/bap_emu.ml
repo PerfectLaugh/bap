@@ -482,3 +482,149 @@ module Taint = struct
     end in
     primus t (module Observe)
 end
+
+(* The symbolic execution of the values, that the program computes from
+   its inputs, which Primus tracks, see [Bap_primus_symbolic], as the
+   program runs in Unicorn, which leaves the code, that uses the symbolic
+   values, to Primus. *)
+module Symbolic = struct
+  open Bap_core_theory
+  module S = Bap_primus_symbolic
+
+  type place = Taint.place = Reg of string | Mem of int64 * int
+  type model = (string * int64) list
+
+  type branch = {
+    addr : int64;
+    taken : bool;
+    condition : string;
+    formula : S.SMT.formula;
+    path : S.SMT.formula list;
+    inputs : S.Input.t list;
+  }
+
+  let components = [ "bap:symbolic-computer"; "bap:symbolic-path-constraints" ]
+  let to_int64 x = Bitvec.to_int64 (Word.to_bitvec x)
+
+  let model inputs model =
+    List.filter_map inputs ~f:(fun input ->
+        S.SMT.Model.get model input
+        |> Option.map ~f:(fun x ->
+            (S.Input.to_symbol input, to_int64 (S.SMT.Value.to_word x))))
+
+  (* the addresses of the bytes of the place in the memory *)
+  let addresses target addr len =
+    let width = Theory.Target.code_addr_size target in
+    List.init len ~f:(fun i -> Word.of_int64 ~width Int64.(addr + of_int i))
+
+  let symbolize t place =
+    let module Symbolize (Machine : Primus.Machine.S) = struct
+      open Machine.Syntax
+      module Env = Primus.Env.Make (Machine)
+      module Mems = Primus.Memory.Make (Machine)
+      module Value = Primus.Value.Make (Machine)
+      module Executor = S.Executor (Machine)
+
+      (* the fresh value, whose formula is the input *)
+      let input origin x =
+        Value.of_word (Primus.Value.to_word x) >>= fun x ->
+        Executor.set_input origin x >>| fun () -> x
+
+      let init () =
+        Machine.gets Project.target >>= fun target ->
+        match place with
+        | Reg name ->
+            let v = Taint.var target name in
+            Env.get v >>= input (S.Input.var v) >>= Env.set v
+        | Mem (addr, len) ->
+            Mems.memory >>= fun bank ->
+            Machine.List.iter (addresses target addr len) ~f:(fun addr ->
+                Mems.get addr
+                >>= input (S.Input.ptr bank addr)
+                >>= Mems.set addr)
+    end in
+    primus t (module Symbolize)
+
+  let formula t place =
+    let result = ref [] in
+    let module Formula (Machine : Primus.Machine.S) = struct
+      open Machine.Syntax
+      module Env = Primus.Env.Make (Machine)
+      module Mems = Primus.Memory.Make (Machine)
+      module Executor = S.Executor (Machine)
+
+      let formula x =
+        Executor.value x >>| Option.map ~f:(Format.asprintf "%a" S.SMT.pp_expr)
+
+      let init () =
+        Machine.gets Project.target >>= fun target ->
+        (match place with
+          | Reg name ->
+              Env.get (Taint.var target name) >>= formula >>| List.return
+          | Mem (addr, len) ->
+              Machine.List.map (addresses target addr len) ~f:(fun addr ->
+                  Mems.get addr >>= formula))
+        >>| fun xs -> result := xs
+    end in
+    primus t (module Formula);
+    !result
+
+  let solve t =
+    let result = ref None in
+    let module Solve (Machine : Primus.Machine.S) = struct
+      open Machine.Syntax
+      module Executor = S.Executor (Machine)
+      module Constraints = S.Context.Make (Machine)
+
+      let init () =
+        Constraints.get S.Context.Scope.user >>= fun user ->
+        Constraints.get S.Context.Scope.path >>= fun path ->
+        Executor.inputs >>| fun inputs ->
+        result :=
+          S.SMT.check (Set.to_list (Set.union user path))
+          |> Option.map ~f:(model (Seq.to_list inputs))
+    end in
+    primus t (module Solve);
+    !result
+
+  let on_branch t f =
+    let module Observe (Machine : Primus.Machine.S) = struct
+      open Machine.Syntax
+      module Eval = Primus.Interpreter.Make (Machine)
+      module Value = Primus.Value.Make (Machine)
+      module Executor = S.Executor (Machine)
+      module Constraints = S.Context.Make (Machine)
+
+      (* the observers, that come later, run first, so the constraints of
+         the path don't have the condition yet *)
+      let decided cond =
+        Executor.value cond >>= function
+        | None -> Machine.return ()
+        | Some x ->
+            let taken = not (Value.is_zero cond) in
+            Eval.pc >>= fun pc ->
+            Constraints.get S.Context.Scope.user >>= fun user ->
+            Constraints.get S.Context.Scope.path >>= fun path ->
+            Executor.inputs >>| fun inputs ->
+            f t
+              {
+                addr = to_int64 pc;
+                taken;
+                condition = Format.asprintf "%a" S.SMT.pp_expr x;
+                formula = S.SMT.formula ~refute:(not taken) x;
+                path = Set.to_list (Set.union user path);
+                inputs = Seq.to_list inputs;
+              }
+
+      let init () = Primus.Interpreter.eval_cond >>> decided
+    end in
+    primus t (module Observe)
+
+  let addr b = b.addr
+  let taken b = b.taken
+  let condition b = b.condition
+
+  let flip b =
+    S.SMT.check (S.SMT.inverse b.formula :: b.path)
+    |> Option.map ~f:(model b.inputs)
+end

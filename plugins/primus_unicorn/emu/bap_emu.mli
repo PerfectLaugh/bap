@@ -231,3 +231,72 @@ module Taint : sig
       on a condition, that the taints of the [kinds] taint. The callback runs,
       when the program runs, so it may only {!stop} it. *)
 end
+
+(** The symbolic execution of the values, that the program computes.
+
+    Primus computes the formulas of the values, that the program computes from
+    the inputs, which the script makes symbolic, see the
+    [bap-primus-symbolic-executor] plugin, as the program runs in Unicorn, which
+    leaves the instructions, that use the symbolic values, to Primus, and
+    collects the constraints of the path, i.e., the conditions of the branches,
+    that the program takes, whose models the SMT solver finds, e.g.,
+
+    {[
+    let emu = Bap_emu.create ~components:Bap_emu.Symbolic.components proj in
+    ignore (Bap_emu.run emu ~until:after_getchar);
+    Bap_emu.Symbolic.symbolize emu (Reg "RAX");
+    Bap_emu.Symbolic.on_branch emu (fun _ b -> branches := b :: !branches);
+    ignore (Bap_emu.run emu);
+    List.map !branches ~f:Bap_emu.Symbolic.flip
+    ]}
+
+    The functions, except the callbacks and {!flip}, run, when the program is
+    paused, or ended, see {!primus}. The time, that the solver has, is the
+    option [--primus-symbolic-executor-timeout]. *)
+module Symbolic : sig
+  (** the place of the values, see {!Taint.place} *)
+  type place = Taint.place = Reg of string | Mem of int64 * int
+
+  type model = (string * int64) list
+  (** the values of the inputs, e.g., [RAX], or [mem[0x7ffffff0]] for a byte of
+      the memory, that satisfy the constraints *)
+
+  type branch
+  (** a branch of the program on a symbolic condition *)
+
+  val components : string list
+  (** the components of the system, that compute the formulas and collect the
+      constraints of the path, which {!create} needs *)
+
+  val symbolize : t -> place -> unit
+  (** [symbolize emu place] makes the values of the [place] the inputs, named
+      after the place, whose values are symbolic, i.e., the value of the
+      register, or each byte of the memory, whose concrete values stay. *)
+
+  val formula : t -> place -> string option list
+  (** [formula emu place] the formulas of the values of the [place], one for a
+      register, and one per byte of the memory, [None] for a concrete value. *)
+
+  val solve : t -> model option
+  (** [solve emu] a model of the constraints of the path, that the program took,
+      [None], if the solver finds none, e.g., in time. *)
+
+  val on_branch : t -> (t -> branch -> unit) -> unit
+  (** [on_branch emu f] calls [f emu branch] when the program decides a branch
+      on a symbolic condition. The callback runs, when the program runs, so it
+      may only {!stop} it. *)
+
+  val addr : branch -> int64
+  (** the address of the instruction of the branch *)
+
+  val taken : branch -> bool
+  (** if the condition of the branch held *)
+
+  val condition : branch -> string
+  (** the formula of the condition *)
+
+  val flip : branch -> model option
+  (** [flip branch] a model of the inputs, with which the program takes the path
+      to the branch, and decides the branch otherwise, [None], if the solver
+      finds none. *)
+end
