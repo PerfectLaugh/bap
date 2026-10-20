@@ -15,27 +15,30 @@
  (extra_objects ../libunicorn/unicorn/lib/unicorn)
  (c_library_flags
   plugins/primus_unicorn/libunicorn/unicorn/lib/libunicorn.a
-  (:include runtime.flags)
+  (:include ../../../lib/bap_disasm/cxx_runtime.flags)
+  (:include threads.flags)
   -lm))
 
-; the threads and the runtime of the compiler that Unicorn uses, which on
-; Windows are linked statically, as for C++, see
-; lib/bap_disasm/config/cxx_runtime.ml, so that the plugin doesn't depend
-; on the DLLs of the mingw-w64 toolchain, which are not in the path
+; the runtime of the compiler that Unicorn uses, e.g., libatomic, is
+; linked statically with the flags of lib/bap_disasm/config/cxx_runtime.ml,
+; which on Windows link the threads too, so that the plugin doesn't depend
+; on the libraries of the toolchain
 
 (rule
  (enabled_if
   (<> %{os_type} Win32))
  (action
   (with-stdout-to
-   runtime.flags
+   threads.flags
    (echo "(-lpthread)"))))
 
 (rule
  (enabled_if
   (= %{os_type} Win32))
  (action
-  (copy %{project_root}/lib/bap_disasm/cxx_runtime.flags runtime.flags)))
+  (with-stdout-to
+   threads.flags
+   (echo "()"))))
 
 (rule
  (targets unicorn_regs.c)

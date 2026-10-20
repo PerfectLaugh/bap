@@ -31,4 +31,5 @@
    (:include libghidra/c.flags)))
  ; the decompiler is linked statically, see libghidra/build.cmake
  (c_library_flags
-  (:include libghidra/link.flags)))
+  (:include libghidra/link.flags)
+  (:include ../bap_disasm/cxx_runtime.flags)))

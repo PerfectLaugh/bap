@@ -33,6 +33,7 @@ set(GHIDRA_SHA256
   2a858300c350f05ae2e729dff86b4f584d0b9a6b398879c55025574e67696cec)
 set(GHIDRA_ROOT ghidra-${GHIDRA_BASENAME})
 set(DECOMPILER ${GHIDRA_ROOT}/Ghidra/Features/Decompiler/src/decompile/cpp)
+set(ZLIB ${GHIDRA_ROOT}/Ghidra/Features/Decompiler/src/decompile/zlib)
 
 if(NOT LINK_PREFIX)
   message(FATAL_ERROR "build.cmake: LINK_PREFIX is not specified")
@@ -100,6 +101,7 @@ file(ARCHIVE_EXTRACT
   DESTINATION "${WORK}"
   PATTERNS
     ${DECOMPILER}
+    ${ZLIB}
     ${GHIDRA_ROOT}/Ghidra/Processors)
 set(SRC "${WORK}/${DECOMPILER}")
 
@@ -153,6 +155,11 @@ set(SLEIGH_COMPILER ${CORE} ${SLEIGH} ${SLACOMP})
 list(TRANSFORM LIBDECOMP REPLACE "(.+)" "${SRC}/\\1.cc")
 list(TRANSFORM SLEIGH_COMPILER REPLACE "(.+)" "${SRC}/\\1.cc")
 
+# the sources of zlib, which the decompiler bundles and selects with
+# LOCAL_ZLIB, are compiled into the library, so that it doesn't depend
+# on the zlib of the system
+file(GLOB ZLIB "${WORK}/${ZLIB}/*.c")
+
 # the first word of a dune compiler command, without its flags
 function(compiler var cmd default)
   if(cmd)
@@ -164,6 +171,7 @@ function(compiler var cmd default)
   set(${var} ${cmd} PARENT_SCOPE)
 endfunction()
 
+compiler(CC "${CC}" cc)
 compiler(CXX "${CXX}" c++)
 
 # dune's C++ compiler is the C compiler of OCaml, e.g., gcc, whose
@@ -217,19 +225,20 @@ endif()
 
 file(WRITE "${WORK}/project/CMakeLists.txt" "
 cmake_minimum_required(VERSION 3.20)
-project(decompiler CXX)
+project(decompiler C CXX)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # the library is linked into the plugin, a shared library
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-add_library(decomp STATIC ${LIBDECOMP})
-target_compile_definitions(decomp PRIVATE ${LIBDECOMP_DEFINITIONS})
+# the subset of zlib, that the decompiler bundles, has no gzip, as in
+# the build of Ghidra
+set_source_files_properties(${ZLIB} PROPERTIES COMPILE_DEFINITIONS NO_GZIP)
+add_library(decomp STATIC ${LIBDECOMP} ${ZLIB})
+target_compile_definitions(decomp PRIVATE LOCAL_ZLIB ${LIBDECOMP_DEFINITIONS})
 target_compile_options(decomp PRIVATE ${LIBDECOMP_OPTIONS})
-add_executable(sleigh_opt ${SLEIGH_COMPILER})
-target_compile_definitions(sleigh_opt PRIVATE ${SLEIGH_DEFINITIONS})
+add_executable(sleigh_opt ${SLEIGH_COMPILER} ${ZLIB})
+target_compile_definitions(sleigh_opt PRIVATE LOCAL_ZLIB ${SLEIGH_DEFINITIONS})
 target_link_options(sleigh_opt PRIVATE ${SLEIGH_LINK_OPTIONS})
-# the compressed specifications, LNK of the Makefile
-target_link_libraries(sleigh_opt PRIVATE z)
 ")
 
 message(STATUS "Building Ghidra ${GHIDRA_VERSION} with ${CXX} in ${WORK}")
@@ -238,6 +247,7 @@ quietly(configure "${CMAKE_COMMAND}"
   -S "${WORK}/project"
   -B "${WORK}/build"
   -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_C_COMPILER=${CC}
   -DCMAKE_CXX_COMPILER=${CXX})
 quietly(build "${CMAKE_COMMAND}" --build "${WORK}/build" --parallel ${JOBS})
 quietly(sleigh "${WORK}/build/sleigh_opt${CMAKE_EXECUTABLE_SUFFIX}"
@@ -272,28 +282,11 @@ if(CMAKE_HOST_WIN32)
   # when the plugin is further than 2 GB from it, as the calls are
   # relative, so they are absolute in the large model
   write_flags(c.flags -mcmodel=large)
-  # the runtime of C++, and zlib, which the decompiler uses, are linked
-  # statically, so that the plugin doesn't depend on the DLLs of the
-  # mingw-w64 toolchain
-  set(runtime)
-  find_program(CYGPATH cygpath)
-  foreach(lib libz.a libstdc++.a libgcc.a libgcc_eh.a libwinpthread.a)
-    execute_process(COMMAND "${CXX}" -print-file-name=${lib}
-      OUTPUT_VARIABLE path OUTPUT_STRIP_TRAILING_WHITESPACE)
-    # the compilers of the mingw-w64 toolchain of opam are Cygwin
-    # programs, which print the paths of Cygwin
-    if(path MATCHES "^/" AND CYGPATH)
-      execute_process(COMMAND "${CYGPATH}" -m "${path}"
-        OUTPUT_VARIABLE path OUTPUT_STRIP_TRAILING_WHITESPACE)
-    endif()
-    if(IS_ABSOLUTE "${path}" AND EXISTS "${path}")
-      list(APPEND runtime "${path}")
-    endif()
-  endforeach()
-  write_flags(link.flags -L${LINK_PREFIX} -ldecomp ${runtime})
 else()
   write_flags(c.flags)
-  write_flags(link.flags -L${LINK_PREFIX} -ldecomp -lz -lstdc++)
 endif()
+# the runtime of C++ is linked with the flags of
+# lib/bap_disasm/config/cxx_runtime.ml
+write_flags(link.flags -L${LINK_PREFIX} -ldecomp)
 
 file(REMOVE_RECURSE "${WORK}")

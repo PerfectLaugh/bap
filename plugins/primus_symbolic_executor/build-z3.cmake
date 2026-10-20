@@ -197,27 +197,11 @@ if(CMAKE_HOST_WIN32)
   # can't relocate when the plugin is further than 2 GB from it, as the
   # calls are relative, so they are absolute in the large model
   write_flags(c.flags -mcmodel=large)
-  # the runtime of C++ is linked statically, so that the plugin doesn't
-  # depend on the DLLs of the mingw-w64 toolchain
-  set(runtime)
-  find_program(CYGPATH cygpath)
-  foreach(lib libstdc++.a libgcc.a libgcc_eh.a libwinpthread.a)
-    execute_process(COMMAND "${CXX}" -print-file-name=${lib}
-      OUTPUT_VARIABLE path OUTPUT_STRIP_TRAILING_WHITESPACE)
-    # the compilers of the mingw-w64 toolchain of opam are Cygwin
-    # programs, which print the paths of Cygwin
-    if(path MATCHES "^/" AND CYGPATH)
-      execute_process(COMMAND "${CYGPATH}" -m "${path}"
-        OUTPUT_VARIABLE path OUTPUT_STRIP_TRAILING_WHITESPACE)
-    endif()
-    if(IS_ABSOLUTE "${path}" AND EXISTS "${path}")
-      list(APPEND runtime "${path}")
-    endif()
-  endforeach()
-  write_flags(link.flags -L${LINK_PREFIX}/lib -lz3 ${runtime})
 else()
   write_flags(c.flags)
-  write_flags(link.flags -L${LINK_PREFIX}/lib -lz3 -lstdc++)
 endif()
+# the runtime of C++ is linked with the flags of
+# lib/bap_disasm/config/cxx_runtime.ml
+write_flags(link.flags -L${LINK_PREFIX}/lib -lz3)
 
 file(REMOVE_RECURSE "${WORK}")

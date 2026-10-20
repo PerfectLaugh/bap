@@ -50,8 +50,8 @@
 ;; Z3 is vendored (git submodule) and built from its sources with its CMake
 ;; build by build-z3.cmake, which also generates the sources of its OCaml
 ;; bindings, whose own build requires a global ocamlfind, so they are an
-;; ordinary local library below. Z3 is linked statically, and on Windows
-;; the runtime of C++ too, see build-z3.cmake.
+;; ordinary local library below. Z3 is linked statically, and the runtime
+;; of C++ too, see lib/bap_disasm/config/cxx_runtime.ml.
 
 (rule
  (targets
@@ -106,4 +106,5 @@
    -Ilibz3/include
    (:include c.flags)))
  (c_library_flags
-  (:include link.flags)))
+  (:include link.flags)
+  (:include ../../lib/bap_disasm/cxx_runtime.flags)))

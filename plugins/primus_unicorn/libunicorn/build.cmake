@@ -209,6 +209,14 @@ message(STATUS "Building Unicorn ${UNICORN_VERSION} with ${CC} in ${WORK}")
 quietly(configure "${CMAKE_COMMAND}" ${CONFIGURE})
 if(CMAKE_HOST_WIN32)
   write_config_headers()
+else()
+  # the atomic accesses of 16 bytes are calls to libatomic, which isn't
+  # position independent on some systems, e.g., Fedora, so it can't be
+  # linked statically into the plugin. The TCG of Unicorn runs on one
+  # thread, so they are disabled, and QEMU falls back to cmpxchg16b
+  file(READ "${WORK}/build/config-host.h" config)
+  string(REPLACE "#define CONFIG_ATOMIC128 1\n" "" config "${config}")
+  file(WRITE "${WORK}/build/config-host.h" "${config}")
 endif()
 quietly(build "${CMAKE_COMMAND}" --build "${WORK}/build" --parallel ${JOBS})
 quietly(install "${CMAKE_COMMAND}" --install "${WORK}/build")
