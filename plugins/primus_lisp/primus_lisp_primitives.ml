@@ -260,6 +260,42 @@ module Closure (Machine : Primus.Machine.S) = struct
         Eval.binop sign sp_value frame_size >>= Eval.set sp >>= fun () ->
         Machine.return (Some (sp, sp_value))
 
+  (* The return address of the subroutine of a target, whose calls push
+     it on the stack, e.g., x86, is at the stack pointer, below the
+     arguments, which the frame reserves, so the subroutine returns to
+     the address, to which the current one returns, e.g., the stub of
+     Lisp, which the executors of the machine treat as its return, and
+     the stack stays balanced, when the subroutines are invoked again,
+     e.g., by _initterm of msvcrt. *)
+  let push_return_address frame =
+    Machine.gets Project.target >>= fun target ->
+    match
+      ( Theory.Target.reg target Theory.Role.Register.link,
+        Theory.Target.reg target Theory.Role.Register.stack_pointer )
+    with
+    | None, Some sp -> (
+        let sp = Var.reify sp in
+        let width = Theory.Target.code_addr_size target in
+        let size = Size.of_int_exn width in
+        let endian =
+          if Theory.Endianness.(Theory.Target.endianness target = eb) then
+            BigEndian
+          else LittleEndian
+        in
+        Eval.get sp >>= fun top ->
+        (match frame with
+          | Some (_, caller) -> Eval.load caller endian size
+          | None -> Eval.load top endian size)
+        >>= fun ret ->
+        match frame with
+        | Some _ -> Eval.store top ret endian size >>| fun () -> frame
+        | None ->
+            Eval.const (Word.of_int ~width (width / 8)) >>= fun n ->
+            Eval.binop Bil.MINUS top n >>= fun slot ->
+            Eval.set sp slot >>= fun () ->
+            Eval.store slot ret endian size >>| fun () -> Some (sp, top))
+    | _ -> Machine.return frame
+
   let is_out_intent a = match Arg.intent a with Some Out -> true | _ -> false
 
   let eval_sub : value list -> 'x = function
@@ -305,7 +341,7 @@ module Closure (Machine : Primus.Machine.S) = struct
             failf "invoke-subroutine: no function for %a" Value.pps sub_addr ()
         | Some sub -> (
             let args = Term.enum arg_t sub in
-            allocate_stack_frame args >>= fun frame ->
+            allocate_stack_frame args >>= push_return_address >>= fun frame ->
             Seq.zip args (Seq.of_list sub_args)
             |> Machine.Seq.iter ~f:(fun (arg, x) ->
                 let open Bil.Types in
