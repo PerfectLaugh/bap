@@ -458,15 +458,21 @@ let provide_coff_segmentation (llvm : LLVM.t) =
       List.concat_map (vheaders name) ~f:(fun (_, addr, vsize) ->
           List.concat_map (flags name) ~f:(fun (_, (r, w, x)) ->
               let addr = Int64.(addr + bias) in
+              (* a section without file contents, e.g., .bss, is
+                 zero-filled, as the segments of ELF are *)
               provide_if
-                Int64.(size <> 0L)
+                Int64.(vsize <> 0L)
                 [
                   Ogre.provide segment addr vsize r w x;
-                  Ogre.provide mapped addr size start;
                   Ogre.provide section addr vsize;
                   Ogre.provide named_region addr vsize name;
                 ]
-              @ provide_if x [ Ogre.provide code_region addr vsize start ])) );
+              @ provide_if
+                  Int64.(size <> 0L)
+                  [ Ogre.provide mapped addr size start ]
+              @ provide_if
+                  (x && Int64.(size <> 0L))
+                  [ Ogre.provide code_region addr vsize start ])) );
   ]
 
 let overload file_type info =

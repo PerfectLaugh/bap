@@ -731,6 +731,28 @@ bool emit_dynamic_relocations(const ELFObjectFile<T> &obj, tables &s) {
             target &= ~uint64_t(1);
         s.entry("llvm:relocation") << rel.offset << target + addend;
     }
+
+    // the global entries of the GOT of MIPS, which the dynamic linker
+    // fills without relocations, are of the dynamic symbols from
+    // DT_MIPS_GOTSYM on, after the DT_MIPS_LOCAL_GOTNO local entries;
+    // those of the data objects, that the file imports, e.g., stdin, are
+    // their references, as the slots of GLOB_DAT are on the other targets
+    uint64_t pltgot, local_gotno, gotsym, symtabno;
+    if (machine == ELF::EM_MIPS && img.tag(ELF::DT_PLTGOT, pltgot) &&
+        img.tag(ELF::DT_MIPS_LOCAL_GOTNO, local_gotno) &&
+        img.tag(ELF::DT_MIPS_GOTSYM, gotsym) &&
+        img.tag(ELF::DT_MIPS_SYMTABNO, symtabno)) {
+        for (uint64_t i = gotsym; i < symtabno; ++i) {
+            auto sym = symbol_at(i);
+            if (!sym) break;
+            if (sym->st_shndx != ELF::SHN_UNDEF || sym->getType() != ELF::STT_OBJECT)
+                continue;
+            auto name = string_at(sym->st_name);
+            if (!name.empty())
+                s.entry("llvm:name-reference")
+                    << pltgot + (local_gotno + i - gotsym) * sizeof(word) << name;
+        }
+    }
     return true;
 }
 

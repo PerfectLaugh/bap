@@ -266,6 +266,80 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     let specs = spec :: List.map libs ~f:Project.Library.specification in
     Machine.List.iter specs ~f:(fixup_relocs_of_doc target)
 
+  (* the data objects of libc, which the programs import, e.g., stdin,
+     whose slots, e.g., of the GOT, which the GLOB_DAT relocations fill,
+     are not relocated, as they are not linked, while the weak imports,
+     e.g., __gmon_start__, stay null, as the programs test them *)
+  let imported_data_objects =
+    String.Set.of_list
+      [
+        "stdin";
+        "stdout";
+        "stderr";
+        "environ";
+        "__environ";
+        "optarg";
+        "optind";
+        "opterr";
+        "optopt";
+        "__stack_chk_guard";
+        "__progname";
+        "program_invocation_name";
+        "program_invocation_short_name";
+      ]
+
+  let unversioned name =
+    match String.lsplit2 name ~on:'@' with
+    | Some (name, _) -> name
+    | None -> name
+
+  (* the slots are in the GOT, while the reference of a copy relocation,
+     e.g., of stdin on x86-64, is the object itself, e.g., in .bss *)
+  let imported_data doc =
+    let got =
+      Ogre.(collect Query.(select @@ from Image.Scheme.named_region))
+      |> or_empty doc
+      |> Seq.filter ~f:(fun { Image.Scheme.info; _ } ->
+          String.is_prefix info ~prefix:".got")
+      |> Seq.to_list
+    in
+    let in_got addr =
+      List.exists got ~f:(fun { Image.Scheme.addr = lower; size; _ } ->
+          Int64.(lower <= addr && addr < lower + size))
+    in
+    Ogre.(collect Query.(select @@ from Image.Scheme.external_reference))
+    |> or_empty doc
+    |> Seq.filter ~f:(fun (addr, name) ->
+        Set.mem imported_data_objects (unversioned name) && in_got addr)
+
+  (* each imported data object, whose slot is null, gets a zeroed word
+     past the loaded memory, as a copy relocation gives it in the
+     program, so that the program reads its value through the slot *)
+  let setup_imported_data endp =
+    Machine.get () >>= fun proj ->
+    let target = Project.target proj in
+    let endian = endian_of_target target in
+    let width = Theory.Target.code_addr_size target in
+    let size = width / 8 in
+    let refs = Seq.to_list (imported_data (Project.specification proj)) in
+    Machine.List.fold refs ~init:([], endp) ~f:(fun (objects, next) (slot, _) ->
+        let slot = Word.of_int64 ~width slot in
+        read_word endian slot >>| fun value ->
+        if Word.is_zero value then (slot :: objects, Addr.nsucc next size)
+        else (objects, next))
+    >>= fun (objects, next) ->
+    if List.is_empty objects then Machine.return endp
+    else
+      let total = align_up (Word.to_int_exn Addr.(next - endp)) 0x1000 in
+      Mem.allocate ~readonly:false ~executable:false
+        ~generator:(Generator.static 0) endp total
+      >>= fun () ->
+      List.rev objects
+      |> List.mapi ~f:(fun i slot -> (Addr.nsucc endp (i * size), slot))
+      |> Machine.List.iter ~f:(fun (storage, slot) ->
+          Machine.ignore_m @@ save_word ~force:true endian storage slot)
+      >>| fun () -> Addr.nsucc endp total
+
   let irelative_relocations doc =
     Ogre.(collect Query.(select @@ from Image.Scheme.irelative_relocation))
     |> or_empty doc
@@ -533,6 +607,8 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     setup_registers () >>= fun () ->
     debug "setting up thread-local storage";
     setup_tls endp >>= fun endp ->
+    debug "setting up the imported data objects";
+    setup_imported_data endp >>= fun endp ->
     set_word "posix:endp" endp >>= fun () ->
     set_word "posix:brk" endp >>= fun () ->
     debug "initializing names";

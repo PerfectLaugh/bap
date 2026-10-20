@@ -59,7 +59,7 @@
   (let ((argc (read-word ptr_t stack_on_entry))
         (argv (ptr+1 ptr_t stack_on_entry))
         (main (read-word ptr_t (+ stinfo 4))))
-    (invoke-subroutine main argc argv)))
+    (exit-with (invoke-subroutine main argc argv))))
 
 
 (defun fini ()
