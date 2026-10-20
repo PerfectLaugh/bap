@@ -82,7 +82,7 @@ Once it is built, run `bap` and the other tools through `dune exec`, e.g., `dune
 | installing from an opam switch | `dune install --pkg=disabled` |
 | formatting the code, or checking it | `dune fmt`, or `dune build @fmt` |
 
-To build without network access, put [llvm-project-23.1.3.src.tar.xz][llvm-src] into the root of the repository before building; BAP verifies its checksum in both cases.
+To build without network access, put [llvm-project-23.1.4.src.tar.xz][llvm-src] into the root of the repository before building; BAP verifies its checksum in both cases.
 
 #### On Windows
 
@@ -246,7 +246,7 @@ Please, [contact us][contact-us] if you would like to become a sponsor or are se
 [opam-windows]: https://opam.ocaml.org/blog/opam-2-2-0-windows/
 [cmake]: https://cmake.org/download/
 [ninja]: https://ninja-build.org/
-[llvm-src]: https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.3/llvm-project-23.1.3.src.tar.xz
+[llvm-src]: https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/llvm-project-23.1.4.src.tar.xz
 [dune-install]: https://dune.build/install
 [dune-pkg]: https://dune.readthedocs.io/en/stable/tutorials/dune-package-management/index.html
 [contact-us]: https://www.cylab.cmu.edu/partners/index.html
