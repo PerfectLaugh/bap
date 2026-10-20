@@ -277,6 +277,8 @@ type request =
       (** the machine is killed, and a fork of the snapshot continues *)
   | Store of int64 * string
       (** the bytes are stored to the memory of Primus, see [Bap_emu.patch] *)
+  | Run of Primus.Machine.component
+      (** the component runs in the machine, see [Bap_emu.primus] *)
 
 type _ Effect.t +=
   | Paused : int64 * Primus.Machine.id -> request Effect.t
@@ -2119,6 +2121,17 @@ module Make (Machine : Primus.Machine.S) = struct
             | a, Some p -> Memory.protect ~lower:a ~upper:a p
             | _, None -> Machine.return ())
         in
+        serve pc
+    | Run component ->
+        (* the component sees the state of Unicorn, and its changes go
+           there *)
+        let* () = pull e in
+        let module Component = (val component : Primus.Machine.Component) in
+        let module Component = Component (Machine) in
+        let* () = Component.init () in
+        (* the component may set the registers without the observations
+           of the interpreter, e.g., with [Env.set] *)
+        let* () = push e in
         serve pc
     | Snapshot -> pull e >>= fun () -> snapshot id pc
     | Restore snapshot ->

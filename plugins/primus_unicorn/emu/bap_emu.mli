@@ -112,6 +112,34 @@ val patch : t -> int64 -> string -> unit
     Raises [Invalid_argument] as {!read} does, or if the program is not paused,
     e.g., in a hook. *)
 
+val primus : t -> Bap_primus.Std.Primus.Machine.component -> unit
+(** [primus emu component] runs the [init] of the [component] in the Primus
+    machine of the program, which is paused, or ended, so that the script uses
+    the whole API of Primus, e.g., its environment, memory, linker, Lisp, or the
+    taint tracker, whose results the script gets, e.g., with references, and
+    whose changes, e.g., of the registers and the memory, the program sees, when
+    it continues, e.g.,
+
+    {[
+    let rax = ref Word.b0 in
+    Bap_emu.primus emu
+      (module functor
+                (Machine : Primus.Machine.S)
+                ->
+                struct
+                  module Env = Primus.Env.Make (Machine)
+                  open Machine.Syntax
+
+                  let init () =
+                    Env.get (Var.create "RAX" reg64_t) >>| fun x ->
+                    rax := Primus.Value.to_word x
+                end)
+    ]}
+
+    The [init] may observe the program, e.g., with
+    [Machine.Observation.observe], as the components do, and its observers stay.
+    Raises [Invalid_argument], if the program is not paused, e.g., in a hook. *)
+
 val on_code : ?first:int64 -> ?last:int64 -> t -> (t -> int64 -> unit) -> unit
 (** [on_code emu f] calls [f emu addr] before each instruction from [first] to
     [last], inclusive, by default of all. *)
@@ -152,3 +180,54 @@ val restore : t -> snapshot -> unit
 (** [restore emu snapshot] drops the state of the paused program, which
     continues from the [snapshot], paused at its address. The hooks of the
     script stay. *)
+
+(** The taint of the values, that the program computes.
+
+    Primus tracks the taint, see the [bap-taint] library, as the program runs in
+    Unicorn, which leaves the instructions, that use the tainted values, to
+    Primus, so that the taint propagates through the computations, the loads and
+    the stores, e.g.,
+
+    {[
+      let emu = Bap_emu.create ~components:Bap_emu.Taint.components proj in
+      ignore (Bap_emu.run emu ~until:after_read);
+      Bap_emu.Taint.introduce emu ~kind:"input" (Mem (buf, len));
+      Bap_emu.Taint.on_jump emu (fun _ ~kinds dst -> ...);
+      Bap_emu.run emu
+    ]}
+
+    The functions, except the callbacks, run, when the program is paused, or
+    ended, see {!primus}. *)
+module Taint : sig
+  (** the place of the values, whose taint is introduced or queried *)
+  type place =
+    | Reg of string  (** the value of the register, e.g., [RAX] *)
+    | Mem of int64 * int
+        (** the values of the bytes of the memory from the address *)
+
+  val components : string list
+  (** the components of the system, that propagate the taint, by the
+      computations, which {!create} needs *)
+
+  val introduce : t -> kind:string -> place -> unit
+  (** [introduce emu ~kind place] taints the values of the [place] with a new
+      taint of the [kind], e.g., ["input"], the value of the register directly,
+      and the bytes of the memory indirectly, i.e., the values, that the program
+      loads from them. *)
+
+  val kinds : t -> place -> string list
+  (** [kinds emu place] the kinds of the taints of the values of the [place],
+      i.e., of the value of the register, or of the locations of the memory. *)
+
+  val is_tainted : t -> kind:string -> place -> bool
+  (** [is_tainted emu ~kind place] if the [place] has a taint of the [kind] *)
+
+  val sanitize : t -> kind:string -> place -> unit
+  (** [sanitize emu ~kind place] removes the taints of the [kind] of the
+      [place], from all values, that they taint. *)
+
+  val on_jump : t -> (t -> kinds:string list -> int64 -> unit) -> unit
+  (** [on_jump emu f] calls [f emu ~kinds dst] when the program jumps to [dst]
+      on a condition, that the taints of the [kinds] taint. The callback runs,
+      when the program runs, so it may only {!stop} it. *)
+end

@@ -674,6 +674,75 @@ let () =
           ]);
     (* the patched code stays, after the snapshot forks the machine, and
        after it is restored, which Bap_emu.write doesn't guarantee *)
+    (* the script reads and writes the state of the machine in Primus *)
+    case "emu/x86_64-linux-gnu-echo/primus" (fun env ->
+        let out =
+          script env "x86_64-linux-gnu-echo"
+            {|#require "bap-primus-unicorn.emu"
+open Bap.Std
+open Bap_primus.Std
+module Emu = Bap_emu
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  Bap_script.init ();
+  let emu = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true file) in
+  ignore (Emu.run emu ~until:0x40076bL);
+  let argc = ref Word.b0 in
+  let module Get (Machine : Primus.Machine.S) = struct
+    module Env = Primus.Env.Make (Machine)
+    module Value = Primus.Value.Make (Machine)
+    open Machine.Syntax
+
+    let init () =
+      Env.get (Var.create "RDI" reg64_t) >>= fun x ->
+      argc := Primus.Value.to_word x;
+      Value.of_int ~width:64 7 >>= Env.set (Var.create "RDI" reg64_t)
+  end in
+  Emu.primus emu (module Get);
+  Printf.printf "argc %s in Primus, %Ld in Unicorn\n%!" (Word.to_string !argc)
+    (Emu.reg emu "RDI")
+|}
+        in
+        contains env "reads and writes the registers" out
+          "argc 2:64u in Primus, 7 in Unicorn");
+    (* the script taints the input, which the code in Unicorn uses, and
+       sees the jumps, that it taints, as the Lisp does, see taint/ *)
+    case "emu/x86_64-linux-gnu-symexec-crc32/taint" (fun env ->
+        let input = write env "input" "abc\nabd\n" in
+        let out =
+          script env "x86_64-linux-gnu-symexec-crc32"
+            (Printf.sprintf
+               {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  Bap_script.init ~options:[ "--primus-lisp-channel-redirect=<stdin>:%s" ] ();
+  let emu = Emu.create ~components:Emu.Taint.components (Bap_script.project file) in
+  (match Emu.run emu ~until:0x80cL with
+   | Paused -> ()
+   | _ -> failwith "fgets didn't return");
+  let rbp = Emu.reg emu "RBP" in
+  Emu.Taint.introduce emu ~kind:"input" (Mem (Int64.sub rbp 0x40L, 16));
+  Emu.Taint.introduce emu ~kind:"input" (Mem (Int64.sub rbp 0x30L, 16));
+  Printf.printf "buf1 %%s, RAX %%s\n%%!"
+    (String.concat "," (Emu.Taint.kinds emu (Mem (Int64.sub rbp 0x40L, 4))))
+    (String.concat "," (Emu.Taint.kinds emu (Reg "RAX")));
+  let jumps = ref [] in
+  Emu.Taint.on_jump emu (fun _ ~kinds dst -> jumps := (dst, kinds) :: !jumps);
+  ignore (Emu.run emu);
+  Printf.printf "jumps:";
+  List.iter (fun (dst, kinds) ->
+      Printf.printf " %%Lx:%%s" dst (String.concat "," kinds)) (List.rev !jumps);
+  print_newline ()
+|}
+               input)
+        in
+        contains env "taints the buffer, not RAX" out "buf1 input, RAX \n";
+        contains env "sees the tainted jumps" out
+          "jumps: 752:input 752:input 752:input 752:input 7b8:input 752:input \
+           752:input 752:input 752:input 7b8:input 83b:input");
     case "emu/x86_64-linux-gnu-echo/patch" (fun env ->
         let out =
           script env "x86_64-linux-gnu-echo"

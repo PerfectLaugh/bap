@@ -90,11 +90,18 @@ let start (entry : Primus.Linker.name) =
     (Linker.exec entry >>| fun () -> Primus.Normal)
     (fun exn -> Machine.return (Primus.Exn exn))
   >>= fun status ->
-  match Effect.perform (X.Ended status) with
-  | X.Restore snapshot ->
-      Machine.current () >>= fun id ->
-      Machine.kill id >>= fun () -> Machine.switch snapshot
-  | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ -> Machine.return ()
+  let rec ended () =
+    match Effect.perform (X.Ended status) with
+    | X.Restore snapshot ->
+        Machine.current () >>= fun id ->
+        Machine.kill id >>= fun () -> Machine.switch snapshot
+    | X.Run component ->
+        let module Component = (val component : Primus.Machine.Component) in
+        let module Component = Component (Machine) in
+        Component.init () >>= ended
+    | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ -> Machine.return ()
+  in
+  ended ()
 
 let create ?(system = "bap:unicorn-executor") ?(components = []) ?(args = [])
     ?(envp = []) ?entry proj =
@@ -284,6 +291,13 @@ let patch t addr data =
   ignore (read t addr (String.length data) : string);
   resume t (X.Store (addr, data))
 
+(* the component runs in the machine, which is paused, or ended *)
+let primus t component =
+  match t.state with
+  | Suspended _ | Ended _ -> resume t (X.Run component)
+  | _ ->
+      invalid_arg "Bap_emu.primus: the program is not paused, e.g., in a hook"
+
 let on_code ?first ?last t f =
   installed (fun e ->
       ignore (Uc.on_code ?first ?last e.uc (fun addr _ -> f t addr)))
@@ -343,3 +357,128 @@ let arg t n =
   | None -> invalid_argf "Bap_emu.arg: the prototype of %s is unknown" name ()
 
 let exit_code _ = !X.exit_code
+
+(* The taint of the values, that the program computes, which Primus
+   tracks, see [Bap_taint], as the program runs in Unicorn, which leaves
+   the code, that uses the tainted values, to Primus. *)
+module Taint = struct
+  open Bap_core_theory
+  module T = Bap_taint.Std.Taint
+
+  type place = Reg of string | Mem of int64 * int
+
+  let components =
+    [ "bap:propagate-taint-by-computation"; "bap:select-default-taint-policy" ]
+
+  (* the variable of the register of the target *)
+  let var target name =
+    match Theory.Target.var target name with
+    | Some v -> Var.reify v
+    | None -> invalid_argf "Bap_emu.Taint: unknown register %s" name ()
+
+  let introduce t ~kind place =
+    let module Introduce (Machine : Primus.Machine.S) = struct
+      open Machine.Syntax
+      module Env = Primus.Env.Make (Machine)
+      module Value = Primus.Value.Make (Machine)
+      module Kind = T.Kind.Make (Machine)
+      module Tracker = T.Tracker.Make (Machine)
+
+      let init () =
+        Kind.create kind >>= fun kind ->
+        match place with
+        | Reg name ->
+            Machine.gets Project.target >>= fun target ->
+            Env.get (var target name) >>= fun v ->
+            Tracker.new_direct v kind >>| ignore
+        | Mem (addr, len) ->
+            Machine.gets Project.target >>= fun target ->
+            let width = Theory.Target.code_addr_size target in
+            Value.of_word (Word.of_int64 ~width addr) >>= fun addr ->
+            Value.of_int ~width len >>= fun len ->
+            Tracker.new_indirect ~addr ~len kind >>| ignore
+    end in
+    primus t (module Introduce)
+
+  (* the kinds of the taints of the place *)
+  let kinds t place =
+    let result = ref [] in
+    let module Kinds (Machine : Primus.Machine.S) = struct
+      open Machine.Syntax
+      module Env = Primus.Env.Make (Machine)
+      module Value = Primus.Value.Make (Machine)
+      module Kind = T.Kind.Make (Machine)
+      module Object = T.Object.Make (Machine)
+      module Tracker = T.Tracker.Make (Machine)
+
+      let names objects =
+        Machine.List.map (Set.to_list objects) ~f:(fun obj ->
+            Object.kind obj >>= Kind.name)
+
+      let init () =
+        Machine.gets Project.target >>= fun target ->
+        (match place with
+          | Reg name ->
+              Env.get (var target name) >>= fun v ->
+              Tracker.lookup v T.Rel.direct >>= names
+          | Mem (addr, len) ->
+              let width = Theory.Target.code_addr_size target in
+              Machine.List.map (List.init len ~f:Fn.id) ~f:(fun i ->
+                  Value.of_word (Word.of_int64 ~width Int64.(addr + of_int i))
+                  >>= fun addr -> Tracker.lookup addr T.Rel.indirect >>= names)
+              >>| List.concat)
+        >>| fun kinds ->
+        result := List.dedup_and_sort kinds ~compare:String.compare
+    end in
+    primus t (module Kinds);
+    !result
+
+  let is_tainted t ~kind place =
+    List.mem (kinds t place) kind ~equal:String.equal
+
+  let sanitize t ~kind place =
+    let module Sanitize (Machine : Primus.Machine.S) = struct
+      open Machine.Syntax
+      module Env = Primus.Env.Make (Machine)
+      module Value = Primus.Value.Make (Machine)
+      module Kind = T.Kind.Make (Machine)
+      module Tracker = T.Tracker.Make (Machine)
+
+      let init () =
+        Kind.create kind >>= fun kind ->
+        Machine.gets Project.target >>= fun target ->
+        match place with
+        | Reg name ->
+            Env.get (var target name) >>= fun v ->
+            Tracker.sanitize v T.Rel.direct kind
+        | Mem (addr, len) ->
+            let width = Theory.Target.code_addr_size target in
+            Machine.List.iter (List.init len ~f:Fn.id) ~f:(fun i ->
+                Value.of_word (Word.of_int64 ~width Int64.(addr + of_int i))
+                >>= fun addr -> Tracker.sanitize addr T.Rel.indirect kind)
+    end in
+    primus t (module Sanitize)
+
+  let on_jump t f =
+    let module Observe (Machine : Primus.Machine.S) = struct
+      open Machine.Syntax
+      module Kind = T.Kind.Make (Machine)
+      module Object = T.Object.Make (Machine)
+      module Tracker = T.Tracker.Make (Machine)
+
+      let jumped (cond, dst) =
+        Tracker.lookup cond T.Rel.direct >>= fun objects ->
+        if Set.is_empty objects then Machine.return ()
+        else
+          Machine.List.map (Set.to_list objects) ~f:(fun obj ->
+              Object.kind obj >>= Kind.name)
+          >>| fun kinds ->
+          f t
+            ~kinds:(List.dedup_and_sort kinds ~compare:String.compare)
+            (Bitvec.to_int64 (Word.to_bitvec (Primus.Value.to_word dst)))
+
+      let init () =
+        Machine.Observation.observe Primus.Interpreter.jumping jumped
+    end in
+    primus t (module Observe)
+end

@@ -11,4 +11,5 @@
   bap-primus
   bap-primus-unicorn.plugin
   bap-primus-unicorn.unicorn
+  bap-taint
   core))
