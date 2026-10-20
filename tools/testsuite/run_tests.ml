@@ -396,6 +396,84 @@ let () =
         lacks env "loads the plugins" out "Failed to load";
         sequence env out
           [ ("stops", "RAX = 9e7dd6e4"); ("runs the program", "1635920155") ]);
+    (* the machines take Unicorn from each other, while their bytes are
+       in Unicorn, see Primus.Memory.Backing, and print the same *)
+    case "script/unicorn/fork" (fun env ->
+        let out =
+          bap ~timeout:300. env
+            [
+              "script";
+              write env "script.ml"
+                {|#require "bap-primus, monads"
+
+open Core
+open Bap.Std
+open Bap_primus.Std
+
+(* forks the machine at the third putchar, and then switches between
+   the parent and the child at each putchar, so that they take Unicorn
+   from each other in the middle of their runs *)
+module Fork (Machine : Primus.Machine.S) = struct
+  open Machine.Syntax
+
+  let calls = ref 0
+  let machines = ref []
+
+  let switch () =
+    Machine.forks () >>= fun alive ->
+    Machine.current () >>= fun self ->
+    let others =
+      List.filter !machines ~f:(fun id ->
+          (not (Monads.Std.Monad.State.Multi.Id.equal id self))
+          && Seq.exists alive ~f:(Monads.Std.Monad.State.Multi.Id.equal id))
+    in
+    match others with
+    | other :: _ -> Machine.switch other
+    | [] -> Machine.return ()
+
+  let call (name, _) =
+    if String.equal name "putchar" then begin
+      incr calls;
+      if !calls = 3 then
+        Machine.current () >>= fun parent ->
+        Machine.fork () >>= fun () ->
+        Machine.current () >>= fun self ->
+        if Monads.Std.Monad.State.Multi.Id.equal self parent then Machine.return ()
+        else begin
+          machines := [ parent; self ];
+          Machine.return ()
+        end
+      else if !calls > 3 then switch ()
+      else Machine.return ()
+    end
+    else Machine.return ()
+
+  let init () = Primus.Linker.Trace.call >>> call
+end
+
+let () =
+  let file = List.hd_exn (Bap_script.args ()) in
+  Bap_script.init
+    ~options:
+      [
+        "--run-systems=bap:unicorn-executor";
+        "--run-components=script:fork";
+        "--run-argv=hello,cruel,world";
+      ]
+    ();
+  Primus.Components.register_generic ~package:"script" "fork" (module Fork);
+  ignore (Bap_script.run_pass "run" (Bap_script.project file))
+|};
+              path data "bin/x86_64-linux-gnu-echo";
+            ]
+        in
+        check env "exits" (out.status = Exited 0);
+        sequence env out
+          [
+            ("forks the machine", "helllloo");
+            ("switches the machines", "ccrruueell");
+            ("runs both machines to the end", "ccoouurrssee");
+          ]);
     case "script/error" (fun env ->
         let out = script env "let () =\n  print_endline 42\n" in
         check env "fails" (out.status = Exited 1);

@@ -8,8 +8,8 @@
 
    - the memory pages are copied from Primus when Unicorn faults on
      them, the changed bytes of the pages, that the code wrote, are
-     copied back when Unicorn stops, and the bytes that Primus stores
-     meanwhile are copied to Unicorn;
+     copied back when Primus accesses them, see [Primus.Memory.Backing],
+     and the bytes that Primus stores are copied to Unicorn;
 
    - the code that Primus links instead of the program, e.g., the Lisp
      stubs, stops Unicorn at its address and is called by the Primus
@@ -65,15 +65,22 @@ type frame = { ret : int64; sp : int64 }
    may allocate later, so the page is dropped, if it does. A writable
    page is read-only in Unicorn, until the code writes it, which makes
    it dirty and writable, see [written_page], so that only the dirty
-   pages are copied back. A dirty page stays writable, while the code
-   changes it between the stops, as changing the protection costs more
-   than comparing the page, e.g., of the stack *)
+   pages are copied back. A dirty page is pending, see [Make.pending],
+   until Primus fetches it, which makes it clean again, if it didn't
+   change, so that a dirty page stays writable, while the code changes
+   it, as changing the protection costs more than comparing the page,
+   e.g., of the stack *)
 type page = {
   snapshot : Bytes.t option;
   holes : (int * int) list;
   perm : Uc.Perm.t;  (** the access to the page in Primus *)
   mutable dirty : bool;
+  mutable fetched : int;  (** the run of Unicorn, after which it is fetched *)
 }
+
+(* the pending page of a machine, that doesn't run in Unicorn, with
+   the contents that the machine has in Unicorn and in Primus *)
+type parked = { data : Bytes.t; known : Bytes.t }
 
 type engine = {
   uc : Uc.t;
@@ -103,6 +110,7 @@ type engine = {
   mutable unchecked : (int64 * (int * int) list) list;
       (** the pages with holes, which Primus may have allocated *)
   mutable dirty : int64 list;  (** the dirty pages *)
+  mutable runs : int;  (** the number of the runs of Unicorn *)
   mutable written : var list;
       (** the registers that Primus has written since Unicorn stopped *)
   mutable broken : bool;
@@ -165,6 +173,11 @@ let restored =
 
 (* the engine of the machines *)
 let active : engine option ref = ref None
+
+(* the pending pages of the machines, that don't run in Unicorn, see
+   [Make.park] *)
+let parked : parked Int64.Table.t Monads.Std.Monad.State.Multi.Id.Table.t =
+  Monads.Std.Monad.State.Multi.Id.Table.create ()
 
 (* the arguments of [create] *)
 let recipe : (Theory.Target.t * int64 list * (int64 * string) list) option ref =
@@ -421,6 +434,7 @@ let create target ~foreign ~externals =
       written = [];
       unchecked = [];
       dirty = [];
+      runs = 0;
       broken = false;
       trampolines = Int64.Table.create ();
       slots = Int64.Table.create ();
@@ -503,6 +517,133 @@ let create target ~foreign ~externals =
       false);
   e
 
+let is_owner e id =
+  match e.owner with
+  | Some owner -> Monads.Std.Monad.State.Multi.Id.equal owner id
+  | None -> false
+
+(* the runs of the bytes of [data], that differ from [known], with their
+   addresses from [base] *)
+let changes base data known =
+  let n = Bytes.length data in
+  let differs i = not (Char.equal (Bytes.get data i) (Bytes.get known i)) in
+  let rec runs i acc =
+    if i = n then List.rev acc
+    else if not (differs i) then runs (i + 1) acc
+    else
+      let rec last j =
+        if j + 1 < n && differs (j + 1) then last (j + 1) else j
+      in
+      let j = last i in
+      runs (j + 1)
+        (( Int64.(base + of_int i),
+           Bytes.To_string.sub data ~pos:i ~len:(j - i + 1) )
+        :: acc)
+  in
+  runs 0 []
+
+let read_page e page =
+  Bytes.of_string (Uc.mem_read e.uc page (Int64.to_int_exn page_size))
+
+(* the dirty page, which Unicorn may have changed since it was fetched *)
+let pending e (p : page) = p.dirty && p.fetched <> e.runs
+
+(* the changed bytes of the dirty pages, that Unicorn may have changed *)
+let pending_changes e =
+  List.concat_map e.dirty ~f:(fun page ->
+      match Hashtbl.find e.pages page with
+      | Some ({ snapshot = Some known; _ } as p) when pending e p ->
+          changes page (read_page e page) known
+      | _ -> [])
+
+(* the changed bytes of the page, which Primus fetches, see [backing],
+   after which the page is clean, if it didn't change *)
+let fetch_page e page =
+  match Hashtbl.find e.pages page with
+  | Some ({ snapshot = Some known; _ } as p) when pending e p ->
+      let data = read_page e page in
+      let changed = changes page data known in
+      Bytes.blit ~src:data ~src_pos:0 ~dst:known ~dst_pos:0
+        ~len:(Bytes.length data);
+      p.fetched <- e.runs;
+      if List.is_empty changed then begin
+        p.dirty <- false;
+        e.dirty <- List.filter e.dirty ~f:(fun x -> Int64.(x <> page));
+        Uc.mem_protect e.uc page page_size Uc.Perm.(p.perm - write)
+      end;
+      changed
+  | _ -> []
+
+let parked_changes pages =
+  Hashtbl.fold pages ~init:[] ~f:(fun ~key ~data:{ data; known } acc ->
+      changes key data known @ acc)
+
+(* The memory of Primus, whose pages are in Unicorn, or are parked. The
+   bytes of the machine, that runs in Unicorn, are fetched from it, and
+   the bytes, that Primus stores, are copied to it, as they are to the
+   copied pages. *)
+let backing memory : Primus.Memory.Backing.t =
+  let words e =
+    List.map ~f:(fun (addr, data) ->
+        (Word.of_int64 ~width:(e.bytes * 8) addr, data))
+  in
+  {
+    memory;
+    pending =
+      (fun id addr ->
+        match !active with
+        | None -> false
+        | Some e -> (
+            let page = page_of (int64_of_word addr) in
+            if is_owner e id then
+              match Hashtbl.find e.pages page with
+              | Some p -> pending e p
+              | None -> false
+            else
+              match Hashtbl.find parked id with
+              | Some pages -> Hashtbl.mem pages page
+              | None -> false));
+    fetch =
+      (fun id addr ->
+        match !active with
+        | None -> []
+        | Some e ->
+            let page = page_of (int64_of_word addr) in
+            words e
+              (if is_owner e id then fetch_page e page
+               else
+                 match Hashtbl.find parked id with
+                 | None -> []
+                 | Some pages -> (
+                     match Hashtbl.find_and_remove pages page with
+                     | Some { data; known } -> changes page data known
+                     | None -> [])));
+    fetch_all =
+      (fun id ->
+        match !active with
+        | None -> []
+        | Some e ->
+            words e
+              (if is_owner e id then List.concat_map e.dirty ~f:(fetch_page e)
+               else
+                 match Hashtbl.find_and_remove parked id with
+                 | Some pages -> parked_changes pages
+                 | None -> []));
+    stored =
+      (fun id addr data ->
+        match !active with
+        | Some e when is_owner e id ->
+            let addr = int64_of_word addr in
+            String.iteri data ~f:(fun i c ->
+                let addr = Int64.(addr + of_int i) in
+                match Hashtbl.find e.pages (page_of addr) with
+                | Some { snapshot = Some known; _ } ->
+                    Bytes.set known Int64.(to_int_exn (addr - page_of addr)) c;
+                    Uc.mem_write e.uc addr (String.of_char c)
+                | _ -> ())
+        | _ -> ());
+  }
+
 module Make (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
   open Machine.Let
@@ -518,9 +659,7 @@ module Make (Machine : Primus.Machine.S) = struct
 
   let owns e =
     let+ id = Machine.current () in
-    match e.owner with
-    | Some owner -> Monads.Std.Monad.State.Multi.Id.equal owner id
-    | None -> false
+    is_owner e id
 
   (* drops the pages, which are copied anew *)
   let forget e =
@@ -530,14 +669,42 @@ module Make (Machine : Primus.Machine.S) = struct
     e.dirty <- [];
     e.written <- []
 
+  (* the pending pages of the owner, which another machine claims, are
+     parked, until the owner fetches them, or claims Unicorn again *)
+  let park e =
+    Option.iter e.owner ~f:(fun owner ->
+        let pages =
+          Hashtbl.find_or_add parked owner ~default:Int64.Table.create
+        in
+        List.iter e.dirty ~f:(fun page ->
+            match Hashtbl.find e.pages page with
+            | Some ({ snapshot = Some known; _ } as p) when pending e p ->
+                let data = read_page e page in
+                if not (Bytes.equal data known) then
+                  Hashtbl.set pages ~key:page
+                    ~data:{ data; known = Bytes.copy known }
+            | _ -> ()))
+
+  let store_changes e =
+    Machine.List.iter ~f:(fun (addr, data) ->
+        Memory.store_bytes (word e addr) data)
+
+  (* the parked pages of the machine go to its memory *)
+  let unpark e id =
+    match Hashtbl.find_and_remove parked id with
+    | None -> Machine.return ()
+    | Some pages -> store_changes e (parked_changes pages)
+
   (* the pages and the registers of another machine are not valid *)
   let claim e =
     let* owned = owns e in
     if owned then Machine.return false
     else
-      let+ id = Machine.current () in
+      let* id = Machine.current () in
+      park e;
       forget e;
       e.owner <- Some id;
+      let+ () = unpark e id in
       true
 
   let union (p : Primus.Memory.protection) (q : Primus.Memory.protection) :
@@ -594,6 +761,7 @@ module Make (Machine : Primus.Machine.S) = struct
           holes;
           perm;
           dirty = false;
+          fetched = 0;
         }
 
   let ensure_page e addr =
@@ -675,65 +843,24 @@ module Make (Machine : Primus.Machine.S) = struct
     | _ -> ());
     Machine.return ()
 
-  (* copies the changed bytes of the page to Primus, if any changed *)
-  let store_page e page snapshot =
-    let data = Uc.mem_read e.uc page (Int64.to_int_exn page_size) in
-    if String.equal data (Bytes.unsafe_to_string snapshot) then
-      Machine.return false
-    else
-      let base = word e page in
-      (* the runs of the changed bytes *)
-      let rec runs i acc =
-        if i = String.length data then List.rev acc
-        else if Char.equal data.[i] (Bytes.get snapshot i) then runs (i + 1) acc
-        else
-          let rec last j =
-            if
-              j + 1 < String.length data
-              && not (Char.equal data.[j + 1] (Bytes.get snapshot (j + 1)))
-            then last (j + 1)
-            else j
-          in
-          let j = last i in
-          runs (j + 1) ((i, j) :: acc)
-      in
-      let changed = runs 0 [] in
-      Bytes.From_string.blit ~src:data ~src_pos:0 ~dst:snapshot ~dst_pos:0
-        ~len:(String.length data);
-      let+ () =
-        Machine.List.iter changed ~f:(fun (i, j) ->
-            Memory.store_bytes
-              Word.(base ++ i)
-              (String.sub data ~pos:i ~len:(j - i + 1)))
-      in
-      true
+  (* copies the pending page to Primus *)
+  let sync_page e page = store_changes e (fetch_page e page)
 
-  (* copies the registers and the dirty pages to Primus, the pages that
-     didn't change are clean again, and checks the writable pages, that
-     Primus may extend, see [page] *)
+  (* copies the pending pages to Primus *)
+  let sync e = Machine.List.iter e.dirty ~f:(sync_page e)
+
+  (* copies the registers to Primus, the dirty pages are fetched, when
+     Primus accesses them, and checks the writable pages, that Primus
+     may extend, see [page] *)
   let pull e =
-    let* () = pull_regs e in
-    let* dirty =
-      Machine.List.filter e.dirty ~f:(fun page ->
-          match Hashtbl.find e.pages page with
-          | Some ({ snapshot = Some snapshot; perm; _ } as p) ->
-              let+ changed = store_page e page snapshot in
-              if not changed then begin
-                p.dirty <- false;
-                Uc.mem_protect e.uc page page_size Uc.Perm.(perm - write)
-              end;
-              changed
-          | _ -> Machine.return false)
-    in
-    e.dirty <- dirty;
+    let+ () = pull_regs e in
     (* a page, which Primus may change, is checked before Unicorn runs *)
     e.unchecked <-
       Hashtbl.fold e.pages ~init:e.unchecked ~f:(fun ~key ~data acc ->
           match data with
           | { snapshot = Some _; holes = _ :: _ as holes; _ } ->
               (key, holes) :: acc
-          | _ -> acc);
-    Machine.return ()
+          | _ -> acc)
 
   (* drops the pages, in which Primus has allocated memory, see [page] *)
   let check_pages e =
@@ -750,53 +877,71 @@ module Make (Machine : Primus.Machine.S) = struct
               in
               first || last)
         in
-        if allocated && Hashtbl.mem e.pages page then (
+        if allocated && Hashtbl.mem e.pages page then begin
+          let+ () = sync_page e page in
           Uc.mem_unmap e.uc page page_size;
-          Hashtbl.remove e.pages page);
-        Machine.return ())
+          Hashtbl.remove e.pages page
+        end
+        else Machine.return ())
 
-  (* the pages, whose protection changes, are copied anew *)
+  (* the pages, whose protection changes, are copied anew, after their
+     changes go to Primus *)
   let protected (lower, upper, _) =
     match !active with
     | None -> Machine.return ()
-    | Some e ->
-        let+ id = Machine.current () in
-        let owned =
-          match e.owner with
-          | Some owner -> Monads.Std.Monad.State.Multi.Id.equal owner id
-          | None -> false
+    | Some e -> (
+        let first = page_of (int64_of_word lower)
+        and last = page_of (int64_of_word upper) in
+        let inside page =
+          Int64.(page >= first && page <= last)
+          || Int64.(first > last && (page >= first || page <= last))
         in
-        if owned then
-          let first = page_of (int64_of_word lower)
-          and last = page_of (int64_of_word upper) in
-          Hashtbl.filter_keys_inplace e.pages ~f:(fun page ->
-              let inside =
-                Int64.(page >= first && page <= last)
-                || Int64.(first > last && (page >= first || page <= last))
-              in
-              if inside then Uc.mem_unmap e.uc page page_size;
-              not inside)
+        let* id = Machine.current () in
+        if is_owner e id then
+          let pages = Hashtbl.keys e.pages |> List.filter ~f:inside in
+          Machine.List.iter pages ~f:(fun page ->
+              let+ () = sync_page e page in
+              Uc.mem_unmap e.uc page page_size;
+              Hashtbl.remove e.pages page)
+        else
+          match Hashtbl.find parked id with
+          | None -> Machine.return ()
+          | Some pages ->
+              Hashtbl.keys pages |> List.filter ~f:inside
+              |> Machine.List.iter ~f:(fun page ->
+                  match Hashtbl.find_and_remove pages page with
+                  | Some { data; known } ->
+                      store_changes e (changes page data known)
+                  | None -> Machine.return ()))
 
-  (* the bytes that Primus stores go to the copied pages *)
-  let stored (addr, x) =
+  (* the fork has the bytes, that its parent has in Unicorn, or parked *)
+  let forked (parent, _) =
     match !active with
     | None -> Machine.return ()
-    | Some e -> (
-        let+ id = Machine.current () in
-        let owned =
-          match e.owner with
-          | Some owner -> Monads.Std.Monad.State.Multi.Id.equal owner id
-          | None -> false
-        in
-        let addr = int64_of_word (Primus.Value.to_word addr) in
-        match Hashtbl.find e.pages (page_of addr) with
-        | Some { snapshot = Some snapshot; _ } when owned ->
-            let c =
-              Char.of_int_exn (Word.to_int_exn (Primus.Value.to_word x))
-            in
-            Bytes.set snapshot Int64.(to_int_exn (addr - page_of addr)) c;
-            Uc.mem_write e.uc addr (String.of_char c)
-        | _ -> ())
+    | Some e ->
+        store_changes e
+          (if is_owner e parent then pending_changes e
+           else
+             match Hashtbl.find parked parent with
+             | Some pages -> parked_changes pages
+             | None -> [])
+
+  let killed id =
+    Hashtbl.remove parked id;
+    Machine.return ()
+
+  (* the memory of the machine, that finishes the system, is in Primus *)
+  let finished () =
+    match !active with
+    | None -> Machine.return ()
+    | Some e ->
+        let* id = Machine.current () in
+        if is_owner e id then sync e else unpark e id
+
+  let system_stopped _ =
+    Primus.Memory.Backing.set None;
+    Hashtbl.clear parked;
+    Machine.return ()
 
   (* the engine, which is created anew, if it is broken, after its state
      goes to Primus *)
@@ -804,7 +949,9 @@ module Make (Machine : Primus.Machine.S) = struct
     match (!active, !recipe) with
     | Some e, Some (target, foreign, externals) when e.broken ->
         let* owned = owns e in
-        let* () = if owned then pull e else Machine.return () in
+        let* () =
+          if owned then pull e >>= fun () -> sync e else Machine.return (park e)
+        in
         Uc.close e.uc;
         let e = create target ~foreign ~externals in
         active := Some e;
@@ -872,8 +1019,9 @@ module Make (Machine : Primus.Machine.S) = struct
           else Machine.raise (Primus.Interpreter.Segmentation_fault a)
       | _ -> Interpreter.load v LittleEndian `r8 >>| ignore
     in
+    let+ () = sync_page e (page_of addr) in
     drop_page e (page_of addr);
-    Machine.return `Continue
+    `Continue
 
   (* the first write of the code to a writable page, which is read-only
      in Unicorn, until it is dirty *)
@@ -967,6 +1115,7 @@ module Make (Machine : Primus.Machine.S) = struct
       let rec dirty page =
         if Int64.(page <= last) then begin
           ignore (written_page e page : bool);
+          Option.iter (Hashtbl.find e.pages page) ~f:(fun p -> p.fetched <- -1);
           dirty Int64.(page + page_size)
         end
       in
@@ -1097,7 +1246,11 @@ module Make (Machine : Primus.Machine.S) = struct
      calls the function, that nothing defines, by its address *)
   let call_foreign e addr =
     let* () = pull e in
-    let* frame = frame e in
+    let* frame =
+      match frame_uc e with
+      | frame -> Machine.return frame
+      | exception (Native.Missing _ | Native.Denied) -> frame e
+    in
     let name =
       match Hashtbl.find e.trampolines addr with
       | Some name -> `symbol name
@@ -1256,6 +1409,7 @@ module Make (Machine : Primus.Machine.S) = struct
         None
       with Uc.Error (_, msg) -> Some msg
     in
+    e.runs <- e.runs + 1;
     match e.reason with
     | Some (Fault (Write_prot, addr)) when written_page e addr ->
         let pc = current_pc e in
@@ -1333,7 +1487,11 @@ module Make (Machine : Primus.Machine.S) = struct
     in
     let* e = engine () in
     let* id = Machine.current () in
+    (* the memory of the machine is replaced, and the parked pages of
+       another machine, that owns Unicorn, are kept *)
+    if not (is_owner e id) then park e;
     forget e;
+    Hashtbl.remove parked id;
     e.owner <- Some id;
     let* () = map_code e in
     let* () = push e in
@@ -1572,6 +1730,9 @@ module Loader (Machine : Primus.Machine.S) = struct
     | exception Unsupported msg -> Machine.raise (Unicorn_failure msg)
     | e ->
         active := Some e;
+        Hashtbl.clear parked;
+        Primus.Memory.Backing.set
+          (Some (backing (Theory.Var.name (Theory.Target.data target))));
         Machine.return ()
 
   let init () =
@@ -1590,7 +1751,10 @@ module Loader (Machine : Primus.Machine.S) = struct
       [
         link_program;
         Primus.System.init >>> create_engine;
-        Primus.Interpreter.stored >>> Exec.stored;
+        Primus.Machine.fork >>> Exec.forked;
+        Primus.Machine.kill >>> Exec.killed;
+        Primus.System.fini >>> Exec.finished;
+        Primus.System.stop >>> Exec.system_stopped;
         Primus.Interpreter.written >>> Exec.written;
         Primus.Memory.protected >>> Exec.protected;
         Primus.Interpreter.clock >>> Exec.clocked;

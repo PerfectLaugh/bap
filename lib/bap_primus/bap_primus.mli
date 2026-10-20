@@ -2353,6 +2353,41 @@ module Std : sig
 
       (** [Make(Machine)] lifts the memory interface into the [Machine] monad.
       *)
+      (** The memory, whose bytes are elsewhere, e.g., in an emulator, until
+          a machine accesses them.
+
+          A machine fetches the bytes, which are pending, before it loads or
+          stores them, takes the snapshot of its memory, or loads or stores
+          the bytes of a range, and the backing learns the bytes that the
+          machine stores, except the fetched ones, so that it may keep its
+          copy of them. Only the memory, whose name is [memory], is backed,
+          and its data are bytes.
+
+          The backing is global, so a component, that sets it, unsets it,
+          when its system stops.
+
+          @since 2.6.0 *)
+      module Backing : sig
+        type t = {
+          memory : string;  (** the name of the backed memory *)
+          pending : Machine.id -> addr -> bool;
+              (** [pending id addr] if the byte at [addr] of the machine [id]
+                  is elsewhere *)
+          fetch : Machine.id -> addr -> (addr * string) list;
+              (** [fetch id addr] the bytes, at least the byte at [addr], that
+                  the machine [id] stores, as they are, after which they are
+                  not pending *)
+          fetch_all : Machine.id -> (addr * string) list;
+              (** [fetch_all id] all pending bytes of the machine [id] *)
+          stored : Machine.id -> addr -> string -> unit;
+              (** [stored id addr data] the machine [id] has stored the bytes
+                  [data] from [addr] *)
+        }
+
+        val set : t option -> unit
+        (** [set backing] backs the memory, or stops backing it with [None] *)
+      end
+
       module Make (Machine : Machine.S) : sig
         val switch : memory -> unit Machine.t
         (** [switch memory] switches the memory module to [memory].

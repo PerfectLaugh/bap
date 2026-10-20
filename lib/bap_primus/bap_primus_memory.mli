@@ -26,6 +26,18 @@ module Descriptor : sig
   include Comparable.S with type t := memory
 end
 
+module Backing : sig
+  type t = {
+    memory : string;
+    pending : id -> addr -> bool;
+    fetch : id -> addr -> (addr * string) list;
+    fetch_all : id -> (addr * string) list;
+    stored : id -> addr -> string -> unit;
+  }
+
+  val set : t option -> unit
+end
+
 module Snapshot : sig
   type t [@@deriving bin_io]
 end

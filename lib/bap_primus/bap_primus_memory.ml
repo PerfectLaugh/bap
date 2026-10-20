@@ -77,6 +77,19 @@ type state = {
 
 type t = { curr : Descriptor.t; mems : state Descriptor.Map.t }
 
+module Backing = struct
+  type t = {
+    memory : string;
+    pending : id -> addr -> bool;
+    fetch : id -> addr -> (addr * string) list;
+    fetch_all : id -> (addr * string) list;
+    stored : id -> addr -> string -> unit;
+  }
+
+  let current : t option ref = ref None
+  let set backing = current := backing
+end
+
 let sexp_of_word w = Sexp.Atom (asprintf "%a" Word.pp_hex w)
 
 let sexp_of_dynamic { lower; upper; value } =
@@ -560,10 +573,72 @@ module Make (Machine : Machine) = struct
 
   let add_text mem = map mem ~readonly:true ~executable:true
   let add_data mem = map mem ~readonly:false ~executable:false
-  let get addr = get_curr >>= read addr
-  let set addr value = get_curr >>= write addr value >>= put_curr
-  let set_never_fail addr value = get_curr >>| set_value addr value >>= put_curr
-  let del addr = update @@ fun s -> { s with values = Map.remove s.values addr }
+
+  let store_bytes_unbacked addr data =
+    Value.of_words
+      (Array.init (String.length data) ~f:(fun i ->
+           Word.of_int ~width:8 (Char.to_int data.[i])))
+    >>= fun xs ->
+    update @@ fun s ->
+    let values =
+      Array.foldi xs ~init:s.values ~f:(fun i values x ->
+          Map.set values ~key:(Addr.nsucc addr i) ~data:x)
+    in
+    { s with values }
+
+  (* calls [f] with the backing of the current memory, if it has one *)
+  let backing f =
+    match !Backing.current with
+    | None -> Machine.return ()
+    | Some b ->
+        Machine.Local.get state >>= fun { curr } ->
+        if String.equal curr.name b.memory then
+          Machine.current () >>= fun id -> f b id
+        else Machine.return ()
+
+  let store_fetched =
+    Machine.List.iter ~f:(fun (addr, data) -> store_bytes_unbacked addr data)
+
+  (* the bytes from [addr], that the backing has, are stored, before
+     the machine accesses them *)
+  let fetch addr len =
+    backing @@ fun b id ->
+    let rec loop i =
+      if i = len then Machine.return ()
+      else
+        let a = Addr.nsucc addr i in
+        if b.pending id a then
+          store_fetched (b.fetch id a) >>= fun () -> loop (i + 1)
+        else loop (i + 1)
+    in
+    loop 0
+
+  let stored addr data =
+    backing @@ fun b id -> Machine.return (b.stored id addr data)
+
+  let stored_value addr value =
+    backing @@ fun b id ->
+    let x = Value.to_word value in
+    if Word.bitwidth x = 8 then
+      b.stored id addr (String.of_char (Char.of_int_exn (Word.to_int_exn x)));
+    Machine.return ()
+
+  let get addr = fetch addr 1 >>= fun () -> get_curr >>= read addr
+
+  let set addr value =
+    fetch addr 1 >>= fun () ->
+    get_curr >>= write addr value >>= put_curr >>= fun () ->
+    stored_value addr value
+
+  let set_never_fail addr value =
+    fetch addr 1 >>= fun () ->
+    get_curr >>| set_value addr value >>= put_curr >>= fun () ->
+    stored_value addr value
+
+  let del addr =
+    fetch addr 1 >>= fun () ->
+    update @@ fun s -> { s with values = Map.remove s.values addr }
+
   let load addr = get addr >>| Value.to_word
   let store addr value = Value.of_word value >>= set addr
   let store_never_fail addr value = Value.of_word value >>= set_never_fail addr
@@ -617,6 +692,7 @@ module Make (Machine : Machine) = struct
 
   let load_bytes addr len =
     check_bytes "load_bytes" >>= fun () ->
+    fetch addr len >>= fun () ->
     get_curr >>= fun s ->
     let bytes = Array.create ~len None in
     let rec loop i s =
@@ -637,16 +713,8 @@ module Make (Machine : Machine) = struct
 
   let store_bytes addr data =
     check_bytes "store_bytes" >>= fun () ->
-    Value.of_words
-      (Array.init (String.length data) ~f:(fun i ->
-           Word.of_int ~width:8 (Char.to_int data.[i])))
-    >>= fun xs ->
-    update @@ fun s ->
-    let values =
-      Array.foldi xs ~init:s.values ~f:(fun i values x ->
-          Map.set values ~key:(Addr.nsucc addr i) ~data:x)
-    in
-    { s with values }
+    fetch addr (String.length data) >>= fun () ->
+    store_bytes_unbacked addr data >>= fun () -> stored addr data
 
   let protect ~lower ~upper protection =
     update (fun s ->
@@ -656,6 +724,7 @@ module Make (Machine : Machine) = struct
     Machine.Observation.make on_protected (lower, upper, protection)
 
   let snapshot =
+    (backing @@ fun b id -> store_fetched (b.fetch_all id)) >>= fun () ->
     Machine.Local.get state >>| fun { curr; mems } ->
     {
       Snapshot.curr;
