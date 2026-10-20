@@ -82,12 +82,12 @@ let paused t = match t.state with Suspended _ -> true | _ -> false
 (* the program runs from the entry, and, when it ends, the script may
    restore a snapshot, after which the machine, that ended, is killed,
    and the snapshot continues, which ends here too *)
-let start entry =
+let start (entry : Primus.Linker.name) =
   let module Machine = Primus.Analysis in
   let module Linker = Primus.Linker.Make (Machine) in
   let open Machine.Syntax in
   Machine.catch
-    (Linker.exec (`symbol entry) >>| fun () -> Primus.Normal)
+    (Linker.exec entry >>| fun () -> Primus.Normal)
     (fun exn -> Machine.return (Primus.Exn exn))
   >>= fun status ->
   match Effect.perform (X.Ended status) with
@@ -97,7 +97,19 @@ let start entry =
   | X.Continue _ | X.Map _ | X.Snapshot -> Machine.return ()
 
 let create ?(system = "bap:unicorn-executor") ?(components = []) ?(args = [])
-    ?(envp = []) ?(entry = "_start") proj =
+    ?(envp = []) ?entry proj =
+  (* the entry point of the program, as the run pass finds it *)
+  let entry =
+    match entry with
+    | Some name -> `symbol name
+    | None -> (
+        match
+          Term.enum sub_t (Project.program proj)
+          |> Seq.find ~f:(fun sub -> Term.has_attr sub Sub.entry_point)
+        with
+        | Some sub -> `tid (Term.tid sub)
+        | None -> `symbol "_start")
+  in
   let system =
     match Primus.System.Repository.find (Knowledge.Name.read system) with
     | Some sys -> sys

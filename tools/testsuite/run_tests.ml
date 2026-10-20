@@ -519,9 +519,9 @@ let () =
   ]
 
 (* the bare projects of the scripts, which are not disassembled, run in
-   Unicorn as the disassembled ones: the functions in the Thumb encoding
-   from the symbol table, and the system calls, that the program doesn't
-   have, as the lifters represent them *)
+   Unicorn as the disassembled ones: from their entry points, with the
+   functions in the Thumb encoding from the symbol table, and the system
+   calls lifted on demand *)
 let bare data =
   let run env ?(options = []) bin =
     let options =
@@ -553,6 +553,20 @@ let bare data =
     case "script/unicorn/bare/arm-linux-gnueabihf-thumb-crc" (fun env ->
         let out = run env "arm-linux-gnueabihf-thumb-crc" in
         contains env "prints the CRC" out "1489580789");
+    case "script/unicorn/bare/aarch64-linux-gnu-svc-crc" (fun env ->
+        ignore
+          (write env "syscalls.lisp"
+             (List.assoc "aarch64-linux-gnu-svc-crc" syscalls));
+        let out =
+          run env "aarch64-linux-gnu-svc-crc"
+            ~options:
+              [ "--primus-lisp-add=" ^ dir env; "--primus-lisp-load=syscalls" ]
+        in
+        contains env "prints the CRC" out "1489580789");
+    case "script/unicorn/bare/mips-linux-gnu-echo" (fun env ->
+        let out = run env "mips-linux-gnu-echo" in
+        sequence env out
+          [ ("prints the arguments", "hello"); ("ends", "course") ]);
     case "script/unicorn/bare/x86_64-linux-gnu-syscall-crc" (fun env ->
         ignore
           (write env "syscalls.lisp"

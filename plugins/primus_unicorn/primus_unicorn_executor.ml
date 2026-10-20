@@ -34,6 +34,7 @@ module Uc = Bap_unicorn
 module Target = Primus_unicorn_target
 module Checkpoint = Primus_unicorn_checkpoint
 module Native = Primus_unicorn_native
+module Lift = Primus_unicorn_lift
 include Bap_main.Loggers ()
 
 type Primus.exn += Unicorn_failure of string
@@ -276,126 +277,84 @@ let bare_mode = ref false
    as the calls to the intrinsic functions, e.g., intrinsic:syscall, with
    the inputs in the variables intrinsic:x0, intrinsic:x1, etc., are run
    by the Primus linker, as the interpreter does, when they stop Unicorn
-   with an interrupt, at the address of their next instruction. *)
+   with an interrupt, after which Unicorn continues from the next
+   instruction. *)
 type intrinsic = { name : string; inputs : (var * exp) list }
 
-let intrinsics : intrinsic Int64.Map.t ref = ref Int64.Map.empty
+(* the intrinsic of the instruction, which the blocks of its IR call *)
+let site_of_blocks blks =
+  let defs =
+    List.concat_map blks ~f:(fun blk -> Term.enum def_t blk |> Seq.to_list)
+  in
+  List.find_map blks ~f:(fun blk ->
+      Term.enum jmp_t blk
+      |> Seq.find_map ~f:(fun jmp ->
+          match Jmp.kind jmp with
+          | Call call -> (
+              match Call.target call with
+              | Direct tid ->
+                  let name =
+                    String.chop_prefix_if_exists (Tid.name tid) ~prefix:"@"
+                  in
+                  Option.some_if
+                    (String.is_prefix name ~prefix:"intrinsic:")
+                    {
+                      name;
+                      inputs =
+                        List.filter_map defs ~f:(fun def ->
+                            Option.some_if
+                              (String.is_prefix
+                                 (Var.name (Def.lhs def))
+                                 ~prefix:"intrinsic:")
+                              (Def.lhs def, Def.rhs def));
+                    }
+              | Indirect _ -> None)
+          | Goto _ | Ret _ | Int _ -> None))
 
-let index_intrinsics prog =
-  let callee jmp =
-    match Jmp.kind jmp with
-    | Call call -> (
-        match Call.target call with
-        | Direct tid ->
-            let name =
-              match Term.find sub_t prog tid with
-              | Some sub -> Sub.name sub
-              | None -> String.chop_prefix_if_exists (Tid.name tid) ~prefix:"@"
-            in
-            Option.some_if (String.is_prefix name ~prefix:"intrinsic:") name
-        | Indirect _ -> None)
-    | Goto _ | Ret _ | Int _ -> None
-  in
-  intrinsics :=
-    Term.enum sub_t prog
-    |> Seq.concat_map ~f:(Term.enum blk_t)
-    |> Seq.fold ~init:Int64.Map.empty ~f:(fun sites blk ->
-        Term.enum jmp_t blk
-        |> Seq.fold ~init:sites ~f:(fun sites jmp ->
-            match (callee jmp, Term.get_attr jmp address) with
-            | Some name, Some addr ->
-                let inputs =
-                  Term.enum def_t blk
-                  |> Seq.filter ~f:(fun def ->
-                      String.is_prefix
-                        (Var.name (Def.lhs def))
-                        ~prefix:"intrinsic:"
-                      && Option.equal Addr.equal
-                           (Term.get_attr def address)
-                           (Some addr))
-                  |> Seq.map ~f:(fun def -> (Def.lhs def, Def.rhs def))
-                  |> Seq.to_list
-                in
-                Map.set sites
-                  ~key:(Bitvec.to_int64 (Word.to_bitvec addr))
-                  ~data:{ name; inputs }
-            | _ -> sites))
+(* the exceptions of Unicorn, that it raises at the instruction, which
+   doesn't run, e.g., the breakpoints of ARM, and the faults of x86, the
+   others, e.g., the system calls, are raised after the instruction *)
+let raised_at (arch : Uc.arch) n =
+  match arch with
+  | Arm | Arm64 -> n = 1 || n = 7
+  | X86 -> n >= 0 && n < 32 && n <> 3 && n <> 4
+  | _ -> false
 
-(* the intrinsic, whose instruction precedes [pc] *)
-let intrinsic_before pc =
-  match Map.closest_key !intrinsics `Less_than pc with
-  | Some (addr, site) when Int64.(pc - addr <= 16L) -> Some site
-  | _ -> None
+(* the intrinsics of the interrupts, by their addresses, with the
+   addresses, from which Unicorn continues after them *)
+let traps : (intrinsic * int64) Int64.Table.t = Int64.Table.create ()
 
-(* The intrinsic of the system call, which ends at [pc], decoded from
-   its bytes, as the lifters represent it, when the program doesn't
-   have it, e.g., when it is not disassembled, see [bare_mode]. The
-   interrupt [n] is the exception of Unicorn, which tells the kind of
-   the instruction, e.g., 2, the supervisor call of ARM, or -1, the
-   syscall or the sysenter of x86, and [read addr n] reads the code. *)
-let decode_intrinsic (arch : Uc.arch) ~bits ~big_endian ~thumb ~read n pc =
-  let word ~big s =
-    String.foldi s ~init:0L ~f:(fun i acc c ->
-        let shift = if big then 8 * (String.length s - 1 - i) else 8 * i in
-        Int64.(acc lor shift_left (of_int (Char.to_int c)) shift))
-  in
-  let insn size =
-    Option.map (read Int64.(pc - of_int size) size) ~f:(word ~big:false)
-  in
-  let insn_be size =
-    Option.map (read Int64.(pc - of_int size) size) ~f:(word ~big:big_endian)
-  in
-  let site name ?(width = bits) input =
-    let inputs =
-      match input with
-      | None -> []
-      | Some x ->
-          [
-            ( Var.create "intrinsic:x0" (Type.imm width),
-              Bil.int (Word.of_int64 ~width x) );
-          ]
-    in
-    Some { name = "intrinsic:" ^ name; inputs }
-  in
-  let open Int64 in
-  match (arch, n) with
-  | X86, -1 -> (
-      match insn 2 with
-      | Some 0x050FL -> site "syscall" None
-      | Some 0x340FL -> site "sysenter" None
-      | _ -> None)
-  | X86, 3 when Option.equal Int64.equal (insn 1) (Some 0xCCL) ->
-      site "breakpoint" None
-  | X86, n -> (
-      match insn 2 with
-      | Some w when w land 0xFFL = 0xCDL && w lsr 8 = Int64.of_int n ->
-          site "interrupt" ~width:8 (Some (Int64.of_int n))
-      | _ -> None)
-  | Arm, 2 when thumb -> (
-      match insn 2 with
-      | Some w when w lsr 8 = 0xDFL -> site "svc" (Some (w land 0xFFL))
-      | _ -> None)
-  | Arm, 2 -> (
-      match insn 4 with
-      | Some w when (w lsr 24) land 0xFL = 0xFL ->
-          site "svc" (Some (w land 0xFFFFFFL))
-      | _ -> None)
-  | Arm64, 2 -> (
-      match insn 4 with
-      | Some w when w land 0xFFE0001FL = 0xD4000001L ->
-          site "svc" (Some ((w lsr 5) land 0xFFFFL))
-      | _ -> None)
-  | Mips, 17 -> (
-      match insn_be 4 with
-      | Some w when w land 0xFC00003FL = 0xCL ->
-          site "syscall" (Some ((w lsr 6) land 0xFFFFFL))
-      | _ -> None)
-  | Ppc, 8 -> (
-      match insn_be 4 with
-      | Some w when w land 0xFC000002L = 0x44000002L ->
-          site "syscall" (Some ((w lsr 5) land 0x7FL))
-      | _ -> None)
-  | _ -> None
+(* The intrinsic of the instruction, that interrupts Unicorn at [pc],
+   lifted on demand, as the program, e.g., the bare one, may have no IR
+   of it, and the interrupts are rare. The instruction is at [pc], or ends
+   there, as Unicorn raises the interrupt, see [raised_at]. *)
+let trap proj (arch : Uc.arch) ~thumb n pc =
+  match Hashtbl.find traps pc with
+  | Some trap -> Some trap
+  | None ->
+      let sizes =
+        match arch with
+        | X86 -> List.range 1 16
+        | Arm when thumb -> [ 2; 4 ]
+        | _ -> [ 4 ]
+      in
+      let at () =
+        Option.bind (Lift.insn proj pc) ~f:(fun (size, blks) ->
+            Option.map (site_of_blocks blks) ~f:(fun site ->
+                (site, Int64.(pc + of_int size))))
+      and before () =
+        List.find_map sizes ~f:(fun size ->
+            match Lift.insn proj Int64.(pc - of_int size) with
+            | Some (n, blks) when n = size ->
+                Option.map (site_of_blocks blks) ~f:(fun site -> (site, pc))
+            | _ -> None)
+      in
+      let trap =
+        if raised_at arch n then Option.first_some (at ()) (before ())
+        else Option.first_some (before ()) (at ())
+      in
+      Option.iter trap ~f:(fun trap -> Hashtbl.set traps ~key:pc ~data:trap);
+      trap
 
 (* the subroutines in the Thumb encoding, which Unicorn runs from their
    addresses with the lower bit set *)
@@ -1744,22 +1703,15 @@ module Make (Machine : Primus.Machine.S) = struct
           | Some (Fault (access, addr)), _ -> (
               fault e access addr >>= function `Continue -> loop pc)
           | Some (Interrupt n), _ -> (
-              match intrinsic_before (code_addr e pc) with
-              | Some site -> call_intrinsic e site >>= fun () -> loop pc
-              | None -> (
-                  let read addr n =
-                    try Some (Uc.mem_read e.uc addr n) with Uc.Error _ -> None
-                  in
-                  match
-                    decode_intrinsic e.arch ~bits:(e.bytes * 8)
-                      ~big_endian:e.big_endian
-                      ~thumb:Int64.(pc land 1L = 1L)
-                      ~read n (code_addr e pc)
-                  with
-                  | Some site -> call_intrinsic e site >>= fun () -> loop pc
-                  | None ->
-                      pull e >>= fun () ->
-                      fail "an unhandled interrupt %d at %Lx" n pc))
+              let* proj = Machine.get () in
+              let thumb = Int64.(pc land 1L = 1L) in
+              match trap proj e.arch ~thumb n (code_addr e pc) with
+              | Some (site, next) ->
+                  call_intrinsic e site >>= fun () ->
+                  loop (if thumb then Int64.(next lor 1L) else next)
+              | None ->
+                  pull e >>= fun () ->
+                  fail "an unhandled interrupt %d at %Lx" n pc)
           | Some Checkpoint, _ -> save e pc >>= fun () -> loop pc
           | Some (Stop addr), _ -> stopped e addr >>= fun () -> loop pc
           | Some Invalid, _ ->
@@ -1950,7 +1902,7 @@ module Loader (Machine : Primus.Machine.S) = struct
 
   let link_program =
     let* prog = Machine.gets Project.program in
-    index_intrinsics prog;
+    Hashtbl.clear traps;
     index_natives prog;
     Term.enum sub_t prog |> Seq.to_list
     |> Machine.List.iter ~f:(fun sub ->

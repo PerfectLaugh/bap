@@ -45,10 +45,11 @@ val create :
   project ->
   t
 (** [create project] starts the program of [project], from [entry], by default
-    [_start], in the [system], by default [bap:unicorn-executor], with the
-    [components], e.g., [bap:debugger], the program arguments [args], without
-    the name of the program, and the environment [envp], and pauses it before
-    its first instruction runs in Unicorn. *)
+    its entry point, or [_start], in the [system], by default
+    [bap:unicorn-executor], with the [components], e.g., [bap:debugger], the
+    program arguments [args], without the name of the program, and the
+    environment [envp], and pauses it before its first instruction runs in
+    Unicorn. *)
 
 val run : ?until:int64 -> t -> status
 (** [run emu] continues the program, until it pauses, e.g., before the
