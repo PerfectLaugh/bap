@@ -5,7 +5,10 @@
     the component [script:debugger] of the repository, stops the machines at the
     breakpoints, or at every instruction, while stepping, see
     [Primus.Interpreter.Stops], and calls the handlers of the script, which see
-    and change the machine with the API of Primus.
+    and change the machine with the API of Primus, e.g., they step, and remove
+    the breakpoints, of the system, that runs the machine, with
+    [Primus.Interpreter.Stops.Make]. The breakpoints and the handlers are of
+    every system, that the script runs, e.g., of each emulator, see [Bap_emu].
 
     The handlers change the registers with [Primus.Interpreter.Make.set] and the
     memory with [Primus.Interpreter.Make.store], so that the executors that copy
@@ -16,10 +19,8 @@ open Bap_primus.Std
 
 val break : string -> unit
 (** [break point] stops the machines at the address or the subroutine with the
-    name [point], which is resolved, when the first machine starts. *)
-
-val step : bool -> unit
-(** [step on] stops the machines at every instruction, while [on]. *)
+    name [point], which is resolved, when the first machine of a system starts.
+*)
 
 (** the handler of the stops *)
 module type Handler = functor (Machine : Primus.Machine.S) -> sig

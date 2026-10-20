@@ -21,13 +21,19 @@ module T = struct
     sp : int64;  (** the stack pointer after the return *)
     vars : (Var.t * Word.t) list;
     memory : Primus.Memory.Snapshot.t;
+    symbols : (string * int64) list;
+        (** the names of the code, that the script gave, e.g., of the code that
+            the program unpacked, see [Bap_emu.add_symbol] *)
+    unstubbed : int64 list;
+        (** the functions of the program, whose code runs instead of their
+            stubs, see [Bap_emu.unstub] *)
   }
   [@@deriving bin_io]
 end
 
 include T
 
-let magic = "bap-primus-unicorn-checkpoint 1\n"
+let magic = "bap-primus-unicorn-checkpoint 2\n"
 
 (* the checkpoint is written to a temporary file first, so that the file
    is never partly written *)
@@ -46,6 +52,11 @@ let load path =
   | exception Sys_error msg -> Error msg
   | data -> (
       match String.chop_prefix data ~prefix:magic with
+      | None when String.is_prefix data ~prefix:"bap-primus-unicorn-checkpoint "
+        ->
+          Error
+            (sprintf "the checkpoint %s is of another version of primus-unicorn"
+               path)
       | None -> Error (sprintf "%s is not a checkpoint of primus-unicorn" path)
       | Some data -> (
           try Ok (Binable.of_string (module T) data)

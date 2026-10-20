@@ -24,14 +24,19 @@ type state =
   | Ended of Primus.exit_status * (X.request, state) Effect.Deep.continuation
   | Running  (** the program runs, e.g., in a hook *)
 
+(* the emulator, whose system has its own session, i.e., its own engine
+   and the state of the executor, so that the emulators run side by side *)
 type t = {
+  session : X.session;
   mutable state : state;
   mutable call : string option;
   target : Bap_core_theory.Theory.Target.t;
+  hooked_calls : Int64.Hash_set.t;
+      (** the addresses, whose calls the script hooks, see [on_call] *)
 }
 
-let engine () =
-  match !X.active with
+let engine t =
+  match t.session.active with
   | Some e -> e
   | None -> invalid_arg "Bap_emu: the engine is not running"
 
@@ -54,14 +59,15 @@ let fiber f =
           | _ -> None);
     }
 
+(* the knowledge of the finished system is of the emulator, see
+   [knowledge], e.g., of the instructions, that it lifted, see
+   [Primus.Lift], and doesn't replace the toplevel one, as each emulator
+   has its own *)
 let finish t state =
   t.state <- state;
   match state with
   | Suspended _ | Ended _ | Running -> ()
-  | Finished (Ok (_, _, kb)) ->
-      Toplevel.set kb;
-      X.driven := false
-  | Finished (Error _) | Crashed _ -> X.driven := false
+  | Finished _ | Crashed _ -> t.session.driven <- false
 
 (* continues the paused system with the request *)
 let resume t request =
@@ -78,10 +84,10 @@ let status t =
   | Suspended _ -> Paused
   | Running -> Running
   | Ended ((Primus.Normal | Exn Primus.Interpreter.Halt), _) ->
-      Exited !X.exit_code
+      Exited t.session.exit_code
   | Ended (Exn exn, _) -> Failed (Primus.Exn.to_string exn)
   | Finished (Ok ((Primus.Normal | Exn Primus.Interpreter.Halt), _, _)) ->
-      Exited !X.exit_code
+      Exited t.session.exit_code
   | Finished (Ok (Exn exn, _, _)) -> Failed (Primus.Exn.to_string exn)
   | Finished (Error conflict) ->
       Failed (Format.asprintf "%a" Knowledge.Conflict.pp conflict)
@@ -114,15 +120,19 @@ let start init (entry : Primus.Linker.name) =
         let module Component = (val component : Primus.Machine.Component) in
         let module Component = Component (Machine) in
         Component.init () >>= ended
-    | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ -> Machine.return ()
+    | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ | X.Save _ ->
+        Machine.return ()
   in
   ended ()
 
 (* the components of [init], and the redirections run
    in the machine, after the components of the system, before the
-   program starts *)
+   program starts, and the program continues from the checkpoint
+   [restore], with its names, which the executor loads, when it starts.
+   The system gets the session of the emulator with its project, see
+   [X.with_session] *)
 let create ?(system = "bap:unicorn-executor") ?(components = []) ?(init = [])
-    ?(redirects = []) ?(args = []) ?(envp = []) ?entry proj =
+    ?(redirects = []) ?(args = []) ?(envp = []) ?entry ?restore proj =
   let init =
     init @ if List.is_empty redirects then [] else [ Io.redirect redirects ]
   in
@@ -151,22 +161,25 @@ let create ?(system = "bap:unicorn-executor") ?(components = []) ?(init = [])
           (Knowledge.Name.unqualified name))
   in
   let program = Option.value (Project.get proj filename) ~default:"a.out" in
-  let module Linker = Primus.Linker.Make (Primus.Analysis) in
-  X.driven := true;
-  X.pause := true;
-  X.exit_code := None;
-  X.engine_hooks := [];
-  Hashtbl.clear X.call_hooks;
+  let session =
+    X.create_session ?restore:(Option.map restore ~f:Option.return) ()
+  in
+  session.driven <- true;
+  session.pause <- true;
   let t =
     {
+      session;
       state = Crashed (Failure "not started");
       call = None;
       target = Project.target proj;
+      hooked_calls = Int64.Hash_set.create ();
     }
   in
   finish t
     (fiber (fun () ->
-         Primus.System.run system proj (Toplevel.current ())
+         Primus.System.run system
+           (X.with_session proj session)
+           (Toplevel.current ())
            ~args:(Array.of_list (program :: args))
            ~envp:(Array.of_list envp) ~start:(start init entry)));
   t
@@ -181,7 +194,9 @@ let set_pc t addr =
   | Suspended (_, id, k) -> t.state <- Suspended (addr, id, k)
   | _ -> invalid_arg "Bap_emu: the program is not paused"
 
-type snapshot = Primus.Machine.id
+(* the machine, which is of the system of the emulator, as the systems
+   number their machines alike *)
+type snapshot = { owner : X.session; id : Primus.Machine.id }
 
 let machine t =
   match t.state with
@@ -193,40 +208,51 @@ let machine t =
 let snapshot t =
   let id = machine t in
   resume t X.Snapshot;
-  id
+  { owner = t.session; id }
 
-let restore t snapshot =
-  X.exit_code := None;
-  resume t (X.Restore snapshot)
+let restore t { owner; id } =
+  if not (phys_equal owner t.session) then
+    invalid_arg "Bap_emu.restore: the snapshot is of another emulator";
+  t.session.exit_code <- None;
+  resume t (X.Restore id)
+
+let save t file =
+  if not (paused t) then
+    invalid_arg "Bap_emu.save: the program is not paused, e.g., in a hook";
+  resume t (X.Save (file, pc t));
+  match t.session.saved with Ok () -> () | Error msg -> failwith msg
 
 (* pauses the program before the next instruction, from a hook *)
-let stop _ =
-  let e = engine () in
-  X.pause := true;
+let stop t =
+  let e = engine t in
+  t.session.pause <- true;
   e.reason <- Some X.Pause;
   Uc.stop e.uc
 
 (* [fresh addr] if the instruction at [addr] is not the one that a hook
    saw last, which runs again, e.g., after its fault, when Unicorn starts
    anew *)
-let instructions () =
+let instructions t =
   let last = ref None in
   fun addr ->
+    let starts = t.session.starts in
     let fresh =
       match !last with
-      | Some (addr', start) -> not (Int64.equal addr addr' && start <> !X.starts)
+      | Some (addr', start) -> not (Int64.equal addr addr' && start <> starts)
       | None -> true
     in
-    last := Some (addr, !X.starts);
+    last := Some (addr, starts);
     fresh
 
-let installed f =
-  X.engine_hooks := f :: !X.engine_hooks;
-  Option.iter !X.active ~f
+(* the hook goes to the engine of the emulator, and to its new engines,
+   see [X.session] *)
+let installed t f =
+  t.session.engine_hooks <- f :: t.session.engine_hooks;
+  Option.iter t.session.active ~f
 
 let run ?until t =
   if paused t then begin
-    let e = engine () in
+    let e = engine t in
     let hook =
       Option.map until ~f:(fun addr ->
           (* the program, which is paused at the address, runs its
@@ -235,14 +261,14 @@ let run ?until t =
             match e.arch with Arm -> Int64.(pc t land lnot 1L) | _ -> pc t
           in
           let skip = ref (Int64.equal addr code) in
-          let fresh = instructions () in
+          let fresh = instructions t in
           ( e,
             Uc.on_code e.uc ~first:addr ~last:addr (fun addr _ ->
                 if fresh addr then if !skip then skip := false else stop t) ))
     in
     resume t (X.Continue (pc t));
     Option.iter hook ~f:(fun (e', hook) ->
-        match !X.active with
+        match t.session.active with
         | Some e when phys_equal e e' -> Uc.delete e.uc hook
         | _ -> ())
   end;
@@ -250,29 +276,29 @@ let run ?until t =
 
 let step t =
   if paused t then begin
-    let e = engine () in
+    let e = engine t in
     let first = ref true in
-    let fresh = instructions () in
+    let fresh = instructions t in
     let hook =
       Uc.on_code e.uc (fun addr _ ->
           if fresh addr then if !first then first := false else stop t)
     in
     resume t (X.Continue (pc t));
-    match !X.active with
+    match t.session.active with
     | Some e' when phys_equal e e' -> Uc.delete e.uc hook
     | _ -> ()
   end;
   status t
 
-let registers _ = Target.Regs.names (engine ()).regs
+let registers t = Target.Regs.names (engine t).regs
 
-let reg _ name =
-  match Target.Regs.read_name (engine ()).regs name with
+let reg t name =
+  match Target.Regs.read_name (engine t).regs name with
   | Some x -> Bitvec.to_int64 (Word.to_bitvec x)
   | None -> invalid_argf "Bap_emu: unknown register %s" name ()
 
-let set_reg _ name x =
-  if not (Target.Regs.write_name (engine ()).regs name (Word.of_int64 x)) then
+let set_reg t name x =
+  if not (Target.Regs.write_name (engine t).regs name (Word.of_int64 x)) then
     invalid_argf "Bap_emu: unknown register %s" name ()
 
 (* the pages, which a paused program copies to Unicorn, as Primus has
@@ -283,19 +309,19 @@ let rec accessible t addr n f =
   | exception Native.Missing missing when paused t ->
       let page = X.page_of missing in
       resume t (X.Map missing);
-      if Hashtbl.mem (engine ()).pages page then accessible t addr n f
+      if Hashtbl.mem (engine t).pages page then accessible t addr n f
       else invalid_argf "Bap_emu: %Lx is not mapped" missing ()
   | exception Native.Missing missing ->
       invalid_argf "Bap_emu: the page of %Lx is not in Unicorn yet" missing ()
   | exception Native.Denied ->
       invalid_argf "Bap_emu: the access to %d bytes at %Lx is denied" n addr ()
 
-let read t addr n = accessible t addr n (fun () -> X.uc_read (engine ()) addr n)
+let read t addr n = accessible t addr n (fun () -> X.uc_read (engine t) addr n)
 
 let write t addr data =
   let n = String.length data in
   accessible t addr n (fun () ->
-      let e = engine () in
+      let e = engine t in
       if X.uc_readable e addr n < n then raise Native.Denied;
       X.uc_write e addr data;
       (* the code, which Unicorn translated, is translated anew *)
@@ -326,20 +352,51 @@ let primus t component =
       invalid_arg "Bap_emu.primus: the program is not paused, e.g., in a hook"
 
 let on_code ?first ?last t f =
-  installed (fun e ->
+  installed t (fun e ->
       ignore (Uc.on_code ?first ?last e.uc (fun addr _ -> f t addr)))
 
 let on_read ?first ?last t f =
-  installed (fun e ->
+  installed t (fun e ->
       ignore
         (Uc.on_mem ?first ?last e.uc [ `read ] (fun _ addr size _ ->
              f t addr size)))
 
 let on_write ?first ?last t f =
-  installed (fun e ->
+  installed t (fun e ->
       ignore
         (Uc.on_mem ?first ?last e.uc [ `write ] (fun _ addr size value ->
              f t addr size value)))
+
+(* the functions of the program, which no stub replaces, are hooked at
+   their addresses, once, by the name, that the address has, when it is
+   called, see [add_symbol], and the others stop Unicorn, see
+   [X.call_returns] *)
+let hook_calls t addr =
+  if not (Hash_set.mem t.hooked_calls addr) then begin
+    Hash_set.add t.hooked_calls addr;
+    installed t (fun e ->
+        (* the call is seen once, as the first instruction of the
+           function runs again, when Unicorn starts at it again, after
+           the hook saw it, and Unicorn stopped there, e.g., as the hook
+           stops it *)
+        let seen = ref (-1) in
+        ignore
+          (Uc.on_code e.uc ~first:addr ~last:addr (fun addr _ ->
+               let s = t.session in
+               let again =
+                 Option.equal Int64.equal s.restarted_at (Some addr)
+                 && !seen = s.starts - 1
+               in
+               seen := s.starts;
+               if not (again || Hash_set.mem e.foreign addr) then
+                 match
+                   Option.bind (Hashtbl.find s.names addr) ~f:(X.call_returns e)
+                 with
+                 | Some ret ->
+                     e.reason <- Some (X.Jump ret);
+                     Uc.stop e.uc
+                 | None -> ())))
+  end
 
 let on_call t name f =
   let hook () =
@@ -349,35 +406,42 @@ let on_call t name f =
         match f t with Default -> X.Default | Return x -> X.Return x)
       ~finally:(fun () -> t.call <- None)
   in
-  Hashtbl.add_multi X.call_hooks ~key:name ~data:hook;
-  (* the functions of the program, which no stub replaces, are hooked at
-     their addresses, the others stop Unicorn, see [X.call_returns] *)
-  let foreign =
-    match !X.recipe with Some (_, foreign, _) -> foreign | None -> []
+  Hashtbl.add_multi t.session.call_hooks ~key:name ~data:hook;
+  Hashtbl.iteri t.session.names ~f:(fun ~key:addr ~data ->
+      if String.equal data name then hook_calls t addr)
+
+(* the name goes to the checkpoints, and replaces the name, that the
+   address had, e.g., of the program *)
+let add_symbol t name addr =
+  Hashtbl.set t.session.symbols ~key:addr ~data:name;
+  Hashtbl.set t.session.names ~key:addr ~data:name;
+  if Hashtbl.mem t.session.call_hooks name then hook_calls t addr
+
+let symbols t =
+  Hashtbl.to_alist t.session.names
+  |> List.sort ~compare:(fun (a, _) (b, _) -> Int64.compare a b)
+  |> List.map ~f:(fun (addr, name) -> (name, addr))
+
+(* the functions of the program, whose code runs again in Unicorn,
+   instead of the stubs, that replaced them *)
+let unstub t name =
+  let own addr =
+    Hashtbl.existsi t.session.own_code ~f:(fun ~key ~data:_ ->
+        Int64.equal (X.int64_of_word key) addr)
   in
-  Hashtbl.iteri X.names ~f:(fun ~key:addr ~data ->
-      if
-        String.equal data name && not (List.mem foreign addr ~equal:Int64.equal)
-      then
-        installed (fun e ->
-            (* the call is seen once, as the first instruction of the
-               function runs again, when Unicorn starts at it again,
-               after the hook saw it, and Unicorn stopped there, e.g., as
-               the hook stops it *)
-            let seen = ref (-1) in
-            ignore
-              (Uc.on_code e.uc ~first:addr ~last:addr (fun addr _ ->
-                   let again =
-                     Option.equal Int64.equal !X.restarted_at (Some addr)
-                     && !seen = !X.starts - 1
-                   in
-                   seen := !X.starts;
-                   if not again then
-                     match X.call_returns e name with
-                     | Some ret ->
-                         e.reason <- Some (X.Jump ret);
-                         Uc.stop e.uc
-                     | None -> ()))))
+  let addrs =
+    Hashtbl.to_alist t.session.names
+    |> List.filter_map ~f:(fun (addr, data) ->
+        Option.some_if (String.equal data name && own addr) addr)
+  in
+  if List.is_empty addrs then
+    invalid_argf "Bap_emu.unstub: %s is not a function of the program" name ();
+  let module Unstub (Machine : Primus.Machine.S) = struct
+    module Exec = X.Make (Machine)
+
+    let init () = Machine.List.iter addrs ~f:Exec.unstub
+  end in
+  primus t (module Unstub)
 
 let arg t n =
   let name =
@@ -385,16 +449,22 @@ let arg t n =
     | Some name -> name
     | None -> invalid_arg "Bap_emu.arg: no function is called"
   in
-  match Hashtbl.find X.signatures name with
+  match Hashtbl.find t.session.signatures name with
   | Some { inputs; _ } -> (
       match List.nth inputs n with
       | Some exp ->
           accessible t 0L 0 (fun () ->
-              Bitvec.to_int64 (Word.to_bitvec (X.eval_uc (engine ()) exp)))
+              Bitvec.to_int64 (Word.to_bitvec (X.eval_uc (engine t) exp)))
       | None -> invalid_argf "Bap_emu.arg: %s has no argument %d" name n ())
   | None -> invalid_argf "Bap_emu.arg: the prototype of %s is unknown" name ()
 
-let exit_code _ = !X.exit_code
+let exit_code t = t.session.exit_code
+
+(* the system, whose program ended, finishes, as its knowledge is the
+   result of the system *)
+let knowledge t =
+  (match t.state with Ended _ -> resume t (X.Continue 0L) | _ -> ());
+  match t.state with Finished (Ok (_, _, kb)) -> Some kb | _ -> None
 
 (* The taint of the values, that the program computes, which Primus
    tracks, see [Bap_taint], as the program runs in Unicorn, which leaves

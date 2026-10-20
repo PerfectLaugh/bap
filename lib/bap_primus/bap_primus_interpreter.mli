@@ -71,13 +71,15 @@ val pagefault_handler : string
 val cfi_violation_handler : string
 
 module Stops : sig
-  val add : addr -> unit
-  val remove : addr -> unit
-  val mem : addr -> bool
-  val to_list : unit -> addr list
-  val set_stepping : bool -> unit
-  val stepping : unit -> bool
-  val version : unit -> int
+  module Make (Machine : Machine) : sig
+    val add : addr -> unit Machine.t
+    val remove : addr -> unit Machine.t
+    val mem : addr -> bool Machine.t
+    val to_list : addr list Machine.t
+    val set_stepping : bool -> unit Machine.t
+    val stepping : bool Machine.t
+    val version : int Machine.t
+  end
 end
 
 module Make (Machine : Machine) : sig

@@ -590,6 +590,17 @@ module Std : sig
 
         val envp : string array t
         (** [envp] program environment variables. *)
+
+        val knowledge : 'a Knowledge.t -> 'a t
+        (** [knowledge x] the computation [x] in the knowledge of the system,
+            that runs the machine, which the system has, when it ends, see
+            {!System.run}, e.g., the instructions, that {!Lift} lifts, so that
+            the generic components use the knowledge, as {!Analysis.lift} does,
+            but not the knowledge of the other systems, e.g., the toplevel one.
+            Fails, if the machine is not of a system, e.g., of
+            [Machine.Make(Monad.Ident)].
+
+            @since 2.6.0 *)
       end
 
       (** A generic machine component.
@@ -1530,32 +1541,35 @@ module Std : sig
           The interpreter posts {!pc_change} for every address, an emulator
           can't afford it, so it posts {!pc_change}, with {!Make.set_pc}, only
           at the addresses of the stops, or at every address, while the stepping
-          is on, e.g., for a debugger. The stops are global, as they are of the
-          user, not of a machine.
+          is on, e.g., for a debugger. The stops are of the system, i.e., of all
+          its machines, but not of the other systems, that run in the same
+          process, e.g., the emulators of a script.
 
           @since 2.6.0 *)
       module Stops : sig
-        val add : addr -> unit
-        (** [add addr] stops the code at [addr] *)
+        module Make (Machine : Machine.S) : sig
+          val add : addr -> unit Machine.t
+          (** [add addr] stops the code at [addr] *)
 
-        val remove : addr -> unit
-        (** [remove addr] stops the code at [addr] no more *)
+          val remove : addr -> unit Machine.t
+          (** [remove addr] stops the code at [addr] no more *)
 
-        val mem : addr -> bool
-        (** [mem addr] if the code stops at [addr] *)
+          val mem : addr -> bool Machine.t
+          (** [mem addr] if the code stops at [addr] *)
 
-        val to_list : unit -> addr list
-        (** [to_list ()] the addresses of the stops, in the ascending order *)
+          val to_list : addr list Machine.t
+          (** the addresses of the stops, in the ascending order *)
 
-        val set_stepping : bool -> unit
-        (** [set_stepping on] stops the code at every address, while [on] *)
+          val set_stepping : bool -> unit Machine.t
+          (** [set_stepping on] stops the code at every address, while [on] *)
 
-        val stepping : unit -> bool
-        (** [stepping ()] if the code stops at every address *)
+          val stepping : bool Machine.t
+          (** if the code stops at every address *)
 
-        val version : unit -> int
-        (** [version ()] changes, whenever the stops change, so that the
-            executors know when to update their hooks *)
+          val version : int Machine.t
+          (** changes, whenever the stops change, so that the executors know
+              when to update their hooks *)
+        end
       end
 
       val loading : value observation
@@ -2429,8 +2443,9 @@ module Std : sig
           Only the memory, whose name is [memory], is backed, and its data are
           bytes.
 
-          The backing is global, so a component, that sets it, unsets it, when
-          its system stops.
+          The backing is of the system, i.e., of all its machines, see
+          {!Make.set_backing}, but not of the other systems, that run in the
+          same process, e.g., the emulators of a script.
 
           @since 2.6.0 *)
       module Backing : sig
@@ -2449,14 +2464,17 @@ module Std : sig
               (** [stored id addr data] the machine [id] has stored the bytes
                   [data] from [addr] *)
         }
-
-        val set : t option -> unit
-        (** [set backing] backs the memory, or stops backing it with [None] *)
       end
 
       (** [Make(Machine)] lifts the memory interface into the [Machine] monad.
       *)
       module Make (Machine : Machine.S) : sig
+        val set_backing : Backing.t option -> unit Machine.t
+        (** [set_backing backing] backs the memory of the machines of the
+            system, or stops backing it with [None], see {!Backing}.
+
+            @since 2.6.0 *)
+
         val switch : memory -> unit Machine.t
         (** [switch memory] switches the memory module to [memory].
 
@@ -2652,45 +2670,51 @@ module Std : sig
       val max_size : int
       (** the maximal size of an instruction, in bytes, that is read *)
 
-      val insn :
-        ?disassembled_only:bool ->
-        ?encoding:Theory.language ->
-        project ->
-        read:(int64 -> int -> string) ->
-        int64 ->
-        (int * blk term list) option
-      (** [insn proj ~read addr] the size and the IR of the instruction at
-          [addr], decoded from the bytes, that [read addr n] reads, at most [n]
-          of them, fewer, if the rest is not readable.
+      (** [Make(Machine)] lifts the instructions in the knowledge of the system,
+          that runs the machine, see {!Machine.S.knowledge}, which caches them,
+          so that the systems, e.g., the emulators of a script, have their own
+          instructions. *)
+      module Make (Machine : Machine.S) : sig
+        val insn :
+          ?disassembled_only:bool ->
+          ?encoding:Theory.language ->
+          read:(int64 -> int -> string) ->
+          int64 ->
+          (int * blk term list) option Machine.t
+        (** [insn ~read addr] the size and the IR of the instruction at [addr],
+            decoded from the bytes, that [read addr n] reads, at most [n] of
+            them, fewer, if the rest is not readable.
 
-          The jumps to the addresses outside of the instruction are the indirect
-          jumps to the constant addresses. The instructions are cached by their
-          addresses and bytes, so the instruction, whose bytes change, is lifted
-          anew. The semantics, that the disassembler computed, are used, if the
-          bytes are the same, otherwise the lifting loads the semantics, e.g.,
-          the Primus Lisp program of x86, once per process, which takes seconds.
-          If [disassembled_only], then only the former are used, and [None]
-          isn't cached.
+            The jumps to the addresses outside of the instruction are the
+            indirect jumps to the constant addresses. The instructions are
+            cached by their addresses and bytes, so the instruction, whose bytes
+            change, is lifted anew. The semantics, that the disassembler
+            computed, are used, if the bytes are the same, otherwise the lifting
+            loads the semantics, e.g., the Primus Lisp program of x86, to the
+            knowledge of the system, which the process parses and types once, as
+            it takes seconds. If [disassembled_only], then only the former are
+            used, and [None] isn't cached.
 
-          The instruction has the [encoding], e.g., Thumb of ARM, that the
-          caller knows, e.g., from the mode of the machine, otherwise the one,
-          that the disassembler found at [addr], otherwise the one, that the
-          target guesses, e.g., from the symbols. The jumps of a call, which the
-          IR of the instruction has, are the calls, that return to the next
-          instruction, as the program has them. *)
+            The instruction has the [encoding], e.g., Thumb of ARM, that the
+            caller knows, e.g., from the mode of the machine, otherwise the one,
+            that the disassembler found at [addr], otherwise the one, that the
+            target guesses, e.g., from the symbols. The jumps of a call, which
+            the IR of the instruction has, are the calls, that return to the
+            next instruction, as the program has them. *)
 
-      val code : project -> int64 -> string option
-      (** [code proj addr] the bytes of the instruction at [addr], that [insn]
-          lifted last. *)
+        val code : int64 -> string option Machine.t
+        (** [code addr] the bytes of the instruction at [addr], that [insn]
+            lifted last. *)
 
-      val encoding : project -> int64 -> Theory.language option
-      (** [encoding proj addr] the encoding of the instruction at [addr], that
-          [insn] lifted last, e.g., Thumb of ARM, which the disassembler found
-          there, or which the caller asked for. *)
+        val encoding : int64 -> Theory.language option Machine.t
+        (** [encoding addr] the encoding of the instruction at [addr], that
+            [insn] lifted last, e.g., Thumb of ARM, which the disassembler found
+            there, or which the caller asked for. *)
 
-      val name : project -> int64 -> string option
-      (** [name proj addr] the name of the instruction at [addr], that [insn]
-          lifted last, e.g., [tBLXi] of LLVM. *)
+        val name : int64 -> string option Machine.t
+        (** [name addr] the name of the instruction at [addr], that [insn]
+            lifted last, e.g., [tBLXi] of LLVM. *)
+      end
     end
 
     (** The interworking of ARM.

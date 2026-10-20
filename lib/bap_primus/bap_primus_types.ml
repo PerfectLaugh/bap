@@ -78,6 +78,7 @@ module type Machine = sig
   val arch : arch t
   val args : string array t
   val envp : string array t
+  val knowledge : 'a Bap_knowledge.Knowledge.t -> 'a t
 end
 
 module type Component = functor (Machine : Machine) -> sig

@@ -17,8 +17,19 @@
     ]}
 
     The program runs in the fiber of the script, which it leaves, when it
-    pauses, and the script continues it with {!run}. The emulator is one at a
-    time, as Unicorn is. *)
+    pauses, and the script continues it with {!run}. The emulators run side by
+    side, e.g., of the programs of different targets, each in its own engine of
+    Unicorn and its own Primus system, with its own registers, memory, names,
+    hooks, stops of the debugger, and snapshots, e.g.,
+
+    {[
+    let a = Bap_emu.create (Bap_script.project ~bare:true x86_file) in
+    let b = Bap_emu.create (Bap_script.project ~bare:true arm_file) in
+    ignore (Bap_emu.step a);
+    ignore (Bap_emu.step b)
+    ]}
+
+    The script, which runs in one thread, runs one of them at a time. *)
 
 open Bap.Std
 
@@ -45,6 +56,7 @@ val create :
   ?args:string list ->
   ?envp:string list ->
   ?entry:string ->
+  ?restore:string ->
   project ->
   t
 (** [create project] starts the program of [project], from [entry], by default
@@ -57,7 +69,10 @@ val create :
     The components of [init], e.g., [Bap_script_debugger.component], and the
     [redirects] of the channels of the program, e.g.,
     [[ ("<stdin>", "input.txt") ]], run in the machine after the components of
-    the system, before the program starts. *)
+    the system, before the program starts.
+
+    With [restore] the program continues from the checkpoint in the file, see
+    {!save}, instead of the [entry], and pauses before its address. *)
 
 val run : ?until:int64 -> t -> status
 (** [run emu] continues the program, until it pauses, e.g., before the
@@ -176,6 +191,14 @@ val arg : t -> int -> int64
 val exit_code : t -> int option
 (** the code, with which the program exited *)
 
+val knowledge : t -> Bap_knowledge.Knowledge.state option
+(** the knowledge of the system, when it finished, e.g., of the instructions,
+    that it lifted, see [Primus.Lift], and what its components computed, or
+    [None], while the program runs, e.g., when it is paused. The system, whose
+    program ended, finishes, after which its snapshots are not restored. The
+    system starts from the toplevel knowledge, see [Toplevel.current], and its
+    knowledge doesn't go there, as each emulator has its own knowledge. *)
+
 type snapshot
 (** the saved state of the paused program, its registers and its memory *)
 
@@ -187,7 +210,53 @@ val snapshot : t -> snapshot
 val restore : t -> snapshot -> unit
 (** [restore emu snapshot] drops the state of the paused program, which
     continues from the [snapshot], paused at its address. The hooks of the
-    script stay. *)
+    script stay.
+
+    Raises [Invalid_argument], if the [snapshot] is of another emulator. *)
+
+val save : t -> string -> unit
+(** [save emu file] saves the checkpoint of the paused program to the [file],
+    from which {!create} continues it, in another run of bap too, e.g.,
+
+    {[
+      ignore (Bap_emu.run emu ~until:after_unpack);
+      Bap_emu.add_symbol emu "decrypt" 0x602000L;
+      Bap_emu.save emu "unpacked.ckpt";
+      ...
+      let emu = Bap_emu.create ~restore:"unpacked.ckpt" proj in
+      Bap_emu.on_call emu "decrypt" (fun _ -> ...)
+    ]}
+
+    The checkpoint has the registers, the memory, as the program and the script
+    changed it, the names of {!add_symbol}, and the functions of {!unstub}. The
+    names of the program and its stubs are of its file, which is loaded anew.
+    The program, that continues from the checkpoint, ends, when the run of
+    Unicorn, in which it was saved, returns, e.g., the program, when it was in
+    the code of the program, which Primus didn't call, e.g., from a Lisp stub.
+
+    Raises [Invalid_argument], if the program is not paused, e.g., in a hook,
+    and [Failure], if the checkpoint can't be saved. *)
+
+val add_symbol : t -> string -> int64 -> unit
+(** [add_symbol emu name addr] names the function at the address of its first
+    instruction, e.g., in the code, that the program unpacked, or moved, which
+    replaces the name, that the address had, so that {!on_call} hooks it by the
+    name, also the hooks that are already there, and the checkpoints have it,
+    see {!save}. *)
+
+val symbols : t -> (string * int64) list
+(** the names of the functions and their addresses, of the program and of
+    {!add_symbol}, in the order of the addresses *)
+
+val unstub : t -> string -> unit
+(** [unstub emu name] runs the code of the function of the program in Unicorn
+    again, instead of the stub, that replaced it, e.g., the Lisp stub of
+    [malloc] of a static program, e.g., after the script patched the code, see
+    {!patch}, also when Primus calls the function, e.g., from another stub. The
+    checkpoints keep it, see {!save}.
+
+    Raises [Invalid_argument], if the program has no code of the function, e.g.,
+    if it is external, or if it is not paused, e.g., in a hook. *)
 
 (** The taint of the values, that the program computes.
 

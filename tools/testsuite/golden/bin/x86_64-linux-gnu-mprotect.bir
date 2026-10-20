@@ -15,7 +15,7 @@ sub mprotect(mprotect_addr, mprotect_len, mprotect_prot, mprotect_result)
 sub putc(putc_c, putc_stream, putc_result)
 sub register_tm_clones(register_tm_clones_result)
 sub intrinsic:hlt()
-sub %00000560(%00000560_result)
+sub %sub1(%sub1_result)
 sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
 
 sub main(main_argc, main_argv, main_result)

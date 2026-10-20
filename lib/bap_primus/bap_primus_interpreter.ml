@@ -123,30 +123,38 @@ let pc_change, pc_changed =
     ~desc:"Occurs after the program counter is changed."
 
 (* the addresses, at which the executors, that run the code outside of
-   the interpreter, stop and tell the address with [Make.set_pc] *)
+   the interpreter, stop and tell the address with [Make.set_pc], which
+   are of the system, i.e., of all its machines, but not of the other
+   systems, that run in the same process, e.g., the emulators of a
+   script *)
 module Stops = struct
-  let addrs = Hash_set.create (module Addr)
-  let stepping = ref false
-  let version = ref 0
-  let changed () = incr version
+  type t = { addrs : Set.M(Addr).t; stepping : bool; version : int }
 
-  let add addr =
-    Hash_set.add addrs addr;
-    changed ()
+  let state =
+    Primus.Machine.State.declare ~uuid:"5e0d1a3c-9b47-4f6e-8d21-c7a4f3b9e016"
+      ~name:"interpreter-stops" (fun _ ->
+        { addrs = Set.empty (module Addr); stepping = false; version = 0 })
 
-  let remove addr =
-    Hash_set.remove addrs addr;
-    changed ()
+  module Make (Machine : Machine) = struct
+    open Machine.Syntax
 
-  let mem addr = Hash_set.mem addrs addr
-  let to_list () = Hash_set.to_list addrs |> List.sort ~compare:Addr.compare
+    let get = Machine.Global.get state
 
-  let set_stepping x =
-    stepping := x;
-    changed ()
+    let update f =
+      Machine.Global.update state ~f:(fun s ->
+          { (f s) with version = s.version + 1 })
 
-  let stepping () = !stepping
-  let version () = !version
+    let add addr = update (fun s -> { s with addrs = Set.add s.addrs addr })
+
+    let remove addr =
+      update (fun s -> { s with addrs = Set.remove s.addrs addr })
+
+    let mem addr = get >>| fun s -> Set.mem s.addrs addr
+    let to_list = get >>| fun s -> Set.to_list s.addrs
+    let set_stepping x = update (fun s -> { s with stepping = x })
+    let stepping = get >>| fun s -> s.stepping
+    let version = get >>| fun s -> s.version
+  end
 end
 
 let halting, will_halt =

@@ -141,6 +141,7 @@ let modes =
    address. *)
 module Arm (Machine : Machine) = struct
   open Machine.Syntax
+  module Lift = Lift.Make (Machine)
 
   let int64 x = Bitvec.to_int64 (Word.to_bitvec x)
 
@@ -161,19 +162,18 @@ module Arm (Machine : Machine) = struct
 
   (* the mode of the instruction, that runs *)
   let mode addr =
-    Machine.get () >>= fun proj ->
-    Machine.Local.get modes >>| fun m ->
+    Machine.Local.get modes >>= fun m ->
     match Map.find m addr with
-    | Some thumb -> thumb
+    | Some thumb -> Machine.return thumb
     | None -> (
-        match Lift.encoding proj (int64 addr) with
+        Lift.encoding (int64 addr) >>| function
         | Some used -> Interworking.is_thumb used
         | None -> false)
 
   let leave addr blks ~next dst =
-    Machine.get () >>= fun proj ->
     mode addr >>= fun thumb ->
-    let name = Option.value (Lift.name proj (int64 addr)) ~default:"" in
+    Lift.name (int64 addr) >>= fun name ->
+    let name = Option.value name ~default:"" in
     let dst, entered = Interworking.jump ~name ~thumb ~next blks dst in
     set next thumb >>= fun () ->
     set dst entered >>| fun () -> dst
@@ -186,12 +186,13 @@ module Run (Mode : Mode) (Machine : Machine) = struct
   module Interp = Interpreter.Make (Machine)
   module Code = Linker.Make (Machine)
   module Mode = Mode (Machine)
+  module Lift = Lift.Make (Machine)
 
   let int64 x = Bitvec.to_int64 (Word.to_bitvec x)
 
   (* the bytes from [addr], while they are executable *)
   let fetch addr =
-    let+ loaded = Memory.load_bytes addr Lift.max_size in
+    let+ loaded = Memory.load_bytes addr Bap_primus_lift.max_size in
     let rec bytes i acc =
       if i = Array.length loaded then acc
       else
@@ -224,12 +225,11 @@ module Run (Mode : Mode) (Machine : Machine) = struct
   (* runs the code from [addr], see above, the code, that is linked
      to the address, see [link], runs as the code of the program *)
   let rec run ~link addr =
-    let* proj = Machine.get () in
     let* addr = Mode.enter addr in
     let* encoding = Mode.encoding addr in
     let* bytes = fetch addr in
     let read _ n = String.prefix bytes n in
-    match Lift.insn ?encoding proj ~read (int64 addr) with
+    Lift.insn ?encoding ~read (int64 addr) >>= function
     | None -> Machine.raise (Interpreter.Segmentation_fault addr)
     | Some (size, blks) ->
         let next = Word.(addr ++ size) in

@@ -365,20 +365,23 @@ open Bap_primus.Std
 module Watch (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
   module Env = Primus.Env.Make (Machine)
+  module Stops = Primus.Interpreter.Stops.Make (Machine)
 
   let stopped addr =
-    if Primus.Interpreter.Stops.mem addr then
+    Stops.mem addr >>= fun stop ->
+    if stop then
       Env.get (Var.create "RAX" (Type.imm 64)) >>| fun x ->
       Printf.printf "RAX = %s\n%!"
         (Word.string_of_value (Primus.Value.to_word x))
     else Machine.return ()
 
-  let init () = Primus.Interpreter.pc_change >>> stopped
+  let init () =
+    Stops.add (Addr.of_int64 ~width:64 0x4004c0L) >>= fun () ->
+    Primus.Interpreter.pc_change >>> stopped
 end
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  Primus.Interpreter.Stops.add (Addr.of_int64 ~width:64 0x4004c0L);
   ignore
     (Bap_script.run ~system:"bap:unicorn-executor" ~init:[ (module Watch) ]
        (Bap_script.project file))
@@ -573,6 +576,32 @@ let bare data =
                  (dir env))
         in
         contains env "prints the CRC" out "1489580789");
+    (* each system lifts the system calls in its own knowledge, with the
+       semantics, that the process loads once *)
+    case "script/unicorn/bare/twice/x86_64-linux-gnu-syscall-crc" (fun env ->
+        ignore
+          (write env "syscalls.lisp"
+             (List.assoc "x86_64-linux-gnu-syscall-crc" syscalls));
+        let out =
+          bap ~timeout:300. env
+            [
+              "script";
+              write env "script.ml"
+                (Printf.sprintf
+                   {|let () =
+  let file = List.hd (Bap_script.args ()) in
+  let lisp = Some { Bap_script.paths = [ %S ]; features = [ "syscalls" ] } in
+  for _ = 1 to 2 do
+    ignore
+      (Bap_script.run ~system:"bap:unicorn-executor"
+         (Bap_script.project ~bare:true ?lisp file))
+  done
+|}
+                   (dir env));
+              path data "bin/x86_64-linux-gnu-syscall-crc";
+            ]
+        in
+        check env "prints the CRC twice" (count out "1489580789" = 2));
   ]
 
 (* the scripts run the programs with Bap_emu, pause them, see and change
@@ -900,6 +929,135 @@ let () =
             ( "pauses the restored program",
               "paused at 400733\n.*\nhello\n.*exited 0" );
           ]);
+    (* the checkpoint keeps the memory, that the script changed, and the
+       names, that it gave, which another run of bap loads *)
+    case "emu/x86_64-linux-gnu-echo/checkpoint" (fun env ->
+        let saved =
+          script env "x86_64-linux-gnu-echo"
+            {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+
+let word emu addr =
+  let s = Emu.read emu addr 8 in
+  let r = ref 0L in
+  for i = 7 downto 0 do r := Int64.(logor (shift_left !r 8) (of_int (Char.code s.[i]))) done;
+  !r
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  let emu = Emu.create ~args:[ "hello"; "cruel" ] (Bap_script.project ~bare:true file) in
+  ignore (Emu.run emu ~until:0x40076bL);
+  Emu.write emu (word emu Int64.(add (Emu.reg emu "RSI") 8L)) "HELLO";
+  let say = List.assoc "print_endline" (Emu.symbols emu) in
+  Emu.add_symbol emu "say" say;
+  Emu.save emu "echo.ckpt";
+  Printf.printf "saved at %Lx, say at %Lx\n%!" (Emu.pc emu) say;
+  (try Emu.save emu "missing/echo.ckpt" with Failure _ -> print_endline "can't save");
+  match Emu.run emu with
+  | Exited c -> Printf.printf "exited %s\n" (match c with Some c -> string_of_int c | None -> "?")
+  | _ -> print_endline "not exited"
+|}
+        in
+        sequence env saved
+          [
+            ("saves", "saved at 40076b, say at 4006ed");
+            ("reports the error", "can't save");
+            ("continues", "HELLO\ncruel\n.*exited 0");
+          ];
+        let restored =
+          script env "x86_64-linux-gnu-echo"
+            {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  let emu = Emu.create ~restore:"echo.ckpt" (Bap_script.project ~bare:true file) in
+  Printf.printf "restored at %Lx, RDI = %Ld\n%!" (Emu.pc emu) (Emu.reg emu "RDI");
+  Printf.printf "say at %Lx\n%!" (List.assoc "say" (Emu.symbols emu));
+  let calls = ref 0 in
+  Emu.on_call emu "say" (fun _ -> incr calls; Default);
+  match Emu.run emu with
+  | Exited c ->
+      Printf.printf "exited %s, say was called %d times\n"
+        (match c with Some c -> string_of_int c | None -> "?") !calls
+  | Failed m -> print_endline ("failed " ^ m)
+  | _ -> print_endline "not exited"
+|}
+        in
+        sequence env restored
+          [
+            ("restores", "restored at 40076b, RDI = 3");
+            ("names the function", "say at 4006ed");
+            ("runs the changed memory", "HELLO\ncruel\n");
+            (* the run of main, which the Lisp stub of __libc_start_main
+               called, returns, so the program doesn't exit *)
+            ("hooks the name", "exited \\?, say was called 11 times");
+          ]);
+    (* the code of the function, that a Lisp stub replaced, runs again,
+       e.g., as the script patched it, also from the checkpoint *)
+    case "emu/x86_64-linux-gnu-echo/unstub" (fun env ->
+        ignore
+          (write env "quiet.lisp"
+             {|(defun print_endline ()
+  (declare (external "print_endline"))
+  0)
+|});
+        let run source =
+          script env "x86_64-linux-gnu-echo"
+            (Printf.sprintf
+               {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+
+let show emu = function
+  | Emu.Paused -> Printf.printf "paused at %%Lx\n%%!" (Emu.pc emu)
+  | Exited c -> Printf.printf "exited %%s\n%%!" (match c with Some c -> string_of_int c | None -> "?")
+  | Failed m -> Printf.printf "failed %%s\n%%!" m
+  | Running -> print_endline "running"
+
+let project file =
+  Bap_script.project ~bare:true
+    ~lisp:{ Bap_script.paths = [ %S ]; features = [ "quiet" ] } file
+
+let file = List.hd (Bap_script.args ())
+%s|}
+               (dir env) source)
+        in
+        let out =
+          run
+            {|let () =
+  let emu = Emu.create ~args:[ "hello" ] (project file) in
+  show emu (Emu.run emu ~until:0x40076bL);
+  let snap = Emu.snapshot emu in
+  print_endline "== stubbed";
+  show emu (Emu.run emu);
+  Emu.restore emu snap;
+  (try Emu.unstub emu "putchar" with Invalid_argument _ -> print_endline "putchar is external");
+  Emu.unstub emu "print_endline";
+  (* mov $0xa, %edi, which prints the newline, prints + instead *)
+  Emu.patch emu 0x400727L "\xbf\x2b";
+  Emu.save emu "echo.ckpt";
+  print_endline "== unstubbed";
+  show emu (Emu.run emu)
+|}
+        in
+        sequence env out
+          [
+            ("pauses", "paused at 40076b");
+            ("runs the stub", "== stubbed\nexited 0");
+            ("checks the function", "putchar is external");
+            ( "runs the patched code",
+              "== unstubbed\n[^\n]*\\+hello\\+we\\+.*exited 0" );
+          ];
+        let out =
+          run
+            {|let () =
+  let emu = Emu.create ~restore:"echo.ckpt" (project file) in
+  print_endline "== restored";
+  show emu (Emu.run emu)
+|}
+        in
+        has env "runs the patched code of the checkpoint" out
+          "== restored\n[^\n]*\\+hello\\+we\\+.*exited \\?");
     case "emu/arm-linux-gnueabihf-thumb-crc" (fun env ->
         let out =
           script env "arm-linux-gnueabihf-thumb-crc"
@@ -923,6 +1081,91 @@ let () =
             ("steps the Thumb code", "steps: 202df 202e1 202e3");
             ("prints the CRC", "1489580789");
             ("exits", "exited 0");
+          ]);
+    (* the emulators run side by side, each in its own engine, also of
+       another target, with their own registers, memory, names and
+       hooks *)
+    case "emu/side-by-side" (fun env ->
+        let out =
+          bap ~timeout:300. env
+            [
+              "script";
+              write env "script.ml"
+                {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+
+let word emu addr =
+  let s = Emu.read emu addr 8 in
+  let r = ref 0L in
+  for i = 7 downto 0 do r := Int64.(logor (shift_left !r 8) (of_int (Char.code s.[i]))) done;
+  !r
+
+let show name emu = function
+  | Emu.Paused -> Printf.printf "%s paused at %Lx\n%!" name (Emu.pc emu)
+  | Exited c -> Printf.printf "%s exited %s\n%!" name (match c with Some c -> string_of_int c | None -> "?")
+  | Failed m -> Printf.printf "%s failed %s\n%!" name m
+  | Running -> Printf.printf "%s running\n%!" name
+
+let () =
+  let echo, crc =
+    match Bap_script.args () with
+    | [ echo; crc ] -> (echo, crc)
+    | _ -> failwith "expected ECHO CRC"
+  in
+  let a = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true echo) in
+  let b = Emu.create ~args:[ "hi" ] (Bap_script.project ~bare:true crc) in
+  let c = Emu.create ~args:[ "world"; "again" ] (Bap_script.project ~bare:true echo) in
+  show "a" a (Emu.run a ~until:0x40076bL);
+  show "c" c (Emu.run c ~until:0x40076bL);
+  Printf.printf "argc: a %Ld, c %Ld\n%!" (Emu.reg a "RDI") (Emu.reg c "RDI");
+  Emu.write a (word a Int64.(add (Emu.reg a "RSI") 8L)) "HELLO";
+  Emu.add_symbol a "only_a" 0x400733L;
+  Printf.printf "names: a %b, c %b\n%!"
+    (List.mem_assoc "only_a" (Emu.symbols a))
+    (List.mem_assoc "only_a" (Emu.symbols c));
+  (try Emu.restore c (Emu.snapshot a)
+   with Invalid_argument _ -> print_endline "the snapshot of a is not of c");
+  let calls_a = ref 0 and calls_c = ref 0 in
+  Emu.on_call a "print_endline" (fun _ -> incr calls_a; Default);
+  Emu.on_call c "print_endline" (fun _ -> incr calls_c; Default);
+  let pcs = ref [] in
+  for _ = 1 to 3 do
+    ignore (Emu.step a);
+    ignore (Emu.step b);
+    ignore (Emu.step c);
+    pcs := Printf.sprintf "%Lx/%Lx/%Lx" (Emu.pc a) (Emu.pc b) (Emu.pc c) :: !pcs
+  done;
+  Printf.printf "steps: %s\n%!" (String.concat " " (List.rev !pcs));
+  print_endline "== b";
+  show "b" b (Emu.run b);
+  print_endline "== c";
+  show "c" c (Emu.run c);
+  print_endline "== a";
+  show "a" a (Emu.run a);
+  Printf.printf "print_endline: a %d, c %d\n" !calls_a !calls_c;
+  Printf.printf "knowledge: a %b, b %b\n"
+    (Option.is_some (Emu.knowledge a))
+    (Option.is_some (Emu.knowledge b))
+|};
+              path data "bin/x86_64-linux-gnu-echo";
+              path data "bin/arm-linux-gnueabihf-thumb-crc";
+            ]
+        in
+        sequence env out
+          [
+            ("pauses a", "a paused at 40076b");
+            ("pauses c", "c paused at 40076b");
+            ("has the registers of each", "argc: a 2, c 3");
+            ("has the names of each", "names: a true, c false");
+            ("has the snapshots of each", "the snapshot of a is not of c");
+            ( "steps them in turns",
+              "steps: 40076c/202df/40076c 40076f/202e1/40076f \
+               400771/202e3/400771" );
+            ("runs b", "== b\n.*1489580789.*b exited 0");
+            ("runs c", "== c\n.*\nworld\nagain\n.*c exited 0");
+            ("runs a with its memory", "== a\n.*\nHELLO\n.*a exited 0");
+            ("hooks the calls of each", "print_endline: a 10, c 11");
+            ("has the knowledge of each", "knowledge: a true, b true");
           ]);
   ]
 
@@ -1316,6 +1559,7 @@ module Debugger = Bap_script_debugger
 module Zero (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
   module Eval = Primus.Interpreter.Make (Machine)
+  module Stops = Primus.Interpreter.Stops.Make (Machine)
 
   let rax = Var.create "RAX" (Type.imm 64)
   let steps = ref 0
@@ -1323,17 +1567,16 @@ module Zero (Machine : Primus.Machine.S) = struct
   let stopped addr =
     if !steps = 0 then begin
       incr steps;
-      Debugger.step true;
+      Stops.set_stepping true >>= fun () ->
       Eval.get rax >>= fun x ->
       Printf.printf "at %s RAX = %s, zeroing it\n%!" (Addr.string_of_value addr)
         (Word.string_of_value (Primus.Value.to_word x));
       Eval.const (Word.zero 64) >>= Eval.set rax
     end
     else begin
-      Debugger.step false;
-      Primus.Interpreter.Stops.remove (Addr.of_int64 ~width:64 0x4004c0L);
-      Printf.printf "stepped to %s\n%!" (Addr.string_of_value addr);
-      Machine.return ()
+      Stops.set_stepping false >>= fun () ->
+      Stops.remove (Addr.of_int64 ~width:64 0x4004c0L) >>| fun () ->
+      Printf.printf "stepped to %s\n%!" (Addr.string_of_value addr)
     end
 end
 

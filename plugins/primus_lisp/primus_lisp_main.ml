@@ -42,6 +42,18 @@ let load_program paths features project =
       let err = asprintf "%a" Primus.Lisp.Load.pp_error err in
       invalid_arg err
 
+(* the programs of the targets, which the units of each knowledge, e.g.,
+   of each Primus system, see [Primus.Lift], load from the same files,
+   so they are loaded once *)
+let programs :
+    (string list * string list * string, Primus.Lisp.program) Hashtbl.Poly.t =
+  Hashtbl.Poly.create ()
+
+let load_target_program paths features target =
+  Hashtbl.find_or_add programs
+    (paths, features, Theory.Target.to_string target)
+    ~default:(fun () -> load_program paths features (Project.empty target))
+
 module Documentation = struct
   let print proj =
     let module Machine = struct
@@ -299,7 +311,7 @@ module Semantics = struct
     | false -> !!empty
     | true ->
         KB.collect Theory.Unit.target unit >>| fun target ->
-        pack @@ load_program paths features @@ Project.empty target
+        pack @@ load_target_program paths features target
 
   (* a backend may specify the width of a register that is not known
      to the target, using the typed variable notation, e.g., ZMM0:512 *)
@@ -387,7 +399,7 @@ module Semantics = struct
     let paths = List.filter ~f:is_folder (paths @ default_paths) in
     let features = "core" :: List.concat_map ~f:collect_features paths in
     let paths = paths @ library_paths in
-    let prog t = pack @@ load_program paths features @@ Project.empty t in
+    let prog t = pack @@ load_target_program paths features t in
     KB.promise Theory.Unit.source @@ fun this ->
     Primus.Lisp.Unit.is_lisp this >>= function
     | true -> !!empty

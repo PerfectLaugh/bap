@@ -717,6 +717,14 @@ let merge_names names =
   | None -> Map.empty (module KB.Name)
   | Some r -> r
 
+(* the typed programs, by their programs, targets and contexts, as the
+   units of each knowledge, e.g., of each Primus system, see
+   [Primus.Lift], have the same programs, which are typed once, as the
+   typing takes seconds *)
+let typed_programs :
+    (Program.t * Theory.Target.t * Context.t * program) list ref =
+  ref []
+
 let obtain_typed_program unit =
   let open KB.Syntax in
   let open KB.Let in
@@ -726,37 +734,56 @@ let obtain_typed_program unit =
   | Some prog -> !!prog
   | None -> (
       let* context = unit --> context in
-      let input =
-        let init = KB.Value.get program src in
-        Program.with_context init
-        @@ Context.merge (Program.context init) context
+      let init = KB.Value.get program src in
+      let cached =
+        List.find_map typed_programs.contents
+          ~f:(fun (init', target', context', prog) ->
+            Option.some_if
+              (phys_equal init init'
+              && Theory.Target.equal target target'
+              &&
+              match Context.order context context' with
+              | EQ -> true
+              | LT | GT | NC -> false)
+              prog)
       in
-      let* prog = link_library target @@ Program.with_places input target in
-      let tprog = Program.Type.infer prog in
-      let prog = Program.Type.program tprog in
-      let places =
-        Program.fold prog Key.place
-          ~f:(fun ~package place places ->
-            let name = KB.Name.create ~package (Def.name place) in
-            Map.set places ~key:name ~data:(Def.Place.location place))
-          ~init:(Map.empty (module KB.Name))
-      in
-      let names =
-        merge_names
-          [
-            collect_names Defn Key.func prog;
-            collect_names Prim Key.semantics prog;
-            collect_names Data Key.para prog;
-            collect_names Data Key.const prog;
-            collect_names Meth Key.meth prog;
-          ]
-      in
-      let program = { prog; places; names } in
-      match Program.Type.errors tprog with
-      | [] ->
+      match cached with
+      | Some program ->
           let src = KB.Value.put typed src (Some program) in
           KB.provide Theory.Unit.source unit src >>| fun () -> program
-      | errs -> KB.fail (Illtyped_program errs))
+      | None -> (
+          let input =
+            Program.with_context init
+            @@ Context.merge (Program.context init) context
+          in
+          let* prog = link_library target @@ Program.with_places input target in
+          let tprog = Program.Type.infer prog in
+          let prog = Program.Type.program tprog in
+          let places =
+            Program.fold prog Key.place
+              ~f:(fun ~package place places ->
+                let name = KB.Name.create ~package (Def.name place) in
+                Map.set places ~key:name ~data:(Def.Place.location place))
+              ~init:(Map.empty (module KB.Name))
+          in
+          let names =
+            merge_names
+              [
+                collect_names Defn Key.func prog;
+                collect_names Prim Key.semantics prog;
+                collect_names Data Key.para prog;
+                collect_names Data Key.const prog;
+                collect_names Meth Key.meth prog;
+              ]
+          in
+          let program = { prog; places; names } in
+          match Program.Type.errors tprog with
+          | [] ->
+              typed_programs.contents <-
+                (init, target, context, program) :: typed_programs.contents;
+              let src = KB.Value.put typed src (Some program) in
+              KB.provide Theory.Unit.source unit src >>| fun () -> program
+          | errs -> KB.fail (Illtyped_program errs)))
 
 let typed_program unit =
   let open KB.Syntax in

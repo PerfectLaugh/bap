@@ -59,10 +59,13 @@ type input = { channel : In_channel.t; prompt : bool }
 let input : input option ref = ref None
 let detached = ref false
 
-(* the breakpoints of the options, which the first machine resolves, as
-   they are of the program *)
+(* the breakpoints of the options, which the first machine of a system
+   resolves, as they are of its program *)
 let points : string list ref = ref []
-let resolved = ref false
+
+let resolved =
+  Primus.Machine.State.declare ~uuid:"0a7e3c19-5d82-4b6f-a1e4-93c2d8f05b7a"
+    ~name:"debugger-resolved" (fun _ -> false)
 
 let read_command () =
   match !input with
@@ -73,12 +76,9 @@ let read_command () =
         Out_channel.flush stdout);
       match In_channel.input_line channel with
       | None ->
-          (* the commands are over, the machines run to the end *)
+          (* the commands are over, the machines run to the end, see
+             [Debugger.repl] *)
           detached := true;
-          Primus.Interpreter.Stops.set_stepping false;
-          List.iter
-            (Primus.Interpreter.Stops.to_list ())
-            ~f:Primus.Interpreter.Stops.remove;
           None
       | Some line ->
           if not prompt then printf "(bap) %s\n" line;
@@ -102,7 +102,7 @@ module Debugger (Machine : Primus.Machine.S) = struct
   module Memory = Primus.Memory.Make (Machine)
   module Value = Primus.Value.Make (Machine)
   module Lisp = Primus.Lisp.Make (Machine)
-  module Stops = Primus.Interpreter.Stops
+  module Stops = Primus.Interpreter.Stops.Make (Machine)
 
   let width = Machine.gets Project.target >>| Theory.Target.bits
 
@@ -220,22 +220,18 @@ module Debugger (Machine : Primus.Machine.S) = struct
     let stay = Machine.return false and go = Machine.return true in
     match words with
     | [] -> stay
-    | ("c" | "continue") :: _ ->
-        Stops.set_stepping false;
-        go
-    | ("s" | "step") :: _ ->
-        Stops.set_stepping true;
-        go
+    | ("c" | "continue") :: _ -> Stops.set_stepping false >>= fun () -> go
+    | ("s" | "step") :: _ -> Stops.set_stepping true >>= fun () -> go
     | ("b" | "break") :: [ point ] ->
         with_point point (fun addr ->
-            Stops.add addr;
-            Machine.return (say "breakpoint at %s" (hex addr)))
+            let+ () = Stops.add addr in
+            say "breakpoint at %s" (hex addr))
         >>= fun () -> stay
     | ("d" | "delete") :: [ point ] ->
-        with_point point (fun addr -> Machine.return (Stops.remove addr))
-        >>= fun () -> stay
+        with_point point Stops.remove >>= fun () -> stay
     | [ "breaks" ] ->
-        List.iter (Stops.to_list ()) ~f:(fun addr -> say "%s" (hex addr));
+        let* stops = Stops.to_list in
+        List.iter stops ~f:(fun addr -> say "%s" (hex addr));
         stay
     | [ "pc" ] ->
         let* pc = Eval.pc in
@@ -290,6 +286,10 @@ module Debugger (Machine : Primus.Machine.S) = struct
 
   let rec repl () =
     match read_command () with
+    | None when !detached ->
+        (* the machines of the system run to the end *)
+        let* () = Stops.set_stepping false in
+        Stops.to_list >>= Machine.List.iter ~f:Stops.remove
     | None -> Machine.return ()
     | Some line ->
         let words =
@@ -304,24 +304,26 @@ module Debugger (Machine : Primus.Machine.S) = struct
 
   let stopped addr =
     if !busy || !detached then Machine.return ()
-    else if not (Stops.stepping () || Stops.mem addr) then Machine.return ()
     else
-      let* id = Machine.current () in
-      say "stopped at %s in machine %s" (hex addr)
-        (Format.asprintf "%a" Monads.Std.Monad.State.Multi.Id.pp id);
-      busy := true;
-      let+ () = repl () in
-      busy := false
+      let* stepping = Stops.stepping in
+      let* stopped = Stops.mem addr in
+      if not (stepping || stopped) then Machine.return ()
+      else
+        let* id = Machine.current () in
+        say "stopped at %s in machine %s" (hex addr)
+          (Format.asprintf "%a" Monads.Std.Monad.State.Multi.Id.pp id);
+        busy := true;
+        let+ () = repl () in
+        busy := false
 
   let add_breakpoints () =
-    if !resolved then Machine.return ()
-    else begin
-      resolved := true;
-      if List.is_empty !points then Machine.return (Stops.set_stepping true)
+    let* done_ = Machine.Global.get resolved in
+    if done_ then Machine.return ()
+    else
+      let* () = Machine.Global.put resolved true in
+      if List.is_empty !points then Stops.set_stepping true
       else
-        Machine.List.iter !points ~f:(fun point ->
-            with_point point (fun addr -> Machine.return (Stops.add addr)))
-    end
+        Machine.List.iter !points ~f:(fun point -> with_point point Stops.add)
 
   let init () =
     Machine.sequence

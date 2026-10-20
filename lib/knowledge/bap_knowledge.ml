@@ -2400,8 +2400,15 @@ module Knowledge = struct
     type +'a t = 'a obj
     type 'a ord = Oid.comparator_witness
 
+    (* the last object of the process, as the states, that grow from the
+       same state, e.g., the knowledge of a Primus system and the
+       toplevel one, create the objects, which may meet, e.g., in the
+       terms of a program, so the objects of all states are distinct *)
+    let last_object = ref Oid.zero
+
     let with_new_object objs f =
-      let next = Oid.succ objs.Env.last in
+      let next = Oid.succ (Oid.max objs.Env.last !last_object) in
+      last_object := next;
       f next { objs with Env.last = next }
 
     let create : ('a, _) cls -> 'a obj Knowledge.t =

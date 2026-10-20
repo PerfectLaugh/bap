@@ -14,7 +14,11 @@
    e.g., of x86, which is not persistent, so the lifters, that use it,
    lift nothing. The unit stays in the knowledge, so that its program is
    loaded once, and the labels, that the lifting creates, stay too, which
-   is bounded by the instructions, see [lifted]. *)
+   is bounded by the instructions, see [lifted].
+
+   The knowledge is of the system, that runs the machine, see
+   [Machine.knowledge], so the systems, e.g., the emulators of a script,
+   lift the instructions in their own knowledge, with their own cache. *)
 
 open Core
 open Bap_core_theory
@@ -80,61 +84,65 @@ let decode ?encoding unit mem =
 
 (* the jumps to the labels of the addresses, which are outside of the
    instruction, jump to the addresses, which the interpreter takes,
-   instead of the labels, which the linker doesn't know *)
+   instead of the labels, which the linker doesn't know, and the jumps
+   to the named labels, e.g., to the intrinsic functions, and to the
+   interrupts jump to the labels of the toplevel knowledge, as the terms
+   of the program have their names and interrupts there, see [Tid.name],
+   and the labels are of the knowledge of the system, see [Make] *)
 let addressed width blks =
+  let open KB.Syntax in
   let inside tid = List.exists blks ~f:(fun b -> Tid.equal (Term.tid b) tid) in
-  let resolve : label -> label = function
+  let resolve : label -> label KB.t = function
     | Direct tid when not (inside tid) -> (
-        match Toplevel.eval Theory.Label.addr (KB.return tid) with
-        | Some addr -> Indirect (Bil.int (Word.create addr width))
-        | None | (exception _) -> Direct tid)
-    | label -> label
+        KB.collect Theory.Label.addr tid >>= function
+        | Some addr -> KB.return (Indirect (Bil.int (Word.create addr width)))
+        | None -> (
+            KB.collect Theory.Label.name tid >>= function
+            | Some name -> KB.return (Direct (Tid.for_name name))
+            | None -> (
+                KB.collect Theory.Label.ivec tid >>| function
+                | Some ivec -> Direct (Tid.for_ivec ivec)
+                | None -> Direct tid)))
+    | label -> KB.return label
   in
-  List.map blks ~f:(fun blk ->
-      Term.map jmp_t blk ~f:(fun jmp ->
-          match Jmp.kind jmp with
-          | Goto l -> Jmp.with_kind jmp (Goto (resolve l))
-          | Ret l -> Jmp.with_kind jmp (Ret (resolve l))
-          | Call c ->
-              let c = Call.with_target c (resolve (Call.target c)) in
-              let c =
-                match Call.return c with
-                | Some r -> Call.with_return c (resolve r)
-                | None -> c
-              in
-              Jmp.with_kind jmp (Call c)
-          | Int _ -> jmp))
+  let resolve_jmp jmp =
+    match Jmp.kind jmp with
+    | Goto l -> resolve l >>| fun l -> Jmp.with_kind jmp (Goto l)
+    | Ret l -> resolve l >>| fun l -> Jmp.with_kind jmp (Ret l)
+    | Call c ->
+        resolve (Call.target c) >>= fun target ->
+        let c = Call.with_target c target in
+        (match Call.return c with
+          | Some r -> resolve r >>| Call.with_return c
+          | None -> KB.return c)
+        >>| fun c -> Jmp.with_kind jmp (Call c)
+    | Int _ -> KB.return jmp
+  in
+  KB.List.map blks ~f:(fun blk ->
+      Term.enum jmp_t blk |> Seq.to_list
+      |> KB.List.fold ~init:blk ~f:(fun blk jmp ->
+          resolve_jmp jmp >>| Term.update jmp_t blk))
 
 (* the IR, that the disassembler computed for the instruction at
    [addr], if it has the bytes, that [code] starts with, which spares
    the loading of the program of the semantics, see above *)
 let disassembled ?encoding addr code =
-  let result = Toplevel.var "unicorn-disassembled-insn" in
-  match
-    Toplevel.put result
-      (let open KB.Syntax in
-       Theory.Label.for_addr (Word.to_bitvec addr) >>= fun label ->
-       KB.collect Theory.Label.encoding label >>= fun coding ->
-       KB.collect Memory.slot label >>= function
-       | Some mem
-         when String.is_prefix code
-                ~prefix:(Bigsubstring.to_string (Memory.to_buffer mem))
-              && Option.for_all encoding ~f:(Theory.Language.equal coding) ->
-           KB.collect Theory.Semantics.slot label >>| fun insn ->
-           Some (Memory.length mem, coding, insn)
-       | _ -> KB.return None)
-  with
-  | exception _ -> None
-  | () -> (
-      match Toplevel.get result with
-      | Some (size, coding, insn) ->
-          let blks = Blk.from_insn ~addr insn in
-          if
-            List.exists blks ~f:(fun blk ->
-                Term.length def_t blk + Term.length jmp_t blk > 0)
-          then Some (size, coding, insn)
-          else None
-      | None | (exception _) -> None)
+  let open KB.Syntax in
+  Theory.Label.for_addr (Word.to_bitvec addr) >>= fun label ->
+  KB.collect Theory.Label.encoding label >>= fun coding ->
+  KB.collect Memory.slot label >>= function
+  | Some mem
+    when String.is_prefix code
+           ~prefix:(Bigsubstring.to_string (Memory.to_buffer mem))
+         && Option.for_all encoding ~f:(Theory.Language.equal coding) ->
+      KB.collect Theory.Semantics.slot label >>| fun insn ->
+      let blks = Blk.from_insn ~addr insn in
+      if
+        List.exists blks ~f:(fun blk ->
+            Term.length def_t blk + Term.length jmp_t blk > 0)
+      then Some (Memory.length mem, coding, insn)
+      else None
+  | _ -> KB.return None
 
 (* the jumps of the call, that leave it, are the calls, that return
    to the next instruction, as the program has them, while the IR of the
@@ -153,64 +161,62 @@ let calls ~next blks =
                 (Call (Call.create ~return:(Indirect next) ~target:l ()))
           | _ -> jmp))
 
-(* the IR of the instruction of [size] bytes at [addr] *)
-let ir ~width ~addr ~size insn =
+(* the size, the encoding, the name and the IR of the instruction of
+   [size] bytes at [addr] *)
+let ir ~width ~addr ~size coding insn =
   let blks = Blk.from_insn ~addr insn in
   let blks =
     if Insn.(is call) insn then calls ~next:(Bil.int Word.(addr ++ size)) blks
     else blks
   in
-  addressed width blks
+  KB.map (addressed width blks) ~f:(fun blks ->
+      Some (size, coding, Insn.name insn, blks))
+
+let width_of proj = Theory.Target.code_addr_size (Project.target proj)
+
+(* the instruction, that the disassembler computed, see [disassembled] *)
+let disassembled_insn ?encoding proj addr code =
+  let open KB.Syntax in
+  let width = width_of proj in
+  let addr = Word.of_int64 ~width addr in
+  disassembled ?encoding addr code >>= function
+  | Some (size, coding, insn) -> ir ~width ~addr ~size coding insn
+  | None -> KB.return None
 
 (* the size and the IR of the instruction at [addr], if [code], the
    bytes from [addr], has it *)
 let lift ?encoding proj addr code =
+  let open KB.Syntax in
   match Project.get proj filename with
-  | None -> None
+  | None -> KB.return None
   | Some file -> (
-      let target = Project.target proj in
-      let width = Theory.Target.code_addr_size target in
-      let addr = Word.of_int64 ~width addr in
-      let endian =
-        if Theory.Endianness.(equal eb) (Theory.Target.endianness target) then
-          BigEndian
-        else LittleEndian
-      in
-      match disassembled ?encoding addr code with
-      | Some (size, coding, insn) ->
-          Some (size, coding, Insn.name insn, ir ~width ~addr ~size insn)
+      disassembled_insn ?encoding proj addr code >>= function
+      | Some _ as insn -> KB.return insn
       | None -> (
+          let target = Project.target proj in
+          let width = width_of proj in
+          let addr = Word.of_int64 ~width addr in
+          let endian =
+            if Theory.Endianness.(equal eb) (Theory.Target.endianness target)
+            then BigEndian
+            else LittleEndian
+          in
           match Memory.create endian addr (Bigstring.of_string code) with
-          | Error _ -> None
+          | Error _ -> KB.return None
           | Ok mem -> (
-              let result = Toplevel.var "unicorn-lifted-insn" in
-              match
-                Toplevel.put result
-                  (let open KB.Syntax in
-                   unit_of_file file >>= fun unit ->
-                   (* the labels, that the lifters create, e.g., to find
-                    the target, which unaliases the registers, belong to
-                    the unit, as the project does it *)
-                   KB.promising Theory.Label.unit ~promise:(fun _ ->
-                       KB.return (Some unit))
-                   @@ fun () ->
-                   decode ?encoding unit mem >>= fun (label, size) ->
-                   match size with
-                   | None -> KB.return None
-                   | Some (size, coding) ->
-                       KB.collect Theory.Semantics.slot label >>| fun insn ->
-                       Some (size, coding, insn))
-              with
-              | exception _ -> None
-              | () -> (
-                  match Toplevel.get result with
-                  | Some (size, coding, insn) ->
-                      Some
-                        ( size,
-                          coding,
-                          Insn.name insn,
-                          ir ~width ~addr ~size insn )
-                  | None | (exception _) -> None))))
+              unit_of_file file >>= fun unit ->
+              (* the labels, that the lifters create, e.g., to find the
+                 target, which unaliases the registers, belong to the
+                 unit, as the project does it *)
+              KB.promising Theory.Label.unit ~promise:(fun _ ->
+                  KB.return (Some unit))
+              @@ fun () ->
+              decode ?encoding unit mem >>= fun (label, size) ->
+              match size with
+              | None -> KB.return None
+              | Some (size, coding) ->
+                  KB.collect Theory.Semantics.slot label
+                  >>= ir ~width ~addr ~size coding)))
 
 (* the instructions, that x86 has, are at most 15 bytes long *)
 let max_size = 16
@@ -224,59 +230,61 @@ type entry = {
 }
 
 (* the instructions, which are lifted, with their bytes, so that the
-   instruction, whose bytes change, is lifted anew *)
-let lifted : entry Int64.Table.t String.Table.t = String.Table.create ()
+   instruction, whose bytes change, is lifted anew, which are of the
+   system, as their labels are of its knowledge *)
+let lifted =
+  Bap_primus_machine.State.declare ~uuid:"7d3a1f86-2c94-4b5e-a0d7-58e6c1b92f34"
+    ~name:"lifted-instructions" (fun _ -> Map.empty (module Int64))
 
-(* [insn proj ~read addr] the instruction at [addr], from the bytes,
-   that [read addr n] reads, which are at most [n], or only the one,
-   that the disassembler computed, if [disassembled_only], which costs
-   less, if it is not cached, e.g., for the guesses of [trap] *)
-let insn ?(disassembled_only = false) ?encoding proj ~read addr =
-  let file = Option.value (Project.get proj filename) ~default:"" in
-  let insns = Hashtbl.find_or_add lifted file ~default:Int64.Table.create in
-  let bytes = read addr max_size in
-  let remember lifted =
-    let code, used, name, insn =
-      match lifted with
-      | Some (size, used, name, blks) ->
-          (String.prefix bytes size, used, name, Some (size, blks))
-      | None -> (bytes, Theory.Language.unknown, "", None)
+module Make (Machine : Bap_primus_types.Machine) = struct
+  open Machine.Syntax
+
+  (* the conflicts of the lifters, e.g., of an invalid instruction, are
+     no instruction *)
+  let knowledge x = Machine.knowledge (KB.catch x (fun _ -> KB.return None))
+
+  (* [insn ~read addr] the instruction at [addr], from the bytes, that
+     [read addr n] reads, which are at most [n], or only the one, that
+     the disassembler computed, if [disassembled_only], which costs
+     less, if it is not cached, e.g., for the guesses of a trap *)
+  let insn ?(disassembled_only = false) ?encoding ~read addr =
+    Machine.get () >>= fun proj ->
+    Machine.Global.get lifted >>= fun insns ->
+    let bytes = read addr max_size in
+    let remember result =
+      let code, used, name, insn =
+        match result with
+        | Some (size, used, name, blks) ->
+            (String.prefix bytes size, used, name, Some (size, blks))
+        | None -> (bytes, Theory.Language.unknown, "", None)
+      in
+      Machine.Global.update lifted ~f:(fun insns ->
+          Map.set insns ~key:addr ~data:{ code; encoding; used; name; insn })
+      >>| fun () -> insn
     in
-    Hashtbl.set insns ~key:addr ~data:{ code; encoding; used; name; insn };
-    insn
-  in
-  let same = Option.equal Theory.Language.equal in
-  match Hashtbl.find insns addr with
-  | Some { code; encoding = cached; insn; _ }
-    when String.is_prefix bytes ~prefix:code
-         && (Option.is_none encoding || same cached encoding) ->
-      insn
-  | _ when String.is_empty bytes -> remember None
-  | _ when disassembled_only -> (
-      let target = Project.target proj in
-      let width = Theory.Target.code_addr_size target in
-      match disassembled ?encoding (Word.of_int64 ~width addr) bytes with
-      | Some (size, coding, insn) ->
-          let addr = Word.of_int64 ~width addr in
-          remember
-            (Some (size, coding, Insn.name insn, ir ~width ~addr ~size insn))
-      | None -> None)
-  | _ -> remember (lift ?encoding proj addr bytes)
+    let same = Option.equal Theory.Language.equal in
+    match Map.find insns addr with
+    | Some { code; encoding = cached; insn; _ }
+      when String.is_prefix bytes ~prefix:code
+           && (Option.is_none encoding || same cached encoding) ->
+        Machine.return insn
+    | _ when String.is_empty bytes -> remember None
+    | _ when disassembled_only -> (
+        knowledge (disassembled_insn ?encoding proj addr bytes) >>= function
+        | Some _ as insn -> remember insn
+        | None -> Machine.return None)
+    | _ -> knowledge (lift ?encoding proj addr bytes) >>= remember
 
-(* the bytes of the instruction at [addr], which is lifted *)
-let code proj addr =
-  let file = Option.value (Project.get proj filename) ~default:"" in
-  Option.bind (Hashtbl.find lifted file) ~f:(fun insns ->
-      Option.map (Hashtbl.find insns addr) ~f:(fun { code; _ } -> code))
+  let entry addr f =
+    Machine.Global.get lifted >>| fun insns ->
+    Option.map (Map.find insns addr) ~f
 
-(* the encoding of the instruction at [addr], which is lifted *)
-let encoding proj addr =
-  let file = Option.value (Project.get proj filename) ~default:"" in
-  Option.bind (Hashtbl.find lifted file) ~f:(fun insns ->
-      Option.map (Hashtbl.find insns addr) ~f:(fun { used; _ } -> used))
+  (* the bytes of the instruction at [addr], which is lifted *)
+  let code addr = entry addr (fun { code; _ } -> code)
 
-(* the name of the instruction at [addr], which is lifted *)
-let name proj addr =
-  let file = Option.value (Project.get proj filename) ~default:"" in
-  Option.bind (Hashtbl.find lifted file) ~f:(fun insns ->
-      Option.map (Hashtbl.find insns addr) ~f:(fun { name; _ } -> name))
+  (* the encoding of the instruction at [addr], which is lifted *)
+  let encoding addr = entry addr (fun { used; _ } -> used)
+
+  (* the name of the instruction at [addr], which is lifted *)
+  let name addr = entry addr (fun { name; _ } -> name)
+end

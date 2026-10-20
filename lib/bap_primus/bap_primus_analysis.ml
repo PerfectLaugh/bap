@@ -6,6 +6,7 @@ module Machine = struct
 
   include Bap_primus_machine.Make (Knowledge)
 
+  let knowledge = lift
   let collect p o = lift (Knowledge.collect p o)
   let resolve p o = lift (Knowledge.resolve p o)
   let provide p o x = lift (Knowledge.provide p o x)

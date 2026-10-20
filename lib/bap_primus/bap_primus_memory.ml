@@ -86,8 +86,11 @@ module Backing = struct
     stored : id -> addr -> string -> unit;
   }
 
-  let current : t option ref = ref None
-  let set backing = current := backing
+  (* the backing is of the system, i.e., of all its machines *)
+  let state : t option Bap_primus_machine.State.t =
+    Bap_primus_machine.State.declare
+      ~uuid:"c2b8e5f1-6a34-4d0b-9e72-1f8d3a6c5b49" ~name:"memory-backing"
+      (fun _ -> None)
 end
 
 let sexp_of_word w = Sexp.Atom (asprintf "%a" Word.pp_hex w)
@@ -609,8 +612,10 @@ module Make (Machine : Machine) = struct
     { s with values }
 
   (* calls [f] with the backing of the current memory, if it has one *)
+  let set_backing backing = Machine.Global.put Backing.state backing
+
   let backing f =
-    match !Backing.current with
+    Machine.Global.get Backing.state >>= function
     | None -> Machine.return ()
     | Some b ->
         Machine.Local.get state >>= fun { curr } ->

@@ -178,6 +178,8 @@ module Components = struct
     type 'a m = 'a Knowledge.t
 
     include Machine.Make (Knowledge)
+
+    let knowledge = lift
   end
 
   module Generics = Generic (Machine)

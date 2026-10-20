@@ -384,6 +384,11 @@ module Make (M : Monad.S) = struct
    fun x ->
     { run = (fun ~reject:_ ~accept s -> M.bind x ~f:(fun x -> accept x s)) }
 
+  (* the machines of the systems override it, see [Bap_primus_system],
+     as their monad is the knowledge *)
+  let knowledge _ =
+    failwith "Primus: the machine has no knowledge, as it is not of a system"
+
   let raise exn = Observation.make raise_exn exn >>= fun () -> fail exn
   let catch = catch
   let args = gets @@ fun s -> s.args

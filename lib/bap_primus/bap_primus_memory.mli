@@ -34,8 +34,6 @@ module Backing : sig
     fetch_all : id -> (addr * string) list;
     stored : id -> addr -> string -> unit;
   }
-
-  val set : t option -> unit
 end
 
 module Snapshot : sig
@@ -43,6 +41,7 @@ module Snapshot : sig
 end
 
 module Make (Machine : Machine) : sig
+  val set_backing : Backing.t option -> unit Machine.t
   val switch : memory -> unit Machine.t
   val memory : memory Machine.t
   val load : addr -> word Machine.t

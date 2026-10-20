@@ -657,6 +657,23 @@ let renumber text =
       let prefix = if (Re.Group.get group 0).[0] = '%' then "%" else "" in
       Printf.sprintf "%s#%d" prefix id)
 
+(* the names of the anonymous subroutines, e.g., %00000560, which are
+   their term identifiers, numbered in the order of their occurrences *)
+let anonymous text =
+  let names = Hashtbl.create 16 in
+  let re = Re.(compile (seq [ char '%'; group (repn xdigit 8 (Some 8)) ])) in
+  Re.replace re text ~f:(fun group ->
+      let tid = Re.Group.get group 1 in
+      let id =
+        match Hashtbl.find_opt names tid with
+        | Some id -> id
+        | None ->
+            let id = Hashtbl.length names + 1 in
+            Hashtbl.add names tid id;
+            id
+      in
+      Printf.sprintf "%%sub%d" id)
+
 (* the summary of a program: its subroutines, with their arguments and the
    subroutines that they call, and the whole body of main *)
 let summary text =
@@ -682,6 +699,9 @@ let summary text =
       if callees <> [] then
         Printf.bprintf buf "  calls %s\n" (String.concat " " callees))
     subs;
+  let headers = anonymous (Buffer.contents buf) in
+  Buffer.clear buf;
+  Buffer.add_string buf headers;
   List.iter
     (fun (header, body, _) ->
       if String.starts_with ~prefix:"main(" header then

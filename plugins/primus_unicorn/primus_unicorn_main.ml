@@ -36,10 +36,12 @@ let restore =
     "restore"
     ~doc:
       "Continues from the checkpoint in the given file, which was saved with \
-       $(b,--primus-unicorn-checkpoint) for the same program, instead of the \
-       first subroutine that the machine runs, e.g., the entry point. The \
-       machine stops when the subroutine, in which the checkpoint was saved, \
-       returns, as the code that called it, e.g., a Lisp stub, is not saved."
+       $(b,--primus-unicorn-checkpoint), or by a script, see Bap_emu.save, for \
+       the same program, instead of the first subroutine that the machine \
+       runs, e.g., the entry point, with the names of the code and the \
+       functions without their stubs, that the script saved too. The machine \
+       stops when the subroutine, in which the checkpoint was saved, returns, \
+       as the code that called it, e.g., a Lisp stub, is not saved."
 
 let native_stubs =
   let module Native = Bap_primus_unicorn_plugin.Primus_unicorn_native in

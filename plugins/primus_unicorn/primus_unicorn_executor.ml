@@ -34,7 +34,6 @@ module Uc = Bap_unicorn
 module Target = Primus_unicorn_target
 module Checkpoint = Primus_unicorn_checkpoint
 module Native = Primus_unicorn_native
-module Lift = Primus.Lift
 include Bap_main.Loggers ()
 
 type Primus.exn += Unicorn_failure of string
@@ -104,7 +103,26 @@ type access = {
   code : string;  (** the bytes of the instruction *)
 }
 
+(* the call of a native function: the expressions of its arguments and
+   of its result, which are registers, their parts, or the words on
+   the stack, see [Make.eval_uc] *)
+type native = { fn : Native.fn; args : exp list; result : (exp * int) option }
+
+(* the arguments and the result of a function, see [native] *)
+type signature = { inputs : exp list; output : (exp * int) option }
+
+(* what a hook of a call does: the function runs, or returns the value
+   at once *)
+type action = Default | Return of int64
+
+(* the loads and the stores of the code, that the observers see, after
+   its instruction runs, with their addresses, sizes and values *)
+type event = Loaded of int64 * int * int64 | Stored of int64 * int * int64
+
+module Id = Monads.Std.Monad.State.Multi.Id
+
 type engine = {
+  session : session;  (** the system, whose machines run in the engine *)
   uc : Uc.t;
   arch : Uc.arch;
   regs : Target.Regs.t;
@@ -165,20 +183,185 @@ type engine = {
    are hooked, only when they are observed, see [Make.watching] *)
 and watching = { pcs : bool; reads : bool; writes : bool }
 
-(* the seconds that a machine may run, in Unicorn and in Primus, e.g.,
-   in the Lisp stubs *)
+(* The state of a system, whose machines run in Unicorn, which is of the
+   system, see [session_state], as the systems, e.g., the emulators of a
+   script, see [Bap_emu], run in the same process, each with its own
+   engine. *)
+and session = {
+  mutable active : engine option;  (** the engine of the machines *)
+  mutable recipe :
+    (Theory.Target.t * int64 list * (int64 * string) list) option;
+      (** the arguments of [create] *)
+  parked : parked Int64.Table.t Id.Table.t;
+      (** the pages of the machines, that don't run in Unicorn, see [Make.park]
+      *)
+  mutable parked_pages : int;  (** the number of the parked pages *)
+  dead : Id.Hash_set.t;  (** the killed machines, whose pages are not parked *)
+  own_code : Primus.Linker.code Addr.Table.t;
+      (** the code that runs the subroutines in Unicorn, see [Loader] *)
+  stubs : Primus.Linker.code Addr.Table.t;
+      (** the stubs of the external functions, e.g., in PLT, which jump through
+          their slots to the trampolines, interpreted, see [call_foreign] *)
+  native_stubs : String.Set.t;  (** the functions of libc that run natively *)
+  natives : native String.Table.t;
+      (** the native functions that the program calls, by their names *)
+  signatures : signature String.Table.t;
+      (** the signatures of the functions of the program, by their names *)
+  names : string Int64.Table.t;
+      (** the names of the subroutines of the program, by their addresses *)
+  symbols : string Int64.Table.t;
+      (** the names of the code, that the script gave, e.g., of the code, that
+          the program unpacked, see [Bap_emu.add_symbol], which the checkpoints
+          keep, as the program doesn't have them *)
+  unstubbed : Int64.Hash_set.t;
+      (** the functions of the program, whose code runs in Unicorn, instead of
+          the stubs, that replaced them, e.g., in Lisp, see [Bap_emu.unstub],
+          which the checkpoints keep *)
+  thumb : Addr.Hash_set.t;
+      (** the subroutines in the Thumb encoding, which Unicorn runs from their
+          addresses with the lower bit set *)
+  thumb_symbols : Int64.Hash_set.t;
+      (** the addresses of the symbols in the Thumb encoding, whose values have
+          the lower bit set, which tell the encoding of the subroutines without
+          the code, e.g., of the bare project *)
+  mutable bare_mode : bool;
+      (** the machine runs without the disassembled program, which the bare
+          project does not have, see [Bap_script.project ~bare] *)
+  timeout : float option;
+      (** the seconds that a machine may run, in Unicorn and in Primus, e.g., in
+          the Lisp stubs *)
+  mutable accounted : float;
+      (** the processor time, which the machines have accounted for, see
+          [account] *)
+  mutable ticks : int;
+      (** the clock ticks of Primus since the time was last checked, see
+          [clocked] *)
+  checkpoint : (string * string) option;
+      (** the file of the checkpoint and the address or the name of the
+          subroutine, at which it is saved *)
+  mutable checkpoint_addr : int64 option;  (** the address of the checkpoint *)
+  mutable checkpointed : bool;  (** the checkpoint is saved once *)
+  restore : string option;
+      (** the file of the checkpoint, from which the machines continue *)
+  mutable restored_from : Checkpoint.t option;
+  mutable resumed_at : int64 option;
+      (** the machine doesn't stop at the address, from which it continues,
+          e.g., after a stop or a checkpoint, until its instruction runs, which
+          it does, unless it faults, after the hook has skipped the address, see
+          [skipped_at] *)
+  mutable skipped_at : int64 option;
+  mutable stops_seen : int;
+      (** the version of the stops of the system, see
+          [Primus.Interpreter.Stops], whose copy the hooks see *)
+  mutable stepping : bool;
+  stop_addrs : Int64.Hash_set.t;
+  mutable driven : bool;
+      (** the script drives the machines, see [Bap_emu], which pause, when
+          [pause] is set *)
+  mutable pause : bool;
+  mutable saved : (unit, string) result;  (** the result of the last [Save] *)
+  mutable starts : int;
+      (** the number of the starts of Unicorn, which tells the instruction that
+          runs again, e.g., after its fault, from the next one *)
+  mutable stopped_at : int64 option;
+      (** the address of the code, at which Unicorn stopped last, before it ran
+          the instruction there, whose hooks may have run, e.g., when they
+          stopped it *)
+  mutable restarted_at : int64 option;
+      (** the address of the code, at which Unicorn starts again, after it
+          stopped there, so that the hooks of the instruction, which ran in the
+          previous start, run again, e.g., of the calls, see [Bap_emu.on_call]
+      *)
+  call_hooks : (unit -> action) list String.Table.t;
+      (** the hooks of the calls of the functions, by their names, the latest
+          first *)
+  mutable exit_code : int option;
+      (** the code, with which the program exited *)
+  mutable engine_hooks : (engine -> unit) list;
+      (** the hooks of the script, which every new engine gets, as the engine
+          may be created anew, see [broken] *)
+  events : event Queue.t;  (** the events, that the observers see *)
+}
+
+(* the options of the plugin, which are the defaults of the sessions: the
+   seconds that a machine may run, the file of the checkpoint and its
+   point, the file of the checkpoint to continue from, and the functions
+   of libc that run natively *)
 let timeout : float option ref = ref None
+let checkpoint : (string * string) option ref = ref None
+let restore : string option ref = ref None
+let native_stubs : String.Set.t ref = ref (String.Set.of_list Native.names)
+
+let create_session ?(restore = !restore) () =
+  {
+    active = None;
+    recipe = None;
+    parked = Id.Table.create ();
+    parked_pages = 0;
+    dead = Id.Hash_set.create ();
+    own_code = Addr.Table.create ();
+    stubs = Addr.Table.create ();
+    native_stubs = !native_stubs;
+    natives = String.Table.create ();
+    signatures = String.Table.create ();
+    names = Int64.Table.create ();
+    symbols = Int64.Table.create ();
+    unstubbed = Int64.Hash_set.create ();
+    thumb = Addr.Hash_set.create ();
+    thumb_symbols = Int64.Hash_set.create ();
+    bare_mode = false;
+    timeout = !timeout;
+    accounted = Stdlib.Sys.time ();
+    ticks = 0;
+    checkpoint = !checkpoint;
+    checkpoint_addr = None;
+    checkpointed = false;
+    restore;
+    restored_from = None;
+    resumed_at = None;
+    skipped_at = None;
+    stops_seen = -1;
+    stepping = false;
+    stop_addrs = Int64.Hash_set.create ();
+    driven = false;
+    pause = false;
+    saved = Ok ();
+    starts = 0;
+    stopped_at = None;
+    restarted_at = None;
+    call_hooks = String.Table.create ();
+    exit_code = None;
+    engine_hooks = [];
+    events = Queue.create ();
+  }
+
+(* the session of the system, which [Loader.init] creates *)
+let session_state =
+  Primus.Machine.State.declare ~uuid:"6b1e9d42-0f3a-4c87-a5d6-2e8b7f913c50"
+    ~name:"unicorn-session" (fun _ -> create_session ())
+
+(* The sessions, which the scripts create for the systems, that they
+   run, see [Bap_emu.create], by the numbers, which their projects have,
+   see [session_tag], until the systems start, see [Loader.init]. *)
+let sessions : session Int.Table.t = Int.Table.create ()
+
+let session_tag =
+  Bap.Std.Value.Tag.register
+    (module Int)
+    ~name:"primus-unicorn-session" ~uuid:"e47c2a91-3d6b-4f08-b5e1-8a9c0d7f6243"
+
+let next_session = ref 0
+
+(* the project, whose system has the session *)
+let with_session proj session =
+  incr next_session;
+  Hashtbl.set sessions ~key:!next_session ~data:session;
+  Project.set proj session_tag !next_session
 
 (* the seconds that the machine has run *)
 let elapsed =
   Primus.Machine.State.declare ~uuid:"ccde44e4-b82f-4627-80ff-8f5ea918e960"
     ~name:"unicorn-elapsed" (fun _ -> 0.)
-
-(* the processor time, which the machines have accounted for, see
-   [account], and the clock ticks of Primus since the time was last
-   checked, see [clocked] *)
-let accounted = ref 0.
-let ticks = ref 0
 
 (* the pending returns of the runs of a machine, the innermost first,
    which are of the machine, as the machines may switch, while a stub
@@ -194,81 +377,24 @@ let slotted =
   Primus.Machine.State.declare ~uuid:"0c7f3d55-2b8e-4f4a-9a5e-62f1d1b0e7a4"
     ~name:"unicorn-slotted" (fun _ -> false)
 
-(* the file of the checkpoint and the address or the name of the
-   subroutine, at which it is saved *)
-let checkpoint : (string * string) option ref = ref None
-
-(* the address of the checkpoint, and whether it was saved, as it is
-   saved once *)
-let checkpoint_addr : int64 option ref = ref None
-let checkpointed = ref false
-
-(* the machine doesn't stop at the address, from which it continues,
-   e.g., after a stop or a checkpoint, until its instruction runs, which
-   it does, unless it faults, after the hook has skipped the address *)
-let resumed_at : int64 option ref = ref None
-let skipped_at : int64 option ref = ref None
-
-(* the file of the checkpoint, from which the machines continue *)
-let restore : string option ref = ref None
-let restored_from : Checkpoint.t option ref = ref None
-
 (* a machine restores the checkpoint once, and its forks don't *)
 let restored =
   Primus.Machine.State.declare ~uuid:"8c3f7a52-1d4e-4b9a-9f0e-6a2d5c7b8e41"
     ~name:"unicorn-restored" (fun _ -> false)
 
-(* the engine of the machines *)
-let active : engine option ref = ref None
-
-(* the pages of the machines, that don't run in Unicorn, see
-   [Make.park], and their number *)
-let parked : parked Int64.Table.t Monads.Std.Monad.State.Multi.Id.Table.t =
-  Monads.Std.Monad.State.Multi.Id.Table.create ()
-
-let parked_pages = ref 0
-
-(* the killed machines, whose pages are not parked *)
-let dead : Monads.Std.Monad.State.Multi.Id.Hash_set.t =
-  Monads.Std.Monad.State.Multi.Id.Hash_set.create ()
-
 (* the number of the pages, that are parked, after which only the
    pending pages are, as the forks may be many *)
 let parked_limit = 16384
 
-let unpark_all id =
-  Option.iter (Hashtbl.find_and_remove parked id) ~f:(fun pages ->
-      parked_pages := !parked_pages - Hashtbl.length pages)
+let unpark_all s id =
+  Option.iter (Hashtbl.find_and_remove s.parked id) ~f:(fun pages ->
+      s.parked_pages <- s.parked_pages - Hashtbl.length pages)
 
-(* the arguments of [create] *)
-let recipe : (Theory.Target.t * int64 list * (int64 * string) list) option ref =
-  ref None
-
-(* the code that runs the subroutines in Unicorn, see [Loader] *)
-let own_code : Primus.Linker.code Addr.Table.t = Addr.Table.create ()
-
-(* the functions of libc that run natively, see [Native] *)
-let native_stubs : String.Set.t ref = ref (String.Set.of_list Native.names)
-
-(* the call of a native function: the expressions of its arguments and
-   of its result, which are registers, their parts, or the words on
-   the stack, see [Make.eval_uc] *)
-type native = { fn : Native.fn; args : exp list; result : (exp * int) option }
-
-(* the native functions that the program calls, by their names *)
-let natives : native String.Table.t = String.Table.create ()
-
-(* the arguments and the result of a function, see [native] *)
-type signature = { inputs : exp list; output : (exp * int) option }
-
-(* the signatures of the functions of the program, by their names *)
-let signatures : signature String.Table.t = String.Table.create ()
-
-(* The script, that drives the machines, see [Primus_unicorn_emu]. A
-   machine pauses before Unicorn runs, when the script asks, and serves
-   the requests of the script, e.g., to copy a page to Unicorn, until
-   the script continues it, from an address. The machines run in the
-   fiber of the script, which they pause with the [Paused] effect. *)
+(* The script, that drives the machines, see [Bap_emu]. A machine
+   pauses before Unicorn runs, when the script asks, and serves the
+   requests of the script, e.g., to copy a page to Unicorn, until the
+   script continues it, from an address. The machines run in the fiber
+   of the script, which they pause with the [Paused] effect. *)
 type request =
   | Continue of int64
   | Map of int64
@@ -279,55 +405,14 @@ type request =
       (** the bytes are stored to the memory of Primus, see [Bap_emu.patch] *)
   | Run of Primus.Machine.component
       (** the component runs in the machine, see [Bap_emu.primus] *)
+  | Save of string * int64
+      (** the checkpoint of the machine, which continues from the address, is
+          saved to the file, see [Bap_emu.save] *)
 
 type _ Effect.t +=
   | Paused : int64 * Primus.Machine.id -> request Effect.t
   | Ended : Primus.exit_status -> request Effect.t
         (** the program ended, and the script may restore a snapshot *)
-
-let driven = ref false
-let pause = ref false
-
-(* the number of the starts of Unicorn, which tells the instruction that
-   runs again, e.g., after its fault, from the next one *)
-let starts = ref 0
-
-(* the address of the code, at which Unicorn stopped last, before it ran
-   the instruction there, whose hooks may have run, e.g., when they
-   stopped it *)
-let stopped_at : int64 option ref = ref None
-
-(* the address of the code, at which Unicorn starts again, after it
-   stopped there, so that the hooks of the instruction, which ran in the
-   previous start, run again, e.g., of the calls, see [Bap_emu.on_call] *)
-let restarted_at : int64 option ref = ref None
-
-(* what a hook of a call does: the function runs, or returns the value
-   at once *)
-type action = Default | Return of int64
-
-(* the hooks of the calls of the functions, by their names, the latest
-   first *)
-let call_hooks : (unit -> action) list String.Table.t = String.Table.create ()
-
-(* the code, with which the program exited *)
-let exit_code : int option ref = ref None
-
-(* the hooks of the script, which every new engine gets, as the engine
-   may be created anew, see [broken] *)
-let engine_hooks : (engine -> unit) list ref = ref []
-
-(* the names of the subroutines of the program, by their addresses *)
-let names : string Int64.Table.t = Int64.Table.create ()
-
-(* the stubs of the external functions, e.g., in PLT, which jump through
-   their slots to the trampolines, interpreted, see [call_foreign] *)
-let stubs : Primus.Linker.code Addr.Table.t = Addr.Table.create ()
-
-(* the machine runs without the disassembled program, which the bare
-   project does not have, see [Bap_script.project ~bare], set from the
-   project of the machine, see [Loader.init] *)
-let bare_mode = ref false
 
 (* The instructions, e.g., the system calls, which the lifters represent
    as the calls to the intrinsic functions, e.g., intrinsic:syscall, with
@@ -376,51 +461,7 @@ let raised_at (arch : Uc.arch) n =
   | X86 -> n >= 0 && n < 32 && n <> 3 && n <> 4
   | _ -> false
 
-(* The intrinsic of the instruction, that interrupts Unicorn at [pc],
-   lifted on demand, as the program, e.g., the bare one, may have no IR
-   of it, and the interrupts are rare, from the bytes, that [read] reads,
-   see [Lift.insn]. The instruction is at [pc], or ends there, as Unicorn
-   raises the interrupt, see [raised_at], and returns the address, from
-   which Unicorn continues. *)
-let trap proj ~read ?encoding (arch : Uc.arch) ~thumb n pc =
-  let sizes =
-    match arch with
-    | X86 -> List.range 1 16
-    | Arm when thumb -> [ 2; 4 ]
-    | _ -> [ 4 ]
-  in
-  let at () =
-    Option.bind (Lift.insn ?encoding proj ~read pc) ~f:(fun (size, blks) ->
-        Option.map (site_of_blocks blks) ~f:(fun site ->
-            (site, Int64.(pc + of_int size))))
-  and before () =
-    (* the instructions, that the disassembler found, go first, as the
-       other guesses are lifted anew, see [Lift.insn] *)
-    List.find_map [ true; false ] ~f:(fun disassembled_only ->
-        List.find_map sizes ~f:(fun size ->
-            match
-              Lift.insn ~disassembled_only ?encoding proj ~read
-                Int64.(pc - of_int size)
-            with
-            | Some (n, blks) when n = size ->
-                Option.map (site_of_blocks blks) ~f:(fun site -> (site, pc))
-            | _ -> None))
-  in
-  if raised_at arch n then Option.first_some (at ()) (before ())
-  else Option.first_some (before ()) (at ())
-
-(* the subroutines in the Thumb encoding, which Unicorn runs from their
-   addresses with the lower bit set *)
-let thumb : Addr.Hash_set.t = Addr.Hash_set.create ()
-
-(* the names of the Thumb instructions of LLVM start with t, e.g., tMOVi8
-   or t2STRDi8, unlike the names of the ARM instructions *)
-(* the addresses of the symbols in the Thumb encoding, whose values have
-   the lower bit set, which tell the encoding of the subroutines without
-   the code, e.g., of the bare project *)
-let thumb_symbols : Int64.Hash_set.t = Int64.Hash_set.create ()
-
-let index_thumb_symbols spec =
+let index_thumb_symbols { thumb_symbols; _ } spec =
   Hash_set.clear thumb_symbols;
   (* the entry point, which the stripped program has no symbol for *)
   (match Ogre.eval (Ogre.request Image.Scheme.entry_point) spec with
@@ -438,7 +479,7 @@ let index_thumb_symbols spec =
           if Int64.(value land 1L = 1L) then
             Hash_set.add thumb_symbols Int64.(addr land lnot 1L))
 
-let is_thumb sub =
+let is_thumb { thumb_symbols; _ } sub =
   match Term.first blk_t sub with
   | None -> (
       match Term.get_attr sub address with
@@ -517,28 +558,30 @@ let halt_at e reason =
   e.reason <- Some reason;
   Uc.stop e.uc
 
+(* the stops of the system, as they were, when Unicorn started, see
+   [Make.sync_stops] *)
 let is_stop e addr =
-  let open Primus.Interpreter.Stops in
-  stepping () || mem (Word.of_int64 ~width:(e.bytes * 8) addr)
+  e.session.stepping || Hash_set.mem e.session.stop_addrs addr
 
 (* the hook of the address of the checkpoint or of a stop, which skips
    the address, from which the machine continues, see [resumed_at], and,
    while stepping, the next hook of the same instruction, which is the
    hook of every address *)
 let dispatch e addr =
-  let stepping = Primus.Interpreter.Stops.stepping () in
-  (match !skipped_at with
-  | Some at when stepping && Int64.(at <> addr) -> skipped_at := None
+  let s = e.session in
+  let stepping = s.stepping in
+  (match s.skipped_at with
+  | Some at when stepping && Int64.(at <> addr) -> s.skipped_at <- None
   | _ -> ());
-  match !resumed_at with
+  match s.resumed_at with
   | Some at when Int64.(at = addr) ->
-      resumed_at := None;
-      skipped_at := Some addr
-  | _ when stepping && Option.equal Int64.equal !skipped_at (Some addr) -> ()
+      s.resumed_at <- None;
+      s.skipped_at <- Some addr
+  | _ when stepping && Option.equal Int64.equal s.skipped_at (Some addr) -> ()
   | _ ->
       if
-        Option.equal Int64.equal !checkpoint_addr (Some addr)
-        && not !checkpointed
+        Option.equal Int64.equal s.checkpoint_addr (Some addr)
+        && not s.checkpointed
       then halt_at e Checkpoint
         (* the observers of every address see the stops too, see [watch] *)
       else if is_stop e addr && not e.watching.pcs then halt_at e (Stop addr)
@@ -643,13 +686,11 @@ let hook_stop e addr =
    translated code is dropped, as the hooks apply only to the code that
    Unicorn translates after them *)
 let sync_stops e =
-  let open Primus.Interpreter in
-  let version = Stops.version () in
+  let version = e.session.stops_seen in
   if e.stops <> version then begin
     e.stops <- version;
-    List.iter (Stops.to_list ()) ~f:(fun addr ->
-        hook_stop e (int64_of_word addr));
-    (match (Stops.stepping (), e.stepper) with
+    Hash_set.iter e.session.stop_addrs ~f:(hook_stop e);
+    (match (e.session.stepping, e.stepper) with
     | true, None ->
         e.stepper <- Some (Uc.on_code e.uc (fun addr _ -> dispatch e addr))
     | false, Some hook ->
@@ -659,7 +700,7 @@ let sync_stops e =
     Uc.flush_tb e.uc
   end
 
-let create target ~foreign ~externals =
+let create session target ~foreign ~externals =
   let arch, mode =
     match Target.engine target with
     | Some e -> e
@@ -684,6 +725,7 @@ let create target ~foreign ~externals =
   let basis = Target.Regs.basis regs in
   let e =
     {
+      session;
       uc;
       arch;
       regs;
@@ -761,10 +803,12 @@ let create target ~foreign ~externals =
   (* the first hook of an address that stops Unicorn is the last one
      called, so the checkpoint goes before the foreign code, which runs
      after it is saved *)
-  Option.iter !checkpoint_addr ~f:(hook_stop e);
+  Option.iter session.checkpoint_addr ~f:(hook_stop e);
+  (* the function may run in Unicorn again, see [Make.unstub] *)
   List.iter foreign ~f:(fun addr ->
       ignore
-      @@ Uc.on_code uc ~first:addr ~last:addr (fun _ _ -> stop (Foreign addr)));
+      @@ Uc.on_code uc ~first:addr ~last:addr (fun _ _ ->
+          if Hash_set.mem e.foreign addr then stop (Foreign addr)));
   let returns addr =
     match e.frames with
     | { ret; sp } :: _ ->
@@ -791,7 +835,7 @@ let create target ~foreign ~externals =
   @@ Uc.on_invalid_insn uc (fun () ->
       e.reason <- Some Invalid;
       false);
-  List.iter (List.rev !engine_hooks) ~f:(fun install -> install e);
+  List.iter (List.rev session.engine_hooks) ~f:(fun install -> install e);
   e
 
 let is_owner e id =
@@ -875,7 +919,7 @@ let all_parked_changes pages =
    bytes of the machine, that runs in Unicorn, are fetched from it, and
    the bytes, that Primus stores, are copied to it, as they are to the
    copied pages. *)
-let backing memory : Primus.Memory.Backing.t =
+let backing s memory : Primus.Memory.Backing.t =
   let words e =
     List.map ~f:(fun (addr, data) ->
         (Word.of_int64 ~width:(e.bytes * 8) addr, data))
@@ -884,7 +928,7 @@ let backing memory : Primus.Memory.Backing.t =
     memory;
     pending =
       (fun id addr ->
-        match !active with
+        match s.active with
         | None -> false
         | Some e -> (
             let page = page_of (int64_of_word addr) in
@@ -893,7 +937,7 @@ let backing memory : Primus.Memory.Backing.t =
               | Some p -> pending e p
               | None -> false
             else
-              match Hashtbl.find parked id with
+              match Hashtbl.find s.parked id with
               | Some pages -> (
                   match Hashtbl.find pages page with
                   | Some stash -> stash.unfetched
@@ -901,14 +945,14 @@ let backing memory : Primus.Memory.Backing.t =
               | None -> false));
     fetch =
       (fun id addr ->
-        match !active with
+        match s.active with
         | None -> []
         | Some e ->
             let page = page_of (int64_of_word addr) in
             words e
               (if is_owner e id then fetch_page e page
                else
-                 match Hashtbl.find parked id with
+                 match Hashtbl.find s.parked id with
                  | None -> []
                  | Some pages -> (
                      match Hashtbl.find pages page with
@@ -916,20 +960,20 @@ let backing memory : Primus.Memory.Backing.t =
                      | None -> [])));
     fetch_all =
       (fun id ->
-        match !active with
+        match s.active with
         | None -> []
         | Some e ->
             words e
               (if is_owner e id then List.concat_map e.dirty ~f:(fetch_page e)
                else
-                 match Hashtbl.find parked id with
+                 match Hashtbl.find s.parked id with
                  | Some pages ->
                      Hashtbl.fold pages ~init:[] ~f:(fun ~key ~data acc ->
                          fetch_parked key data @ acc)
                  | None -> []));
     stored =
       (fun id addr data ->
-        match !active with
+        match s.active with
         | Some e when is_owner e id ->
             let addr = int64_of_word addr in
             let code = ref false in
@@ -949,7 +993,7 @@ let backing memory : Primus.Memory.Backing.t =
             (* the code, which Unicorn translated, is translated anew *)
             if !code then Uc.flush_tb e.uc
         | _ -> (
-            match Hashtbl.find parked id with
+            match Hashtbl.find s.parked id with
             | None -> ()
             | Some pages ->
                 let addr = int64_of_word addr in
@@ -1085,12 +1129,6 @@ let frame_uc e =
       in
       { ret = int64_of_word ret; sp = Int64.(sp + of_int e.bytes) }
 
-(* the loads and the stores of the code, that the observers see, after
-   its instruction runs, with their addresses, sizes and values *)
-type event = Loaded of int64 * int * int64 | Stored of int64 * int * int64
-
-let events : event Queue.t = Queue.create ()
-
 (* Hooks the events, that the observers see: the instructions, whose
    addresses the observers of the program counter see, and the loads and
    the stores, after which Unicorn stops at the next instruction, so that
@@ -1107,21 +1145,21 @@ let watch e (w : watching) =
     if w.reads then
       add
         (Uc.on_mem e.uc [ `read_after ] (fun _ addr size value ->
-             Queue.enqueue events (Loaded (addr, size, value))));
+             Queue.enqueue e.session.events (Loaded (addr, size, value))));
     if w.writes then
       add
         (Uc.on_mem e.uc [ `write ] (fun _ addr size value ->
-             Queue.enqueue events (Stored (addr, size, value))));
+             Queue.enqueue e.session.events (Stored (addr, size, value))));
     if w.pcs || w.reads || w.writes then
       add
         (Uc.on_code e.uc (fun addr _ ->
-             if w.pcs || not (Queue.is_empty events) then
+             if w.pcs || not (Queue.is_empty e.session.events) then
                match e.observed with
                | Some (last, start)
-                 when Int64.equal last addr && start <> !starts ->
+                 when Int64.equal last addr && start <> e.session.starts ->
                    ()
                | _ ->
-                   e.observed <- Some (addr, !starts);
+                   e.observed <- Some (addr, e.session.starts);
                    e.reason <- Some (Observe addr);
                    Uc.stop e.uc));
     (* the hooks of the code apply to the code, that Unicorn translates
@@ -1133,13 +1171,13 @@ let watch e (w : watching) =
 let function_name e addr =
   match Hashtbl.find e.trampolines addr with
   | Some name -> Some name
-  | None -> Hashtbl.find names addr
+  | None -> Hashtbl.find e.session.names addr
 
 (* runs the hooks of the call of the function, the first of which, that
    returns a value, returns it from the call, so that Unicorn continues
    from the return address, which is the result *)
 let call_returns e name =
-  match Hashtbl.find call_hooks name with
+  match Hashtbl.find e.session.call_hooks name with
   | None -> None
   | Some hooks -> (
       match
@@ -1149,7 +1187,7 @@ let call_returns e name =
       | None -> None
       | Some x ->
           let frame = frame_uc e in
-          (match Hashtbl.find signatures name with
+          (match Hashtbl.find e.session.signatures name with
           | Some { output = Some (exp, width); _ } ->
               ignore (assign_uc e exp (Word.of_int64 ~width x) : bool)
           | _ -> ());
@@ -1170,9 +1208,48 @@ module Make (Machine : Primus.Machine.S) = struct
   module Interpreter = Primus.Interpreter.Make (Machine)
   module Lisp = Primus.Lisp.Make (Machine)
   module Track = Primus.Track.Make (Machine)
+  module Lift = Primus.Lift.Make (Machine)
 
   let fail fmt = ksprintf (fun msg -> Machine.raise (Unicorn_failure msg)) fmt
   let word e x = Word.of_int64 ~width:(e.bytes * 8) x
+
+  (* the session of the system, see [Loader.init] *)
+  let session = Machine.Global.get session_state
+
+  (* The intrinsic of the instruction, that interrupts Unicorn at [pc],
+     lifted on demand, as the program, e.g., the bare one, may have no IR
+     of it, and the interrupts are rare, from the bytes, that [read]
+     reads, see [Lift.insn]. The instruction is at [pc], or ends there,
+     as Unicorn raises the interrupt, see [raised_at], and returns the
+     address, from which Unicorn continues. *)
+  let trap ~read ?encoding (arch : Uc.arch) ~thumb n pc =
+    let sizes =
+      match arch with
+      | X86 -> List.range 1 16
+      | Arm when thumb -> [ 2; 4 ]
+      | _ -> [ 4 ]
+    in
+    let at () =
+      Lift.insn ?encoding ~read pc
+      >>| Option.bind ~f:(fun (size, blks) ->
+          Option.map (site_of_blocks blks) ~f:(fun site ->
+              (site, Int64.(pc + of_int size))))
+    and before () =
+      (* the instructions, that the disassembler found, go first, as the
+         other guesses are lifted anew, see [Lift.insn] *)
+      Machine.List.find_map [ true; false ] ~f:(fun disassembled_only ->
+          Machine.List.find_map sizes ~f:(fun size ->
+              Lift.insn ~disassembled_only ?encoding ~read
+                Int64.(pc - of_int size)
+              >>| function
+              | Some (n, blks) when n = size ->
+                  Option.map (site_of_blocks blks) ~f:(fun site -> (site, pc))
+              | _ -> None))
+    in
+    let first f g =
+      f () >>= function Some _ as x -> Machine.return x | None -> g ()
+    in
+    if raised_at arch n then first at before else first before at
 
   let owns e =
     let+ id = Machine.current () in
@@ -1193,14 +1270,15 @@ module Make (Machine : Primus.Machine.S) = struct
      until the owner claims Unicorn again, or the pending ones, if too
      many are parked *)
   let park e =
+    let s = e.session in
     Option.iter e.owner ~f:(fun owner ->
-        if not (Hash_set.mem dead owner) then
+        if not (Hash_set.mem s.dead owner) then
           let pages =
-            Hashtbl.find_or_add parked owner ~default:Int64.Table.create
+            Hashtbl.find_or_add s.parked owner ~default:Int64.Table.create
           in
           Hashtbl.iteri e.pages ~f:(fun ~key:page ~data:copy ->
               let unfetched = pending e copy in
-              if unfetched || !parked_pages < parked_limit then begin
+              if unfetched || s.parked_pages < parked_limit then begin
                 let data = read_page e page in
                 let unfetched =
                   unfetched
@@ -1209,15 +1287,16 @@ module Make (Machine : Primus.Machine.S) = struct
                   | Some known -> not (Bytes.equal data known)
                   | None -> false
                 in
-                if not (Hashtbl.mem pages page) then incr parked_pages;
+                if not (Hashtbl.mem pages page) then
+                  s.parked_pages <- s.parked_pages + 1;
                 Hashtbl.set pages ~key:page ~data:{ data; copy; unfetched }
               end))
 
   (* the parked pages of the machine go to Unicorn, with the pending
      ones writable and dirty *)
   let unpark e id =
-    Option.iter (Hashtbl.find parked id) ~f:(fun pages ->
-        unpark_all id;
+    Option.iter (Hashtbl.find e.session.parked id) ~f:(fun pages ->
+        unpark_all e.session id;
         Hashtbl.iteri pages ~f:(fun ~key:page ~data:{ data; copy; unfetched } ->
             let perm =
               if unfetched then copy.perm else Uc.Perm.(copy.perm - write)
@@ -1239,7 +1318,7 @@ module Make (Machine : Primus.Machine.S) = struct
 
   (* the pending parked pages of the machine go to its memory *)
   let materialize e id =
-    match Hashtbl.find parked id with
+    match Hashtbl.find e.session.parked id with
     | None -> Machine.return ()
     | Some pages ->
         store_changes e
@@ -1420,7 +1499,8 @@ module Make (Machine : Primus.Machine.S) = struct
   (* the registers, that Primus writes, go to Unicorn, and they are
      tracked, if their values are, see [trace] *)
   let written (v, x) =
-    match !active with
+    let* s = session in
+    match s.active with
     | Some e when Target.Regs.mem e.regs v -> (
         e.written <- v :: e.written;
         match Target.Regs.owner e.regs (Var.name v) with
@@ -1482,7 +1562,8 @@ module Make (Machine : Primus.Machine.S) = struct
   and marked addr = drop addr addr
 
   and drop lower upper =
-    match !active with
+    let* s = session in
+    match s.active with
     | None -> Machine.return ()
     | Some e -> (
         let first = page_of (int64_of_word lower)
@@ -1499,60 +1580,63 @@ module Make (Machine : Primus.Machine.S) = struct
               Uc.mem_unmap e.uc page page_size;
               Hashtbl.remove e.pages page)
         else
-          match Hashtbl.find parked id with
+          match Hashtbl.find s.parked id with
           | None -> Machine.return ()
           | Some pages ->
               Hashtbl.keys pages |> List.filter ~f:inside
               |> Machine.List.iter ~f:(fun page ->
                   match Hashtbl.find_and_remove pages page with
                   | Some stash ->
-                      decr parked_pages;
+                      s.parked_pages <- s.parked_pages - 1;
                       store_changes e (parked_changes page stash)
                   | None -> Machine.return ()))
 
   (* the fork has the bytes, that its parent has in Unicorn, or parked *)
   let forked (parent, _) =
-    match !active with
+    let* s = session in
+    match s.active with
     | None -> Machine.return ()
     | Some e ->
         store_changes e
           (if is_owner e parent then pending_changes e
            else
-             match Hashtbl.find parked parent with
+             match Hashtbl.find s.parked parent with
              | Some pages -> all_parked_changes pages
              | None -> [])
 
   let killed id =
-    unpark_all id;
-    Hash_set.add dead id;
-    Machine.return ()
+    let+ s = session in
+    unpark_all s id;
+    Hash_set.add s.dead id
 
   (* the memory of the machine, that finishes the system, is in Primus *)
   let finished () =
-    match !active with
+    let* s = session in
+    match s.active with
     | None -> Machine.return ()
     | Some e ->
         let* id = Machine.current () in
         if is_owner e id then sync e else materialize e id
 
   let system_stopped _ =
-    Primus.Memory.Backing.set None;
-    Hashtbl.clear parked;
-    parked_pages := 0;
-    Machine.return ()
+    let* s = session in
+    Hashtbl.clear s.parked;
+    s.parked_pages <- 0;
+    Memory.set_backing None
 
   (* the engine, which is created anew, if it is broken, after its
      registers go to Primus, and its pages are parked *)
   let engine () =
-    match (!active, !recipe) with
+    let* s = session in
+    match (s.active, s.recipe) with
     | Some e, Some (target, foreign, externals) when e.broken ->
         let* owned = owns e in
         let* () = if owned then pull e else Machine.return () in
         (* the pages go to the new engine, when their machine claims it *)
         park e;
         Uc.close e.uc;
-        let e = create target ~foreign ~externals in
-        active := Some e;
+        let e = create s target ~foreign ~externals in
+        s.active <- Some e;
         Machine.return e
     | Some e, _ -> Machine.return e
     | None, _ -> fail "the engine is not initialized"
@@ -1636,12 +1720,15 @@ module Make (Machine : Primus.Machine.S) = struct
 
   (* the interpreted stub, if the function is linked to the stub of the
      program, which nothing replaced *)
-  let unreplaced_stub name =
+  let unreplaced_stub e name =
     let* code = Linker.lookup name in
     let+ addr = Linker.resolve_addr name in
     match (code, addr) with
     | Some code, Some addr -> (
-        match (Hashtbl.find own_code addr, Hashtbl.find stubs addr) with
+        match
+          ( Hashtbl.find e.session.own_code addr,
+            Hashtbl.find e.session.stubs addr )
+        with
         | Some own, Some stub when phys_equal own code -> Some stub
         | _ -> None)
     | _ -> None
@@ -1667,11 +1754,12 @@ module Make (Machine : Primus.Machine.S) = struct
     let name =
       match Hashtbl.find e.trampolines addr with
       | Some name -> Some name
-      | None -> Hashtbl.find names addr
+      | None -> Hashtbl.find e.session.names addr
     in
     match
       Option.bind name ~f:(fun name ->
-          Option.map (Hashtbl.find natives name) ~f:(fun call -> (name, call)))
+          Option.map (Hashtbl.find e.session.natives name) ~f:(fun call ->
+              (name, call)))
     with
     | None -> Machine.return None
     | Some _ when is_stop e addr -> Machine.return None
@@ -1681,7 +1769,7 @@ module Make (Machine : Primus.Machine.S) = struct
     | Some (_, call) when reads_tracked e call.args -> Machine.return None
     | Some (name, call) ->
         let* linked = Linker.is_linked (`symbol name) in
-        let* unreplaced = unreplaced_stub (`symbol name) in
+        let* unreplaced = unreplaced_stub e (`symbol name) in
         let* advised = Lisp.advised name in
         if (not linked) || Option.is_some unreplaced || advised then
           Machine.return None
@@ -1755,7 +1843,7 @@ module Make (Machine : Primus.Machine.S) = struct
       else Machine.return ()
     in
     let* () =
-      unreplaced_stub name >>= function
+      unreplaced_stub e name >>= function
       | Some (module Stub : Primus.Linker.Code) ->
           let module Stub = Stub (Machine) in
           Stub.exec
@@ -1801,8 +1889,8 @@ module Make (Machine : Primus.Machine.S) = struct
 
   (* saves the state of the machine, which is in Primus, after it is
      copied from Unicorn, and the innermost run, from which Unicorn
-     continues *)
-  let save e pc =
+     continues, to the file, or the error *)
+  let save e pc file =
     let* () = pull e in
     let* target = Machine.gets Project.target in
     let* vars = Env.all in
@@ -1816,32 +1904,65 @@ module Make (Machine : Primus.Machine.S) = struct
           let+ x = Env.get v in
           (v, Primus.Value.to_word x))
     in
-    let* memory = Memory.snapshot in
-    checkpointed := true;
-    let file, _ = Option.value_exn !checkpoint in
-    let { ret; sp } = List.hd_exn e.frames in
+    let+ memory = Memory.snapshot in
+    let saved =
+      match e.frames with
+      | [] -> Error (sprintf "%Lx is outside of a run" pc)
+      | { ret; sp } :: _ ->
+          Checkpoint.save file
+            {
+              target = Theory.Target.to_string target;
+              pc;
+              ret;
+              sp;
+              vars;
+              memory;
+              symbols =
+                Hashtbl.to_alist e.session.symbols
+                |> List.map ~f:(fun (addr, name) -> (name, addr));
+              unstubbed = Hash_set.to_list e.session.unstubbed;
+            }
+    in
+    Result.iter saved ~f:(fun () ->
+        info "saved the checkpoint at %Lx to %s" pc file);
+    Result.map_error saved ~f:(sprintf "can't save the checkpoint: %s")
+
+  (* the function of the program at the address runs in Unicorn again,
+     instead of the stub, that replaced it, e.g., in Lisp, so that the
+     code, that the script patched, runs, see [Bap_emu.unstub] *)
+  let unstub addr =
+    let* s = session in
     match
-      Checkpoint.save file
-        { target = Theory.Target.to_string target; pc; ret; sp; vars; memory }
+      Hashtbl.to_alist s.own_code
+      |> List.find ~f:(fun (a, _) -> Int64.equal (int64_of_word a) addr)
     with
-    | Ok () ->
-        info "saved the checkpoint at %Lx to %s" pc file;
-        Machine.return ()
-    | Error msg -> fail "can't save the checkpoint: %s" msg
+    | None -> Machine.return ()
+    | Some (a, code) ->
+        let* name = Linker.resolve_symbol (`addr a) in
+        let* tid = Linker.resolve_tid (`addr a) in
+        Hash_set.add s.unstubbed addr;
+        Option.iter s.active ~f:(fun e -> Hash_set.remove e.foreign addr);
+        s.recipe <-
+          Option.map s.recipe ~f:(fun (target, foreign, externals) ->
+              ( target,
+                List.filter foreign ~f:(fun a -> not (Int64.equal a addr)),
+                externals ));
+        Linker.link ~addr:a ?name ?tid code
 
   (* the time since it was last accounted for goes to the machine that
      runs, which is the machine that spent it, as they switch rarely *)
   let account () =
+    let* s = session in
     let now = Stdlib.Sys.time () in
-    let spent = now -. !accounted in
-    accounted := now;
+    let spent = now -. s.accounted in
+    s.accounted <- now;
     Machine.Local.update elapsed ~f:(fun t -> t +. spent)
 
   let halt () =
+    let* s = session in
     let* id = Machine.current () in
-    info "terminating machine %a, which has run for %g seconds"
-      Monads.Std.Monad.State.Multi.Id.pp id
-      (Option.value_exn !timeout);
+    info "terminating machine %a, which has run for %g seconds" Id.pp id
+      (Option.value_exn s.timeout);
     Interpreter.halt >>= never_returns
 
   let terminate e =
@@ -1852,13 +1973,14 @@ module Make (Machine : Primus.Machine.S) = struct
      checked every few thousand ticks of its clock, as the time is not
      free to get *)
   let clocked _ =
-    match !timeout with
+    let* s = session in
+    match s.timeout with
     | None -> Machine.return ()
     | Some limit ->
-        incr ticks;
-        if !ticks < 4096 then Machine.return ()
+        s.ticks <- s.ticks + 1;
+        if s.ticks < 4096 then Machine.return ()
         else begin
-          ticks := 0;
+          s.ticks <- 0;
           let* () = account () in
           let* used = Machine.Local.get elapsed in
           if Float.(used >= limit) then halt () else Machine.return ()
@@ -1897,13 +2019,14 @@ module Make (Machine : Primus.Machine.S) = struct
      through [loop]; the stop at the instruction, which wrote, is skipped
      again, as in [loop] *)
   let rec start_uc e pc deadline =
+    let s = e.session in
     e.reason <- None;
-    skipped_at := None;
-    incr starts;
-    restarted_at :=
-      if Option.equal Int64.equal !stopped_at (Some (code_addr e pc)) then
-        !stopped_at
-      else None;
+    s.skipped_at <- None;
+    s.starts <- s.starts + 1;
+    s.restarted_at <-
+      (if Option.equal Int64.equal s.stopped_at (Some (code_addr e pc)) then
+         s.stopped_at
+       else None);
     let error =
       try
         Uc.start e.uc pc
@@ -1915,14 +2038,33 @@ module Make (Machine : Primus.Machine.S) = struct
       with Uc.Error (_, msg) -> Some msg
     in
     e.runs <- e.runs + 1;
-    stopped_at := Some (code_addr e (current_pc e));
+    s.stopped_at <- Some (code_addr e (current_pc e));
     match e.reason with
     | Some (Fault (Write_prot, addr)) when written_page e addr ->
         let pc = current_pc e in
-        if Option.equal Int64.equal !skipped_at (Some (code_addr e pc)) then
-          resumed_at := !skipped_at;
+        if Option.equal Int64.equal s.skipped_at (Some (code_addr e pc)) then
+          s.resumed_at <- s.skipped_at;
         start_uc e pc deadline
     | _ -> error
+
+  (* the stops of the system, which the hooks see, see [is_stop], and
+     hook, see [sync_stops] *)
+  let sync_stops e =
+    let module Stops = Primus.Interpreter.Stops.Make (Machine) in
+    let s = e.session in
+    let* version = Stops.version in
+    let+ () =
+      if version = s.stops_seen then Machine.return ()
+      else
+        let* addrs = Stops.to_list in
+        let+ stepping = Stops.stepping in
+        s.stops_seen <- version;
+        s.stepping <- stepping;
+        Hash_set.clear s.stop_addrs;
+        List.iter addrs ~f:(fun addr ->
+            Hash_set.add s.stop_addrs (int64_of_word addr))
+    in
+    sync_stops e
 
   (* the events, that the observers of the machine see, see [watch] *)
   let watching e =
@@ -1931,8 +2073,7 @@ module Make (Machine : Primus.Machine.S) = struct
        program counter only at the stops, see [sync_stops], the others,
        e.g., the analyses of Lisp, see it at every instruction *)
     let* pcs =
-      let open Primus.Interpreter.Stops in
-      if stepping () || not (List.is_empty (to_list ())) then
+      if e.session.stepping || not (Hash_set.is_empty e.session.stop_addrs) then
         Machine.return false
       else observed Primus.Interpreter.pc_change
     in
@@ -1945,6 +2086,7 @@ module Make (Machine : Primus.Machine.S) = struct
   (* the loads and the stores of the code, that Unicorn ran, which the
      observers see byte by byte, as they see those of Primus *)
   let observe e =
+    let events = e.session.events in
     if Queue.is_empty events then Machine.return ()
     else
       let happened = Queue.to_list events in
@@ -2006,8 +2148,8 @@ module Make (Machine : Primus.Machine.S) = struct
      Primus, for [Lift.insn], which reads them from the instruction at
      [addr], or before it, see [trap]. *)
   let code_reader e addr =
-    let lo = Int64.(max 0L (addr - of_int Lift.max_size)) in
-    let n = Int64.to_int_exn Int64.(addr + of_int Lift.max_size - lo) in
+    let lo = Int64.(max 0L (addr - of_int Primus.Lift.max_size)) in
+    let n = Int64.to_int_exn Int64.(addr + of_int Primus.Lift.max_size - lo) in
     let in_uc x = Hashtbl.mem e.pages (page_of x) in
     let+ loaded =
       if in_uc lo && in_uc Int64.(lo + of_int n - 1L) then Machine.return [||]
@@ -2037,16 +2179,15 @@ module Make (Machine : Primus.Machine.S) = struct
   (* the instruction at [addr], decoded from its current bytes, in
      the Thumb mode, if Unicorn runs the Thumb code *)
   let lift ?(thumb = false) e addr =
-    let* proj = Machine.get () in
-    let+ read = code_reader e addr in
-    Lift.insn ?encoding:(arm_encoding e ~thumb) proj ~read addr
+    let* read = code_reader e addr in
+    Lift.insn ?encoding:(arm_encoding e ~thumb) ~read addr
 
   (* the accesses of the instruction at [addr], which are analyzed
      anew, if its bytes changed *)
   let analyze ?thumb e addr =
     let* insn = lift ?thumb e addr in
-    let+ proj = Machine.get () in
-    let code = Option.value (Lift.code proj addr) ~default:"" in
+    let+ code = Lift.code addr in
+    let code = Option.value code ~default:"" in
     match Hashtbl.find e.accesses addr with
     | Some access when String.equal access.code code -> access
     | _ ->
@@ -2070,9 +2211,10 @@ module Make (Machine : Primus.Machine.S) = struct
       || Hash_set.mem e.foreign addr
       || is_stop e addr
       (* the hooks of the calls run in Unicorn, see [call_returns] *)
-      || Option.exists (function_name e addr) ~f:(Hashtbl.mem call_hooks)
-      || Option.equal Int64.equal !checkpoint_addr (Some addr)
-      || (!driven && !pause)
+      || Option.exists (function_name e addr)
+           ~f:(Hashtbl.mem e.session.call_hooks)
+      || Option.equal Int64.equal e.session.checkpoint_addr (Some addr)
+      || (e.session.driven && e.session.pause)
       ||
       match e.frames with
       | { ret; _ } :: _ -> Int64.(ret = addr)
@@ -2105,10 +2247,8 @@ module Make (Machine : Primus.Machine.S) = struct
                     (* the mode, that the jump enters, see [Interworking] *)
                     let blks = Primus.Interworking.unmask blks in
                     let* dst = Interpreter.step ~next blks in
-                    let+ proj = Machine.get () in
-                    let name =
-                      Option.value (Lift.name proj (code_addr e pc)) ~default:""
-                    in
+                    let+ name = Lift.name (code_addr e pc) in
+                    let name = Option.value name ~default:"" in
                     let dst, thumb =
                       Primus.Interworking.jump ~name ~thumb:(in_thumb e pc)
                         ~next blks (Primus.Value.to_word dst)
@@ -2133,8 +2273,8 @@ module Make (Machine : Primus.Machine.S) = struct
      again, so that it stays, and its fork continues. The machine, which
      serves, owns Unicorn, as the script accesses its state there. *)
   let rec serve pc =
-    pause := false;
     let* e = prepare () in
+    e.session.pause <- false;
     let* id = Machine.current () in
     match Effect.perform (Paused (pc, id)) with
     | Continue pc -> Machine.return pc
@@ -2165,6 +2305,10 @@ module Make (Machine : Primus.Machine.S) = struct
            of the interpreter, e.g., with [Env.set] *)
         let* () = push e in
         serve pc
+    | Save (file, pc') ->
+        let* r = save e pc' file in
+        e.session.saved <- r;
+        serve pc
     | Snapshot -> pull e >>= fun () -> snapshot id pc
     | Restore snapshot ->
         let* () = Machine.kill id in
@@ -2180,17 +2324,18 @@ module Make (Machine : Primus.Machine.S) = struct
 
   let rec loop pc =
     let* e = prepare () in
-    if !driven && !pause then serve pc >>= loop
+    let s = e.session in
+    if s.driven && s.pause then serve pc >>= loop
     else
       check_pages e >>= fun () ->
       ensure_page e pc >>= fun () ->
       let* () = account () in
       let* used = Machine.Local.get elapsed in
-      let remaining = Option.map !timeout ~f:(fun t -> t -. used) in
+      let remaining = Option.map s.timeout ~f:(fun t -> t -. used) in
       match remaining with
       | Some t when Float.(t <= 0.) -> terminate e
       | _ -> (
-          sync_stops e;
+          let* () = sync_stops e in
           let* () = tracking e in
           let* () = watching e in
           let error =
@@ -2202,8 +2347,9 @@ module Make (Machine : Primus.Machine.S) = struct
           let pc = current_pc e in
           (match e.reason with
           | Some (Fault _ | Unknown _)
-            when Option.equal Int64.equal !skipped_at (Some (code_addr e pc)) ->
-              resumed_at := !skipped_at
+            when Option.equal Int64.equal s.skipped_at (Some (code_addr e pc))
+            ->
+              s.resumed_at <- s.skipped_at
           | _ -> ());
           match (e.reason, error) with
           | None, None when Option.is_some remaining -> loop pc
@@ -2237,20 +2383,21 @@ module Make (Machine : Primus.Machine.S) = struct
               analyze ~thumb:(in_thumb e pc) e addr >>= fun _ -> loop pc
           | Some (Interrupt n), _ -> (
               let* () = Interpreter.interrupt n in
-              let* proj = Machine.get () in
               let thumb = Int64.(pc land 1L = 1L) in
               let* read = code_reader e (code_addr e pc) in
               let encoding = arm_encoding e ~thumb:(in_thumb e pc) in
-              match
-                trap proj ~read ?encoding e.arch ~thumb n (code_addr e pc)
-              with
+              trap ~read ?encoding e.arch ~thumb n (code_addr e pc) >>= function
               | Some (site, next) ->
                   call_intrinsic e site >>= fun () ->
                   loop (if thumb then Int64.(next lor 1L) else next)
               | None ->
                   pull e >>= fun () ->
                   fail "an unhandled interrupt %d at %Lx" n pc)
-          | Some Checkpoint, _ -> save e pc >>= fun () -> loop pc
+          | Some Checkpoint, _ -> (
+              s.checkpointed <- true;
+              let file, _ = Option.value_exn s.checkpoint in
+              save e pc file >>= fun saved ->
+              match saved with Ok () -> loop pc | Error msg -> fail "%s" msg)
           | Some (Stop addr), _ -> stopped e addr >>= fun () -> loop pc
           | Some Invalid, _ ->
               pull e >>= fun () -> fail "an invalid instruction at %Lx" pc
@@ -2262,14 +2409,13 @@ module Make (Machine : Primus.Machine.S) = struct
   and stopped e addr =
     let* () = pull e in
     let* () = Interpreter.set_pc (word e addr) in
-    let* () = push_owned e in
-    resumed_at := Some addr;
-    Machine.return ()
+    let+ () = push_owned e in
+    e.session.resumed_at <- Some addr
 
   let start e addr =
     let pc = int64_of_word addr in
     match e.arch with
-    | Arm when Hash_set.mem thumb addr -> Int64.(pc lor 1L)
+    | Arm when Hash_set.mem e.session.thumb addr -> Int64.(pc lor 1L)
     | _ -> pc
 
   (* the run continues from the checkpoint, and ends when it returns,
@@ -2286,13 +2432,16 @@ module Make (Machine : Primus.Machine.S) = struct
        another machine, that owns Unicorn, are kept *)
     if not (is_owner e id) then park e;
     forget e;
-    unpark_all id;
+    unpark_all e.session id;
     e.owner <- Some id;
     let* () = map_code e in
     let* () = push e in
+    let* () = sync_stops e in
     (let addr = code_addr e cp.pc in
-     if Option.equal Int64.equal !checkpoint_addr (Some addr) || is_stop e addr
-     then resumed_at := Some addr);
+     if
+       Option.equal Int64.equal e.session.checkpoint_addr (Some addr)
+       || is_stop e addr
+     then e.session.resumed_at <- Some addr);
     info "continues from the checkpoint at %Lx" cp.pc;
     let* pending = Machine.Local.get frames in
     let* () =
@@ -2326,7 +2475,7 @@ module Make (Machine : Primus.Machine.S) = struct
     let* e = engine () in
     let* () = link_slots e in
     let* restored = Machine.Local.get restored in
-    match !restored_from with
+    match e.session.restored_from with
     | Some cp when not restored -> resume cp
     | _ ->
         let* e = engine () in
@@ -2380,14 +2529,12 @@ module Loader (Machine : Primus.Machine.S) = struct
 
   (* the native functions, whose arguments are evaluated in Unicorn, and
      whose result is written to a register, see [Make.eval_uc] *)
-  let index_natives prog =
-    Hashtbl.clear natives;
-    Hashtbl.clear signatures;
+  let index_natives s prog =
     Term.enum sub_t prog
     |> Seq.iter ~f:(fun sub ->
         let name = Sub.name sub in
         Option.iter (Term.get_attr sub address) ~f:(fun addr ->
-            Hashtbl.set names ~key:(int64_of_word addr) ~data:name);
+            Hashtbl.set s.names ~key:(int64_of_word addr) ~data:name);
         let args = Term.enum arg_t sub |> Seq.to_list in
         match args with
         | [] -> ()
@@ -2417,16 +2564,16 @@ module Loader (Machine : Primus.Machine.S) = struct
               | _ -> None
             in
             Option.iter signature ~f:(fun { inputs; output } ->
-                Hashtbl.set signatures ~key:name ~data:{ inputs; output };
+                Hashtbl.set s.signatures ~key:name ~data:{ inputs; output };
                 match Native.find name with
                 | Some fn
-                  when Set.mem !native_stubs name && not (List.is_empty inputs)
+                  when Set.mem s.native_stubs name && not (List.is_empty inputs)
                   ->
-                    Hashtbl.set natives ~key:name
+                    Hashtbl.set s.natives ~key:name
                       ~data:{ fn; args = inputs; result = output }
                 | _ -> ()))
 
-  let link_sub sub =
+  let link_sub s sub =
     let* linked = is_linked Sub.name sub in
     if linked then Machine.return ()
     else
@@ -2435,7 +2582,7 @@ module Loader (Machine : Primus.Machine.S) = struct
           (* the subs of the bare project are synthetic, their terms have
              no code and their arg terms must not be evaluated; what is
              not replaced, e.g., by the Lisp stubs, is unresolved *)
-          if !bare_mode then Machine.return ()
+          if s.bare_mode then Machine.return ()
           else
             let module Code (Machine : Primus.Machine.S) = struct
               module Interp = Primus.Interpreter.Make (Machine)
@@ -2450,38 +2597,41 @@ module Loader (Machine : Primus.Machine.S) = struct
             let exec = Exec.run addr
           end in
           let code : Primus.Linker.code = (module Code) in
-          Hashtbl.set own_code ~key:addr ~data:code;
+          Hashtbl.set s.own_code ~key:addr ~data:code;
           if Term.has_attr sub Sub.stub then begin
             let module Stub (Machine : Primus.Machine.S) = struct
               module Interp = Primus.Interpreter.Make (Machine)
 
               let exec = Interp.sub sub
             end in
-            Hashtbl.set stubs ~key:addr ~data:(module Stub)
+            Hashtbl.set s.stubs ~key:addr ~data:(module Stub)
           end;
-          if is_thumb sub then Hash_set.add thumb addr;
+          if is_thumb s sub then Hash_set.add s.thumb addr;
           Linker.link ~addr ~name:(Sub.name sub) ~tid:(Term.tid sub) code
 
-  let link_program =
+  let link_program s =
     let* prog = Machine.gets Project.program in
-    index_natives prog;
+    index_natives s prog;
     Term.enum sub_t prog |> Seq.to_list
     |> Machine.List.iter ~f:(fun sub ->
-        let* () = link_sub sub in
+        let* () = link_sub s sub in
         Term.enum blk_t sub |> Seq.to_list |> Machine.List.iter ~f:link_blk)
 
   (* the code at an address, that nothing is linked to, e.g., of a
      function of the stripped program, runs in Unicorn, from the address
      without the lower bit in the Thumb state of ARM *)
+  let session = Machine.Global.get session_state
+
   let link_unresolved : Primus.Linker.name -> unit Machine.t = function
     | `addr addr ->
+        let* s = session in
         let* proj = Machine.get () in
         let start =
           match Project.arch proj with
           | (#Arch.arm | #Arch.thumb)
             when Word.(is_one (extract_exn ~hi:0 addr)) ->
               let start = Word.(addr - one (bitwidth addr)) in
-              Hash_set.add thumb start;
+              Hash_set.add s.thumb start;
               start
           | _ -> addr
         in
@@ -2497,13 +2647,13 @@ module Loader (Machine : Primus.Machine.S) = struct
     | `symbol _ | `tid _ -> Machine.return ()
 
   (* the references to the external functions of the program *)
-  let externals () =
+  let externals s =
     let* proj = Machine.get () in
     (* the bare project has subroutines for all imports, e.g., of the
        data objects, so the functions there are those, that the
        components, e.g., the Lisp machine, link, e.g., the stubs *)
     let* functions =
-      if !bare_mode then Linker.linked_symbols >>| String.Set.of_list
+      if s.bare_mode then Linker.linked_symbols >>| String.Set.of_list
       else
         Machine.return
           (Term.enum sub_t (Project.program proj)
@@ -2565,8 +2715,8 @@ module Loader (Machine : Primus.Machine.S) = struct
               (Unicorn_failure
                  (sprintf "the checkpoint is at %s, which is not found" point)))
 
-  let load_checkpoint target =
-    match !restore with
+  let load_checkpoint s target =
+    match s.restore with
     | None -> Machine.return None
     | Some file -> (
         match Checkpoint.load file with
@@ -2582,65 +2732,82 @@ module Loader (Machine : Primus.Machine.S) = struct
   (* the subroutines, whose code the other components replaced, stop
      Unicorn *)
   let create_engine () =
+    let* s = session in
     let* target = Machine.gets Project.target in
     let* () =
-      match !checkpoint with
+      match s.checkpoint with
       | None -> Machine.return ()
       | Some (_, point) ->
           let+ addr = resolve point in
-          checkpoint_addr := Some addr
+          s.checkpoint_addr <- Some addr
     in
-    let* cp = load_checkpoint target in
-    restored_from := cp;
+    let* cp = load_checkpoint s target in
+    s.restored_from <- cp;
+    (* the names and the functions, that the script changed, are of the
+       checkpoint too *)
+    Option.iter cp ~f:(fun (cp : Checkpoint.t) ->
+        List.iter cp.symbols ~f:(fun (name, addr) ->
+            Hashtbl.set s.symbols ~key:addr ~data:name);
+        List.iter cp.unstubbed ~f:(Hash_set.add s.unstubbed));
+    Hashtbl.iteri s.symbols ~f:(fun ~key ~data ->
+        Hashtbl.set s.names ~key ~data);
+    let* () =
+      let module Exec = Make (Machine) in
+      Hash_set.to_list s.unstubbed |> Machine.List.iter ~f:Exec.unstub
+    in
     let* foreign =
-      Hashtbl.keys own_code
+      Hashtbl.keys s.own_code
       |> Machine.List.filter_map ~f:(fun addr ->
           Linker.lookup (`addr addr) >>| function
-          | Some code when phys_equal code (Hashtbl.find_exn own_code addr) ->
+          | Some code when phys_equal code (Hashtbl.find_exn s.own_code addr) ->
               None
           | _ -> Some (int64_of_word addr))
     in
-    (match !active with Some e -> Uc.close e.uc | None -> ());
-    active := None;
-    let* externals = externals () in
-    recipe := Some (target, foreign, externals);
-    match create target ~foreign ~externals with
+    (match s.active with Some e -> Uc.close e.uc | None -> ());
+    s.active <- None;
+    let* externals = externals s in
+    s.recipe <- Some (target, foreign, externals);
+    match create s target ~foreign ~externals with
     | exception Unsupported msg -> Machine.raise (Unicorn_failure msg)
     | e ->
-        active := Some e;
-        Hashtbl.clear parked;
-        parked_pages := 0;
-        Primus.Memory.Backing.set
-          (Some (backing (Theory.Var.name (Theory.Target.data target))));
-        Machine.return ()
+        s.active <- Some e;
+        Hashtbl.clear s.parked;
+        s.parked_pages <- 0;
+        Memory.set_backing
+          (Some (backing s (Theory.Var.name (Theory.Target.data target))))
+
+  (* the session, that the script created for the system, see
+     [Bap_emu.create], or a new one *)
+  let start_session =
+    let* proj = Machine.get () in
+    let s =
+      match
+        Option.bind
+          (Project.get proj session_tag)
+          ~f:(Hashtbl.find_and_remove sessions)
+      with
+      | Some s -> s
+      | None -> create_session ()
+    in
+    s.bare_mode <- not (Project.disassembled proj);
+    index_thumb_symbols s (Project.specification proj);
+    let* () = Machine.Global.put session_state s in
+    link_program s
 
   let init () =
-    Hashtbl.clear own_code;
-    Hashtbl.clear stubs;
-    Hashtbl.clear names;
-    Hash_set.clear thumb;
-    checkpoint_addr := None;
-    checkpointed := false;
-    resumed_at := None;
-    skipped_at := None;
-    accounted := Stdlib.Sys.time ();
-    ticks := 0;
     let module Exec = Make (Machine) in
     Machine.sequence
       [
-        ( Machine.get () >>| fun proj ->
-          bare_mode := not (Project.disassembled proj);
-          index_thumb_symbols (Project.specification proj) );
-        link_program;
+        start_session;
         Primus.System.init >>> create_engine;
         Primus.Machine.fork >>> Exec.forked;
         Primus.Linker.unresolved >>> link_unresolved;
         ( Primus.Interpreter.exited >>> fun code ->
-          exit_code :=
+          let+ s = session in
+          s.exit_code <-
             Some
               (Word.to_int_exn
-                 (Word.extract_exn ~hi:7 (Primus.Value.to_word code)));
-          Machine.return () );
+                 (Word.extract_exn ~hi:7 (Primus.Value.to_word code))) );
         Primus.Machine.kill >>> Exec.killed;
         Primus.System.fini >>> Exec.finished;
         Primus.System.stop >>> Exec.system_stopped;

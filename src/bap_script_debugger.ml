@@ -2,7 +2,6 @@ open Core
 open Bap_core_theory
 open Bap.Std
 open Bap_primus.Std
-module Stops = Primus.Interpreter.Stops
 
 module type Handler = functor (Machine : Primus.Machine.S) -> sig
   val stopped : addr -> unit Machine.t
@@ -10,13 +9,18 @@ end
 
 let handlers : (module Handler) list ref = ref []
 let points : string list ref = ref []
-let resolved = ref false
 let break point = points := !points @ [ point ]
-let step on = Stops.set_stepping on
 let on_stop handler = handlers := !handlers @ [ handler ]
+
+(* the breakpoints are of the program, so the first machine of a system
+   resolves them *)
+let resolved =
+  Primus.Machine.State.declare ~uuid:"3f9b6d24-71c8-4e05-b2a7-d84e1c6f5a93"
+    ~name:"script-debugger-resolved" (fun _ -> false)
 
 module Debugger (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
+  module Stops = Primus.Interpreter.Stops.Make (Machine)
 
   (* the address, or the address of the subroutine with the name *)
   let resolve point =
@@ -29,18 +33,17 @@ module Debugger (Machine : Primus.Machine.S) = struct
         |> Seq.find ~f:(fun sub -> String.equal (Sub.name sub) point)
         |> Option.bind ~f:(fun sub -> Term.get_attr sub address)
 
-  (* the breakpoints are of the program, so the first machine resolves
-     them *)
   let add_breakpoints () =
-    if !resolved then Machine.return ()
-    else begin
-      resolved := true;
+    Machine.Global.get resolved >>= fun done_ ->
+    if done_ then Machine.return ()
+    else
+      Machine.Global.put resolved true >>= fun () ->
       Machine.List.iter !points ~f:(fun point ->
-          resolve point >>| function
+          resolve point >>= function
           | Some addr -> Stops.add addr
           | None ->
-              eprintf "bap script: the breakpoint %s is not found\n%!" point)
-    end
+              eprintf "bap script: the breakpoint %s is not found\n%!" point;
+              Machine.return ())
 
   (* the handlers are applied once, as the functors make their modules *)
   let stops =
@@ -50,7 +53,9 @@ module Debugger (Machine : Primus.Machine.S) = struct
         Handler.stopped)
 
   let stopped addr =
-    if Stops.stepping () || Stops.mem addr then
+    Stops.stepping >>= fun stepping ->
+    Stops.mem addr >>= fun stopped ->
+    if stepping || stopped then
       Machine.List.iter stops ~f:(fun stopped -> stopped addr)
     else Machine.return ()
 
