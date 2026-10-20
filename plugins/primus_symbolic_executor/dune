@@ -1,3 +1,23 @@
+;; the symbolic execution, that the plugin and the scripts use
+
+(library
+ (optional)
+ (name bap_primus_symbolic)
+ (public_name bap-primus-symbolic-executor.symbolic)
+ (modules bap_primus_symbolic)
+ (preprocess
+  (pps ppx_bap))
+ (libraries
+  bap
+  bap-core-theory
+  bap-primus
+  bitvec
+  core
+  monads
+  regular
+  zarith
+  z3))
+
 (library
  (optional)
  (name bap_primus_symbolic_executor_plugin)
@@ -9,6 +29,7 @@
   bap
   bap-main
   bap-primus
+  bap-primus-symbolic-executor.symbolic
   bap-primus-track-visited
   bitvec
   core
