@@ -1,0 +1,4 @@
+(test
+ (name test_direct)
+ (package bap-knowledge)
+ (libraries bap-knowledge core ounit2))

@@ -2658,6 +2658,49 @@ module Knowledge = struct
       | Empty _ | Reject -> Knowledge.return missing
       | other -> Knowledge.fail other)
 
+  (* the direct style: [await x] suspends the function of [direct] until
+     the knowledge computation [x] accepts, which resumes the function with
+     the result, or rejects, which raises [Failed] in the function, so that
+     its finalizers run, and the computation of [direct] fails. The
+     knowledge computations accept or reject only once, so the continuation
+     is resumed only once, as the effects of OCaml require. *)
+  type _ Stdlib.Effect.t += Await : 'a knowledge -> 'a Stdlib.Effect.t
+
+  exception Failed of conflict
+
+  let await x = Stdlib.Effect.perform (Await x)
+
+  let direct (type a) (f : unit -> a) : a knowledge =
+    let open Stdlib.Effect.Deep in
+    let handler : (a, a knowledge) handler =
+      {
+        retc = Knowledge.return;
+        exnc =
+          (function
+          | Failed p -> Knowledge.fail p
+          | exn ->
+              Stdlib.Printexc.raise_with_backtrace exn
+                (Stdlib.Printexc.get_raw_backtrace ()));
+        effc =
+          (fun (type b) (eff : b Stdlib.Effect.t) ->
+            match eff with
+            | Await x ->
+                Some
+                  (fun (k : (b, a knowledge) continuation) : a knowledge ->
+                    {
+                      run =
+                        (fun ~reject ~accept s ->
+                          x.run s
+                            ~accept:(fun x s ->
+                              (continue k x).run ~reject ~accept s)
+                            ~reject:(fun p ->
+                              (discontinue k (Failed p)).run ~reject ~accept s));
+                    })
+            | _ -> None);
+      }
+    in
+    { run = (fun ~reject ~accept s -> (match_with f () handler).run ~reject ~accept s) }
+
   let register_watcher (type a b) (s : (a, b) slot) run =
     Pid.incr pids;
     let pid = !pids in

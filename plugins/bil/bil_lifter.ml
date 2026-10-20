@@ -192,9 +192,10 @@ let provide_bir () =
     |> provide Theory.Semantics.slot
     |> comment "reifies IR, with the relocations applied");
   KB.promise Theory.Semantics.slot @@ fun obj ->
-  KB.collect Theory.Semantics.slot obj >>= fun sema ->
-  KB.proceed ~unless:(KB.Value.has Term.slot sema) >>= fun () ->
-  Relocations.relocated obj sema >>| fun ir ->
+  KB.direct @@ fun () ->
+  let sema = KB.await (KB.collect Theory.Semantics.slot obj) in
+  KB.await (KB.proceed ~unless:(KB.Value.has Term.slot sema));
+  let ir = KB.await (Relocations.relocated obj sema) in
   let ir = Option.value ir ~default:(KB.Value.get Bil_ir.slot sema) in
   match Bil_ir.reify ir with
   | [] -> Insn.empty
@@ -377,14 +378,17 @@ let provide_lifter ~with_fp () =
   in
   let is_empty = KB.Domain.is_empty Bil.domain in
   let lifter obj =
-    KB.collect Bil.code obj >>= fun bil ->
-    if is_empty bil then !!Insn.empty
+    KB.direct @@ fun () ->
+    let bil = KB.await (KB.collect Bil.code obj) in
+    if is_empty bil then Insn.empty
     else
-      Theory.Label.target obj >>= fun target ->
-      Theory.instance ~context:(context target) () >>= Theory.require
-      >>= fun (module Core) ->
+      let target = KB.await (Theory.Label.target obj) in
+      let (module Core) =
+        KB.await
+          (Theory.instance ~context:(context target) () >>= Theory.require)
+      in
       let module Lifter = Theory.Parser.Make (Core) in
-      Lifter.run Bil.Theory.parser bil
+      KB.await (Lifter.run Bil.Theory.parser bil)
   in
   KB.Rule.(
     declare ~package "bil-semantics"

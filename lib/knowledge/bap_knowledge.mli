@@ -327,6 +327,35 @@ module Knowledge : sig
 
       @since 2.5.0 *)
 
+  val direct : (unit -> 'a) -> 'a t
+  (** [direct f] is the knowledge computation of [f ()], which is written in
+      the direct style, i.e., [f] calls {!await} instead of binding the
+      knowledge computations, e.g.,
+
+      {[
+        KB.promise Theory.Semantics.slot @@ fun label ->
+        KB.direct @@ fun () ->
+        let insn = KB.await (KB.collect Insn.slot label) in
+        let mem = KB.await (KB.collect Memory.slot label) in
+        ...
+      ]}
+
+      When a computation that [f] awaits fails, [f] is aborted with an
+      exception, which [f] shouldn't catch, so that the computation of
+      [direct f] fails with the same conflict, e.g., a promise of [f] is
+      rejected when it awaits [reject ()]. Use {!Syntax.(>>=)} or {!catch}
+      inside of [await] to handle the failures, and don't catch all
+      exceptions, e.g., with [try ... with _ ->], in [f].
+
+      The other exceptions of [f] are raised, as from the monadic code. *)
+
+  val await : 'a t -> 'a
+  (** [await x] evaluates [x] in the current knowledge computation of
+      {!direct} and returns its result.
+
+      Must be called during [f ()] of [direct f], but not inside of a C
+      callback in it, otherwise raises [Effect.Unhandled]. *)
+
   val empty : state
   (** state with no knowledge *)
 
