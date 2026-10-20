@@ -13,6 +13,7 @@
   llvm-x86-64-floats.lisp
   locale.lisp
   memory-allocator.lisp
+  msvcrt.lisp
   posix.lisp
   setjmp.lisp
   simple-memory-allocator.lisp

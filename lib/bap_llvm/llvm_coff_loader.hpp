@@ -141,9 +141,28 @@ void emit_relocation(const coff_obj &obj, const RelocationRef &rel, section_iter
     }
 }
 
+// the headers of the image, which the loader of Windows maps at the
+// image base, as the programs read them, e.g., the startup code of mingw
+// validates them through __ImageBase
+uint64_t size_of_headers(const coff_obj &obj) {
+    if (obj.getBytesInAddress() == 4) {
+        if (auto hdr = get_pe32_header(obj)) return hdr->SizeOfHeaders;
+    } else {
+        if (auto hdr = get_pe32plus_header(obj)) return hdr->SizeOfHeaders;
+    }
+    return 0;
+}
+
 void emit_sections(const coff_obj &obj, tables &s) {
     uint64_t base = obj.getImageBase();
     bool is_rel = obj.isRelocatableObject();
+    if (!is_rel) {
+        if (uint64_t size = size_of_headers(obj)) {
+            s.entry("llvm:section-entry") << ".headers" << base << size << 0;
+            s.entry("llvm:coff-virtual-section-header") << ".headers" << base << size;
+            s.entry("llvm:section-flags") << ".headers" << true << false << false;
+        }
+    }
     for (auto sec : prim::sections(obj))
         emit_section(*get_coff_section(obj, sec), base, is_rel, s);
 }
@@ -345,11 +364,30 @@ error_or<uint64_t> symbol_file_offset(const coff_obj &obj, const SymbolRef &sym)
     }
 }
 
+// The slots of the import address table (IAT) of each library, which
+// the loader of Windows fills with the addresses of the imported
+// symbols, in the order of the lookup table, are their references, as
+// the slots of the GOT are of ELF. The symbols, that are imported by
+// their ordinals, have no names, so they are not referenced.
 void emit_import_directories(const coff_obj &obj, tables &s) {
+    uint64_t base = obj.getImageBase();
+    uint64_t size = obj.getBytesInAddress();
     for (auto dir : obj.import_directories()) {
         StringRef name;
         if (!dir.getName(name))
             s.entry("require") << name.str();
+        uint32_t iat;
+        if (dir.getImportAddressTableRVA(iat))
+            continue;
+        uint64_t slot = base + iat;
+        for (auto sym : dir.imported_symbols()) {
+            bool ordinal = false;
+            StringRef sym_name;
+            if (!sym.isOrdinal(ordinal) && !ordinal &&
+                !sym.getSymbolName(sym_name) && !sym_name.empty())
+                s.entry("llvm:name-reference") << slot << sym_name.str();
+            slot += size;
+        }
     }
 }
 

@@ -171,9 +171,74 @@ let promise_noreturn paths files =
       in
       Option.some_if (Set.mem (Lazy.force names) name) true
 
+(* The functions, that a file of PE imports from the libraries, e.g., of
+   KERNEL32, which the program calls through the slots of its import
+   address table, have no code in the file, unlike the thunks, so they
+   are the subroutines without addresses, as the external functions of
+   the bare projects are, whose prototypes the api files give, so that
+   the stubs, e.g., of Lisp, get their arguments. The data objects, that
+   the programs import from msvcrt, are not subroutines, so that the
+   loaders give them storage, see primus_loader_basic.ml. *)
+let msvcrt_data_objects =
+  String.Set.of_list
+    [
+      "__initenv";
+      "__winitenv";
+      "_acmdln";
+      "_wcmdln";
+      "_fmode";
+      "_commode";
+      "__argc";
+      "__argv";
+      "__wargv";
+      "_environ";
+      "_wenviron";
+      "_iob";
+      "__mb_cur_max";
+      "_pctype";
+      "_osver";
+      "_winver";
+      "_timezone";
+      "_daylight";
+      "_tzname";
+    ]
+
+let unversioned name =
+  Option.value_map ~default:name ~f:fst (String.lsplit2 name ~on:'@')
+
+let pe_imports proj =
+  let spec = Project.specification proj in
+  match Ogre.eval (Ogre.request Image.Scheme.format) spec with
+  | Ok (Some "coff") -> (
+      match
+        Ogre.eval
+          (Ogre.collect
+             Ogre.Query.(select (from Image.Scheme.external_reference)))
+          spec
+      with
+      | Ok refs ->
+          let defined =
+            Term.enum sub_t (Project.program proj)
+            |> Seq.map ~f:Sub.name |> Seq.to_list |> String.Set.of_list
+          in
+          Seq.to_list refs
+          |> List.map ~f:(fun (_, name) -> unversioned name)
+          |> List.dedup_and_sort ~compare:String.compare
+          |> List.filter ~f:(fun name ->
+              not (Set.mem defined name || Set.mem msvcrt_data_objects name))
+      | Error _ -> [])
+  | _ -> []
+
+let with_imports imports prog =
+  List.fold imports ~init:prog ~f:(fun prog name ->
+      let tid = Tid.create () in
+      Tid.set_name tid name;
+      Term.append sub_t prog (Sub.create ~tid ~name ()))
+
 (* the folders of the project, see [Bap_api.with_paths], are searched
    after those of the options *)
 let main paths files proj =
+  let imports = pe_imports proj in
   let paths =
     paths
     @ List.filter_map (Bap_api.paths proj) ~f:(fun p ->
@@ -187,6 +252,7 @@ let main paths files proj =
       exit 1
   | Ok mappers ->
       Project.map_program proj ~f:(fun prog ->
+          with_imports imports prog |> fun prog ->
           List.fold mappers ~init:prog ~f:(fun prog map -> map#run prog))
 
 let list_of_paths paths =

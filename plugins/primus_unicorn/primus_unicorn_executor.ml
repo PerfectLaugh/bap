@@ -1371,6 +1371,20 @@ module Make (Machine : Primus.Machine.S) = struct
      the registers of the program win, and then the registers, which the
      aliases changed, go back to Primus *)
   let push_vars e vars =
+    (* the bases of the segments of x86 in the protected mode are in its
+       descriptors, see [Target.Segments] *)
+    let* () =
+      if Poly.(e.arch = Uc.X86) && e.bytes = 4 then
+        Machine.List.iter vars ~f:(fun v ->
+            if Target.Segments.is_base (Var.name v) then
+              let+ x = Env.get v in
+              ignore
+                (Target.Segments.set e.uc (Var.name v)
+                   (Bitvec.to_int64 (Word.to_bitvec (Primus.Value.to_word x)))
+                  : bool)
+            else Machine.return ())
+      else Machine.return ()
+    in
     let vars = List.filter vars ~f:(Target.Regs.mem e.regs) in
     let is_basis v = List.mem e.basis v ~equal:Var.equal in
     let aliases, basis = List.partition_tf vars ~f:(Fn.non is_basis) in

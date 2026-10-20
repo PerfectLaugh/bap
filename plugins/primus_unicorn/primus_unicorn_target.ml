@@ -353,3 +353,84 @@ module Regs = struct
 
   let names t = Map.keys t.locs
 end
+
+(* The bases of the segments of x86 in the protected mode, e.g., of FS,
+   which the programs of Windows read their thread environment block
+   through, are in the descriptors of the global descriptor table, which
+   Unicorn loads, when the selectors are written, unlike the bases of
+   the 64-bit mode, which are its registers. The table is mapped at
+   [gdt_base], with the FS and the GS segments in its entries 1 and 2, and
+   the flat stack segment in the entry 3, as loading a selector makes
+   Unicorn take the size of the stack from the descriptor of SS. *)
+module Segments = struct
+  let gdt_base = 0xFFFE_0000L
+  let gdt_size = 0x1000L
+
+  let entry = function
+    | "FS_BASE" -> Some (1, "FS")
+    | "GS_BASE" -> Some (2, "GS")
+    | _ -> None
+
+  let is_base = Fn.compose Option.is_some entry
+
+  (* the descriptor of the writable data segment of the 32-bit mode, of
+     the ring 3, or 0, which covers all memory, from the base, with the
+     page granularity *)
+  let descriptor ?(access = 0xF2L) base =
+    let limit = 0xFFFFFL and flags = 0xCL in
+    let open Int64 in
+    let low = limit land 0xFFFFL lor ((base land 0xFFFFL) lsl 16) in
+    let high =
+      (base lsr 16) land 0xFFL lor (access lsl 8)
+      lor (((limit lsr 16) land 0xFL) lsl 16)
+      lor (flags lsl 20)
+      lor (((base lsr 24) land 0xFFL) lsl 24)
+    in
+    let byte x i =
+      Char.of_int_exn (to_int_exn ((x lsr Int.(8 * i)) land 0xFFL))
+    in
+    String.init 8 ~f:(fun i ->
+        if Int.(i < 4) then byte low i else byte high Int.(i - 4))
+
+  (* the GDTR, which is uc_x86_mmr: the selector, the base, the limit,
+     and the flags, as the C compiler lays them out *)
+  let gdtr =
+    let le x n =
+      String.init n ~f:(fun i ->
+          Char.of_int_exn Int64.(to_int_exn ((x lsr Int.(8 * i)) land 0xFFL)))
+    in
+    String.concat
+      [
+        le 0L 2;
+        String.make 6 '\000';
+        le gdt_base 8;
+        le Int64.(gdt_size - 1L) 4;
+        le 0L 4;
+      ]
+
+  let mapped uc =
+    List.exists (Uc.mem_regions uc) ~f:(fun (lower, _, _) ->
+        Int64.equal lower gdt_base)
+
+  (* [set uc name base] the segment of the base register [name], e.g.,
+     FS_BASE, has the [base], returns [false], if it is not a base *)
+  let set uc name base =
+    match (entry name, Uc.reg X86 "GDTR") with
+    | Some (index, selector), Some id -> (
+        if not (mapped uc) then begin
+          Uc.mem_map uc gdt_base gdt_size Uc.Perm.(read + write);
+          Uc.reg_write_bytes uc id gdtr;
+          Uc.mem_write uc Int64.(gdt_base + 24L) (descriptor ~access:0x92L 0L);
+          Option.iter (Uc.reg X86 "SS") ~f:(fun ss -> Uc.reg_write uc ss 0x18L)
+        end;
+        Uc.mem_write uc
+          Int64.(gdt_base + of_int Int.(index * 8))
+          (descriptor base);
+        match Uc.reg X86 selector with
+        | Some sel ->
+            (* the selector of the entry, with the privilege level 3 *)
+            Uc.reg_write uc sel (Int64.of_int ((index lsl 3) lor 3));
+            true
+        | None -> false)
+    | _ -> false
+end

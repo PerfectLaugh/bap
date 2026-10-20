@@ -50,7 +50,19 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
         Machine.return ()
     | Some sp ->
         Env.set sp bottom >>= fun () ->
-        Mem.allocate ~readonly:false ~executable:false top stack_size
+        Machine.get () >>= fun proj ->
+        (* the stack of Windows is zeroed, which the programs of PE read,
+           e.g., __chkstk_ms probes its pages *)
+        let init =
+          match
+            Ogre.eval
+              (Ogre.request Image.Scheme.format)
+              (Project.specification proj)
+          with
+          | Ok (Some "coff") -> Some (fun _ -> Machine.return (Word.zero 8))
+          | _ -> None
+        in
+        Mem.allocate ~readonly:false ~executable:false ?init top stack_size
 
   let setup_registers () =
     let zero = Generator.static 0 in
@@ -266,7 +278,7 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     let specs = spec :: List.map libs ~f:Project.Library.specification in
     Machine.List.iter specs ~f:(fixup_relocs_of_doc target)
 
-  (* the data objects of libc, which the programs import, e.g., stdin,
+  (* the data objects of libc, which the programs of ELF import, e.g., stdin,
      whose slots, e.g., of the GOT, which the GLOB_DAT relocations fill,
      are not relocated, as they are not linked, while the weak imports,
      e.g., __gmon_start__, stay null, as the programs test them *)
@@ -312,33 +324,124 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     |> Seq.filter ~f:(fun (addr, name) ->
         Set.mem imported_data_objects (unversioned name) && in_got addr)
 
-  (* each imported data object, whose slot is null, gets a zeroed word
-     past the loaded memory, as a copy relocation gives it in the
-     program, so that the program reads its value through the slot *)
-  let setup_imported_data endp =
+  let is_coff doc =
+    match Ogre.eval (Ogre.request Image.Scheme.format) doc with
+    | Ok (Some "coff") -> true
+    | _ -> false
+
+  (* the memory, that the loader zeroes, e.g., the storage of the imports,
+     is initialized, not generated, as the generated values are the
+     inputs, e.g., of the symbolic executor *)
+  let zero _ = Machine.return (Word.zero 8)
+
+  (* the slots of the imports, which the loader of the system fills, the
+     data objects, with the addresses of their storage, and the functions
+     with the addresses, at which the code, that calls them by their
+     names, is linked, e.g., the stubs of Lisp, as the import address
+     table of PE is the only way, by which the programs call them *)
+  type import = Object of addr * string | Function of addr * string
+
+  let imports doc =
+    if is_coff doc then
+      (* the api pass makes the imported functions subroutines, see
+         api_main.ml, the other imports are the data objects *)
+      Machine.gets Project.program >>= fun prog ->
+      let functions =
+        Term.enum sub_t prog |> Seq.map ~f:Sub.name |> Seq.to_list
+        |> String.Set.of_list
+      in
+      Ogre.(collect Query.(select @@ from Image.Scheme.external_reference))
+      |> or_empty doc |> Seq.to_list
+      |> Machine.List.map ~f:(fun (slot, name) ->
+          make_word slot >>| fun slot ->
+          if Set.mem functions name then Function (slot, name)
+          else Object (slot, name))
+    else
+      Machine.gets Project.target >>= fun target ->
+      let endian = endian_of_target target in
+      imported_data doc |> Seq.to_list
+      |> Machine.List.filter_map ~f:(fun (slot, _) ->
+          make_word slot >>= fun slot ->
+          read_word endian slot >>| fun value ->
+          Option.some_if (Word.is_zero value) (Object (slot, "")))
+
+  (* the code, that calls the function by its name *)
+  let call name : Primus.Linker.code =
+    let module Code (Machine : Primus.Machine.S) = struct
+      module Linker = Primus.Linker.Make (Machine)
+
+      let exec = Linker.exec (`symbol name)
+    end in
+    (module Code)
+
+  (* the imports get a word each, past the loaded memory, as a copy
+     relocation gives a data object in the program, which is zeroed *)
+  let setup_imports endp =
     Machine.get () >>= fun proj ->
     let target = Project.target proj in
     let endian = endian_of_target target in
-    let width = Theory.Target.code_addr_size target in
-    let size = width / 8 in
-    let refs = Seq.to_list (imported_data (Project.specification proj)) in
-    Machine.List.fold refs ~init:([], endp) ~f:(fun (objects, next) (slot, _) ->
-        let slot = Word.of_int64 ~width slot in
-        read_word endian slot >>| fun value ->
-        if Word.is_zero value then (slot :: objects, Addr.nsucc next size)
-        else (objects, next))
-    >>= fun (objects, next) ->
-    if List.is_empty objects then Machine.return endp
+    let size = Theory.Target.code_addr_size target / 8 in
+    imports (Project.specification proj) >>= function
+    | [] -> Machine.return endp
+    | imports ->
+        let total = align_up (List.length imports * size) 0x1000 in
+        Mem.allocate ~readonly:false ~executable:false ~init:zero endp total
+        >>= fun () ->
+        List.mapi imports ~f:(fun i import ->
+            (Addr.nsucc endp (i * size), import))
+        |> Machine.List.iter ~f:(fun (addr, import) ->
+            match import with
+            | Object (slot, "_iob") ->
+                (* the streams of msvcrt, e.g., stdin, which is &_iob[0],
+                   are the file descriptors of Lisp, as __iob_func of
+                   msvcrt.lisp tells *)
+                make_word 0L >>= fun null ->
+                Machine.ignore_m @@ save_word ~force:true endian null slot
+            | Object (slot, _) ->
+                Machine.ignore_m @@ save_word ~force:true endian addr slot
+            | Function (slot, name) ->
+                Linker.link ~addr (call name) >>= fun () ->
+                Machine.ignore_m @@ save_word ~force:true endian addr slot)
+        >>| fun () -> Addr.nsucc endp total
+
+  (* The thread environment block (TEB) of Windows, which the programs of
+     PE read through GS on x86-64, and FS on x86, e.g., its address at
+     NtTib.Self, and the bounds of the stack, and its process environment
+     block (PEB), which is zeroed, follows it, and the stack of Windows. *)
+  let setup_teb endp =
+    Machine.get () >>= fun proj ->
+    if not (is_coff (Project.specification proj)) then Machine.return endp
     else
-      let total = align_up (Word.to_int_exn Addr.(next - endp)) 0x1000 in
-      Mem.allocate ~readonly:false ~executable:false
-        ~generator:(Generator.static 0) endp total
+      let target = Project.target proj in
+      let endian = endian_of_target target in
+      let width = Theory.Target.code_addr_size target in
+      let base, self, top, limit, peb =
+        if width = 64 then ("GS_BASE", 0x30, 0x8, 0x10, 0x60)
+        else ("FS_BASE", 0x18, 0x4, 0x8, 0x30)
+      in
+      let size = 0x2000 in
+      let field off x =
+        make_word x >>= fun x ->
+        Machine.ignore_m @@ save_word ~force:true endian x (Addr.nsucc endp off)
+      in
+      Mem.allocate ~readonly:false ~executable:false ~init:zero endp size
       >>= fun () ->
-      List.rev objects
-      |> List.mapi ~f:(fun i slot -> (Addr.nsucc endp (i * size), slot))
-      |> Machine.List.iter ~f:(fun (storage, slot) ->
-          Machine.ignore_m @@ save_word ~force:true endian storage slot)
-      >>| fun () -> Addr.nsucc endp total
+      let teb = Word.to_int64_exn endp in
+      field self teb >>= fun () ->
+      field top stack_base >>= fun () ->
+      field limit Int64.(stack_base - of_int stack_size) >>= fun () ->
+      field peb Int64.(teb + 0x1000L) >>= fun () ->
+      Val.of_word endp >>= Env.set (Var.create base (Type.imm width))
+      >>= fun () ->
+      (* the entry is called, as on Windows, with the stack aligned, so
+         that the stack, whose callers own the shadow space above it, is
+         below the arguments and the environment, see [setup_main_frame] *)
+      ( stack_pointer >>= function
+        | None -> Machine.return ()
+        | Some sp ->
+            make_word Int64.(stack_base - 0x88L) >>= Val.of_word >>= Env.set sp
+      )
+      >>| fun () -> Addr.nsucc endp size
 
   let irelative_relocations doc =
     Ogre.(collect Query.(select @@ from Image.Scheme.irelative_relocation))
@@ -607,10 +710,15 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     setup_registers () >>= fun () ->
     debug "setting up thread-local storage";
     setup_tls endp >>= fun endp ->
-    debug "setting up the imported data objects";
-    setup_imported_data endp >>= fun endp ->
+    debug "setting up the imports";
+    setup_imports endp >>= fun endp ->
+    debug "setting up the thread environment block";
+    setup_teb endp >>= fun endp ->
     set_word "posix:endp" endp >>= fun () ->
     set_word "posix:brk" endp >>= fun () ->
+    (* the arguments and the environment, e.g., for __getmainargs of
+       msvcrt, which the programs of PE call *)
+    make_word stack_base >>= set_word "posix:main-frame" >>= fun () ->
     debug "initializing names";
     init_names () >>= fun () ->
     (* the resolvers are run when the code is linked, and they return

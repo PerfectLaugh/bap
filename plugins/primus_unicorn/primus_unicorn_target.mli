@@ -53,3 +53,15 @@ module Regs : sig
   val names : t -> string list
   (** the names of the registers that have counterparts *)
 end
+
+(** the bases of the segments of x86 in the protected mode, e.g., of FS, in the
+    descriptors of the global descriptor table, which Unicorn loads, when the
+    selectors are written *)
+module Segments : sig
+  val is_base : string -> bool
+  (** [is_base name] if [name] is a base register, e.g., FS_BASE *)
+
+  val set : Bap_unicorn.t -> string -> int64 -> bool
+  (** [set uc name base] the segment of the base register [name] has the [base],
+      [false], if [name] is not a base register *)
+end
