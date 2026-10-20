@@ -12,3 +12,4 @@ val insn :
 
 val code : project -> int64 -> string option
 val encoding : project -> int64 -> Bap_core_theory.Theory.language option
+val name : project -> int64 -> string option

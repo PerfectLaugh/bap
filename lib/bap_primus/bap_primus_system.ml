@@ -425,6 +425,6 @@ let () =
        changes, or writes, e.g., on the heap, runs as it is in the memory, \
        lifted when it runs, except that a block, that changes, while it runs, \
        runs as it was until the program jumps to it again, a subroutine, whose \
-       code changed, posts no call observations, and the dynamic code of ARM \
-       enters Thumb by the jumps to the odd addresses, and stays in the mode \
-       of the code, that jumps directly, e.g., by [blx label] to the A32 code."
+       code changed, posts no call observations. The program of ARM \
+       interworks, as ARMv7 does, so its code runs in the mode, Thumb or A32, \
+       that the jumps enter."

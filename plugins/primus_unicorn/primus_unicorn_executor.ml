@@ -1752,12 +1752,9 @@ module Make (Machine : Primus.Machine.S) = struct
         else pc
     | _ -> pc
 
-  (* the Thumb code of ARM, see [Lift.insn] *)
-  let thumb_encoding =
-    lazy
-      (match Theory.Language.read ~package:"bap" "llvm-thumb" with
-      | language -> Some language
-      | exception _ -> None)
+  (* the encoding of the mode of ARM, that Unicorn runs, see [Lift.insn] *)
+  let arm_encoding (e : engine) ~thumb =
+    match e.arch with Arm -> Primus.Interworking.encoding ~thumb | _ -> None
 
   (* the address of the code in the Thumb state of ARM, see [current_pc] *)
   let in_thumb (e : engine) pc =
@@ -2011,8 +2008,7 @@ module Make (Machine : Primus.Machine.S) = struct
   let lift ?(thumb = false) e addr =
     let* proj = Machine.get () in
     let+ read = code_reader e addr in
-    let encoding = if thumb then Lazy.force thumb_encoding else None in
-    Lift.insn ?encoding proj ~read addr
+    Lift.insn ?encoding:(arm_encoding e ~thumb) proj ~read addr
 
   (* the accesses of the instruction at [addr], which are analyzed
      anew, if its bytes changed *)
@@ -2069,13 +2065,25 @@ module Make (Machine : Primus.Machine.S) = struct
             match site_of_blocks blks with
             | Some site -> call_intrinsic e site >>| fun () -> next
             | None -> (
-                let+ dst =
-                  Interpreter.step ~next:(word e (code_addr e next)) blks
-                in
-                let dst = int64_of_word (Primus.Value.to_word dst) in
+                let next = word e (code_addr e next) in
                 match e.arch with
-                | Arm when Int64.(pc land 1L = 1L) -> Int64.(dst lor 1L)
-                | _ -> dst)
+                | Arm ->
+                    (* the mode, that the jump enters, see [Interworking] *)
+                    let blks = Primus.Interworking.unmask blks in
+                    let* dst = Interpreter.step ~next blks in
+                    let+ proj = Machine.get () in
+                    let name =
+                      Option.value (Lift.name proj (code_addr e pc)) ~default:""
+                    in
+                    let dst, thumb =
+                      Primus.Interworking.jump ~name ~thumb:(in_thumb e pc)
+                        ~next blks (Primus.Value.to_word dst)
+                    in
+                    let dst = int64_of_word dst in
+                    if thumb then Int64.(dst lor 1L) else dst
+                | _ ->
+                    let+ dst = Interpreter.step ~next blks in
+                    int64_of_word (Primus.Value.to_word dst))
           in
           let* more = if n > 1 then continues e pc else Machine.return false in
           if more then run pc (n - 1) else Machine.return pc
@@ -2187,9 +2195,7 @@ module Make (Machine : Primus.Machine.S) = struct
               let* proj = Machine.get () in
               let thumb = Int64.(pc land 1L = 1L) in
               let* read = code_reader e (code_addr e pc) in
-              let encoding =
-                if in_thumb e pc then Lazy.force thumb_encoding else None
-              in
+              let encoding = arm_encoding e ~thumb:(in_thumb e pc) in
               match
                 trap proj ~read ?encoding e.arch ~thumb n (code_addr e pc)
               with

@@ -14,6 +14,7 @@ end
 open Primus
 module Interpreter = Bap_primus_interpreter
 module Lift = Bap_primus_lift
+module Interworking = Bap_primus_interworking
 
 (* The code, that the program changes or writes, e.g., on the heap,
    which the disassembly of the program doesn't have, runs as it is in
@@ -36,17 +37,12 @@ module Lift = Bap_primus_lift
      program, as the dynamic code has no arguments, and neither do the
      calls, that the dynamic code makes;
 
-   - the mode of the dynamic code of ARM, see [Arm], Thumb or A32, is the
-     encoding,
-     that the disassembler found at the address, or the mode, that the
-     jumps tell: the jump to the odd address, e.g., [blx r3], enters
-     Thumb, the next instruction and the direct jumps, e.g., [b label],
-     stay in the mode, and the other jumps to the even addresses, e.g.,
-     [bx r3], enter A32, so the direct jump from Thumb to the A32 code,
-     that the program writes, i.e., [blx label], is decoded as Thumb, and
-     the code, that the program enters otherwise, e.g., by a return,
-     whose IR clears the Thumb bit, has the default encoding of the
-     target, e.g., A32. *)
+   - the dynamic code of ARM runs in the mode, Thumb or A32, that the
+     jumps enter, as ARMv7 does, see [Interworking], or that the
+     disassembler found at the address, but the code, that is entered
+     without the mode, e.g., by a stub of Lisp, that calls the even address
+     of the code, that the disassembler didn't find, has the encoding,
+     that the target guesses, e.g., A32. *)
 
 (* the basic blocks of the disassembly, their last addresses, and the
    blocks and the subroutines of the program, that start there, which are
@@ -117,6 +113,9 @@ module type Mode = functor (Machine : Machine) -> sig
   (** [encoding addr] the encoding of the instruction at [addr], that the mode
       tells, otherwise [Lift.insn] finds it *)
 
+  val ir : blk term list -> blk term list
+  (** [ir blks] the IR of the instruction, that runs *)
+
   val leave : addr -> blk term list -> next:addr -> addr -> addr Machine.t
   (** [leave addr blks ~next dst] the address, that the instruction at [addr],
       whose IR is [blks], jumps to, when it jumps to [dst], or falls through to
@@ -127,74 +126,57 @@ end
 module Generic (Machine : Machine) = struct
   let enter = Machine.return
   let encoding _ = Machine.return None
+  let ir = Fn.id
   let leave _ _ ~next:_ dst = Machine.return dst
 end
 
-(* The mode of ARM, Thumb or A32, is the encoding, that the disassembler
-   found at the address, or the mode, that the jumps tell: the jump to
-   the odd address, e.g., [blx r3], enters the Thumb code at the even
-   address, the next instruction and the direct jumps, e.g., [b label],
-   stay in the mode, and the other jumps to the even addresses, e.g.,
-   [bx r3], enter A32. *)
-(* the addresses of the Thumb code, that the dynamic code runs *)
-let thumb =
+(* the modes of the addresses of the dynamic code of ARM, Thumb, if
+   [true], or A32 *)
+let modes =
   Bap_primus_machine.State.declare ~uuid:"9d3f6a21-58c4-4b7e-a0d2-7e1c5b8f4a69"
-    ~name:"dynamic-thumb-code" (fun _ -> Addr.Set.empty)
+    ~name:"dynamic-arm-modes" (fun _ -> Addr.Map.empty)
 
-let thumb_encoding =
-  lazy
-    (match Theory.Language.read ~package:"bap" "llvm-thumb" with
-    | language -> Some language
-    | exception _ -> None)
-
+(* The mode of ARM, Thumb or A32, is the mode, that the jumps tell, see
+   [Interworking], or the encoding, that the disassembler found at the
+   address. *)
 module Arm (Machine : Machine) = struct
   open Machine.Syntax
 
   let int64 x = Bitvec.to_int64 (Word.to_bitvec x)
-  let set_thumb addr = Machine.Local.update thumb ~f:(fun s -> Set.add s addr)
 
-  (* the address without the Thumb bit, and the bit *)
-  let even addr =
-    if Word.(is_one (extract_exn ~hi:0 addr)) then
-      (Word.(addr land lnot (one (bitwidth addr))), true)
-    else (addr, false)
+  let set addr thumb =
+    Machine.Local.update modes ~f:(fun m -> Map.set m ~key:addr ~data:thumb)
 
   let enter addr =
-    let addr, odd = even addr in
-    (if odd then set_thumb addr else Machine.return ()) >>| fun () -> addr
+    if Word.(is_one (extract_exn ~hi:0 addr)) then
+      let addr = Word.(addr land lnot (one (bitwidth addr))) in
+      set addr true >>| fun () -> addr
+    else Machine.return addr
 
   let encoding addr =
-    Machine.Local.get thumb >>| fun s ->
-    if Set.mem s addr then Lazy.force thumb_encoding else None
+    Machine.Local.get modes >>| fun m ->
+    Option.bind (Map.find m addr) ~f:(fun thumb -> Interworking.encoding ~thumb)
 
-  (* the instruction is Thumb, as the mode tells, or the disassembler *)
-  let is_thumb addr =
+  let ir = Interworking.unmask
+
+  (* the mode of the instruction, that runs *)
+  let mode addr =
     Machine.get () >>= fun proj ->
-    Machine.Local.get thumb >>| fun s ->
-    Set.mem s addr
-    ||
-    match (Lift.encoding proj (int64 addr), Lazy.force thumb_encoding) with
-    | Some used, Some thumb -> Theory.Language.equal used thumb
-    | _ -> false
-
-  (* the jump to the constant address, e.g., [b label], that stays in
-     the mode, unlike [bx r0] to the even address *)
-  let is_direct blks =
-    List.for_all blks ~f:(fun blk ->
-        Term.enum jmp_t blk
-        |> Seq.for_all ~f:(fun jmp ->
-            match Jmp.kind jmp with
-            | Goto (Indirect (Bil.Int _)) | Call _ | Goto (Direct _) | Int _ ->
-                true
-            | Goto (Indirect _) | Ret _ -> false))
+    Machine.Local.get modes >>| fun m ->
+    match Map.find m addr with
+    | Some thumb -> thumb
+    | None -> (
+        match Lift.encoding proj (int64 addr) with
+        | Some used -> Interworking.is_thumb used
+        | None -> false)
 
   let leave addr blks ~next dst =
-    is_thumb addr >>= fun thumb ->
-    let dst, odd = even dst in
-    (if thumb then set_thumb next else Machine.return ()) >>= fun () ->
-    (if odd || (thumb && is_direct blks) then set_thumb dst
-     else Machine.return ())
-    >>| fun () -> dst
+    Machine.get () >>= fun proj ->
+    mode addr >>= fun thumb ->
+    let name = Option.value (Lift.name proj (int64 addr)) ~default:"" in
+    let dst, entered = Interworking.jump ~name ~thumb ~next blks dst in
+    set next thumb >>= fun () ->
+    set dst entered >>| fun () -> dst
 end
 
 module Run (Mode : Mode) (Machine : Machine) = struct
@@ -251,6 +233,7 @@ module Run (Mode : Mode) (Machine : Machine) = struct
     | None -> Machine.raise (Interpreter.Segmentation_fault addr)
     | Some (size, blks) ->
         let next = Word.(addr ++ size) in
+        let blks = Mode.ir blks in
         let* dst = Interp.step ~next blks in
         let* dst = Mode.leave addr blks ~next (Value.to_word dst) in
         if is_call blks && not (Word.equal dst next) then
@@ -317,17 +300,27 @@ module LinkBinaryProgram (Machine : Machine) = struct
     else
       let { blocks; blks; subs } = Lazy.force index in
       match Map.closest_key blocks `Less_or_equal_to addr with
-      | Some (start, last) when Addr.(addr <= last) -> (
+      | Some (start, last) when Addr.(addr <= last) ->
           Machine.Local.get dynamic >>= fun linked ->
           if Set.mem linked start then Machine.return ()
           else
-            let tids = Map.find_multi blks start in
-            (if List.is_empty tids then link_dynamic start
-             else Machine.List.iter tids ~f:(fun tid -> link_dynamic ~tid start))
-            >>= fun () ->
-            match Map.find subs start with
-            | Some (tid, name) -> link_dynamic ~tid ~name start
-            | None -> Machine.return ())
+            (* the Thumb code of ARM is linked at the odd address too *)
+            Machine.gets Project.arch >>= fun arch ->
+            let starts =
+              match arch with
+              | #Arch.arm | #Arch.thumb ->
+                  [ Word.(start lor one (bitwidth start)); start ]
+              | _ -> [ start ]
+            in
+            Machine.List.iter starts ~f:(fun addr ->
+                let tids = Map.find_multi blks start in
+                (if List.is_empty tids then link_dynamic addr
+                 else
+                   Machine.List.iter tids ~f:(fun tid -> link_dynamic ~tid addr))
+                >>= fun () ->
+                match Map.find subs start with
+                | Some (tid, name) -> link_dynamic ~tid ~name addr
+                | None -> Machine.return ())
       | _ -> Machine.return ()
 
   (* the executable address, that nothing is linked to, see the
@@ -363,34 +356,74 @@ module LinkBinaryProgram (Machine : Machine) = struct
       method! enter_sub = collect Sub.name
     end
 
-  let link name code t m =
-    m >>= fun () ->
-    Linker.link ~name:(name t) ~tid:(Term.tid t) ?addr:(Term.get_attr t address)
-      code
+  (* The program of ARM interworks, see [Interworking]: its jumps don't
+     clear the Thumb bit of their targets, so that they enter the code,
+     that the program writes, in its mode, and its Thumb code is linked
+     at the odd addresses too, as the jumps to it have the Thumb bit. *)
+  module Arm = struct
+    let unmask_blk blk =
+      match Interworking.unmask [ blk ] with [ blk ] -> blk | _ -> blk
 
-  let linker linked =
+    let unmask_sub sub = Term.map blk_t sub ~f:unmask_blk
+
+    (* the names of the Thumb instructions of LLVM start with t *)
+    let is_thumb_blk blk =
+      let insn =
+        match Term.first def_t blk with
+        | Some def -> Term.get_attr def Disasm.insn
+        | None ->
+            Option.bind (Term.first jmp_t blk) ~f:(fun jmp ->
+                Term.get_attr jmp Disasm.insn)
+      in
+      match insn with
+      | Some insn -> String.is_prefix (Insn.name insn) ~prefix:"t"
+      | None -> false
+
+    let is_thumb_sub sub =
+      match Term.first blk_t sub with
+      | Some blk -> is_thumb_blk blk
+      | None -> false
+
+    let odd addr = Word.(addr lor one (bitwidth addr))
+  end
+
+  let link ?(thumb = false) name code t m =
+    m >>= fun () ->
+    let addr = Term.get_attr t address in
+    (if thumb then
+       match addr with
+       | Some addr ->
+           Linker.link ~name:(name t) ~tid:(Term.tid t) ~addr:(Arm.odd addr)
+             code
+       | None -> Machine.return ()
+     else Machine.return ())
+    >>= fun () -> Linker.link ~name:(name t) ~tid:(Term.tid t) ?addr code
+
+  let linker ~arm linked =
     object
       inherit [unit Machine.t] Term.visitor
 
       method! enter_blk t m =
         if not @@ Set.mem linked @@ Term.tid t then
+          let blk = if arm then Arm.unmask_blk t else t in
           let module Code (Machine : Machine) = struct
             module Interp = Interpreter.Make (Machine)
 
-            let exec = Interp.blk t
+            let exec = Interp.blk blk
           end in
-          link Term.name (module Code) t m
+          link ~thumb:(arm && Arm.is_thumb_blk t) Term.name (module Code) t m
         else m
 
       method! enter_sub t m =
         if not @@ Set.mem linked @@ Term.tid t then (
+          let sub = if arm then Arm.unmask_sub t else t in
           let module Code (Machine : Machine) = struct
             module Interp = Interpreter.Make (Machine)
 
-            let exec = Interp.sub t
+            let exec = Interp.sub sub
           end in
           info "Linking subroutine %s%!" @@ Sub.name t;
-          link Sub.name (module Code) t m)
+          link ~thumb:(arm && Arm.is_thumb_sub t) Sub.name (module Code) t m)
         else m
     end
 
@@ -399,7 +432,12 @@ module LinkBinaryProgram (Machine : Machine) = struct
     let prog = Project.program proj in
     info "Linking binary program%!";
     collector#run prog !!Tid.Set.empty >>= fun linked ->
-    (linker linked)#run prog !!() >>= fun () ->
+    let arm =
+      match Project.arch proj with
+      | #Arch.arm | #Arch.thumb -> true
+      | _ -> false
+    in
+    (linker ~arm linked)#run prog !!() >>= fun () ->
     info "Finished linking binary program%!";
     Machine.sequence
       [

@@ -178,7 +178,7 @@ let lift ?encoding proj addr code =
       in
       match disassembled ?encoding addr code with
       | Some (size, coding, insn) ->
-          Some (size, coding, ir ~width ~addr ~size insn)
+          Some (size, coding, Insn.name insn, ir ~width ~addr ~size insn)
       | None -> (
           match Memory.create endian addr (Bigstring.of_string code) with
           | Error _ -> None
@@ -205,7 +205,11 @@ let lift ?encoding proj addr code =
               | () -> (
                   match Toplevel.get result with
                   | Some (size, coding, insn) ->
-                      Some (size, coding, ir ~width ~addr ~size insn)
+                      Some
+                        ( size,
+                          coding,
+                          Insn.name insn,
+                          ir ~width ~addr ~size insn )
                   | None | (exception _) -> None))))
 
 (* the instructions, that x86 has, are at most 15 bytes long *)
@@ -215,6 +219,7 @@ type entry = {
   code : string;
   encoding : Theory.language option;  (** that the caller asked for *)
   used : Theory.language;  (** that the instruction has *)
+  name : string;  (** the name of the instruction, e.g., tBLXi *)
   insn : (int * blk term list) option;
 }
 
@@ -231,13 +236,13 @@ let insn ?(disassembled_only = false) ?encoding proj ~read addr =
   let insns = Hashtbl.find_or_add lifted file ~default:Int64.Table.create in
   let bytes = read addr max_size in
   let remember lifted =
-    let code, used, insn =
+    let code, used, name, insn =
       match lifted with
-      | Some (size, used, blks) ->
-          (String.prefix bytes size, used, Some (size, blks))
-      | None -> (bytes, Theory.Language.unknown, None)
+      | Some (size, used, name, blks) ->
+          (String.prefix bytes size, used, name, Some (size, blks))
+      | None -> (bytes, Theory.Language.unknown, "", None)
     in
-    Hashtbl.set insns ~key:addr ~data:{ code; encoding; used; insn };
+    Hashtbl.set insns ~key:addr ~data:{ code; encoding; used; name; insn };
     insn
   in
   let same = Option.equal Theory.Language.equal in
@@ -253,7 +258,8 @@ let insn ?(disassembled_only = false) ?encoding proj ~read addr =
       match disassembled ?encoding (Word.of_int64 ~width addr) bytes with
       | Some (size, coding, insn) ->
           let addr = Word.of_int64 ~width addr in
-          remember (Some (size, coding, ir ~width ~addr ~size insn))
+          remember
+            (Some (size, coding, Insn.name insn, ir ~width ~addr ~size insn))
       | None -> None)
   | _ -> remember (lift ?encoding proj addr bytes)
 
@@ -268,3 +274,9 @@ let encoding proj addr =
   let file = Option.value (Project.get proj filename) ~default:"" in
   Option.bind (Hashtbl.find lifted file) ~f:(fun insns ->
       Option.map (Hashtbl.find insns addr) ~f:(fun { used; _ } -> used))
+
+(* the name of the instruction at [addr], which is lifted *)
+let name proj addr =
+  let file = Option.value (Project.get proj filename) ~default:"" in
+  Option.bind (Hashtbl.find lifted file) ~f:(fun insns ->
+      Option.map (Hashtbl.find insns addr) ~f:(fun { name; _ } -> name))

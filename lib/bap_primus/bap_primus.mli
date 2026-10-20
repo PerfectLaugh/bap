@@ -2687,6 +2687,56 @@ module Std : sig
       (** [encoding proj addr] the encoding of the instruction at [addr], that
           [insn] lifted last, e.g., Thumb of ARM, which the disassembler found
           there, or which the caller asked for. *)
+
+      val name : project -> int64 -> string option
+      (** [name proj addr] the name of the instruction at [addr], that [insn]
+          lifted last, e.g., [tBLXi] of LLVM. *)
+    end
+
+    (** The interworking of ARM.
+
+        ARM switches between its encodings, A32 and Thumb, by the jumps, as
+        ARMv7 does it: the branches to the immediate targets, e.g., [b label],
+        stay in the mode, except [blx label], which switches it, the other
+        writes of the program counter, e.g., [bx r3], [pop {pc}], or
+        [mov pc, r3] of A32, enter Thumb, if the lower bit of the target is set,
+        and A32 otherwise, while [mov pc, r3] and [add pc, r3] of Thumb stay in
+        Thumb.
+
+        The executors, that run the instructions, which {!Lift} lifts, track the
+        mode with it.
+
+        @since 2.6.0 *)
+    module Interworking : sig
+      val thumb : unit -> Theory.language option
+      (** the Thumb encoding, if the ARM plugin is loaded *)
+
+      val a32 : unit -> Theory.language option
+      (** the A32 encoding, if the ARM plugin is loaded *)
+
+      val encoding : thumb:bool -> Theory.language option
+      (** [encoding ~thumb] the encoding of the mode *)
+
+      val is_thumb : Theory.language -> bool
+      (** [is_thumb encoding] if [encoding] is Thumb *)
+
+      val unmask : blk term list -> blk term list
+      (** [unmask blks] the IR, whose jumps don't clear the lower bit of their
+          targets, which the lifters clear, e.g., of [bx r3], so that the
+          targets tell the mode. *)
+
+      val jump :
+        name:string ->
+        thumb:bool ->
+        next:addr ->
+        blk term list ->
+        addr ->
+        addr * bool
+      (** [jump ~name ~thumb ~next blks dst] the address of the code, that the
+          instruction [name] in the mode [thumb], whose IR is [blks], and the
+          next instruction is at [next], enters, when it jumps to [dst], see
+          {!Interpreter.Make.step}, without the lower bit, and if it is Thumb.
+      *)
     end
 
     (** The values and the locations of the memory, that the analyses track.

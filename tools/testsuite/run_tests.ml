@@ -1030,12 +1030,16 @@ let patched_code data =
           contains env "interprets the return of print" out
             "interpreted jump to 0x202FB")
   in
-  (* the Thumb code, that the program writes, as print calls it, after
-     the first call of putchar, instead of its putchar of the newline,
-     through the address with the Thumb bit, which calls putchar with +,
-     whose return Primus interprets, if the stack is tainted:
+  (* the Thumb and A32 code, that the program writes, which print calls,
+     after the first call of putchar, instead of its putchar of the
+     newline, through the address with the Thumb bit, which calls the A32
+     code by the direct blx, that switches the mode, which returns to the
+     Thumb code by bx lr, whose IR clears the Thumb bit, and calls putchar
+     with +, all of which Primus interprets in Unicorn, if the code is
+     tainted:
 
-     0x8000: push {lr}; movs r0, #0x2b; blx putchar; pop {pc}
+     0x8000: push {lr}; blx 0x8100; blx putchar; pop {pc}
+     0x8100: mov r0, #0x2b; bx lr
      0x202d0: movw r3, #0x8001; blx r3 *)
   let generated ~taint system =
     let name =
@@ -1056,8 +1060,12 @@ let patched_code data =
     (memory-allocate 0x8000 0x1000)
     (memory-write (memory-write (memory-write (memory-write (memory-write
       (memory-write (memory-write (memory-write (memory-write (memory-write
-        0x8000 0x00:8) 0xb5:8) 0x2b:8) 0x20:8) 0x18:8) 0xf0:8) 0x8c:8) 0xe9:8)
-        0x00:8) 0xbd:8)
+      (memory-write (memory-write
+        0x8000 0x00:8) 0xb5:8) 0x00:8) 0xf0:8) 0x7e:8) 0xe8:8) 0x18:8) 0xf0:8)
+        0x8c:8) 0xe9:8) 0x00:8) 0xbd:8)
+    (memory-write (memory-write (memory-write (memory-write (memory-write
+      (memory-write (memory-write (memory-write
+        0x8100 0x2b:8) 0x00:8) 0xa0:8) 0xe3:8) 0x1e:8) 0xff:8) 0x2f:8) 0xe1:8)
     (memory-protect 0x8000 0x1000 5)
     (memory-protect 0x202d0 6 7)
     (memory-write (memory-write (memory-write (memory-write (memory-write
@@ -1066,8 +1074,7 @@ let patched_code data =
 
 %s
 |}
-                (if taint then
-                   "(taint-introduce-indirectly 'stack (- SP 64) 128)"
+                (if taint then "(taint-introduce-indirectly 'code 0x8000 0x200)"
                  else "")
                 (if taint then
                    {|(defmethod jumping (c dst) (msg "interpreted jump to $0" dst))|}
@@ -1090,11 +1097,18 @@ let patched_code data =
               ]
             else [])
         in
-        contains env "prints + from the generated code" out "1489580789+";
         lacks env "returns from print" out "Segmentation fault";
         if taint then
-          contains env "interprets the return of the generated code" out
-            "interpreted jump to 0x202D7")
+          (* the messages of the jumps are among the output *)
+          sequence env out
+            [
+              ("prints the CRC", "1489580789");
+              ("enters A32 by blx", "interpreted jump to 0x8100");
+              ("returns to Thumb by bx lr", "interpreted jump to 0x8007");
+              ( "prints + from the generated code",
+                {|\+\(lisp-message "interpreted jump to 0x202D7"\)|} );
+            ]
+        else contains env "prints + from the generated code" out "1489580789+")
   in
   let systems = [ "bap:stubbed-executor"; "bap:unicorn-executor" ] in
   List.map taint systems @ List.map thumb systems
