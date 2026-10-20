@@ -58,19 +58,22 @@ module Example = struct
     b6
     |> def t
          Bil.(
-           load ~mem:(var mem) ~addr:(int (Word.of_int64 0x1000L)) LittleEndian
-             `r64)
+           load ~mem:(var mem)
+             ~addr:(int (Word.of_int64 0x1000L))
+             LittleEndian `r64)
     |> def mem
          Bil.(
-           store ~mem:(var mem) ~addr:(var t) (extract ~hi:7 ~lo:0 (var t))
+           store ~mem:(var mem) ~addr:(var t)
+             (extract ~hi:7 ~lo:0 (var t))
              BigEndian `r8)
     |> def i Bil.(cast signed 32 (cast low 16 (var i)))
     |> def j Bil.(let_ t (cast unsigned 64 (var i)) (cast high 32 (var t)))
-    |> def k Bil.(ite ~if_:(var k) ~then_:(lnot (var k)) ~else_:(unknown "?" bool_t))
+    |> def k
+         Bil.(
+           ite ~if_:(var k) ~then_:(lnot (var k)) ~else_:(unknown "?" bool_t))
     |> def t Bil.(concat (var i) (unop neg (var j)))
-    |> def j Bil.(var i lsl var j land (var i lxor var j))
-    |> fun b ->
-    Term.append jmp_t b (Jmp.create_int 0x80 (Term.tid b7))
+    |> def j Bil.((var i lsl var j) land (var i lxor var j))
+    |> fun b -> Term.append jmp_t b (Jmp.create_int 0x80 (Term.tid b7))
 
   let b7 = Term.append jmp_t b7 (Jmp.create_ret (Label.indirect Bil.(var j)))
   let exit = def i Bil.(var i + _1) exit
@@ -79,8 +82,9 @@ module Example = struct
     let sub = Sub.create ~name:"example" () in
     let sub = Term.append arg_t sub (Arg.create ~intent:In i Bil.(var i)) in
     let sub = Term.append arg_t sub (Arg.create j Bil.(var j)) in
-    List.fold [ entry; b1; b2; b3; b4; b5; b6; b7; exit ] ~init:sub
-      ~f:(Term.append blk_t)
+    List.fold
+      [ entry; b1; b2; b3; b4; b5; b6; b7; exit ]
+      ~init:sub ~f:(Term.append blk_t)
 
   let program = Term.append sub_t (Program.create ()) sub
 
@@ -107,7 +111,9 @@ let bil_roundtrip fmt ctxt =
   let bil =
     Bil_proto.bil_to_string fmt Example.bil |> Bil_proto.bil_of_string fmt
   in
-  assert_equal ~ctxt ~cmp:(fun x y -> Bil.compare x y = 0) ~printer:Bil.to_string Example.bil bil
+  assert_equal ~ctxt
+    ~cmp:(fun x y -> Bil.compare x y = 0)
+    ~printer:Bil.to_string Example.bil bil
 
 (* the formats, that the plugin registers *)
 let data_roundtrip (name, _) ctxt =
@@ -120,9 +126,9 @@ let suite =
   "protobuf"
   >::: List.concat_map fmts ~f:(fun ((name, fmt) as f) ->
       [
-        ("program/" ^ name >:: program_roundtrip fmt);
-        ("bil/" ^ name >:: bil_roundtrip fmt);
-        ("data/" ^ name >:: data_roundtrip f);
+        "program/" ^ name >:: program_roundtrip fmt;
+        "bil/" ^ name >:: bil_roundtrip fmt;
+        "data/" ^ name >:: data_roundtrip f;
       ])
 
 let () =

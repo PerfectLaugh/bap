@@ -75,10 +75,7 @@ module Digest = Stdlib.Digest
 module Config = Extension.Configuration
 module Sys = Stdlib.Sys
 
-type failure =
-  | Image of Error.t
-  | Sigs of Sigs.error
-
+type failure = Image of Error.t | Sigs of Sigs.error
 type Extension.Error.t += Byteweight_failed of failure
 
 module Filename = Stdlib.Filename

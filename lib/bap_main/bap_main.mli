@@ -289,9 +289,9 @@
 
     The [-L], [--log-dir], [--cache-dir], and [--config-dir] options are
     preparsed on the command line and are used to specify the plugins search
-    path (which obviously should be specified before we can load plugins),
-    the logging destination, the cache, and the configuration files, which we
-    would like to know as soon as possible.
+    path (which obviously should be specified before we can load plugins), the
+    logging destination, the cache, and the configuration files, which we would
+    like to know as soon as possible.
 
     The [--recipe] option is very special, as it changes the command line
     itself. Every occurrence of the [--recipe] option will parse the provided
@@ -392,11 +392,11 @@ val init :
       reached, which will be discarded. If the [log] parameter is not specified,
       then the logging will be performed in a directory which name is obtained
       either from the command line (via the [--log-dir] parameter) or from the
-      environment (using the [BAP_LOG_DIR] variable). If neither is present
-      then only the errors will be printed into [stderr]. If, for some reason,
-      it wasn't possible to create a log file, then logging will fallback to the [stderr] channel. Note, a
-      usual log rotating routine will be applied in the log directory, as
-      described above.
+      environment (using the [BAP_LOG_DIR] variable). If neither is present then
+      only the errors will be printed into [stderr]. If, for some reason, it
+      wasn't possible to create a log file, then logging will fallback to the
+      [stderr] channel. Note, a usual log rotating routine will be applied in
+      the log directory, as described above.
 
     @param out
       if specified, then this channel will be used to report help and other
@@ -1053,8 +1053,7 @@ module Extension : sig
     (** [cachedir ()] folder for non-essential data files.
 
         It is the folder of the [--cache-dir] option or the BAP_CACHE_DIR
-        variable, and [None], i.e., nothing is cached, if neither is
-        specified.
+        variable, and [None], i.e., nothing is cached, if neither is specified.
 
         @since 2.3.0, a function since 2.6.0 *)
 
@@ -1069,10 +1068,10 @@ module Extension : sig
         binaries that are not intended to be executed directly. *)
 
     val confdir : string
-    (** [confdir] a directory for BAP specific configuration files, the
-        [config] subdirectory of {!sysdatadir}. The files of the folder of
-        the [--config-dir] option or the BAP_CONFIG_DIR variable prevail over
-        its files. *)
+    (** [confdir] a directory for BAP specific configuration files, the [config]
+        subdirectory of {!sysdatadir}. The files of the folder of the
+        [--config-dir] option or the BAP_CONFIG_DIR variable prevail over its
+        files. *)
 
     val bindir : string
     (** [bindir] the preconfigured directory for binaries.

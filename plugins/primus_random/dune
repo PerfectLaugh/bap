@@ -3,15 +3,7 @@
  (public_name bap-primus-random.plugin)
  (preprocess
   (pps ppx_bap))
- (libraries
-  bap
-  bap-main
-  bap-primus
-  bitvec
-  
-  core
-  zarith
-  bap-core-theory))
+ (libraries bap bap-main bap-primus bitvec core zarith bap-core-theory))
 
 (plugin
  (name primus-random)

@@ -2,8 +2,8 @@
 
 open Bap.Std
 
-(** the formats: the binary protobuf, and its JSON *)
 type fmt = [ `pb | `json ] [@@deriving sexp, enumerate]
+(** the formats: the binary protobuf, and its JSON *)
 
 val exp_to_string : fmt -> exp -> string
 val exp_of_string : fmt -> string -> exp
@@ -31,9 +31,9 @@ val encode :
 
 val decode :
   fmt -> (Pbrt.Decoder.t -> 'a) -> (Yojson.Basic.t -> 'a) -> string -> 'a
-(** [decode fmt decode_pb decode_json data] is the message of [data] in
-    [fmt]. *)
+(** [decode fmt decode_pb decode_json data] is the message of [data] in [fmt].
+*)
 
 val required : string -> 'a option -> 'a
-(** [required what field] is the value of the [field] of a message, which
-    is [what], and fails, if the message has no such field. *)
+(** [required what field] is the value of the [field] of a message, which is
+    [what], and fails, if the message has no such field. *)

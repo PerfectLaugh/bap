@@ -16,7 +16,6 @@
   bitvec-order
   bitvec-sexp
   core
-  
   ogre))
 
 (plugin

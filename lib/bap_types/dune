@@ -9,12 +9,9 @@
   bap-knowledge
   bap-main
   bitvec
-  
-  
   core
   graphlib
   monads
   ogre
   regular
-  
   zarith))

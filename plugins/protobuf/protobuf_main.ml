@@ -24,15 +24,15 @@ let register (type t) (module T : Data.S with type t = t) to_string of_string =
       T.add_reader ~desc ~ver (name fmt) (reader of_string fmt))
 
 let () =
-  Extension.declare
-    ~doc:"serializes BIL and BIR in protobuf and JSON"
+  Extension.declare ~doc:"serializes BIL and BIR in protobuf and JSON"
     ~provides:[ "serialization"; "protobuf"; "json" ]
   @@ fun _ ->
   register (module Exp) Bil_proto.exp_to_string Bil_proto.exp_of_string;
   register (module Stmt) Bil_proto.stmt_to_string Bil_proto.stmt_of_string;
   register (module Bil) Bil_proto.bil_to_string Bil_proto.bil_of_string;
-  register (module Program) Bir_proto.program_to_string
-    Bir_proto.program_of_string;
+  register
+    (module Program)
+    Bir_proto.program_to_string Bir_proto.program_of_string;
   register (module Sub) Bir_proto.sub_to_string Bir_proto.sub_of_string;
   register (module Blk) Bir_proto.blk_to_string Bir_proto.blk_of_string;
   register (module Arg) Bir_proto.arg_to_string Bir_proto.arg_of_string;
@@ -41,9 +41,12 @@ let () =
   register (module Jmp) Bir_proto.jmp_to_string Bir_proto.jmp_of_string;
   (* the program of the project, e.g., bap --dump=bir.json *)
   List.iter Bil_proto.all_of_fmt ~f:(fun fmt ->
-      Project.add_writer ~desc:("print program in " ^ desc fmt) ~ver
+      Project.add_writer
+        ~desc:("print program in " ^ desc fmt)
+        ~ver
         ("bir." ^ name fmt)
         (writer
-           (fun fmt proj -> Bir_proto.program_to_string fmt (Project.program proj))
+           (fun fmt proj ->
+             Bir_proto.program_to_string fmt (Project.program proj))
            fmt));
   Ok ()

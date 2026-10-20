@@ -4,7 +4,7 @@
  (wrapped false)
  (preprocess
   (pps ppx_bap))
- (libraries bap core  monads ogre)
+ (libraries bap core monads ogre)
  (foreign_stubs
   (language cxx)
   (names

@@ -13,7 +13,6 @@
  (libraries
   core
   dynlink
-  
   findlib
   uri
   bap-bundle

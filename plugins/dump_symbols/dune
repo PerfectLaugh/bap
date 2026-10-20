@@ -3,7 +3,7 @@
  (public_name bap-dump-symbols.plugin)
  (preprocess
   (pps ppx_bap))
- (libraries bap core graphlib ))
+ (libraries bap core graphlib))
 
 (plugin
  (name dump-symbols)

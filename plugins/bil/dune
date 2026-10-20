@@ -6,11 +6,9 @@
  (libraries
   bap
   bap-core-theory
-  
   bap-knowledge
   bap-main
   bitvec
-  
   core
   monads
   ogre))

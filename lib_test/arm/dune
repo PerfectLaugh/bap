@@ -1,15 +1,6 @@
 (executable
  (name run_arm_tests)
- (libraries
-  bap
-  
-  
-  
-  bap-main
-  ounit2
-  primus_bil
-  lifter_test
-  threads))
+ (libraries bap bap-main ounit2 primus_bil lifter_test threads))
 
 ; the instruction tests are slow, so they don't run with dune test, run
 ; them with dune build @instruction-tests, in one process, as the most of

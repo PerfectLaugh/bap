@@ -23,7 +23,6 @@ module Api_path = struct
 
   let ( / ) = Path.concat
   let to_string = Path.string_of_filename
-
   let of_string x = Path.reduce @@ Path.filename_of_string x
   let is_apiable = FileUtil.(Or (Is_file, Is_link))
   let try_with_access f p = try Ok (f p) with _ -> Error `No_access

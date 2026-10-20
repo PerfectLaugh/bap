@@ -3,7 +3,7 @@
  (public_name bap-primus-round-robin-scheduler.plugin)
  (preprocess
   (pps ppx_bap))
- (libraries bap  bap-primus monads core))
+ (libraries bap bap-primus monads core))
 
 (plugin
  (name primus-round-robin)

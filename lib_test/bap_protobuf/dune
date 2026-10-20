@@ -6,7 +6,14 @@
  (package bap-protobuf)
  (preprocess
   (pps ppx_bap))
- (libraries bap bap-main bap-protobuf bap-protobuf.plugin core ounit2 threads)
+ (libraries
+  bap
+  bap-main
+  bap-protobuf
+  bap-protobuf.plugin
+  core
+  ounit2
+  threads)
  (action
   (setenv
    OUNIT_RUN_GC_FULL_MAJOR

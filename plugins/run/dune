@@ -8,8 +8,7 @@
   bap-primus
   core
   graphlib
-  monads
-  ))
+  monads))
 
 (plugin
  (name run)

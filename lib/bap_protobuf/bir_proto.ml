@@ -54,8 +54,7 @@ module Get = struct
       ->
         let vector = tid vector_tid in
         Toplevel.exec
-          (KB.provide Theory.Label.ivec vector
-             (Some (Int32.to_int_exn number)));
+          (KB.provide Theory.Label.ivec vector (Some (Int32.to_int_exn number)));
         Jmp.with_alt jmp (Some (Jmp.resolved vector))
     | _ -> jmp
 
@@ -126,8 +125,11 @@ module Put = struct
       ()
 
   let def d =
-    P.make_def ~tid:(tid (Term.tid d)) ~lhs:(var (Def.lhs d))
-      ~rhs:(exp (Def.rhs d)) ()
+    P.make_def
+      ~tid:(tid (Term.tid d))
+      ~lhs:(var (Def.lhs d))
+      ~rhs:(exp (Def.rhs d))
+      ()
 
   let phi p =
     P.make_phi
@@ -135,7 +137,8 @@ module Put = struct
       ~lhs:(var (Phi.lhs p))
       ~values:
         (Phi.values p
-        |> Seq.map ~f:(fun (t, e) -> P.make_phi_value ~tid:(tid t) ~exp:(exp e) ())
+        |> Seq.map ~f:(fun (t, e) ->
+            P.make_phi_value ~tid:(tid t) ~exp:(exp e) ())
         |> Seq.to_list)
       ()
 

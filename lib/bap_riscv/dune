@@ -4,4 +4,4 @@
  (preprocess
   (pps ppx_bap))
  (wrapped false)
- (libraries bap-core-theory  core))
+ (libraries bap-core-theory core))

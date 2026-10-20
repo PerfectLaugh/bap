@@ -117,7 +117,10 @@ module Std = struct
           if compress then Zipc.File.deflate_of_binary_string data
           else Zipc.File.stored_of_binary_string data
         in
-        let entry = Result.bind file ~f:(fun file -> Zipc.Member.make ~path:name (File file)) in
+        let entry =
+          Result.bind file ~f:(fun file ->
+              Zipc.Member.make ~path:name (File file))
+        in
         Zipc.add (ok_exn entry) zip
 
       let add_file ?compress zip name path =
@@ -159,13 +162,10 @@ module Std = struct
           | None -> Manifest.create "noname"
         in
         let mdata = Manifest.to_string man in
-        Zip.write
-          (Zip.add_entry ~compress:false zip Nameof.manifest mdata)
-          path
+        Zip.write (Zip.add_entry ~compress:false zip Nameof.manifest mdata) path
     end
 
     let input b f = f (open_in b.path)
-
     let ( >>> ) = input
 
     let manifest b =

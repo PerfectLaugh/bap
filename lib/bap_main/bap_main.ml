@@ -521,8 +521,7 @@ module Pre = struct
   let logdir : string option Term.t =
     let doc = "A folder for log files." in
     let env = Cmd.Env.info ~doc "BAP_LOG_DIR" in
-    Arg.(
-      value & opt (some string) None & info [ "log-dir" ] ~env ~doc)
+    Arg.(value & opt (some string) None & info [ "log-dir" ] ~env ~doc)
 
   let cachedir : string option Term.t =
     let doc =
@@ -1267,8 +1266,7 @@ let init ?features ?requires ?library ?(argv = [| Sys.executable_name |]) ?env
       in
       enable_logging log;
       Bap_main_dirs.cache := Option.join Pre.(extract ?env cachedir argv);
-      Bap_main_dirs.user_config :=
-        Option.join Pre.(extract ?env configdir argv);
+      Bap_main_dirs.user_config := Option.join Pre.(extract ?env configdir argv);
       let library =
         match library with
         | Some libs -> libs

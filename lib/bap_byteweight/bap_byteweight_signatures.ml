@@ -33,7 +33,9 @@ module Zip = struct
     | Ok zip -> zip
     | Error err -> zip_error file err
 
-  let read_if_exists file = if Sys.file_exists file then read file else Zipc.empty
+  let read_if_exists file =
+    if Sys.file_exists file then read file else Zipc.empty
+
   let entries zip = List.rev (Zipc.fold List.cons zip [])
 
   let read_entry entry =
@@ -88,7 +90,8 @@ let default_path =
 
 (* the signatures installed with BAP, see plugins/byteweight/signatures *)
 let installed_paths =
-  List.map (Bap_common.sites "signatures") ~f:(fun dir -> dir / "byteweight.zip")
+  List.map (Bap_common.sites "signatures") ~f:(fun dir ->
+      dir / "byteweight.zip")
 
 let default_paths = (default_path :: installed_paths) @ [ system_path ]
 
@@ -117,7 +120,9 @@ let update_or_fail ?compiler target data payload path =
     |> List.fold ~init:zip ~f:(fun zip entry ->
         Zipc.remove (Zipc.Member.path entry) zip)
   in
-  Zip.add zip (make_entry ?compiler target data) (Bytes.to_string (data.save payload))
+  Zip.add zip
+    (make_entry ?compiler target data)
+    (Bytes.to_string (data.save payload))
   |> Zip.write path
 
 let copy input output =
@@ -193,7 +198,8 @@ let load ?comp ?path ~mode arch =
 
 let save_exn ?comp ~mode ~path arch data =
   try
-    Zip.add (Zip.read_if_exists path) (entry ?comp ~mode arch) (Bytes.to_string data)
+    Zip.add (Zip.read_if_exists path) (entry ?comp ~mode arch)
+      (Bytes.to_string data)
     |> Zip.write path
   with Sys_error msg -> fail (`Sys_error msg)
 

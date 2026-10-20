@@ -13,8 +13,7 @@
   bap-primus
   bitvec
   core
-  monads
-  ))
+  monads))
 
 (plugin
  (name primus-lisp)

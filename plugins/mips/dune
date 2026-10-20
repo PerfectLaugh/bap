@@ -3,18 +3,7 @@
  (public_name bap-mips.plugin)
  (preprocess
   (pps ppx_bap))
- (libraries
-  bap
-  
-  
-  bap-c
-  bap-core-theory
-  bap-knowledge
-  
-  bap-mips
-  core
-  
-  ))
+ (libraries bap bap-c bap-core-theory bap-knowledge bap-mips core))
 
 (plugin
  (name mips)

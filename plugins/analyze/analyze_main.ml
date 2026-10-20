@@ -235,9 +235,10 @@ let load_history = function
   | None -> ()
   | Some filename when not (Sys.file_exists filename) -> ()
   | Some filename -> (
-    match Line_editor.history_load ~filename with
-    | Ok () -> ()
-    | Error msg -> Format.eprintf "Failed to load the history file: %s@\n%!" msg)
+      match Line_editor.history_load ~filename with
+      | Ok () -> ()
+      | Error msg ->
+          Format.eprintf "Failed to load the history file: %s@\n%!" msg)
 
 let remember ctxt input =
   match Line_editor.history_add input with
@@ -346,8 +347,9 @@ let () =
     parameter
       Type.("path" %: some file)
       "history" ~aliases:[ "H" ]
-      ~doc:"The path to the history file, which is kept only in memory, if \
-            it isn't specified."
+      ~doc:
+        "The path to the history file, which is kept only in memory, if it \
+         isn't specified."
   in
   declare "analyze" ~doc (args $ knowledge $ commands $ script $ history)
   @@ fun base commands script history _ctxt ->

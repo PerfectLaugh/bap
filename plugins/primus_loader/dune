@@ -3,7 +3,7 @@
  (public_name bap-primus-loader.plugin)
  (preprocess
   (pps ppx_bap))
- (libraries bap bap-core-theory bap-primus  core ogre))
+ (libraries bap bap-core-theory bap-primus core ogre))
 
 (plugin
  (name primus-loader)

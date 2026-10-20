@@ -3,15 +3,7 @@
  (public_name bap-thumb.plugin)
  (preprocess
   (pps ppx_bap))
- (libraries
-  bap
-  bap-arm
-  bap-core-theory
-  bap-knowledge
-  bap-main
-  bitvec
-  core
-  ))
+ (libraries bap bap-arm bap-core-theory bap-knowledge bap-main bitvec core))
 
 (plugin
  (name thumb)

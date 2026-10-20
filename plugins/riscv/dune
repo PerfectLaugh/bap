@@ -5,15 +5,12 @@
   (pps ppx_bap))
  (libraries
   bap
-  
-  
   bap-c
   bap-core-theory
   bap-knowledge
   bap-main
   bap-riscv
   core
-  
   ogre))
 
 (plugin

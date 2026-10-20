@@ -3,7 +3,7 @@
  (public_name bap-primus-region.plugin)
  (preprocess
   (pps ppx_bap))
- (libraries bap bap-core-theory bap-primus  core))
+ (libraries bap bap-core-theory bap-primus core))
 
 (plugin
  (name primus-region)

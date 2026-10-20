@@ -3,7 +3,7 @@
  (public_name bap-phoenix.plugin)
  (preprocess
   (pps ppx_bap))
- (libraries bap core ezjsonm graphlib ocamlgraph  text-tags))
+ (libraries bap core ezjsonm graphlib ocamlgraph text-tags))
 
 (plugin
  (name phoenix)

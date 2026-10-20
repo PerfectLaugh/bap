@@ -4,7 +4,7 @@
  (wrapped false)
  (preprocess
   (pps ppx_bap))
- (libraries bap  )
+ (libraries bap)
  (foreign_stubs
   (language cxx)
   (names ghidra_disasm)

@@ -10,7 +10,6 @@
   bap-main
   bitvec
   core
-  
   ; Windows has no linenoise, see line_editor.plain.ml
   (select
    line_editor.ml

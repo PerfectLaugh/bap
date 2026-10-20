@@ -203,8 +203,8 @@ let rec stmt_to_proto : stmt -> P.stmt = function
   | Special s -> Special s
   | While (cond, body) ->
       While_stmt
-        (P.make_while_stmt ~cond:(exp_to_proto cond)
-           ~body:(bil_to_proto body) ())
+        (P.make_while_stmt ~cond:(exp_to_proto cond) ~body:(bil_to_proto body)
+           ())
   | If (cond, yes, no) ->
       If_stmt
         (P.make_if_stmt ~cond:(exp_to_proto cond) ~yes:(bil_to_proto yes)

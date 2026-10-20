@@ -1,9 +1,9 @@
 (** The scripts of BAP.
 
     [bap script [--cache-dir=DIR] FILE.ml ARG...] compiles the OCaml script
-    [FILE.ml] to the native code, which is cached in [DIR], if it is
-    specified, and runs it, with the libraries of BAP, and the libraries that
-    its lines [#require "LIB,..."] name, e.g., [#require "bap-primus"].
+    [FILE.ml] to the native code, which is cached in [DIR], if it is specified,
+    and runs it, with the libraries of BAP, and the libraries that its lines
+    [#require "LIB,..."] name, e.g., [#require "bap-primus"].
 
     The script configures the analyses with the arguments of the functions, that
     it calls, not with the options of the command line, e.g.,
