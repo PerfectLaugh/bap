@@ -10,7 +10,7 @@ bug-reports: "https://github.com/ocaml/Zarith/issues"
 dev-repo: "git+https://github.com/ocaml/Zarith.git"
 license: "LGPL-2.0-only WITH OCaml-LGPL-linking-exception"
 extra-files: [
-  ["static-gmp.sh" "sha256=3e57eb665c389d4e0ca39c033a3de842191217db355b674dd5f301d2a0d9d790"]
+  ["static-gmp.sh" "sha256=7cb05e1c143a9e92605fa3a93a12f620b56228bab2eef931dda7615bab71d730"]
 ]
 build: [
   ["sh" "static-gmp.sh" jobs] {os != "win32"}
@@ -25,7 +25,6 @@ depends: [
   "ocaml"     {>= "4.07.0"}
   "ocamlfind"
   "conf-pkg-config"
-  "conf-m4" {os != "win32"}
   "conf-gmp" {os = "win32"}
 ]
 synopsis:

@@ -44,7 +44,7 @@
      (os macos))
     ((arch arm64)
      (os macos)))
-   (ocaml ocamlfind conf-pkg-config conf-m4))
+   (ocaml ocamlfind conf-pkg-config))
   ((((arch x86_64)
      (os win32)))
    (ocaml ocamlfind conf-pkg-config conf-gmp))))

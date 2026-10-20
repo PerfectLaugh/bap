@@ -5,6 +5,9 @@
 # system, then configures zarith, which sees only the pkg-config file of
 # this GMP, installed into ./gmp. The tests of the configure of GMP
 # 6.3.0 aren't valid C23, the default of GCC 15, hence the standard.
+# GMP needs m4, which is required from the system instead of with
+# conf-m4, which on macOS links Homebrew's gm4 into its package, which the
+# sandbox of dune can't link.
 
 set -eu
 
