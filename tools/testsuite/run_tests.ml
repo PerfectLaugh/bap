@@ -837,6 +837,56 @@ let unicorn_taint data =
             ]))
     [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
 
+(* the code, which the program changes, is decoded anew: the first
+   tainted jump of the loop of the CRC, which Primus interprets, changes
+   the jne, that continues the loop, to je, so the loop ends after the
+   first byte of the first line, and before the first byte of the second
+   one, as the bytes are not zeros *)
+let unicorn_patched_code data =
+  [
+    case "taint/bap:unicorn-executor/patched-code" (fun env ->
+        let input = write env "input" "abc\nabd\n" in
+        ignore
+          (write env "patching.lisp"
+             {|(defparameter *patched* nil)
+
+(defmethod call-return (name buf n _ ret)
+  (when (= name 'fgets)
+    (taint-introduce-indirectly 'input buf n)))
+
+(defmethod jumping (c dst)
+  (when (taint-get-direct 'input c)
+    (msg "tainted jump to $0" dst)
+    (unless *patched*
+      (set *patched* true)
+      (memory-protect 0x7B6 1 7)
+      (memory-write 0x7B6 0x74:8)
+      (memory-protect 0x7B6 1 5))))
+|});
+        let out =
+          bap env
+            [
+              path data "bin/x86_64-linux-gnu-symexec-crc32";
+              "--passes=run";
+              "--no-objdump";
+              "--run-systems=bap:unicorn-executor";
+              "--primus-lisp-channel-redirect=<stdin>:" ^ input;
+              "--run-components=bap:taint-primitives,bap:propagate-taint-by-computation,bap:select-default-taint-policy";
+              "--primus-lisp-add=" ^ dir env;
+              "--primus-lisp-load=posix,patching";
+              "--primus-print-observations=lisp-message";
+            ]
+        in
+        sequence env out
+          [
+            ("runs the jne", "tainted jump to 0x752");
+            ("runs the je", "tainted jump to 0x7B8");
+            ("runs the je again", "tainted jump to 0x7B8");
+            ("compares the CRCs", "tainted jump to 0x83B");
+          ];
+        lacks env "runs the jne once" out {|0x752[^\n]*\n[^\n]*0x752|});
+  ]
+
 (* the symbolic executor finds the input, as the code that uses the
    symbolic values is interpreted, and the rest runs in Unicorn *)
 let unicorn_symexec data =
@@ -1065,6 +1115,31 @@ let mmap data =
             ("denies the load", "Segmentation fault at 0x7F0000000000");
           ];
         lacks env "stops" out "\\bX\\b");
+    (* the stack is tainted, so the code that the program writes, and
+       which returns through it, is interpreted, from its bytes *)
+    case "run/mmap/interpreted" (fun env ->
+        ignore
+          (write env "stack.lisp"
+             {|(defmethod call-return (name p n prot ret)
+  (when (= name 'mprotect)
+    (taint-introduce-indirectly 'stack (- RSP 64) 128)))
+|});
+        let out =
+          bap env
+            [
+              path data "bin/x86_64-linux-gnu-mmap";
+              "--passes=run";
+              "--no-objdump";
+              "--run-systems=bap:unicorn-executor";
+              "--run-components=bap:taint-primitives,bap:propagate-taint-by-computation,bap:select-default-taint-policy";
+              "--primus-lisp-add=" ^ dir env;
+              "--primus-lisp-load=posix,stack";
+              "--primus-print-observations=exception";
+            ]
+        in
+        lacks env "interprets the code" out "can't interpret";
+        sequence env out
+          [ ("runs the code", "\\b42\\b"); ("unmaps the page", "\\bU\\b") ]);
   ]
 
 (* the rules of Linux for the pages, see src/pages.c *)
@@ -1207,6 +1282,7 @@ let tests =
     emu;
     observations;
     unicorn_taint;
+    unicorn_patched_code;
     unicorn_symexec;
     script_debugger;
     mprotect;

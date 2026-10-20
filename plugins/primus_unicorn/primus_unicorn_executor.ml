@@ -97,7 +97,12 @@ type parked = { data : Bytes.t; copy : page; mutable unfetched : bool }
 
 (* the registers of the basis, that the instruction reads, and the ones
    that it writes whole, unless it writes them conditionally *)
-type access = { uses : string list; defs : string list; memory : bool }
+type access = {
+  uses : string list;
+  defs : string list;
+  memory : bool;
+  code : string;  (** the bytes of the instruction *)
+}
 
 type engine = {
   uc : Uc.t;
@@ -357,41 +362,37 @@ let raised_at (arch : Uc.arch) n =
   | X86 -> n >= 0 && n < 32 && n <> 3 && n <> 4
   | _ -> false
 
-(* the intrinsics of the interrupts, by their addresses, with the
-   addresses, from which Unicorn continues after them *)
-let traps : (intrinsic * int64) Int64.Table.t = Int64.Table.create ()
-
 (* The intrinsic of the instruction, that interrupts Unicorn at [pc],
    lifted on demand, as the program, e.g., the bare one, may have no IR
-   of it, and the interrupts are rare. The instruction is at [pc], or ends
-   there, as Unicorn raises the interrupt, see [raised_at]. *)
-let trap proj (arch : Uc.arch) ~thumb n pc =
-  match Hashtbl.find traps pc with
-  | Some trap -> Some trap
-  | None ->
-      let sizes =
-        match arch with
-        | X86 -> List.range 1 16
-        | Arm when thumb -> [ 2; 4 ]
-        | _ -> [ 4 ]
-      in
-      let at () =
-        Option.bind (Lift.insn proj pc) ~f:(fun (size, blks) ->
-            Option.map (site_of_blocks blks) ~f:(fun site ->
-                (site, Int64.(pc + of_int size))))
-      and before () =
+   of it, and the interrupts are rare, from the bytes, that [read] reads,
+   see [Lift.insn]. The instruction is at [pc], or ends there, as Unicorn
+   raises the interrupt, see [raised_at], and returns the address, from
+   which Unicorn continues. *)
+let trap proj ~read (arch : Uc.arch) ~thumb n pc =
+  let sizes =
+    match arch with
+    | X86 -> List.range 1 16
+    | Arm when thumb -> [ 2; 4 ]
+    | _ -> [ 4 ]
+  in
+  let at () =
+    Option.bind (Lift.insn proj ~read pc) ~f:(fun (size, blks) ->
+        Option.map (site_of_blocks blks) ~f:(fun site ->
+            (site, Int64.(pc + of_int size))))
+  and before () =
+    (* the instructions, that the disassembler found, go first, as the
+       other guesses are lifted anew, see [Lift.insn] *)
+    List.find_map [ true; false ] ~f:(fun disassembled_only ->
         List.find_map sizes ~f:(fun size ->
-            match Lift.insn proj Int64.(pc - of_int size) with
+            match
+              Lift.insn ~disassembled_only proj ~read Int64.(pc - of_int size)
+            with
             | Some (n, blks) when n = size ->
                 Option.map (site_of_blocks blks) ~f:(fun site -> (site, pc))
-            | _ -> None)
-      in
-      let trap =
-        if raised_at arch n then Option.first_some (at ()) (before ())
-        else Option.first_some (before ()) (at ())
-      in
-      Option.iter trap ~f:(fun trap -> Hashtbl.set traps ~key:pc ~data:trap);
-      trap
+            | _ -> None))
+  in
+  if raised_at arch n then Option.first_some (at ()) (before ())
+  else Option.first_some (before ()) (at ())
 
 (* the subroutines in the Thumb encoding, which Unicorn runs from their
    addresses with the lower bit set *)
@@ -530,13 +531,20 @@ let dispatch e addr =
 (* The instructions, which read the tracked registers, are interpreted
    by Primus, as the analyses, that track them, e.g., taint, see their
    computations, so Unicorn stops before them, and before the ones, which
-   it didn't see yet, after which they are analyzed, see [Make.analyze].
+   it didn't see yet, or whose bytes changed, e.g., which the program
+   wrote, after which they are analyzed, see [Make.analyze].
    The tracked registers, that the code writes, are not tracked anymore,
    and Primus gets their values, see [Make.pull_regs] *)
 let trace e addr =
+  let unchanged { code; _ } =
+    String.is_empty code
+    ||
+    match Uc.mem_read e.uc addr (String.length code) with
+    | bytes -> String.equal bytes code
+    | exception Uc.Error _ -> false
+  in
   match Hashtbl.find e.accesses addr with
-  | None -> halt_at e (Unknown addr)
-  | Some { uses; defs } ->
+  | Some ({ uses; defs; _ } as access) when unchanged access ->
       if List.exists uses ~f:(Hash_set.mem e.tracked) then
         halt_at e (Interpret addr)
       else
@@ -545,6 +553,7 @@ let trace e addr =
               Hash_set.remove e.tracked r;
               e.clobbered <- r :: e.clobbered
             end)
+  | _ -> halt_at e (Unknown addr)
 
 (* the hook of every address is installed, while a register is tracked,
    and the translated code is dropped, see [sync_stops] *)
@@ -560,7 +569,7 @@ let sync_tracer e =
   | _ -> ()
 
 (* the registers of the basis, that the instruction reads and writes *)
-let access_of_blocks regs blks =
+let access_of_blocks regs ~code blks =
   let owner v =
     if Var.is_physical v then Target.Regs.owner regs (Var.name v) else None
   in
@@ -605,7 +614,7 @@ let access_of_blocks regs blks =
             | _ -> None)
     | _ -> []
   in
-  { uses; defs; memory }
+  { uses; defs; memory; code }
 
 let hook_stop e addr =
   if not (Hash_set.mem e.hooked addr) then begin
@@ -908,13 +917,17 @@ let backing memory : Primus.Memory.Backing.t =
         match !active with
         | Some e when is_owner e id ->
             let addr = int64_of_word addr in
+            let code = ref false in
             String.iteri data ~f:(fun i c ->
                 let addr = Int64.(addr + of_int i) in
                 match Hashtbl.find e.pages (page_of addr) with
-                | Some { snapshot = Some known; _ } ->
+                | Some { snapshot = Some known; perm; _ } ->
                     Bytes.set known Int64.(to_int_exn (addr - page_of addr)) c;
-                    Uc.mem_write e.uc addr (String.of_char c)
-                | _ -> ())
+                    Uc.mem_write e.uc addr (String.of_char c);
+                    if Uc.Perm.mem perm Uc.Perm.exec then code := true
+                | _ -> ());
+            (* the code, which Unicorn translated, is translated anew *)
+            if !code then Uc.flush_tb e.uc
         | _ -> (
             match Hashtbl.find parked id with
             | None -> ()
@@ -1941,14 +1954,60 @@ module Make (Machine : Primus.Machine.S) = struct
     sync_tracer e;
     Machine.return ()
 
-  let analyze e addr =
-    let+ proj = Machine.get () in
-    let access =
-      match Lift.insn proj addr with
-      | Some (_, blks) -> access_of_blocks e.regs blks
-      | None -> { uses = []; defs = []; memory = false }
+  (* The bytes of the code around [addr], from Unicorn, if it has their
+     page, as the program may have changed them there, otherwise from
+     Primus, for [Lift.insn], which reads them from the instruction at
+     [addr], or before it, see [trap]. *)
+  let code_reader e addr =
+    let lo = Int64.(max 0L (addr - of_int Lift.max_size)) in
+    let n = Int64.to_int_exn Int64.(addr + of_int Lift.max_size - lo) in
+    let in_uc x = Hashtbl.mem e.pages (page_of x) in
+    let+ loaded =
+      if in_uc lo && in_uc Int64.(lo + of_int n - 1L) then Machine.return [||]
+      else Memory.load_bytes (word e lo) n
     in
-    Hashtbl.set e.accesses ~key:addr ~data:access
+    let byte x =
+      if in_uc x then
+        match Uc.mem_read e.uc x 1 with
+        | b -> Some b.[0]
+        | exception Uc.Error _ -> None
+      else
+        let i = Int64.(to_int_exn (x - lo)) in
+        if i >= 0 && i < Array.length loaded then Option.map loaded.(i) ~f:fst
+        else None
+    in
+    fun addr n ->
+      let rec bytes i acc =
+        if i = n then acc
+        else
+          match byte Int64.(addr + of_int i) with
+          | Some c -> bytes (i + 1) (c :: acc)
+          | None -> acc
+      in
+      String.of_char_list (List.rev (bytes 0 []))
+
+  (* the instruction at [addr], decoded from its current bytes *)
+  let lift e addr =
+    let* proj = Machine.get () in
+    let+ read = code_reader e addr in
+    Lift.insn proj ~read addr
+
+  (* the accesses of the instruction at [addr], which are analyzed
+     anew, if its bytes changed *)
+  let analyze e addr =
+    let* insn = lift e addr in
+    let+ proj = Machine.get () in
+    let code = Option.value (Lift.code proj addr) ~default:"" in
+    match Hashtbl.find e.accesses addr with
+    | Some access when String.equal access.code code -> access
+    | _ ->
+        let access =
+          match insn with
+          | Some (_, blks) -> access_of_blocks e.regs ~code blks
+          | None -> { uses = []; defs = []; memory = false; code }
+        in
+        Hashtbl.set e.accesses ~key:addr ~data:access;
+        access
 
   (* the instruction at [pc], which Primus interprets after the one it
      interpreted, as it uses a tracked register, or the memory, while a
@@ -1968,11 +2027,7 @@ module Make (Machine : Primus.Machine.S) = struct
       | [] -> false
     then Machine.return false
     else
-      let* () =
-        if Hashtbl.mem e.accesses addr then Machine.return ()
-        else analyze e addr
-      in
-      let { uses; memory; _ } = Hashtbl.find_exn e.accesses addr in
+      let* { uses; memory; _ } = analyze e addr in
       if List.exists uses ~f:(Hash_set.mem e.tracked) then Machine.return true
       else if memory then Track.has_marks
       else Machine.return false
@@ -1983,9 +2038,8 @@ module Make (Machine : Primus.Machine.S) = struct
      lower bit *)
   let interpret e pc =
     let* () = pull e in
-    let* proj = Machine.get () in
     let rec run pc n =
-      match Lift.insn proj (code_addr e pc) with
+      lift e (code_addr e pc) >>= function
       | None -> fail "can't interpret the instruction at %Lx" pc
       | Some (size, blks) ->
           let next = Int64.(pc + of_int size) in
@@ -2089,12 +2143,13 @@ module Make (Machine : Primus.Machine.S) = struct
               | `Continue -> loop pc
               | `Interpret -> interpret e pc >>= loop)
           | Some (Interpret _), _ -> interpret e pc >>= loop
-          | Some (Unknown addr), _ -> analyze e addr >>= fun () -> loop pc
+          | Some (Unknown addr), _ -> analyze e addr >>= fun _ -> loop pc
           | Some (Interrupt n), _ -> (
               let* () = Interpreter.interrupt n in
               let* proj = Machine.get () in
               let thumb = Int64.(pc land 1L = 1L) in
-              match trap proj e.arch ~thumb n (code_addr e pc) with
+              let* read = code_reader e (code_addr e pc) in
+              match trap proj ~read e.arch ~thumb n (code_addr e pc) with
               | Some (site, next) ->
                   call_intrinsic e site >>= fun () ->
                   loop (if thumb then Int64.(next lor 1L) else next)
@@ -2202,6 +2257,7 @@ module Loader (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
   open Machine.Let
   module Linker = Primus.Linker.Make (Machine)
+  module Memory = Primus.Memory.Make (Machine)
 
   let is_linked name t =
     let* linked =
@@ -2314,7 +2370,6 @@ module Loader (Machine : Primus.Machine.S) = struct
 
   let link_program =
     let* prog = Machine.gets Project.program in
-    Hashtbl.clear traps;
     index_natives prog;
     Term.enum sub_t prog |> Seq.to_list
     |> Machine.List.iter ~f:(fun sub ->
@@ -2325,7 +2380,7 @@ module Loader (Machine : Primus.Machine.S) = struct
      function of the stripped program, runs in Unicorn, from the address
      without the lower bit in the Thumb state of ARM *)
   let link_unresolved : Primus.Linker.name -> unit Machine.t = function
-    | `addr addr -> (
+    | `addr addr ->
         let* proj = Machine.get () in
         let start =
           match Project.arch proj with
@@ -2336,15 +2391,15 @@ module Loader (Machine : Primus.Machine.S) = struct
               start
           | _ -> addr
         in
-        match Lift.code proj start with
-        | None -> Machine.return ()
-        | Some _ ->
-            let module Code (Machine : Primus.Machine.S) = struct
-              module Exec = Make (Machine)
+        let* executable = Memory.is_executable start in
+        if not executable then Machine.return ()
+        else
+          let module Code (Machine : Primus.Machine.S) = struct
+            module Exec = Make (Machine)
 
-              let exec = Exec.run start
-            end in
-            Linker.link ~addr (module Code))
+            let exec = Exec.run start
+          end in
+          Linker.link ~addr (module Code)
     | `symbol _ | `tid _ -> Machine.return ()
 
   (* the references to the external functions of the program *)
