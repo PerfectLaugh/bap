@@ -4,7 +4,15 @@ open Bap.Std
 open Bap_primus.Std
 include Self ()
 
-type channel = { input : In_channel.t option; output : Out_channel.t option }
+(* the origin of a channel, from which a checkpoint opens it anew, see
+   [Persistent] *)
+type source = Std of int | File of string [@@deriving bin_io]
+
+type channel = {
+  input : In_channel.t option;
+  output : Out_channel.t option;
+  source : source;
+}
 
 type state = {
   redirections : string String.Map.t;
@@ -14,9 +22,14 @@ type state = {
 let default_channels =
   Int.Map.of_alist_exn
     [
-      (0, { input = Some In_channel.stdin; output = Some Out_channel.stdout });
-      (1, { input = None; output = Some Out_channel.stdout });
-      (2, { input = None; output = Some Out_channel.stderr });
+      ( 0,
+        {
+          input = Some In_channel.stdin;
+          output = Some Out_channel.stdout;
+          source = Std 0;
+        } );
+      (1, { input = None; output = Some Out_channel.stdout; source = Std 1 });
+      (2, { input = None; output = Some Out_channel.stderr; source = Std 2 });
     ]
 
 let standard_channels = [ "<stdin>"; "<stdout>"; "<stderr>" ]
@@ -33,8 +46,17 @@ let init_channels =
           info "redirecting fd %d to %s" fd name;
           let chan =
             if fd > 0 then
-              { input = None; output = Some (Out_channel.create name) }
-            else { output = None; input = Some (In_channel.create name) }
+              {
+                input = None;
+                output = Some (Out_channel.create name);
+                source = File name;
+              }
+            else
+              {
+                output = None;
+                input = Some (In_channel.create name);
+                source = File name;
+              }
           in
           Map.set chans ~key:fd ~data:chan)
 
@@ -52,6 +74,7 @@ let try_open path =
       {
         input = Some (In_channel.create path);
         output = Some (Out_channel.create ~append:true path);
+        source = File path;
       })
 
 let try_flush { output } =
@@ -66,6 +89,100 @@ let state =
   Primus.Machine.State.declare ~name:"io-channels"
     ~uuid:"f326a07d-16ed-42ec-958d-76ef584cb341" (fun _ ->
       { redirections = String.Map.empty; channels = Int.Map.empty })
+
+(* The channels of the machine, which the checkpoints keep, e.g., of the
+   Unicorn executor, as their origins and the positions of their inputs,
+   from which they are opened anew. The outputs are flushed, and the files
+   are appended to. A channel, that can't be opened anew, is closed. *)
+module Persistent = struct
+  type saved = {
+    fd : int;
+    source : source;
+    input : int64 option;  (** the position of the input, if it has one *)
+    output : bool;
+  }
+  [@@deriving bin_io]
+
+  type t = { redirections : (string * string) list; channels : saved list }
+  [@@deriving bin_io]
+
+  let save_channel fd ({ input; output; source } : channel) : saved =
+    Option.iter output ~f:Out_channel.flush;
+    {
+      fd;
+      source;
+      input =
+        Option.bind input ~f:(fun ch ->
+            Option.try_with (fun () -> In_channel.pos ch));
+      output = Option.is_some output;
+    }
+
+  let open_channel ({ source; input; output; _ } : saved) : channel option =
+    Option.try_with @@ fun () : channel ->
+    match source with
+    | Std n ->
+        {
+          source;
+          input = Option.map input ~f:(fun _ -> In_channel.stdin);
+          output =
+            Option.some_if output
+              (if n = 2 then Out_channel.stderr else Out_channel.stdout);
+        }
+    | File path ->
+        {
+          source;
+          input =
+            Option.map input ~f:(fun pos ->
+                let ch = In_channel.create path in
+                In_channel.seek ch pos;
+                ch);
+          output = Option.some_if output (Out_channel.create ~append:true path);
+        }
+
+  module Extension (Machine : Primus.Machine.S) = struct
+    open Machine.Syntax
+
+    let save =
+      Machine.Local.get state >>| fun { redirections; channels } ->
+      Some
+        (Binable.to_string
+           (module struct
+             type nonrec t = t [@@deriving bin_io]
+           end)
+           {
+             redirections = Map.to_alist redirections;
+             channels =
+               Map.to_alist channels
+               |> List.map ~f:(fun (fd, ch) -> save_channel fd ch);
+           })
+
+    let restore data =
+      let saved =
+        Binable.of_string
+          (module struct
+            type nonrec t = t [@@deriving bin_io]
+          end)
+          data
+      in
+      let channels =
+        List.filter_map saved.channels ~f:(fun ch ->
+            match open_channel ch with
+            | Some chan -> Some (ch.fd, chan)
+            | None ->
+                warning "can't open the channel %d anew, it is closed" ch.fd;
+                None)
+      in
+      Machine.Local.put state
+        {
+          redirections =
+            String.Map.of_alist_reduce saved.redirections ~f:(fun _ x -> x);
+          channels = Int.Map.of_alist_reduce channels ~f:(fun _ x -> x);
+        }
+  end
+
+  let () =
+    Primus.Checkpoint.register ~package:"bap" "lisp-channels" (module Extension)
+end
 
 let init redirections =
   let module Lib (Machine : Primus.Machine.S) = struct

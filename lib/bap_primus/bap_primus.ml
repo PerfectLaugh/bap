@@ -12,6 +12,7 @@ module Std = struct
     module Memory = Bap_primus_memory
     module Track = Bap_primus_track
     module Lift = Bap_primus_lift
+    module Checkpoint = Bap_primus_checkpoint
     module Interworking = Bap_primus_interworking
     module Observation = Bap_primus_observation
     module Lisp = Bap_primus_lisp

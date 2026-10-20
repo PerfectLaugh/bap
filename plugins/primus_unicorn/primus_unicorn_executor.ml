@@ -382,6 +382,31 @@ let restored =
   Primus.Machine.State.declare ~uuid:"8c3f7a52-1d4e-4b9a-9f0e-6a2d5c7b8e41"
     ~name:"unicorn-restored" (fun _ -> false)
 
+(* the functions, that the runs of a machine run, and the stubs, that
+   called them, e.g., in Lisp, as its frames, see [frames], which the
+   checkpoints keep *)
+let calls : (string option * string option) list Primus.Machine.State.t =
+  Primus.Machine.State.declare ~uuid:"b5e2d8a4-6c13-4f97-8e0b-3a9d1c7f2e65"
+    ~name:"unicorn-calls" (fun _ -> [])
+
+(* the Lisp stubs, that the machine runs, the innermost first *)
+let lisp_calls : string list Primus.Machine.State.t =
+  Primus.Machine.State.declare ~uuid:"4d7a1e93-b2c8-4f05-9a6e-e1f3b0c82d57"
+    ~name:"unicorn-lisp-calls" (fun _ -> [])
+
+(* What a stub does, after the function, that it called, returns, e.g.,
+   __libc_start_main exits with the result of main, as the run of the
+   function continues from a checkpoint, without the stub, whose code is
+   not data, see [Checkpoint] *)
+module type Completion = functor (Machine : Primus.Machine.S) -> sig
+  val complete : callee:string option -> unit Machine.t
+end
+
+let completions : (module Completion) String.Table.t = String.Table.create ()
+
+let complete name completion =
+  Hashtbl.set completions ~key:name ~data:completion
+
 (* the number of the pages, that are parked, after which only the
    pending pages are, as the forks may be many *)
 let parked_limit = 16384
@@ -1904,23 +1929,48 @@ module Make (Machine : Primus.Machine.S) = struct
           let+ x = Env.get v in
           (v, Primus.Value.to_word x))
     in
-    let+ memory = Memory.snapshot in
+    let* memory = Memory.snapshot in
+    let* extensions =
+      Primus.Checkpoint.names ()
+      |> Machine.List.filter_map ~f:(fun name ->
+          match Primus.Checkpoint.find name with
+          | None -> Machine.return None
+          | Some (module Ext) ->
+              let module Ext = Ext (Machine) in
+              let+ data = Ext.save in
+              Option.map data ~f:(fun data -> (name, data)))
+    in
+    let* pending = Machine.Local.get frames in
+    let* called = Machine.Local.get calls in
+    let+ digest =
+      Machine.gets (fun proj -> Project.get proj filename) >>| function
+      | None -> ""
+      | Some file -> ( try Checkpoint.digest file with Sys_error _ -> "")
+    in
+    let frames =
+      List.mapi pending ~f:(fun i { ret; sp } ->
+          let callee, caller =
+            Option.value (List.nth called i) ~default:(None, None)
+          in
+          { Checkpoint.ret; sp; callee; caller })
+    in
     let saved =
-      match e.frames with
+      match frames with
       | [] -> Error (sprintf "%Lx is outside of a run" pc)
-      | { ret; sp } :: _ ->
+      | frames ->
           Checkpoint.save file
             {
               target = Theory.Target.to_string target;
+              digest;
               pc;
-              ret;
-              sp;
+              frames;
               vars;
               memory;
               symbols =
                 Hashtbl.to_alist e.session.symbols
                 |> List.map ~f:(fun (addr, name) -> (name, addr));
               unstubbed = Hash_set.to_list e.session.unstubbed;
+              extensions;
             }
     in
     Result.iter saved ~f:(fun () ->
@@ -2420,12 +2470,42 @@ module Make (Machine : Primus.Machine.S) = struct
 
   (* the run continues from the checkpoint, and ends when it returns,
      see [Checkpoint] *)
+  (* the states of the components, that extend the checkpoint, see
+     [Primus.Checkpoint] *)
+  let restore_extensions (cp : Checkpoint.t) =
+    Machine.List.iter cp.extensions ~f:(fun (name, data) ->
+        match Primus.Checkpoint.find name with
+        | Some (module Ext) ->
+            let module Ext = Ext (Machine) in
+            Ext.restore data
+        | None ->
+            warning "the state of %s is not restored, as it is not loaded" name;
+            Machine.return ())
+
+  (* the stub, that called the function of the run, which returned,
+     completes, if it is known, see [Completion] *)
+  let completed ({ callee; caller; _ } : Checkpoint.frame) =
+    match caller with
+    | None -> Machine.return ()
+    | Some stub -> (
+        match Hashtbl.find completions stub with
+        | Some (module C) ->
+            let module C = C (Machine) in
+            C.complete ~callee
+        | None ->
+            info
+              "the run of %s returned to %s, which the checkpoint doesn't have"
+              (Option.value callee ~default:"the code")
+              stub;
+            Machine.return ())
+
   let resume (cp : Checkpoint.t) =
     let* () = Machine.Local.put restored true in
     let* () = Memory.restore cp.memory in
     let* () =
       Machine.List.iter cp.vars ~f:(fun (v, x) -> Value.of_word x >>= Env.set v)
     in
+    let* () = restore_extensions cp in
     let* e = engine () in
     let* id = Machine.current () in
     (* the memory of the machine is replaced, and the parked pages of
@@ -2443,12 +2523,17 @@ module Make (Machine : Primus.Machine.S) = struct
        || is_stop e addr
      then e.session.resumed_at <- Some addr);
     info "continues from the checkpoint at %Lx" cp.pc;
-    let* pending = Machine.Local.get frames in
-    let* () =
-      Machine.Local.put frames ({ ret = cp.ret; sp = cp.sp } :: pending)
-    in
-    let* () = loop cp.pc in
-    Machine.Local.put frames pending
+    match cp.frames with
+    | [] -> fail "the checkpoint has no run"
+    | ({ ret; sp; callee; caller } as top) :: _ ->
+        let* pending = Machine.Local.get frames in
+        let* called = Machine.Local.get calls in
+        let* () = Machine.Local.put frames ({ ret; sp } :: pending) in
+        let* () = Machine.Local.put calls ((callee, caller) :: called) in
+        let* () = loop cp.pc in
+        let* () = Machine.Local.put frames pending in
+        let* () = Machine.Local.put calls called in
+        completed top
 
   (* the slots of the external functions refer to their trampolines in
      Primus too, as the code, that Primus interprets, see [interpret],
@@ -2485,13 +2570,77 @@ module Make (Machine : Primus.Machine.S) = struct
 
         let* frame = frame e in
         let* pending = Machine.Local.get frames in
+        let* called = Machine.Local.get calls in
+        let* stubs = Machine.Local.get lisp_calls in
+        let callee = Hashtbl.find e.session.names (int64_of_word addr) in
         let* () =
           Machine.Local.put frames
             ({ frame with ret = address e frame } :: pending)
         in
+        let* () = Machine.Local.put calls ((callee, List.hd stubs) :: called) in
         let* () = loop (start e addr) in
-        Machine.Local.put frames pending
+        let* () = Machine.Local.put frames pending in
+        Machine.Local.put calls called
 end
+
+(* __libc_start_main exits with the result of main, see its Lisp stub,
+   as the result of a function is in its output argument, see its
+   prototype, otherwise where the C ABI returns a word, as the Lisp
+   primitive invoke-subroutine takes it *)
+module Exit (Machine : Primus.Machine.S) = struct
+  open Machine.Syntax
+  module Interpreter = Primus.Interpreter.Make (Machine)
+  module Lisp = Primus.Lisp.Make (Machine)
+
+  let result target signature =
+    match signature with
+    | Some { output = Some (exp, _); _ } -> Some exp
+    | _ -> (
+        match Bap_c.Std.C.Abi.lookup target with
+        | None -> None
+        | Some abi ->
+            let proto : Bap_c.Std.C.Type.proto =
+              {
+                return = Bap_c.Std.C.Type.basic `sint;
+                args = [];
+                variadic = false;
+              }
+            in
+            Bap_c.Std.C.Abi.apply abi
+              (Bap_c.Std.C.Abi.model target)
+              [] proto (Sub.create ())
+            |> Term.enum arg_t
+            |> Seq.find_map ~f:(fun arg ->
+                match Arg.intent arg with
+                | Some Out -> Some (Arg.rhs arg)
+                | _ -> None))
+
+  let complete ~callee =
+    Machine.Global.get session_state >>= fun s ->
+    Machine.gets Project.target >>= fun target ->
+    let signature = Option.bind callee ~f:(Hashtbl.find s.signatures) in
+    match result target signature with
+    | None -> Machine.return ()
+    | Some exp ->
+        Interpreter.exp exp >>= fun code ->
+        Lisp.eval_fun "exit" [ code ] >>| ignore
+end
+
+let () = complete "__libc_start_main" (module Exit)
+
+(* the time, that the machine has run, which its timeout limits *)
+module Elapsed (Machine : Primus.Machine.S) = struct
+  open Machine.Syntax
+
+  let save = Machine.Local.get elapsed >>| fun t -> Some (Float.to_string t)
+
+  let restore data =
+    Machine.Local.put elapsed
+      (Option.value (Float.of_string_opt data) ~default:0.)
+end
+
+let () =
+  Primus.Checkpoint.register ~package:"bap" "unicorn-elapsed" (module Elapsed)
 
 (* links the program, as load-binary does, except that its subroutines
    run in Unicorn, and keeps the linked code to tell the addresses of the
@@ -2716,11 +2865,26 @@ module Loader (Machine : Primus.Machine.S) = struct
                  (sprintf "the checkpoint is at %s, which is not found" point)))
 
   let load_checkpoint s target =
+    let* program = Machine.gets (fun proj -> Project.get proj filename) in
+    (* the program, which the checkpoint is of, has the same digest *)
+    let same digest =
+      String.is_empty digest
+      ||
+      match program with
+      | None -> true
+      | Some file -> (
+          try String.equal digest (Checkpoint.digest file)
+          with Sys_error _ -> true)
+    in
     match s.restore with
     | None -> Machine.return None
     | Some file -> (
         match Checkpoint.load file with
         | Error msg -> Machine.raise (Unicorn_failure msg)
+        | Ok cp when not (same cp.digest) ->
+            Machine.raise
+              (Unicorn_failure
+                 (sprintf "the checkpoint %s is of another program" file))
         | Ok cp when String.equal cp.target (Theory.Target.to_string target) ->
             Machine.return (Some cp)
         | Ok cp ->
@@ -2815,5 +2979,11 @@ module Loader (Machine : Primus.Machine.S) = struct
         Primus.Memory.protected >>> Exec.protected;
         Primus.Track.marked >>> Exec.marked;
         Primus.Interpreter.clock >>> Exec.clocked;
+        ( Primus.Linker.Trace.lisp_call >>> fun (name, _) ->
+          Machine.Local.update lisp_calls ~f:(List.cons name) );
+        ( Primus.Linker.Trace.lisp_call_return >>> fun _ ->
+          Machine.Local.update lisp_calls ~f:(function
+            | _ :: rest -> rest
+            | [] -> []) );
       ]
 end

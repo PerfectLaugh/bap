@@ -427,6 +427,99 @@ module Gc = struct
   end
 end
 
+(* The taint of the machine, which the checkpoints keep, see
+   [Primus.Checkpoint]: the kinds of the objects, the objects of the
+   addresses, and the objects of the values of the variables, which are
+   the only values, that have them, see [Gc], as the values are created
+   anew, when the machine continues from the checkpoint, and the values
+   and the locations, that have the objects, are tracked again, see
+   [Primus.Track]. *)
+module Persistent = struct
+  type t = {
+    kinds : (word * string) list;  (** the objects and their kinds *)
+    direct : (var * word list) list;  (** the objects of the variables *)
+    indirect : (word * word list) list;  (** the objects of the addresses *)
+  }
+  [@@deriving bin_io]
+
+  module Extension (Machine : Primus.Machine.S) = struct
+    open Machine.Syntax
+    module Env = Primus.Env.Make (Machine)
+    module Value = Primus.Value.Make (Machine)
+    module Track = Primus.Track.Make (Machine)
+
+    let words objects = Set.to_list objects |> List.map ~f:Primus.Value.to_word
+
+    let objects words =
+      Machine.List.map words ~f:Value.of_word >>| Object.Set.of_list
+
+    let save =
+      Machine.Global.get kinds >>= fun { objects } ->
+      Machine.Local.get tainter >>= fun { direct; indirect } ->
+      Machine.List.map (Map.to_alist objects) ~f:(fun (obj, kind) ->
+          Value.Symbol.of_value kind >>| fun name ->
+          (Primus.Value.to_word obj, name))
+      >>= fun kinds ->
+      Env.all >>| Seq.to_list >>= fun vars ->
+      Machine.List.filter_map vars ~f:(fun var ->
+          Env.is_set var >>= function
+          | false -> Machine.return None
+          | true ->
+              Env.get var >>| fun x ->
+              Map.find direct (Primus.Value.id x)
+              |> Option.map ~f:(fun objects -> (var, words objects)))
+      >>| fun direct ->
+      let indirect =
+        Map.to_alist indirect
+        |> List.map ~f:(fun (addr, objects) ->
+            (Primus.Value.to_word addr, words objects))
+      in
+      if List.is_empty kinds then None
+      else
+        Some
+          (Binable.to_string
+             (module struct
+               type nonrec t = t [@@deriving bin_io]
+             end)
+             { kinds; direct; indirect })
+
+    let restore data =
+      let saved =
+        Binable.of_string
+          (module struct
+            type nonrec t = t [@@deriving bin_io]
+          end)
+          data
+      in
+      Machine.List.map saved.kinds ~f:(fun (obj, name) ->
+          Value.of_word obj >>= fun obj ->
+          Value.Symbol.to_value name >>| fun kind -> (obj, kind))
+      >>= fun kinds' ->
+      Machine.Global.put kinds
+        { objects = Primus.Value.Map.of_alist_reduce kinds' ~f:(fun _ k -> k) }
+      >>= fun () ->
+      Machine.List.fold saved.direct ~init:Vid.Map.empty
+        ~f:(fun direct (var, words) ->
+          Env.get var >>= fun x ->
+          Track.track x >>= fun () ->
+          objects words >>| fun objects ->
+          Map.set direct ~key:(Primus.Value.id x) ~data:objects)
+      >>= fun direct ->
+      Machine.List.fold saved.indirect ~init:Primus.Value.Map.empty
+        ~f:(fun indirect (addr, words) ->
+          Track.mark addr >>= fun () ->
+          Value.of_word addr >>= fun addr ->
+          objects words >>| fun objects ->
+          Map.set indirect ~key:addr ~data:objects)
+      >>= fun indirect ->
+      let restored = { direct; indirect } in
+      Machine.Local.put tainter restored >>= fun () ->
+      Machine.Local.put gc { old = restored }
+  end
+
+  let () = Primus.Checkpoint.register ~package:"bap" "taint" (module Extension)
+end
+
 module Std = struct
   module type Value = Value
 

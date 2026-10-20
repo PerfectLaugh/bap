@@ -50,6 +50,11 @@ module Input : sig
   val to_symbol : t -> string
   val size : t -> int
 
+  type saved [@@deriving bin_io]
+
+  val save : t -> saved
+  val load : saved -> t
+
   module Make (Machine : Primus.Machine.S) : sig
     val set : t -> Primus.Value.t -> unit Machine.t
   end
@@ -74,6 +79,33 @@ end = struct
   let size = function
     | Ptr { bank } -> Primus.Memory.Descriptor.data_size bank
     | Var v -> ( match Var.typ v with Imm m -> m | _ -> 1)
+
+  (* the input, as the checkpoints keep it *)
+  type saved =
+    | Saved_var of var
+    | Saved_ptr of {
+        name : string;
+        addr_size : int;
+        data_size : int;
+        addr : addr;
+      }
+  [@@deriving bin_io]
+
+  let save = function
+    | Var v -> Saved_var v
+    | Ptr { bank; addr } ->
+        Saved_ptr
+          {
+            name = Bank.name bank;
+            addr_size = Bank.addr_size bank;
+            data_size = Bank.data_size bank;
+            addr;
+          }
+
+  let load = function
+    | Saved_var v -> Var v
+    | Saved_ptr { name; addr_size; data_size; addr } ->
+        Ptr { bank = Bank.create ~addr_size ~data_size name; addr }
 
   module Make (Machine : Primus.Machine.S) = struct
     open Machine.Syntax
@@ -147,6 +179,14 @@ module SMT : sig
   end
 
   module Formula : Base.Comparable.S with type t = formula
+
+  val serialize : expr list -> formula list -> string
+  (** the expressions and the formulas in SMT-LIB, with the declarations of
+      their constants, see [deserialize] *)
+
+  val deserialize : string -> exprs:int -> expr list * formula list
+  (** [deserialize data ~exprs] the [exprs] expressions and the formulas, that
+      [serialize] serialized, in its order *)
 
   val pp_expr : Format.formatter -> expr -> unit
   val pp_formula : Format.formatter -> formula -> unit
@@ -271,6 +311,28 @@ end = struct
 
   let var name size = Expr.mk_const_s ctxt name (Bitv.mk_sort ctxt size)
 
+  (* the expressions are the right sides of the equalities to the fresh
+     constants, which the benchmark asserts in the order *)
+  let saved i = sprintf "bap:saved:%d" i
+
+  let serialize exprs formulas =
+    let exprs = exprs @ formulas in
+    let equalities =
+      List.mapi exprs ~f:(fun i x ->
+          Bool.mk_eq ctxt (Expr.mk_const_s ctxt (saved i) (Expr.get_sort x)) x)
+    in
+    Z3.SMT.benchmark_to_smtstring ctxt "checkpoint" "" "unknown" "" equalities
+      (Bool.mk_true ctxt)
+
+  let deserialize data ~exprs =
+    Z3.SMT.parse_smtlib2_string ctxt data [] [] [] []
+    |> Z3.AST.ASTVector.to_expr_list
+    |> List.filter_map ~f:(fun x ->
+        if Bool.is_eq x then
+          match Expr.get_args x with [ _; x ] -> Some x | _ -> None
+        else None)
+    |> fun xs -> List.split_n xs exprs
+
   type model = { model : Z3.Model.model }
 
   let inverse x = do_simpl @@ Bool.mk_not ctxt x
@@ -378,6 +440,11 @@ module Context : sig
   module Make (Machine : Primus.Machine.S) : sig
     val add : scope -> SMT.formula -> unit Machine.t
     val get : scope -> Set.M(SMT.Formula).t Machine.t
+
+    val all : (string * SMT.formula list) list Machine.t
+    (** the formulas of the scopes by their names, see [Persistent] *)
+
+    val set_all : (string * SMT.formula list) list -> unit Machine.t
   end
 end = struct
   type scope = string
@@ -419,6 +486,20 @@ end = struct
       match Map.find s.assertions scope with
       | None -> Set.empty (module SMT.Formula)
       | Some xs -> xs
+
+    let all =
+      Machine.Local.get context >>| fun s ->
+      Map.to_alist s.assertions
+      |> List.map ~f:(fun (scope, xs) -> (scope, Set.to_list xs))
+
+    let set_all scopes =
+      Machine.Local.put context
+        {
+          assertions =
+            List.map scopes ~f:(fun (scope, xs) ->
+                (scope, Set.of_list (module SMT.Formula) xs))
+            |> Map.of_alist_reduce (module String) ~f:Set.union;
+        }
   end
 end
 
@@ -509,6 +590,123 @@ end = struct
           Primus.Memory.generated >>> on_memory_input;
           Primus.Env.generated >>> on_env_input;
         ]
+end
+
+(* The symbolic execution of the machine, which the checkpoints keep,
+   see [Primus.Checkpoint]: the inputs, the formulas of the values of the
+   variables and of the memories, by their locations, as the values are
+   created anew, when the machine continues from the checkpoint, after
+   which they are tracked again, see [Primus.Track], and the constraints
+   of the scopes. The formulas are in SMT-LIB, see [SMT.serialize]. *)
+module Persistent = struct
+  type cell = { name : string; addr_size : int; data_size : int; addr : addr }
+  [@@deriving bin_io]
+
+  type t = {
+    inputs : Input.saved list;
+    vars : var list;  (** the variables, that have the formulas *)
+    cells : cell list;  (** the locations, that have the formulas *)
+    scopes : (string * int) list;  (** the numbers of their constraints *)
+    formulas : string;
+        (** the formulas of the variables, of the cells, and the constraints *)
+  }
+  [@@deriving bin_io]
+
+  module Extension (Machine : Primus.Machine.S) = struct
+    open Machine.Syntax
+    module Env = Primus.Env.Make (Machine)
+    module Mems = Primus.Memory.Make (Machine)
+    module Track = Primus.Track.Make (Machine)
+    module Ctxt = Context.Make (Machine)
+
+    let binable =
+      (module struct
+        type nonrec t = t [@@deriving bin_io]
+      end : Binable.S
+        with type t = t)
+
+    let save =
+      Machine.Local.get executor >>= fun { inputs; values } ->
+      let formula x = Map.find values (Primus.Value.id x) in
+      Env.all >>| Seq.to_list >>= fun vars ->
+      Machine.List.filter_map vars ~f:(fun var ->
+          Env.is_set var >>= function
+          | false -> Machine.return None
+          | true ->
+              Env.get var >>| fun x ->
+              Option.map (formula x) ~f:(fun f -> (var, f)))
+      >>= fun vars ->
+      Mems.values >>= fun stored ->
+      let cells =
+        List.filter_map stored ~f:(fun (bank, addr, x) ->
+            Option.map (formula x) ~f:(fun f ->
+                ( {
+                    name = Bank.name bank;
+                    addr_size = Bank.addr_size bank;
+                    data_size = Bank.data_size bank;
+                    addr;
+                  },
+                  f )))
+      in
+      Ctxt.all >>| fun scopes ->
+      if Set.is_empty inputs && List.is_empty vars && List.is_empty cells then
+        None
+      else
+        let formulas =
+          SMT.serialize
+            (List.map vars ~f:snd @ List.map cells ~f:snd)
+            (List.concat_map scopes ~f:snd)
+        in
+        Some
+          (Binable.to_string binable
+             {
+               inputs = Set.to_list inputs |> List.map ~f:Input.save;
+               vars = List.map vars ~f:fst;
+               cells = List.map cells ~f:fst;
+               scopes =
+                 List.map scopes ~f:(fun (scope, xs) -> (scope, List.length xs));
+               formulas;
+             })
+
+    let restore data =
+      let saved = Binable.of_string binable data in
+      let nvars = List.length saved.vars in
+      let exprs, rest =
+        SMT.deserialize saved.formulas ~exprs:(nvars + List.length saved.cells)
+      in
+      let of_vars, of_cells = List.split_n exprs nvars in
+      let scopes, _ =
+        List.fold saved.scopes ~init:([], rest) ~f:(fun (scopes, rest) (s, n) ->
+            let xs, rest = List.split_n rest n in
+            ((s, xs) :: scopes, rest))
+      in
+      Machine.List.fold (List.zip_exn saved.vars of_vars)
+        ~init:Primus.Value.Id.Map.empty ~f:(fun values (var, f) ->
+          Env.get var >>= fun x ->
+          Track.track x >>| fun () ->
+          Map.set values ~key:(Primus.Value.id x) ~data:f)
+      >>= fun values ->
+      Mems.memory >>= fun current ->
+      Machine.List.fold (List.zip_exn saved.cells of_cells) ~init:values
+        ~f:(fun values ({ name; addr_size; data_size; addr }, f) ->
+          Mems.switch (Bank.create ~addr_size ~data_size name) >>= fun () ->
+          Mems.get addr >>= fun x ->
+          Track.track x >>= fun () ->
+          Track.mark addr >>| fun () ->
+          Map.set values ~key:(Primus.Value.id x) ~data:f)
+      >>= fun values ->
+      Mems.switch current >>= fun () ->
+      Machine.Local.put executor
+        {
+          inputs =
+            List.map saved.inputs ~f:Input.load |> Set.of_list (module Input);
+          values;
+        }
+      >>= fun () -> Ctxt.set_all (List.rev scopes)
+  end
+
+  let () =
+    Primus.Checkpoint.register ~package:"bap" "symbolic" (module Extension)
 end
 
 module Paths (Machine : Primus.Machine.S) = struct

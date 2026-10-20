@@ -762,6 +762,14 @@ module Make (Machine : Machine) = struct
         |> List.map ~f:(fun (desc, s) -> (desc, Snapshot.of_state s));
     }
 
+  (* the values of all memories, with their identities *)
+  let values =
+    (backing @@ fun b id -> store_fetched (b.fetch_all id)) >>= fun () ->
+    Machine.Local.get state >>| fun { mems; _ } ->
+    Map.to_alist mems
+    |> List.concat_map ~f:(fun (desc, (s : state)) ->
+        Map.to_alist s.values |> List.map ~f:(fun (addr, x) -> (desc, addr, x)))
+
   let restore_state current (m : Snapshot.mem) =
     match
       Result.all (List.map m.layers ~f:(Snapshot.to_layer current.layers))

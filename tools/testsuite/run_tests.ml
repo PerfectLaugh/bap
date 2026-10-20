@@ -847,6 +847,115 @@ let () =
         contains env "sees the symbolic branches" out
           "branches: 7b6 7b6 7b6 7b6 82d\n";
         contains env "finds the collision of the CRC" out "collision: abd\n");
+    (* the checkpoints keep the taint and the symbolic values, e.g., of the
+       buffer, which the program, that continues from them, uses *)
+    case "emu/x86_64-linux-gnu-symexec-crc32/checkpoint-taint" (fun env ->
+        let input = write env "input" "abc\nabd\n" in
+        let saved =
+          script env "x86_64-linux-gnu-symexec-crc32"
+            (Printf.sprintf
+               {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  let emu =
+    Emu.create ~components:Emu.Taint.components ~redirects:[ ("<stdin>", "%s") ]
+      (Bap_script.project file)
+  in
+  (match Emu.run emu ~until:0x80cL with
+   | Paused -> ()
+   | _ -> failwith "fgets didn't return");
+  let rbp = Emu.reg emu "RBP" in
+  Emu.Taint.introduce emu ~kind:"input" (Mem (Int64.sub rbp 0x40L, 16));
+  Emu.Taint.introduce emu ~kind:"input" (Mem (Int64.sub rbp 0x30L, 16));
+  Emu.save emu "taint.ckpt";
+  print_endline "saved"
+|}
+               input)
+        in
+        contains env "saves" saved "saved";
+        let out =
+          script env "x86_64-linux-gnu-symexec-crc32"
+            {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  let emu =
+    Emu.create ~components:Emu.Taint.components ~restore:"taint.ckpt"
+      (Bap_script.project file)
+  in
+  let rbp = Emu.reg emu "RBP" in
+  Printf.printf "buf1 %s\n%!"
+    (String.concat "," (Emu.Taint.kinds emu (Mem (Int64.sub rbp 0x40L, 4))));
+  let jumps = ref [] in
+  Emu.Taint.on_jump emu (fun _ ~kinds dst -> jumps := (dst, kinds) :: !jumps);
+  ignore (Emu.run emu);
+  Printf.printf "jumps:";
+  List.iter (fun (dst, kinds) ->
+      Printf.printf " %Lx:%s" dst (String.concat "," kinds)) (List.rev !jumps);
+  print_newline ()
+|}
+        in
+        contains env "restores the taint" out "buf1 input\n";
+        contains env "sees the tainted jumps" out
+          "jumps: 752:input 752:input 752:input 752:input 7b8:input 752:input \
+           752:input 752:input 752:input 7b8:input 83b:input");
+    case "emu/x86_64-linux-gnu-symexec-crc32/checkpoint-symbolic" (fun env ->
+        let input = write env "input" "abc\nabd\n" in
+        let saved =
+          script env "x86_64-linux-gnu-symexec-crc32"
+            (Printf.sprintf
+               {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+module Sym = Emu.Symbolic
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  let emu =
+    Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", "%s") ]
+      (Bap_script.project file)
+  in
+  (match Emu.run emu ~until:0x80cL with
+   | Paused -> ()
+   | _ -> failwith "fgets didn't return");
+  Sym.symbolize emu (Mem (Int64.sub (Emu.reg emu "RBP") 0x40L, 4));
+  Emu.save emu "symbolic.ckpt";
+  print_endline "saved"
+|}
+               input)
+        in
+        contains env "saves" saved "saved";
+        let out =
+          script env "x86_64-linux-gnu-symexec-crc32"
+            {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+module Sym = Emu.Symbolic
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  let emu =
+    Emu.create ~components:Sym.components ~restore:"symbolic.ckpt"
+      (Bap_script.project file)
+  in
+  let branches = ref [] in
+  Sym.on_branch emu (fun _ b -> branches := b :: !branches);
+  ignore (Emu.run emu);
+  Printf.printf "branches:";
+  List.iter (fun b -> Printf.printf " %Lx" (Sym.addr b)) (List.rev !branches);
+  print_newline ();
+  match Sym.flip ~timeout:10_000 (List.hd !branches) with
+  | None -> print_endline "no collision"
+  | Some m ->
+      print_string "collision: ";
+      List.iter (fun (_, v) -> print_char (Char.chr (Int64.to_int v))) m;
+      print_newline ()
+|}
+        in
+        contains env "sees the symbolic branches" out
+          "branches: 7b6 7b6 7b6 7b6 82d\n";
+        contains env "finds the collision of the CRC" out "collision: abd\n");
     case "emu/x86_64-linux-gnu-echo/patch" (fun env ->
         let out =
           script env "x86_64-linux-gnu-echo"
@@ -989,9 +1098,10 @@ let () =
             ("restores", "restored at 40076b, RDI = 3");
             ("names the function", "say at 4006ed");
             ("runs the changed memory", "HELLO\ncruel\n");
-            (* the run of main, which the Lisp stub of __libc_start_main
-               called, returns, so the program doesn't exit *)
-            ("hooks the name", "exited \\?, say was called 11 times");
+            (* the run of main returns to the Lisp stub of
+               __libc_start_main, which the checkpoint completes, as it
+               exits with the result of main *)
+            ("hooks the name", "exited 0, say was called 11 times");
           ]);
     (* the code of the function, that a Lisp stub replaced, runs again,
        e.g., as the script patched it, also from the checkpoint *)
@@ -1057,7 +1167,59 @@ let file = List.hd (Bap_script.args ())
 |}
         in
         has env "runs the patched code of the checkpoint" out
-          "== restored\n[^\n]*\\+hello\\+we\\+.*exited \\?");
+          "== restored\n[^\n]*\\+hello\\+we\\+.*exited 0");
+    (* the checkpoint keeps the channels of Lisp, e.g., the input, that
+       the program read partly, and is of its program *)
+    case "emu/x86_64-linux-gnu-symexec-crc32/checkpoint" (fun env ->
+        let input = write env "input" "abc\nabd\n" in
+        let saved =
+          script env "x86_64-linux-gnu-symexec-crc32"
+            (Printf.sprintf
+               {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  let emu = Emu.create ~redirects:[ ("<stdin>", "%s") ] (Bap_script.project file) in
+  (match Emu.run emu ~until:0x7efL with
+   | Paused -> ()
+   | _ -> failwith "fgets didn't return");
+  Printf.printf "buf1 %%S\n%%!" (Emu.read emu (Int64.sub (Emu.reg emu "RBP") 0x40L) 4);
+  Emu.save emu "crc.ckpt";
+  print_endline "saved"
+|}
+               input)
+        in
+        sequence env saved
+          [ ("reads the first line", "buf1 \"abc\\\\n\""); ("saves", "saved") ];
+        let restored =
+          script env "x86_64-linux-gnu-symexec-crc32"
+            {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  let emu = Emu.create ~restore:"crc.ckpt" (Bap_script.project file) in
+  match Emu.run emu ~until:0x80cL with
+  | Paused ->
+      Printf.printf "buf2 %S\n%!" (Emu.read emu (Int64.sub (Emu.reg emu "RBP") 0x30L) 4)
+  | _ -> print_endline "fgets didn't return"
+|}
+        in
+        contains env "reads the rest of the input" restored "buf2 \"abd\\n\"";
+        let other =
+          script env "x86_64-linux-gnu-echo"
+            {|#require "bap-primus-unicorn.emu"
+module Emu = Bap_emu
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  match Emu.status (Emu.create ~restore:"crc.ckpt" (Bap_script.project file)) with
+  | Failed msg -> print_endline msg
+  | _ -> print_endline "restored"
+|}
+        in
+        contains env "is of its program" other "is of another program");
     case "emu/arm-linux-gnueabihf-thumb-crc" (fun env ->
         let out =
           script env "arm-linux-gnueabihf-thumb-crc"

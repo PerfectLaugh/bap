@@ -2646,6 +2646,14 @@ module Std : sig
 
             @since 2.6.0 *)
 
+        val values : (memory * addr * value) list Machine.t
+        (** [values] the values, that the machine stored in its memories, with
+            their memories and addresses, e.g., to find the locations of the
+            values, that an analysis tracks by their identities, see
+            {!Value.id}, which {!restore} doesn't keep.
+
+            @since 2.6.0 *)
+
         val restore : Snapshot.t -> unit Machine.t
         (** [restore snapshot] replaces the state of the memories of the machine
             with [snapshot]. The segments of the program are not stored in the
@@ -2666,6 +2674,41 @@ module Std : sig
         that the interpreter runs them, see {!Interpreter.Make.step}.
 
         @since 2.6.0 *)
+    (** The states of the components, that the checkpoints of the machines
+        keep.
+
+        An executor, that saves the state of a machine to a file, from which
+        another run of bap continues it, e.g., the checkpoints of the Unicorn
+        executor, keeps the registers and the memory of the machine, and the
+        states of the components, that register their extensions, e.g., the
+        channels of Primus Lisp, which save and restore them as bytes, e.g.,
+        with [bin_io].
+
+        @since 2.6.0 *)
+    module Checkpoint : sig
+      (** an extension, that saves and restores the state of a component *)
+      module type S = functor (Machine : Machine.S) -> sig
+        val save : string option Machine.t
+        (** the state of the component in the machine, or [None], if it has
+            nothing to save *)
+
+        val restore : string -> unit Machine.t
+        (** [restore data] restores the state, that [save] saved, in the
+            machine, which continues from the checkpoint *)
+      end
+
+      val register : ?package:string -> string -> (module S) -> unit
+      (** [register ~package name ext] registers the extension, whose state the
+          checkpoints keep with the name [package:name], raises
+          [Invalid_argument], if the name is registered. *)
+
+      val find : string -> (module S) option
+      (** [find name] the extension with the full name [package:name] *)
+
+      val names : unit -> string list
+      (** the full names of the registered extensions *)
+    end
+
     module Lift : sig
       val max_size : int
       (** the maximal size of an instruction, in bytes, that is read *)

@@ -216,6 +216,10 @@ let restore t { owner; id } =
   t.session.exit_code <- None;
   resume t (X.Restore id)
 
+module type Completion = X.Completion
+
+let complete = X.complete
+
 let save t file =
   if not (paused t) then
     invalid_arg "Bap_emu.save: the program is not paused, e.g., in a hook";

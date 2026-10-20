@@ -82,5 +82,6 @@ module Make (Machine : Machine) : sig
   val store_bytes : addr -> string -> unit Machine.t
   val protect : lower:addr -> upper:addr -> protection -> unit Machine.t
   val snapshot : Snapshot.t Machine.t
+  val values : (memory * addr * value) list Machine.t
   val restore : Snapshot.t -> unit Machine.t
 end

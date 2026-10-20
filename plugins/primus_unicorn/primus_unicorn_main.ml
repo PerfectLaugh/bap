@@ -39,9 +39,12 @@ let restore =
        $(b,--primus-unicorn-checkpoint), or by a script, see Bap_emu.save, for \
        the same program, instead of the first subroutine that the machine \
        runs, e.g., the entry point, with the names of the code and the \
-       functions without their stubs, that the script saved too. The machine \
-       stops when the subroutine, in which the checkpoint was saved, returns, \
-       as the code that called it, e.g., a Lisp stub, is not saved."
+       functions without their stubs, that the script saved too, and the \
+       states of the components, e.g., the channels of Primus Lisp. The \
+       checkpoint must be of the same file. The machine stops when the \
+       subroutine, in which the checkpoint was saved, returns, after the stub \
+       that called it completes, if it is known, e.g., __libc_start_main exits \
+       with the result of main, as the code of the stubs is not saved."
 
 let native_stubs =
   let module Native = Bap_primus_unicorn_plugin.Primus_unicorn_native in

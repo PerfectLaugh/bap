@@ -228,14 +228,38 @@ val save : t -> string -> unit
     ]}
 
     The checkpoint has the registers, the memory, as the program and the script
-    changed it, the names of {!add_symbol}, and the functions of {!unstub}. The
-    names of the program and its stubs are of its file, which is loaded anew.
-    The program, that continues from the checkpoint, ends, when the run of
-    Unicorn, in which it was saved, returns, e.g., the program, when it was in
-    the code of the program, which Primus didn't call, e.g., from a Lisp stub.
+    changed it, the names of {!add_symbol}, the functions of {!unstub}, the
+    states of the components, that extend the checkpoints, see
+    [Primus.Checkpoint], e.g., the channels of Primus Lisp, which are opened
+    anew, with the positions of their inputs, the digest of the file of the
+    program, which the checkpoint is of, and the runs of Unicorn, that Primus
+    called, with the stubs, that called them. The names of the program and its
+    stubs are of its file, which is loaded anew.
+
+    The program, that continues from the checkpoint, continues the innermost
+    run, after which the stub, that called it, completes, if it is known, see
+    {!complete}, e.g., __libc_start_main exits with the result of main, as the
+    code of the stubs is not data, and the program ends.
 
     Raises [Invalid_argument], if the program is not paused, e.g., in a hook,
     and [Failure], if the checkpoint can't be saved. *)
+
+(** what a stub does, after the function, that it called, returns, see
+    {!complete} *)
+module type Completion = functor
+  (Machine : Bap_primus.Std.Primus.Machine.S)
+  -> sig
+  val complete : callee:string option -> unit Machine.t
+  (** [complete ~callee] completes the stub, after [callee], the function of the
+      program, that it called, if its name is known, returned, e.g., exits with
+      its result. *)
+end
+
+val complete : string -> (module Completion) -> unit
+(** [complete stub completion] completes the [stub], e.g., the Lisp stub of
+    [__libc_start_main], whose run of the program, that continues from a
+    checkpoint, see {!save}, returned, as [__libc_start_main] does by default,
+    which exits with the result of [main]. *)
 
 val add_symbol : t -> string -> int64 -> unit
 (** [add_symbol emu name addr] names the function at the address of its first

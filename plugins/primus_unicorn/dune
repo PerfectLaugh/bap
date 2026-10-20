@@ -10,6 +10,7 @@
   (pps ppx_bap))
  (libraries
   bap
+  bap-c
   bap-core-theory
   bap-primus
   bap-primus-unicorn.unicorn
