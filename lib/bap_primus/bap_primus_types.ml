@@ -40,6 +40,7 @@ module type Machine = sig
     val watch : provider -> (Sexp.t -> unit t) -> unit t
     val make : 'a statement -> 'a -> unit t
     val post : 'a statement -> f:(('a -> unit t) -> unit t) -> unit t
+    val observed : 'a observation -> bool t
   end
 
   module Syntax : sig

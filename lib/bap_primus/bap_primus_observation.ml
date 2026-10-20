@@ -136,6 +136,12 @@ module Make (Machine : Monad.S) = struct
   [@@inline]
 end
 
+let observed os key =
+  let p = Hashtbl.find_exn providers (name key) in
+  (not (List.is_empty (callbacks os key)))
+  || (not (List.is_empty (callbacks os p.key)))
+  || Stream.has_subscribers p.data
+
 let empty = Map.empty
 let list_providers () = Hashtbl.data providers
 let list () = list_providers () |> List.map ~f:(fun { info } -> info)

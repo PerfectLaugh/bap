@@ -59,6 +59,9 @@ type reason =
   | Stop of int64  (** a stop of Primus, see [Primus.Interpreter.Stops] *)
   | Pause  (** the script, that drives the machine, asks it to pause *)
   | Jump of int64  (** a call hook returned, see [call_hooks] *)
+  | Observe of int64
+      (** the observers see the events of the code before the address, see
+          [watch] *)
 
 (* a pending return of a run *)
 type frame = { ret : int64; sp : int64 }
@@ -127,7 +130,15 @@ type engine = {
   mutable stops : int;  (** the version of the stops, which are hooked *)
   mutable stepper : Uc.hook option;
       (** the hook of every address, while the stepping is on *)
+  mutable watching : watching;  (** the events that the observers see *)
+  mutable watchers : Uc.hook list;  (** the hooks of the events *)
+  mutable observed : (int64 * int) option;
+      (** the address of the last observation and the start of Unicorn *)
 }
+
+(* the events of the code, that the observers of the machine see, which
+   are hooked, only when they are observed, see [Make.watching] *)
+and watching = { pcs : bool; reads : bool; writes : bool }
 
 (* the seconds that a machine may run, in Unicorn and in Primus, e.g.,
    in the Lisp stubs *)
@@ -487,7 +498,8 @@ let dispatch e addr =
         Option.equal Int64.equal !checkpoint_addr (Some addr)
         && not !checkpointed
       then halt_at e Checkpoint
-      else if is_stop e addr then halt_at e (Stop addr)
+        (* the observers of every address see the stops too, see [watch] *)
+      else if is_stop e addr && not e.watching.pcs then halt_at e (Stop addr)
 
 let hook_stop e addr =
   if not (Hash_set.mem e.hooked addr) then begin
@@ -568,6 +580,9 @@ let create target ~foreign ~externals =
       hooked = Int64.Hash_set.create ();
       stops = -1;
       stepper = None;
+      watching = { pcs = false; reads = false; writes = false };
+      watchers = [];
+      observed = None;
     }
   in
   let base = trampolines_base target in
@@ -925,6 +940,50 @@ let frame_uc e =
       in
       { ret = int64_of_word ret; sp = Int64.(sp + of_int e.bytes) }
 
+(* the loads and the stores of the code, that the observers see, after
+   its instruction runs, with their addresses, sizes and values *)
+type event = Loaded of int64 * int * int64 | Stored of int64 * int * int64
+
+let events : event Queue.t = Queue.create ()
+
+(* Hooks the events, that the observers see: the instructions, whose
+   addresses the observers of the program counter see, and the loads and
+   the stores, after which Unicorn stops at the next instruction, so that
+   the observers see them synchronously, with the state of the machine in
+   Primus, and may change it. The instruction, that runs again, e.g.,
+   after its fault, or from the address, at which Unicorn stopped, is not
+   observed again, as Unicorn starts anew, see [starts]. *)
+let watch e (w : watching) =
+  if not (Poly.equal e.watching w) then begin
+    List.iter e.watchers ~f:(Uc.delete e.uc);
+    e.watchers <- [];
+    e.watching <- w;
+    let add hook = e.watchers <- hook :: e.watchers in
+    if w.reads then
+      add
+        (Uc.on_mem e.uc [ `read_after ] (fun _ addr size value ->
+             Queue.enqueue events (Loaded (addr, size, value))));
+    if w.writes then
+      add
+        (Uc.on_mem e.uc [ `write ] (fun _ addr size value ->
+             Queue.enqueue events (Stored (addr, size, value))));
+    if w.pcs || w.reads || w.writes then
+      add
+        (Uc.on_code e.uc (fun addr _ ->
+             if w.pcs || not (Queue.is_empty events) then
+               match e.observed with
+               | Some (last, start)
+                 when Int64.equal last addr && start <> !starts ->
+                   ()
+               | _ ->
+                   e.observed <- Some (addr, !starts);
+                   e.reason <- Some (Observe addr);
+                   Uc.stop e.uc));
+    (* the hooks of the code apply to the code, that Unicorn translates
+       after them *)
+    Uc.flush_tb e.uc
+  end
+
 (* the name of the function at the address, which Unicorn calls *)
 let function_name e addr =
   match Hashtbl.find e.trampolines addr with
@@ -1160,10 +1219,14 @@ module Make (Machine : Primus.Machine.S) = struct
     let* () =
       Machine.List.iter (aliases @ basis) ~f:(fun v ->
           let+ x = Env.get v in
-          ignore (Target.Regs.write e.regs v (Primus.Value.to_word x)))
+          let x = Primus.Value.to_word x in
+          if Target.Regs.write e.regs v x && is_basis v then
+            Hashtbl.set e.synced ~key:(Var.name v) ~data:x)
     in
     e.written <- [];
-    pull_regs e
+    (* the registers, which the aliases changed, e.g., the flags in a
+       status register, go back to Primus *)
+    if List.is_empty aliases then Machine.return () else pull_regs e
 
   (* copies all registers from Primus *)
   let push e =
@@ -1393,8 +1456,9 @@ module Make (Machine : Primus.Machine.S) = struct
     | _ -> None
 
   (* runs the native function at the address, unless the code at the
-     address is stopped at, the function is linked to the stub of the
-     program, which nothing replaced, or Lisp advises the function, and
+     address is stopped at, the loads or the stores are observed, the
+     function is linked to the stub of the program, which nothing
+     replaced, or Lisp advises the function, and
      returns the address, from
      which Unicorn continues, or [None], if the function can't run, e.g.,
      when it would fault, so that the stub runs, as the faults are of
@@ -1411,6 +1475,8 @@ module Make (Machine : Primus.Machine.S) = struct
     with
     | None -> Machine.return None
     | Some _ when is_stop e addr -> Machine.return None
+    (* the native functions access the memory without its events *)
+    | Some _ when e.watching.reads || e.watching.writes -> Machine.return None
     | Some (name, call) ->
         let* linked = Linker.is_linked (`symbol name) in
         let* unreplaced = unreplaced_stub (`symbol name) in
@@ -1643,6 +1709,55 @@ module Make (Machine : Primus.Machine.S) = struct
         start_uc e pc deadline
     | _ -> error
 
+  (* the events, that the observers of the machine see, see [watch] *)
+  let watching e =
+    let observed = Machine.Observation.observed in
+    (* the components, that tell the stops, e.g., a debugger, see the
+       program counter only at the stops, see [sync_stops], the others,
+       e.g., the analyses of Lisp, see it at every instruction *)
+    let* pcs =
+      let open Primus.Interpreter.Stops in
+      if stepping () || not (List.is_empty (to_list ())) then
+        Machine.return false
+      else observed Primus.Interpreter.pc_change
+    in
+    let* loading = observed Primus.Interpreter.loading in
+    let* loaded = observed Primus.Interpreter.loaded in
+    let* storing = observed Primus.Interpreter.storing in
+    let+ stored = observed Primus.Interpreter.stored in
+    watch e { pcs; reads = loading || loaded; writes = storing || stored }
+
+  (* the loads and the stores of the code, that Unicorn ran, which the
+     observers see byte by byte, as they see those of Primus *)
+  let observe e =
+    if Queue.is_empty events then Machine.return ()
+    else
+      let happened = Queue.to_list events in
+      Queue.clear events;
+      let* () = pull e in
+      let bytes addr size value =
+        List.init size ~f:(fun i ->
+            let shift = if e.big_endian then size - 1 - i else i in
+            ( word e Int64.(addr + of_int i),
+              Word.of_int64 ~width:8
+                Int64.(shift_right_logical value Int.(8 * shift) land 0xFFL) ))
+      in
+      let* () =
+        Machine.List.iter happened ~f:(fun event ->
+            let notify, addr, size, value =
+              match event with
+              | Loaded (addr, size, value) ->
+                  (Interpreter.notify_load, addr, size, value)
+              | Stored (addr, size, value) ->
+                  (Interpreter.notify_store, addr, size, value)
+            in
+            Machine.List.iter (bytes addr size value) ~f:(fun (addr, byte) ->
+                let* addr = Value.of_word addr in
+                let* byte = Value.of_word byte in
+                notify addr byte))
+      in
+      push_owned e
+
   (* The machine, which the script drives, pauses, and serves the
      requests of the script, until it continues. The machine, which
      takes a snapshot, forks, and its parent stays paused, as the
@@ -1682,11 +1797,13 @@ module Make (Machine : Primus.Machine.S) = struct
       | Some t when Float.(t <= 0.) -> terminate e
       | _ -> (
           sync_stops e;
+          let* () = watching e in
           let error =
             start_uc e pc
               (Option.map remaining ~f:(fun t -> Stdlib.Sys.time () +. t))
           in
           let* () = account () in
+          let* () = observe e in
           let pc = current_pc e in
           (match e.reason with
           | Some (Fault _)
@@ -1704,10 +1821,22 @@ module Make (Machine : Primus.Machine.S) = struct
                   | Some pc -> loop pc
                   | None -> call_foreign e addr >>= loop))
           | Some Pause, _ -> loop pc
+          | Some (Observe _), _ ->
+              let* () =
+                Machine.Observation.observed Primus.Interpreter.pc_change
+                >>= function
+                | false -> Machine.return ()
+                | true ->
+                    let* () = pull e in
+                    let* () = Interpreter.set_pc (word e (code_addr e pc)) in
+                    push_owned e
+              in
+              loop pc
           | Some (Jump pc), _ -> loop pc
           | Some (Fault (access, addr)), _ -> (
               fault e access addr >>= function `Continue -> loop pc)
           | Some (Interrupt n), _ -> (
+              let* () = Interpreter.interrupt n in
               let* proj = Machine.get () in
               let thumb = Int64.(pc land 1L = 1L) in
               match trap proj e.arch ~thumb n (code_addr e pc) with

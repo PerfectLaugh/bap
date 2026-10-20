@@ -750,6 +750,42 @@ let () =
           ]);
   ]
 
+(* the observers of Lisp see the instructions, the loads and the stores
+   of the code, which runs in Unicorn, as they see those of the
+   interpreter, except the loads, which the semantics of x86 repeat *)
+let observations data =
+  let run env system =
+    ignore
+      (write env "counts.lisp"
+         {|(defparameter *pcs* 0)
+(defparameter *stores* 0)
+(defparameter *loads* 0)
+(defmethod pc-changed (pc) (incr *pcs*))
+(defmethod stored (a x) (incr *stores*))
+(defmethod loaded (a x) (incr *loads*))
+(defmethod fini () (msg "pcs $0 stores $1 loads $2" *pcs* *stores* *loads*))
+|});
+    bap env
+      [
+        path data "bin/x86_64-linux-gnu-echo";
+        "--passes=run";
+        "--no-objdump";
+        "--run-argv=echo,hello";
+        "--run-systems=" ^ system;
+        "--primus-lisp-add=" ^ dir env;
+        "--primus-lisp-load=posix,counts";
+        "--primus-print-observations=lisp-message";
+      ]
+  in
+  [
+    case "run/unicorn/observations" (fun env ->
+        let out = run env "bap:unicorn-executor" in
+        contains env "sees the events" out "pcs 0x508 stores 0x883 loads 0xE1D");
+    case "run/stubbed-executor/observations" (fun env ->
+        let out = run env "bap:stubbed-executor" in
+        contains env "sees the events" out "pcs 0x507 stores 0x86B loads 0x11E9");
+  ]
+
 (* the scripts stop the machines with Bap_script_debugger, and see and
    change them in their handlers, the same in the interpreter and in
    Unicorn *)
@@ -1088,6 +1124,7 @@ let tests =
     scripts;
     bare;
     emu;
+    observations;
     script_debugger;
     mprotect;
     mmap;

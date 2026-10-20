@@ -199,6 +199,9 @@ module Make (M : Monad.S) = struct
     let make_even_if_restricted key obs =
       observations () >>= fun os -> Observation.notify os key obs
 
+    let observed key =
+      observations () >>| fun os -> Bap_primus_observation.observed os key
+
     let post key ~f =
       unrestricted () >>= function
       | None -> return ()

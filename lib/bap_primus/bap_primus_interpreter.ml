@@ -437,6 +437,12 @@ module Make (Machine : Machine) = struct
     tick >>= fun () ->
     post on_loaded ~f:(fun k -> k (a, r)) >>| fun () -> r
 
+  let notify_load a x =
+    !!on_loading a >>= fun () -> post on_loaded ~f:(fun k -> k (a, x))
+
+  let notify_store a x =
+    !!on_storing a >>= fun () -> post on_stored ~f:(fun k -> k (a, x))
+
   let store_byte a x =
     !!on_storing a >>= fun () ->
     trapped_memory_access (Memory.set a.value x) >>= fun () ->

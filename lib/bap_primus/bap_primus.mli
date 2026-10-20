@@ -499,6 +499,13 @@ module Std : sig
               observation.
 
               @since 2.1.0 *)
+
+          val observed : 'a observation -> bool t
+          (** [observed observation] if the [observation] has observers or
+              watchers, so that the components, that make it otherwise, e.g., an
+              emulator, which hooks its events, make it only when it is needed.
+
+              @since 2.6.0 *)
         end
 
         (** Computation Syntax.*)
@@ -1899,6 +1906,19 @@ module Std : sig
             invoked. If the handler is provided, then it is invoked and the
             operation is repeated. Otherwise the [Segmentation_fault] machine
             exception is raised. *)
+
+        val notify_load : value -> value -> unit m
+        (** [notify_load a x] posts the {!loading} and {!loaded} observations of
+            the byte [x], that was loaded from [a] otherwise, e.g., in an
+            emulator, without the load.
+
+            @since 2.6.0 *)
+
+        val notify_store : value -> value -> unit m
+        (** [notify_store a x] posts the {!storing} and {!stored} observations
+            of the byte [x], that was stored to [a] otherwise.
+
+            @since 2.6.0 *)
 
         val branch : value -> 'a m -> 'a m -> 'a m
         (** [branch cnd yes no] if [cnd] evaluates to [zero] then [yes] else
