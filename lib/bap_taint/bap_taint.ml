@@ -277,7 +277,7 @@ module Taint = struct
       >>| Set.filter ~f:(fun t ->
           match Map.find objects t with
           | None -> false
-          | Some k' -> Kind.(k <> k'))
+          | Some k' -> Kind.(k = k'))
       >>= fun kill ->
       Machine.Local.update tainter ~f:(fun { direct; indirect } ->
           {
