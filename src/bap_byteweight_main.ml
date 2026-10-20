@@ -5,8 +5,8 @@ let man =
 A utitilty to manipulate Byteweight function start signatures. This
 utility is not needed for Byteweight to function properly, for that
 you need the byteweight plugin. The utility is used to update
-signatures, using new training corpora, fetch the existing signatures
-from the Internet, and test the results.
+signatures, using new training corpora, and test the results. The
+signatures of the BAP release are installed with BAP.
 
 # TRAINING
 
@@ -78,15 +78,8 @@ module Sys = Stdlib.Sys
 type failure =
   | Image of Error.t
   | Sigs of Sigs.error
-  | Network of Curl.curlCode * int * string
-  | Http of int
-  | Unknown of exn
 
 type Extension.Error.t += Byteweight_failed of failure
-
-let github =
-  sprintf
-    "https://github.com/BinaryAnalysisPlatform/bap/releases/download/v%s/sigs.zip"
 
 module Filename = Stdlib.Filename
 
@@ -256,50 +249,6 @@ let dump loader comp info min_length max_length threshold path input _ctxt =
       SymIO.write_addrs stdout @@ Seq.to_list (Seq.map mems ~f:Memory.min_addr);
       Ok ()
 
-let create_parent_dir dst =
-  let dir =
-    if Filename.(check_suffix dst dir_sep) then dst else Filename.dirname dst
-  in
-  FileUtil.mkdir ~parent:true dir
-
-let fetch fname url version _ctxt =
-  let url = match version with None -> url | Some v -> github v in
-  let tmp, fd = Filename.open_temp_file "bap_" ".sigs" in
-  let write s =
-    Out_channel.output_string fd s;
-    String.length s
-  in
-  let conn = Curl.init () in
-  Curl.set_writefunction conn write;
-  Curl.set_followlocation conn true;
-  Curl.set_sslverifypeer conn false;
-  Curl.set_url conn url;
-  let result =
-    try Ok (Curl.perform conn) with
-    | Curl.CurlException (code, n, str) -> fail (Network (code, n, str))
-    | exn -> fail (Unknown exn)
-  in
-  let code = Curl.get_httpcode conn in
-  Curl.cleanup conn;
-  Out_channel.close fd;
-  match result with
-  | Ok () when code < 300 ->
-      create_parent_dir fname;
-      FileUtil.mv tmp fname;
-      printf "Successfully downloaded to %s\n" fname;
-      Ok ()
-  | _ ->
-      FileUtil.rm [ tmp ];
-      if Result.is_ok result then fail (Http code) else result
-
-let update url dst version ctxt =
-  let old = Filename.temp_file "bap_old_sigs" ".zip" in
-  if Sys.file_exists dst then FileUtil.cp [ dst ] old;
-  fetch dst url version ctxt >>| fun () ->
-  if Option.is_none @@ FileUtil.cmp old dst then printf "Already up-to-date.\n"
-  else printf "Installed new signatures.\n";
-  if Sys.file_exists old then FileUtil.rm [ old ]
-
 module Parameters = struct
   open Extension
 
@@ -362,24 +311,6 @@ module Parameters = struct
          probability."
       ~aliases:[ "t" ]
 
-  let ver = Configuration.version
-
-  let url =
-    Command.parameter
-      Type.(string =? github ver)
-      "url" ~doc:"URL of the function starts signatures."
-
-  let version =
-    Command.parameter
-      Type.(some string)
-      "from-version" ~aliases:[ "v"; "for-version" ]
-      ~doc:"fetch signatures for the specified version"
-
-  let dst = Command.argument Type.(path =? Sigs.default_path) ~doc:"Destination"
-
-  let output =
-    Command.parameter Type.(string =? "sigs.zip") "o" ~doc:"Output filename"
-
   let print_name =
     Command.flag "print-name" ~doc:"Print symbol's name." ~aliases:[ "n" ]
 
@@ -406,12 +337,6 @@ let () =
     (args $ loader $ threshold $ min_length $ max_length $ compiler
    $ database_in $ filename)
     find ~doc:"Outputs the function starts detected with Byteweight.";
-  declare "fetch"
-    (args $ output $ url $ version)
-    fetch ~doc:"Downloads signatures from to the current folder.";
-  declare "update"
-    (args $ url $ dst $ version)
-    update ~doc:"Downloads and installs signatures.";
   declare "symbols"
     (args $ loader $ print_name $ print_size $ filename)
     symbols
@@ -421,10 +346,6 @@ let string_of_error = function
   | Image err -> Format.asprintf "Failed to load a file: %a" Error.pp err
   | Sigs err ->
       sprintf "Failed to load/store signatures: %s" (Sigs.string_of_error err)
-  | Network (err, code, msg) ->
-      sprintf "Network failure: %s, %d, %s" (Curl.strerror err) code msg
-  | Unknown exn -> sprintf "An unexpected exception: %s" (Exn.to_string exn)
-  | Http code -> sprintf "got an unexepected HTTP code %d" code
 
 let () =
   Extension.Error.register_printer @@ function

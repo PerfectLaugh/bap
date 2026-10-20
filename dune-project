@@ -153,8 +153,9 @@
 (package
  (name bap-signatures)
  (tags (bap data))
- (allow_empty)
- (synopsis "A data package with BAP binary signatures"))
+ (synopsis "A data package with BAP binary signatures")
+ (depends
+  (bap-common (= :version))))
 
 ;; Actual Packages
 
@@ -273,7 +274,7 @@
  (depends
   (bap-signatures (= :version))
   (bap-std (= :version))
-  (camlzip (and (>= 1.0) (< 2.0)))
+  (zipc (>= 0.2.0))
   core
   (bap-common (= :version))
   (ppx_bap (= :version))
@@ -291,7 +292,6 @@
   core
   fileutils
   (bap-common (= :version))
-  (curl (>= 0.10.0))
   (ppx_bap (= :version))
   (re (and (>= 1.0) (< 2.0)))))
 
@@ -309,7 +309,7 @@
  (synopsis "A bundler for BAP plugins")
  (tags (bap bap-tool))
  (depends
-  camlzip
+  (zipc (>= 0.2.0))
   core
   core_kernel
    fileutils
@@ -545,7 +545,7 @@ be seen as a common denominator between Lwt and Async libraries.")
  (synopsis "The BAP NSA Ghidra backend")
  (tags (bap ghidra disassembler))
  (depends
-  (camlzip (and (>= 1.07) (< 2.0)))
+  (zipc (>= 0.2.0))
   (conf-mingw-w64-g++-x86_64 (= :os win32))
   core
   fileutils
@@ -1242,7 +1242,7 @@ between the sets.")
    base-unix
   (bitvec-order (= :version))
   (bitvec (= :version))
-  (camlzip (and (>= 1.07) (< 2.0)))
+  (zipc (>= 0.2.0))
   (cmdliner (>= 2.0.0))
   (conf-mingw-w64-g++-x86_64 (= :os win32))
   core

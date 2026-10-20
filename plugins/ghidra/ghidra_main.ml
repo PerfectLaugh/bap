@@ -39,18 +39,20 @@ let extracted_archive site =
         Stdlib.Filename.temp_dir ~temp_dir:(Filename.dirname root) "ghidra-"
           ".tmp"
       in
-      let zip = Zip.open_in archive in
+      let ok_exn = function Ok x -> x | Error msg -> failwith msg in
       begin try
-        Exn.protect
-          ~finally:(fun () -> Zip.close_in zip)
-          ~f:(fun () ->
-            List.iter (Zip.entries zip) ~f:(fun entry ->
-                let name = entry.Zip.filename in
-                if (not entry.Zip.is_directory) && is_processor_data name then begin
-                  let file = tmp / name in
-                  mkdir (Filename.dirname file);
-                  Zip.copy_entry_to_file zip entry file
-                end))
+        let zip = ok_exn (Zipc.of_binary_string (In_channel.read_all archive)) in
+        Zipc.fold
+          (fun entry () ->
+            let name = Zipc.Member.path entry in
+            match Zipc.Member.kind entry with
+            | File data when is_processor_data name ->
+                let file = tmp / name in
+                mkdir (Filename.dirname file);
+                Out_channel.write_all file
+                  ~data:(ok_exn (Zipc.File.to_binary_string data))
+            | File _ | Dir -> ())
+          zip ()
       with exn ->
         FileUtil.rm ~recurse:true [ tmp ];
         raise exn

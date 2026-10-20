@@ -16,7 +16,6 @@ depends: [
   "core"
   "fileutils"
   "bap-common" {= version}
-  "curl" {>= "0.10.0"}
   "ppx_bap" {= version}
   "re" {>= "1.0" & < "2.0"}
   "odoc" {with-doc}

@@ -2,4 +2,4 @@
  (name bap_recipe)
  (public_name bap-recipe)
  (wrapped false)
- (libraries stdlib-shims base stdio parsexp fileutils camlzip uuidm))
+ (libraries stdlib-shims base stdio parsexp fileutils zipc uuidm))

@@ -12,7 +12,7 @@ depends: [
   "dune" {>= "3.24"}
   "bap-signatures" {= version}
   "bap-std" {= version}
-  "camlzip" {>= "1.0" & < "2.0"}
+  "zipc" {>= "0.2.0"}
   "core"
   "bap-common" {= version}
   "ppx_bap" {= version}

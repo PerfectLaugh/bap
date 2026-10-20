@@ -8,6 +8,9 @@ module Sys = Stdlib.Sys
 
 exception Bad_substitution of string
 
+(* the archive, the member, and the problem *)
+exception Bad_zip of string * string * string
+
 type format = Zip | Dir | Raw
 
 type error =
@@ -152,21 +155,32 @@ let mkdtemp ?(mode = 0o0700) ?tmp_dir ?(prefix = "") ?(suffix = "") () =
   in
   genname () |> create
 
+let read_zip file =
+  match Zipc.of_binary_string (In_channel.read_all file) with
+  | Ok zip -> zip
+  | Error msg -> raise (Bad_zip (file, "", msg))
+
 let unzip file dst =
-  let zip = Zip.open_in file in
-  Zip.entries zip
-  |> List.filter ~f:(fun entry -> not entry.Zip.is_directory)
-  |> List.iter ~f:(fun ({ Zip.filename } as entry) ->
-      let path = dst / filename in
-      FileUtil.mkdir ~parent:true (Filename.dirname path);
-      Zip.copy_entry_to_file zip entry path);
-  Zip.close_in zip
+  let zip = read_zip file in
+  Zipc.fold
+    (fun member () ->
+      match Zipc.Member.kind member with
+      | Dir -> ()
+      | File data -> (
+          let name = Zipc.Member.path member in
+          match Zipc.File.to_binary_string data with
+          | Error msg -> raise (Bad_zip (file, name, msg))
+          | Ok data ->
+              let path = dst / name in
+              FileUtil.mkdir ~parent:true (Filename.dirname path);
+              Out_channel.write_all path ~data))
+    zip ()
 
 let is_zip path =
-  try
-    Zip.close_in (Zip.open_in path);
-    true
-  with Zip.Error _ -> false
+  Stdlib.In_channel.with_open_bin path @@ fun ch ->
+  match Stdlib.In_channel.really_input_string ch 4 with
+  | Some magic -> Zipc.string_has_magic magic
+  | None -> false
 
 let target_format t =
   if Sys.is_directory t then Dir else if is_zip t then Zip else Raw
@@ -259,7 +273,7 @@ let load_exn ?(paths = []) ?env name =
 
 let load ?paths ?env name =
   try load_exn ?paths ?env name with
-  | Zip.Error (name, entry, msg) -> Error (Malformed_recipe (name, entry, msg))
+  | Bad_zip (name, entry, msg) -> Error (Malformed_recipe (name, entry, msg))
   | Unix.Unix_error (err, _, _) -> Error (System_error (Unix.error_message err))
   | Sys_error s -> Error (System_error s)
 

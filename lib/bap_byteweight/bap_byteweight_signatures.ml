@@ -26,7 +26,40 @@ let matches_modulo_bits t name =
   | None -> false
   | Some t' -> Theory.Target.bits t = Theory.Target.bits t'
 
-let matching_entry ?compiler target data { Zip.filename } =
+(* the archives are read and written as a whole *)
+module Zip = struct
+  let read file =
+    match Zipc.of_binary_string (In_channel.read_all file) with
+    | Ok zip -> zip
+    | Error err -> zip_error file err
+
+  let read_if_exists file = if Sys.file_exists file then read file else Zipc.empty
+  let entries zip = List.rev (Zipc.fold List.cons zip [])
+
+  let read_entry entry =
+    match Zipc.Member.kind entry with
+    | Dir -> ""
+    | File file -> (
+        match Zipc.File.to_binary_string file with
+        | Ok data -> data
+        | Error err -> zip_error (Zipc.Member.path entry) err)
+
+  let add zip name data =
+    match
+      Result.bind (Zipc.File.deflate_of_binary_string data) ~f:(fun file ->
+          Zipc.Member.make ~path:name (File file))
+    with
+    | Ok entry -> Zipc.add entry zip
+    | Error err -> zip_error name err
+
+  let write file zip =
+    match Zipc.to_binary_string zip with
+    | Ok data -> Out_channel.write_all file ~data
+    | Error err -> zip_error file err
+end
+
+let matching_entry ?compiler target data entry =
+  let filename = Zipc.Member.path entry in
   match String.split filename ~on:'/' with
   | [ p1; p2; p3 ] ->
       matches_modulo_bits target p1
@@ -34,27 +67,11 @@ let matching_entry ?compiler target data { Zip.filename } =
       && String.equal data.name p3
   | _ -> fail (`Corrupted ("invalid entry name: " ^ filename))
 
-let with_input file k =
-  let zip = Zip.open_in file in
-  protect ~finally:(fun () -> Zip.close_in zip) ~f:(fun () -> k zip)
-
-let with_output file k =
-  let zip = Zip.open_out file in
-  protect ~finally:(fun () -> Zip.close_out zip) ~f:(fun () -> k zip)
-
 let read_entry ?compiler target data file =
-  with_input file @@ fun zip ->
-  Zip.entries zip |> List.find ~f:(matching_entry ?compiler target data)
-  |> function
-  | None -> None
-  | Some entry -> Some (data.load (Bytes.of_string (Zip.read_entry zip entry)))
-
-let read_entries file =
-  if Fn.non Sys.file_exists file then []
-  else
-    with_input file @@ fun zip ->
-    Zip.entries zip
-    |> List.map ~f:(fun entry -> (entry, Zip.read_entry zip entry))
+  Zip.entries (Zip.read file)
+  |> List.find ~f:(matching_entry ?compiler target data)
+  |> Option.map ~f:(fun entry ->
+      data.load (Bytes.of_string (Zip.read_entry entry)))
 
 let target_name = Fn.compose KB.Name.unqualified Theory.Target.name
 
@@ -69,7 +86,11 @@ let default_path =
   | Some path -> path
   | None -> make_path Config.datadir
 
-let default_paths = [ default_path; system_path ]
+(* the signatures installed with BAP, see plugins/byteweight/signatures *)
+let installed_paths =
+  List.map (Bap_common.sites "signatures") ~f:(fun dir -> dir / "byteweight.zip")
+
+let default_paths = (default_path :: installed_paths) @ [ system_path ]
 
 let try_lookup ?(paths = []) ?(defaults = true) ?compiler target data =
   (if defaults then paths @ default_paths else paths)
@@ -79,7 +100,6 @@ let try_lookup ?(paths = []) ?(defaults = true) ?compiler target data =
 
 let of_exn = function
   | Sys_error msg -> Error (`Sys_error msg)
-  | Zip.Error (_, ent, err) -> Error (corrupted ent err)
   | Failed er -> Error er
   | other -> raise other
 
@@ -90,20 +110,15 @@ let lookup ?paths ?defaults ?compiler target data =
   | Some data -> Ok data
 
 let update_or_fail ?compiler target data payload path =
-  let entries =
-    read_entries path
-    |> List.filter ~f:(fun (entry, _) ->
-        not (matching_entry ?compiler target data entry))
+  let zip = Zip.read_if_exists path in
+  let zip =
+    Zip.entries zip
+    |> List.filter ~f:(matching_entry ?compiler target data)
+    |> List.fold ~init:zip ~f:(fun zip entry ->
+        Zipc.remove (Zipc.Member.path entry) zip)
   in
-  with_output path @@ fun zip ->
-  let path = make_entry ?compiler target data in
-  let data =
-    Bytes.unsafe_to_string
-      ~no_mutation_while_string_reachable:(data.save payload)
-  in
-  Zip.add_entry data zip path;
-  List.iter entries ~f:(fun ({ Zip.filename; comment; mtime; _ }, data) ->
-      Zip.add_entry data zip filename ~comment ~mtime)
+  Zip.add zip (make_entry ?compiler target data) (Bytes.to_string (data.save payload))
+  |> Zip.write path
 
 let copy input output =
   let len = 0x1000 in
@@ -167,57 +182,20 @@ let entry ?(comp = "default") ~mode arch = Arch.to_string arch / comp / mode
 
 let load_exn ?comp ?path ~mode arch =
   let path = resolve_path path in
-  let zip =
-    try Zip.open_in path with
-    | Sys_error msg -> fail (`Sys_error msg)
-    | Zip.Error (_, ent, err) -> zip_error ent err
-  in
+  let zip = try Zip.read path with Sys_error msg -> fail (`Sys_error msg) in
   let entry_path = entry ?comp ~mode arch in
-  let r =
-    try
-      let entry = Zip.find_entry zip entry_path in
-      Ok (Zip.read_entry zip entry |> Stdlib.Bytes.unsafe_of_string)
-    with
-    | Stdlib.Not_found -> fail (`No_entry entry_path)
-    | Zip.Error (_, ent, err) -> zip_error ent err
-  in
-  Zip.close_in zip;
-  r
+  match Zipc.find entry_path zip with
+  | None -> fail (`No_entry entry_path)
+  | Some entry -> Ok (Stdlib.Bytes.unsafe_of_string (Zip.read_entry entry))
 
 let load ?comp ?path ~mode arch =
   try load_exn ?comp ?path ~mode arch with Failed err -> Error err
 
-(* for some reason Zip truncates the output file, and doesn't provide
-   us an option to append anything to for it. *)
 let save_exn ?comp ~mode ~path arch data =
-  let data = Bytes.to_string data in
-  let old =
-    try
-      if Sys.file_exists path then (
-        let zip = Zip.open_in path in
-        let ins =
-          Zip.entries zip |> List.map ~f:(fun e -> (e, Zip.read_entry zip e))
-        in
-        Zip.close_in zip;
-        ins)
-      else []
-    with
-    | Sys_error msg -> fail (`Sys_error msg)
-    | Zip.Error (_, ent, err) -> zip_error ent err
-  in
-  let zip =
-    try Zip.open_out path with Sys_error msg -> fail (`Sys_error msg)
-  in
   try
-    let dst = entry ?comp ~mode arch in
-    List.iter old ~f:(fun (entry, data) ->
-        let file = Zip.(entry.filename) in
-        if String.(file <> dst) then Zip.add_entry data zip file);
-    Zip.add_entry data zip dst;
-    Zip.close_out zip
-  with
-  | Sys_error msg -> fail (`Sys_error msg)
-  | Zip.Error (_, ent, err) -> zip_error ent err
+    Zip.add (Zip.read_if_exists path) (entry ?comp ~mode arch) (Bytes.to_string data)
+    |> Zip.write path
+  with Sys_error msg -> fail (`Sys_error msg)
 
 let save ?comp ~mode ~path arch data =
   try Ok (save_exn ?comp ~mode ~path arch data) with Failed err -> Error err

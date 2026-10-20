@@ -1,0 +1,23 @@
+(version 0.2.0)
+
+(build
+ (all_platforms
+  ((action
+    (run
+     ocaml
+     pkg/pkg.ml
+     build
+     --dev-pkg
+     %{pkg-self:dev}
+     --with-cmdliner
+     %{pkg:cmdliner:installed})))))
+
+(depends
+ (all_platforms
+  (ocaml ocamlfind ocamlbuild topkg cmdliner)))
+
+(source
+ (fetch
+  (url https://erratique.ch/software/zipc/releases/zipc-0.2.0.tbz)
+  (checksum
+   sha512=ac1ff84abdc733e400c4bc3c56f09fe5792c96fc236d254ded97c40b2f2c9b521f34288e6c721a096e5acb0f15c73ec5852b57166985d3f48257b45e8587ab8a)))

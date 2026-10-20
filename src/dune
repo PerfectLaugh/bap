@@ -92,7 +92,9 @@
   bap-core-theory
   bap-knowledge
   cmdliner
-  curl
+  ; loads the plugins, e.g., the loaders
+  dune-site.plugins
+  findlib.dynload
   fileutils
   re.posix
   threads))

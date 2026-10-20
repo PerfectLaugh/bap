@@ -1,0 +1,20 @@
+; The signatures of the function starts, that the byteweight plugin
+; uses, are downloaded during the build, see fetch.cmake, or taken from
+; sigs.zip at the root of the project, when opam has fetched it as an
+; extra-source, so that BAP doesn't download them when it runs.
+
+(rule
+ (target byteweight.zip)
+ (deps
+  fetch.cmake
+  (:archive
+   (glob_files %{project_root}/sigs.zip)))
+ (action
+  (run cmake "-DARCHIVE=%{archive}" -P %{dep:fetch.cmake})))
+
+(install
+ (files byteweight.zip)
+ (package bap-signatures)
+ (section
+  (site
+   (bap-common signatures))))

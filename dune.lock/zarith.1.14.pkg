@@ -1,18 +1,63 @@
 (version 1.14)
 
 (install
- (all_platforms
-  (run %{make} install)))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   (progn
+    (run %{make} install)
+    (run cp gmp/lib/libgmp.a %{lib}/zarith/libgmp.a)))
+  ((((arch x86_64)
+     (os win32)))
+   (run %{make} install))))
 
 (build
- (all_platforms ((action (progn (run ./configure) (run %{make}))))))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   ((action
+     (progn
+      (run sh static-gmp.sh %{jobs})
+      (run %{make})))))
+  ((((arch x86_64) (os win32)))
+   ((action (progn (run ./configure) (run %{make})))))))
 
 (depends
- (all_platforms
-  (ocaml ocamlfind conf-pkg-config conf-gmp)))
+ (choice
+  ((((arch x86_64)
+     (os linux))
+    ((arch arm64)
+     (os linux))
+    ((arch x86_64)
+     (os macos))
+    ((arch arm64)
+     (os macos)))
+   (ocaml ocamlfind conf-pkg-config conf-m4))
+  ((((arch x86_64)
+     (os win32)))
+   (ocaml ocamlfind conf-pkg-config conf-gmp))))
 
 (source
  (fetch
   (url https://github.com/ocaml/Zarith/archive/release-1.14.tar.gz)
   (checksum
    sha512=8a7f3e82dfa5699c8dda54dd5398c712f3ac4fe04f5208d43d8ba198fb8152de5f91cbb59c15c0a4ba010d4dfcc79f52e405bdd0abbf2798167e9e4216bcb3dd)))
+
+(extra_sources
+ (gmp-6.3.0.tar.xz
+  (fetch
+   (url https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz)
+   (checksum
+    sha256=a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898))))

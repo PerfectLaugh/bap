@@ -5,6 +5,12 @@ to the repositories of the lock.
   isn't available there, since the C runtime of Windows has no memmem,
   which files/windows-memmem.patch defines, and core depends on it.
 
+- zarith.1.14 links GMP statically: files/static-gmp.sh builds GMP 6.3.0
+  from its sources, fetched as an extra-source, into a static library with
+  position independent code, which is installed next to zarith, so that the
+  programs of BAP don't depend on the libgmp of the system (except on
+  Windows, where the package is unchanged).
+
 Keep the files with LF line endings (see /.gitattributes), as the checksums
 in extra-files and the patches depend on them.
 

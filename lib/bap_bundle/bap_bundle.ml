@@ -90,8 +90,44 @@ module Std = struct
       let name = Filename.basename Sys.executable_name in
       ref { name; path = name ^ ".bundle" }
 
-    let open_in uri =
-      try Zip.open_in uri with Zip.Error _ -> raise Not_a_bundle
+    (* the archives are read and written as a whole *)
+    module Zip = struct
+      let ok_exn = function Ok x -> x | Error msg -> failwith msg
+
+      let open_in path =
+        match Zipc.of_binary_string (In_channel.read_all path) with
+        | Ok zip -> zip
+        | Error _ -> raise Not_a_bundle
+
+      let entries zip = List.rev (Zipc.fold List.cons zip [])
+      let filename = Zipc.Member.path
+
+      let find_entry zip name =
+        match Zipc.find name zip with
+        | Some entry -> entry
+        | None -> raise Stdlib.Not_found
+
+      let read_entry entry =
+        match Zipc.Member.kind entry with
+        | Dir -> ""
+        | File file -> ok_exn (Zipc.File.to_binary_string file)
+
+      let add_entry ?(compress = true) zip name data =
+        let file =
+          if compress then Zipc.File.deflate_of_binary_string data
+          else Zipc.File.stored_of_binary_string data
+        in
+        let entry = Result.bind file ~f:(fun file -> Zipc.Member.make ~path:name (File file)) in
+        Zipc.add (ok_exn entry) zip
+
+      let add_file ?compress zip name path =
+        add_entry ?compress zip name (In_channel.read_all path)
+
+      let write zip path =
+        Out_channel.write_all path ~data:(ok_exn (Zipc.to_binary_string zip))
+    end
+
+    let open_in = Zip.open_in
 
     module Builder = struct
       type t = {
@@ -107,32 +143,34 @@ module Std = struct
 
       let flush b uri =
         let path = Uri.(pct_decode (path uri)) in
-        let zip = Zip.open_out path in
-        List.iter b.files ~f:(fun (name, uri) ->
-            let path = Uri.(pct_decode (path uri)) in
-            let name = Option.value name ~default:path in
-            Zip.copy_file_to_entry path zip name);
-        List.iter b.data ~f:(fun (`Name name, data) ->
-            Zip.add_entry data zip name);
+        let zip =
+          List.fold b.files ~init:Zipc.empty ~f:(fun zip (name, uri) ->
+              let path = Uri.(pct_decode (path uri)) in
+              let name = Option.value name ~default:path in
+              Zip.add_file zip name path)
+        in
+        let zip =
+          List.fold b.data ~init:zip ~f:(fun zip (`Name name, data) ->
+              Zip.add_entry zip name data)
+        in
         let man =
           match b.manifest with
           | Some man -> man
           | None -> Manifest.create "noname"
         in
         let mdata = Manifest.to_string man in
-        Zip.add_entry ~level:0 mdata zip Nameof.manifest;
-        Zip.close_out zip
+        Zip.write
+          (Zip.add_entry ~compress:false zip Nameof.manifest mdata)
+          path
     end
 
-    let input b f =
-      let zip = open_in b.path in
-      protect ~f:(fun () -> f zip) ~finally:(fun () -> Zip.close_in zip)
+    let input b f = f (open_in b.path)
 
     let ( >>> ) = input
 
     let manifest b =
       b >>> fun zip ->
-      let data = Zip.read_entry zip (Zip.find_entry zip Nameof.manifest) in
+      let data = Zip.read_entry (Zip.find_entry zip Nameof.manifest) in
       Manifest.of_string data
 
     (* the paths of the URIs are percent-encoded, e.g., the backslashes
@@ -151,20 +189,20 @@ module Std = struct
         let path = Uri.(pct_decode (path uri)) in
         let entry = Zip.find_entry zip path in
         let name = Option.value name ~default:path in
-        Zip.copy_entry_to_file zip entry name;
+        Out_channel.write_all name ~data:(Zip.read_entry entry);
         Some (Uri.make ~path:name ())
       with Stdlib.Not_found -> None
 
     let get_data b name =
       b >>> fun zip ->
-      try Some Zip.(read_entry zip (find_entry zip name))
+      try Some Zip.(read_entry (find_entry zip name))
       with Stdlib.Not_found -> None
 
     let list b =
       b >>> fun zip ->
       Zip.entries zip
       |> List.filter_map ~f:(fun e ->
-          let name = Zip.(e.filename) in
+          let name = Zip.filename e in
           Option.some_if (not (String.equal name Nameof.manifest)) name)
 
     let transform files bundle ~f =
@@ -172,16 +210,15 @@ module Std = struct
       let store filename data = Hashtbl.set files ~key:filename ~data in
       Zip.entries zin
       |> List.iter ~f:(fun entry ->
-          let filename = Zip.(entry.filename) in
+          let filename = Zip.filename entry in
           let process_file f =
-            let name, chan = Filename.open_temp_file "bundle" "entry" in
-            Zip.copy_entry_to_channel zin entry chan;
-            Out_channel.close chan;
+            let name = Filename.temp_file "bundle" "entry" in
+            Out_channel.write_all name ~data:(Zip.read_entry entry);
             f name;
             store filename (`Move name)
           in
           let process_data f =
-            let data = Zip.read_entry zin entry in
+            let data = Zip.read_entry entry in
             store filename (`Data (f data))
           in
           match f filename with
@@ -189,16 +226,15 @@ module Std = struct
           | `Proc f -> process_file f
           | `Copy -> process_file ignore
           | `Drop -> ());
-      Zip.close_in zin;
-      let zout = Zip.open_out bundle.path in
-      Hashtbl.iteri files ~f:(fun ~key:name ~data ->
+      Hashtbl.fold files ~init:Zipc.empty ~f:(fun ~key:name ~data zout ->
           match data with
-          | `Data s -> Zip.add_entry ~level:0 s zout name
-          | `Copy f -> Zip.copy_file_to_entry ~level:0 f zout name
+          | `Data s -> Zip.add_entry ~compress:false zout name s
+          | `Copy f -> Zip.add_file ~compress:false zout name f
           | `Move f ->
-              Zip.copy_file_to_entry ~level:0 f zout name;
-              Sys.remove f);
-      Zip.close_out zout
+              let zout = Zip.add_file ~compress:false zout name f in
+              Sys.remove f;
+              zout)
+      |> Fn.flip Zip.write bundle.path
 
     let update bundle ~f = transform (String.Table.create ()) bundle ~f
 

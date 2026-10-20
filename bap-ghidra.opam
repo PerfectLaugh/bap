@@ -10,7 +10,7 @@ homepage: "https://github.com/BinaryAnalysisPlatform/bap"
 bug-reports: "https://github.com/BinaryAnalysisPlatform/bap/issues"
 depends: [
   "dune" {>= "3.24"}
-  "camlzip" {>= "1.07" & < "2.0"}
+  "zipc" {>= "0.2.0"}
   "conf-mingw-w64-g++-x86_64" {os = "win32"}
   "core"
   "fileutils"
