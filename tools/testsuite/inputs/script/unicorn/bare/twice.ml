@@ -8,6 +8,6 @@ let () =
       for _ = 1 to 2 do
         ignore
           (Bap_script.run ~system:"bap:unicorn-executor"
-             (Bap_script.project ~bare:true ?lisp file))
+             (Bap_script.project ?lisp file))
       done
   | _ -> failwith "expected FILE LISP"

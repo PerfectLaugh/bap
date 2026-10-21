@@ -157,22 +157,22 @@ The `bap script` command, which runs before the other options are parsed, takes 
 
 ## Running programs
 
-BAP runs binary programs in [Primus][primus], its emulation framework. A Primus system, e.g., `bap:stubbed-executor`, interprets the lifted program with the Lisp stubs of libc, and `bap:unicorn-executor` runs the code natively in Unicorn, which is many times faster, while the stubs and the system calls still run in Primus, e.g.,
+BAP runs binary programs in [Primus][primus], its emulation framework. A Primus system, e.g., `bap:stubbed-executor`, interprets the lifted program with the Lisp stubs of libc, and `bap:unicorn-executor`, the default, runs the code natively in Unicorn, which is many times faster, while the stubs and the system calls still run in Primus, e.g.,
 
 ```bash
-bap ./echo --passes=run --run-systems=bap:unicorn-executor --run-argv=hello,world
+bap ./echo --passes=run --run-argv=hello,world
 ```
+
+Without the `bap-primus-unicorn` package, which is licensed under GPL, the default is `bap:legacy-main`, which interprets the lifted program, as `--run-systems=bap:legacy-main` does.
 
 The `bap:debugger` component stops the program at its breakpoints, e.g., `--run-components=bap:debugger --primus-debugger-break=main`, and the Unicorn executor saves and restores checkpoints of the program with `--primus-unicorn-checkpoint` and `--primus-unicorn-restore`.
 
-The `bap script` command runs OCaml scripts, which use the libraries of BAP without writing a plugin, e.g., to load a project without its disassembly and run it in Unicorn,
+The `bap script` command runs OCaml scripts, which use the libraries of BAP without writing a plugin, e.g., to load a project without its disassembly and run it in Unicorn, which they do by default,
 
 ```ocaml
 let () =
   let file = List.hd (Bap_script.args ()) in
-  ignore
-    (Bap_script.run ~system:"bap:unicorn-executor" ~args:[ "hello" ]
-       (Bap_script.project ~bare:true file))
+  ignore (Bap_script.run ~args:[ "hello" ] (Bap_script.project file))
 ```
 
 ```bash

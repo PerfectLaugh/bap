@@ -273,11 +273,13 @@ let synthesize_program proj =
 type lisp = { paths : string list; features : string list }
 
 (* the default loader of the disassemble command, which runs the passes
-   that are flagged with autorun, e.g., the api pass, first; with [~bare]
-   the disassembly and the lifting are skipped, for the executors that
-   run the code natively *)
-let project ?(bare = false) ?(loader = "llvm") ?target ?(api = []) ?lisp file =
+   that are flagged with autorun, e.g., the api pass, first; the
+   disassembly and the lifting are skipped, for the executors that run
+   the code natively, unless [~disassemble] *)
+let project ?(disassemble = false) ?(loader = "llvm") ?target ?(api = []) ?lisp
+    file =
   init ();
+  let bare = not disassemble in
   let state = if bare then Some Project.empty_state else None in
   match Project.create ?state (Project.Input.load ~loader ?target file) with
   | Error err -> fail "can't load %s: %a" file Error.pp err
@@ -323,10 +325,20 @@ let system_of ?(components = []) name =
 let pass name proj =
   match Project.find_pass name with None -> proj | Some pass -> run pass proj
 
+(* the code runs in Unicorn, unless the plugin, which is licensed under
+   GPL, isn't installed *)
+let default_system () =
+  if
+    Option.is_some
+      (Primus.System.Repository.find
+         (Knowledge.Name.create ~package:"bap" "unicorn-executor"))
+  then "bap:unicorn-executor"
+  else "bap:legacy-main"
+
 (* the components of [init] run in the machine,
    after the components of the system, before the program starts *)
-let run ?(system = "bap:legacy-main") ?components ?(init = []) ?(args = [])
-    ?(envp = []) ?entry proj =
+let run ?system ?components ?(init = []) ?(args = []) ?(envp = []) ?entry proj =
+  let system = match system with Some s -> s | None -> default_system () in
   let module Machine = Primus.Analysis in
   let module Linker = Primus.Linker.Make (Machine) in
   let open Machine.Syntax in

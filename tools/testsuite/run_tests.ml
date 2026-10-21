@@ -3,12 +3,15 @@
 open Suite
 
 (* runs the floating-point test of src/floats.c, which performs addition,
-   division and comparison and prints PASS seven times *)
+   division and comparison and prints PASS seven times, in the interpreter,
+   which runs the lifted code *)
 let floats name args data =
   [
     case name (fun env ->
         let out =
-          bap env ((path data "sse/floats" :: args) @ [ "--passes=run" ])
+          bap env
+            ((path data "sse/floats" :: args)
+            @ [ "--passes=run"; "--run-systems=bap:legacy-main" ])
         in
         let passes = count out "PASS" in
         check env

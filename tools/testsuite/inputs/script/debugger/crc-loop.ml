@@ -35,4 +35,4 @@ let () =
   Debugger.on_stop (module Zero);
   ignore
     (Bap_script.run ~system:"bap:unicorn-executor" ~init:[ Debugger.component ]
-       (Bap_script.project (List.hd (Bap_script.args ()))))
+       (Bap_script.project ~disassemble:true (List.hd (Bap_script.args ()))))

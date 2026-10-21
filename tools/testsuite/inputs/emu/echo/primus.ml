@@ -6,7 +6,7 @@ module Emu = Bap_emu
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true file) in
+  let emu = Emu.create ~args:[ "hello" ] (Bap_script.project file) in
   ignore (Emu.run emu ~until:0x40076bL);
   let argc = ref Word.b0 in
   let module Get (Machine : Primus.Machine.S) = struct

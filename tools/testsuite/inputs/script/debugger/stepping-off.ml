@@ -24,5 +24,5 @@ let () =
   ignore
     (Bap_script.run ~system:"bap:unicorn-executor"
        ~init:[ Debugger.component; (module Step_on) ]
-       (Bap_script.project (List.hd (Bap_script.args ()))));
+       (Bap_script.project ~disassemble:true (List.hd (Bap_script.args ()))));
   Printf.printf "stopped %d times\n" !stops

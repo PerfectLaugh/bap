@@ -4,7 +4,7 @@ module Emu = Bap_emu
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~restore:"crc.ckpt" (Bap_script.project file) in
+  let emu = Emu.create ~restore:"crc.ckpt" (Bap_script.project ~disassemble:true file) in
   match Emu.run emu ~until:0x80cL with
   | Paused ->
       Printf.printf "buf2 %S\n%!"

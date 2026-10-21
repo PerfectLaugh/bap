@@ -4,8 +4,8 @@ module Emu = Bap_emu
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  let bare = Sys.getenv_opt "BARE" <> Some "0" in
-  let emu = Emu.create ~args:[ "hi" ] (Bap_script.project ~bare file) in
+  let disassemble = Sys.getenv_opt "DISASSEMBLE" = Some "1" in
+  let emu = Emu.create ~args:[ "hi" ] (Bap_script.project ~disassemble file) in
   let pcs =
     List.init 3 (fun _ ->
         ignore (Emu.step emu);

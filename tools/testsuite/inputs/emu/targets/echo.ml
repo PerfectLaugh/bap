@@ -16,7 +16,7 @@ let () =
       let emu =
         Emu.create
           ~args:[ "hello"; "cruel"; "world" ]
-          (Bap_script.project ~api ~bare:true file)
+          (Bap_script.project ~api file)
       in
       let entry = Emu.pc emu in
       Printf.printf "registers: %b\n%!" (List.length (Emu.registers emu) > 16);

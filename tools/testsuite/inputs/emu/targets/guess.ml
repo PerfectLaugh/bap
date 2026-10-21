@@ -29,7 +29,7 @@ let () =
       let emu =
         Emu.create ~components:Sym.components
           ~redirects:[ ("<stdin>", input) ]
-          (Bap_script.project ~api file)
+          (Bap_script.project ~disassemble:true ~api file)
       in
       (match Emu.run emu ~until:(Int64.of_string until) with
       | Paused -> ()

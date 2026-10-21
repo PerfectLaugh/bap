@@ -6,7 +6,7 @@ let () =
   let file = List.hd (Bap_script.args ()) in
   let emu =
     Emu.create ~components:Emu.Taint.components ~restore:"taint.ckpt"
-      (Bap_script.project file)
+      (Bap_script.project ~disassemble:true file)
   in
   let rbp = Emu.reg emu "RBP" in
   Printf.printf "buf1 %s\n%!"

@@ -21,5 +21,5 @@ let () =
   Debugger.on_stop (module Count);
   ignore
     (Bap_script.run ~system ~init:[ Debugger.component ]
-       (Bap_script.project file));
+       (Bap_script.project ~disassemble:true file));
   Printf.printf "print_endline was called %d times\n" !calls

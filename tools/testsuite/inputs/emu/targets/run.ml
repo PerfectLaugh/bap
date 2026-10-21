@@ -19,6 +19,6 @@ let () =
         (Bap_script.run ~system
            ~init:[ (module Count) ]
            ~args:[ "hello"; "cruel"; "world" ]
-           (Bap_script.project ~api file));
+           (Bap_script.project ~disassemble:true ~api file));
       Printf.printf "\nputchar was called %b\n" (!calls > 20)
   | _ -> failwith "expected SYSTEM FILE [API]"

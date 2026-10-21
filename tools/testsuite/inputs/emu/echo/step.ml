@@ -12,7 +12,7 @@ let show emu = function
 let () =
   let file = List.hd (Bap_script.args ()) in
   let emu =
-    Emu.create ~args:[ "hello"; "cruel" ] (Bap_script.project ~bare:true file)
+    Emu.create ~args:[ "hello"; "cruel" ] (Bap_script.project file)
   in
   (* three steps from the entry *)
   for _ = 1 to 3 do

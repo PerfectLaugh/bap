@@ -80,10 +80,13 @@ module Param = struct
         \      subroutines in a row. "
 
   let systems =
-    param_all (list string) "systems" ~default:[ [ "bap:legacy-main" ] ]
+    param_all (list string) "systems" ~default:[]
       ~doc:
         "Runs the specified Primus systems. If several systems are specified \
-         then runs all entry points for each specified system."
+         then runs all entry points for each specified system. By default, \
+         runs bap:unicorn-executor, in which the code runs in Unicorn, if the \
+         primus-unicorn plugin is installed, otherwise bap:legacy-main, which \
+         interprets the lifted code."
 
   let components =
     param_all (list string) "components" ~default:[]
@@ -304,6 +307,16 @@ let find_first_unvisited_blk prog =
           let blk = Graphs.Ir.Node.label blk in
           if not (Term.has_attr blk Term.visited) then Some blk else None))
 
+(* the code runs in Unicorn, unless the plugin, which is licensed under
+   GPL, isn't installed *)
+let default_system () =
+  if
+    Option.is_some
+      (Primus.System.Repository.find
+         (Knowledge.Name.create ~package:"bap" "unicorn-executor"))
+  then "bap:unicorn-executor"
+  else "bap:legacy-main"
+
 let main { Config.get = ( ! ) } proj =
   let open Param in
   let run_until_visited = !until_visited in
@@ -312,7 +325,9 @@ let main { Config.get = ( ! ) } proj =
   in
   let inputs = parse_entry_points proj !entry in
   let systems =
-    List.concat !systems
+    (match List.concat !systems with
+      | [] -> [ default_system () ]
+      | systems -> systems)
     |> List.map ~f:(fun sys ->
         let name = Knowledge.Name.read sys in
         match Primus.System.Repository.find name with

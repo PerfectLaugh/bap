@@ -16,7 +16,7 @@ let () =
   let emu =
     Emu.create
       ~args:[ "hello"; "cruel"; "world" ]
-      (Bap_script.project ~bare:true file)
+      (Bap_script.project file)
   in
   Printf.printf "paused at the entry %Lx\n%!" (Emu.pc emu);
   (match Emu.run emu ~until:0x40076bL with

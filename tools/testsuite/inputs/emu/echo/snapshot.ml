@@ -19,7 +19,7 @@ let show emu = function
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true file) in
+  let emu = Emu.create ~args:[ "hello" ] (Bap_script.project file) in
   show emu (Emu.run emu ~until:0x40076bL);
   let snap = Emu.snapshot emu in
   let arg1 () = word emu Int64.(add (Emu.reg emu "RSI") 8L) in

@@ -9,7 +9,7 @@ let () =
     | _ -> failwith "expected FILE INPUT"
   in
   let emu =
-    Emu.create ~redirects:[ ("<stdin>", stdin) ] (Bap_script.project file)
+    Emu.create ~redirects:[ ("<stdin>", stdin) ] (Bap_script.project ~disassemble:true file)
   in
   (match Emu.run emu ~until:0x7efL with
   | Paused -> ()

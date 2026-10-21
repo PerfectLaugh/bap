@@ -99,4 +99,4 @@ let () =
     (Bap_script.run ~system:"bap:unicorn-executor"
        ~init:[ (module Fork) ]
        ~args:[ "hello"; "cruel"; "world" ]
-       (Bap_script.project file))
+       (Bap_script.project ~disassemble:true file))

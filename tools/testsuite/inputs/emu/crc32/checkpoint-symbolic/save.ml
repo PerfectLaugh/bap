@@ -12,7 +12,7 @@ let () =
   let emu =
     Emu.create ~components:Sym.components
       ~redirects:[ ("<stdin>", stdin) ]
-      (Bap_script.project file)
+      (Bap_script.project ~disassemble:true file)
   in
   (match Emu.run emu ~until:0x80cL with
   | Paused -> ()

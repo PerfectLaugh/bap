@@ -1,15 +1,15 @@
 (** Runs a program in Unicorn, as the script drives it.
 
-    The emulator runs the program of a project, e.g., of a bare project, see
-    [Bap_script.project ~bare], in a Primus system, by default the
-    [bap:unicorn-executor], in which the code runs in Unicorn, and Primus runs
-    the stubs, e.g., of libc, and the system calls. The script pauses and
+    The emulator runs the program of a project, e.g., of a bare project, which
+    isn't disassembled, see [Bap_script.project], in a Primus system, by default
+    the [bap:unicorn-executor], in which the code runs in Unicorn, and Primus
+    runs the stubs, e.g., of libc, and the system calls. The script pauses and
     continues the program, reads and writes its registers and memory, and hooks
     its instructions, its memory accesses and the calls of its functions, as it
     would with Unicorn, e.g.,
 
     {[
-      let emu = Bap_emu.create (Bap_script.project ~bare:true file) in
+      let emu = Bap_emu.create (Bap_script.project file) in
       Bap_emu.on_call emu "getuid" (fun _ -> Return 0L);
       match Bap_emu.run emu ~until:0x401000L with
       | Paused -> Bap_emu.set_reg emu "RAX" 42L
@@ -23,8 +23,8 @@
     hooks, stops of the debugger, and snapshots, e.g.,
 
     {[
-    let a = Bap_emu.create (Bap_script.project ~bare:true x86_file) in
-    let b = Bap_emu.create (Bap_script.project ~bare:true arm_file) in
+    let a = Bap_emu.create (Bap_script.project x86_file) in
+    let b = Bap_emu.create (Bap_script.project arm_file) in
     ignore (Bap_emu.step a);
     ignore (Bap_emu.step b)
     ]}

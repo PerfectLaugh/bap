@@ -10,8 +10,8 @@
 
     {[
     let lisp = { Bap_script.paths = [ dir ]; features = [ "syscalls" ] } in
-    let proj = Bap_script.project ~bare:true ~lisp file in
-    Bap_script.run proj ~system:"bap:unicorn-executor" ~args:[ "hello" ]
+    let proj = Bap_script.project ~lisp file in
+    Bap_script.run proj ~args:[ "hello" ]
     ]}
 
     The plugins of BAP are loaded, when the script first needs them, e.g., by
@@ -47,23 +47,26 @@ type lisp = {
     library, e.g., [posix] *)
 
 val project :
-  ?bare:bool ->
+  ?disassemble:bool ->
   ?loader:string ->
   ?target:Bap_core_theory.Theory.Target.t ->
   ?api:string list ->
   ?lisp:lisp ->
   string ->
   project
-(** [project file] disassembles the [file], as the disassemble command does,
-    with the [loader], llvm by default, and runs the passes that run
-    automatically, e.g., api, without the cache of the knowledge. With
-    [~bare:true] the disassembly and the lifting are skipped: the program
-    contains only the subroutines of the named symbols of the file, and of the
-    symbols, that the user provided, e.g., with [--read-symbols-from], whose
-    names come first, or, if there are none, e.g., the file is stripped, the
-    subroutines that the knowledge base finds, which scans the whole code, for
-    the executors that run the code natively, e.g., the [bap:unicorn-executor]
-    system. The api pass applies the api files of the folders [api] too, see
+(** [project file] loads the [file] with the [loader], llvm by default, and runs
+    the passes that run automatically, e.g., api, without the cache of the
+    knowledge. The disassembly and the lifting are skipped, for the executors
+    that run the code natively, e.g., the [bap:unicorn-executor] system, which
+    lifts only the code, that Primus interprets, on demand: the program contains
+    only the subroutines of the named symbols of the file, and of the symbols,
+    that the user provided, e.g., with [--read-symbols-from], whose names come
+    first, or, if there are none, e.g., the file is stripped, the subroutines
+    that the knowledge base finds, which scans the whole code. With
+    [~disassemble:true] the [file] is disassembled and lifted, as the
+    disassemble command does, e.g., for the [bap:legacy-main] system, which
+    interprets the whole program, or for the analyses of the whole program. The
+    api pass applies the api files of the folders [api] too, see
     [Bap_api.with_paths], e.g., the prototypes of the functions of a target, and
     the Primus machines, that run the program, load the [lisp] program, see
     [Primus.Lisp.Load.with_features]. *)
@@ -82,10 +85,12 @@ val run :
   project ->
   project
 (** [run project] runs the program of the [project] in the Primus [system], by
-    default [bap:legacy-main], with the [components] of the repository, e.g.,
-    [bap:debugger], from the [entry], by default the entry point of the program,
-    or [_start], with the program arguments [args], without the name of the
-    program, and the environment [envp], e.g., [["HOME=/root"]].
+    default [bap:unicorn-executor], or [bap:legacy-main], if the primus-unicorn
+    plugin, which is licensed under GPL, isn't installed, with the [components]
+    of the repository, e.g., [bap:debugger], from the [entry], by default the
+    entry point of the program, or [_start], with the program arguments [args],
+    without the name of the program, and the environment [envp], e.g.,
+    [["HOME=/root"]].
 
     The components of [init] run in the machine after the components of the
     system, before the program starts, e.g., the components of the script, that

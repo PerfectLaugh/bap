@@ -21,7 +21,7 @@ let () =
         Emu.create
           ~components:(Sym.components @ Taint.components)
           ~redirects:[ ("<stdin>", input) ]
-          (Bap_script.project ~api file)
+          (Bap_script.project ~disassemble:true ~api file)
       in
       let buffers = ref [] and crcs = ref 0 in
       Emu.on_call emu "fgets" (fun emu ->

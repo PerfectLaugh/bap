@@ -17,7 +17,7 @@ let file, lisp =
   | _ -> failwith "expected FILE LISP"
 
 let project file =
-  Bap_script.project ~bare:true
+  Bap_script.project
     ~lisp:{ Bap_script.paths = [ lisp ]; features = [ "quiet" ] }
     file
 

@@ -13,7 +13,7 @@ let word emu addr =
 let () =
   let file = List.hd (Bap_script.args ()) in
   let emu =
-    Emu.create ~args:[ "hello"; "cruel" ] (Bap_script.project ~bare:true file)
+    Emu.create ~args:[ "hello"; "cruel" ] (Bap_script.project file)
   in
   ignore (Emu.run emu ~until:0x40076bL);
   Emu.write emu (word emu Int64.(add (Emu.reg emu "RSI") 8L)) "HELLO";

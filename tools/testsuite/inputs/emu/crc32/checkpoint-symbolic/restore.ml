@@ -7,7 +7,7 @@ let () =
   let file = List.hd (Bap_script.args ()) in
   let emu =
     Emu.create ~components:Sym.components ~restore:"symbolic.ckpt"
-      (Bap_script.project file)
+      (Bap_script.project ~disassemble:true file)
   in
   let branches = ref [] in
   Sym.on_branch emu (fun _ b -> branches := b :: !branches);

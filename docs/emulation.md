@@ -12,17 +12,20 @@ All three run the program in a Primus system. A system is a set of components, e
 
 | System | The code runs in | Notes |
 |--------|------------------|-------|
+| `bap:legacy-main` | the Primus interpreter | the lifted program |
 | `bap:stubbed-executor` | the Primus interpreter | the lifted program, with the Lisp stubs of libc |
-| `bap:unicorn-executor` | Unicorn, natively | the stubs and the system calls still run in Primus |
+| `bap:unicorn-executor` | Unicorn, natively | the default; the stubs and the system calls still run in Primus |
 | `bap:terminating-unicorn-executor` | Unicorn | with `bap:limit`, so that the program always ends |
 
-The Unicorn executor is many times faster than the interpreter. It hands an instruction to the interpreter only when Primus has to see it, e.g., when it reads a tainted or symbolic value, when it traps, or when the program writes code.
+The `run` pass and the scripts run `bap:unicorn-executor`, unless they name another system, or the `primus-unicorn` plugin, which is licensed under GPL, isn't installed, then they run `bap:legacy-main`. The Unicorn executor is many times faster than the interpreter. It hands an instruction to the interpreter only when Primus has to see it, e.g., when it reads a tainted or symbolic value, when it traps, or when the program writes code.
 
 ## The `run` pass
 
 ```bash
-bap ./echo --passes=run --run-systems=bap:unicorn-executor --run-argv=hello,world
+bap ./echo --passes=run --run-argv=hello,world
 ```
+
+`--run-systems=bap:legacy-main` interprets the whole program instead, as BAP did before.
 
 The options of the Unicorn executor:
 
@@ -85,17 +88,18 @@ A script configures the analyses with the arguments of the functions that it cal
 let () =
   let file = List.hd (Bap_script.args ()) in
   ignore
-    (Bap_script.run ~system:"bap:unicorn-executor"
-       ~args:[ "hello"; "cruel"; "world" ]
-       (Bap_script.project ~bare:true file))
+    (Bap_script.run ~args:[ "hello"; "cruel"; "world" ]
+       (Bap_script.project file))
 ```
 
-- `Bap_script.project file` loads and disassembles the file, as the `disassemble` command does, and runs the passes that run automatically, e.g., `api`. `~api` adds folders of api files, and `~lisp` adds a Primus Lisp program, e.g., `~lisp:{ paths = [ dir ]; features = [ "syscalls" ] }`.
-- `Bap_script.run project` runs the program in a system, by default `bap:legacy-main`. Use `~components` to add components by name, and `~init` to add the script's own components. `~args`, `~envp`, and `~entry` set the arguments, the environment, and the entry point.
+- `Bap_script.project file` loads the file, without its disassembly, see [Bare projects](#bare-projects), and runs the passes that run automatically, e.g., `api`. `~api` adds folders of api files, and `~lisp` adds a Primus Lisp program, e.g., `~lisp:{ paths = [ dir ]; features = [ "syscalls" ] }`.
+- `Bap_script.run project` runs the program in a system, by default `bap:unicorn-executor`. Use `~components` to add components by name, and `~init` to add the script's own components. `~args`, `~envp`, and `~entry` set the arguments, the environment, and the entry point.
 
 ### Bare projects
 
-`Bap_script.project ~bare:true` skips the disassembly and the lifting. These are the expensive parts of loading, and Unicorn doesn't need them. The program then has only the subroutines of the file's named symbols, plus those the user provides, e.g., with `--read-symbols-from`. A stripped file without either gets the subroutines that the knowledge base finds instead, which costs a scan of the whole code. Primus lifts the instructions that it needs on demand, e.g., the system calls.
+`Bap_script.project` skips the disassembly and the lifting. These are the expensive parts of loading, and Unicorn doesn't need them. The program then has only the subroutines of the file's named symbols, plus those the user provides, e.g., with `--read-symbols-from`. A stripped file without either gets the subroutines that the knowledge base finds instead, which costs a scan of the whole code. Primus lifts the instructions that it needs on demand, e.g., the system calls.
+
+`Bap_script.project ~disassemble:true` disassembles and lifts the file, as the `disassemble` command does, e.g., for `bap:legacy-main`, which interprets the whole program, or for the analyses of the whole program.
 
 ### The options of the plugins
 
@@ -149,7 +153,7 @@ module Emu = Bap_emu
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true file) in
+  let emu = Emu.create ~args:[ "hello" ] (Bap_script.project file) in
   match Emu.run emu ~until:0x40076bL with
   | Paused ->
       Printf.printf "paused at %Lx, argc = %Ld\n" (Emu.pc emu) (Emu.reg emu "RDI");
@@ -271,8 +275,8 @@ List.iter (fun b ->
 The emulators of a script run side by side, e.g., programs of different targets. Each has its own Unicorn engine, Primus system, knowledge, hooks, stops, and snapshots:
 
 ```ocaml
-let a = Emu.create (Bap_script.project ~bare:true x86_file) in
-let b = Emu.create (Bap_script.project ~bare:true arm_file) in
+let a = Emu.create (Bap_script.project x86_file) in
+let b = Emu.create (Bap_script.project arm_file) in
 ignore (Emu.step a);
 ignore (Emu.step b)
 ```

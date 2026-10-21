@@ -4,6 +4,8 @@
 ### Features
 - runs the binary programs natively in Unicorn, with the `bap:unicorn-executor` and `bap:terminating-unicorn-executor` systems, on x86, x86-64, ARM, Thumb, AArch64, MIPS, PowerPC, and RISC-V, with the Lisp stubs and the system calls in Primus
 - runs the binaries in Unicorn without their disassembly, with the bare projects of the scripts, from the symbols of the file, or of `--read-symbols-from`
+- the `run` pass and `Bap_script.run` run `bap:unicorn-executor` by default, or `bap:legacy-main`, if the `bap-primus-unicorn` package, which is licensed under GPL, isn't installed; `--run-systems=bap:legacy-main` interprets the whole program, as before
+- `Bap_script.project` makes a bare project by default, and `~disassemble:true` disassembles and lifts the whole file, as before
 - interprets in Primus only the instructions that Primus must see, e.g., those that read tainted or symbolic values, that trap, or that the program wrote, and lifts them on demand
 - saves and restores the checkpoints of the machines, with `--primus-unicorn-checkpoint`, `--primus-unicorn-checkpoint-at`, and `--primus-unicorn-restore`, including the states of the components that extend them, see `Primus.Checkpoint`, e.g., the channels of Primus Lisp, the taint, and the symbolic inputs
 - adds the `bap script` command, which compiles, caches, and runs OCaml scripts with the libraries of BAP, and the `Bap_script` library

@@ -226,7 +226,7 @@ and session = {
           the code, e.g., of the bare project *)
   mutable bare_mode : bool;
       (** the machine runs without the disassembled program, which the bare
-          project does not have, see [Bap_script.project ~bare] *)
+          project does not have, see [Bap_script.project] *)
   timeout : float option;
       (** the seconds that a machine may run, in Unicorn and in Primus, e.g., in
           the Lisp stubs *)

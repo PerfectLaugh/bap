@@ -11,4 +11,4 @@ let () =
   ignore
     (Bap_script.run ~system:"bap:unicorn-executor"
        ~args:[ "hello"; "cruel"; "world" ]
-       (Bap_script.project ~bare:true ?lisp file))
+       (Bap_script.project ?lisp file))

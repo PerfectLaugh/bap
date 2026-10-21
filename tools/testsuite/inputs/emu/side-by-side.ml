@@ -24,10 +24,10 @@ let () =
     | [ echo; crc ] -> (echo, crc)
     | _ -> failwith "expected ECHO CRC"
   in
-  let a = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true echo) in
-  let b = Emu.create ~args:[ "hi" ] (Bap_script.project ~bare:true crc) in
+  let a = Emu.create ~args:[ "hello" ] (Bap_script.project echo) in
+  let b = Emu.create ~args:[ "hi" ] (Bap_script.project crc) in
   let c =
-    Emu.create ~args:[ "world"; "again" ] (Bap_script.project ~bare:true echo)
+    Emu.create ~args:[ "world"; "again" ] (Bap_script.project echo)
   in
   show "a" a (Emu.run a ~until:0x40076bL);
   show "c" c (Emu.run c ~until:0x40076bL);

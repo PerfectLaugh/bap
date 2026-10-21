@@ -5,7 +5,7 @@ module Emu = Bap_emu
 let () =
   let file = List.hd (Bap_script.args ()) in
   let emu =
-    Emu.create ~restore:"echo.ckpt" (Bap_script.project ~bare:true file)
+    Emu.create ~restore:"echo.ckpt" (Bap_script.project file)
   in
   Printf.printf "restored at %Lx, RDI = %Ld\n%!" (Emu.pc emu)
     (Emu.reg emu "RDI");
