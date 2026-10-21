@@ -238,7 +238,8 @@ module Redirection = struct
   let parse str =
     match String.lsplit2 str ~on:':' with
     | Some (oldname, newname) -> make oldname newname
-    | None -> `Error (sprintf "bad redirection, expected <old>:<new> got %s" str)
+    | None ->
+        `Error (sprintf "bad redirection, expected <old>:<new> got %s" str)
 
   let print ppf (oldname, newname) = Format.fprintf ppf "%s:%s" oldname newname
   let convert = Config.converter parse print ("none", "none")

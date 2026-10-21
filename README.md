@@ -71,7 +71,7 @@ dune show depexts         # lists the system packages to install with your packa
 dune build                # fetches the dependencies and builds BAP
 ```
 
-Once it is built, run `bap` and the other tools through `dune exec`, e.g., `dune exec -- bap /bin/echo -d`, so that they can find the plugins in the build tree. The other tasks, e.g., the tests, are dune commands too, see [Development](#development).
+Once it is built, run `bap` and the other tools through `dune exec`, e.g., `dune exec -- bap /bin/echo -d`, or directly from the build tree, e.g., `_build/default/src/bap_frontend.exe /bin/echo -d`, as a program in `_build` finds the plugins and the data in the install tree of its context, e.g., `_build/install/default`. The other tasks, e.g., the tests, are dune commands too, see [Development](#development).
 
 To build without network access, put [llvm-project-23.1.4.src.tar.xz][llvm-src] into the root of the repository before building; BAP verifies its checksum in both cases.
 

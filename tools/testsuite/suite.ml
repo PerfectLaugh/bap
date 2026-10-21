@@ -374,10 +374,10 @@ let main tests =
   (* dune tells the source root to the actions, whatever the build
      directory is, e.g., with --build-dir, otherwise it is the parent of
      _build, when the runner runs in it *)
-  root :=
-    (match Sys.getenv_opt "DUNE_SOURCEROOT" with
-    | Some dir when dir <> "" -> dir
-    | _ -> Option.value (source_root (Sys.getcwd ())) ~default:(Sys.getcwd ()));
+  (root :=
+     match Sys.getenv_opt "DUNE_SOURCEROOT" with
+     | Some dir when dir <> "" -> dir
+     | _ -> Option.value (source_root (Sys.getcwd ())) ~default:(Sys.getcwd ()));
   let root = !root in
   let dir =
     match Sys.getenv_opt "BAP_TESTSUITE" with
