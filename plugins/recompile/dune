@@ -1,0 +1,25 @@
+(library
+ (name bap_recompile_plugin)
+ (public_name bap-recompile.plugin)
+ (libraries bap bap-main core unix))
+
+(plugin
+ (name recompile)
+ (package bap-recompile)
+ (libraries bap-recompile.plugin)
+ (site
+  (bap-common plugins)))
+
+; the runtime, that the pass writes next to the program, is a C file,
+; which is embedded in the plugin
+
+(rule
+ (target recompile_runtime.ml)
+ (deps recompile_runtime.c)
+ (action
+  (with-stdout-to
+   %{target}
+   (progn
+    (echo "let source = {xx|")
+    (cat %{deps})
+    (echo "|xx}\n")))))

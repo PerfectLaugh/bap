@@ -463,6 +463,30 @@ let uninstalled data =
           "uninstalled:executor");
   ]
 
+(* the recompile pass writes the program as LLVM IR, with its runtime,
+   which aren't compiled here, as the testsuite doesn't need clang *)
+let recompile data =
+  [
+    case "recompile/x86_64-linux-gnu-crc-loop" (fun env ->
+        let ll = file env "crc.ll" in
+        let out =
+          bap env
+            [
+              path data "bin/x86_64-linux-gnu-crc-loop";
+              "--passes=recompile";
+              "--recompile-output=" ^ ll;
+            ]
+        in
+        check env "exits" (out.status = Exited 0);
+        let ir = In_channel.with_open_bin ll In_channel.input_all in
+        let has name text = contains env name { out with text = ir } text in
+        has "defines main" "define internal void @f.main(i64 %ret)";
+        has "calls putc natively" "call i64 @putc(";
+        has "dispatches the indirect calls" "define void @bap_dispatch";
+        has "starts from main" "call void @f.main(i64 %ret)";
+        check env "writes the runtime" (Sys.file_exists (ll ^ ".rt.c")));
+  ]
+
 let source_type _ =
   [
     case "source-type" (fun env ->
@@ -742,6 +766,7 @@ let tests =
     mangling;
     obj;
     plugins;
+    recompile;
     source_type;
     symbols;
     uninstalled;

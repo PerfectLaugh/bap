@@ -502,6 +502,16 @@ details of the program behavior.")
   (bap-common (= :version))))
 
 (package
+ (name bap-recompile)
+ (synopsis "A BAP pass that recompiles the program of x86-64 to LLVM IR")
+ (tags (bap bap-plugin))
+ (depends
+  (bap-common (= :version))
+  (bap-main (= :version))
+  (bap-std (= :version))
+  core))
+
+(package
  (name bap-frontend)
  (synopsis "The main BAP command-line tool")
  (tags (bap bap-command))
