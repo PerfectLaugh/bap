@@ -38,36 +38,97 @@ let run pass proj =
       fail "the pass %s depends on the unknown pass %s" (Project.Pass.name pass)
         dep
 
-(* the symbols of the knowledge base, e.g., provided with
-   --read-symbols-from, as the subroutine terms of the bare program, so
-   that the components that need the program work without the
-   disassembly, e.g., the Lisp machine, which links the stubs by the
-   names and addresses of their subroutines *)
+(* the names, that are identifiers, as the symbolizer has them, see
+   plugins/disassemble/disassemble_main_rules.ml *)
+let is_ident s =
+  (not (String.is_empty s))
+  && (Char.is_alpha s.[0] || Char.equal s.[0] '_')
+  && String.for_all s ~f:(fun c -> Char.is_alphanum c || Char.equal c '_')
+
+(* the starts of the subroutines, that the symbols of the file tell, as
+   the symbolizer computes them from the specification, with the
+   shortest of their names, that are identifiers, if they have one, see
+   plugins/disassemble/disassemble_main_rules.ml *)
+let symbol_starts proj =
+  let t = Project.target proj in
+  let m = Bitvec.modulus (Theory.Target.code_addr_size t) in
+  let n = Theory.Target.code_alignment t / Theory.Target.byte t in
+  let mask = Int64.(lnot (of_int n - 1L)) in
+  let to_addr x = Bitvec.(int64 Int64.(x land mask) mod m) in
+  let collect fld = Ogre.collect Ogre.Query.(select @@ from fld) in
+  let symbols =
+    let open Ogre.Let in
+    let* starts = collect Image.Scheme.code_start in
+    let* values = collect Image.Scheme.symbol_value in
+    let* entry = Ogre.request Image.Scheme.entry_point in
+    let+ names = collect Image.Scheme.named_symbol in
+    let roots = Seq.append starts (Seq.map ~f:fst values) in
+    (Option.fold entry ~init:roots ~f:(Fn.flip Seq.cons), names)
+  in
+  match Ogre.eval symbols (Project.specification proj) with
+  | Error _ -> Map.empty (module Bitvec_order)
+  | Ok (roots, names) ->
+      let starts =
+        Seq.fold roots
+          ~init:(Map.empty (module Bitvec_order))
+          ~f:(fun starts x -> Map.set starts ~key:(to_addr x) ~data:None)
+      in
+      Seq.fold names ~init:starts ~f:(fun starts (x, name) ->
+          let addr = to_addr x in
+          if not (is_ident name) then starts
+          else
+            match Map.find starts addr with
+            | None -> starts
+            | Some (Some other) when String.length other <= String.length name
+              ->
+                starts
+            | Some _ -> Map.set starts ~key:addr ~data:(Some name))
+
+(* the starts of the subroutines of the knowledge base, e.g., provided
+   with --read-symbols-from or found by the heuristics, with their
+   names, which its symbolizers find *)
+let known_starts unit =
+  let open KB.Syntax in
+  KB.collect Theory.Unit.subroutines unit >>= fun starts ->
+  Set.to_list starts
+  |> KB.List.filter_map ~f:(fun addr ->
+      Theory.Label.for_addr addr >>= fun label ->
+      (* the fresh label has no unit, which the symbol providers need,
+         e.g., to find the symbols of the file that the label is in, and
+         the label, that has one, e.g., of another file at the same
+         address, keeps it *)
+      ( KB.collect Theory.Label.unit label >>= function
+        | Some _ -> KB.return ()
+        | None -> KB.provide Theory.Label.unit label (Some unit) )
+      >>= fun () ->
+      KB.collect Theory.Label.name label >>= fun name ->
+      (match name with
+        | Some _ -> KB.return name
+        | None -> KB.resolve Theory.Label.possible_name label)
+      >>| Option.map ~f:(fun name -> (name, addr)))
+
+(* the named symbols of the file, as the subroutine terms of the bare
+   program, so that the components that need the program work without
+   the disassembly, e.g., the Lisp machine, which links the stubs by the
+   names and addresses of their subroutines. The file, that has no
+   symbols, e.g., the stripped one, has the subroutines of the knowledge
+   base instead, as the knowledge base finds them in the whole code,
+   e.g., with the patterns of the prologues, and names them, e.g., the
+   stubs, from their code, which is too costly for the large files *)
 let synthesize_program proj =
   match Project.get proj filename with
   | None -> proj
   | Some file -> (
+      let symbols = symbol_starts proj in
       let result = Toplevel.var "bare-symbols" in
       Toplevel.put result
-        (let open KB.Syntax in
-         Theory.Unit.for_file file >>= fun unit ->
-         KB.collect Theory.Unit.subroutines unit >>= fun starts ->
-         Set.to_list starts
-         |> KB.List.filter_map ~f:(fun addr ->
-             Theory.Label.for_addr addr >>= fun label ->
-             (* the fresh label has no unit, which the symbol
-                providers need, e.g., to find the symbols of the file
-                that the label is in, and the label, that has one,
-                e.g., of another file at the same address, keeps it *)
-             ( KB.collect Theory.Label.unit label >>= function
-               | Some _ -> KB.return ()
-               | None -> KB.provide Theory.Label.unit label (Some unit) )
-             >>= fun () ->
-             KB.collect Theory.Label.name label >>= fun name ->
-             (match name with
-               | Some _ -> KB.return name
-               | None -> KB.resolve Theory.Label.possible_name label)
-             >>| Option.map ~f:(fun name -> (name, addr))));
+        (if Map.is_empty symbols then
+           KB.(Theory.Unit.for_file file >>= known_starts)
+         else
+           KB.return
+             (Map.to_alist symbols
+             |> List.filter_map ~f:(fun (addr, name) ->
+                 Option.map name ~f:(fun name -> (name, addr)))));
       (* the subroutines are by their addresses, as the names of the
          static functions of different files may be the same *)
       match Toplevel.get result with

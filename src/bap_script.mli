@@ -50,8 +50,9 @@ val project :
     with the [loader], llvm by default, and runs the passes that run
     automatically, e.g., api, without the cache of the knowledge. With
     [~bare:true] the disassembly and the lifting are skipped: the program
-    contains only the subroutines that the knowledge base knows, e.g., from the
-    symbols of the file, for the executors that run the code natively, e.g., the
+    contains only the subroutines of the named symbols of the file, or, if it
+    has none, e.g., it is stripped, the subroutines that the knowledge base
+    finds, for the executors that run the code natively, e.g., the
     [bap:unicorn-executor] system. The api pass applies the api files of the
     folders [api] too, see [Bap_api.with_paths], e.g., the prototypes of the
     functions of a target, and the Primus machines, that run the program, load
