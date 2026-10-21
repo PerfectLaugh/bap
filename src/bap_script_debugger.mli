@@ -10,6 +10,11 @@
     [Primus.Interpreter.Stops.Make]. The breakpoints and the handlers are of
     every system, that the script runs, e.g., of each emulator, see [Bap_emu].
 
+    The debugger observes only the stops, see [Primus.Interpreter.stop_reached],
+    so the executors, that run the code outside of the interpreter, e.g.,
+    Unicorn, don't stop at the other instructions for it, also after the
+    stepping is off, and no breakpoint is left.
+
     The handlers change the registers with [Primus.Interpreter.Make.set] and the
     memory with [Primus.Interpreter.Make.store], so that the executors that copy
     the state, e.g., Unicorn, see the changes. *)

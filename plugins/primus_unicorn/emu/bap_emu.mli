@@ -29,7 +29,10 @@
     ignore (Bap_emu.step b)
     ]}
 
-    The script, which runs in one thread, runs one of them at a time. *)
+    The script, which runs in one thread, runs one of them at a time.
+
+    See [docs/emulation.md] for the guide, with the examples of the hooks, the
+    snapshots, the checkpoints, the taint, and the symbolic execution. *)
 
 open Bap.Std
 

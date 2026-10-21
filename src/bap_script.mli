@@ -14,8 +14,16 @@
     Bap_script.run proj ~system:"bap:unicorn-executor" ~args:[ "hello" ]
     ]}
 
-    The plugins of BAP are loaded with their defaults, when the script first
-    needs them, e.g., by {!project}. *)
+    The plugins of BAP are loaded, when the script first needs them, e.g., by
+    {!project}. A script starts bap without the options of the command line, so
+    the options of the plugins come from the environment, whose variable is the
+    full name of the option in upper case, with [BAP_] before it and the dashes
+    replaced by the underscores, e.g., [BAP_READ_SYMBOLS_FROM=FILE] for
+    [--read-symbols-from=FILE], or from the configuration files, otherwise they
+    have their defaults.
+
+    See [docs/emulation.md] for the guide to the scripts and the emulator, see
+    [Bap_emu]. *)
 
 open Bap.Std
 open Bap_primus.Std
@@ -50,13 +58,15 @@ val project :
     with the [loader], llvm by default, and runs the passes that run
     automatically, e.g., api, without the cache of the knowledge. With
     [~bare:true] the disassembly and the lifting are skipped: the program
-    contains only the subroutines of the named symbols of the file, or, if it
-    has none, e.g., it is stripped, the subroutines that the knowledge base
-    finds, for the executors that run the code natively, e.g., the
-    [bap:unicorn-executor] system. The api pass applies the api files of the
-    folders [api] too, see [Bap_api.with_paths], e.g., the prototypes of the
-    functions of a target, and the Primus machines, that run the program, load
-    the [lisp] program, see [Primus.Lisp.Load.with_features]. *)
+    contains only the subroutines of the named symbols of the file, and of the
+    symbols, that the user provided, e.g., with [--read-symbols-from], whose
+    names come first, or, if there are none, e.g., the file is stripped, the
+    subroutines that the knowledge base finds, which scans the whole code, for
+    the executors that run the code natively, e.g., the [bap:unicorn-executor]
+    system. The api pass applies the api files of the folders [api] too, see
+    [Bap_api.with_paths], e.g., the prototypes of the functions of a target, and
+    the Primus machines, that run the program, load the [lisp] program, see
+    [Primus.Lisp.Load.with_features]. *)
 
 val run_pass : string -> project -> project
 (** [run_pass name project] runs the pass, e.g., ["api"], after its

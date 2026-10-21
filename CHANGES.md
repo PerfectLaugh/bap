@@ -1,3 +1,56 @@
+2.6.0 (unreleased)
+==================
+
+### Features
+- runs the binary programs natively in Unicorn, with the `bap:unicorn-executor` and `bap:terminating-unicorn-executor` systems, on x86, x86-64, ARM, Thumb, AArch64, MIPS, PowerPC, and RISC-V, with the Lisp stubs and the system calls in Primus
+- runs the binaries in Unicorn without their disassembly, with the bare projects of the scripts, from the symbols of the file, or of `--read-symbols-from`
+- interprets in Primus only the instructions that Primus must see, e.g., those that read tainted or symbolic values, that trap, or that the program wrote, and lifts them on demand
+- saves and restores the checkpoints of the machines, with `--primus-unicorn-checkpoint`, `--primus-unicorn-checkpoint-at`, and `--primus-unicorn-restore`, including the states of the components that extend them, see `Primus.Checkpoint`, e.g., the channels of Primus Lisp, the taint, and the symbolic inputs
+- adds the `bap script` command, which compiles, caches, and runs OCaml scripts with the libraries of BAP, and the `Bap_script` library
+- adds the `Bap_emu` library, which drives a program in Unicorn from a script: running, stepping, and pausing, registers and memory, hooks of the code, the memory, and the calls, patches, snapshots, checkpoints, taint, symbolic execution, and several emulators side by side, each with its own knowledge
+- adds the `bap:debugger` component, which stops the machines at the breakpoints and reads the commands from the terminal or a file, and the `Bap_script_debugger` library, which calls the handlers of a script at the stops
+- adds `Primus.Interpreter.Stops`, the stops of the machines for the executors outside of the interpreter, and the `Primus.Interpreter.stop_reached` observation, so that the debuggers don't make Unicorn stop at every instruction
+- adds the `--run-components` option, which adds components to the systems of the `run` pass
+- moves the symbolic execution of Primus to a library, which the scripts use
+- protects the memory of Primus, as `mprotect` does, maps the anonymous memory with `mmap`, and snapshots and restores the memory
+- runs the code that the program writes or changes in the interpreter, in the Thumb or A32 mode that the jumps select, as ARMv7 does
+- loads ELF files as the dynamic linker does, links the relocatable ELF files, e.g., kernel modules, and runs the imports of data, the `.bss` of PE, and the programs of mingw on x86 and x86-64
+- lifts more AArch64 integer, load/store, SIMD, scalar floating-point, and system instructions, the VFP and more AArch32 instructions, and the RV64 words and the M extension of RISC-V
+- lifts x86, MIPS, PowerPC, and AArch32 with Primus Lisp only, tested against QEMU
+- writes the computations of the knowledge base in the direct style, with `KB.direct` and `KB.await`, using the effects of OCaml 5
+- serializes BIL and BIR in protobuf and JSON
+- adds `channel-seek`, `fconvert`, and `fround` to Primus Lisp
+
+### Improvements
+- loads big images faster, without the quadratic costs of the image, Ogre, and the monads, and with the loader facts passed to OCaml as binary tables
+- loads the bare projects of big files, e.g., `amdgpu.ko`, without scanning their code for the subroutine starts
+- halves the peak memory of linking big relocatable files, by making the relocation records one by one
+- collects only the asked property of a term identifier, instead of all properties of its label
+- doesn't make the arguments of the subroutines places of Primus Lisp, and links each variable once
+- finds the subroutine starts of a region at once, and indexes the scanned regions
+- loads and types the Primus Lisp programs faster, once per process
+- runs the functional tests in parallel with an OCaml runner and OUnit2, and keeps their files in the repository, in `testsuite/`
+- doesn't use the directories of the user: the cache, the log, and the configuration are only in the directories of `--cache-dir`, `--log-dir`, and `--config-dir`
+- uses the APIs, plugins, Lisp files, and Primus systems without installing them
+
+### Bug Fixes
+- fixes the semantics of many ARM, Thumb, AArch64, x86, MIPS, PowerPC, and RISC-V instructions, found by the new unit tests of the lifters
+- fixes the special cases and the directed rounding modes of the floating-point emulation
+- fixes the extraction from an extraction, and the variable types after block flattening
+- keeps the symbols of `--read-symbols-from` out of the symbols of the file, so that the symbolizer doesn't lose the names of the file
+- links Z3 with dbghelp on Windows, so that the symbolic executor loads
+
+### Tooling
+- builds with dune package management, with the dependencies pinned in `dune.lock`, without oasis, the configure script, or Makefiles, and generates the opam files from `dune-project`
+- builds natively on Windows with mingw-w64, and on arm64 macOS
+- updates to OCaml 5, LLVM 23.1.4, Z3 5.3.1, Ghidra 11.4, and cmdliner 2
+- links the C++ runtime, GMP, libatomic, and zlib statically
+- removes the integrations with IDA Pro, radare2, and binutils, the deprecated options, and the install commands
+- requires the full names of the options and the commands
+- builds the documentation and the website with dune, without odig
+- formats the code with ocamlformat
+
+
 2.5.0
 =====
 
