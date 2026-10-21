@@ -1,0 +1,3 @@
+LIBRARY ordinal.dll
+EXPORTS
+  unnamed @7 NONAME

@@ -79,3 +79,8 @@
  (name default)
  (deps
   (alias_rec install)))
+
+; the binaries of the functional tests and their sources, which are not
+; built, see tools/testsuite/dune
+
+(data_only_dirs testsuite)

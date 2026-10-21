@@ -357,28 +357,6 @@ let rec source_root dir =
   else if parent = dir then None
   else source_root parent
 
-let run_git args =
-  let pid = Spawn.spawn ~prog:(locate "git") ~argv:("git" :: args) () in
-  match waitpid [] pid with _, Unix.WEXITED 0 -> true | _ -> false
-
-(* checks out the revision of the testsuite in [dir], which is written in
-   tools/testsuite/REVISION with its repository *)
-let fetch ~root dir =
-  let url, rev =
-    match
-      read (Filename.concat root "tools/testsuite/REVISION")
-      |> String.split_on_char '\n' |> List.map String.trim
-      |> List.filter (( <> ) "")
-    with
-    | [ url; rev ] -> (url, rev)
-    | _ -> failwith "tools/testsuite/REVISION: expected the URL and revision"
-  in
-  let git args = if not (run_git args) then failwith "git failed" in
-  if not (Sys.file_exists dir) then git [ "clone"; url; dir ];
-  if not (run_git [ "-C"; dir; "cat-file"; "-e"; rev ^ "^{commit}" ]) then
-    git [ "-C"; dir; "fetch"; url ];
-  git [ "-C"; dir; "checkout"; "-q"; rev ]
-
 let selected filters case =
   filters = []
   || List.exists
@@ -400,8 +378,6 @@ let main tests =
     | Some dir -> absolute dir
     | None -> Filename.concat root "testsuite"
   in
-  if Sys.getenv_opt "BAP_TESTSUITE_NO_FETCH" = None then fetch ~root dir;
-  if Array.length Sys.argv > 1 && Sys.argv.(1) = "--fetch-only" then exit 0;
   let keep = Sys.getenv_opt "BAP_TESTSUITE_WORK" <> None in
   let work =
     match Sys.getenv_opt "BAP_TESTSUITE_WORK" with

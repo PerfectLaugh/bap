@@ -71,7 +71,6 @@ _oasis
 bap_main_config.ml
 tools/postinstall.ml
 OMakefile
-/testsuite/
 /config.status
 /config.status.in
 /_opam/

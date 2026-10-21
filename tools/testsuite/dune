@@ -1,6 +1,7 @@
 ; the functional tests of bap and bap-mc, which run them on the binaries of
-; the testsuite repository, checked out in testsuite/ at the revision of
-; REVISION. They are OUnit tests, which are slow, so they don't run with
+; the testsuite, in testsuite/ at the root of the repository, with their
+; sources in testsuite/src. They are OUnit tests, which are slow, so they
+; don't run with
 ; dune test, run them with
 ;
 ;   dune build @testsuite
@@ -41,7 +42,6 @@
  (alias testsuite)
  (deps
   (alias_rec %{workspace_root}/install)
-  REVISION
   (universe))
  (action
   (run %{exe:run.exe} -bap %{bin:bap} -mc %{bin:bap-mc})))

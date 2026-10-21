@@ -122,7 +122,6 @@ val main : (data -> case list) list -> unit
     with 1 if any of them fails.
 
     The words of BAP_TESTS select the cases whose names contain one of them. The
-    testsuite is checked out in ROOT/testsuite, or BAP_TESTSUITE, unless
-    BAP_TESTSUITE_NO_FETCH is set, and the argument [--fetch-only] only checks
-    it out. The outputs of the failed cases are kept in BAP_TESTSUITE_WORK, or a
-    temporary directory. *)
+    files of the testsuite are in ROOT/testsuite, or BAP_TESTSUITE. The outputs
+    of the failed cases are kept in BAP_TESTSUITE_WORK, or a temporary
+    directory. *)
