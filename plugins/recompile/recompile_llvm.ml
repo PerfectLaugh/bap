@@ -533,14 +533,3 @@ let program_of proj =
         Set.union regs (Set.filter (vars_of_sub s) ~f:Var.is_physical))
   in
   { subs; externals; registers }
-
-let main ~entry ~output proj =
-  let path =
-    match Project.get proj filename with
-    | Some file -> Caml_unix.realpath file
-    | None -> invalid_arg "the project has no file"
-  in
-  let ir = emit ~entry ~path (program_of proj) in
-  Out_channel.write_all output ~data:ir;
-  Out_channel.write_all (output ^ ".rt.c") ~data:Recompile_runtime.source;
-  proj

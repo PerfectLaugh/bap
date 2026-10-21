@@ -1,7 +1,14 @@
 (library
+ (name bap_recompile)
+ (public_name bap-recompile)
+ (modules bap_recompile recompile_llvm recompile_optimize recompile_runtime)
+ (libraries bap core unix))
+
+(library
  (name bap_recompile_plugin)
  (public_name bap-recompile.plugin)
- (libraries bap bap-main core unix))
+ (modules recompile_main)
+ (libraries bap bap-main bap-recompile core))
 
 (plugin
  (name recompile)

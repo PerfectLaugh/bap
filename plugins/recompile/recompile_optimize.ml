@@ -126,9 +126,7 @@ let emit_func prog out n sub =
     let prefix = name
   end) in
   match E.body () with
-  | exception Unsupported msg ->
-      eprintf "bap-recompile: can't optimize %s: %s\n%!" (Sub.name sub) msg;
-      None
+  | exception Unsupported msg -> Error msg
   | () ->
       Hashtbl.iteri exits ~f:(fun ~key ~data ->
           let indirect =
@@ -143,7 +141,7 @@ let emit_func prog out n sub =
       bprintf out "define void @%s() {\nentry:\n" name;
       Buffer.add_buffer out buf;
       bprintf out "}\n\n";
-      Some { sub; name; exits }
+      Ok { sub; name; exits }
 
 (* the subset of LLVM IR, that opt makes of the functions *)
 module Parse = struct
@@ -704,6 +702,11 @@ let raise_sub ~mem sub exits (blocks : Parse.block list) =
   let open Parse in
   let tids = String.Table.create () in
   let tid l = Hashtbl.find_or_add tids l ~default:Tid.create in
+  (* the entry keeps its identity, so that the jumps to it, e.g., from the
+     code around an optimized region, still enter it *)
+  (match (Term.first blk_t sub, blocks) with
+  | Some first, b :: _ -> Hashtbl.set tids ~key:b.label ~data:(Term.tid first)
+  | _ -> ());
   (* the addresses of the blocks, that the machines enter by their
      addresses: the entry, e.g., of the indirect calls, and the
      continuations of the calls, e.g., of the returns, as only they load the
@@ -901,46 +904,56 @@ let run_opt ~opt ~pipeline input =
   | Some text -> text
   | None -> invalid_argf "%s failed with %d" cmd status ()
 
-let optimize ~opt ~pipeline ~subs proj =
-  let prog = program_of proj in
+(* the subs, optimized by the [pipeline] of LLVM, in one run of [opt], or
+   the errors, why they can't be *)
+let optimize_subs ~opt ~pipeline subs =
   let out = Buffer.create 65536 in
   let registers =
-    Set.fold prog.registers ~init:String.Map.empty ~f:(fun m v ->
-        Map.set m ~key:(mangle (Var.name v)) ~data:v)
+    List.fold subs ~init:String.Map.empty ~f:(fun m s ->
+        Set.fold (vars_of_sub s) ~init:m ~f:(fun m v ->
+            if Var.is_physical v then
+              Map.set m ~key:(mangle (Var.name v)) ~data:v
+            else m))
   in
   Map.iteri registers ~f:(fun ~key ~data ->
       bprintf out "@bap_%s = external global %s\n" key
         (ty (Option.value_exn (width data))));
-  let funcs =
-    Map.data prog.subs
-    |> List.filter ~f:(fun s -> not (is_external s || is_intrinsic s))
-    |> List.filter ~f:(fun s ->
-        List.is_empty subs || List.mem subs (Sub.name s) ~equal:String.equal)
-    |> List.filter_mapi ~f:(fun n s -> emit_func prog out n s)
+  let prog =
+    {
+      subs =
+        Tid.Map.of_alist_reduce
+          ~f:(fun s _ -> s)
+          (List.map subs ~f:(fun s -> (Term.tid s, s)));
+      externals = String.Set.empty;
+      registers = Var.Set.of_list (Map.data registers);
+    }
   in
-  let optimized = functions (run_opt ~opt ~pipeline (Buffer.contents out)) in
-  let program =
-    List.fold funcs ~init:(Project.program proj) ~f:(fun program f ->
-        match Map.find optimized f.name with
-        | None -> program
-        | Some lines -> (
-            let mem = memory_of f.sub in
-            let module R = Raise (struct
-              let registers = registers
-              let mem = mem
-            end) in
-            match
-              R.blocks lines |> inline_values |> raise_sub ~mem f.sub f.exits
-            with
-            | raised -> Term.update sub_t program raised
-            | exception exn ->
-                let msg =
-                  match exn with
-                  | Parse.Error msg | Unsupported msg -> msg
-                  | exn -> Exn.to_string exn
-                in
-                eprintf "bap-recompile: can't raise %s: %s\n%!" (Sub.name f.sub)
-                  msg;
-                program))
+  let funcs = List.mapi subs ~f:(fun n s -> (s, emit_func prog out n s)) in
+  let optimized =
+    if List.exists funcs ~f:(fun (_, f) -> Result.is_ok f) then
+      Or_error.try_with (fun () ->
+          functions (run_opt ~opt ~pipeline (Buffer.contents out)))
+    else Ok String.Map.empty
   in
-  Project.with_program proj program
+  List.map funcs ~f:(fun (sub, f) ->
+      ( sub,
+        match (f, optimized) with
+        | Error msg, _ -> Or_error.error_string msg
+        | Ok _, Error err -> Error err
+        | Ok f, Ok optimized -> (
+            match Map.find optimized f.name with
+            | None -> Or_error.error_string "opt didn't write the function"
+            | Some lines -> (
+                let mem = memory_of f.sub in
+                let module R = Raise (struct
+                  let registers = registers
+                  let mem = mem
+                end) in
+                match
+                  R.blocks lines |> inline_values
+                  |> raise_sub ~mem f.sub f.exits
+                with
+                | raised -> Ok raised
+                | exception (Parse.Error msg | Unsupported msg) ->
+                    Or_error.error_string msg
+                | exception exn -> Or_error.of_exn exn)) ))

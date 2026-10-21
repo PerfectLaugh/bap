@@ -46,6 +46,14 @@ which the code continues after its calls, have their addresses, as the
 other blocks use the values, that their dominators computed, so the
 indirect jumps into the sub, e.g., of the tables of its switches, can't
 enter them, and $(b,--recompile-opt-subs) excludes such subs.
+
+The scripts and the other plugins optimize the subs on demand with the
+library of the plugin, e.g.,
+
+```
+  #require "bap-recompile"
+  let sub = Bap_recompile.optimize sub |> Or_error.ok_exn
+```
 |}
 
 open Core
@@ -70,9 +78,7 @@ let opt =
 
 let pipeline =
   Extension.Configuration.parameter
-    Extension.Type.(
-      string
-      =? "function(sroa,early-cse,instcombine<no-verify-fixpoint>,simplifycfg,sccp,gvn,dse,adce,jump-threading,instcombine<no-verify-fixpoint>,simplifycfg)")
+    Extension.Type.(string =? Bap_recompile.default_passes)
     "opt-passes"
     ~doc:
       "The pipeline of the passes of LLVM, that optimize the subs, in the \
@@ -91,10 +97,18 @@ let () =
   let output = ctxt --> output in
   Project.register_pass (fun proj ->
       match output with
-      | Some output -> Recompile_llvm.main ~entry ~output proj
-      | None -> invalid_arg "the recompile pass needs --recompile-output");
-  let opt = ctxt --> opt and pipeline = ctxt --> pipeline in
+      | None -> invalid_arg "the recompile pass needs --recompile-output"
+      | Some output ->
+          let ir, runtime = Bap_recompile.recompile ~entry proj in
+          Out_channel.write_all output ~data:ir;
+          Out_channel.write_all (output ^ ".rt.c") ~data:runtime;
+          proj);
+  let opt = ctxt --> opt and passes = ctxt --> pipeline in
   let subs = ctxt --> subs in
+  let select sub =
+    List.is_empty subs || List.mem subs (Sub.name sub) ~equal:String.equal
+  in
   Project.register_pass ~name:"optimize"
-    (Recompile_optimize.optimize ~opt ~pipeline ~subs);
+    (Project.map_program
+       ~f:(Bap_recompile.optimize_program ~opt ~passes ~select));
   Ok ()
