@@ -914,70 +914,80 @@ let link input =
     table
   in
   let references = ref [] in
-  let sites =
-    List.filter_map input.relocations ~f:(fun rel ->
-        match
-          ( Hashtbl.find section_table rel.section,
-            Hashtbl.find section_addrs rel.section )
-        with
-        | Some sec, Some base -> (
-            let sym =
-              Map.find input.symbols rel.symbol
-              |> Option.value ~default:null_symbol
+  (* the site of the relocation, which is made anew for each pass over
+     the relocations, so that only one is live, as a file may have
+     millions of them, e.g., a kernel module; the first pass [report]s
+     the relocations, that are not applied, and the external references *)
+  let site_of ~report rel =
+    match
+      ( Hashtbl.find section_table rel.section,
+        Hashtbl.find section_addrs rel.section )
+    with
+    | Some sec, Some base -> (
+        let sym =
+          Map.find input.symbols rel.symbol |> Option.value ~default:null_symbol
+        in
+        let p = base + rel.offset in
+        let off = sec.off + rel.offset in
+        match resolve rel.symbol sym with
+        | _ when rel.offset < 0L || rel.offset >= sec.size ->
+            if report then
+              warn "relocation at %Lx is outside of the section %s" p sec.name;
+            None
+        | None ->
+            if report then
+              warn "unable to resolve the symbol %S referenced at %Lx" sym.name
+                p;
+            None
+        | Some s ->
+            if report && is_external input.machine sym then
+              references := (p, sym.name) :: !references;
+            (* the accessed bytes must lie inside of the section and
+               of the file, otherwise they would clobber the
+               neighboring section or the GOT, which is stored past
+               the end of the file *)
+            let check at n =
+              let at = rel.offset + of_int at in
+              if
+                at < 0L
+                || at + of_int n > sec.size
+                || sec.off + at + of_int n > Memory.length mem
+              then raise (Outside_of_section (p, sec.name))
             in
-            let p = base + rel.offset in
-            let off = sec.off + rel.offset in
-            match resolve rel.symbol sym with
-            | _ when rel.offset < 0L || rel.offset >= sec.size ->
-                warn "relocation at %Lx is outside of the section %s" p sec.name;
-                None
-            | None ->
-                warn "unable to resolve the symbol %S referenced at %Lx"
-                  sym.name p;
-                None
-            | Some s ->
-                if is_external input.machine sym then
-                  references := (p, sym.name) :: !references;
-                (* the accessed bytes must lie inside of the section and
-                   of the file, otherwise they would clobber the
-                   neighboring section or the GOT, which is stored past
-                   the end of the file *)
-                let check at n =
-                  let at = rel.offset + of_int at in
-                  if
-                    at < 0L
-                    || at + of_int n > sec.size
-                    || sec.off + at + of_int n > Memory.length mem
-                  then raise (Outside_of_section (p, sec.name))
-                in
-                let ld little at n =
-                  check at n;
-                  Memory.read mem ~little (off + of_int at) n
-                and st little at n x =
-                  check at n;
-                  Memory.write mem ~little (off + of_int at) n x
-                in
-                Some
-                  {
-                    rel;
-                    sym;
-                    p;
-                    s;
-                    a = (if rel.explicit then rel.addend else 0L);
-                    ld = ld input.little;
-                    st = st input.little;
-                    ldi = ld code_little;
-                    sti = st code_little;
-                  })
-        | _ -> None)
+            let ld little at n =
+              check at n;
+              Memory.read mem ~little (off + of_int at) n
+            and st little at n x =
+              check at n;
+              Memory.write mem ~little (off + of_int at) n x
+            in
+            Some
+              {
+                rel;
+                sym;
+                p;
+                s;
+                a = (if rel.explicit then rel.addend else 0L);
+                ld = ld input.little;
+                st = st input.little;
+                ldi = ld code_little;
+                sti = st code_little;
+              })
+    | _ -> None
+  in
+  let each_site ~report f =
+    List.iter input.relocations ~f:(fun rel ->
+        Option.iter (site_of ~report rel) ~f)
   in
   (match handler input with
-  | None when not (List.is_empty sites) ->
-      warn
-        "relocations of the machine %d are not supported, the code is left \
-         unrelocated"
-        input.machine
-  | None -> ()
+  | None ->
+      let relocated = ref false in
+      each_site ~report:true (fun _ -> relocated := true);
+      if !relocated then
+        warn
+          "relocations of the machine %d are not supported, the code is left \
+           unrelocated"
+          input.machine
   | Some create ->
       let h = create { got; got_base } in
       let guard f x =
@@ -986,14 +996,13 @@ let link input =
           warn "relocation at %Lx accesses data outside of the section %s" p
             name
       in
-      List.iter sites ~f:(guard h.prescan);
+      each_site ~report:true (guard h.prescan);
       let unsupported = Hashtbl.create (module Int) in
-      List.iter sites
-        ~f:
-          (guard (fun site ->
-               match h.apply site with
-               | Done -> ()
-               | Unsupported -> Hashtbl.incr unsupported site.rel.typ));
+      each_site ~report:false
+        (guard (fun site ->
+             match h.apply site with
+             | Done -> ()
+             | Unsupported -> Hashtbl.incr unsupported site.rel.typ));
       guard h.finish ();
       Hashtbl.iteri unsupported ~f:(fun ~key ~data ->
           warn "%d relocations of type %d (machine %d) were not applied" data

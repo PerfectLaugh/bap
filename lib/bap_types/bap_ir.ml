@@ -57,7 +57,14 @@ module Tid = struct
   let set slot tid name = Toplevel.exec (KB.provide slot tid (Some name))
   let set_addr t w = set Theory.Label.addr t (Bap_bitvector.to_bitvec w)
   let set_ivec = set Theory.Label.ivec
-  let get slot tid = Toplevel.eval slot (Knowledge.return tid)
+
+  (* only the property is collected, as [Toplevel.eval] computes all
+     properties of the label, that have promises, e.g., its semantics *)
+  let get slot tid =
+    let result = ref None in
+    Toplevel.exec (KB.collect slot tid >>| fun x -> result := Some x);
+    Option.value_exn !result
+
   let get_name = get Theory.Label.name
 
   (* let get_addr = get Theory.Label.addr addr *)
