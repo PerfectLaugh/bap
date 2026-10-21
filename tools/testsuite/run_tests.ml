@@ -939,8 +939,11 @@ let script_debugger data =
     (* the debugger, which stops the machine no more, after the stepping
      is off, without the breakpoints, doesn't make Unicorn stop at every
      instruction, as it observes only the stops, so the loop runs at the
-     speed of Unicorn, which it didn't in 20 seconds otherwise *)
-  :: case "script/debugger/bap:unicorn-executor/stepping-off" (fun env ->
+     speed of Unicorn, which it didn't in 20 seconds otherwise; as the
+     time measures the speed, the case runs alone, since the other cases,
+     that run in parallel, slow it down, e.g., on Windows *)
+  :: case ~serial:true "script/debugger/bap:unicorn-executor/stepping-off"
+       (fun env ->
       let out =
         bap ~timeout:20. env
           [
