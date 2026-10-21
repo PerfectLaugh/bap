@@ -48,7 +48,7 @@
     (untrust/string ret)))
 
 ;; Rule:
-;; realpath(x,y,n) |- T(x,strlen(x)), T(y,strlen(x))
+;; realpath(x,y,n) |- T(x,strlen(x)), T(y,strlen(y))
 ;;
 ;; Motivation:
 ;; If a program sanitizes a path, then it indicates that the program
@@ -139,7 +139,7 @@
     (untrust/string s2)))
 
 ;; Rule:
-;; r=str?cmp(x,y), r=strcoll(x,y), r=str?casecmp(x,y) |- T(r)
+;; r=strcmp(x,y), r=strcasecmp(x,y), r=strcoll(x,y) |- T(r)
 ;; Motivation:
 ;; The result of string comparison is also controlled by untrusted input.
 (defmethod call-return (name s1 s2 res)
@@ -147,7 +147,7 @@
     (untrust/value res)))
 
 ;; Rule:
-;; r = crypt(x,_) |- T(r), T(x,strlen(x))
+;; crypt(x,_) |- T(x,strlen(x))
 ;; Motivation:
 ;; Crypt is often used for checking the authentication token that comes
 ;; from the untrusted party (otherwise why would we check it)
@@ -156,7 +156,7 @@
     (untrust/region key (strlen key))))
 
 ;; Rule:
-;; r = readlink(p,q,n) |- T(p,strlen(p)), T(q,n), T(r)
+;; readlink(p,q,n) |- T(p,strlen(p)), T(q,n)
 ;; Motivation:
 ;; Readlink reads a contents of a link, that could be arbitrary,
 ;; as well as having arbitrary size
