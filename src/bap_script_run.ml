@@ -40,11 +40,16 @@ let output ~error cmd file =
   command ~error (sprintf "%s > %s" cmd (Filename.quote file));
   In_channel.read_all file
 
+(* the directory is removed as much as possible, as Windows doesn't
+   remove the plugin that bap has loaded, which stays in the temporary
+   directory *)
 let remove_dir dir =
+  let ignore_errors f = try f () with Sys_error _ -> () in
   if Stdlib.Sys.file_exists dir then begin
     Stdlib.Sys.readdir dir
-    |> Array.iter ~f:(fun f -> Stdlib.Sys.remove (Filename.concat dir f));
-    Stdlib.Sys.rmdir dir
+    |> Array.iter ~f:(fun f ->
+        ignore_errors (fun () -> Stdlib.Sys.remove (Filename.concat dir f)));
+    ignore_errors (fun () -> Stdlib.Sys.rmdir dir)
   end
 
 (* the compiled scripts are cached by the digest of their source, their
