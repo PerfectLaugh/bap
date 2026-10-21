@@ -66,8 +66,6 @@ module Tid = struct
     Option.value_exn !result
 
   let get_name = get Theory.Label.name
-
-  (* let get_addr = get Theory.Label.addr addr *)
   let get_ivec = get Theory.Label.ivec
 
   let add_name tid name =

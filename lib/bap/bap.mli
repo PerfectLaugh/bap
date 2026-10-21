@@ -688,7 +688,7 @@ module Std : sig
       (** [nth_token key n] the [n]'th token of key. Should be O(1) *)
 
       val token_hash : token -> int
-      (** [hash_token tok] efficient hash function for the [token] type. If
+      (** [token_hash tok] efficient hash function for the [token] type. If
           nothing efficient came to mind, just use [Hashtbl.hash]. *)
     end
 
@@ -903,7 +903,7 @@ module Std : sig
           Returns [None] if [t] is empty. *)
 
       val min_binding : 'a t -> (key * 'a) option
-      (** [min_bining t] returns the least binding in the tree *)
+      (** [min_binding t] returns the least binding in the tree *)
 
       val max_binding : 'a t -> (key * 'a) option
       (** [max_binding t] returns the greatest binding in the tree *)
@@ -946,12 +946,12 @@ module Std : sig
           [false] are removed. *)
 
       val filter_map : 'a t -> f:('a -> 'b option) -> 'b t
-      (** [filter t ~f] returns a tree where all elements for which [f] returned
-          [None] are removed and all others are mapped. *)
+      (** [filter_map t ~f] returns a tree where all elements for which [f]
+          returned [None] are removed and all others are mapped. *)
 
       val filter_mapi : 'a t -> f:(key -> 'a -> 'b option) -> 'b t
-      (** [filter t ~f] returns a tree where all elements for which [f] returned
-          [None] are removed and all others are mapped. *)
+      (** [filter_mapi t ~f] returns a tree where all elements for which [f]
+          returned [None] are removed and all others are mapped. *)
 
       val remove : 'a t -> key -> 'a t
       (** [remove t k] removes all bindings to the key [k] *)
@@ -1099,7 +1099,7 @@ module Std : sig
       let z = to_int (signed x) (* z = ~-6 *)
       let zero = of_int 0 ~width:8
       let p = x < zero (* p = false *)
-      let q = signed x < zero (* p = true *)
+      let q = signed x < zero (* q = true *)
       ]}
 
       {2:bv_sizes Clarification on size-morphism}
@@ -1279,9 +1279,9 @@ module Std : sig
         [width] are ignored. Parameter [width] defaults to [32]. *)
 
     val of_int64 : ?width:int -> int64 -> t
-    (** [of_int32 ?width n] creates a bitvector of the specified bit-[width]
+    (** [of_int64 ?width n] creates a bitvector of the specified bit-[width]
         with the value equal to [n]. If bits of the [n] that doesn't fit into
-        [width] are ignored. Parameter [width] defaults to [32]. *)
+        [width] are ignored. Parameter [width] defaults to [64]. *)
 
     (** {2 Some predefined constant constructors} *)
 
@@ -1548,7 +1548,7 @@ module Std : sig
     (** [is_zero bv] is true iff all bits are set to zero. *)
 
     val is_one : t -> bool
-    (** [is_ones bv] is true if the least significant bit is equal to one *)
+    (** [is_one bv] is true if the least significant bit is equal to one *)
 
     val bitwidth : t -> int
     (** [bitwidth bv] return a bit-width, i.e., the amount of bits *)
@@ -1640,7 +1640,7 @@ module Std : sig
         [order]. Each byte is represented as a [bitvector] itself. *)
 
     val enum_chars : t -> endian -> char seq
-    (** [enum_bytes x order] returns bytes of [x] in a specified [order], with
+    (** [enum_chars x order] returns bytes of [x] in a specified [order], with
         bytes represented by [char] type *)
 
     val enum_bits : t -> endian -> bool seq
@@ -4377,7 +4377,7 @@ module Std : sig
         of [xs], for which [f i x] is [true]. *)
 
     val iteri : 'a t -> f:(int -> 'a -> unit) -> unit
-    (** [iter xs ~f] applies [f i x] for each [x_i] in [xs] *)
+    (** [iteri xs ~f] applies [f i x] for each [x_i] in [xs] *)
 
     val foldi : 'a t -> init:'b -> f:(int -> 'b -> 'a -> 'b) -> 'b
     (** [foldi xs ~init:s_0 ~f] computes [f n s_n x_n], where
@@ -4740,10 +4740,9 @@ module Std : sig
 
     val view : ?word_size:size -> ?from:addr -> ?words:int -> t -> t Or_error.t
     (** [view word_size ~from ~words mem] returns a new memory that represents
-        the specified region of memory [mem]. [copy] function performs deep
-        copy.
+        the specified region of memory [mem].
 
-        @param addr defaults [min_addr mem]
+        @param from defaults [min_addr mem]
         @param words defaults to the end of the memory region. *)
 
     val view_exn : ?word_size:size -> ?from:addr -> ?words:int -> t -> t
@@ -4886,7 +4885,7 @@ module Std : sig
         exposing memory to c programs. *)
 
     val to_buffer : t -> Bigsubstring.t
-    (** [to_buffers mem] creates a buffer representing the memory [mem]. It is
+    (** [to_buffer mem] creates a buffer representing the memory [mem]. It is
         not specified whether the returned buffer has some sharing with
         underlying implementation. In other words the returned buffer shouldn't
         be modified.
@@ -5002,7 +5001,7 @@ module Std : sig
     (** [next table elt] returns element next to [elt], if any *)
 
     val prev : 'a t -> mem -> (mem * 'a) option
-    (** [next table elt] returns element preceding to [elt], if any *)
+    (** [prev table elt] returns element preceding to [elt], if any *)
 
     val min : 'a t -> (mem * 'a) option
     (** [min tab] return the lowest binding *)
@@ -5158,7 +5157,7 @@ module Std : sig
         memory as an argument. *)
 
     val iteri : ('a t -> f:(mem -> 'a -> unit) -> unit) ranged
-    (** [ieri ~start ~until ~f table] is like {!iter}, but also passes the
+    (** [iteri ~start ~until ~f table] is like {!iter}, but also passes the
         memory as an argument. *)
 
     val map : ('a t -> f:('a -> 'b) -> 'b t) ranged
@@ -6163,7 +6162,7 @@ module Std : sig
         (** [insn_name dis ~insn:n] the [n]th instruction name. *)
 
         val insn_code : t -> insn:int -> int
-        (** [insn_name dis ~insn:n] the [n]th instruction opcode.
+        (** [insn_code dis ~insn:n] the [n]th instruction opcode.
 
             The opcode name is represented as an offset to the [insn_table dis]
             string table in which each element is a null-terminated string. *)
@@ -6172,7 +6171,7 @@ module Std : sig
         (** [insn_offset dis ~insn:n] the offset of [n]th instruction. *)
 
         val insn_asm_size : t -> insn:int -> int
-        (** [insn_offset dis ~insn:n] the [n]th instruction assembly string
+        (** [insn_asm_size dis ~insn:n] the [n]th instruction assembly string
             length. *)
 
         val insn_asm_copy : t -> insn:int -> Bytes.t -> unit
@@ -6208,7 +6207,7 @@ module Std : sig
             Precondition: [insn_op_type dis ~insn:n ~oper:m = Reg] *)
 
         val insn_op_reg_code : t -> insn:int -> oper:int -> int
-        (** [insn_op_reg_name dis ~insn:n ~oper:m] the register code.
+        (** [insn_op_reg_code dis ~insn:n ~oper:m] the register code.
 
             Returns the register code of the operand [m]. The code is a unique
             number identifying the register (could be the same as
@@ -7437,12 +7436,12 @@ module Std : sig
       arch ->
       mem ->
       t Or_error.t
-    (** [disassemble ?roots arch mem] disassemble provided memory region [mem]
-        using best available algorithm and backend for the specified [arch].
-        Roots, if provided, should point to memory regions, that are believed to
-        contain code. At best, this should be a list of function starts. If no
-        roots are provided, then the starting address of the provided memory
-        [mem] will be used as a root.
+    (** [of_mem ?rooter arch mem] disassemble provided memory region [mem] using
+        best available algorithm and backend for the specified [arch]. Roots, if
+        provided, should point to memory regions, that are believed to contain
+        code. At best, this should be a list of function starts. If no roots are
+        provided, then the starting address of the provided memory [mem] will be
+        used as a root.
 
         The returned value will contain all memory reachable from the a given
         set of roots, at our best knowledge. *)
@@ -7453,11 +7452,11 @@ module Std : sig
       ?rooter:rooter ->
       image ->
       t Or_error.t
-    (** [disassemble_image image] disassemble a given image. Will take
-        executable segments of the image and disassemble it, applying
-        [disassemble] function. If no roots are specified, then symbol table
-        will be used as a source of roots. If file doesn't contain one, then
-        entry point will be used. *)
+    (** [of_image image] disassemble a given image. Will take executable
+        segments of the image and disassemble it, applying [disassemble]
+        function. If no roots are specified, then symbol table will be used as a
+        source of roots. If file doesn't contain one, then entry point will be
+        used. *)
 
     val of_file :
       ?backend:string ->
@@ -7466,8 +7465,7 @@ module Std : sig
       ?loader:string ->
       string ->
       t Or_error.t
-    (** [disassemble_file ?roots path] takes a path to a binary and disassembles
-        it *)
+    (** [of_file ?rooter path] takes a path to a binary and disassembles it *)
 
     (** [With_exn.f] is the same as [f] except that it throws an exception
         instead of returning [Error]. *)
@@ -7557,7 +7555,7 @@ module Std : sig
         provided memory region [mem] *)
 
     val intersecting : t -> mem -> fn list
-    (** [intersecting_mem syms mem] returns a list of functions, that resides in
+    (** [intersecting syms mem] returns a list of functions, that resides in
         memory region [mem] *)
 
     val to_sequence : t -> fn seq
@@ -8913,7 +8911,7 @@ module Std : sig
         but inherits all definitions and jumps from the [blk]. *)
 
     val split_bot : t -> t * t
-    (** [split_top blk] returns two blocks, where first block shares the same
+    (** [split_bot blk] returns two blocks, where first block shares the same
         tid as [blk], has all $\Phi$-nodes and definitions from [blk], but has
         only one destination, namely the second block. Second block has new
         tidentity, all jumps from the [blk]. *)
@@ -8945,7 +8943,7 @@ module Std : sig
       ?jmp:(jmp term -> jmp term) ->
       blk term ->
       blk term
-    (** [map_elt ?phi ?def ?jmp blk] applies provided functions to the terms of
+    (** [map_elts ?phi ?def ?jmp blk] applies provided functions to the terms of
         corresponding classes. All functions default to the identity function.
     *)
 
@@ -9257,8 +9255,8 @@ module Std : sig
         (** [list source] is a list of names of source providers *)
 
         val find : string -> t source option
-        (** [create name args] finds a source provider with the given name and
-            creates it *)
+        (** [find name] finds a source provider with the given name and creates
+            it *)
 
         val register : string -> t source -> unit
         (** [register name cons] registers a method that creates a given source
@@ -9941,7 +9939,7 @@ module Std : sig
         together. *)
 
     val empty : Theory.Target.t -> t
-    (** [empty target] creates a for the given [target]. *)
+    (** [empty target] creates an empty project for the given [target]. *)
 
     val arch : t -> arch
     (** [arch project] reveals the architecture of a loaded file
@@ -10217,7 +10215,7 @@ module Std : sig
           @since 2.2.0 *)
 
       val raw_file : ?base:addr -> Theory.Target.t -> string -> t
-      (** [raw_file ?base target ~filename] creates an input from a binary file
+      (** [raw_file ?base target filename] creates an input from a binary file
           that is raw code for the given [target], i.e., without any headers or
           meta information.
 
@@ -10226,14 +10224,14 @@ module Std : sig
           @since 2.2.0 *)
 
       val from_string : ?base:addr -> Theory.Target.t -> string -> t
-      (** [create ?base target code] creates input from the binary [code] for
-          the given [target].
+      (** [from_string ?base target code] creates input from the binary [code]
+          for the given [target].
 
           @since 2.2.0 *)
 
       val from_bigstring : ?base:addr -> Theory.Target.t -> Bigstring.t -> t
-      (** [create ?base target code] creates input from the binary [code] for
-          the given [target].
+      (** [from_bigstring ?base target code] creates input from the binary
+          [code] for the given [target].
 
           @since 2.2.0 *)
 
@@ -10282,11 +10280,11 @@ module Std : sig
           @deprecated use [Input.raw_file] instead. *)
 
       val file : ?loader:string -> filename:string -> t
-      (** [file ?target ?loader ~filename] input data from a file, using the
-          specified loader. If [loader] is not specified, then some existing
-          loader will be used. If it is specified, then it is first looked up in
-          the [available_loaders] and if it is not found, then it will be looked
-          up in the {!Image.available_backends}.
+      (** [file ?loader ~filename] input data from a file, using the specified
+          loader. If [loader] is not specified, then some existing loader will
+          be used. If it is specified, then it is first looked up in the
+          [available_loaders] and if it is not found, then it will be looked up
+          in the {!Image.available_backends}.
 
           @deprecated use [Input.load filename] *)
 
@@ -10369,17 +10367,12 @@ module Std : sig
     module Pass : sig
       type t = pass
 
-      (** An error that can occur when loading or running pass.
-          - [Not_loaded name] pass with a given [name] wasn't loaded for some
-            reason. This is a very unlikely error, indicating either a logic
-            error in the plugin system implementation or something very weird,
-            that we didn't expect.
+      (** An error that can occur when running a pass.
+          - [Unsat_dep (pass,name)] the dependency [name] of the [pass] is not
+            registered.
 
-          - [Not_loaded name] when we tried to load plugin with a given [name]
-            we failed to find it in our search paths.
-
-          - [Runtime_error (name,exn)] when plugin with a given [name] was run
-            it raised an [exn]. *)
+          - [Runtime_error (pass,exn)] when the [pass] was run it raised an
+            [exn]. *)
       type error = Unsat_dep of pass * string | Runtime_error of pass * exn
       [@@deriving sexp_of]
 
@@ -10390,14 +10383,14 @@ module Std : sig
           their documentation and has [_exn] suffix in their name. *)
 
       val run : t -> project -> (project, error) Result.t
-      (** [run_pass project pass] applies [pass] to a [project].
+      (** [run pass project] applies [pass] to a [project].
 
           If a pass has dependencies, then they will be run before the pass in
           some topological order. *)
 
       val run_exn : t -> project -> project
-      (** [run_pass_exn proj] is the same as {!run}, but raises an exception on
-          error. Useful to provide custom error handling/printing.
+      (** [run_exn pass project] is the same as {!run}, but raises an exception
+          on error. Useful to provide custom error handling/printing.
 
           @raise Failed if failed to load, or if plugin failed at runtime. *)
 
@@ -10729,11 +10722,10 @@ module Std : sig
 
           recognizes the following strings,
           - [""]
-          - [":foo hello"]
-          - [":bar 0x42"]
-          - [":foo hello :bar 0x42"]
-          - [":bar 0x42 :foo hello"]
-          - and so on. *)
+          - [":foo"]
+          - [":bar"]
+          - [":foo :bar"]
+          - [":bar :foo"] *)
 
       val rest : 'a arg -> 'a list arg
       (** [rest x] a zero or more [x] arguments.
@@ -10790,9 +10782,10 @@ module Std : sig
       If run in a standalone mode, then field [name] would be set to
       {!Sys.executable_name} and [argv] to {!Sys.argv}.
 
-      Note: this module uses the [Event.Self()] module and extends it with
+      Note: this module uses the [Event.Log.Create()] module and extends it with
       several more fields, such as [name], [version], [doc], and [argv]. It is
-      recommended to use [Event.Self()] aka [Bap_main_event.Self()] instead. *)
+      recommended to use [Event.Log.Create()] aka [Bap_main_event.Log.Create()]
+      instead. *)
   module Self () : sig
     val name : string
     (** [name of a plugin] *)
@@ -10804,8 +10797,8 @@ module Std : sig
     (** A short, one-line description *)
 
     val argv : string array
-    (** [args name] returns an array of arguments designated for a plugin with a
-        given [name].
+    (** [argv] is an array of arguments designated for the plugin with the given
+        [name].
 
         The arguments will be extracted from [Sys.argv] array by removing all
         arguments that doesn't start with [--name-]. Then, from all command

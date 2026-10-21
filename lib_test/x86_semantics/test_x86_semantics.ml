@@ -162,7 +162,7 @@ let%expect_test "xchgb %cl, 0x12(%rdi)" =
     }
     |}]
 
-(* #                    Testing packssdw *)
+(* Testing packssdw *)
 
 let%expect_test "packssdw %xmm9, %xmm8" =
   show "66 45 0f 6b c1";

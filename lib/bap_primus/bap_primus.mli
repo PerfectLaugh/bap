@@ -1541,13 +1541,13 @@ module Std : sig
           debugger, observe {!stop_reached} instead. *)
 
       val stop_reached : addr observation
-      (** [stop_reached x] happens after {!pc_change}, when the code at [x] is
-          a stop, or at every address, while the stepping is on, see {!Stops}.
+      (** [stop_reached x] happens after {!pc_change}, when the code at [x] is a
+          stop, or at every address, while the stepping is on, see {!Stops}.
 
           @since 2.6.0 *)
 
-      (** The addresses at which the machines stop, e.g., for a debugger,
-          which observes them with {!stop_reached}.
+      (** The addresses at which the machines stop, e.g., for a debugger, which
+          observes them with {!stop_reached}.
 
           The interpreter posts {!stop_reached} after {!pc_change}, when the
           program counter is the address of a stop, or at every address, while
@@ -2678,16 +2678,7 @@ module Std : sig
       end
     end
 
-    (** The instructions, that the program has at run time.
-
-        Disassembles and lifts the instructions on demand, from the bytes, that
-        the machine has in its memory, e.g., of the code, that the program
-        writes or changes, or of a bare project, which has no disassembly, so
-        that the interpreter runs them, see {!Interpreter.Make.step}.
-
-        @since 2.6.0 *)
-    (** The states of the components, that the checkpoints of the machines
-        keep.
+    (** The states of the components, that the checkpoints of the machines keep.
 
         An executor, that saves the state of a machine to a file, from which
         another run of bap continues it, e.g., the checkpoints of the Unicorn
@@ -2721,6 +2712,14 @@ module Std : sig
       (** the full names of the registered extensions *)
     end
 
+    (** The instructions, that the program has at run time.
+
+        Disassembles and lifts the instructions on demand, from the bytes, that
+        the machine has in its memory, e.g., of the code, that the program
+        writes or changes, or of a bare project, which has no disassembly, so
+        that the interpreter runs them, see {!Interpreter.Make.step}.
+
+        @since 2.6.0 *)
     module Lift : sig
       val max_size : int
       (** the maximal size of an instruction, in bytes, that is read *)
@@ -4536,7 +4535,7 @@ module Std : sig
         (** [link_primitives prims] provides the primitives [prims] *)
       end
 
-      (* it's a no-op now. *)
+      (* it fails now, as the library no longer requires initialization. *)
       val init :
         ?log:Format.formatter -> ?paths:string list -> string list -> unit
       [@@deprecated "[since 2018-03] use the Machine interface instead"]

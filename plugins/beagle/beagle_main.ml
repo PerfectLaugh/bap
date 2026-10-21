@@ -220,8 +220,6 @@ module Hunter (Machine : Primus.Machine.S) = struct
       Primus.Interpreter.
         [
           loading >>> save_address;
-          (* variable_read    >>> process_variable; *)
-          (* variable_written >>> process_variable; *)
           stored >>> process_memory;
           Primus.Machine.kill >>> gohome;
           Beagle_prey.detected >>> print_prey;

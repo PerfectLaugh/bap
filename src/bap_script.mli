@@ -33,8 +33,8 @@ val args : unit -> string list
 
 val init : unit -> unit
 (** [init ()] loads the plugins of BAP, with their defaults, once, and does
-    nothing afterwards. {!project} and {!run} call it, and the script calls it,
-    when it needs the plugins before, e.g., the systems of Primus. *)
+    nothing afterwards. {!project} calls it, and the script calls it, when it
+    needs the plugins before, e.g., the systems of Primus. *)
 
 type lisp = {
   paths : string list;

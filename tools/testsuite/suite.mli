@@ -1,15 +1,15 @@
 (** The functional tests of bap and bap-mc.
 
     A test is a list of cases, each case runs the tools on the files of the
-    testsuite repository and checks their outputs. The cases run in parallel,
-    each in its own directory and with its own cache, state, configuration and
-    log directories, so they don't see each other. *)
+    testsuite and checks their outputs. The cases run in parallel, each in its
+    own directory and with its own cache, state, configuration and log
+    directories, so they don't see each other. *)
 
 type data
-(** the checkout of the testsuite repository *)
+(** the files of the testsuite *)
 
 val data : string -> data
-(** [data dir] is the testsuite checked out in [dir]. *)
+(** [data dir] is the testsuite in [dir]. *)
 
 val path : data -> string -> string
 (** [path data name] is the absolute name of [name], a path relative to the root

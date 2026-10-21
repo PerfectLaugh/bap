@@ -852,10 +852,6 @@ module Make (B : Monad.S) = struct
       'b seq t =
     M.get () >>| fun doc ->
     Sequence.map (Exp.eval names join where doc) ~f:(fun row -> read row f)
-  (* | Error err -> M.lift (B.return (Error err)) *)
-  (* | rows -> *)
-  (*   foldm rows ~init:[] ~f:(fun xs row -> read row f >>| fun x -> x :: xs) >>| *)
-  (*   Sequence.of_list *)
 
   let collect q = foreach q ~f:Fn.id
 

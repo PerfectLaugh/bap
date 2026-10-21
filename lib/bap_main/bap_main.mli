@@ -241,18 +241,16 @@
       | {"-L", [=], string}
       | {"--load-path", [=], string}
       | {"--plugin-path", [=], string}
+      | {"--plugin", [=], string}
       | "--log-dir", [=], string
       | "--cache-dir", [=], string
       | "--config-dir", [=], string
       | "--recipe", recipe-grammar
       | "--version"
       | "--help", [[=], help-format]
-      | "--help-<plugin1>", [[=], help-format]
+      | "--<plugin1>-help", [[=], help-format]
       ...
-      | "--help-<pluginN>", [[=], help-format]
-      | "--<plugin1>"
-      ...
-      | "--<pluginN>"
+      | "--<pluginN>-help", [[=], help-format]
       | "--no-<plugin1>"
       ...
       | "--no-<pluginN>"
@@ -281,17 +279,14 @@
     registered with it will not be loaded. Unless the extension is the command
     itself, which will be still evaluated if selected on the command line.
 
-    Also, for each registered [<plugin>] an option [--<plugin>] will be added to
-    enable the backward compatibility with the old style of specifying passes.
-
-    Another rule which is added on per plugin basis, is the [--help-<plugin>]
+    Another rule which is added on per plugin basis, is the [--<plugin>-help]
     rule which will render a manual page for the given [<plugin>].
 
-    The [-L], [--log-dir], [--cache-dir], and [--config-dir] options are
-    preparsed on the command line and are used to specify the plugins search
-    path (which obviously should be specified before we can load plugins), the
-    logging destination, the cache, and the configuration files, which we would
-    like to know as soon as possible.
+    The [-L], [--plugin], [--log-dir], [--cache-dir], and [--config-dir] options
+    are preparsed on the command line and are used to specify the plugins search
+    path and the plugins to load (which obviously should be specified before we
+    can load plugins), the logging destination, the cache, and the configuration
+    files, which we would like to know as soon as possible.
 
     The [--recipe] option is very special, as it changes the command line
     itself. Every occurrence of the [--recipe] option will parse the provided
@@ -522,16 +517,11 @@ module Extension : sig
       ('f, ctxt -> (unit, error) result) t ->
       'f ->
       unit
-    (** [declare grammar name command] declares a [command].
+    (** [declare name grammar command] declares a [command].
 
         Declares to BAP that a command with the given [name] should be invoked
-        when a user specifies the [name] or [:name] as the first argument in the
-        command line. The [grammar] defines the command line grammar of this
-        command.
-
-        where [<command1>] ... [<commandN>] are the names of declared commands,
-        [grammar1] ... [grammarN] are corresponding grammars for each command,
-        and [G'] is the global
+        when a user specifies the [name] as the first argument in the command
+        line. The [grammar] defines the command line grammar of this command.
 
         When the command is selected and command line arguments are parsed
         successfully, the [command] function is applied to the specified command
@@ -746,10 +736,6 @@ module Extension : sig
 
         @param as_flag enables the "Keys as flags" mode.
 
-        @param docv
-          is the name that will be used to reference values in the documentation
-          string.
-
         @param doc
           if specified then [doc k] will be the documentation string for the
           [--<key k>] parameter. *)
@@ -796,10 +782,6 @@ module Extension : sig
         @param as_flag enables the "Parameters as flags" mode.
 
         @param doc is the documentation string.
-
-        @param docv
-          is the name used to reference the parameter value in its
-          documentation.
 
         @param aliases is a list of additional aliases of the parameter. *)
 
@@ -1110,10 +1092,10 @@ module Extension : sig
         Use {!refine} to select plugins by the features they provide. *)
 
     val info_name : info -> string
-    (** [name info] returns the name of a plugin or command. *)
+    (** [info_name info] returns the name of a plugin or command. *)
 
     val info_doc : info -> string
-    (** [doc info] returns the short documentation. *)
+    (** [info_doc info] returns the short documentation. *)
 
     val digest : ctxt -> string
     (** [digest context] returns the [context] digest.
@@ -1196,7 +1178,7 @@ module Extension : sig
         that are not members of the newly defined data type. *)
 
     val rename : 'a t -> string -> 'a t
-    (** [renam t var] denotes elements of [t] with the new [var]. *)
+    (** [rename t var] denotes elements of [t] with the new [var]. *)
 
     val digest : 'a t -> 'a -> string
     (** [digest t x] is the digest of [x]. *)
@@ -1208,12 +1190,12 @@ module Extension : sig
         [x]. *)
 
     val ( |= ) : 'a t -> ('a -> unit) -> 'a t
-    (** [t |? guard] is [refine t guard] *)
+    (** [t |= guard] is [refine t guard] *)
 
     val ( %: ) : string -> 'a t -> 'a t
     (** [name %: t] is [rename t name].
 
-        Note, operators [(=?)], [|?], and [(%:)] are designed to be used
+        Note, operators [(=?)], [(|=)], and [(%:)] are designed to be used
         together for easy definitions of new types, e.g.,
 
         {[

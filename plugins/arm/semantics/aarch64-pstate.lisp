@@ -35,7 +35,6 @@
 (defun CCMPXr (rn rm  nzcv cnd) (CCMP** rn rm  nzcv cnd))
 
 (defun CFINV () (set CF (lnot CF)))
-;; (defun MSR () )
 
 (defun RMIF (rn imm nzcv-mask)
   (let ((tmp (extract 3 0 (rotate-right rn imm))))

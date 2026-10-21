@@ -337,7 +337,7 @@ let install_handwritten_manpages () =
         (Filename.concat "man1" page))
 
 (* by default, title is the buffer/file name with no extension,
-   that's why we need override it with an empty title *)
+   that's why we override it with our own title *)
 let html_of_org file =
   append_to_file file "#+TITLE: Primus Lisp Documentation\n\n";
   run "emacs" [ file; "--batch"; "--eval"; "(org-html-export-to-html)" ];

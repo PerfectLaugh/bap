@@ -1,5 +1,3 @@
-;; for the invoke-procedure we need a type of the invoked function
-;; so, the function must be present in the static representation of a program.
 (in-package posix)
 (declare (visibility :private))
 

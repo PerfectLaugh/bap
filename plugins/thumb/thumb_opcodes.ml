@@ -1,7 +1,7 @@
 open Core
 open Bap.Std
 
-(* all the `mov` series, registers marked with `e` means extended *)
+(* all the `mov` series *)
 type opmov =
   [ `tADC
   | `tADDi3

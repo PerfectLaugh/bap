@@ -8,7 +8,7 @@ module Std : sig
   type x86_syntax = [ `att | `intel ] [@@deriving sexp]
 
   val llvm_version : string
-  (** [llvm_version] *)
+  (** [llvm_version] the version of LLVM that BAP is built with *)
 
   val init_disassembler : ?x86_syntax:x86_syntax -> unit -> unit Or_error.t
   (** [init_disassembler ()] initializes and registers the LLVM based
@@ -22,7 +22,7 @@ module Std : sig
       @since 2.6.0 *)
 
   val init_loader : ?base:int64 -> ?pdb_path:string -> unit -> unit
-  (** [init-loader ()] initializes and registers the LLVM based loader.
+  (** [init_loader ()] initializes and registers the LLVM based loader.
 
       @param base
         a base address to use. If not specified, then a base address specified

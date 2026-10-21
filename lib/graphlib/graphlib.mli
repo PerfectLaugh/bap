@@ -473,12 +473,12 @@ module Std : sig
 
     val refine :
       'a t -> equiv:('a -> 'a -> bool) -> cmp:('a -> 'a -> int) -> 'a t
-    (** [refine p ~rel ~comp] takes a partition [p], and refines it according to
-        the equivalence relation [r], so that the resulting partition
-        corresponds to the classes of [r], assuming that those classes are finer
-        that the original [p].
+    (** [refine p ~equiv ~cmp] takes a partition [p], and refines it according
+        to the equivalence relation [equiv], so that the resulting partition
+        corresponds to the classes of [equiv], assuming that those classes are
+        finer that the original [p].
 
-        Takes an additional [comp] argument to compare for equality within the
+        Takes an additional [cmp] argument to compare for equality within the
         equivalence classes. *)
 
     val union : 'a t -> 'a -> 'a -> 'a t

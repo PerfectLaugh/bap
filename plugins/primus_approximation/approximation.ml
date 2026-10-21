@@ -162,7 +162,7 @@ module Sin = struct
 end
 
 module Horner : sig
-  (* [run op v coef] computes an approximation of [op] using coef with variable v *)
+  (* [build op v coef] computes an approximation of [op] using coef with variable v *)
   val build : op -> Bap.Std.Var.t -> word array -> exp option
 end = struct
   open CT

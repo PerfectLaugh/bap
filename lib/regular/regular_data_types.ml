@@ -2,8 +2,7 @@ open Core
 
 type ('a, 'b) copy = 'b -> 'a -> int -> unit
 (** [copy buf obj pos] is a method to copy object [obj] into a buffer [buf],
-    starting from a position [pos] and will return the number of bytes written.
-    XXX: we need the amount of bytes beforehand. *)
+    starting from a position [pos]. *)
 
 type ('a, 'b) dump = 'b -> 'a -> unit
 type lexbuf = Lexing.lexbuf

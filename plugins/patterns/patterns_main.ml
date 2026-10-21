@@ -214,7 +214,7 @@ module Parser : sig
   (** [p >>$ x] if [p] succeeds returns [x]. *)
 
   val ( <|> ) : 'a t -> 'a t -> 'a t
-  (** [p <|> q] if [p] *)
+  (** [p <|> q] if [p] fails without consuming input, then [q]. *)
 
   val ( !* ) : 'a t -> 'a list t
   (** [!*p] reconizes zero or more [p],

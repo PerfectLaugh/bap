@@ -74,7 +74,7 @@ let get_int64 ~byte_order ~buf =
   unpack_signed_64 ~byte_order ~buf:(of_string buf)
 
 (** [make_reader inj endian size] will read a word of [size], with byte order
-    specified with [ending] and then it will try to inject it into ['a] type
+    specified with [endian] and then it will try to inject it into ['a] type
     using [inj] function. *)
 let make_reader (inj : 'a inj) endian size : 'a reader =
   let byte_order = of_endian endian in
@@ -108,7 +108,7 @@ let form_of_int = function
   | 0x0b -> return @@ Form.const One
   | 0x0c -> return @@ Form.const One
   | 0x0d -> return @@ Form.const Leb128 (* fixme: signed!     *)
-  | 0x0e -> return @@ Form.strp (* not supported, yet *)
+  | 0x0e -> return @@ Form.strp
   | 0x0f -> return @@ Form.const Leb128
   | 0x10 -> return @@ Form.offset
   | 0x11 -> return @@ Form.ref One

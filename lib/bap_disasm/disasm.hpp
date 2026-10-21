@@ -47,7 +47,7 @@ struct disassembler_interface {
     // each name is a null-terminated string.
     virtual table insn_table() const = 0;
 
-    // table, containing all instruction names
+    // table, containing all register names
     // each name is a null-terminated string.
     virtual table reg_table() const = 0;
 
@@ -60,7 +60,7 @@ struct disassembler_interface {
     // true if insn satisifes predicate \a p.
     virtual bool satisfies(bap_disasm_insn_p_type p) const = 0;
 
-    // returns a set of predicates supported by this disassmbler.
+    // true if the predicate \a p is supported by this disassmbler.
     virtual bool supports(bap_disasm_insn_p_type p) const = 0;
 };
 

@@ -90,7 +90,7 @@ let has_intersections tab (x : mem) : bool =
           | Some (n, _) -> intersects x n))
 
 (** [left_bound t x ] returns a key to a largest interval in [t] that has
-    intersections with [].
+    intersections with [x].
 
     since we can't get the matching key (only lesser or greater ones) we will
     return key [x] itself on a perfect match case. That means, that this

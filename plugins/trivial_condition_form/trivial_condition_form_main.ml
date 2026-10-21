@@ -12,7 +12,7 @@ module TCF = struct
   let blk_without_jmps = Term.filter jmp_t ~f:(fun _ -> false)
   let new_var () = Var.create ~is_virtual:true ~fresh:true "c" bool_t
 
-  (* Pre: number of jumps is greater than 1
+  (* Pre: number of jumps is greater than 0
      post: number of jumps is the same, each jump is in TCF.*)
   let blk blk =
     Term.enum jmp_t blk

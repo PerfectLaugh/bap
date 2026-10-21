@@ -16,9 +16,6 @@ module Make (CT : Theory.Core) = struct
   let half x = CT.low s16 x
   let byte x = CT.low s8 x
   let var = CT.var
-
-  (**************************************************************)
-
   let ldri rd r i = rd <-? load s32 (var r + const i)
   let ldrr rd rn rm = rd <-? load s32 (var rn + var rm)
   let ldrbi rd rn i = rd <-? unsigned @@ load s8 (var rn + const i)

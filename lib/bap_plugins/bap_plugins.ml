@@ -100,6 +100,13 @@ module Plugin = struct
      loaded, so there the unit is extracted into a file named after the
      digest of the bundle, which the next loads reuse, e.g., by another
      bap, which may have it loaded. *)
+  let extracted_unit plugin name suffix =
+    if not Sys.win32 then Filename.temp_file name suffix
+    else
+      let dir = Filename.concat (Filename.get_temp_dir_name ()) "bap-plugins" in
+      (try Sys.mkdir dir 0o700 with Sys_error _ -> ());
+      let digest = Stdlib.Digest.(to_hex (file (path plugin))) in
+      Filename.concat dir (sprintf "%s-%s%s" name digest suffix)
 
   (** [load_entry plugin name] loads a compilation unit with the specified
       [name] required by [plugin]. The compilation unit should not be already
@@ -109,7 +116,7 @@ module Plugin = struct
       the bundle) returns an error, otherwise returns unit.
 
       The loaded unit is recorded in the internal registry of units, linked into
-      the host program (unless the `don't_register` option is set to [true]).
+      the host program.
 
       We track compilation units by their names, where the name consists of the
       base name of library with the extension chopped. This is a slightly better
@@ -120,14 +127,6 @@ module Plugin = struct
       same compilation unit twice, as if that happens a memory of a unit is
       corrupted (the global roots are overwritten). This is a known bug/issue in
       the OCaml runtime that we need to workaround. *)
-  let extracted_unit plugin name suffix =
-    if not Sys.win32 then Filename.temp_file name suffix
-    else
-      let dir = Filename.concat (Filename.get_temp_dir_name ()) "bap-plugins" in
-      (try Sys.mkdir dir 0o700 with Sys_error _ -> ());
-      let digest = Stdlib.Digest.(to_hex (file (path plugin))) in
-      Filename.concat dir (sprintf "%s-%s%s" name digest suffix)
-
   let load_entry ?(main = false) plugin name =
     let suffix = if Dynlink.is_native then ".cmxs" else ".cma" in
     let name = Filename.basename name in

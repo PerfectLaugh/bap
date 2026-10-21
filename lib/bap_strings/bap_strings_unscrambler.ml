@@ -103,21 +103,3 @@ module Make (Alpha : Alphabet) = struct
   let of_file name = add_from_file empty name
   let of_files files = List.fold files ~init:empty ~f:add_from_file
 end
-
-(* module Test = struct *)
-(*   module Dict = Make(Ascii.Printable) *)
-(*   let run () = *)
-(*     let dict = *)
-(*       In_channel.(with_file Sys.argv.(1) *)
-(*                     ~f:(fold_lines ~init:Dict.empty ~f:Dict.add_word)) in *)
-(*     printf "Dictionary is %d MB big\n" (Dict.bin_size_t dict / 1024 / 1024); *)
-(*     let prompt () = *)
-(*       printf "Enter characters and hit enter (or Ctrl-D to stop): %!" in *)
-(*     prompt (); *)
-(*     In_channel.iter_lines stdin ~f:(fun set -> *)
-(*         Dict.build dict set |> Sequence.iter ~f:print_endline; *)
-(*         prompt ()) *)
-
-(* end *)
-
-(* let () = Test.run () *)

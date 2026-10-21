@@ -12,6 +12,6 @@ val run :
   read:(int -> char option) ->
   int ->
   (int * string) Sequence.t
-(** [scan ~is_stop ~read off] applies [next ~is_stop ~read] for all offsets that
+(** [run ~is_stop ~read off] applies [next ~is_stop ~read] for all offsets that
     are bigger than [off] until [read off] is not [None]. Returns a sequence of
     non-empty strings, paired with their corresponding offsets in data. *)

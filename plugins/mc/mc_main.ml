@@ -254,8 +254,8 @@ let bad_insn addr state start =
 let escape_0x = String.substr_replace_all ~pattern:"0x" ~with_:"\\x"
 let prepend_slash_x x = "\\x" ^ x
 
-(** [to_binary ?escape s] make a binary string from ascii representation, (e.g.,
-    "\x01\x02..."). Apply optional escape function for each byte *)
+(** [to_binary ?map s] make a binary string from ascii representation, (e.g.,
+    "\x01\x02..."). Apply optional map function for each byte *)
 let to_binary ?(map = Fn.id) s =
   let seps = [ ' '; ','; ';' ] in
   let separated = List.exists seps ~f:(String.mem s) in

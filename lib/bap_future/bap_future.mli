@@ -436,7 +436,7 @@ module Std : sig
         from [es] are ignored. *)
 
     val of_sequence : 'a Sequence.t -> 'a t * unit signal * unit future
-    (** [of_seq xs] returns a stream [ss], a signal [s] and a future [es].
+    (** [of_sequence xs] returns a stream [ss], a signal [s] and a future [es].
         Stream will produce consequently elements of [xs] every time the signal
         [s] is sent. Once all elements are produced the future [es] will occur
         signifying the end of the underlying sequence. All consecutive signals

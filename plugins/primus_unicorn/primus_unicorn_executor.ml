@@ -2222,7 +2222,6 @@ module Make (Machine : Primus.Machine.S) = struct
       in
       String.of_char_list (List.rev (bytes 0 []))
 
-  (* the instruction at [addr], decoded from its current bytes *)
   (* the instruction at [addr], decoded from its current bytes, in
      the Thumb mode, if Unicorn runs the Thumb code *)
   let lift ?(thumb = false) e addr =
@@ -2450,8 +2449,8 @@ module Make (Machine : Primus.Machine.S) = struct
               pull e >>= fun () -> fail "an invalid instruction at %Lx" pc
           | None, Some msg -> pull e >>= fun () -> fail "%s at %Lx" msg pc)
 
-  (* the stop, at which the observers of the program counter, e.g., a
-     debugger, see the state of the machine, and may change it, after
+  (* the stop, at which the observers of the stops, e.g., a debugger,
+     see the state of the machine, and may change it, after
      which Unicorn continues from the address *)
   and stopped e addr =
     let* () = pull e in
@@ -2465,8 +2464,6 @@ module Make (Machine : Primus.Machine.S) = struct
     | Arm when Hash_set.mem e.session.thumb addr -> Int64.(pc lor 1L)
     | _ -> pc
 
-  (* the run continues from the checkpoint, and ends when it returns,
-     see [Checkpoint] *)
   (* the states of the components, that extend the checkpoint, see
      [Primus.Checkpoint] *)
   let restore_extensions (cp : Checkpoint.t) =
@@ -2496,6 +2493,8 @@ module Make (Machine : Primus.Machine.S) = struct
               stub;
             Machine.return ())
 
+  (* the run continues from the checkpoint, and ends when it returns,
+     see [Checkpoint] *)
   let resume (cp : Checkpoint.t) =
     let* () = Machine.Local.put restored true in
     let* () = Memory.restore cp.memory in

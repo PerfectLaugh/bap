@@ -1,5 +1,5 @@
-; run with dune exec -- ./benchmarks/run_benchmarks.exe [NAME...], after
-; checking out the testsuite, see README.md
+; run with dune exec -- ./benchmarks/run_benchmarks.exe [NAME...], on the
+; binaries of the testsuite, see README.md
 
 (executable
  (name run_benchmarks)

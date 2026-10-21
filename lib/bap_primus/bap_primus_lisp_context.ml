@@ -105,17 +105,7 @@ let add cs cs' =
 
 let pp ppf ctxt = Sexp.pp_hum ppf (sexp_of ctxt)
 
-(* OLD: [C <= C'] iff for each class c in C, there is a class c' in C'
-   such that c >= c', where c >= c' is a superset operation.
-
-   This implies that the set of classes in C is a subset of the set of
-   classes in C', since all missing classes can be introduced as
-   classes with an empty feature sets. Intuitively, that denotes that
-   a definition implicitly states that it is applicable to all
-   instances of a missing class.
-*)
-
-(* NEW: X <= Y if X is less-specific than Y, i.e., if for each
+(* X <= Y if X is less-specific than Y, i.e., if for each
    class x in X we have a class y in Y so that F(x) is a subset
    of F(y), where F(.) is the set of features.
 

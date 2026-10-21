@@ -611,9 +611,9 @@ module Make (Machine : Machine) = struct
     in
     { s with values }
 
-  (* calls [f] with the backing of the current memory, if it has one *)
   let set_backing backing = Machine.Global.put Backing.state backing
 
+  (* calls [f] with the backing of the current memory, if it has one *)
   let backing f =
     Machine.Global.get Backing.state >>= function
     | None -> Machine.return ()

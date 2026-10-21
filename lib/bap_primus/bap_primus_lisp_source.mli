@@ -92,7 +92,7 @@ val pp_underline : ?context:int -> t -> Format.formatter -> Loc.t -> unit
     line is underlined, however all lines are prefixed.*)
 
 val pp : t -> Format.formatter -> Loc.t -> unit
-(** [pp ?context src] creates a source code printer.
+(** [pp src] creates a source code printer.
 
     [let pp_loc = pp src] creates a function that takes a location and prints
     the corresponding original text that is designated by the location. *)

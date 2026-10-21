@@ -53,7 +53,6 @@ module Std : sig
         @since 2.6.0 *)
 
     val with_context : t -> f:(unit -> 'a) -> 'a
-    (** [] *)
 
     val load : ?argv:string array -> t -> unit Or_error.t
     (** [load plugin] load all unsatisfied dependencies of a [plugin], and then
@@ -136,7 +135,7 @@ module Std : sig
           order):
           - the list of paths specified by the BAP_PLUGIN_PATH environment
             variable;
-          - the [Plugins.directory] constant.
+          - the [Plugins.path] constant.
 
         Note, any non-files or non-directories are silently excluded from the
         list. *)

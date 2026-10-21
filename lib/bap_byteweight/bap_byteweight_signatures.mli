@@ -38,7 +38,8 @@ val lookup :
     exist then it is skipped. If it exists but unreadable an error is returned.
 
     Unless [defaults] is [false] (it is [true] by default), the paths list is
-    appended by [[default_path; system_path]], in that specific order.
+    appended by [default_path], the signatures installed with BAP, and
+    [system_path], in that specific order.
 
     If [compiler] is specified, then only entries that list matching compiler
     will be selected.
@@ -93,7 +94,7 @@ val load :
   ?comp:string -> ?path:string -> mode:string -> arch -> (bytes, error) Result.t
 [@@deprecated "since 2022-02 use [update]"]
 (** [load ?comp ?path ~mode arch] finds a signature for the specified
-    [arch-comp-path] triple.
+    [arch-comp-mode] triple.
 
     If [path] is not set, the the signatures are looked up first in
     [default_path] and, if not found, in [system_path].

@@ -396,8 +396,6 @@ let plugins _ =
           plugins);
   ]
 
-(* the recipes, the Primus Lisp files, and the Primus systems are used from
-   their files, without installing them *)
 (* the code after the jumps that never fall through, e.g., the junk
    after the traps, the calls to noreturn functions, and the jumps over
    the junk that overlaps their destinations, isn't disassembled *)
@@ -452,6 +450,8 @@ let branches data =
           "call @__stack_chk_fail with noreturn");
   ]
 
+(* the recipes, the Primus Lisp files, and the Primus systems are used from
+   their files, without installing them *)
 let uninstalled data =
   let echo = path data (echo "x86_64-linux-gnu") in
   [

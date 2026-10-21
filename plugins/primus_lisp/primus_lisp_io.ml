@@ -370,10 +370,9 @@ let init redirections =
         [
           set "posix:*standard-input*" 0;
           set "posix:*standard-output*" 1;
+          (* the name of Common Lisp and the conventional one *)
           set "posix:*error-output*" 2;
-          (* CL name *)
           set "posix:*standard-error*" 2;
-          (* conventional name *)
         ]
 
     let setup_redirections = Machine.Local.put state (init redirections)

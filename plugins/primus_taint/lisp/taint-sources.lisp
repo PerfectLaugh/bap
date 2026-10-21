@@ -120,7 +120,7 @@
     (untrust/value res)))
 
 ;; Rule:
-;; x = fgetc(_), x = getc(_) |- T(c)
+;; x = fgetc(_), x = getc(_) |- T(x)
 ;; Motivation:
 ;; User input
 (defmethod call-return (name _ ret)

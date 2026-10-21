@@ -368,7 +368,7 @@ module Query : sig
       a selection, and [id.[1]] will be bound to the second one.*)
   module String : sig
     val get : _ field -> int -> exp
-    (** [filed.(n)] creates a field variable that ranges over values of [field]
+    (** [field.[n]] creates a field variable that ranges over values of [field]
         that belongs to the n'th attribute of a selection.*)
   end
 
@@ -477,7 +477,7 @@ module Doc : sig
   (** [pp ppf doc] prints a [doc] in the specified formatter [ppf] *)
 
   val pp_yaml : Format.formatter -> doc -> unit
-  (** [pp_yamp ppf doc] prints doc to [ppf] in the YAML format.
+  (** [pp_yaml ppf doc] prints doc to [ppf] in the YAML format.
 
       @since 2.3.0 *)
 

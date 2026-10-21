@@ -47,7 +47,7 @@ bool is_executable(const ELFObjectFile<T> &obj) {
 // The base address is derived as a difference between the
 // virtual address of any loadable code segment and its offset.
 //
-// If there are no loadable segments then the base is 0.
+// If there are no loadable code segments then the base is 0.
 template <typename T>
 uint64_t base_address(const ELFObjectFile<T> &obj) {
     uint64_t base = 0L;

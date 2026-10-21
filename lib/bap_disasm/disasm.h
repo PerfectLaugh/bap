@@ -109,8 +109,8 @@ typedef enum bap_disasm_insn_p {
     may_load
 } bap_disasm_insn_p_type;
 
-/** bap_disasm_create(triple,cpu) creates a disassembler for a given
- * triple and cpu.
+/** bap_disasm_create(backend,triple,cpu,debug_level) creates a
+ * disassembler of the backend for a given triple and cpu.
  * This function is not thread-safe.
  *
  * @pre No preconditions.
@@ -313,7 +313,7 @@ int bap_disasm_insn_satisfies(bap_disasm_type disasm,
 /* Querying operands
  *
  * All functions below share precondition that op is less than
- * ops_size and greater than zero
+ * ops_size and not negative
  */
 
 /* returns the amount of operands for a given instruction  */

@@ -52,7 +52,7 @@ module Systemz (CT : Theory.Core) = struct
   let ( @ ) = CT.append r64
 
   (* finally, we can build the semantics of our LR instruction, we use
-     our parser function [parse_gpr] to parse operands to GPR
+     our parser function [require_gpr] to parse operands to GPR
      registers, and build the denotation as a data effect, which
      assigns the lower part of the destination register a value of the
      lower part of the source register.  This function relies on

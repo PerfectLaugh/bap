@@ -168,8 +168,7 @@ module Std : sig
   module Data : sig
     type ('a, 'b) copy = 'b -> 'a -> int -> unit
     (** [copy buf obj pos] is a method to copy object [obj] into a buffer [buf],
-        starting from a position [pos] and will return the number of bytes
-        written. XXX: we need the amount of bytes beforehand. *)
+        starting from a position [pos]. *)
 
     type ('a, 'b) dump = 'b -> 'a -> unit
     (** [dump out obj] a type of functions that outputs a value [obj] into
@@ -217,7 +216,7 @@ module Std : sig
     (** [bin_writer (module T)] returns a writer in binprot format. *)
 
     val pretty_writer : (module Pretty_printer.S with type t = 'a) -> 'a writer
-    (** [pretty_printer (module T)] creates a writer that uses [T.pp] function
+    (** [pretty_writer (module T)] creates a writer that uses [T.pp] function
         for outputting. *)
 
     (** Data type interface.
@@ -296,7 +295,7 @@ module Std : sig
       (** [of_bigstring ?ver ?fmt buf] deserializes a datum from bigstring *)
 
       val to_bigstring : ?ver:string -> ?fmt:string -> t -> bigstring
-      (** [of_bigstring ?ver ?fmt datum] serializes a datum to a sequence of
+      (** [to_bigstring ?ver ?fmt datum] serializes a datum to a sequence of
           bytes represented as bigstring *)
 
       val blit_to_bigstring :
@@ -314,7 +313,7 @@ module Std : sig
 
         val load_all :
           ?ver:string -> ?fmt:string -> ?rev:bool -> In_channel.t -> t list
-        (** [read_all ?ver ?fmt ?rev channel] reads a sequence of datums stored
+        (** [load_all ?ver ?fmt ?rev channel] reads a sequence of datums stored
             in the storage accessed via [channel] and returns it as a list. If
             [rev] is [true] (defaults to [false]) then a list will be reversed
             (slightly faster). *)
@@ -411,7 +410,7 @@ module Std : sig
           provided [name], version [ver] and optional description [desc] *)
 
       val available_readers : unit -> info list
-      (** [available_reader ()] lists available readers for the data type *)
+      (** [available_readers ()] lists available readers for the data type *)
 
       val default_reader : unit -> info
       (** [default_reader] returns information about default reader *)
@@ -427,7 +426,7 @@ module Std : sig
           restored after [operation] is finished. *)
 
       val available_writers : unit -> info list
-      (** [available_writer ()] lists available writers for the data type *)
+      (** [available_writers ()] lists available writers for the data type *)
 
       val default_writer : unit -> info
       (** [default_writer] returns information about the default writer *)
@@ -443,7 +442,7 @@ module Std : sig
           restored after [operation] is finished. *)
 
       val default_printer : unit -> info option
-      (** [default_writer] optionally returns an information about default
+      (** [default_printer] optionally returns an information about default
           printer *)
 
       val set_default_printer : ?ver:string -> string -> unit

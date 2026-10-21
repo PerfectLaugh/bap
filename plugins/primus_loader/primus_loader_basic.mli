@@ -29,8 +29,8 @@ open Bap_primus.Std
       byte beyond the end of the stack segment. The memory region between
       [(stack_base - stack_size, stack_base)] is the stack segment. Note, that
       the [stack_base] address doesn't belong to it. The memory is initialized
-      to random values, and can be used to store automatic variables and pass
-      arguments.
+      to random values, or to zeros for PE, and can be used to store automatic
+      variables and pass arguments.
 
     After the image is loaded, the SP will point to the number of command line
     arguments, and the arguments will follow it, e.g. if an address size is 4

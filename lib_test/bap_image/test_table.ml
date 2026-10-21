@@ -46,7 +46,6 @@ let get_mem_tag = function
 let mem_low = create_mem ~start_addr:0x10 ~size:0x10 ()
 let mem_high = create_mem ~start_addr:0x30 ~size:0x10 ()
 
-(* Construct a new table tab *)
 let tab =
   let t =
     Table.add empty_table mem_low "lo" >>= fun t ->

@@ -216,7 +216,7 @@ module Stats : sig
   type t = stats
 
   val trials : t -> int
-  (** [trial stats] is the total number of trials.
+  (** [trials stats] is the total number of trials.
 
       This is the total number of occurences of the given substring in all
       tests, it is equal to [h0 stats + h1 stats]. *)

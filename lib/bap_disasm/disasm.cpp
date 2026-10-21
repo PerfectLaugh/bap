@@ -8,7 +8,6 @@
 #include <cassert>
 #include <cstring>
 
-// debug REMOVE
 #include <iostream>
 
 #include "disasm.hpp"

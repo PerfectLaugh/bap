@@ -38,7 +38,7 @@ let stage1 defs name = List.filter defs ~f:(fun def -> has_name def name)
 let context def = Attribute.Set.get Context.t (Def.attributes def)
 let compare_def d1 d2 = Context.(order (context d1) (context d2))
 
-(* all definitions that satisfy the [ctxts] constraint *)
+(* all definitions that satisfy the [global] context constraint *)
 let stage2 (global : Context.t) defs =
   List.filter defs ~f:(fun def -> Context.(context def <= global))
 

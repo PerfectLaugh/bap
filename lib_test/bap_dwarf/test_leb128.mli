@@ -1,3 +1,3 @@
-(** this is a unit test for test_leb128 *)
+(** the unit tests of the LEB128 encoding *)
 
 val suite : OUnit2.test

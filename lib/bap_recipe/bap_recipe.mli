@@ -23,12 +23,12 @@ val load :
     will be removed when {!close} is called on the recipe. *)
 
 val search : string list -> string list
-(** [search paths] is a list of recipe names available in [paths].
+(** [search paths] is a list of recipes available in [paths].
 
     A file or a folder is considered to be a recipe if has the [.recipe]
     extension, therefore this function just returns the list of all files and
-    directories that match this criterion. The names a chopped of the extension
-    and dirnames. *)
+    directories that match this criterion. The returned names keep their
+    dirnames and the extension. *)
 
 val args : t -> string array
 (** [args recipe] is an array of arguments specified in the recipe. *)

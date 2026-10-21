@@ -54,10 +54,10 @@ let sexp_of_t mem =
 
 let endian t = t.endian
 
-(** [create_getters endian addr offset size data] creates a getters class
-    according to the specified parameters. All parameters will be encapsulated
-    inside a closure (cf, [getter] type). [addr] is a virtual address of the
-    byte located at the [offset] from the beginning of the [data] *)
+(** [getter mem] creates the getters of the memory [mem], one for each kind of
+    word. All parameters will be encapsulated inside a closure (cf, [getter]
+    type). [addr] is a virtual address of the byte located at the [off] from the
+    beginning of the [data] *)
 let getter { endian; addr; off; size; data } =
   let length = Bigstring.length data in
   (* this precondition should be checked before entry *)

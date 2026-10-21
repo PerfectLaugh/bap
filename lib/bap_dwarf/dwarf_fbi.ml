@@ -21,7 +21,6 @@ type table = scheme Table.t
 
 let functions = Fn.id
 
-(**  *)
 module Fn = struct
   module T = struct
     type t = { pc_hi : addr option; pc_lo : addr }

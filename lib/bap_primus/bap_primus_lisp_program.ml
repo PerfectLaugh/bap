@@ -630,16 +630,20 @@ module Use = struct
         })
 end
 
-(** Assign fresh indices to trees that were produced my macros or that ** have
-    no indices at all. ** ** We first scan through all meta definitions (i.e.,
-    macros, substs, ** and consts) to obtain a set of indices that we shall
-    rewrite, and ** then perform rewriting for all program definitions (defs,
-    mets, ** and pars) ** ** The newly generated Ids are derived (i.e.,
-    associated) with their ** base ids, so that if needed their origin can be
-    always ** established. (except if their origin was the null identifier). **
-    ** Motivation: since we identify an ast by its identifier, we want ** the
-    trees produced by the term rewriting to have different ** identifiers.
-    Otherwise, they could be unified, for example in the ** Type checker. **)
+(** Assign fresh indices to trees that were produced by macros or that have no
+    indices at all.
+
+    We first scan through all meta definitions (i.e., macros, substs, and
+    consts) to obtain a set of indices that we shall rewrite, and then perform
+    rewriting for all program definitions (defs, mets, and pars).
+
+    The newly generated Ids are derived (i.e., associated) with their base ids,
+    so that if needed their origin can be always established (except if their
+    origin was the null identifier).
+
+    Motivation: since we identify an ast by its identifier, we want the trees
+    produced by the term rewriting to have different identifiers. Otherwise,
+    they could be unified, for example in the Type checker. *)
 module Reindex : sig
   val program : program -> program
 end = struct
@@ -892,14 +896,13 @@ module Typing = struct
     val widen : Id.t -> rule
 
     val unify : Id.t -> Id.t -> rule
-    (** [meet x y] types of [x] and [y] shall have the same type, which is the
+    (** [unify x y] types of [x] and [y] shall have the same type, which is the
         greatest lower bound of types [x] and [y]. *)
 
     val unify_all : Id.t -> Id.t list -> rule
-    (** [meets x xs] meets all types in [x::xs] *)
+    (** [unify_all x xs] unifies all types in [x::xs] *)
 
     val merge : t -> t -> t
-    (** [merge xs ys] *)
 
     val partition : t -> group list
     (** [partition g] returns a partition of the set of expressions.

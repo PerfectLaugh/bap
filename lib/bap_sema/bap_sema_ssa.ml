@@ -171,7 +171,6 @@ let rename t =
 let has_phi_for_var blk x =
   Term.enum phi_t blk |> Seq.exists ~f:(fun phi -> Var.(Ir_phi.lhs phi = x))
 
-(** [insert_phi_node ins blk x] *)
 let insert_phi_node ins blk x =
   if has_phi_for_var blk x then !!blk
   else

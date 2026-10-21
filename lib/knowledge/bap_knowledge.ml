@@ -3188,12 +3188,6 @@ module Knowledge = struct
         ~f:(fun _ { package; name } names ->
           Set.add (Set.add names package) name)
 
-    (* let names = Map.fold
-     *     ~init:(Set.empty (module String))
-     *     ~f:(fun ~key:_ ~data:{Env.syms} names ->
-     *         Set.union names @@
-     *         names_in_syms syms) *)
-
     let serialize_record record =
       let fields =
         Dict.foreach record ~init:[]
