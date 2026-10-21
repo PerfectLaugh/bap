@@ -138,6 +138,22 @@ val patch : t -> int64 -> string -> unit
     Raises [Invalid_argument] as {!read} does, or if the program is not paused,
     e.g., in a hook. *)
 
+val bir : ?thumb:bool -> t -> int64 -> (int * blk term list) option
+(** [bir emu addr] is the size and the BIR of the instruction at [addr], lifted
+    on demand from the bytes, that the program has there now, e.g., after
+    {!patch}, as Primus lifts it, when it interprets the instruction, e.g., of
+    the tainted or the symbolic values, or [None], if the bytes aren't an
+    instruction. The instruction is in the Thumb state of ARM, if [thumb], by
+    default, if the lower bit of [addr] is set, as in the program counter.
+
+    The jumps to the addresses outside of the instruction are the indirect jumps
+    to the constant addresses, and the instruction, that falls through, has no
+    jump to the next one. The instructions are cached by their addresses and
+    bytes, see [Primus.Lift], in the knowledge of the emulator.
+
+    Raises [Invalid_argument], if [addr] is not mapped, or if the program is not
+    paused, e.g., in a hook. *)
+
 val primus : t -> Bap_primus.Std.Primus.Machine.component -> unit
 (** [primus emu component] runs the [init] of the [component] in the Primus
     machine of the program, which is paused, or ended, so that the script uses

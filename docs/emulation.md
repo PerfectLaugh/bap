@@ -179,6 +179,7 @@ let () =
 | `registers`, `reg`, `set_reg` | the registers of the target, by name, e.g., `RAX` |
 | `read emu addr n`, `write emu addr data` | the bytes of the memory |
 | `patch emu addr data` | change the code, so that the change stays |
+| `bir emu addr` | the size and the BIR of the instruction at the address, lifted on demand from its current bytes; Thumb on ARM by the lower bit of the address |
 | `symbols`, `add_symbol` | the names of the functions; name new code, e.g., code that the program unpacked |
 | `unstub emu name` | run the program's own code of a function, instead of its Lisp stub |
 
@@ -187,6 +188,14 @@ let () =
 ```ocaml
 (* mov $0xa, %edi, which prints the newline, prints + instead *)
 Emu.patch emu 0x400727L "\xbf\x2b"
+```
+
+The program has no disassembled BIR in a bare project, so `bir` lifts the instruction, as Primus does when it interprets it. The patched code is lifted from its new bytes:
+
+```ocaml
+match Emu.bir emu 0x400727L with
+| Some (size, blks) -> List.iter blks ~f:(fun b -> print_endline (Blk.to_string b))
+| None -> print_endline "not an instruction"
 ```
 
 ### Hooks

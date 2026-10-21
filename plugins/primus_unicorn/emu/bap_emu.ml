@@ -355,6 +355,46 @@ let primus t component =
   | _ ->
       invalid_arg "Bap_emu.primus: the program is not paused, e.g., in a hook"
 
+(* the bytes are read before the instruction is lifted in the machine,
+   as the reading may copy the pages to Unicorn, and the instruction may
+   end on an unmapped page *)
+let bir ?thumb t addr =
+  let e = engine t in
+  let thumb =
+    match (e.arch, thumb) with
+    | Arm, Some thumb -> thumb
+    | Arm, None -> Int64.(addr land 1L = 1L)
+    | _ -> false
+  in
+  let addr = match e.arch with Arm -> Int64.(addr land lnot 1L) | _ -> addr in
+  let bytes =
+    List.range ~stride:(-1) Primus.Lift.max_size 0
+    |> List.find_map ~f:(fun n ->
+        try Some (read t addr n) with Invalid_argument _ -> None)
+    |> Option.value_exn ~message:(sprintf "Bap_emu.bir: %Lx is not mapped" addr)
+  in
+  let read a n =
+    let off = Int64.(to_int_exn (a - addr)) in
+    if off < 0 || off >= String.length bytes then ""
+    else String.sub bytes ~pos:off ~len:(min n (String.length bytes - off))
+  in
+  let encoding =
+    match e.arch with Arm -> Primus.Interworking.encoding ~thumb | _ -> None
+  in
+  let result = ref None in
+  primus t
+    (module functor
+              (Machine : Primus.Machine.S)
+              ->
+              struct
+                module Lift = Primus.Lift.Make (Machine)
+                open Machine.Syntax
+
+                let init () =
+                  Lift.insn ?encoding ~read addr >>| fun insn -> result := insn
+              end);
+  !result
+
 let on_code ?first ?last t f =
   installed t (fun e ->
       ignore (Uc.on_code ?first ?last e.uc (fun addr _ -> f t addr)))

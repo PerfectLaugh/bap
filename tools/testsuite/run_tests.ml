@@ -647,6 +647,27 @@ let emu data =
             ("prints the CRC", "1489580789");
             ("exits", "exited 0");
           ]);
+    (* the BIR of an instruction, lifted on demand from the bytes, that
+       the program has now, e.g., after the patch, also of the Thumb code,
+       by the lower bit of its address *)
+    case "emu/bir" (fun env ->
+        let out =
+          bap ~timeout:300. env
+            [
+              "script";
+              input "emu/bir.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              path data "bin/arm-linux-gnueabihf-thumb-crc";
+            ]
+        in
+        sequence env out
+          [
+            ("lifts the entry", "400600: 2 bytes\n");
+            ("lifts the push of main", "40076b: 1 bytes\n.*RSP := RSP - 8");
+            ("lifts the code", "400727: 5 bytes\n.*RDI := 0xA\n");
+            ("lifts the patched code", "400727: 5 bytes\n.*RDI := 0x2B\n");
+            ("lifts the Thumb code", "202dd: 2 bytes\n.*<- LR");
+          ]);
     (* the emulators run side by side, each in its own engine, also of
        another target, with their own registers, memory, names and
        hooks *)
