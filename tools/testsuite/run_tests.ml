@@ -362,8 +362,7 @@ let scripts data =
           bap ~timeout:300. env
             ~env:
               [
-                ( "BAP_READ_SYMBOLS_FROM",
-                  path data "data/x86_64-elf_so.symbols" );
+                ("BAP_READ_SYMBOLS_FROM", path data "data/x86_64-elf_so.symbols");
               ]
             [
               "script";
@@ -398,17 +397,15 @@ module Watch (Machine : Primus.Machine.S) = struct
   module Env = Primus.Env.Make (Machine)
   module Stops = Primus.Interpreter.Stops.Make (Machine)
 
-  let stopped addr =
-    Stops.mem addr >>= fun stop ->
-    if stop then
-      Env.get (Var.create "RAX" (Type.imm 64)) >>| fun x ->
-      Printf.printf "RAX = %s\n%!"
-        (Word.string_of_value (Primus.Value.to_word x))
-    else Machine.return ()
+  let stopped _ =
+    Env.get (Var.create "RAX" (Type.imm 64)) >>| fun x ->
+    Printf.printf "RAX = %s\n%!"
+      (Word.string_of_value (Primus.Value.to_word x))
 
+  (* the stops, but not every address, see [stop_reached] *)
   let init () =
     Stops.add (Addr.of_int64 ~width:64 0x4004c0L) >>= fun () ->
-    Primus.Interpreter.pc_change >>> stopped
+    Primus.Interpreter.stop_reached >>> stopped
 end
 
 let () =
@@ -1787,6 +1784,54 @@ let () =
           ("stops", "at 4004c0 RAX = 9e7dd6e4");
           ("steps", "stepped to 4004c2");
           ("prints the CRC of zero", "4294967295");
+        ])
+    (* the debugger, which stops the machine no more, after the stepping
+     is off, without the breakpoints, doesn't make Unicorn stop at every
+     instruction, as it observes only the stops, so the loop runs at the
+     speed of Unicorn, which it didn't in 20 seconds otherwise *)
+  :: case "script/debugger/bap:unicorn-executor/stepping-off" (fun env ->
+      let out =
+        bap ~timeout:20. env
+          [
+            "script";
+            write env "script.ml"
+              {|#require "bap-primus, bap-frontend.script-debugger"
+
+open Bap_primus.Std
+module Debugger = Bap_script_debugger
+
+let stops = ref 0
+
+module Step_on (Machine : Primus.Machine.S) = struct
+  module Stops = Primus.Interpreter.Stops.Make (Machine)
+
+  let init () = Stops.set_stepping true
+end
+
+module Step_off (Machine : Primus.Machine.S) = struct
+  module Stops = Primus.Interpreter.Stops.Make (Machine)
+
+  let stopped _ =
+    incr stops;
+    if !stops = 3 then Stops.set_stepping false else Machine.return ()
+end
+
+let () =
+  Debugger.on_stop (module Step_off);
+  ignore
+    (Bap_script.run ~system:"bap:unicorn-executor"
+       ~init:[ Debugger.component; (module Step_on) ]
+       (Bap_script.project (List.hd (Bap_script.args ()))));
+  Printf.printf "stopped %d times\n" !stops
+|};
+            path data "bin/x86_64-linux-gnu-crc-loop";
+          ]
+      in
+      check env "exits" (out.status = Exited 0);
+      sequence env out
+        [
+          ("prints the CRC", "1635920155");
+          ("stops while stepping", "stopped 3 times");
         ])
   :: List.map
        (fun system ->

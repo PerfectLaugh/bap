@@ -1533,17 +1533,29 @@ module Std : sig
       (** [clock] occurs every time the machine clock changes its value. *)
 
       val pc_change : addr observation
-      (** [pc_change x] happens every time a code at address [x] is executed. *)
+      (** [pc_change x] happens every time a code at address [x] is executed.
 
-      (** The addresses at which the code is observed by the executors that run
-          it outside of the interpreter, e.g., in an emulator.
+          An executor, that runs the code outside of the interpreter, e.g., an
+          emulator, observes every address only for the observers of
+          [pc_change], so the components, that need only the stops, e.g., a
+          debugger, observe {!stop_reached} instead. *)
 
-          The interpreter posts {!pc_change} for every address, an emulator
-          can't afford it, so it posts {!pc_change}, with {!Make.set_pc}, only
-          at the addresses of the stops, or at every address, while the stepping
-          is on, e.g., for a debugger. The stops are of the system, i.e., of all
-          its machines, but not of the other systems, that run in the same
-          process, e.g., the emulators of a script.
+      val stop_reached : addr observation
+      (** [stop_reached x] happens after {!pc_change}, when the code at [x] is
+          a stop, or at every address, while the stepping is on, see {!Stops}.
+
+          @since 2.6.0 *)
+
+      (** The addresses at which the machines stop, e.g., for a debugger,
+          which observes them with {!stop_reached}.
+
+          The interpreter posts {!stop_reached} after {!pc_change}, when the
+          program counter is the address of a stop, or at every address, while
+          the stepping is on. The executors, that run the code outside of the
+          interpreter, e.g., an emulator, stop at them, and tell the address
+          with {!Make.set_pc}. The stops are of the system, i.e., of all its
+          machines, but not of the other systems, that run in the same process,
+          e.g., the emulators of a script.
 
           @since 2.6.0 *)
       module Stops : sig

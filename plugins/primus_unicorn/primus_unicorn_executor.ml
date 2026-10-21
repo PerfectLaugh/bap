@@ -2119,14 +2119,11 @@ module Make (Machine : Primus.Machine.S) = struct
   (* the events, that the observers of the machine see, see [watch] *)
   let watching e =
     let observed = Machine.Observation.observed in
-    (* the components, that tell the stops, e.g., a debugger, see the
-       program counter only at the stops, see [sync_stops], the others,
-       e.g., the analyses of Lisp, see it at every instruction *)
-    let* pcs =
-      if e.session.stepping || not (Hash_set.is_empty e.session.stop_addrs) then
-        Machine.return false
-      else observed Primus.Interpreter.pc_change
-    in
+    (* the observers of the program counter, e.g., the analyses of
+       Lisp, see it at every instruction, but the observers of the stops,
+       e.g., a debugger, see it only at the stops, see [sync_stops] and
+       [Primus.Interpreter.stop_reached] *)
+    let* pcs = observed Primus.Interpreter.pc_change in
     let* loading = observed Primus.Interpreter.loading in
     let* loaded = observed Primus.Interpreter.loaded in
     let* storing = observed Primus.Interpreter.storing in

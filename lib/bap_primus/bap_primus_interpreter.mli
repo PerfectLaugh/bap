@@ -15,6 +15,7 @@ end
 
 val clock : Time.t observation
 val pc_change : addr observation
+val stop_reached : addr observation
 val halting : unit observation
 val exited : value observation
 val interrupt : int observation

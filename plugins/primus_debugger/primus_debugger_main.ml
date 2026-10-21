@@ -6,8 +6,9 @@
    registers and the memory of the machine, call the Lisp functions, and
    set the breakpoints, until a command continues the machine.
 
-   The interpreter posts [pc_change] at every instruction, and Unicorn
-   at the stops, so the debugger is the same for both. *)
+   The interpreter and Unicorn post [stop_reached] at the stops, so the
+   debugger is the same for both, and Unicorn doesn't stop at the other
+   instructions for it, as it would for the observers of [pc_change]. *)
 
 open Core
 open Bap_main
@@ -305,16 +306,12 @@ module Debugger (Machine : Primus.Machine.S) = struct
   let stopped addr =
     if !busy || !detached then Machine.return ()
     else
-      let* stepping = Stops.stepping in
-      let* stopped = Stops.mem addr in
-      if not (stepping || stopped) then Machine.return ()
-      else
-        let* id = Machine.current () in
-        say "stopped at %s in machine %s" (hex addr)
-          (Format.asprintf "%a" Monads.Std.Monad.State.Multi.Id.pp id);
-        busy := true;
-        let+ () = repl () in
-        busy := false
+      let* id = Machine.current () in
+      say "stopped at %s in machine %s" (hex addr)
+        (Format.asprintf "%a" Monads.Std.Monad.State.Multi.Id.pp id);
+      busy := true;
+      let+ () = repl () in
+      busy := false
 
   let add_breakpoints () =
     let* done_ = Machine.Global.get resolved in
@@ -327,7 +324,7 @@ module Debugger (Machine : Primus.Machine.S) = struct
 
   let init () =
     Machine.sequence
-      [ add_breakpoints (); Primus.Interpreter.pc_change >>> stopped ]
+      [ add_breakpoints (); Primus.Interpreter.stop_reached >>> stopped ]
 end
 
 let () =

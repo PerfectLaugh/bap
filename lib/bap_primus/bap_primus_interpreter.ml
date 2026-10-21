@@ -157,6 +157,13 @@ module Stops = struct
   end
 end
 
+let stop_reached, reached_stop =
+  Observation.provide ~inspect:sexp_of_word "stop-reached"
+    ~desc:
+      "Occurs after the program counter is changed to an address, at which the \
+       machines stop, or to every address, while they are stepping, see \
+       [Stops]."
+
 let halting, will_halt =
   Observation.provide ~inspect:sexp_of_unit "halting"
     ~desc:"Occurs before the halt operation is posted."
@@ -654,13 +661,22 @@ module Make (Machine : Machine) = struct
         Machine.sequence [ assign high hix; assign rest lox ]
     | exp -> failf "not an lvalue: %a" Exp.pps exp ()
 
+  (* the observers of the stops, e.g., a debugger, see only them, so
+     that the executors, that run the code outside of the interpreter,
+     e.g., Unicorn, stop only at them, see [Stops] *)
+  let changed addr =
+    !!pc_changed addr >>= fun () ->
+    Machine.Global.get Stops.state >>= fun { Stops.addrs; stepping; _ } ->
+    if stepping || Set.mem addrs addr then !!reached_stop addr
+    else Machine.return ()
+
   let update_pc t =
     match Term.get_attr t address with
     | None -> Machine.return ()
     | Some addr ->
         Machine.Local.get state >>= fun s ->
         Machine.Local.put state { s with addr } >>= fun () ->
-        if Addr.(s.addr <> addr) then !!pc_changed addr else Machine.return ()
+        if Addr.(s.addr <> addr) then changed addr else Machine.return ()
 
   let enter cls curr t =
     !!pos_entered curr >>= fun () ->
@@ -944,5 +960,5 @@ module Make (Machine : Machine) = struct
 
   let set_pc addr =
     Machine.Local.update state ~f:(fun s -> { s with addr }) >>= fun () ->
-    !!pc_changed addr
+    changed addr
 end

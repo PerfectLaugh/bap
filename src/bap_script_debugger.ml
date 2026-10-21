@@ -52,16 +52,13 @@ module Debugger (Machine : Primus.Machine.S) = struct
         let module Handler = Handler (Machine) in
         Handler.stopped)
 
-  let stopped addr =
-    Stops.stepping >>= fun stepping ->
-    Stops.mem addr >>= fun stopped ->
-    if stepping || stopped then
-      Machine.List.iter stops ~f:(fun stopped -> stopped addr)
-    else Machine.return ()
+  let stopped addr = Machine.List.iter stops ~f:(fun stopped -> stopped addr)
 
+  (* the stops, but not every address, which the executors, e.g.,
+     Unicorn, observe only for the observers of [pc_change] *)
   let init () =
     Machine.sequence
-      [ add_breakpoints (); Primus.Interpreter.pc_change >>> stopped ]
+      [ add_breakpoints (); Primus.Interpreter.stop_reached >>> stopped ]
 end
 
 let () =
