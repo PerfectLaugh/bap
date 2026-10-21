@@ -566,10 +566,25 @@ module Make (Machine : Machine) = struct
 
   let reflect v = Theory.Var.define (Var.sort v) (Var.name v)
 
+  (* the variables of the program, but not the variables of the
+     arguments of its subroutines, which aren't global, as the
+     interpreter assigns them, when it calls the subroutines, and are
+     many, e.g., the prototypes of all functions of a kernel module, so
+     they are not places, but only the locations of the arguments are,
+     and they are linked, see [link_places] *)
   let collect_program_vars prog =
-    object
+    object (self)
       inherit [Var.Set.t] Term.visitor
       method! enter_var v vs = Set.add vs v
+      method! visit_arg arg vs = self#visit_exp (Arg.rhs arg) vs
+    end
+      #run prog Var.Set.empty
+    |> Set.to_sequence
+
+  let collect_argument_vars prog =
+    object
+      inherit [Var.Set.t] Term.visitor
+      method! enter_arg arg vs = Set.add vs (Arg.lhs arg)
     end
       #run prog Var.Set.empty
     |> Set.to_sequence
@@ -600,7 +615,22 @@ module Make (Machine : Machine) = struct
     add_places >>= fun () ->
     init_places >>= fun () ->
     Machine.Local.get state >>= fun { places } ->
-    Map.to_sequence places |> Machine.Seq.iter ~f:(fun (_, v) -> link_global v)
+    (* the variables of the places, and of the arguments of the
+       subroutines, which are not places, see [collect_program_vars],
+       are linked once, as the place of a public definition is in each
+       package that sees it, and only those, that the environment
+       doesn't have yet, e.g., most of them are the variables of the
+       environment, see [add_places] *)
+    Env.all >>= fun defined ->
+    let linked = Var.Hash_set.create () in
+    Seq.iter defined ~f:(Hash_set.add linked);
+    Machine.gets Project.program >>= fun prog ->
+    Seq.append (Seq.of_list (Map.data places)) (collect_argument_vars prog)
+    |> Machine.Seq.iter ~f:(fun v ->
+        if Hash_set.mem linked v then Machine.return ()
+        else (
+          Hash_set.add linked v;
+          link_global v))
 
   let find_sub prog name =
     Term.enum sub_t prog

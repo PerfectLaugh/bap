@@ -20,8 +20,10 @@ module Entries = struct
   let of_list list = { list; set = Set.of_list (module Entry) list }
   let singleton x = of_list [ x ]
 
+  (* the set is searched once, as it doesn't grow, if it has [x] *)
   let add t x =
-    if Set.mem t.set x then t else { list = x :: t.list; set = Set.add t.set x }
+    let set = Set.add t.set x in
+    if Set.length set = Set.length t.set then t else { list = x :: t.list; set }
 
   let compare x y = [%compare: entry list] x.list y.list
 

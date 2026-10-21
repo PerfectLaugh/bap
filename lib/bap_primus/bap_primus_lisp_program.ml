@@ -1472,10 +1472,12 @@ module Typing = struct
             Map.add_multi funcs ~key:name ~data:def))
       ~init:empty_names
 
+  (* the names of the places in the packages are unqualified, see [add],
+     so they are created, as the Lisp machine does, not read *)
   let add_places prog =
     fold prog Items.place
       ~f:(fun ~package place vars ->
-        let name = KB.Name.read ~package (Def.name place) in
+        let name = KB.Name.create ~package (Def.name place) in
         let var = Var.reify @@ Def.Place.location place in
         match Var.typ var with
         | Type.Imm n -> Map.set vars ~key:name ~data:n
