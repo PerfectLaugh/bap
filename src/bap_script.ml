@@ -84,6 +84,28 @@ let symbol_starts target spec =
                 starts
             | Some _ -> Map.set starts ~key:addr ~data:(Some name))
 
+(* the symbols, that the user provided, e.g., with
+   --read-symbols-from, which the read-symbols plugin provides as the
+   facts of the specification of the unit, see
+   plugins/read_symbols/read_symbols_main.ml, which declares the
+   attribute too *)
+let user_symbol () =
+  Ogre.declare ~name:"user-symbol"
+    Ogre.Type.(scheme Image.Scheme.addr $ Image.Scheme.name)
+    (fun addr name -> (addr, name))
+
+let user_symbols target spec =
+  let m = Bitvec.modulus (Theory.Target.code_addr_size target) in
+  match
+    Ogre.eval (Ogre.collect Ogre.Query.(select (from user_symbol))) spec
+  with
+  | Error _ -> Map.empty (module Bitvec_order)
+  | Ok symbols ->
+      Seq.fold symbols
+        ~init:(Map.empty (module Bitvec_order))
+        ~f:(fun symbols (addr, name) ->
+          Map.set symbols ~key:Bitvec.(int64 addr mod m) ~data:(Some name))
+
 (* the starts of the subroutines of the knowledge base, e.g., provided
    with --read-symbols-from or found by the heuristics, with their
    names, which its symbolizers find *)
@@ -110,10 +132,10 @@ let known_starts unit =
 (* the named symbols of the file, as the subroutine terms of the bare
    program, so that the components that need the program work without
    the disassembly, e.g., the Lisp machine, which links the stubs by the
-   names and addresses of their subroutines. The specification of the
-   unit also has the symbols that the plugins provide, e.g., the
-   read-symbols plugin, so that they are the subroutines of the bare
-   program as well. The file, that has no symbols, e.g., the stripped
+   names and addresses of their subroutines, and the symbols, that the
+   user provided, e.g., with --read-symbols-from, whose names are taken
+   over the names of the file, as the knowledge base does, see
+   [user_symbols]. The file, that has no symbols, e.g., the stripped
    one, has the subroutines of the knowledge base instead, as the
    knowledge base finds them in the whole code, e.g., with the patterns
    of the prologues, and names them, e.g., the stubs, from their code,
@@ -127,7 +149,12 @@ let synthesize_program proj =
         (let open KB.Syntax in
          Theory.Unit.for_file file >>= fun unit ->
          KB.collect Image.Spec.slot unit >>= fun spec ->
-         let symbols = symbol_starts (Project.target proj) spec in
+         let symbols =
+           Map.merge_skewed
+             (symbol_starts (Project.target proj) spec)
+             (user_symbols (Project.target proj) spec)
+             ~combine:(fun ~key:_ _ name -> name)
+         in
          if Map.is_empty symbols then known_starts unit
          else
            KB.return

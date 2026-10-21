@@ -151,43 +151,7 @@ let collect path files filter =
   in
   List.fold paths ~init:empty ~f:read_relations |> build_functions
 
-(* the symbols of the file as the facts of the specification of the
-   unit, so that the consumers of the specification, e.g., the bare
-   program of the script, which takes the subroutines of the
-   specification without the agents of the knowledge base, as they are
-   costly on the large files, have them as well *)
-(* the symbols of the file as the facts of the specification of the
-   unit, so that the consumers of the specification, e.g., the bare
-   program of the script, which takes the subroutines of the
-   specification without the agents of the knowledge base, as they are
-   costly on the large files, have them as well; the specification is
-   provided when the unit is created, as the promises of a slot are not
-   consulted, once the slot is provided *)
-let provide_spec files matches =
-  KB.observe Theory.Unit.path @@ fun unit -> function
-  | None -> KB.return ()
-  | Some path -> (
-      let functions = collect path files matches in
-      if Hashtbl.is_empty functions then KB.return ()
-      else
-        let open Ogre.Syntax in
-        let facts =
-          Hashtbl.fold functions ~init:(Ogre.return ())
-            ~f:(fun ~key:addr ~data:name facts ->
-              facts >>= fun () ->
-              let addr = Bitvec.to_int64 addr in
-              Ogre.provide Bap.Std.Image.Scheme.code_start addr >>= fun () ->
-              if is_anonymous name then Ogre.return ()
-              else Ogre.provide Bap.Std.Image.Scheme.named_symbol addr name)
-        in
-        match Ogre.exec facts Ogre.Doc.empty with
-        | Ok doc -> KB.provide Bap.Std.Image.Spec.slot unit doc
-        | Error err ->
-            warning "failed to provide the symbols of %s: %a" path Error.pp err;
-            KB.return ())
-
 let provide_data files matches =
-  provide_spec files matches;
   KB.promise data @@ fun unit ->
   KB.collect Theory.Unit.path unit >>|? fun path ->
   Some (collect path files matches)
@@ -208,6 +172,43 @@ let provide_starts () =
   | None -> Set.empty (module Bitvec_order)
   | Some data -> Set.of_list (module Bitvec_order) (Hashtbl.keys data)
 
+(* The named symbols, which the facts of the specification of the unit
+   tell the consumers, that don't ask the knowledge base for all
+   subroutines, as the agents of the knowledge base are costly on the
+   large files, e.g., the bare program of a script, see
+   src/bap_script.ml, which declares the attribute too. They are not
+   the symbols of the specification, e.g., named-symbol, as those are
+   the symbols of the file, which the symbolizer of the file would
+   confuse with them. The specification is provided when the unit has
+   the path, as the promises of a slot are not consulted, once the slot
+   is provided. *)
+let user_symbol () =
+  Ogre.declare ~name:"user-symbol"
+    Ogre.Type.(scheme Bap.Std.Image.Scheme.addr $ Bap.Std.Image.Scheme.name)
+    (fun addr name -> (addr, name))
+
+let provide_spec () =
+  KB.observe Theory.Unit.path @@ fun unit -> function
+  | None -> KB.return ()
+  | Some path -> (
+      KB.collect data unit >>= fun data ->
+      let symbols =
+        Option.value_map data ~default:[] ~f:Hashtbl.to_alist
+        |> List.filter ~f:(fun (_, name) -> not (is_anonymous name))
+      in
+      if List.is_empty symbols then KB.return ()
+      else
+        let facts =
+          Ogre.sequence
+          @@ List.map symbols ~f:(fun (addr, name) ->
+              Ogre.provide user_symbol (Bitvec.to_int64 addr) name)
+        in
+        match Ogre.exec facts Ogre.Doc.empty with
+        | Ok doc -> KB.provide Bap.Std.Image.Spec.slot unit doc
+        | Error err ->
+            warning "failed to provide the symbols of %s: %a" path Error.pp err;
+            KB.return ())
+
 let provide_names () =
   KB.propose agent Theory.Label.possible_name @@ fun label ->
   get_entry label >>|? fun name -> Option.some_if (not (is_anonymous name)) name
@@ -227,6 +228,7 @@ let () =
   | [] -> Ok ()
   | files ->
       provide_data files (ctxt --> enable_matches);
+      provide_spec ();
       provide_starts ();
       provide_names ();
       Ok ()

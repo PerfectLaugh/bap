@@ -1302,8 +1302,10 @@ The library provides several algorithms:
   (bap-knowledge (= :version))
   (bap-main (= :version))
   (bap-relation (= :version))
+  (bap-std (= :version))
   (bitvec (= :version))
-  core))
+  core
+  (ogre (= :version))))
 
 (package
  (name bap-systemz)

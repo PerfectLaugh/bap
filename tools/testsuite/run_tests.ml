@@ -354,6 +354,37 @@ let scripts data =
         in
         check env "exits" (out.status = Exited 0);
         contains env "runs the program" out "1635920155");
+    (* the symbols of the file, that the user provides, are the
+       subroutines of the bare program too, e.g., of the stubs of the
+       PLT, which have no symbols in the file *)
+    case "script/bare/read-symbols" (fun env ->
+        let out =
+          bap ~timeout:300. env
+            ~env:
+              [
+                ( "BAP_READ_SYMBOLS_FROM",
+                  path data "data/x86_64-elf_so.symbols" );
+              ]
+            [
+              "script";
+              write env "script.ml"
+                {|open Bap.Std
+
+let () =
+  let file = List.hd (Bap_script.args ()) in
+  let prog = Project.program (Bap_script.project ~bare:true file) in
+  Term.enum sub_t prog
+  |> Seq.iter ~f:(fun sub ->
+         match Term.get_attr sub address with
+         | Some addr -> Format.printf "%s %a@." (Sub.name sub) Addr.pp addr
+         | None -> ())
+|};
+              path data "dyn/x86_64-elf_so";
+            ]
+        in
+        check env "exits" (out.status = Exited 0);
+        contains env "names the stub of the PLT" out "bar 0x4A0";
+        contains env "has the symbols of the file" out "foo 0x59A");
     case "script/primus" (fun env ->
         let out =
           script env

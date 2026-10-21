@@ -15,8 +15,10 @@ depends: [
   "bap-knowledge" {= version}
   "bap-main" {= version}
   "bap-relation" {= version}
+  "bap-std" {= version}
   "bitvec" {= version}
   "core"
+  "ogre" {= version}
   "odoc" {with-doc}
 ]
 build: [
