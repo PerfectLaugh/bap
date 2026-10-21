@@ -211,6 +211,14 @@ else()
 endif()
 # the runtime of C++ is linked with the flags of
 # lib/bap_disasm/config/cxx_runtime.ml
-write_flags(link.flags -L${LINK_PREFIX}/lib -lz3)
+if(CMAKE_HOST_WIN32)
+  # the backtraces of Z3 on Windows call dbghelp, which only MSVC links
+  # by itself, with the pragma of src/util/debug.cpp, otherwise flexdll
+  # can't resolve its functions, e.g., SymSetOptions, when the plugin
+  # is loaded
+  write_flags(link.flags -L${LINK_PREFIX}/lib -lz3 -ldbghelp)
+else()
+  write_flags(link.flags -L${LINK_PREFIX}/lib -lz3)
+endif()
 
 file(REMOVE_RECURSE "${WORK}")
