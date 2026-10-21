@@ -233,10 +233,12 @@ module Redirection = struct
              (String.concat ~sep:", " known_channels))
     else `Ok (oldname, newname)
 
+  (* the old name is a channel or a file of the program, and the new one
+     is a file of the host, which may have a drive, e.g., <stdin>:C:\in *)
   let parse str =
-    match String.split str ~on:':' with
-    | [ oldname; newname ] -> make oldname newname
-    | _ -> `Error (sprintf "bad redirection, expected <old>:<new> got %s" str)
+    match String.lsplit2 str ~on:':' with
+    | Some (oldname, newname) -> make oldname newname
+    | None -> `Error (sprintf "bad redirection, expected <old>:<new> got %s" str)
 
   let print ppf (oldname, newname) = Format.fprintf ppf "%s:%s" oldname newname
   let convert = Config.converter parse print ("none", "none")
