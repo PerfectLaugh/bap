@@ -221,6 +221,16 @@ let lift ?encoding proj addr code =
 (* the instructions, that x86 has, are at most 15 bytes long *)
 let max_size = 16
 
+(* the instruction, outside of a machine, in the toplevel knowledge, e.g.,
+   of a script, whose conflicts, e.g., of an invalid instruction, are no
+   instruction *)
+let instruction ?encoding proj addr code =
+  let open KB.Syntax in
+  KB.catch
+    (lift ?encoding proj addr code >>| Option.map ~f:(fun (size, _, _, blks) ->
+         (size, blks)))
+    (fun _ -> KB.return None)
+
 type entry = {
   code : string;
   encoding : Theory.language option;  (** that the caller asked for *)

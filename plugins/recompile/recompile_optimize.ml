@@ -18,12 +18,14 @@ module Opaque (S : sig
   val buf : Buffer.t
   val exits : exits
   val prefix : string
+  val frame : Recompile_frame.t option
 end) =
 struct
   include Emit (struct
     let prog = S.prog
     let sub = S.sub
     let buf = S.buf
+    let frame = S.frame
   end)
 
   (* the opaque call, after which the code continues in [return] *)
@@ -100,6 +102,7 @@ struct
     Set.iter vars ~f:(fun v ->
         line "  %s = alloca %s" (local v) (ty (Option.value_exn (width v))));
     sync_in ();
+    enter_frame ();
     match Term.first blk_t S.sub with
     | None -> unsupported "the sub without blocks"
     | Some first ->
@@ -107,6 +110,7 @@ struct
         Term.enum blk_t S.sub
         |> Seq.iter ~f:(fun blk ->
             line "%s:" (label (Term.tid blk));
+            enter_block (Term.tid blk);
             Term.enum def_t blk |> Seq.iter ~f:def;
             jumps blk)
 end
@@ -114,16 +118,29 @@ end
 (* the function of the sub, and its jumps, that leave it *)
 type func = { sub : sub term; name : string; exits : exits }
 
-let emit_func prog out n sub =
+let emit_func ?target prog out n sub =
   let buf = Buffer.create 4096 in
   let exits = Int.Table.create () in
   let name = sprintf "f%d" n in
+  (* the slots of the frame are promoted, if the address of the frame
+     doesn't escape, otherwise the sub is optimized without them *)
+  let frame =
+    Option.bind target ~f:(fun target ->
+        match Recompile_frame.analyze ~target sub with
+        | Ok frame -> Some frame
+        | Error reason ->
+            bprintf out "; the frame of %s stays in the memory: %s\n"
+              (Sub.name sub)
+              (String.map reason ~f:(function '\n' | '\r' -> ' ' | c -> c));
+            None)
+  in
   let module E = Opaque (struct
     let prog = prog
     let sub = sub
     let buf = buf
     let exits = exits
     let prefix = name
+    let frame = frame
   end) in
   match E.body () with
   | exception Unsupported msg -> Error msg
@@ -697,6 +714,258 @@ let inline_values blocks =
       flush ~f:(fun _ -> true);
       { b with items = List.rev !out; terminator })
 
+(* the dispatchers of the state machines, e.g., of a flattened control
+   flow, whose blocks set the state, from which the dispatcher, e.g., a
+   binary search of the cases of a switch, finds the next block, are
+   threaded, as LLVM doesn't thread the jumps into the headers of the
+   loops, and the dispatcher is the header of the loop of the machine.
+
+   The state is the phi of the header, whose most values, that the
+   predecessors pass, are the constants, or the selects of the constants.
+   The dispatcher is evaluated from the header for each of them, as long
+   as its blocks have no effects, but the definitions of the variables,
+   and their conditions are the constants, until the block, that the
+   state leads to. The predecessor goes to the copy of the header for its
+   edge, which defines the variables, as the dispatcher did, which are
+   the constants, and goes to that block, or, for the select, branches on
+   its condition to the copies of its states, so that the dispatcher
+   isn't reached, and the next optimization removes it. *)
+let dispatchers (blocks : Parse.block list) =
+  let open Parse in
+  let fresh = ref 0 in
+  let index = String.Table.create () in
+  List.iter blocks ~f:(fun b -> Hashtbl.set index ~key:b.label ~data:b);
+  let find = Hashtbl.find index in
+  let constant e =
+    match Exp.fold_consts e with Bil.Int w -> Some w | _ -> None
+  in
+  let substitute env e =
+    Map.fold env ~init:e ~f:(fun ~key ~data e ->
+        if Set.mem (Exp.free_vars e) key then
+          Exp.substitute (Bil.var key) (Bil.int data) e
+        else e)
+  in
+  (* the block, that the terminator goes to, if its condition is known *)
+  let next_of env = function
+    | Br l -> Some l
+    | Cbr (cond, yes, no) ->
+        Option.map
+          (constant (substitute env cond))
+          ~f:(fun w -> if Word.is_one w then yes else no)
+    | Switch (x, _, cases, d) ->
+        Option.map
+          (constant (substitute env x))
+          ~f:(fun w ->
+            match List.find cases ~f:(fun (k, _) -> Word.equal k w) with
+            | Some (_, l) -> l
+            | None -> d)
+    | Unreachable | Return -> None
+  in
+  (* the block, that the state [c] leads to from the [header], and the
+     values of the variables, that the dispatcher defined on the way *)
+  let walk header v c =
+    let pure b =
+      List.for_all b.items ~f:(function Assign _ -> true | _ -> false)
+    in
+    let rec go label pred env defs steps =
+      match find label with
+      | None -> None
+      | Some b when steps > 64 -> Some (b, pred, env, defs)
+      | Some b -> (
+          (* the phis of the block take the values from the predecessor *)
+          let phis =
+            List.map b.phis ~f:(fun (x, ins) ->
+                ( x,
+                  Option.bind
+                    (List.find ins ~f:(fun (_, p) -> String.equal p pred))
+                    ~f:(fun (e, _) -> constant (substitute env e)) ))
+          in
+          if
+            (not (List.for_all phis ~f:(fun (_, x) -> Option.is_some x)))
+            || not (pure b)
+          then Some (b, pred, env, defs)
+          else
+            let env, defs =
+              List.fold phis ~init:(env, defs) ~f:(fun (env, defs) (x, c) ->
+                  let c = Option.value_exn c in
+                  (Map.set env ~key:x ~data:c, (x, c) :: defs))
+            in
+            let env' =
+              List.fold b.items ~init:(Some env) ~f:(fun env item ->
+                  Option.bind env ~f:(fun env ->
+                      match item with
+                      | Assign (x, e) ->
+                          Option.map
+                            (constant (substitute env e))
+                            ~f:(fun c -> Map.set env ~key:x ~data:c)
+                      | _ -> None))
+            in
+            match env' with
+            | None -> Some (b, pred, env, defs)
+            | Some env' -> (
+                let defs' =
+                  List.fold b.items ~init:defs ~f:(fun defs -> function
+                    | Assign (x, _) -> (x, Map.find_exn env' x) :: defs
+                    | _ -> defs)
+                in
+                let next = next_of env' b.terminator in
+                match next with
+                | Some l when String.equal l header.label -> None
+                | Some l -> go l b.label env' defs' (steps + 1)
+                | None -> Some (b, pred, env, defs)))
+    in
+    (* the header's own phis and definitions run, before it branches *)
+    let env = Var.Map.singleton v c in
+    let env =
+      List.fold header.items ~init:(Some env) ~f:(fun env item ->
+          Option.bind env ~f:(fun env ->
+              match item with
+              | Assign (x, e) ->
+                  Option.map
+                    (constant (substitute env e))
+                    ~f:(fun c -> Map.set env ~key:x ~data:c)
+              | _ -> None))
+    in
+    Option.bind env ~f:(fun env ->
+        let start = next_of env header.terminator in
+        Option.bind start ~f:(fun l -> go l header.label env [] 0))
+  in
+  (* the value of the state, that the predecessor passes, as the
+     variable, that the predecessor defined, resolves to *)
+  let incoming pred v header =
+    let defined x =
+      List.fold pred.items ~init:None ~f:(fun last -> function
+        | Assign (y, e) when Var.equal x y -> Some e
+        | _ -> last)
+    in
+    List.find_map header.phis ~f:(fun (x, ins) ->
+        if not (Var.equal x v) then None
+        else
+          Option.map
+            (List.find ins ~f:(fun (_, p) -> String.equal p pred.label))
+            ~f:(fun (e, _) ->
+              match e with
+              | Bil.Var x -> Option.value (defined x) ~default:e
+              | e -> e))
+  in
+  let added = ref [] in
+  let label prefix =
+    incr fresh;
+    sprintf "%s.%s%d" prefix "thread" !fresh
+  in
+  (* the copy of the header for the edge from [pred], whose state is [c],
+     which goes to the block, that the dispatcher leads to *)
+  let thread header v pred_label pred c =
+    match walk header v c with
+    | Some (leaf, last, env, defs)
+      when not (String.equal leaf.label header.label) ->
+        let edge = label header.label in
+        let leaf = Option.value (find leaf.label) ~default:leaf in
+        Hashtbl.set index ~key:leaf.label
+          ~data:
+            {
+              leaf with
+              phis =
+                List.map leaf.phis ~f:(fun (x, ins) ->
+                    match
+                      List.find ins ~f:(fun (_, p) -> String.equal p last)
+                    with
+                    | Some (e, _) -> (x, (substitute env e, edge) :: ins)
+                    | None -> (x, ins));
+            };
+        added :=
+          {
+            label = edge;
+            phis =
+              List.filter_map header.phis ~f:(fun (x, ins) ->
+                  Option.map
+                    (List.find ins ~f:(fun (_, p) -> String.equal p pred.label))
+                    ~f:(fun (e, _) -> (x, [ (e, pred_label) ])));
+            items =
+              header.items
+              @ List.map defs ~f:(fun (x, c) -> Assign (x, Bil.int c));
+            terminator = Br leaf.label;
+          }
+          :: !added;
+        Some edge
+    | _ -> None
+  in
+  List.iter blocks ~f:(fun header ->
+      let header = Option.value (find header.label) ~default:header in
+      (* the state is the phi, whose most values are the constants, or
+         the selects of the constants, that the predecessors pass *)
+      let constant_values v =
+        List.count blocks ~f:(fun pred ->
+            match
+              incoming (Option.value (find pred.label) ~default:pred) v header
+            with
+            | Some (Int _ | Ite (_, Int _, Int _)) -> true
+            | _ -> false)
+      in
+      let state =
+        List.filter_map header.phis ~f:(fun (v, _) ->
+            match Var.typ v with
+            | Imm w when w > 1 -> Some (v, constant_values v)
+            | _ -> None)
+        |> List.max_elt ~compare:(fun (_, x) (_, y) -> Int.compare x y)
+        |> Option.bind ~f:(fun (v, n) -> Option.some_if (n >= 2) v)
+      in
+      Option.iter state ~f:(fun v ->
+          List.iter blocks ~f:(fun pred ->
+              let pred = Option.value (find pred.label) ~default:pred in
+              let goes_to_header l = String.equal l header.label in
+              let redirect target =
+                let retarget l = if goes_to_header l then target else l in
+                Hashtbl.set index ~key:pred.label
+                  ~data:
+                    {
+                      pred with
+                      terminator =
+                        (match pred.terminator with
+                        | Br l -> Br (retarget l)
+                        | Cbr (c, x, y) -> Cbr (c, retarget x, retarget y)
+                        | Switch (x, w, cases, d) ->
+                            Switch
+                              ( x,
+                                w,
+                                List.map cases ~f:(fun (k, l) ->
+                                    (k, retarget l)),
+                                retarget d )
+                        | t -> t);
+                    }
+              in
+              let edges =
+                match pred.terminator with
+                | Br l -> [ l ]
+                | Cbr (_, x, y) -> [ x; y ]
+                | _ -> []
+              in
+              if List.exists edges ~f:goes_to_header then
+                match incoming pred v header with
+                | Some (Int c) ->
+                    Option.iter (thread header v pred.label pred c) ~f:redirect
+                | Some (Ite (cond, Int c1, Int c2)) -> (
+                    (* the select of the state is the branch *)
+                    let split = label header.label in
+                    match
+                      ( thread header v split pred c1,
+                        thread header v split pred c2 )
+                    with
+                    | Some e1, Some e2 ->
+                        added :=
+                          {
+                            label = split;
+                            phis = [];
+                            items = [];
+                            terminator = Cbr (cond, e1, e2);
+                          }
+                          :: !added;
+                        redirect split
+                    | _ -> ())
+                | _ -> ())));
+  List.map blocks ~f:(fun b -> Option.value (find b.label) ~default:b)
+  @ List.rev !added
+
 (* the sub of BIR, that the blocks of LLVM make, with the jumps of [exits] *)
 let raise_sub ~mem sub exits (blocks : Parse.block list) =
   let open Parse in
@@ -753,6 +1022,11 @@ let raise_sub ~mem sub exits (blocks : Parse.block list) =
                   (not (Var.equal u v))
                   && List.exists incoming ~f:(fun (w, _) -> Var.equal u w)))
         in
+        (* the phi, that keeps its value on the edge, needs no copy *)
+        let incoming =
+          List.filter incoming ~f:(fun (v, x) ->
+              match x with Bil.Var u -> not (Var.equal u v) | _ -> true)
+        in
         let defs =
           if not parallel then
             List.map incoming ~f:(fun (v, x) -> Def.create v x)
@@ -775,6 +1049,13 @@ let raise_sub ~mem sub exits (blocks : Parse.block list) =
   in
   let goto ?cond pred succ =
     Jmp.create_goto ?cond (Direct (target pred succ))
+  in
+  let unreachable =
+    List.filter_map blocks ~f:(fun b ->
+        match (b.phis, b.items, b.terminator) with
+        | [], [], Unreachable -> Some b.label
+        | _ -> None)
+    |> String.Set.of_list
   in
   let rebuild k arg cont =
     let j = fst (Hashtbl.find_exn exits k) in
@@ -819,14 +1100,22 @@ let raise_sub ~mem sub exits (blocks : Parse.block list) =
                 match b.terminator with
                 | Br l -> [ goto b.label l ]
                 | Cbr (c, x, y) -> [ goto ~cond:c b.label x; goto b.label y ]
-                | Switch (v, w, cases, d) ->
-                    List.map cases ~f:(fun (c, l) ->
-                        goto ~cond:Bil.(v = int c) b.label l)
-                    @ [ goto b.label d ]
-                    |> fun js ->
-                    ignore w;
-                    js
-                | Unreachable -> raise (Error "the unreachable code")
+                | Switch (v, _, cases, d) -> (
+                    (* the default, that LLVM proved unreachable, is the
+                       last case, e.g., of a dispatcher, whose state is
+                       one of its cases *)
+                    match (List.rev cases, Set.mem unreachable d) with
+                    | (_, last) :: rest, true ->
+                        List.rev_map rest ~f:(fun (c, l) ->
+                            goto ~cond:Bil.(v = int c) b.label l)
+                        @ [ goto b.label last ]
+                    | _ ->
+                        List.map cases ~f:(fun (c, l) ->
+                            goto ~cond:Bil.(v = int c) b.label l)
+                        @ [ goto b.label d ])
+                (* the code, that LLVM proved unreachable, loops, so that
+                   it is the block of BIR *)
+                | Unreachable -> [ Jmp.create_goto (Direct tid) ]
                 | Return -> raise (Error "the return")
               in
               [ Blk.create ~tid ~defs:(List.rev defs) ~jmps () ]
@@ -839,8 +1128,17 @@ let raise_sub ~mem sub exits (blocks : Parse.block list) =
                 let next = Tid.create () in
                 Option.iter (return_address k) ~f:(fun a ->
                     Hashtbl.set addresses ~key:next ~data:a);
+                (* the call, that doesn't return, but whose callee returns
+                   by the address of the next block, goes to it, as the
+                   original did, so that the next optimization keeps it *)
+                let fallthrough =
+                  match Jmp.kind (fst (Hashtbl.find_exn exits k)) with
+                  | Call c when Option.is_none (Call.return c) ->
+                      [ Jmp.create_goto (Direct next) ]
+                  | _ -> []
+                in
                 Blk.create ~tid ~defs:(List.rev defs)
-                  ~jmps:[ rebuild k arg (Some next) ]
+                  ~jmps:(rebuild k arg (Some next) :: fallthrough)
                   ()
                 :: split next [] rest)
               else
@@ -886,8 +1184,17 @@ let memory_of sub =
             ~f:(fun v -> if Option.is_none (width v) then mem := Some v)));
   Option.value !mem ~default:(Var.create "mem" (Mem (`r64, `r8)))
 
+(* the input and the output of opt are kept in the directory of
+   BAP_RECOMPILE_KEEP, if it is set, e.g., to see what LLVM did *)
 let run_opt ~opt ~pipeline input =
-  let dir = Stdlib.Filename.temp_dir "bap-recompile" "" in
+  let keep = Sys.getenv "BAP_RECOMPILE_KEEP" in
+  let dir =
+    match keep with
+    | Some dir ->
+        (try Caml_unix.mkdir dir 0o755 with Caml_unix.Unix_error _ -> ());
+        dir
+    | None -> Stdlib.Filename.temp_dir "bap-recompile" ""
+  in
   let src = Filename.concat dir "in.ll"
   and dst = Filename.concat dir "out.ll" in
   Out_channel.write_all src ~data:input;
@@ -898,15 +1205,16 @@ let run_opt ~opt ~pipeline input =
   in
   let status = Stdlib.Sys.command cmd in
   let output = if status = 0 then Some (In_channel.read_all dst) else None in
-  List.iter [ src; dst ] ~f:(fun f -> try Stdlib.Sys.remove f with _ -> ());
-  (try Stdlib.Sys.rmdir dir with _ -> ());
+  if Option.is_none keep then (
+    List.iter [ src; dst ] ~f:(fun f -> try Stdlib.Sys.remove f with _ -> ());
+    try Stdlib.Sys.rmdir dir with _ -> ());
   match output with
   | Some text -> text
   | None -> invalid_argf "%s failed with %d" cmd status ()
 
 (* the subs, optimized by the [pipeline] of LLVM, in one run of [opt], or
    the errors, why they can't be *)
-let optimize_subs ~opt ~pipeline subs =
+let optimize_subs ?target ~opt ~pipeline subs =
   let out = Buffer.create 65536 in
   let registers =
     List.fold subs ~init:String.Map.empty ~f:(fun m s ->
@@ -928,7 +1236,9 @@ let optimize_subs ~opt ~pipeline subs =
       registers = Var.Set.of_list (Map.data registers);
     }
   in
-  let funcs = List.mapi subs ~f:(fun n s -> (s, emit_func prog out n s)) in
+  let funcs =
+    List.mapi subs ~f:(fun n s -> (s, emit_func ?target prog out n s))
+  in
   let optimized =
     if List.exists funcs ~f:(fun (_, f) -> Result.is_ok f) then
       Or_error.try_with (fun () ->
@@ -950,7 +1260,7 @@ let optimize_subs ~opt ~pipeline subs =
                   let mem = mem
                 end) in
                 match
-                  R.blocks lines |> inline_values
+                  R.blocks lines |> inline_values |> dispatchers
                   |> raise_sub ~mem f.sub f.exits
                 with
                 | raised -> Ok raised

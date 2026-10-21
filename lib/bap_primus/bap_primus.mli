@@ -2724,6 +2724,18 @@ module Std : sig
       val max_size : int
       (** the maximal size of an instruction, in bytes, that is read *)
 
+      val instruction :
+        ?encoding:Theory.language ->
+        project ->
+        int64 ->
+        string ->
+        (int * blk term list) option knowledge
+      (** [instruction project addr code] the size and the IR of the instruction
+          at [addr], decoded from [code], its bytes, at most {!max_size} of
+          them, in the knowledge, that the computation runs in, e.g., the
+          toplevel one, outside of a machine, as {!Make.insn} lifts it, but
+          without its cache. *)
+
       (** [Make(Machine)] lifts the instructions in the knowledge of the system,
           that runs the machine, see {!Machine.S.knowledge}, which caches them,
           so that the systems, e.g., the emulators of a script, have their own

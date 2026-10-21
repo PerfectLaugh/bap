@@ -1,5 +1,9 @@
 open Core
 open Bap.Std
+open Bap_core_theory
+
+let deflatten_passes =
+  "function(sroa,early-cse,instcombine<no-verify-fixpoint>,sccp,simplifycfg,jump-threading,simplifycfg,sccp,instcombine<no-verify-fixpoint>,gvn,dse,adce,simplifycfg)"
 
 let default_passes =
   "function(sroa,early-cse,instcombine<no-verify-fixpoint>,simplifycfg,sccp,gvn,dse,adce,jump-threading,instcombine<no-verify-fixpoint>,simplifycfg)"
@@ -7,28 +11,35 @@ let default_passes =
 (* the optimized subs by the pipeline and the text of the sub, which has
    its identifiers, so that the same sub is optimized once *)
 let cache : sub term Or_error.t String.Table.t = String.Table.create ()
-let key passes sub = passes ^ "\n" ^ Sub.to_string sub
+
+let key ?target passes sub =
+  let target =
+    Option.value_map target ~default:"" ~f:(fun t ->
+        KB.Name.show (Theory.Target.name t))
+  in
+  String.concat ~sep:"\n" [ target; passes; Sub.to_string sub ]
 
 let has_code sub =
   not (Recompile_llvm.is_external sub || Recompile_llvm.is_intrinsic sub)
 
-let optimize_subs ?(opt = "opt") ?(passes = default_passes) subs =
+let optimize_subs ?target ?(opt = "opt") ?(passes = default_passes) subs =
+  let key = key ?target passes in
   let cached, fresh =
     List.partition_map subs ~f:(fun sub ->
-        match Hashtbl.find cache (key passes sub) with
+        match Hashtbl.find cache (key sub) with
         | Some result -> First (sub, result)
         | None -> Second sub)
   in
   let optimized =
     if List.is_empty fresh then []
-    else Recompile_optimize.optimize_subs ~opt ~pipeline:passes fresh
+    else Recompile_optimize.optimize_subs ?target ~opt ~pipeline:passes fresh
   in
   List.iter optimized ~f:(fun (sub, result) ->
-      Hashtbl.set cache ~key:(key passes sub) ~data:result);
+      Hashtbl.set cache ~key:(key sub) ~data:result);
   cached @ optimized
 
-let optimize ?opt ?passes sub =
-  match optimize_subs ?opt ?passes [ sub ] with
+let optimize ?target ?opt ?passes sub =
+  match optimize_subs ?target ?opt ?passes [ sub ] with
   | [ (_, result) ] -> result
   | _ -> Or_error.error_string "the sub wasn't optimized"
 
@@ -153,20 +164,33 @@ module Region = struct
     Term.with_attrs updated (Term.attrs sub)
 end
 
-let optimize_region ?opt ?passes (region : Region.t) =
+(* the rounds of the optimization, until the number of the blocks
+   doesn't change, as each round threads the dispatchers, that the
+   previous one revealed *)
+let deflatten ?target ?opt ?(passes = deflatten_passes) ?(rounds = 4) sub =
+  let blocks sub = Term.length blk_t sub in
+  let rec loop n sub =
+    if n = 0 then Ok sub
+    else
+      Result.bind (optimize ?target ?opt ~passes sub) ~f:(fun sub' ->
+          if blocks sub' = blocks sub then Ok sub' else loop (n - 1) sub')
+  in
+  loop rounds sub
+
+let optimize_region ?target ?opt ?passes (region : Region.t) =
   let sub = Sub.create ~name:"region" ~blks:region.blks () in
-  Result.map (optimize ?opt ?passes sub) ~f:(fun sub ->
+  Result.map (optimize ?target ?opt ?passes sub) ~f:(fun sub ->
       { region with blks = Term.enum blk_t sub |> Seq.to_list })
 
 let print_error sub err =
   eprintf "bap-recompile: can't optimize %s: %s\n%!" (Sub.name sub)
     (Error.to_string_hum err)
 
-let optimize_program ?opt ?passes ?(select = has_code) ?(report = print_error)
-    prog =
+let optimize_program ?target ?opt ?passes ?(select = has_code)
+    ?(report = print_error) prog =
   Term.enum sub_t prog |> Seq.to_list
   |> List.filter ~f:(fun sub -> has_code sub && select sub)
-  |> optimize_subs ?opt ?passes
+  |> optimize_subs ?target ?opt ?passes
   |> List.fold ~init:prog ~f:(fun prog (sub, result) ->
       match result with
       | Ok sub -> Term.update sub_t prog sub

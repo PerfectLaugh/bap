@@ -47,6 +47,19 @@ other blocks use the values, that their dominators computed, so the
 indirect jumps into the sub, e.g., of the tables of its switches, can't
 enter them, and $(b,--recompile-opt-subs) excludes such subs.
 
+The slots of the frame of a sub, i.e., the memory at the constant offsets
+from its stack pointer at the entry, are the variables of LLVM, e.g., the
+local variables of the code, that is compiled without the optimizations,
+if the address of the frame doesn't escape, and the dispatchers of the
+state machines are threaded, so that $(b,--recompile-deflatten) undoes
+the flattening of the control flow, e.g., of the obfuscators, whose
+blocks go through a dispatcher, which switches on the state, that they
+set, e.g.,
+
+```
+  bap ./prog --passes=recompile-optimize --recompile-deflatten -dbir
+```
+
 The scripts and the other plugins optimize the subs on demand with the
 library of the plugin, e.g.,
 
@@ -90,6 +103,15 @@ let subs =
     Extension.Type.(list string)
     "opt-subs" ~doc:"Optimizes only the named subs, by default all of them."
 
+let deflatten =
+  Extension.Configuration.flag "deflatten"
+    ~doc:
+      "Undoes the flattening of the control flow of the subs, e.g., of the \
+       obfuscators, whose blocks go through a dispatcher, which switches on \
+       the state, that the blocks set, so that the blocks jump to each other, \
+       in the rounds of the optimization, see $(b,--recompile-opt-passes), \
+       whose default is the pipeline of the deflattening then."
+
 let () =
   Extension.declare ~doc ~provides:[ "pass"; "llvm"; "recompile" ]
   @@ fun ctxt ->
@@ -108,7 +130,30 @@ let () =
   let select sub =
     List.is_empty subs || List.mem subs (Sub.name sub) ~equal:String.equal
   in
-  Project.register_pass ~name:"optimize"
-    (Project.map_program
-       ~f:(Bap_recompile.optimize_program ~opt ~passes ~select));
+  let deflatten = ctxt --> deflatten in
+  Project.register_pass ~name:"optimize" (fun proj ->
+      let target = Project.target proj in
+      if deflatten then
+        let passes =
+          if String.equal passes Bap_recompile.default_passes then
+            Bap_recompile.deflatten_passes
+          else passes
+        in
+        Project.map_program proj ~f:(fun prog ->
+            Term.map sub_t prog ~f:(fun sub ->
+                if
+                  Term.length blk_t sub = 0
+                  || String.is_prefix (Sub.name sub) ~prefix:"intrinsic:"
+                  || not (select sub)
+                then sub
+                else
+                  match Bap_recompile.deflatten ~target ~opt ~passes sub with
+                  | Ok sub -> sub
+                  | Error err ->
+                      eprintf "bap-recompile: can't deflatten %s: %s\n%!"
+                        (Sub.name sub) (Error.to_string_hum err);
+                      sub))
+      else
+        Project.map_program proj
+          ~f:(Bap_recompile.optimize_program ~target ~opt ~passes ~select));
   Ok ()

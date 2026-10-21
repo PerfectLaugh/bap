@@ -3,6 +3,13 @@ open Bap_core_theory
 
 val max_size : int
 
+val instruction :
+  ?encoding:Theory.language ->
+  project ->
+  int64 ->
+  string ->
+  (int * blk term list) option KB.t
+
 module Make (Machine : Bap_primus_types.Machine) : sig
   val insn :
     ?disassembled_only:bool ->

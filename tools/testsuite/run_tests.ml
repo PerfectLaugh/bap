@@ -19,6 +19,29 @@ let floats name args data =
           (passes = 7));
   ]
 
+(* the flattened control flows, by hand, of src/cff.c, and by
+   Obfuscator-LLVM, of src/ollvm/collatz.c, whose blocks go through the
+   dispatchers, run as the original *)
+let cff data =
+  List.concat_map
+    (fun bin ->
+      List.map
+        (fun system ->
+          case
+            ("run/" ^ bin ^ "/" ^ system)
+            (fun env ->
+              let out =
+                bap env
+                  [
+                    path data ("bin/x86_64-linux-gnu-" ^ bin);
+                    "--passes=run";
+                    "--run-systems=" ^ system;
+                  ]
+              in
+              contains env "prints the steps" out "53\n111\n"))
+        [ "bap:stubbed-executor"; "bap:unicorn-executor" ])
+    [ "cff"; "ollvm-fla" ]
+
 let sse = floats "llvm-x86-64-sse" []
 let x86_floats = floats "x86-floats" [ "--bil-enable-fp-emulation" ]
 
@@ -1576,6 +1599,7 @@ let loader_layouts data =
 
 let tests =
   [
+    cff;
     sse;
     x86_floats;
     run;

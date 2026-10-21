@@ -15,16 +15,34 @@
 
 open Core
 open Bap.Std
+open Bap_core_theory
 
 val default_passes : string
 (** the pipeline of the passes of LLVM, that {!optimize} runs by default, in the
     syntax of [opt -passes], without the vectorizers, whose vectors aren't
     raised back to BIR *)
 
-val optimize : ?opt:string -> ?passes:string -> sub term -> sub term Or_error.t
+val deflatten_passes : string
+(** the pipeline of {!deflatten}, which simplifies the conditions of the
+    dispatchers, and removes them, after they are threaded *)
+
+val optimize :
+  ?target:Theory.Target.t ->
+  ?opt:string ->
+  ?passes:string ->
+  sub term ->
+  sub term Or_error.t
 (** [optimize sub] is the [sub] optimized by the [passes] of LLVM, which [opt]
     runs, by default the opt in PATH, e.g., without the flags, that the code
     doesn't read, and with the simpler expressions and control flow.
+
+    With the [target], the slots of the frame of [sub], i.e., the memory at the
+    constant offsets from its stack pointer at the entry, are the variables of
+    LLVM, e.g., the local variables of the code, compiled without the
+    optimizations, as the registers are, if the address of the frame doesn't
+    escape: it isn't stored, or passed to a callee, but in the stack and the
+    frame pointers, and the memory isn't accessed at an unknown address in the
+    frame. The slots are in the memory at the jumps, that leave the sub.
 
     The jumps of [sub], that leave it, e.g., the calls, the returns, and the
     interrupts, are opaque to LLVM, so the registers and the memory are the same
@@ -84,11 +102,39 @@ module Region : sig
 end
 
 val optimize_region :
-  ?opt:string -> ?passes:string -> Region.t -> Region.t Or_error.t
+  ?target:Theory.Target.t ->
+  ?opt:string ->
+  ?passes:string ->
+  Region.t ->
+  Region.t Or_error.t
 (** [optimize_region region] optimizes the code of [region], as {!optimize}
     does, which has the same entry, and the same jumps, that leave it. *)
 
+val deflatten :
+  ?target:Theory.Target.t ->
+  ?opt:string ->
+  ?passes:string ->
+  ?rounds:int ->
+  sub term ->
+  sub term Or_error.t
+(** [deflatten sub] undoes the flattening of the control flow of [sub], e.g., of
+    the obfuscators, whose blocks go through the dispatcher, which finds the
+    next block from the state, that the blocks set, e.g., by the binary search
+    of the cases of a switch, so that the blocks jump to each other, and the
+    dispatcher is removed, e.g., for the analyses, that need the control flow.
+
+    Each of the [rounds], 4 by default, optimizes [sub], see {!optimize}, until
+    the number of its blocks doesn't change. As the state must be a value, that
+    LLVM sees, the [target], that promotes the slots of the frame, is needed, if
+    the state is on the stack, e.g., of the code, that is compiled without the
+    optimizations. Each round, the dispatcher is evaluated for each state, that
+    a block passes to it, a constant, or a select of the constants, as long as
+    its blocks have no effects, and the block jumps to the block, that the
+    dispatcher leads to, with the variables, that the dispatcher defined on the
+    way. *)
+
 val optimize_program :
+  ?target:Theory.Target.t ->
   ?opt:string ->
   ?passes:string ->
   ?select:(sub term -> bool) ->

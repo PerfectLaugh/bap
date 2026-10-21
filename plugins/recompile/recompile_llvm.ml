@@ -82,6 +82,9 @@ module Emit (S : sig
   val prog : program
   val sub : sub term
   val buf : Buffer.t
+
+  val frame : Recompile_frame.t option
+  (** the frame, whose slots are the variables of LLVM *)
 end) =
 struct
   open S
@@ -115,11 +118,70 @@ struct
   let vars = vars_of_sub sub
   let registers = Set.filter vars ~f:Var.is_physical
 
+  (* the slots of the frame, which are in the memory at the jumps, that
+     leave the sub, at their offsets from [%frame.base], the stack
+     pointer at the entry, and in the variables of LLVM inside of it *)
+  let slots = Option.value_map frame ~default:[] ~f:Recompile_frame.slots
+
+  let slot (k, bits) =
+    sprintf "%%slot.%s%d.%d" (if k < 0 then "m" else "") (abs k) bits
+
+  let big_endian =
+    Option.value_map frame ~default:false ~f:Recompile_frame.big_endian
+
+  let slot_pointer k =
+    let a = instr "add i64 %%frame.base, %d" k in
+    instr "inttoptr i64 %s to ptr" a
+
+  let slot_order bits x =
+    if big_endian && bits > 8 then
+      instr "call %s @llvm.bswap.%s(%s %s)" (ty bits) (ty bits) (ty bits) x
+    else x
+
   let sync_out () =
     Set.iter registers ~f:(fun v ->
         let w = Option.value_exn (width v) in
         let x = instr "load %s, ptr %s" (ty w) (local v) in
-        line "  store %s %s, ptr %s" (ty w) x (global v))
+        line "  store %s %s, ptr %s" (ty w) x (global v));
+    List.iter slots ~f:(fun ((k, bits) as s) ->
+        let x = instr "load %s, ptr %s" (ty bits) (slot s) in
+        let p = slot_pointer k in
+        line "  store %s %s, ptr %s, align 1" (ty bits) (slot_order bits x) p)
+
+  (* the slots are loaded from the memory at the entry *)
+  let enter_frame () =
+    Option.iter frame ~f:(fun frame ->
+        let sp = Recompile_frame.stack_pointer frame in
+        let w = Option.value_exn (width sp) in
+        List.iter slots ~f:(fun s ->
+            line "  %s = alloca %s" (slot s) (ty (snd s)));
+        let base = instr "load %s, ptr %s" (ty w) (local sp) in
+        let base =
+          if w = 64 then base else instr "zext %s %s to i64" (ty w) base
+        in
+        line "  %%frame.base = add i64 %s, 0" base;
+        List.iter slots ~f:(fun ((k, bits) as s) ->
+            let p = slot_pointer k in
+            let x = instr "load %s, ptr %s, align 1" (ty bits) p in
+            line "  store %s %s, ptr %s" (ty bits) (slot_order bits x) (slot s)))
+
+  (* the state of the frame at the definition, that is emitted *)
+  let frame_state = ref Recompile_frame.Var_state.empty
+
+  (* the definitions of the virtual variables of the block, that is
+     emitted, which the patterns of the flags see through, while the
+     variables, that they use, aren't changed *)
+  let defined : exp Var.Map.t ref = ref Var.Map.empty
+
+  let enter_block tid =
+    defined := Var.Map.empty;
+    Option.iter frame ~f:(fun frame ->
+        frame_state := Recompile_frame.entry frame tid)
+
+  let slot_of a bits =
+    Option.bind frame ~f:(fun frame ->
+        Option.map (Recompile_frame.slot frame !frame_state a bits) ~f:(fun k ->
+            slot (k, bits)))
 
   let sync_in () =
     Set.iter registers ~f:(fun v ->
@@ -160,6 +222,56 @@ struct
     in
     instr "select i1 %s, %s %s, %s %s" big (ty w) saturated (ty w) r
 
+  (* the definition is kept, unless it uses the variable, that it defines,
+     whose old value it would be *)
+  let define v e =
+    defined :=
+      Map.filter !defined ~f:(fun x -> not (Set.mem (Exp.free_vars x) v));
+    if Set.mem (Exp.free_vars e) v then defined := Map.remove !defined v
+    else defined := Map.set !defined ~key:v ~data:e
+
+  let rec resolve = function
+    | Bil.Var v as e -> (
+        match Map.find !defined v with Some e -> resolve e | None -> e)
+    | e -> e
+
+  (* the borrow of [x - y], i.e., the carry flag of the subtraction and
+     the comparison of x86, which is [x < y], that LLVM doesn't see, as
+     its jump threading sees only the comparisons *)
+  let borrow e =
+    match resolve e with
+    | BinOp
+        ( OR,
+          BinOp (AND, UnOp (NOT, x), y),
+          BinOp (AND, UnOp (NOT, BinOp (XOR, x', y')), d) )
+      when Exp.equal x x' && Exp.equal y y' -> (
+        match resolve d with
+        | BinOp (MINUS, x'', y'') when Exp.equal x x'' && Exp.equal y y'' ->
+            Some (x, y)
+        | _ -> None)
+    | _ -> None
+
+  (* the sign and the overflow flags of [x - y], e.g., of the comparison of
+     x86, whose difference is [x < y], signed, and their equality is
+     [x >= y], as LLVM doesn't see them *)
+  let signed_less a b =
+    let msb = function
+      | Bil.Extract (hi, lo, e) when hi = lo -> Some (hi, resolve e)
+      | _ -> None
+    in
+    let check sf o =
+      match (msb (resolve sf), msb (resolve o)) with
+      | ( Some (h, r),
+          Some (h', BinOp (AND, BinOp (XOR, x, y), BinOp (XOR, x', r'))) )
+        when h = h' && Exp.equal x x' && Exp.equal (resolve r') r -> (
+          match r with
+          | BinOp (MINUS, x'', y') when Exp.equal x x'' && Exp.equal y y' ->
+              Some (h, x, y)
+          | _ -> None)
+      | _ -> None
+    in
+    match check a b with Some _ as r -> r | None -> check b a
+
   let rec exp env (e : exp) : string * int =
     match e with
     | Var v -> (
@@ -172,13 +284,25 @@ struct
     | Int w ->
         let n = Word.bitwidth w in
         (sprintf "u0x%s" (Word.string_of_value ~hex:true w), n)
-    | Load (m, a, endian, size) ->
+    | Load (m, a, endian, size) -> (
         memory env m;
-        let a, wa = exp env a in
-        let p = pointer a wa in
         let n = Size.in_bits size in
-        (swap endian n (instr "load %s, ptr %s, align 1" (ty n) p), n)
+        match slot_of a n with
+        | Some s -> (instr "load %s, ptr %s" (ty n) s, n)
+        | None ->
+            let a, wa = exp env a in
+            let p = pointer a wa in
+            (swap endian n (instr "load %s, ptr %s, align 1" (ty n) p), n))
     | Store _ -> unsupported "the store as a value"
+    | BinOp (((NEQ | XOR | EQ) as op), a, b)
+      when Option.is_some (signed_less a b) ->
+        let h, x, y = Option.value_exn (signed_less a b) in
+        let x, w = exp env x in
+        let y, wy = exp env y in
+        let pred = match op with EQ -> "sge" | _ -> "slt" in
+        if w = h + 1 && wy = w then
+          (instr "icmp %s %s %s, %s" pred (ty w) x y, 1)
+        else binop env op a b
     | BinOp (op, x, y) -> binop env op x y
     | UnOp (NEG, x) ->
         let x, w = exp env x in
@@ -209,6 +333,15 @@ struct
         let y, wy = exp env y in
         let y = resize y wy w in
         (instr "select i1 %s, %s %s, %s %s" c (ty w) x (ty w) y, w)
+    | Extract (hi, lo, e) when hi = lo && Option.is_some (borrow e) ->
+        let x, y = Option.value_exn (borrow e) in
+        let x, w = exp env x in
+        let y, wy = exp env y in
+        if w = hi + 1 && wy = w then (instr "icmp ult %s %s, %s" (ty w) x y, 1)
+        else
+          let e, we = exp env e in
+          let e = if lo > 0 then instr "lshr %s %s, %d" (ty we) e lo else e in
+          (resize e we 1, 1)
     | Extract (hi, lo, x) ->
         let x, w = exp env x in
         let n = hi - lo + 1 in
@@ -257,23 +390,29 @@ struct
   and memory env (m : exp) =
     match m with
     | Var _ -> ()
-    | Store (m, a, v, endian, size) ->
+    | Store (m, a, v, endian, size) -> (
         memory env m;
-        let a, wa = exp env a in
-        let v, wv = exp env v in
         let n = Size.in_bits size in
-        let v = swap endian n (resize v wv n) in
-        let p = pointer a wa in
-        line "  store %s %s, ptr %s, align 1" (ty n) v p
+        let v, wv = exp env v in
+        match slot_of a n with
+        | Some s -> line "  store %s %s, ptr %s" (ty n) (resize v wv n) s
+        | None ->
+            let a, wa = exp env a in
+            let v = swap endian n (resize v wv n) in
+            let p = pointer a wa in
+            line "  store %s %s, ptr %s, align 1" (ty n) v p)
     | _ -> unsupported "the memory %a" Exp.pp m
 
   let def d =
     let v = Def.lhs d in
-    match width v with
+    (match width v with
     | None -> memory String.Map.empty (Def.rhs d)
     | Some w ->
         let x, wx = exp String.Map.empty (Def.rhs d) in
-        line "  store %s %s, ptr %s" (ty w) (resize x wx w) (local v)
+        line "  store %s %s, ptr %s" (ty w) (resize x wx w) (local v));
+    define v (Def.rhs d);
+    Option.iter frame ~f:(fun frame ->
+        frame_state := Recompile_frame.step frame !frame_state d)
 
   (* the addresses of the blocks of the sub, that the indirect jumps
      inside of it may reach *)
@@ -429,6 +568,7 @@ struct
         Term.enum blk_t sub
         |> Seq.iter ~f:(fun blk ->
             line "%s:" (label (Term.tid blk));
+            enter_block (Term.tid blk);
             Term.enum def_t blk |> Seq.iter ~f:def;
             jumps blk)
 end
@@ -439,6 +579,7 @@ let emit_sub prog out sub =
     let prog = prog
     let sub = sub
     let buf = buf
+    let frame = None
   end) in
   bprintf out "define internal void %s(i64 %%ret) {\nentry:\n" (fn_name sub);
   (match E.body () with

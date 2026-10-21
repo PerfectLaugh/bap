@@ -1,0 +1,85 @@
+# exited with 0
+sub __do_global_dtors_aux(__do_global_dtors_aux_result)
+  calls deregister_tm_clones
+sub _dl_relocate_static_pie(_dl_relocate_static_pie_result)
+sub _fini(_fini_result)
+sub _init(_init_result)
+sub _start(_start_result)
+  calls __libc_start_main _dl_relocate_static_pie intrinsic:hlt
+sub deregister_tm_clones(deregister_tm_clones_result)
+sub frame_dummy(frame_dummy_result)
+  calls register_tm_clones
+sub main(main_argc, main_argv, main_result)
+  calls print steps
+sub print(print_result)
+  calls putchar
+sub putchar(putchar_c, putchar_result)
+sub register_tm_clones(register_tm_clones_result)
+sub steps(steps_result)
+  calls print
+sub intrinsic:hlt()
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[RDI]
+#2: main_argv :: in out u64 = RSI
+#3: main_result :: out u32 = low:32[RAX]
+
+#4:
+#5: RSP := RSP - 8
+#6: mem := mem with [RSP, el]:u64 <- RBP
+#7: RBP := RSP
+#8: #136 := RSP - 0x10
+#9: CF := 63:63[~RSP & 0x10 | ~(RSP ^ 0x10) & #136]
+#10: OF := 63:63[(RSP ^ 0x10) & (RSP ^ #136)]
+#11: AF := 0:0[(#136 ^ RSP ^ 0x10) >> 4]
+#12: SF := 63:63[#136]
+#13: ZF := #136 = 0
+#14: #137 := low:8[#136]
+#15: #138 := #137 ^ #137 >> 4
+#16: #139 := #138 ^ #138 >> 2
+#17: #140 := #139 ^ #139 >> 1
+#18: PF := ~0:0[#140]
+#19: RSP := #136
+#20: mem := mem with [RBP - 4, el]:u32 <- 0
+#21: RDI := 0x1B
+#22: RSP := RSP - 8
+#23: mem := mem with [RSP, el]:u64 <- 0x4006D9
+#24: call @steps with return %#25
+
+#25:
+#26: RDI := pad:64[31:0[RAX]]
+#27: RSP := RSP - 8
+#28: mem := mem with [RSP, el]:u64 <- 0x4006E0
+#29: call @print with return %#30
+
+#30:
+#31: CF := 0
+#32: OF := 0
+#33: SF := 0
+#34: ZF := 1
+#35: #144 := 0
+#36: #145 := #144 ^ #144 >> 4
+#37: #146 := #145 ^ #145 >> 2
+#38: #147 := #146 ^ #146 >> 1
+#39: PF := ~0:0[#147]
+#40: RAX := 0
+#41: #148 := RSP + 0x10
+#42: CF := 63:63[RSP] & ~63:63[#148]
+#43: OF := ~63:63[RSP] & 63:63[#148]
+#44: AF := 0:0[(#148 ^ RSP ^ 0x10) >> 4]
+#45: SF := 63:63[#148]
+#46: ZF := #148 = 0
+#47: #149 := low:8[#148]
+#48: #150 := #149 ^ #149 >> 4
+#49: #151 := #150 ^ #150 >> 2
+#50: #152 := #151 ^ #151 >> 1
+#51: PF := ~0:0[#152]
+#52: RSP := #148
+#53: #153 := mem[RSP, el]:u64
+#54: RSP := RSP + 8
+#55: RBP := #153
+#56: #154 := mem[RSP, el]:u64
+#57: RSP := RSP + 8
+#58: call #154 with noreturn
+
