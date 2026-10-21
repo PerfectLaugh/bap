@@ -87,3 +87,6 @@ llvm-project-*.src.tar.xz
 # (e.g., `*.ba*` matches base-unix.base.pkg)
 !/dune.lock/**
 /testsuite-results/
+
+# the settings of the editors
+.vscode/

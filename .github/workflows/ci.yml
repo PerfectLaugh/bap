@@ -2,11 +2,8 @@
 name: ci
 run-name: Testing ${{ github.ref }}
 
+# disabled: runs only when it is started by hand, from the Actions tab
 on:
-  pull_request:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
