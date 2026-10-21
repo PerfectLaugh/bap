@@ -770,7 +770,7 @@ module Emu = Bap_emu
 let () =
   let file = List.hd (Bap_script.args ()) in
   let emu =
-    Emu.create ~components:Emu.Taint.components ~redirects:[ ("<stdin>", "%s") ]
+    Emu.create ~components:Emu.Taint.components ~redirects:[ ("<stdin>", %S) ]
       (Bap_script.project file)
   in
   (match Emu.run emu ~until:0x80cL with
@@ -816,7 +816,7 @@ let model = function
 let () =
   let file = List.hd (Bap_script.args ()) in
   let emu =
-    Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", "%s") ]
+    Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", %S) ]
       (Bap_script.project file)
   in
   (match Emu.run emu ~until:0x693L with
@@ -849,7 +849,7 @@ module Sym = Emu.Symbolic
 let () =
   let file = List.hd (Bap_script.args ()) in
   let emu =
-    Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", "%s") ]
+    Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", %S) ]
       (Bap_script.project file)
   in
   (match Emu.run emu ~until:0x80cL with
@@ -888,7 +888,7 @@ module Emu = Bap_emu
 let () =
   let file = List.hd (Bap_script.args ()) in
   let emu =
-    Emu.create ~components:Emu.Taint.components ~redirects:[ ("<stdin>", "%s") ]
+    Emu.create ~components:Emu.Taint.components ~redirects:[ ("<stdin>", %S) ]
       (Bap_script.project file)
   in
   (match Emu.run emu ~until:0x80cL with
@@ -942,7 +942,7 @@ module Sym = Emu.Symbolic
 let () =
   let file = List.hd (Bap_script.args ()) in
   let emu =
-    Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", "%s") ]
+    Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", %S) ]
       (Bap_script.project file)
   in
   (match Emu.run emu ~until:0x80cL with
@@ -1208,7 +1208,7 @@ module Emu = Bap_emu
 
 let () =
   let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~redirects:[ ("<stdin>", "%s") ] (Bap_script.project file) in
+  let emu = Emu.create ~redirects:[ ("<stdin>", %S) ] (Bap_script.project file) in
   (match Emu.run emu ~until:0x7efL with
    | Paused -> ()
    | _ -> failwith "fgets didn't return");
