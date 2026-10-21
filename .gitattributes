@@ -2,7 +2,9 @@
 # Windows, as the patches and the checksums of the files depend on them
 /dune.lock/** -text
 /opam-overlay/** -text
-# the binaries of the functional tests, and the golden files, which are
-# compared byte by byte, keep their line endings on Windows
+# the binaries of the functional tests, their fixed inputs, e.g., the
+# lines that the programs read, and the golden files, which are compared
+# byte by byte, keep their line endings on Windows
 /testsuite/** -text
+/tools/testsuite/inputs/** -text
 /tools/testsuite/golden/** -text

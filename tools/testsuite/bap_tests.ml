@@ -90,15 +90,9 @@ let with_exit_code env name args expected status =
 let api_options data =
   [
     case "api-options" (fun env ->
-        let api_path = file env "api" in
-        Sys.mkdir api_path 0o755;
-        Sys.mkdir (Filename.concat api_path "c") 0o755;
-        ignore (write env "api/c/api-options.h" "");
-        Sys.mkdir (file env "own") 0o755;
-        let own = write env "own/api-options.h" "" in
-        let api_file =
-          write env "api-file.h" "int print_strings(char *a, int n);\n"
-        in
+        let api_path = input "api-options/api" in
+        let own = input "api-options/own/api-options.h" in
+        let api_file = input "api-options/api-file.h" in
         let echo = path data (echo "x86_64-linux-gnu") in
         List.iter
           (fun (name, args, expected, status) ->
@@ -275,15 +269,14 @@ let echo_main data =
 
 let improper_feed _ =
   [
-    ("empty file", "File corrupted", "");
-    ("random data", "File format is not supported", "Hello, world\n");
-    ( "truncated elf",
-      "File format is not supported",
-      "\x7f\x45\x4c\x46\x02\x01\x01\n" );
+    ("empty file", "File corrupted", "empty");
+    ("random data", "File format is not supported", "random-data");
+    (* the magic of ELF, and nothing else *)
+    ("truncated elf", "File format is not supported", "truncated-elf");
   ]
-  |> List.map (fun (msg, expected, data) ->
+  |> List.map (fun (msg, expected, name) ->
       case ("improper-feed/" ^ msg) (fun env ->
-          let file = write env "input" data in
+          let file = input ("improper-feed/" ^ name) in
           with_exit_code env msg [ file; "-d" ] expected 1))
 
 let internal_plt data =
@@ -400,9 +393,9 @@ let plugins _ =
    after the traps, the calls to noreturn functions, and the jumps over
    the junk that overlaps their destinations, isn't disassembled *)
 let branches data =
-  let raw name arch code ~junk ~real =
+  let raw name arch ~junk ~real =
     case ("branches/" ^ name) (fun env ->
-        let file = write env (name ^ ".bin") code in
+        let file = input ("branches/" ^ name ^ ".bin") in
         let out =
           bap env
             [
@@ -418,29 +411,19 @@ let branches data =
   in
   (* mov x0, #1; bl L; udf #0; udf #0; add x1, x1, #1; L: ret *)
   [
-    raw "aarch64-udf" "aarch64"
-      "\x20\x00\x80\xd2\x04\x00\x00\x94\x00\x00\x00\x00\x00\x00\x00\x00\x21\x04\x00\x91\xc0\x03\x5f\xd6"
-      ~junk:"add x1" ~real:"ret";
+    raw "aarch64-udf" "aarch64" ~junk:"add x1" ~real:"ret";
     (* mov x0, #1; b.eq L; brk #1; add x1, x1, #1; add x1, x1, #1; L: ret *)
-    raw "aarch64-brk" "aarch64"
-      "\x20\x00\x80\xd2\x80\x00\x00\x54\x20\x00\x20\xd4\x21\x04\x00\x91\x21\x04\x00\x91\xc0\x03\x5f\xd6"
-      ~junk:"add x1" ~real:"ret";
+    raw "aarch64-brk" "aarch64" ~junk:"add x1" ~real:"ret";
     (* movl $1, %eax; call L; ud2; addq %rcx, %rax; L: retq *)
-    raw "x86-ud2" "x86_64"
-      "\xb8\x01\x00\x00\x00\xe8\x05\x00\x00\x00\x0f\x0b\x48\x01\xc8\xc3"
-      ~junk:"addq" ~real:"retq";
+    raw "x86-ud2" "x86_64" ~junk:"addq" ~real:"retq";
     (* call L; the junk movl that overlaps L; L: addq %rcx, %rax; retq *)
-    raw "x86-call-overlap" "x86_64"
-      "\xe8\x01\x00\x00\x00\xb8\x48\x01\xc8\xc3\xc3" ~junk:"movl" ~real:"addq";
+    raw "x86-call-overlap" "x86_64" ~junk:"movl" ~real:"addq";
     (* jne L; the junk movl that overlaps L; L: addq %rcx, %rax; retq *)
-    raw "x86-jne-overlap" "x86_64" "\x75\x01\xb8\x48\x01\xc8\xc3\xc3"
-      ~junk:"movl" ~real:"addq";
+    raw "x86-jne-overlap" "x86_64" ~junk:"movl" ~real:"addq";
     (* je L; jne L; the junk movl that overlaps L; L: addq; retq *)
-    raw "x86-je-jne-overlap" "x86_64" "\x74\x03\x75\x01\xb8\x48\x01\xc8\xc3\xc3"
-      ~junk:"movl" ~real:"addq";
+    raw "x86-je-jne-overlap" "x86_64" ~junk:"movl" ~real:"addq";
     (* jmp L; the junk movl that overlaps L; L: addq %rcx, %rax; retq *)
-    raw "x86-jmp-overlap" "x86_64" "\xeb\x01\xb8\x48\x01\xc8\xc3\xc3"
-      ~junk:"movl" ~real:"addq";
+    raw "x86-jmp-overlap" "x86_64" ~junk:"movl" ~real:"addq";
     case "branches/noreturn-calls" (fun env ->
         let out =
           bap env [ path data (echo "aarch64-linux-gnu"); "--dump=bir" ]
@@ -456,17 +439,12 @@ let uninstalled data =
   let echo = path data (echo "x86_64-linux-gnu") in
   [
     case "uninstalled/recipe" (fun env ->
-        let recipe = write env "dump.recipe" "(option dump bir)\n" in
+        let recipe = input "uninstalled/dump.recipe" in
         has env "the recipe at an absolute path is loaded"
           (bap env [ echo; "--recipe=" ^ recipe ])
           "sub main");
     case "uninstalled/lisp" (fun env ->
-        let lisp =
-          write env "uninstalled.lisp"
-            "(defun uninstalled-lisp-function ()\n\
-            \  \"is loaded from its file\"\n\
-            \  0)\n"
-        in
+        let lisp = input "uninstalled/uninstalled.lisp" in
         has env "the lisp file is loaded"
           (bap env
              [
@@ -479,12 +457,7 @@ let uninstalled data =
           (bap env [ echo; "--primus-lisp-load=missing.lisp" ])
           "unable to load the Primus Lisp file");
     case "uninstalled/systems" (fun env ->
-        let asd =
-          write env "uninstalled.asd"
-            "(defsystem uninstalled:executor\n\
-            \  :description \"is loaded from its file\"\n\
-            \  :depends-on (bap:stubbed-executor))\n"
-        in
+        let asd = input "uninstalled/uninstalled.asd" in
         has env "the systems file is loaded"
           (bap env [ "primus-systems"; "--primus-systems-add-path=" ^ asd ])
           "uninstalled:executor");
@@ -493,7 +466,7 @@ let uninstalled data =
 let source_type _ =
   [
     case "source-type" (fun env ->
-        let file = write env "code" "\x83\x3d\xe9\xb5\x21\x00\x01\xeb\xf7" in
+        let file = input "source-type/code" in
         has env "source-type"
           (bap env [ file; "--dump=asm"; "--loader=raw"; "--raw-arch=x86" ])
           "cmpl");

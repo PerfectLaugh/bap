@@ -1,0 +1,7 @@
+(defparameter *pcs* 0)
+(defparameter *stores* 0)
+(defparameter *loads* 0)
+(defmethod pc-changed (pc) (incr *pcs*))
+(defmethod stored (a x) (incr *stores*))
+(defmethod loaded (a x) (incr *loads*))
+(defmethod fini () (msg "pcs $0 stores $1 loads $2" *pcs* *stores* *loads*))

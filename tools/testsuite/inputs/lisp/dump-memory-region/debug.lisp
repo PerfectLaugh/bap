@@ -1,0 +1,5 @@
+(defun debug (dst src)
+  (declare (advice :before strcpy))
+  (memory-allocate 0x50000000 32 0x41)
+  (memory-protect 0x50000010 16 0)
+  (dump-memory-region 0x50000000 34))

@@ -82,6 +82,13 @@ val source : string -> string
 (** [source name] is the absolute name of [name], a path relative to the root of
     the source tree of bap. *)
 
+val input : string -> string
+(** [input name] is the absolute name of the fixed file [name] of the cases,
+    e.g., a script, a Lisp file, or an input of a program, which is a path
+    relative to [tools/testsuite/inputs], with the native separators. The cases
+    read their files there, rather than write them, so that they are the same in
+    every environment. *)
+
 val golden : env -> string -> string -> unit
 (** [golden env name text] checks that [text] is the contents of the golden file
     [name] in [tools/testsuite/golden], and keeps [text] in [dir env] otherwise,
@@ -122,6 +129,8 @@ val main : (data -> case list) list -> unit
     with 1 if any of them fails.
 
     The words of BAP_TESTS select the cases whose names contain one of them. The
-    files of the testsuite are in ROOT/testsuite, or BAP_TESTSUITE. The outputs
-    of the failed cases are kept in BAP_TESTSUITE_WORK, or a temporary
+    files of the testsuite are in ROOT/testsuite, and the fixed files of the
+    cases in ROOT/tools/testsuite/inputs, and the commands don't see the
+    variables of BAP, e.g., BAP_PLUGIN_PATH, which the cases don't set. The
+    outputs of the failed cases are kept in BAP_TESTSUITE_WORK, or a temporary
     directory. *)

@@ -27,14 +27,12 @@ type env = {
 
 let dir env = env.dir
 
-(* the names are relative to the directory of the case, with the native
-   separators, as bap prints them *)
-let file env name =
-  let name =
-    if Sys.win32 then String.map (function '/' -> '\\' | c -> c) name
-    else name
-  in
-  Filename.concat env.dir name
+(* the native separators, as bap prints them *)
+let native name =
+  if Sys.win32 then String.map (function '/' -> '\\' | c -> c) name else name
+
+(* the names are relative to the directory of the case *)
+let file env name = Filename.concat env.dir (native name)
 
 let write env name data =
   let name = file env name in
@@ -62,12 +60,18 @@ let variables env =
     ("TERM", "dumb");
   ]
 
+(* the environment of the commands, without the variables of BAP, e.g.,
+   the options of the plugins, or BAP_PLUGIN_PATH, which the commands
+   would read, so that they are the same in every environment, except
+   the ones that the case sets *)
 let environment ?(unset = []) vars =
   let names = List.map fst vars @ unset in
   Unix.environment () |> Array.to_list
   |> List.filter (fun var ->
       match String.index_opt var '=' with
-      | Some i -> not (List.mem (String.sub var 0 i) names)
+      | Some i ->
+          let name = String.sub var 0 i in
+          not (List.mem name names || String.starts_with ~prefix:"BAP_" name)
       | None -> true)
   |> List.append (List.map (fun (name, value) -> name ^ "=" ^ value) vars)
 
@@ -139,6 +143,11 @@ let lacks env name output re = check env name (not (matches output re))
 (* the root of the source tree, which [main] finds *)
 let root = ref (Sys.getcwd ())
 let source name = Filename.concat !root name
+
+(* the fixed files of the cases, e.g., the scripts, the Lisp files, and
+   the inputs of the programs, which are in tools/testsuite/inputs, so
+   that the cases are the same in every environment *)
+let input name = native (source ("tools/testsuite/inputs/" ^ name))
 
 (* the golden files may have \r\n, when git converts the ends of lines *)
 let unix_lines text = String.concat "" (String.split_on_char '\r' text)
@@ -379,11 +388,8 @@ let main tests =
      | Some dir when dir <> "" -> dir
      | _ -> Option.value (source_root (Sys.getcwd ())) ~default:(Sys.getcwd ()));
   let root = !root in
-  let dir =
-    match Sys.getenv_opt "BAP_TESTSUITE" with
-    | Some dir -> absolute dir
-    | None -> Filename.concat root "testsuite"
-  in
+  (* the binaries of the testsuite, which are in the repository *)
+  let dir = Filename.concat root "testsuite" in
   let keep = Sys.getenv_opt "BAP_TESTSUITE_WORK" <> None in
   let work =
     match Sys.getenv_opt "BAP_TESTSUITE_WORK" with

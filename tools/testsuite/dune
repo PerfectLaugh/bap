@@ -1,8 +1,9 @@
 ; the functional tests of bap and bap-mc, which run them on the binaries of
 ; the testsuite, in testsuite/ at the root of the repository, with their
-; sources in testsuite/src. They are OUnit tests, which are slow, so they
-; don't run with
-; dune test, run them with
+; sources in testsuite/src, and with the scripts, the Lisp files, and the
+; inputs of the cases in inputs/, which the cases read rather than write,
+; so that they are the same in every environment. They are OUnit tests,
+; which are slow, so they don't run with dune test, run them with
 ;
 ;   dune build @testsuite
 ;
@@ -45,3 +46,7 @@
   (universe))
  (action
   (run %{exe:run.exe} -bap %{bin:bap} -mc %{bin:bap-mc})))
+
+; the fixed inputs and the golden files of the cases are data
+
+(data_only_dirs inputs golden)

@@ -98,45 +98,29 @@ let unicorn data =
       [ "bap:stubbed-executor"; "bap:legacy-main"; "bap:unicorn-executor" ]
 
 (* the write system calls of Linux, which Primus Lisp doesn't model, so
-   the cases define the intrinsics of the system calls *)
-let syscalls =
-  [
-    ( "x86_64-linux-gnu-syscall-crc",
-      {|(require stdio)
-(defun syscall ()
-  (declare (external "intrinsic:syscall"))
-  (set RAX (if (= RAX 1) (write RDI RSI RDX) -1)))
-|}
-    );
-    ( "aarch64-linux-gnu-svc-crc",
-      {|(require stdio)
-(defun svc ()
-  (declare (external "intrinsic:svc"))
-  (set R0 (if (= R8 64) (write R0 R1 R2) -1)))
-|}
-    );
-  ]
+   the cases define the intrinsics of the system calls, in the directory
+   of the program, with its syscalls.lisp *)
+let syscalls bin = input ("syscalls/" ^ bin)
 
 let syscall data =
   List.concat_map
-    (fun (bin, lisp) ->
+    (fun bin ->
       List.map
         (fun system ->
           case (Printf.sprintf "run/syscall/%s/%s" system bin) (fun env ->
-              ignore (write env "syscalls.lisp" lisp);
               let out =
                 bap env
                   [
                     path data ("bin/" ^ bin);
                     "--passes=run";
                     "--run-systems=" ^ system;
-                    "--primus-lisp-add=" ^ dir env;
+                    "--primus-lisp-add=" ^ syscalls bin;
                     "--primus-lisp-load=syscalls";
                   ]
               in
               contains env "prints the CRC" out "1489580789"))
         [ "bap:stubbed-executor"; "bap:unicorn-executor" ])
-    syscalls
+    [ "x86_64-linux-gnu-syscall-crc"; "aarch64-linux-gnu-svc-crc" ]
 
 (* a program that never ends is terminated after the time in Unicorn *)
 let timeout data =
@@ -219,37 +203,28 @@ let limit data =
     [ (100, false); (1_000_000, true) ]
 
 (* the primitives of Primus Lisp for debugging, in the advice of strcpy,
-   which echo calls for its argument *)
+   which echo calls for its argument, in the debug.lisp of the directory
+   of the case *)
 let debugging data =
   let run env system lisp args =
-    let _ = write env "debug.lisp" lisp in
     bap ~timeout:120. env
       ([
          path data "bin/x86_64-linux-gnu-echo";
          "--run-argv=hello";
          "--passes=run";
          "--run-systems=" ^ system;
-         "--primus-lisp-add=" ^ dir env;
+         "--primus-lisp-add=" ^ input ("lisp/" ^ lisp);
          "--primus-lisp-load=posix,debug";
          "--primus-lisp-type-check";
        ]
       @ args)
-  in
-  let advice body =
-    Printf.sprintf
-      "(defun debug (dst src)\n  (declare (advice :before strcpy))\n  %s)\n"
-      body
   in
   List.concat_map
     (fun system ->
       [
         case ("lisp/dump-memory-region/" ^ system) (fun env ->
             let out =
-              run env system
-                (advice
-                   "(memory-allocate 0x50000000 32 0x41)\n\
-                   \  (memory-protect 0x50000010 16 0)\n\
-                   \  (dump-memory-region 0x50000000 34)")
+              run env system "dump-memory-region"
                 [ "--primus-print-observations=lisp-message" ]
             in
             lacks env "well-typed" out "ill-typed";
@@ -263,7 +238,7 @@ let debugging data =
         case ("lisp/bap-exit/" ^ system) (fun env ->
             let obs = file env "observations" in
             let out =
-              run env system (advice "(bap-exit 7)")
+              run env system "bap-exit"
                 [
                   "--primus-print-observations=lisp-message";
                   "--primus-print-output=" ^ obs;
@@ -280,7 +255,6 @@ let debugging data =
    commands of a file, the same in the interpreter and in Unicorn *)
 let debugger data =
   let run env system bin commands args =
-    let commands = write env "commands" commands in
     bap ~timeout:120. env
       ([
          path data ("bin/" ^ bin);
@@ -294,7 +268,7 @@ let debugger data =
   case "debugger/bap:unicorn-executor/x86_64-linux-gnu-crc-loop" (fun env ->
       let out =
         run env "bap:unicorn-executor" "x86_64-linux-gnu-crc-loop"
-          "reg RAX\nset RAX 0\nstep\nstep\nc\n"
+          (input "debugger/crc-loop/commands")
           [ "--primus-debugger-break=0x4004c0" ]
       in
       sequence env out
@@ -310,17 +284,13 @@ let debugger data =
          case
            ("debugger/" ^ system ^ "/x86_64-linux-gnu-echo")
            (fun env ->
-             let _ =
-               write env "helpers.lisp"
-                 "(defun arg-length ()\n  (strlen RDI))\n"
-             in
              let out =
                run env system "x86_64-linux-gnu-echo"
-                 "call arg-length\nstep\nd print_endline\nc\n"
+                 (input "debugger/echo/commands")
                  [
                    "--run-argv=hello";
                    "--primus-debugger-break=print_endline";
-                   "--primus-lisp-add=" ^ dir env;
+                   "--primus-lisp-add=" ^ input "debugger/echo";
                    "--primus-lisp-load=posix,helpers";
                  ]
              in
@@ -339,19 +309,10 @@ let debugger data =
    options, and use its API, e.g., to add a Primus component *)
 let scripts data =
   let crc = path data "bin/x86_64-linux-gnu-crc-loop" in
-  let script env source =
-    bap ~timeout:300. env [ "script"; write env "script.ml" source; crc ]
-  in
+  let script env file = bap ~timeout:300. env [ "script"; file; crc ] in
   [
     case "script/run" (fun env ->
-        let out =
-          script env
-            {|let () =
-  let file = List.hd (Bap_script.args ()) in
-  ignore
-    (Bap_script.run ~system:"bap:unicorn-executor" (Bap_script.project file))
-|}
-        in
+        let out = script env (input "script/run.ml") in
         check env "exits" (out.status = Exited 0);
         contains env "runs the program" out "1635920155");
     (* the symbols of the file, that the user provides, are the
@@ -366,18 +327,7 @@ let scripts data =
               ]
             [
               "script";
-              write env "script.ml"
-                {|open Bap.Std
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let prog = Project.program (Bap_script.project ~bare:true file) in
-  Term.enum sub_t prog
-  |> Seq.iter ~f:(fun sub ->
-         match Term.get_attr sub address with
-         | Some addr -> Format.printf "%s %a@." (Sub.name sub) Addr.pp addr
-         | None -> ())
-|};
+              input "script/bare/read-symbols.ml";
               path data "dyn/x86_64-elf_so";
             ]
         in
@@ -385,36 +335,7 @@ let () =
         contains env "names the stub of the PLT" out "bar 0x4A0";
         contains env "has the symbols of the file" out "foo 0x59A");
     case "script/primus" (fun env ->
-        let out =
-          script env
-            {|#require "bap-primus"
-
-open Bap.Std
-open Bap_primus.Std
-
-module Watch (Machine : Primus.Machine.S) = struct
-  open Machine.Syntax
-  module Env = Primus.Env.Make (Machine)
-  module Stops = Primus.Interpreter.Stops.Make (Machine)
-
-  let stopped _ =
-    Env.get (Var.create "RAX" (Type.imm 64)) >>| fun x ->
-    Printf.printf "RAX = %s\n%!"
-      (Word.string_of_value (Primus.Value.to_word x))
-
-  (* the stops, but not every address, see [stop_reached] *)
-  let init () =
-    Stops.add (Addr.of_int64 ~width:64 0x4004c0L) >>= fun () ->
-    Primus.Interpreter.stop_reached >>> stopped
-end
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  ignore
-    (Bap_script.run ~system:"bap:unicorn-executor" ~init:[ (module Watch) ]
-       (Bap_script.project file))
-|}
-        in
+        let out = script env (input "script/primus.ml") in
         lacks env "loads the plugins" out "Failed to load";
         sequence env out
           [ ("stops", "RAX = 9e7dd6e4"); ("runs the program", "1635920155") ]);
@@ -427,106 +348,7 @@ let () =
           bap ~timeout:300. env
             [
               "script";
-              write env "script.ml"
-                {|#require "bap-primus, monads"
-
-open Core
-open Bap.Std
-open Bap_primus.Std
-
-(* forks the machine at the third putchar, and then switches between
-   the parent and the child at each putchar, so that they take Unicorn
-   from each other in the middle of their runs, and the parent, which
-   doesn't run in Unicorn, capitalizes its argument world *)
-module Fork (Machine : Primus.Machine.S) = struct
-  open Machine.Syntax
-  module Env = Primus.Env.Make (Machine)
-  module Memory = Primus.Memory.Make (Machine)
-
-  let calls = ref 0
-  let machines = ref []
-  let patched = ref false
-
-  (* the string, to which a word of the stack points, e.g., the copy of
-     the argument in the heap, which echo prints *)
-  let find_string sp text =
-    Memory.load_bytes sp 0x1000 >>= fun bytes ->
-    let word i =
-      List.init 8 ~f:(fun k ->
-          match bytes.(i + k) with Some (c, _) -> Char.to_int c | None -> 0)
-      |> List.foldi ~init:0L ~f:(fun k acc b ->
-          Int64.(acc lor shift_left (of_int b) Int.(8 * k)))
-    in
-    let pointers =
-      List.init (0x1000 / 8) ~f:(fun i -> Addr.of_int64 ~width:64 (word (i * 8)))
-    in
-    Machine.List.find pointers ~f:(fun p ->
-        Memory.load_bytes p (String.length text) >>| fun bytes ->
-        String.equal text
-          (String.of_array
-             (Array.map bytes ~f:(function Some (c, _) -> c | None -> '?'))))
-
-  let capitalize () =
-    Machine.current () >>= fun self ->
-    match !machines with
-    | parent :: _
-      when Monads.Std.Monad.State.Multi.Id.equal parent self && not !patched ->
-        patched := true;
-        Env.get (Var.create "RSP" (Type.imm 64)) >>= fun sp ->
-        find_string (Primus.Value.to_word sp) "world\000" >>= (function
-        | Some p -> Memory.store p (Word.of_int ~width:8 (Char.to_int 'W'))
-        | None -> Machine.return ())
-    | _ -> Machine.return ()
-
-  let switch () =
-    Machine.forks () >>= fun alive ->
-    Machine.current () >>= fun self ->
-    let others =
-      List.filter !machines ~f:(fun id ->
-          (not (Monads.Std.Monad.State.Multi.Id.equal id self))
-          && Seq.exists alive ~f:(Monads.Std.Monad.State.Multi.Id.equal id))
-    in
-    match others with
-    | other :: _ -> Machine.switch other
-    | [] -> Machine.return ()
-
-  (* the calls are counted after the name of the program, argv[0] *)
-  let started = ref false
-
-  let call (name, args) =
-    if String.equal name "putchar" && not !started then begin
-      (match args with
-      | [ c ] when Word.to_int_exn (Primus.Value.to_word c) = 10 ->
-          started := true
-      | _ -> ());
-      Machine.return ()
-    end
-    else if String.equal name "putchar" then begin
-      incr calls;
-      if !calls = 3 then
-        Machine.current () >>= fun parent ->
-        Machine.fork () >>= fun () ->
-        Machine.current () >>= fun self ->
-        if Monads.Std.Monad.State.Multi.Id.equal self parent then Machine.return ()
-        else begin
-          machines := [ parent; self ];
-          Machine.return ()
-        end
-      else if !calls > 3 then switch () >>= capitalize
-      else Machine.return ()
-    end
-    else Machine.return ()
-
-  let init () = Primus.Linker.Trace.call >>> call
-end
-
-let () =
-  let file = List.hd_exn (Bap_script.args ()) in
-  ignore
-    (Bap_script.run ~system:"bap:unicorn-executor" ~init:[ (module Fork) ]
-       ~args:[ "hello"; "cruel"; "world" ]
-       (Bap_script.project file))
-|};
+              input "script/unicorn/fork.ml";
               path data "bin/x86_64-linux-gnu-echo";
             ]
         in
@@ -539,7 +361,7 @@ let () =
             ("runs both machines to the end", "ccoouurrssee");
           ]);
     case "script/error" (fun env ->
-        let out = script env "let () =\n  print_endline 42\n" in
+        let out = script env (input "script/error/script.ml") in
         check env "fails" (out.status = Exited 1);
         has env "tells the line of the script" out "script\\.ml\", line 2");
   ]
@@ -549,22 +371,12 @@ let () =
    functions in the Thumb encoding from the symbol table, and the system
    calls lifted on demand *)
 let bare data =
-  let run env ?(lisp = "None") bin =
+  let run env ?(lisp = []) bin =
     bap ~timeout:300. env
-      [
-        "script";
-        write env "script.ml"
-          (Printf.sprintf
-             {|let () =
-  let file = List.hd (Bap_script.args ()) in
-  ignore
-    (Bap_script.run ~system:"bap:unicorn-executor"
-       ~args:[ "hello"; "cruel"; "world" ]
-       (Bap_script.project ~bare:true ?lisp:%s file))
-|}
-             lisp);
-        path data ("bin/" ^ bin);
-      ]
+      ([
+         "script"; input "script/unicorn/bare/run.ml"; path data ("bin/" ^ bin);
+       ]
+      @ lisp)
   in
   [
     case "script/unicorn/bare/x86_64-linux-gnu-echo" (fun env ->
@@ -575,16 +387,9 @@ let bare data =
         let out = run env "arm-linux-gnueabihf-thumb-crc" in
         contains env "prints the CRC" out "1489580789");
     case "script/unicorn/bare/aarch64-linux-gnu-svc-crc" (fun env ->
-        ignore
-          (write env "syscalls.lisp"
-             (List.assoc "aarch64-linux-gnu-svc-crc" syscalls));
         let out =
           run env "aarch64-linux-gnu-svc-crc"
-            ~lisp:
-              (Printf.sprintf
-                 "(Some { Bap_script.paths = [ %S ]; features = [ \"syscalls\" \
-                  ] })"
-                 (dir env))
+            ~lisp:[ syscalls "aarch64-linux-gnu-svc-crc" ]
         in
         contains env "prints the CRC" out "1489580789");
     case "script/unicorn/bare/mips-linux-gnu-echo" (fun env ->
@@ -592,41 +397,21 @@ let bare data =
         sequence env out
           [ ("prints the arguments", "hello"); ("ends", "course") ]);
     case "script/unicorn/bare/x86_64-linux-gnu-syscall-crc" (fun env ->
-        ignore
-          (write env "syscalls.lisp"
-             (List.assoc "x86_64-linux-gnu-syscall-crc" syscalls));
         let out =
           run env "x86_64-linux-gnu-syscall-crc"
-            ~lisp:
-              (Printf.sprintf
-                 "(Some { Bap_script.paths = [ %S ]; features = [ \"syscalls\" \
-                  ] })"
-                 (dir env))
+            ~lisp:[ syscalls "x86_64-linux-gnu-syscall-crc" ]
         in
         contains env "prints the CRC" out "1489580789");
     (* each system lifts the system calls in its own knowledge, with the
        semantics, that the process loads once *)
     case "script/unicorn/bare/twice/x86_64-linux-gnu-syscall-crc" (fun env ->
-        ignore
-          (write env "syscalls.lisp"
-             (List.assoc "x86_64-linux-gnu-syscall-crc" syscalls));
         let out =
           bap ~timeout:300. env
             [
               "script";
-              write env "script.ml"
-                (Printf.sprintf
-                   {|let () =
-  let file = List.hd (Bap_script.args ()) in
-  let lisp = Some { Bap_script.paths = [ %S ]; features = [ "syscalls" ] } in
-  for _ = 1 to 2 do
-    ignore
-      (Bap_script.run ~system:"bap:unicorn-executor"
-         (Bap_script.project ~bare:true ?lisp file))
-  done
-|}
-                   (dir env));
+              input "script/unicorn/bare/twice.ml";
               path data "bin/x86_64-linux-gnu-syscall-crc";
+              syscalls "x86_64-linux-gnu-syscall-crc";
             ]
         in
         check env "prints the CRC twice" (count out "1489580789" = 2));
@@ -636,47 +421,15 @@ let bare data =
    their registers and memory, hook their instructions, stores and calls,
    and restore their snapshots *)
 let emu data =
-  let script env bin source =
-    bap ~timeout:300. env
-      [ "script"; write env "script.ml" source; path data ("bin/" ^ bin) ]
+  (* the arguments of the scripts are the program, and the input, that
+     some of them redirect the standard input to *)
+  let script ?(args = []) env bin file =
+    bap ~timeout:300. env ([ "script"; file; path data ("bin/" ^ bin) ] @ args)
   in
   [
     case "emu/x86_64-linux-gnu-echo/main" (fun env ->
         let out =
-          script env "x86_64-linux-gnu-echo"
-            {|#require "bap-primus-unicorn.emu"
-open Bap.Std
-module Emu = Bap_emu
-
-let word emu addr =
-  let s = Emu.read emu addr 8 in
-  let r = ref 0L in
-  for i = 7 downto 0 do r := Int64.(logor (shift_left !r 8) (of_int (Char.code s.[i]))) done;
-  !r
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~args:[ "hello"; "cruel"; "world" ] (Bap_script.project ~bare:true file) in
-  Printf.printf "paused at the entry %Lx\n%!" (Emu.pc emu);
-  (match Emu.run emu ~until:0x40076bL with
-  | Paused -> Printf.printf "paused at main %Lx, argc = %Ld\n%!" (Emu.pc emu) (Emu.reg emu "RDI")
-  | _ -> failwith "main is not reached");
-  let argv = Emu.reg emu "RSI" in
-  let arg1 = word emu Int64.(add argv 8L) in
-  Printf.printf "argv[1] = %s\n%!" (Emu.read emu arg1 5);
-  Emu.write emu arg1 "HELLO";
-  let stores = ref 0 in
-  Emu.on_write emu (fun _ _ _ _ -> incr stores);
-  Emu.on_call emu "putchar" (fun emu ->
-      if Emu.arg emu 0 = Int64.of_int (Char.code 'l') then Return 108L else Default);
-  (match Emu.run emu with
-  | Exited code ->
-      Printf.printf "exited with %s after %d stores\n"
-        (match code with Some c -> string_of_int c | None -> "?") !stores
-  | Paused -> print_endline "paused"
-  | Running -> print_endline "running"
-  | Failed msg -> print_endline ("failed: " ^ msg))
-|}
+          script env "x86_64-linux-gnu-echo" (input "emu/echo/main.ml")
         in
         sequence env out
           [
@@ -689,33 +442,7 @@ let () =
           ]);
     case "emu/x86_64-linux-gnu-echo/step" (fun env ->
         let out =
-          script env "x86_64-linux-gnu-echo"
-            {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let show emu = function
-  | Emu.Paused -> Printf.printf "paused at %Lx\n%!" (Emu.pc emu)
-  | Exited c -> Printf.printf "exited %s\n%!" (match c with Some c -> string_of_int c | None -> "?")
-  | Failed m -> Printf.printf "failed %s\n%!" m
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~args:[ "hello"; "cruel" ] (Bap_script.project ~bare:true file) in
-  (* three steps from the entry *)
-  for _ = 1 to 3 do show emu (Emu.step emu) done;
-  (* the first instruction of print_strings stops the program *)
-  let stopped = ref false in
-  Emu.on_code emu ~first:0x400733L ~last:0x400733L (fun emu _ ->
-      if not !stopped then (stopped := true; Emu.stop emu));
-  show emu (Emu.run emu);
-  (* print_endline, a function of the program, prints nothing for the
-     arguments, but the strings of the program *)
-  let calls = ref 0 in
-  Emu.on_call emu "print_endline" (fun _ ->
-      incr calls; if !calls <= 3 then Return 0L else Default);
-  show emu (Emu.run emu);
-  Printf.printf "print_endline was called %d times\n" !calls
-|}
+          script env "x86_64-linux-gnu-echo" (input "emu/echo/step.ml")
         in
         sequence env out
           [
@@ -729,68 +456,17 @@ let () =
     (* the script reads and writes the state of the machine in Primus *)
     case "emu/x86_64-linux-gnu-echo/primus" (fun env ->
         let out =
-          script env "x86_64-linux-gnu-echo"
-            {|#require "bap-primus-unicorn.emu"
-open Bap.Std
-open Bap_primus.Std
-module Emu = Bap_emu
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true file) in
-  ignore (Emu.run emu ~until:0x40076bL);
-  let argc = ref Word.b0 in
-  let module Get (Machine : Primus.Machine.S) = struct
-    module Env = Primus.Env.Make (Machine)
-    module Value = Primus.Value.Make (Machine)
-    open Machine.Syntax
-
-    let init () =
-      Env.get (Var.create "RDI" reg64_t) >>= fun x ->
-      argc := Primus.Value.to_word x;
-      Value.of_int ~width:64 7 >>= Env.set (Var.create "RDI" reg64_t)
-  end in
-  Emu.primus emu (module Get);
-  Printf.printf "argc %s in Primus, %Ld in Unicorn\n%!" (Word.to_string !argc)
-    (Emu.reg emu "RDI")
-|}
+          script env "x86_64-linux-gnu-echo" (input "emu/echo/primus.ml")
         in
         contains env "reads and writes the registers" out
           "argc 2:64u in Primus, 7 in Unicorn");
     (* the script taints the input, which the code in Unicorn uses, and
        sees the jumps, that it taints, as the Lisp does, see taint/ *)
     case "emu/x86_64-linux-gnu-symexec-crc32/taint" (fun env ->
-        let input = write env "input" "abc\nabd\n" in
         let out =
           script env "x86_64-linux-gnu-symexec-crc32"
-            (Printf.sprintf
-               {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu =
-    Emu.create ~components:Emu.Taint.components ~redirects:[ ("<stdin>", %S) ]
-      (Bap_script.project file)
-  in
-  (match Emu.run emu ~until:0x80cL with
-   | Paused -> ()
-   | _ -> failwith "fgets didn't return");
-  let rbp = Emu.reg emu "RBP" in
-  Emu.Taint.introduce emu ~kind:"input" (Mem (Int64.sub rbp 0x40L, 16));
-  Emu.Taint.introduce emu ~kind:"input" (Mem (Int64.sub rbp 0x30L, 16));
-  Printf.printf "buf1 %%s, RAX %%s\n%%!"
-    (String.concat "," (Emu.Taint.kinds emu (Mem (Int64.sub rbp 0x40L, 4))))
-    (String.concat "," (Emu.Taint.kinds emu (Reg "RAX")));
-  let jumps = ref [] in
-  Emu.Taint.on_jump emu (fun _ ~kinds dst -> jumps := (dst, kinds) :: !jumps);
-  ignore (Emu.run emu);
-  Printf.printf "jumps:";
-  List.iter (fun (dst, kinds) ->
-      Printf.printf " %%Lx:%%s" dst (String.concat "," kinds)) (List.rev !jumps);
-  print_newline ()
-|}
-               input)
+            ~args:[ input "stdin/abc-abd" ]
+            (input "emu/crc32/taint.ml")
         in
         contains env "taints the buffer, not RAX" out "buf1 input, RAX \n";
         contains env "sees the tainted jumps" out
@@ -799,78 +475,18 @@ let () =
     (* the scripts make the registers and the memory symbolic, and the
        solver finds the inputs, that flip the branches *)
     case "emu/x86_64-linux-gnu-symexec-guess/symbolic" (fun env ->
-        let input = write env "input" "Z" in
         let out =
           script env "x86_64-linux-gnu-symexec-guess"
-            (Printf.sprintf
-               {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-module Sym = Emu.Symbolic
-
-let model = function
-  | None -> "unsat"
-  | Some m ->
-      String.concat ","
-        (List.map (fun (n, v) -> Printf.sprintf "%%s=%%Lx" n (Int64.logand v 0xffL)) m)
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu =
-    Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", %S) ]
-      (Bap_script.project file)
-  in
-  (match Emu.run emu ~until:0x693L with
-   | Paused -> ()
-   | _ -> failwith "getchar didn't return");
-  Sym.symbolize emu (Reg "RAX");
-  Printf.printf "RAX %%s, RBX %%s\n%%!"
-    (String.concat "," (List.map (Option.value ~default:"-") (Sym.formula emu (Reg "RAX"))))
-    (String.concat "," (List.map (Option.value ~default:"-") (Sym.formula emu (Reg "RBX"))));
-  let branches = ref [] in
-  Sym.on_branch emu (fun _ b -> branches := b :: !branches);
-  ignore (Emu.run emu);
-  List.iter (fun b ->
-      Printf.printf "branch %%Lx %%b flips with %%s\n" (Sym.addr b) (Sym.taken b)
-        (model (Sym.flip b))) (List.rev !branches)
-|}
-               input)
+            ~args:[ input "stdin/Z" ]
+            (input "emu/guess/symbolic.ml")
         in
         contains env "makes RAX symbolic" out "RAX RAX, RBX -\n";
         contains env "flips the branch" out "branch 696 true flips with RAX=41");
     case "emu/x86_64-linux-gnu-symexec-crc32/symbolic" (fun env ->
-        let input = write env "input" "abc\nabd\n" in
         let out =
           script env "x86_64-linux-gnu-symexec-crc32"
-            (Printf.sprintf
-               {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-module Sym = Emu.Symbolic
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu =
-    Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", %S) ]
-      (Bap_script.project file)
-  in
-  (match Emu.run emu ~until:0x80cL with
-   | Paused -> ()
-   | _ -> failwith "fgets didn't return");
-  let buf1 = Int64.sub (Emu.reg emu "RBP") 0x40L in
-  Sym.symbolize emu (Mem (buf1, 4));
-  let branches = ref [] in
-  Sym.on_branch emu (fun _ b -> branches := b :: !branches);
-  ignore (Emu.run emu);
-  Printf.printf "branches:";
-  List.iter (fun b -> Printf.printf " %%Lx" (Sym.addr b)) (List.rev !branches);
-  print_newline ();
-  match Sym.flip ~timeout:10_000 (List.hd !branches) with
-  | None -> print_endline "no collision"
-  | Some m ->
-      print_string "collision: ";
-      List.iter (fun (_, v) -> print_char (Char.chr (Int64.to_int v))) m;
-      print_newline ()
-|}
-               input)
+            ~args:[ input "stdin/abc-abd" ]
+            (input "emu/crc32/symbolic.ml")
         in
         contains env "sees the symbolic branches" out
           "branches: 7b6 7b6 7b6 7b6 82d\n";
@@ -878,135 +494,37 @@ let () =
     (* the checkpoints keep the taint and the symbolic values, e.g., of the
        buffer, which the program, that continues from them, uses *)
     case "emu/x86_64-linux-gnu-symexec-crc32/checkpoint-taint" (fun env ->
-        let input = write env "input" "abc\nabd\n" in
         let saved =
           script env "x86_64-linux-gnu-symexec-crc32"
-            (Printf.sprintf
-               {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu =
-    Emu.create ~components:Emu.Taint.components ~redirects:[ ("<stdin>", %S) ]
-      (Bap_script.project file)
-  in
-  (match Emu.run emu ~until:0x80cL with
-   | Paused -> ()
-   | _ -> failwith "fgets didn't return");
-  let rbp = Emu.reg emu "RBP" in
-  Emu.Taint.introduce emu ~kind:"input" (Mem (Int64.sub rbp 0x40L, 16));
-  Emu.Taint.introduce emu ~kind:"input" (Mem (Int64.sub rbp 0x30L, 16));
-  Emu.save emu "taint.ckpt";
-  print_endline "saved"
-|}
-               input)
+            ~args:[ input "stdin/abc-abd" ]
+            (input "emu/crc32/checkpoint-taint/save.ml")
         in
         contains env "saves" saved "saved";
         let out =
           script env "x86_64-linux-gnu-symexec-crc32"
-            {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu =
-    Emu.create ~components:Emu.Taint.components ~restore:"taint.ckpt"
-      (Bap_script.project file)
-  in
-  let rbp = Emu.reg emu "RBP" in
-  Printf.printf "buf1 %s\n%!"
-    (String.concat "," (Emu.Taint.kinds emu (Mem (Int64.sub rbp 0x40L, 4))));
-  let jumps = ref [] in
-  Emu.Taint.on_jump emu (fun _ ~kinds dst -> jumps := (dst, kinds) :: !jumps);
-  ignore (Emu.run emu);
-  Printf.printf "jumps:";
-  List.iter (fun (dst, kinds) ->
-      Printf.printf " %Lx:%s" dst (String.concat "," kinds)) (List.rev !jumps);
-  print_newline ()
-|}
+            (input "emu/crc32/checkpoint-taint/restore.ml")
         in
         contains env "restores the taint" out "buf1 input\n";
         contains env "sees the tainted jumps" out
           "jumps: 752:input 752:input 752:input 752:input 7b8:input 752:input \
            752:input 752:input 752:input 7b8:input 83b:input");
     case "emu/x86_64-linux-gnu-symexec-crc32/checkpoint-symbolic" (fun env ->
-        let input = write env "input" "abc\nabd\n" in
         let saved =
           script env "x86_64-linux-gnu-symexec-crc32"
-            (Printf.sprintf
-               {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-module Sym = Emu.Symbolic
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu =
-    Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", %S) ]
-      (Bap_script.project file)
-  in
-  (match Emu.run emu ~until:0x80cL with
-   | Paused -> ()
-   | _ -> failwith "fgets didn't return");
-  Sym.symbolize emu (Mem (Int64.sub (Emu.reg emu "RBP") 0x40L, 4));
-  Emu.save emu "symbolic.ckpt";
-  print_endline "saved"
-|}
-               input)
+            ~args:[ input "stdin/abc-abd" ]
+            (input "emu/crc32/checkpoint-symbolic/save.ml")
         in
         contains env "saves" saved "saved";
         let out =
           script env "x86_64-linux-gnu-symexec-crc32"
-            {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-module Sym = Emu.Symbolic
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu =
-    Emu.create ~components:Sym.components ~restore:"symbolic.ckpt"
-      (Bap_script.project file)
-  in
-  let branches = ref [] in
-  Sym.on_branch emu (fun _ b -> branches := b :: !branches);
-  ignore (Emu.run emu);
-  Printf.printf "branches:";
-  List.iter (fun b -> Printf.printf " %Lx" (Sym.addr b)) (List.rev !branches);
-  print_newline ();
-  match Sym.flip ~timeout:10_000 (List.hd !branches) with
-  | None -> print_endline "no collision"
-  | Some m ->
-      print_string "collision: ";
-      List.iter (fun (_, v) -> print_char (Char.chr (Int64.to_int v))) m;
-      print_newline ()
-|}
+            (input "emu/crc32/checkpoint-symbolic/restore.ml")
         in
         contains env "sees the symbolic branches" out
           "branches: 7b6 7b6 7b6 7b6 82d\n";
         contains env "finds the collision of the CRC" out "collision: abd\n");
     case "emu/x86_64-linux-gnu-echo/patch" (fun env ->
         let out =
-          script env "x86_64-linux-gnu-echo"
-            {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let status = function
-  | Emu.Exited _ -> print_endline "exited"
-  | Paused -> print_endline "paused"
-  | Running -> print_endline "running"
-  | Failed m -> print_endline ("failed: " ^ m)
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true file) in
-  ignore (Emu.run emu ~until:0x40076bL);
-  (* mov $0xa, %edi, which prints the newline, prints + instead *)
-  Emu.patch emu 0x400727L "\xbf\x2b";
-  let snapshot = Emu.snapshot emu in
-  status (Emu.run emu);
-  Emu.restore emu snapshot;
-  status (Emu.run emu)
-|}
+          script env "x86_64-linux-gnu-echo" (input "emu/echo/patch.ml")
         in
         sequence env out
           [
@@ -1017,42 +535,7 @@ let () =
           ]);
     case "emu/x86_64-linux-gnu-echo/snapshot" (fun env ->
         let out =
-          script env "x86_64-linux-gnu-echo"
-            {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let word emu addr =
-  let s = Emu.read emu addr 8 in
-  let r = ref 0L in
-  for i = 7 downto 0 do r := Int64.(logor (shift_left !r 8) (of_int (Char.code s.[i]))) done;
-  !r
-
-let show emu = function
-  | Emu.Paused -> Printf.printf "paused at %Lx\n%!" (Emu.pc emu)
-  | Exited c -> Printf.printf "exited %s\n%!" (match c with Some c -> string_of_int c | None -> "?")
-  | Failed m -> Printf.printf "failed %s\n%!" m
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true file) in
-  show emu (Emu.run emu ~until:0x40076bL);
-  let snap = Emu.snapshot emu in
-  let arg1 () = word emu Int64.(add (Emu.reg emu "RSI") 8L) in
-  Printf.printf "snapshot at %Lx, RDI = %Ld, argv[1] = %s\n%!" (Emu.pc emu) (Emu.reg emu "RDI") (Emu.read emu (arg1 ()) 5);
-  print_endline "== first run";
-  show emu (Emu.run emu);
-  Emu.restore emu snap;
-  Printf.printf "restored at %Lx, RDI = %Ld, argv[1] = %s\n%!" (Emu.pc emu) (Emu.reg emu "RDI") (Emu.read emu (arg1 ()) 5);
-  Emu.write emu (arg1 ()) "WORLD";
-  Emu.set_reg emu "RDI" 2L;
-  print_endline "== second run, argv[1] = WORLD, argc = 2";
-  show emu (Emu.run emu);
-  Emu.restore emu snap;
-  Printf.printf "restored again, RDI = %Ld, argv[1] = %s\n%!" (Emu.reg emu "RDI") (Emu.read emu (arg1 ()) 5);
-  print_endline "== third run";
-  show emu (Emu.run emu ~until:0x400733L);
-  show emu (Emu.run emu)
-|}
+          script env "x86_64-linux-gnu-echo" (input "emu/echo/snapshot.ml")
         in
         sequence env out
           [
@@ -1071,29 +554,7 @@ let () =
     case "emu/x86_64-linux-gnu-echo/checkpoint" (fun env ->
         let saved =
           script env "x86_64-linux-gnu-echo"
-            {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let word emu addr =
-  let s = Emu.read emu addr 8 in
-  let r = ref 0L in
-  for i = 7 downto 0 do r := Int64.(logor (shift_left !r 8) (of_int (Char.code s.[i]))) done;
-  !r
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~args:[ "hello"; "cruel" ] (Bap_script.project ~bare:true file) in
-  ignore (Emu.run emu ~until:0x40076bL);
-  Emu.write emu (word emu Int64.(add (Emu.reg emu "RSI") 8L)) "HELLO";
-  let say = List.assoc "print_endline" (Emu.symbols emu) in
-  Emu.add_symbol emu "say" say;
-  Emu.save emu "echo.ckpt";
-  Printf.printf "saved at %Lx, say at %Lx\n%!" (Emu.pc emu) say;
-  (try Emu.save emu "missing/echo.ckpt" with Failure _ -> print_endline "can't save");
-  match Emu.run emu with
-  | Exited c -> Printf.printf "exited %s\n" (match c with Some c -> string_of_int c | None -> "?")
-  | _ -> print_endline "not exited"
-|}
+            (input "emu/echo/checkpoint/save.ml")
         in
         sequence env saved
           [
@@ -1103,23 +564,7 @@ let () =
           ];
         let restored =
           script env "x86_64-linux-gnu-echo"
-            {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~restore:"echo.ckpt" (Bap_script.project ~bare:true file) in
-  Printf.printf "restored at %Lx, RDI = %Ld\n%!" (Emu.pc emu) (Emu.reg emu "RDI");
-  Printf.printf "say at %Lx\n%!" (List.assoc "say" (Emu.symbols emu));
-  let calls = ref 0 in
-  Emu.on_call emu "say" (fun _ -> incr calls; Default);
-  match Emu.run emu with
-  | Exited c ->
-      Printf.printf "exited %s, say was called %d times\n"
-        (match c with Some c -> string_of_int c | None -> "?") !calls
-  | Failed m -> print_endline ("failed " ^ m)
-  | _ -> print_endline "not exited"
-|}
+            (input "emu/echo/checkpoint/restore.ml")
         in
         sequence env restored
           [
@@ -1134,50 +579,12 @@ let () =
     (* the code of the function, that a Lisp stub replaced, runs again,
        e.g., as the script patched it, also from the checkpoint *)
     case "emu/x86_64-linux-gnu-echo/unstub" (fun env ->
-        ignore
-          (write env "quiet.lisp"
-             {|(defun print_endline ()
-  (declare (external "print_endline"))
-  0)
-|});
-        let run source =
+        let run file =
           script env "x86_64-linux-gnu-echo"
-            (Printf.sprintf
-               {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let show emu = function
-  | Emu.Paused -> Printf.printf "paused at %%Lx\n%%!" (Emu.pc emu)
-  | Exited c -> Printf.printf "exited %%s\n%%!" (match c with Some c -> string_of_int c | None -> "?")
-  | Failed m -> Printf.printf "failed %%s\n%%!" m
-  | Running -> print_endline "running"
-
-let project file =
-  Bap_script.project ~bare:true
-    ~lisp:{ Bap_script.paths = [ %S ]; features = [ "quiet" ] } file
-
-let file = List.hd (Bap_script.args ())
-%s|}
-               (dir env) source)
+            ~args:[ input "emu/echo/unstub" ]
+            file
         in
-        let out =
-          run
-            {|let () =
-  let emu = Emu.create ~args:[ "hello" ] (project file) in
-  show emu (Emu.run emu ~until:0x40076bL);
-  let snap = Emu.snapshot emu in
-  print_endline "== stubbed";
-  show emu (Emu.run emu);
-  Emu.restore emu snap;
-  (try Emu.unstub emu "putchar" with Invalid_argument _ -> print_endline "putchar is external");
-  Emu.unstub emu "print_endline";
-  (* mov $0xa, %edi, which prints the newline, prints + instead *)
-  Emu.patch emu 0x400727L "\xbf\x2b";
-  Emu.save emu "echo.ckpt";
-  print_endline "== unstubbed";
-  show emu (Emu.run emu)
-|}
-        in
+        let out = run (input "emu/echo/unstub/stubbed.ml") in
         sequence env out
           [
             ("pauses", "paused at 40076b");
@@ -1186,85 +593,32 @@ let file = List.hd (Bap_script.args ())
             ( "runs the patched code",
               "== unstubbed\n[^\n]*\\+hello\\+we\\+.*exited 0" );
           ];
-        let out =
-          run
-            {|let () =
-  let emu = Emu.create ~restore:"echo.ckpt" (project file) in
-  print_endline "== restored";
-  show emu (Emu.run emu)
-|}
-        in
+        let out = run (input "emu/echo/unstub/restored.ml") in
         has env "runs the patched code of the checkpoint" out
           "== restored\n[^\n]*\\+hello\\+we\\+.*exited 0");
     (* the checkpoint keeps the channels of Lisp, e.g., the input, that
        the program read partly, and is of its program *)
     case "emu/x86_64-linux-gnu-symexec-crc32/checkpoint" (fun env ->
-        let input = write env "input" "abc\nabd\n" in
         let saved =
           script env "x86_64-linux-gnu-symexec-crc32"
-            (Printf.sprintf
-               {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~redirects:[ ("<stdin>", %S) ] (Bap_script.project file) in
-  (match Emu.run emu ~until:0x7efL with
-   | Paused -> ()
-   | _ -> failwith "fgets didn't return");
-  Printf.printf "buf1 %%S\n%%!" (Emu.read emu (Int64.sub (Emu.reg emu "RBP") 0x40L) 4);
-  Emu.save emu "crc.ckpt";
-  print_endline "saved"
-|}
-               input)
+            ~args:[ input "stdin/abc-abd" ]
+            (input "emu/crc32/checkpoint/save.ml")
         in
         sequence env saved
           [ ("reads the first line", "buf1 \"abc\\\\n\""); ("saves", "saved") ];
         let restored =
           script env "x86_64-linux-gnu-symexec-crc32"
-            {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let emu = Emu.create ~restore:"crc.ckpt" (Bap_script.project file) in
-  match Emu.run emu ~until:0x80cL with
-  | Paused ->
-      Printf.printf "buf2 %S\n%!" (Emu.read emu (Int64.sub (Emu.reg emu "RBP") 0x30L) 4)
-  | _ -> print_endline "fgets didn't return"
-|}
+            (input "emu/crc32/checkpoint/restore.ml")
         in
         contains env "reads the rest of the input" restored "buf2 \"abd\\n\"";
         let other =
           script env "x86_64-linux-gnu-echo"
-            {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  match Emu.status (Emu.create ~restore:"crc.ckpt" (Bap_script.project file)) with
-  | Failed msg -> print_endline msg
-  | _ -> print_endline "restored"
-|}
+            (input "emu/crc32/checkpoint/other.ml")
         in
         contains env "is of its program" other "is of another program");
     case "emu/arm-linux-gnueabihf-thumb-crc" (fun env ->
         let out =
-          script env "arm-linux-gnueabihf-thumb-crc"
-            {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-let () =
-  let file = List.hd (Bap_script.args ()) in
-  let bare = Sys.getenv_opt "BARE" <> Some "0" in
-  let emu = Emu.create ~args:[ "hi" ] (Bap_script.project ~bare file) in
-  let pcs = List.init 3 (fun _ -> ignore (Emu.step emu); Printf.sprintf "%Lx" (Emu.pc emu)) in
-  Printf.printf "steps: %s\n%!" (String.concat " " pcs);
-  match Emu.run emu with
-  | Exited c -> Printf.printf "exited %s\n" (match c with Some c -> string_of_int c | None -> "?")
-  | Paused -> print_endline "paused"
-  | Running -> print_endline "running"
-  | Failed m -> print_endline ("failed: " ^ m)
-|}
+          script env "arm-linux-gnueabihf-thumb-crc" (input "emu/thumb-crc.ml")
         in
         sequence env out
           [
@@ -1280,63 +634,7 @@ let () =
           bap ~timeout:300. env
             [
               "script";
-              write env "script.ml"
-                {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let word emu addr =
-  let s = Emu.read emu addr 8 in
-  let r = ref 0L in
-  for i = 7 downto 0 do r := Int64.(logor (shift_left !r 8) (of_int (Char.code s.[i]))) done;
-  !r
-
-let show name emu = function
-  | Emu.Paused -> Printf.printf "%s paused at %Lx\n%!" name (Emu.pc emu)
-  | Exited c -> Printf.printf "%s exited %s\n%!" name (match c with Some c -> string_of_int c | None -> "?")
-  | Failed m -> Printf.printf "%s failed %s\n%!" name m
-  | Running -> Printf.printf "%s running\n%!" name
-
-let () =
-  let echo, crc =
-    match Bap_script.args () with
-    | [ echo; crc ] -> (echo, crc)
-    | _ -> failwith "expected ECHO CRC"
-  in
-  let a = Emu.create ~args:[ "hello" ] (Bap_script.project ~bare:true echo) in
-  let b = Emu.create ~args:[ "hi" ] (Bap_script.project ~bare:true crc) in
-  let c = Emu.create ~args:[ "world"; "again" ] (Bap_script.project ~bare:true echo) in
-  show "a" a (Emu.run a ~until:0x40076bL);
-  show "c" c (Emu.run c ~until:0x40076bL);
-  Printf.printf "argc: a %Ld, c %Ld\n%!" (Emu.reg a "RDI") (Emu.reg c "RDI");
-  Emu.write a (word a Int64.(add (Emu.reg a "RSI") 8L)) "HELLO";
-  Emu.add_symbol a "only_a" 0x400733L;
-  Printf.printf "names: a %b, c %b\n%!"
-    (List.mem_assoc "only_a" (Emu.symbols a))
-    (List.mem_assoc "only_a" (Emu.symbols c));
-  (try Emu.restore c (Emu.snapshot a)
-   with Invalid_argument _ -> print_endline "the snapshot of a is not of c");
-  let calls_a = ref 0 and calls_c = ref 0 in
-  Emu.on_call a "print_endline" (fun _ -> incr calls_a; Default);
-  Emu.on_call c "print_endline" (fun _ -> incr calls_c; Default);
-  let pcs = ref [] in
-  for _ = 1 to 3 do
-    ignore (Emu.step a);
-    ignore (Emu.step b);
-    ignore (Emu.step c);
-    pcs := Printf.sprintf "%Lx/%Lx/%Lx" (Emu.pc a) (Emu.pc b) (Emu.pc c) :: !pcs
-  done;
-  Printf.printf "steps: %s\n%!" (String.concat " " (List.rev !pcs));
-  print_endline "== b";
-  show "b" b (Emu.run b);
-  print_endline "== c";
-  show "c" c (Emu.run c);
-  print_endline "== a";
-  show "a" a (Emu.run a);
-  Printf.printf "print_endline: a %d, c %d\n" !calls_a !calls_c;
-  Printf.printf "knowledge: a %b, b %b\n"
-    (Option.is_some (Emu.knowledge a))
-    (Option.is_some (Emu.knowledge b))
-|};
+              input "emu/side-by-side.ml";
               path data "bin/x86_64-linux-gnu-echo";
               path data "bin/arm-linux-gnueabihf-thumb-crc";
             ]
@@ -1367,23 +665,13 @@ let () =
    the thread control block *)
 let observations data =
   let run env system =
-    ignore
-      (write env "counts.lisp"
-         {|(defparameter *pcs* 0)
-(defparameter *stores* 0)
-(defparameter *loads* 0)
-(defmethod pc-changed (pc) (incr *pcs*))
-(defmethod stored (a x) (incr *stores*))
-(defmethod loaded (a x) (incr *loads*))
-(defmethod fini () (msg "pcs $0 stores $1 loads $2" *pcs* *stores* *loads*))
-|});
     bap env
       [
         path data "bin/x86_64-linux-gnu-echo";
         "--passes=run";
         "--run-argv=echo,hello";
         "--run-systems=" ^ system;
-        "--primus-lisp-add=" ^ dir env;
+        "--primus-lisp-add=" ^ input "observations";
         "--primus-lisp-load=posix,counts";
         "--primus-print-observations=lisp-message";
       ]
@@ -1404,30 +692,15 @@ let observations data =
    of the comparison of the CRCs *)
 let unicorn_taint data =
   let run env system =
-    let input = write env "input" "abc\nabd\n" in
-    ignore
-      (write env "tainting.lisp"
-         {|(defparameter *tainted* 0)
-
-(defmethod call-return (name buf n _ ret)
-  (when (= name 'fgets)
-    (taint-introduce-indirectly 'input buf n)))
-
-(defmethod jumping (c dst)
-  (when (taint-get-direct 'input c)
-    (msg "tainted jump to $0" dst)
-    (incr *tainted*)))
-
-(defmethod fini () (msg "tainted $0 jumps" *tainted*))
-|});
+    let stdin = input "stdin/abc-abd" in
     bap env
       [
         path data "bin/x86_64-linux-gnu-symexec-crc32";
         "--passes=run";
         "--run-systems=" ^ system;
-        "--primus-lisp-channel-redirect=<stdin>:" ^ input;
+        "--primus-lisp-channel-redirect=<stdin>:" ^ stdin;
         "--run-components=bap:taint-primitives,bap:propagate-taint-by-computation,bap:select-default-taint-policy";
-        "--primus-lisp-add=" ^ dir env;
+        "--primus-lisp-add=" ^ input "taint/unicorn";
         "--primus-lisp-load=posix,tainting";
         "--primus-print-observations=lisp-message";
       ]
@@ -1457,33 +730,16 @@ let patched_code data =
     case
       ("taint/" ^ system ^ "/patched-code")
       (fun env ->
-        let input = write env "input" "abc\nabd\n" in
-        ignore
-          (write env "patching.lisp"
-             {|(defparameter *patched* nil)
-
-(defmethod call-return (name buf n _ ret)
-  (when (= name 'fgets)
-    (taint-introduce-indirectly 'input buf n)))
-
-(defmethod jumping (c dst)
-  (when (taint-get-direct 'input c)
-    (msg "tainted jump to $0" dst)
-    (unless *patched*
-      (set *patched* true)
-      (memory-protect 0x7B6 1 7)
-      (memory-write 0x7B6 0x74:8)
-      (memory-protect 0x7B6 1 5))))
-|});
+        let stdin = input "stdin/abc-abd" in
         let out =
           bap env
             [
               path data "bin/x86_64-linux-gnu-symexec-crc32";
               "--passes=run";
               "--run-systems=" ^ system;
-              "--primus-lisp-channel-redirect=<stdin>:" ^ input;
+              "--primus-lisp-channel-redirect=<stdin>:" ^ stdin;
               "--run-components=bap:taint-primitives,bap:propagate-taint-by-computation,bap:select-default-taint-policy";
-              "--primus-lisp-add=" ^ dir env;
+              "--primus-lisp-add=" ^ input "patched-code/taint";
               "--primus-lisp-load=posix,patching";
               "--primus-print-observations=lisp-message";
             ]
@@ -1501,29 +757,10 @@ let patched_code data =
      putchar, passes + instead, or the tab on RISC-V, whose short
      instruction has no room for +, which the first call of strlen
      patches, as the call is a stub of Lisp *)
-  let echo (arch, addr, bytes, sep) system =
+  let echo (arch, sep) system =
     case
       ("run/patched-code/" ^ system ^ "/" ^ arch ^ "-echo")
       (fun env ->
-        let patch =
-          List.fold_left
-            (fun dst byte ->
-              Printf.sprintf "(memory-write %s 0x%02x:8)" dst byte)
-            addr bytes
-        in
-        ignore
-          (write env "patching.lisp"
-             (Printf.sprintf
-                {|(defparameter *patched* nil)
-
-(defmethod call-return (name s n)
-  (when (and (= name 'strlen) (not *patched*))
-    (set *patched* true)
-    (memory-protect %s 4 7)
-    %s
-    (memory-protect %s 4 5)))
-|}
-                addr patch addr));
         let out =
           bap env
             ([ path data ("bin/" ^ arch ^ "-echo") ]
@@ -1532,7 +769,7 @@ let patched_code data =
                 "--passes=run";
                 "--run-argv=echo,hello,world";
                 "--run-systems=" ^ system;
-                "--primus-lisp-add=" ^ dir env;
+                "--primus-lisp-add=" ^ input ("patched-code/echo/" ^ arch);
                 "--primus-lisp-load=posix,patching";
               ])
         in
@@ -1541,14 +778,14 @@ let patched_code data =
   in
   let echos =
     [
-      ("x86_64-linux-gnu", "0x400728", [ 0x2b ], "+");
-      ("x86-linux-gnu", "0x804856f", [ 0x2b ], "+");
-      ("aarch64-linux-gnu", "0xaa0", [ 0x60; 0x05; 0x80; 0x52 ], "+");
-      ("arm-linux-gnueabi", "0x85b4", [ 0x2b ], "+");
-      ("mips-linux-gnu", "0x4008fb", [ 0x2b ], "+");
-      ("mips64-linux-gnueabi", "0x120000d8b", [ 0x2b ], "+");
-      ("powerpc32-linux-gnu", "0x10000673", [ 0x2b ], "+");
-      ("riscv64-linux-gnu", "0x10734", [ 0x25; 0x45 ], "\t");
+      ("x86_64-linux-gnu", "+");
+      ("x86-linux-gnu", "+");
+      ("aarch64-linux-gnu", "+");
+      ("arm-linux-gnueabi", "+");
+      ("mips-linux-gnu", "+");
+      ("mips64-linux-gnueabi", "+");
+      ("powerpc32-linux-gnu", "+");
+      ("riscv64-linux-gnu", "\t");
     ]
   in
   (* the Thumb code of ARM, whose newline of print is +, after the first
@@ -1560,34 +797,14 @@ let patched_code data =
       ("run/patched-code/" ^ system ^ "/arm-linux-gnueabihf-thumb-crc")
       (fun env ->
         let taint = String.equal system "bap:unicorn-executor" in
-        ignore
-          (write env "patching.lisp"
-             (Printf.sprintf
-                {|(defparameter *patched* nil)
-
-(defmethod call (name c)
-  (when (and (= name 'putchar) (not *patched*))
-    (set *patched* true)
-    %s
-    (memory-protect 0x202d0 2 7)
-    (memory-write 0x202d0 0x2b:8)
-    (memory-protect 0x202d0 2 5)))
-
-%s
-|}
-                (if taint then
-                   "(taint-introduce-indirectly 'stack (- SP 64) 128)"
-                 else "")
-                (if taint then
-                   {|(defmethod jumping (c dst) (msg "interpreted jump to $0" dst))|}
-                 else "")));
+        let variant = if taint then "tainted" else "plain" in
         let out =
           bap env
             ([
                path data "bin/arm-linux-gnueabihf-thumb-crc";
                "--passes=run";
                "--run-systems=" ^ system;
-               "--primus-lisp-add=" ^ dir env;
+               "--primus-lisp-add=" ^ input ("patched-code/thumb/" ^ variant);
                "--primus-lisp-load=posix,patching";
                "--primus-print-observations=lisp-message,exception";
              ]
@@ -1621,45 +838,15 @@ let patched_code data =
       ^ (if taint then "/tainted/" else "/")
       ^ "arm-linux-gnueabihf-thumb-crc"
     in
+    let variant = if taint then "tainted" else "plain" in
     case name (fun env ->
-        ignore
-          (write env "generating.lisp"
-             (Printf.sprintf
-                {|(defparameter *patched* nil)
-
-(defmethod call (name c)
-  (when (and (= name 'putchar) (not *patched*))
-    (set *patched* true)
-    %s
-    (memory-allocate 0x8000 0x1000)
-    (memory-write (memory-write (memory-write (memory-write (memory-write
-      (memory-write (memory-write (memory-write (memory-write (memory-write
-      (memory-write (memory-write
-        0x8000 0x00:8) 0xb5:8) 0x00:8) 0xf0:8) 0x7e:8) 0xe8:8) 0x18:8) 0xf0:8)
-        0x8c:8) 0xe9:8) 0x00:8) 0xbd:8)
-    (memory-write (memory-write (memory-write (memory-write (memory-write
-      (memory-write (memory-write (memory-write
-        0x8100 0x2b:8) 0x00:8) 0xa0:8) 0xe3:8) 0x1e:8) 0xff:8) 0x2f:8) 0xe1:8)
-    (memory-protect 0x8000 0x1000 5)
-    (memory-protect 0x202d0 6 7)
-    (memory-write (memory-write (memory-write (memory-write (memory-write
-      (memory-write 0x202d0 0x48:8) 0xf2:8) 0x01:8) 0x03:8) 0x98:8) 0x47:8)
-    (memory-protect 0x202d0 6 5)))
-
-%s
-|}
-                (if taint then "(taint-introduce-indirectly 'code 0x8000 0x200)"
-                 else "")
-                (if taint then
-                   {|(defmethod jumping (c dst) (msg "interpreted jump to $0" dst))|}
-                 else "")));
         let out =
           bap env
             ([
                path data "bin/arm-linux-gnueabihf-thumb-crc";
                "--passes=run";
                "--run-systems=" ^ system;
-               "--primus-lisp-add=" ^ dir env;
+               "--primus-lisp-add=" ^ input ("generated-code/" ^ variant);
                "--primus-lisp-load=posix,generating";
                "--primus-print-observations=lisp-message,exception";
              ]
@@ -1732,51 +919,12 @@ let unicorn_symexec data =
    change them in their handlers, the same in the interpreter and in
    Unicorn *)
 let script_debugger data =
-  let script env source args =
-    bap ~timeout:300. env ("script" :: write env "script.ml" source :: args)
-  in
+  let script env file args = bap ~timeout:300. env ("script" :: file :: args) in
   case "script/debugger/bap:unicorn-executor/x86_64-linux-gnu-crc-loop"
     (fun env ->
       let out =
         script env
-          {|#require "bap-primus, bap-frontend.script-debugger"
-
-open Bap.Std
-open Bap_primus.Std
-module Debugger = Bap_script_debugger
-
-(* zeroes the CRC, at the breakpoint, and shows the next instruction *)
-module Zero (Machine : Primus.Machine.S) = struct
-  open Machine.Syntax
-  module Eval = Primus.Interpreter.Make (Machine)
-  module Stops = Primus.Interpreter.Stops.Make (Machine)
-
-  let rax = Var.create "RAX" (Type.imm 64)
-  let steps = ref 0
-
-  let stopped addr =
-    if !steps = 0 then begin
-      incr steps;
-      Stops.set_stepping true >>= fun () ->
-      Eval.get rax >>= fun x ->
-      Printf.printf "at %s RAX = %s, zeroing it\n%!" (Addr.string_of_value addr)
-        (Word.string_of_value (Primus.Value.to_word x));
-      Eval.const (Word.zero 64) >>= Eval.set rax
-    end
-    else begin
-      Stops.set_stepping false >>= fun () ->
-      Stops.remove (Addr.of_int64 ~width:64 0x4004c0L) >>| fun () ->
-      Printf.printf "stepped to %s\n%!" (Addr.string_of_value addr)
-    end
-end
-
-let () =
-  Debugger.break "0x4004c0";
-  Debugger.on_stop (module Zero);
-  ignore
-    (Bap_script.run ~system:"bap:unicorn-executor" ~init:[ Debugger.component ]
-       (Bap_script.project (List.hd (Bap_script.args ()))))
-|}
+          (input "script/debugger/crc-loop.ml")
           [ path data "bin/x86_64-linux-gnu-crc-loop" ]
       in
       sequence env out
@@ -1794,36 +942,7 @@ let () =
         bap ~timeout:20. env
           [
             "script";
-            write env "script.ml"
-              {|#require "bap-primus, bap-frontend.script-debugger"
-
-open Bap_primus.Std
-module Debugger = Bap_script_debugger
-
-let stops = ref 0
-
-module Step_on (Machine : Primus.Machine.S) = struct
-  module Stops = Primus.Interpreter.Stops.Make (Machine)
-
-  let init () = Stops.set_stepping true
-end
-
-module Step_off (Machine : Primus.Machine.S) = struct
-  module Stops = Primus.Interpreter.Stops.Make (Machine)
-
-  let stopped _ =
-    incr stops;
-    if !stops = 3 then Stops.set_stepping false else Machine.return ()
-end
-
-let () =
-  Debugger.on_stop (module Step_off);
-  ignore
-    (Bap_script.run ~system:"bap:unicorn-executor"
-       ~init:[ Debugger.component; (module Step_on) ]
-       (Bap_script.project (List.hd (Bap_script.args ()))));
-  Printf.printf "stopped %d times\n" !stops
-|};
+            input "script/debugger/stepping-off.ml";
             path data "bin/x86_64-linux-gnu-crc-loop";
           ]
       in
@@ -1840,32 +959,7 @@ let () =
            (fun env ->
              let out =
                script env
-                 {|#require "bap-primus, bap-frontend.script-debugger"
-
-open Bap_primus.Std
-module Debugger = Bap_script_debugger
-
-let calls = ref 0
-
-module Count (Machine : Primus.Machine.S) = struct
-  let stopped _ =
-    incr calls;
-    Machine.return ()
-end
-
-let () =
-  let system, file =
-    match Bap_script.args () with
-    | [ system; file ] -> (system, file)
-    | _ -> failwith "expected SYSTEM FILE"
-  in
-  Debugger.break "print_endline";
-  Debugger.on_stop (module Count);
-  ignore
-    (Bap_script.run ~system ~init:[ Debugger.component ]
-       (Bap_script.project file));
-  Printf.printf "print_endline was called %d times\n" !calls
-|}
+                 (input "script/debugger/echo.ml")
                  [ system; path data "bin/x86_64-linux-gnu-echo" ]
              in
              contains env "stops at each call" out
@@ -1993,12 +1087,6 @@ let mmap data =
     (* the stack is tainted, so the code that the program writes, and
        which returns through it, is interpreted, from its bytes *)
     case "run/mmap/interpreted" (fun env ->
-        ignore
-          (write env "stack.lisp"
-             {|(defmethod call-return (name p n prot ret)
-  (when (= name 'mprotect)
-    (taint-introduce-indirectly 'stack (- RSP 64) 128)))
-|});
         let out =
           bap env
             [
@@ -2006,7 +1094,7 @@ let mmap data =
               "--passes=run";
               "--run-systems=bap:unicorn-executor";
               "--run-components=bap:taint-primitives,bap:propagate-taint-by-computation,bap:select-default-taint-policy";
-              "--primus-lisp-add=" ^ dir env;
+              "--primus-lisp-add=" ^ input "run/mmap";
               "--primus-lisp-load=posix,stack";
               "--primus-print-observations=exception";
             ]
@@ -2050,20 +1138,6 @@ let contains_any subs name =
 (* the binaries of mingw have the most code, so they are the slowest *)
 let mingw = contains_any [ "mingw" ]
 
-(* the legacy main system that explores all paths, as the promiscuous
-   executor does *)
-let promiscuous_main =
-  {|(defsystem test:promiscuous-legacy-main
-  :description "The legacy main system in the promiscuous mode."
-  :depends-on (bap:legacy-main)
-  :components (bap:var-randomizer
-               bap:mem-randomizer
-               bap:arg-randomizer
-               bap:promiscuous-path-explorer
-               bap:division-by-zero-handler
-               bap:limit))
-|}
-
 let taint data =
   let opts =
     [
@@ -2088,7 +1162,9 @@ let taint data =
             Printf.sprintf "taint/%s/%s" system (Filename.basename file)
           in
           case ~slow:(mingw file) name (fun env ->
-              let systems = write env "promiscuous-main.asd" promiscuous_main in
+              (* the legacy main system that explores all paths, as the
+                 promiscuous executor does *)
+              let systems = input "taint/promiscuous-main.asd" in
               let out =
                 bap env
                   ((path data file :: opts) @ api data file
@@ -2147,9 +1223,7 @@ let emu_targets data =
       [ path data "api/powerpc" ]
     else []
   in
-  let script env name source args =
-    bap ~timeout:300. env ("script" :: write env name source :: args)
-  in
+  let script env file args = bap ~timeout:300. env ("script" :: file :: args) in
   (* the target, the address after getchar returns, the register, that
      holds its result, the base register, that the code reads, and the
      branch on it, see symexec-guess.c *)
@@ -2164,203 +1238,10 @@ let emu_targets data =
       ("i686-w64-mingw32", "0x401543", "EAX", "EAX", "401546");
     ]
   in
-  let guess =
-    {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-module Sym = Emu.Symbolic
-
-let model = function
-  | None -> "unsat"
-  | Some m ->
-      String.concat ","
-        (List.map (fun (n, v) -> Printf.sprintf "%s=%Lx" n (Int64.logand v 0xffL)) m)
-
-let formulas emu place =
-  String.concat ","
-    (List.map (function Some f -> f | None -> "-") (Sym.formula emu place))
-
-let status = function
-  | Emu.Exited c ->
-      Printf.sprintf "exited %s" (match c with Some c -> string_of_int c | None -> "?")
-  | Paused -> "paused"
-  | Running -> "running"
-  | Failed m -> "failed " ^ m
-
-let () =
-  match Bap_script.args () with
-  | file :: input :: until :: reg :: api ->
-      let emu =
-        Emu.create ~components:Sym.components ~redirects:[ ("<stdin>", input) ]
-          (Bap_script.project ~api file)
-      in
-      (match Emu.run emu ~until:(Int64.of_string until) with
-       | Paused -> ()
-       | s -> failwith ("getchar didn't return: " ^ status s));
-      Printf.printf "before: %s\n%!" (formulas emu (Reg reg));
-      (try Sym.symbolize emu (Reg "NO-SUCH-REGISTER")
-       with Invalid_argument _ -> print_endline "rejects the unknown register");
-      Sym.symbolize emu (Reg reg);
-      Printf.printf "after: %s\n%!" (formulas emu (Reg reg));
-      Printf.printf "unsolved: %s\n%!" (model (Sym.solve emu));
-      let branches = ref [] in
-      Sym.on_branch emu (fun emu b ->
-          (try Sym.symbolize emu (Reg reg)
-           with Invalid_argument _ -> print_endline "rejects the hook");
-          branches := b :: !branches);
-      let s = status (Emu.run emu) in
-      Printf.printf "%s\n" s;
-      List.iter
-        (fun b ->
-          Printf.printf "branch %Lx %s flips with %s\n" (Sym.addr b)
-            (if Sym.taken b then "taken" else "fell") (model (Sym.flip b)))
-        (List.rev !branches);
-      Printf.printf "branches %d\n" (List.length !branches);
-      Printf.printf "solved: %s\n" (model (Sym.solve emu));
-      Printf.printf "ended: %s\n" (formulas emu (Reg reg))
-  | _ -> failwith "expected FILE INPUT UNTIL REG [API]"
-|}
-  in
-  let crc32 =
-    {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-module Sym = Emu.Symbolic
-module Taint = Emu.Taint
-
-let status = function
-  | Emu.Exited c ->
-      Printf.sprintf "exited %s" (match c with Some c -> string_of_int c | None -> "?")
-  | Paused -> "paused"
-  | Running -> "running"
-  | Failed m -> "failed " ^ m
-
-(* the program pauses, when it calls crc32 first, after it read both
-   lines with fgets, whose first argument is the buffer *)
-let () =
-  match Bap_script.args () with
-  | file :: input :: api ->
-      let emu =
-        Emu.create ~components:(Sym.components @ Taint.components)
-          ~redirects:[ ("<stdin>", input) ] (Bap_script.project ~api file)
-      in
-      let buffers = ref [] and crcs = ref 0 in
-      Emu.on_call emu "fgets" (fun emu ->
-          buffers := Emu.arg emu 0 :: !buffers;
-          Default);
-      Emu.on_call emu "crc32" (fun emu ->
-          incr crcs;
-          if !crcs = 1 then Emu.stop emu;
-          Default);
-      let s = status (Emu.run emu) in
-      Printf.printf "at crc32: %s after %d reads\n%!" s (List.length !buffers);
-      let buf1 = List.nth !buffers 1 and buf2 = List.nth !buffers 0 in
-      Printf.printf "buf1 %S, buf2 %S\n%!" (Emu.read emu buf1 4) (Emu.read emu buf2 4);
-      Sym.symbolize emu (Mem (buf1, 4));
-      Taint.introduce emu ~kind:"input" (Mem (buf1, 4));
-      Printf.printf "symbolic: %s\n%!"
-        (String.concat ""
-           (List.map (function Some _ -> "S" | None -> "-") (Sym.formula emu (Mem (buf1, 5)))));
-      Printf.printf "tainted: %b %b\n%!"
-        (Taint.is_tainted emu ~kind:"input" (Mem (buf1, 4)))
-        (Taint.is_tainted emu ~kind:"input" (Mem (buf2, 4)));
-      let branches = ref [] and jumps = ref 0 in
-      Sym.on_branch emu (fun _ b -> branches := b :: !branches);
-      Taint.on_jump emu (fun _ ~kinds _ -> if List.mem "input" kinds then incr jumps);
-      let s = status (Emu.run emu) in
-      let crcs = !crcs in
-      Printf.printf "%s, crc32 called %d times\n" s crcs;
-      Printf.printf "symbolic branches: %b, tainted jumps: %b\n"
-        (List.length !branches > 4) (!jumps > 4);
-      (match Sym.flip ~timeout:30_000 (List.hd !branches) with
-       | None -> print_endline "no collision"
-       | Some m ->
-           Printf.printf "collision %S\n"
-             (String.concat "" (List.map (fun (_, v) -> String.make 1 (Char.chr (Int64.to_int v))) m)));
-      Taint.sanitize emu ~kind:"input" (Mem (buf1, 4));
-      Printf.printf "sanitized: %b\n" (Taint.is_tainted emu ~kind:"input" (Mem (buf1, 4)))
-  | _ -> failwith "expected FILE INPUT [API]"
-|}
-  in
-  let echo =
-    {|#require "bap-primus-unicorn.emu"
-module Emu = Bap_emu
-
-let status = function
-  | Emu.Exited c ->
-      Printf.sprintf "exited %s" (match c with Some c -> string_of_int c | None -> "?")
-  | Paused -> "paused"
-  | Running -> "running"
-  | Failed m -> "failed " ^ m
-
-let () =
-  match Bap_script.args () with
-  | file :: api ->
-      let emu =
-        Emu.create ~args:[ "hello"; "cruel"; "world" ]
-          (Bap_script.project ~api ~bare:true file)
-      in
-      let entry = Emu.pc emu in
-      Printf.printf "registers: %b\n%!" (List.length (Emu.registers emu) > 16);
-      let stepped = status (Emu.step emu) in
-      Printf.printf "step: %s, moved %b\n%!" stepped (Emu.pc emu <> entry);
-      (try ignore (Emu.arg emu 0)
-       with Invalid_argument _ -> print_endline "no argument outside of a call");
-      let chars = Buffer.create 64 and first = ref true in
-      Emu.on_call emu "putchar" (fun emu ->
-          let c = Char.chr (Int64.to_int (Int64.logand (Emu.arg emu 0) 0xffL)) in
-          (try Emu.patch emu 0L "x" with Invalid_argument _ ->
-             if !first then print_endline "no patch in the hook");
-          if !first then begin
-            first := false;
-            Emu.stop emu
-          end;
-          (* the program prints the vowels of the arguments, as Q *)
-          if c = 'e' then Return 101L
-          else begin
-            Buffer.add_char chars c;
-            Default
-          end);
-      Printf.printf "first putchar: %s\n%!" (status (Emu.run emu));
-      let snapshot = Emu.snapshot emu in
-      let s1 = status (Emu.run emu) in
-      let out1 = Buffer.contents chars in
-      Buffer.clear chars;
-      Emu.restore emu snapshot;
-      Printf.printf "restored: %s\n%!" (status (Emu.status emu));
-      let s2 = status (Emu.run emu) in
-      let replays =
-        String.equal (String.sub out1 1 (String.length out1 - 1)) (Buffer.contents chars)
-      in
-      Printf.printf "%s, %s, replays %b, exit code %s\n" s1 s2 replays
-        (match Emu.exit_code emu with Some c -> string_of_int c | None -> "?");
-      Printf.printf "printed %S\n" out1
-  | _ -> failwith "expected FILE [API]"
-|}
-  in
-  let run =
-    {|#require "bap-primus"
-open Bap_primus.Std
-
-let calls = ref 0
-
-module Count (Machine : Primus.Machine.S) = struct
-  let call (name, _) =
-    if String.equal name "putchar" then incr calls;
-    Machine.return ()
-
-  let init () = Machine.Observation.observe Primus.Linker.Trace.call call
-end
-
-let () =
-  match Bap_script.args () with
-  | system :: file :: api ->
-      ignore
-        (Bap_script.run ~system ~init:[ (module Count) ]
-           ~args:[ "hello"; "cruel"; "world" ]
-           (Bap_script.project ~api file));
-      Printf.printf "\nputchar was called %b\n" (!calls > 20)
-  | _ -> failwith "expected SYSTEM FILE [API]"
-|}
-  in
+  let guess = input "emu/targets/guess.ml" in
+  let crc32 = input "emu/targets/crc32.ml" in
+  let echo = input "emu/targets/echo.ml" in
+  let run = input "emu/targets/run.ml" in
   let echos =
     [
       "x86_64-linux-gnu";
@@ -2376,9 +1257,9 @@ let () =
   List.concat_map
     (fun (target, until, reg, base, branch) ->
       let file = "bin/" ^ target ^ "-symexec-guess" in
-      let run env input =
-        script env "guess.ml" guess
-          ([ path data file; write env "input" input; until; reg ] @ api target)
+      let run env stdin =
+        script env guess
+          ([ path data file; input ("stdin/" ^ stdin); until; reg ] @ api target)
       in
       [
         case
@@ -2419,10 +1300,10 @@ let () =
         case ~slow:true
           ("emu/" ^ target ^ "-symexec-crc32/collision")
           (fun env ->
-            let input = write env "input" "abc\nabd\n" in
+            let stdin = input "stdin/abc-abd" in
             let out =
-              script env "crc32.ml" crc32
-                ([ path data ("bin/" ^ target ^ "-symexec-crc32"); input ]
+              script env crc32
+                ([ path data ("bin/" ^ target ^ "-symexec-crc32"); stdin ]
                 @ api target)
             in
             sequence env out
@@ -2445,7 +1326,7 @@ let () =
           case
             ("emu/" ^ target ^ "-echo/hooks")
             (fun env ->
-              let out = script env "echo.ml" echo (file :: api target) in
+              let out = script env echo (file :: api target) in
               sequence env out
                 [
                   ("has the registers", "registers: true");
@@ -2463,8 +1344,7 @@ let () =
             ("script/unicorn/run/" ^ target ^ "-echo")
             (fun env ->
               let out =
-                script env "run.ml" run
-                  ("bap:unicorn-executor" :: file :: api target)
+                script env run ("bap:unicorn-executor" :: file :: api target)
               in
               sequence env out
                 [
@@ -2514,14 +1394,14 @@ let loaders data =
               case
                 ("loader/pe/" ^ system ^ "/" ^ target ^ "-symexec-guess")
                 (fun env ->
-                  let input = write env "input" "A" in
+                  let stdin = input "stdin/A" in
                   let out =
                     bap env ~timeout:120.
                       [
                         path data ("bin/" ^ target ^ "-symexec-guess");
                         "--passes=run";
                         "--run-systems=" ^ system;
-                        "--primus-lisp-channel-redirect=<stdin>:" ^ input;
+                        "--primus-lisp-channel-redirect=<stdin>:" ^ stdin;
                       ]
                   in
                   contains env "runs the program of PE" out "access granted");
@@ -2553,14 +1433,14 @@ let loaders data =
             case
               ("loader/imports/" ^ system ^ "/" ^ name)
               (fun env ->
-                let input = write env "input" "abc\nabc\n" in
+                let stdin = input "stdin/abc-abc" in
                 let out =
                   bap env ~timeout:120.
                     ((path data ("bin/" ^ name) :: api data name)
                     @ [
                         "--passes=run";
                         "--run-systems=" ^ system;
-                        "--primus-lisp-channel-redirect=<stdin>:" ^ input;
+                        "--primus-lisp-channel-redirect=<stdin>:" ^ stdin;
                       ])
                 in
                 contains env "reads stdin through the GOT" out "access granted"))
@@ -2628,14 +1508,14 @@ let loader_layouts data =
           case
             ("loader/layout/" ^ system ^ "/" ^ base)
             (fun env ->
-              let input = write env "input" "A" in
+              let stdin = input "stdin/A" in
               let out =
                 bap env ~timeout:60.
                   [
                     path data file;
                     "--passes=run";
                     "--run-systems=" ^ system;
-                    "--primus-lisp-channel-redirect=<stdin>:" ^ input;
+                    "--primus-lisp-channel-redirect=<stdin>:" ^ stdin;
                   ]
               in
               match expected name base with
