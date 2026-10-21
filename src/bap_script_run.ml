@@ -139,8 +139,13 @@ let run ?cache file args =
     else (compile (), None)
   in
   Bap_script.set_args args;
-  (* the libraries are loaded, as the plugins are, so that the plugins,
-     which bap loads later, don't load them again *)
+  (* the plugins are loaded before the libraries, that the script
+     requires, as the libraries may use the libraries of the plugins,
+     e.g., Bap_emu uses the one of the primus-lisp plugin, whose options
+     and code bap gives to the plugin, that it loads next, so that the
+     libraries of the plugins are loaded, as the plugins are, and the
+     required libraries load only the rest *)
+  if not (List.is_empty required) then Bap_script.init ();
   List.iter required ~f:(fun lib ->
       try Dune_site_plugins.V1.load lib
       with exn -> fail "can't load %s: %s" lib (Exn.to_string exn));

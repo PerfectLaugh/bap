@@ -363,6 +363,24 @@ let scripts data =
             ("keeps the stores of the parked machine", "(wW|Ww)oorrlldd");
             ("runs both machines to the end", "ccoouurrssee");
           ]);
+    (* the libraries, that the script requires, are loaded after the
+       plugins, as they may use the libraries of the plugins, whose options
+       would be another plugin's otherwise *)
+    case "script/require/plugin-options" (fun env ->
+        let out =
+          bap ~timeout:300. env
+            ~env:
+              [
+                ( "BAP_PRIMUS_LISP_CHANNEL_REDIRECT",
+                  "<stdin>:" ^ input "stdin/abc-abc" );
+              ]
+            [
+              "script";
+              input "script/require/plugin-options.ml";
+              path data "bin/x86_64-linux-gnu-symexec-crc32";
+            ]
+        in
+        contains env "reads the redirected input" out "access granted");
     case "script/error" (fun env ->
         let out = script env (input "script/error/script.ml") in
         check env "fails" (out.status = Exited 1);
