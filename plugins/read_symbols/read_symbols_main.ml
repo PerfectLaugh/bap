@@ -151,7 +151,43 @@ let collect path files filter =
   in
   List.fold paths ~init:empty ~f:read_relations |> build_functions
 
+(* the symbols of the file as the facts of the specification of the
+   unit, so that the consumers of the specification, e.g., the bare
+   program of the script, which takes the subroutines of the
+   specification without the agents of the knowledge base, as they are
+   costly on the large files, have them as well *)
+(* the symbols of the file as the facts of the specification of the
+   unit, so that the consumers of the specification, e.g., the bare
+   program of the script, which takes the subroutines of the
+   specification without the agents of the knowledge base, as they are
+   costly on the large files, have them as well; the specification is
+   provided when the unit is created, as the promises of a slot are not
+   consulted, once the slot is provided *)
+let provide_spec files matches =
+  KB.observe Theory.Unit.path @@ fun unit -> function
+  | None -> KB.return ()
+  | Some path -> (
+      let functions = collect path files matches in
+      if Hashtbl.is_empty functions then KB.return ()
+      else
+        let open Ogre.Syntax in
+        let facts =
+          Hashtbl.fold functions ~init:(Ogre.return ())
+            ~f:(fun ~key:addr ~data:name facts ->
+              facts >>= fun () ->
+              let addr = Bitvec.to_int64 addr in
+              Ogre.provide Bap.Std.Image.Scheme.code_start addr >>= fun () ->
+              if is_anonymous name then Ogre.return ()
+              else Ogre.provide Bap.Std.Image.Scheme.named_symbol addr name)
+        in
+        match Ogre.exec facts Ogre.Doc.empty with
+        | Ok doc -> KB.provide Bap.Std.Image.Spec.slot unit doc
+        | Error err ->
+            warning "failed to provide the symbols of %s: %a" path Error.pp err;
+            KB.return ())
+
 let provide_data files matches =
+  provide_spec files matches;
   KB.promise data @@ fun unit ->
   KB.collect Theory.Unit.path unit >>|? fun path ->
   Some (collect path files matches)

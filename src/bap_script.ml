@@ -49,8 +49,8 @@ let is_ident s =
    the symbolizer computes them from the specification, with the
    shortest of their names, that are identifiers, if they have one, see
    plugins/disassemble/disassemble_main_rules.ml *)
-let symbol_starts proj =
-  let t = Project.target proj in
+let symbol_starts target spec =
+  let t = target in
   let m = Bitvec.modulus (Theory.Target.code_addr_size t) in
   let n = Theory.Target.code_alignment t / Theory.Target.byte t in
   let mask = Int64.(lnot (of_int n - 1L)) in
@@ -65,7 +65,7 @@ let symbol_starts proj =
     let roots = Seq.append starts (Seq.map ~f:fst values) in
     (Option.fold entry ~init:roots ~f:(Fn.flip Seq.cons), names)
   in
-  match Ogre.eval symbols (Project.specification proj) with
+  match Ogre.eval symbols spec with
   | Error _ -> Map.empty (module Bitvec_order)
   | Ok (roots, names) ->
       let starts =
@@ -110,20 +110,25 @@ let known_starts unit =
 (* the named symbols of the file, as the subroutine terms of the bare
    program, so that the components that need the program work without
    the disassembly, e.g., the Lisp machine, which links the stubs by the
-   names and addresses of their subroutines. The file, that has no
-   symbols, e.g., the stripped one, has the subroutines of the knowledge
-   base instead, as the knowledge base finds them in the whole code,
-   e.g., with the patterns of the prologues, and names them, e.g., the
-   stubs, from their code, which is too costly for the large files *)
+   names and addresses of their subroutines. The specification of the
+   unit also has the symbols that the plugins provide, e.g., the
+   read-symbols plugin, so that they are the subroutines of the bare
+   program as well. The file, that has no symbols, e.g., the stripped
+   one, has the subroutines of the knowledge base instead, as the
+   knowledge base finds them in the whole code, e.g., with the patterns
+   of the prologues, and names them, e.g., the stubs, from their code,
+   which is too costly for the large files *)
 let synthesize_program proj =
   match Project.get proj filename with
   | None -> proj
   | Some file -> (
-      let symbols = symbol_starts proj in
       let result = Toplevel.var "bare-symbols" in
       Toplevel.put result
-        (if Map.is_empty symbols then
-           KB.(Theory.Unit.for_file file >>= known_starts)
+        (let open KB.Syntax in
+         Theory.Unit.for_file file >>= fun unit ->
+         KB.collect Image.Spec.slot unit >>= fun spec ->
+         let symbols = symbol_starts (Project.target proj) spec in
+         if Map.is_empty symbols then known_starts unit
          else
            KB.return
              (Map.to_alist symbols
