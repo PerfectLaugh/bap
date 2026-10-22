@@ -18,12 +18,9 @@ let () =
   for _ = 1 to 3 do
     show emu (Emu.step emu)
   done;
-  (* the first instruction of print_strings stops the program *)
-  let stopped = ref false in
-  Emu.on_code emu ~first:0x400733L ~last:0x400733L (fun emu _ ->
-      if not !stopped then (
-        stopped := true;
-        Emu.stop emu));
+  (* the first instruction of print_strings stops the program, which
+     continues from there, as the hook doesn't see it again *)
+  Emu.on_code emu ~first:0x400733L ~last:0x400733L (fun emu _ -> Emu.stop emu);
   show emu (Emu.run emu);
   (* print_endline, a function of the program, prints nothing for the
      arguments, but the strings of the program *)
