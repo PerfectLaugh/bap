@@ -2820,14 +2820,24 @@ module Loader (Machine : Primus.Machine.S) = struct
     | Error _ -> Machine.return []
     | Ok refs ->
         (* some loaders refer to the code, e.g., to the PLT entries, which
-           are not the slots *)
+           are not the slots, but the slots of GOT are, also in the segment,
+           that is writable and executable, e.g., of the code, that the
+           program writes, which has the data too *)
         let width = Theory.Target.code_addr_size (Project.target proj) in
         let is_code addr =
-          Memmap.lookup (Project.memory proj) (Word.of_int64 ~width addr)
-          |> Seq.exists ~f:(fun (_, tag) ->
+          let tags =
+            Memmap.lookup (Project.memory proj) (Word.of_int64 ~width addr)
+            |> Seq.map ~f:snd |> Seq.to_list
+          in
+          List.exists tags ~f:(fun tag ->
               match Bap.Std.Value.get Image.segment tag with
               | Some seg -> Image.Segment.is_executable seg
               | None -> false)
+          && not
+               (List.exists tags ~f:(fun tag ->
+                    match Bap.Std.Value.get Image.section tag with
+                    | Some name -> String.is_prefix name ~prefix:".got"
+                    | None -> false))
         in
         (* the slot, that is null in the file, of a function, that
            nothing links, e.g., the weak one, that nothing defines, stays
