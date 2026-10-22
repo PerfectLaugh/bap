@@ -584,13 +584,16 @@ module Abi = struct
           (is_composite, pass_composite (Arg.reference iregs) irets vrets);
         ]
     in
+    (* the arguments, that the registers don't take, are on the stack,
+       after the return address *)
+    let* () = Arg.rebase 1 in
     describe ~return @@ fun ~alignment:_ bits ->
     select
       [
         (is (bits > 128), Arg.memory);
-        (is_integer, Arg.register iregs);
-        (is_sse, Arg.register vregs);
-        (is_csse, registers vregs);
+        (is_integer, choose [ Arg.register iregs; Arg.memory ]);
+        (is_sse, choose [ Arg.register vregs; Arg.memory ]);
+        (is_csse, choose [ registers vregs; Arg.memory ]);
         (is_composite, pass_composite Arg.memory iregs vregs);
       ]
 
