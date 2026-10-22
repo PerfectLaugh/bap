@@ -336,7 +336,10 @@ val primus : t -> Bap_primus.Std.Primus.Machine.component -> unit
 
 val on_code : ?first:int64 -> ?last:int64 -> t -> (t -> int64 -> unit) -> unit
 (** [on_code emu f] calls [f emu addr] before each instruction from [first] to
-    [last], inclusive, by default of all. *)
+    [last], inclusive, by default of all. The instruction, that the hook saw,
+    when the program paused before it, e.g., as the hook stopped it, is not seen
+    again, when the program continues from it, so the hook may stop the program
+    unconditionally. *)
 
 val on_read :
   ?first:int64 -> ?last:int64 -> t -> (t -> int64 -> int -> unit) -> unit

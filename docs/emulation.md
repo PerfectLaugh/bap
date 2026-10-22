@@ -208,6 +208,8 @@ match Emu.bir emu 0x400727L with
 | `on_read`, `on_write` | before each load or store in the range |
 | `on_call emu name f` | when the program calls the function; `f` returns `Default` to run it, or `Return x` to return `x` at once |
 
+A hook doesn't see again the instruction, before which it paused the program, when the program continues from there, so `on_code` may `stop` the program at an address unconditionally, and `run` stops there the next time the code reaches it.
+
 `arg emu n` reads the arguments of the called function, as its prototype tells, e.g., from the api files. While the program runs, a hook may only `stop` it, or `read` and `write_direct` the memory:
 
 ```ocaml

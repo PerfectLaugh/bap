@@ -242,20 +242,24 @@ let stop t =
   e.reason <- Some X.Pause;
   Uc.stop e.uc
 
-(* [fresh addr] if the instruction at [addr] is not the one that a hook
-   saw last, which runs again, e.g., after its fault, when Unicorn starts
-   anew *)
+(* [fresh addr] unless the hook saw the instruction at [addr] last in
+   the previous start of Unicorn, which stopped there, and starts there
+   again, e.g., after its fault, or as the hook paused the program, so
+   that the hook, that stops it, doesn't stop it again, when it
+   continues *)
 let instructions t =
   let last = ref None in
   fun addr ->
-    let starts = t.session.starts in
-    let fresh =
+    let s = t.session in
+    let again =
+      Option.equal Int64.equal s.restarted_at (Some addr)
+      &&
       match !last with
-      | Some (addr', start) -> not (Int64.equal addr addr' && start <> starts)
-      | None -> true
+      | Some (addr', start) -> Int64.equal addr addr' && start = s.starts - 1
+      | None -> false
     in
-    last := Some (addr, starts);
-    fresh
+    last := Some (addr, s.starts);
+    not again
 
 (* the hook goes to the engine of the emulator, and to its new engines,
    see [X.session] *)
@@ -1191,7 +1195,10 @@ let slice ?(addresses = false) ?window (tr : Trace.t) criterion =
 
 let on_code ?first ?last t f =
   installed t (fun e ->
-      ignore (Uc.on_code ?first ?last e.uc (fun addr _ -> f t addr)))
+      let fresh = instructions t in
+      ignore
+        (Uc.on_code ?first ?last e.uc (fun addr _ ->
+             if fresh addr then f t addr)))
 
 let on_read ?first ?last t f =
   installed t (fun e ->
@@ -1217,16 +1224,11 @@ let hook_calls t addr =
            function runs again, when Unicorn starts at it again, after
            the hook saw it, and Unicorn stopped there, e.g., as the hook
            stops it *)
-        let seen = ref (-1) in
+        let fresh = instructions t in
         ignore
           (Uc.on_code e.uc ~first:addr ~last:addr (fun addr _ ->
                let s = t.session in
-               let again =
-                 Option.equal Int64.equal s.restarted_at (Some addr)
-                 && !seen = s.starts - 1
-               in
-               seen := s.starts;
-               if not (again || Hash_set.mem e.foreign addr) then
+               if fresh addr && not (Hash_set.mem e.foreign addr) then
                  match
                    Option.bind (Hashtbl.find s.names addr) ~f:(X.call_returns e)
                  with

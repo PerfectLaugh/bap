@@ -503,6 +503,21 @@ let emu data =
             ("replaces a function of the program", "\nwe\n");
             ("calls it", "print_endline was called 11 times");
           ]);
+    (* the hook, that stops the program, and the address, at which it
+       runs until, don't stop it again, when it continues from there,
+       but when the code returns there, after Unicorn stopped elsewhere,
+       e.g., at a stub *)
+    case "emu/x86_64-linux-gnu-echo/stop" (fun env ->
+        let out =
+          script env "x86_64-linux-gnu-echo" (input "emu/echo/stop.ml")
+        in
+        sequence env out
+          [
+            ("stops in each iteration", "paused at 40080b 40080b 40080b, exited");
+            ( "runs until each iteration",
+              "paused at 400749 400749 400749 400749 400749 400749 400749 \
+               400749 400749 400749 400749, exited" );
+          ]);
     (* the patched code stays, after the snapshot forks the machine, and
        after it is restored, which Bap_emu.write_direct doesn't guarantee *)
     (* the script reads and writes the state of the machine in Primus *)
