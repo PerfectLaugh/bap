@@ -1899,14 +1899,16 @@ module Make (Machine : Primus.Machine.S) = struct
       ignore (Target.Regs.write e.regs e.sp (word e frame.sp));
     Machine.return frame.ret
 
+  let cpsr = lazy (Option.value_exn (Uc.reg Arm "CPSR"))
+
   (* the address, from which Unicorn continues, with the lower bit set in
      the Thumb state of ARM *)
   let current_pc e =
     let pc = Uc.reg_read e.uc e.pc in
     match e.arch with
     | Arm ->
-        let cpsr = Option.value_exn (Uc.reg Arm "CPSR") in
-        if Int64.(Uc.reg_read e.uc cpsr land 0x20L <> 0L) then Int64.(pc lor 1L)
+        if Int64.(Uc.reg_read e.uc (force cpsr) land 0x20L <> 0L) then
+          Int64.(pc lor 1L)
         else pc
     | _ -> pc
 
@@ -2019,13 +2021,17 @@ module Make (Machine : Primus.Machine.S) = struct
         Linker.link ~addr:a ?name ?tid code
 
   (* the time since it was last accounted for goes to the machine that
-     runs, which is the machine that spent it, as they switch rarely *)
+     runs, which is the machine that spent it, as they switch rarely,
+     only if the time is limited, as the time is not free to get *)
   let account () =
     let* s = session in
-    let now = Stdlib.Sys.time () in
-    let spent = now -. s.accounted in
-    s.accounted <- now;
-    Machine.Local.update elapsed ~f:(fun t -> t +. spent)
+    match s.timeout with
+    | None -> Machine.return ()
+    | Some _ ->
+        let now = Stdlib.Sys.time () in
+        let spent = now -. s.accounted in
+        s.accounted <- now;
+        Machine.Local.update elapsed ~f:(fun t -> t +. spent)
 
   let halt () =
     let* s = session in

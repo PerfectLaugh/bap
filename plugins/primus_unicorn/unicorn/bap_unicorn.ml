@@ -85,11 +85,29 @@ external hook_del : t -> int64 -> unit = "bap_uc_hook_del"
 
 let supported arch = supported_code (arch_code arch)
 let create arch mode = create_code (arch_code arch) mode
-let regs arch = regs_code (arch_code arch)
+
+(* the registers of the architectures, whose table the stubs build, are
+   cached, as the executor looks them up, while it runs *)
+let tables = Hashtbl.create 8
+
+let table arch =
+  match Hashtbl.find_opt tables arch with
+  | Some table -> table
+  | None ->
+      let regs = regs_code (arch_code arch) in
+      let table = Hashtbl.create (List.length regs) in
+      (* the first of the same names, as [List.assoc] finds it *)
+      List.iter
+        (fun (name, id) ->
+          if not (Hashtbl.mem table name) then Hashtbl.add table name id)
+        regs;
+      Hashtbl.replace tables arch (regs, table);
+      (regs, table)
+
+let regs arch = fst (table arch)
 
 let reg arch name =
-  let name = String.uppercase_ascii name in
-  List.assoc_opt name (regs arch)
+  Hashtbl.find_opt (snd (table arch)) (String.uppercase_ascii name)
 
 (* Unicorn stops at [until], which is never reached by default, as the
    program counter, even of 64 bits, is never all ones *)
