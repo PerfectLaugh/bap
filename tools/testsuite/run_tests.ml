@@ -1477,6 +1477,39 @@ let symexec data =
           | Timeout -> check env (file ^ " run out of time.") false
           | _ -> check env (file ^ " withhold the attack.") false))
 
+(* the signals stop the loop of signal-loop.c, which runs in Unicorn
+   without calls, so that their handlers run, e.g., of the script, which
+   saves the checkpoint, and the stores, which the loop is in, don't run
+   again, as Unicorn continues, see build.cmake of libunicorn; the signals
+   are not watched on Windows *)
+let emu_signals data =
+  let script env file =
+    bap ~timeout:300. env
+      [
+        "script";
+        input ("emu/signal/" ^ file);
+        path data "bin/x86_64-linux-gnu-signal-loop";
+      ]
+  in
+  let sum = "1080774656\n" in
+  if Sys.win32 then []
+  else
+    [
+      case "emu/x86_64-linux-gnu-signal-loop/checkpoint" (fun env ->
+          let out = script env "save.ml" in
+          sequence env out
+            [
+              ("pauses in the loop", "paused in the loop\nsaved\n");
+              ("continues", sum ^ "exited");
+            ];
+          let out = script env "restore.ml" in
+          has env "continues from the checkpoint" out (sum ^ "exited"));
+      case "emu/x86_64-linux-gnu-signal-loop/interrupts" (fun env ->
+          let out = script env "interrupts.ml" in
+          has env "runs the stores once" out
+            (sum ^ "exited, the handler ran while it ran"));
+    ]
+
 (* the scripts on every target, that the testsuite has the binaries of:
    the symbolic and the tainted registers and memory, the branches and
    their flips, the hooks, the snapshots, and the misuses, e.g., of the
@@ -1812,6 +1845,7 @@ let tests =
     scripts;
     bare;
     emu;
+    emu_signals;
     emu_targets;
     loaders;
     loader_layouts;

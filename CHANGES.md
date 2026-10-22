@@ -12,6 +12,7 @@
 - adds the `bap script` command, which compiles, caches, and runs OCaml scripts with the libraries of BAP, and the `Bap_script` library
 - adds the `Bap_emu` library, which drives a program in Unicorn from a script: running, stepping, and pausing, registers and memory, hooks of the code, the memory, and the calls, patches, snapshots, checkpoints, taint, symbolic execution, and several emulators side by side, each with its own knowledge, and `Bap_emu.bir`, which lifts the BIR of an instruction on demand, from the bytes, that the program has now, also in the hooks, and `Bap_emu.Trace`, which records the program counters, of the instructions or of the blocks, and the accesses to the memory, natively, in the rings of Unicorn, with no call to OCaml, and `Bap_emu.slice`, which slices the values of the registers and the memory backward over a trace, by the byte, through the conditional defs, the writes of the hooks, the stubs and the script, and the code, that the program patched, and of ARM, in its modes, A32 and Thumb, and its IT blocks, and by the registers, that a load or a store of multiple registers moves
 - adds the `bap:debugger` component, which stops the machines at the breakpoints and reads the commands from the terminal or a file, and the `Bap_script_debugger` library, which calls the handlers of a script at the stops
+- runs the OCaml handlers of the signals, while the program runs in Unicorn, e.g., a loop without calls, so that a script may pause it, and save its checkpoint, when it is signaled, except on Windows
 - adds `Primus.Interpreter.Stops`, the stops of the machines for the executors outside of the interpreter, and the `Primus.Interpreter.stop_reached` observation, so that the debuggers don't make Unicorn stop at every instruction
 - adds the `--run-components` option, which adds components to the systems of the `run` pass
 - moves the symbolic execution of Primus to a library, which the scripts use
@@ -40,6 +41,7 @@
 - fixes the semantics of many ARM, Thumb, AArch64, x86, MIPS, PowerPC, and RISC-V instructions, found by the new unit tests of the lifters
 - redirects the slots of GOT in Unicorn, also in the segment, that is writable and executable, so that the programs with such a segment call the stubs of their imports
 - enables VFP and NEON of ARM in Unicorn, as Linux does, so that the programs of the hard float ABI run
+- patches Unicorn, so that a stop, that is requested asynchronously, e.g., by its timeout, takes effect at the start of a block, instead of after a memory access, whose instruction, e.g., a store, ran again, when the emulation continued
 - selects the maximal AArch64 CPU of Unicorn, as the default Cortex-A72 lacks the LSE atomics of ARMv8.1, e.g., ldadd and cas, so that the programs compiled for ARMv8.1 and later run
 - fixes the special cases and the directed rounding modes of the floating-point emulation
 - fixes the extraction from an extraction, and the variable types after block flattening

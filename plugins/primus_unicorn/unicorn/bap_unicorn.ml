@@ -81,6 +81,8 @@ external emu_start : t -> int64 -> int64 -> int64 -> int -> unit
   = "bap_uc_emu_start"
 
 external stop : t -> unit = "bap_uc_emu_stop"
+external interrupted : unit -> bool = "bap_uc_interrupted"
+external process_signals : unit -> unit = "bap_uc_process_signals"
 external hook_del : t -> int64 -> unit = "bap_uc_hook_del"
 
 let supported arch = supported_code (arch_code arch)

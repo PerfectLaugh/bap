@@ -288,6 +288,17 @@ A checkpoint keeps:
 
 The program continues the innermost run of Unicorn. Afterwards, the stub that started it completes, if it is known, see `Emu.complete`; e.g., `__libc_start_main` exits with the result of `main`.
 
+A signal, e.g., of `kill`, may save the checkpoint: its handler stops the program, which pauses, and the script saves it:
+
+```ocaml
+Sys.set_signal Sys.sigterm (Sys.Signal_handle (fun _ -> Emu.stop emu));
+match Emu.run emu with
+| Paused -> Emu.save emu "interrupted.ckpt"
+| _ -> ()
+```
+
+The handler runs within about 20 ms, also while the program runs a loop without calls, as Unicorn is stopped, when a handler of OCaml is pending, at the start of a block, and continues, if the handler doesn't pause the program. On Windows, the handler runs, when the program next leaves Unicorn, e.g., calls a stub.
+
 ### Primus from the script
 
 `primus emu component` runs a component in the paused program's machine. Through it, the script can use the whole API of Primus, e.g., the environment, the memory, the linker, Lisp, or the taint tracker.

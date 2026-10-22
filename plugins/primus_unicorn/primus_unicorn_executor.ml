@@ -66,6 +66,8 @@ type reason =
   | Unknown of int64
       (** the registers of the instruction at the address are not known yet, see
           [trace] *)
+  | Interrupted
+      (** a signal stopped Unicorn, so that its handler runs, see [start_uc] *)
 
 (* a pending return of a run *)
 type frame = { ret : int64; sp : int64 }
@@ -2127,6 +2129,12 @@ module Make (Machine : Primus.Machine.S) = struct
     in
     e.runs <- e.runs + 1;
     s.stopped_at <- Some (code_addr e (current_pc e));
+    (* the handlers of the signals run, e.g., of the script, which may
+       pause the program, and else it continues *)
+    if Uc.interrupted () then begin
+      Uc.process_signals ();
+      if Option.is_none e.reason then e.reason <- Some Interrupted
+    end;
     match e.reason with
     | Some (Fault (Write_prot, addr)) when written_page e addr ->
         let pc = current_pc e in
@@ -2474,7 +2482,7 @@ module Make (Machine : Primus.Machine.S) = struct
                   native e addr >>= function
                   | Some pc -> loop pc
                   | None -> call_foreign e addr >>= loop))
-          | Some Pause, _ -> loop pc
+          | Some (Pause | Interrupted), _ -> loop pc
           | Some (Observe _), _ ->
               let* () =
                 Machine.Observation.observed Primus.Interpreter.pc_change

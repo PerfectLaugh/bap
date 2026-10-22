@@ -17,6 +17,7 @@
 #include <caml/fail.h>
 #include <caml/memory.h>
 #include <caml/mlvalues.h>
+#include <caml/signals.h>
 
 #include <unicorn/unicorn.h>
 
@@ -560,6 +561,86 @@ value bap_uc_regs(value arch) {
 static void fixup(struct engine *e);
 static void mark(struct engine *e);
 
+/* The signals, whose OCaml handlers are pending, stop the engine, that
+   runs, as OCaml runs its handlers only, when its code runs, e.g., in
+   the hooks, and Unicorn may run the code of the program for long
+   without them, e.g., a loop. The watcher looks at the signals a few
+   times a second, while an engine runs, and stops it, after which the
+   handlers run, see [bap_uc_process_signals], e.g., the one of a
+   script, which pauses the program to save it. The engine stops at the
+   start of a block, see build.cmake of libunicorn. The engine, that
+   runs, is guarded, as it is closed, after it stops. On Windows, the
+   signals are not watched. */
+#ifndef _WIN32
+#include <pthread.h>
+#include <signal.h>
+#include <time.h>
+
+/* of the runtime, which declares it only for itself, and which only
+   reads the atomic bits of the signals, so the watcher calls it */
+CAMLextern int caml_check_pending_signals(void);
+
+static pthread_mutex_t watched_lock = PTHREAD_MUTEX_INITIALIZER;
+static uc_engine *watched = NULL;
+static int interrupted = 0;
+
+static void *watch_signals(void *data) {
+    struct timespec period = {0, 20 * 1000 * 1000};
+    for (;;) {
+        nanosleep(&period, NULL);
+        pthread_mutex_lock(&watched_lock);
+        if (watched != NULL && caml_check_pending_signals()) {
+            interrupted = 1;
+            uc_emu_stop(watched);
+        }
+        pthread_mutex_unlock(&watched_lock);
+    }
+    return NULL;
+}
+
+/* the signals go to the threads of OCaml, and not to the watcher */
+static void start_watcher(void) {
+    sigset_t all, old;
+    pthread_t thread;
+    sigfillset(&all);
+    pthread_sigmask(SIG_SETMASK, &all, &old);
+    if (pthread_create(&thread, NULL, watch_signals, NULL) == 0) {
+        pthread_detach(thread);
+    }
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+}
+
+static void watch(uc_engine *uc) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, start_watcher);
+    pthread_mutex_lock(&watched_lock);
+    watched = uc;
+    pthread_mutex_unlock(&watched_lock);
+}
+
+static int unwatch(void) {
+    pthread_mutex_lock(&watched_lock);
+    watched = NULL;
+    int was = interrupted;
+    interrupted = 0;
+    pthread_mutex_unlock(&watched_lock);
+    return was;
+}
+#else
+static void watch(uc_engine *uc) {}
+static int unwatch(void) { return 0; }
+#endif
+
+/* if a signal stopped the engine, which ran last, see [watch] */
+static int last_interrupted = 0;
+
+value bap_uc_interrupted(value unit) { return Val_bool(last_interrupted); }
+
+value bap_uc_process_signals(value unit) {
+    caml_process_pending_actions();
+    return Val_unit;
+}
+
 value bap_uc_emu_start(value v, value start, value until, value timeout,
                        value count) {
     CAMLparam5(v, start, until, timeout, count);
@@ -567,9 +648,11 @@ value bap_uc_emu_start(value v, value start, value until, value timeout,
     struct engine *e = Engine_val(v);
     mark(e);
     e->running = 1;
+    watch(engine_uc(v));
     uc_err err = uc_emu_start(engine_uc(v), Int64_val(start),
                               Int64_val(until), Int64_val(timeout),
                               Long_val(count));
+    last_interrupted = unwatch();
     e->running = 0;
     fixup(e);
     if (e->exn != Val_unit) {

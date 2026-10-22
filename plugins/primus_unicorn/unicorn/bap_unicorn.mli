@@ -140,6 +140,14 @@ val start : ?until:int64 -> ?timeout:int -> ?count:int -> t -> int64 -> unit
 val stop : t -> unit
 (** [stop uc] stops the emulation, e.g., from a hook. *)
 
+val interrupted : unit -> bool
+(** [interrupted ()] if the last emulation stopped, as an OCaml handler of a
+    signal was pending, which OCaml runs only, when its code runs, e.g., in the
+    hooks, see {!process_signals}. The signals are not watched on Windows. *)
+
+val process_signals : unit -> unit
+(** [process_signals ()] runs the OCaml handlers of the pending signals. *)
+
 (** {2 Hooks}
 
     A hook may be called for the addresses from [first] to [last], inclusive, by
