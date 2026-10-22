@@ -9,6 +9,11 @@ module type S = sig
   val next : t -> t
   val pp : Format.formatter -> t -> unit
 
+  val to_int : t -> int
+  (** [to_int x] the number of [x], e.g., to store it, see {!of_int} *)
+
+  val of_int : int -> t
+
   include Comparable.S_plain with type t := t
 end
 

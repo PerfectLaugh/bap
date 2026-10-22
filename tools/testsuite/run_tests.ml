@@ -285,6 +285,46 @@ let debugging data =
       ])
     [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
 
+(* the cached Lisp program is of the files, that it was loaded from, so
+   the changed file is loaded anew, see Bap_primus_lisp_cache *)
+let lisp_cache data =
+  [
+    case "lisp/cache" (fun env ->
+        let feature = file env "lisp" and cache = file env "lisp-cache" in
+        Sys.mkdir feature 0o755;
+        let probe version =
+          ignore
+            (write env "lisp/probe.lisp"
+               (Printf.sprintf "(defmethod init () (msg \"probe %s\"))\n"
+                  version))
+        in
+        let run () =
+          bap env
+            ~unset:[ "BAP_PRIMUS_LISP_CACHE" ]
+            ~env:[ ("BAP_PRIMUS_LISP_CACHE", cache) ]
+            [
+              path data "bin/x86_64-linux-gnu-echo";
+              "--passes=run";
+              "--primus-lisp-add=" ^ feature;
+              "--primus-lisp-load=probe";
+              "--primus-print-observations=lisp-message";
+            ]
+        in
+        let cached kind =
+          Sys.file_exists cache
+          && Array.exists
+               (String.starts_with ~prefix:(kind ^ "-"))
+               (Sys.readdir cache)
+        in
+        probe "v1";
+        contains env "loads the program" (run ()) "probe v1";
+        check env "caches the source" (cached "source");
+        check env "caches the types" (cached "types");
+        contains env "loads the cached program" (run ()) "probe v1";
+        probe "v2";
+        contains env "loads the changed file" (run ()) "probe v2");
+  ]
+
 (* the debugger stops the machines at the breakpoints and runs the
    commands of a file, the same in the interpreter and in Unicorn *)
 let debugger data =
@@ -1767,6 +1807,7 @@ let tests =
     unresolved;
     limit;
     debugging;
+    lisp_cache;
     debugger;
     scripts;
     bare;

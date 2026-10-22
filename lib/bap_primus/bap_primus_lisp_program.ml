@@ -833,9 +833,102 @@ module Typing = struct
     | No_unification of Id.t * tval * Id.t * tval
   [@@deriving compare, sexp_of]
 
+  type typ_t = typ
+  type signature_t = signature
+  type tval_t = tval
+  type type_error_t = type_error
+
+  (* the types, as they are cached, see [Type.infer] *)
+  module Repr = struct
+    type typ = Any | Symbol | Name of string | Type of int [@@deriving bin_io]
+
+    type signature = { args : typ list; rest : typ option; ret : typ }
+    [@@deriving bin_io]
+
+    type tval = Tany | Tsym | Grnd of int [@@deriving bin_io]
+
+    type type_error =
+      | Unresolved_variable of int * string
+      | Unresolved_function of int * string * signature list
+      | Unresolved_signal of int * string * signature option
+      | Unresolved_parameter of int * string
+      | No_unification of int * tval * int * tval
+    [@@deriving bin_io]
+
+    type tvals = { result : (tval, type_error) Result.t; origin : int }
+    [@@deriving bin_io]
+
+    type tvar = Name of string | Tvar of int [@@deriving bin_io]
+
+    type gamma = { vars : (int * tvar) array; vals : (tvar * tvals) array }
+    [@@deriving bin_io]
+
+    let typ : typ_t -> typ = function
+      | Any -> Any
+      | Symbol -> Symbol
+      | Name x -> Name x
+      | Type n -> Type n
+
+    let of_typ : typ -> typ_t = function
+      | Any -> Any
+      | Symbol -> Symbol
+      | Name x -> Name x
+      | Type n -> Type n
+
+    let signature ({ args; rest; ret } : signature_t) : signature =
+      {
+        args = List.map args ~f:typ;
+        rest = Option.map rest ~f:typ;
+        ret = typ ret;
+      }
+
+    let of_signature ({ args; rest; ret } : signature) : signature_t =
+      {
+        args = List.map args ~f:of_typ;
+        rest = Option.map rest ~f:of_typ;
+        ret = of_typ ret;
+      }
+
+    let tval : tval_t -> tval = function
+      | Tany -> Tany
+      | Tsym -> Tsym
+      | Grnd n -> Grnd n
+
+    let of_tval : tval -> tval_t = function
+      | Tany -> Tany
+      | Tsym -> Tsym
+      | Grnd n -> Grnd n
+
+    let type_error : type_error_t -> type_error =
+      let id = Id.to_int in
+      function
+      | Unresolved_variable (x, s) -> Unresolved_variable (id x, s)
+      | Unresolved_function (x, s, sigs) ->
+          Unresolved_function (id x, s, List.map sigs ~f:signature)
+      | Unresolved_signal (x, s, sg) ->
+          Unresolved_signal (id x, s, Option.map sg ~f:signature)
+      | Unresolved_parameter (x, s) -> Unresolved_parameter (id x, s)
+      | No_unification (x, t, y, u) ->
+          No_unification (id x, tval t, id y, tval u)
+
+    let of_type_error : type_error -> type_error_t =
+      let id = Id.of_int in
+      function
+      | Unresolved_variable (x, s) -> Unresolved_variable (id x, s)
+      | Unresolved_function (x, s, sigs) ->
+          Unresolved_function (id x, s, List.map sigs ~f:of_signature)
+      | Unresolved_signal (x, s, sg) ->
+          Unresolved_signal (id x, s, Option.map sg ~f:of_signature)
+      | Unresolved_parameter (x, s) -> Unresolved_parameter (id x, s)
+      | No_unification (x, t, y, u) ->
+          No_unification (id x, of_tval t, id y, of_tval u)
+  end
+
   module Tvals : sig
     type t [@@deriving compare, sexp_of]
 
+    val repr : t -> Repr.tvals
+    val of_repr : Repr.tvals -> t
     val create : Id.t -> tval -> t
     val fail : Id.t -> type_error -> t
     val meet : Id.t -> t -> t -> t
@@ -868,6 +961,21 @@ module Typing = struct
           { result = meet_tvals x.origin y.origin t1 t2; origin = id }
 
     let result x = x.result
+
+    let repr { result; origin } : Repr.tvals =
+      {
+        result =
+          Result.map result ~f:Repr.tval |> Result.map_error ~f:Repr.type_error;
+        origin = Id.to_int origin;
+      }
+
+    let of_repr ({ result; origin } : Repr.tvals) =
+      {
+        result =
+          Result.map result ~f:Repr.of_tval
+          |> Result.map_error ~f:Repr.of_type_error;
+        origin = Id.of_int origin;
+      }
   end
 
   (* type variables
@@ -938,6 +1046,8 @@ module Typing = struct
     end
 
     val pp : formatter -> t -> unit
+    val repr : t -> Repr.gamma
+    val of_repr : Repr.gamma -> t
   end = struct
     (* typing environment.
 
@@ -1006,6 +1116,38 @@ module Typing = struct
     let members vars =
       Map.fold vars ~init:Tvar.Map.empty ~f:(fun ~key:x ~data:v mems ->
           add_mem x v mems)
+
+    let tvar_repr : tvar -> Repr.tvar = function
+      | Name x -> Name x
+      | Tvar x -> Tvar (Id.to_int x)
+
+    let tvar_of_repr : Repr.tvar -> tvar = function
+      | Name x -> Name x
+      | Tvar x -> Tvar (Id.of_int x)
+
+    (* the maps are arrays in their orders, see [Repr] *)
+    let repr { vars; vals; _ } : Repr.gamma =
+      {
+        vars =
+          Map.to_alist vars
+          |> List.map ~f:(fun (x, v) -> (Id.to_int x, tvar_repr v))
+          |> Array.of_list;
+        vals =
+          Map.to_alist vals
+          |> List.map ~f:(fun (v, t) -> (tvar_repr v, Tvals.repr t))
+          |> Array.of_list;
+      }
+
+    let of_repr ({ vars; vals } : Repr.gamma) =
+      let vars =
+        Array.map vars ~f:(fun (x, v) -> (Id.of_int x, tvar_of_repr v))
+        |> Id.Map.of_sorted_array_unchecked
+      in
+      let vals =
+        Array.map vals ~f:(fun (v, t) -> (tvar_of_repr v, Tvals.of_repr t))
+        |> Tvar.Map.of_sorted_array_unchecked
+      in
+      { vars; vals; mems = members vars }
 
     let add_var x v g =
       {
@@ -1544,6 +1686,63 @@ module Typing = struct
     in
     check_methods glob p (solve Gamma.empty)
 
+  (* the digest of what [infer] reads: the context, the applicable
+     functions and methods, the parameters, the signals, the primitives,
+     the places, and the externals, with the identifiers of the terms,
+     which the program, that is loaded the same, has the same, or
+     [None], if they can't be digested *)
+  let digest externals (p : program) =
+    let items f defs =
+      Map.to_alist defs
+      |> List.map ~f:(fun (name, defs) -> (name, List.map defs ~f))
+    in
+    let library =
+      Map.to_alist (applicable p.context p.library)
+      |> List.map ~f:(fun (package, { defs; mets; _ }) ->
+          ( package,
+            items
+              (fun def -> (def.id, Def.Func.args def, Def.Func.body def))
+              defs,
+            items
+              (fun met -> (met.id, Def.Meth.args met, Def.Meth.body met))
+              mets ))
+    in
+    let signals =
+      Map.to_alist p.library
+      |> List.map ~f:(fun (package, { sigs; _ }) ->
+          (package, items Def.Signal.signature sigs))
+    in
+    let context = Binable.to_string (module Lisp.Context) p.context in
+    let prims = Map.to_alist (make_prims p (make_externals externals)) in
+    let places = Map.to_alist (add_places p) in
+    let paras = Set.to_list (make_paras p) in
+    match
+      Marshal.to_string (context, library, signals, prims, places, paras) []
+    with
+    | data -> Some (Stdlib.Digest.to_hex (Stdlib.Digest.string data))
+    | exception _ -> None
+
+  module Cached = struct
+    type t = Repr.gamma [@@deriving bin_io]
+  end
+
+  (* the types of the program, that are cached by what [infer] reads,
+     see [Bap_primus_lisp_cache] *)
+  let cached externals p =
+    match digest externals p with
+    | None -> infer externals p
+    | Some key -> (
+        match
+          Bap_primus_lisp_cache.load (module Cached) ~kind:"types" [ key ]
+        with
+        | Some gamma -> Gamma.of_repr gamma
+        | None ->
+            let gamma = infer externals p in
+            Bap_primus_lisp_cache.store
+              (module Cached)
+              ~kind:"types" [ key ] (Gamma.repr gamma);
+            gamma)
+
   (* The public interface  *)
   module Type = struct
     type error = { sources : Source.t; problem : type_error }
@@ -1561,7 +1760,7 @@ module Typing = struct
 
     let infer ?(externals = []) program =
       let program = Reindex.program program in
-      let gamma = infer externals program in
+      let gamma = cached externals program in
       { program; gamma }
 
     let errors { program = { sources }; gamma } =

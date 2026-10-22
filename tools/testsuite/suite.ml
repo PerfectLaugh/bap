@@ -50,6 +50,11 @@ let read_output name =
 
 let null = if Sys.win32 then "NUL" else "/dev/null"
 
+(* the cache of the Lisp programs, which the cases share, as their
+   entries are of the files, that they validate, and their caches are of
+   their own, see Bap_primus_lisp_cache *)
+let lisp_cache = ref None
+
 (* the variables that make the commands use the directories of the case *)
 let variables env =
   let dir name = file env name in
@@ -59,6 +64,10 @@ let variables env =
     (* the messages are plain text *)
     ("TERM", "dumb");
   ]
+  @
+  match !lisp_cache with
+  | Some dir -> [ ("BAP_PRIMUS_LISP_CACHE", dir) ]
+  | None -> []
 
 (* the environment of the commands, without the variables of BAP, e.g.,
    the options of the plugins, or BAP_PLUGIN_PATH, which the commands
@@ -398,6 +407,7 @@ let main tests =
         absolute dir
     | None -> Filename.temp_dir "bap-testsuite" ""
   in
+  lisp_cache := Some (Filename.concat work "primus-lisp");
   let cases =
     List.concat_map (fun test -> test dir) tests
     |> List.filter (selected (words "BAP_TESTS"))
@@ -416,6 +426,7 @@ let main tests =
         List.sort (fun x y -> compare y x) !times
         |> List.filteri (fun i _ -> i < 5)
         |> List.iter (fun (time, name) -> printf "  %5.0f s %s\n" time name));
+      Option.iter remove !lisp_cache;
       if Sys.readdir work = [||] then (if not keep then Unix.rmdir work)
       else printf "the outputs of the failed cases are kept in %s\n" work);
   (* the cases wait for their commands, so they run in threads *)

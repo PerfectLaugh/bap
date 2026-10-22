@@ -31,7 +31,7 @@
 - collects only the asked property of a term identifier, instead of all properties of its label
 - doesn't make the arguments of the subroutines places of Primus Lisp, and links each variable once
 - finds the subroutine starts of a region at once, and indexes the scanned regions
-- loads and types the Primus Lisp programs faster, once per process
+- loads and types the Primus Lisp programs faster, once per process, and caches the parsed sources and the types, which take most of the time, in the `primus-lisp` folder of the cache, or in the folder of `BAP_PRIMUS_LISP_CACHE`, which the processes with their own caches may share, e.g., the cases of the testsuite
 - runs the functional tests in parallel with an OCaml runner and OUnit2, and keeps their files in the repository, in `testsuite/`
 - doesn't use the directories of the user: the cache, the log, and the configuration are only in the directories of `--cache-dir`, `--log-dir`, and `--config-dir`
 - uses the APIs, plugins, Lisp files, and Primus systems without installing them

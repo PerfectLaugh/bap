@@ -11,6 +11,7 @@
   bap-core-theory
   bap-future
   bap-knowledge
+  bap-main
   bap-strings
   bitvec
   bitvec-binprot
@@ -20,5 +21,6 @@
   monads
   parsexp
   regular
+  unix
   uuidm
   zarith))

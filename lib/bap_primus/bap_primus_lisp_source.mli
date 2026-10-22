@@ -76,6 +76,18 @@ val derived_all : t -> (Id.t * Id.t) list -> t
 
 val lastid : t -> Id.t
 val lasteq : t -> Eq.t
+
+(** the source, as it is cached, see [Bap_primus_lisp_cache] *)
+module Repr : sig
+  type t [@@deriving bin_io]
+end
+
+val to_repr : t -> Repr.t
+val of_repr : Repr.t -> t
+
+val inputs : t -> (string * string) list
+(** [inputs p] the files of the source, and their contents *)
+
 val pp_error : Format.formatter -> error -> unit
 val pp_tree : Format.formatter -> tree -> unit
 

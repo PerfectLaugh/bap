@@ -765,6 +765,58 @@ module Load = struct
     List.fold ~init:String.Map.empty ~f:(fun fs f ->
         Map.set fs ~key:f ~data:Cmdline)
 
+  (* the features, that are asked, and that the source requires, with
+     the files, that they are resolved to now *)
+  let resolutions paths fs p =
+    Source.fold p ~init:fs ~f:(fun _ trees names ->
+        List.fold trees ~init:names ~f:(fun names tree ->
+            match parse_require tree with
+            | Some (Ok name) -> name :: names
+            | Some (Error _) | None -> names))
+    |> List.dedup_and_sort ~compare:String.compare
+    |> List.map ~f:(fun name -> (name, file_of_feature paths name))
+
+  module Cached = struct
+    type t = {
+      resolutions : (string * string option) list;
+      source : Source.Repr.t;
+    }
+    [@@deriving bin_io]
+  end
+
+  let unchanged p =
+    List.for_all (Source.inputs p) ~f:(fun (file, contents) ->
+        match In_channel.read_all file with
+        | data -> String.equal data contents
+        | exception Sys_error _ -> false)
+
+  let same_resolutions = List.equal [%equal: string * string option]
+
+  (* the cached source is of the same files, and its features are
+     resolved to them, so that it is the source, that is loaded *)
+  let cached paths fs =
+    let key =
+      [ Sexp.to_string [%sexp ((paths, fs) : string list * string list)] ]
+    in
+    let load () =
+      let p =
+        load_trees paths Source.empty (features_of_list fs)
+        |> transitive_closure paths
+      in
+      Bap_primus_lisp_cache.store
+        (module Cached)
+        ~kind:"source" key
+        { resolutions = resolutions paths fs p; source = Source.to_repr p };
+      p
+    in
+    match Bap_primus_lisp_cache.load (module Cached) ~kind:"source" key with
+    | None -> load ()
+    | Some { resolutions = cached; source } ->
+        let p = Source.of_repr source in
+        if unchanged p && same_resolutions cached (resolutions paths fs p) then
+          p
+        else load ()
+
   (* the sources of the features don't depend on the project, so they
      are read once, e.g., for each target of a project *)
   let sources = Hashtbl.Poly.create ()
@@ -772,8 +824,7 @@ module Load = struct
   let features ?(paths = [ Filename.current_dir_name ]) proj fs =
     let source =
       Hashtbl.find_or_add sources (paths, fs) ~default:(fun () ->
-          load_trees paths Source.empty (features_of_list fs)
-          |> transitive_closure paths)
+          cached paths fs)
     in
     try Parse.source (Context.of_project proj) source
     with Parse_error (err, trees) ->

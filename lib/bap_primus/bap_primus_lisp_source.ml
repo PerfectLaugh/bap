@@ -163,6 +163,7 @@ let load p filename =
         }
 
 let find p filename = Map.find p.source filename
+let inputs p = Map.to_alist p.inputs
 
 let range p id =
   match Map.find p.ranges (repr p id) with None -> norange | Some rng -> rng
@@ -206,6 +207,138 @@ let derived_all p ids =
             Map.merge_skewed p.rclass upper_part ~combine:(fun ~key:_ _ x -> x)
       in
       { p with lastid = Id.max last p.lastid; rclass }
+
+(* The source, as it is stored in the cache, see [Bap_primus_lisp_cache],
+   whose maps are arrays, in their orders, so that they are built in a
+   linear time. The terms of [hashed], whose sexps contain the sexps of
+   their subterms, are stored by the classes of their subterms, which are
+   hashed before them, so that the sexps share their subterms again. *)
+module Repr = struct
+  type tree = { data : token; id : int; eq : int }
+  and token = Atom of string | List of tree list [@@deriving bin_io]
+
+  type term = Term_atom of string | Term_list of int list [@@deriving bin_io]
+  type pos = { line : int; col : int; offset : int } [@@deriving bin_io]
+
+  type t = {
+    lastid : int;
+    lasteq : int;
+    hashed : (term * int) array;
+    equivs : (int * int) array;
+    files : string array;
+    origin : (int * int) array;
+    ranges : (int * pos * pos) array;
+    source : (string * tree list) array;
+    inputs : (string * string) array;
+    rclass : (int * int) array;
+  }
+  [@@deriving bin_io]
+end
+
+let to_repr (p : t) : Repr.t =
+  let id = Id.to_int and eq = Eq.to_int in
+  let rec tree ({ data; id = i; eq = e } : tree) : Repr.tree =
+    let data : Repr.token =
+      match data with Atom x -> Atom x | List xs -> List (List.map xs ~f:tree)
+    in
+    { data; id = id i; eq = eq e }
+  in
+  let pos ({ line; col; offset } : Parsexp.Positions.pos) : Repr.pos =
+    { line; col; offset }
+  in
+  let files =
+    Map.data p.origin |> List.dedup_and_sort ~compare:String.compare
+  in
+  let file = String.Map.of_alist_exn (List.mapi files ~f:(fun i f -> (f, i))) in
+  {
+    lastid = id p.lastid;
+    lasteq = eq p.lasteq;
+    hashed =
+      Map.to_alist p.hashed
+      |> List.map ~f:(fun (sexp, e) ->
+          let term : Repr.term =
+            match sexp with
+            | Sexp.Atom x -> Term_atom x
+            | Sexp.List xs ->
+                Term_list
+                  (List.map xs ~f:(fun x -> eq (Map.find_exn p.hashed x)))
+          in
+          (term, eq e))
+      |> Array.of_list;
+    equivs =
+      Map.to_alist p.equivs
+      |> List.map ~f:(fun (i, e) -> (id i, eq e))
+      |> Array.of_list;
+    files = Array.of_list files;
+    origin =
+      Map.to_alist p.origin
+      |> List.map ~f:(fun (i, f) -> (id i, Map.find_exn file f))
+      |> Array.of_list;
+    ranges =
+      Map.to_alist p.ranges
+      |> List.map ~f:(fun (i, { Parsexp.Positions.start_pos; end_pos }) ->
+          (id i, pos start_pos, pos end_pos))
+      |> Array.of_list;
+    source =
+      Map.to_alist p.source
+      |> List.map ~f:(fun (f, trees) -> (f, List.map trees ~f:tree))
+      |> Array.of_list;
+    inputs = Map.to_alist p.inputs |> Array.of_list;
+    rclass =
+      Map.to_alist p.rclass
+      |> List.map ~f:(fun (i, j) -> (id i, id j))
+      |> Array.of_list;
+  }
+
+let of_repr (r : Repr.t) : t =
+  let id = Id.of_int and eq = Eq.of_int in
+  let rec tree ({ data; id = i; eq = e } : Repr.tree) : tree =
+    let data =
+      match data with Atom x -> Atom x | List xs -> List (List.map xs ~f:tree)
+    in
+    { data; id = id i; eq = eq e }
+  in
+  let pos ({ line; col; offset } : Repr.pos) : Parsexp.Positions.pos =
+    { line; col; offset }
+  in
+  (* the sexps of the classes, the subterms first *)
+  let sexps = Hashtbl.create (module Int) in
+  Array.sorted_copy r.hashed ~compare:(fun (_, x) (_, y) -> Int.compare x y)
+  |> Array.iter ~f:(fun (term, e) ->
+      let sexp =
+        match (term : Repr.term) with
+        | Term_atom x -> Sexp.Atom x
+        | Term_list xs -> Sexp.List (List.map xs ~f:(Hashtbl.find_exn sexps))
+      in
+      Hashtbl.set sexps ~key:e ~data:sexp);
+  {
+    lastid = id r.lastid;
+    lasteq = eq r.lasteq;
+    hashed =
+      Array.map r.hashed ~f:(fun (_, e) -> (Hashtbl.find_exn sexps e, eq e))
+      |> Sexp.Map.of_sorted_array_unchecked;
+    equivs =
+      Array.map r.equivs ~f:(fun (i, e) -> (id i, eq e))
+      |> Id.Map.of_sorted_array_unchecked;
+    origin =
+      Array.map r.origin ~f:(fun (i, f) -> (id i, r.files.(f)))
+      |> Id.Map.of_sorted_array_unchecked;
+    ranges =
+      Array.map r.ranges ~f:(fun (i, start_pos, end_pos) ->
+          ( id i,
+            {
+              Parsexp.Positions.start_pos = pos start_pos;
+              end_pos = pos end_pos;
+            } ))
+      |> Id.Map.of_sorted_array_unchecked;
+    source =
+      Array.map r.source ~f:(fun (f, trees) -> (f, List.map trees ~f:tree))
+      |> String.Map.of_sorted_array_unchecked;
+    inputs = String.Map.of_sorted_array_unchecked r.inputs;
+    rclass =
+      Array.map r.rclass ~f:(fun (i, j) -> (id i, id j))
+      |> Id.Map.of_sorted_array_unchecked;
+  }
 
 let pp_error ppf (Bad_sexp (filename, err)) =
   Parsexp.Parse_error.report ppf ~filename err
