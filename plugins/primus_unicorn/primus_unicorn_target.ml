@@ -137,7 +137,11 @@ let parts ~bits : Uc.arch -> (string * part) list = function
   | Mips ->
       ("R0", Skip)
       :: ("USERLOCAL", Reg "CP0_USERLOCAL")
-      :: numbered "R" ~first:1 31 (fun n -> Reg (Int.to_string n))
+      (* the condition codes of the FPU are the bits 23, and 25 to 31, of
+         FCSR *)
+      :: ("FCC0", Bit ("FCSR", 23))
+      :: numbered "FCC" ~first:1 7 (fun n -> Bit ("FCSR", 24 + n))
+      @ numbered "R" ~first:1 31 (fun n -> Reg (Int.to_string n))
       @ [ ("ZERO", Skip); ("ZERO_64", Skip) ]
   | Ppc ->
       let cr =

@@ -97,7 +97,14 @@ let define ?(parent = parent) ?nicknames bits endianness =
   (* the hardware register 29, which rdhwr reads, e.g., the thread
      pointer of Linux *)
   let userlocal = reg bits "USERLOCAL" in
-  let vars = gprs @< fprs @< hilo @< [ userlocal ] @< [ data ] in
+  (* the condition codes of the FPU, of FCSR, which c.cond.fmt sets, and
+     bc1t, bc1f, movt, and movf read *)
+  let fccs =
+    List.init 8 ~f:(fun i -> Theory.Var.define Theory.Bool.t (sprintf "FCC%d" i))
+  in
+  let vars =
+    gprs @< fprs @< hilo @< [ userlocal ] @< untyped fccs @ untyped [ data ]
+  in
   let regs = List.map ~f:(fun name -> Theory.Var.forget (reg bits name)) in
   let aliases = List.map gpr_names ~f:(reg bits) in
   (* LLVM names the registers of the 64-bit operations, e.g., V0_64 *)
@@ -134,6 +141,7 @@ let define ?(parent = parent) ?nicknames bits endianness =
           ([ frame_pointer ], regs [ "R30" ]);
           ([ link ], regs [ "R31" ]);
           ([ thread ], untyped [ userlocal ]);
+          ([ status; floating ], untyped fccs);
           ([ alias ], untyped aliases @ untyped aliases64);
         ]
 

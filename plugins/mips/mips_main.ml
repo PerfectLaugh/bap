@@ -47,6 +47,10 @@ let delayed =
       "BLTZ64";
       "JR64";
       "JALR64";
+      "BC1T";
+      "BC1F";
+      "BC1TL";
+      "BC1FL";
     ]
 
 let promise_delay_slots () =

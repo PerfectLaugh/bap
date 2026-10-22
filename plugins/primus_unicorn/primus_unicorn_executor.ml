@@ -863,7 +863,13 @@ let create session target ~foreign ~externals =
   (match arch with
   | Mips when Theory.Target.bits target = 64 ->
       let status = Option.value_exn (Uc.reg Mips "CP0_STATUS") in
-      Uc.reg_write uc status Int64.(Uc.reg_read uc status lor 0xE0L)
+      (* and the 64-bit FPU registers, FR, of the n64 ABI *)
+      Uc.reg_write uc status Int64.(Uc.reg_read uc status lor 0x040000E0L)
+  (* the FPU of RISC-V, which Linux enables, is off at the reset, as
+     mstatus.FS is 0 *)
+  | Riscv ->
+      Option.iter (Uc.reg Riscv "MSTATUS") ~f:(fun mstatus ->
+          Uc.reg_write uc mstatus Int64.(Uc.reg_read uc mstatus lor 0x6000L))
   (* the VFP and NEON of ARM, which Linux enables, are disabled at the
      reset: the coprocessors 10 and 11 are accessible in CPACR, and
      FPEXC enables them *)
@@ -4062,7 +4068,7 @@ module Make (Machine : Primus.Machine.S) = struct
      they continue, see [continues], and returns the address of the next
      one, which on ARM stays in the Thumb state, unless the jump sets the
      lower bit *)
-  let interpret ?(budget = 4096) ?(slot = true) e pc =
+  let interpret ?(budget = 4096) ?(slot = true) ?(strict = true) e pc =
     let* () = pull e in
     let* pc = if slot then branch_of_slot e pc else Machine.return pc in
     (* the call of the threads runs in Unicorn, see [Threads] *)
@@ -4082,7 +4088,7 @@ module Make (Machine : Primus.Machine.S) = struct
          accessed the tainted memory, has the semantics, else it would
          run again and again *)
       | Some (_, blks)
-        when n = budget
+        when strict && n = budget
              && List.for_all blks ~f:(fun blk ->
                  Term.length def_t blk = 0 && Term.length jmp_t blk = 0) ->
           fail "the instruction at %Lx has no semantics to interpret" pc
@@ -4171,7 +4177,7 @@ module Make (Machine : Primus.Machine.S) = struct
     match Effect.perform (Paused (pc, id)) with
     | Continue pc -> Machine.return pc
     | Map addr -> ensure_page e addr >>= fun () -> serve pc
-    | Interpret -> interpret ~budget:1 ~slot:false e pc >>= serve
+    | Interpret -> interpret ~budget:1 ~slot:false ~strict:false e pc >>= serve
     | Set_pc pc -> serve pc
     | Store (addr, data) ->
         (* the stored bytes of a read-only segment would be writable, so

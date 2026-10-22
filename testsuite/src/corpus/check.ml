@@ -243,12 +243,19 @@ let () =
         let unchecked =
           String.starts_with ~prefix:"failed Unicorn: an invalid instruction"
             native.status
+          (* the illegal instructions of RISC-V are its exception 2 *)
+          || String.starts_with target ~prefix:"riscv"
+             && String.starts_with ~prefix:"failed Unicorn: an unhandled interrupt 2 "
+                  native.status
         in
         let diffs =
           if unchecked then [ "unchecked, as Unicorn doesn't have it" ]
           else
           (let fault s =
              String.starts_with ~prefix:"failed Segmentation fault" s
+             (* the unaligned accesses, e.g., of MIPS, are the exceptions
+                of Unicorn *)
+             || String.starts_with ~prefix:"failed Unicorn: an unhandled interrupt" s
            in
            if native.status <> lifted.status
               && not (fault native.status && fault lifted.status)
