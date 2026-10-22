@@ -18,7 +18,7 @@
 - protects the memory of Primus, as `mprotect` does, maps the anonymous memory with `mmap`, and snapshots and restores the memory
 - runs the code that the program writes or changes in the interpreter, in the Thumb or A32 mode that the jumps select, as ARMv7 does
 - loads ELF files as the dynamic linker does, links the relocatable ELF files, e.g., kernel modules, and runs the imports of data, the `.bss` of PE, and the programs of mingw on x86 and x86-64
-- lifts more AArch64 integer, load/store, SIMD, scalar floating-point, and system instructions, the VFP and more AArch32 instructions, and the RV64 words and the M extension of RISC-V
+- lifts more AArch64 integer, load/store, SIMD, scalar floating-point, and system instructions, the LSE atomics of ARMv8.1, the VFP and more AArch32 instructions, and the RV64 words and the M extension of RISC-V
 - lifts x86, MIPS, PowerPC, and AArch32 with Primus Lisp only, tested against QEMU
 - writes the computations of the knowledge base in the direct style, with `KB.direct` and `KB.await`, using the effects of OCaml 5
 - serializes BIL and BIR in protobuf and JSON
