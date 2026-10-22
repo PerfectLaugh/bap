@@ -61,7 +61,13 @@ let insert_call prog start entry jmp =
   let sub = Sub.create ~tid ~name () in
   let prog = Term.append sub_t prog sub in
   let entry = Term.remove jmp_t entry (Term.tid jmp) in
-  let call = Call.create ~target:(Direct (Term.tid sub)) () in
+  (* the call returns, where the indirect one, e.g., through the GOT,
+     returned, so that the code, that calls main, e.g., the stub of
+     __libc_start_main in Primus, sees, when it returns *)
+  let return =
+    match Jmp.kind jmp with Call call -> Call.return call | _ -> None
+  in
+  let call = Call.create ?return ~target:(Direct (Term.tid sub)) () in
   let jmp = Jmp.create_call call in
   let entry = Term.prepend jmp_t entry jmp in
   let start = Term.update blk_t start entry in
