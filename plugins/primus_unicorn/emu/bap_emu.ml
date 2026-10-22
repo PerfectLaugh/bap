@@ -37,6 +37,10 @@ type t = {
           outside of the machine, which runs *)
   lifted : (int64 * string * bool, (int * blk term list) option) Hashtbl.t;
       (** the instructions, that [bir] lifted in the hooks *)
+  paused_lifts :
+    (int64 * string * bool, (int * blk term list) option) Hashtbl.t;
+      (** the instructions, that [bir] lifted in the machine, as the machine is
+          not free to call *)
   hooked_calls : Int64.Hash_set.t;
       (** the addresses, whose calls the script hooks, see [on_call] *)
 }
@@ -181,6 +185,7 @@ let create ?(system = "bap:unicorn-executor") ?(components = []) ?(init = [])
       project = proj;
       hooked = None;
       lifted = Hashtbl.Poly.create ();
+      paused_lifts = Hashtbl.Poly.create ();
       hooked_calls = Int64.Hash_set.create ();
     }
   in
@@ -414,20 +419,22 @@ let bir ?thumb t addr =
   match t.state with
   | Running -> hooked t ?encoding ~thumb addr bytes
   | _ ->
-      let result = ref None in
-      primus t
-        (module functor
-                  (Machine : Primus.Machine.S)
-                  ->
-                  struct
-                    module Lift = Primus.Lift.Make (Machine)
-                    open Machine.Syntax
+      Hashtbl.find_or_add t.paused_lifts (addr, bytes, thumb)
+        ~default:(fun () ->
+          let result = ref None in
+          primus t
+            (module functor
+                      (Machine : Primus.Machine.S)
+                      ->
+                      struct
+                        module Lift = Primus.Lift.Make (Machine)
+                        open Machine.Syntax
 
-                    let init () =
-                      Lift.insn ?encoding ~read addr >>| fun insn ->
-                      result := insn
-                  end);
-      !result
+                        let init () =
+                          Lift.insn ?encoding ~read addr >>| fun insn ->
+                          result := insn
+                      end);
+          !result)
 
 (* the bytes of the code at [addr], at most the size of an instruction,
    fewer, if the rest is not mapped *)
