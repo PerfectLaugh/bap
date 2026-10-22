@@ -740,6 +740,14 @@ let create session target ~foreign ~externals =
   | Mips when Theory.Target.bits target = 64 ->
       let status = Option.value_exn (Uc.reg Mips "CP0_STATUS") in
       Uc.reg_write uc status Int64.(Uc.reg_read uc status lor 0xE0L)
+  (* the VFP and NEON of ARM, which Linux enables, are disabled at the
+     reset: the coprocessors 10 and 11 are accessible in CPACR, and
+     FPEXC enables them *)
+  | Arm ->
+      Option.iter (Uc.reg Arm "C1_C0_2") ~f:(fun cpacr ->
+          Uc.reg_write uc cpacr Int64.(Uc.reg_read uc cpacr lor 0xF00000L));
+      Option.iter (Uc.reg Arm "FPEXC") ~f:(fun fpexc ->
+          Uc.reg_write uc fpexc 0x40000000L)
   | _ -> ());
   let regs = Target.Regs.create target arch uc in
   let sp =
