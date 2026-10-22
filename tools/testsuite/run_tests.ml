@@ -699,6 +699,24 @@ let emu data =
             ( "lifts the written code",
               "written 405000: 5 bytes\n.*RAX := 0x2A\n" );
           ]);
+    (* the code, that ran, and that memcpy, a native function, rewrites,
+       runs anew, as Unicorn translates it anew, also after the store of
+       the program *)
+    case "emu/rewrite" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/rewrite.ml";
+              path data "bin/x86_64-linux-gnu-rewrite";
+            ]
+        in
+        sequence env out
+          [
+            ("runs the written code", "returns 42\n");
+            ("runs the code, that memcpy rewrote", "returns 7\n");
+            ("runs the code, that the store rewrote", "returns 9\n");
+          ]);
     (* the emulators run side by side, each in its own engine, also of
        another target, with their own registers, memory, names and
        hooks *)
