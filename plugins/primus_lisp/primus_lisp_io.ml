@@ -285,6 +285,49 @@ let init redirections =
               | _ -> error))
       | _ -> wrong_arity ()
   end in
+  (* the formatted output of printf, see [Primus_lisp_format] *)
+  let module Printf (Machine : Primus.Machine.S) = struct
+    include Lib (Machine)
+    module Format = Primus_lisp_format.Make (Machine)
+
+    let run = function
+      | fd :: fmt :: args -> (
+          value_to_fd fd |> function
+          | None -> error
+          | Some fd -> (
+              Format.format fmt args >>= fun text ->
+              Machine.Local.get state >>= fun { channels } ->
+              match Map.find channels fd with
+              | Some { output = Some ch } ->
+                  Out_channel.output_string ch text;
+                  int (String.length text)
+              | _ -> error))
+      | _ -> wrong_arity ()
+  end in
+  (* the formatted string of snprintf, the bytes of which, that fit, are
+     stored, with the null *)
+  let module Sprintf (Machine : Primus.Machine.S) = struct
+    include Lib (Machine)
+    module Format = Primus_lisp_format.Make (Machine)
+
+    let run = function
+      | ptr :: size :: fmt :: args ->
+          Format.format fmt args >>= fun text ->
+          let size =
+            match Word.to_int (Value.to_word size) with
+            | Ok n when n >= 0 -> n
+            | _ -> Int.max_value
+          in
+          let stored =
+            if size = 0 then "" else String.prefix text (size - 1) ^ "\000"
+          in
+          String.to_list stored
+          |> Machine.List.fold ~init:ptr ~f:(fun ptr c ->
+              Value.of_int ~width:8 (Char.to_int c) >>= fun c ->
+              Eval.store ptr c LittleEndian `r8 >>= fun () -> Value.succ ptr)
+          >>= fun _ -> int (String.length text)
+      | _ -> wrong_arity ()
+  end in
   let module Flush (Machine : Primus.Machine.S) = struct
     include Lib (Machine)
 
@@ -424,6 +467,23 @@ let init redirections =
             of a readable channel. WHENCE is interpreted as in fseek: zero
             seeks from the beginning, one from the current position, and two
             from the end. Returns zero on success and -1 on failure.|};
+          def "channel-printf"
+            ((tuple [ int; int ] // all any) @-> int)
+            (module Printf)
+            {|(channel-printf DESCR FMT ARG ...) outputs the string, that
+            printf formats from the format, that FMT points to, and the
+            words ARG ..., to the channel, that has the descriptor DESCR.
+            The floating point conversions, e.g., %f, are output as they
+            are. Returns the number of the output characters, or -1 if no
+            such channel exists, or if it is not writable.|};
+          def "memory-printf"
+            ((tuple [ int; int; int ] // all any) @-> int)
+            (module Sprintf)
+            {|(memory-printf PTR SIZE FMT ARG ...) stores the string, that
+            printf formats from the format, that FMT points to, and the
+            words ARG ..., at PTR, at most SIZE bytes of it, with the
+            terminating null, as snprintf does. Returns the length of the
+            formatted string.|};
           def "channel-output"
             ((one int // all byte) @-> int)
             (module Output)

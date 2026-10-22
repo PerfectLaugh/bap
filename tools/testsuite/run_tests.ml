@@ -1136,6 +1136,54 @@ let mprotect data =
           lacks env "stops" out "\\bX\\b"))
     [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
 
+(* the stubs of the printf family format the words, that the C ABI
+   passes, also on the stack, the streams of libc are the channels of
+   Lisp, whether the program refers to them with a copy relocation, or
+   through the GOT, as the fortified one does, which calls __printf_chk,
+   and the program exits with the result of main *)
+let printf_family data =
+  let lines =
+    [
+      "int 42 neg -7 unsigned 3000000000 hex ff HEX 0XFF oct 10\n";
+      "long -1234567890123 18446744073709551615 deadbeefcafe char Z str [hi] \
+       [   ab] [ab   |] [ab]\n";
+      "pad [   12] [12   |] [-0012] [+5] [ 5] [007] [   9] %\n";
+      "stack 1 2 3 4 5 6 7 8\n";
+      "ptr 0x1234 null (nil) (null)\n";
+      "sprintf [s10xyz] 6 snprintf [truncat] 16\n";
+    ]
+  in
+  List.concat_map
+    (fun bin ->
+      List.map
+        (fun system ->
+          case
+            ("run/" ^ bin ^ "/" ^ system)
+            (fun env ->
+              let stderr = file env "stderr" in
+              let out =
+                bap env
+                  [
+                    path data ("bin/x86_64-linux-gnu-" ^ bin);
+                    "--passes=run";
+                    "--run-systems=" ^ system;
+                    "--primus-lisp-channel-redirect=<stderr>:" ^ stderr;
+                    "--primus-print-observations=exited";
+                  ]
+              in
+              List.iter (fun line -> contains env line out line) lines;
+              contains env "exits with the result of main" out "(exited 3:";
+              lacks env "doesn't print stderr to stdout" out "err 99";
+              let err =
+                {
+                  out with
+                  text = In_channel.with_open_bin stderr In_channel.input_all;
+                }
+              in
+              contains env "prints to stderr" err "err 99\n"))
+        [ "bap:stubbed-executor"; "bap:unicorn-executor" ])
+    [ "printf"; "printf-chk" ]
+
 (* the program maps an anonymous page with mmap, runs the code that it
    writes there, after it makes it executable, and reads from the page,
    after it unmaps it *)
@@ -1650,6 +1698,7 @@ let tests =
     unicorn_symexec;
     script_debugger;
     mprotect;
+    printf_family;
     mmap;
     pages;
     taint;

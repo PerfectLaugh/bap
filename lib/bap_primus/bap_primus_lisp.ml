@@ -632,16 +632,42 @@ module Make (Machine : Machine) = struct
           Hash_set.add linked v;
           link_global v))
 
-  let find_sub prog name =
+  (* the number of the words, that a variadic function takes, after its
+     named arguments, at most, e.g., the values of the format of printf *)
+  let max_variadic = 8
+
+  (* the words after the named arguments of the variadic function, where
+     the C ABI passes them, which the definitions of Lisp take, if they
+     have more parameters, e.g., printf, see stdio.lisp *)
+  let variadic_args target (proto : C.Type.proto) =
+    match C.Abi.lookup target with
+    | None -> []
+    | Some abi ->
+        let named = List.length proto.args in
+        let word = C.Type.basic `slong in
+        let extra =
+          List.init max_variadic ~f:(fun i -> (sprintf "vararg%d" i, word))
+        in
+        let proto =
+          { proto with args = proto.args @ extra; variadic = false }
+        in
+        C.Abi.apply abi (C.Abi.model target) [] proto (Sub.create ())
+        |> Term.enum arg_t
+        |> Seq.filter ~f:(fun arg ->
+            match Arg.intent arg with Some Out -> false | _ -> true)
+        |> Seq.to_list
+        |> fun args -> List.drop args named
+
+  let find_sub prog target name =
     Term.enum sub_t prog
     |> Seq.find ~f:(fun s -> String.equal (Sub.name s) name)
     |> function
-    | None -> ([], None, None, None)
+    | None -> ([], [], None, None, None)
     | Some sub -> (
         let tid = Some (Term.tid sub) in
         let addr = Term.get_attr sub address in
         match Term.get_attr sub C.proto with
-        | None -> ([], None, tid, addr)
+        | None -> ([], [], None, tid, addr)
         | Some proto ->
             let args = Term.enum arg_t sub |> Seq.to_list in
             let args, ret =
@@ -649,17 +675,40 @@ module Make (Machine : Machine) = struct
               | `Void -> (args, None)
               | _ -> List.(take args (List.length args - 1), last args)
             in
-            (args, ret, tid, addr))
+            let varargs =
+              if proto.variadic then variadic_args target proto else []
+            in
+            (args, varargs, ret, tid, addr))
+
+  (* the definition, that takes the named arguments, otherwise the one,
+     that takes the fewest words after them, if the function is variadic *)
+  let resolve_extern program fullname args varargs =
+    let resolve args =
+      Lisp.Resolve.extern Lisp.Check.arg program Lisp.Program.Items.func
+        fullname args
+    in
+    let rec variadic n =
+      if n > List.length varargs then None
+      else
+        match resolve (args @ List.take varargs n) with
+        | Some (Ok _) as ok -> ok
+        | _ -> variadic (n + 1)
+    in
+    match resolve args with
+    | Some (Ok _) as ok -> ok
+    | failed -> (
+        if List.is_empty varargs then failed
+        else match variadic 1 with Some _ as ok -> ok | None -> failed)
 
   let link_feature program def =
     Machine.get () >>= fun proj ->
     Machine.Local.get state >>= fun s ->
     let name = Lisp.Def.name def in
-    let args, ret, tid, addr = find_sub (Project.program proj) name in
+    let args, varargs, ret, tid, addr =
+      find_sub (Project.program proj) (Project.target proj) name
+    in
     let fullname = KB.Name.create ~package:"external" name in
-    Lisp.Resolve.extern Lisp.Check.arg program Lisp.Program.Items.func fullname
-      args
-    |> function
+    resolve_extern program fullname args varargs |> function
     | None -> Machine.return ()
     | Some (Error _) when Option.is_none tid -> Machine.return ()
     | Some (Error err) -> Machine.raise (Unresolved (fullname, err))

@@ -25,6 +25,40 @@
   (declare (external "puts" "puts_unlocked"))
   (fputs p *standard-output*))
 
+;; the functions of the printf family take the words, that the C ABI
+;; passes after the format, at most eight of them, see channel-printf
+(defun printf (fmt a0 a1 a2 a3 a4 a5 a6 a7)
+  (declare (external "printf"))
+  (channel-printf *standard-output* fmt a0 a1 a2 a3 a4 a5 a6 a7))
+
+(defun printf-chk (flag fmt a0 a1 a2 a3 a4 a5 a6 a7)
+  (declare (external "__printf_chk"))
+  (channel-printf *standard-output* fmt a0 a1 a2 a3 a4 a5 a6 a7))
+
+(defun fprintf (stream fmt a0 a1 a2 a3 a4 a5 a6 a7)
+  (declare (external "fprintf" "dprintf"))
+  (channel-printf stream fmt a0 a1 a2 a3 a4 a5 a6 a7))
+
+(defun fprintf-chk (stream flag fmt a0 a1 a2 a3 a4 a5 a6 a7)
+  (declare (external "__fprintf_chk"))
+  (channel-printf stream fmt a0 a1 a2 a3 a4 a5 a6 a7))
+
+(defun sprintf (buf fmt a0 a1 a2 a3 a4 a5 a6 a7)
+  (declare (external "sprintf"))
+  (memory-printf buf -1 fmt a0 a1 a2 a3 a4 a5 a6 a7))
+
+(defun sprintf-chk (buf flag len fmt a0 a1 a2 a3 a4 a5 a6 a7)
+  (declare (external "__sprintf_chk"))
+  (memory-printf buf -1 fmt a0 a1 a2 a3 a4 a5 a6 a7))
+
+(defun snprintf (buf size fmt a0 a1 a2 a3 a4 a5 a6 a7)
+  (declare (external "snprintf"))
+  (memory-printf buf size fmt a0 a1 a2 a3 a4 a5 a6 a7))
+
+(defun snprintf-chk (buf size flag len fmt a0 a1 a2 a3 a4 a5 a6 a7)
+  (declare (external "__snprintf_chk"))
+  (memory-printf buf size fmt a0 a1 a2 a3 a4 a5 a6 a7))
+
 (defun fflush (s)
   (declare (external "fflush" "fflush_unlocked"))
   (channel-flush s))
