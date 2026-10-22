@@ -36,7 +36,8 @@ type t = {
       (** the knowledge, in which [bir] lifts the instructions in the hooks,
           outside of the machine, which runs *)
   lifted : (int64 * string * bool, (int * blk term list) option) Hashtbl.t;
-      (** the instructions, that [bir] lifted in the hooks *)
+      (** the instructions, that [bir] lifted in the hooks, of the program,
+          see [lifts] *)
   paused_lifts :
     (int64 * string * bool, (int * blk term list) option) Hashtbl.t;
       (** the instructions, that [bir] lifted in the machine, as the machine is
@@ -135,6 +136,20 @@ let start init (entry : Primus.Linker.name) =
   in
   ended ()
 
+(* the instructions, that the hooks lift, are of the file and the
+   target, and not of the emulator, as their bytes are in the key, so
+   the emulators of the same program share them, e.g., the ones of a
+   script, which creates one for each case, see [hooked] *)
+let shared_lifts = Hashtbl.Poly.create ()
+
+let lifts proj =
+  match Project.get proj filename with
+  | None -> Hashtbl.Poly.create ()
+  | Some file ->
+      Hashtbl.find_or_add shared_lifts
+        (file, Bap_core_theory.Theory.Target.to_string (Project.target proj))
+        ~default:Hashtbl.Poly.create
+
 (* the components of [init], and the redirections run
    in the machine, after the components of the system, before the
    program starts, and the program continues from the checkpoint
@@ -184,7 +199,7 @@ let create ?(system = "bap:unicorn-executor") ?(components = []) ?(init = [])
       target = Project.target proj;
       project = proj;
       hooked = None;
-      lifted = Hashtbl.Poly.create ();
+      lifted = lifts proj;
       paused_lifts = Hashtbl.Poly.create ();
       hooked_calls = Int64.Hash_set.create ();
     }
