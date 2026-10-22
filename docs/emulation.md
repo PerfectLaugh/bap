@@ -336,9 +336,11 @@ List.iter (fun b ->
 
 ### Threads
 
-The programs of x86-64 and AArch64 run their threads, that the system calls of Linux create, e.g., `clone` with `CLONE_VM`, as `pthread_create` does, one at a time, in the same memory. A thread switches, when it waits on a futex, exits, or calls `sched_yield`, and else every millisecond of the processor, while another thread is ready, so the interleavings may differ from run to run. The executor handles `clone`, `futex` (its waits and wakes), `set_tid_address`, `gettid`, `sched_yield`, `exit`, and `exit_group`, which exits with the Lisp `exit`; the other system calls go to `intrinsic:syscall` or `intrinsic:svc`, as before. `Emu.thread` tells the thread, that the paused program runs.
+The programs of x86-64 and AArch64 run their threads, that the system calls of Linux create, e.g., `clone` with `CLONE_VM`, as `pthread_create` does, one at a time, in the same memory. A thread switches, when it waits on a futex, exits, or calls `sched_yield`, and else after 5 ms of the processor, while another thread is ready, so the interleavings may differ from run to run. The executor handles `clone`, `futex` (its waits and wakes), `set_tid_address`, `gettid`, `sched_yield`, `exit`, and `exit_group`, which exits with the Lisp `exit`; the other system calls go to `intrinsic:syscall` or `intrinsic:svc`, as before. `Emu.thread` tells the thread, that the paused program runs.
 
-The limits: a `clone` of a process, without `CLONE_VM`, fails with `ENOSYS`, as does `clone3`, after which glibc calls `clone`. The threads switch only in the run, that created them, so a thread can't wait in a function of the program, that a Lisp stub called. The checkpoints keep one thread, so `save` fails, while the program has several. The taint and the symbolic values don't know the threads, that computed them.
+A thread, that doesn't run, keeps the values of its registers in the variables of Primus, `thread_<tid>_<register>`, so they keep their taint and their symbolic formulas, while the threads switch, and the checkpoints keep them, with the threads, e.g., to continue a program, that was saved in one thread, while the others wait.
+
+The limits: a `clone` of a process, without `CLONE_VM`, fails with `ENOSYS`, as does `clone3`, after which glibc calls `clone`. The threads switch only in the run, that created them, so a thread can't wait in a function of the program, that a Lisp stub called, and the checkpoint isn't saved there.
 
 ### Several emulators
 

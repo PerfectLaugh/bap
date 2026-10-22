@@ -1529,22 +1529,36 @@ let threads data =
           has env "counts the steps of the threads" out "8000\nok\n"))
     [ "x86_64-linux-gnu"; "aarch64-linux-gnu" ]
   @ [
-      case "emu/x86_64-linux-gnu-threads/save" (fun env ->
-          let out =
+      (* the taint of a register of a thread stays, while the threads
+         switch, also in the program, that continues from the checkpoint,
+         which keeps the threads *)
+      case "emu/x86_64-linux-gnu-threads/checkpoint" (fun env ->
+          let script args =
             bap ~timeout:300. env
-              [
-                "script";
-                input "emu/threads/save.ml";
-                path data "bin/x86_64-linux-gnu-threads";
-              ]
+              ([
+                 "script";
+                 input "emu/threads/save.ml";
+                 path data "bin/x86_64-linux-gnu-threads";
+               ]
+              @ args)
           in
+          let taint out =
+            has env "taints R8 of the thread 2" out
+              "R8 of the thread 2: input\n";
+            lacks env "doesn't taint the other threads" out
+              "R8 of the thread [^2]: input";
+            has env "finishes the threads" out "8000\nok\nexited"
+          in
+          let out = script [] in
           sequence env out
             [
-              (* the first thread, after main, is preempted *)
-              ("pauses in a thread", "paused in the thread 2");
-              ("doesn't save the threads", "the program has several threads");
-              ("continues", "8000\nok\nexited");
-            ]);
+              ("taints in the thread 2", "tainted in the thread 2\n");
+              ("saves in main", "saved in the thread 1\n");
+            ];
+          taint out;
+          let out = script [ "restore" ] in
+          has env "restores in main" out "restored in the thread 1\n";
+          taint out);
     ]
 
 (* the scripts on every target, that the testsuite has the binaries of:

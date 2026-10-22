@@ -24,6 +24,27 @@ type frame = {
 }
 [@@deriving bin_io]
 
+(* a thread, that doesn't run, whose registers are the variables, see
+   [Primus_unicorn_executor.thread_var] *)
+type thread = {
+  tid : int;
+  extra : (int * string) list;
+      (** the registers of Unicorn, that Primus doesn't have, by their ids *)
+  next : int64;  (** the address, from which it continues *)
+  waiting : int64 option;  (** the futex, on which it waits *)
+  clear : int64 option;  (** the address of its TID, cleared at its exit *)
+}
+[@@deriving bin_io]
+
+(* the threads of the machine, see [Primus_unicorn_executor.threads] *)
+type threads = {
+  current : int;  (** the TID of the thread, that runs *)
+  cleared : int64 option;  (** its [clear] *)
+  others : thread list;
+  last : int;  (** the last TID *)
+}
+[@@deriving bin_io]
+
 module T = struct
   type t = {
     target : string;  (** the target of the program, see [Theory.Target] *)
@@ -45,13 +66,19 @@ module T = struct
     extensions : (string * string) list;
         (** the states of the components, by the names of their extensions, see
             [Primus.Checkpoint] *)
+    extra : (int * string) list;
+        (** the registers of Unicorn, that Primus doesn't have, e.g., of TLS, by
+            their ids *)
+    threads : threads option;
+        (** the threads, if the program created them, which switch in the run,
+            from which Unicorn continues *)
   }
   [@@deriving bin_io]
 end
 
 include T
 
-let magic = "bap-primus-unicorn-checkpoint 3\n"
+let magic = "bap-primus-unicorn-checkpoint 4\n"
 
 (* the digest of the file of the program, which the checkpoint is of *)
 let digest path = Stdlib.Digest.(to_hex (file path))

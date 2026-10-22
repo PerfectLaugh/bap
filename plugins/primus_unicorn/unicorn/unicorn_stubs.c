@@ -567,10 +567,13 @@ static void mark(struct engine *e);
    without them, e.g., a loop. The watcher looks at the signals a few
    times a second, while an engine runs, and stops it, after which the
    handlers run, see [bap_uc_process_signals], e.g., the one of a
-   script, which pauses the program to save it. The engine stops at the
-   start of a block, see build.cmake of libunicorn. The engine, that
-   runs, is guarded, as it is closed, after it stops. On Windows, the
-   signals are not watched. */
+   script, which pauses the program to save it. It also stops the
+   engine at the deadline of its run, e.g., at the end of the time slice
+   of a thread, instead of the timeout of Unicorn, which creates a
+   thread for each run. The engine stops at the start of a block, see
+   build.cmake of libunicorn. The engine, that runs, is guarded, as it is
+   closed, after it stops. On Windows, the signals are not watched, and
+   the timeouts are of Unicorn. */
 #ifndef _WIN32
 #include <pthread.h>
 #include <signal.h>
@@ -581,19 +584,48 @@ static void mark(struct engine *e);
 CAMLextern int caml_check_pending_signals(void);
 
 static pthread_mutex_t watched_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t watched_changed = PTHREAD_COND_INITIALIZER;
 static uc_engine *watched = NULL;
 static int interrupted = 0;
+static int has_deadline = 0;
+static struct timespec deadline;
+
+static int before(const struct timespec *x, const struct timespec *y) {
+    return x->tv_sec < y->tv_sec ||
+           (x->tv_sec == y->tv_sec && x->tv_nsec < y->tv_nsec);
+}
+
+static struct timespec after(long usec) {
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    t.tv_sec += usec / 1000000;
+    t.tv_nsec += (usec % 1000000) * 1000;
+    if (t.tv_nsec >= 1000000000) {
+        t.tv_sec += 1;
+        t.tv_nsec -= 1000000000;
+    }
+    return t;
+}
 
 static void *watch_signals(void *data) {
-    struct timespec period = {0, 20 * 1000 * 1000};
+    pthread_mutex_lock(&watched_lock);
     for (;;) {
-        nanosleep(&period, NULL);
-        pthread_mutex_lock(&watched_lock);
-        if (watched != NULL && caml_check_pending_signals()) {
+        struct timespec until = after(20 * 1000);
+        if (watched != NULL && has_deadline && before(&deadline, &until)) {
+            until = deadline;
+        }
+        pthread_cond_timedwait(&watched_changed, &watched_lock, &until);
+        if (watched == NULL) {
+            continue;
+        }
+        struct timespec now = after(0);
+        if (caml_check_pending_signals()) {
             interrupted = 1;
             uc_emu_stop(watched);
+        } else if (has_deadline && !before(&now, &deadline)) {
+            has_deadline = 0;
+            uc_emu_stop(watched);
         }
-        pthread_mutex_unlock(&watched_lock);
     }
     return NULL;
 }
@@ -610,24 +642,33 @@ static void start_watcher(void) {
     pthread_sigmask(SIG_SETMASK, &old, NULL);
 }
 
-static void watch(uc_engine *uc) {
+/* the engine runs, at most [usec] microseconds, if it is not 0, and
+   the timeout of Unicorn is 0 */
+static uint64_t watch(uc_engine *uc, uint64_t usec) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
     pthread_once(&once, start_watcher);
     pthread_mutex_lock(&watched_lock);
     watched = uc;
+    has_deadline = usec > 0;
+    if (has_deadline) {
+        deadline = after((long)usec);
+    }
+    pthread_cond_signal(&watched_changed);
     pthread_mutex_unlock(&watched_lock);
+    return 0;
 }
 
 static int unwatch(void) {
     pthread_mutex_lock(&watched_lock);
     watched = NULL;
+    has_deadline = 0;
     int was = interrupted;
     interrupted = 0;
     pthread_mutex_unlock(&watched_lock);
     return was;
 }
 #else
-static void watch(uc_engine *uc) {}
+static uint64_t watch(uc_engine *uc, uint64_t usec) { return usec; }
 static int unwatch(void) { return 0; }
 #endif
 
@@ -648,10 +689,9 @@ value bap_uc_emu_start(value v, value start, value until, value timeout,
     struct engine *e = Engine_val(v);
     mark(e);
     e->running = 1;
-    watch(engine_uc(v));
+    uint64_t usec = watch(engine_uc(v), Int64_val(timeout));
     uc_err err = uc_emu_start(engine_uc(v), Int64_val(start),
-                              Int64_val(until), Int64_val(timeout),
-                              Long_val(count));
+                              Int64_val(until), usec, Long_val(count));
     last_interrupted = unwatch();
     e->running = 0;
     fixup(e);
