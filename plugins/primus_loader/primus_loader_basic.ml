@@ -350,6 +350,13 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     | Some (name, _) -> name
     | None -> name
 
+  (* the streams of libc are the file descriptors of Lisp, see
+     stdio.lisp, e.g., stdout is 1 *)
+  let stream name =
+    List.Assoc.find ~equal:String.equal
+      [ ("stdin", 0L); ("stdout", 1L); ("stderr", 2L) ]
+      (unversioned name)
+
   (* the slots, e.g., of the GOT, have contents in the file, while the
      reference of a copy relocation, e.g., of stdin on x86-64, is the
      object itself, e.g., in .bss, which the file doesn't contain, so the
@@ -440,10 +447,10 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
       let endian = endian_of_target target in
       let objects =
         imported_data doc |> Seq.to_list
-        |> Machine.List.filter_map ~f:(fun (slot, _) ->
+        |> Machine.List.filter_map ~f:(fun (slot, name) ->
             make_word slot >>= fun slot ->
             read_word endian slot >>| fun value ->
-            Option.some_if (Word.is_zero value) (Object (slot, "")))
+            Option.some_if (Word.is_zero value) (Object (slot, name)))
       in
       objects >>= fun objects ->
       imported_functions doc
@@ -483,12 +490,42 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
                    msvcrt.lisp tells *)
                 make_word 0L >>= fun null ->
                 Machine.ignore_m @@ save_word ~force:true endian null slot
-            | Object (slot, _) ->
-                Machine.ignore_m @@ save_word ~force:true endian addr slot
+            | Object (slot, name) -> (
+                save_word ~force:true endian addr slot >>= fun _ ->
+                match stream name with
+                | Some fd ->
+                    make_word fd >>= fun fd ->
+                    Machine.ignore_m @@ save_word ~force:true endian fd addr
+                | None -> Machine.return ())
             | Function (slot, name) ->
                 Linker.link ~addr (call name) >>= fun () ->
                 Machine.ignore_m @@ save_word ~force:true endian addr slot)
         >>| fun () -> Addr.nsucc endp total
+
+  (* the streams, that the program has, as the copy relocations, e.g., of
+     stdout on x86-64, give the object in the program, e.g., in .bss, not in
+     the file, which the dynamic linker sets, are the file descriptors *)
+  let setup_copied_streams () =
+    Machine.get () >>= fun proj ->
+    let doc = Project.specification proj in
+    let endian = endian_of_target (Project.target proj) in
+    if is_coff doc then Machine.return ()
+    else
+      let in_file =
+        Set.of_sequence (module Int64) (Seq.map (imported_data doc) ~f:fst)
+      in
+      Ogre.(collect Query.(select @@ from Image.Scheme.external_reference))
+      |> or_empty doc |> Seq.to_list
+      |> Machine.List.iter ~f:(fun (addr, name) ->
+          match stream name with
+          | Some fd when not (Set.mem in_file addr) ->
+              make_word addr >>= fun addr ->
+              make_word fd >>= fun fd ->
+              Mem.is_mapped addr >>= fun mapped ->
+              if mapped then
+                Machine.ignore_m @@ save_word ~force:true endian fd addr
+              else Machine.return ()
+          | _ -> Machine.return ())
 
   (* The thread environment block (TEB) of Windows, which the programs of
      PE read through GS on x86-64, and FS on x86, e.g., its address at
@@ -815,6 +852,7 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     setup_tls endp >>= fun endp ->
     debug "setting up the imports";
     setup_imports endp >>= fun endp ->
+    setup_copied_streams () >>= fun () ->
     debug "setting up the thread environment block";
     setup_teb endp >>= fun endp ->
     set_word "posix:endp" endp >>= fun () ->
