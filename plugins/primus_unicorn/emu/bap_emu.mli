@@ -237,6 +237,9 @@ module Trace : sig
     size : int;
     write : bool;
     value : int64;  (** the written value *)
+    old : int64;
+        (** the bytes, that a write of at most 8 bytes overwrote, the first one
+            in the lowest byte *)
   }
 
   val accesses : ?last:int -> t -> access list
@@ -269,11 +272,11 @@ type slice = {
   live : location list;
       (** the locations, whose values come from before the window *)
   gaps : int64 list;
-      (** the indices of the records, the latest first, before which the
-          registers, or the memory, were written outside of the trace, e.g., by
-          the code, that Primus runs, or by the script, while the slice had live
-          registers, or memory, respectively, whose values may come from there
-      *)
+      (** the indices of the records, the latest first, before which, or before
+          one of whose instructions, e.g., in a hook, the registers, or the
+          memory, were written outside of the trace, e.g., by the code, that
+          Primus runs, or by the script, while the slice had live registers, or
+          memory, respectively, whose values may come from there *)
   complete : bool;
       (** if nothing comes from before the window, or from outside of the trace,
           and the memory, that the steps load, is in the trace *)
@@ -287,11 +290,14 @@ val slice : ?addresses:bool -> ?window:int -> Trace.t -> location list -> slice
     accesses, through the memory, at the addresses, that they had, and through
     the addresses of the loads and the stores, if [addresses].
 
-    It is a slice of the data: the jumps, and the conditions of the
-    instructions, e.g., of a conditional move, aren't followed. The instructions
-    are lifted from the bytes, that they have now. The code, that Primus runs,
-    e.g., the Lisp stubs, isn't in the trace, so the values, that it computes,
-    are missed, and the slice continues before it, but has the [gaps].
+    It is a slice of the data: the jumps aren't followed, but the conditions of
+    the defs, that an instruction may skip, e.g., of a compare and exchange,
+    are, as of a conditional move, and the registers stay live. The instructions
+    are lifted from the bytes, that they had, if the trace has the writes, that
+    patched them, or else that they have now. The code, that Primus runs, e.g.,
+    the Lisp stubs, isn't in the trace, so the values, that it computes, are
+    missed, and the slice has the [gaps]: the bytes, that were written there,
+    come from it, and the registers, which aren't known, are followed further.
 
     The instructions of a trace of the blocks are those of {!Trace.insns}, and
     their steps have the indices of their blocks. *)

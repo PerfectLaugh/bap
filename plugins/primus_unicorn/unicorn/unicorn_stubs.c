@@ -31,8 +31,87 @@ struct hook {
     /* the trace, that the native hook of the code records, see
        [fixup], or NULL */
     struct trace *trace;
+    /* the trace, that the native hook of the accesses records, or NULL */
+    struct trace *mem;
     struct hook *next;
 };
+
+/* the numbers of the pages of 4KiB, in an open hash, e.g., of the code,
+   whose writes the traces keep the bytes of, that they overwrite */
+struct pages {
+    uint64_t *slots;
+    size_t size; /* a power of two */
+    size_t used; /* with the removed ones */
+};
+
+#define FREE UINT64_MAX
+#define GONE (UINT64_MAX - 1)
+
+static size_t pages_find(struct pages *p, uint64_t page) {
+    size_t i = (page * 0x9E3779B97F4A7C15ULL >> 32) & (p->size - 1);
+    while (p->slots[i] != FREE && p->slots[i] != page) {
+        i = (i + 1) & (p->size - 1);
+    }
+    return i;
+}
+
+static int pages_mem(struct pages *p, uint64_t page) {
+    return p->size > 0 && p->slots[pages_find(p, page)] == page;
+}
+
+static void pages_add(struct pages *p, uint64_t page);
+
+static void pages_grow(struct pages *p) {
+    struct pages old = *p;
+    size_t size = old.size == 0 ? 64 : 2 * old.size;
+    uint64_t *slots = malloc(size * sizeof(uint64_t));
+    if (slots == NULL) {
+        caml_raise_out_of_memory();
+    }
+    for (size_t i = 0; i < size; i++) {
+        slots[i] = FREE;
+    }
+    p->slots = slots;
+    p->size = size;
+    p->used = 0;
+    for (size_t i = 0; i < old.size; i++) {
+        if (old.slots[i] != FREE && old.slots[i] != GONE) {
+            pages_add(p, old.slots[i]);
+        }
+    }
+    free(old.slots);
+}
+
+static void pages_add(struct pages *p, uint64_t page) {
+    if (pages_mem(p, page)) {
+        return;
+    }
+    if (2 * (p->used + 1) > p->size) {
+        pages_grow(p);
+    }
+    p->slots[pages_find(p, page)] = page;
+    p->used++;
+}
+
+static void pages_remove(struct pages *p, uint64_t page) {
+    if (pages_mem(p, page)) {
+        p->slots[pages_find(p, page)] = GONE;
+    }
+}
+
+/* adds or removes the pages of the region */
+static void pages_set(struct pages *p, uint64_t addr, uint64_t size, int in) {
+    if (size == 0) {
+        return;
+    }
+    for (uint64_t page = addr >> 12; page <= (addr + size - 1) >> 12; page++) {
+        if (in) {
+            pages_add(p, page);
+        } else {
+            pages_remove(p, page);
+        }
+    }
+}
 
 /* the regions, that are mapped, while the emulation is stopped, whose
    writes fill them, so they aren't the changes, that the traces mark */
@@ -42,14 +121,27 @@ struct fresh {
     struct fresh *next;
 };
 
+/* the bytes, that were written outside of the traces, see [mark] */
+struct range {
+    uint64_t addr;
+    uint64_t size;
+};
+
+#define PENDING 65536
+
 struct engine {
     uc_engine *uc;
     uc_arch arch;
     struct hook *hooks;
     /* the writes, since the emulation stopped, see [mark] */
+    int running;
     int wrote_regs;
     int wrote_mem;
+    struct range *wrote; /* the bytes, unless too many, see [PENDING] */
+    size_t nwrote;
+    int wrote_all;
     struct fresh *fresh;
+    struct pages code; /* the executable pages */
     /* the exception that a hook raised, or Val_unit */
     value exn;
 };
@@ -110,6 +202,12 @@ static void close_engine(struct engine *e) {
     }
     free_hooks(e);
     free_fresh(e);
+    free(e->wrote);
+    e->wrote = NULL;
+    free(e->code.slots);
+    e->code.slots = NULL;
+    e->code.size = 0;
+    e->code.used = 0;
 }
 
 static void finalize_engine(value v) {
@@ -166,9 +264,16 @@ value bap_uc_open(value arch, value mode) {
     e->uc = uc;
     e->arch = Int_val(arch);
     e->hooks = NULL;
+    e->running = 0;
     e->wrote_regs = 0;
     e->wrote_mem = 0;
+    e->wrote = NULL;
+    e->nwrote = 0;
+    e->wrote_all = 0;
     e->fresh = NULL;
+    e->code.slots = NULL;
+    e->code.size = 0;
+    e->code.used = 0;
     e->exn = Val_unit;
     caml_register_generational_global_root(&e->exn);
     r = caml_alloc_custom(&engine_ops, sizeof(struct engine *), 0, 1);
@@ -200,6 +305,8 @@ value bap_uc_mem_map(value v, value addr, value size, value perms) {
     struct engine *e = Engine_val(v);
     check(uc_mem_map(engine_uc(v), Int64_val(addr), Int64_val(size),
                      Int_val(perms)));
+    pages_set(&e->code, Int64_val(addr), Int64_val(size),
+              Int_val(perms) & UC_PROT_EXEC);
     struct fresh *f = malloc(sizeof(struct fresh));
     if (f != NULL) {
         f->addr = Int64_val(addr);
@@ -212,17 +319,49 @@ value bap_uc_mem_map(value v, value addr, value size, value perms) {
 
 value bap_uc_mem_unmap(value v, value addr, value size) {
     check(uc_mem_unmap(engine_uc(v), Int64_val(addr), Int64_val(size)));
+    pages_set(&Engine_val(v)->code, Int64_val(addr), Int64_val(size), 0);
     return Val_unit;
 }
 
 value bap_uc_mem_protect(value v, value addr, value size, value perms) {
     check(uc_mem_protect(engine_uc(v), Int64_val(addr), Int64_val(size),
                          Int_val(perms)));
+    pages_set(&Engine_val(v)->code, Int64_val(addr), Int64_val(size),
+              Int_val(perms) & UC_PROT_EXEC);
     return Val_unit;
 }
 
 /* neither reading nor writing the memory runs hooks, so the strings
    stay in place */
+
+static void mark_running(struct engine *e, int regs, int mem, uint64_t addr,
+                         uint64_t size);
+
+/* the bytes, that are written, while the emulation is stopped, which
+   are coalesced, as Primus stores them byte by byte */
+static void wrote(struct engine *e, uint64_t addr, uint64_t size) {
+    e->wrote_mem = 1;
+    if (e->wrote_all) {
+        return;
+    }
+    if (e->nwrote > 0) {
+        struct range *r = &e->wrote[e->nwrote - 1];
+        if (r->addr + r->size == addr) {
+            r->size += size;
+            return;
+        }
+    }
+    if (e->wrote == NULL) {
+        e->wrote = malloc(PENDING * sizeof(struct range));
+    }
+    if (e->wrote == NULL || e->nwrote == PENDING) {
+        e->wrote_all = 1;
+        return;
+    }
+    e->wrote[e->nwrote].addr = addr;
+    e->wrote[e->nwrote].size = size;
+    e->nwrote++;
+}
 
 static int is_fresh(struct engine *e, uint64_t addr, uint64_t size) {
     for (struct fresh *f = e->fresh; f != NULL; f = f->next) {
@@ -238,7 +377,11 @@ value bap_uc_mem_write(value v, value addr, value data) {
     check(uc_mem_write(engine_uc(v), Int64_val(addr), String_val(data),
                        caml_string_length(data)));
     if (!is_fresh(e, Int64_val(addr), caml_string_length(data))) {
-        e->wrote_mem = 1;
+        if (e->running) {
+            mark_running(e, 0, 1, Int64_val(addr), caml_string_length(data));
+        } else {
+            wrote(e, Int64_val(addr), caml_string_length(data));
+        }
     }
     return Val_unit;
 }
@@ -317,7 +460,12 @@ value bap_uc_reg_read(value v, value reg) {
 
 value bap_uc_reg_write(value v, value reg, value x) {
     uc_engine *uc = engine_uc(v);
-    Engine_val(v)->wrote_regs = 1;
+    struct engine *e = Engine_val(v);
+    if (e->running) {
+        mark_running(e, 1, 0, 0, 0);
+    } else {
+        e->wrote_regs = 1;
+    }
     uint8_t buf[REG_BUF];
     size_t size = reg_read(uc, Int_val(reg), buf);
     uint64_t x64 = Int64_val(x);
@@ -348,7 +496,12 @@ value bap_uc_reg_read_bytes(value v, value reg) {
 
 value bap_uc_reg_write_bytes(value v, value reg, value data) {
     uc_engine *uc = engine_uc(v);
-    Engine_val(v)->wrote_regs = 1;
+    struct engine *e = Engine_val(v);
+    if (e->running) {
+        mark_running(e, 1, 0, 0, 0);
+    } else {
+        e->wrote_regs = 1;
+    }
     uint8_t buf[REG_BUF];
     size_t size = reg_read(uc, Int_val(reg), buf);
     if (caml_string_length(data) != size) {
@@ -397,9 +550,11 @@ value bap_uc_emu_start(value v, value start, value until, value timeout,
     CAMLlocal1(exn);
     struct engine *e = Engine_val(v);
     mark(e);
+    e->running = 1;
     uc_err err = uc_emu_start(engine_uc(v), Int64_val(start),
                               Int64_val(until), Int64_val(timeout),
                               Long_val(count));
+    e->running = 0;
     fixup(e);
     if (e->exn != Val_unit) {
         exn = e->exn;
@@ -528,6 +683,7 @@ value bap_uc_hook_add(value v, value kind, value types, value start,
     h->closure = closure;
     h->engine = e;
     h->trace = NULL;
+    h->mem = NULL;
     caml_register_generational_global_root(&h->closure);
     uc_err err =
         Int_val(kind) == HOOK_INSN
@@ -611,6 +767,7 @@ struct access {
     uint64_t pc; /* of the instruction in a trace of blocks */
     uint64_t addr;
     uint64_t value;
+    uint64_t old; /* the bytes, that a write overwrote, see [trace_mem] */
     uint32_t size;
     uint32_t write;
 };
@@ -626,10 +783,23 @@ struct trace {
     uint64_t amask;
     struct access *mem;
     uc_arch arch;
-    /* the boundaries, see [mark] */
+    /* the boundaries, see [mark], and the program counters of the ones,
+       that the hooks made, see [mark_running] */
     uint64_t marks;
     uint64_t *bounds;
+    uint64_t *at;
+    /* the written bytes of the boundaries, the first one and the number,
+       or [UNKNOWN], in the ring of [RANGES] */
+    uint64_t *first;
+    uint64_t *nranges;
+    uint64_t ranges_count;
+    struct range *ranges;
 };
+
+#define RANGES 65536
+#define UNKNOWN UINT64_MAX
+
+#define MID (1ULL << 61)
 
 #define BOUNDS 65536
 
@@ -638,6 +808,10 @@ struct trace {
 static void finalize_trace(value v) {
     struct trace *t = Trace_val(v);
     free(t->bounds);
+    free(t->at);
+    free(t->first);
+    free(t->nranges);
+    free(t->ranges);
     free(t->pcs);
     free(t->sizes);
     free(t->mem);
@@ -675,16 +849,25 @@ value bap_uc_trace_create(value size, value every, value blocks,
     t->sizes = Bool_val(blocks) ? malloc(n * sizeof(uint32_t)) : NULL;
     t->every = Long_val(every) < 1 ? 1 : Long_val(every);
     t->bounds = malloc(BOUNDS * sizeof(uint64_t));
+    t->at = malloc(BOUNDS * sizeof(uint64_t));
+    t->first = malloc(BOUNDS * sizeof(uint64_t));
+    t->nranges = malloc(BOUNDS * sizeof(uint64_t));
+    t->ranges = malloc(RANGES * sizeof(struct range));
     t->skip = t->every;
     if (Long_val(accesses) > 0) {
         uint64_t m = ring_size(Long_val(accesses) + 1);
         t->amask = m - 1;
         t->mem = malloc(m * sizeof(struct access));
     }
-    if (t->pcs == NULL || t->bounds == NULL ||
+    if (t->pcs == NULL || t->bounds == NULL || t->at == NULL ||
+        t->first == NULL || t->nranges == NULL || t->ranges == NULL ||
         (Bool_val(blocks) && t->sizes == NULL) ||
         (Long_val(accesses) > 0 && t->mem == NULL)) {
         free(t->bounds);
+        free(t->at);
+        free(t->first);
+        free(t->nranges);
+        free(t->ranges);
         free(t->pcs);
         free(t->sizes);
         free(t->mem);
@@ -719,10 +902,14 @@ static void trace_block(uc_engine *uc, uint64_t addr, uint32_t size,
 static int read_pc(uc_engine *uc, uc_arch arch, uint64_t *pc);
 
 /* the program counter of the instruction, that makes the access, is
-   read only in a trace of blocks, where it is in the block */
+   read only in a trace of blocks, where it is in the block, and a write
+   of at most eight bytes to the code keeps the bytes, that it overwrites,
+   as the memory has them, the first one in the lowest byte, e.g., of the
+   code, that the program patches, which the slices lift, as it was */
 static void trace_mem(uc_engine *uc, uc_mem_type type, uint64_t addr,
                       int size, int64_t x, void *data) {
-    struct trace *t = data;
+    struct hook *h = data;
+    struct trace *t = h->mem;
     if (t->count == 0) {
         return;
     }
@@ -736,6 +923,17 @@ static void trace_mem(uc_engine *uc, uc_mem_type type, uint64_t addr,
     a->size = size;
     a->write = type == UC_MEM_WRITE;
     a->value = type == UC_MEM_WRITE ? (uint64_t)x : 0;
+    a->old = 0;
+    if (type == UC_MEM_WRITE && size <= 8 && h->engine->code.size > 0 &&
+        (pages_mem(&h->engine->code, addr >> 12) ||
+         pages_mem(&h->engine->code, (addr + size - 1) >> 12))) {
+        uint8_t bytes[8] = {0};
+        if (uc_mem_read(uc, addr, bytes, size) == UC_ERR_OK) {
+            for (int i = 0; i < size; i++) {
+                a->old |= (uint64_t)bytes[i] << (8 * i);
+            }
+        }
+    }
     t->accesses++;
 }
 
@@ -803,6 +1001,20 @@ static void fixup(struct engine *e) {
             }
             if (pc > start) {
                 t->sizes[last & t->mask] = pc - start;
+                /* the hooks of the instructions, that didn't run, made
+                   their boundaries before the next block */
+                for (uint64_t i = t->marks; i > 0 && t->marks - i < BOUNDS;
+                     i--) {
+                    uint64_t *b = &t->bounds[(i - 1) & (BOUNDS - 1)];
+                    uint64_t record = *b & ~(7ULL << 61);
+                    if (record < last) {
+                        break;
+                    }
+                    if (record == last && (*b & MID) &&
+                        t->at[(i - 1) & (BOUNDS - 1)] >= pc) {
+                        *b = (*b & (7ULL << 61)) | t->count;
+                    }
+                }
                 while (t->accesses > 0) {
                     struct access *a = &t->mem[(t->accesses - 1) & t->amask];
                     if (a->insn != last || a->pc < pc) {
@@ -830,6 +1042,36 @@ static void fixup(struct engine *e) {
    follows it, with the written registers in the bit 62, and the memory
    in the bit 63, so that the slices see, that the values of the
    locations may come from outside of the trace. */
+/* the boundary, with the written bytes, which are unknown, if [n] is
+   [UNKNOWN], which joins the last one, if they are at the same place */
+static void bound(struct trace *t, uint64_t bound, uint64_t pc,
+                  struct range *ranges, uint64_t n) {
+    uint64_t i = (t->marks - 1) & (BOUNDS - 1);
+    uint64_t last = t->bounds[i];
+    if (t->marks > 0 && (last & ~(3ULL << 62)) == (bound & ~(3ULL << 62)) &&
+        (!(bound & MID) || t->at[i] == pc) &&
+        (t->nranges[i] == UNKNOWN ||
+         t->first[i] + t->nranges[i] == t->ranges_count)) {
+        t->bounds[i] = last | bound;
+    } else {
+        i = t->marks & (BOUNDS - 1);
+        t->bounds[i] = bound;
+        t->at[i] = pc;
+        t->first[i] = t->ranges_count;
+        t->nranges[i] = 0;
+        t->marks++;
+    }
+    if (n == UNKNOWN || t->nranges[i] == UNKNOWN) {
+        t->nranges[i] = UNKNOWN;
+        return;
+    }
+    for (uint64_t k = 0; k < n; k++) {
+        t->ranges[t->ranges_count & (RANGES - 1)] = ranges[k];
+        t->ranges_count++;
+    }
+    t->nranges[i] += n;
+}
+
 static void mark(struct engine *e) {
     if (e->wrote_regs || e->wrote_mem) {
         for (struct hook *h = e->hooks; h != NULL; h = h->next) {
@@ -837,20 +1079,55 @@ static void mark(struct engine *e) {
             if (t == NULL) {
                 continue;
             }
-            uint64_t bound = t->count | ((uint64_t)e->wrote_regs << 62) |
-                             ((uint64_t)e->wrote_mem << 63);
-            uint64_t last = t->bounds[(t->marks - 1) & (BOUNDS - 1)];
-            if (t->marks > 0 && (last & ~(3ULL << 62)) == t->count) {
-                t->bounds[(t->marks - 1) & (BOUNDS - 1)] = last | bound;
-            } else {
-                t->bounds[t->marks & (BOUNDS - 1)] = bound;
-                t->marks++;
-            }
+            bound(t,
+                  t->count | ((uint64_t)e->wrote_regs << 62) |
+                      ((uint64_t)e->wrote_mem << 63),
+                  0, e->wrote, e->wrote_all ? UNKNOWN : e->nwrote);
         }
     }
     e->wrote_regs = 0;
     e->wrote_mem = 0;
+    e->nwrote = 0;
+    e->wrote_all = 0;
     free_fresh(e);
+}
+
+/* The registers or the memory, that a hook writes, while the emulation
+   runs, make a boundary before the instruction at the pc, with the bit
+   61, in its record, which is the last one, if the trace has it, as the
+   hook of the blocks runs before the hooks of their instructions, and
+   the hooks of the code before the ones of the accesses, or else the
+   next one, as the hook of the trace runs after the one, that writes.
+   An instruction, that repeats, e.g., of a string, has the last record,
+   if the hook of the trace is after the one, that writes, too. */
+static void mark_running(struct engine *e, int regs, int mem, uint64_t addr,
+                         uint64_t size) {
+    uint64_t pc;
+    if (!read_pc(e->uc, e->arch, &pc)) {
+        e->wrote_regs |= regs;
+        if (mem) {
+            wrote(e, addr, size);
+        }
+        return;
+    }
+    struct range range = {addr, size};
+    for (struct hook *h = e->hooks; h != NULL; h = h->next) {
+        struct trace *t = h->trace;
+        if (t == NULL) {
+            continue;
+        }
+        uint64_t record = t->count;
+        if (t->count > 0) {
+            uint64_t last = (t->count - 1) & t->mask;
+            uint64_t start = t->pcs[last];
+            if (t->sizes != NULL ? pc >= start && pc < start + t->sizes[last]
+                                 : pc == start) {
+                record = t->count - 1;
+            }
+        }
+        bound(t, record | MID | ((uint64_t)regs << 62) | ((uint64_t)mem << 63),
+              pc, &range, mem ? 1 : 0);
+    }
 }
 
 enum trace_kind { TRACE_CODE, TRACE_BLOCK, TRACE_MEM };
@@ -889,9 +1166,11 @@ value bap_uc_trace_add(value v, value tv, value kind, value start,
     h->closure = tv;
     h->engine = e;
     h->trace = Int_val(kind) == TRACE_MEM ? NULL : t;
+    h->mem = Int_val(kind) == TRACE_MEM ? t : NULL;
     t->arch = e->arch;
     caml_register_generational_global_root(&h->closure);
-    uc_err err = uc_hook_add(uc, &h->handle, type, callback, t,
+    uc_err err = uc_hook_add(uc, &h->handle, type, callback,
+                             Int_val(kind) == TRACE_MEM ? (void *)h : (void *)t,
                              Int64_val(start), Int64_val(stop));
     if (err != UC_ERR_OK) {
         caml_remove_generational_global_root(&h->closure);
@@ -920,6 +1199,7 @@ value bap_uc_trace_clear(value tv) {
     t->count = 0;
     t->accesses = 0;
     t->marks = 0;
+    t->ranges_count = 0;
     t->skip = t->every;
     return Val_unit;
 }
@@ -971,16 +1251,17 @@ value bap_uc_trace_mem(value tv, value n) {
     struct trace *t = Trace_val(tv);
     uint64_t k = t->mem == NULL ? 0 : kept(t->accesses, t->amask, Long_val(n));
     r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 2, NULL, k,
-                           (intnat)5);
+                           (intnat)6);
     int64_t *data = Caml_ba_data_val(r);
     uint64_t first = t->accesses - k;
     for (uint64_t i = 0; i < k; i++) {
         struct access *a = &t->mem[(first + i) & t->amask];
-        data[5 * i] = a->insn;
-        data[5 * i + 1] = a->addr;
-        data[5 * i + 2] = a->value;
-        data[5 * i + 3] = (int64_t)a->size | ((int64_t)a->write << 32);
-        data[5 * i + 4] = a->pc;
+        data[6 * i] = a->insn;
+        data[6 * i + 1] = a->addr;
+        data[6 * i + 2] = a->value;
+        data[6 * i + 3] = (int64_t)a->size | ((int64_t)a->write << 32);
+        data[6 * i + 4] = a->pc;
+        data[6 * i + 5] = a->old;
     }
     CAMLreturn(r);
 }
@@ -1005,17 +1286,57 @@ value bap_uc_trace_save(value tv, value n, value path) {
     CAMLreturn(caml_copy_int64(k));
 }
 
-/* the boundaries, that the ring keeps, the oldest first, see [mark] */
+/* the written bytes of the boundary, unless the ring lost them */
+static uint64_t written(struct trace *t, uint64_t i) {
+    uint64_t n = t->nranges[i];
+    return n != UNKNOWN && t->ranges_count - t->first[i] <= RANGES ? n
+                                                                  : UNKNOWN;
+}
+
+/* the boundaries, that the ring keeps, the oldest first, each with its
+   program counter, see [mark] and [mark_running], and the number of
+   its written bytes, see [bap_uc_trace_ranges], or -1 */
 value bap_uc_trace_bounds(value tv) {
     CAMLparam1(tv);
     CAMLlocal1(r);
     struct trace *t = Trace_val(tv);
     uint64_t k = t->marks < BOUNDS ? t->marks : BOUNDS;
-    r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 1, NULL, k);
+    r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 1, NULL, 3 * k);
     int64_t *data = Caml_ba_data_val(r);
     uint64_t first = t->marks - k;
     for (uint64_t i = 0; i < k; i++) {
-        data[i] = t->bounds[(first + i) & (BOUNDS - 1)];
+        uint64_t j = (first + i) & (BOUNDS - 1);
+        data[3 * i] = t->bounds[j];
+        data[3 * i + 1] = t->at[j];
+        data[3 * i + 2] = written(t, j);
+    }
+    CAMLreturn(r);
+}
+
+/* the addresses and the sizes of the written bytes of the boundaries,
+   that [bap_uc_trace_bounds] has, in its order */
+value bap_uc_trace_ranges(value tv) {
+    CAMLparam1(tv);
+    CAMLlocal1(r);
+    struct trace *t = Trace_val(tv);
+    uint64_t k = t->marks < BOUNDS ? t->marks : BOUNDS;
+    uint64_t first = t->marks - k, total = 0;
+    for (uint64_t i = 0; i < k; i++) {
+        uint64_t n = written(t, (first + i) & (BOUNDS - 1));
+        total += n == UNKNOWN ? 0 : n;
+    }
+    r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 1, NULL,
+                           2 * total);
+    int64_t *data = Caml_ba_data_val(r);
+    uint64_t pos = 0;
+    for (uint64_t i = 0; i < k; i++) {
+        uint64_t j = (first + i) & (BOUNDS - 1);
+        uint64_t n = written(t, j);
+        for (uint64_t m = 0; n != UNKNOWN && m < n; m++) {
+            struct range *x = &t->ranges[(t->first[j] + m) & (RANGES - 1)];
+            data[pos++] = x->addr;
+            data[pos++] = x->size;
+        }
     }
     CAMLreturn(r);
 }

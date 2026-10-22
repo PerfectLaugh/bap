@@ -187,6 +187,7 @@ module Trace = struct
   external accesses : t -> int -> accesses = "bap_uc_trace_mem"
   external save : t -> int -> string -> int64 = "bap_uc_trace_save"
   external bounds : t -> pcs = "bap_uc_trace_bounds"
+  external ranges : t -> pcs = "bap_uc_trace_ranges"
 
   let create ?(every = 1) ?(blocks = false) ?(accesses = 0) size =
     create size every blocks accesses

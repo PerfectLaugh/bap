@@ -1,0 +1,56 @@
+s_zero i: s_zero+3 s_zero+5 | live RSI | gaps  | complete false
+s_zero b: s_zero+3 s_zero+5 | live RSI | gaps  | complete false
+s_partial i: s_partial s_partial+3 | live RDI,RSI | gaps  | complete false
+s_partial b: s_partial s_partial+3 | live RDI,RSI | gaps  | complete false
+s_kill32 i: s_kill32+3 | live RDI | gaps  | complete false
+s_kill32 b: s_kill32+3 | live RDI | gaps  | complete false
+s_bytes i: s_bytes+4 s_bytes+8 s_bytes+13 | live RDI,RSI | gaps  | complete false
+s_bytes b: s_bytes+4 s_bytes+8 s_bytes+13 | live RDI,RSI | gaps  | complete false
+s_bytekill i: s_bytekill+9 s_bytekill+13 | live RDI | gaps  | complete false
+s_bytekill b: s_bytekill+9 s_bytekill+13 | live RDI | gaps  | complete false
+s_overlap i: s_overlap+4 s_overlap+7 s_overlap+11 | live RDI,RSI | gaps  | complete false
+s_overlap b: s_overlap+4 s_overlap+7 s_overlap+11 | live RDI,RSI | gaps  | complete false
+s_cmov_no i: s_cmov_no s_cmov_no+3 s_cmov_no+6 | live RCX,RDI | gaps  | complete false
+s_cmov_no b: s_cmov_no s_cmov_no+3 s_cmov_no+6 | live RCX,RDI | gaps  | complete false
+s_cmov_yes i: s_cmov_yes s_cmov_yes+3 s_cmov_yes+6 | live RCX,RDI,RDX,RSI | gaps  | complete false
+s_cmov_yes b: s_cmov_yes s_cmov_yes+3 s_cmov_yes+6 | live RCX,RDI,RDX,RSI | gaps  | complete false
+s_xchg i: s_xchg+1 s_xchg+5 | live RSI | gaps  | complete false
+s_xchg b: s_xchg+1 s_xchg+5 | live RSI | gaps  | complete false
+s_rep i: s_rep+4 s_rep+22*8 s_rep+24 | live RDI | gaps  | complete false
+s_rep b: s_rep+4 s_rep+22*8 s_rep+24 | live RDI | gaps  | complete false
+s_pushf i: s_pushf s_pushf+3 s_pushf+4 | live AC,AES,AI,DF,EFLAGS_1,EFLAGS_22,EFLAGS_23,EFLAGS_24,EFLAGS_25,EFLAGS_26,EFLAGS_27,EFLAGS_28,EFLAGS_29,EFLAGS_3,EFLAGS_5,ID,IF,IOPLH,IOPLL,MD,NT,RDI,RF,RSI,TF,VIF,VIP,VM | gaps  | complete false
+s_pushf b: s_pushf s_pushf+3 s_pushf+4 | live AC,AES,AI,DF,EFLAGS_1,EFLAGS_22,EFLAGS_23,EFLAGS_24,EFLAGS_25,EFLAGS_26,EFLAGS_27,EFLAGS_28,EFLAGS_29,EFLAGS_3,EFLAGS_5,ID,IF,IOPLH,IOPLL,MD,NT,RDI,RF,RSI,TF,VIF,VIP,VM | gaps  | complete false
+s_callpop i: s_callpop s_callpop+5 | live  | gaps  | complete true
+s_callpop b: s_callpop s_callpop+5 | live  | gaps  | complete true
+s_sse i: s_sse s_sse+5 s_sse+9 | live RDI,YMM0 | gaps  | complete false
+s_sse b: s_sse s_sse+5 s_sse+9 | live RDI,YMM0 | gaps  | complete false
+s_div i: s_div s_div+3 s_div+5 s_div+8 | live RDI,RSI | gaps  | complete false
+s_div b: s_div s_div+3 s_div+5 s_div+8 | live RDI,RSI | gaps  | complete false
+s_setcc i: s_setcc s_setcc+2 s_setcc+5 | live RDI,RSI | gaps  | complete false
+s_setcc b: s_setcc s_setcc+2 s_setcc+5 | live RDI,RSI | gaps  | complete false
+s_pushmem i: s_pushmem+4 s_pushmem+8 s_pushmem+11 | live RDI | gaps  | complete false
+s_pushmem b: s_pushmem+4 s_pushmem+8 s_pushmem+11 | live RDI | gaps  | complete false
+s_loop i: s_loop s_loop+7*5 | live RDI | gaps  | complete false
+s_loop b: s_loop s_loop+7*5 | live RDI | gaps  | complete false
+s_cmpxchg i: s_cmpxchg+4 s_cmpxchg+8 s_cmpxchg+11 s_cmpxchg+17 | live RDI,RSI | gaps  | complete false
+s_cmpxchg b: s_cmpxchg+4 s_cmpxchg+8 s_cmpxchg+11 s_cmpxchg+17 | live RDI,RSI | gaps  | complete false
+s_cmpxchg_fail i: s_cmpxchg_fail+4 s_cmpxchg_fail+8 s_cmpxchg_fail+11 s_cmpxchg_fail+17 | live RDI,RDX,RSI | gaps  | complete false
+s_cmpxchg_fail b: s_cmpxchg_fail+4 s_cmpxchg_fail+8 s_cmpxchg_fail+11 s_cmpxchg_fail+17 | live RDI,RDX,RSI | gaps  | complete false
+s_smc i: s_smc+2 s_smc+9 s_smc+2 s_smc+23 | live RDI,RSI | gaps  | complete false
+s_smc b: s_smc+2 s_smc+9 s_smc+2 s_smc+23 | live RDI,RSI | gaps  | complete false
+s_fact i: fact+8 fact+19 fact+23 fact+27 fact+8 fact+19 fact+23 fact+27 fact+8 fact+19 fact+23 fact+27 fact+8 fact+19 fact+23 fact+27 fact+8 fact+42 fact+35*5 | live RDI | gaps  | complete false
+s_fact b: fact+8 fact+19 fact+23 fact+27 fact+8 fact+19 fact+23 fact+27 fact+8 fact+19 fact+23 fact+27 fact+8 fact+19 fact+23 fact+27 fact+8 fact+42 fact+35*5 | live RDI | gaps  | complete false
+s_copied i: copied+63 | live  | gaps copied+63 | complete false
+s_copied b: copied+63 | live  | gaps copied+63 | complete false
+s_hooked/after i: s_hooked s_hooked_at+1 | live RDI,RSI | gaps s_hooked_at | complete false
+s_hooked/after b: s_hooked s_hooked_at+1 | live RDI,RSI | gaps s_hooked | complete false
+s_hooked/before i: s_hooked s_hooked_at+1 | live RDI,RSI | gaps s_hooked_at | complete false
+s_hooked/before b: s_hooked s_hooked_at+1 | live RDI,RSI | gaps s_hooked | complete false
+s_written i: s_written_at | live  | gaps s_written_at | complete false
+s_written b: s_written_at | live  | gaps s_written_at | complete false
+s_rep/4 i: s_rep+22*2 s_rep+24 | live mem:2,mem:6 | gaps  | complete false
+s_rep/4 b: s_rep+22*2 s_rep+24 | live mem:2,mem:6 | gaps  | complete false
+s_rep/12 i: s_rep+22*6 s_rep+24 | live mem:6,mem:2 | gaps  | complete false
+s_rep/12 b: s_rep+22*6 s_rep+24 | live mem:6,mem:2 | gaps  | complete false
+s_rep/last3 i: s_rep+24 | live mem:8 | gaps  | complete false
+s_rep/last3 b: s_rep+22 s_rep+24 | live mem:1,mem:7 | gaps  | complete false

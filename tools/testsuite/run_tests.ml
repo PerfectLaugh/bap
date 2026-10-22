@@ -746,6 +746,22 @@ let emu data =
             ("slices the blocks", "slice of blocks: " ^ slice);
             ("has the gap of the blocks", "gap at main: true, complete: false\n");
           ]);
+    (* the slices of the odd cases of slice-weird.c, the partial
+       registers and bytes, the conditional moves and exchanges, the
+       repeated moves, the recursion, the code, that patches itself, in
+       the segment, that is writable and executable, whose slots are of
+       GOT, the stubs, the hooks and the script, that write, and the
+       rings, that lose the accesses, see the comments of the script *)
+    case "emu/slice" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/slice.ml";
+              path data "bin/x86_64-linux-gnu-slice-weird";
+            ]
+        in
+        golden env "emu/slice.txt" out.text);
     (* the emulators run side by side, each in its own engine, also of
        another target, with their own registers, memory, names and
        hooks *)

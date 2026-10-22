@@ -243,6 +243,16 @@ let s = Emu.slice trace [ Emu.Reg "RAX" ] in
 List.iter s.steps ~f:(fun { Emu.pc; _ } -> printf "%Lx\n" pc)
 ```
 
+The slice handles these cases, see `testsuite/src/slice-weird.c` and the `emu/slice` case of the testsuite:
+
+- The registers and the memory are followed by the byte, e.g., through the partial registers, the overlapping stores, and the bytes, that a later store overwrites, and through the repeated moves, each of whose iterations is a record.
+- A def, that the instruction may skip, e.g., of a compare and exchange, keeps its register live, and its value depends on the conditions of the instruction, as of a conditional move. The stores, that the trace recorded, did happen, so their conditions, e.g., of a repeated move, are not followed. A conditional store to the bytes, that the instruction also reads, may be the write-back of a compare and exchange, that fails, so those bytes stay live.
+- The registers or the memory, that a hook writes while the program runs, e.g., with `set_reg` in `on_code`, make a gap before the instruction, that the hook sees. The bytes, that the stubs or the script wrote, e.g., `memcpy` or `write`, come from the gap, so the slice doesn't follow them to the stores before it. The written registers are not known, so the slice goes on through them.
+- The code, that the program patched after it ran, is lifted with the bytes, that it had then, which the trace keeps, as the writes to the executable pages keep the bytes, that they overwrite.
+- When the ring of the accesses has wrapped, the slice stops at the first record, whose accesses are all kept.
+
+The limits: the instructions of a trace of blocks are decoded with the bytes, that the code has now. The patches, that the stubs or the script made, aren't undone. The slice is of the data, not of the control.
+
 ### Snapshots and checkpoints
 
 `snapshot` saves the state of the paused program in memory, and `restore` returns to it, as many times as needed. The hooks stay:
