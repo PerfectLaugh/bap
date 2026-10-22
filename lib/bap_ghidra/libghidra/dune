@@ -14,7 +14,7 @@
  (deps
   build.cmake
   (:tarball
-   (glob_files %{project_root}/Ghidra_12.1.4_build.tar.gz)))
+   (glob_files %{project_root}/Ghidra_12.2_build.tar.gz)))
  (action
   (run
    cmake

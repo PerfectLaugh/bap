@@ -54,7 +54,7 @@
 ### Tooling
 - builds with dune package management, with the dependencies pinned in `dune.lock`, without oasis, the configure script, or Makefiles, and generates the opam files from `dune-project`
 - builds natively on Windows with mingw-w64, and on arm64 macOS
-- updates to OCaml 5, LLVM 23.1.4, Z3 5.3.1, Ghidra 11.4, and cmdliner 2
+- updates to OCaml 5, LLVM 23.1.4, Z3 5.3.1, Ghidra 12.2, and cmdliner 2
 - links the C++ runtime, GMP, libatomic, and zlib statically
 - removes the integrations with IDA Pro, radare2, and binutils, the deprecated options, and the install commands
 - requires the full names of the options and the commands

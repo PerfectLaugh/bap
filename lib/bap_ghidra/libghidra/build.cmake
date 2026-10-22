@@ -27,12 +27,12 @@
 
 cmake_minimum_required(VERSION 3.21)
 
-set(GHIDRA_VERSION 12.1.4)
+set(GHIDRA_VERSION 12.2)
 set(GHIDRA_BASENAME Ghidra_${GHIDRA_VERSION}_build)
 set(GHIDRA_URL
   https://github.com/NationalSecurityAgency/ghidra/archive/refs/tags/${GHIDRA_BASENAME}.tar.gz)
 set(GHIDRA_SHA256
-  2a858300c350f05ae2e729dff86b4f584d0b9a6b398879c55025574e67696cec)
+  ade4fd6e277a10c82db4e75ff5acaeedb3113ef0c7d126ea2c8b38c37128f3c3)
 set(GHIDRA_ROOT ghidra-${GHIDRA_BASENAME})
 set(DECOMPILER ${GHIDRA_ROOT}/Ghidra/Features/Decompiler/src/decompile/cpp)
 set(ZLIB ${GHIDRA_ROOT}/Ghidra/Features/Decompiler/src/decompile/zlib)
