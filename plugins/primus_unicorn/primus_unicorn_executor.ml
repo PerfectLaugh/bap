@@ -2478,20 +2478,45 @@ module Make (Machine : Primus.Machine.S) = struct
           let i = if e.big_endian then i else n - 1 - i in
           Int64.((acc lsl 8) lor of_int (Char.to_int data.[i])))
 
+    (* the bytes of the word at [addr] in Primus, if they all have the
+       [access], as the page, whose locations are marked, e.g., tainted,
+       is not in Unicorn, see [ensure_page] *)
+    let primus_word e addr access =
+      let+ loaded = Memory.load_bytes (word e addr) 4 in
+      if
+        Array.for_all loaded ~f:(function
+          | Some (_, p) -> access p
+          | None -> false)
+      then
+        Some
+          (String.of_array
+             (Array.map loaded ~f:(fun b -> fst (Option.value_exn b))))
+      else None
+
     (* the futexes and the TIDs are the words of 32 bits *)
     let load32 e addr =
-      let+ () = ensure_page e addr in
-      match uc_read e addr 4 with
-      | data -> Some (value e data)
-      | exception (Native.Missing _ | Native.Denied) -> None
+      let* () = ensure_page e addr in
+      if Hashtbl.mem e.pages (page_of addr) then
+        Machine.return
+          (match uc_read e addr 4 with
+          | data -> Some (value e data)
+          | exception (Native.Missing _ | Native.Denied) -> None)
+      else primus_word e addr (fun p -> p.readable) >>| Option.map ~f:(value e)
 
     let store32 e addr x =
-      let+ () = ensure_page e addr in
-      match uc_check_write e addr 4 with
-      | () ->
-          uc_write e addr (bytes e x 4);
-          true
-      | exception (Native.Missing _ | Native.Denied) -> false
+      let* () = ensure_page e addr in
+      if Hashtbl.mem e.pages (page_of addr) then
+        Machine.return
+          (match uc_check_write e addr 4 with
+          | () ->
+              uc_write e addr (bytes e x 4);
+              true
+          | exception (Native.Missing _ | Native.Denied) -> false)
+      else
+        primus_word e addr (fun p -> p.writable) >>= function
+        | None -> Machine.return false
+        | Some _ ->
+            Memory.store_bytes (word e addr) (bytes e x 4) >>| fun () -> true
 
     (* the thread, that runs, as it continues from [next] *)
     (* the registers, that are set, the aliases too, e.g., EAX *)

@@ -353,7 +353,48 @@ let rec accessible t addr n f =
   | exception Native.Denied ->
       invalid_argf "Bap_emu: the access to %d bytes at %Lx is denied" n addr ()
 
-let read t addr n = accessible t addr n (fun () -> X.uc_read (engine t) addr n)
+(* the component runs in the machine, which is paused, or ended *)
+let primus t component =
+  match t.state with
+  | Suspended _ | Ended _ -> resume t (X.Run component)
+  | _ ->
+      invalid_arg "Bap_emu.primus: the program is not paused, e.g., in a hook"
+
+(* the bytes, that Primus has, and Unicorn doesn't, as their page is
+   marked, e.g., tainted, see [X.ensure_page] *)
+let primus_bytes t addr n =
+  let result = ref None in
+  primus t
+    (module functor
+              (Machine : Primus.Machine.S)
+              ->
+              struct
+                module Memory = Primus.Memory.Make (Machine)
+                open Machine.Syntax
+
+                let init () =
+                  let width = (engine t).bytes * 8 in
+                  Memory.load_bytes (Word.of_int64 ~width addr) n
+                  >>| fun loaded ->
+                  if
+                    Array.for_all loaded ~f:(function
+                      | Some (_, (p : Primus.Memory.protection)) -> p.readable
+                      | None -> false)
+                  then
+                    result :=
+                      Some
+                        (String.of_array
+                           (Array.map loaded ~f:(fun b ->
+                                fst (Option.value_exn b))))
+              end);
+  !result
+
+let read t addr n =
+  match accessible t addr n (fun () -> X.uc_read (engine t) addr n) with
+  | data -> data
+  | exception (Invalid_argument _ as exn)
+    when match t.state with Suspended _ | Ended _ -> true | _ -> false -> (
+      match primus_bytes t addr n with Some data -> data | None -> raise exn)
 
 (* the bytes go only to Unicorn, which translates the code anew, see
    [X.uc_write] *)
@@ -372,13 +413,6 @@ let write t addr data =
   (* the bytes are mapped and readable *)
   ignore (read t addr (String.length data) : string);
   resume t (X.Store (addr, data))
-
-(* the component runs in the machine, which is paused, or ended *)
-let primus t component =
-  match t.state with
-  | Suspended _ | Ended _ -> resume t (X.Run component)
-  | _ ->
-      invalid_arg "Bap_emu.primus: the program is not paused, e.g., in a hook"
 
 (* the instruction in a hook, while the machine runs the program, is
    lifted outside of it, as the script does, in the knowledge, that

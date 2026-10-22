@@ -1560,6 +1560,93 @@ let threads data =
           has env "restores in main" out "restored in the thread 1\n";
           taint out);
     ]
+  @ List.concat_map
+      (fun target ->
+        let bin = target ^ "-threads-weird" in
+        let lines =
+          "taint 22099\n\
+           tls ok\n\
+           nested 43\n\
+           pingpong ok\n\
+           errors -11 -110 -38 -38\n\
+           many 2400\n\
+           orphan\n"
+        in
+        [
+          (* the odd uses of the threads, see threads-weird.c *)
+          case ("run/unicorn/threads/" ^ bin) (fun env ->
+              let out =
+                bap ~timeout:300. env
+                  [
+                    path data ("bin/" ^ bin);
+                    "--passes=run";
+                    "--run-systems=bap:unicorn-executor";
+                  ]
+              in
+              check env "exits" (out.status = Exited 0);
+              has env "runs the odd threads" out lines);
+          (* the taint, that goes to a thread through clone, and the
+             memory, which is not in Unicorn, as it is tainted, so that
+             the futexes and the TIDs are in Primus, and the checkpoints,
+             while a thread waits, in a thread, of a restored program,
+             and after main exited, see threads-weird/script.ml *)
+          case
+            ("emu/" ^ bin ^ "/checkpoints")
+            (fun env ->
+              let script args =
+                bap ~timeout:300. env
+                  ([
+                     "script";
+                     input "emu/threads-weird/script.ml";
+                     path data ("bin/" ^ bin);
+                   ]
+                  @ args)
+              in
+              let taint out =
+                has env "taints through clone and the memory" out
+                  "inherited: secret\nmixed: secret\nclean: -\n"
+              in
+              let exits out =
+                has env "exits with the code of the last thread" out
+                  "orphan\n\
+                   exited 7\n\
+                   inherited: secret\n\
+                   mixed: secret\n\
+                   clean: -\n"
+              in
+              let out = script [] in
+              sequence env out
+                [
+                  ("saves while the mixer waits", "saved mixer.ckpt\n");
+                  ( "runs the thread, that waited",
+                    "taint_joined in the thread 1\n" );
+                  ("saves in a thread", "pinged in the thread 9\n");
+                  ("saves after main exited", "orphaned in the thread 34\n");
+                ];
+              taint out;
+              has env "runs the odd threads" out "many 2400\n";
+              exits out;
+              let out = script [ "restore"; "mixer.ckpt"; "again.ckpt" ] in
+              has env "restores in main" out
+                "restored mixer.ckpt in the thread 1\n";
+              taint out;
+              has env "runs the restored threads" out
+                "taint 22099\ntls ok\nnested 43\n";
+              has env "saves the restored program" out "saved again.ckpt\n";
+              exits out;
+              List.iter
+                (fun ckpt ->
+                  let out = script [ "restore"; ckpt ] in
+                  has env "restores in the thread" out
+                    ("restored " ^ ckpt ^ " in the thread 9\npingpong ok\n");
+                  exits out)
+                [ "pingpong.ckpt"; "again.ckpt" ];
+              let out = script [ "restore"; "orphan.ckpt" ] in
+              has env "restores without main" out
+                "restored orphan.ckpt in the thread 34\n";
+              exits out);
+        ])
+      [ "x86_64-linux-gnu"; "aarch64-linux-gnu" ]
 
 (* the scripts on every target, that the testsuite has the binaries of:
    the symbolic and the tainted registers and memory, the branches and
