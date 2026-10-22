@@ -294,10 +294,14 @@ val slice : ?addresses:bool -> ?window:int -> Trace.t -> location list -> slice
     the defs, that an instruction may skip, e.g., of a compare and exchange,
     are, as of a conditional move, and the registers stay live. The instructions
     are lifted from the bytes, that they had, if the trace has the writes, that
-    patched them, or else that they have now. The code, that Primus runs, e.g.,
-    the Lisp stubs, isn't in the trace, so the values, that it computes, are
-    missed, and the slice has the [gaps]: the bytes, that were written there,
-    come from it, and the registers, which aren't known, are followed further.
+    patched them, or else that they have now, in their modes, e.g., A32 or Thumb
+    of ARM, that the trace records, and the IT blocks of Thumb in their order.
+    The loads and the stores of an instruction are its accesses, if their sizes
+    are the same, e.g., of the multiple registers of ARM. The code, that Primus
+    runs, e.g., the Lisp stubs, isn't in the trace, so the values, that it
+    computes, are missed, and the slice has the [gaps]: the bytes, that were
+    written there, come from it, and the registers, which aren't known, are
+    followed further.
 
     The instructions of a trace of the blocks are those of {!Trace.insns}, and
     their steps have the indices of their blocks. *)

@@ -762,6 +762,21 @@ let emu data =
             ]
         in
         golden env "emu/slice.txt" out.text);
+    (* the slices of the odd cases of ARM, of arm-slice-weird.c, in A32 and
+       in Thumb, whose modes the traces record, the conditional ones, the
+       IT blocks, the loads and stores of multiple registers, by their
+       accesses, VFP, which Unicorn enables, the stubs, and the hooks *)
+    case "emu/arm-slice" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/slice.ml";
+              path data "bin/arm-linux-gnueabihf-slice-weird";
+              "arm";
+            ]
+        in
+        golden env "emu/arm-slice.txt" out.text);
     (* the emulators run side by side, each in its own engine, also of
        another target, with their own registers, memory, names and
        hooks *)

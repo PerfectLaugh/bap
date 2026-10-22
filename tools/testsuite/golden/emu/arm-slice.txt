@@ -1,0 +1,46 @@
+a_cond_no i: a_cond_no a_cond_no+4 a_cond_no+8 | live R1,R2,R3 | gaps  | complete false
+a_cond_no b: a_cond_no a_cond_no+4 a_cond_no+8 | live R1,R2,R3 | gaps  | complete false
+a_cond_yes i: a_cond_yes a_cond_yes+4 a_cond_yes+8 | live R1,R2,R3 | gaps  | complete false
+a_cond_yes b: a_cond_yes a_cond_yes+4 a_cond_yes+8 | live R1,R2,R3 | gaps  | complete false
+a_ldm i: a_ldm a_ldm+4 | live R1 | gaps  | complete false
+a_ldm b: a_ldm a_ldm+4 | live R1 | gaps  | complete false
+a_pool i: a_pool | live mem:4 | gaps  | complete false
+a_pool b: a_pool | live mem:4 | gaps  | complete false
+a_shift i: a_shift | live R1,R2 | gaps  | complete false
+a_shift b: a_shift | live R1,R2 | gaps  | complete false
+a_umull i: a_umull | live R1,R2 | gaps  | complete false
+a_umull b: a_umull | live R1,R2 | gaps  | complete false
+a_bytes i: a_bytes+4 a_bytes+8 a_bytes+12 | live R1,R2 | gaps  | complete false
+a_bytes b: a_bytes+4 a_bytes+8 a_bytes+12 | live R1,R2 | gaps  | complete false
+a_strex i: a_strex+16 a_strex+20 | live R2 | gaps  | complete false
+a_strex b: a_strex+16 a_strex+20 | live R2 | gaps  | complete false
+a_link i: a_link+4 a_link+8 | live  | gaps  | complete true
+a_link b: a_link+4 a_link+8 | live  | gaps  | complete true
+a_carry i: a_carry a_carry+4 | live R1,R2 | gaps  | complete false
+a_carry b: a_carry a_carry+4 | live R1,R2 | gaps  | complete false
+t_ite i: t_ite t_ite+6 | live R0,R1,R2 | gaps  | complete false
+t_ite b: t_ite t_ite+4 t_ite+6 | live R0,R1,R2,R3 | gaps  | complete false
+a_interwork i: t_add | live R1,R2 | gaps  | complete false
+a_interwork b: t_add | live R1,R2 | gaps  | complete false
+t_loop i: t_loop t_loop+4*5 | live R1 | gaps  | complete false
+t_loop b: t_loop t_loop+4*5 | live R1 | gaps  | complete false
+t_pool i: t_pool t_pool+2 | live R1,mem:4 | gaps  | complete false
+t_pool b: t_pool t_pool+2 | live R1,mem:4 | gaps  | complete false
+a_vfp i: a_vfp a_vfp+4 a_vfp+8 | live D0,R1,R2 | gaps  | complete false
+a_vfp b: a_vfp a_vfp+4 a_vfp+8 | live D0,R1,R2 | gaps  | complete false
+a_ldrd i: a_ldrd+4 a_ldrd+8 a_ldrd+12 | live R3 | gaps  | complete false
+a_ldrd b: a_ldrd+4 a_ldrd+8 a_ldrd+12 | live R3 | gaps  | complete false
+a_frame i: a_frame a_frame+4 | live R3 | gaps  | complete false
+a_frame b: a_frame a_frame+4 | live R3 | gaps  | complete false
+a_ldrne i: a_ldrne+4 a_ldrne+8 a_ldrne+12 | live R1 | gaps  | complete false
+a_ldrne b: a_ldrne+4 a_ldrne+8 a_ldrne+12 | live R1 | gaps  | complete false
+a_wback i: a_wback a_wback+4 a_wback+8 a_wback+12 | live SP | gaps  | complete false
+a_wback b: a_wback a_wback+4 a_wback+8 a_wback+12 | live SP | gaps  | complete false
+a_mrs i: a_mrs a_mrs+4 | live QF,R1,R2 | gaps  | complete false
+a_mrs b: a_mrs a_mrs+4 | live QF,R1,R2 | gaps  | complete false
+t_frame i: t_frame t_frame+2 | live R2 | gaps  | complete false
+t_frame b: t_frame t_frame+2 | live R2 | gaps  | complete false
+a_copied i: copied+60 | live  | gaps copied+60 | complete false
+a_copied b: copied+60 | live  | gaps copied+60 | complete false
+a_hooked i: a_hooked a_hooked_at+4 | live R1,R2 | gaps a_hooked_at | complete false
+a_hooked b: a_hooked a_hooked_at+4 | live R1,R2 | gaps a_hooked | complete false

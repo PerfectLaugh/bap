@@ -3,11 +3,12 @@
 open Core
 module Emu = Bap_emu
 
-(* The slices of RAX at the returns of the odd cases of slice-weird.c,
-   over their windows, from their entries, by the instructions and by
-   the blocks, as the steps in the case, by its labels and offsets, the
-   repeated ones counted, and the locations, that are live at its entry,
-   i.e., its inputs, and the gaps, by the labels of their records. *)
+(* The slices of the result, RAX or R0, at the returns of the odd cases
+   of slice-weird.c, or of arm-slice-weird.c, with [arm], over their
+   windows, from their entries, by the instructions and by the blocks,
+   as the steps in the case, by its labels and offsets, the repeated ones
+   counted, and the locations, that are live at its entry, i.e., its
+   inputs, and the gaps, by the labels of their records. *)
 
 let sym emu name =
   List.Assoc.find_exn (Emu.symbols emu) ~equal:String.equal name
@@ -28,16 +29,16 @@ let compress names =
     | n :: _ as l -> sprintf "%s*%d" n (List.length l)
     | [] -> "")
 
-let location = function
-  | Emu.Reg r -> r
-  | Mem (_, n) -> sprintf "mem:%d" n
+let location = function Emu.Reg r -> r | Mem (_, n) -> sprintf "mem:%d" n
+let result = ref "RAX"
 
 let show ?(tag = "") ?last ?(accesses = 4096) ?(early = fun _ -> ())
     ?(setup = fun _ -> ()) prog name blocks =
   let emu = Emu.create ~args:[ "a"; "b" ] (Bap_script.project prog) in
   let syms =
     List.filter (Emu.symbols emu) ~f:(fun (n, _) ->
-        String.is_prefix n ~prefix:"s_"
+        List.exists [ "s_"; "a_"; "t_" ] ~f:(fun prefix ->
+            String.is_prefix n ~prefix)
         || List.mem [ "fact"; "copied" ] n ~equal:String.equal)
   in
   early emu;
@@ -55,7 +56,7 @@ let show ?(tag = "") ?last ?(accesses = 4096) ?(early = fun _ -> ())
   let window =
     match last with Some n -> n | None -> Int64.(to_int_exn (count - entry))
   in
-  let s = Emu.slice ~window trace [ Emu.Reg "RAX" ] in
+  let s = Emu.slice ~window trace [ Emu.Reg !result ] in
   let pcs = Emu.Trace.pcs trace in
   let at r =
     let i = Bigarray.Array1.dim pcs - Int64.(to_int_exn (count - r)) in
@@ -75,14 +76,67 @@ let both ?tag ?last ?accesses ?early ?setup prog name =
 
 let cases =
   [
-    "s_zero"; "s_partial"; "s_kill32"; "s_bytes"; "s_bytekill"; "s_overlap";
-    "s_cmov_no"; "s_cmov_yes"; "s_xchg"; "s_rep"; "s_pushf"; "s_callpop";
-    "s_sse"; "s_div"; "s_setcc"; "s_pushmem"; "s_loop"; "s_cmpxchg";
-    "s_cmpxchg_fail"; "s_smc"; "s_fact"; "s_copied";
+    "s_zero";
+    "s_partial";
+    "s_kill32";
+    "s_bytes";
+    "s_bytekill";
+    "s_overlap";
+    "s_cmov_no";
+    "s_cmov_yes";
+    "s_xchg";
+    "s_rep";
+    "s_pushf";
+    "s_callpop";
+    "s_sse";
+    "s_div";
+    "s_setcc";
+    "s_pushmem";
+    "s_loop";
+    "s_cmpxchg";
+    "s_cmpxchg_fail";
+    "s_smc";
+    "s_fact";
+    "s_copied";
+  ]
+
+let arm =
+  [
+    "a_cond_no";
+    "a_cond_yes";
+    "a_ldm";
+    "a_pool";
+    "a_shift";
+    "a_umull";
+    "a_bytes";
+    "a_strex";
+    "a_link";
+    "a_carry";
+    "t_ite";
+    "a_interwork";
+    "t_loop";
+    "t_pool";
+    "a_vfp";
+    "a_ldrd";
+    "a_frame";
+    "a_ldrne";
+    "a_wback";
+    "a_mrs";
+    "t_frame";
+    "a_copied";
   ]
 
 let () =
   match Bap_script.args () with
+  | [ prog; "arm" ] ->
+      result := "R0";
+      List.iter arm ~f:(both prog);
+      let hook emu =
+        let at = sym emu "a_hooked_at" in
+        Emu.on_code ~first:at ~last:at emu (fun emu _ ->
+            Emu.set_reg emu "R0" 1000L)
+      in
+      both ~setup:hook prog "a_hooked"
   | [ prog ] ->
       List.iter cases ~f:(both prog);
       (* the hook writes RAX, before or after the trace starts *)

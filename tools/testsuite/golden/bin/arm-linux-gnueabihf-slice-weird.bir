@@ -1,0 +1,334 @@
+# exited with 0
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+sub _start(_start_result)
+  calls __libc_start_main
+sub a_bytes(a_bytes_result)
+  calls a_bytes_ret
+sub a_bytes_ret(a_bytes_ret_result)
+sub a_carry(a_carry_result)
+  calls a_carry_ret
+sub a_carry_ret(a_carry_ret_result)
+sub a_cond_no(a_cond_no_result)
+  calls a_cond_no_ret
+sub a_cond_no_ret(a_cond_no_ret_result)
+sub a_cond_yes(a_cond_yes_result)
+  calls a_cond_yes_ret
+sub a_cond_yes_ret(a_cond_yes_ret_result)
+sub a_copied(a_copied_result)
+  calls a_copied_ret copied
+sub a_copied_ret(a_copied_ret_result)
+sub a_frame(a_frame_result)
+  calls a_frame_ret
+sub a_frame_ret(a_frame_ret_result)
+sub a_hooked(a_hooked_result)
+  calls a_hooked_at
+sub a_hooked_at(a_hooked_at_result)
+  calls a_hooked_ret
+sub a_hooked_ret(a_hooked_ret_result)
+sub a_interwork_ret(a_interwork_ret_result)
+sub a_ldm(a_ldm_result)
+  calls a_ldm_ret
+sub a_ldm_ret(a_ldm_ret_result)
+sub a_ldrd(a_ldrd_result)
+  calls a_ldrd_ret
+sub a_ldrd_ret(a_ldrd_ret_result)
+sub a_ldrne(a_ldrne_result)
+  calls a_ldrne_ret
+sub a_ldrne_ret(a_ldrne_ret_result)
+sub a_link(a_link_result)
+  calls sub_202fc
+sub a_link_ret(a_link_ret_result)
+sub a_mrs(a_mrs_result)
+  calls a_mrs_ret
+sub a_mrs_ret(a_mrs_ret_result)
+sub a_pool(a_pool_result)
+  calls a_pool_ret
+sub a_pool_ret(a_pool_ret_result)
+sub a_shift(a_shift_result)
+  calls a_shift_ret
+sub a_shift_ret(a_shift_ret_result)
+sub a_strex(a_strex_result)
+  calls a_strex_ret
+sub a_strex_ret(a_strex_ret_result)
+sub a_umull(a_umull_result)
+  calls a_umull_ret
+sub a_umull_ret(a_umull_ret_result)
+sub a_vfp(a_vfp_result)
+  calls a_vfp_ret
+sub a_vfp_ret(a_vfp_ret_result)
+sub a_wback(a_wback_result)
+  calls a_wback_ret
+sub a_wback_ret(a_wback_ret_result)
+sub copied(copied_result)
+  calls memcpy
+sub main(main_argc, main_argv, main_result)
+  calls a_bytes a_carry a_cond_no a_cond_yes a_ldm a_link a_pool a_shift a_strex a_umull
+sub memcpy(memcpy_dst, memcpy_src, memcpy_n, memcpy_result)
+sub sub_202fc(sub_202fc_result)
+  calls a_link_ret
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = R0
+#2: main_argv :: in out u32 = R1
+#3: main_result :: out u32 = R0
+
+#4:
+#5: #314 := SP
+#6: #316 := #314 - 8
+#7: mem := mem with [#316, el]:u32 <- R11
+#8: mem := mem with [#316 + 4, el]:u32 <- LR
+#9: SP := #314 - 8
+#10: #319 := CF
+#11: #320 := SP
+#12: R11 := #320
+#13: #324 := SP - 0x20
+#14: SP := #324
+#15: R2 := 0
+#16: mem := mem with [R11 - 4, el]:u32 <- R2
+#17: mem := mem with [R11 - 8, el]:u32 <- R0
+#18: mem := mem with [R11 - 0xC, el]:u32 <- R1
+#19: #330 := mem[R11 - 8, el]:u32
+#20: R0 := #330
+#21: mem := mem with [SP + 0x10, el]:u32 <- R0
+#22: #333 := mem[R11 - 8, el]:u32
+#23: R0 := #333
+#24: #337 := R0 + 1
+#25: R0 := #337
+#26: mem := mem with [SP + 0xC, el]:u32 <- R0
+#27: #340 := mem[R11 - 8, el]:u32
+#28: R0 := #340
+#29: #344 := R0 + 2
+#30: R0 := #344
+#31: mem := mem with [SP + 8, el]:u32 <- R0
+#32: #347 := mem[R11 - 8, el]:u32
+#33: R0 := #347
+#34: #351 := R0 + 3
+#35: R0 := #351
+#36: mem := mem with [SP + 4, el]:u32 <- R0
+#37: #354 := mem[SP + 0x10, el]:u32
+#38: R0 := #354
+#39: #356 := mem[SP + 0xC, el]:u32
+#40: R1 := #356
+#41: #358 := mem[SP + 8, el]:u32
+#42: R2 := #358
+#43: #360 := mem[SP + 4, el]:u32
+#44: R3 := #360
+#45: LR := 0x20498
+#46: call @a_cond_no with return %#47
+
+#47:
+#48: #362 := CF
+#49: #363 := R0
+#50: R1 := #363
+#51: R0 := 0xA44
+#52: R0 := R0 & 0xFFFF | 0x40000
+#53: #367 := mem[R0, el]:u32
+#54: R0 := #367
+#55: #369 := R0 + R1
+#56: R0 := #369
+#57: R1 := 0xA44
+#58: R1 := R1 & 0xFFFF | 0x40000
+#59: mem := mem with [R1, el]:u32 <- R0
+#60: #374 := mem[SP + 0x10, el]:u32
+#61: R0 := #374
+#62: #376 := mem[SP + 0xC, el]:u32
+#63: R1 := #376
+#64: #378 := mem[SP + 8, el]:u32
+#65: R2 := #378
+#66: #380 := mem[SP + 4, el]:u32
+#67: R3 := #380
+#68: LR := 0x204CC
+#69: call @a_cond_yes with return %#70
+
+#70:
+#71: #382 := CF
+#72: #383 := R0
+#73: R1 := #383
+#74: R0 := 0xA44
+#75: R0 := R0 & 0xFFFF | 0x40000
+#76: #387 := mem[R0, el]:u32
+#77: R0 := #387
+#78: #389 := R0 + R1
+#79: R0 := #389
+#80: R1 := 0xA44
+#81: R1 := R1 & 0xFFFF | 0x40000
+#82: mem := mem with [R1, el]:u32 <- R0
+#83: #394 := mem[SP + 0x10, el]:u32
+#84: R0 := #394
+#85: #396 := mem[SP + 0xC, el]:u32
+#86: R1 := #396
+#87: #398 := mem[SP + 8, el]:u32
+#88: R2 := #398
+#89: #400 := mem[SP + 4, el]:u32
+#90: R3 := #400
+#91: LR := 0x20500
+#92: call @a_ldm with return %#93
+
+#93:
+#94: #402 := CF
+#95: #403 := R0
+#96: R1 := #403
+#97: R0 := 0xA44
+#98: R0 := R0 & 0xFFFF | 0x40000
+#99: #407 := mem[R0, el]:u32
+#100: R0 := #407
+#101: #409 := R0 + R1
+#102: R0 := #409
+#103: R1 := 0xA44
+#104: R1 := R1 & 0xFFFF | 0x40000
+#105: mem := mem with [R1, el]:u32 <- R0
+#106: #414 := mem[SP + 0x10, el]:u32
+#107: R0 := #414
+#108: #416 := mem[SP + 0xC, el]:u32
+#109: R1 := #416
+#110: #418 := mem[SP + 8, el]:u32
+#111: R2 := #418
+#112: #420 := mem[SP + 4, el]:u32
+#113: R3 := #420
+#114: LR := 0x20534
+#115: call @a_pool with return %#116
+
+#116:
+#117: #422 := CF
+#118: #423 := R0
+#119: R1 := #423
+#120: R0 := 0xA44
+#121: R0 := R0 & 0xFFFF | 0x40000
+#122: #427 := mem[R0, el]:u32
+#123: R0 := #427
+#124: #429 := R0 + R1
+#125: R0 := #429
+#126: R1 := 0xA44
+#127: R1 := R1 & 0xFFFF | 0x40000
+#128: mem := mem with [R1, el]:u32 <- R0
+#129: #434 := mem[SP + 0x10, el]:u32
+#130: R0 := #434
+#131: #436 := mem[SP + 0xC, el]:u32
+#132: R1 := #436
+#133: #438 := mem[SP + 8, el]:u32
+#134: R2 := #438
+#135: #440 := mem[SP + 4, el]:u32
+#136: R3 := #440
+#137: LR := 0x20568
+#138: call @a_shift with return %#139
+
+#139:
+#140: #442 := CF
+#141: #443 := R0
+#142: R1 := #443
+#143: R0 := 0xA44
+#144: R0 := R0 & 0xFFFF | 0x40000
+#145: #447 := mem[R0, el]:u32
+#146: R0 := #447
+#147: #449 := R0 + R1
+#148: R0 := #449
+#149: R1 := 0xA44
+#150: R1 := R1 & 0xFFFF | 0x40000
+#151: mem := mem with [R1, el]:u32 <- R0
+#152: #454 := mem[SP + 0x10, el]:u32
+#153: R0 := #454
+#154: #456 := mem[SP + 0xC, el]:u32
+#155: R1 := #456
+#156: #458 := mem[SP + 8, el]:u32
+#157: R2 := #458
+#158: #460 := mem[SP + 4, el]:u32
+#159: R3 := #460
+#160: LR := 0x2059C
+#161: call @a_umull with return %#162
+
+#162:
+#163: #462 := CF
+#164: #463 := R0
+#165: R1 := #463
+#166: R0 := 0xA44
+#167: R0 := R0 & 0xFFFF | 0x40000
+#168: #467 := mem[R0, el]:u32
+#169: R0 := #467
+#170: #469 := R0 + R1
+#171: R0 := #469
+#172: R1 := 0xA44
+#173: R1 := R1 & 0xFFFF | 0x40000
+#174: mem := mem with [R1, el]:u32 <- R0
+#175: #474 := mem[SP + 0x10, el]:u32
+#176: R0 := #474
+#177: #476 := mem[SP + 0xC, el]:u32
+#178: R1 := #476
+#179: #478 := mem[SP + 8, el]:u32
+#180: R2 := #478
+#181: #480 := mem[SP + 4, el]:u32
+#182: R3 := #480
+#183: LR := 0x205D0
+#184: call @a_bytes with return %#185
+
+#185:
+#186: #482 := CF
+#187: #483 := R0
+#188: R1 := #483
+#189: R0 := 0xA44
+#190: R0 := R0 & 0xFFFF | 0x40000
+#191: #487 := mem[R0, el]:u32
+#192: R0 := #487
+#193: #489 := R0 + R1
+#194: R0 := #489
+#195: R1 := 0xA44
+#196: R1 := R1 & 0xFFFF | 0x40000
+#197: mem := mem with [R1, el]:u32 <- R0
+#198: #494 := mem[SP + 0x10, el]:u32
+#199: R0 := #494
+#200: #496 := mem[SP + 0xC, el]:u32
+#201: R1 := #496
+#202: #498 := mem[SP + 8, el]:u32
+#203: R2 := #498
+#204: #500 := mem[SP + 4, el]:u32
+#205: R3 := #500
+#206: LR := 0x20604
+#207: call @a_strex with return %#208
+
+#208:
+#209: #502 := CF
+#210: #503 := R0
+#211: R1 := #503
+#212: R0 := 0xA44
+#213: R0 := R0 & 0xFFFF | 0x40000
+#214: #507 := mem[R0, el]:u32
+#215: R0 := #507
+#216: #509 := R0 + R1
+#217: R0 := #509
+#218: R1 := 0xA44
+#219: R1 := R1 & 0xFFFF | 0x40000
+#220: mem := mem with [R1, el]:u32 <- R0
+#221: #514 := mem[SP + 0x10, el]:u32
+#222: R0 := #514
+#223: #516 := mem[SP + 0xC, el]:u32
+#224: R1 := #516
+#225: #518 := mem[SP + 8, el]:u32
+#226: R2 := #518
+#227: #520 := mem[SP + 4, el]:u32
+#228: R3 := #520
+#229: LR := 0x20638
+#230: call @a_link with return %#231
+
+#231:
+#232: #522 := CF
+#233: #523 := R0
+#234: R1 := #523
+#235: R0 := 0xA44
+#236: R0 := R0 & 0xFFFF | 0x40000
+#237: #527 := mem[R0, el]:u32
+#238: R0 := #527
+#239: #529 := R0 + R1
+#240: R0 := #529
+#241: R1 := 0xA44
+#242: R1 := R1 & 0xFFFF | 0x40000
+#243: mem := mem with [R1, el]:u32 <- R0
+#244: #534 := mem[SP + 0x10, el]:u32
+#245: R0 := #534
+#246: #536 := mem[SP + 0xC, el]:u32
+#247: R1 := #536
+#248: #538 := mem[SP + 8, el]:u32
+#249: R2 := #538
+#250: #540 := mem[SP + 4, el]:u32
+#251: R3 := #540
+#252: LR := 0x2066C
+#253: call @a_carry with noreturn
+

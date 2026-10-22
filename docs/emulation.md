@@ -250,8 +250,10 @@ The slice handles these cases, see `testsuite/src/slice-weird.c` and the `emu/sl
 - The registers or the memory, that a hook writes while the program runs, e.g., with `set_reg` in `on_code`, make a gap before the instruction, that the hook sees. The bytes, that the stubs or the script wrote, e.g., `memcpy` or `write`, come from the gap, so the slice doesn't follow them to the stores before it. The written registers are not known, so the slice goes on through them.
 - The code, that the program patched after it ran, is lifted with the bytes, that it had then, which the trace keeps, as the writes to the executable pages keep the bytes, that they overwrite.
 - When the ring of the accesses has wrapped, the slice stops at the first record, whose accesses are all kept.
+- The loads and the stores of an instruction are its accesses, in their order, if their sizes are the same, so that a load or a store of multiple registers, e.g., `push` and `pop` of ARM, or `ldrd`, moves each register by its own bytes.
+- On ARM, the traces record the mode of each record, A32 or Thumb, as the program counters of Thumb have no lower bit, and the instructions are lifted in it. The IT blocks of Thumb are lifted in their order, from the IT instruction, as the decoder gives their conditions; the instructions, whose conditions fail, have no records in a trace of the instructions. Unicorn enables VFP and NEON, as Linux does.
 
-The limits: the instructions of a trace of blocks are decoded with the bytes, that the code has now. The patches, that the stubs or the script made, aren't undone. The slice is of the data, not of the control.
+The limits: the instructions of a trace of blocks are decoded with the bytes, that the code has now. The patches, that the stubs or the script made, aren't undone. The registers are followed whole, e.g., `AL` of `RAX`, or `S1` of `D0`. An IT block, that starts before the window, isn't known. The slice is of the data, not of the control.
 
 ### Snapshots and checkpoints
 

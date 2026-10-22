@@ -174,6 +174,9 @@ module Trace = struct
   type pcs = (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t
   type sizes = (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array1.t
 
+  type modes =
+    (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
+
   type accesses =
     (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array2.t
 
@@ -184,6 +187,7 @@ module Trace = struct
   external blocks : t -> bool = "bap_uc_trace_blocks"
   external pcs : t -> int -> pcs = "bap_uc_trace_pcs"
   external sizes : t -> int -> sizes = "bap_uc_trace_sizes"
+  external modes : t -> int -> modes = "bap_uc_trace_modes"
   external accesses : t -> int -> accesses = "bap_uc_trace_mem"
   external save : t -> int -> string -> int64 = "bap_uc_trace_save"
   external bounds : t -> pcs = "bap_uc_trace_bounds"
@@ -194,20 +198,26 @@ module Trace = struct
 
   let pcs ?(last = -1) t = pcs t last
   let sizes ?(last = -1) t = sizes t last
+  let modes ?(last = -1) t = modes t last
   let accesses ?(last = -1) t = accesses t last
   let save ?(last = -1) t file = save t last file
 end
 
 (* the kinds of the native hooks in unicorn_stubs.c *)
-type trace_kind = Trace_code | Trace_block | Trace_mem
+type trace_kind = Trace_code | Trace_block | Trace_mem | Trace_mode
 
 external trace_add : t -> Trace.t -> trace_kind -> int64 -> int64 -> int64
   = "bap_uc_trace_add"
 
+(* the trace of the code of ARM has the modes of its blocks, whose hook
+   isn't there on the other targets *)
 let trace ?(first = 1L) ?(last = 0L) ?(memory = false) uc trace =
   let kind = if Trace.blocks trace then Trace_block else Trace_code in
+  let mode = trace_add uc trace Trace_mode 1L 0L in
   let code = trace_add uc trace kind first last in
-  if memory then [ code; trace_add uc trace Trace_mem 1L 0L ] else [ code ]
+  List.filter (( <> ) (-1L))
+    ([ mode; code ]
+    @ if memory then [ trace_add uc trace Trace_mem 1L 0L ] else [])
 
 type context
 

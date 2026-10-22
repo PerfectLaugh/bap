@@ -777,6 +777,8 @@ struct trace {
     uint64_t mask;
     uint64_t *pcs;
     uint32_t *sizes; /* of the blocks */
+    uint8_t *modes;  /* the Thumb bits of the records, on ARM */
+    uint8_t thumb;   /* of the block, that runs, see [trace_mode] */
     uint64_t every;
     uint64_t skip;
     uint64_t accesses; /* the recorded accesses */
@@ -814,6 +816,7 @@ static void finalize_trace(value v) {
     free(t->ranges);
     free(t->pcs);
     free(t->sizes);
+    free(t->modes);
     free(t->mem);
     free(t);
 }
@@ -880,6 +883,15 @@ value bap_uc_trace_create(value size, value every, value blocks,
     CAMLreturn(r);
 }
 
+/* the mode of ARM, that the instruction runs in, which the slices
+   decode it in, as the program counters of Thumb have no lower bit, and
+   the blocks are in one mode */
+static uint8_t thumb(uc_engine *uc) {
+    uint32_t cpsr = 0;
+    uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+    return (cpsr >> 5) & 1;
+}
+
 static void trace_code(uc_engine *uc, uint64_t addr, uint32_t size,
                        void *data) {
     struct trace *t = data;
@@ -888,7 +900,19 @@ static void trace_code(uc_engine *uc, uint64_t addr, uint32_t size,
     }
     t->skip = t->every;
     t->pcs[t->count & t->mask] = addr;
+    if (t->modes != NULL) {
+        t->modes[t->count & t->mask] = t->thumb;
+    }
     t->count++;
+}
+
+/* the mode of the block, whose instructions the trace of the code
+   records, as the blocks of QEMU are in one mode, and the hooks of the
+   blocks run before the ones of their instructions */
+static void trace_mode(uc_engine *uc, uint64_t addr, uint32_t size,
+                       void *data) {
+    struct trace *t = data;
+    t->thumb = thumb(uc);
 }
 
 static void trace_block(uc_engine *uc, uint64_t addr, uint32_t size,
@@ -896,6 +920,9 @@ static void trace_block(uc_engine *uc, uint64_t addr, uint32_t size,
     struct trace *t = data;
     t->pcs[t->count & t->mask] = addr;
     t->sizes[t->count & t->mask] = size;
+    if (t->modes != NULL) {
+        t->modes[t->count & t->mask] = thumb(uc);
+    }
     t->count++;
 }
 
@@ -1130,7 +1157,7 @@ static void mark_running(struct engine *e, int regs, int mem, uint64_t addr,
     }
 }
 
-enum trace_kind { TRACE_CODE, TRACE_BLOCK, TRACE_MEM };
+enum trace_kind { TRACE_CODE, TRACE_BLOCK, TRACE_MEM, TRACE_MODE };
 
 /* the native hook, which records the trace, which it keeps alive */
 value bap_uc_trace_add(value v, value tv, value kind, value start,
@@ -1157,6 +1184,16 @@ value bap_uc_trace_add(value v, value tv, value kind, value start,
         callback = trace_mem;
         type = UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE;
         break;
+    case TRACE_MODE:
+        /* only ARM has the modes, and its trace of the code, as the one
+           of the blocks reads the mode itself */
+        if (e->arch != UC_ARCH_ARM || t->sizes != NULL) {
+            CAMLreturn(caml_copy_int64(-1));
+        }
+        callback = trace_mode;
+        type = UC_HOOK_BLOCK;
+        t->thumb = thumb(uc);
+        break;
     default: caml_invalid_argument("Unicorn.trace");
     }
     struct hook *h = malloc(sizeof(struct hook));
@@ -1165,9 +1202,18 @@ value bap_uc_trace_add(value v, value tv, value kind, value start,
     }
     h->closure = tv;
     h->engine = e;
-    h->trace = Int_val(kind) == TRACE_MEM ? NULL : t;
+    h->trace = Int_val(kind) == TRACE_CODE || Int_val(kind) == TRACE_BLOCK
+                   ? t
+                   : NULL;
     h->mem = Int_val(kind) == TRACE_MEM ? t : NULL;
     t->arch = e->arch;
+    if (e->arch == UC_ARCH_ARM && t->modes == NULL) {
+        t->modes = calloc(t->mask + 1, 1);
+        if (t->modes == NULL) {
+            free(h);
+            caml_raise_out_of_memory();
+        }
+    }
     caml_register_generational_global_root(&h->closure);
     uc_err err = uc_hook_add(uc, &h->handle, type, callback,
                              Int_val(kind) == TRACE_MEM ? (void *)h : (void *)t,
@@ -1241,10 +1287,26 @@ value bap_uc_trace_sizes(value tv, value n) {
     CAMLreturn(r);
 }
 
-/* the last [n] accesses, the oldest first, five words each: the index
+/* the Thumb bits of the last [n] records, as [bap_uc_trace_pcs], which
+   are zeros, if the trace isn't of ARM */
+value bap_uc_trace_modes(value tv, value n) {
+    CAMLparam2(tv, n);
+    CAMLlocal1(r);
+    struct trace *t = Trace_val(tv);
+    uint64_t k = kept(t->count, t->mask, Long_val(n));
+    r = caml_ba_alloc_dims(CAML_BA_UINT8 | CAML_BA_C_LAYOUT, 1, NULL, k);
+    uint8_t *data = Caml_ba_data_val(r);
+    uint64_t first = t->count - k;
+    for (uint64_t i = 0; i < k; i++) {
+        data[i] = t->modes == NULL ? 0 : t->modes[(first + i) & t->mask];
+    }
+    CAMLreturn(r);
+}
+
+/* the last [n] accesses, the oldest first, six words each: the index
    of the instruction, the address, the written value, the size, with
-   the write in the bit 32, and the program counter, of a trace of
-   blocks */
+   the write in the bit 32, the program counter, of a trace of blocks,
+   and the overwritten bytes, see [trace_mem] */
 value bap_uc_trace_mem(value tv, value n) {
     CAMLparam2(tv, n);
     CAMLlocal1(r);

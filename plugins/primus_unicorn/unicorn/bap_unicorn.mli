@@ -206,6 +206,9 @@ module Trace : sig
   type pcs = (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t
   type sizes = (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array1.t
 
+  type modes =
+    (int, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
+
   type accesses =
     (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array2.t
   (** the accesses, a row each: the index of the instruction, that made it, in
@@ -239,6 +242,10 @@ module Trace : sig
 
   val sizes : ?last:int -> t -> sizes
   (** the sizes of the last blocks, as {!pcs} *)
+
+  val modes : ?last:int -> t -> modes
+  (** the modes of the last records, as {!pcs}, [1] for Thumb, on ARM, whose
+      program counters have no lower bit, or else zeros *)
 
   val accesses : ?last:int -> t -> accesses
   (** the last accesses, as {!pcs} *)
