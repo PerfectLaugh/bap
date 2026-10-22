@@ -1095,19 +1095,25 @@ let uc_check_write e addr n =
   in
   if n > 0 then check (page_of addr)
 
+(* the code, that the native function writes, e.g., memcpy, which
+   Unicorn translated, is translated anew, as Unicorn doesn't drop it *)
 let uc_write e addr data =
   let n = String.length data in
   if n > 0 then begin
     let last = Int64.(addr + of_int n - 1L) in
+    let code = ref false in
     let rec dirty page =
       if Int64.(page <= last) then begin
         ignore (written_page e page : bool);
-        Option.iter (Hashtbl.find e.pages page) ~f:(fun p -> p.fetched <- -1);
+        Option.iter (Hashtbl.find e.pages page) ~f:(fun p ->
+            p.fetched <- -1;
+            if Uc.Perm.mem p.perm Uc.Perm.exec then code := true);
         dirty Int64.(page + page_size)
       end
     in
     dirty (page_of addr);
-    Uc.mem_write e.uc addr data
+    Uc.mem_write e.uc addr data;
+    if !code then Uc.flush_tb e.uc
   end
 
 (* the value of an expression in Unicorn *)
