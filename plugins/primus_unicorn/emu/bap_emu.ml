@@ -31,6 +31,12 @@ type t = {
   mutable state : state;
   mutable call : string option;
   target : Bap_core_theory.Theory.Target.t;
+  project : project;
+  mutable hooked : Knowledge.state option;
+      (** the knowledge, in which [bir] lifts the instructions in the hooks,
+          outside of the machine, which runs *)
+  lifted : (int64 * string * bool, (int * blk term list) option) Hashtbl.t;
+      (** the instructions, that [bir] lifted in the hooks *)
   hooked_calls : Int64.Hash_set.t;
       (** the addresses, whose calls the script hooks, see [on_call] *)
 }
@@ -172,6 +178,9 @@ let create ?(system = "bap:unicorn-executor") ?(components = []) ?(init = [])
       state = Crashed (Failure "not started");
       call = None;
       target = Project.target proj;
+      project = proj;
+      hooked = None;
+      lifted = Hashtbl.Poly.create ();
       hooked_calls = Int64.Hash_set.create ();
     }
   in
@@ -355,6 +364,31 @@ let primus t component =
   | _ ->
       invalid_arg "Bap_emu.primus: the program is not paused, e.g., in a hook"
 
+(* the instruction in a hook, while the machine runs the program, is
+   lifted outside of it, as the script does, in the knowledge, that
+   starts from the toplevel one, and keeps the semantics, e.g., the Lisp
+   program of x86, which it loads once, and the instructions, which are
+   cached by their addresses and bytes *)
+let hooked t ?encoding ~thumb addr bytes =
+  let key = (addr, bytes, thumb) in
+  match Hashtbl.find t.lifted key with
+  | Some insn -> insn
+  | None ->
+      let toplevel = Toplevel.current () in
+      let result = ref None in
+      Toplevel.set (Option.value t.hooked ~default:toplevel);
+      Exn.protect
+        ~finally:(fun () ->
+          t.hooked <- Some (Toplevel.current ());
+          Toplevel.set toplevel)
+        ~f:(fun () ->
+          Toplevel.exec
+            Knowledge.Syntax.(
+              Primus.Lift.instruction ?encoding t.project addr bytes
+              >>| fun insn -> result := insn));
+      Hashtbl.set t.lifted ~key ~data:!result;
+      !result
+
 (* the bytes are read before the instruction is lifted in the machine,
    as the reading may copy the pages to Unicorn, and the instruction may
    end on an unmapped page *)
@@ -381,19 +415,23 @@ let bir ?thumb t addr =
   let encoding =
     match e.arch with Arm -> Primus.Interworking.encoding ~thumb | _ -> None
   in
-  let result = ref None in
-  primus t
-    (module functor
-              (Machine : Primus.Machine.S)
-              ->
-              struct
-                module Lift = Primus.Lift.Make (Machine)
-                open Machine.Syntax
+  match t.state with
+  | Running -> hooked t ?encoding ~thumb addr bytes
+  | _ ->
+      let result = ref None in
+      primus t
+        (module functor
+                  (Machine : Primus.Machine.S)
+                  ->
+                  struct
+                    module Lift = Primus.Lift.Make (Machine)
+                    open Machine.Syntax
 
-                let init () =
-                  Lift.insn ?encoding ~read addr >>| fun insn -> result := insn
-              end);
-  !result
+                    let init () =
+                      Lift.insn ?encoding ~read addr >>| fun insn ->
+                      result := insn
+                  end);
+      !result
 
 let on_code ?first ?last t f =
   installed t (fun e ->

@@ -179,7 +179,7 @@ let () =
 | `registers`, `reg`, `set_reg` | the registers of the target, by name, e.g., `RAX` |
 | `read emu addr n`, `write emu addr data` | the bytes of the memory |
 | `patch emu addr data` | change the code, so that the change stays |
-| `bir emu addr` | the size and the BIR of the instruction at the address, lifted on demand from its current bytes; Thumb on ARM by the lower bit of the address |
+| `bir emu addr` | the size and the BIR of the instruction at the address, lifted on demand from its current bytes, also in the hooks; Thumb on ARM by the lower bit of the address |
 | `symbols`, `add_symbol` | the names of the functions; name new code, e.g., code that the program unpacked |
 | `unstub emu name` | run the program's own code of a function, instead of its Lisp stub |
 

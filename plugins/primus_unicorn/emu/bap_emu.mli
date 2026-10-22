@@ -149,10 +149,13 @@ val bir : ?thumb:bool -> t -> int64 -> (int * blk term list) option
     The jumps to the addresses outside of the instruction are the indirect jumps
     to the constant addresses, and the instruction, that falls through, has no
     jump to the next one. The instructions are cached by their addresses and
-    bytes, see [Primus.Lift], in the knowledge of the emulator.
+    bytes, see [Primus.Lift], in the knowledge of the emulator. In a hook, e.g.,
+    of {!on_code}, the machine runs the program, so the instruction is lifted
+    outside of it, as [Primus.Lift.instruction] does, in the knowledge, that the
+    emulator keeps for the hooks, and is cached there.
 
-    Raises [Invalid_argument], if [addr] is not mapped, or if the program is not
-    paused, e.g., in a hook. *)
+    Raises [Invalid_argument], if [addr] is not mapped, e.g., in a hook, if its
+    page is not in Unicorn yet. *)
 
 val primus : t -> Bap_primus.Std.Primus.Machine.component -> unit
 (** [primus emu component] runs the [init] of the [component] in the Primus

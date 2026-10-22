@@ -671,7 +671,7 @@ let emu data =
             ("exits", "exited 0");
           ]);
     (* the BIR of an instruction, lifted on demand from the bytes, that
-       the program has now, e.g., after the patch, also of the Thumb code,
+       the program has now, also in a hook, after the patch, of the Thumb code,
        by the lower bit of its address *)
     case "emu/bir" (fun env ->
         let out =
@@ -686,6 +686,7 @@ let emu data =
         sequence env out
           [
             ("lifts the entry", "400600: 2 bytes\n");
+            ("lifts in a hook", "hook 400602: 3 bytes\n.*R9 := RDX\n");
             ("lifts the push of main", "40076b: 1 bytes\n.*RSP := RSP - 8");
             ("lifts the code", "400727: 5 bytes\n.*RDI := 0xA\n");
             ("lifts the patched code", "400727: 5 bytes\n.*RDI := 0x2B\n");

@@ -16,6 +16,13 @@ let () =
   | [ echo; thumb ] ->
       let emu = Emu.create ~args:[ "hello" ] (Bap_script.project echo) in
       show emu (Emu.pc emu);
+      (* in a hook, where the program runs, at the address of the code *)
+      let n = ref 0 in
+      Emu.on_code emu (fun emu addr ->
+          incr n;
+          if !n = 2 then (
+            printf "hook ";
+            show emu addr));
       ignore (Emu.run emu ~until:0x40076bL);
       show emu 0x40076bL;
       (* the patched code is lifted anew, mov $0xa, %edi becomes mov $0x2b *)
