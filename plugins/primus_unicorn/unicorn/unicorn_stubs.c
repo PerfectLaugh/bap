@@ -291,8 +291,24 @@ value bap_uc_set_cpu_model(value v, value model) {
     return Val_unit;
 }
 
+/* the virtual TLB maps the addresses to themselves, with all accesses,
+   as the TLB of a CPU without its MMU does, so that the regions of the
+   memory keep their protections; without the hook, the entry allows
+   only the access, that filled it, so that the code, that loads from
+   a page and stores to it, e.g., to the stack, refills it each time */
+static bool fill_tlb(uc_engine *uc, uint64_t addr, uc_mem_type type,
+                     uc_tlb_entry *entry, void *data) {
+    entry->paddr = addr;
+    entry->perms = UC_PROT_ALL;
+    return true;
+}
+
 value bap_uc_set_tlb_virtual(value v) {
-    check(uc_ctl_tlb_mode(engine_uc(v), UC_TLB_VIRTUAL));
+    uc_engine *uc = engine_uc(v);
+    uc_hook hook;
+    check(uc_ctl_tlb_mode(uc, UC_TLB_VIRTUAL));
+    check(uc_hook_add(uc, &hook, UC_HOOK_TLB_FILL, (void *)fill_tlb, NULL, 1,
+                      0));
     return Val_unit;
 }
 
