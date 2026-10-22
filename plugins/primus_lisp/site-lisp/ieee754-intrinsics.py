@@ -56,9 +56,12 @@ print(""";; the intrinsics of IEEE 754, that the lifters call, which run in
 """)
 
 def defun(name, op, rm, src, dst, args):
+    # the operands and the result are of their sizes, not of the word,
+    # e.g., the binary64 on the 32-bit targets
+    args = " ".join(f"{a}:{src}" for a in args.split())
     print(f'(defun {name} ()\n'
           f'  (declare (external "intrinsic:{name}"))\n'
-          f'  (set y0 (ieee754-op {ops[op]} {rm} {src} {dst} (ieee754-policy) {args})))\n')
+          f'  (set y0:{dst} (ieee754-op {ops[op]} {rm} {src} {dst} (ieee754-policy) {args})))\n')
 
 for k in floats:
     for i, rm in enumerate(rmodes):
