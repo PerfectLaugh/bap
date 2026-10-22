@@ -66,6 +66,13 @@ val close : t -> unit
 (** [close uc] releases the emulator and its hooks. Using a closed emulator
     raises [Invalid_argument]. Closing it again does nothing. *)
 
+(** The CPU models of Unicorn. *)
+module Cpu : sig
+  val arm64_max : int
+  (** [arm64_max] is the AArch64 CPU with all the features of QEMU, e.g., the
+      LSE atomics of ARMv8.1, which the default Cortex-A72 lacks. *)
+end
+
 val set_cpu_model : t -> int -> unit
 (** [set_cpu_model uc model] selects the CPU, one of the UC_CPU_* constants of
     the architecture. It must be done before the first other operation. *)

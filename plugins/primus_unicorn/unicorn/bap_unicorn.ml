@@ -52,6 +52,12 @@ external version : unit -> int * int = "bap_uc_version"
 external supported_code : int -> bool = "bap_uc_arch_supported"
 external create_code : int -> Mode.t -> t = "bap_uc_open"
 external close : t -> unit = "bap_uc_close"
+
+(* the values of uc_cpu_* *)
+module Cpu = struct
+  let arm64_max = 3
+end
+
 external set_cpu_model : t -> int -> unit = "bap_uc_set_cpu_model"
 external flush_tb : t -> unit = "bap_uc_flush_tb"
 external set_tlb_virtual : t -> unit = "bap_uc_set_tlb_virtual"

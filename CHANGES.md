@@ -40,6 +40,7 @@
 - fixes the semantics of many ARM, Thumb, AArch64, x86, MIPS, PowerPC, and RISC-V instructions, found by the new unit tests of the lifters
 - redirects the slots of GOT in Unicorn, also in the segment, that is writable and executable, so that the programs with such a segment call the stubs of their imports
 - enables VFP and NEON of ARM in Unicorn, as Linux does, so that the programs of the hard float ABI run
+- selects the maximal AArch64 CPU of Unicorn, as the default Cortex-A72 lacks the LSE atomics of ARMv8.1, e.g., ldadd and cas, so that the programs compiled for ARMv8.1 and later run
 - fixes the special cases and the directed rounding modes of the floating-point emulation
 - fixes the extraction from an extraction, and the variable types after block flattening
 - keeps the symbols of `--read-symbols-from` out of the symbols of the file, so that the symbolizer doesn't lose the names of the file

@@ -117,6 +117,12 @@ let unicorn data =
     (fun bin ->
       crc data ("run/unicorn/" ^ bin) bin "bap:unicorn-executor" "1635920155")
     [ "x86_64-linux-gnu-crc-loop"; "arm-linux-gnueabihf-thumb-crc-loop" ]
+  (* the LSE atomics of ARMv8.1 and the exclusive pair, which the default
+     CPU of Unicorn, ARMv8.0, doesn't have, see lse-crc.c *)
+  @ [
+      crc data "run/unicorn/aarch64-linux-gnu-lse-crc"
+        "aarch64-linux-gnu-lse-crc" "bap:unicorn-executor" "1489580789";
+    ]
   @ List.map
       (fun system ->
         let bin = "arm-linux-gnueabihf-thumb-crc" in

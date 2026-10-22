@@ -733,6 +733,11 @@ let create session target ~foreign ~externals =
         failf "the target %s is not supported" (Theory.Target.to_string target)
   in
   let uc = Uc.create arch mode in
+  (* the default CPU of AArch64, Cortex-A72, is ARMv8.0, which has no LSE
+     atomics of ARMv8.1, e.g., ldadd and cas, that the programs compiled
+     for the later ones, or with outline atomics, run; the maximum one has
+     all of them, and must be selected before anything else *)
+  (match arch with Arm64 -> Uc.set_cpu_model uc Uc.Cpu.arm64_max | _ -> ());
   (* the addresses of the program are the addresses of Unicorn *)
   Uc.set_tlb_virtual uc;
   (* the 64-bit addresses of MIPS are enabled by the KX, SX, and UX bits *)
