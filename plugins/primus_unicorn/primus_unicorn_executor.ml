@@ -1531,6 +1531,19 @@ module Make (Machine : Primus.Machine.S) = struct
     let* vars = Machine.List.filter (Seq.to_list vars) ~f:Env.is_set in
     push_vars e vars
 
+  (* the values of the registers, that are set in Primus *)
+  let registers e =
+    let* vars = Env.all in
+    Seq.to_list vars
+    |> List.filter ~f:(Target.Regs.mem e.regs)
+    |> Machine.List.filter_map ~f:(fun v ->
+        Env.is_set v >>= function
+        | false -> Machine.return None
+        | true ->
+            let+ x = Env.get v in
+            Some (v, Primus.Value.to_word x))
+    >>| Var.Map.of_alist_reduce ~f:(fun _ x -> x)
+
   (* copies the registers that Primus has written *)
   let push_written e = push_vars e (List.rev e.written)
 
@@ -2357,24 +2370,53 @@ module Make (Machine : Primus.Machine.S) = struct
           List.init (String.length data) ~f:(fun i ->
               word e Int64.(addr + of_int i))
         in
-        let* protections = Machine.List.map bytes ~f:Memory.protection in
+        let* before = Machine.List.map bytes ~f:Memory.protection in
         let* () = Memory.store_bytes (word e addr) data in
+        let* after = Machine.List.map bytes ~f:Memory.protection in
+        (* only the changed ones, by their ranges, as each protection
+           stays in the memory, and drops the page of Unicorn *)
+        let changed =
+          List.zip_exn bytes (List.zip_exn before after)
+          |> List.filter_map ~f:(function
+            | a, (Some p, q)
+              when not (Option.equal Primus.Memory.equal_protection (Some p) q)
+              ->
+                Some (a, p)
+            | _ -> None)
+        in
+        let ranges =
+          List.fold changed ~init:[] ~f:(fun acc (a, p) ->
+              match acc with
+              | (lower, upper, p') :: rest
+                when Word.equal (Word.succ upper) a
+                     && Primus.Memory.equal_protection p p' ->
+                  (lower, a, p) :: rest
+              | _ -> (a, a, p) :: acc)
+        in
         let* () =
-          Machine.List.iter (List.zip_exn bytes protections) ~f:(function
-            | a, Some p -> Memory.protect ~lower:a ~upper:a p
-            | _, None -> Machine.return ())
+          Machine.List.iter ranges ~f:(fun (lower, upper, p) ->
+              Memory.protect ~lower ~upper p)
         in
         serve pc
     | Run component ->
         (* the component sees the state of Unicorn, and its changes go
            there *)
         let* () = pull e in
+        let* before = registers e in
         let module Component = (val component : Primus.Machine.Component) in
         let module Component = Component (Machine) in
         let* () = Component.init () in
         (* the component may set the registers without the observations
-           of the interpreter, e.g., with [Env.set] *)
-        let* () = push e in
+           of the interpreter, e.g., with [Env.set], so the ones, that it
+           changed, go to Unicorn *)
+        let* after = registers e in
+        let* () =
+          push_vars e
+            (Map.fold after ~init:[] ~f:(fun ~key ~data acc ->
+                 match Map.find before key with
+                 | Some x when Word.equal x data -> acc
+                 | _ -> key :: acc))
+        in
         serve pc
     | Save (file, pc') ->
         let* r = save e pc' file in
