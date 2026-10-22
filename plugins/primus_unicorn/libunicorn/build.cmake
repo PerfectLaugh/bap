@@ -142,6 +142,48 @@ if(CMAKE_HOST_WIN32)
     "__mingw_aligned_malloc(size, alignment < 16 ? 16 : alignment)")
 endif()
 
+# After each memory access, Unicorn exits, if an exit is requested, and
+# restores the instruction of the access, so that it runs again, when the
+# emulation continues, which repeats a store, e.g., when uc_emu_stop is
+# called from another thread, e.g., by the timeout of Unicorn, or by the
+# watcher of the signals of the plugin. The check after an access exits
+# only if the access was invalid, and the other requests exit at the next
+# check, e.g., at the start of the next block, at its address.
+patch(qemu/tcg/tcg-op.c
+  "check_exit_request(tcg_ctx);"
+  "check_exit_request_mem(tcg_ctx);")
+patch(qemu/tcg/tcg-op.c
+  "static void tcg_gen_req_mo(TCGContext *tcg_ctx, TCGBar type)\n"
+  [=[// BAP: after a memory access, the emulation exits only if the access
+// was invalid, see build.cmake
+static void check_exit_request_mem(TCGContext *tcg_ctx)
+{
+    if (tcg_ctx->uc->no_exit_request) {
+        return;
+    }
+
+    TCGv_ptr puc = tcg_const_ptr(tcg_ctx, tcg_ctx->uc);
+    TCGv_i32 tmp = tcg_const_i32(tcg_ctx, 0);
+    if (tcg_ctx->delay_slot_flag != NULL) {
+        tcg_gen_mov_i32(tcg_ctx, tmp, tcg_ctx->delay_slot_flag);
+    }
+    tcg_gen_ori_i32(tcg_ctx, tmp, tmp, 0x80000000);
+    gen_helper_check_exit_request(tcg_ctx, puc, tmp);
+    tcg_temp_free_i32(tcg_ctx, tmp);
+    tcg_temp_free_ptr(tcg_ctx, puc);
+}
+
+static void tcg_gen_req_mo(TCGContext *tcg_ctx, TCGBar type)
+]=])
+patch(qemu/accel/tcg/tcg-runtime.c
+  "    if (cpu_loop_exit_requested(uc->cpu) && !in_delay_slot) {"
+  [=[    // BAP: the high bit marks the check after a memory access, which
+    // exits only if the access was invalid, see build.cmake
+    bool after_access = in_delay_slot & 0x80000000;
+    in_delay_slot &= 0x7fffffff;
+    if (cpu_loop_exit_requested(uc->cpu) && !in_delay_slot &&
+        (!after_access || uc->invalid_error != UC_ERR_OK)) {]=])
+
 # On Windows, Unicorn generates its configuration headers with the
 # configure script of QEMU, which needs a POSIX shell, and when there is
 # none it leaves them empty. So after it is configured, we write the
