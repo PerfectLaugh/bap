@@ -195,6 +195,73 @@ val on_mem_invalid :
 val delete : t -> hook -> unit
 (** [delete uc hook] removes the hook. *)
 
+(** {2 Traces}
+
+    The traces of the code, that the native hooks record in rings, with no call
+    to OCaml, so that the code runs at most a few times slower, than without
+    hooks. *)
+
+module Trace : sig
+  type t
+  type pcs = (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t
+  type sizes = (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array1.t
+
+  type accesses =
+    (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array2.t
+  (** the accesses, a row each: the index of the instruction, that made it, in
+      all instructions, that the trace recorded, the address, the written value,
+      and the size, with the bit 32 set, if it is a write *)
+
+  val create : ?every:int -> ?blocks:bool -> ?accesses:int -> int -> t
+  (** [create size] the trace of the last [size] instructions, at least, as the
+      ring has the size of a power of two, of every [every] one, by default of
+      all, or of the first instructions of the blocks, with their sizes, if
+      [blocks], and of the last [accesses] accesses to the memory, at least, by
+      default of none. *)
+
+  val blocks : t -> bool
+  (** if it is a trace of blocks *)
+
+  val count : t -> int64
+  (** the number of the recorded instructions, or blocks, also of those, that
+      the ring doesn't keep anymore *)
+
+  val accesses_count : t -> int64
+  (** the number of the recorded accesses *)
+
+  val clear : t -> unit
+
+  val pcs : ?last:int -> t -> pcs
+  (** the last program counters, at most [last], the oldest first, by default
+      all, that the ring keeps *)
+
+  val sizes : ?last:int -> t -> sizes
+  (** the sizes of the last blocks, as {!pcs} *)
+
+  val accesses : ?last:int -> t -> accesses
+  (** the last accesses, as {!pcs} *)
+
+  val bounds : t -> pcs
+  (** the boundaries, the oldest first, the index of the record, which follows
+      the registers, if the bit 62 is set, or the memory, if the bit 63 is,
+      which were written, while the emulation was stopped, except the pages,
+      that were filled, as they were mapped *)
+
+  val save : ?last:int -> t -> string -> int64
+  (** [save trace file] writes the last program counters, as {!pcs}, one in hex
+      a line, and returns their number. *)
+end
+
+val trace :
+  ?first:int64 -> ?last:int64 -> ?memory:bool -> t -> Trace.t -> hook list
+(** [trace uc trace] records the instructions from [first] to [last], or the
+    blocks, see {!Trace.create}, and the accesses to the memory, if [memory].
+    The hooks keep the trace alive.
+
+    The instruction, that the emulation stopped at, before it ran it, e.g., at a
+    fault, which the emulation repeats, or at a hook, that stops it, isn't
+    recorded, unless only every n-th instruction, or the blocks, are. *)
+
 (** {2 Contexts} *)
 
 type context

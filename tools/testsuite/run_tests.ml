@@ -718,6 +718,34 @@ let emu data =
             ("runs the code, that the store rewrote", "returns 9\n");
             ("exits with the result of main", "exited 7\n");
           ]);
+    (* the native traces of the instructions, and of the blocks, whose
+       instructions are the same, and the backward slice, by both, of the
+       result of main, through the stack, without the noise *)
+    case "emu/trace" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/trace.ml";
+              path data "bin/x86_64-linux-gnu-crc-loop";
+              path data "bin/x86_64-linux-gnu-slice";
+              file env "pcs";
+            ]
+        in
+        let slice =
+          "40044a 400451 400454 400456 400458 40045a 400466 40046d 400470 \
+           400473 400475 400488 40048b 40048d 400490\n"
+        in
+        sequence env out
+          [
+            ("counts", "instructions 71000263, blocks 9000049\n");
+            ("expands the blocks", "the same: true, the last is 400589\n");
+            ("saves", "saved 1000, 1000 lines, the last is 400589\n");
+            ("slices the instructions", "slice of instructions: " ^ slice);
+            ("has the gap", "gap at main: true, complete: false\n");
+            ("slices the blocks", "slice of blocks: " ^ slice);
+            ("has the gap of the blocks", "gap at main: true, complete: false\n");
+          ]);
     (* the emulators run side by side, each in its own engine, also of
        another target, with their own registers, memory, names and
        hooks *)

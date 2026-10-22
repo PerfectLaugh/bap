@@ -215,6 +215,34 @@ Emu.on_call emu "putchar" (fun emu ->
     if Emu.arg emu 0 = Int64.of_int (Char.code 'l') then Return 108L else Default)
 ```
 
+### Traces and slices
+
+`on_code` calls its closure for each instruction, which makes the program run tens to hundreds of times slower. `Emu.Trace` records the program counters natively, in a ring in C, with no call to OCaml:
+
+| Function | Action |
+|----------|--------|
+| `Trace.start ?size ?blocks ?every ?accesses ?first ?last emu` | record the last `size` instructions, by default 2^20, or only the blocks with `~blocks:true`, or every `every`-th instruction, and the last `accesses` loads and stores |
+| `Trace.insns ?last trace` | the program counters of the last instructions, also of a trace of blocks, whose blocks are decoded once |
+| `Trace.save ?last trace file` | write the recorded program counters, one in hex a line |
+| `Trace.count`, `Trace.accesses`, `Trace.stop` | the number of records, the recorded accesses, and the end of recording |
+
+The trace of the blocks costs the least, about three times the time of the program, and its `insns` are the instructions of the trace of each instruction, which costs tens of times the time, as Unicorn calls a hook for each instruction:
+
+```ocaml
+let trace = Emu.Trace.start ~blocks:true ~size:(1 lsl 20) emu in
+ignore (Emu.run emu);
+ignore (Emu.Trace.save trace "pcs.txt")
+```
+
+`slice trace locations` is the dynamic backward slice of the values, that the paused program has in the registers, e.g., `Reg "RAX"`, or the memory, e.g., `Mem (addr, 4)`, over the trace: the instructions, whose values flow to them, through the registers, and, if the trace records the accesses, through the memory, at the addresses, that they had. It is a slice of the data, and with `~addresses:true` it follows the addresses of the loads and the stores too. The code, that Primus runs, e.g., the Lisp stubs, isn't in the trace, so the slice marks the `gaps`, where the registers or the memory, that it follows, were written outside of the trace:
+
+```ocaml
+let trace = Emu.Trace.start ~blocks:true ~accesses:(1 lsl 20) emu in
+ignore (Emu.run emu ~until:0x400494L);
+let s = Emu.slice trace [ Emu.Reg "RAX" ] in
+List.iter s.steps ~f:(fun { Emu.pc; _ } -> printf "%Lx\n" pc)
+```
+
 ### Snapshots and checkpoints
 
 `snapshot` saves the state of the paused program in memory, and `restore` returns to it, as many times as needed. The hooks stay:

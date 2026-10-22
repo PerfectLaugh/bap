@@ -425,6 +425,431 @@ let bir ?thumb t addr =
                   end);
       !result
 
+(* the bytes of the code at [addr], at most the size of an instruction,
+   fewer, if the rest is not mapped *)
+let code_bytes t addr =
+  List.range ~stride:(-1) Primus.Lift.max_size 0
+  |> List.find_map ~f:(fun n ->
+      try Some (read t addr n) with Invalid_argument _ -> None)
+  |> Option.value ~default:""
+
+(* the instruction at [pc], lifted outside of the machine, as in the
+   hooks, with the encoding, that the target guesses, e.g., on ARM *)
+let lift t pc = hooked t ~thumb:false pc (code_bytes t pc)
+
+module Trace = struct
+  type emu = t
+
+  type t = {
+    emu : emu;
+    trace : Uc.Trace.t;
+    memory : bool;
+    mutable active : bool;
+    mutable hooks : (Uc.t * Uc.hook list) option;  (** on the engine *)
+    blocks : (int * int64 array) list Int64.Table.t;
+        (** the instructions of the blocks, by their addresses and sizes, see
+            [insns] *)
+  }
+
+  (* the hooks are native, see [Uc.trace], and go to the new engines too,
+     until the trace stops *)
+  let start ?(size = 1 lsl 20) ?every ?(blocks = false) ?(accesses = 0) ?first
+      ?last emu =
+    let memory = accesses > 0 in
+    if
+      memory
+      && (Option.value every ~default:1 > 1
+         || Option.is_some first || Option.is_some last)
+    then
+      invalid_arg
+        "Bap_emu.Trace.start: the accesses are recorded only with all \
+         instructions, or blocks";
+    let trace = Uc.Trace.create ?every ~blocks ~accesses size in
+    let t =
+      {
+        emu;
+        trace;
+        memory;
+        active = true;
+        hooks = None;
+        blocks = Int64.Table.create ();
+      }
+    in
+    installed emu (fun e ->
+        if t.active then
+          t.hooks <- Some (e.uc, Uc.trace ?first ?last ~memory e.uc trace));
+    t
+
+  (* the hooks of a closed engine are gone with it *)
+  let stop t =
+    if t.active then begin
+      t.active <- false;
+      Option.iter t.hooks ~f:(fun (uc, hooks) ->
+          List.iter hooks ~f:(fun hook ->
+              try Uc.delete uc hook with Invalid_argument _ -> ()));
+      t.hooks <- None
+    end
+
+  let count t = Uc.Trace.count t.trace
+  let clear t = Uc.Trace.clear t.trace
+  let blocks t = Uc.Trace.blocks t.trace
+  let pcs ?last t = Uc.Trace.pcs ?last t.trace
+  let sizes ?last t = Uc.Trace.sizes ?last t.trace
+  let save ?last t file = Uc.Trace.save ?last t.trace file
+
+  type access = {
+    insn : int64;
+    pc : int64;
+    addr : int64;
+    size : int;
+    write : bool;
+    value : int64;
+  }
+
+  let access rows i =
+    let open Bigarray.Array2 in
+    let info = get rows i 3 in
+    {
+      insn = get rows i 0;
+      addr = get rows i 1;
+      value = get rows i 2;
+      size = Int64.(to_int_exn (info land 0xFFFF_FFFFL));
+      write = Int64.(shift_right_logical info 32 land 1L = 1L);
+      pc = get rows i 4;
+    }
+
+  let accesses ?last t =
+    let rows = Uc.Trace.accesses ?last t.trace in
+    List.init (Bigarray.Array2.dim1 rows) ~f:(access rows)
+
+  (* the instructions of the block of [size] bytes at [addr], which are
+     decoded once, as the sizes of the instructions, that are lifted *)
+  let block t addr size =
+    let known = Option.value (Hashtbl.find t.blocks addr) ~default:[] in
+    match List.Assoc.find known size ~equal:Int.equal with
+    | Some insns -> insns
+    | None ->
+        let last = Int64.(addr + of_int size) in
+        let rec loop pc acc =
+          if Int64.(pc >= last) then Array.of_list_rev acc
+          else
+            match lift t.emu pc with
+            | Some (n, _) when n > 0 -> loop Int64.(pc + of_int n) (pc :: acc)
+            | _ -> Array.of_list_rev (pc :: acc)
+        in
+        let insns = loop addr [] in
+        Hashtbl.set t.blocks ~key:addr ~data:((size, insns) :: known);
+        insns
+
+  type words = (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t
+
+  let words n : words =
+    Bigarray.Array1.create Bigarray.int64 Bigarray.c_layout n
+
+  (* the program counters of the instructions of the last [last] records,
+     and the indices of their records, which are unboxed *)
+  let window ?(records = true) ?last t : words * words =
+    let pcs = pcs ?last t in
+    let n = Bigarray.Array1.dim pcs in
+    let first = Int64.(count t - of_int n) in
+    if not (blocks t) then begin
+      let indices = words (if records then n else 0) in
+      if records then
+        for i = 0 to n - 1 do
+          Bigarray.Array1.unsafe_set indices i Int64.(first + of_int i)
+        done;
+      (pcs, indices)
+    end
+    else
+      let sizes = sizes ?last t in
+      (* the blocks of the loops repeat, so they are cached by the lower
+         bits of their addresses first *)
+      let slots = 4096 in
+      let cache = Array.create ~len:slots (-1L, -1, [||]) in
+      let insns =
+        Array.init n ~f:(fun i ->
+            let addr = Bigarray.Array1.unsafe_get pcs i in
+            let size =
+              Int32.to_int_trunc (Bigarray.Array1.unsafe_get sizes i)
+            in
+            let slot = Int64.to_int_trunc addr land (slots - 1) in
+            let a, sz, b = Array.unsafe_get cache slot in
+            if Int64.(a = addr) && sz = size then b
+            else
+              let b = block t addr size in
+              Array.unsafe_set cache slot (addr, size, b);
+              b)
+      in
+      let total = Array.sum (module Int) insns ~f:Array.length in
+      let out = words total
+      and indices = words (if records then total else 0) in
+      let pos = ref 0 in
+      Array.iteri insns ~f:(fun i b ->
+          let record = Int64.(first + of_int i) in
+          for j = 0 to Array.length b - 1 do
+            Bigarray.Array1.unsafe_set out (!pos + j) (Array.unsafe_get b j);
+            if records then Bigarray.Array1.unsafe_set indices (!pos + j) record
+          done;
+          pos := !pos + Array.length b);
+      (out, indices)
+
+  let insns ?last t =
+    if blocks t then fst (window ~records:false ?last t) else pcs ?last t
+end
+
+type location = Reg of string | Mem of int64 * int
+type step = { index : int64; pc : int64 }
+
+type slice = {
+  steps : step list;
+  live : location list;
+  gaps : int64 list;
+  complete : bool;
+}
+
+(* The registers, that an instruction writes, and, for the ones, that are
+   needed, the registers, that it reads to compute them, and whether it
+   loads from the memory, through its temporaries, as the defs of all its
+   blocks run in order, as the jumps of the instruction are not followed,
+   e.g., of a conditional move, so the slice is of the data. *)
+module Insn = struct
+  type t = { defs : (Var.t * exp) list; written : String.Set.t }
+
+  let register v =
+    (not (Var.is_virtual v))
+    && match Var.typ v with Imm _ -> true | Mem _ | Unk -> false
+
+  let name v = String.uppercase (Var.name v)
+
+  let of_blks blks =
+    let defs =
+      List.concat_map blks ~f:(fun b ->
+          Term.enum def_t b |> Seq.to_list
+          |> List.map ~f:(fun d -> (Def.lhs d, Def.rhs d)))
+    in
+    let written =
+      List.filter_map defs ~f:(fun (v, _) ->
+          Option.some_if (register v) (name v))
+      |> String.Set.of_list
+    in
+    { defs; written }
+
+  (* the variables, that [e] reads, and whether it loads, with the
+     variables of the addresses, if [addresses] *)
+  let uses ~addresses e =
+    let vars = Var.Hash_set.create () and loads = ref false in
+    let rec go : exp -> unit = function
+      | Var v -> (
+          match Var.typ v with Mem _ -> () | _ -> Hash_set.add vars v)
+      | Load (m, a, _, _) ->
+          loads := true;
+          go m;
+          if addresses then go a
+      | Store (m, a, x, _, _) ->
+          go m;
+          go x;
+          if addresses then go a
+      | BinOp (_, x, y) | Concat (x, y) ->
+          go x;
+          go y
+      | UnOp (_, x) | Cast (_, _, x) | Extract (_, _, x) -> go x
+      | Let (_, x, y) ->
+          go x;
+          go y
+      | Ite (c, x, y) ->
+          go c;
+          go x;
+          go y
+      | Int _ | Unknown _ -> ()
+    in
+    go e;
+    (vars, !loads)
+
+  (* the registers, that compute the [needed] registers, and the stores,
+     if [stores], and whether they load *)
+  let inputs ~addresses insn ~needed ~stores =
+    let live = Var.Hash_set.create () in
+    List.iter insn.defs ~f:(fun (v, _) ->
+        if register v && Set.mem needed (name v) then Hash_set.add live v);
+    let loads = ref false in
+    let take e =
+      let vars, l = uses ~addresses e in
+      Hash_set.iter vars ~f:(Hash_set.add live);
+      if l then loads := true
+    in
+    List.iter (List.rev insn.defs) ~f:(fun (v, e) ->
+        match Var.typ v with
+        | Mem _ -> if stores then take e
+        | _ ->
+            if Hash_set.mem live v then begin
+              Hash_set.remove live v;
+              take e
+            end);
+    let regs =
+      Hash_set.to_list live
+      |> List.filter_map ~f:(fun v -> Option.some_if (register v) (name v))
+    in
+    (regs, !loads)
+end
+
+(* the bytes of the locations, coalesced *)
+let ranges bytes =
+  List.sort (Hash_set.to_list bytes) ~compare:Int64.compare
+  |> List.fold ~init:[] ~f:(fun acc a ->
+      match acc with
+      | Mem (b, n) :: rest when Int64.(b + of_int n = a) ->
+          Mem (b, n + 1) :: rest
+      | _ -> Mem (a, 1) :: acc)
+  |> List.rev
+
+(* The slice goes backward from the last recorded instruction, whose
+   defs of the live locations make it a step, which kills them, and
+   makes its inputs live, the registers, that compute them, and the
+   bytes, that it read, if they load, as the trace has their addresses.
+   The instructions of a trace of blocks are of their blocks, and their
+   accesses are found by their program counters. The instructions are
+   lifted once, from the bytes, that they have now, outside of the
+   machine, as in the hooks. *)
+let slice ?(addresses = false) ?window (tr : Trace.t) criterion =
+  let t = tr.emu in
+  let pcs, records = Trace.window ?last:window tr in
+  let n = Bigarray.Array1.dim pcs in
+  let blocks = Trace.blocks tr in
+  let rows = Uc.Trace.accesses tr.trace in
+  let rows_n = Bigarray.Array2.dim1 rows in
+  let first_record =
+    if n = 0 then Trace.count tr else Bigarray.Array1.get records 0
+  in
+  (* the records before the oldest kept access, whose accesses the ring
+     has lost, aren't in the window *)
+  let covered =
+    if
+      (not tr.memory)
+      || Int64.(Uc.Trace.accesses_count tr.trace = of_int rows_n)
+    then first_record
+    else if rows_n = 0 then Trace.count tr
+    else Int64.max first_record (Trace.access rows 0).insn
+  in
+  let live_regs = String.Hash_set.create () in
+  let live_mem = Int64.Hash_set.create () in
+  List.iter criterion ~f:(function
+    | Reg r -> Hash_set.add live_regs (String.uppercase r)
+    | Mem (a, size) ->
+        for i = 0 to size - 1 do
+          Hash_set.add live_mem Int64.(a + of_int i)
+        done);
+  (* the loads, whose bytes the trace doesn't have *)
+  let untracked = ref false in
+  (* the records, before which the registers, the bit 62, or the memory,
+     the bit 63, were written outside of the trace, see [Uc.Trace.bounds] *)
+  let bounds = Int64.Table.create () in
+  let marks = Uc.Trace.bounds tr.trace in
+  for i = 0 to Bigarray.Array1.dim marks - 1 do
+    let b = Bigarray.Array1.get marks i in
+    let record = Int64.(b land 0x3FFF_FFFF_FFFF_FFFFL) in
+    let regs = Int64.(b land 0x4000_0000_0000_0000L <> 0L) in
+    let mem = Int64.(b < 0L) in
+    Hashtbl.set bounds ~key:record ~data:(regs, mem)
+  done;
+  let gaps = ref [] in
+  (* the values of the live locations may come from outside of the trace,
+     before the first instruction of a record, that follows a boundary *)
+  let crossed k =
+    let record = Bigarray.Array1.get records k in
+    if k = 0 || not (Int64.equal (Bigarray.Array1.get records (k - 1)) record)
+    then
+      match Hashtbl.find bounds record with
+      | Some (regs, mem)
+        when (regs && not (Hash_set.is_empty live_regs))
+             || (mem && not (Hash_set.is_empty live_mem)) ->
+          gaps := record :: !gaps
+      | _ -> ()
+  in
+  let lifted = Int64.Table.create () in
+  let insn pc =
+    Hashtbl.find_or_add lifted pc ~default:(fun () ->
+        Option.map (lift t pc) ~f:(fun (_, blks) -> Insn.of_blks blks))
+  in
+  let bytes acc (a : Trace.access) =
+    for i = 0 to a.size - 1 do
+      acc := Int64.(a.addr + of_int i) :: !acc
+    done
+  in
+  (* the access is of the instruction at [k], of a later one, whose
+     access is skipped, or of an earlier one, as the instructions of a
+     block of a trace of blocks have increasing addresses *)
+  let order k (a : Trace.access) =
+    let record = Bigarray.Array1.get records k in
+    if Int64.(a.insn > record) then `Later
+    else if Int64.(a.insn < record) then `Earlier
+    else if not blocks then `Ours
+    else
+      let pc = Bigarray.Array1.get pcs k in
+      if Int64.(a.pc > pc) then `Later
+      else if Int64.(a.pc < pc) then `Earlier
+      else `Ours
+  in
+  let rec loop k row steps =
+    if
+      k < 0
+      || Int64.(Bigarray.Array1.get records k < covered)
+      || (Hash_set.is_empty live_regs && Hash_set.is_empty live_mem)
+    then steps
+    else
+      let record = Bigarray.Array1.get records k in
+      (* the accesses of the instruction, which are before [row] *)
+      let rec accesses row reads writes =
+        if row < 0 then row
+        else
+          let a = Trace.access rows row in
+          match order k a with
+          | `Later -> accesses (row - 1) reads writes
+          | `Ours ->
+              bytes (if a.write then writes else reads) a;
+              accesses (row - 1) reads writes
+          | `Earlier -> row
+      in
+      let reads = ref [] and writes = ref [] in
+      let row = accesses row reads writes in
+      let pc = Bigarray.Array1.get pcs k in
+      let stores = List.exists !writes ~f:(Hash_set.mem live_mem) in
+      match insn pc with
+      | None ->
+          crossed k;
+          loop (k - 1) row steps
+      | Some i ->
+          let needed = Set.filter i.written ~f:(Hash_set.mem live_regs) in
+          if Set.is_empty needed && not stores then begin
+            crossed k;
+            loop (k - 1) row steps
+          end
+          else begin
+            let regs, loads = Insn.inputs ~addresses i ~needed ~stores in
+            Set.iter needed ~f:(Hash_set.remove live_regs);
+            List.iter !writes ~f:(Hash_set.remove live_mem);
+            List.iter regs ~f:(Hash_set.add live_regs);
+            if loads then
+              if tr.memory then List.iter !reads ~f:(Hash_set.add live_mem)
+              else untracked := true;
+            crossed k;
+            loop (k - 1) row ({ index = record; pc } :: steps)
+          end
+  in
+  let steps = loop (n - 1) (rows_n - 1) [] in
+  let live =
+    (Hash_set.to_list live_regs
+    |> List.sort ~compare:String.compare
+    |> List.map ~f:(fun r -> Reg r))
+    @ ranges live_mem
+  in
+  let gaps = List.rev !gaps in
+  {
+    steps;
+    live;
+    gaps;
+    complete = List.is_empty live && List.is_empty gaps && not !untracked;
+  }
+
 let on_code ?first ?last t f =
   installed t (fun e ->
       ignore (Uc.on_code ?first ?last e.uc (fun addr _ -> f t addr)))

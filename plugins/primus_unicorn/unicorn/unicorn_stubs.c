@@ -5,11 +5,13 @@
    raised by a hook can not unwind the frames of Unicorn, so it stops
    the emulation and is reraised when uc_emu_start returns. */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define CAML_NAME_SPACE
 #include <caml/alloc.h>
+#include <caml/bigarray.h>
 #include <caml/callback.h>
 #include <caml/custom.h>
 #include <caml/fail.h>
@@ -20,17 +22,34 @@
 
 #include "unicorn_regs.h"
 
+struct trace;
+
 struct hook {
     uc_hook handle;
     value closure;
     struct engine *engine;
+    /* the trace, that the native hook of the code records, see
+       [fixup], or NULL */
+    struct trace *trace;
     struct hook *next;
+};
+
+/* the regions, that are mapped, while the emulation is stopped, whose
+   writes fill them, so they aren't the changes, that the traces mark */
+struct fresh {
+    uint64_t addr;
+    uint64_t size;
+    struct fresh *next;
 };
 
 struct engine {
     uc_engine *uc;
     uc_arch arch;
     struct hook *hooks;
+    /* the writes, since the emulation stopped, see [mark] */
+    int wrote_regs;
+    int wrote_mem;
+    struct fresh *fresh;
     /* the exception that a hook raised, or Val_unit */
     value exn;
 };
@@ -76,12 +95,21 @@ static void free_hooks(struct engine *e) {
     e->hooks = NULL;
 }
 
+static void free_fresh(struct engine *e) {
+    while (e->fresh != NULL) {
+        struct fresh *next = e->fresh->next;
+        free(e->fresh);
+        e->fresh = next;
+    }
+}
+
 static void close_engine(struct engine *e) {
     if (e->uc != NULL) {
         uc_close(e->uc);
         e->uc = NULL;
     }
     free_hooks(e);
+    free_fresh(e);
 }
 
 static void finalize_engine(value v) {
@@ -138,6 +166,9 @@ value bap_uc_open(value arch, value mode) {
     e->uc = uc;
     e->arch = Int_val(arch);
     e->hooks = NULL;
+    e->wrote_regs = 0;
+    e->wrote_mem = 0;
+    e->fresh = NULL;
     e->exn = Val_unit;
     caml_register_generational_global_root(&e->exn);
     r = caml_alloc_custom(&engine_ops, sizeof(struct engine *), 0, 1);
@@ -166,8 +197,16 @@ value bap_uc_flush_tb(value v) {
 }
 
 value bap_uc_mem_map(value v, value addr, value size, value perms) {
+    struct engine *e = Engine_val(v);
     check(uc_mem_map(engine_uc(v), Int64_val(addr), Int64_val(size),
                      Int_val(perms)));
+    struct fresh *f = malloc(sizeof(struct fresh));
+    if (f != NULL) {
+        f->addr = Int64_val(addr);
+        f->size = Int64_val(size);
+        f->next = e->fresh;
+        e->fresh = f;
+    }
     return Val_unit;
 }
 
@@ -185,9 +224,22 @@ value bap_uc_mem_protect(value v, value addr, value size, value perms) {
 /* neither reading nor writing the memory runs hooks, so the strings
    stay in place */
 
+static int is_fresh(struct engine *e, uint64_t addr, uint64_t size) {
+    for (struct fresh *f = e->fresh; f != NULL; f = f->next) {
+        if (addr >= f->addr && addr + size <= f->addr + f->size) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 value bap_uc_mem_write(value v, value addr, value data) {
+    struct engine *e = Engine_val(v);
     check(uc_mem_write(engine_uc(v), Int64_val(addr), String_val(data),
                        caml_string_length(data)));
+    if (!is_fresh(e, Int64_val(addr), caml_string_length(data))) {
+        e->wrote_mem = 1;
+    }
     return Val_unit;
 }
 
@@ -265,6 +317,7 @@ value bap_uc_reg_read(value v, value reg) {
 
 value bap_uc_reg_write(value v, value reg, value x) {
     uc_engine *uc = engine_uc(v);
+    Engine_val(v)->wrote_regs = 1;
     uint8_t buf[REG_BUF];
     size_t size = reg_read(uc, Int_val(reg), buf);
     uint64_t x64 = Int64_val(x);
@@ -295,6 +348,7 @@ value bap_uc_reg_read_bytes(value v, value reg) {
 
 value bap_uc_reg_write_bytes(value v, value reg, value data) {
     uc_engine *uc = engine_uc(v);
+    Engine_val(v)->wrote_regs = 1;
     uint8_t buf[REG_BUF];
     size_t size = reg_read(uc, Int_val(reg), buf);
     if (caml_string_length(data) != size) {
@@ -334,14 +388,19 @@ value bap_uc_regs(value arch) {
     CAMLreturn(r);
 }
 
+static void fixup(struct engine *e);
+static void mark(struct engine *e);
+
 value bap_uc_emu_start(value v, value start, value until, value timeout,
                        value count) {
     CAMLparam5(v, start, until, timeout, count);
     CAMLlocal1(exn);
     struct engine *e = Engine_val(v);
+    mark(e);
     uc_err err = uc_emu_start(engine_uc(v), Int64_val(start),
                               Int64_val(until), Int64_val(timeout),
                               Long_val(count));
+    fixup(e);
     if (e->exn != Val_unit) {
         exn = e->exn;
         caml_modify_generational_global_root(&e->exn, Val_unit);
@@ -468,6 +527,7 @@ value bap_uc_hook_add(value v, value kind, value types, value start,
     }
     h->closure = closure;
     h->engine = e;
+    h->trace = NULL;
     caml_register_generational_global_root(&h->closure);
     uc_err err =
         Int_val(kind) == HOOK_INSN
@@ -536,4 +596,426 @@ value bap_uc_context_save(value v) {
 value bap_uc_context_restore(value v, value ctx) {
     check(uc_context_restore(engine_uc(v), Context_val(ctx)));
     return Val_unit;
+}
+
+/* The traces of the code, that the native hooks record, with no call
+   to OCaml, see Bap_unicorn.Trace. The program counters are in a ring,
+   whose size is a power of two, of every instruction, of every [every]
+   one, or of the first ones of the blocks, and the accesses to the
+   memory, if they are recorded, in another ring, with the index of the
+   instruction, that made them, i.e., its position in all instructions,
+   that the trace has recorded. */
+
+struct access {
+    uint64_t insn;
+    uint64_t pc; /* of the instruction in a trace of blocks */
+    uint64_t addr;
+    uint64_t value;
+    uint32_t size;
+    uint32_t write;
+};
+
+struct trace {
+    uint64_t count; /* the recorded instructions, or blocks */
+    uint64_t mask;
+    uint64_t *pcs;
+    uint32_t *sizes; /* of the blocks */
+    uint64_t every;
+    uint64_t skip;
+    uint64_t accesses; /* the recorded accesses */
+    uint64_t amask;
+    struct access *mem;
+    uc_arch arch;
+    /* the boundaries, see [mark] */
+    uint64_t marks;
+    uint64_t *bounds;
+};
+
+#define BOUNDS 65536
+
+#define Trace_val(v) (*((struct trace **)Data_custom_val(v)))
+
+static void finalize_trace(value v) {
+    struct trace *t = Trace_val(v);
+    free(t->bounds);
+    free(t->pcs);
+    free(t->sizes);
+    free(t->mem);
+    free(t);
+}
+
+static struct custom_operations trace_ops = {
+    "bap.unicorn.trace.1",      finalize_trace,
+    custom_compare_default,     custom_hash_default,
+    custom_serialize_default,   custom_deserialize_default,
+    custom_compare_ext_default, custom_fixed_length_default};
+
+static uint64_t ring_size(intnat n) {
+    uint64_t size = 1;
+    while (size < (uint64_t)n) {
+        size <<= 1;
+    }
+    return size;
+}
+
+/* the trace of [size] program counters, rounded up to a power of two,
+   of every [every] instruction, with the sizes of the blocks, if
+   [blocks], and with [accesses] accesses to the memory, if positive */
+value bap_uc_trace_create(value size, value every, value blocks,
+                          value accesses) {
+    CAMLparam4(size, every, blocks, accesses);
+    CAMLlocal1(r);
+    struct trace *t = calloc(1, sizeof(struct trace));
+    if (t == NULL) {
+        caml_raise_out_of_memory();
+    }
+    uint64_t n = ring_size(Long_val(size) < 1 ? 2 : Long_val(size) + 1);
+    t->mask = n - 1;
+    t->pcs = malloc(n * sizeof(uint64_t));
+    t->sizes = Bool_val(blocks) ? malloc(n * sizeof(uint32_t)) : NULL;
+    t->every = Long_val(every) < 1 ? 1 : Long_val(every);
+    t->bounds = malloc(BOUNDS * sizeof(uint64_t));
+    t->skip = t->every;
+    if (Long_val(accesses) > 0) {
+        uint64_t m = ring_size(Long_val(accesses) + 1);
+        t->amask = m - 1;
+        t->mem = malloc(m * sizeof(struct access));
+    }
+    if (t->pcs == NULL || t->bounds == NULL ||
+        (Bool_val(blocks) && t->sizes == NULL) ||
+        (Long_val(accesses) > 0 && t->mem == NULL)) {
+        free(t->bounds);
+        free(t->pcs);
+        free(t->sizes);
+        free(t->mem);
+        free(t);
+        caml_raise_out_of_memory();
+    }
+    r = caml_alloc_custom_mem(&trace_ops, sizeof(struct trace *),
+                              n * sizeof(uint64_t));
+    Trace_val(r) = t;
+    CAMLreturn(r);
+}
+
+static void trace_code(uc_engine *uc, uint64_t addr, uint32_t size,
+                       void *data) {
+    struct trace *t = data;
+    if (--t->skip) {
+        return;
+    }
+    t->skip = t->every;
+    t->pcs[t->count & t->mask] = addr;
+    t->count++;
+}
+
+static void trace_block(uc_engine *uc, uint64_t addr, uint32_t size,
+                        void *data) {
+    struct trace *t = data;
+    t->pcs[t->count & t->mask] = addr;
+    t->sizes[t->count & t->mask] = size;
+    t->count++;
+}
+
+static int read_pc(uc_engine *uc, uc_arch arch, uint64_t *pc);
+
+/* the program counter of the instruction, that makes the access, is
+   read only in a trace of blocks, where it is in the block */
+static void trace_mem(uc_engine *uc, uc_mem_type type, uint64_t addr,
+                      int size, int64_t x, void *data) {
+    struct trace *t = data;
+    if (t->count == 0) {
+        return;
+    }
+    struct access *a = &t->mem[t->accesses & t->amask];
+    a->insn = t->count - 1;
+    a->pc = 0;
+    if (t->sizes != NULL && !read_pc(uc, t->arch, &a->pc)) {
+        a->pc = 0;
+    }
+    a->addr = addr;
+    a->size = size;
+    a->write = type == UC_MEM_WRITE;
+    a->value = type == UC_MEM_WRITE ? (uint64_t)x : 0;
+    t->accesses++;
+}
+
+/* the program counter, from which Unicorn continues */
+static int read_pc(uc_engine *uc, uc_arch arch, uint64_t *pc) {
+    int reg;
+    switch (arch) {
+    case UC_ARCH_X86: {
+        size_t mode = 0;
+        if (uc_query(uc, UC_QUERY_MODE, &mode) != UC_ERR_OK) {
+            return 0;
+        }
+        reg = mode & UC_MODE_64   ? UC_X86_REG_RIP
+              : mode & UC_MODE_32 ? UC_X86_REG_EIP
+                                  : UC_X86_REG_IP;
+        break;
+    }
+    case UC_ARCH_ARM: reg = UC_ARM_REG_PC; break;
+    case UC_ARCH_ARM64: reg = UC_ARM64_REG_PC; break;
+    case UC_ARCH_MIPS: reg = UC_MIPS_REG_PC; break;
+    case UC_ARCH_PPC: reg = UC_PPC_REG_PC; break;
+    case UC_ARCH_RISCV: reg = UC_RISCV_REG_PC; break;
+    default: return 0;
+    }
+    uint8_t buf[REG_BUF];
+    memset(buf, 0, REG_BUF);
+    size_t size = REG_BUF;
+    if (uc_reg_read2(uc, reg, buf, &size) != UC_ERR_OK || size > 8) {
+        return 0;
+    }
+    *pc = reg_value(buf, size);
+    if (arch == UC_ARCH_ARM) {
+        *pc &= ~(uint64_t)1;
+    }
+    return 1;
+}
+
+/* The instruction, that Unicorn stopped at, e.g., at a stop of Primus,
+   or at a fault, which it repeats, after the executor mapped the page,
+   was recorded, but didn't run, so its record and its accesses are
+   dropped, as it is recorded again, when it runs. The pc of Thumb has
+   no lower bit, as the hooks of the code see it. */
+static void fixup(struct engine *e) {
+    uint64_t pc;
+    int known = 0;
+    for (struct hook *h = e->hooks; h != NULL; h = h->next) {
+        struct trace *t = h->trace;
+        if (t == NULL || t->every != 1 || t->count == 0) {
+            continue;
+        }
+        if (!known) {
+            if (!read_pc(e->uc, e->arch, &pc)) {
+                return;
+            }
+            known = 1;
+        }
+        uint64_t last = t->count - 1;
+        uint64_t start = t->pcs[last & t->mask];
+        if (t->sizes != NULL) {
+            /* the block, that Unicorn left at [pc], ran only before it,
+               and the accesses of the instructions after it are none */
+            uint32_t size = t->sizes[last & t->mask];
+            if (pc < start || pc >= start + size) {
+                continue;
+            }
+            if (pc > start) {
+                t->sizes[last & t->mask] = pc - start;
+                while (t->accesses > 0) {
+                    struct access *a = &t->mem[(t->accesses - 1) & t->amask];
+                    if (a->insn != last || a->pc < pc) {
+                        break;
+                    }
+                    t->accesses--;
+                }
+                continue;
+            }
+        } else if (start != pc) {
+            continue;
+        }
+        t->count--;
+        while (t->accesses > 0 &&
+               t->mem[(t->accesses - 1) & t->amask].insn == last) {
+            t->accesses--;
+        }
+    }
+}
+
+/* The registers or the memory, that the emulation has, which were
+   written, while it was stopped, e.g., by the code, that Primus runs,
+   or by the script, but not the pages, that were filled, as they were
+   mapped, make a boundary of the traces, the index of the record, that
+   follows it, with the written registers in the bit 62, and the memory
+   in the bit 63, so that the slices see, that the values of the
+   locations may come from outside of the trace. */
+static void mark(struct engine *e) {
+    if (e->wrote_regs || e->wrote_mem) {
+        for (struct hook *h = e->hooks; h != NULL; h = h->next) {
+            struct trace *t = h->trace;
+            if (t == NULL) {
+                continue;
+            }
+            uint64_t bound = t->count | ((uint64_t)e->wrote_regs << 62) |
+                             ((uint64_t)e->wrote_mem << 63);
+            uint64_t last = t->bounds[(t->marks - 1) & (BOUNDS - 1)];
+            if (t->marks > 0 && (last & ~(3ULL << 62)) == t->count) {
+                t->bounds[(t->marks - 1) & (BOUNDS - 1)] = last | bound;
+            } else {
+                t->bounds[t->marks & (BOUNDS - 1)] = bound;
+                t->marks++;
+            }
+        }
+    }
+    e->wrote_regs = 0;
+    e->wrote_mem = 0;
+    free_fresh(e);
+}
+
+enum trace_kind { TRACE_CODE, TRACE_BLOCK, TRACE_MEM };
+
+/* the native hook, which records the trace, which it keeps alive */
+value bap_uc_trace_add(value v, value tv, value kind, value start,
+                       value stop) {
+    CAMLparam5(v, tv, kind, start, stop);
+    struct engine *e = Engine_val(v);
+    uc_engine *uc = engine_uc(v);
+    struct trace *t = Trace_val(tv);
+    void *callback;
+    int type;
+    switch (Int_val(kind)) {
+    case TRACE_CODE: callback = trace_code; type = UC_HOOK_CODE; break;
+    case TRACE_BLOCK:
+        if (t->sizes == NULL) {
+            caml_invalid_argument("Unicorn.trace: not a trace of blocks");
+        }
+        callback = trace_block;
+        type = UC_HOOK_BLOCK;
+        break;
+    case TRACE_MEM:
+        if (t->mem == NULL) {
+            caml_invalid_argument("Unicorn.trace: no accesses are recorded");
+        }
+        callback = trace_mem;
+        type = UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE;
+        break;
+    default: caml_invalid_argument("Unicorn.trace");
+    }
+    struct hook *h = malloc(sizeof(struct hook));
+    if (h == NULL) {
+        caml_raise_out_of_memory();
+    }
+    h->closure = tv;
+    h->engine = e;
+    h->trace = Int_val(kind) == TRACE_MEM ? NULL : t;
+    t->arch = e->arch;
+    caml_register_generational_global_root(&h->closure);
+    uc_err err = uc_hook_add(uc, &h->handle, type, callback, t,
+                             Int64_val(start), Int64_val(stop));
+    if (err != UC_ERR_OK) {
+        caml_remove_generational_global_root(&h->closure);
+        free(h);
+        fail(err);
+    }
+    h->next = e->hooks;
+    e->hooks = h;
+    CAMLreturn(caml_copy_int64((int64_t)h->handle));
+}
+
+value bap_uc_trace_count(value tv) {
+    return caml_copy_int64(Trace_val(tv)->count);
+}
+
+value bap_uc_trace_accesses_count(value tv) {
+    return caml_copy_int64(Trace_val(tv)->accesses);
+}
+
+value bap_uc_trace_blocks(value tv) {
+    return Val_bool(Trace_val(tv)->sizes != NULL);
+}
+
+value bap_uc_trace_clear(value tv) {
+    struct trace *t = Trace_val(tv);
+    t->count = 0;
+    t->accesses = 0;
+    t->marks = 0;
+    t->skip = t->every;
+    return Val_unit;
+}
+
+/* the number of the last records, at most [n], that the ring keeps,
+   whose slot of the next record, which may have a record, that [fixup]
+   dropped, is not one of them */
+static uint64_t kept(uint64_t count, uint64_t mask, intnat n) {
+    uint64_t k = count < mask ? count : mask;
+    return n >= 0 && (uint64_t)n < k ? (uint64_t)n : k;
+}
+
+/* the last [n] program counters, the oldest first, and their indices */
+value bap_uc_trace_pcs(value tv, value n) {
+    CAMLparam2(tv, n);
+    CAMLlocal1(r);
+    struct trace *t = Trace_val(tv);
+    uint64_t k = kept(t->count, t->mask, Long_val(n));
+    r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 1, NULL, k);
+    int64_t *data = Caml_ba_data_val(r);
+    uint64_t first = t->count - k;
+    for (uint64_t i = 0; i < k; i++) {
+        data[i] = t->pcs[(first + i) & t->mask];
+    }
+    CAMLreturn(r);
+}
+
+value bap_uc_trace_sizes(value tv, value n) {
+    CAMLparam2(tv, n);
+    CAMLlocal1(r);
+    struct trace *t = Trace_val(tv);
+    uint64_t k = t->sizes == NULL ? 0 : kept(t->count, t->mask, Long_val(n));
+    r = caml_ba_alloc_dims(CAML_BA_INT32 | CAML_BA_C_LAYOUT, 1, NULL, k);
+    int32_t *data = Caml_ba_data_val(r);
+    uint64_t first = t->count - k;
+    for (uint64_t i = 0; i < k; i++) {
+        data[i] = t->sizes[(first + i) & t->mask];
+    }
+    CAMLreturn(r);
+}
+
+/* the last [n] accesses, the oldest first, five words each: the index
+   of the instruction, the address, the written value, the size, with
+   the write in the bit 32, and the program counter, of a trace of
+   blocks */
+value bap_uc_trace_mem(value tv, value n) {
+    CAMLparam2(tv, n);
+    CAMLlocal1(r);
+    struct trace *t = Trace_val(tv);
+    uint64_t k = t->mem == NULL ? 0 : kept(t->accesses, t->amask, Long_val(n));
+    r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 2, NULL, k,
+                           (intnat)5);
+    int64_t *data = Caml_ba_data_val(r);
+    uint64_t first = t->accesses - k;
+    for (uint64_t i = 0; i < k; i++) {
+        struct access *a = &t->mem[(first + i) & t->amask];
+        data[5 * i] = a->insn;
+        data[5 * i + 1] = a->addr;
+        data[5 * i + 2] = a->value;
+        data[5 * i + 3] = (int64_t)a->size | ((int64_t)a->write << 32);
+        data[5 * i + 4] = a->pc;
+    }
+    CAMLreturn(r);
+}
+
+/* writes the last [n] program counters, one in hex a line, the oldest
+   first, to the file, and returns their number */
+value bap_uc_trace_save(value tv, value n, value path) {
+    CAMLparam3(tv, n, path);
+    struct trace *t = Trace_val(tv);
+    FILE *f = fopen(String_val(path), "w");
+    if (f == NULL) {
+        caml_failwith("Unicorn.Trace.save: can't open the file");
+    }
+    uint64_t k = kept(t->count, t->mask, Long_val(n));
+    uint64_t first = t->count - k;
+    for (uint64_t i = 0; i < k; i++) {
+        fprintf(f, "%llx\n", (unsigned long long)t->pcs[(first + i) & t->mask]);
+    }
+    if (fclose(f) != 0) {
+        caml_failwith("Unicorn.Trace.save: can't write the file");
+    }
+    CAMLreturn(caml_copy_int64(k));
+}
+
+/* the boundaries, that the ring keeps, the oldest first, see [mark] */
+value bap_uc_trace_bounds(value tv) {
+    CAMLparam1(tv);
+    CAMLlocal1(r);
+    struct trace *t = Trace_val(tv);
+    uint64_t k = t->marks < BOUNDS ? t->marks : BOUNDS;
+    r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 1, NULL, k);
+    int64_t *data = Caml_ba_data_val(r);
+    uint64_t first = t->marks - k;
+    for (uint64_t i = 0; i < k; i++) {
+        data[i] = t->bounds[(first + i) & (BOUNDS - 1)];
+    }
+    CAMLreturn(r);
 }

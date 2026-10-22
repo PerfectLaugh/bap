@@ -169,6 +169,45 @@ let on_mem_invalid ?first ?last uc accesses kinds
 
 let delete = hook_del
 
+module Trace = struct
+  type t
+  type pcs = (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t
+  type sizes = (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array1.t
+
+  type accesses =
+    (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array2.t
+
+  external create : int -> int -> bool -> int -> t = "bap_uc_trace_create"
+  external count : t -> int64 = "bap_uc_trace_count"
+  external accesses_count : t -> int64 = "bap_uc_trace_accesses_count"
+  external clear : t -> unit = "bap_uc_trace_clear"
+  external blocks : t -> bool = "bap_uc_trace_blocks"
+  external pcs : t -> int -> pcs = "bap_uc_trace_pcs"
+  external sizes : t -> int -> sizes = "bap_uc_trace_sizes"
+  external accesses : t -> int -> accesses = "bap_uc_trace_mem"
+  external save : t -> int -> string -> int64 = "bap_uc_trace_save"
+  external bounds : t -> pcs = "bap_uc_trace_bounds"
+
+  let create ?(every = 1) ?(blocks = false) ?(accesses = 0) size =
+    create size every blocks accesses
+
+  let pcs ?(last = -1) t = pcs t last
+  let sizes ?(last = -1) t = sizes t last
+  let accesses ?(last = -1) t = accesses t last
+  let save ?(last = -1) t file = save t last file
+end
+
+(* the kinds of the native hooks in unicorn_stubs.c *)
+type trace_kind = Trace_code | Trace_block | Trace_mem
+
+external trace_add : t -> Trace.t -> trace_kind -> int64 -> int64 -> int64
+  = "bap_uc_trace_add"
+
+let trace ?(first = 1L) ?(last = 0L) ?(memory = false) uc trace =
+  let kind = if Trace.blocks trace then Trace_block else Trace_code in
+  let code = trace_add uc trace kind first last in
+  if memory then [ code; trace_add uc trace Trace_mem 1L 0L ] else [ code ]
+
 type context
 
 external save : t -> context = "bap_uc_context_save"

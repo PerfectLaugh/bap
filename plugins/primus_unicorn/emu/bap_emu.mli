@@ -158,6 +158,144 @@ val bir : ?thumb:bool -> t -> int64 -> (int * blk term list) option
     Raises [Invalid_argument], if [addr] is not mapped, e.g., in a hook, if its
     page is not in Unicorn yet. *)
 
+(** The traces of the program counters, which the native hooks of Unicorn record
+    in a ring, with no call to OCaml. The trace of the blocks costs the least,
+    the program runs about three times slower, and {!Trace.insns} gives the
+    instructions of its blocks, while the trace of each instruction makes it run
+    tens of times slower, as Unicorn calls its hook for each one, which is still
+    faster, than {!on_code}, whose closure runs for each one. The instructions,
+    that Primus runs, e.g., the Lisp stubs, or the code, that uses the tainted
+    or the symbolic values, aren't in the trace.
+
+    {[
+    let trace = Emu.Trace.start ~blocks:true emu in
+    ignore (Emu.run emu);
+    Emu.Trace.insns trace
+    ]} *)
+module Trace : sig
+  type emu := t
+  type t
+
+  val start :
+    ?size:int ->
+    ?every:int ->
+    ?blocks:bool ->
+    ?accesses:int ->
+    ?first:int64 ->
+    ?last:int64 ->
+    emu ->
+    t
+  (** [start emu] records the program counters of the last [size] instructions,
+      at least, by default of 2{^ 20}, from [first] to [last], by default of
+      all, every [every]-th one, by default each, or of the first instructions
+      of the blocks, with their sizes, if [blocks], which costs the least, and
+      the last [accesses] accesses to the memory, by default none, which
+      {!slice} needs to follow the memory, and which only the traces of all
+      instructions, or of the blocks, record.
+
+      The instruction, that Unicorn stops at, before it runs it, e.g., at a
+      stop, or at a fault, which it repeats, isn't recorded, and the block, that
+      it leaves there, ends there, unless only every [every]-th instruction is
+      recorded, which may record it twice.
+
+      Raises [Invalid_argument], if [accesses] is positive, and the instructions
+      are sampled, or the ones of a range are recorded. *)
+
+  val stop : t -> unit
+  (** [stop trace] stops recording, the trace keeps the records *)
+
+  val count : t -> int64
+  (** the number of the recorded instructions, or blocks, also of those, that
+      the ring doesn't keep anymore *)
+
+  val clear : t -> unit
+  val blocks : t -> bool
+
+  val pcs :
+    ?last:int ->
+    t ->
+    (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t
+  (** the last program counters, at most [last], by default all, that the ring
+      keeps, the oldest first *)
+
+  val sizes :
+    ?last:int ->
+    t ->
+    (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array1.t
+  (** the sizes of the last blocks, as {!pcs}, of the trace of the blocks *)
+
+  val save : ?last:int -> t -> string -> int64
+  (** [save trace file] writes the last program counters, as {!pcs}, one in hex
+      a line, and returns their number *)
+
+  type access = {
+    insn : int64;
+        (** the index of the record of the instruction, or of its block, as
+            {!step.index} *)
+    pc : int64;  (** of the instruction, in a trace of the blocks *)
+    addr : int64;
+    size : int;
+    write : bool;
+    value : int64;  (** the written value *)
+  }
+
+  val accesses : ?last:int -> t -> access list
+  (** the last accesses to the memory, the oldest first *)
+
+  val insns :
+    ?last:int ->
+    t ->
+    (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t
+  (** the program counters of the instructions of the last [last] records, by
+      default of all, that the ring keeps, the oldest first, of the blocks too,
+      whose instructions are decoded once, from the bytes, that they have now *)
+end
+
+type location =
+  | Reg of string
+  | Mem of int64 * int
+      (** a register, by the name of the variable of BIR, e.g., [RAX], the case
+          of which doesn't matter, or the bytes from an address *)
+
+type step = {
+  index : int64;
+      (** the position of the instruction in the trace, from the first recorded
+          one *)
+  pc : int64;
+}
+
+type slice = {
+  steps : step list;  (** the oldest first *)
+  live : location list;
+      (** the locations, whose values come from before the window *)
+  gaps : int64 list;
+      (** the indices of the records, the latest first, before which the
+          registers, or the memory, were written outside of the trace, e.g., by
+          the code, that Primus runs, or by the script, while the slice had live
+          registers, or memory, respectively, whose values may come from there
+      *)
+  complete : bool;
+      (** if nothing comes from before the window, or from outside of the trace,
+          and the memory, that the steps load, is in the trace *)
+}
+
+val slice : ?addresses:bool -> ?window:int -> Trace.t -> location list -> slice
+(** [slice trace locations] the dynamic backward slice of the values of the
+    [locations], as the paused program has them, over the last [window]
+    instructions of the trace, by default all, that it keeps: the instructions,
+    whose values flow to them, through the registers, and, if the trace has the
+    accesses, through the memory, at the addresses, that they had, and through
+    the addresses of the loads and the stores, if [addresses].
+
+    It is a slice of the data: the jumps, and the conditions of the
+    instructions, e.g., of a conditional move, aren't followed. The instructions
+    are lifted from the bytes, that they have now. The code, that Primus runs,
+    e.g., the Lisp stubs, isn't in the trace, so the values, that it computes,
+    are missed, and the slice continues before it, but has the [gaps].
+
+    The instructions of a trace of the blocks are those of {!Trace.insns}, and
+    their steps have the indices of their blocks. *)
+
 val primus : t -> Bap_primus.Std.Primus.Machine.component -> unit
 (** [primus emu component] runs the [init] of the [component] in the Primus
     machine of the program, which is paused, or ended, so that the script uses
