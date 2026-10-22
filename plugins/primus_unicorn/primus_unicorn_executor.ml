@@ -401,12 +401,17 @@ let lisp_calls : string list Primus.Machine.State.t =
     ~name:"unicorn-lisp-calls" (fun _ -> [])
 
 (* The threads of the program, that the system calls of Linux create,
-   e.g., clone, which run in the same engine, and share its memory, one
-   at a time, see [Make.Threads]. A thread, that doesn't run, keeps the
-   values of its registers in the variables of Primus, see [thread_var],
-   so that they keep their taint and their formulas, and the
-   checkpoints keep them, and the address, from which it continues. *)
-type wait = Ready | Waiting of int64  (** on the futex at the address *)
+   e.g., clone, or the functions of Windows, e.g., CreateThread, which
+   run in the same engine, and share its memory, one at a time, see
+   [Make.Threads]. A thread, that doesn't run, keeps the values of its
+   registers in the variables of Primus, see [thread_var], so that they
+   keep their taint and their formulas, and the checkpoints keep them,
+   and the address, from which it continues. *)
+type wait =
+  | Ready
+  | Waiting of int64 list
+      (** on the addresses, e.g., of the futexes, or of the objects of Windows,
+          until one of them is woken *)
 
 type thread = {
   tid : int;
@@ -418,6 +423,9 @@ type thread = {
   clear : int64 option;
       (** the address of its TID, which is cleared, when it exits, see
           set_tid_address *)
+  woken : bool;
+      (** if it was woken from its wait, e.g., in the function of Windows, that
+          it calls again, see [Make.Threads.Windows] *)
 }
 
 type threads = {
@@ -428,6 +436,7 @@ type threads = {
   depth : int option;
       (** the number of the pending returns, at which the threads switch, which
           is of the run, that created the first thread, see [frames] *)
+  woken : bool;  (** the [woken] of the thread, that runs *)
 }
 
 (* the registers of a thread, that Primus doesn't have, e.g., of TLS,
@@ -436,8 +445,38 @@ let extra_regs (e : engine) =
   (match e.arch with
     | X86 -> [ "FS_BASE"; "GS_BASE"; "MXCSR" ]
     | Arm64 -> [ "TPIDR_EL0"; "FPCR"; "FPSR" ]
+    | Arm -> [ "C13_C0_3"; "FPSCR" ]
+    | Mips -> [ "CP0_USERLOCAL" ]
+    | Ppc -> [ "XER"; "FPSCR" ]
     | _ -> [])
   |> List.filter_map ~f:(Uc.reg e.arch)
+
+(* the bases of the segments of x86 in the protected mode, which Unicorn
+   reads, but doesn't write, as they are in the descriptors, see
+   [Target.Segments] *)
+let segment_base (e : engine) id =
+  match e.arch with
+  | X86 when e.bytes = 4 ->
+      List.find [ "FS_BASE"; "GS_BASE" ] ~f:(fun name ->
+          Option.equal Int.equal (Uc.reg X86 name) (Some id))
+  | _ -> None
+
+(* the base of the segment is in its descriptor, if the table is mapped,
+   as Unicorn reads only FS_BASE in the protected mode *)
+let read_extra (e : engine) id =
+  match segment_base e id with
+  | Some name -> Target.Segments.get e.uc name
+  | None -> Uc.reg_read_bytes e.uc id
+
+let write_extra (e : engine) id data =
+  match segment_base e id with
+  | Some name ->
+      let base =
+        String.foldi data ~init:0L ~f:(fun i acc c ->
+            Int64.(acc lor (of_int (Char.to_int c) lsl Int.(8 * i))))
+      in
+      ignore (Target.Segments.set e.uc name base : bool)
+  | None -> Uc.reg_write_bytes e.uc id data
 
 (* the variable of the register [v] of the thread, that doesn't run,
    which are made once, as the threads switch often *)
@@ -452,7 +491,14 @@ let thread_var tid v =
 let threads =
   Primus.Machine.State.declare ~uuid:"2f6c8e1a-9b3d-4c7e-a5f0-7d1e4b8c9a36"
     ~name:"unicorn-threads" (fun _ ->
-      { current = 1; cleared = None; others = []; last = 1; depth = None })
+      {
+        current = 1;
+        cleared = None;
+        others = [];
+        last = 1;
+        depth = None;
+        woken = false;
+      })
 
 (* What a stub does, after the function, that it called, returns, e.g.,
    __libc_start_main exits with the result of main, as the run of the
@@ -798,6 +844,13 @@ let create session target ~foreign ~externals =
      for the later ones, or with outline atomics, run; the maximum one has
      all of them, and must be selected before anything else *)
   (match arch with Arm64 -> Uc.set_cpu_model uc Uc.Cpu.arm64_max | _ -> ());
+  (* the default CPU of MIPS64, R4000, is MIPS III, which has no
+     instructions of the release 2, e.g., seb, and rdhwr, which reads the
+     pointer of TLS, that the programs of Linux use *)
+  (match arch with
+  | Mips when Theory.Target.bits target = 64 ->
+      Uc.set_cpu_model uc Uc.Cpu.mips64r2_generic
+  | _ -> ());
   (* the addresses of the program are the addresses of Unicorn *)
   Uc.set_tlb_virtual uc;
   (* the 64-bit addresses of MIPS are enabled by the KX, SX, and UX bits *)
@@ -2073,8 +2126,7 @@ module Make (Machine : Primus.Machine.S) = struct
               unstubbed = Hash_set.to_list e.session.unstubbed;
               extensions;
               extra =
-                List.map (extra_regs e) ~f:(fun id ->
-                    (id, Uc.reg_read_bytes e.uc id));
+                List.map (extra_regs e) ~f:(fun id -> (id, read_extra e id));
               threads =
                 (if threads.last = 1 then None
                  else
@@ -2083,18 +2135,21 @@ module Make (Machine : Primus.Machine.S) = struct
                        current = threads.current;
                        cleared = threads.cleared;
                        last = threads.last;
+                       woken = threads.woken;
                        others =
                          List.map threads.others
-                           ~f:(fun { tid; saved_extra; next; wait; clear } ->
+                           ~f:(fun
+                               { tid; saved_extra; next; wait; clear; woken } ->
                              {
                                Checkpoint.tid;
                                extra = saved_extra;
                                next;
                                clear;
+                               woken;
                                waiting =
                                  (match wait with
                                  | Ready -> None
-                                 | Waiting addr -> Some addr);
+                                 | Waiting addrs -> Some addrs);
                              });
                      });
             }
@@ -2381,6 +2436,52 @@ module Make (Machine : Primus.Machine.S) = struct
         Hashtbl.set e.accesses ~key:addr ~data:access;
         access
 
+  (* if the instruction of MIPS is a branch or a jump, which has a delay
+     slot, by its encoding: J, JAL, BEQ, BNE, BLEZ, BGTZ, and their likely
+     forms, the branches of REGIMM, e.g., BLTZ and BGEZAL, JR and JALR of
+     SPECIAL, and BC1 of COP1 *)
+  let mips_delayed word =
+    let op = Int64.(to_int_exn ((word lsr 26) land 0x3FL)) in
+    let rs = Int64.(to_int_exn ((word lsr 21) land 0x1FL)) in
+    let rt = Int64.(to_int_exn ((word lsr 16) land 0x1FL)) in
+    let funct = Int64.(to_int_exn (word land 0x3FL)) in
+    match op with
+    | 0x02 | 0x03 | 0x04 | 0x05 | 0x06 | 0x07 | 0x14 | 0x15 | 0x16 | 0x17 ->
+        true
+    | 0x01 ->
+        List.mem
+          [ 0x00; 0x01; 0x02; 0x03; 0x10; 0x11; 0x12; 0x13 ]
+          rt ~equal:Int.equal
+    | 0x00 -> funct = 0x08 || funct = 0x09
+    | 0x11 -> rs = 0x08
+    | _ -> false
+
+  (* Unicorn continues anew from [pc], outside of a delay slot of MIPS,
+     whose branch, of the thread, that ran, or that Primus interpreted,
+     is not pending, see build.cmake of libunicorn *)
+  let fresh e pc =
+    match e.arch with Mips -> Uc.reg_write e.uc e.pc pc | _ -> ()
+
+  (* the branch of MIPS, whose delay slot is at [pc], or [pc], as
+     Unicorn stops in the delay slot, e.g., at its fault, while the
+     branch is pending, which runs again then, as its delay slot didn't
+     run, and the address after a branch is its delay slot *)
+  let branch_of_slot e pc =
+    match e.arch with
+    | Mips -> (
+        let branch = Int64.(pc - 4L) in
+        let+ () = ensure_page e branch in
+        match uc_read e branch 4 with
+        | data ->
+            let word =
+              String.foldi data ~init:0L ~f:(fun i acc c ->
+                  let shift = if e.big_endian then 8 * (3 - i) else 8 * i in
+                  Int64.(acc lor (of_int (Char.to_int c) lsl shift)))
+            in
+            if mips_delayed word then branch else pc
+        | exception (Native.Missing _ | Native.Denied) -> pc)
+    | _ -> Machine.return pc
+
   (* The system calls of Linux, that create and run the threads, see
      [threads], which run one at a time, in the engine, and switch, when
      the thread, that runs, waits, exits, or yields, or else, when its
@@ -2390,37 +2491,6 @@ module Make (Machine : Primus.Machine.S) = struct
      processes, e.g., clone without CLONE_VM, and the other calls go to
      the intrinsic functions, as before. *)
   module Threads = struct
-    (* the registers of the calls: the number, the arguments, the
-       result, and the register of TLS, which Primus doesn't have *)
-    type abi = {
-      number : string;
-      args : string list;
-      result : string;
-      tls : string;
-    }
-
-    let abi (e : engine) =
-      match e.arch with
-      | X86 when e.bytes = 8 ->
-          Some
-            {
-              number = "RAX";
-              args = [ "RDI"; "RSI"; "RDX"; "R10"; "R8"; "R9" ];
-              result = "RAX";
-              tls = "FS_BASE";
-            }
-      | Arm64 ->
-          Some
-            {
-              number = "R8";
-              args = [ "R0"; "R1"; "R2"; "R3"; "R4"; "R5" ];
-              result = "R0";
-              tls = "TPIDR_EL0";
-            }
-      | _ -> None
-
-    let extra = extra_regs
-
     type call =
       | Clone
       | Clone3
@@ -2430,18 +2500,178 @@ module Make (Machine : Primus.Machine.S) = struct
       | Sched_yield
       | Exit
       | Exit_group
+      | Set_tls  (** the register of TLS, e.g., of ARM, and MIPS *)
+      | Set_thread_area  (** the descriptor of TLS of x86 *)
 
-    let call (e : engine) n =
-      match (e.arch, n) with
-      | X86, 56 | Arm64, 220 -> Some Clone
-      | (X86 | Arm64), 435 -> Some Clone3
-      | X86, 202 | Arm64, 98 -> Some Futex
-      | X86, 218 | Arm64, 96 -> Some Set_tid_address
-      | X86, 186 | Arm64, 178 -> Some Gettid
-      | X86, 24 | Arm64, 124 -> Some Sched_yield
-      | X86, 60 | Arm64, 93 -> Some Exit
-      | X86, 231 | Arm64, 94 -> Some Exit_group
+    (* how a system call fails: with the negated number of the error in
+       its result, or with the number, and the flag of the error, e.g.,
+       A3 of MIPS, or SO of CR0 of PowerPC *)
+    type errors = Negated | Flagged of string
+
+    (* the register of TLS, that clone sets: of Unicorn only, e.g.,
+       FS_BASE of x86-64, see [extra_regs], of Primus, e.g., R2 of
+       PowerPC, or the descriptor of the segment of x86, whose base is
+       GS_BASE, see [Target.Segments] *)
+    type tls = Extra of string | Reg of string | Descriptor
+
+    (* the system calls of Linux: the registers of the number, of the
+       arguments, after which the arguments are on the stack, from
+       [stacked] of SP, of the result, the errors, the register of TLS,
+       the numbers of the calls, and the order of the arguments of clone,
+       which is (flags, stack, ptid, tls, ctid), if [backwards], as
+       Linux calls it, and (flags, stack, ptid, ctid, tls) on x86-64 *)
+    type abi = {
+      number : string;
+      args : string list;
+      stacked : int;
+      result : string;
+      errors : errors;
+      tls : tls;
+      calls : (int * call) list;
+      backwards : bool;
+    }
+
+    (* the numbers of the calls, from the tables of Linux *)
+    let x86_64 =
+      [
+        (56, Clone);
+        (435, Clone3);
+        (202, Futex);
+        (218, Set_tid_address);
+        (186, Gettid);
+        (24, Sched_yield);
+        (60, Exit);
+        (231, Exit_group);
+      ]
+
+    (* of AArch64 and RISC-V *)
+    let generic =
+      [
+        (220, Clone);
+        (435, Clone3);
+        (98, Futex);
+        (96, Set_tid_address);
+        (178, Gettid);
+        (124, Sched_yield);
+        (93, Exit);
+        (94, Exit_group);
+      ]
+
+    let i386 =
+      [
+        (120, Clone);
+        (435, Clone3);
+        (240, Futex);
+        (258, Set_tid_address);
+        (224, Gettid);
+        (158, Sched_yield);
+        (1, Exit);
+        (252, Exit_group);
+        (243, Set_thread_area);
+      ]
+
+    (* with set_tls, the private call of ARM *)
+    let arm =
+      [
+        (120, Clone);
+        (435, Clone3);
+        (240, Futex);
+        (256, Set_tid_address);
+        (224, Gettid);
+        (158, Sched_yield);
+        (1, Exit);
+        (248, Exit_group);
+        (0xf0005, Set_tls);
+      ]
+
+    (* with set_thread_area, which sets the register of TLS *)
+    let o32 =
+      List.map
+        ~f:(fun (n, call) -> (4000 + n, call))
+        [
+          (120, Clone);
+          (435, Clone3);
+          (238, Futex);
+          (252, Set_tid_address);
+          (222, Gettid);
+          (162, Sched_yield);
+          (1, Exit);
+          (246, Exit_group);
+          (283, Set_tls);
+        ]
+
+    let n64 =
+      List.map
+        ~f:(fun (n, call) -> (5000 + n, call))
+        [
+          (55, Clone);
+          (435, Clone3);
+          (194, Futex);
+          (212, Set_tid_address);
+          (178, Gettid);
+          (23, Sched_yield);
+          (58, Exit);
+          (205, Exit_group);
+          (242, Set_tls);
+        ]
+
+    let ppc =
+      [
+        (120, Clone);
+        (435, Clone3);
+        (221, Futex);
+        (232, Set_tid_address);
+        (207, Gettid);
+        (158, Sched_yield);
+        (1, Exit);
+        (234, Exit_group);
+      ]
+
+    let abi (e : engine) =
+      let regs prefix = List.map ~f:(sprintf "%s%d" prefix) in
+      let linux ?(stacked = 0) ?(errors = Negated) ?(backwards = true) number
+          args result tls calls =
+        Some { number; args; stacked; result; errors; tls; calls; backwards }
+      in
+      match e.arch with
+      | X86 when e.bytes = 8 ->
+          linux ~backwards:false "RAX"
+            [ "RDI"; "RSI"; "RDX"; "R10"; "R8"; "R9" ]
+            "RAX" (Extra "FS_BASE") x86_64
+      | X86 ->
+          linux "EAX"
+            [ "EBX"; "ECX"; "EDX"; "ESI"; "EDI"; "EBP" ]
+            "EAX" Descriptor i386
+      | Arm64 ->
+          linux "R8"
+            (regs "R" [ 0; 1; 2; 3; 4; 5 ])
+            "R0" (Extra "TPIDR_EL0") generic
+      | Arm ->
+          linux "R7" (regs "R" [ 0; 1; 2; 3; 4; 5 ]) "R0" (Extra "C13_C0_3") arm
+      | Mips when e.bytes = 4 ->
+          (* the fifth and the sixth arguments are on the stack, after
+             the space of the four in the registers *)
+          linux ~stacked:16 ~errors:(Flagged "R7") "R2"
+            (regs "R" [ 4; 5; 6; 7 ])
+            "R2" (Extra "CP0_USERLOCAL") o32
+      | Mips ->
+          linux ~errors:(Flagged "R7") "R2"
+            (regs "R" [ 4; 5; 6; 7; 8; 9 ])
+            "R2" (Extra "CP0_USERLOCAL") n64
+      | Ppc when e.bytes = 4 ->
+          linux ~errors:(Flagged "CR0UN") "R0"
+            (regs "R" [ 3; 4; 5; 6; 7; 8 ])
+            "R3" (Reg "R2") ppc
+      | Riscv when e.bytes = 8 ->
+          linux "X17"
+            (regs "X" [ 10; 11; 12; 13; 14; 15 ])
+            "X10" (Reg "X4") generic
       | _ -> None
+
+    let extra = extra_regs
+
+    let call abi n =
+      List.Assoc.find abi.calls ~equal:Int.equal (Int64.to_int_trunc n)
 
     let get e name =
       Option.value_map
@@ -2451,13 +2681,40 @@ module Make (Machine : Primus.Machine.S) = struct
     let set e name x =
       ignore (Target.Regs.write_name e.regs name (word e x) : bool)
 
+    (* the result of the call, which succeeded *)
+    let succeed e abi x =
+      set e abi.result x;
+      match abi.errors with Flagged flag -> set e flag 0L | Negated -> ()
+
+    let failure e abi errno =
+      match abi.errors with
+      | Negated -> set e abi.result (Int64.neg errno)
+      | Flagged flag ->
+          set e abi.result errno;
+          set e flag 1L
+
+    (* the instructions of the system calls, e.g., int 0x80 of x86 *)
+    let is_trap { name; inputs } =
+      match name with
+      | "intrinsic:syscall" | "intrinsic:svc" -> true
+      | "intrinsic:interrupt" ->
+          List.exists inputs ~f:(fun (v, x) ->
+              String.equal (Var.name v) "intrinsic:x0"
+              &&
+              match x with
+              | Bil.Int w ->
+                  Word.equal w (Word.of_int ~width:(Word.bitwidth w) 0x80)
+              | _ -> false)
+      | _ -> false
+
     (* if the call of the intrinsic function [site] is of the threads,
        by its [number] *)
-    let is_call e { name; _ } number =
-      (String.equal name "intrinsic:syscall"
-      || String.equal name "intrinsic:svc")
-      && Option.is_some (abi e)
-      && Option.is_some (call e (Int64.to_int_trunc number))
+    let is_call e site number =
+      is_trap site
+      &&
+      match abi e with
+      | Some abi -> Option.is_some (call abi number)
+      | None -> false
 
     (* the threads switch at the depth of the run, that created them *)
     let switchable e { depth; _ } =
@@ -2478,11 +2735,23 @@ module Make (Machine : Primus.Machine.S) = struct
           let i = if e.big_endian then i else n - 1 - i in
           Int64.((acc lsl 8) lor of_int (Char.to_int data.[i])))
 
-    (* the bytes of the word at [addr] in Primus, if they all have the
-       [access], as the page, whose locations are marked, e.g., tainted,
-       is not in Unicorn, see [ensure_page] *)
-    let primus_word e addr access =
-      let+ loaded = Memory.load_bytes (word e addr) 4 in
+    (* the parts of the [n] bytes from [addr], in their pages *)
+    let chunks addr n =
+      let rec chunks addr n acc =
+        if n <= 0 then List.rev acc
+        else
+          let len =
+            Int.min n (Int64.to_int_exn Int64.(page_of addr + page_size - addr))
+          in
+          chunks Int64.(addr + of_int len) (n - len) ((addr, len) :: acc)
+      in
+      chunks addr n []
+
+    (* the bytes in Primus, if they all have the [access], as the page,
+       whose locations are marked, e.g., tainted, is not in Unicorn, see
+       [ensure_page] *)
+    let primus_bytes e addr n access =
+      let+ loaded = Memory.load_bytes (word e addr) n in
       if
         Array.for_all loaded ~f:(function
           | Some (_, p) -> access p
@@ -2493,38 +2762,63 @@ module Make (Machine : Primus.Machine.S) = struct
              (Array.map loaded ~f:(fun b -> fst (Option.value_exn b))))
       else None
 
-    (* the futexes and the TIDs are the words of 32 bits *)
-    let load32 e addr =
+    let load_chunk e (addr, n) =
       let* () = ensure_page e addr in
       if Hashtbl.mem e.pages (page_of addr) then
         Machine.return
-          (match uc_read e addr 4 with
-          | data -> Some (value e data)
+          (match uc_read e addr n with
+          | data -> Some data
           | exception (Native.Missing _ | Native.Denied) -> None)
-      else primus_word e addr (fun p -> p.readable) >>| Option.map ~f:(value e)
+      else
+        primus_bytes e addr n (fun (p : Primus.Memory.protection) -> p.readable)
 
-    let store32 e addr x =
+    let store_chunk e addr data =
+      let n = String.length data in
       let* () = ensure_page e addr in
       if Hashtbl.mem e.pages (page_of addr) then
         Machine.return
-          (match uc_check_write e addr 4 with
+          (match uc_check_write e addr n with
           | () ->
-              uc_write e addr (bytes e x 4);
+              uc_write e addr data;
               true
           | exception (Native.Missing _ | Native.Denied) -> false)
       else
-        primus_word e addr (fun p -> p.writable) >>= function
+        primus_bytes e addr n (fun p -> p.writable) >>= function
         | None -> Machine.return false
-        | Some _ ->
-            Memory.store_bytes (word e addr) (bytes e x 4) >>| fun () -> true
+        | Some _ -> Memory.store_bytes (word e addr) data >>| fun () -> true
 
-    (* the thread, that runs, as it continues from [next] *)
+    (* the bytes of the memory, or [None], if they are not accessible *)
+    let load e addr n =
+      Machine.List.map (chunks addr n) ~f:(load_chunk e)
+      >>| Option.all
+      >>| Option.map ~f:String.concat
+
+    let store e addr data =
+      chunks addr (String.length data)
+      |> Machine.List.map ~f:(fun (a, n) ->
+          store_chunk e a
+            (String.sub data ~pos:(Int64.to_int_exn Int64.(a - addr)) ~len:n))
+      >>| List.for_all ~f:Fn.id
+
+    (* the futexes and the TIDs are the words of 32 bits *)
+    let load32 e addr = load e addr 4 >>| Option.map ~f:(value e)
+    let store32 e addr x = store e addr (bytes e x 4)
+
+    (* the words of the size of the addresses *)
+    let loadw e addr = load e addr e.bytes >>| Option.map ~f:(value e)
+    let storew e addr x = store e addr (bytes e x e.bytes)
+
     (* the registers, that are set, the aliases too, e.g., EAX *)
     let registers e =
       let* vars = Env.all in
       Seq.to_list vars
       |> List.filter ~f:(Target.Regs.mem e.regs)
       |> Machine.List.filter ~f:Env.is_set
+
+    (* the value of the width of [x] *)
+    let like x n =
+      Value.of_word
+        (Word.of_int64 ~width:(Word.bitwidth (Primus.Value.to_word x)) n)
 
     (* the registers of the thread [tid] are the values of the
        registers, that run, all of them, from Unicorn, if Primus doesn't
@@ -2557,12 +2851,17 @@ module Make (Machine : Primus.Machine.S) = struct
       let+ () = copy e st.current in
       {
         tid = st.current;
-        saved_extra =
-          List.map (extra e) ~f:(fun id -> (id, Uc.reg_read_bytes e.uc id));
+        saved_extra = List.map (extra e) ~f:(fun id -> (id, read_extra e id));
         next;
         wait;
         clear = st.cleared;
+        woken = false;
       }
+
+    (* the bases of the segments of x86, that Primus has, e.g., FS_BASE,
+       through which the programs of Windows read their TEB, which go to
+       Unicorn, see [push_vars] *)
+    let set_base e name x = Env.set (Var.create name (Type.imm (e.bytes * 8))) x
 
     (* the registers of the thread, that runs again, go to Primus and to
        Unicorn, and the ones, whose values are tracked, are tracked, see
@@ -2588,7 +2887,7 @@ module Make (Machine : Primus.Machine.S) = struct
          and else are read anew, so that the ones of the other thread,
          e.g., tracked, don't stay *)
       let basis = Target.Regs.basis e.regs in
-      let+ () =
+      let* () =
         registers e
         >>= Machine.List.iter ~f:(fun v ->
             if List.mem basis v ~equal:Var.equal then Machine.return ()
@@ -2608,9 +2907,19 @@ module Make (Machine : Primus.Machine.S) = struct
                   | Some x -> Env.set v x
                   | None -> Value.of_word w >>= Env.set v))
       in
-      List.iter thread.saved_extra ~f:(fun (id, data) ->
-          Uc.reg_write_bytes e.uc id data);
-      e.written <- []
+      List.iter thread.saved_extra ~f:(fun (id, data) -> write_extra e id data);
+      e.written <- [];
+      (* the bases of the segments of x86 are of the thread in Primus
+         too, if it has them *)
+      Machine.List.iter thread.saved_extra ~f:(fun (id, data) ->
+          match segment_base e id with
+          | None -> Machine.return ()
+          | Some name -> (
+              let v = Var.create name (Type.imm (e.bytes * 8)) in
+              let x = value { e with big_endian = false } data in
+              Env.is_set v >>= function
+              | false when Int64.(x = 0L) -> Machine.return ()
+              | _ -> Value.of_word (word e x) >>= set_base e name))
 
     (* the next thread, that is ready, runs, after [parked], which was
        the thread, that ran, if it is not exited, or [None], if no thread
@@ -2624,6 +2933,7 @@ module Make (Machine : Primus.Machine.S) = struct
       | None -> Machine.return None
       | Some (i, next) ->
           let* () = resume e next in
+          fresh e next.next;
           e.session.sliced_at <- Stdlib.Sys.time ();
           let+ () =
             Machine.Local.put threads
@@ -2631,21 +2941,23 @@ module Make (Machine : Primus.Machine.S) = struct
                 st with
                 current = next.tid;
                 cleared = next.clear;
+                woken = next.woken;
                 others = List.filteri others ~f:(fun j _ -> j <> i);
               }
           in
           Some next.next
 
-    (* the threads, that wait on the futex at [addr], at most [n], are
-       ready, the first first *)
+    (* the threads, that wait on [addr], at most [n], are ready, the
+       first first *)
     let wake st addr n =
       let woken = ref 0 in
       let others =
         List.map st.others ~f:(fun t ->
             match t.wait with
-            | Waiting a when Int64.equal a addr && !woken < n ->
+            | Waiting addrs
+              when List.mem addrs addr ~equal:Int64.equal && !woken < n ->
                 incr woken;
-                { t with wait = Ready }
+                { t with wait = Ready; woken = true }
             | _ -> t)
       in
       ({ st with others }, !woken)
@@ -2667,10 +2979,28 @@ module Make (Machine : Primus.Machine.S) = struct
     (* the thread, that runs, is preempted at [pc], see [loop] *)
     let preempt e pc =
       let* st = Machine.Local.get threads in
+      let* pc = branch_of_slot e pc in
       let* parked = park e ~next:pc ~wait:Ready st in
       switch e ~parked st >>| function Some pc -> pc | None -> pc
 
     let flag flags bit = Int64.(flags land bit <> 0L)
+
+    (* the thread, that runs, waits on [addrs], and continues from
+       [next], when it is woken, or [timeout] continues it, if no thread
+       is ready, e.g., with the error of the timeout *)
+    let block e st ~next ~addrs ~timeout =
+      if not (switchable e st) then
+        fail "the thread %d waits in a run of a stub" st.current
+      else
+        let* parked = park e ~next ~wait:(Waiting addrs) st in
+        switch e ~parked st >>= function
+        | Some pc -> Machine.return (Some pc)
+        | None -> (
+            match timeout with
+            | Some timeout -> timeout ()
+            | None ->
+                fail "the threads wait, the last one on %s"
+                  (String.concat ~sep:", " (List.map addrs ~f:(sprintf "%Lx"))))
 
     (* the call of the thread, that runs, after which the thread, that
        runs then, continues from the address, or [None], if it isn't a
@@ -2679,17 +3009,33 @@ module Make (Machine : Primus.Machine.S) = struct
       match abi e with
       | None -> Machine.return None
       | Some abi -> (
-          let arg i = get e (List.nth_exn abi.args i) in
-          match call e (Int64.to_int_trunc (get e abi.number)) with
+          match call abi (get e abi.number) with
           | None -> Machine.return None
           | Some call -> (
+              let* args =
+                let regs = List.map abi.args ~f:(get e) in
+                if abi.stacked = 0 then Machine.return regs
+                else
+                  let sp = get e (Var.name e.sp) in
+                  let+ stacked =
+                    Machine.List.map [ 0; 1 ] ~f:(fun i ->
+                        loadw e
+                          Int64.(sp + of_int Int.(abi.stacked + (i * e.bytes)))
+                        >>| Option.value ~default:0L)
+                  in
+                  regs @ stacked
+              in
+              let arg i = List.nth_exn args i in
               let* st = Machine.Local.get threads in
               let return x =
-                set e abi.result x;
+                succeed e abi x;
+                Machine.return (Some next)
+              and error errno =
+                failure e abi errno;
                 Machine.return (Some next)
               in
               match call with
-              | Clone3 -> return (-38L)
+              | Clone3 -> error 38L
               | Gettid -> return (Int64.of_int st.current)
               | Set_tid_address ->
                   let* () =
@@ -2698,20 +3044,52 @@ module Make (Machine : Primus.Machine.S) = struct
                   return (Int64.of_int st.current)
               | Exit_group -> exit_process e (arg 0)
               | Sched_yield ->
-                  set e abi.result 0L;
+                  succeed e abi 0L;
                   if ready e st then
                     let* parked = park e ~next ~wait:Ready st in
                     switch e ~parked st
                   else Machine.return (Some next)
+              | Set_tls -> (
+                  match abi.tls with
+                  | Extra name -> (
+                      match Uc.reg e.arch name with
+                      | Some id ->
+                          Uc.reg_write e.uc id (arg 0);
+                          return 0L
+                      | None -> error 38L)
+                  | Reg name ->
+                      set e name (arg 0);
+                      return 0L
+                  | Descriptor -> error 38L)
+              | Set_thread_area -> (
+                  (* the descriptor of the segment of GS, whose entry the
+                     program loads, which is the one of GS_BASE, see
+                     [Target.Segments], if the program lets the kernel
+                     choose it *)
+                  let desc = arg 0 in
+                  let* entry = load32 e desc in
+                  let* base = load32 e Int64.(desc + 4L) in
+                  match (entry, base) with
+                  | Some entry, Some base ->
+                      let* () =
+                        if Int64.(entry = 0xFFFF_FFFFL) then
+                          store32 e desc 2L >>| ignore
+                        else Machine.return ()
+                      in
+                      ignore (Target.Segments.set e.uc "GS_BASE" base : bool);
+                      let* () =
+                        Value.of_word (word e base) >>= set_base e "GS_BASE"
+                      in
+                      return 0L
+                  | _ -> error 14L)
               | Clone ->
                   let flags = arg 0 and stack = arg 1 and ptid = arg 2 in
                   let ctid, tls =
-                    match e.arch with
-                    | X86 -> (arg 3, arg 4)
-                    | _ -> (arg 4, arg 3)
+                    if abi.backwards then (arg 4, arg 3) else (arg 3, arg 4)
                   in
+                  let settls = flag flags 0x80000L in
                   (* the processes, that don't share the memory *)
-                  if not (flag flags 0x100L) then return (-38L)
+                  if not (flag flags 0x100L) then error 38L
                   else
                     let tid = st.last + 1 in
                     let* () =
@@ -2724,33 +3102,63 @@ module Make (Machine : Primus.Machine.S) = struct
                         store32 e ctid (Int64.of_int tid) >>| ignore
                       else Machine.return ()
                     in
+                    (* the base of the segment of x86 is in the
+                       descriptor, see [Set_thread_area] *)
+                    let* tls =
+                      match abi.tls with
+                      | Descriptor when settls ->
+                          load32 e Int64.(tls + 4L) >>| Option.value ~default:0L
+                      | _ -> Machine.return tls
+                    in
                     (* the child has the values of the registers of
                        the parent, e.g., their taint, but the result,
                        the stack, and TLS *)
                     let* () =
                       copy e tid ~changed:(fun v x ->
-                          if String.equal (Var.name v) abi.result then
-                            Value.of_word (word e 0L)
+                          let name = Var.name v in
+                          if
+                            String.equal name abi.result
+                            ||
+                            match abi.errors with
+                            | Flagged flag -> String.equal name flag
+                            | Negated -> false
+                          then like x 0L
                           else if Var.equal v e.sp && Int64.(stack <> 0L) then
-                            Value.of_word (word e stack)
+                            like x stack
+                          else if
+                            settls
+                            &&
+                            match abi.tls with
+                            | Reg reg -> String.equal name reg
+                            | Extra _ | Descriptor -> false
+                          then like x tls
                           else Machine.return x)
                     in
-                    let tls_id = Uc.reg e.arch abi.tls in
+                    let tls_id =
+                      if not settls then None
+                      else
+                        match abi.tls with
+                        | Extra name -> Uc.reg e.arch name
+                        | Descriptor -> Uc.reg e.arch "GS_BASE"
+                        | Reg _ -> None
+                    in
                     let child =
                       {
                         tid;
                         saved_extra =
                           List.map (extra e) ~f:(fun id ->
-                              let data = Uc.reg_read_bytes e.uc id in
-                              if
-                                flag flags 0x80000L
-                                && Option.equal Int.equal (Some id) tls_id
-                              then (id, bytes e tls (String.length data))
+                              let data = read_extra e id in
+                              if Option.equal Int.equal (Some id) tls_id then
+                                ( id,
+                                  bytes
+                                    { e with big_endian = false }
+                                    tls (String.length data) )
                               else (id, data));
                         next;
                         wait = Ready;
                         clear =
                           (if flag flags 0x200000L then Some ctid else None);
+                        woken = false;
                       }
                     in
                     let* () =
@@ -2772,29 +3180,21 @@ module Make (Machine : Primus.Machine.S) = struct
                   match Int64.to_int_trunc (arg 1) land 0x7F with
                   | 0 | 9 -> (
                       load32 e addr >>= function
-                      | None -> return (-14L)
-                      | Some x when Int64.(x <> value) -> return (-11L)
-                      | Some _ -> (
-                          if not (switchable e st) then
-                            fail "the thread %d waits in a run of a stub"
-                              st.current
-                          else
-                            (* it returns 0, when it is woken *)
-                            let () = set e abi.result 0L in
-                            let* parked =
-                              park e ~next ~wait:(Waiting addr) st
-                            in
-                            switch e ~parked st >>= function
-                            | Some pc -> Machine.return (Some pc)
-                            | None when Int64.(arg 3 <> 0L) -> return (-110L)
-                            | None ->
-                                fail "the threads wait, the last one on %Lx"
-                                  addr))
+                      | None -> error 14L
+                      | Some x when Int64.(x <> value) -> error 11L
+                      | Some _ ->
+                          (* it returns 0, when it is woken *)
+                          succeed e abi 0L;
+                          block e st ~next ~addrs:[ addr ]
+                            ~timeout:
+                              (Option.some_if
+                                 Int64.(arg 3 <> 0L)
+                                 (fun () -> error 110L)))
                   | 1 | 10 ->
                       let st, woken = wake st addr (Int64.to_int_trunc value) in
                       let* () = Machine.Local.put threads st in
                       return (Int64.of_int woken)
-                  | _ -> return (-38L))
+                  | _ -> error 38L)
               | Exit -> (
                   let* st =
                     match st.cleared with
@@ -2810,6 +3210,782 @@ module Make (Machine : Primus.Machine.S) = struct
                     | None ->
                         fail "the threads wait, after the thread %d exited"
                           st.current)))
+
+    (* The threads of the programs of Windows, that the functions of
+       KERNEL32, e.g., CreateThread, and of msvcrt, e.g., _beginthreadex,
+       create, and their objects, e.g., the events, the mutexes, the
+       semaphores, the critical sections, the SRW locks, the condition
+       variables, the addresses of WaitOnAddress, and the slots of TLS,
+       which the executor runs, instead of their stubs, when the program
+       calls them, on x86 and x86-64.
+
+       The objects, whose handles are their addresses, are in the memory,
+       that malloc allocates, as the stacks and the TEBs of the threads,
+       so that the checkpoints keep them. The thread, that waits, calls
+       the function again, when it is woken, as it continues from its
+       entry, see [block], and the condition variables reacquire their
+       locks then, see [woken]. A thread, whose function returns, returns
+       to [exit_addr], which is not mapped, and exits with its result.
+       The timeouts expire only when no thread is ready, as the time
+       doesn't pass. *)
+    module Windows = struct
+      let wide e = e.bytes = 8
+      let result e = if wide e then "RAX" else "EAX"
+
+      (* the return address of the threads, that aren't main *)
+      let exit_addr = 0xFFFF_F000L
+      let infinite = 0xFFFF_FFFFL
+      let timeout = 0x102L
+      let failed = 0xFFFF_FFFFL
+
+      (* the register of the base of TEB, and the offsets of its fields:
+         NtTib.Self, NtTib.StackBase, NtTib.StackLimit, ClientId, the
+         PEB, TlsSlots, and Win32ThreadInfo, which has the object of the
+         thread here, and the offset of TlsBitmapBits of PEB *)
+      type teb = {
+        base : string;
+        self : int;
+        stack_base : int;
+        stack_limit : int;
+        client : int;
+        peb : int;
+        slots : int;
+        info : int;
+        bitmap : int;
+      }
+
+      let teb e =
+        if wide e then
+          {
+            base = "GS_BASE";
+            self = 0x30;
+            stack_base = 0x8;
+            stack_limit = 0x10;
+            client = 0x40;
+            peb = 0x60;
+            slots = 0x1480;
+            info = 0x78;
+            bitmap = 0x80;
+          }
+        else
+          {
+            base = "FS_BASE";
+            self = 0x18;
+            stack_base = 0x4;
+            stack_limit = 0x8;
+            client = 0x20;
+            peb = 0x30;
+            slots = 0xE10;
+            info = 0x40;
+            bitmap = 0x44;
+          }
+
+      (* the TEB of the thread, that runs *)
+      let current_teb e =
+        match Uc.reg X86 (teb e).base with
+        | Some id -> Uc.reg_read e.uc id
+        | None -> 0L
+
+      (* the arguments of the functions of Windows, in RCX, RDX, R8, R9,
+         and on the stack, after the return address and the shadow
+         space, on x86-64, and on the stack on x86 *)
+      let arg e i =
+        let sp = get e (Var.name e.sp) in
+        if wide e && i < 4 then
+          Machine.return (get e (List.nth_exn [ "RCX"; "RDX"; "R8"; "R9" ] i))
+        else
+          let off = if wide e then 0x28 + (8 * (i - 4)) else 4 + (4 * i) in
+          loadw e Int64.(sp + of_int off) >>| Option.value ~default:0L
+
+      (* the function returns [x], after which the thread continues from
+         the return address, and pops its [n] arguments on x86, as
+         stdcall does, unless it is cdecl, e.g., of msvcrt *)
+      let finish e ?(cdecl = false) n x =
+        let sp = get e (Var.name e.sp) in
+        loadw e sp >>= function
+        | None -> fail "the return address of %Lx is not accessible" sp
+        | Some ret ->
+            set e (result e) x;
+            let pops = if wide e || cdecl then 0 else 4 * n in
+            set e (Var.name e.sp) Int64.(sp + of_int Int.(e.bytes + pops));
+            Machine.return ret
+
+      (* the objects, whose handles are their addresses, which start with
+         [magic], and their kind, and whose fields are the words of 32
+         bits *)
+      let magic = 0x57504142L
+
+      type kind = Thread | Event | Mutex | Semaphore
+
+      let kinds = [ (1L, Thread); (2L, Event); (3L, Mutex); (4L, Semaphore) ]
+
+      let code kind =
+        fst (List.find_exn kinds ~f:(fun (_, k) -> Poly.equal k kind))
+
+      let field h i = Int64.(h + of_int Int.(4 * i))
+      let read e h i = load32 e (field h i) >>| Option.value ~default:0L
+      let write e h i x = store32 e (field h i) x >>| ignore
+
+      (* the fields of the objects, after the magic and the kind *)
+      let tid = 2 (* of the thread *)
+      let exited = 3
+      let exit_code = 4
+      let suspended = 5
+      let manual = 2 (* of the event *)
+      let signaled = 3
+      let owner = 2 (* of the mutex *)
+      let count = 3
+      let available = 2 (* of the semaphore *)
+      let maximum = 3
+
+      (* the thread, that is suspended, waits on the field of the count,
+         until it is resumed *)
+      let resumed h = field h suspended
+
+      let kind e h =
+        if Int64.(h = 0L || h land 3L <> 0L) then Machine.return None
+        else
+          load32 e h >>= function
+          | Some m when Int64.(m = magic) ->
+              read e h 1 >>| List.Assoc.find kinds ~equal:Int64.equal
+          | _ -> Machine.return None
+
+      (* the memory of [n] bytes, aligned to 16 bytes, as malloc
+         aligns the chunks to the program break *)
+      let allocate e n =
+        let* size = Value.of_word (word e (Int64.of_int (n + 15))) in
+        let* p = Lisp.eval_fun "malloc" [ size ] in
+        let p = int64_of_word (Primus.Value.to_word p) in
+        if Int64.(p = 0L) then fail "malloc can't allocate %d bytes" n
+        else Machine.return Int64.((p + 15L) land lnot 15L)
+
+      let create_object e kind fields =
+        let* h = allocate e 32 in
+        let* () =
+          Machine.List.iter
+            (List.mapi ([ magic; code kind ] @ fields) ~f:(fun i x -> (i, x)))
+            ~f:(fun (i, x) -> write e h i x)
+        in
+        Machine.return h
+
+      (* the object [h] of the [kind] is signaled, and the thread [me]
+         acquires it, if it is, e.g., the mutex, or the semaphore *)
+      let is_signaled e ~me h kind =
+        match kind with
+        | Thread -> read e h exited >>| Int64.equal 1L
+        | Event -> read e h signaled >>| Int64.equal 1L
+        | Mutex -> read e h owner >>| fun o -> Int64.(o = 0L || o = me)
+        | Semaphore -> read e h available >>| fun n -> Int64.(n > 0L)
+
+      let acquire e ~me h kind =
+        match kind with
+        | Thread -> Machine.return ()
+        | Event ->
+            read e h manual >>= fun manual ->
+            if Int64.(manual = 0L) then write e h signaled 0L
+            else Machine.return ()
+        | Mutex ->
+            let* () = write e h owner me in
+            read e h count >>= fun n -> write e h count Int64.(n + 1L)
+        | Semaphore ->
+            read e h available >>= fun n -> write e h available Int64.(n - 1L)
+
+      let wake_all e st addr =
+        let st, _ = wake st addr Int.max_value in
+        let+ () = Machine.Local.put threads st in
+        st
+
+      (* the slots of TLS, which the bits of TlsBitmapBits of PEB
+         allocate *)
+      let bitmap e =
+        let t = teb e in
+        let* peb = loadw e Int64.(current_teb e + of_int t.peb) in
+        let peb = Option.value peb ~default:0L in
+        let addr = Int64.(peb + of_int t.bitmap) in
+        let+ bits = load e addr 8 in
+        (addr, Option.value_map bits ~default:0L ~f:(value e))
+
+      let slot e i =
+        let t = teb e in
+        Int64.(current_teb e + of_int t.slots + (i * of_int e.bytes))
+
+      (* the critical section: LockCount, RecursionCount, and
+         OwningThread, which is the TID here *)
+      let section e cs =
+        if wide e then (Int64.(cs + 8L), Int64.(cs + 12L), Int64.(cs + 16L))
+        else (Int64.(cs + 4L), Int64.(cs + 8L), Int64.(cs + 12L))
+
+      let enter_section e ~me cs =
+        let lock, recursion, owner = section e cs in
+        let* o = loadw e owner >>| Option.value ~default:0L in
+        if Int64.(o = 0L) then
+          let* _ = storew e owner me in
+          let* _ = store32 e recursion 1L in
+          let+ _ = store32 e lock 0L in
+          true
+        else if Int64.(o = me) then
+          let* r = load32 e recursion >>| Option.value ~default:0L in
+          let* _ = store32 e recursion Int64.(r + 1L) in
+          let* l = load32 e lock >>| Option.value ~default:0L in
+          let+ _ = store32 e lock Int64.((l + 1L) land 0xFFFF_FFFFL) in
+          true
+        else Machine.return false
+
+      (* the thread [me] leaves the section, [all] the times, e.g., as it
+         waits on a condition variable, and returns if it owned it *)
+      let leave_section e st ~me ?(all = false) cs =
+        let lock, recursion, owner = section e cs in
+        let* o = loadw e owner >>| Option.value ~default:0L in
+        if Int64.(o <> me) then Machine.return (st, false)
+        else
+          let* r = load32 e recursion >>| Option.value ~default:1L in
+          if Int64.(r > 1L) && not all then
+            let* _ = store32 e recursion Int64.(r - 1L) in
+            Machine.return (st, true)
+          else
+            let* _ = storew e owner 0L in
+            let* _ = store32 e recursion 0L in
+            let* _ = store32 e lock 0xFFFF_FFFFL in
+            let st, _ = wake st cs 1 in
+            let+ () = Machine.Local.put threads st in
+            (st, true)
+
+      (* the SRW lock is 1, if it is exclusive, and twice the number of
+         its shared owners otherwise *)
+      let acquire_srw e ~shared lock =
+        let* w = loadw e lock >>| Option.value ~default:0L in
+        if shared && Int64.(w land 1L = 0L) then storew e lock Int64.(w + 2L)
+        else if (not shared) && Int64.(w = 0L) then storew e lock 1L
+        else Machine.return false
+
+      let release_srw e st lock =
+        let* w = loadw e lock >>| Option.value ~default:0L in
+        let w = if Int64.(w = 1L) then 0L else Int64.(max 0L (w - 2L)) in
+        let* _ = storew e lock w in
+        if Int64.(w = 0L) then wake_all e st lock else Machine.return st
+
+      (* the thread [tid], whose function starts at [start] with the
+         [param], on the stack of the [size], which is suspended, if
+         [suspended], and whose object is the result *)
+      let create e st ~start ~param ~size ~suspended =
+        let tid = st.last + 1 in
+        let t = teb e in
+        let size =
+          if Int64.(size <= 0L) then 0x40000
+          else
+            Int64.(to_int_exn ((max size 0x10000L + 0xFFFFL) land lnot 0xFFFFL))
+        in
+        let* stack = allocate e size in
+        let* teb = allocate e 0x2000 in
+        let* h =
+          create_object e Thread
+            [ Int64.of_int tid; 0L; 259L; (if suspended then 1L else 0L) ]
+        in
+        let* peb =
+          loadw e Int64.(current_teb e + of_int t.peb)
+          >>| Option.value ~default:0L
+        in
+        let top = Int64.((stack + of_int size) land lnot 15L) in
+        let* _ = store e teb (String.make 0x2000 '\000') in
+        let field off x = storew e Int64.(teb + of_int off) x >>| ignore in
+        let* () = field t.self teb in
+        let* () = field t.stack_base top in
+        let* () = field t.stack_limit stack in
+        let* () = field t.peb peb in
+        let* () = field t.client 1L in
+        let* () = field (t.client + e.bytes) (Int64.of_int tid) in
+        let* () = field t.info h in
+        (* the end of the chain of the handlers of SEH of x86 *)
+        let* () = if wide e then Machine.return () else field 0 0xFFFF_FFFFL in
+        (* the function returns to [exit_addr], with the stack aligned,
+           as at the entries of the functions *)
+        let sp = if wide e then Int64.(top - 0x38L) else Int64.(top - 0x14L) in
+        let* _ = storew e sp exit_addr in
+        let* () =
+          if wide e then Machine.return ()
+          else storew e Int64.(sp + 4L) param >>| ignore
+        in
+        let* () =
+          copy e tid ~changed:(fun v x ->
+              let name = Var.name v in
+              if Var.equal v e.sp then like x sp
+              else if wide e && String.equal name "RCX" then like x param
+              else if String.equal name t.base then like x teb
+              else Machine.return x)
+        in
+        let base = Uc.reg X86 t.base in
+        let child =
+          {
+            tid;
+            saved_extra =
+              List.map (extra e) ~f:(fun id ->
+                  let data = read_extra e id in
+                  if Option.equal Int.equal (Some id) base then
+                    (id, bytes e teb (String.length data))
+                  else (id, data));
+            next = start;
+            wait = (if suspended then Waiting [ resumed h ] else Ready);
+            clear = None;
+            woken = false;
+          }
+        in
+        let+ () =
+          Machine.Local.put threads
+            {
+              st with
+              others = st.others @ [ child ];
+              last = tid;
+              depth =
+                Some (Option.value st.depth ~default:(List.length e.frames));
+            }
+        in
+        h
+
+      (* the thread, that runs, exits with the [code], whose object is
+         signaled, and the process exits, if it was the last one *)
+      let exit_thread e st code =
+        let t = teb e in
+        let* h =
+          loadw e Int64.(current_teb e + of_int t.info)
+          >>| Option.value ~default:0L
+        in
+        let* st =
+          kind e h >>= function
+          | Some Thread ->
+              let* () = write e h exited 1L in
+              let* () = write e h exit_code Int64.(code land 0xFFFF_FFFFL) in
+              wake_all e st h
+          | _ -> Machine.return st
+        in
+        if List.is_empty st.others then exit_process e code
+        else
+          switch e st >>= function
+          | Some pc -> Machine.return (Some pc)
+          | None ->
+              fail "the threads wait, after the thread %d exited" st.current
+
+      (* the functions, by their names, and the numbers of their
+         arguments *)
+      let functions =
+        [
+          ("CreateThread", 6);
+          ("_beginthreadex", 6);
+          ("_beginthread", 3);
+          ("ExitThread", 1);
+          ("_endthreadex", 1);
+          ("_endthread", 0);
+          ("GetCurrentThreadId", 0);
+          ("GetCurrentThread", 0);
+          ("GetThreadId", 1);
+          ("GetExitCodeThread", 2);
+          ("ResumeThread", 1);
+          ("CloseHandle", 1);
+          ("Sleep", 1);
+          ("SleepEx", 2);
+          ("SwitchToThread", 0);
+          ("WaitForSingleObject", 2);
+          ("WaitForSingleObjectEx", 3);
+          ("WaitForMultipleObjects", 4);
+          ("WaitForMultipleObjectsEx", 5);
+          ("CreateEventA", 4);
+          ("CreateEventW", 4);
+          ("CreateEventExA", 4);
+          ("CreateEventExW", 4);
+          ("SetEvent", 1);
+          ("ResetEvent", 1);
+          ("CreateMutexA", 3);
+          ("CreateMutexW", 3);
+          ("ReleaseMutex", 1);
+          ("CreateSemaphoreA", 4);
+          ("CreateSemaphoreW", 4);
+          ("ReleaseSemaphore", 3);
+          ("InitializeCriticalSection", 1);
+          ("InitializeCriticalSectionAndSpinCount", 2);
+          ("InitializeCriticalSectionEx", 3);
+          ("DeleteCriticalSection", 1);
+          ("EnterCriticalSection", 1);
+          ("TryEnterCriticalSection", 1);
+          ("LeaveCriticalSection", 1);
+          ("InitializeSRWLock", 1);
+          ("AcquireSRWLockExclusive", 1);
+          ("AcquireSRWLockShared", 1);
+          ("TryAcquireSRWLockExclusive", 1);
+          ("TryAcquireSRWLockShared", 1);
+          ("ReleaseSRWLockExclusive", 1);
+          ("ReleaseSRWLockShared", 1);
+          ("InitializeConditionVariable", 1);
+          ("SleepConditionVariableCS", 3);
+          ("SleepConditionVariableSRW", 4);
+          ("WakeConditionVariable", 1);
+          ("WakeAllConditionVariable", 1);
+          ("WaitOnAddress", 4);
+          ("WakeByAddressSingle", 1);
+          ("WakeByAddressAll", 1);
+          ("TlsAlloc", 0);
+          ("TlsFree", 1);
+          ("TlsGetValue", 1);
+          ("TlsSetValue", 2);
+          ("FlsAlloc", 1);
+          ("FlsFree", 1);
+          ("FlsGetValue", 1);
+          ("FlsSetValue", 2);
+        ]
+
+      let is_pe =
+        Machine.gets Project.specification >>| fun spec ->
+        match Ogre.eval (Ogre.request Image.Scheme.format) spec with
+        | Ok (Some "coff") -> true
+        | _ -> false
+
+      (* the function of Windows at [entry], which the thread, that runs,
+         calls, after which the thread, that runs then, continues from
+         the address, or [None], if it isn't a function of the threads *)
+      let call e entry =
+        match
+          Option.bind (function_name e entry) ~f:(fun name ->
+              Option.map (List.Assoc.find functions ~equal:String.equal name)
+                ~f:(fun n -> (name, n)))
+        with
+        | None -> Machine.return None
+        | Some _ when not (Poly.equal e.arch Uc.X86) -> Machine.return None
+        | Some (name, n) -> (
+            is_pe >>= function
+            | false -> Machine.return None
+            | true -> (
+                let* () = pull e in
+                let* args =
+                  Machine.List.map (List.init n ~f:Fn.id) ~f:(arg e)
+                in
+                let arg i = List.nth_exn args i in
+                (* the thread was woken, e.g., from the condition
+                   variable, which is the call again *)
+                let* st = Machine.Local.get threads in
+                let woken = st.woken in
+                let st = { st with woken = false } in
+                let* () = Machine.Local.put threads st in
+                let me = Int64.of_int st.current in
+                let cdecl = String.is_prefix name ~prefix:"_" in
+                let return x = finish e ~cdecl n x >>| Option.some in
+                let bool b = return (if b then 1L else 0L) in
+                (* waits on the [addrs], after which the function is
+                   called again, or returns [timeout], if it waits for
+                   the [ms], and no thread is ready *)
+                let wait ?(ms = infinite) ?(result = timeout) addrs =
+                  if Int64.(ms land 0xFFFF_FFFFL = 0L) then return result
+                  else
+                    block e st ~next:entry ~addrs
+                      ~timeout:
+                        (Option.some_if
+                           Int64.(ms land 0xFFFF_FFFFL <> infinite)
+                           (fun () -> return result))
+                in
+                let yield x =
+                  let* ret = finish e ~cdecl n x in
+                  if ready e st then
+                    let* parked = park e ~next:ret ~wait:Ready st in
+                    switch e ~parked st
+                  else Machine.return (Some ret)
+                in
+                let create ~start ~param ~size ~flags ~ptid =
+                  let* h =
+                    create e st ~start ~param ~size ~suspended:(flag flags 4L)
+                  in
+                  let* () =
+                    if Int64.(ptid <> 0L) then
+                      store32 e ptid (Int64.of_int (st.last + 1)) >>| ignore
+                    else Machine.return ()
+                  in
+                  return h
+                in
+                let objects handles =
+                  Machine.List.map handles ~f:(fun h ->
+                      kind e h >>| Option.map ~f:(fun k -> (h, k)))
+                  >>| Option.all
+                in
+                match name with
+                | "CreateThread" | "_beginthreadex" ->
+                    create ~start:(arg 2) ~param:(arg 3) ~size:(arg 1)
+                      ~flags:(arg 4) ~ptid:(arg 5)
+                | "_beginthread" ->
+                    create ~start:(arg 0) ~param:(arg 2) ~size:(arg 1) ~flags:0L
+                      ~ptid:0L
+                | "ExitThread" | "_endthreadex" -> exit_thread e st (arg 0)
+                | "_endthread" -> exit_thread e st 0L
+                | "GetCurrentThreadId" -> return me
+                | "GetCurrentThread" -> return (-2L)
+                | "GetThreadId" -> (
+                    kind e (arg 0) >>= function
+                    | Some Thread -> read e (arg 0) tid >>= return
+                    | _ -> return 0L)
+                | "GetExitCodeThread" -> (
+                    kind e (arg 0) >>= function
+                    | Some Thread ->
+                        let* code = read e (arg 0) exit_code in
+                        let* _ = store32 e (arg 1) code in
+                        return 1L
+                    | _ -> return 0L)
+                | "ResumeThread" -> (
+                    let h = arg 0 in
+                    kind e h >>= function
+                    | Some Thread ->
+                        let* n = read e h suspended in
+                        let* st =
+                          if Int64.(n = 1L) then
+                            let* () = write e h suspended 0L in
+                            wake_all e st (resumed h)
+                          else if Int64.(n > 1L) then
+                            write e h suspended Int64.(n - 1L) >>| fun () -> st
+                          else Machine.return st
+                        in
+                        ignore st;
+                        return n
+                    | _ -> return failed)
+                | "CloseHandle" -> return 1L
+                | "Sleep" | "SleepEx" -> yield 0L
+                | "SwitchToThread" -> yield (if ready e st then 1L else 0L)
+                | "WaitForSingleObject" | "WaitForSingleObjectEx" -> (
+                    let h = arg 0 in
+                    kind e h >>= function
+                    | None -> return failed
+                    | Some kind -> (
+                        is_signaled e ~me h kind >>= function
+                        | true -> acquire e ~me h kind >>= fun () -> return 0L
+                        | false -> wait ~ms:(arg 1) [ h ]))
+                | "WaitForMultipleObjects" | "WaitForMultipleObjectsEx" -> (
+                    let count = Int64.to_int_exn (arg 0) in
+                    let* handles =
+                      Machine.List.map (List.init count ~f:Fn.id) ~f:(fun i ->
+                          loadw e Int64.(arg 1 + of_int Int.(i * e.bytes))
+                          >>| Option.value ~default:0L)
+                    in
+                    objects handles >>= function
+                    | None -> return failed
+                    | Some objects -> (
+                        let ms = arg 3 in
+                        if Int64.(arg 2 <> 0L) then
+                          let* all =
+                            Machine.List.for_all objects ~f:(fun (h, k) ->
+                                is_signaled e ~me h k)
+                          in
+                          if all then
+                            let* () =
+                              Machine.List.iter objects ~f:(fun (h, k) ->
+                                  acquire e ~me h k)
+                            in
+                            return 0L
+                          else wait ~ms handles
+                        else
+                          let* first =
+                            Machine.List.find_map
+                              (List.mapi objects ~f:(fun i o -> (i, o)))
+                              ~f:(fun (i, (h, k)) ->
+                                is_signaled e ~me h k >>| fun s ->
+                                Option.some_if s (i, h, k))
+                          in
+                          match first with
+                          | Some (i, h, k) ->
+                              acquire e ~me h k >>= fun () ->
+                              return (Int64.of_int i)
+                          | None -> wait ~ms handles))
+                | "CreateEventA" | "CreateEventW" ->
+                    create_object e Event
+                      [
+                        (if Int64.(arg 1 <> 0L) then 1L else 0L);
+                        (if Int64.(arg 2 <> 0L) then 1L else 0L);
+                      ]
+                    >>= return
+                | "CreateEventExA" | "CreateEventExW" ->
+                    create_object e Event
+                      [
+                        (if flag (arg 2) 1L then 1L else 0L);
+                        (if flag (arg 2) 2L then 1L else 0L);
+                      ]
+                    >>= return
+                | "SetEvent" | "ResetEvent" -> (
+                    let h = arg 0 in
+                    kind e h >>= function
+                    | Some Event ->
+                        let set = String.equal name "SetEvent" in
+                        let* () = write e h signaled (if set then 1L else 0L) in
+                        let* _ =
+                          if set then wake_all e st h else Machine.return st
+                        in
+                        return 1L
+                    | _ -> return 0L)
+                | "CreateMutexA" | "CreateMutexW" ->
+                    (if Int64.(arg 1 <> 0L) then [ me; 1L ] else [ 0L; 0L ])
+                    |> create_object e Mutex >>= return
+                | "ReleaseMutex" -> (
+                    let h = arg 0 in
+                    kind e h >>= function
+                    | Some Mutex -> (
+                        read e h owner >>= function
+                        | o when Int64.(o = me) ->
+                            let* n = read e h count in
+                            let* () = write e h count Int64.(n - 1L) in
+                            let* _ =
+                              if Int64.(n <= 1L) then
+                                write e h owner 0L >>= fun () -> wake_all e st h
+                              else Machine.return st
+                            in
+                            return 1L
+                        | _ -> return 0L)
+                    | _ -> return 0L)
+                | "CreateSemaphoreA" | "CreateSemaphoreW" ->
+                    create_object e Semaphore [ arg 1; arg 2 ] >>= return
+                | "ReleaseSemaphore" -> (
+                    let h = arg 0 in
+                    kind e h >>= function
+                    | Some Semaphore ->
+                        let* n = read e h available in
+                        let* limit = read e h maximum in
+                        if Int64.(n + arg 1 > limit) then return 0L
+                        else
+                          let* () = write e h available Int64.(n + arg 1) in
+                          let* () =
+                            if Int64.(arg 2 <> 0L) then
+                              store32 e (arg 2) n >>| ignore
+                            else Machine.return ()
+                          in
+                          let* _ = wake_all e st h in
+                          return 1L
+                    | _ -> return 0L)
+                | "InitializeCriticalSection"
+                | "InitializeCriticalSectionAndSpinCount"
+                | "InitializeCriticalSectionEx" ->
+                    let lock, recursion, owner = section e (arg 0) in
+                    let* _ = storew e (arg 0) 0L in
+                    let* _ = store32 e lock 0xFFFF_FFFFL in
+                    let* _ = store32 e recursion 0L in
+                    let* _ = storew e owner 0L in
+                    return 1L
+                | "DeleteCriticalSection" -> return 0L
+                | "EnterCriticalSection" -> (
+                    enter_section e ~me (arg 0) >>= function
+                    | true -> return 0L
+                    | false -> wait [ arg 0 ])
+                | "TryEnterCriticalSection" ->
+                    enter_section e ~me (arg 0) >>= bool
+                | "LeaveCriticalSection" ->
+                    leave_section e st ~me (arg 0) >>= fun _ -> return 0L
+                | "InitializeSRWLock" | "InitializeConditionVariable" ->
+                    storew e (arg 0) 0L >>= fun _ -> return 0L
+                | "AcquireSRWLockExclusive" | "AcquireSRWLockShared" -> (
+                    let shared = String.equal name "AcquireSRWLockShared" in
+                    acquire_srw e ~shared (arg 0) >>= function
+                    | true -> return 0L
+                    | false -> wait [ arg 0 ])
+                | "TryAcquireSRWLockExclusive" | "TryAcquireSRWLockShared" ->
+                    let shared = String.equal name "TryAcquireSRWLockShared" in
+                    acquire_srw e ~shared (arg 0) >>= bool
+                | "ReleaseSRWLockExclusive" | "ReleaseSRWLockShared" ->
+                    release_srw e st (arg 0) >>= fun _ -> return 0L
+                | "SleepConditionVariableCS" | "SleepConditionVariableSRW" ->
+                    let cv = arg 0 and lock = arg 1 and ms = arg 2 in
+                    let cs = String.equal name "SleepConditionVariableCS" in
+                    let shared = (not cs) && flag (arg 3) 1L in
+                    let reacquire () =
+                      if cs then enter_section e ~me lock
+                      else acquire_srw e ~shared lock
+                    in
+                    if woken then
+                      (* woken, the thread reacquires the lock, or waits
+                         for it, after which it is woken again *)
+                      reacquire () >>= function
+                      | true -> return 1L
+                      | false -> (
+                          let* parked =
+                            park e ~next:entry ~wait:(Waiting [ lock ]) st
+                          in
+                          switch e ~parked:{ parked with woken = true } st
+                          >>= function
+                          | Some pc -> Machine.return (Some pc)
+                          | None ->
+                              fail "the threads wait, the last one on %Lx" lock)
+                    else
+                      let* st =
+                        if cs then leave_section e st ~me ~all:true lock >>| fst
+                        else release_srw e st lock
+                      in
+                      if Int64.(ms land 0xFFFF_FFFFL = 0L) then
+                        reacquire () >>= fun _ -> return 0L
+                      else
+                        block e st ~next:entry ~addrs:[ cv ]
+                          ~timeout:
+                            (Option.some_if
+                               Int64.(ms land 0xFFFF_FFFFL <> infinite)
+                               (fun () -> reacquire () >>= fun _ -> return 0L))
+                | "WakeConditionVariable" ->
+                    let st, _ = wake st (arg 0) 1 in
+                    let* () = Machine.Local.put threads st in
+                    return 0L
+                | "WakeAllConditionVariable" ->
+                    wake_all e st (arg 0) >>= fun _ -> return 0L
+                | "WaitOnAddress" -> (
+                    let addr = arg 0 and size = Int64.to_int_exn (arg 2) in
+                    let* x = load e addr size in
+                    let* y = load e (arg 1) size in
+                    match (x, y) with
+                    | Some x, Some y when String.equal x y ->
+                        if Int64.(arg 3 land 0xFFFF_FFFFL = 0L) then return 0L
+                        else
+                          (* it returns TRUE, when it is woken *)
+                          let* ret = finish e n 1L in
+                          block e st ~next:ret ~addrs:[ addr ]
+                            ~timeout:
+                              (Option.some_if
+                                 Int64.(arg 3 land 0xFFFF_FFFFL <> infinite)
+                                 (fun () ->
+                                   set e (result e) 0L;
+                                   Machine.return (Some ret)))
+                    | _ -> return 1L)
+                | "WakeByAddressSingle" ->
+                    let st, _ = wake st (arg 0) 1 in
+                    let* () = Machine.Local.put threads st in
+                    return 0L
+                | "WakeByAddressAll" ->
+                    wake_all e st (arg 0) >>= fun _ -> return 0L
+                | "TlsAlloc" | "FlsAlloc" -> (
+                    let* addr, bits = bitmap e in
+                    match
+                      List.find (List.init 64 ~f:Fn.id) ~f:(fun i ->
+                          Int64.(bits land (1L lsl i) = 0L))
+                    with
+                    | None -> return failed
+                    | Some i ->
+                        let* _ =
+                          store e addr (bytes e Int64.(bits lor (1L lsl i)) 8)
+                        in
+                        let* _ = storew e (slot e (Int64.of_int i)) 0L in
+                        return (Int64.of_int i))
+                | "TlsFree" | "FlsFree" ->
+                    let* addr, bits = bitmap e in
+                    let i = Int64.(arg 0 land 63L) in
+                    let* _ =
+                      store e addr
+                        (bytes e Int64.(bits land lnot (1L lsl to_int_exn i)) 8)
+                    in
+                    return 1L
+                | "TlsGetValue" | "FlsGetValue" ->
+                    loadw e (slot e (arg 0))
+                    >>| Option.value ~default:0L >>= return
+                | "TlsSetValue" | "FlsSetValue" ->
+                    storew e (slot e (arg 0)) (arg 1) >>= bool
+                | _ -> Machine.return None))
+
+      (* the thread, whose function returned to [exit_addr], exits with
+         its result *)
+      let returned e addr =
+        if (not (Poly.equal e.arch Uc.X86)) || Int64.(addr <> exit_addr) then
+          Machine.return None
+        else
+          is_pe >>= function
+          | false -> Machine.return None
+          | true ->
+              let* () = pull e in
+              let* st = Machine.Local.get threads in
+              exit_thread e st (get e (result e))
+    end
   end
 
   (* the instruction at [pc], which Primus interprets after the one it
@@ -2839,12 +4015,50 @@ module Make (Machine : Primus.Machine.S) = struct
       else if memory then Track.has_marks
       else Machine.return false
 
+  (* the loads and the stores of the atomic sequences, e.g., ldrex and
+     strex of ARM, lwarx and stwcx. of PowerPC, ll and sc of MIPS, by the
+     names of their instructions *)
+  let load_linked name =
+    List.exists
+      [
+        "LDREX";
+        "LDAEX";
+        "LDXR";
+        "LDAXR";
+        "LDXP";
+        "LDAXP";
+        "LBARX";
+        "LHARX";
+        "LWARX";
+        "LDARX";
+        "LR_";
+      ] ~f:(fun prefix -> String.is_prefix name ~prefix)
+    || List.mem [ "LL"; "LLD"; "LL64"; "LLD64" ] name ~equal:String.equal
+
+  let store_conditional name =
+    List.exists
+      [
+        "STREX";
+        "STLEX";
+        "STXR";
+        "STLXR";
+        "STXP";
+        "STLXP";
+        "STBCX";
+        "STHCX";
+        "STWCX";
+        "STDCX";
+        "SC_";
+      ] ~f:(fun prefix -> String.is_prefix name ~prefix)
+    || List.mem [ "SC"; "SCD"; "SC64"; "SCD64" ] name ~equal:String.equal
+
   (* Primus interprets the instructions from [pc], see [trace], while
      they continue, see [continues], and returns the address of the next
      one, which on ARM stays in the Thumb state, unless the jump sets the
      lower bit *)
   let interpret e pc =
     let* () = pull e in
+    let* pc = branch_of_slot e pc in
     (* the call of the threads runs in Unicorn, see [Threads] *)
     let threads_call site =
       match Threads.abi e with
@@ -2853,10 +4067,19 @@ module Make (Machine : Primus.Machine.S) = struct
           let+ n = Env.get (Var.create number (Type.imm (e.bytes * 8))) in
           Threads.is_call e site (int64_of_word (Primus.Value.to_word n))
     in
-    let stopped = ref false in
+    let stopped = ref false and linked = ref false and budget = 4096 in
     let rec run pc n =
+      let insn = pc in
       lift ~thumb:(in_thumb e pc) e (code_addr e pc) >>= function
       | None -> fail "can't interpret the instruction at %Lx" pc
+      (* the instruction, that Unicorn left to Primus, e.g., as it
+         accessed the tainted memory, has the semantics, else it would
+         run again and again *)
+      | Some (_, blks)
+        when n = budget
+             && List.for_all blks ~f:(fun blk ->
+                 Term.length def_t blk = 0 && Term.length jmp_t blk = 0) ->
+          fail "the instruction at %Lx has no semantics to interpret" pc
       | Some (size, blks) ->
           let next = Int64.(pc + of_int size) in
           let* pc =
@@ -2882,18 +4105,45 @@ module Make (Machine : Primus.Machine.S) = struct
                     in
                     let dst = int64_of_word dst in
                     if thumb then Int64.(dst lor 1L) else dst
+                | Mips -> (
+                    (* the branch, that is taken, runs its delay slot,
+                       after its condition and its link, as the lifter
+                       lifts the branches without their delay slots *)
+                    let* dst = Interpreter.step ~next blks in
+                    let dst = int64_of_word (Primus.Value.to_word dst) in
+                    let slot = Int64.(pc + of_int size) in
+                    if Int64.(dst = slot) then Machine.return dst
+                    else
+                      lift e slot >>= function
+                      | None ->
+                          fail "can't interpret the delay slot at %Lx" slot
+                      | Some (n, blks) ->
+                          let next = word e Int64.(slot + of_int n) in
+                          let+ _ = Interpreter.step ~next blks in
+                          dst)
                 | _ ->
                     let+ dst = Interpreter.step ~next blks in
                     int64_of_word (Primus.Value.to_word dst))
           in
+          (* the store, that is conditional on the load, that Primus
+             interpreted, is interpreted too, as Unicorn has no
+             reservation of the load *)
+          let* () =
+            Lift.name (code_addr e insn) >>| function
+            | Some name when load_linked name -> linked := true
+            | Some name when store_conditional name -> linked := false
+            | _ -> ()
+          in
           let* more =
-            if n > 1 && not !stopped then continues e pc
+            if n > 1 && not !stopped then
+              if !linked then Machine.return true else continues e pc
             else Machine.return false
           in
           if more then run pc (n - 1) else Machine.return pc
     in
-    let* pc = run pc 4096 in
+    let* pc = run pc budget in
     let+ () = push_owned e in
+    fresh e pc;
     pc
 
   (* The machine, which the script drives, pauses, and serves the
@@ -3040,9 +4290,15 @@ module Make (Machine : Primus.Machine.S) = struct
                 with
                 | Some pc -> loop pc
                 | None -> (
-                    native e addr >>= function
+                    (* the functions of the threads of Windows, see
+                       [Threads.Windows] *)
+                    Threads.Windows.call e addr
+                    >>= function
                     | Some pc -> loop pc
-                    | None -> call_foreign e addr >>= loop))
+                    | None -> (
+                        native e addr >>= function
+                        | Some pc -> loop pc
+                        | None -> call_foreign e addr >>= loop)))
             | Some (Pause | Interrupted), _ -> loop pc
             | Some (Observe _), _ ->
                 let* () =
@@ -3057,9 +4313,12 @@ module Make (Machine : Primus.Machine.S) = struct
                 loop pc
             | Some (Jump pc), _ -> loop pc
             | Some (Fault (access, addr)), _ -> (
-                fault e access addr >>= function
-                | `Continue -> loop pc
-                | `Interpret -> interpret e pc >>= loop)
+                Threads.Windows.returned e addr >>= function
+                | Some pc -> loop pc
+                | None -> (
+                    fault e access addr >>= function
+                    | `Continue -> loop pc
+                    | `Interpret -> interpret e pc >>= loop))
             | Some (Interpret _), _ -> interpret e pc >>= loop
             | Some (Unknown addr), _ ->
                 analyze ~thumb:(in_thumb e pc) e addr >>= fun _ -> loop pc
@@ -3151,7 +4410,7 @@ module Make (Machine : Primus.Machine.S) = struct
     e.owner <- Some id;
     let* () = map_code e in
     let* () = push e in
-    List.iter cp.extra ~f:(fun (id, data) -> Uc.reg_write_bytes e.uc id data);
+    List.iter cp.extra ~f:(fun (id, data) -> write_extra e id data);
     let* () = sync_stops e in
     (let addr = code_addr e cp.pc in
      if
@@ -3170,25 +4429,27 @@ module Make (Machine : Primus.Machine.S) = struct
         let* () =
           match cp.threads with
           | None -> Machine.return ()
-          | Some { current; cleared; others; last } ->
+          | Some { current; cleared; others; last; woken } ->
               Machine.Local.put threads
                 {
                   current;
                   cleared;
                   last;
+                  woken;
                   depth = Some (List.length pending + 1);
                   others =
                     List.map others
-                      ~f:(fun { tid; extra; next; waiting; clear } ->
+                      ~f:(fun { tid; extra; next; waiting; clear; woken } ->
                         {
                           tid;
                           saved_extra = extra;
                           next;
                           clear;
+                          woken;
                           wait =
                             (match waiting with
                             | None -> Ready
-                            | Some addr -> Waiting addr);
+                            | Some addrs -> Waiting addrs);
                         });
                 }
         in

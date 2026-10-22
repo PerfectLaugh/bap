@@ -839,8 +839,13 @@ module Make (Machine : Machine) = struct
     Machine.Local.update state ~f:(fun s ->
         match s.curr with
         | Top up -> { s with curr = Sub { me = insn_sub; up } }
-        | Blk { up } -> { s with curr = Sub up }
-        | _ -> s)
+        | Blk { up } | Arg { up } -> { s with curr = Sub up }
+        (* the terms of the instruction, that ran, e.g., its last def *)
+        | Def { up = { up; _ }; _ }
+        | Jmp { up = { up; _ }; _ }
+        | Phi { up = { up; _ }; _ } ->
+            { s with curr = Sub up }
+        | Sub _ -> s)
 
   (* the destination of the jump, that leaves the instruction *)
   let leave_insn cond dst =
@@ -878,11 +883,25 @@ module Make (Machine : Machine) = struct
                   | None -> (
                       Code.resolve_addr (`tid dst) >>= function
                       | Some addr -> Value.of_word addr >>= leave_insn cond
-                      (* the code without an address, e.g., an intrinsic,
-                         runs, as the jump of the program runs it *)
-                      | None ->
-                          Code.exec (`tid dst) >>= fun () -> Value.of_word next)
-                  )
+                      | None -> (
+                          (* the label of the program, e.g., of a function,
+                             that a stub replaced, which is linked without
+                             its address, is jumped to, as the stub runs,
+                             when the machine reaches it *)
+                          Machine.knowledge
+                            (Bap_knowledge.Knowledge.collect
+                               Bap_core_theory.Theory.Label.addr dst)
+                          >>= function
+                          | Some addr ->
+                              Value.of_word
+                                (Word.create addr (Word.bitwidth next))
+                              >>= leave_insn cond
+                          (* the code without an address, e.g., an
+                             intrinsic, runs, as the jump of the program
+                             runs it *)
+                          | None ->
+                              Code.exec (`tid dst) >>= fun () ->
+                              Value.of_word next)))
             in
             match Jmp.kind t with
             | Goto l | Ret l -> goto l

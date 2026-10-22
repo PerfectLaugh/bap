@@ -31,8 +31,11 @@ type thread = {
   extra : (int * string) list;
       (** the registers of Unicorn, that Primus doesn't have, by their ids *)
   next : int64;  (** the address, from which it continues *)
-  waiting : int64 option;  (** the futex, on which it waits *)
+  waiting : int64 list option;
+      (** the addresses, e.g., of the futexes, or of the objects of Windows, on
+          which it waits *)
   clear : int64 option;  (** the address of its TID, cleared at its exit *)
+  woken : bool;  (** if it was woken, from its wait *)
 }
 [@@deriving bin_io]
 
@@ -42,6 +45,7 @@ type threads = {
   cleared : int64 option;  (** its [clear] *)
   others : thread list;
   last : int;  (** the last TID *)
+  woken : bool;  (** if the thread, that runs, was woken *)
 }
 [@@deriving bin_io]
 
@@ -78,7 +82,7 @@ end
 
 include T
 
-let magic = "bap-primus-unicorn-checkpoint 4\n"
+let magic = "bap-primus-unicorn-checkpoint 5\n"
 
 (* the digest of the file of the program, which the checkpoint is of *)
 let digest path = Stdlib.Digest.(to_hex (file path))

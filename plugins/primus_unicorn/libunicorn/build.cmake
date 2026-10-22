@@ -175,6 +175,14 @@ static void check_exit_request_mem(TCGContext *tcg_ctx)
 
 static void tcg_gen_req_mo(TCGContext *tcg_ctx, TCGBar type)
 ]=])
+# BAP: the PC, that is written, starts anew, outside of a delay slot of
+# MIPS, as the branch, whose delay slot it was, e.g., of another thread,
+# that ran, is not pending, while uc_emu_start keeps it, so that the
+# emulation, that stopped in a delay slot, continues there
+patch(qemu/target/mips/unicorn.c
+  "            env->active_tc.PC = *(mipsreg_t *)value & ~1ULL;"
+  "            env->active_tc.PC = *(mipsreg_t *)value & ~1ULL;
+            env->hflags &= ~MIPS_HFLAG_BMASK;")
 patch(qemu/accel/tcg/tcg-runtime.c
   "    if (cpu_loop_exit_requested(uc->cpu) && !in_delay_slot) {"
   [=[    // BAP: the high bit marks the check after a memory access, which

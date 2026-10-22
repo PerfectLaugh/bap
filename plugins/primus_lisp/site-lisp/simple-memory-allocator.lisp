@@ -54,7 +54,8 @@
   (declare (external "malloc"))
   (if (= n 0) *malloc-zero-sentinel*
     (if (malloc-will-reach-limit n) 0
-      (malloc/grow-arena-if-needed n)
+      (malloc/grow-arena-if-needed
+       (+ n (* 2 *malloc-guard-edges*) (sizeof int)))
       (+= *malloc/total-bytes-allocated* n)
       (let ((header-size (sizeof int))
             (chunk-size (+ n (* 2 *malloc-guard-edges*) header-size))
@@ -160,10 +161,14 @@
                        *malloc-uniform-max-value*))))
 
 (defun malloc/grow-arena-if-needed (len)
+  "allocates the arena for the chunk of LEN bytes, with its header and
+   its edges, after the arena, which continues, if it ends at brk, and
+   else the chunks continue in the new one"
   (declare (visibility :private))
-  (let ((free-space (- *malloc-arena-end* *malloc/brk*)))
-    (when (> len free-space)
-      (malloc/allocate-arena (max *malloc-arena-initial-size* len)))))
+  (when (> (+ *malloc/brk* len) *malloc-arena-end*)
+    (when (/= *malloc-arena-end* brk)
+      (set *malloc/brk* brk))
+    (malloc/allocate-arena (max *malloc-arena-initial-size* len))))
 
 (defun realloc/shrink-chunk (ptr len)
   (declare (visibility :private))

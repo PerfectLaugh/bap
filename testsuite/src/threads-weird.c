@@ -18,21 +18,11 @@
      joins it, by the TID of set_tid_address, prints, and exits, with
      the code of the process, 7.
 
-   It links the stand-in libc of stub-libc.c, for putchar:
-
-   T="--target=$TARGET -fuse-ld=lld -nostdlib -O1 -fno-builtin \
-      -fno-unwind-tables -fno-asynchronous-unwind-tables"
-   clang $T -shared -fPIC -Wl,-soname,libc.so.6 stub-libc.c -o libc.so.6
-   clang $T -fno-pie -no-pie -Wl,--dynamic-linker=$LOADER \
-     threads-weird.c libc.so.6 -o ../bin/$TARGET-threads-weird
-
-   with TARGET=x86_64-linux-gnu and LOADER=/lib64/ld-linux-x86-64.so.2,
-   and TARGET=aarch64-linux-gnu and LOADER=/lib/ld-linux-aarch64.so.1,
-   and -mno-outline-atomics, as the stand-in libc has no atomics */
+   It links the stand-in libc of stub-libc.c, for putchar, on each
+   target of Linux, see threads.sh, with the system calls of
+   threads-arch.h. */
 
 int putchar(int);
-int __libc_start_main(int (*)(int, char **, char **), int, char **,
-                      void (*)(void), void (*)(void), void (*)(void), void *);
 
 #define CLONE_VM 0x100
 #define CLONE_FS 0x200
@@ -48,113 +38,7 @@ int __libc_start_main(int (*)(int, char **, char **), int, char **,
     (CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |      \
      CLONE_SYSVSEM | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID)
 
-#if defined(__x86_64__)
-#define SYS_clone 56
-#define SYS_clone3 435
-#define SYS_exit 60
-#define SYS_futex 202
-#define SYS_sched_yield 24
-#define SYS_set_tid_address 218
-
-static long syscall6(long n, long a, long b, long c, long d, long e, long f) {
-    long r;
-    register long r10 __asm__("r10") = d;
-    register long r8 __asm__("r8") = e;
-    register long r9 __asm__("r9") = f;
-    __asm__ volatile("syscall"
-                     : "=a"(r)
-                     : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8),
-                       "r"(r9)
-                     : "rcx", "r11", "memory");
-    return r;
-}
-
-/* the child runs fn(arg) on its stack, and exits */
-static long spawn(long flags, void *stack, int *ptid, int *ctid, void *tls,
-                  void (*fn)(long), long arg) {
-    long r;
-    register long r10 __asm__("r10") = (long)ctid;
-    register long r8 __asm__("r8") = (long)tls;
-    register long r12 __asm__("r12") = arg;
-    register long r13 __asm__("r13") = (long)fn;
-    __asm__ volatile("syscall\n"
-                     "test %%rax, %%rax\n"
-                     "jnz 1f\n"
-                     "xor %%ebp, %%ebp\n"
-                     "mov %%r12, %%rdi\n"
-                     "call *%%r13\n"
-                     "mov $60, %%eax\n"
-                     "xor %%edi, %%edi\n"
-                     "syscall\n"
-                     "1:\n"
-                     : "=a"(r)
-                     : "a"(SYS_clone), "D"(flags), "S"(stack), "d"(ptid),
-                       "r"(r10), "r"(r8), "r"(r12), "r"(r13)
-                     : "rcx", "r11", "memory");
-    return r;
-}
-
-/* the first word of the block of TLS is its address, as on Linux */
-static void *thread_pointer(void) {
-    void *p;
-    __asm__ volatile("mov %%fs:0, %0" : "=r"(p));
-    return p;
-}
-#elif defined(__aarch64__)
-#define SYS_clone 220
-#define SYS_clone3 435
-#define SYS_exit 93
-#define SYS_futex 98
-#define SYS_sched_yield 124
-#define SYS_set_tid_address 96
-
-static long syscall6(long n, long a, long b, long c, long d, long e, long f) {
-    register long x8 __asm__("x8") = n;
-    register long x0 __asm__("x0") = a;
-    register long x1 __asm__("x1") = b;
-    register long x2 __asm__("x2") = c;
-    register long x3 __asm__("x3") = d;
-    register long x4 __asm__("x4") = e;
-    register long x5 __asm__("x5") = f;
-    __asm__ volatile("svc #0"
-                     : "+r"(x0)
-                     : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
-                     : "memory");
-    return x0;
-}
-
-static long spawn(long flags, void *stack, int *ptid, int *ctid, void *tls,
-                  void (*fn)(long), long arg) {
-    register long x8 __asm__("x8") = SYS_clone;
-    register long x0 __asm__("x0") = flags;
-    register long x1 __asm__("x1") = (long)stack;
-    register long x2 __asm__("x2") = (long)ptid;
-    register long x3 __asm__("x3") = (long)tls;
-    register long x4 __asm__("x4") = (long)ctid;
-    register long x19 __asm__("x19") = arg;
-    register long x20 __asm__("x20") = (long)fn;
-    __asm__ volatile("svc #0\n"
-                     "cbnz x0, 1f\n"
-                     "mov x29, #0\n"
-                     "mov x0, x19\n"
-                     "blr x20\n"
-                     "mov x8, #93\n"
-                     "mov x0, #0\n"
-                     "svc #0\n"
-                     "1:\n"
-                     : "+r"(x0)
-                     : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x19),
-                       "r"(x20)
-                     : "x30", "memory");
-    return x0;
-}
-
-static void *thread_pointer(void) {
-    void *p;
-    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(p));
-    return p;
-}
-#endif
+#include "threads-arch.h"
 
 static long futex_wait(int *addr, int value, void *timeout) {
     return syscall6(SYS_futex, (long)addr, 0, value, (long)timeout, 0, 0);
@@ -205,7 +89,8 @@ static char stacks[32][STACK] __attribute__((aligned(16)));
 static int tids[32];
 
 static long start(int i, void (*fn)(long), long arg) {
-    return spawn(THREAD, stacks[i] + STACK, &tids[i], &tids[i], 0, fn, arg);
+    return spawn(THREAD, stacks[i] + STACK - 64, &tids[i], &tids[i], 0, fn,
+                 arg);
 }
 
 /* the marks of the scripts, which they pause at, whose arguments are
@@ -267,12 +152,16 @@ static void tls_worker(long n) {
     seen_tp[n] = thread_pointer();
 }
 
+static long main_block[4];
+
 static void tls(void) {
+    main_block[0] = (long)main_block;
+    init_tls(main_block);
     void *before = thread_pointer();
     for (int i = 0; i < 3; i++) {
         blocks[i][0] = (long)blocks[i];
-        spawn(THREAD | CLONE_SETTLS, stacks[i] + STACK, &tids[i], &tids[i],
-              blocks[i], tls_worker, i);
+        spawn(THREAD | CLONE_SETTLS, stacks[i] + STACK - 64, &tids[i],
+              &tids[i], tls_arg(i, blocks[i]), tls_worker, i);
     }
     for (int i = 0; i < 3; i++) join(&tids[i]);
     int ok = thread_pointer() == before;
@@ -289,7 +178,7 @@ static long nested_value;
 static void grandchild(long x) { nested_value = x * 3; }
 
 static void child(long x) {
-    spawn(THREAD, stacks[1] + STACK, &grandchild_tid, &grandchild_tid, 0,
+    spawn(THREAD, stacks[1] + STACK - 64, &grandchild_tid, &grandchild_tid, 0,
           grandchild, x + 1);
     join(&grandchild_tid);
     nested_value += 1;
@@ -399,4 +288,4 @@ int main(int argc, char **argv, char **envp) {
     return 1;
 }
 
-void _start(void) { __libc_start_main(main, 0, 0, 0, 0, 0, 0); }
+void _start(void) { start_main(main); }

@@ -61,6 +61,10 @@ module Segments : sig
   val is_base : string -> bool
   (** [is_base name] if [name] is a base register, e.g., FS_BASE *)
 
+  val get : Bap_unicorn.t -> string -> string
+  (** [get uc name] the base of the segment of the base register [name], in its
+      4 little-endian bytes, which are zero, if Unicorn has no descriptor *)
+
   val set : Bap_unicorn.t -> string -> int64 -> bool
   (** [set uc name base] the segment of the base register [name] has the [base],
       [false], if [name] is not a base register *)

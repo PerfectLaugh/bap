@@ -1511,7 +1511,9 @@ let emu_signals data =
     ]
 
 (* the threads of threads.c, that the system calls of Linux create, which
-   are preempted, and wait on the futexes, see Primus_unicorn_executor *)
+   are preempted, and wait on the futexes, of threads-weird.c, on the
+   targets of Linux, and of threads-win.c, that the functions of Windows
+   create, see Primus_unicorn_executor *)
 let threads data =
   List.map
     (fun target ->
@@ -1577,11 +1579,12 @@ let threads data =
           case ("run/unicorn/threads/" ^ bin) (fun env ->
               let out =
                 bap ~timeout:300. env
-                  [
-                    path data ("bin/" ^ bin);
-                    "--passes=run";
-                    "--run-systems=bap:unicorn-executor";
-                  ]
+                  ([
+                     path data ("bin/" ^ bin);
+                     "--passes=run";
+                     "--run-systems=bap:unicorn-executor";
+                   ]
+                  @ api data bin)
               in
               check env "exits" (out.status = Exited 0);
               has env "runs the odd threads" out lines);
@@ -1600,7 +1603,11 @@ let threads data =
                      input "emu/threads-weird/script.ml";
                      path data ("bin/" ^ bin);
                    ]
-                  @ args)
+                  @ args
+                  @
+                  if String.starts_with ~prefix:"powerpc" bin then
+                    [ "api=" ^ path data "api/powerpc" ]
+                  else [])
               in
               let taint out =
                 has env "taints through clone and the memory" out
@@ -1646,7 +1653,77 @@ let threads data =
                 "restored orphan.ckpt in the thread 34\n";
               exits out);
         ])
-      [ "x86_64-linux-gnu"; "aarch64-linux-gnu" ]
+      [
+        "x86_64-linux-gnu";
+        "aarch64-linux-gnu";
+        "i686-linux-gnu";
+        "arm-linux-gnueabihf";
+        "mips-linux-gnu";
+        "mips64-linux-gnuabi64";
+        "powerpc-linux-gnu";
+        "riscv64-linux-gnu";
+      ]
+  @ List.concat_map
+      (fun target ->
+        let bin = target ^ "-threads-win" in
+        let lines =
+          "events ok\n\
+           semaphore 3\n\
+           condition 155\n\
+           address 42\n\
+           tls ok\n\
+           suspended 11\n\
+           timeouts 258 258 0\n\
+           exit 5\n\
+           orphan\n"
+        in
+        [
+          (* the threads of Windows, and their objects, see
+             threads-win.c *)
+          case ("run/unicorn/threads/" ^ bin) (fun env ->
+              let out =
+                bap ~timeout:300. env
+                  [
+                    path data ("bin/" ^ bin);
+                    "--passes=run";
+                    "--run-systems=bap:unicorn-executor";
+                  ]
+              in
+              check env "exits" (out.status = Exited 0);
+              has env "runs the threads" out ("create 4000 46\n" ^ lines));
+          (* the taint, that a thread mixes, in the memory, which is not
+             in Unicorn, as it is tainted, so that the objects of
+             Windows are in Primus, and the checkpoint, while a thread
+             waits on an event, see threads-win/script.ml *)
+          case
+            ("emu/" ^ bin ^ "/checkpoint")
+            (fun env ->
+              let script args =
+                bap ~timeout:300. env
+                  ([
+                     "script";
+                     input "emu/threads-win/script.ml";
+                     path data ("bin/" ^ bin);
+                   ]
+                  @ args)
+              in
+              let finishes out =
+                has env "finishes the threads" out (lines ^ "exited 7\n");
+                has env "taints the mixed seed" out
+                  "turns: -\nseed: secret\nmixed: secret\n"
+              in
+              let out = script [] in
+              sequence env out
+                [
+                  ("pauses in main", "paused in the thread 1\n");
+                  ("saves while the thread waits", "saved events.ckpt\n");
+                ];
+              finishes out;
+              let out = script [ "restore" ] in
+              has env "restores in main" out "restored in the thread 1\n";
+              finishes out);
+        ])
+      [ "x86_64-pc-windows-msvc"; "i686-pc-windows-msvc" ]
 
 (* the scripts on every target, that the testsuite has the binaries of:
    the symbolic and the tainted registers and memory, the branches and

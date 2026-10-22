@@ -13,28 +13,47 @@ module Emu = Bap_emu
    save: runs, and saves the checkpoints, mixer.ckpt, pingpong.ckpt, and
    orphan.ckpt, after main exited
    restore FILE [SAVE]: continues from the checkpoint, and saves the one
-   of pingpong, if the SAVE is given *)
+   of pingpong, if the SAVE is given
+
+   and api=DIR, the api of the target, e.g., of PowerPC *)
 
 let addr emu name =
   match List.assoc_opt name (Emu.symbols emu) with
   | Some addr -> addr
   | None -> failwith ("no " ^ name)
 
-(* the argument [n] of the mark, that the program paused at *)
+(* the target, by the name of the file, e.g., aarch64-linux-gnu-... *)
+let target = ref ""
+
+let starts prefix = String.starts_with ~prefix !target
+
+(* the argument [n] of the mark, that the program paused at, at its
+   entry, which is on the stack of x86 *)
 let arg emu n =
-  let regs =
-    if List.mem "RDI" (Emu.registers emu) then [| "RDI"; "RSI"; "RDX" |]
-    else [| "R0"; "R1"; "R2" |]
-  in
-  Emu.reg emu regs.(n)
+  let reg prefix first = Emu.reg emu (Printf.sprintf "%s%d" prefix (first + n)) in
+  if starts "x86_64" then Emu.reg emu [| "RDI"; "RSI"; "RDX" |].(n)
+  else if starts "i686" then
+    let data = Emu.read emu Int64.(add (Emu.reg emu "ESP") (of_int (4 + (4 * n)))) 4 in
+    String.fold_right
+      (fun c acc -> Int64.(logor (shift_left acc 8) (of_int (Char.code c))))
+      data 0L
+  else if starts "mips" then reg "R" 4
+  else if starts "powerpc" then reg "R" 3
+  else if starts "riscv" then reg "X" 10
+  else reg "R" 0
 
 let pause emu name =
   match Emu.run emu ~until:(addr emu name) with
   | Paused -> Printf.printf "%s in the thread %d\n%!" name (Emu.thread emu)
+  | Failed msg -> failwith ("doesn't pause at " ^ name ^ ": " ^ msg)
+  | Exited code ->
+      failwith
+        (Printf.sprintf "doesn't pause at %s: exited %s" name
+           (match code with Some c -> string_of_int c | None -> "-"))
   | _ -> failwith ("doesn't pause at " ^ name)
 
 let taint emu (name, addr) =
-  let kinds = Emu.Taint.kinds emu (Mem (addr, 8)) in
+  let kinds = Emu.Taint.kinds emu (Mem (addr, 1)) in
   Printf.printf "%s: %s\n%!" name
     (if kinds = [] then "-" else String.concat "," kinds)
 
@@ -62,12 +81,26 @@ let finish emu data =
   | _ -> print_endline "not exited");
   List.iter (taint emu) data
 
+(* the api of PowerPC, as api=DIR *)
+let api =
+  List.filter_map
+    (fun arg ->
+      if String.starts_with ~prefix:"api=" arg then
+        Some (String.sub arg 4 (String.length arg - 4))
+      else None)
+    (Bap_script.args ())
+
 let create ?restore file =
+  target := Filename.basename file;
   Emu.create ~components:Emu.Taint.components ?restore
-    (Bap_script.project ~disassemble:true file)
+    (Bap_script.project ~api ~disassemble:true file)
 
 let () =
-  match Bap_script.args () with
+  match
+    List.filter
+      (fun arg -> not (String.starts_with ~prefix:"api=" arg))
+      (Bap_script.args ())
+  with
   | [ file ] ->
       let emu = create file in
       pause emu "taint_started";

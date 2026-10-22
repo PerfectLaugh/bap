@@ -415,6 +415,16 @@ module Segments = struct
     List.exists (Uc.mem_regions uc) ~f:(fun (lower, _, _) ->
         Int64.equal lower gdt_base)
 
+  (* [get uc name] the base of the segment of the base register [name],
+     in the little-endian bytes of 32 bits, which is 0, if the table is
+     not mapped *)
+  let get uc name =
+    match entry name with
+    | Some (index, _) when mapped uc ->
+        let d = Uc.mem_read uc Int64.(gdt_base + of_int Int.(index * 8)) 8 in
+        String.of_char_list [ d.[2]; d.[3]; d.[4]; d.[7] ]
+    | _ -> String.make 4 '\000'
+
   (* [set uc name base] the segment of the base register [name], e.g.,
      FS_BASE, has the [base], returns [false], if it is not a base *)
   let set uc name base =

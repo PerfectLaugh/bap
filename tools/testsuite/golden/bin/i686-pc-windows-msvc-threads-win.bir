@@ -1,0 +1,205 @@
+# exited with 0
+sub line(line_result)
+sub start(start_result)
+  calls line win_waits
+sub sub_401109(sub_401109_result)
+  calls intrinsic:breakpoint
+sub sub_40110a(sub_40110a_result)
+  calls intrinsic:breakpoint
+sub sub_40110b(sub_40110b_result)
+  calls intrinsic:breakpoint
+sub sub_40111f(sub_40111f_result)
+  calls intrinsic:breakpoint
+sub sub_401120(sub_401120_result)
+  calls intrinsic:breakpoint
+sub sub_401121(sub_401121_result)
+  calls intrinsic:breakpoint
+sub sub_401126(sub_401126_result)
+  calls intrinsic:breakpoint
+sub sub_401127(sub_401127_result)
+  calls intrinsic:breakpoint
+sub sub_401128(sub_401128_result)
+  calls intrinsic:breakpoint
+sub sub_401129(sub_401129_result)
+  calls intrinsic:breakpoint
+sub sub_40112f(sub_40112f_result)
+  calls intrinsic:breakpoint
+sub sub_401130(sub_401130_result)
+  calls intrinsic:breakpoint
+sub sub_401131(sub_401131_result)
+  calls intrinsic:breakpoint
+sub sub_4011b8(sub_4011b8_result)
+  calls intrinsic:breakpoint
+sub sub_4011b9(sub_4011b9_result)
+  calls intrinsic:breakpoint
+sub sub_4011ba(sub_4011ba_result)
+  calls intrinsic:breakpoint
+sub sub_4011ce(sub_4011ce_result)
+  calls intrinsic:breakpoint
+sub sub_4011cf(sub_4011cf_result)
+  calls intrinsic:breakpoint
+sub sub_4011d0(sub_4011d0_result)
+  calls intrinsic:breakpoint
+sub sub_4011d5(sub_4011d5_result)
+  calls intrinsic:breakpoint
+sub sub_4011d6(sub_4011d6_result)
+  calls intrinsic:breakpoint
+sub sub_4011d7(sub_4011d7_result)
+  calls intrinsic:breakpoint
+sub sub_4011d8(sub_4011d8_result)
+  calls intrinsic:breakpoint
+sub sub_4011de(sub_4011de_result)
+  calls intrinsic:breakpoint
+sub sub_4011df(sub_4011df_result)
+  calls intrinsic:breakpoint
+sub sub_4011e0(sub_4011e0_result)
+  calls intrinsic:breakpoint
+sub sub_4016af(sub_4016af_result)
+  calls intrinsic:breakpoint
+sub sub_401777(sub_401777_result)
+  calls intrinsic:breakpoint
+sub sub_401778(sub_401778_result)
+  calls intrinsic:breakpoint
+sub sub_401779(sub_401779_result)
+  calls intrinsic:breakpoint
+sub sub_40178d(sub_40178d_result)
+  calls intrinsic:breakpoint
+sub sub_40178e(sub_40178e_result)
+  calls intrinsic:breakpoint
+sub sub_40178f(sub_40178f_result)
+  calls intrinsic:breakpoint
+sub sub_401794(sub_401794_result)
+  calls intrinsic:breakpoint
+sub sub_401795(sub_401795_result)
+  calls intrinsic:breakpoint
+sub sub_401796(sub_401796_result)
+  calls intrinsic:breakpoint
+sub sub_401797(sub_401797_result)
+  calls intrinsic:breakpoint
+sub sub_40179d(sub_40179d_result)
+  calls intrinsic:breakpoint
+sub sub_40179e(sub_40179e_result)
+  calls intrinsic:breakpoint
+sub sub_40179f(sub_40179f_result)
+  calls intrinsic:breakpoint
+sub sub_401829(sub_401829_result)
+  calls intrinsic:breakpoint
+sub sub_40182a(sub_40182a_result)
+  calls intrinsic:breakpoint
+sub sub_40182b(sub_40182b_result)
+  calls intrinsic:breakpoint
+sub sub_40183f(sub_40183f_result)
+  calls intrinsic:breakpoint
+sub sub_401840(sub_401840_result)
+  calls intrinsic:breakpoint
+sub sub_401841(sub_401841_result)
+  calls intrinsic:breakpoint
+sub sub_401846(sub_401846_result)
+  calls intrinsic:breakpoint
+sub sub_401847(sub_401847_result)
+  calls intrinsic:breakpoint
+sub sub_401848(sub_401848_result)
+  calls intrinsic:breakpoint
+sub sub_401849(sub_401849_result)
+  calls intrinsic:breakpoint
+sub sub_40184f(sub_40184f_result)
+  calls intrinsic:breakpoint
+sub sub_401850(sub_401850_result)
+  calls intrinsic:breakpoint
+sub sub_401851(sub_401851_result)
+  calls intrinsic:breakpoint
+sub sub_4018ca(sub_4018ca_result)
+  calls intrinsic:breakpoint
+sub sub_4018cb(sub_4018cb_result)
+  calls intrinsic:breakpoint
+sub sub_4018cc(sub_4018cc_result)
+  calls intrinsic:breakpoint
+sub sub_4018e2(sub_4018e2_result)
+  calls intrinsic:breakpoint
+sub sub_4018e3(sub_4018e3_result)
+  calls intrinsic:breakpoint
+sub sub_4018e4(sub_4018e4_result)
+  calls intrinsic:breakpoint
+sub sub_4018e5(sub_4018e5_result)
+  calls intrinsic:breakpoint
+sub sub_4018eb(sub_4018eb_result)
+  calls intrinsic:breakpoint
+sub sub_4018ec(sub_4018ec_result)
+  calls intrinsic:breakpoint
+sub sub_4018ed(sub_4018ed_result)
+  calls intrinsic:breakpoint
+sub sub_4019e0(sub_4019e0_result)
+sub sub_401a30(sub_401a30_result)
+sub sub_401ab0(sub_401ab0_result)
+sub sub_401b20(sub_401b20_result)
+sub sub_401bf8(sub_401bf8_result)
+  calls intrinsic:breakpoint
+sub sub_401bf9(sub_401bf9_result)
+  calls intrinsic:breakpoint
+sub sub_401bfa(sub_401bfa_result)
+  calls intrinsic:breakpoint
+sub sub_401c0e(sub_401c0e_result)
+  calls intrinsic:breakpoint
+sub sub_401c0f(sub_401c0f_result)
+  calls intrinsic:breakpoint
+sub sub_401c10(sub_401c10_result)
+  calls intrinsic:breakpoint
+sub sub_401c15(sub_401c15_result)
+  calls intrinsic:breakpoint
+sub sub_401c16(sub_401c16_result)
+  calls intrinsic:breakpoint
+sub sub_401c17(sub_401c17_result)
+  calls intrinsic:breakpoint
+sub sub_401c18(sub_401c18_result)
+  calls intrinsic:breakpoint
+sub sub_401c1e(sub_401c1e_result)
+  calls intrinsic:breakpoint
+sub sub_401c1f(sub_401c1f_result)
+  calls intrinsic:breakpoint
+sub sub_401c20(sub_401c20_result)
+  calls intrinsic:breakpoint
+sub sub_401c80(sub_401c80_result)
+sub sub_401d60(sub_401d60_result)
+sub sub_401db0(sub_401db0_result)
+sub sub_401e50(sub_401e50_result)
+sub sub_401e60(sub_401e60_result)
+sub sub_401f0d(sub_401f0d_result)
+  calls intrinsic:breakpoint
+sub win_waits(win_waits_result)
+sub intrinsic:breakpoint()
+sub AcquireSRWLockExclusive(AcquireSRWLockExclusive_result)
+sub CloseHandle(CloseHandle_result)
+sub CreateEventA(CreateEventA_result)
+sub CreateMutexA(CreateMutexA_result)
+sub CreateSemaphoreA(CreateSemaphoreA_result)
+sub CreateThread(CreateThread_result)
+sub DeleteCriticalSection(DeleteCriticalSection_section)
+sub EnterCriticalSection(EnterCriticalSection_section)
+sub ExitThread(ExitThread_result)
+sub GetCurrentThreadId(GetCurrentThreadId_result)
+sub GetExitCodeThread(GetExitCodeThread_result)
+sub GetThreadId(GetThreadId_result)
+sub InitializeConditionVariable(InitializeConditionVariable_result)
+sub InitializeCriticalSection(InitializeCriticalSection_section)
+sub InitializeSRWLock(InitializeSRWLock_result)
+sub LeaveCriticalSection(LeaveCriticalSection_section)
+sub ReleaseMutex(ReleaseMutex_result)
+sub ReleaseSRWLockExclusive(ReleaseSRWLockExclusive_result)
+sub ReleaseSemaphore(ReleaseSemaphore_result)
+sub ResumeThread(ResumeThread_result)
+sub SetEvent(SetEvent_result)
+sub Sleep(Sleep_milliseconds)
+sub SleepConditionVariableCS(SleepConditionVariableCS_result)
+sub SleepConditionVariableSRW(SleepConditionVariableSRW_result)
+sub SwitchToThread(SwitchToThread_result)
+sub TlsAlloc(TlsAlloc_result)
+sub TlsFree(TlsFree_result)
+sub TlsGetValue(TlsGetValue_index, TlsGetValue_result)
+sub TlsSetValue(TlsSetValue_result)
+sub WaitForMultipleObjects(WaitForMultipleObjects_result)
+sub WaitForSingleObject(WaitForSingleObject_result)
+sub WaitOnAddress(WaitOnAddress_result)
+sub WakeAllConditionVariable(WakeAllConditionVariable_result)
+sub WakeByAddressSingle(WakeByAddressSingle_result)
+sub WakeConditionVariable(WakeConditionVariable_result)
+sub putchar(putchar_c, putchar_result)
