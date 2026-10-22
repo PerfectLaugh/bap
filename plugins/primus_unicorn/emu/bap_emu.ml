@@ -36,8 +36,8 @@ type t = {
       (** the knowledge, in which [bir] lifts the instructions in the hooks,
           outside of the machine, which runs *)
   lifted : (int64 * string * bool, (int * blk term list) option) Hashtbl.t;
-      (** the instructions, that [bir] lifted in the hooks, of the program,
-          see [lifts] *)
+      (** the instructions, that [bir] lifted in the hooks, of the program, see
+          [lifts] *)
   paused_lifts :
     (int64 * string * bool, (int * blk term list) option) Hashtbl.t;
       (** the instructions, that [bir] lifted in the machine, as the machine is
@@ -1321,6 +1321,22 @@ let arg t n =
   | None -> invalid_argf "Bap_emu.arg: the prototype of %s is unknown" name ()
 
 let exit_code t = t.session.exit_code
+
+(* the threads are of the machine, see [X.threads] *)
+let thread t =
+  let tid = ref 1 in
+  primus t
+    (module functor
+              (Machine : Primus.Machine.S)
+              ->
+              struct
+                open Machine.Syntax
+
+                let init () =
+                  Machine.Local.get X.threads >>| fun { current; _ } ->
+                  tid := current
+              end);
+  !tid
 
 (* the system, whose program ended, finishes, as its knowledge is the
    result of the system *)

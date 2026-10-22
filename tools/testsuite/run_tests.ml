@@ -1510,6 +1510,43 @@ let emu_signals data =
             (sum ^ "exited, the handler ran while it ran"));
     ]
 
+(* the threads of threads.c, that the system calls of Linux create, which
+   are preempted, and wait on the futexes, see Primus_unicorn_executor *)
+let threads data =
+  List.map
+    (fun target ->
+      let bin = target ^ "-threads" in
+      case ("run/unicorn/threads/" ^ bin) (fun env ->
+          let out =
+            bap ~timeout:300. env
+              [
+                path data ("bin/" ^ bin);
+                "--passes=run";
+                "--run-systems=bap:unicorn-executor";
+              ]
+          in
+          check env "exits" (out.status = Exited 0);
+          has env "counts the steps of the threads" out "8000\nok\n"))
+    [ "x86_64-linux-gnu"; "aarch64-linux-gnu" ]
+  @ [
+      case "emu/x86_64-linux-gnu-threads/save" (fun env ->
+          let out =
+            bap ~timeout:300. env
+              [
+                "script";
+                input "emu/threads/save.ml";
+                path data "bin/x86_64-linux-gnu-threads";
+              ]
+          in
+          sequence env out
+            [
+              (* the first thread, after main, is preempted *)
+              ("pauses in a thread", "paused in the thread 2");
+              ("doesn't save the threads", "the program has several threads");
+              ("continues", "8000\nok\nexited");
+            ]);
+    ]
+
 (* the scripts on every target, that the testsuite has the binaries of:
    the symbolic and the tainted registers and memory, the branches and
    their flips, the hooks, the snapshots, and the misuses, e.g., of the
@@ -1846,6 +1883,7 @@ let tests =
     bare;
     emu;
     emu_signals;
+    threads;
     emu_targets;
     loaders;
     loader_layouts;

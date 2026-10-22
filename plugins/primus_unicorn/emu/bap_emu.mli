@@ -365,6 +365,12 @@ val arg : t -> int -> int64
 val exit_code : t -> int option
 (** the code, with which the program exited *)
 
+val thread : t -> int
+(** [thread emu] the TID of the thread, that the paused program runs, which is
+    1, unless the program created threads with the system calls of Linux, e.g.,
+    clone, on x86-64 and AArch64, which run one at a time, and are preempted.
+    Raises [Invalid_argument], if the program is not paused. *)
+
 val knowledge : t -> Bap_knowledge.Knowledge.state option
 (** the knowledge of the system, when it finished, e.g., of the instructions,
     that it lifted, see [Primus.Lift], and what its components computed, or

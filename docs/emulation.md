@@ -334,6 +334,12 @@ List.iter (fun b ->
 
 `formula` shows the formulas of a register or of memory, and `solve` finds a model of the constraints of the path taken.
 
+### Threads
+
+The programs of x86-64 and AArch64 run their threads, that the system calls of Linux create, e.g., `clone` with `CLONE_VM`, as `pthread_create` does, one at a time, in the same memory. A thread switches, when it waits on a futex, exits, or calls `sched_yield`, and else every millisecond of the processor, while another thread is ready, so the interleavings may differ from run to run. The executor handles `clone`, `futex` (its waits and wakes), `set_tid_address`, `gettid`, `sched_yield`, `exit`, and `exit_group`, which exits with the Lisp `exit`; the other system calls go to `intrinsic:syscall` or `intrinsic:svc`, as before. `Emu.thread` tells the thread, that the paused program runs.
+
+The limits: a `clone` of a process, without `CLONE_VM`, fails with `ENOSYS`, as does `clone3`, after which glibc calls `clone`. The threads switch only in the run, that created them, so a thread can't wait in a function of the program, that a Lisp stub called. The checkpoints keep one thread, so `save` fails, while the program has several. The taint and the symbolic values don't know the threads, that computed them.
+
 ### Several emulators
 
 The emulators of a script run side by side, e.g., programs of different targets. Each has its own Unicorn engine, Primus system, knowledge, hooks, stops, and snapshots:
