@@ -131,25 +131,23 @@ let fold_multi ~f =
 
 let items xs = List.concat (Map.data xs)
 
+(* the definitions of both, without the repeated ones, by their names,
+   the last first, as the packages are merged often, e.g., for each
+   package, that uses them, and a name has a few definitions *)
 let ( ++ ) : 'a defs -> 'a defs -> 'a defs =
  fun xs ys ->
-  let remember set def =
-    Map.update set (Def.name def) ~f:(function
-      | None -> Set.singleton (module Id) def.id
-      | Some ids -> Set.add ids def.id)
+  let dedup defs =
+    List.fold defs ~init:([], []) ~f:(fun (ids, defs) (def : _ Def.t) ->
+        if List.mem ids def.id ~equal:Id.equal then (ids, defs)
+        else (def.id :: ids, def :: defs))
+    |> snd
+    |> function
+    | [] -> None
+    | defs -> Some defs
   in
-  let is_presented set def =
-    match Map.find set (Def.name def) with
-    | None -> false
-    | Some ids -> Set.mem ids def.id
-  in
-  let add ~key:name ~data:defs init =
-    List.fold defs ~init ~f:(fun (set, defs) def ->
-        if is_presented set def then (set, defs)
-        else (remember set def, Map.add_multi defs ~key:name ~data:def))
-  in
-  let init = (Map.empty (module String), nodefs) in
-  snd @@ Map.fold ys ~f:add ~init:(Map.fold ~init xs ~f:add)
+  Map.merge xs ys ~f:(fun ~key:_ -> function
+    | `Left defs | `Right defs -> dedup defs
+    | `Both (xs, ys) -> dedup (xs @ ys))
 
 let pp_defs ppf =
   Format.pp_print_list
@@ -742,13 +740,30 @@ end = struct
     let body' = map body in
     if phys_equal body body' then def else set def body'
 
-  let reindex_package src macros p =
+  (* the definition, that the packages share, as a package has the
+     definitions of the packages, that it uses, is reindexed once, so
+     its copies have the same identifiers, as its other nodes have *)
+  let memoized memo f (def : _ Def.t) =
+    match Map.find !memo def.id with
+    | Some (def', result) when phys_equal def def' -> result
+    | _ ->
+        let result = f def in
+        memo := Map.set !memo ~key:def.id ~data:(def, result);
+        result
+
+  let reindex_package (fs, ms, ps) src macros p =
     let def = (Def.Func.body, Def.Func.with_body) in
     let met = (Def.Meth.body, Def.Meth.with_body) in
     let par = (Def.Para.default, Def.Para.with_default) in
-    let defs = List.map (items p.defs) ~f:(reindex src macros def) in
-    let mets = List.map (items p.mets) ~f:(reindex src macros met) in
-    let pars = List.map (items p.pars) ~f:(reindex src macros par) in
+    let defs =
+      List.map (items p.defs) ~f:(memoized fs (reindex src macros def))
+    in
+    let mets =
+      List.map (items p.mets) ~f:(memoized ms (reindex src macros met))
+    in
+    let pars =
+      List.map (items p.pars) ~f:(memoized ps (reindex src macros par))
+    in
     (defs, mets, pars)
 
   let repack defs =
@@ -758,10 +773,11 @@ end = struct
 
   let program prog =
     let macros = macro_ids prog.library in
+    let memo = (ref Id.Map.empty, ref Id.Map.empty, ref Id.Map.empty) in
     fold_library prog.library
       ~f:(fun ~package pkg prog ->
         let src = { last = Source.lastid prog.sources; derived = [] } in
-        let defs, mets, pars = reindex_package src macros pkg in
+        let defs, mets, pars = reindex_package memo src macros pkg in
         {
           prog with
           sources = Source.derived_all prog.sources (List.rev src.derived);
