@@ -672,7 +672,8 @@ let emu data =
           ]);
     (* the BIR of an instruction, lifted on demand from the bytes, that
        the program has now, also in a hook, after the patch, of the Thumb code,
-       by the lower bit of its address *)
+       by the lower bit of its address, and of the code, that the program
+       writes *)
     case "emu/bir" (fun env ->
         let out =
           bap ~timeout:300. env
@@ -681,6 +682,7 @@ let emu data =
               input "emu/bir.ml";
               path data "bin/x86_64-linux-gnu-echo";
               path data "bin/arm-linux-gnueabihf-thumb-crc";
+              path data "bin/x86_64-linux-gnu-mprotect";
             ]
         in
         sequence env out
@@ -691,6 +693,11 @@ let emu data =
             ("lifts the code", "400727: 5 bytes\n.*RDI := 0xA\n");
             ("lifts the patched code", "400727: 5 bytes\n.*RDI := 0x2B\n");
             ("lifts the Thumb code", "202dd: 2 bytes\n.*<- LR");
+            ("lifts the unwritten code", "unwritten 405000: 2 bytes\n");
+            ( "lifts the written code in a hook",
+              "written hook 405000: 5 bytes\n.*RAX := 0x2A\n" );
+            ( "lifts the written code",
+              "written 405000: 5 bytes\n.*RAX := 0x2A\n" );
           ]);
     (* the emulators run side by side, each in its own engine, also of
        another target, with their own registers, memory, names and
@@ -1007,20 +1014,20 @@ let script_debugger data =
      that run in parallel, slow it down, e.g., on Windows *)
   :: case ~serial:true "script/debugger/bap:unicorn-executor/stepping-off"
        (fun env ->
-      let out =
-        bap ~timeout:20. env
-          [
-            "script";
-            input "script/debugger/stepping-off.ml";
-            path data "bin/x86_64-linux-gnu-crc-loop";
-          ]
-      in
-      check env "exits" (out.status = Exited 0);
-      sequence env out
-        [
-          ("prints the CRC", "1635920155");
-          ("stops while stepping", "stopped 3 times");
-        ])
+         let out =
+           bap ~timeout:20. env
+             [
+               "script";
+               input "script/debugger/stepping-off.ml";
+               path data "bin/x86_64-linux-gnu-crc-loop";
+             ]
+         in
+         check env "exits" (out.status = Exited 0);
+         sequence env out
+           [
+             ("prints the CRC", "1635920155");
+             ("stops while stepping", "stopped 3 times");
+           ])
   :: List.map
        (fun system ->
          case

@@ -13,7 +13,7 @@ let show emu addr =
 
 let () =
   match Bap_script.args () with
-  | [ echo; thumb ] ->
+  | [ echo; thumb; mprotect ] ->
       let emu = Emu.create ~args:[ "hello" ] (Bap_script.project echo) in
       show emu (Emu.pc emu);
       (* in a hook, where the program runs, at the address of the code *)
@@ -32,5 +32,17 @@ let () =
       (* the Thumb code of ARM, by the lower bit of the address *)
       let arm = Emu.create (Bap_script.project thumb) in
       printf "thumb pc %Lx\n" (Emu.pc arm);
-      show arm (Emu.pc arm)
-  | _ -> failwith "expected ECHO THUMB"
+      show arm (Emu.pc arm);
+      (* the code, that the program writes to its buffer at 0x405000, is
+         lifted from its bytes, the zeros before, mov $42, %eax after *)
+      let code = 0x405000L in
+      let emu = Emu.create (Bap_script.project mprotect) in
+      printf "unwritten ";
+      show emu code;
+      Emu.on_code emu ~first:code ~last:code (fun emu addr ->
+          printf "written hook ";
+          show emu addr);
+      ignore (Emu.run emu ~until:code);
+      printf "written ";
+      show emu (Emu.pc emu)
+  | _ -> failwith "expected ECHO THUMB MPROTECT"
