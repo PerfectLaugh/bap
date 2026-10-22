@@ -13,7 +13,7 @@ let () =
   let emu = Emu.create ~args:[ "hello" ] (Bap_script.project file) in
   ignore (Emu.run emu ~until:0x40076bL);
   (* mov $0xa, %edi, which prints the newline, prints + instead *)
-  Emu.patch emu 0x400727L "\xbf\x2b";
+  Emu.write emu 0x400727L "\xbf\x2b";
   let snapshot = Emu.snapshot emu in
   status (Emu.run emu);
   Emu.restore emu snapshot;

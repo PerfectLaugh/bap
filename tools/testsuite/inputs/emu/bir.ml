@@ -27,7 +27,7 @@ let () =
       show emu 0x40076bL;
       (* the patched code is lifted anew, mov $0xa, %edi becomes mov $0x2b *)
       show emu 0x400727L;
-      Emu.patch emu 0x400727L "\xbf\x2b";
+      Emu.write emu 0x400727L "\xbf\x2b";
       show emu 0x400727L;
       (* the Thumb code of ARM, by the lower bit of the address *)
       let arm = Emu.create (Bap_script.project thumb) in

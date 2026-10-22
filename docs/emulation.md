@@ -177,18 +177,20 @@ let () =
 | Function | Action |
 |----------|--------|
 | `registers`, `reg`, `set_reg` | the registers of the target, by name, e.g., `RAX` |
-| `read emu addr n`, `write emu addr data` | the bytes of the memory |
-| `patch emu addr data` | change the code, so that the change stays |
+| `read emu addr n`, `write emu addr data` | the bytes of the memory, also of the code, so that the change stays |
+| `write_direct emu addr data` | the bytes of Unicorn's copy of the memory, also in the hooks |
 | `bir emu addr` | the size and the BIR of the instruction at the address, lifted on demand from its current bytes, also in the hooks; Thumb on ARM by the lower bit of the address |
 | `symbols`, `add_symbol` | the names of the functions; name new code, e.g., code that the program unpacked |
 | `unstub emu name` | run the program's own code of a function, instead of its Lisp stub |
 
-`write` changes only Unicorn's copy of a read-only page. The change is lost when Unicorn copies the page again, e.g., after a snapshot, and the interpreter doesn't see it. Use `patch` for code that must stay changed:
+`write` stores the bytes to the memory of Primus, from which they go to Unicorn, so the change stays, also of a read-only page, e.g., of the code:
 
 ```ocaml
 (* mov $0xa, %edi, which prints the newline, prints + instead *)
-Emu.patch emu 0x400727L "\xbf\x2b"
+Emu.write emu 0x400727L "\xbf\x2b"
 ```
+
+`write_direct` changes only Unicorn's copy of a read-only page, which is lost when Unicorn copies the page again, e.g., after a snapshot, and which the interpreter doesn't see, but it is the only write in the hooks.
 
 The program has no disassembled BIR in a bare project, so `bir` lifts the instruction, as Primus does when it interprets it. The patched code is lifted from its new bytes:
 
@@ -206,7 +208,7 @@ match Emu.bir emu 0x400727L with
 | `on_read`, `on_write` | before each load or store in the range |
 | `on_call emu name f` | when the program calls the function; `f` returns `Default` to run it, or `Return x` to return `x` at once |
 
-`arg emu n` reads the arguments of the called function, as its prototype tells, e.g., from the api files. While the program runs, a hook may only `stop` it, or `read` and `write` the memory:
+`arg emu n` reads the arguments of the called function, as its prototype tells, e.g., from the api files. While the program runs, a hook may only `stop` it, or `read` and `write_direct` the memory:
 
 ```ocaml
 Emu.on_call emu "putchar" (fun emu ->

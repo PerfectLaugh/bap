@@ -331,28 +331,20 @@ let rec accessible t addr n f =
 
 let read t addr n = accessible t addr n (fun () -> X.uc_read (engine t) addr n)
 
-let write t addr data =
+(* the bytes go only to Unicorn, which translates the code anew, see
+   [X.uc_write] *)
+let write_direct t addr data =
   let n = String.length data in
   accessible t addr n (fun () ->
       let e = engine t in
       if X.uc_readable e addr n < n then raise Native.Denied;
-      X.uc_write e addr data;
-      (* the code, which Unicorn translated, is translated anew *)
-      let code =
-        List.exists
-          [ X.page_of addr; X.page_of Int64.(addr + of_int n - 1L) ]
-          ~f:(fun page ->
-            match Hashtbl.find e.pages page with
-            | Some { perm; _ } -> Uc.Perm.mem perm Uc.Perm.exec
-            | None -> false)
-      in
-      if code then Uc.flush_tb e.uc)
+      X.uc_write e addr data)
 
 (* the bytes go to Primus, from which they go to Unicorn, see
    [X.backing], and the code, that it translated, is translated anew *)
-let patch t addr data =
+let write t addr data =
   if not (paused t) then
-    invalid_arg "Bap_emu.patch: the program is not paused, e.g., in a hook";
+    invalid_arg "Bap_emu.write: the program is not paused, e.g., in a hook";
   (* the bytes are mapped and readable *)
   ignore (read t addr (String.length data) : string);
   resume t (X.Store (addr, data))

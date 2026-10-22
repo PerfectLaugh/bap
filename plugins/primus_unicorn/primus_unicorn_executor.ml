@@ -427,7 +427,7 @@ type request =
   | Restore of Primus.Machine.id
       (** the machine is killed, and a fork of the snapshot continues *)
   | Store of int64 * string
-      (** the bytes are stored to the memory of Primus, see [Bap_emu.patch] *)
+      (** the bytes are stored to the memory of Primus, see [Bap_emu.write] *)
   | Run of Primus.Machine.component
       (** the component runs in the machine, see [Bap_emu.primus] *)
   | Save of string * int64
@@ -1005,7 +1005,7 @@ let backing s memory : Primus.Memory.Backing.t =
             String.iteri data ~f:(fun i c ->
                 let addr = Int64.(addr + of_int i) in
                 (* the copies of the read-only pages too, e.g., of the
-                   code, that a script patches, see [Bap_emu.patch] *)
+                   code, that a script patches, see [Bap_emu.write] *)
                 match Hashtbl.find e.pages (page_of addr) with
                 | Some { snapshot; perm; _ } ->
                     Option.iter snapshot ~f:(fun known ->

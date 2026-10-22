@@ -114,21 +114,7 @@ val read : t -> int64 -> int -> string
     Unicorn yet, which a paused program copies. *)
 
 val write : t -> int64 -> string -> unit
-(** [write emu addr data] writes the bytes, also to the code, as the debuggers
-    do, raises [Invalid_argument] as {!read} does.
-
-    {b Warning:} the bytes of a read-only page, e.g., of the code, go only to
-    the copy of the page in Unicorn, not to the memory of the machine in Primus,
-    so they are lost, when Unicorn copies the page anew, e.g., after
-    {!snapshot}, which forks the machine, or after the protection of the page
-    changes, and Primus doesn't see them, e.g., when it interprets the code of
-    the page, see the taint and the symbolic execution. Use {!patch} for the
-    code, that must stay patched. It is the only write in the hooks.
-
-    The writable pages have no such problem, as their changes go to Primus. *)
-
-val patch : t -> int64 -> string -> unit
-(** [patch emu addr data] stores the bytes to the memory of the machine in
+(** [write emu addr data] stores the bytes to the memory of the machine in
     Primus, also to the read-only pages, e.g., to the code, from which they go
     to Unicorn, which translates the changed code anew, so that they stay, as
     the program changed them, e.g., after {!snapshot} or {!restore} of a later
@@ -136,12 +122,27 @@ val patch : t -> int64 -> string -> unit
     the executor tracks, are decoded and lifted anew from them.
 
     Raises [Invalid_argument] as {!read} does, or if the program is not paused,
-    e.g., in a hook. *)
+    e.g., in a hook, where {!write_direct} writes. *)
+
+val write_direct : t -> int64 -> string -> unit
+(** [write_direct emu addr data] writes the bytes to Unicorn, also to the code,
+    as the debuggers do, raises [Invalid_argument] as {!read} does. It is the
+    only write in the hooks.
+
+    {b Warning:} the bytes of a read-only page, e.g., of the code, go only to
+    the copy of the page in Unicorn, not to the memory of the machine in Primus,
+    so they are lost, when Unicorn copies the page anew, e.g., after
+    {!snapshot}, which forks the machine, or after the protection of the page
+    changes, and Primus doesn't see them, e.g., when it interprets the code of
+    the page, see the taint and the symbolic execution. Use {!write} for the
+    code, that must stay changed.
+
+    The writable pages have no such problem, as their changes go to Primus. *)
 
 val bir : ?thumb:bool -> t -> int64 -> (int * blk term list) option
 (** [bir emu addr] is the size and the BIR of the instruction at [addr], lifted
     on demand from the bytes, that the program has there now, e.g., after
-    {!patch}, as Primus lifts it, when it interprets the instruction, e.g., of
+    {!write}, as Primus lifts it, when it interprets the instruction, e.g., of
     the tainted or the symbolic values, or [None], if the bytes aren't an
     instruction. The instruction is in the Thumb state of ARM, if [thumb], by
     default, if the lower bit of [addr] is set, as in the program counter.
@@ -298,7 +299,7 @@ val unstub : t -> string -> unit
 (** [unstub emu name] runs the code of the function of the program in Unicorn
     again, instead of the stub, that replaced it, e.g., the Lisp stub of
     [malloc] of a static program, e.g., after the script patched the code, see
-    {!patch}, also when Primus calls the function, e.g., from another stub. The
+    {!write}, also when Primus calls the function, e.g., from another stub. The
     checkpoints keep it, see {!save}.
 
     Raises [Invalid_argument], if the program has no code of the function, e.g.,

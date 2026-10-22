@@ -30,9 +30,9 @@ let () =
           let c =
             Char.chr (Int64.to_int (Int64.logand (Emu.arg emu 0) 0xffL))
           in
-          (try Emu.patch emu 0L "x"
+          (try Emu.write emu 0L "x"
            with Invalid_argument _ ->
-             if !first then print_endline "no patch in the hook");
+             if !first then print_endline "no write in the hook");
           if !first then begin
             first := false;
             Emu.stop emu

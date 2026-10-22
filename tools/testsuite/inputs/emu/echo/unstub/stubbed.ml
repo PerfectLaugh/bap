@@ -32,7 +32,7 @@ let () =
    with Invalid_argument _ -> print_endline "putchar is external");
   Emu.unstub emu "print_endline";
   (* mov $0xa, %edi, which prints the newline, prints + instead *)
-  Emu.patch emu 0x400727L "\xbf\x2b";
+  Emu.write emu 0x400727L "\xbf\x2b";
   Emu.save emu "echo.ckpt";
   print_endline "== unstubbed";
   show emu (Emu.run emu)

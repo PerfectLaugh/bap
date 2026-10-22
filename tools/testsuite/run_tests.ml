@@ -496,7 +496,7 @@ let emu data =
             ("calls it", "print_endline was called 11 times");
           ]);
     (* the patched code stays, after the snapshot forks the machine, and
-       after it is restored, which Bap_emu.write doesn't guarantee *)
+       after it is restored, which Bap_emu.write_direct doesn't guarantee *)
     (* the script reads and writes the state of the machine in Primus *)
     case "emu/x86_64-linux-gnu-echo/primus" (fun env ->
         let out =
@@ -1476,7 +1476,7 @@ let emu_targets data =
                   ("steps", "step: paused, moved true");
                   ( "has no argument outside of a call",
                     "no argument outside of a call" );
-                  ("has no patch in the hook", "no patch in the hook");
+                  ("has no write in the hook", "no write in the hook");
                   ("pauses at putchar", "first putchar: paused");
                   ("restores the paused program", "restored: paused");
                   ( "replays the program",
