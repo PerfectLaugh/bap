@@ -53,7 +53,14 @@ let pp_ident ppf ident =
   | Var { num; ver } -> Format.fprintf ppf "#%a%a" Int63.pp num pp_ver ver
 
 let pp ppf (_, v) = Format.fprintf ppf "%a" pp_ident v
-let name (_, v) = Format.asprintf "%a" pp_ident v
+
+(* the name of a register, which is the most common, isn't formatted,
+   as the names are looked up often, e.g., by the executors *)
+let name (_, v) =
+  match v with
+  | Reg { name; ver = 0 } -> name
+  | _ -> Format.asprintf "%a" pp_ident v
+
 let ident (_, v) = v
 let sort (s, _) = s
 let is_virtual v = match ident v with Let _ | Var _ -> true | Reg _ -> false
