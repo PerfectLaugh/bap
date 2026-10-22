@@ -22,7 +22,7 @@ let use_llvm_decoding () =
 
 let enable_llvm encoding triple =
   Dis.register encoding @@ fun _ ->
-  Dis.create ~attrs:"+a,+c,+d,+m" ~backend:"llvm" triple
+  Dis.create ~attrs:"+a,+c,+d,+f,+m,+zba,+zbb,+zbs" ~backend:"llvm" triple
 
 let pcode = Theory.Language.declare ~package:"bap" "pcode-riscv"
 

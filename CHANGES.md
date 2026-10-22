@@ -20,6 +20,8 @@
 - adds `Bap_emu.interpret`, which runs an instruction in Primus, `Bap_emu.reg_word` and `Bap_emu.set_reg_word`, and keeps the address of `Bap_emu.set_pc` after the snapshots
 - adds the corpus of testsuite/src/corpus, whose instructions `check.ml` runs in Unicorn and in Primus, and compares
 - adds the FPU of MIPS and MIPS64, the loads, the stores, and the moves of COP1, the arithmetic, the conversions, the compares, the condition codes FCC0-FCC7, and the branches on them, with the legacy NaNs, the divisions, that don't fault, as the hardware, runs MIPS64 with the 64-bit FPU registers of the n64 ABI, and turns on the FPU of RISC-V in Unicorn
+- adds the F and D extensions of RISC-V, with the rounding modes of the instructions, the NaN-boxing, and the fused operations, also on RV32, whose FPU registers are of 64 bits, the Zba, Zbb, and Zbs extensions, which are decoded now, and the CSR instructions, and fixes the divisions by zero, and the sizes of the loads and the stores of the halves and the words on RV32
+- refers, in Primus Lisp, with the reference of a size, e.g., x0:64, to the variable of the size of a global, e.g., of the float intrinsics on the 32-bit targets
 - continues MIPS from the branch, whose delay slot Unicorn stopped in, and outside of a delay slot, after Primus interpreted, or another thread ran, as Unicorn keeps the pending branch
 - jumps, in `Primus.Interpreter.step`, to the address of the label, that the knowledge has, e.g., of a function of the program, that a stub replaced, and keeps the position of the interpreter at the subroutine of the instruction, after it runs
 - fixes the arena of the Lisp `malloc`, which didn't grow for the header of the chunk, that filled it

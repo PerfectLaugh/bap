@@ -69,7 +69,9 @@ let riscv t =
   let mem = reg mems "mem" in
   let pc = reg t "PC" in
   let ints = untyped @@ vars 'X' t in
-  let flts = untyped @@ vars 'F' t in
+  (* the floating-point registers are of FLEN, 64 bits with the D
+     extension, also on RV32 *)
+  let flts = untyped @@ vars 'F' r64 in
   let vars = ints @< flts @< [ pc ] @< [ mem ] in
   let bits = Theory.Bitv.size t in
   let name = sprintf "riscv%d" bits in
