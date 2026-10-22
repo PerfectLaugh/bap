@@ -48,21 +48,26 @@ module Make (Param : Param) (Machine : Primus.Machine.S) = struct
     | None ->
         warning "unable to initialize stack - no stack pointer@\n";
         Machine.return ()
-    | Some sp ->
+    | Some sp -> (
         Env.set sp bottom >>= fun () ->
         Machine.get () >>= fun proj ->
         (* the stack of Windows is zeroed, which the programs of PE read,
-           e.g., __chkstk_ms probes its pages *)
-        let init =
-          match
-            Ogre.eval
-              (Ogre.request Image.Scheme.format)
-              (Project.specification proj)
-          with
-          | Ok (Some "coff") -> Some (fun _ -> Machine.return (Word.zero 8))
-          | _ -> None
-        in
-        Mem.allocate ~readonly:false ~executable:false ?init top stack_size
+           e.g., __chkstk_ms probes its pages, and its zeros are mapped,
+           as the segments of the program are, as the zeros, that are
+           stored, are a value for each byte *)
+        match
+          Ogre.eval
+            (Ogre.request Image.Scheme.format)
+            (Project.specification proj)
+        with
+        | Ok (Some "coff") -> (
+            let zeros = Bigstring.init stack_size ~f:(fun _ -> '\000') in
+            match Memory.create LittleEndian top zeros with
+            | Ok mem -> Mem.map ~readonly:false ~executable:false mem
+            | Error err ->
+                failwithf "can't map the stack: %s" (Error.to_string_hum err) ()
+            )
+        | _ -> Mem.allocate ~readonly:false ~executable:false top stack_size)
 
   let setup_registers () =
     let zero = Generator.static 0 in
