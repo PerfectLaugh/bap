@@ -175,6 +175,15 @@ static void check_exit_request_mem(TCGContext *tcg_ctx)
 
 static void tcg_gen_req_mo(TCGContext *tcg_ctx, TCGBar type)
 ]=])
+# BAP: SO, OV, and CA of XER of PowerPC are the fields of their own of
+# QEMU, which cpu_read_xer and cpu_write_xer merge, so that the carry,
+# e.g., of adde, is the one of the register, that is written
+patch(qemu/target/ppc/unicorn.c
+  "*(uint32_t *)value = env->xer;"
+  "*(uint32_t *)value = cpu_read_xer(env);")
+patch(qemu/target/ppc/unicorn.c
+  "env->xer = *(uint32_t *)value;"
+  "cpu_write_xer(env, *(uint32_t *)value);")
 # BAP: the PC, that is written, starts anew, outside of a delay slot of
 # MIPS, as the branch, whose delay slot it was, e.g., of another thread,
 # that ran, is not pending, while uc_emu_start keeps it, so that the

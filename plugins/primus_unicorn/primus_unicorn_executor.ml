@@ -865,6 +865,11 @@ let create session target ~foreign ~externals =
       let status = Option.value_exn (Uc.reg Mips "CP0_STATUS") in
       (* and the 64-bit FPU registers, FR, of the n64 ABI *)
       Uc.reg_write uc status Int64.(Uc.reg_read uc status lor 0x040000E0L)
+  (* the FPU and AltiVec of PowerPC, which Linux enables, are off at the
+     reset, as MSR.FP and MSR.VEC are 0 *)
+  | Ppc ->
+      Option.iter (Uc.reg Ppc "MSR") ~f:(fun msr ->
+          Uc.reg_write uc msr Int64.(Uc.reg_read uc msr lor 0x02002000L))
   (* the FPU of RISC-V, which Linux enables, is off at the reset, as
      mstatus.FS is 0 *)
   | Riscv ->

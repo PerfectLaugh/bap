@@ -29,9 +29,10 @@
   0x22)
 
 (defun ieee754-policy ()
-  "the integers of the NaNs are the minimum"
+  "the first NaN operand is the result, and the integers of the NaNs are
+   the minimum"
   (declare (context (target powerpc-family)))
-  0x30)
+  0x34)
 
 (defun ieee754-policy ()
   "the invalid integers are the maximum"
