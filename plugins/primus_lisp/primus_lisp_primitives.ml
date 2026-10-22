@@ -350,8 +350,12 @@ module Closure (Machine : Primus.Machine.S) = struct
             >>= fun () ->
             Linker.exec (`addr (Option.value_exn (Term.get_attr sub address)))
             >>= fun () ->
+            (* the result is where the function returns it, e.g., RAX,
+               as the variable of the argument is assigned only by the
+               interpreter, not by the code, that runs elsewhere, e.g.,
+               in Unicorn, or of the anonymous function *)
             Machine.Seq.find_map args ~f:(fun arg ->
-                if is_out_intent arg then Eval.get (Arg.lhs arg) >>| Option.some
+                if is_out_intent arg then Eval.exp (Arg.rhs arg) >>| Option.some
                 else Machine.return None)
             >>= fun rval ->
             let teardown_frame =

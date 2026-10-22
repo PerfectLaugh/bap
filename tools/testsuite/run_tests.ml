@@ -716,6 +716,7 @@ let emu data =
             ("runs the written code", "returns 42\n");
             ("runs the code, that memcpy rewrote", "returns 7\n");
             ("runs the code, that the store rewrote", "returns 9\n");
+            ("exits with the result of main", "exited 7\n");
           ]);
     (* the emulators run side by side, each in its own engine, also of
        another target, with their own registers, memory, names and
