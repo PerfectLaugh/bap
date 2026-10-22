@@ -467,12 +467,19 @@ module Persistent = struct
           | true ->
               Env.get var >>| fun x ->
               Map.find direct (Primus.Value.id x)
-              |> Option.map ~f:(fun objects -> (var, words objects)))
+              |> Option.bind ~f:(fun objects ->
+                  Option.some_if
+                    (not (Set.is_empty objects))
+                    (var, words objects)))
       >>| fun direct ->
+      (* the locations without the taint, e.g., that were attached
+         nothing, aren't tracked, when the checkpoint is restored *)
       let indirect =
         Map.to_alist indirect
-        |> List.map ~f:(fun (addr, objects) ->
-            (Primus.Value.to_word addr, words objects))
+        |> List.filter_map ~f:(fun (addr, objects) ->
+            Option.some_if
+              (not (Set.is_empty objects))
+              (Primus.Value.to_word addr, words objects))
       in
       if List.is_empty kinds then None
       else
