@@ -536,6 +536,12 @@ type request =
       (** the bytes are stored to the memory of Primus, see [Bap_emu.write] *)
   | Run of Primus.Machine.component
       (** the component runs in the machine, see [Bap_emu.primus] *)
+  | Set_pc of int64
+      (** the machine continues from the address, when it continues, see
+          [Bap_emu.set_pc] *)
+  | Interpret
+      (** the instruction, at which the machine paused, runs in Primus, as its
+          lifted semantics, see [Bap_emu.interpret] *)
   | Save of string * int64
       (** the checkpoint of the machine, which continues from the address, is
           saved to the file, see [Bap_emu.save] *)
@@ -4056,9 +4062,9 @@ module Make (Machine : Primus.Machine.S) = struct
      they continue, see [continues], and returns the address of the next
      one, which on ARM stays in the Thumb state, unless the jump sets the
      lower bit *)
-  let interpret e pc =
+  let interpret ?(budget = 4096) ?(slot = true) e pc =
     let* () = pull e in
-    let* pc = branch_of_slot e pc in
+    let* pc = if slot then branch_of_slot e pc else Machine.return pc in
     (* the call of the threads runs in Unicorn, see [Threads] *)
     let threads_call site =
       match Threads.abi e with
@@ -4067,7 +4073,7 @@ module Make (Machine : Primus.Machine.S) = struct
           let+ n = Env.get (Var.create number (Type.imm (e.bytes * 8))) in
           Threads.is_call e site (int64_of_word (Primus.Value.to_word n))
     in
-    let stopped = ref false and linked = ref false and budget = 4096 in
+    let stopped = ref false and linked = ref false in
     let rec run pc n =
       let insn = pc in
       lift ~thumb:(in_thumb e pc) e (code_addr e pc) >>= function
@@ -4089,7 +4095,13 @@ module Make (Machine : Primus.Machine.S) = struct
                 | true ->
                     stopped := true;
                     Machine.return pc
-                | false -> call_intrinsic e site >>| fun () -> next)
+                | false ->
+                    (* the intrinsics run, as the interpreter calls them
+                       by their names, and the instruction continues after
+                       them, e.g., it moves their results *)
+                    let next = word e (code_addr e next) in
+                    let+ dst = Interpreter.step ~next blks in
+                    int64_of_word (Primus.Value.to_word dst))
             | None -> (
                 let next = word e (code_addr e next) in
                 match e.arch with
@@ -4159,6 +4171,8 @@ module Make (Machine : Primus.Machine.S) = struct
     match Effect.perform (Paused (pc, id)) with
     | Continue pc -> Machine.return pc
     | Map addr -> ensure_page e addr >>= fun () -> serve pc
+    | Interpret -> interpret ~budget:1 ~slot:false e pc >>= serve
+    | Set_pc pc -> serve pc
     | Store (addr, data) ->
         (* the stored bytes of a read-only segment would be writable, so
            they keep their protection *)

@@ -54,8 +54,12 @@ module SetupPLT (Machine : Primus.Machine.S) = struct
 
   let unresolve = load_table >>= filter_plt >>= unlink
 
+  (* the intrinsics are not called, e.g., of the instructions, that
+     Primus lifts, when it interprets them, which the program doesn't
+     have *)
   let correct_sp ignore sp addend (name, _) =
-    if Set.mem ignore name then Machine.return ()
+    if Set.mem ignore name || String.is_prefix name ~prefix:"intrinsic:" then
+      Machine.return ()
     else
       Interpreter.get sp >>= fun x ->
       Interpreter.binop Bil.plus x addend >>= Interpreter.set sp

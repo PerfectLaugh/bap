@@ -875,7 +875,22 @@ module Make (Machine : Machine) = struct
               | [] -> None
               | blks -> Some blks
             in
-            let goto : label -> _ = function
+            (* the code of the label without an address, e.g., of an
+               intrinsic, runs, by its name, as the jump of the program
+               runs it, after which the instruction continues at the
+               return of the call, if it is in the instruction *)
+            let exec dst ~return =
+              let code =
+                match String.chop_prefix (Tid.name dst) ~prefix:"@" with
+                | Some name -> `symbol name
+                | None -> `tid dst
+              in
+              Code.exec code >>= fun () ->
+              match Option.bind return ~f:inside with
+              | Some blks' -> step_from ~next blks Init blks'
+              | None -> Value.of_word next
+            in
+            let goto ?return : label -> _ = function
               | Indirect x -> eval_exp x >>= leave_insn cond
               | Direct dst -> (
                   match inside dst with
@@ -896,16 +911,17 @@ module Make (Machine : Machine) = struct
                               Value.of_word
                                 (Word.create addr (Word.bitwidth next))
                               >>= leave_insn cond
-                          (* the code without an address, e.g., an
-                             intrinsic, runs, as the jump of the program
-                             runs it *)
-                          | None ->
-                              Code.exec (`tid dst) >>= fun () ->
-                              Value.of_word next)))
+                          | None -> exec dst ~return)))
             in
             match Jmp.kind t with
             | Goto l | Ret l -> goto l
-            | Call c -> goto (Call.target c)
+            | Call c ->
+                let return =
+                  match Call.return c with
+                  | Some (Direct r) -> Some r
+                  | _ -> None
+                in
+                goto ?return (Call.target c)
             | Int (n, r) -> (
                 interrupt n >>= fun () ->
                 match inside r with

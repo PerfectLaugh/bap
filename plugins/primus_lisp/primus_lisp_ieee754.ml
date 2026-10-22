@@ -96,6 +96,103 @@ module Primitives (Machine : Primus.Machine.S) = struct
 
   let is_nan x = Float.Class.(compare Nan (Float.classify x) = 0)
 
+  (* [(ieee754-op OP RMODE FROM TO POLICY X ...)] applies the operation
+     of the intrinsics of IEEE 754, exactly, see Primus_lisp_softfloat:
+     OP is 1 fadd, 2 fsub, 3 fmul, 4 fdiv, 5 fsqrt, 6 fround, 7 fconvert,
+     8 cast_float, 9 cast_sfloat, 10 cast_int, 11 cast_sint, 12 forder,
+     13 is_nan, 14 is_inf, 15 fmad (X * Y + Z, rounded once), RMODE is 0
+     rne, 1 rtz, 2 rtp, 3 rtn, 4 rna,
+     FROM and TO are the sizes of the operands and of the result, of the
+     floats, or of the integers of the casts, and POLICY is the bits of
+     the NaNs and of the invalid integers of the target, 1 the default
+     NaN is negative, 2 the NaNs are canonical, 4 the first NaN operand
+     is the result, else the first signaling one, and, from the bit 4, 0
+     the integers saturate, and the NaNs are 0, 1 they are indefinite, 2
+     the NaNs are the maximum, 3 the NaNs are the minimum *)
+  let define_op () =
+    let module Op (Machine : Primus.Machine.S) = struct
+      open Machine.Syntax
+      module Lisp = Primus.Lisp.Make (Machine)
+      module Value = Primus.Value.Make (Machine)
+      module F = Primus_lisp_softfloat
+
+      let int x = Word.to_int_exn (Value.to_word x)
+      let z x = Bitvec.to_bigint (Word.to_bitvec (Value.to_word x))
+
+      let run = function
+        | op :: rm :: src :: dst :: policy :: args -> (
+            let op = int op and src = int src and dst = int dst in
+            let policy = int policy in
+            let rm =
+              match int rm with
+              | 1 -> F.Rtz
+              | 2 -> F.Rtp
+              | 3 -> F.Rtn
+              | 4 -> F.Rna
+              | _ -> F.Rne
+            in
+            let policy =
+              {
+                F.default_negative = policy land 1 <> 0;
+                canonical = policy land 2 <> 0;
+                first = policy land 4 <> 0;
+                invalid_int =
+                  (match (policy lsr 4) land 3 with
+                  | 1 -> `Indefinite
+                  | 2 -> `Saturate_max
+                  | 3 -> `Saturate_min
+                  | _ -> `Saturate_zero);
+              }
+            in
+            let fmt n =
+              match F.format n with
+              | Some f -> f
+              | None -> invalid_argf "ieee754-op: no binary%d format" n ()
+            in
+            let args = List.map args ~f:z in
+            let word width x =
+              Value.of_word
+                (Word.create
+                   (Bitvec.bigint_unsafe
+                      (Z.logand x (Z.pred (Z.shift_left Z.one width))))
+                   width)
+            in
+            let bool b = Value.of_word (Word.of_bool b) in
+            match (op, args) with
+            | 1, [ x; y ] -> word dst (F.add policy (fmt src) rm x y ~sub:false)
+            | 2, [ x; y ] -> word dst (F.add policy (fmt src) rm x y ~sub:true)
+            | 3, [ x; y ] -> word dst (F.mul policy (fmt src) rm x y)
+            | 4, [ x; y ] -> word dst (F.div policy (fmt src) rm x y)
+            | 5, [ x ] -> word dst (F.sqrt policy (fmt src) rm x)
+            | 6, [ x ] -> word dst (F.round_integral policy (fmt src) rm x)
+            | 7, [ x ] -> word dst (F.convert policy (fmt src) (fmt dst) rm x)
+            | 8, [ x ] ->
+                word dst (F.of_int (fmt dst) rm ~signed:false ~width:src x)
+            | 9, [ x ] ->
+                word dst (F.of_int (fmt dst) rm ~signed:true ~width:src x)
+            | 10, [ x ] ->
+                word dst
+                  (F.to_int policy (fmt src) rm ~signed:false ~width:dst x)
+            | 11, [ x ] ->
+                word dst
+                  (F.to_int policy (fmt src) rm ~signed:true ~width:dst x)
+            | 12, [ x; y ] -> bool (F.less (fmt src) x y)
+            | 13, [ x ] -> bool (F.is_nan (fmt src) x)
+            | 14, [ x ] -> bool (F.is_inf (fmt src) x)
+            | 15, [ x; y; z ] -> word dst (F.fma policy (fmt src) rm x y z)
+            | _ ->
+                Lisp.failf "ieee754-op: the operation %d with %d operands" op
+                  (List.length args) ())
+        | _ -> Lisp.failf "ieee754-op: expects OP RMODE FROM TO POLICY X ..." ()
+    end in
+    Lisp.define "ieee754-op"
+      (module Op)
+      ~types:Primus.Lisp.Type.Spec.(all any @-> any)
+      ~docs:
+        "(ieee754-op OP RMODE FROM TO POLICY X ...) applies the operation of \
+         IEEE 754, exactly, in the formats of the sizes, see \
+         primus_lisp_ieee754.ml"
+
   let init () =
     Machine.sequence
       Stdlib.
@@ -136,6 +233,7 @@ module Primitives (Machine : Primus.Machine.S) = struct
           define ord "gt" Float.(( > ));
           define ord "ge" Float.(( >= ));
           define cnd "is-nan" is_nan;
+          define_op ();
         ]
 end
 

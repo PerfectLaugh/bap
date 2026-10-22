@@ -131,7 +131,8 @@ let start init (entry : Primus.Linker.name) =
         let module Component = (val component : Primus.Machine.Component) in
         let module Component = Component (Machine) in
         Component.init () >>= ended
-    | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ | X.Save _ ->
+    | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ | X.Save _ | X.Interpret
+    | X.Set_pc _ ->
         Machine.return ()
   in
   ended ()
@@ -218,9 +219,12 @@ let pc t =
   | Suspended (pc, _, _) -> pc
   | _ -> invalid_arg "Bap_emu: the program is not paused"
 
+(* the machine continues from the address, also after the other
+   requests, e.g., of the snapshots, which the machine serves at its
+   address *)
 let set_pc t addr =
   match t.state with
-  | Suspended (_, id, k) -> t.state <- Suspended (addr, id, k)
+  | Suspended _ -> resume t (X.Set_pc addr)
   | _ -> invalid_arg "Bap_emu: the program is not paused"
 
 (* the machine, which is of the system of the emulator, as the systems
@@ -327,6 +331,12 @@ let step t =
   end;
   status t
 
+let interpret t =
+  if not (paused t) then
+    invalid_arg "Bap_emu.interpret: the program is not paused, e.g., in a hook";
+  resume t X.Interpret;
+  status t
+
 let registers t = Target.Regs.names (engine t).regs
 
 let reg t name =
@@ -336,6 +346,15 @@ let reg t name =
 
 let set_reg t name x =
   if not (Target.Regs.write_name (engine t).regs name (Word.of_int64 x)) then
+    invalid_argf "Bap_emu: unknown register %s" name ()
+
+let reg_word t name =
+  match Target.Regs.read_name (engine t).regs name with
+  | Some x -> x
+  | None -> invalid_argf "Bap_emu: unknown register %s" name ()
+
+let set_reg_word t name x =
+  if not (Target.Regs.write_name (engine t).regs name x) then
     invalid_argf "Bap_emu: unknown register %s" name ()
 
 (* the pages, which a paused program copies to Unicorn, as Primus has

@@ -84,6 +84,13 @@ val run : ?until:int64 -> t -> status
 val step : t -> status
 (** [step emu] runs one instruction in Unicorn. *)
 
+val interpret : t -> status
+(** [interpret emu] runs the instruction, at which the program paused, in
+    Primus, which interprets its lifted semantics, e.g., to compare them with
+    {!step}, after which the program pauses at the next one, or the status
+    tells, why it failed, e.g., an instruction without semantics. Raises
+    [Invalid_argument], if the program is not paused. *)
+
 val status : t -> status
 (** the state of the program *)
 
@@ -107,6 +114,14 @@ val reg : t -> string -> int64
 
 val set_reg : t -> string -> int64 -> unit
 (** [set_reg emu name x] writes [x] to the register. *)
+
+val reg_word : t -> string -> word
+(** [reg_word emu name] the whole value of the register, of its width, e.g., of
+    the 256 bits of YMM0, raises [Invalid_argument] for the unknown register. *)
+
+val set_reg_word : t -> string -> word -> unit
+(** [set_reg_word emu name x] writes the bits of [x], of the width of the
+    register, to the register. *)
 
 val read : t -> int64 -> int -> string
 (** [read emu addr n] reads [n] bytes from [addr], raises [Invalid_argument], if

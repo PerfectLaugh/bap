@@ -1,3 +1,4 @@
+(require ieee754-intrinsics)
 (require stdlib)
 (require stdio)
 (require string)
