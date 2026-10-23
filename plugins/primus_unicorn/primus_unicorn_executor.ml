@@ -2724,9 +2724,12 @@ module Make (Machine : Primus.Machine.S) = struct
        [Primus.Interpreter.stop_reached] *)
     let* pcs = observed Primus.Interpreter.pc_change in
     let* loading = observed Primus.Interpreter.loading in
-    let* loaded = observed Primus.Interpreter.loaded in
     let* storing = observed Primus.Interpreter.storing in
-    let+ stored = observed Primus.Interpreter.stored in
+    (* the observers of the loads and the stores, that need only the
+       tracked values, e.g., of the taint, see them in the interpreter,
+       which runs the code, that uses them, see [Primus.Track.cover] *)
+    let* loaded = Track.uncovered Primus.Interpreter.loaded in
+    let+ stored = Track.uncovered Primus.Interpreter.stored in
     watch e { pcs; reads = loading || loaded; writes = storing || stored }
 
   (* the loads and the stores of the code, that Unicorn ran, which the

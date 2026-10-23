@@ -46,6 +46,7 @@ module Make (Machine : Monad.S) : sig
 end
 
 val observed : 'e observations -> 'a t -> bool
+val observers : 'e observations -> 'a t -> int
 val empty : 'e observations
 val list_providers : unit -> provider list
 val list : unit -> Info.t list

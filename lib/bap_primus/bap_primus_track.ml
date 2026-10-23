@@ -15,6 +15,9 @@ type t = {
   addrs : Addr.Set.t;
   pages : int Int64.Map.t;
   version : int;
+  covered : int String.Map.t;
+      (** the numbers of the observers of the observations, by their names, that
+          need the events of the tracked values only, see [cover] *)
 }
 
 let state =
@@ -25,6 +28,7 @@ let state =
         addrs = Addr.Set.empty;
         pages = Int64.Map.empty;
         version = 0;
+        covered = String.Map.empty;
       })
 
 let marked, on_marked =
@@ -69,6 +73,7 @@ module Make (Machine : Machine) = struct
             Map.update s.pages page ~f:(function None -> 1 | Some n -> n + 1);
           values = s.values;
           version = s.version + 1;
+          covered = s.covered;
         }
       >>= fun () -> Machine.Observation.make on_marked addr
 
@@ -107,4 +112,19 @@ module Make (Machine : Machine) = struct
     Machine.Local.get state >>| fun s -> not (Set.is_empty s.addrs)
 
   let version = Machine.Local.get state >>| fun s -> s.version
+
+  let cover key =
+    Machine.Local.update state ~f:(fun s ->
+        {
+          s with
+          covered =
+            Map.update s.covered (Observation.name key) ~f:(function
+              | None -> 1
+              | Some n -> n + 1);
+        })
+
+  let uncovered key =
+    Machine.Observation.observers key >>= fun n ->
+    Machine.Local.get state >>| fun s ->
+    n > Option.value (Map.find s.covered (Observation.name key)) ~default:0
 end

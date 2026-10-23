@@ -15,4 +15,6 @@ module Make (Machine : Machine) : sig
   val active : bool Machine.t
   val has_marks : bool Machine.t
   val version : int Machine.t
+  val cover : 'a Bap_primus_observation.t -> unit Machine.t
+  val uncovered : 'a Bap_primus_observation.t -> bool Machine.t
 end

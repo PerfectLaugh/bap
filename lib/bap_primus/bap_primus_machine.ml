@@ -202,6 +202,9 @@ module Make (M : Monad.S) = struct
     let observed key =
       observations () >>| fun os -> Bap_primus_observation.observed os key
 
+    let observers key =
+      observations () >>| fun os -> Bap_primus_observation.observers os key
+
     let post key ~f =
       unrestricted () >>= function
       | None -> return ()

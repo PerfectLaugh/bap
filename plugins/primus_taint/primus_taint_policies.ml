@@ -18,6 +18,16 @@ struct
 
   let ( --> ) rs rd srcs dst =
     name >>= fun p -> Policy.propagate p rs rd srcs dst
+
+  (* the loads and the stores propagate the taint only from and to the
+     tainted values and locations, which are tracked, so the executors,
+     e.g., Unicorn, leave the code, that uses them, to the interpreter,
+     and needn't make them for the rest of the code, see
+     [Primus.Track.cover] *)
+  let covered =
+    let module Track = Primus.Track.Make (Machine) in
+    Track.cover Primus.Interpreter.loaded >>= fun () ->
+    Track.cover Primus.Interpreter.stored
 end
 
 module Computation (Machine : Primus.Machine.S) = struct
@@ -53,6 +63,7 @@ module Computation (Machine : Primus.Machine.S) = struct
         [
           Interpreter.loaded >>> loaded;
           Interpreter.stored >>> stored;
+          covered;
           Interpreter.binop >>> binop;
           Interpreter.unop >>> unop;
           Interpreter.extract >>> extract;
@@ -93,6 +104,7 @@ module Exact (Machine : Primus.Machine.S) = struct
         [
           Interpreter.loaded >>> loaded;
           Interpreter.stored >>> stored;
+          covered;
           Interpreter.extract >>> extract;
           Interpreter.concat >>> concat;
           Interpreter.cast >>> cast;

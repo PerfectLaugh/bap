@@ -439,6 +439,19 @@ module Make (Machine : Machine) = struct
           if String.equal curr.name (virtual_memory target).name then
             Tracked.stored addr value
           else Machine.return ()
+
+    (* the generated value isn't stored by the program, so it marks its
+       location, if it is tracked, but doesn't unmark it, e.g., the
+       location of the zeros of a page, that is marked, as tainted *)
+    let generated addr value =
+      Tracked.is_tracked value >>= function
+      | false -> Machine.return ()
+      | true ->
+          memory >>= fun curr ->
+          Machine.gets Project.target >>= fun target ->
+          if String.equal curr.name (virtual_memory target).name then
+            Tracked.mark addr
+          else Machine.return ()
   end
 
   let switch curr = Machine.Local.update state ~f:(fun s -> { s with curr })
@@ -531,7 +544,7 @@ module Make (Machine : Machine) = struct
     store_word ?notify arch size ~addr word s.values >>= fun (values, keys) ->
     put_curr { s with values } >>= fun () ->
     Machine.List.iter keys ~f:(fun key ->
-        Track.stored key (Map.find_exn values key))
+        Track.generated key (Map.find_exn values key))
     >>| fun () -> Map.find_exn values addr
 
   let read addr ({ values } as s) =

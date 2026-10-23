@@ -142,6 +142,13 @@ let observed os key =
   || (not (List.is_empty (callbacks os p.key)))
   || Stream.has_subscribers p.data
 
+(* the number of the observers, the watchers, and the streams *)
+let observers os key =
+  let p = Hashtbl.find_exn providers (name key) in
+  List.length (callbacks os key)
+  + List.length (callbacks os p.key)
+  + if Stream.has_subscribers p.data then 1 else 0
+
 let empty = Map.empty
 let list_providers () = Hashtbl.data providers
 let list () = list_providers () |> List.map ~f:(fun { info } -> info)

@@ -506,6 +506,12 @@ module Std : sig
               emulator, which hooks its events, make it only when it is needed.
 
               @since 2.6.0 *)
+
+          val observers : 'a observation -> int t
+          (** [observers observation] the number of the observers, the watchers,
+              and the streams of the [observation], see {!Track.uncovered}.
+
+              @since 2.6.0 *)
         end
 
         (** Computation Syntax.*)
@@ -2742,8 +2748,8 @@ module Std : sig
         int64 ->
         string ->
         (int * string * blk term list) option knowledge
-      (** [named project addr code] the size, the name, e.g., [tBLXi] of
-          LLVM, and the IR of the instruction, as {!instruction}.
+      (** [named project addr code] the size, the name, e.g., [tBLXi] of LLVM,
+          and the IR of the instruction, as {!instruction}.
 
           @since 3.0.0 *)
 
@@ -2890,6 +2896,18 @@ module Std : sig
 
         val version : int Machine.t
         (** [version] changes, when the tracked values or locations change *)
+
+        val cover : 'a observation -> unit Machine.t
+        (** [cover observation] declares, that an observer of the [observation],
+            which the caller adds, needs only the events of the tracked values
+            and locations, e.g., of the loads and the stores, that propagate the
+            taint, so that the executors, that leave the code, which uses them,
+            to the interpreter, e.g., Unicorn, don't make them for the rest of
+            the code. *)
+
+        val uncovered : 'a observation -> bool Machine.t
+        (** [uncovered observation] if the [observation] has an observer, or a
+            watcher, that isn't covered, see {!cover} *)
       end
     end
 

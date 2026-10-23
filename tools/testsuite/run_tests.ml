@@ -1302,6 +1302,33 @@ let smc data =
           contains env "runs the patched code" out "s 250216 250216"))
     [ "bap:unicorn-executor"; "bap:lifted-executor" ]
 
+(* the taint of the bytes of the page of the bss, which are generated,
+   when they are read, stays, and the code, that doesn't use the
+   tainted values, runs in the engine, without the events of its loads
+   and stores, which the observers of the taint don't need, see
+   taint-bss.c, so that it ends in time *)
+let taint_bss data =
+  List.map
+    (fun engine ->
+      case ("emu/taint-bss/" ^ engine) (fun env ->
+          let out =
+            bap ~timeout:60. env
+              [
+                "script";
+                input "emu/taint-bss/script.ml";
+                engine;
+                path data "bin/x86_64-linux-gnu-taint-bss";
+              ]
+          in
+          sequence env out
+            [
+              ("taints the CRC of buf", "RDX: input\n");
+              ("taints the count of its odd bytes", "RCX: input\n");
+              ("doesn't taint the other CRC", "RSI: -\n");
+              ("exits", "exited\n");
+            ]))
+    [ "unicorn"; "lifted" ]
+
 (* calloc of Primus Lisp returns the zeros, also in the arena, whose
    values are random, which the engine has, and null, if the size
    overflows, see calloc.c *)
@@ -2240,6 +2267,7 @@ let tests =
     mprotect;
     smc;
     calloc;
+    taint_bss;
     printf_family;
     mmap;
     pages;
