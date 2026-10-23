@@ -476,8 +476,9 @@ intnat bap_jit_run(intnat fn, value mem, value regs, value code,
     for (;;) {
         f->undo = 0;
         int32_t r = ((block)fn)(f, ptrs);
-        if ((r & 3) == 0) {
-            /* the instruction, that stopped, didn't run */
+        if ((r & 3) == 0 || (r & 3) == 3) {
+            /* the instruction, that stopped, didn't run, e.g., the delay
+               slot of the branch, that is taken */
             for (uint32_t i = f->undo; i-- > 0;)
                 memcpy(m->undo[i].at, &m->undo[i].old, m->undo[i].size);
             return r;

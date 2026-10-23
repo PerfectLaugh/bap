@@ -19,8 +19,10 @@
    The block returns 4k, if its instruction k stopped, before it ran,
    e.g., as its access faulted, or it divided by zero, so that the engine
    runs it, 4k + 1, if the instruction k jumped to the target, which is
-   in the frame, and 4k + 2, if it is the last instruction, which didn't
-   jump. The instructions, that the block can't run, e.g., that call an
+   in the frame, 4k + 2, if it is the last instruction, which didn't
+   jump, and 4k + 3, if the instruction k, the delay slot of the branch
+   before it, that jumps to the target, which is in the frame, stopped,
+   so that the engine runs it, and then jumps. The instructions, that the block can't run, e.g., that call an
    intrinsic, or that have delay slots, are not in it.
 
    The code and the data of the program are untrusted, so the blocks run
@@ -38,6 +40,10 @@ type insn = {
   pc : int64;
   next : int64;  (** the address after the instruction *)
   blks : blk term list;
+  delay : [ `None | `Delayed | `Likely ];
+      (** if the branch has a delay slot, e.g., of MIPS, which runs after it,
+          always, or, if it is likely, only if it is taken, and is the next
+          instruction of the block *)
 }
 
 exception Unsupported of string
@@ -687,7 +693,7 @@ let loop_back t ~start ~target ~ran =
 (* the instruction [k], whose blocks are the labels i<k>b<j>, and which
    ends at i<k>.done, if it doesn't jump, at i<k>.jump, with the target in
    %tgt, if it jumps, and at i<k>.stop, if it stops *)
-let insn t k (ins : insn) =
+let insn ?(role = `Plain) t k (ins : insn) =
   let blks = Array.of_list ins.blks in
   let index tid =
     Array.findi blks ~f:(fun _ b -> Tid.equal (Term.tid b) tid)
@@ -701,6 +707,9 @@ let insn t k (ins : insn) =
   let before = Buffer.contents t.body in
   Buffer.clear t.body;
   let jump_to a =
+    (match role with
+    | `Slot -> unsupported "a jump in a delay slot"
+    | `Plain | `Branch _ -> ());
     emit t "  store i64 %s, ptr %%tgt\n  br label %%i%d.jump\n" a k
   in
   let goto j = function
@@ -747,18 +756,42 @@ let insn t k (ins : insn) =
       else emit t "  br label %%i%d.done\n" k);
   if Array.is_empty blks then emit t "i%db0:\n  br label %%i%d.done\n" k k;
   let copied = s.written in
-  emit t "i%d.done:\n  br label %%i%d\n" k (k + 1);
+  (* the exit of the block to [a], after the instruction *)
+  let out a =
+    (match t.loop with
+    | Some start -> loop_back t ~start ~target:a ~ran:(k + 1)
+    | None -> ());
+    let l = label t in
+    emit t "  br label %%%s\n%s:\n  br label %%exit\n" l l;
+    t.outs <- (l, a, k + 1, (4 * k) + 1) :: t.outs
+  in
+  (match role with
+  | `Plain -> emit t "i%d.done:\n  br label %%i%d\n" k (k + 1)
+  (* the branch, that isn't taken, runs its delay slot, or skips it, if
+     it is likely *)
+  | `Branch (`Delayed, _) ->
+      emit t "i%d.done:\n  store i1 0, ptr %%pend\n  br label %%i%d\n" k (k + 1)
+  | `Branch (`Likely, after) ->
+      emit t "i%d.done:\n" k;
+      out (Int64.to_string after)
+  (* the slot jumps to the target of the branch, that is taken *)
+  | `Slot ->
+      emit t "i%d.done:\n" k;
+      let taken = assign t "load i1, ptr %%pend" in
+      let l = label t in
+      emit t "  br i1 %s, label %%%s, label %%i%d\n" taken l (k + 1);
+      start t l;
+      out (assign t "load i64, ptr %%pendt"));
   t.exits <-
-    (fun all ->
+    (fun _ ->
       emit t "i%d.jump:\n" k;
       let a = assign t "load i64, ptr %%tgt" in
-      (match t.loop with
-      | Some start -> loop_back t ~start ~target:a ~ran:(k + 1)
-      | None -> ());
-      ignore all;
-      let l = label t in
-      emit t "  br label %%%s\n%s:\n  br label %%exit\n" l l;
-      t.outs <- (l, a, k + 1, (4 * k) + 1) :: t.outs)
+      match role with
+      (* the branch, that is taken, runs its delay slot first *)
+      | `Branch _ ->
+          emit t "  store i1 1, ptr %%pend\n  store i64 %s, ptr %%pendt\n" a;
+          emit t "  br label %%i%d\n" (k + 1)
+      | `Plain | `Slot -> out a)
     :: (fun all ->
       (* the registers, as the previous instructions left them, as the
        instruction copied them, and the ones, that it doesn't write, as
@@ -766,7 +799,17 @@ let insn t k (ins : insn) =
       emit t "i%d.stop:\n" k;
       commit t ~copy:(k, copied) all;
       write_chained t;
-      emit t "  ret i32 %d\n" (4 * k))
+      match role with
+      | `Plain | `Branch _ -> emit t "  ret i32 %d\n" (4 * k)
+      (* the slot of the branch, that is taken, stops with its target *)
+      | `Slot ->
+          let taken = assign t "load i1, ptr %%pend" in
+          let a = assign t "load i64, ptr %%pendt" in
+          emit t "  store i64 %s, ptr %%next\n" a;
+          let r =
+            assign t "select i1 %s, i32 %d, i32 %d" taken ((4 * k) + 3) (4 * k)
+          in
+          emit t "  ret i32 %s\n" r)
     :: t.exits;
   let body = Buffer.contents t.body in
   Buffer.clear t.body;
@@ -818,6 +861,8 @@ let header t name =
   add "  %%on0 = load i32, ptr %%onp\n";
   add "  %%on = icmp ne i32 %%on0, 0\n";
   add "  %%tgt = alloca i64\n";
+  add "  %%pend = alloca i1\n  store i1 0, ptr %%pend\n";
+  add "  %%pendt = alloca i64\n  store i64 0, ptr %%pendt\n";
   List.iter (List.rev t.vars) ~f:(fun (p, w) ->
       add "  %s = alloca %s\n  store %s 0, ptr %s\n" p (ty w) (ty w) p);
   Hashtbl.to_alist t.slots
@@ -918,8 +963,21 @@ let compile ?loop ~locate ~reg_size ~global insns =
             t.exits,
             t.outs )
         in
-        match insn t k ins with
-        | () -> loop (k + 1) rest
+        (* the branch, that has a delay slot, and its slot, are in the
+           block together, or not at all *)
+        let compiled () =
+          match (ins.delay, rest) with
+          | `None, _ ->
+              insn t k ins;
+              (1, rest)
+          | ((`Delayed | `Likely) as kind), slot :: rest ->
+              insn ~role:(`Branch (kind, slot.next)) t k ins;
+              insn ~role:`Slot t (k + 1) slot;
+              (2, rest)
+          | _, [] -> unsupported "a branch without its delay slot"
+        in
+        match compiled () with
+        | n, rest -> loop (k + n) rest
         | exception Unsupported reason ->
             let body, slots, vars, decls, temps, written_before, exits, outs =
               saved

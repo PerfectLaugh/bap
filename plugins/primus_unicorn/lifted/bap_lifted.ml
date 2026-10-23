@@ -1593,7 +1593,20 @@ let candidates t pc =
               let acc = (addr, insn) :: acc in
               if insn.jumps then List.rev acc
               else loop (i + 1) Int64.(addr + of_int insn.size) acc
-          | _ -> List.rev acc)
+          (* the branch, whose delay slot ends the block with it, see
+             [Bap_lifted_jit.insn], if the slot doesn't jump *)
+          | `Delayed | `Likely -> (
+              let slot = Int64.(addr + of_int insn.size) in
+              let ok (i : insn) =
+                (not i.jumps) && Poly.equal (t.config.delay i.code) `None
+              in
+              match
+                if hooked t slot || not (executable slot) then None
+                else lifted t slot
+              with
+              | Some s when ok s -> List.rev ((slot, s) :: (addr, insn) :: acc)
+              | _ | (exception Fault _) -> List.rev acc)
+          | `Forbidden -> List.rev acc)
   in
   loop 0 pc []
 
@@ -1619,6 +1632,10 @@ let compile_block t j pc =
             Bap_lifted_jit.pc;
             next = Int64.(pc + of_int insn.size);
             blks = insn.blks;
+            delay =
+              (match t.config.delay insn.code with
+              | (`Delayed | `Likely) as d -> d
+              | `None | `Forbidden -> `None);
           })
     in
     (* the jump of the block to its start loops in it, unless it changes
@@ -1796,21 +1813,26 @@ let exec ?until ?count t j (b : block) pc n =
     (* the code changed *)
     release j (Compiled b);
     Hashtbl.set j.blocks ~key:pc ~data:(Counting 0);
-    if chained = 0 then None else Some (pc, chained, true))
+    if chained = 0 then None else Some (pc, chained, true, None))
   else
     match r land 3 with
     | 0 when k = 0 && chained = 0 -> None
-    | 0 when k = 0 -> Some (pc, chained, true)
+    | 0 when k = 0 -> Some (pc, chained, true, None)
     | 0 ->
         let k' = ran k in
-        Some (b.pcs.(k), k', false)
+        Some (b.pcs.(k), k', false, None)
     | 1 ->
         let k' = ran (k + 1) in
         let target = Bap_lifted_jit.Runtime.next j.mem in
-        Some (jump t b.insns.(k) ~next:(next k) target, k', true)
+        Some (jump t b.insns.(k) ~next:(next k) target, k', true, None)
+    (* the delay slot of the branch, that is taken, which the loop runs,
+       and then jumps *)
+    | 3 ->
+        let k' = ran k in
+        Some (b.pcs.(k), k', false, Some (Bap_lifted_jit.Runtime.next j.mem))
     | _ ->
         let k' = ran (k + 1) in
-        Some (next k, k', b.insns.(k).jumps)
+        Some (next k, k', b.insns.(k).jumps, None)
 
 (* the block at [pc], that runs, before its first instruction is lifted
    again, and before the hooks, if its code isn't hooked, as the code of
@@ -1915,9 +1937,9 @@ let start ?until ?timeout ?count t pc =
         | _ -> None
       in
       match fast with
-      | Some (next, k, starts) ->
+      | Some (next, k, starts, pending) ->
           t.block <- starts;
-          loop next (n + k)
+          loop ?pending next (n + k)
       | None -> (
           match lifted t pc with
           | exception Fault (access, addr) ->
@@ -1960,9 +1982,9 @@ let start ?until ?timeout ?count t pc =
                   | _ -> None
                 in
                 match block with
-                | Some (next, k, starts) ->
+                | Some (next, k, starts, pending) ->
                     t.block <- starts;
-                    loop next (n + k)
+                    loop ?pending next (n + k)
                 | None -> (
                     t.last_block <- Some pc;
                     let next = Int64.(pc + of_int insn.size) in
