@@ -5,6 +5,7 @@
 #include <string>
 
 #include <llvm/AsmParser/Parser.h>
+#include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/IR/LLVMContext.h>
@@ -118,7 +119,14 @@ extern "C" value bap_llvm_jit_create(value unit) {
             fail("the JIT of LLVM doesn't have the target of the host");
         initialized = true;
     }
-    auto lljit = LLJITBuilder().create();
+    // the code calls the functions of the program, e.g., of its runtime,
+    // that may be further than 2 GB from it, so its calls are absolute,
+    // in the large model, rather than relative, which the linker of the
+    // JIT doesn't relocate on every host, e.g., the one of COFF on Windows
+    auto host = JITTargetMachineBuilder::detectHost();
+    if (!host) fail(message(host.takeError()));
+    host->setCodeModel(CodeModel::Large);
+    auto lljit = LLJITBuilder().setJITTargetMachineBuilder(std::move(*host)).create();
     if (!lljit) fail(message(lljit.takeError()));
     r = caml_alloc_custom(&jit_ops, sizeof(jit *), 0, 1);
     *static_cast<jit **>(Data_custom_val(r)) = new jit{std::move(*lljit)};

@@ -42,8 +42,12 @@ exception Unsupported of string
 let unsupported fmt = ksprintf (fun msg -> raise (Unsupported msg)) fmt
 let max_width = 1024
 
-(* the slots, that the runtime passes, see MAX_REGS of the stubs *)
+(* the slots, that the runtime passes, see MAX_REGS of the stubs, and
+   their bytes, whose copies are on the stack of the block, whose frame
+   is less than a page, so that the code needs no probes of the stack,
+   e.g., __chkstk of Windows, that the JIT doesn't link *)
 let max_slots = 256
+let max_slot_bytes = 1024
 
 type value =
   | Val of string * int  (** the operand, and its width *)
@@ -127,6 +131,12 @@ let slot t id =
   | None ->
       let i = Hashtbl.length t.slots in
       if i = max_slots then unsupported "more than %d registers" max_slots;
+      let bytes =
+        Hashtbl.fold t.slots ~init:(t.reg_size id) ~f:(fun ~key ~data:_ n ->
+            n + t.reg_size key)
+      in
+      if bytes > max_slot_bytes then
+        unsupported "the registers of more than %d bytes" max_slot_bytes;
       Hashtbl.set t.slots ~key:id ~data:i;
       i
 
