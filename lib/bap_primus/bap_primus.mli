@@ -2753,6 +2753,25 @@ module Std : sig
 
           @since 3.0.0 *)
 
+      val undefined :
+        ?encoding:Theory.language ->
+        project ->
+        int64 ->
+        string ->
+        string option knowledge
+      (** [undefined project addr code] the name of the instruction at [addr],
+          decoded from [code], e.g., [FRECPEv1i32] of LLVM, which no lifter
+          defined, e.g., whose Primus Lisp definition is missing, or [None], if
+          the instruction is defined, or the bytes are not an instruction.
+
+          Such an instruction is not lifted, by {!instruction}, {!named}, and
+          {!Make.insn}, as it is not known, what it does, rather than lifted as
+          an instruction, that does nothing, so that the executors, that run it,
+          fail, e.g., with an invalid instruction, while the instructions, whose
+          definitions do nothing, e.g., NOP, are lifted.
+
+          @since 3.0.0 *)
+
       (** [Make(Machine)] lifts the instructions in the knowledge of the system,
           that runs the machine, see {!Machine.S.knowledge}, which caches them,
           so that the systems, e.g., the emulators of a script, have their own

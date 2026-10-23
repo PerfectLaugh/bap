@@ -17,6 +17,9 @@ val named :
   string ->
   (int * string * blk term list) option KB.t
 
+val undefined :
+  ?encoding:Theory.language -> project -> int64 -> string -> string option KB.t
+
 module Make (Machine : Bap_primus_types.Machine) : sig
   val insn :
     ?disassembled_only:bool ->

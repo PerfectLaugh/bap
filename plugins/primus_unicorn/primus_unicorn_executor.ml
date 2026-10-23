@@ -665,12 +665,27 @@ type _ Effect.t +=
    by the Primus linker, as the interpreter does, when they stop Unicorn
    with an interrupt, after which Unicorn continues from the next
    instruction. *)
-type intrinsic = { name : string; inputs : (var * exp) list }
+type intrinsic = {
+  name : string;
+  inputs : (var * exp) list;
+  outputs : (var * exp) list;
+      (** the defs after the call, e.g., of the registers, that the results of
+          the intrinsic, intrinsic:y0, ..., go to *)
+}
 
 (* the intrinsic of the instruction, which the blocks of its IR call *)
 let site_of_blocks blks =
   let defs =
     List.concat_map blks ~f:(fun blk -> Term.enum def_t blk |> Seq.to_list)
+  in
+  (* the defs of the blocks after the one, that calls *)
+  let after blk =
+    match List.drop_while blks ~f:(fun b -> not (phys_equal b blk)) with
+    | _ :: rest ->
+        List.concat_map rest ~f:(fun blk ->
+            Term.enum def_t blk |> Seq.to_list
+            |> List.map ~f:(fun def -> (Def.lhs def, Def.rhs def)))
+    | [] -> []
   in
   List.find_map blks ~f:(fun blk ->
       Term.enum jmp_t blk
@@ -693,6 +708,7 @@ let site_of_blocks blks =
                                  (Var.name (Def.lhs def))
                                  ~prefix:"intrinsic:")
                               (Def.lhs def, Def.rhs def));
+                      outputs = after blk;
                     }
               | Indirect _ -> None)
           | Goto _ | Ret _ | Int _ -> None))
@@ -1063,6 +1079,46 @@ module Lifts = struct
                entries));
       Stdlib.Sys.rename tmp file
     with _ -> ()
+end
+
+(* The intrinsics of x86, that Unicorn runs natively, and that Primus
+   and the lifted engine call, see CPUID of x86-control.lisp: CPUID and
+   XGETBV run in a Unicorn of their own, of the mode of the target, so
+   that they report the processor of Unicorn, and their results are
+   cached, and the time stamp counter is the monotonic clock, in ns. *)
+module X86_intrinsics = struct
+  let scratch = Hashtbl.Poly.create ()
+  let results = Hashtbl.Poly.create ()
+  let code_addr = 0x1000L
+
+  let uc mode =
+    Hashtbl.find_or_add scratch mode ~default:(fun () ->
+        let uc = Uc.create X86 mode in
+        Uc.mem_map uc code_addr 0x1000L Uc.Perm.(read + exec);
+        uc)
+
+  let reg name = Option.value_exn (Uc.reg X86 name)
+
+  (* the registers RAX, RBX, RCX, RDX after the instruction [code], that
+     runs from RAX = [a] and RCX = [c], or [None], if it faults *)
+  let run mode code a c =
+    Hashtbl.find_or_add results (mode, code, a, c) ~default:(fun () ->
+        let uc = uc mode in
+        Uc.mem_write uc code_addr code;
+        (* Unicorn runs the code, that it translated, unless it flushes it *)
+        Uc.flush_tb uc;
+        List.iter [ "RAX"; "RBX"; "RCX"; "RDX" ] ~f:(fun r ->
+            Uc.reg_write uc (reg r) 0L);
+        Uc.reg_write uc (reg "RAX") a;
+        Uc.reg_write uc (reg "RCX") c;
+        match Uc.start ~count:1 uc code_addr with
+        | () ->
+            Some
+              (List.map [ "RAX"; "RBX"; "RCX"; "RDX" ] ~f:(fun r ->
+                   Int64.(Uc.reg_read uc (reg r) land 0xFFFF_FFFFL)))
+        | exception Uc.Error _ -> None)
+
+  let tsc () = Int64.of_float (clock () *. 1e9)
 end
 
 let lifter ?cache ~arm project =
@@ -2805,13 +2861,19 @@ module Make (Machine : Primus.Machine.S) = struct
   let code_addr e pc =
     match e.arch with Arm -> Int64.(pc land lnot 1L) | _ -> pc
 
-  let call_intrinsic e { name; inputs } =
+  let call_intrinsic e { name; inputs; outputs } =
     let* () = pull e in
     let* () =
       Machine.List.iter inputs ~f:(fun (var, exp) ->
           Interpreter.exp exp >>= Interpreter.set var)
     in
     let* () = Linker.exec (`symbol name) in
+    (* the results go to their registers, e.g., of RDTSC, or of the
+       counters of RISC-V, which Unicorn doesn't have *)
+    let* () =
+      Machine.List.iter outputs ~f:(fun (var, exp) ->
+          Interpreter.exp exp >>= Interpreter.set var)
+    in
     push_owned e
 
   (* saves the state of the machine, which is in Primus, after it is
@@ -3191,6 +3253,24 @@ module Make (Machine : Primus.Machine.S) = struct
 
   (* the instruction at [addr], decoded from its current bytes, in
      the Thumb mode, if Unicorn runs the Thumb code *)
+  (* the failure at the instruction at [pc], that couldn't run, e.g.,
+     that no lifter defined, which isn't lifted, see
+     [Primus.Lift.undefined], or that is invalid *)
+  let unrunnable e pc what =
+    let addr = code_addr e pc in
+    let* read = code_reader e addr in
+    let* proj = Machine.get () in
+    let code = read addr Primus.Lift.max_size in
+    let* name =
+      Machine.knowledge
+        (Primus.Lift.undefined
+           ?encoding:(arm_encoding e ~thumb:(in_thumb e pc))
+           proj addr code)
+    in
+    match name with
+    | Some name -> fail "the instruction %s at %Lx has no semantics" name pc
+    | None -> fail "%s at %Lx" what pc
+
   let lift ?(thumb = false) e addr =
     let* read = code_reader e addr in
     Lift.insn ?encoding:(arm_encoding e ~thumb) ~read addr
@@ -3450,7 +3530,7 @@ module Make (Machine : Primus.Machine.S) = struct
           set e flag 1L
 
     (* the instructions of the system calls, e.g., int 0x80 of x86 *)
-    let is_trap { name; inputs } =
+    let is_trap { name; inputs; _ } =
       match name with
       | "intrinsic:syscall" | "intrinsic:svc" -> true
       | "intrinsic:interrupt" ->
@@ -4976,7 +5056,7 @@ module Make (Machine : Primus.Machine.S) = struct
     let rec run pc n =
       let insn = pc in
       lift ~thumb:(in_thumb e pc) e (code_addr e pc) >>= function
-      | None -> fail "can't interpret the instruction at %Lx" pc
+      | None -> unrunnable e pc "can't interpret the instruction"
       (* the instruction, that Unicorn left to Primus, e.g., as it
          accessed the tainted memory, has the semantics, else it would
          run again and again *)
@@ -5306,7 +5386,7 @@ module Make (Machine : Primus.Machine.S) = struct
                 match saved with Ok () -> loop pc | Error msg -> fail "%s" msg)
             | Some (Stop addr), _ -> stopped e addr >>= fun () -> loop pc
             | Some Invalid, _ ->
-                pull e >>= fun () -> fail "an invalid instruction at %Lx" pc
+                pull e >>= fun () -> unrunnable e pc "an invalid instruction"
             | None, Some msg -> pull e >>= fun () -> fail "%s at %Lx" msg pc)
 
   (* the stop, at which the observers of the stops, e.g., a debugger,
@@ -5942,11 +6022,92 @@ module Loader (Machine : Primus.Machine.S) = struct
               the components of Primus changed")
     | _ -> Machine.return ()
 
+  (* the intrinsics of x86, see [X86_intrinsics], and the counters of
+     RISC-V, unless the program, e.g., Primus Lisp, defines them, which
+     compute their results from their inputs, intrinsic:x0, ..., to
+     intrinsic:y0 *)
+  let link_intrinsics () =
+    let* target = Machine.gets Project.target in
+    let word w x = Word.of_int64 ~width:w x in
+    let intrinsic name ~inputs ~compute =
+      Linker.is_linked (`symbol name) >>= function
+      | true -> Machine.return ()
+      | false ->
+          let module Code (Machine : Primus.Machine.S) = struct
+            module Env = Primus.Env.Make (Machine)
+            module Value = Primus.Value.Make (Machine)
+            open Machine.Syntax
+
+            let arg (n, w) =
+              Env.get (Var.create (sprintf "intrinsic:x%d" n) (Type.imm w))
+              >>| fun x -> Word.to_int64_exn (Primus.Value.to_word x)
+
+            let exec =
+              Machine.List.map inputs ~f:arg >>= fun args ->
+              match compute args with
+              | Ok x ->
+                  Value.of_word x
+                  >>= Env.set
+                        (Var.create "intrinsic:y0" (Type.imm (Word.bitwidth x)))
+              | Error what ->
+                  Machine.raise
+                    (Unicorn_failure (sprintf "%s faults in Unicorn" what))
+          end in
+          Linker.link ~name (module Code)
+    in
+    let words ws =
+      List.reduce_exn (List.rev ws) ~f:(fun hi lo -> Word.concat hi lo)
+    in
+    match Target.engine target with
+    | Some (X86, mode) ->
+        let* () =
+          intrinsic "intrinsic:cpuid"
+            ~inputs:[ (0, 32); (1, 32) ]
+            ~compute:(function
+              | [ a; c ] -> (
+                  match X86_intrinsics.run mode "\x0f\xa2" a c with
+                  | Some regs -> Ok (words (List.map regs ~f:(word 32)))
+                  | None -> Error "cpuid")
+              | _ -> Error "cpuid")
+        in
+        let* () =
+          intrinsic "intrinsic:xgetbv"
+            ~inputs:[ (0, 32) ]
+            ~compute:(function
+              | [ c ] -> (
+                  match X86_intrinsics.run mode "\x0f\x01\xd0" 0L c with
+                  | Some [ eax; _; _; edx ] ->
+                      Ok (words [ word 32 eax; word 32 edx ])
+                  | _ -> Error "xgetbv")
+              | _ -> Error "xgetbv")
+        in
+        let* () =
+          intrinsic "intrinsic:rdtsc" ~inputs:[] ~compute:(fun _ ->
+              Ok (word 64 (X86_intrinsics.tsc ())))
+        in
+        (* the TSC_AUX of RDTSCP, the number of the processor, is 0 *)
+        intrinsic "intrinsic:rdtscp" ~inputs:[] ~compute:(fun _ ->
+            Ok (words [ word 64 (X86_intrinsics.tsc ()); word 32 0L ]))
+    | Some (Riscv, _) ->
+        (* the cycles and the instructions are the nanoseconds of the
+           clock, and the time is of the timebase of 10 MHz, as of the
+           virt machine of QEMU *)
+        let bits = Theory.Target.bits target in
+        let counter name scale =
+          intrinsic name ~inputs:[] ~compute:(fun _ ->
+              Ok (word bits Int64.(X86_intrinsics.tsc () / scale)))
+        in
+        let* () = counter "intrinsic:riscv_csr_cycle" 1L in
+        let* () = counter "intrinsic:riscv_csr_instret" 1L in
+        counter "intrinsic:riscv_csr_time" 100L
+    | _ -> Machine.return ()
+
   let init () =
     let module Exec = Make (Machine) in
     Machine.sequence
       [
         start_session;
+        Primus.System.init >>> link_intrinsics;
         Primus.System.init >>> check_engine;
         Primus.System.init >>> create_engine;
         Primus.Machine.fork >>> Exec.forked;

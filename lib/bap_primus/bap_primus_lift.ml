@@ -163,14 +163,23 @@ let calls ~next blks =
 
 (* the size, the encoding, the name and the IR of the instruction of
    [size] bytes at [addr] *)
+(* the instruction, that no lifter defined, e.g., whose Primus Lisp
+   definition is missing, which has no name, rather than the one, whose
+   definition does nothing, e.g., NOP *)
+let is_undefined insn = String.equal (Insn.name insn) (Insn.name Insn.empty)
+
+(* the instruction, that no lifter defined, is no instruction, rather
+   than the one, that does nothing, so that it fails, where it runs *)
 let ir ~width ~addr ~size coding insn =
-  let blks = Blk.from_insn ~addr insn in
-  let blks =
-    if Insn.(is call) insn then calls ~next:(Bil.int Word.(addr ++ size)) blks
-    else blks
-  in
-  KB.map (addressed width blks) ~f:(fun blks ->
-      Some (size, coding, Insn.name insn, blks))
+  if is_undefined insn then KB.return None
+  else
+    let blks = Blk.from_insn ~addr insn in
+    let blks =
+      if Insn.(is call) insn then calls ~next:(Bil.int Word.(addr ++ size)) blks
+      else blks
+    in
+    KB.map (addressed width blks) ~f:(fun blks ->
+        Some (size, coding, Insn.name insn, blks))
 
 let width_of proj = Theory.Target.code_addr_size (Project.target proj)
 
@@ -217,6 +226,43 @@ let lift ?encoding proj addr code =
               | Some (size, coding) ->
                   KB.collect Theory.Semantics.slot label
                   >>= ir ~width ~addr ~size coding)))
+
+(* the name of the instruction at [addr], that [code] has, which no
+   lifter defined, so that it is not lifted, see [ir] *)
+let undefined ?encoding proj addr code =
+  let open KB.Syntax in
+  match Project.get proj filename with
+  | None -> KB.return None
+  | Some file -> (
+      let target = Project.target proj in
+      let width = width_of proj in
+      let addr = Word.of_int64 ~width addr in
+      let endian =
+        if Theory.Endianness.(equal eb) (Theory.Target.endianness target) then
+          BigEndian
+        else LittleEndian
+      in
+      match Memory.create endian addr (Bigstring.of_string code) with
+      | Error _ -> KB.return None
+      | Ok mem ->
+          unit_of_file file >>= fun unit ->
+          KB.promising Theory.Label.unit ~promise:(fun _ ->
+              KB.return (Some unit))
+          @@ fun () ->
+          decode ?encoding unit mem >>= fun (label, size) ->
+          if Option.is_none size then KB.return None
+          else
+            KB.collect Theory.Semantics.slot label >>= fun insn ->
+            if not (is_undefined insn) then KB.return None
+            else
+              KB.collect Dis.Insn.slot label >>| fun basic ->
+              Some
+                (Option.value_map basic ~default:"an unknown instruction"
+                   ~f:Dis.Insn.name))
+
+let undefined ?encoding proj addr code =
+  let open KB.Syntax in
+  KB.catch (undefined ?encoding proj addr code) (fun _ -> KB.return None)
 
 (* the instructions, that x86 has, are at most 15 bytes long *)
 let max_size = 16
