@@ -166,6 +166,9 @@ type jit = {
   mutable gen : int;  (** the version of the hooks *)
   mutable traced : bool;
       (** if the traces of the code record the instructions of the blocks *)
+  mutable native : bool;
+      (** if the traces are of the blocks only, whose blocks, that the runs
+          chain, the runtime records, see [Bap_lifted_jit.Runtime.traces] *)
   mutable whole : bool;
       (** if the blocks may run on after the branches, that aren't taken, as no
           hook or trace needs the blocks of Unicorn, see [falls] *)
@@ -418,6 +421,7 @@ let create config arch mode =
                blocks = Int64.Table.create ();
                gen = 0;
                traced = false;
+               native = false;
                whole = not (Poly.equal arch Uc.Arm);
                jitted = 0;
                compiles = Int64.Table.create ();
@@ -821,9 +825,24 @@ let hooks_changed t =
       j.gen <- j.gen + 1;
       Hashtbl.iteri t.pages ~f:(fun ~key:page ~data:p ->
           Bap_lifted_jit.Runtime.protect j.mem page (effective t page p.perm));
-      j.traced <-
-        List.exists t.hooks ~f:(fun h ->
-            match h.kind with Trace_code _ -> true | _ -> false);
+      j.traced <- not (Array.is_empty t.by_kind.trace_code);
+      (* the traces of the whole blocks, without the accesses *)
+      let native =
+        Array.for_all t.by_kind.trace_code ~f:(fun h ->
+            match h.kind with
+            | Trace_code tr ->
+                Uc.Trace.blocks tr && Option.is_none h.first
+                && Option.is_none h.last
+            | _ -> false)
+        && Array.is_empty t.by_kind.trace_mem
+        && Array.length t.by_kind.trace_code <= 4
+      in
+      j.native <- j.traced && native;
+      Bap_lifted_jit.Runtime.traces j.mem
+        (if j.native then
+           Array.filter_map t.by_kind.trace_code ~f:(fun h ->
+               match h.kind with Trace_code tr -> Some tr | _ -> None)
+         else [||]);
       j.whole <-
         (not (Poly.equal t.arch Uc.Arm))
         && not
@@ -2413,6 +2432,9 @@ let chainable (j : jit) (b : block) =
 (* the flags of the link of the block, see LINK_ARM of the stubs *)
 let link_flags (b : block) =
   let last = b.insns.(Array.length b.insns - 1) in
+  (* LINK_JUMPS, the next block starts a block of the traces *)
+  (if last.jumps then 16 else 0)
+  lor
   match last.modes with
   | None -> 0
   | Some (even, odd) ->
@@ -2459,8 +2481,9 @@ let untaint_writes t (b : block) k =
 
 let exec ?until ?count t j (b : block) pc n =
   (* the instructions, that ran, are recorded, after they ran, in their
-     order, as the closures record them *)
-  let ran k =
+     order, as the closures record them, of the block [b], that ran last,
+     after the ones, that the runtime chained *)
+  let ran (b : block) k =
     if b.atomic then
       for i = 0 to k - 1 do
         link t b.insns.(i);
@@ -2490,7 +2513,9 @@ let exec ?until ?count t j (b : block) pc n =
     b.chained <- true
   end;
   Bap_lifted_jit.Runtime.limits j.mem
-    (b.chained && (not j.traced) && Hashtbl.is_empty t.shadow.sregs)
+    (b.chained
+    && ((not j.traced) || j.native)
+    && Hashtbl.is_empty t.shadow.sregs)
     (match count with
     | Some c -> Int.min (c - n) max_chained
     | None -> max_chained)
@@ -2503,6 +2528,9 @@ let exec ?until ?count t j (b : block) pc n =
   in
   (* the instructions of the blocks, that ran before the last one *)
   let chained = Bap_lifted_jit.Runtime.chained j.mem in
+  (* the runtime recorded the blocks before the last one, which starts a
+     block of the traces, if the one before it jumped *)
+  if chained > 0 && j.native then t.block <- Bap_lifted_jit.Runtime.starts j.mem;
   let pc, b =
     if chained = 0 then (pc, b)
     else begin
@@ -2515,7 +2543,7 @@ let exec ?until ?count t j (b : block) pc n =
     end
   in
   let ran k =
-    ran k;
+    ran b k;
     k + chained
   in
   let k = r lsr 2 in

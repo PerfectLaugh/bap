@@ -1442,6 +1442,33 @@ value bap_uc_trace_extend(value tv, value size) {
     return Val_unit;
 }
 
+/* the trace, whose blocks the lifted engine records natively, with no
+   call to OCaml, see bap_lifted_jit_stubs.c, which keeps it alive */
+void *bap_uc_trace_of(value tv) { return Trace_val(tv); }
+
+/* the block at [pc] of [size] bytes, in the mode, or its bytes, that
+   the block, which was recorded last, continues with, unless it [starts]
+   a block, as [bap_uc_trace_record] and [bap_uc_trace_extend] */
+void bap_uc_trace_block(void *tp, uint64_t pc, uint32_t size, int thumb,
+                        int starts) {
+    struct trace *t = tp;
+    if (t->sizes == NULL) {
+        return;
+    }
+    if (!starts) {
+        if (t->count > 0) {
+            t->sizes[(t->count - 1) & t->mask] += size;
+        }
+        return;
+    }
+    t->sizes[t->count & t->mask] = size;
+    t->pcs[t->count & t->mask] = pc;
+    if (t->modes != NULL) {
+        t->modes[t->count & t->mask] = thumb;
+    }
+    t->count++;
+}
+
 /* the access of the instruction at [pc], see [trace_mem] */
 value bap_uc_trace_access(value tv, value write, value addr, value size,
                           value x, value old, value pc) {

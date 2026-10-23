@@ -97,6 +97,15 @@ _Static_assert(sizeof(entry) == 24 && offsetof(entry, data) == 8 &&
 #define LINK_THUMB 1
 #define LINK_EVEN 2
 #define LINK_ODD 4
+/* the last instruction of the block jumps, so the next one starts a
+   block of the traces, see [record] */
+#define LINK_JUMPS 16
+
+/* the traces of the blocks, that the runs record, see [record] */
+#define MAX_TRACES 4
+void *bap_uc_trace_of(value tv);
+void bap_uc_trace_block(void *t, uint64_t pc, uint32_t size, int thumb,
+                        int starts);
 
 /* the block, that the run of another one continues with, see [run] */
 typedef struct {
@@ -120,6 +129,11 @@ struct jit_mem {
     uint64_t seed; /* of the hash, which the program can't predict */
     entry tlb[TLB_SIZE];
     undo_entry undo[UNDO_SIZE];
+    /* the traces of the blocks, which the hooks keep alive, and if the
+       last block, that ran, starts a block of them */
+    void *traces[MAX_TRACES];
+    int ntraces;
+    int starts;
 };
 
 #define EMPTY UINT64_MAX
@@ -442,6 +456,28 @@ value bap_jit_unlink_all(value mem) {
     return Val_unit;
 }
 
+/* [traces mem traces] the blocks, that the runs chain, are recorded in
+   the [traces] of the blocks, see [Uc.Trace], and they return to the
+   runtime, rather than call the next ones themselves */
+value bap_jit_traces(value mem, value traces) {
+    jit_mem *m = Mem_val(mem);
+    size_t n = Wosize_val(traces);
+    if (n > MAX_TRACES) caml_invalid_argument("Bap_lifted_jit: too many traces");
+    for (size_t i = 0; i < n; i++) m->traces[i] = bap_uc_trace_of(Field(traces, i));
+    m->ntraces = (int)n;
+    return Val_unit;
+}
+
+/* the block, that ran whole, before the next one, in the traces */
+static void record(jit_mem *m, jit_link *l) {
+    for (int i = 0; i < m->ntraces; i++)
+        bap_uc_trace_block(m->traces[i], l->pc, (uint32_t)(l->end - l->pc),
+                           l->flags & LINK_THUMB, m->starts);
+    m->starts = (l->flags & LINK_JUMPS) != 0;
+}
+
+value bap_jit_starts(value mem) { return Val_bool(Mem_val(mem)->starts); }
+
 /* [limits mem chain budget until] the runs continue with the linked
    blocks, if [chain], at most for [budget] instructions, until [until] */
 value bap_jit_limits(value mem, value chain, value budget, value until) {
@@ -469,10 +505,16 @@ intnat bap_jit_run(intnat fn, value mem, value regs, value code,
     (void)code;
     f->chained = 0;
     f->last = (uint64_t)addr;
+    /* the engine runs the blocks at the starts of the blocks */
+    m->starts = 1;
     if (nregs > MAX_REGS) return -1;
     for (size_t i = 0; i < nregs; i++) ptrs[i] = Bytes_val(Field(regs, i));
     uint64_t pc = (uint64_t)addr;
-    jit_link *current = f->chain ? find_link(m, pc) : NULL;
+    /* the code of the blocks doesn't continue with the next ones itself,
+       e.g., with itself, while the traces record them here */
+    int chain = f->chain;
+    if (m->ntraces) f->chain = 0;
+    jit_link *current = chain ? find_link(m, pc) : NULL;
     for (;;) {
         f->undo = 0;
         int32_t r = ((block)fn)(f, ptrs);
@@ -487,7 +529,7 @@ intnat bap_jit_run(intnat fn, value mem, value regs, value code,
            calls, see [exit_to] */
         if (f->last != pc) {
             pc = f->last;
-            current = f->chain ? find_link(m, pc) : NULL;
+            current = chain ? find_link(m, pc) : NULL;
         }
         if (!current) return r;
         uint64_t ran = (uint64_t)(r >> 2) + 1;
@@ -505,17 +547,21 @@ intnat bap_jit_run(intnat fn, value mem, value regs, value code,
         }
         jit_link *l = find_link(m, next);
         if (!l || (l->flags & LINK_THUMB) != thumb) return r;
-        /* the block continues with the next one by itself, next time */
-        slot *s = current->slots;
-        int i = s[0].fn == NULL || s[0].key == key ? 0 : 1;
-        s[i].key = key;
-        s[i].fn = (void *)l->fn;
-        s[i].pc = l->pc;
-        s[i].end = l->end;
-        s[i].length = l->length;
+        /* the block continues with the next one by itself, next time,
+           unless the blocks are recorded here */
+        if (m->ntraces == 0) {
+            slot *s = current->slots;
+            int i = s[0].fn == NULL || s[0].key == key ? 0 : 1;
+            s[i].key = key;
+            s[i].fn = (void *)l->fn;
+            s[i].pc = l->pc;
+            s[i].end = l->end;
+            s[i].length = l->length;
+        }
         if (next == f->until || (f->until > l->pc && f->until < l->end) ||
             f->chained + ran + l->length > f->budget)
             return r;
+        record(m, current);
         f->chained += ran;
         f->last = next;
         current = l;

@@ -1065,6 +1065,8 @@ module Runtime = struct
     nativeint ->
     unit = "bap_jit_link_byte" "bap_jit_link"
 
+  external traces : mem -> Bap_unicorn.Trace.t array -> unit = "bap_jit_traces"
+  external starts : mem -> bool = "bap_jit_starts"
   external unlink : mem -> int64 -> unit = "bap_jit_unlink"
   external unlink_all : mem -> unit = "bap_jit_unlink_all"
   external limits : mem -> bool -> int -> int64 -> unit = "bap_jit_limits"
