@@ -51,7 +51,14 @@ type hook = {
 
 (* the bytes of the pages are outside of the heap, as the blocks, that
    the JIT compiled, access them, see Bap_lifted_jit *)
-type page = { data : Bigstring.t; mutable perm : Uc.Perm.t }
+type page = {
+  data : Bigstring.t;
+  mutable perm : Uc.Perm.t;
+  mutable code : (int64 * int64 * int64) list;
+      (** the blocks, that the JIT compiled, whose bytes are on the page, their
+          addresses, and the first and the last address of their bytes, which
+          are dropped, when they are written, see [code_written] *)
+}
 
 (* the outcome of an instruction *)
 type next = Next | Jump of int64 | Interrupt_at of int * int64
@@ -157,6 +164,9 @@ type t = {
           until a store conditional, see [expired] *)
   mutable unsupported : int;  (** the instructions, that it couldn't run *)
   jit : jit option;  (** if [config.jit], on a little-endian host *)
+  mutable stale : int64 list;
+      (** the blocks, whose code was written, which are dropped, before the next
+          block runs, see [drop_stale] *)
 }
 
 exception Fault of Uc.access * int64
@@ -270,6 +280,7 @@ let create config arch mode =
       reads = [];
       ran = 0;
       linked = None;
+      stale = [];
       unsupported = 0;
       jit =
         (if Sys.big_endian || not config.jit then None
@@ -379,6 +390,25 @@ let pages_of addr size f =
 let aligned addr size =
   Int64.(addr land (page_size - 1L) = 0L && size land (page_size - 1L) = 0L)
 
+(* the blocks of the code of the page, whose bytes from [addr] are
+   written, or which is unmapped, or not executable anymore, are stale, as
+   the compiled blocks don't check their bytes, when they run, and the JIT
+   never writes the pages, that are executable, see bap_lifted_jit_stubs.c *)
+let code_written ?range t (p : page) =
+  if not (List.is_empty p.code) then begin
+    let ( <=: ) x y = Stdlib.Int64.unsigned_compare x y <= 0 in
+    let written (_, lo, hi) =
+      match range with
+      | None -> true
+      | Some (addr, size) -> (lo <=: Int64.(addr + size - 1L)) && addr <=: hi
+    in
+    let stale, rest = List.partition_tf p.code ~f:written in
+    if not (List.is_empty stale) then begin
+      t.stale <- List.map stale ~f:(fun (pc, _, _) -> pc) @ t.stale;
+      p.code <- rest
+    end
+  end
+
 let mem_map t addr size perm =
   check t;
   if not (aligned addr size) then error 15 "Invalid argument (UC_ERR_ARG)";
@@ -390,7 +420,7 @@ let mem_map t addr size perm =
         Bigstring.init (Int64.to_int_exn page_size) ~f:(fun _ -> '\000')
       in
       Hashtbl.set t.fresh ~key:page ~data:();
-      Hashtbl.set t.pages ~key:page ~data:{ data; perm };
+      Hashtbl.set t.pages ~key:page ~data:{ data; perm; code = [] };
       Option.iter t.jit ~f:(fun j ->
           Bap_lifted_jit.Runtime.map j.mem page data (perm :> int)))
 
@@ -400,6 +430,7 @@ let mem_unmap t addr size =
       if not (Hashtbl.mem t.pages page) then
         error 11 "Invalid memory mapping (UC_ERR_NOMEM)");
   pages_of addr size (fun page ->
+      Option.iter (Hashtbl.find t.pages page) ~f:(code_written t);
       Option.iter t.jit ~f:(fun j -> Bap_lifted_jit.Runtime.unmap j.mem page);
       Hashtbl.remove t.pages page)
 
@@ -408,6 +439,7 @@ let mem_protect t addr size perm =
   pages_of addr size (fun page ->
       match Hashtbl.find t.pages page with
       | Some p ->
+          if not Uc.Perm.(mem perm exec) then code_written t p;
           p.perm <- perm;
           Option.iter t.jit ~f:(fun j ->
               Bap_lifted_jit.Runtime.protect j.mem page (perm :> int))
@@ -431,7 +463,9 @@ let write_mem t addr data =
   String.iteri data ~f:(fun i c ->
       let addr = Int64.(addr + of_int i) in
       match Hashtbl.find t.pages (page_of addr) with
-      | Some p -> Bigstring.set p.data (offset addr) c
+      | Some p ->
+          code_written t p ~range:(addr, 1L);
+          Bigstring.set p.data (offset addr) c
       | None ->
           error uc_err_write_unmapped
             "Invalid memory write (UC_ERR_WRITE_UNMAPPED)")
@@ -659,6 +693,7 @@ let store t addr data value =
   String.iteri data ~f:(fun i c ->
       let addr = Int64.(addr + of_int i) in
       let p = page_for t `write addr (String.length data) value in
+      code_written t p ~range:(addr, 1L);
       let off = offset addr in
       let old = Bigstring.get p.data off in
       t.undo <- (fun () -> Bigstring.set p.data off old) :: t.undo;
@@ -1603,6 +1638,19 @@ let compile_block t j pc =
         | native ->
             let candidates = List.take candidates b.length in
             j.live <- j.live + 1;
+            (* the pages of its bytes, whose writes drop it, see [code_written] *)
+            (let lo = pc
+             and hi =
+               Int64.(
+                 List.fold candidates ~init:pc ~f:(fun _ (a, (i : insn)) ->
+                     a + of_int i.size)
+                 - 1L)
+             in
+             pages_of lo
+               Int64.(hi - lo + 1L)
+               (fun page ->
+                 Option.iter (Hashtbl.find t.pages page) ~f:(fun (p : page) ->
+                     p.code <- (pc, lo, hi) :: p.code)));
             Compiled
               {
                 native;
@@ -1753,7 +1801,20 @@ let exec ?until ?count t j (b : block) pc n =
 (* the block at [pc], that runs, before its first instruction is lifted
    again, and before the hooks, if its code isn't hooked, as the code of
    the block is checked, when it runs *)
+(* the blocks, whose code was written, see [code_written] *)
+let drop_stale t (j : jit) =
+  if not (List.is_empty t.stale) then begin
+    List.iter t.stale ~f:(fun pc ->
+        match Hashtbl.find j.blocks pc with
+        | Some (Compiled _ as b) ->
+            release j b;
+            Hashtbl.set j.blocks ~key:pc ~data:(Counting 0)
+        | _ -> ());
+    t.stale <- []
+  end
+
 let fast_block t j pc ~until ~count n =
+  drop_stale t j;
   match Hashtbl.find j.blocks pc with
   | Some (Compiled b)
     when (not b.entry_hooked) && b.gen = j.gen
@@ -1769,6 +1830,7 @@ let fast_block t j pc ~until ~count n =
   | _ -> None
 
 let run_block t j insn pc ~until ~count n =
+  drop_stale t j;
   let recount () =
     Option.iter (Hashtbl.find j.blocks pc) ~f:(release j);
     Hashtbl.set j.blocks ~key:pc ~data:(Counting 0)

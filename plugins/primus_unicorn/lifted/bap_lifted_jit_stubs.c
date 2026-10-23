@@ -329,22 +329,6 @@ value bap_jit_helpers(value unit) {
     CAMLreturn(r);
 }
 
-/* if the bytes at [addr] are [code], which are executable */
-static int same_code(jit_mem *m, uint64_t addr, const uint8_t *code,
-                     size_t n) {
-    while (n > 0) {
-        entry *e = find(m, PAGE_OF(addr));
-        if (!e || !(e->perm & PERM_EXEC)) return 0;
-        uint64_t off = addr - e->page;
-        size_t k = PAGE_SIZE - off < n ? (size_t)(PAGE_SIZE - off) : n;
-        if (memcmp(e->data + off, code, k)) return 0;
-        code += k;
-        addr += k;
-        n -= k;
-    }
-    return 1;
-}
-
 typedef int32_t (*block)(frame *, uint8_t **);
 
 /* [link mem pc fn code length end] the block [fn] at [pc], whose bytes
@@ -406,7 +390,9 @@ value bap_jit_limits(value mem, value chain, value budget, value until) {
 }
 
 /* [run fn mem regs code addr] runs the block [fn], whose instructions
-   are the bytes [code] at [addr], whose registers are [regs], and then
+   are the bytes [code] at [addr], which the engine drops, when they are
+   written, rather than they are checked here, whose registers are
+   [regs], and then
    the linked blocks, that the blocks continue with, see [limits], and
    returns the result of the last one, see bap_lifted_jit.ml, or -1, if
    its code changed, whose address is [last], after the [chained]
@@ -418,10 +404,8 @@ intnat bap_jit_run(intnat fn, value mem, value regs, value code,
     uint8_t *ptrs[MAX_REGS];
     m->chained = 0;
     m->last = (uint64_t)addr;
+    (void)code;
     if (nregs > MAX_REGS) return -1;
-    if (!same_code(m, (uint64_t)addr, (const uint8_t *)String_val(code),
-                   caml_string_length(code)))
-        return -1;
     for (size_t i = 0; i < nregs; i++) ptrs[i] = Bytes_val(Field(regs, i));
     uint64_t pc = (uint64_t)addr;
     jit_link *current = m->chain ? find_link(m, pc) : NULL;
@@ -454,7 +438,6 @@ intnat bap_jit_run(intnat fn, value mem, value regs, value code,
             return r;
         m->chained += ran;
         m->last = next;
-        if (!same_code(m, next, l->code, l->size)) return -1;
         current = l;
         fn = l->fn;
         pc = next;
