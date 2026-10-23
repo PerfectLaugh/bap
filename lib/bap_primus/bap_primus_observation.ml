@@ -25,6 +25,12 @@ type 'a mstream = { providers : provider list }
 
 let providers : (string, provider) Hashtbl.t = Hashtbl.create (module String)
 
+(* the providers by their keys, whose signals and streams, which the
+   notifications use, stay, rather than by the names of the keys, which
+   each notification would hash *)
+let by_key : provider Type_equal.Id.Uid.Table.t =
+  Type_equal.Id.Uid.Table.create ()
+
 let provider ?desc ?(package = "primus") name =
   let data, newdata = Stream.create () in
   let triggers, newtrigger = Stream.create () in
@@ -51,6 +57,7 @@ let provide ?desc ?(inspect = sexp_of_opaque) ?package name =
       name ();
   Hashtbl.add_exn providers ~key:name ~data:provider;
   let k = Univ_map.Key.create ~name inspect in
+  Hashtbl.set by_key ~key:(Type_equal.Id.uid k) ~data:provider;
   (k, k)
 
 let inspect = Univ_map.Key.to_sexp
@@ -116,15 +123,15 @@ module Make (Machine : Monad.S) = struct
     apply Fn.id x os >>= fun () -> apply Lazy.force sexp ws
 
   let notify os key x =
-    let p = Hashtbl.find_exn providers (name key) in
+    let p = Hashtbl.find_exn by_key (Type_equal.Id.uid key) in
     let os = callbacks os key and ws = callbacks os p.key in
-    Signal.send p.newtrigger ();
+    if Stream.has_subscribers p.triggers then Signal.send p.newtrigger ();
     push_data p key os ws x
   [@@inline]
 
   let notify_if_observed os key k =
-    let p = Hashtbl.find_exn providers (name key) in
-    Signal.send p.newtrigger ();
+    let p = Hashtbl.find_exn by_key (Type_equal.Id.uid key) in
+    if Stream.has_subscribers p.triggers then Signal.send p.newtrigger ();
     match (callbacks os key, callbacks os p.key) with
     | [], [] ->
         if Stream.has_subscribers p.data then (
@@ -137,14 +144,14 @@ module Make (Machine : Monad.S) = struct
 end
 
 let observed os key =
-  let p = Hashtbl.find_exn providers (name key) in
+  let p = Hashtbl.find_exn by_key (Type_equal.Id.uid key) in
   (not (List.is_empty (callbacks os key)))
   || (not (List.is_empty (callbacks os p.key)))
   || Stream.has_subscribers p.data
 
 (* the number of the observers, the watchers, and the streams *)
 let observers os key =
-  let p = Hashtbl.find_exn providers (name key) in
+  let p = Hashtbl.find_exn by_key (Type_equal.Id.uid key) in
   List.length (callbacks os key)
   + List.length (callbacks os p.key)
   + if Stream.has_subscribers p.data then 1 else 0

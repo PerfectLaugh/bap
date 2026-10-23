@@ -37,16 +37,24 @@ module Bag = struct
           \            creation function from the scope of a functor."
           (name state) state.uuid ()
 
+  (* the invariant holds for the keys, that the bag has, as it was
+     checked, when they were added, so it is checked only for the new
+     ones, rather than on each access, which compares the uuids *)
   let with_state t state ~ready ~create =
-    check_invariant t state;
     match Dict.find t.dict state.key with
-    | None -> create state.init
+    | None ->
+        check_invariant t state;
+        create state.init
     | Some data -> ready data
 
   let set t state data =
-    check_invariant t state;
-    {
-      uids = Map.set t.uids ~key:state.uuid ~data:(Key.hash state.key);
-      dict = Dict.set t.dict ~key:state.key ~data;
-    }
+    if Dict.mem t.dict state.key then
+      { t with dict = Dict.set t.dict ~key:state.key ~data }
+    else begin
+      check_invariant t state;
+      {
+        uids = Map.set t.uids ~key:state.uuid ~data:(Key.hash state.key);
+        dict = Dict.set t.dict ~key:state.key ~data;
+      }
+    end
 end

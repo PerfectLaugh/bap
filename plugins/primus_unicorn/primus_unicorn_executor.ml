@@ -2777,8 +2777,9 @@ module Make (Machine : Primus.Machine.S) = struct
         let* active = Track.active in
         if not active then Machine.return ()
         else
-          let* vars = Env.all in
-          Machine.Seq.iter vars ~f:(fun v ->
+          (* the registers, rather than all the variables, e.g., the
+             saved registers of the threads *)
+          Machine.List.iter (Target.Regs.vars e.regs) ~f:(fun v ->
               match Target.Regs.owner e.regs (Var.name v) with
               | None -> Machine.return ()
               | Some r ->
