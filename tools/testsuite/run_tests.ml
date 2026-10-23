@@ -781,6 +781,31 @@ let emu data =
             ("runs the code, that the store rewrote", "returns 9\n");
             ("exits with the result of main", "exited 7\n");
           ]);
+    (* the code, that is hostile to the JIT of the lifted engine, runs in
+       it, as in Unicorn, see emu/hostile.ml, e.g., the store, whose
+       address wraps around, which crashed the runtime of the blocks *)
+    case "emu/hostile" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/hostile.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+            ]
+        in
+        sequence env out
+          (List.concat_map
+             (fun engine ->
+               let line s = Printf.sprintf "%s: %s\n" engine s in
+               [
+                 ( "runs the loop of the string instruction",
+                   line "rep paused, rdi \\+16, \"ZZZZZZZZZZZZZZZZ>\"" );
+                 ("runs the patched code", line "patch paused, ebx 9500");
+                 ( "faults on the wrapped store",
+                   line "wrap paused, Segmentation fault at 0xFFFFFFFFFFFFFFFF"
+                 );
+               ])
+             [ "unicorn"; "lifted" ]));
     (* the native traces of the instructions, and of the blocks, whose
        instructions are the same, and the backward slice, by both, of the
        result of main, through the stack, without the noise *)

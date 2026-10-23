@@ -72,6 +72,7 @@ type insn = {
 (* the block, that the JIT compiled, of the instructions, that start at
    the addresses, see Bap_engine_jit *)
 type block = {
+  native : Bap_llvm_jit.code;
   fn : nativeint;
   regs : Bytes.t array;  (** the registers of its slots *)
   code : string;  (** the bytes of its instructions *)
@@ -95,6 +96,8 @@ type jit = {
   mutable traced : bool;
       (** if the traces of the code record the instructions of the blocks *)
   mutable jitted : int;  (** the instructions, that the blocks ran *)
+  compiles : int Int64.Table.t;  (** the blocks compiled at the addresses *)
+  mutable live : int;  (** the blocks, that are not released *)
 }
 
 type t = {
@@ -199,6 +202,8 @@ let create config arch mode =
                allowed = true;
                traced = false;
                jitted = 0;
+               compiles = Int64.Table.create ();
+               live = 0;
              });
     }
   in
@@ -215,6 +220,12 @@ let check t = if t.closed then invalid_arg "the engine is closed"
 
 let close t =
   if Lazy.is_val t.probe then Uc.close (Lazy.force t.probe);
+  Option.iter t.jit ~f:(fun j ->
+      Hashtbl.iter j.blocks ~f:(function
+        | Compiled b -> Bap_llvm_jit.release b.native
+        | Counting _ | Failed -> ());
+      Hashtbl.clear j.blocks;
+      j.live <- 0);
   t.closed <- true
 
 (* the registers *)
@@ -1165,9 +1176,19 @@ let jump t insn ~next a =
       Word.to_int64_exn dst
   | _ -> a
 
+(* the code of the block, that is dropped, is released, as the program
+   may make the blocks anew, e.g., as it patches its code *)
+let release (j : jit) = function
+  | Compiled b ->
+      Bap_llvm_jit.release b.native;
+      j.live <- j.live - 1
+  | Counting _ | Failed -> ()
+
 let flush_tb t =
   Hashtbl.clear t.insns;
-  Option.iter t.jit ~f:(fun j -> Hashtbl.clear j.blocks)
+  Option.iter t.jit ~f:(fun j ->
+      Hashtbl.iter j.blocks ~f:(release j);
+      Hashtbl.clear j.blocks)
 
 (* the hooks of the blocks, at the starts of the blocks, and then of the
    instruction, in their order, but the ones after the hook, that stops
@@ -1235,6 +1256,12 @@ let fault_error (access : Uc.access) =
 let hot = 32
 let max_block = 32
 
+(* the blocks, that are compiled at an address, e.g., of the code, that
+   the program patches, and of all addresses, at most, so that the code
+   of the program doesn't use all memory, nor the time of the JIT *)
+let max_compiles = 8
+let max_live = 0x10000
+
 let verbose () =
   Option.equal String.equal (Sys.getenv "BAP_LIFTED_STATS") (Some "verbose")
 
@@ -1272,6 +1299,10 @@ let candidates t pc =
   loop 0 pc []
 
 let compile_block t j pc =
+  let compiles = Option.value (Hashtbl.find j.compiles pc) ~default:0 in
+  if compiles >= max_compiles || j.live >= max_live then Failed
+  else begin
+  Hashtbl.set j.compiles ~key:pc ~data:(compiles + 1);
   let candidates = candidates t pc in
   let insns =
     List.map candidates ~f:(fun (pc, insn) ->
@@ -1297,11 +1328,13 @@ let compile_block t j pc =
             Printf.eprintf "lifted engine: the block at %Lx failed: %s\n%!" pc
               msg;
           Failed
-      | fn ->
+      | native ->
           let candidates = List.take candidates b.length in
+          j.live <- j.live + 1;
           Compiled
             {
-              fn;
+              native;
+              fn = Bap_llvm_jit.address native;
               regs = Array.map b.regs ~f:(reg_bytes t);
               code = String.concat (List.map candidates ~f:(fun (_, i) -> i.code));
               pcs = Array.of_list_map candidates ~f:fst;
@@ -1309,6 +1342,7 @@ let compile_block t j pc =
               gen = j.gen;
               entry_hooked = hooked ~blocks:true t pc;
             })
+  end
 
 (* the block, whose hooks of the code changed, is checked again *)
 let unhooked t (j : jit) (b : block) =
@@ -1345,6 +1379,7 @@ let exec t j (b : block) pc =
   let next k = Int64.(b.pcs.(k) + of_int b.insns.(k).size) in
   if r < 0 then (
     (* the code changed *)
+    release j (Compiled b);
     Hashtbl.set j.blocks ~key:pc ~data:(Counting 0);
     None)
   else
@@ -1378,7 +1413,10 @@ let fast_block t j pc ~until ~count n =
   | _ -> None
 
 let run_block t j insn pc ~until ~count n =
-  let recount () = Hashtbl.set j.blocks ~key:pc ~data:(Counting 0) in
+  let recount () =
+    Option.iter (Hashtbl.find j.blocks pc) ~f:(release j);
+    Hashtbl.set j.blocks ~key:pc ~data:(Counting 0)
+  in
   match Hashtbl.find j.blocks pc with
   | None ->
       Hashtbl.set j.blocks ~key:pc ~data:(Counting 1);

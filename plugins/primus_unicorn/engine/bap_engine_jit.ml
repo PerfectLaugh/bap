@@ -18,7 +18,15 @@
    runs it, 4k + 1, if the instruction k jumped to the target, which is
    in the frame, and 4k + 2, if it is the last instruction, which didn't
    jump. The instructions, that the block can't run, e.g., that call an
-   intrinsic, or that have delay slots, are not in it. *)
+   intrinsic, or that have delay slots, are not in it.
+
+   The code and the data of the program are untrusted, so the blocks run
+   only what the closures run the same, and nothing, that may abort
+   LLVM, or run long without returning to OCaml: the instructions, whose
+   blocks loop, e.g., the string instructions of x86, which repeat, the
+   integers of more than [max_width] bits, the divisions of more than 128
+   bits, and the blocks of more than [max_slots] registers aren't in
+   them, and the accesses of the memory check the pages. *)
 
 open Core
 open Bap.Std
@@ -32,6 +40,10 @@ type insn = {
 exception Unsupported of string
 
 let unsupported fmt = ksprintf (fun msg -> raise (Unsupported msg)) fmt
+let max_width = 1024
+
+(* the slots, that the runtime passes, see MAX_REGS of the stubs *)
+let max_slots = 256
 
 type value =
   | Val of string * int  (** the operand, and its width *)
@@ -81,7 +93,9 @@ let of_word x =
   let w = Word.bitwidth x in
   Val (const w (Bitvec.to_bigint (Word.to_bitvec x)), w)
 
-let ty w = sprintf "i%d" w
+let ty w =
+  if w < 1 || w > max_width then unsupported "an integer of %d bits" w;
+  sprintf "i%d" w
 
 let assign t fmt =
   ksprintf
@@ -112,6 +126,7 @@ let slot t id =
   | Some i -> i
   | None ->
       let i = Hashtbl.length t.slots in
+      if i = max_slots then unsupported "more than %d registers" max_slots;
       Hashtbl.set t.slots ~key:id ~data:i;
       i
 
@@ -120,6 +135,7 @@ let reg_width t id = t.reg_size id * 8
 let declare t decl = t.decls <- Set.add t.decls decl
 
 let bswap t x w =
+  if w mod 16 <> 0 && w <> 8 then unsupported "a swap of %d bits" w;
   if w = 8 then x
   else begin
     declare t (sprintf "declare %s @llvm.bswap.%s(%s)" (ty w) (ty w) (ty w));
@@ -231,6 +247,7 @@ let addr64 t x w = resize t x w 64
 (* the division, which stops the instruction, if it divides by zero,
    which is the exception of the target, that Primus raises *)
 let nonzero t s y w =
+  if w > 128 then unsupported "a division of %d bits" w;
   let zero = assign t "icmp eq %s %s, 0" (ty w) y in
   let l = label t in
   emit t "  br i1 %s, label %%i%d.stop, label %%%s\n" zero s.k l;
@@ -394,11 +411,13 @@ let insn t k (ins : insn) =
   let jump_to a =
     emit t "  store i64 %s, ptr %%tgt\n  br label %%i%d.jump\n" a k
   in
-  let goto = function
+  let goto j = function
     | Direct tid -> (
         match index tid with
         (* the jump to the instruction itself, e.g., b . of ARM *)
         | Some 0 -> jump_to (Int64.to_string ins.pc)
+        (* the loop, e.g., of rep movs of x86, may run for long *)
+        | Some i when i <= j -> unsupported "a loop in the instruction"
         | Some i -> emit t "  br label %%i%db%d\n" k i
         | None -> unsupported "a call of %s" (Tid.name tid))
     | Indirect e ->
@@ -422,13 +441,13 @@ let insn t k (ins : insn) =
           emit t "  br i1 %s, label %%%s, label %%%s\n" c taken rest;
           start t taken;
           (match Jmp.kind jmp with
-          | Goto label | Ret label -> goto label
+          | Goto label | Ret label -> goto j label
           | Call c -> (
               match Call.target c with
               | Indirect e ->
                   let a, w = value (exp t s e) in
                   jump_to (addr64 t a w)
-              | label -> goto label)
+              | label -> goto j label)
           | Int _ -> unsupported "an interrupt");
           start t rest);
       if j + 1 < Array.length blks then emit t "  br label %%i%db%d\n" k (j + 1)
@@ -566,7 +585,7 @@ let llvm =
 
 let blocks = ref 0
 
-(* the address of the function of the block *)
+(* the code of the block *)
 let native block =
   incr blocks;
   let name = sprintf "bap_block_%d" !blocks in

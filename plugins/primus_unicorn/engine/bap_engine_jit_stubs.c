@@ -130,9 +130,13 @@ value bap_jit_mem_create(value unit) {
    engine keeps, while it is mapped */
 value bap_jit_mem_map(value mem, value page, value data, value perm) {
     jit_mem *m = Mem_val(mem);
+    uint64_t p = (uint64_t)Int64_val(page);
+    if (p != PAGE_OF(p) || Caml_ba_array_val(data)->dim[0] != PAGE_SIZE)
+        caml_invalid_argument("Bap_engine_jit.Runtime.map");
+    flush_tlb(m);
+    if (find(m, p)) caml_invalid_argument("Bap_engine_jit.Runtime.map: mapped");
     if (2 * (m->count + 1) > m->capacity) rehash(m, 2 * m->capacity);
-    entry e = {(uint64_t)Int64_val(page), Caml_ba_data_val(data),
-               Int_val(perm)};
+    entry e = {p, Caml_ba_data_val(data), Int_val(perm)};
     insert(m->table, m->capacity, e);
     m->count++;
     flush_tlb(m);
@@ -188,15 +192,27 @@ int32_t bap_jit_load(frame *f, uint64_t addr, uint32_t n, uint8_t *out) {
     return 1;
 }
 
+/* the pages of the bytes, that a store of [n] bytes at [addr] writes,
+   which wrap around the end of the address space, as the accesses of the
+   closures do, are writable */
+static int writable(jit_mem *m, uint64_t addr, uint32_t n) {
+    while (n > 0) {
+        entry *e = find(m, PAGE_OF(addr));
+        if (!e || !(e->perm & PERM_WRITE)) return 0;
+        uint64_t off = addr - e->page;
+        uint32_t k = PAGE_SIZE - off < n ? (uint32_t)(PAGE_SIZE - off) : n;
+        addr += k;
+        n -= k;
+    }
+    return 1;
+}
+
 int32_t bap_jit_store(frame *f, uint64_t addr, uint32_t n,
                       const uint8_t *in) {
     jit_mem *m = f->mem;
-    if (f->undo + n > UNDO_SIZE) return 0;
-    for (uint64_t page = PAGE_OF(addr); page < addr + n; page += PAGE_SIZE) {
-        entry *e = find(m, page);
-        if (!e || !(e->perm & PERM_WRITE)) return 0;
-        if (page + PAGE_SIZE < page) break;
-    }
+    /* the store is checked as a whole, so that it writes all of its
+       bytes, or none */
+    if (n > UNDO_SIZE - f->undo || !writable(m, addr, n)) return 0;
     while (n > 0) {
         entry *e = find(m, PAGE_OF(addr));
         uint64_t off = addr - e->page;
