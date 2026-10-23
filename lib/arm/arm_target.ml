@@ -158,6 +158,15 @@ let zr = reg r64 "ZR"
 let zr64 = reg r64 "XZR"
 let zr32 = reg r32 "WZR"
 let tpidr_el0 = reg r64 "TPIDR_EL0"
+
+(* the system registers, that the programs read and write, see MRS and
+   MSR of aarch64-special.lisp: the controls and the status of the
+   floats, the read-only thread register, and the virtual counter,
+   which only Primus has, as the counter of Unicorn is of the host *)
+let fpcr = reg r32 "FPCR"
+let fpsr = reg r32 "FPSR"
+let tpidrro_el0 = reg r64 "TPIDRRO_EL0"
+let cntvct_el0 = reg r64 "CNTVCT_EL0"
 let memsv8 = CT.Mem.define r64 r8
 let datav8 = CT.Var.define memsv8 "mem"
 let flagsv8 = [ reg bool "NF"; reg bool "ZF"; reg bool "CF"; reg bool "VF" ]
@@ -167,7 +176,10 @@ let aliases =
   xs @< ws @< qs @< ds @< ss @< hs @< bs @< [ fp64; lr64; sp64; zr64 ]
   @< [ sp32; zr32 ]
 
-let varsv8 = rs @< flagsv8 @< [ datav8 ] @< [ tpidr_el0 ]
+let varsv8 =
+  rs @< flagsv8 @< [ datav8 ]
+  @< [ tpidr_el0; tpidrro_el0; cntvct_el0 ]
+  @< [ fpcr; fpsr ]
 
 let regsv8 =
   Theory.Role.Register.
@@ -182,7 +194,8 @@ let regsv8 =
       ([ constant; zero; pseudo ], untyped [ reg r64 "XZR"; reg r64 "ZR" ]);
       ([ constant; zero; pseudo ], untyped [ reg r32 "WZR" ]);
       ([ link ], untyped [ reg r64 "R30" ]);
-      ([ thread ], untyped [ tpidr_el0 ]);
+      ([ thread ], untyped [ tpidr_el0; tpidrro_el0 ]);
+      ([ system ], untyped [ fpcr; fpsr ] @< untyped [ cntvct_el0 ]);
       ([ alias ], aliases);
     ]
   @ status_regs

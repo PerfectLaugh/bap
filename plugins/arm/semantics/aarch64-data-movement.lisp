@@ -82,6 +82,10 @@
     (setw r1 (cast-unsigned (word) (load-hword addr)))
     (setw r2 (cast-unsigned (word) (load-hword (+ addr 4))))))
 
+;; the non-temporal pairs, whose hint has no effect
+(defun LDNPXi (r1 r2 base off) (LDPXi r1 r2 base off))
+(defun LDNPWi (r1 r2 base off) (LDPWi r1 r2 base off))
+
 (defun LDRXroX (rt rn rm _ shift)
   (set$ rt (load-word (+ rn (lshift rm (* shift 3))))))
 
@@ -163,6 +167,9 @@
 ;; the prefetch hints have no effect on the semantics
 (defun PRFMroW (_ _ _ _ _) (empty))
 (defun PRFMroX (_ _ _ _ _) (empty))
+;; the prefetches of the unsigned and the unscaled offsets
+(defun PRFMui (_ _ _) (empty))
+(defun PRFUMi (_ _ _) (empty))
 
 ;; MOV...
 
@@ -209,6 +216,10 @@
   (let ((off (lshift off 2)))
     (store-word (+ base off) (cast-low 32 t1))
     (store-word (+ base off 4) (cast-low 32 t2))))
+
+;; the non-temporal pairs, whose hint has no effect
+(defun STNPXi (t1 t2 base off) (STPXi t1 t2 base off))
+(defun STNPWi (t1 t2 base off) (STPWi t1 t2 base off))
 
 (defun STRXui (src reg off)
   (let ((off (lshift off 3)))

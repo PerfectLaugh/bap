@@ -85,6 +85,20 @@ a3 00 ae 9e  # fmov x3, v5.d[1]
 a3 00 af 9e  # fmov v3.d[1], x5
 a3 c0 23 1e  # fcvt h3, s5
 a3 c0 e2 1e  # fcvt d3, h5
+03 42 3b d5  # mrs x3, nzcv
+03 44 3b d5  # mrs x3, fpcr
+e3 00 3b d5  # mrs x3, dczid_el0
+03 00 38 d5  # mrs x3, midr_el1
+05 42 1b d5  # msr nzcv, x5
+25 44 1b d5  # msr fpsr, x5
+25 74 0b d5  # dc zva, x5
+25 7e 0b d5  # dc civac, x5
+ff 30 03 d5  # sb
+a0 04 80 f9  # prfm pldl1keep, [x5, #8]
+a3 0c 40 3d  # ldr b3, [x5, #3]
+a3 08 00 7d  # str h3, [x5, #4]
+a3 1c 41 a8  # ldnp x3, x7, [x5, #16]
+a3 10 01 ac  # stnp q3, q4, [x5, #32]
 00 18 21 1e  # fdiv s0, s0, s1
 00 04 02 1f  # fmadd s0, s0, s2, s1
 00 68 21 1e  # fmaxnm s0, s0, s1
