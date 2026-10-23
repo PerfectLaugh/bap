@@ -286,7 +286,11 @@ let rec remove name =
         (fun entry -> remove (Filename.concat name entry))
         (Sys.readdir name);
       Unix.rmdir name
-  | _ -> Sys.remove name
+  | _ ->
+      (* Windows doesn't remove the read-only files, e.g., the inputs,
+         that the cases make read-only *)
+      if Sys.win32 then Unix.chmod name 0o644;
+      Sys.remove name
   | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ()
 
 let mkdir name = if not (Sys.file_exists name) then Sys.mkdir name 0o755
