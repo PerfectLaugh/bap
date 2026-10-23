@@ -203,14 +203,18 @@ module Make (B : Theory.Core) = struct
     unpack_raw fsort x @@ fun _sign expn coef ->
     is_all_ones expn && non_zero coef
 
+  (* the default NaN is negative on x86, as its real indefinite, and
+     positive on the other targets, e.g., Arm, RISC-V, and PowerPC *)
   let qnan fsort =
     let open B in
     let open IEEE754 in
     let exps = Sort.exps fsort in
     let spec = Sort.spec fsort in
     let sigs = Bits.define spec.t in
+    Theory.Target.current () >>= fun target ->
+    let sign = if Theory.Target.matches target "x86" then B.b1 else B.b0 in
     (not (ones sigs lsr one sigs)) >>>= fun coef ->
-    pack_raw fsort B.b1 (ones exps) coef
+    pack_raw fsort sign (ones exps) coef
 
   let snan fsort =
     let open B in

@@ -95,7 +95,7 @@ sub main(main_argc, main_argv, main_result)
 #70: R8 := 0x20000
 #71: R21 := 1
 #72: R9 := pad:64[low:32[pad:64[mem[R8 + 0x14C, el]:u32]]]
-#73: R9 := pad:64[low:32[extend:64[31:0[R9]] + 1]]
+#73: R9 := pad:64[low:32[pad:64[31:0[R9]] + 1]]
 #74: mem := mem with [R8 + 0x14C, el]:u32 <- 31:0[R9]
 #75: R30 := 0x200B4
 #76: call @answer with return %#77

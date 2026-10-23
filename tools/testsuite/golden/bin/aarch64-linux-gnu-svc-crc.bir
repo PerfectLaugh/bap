@@ -39,7 +39,7 @@ sub main(main_argc, main_argv, main_result)
 #26: goto %#27
 
 #27:
-#28: R9 := pad:64[low:32[extend:64[31:0[R9]] + 1]]
+#28: R9 := pad:64[low:32[pad:64[31:0[R9]] + 1]]
 #29: #27 := 0xFFFFFF9C + 31:0[R9]
 #30: NF := 31:31[#27]
 #31: VF := 31:31[R9] & ~31:31[#27]

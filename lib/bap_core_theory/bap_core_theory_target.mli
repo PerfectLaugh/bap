@@ -90,6 +90,8 @@ val parent : t -> t
 val parents : t -> t list
 val declared : unit -> t list
 val family : t -> t list
+val current : unit -> t KB.t
+val with_current : t -> (unit -> 'a KB.t) -> 'a KB.t
 val partition : t list -> t list list
 val families : unit -> t list list
 val bits : t -> int

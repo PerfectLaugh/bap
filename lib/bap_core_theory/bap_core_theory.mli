@@ -1468,6 +1468,22 @@ module Theory : sig
         The family members are ordered according to their hierarchy with [p]
         comming first. *)
 
+    val current : unit -> t knowledge
+    (** [current ()] is the target of the code, whose semantics the theories
+        denote, or [unknown], see {!with_current}.
+
+        The theories may use it for the details, that the target defines,
+        e.g., the default NaN of its floating-point operations.
+
+        @since 3.0.0 *)
+
+    val with_current : t -> (unit -> 'a knowledge) -> 'a knowledge
+    (** [with_current t f] sets [t] as the {!current} target in the scope of
+        [f], e.g., while a lifter denotes the semantics of an instruction of
+        [t].
+
+        @since 3.0.0 *)
+
     val partition : t list -> t list list
     (** [partition targets] partitions targets into families.
 

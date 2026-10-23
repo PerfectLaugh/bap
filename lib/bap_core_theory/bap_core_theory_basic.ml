@@ -83,9 +83,13 @@ module Make (L : Minimal) = struct
     mem >>-> fun mem_t mem ->
     let chunks = Mem.vals mem_t in
     let needed = size data_t and chunk_len = size chunks in
+    (* the chunk at the offset [stored] is the most significant one first,
+       in the big endian order, as [loadw] concatenates them *)
     let nth stored =
       let shift_amount =
-        ite dir (small data_t stored) (small data_t (needed - stored))
+        ite dir
+          (small data_t (needed - chunk_len - stored))
+          (small data_t stored)
       in
       cast chunks b0 (shiftr b0 !!data shift_amount)
     in

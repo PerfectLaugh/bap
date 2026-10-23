@@ -482,8 +482,35 @@ module Prelude (CT : Theory.Core) = struct
           Theory.Var.fresh Theory.Bool.t >>= fun c ->
           let* yes = eval yes in
           let* nay = eval nay in
-          full [ !!cnd; data [ c := !cres ]; CT.branch (CT.var c) !yes !nay ]
-          @@ CT.ite (CT.var c) !(res yes) !(res nay)
+          let statements x = not (List.is_empty (KB.Value.get Bil.slot x)) in
+          let defined x =
+            match KB.Value.get Exp.slot (res x) with
+            | Bil.Unknown ("empty", _) -> false
+            | _ -> true
+          in
+          if
+            (statements yes || statements nay)
+            && defined yes && defined nay
+            && Theory.Value.Sort.same
+                 (Theory.Value.sort (res yes))
+                 (Theory.Value.sort (res nay))
+          then
+            (* the value of a branch may read the temporaries of its
+               statements, which the other branch doesn't assign, so each
+               branch assigns its value *)
+            Theory.Var.fresh (Theory.Value.sort (res yes)) >>= fun r ->
+            full
+              [
+                !!cnd;
+                data [ c := !cres ];
+                CT.branch (CT.var c)
+                  (seq [ !yes; data [ r := !(res yes) ] ])
+                  (seq [ !nay; data [ r := !(res nay) ] ]);
+              ]
+            @@ CT.var r
+          else
+            full [ !!cnd; data [ c := !cres ]; CT.branch (CT.var c) !yes !nay ]
+            @@ CT.ite (CT.var c) !(res yes) !(res nay)
     and rep cnd body =
       let* r = eval cnd in
       match static r with
@@ -818,7 +845,11 @@ let provide_semantics ?(stdout = Format.std_formatter) () =
            });
     let (module Core) = KB.await Theory.current in
     let open Prelude (Core) in
-    let res = KB.await (reify stdout prog obj target name args) in
+    let res =
+      KB.await
+        ( Theory.Target.with_current target @@ fun () ->
+          reify stdout prog obj target name args )
+    in
     match KB.await (KB.collect Disasm_expert.Basic.Insn.slot obj) with
     | Some basic when Insn.(res <> empty) -> Insn.with_basic res basic
     | _ -> res

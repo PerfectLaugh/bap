@@ -607,9 +607,12 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
 
   type 'a bitv = 'a Theory.Bitv.t Theory.Value.sort
 
+  (* the narrower operands are zero-extended, as the constants, and as
+     the interpreter extends them *)
   let coerce s x =
     if Theory.Value.Sort.same (Theory.Value.sort x) s then !!x
-    else match const x with Some x -> const_int s x | None -> CT.signed s !!x
+    else
+      match const x with Some x -> const_int s x | None -> CT.unsigned s !!x
 
   let monoid s cast sf df init xs =
     with_nbitv s cast xs @@ fun s xs ->

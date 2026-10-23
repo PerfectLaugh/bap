@@ -388,7 +388,9 @@ let provide_lifter ~with_fp () =
           (Theory.instance ~context:(context target) () >>= Theory.require)
       in
       let module Lifter = Theory.Parser.Make (Core) in
-      KB.await (Lifter.run Bil.Theory.parser bil)
+      KB.await
+        ( Theory.Target.with_current target @@ fun () ->
+          Lifter.run Bil.Theory.parser bil )
   in
   KB.Rule.(
     declare ~package "bil-semantics"

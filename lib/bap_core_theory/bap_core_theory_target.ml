@@ -789,3 +789,11 @@ include (Self : Pretty_printer.S with type t := t)
 let domain = Self.domain
 let persistent = Self.persistent
 let unknown = Self.unknown
+
+(* the target of the code, whose semantics the theories denote, e.g.,
+   for the details, that the target defines, e.g., its default NaN *)
+let current_target =
+  KB.Context.declare ~package "*current-target*" (KB.return unknown)
+
+let current () = KB.Context.get current_target
+let with_current t f = KB.Context.with_var current_target t f

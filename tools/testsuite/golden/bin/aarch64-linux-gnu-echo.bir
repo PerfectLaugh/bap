@@ -61,7 +61,7 @@ sub main(main_argc, main_argv, main_result)
 #21: R1 := pad:64[low:32[pad:64[mem[R29 + 0x2C, el]:u32]]]
 #22: R0 := pad:64[low:32[pad:64[mem[R29 + 0x44, el]:u32]]]
 #23: R0 := pad:64[31:0[R1] + 31:0[R0]]
-#24: R0 := pad:64[low:32[extend:64[31:0[R0]] + 1]]
+#24: R0 := pad:64[low:32[pad:64[31:0[R0]] + 1]]
 #25: mem := mem with [R29 + 0x48, el]:u32 <- 31:0[R0]
 #26: R0 := extend:64[mem[R29 + 0x48, el]:u32]
 #27: R0 := R0 - 1
@@ -131,7 +131,7 @@ sub main(main_argc, main_argv, main_result)
 
 #86:
 #87: R0 := pad:64[low:32[pad:64[mem[R29 + 0x48, el]:u32]]]
-#88: R1 := pad:64[low:32[extend:64[31:0[R0]] - 1]]
+#88: R1 := pad:64[low:32[pad:64[31:0[R0]] - 1]]
 #89: R0 := mem[R29 + 0x58, el]:u64
 #90: R1 := extend:64[31:0[R1]]
 #91: mem := mem with [R0 + (R1 << 3), el]:u64 <- 0
@@ -197,7 +197,7 @@ sub main(main_argc, main_argv, main_result)
 
 #143:
 #144: R0 := pad:64[low:32[pad:64[mem[R29 + 0x40, el]:u32]]]
-#145: R0 := pad:64[low:32[extend:64[31:0[R0]] + 1]]
+#145: R0 := pad:64[low:32[pad:64[31:0[R0]] + 1]]
 #146: mem := mem with [R29 + 0x40, el]:u32 <- 31:0[R0]
 #147: goto %#98
 
@@ -223,7 +223,7 @@ sub main(main_argc, main_argv, main_result)
 #164: R1 := mem[R29 + 0x68, el]:u64
 #165: R0 := mem[R29 + 0x60, el]:u64
 #166: R0 := R1 - R0
-#167: R0 := pad:64[low:32[extend:64[31:0[R0]] + 1]]
+#167: R0 := pad:64[low:32[pad:64[31:0[R0]] + 1]]
 #168: mem := mem with [R29 + 0x4C, el]:u32 <- 31:0[R0]
 #169: R0 := extend:64[mem[R29 + 0x4C, el]:u32]
 #170: R30 := 0xC8C
@@ -249,10 +249,10 @@ sub main(main_argc, main_argv, main_result)
 #188: R2 := mem[R29 + 0x70, el]:u64
 #189: mem := mem with [R0 + (R1 << 3), el]:u64 <- R2
 #190: R0 := pad:64[low:32[pad:64[mem[R29 + 0x3C, el]:u32]]]
-#191: R0 := pad:64[low:32[extend:64[31:0[R0]] + 1]]
+#191: R0 := pad:64[low:32[pad:64[31:0[R0]] + 1]]
 #192: mem := mem with [R29 + 0x3C, el]:u32 <- 31:0[R0]
 #193: R0 := pad:64[low:32[pad:64[mem[R29 + 0x40, el]:u32]]]
-#194: R0 := pad:64[low:32[extend:64[31:0[R0]] + 1]]
+#194: R0 := pad:64[low:32[pad:64[31:0[R0]] + 1]]
 #195: mem := mem with [R29 + 0x40, el]:u32 <- 31:0[R0]
 #196: goto %#73
 
@@ -288,7 +288,7 @@ sub main(main_argc, main_argv, main_result)
 #222: R1 := extend:64[mem[R29 + 0x40, el]:u32]
 #223: mem := mem with [R0 + (R1 << 3), el]:u64 <- R2
 #224: R0 := pad:64[low:32[pad:64[mem[R29 + 0x40, el]:u32]]]
-#225: R0 := pad:64[low:32[extend:64[31:0[R0]] + 1]]
+#225: R0 := pad:64[low:32[pad:64[31:0[R0]] + 1]]
 #226: mem := mem with [R29 + 0x40, el]:u32 <- 31:0[R0]
 #227: goto %#57
 

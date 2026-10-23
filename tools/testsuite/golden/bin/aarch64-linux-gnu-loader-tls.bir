@@ -160,7 +160,7 @@ sub main(main_argc, main_argv, main_result)
 #129: R8 := R8 + 0x18
 #130: R0 := 0x77
 #131: R20 := 1
-#132: R10 := pad:64[low:32[extend:64[31:0[R21]] + 1]]
+#132: R10 := pad:64[low:32[pad:64[31:0[R21]] + 1]]
 #133: mem := mem with [R8 + 0x3F] <- low:8[31:0[R9]]
 #134: mem := mem with [R22, el]:u32 <- 31:0[R10]
 #135: R22 := 0x200000
