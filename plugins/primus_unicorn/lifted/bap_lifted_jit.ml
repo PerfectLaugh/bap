@@ -70,8 +70,22 @@ type t = {
   mutable vars : (string * int) list;  (** the allocas of the variables *)
   mutable decls : String.Set.t;  (** the intrinsics of LLVM *)
   mutable written_before : Int.Set.t;
-      (** the slots, that the instructions before the one, that is compiled,
-          write *)
+      (** the slots, that the instructions, that are compiled, write *)
+  mutable outs : (string * string * int * int) list;
+      (** the incomings of the exit, that the jumps, and the end of the block,
+          share, their labels, targets, numbers of instructions, and results, so
+          that the values, that only it uses, e.g., the flags, sink into it, see
+          [compile] *)
+  mutable exits : (Int.Set.t -> unit) list;
+      (** the exits of the instructions, which write all slots, that the block
+          writes, see [insn], as the block may loop *)
+  loop : int64 option;
+      (** the address of the block, whose jump to it loops in it *)
+  fields : (int, (int * int) list) Hashtbl.t;
+      (** the registers, that the block reads and writes only by their fields,
+          which are disjoint, by their first bits and widths, e.g., the flags of
+          EFLAGS of x86, whose fields are its variables, that the register gets,
+          when it is written, see [split] *)
 }
 
 type insn_state = {
@@ -94,6 +108,8 @@ let label t =
   sprintf "l%d" t.temps
 
 let start t l = emit t "%s:\n" l
+let start_label = start
+let fst4 (x, _, _, _) = x
 
 (* the constant of the bits of [x], of the width [w], which LLVM reads
    signed *)
@@ -189,6 +205,9 @@ let read_var t s v =
       Val (assign t "load %s, ptr %s" (ty w) p, w)
   | None -> (
       match t.locate name with
+      | Some (id, lo, width) when Hashtbl.mem t.fields id ->
+          let i = slot t id in
+          Val (assign t "load %s, ptr %%sf%d_%d" (ty width) i lo, width)
       | Some (id, lo, width) ->
           let i = slot t id and size = reg_width t id in
           let x = assign t "load %s, ptr %%sh%d" (ty size) i in
@@ -242,6 +261,11 @@ let write_var t s v x =
   | Val (x, w) -> (
       match t.locate name with
       | None -> unsupported "the register %s, that is not mapped" name
+      | Some (id, lo, width) when Hashtbl.mem t.fields id ->
+          let i = slot t id in
+          s.written <- Set.add s.written i;
+          emit t "  store %s %s, ptr %%sf%d_%d\n" (ty width)
+            (resize t x w width) i lo
       | Some (id, lo, width) ->
           let i = slot t id and size = reg_width t id in
           s.written <- Set.add s.written i;
@@ -423,22 +447,50 @@ let rec exp t s : exp -> value = function
       let x = assign t "shl %s %s, %d" (ty w) x b in
       Val (assign t "or %s %s, %s" (ty w) x y, w)
 
-let slot_width t i =
+let slot_id t i =
   Hashtbl.to_alist t.slots
   |> List.find_map_exn ~f:(fun (id, i') -> Option.some_if (i = i') id)
-  |> reg_width t
+
+let slot_width t i = reg_width t (slot_id t i)
+
+(* the value of the register of the slot [i], whose fields are split, from
+   its value, when the block started, and its fields, by [field] *)
+let compose t i fields ~field =
+  let size = slot_width t i in
+  let mask =
+    List.fold fields ~init:Z.zero ~f:(fun m (lo, w) ->
+        Z.(m lor shift_left (shift_left one w - one) lo))
+  in
+  List.fold fields
+    ~init:
+      (assign t "and %s %%ld%d, %s" (ty size) i (const size (Z.lognot mask)))
+    ~f:(fun acc (lo, w) ->
+      let x = resize t (field lo w) w size in
+      let x = if lo = 0 then x else assign t "shl %s %s, %d" (ty size) x lo in
+      assign t "or %s %s, %s" (ty size) acc x)
 
 (* the slots are written to the registers, from their copies of the
    start of the instruction [k], if they are [copy] *)
 let commit ?copy t slots =
   Set.iter slots ~f:(fun i ->
-      let ty = ty (slot_width t i) in
-      let x =
+      let ty' = ty (slot_width t i) in
+      let copied =
         match copy with
-        | Some (k, copied) when Set.mem copied i -> sprintf "%%copy%d_%d" k i
-        | _ -> assign t "load %s, ptr %%sh%d" ty i
+        | Some (k, copied) when Set.mem copied i -> Some k
+        | _ -> None
       in
-      emit t "  store %s %s, ptr %%rp%d, align 1\n" ty x i)
+      let x =
+        match (Hashtbl.find t.fields (slot_id t i), copied) with
+        | Some fields, Some k ->
+            compose t i fields ~field:(fun lo _ ->
+                sprintf "%%copy%d_%d_%d" k i lo)
+        | Some fields, None ->
+            compose t i fields ~field:(fun lo w ->
+                assign t "load %s, ptr %%sf%d_%d" (ty w) i lo)
+        | None, Some k -> sprintf "%%copy%d_%d" k i
+        | None, None -> assign t "load %s, ptr %%sh%d" ty' i
+      in
+      emit t "  store %s %s, ptr %%rp%d, align 1\n" ty' x i)
 
 (* The exit of the block to [target], after [ran] instructions, continues
    with the next block, that the runtime linked, whose function, address,
@@ -448,13 +500,16 @@ let commit ?copy t slots =
    block doesn't reach the address, at which the run stops. The call is
    the tail call, so that the stack doesn't grow, and else the block
    returns [result]. The offsets of the frame are the ones of [frame]. *)
+(* the instructions of the blocks, that ran before this one, and of the
+   iterations of its loop, are written to the frame, before it returns *)
+let write_chained t =
+  let c = assign t "load i64, ptr %%chained" in
+  emit t "  store i64 %s, ptr %%chainedp\n" c
+
 let exit_to t ~target ~ran ~result =
   let l = label t in
-  let chain = assign t "getelementptr inbounds i8, ptr %%f, i64 56" in
-  let on = assign t "load i32, ptr %s" chain in
-  let on = assign t "icmp ne i32 %s, 0" on in
   let ret = label t and try_ = label t in
-  emit t "  br i1 %s, label %%%s, label %%%s\n" on try_ ret;
+  emit t "  br i1 %%on, label %%%s, label %%%s\n" try_ ret;
   start t try_;
   let field i f =
     assign t
@@ -481,12 +536,11 @@ let exit_to t ~target ~ran ~result =
   let some = assign t "icmp ne ptr %s, null" fn in
   let field_ off = assign t "getelementptr inbounds i8, ptr %%f, i64 %d" off in
   let chainedp = field_ 24 and lastp = field_ 32 in
-  let chained = assign t "load i64, ptr %s" chainedp in
-  let budget = assign t "load i64, ptr %s" (field_ 40) in
-  let until = assign t "load i64, ptr %s" (field_ 48) in
-  let total = assign t "add i64 %s, %d" chained ran in
+  let chained = assign t "load i64, ptr %%chained" in
+  let until = "%until" in
+  let total = assign t "add i64 %s, %s" chained ran in
   let need = assign t "add i64 %s, %s" total len in
-  let within = assign t "icmp ule i64 %s, %s" need budget in
+  let within = assign t "icmp ule i64 %s, %%budget" need in
   let at = assign t "icmp eq i64 %s, %s" until pc in
   let after = assign t "icmp ugt i64 %s, %s" until pc in
   let before = assign t "icmp ult i64 %s, %s" until end_ in
@@ -503,7 +557,32 @@ let exit_to t ~target ~ran ~result =
   let r = assign t "musttail call i32 %s(ptr %%f, ptr %%regs)" fn in
   emit t "  ret i32 %s\n" r;
   start t ret;
-  emit t "  ret i32 %d\n" result
+  write_chained t;
+  emit t "  ret i32 %s\n" result
+
+(* The jump of the block to its start runs it again, as the loop of the
+   function, whose registers stay, rather than they are written, and the
+   next block is called, so that LLVM removes the values, that the next
+   iteration sets again, e.g., the flags, while the frame allows it, as
+   for the next block, see [exit_to], and the run doesn't stop at its
+   start. The instructions of the iteration are in the chained ones. *)
+let loop_back t ~start ~target ~ran =
+  let self = assign t "icmp eq i64 %s, %Ld" target start in
+  let on = "%on" in
+  let chained = assign t "load i64, ptr %%chained" in
+  let total = assign t "add i64 %s, %d" chained ran in
+  let need = assign t "add i64 %s, %d" total ran in
+  let within = assign t "icmp ule i64 %s, %%budget" need in
+  let stops = assign t "icmp eq i64 %%until, %Ld" start in
+  let runs = assign t "xor i1 %s, true" stops in
+  let go = assign t "and i1 %s, %s" self on in
+  let go = assign t "and i1 %s, %s" go within in
+  let go = assign t "and i1 %s, %s" go runs in
+  let back = label t and out = label t in
+  emit t "  br i1 %s, label %%%s, label %%%s\n" go back out;
+  start_label t back;
+  emit t "  store i64 %s, ptr %%chained\n  br label %%i0\n" total;
+  start_label t out
 
 (* the instruction [k], whose blocks are the labels i<k>b<j>, and which
    ends at i<k>.done, if it doesn't jump, at i<k>.jump, with the target in
@@ -567,23 +646,42 @@ let insn t k (ins : insn) =
       if j + 1 < Array.length blks then emit t "  br label %%i%db%d\n" k (j + 1)
       else emit t "  br label %%i%d.done\n" k);
   if Array.is_empty blks then emit t "i%db0:\n  br label %%i%d.done\n" k k;
-  let copied = Set.inter t.written_before s.written in
+  let copied = s.written in
   emit t "i%d.done:\n  br label %%i%d\n" k (k + 1);
-  emit t "i%d.jump:\n" k;
-  commit t (Set.union t.written_before s.written);
-  let a = assign t "load i64, ptr %%tgt" in
-  emit t "  store i64 %s, ptr %%next\n" a;
-  exit_to t ~target:a ~ran:(k + 1) ~result:((4 * k) + 1);
-  (* the registers, as the previous instructions left them *)
-  emit t "i%d.stop:\n" k;
-  commit t ~copy:(k, copied) t.written_before;
-  emit t "  ret i32 %d\n" (4 * k);
+  t.exits <-
+    (fun all ->
+      emit t "i%d.jump:\n" k;
+      let a = assign t "load i64, ptr %%tgt" in
+      (match t.loop with
+      | Some start -> loop_back t ~start ~target:a ~ran:(k + 1)
+      | None -> ());
+      ignore all;
+      let l = label t in
+      emit t "  br label %%%s\n%s:\n  br label %%exit\n" l l;
+      t.outs <- (l, a, k + 1, (4 * k) + 1) :: t.outs)
+    :: (fun all ->
+      (* the registers, as the previous instructions left them, as the
+       instruction copied them, and the ones, that it doesn't write, as
+       they are, which may be of the previous iteration of a loop *)
+      emit t "i%d.stop:\n" k;
+      commit t ~copy:(k, copied) all;
+      write_chained t;
+      emit t "  ret i32 %d\n" (4 * k))
+    :: t.exits;
   let body = Buffer.contents t.body in
   Buffer.clear t.body;
   Buffer.add_string t.body before;
   emit t "i%d:\n  store i32 0, ptr %%undo\n" k;
   Set.iter copied ~f:(fun i ->
-      emit t "  %%copy%d_%d = load %s, ptr %%sh%d\n" k i (ty (slot_width t i)) i);
+      match Hashtbl.find t.fields (slot_id t i) with
+      | Some fields ->
+          List.iter fields ~f:(fun (lo, w) ->
+              emit t "  %%copy%d_%d_%d = load %s, ptr %%sf%d_%d\n" k i lo (ty w)
+                i lo)
+      | None ->
+          emit t "  %%copy%d_%d = load %s, ptr %%sh%d\n" k i
+            (ty (slot_width t i))
+            i);
   emit t "  br label %%i%db0\n" k;
   Buffer.add_string t.body body;
   t.written_before <- Set.union t.written_before s.written
@@ -602,6 +700,19 @@ let header t name =
   add "  %%next = getelementptr inbounds i8, ptr %%f, i64 8\n";
   add "  %%undo = getelementptr inbounds i8, ptr %%f, i64 16\n";
   add "  %%buf = alloca [64 x i8], align 16\n";
+  (* the values of the frame, that the run doesn't change, and the
+     instructions of the chained blocks, see [exit_to] *)
+  add "  %%chainedp = getelementptr inbounds i8, ptr %%f, i64 24\n";
+  add "  %%chained = alloca i64\n";
+  add "  %%chained0 = load i64, ptr %%chainedp\n";
+  add "  store i64 %%chained0, ptr %%chained\n";
+  add "  %%budgetp = getelementptr inbounds i8, ptr %%f, i64 40\n";
+  add "  %%budget = load i64, ptr %%budgetp\n";
+  add "  %%untilp = getelementptr inbounds i8, ptr %%f, i64 48\n";
+  add "  %%until = load i64, ptr %%untilp\n";
+  add "  %%onp = getelementptr inbounds i8, ptr %%f, i64 56\n";
+  add "  %%on0 = load i32, ptr %%onp\n";
+  add "  %%on = icmp ne i32 %%on0, 0\n";
   add "  %%tgt = alloca i64\n";
   List.iter (List.rev t.vars) ~f:(fun (p, w) ->
       add "  %s = alloca %s\n  store %s 0, ptr %s\n" p (ty w) (ty w) p);
@@ -614,7 +725,14 @@ let header t name =
       add "  %%rp%d = load ptr, ptr %%rpp%d\n" i i;
       add "  %%sh%d = alloca %s\n" i (ty w);
       add "  %%ld%d = load %s, ptr %%rp%d, align 1\n" i (ty w) i;
-      add "  store %s %%ld%d, ptr %%sh%d\n" (ty w) i i);
+      add "  store %s %%ld%d, ptr %%sh%d\n" (ty w) i i;
+      Option.iter (Hashtbl.find t.fields id) ~f:(fun fields ->
+          List.iter fields ~f:(fun (lo, fw) ->
+              add "  %%sf%d_%d = alloca %s\n" i lo (ty fw);
+              add "  %%sfv%d_%d = lshr %s %%ld%d, %d\n" i lo (ty w) i lo;
+              add "  %%sft%d_%d = trunc %s %%sfv%d_%d to %s\n" i lo (ty w) i lo
+                (ty fw);
+              add "  store %s %%sft%d_%d, ptr %%sf%d_%d\n" (ty fw) i lo i lo)));
   add "  br label %%i0\n";
   b
 
@@ -627,7 +745,45 @@ type block = {
 (* [compile ~locate ~reg_size insns] the block of the longest prefix
    of [insns], that it can run, with the reasons, why the next
    instruction is not in it, or [None], if it can't run the first one *)
-let compile ~locate ~reg_size ~global insns =
+(* the registers of the instructions, that are read and written only by
+   their disjoint fields, see [fields] *)
+let split ~locate ~reg_size insns =
+  let accesses = Hashtbl.create (module Int) in
+  let var v =
+    if not (Var.is_virtual v) then
+      Option.iter
+        (locate (Var.name v))
+        ~f:(fun (id, lo, w) -> Hashtbl.add_multi accesses ~key:id ~data:(lo, w))
+  in
+  let exp e = Set.iter (Exp.free_vars e) ~f:var in
+  List.iter insns ~f:(fun ins ->
+      List.iter ins.blks ~f:(fun blk ->
+          Term.enum def_t blk
+          |> Seq.iter ~f:(fun def ->
+              var (Def.lhs def);
+              exp (Def.rhs def));
+          Term.enum jmp_t blk
+          |> Seq.iter ~f:(fun jmp ->
+              exp (Jmp.cond jmp);
+              match Jmp.kind jmp with
+              | Goto (Indirect e) | Ret (Indirect e) -> exp e
+              | Call c -> (
+                  match Call.target c with Indirect e -> exp e | _ -> ())
+              | _ -> ())));
+  let fields = Hashtbl.create (module Int) in
+  Hashtbl.iteri accesses ~f:(fun ~key:id ~data ->
+      let size = reg_size id * 8 in
+      let data = List.dedup_and_sort data ~compare:Poly.compare in
+      let disjoint =
+        List.for_all data ~f:(fun (lo, w) ->
+            (lo <> 0 || w <> size)
+            && List.for_all data ~f:(fun (lo', w') ->
+                (lo = lo' && w = w') || lo + w <= lo' || lo' + w' <= lo))
+      in
+      if disjoint && List.length data > 1 then Hashtbl.set fields ~key:id ~data);
+  fields
+
+let compile ?loop ~locate ~reg_size ~global insns =
   let t =
     {
       locate;
@@ -639,6 +795,10 @@ let compile ~locate ~reg_size ~global insns =
       vars = [];
       decls = String.Set.empty;
       written_before = Int.Set.empty;
+      exits = [];
+      outs = [];
+      loop;
+      fields = split ~locate ~reg_size insns;
     }
   in
   let rec loop k = function
@@ -650,13 +810,19 @@ let compile ~locate ~reg_size ~global insns =
             t.vars,
             t.decls,
             t.temps,
-            t.written_before )
+            t.written_before,
+            t.exits,
+            t.outs )
         in
         match insn t k ins with
         | () -> loop (k + 1) rest
         | exception Unsupported reason ->
-            let body, slots, vars, decls, temps, written_before = saved in
+            let body, slots, vars, decls, temps, written_before, exits, outs =
+              saved
+            in
             t.written_before <- written_before;
+            t.exits <- exits;
+            t.outs <- outs;
             Buffer.clear t.body;
             Buffer.add_string t.body body;
             Hashtbl.clear t.slots;
@@ -670,13 +836,29 @@ let compile ~locate ~reg_size ~global insns =
   let length, reason = loop 0 insns in
   if length = 0 then Error (Option.value reason ~default:"no instructions")
   else begin
-    emit t "i%d:\n" length;
-    commit t t.written_before;
+    emit t "i%d:\n  br label %%exit\n" length;
     let last = List.nth_exn insns (length - 1) in
-    exit_to t
-      ~target:(Int64.to_string last.next)
-      ~ran:length
-      ~result:((4 * (length - 1)) + 2);
+    t.outs <-
+      ( sprintf "i%d" length,
+        Int64.to_string last.next,
+        length,
+        (4 * (length - 1)) + 2 )
+      :: t.outs;
+    List.iter (List.rev t.exits) ~f:(fun exit -> exit t.written_before);
+    (* the exit, that the jumps, and the end, share *)
+    let phi ty f =
+      assign t "phi %s %s" ty
+        (String.concat ~sep:", "
+           (List.map t.outs ~f:(fun out ->
+                sprintf "[%s, %%%s]" (f out) (fst4 out))))
+    in
+    emit t "exit:\n";
+    let target = phi "i64" (fun (_, a, _, _) -> a) in
+    let ran = phi "i64" (fun (_, _, n, _) -> Int.to_string n) in
+    let result = phi "i32" (fun (_, _, _, r) -> Int.to_string r) in
+    commit t t.written_before;
+    emit t "  store i64 %s, ptr %%next\n" target;
+    exit_to t ~target ~ran ~result;
     emit t "}\n";
     let b = header t "block" in
     Buffer.add_buffer b t.body;
@@ -754,5 +936,8 @@ let native block =
     |> String.substr_replace_all ~pattern:"@block_slots"
          ~with_:("@" ^ name ^ "_slots")
   in
+  (match Sys.getenv "BAP_DUMP_IR" with
+  | Some dir -> Out_channel.write_all (dir ^ "/" ^ name ^ ".ll") ~data:ir
+  | None -> ());
   let code = Bap_llvm_jit.compile (Lazy.force llvm) ir name in
   (code, Bap_llvm_jit.symbol (Lazy.force llvm) (name ^ "_slots"))

@@ -11,7 +11,9 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/AssumptionCache.h>
+#include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/IR/Dominators.h>
@@ -21,6 +23,7 @@
 #include <llvm/Transforms/Scalar/EarlyCSE.h>
 #include <llvm/Transforms/Scalar/SROA.h>
 #include <llvm/Transforms/Scalar/SimplifyCFG.h>
+#include <llvm/Transforms/Scalar/Sink.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/TargetSelect.h>
@@ -99,11 +102,16 @@ void optimize(Module &m) {
     fam.registerPass([] { return AssumptionAnalysis(); });
     fam.registerPass([] { return TargetLibraryAnalysis(); });
     fam.registerPass([] { return TargetIRAnalysis(); });
+    fam.registerPass([] { return LoopAnalysis(); });
+    fam.registerPass([] { return AAManager(); });
     FunctionPassManager fpm;
     fpm.addPass(SROAPass(SROAOptions::ModifyCFG));
     fpm.addPass(EarlyCSEPass());
     fpm.addPass(SimplifyCFGPass());
     fpm.addPass(DCEPass());
+    // the values, that only the exits of a loop use, e.g., the flags of
+    // its last iteration, which the loop doesn't compute each time
+    fpm.addPass(SinkingPass());
     for (auto &f : m)
         if (!f.isDeclaration()) fpm.run(f, fam);
 }

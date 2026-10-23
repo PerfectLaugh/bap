@@ -1621,9 +1621,19 @@ let compile_block t j pc =
             blks = insn.blks;
           })
     in
+    (* the jump of the block to its start loops in it, unless it changes
+       the mode of ARM *)
+    let loop =
+      Option.some_if
+        (List.for_all candidates ~f:(fun (_, (i : insn)) ->
+             match i.modes with
+             | Some (even, _) -> Bool.equal even i.thumb
+             | None -> true))
+        pc
+    in
     match
       Bap_lifted_jit.compile ~locate:t.config.locate ~reg_size:(reg_size t)
-        ~global:(global t j) insns
+        ~global:(global t j) ?loop insns
     with
     | Error reason ->
         if verbose () then
