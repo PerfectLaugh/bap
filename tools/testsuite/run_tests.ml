@@ -2181,7 +2181,9 @@ let loader_layouts data =
                   contains env "runs until the import" out "before 1\n";
                   lacks env "doesn't call the import" out "unnamed";
                   check env "ends" (out.status <> Timeout)))
-        [ "bap:stubbed-executor"; "bap:unicorn-executor" ])
+        [
+          "bap:stubbed-executor"; "bap:unicorn-executor"; "bap:lifted-executor";
+        ])
 
 let tests =
   [

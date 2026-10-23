@@ -561,8 +561,11 @@ let analyze data =
         sequence env out
           [
             ("the entry of main", ":0x40076b\n");
+            (* the old value of the stack pointer is pushed, so the
+               value is a temporary, see x86-move.lisp *)
             ( "push rbp",
-              "RSP := RSP - 8.*mem := mem with \\[RSP, el\\]:u64 <- RBP" );
+              "#[0-9]+ := RBP.*RSP := RSP - 8.*mem := mem with \\[RSP, \
+               el\\]:u64 <- #[0-9]+" );
             ("the second instruction of main", ":0x40076c\n");
             ("mov rbp, rsp", "RBP := RSP");
           ];

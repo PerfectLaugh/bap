@@ -2007,6 +2007,14 @@ let start ?until ?timeout ?count t pc =
   in
   (* [pending] is the target of the branch, whose delay slot is at [pc] *)
   let checked = ref 0 in
+  (* the fault in the delay slot, e.g., of MIPS, is at its branch, as the
+     processor has it, so that the branch runs again with its slot, when
+     the engine continues, rather than the slot alone, which would fall
+     through, as its branch isn't pending anymore, whose writes, e.g., of
+     the return address, are the same again *)
+  let faulted ?pending pc =
+    match pending with Some _ -> Int64.(pc - 4L) | None -> pc
+  in
   let rec loop ?pending ?(forbidden = false) pc n =
     set_pc t pc;
     let expired () =
@@ -2042,7 +2050,7 @@ let start ?until ?timeout ?count t pc =
       | None -> (
           match lifted t pc with
           | exception Fault (access, addr) ->
-              set_pc t pc;
+              set_pc t (faulted ?pending pc);
               ignore addr;
               let code, msg = fault_error access in
               raise (Uc.Error (code, msg))
@@ -2154,7 +2162,7 @@ let start ?until ?timeout ?count t pc =
                         List.iter t.undo ~f:(fun f -> f ());
                         t.undo <- [];
                         unrun t pc;
-                        set_pc t pc;
+                        set_pc t (faulted ?pending pc);
                         let code, msg = fault_error access in
                         raise (Uc.Error (code, msg)))
               end)
