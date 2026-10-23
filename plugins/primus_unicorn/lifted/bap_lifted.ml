@@ -65,8 +65,8 @@ type insn = {
   thumb : bool;
   blks : blk term list;
   jumps : bool;
-      (** if it may jump, so that it ends the block, even if it doesn't jump,
-          as in Unicorn *)
+      (** if it may jump, so that it ends the block, even if it doesn't jump, as
+          in Unicorn *)
   run : unit -> next;  (** the compiled instruction *)
 }
 
@@ -81,8 +81,8 @@ type block = {
   insns : insn array;
   mutable gen : int;  (** the hooks, that it was checked against *)
   mutable entry_hooked : bool;
-      (** if the hooks of the code or of the blocks hook its first
-          instruction, which are called before it runs *)
+      (** if the hooks of the code or of the blocks hook its first instruction,
+          which are called before it runs *)
 }
 
 (* the blocks are compiled, after they run [hot] times *)
@@ -131,6 +131,9 @@ type t = {
           repeat, e.g., of an operand, that the flags use too, but the traces
           record once, as Unicorn reads it once *)
   mutable ran : int;  (** the instructions, that the engine ran *)
+  mutable linked : int option;
+      (** the instruction, that loaded linked last, e.g., ll of MIPS, by [ran],
+          until a store conditional, see [expired] *)
   mutable unsupported : int;  (** the instructions, that it couldn't run *)
   jit : jit option;  (** if [config.jit], on a little-endian host *)
 }
@@ -144,6 +147,55 @@ exception Unsupported_insn of string
    interrupts Unicorn, with the number of its interrupt *)
 exception Trap of int
 
+(* the loads and the stores of the atomic sequences, e.g., ll and sc of
+   MIPS, by the names of their instructions, as the executor knows them,
+   whose semantics have no reservation, so that the store succeeds, if
+   another thread wrote, while the engine stopped between them *)
+let load_linked name =
+  List.exists
+    [
+      "LDREX";
+      "LDAEX";
+      "LDXR";
+      "LDAXR";
+      "LDXP";
+      "LDAXP";
+      "LBARX";
+      "LHARX";
+      "LWARX";
+      "LDARX";
+      "LR_";
+      "LL_";
+      "LLD_";
+    ] ~f:(fun prefix -> String.is_prefix name ~prefix)
+  || List.mem [ "LL"; "LLD"; "LL64"; "LLD64" ] name ~equal:String.equal
+
+let store_conditional name =
+  List.exists
+    [
+      "STREX";
+      "STLEX";
+      "STXR";
+      "STLXR";
+      "STXP";
+      "STLXP";
+      "STBCX";
+      "STHCX";
+      "STWCX";
+      "STDCX";
+      "SC_";
+      "SCD_";
+    ] ~f:(fun prefix -> String.is_prefix name ~prefix)
+  || List.mem [ "SC"; "SCD"; "SC64"; "SCD64" ] name ~equal:String.equal
+
+(* the instruction, that ran, starts or ends an atomic sequence *)
+let link t insn =
+  if load_linked insn.name then t.linked <- Some t.ran
+  else if store_conditional insn.name then t.linked <- None
+
+(* the time doesn't stop the engine in an atomic sequence, of at most so
+   many instructions, as the threads switch, when it stops *)
+let max_linked = 32
 let page_size = 0x1000L
 let page_of addr = Int64.(addr land lnot (page_size - 1L))
 
@@ -188,6 +240,7 @@ let create config arch mode =
       fresh = Int64.Table.create ();
       reads = [];
       ran = 0;
+      linked = None;
       unsupported = 0;
       jit =
         (if Sys.big_endian || not config.jit then None
@@ -302,7 +355,9 @@ let mem_map t addr size perm =
       if Hashtbl.mem t.pages page then
         error 11 "Invalid memory mapping (UC_ERR_MAP)");
   pages_of addr size (fun page ->
-      let data = Bigstring.init (Int64.to_int_exn page_size) ~f:(fun _ -> '\000') in
+      let data =
+        Bigstring.init (Int64.to_int_exn page_size) ~f:(fun _ -> '\000')
+      in
       Hashtbl.set t.fresh ~key:page ~data:();
       Hashtbl.set t.pages ~key:page ~data:{ data; perm };
       Option.iter t.jit ~f:(fun j ->
@@ -468,13 +523,16 @@ let mem_write t addr data =
   wrote_mem t addr (String.length data);
   write_mem t addr data
 
+(* if the instruction, that runs, read the bytes already, since it
+   wrote them last, which the semantics may read again, e.g., an operand,
+   that the flags use too, but Unicorn reads once *)
+let read_again t addr size =
+  List.mem t.reads (addr, size) ~equal:(fun (a, n) (b, m) ->
+      Int64.equal a b && n = m)
+
 let trace_access t ~write addr size value old =
   let read = (addr, size) in
-  let again =
-    (not write)
-    && List.mem t.reads read ~equal:(fun (a, n) (b, m) ->
-        Int64.equal a b && n = m)
-  in
+  let again = (not write) && read_again t addr size in
   if write then
     t.reads <-
       List.filter t.reads ~f:(fun (a, n) ->
@@ -614,7 +672,8 @@ let semantic f =
   | Division_by_zero -> raise (Unsupported_insn "a division by zero")
 
 (* the operations of BIL, see [Bil.Apply], on the small values *)
-let binop (op : binop) x y = semantic @@ fun () ->
+let binop (op : binop) x y =
+  semantic @@ fun () ->
   match (x, y) with
   | S (w, a), S (w', b) -> (
       let same = Int.equal w w' in
@@ -654,14 +713,18 @@ let binop (op : binop) x y = semantic @@ fun () ->
       | _ -> of_word (Bil.Apply.binop op (word x) (word y)))
   | _ -> of_word (Bil.Apply.binop op (word x) (word y))
 
-let unop (op : unop) x = semantic @@ fun () -> match x with
+let unop (op : unop) x =
+  semantic @@ fun () ->
+  match x with
   | S (w, a) -> (
       match op with
       | NEG -> S (w, norm w (Int64.neg a))
       | NOT -> S (w, norm w (Int64.lnot a)))
   | x -> of_word (Bil.Apply.unop op (word x))
 
-let cast (kind : cast) n x = semantic @@ fun () -> match x with
+let cast (kind : cast) n x =
+  semantic @@ fun () ->
+  match x with
   | S (w, a) when n <= 64 -> (
       match kind with
       | UNSIGNED -> S (n, norm n a)
@@ -670,13 +733,16 @@ let cast (kind : cast) n x = semantic @@ fun () -> match x with
       | HIGH -> S (n, norm n (if w > n then Int64.(a lsr Int.(w - n)) else a)))
   | x -> of_word (Bil.Apply.cast kind n (word x))
 
-let extract ~hi ~lo x = semantic @@ fun () -> match x with
+let extract ~hi ~lo x =
+  semantic @@ fun () ->
+  match x with
   | S (_, a) when hi < 64 && lo <= hi ->
       let w = hi - lo + 1 in
       S (w, norm w Int64.(a lsr lo))
   | x -> of_word (Word.extract_exn ~hi ~lo (word x))
 
-let concat x y = semantic @@ fun () ->
+let concat x y =
+  semantic @@ fun () ->
   match (x, y) with
   | S (a, x), S (b, y) when a + b <= 64 -> S (a + b, Int64.((x lsl b) lor y))
   | _ -> of_word (Word.concat (word x) (word y))
@@ -716,9 +782,11 @@ let load_value t stores addr endian size =
   match pending with
   | Some (_, x, _, _) -> x
   | None ->
-      mem_hooks t Read addr n 0L;
+      (* the hooks see a read once, as in Unicorn *)
+      let again = read_again t addr n in
+      if not again then mem_hooks t Read addr n 0L;
       let x = value_of_bytes endian (load t addr n) in
-      mem_hooks t Read_after addr n (bits x);
+      if not again then mem_hooks t Read_after addr n (bits x);
       trace_access t ~write:false addr n (bits x) 0L;
       x
 
@@ -1289,8 +1357,8 @@ let candidates t pc =
     | None -> false
   in
   let rec loop i addr acc =
-    if i = max_block || (i > 0 && (hooked t addr || not (executable addr)))
-    then List.rev acc
+    if i = max_block || (i > 0 && (hooked t addr || not (executable addr))) then
+      List.rev acc
     else
       match lifted t addr with
       | exception Fault _ -> List.rev acc
@@ -1309,46 +1377,48 @@ let compile_block t j pc =
   let compiles = Option.value (Hashtbl.find j.compiles pc) ~default:0 in
   if compiles >= max_compiles || j.live >= max_live then Failed
   else begin
-  Hashtbl.set j.compiles ~key:pc ~data:(compiles + 1);
-  let candidates = candidates t pc in
-  let insns =
-    List.map candidates ~f:(fun (pc, insn) ->
-        {
-          Bap_lifted_jit.pc;
-          next = Int64.(pc + of_int insn.size);
-          blks = insn.blks;
-        })
-  in
-  match
-    Bap_lifted_jit.compile ~locate:t.config.locate ~reg_size:(reg_size t) insns
-  with
-  | Error reason ->
-      if verbose () then
-        Printf.eprintf "lifted engine: no block at %Lx: %s\n%!" pc reason;
-      Failed
-  | Ok b -> (
-      if verbose () then
-        Printf.eprintf "lifted engine: a block of %d at %Lx\n%!" b.length pc;
-      match Bap_lifted_jit.native b with
-      | exception Failure msg ->
-          if verbose () then
-            Printf.eprintf "lifted engine: the block at %Lx failed: %s\n%!" pc
-              msg;
-          Failed
-      | native ->
-          let candidates = List.take candidates b.length in
-          j.live <- j.live + 1;
-          Compiled
-            {
-              native;
-              fn = Bap_llvm_jit.address native;
-              regs = Array.map b.regs ~f:(reg_bytes t);
-              code = String.concat (List.map candidates ~f:(fun (_, i) -> i.code));
-              pcs = Array.of_list_map candidates ~f:fst;
-              insns = Array.of_list_map candidates ~f:snd;
-              gen = j.gen;
-              entry_hooked = hooked ~blocks:true t pc;
-            })
+    Hashtbl.set j.compiles ~key:pc ~data:(compiles + 1);
+    let candidates = candidates t pc in
+    let insns =
+      List.map candidates ~f:(fun (pc, insn) ->
+          {
+            Bap_lifted_jit.pc;
+            next = Int64.(pc + of_int insn.size);
+            blks = insn.blks;
+          })
+    in
+    match
+      Bap_lifted_jit.compile ~locate:t.config.locate ~reg_size:(reg_size t)
+        insns
+    with
+    | Error reason ->
+        if verbose () then
+          Printf.eprintf "lifted engine: no block at %Lx: %s\n%!" pc reason;
+        Failed
+    | Ok b -> (
+        if verbose () then
+          Printf.eprintf "lifted engine: a block of %d at %Lx\n%!" b.length pc;
+        match Bap_lifted_jit.native b with
+        | exception Failure msg ->
+            if verbose () then
+              Printf.eprintf "lifted engine: the block at %Lx failed: %s\n%!" pc
+                msg;
+            Failed
+        | native ->
+            let candidates = List.take candidates b.length in
+            j.live <- j.live + 1;
+            Compiled
+              {
+                native;
+                fn = Bap_llvm_jit.address native;
+                regs = Array.map b.regs ~f:(reg_bytes t);
+                code =
+                  String.concat (List.map candidates ~f:(fun (_, i) -> i.code));
+                pcs = Array.of_list_map candidates ~f:fst;
+                insns = Array.of_list_map candidates ~f:snd;
+                gen = j.gen;
+                entry_hooked = hooked ~blocks:true t pc;
+              })
   end
 
 (* the block, whose hooks of the code changed, is checked again *)
@@ -1372,7 +1442,10 @@ let exec t j (b : block) pc =
   (* the instructions, that ran, are recorded, after they ran, in their
      order, as the closures record them *)
   let ran k =
-    t.ran <- t.ran + k;
+    for i = 0 to k - 1 do
+      link t b.insns.(i);
+      t.ran <- t.ran + 1
+    done;
     j.jitted <- j.jitted + k;
     if j.traced then
       for i = 0 to k - 1 do
@@ -1463,7 +1536,8 @@ let start ?until ?timeout ?count t pc =
     let expired () =
       match deadline with
       | Some d ->
-          n - !checked >= 0x100
+          (not (Option.exists t.linked ~f:(fun at -> t.ran - at < max_linked)))
+          && n - !checked >= 0x100
           && begin
             checked := n;
             Time_float.(now () >= d)
@@ -1489,106 +1563,110 @@ let start ?until ?timeout ?count t pc =
       | Some (next, k, starts) ->
           t.block <- starts;
           loop next (n + k)
-      | None ->
-      match lifted t pc with
-      | exception Fault (access, addr) ->
-          set_pc t pc;
-          ignore addr;
-          let code, msg = fault_error access in
-          raise (Uc.Error (code, msg))
-      | None ->
-          if invalid_insn t then loop pc n
-          else
-            error uc_err_insn_invalid
-              "Invalid instruction (UC_ERR_INSN_INVALID)"
-      | Some insn ->
-          t.current <- pc;
-          code_hooks t pc insn.size;
-          (* the stop in a delay slot stops at the target of its branch,
+      | None -> (
+          match lifted t pc with
+          | exception Fault (access, addr) ->
+              set_pc t pc;
+              ignore addr;
+              let code, msg = fault_error access in
+              raise (Uc.Error (code, msg))
+          | None ->
+              if invalid_insn t then loop pc n
+              else
+                error uc_err_insn_invalid
+                  "Invalid instruction (UC_ERR_INSN_INVALID)"
+          | Some insn ->
+              t.current <- pc;
+              code_hooks t pc insn.size;
+              (* the stop in a delay slot stops at the target of its branch,
              after the slot, as Unicorn doesn't stop in a delay slot *)
-          if t.stopped && Option.is_none pending && not forbidden then ()
-          else begin
-            let block =
-              match t.jit with
-              | Some j
-                when j.allowed && t.block && Option.is_none pending
-                     && not forbidden ->
-                  run_block t j insn pc ~until ~count n
-              | _ -> None
-            in
-            match block with
-            | Some (next, k, starts) ->
-                t.block <- starts;
-                loop next (n + k)
-            | None ->
-            t.last_block <- Some pc;
-            let next = Int64.(pc + of_int insn.size) in
-            trace_insn t pc insn.size insn.thumb;
-            t.undo <- [];
-            match insn.run () with
-            | outcome -> (
-                t.undo <- [];
-                t.ran <- t.ran + 1;
-                if
-                  t.ran land 0xFFFFF = 0
-                  && Option.equal String.equal
-                       (Sys.getenv "BAP_LIFTED_STATS")
-                       (Some "verbose")
-                then
-                  Printf.eprintf "lifted engine: %d run in %.1f s at %Lx\n%!"
-                    t.ran (Stdlib.Sys.time ()) pc;
-                (* the branch, that has a delay slot, e.g., of MIPS, runs
+              if t.stopped && Option.is_none pending && not forbidden then ()
+              else begin
+                let block =
+                  match t.jit with
+                  | Some j
+                    when j.allowed && t.block && Option.is_none pending
+                         && not forbidden ->
+                      run_block t j insn pc ~until ~count n
+                  | _ -> None
+                in
+                match block with
+                | Some (next, k, starts) ->
+                    t.block <- starts;
+                    loop next (n + k)
+                | None -> (
+                    t.last_block <- Some pc;
+                    let next = Int64.(pc + of_int insn.size) in
+                    trace_insn t pc insn.size insn.thumb;
+                    t.undo <- [];
+                    match insn.run () with
+                    | outcome -> (
+                        t.undo <- [];
+                        link t insn;
+                        t.ran <- t.ran + 1;
+                        if
+                          t.ran land 0xFFFFF = 0
+                          && Option.equal String.equal
+                               (Sys.getenv "BAP_LIFTED_STATS")
+                               (Some "verbose")
+                        then
+                          Printf.eprintf
+                            "lifted engine: %d run in %.1f s at %Lx\n%!" t.ran
+                            (Stdlib.Sys.time ()) pc;
+                        (* the branch, that has a delay slot, e.g., of MIPS, runs
                    it before its target, and the likely one, that isn't
                    taken, skips it *)
-                let delay =
-                  match pending with
-                  | Some _ -> `None
-                  | None -> t.config.delay insn.code
-                in
-                match (outcome, delay, pending) with
-                | Next, _, Some a ->
-                    t.block <- true;
-                    loop a (n + 1)
-                | Next, `Likely, None -> loop Int64.(next + 4L) (n + 1)
-                (* the forbidden slot of the compact branch of MIPS, that
+                        let delay =
+                          match pending with
+                          | Some _ -> `None
+                          | None -> t.config.delay insn.code
+                        in
+                        match (outcome, delay, pending) with
+                        | Next, _, Some a ->
+                            t.block <- true;
+                            loop a (n + 1)
+                        | Next, `Likely, None -> loop Int64.(next + 4L) (n + 1)
+                        (* the forbidden slot of the compact branch of MIPS, that
                    isn't taken, runs with it, as in Unicorn *)
-                | Next, `Forbidden, None -> loop ~forbidden:true next (n + 1)
-                | Next, _, None ->
-                    if insn.jumps then t.block <- true;
-                    loop next (n + 1)
-                | Jump a, (`Delayed | `Likely), _ -> loop ~pending:a next (n + 1)
-                | Jump a, (`None | `Forbidden), _ ->
-                    t.block <- true;
-                    loop (jump t insn ~next a) (n + 1)
-                | Interrupt_at (no, next), _, _ ->
-                    t.block <- true;
-                    set_pc t next;
-                    interrupt t no;
-                    loop next (n + 1))
-            | exception Unsupported_insn reason ->
-                if
-                  Option.equal String.equal
-                    (Sys.getenv "BAP_LIFTED_STATS")
-                    (Some "verbose")
-                then
-                  Printf.eprintf "lifted engine: unsupported %Lx (%s): %s\n%!"
-                    pc
-                    (String.concat_map insn.code ~sep:" " ~f:(fun c ->
-                         sprintf "%02x" (Char.to_int c)))
-                    reason;
-                List.iter t.undo ~f:(fun f -> f ());
-                t.undo <- [];
-                unrun t pc;
-                set_pc t pc;
-                unsupported t pc
-            | exception Fault (access, _) ->
-                List.iter t.undo ~f:(fun f -> f ());
-                t.undo <- [];
-                unrun t pc;
-                set_pc t pc;
-                let code, msg = fault_error access in
-                raise (Uc.Error (code, msg))
-          end
+                        | Next, `Forbidden, None ->
+                            loop ~forbidden:true next (n + 1)
+                        | Next, _, None ->
+                            if insn.jumps then t.block <- true;
+                            loop next (n + 1)
+                        | Jump a, (`Delayed | `Likely), _ ->
+                            loop ~pending:a next (n + 1)
+                        | Jump a, (`None | `Forbidden), _ ->
+                            t.block <- true;
+                            loop (jump t insn ~next a) (n + 1)
+                        | Interrupt_at (no, next), _, _ ->
+                            t.block <- true;
+                            set_pc t next;
+                            interrupt t no;
+                            loop next (n + 1))
+                    | exception Unsupported_insn reason ->
+                        if
+                          Option.equal String.equal
+                            (Sys.getenv "BAP_LIFTED_STATS")
+                            (Some "verbose")
+                        then
+                          Printf.eprintf
+                            "lifted engine: unsupported %Lx (%s): %s\n%!" pc
+                            (String.concat_map insn.code ~sep:" " ~f:(fun c ->
+                                 sprintf "%02x" (Char.to_int c)))
+                            reason;
+                        List.iter t.undo ~f:(fun f -> f ());
+                        t.undo <- [];
+                        unrun t pc;
+                        set_pc t pc;
+                        unsupported t pc
+                    | exception Fault (access, _) ->
+                        List.iter t.undo ~f:(fun f -> f ());
+                        t.undo <- [];
+                        unrun t pc;
+                        set_pc t pc;
+                        let code, msg = fault_error access in
+                        raise (Uc.Error (code, msg)))
+              end)
   in
   (* the lower bit of the address of ARM is the Thumb state *)
   let pc =

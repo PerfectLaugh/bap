@@ -140,7 +140,6 @@ type options = {
   mutable jit : bool;
 }
 
-
 type engine = {
   session : session;  (** the system, whose machines run in the engine *)
   uc : Uc.t;
@@ -527,14 +526,14 @@ let read_extra (e : engine) id =
 let write_extra (e : engine) id data =
   if not (List.mem (extra_regs e) id ~equal:Int.equal) then ()
   else
-  match segment_base e id with
-  | Some name ->
-      let base =
-        String.foldi data ~init:0L ~f:(fun i acc c ->
-            Int64.(acc lor (of_int (Char.to_int c) lsl Int.(8 * i))))
-      in
-      ignore (Target.Segments.set e.uc name base : bool)
-  | None -> Uc.reg_write_bytes e.uc id data
+    match segment_base e id with
+    | Some name ->
+        let base =
+          String.foldi data ~init:0L ~f:(fun i acc c ->
+              Int64.(acc lor (of_int (Char.to_int c) lsl Int.(8 * i))))
+        in
+        ignore (Target.Segments.set e.uc name base : bool)
+    | None -> Uc.reg_write_bytes e.uc id data
 
 (* the variable of the register [v] of the thread, that doesn't run,
    which are made once, as the threads switch often *)
@@ -3321,7 +3320,7 @@ module Make (Machine : Primus.Machine.S) = struct
                   let settls = flag flags 0x80000L in
                   (* the processes, that don't share the memory *)
                   if not (flag flags 0x100L) then error 38L
-                  (* EAGAIN, as RLIMIT_NPROC *)
+                    (* EAGAIN, as RLIMIT_NPROC *)
                   else if too_many_threads st then error 11L
                   else
                     let tid = st.last + 1 in
@@ -3514,9 +3513,14 @@ module Make (Machine : Primus.Machine.S) = struct
           }
 
       (* the TEB of the thread, that runs *)
+      (* the base of the segment of the TEB, which is in its descriptor in
+         the protected mode, rather than in the register, e.g., of the
+         lifted engine, see [read_extra] *)
       let current_teb e =
         match Uc.reg X86 (teb e).base with
-        | Some id -> Uc.reg_read e.uc id
+        | Some id ->
+            String.foldi (read_extra e id) ~init:0L ~f:(fun i acc c ->
+                Int64.(acc lor (of_int (Char.to_int c) lsl Int.(8 * i))))
         | None -> 0L
 
       (* the arguments of the functions of Windows, in RCX, RDX, R8, R9,
@@ -3928,15 +3932,15 @@ module Make (Machine : Primus.Machine.S) = struct
                      are limited *)
                   if too_many_threads st then return 0L
                   else
-                  let* h =
-                    create e st ~start ~param ~size ~suspended:(flag flags 4L)
-                  in
-                  let* () =
-                    if Int64.(ptid <> 0L) then
-                      store32 e ptid (Int64.of_int (st.last + 1)) >>| ignore
-                    else Machine.return ()
-                  in
-                  return h
+                    let* h =
+                      create e st ~start ~param ~size ~suspended:(flag flags 4L)
+                    in
+                    let* () =
+                      if Int64.(ptid <> 0L) then
+                        store32 e ptid (Int64.of_int (st.last + 1)) >>| ignore
+                      else Machine.return ()
+                    in
+                    return h
                 in
                 let objects handles =
                   Machine.List.map handles ~f:(fun h ->
@@ -3994,43 +3998,45 @@ module Make (Machine : Primus.Machine.S) = struct
                         | false -> wait ~ms:(arg 1) [ h ]))
                 | "WaitForMultipleObjects" | "WaitForMultipleObjectsEx" -> (
                     (* at most MAXIMUM_WAIT_OBJECTS handles, a DWORD *)
-                    let count = Int64.(to_int_trunc (arg 0 land 0xFFFF_FFFFL)) in
+                    let count =
+                      Int64.(to_int_trunc (arg 0 land 0xFFFF_FFFFL))
+                    in
                     if count < 1 || count > 64 then return failed
                     else
-                    let* handles =
-                      Machine.List.map (List.init count ~f:Fn.id) ~f:(fun i ->
-                          loadw e Int64.(arg 1 + of_int Int.(i * e.bytes))
-                          >>| Option.value ~default:0L)
-                    in
-                    objects handles >>= function
-                    | None -> return failed
-                    | Some objects -> (
-                        let ms = arg 3 in
-                        if Int64.(arg 2 <> 0L) then
-                          let* all =
-                            Machine.List.for_all objects ~f:(fun (h, k) ->
-                                is_signaled e ~me h k)
-                          in
-                          if all then
-                            let* () =
-                              Machine.List.iter objects ~f:(fun (h, k) ->
-                                  acquire e ~me h k)
+                      let* handles =
+                        Machine.List.map (List.init count ~f:Fn.id) ~f:(fun i ->
+                            loadw e Int64.(arg 1 + of_int Int.(i * e.bytes))
+                            >>| Option.value ~default:0L)
+                      in
+                      objects handles >>= function
+                      | None -> return failed
+                      | Some objects -> (
+                          let ms = arg 3 in
+                          if Int64.(arg 2 <> 0L) then
+                            let* all =
+                              Machine.List.for_all objects ~f:(fun (h, k) ->
+                                  is_signaled e ~me h k)
                             in
-                            return 0L
-                          else wait ~ms handles
-                        else
-                          let* first =
-                            Machine.List.find_map
-                              (List.mapi objects ~f:(fun i o -> (i, o)))
-                              ~f:(fun (i, (h, k)) ->
-                                is_signaled e ~me h k >>| fun s ->
-                                Option.some_if s (i, h, k))
-                          in
-                          match first with
-                          | Some (i, h, k) ->
-                              acquire e ~me h k >>= fun () ->
-                              return (Int64.of_int i)
-                          | None -> wait ~ms handles))
+                            if all then
+                              let* () =
+                                Machine.List.iter objects ~f:(fun (h, k) ->
+                                    acquire e ~me h k)
+                              in
+                              return 0L
+                            else wait ~ms handles
+                          else
+                            let* first =
+                              Machine.List.find_map
+                                (List.mapi objects ~f:(fun i o -> (i, o)))
+                                ~f:(fun (i, (h, k)) ->
+                                  is_signaled e ~me h k >>| fun s ->
+                                  Option.some_if s (i, h, k))
+                            in
+                            match first with
+                            | Some (i, h, k) ->
+                                acquire e ~me h k >>= fun () ->
+                                return (Int64.of_int i)
+                            | None -> wait ~ms handles))
                 | "CreateEventA" | "CreateEventW" ->
                     create_object e Event
                       [
@@ -4169,23 +4175,24 @@ module Make (Machine : Primus.Machine.S) = struct
                     match arg 2 with
                     (* the sizes of the addresses, that it compares *)
                     | (1L | 2L | 4L | 8L) as size -> (
-                    let addr = arg 0 and size = Int64.to_int_exn size in
-                    let* x = load e addr size in
-                    let* y = load e (arg 1) size in
-                    match (x, y) with
-                    | Some x, Some y when String.equal x y ->
-                        if Int64.(arg 3 land 0xFFFF_FFFFL = 0L) then return 0L
-                        else
-                          (* it returns TRUE, when it is woken *)
-                          let* ret = finish e n 1L in
-                          block e st ~next:ret ~addrs:[ addr ]
-                            ~timeout:
-                              (Option.some_if
-                                 Int64.(arg 3 land 0xFFFF_FFFFL <> infinite)
-                                 (fun () ->
-                                   set e (result e) 0L;
-                                   Machine.return (Some ret)))
-                    | _ -> return 1L)
+                        let addr = arg 0 and size = Int64.to_int_exn size in
+                        let* x = load e addr size in
+                        let* y = load e (arg 1) size in
+                        match (x, y) with
+                        | Some x, Some y when String.equal x y ->
+                            if Int64.(arg 3 land 0xFFFF_FFFFL = 0L) then
+                              return 0L
+                            else
+                              (* it returns TRUE, when it is woken *)
+                              let* ret = finish e n 1L in
+                              block e st ~next:ret ~addrs:[ addr ]
+                                ~timeout:
+                                  (Option.some_if
+                                     Int64.(arg 3 land 0xFFFF_FFFFL <> infinite)
+                                     (fun () ->
+                                       set e (result e) 0L;
+                                       Machine.return (Some ret)))
+                        | _ -> return 1L)
                     | _ -> return 0L)
                 | "WakeByAddressSingle" ->
                     let st, _ = wake st (arg 0) 1 in
@@ -4280,6 +4287,9 @@ module Make (Machine : Primus.Machine.S) = struct
         "LWARX";
         "LDARX";
         "LR_";
+        (* LL_R6 and LLD_R6 of the release 6 of MIPS *)
+        "LL_";
+        "LLD_";
       ] ~f:(fun prefix -> String.is_prefix name ~prefix)
     || List.mem [ "LL"; "LLD"; "LL64"; "LLD64" ] name ~equal:String.equal
 
@@ -4297,6 +4307,7 @@ module Make (Machine : Primus.Machine.S) = struct
         "STWCX";
         "STDCX";
         "SC_";
+        "SCD_";
       ] ~f:(fun prefix -> String.is_prefix name ~prefix)
     || List.mem [ "SC"; "SCD"; "SC64"; "SCD64" ] name ~equal:String.equal
 
@@ -5098,8 +5109,8 @@ module Loader (Machine : Primus.Machine.S) = struct
       | Some file -> (
           (not (String.is_empty digest))
           &&
-          try String.equal digest (Checkpoint.digest file)
-          with Sys_error _ -> true)
+            try String.equal digest (Checkpoint.digest file)
+            with Sys_error _ -> true)
     in
     match s.restore with
     | None -> Machine.return None
@@ -5157,16 +5168,26 @@ module Loader (Machine : Primus.Machine.S) = struct
     let* externals = externals s in
     s.recipe <- Some (target, foreign, externals);
     let* () =
-      if s.lifted && Option.is_none s.lifter then
+      if s.lifted && Option.is_none s.lifter then (
         Machine.get () >>| fun proj ->
-        s.lifter <-
-          Some
-            (lifter
-               ~arm:
-                 (Poly.equal
-                    (Option.map (Target.engine (Project.target proj)) ~f:fst)
-                    (Some Uc.Arm))
-               proj)
+        let target = Project.target proj in
+        let engine = Target.engine target in
+        let ((lift, _) as l) =
+          lifter ~arm:(Poly.equal (Option.map engine ~f:fst) (Some Uc.Arm)) proj
+        in
+        s.lifter <- Some l;
+        (* the first instruction, that is lifted, loads the semantics of
+           Primus Lisp, which takes a second or two, so it is lifted now,
+           before the program runs, rather than as it runs, e.g., while
+           the timer of a script, that stops it, runs *)
+        Option.iter engine ~f:(fun (arch, _) ->
+            ignore
+              (lift ~thumb:false 0L
+                 (nop arch
+                    ~big_endian:
+                      Theory.Endianness.(
+                        equal eb (Theory.Target.endianness target)))
+                : _ option)))
       else Machine.return ()
     in
     match create s target ~foreign ~externals with
@@ -5207,8 +5228,8 @@ module Loader (Machine : Primus.Machine.S) = struct
     | Some chosen when not (Poly.equal chosen engine) ->
         Machine.raise
           (Unicorn_failure
-             "the engine was chosen after the loader started, as the order \
-              of the components of Primus changed")
+             "the engine was chosen after the loader started, as the order of \
+              the components of Primus changed")
     | _ -> Machine.return ()
 
   let init () =
