@@ -76,3 +76,16 @@ switches of `gen_pcrel` were on the masks of `unsigned long`, while
 the opcodes of their cases are the negative `int`s, e.g., `0x3B << 26`,
 which differ, when they are converted to it. The switches are on the
 32 bits.
+
+## The single floats of RISC-V
+
+`qemu/target/riscv/fpu_helper.c`,
+`qemu/target/riscv/insn_trans/trans_rvf.inc.c`
+
+The single floats are NaN-boxed, as RISC-V tells, and as the later
+versions of QEMU do: the operations of the single floats read the value
+of a register, whose upper 32 bits are not all ones, as the canonical
+NaN, and set them in their results, e.g., of `fadd.s`, `fcvt.s.d`, or
+`fmv.w.x`, and the sign of `fneg.s`, `fabs.s`, and `fsgnjx.s` is the
+bit 31, rather than `INT32_MIN`, whose upper bits are ones, too, which
+changed them.

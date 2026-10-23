@@ -35,34 +35,55 @@
 3b 55 b5 02  # divuw a0, a0, a1
 3b 45 b5 02  # divw a0, a0, a1
 53 25 a5 22  # fabs.d fa0, fa0
+53 25 a5 20  # fabs.s fa0, fa0
 53 75 b5 02  # fadd.d fa0, fa0, fa1
+53 75 b5 00  # fadd.s fa0, fa0, fa1
 53 75 25 d2  # fcvt.d.l fa0, a0
 53 75 35 d2  # fcvt.d.lu fa0, a0
 53 05 05 42  # fcvt.d.s fa0, fa0
 53 05 05 d2  # fcvt.d.w fa0, a0
 53 05 15 d2  # fcvt.d.wu fa0, a0
 53 15 25 c2  # fcvt.l.d a0, fa0, rtz
+53 15 25 c0  # fcvt.l.s a0, fa0, rtz
 53 15 35 c2  # fcvt.lu.d a0, fa0, rtz
+53 15 35 c0  # fcvt.lu.s a0, fa0, rtz
+53 75 15 40  # fcvt.s.d fa0, fa0
+53 75 25 d0  # fcvt.s.l fa0, a0
+53 75 35 d0  # fcvt.s.lu fa0, a0
+53 75 05 d0  # fcvt.s.w fa0, a0
+53 75 15 d0  # fcvt.s.wu fa0, a0
 53 15 05 c2  # fcvt.w.d a0, fa0, rtz
+53 15 05 c0  # fcvt.w.s a0, fa0, rtz
 53 15 15 c2  # fcvt.wu.d a0, fa0, rtz
 53 15 15 c0  # fcvt.wu.s a0, fa0, rtz
 53 75 b5 1a  # fdiv.d fa0, fa0, fa1
+53 75 b5 18  # fdiv.s fa0, fa0, fa1
 0f 00 10 03  # fence rw, w
 53 25 b5 a2  # feq.d a0, fa0, fa1
 53 25 b5 a0  # feq.s a0, fa0, fa1
 08 20  # fld fa0, 0x0(s0)
 53 05 b5 a2  # fle.d a0, fa0, fa1
+53 05 b5 a0  # fle.s a0, fa0, fa1
 53 15 b5 a2  # flt.d a0, fa0, fa1
+53 15 b5 a0  # flt.s a0, fa0, fa1
 07 27 06 00  # flw fa4, 0x0(a2)
 43 75 b5 62  # fmadd.d fa0, fa0, fa1, fa2
+43 75 b5 60  # fmadd.s fa0, fa0, fa1, fa2
 53 15 b5 2a  # fmax.d fa0, fa0, fa1
+53 15 b5 28  # fmax.s fa0, fa0, fa1
 53 75 b5 12  # fmul.d fa0, fa0, fa1
+53 75 b5 10  # fmul.s fa0, fa0, fa1
 53 05 c6 22  # fmv.d fa0, fa2
 53 07 05 f2  # fmv.d.x fa4, a0
+53 05 c6 20  # fmv.s fa0, fa2
+53 05 00 f0  # fmv.w.x fa0, zero
 53 15 a5 22  # fneg.d fa0, fa0
+53 15 a5 20  # fneg.s fa0, fa0
 18 a1  # fsd fa4, 0x0(a0)
 53 05 b5 22  # fsgnj.d fa0, fa0, fa1
+53 05 b5 20  # fsgnj.s fa0, fa0, fa1
 53 75 b5 0a  # fsub.d fa0, fa0, fa1
+53 75 b5 08  # fsub.s fa0, fa0, fa1
 27 20 e5 00  # fsw fa4, 0x0(a0)
 01 a0  # j 0x850 <shl_i128+0x10>
 03 05 45 00  # lb a0, 0x4(a0)
@@ -141,48 +162,6 @@
 #   Unicorn doesn't have it
 # 1b 15 15 60  # ctzw a0, a0
 #   Unicorn doesn't have it
-# 53 25 a5 20  # fabs.s fa0, fa0
-#   F10 0x7FFFFFF3 / 0xFFFFFFFF7FFFFFF3
-# 53 75 b5 00  # fadd.s fa0, fa0, fa1
-#   F10 0x367122B7 / 0xFFFFFFFF7FC00000
-# 53 15 25 c0  # fcvt.l.s a0, fa0, rtz
-#   X10 0 / 0x7FFFFFFFFFFFFFFF
-# 53 15 35 c0  # fcvt.lu.s a0, fa0, rtz
-#   X10 0 / 0xFFFFFFFFFFFFFFFF
-# 53 75 15 40  # fcvt.s.d fa0, fa0
-#   F10 0x80000000 / 0xFFFFFFFF80000000
-# 53 75 25 d0  # fcvt.s.l fa0, a0
-#   F10 0x4E7FF840 / 0xFFFFFFFF4E7FF840
-# 53 75 35 d0  # fcvt.s.lu fa0, a0
-#   F10 0x4E7FF85D / 0xFFFFFFFF4E7FF85D
-# 53 75 05 d0  # fcvt.s.w fa0, a0
-#   F10 0x4E7FF840 / 0xFFFFFFFF4E7FF840
-# 53 75 15 d0  # fcvt.s.wu fa0, a0
-#   F10 0x4E7FF85F / 0xFFFFFFFF4E7FF85F
-# 53 15 05 c0  # fcvt.w.s a0, fa0, rtz
-#   X10 0 / 0x7FFFFFFF
-# 53 75 b5 18  # fdiv.s fa0, fa0, fa1
-#   F10 0x7FC00000 / 0xFFFFFFFF7FC00000
-# 53 05 b5 a0  # fle.s a0, fa0, fa1
-#   X10 1 / 0
-# 53 15 b5 a0  # flt.s a0, fa0, fa1
-#   X10 1 / 0
-# 43 75 b5 60  # fmadd.s fa0, fa0, fa1, fa2
-#   F10 0 / 0xFFFFFFFF7FC00000
-# 53 15 b5 28  # fmax.s fa0, fa0, fa1
-#   F10 0 / 0xFFFFFFFF7FC00000
-# 53 75 b5 10  # fmul.s fa0, fa0, fa1
-#   F10 0x7FC00000 / 0xFFFFFFFF7FC00000
-# 53 05 c6 20  # fmv.s fa0, fa2
-#   F10 0xA7806EA92499F033 / 0xFFFFFFFF7FC00000
-# 53 05 00 f0  # fmv.w.x fa0, zero
-#   F10 0 / 0xFFFFFFFF00000000
-# 53 15 a5 20  # fneg.s fa0, fa0
-#   F10 0xFFFFFFFF80000001 / 0xFFFFFFFFFFC00000
-# 53 05 b5 20  # fsgnj.s fa0, fa0, fa1
-#   F10 0xF6B052E8FEDB20C1 / 0xFFFFFFFF7FC00000
-# 53 75 b5 08  # fsub.s fa0, fa0, fa1
-#   F10 0x9E3E5A8F / 0xFFFFFFFF7FC00000
 # 82 94  # jalr s1
 #   Unicorn faults: Segmentation fault at 0x3FFE14B0 / paused
 # 02 85  # jr a0

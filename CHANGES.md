@@ -46,6 +46,7 @@
 - runs the PC-relative instructions of the release 6 of MIPS in Unicorn, e.g., `lwpc`, whose decoding of QEMU raised the reserved instruction on the 64-bit hosts
 - runs the system calls, e.g., `syscall`, `svc`, and `int 0x80`, in the lifted engine, which interrupts, as Unicorn does, so that the programs with the threads run in it, and the hooks of a stop in the order of Unicorn
 - continues MIPS from the branch, whose delay slot Unicorn stopped in, and outside of a delay slot, after Primus interpreted, or another thread ran, as Unicorn keeps the pending branch
+- NaN-boxes the single floats of RISC-V in Unicorn, as RISC-V tells, so that the single operations, e.g., `fadd.s`, read a value, that is not NaN-boxed, as the canonical NaN, and box their results, and the sign operations, e.g., `fneg.s`, keep the upper bits
 - jumps, in `Primus.Interpreter.step`, to the address of the label, that the knowledge has, e.g., of a function of the program, that a stub replaced, and keeps the position of the interpreter at the subroutine of the instruction, after it runs
 - fixes the arena of the Lisp `malloc`, which didn't grow for the header of the chunk, that filled it
 - runs the OCaml handlers of the signals, while the program runs in Unicorn, e.g., a loop without calls, so that a script may pause it, and save its checkpoint, when it is signaled, except on Windows
