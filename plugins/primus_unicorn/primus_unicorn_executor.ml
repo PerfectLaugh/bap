@@ -2056,9 +2056,7 @@ module Make (Machine : Primus.Machine.S) = struct
 
   (* the values of the registers, that are set in Primus *)
   let registers e =
-    let* vars = Env.all in
-    Seq.to_list vars
-    |> List.filter ~f:(Target.Regs.mem e.regs)
+    Target.Regs.vars e.regs
     |> Machine.List.filter_map ~f:(fun v ->
         Env.is_set v >>= function
         | false -> Machine.return None
@@ -3210,10 +3208,7 @@ module Make (Machine : Primus.Machine.S) = struct
 
     (* the registers, that are set, the aliases too, e.g., EAX *)
     let registers e =
-      let* vars = Env.all in
-      Seq.to_list vars
-      |> List.filter ~f:(Target.Regs.mem e.regs)
-      |> Machine.List.filter ~f:Env.is_set
+      Target.Regs.vars e.regs |> Machine.List.filter ~f:Env.is_set
 
     (* the value of the width of [x] *)
     let like x n =

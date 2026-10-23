@@ -213,6 +213,7 @@ module Regs = struct
   type t = {
     uc : Uc.t;
     locs : loc String.Map.t;
+    vars : var list;
     basis : var list;
     owners : string String.Map.t;
     unmapped : string list;
@@ -332,9 +333,14 @@ module Regs = struct
                   Some name
               | _ -> None))
     in
-    { uc; locs; basis; owners; unmapped = List.rev unmapped }
+    let vars =
+      Map.fold locs ~init:[] ~f:(fun ~key ~data acc ->
+          Var.create key (Type.imm data.width) :: acc)
+    in
+    { uc; locs; vars; basis; owners; unmapped = List.rev unmapped }
 
   let basis t = t.basis
+  let vars t = t.vars
   let owner t name = Map.find t.owners name
 
   let find { locs; _ } v =
