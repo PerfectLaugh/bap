@@ -1031,6 +1031,7 @@ so this package is distributed under GPL-2.0, unlike the rest of BAP.")
  (depends
   (bap-common (= :version))
   (bap-core-theory (= :version))
+  (bap-llvm (= :version))
   (bap-main (= :version))
   (bap-primus (= :version))
   (bap-std (= :version))

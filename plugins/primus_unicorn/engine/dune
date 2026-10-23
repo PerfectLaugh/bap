@@ -3,6 +3,16 @@
 (library
  (name bap_engine)
  (public_name bap-primus-unicorn.engine)
- (modules bap_engine bap_engine_lifted)
- (private_modules bap_engine_lifted)
- (libraries bap bap-primus bap-primus-lisp.plugin bap-primus-unicorn.unicorn core zarith))
+ (modules bap_engine bap_engine_lifted bap_engine_jit)
+ (private_modules bap_engine_lifted bap_engine_jit)
+ (foreign_stubs
+  (language c)
+  (names bap_engine_jit_stubs))
+ (libraries
+  bap
+  bap-llvm
+  bap-primus
+  bap-primus-lisp.plugin
+  bap-primus-unicorn.unicorn
+  core
+  zarith))

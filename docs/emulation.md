@@ -39,13 +39,13 @@ The options of the Unicorn executor:
 
 ### The engines
 
-The native code runs in an engine: `unicorn`, the CPU emulator, by default, or `lifted`, which runs the semantics of the instructions, that BAP lifts, so that the program runs as the lifters see it. The lifted engine compiles each instruction, once, to the closures, and runs the intrinsics of the floats natively, as Primus Lisp runs them. The instructions, that it can't run, e.g., the system calls, or the traps, are interpreted in Primus. It runs about a million instructions per second, and records the traces, see `Emu.Trace`, as Unicorn does: the same instructions and accesses, while its blocks may end elsewhere, and on x86 without the reads of the descriptors of the segments, that Unicorn makes.
+The native code runs in an engine: `unicorn`, the CPU emulator, by default, or `lifted`, which runs the semantics of the instructions, that BAP lifts, so that the program runs as the lifters see it. The lifted engine compiles each instruction, once, to the closures, and runs the intrinsics of the floats natively, as Primus Lisp runs them. The instructions, that it can't run, e.g., the system calls, or the traps, are interpreted in Primus. Its blocks, that run 32 times, are compiled by the JIT of LLVM to the native code of the host, from the instructions, that start them, to the one, that may jump, which ends the block, as in Unicorn, so that it runs about 70 million instructions per second in the loops, and about a million in the closures, e.g., while a hook of the memory, or a trace of the accesses, needs them. It records the traces, see `Emu.Trace`, as Unicorn does: the same instructions, blocks, and accesses, but on x86 without the reads of the descriptors of the segments, that Unicorn makes.
 
 ```bash
 bap ./prog --passes=run --primus-unicorn-engine=lifted
 ```
 
-`BAP_LIFTED_STATS=1` prints the numbers of the instructions, that the lifted engine ran, and couldn't run, and `BAP_LIFTED_STATS=verbose` the ones, that it couldn't run, and why. The cases `lifted/TARGET/N` of the testsuite check the lifted engine against Unicorn, instruction by instruction, and `BAP_TESTSUITE_ENGINE=lifted` runs the other cases in it.
+`BAP_LIFTED_STATS=1` prints the numbers of the instructions, that the lifted engine ran, couldn't run, and ran in the compiled blocks, and `BAP_LIFTED_STATS=verbose` the ones, that it couldn't run, and the blocks, that it compiled, or couldn't, and why. `BAP_LIFTED_JIT=0` runs only the closures. The cases `lifted/TARGET/N` of the testsuite check the lifted engine against Unicorn, instruction by instruction, and `BAP_TESTSUITE_ENGINE=lifted` runs the other cases in it.
 
 The changes of BAP to Unicorn, e.g., the restarted stores of its helpers, are the files of `plugins/primus_unicorn/libunicorn/overlay`, see its README.
 

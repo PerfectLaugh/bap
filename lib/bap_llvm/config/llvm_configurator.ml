@@ -14,8 +14,13 @@ let target_components targets =
       let target = String.lowercase target in
       [ target ^ "info"; target ^ "desc"; target ^ "disassembler" ])
 
+(* the JIT of the host, see llvm_jit.cpp, its code generator, and the
+   parser of the text of LLVM IR *)
 let llvm_components =
   [
+    "orcjit";
+    "native";
+    "asmparser";
     "binaryformat";
     "core";
     "demangle";

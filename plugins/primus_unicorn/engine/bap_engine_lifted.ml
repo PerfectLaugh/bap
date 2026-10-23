@@ -48,7 +48,9 @@ type hook = {
   mutable deleted : bool;
 }
 
-type page = { data : Bytes.t; mutable perm : Uc.Perm.t }
+(* the bytes of the pages are outside of the heap, as the blocks, that
+   the JIT compiled, access them, see Bap_engine_jit *)
+type page = { data : Bigstring.t; mutable perm : Uc.Perm.t }
 
 (* the outcome of an instruction *)
 type next = Next | Jump of int64 | Interrupt_at of int * int64
@@ -61,7 +63,38 @@ type insn = {
   name : string;
   thumb : bool;
   blks : blk term list;
+  jumps : bool;
+      (** if it may jump, so that it ends the block, even if it doesn't jump,
+          as in Unicorn *)
   run : unit -> next;  (** the compiled instruction *)
+}
+
+(* the block, that the JIT compiled, of the instructions, that start at
+   the addresses, see Bap_engine_jit *)
+type block = {
+  fn : nativeint;
+  regs : Bytes.t array;  (** the registers of its slots *)
+  code : string;  (** the bytes of its instructions *)
+  pcs : int64 array;
+  insns : insn array;
+  mutable gen : int;  (** the hooks, that it was checked against *)
+  mutable entry_hooked : bool;
+      (** if the hooks of the code or of the blocks hook its first
+          instruction, which are called before it runs *)
+}
+
+(* the blocks are compiled, after they run [hot] times *)
+type compiled = Counting of int | Compiled of block | Failed
+
+type jit = {
+  mem : Bap_engine_jit.Runtime.mem;
+  blocks : compiled Int64.Table.t;
+  mutable gen : int;  (** the version of the hooks *)
+  mutable allowed : bool;
+      (** if no hook, e.g., of the memory, needs the closures *)
+  mutable traced : bool;
+      (** if the traces of the code record the instructions of the blocks *)
+  mutable jitted : int;  (** the instructions, that the blocks ran *)
 }
 
 type t = {
@@ -95,6 +128,7 @@ type t = {
           record once, as Unicorn reads it once *)
   mutable ran : int;  (** the instructions, that the engine ran *)
   mutable unsupported : int;  (** the instructions, that it couldn't run *)
+  jit : jit option;  (** unless BAP_LIFTED_JIT is 0, or LLVM can't *)
 }
 
 exception Fault of Uc.access * int64
@@ -151,13 +185,30 @@ let create config arch mode =
       reads = [];
       ran = 0;
       unsupported = 0;
+      jit =
+        (if
+           Sys.big_endian
+           || Option.equal String.equal (Sys.getenv "BAP_LIFTED_JIT") (Some "0")
+         then None
+         else
+           Some
+             {
+               mem = Bap_engine_jit.Runtime.create ();
+               blocks = Int64.Table.create ();
+               gen = 0;
+               allowed = true;
+               traced = false;
+               jitted = 0;
+             });
     }
   in
   (* the numbers of the instructions, with BAP_LIFTED_STATS *)
   if Option.is_some (Sys.getenv "BAP_LIFTED_STATS") then
     at_exit (fun () ->
-        Printf.eprintf "lifted engine: %d instructions run, %d unsupported\n%!"
-          t.ran t.unsupported);
+        Printf.eprintf
+          "lifted engine: %d instructions run, %d unsupported, %d jitted\n%!"
+          t.ran t.unsupported
+          (Option.value_map t.jit ~default:0 ~f:(fun j -> j.jitted)));
   t
 
 let check t = if t.closed then invalid_arg "the engine is closed"
@@ -242,22 +293,29 @@ let mem_map t addr size perm =
       if Hashtbl.mem t.pages page then
         error 11 "Invalid memory mapping (UC_ERR_MAP)");
   pages_of addr size (fun page ->
+      let data = Bigstring.init (Int64.to_int_exn page_size) ~f:(fun _ -> '\000') in
       Hashtbl.set t.fresh ~key:page ~data:();
-      Hashtbl.set t.pages ~key:page
-        ~data:{ data = Bytes.make (Int64.to_int_exn page_size) '\000'; perm })
+      Hashtbl.set t.pages ~key:page ~data:{ data; perm };
+      Option.iter t.jit ~f:(fun j ->
+          Bap_engine_jit.Runtime.map j.mem page data (perm :> int)))
 
 let mem_unmap t addr size =
   check t;
   pages_of addr size (fun page ->
       if not (Hashtbl.mem t.pages page) then
         error 11 "Invalid memory mapping (UC_ERR_NOMEM)");
-  pages_of addr size (Hashtbl.remove t.pages)
+  pages_of addr size (fun page ->
+      Option.iter t.jit ~f:(fun j -> Bap_engine_jit.Runtime.unmap j.mem page);
+      Hashtbl.remove t.pages page)
 
 let mem_protect t addr size perm =
   check t;
   pages_of addr size (fun page ->
       match Hashtbl.find t.pages page with
-      | Some p -> p.perm <- perm
+      | Some p ->
+          p.perm <- perm;
+          Option.iter t.jit ~f:(fun j ->
+              Bap_engine_jit.Runtime.protect j.mem page (perm :> int))
       | None -> error 11 "Invalid memory mapping (UC_ERR_NOMEM)")
 
 let offset addr = Int64.(to_int_exn (addr - page_of addr))
@@ -268,7 +326,7 @@ let mem_read t addr n =
   String.init n ~f:(fun i ->
       let addr = Int64.(addr + of_int i) in
       match Hashtbl.find t.pages (page_of addr) with
-      | Some p -> Bytes.get p.data (offset addr)
+      | Some p -> Bigstring.get p.data (offset addr)
       | None ->
           error uc_err_read_unmapped
             "Invalid memory read (UC_ERR_READ_UNMAPPED)")
@@ -278,7 +336,7 @@ let write_mem t addr data =
   String.iteri data ~f:(fun i c ->
       let addr = Int64.(addr + of_int i) in
       match Hashtbl.find t.pages (page_of addr) with
-      | Some p -> Bytes.set p.data (offset addr) c
+      | Some p -> Bigstring.set p.data (offset addr) c
       | None ->
           error uc_err_write_unmapped
             "Invalid memory write (UC_ERR_WRITE_UNMAPPED)")
@@ -298,15 +356,31 @@ let mem_regions t =
 
 (* the hooks *)
 
+(* the blocks of the JIT run, unless a hook needs the accesses, or the
+   instructions, that the blocks run, and they are checked again against
+   the hooks of the code *)
+let hooks_changed t =
+  Option.iter t.jit ~f:(fun j ->
+      j.gen <- j.gen + 1;
+      j.allowed <-
+        not
+          (List.exists t.hooks ~f:(fun h ->
+               match h.kind with Mem _ | Trace_mem _ -> true | _ -> false));
+      j.traced <-
+        List.exists t.hooks ~f:(fun h ->
+            match h.kind with Trace_code _ -> true | _ -> false))
+
 let add t ?first ?last kind =
   check t;
   let h = { first; last; kind; deleted = false } in
   t.hooks <- t.hooks @ [ h ];
+  hooks_changed t;
   h
 
 let delete t h =
   h.deleted <- true;
-  t.hooks <- List.filter t.hooks ~f:(fun h' -> not (phys_equal h h'))
+  t.hooks <- List.filter t.hooks ~f:(fun h' -> not (phys_equal h h'));
+  hooks_changed t
 
 let covers h addr =
   match (h.first, h.last) with
@@ -464,7 +538,7 @@ let load t addr n =
     String.init n ~f:(fun i ->
         let addr = Int64.(addr + of_int i) in
         let p = page_for t `read addr n 0L in
-        Bytes.get p.data (offset addr))
+        Bigstring.get p.data (offset addr))
   in
   bytes
 
@@ -473,9 +547,9 @@ let store t addr data value =
       let addr = Int64.(addr + of_int i) in
       let p = page_for t `write addr (String.length data) value in
       let off = offset addr in
-      let old = Bytes.get p.data off in
-      t.undo <- (fun () -> Bytes.set p.data off old) :: t.undo;
-      Bytes.set p.data off c)
+      let old = Bigstring.get p.data off in
+      t.undo <- (fun () -> Bigstring.set p.data off old) :: t.undo;
+      Bigstring.set p.data off c)
 
 (* the values, of at most 64 bits, as the integers, whose bits above the
    width are zeros, and the wider ones, as the words *)
@@ -1015,7 +1089,7 @@ let fetch t pc =
       let addr = Int64.(pc + of_int i) in
       match Hashtbl.find t.pages (page_of addr) with
       | Some p when Uc.Perm.(mem p.perm exec) ->
-          bytes (i + 1) (Bytes.get p.data (offset addr) :: acc)
+          bytes (i + 1) (Bigstring.get p.data (offset addr) :: acc)
       | _ -> acc
   in
   String.of_char_list (List.rev (bytes 0 []))
@@ -1030,6 +1104,18 @@ let set_thumb t on =
   Option.iter t.cpsr ~f:(fun cpsr ->
       let x = reg_read t cpsr in
       write_reg t cpsr Int64.(if on then x lor 0x20L else x land lnot 0x20L))
+
+(* if the blocks of the instruction may jump out of it *)
+let may_jump blks =
+  let internal tid =
+    List.existsi blks ~f:(fun i b -> i > 0 && Tid.equal (Term.tid b) tid)
+  in
+  List.exists blks ~f:(fun blk ->
+      Term.enum jmp_t blk
+      |> Seq.exists ~f:(fun jmp ->
+          match Jmp.kind jmp with
+          | Goto (Direct tid) | Ret (Direct tid) -> not (internal tid)
+          | _ -> true))
 
 let lifted t pc =
   let code = fetch t pc in
@@ -1057,6 +1143,7 @@ let lifted t pc =
               name;
               thumb;
               blks;
+              jumps = may_jump blks;
               run = compile t ~pc ~next blks;
             }
           in
@@ -1078,7 +1165,9 @@ let jump t insn ~next a =
       Word.to_int64_exn dst
   | _ -> a
 
-let flush_tb t = Hashtbl.clear t.insns
+let flush_tb t =
+  Hashtbl.clear t.insns;
+  Option.iter t.jit ~f:(fun j -> Hashtbl.clear j.blocks)
 
 (* the hooks of the blocks, at the starts of the blocks, and then of the
    instruction, in their order, but the ones after the hook, that stops
@@ -1132,6 +1221,188 @@ let fault_error (access : Uc.access) =
       (uc_err_fetch_prot, "Fetch from non-executable memory (UC_ERR_FETCH_PROT)")
   | Read | Write | Fetch | Read_after -> (11, "Invalid memory access")
 
+(* The blocks, that the JIT compiles, see Bap_engine_jit, which start at
+   the targets of the jumps, that run [hot] times, and run the
+   instructions after them, until the one, that may jump, which ends the
+   block, as in Unicorn, at most [max_block] of them, that don't have
+   the delay slots, and whose code isn't hooked, but the first one's,
+   whose hooks are called before the block runs. The block, whose
+   instruction stops, e.g., as its access faults, returns to the
+   closures, which run the instruction. The traces of the code record the
+   instructions of the blocks, after they ran, while the hooks of the
+   accesses, and the traces of them, need the closures. *)
+
+let hot = 32
+let max_block = 32
+
+let verbose () =
+  Option.equal String.equal (Sys.getenv "BAP_LIFTED_STATS") (Some "verbose")
+
+let hooked ?(blocks = false) t addr =
+  List.exists t.hooks ~f:(fun h ->
+      match h.kind with
+      | Code _ -> (not h.deleted) && covers h addr
+      | Block _ when blocks -> (not h.deleted) && covers h addr
+      | _ -> false)
+
+(* the instructions, that may be in the block at [pc], whose bytes are
+   fetched only from the executable pages, as the hooks of the invalid
+   fetches are not called *)
+let candidates t pc =
+  let executable addr =
+    match Hashtbl.find t.pages (page_of addr) with
+    | Some p -> Uc.Perm.(mem p.perm exec)
+    | None -> false
+  in
+  let rec loop i addr acc =
+    if i = max_block || (i > 0 && (hooked t addr || not (executable addr)))
+    then List.rev acc
+    else
+      match lifted t addr with
+      | exception Fault _ -> List.rev acc
+      | None -> List.rev acc
+      | Some insn -> (
+          match t.config.delay insn.code with
+          | `None ->
+              let acc = (addr, insn) :: acc in
+              if insn.jumps then List.rev acc
+              else loop (i + 1) Int64.(addr + of_int insn.size) acc
+          | _ -> List.rev acc)
+  in
+  loop 0 pc []
+
+let compile_block t j pc =
+  let candidates = candidates t pc in
+  let insns =
+    List.map candidates ~f:(fun (pc, insn) ->
+        {
+          Bap_engine_jit.pc;
+          next = Int64.(pc + of_int insn.size);
+          blks = insn.blks;
+        })
+  in
+  match
+    Bap_engine_jit.compile ~locate:t.config.locate ~reg_size:(reg_size t) insns
+  with
+  | Error reason ->
+      if verbose () then
+        Printf.eprintf "lifted engine: no block at %Lx: %s\n%!" pc reason;
+      Failed
+  | Ok b -> (
+      if verbose () then
+        Printf.eprintf "lifted engine: a block of %d at %Lx\n%!" b.length pc;
+      match Bap_engine_jit.native b with
+      | exception Failure msg ->
+          if verbose () then
+            Printf.eprintf "lifted engine: the block at %Lx failed: %s\n%!" pc
+              msg;
+          Failed
+      | fn ->
+          let candidates = List.take candidates b.length in
+          Compiled
+            {
+              fn;
+              regs = Array.map b.regs ~f:(reg_bytes t);
+              code = String.concat (List.map candidates ~f:(fun (_, i) -> i.code));
+              pcs = Array.of_list_map candidates ~f:fst;
+              insns = Array.of_list_map candidates ~f:snd;
+              gen = j.gen;
+              entry_hooked = hooked ~blocks:true t pc;
+            })
+
+(* the block, whose hooks of the code changed, is checked again *)
+let unhooked t (j : jit) (b : block) =
+  b.gen = j.gen
+  ||
+  let unhooked =
+    Array.for_alli b.pcs ~f:(fun i pc -> i = 0 || not (hooked t pc))
+  in
+  if unhooked then begin
+    b.gen <- j.gen;
+    b.entry_hooked <- hooked ~blocks:true t b.pcs.(0)
+  end;
+  unhooked
+
+(* runs the block at [pc], whose first instruction is [insn], whose hooks
+   were called, if it is compiled, and returns the next instruction, the
+   number of the instructions, that it ran, and if the next one starts a
+   block *)
+let exec t j (b : block) pc =
+  (* the instructions, that ran, are recorded, after they ran, in their
+     order, as the closures record them *)
+  let ran k =
+    t.ran <- t.ran + k;
+    j.jitted <- j.jitted + k;
+    if j.traced then
+      for i = 0 to k - 1 do
+        let insn = b.insns.(i) in
+        t.current <- b.pcs.(i);
+        trace_insn t b.pcs.(i) insn.size insn.thumb
+      done
+  in
+  let r = Bap_engine_jit.Runtime.run b.fn j.mem b.regs b.code pc in
+  let k = r lsr 2 in
+  let next k = Int64.(b.pcs.(k) + of_int b.insns.(k).size) in
+  if r < 0 then (
+    (* the code changed *)
+    Hashtbl.set j.blocks ~key:pc ~data:(Counting 0);
+    None)
+  else
+    match r land 3 with
+    | 0 when k = 0 -> None
+    | 0 ->
+        ran k;
+        Some (b.pcs.(k), k, false)
+    | 1 ->
+        ran (k + 1);
+        let target = Bap_engine_jit.Runtime.next j.mem in
+        Some (jump t b.insns.(k) ~next:(next k) target, k + 1, true)
+    | _ ->
+        ran (k + 1);
+        Some (next k, k + 1, b.insns.(k).jumps)
+
+(* the block at [pc], that runs, before its first instruction is lifted
+   again, and before the hooks, if its code isn't hooked, as the code of
+   the block is checked, when it runs *)
+let fast_block t j pc ~until ~count n =
+  match Hashtbl.find j.blocks pc with
+  | Some (Compiled b)
+    when (not b.entry_hooked) && b.gen = j.gen
+         && Bool.equal b.insns.(0).thumb (thumb t)
+         && (not (Option.exists count ~f:(fun c -> n + Array.length b.pcs > c)))
+         && not
+              (Option.exists until ~f:(fun u ->
+                   Array.existsi b.pcs ~f:(fun i a -> i > 0 && Int64.equal a u)))
+    ->
+      exec t j b pc
+  | _ -> None
+
+let run_block t j insn pc ~until ~count n =
+  let recount () = Hashtbl.set j.blocks ~key:pc ~data:(Counting 0) in
+  match Hashtbl.find j.blocks pc with
+  | None ->
+      Hashtbl.set j.blocks ~key:pc ~data:(Counting 1);
+      None
+  | Some Failed -> None
+  | Some (Counting c) ->
+      Hashtbl.set j.blocks ~key:pc
+        ~data:(if c + 1 < hot then Counting (c + 1) else compile_block t j pc);
+      None
+  | Some (Compiled b) ->
+      let length = Array.length b.pcs in
+      if not (phys_equal b.insns.(0) insn) then (
+        recount ();
+        None)
+      else if
+        Option.exists count ~f:(fun c -> n + length > c)
+        || Option.exists until ~f:(fun u ->
+            Array.existsi b.pcs ~f:(fun i a -> i > 0 && Int64.equal a u))
+      then None
+      else if not (unhooked t j b) then (
+        recount ();
+        None)
+      else exec t j b pc
+
 let start ?until ?timeout ?count t pc =
   check t;
   t.stopped <- false;
@@ -1141,11 +1412,17 @@ let start ?until ?timeout ?count t pc =
         Time_float.(add (now ()) (Span.of_us (Float.of_int us))))
   in
   (* [pending] is the target of the branch, whose delay slot is at [pc] *)
+  let checked = ref 0 in
   let rec loop ?pending ?(forbidden = false) pc n =
     set_pc t pc;
     let expired () =
       match deadline with
-      | Some d -> n land 0xFF = 0 && Time_float.(now () >= d)
+      | Some d ->
+          n - !checked >= 0x100
+          && begin
+            checked := n;
+            Time_float.(now () >= d)
+          end
       | None -> false
     in
     if
@@ -1155,6 +1432,19 @@ let start ?until ?timeout ?count t pc =
       || expired ()
     then ()
     else
+      let fast =
+        match t.jit with
+        | Some j
+          when j.allowed && t.block && Option.is_none pending && not forbidden
+          ->
+            fast_block t j pc ~until ~count n
+        | _ -> None
+      in
+      match fast with
+      | Some (next, k, starts) ->
+          t.block <- starts;
+          loop next (n + k)
+      | None ->
       match lifted t pc with
       | exception Fault (access, addr) ->
           set_pc t pc;
@@ -1173,6 +1463,19 @@ let start ?until ?timeout ?count t pc =
              after the slot, as Unicorn doesn't stop in a delay slot *)
           if t.stopped && Option.is_none pending && not forbidden then ()
           else begin
+            let block =
+              match t.jit with
+              | Some j
+                when j.allowed && t.block && Option.is_none pending
+                     && not forbidden ->
+                  run_block t j insn pc ~until ~count n
+              | _ -> None
+            in
+            match block with
+            | Some (next, k, starts) ->
+                t.block <- starts;
+                loop next (n + k)
+            | None ->
             t.last_block <- Some pc;
             let next = Int64.(pc + of_int insn.size) in
             trace_insn t pc insn.size insn.thumb;
@@ -1205,7 +1508,9 @@ let start ?until ?timeout ?count t pc =
                 (* the forbidden slot of the compact branch of MIPS, that
                    isn't taken, runs with it, as in Unicorn *)
                 | Next, `Forbidden, None -> loop ~forbidden:true next (n + 1)
-                | Next, _, None -> loop next (n + 1)
+                | Next, _, None ->
+                    if insn.jumps then t.block <- true;
+                    loop next (n + 1)
                 | Jump a, (`Delayed | `Likely), _ -> loop ~pending:a next (n + 1)
                 | Jump a, (`None | `Forbidden), _ ->
                     t.block <- true;
