@@ -67,6 +67,24 @@ bf 39 03 d5  # dmb ishld
 91 6a 61 4e  # fcvtn2 v17.4s, v20.2d
 00 00 38 1e  # fcvtzs w0, s0
 00 00 39 1e  # fcvtzu w0, s0
+22 00 20 1e  # fcvtns w2, s1
+64 00 61 9e  # fcvtnu x4, d3
+08 00 29 9e  # fcvtpu x8, s0
+a6 00 68 1e  # fcvtps w6, d5
+e9 00 30 9e  # fcvtms x9, s7
+43 00 71 1e  # fcvtmu w3, d2
+85 00 24 1e  # fcvtas w5, s4
+c7 00 65 9e  # fcvtau x7, d6
+21 00 e9 9e  # fcvtpu x1, h1
+42 00 f8 1e  # fcvtzs w2, h2
+a3 bc 18 1e  # fcvtzs w3, s5, #0x11
+a3 80 59 9e  # fcvtzu x3, d5, #0x20
+a3 bc 42 9e  # scvtf d3, x5, #0x11
+a3 fc 03 1e  # ucvtf s3, w5, #0x1
+a3 00 ae 9e  # fmov x3, v5.d[1]
+a3 00 af 9e  # fmov v3.d[1], x5
+a3 c0 23 1e  # fcvt h3, s5
+a3 c0 e2 1e  # fcvt d3, h5
 00 18 21 1e  # fdiv s0, s0, s1
 00 04 02 1f  # fmadd s0, s0, s2, s1
 00 68 21 1e  # fmaxnm s0, s0, s1

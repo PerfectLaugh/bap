@@ -164,6 +164,9 @@
 (defun FMOVXDr (rd rn) (setd rd (cast-low 64 rn)))
 (defun FMOVSWr (rd rn) (setw rd (cast-unsigned (word) (cast-low 32 rn))))
 (defun FMOVDXr (rd rn) (set$ rd (cast-low 64 rn)))
+;; the upper half of the vector register, Vn.D[1]
+(defun FMOVDXHighr (rd rn _) (set$ rd (cast-high 64 rn)))
+(defun FMOVXDHighr (rd rn _) (set$ rd (concat (cast-low 64 rn) (cast-low 64 rd))))
 (defun FMOVSi (rd imm) (setd rd (vfp-expand-imm imm 8 23)))
 (defun FMOVDi (rd imm) (setd rd (vfp-expand-imm imm 11 52)))
 
@@ -191,8 +194,103 @@
 (defun FCVTZUUXSr (rd rn) (set$ rd (fp-to-int false 64 rn 8 23)))
 (defun FCVTZUUXDr (rd rn) (set$ rd (fp-to-int false 64 rn 11 52)))
 
+
+;; the conversions to the integers of the other rounding modes, to the
+;; nearest, with the ties to even (N), or away from zero (A), toward
+;; +inf (P), and toward -inf (M), and of the halves (H)
+(defun a64-fcvt-to (signed mode bits a)
+  "converts A to the integer of BITS, rounded by MODE, saturated"
+  (fp-to-int signed bits (if (= mode 'z) a (a64-frint mode a))
+             (a64-fexp-bits a) (a64-frac-bits a)))
+
+(defun FCVTNSUWSr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'n 32 rn))))
+(defun FCVTNSUXSr (rd rn) (set$ rd (a64-fcvt-to true 'n 64 rn)))
+(defun FCVTNSUWDr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'n 32 rn))))
+(defun FCVTNSUXDr (rd rn) (set$ rd (a64-fcvt-to true 'n 64 rn)))
+(defun FCVTNSUWHr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'n 32 rn))))
+(defun FCVTNSUXHr (rd rn) (set$ rd (a64-fcvt-to true 'n 64 rn)))
+(defun FCVTNUUWSr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'n 32 rn))))
+(defun FCVTNUUXSr (rd rn) (set$ rd (a64-fcvt-to false 'n 64 rn)))
+(defun FCVTNUUWDr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'n 32 rn))))
+(defun FCVTNUUXDr (rd rn) (set$ rd (a64-fcvt-to false 'n 64 rn)))
+(defun FCVTNUUWHr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'n 32 rn))))
+(defun FCVTNUUXHr (rd rn) (set$ rd (a64-fcvt-to false 'n 64 rn)))
+(defun FCVTPSUWSr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'p 32 rn))))
+(defun FCVTPSUXSr (rd rn) (set$ rd (a64-fcvt-to true 'p 64 rn)))
+(defun FCVTPSUWDr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'p 32 rn))))
+(defun FCVTPSUXDr (rd rn) (set$ rd (a64-fcvt-to true 'p 64 rn)))
+(defun FCVTPSUWHr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'p 32 rn))))
+(defun FCVTPSUXHr (rd rn) (set$ rd (a64-fcvt-to true 'p 64 rn)))
+(defun FCVTPUUWSr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'p 32 rn))))
+(defun FCVTPUUXSr (rd rn) (set$ rd (a64-fcvt-to false 'p 64 rn)))
+(defun FCVTPUUWDr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'p 32 rn))))
+(defun FCVTPUUXDr (rd rn) (set$ rd (a64-fcvt-to false 'p 64 rn)))
+(defun FCVTPUUWHr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'p 32 rn))))
+(defun FCVTPUUXHr (rd rn) (set$ rd (a64-fcvt-to false 'p 64 rn)))
+(defun FCVTMSUWSr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'm 32 rn))))
+(defun FCVTMSUXSr (rd rn) (set$ rd (a64-fcvt-to true 'm 64 rn)))
+(defun FCVTMSUWDr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'm 32 rn))))
+(defun FCVTMSUXDr (rd rn) (set$ rd (a64-fcvt-to true 'm 64 rn)))
+(defun FCVTMSUWHr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'm 32 rn))))
+(defun FCVTMSUXHr (rd rn) (set$ rd (a64-fcvt-to true 'm 64 rn)))
+(defun FCVTMUUWSr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'm 32 rn))))
+(defun FCVTMUUXSr (rd rn) (set$ rd (a64-fcvt-to false 'm 64 rn)))
+(defun FCVTMUUWDr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'm 32 rn))))
+(defun FCVTMUUXDr (rd rn) (set$ rd (a64-fcvt-to false 'm 64 rn)))
+(defun FCVTMUUWHr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'm 32 rn))))
+(defun FCVTMUUXHr (rd rn) (set$ rd (a64-fcvt-to false 'm 64 rn)))
+(defun FCVTASUWSr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'a 32 rn))))
+(defun FCVTASUXSr (rd rn) (set$ rd (a64-fcvt-to true 'a 64 rn)))
+(defun FCVTASUWDr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'a 32 rn))))
+(defun FCVTASUXDr (rd rn) (set$ rd (a64-fcvt-to true 'a 64 rn)))
+(defun FCVTASUWHr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'a 32 rn))))
+(defun FCVTASUXHr (rd rn) (set$ rd (a64-fcvt-to true 'a 64 rn)))
+(defun FCVTAUUWSr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'a 32 rn))))
+(defun FCVTAUUXSr (rd rn) (set$ rd (a64-fcvt-to false 'a 64 rn)))
+(defun FCVTAUUWDr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'a 32 rn))))
+(defun FCVTAUUXDr (rd rn) (set$ rd (a64-fcvt-to false 'a 64 rn)))
+(defun FCVTAUUWHr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'a 32 rn))))
+(defun FCVTAUUXHr (rd rn) (set$ rd (a64-fcvt-to false 'a 64 rn)))
+(defun FCVTZSUWHr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to true 'z 32 rn))))
+(defun FCVTZSUXHr (rd rn) (set$ rd (a64-fcvt-to true 'z 64 rn)))
+(defun FCVTZUUWHr (rd rn) (setw rd (cast-unsigned (word) (a64-fcvt-to false 'z 32 rn))))
+(defun FCVTZUUXHr (rd rn) (set$ rd (a64-fcvt-to false 'z 64 rn)))
+
+
+;; the conversions of the fixed-point numbers with FBITS fractional bits,
+;; whose scaling by a power of two is exact, so they round once
+(defun a64-fcvt-fixed (signed bits a fbits)
+  "converts A times 2^FBITS to the integer of BITS, toward zero"
+  (a64-fcvt-to signed 'z bits (*. :rne a (a64-fpow2 a fbits))))
+
+(defun a64-cvtf-fixed (signed bits x fbits)
+  "converts the integer X over 2^FBITS to the float of BITS"
+  (let ((f (if signed (cast-sfloat :rne bits x) (cast-float :rne bits x))))
+    (/. :rne f (a64-fpow2 f fbits))))
+
+(defun FCVTZSSWSri (rd rn fbits) (setw rd (cast-unsigned (word) (a64-fcvt-fixed true 32 rn fbits))))
+(defun FCVTZSSXSri (rd rn fbits) (set$ rd (a64-fcvt-fixed true 64 rn fbits)))
+(defun FCVTZSSWDri (rd rn fbits) (setw rd (cast-unsigned (word) (a64-fcvt-fixed true 32 rn fbits))))
+(defun FCVTZSSXDri (rd rn fbits) (set$ rd (a64-fcvt-fixed true 64 rn fbits)))
+(defun FCVTZUSWSri (rd rn fbits) (setw rd (cast-unsigned (word) (a64-fcvt-fixed false 32 rn fbits))))
+(defun FCVTZUSXSri (rd rn fbits) (set$ rd (a64-fcvt-fixed false 64 rn fbits)))
+(defun FCVTZUSWDri (rd rn fbits) (setw rd (cast-unsigned (word) (a64-fcvt-fixed false 32 rn fbits))))
+(defun FCVTZUSXDri (rd rn fbits) (set$ rd (a64-fcvt-fixed false 64 rn fbits)))
+(defun SCVTFSWSri (rd rn fbits) (setd rd (a64-cvtf-fixed true 32 (cast-low 32 rn) fbits)))
+(defun SCVTFSXSri (rd rn fbits) (setd rd (a64-cvtf-fixed true 32 (cast-low 64 rn) fbits)))
+(defun SCVTFSWDri (rd rn fbits) (setd rd (a64-cvtf-fixed true 64 (cast-low 32 rn) fbits)))
+(defun SCVTFSXDri (rd rn fbits) (setd rd (a64-cvtf-fixed true 64 (cast-low 64 rn) fbits)))
+(defun UCVTFSWSri (rd rn fbits) (setd rd (a64-cvtf-fixed false 32 (cast-low 32 rn) fbits)))
+(defun UCVTFSXSri (rd rn fbits) (setd rd (a64-cvtf-fixed false 32 (cast-low 64 rn) fbits)))
+(defun UCVTFSWDri (rd rn fbits) (setd rd (a64-cvtf-fixed false 64 (cast-low 32 rn) fbits)))
+(defun UCVTFSXDri (rd rn fbits) (setd rd (a64-cvtf-fixed false 64 (cast-low 64 rn) fbits)))
+
 (defun FCVTDSr (rd rn) (setd rd (fconvert :rne 64 rn)))
 (defun FCVTSDr (rd rn) (setd rd (fconvert :rne 32 rn)))
+(defun FCVTHSr (rd rn) (setd rd (fconvert :rne 16 rn)))
+(defun FCVTHDr (rd rn) (setd rd (fconvert :rne 16 rn)))
+(defun FCVTSHr (rd rn) (setd rd (fconvert :rne 32 rn)))
+(defun FCVTDHr (rd rn) (setd rd (fconvert :rne 64 rn)))
 
 ;; LOADS AND STORES
 
