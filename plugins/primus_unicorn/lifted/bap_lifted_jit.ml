@@ -440,6 +440,71 @@ let commit ?copy t slots =
       in
       emit t "  store %s %s, ptr %%rp%d, align 1\n" ty x i)
 
+(* The exit of the block to [target], after [ran] instructions, continues
+   with the next block, that the runtime linked, whose function, address,
+   end, and length are in one of the two entries of @block_slots, keyed
+   by the target, see bap_lifted_jit_stubs.c, if the frame allows it: the
+   chain is on, the instructions are within the budget, and the next
+   block doesn't reach the address, at which the run stops. The call is
+   the tail call, so that the stack doesn't grow, and else the block
+   returns [result]. The offsets of the frame are the ones of [frame]. *)
+let exit_to t ~target ~ran ~result =
+  let l = label t in
+  let chain = assign t "getelementptr inbounds i8, ptr %%f, i64 56" in
+  let on = assign t "load i32, ptr %s" chain in
+  let on = assign t "icmp ne i32 %s, 0" on in
+  let ret = label t and try_ = label t in
+  emit t "  br i1 %s, label %%%s, label %%%s\n" on try_ ret;
+  start t try_;
+  let field i f =
+    assign t
+      "getelementptr inbounds [2 x {i64, ptr, i64, i64, i64}], ptr \
+       @block_slots, i64 0, i64 %d, i32 %d"
+      i f
+  in
+  let k0 = assign t "load i64, ptr %s" (field 0 0) in
+  let first = assign t "icmp eq i64 %s, %s" k0 target in
+  let i = assign t "zext i1 %s to i64" first in
+  let i = assign t "sub i64 1, %s" i in
+  let entry f =
+    assign t
+      "getelementptr inbounds [2 x {i64, ptr, i64, i64, i64}], ptr \
+       @block_slots, i64 0, i64 %s, i32 %d"
+      i f
+  in
+  let key = assign t "load i64, ptr %s" (entry 0) in
+  let fn = assign t "load ptr, ptr %s" (entry 1) in
+  let pc = assign t "load i64, ptr %s" (entry 2) in
+  let end_ = assign t "load i64, ptr %s" (entry 3) in
+  let len = assign t "load i64, ptr %s" (entry 4) in
+  let hit = assign t "icmp eq i64 %s, %s" key target in
+  let some = assign t "icmp ne ptr %s, null" fn in
+  let field_ off = assign t "getelementptr inbounds i8, ptr %%f, i64 %d" off in
+  let chainedp = field_ 24 and lastp = field_ 32 in
+  let chained = assign t "load i64, ptr %s" chainedp in
+  let budget = assign t "load i64, ptr %s" (field_ 40) in
+  let until = assign t "load i64, ptr %s" (field_ 48) in
+  let total = assign t "add i64 %s, %d" chained ran in
+  let need = assign t "add i64 %s, %s" total len in
+  let within = assign t "icmp ule i64 %s, %s" need budget in
+  let at = assign t "icmp eq i64 %s, %s" until pc in
+  let after = assign t "icmp ugt i64 %s, %s" until pc in
+  let before = assign t "icmp ult i64 %s, %s" until end_ in
+  let inside = assign t "and i1 %s, %s" after before in
+  let stops = assign t "or i1 %s, %s" at inside in
+  let go = assign t "and i1 %s, %s" hit some in
+  let go = assign t "and i1 %s, %s" go within in
+  let runs = assign t "xor i1 %s, true" stops in
+  let go = assign t "and i1 %s, %s" go runs in
+  emit t "  br i1 %s, label %%%s, label %%%s\n" go l ret;
+  start t l;
+  emit t "  store i64 %s, ptr %s\n  store i64 %s, ptr %s\n" total chainedp pc
+    lastp;
+  let r = assign t "musttail call i32 %s(ptr %%f, ptr %%regs)" fn in
+  emit t "  ret i32 %s\n" r;
+  start t ret;
+  emit t "  ret i32 %d\n" result
+
 (* the instruction [k], whose blocks are the labels i<k>b<j>, and which
    ends at i<k>.done, if it doesn't jump, at i<k>.jump, with the target in
    %tgt, if it jumps, and at i<k>.stop, if it stops *)
@@ -507,7 +572,8 @@ let insn t k (ins : insn) =
   emit t "i%d.jump:\n" k;
   commit t (Set.union t.written_before s.written);
   let a = assign t "load i64, ptr %%tgt" in
-  emit t "  store i64 %s, ptr %%next\n  ret i32 %d\n" a ((4 * k) + 1);
+  emit t "  store i64 %s, ptr %%next\n" a;
+  exit_to t ~target:a ~ran:(k + 1) ~result:((4 * k) + 1);
   (* the registers, as the previous instructions left them *)
   emit t "i%d.stop:\n" k;
   commit t ~copy:(k, copied) t.written_before;
@@ -528,6 +594,10 @@ let header t name =
   add "declare i32 @bap_jit_load(ptr, i64, i32, ptr)\n";
   add "declare i32 @bap_jit_store(ptr, i64, i32, ptr)\n";
   Set.iter t.decls ~f:(fun d -> add "%s\n" d);
+  add
+    "@block_slots = global [2 x {i64, ptr, i64, i64, i64}] [{i64, ptr, i64, \
+     i64, i64} {i64 -1, ptr null, i64 0, i64 0, i64 0}, {i64, ptr, i64, i64, \
+     i64} {i64 -1, ptr null, i64 0, i64 0, i64 0}]\n";
   add "define i32 @%s(ptr noalias %%f, ptr noalias %%regs) {\nentry:\n" name;
   add "  %%next = getelementptr inbounds i8, ptr %%f, i64 8\n";
   add "  %%undo = getelementptr inbounds i8, ptr %%f, i64 16\n";
@@ -602,7 +672,12 @@ let compile ~locate ~reg_size ~global insns =
   else begin
     emit t "i%d:\n" length;
     commit t t.written_before;
-    emit t "  ret i32 %d\n}\n" ((4 * (length - 1)) + 2);
+    let last = List.nth_exn insns (length - 1) in
+    exit_to t
+      ~target:(Int64.to_string last.next)
+      ~ran:length
+      ~result:((4 * (length - 1)) + 2);
+    emit t "}\n";
     let b = header t "block" in
     Buffer.add_buffer b t.body;
     let regs = Array.create ~len:(Hashtbl.length t.slots) 0 in
@@ -636,8 +711,15 @@ module Runtime = struct
   [@@noalloc]
 
   external link :
-    mem -> int64 -> nativeint -> string -> int -> int64 -> int -> unit
-    = "bap_jit_link_byte" "bap_jit_link"
+    mem ->
+    int64 ->
+    nativeint ->
+    string ->
+    int ->
+    int64 ->
+    int ->
+    nativeint ->
+    unit = "bap_jit_link_byte" "bap_jit_link"
 
   external unlink : mem -> int64 -> unit = "bap_jit_unlink"
   external unlink_all : mem -> unit = "bap_jit_unlink_all"
@@ -669,5 +751,8 @@ let native block =
   let ir =
     String.substr_replace_first block.ir ~pattern:"@block("
       ~with_:("@" ^ name ^ "(")
+    |> String.substr_replace_all ~pattern:"@block_slots"
+         ~with_:("@" ^ name ^ "_slots")
   in
-  Bap_llvm_jit.compile (Lazy.force llvm) ir name
+  let code = Bap_llvm_jit.compile (Lazy.force llvm) ir name in
+  (code, Bap_llvm_jit.symbol (Lazy.force llvm) (name ^ "_slots"))

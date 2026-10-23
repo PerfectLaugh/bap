@@ -88,6 +88,9 @@ type insn = {
 type block = {
   native : Bap_llvm_jit.code;
   fn : nativeint;
+  slots : nativeint;
+      (** the entries of the next blocks, that its code calls, see
+          [Bap_lifted_jit.exit_to] *)
   mutable chained : bool;
       (** if the runs of the other blocks continue with it, see [chainable] *)
   code : string;  (** the bytes of its instructions *)
@@ -1635,7 +1638,7 @@ let compile_block t j pc =
               Printf.eprintf "lifted engine: the block at %Lx failed: %s\n%!" pc
                 msg;
             Failed
-        | native ->
+        | native, slots ->
             let candidates = List.take candidates b.length in
             j.live <- j.live + 1;
             (* the pages of its bytes, whose writes drop it, see [code_written] *)
@@ -1655,6 +1658,7 @@ let compile_block t j pc =
               {
                 native;
                 fn = Bap_llvm_jit.address native;
+                slots;
                 chained = false;
                 code =
                   String.concat (List.map candidates ~f:(fun (_, i) -> i.code));
@@ -1703,7 +1707,7 @@ let unhooked t (j : jit) (b : block) =
    change the mode of ARM, while the run is limited, so that the loop checks the time,
    the stops, and the signals. *)
 
-let max_chained = 4096
+let max_chained = 0x10000
 
 let chainable (j : jit) (b : block) =
   (not b.atomic)
@@ -1749,7 +1753,7 @@ let exec ?until ?count t j (b : block) pc n =
     let last = Array.length b.pcs - 1 in
     Bap_lifted_jit.Runtime.link j.mem pc b.fn b.code (Array.length b.pcs)
       Int64.(b.pcs.(last) + of_int b.insns.(last).size)
-      (link_flags b);
+      (link_flags b) b.slots;
     b.chained <- true
   end;
   Bap_lifted_jit.Runtime.limits j.mem

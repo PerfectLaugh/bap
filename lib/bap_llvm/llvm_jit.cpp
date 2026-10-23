@@ -185,6 +185,16 @@ extern "C" value bap_llvm_jit_compile(value v, value ir, value name) {
     CAMLreturn(r);
 }
 
+// [symbol jit name] the address of the symbol [name] of a module, e.g.,
+// of its data, which stays, until its code is released
+extern "C" value bap_llvm_jit_symbol(value v, value name) {
+    CAMLparam2(v, name);
+    jit *j = jit_val(v);
+    auto sym = j->lljit->lookup(String_val(name));
+    if (!sym) fail(message(sym.takeError()));
+    CAMLreturn(caml_copy_nativeint(static_cast<intnat>(sym->getValue())));
+}
+
 extern "C" value bap_llvm_jit_address(value v) {
     CAMLparam1(v);
     code *c = code_val(v);
