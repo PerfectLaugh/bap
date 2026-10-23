@@ -38,6 +38,8 @@ type kind =
   | Unsupported of (int64 -> unit)
   | Mem of Uc.access list * (Uc.access -> int64 -> int -> int64 -> unit)
   | Mem_invalid of Uc.access list * (Uc.access -> int64 -> int -> int64 -> bool)
+  | Trace_code of Uc.Trace.t  (** records the instructions, or the blocks *)
+  | Trace_mem of Uc.Trace.t  (** records the accesses *)
 
 type hook = {
   first : int64 option;
@@ -77,6 +79,20 @@ type t = {
   mutable closed : bool;
   mutable undo : (unit -> unit) list;
   mutable last_block : int64 option;
+  mutable block : bool;  (** the next instruction starts a block *)
+  mutable running : bool;
+  mutable current : int64;  (** the instruction, that runs *)
+  (* the writes of the registers and the memory, while the emulation is
+     stopped, which make a boundary of the traces, when it starts, see
+     [Uc.Trace.bounds], but the fills of the pages, that are mapped *)
+  mutable wrote_regs : bool;
+  mutable wrote : (int64 * int64) list;
+  mutable wrote_all : bool;
+  fresh : unit Int64.Table.t;
+  mutable reads : (int64 * int) list;
+      (** the reads of the instruction, that runs, which the semantics may
+          repeat, e.g., of an operand, that the flags use too, but the traces
+          record once, as Unicorn reads it once *)
   mutable ran : int;  (** the instructions, that the engine ran *)
   mutable unsupported : int;  (** the instructions, that it couldn't run *)
 }
@@ -121,6 +137,14 @@ let create config arch mode =
       closed = false;
       undo = [];
       last_block = None;
+      block = true;
+      running = false;
+      current = 0L;
+      wrote_regs = false;
+      wrote = [];
+      wrote_all = false;
+      fresh = Int64.Table.create ();
+      reads = [];
       ran = 0;
       unsupported = 0;
     }
@@ -159,7 +183,7 @@ let reg_bytes t id =
 
 let reg_read_bytes t id = Bytes.to_string (reg_bytes t id)
 
-let reg_write_bytes t id data =
+let write_reg_bytes t id data =
   let b = reg_bytes t id in
   if String.length data <> Bytes.length b then
     invalid_arg "Unicorn.reg_write_bytes: a wrong size";
@@ -179,7 +203,7 @@ let reg_read t id =
   if Bytes.length b > 8 then invalid_arg "Unicorn.reg_read: a wide register";
   int64_of_bytes b (Bytes.length b)
 
-let reg_write t id x =
+let write_reg t id x =
   let b = reg_bytes t id in
   if Bytes.length b > 8 then invalid_arg "Unicorn.reg_write: a wide register";
   for i = 0 to Bytes.length b - 1 do
@@ -191,7 +215,7 @@ let pc t = reg_read t t.config.pc
 
 let set_pc t pc =
   if reg_size t t.config.pc > 8 then invalid_arg "the program counter is wide"
-  else reg_write t t.config.pc pc
+  else write_reg t t.config.pc pc
 
 (* the memory *)
 
@@ -214,6 +238,7 @@ let mem_map t addr size perm =
       if Hashtbl.mem t.pages page then
         error 11 "Invalid memory mapping (UC_ERR_MAP)");
   pages_of addr size (fun page ->
+      Hashtbl.set t.fresh ~key:page ~data:();
       Hashtbl.set t.pages ~key:page
         ~data:{ data = Bytes.make (Int64.to_int_exn page_size) '\000'; perm })
 
@@ -244,7 +269,7 @@ let mem_read t addr n =
           error uc_err_read_unmapped
             "Invalid memory read (UC_ERR_READ_UNMAPPED)")
 
-let mem_write t addr data =
+let write_mem t addr data =
   check t;
   String.iteri data ~f:(fun i c ->
       let addr = Int64.(addr + of_int i) in
@@ -294,6 +319,102 @@ let mem_hooks t access addr size value =
         when covers h addr && List.mem accesses access ~equal:Poly.equal ->
           f access addr size value
       | _ -> ())
+
+(* The traces, that the engine records, as the native hooks of Unicorn
+   record them, see [Uc.Trace]. *)
+
+module Record = Uc.Trace.Record
+
+let ranges_array ranges =
+  List.concat_map ranges ~f:(fun (addr, size) -> [ addr; size ])
+  |> Array.of_list
+
+(* the boundary, before the instruction, that runs, of the writes of a
+   hook *)
+let bound_running t ~regs ~mem ranges =
+  each t (fun h ->
+      match h.kind with
+      | Trace_code tr ->
+          Record.bound tr regs mem true t.current (ranges_array ranges) false
+      | _ -> ())
+
+let wrote_regs t =
+  if t.running then bound_running t ~regs:true ~mem:false []
+  else t.wrote_regs <- true
+
+let wrote_mem t addr size =
+  let fresh = ref true in
+  pages_of addr (Int64.of_int size) (fun page ->
+      if not (Hashtbl.mem t.fresh page) then fresh := false);
+  if size > 0 && not !fresh then
+    if t.running then
+      bound_running t ~regs:false ~mem:true [ (addr, Int64.of_int size) ]
+    else if List.length t.wrote >= 4096 then t.wrote_all <- true
+    else t.wrote <- (addr, Int64.of_int size) :: t.wrote
+
+(* the writes, while the emulation was stopped, make a boundary, when it
+   starts *)
+let mark t =
+  let mem = (not (List.is_empty t.wrote)) || t.wrote_all in
+  if t.wrote_regs || mem then
+    each t (fun h ->
+        match h.kind with
+        | Trace_code tr ->
+            Record.bound tr t.wrote_regs mem false 0L
+              (ranges_array (List.rev t.wrote))
+              t.wrote_all
+        | _ -> ());
+  t.wrote_regs <- false;
+  t.wrote <- [];
+  t.wrote_all <- false;
+  Hashtbl.clear t.fresh
+
+let reg_write t id x =
+  wrote_regs t;
+  write_reg t id x
+
+let reg_write_bytes t id data =
+  wrote_regs t;
+  write_reg_bytes t id data
+
+let mem_write t addr data =
+  wrote_mem t addr (String.length data);
+  write_mem t addr data
+
+let trace_access t ~write addr size value old =
+  let read = (addr, size) in
+  let again =
+    (not write)
+    && List.mem t.reads read ~equal:(fun (a, n) (b, m) ->
+        Int64.equal a b && n = m)
+  in
+  if write then
+    t.reads <-
+      List.filter t.reads ~f:(fun (a, n) ->
+          Int64.(a + of_int n <= addr || addr + of_int size <= a))
+  else if not again then t.reads <- read :: t.reads;
+  if not again then
+    each t (fun h ->
+        match h.kind with
+        | Trace_mem tr when covers h addr ->
+            Record.access tr write addr size value old t.current
+        | _ -> ())
+
+(* the instruction, that runs, in the traces of the code *)
+let trace_insn t pc size thumb =
+  t.reads <- [];
+  each t (fun h ->
+      match h.kind with
+      | Trace_code tr when covers h pc ->
+          if Uc.Trace.blocks tr && not t.block then Record.extend tr size
+          else Record.record tr pc size thumb
+      | _ -> ());
+  t.block <- false
+
+(* the instruction, that didn't run, e.g., as it faulted *)
+let unrun t pc =
+  each t (fun h ->
+      match h.kind with Trace_code tr -> Record.unrun tr pc | _ -> ())
 
 (* the hooks of the invalid access, the access is retried, if one of them
    handled it, and else the instruction faults *)
@@ -502,6 +623,7 @@ let load_value t stores addr endian size =
       mem_hooks t Read addr n 0L;
       let x = value_of_bytes endian (load t addr n) in
       mem_hooks t Read_after addr n (bits x);
+      trace_access t ~write:false addr n (bits x) 0L;
       x
 
 let addr_of v = bits v
@@ -594,6 +716,17 @@ let write_stores t stores =
       let n = Size.in_bytes size in
       let data = bytes_of_value endian x in
       mem_hooks t Write addr n (bits x);
+      (* the bytes, that the write overwrites, see [Uc.Trace.accesses] *)
+      let old =
+        if n > 8 then 0L
+        else
+          match mem_read t addr n with
+          | old ->
+              String.foldi old ~init:0L ~f:(fun i acc c ->
+                  Int64.(acc lor (of_int (Char.to_int c) lsl Int.(8 * i))))
+          | exception Uc.Error _ -> 0L
+      in
+      trace_access t ~write:true addr n (bits x) old;
       store t addr data 0L)
 
 let write_var ctx v : value -> unit =
@@ -876,7 +1009,7 @@ let thumb t =
 let set_thumb t on =
   Option.iter t.cpsr ~f:(fun cpsr ->
       let x = reg_read t cpsr in
-      reg_write t cpsr Int64.(if on then x lor 0x20L else x land lnot 0x20L))
+      write_reg t cpsr Int64.(if on then x lor 0x20L else x land lnot 0x20L))
 
 let lifted t pc =
   let code = fetch t pc in
@@ -1008,6 +1141,7 @@ let start ?until ?timeout ?count t pc =
             error uc_err_insn_invalid
               "Invalid instruction (UC_ERR_INSN_INVALID)"
       | Some insn ->
+          t.current <- pc;
           code_hooks t pc insn.size;
           (* the stop in a delay slot stops at the target of its branch,
              after the slot, as Unicorn doesn't stop in a delay slot *)
@@ -1015,6 +1149,7 @@ let start ?until ?timeout ?count t pc =
           else begin
             t.last_block <- Some pc;
             let next = Int64.(pc + of_int insn.size) in
+            trace_insn t pc insn.size insn.thumb;
             t.undo <- [];
             match insn.run () with
             | outcome -> (
@@ -1037,7 +1172,9 @@ let start ?until ?timeout ?count t pc =
                   | None -> t.config.delay insn.code
                 in
                 match (outcome, delay, pending) with
-                | Next, _, Some a -> loop a (n + 1)
+                | Next, _, Some a ->
+                    t.block <- true;
+                    loop a (n + 1)
                 | Next, `Likely, None -> loop Int64.(next + 4L) (n + 1)
                 (* the forbidden slot of the compact branch of MIPS, that
                    isn't taken, runs with it, as in Unicorn *)
@@ -1045,8 +1182,10 @@ let start ?until ?timeout ?count t pc =
                 | Next, _, None -> loop next (n + 1)
                 | Jump a, (`Delayed | `Likely), _ -> loop ~pending:a next (n + 1)
                 | Jump a, (`None | `Forbidden), _ ->
+                    t.block <- true;
                     loop (jump t insn ~next a) (n + 1)
                 | Interrupt_at (no, next), _, _ ->
+                    t.block <- true;
                     set_pc t next;
                     interrupt t no;
                     loop next (n + 1))
@@ -1063,11 +1202,13 @@ let start ?until ?timeout ?count t pc =
                     reason;
                 List.iter t.undo ~f:(fun f -> f ());
                 t.undo <- [];
+                unrun t pc;
                 set_pc t pc;
                 unsupported t pc
             | exception Fault (access, _) ->
                 List.iter t.undo ~f:(fun f -> f ());
                 t.undo <- [];
+                unrun t pc;
                 set_pc t pc;
                 let code, msg = fault_error access in
                 raise (Uc.Error (code, msg))
@@ -1081,9 +1222,13 @@ let start ?until ?timeout ?count t pc =
         Int64.(pc land lnot 1L)
     | _ -> pc
   in
+  mark t;
+  t.block <- true;
+  t.running <- true;
   Exn.protect
     ~f:(fun () -> loop pc 0)
     ~finally:(fun () ->
+      t.running <- false;
       if Option.is_some (Sys.getenv "BAP_LIFTED_STATS") then
         Printf.eprintf "lifted engine: %d run, %d unsupported, at %Lx\n%!" t.ran
           t.unsupported (reg_read t t.config.pc))
@@ -1116,6 +1261,11 @@ let on_unsupported t f = add t (Unsupported f)
 
 let on_mem ?first ?last t accesses f =
   add t ?first ?last (Mem (accesses_of accesses, f))
+
+let trace ?first ?last ?(memory = false) t trace =
+  Record.prepare trace (Poly.equal t.arch Uc.Arm);
+  add t ?first ?last (Trace_code trace)
+  :: (if memory then [ add t ?first ?last (Trace_mem trace) ] else [])
 
 let on_mem_invalid ?first ?last t accesses kinds f =
   add t ?first ?last (Mem_invalid (invalid_accesses accesses kinds, f))

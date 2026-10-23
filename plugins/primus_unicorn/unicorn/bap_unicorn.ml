@@ -213,6 +213,21 @@ module Trace = struct
   external count : t -> int64 = "bap_uc_trace_count"
   external accesses_count : t -> int64 = "bap_uc_trace_accesses_count"
   external clear : t -> unit = "bap_uc_trace_clear"
+
+  module Record = struct
+    external prepare : t -> bool -> unit = "bap_uc_trace_prepare"
+    external record : t -> int64 -> int -> bool -> unit = "bap_uc_trace_record"
+    external extend : t -> int -> unit = "bap_uc_trace_extend"
+
+    external access : t -> bool -> int64 -> int -> int64 -> int64 -> int64 -> unit
+      = "bap_uc_trace_access_bytecode" "bap_uc_trace_access"
+
+    external unrun : t -> int64 -> unit = "bap_uc_trace_unrun"
+
+    external bound :
+      t -> bool -> bool -> bool -> int64 -> int64 array -> bool -> unit
+      = "bap_uc_trace_bound_bytecode" "bap_uc_trace_bound"
+  end
   external blocks : t -> bool = "bap_uc_trace_blocks"
   external pcs : t -> int -> pcs = "bap_uc_trace_pcs"
   external sizes : t -> int -> sizes = "bap_uc_trace_sizes"

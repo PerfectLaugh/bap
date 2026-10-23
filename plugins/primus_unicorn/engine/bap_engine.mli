@@ -150,8 +150,8 @@ module Trace = Bap_unicorn.Trace
 
 val trace :
   ?first:int64 -> ?last:int64 -> ?memory:bool -> t -> Trace.t -> hook list
-(** [trace t trace] records the trace, see {!Bap_unicorn.trace}, in Unicorn
-    only, the lifted engine raises [Invalid_argument]. *)
+(** [trace t trace] records the trace, see {!Bap_unicorn.trace}, in either
+    engine. *)
 
 (** {2 Contexts} *)
 

@@ -1935,6 +1935,36 @@ let lifters data =
         targets)
     [ ("lifters", []); ("lifted", [ "engine=lifted" ]) ]
 
+(* the traces of the lifted engine, see engines.ml, are the ones of
+   Unicorn, but on x86, whose Unicorn reads the descriptors of the
+   segments too *)
+let engines data =
+  List.map
+    (fun target ->
+      case ("lifted/traces/" ^ target) (fun env ->
+          let out =
+            bap ~timeout:300. env
+              [
+                "script";
+                input "emu/engines.ml";
+                path data ("bin/" ^ target ^ "-echo");
+              ]
+          in
+          List.iter
+            (fun blocks ->
+              has env "records the same instructions and accesses" out
+                ("blocks " ^ blocks
+               ^ ": the instructions are the same true, the accesses true"))
+            [ "false"; "true" ]))
+    [
+      "x86_64-linux-gnu";
+      "aarch64-linux-gnu";
+      "arm-linux-gnueabi";
+      "mips-linux-gnu";
+      "mips64-linux-gnueabi";
+      "riscv64-linux-gnu";
+    ]
+
 (* the loaders: the sections of PE without the contents, e.g., .bss, are
    zero-filled segments, and the data objects, that the programs import,
    e.g., stdin, through the slots of the GOT, which the GLOB_DAT
@@ -2131,6 +2161,7 @@ let tests =
     threads;
     emu_targets;
     lifters;
+    engines;
     loaders;
     loader_layouts;
     observations;

@@ -175,7 +175,8 @@ let trace ?first ?last ?memory t trace =
   match t with
   | Unicorn u ->
       List.map (fun h -> Unicorn_hook h) (Uc.trace ?first ?last ?memory u trace)
-  | Lifted _ -> invalid_arg "Bap_engine.trace: the lifted engine has no traces"
+  | Lifted l ->
+      List.map (fun h -> Lifted_hook h) (L.trace ?first ?last ?memory l trace)
 
 type context = Unicorn_context of Uc.context | Lifted_context of L.context
 

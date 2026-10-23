@@ -41,6 +41,8 @@
 - keeps the changes to Unicorn as the files of an overlay of its sources, see plugins/primus_unicorn/libunicorn/overlay/README.md
 - locates the aliases of the registers, e.g., D0 of V0 of AArch64, through their origins, also in Unicorn, whose registers of their own share the bits
 - adds `Primus.Lift.named`, the name of the instruction, that it lifts
+- records the traces of `Bap_emu.Trace` in the lifted engine too, into the rings of Unicorn, with `Bap_unicorn.Trace.Record`, and the cases `lifted/traces/TARGET` compare them with the ones of Unicorn
+- pushes the old value of the stack pointer, e.g., `push %rsp` of x86, which pushed the decremented one
 - continues MIPS from the branch, whose delay slot Unicorn stopped in, and outside of a delay slot, after Primus interpreted, or another thread ran, as Unicorn keeps the pending branch
 - jumps, in `Primus.Interpreter.step`, to the address of the label, that the knowledge has, e.g., of a function of the program, that a stub replaced, and keeps the position of the interpreter at the subroutine of the instruction, after it runs
 - fixes the arena of the Lisp `malloc`, which didn't grow for the header of the chunk, that filled it

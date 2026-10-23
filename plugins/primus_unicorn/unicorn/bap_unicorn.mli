@@ -292,6 +292,37 @@ module Trace : sig
   val save : ?last:int -> t -> string -> int64
   (** [save trace file] writes the last program counters, as {!pcs}, one in hex
       a line, and returns their number. *)
+
+  (** The records of the engines, that record the traces themselves, as the
+      native hooks do, e.g., the lifted engine of [Bap_engine]. *)
+  module Record : sig
+    val prepare : t -> bool -> unit
+    (** [prepare trace arm] the trace records the modes, if [arm]. *)
+
+    val record : t -> int64 -> int -> bool -> unit
+    (** [record trace pc size thumb] records the instruction, of every [every]
+        one, or the block, of [size] bytes, that starts at [pc], in the mode.
+    *)
+
+    val extend : t -> int -> unit
+    (** [extend trace size] the last block runs the next instruction of [size]
+        bytes. *)
+
+    val access : t -> bool -> int64 -> int -> int64 -> int64 -> int64 -> unit
+    (** [access trace write addr size value old pc] records the access of the
+        instruction at [pc], the [old] bytes of a write, as {!accesses}. *)
+
+    val unrun : t -> int64 -> unit
+    (** [unrun trace pc] the instruction at [pc], that the trace recorded last,
+        didn't run, e.g., as it faulted, so that it is recorded again, when it
+        runs. *)
+
+    val bound : t -> bool -> bool -> bool -> int64 -> int64 array -> bool -> unit
+    (** [bound trace regs mem running pc ranges unknown] the boundary of the
+        written registers and memory, whose addresses and sizes are the pairs of
+        [ranges], or are [unknown], as {!bounds}, made while the emulation runs,
+        before the instruction at [pc], if [running]. *)
+  end
 end
 
 val trace :

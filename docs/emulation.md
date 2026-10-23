@@ -39,7 +39,7 @@ The options of the Unicorn executor:
 
 ### The engines
 
-The native code runs in an engine: `unicorn`, the CPU emulator, by default, or `lifted`, which runs the semantics of the instructions, that BAP lifts, so that the program runs as the lifters see it. The lifted engine compiles each instruction, once, to the closures, and runs the intrinsics of the floats natively, as Primus Lisp runs them. The instructions, that it can't run, e.g., the system calls, or the traps, are interpreted in Primus. It runs about a million instructions per second, and has no traces, see `Emu.Trace`, yet.
+The native code runs in an engine: `unicorn`, the CPU emulator, by default, or `lifted`, which runs the semantics of the instructions, that BAP lifts, so that the program runs as the lifters see it. The lifted engine compiles each instruction, once, to the closures, and runs the intrinsics of the floats natively, as Primus Lisp runs them. The instructions, that it can't run, e.g., the system calls, or the traps, are interpreted in Primus. It runs about a million instructions per second, and records the traces, see `Emu.Trace`, as Unicorn does: the same instructions and accesses, while its blocks may end elsewhere, and on x86 without the reads of the descriptors of the segments, that Unicorn makes.
 
 ```bash
 bap ./prog --passes=run --primus-unicorn-engine=lifted
