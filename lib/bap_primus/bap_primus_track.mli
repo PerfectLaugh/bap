@@ -9,6 +9,7 @@ module Make (Machine : Machine) : sig
   val is_tracked : value -> bool Machine.t
   val mark : addr -> unit Machine.t
   val unmark : addr -> unit Machine.t
+  val set_marks : (addr * bool) list -> unit Machine.t
   val is_marked : addr -> bool Machine.t
   val page_marked : addr -> bool Machine.t
   val stored : addr -> value -> unit Machine.t
@@ -17,4 +18,6 @@ module Make (Machine : Machine) : sig
   val version : int Machine.t
   val cover : 'a Bap_primus_observation.t -> unit Machine.t
   val uncovered : 'a Bap_primus_observation.t -> bool Machine.t
+  val opaque : unit Machine.t
+  val is_opaque : bool Machine.t
 end

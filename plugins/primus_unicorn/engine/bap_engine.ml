@@ -21,6 +21,7 @@ module Lifted = struct
     policy : int;
     delay : string -> [ `None | `Delayed | `Likely | `Forbidden ];
     locate : string -> (int * int * int) option;
+    owner : string -> string option;
     pc : int;
     big_endian : bool;
     bits : int;
@@ -108,6 +109,33 @@ let start ?until ?timeout ?count t pc =
 
 let stop = function Unicorn u -> Uc.stop u | Lifted l -> L.stop l
 let in_atomic = function Unicorn _ -> false | Lifted l -> L.in_atomic l
+
+(* the taint, that the lifted engine propagates, see [Bap_lifted] *)
+let taint_start ?jumps = function
+  | Unicorn _ -> invalid_arg "Unicorn doesn't propagate the taint"
+  | Lifted l -> L.taint_start ?jumps l
+
+let lifted f ~default = function Unicorn _ -> default | Lifted l -> f l
+let taint_stop = lifted L.taint_stop ~default:()
+let taint_active = lifted L.taint_active ~default:false
+let taint_clear = lifted L.taint_clear ~default:()
+
+let taint_labels t classes =
+  lifted (fun l -> L.taint_labels l classes) ~default:() t
+
+let reg_labels t name = lifted (fun l -> L.reg_labels l name) ~default:[] t
+
+let set_reg_labels t name ls =
+  lifted (fun l -> L.set_reg_labels l name ls) ~default:() t
+
+let mem_labels t addr = lifted (fun l -> L.mem_labels l addr) ~default:[] t
+
+let set_mem_labels t addr ls =
+  lifted (fun l -> L.set_mem_labels l addr ls) ~default:() t
+
+let tainted_regs = lifted L.tainted_regs ~default:[]
+let tainted_mem = lifted L.tainted_mem ~default:[]
+let taint_changes = lifted L.taint_changes ~default:([], [])
 let interrupted = Uc.interrupted
 let process_signals = Uc.process_signals
 

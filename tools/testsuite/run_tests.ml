@@ -957,7 +957,7 @@ let unicorn_taint data =
               ("taints the comparison", "tainted jump to 0x83B");
               ("counts the tainted jumps", "tainted 0xB jumps");
             ]))
-    [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
+    [ "bap:stubbed-executor"; "bap:unicorn-executor"; "bap:lifted-executor" ]
 
 (* the code, which the program changes, is decoded anew: the first
    tainted jump of the loop of the CRC changes the jne, that continues
@@ -1097,7 +1097,10 @@ let patched_code data =
             else [])
         in
         lacks env "returns from print" out "Segmentation fault";
-        if taint then
+        (* the lifted engine propagates the taint itself, so it runs the
+           code of the tainted page, whose jumps the interpreter doesn't
+           see, see [Bap_lifted.taint_start] *)
+        if taint && not (String.equal system "bap:lifted-executor") then
           (* the messages of the jumps are among the output *)
           sequence env out
             [
@@ -1110,9 +1113,13 @@ let patched_code data =
         else contains env "prints + from the generated code" out "1489580789+")
   in
   let systems = [ "bap:stubbed-executor"; "bap:unicorn-executor" ] in
-  List.map taint systems @ List.map thumb systems
+  List.map taint (systems @ [ "bap:lifted-executor" ])
+  @ List.map thumb systems
   @ List.map (generated ~taint:false) systems
-  @ [ generated ~taint:true "bap:unicorn-executor" ]
+  @ [
+      generated ~taint:true "bap:unicorn-executor";
+      generated ~taint:true "bap:lifted-executor";
+    ]
   @ List.concat_map
       (fun system -> List.map (fun e -> echo e system) echos)
       systems
@@ -1301,6 +1308,59 @@ let smc data =
           in
           contains env "runs the patched code" out "s 250216 250216"))
     [ "bap:unicorn-executor"; "bap:lifted-executor" ]
+
+(* the taint, that the lifted engine propagates itself, is the one, that
+   the interpreter propagates, by the policy of the computations, and of
+   the moves, through the moves, the arithmetic, the bytes of the words,
+   the copies of the memory, and not the constants, the branches, and the
+   values, that the program writes over, see taint-ops.c *)
+let taint_ops data =
+  let expected = function
+    | "exact" ->
+        "out: 0=input 1=- 2=- 3=- 4=input 5=input 6=- 7=- 8=- 9=- 10=- 11=- \
+         12=- 13=- 14=- 15=- 16=input 17=input 18=input 19=input 20=input \
+         21=input 22=input 23=input 24=input 25=- 26=- 27=-\n\
+         RDI: input\n\
+         RSI: -\n\
+         RDX: -\n\
+         RCX: -\n"
+    | _ ->
+        "out: 0=input 1=input 2=- 3=- 4=input 5=input 6=- 7=- 8=input 9=input \
+         10=input 11=input 12=input 13=input 14=input 15=input 16=input \
+         17=input 18=input 19=input 20=input 21=input 22=input 23=input \
+         24=input 25=- 26=input 27=-\n\
+         RDI: input\n\
+         RSI: input\n\
+         RDX: -\n\
+         RCX: input\n"
+  in
+  List.concat_map
+    (fun policy ->
+      List.map
+        (fun (mode, shadow) ->
+          case
+            ("emu/taint-ops/" ^ policy ^ "/" ^ mode)
+            (fun env ->
+              let out =
+                bap env
+                  ~env:
+                    [
+                      ("BAP_LIFTED_TAINT", shadow);
+                      ( "BAP_PRIMUS_TAINT_DEFAULT_POLICY",
+                        if policy = "exact" then "propagate-exactly"
+                        else "propagate-by-computation" );
+                    ]
+                  [
+                    "script";
+                    input "emu/taint-ops/script.ml";
+                    policy;
+                    path data "bin/x86_64-linux-gnu-taint-ops";
+                  ]
+              in
+              has env "propagates the taint" out (expected policy);
+              has env "exits" out "exited\n"))
+        [ ("lifted", "true"); ("interpreted", "false") ])
+    [ "computation"; "exact" ]
 
 (* the hooks of the memory see the same reads and writes of the
    crc-loop in Unicorn and in the lifted engine, whose loop runs compiled,
@@ -2289,6 +2349,7 @@ let tests =
     calloc;
     taint_bss;
     memory_hooks;
+    taint_ops;
     printf_family;
     mmap;
     pages;

@@ -37,6 +37,9 @@ type config = {
       (** the delay slot of the branch of the bytes *)
   locate : string -> (int * int * int) option;
       (** the register of the engine, and its bits, of the register of BAP *)
+  owner : string -> string option;
+      (** the register of the basis, that holds the register of BAP, e.g., RAX
+          for EAX, whose taint it has, see {!taint_start} *)
   pc : int;  (** the register, that is the program counter *)
   big_endian : bool;  (** the order of the bytes of the memory *)
   bits : int;  (** the size of an address *)
@@ -129,6 +132,46 @@ val trace :
   Bap_unicorn.Trace.t ->
   hook list
 (** [trace t trace] records the trace, as {!Bap_unicorn.trace} does. *)
+
+(** {2 Taint}
+
+    The engine propagates the taint itself, rather than the interpreter, while
+    it is started, as the sets of the labels, e.g., of the tainted objects, of
+    the registers, by the names of their bases, see [config.owner], and of the
+    bytes of the memory. A label propagates through the computations, e.g., the
+    arithmetic, if its class is [`All], through the moves only, e.g., the loads,
+    the stores, the casts, the extractions, and the concatenations, if it is
+    [`Moves], or not at all. The instruction, that reads a tainted register, or
+    accesses the memory, while a byte is tainted, runs in the closures, that
+    propagate it, and the blocks, that the JIT compiled, run, unless they read a
+    tainted register, as their accesses of the tainted pages stop them. The
+    conditions of [Ite] don't taint its value. *)
+
+val taint_start : ?jumps:bool -> t -> unit
+(** [taint_start t] starts the propagation of the taint. With [jumps], the jump,
+    whose condition is tainted, e.g., which its observers see, is unsupported,
+    as the intrinsic of a tainted value always is, see {!on_unsupported}. *)
+
+val taint_stop : t -> unit
+(** [taint_stop t] stops it, and clears the taint *)
+
+val taint_active : t -> bool
+val taint_clear : t -> unit
+
+val taint_labels : t -> (int * [ `All | `Moves | `None ]) list -> unit
+(** [taint_labels t classes] the classes of the labels, the others are [`None]
+*)
+
+val reg_labels : t -> string -> int list
+val set_reg_labels : t -> string -> int list -> unit
+val mem_labels : t -> int64 -> int list
+val set_mem_labels : t -> int64 -> int list -> unit
+val tainted_regs : t -> string list
+val tainted_mem : t -> int64 list
+
+val taint_changes : t -> string list * int64 list
+(** [taint_changes t] the registers and the bytes, whose taint the instructions
+    changed, since it was called last, rather than [set_*_labels] *)
 
 (** {2 Contexts} *)
 

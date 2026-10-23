@@ -25,6 +25,7 @@ type config = {
   policy : int;
   delay : string -> [ `None | `Delayed | `Likely | `Forbidden ];
   locate : string -> (int * int * int) option;
+  owner : string -> string option;
   pc : int;
   big_endian : bool;
   bits : int;
@@ -64,6 +65,17 @@ type page = {
 (* the outcome of an instruction *)
 type next = Next | Jump of int64 | Interrupt_at of int * int64
 
+(* the registers, that the instruction reads, and writes, as the
+   registers, whose taints they have, see [owner], with the writes of the
+   whole registers, if it accesses the memory, and the instruction, that
+   propagates the taint, see [shadow] *)
+type taint_info = {
+  reads : string array;
+  writes : (string * bool) array;
+  memory : bool;
+  shadowed : unit -> next;
+}
+
 (* the instruction, that is lifted, and its bytes, in the mode, e.g.,
    Thumb of ARM *)
 type insn = {
@@ -82,6 +94,7 @@ type insn = {
       (** the modes of ARM, Thumb or not, after the jumps of the instruction to
           the even and to the odd addresses, see [jump] *)
   run : unit -> next;  (** the compiled instruction *)
+  taint : taint_info Lazy.t;  (** see [shadow] *)
 }
 
 (* the block, that the JIT compiled, of the instructions, that start at
@@ -134,6 +147,35 @@ type jit = {
           a block continues with the next one, see [chainable] *)
 }
 
+(* The taint, that the engine propagates itself, rather than the
+   interpreter, see [taint_start]: the sets of the labels, e.g., of the
+   tainted objects, by their numbers, the sets of the registers, by the
+   names of their bases, see [config.owner], and of the bytes of the
+   memory, and the classes of the labels, which tell, if the labels
+   propagate through the computations, e.g., the arithmetic, or only
+   through the moves, e.g., the loads and the stores, or not at all. *)
+type label_class = [ `All | `Moves | `None ]
+
+type shadow = {
+  mutable on : bool;
+  mutable jumps : bool;
+      (** if a jump, whose condition is tainted, is unsupported, e.g., as its
+          observers see it *)
+  mutable sets : Int.Set.t array;  (** the sets by their numbers, 0 is empty *)
+  mutable count : int;
+  ids : (int list, int) Hashtbl.t;
+  unions : (int * int, int) Hashtbl.t;
+  moves : int Int.Table.t;  (** the labels of a set, that the moves keep *)
+  comps : int Int.Table.t;  (** and that the computations keep *)
+  classes : label_class Int.Table.t;
+  sregs : int String.Table.t;  (** the tainted registers *)
+  smem : int Int64.Table.t;  (** the tainted bytes *)
+  spages : int Int64.Table.t;  (** the numbers of the tainted bytes of pages *)
+  dirty_regs : String.Hash_set.t;  (** the changes since [taint_changes] *)
+  dirty_mem : Int64.Hash_set.t;
+  mutable cur : int;  (** the taint of the value, that was computed last *)
+}
+
 type t = {
   config : config;
   arch : Uc.arch;
@@ -180,6 +222,7 @@ type t = {
   mutable stale : int64 list;
       (** the blocks, whose code was written, which are dropped, before the next
           block runs, see [drop_stale] *)
+  shadow : shadow;
 }
 
 exception Fault of Uc.access * int64
@@ -316,6 +359,24 @@ let create config arch mode =
       linked = None;
       stale = [];
       unsupported = 0;
+      shadow =
+        {
+          on = false;
+          jumps = false;
+          sets = Array.create ~len:16 Int.Set.empty;
+          count = 1;
+          ids = Hashtbl.Poly.create ();
+          unions = Hashtbl.Poly.create ();
+          moves = Int.Table.create ();
+          comps = Int.Table.create ();
+          classes = Int.Table.create ();
+          sregs = String.Table.create ();
+          smem = Int64.Table.create ();
+          spages = Int64.Table.create ();
+          dirty_regs = String.Hash_set.create ();
+          dirty_mem = Int64.Hash_set.create ();
+          cur = 0;
+        };
       jit =
         (if Sys.big_endian || not config.jit then None
          else
@@ -476,8 +537,10 @@ let effective t page (perm : Uc.Perm.t) =
         | _ -> false)
   in
   let perm = (perm :> int) in
-  let perm = if hooked `read then perm land lnot 1 else perm in
-  if hooked `write then perm land lnot 2 else perm
+  (* the tainted bytes are accessed by the closures, see [shadow] *)
+  let tainted = t.shadow.on && Hashtbl.mem t.shadow.spages page in
+  let perm = if tainted || hooked `read then perm land lnot 1 else perm in
+  if tainted || hooked `write then perm land lnot 2 else perm
 
 let mem_map t addr size perm =
   check t;
@@ -516,6 +579,116 @@ let mem_protect t addr size perm =
       | None -> error 11 "Invalid memory mapping (UC_ERR_NOMEM)")
 
 let offset addr = Int64.(to_int_exn (addr - page_of addr))
+
+(* the sets of the labels of the taint, see [shadow] *)
+let set_id s (labels : Int.Set.t) =
+  if Set.is_empty labels then 0
+  else
+    let key = Set.to_list labels in
+    match Hashtbl.find s.ids key with
+    | Some i -> i
+    | None ->
+        let i = s.count in
+        if i = Array.length s.sets then begin
+          let sets = Array.create ~len:(2 * i) Int.Set.empty in
+          Array.blit ~src:s.sets ~src_pos:0 ~dst:sets ~dst_pos:0 ~len:i;
+          s.sets <- sets
+        end;
+        s.sets.(i) <- labels;
+        s.count <- i + 1;
+        Hashtbl.set s.ids ~key ~data:i;
+        i
+
+let union s a b =
+  if a = 0 || a = b then b
+  else if b = 0 then a
+  else
+    let key = if a < b then (a, b) else (b, a) in
+    match Hashtbl.find s.unions key with
+    | Some i -> i
+    | None ->
+        let i = set_id s (Set.union s.sets.(a) s.sets.(b)) in
+        Hashtbl.set s.unions ~key ~data:i;
+        i
+
+let filter s memo keep a =
+  if a = 0 then 0
+  else
+    match Hashtbl.find memo a with
+    | Some i -> i
+    | None ->
+        let i =
+          set_id s
+            (Set.filter s.sets.(a) ~f:(fun l ->
+                 keep (Option.value (Hashtbl.find s.classes l) ~default:`None)))
+        in
+        Hashtbl.set memo ~key:a ~data:i;
+        i
+
+(* the labels, that the moves, e.g., the loads, and the computations,
+   e.g., the arithmetic, propagate *)
+let moves s a =
+  filter s s.moves (function `All | `Moves -> true | `None -> false) a
+
+let comps s a = filter s s.comps (function `All -> true | _ -> false) a
+
+(* the register, whose taint the register of BAP has *)
+let owner t name = Option.value (t.config.owner name) ~default:name
+
+let reg_taint t name =
+  if Hashtbl.is_empty t.shadow.sregs then 0
+  else Option.value (Hashtbl.find t.shadow.sregs name) ~default:0
+
+let set_reg_taint_id ?(dirty = true) t name id =
+  let s = t.shadow in
+  if reg_taint t name <> id then begin
+    if id = 0 then Hashtbl.remove s.sregs name
+    else Hashtbl.set s.sregs ~key:name ~data:id;
+    if dirty then Hash_set.add s.dirty_regs name
+  end
+
+let mem_taint t addr =
+  if Hashtbl.is_empty t.shadow.smem then 0
+  else Option.value (Hashtbl.find t.shadow.smem addr) ~default:0
+
+let reprotect t page =
+  Option.iter t.jit ~f:(fun j ->
+      Option.iter (Hashtbl.find t.pages page) ~f:(fun p ->
+          Bap_lifted_jit.Runtime.protect j.mem page (effective t page p.perm)))
+
+(* the tainted pages are accessed by the closures, see [effective] *)
+let set_mem_taint_id ?(dirty = true) t addr id =
+  let s = t.shadow in
+  let old = mem_taint t addr in
+  if old <> id then begin
+    if id = 0 then Hashtbl.remove s.smem addr
+    else Hashtbl.set s.smem ~key:addr ~data:id;
+    if dirty then Hash_set.add s.dirty_mem addr;
+    let delta = (if id = 0 then 0 else 1) - if old = 0 then 0 else 1 in
+    if delta <> 0 then begin
+      let page = page_of addr in
+      let n = Option.value (Hashtbl.find s.spages page) ~default:0 + delta in
+      if n = 0 then Hashtbl.remove s.spages page
+      else Hashtbl.set s.spages ~key:page ~data:n;
+      if n = 0 || (n = 1 && delta > 0) then reprotect t page
+    end
+  end
+
+(* the changes of the taint of an instruction, which are undone, if it
+   faults *)
+let write_reg_taint t name id =
+  let old = reg_taint t name in
+  if old <> id then begin
+    t.undo <- (fun () -> set_reg_taint_id t name old) :: t.undo;
+    set_reg_taint_id t name id
+  end
+
+let write_mem_taint t addr id =
+  let old = mem_taint t addr in
+  if old <> id then begin
+    t.undo <- (fun () -> set_mem_taint_id t addr old) :: t.undo;
+    set_mem_taint_id t addr id
+  end
 
 (* the bytes of the memory, regardless of the permissions *)
 let mem_read t addr n =
@@ -783,7 +956,8 @@ let store t addr data value =
 type value =
   | S of int * int64  (** the width and the bits *)
   | W of word
-  | Memory of (int64 * value * endian * size) list
+  | Memory of (int64 * value * endian * size * int) list
+      (** the stores, with the taints of their values, see [shadow] *)
 
 let mask w = if w >= 64 then -1L else Int64.((1L lsl w) - 1L)
 let norm w x = Int64.(x land mask w)
@@ -935,11 +1109,14 @@ let load_value t stores addr endian size =
   let n = Size.in_bytes size in
   (* the stores of the expression, that aren't done yet, the latest first *)
   let pending =
-    List.find stores ~f:(fun (a, _, _, s) ->
+    List.find stores ~f:(fun (a, _, _, s, _) ->
         Int64.equal a addr && Size.equal s size)
   in
+  let sh = t.shadow in
   match pending with
-  | Some (_, x, _, _) -> x
+  | Some (_, x, _, _, taint) ->
+      if sh.on then sh.cur <- moves sh taint;
+      x
   | None ->
       (* the hooks see a read once, as in Unicorn *)
       let again = read_again t addr n in
@@ -951,6 +1128,14 @@ let load_value t stores addr endian size =
       let x = value_of_bytes endian (load t addr n) in
       if not again then mem_hooks t Read_after addr n (bits x);
       trace_access t ~write:false addr n (bits x) 0L;
+      if sh.on then begin
+        let taint = ref 0 in
+        if not (Hashtbl.is_empty sh.smem) then
+          for i = 0 to n - 1 do
+            taint := union sh !taint (mem_taint t Int64.(addr + of_int i))
+          done;
+        sh.cur <- moves sh !taint
+      end;
       x
 
 let addr_of v = bits v
@@ -999,6 +1184,10 @@ type ctx = {
   mutable lets : (string * int) list;  (** the innermost first *)
   mutable size : int;
   env : value array ref;
+  sh : shadow option;
+      (** if the closures propagate the taint, see [shadow], whose taints of the
+          virtual variables are in [senv] *)
+  senv : int array ref;
 }
 
 let fresh ctx =
@@ -1013,7 +1202,31 @@ let slot ctx name =
 
 let unsupported_now reason () = raise (Unsupported_insn reason)
 
-let read_var ctx v : unit -> value =
+let rec read_var ctx v : unit -> value =
+  match ctx.sh with
+  | None -> read_value ctx v
+  | Some s -> (
+      let f = read_value ctx v in
+      let name = Var.name v in
+      if Var.is_virtual v || List.Assoc.mem ctx.lets name ~equal:String.equal
+      then (
+        let i = slot ctx name and senv = ctx.senv in
+        fun () ->
+          s.cur <- !senv.(i);
+          f ())
+      else
+        match Var.typ v with
+        | Mem _ ->
+            fun () ->
+              s.cur <- 0;
+              f ()
+        | _ ->
+            let t = ctx.t and key = owner ctx.t name in
+            fun () ->
+              s.cur <- reg_taint t key;
+              f ())
+
+and read_value ctx v : unit -> value =
   let t = ctx.t and env = ctx.env in
   let name = Var.name v in
   if Var.is_virtual v || List.Assoc.mem ctx.lets name ~equal:String.equal then
@@ -1039,7 +1252,7 @@ let read_var ctx v : unit -> value =
 
 let write_stores t stores =
   (* the stores to the memory, in their order *)
-  List.iter (List.rev stores) ~f:(fun (addr, x, endian, size) ->
+  List.iter (List.rev stores) ~f:(fun (addr, x, endian, size, taint) ->
       let n = Size.in_bytes size in
       let data = bytes_of_value endian x in
       mem_hooks t Write addr n (bits x);
@@ -1054,9 +1267,40 @@ let write_stores t stores =
           | exception Uc.Error _ -> 0L
       in
       trace_access t ~write:true addr n (bits x) old;
-      store t addr data 0L)
+      store t addr data 0L;
+      let sh = t.shadow in
+      if sh.on && (taint <> 0 || not (Hashtbl.is_empty sh.smem)) then begin
+        let taint = moves sh taint in
+        for i = 0 to n - 1 do
+          write_mem_taint t Int64.(addr + of_int i) taint
+        done
+      end)
 
-let write_var ctx v : value -> unit =
+let rec write_var ctx v : value -> unit =
+  match ctx.sh with
+  | None -> write_value ctx v
+  | Some s ->
+      let f = write_value ctx v in
+      let name = Var.name v in
+      if Var.is_virtual v then (
+        let i = slot ctx name and senv = ctx.senv in
+        fun x ->
+          (match x with Memory _ -> () | _ -> !senv.(i) <- s.cur);
+          f x)
+      else
+        let t = ctx.t and key = owner ctx.t name in
+        (* the write of a part of the register keeps the taint of the
+           rest of it *)
+        let full = String.equal key name in
+        fun x ->
+          (match x with
+          | Memory _ -> ()
+          | _ ->
+              write_reg_taint t key
+                (if full then s.cur else union s (reg_taint t key) s.cur));
+          f x
+
+and write_value ctx v : value -> unit =
   let t = ctx.t and env = ctx.env in
   let name = Var.name v in
   let other value =
@@ -1121,7 +1365,13 @@ let write_var ctx v : value -> unit =
             Bytes.From_string.blit ~src:(host_bytes size x) ~src_pos:0 ~dst:b
               ~dst_pos:0 ~len:size)
 
-let rec compile_exp ctx : exp -> unit -> value = function
+let rec compile_exp ctx : exp -> unit -> value =
+ fun exp ->
+  match ctx.sh with
+  | None -> compile_plain ctx exp
+  | Some s -> compile_tainted ctx s exp
+
+and compile_plain ctx : exp -> unit -> value = function
   | Var v -> read_var ctx v
   | Int x ->
       let r = of_word x in
@@ -1142,7 +1392,7 @@ let rec compile_exp ctx : exp -> unit -> value = function
         let a = addr_of (addr ()) in
         let x = x () in
         match mem () with
-        | Memory stores -> Memory ((a, x, endian, size) :: stores)
+        | Memory stores -> Memory ((a, x, endian, size, 0) :: stores)
         | _ -> raise (Unsupported_insn "a store to a value"))
   | BinOp (op, x, y) -> (
       let x = compile_exp ctx x and y = compile_exp ctx y in
@@ -1190,6 +1440,106 @@ let rec compile_exp ctx : exp -> unit -> value = function
       let x = compile_exp ctx x and y = compile_exp ctx y in
       fun () -> concat (x ()) (y ())
 
+(* the expression, that computes its value, and its taint in [s.cur],
+   as the policies of the taint propagate it, see [moves] and [comps]:
+   the conditions of [Ite] don't taint its value, as in the interpreter,
+   whose [ite] returns the value of a branch *)
+and compile_tainted ctx s : exp -> unit -> value = function
+  | Var v -> read_var ctx v
+  | Int x ->
+      let r = of_word x in
+      fun () ->
+        s.cur <- 0;
+        r
+  | Load (mem, addr, endian, size) -> (
+      let t = ctx.t in
+      let mem = compile_exp ctx mem and addr = compile_exp ctx addr in
+      fun () ->
+        let a = addr_of (addr ()) in
+        match mem () with
+        | Memory stores -> load_value t stores a endian size
+        | _ -> raise (Unsupported_insn "a load from a value"))
+  | Store (mem, addr, x, endian, size) -> (
+      let mem = compile_exp ctx mem
+      and addr = compile_exp ctx addr
+      and x = compile_exp ctx x in
+      fun () ->
+        let a = addr_of (addr ()) in
+        let x = x () in
+        let taint = s.cur in
+        match mem () with
+        | Memory stores ->
+            s.cur <- 0;
+            Memory ((a, x, endian, size, taint) :: stores)
+        | _ -> raise (Unsupported_insn "a store to a value"))
+  | BinOp (op, x, y) ->
+      let x = compile_exp ctx x and y = compile_exp ctx y in
+      let apply =
+        match op with
+        | DIVIDE | SDIVIDE | MOD | SMOD ->
+            fun a b ->
+              if is_zero b then raise (Unsupported_insn "a division by zero")
+              else binop op a b
+        | _ -> binop op
+      in
+      fun () ->
+        let a = x () in
+        let ta = s.cur in
+        let b = y () in
+        let r = apply a b in
+        s.cur <- comps s (union s ta s.cur);
+        r
+  | UnOp (op, x) ->
+      let x = compile_exp ctx x in
+      fun () ->
+        let a = x () in
+        s.cur <- comps s s.cur;
+        unop op a
+  | Cast (kind, n, x) ->
+      let x = compile_exp ctx x in
+      fun () ->
+        let a = x () in
+        s.cur <- moves s s.cur;
+        cast kind n a
+  | Let (v, x, body) ->
+      let x = compile_exp ctx x in
+      let i = fresh ctx in
+      ctx.lets <- (Var.name v, i) :: ctx.lets;
+      let body = compile_exp ctx body in
+      ctx.lets <- List.tl_exn ctx.lets;
+      let env = ctx.env and senv = ctx.senv in
+      fun () ->
+        !env.(i) <- x ();
+        !senv.(i) <- s.cur;
+        body ()
+  | Unknown (_, typ) -> (
+      match typ with
+      | Imm n ->
+          let r = small n 0L in
+          fun () ->
+            s.cur <- 0;
+            r
+      | _ -> unsupported_now "an unknown value")
+  | Ite (c, x, y) ->
+      let c = compile_exp ctx c
+      and x = compile_exp ctx x
+      and y = compile_exp ctx y in
+      fun () -> if is_zero (c ()) then y () else x ()
+  | Extract (hi, lo, x) ->
+      let x = compile_exp ctx x in
+      fun () ->
+        let a = x () in
+        s.cur <- moves s s.cur;
+        extract ~hi ~lo a
+  | Concat (x, y) ->
+      let x = compile_exp ctx x and y = compile_exp ctx y in
+      fun () ->
+        let a = x () in
+        let ta = s.cur in
+        let b = y () in
+        s.cur <- moves s (union s ta s.cur);
+        concat a b
+
 (* the intrinsics of IEEE 754, e.g., intrinsic:fadd_rne_ieee754_binary_64,
    whose operands are intrinsic:x0, ..., and whose result is intrinsic:y0,
    as the Primus Lisp program of ieee754-intrinsics.lisp runs them *)
@@ -1236,12 +1586,20 @@ let compile_intrinsic ctx tid : unit -> unit =
           fun () ->
             let args =
               List.map args ~f:(fun arg ->
-                  let x = Word.extract_exn ~hi:(src - 1) (word (arg ())) in
+                  let x = arg () in
+                  (* the interpreter propagates the taint of the
+                     intrinsic, as it runs its program *)
+                  (match ctx.sh with
+                  | Some s when s.cur <> 0 ->
+                      raise (Unsupported_insn ("the tainted " ^ name))
+                  | _ -> ());
+                  let x = Word.extract_exn ~hi:(src - 1) (word x) in
                   Bitvec.to_bigint (Word.to_bitvec x))
             in
             match F.apply ~op ~rm ~src ~dst policy args with
             | None -> raise (Unsupported_insn ("the intrinsic " ^ name))
             | Some x ->
+                Option.iter ctx.sh ~f:(fun s -> s.cur <- 0);
                 result (of_word (Word.create (Bitvec.bigint_unsafe x) dst))))
 
 (* the block, that the first block only jumps to, and the others jump
@@ -1274,9 +1632,17 @@ let loop_head (blks : blk term list) =
       | _ -> None)
 
 (* the instruction, whose blocks run from the first one *)
-let compile t ~pc ~next (blks : blk term list) : unit -> next =
+let compile ?shadow t ~pc ~next (blks : blk term list) : unit -> next =
   let ctx =
-    { t; slots = String.Table.create (); lets = []; size = 0; env = ref [||] }
+    {
+      t;
+      slots = String.Table.create ();
+      lets = [];
+      size = 0;
+      env = ref [||];
+      sh = shadow;
+      senv = ref [||];
+    }
   in
   let blks = Array.of_list blks in
   let index tid = Array.findi blks ~f:(fun _ b -> Tid.equal (Term.tid b) tid) in
@@ -1354,9 +1720,18 @@ let compile t ~pc ~next (blks : blk term list) : unit -> next =
       let rec jump = function
         (* falls through to the next block of the instruction, if any *)
         | [] -> fun () -> run (i + 1)
-        | (cond, target) :: rest ->
+        | (cond, target) :: rest -> (
             let rest = jump rest in
-            fun () -> if is_zero (cond ()) then rest () else target ()
+            match ctx.sh with
+            | None -> fun () -> if is_zero (cond ()) then rest () else target ()
+            | Some s ->
+                (* the jump, whose condition is tainted, which its
+                   observers see, is interpreted *)
+                fun () ->
+                  let c = cond () in
+                  if s.jumps && s.cur <> 0 then
+                    raise (Unsupported_insn "a jump on a tainted condition");
+                  if is_zero c then rest () else target ())
       in
       let jumps = jump jumps in
       codes.(i) <-
@@ -1364,7 +1739,54 @@ let compile t ~pc ~next (blks : blk term list) : unit -> next =
           Array.iter defs ~f:(fun def -> def ());
           jumps ()));
   ctx.env := Array.create ~len:ctx.size (S (1, 0L));
+  ctx.senv := Array.create ~len:ctx.size 0;
   fun () -> run 0
+
+let taint_info t ~pc ~next blks =
+  let defs = List.concat_map blks ~f:(fun b -> Term.enum def_t b |> Seq.to_list)
+  and jmps =
+    List.concat_map blks ~f:(fun b -> Term.enum jmp_t b |> Seq.to_list)
+  in
+  let exps =
+    List.map defs ~f:Def.rhs
+    @ List.concat_map jmps ~f:(fun jmp ->
+        Jmp.cond jmp
+        :: List.filter_map
+             ( Jmp.kind jmp |> function
+               | Goto l | Ret l -> [ Some l ]
+               | Call c -> [ Some (Call.target c); Call.return c ]
+               | Int _ -> [] )
+             ~f:(function Some (Indirect e) -> Some e | _ -> None))
+  in
+  let registers vars =
+    List.filter vars ~f:(fun v ->
+        (not (Var.is_virtual v))
+        && match Var.typ v with Imm _ -> true | _ -> false)
+  in
+  let free = List.concat_map exps ~f:(fun e -> Set.to_list (Exp.free_vars e)) in
+  let reads =
+    registers free
+    |> List.map ~f:(fun v -> owner t (Var.name v))
+    |> List.dedup_and_sort ~compare:String.compare
+    |> Array.of_list
+  and writes =
+    registers (List.map defs ~f:Def.lhs)
+    |> List.map ~f:(fun v ->
+        let key = owner t (Var.name v) in
+        (key, String.equal key (Var.name v)))
+    |> List.dedup_and_sort ~compare:Poly.compare
+    |> Array.of_list
+  and memory =
+    List.exists
+      (free @ List.map defs ~f:Def.lhs)
+      ~f:(fun v -> match Var.typ v with Mem _ -> true | _ -> false)
+  in
+  {
+    reads;
+    writes;
+    memory;
+    shadowed = compile ~shadow:t.shadow t ~pc ~next blks;
+  }
 
 (* the bytes of the instruction at [pc], at most [max] of them, which
    the instruction may fetch *)
@@ -1407,63 +1829,83 @@ let may_jump blks =
           | Goto (Direct tid) | Ret (Direct tid) -> not (internal tid)
           | _ -> true))
 
+(* if the bytes of the instruction, that are on the page of [pc], are
+   its code, as [fetch] would read them *)
+let same_code t pc (insn : insn) =
+  let p = page_for t `fetch pc 1 0L in
+  let off = offset pc and n = String.length insn.code in
+  off + n <= Int64.to_int_exn page_size
+  &&
+  let rec same i =
+    i = n
+    || Char.equal (Bigstring.get p.data (off + i)) insn.code.[i]
+       && same (i + 1)
+  in
+  same 0
+
 let lifted t pc =
-  let code = fetch t pc in
   let thumb = thumb t in
   match Hashtbl.find t.insns pc with
-  | Some insn
-    when Bool.equal insn.thumb thumb && String.is_prefix code ~prefix:insn.code
-    ->
+  | Some insn when Bool.equal insn.thumb thumb && same_code t pc insn ->
       Some insn
-  | _ -> (
-      incr lifted_count;
-      match timed lift_time (fun () -> t.config.lift ~thumb pc code) with
-      | None -> None
-      | Some (size, name, blks) ->
-          (* the jumps of ARM tell the mode, see [Primus.Interworking] *)
-          let blks =
-            match t.arch with
-            | Arm -> Bap_primus.Std.Primus.Interworking.unmask blks
-            | _ -> blks
-          in
-          let next = Int64.(pc + of_int size) in
-          let insn =
-            {
-              code = String.prefix code size;
-              size;
-              name;
-              thumb;
-              blks;
-              jumps = may_jump blks;
-              atomic =
-                (if load_linked name then `Load
-                 else if store_conditional name then `Store
-                 else `None);
-              (* IT, rather than a hint, whose mask is zero *)
-              it =
-                (if
-                   thumb && size = 2
-                   && Char.equal code.[1] '\xBF'
-                   && Char.to_int code.[0] land 0xF <> 0
-                 then Some (Char.to_int code.[0])
-                 else None);
-              modes =
-                (match t.arch with
-                | Arm ->
-                    let width = t.config.bits in
-                    let mode dst =
-                      snd
-                        (Bap_primus.Std.Primus.Interworking.jump ~name ~thumb
-                           ~next:(Word.of_int64 ~width next)
-                           blks (Word.of_int64 ~width dst))
-                    in
-                    Some (mode Int64.(next + 4L), mode Int64.(next + 5L))
-                | _ -> None);
-              run = compile t ~pc ~next blks;
-            }
-          in
-          Hashtbl.set t.insns ~key:pc ~data:insn;
-          Some insn)
+  | cached -> (
+      let code = fetch t pc in
+      match cached with
+      | Some insn
+        when Bool.equal insn.thumb thumb
+             && String.is_prefix code ~prefix:insn.code ->
+          Some insn
+      | _ -> (
+          incr lifted_count;
+          match timed lift_time (fun () -> t.config.lift ~thumb pc code) with
+          | None -> None
+          | Some (size, name, blks) ->
+              (* the jumps of ARM tell the mode, see [Primus.Interworking] *)
+              let blks =
+                match t.arch with
+                | Arm -> Bap_primus.Std.Primus.Interworking.unmask blks
+                | _ -> blks
+              in
+              let next = Int64.(pc + of_int size) in
+              let insn =
+                {
+                  code = String.prefix code size;
+                  size;
+                  name;
+                  thumb;
+                  blks;
+                  jumps = may_jump blks;
+                  atomic =
+                    (if load_linked name then `Load
+                     else if store_conditional name then `Store
+                     else `None);
+                  (* IT, rather than a hint, whose mask is zero *)
+                  it =
+                    (if
+                       thumb && size = 2
+                       && Char.equal code.[1] '\xBF'
+                       && Char.to_int code.[0] land 0xF <> 0
+                     then Some (Char.to_int code.[0])
+                     else None);
+                  modes =
+                    (match t.arch with
+                    | Arm ->
+                        let width = t.config.bits in
+                        let mode dst =
+                          snd
+                            (Bap_primus.Std.Primus.Interworking.jump ~name
+                               ~thumb
+                               ~next:(Word.of_int64 ~width next)
+                               blks (Word.of_int64 ~width dst))
+                        in
+                        Some (mode Int64.(next + 4L), mode Int64.(next + 5L))
+                    | _ -> None);
+                  run = compile t ~pc ~next blks;
+                  taint = lazy (taint_info t ~pc ~next blks);
+                }
+              in
+              Hashtbl.set t.insns ~key:pc ~data:insn;
+              Some insn))
 
 (* the target of the jump of the instruction, and its mode on ARM *)
 (* the target of the jump, whose mode, after the jump, is the one, that
@@ -1885,6 +2327,42 @@ let link_flags (b : block) =
       lor (if even then 2 else 0)
       lor if odd then 4 else 0
 
+(* the instruction, that reads a tainted register, or accesses the
+   memory, while a byte is tainted, propagates the taint, and the others
+   untaint the whole registers, that they write *)
+let run_insn t (insn : insn) =
+  let s = t.shadow in
+  if not s.on then insn.run ()
+  else
+    let info = Lazy.force insn.taint in
+    if
+      Array.exists info.reads ~f:(fun r -> reg_taint t r <> 0)
+      || (info.memory && not (Hashtbl.is_empty s.smem))
+    then info.shadowed ()
+    else
+      let r = insn.run () in
+      if not (Hashtbl.is_empty s.sregs) then
+        Array.iter info.writes ~f:(fun (r, whole) ->
+            if whole then set_reg_taint_id t r 0);
+      r
+
+(* the block, whose instructions read no tainted register, runs
+   compiled, as its accesses of the tainted pages stop it, see
+   [effective] *)
+let untainted t (b : block) =
+  let s = t.shadow in
+  (not s.on) || Hashtbl.is_empty s.sregs
+  || Array.for_all b.insns ~f:(fun insn ->
+      Array.for_all (Lazy.force insn.taint).reads ~f:(fun r ->
+          reg_taint t r = 0))
+
+let untaint_writes t (b : block) k =
+  if t.shadow.on && not (Hashtbl.is_empty t.shadow.sregs) then
+    for i = 0 to k - 1 do
+      Array.iter (Lazy.force b.insns.(i).taint).writes ~f:(fun (r, whole) ->
+          if whole then set_reg_taint_id t r 0)
+    done
+
 let exec ?until ?count t j (b : block) pc n =
   (* the instructions, that ran, are recorded, after they ran, in their
      order, as the closures record them *)
@@ -1895,6 +2373,7 @@ let exec ?until ?count t j (b : block) pc n =
         t.ran <- t.ran + 1
       done
     else t.ran <- t.ran + k;
+    untaint_writes t b k;
     (* the IT state after the instructions, whose IT blocks the block
        ran, whose conditions are in their semantics *)
     if b.has_it then
@@ -1917,7 +2396,7 @@ let exec ?until ?count t j (b : block) pc n =
     b.chained <- true
   end;
   Bap_lifted_jit.Runtime.limits j.mem
-    (b.chained && not j.traced)
+    (b.chained && (not j.traced) && Hashtbl.is_empty t.shadow.sregs)
     (match count with
     | Some c -> Int.min (c - n) max_chained
     | None -> max_chained)
@@ -1996,10 +2475,10 @@ let fast_block t j pc ~until ~count n =
          && (not (j.traced && b.has_it))
          && Bool.equal b.insns.(0).thumb (thumb t)
          && (not (Option.exists count ~f:(fun c -> n + Array.length b.pcs > c)))
-         && not
-              (Option.exists until ~f:(fun u ->
-                   Array.existsi b.pcs ~f:(fun i a -> i > 0 && Int64.equal a u)))
-    ->
+         && (not
+               (Option.exists until ~f:(fun u ->
+                    Array.existsi b.pcs ~f:(fun i a -> i > 0 && Int64.equal a u))))
+         && untainted t b ->
       exec ?until ?count t j b pc n
   | _ -> None
 
@@ -2020,7 +2499,9 @@ let run_block t j insn pc ~until ~count n =
       None
   (* the traces record the instructions of the IT blocks of Thumb, whose
      conditions fail, which the closures skip, see [skipped] *)
-  | Some (Compiled b) when itstate t <> 0 || (j.traced && b.has_it) -> None
+  | Some (Compiled b)
+    when itstate t <> 0 || (j.traced && b.has_it) || not (untainted t b) ->
+      None
   | Some (Compiled b) ->
       let length = Array.length b.pcs in
       if not (phys_equal b.insns.(0) insn) then (
@@ -2133,7 +2614,7 @@ let start ?until ?timeout ?count t pc =
                     let next = Int64.(pc + of_int insn.size) in
                     trace_insn t pc insn.size insn.thumb;
                     t.undo <- [];
-                    match insn.run () with
+                    match run_insn t insn with
                     | outcome -> (
                         t.undo <- [];
                         link t insn;
@@ -2260,6 +2741,65 @@ let trace ?first ?last ?(memory = false) t trace =
 
 let on_mem_invalid ?first ?last t accesses kinds f =
   add t ?first ?last (Mem_invalid (invalid_accesses accesses kinds, f))
+
+(* the taint, see [shadow] *)
+
+let reprotect_all t =
+  Hashtbl.iter_keys t.pages ~f:(fun page -> reprotect t page)
+
+let taint_clear t =
+  let s = t.shadow in
+  let pages = Hashtbl.keys s.spages in
+  Hashtbl.clear s.sregs;
+  Hashtbl.clear s.smem;
+  Hashtbl.clear s.spages;
+  Hash_set.clear s.dirty_regs;
+  Hash_set.clear s.dirty_mem;
+  List.iter pages ~f:(reprotect t)
+
+let taint_start ?(jumps = false) t =
+  let s = t.shadow in
+  s.jumps <- jumps;
+  if not s.on then begin
+    s.on <- true;
+    reprotect_all t
+  end
+
+let taint_stop t =
+  taint_clear t;
+  t.shadow.on <- false;
+  reprotect_all t
+
+let taint_active t = t.shadow.on
+
+let taint_labels t classes =
+  let s = t.shadow in
+  Hashtbl.clear s.classes;
+  List.iter classes ~f:(fun (l, c) -> Hashtbl.set s.classes ~key:l ~data:c);
+  Hashtbl.clear s.moves;
+  Hashtbl.clear s.comps
+
+let labels t id = Set.to_list t.shadow.sets.(id)
+let reg_labels t name = labels t (reg_taint t name)
+
+let set_reg_labels t name ls =
+  set_reg_taint_id ~dirty:false t name (set_id t.shadow (Int.Set.of_list ls))
+
+let mem_labels t addr = labels t (mem_taint t addr)
+
+let set_mem_labels t addr ls =
+  set_mem_taint_id ~dirty:false t addr (set_id t.shadow (Int.Set.of_list ls))
+
+let tainted_regs t = Hashtbl.keys t.shadow.sregs
+let tainted_mem t = Hashtbl.keys t.shadow.smem
+
+let taint_changes t =
+  let s = t.shadow in
+  let regs = Hash_set.to_list s.dirty_regs
+  and mem = Hash_set.to_list s.dirty_mem in
+  Hash_set.clear s.dirty_regs;
+  Hash_set.clear s.dirty_mem;
+  (regs, mem)
 
 type context = (int * string) list * (string * word) list
 

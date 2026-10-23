@@ -204,6 +204,8 @@ type engine = {
   mutable tracer : Uc.hook option;
       (** the hook of every address, while a register is tracked *)
   mutable seen : int;  (** the version of [Primus.Track], that is seen *)
+  mutable shadowing : bool;
+      (** if the lifted engine propagates the taint, see [Make.Shadow] *)
 }
 
 (* the events of the code, that the observers of the machine see, which
@@ -1207,7 +1209,7 @@ let create session target ~foreign ~externals =
   in
   (* the registers of BAP, that the lifted engine runs, are located, when
      the engine is created, see [regs] *)
-  let locate = ref (fun _ -> None) in
+  let locate = ref (fun _ -> None) and owner = ref (fun _ -> None) in
   let uc =
     match session.lifter with
     | Some (lift, name, _) when session.lifted ->
@@ -1218,6 +1220,7 @@ let create session target ~foreign ~externals =
             policy = ieee754_policy target;
             delay = delay_of target arch;
             locate = (fun name -> !locate name);
+            owner = (fun name -> !owner name);
             pc = Target.pc arch mode;
             big_endian =
               Theory.Endianness.(equal eb) (Theory.Target.endianness target);
@@ -1274,6 +1277,7 @@ let create session target ~foreign ~externals =
   | _ -> ());
   let regs = Target.Regs.create target arch uc in
   (locate := fun name -> Target.Regs.locate regs name);
+  (owner := fun name -> Target.Regs.owner regs name);
   let sp =
     match reg_of_role target Theory.Role.Register.stack_pointer with
     | Some sp -> sp
@@ -1319,6 +1323,7 @@ let create session target ~foreign ~externals =
       clobbered = [];
       tracer = None;
       seen = -1;
+      shadowing = false;
     }
   in
   let base = trampolines_base target in
@@ -1783,6 +1788,169 @@ module Make (Machine : Primus.Machine.S) = struct
   (* the session of the system, see [Loader.init] *)
   let session = Machine.Global.get session_state
 
+  (* The taint, that the lifted engine propagates itself, see
+     [Bap_lifted.taint_start], rather than the interpreter, while one
+     policy of the taint declares its propagation, see
+     [Taint.Propagation.Policy.shadow], and no observer needs the
+     interpreter, e.g., of the attached taint, or of its garbage. The
+     taint of the registers and of the memory goes to the engine, when
+     the taint of Primus changes, see [tracking], or Primus writes the
+     registers, see [push_vars], and back to Primus, when it gets the
+     registers, see [pull_regs]. The objects of the taint are the labels
+     of the engine, by their numbers. BAP_LIFTED_TAINT=false leaves the
+     tainted code to the interpreter, as Unicorn does. *)
+  module Shadow = struct
+    module T = Bap_taint.Std.Taint
+    module Tracker = T.Tracker.Make (Machine)
+    module Objects = T.Object.Make (Machine)
+    module Policy = T.Propagation.Policy.Make (Machine)
+
+    let enabled =
+      not
+        (Option.equal String.equal
+           (Sys.getenv "BAP_LIFTED_TAINT")
+           (Some "false"))
+
+    let label o =
+      Objects.to_value o >>| fun v -> Word.to_int_exn (Primus.Value.to_word v)
+
+    let labels objs = Machine.List.map (Set.to_list objs) ~f:label
+
+    let objects ls =
+      Machine.List.map ls ~f:(fun l ->
+          Value.of_word (Word.of_int ~width:63 l) >>= Objects.of_value)
+      >>| T.Object.Set.of_list
+
+    (* starts or stops the propagation of the engine *)
+    let decide (e : engine) =
+      if not (e.session.lifted && enabled) then Machine.return false
+      else
+        let observed = Machine.Observation.observed in
+        let* attached = observed T.attached in
+        let* finalized = observed T.Gc.taint_finalize in
+        let* jumps = observed Primus.Interpreter.jumping in
+        let* opaque = Track.is_opaque in
+        let+ shadows = Policy.shadows in
+        let on =
+          (not attached) && (not finalized) && (not opaque)
+          && List.length shadows = 1
+        in
+        if on then Uc.taint_start ~jumps e.uc else Uc.taint_stop e.uc;
+        e.shadowing <- on;
+        on
+
+    let classes objs =
+      let* shadows = Policy.shadows in
+      Machine.List.map (Set.to_list objs) ~f:(fun o ->
+          let* kind = Objects.kind o in
+          let* l = label o in
+          let+ c =
+            Machine.List.fold shadows ~init:`None ~f:(fun c (p, c') ->
+                match c with
+                | `None ->
+                    Policy.selected p kind >>| fun selected ->
+                    if selected then (c' :> [ `All | `Moves | `None ])
+                    else `None
+                | c -> Machine.return c)
+          in
+          (l, c))
+
+    let owner (e : engine) v =
+      Option.value (Target.Regs.owner e.regs (Var.name v)) ~default:(Var.name v)
+
+    (* the taint of the register, that Primus wrote, goes to the engine,
+       which the register of the basis replaces, and an alias adds *)
+    let pushed (e : engine) v =
+      let* set = Env.is_set v in
+      if not set then Machine.return ()
+      else
+        let* x = Env.get v in
+        let* objs = Tracker.lookup x T.Rel.direct in
+        let+ ls = labels objs in
+        let r = owner e v in
+        if String.equal r (Var.name v) then Uc.set_reg_labels e.uc r ls
+        else if not (List.is_empty ls) then
+          Uc.set_reg_labels e.uc r
+            (List.dedup_and_sort ~compare (Uc.reg_labels e.uc r @ ls))
+
+    (* the taint of Primus goes to the engine, after its changes went to
+       Primus, see [export] *)
+    let import (e : engine) =
+      Uc.taint_clear e.uc;
+      let* objs = Tracker.objects in
+      let* classes = classes objs in
+      Uc.taint_labels e.uc classes;
+      let* () =
+        Machine.List.iter (Target.Regs.vars e.regs) ~f:(fun v ->
+            let* set = Env.is_set v in
+            if not set then Machine.return ()
+            else
+              let* x = Env.get v in
+              let* objs = Tracker.lookup x T.Rel.direct in
+              let+ ls = labels objs in
+              if not (List.is_empty ls) then
+                let r = owner e v in
+                Uc.set_reg_labels e.uc r
+                  (List.dedup_and_sort ~compare (Uc.reg_labels e.uc r @ ls)))
+      in
+      let* indirect = Tracker.indirect_taints in
+      Machine.List.iter indirect ~f:(fun (addr, objs) ->
+          let+ ls = labels objs in
+          Uc.set_mem_labels e.uc (int64_of_word (Primus.Value.to_word addr)) ls)
+
+    (* the taint, that the engine changed, goes to Primus, to the values
+       of the registers, which are new, if their taint changed, as the
+       other variables may have the old ones, and to the locations *)
+    let export (e : engine) =
+      let regs, mem = Uc.taint_changes e.uc in
+      let regs =
+        List.dedup_and_sort ~compare:String.compare (regs @ Uc.tainted_regs e.uc)
+      in
+      if List.is_empty regs && List.is_empty mem then Machine.return ()
+      else
+        let* before = Track.version in
+        let* () =
+          Machine.List.iter regs ~f:(fun r ->
+              match
+                List.find e.basis ~f:(fun v -> String.equal (Var.name v) r)
+              with
+              | None -> Machine.return ()
+              | Some v ->
+                  let* set = Env.is_set v in
+                  if not set then Machine.return ()
+                  else
+                    let* x = Env.get v in
+                    let* have = Tracker.lookup x T.Rel.direct in
+                    let* want = objects (Uc.reg_labels e.uc r) in
+                    if Set.equal have want then Machine.return ()
+                    else
+                      let* x = Value.of_word (Primus.Value.to_word x) in
+                      let* () = Env.set v x in
+                      if Set.is_empty want then Machine.return ()
+                      else Tracker.attach x T.Rel.direct want)
+        in
+        (* the objects of the sets of the labels, which the bytes share *)
+        let sets = Hashtbl.Poly.create () in
+        let* taints =
+          Machine.List.map mem ~f:(fun addr ->
+              let* a = Value.of_word (word e addr) in
+              let ls = Uc.mem_labels e.uc addr in
+              let+ objs =
+                match Hashtbl.find sets ls with
+                | Some objs -> Machine.return objs
+                | None ->
+                    let+ objs = objects ls in
+                    Hashtbl.set sets ~key:ls ~data:objs;
+                    objs
+              in
+              (a, objs))
+        in
+        let* () = Tracker.set_indirect taints in
+        (* the taint of Primus, that the engine has, is seen *)
+        let+ after = Track.version in
+        if before = e.seen then e.seen <- after
+  end
+
   (* The intrinsic of the instruction, that interrupts Unicorn at [pc],
      lifted on demand, as the program, e.g., the bare one, may have no IR
      of it, and the interrupts are rare, from the bytes, that [read]
@@ -1961,6 +2129,12 @@ module Make (Machine : Primus.Machine.S) = struct
           fetched = 0;
         }
 
+  (* the page, that has a tracked location, unless the engine propagates
+     the taint, see [Shadow] *)
+  let marked_page e addr =
+    if e.shadowing then Machine.return false
+    else Track.page_marked (word e addr)
+
   (* the page, which has a tracked location, stays in Primus, so that
      the code, which accesses it, faults, and is interpreted *)
   let ensure_page e addr =
@@ -1968,7 +2142,7 @@ module Make (Machine : Primus.Machine.S) = struct
     if Hashtbl.mem e.pages page then Machine.return ()
     else
       let* mapped = Memory.is_mapped (word e addr) in
-      let* marked = Track.page_marked (word e addr) in
+      let* marked = marked_page e addr in
       if mapped && not marked then map_page e page else Machine.return ()
 
   (* maps the code, so that it is never fetched from unmapped pages,
@@ -2012,6 +2186,7 @@ module Make (Machine : Primus.Machine.S) = struct
             Hash_set.remove e.tracked (Var.name v);
             Value.of_word x >>= Env.set v
         | _ -> Machine.return ())
+    >>= fun () -> if e.shadowing then Shadow.export e else Machine.return ()
 
   (* copies the registers from Primus, the aliases go first, so that
      the registers of the program win, and then the registers, which the
@@ -2040,6 +2215,11 @@ module Make (Machine : Primus.Machine.S) = struct
           let x = Primus.Value.to_word x in
           if Target.Regs.write e.regs v x && is_basis v then
             Hashtbl.set e.synced ~key:(Var.name v) ~data:x)
+    in
+    let* () =
+      if e.shadowing then
+        Machine.List.iter (aliases @ basis) ~f:(Shadow.pushed e)
+      else Machine.return ()
     in
     e.written <- [];
     (* the registers, which the aliases changed, e.g., the flags in a
@@ -2085,7 +2265,7 @@ module Make (Machine : Primus.Machine.S) = struct
         | None -> Machine.return ()
         | Some r ->
             let+ tracked = Track.is_tracked x in
-            if tracked then Hash_set.add e.tracked r
+            if tracked && not e.shadowing then Hash_set.add e.tracked r
             else if String.equal r (Var.name v) then Hash_set.remove e.tracked r
         )
     | _ -> Machine.return ()
@@ -2137,7 +2317,11 @@ module Make (Machine : Primus.Machine.S) = struct
 
   (* the page, which has a tracked location, goes to Primus, see
      [ensure_page] *)
-  and marked addr = drop addr addr
+  and marked addr =
+    let* s = session in
+    match s.active with
+    | Some e when e.shadowing -> Machine.return ()
+    | _ -> drop addr addr
 
   and drop lower upper =
     let* s = session in
@@ -2288,7 +2472,7 @@ module Make (Machine : Primus.Machine.S) = struct
     | Write_prot when written_page e addr -> Machine.return `Continue
     | Read_unmapped | Write_unmapped | Fetch_unmapped ->
         let* mapped = Memory.is_mapped (word e addr) in
-        let* marked = Track.page_marked (word e addr) in
+        let* marked = marked_page e addr in
         if mapped && marked then Machine.return `Interpret
         else if mapped then map_page e (page_of addr) >>| fun () -> `Continue
         else repeat e access addr
@@ -2345,6 +2529,13 @@ module Make (Machine : Primus.Machine.S) = struct
     | Some _ when e.watching.reads || e.watching.writes -> Machine.return None
     (* the native functions compute the concrete values *)
     | Some (_, call) when reads_tracked e call.args -> Machine.return None
+    (* and they don't propagate the taint, see [Shadow] *)
+    | Some _
+      when e.shadowing && Uc.taint_active e.uc
+           && not
+                (List.is_empty (Uc.tainted_regs e.uc)
+                && List.is_empty (Uc.tainted_mem e.uc)) ->
+        Machine.return None
     | Some (name, call) ->
         let* linked = Linker.is_linked (`symbol name) in
         let* unreplaced = unreplaced_stub e (`symbol name) in
@@ -2772,10 +2963,17 @@ module Make (Machine : Primus.Machine.S) = struct
       if version = e.seen then Machine.return ()
       else
         let* () = pull_regs e in
+        let* version = Track.version in
         e.seen <- version;
         Hash_set.clear e.tracked;
         let* active = Track.active in
-        if not active then Machine.return ()
+        let* shadowing =
+          if active then Shadow.decide e else Machine.return e.shadowing
+        in
+        if not active then (
+          Uc.taint_clear e.uc;
+          Machine.return ())
+        else if shadowing then Shadow.import e
         else
           (* the registers, rather than all the variables, e.g., the
              saved registers of the threads *)
@@ -3278,7 +3476,8 @@ module Make (Machine : Primus.Machine.S) = struct
                 if Target.Regs.write e.regs v w then
                   Hashtbl.set e.synced ~key:(Var.name v) ~data:w;
                 let+ tracked = Track.is_tracked x in
-                if tracked then Hash_set.add e.tracked (Var.name v)
+                if tracked && not e.shadowing then
+                  Hash_set.add e.tracked (Var.name v)
                 else Hash_set.remove e.tracked (Var.name v))
       in
       (* the aliases, that are set, are of the thread, if their saved
@@ -3308,6 +3507,8 @@ module Make (Machine : Primus.Machine.S) = struct
       in
       List.iter thread.saved_extra ~f:(fun (id, data) -> write_extra e id data);
       e.written <- [];
+      (* the taint of the registers of the thread *)
+      let* () = if e.shadowing then Shadow.import e else Machine.return () in
       (* the bases of the segments of x86 are of the thread in Primus
          too, if it has them *)
       Machine.List.iter thread.saved_extra ~f:(fun (id, data) ->
@@ -4436,7 +4637,7 @@ module Make (Machine : Primus.Machine.S) = struct
     else
       let* { uses; memory; _ } = analyze ~thumb:(in_thumb e pc) e addr in
       if List.exists uses ~f:(Hash_set.mem e.tracked) then Machine.return true
-      else if memory then Track.has_marks
+      else if memory && not e.shadowing then Track.has_marks
       else Machine.return false
 
   (* the loads and the stores of the atomic sequences, e.g., ldrex and
@@ -4720,6 +4921,9 @@ module Make (Machine : Primus.Machine.S) = struct
             in
             let error = start_uc e pc deadline in
             let* () = account () in
+            (* the taint, that the engine changed, goes to Primus, before
+               anything sees it, e.g., a script, see [Shadow] *)
+            let* () = if e.shadowing then pull_regs e else Machine.return () in
             let* () = observe e in
             let pc = current_pc e in
             (match e.reason with

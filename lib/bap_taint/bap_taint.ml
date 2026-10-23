@@ -286,6 +286,30 @@ module Taint = struct
           })
 
     let objects = Machine.Local.get tainter >>| objects
+
+    let indirect_taints =
+      Machine.Local.get tainter >>| fun { indirect; _ } -> Map.to_alist indirect
+
+    let set_indirect taints =
+      Machine.Local.update tainter ~f:(fun s ->
+          {
+            s with
+            indirect =
+              List.fold taints ~init:s.indirect ~f:(fun m (addr, ts) ->
+                  if Set.is_empty ts then Map.remove m addr
+                  else Map.set m ~key:addr ~data:ts);
+          })
+      >>= fun () ->
+      Track.set_marks
+        (List.map taints ~f:(fun (addr, ts) ->
+             (Primus.Value.to_word addr, not (Set.is_empty ts))))
+      >>= fun () ->
+      Machine.Observation.observed attached >>= function
+      | false -> Machine.return ()
+      | true ->
+          Machine.List.iter taints ~f:(fun (addr, ts) ->
+              Set.to_sequence ts
+              |> Machine.Seq.iter ~f:(fun o -> report_attached indirect o addr))
   end
 end
 
@@ -299,6 +323,12 @@ module Propagation = struct
     Primus.Machine.State.declare ~name:"taint-policies"
       ~uuid:"4c370c33-ef1b-4e10-be27-ee751a4d6cf3" (fun _ ->
         { servers = Kind.Map.empty; default = None })
+
+  (* the policies, whose propagation an emulator may do itself *)
+  let shadows =
+    Primus.Machine.State.declare ~name:"taint-shadows"
+      ~uuid:"8e0f3b51-6c2d-4a8e-9b71-3f5d2c9e4a07" (fun _ ->
+        ([] : (Primus.value * [ `All | `Moves ]) list))
 
   module Policy = struct
     type t = value
@@ -352,6 +382,13 @@ module Propagation = struct
         Machine.Local.get tainter >>= fun s ->
         collect_taints p ms srcs s >>= fun taints ->
         Tracker.attach dst md taints
+
+      let shadow p c =
+        Machine.Local.update shadows ~f:(fun ps ->
+            (p, c)
+            :: List.filter ps ~f:(fun (p', _) -> not (Primus.Value.equal p p')))
+
+      let shadows = Machine.Local.get shadows
 
       include Ident (Machine)
     end

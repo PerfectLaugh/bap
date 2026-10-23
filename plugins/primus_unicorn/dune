@@ -16,6 +16,7 @@
   bap-main
   bap-primus
   bap-primus-unicorn.engine
+  bap-taint
   bitvec
   core
   monads))

@@ -18,6 +18,7 @@ type t = {
   covered : int String.Map.t;
       (** the numbers of the observers of the observations, by their names, that
           need the events of the tracked values only, see [cover] *)
+  opaque : bool;  (** see [opaque] *)
 }
 
 let state =
@@ -29,6 +30,7 @@ let state =
         pages = Int64.Map.empty;
         version = 0;
         covered = String.Map.empty;
+        opaque = false;
       })
 
 let marked, on_marked =
@@ -74,6 +76,7 @@ module Make (Machine : Machine) = struct
           values = s.values;
           version = s.version + 1;
           covered = s.covered;
+          opaque = s.opaque;
         }
       >>= fun () -> Machine.Observation.make on_marked addr
 
@@ -89,6 +92,41 @@ module Make (Machine : Machine) = struct
                 | Some n when n > 1 -> Some (n - 1)
                 | _ -> None);
           })
+
+  (* marks or unmarks the locations at once, see [mark] *)
+  let set_marks marks =
+    Machine.Local.get state >>= fun s ->
+    let s', marked =
+      List.fold marks ~init:(s, []) ~f:(fun (s, marked) (addr, on) ->
+          let page = page_of addr in
+          match (on, Set.mem s.addrs addr) with
+          | true, false ->
+              ( {
+                  s with
+                  addrs = Set.add s.addrs addr;
+                  pages =
+                    Map.update s.pages page ~f:(function
+                      | None -> 1
+                      | Some n -> n + 1);
+                },
+                addr :: marked )
+          | false, true ->
+              ( {
+                  s with
+                  addrs = Set.remove s.addrs addr;
+                  pages =
+                    Map.change s.pages page ~f:(function
+                      | Some n when n > 1 -> Some (n - 1)
+                      | _ -> None);
+                },
+                marked )
+          | _ -> (s, marked))
+    in
+    if phys_equal s s' then Machine.return ()
+    else
+      Machine.Local.put state { s' with version = s.version + 1 } >>= fun () ->
+      Machine.List.iter (List.rev marked)
+        ~f:(Machine.Observation.make on_marked)
 
   let is_marked addr =
     Machine.Local.get state >>| fun s ->
@@ -122,6 +160,9 @@ module Make (Machine : Machine) = struct
               | None -> 1
               | Some n -> n + 1);
         })
+
+  let opaque = Machine.Local.update state ~f:(fun s -> { s with opaque = true })
+  let is_opaque = Machine.Local.get state >>| fun s -> s.opaque
 
   let uncovered key =
     Machine.Observation.observers key >>= fun n ->

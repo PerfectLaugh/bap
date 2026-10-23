@@ -28,6 +28,10 @@ struct
     let module Track = Primus.Track.Make (Machine) in
     Track.cover Primus.Interpreter.loaded >>= fun () ->
     Track.cover Primus.Interpreter.stored
+
+  (* the class of the propagation, that an emulator may do itself, see
+     [Taint.Propagation.Policy.shadow] *)
+  let shadow c = name >>= fun p -> Policy.shadow p c
 end
 
 module Computation (Machine : Primus.Machine.S) = struct
@@ -64,6 +68,7 @@ module Computation (Machine : Primus.Machine.S) = struct
           Interpreter.loaded >>> loaded;
           Interpreter.stored >>> stored;
           covered;
+          shadow `All;
           Interpreter.binop >>> binop;
           Interpreter.unop >>> unop;
           Interpreter.extract >>> extract;
@@ -105,6 +110,7 @@ module Exact (Machine : Primus.Machine.S) = struct
           Interpreter.loaded >>> loaded;
           Interpreter.stored >>> stored;
           covered;
+          shadow `Moves;
           Interpreter.extract >>> extract;
           Interpreter.concat >>> concat;
           Interpreter.cast >>> cast;

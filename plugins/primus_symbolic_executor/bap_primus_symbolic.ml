@@ -328,7 +328,8 @@ end = struct
      the only ones, that the checkpoint, which may be crafted, has, as Z3
      runs the commands, that it parses, e.g., set-option, which may open
      the files of the host *)
-  let commands = [ "set-info"; "declare-fun"; "declare-const"; "assert"; "check-sat" ]
+  let commands =
+    [ "set-info"; "declare-fun"; "declare-const"; "assert"; "check-sat" ]
 
   let check_commands data =
     let n = String.length data in
@@ -346,8 +347,10 @@ end = struct
       let j = ref i in
       while
         !j < n
-        && not (Char.is_whitespace data.[!j] || Char.equal data.[!j] '('
-                || Char.equal data.[!j] ')')
+        && not
+             (Char.is_whitespace data.[!j]
+             || Char.equal data.[!j] '('
+             || Char.equal data.[!j] ')')
       do
         incr j
       done;
@@ -362,8 +365,7 @@ end = struct
         | '|' -> loop depth (skip_until '|' (i + 1))
         | '(' when depth = 0 ->
             let name = command (i + 1) in
-            if List.mem commands name ~equal:String.equal then
-              loop 1 (i + 1)
+            if List.mem commands name ~equal:String.equal then loop 1 (i + 1)
             else Error name
         | '(' -> loop (depth + 1) (i + 1)
         | ')' when depth = 0 -> Error "unbalanced"
@@ -633,6 +635,8 @@ end = struct
     Machine.sequence
       Primus.Interpreter.
         [
+          (* the symbolic values are computed by the interpreter *)
+          Track.opaque;
           binop >>> on_binop;
           unop >>> on_unop;
           extract >>> on_extract;

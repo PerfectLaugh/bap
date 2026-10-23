@@ -19,7 +19,9 @@ depends: [
   "bap-main" {= version}
   "bap-primus" {= version}
   "bap-primus-lisp" {= version}
+  "bap-primus-symbolic-executor" {= version}
   "bap-std" {= version}
+  "bap-taint" {= version}
   "bitvec" {= version}
   "core"
   "monads" {= version}

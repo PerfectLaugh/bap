@@ -2877,6 +2877,11 @@ module Std : sig
         val unmark : addr -> unit Machine.t
         (** [unmark addr] unmarks the location [addr] *)
 
+        val set_marks : (addr * bool) list -> unit Machine.t
+        (** [set_marks marks] marks the locations, whose flags are [true], and
+            unmarks the others, at once, e.g., the ones, whose taint an emulator
+            propagated. *)
+
         val is_marked : addr -> bool Machine.t
         (** [is_marked addr] if [addr] is marked *)
 
@@ -2908,6 +2913,16 @@ module Std : sig
         val uncovered : 'a observation -> bool Machine.t
         (** [uncovered observation] if the [observation] has an observer, or a
             watcher, that isn't covered, see {!cover} *)
+
+        val opaque : unit Machine.t
+        (** [opaque] declares, that the caller tracks the values, that only the
+            interpreter computes, e.g., the symbolic ones, so that the
+            executors, that propagate the tracked values themselves, e.g., the
+            taint in the lifted engine of the Primus Unicorn, leave the code,
+            that uses them, to the interpreter. *)
+
+        val is_opaque : bool Machine.t
+        (** [is_opaque] if a tracker is opaque, see {!opaque} *)
       end
     end
 

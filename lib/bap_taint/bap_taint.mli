@@ -285,6 +285,21 @@ module Std : sig
         val objects : Set.M(Object).t Machine.t
         (** [objects] the set taint objects that are currently tracked.
             @since 2.2.0 *)
+
+        val set_indirect :
+          (Primus.value * Set.M(Object).t) list -> unit Machine.t
+        (** [set_indirect taints] relates each address to its objects
+            indirectly, rather than to the ones, that it was related to, at
+            once, e.g., the ones, whose taint an emulator propagated.
+
+            @since 2.6.0 *)
+
+        val indirect_taints : (Primus.value * Set.M(Object).t) list Machine.t
+        (** [indirect_taints] the addresses, that are related to the objects
+            indirectly, and their objects, e.g., which an emulator, that
+            propagates the taint itself, gets.
+
+            @since 2.6.0 *)
       end
     end
 
@@ -332,6 +347,23 @@ module Std : sig
               and were associated with [srcs] by the relation [rs] are attached
               to the [dst] value using the [rd] relation. All associations of
               the [srcs] values remain unaffected. *)
+
+          val shadow : t -> [ `All | `Moves ] -> unit Machine.t
+          (** [shadow p c] declares, that the component, that implements the
+              policy [p], propagates the objects through all the operations, if
+              [c] is [`All], e.g., [propagate-by-computation], or only through
+              the loads, the stores, the casts, the extractions, and the
+              concatenations, if it is [`Moves], e.g., [propagate-taint-exact],
+              so that an emulator, e.g., the lifted engine of the Primus
+              Unicorn, propagates them itself, as the policy does, rather than
+              the interpreter.
+
+              @since 2.6.0 *)
+
+          val shadows : (t * [ `All | `Moves ]) list Machine.t
+          (** [shadows] the policies, that are declared, see {!shadow}
+
+              @since 2.6.0 *)
 
           include Value with type t := t and type 'a m := 'a Machine.t
         end

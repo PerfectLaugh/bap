@@ -45,6 +45,9 @@ module Lifted : sig
             the lowest, and their number, of the register [name] of BAP, as
             [Primus_unicorn_target.Regs] maps them; the registers have the sizes
             of the registers of Unicorn *)
+    owner : string -> string option;
+        (** [owner name] the register of the basis, that holds the register
+            [name], whose taint it has, see {!taint_start} *)
     pc : int;  (** the register of the engine, that is the program counter *)
     big_endian : bool;  (** the order of the bytes of the memory *)
     bits : int;  (** the size of an address *)
@@ -110,6 +113,24 @@ val in_atomic : t -> bool
     {!Bap_lifted.in_atomic}. Unicorn is never in one, as its store conditional
     fails, if the memory changed. *)
 
+(** {2 Taint}
+
+    The taint, that the lifted engine propagates itself, see
+    {!Bap_lifted.taint_start}, which Unicorn doesn't, whose functions do
+    nothing, but [taint_start], which raises [Invalid_argument]. *)
+
+val taint_start : ?jumps:bool -> t -> unit
+val taint_stop : t -> unit
+val taint_active : t -> bool
+val taint_clear : t -> unit
+val taint_labels : t -> (int * [ `All | `Moves | `None ]) list -> unit
+val reg_labels : t -> string -> int list
+val set_reg_labels : t -> string -> int list -> unit
+val mem_labels : t -> int64 -> int list
+val set_mem_labels : t -> int64 -> int list -> unit
+val tainted_regs : t -> string list
+val tainted_mem : t -> int64 list
+val taint_changes : t -> string list * int64 list
 val interrupted : unit -> bool
 val process_signals : unit -> unit
 
