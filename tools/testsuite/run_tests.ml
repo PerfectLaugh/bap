@@ -1755,6 +1755,8 @@ let threads data =
             ];
           taint out;
           let out = script [ "restore" ] in
+          has env "reads the checkpoint" out
+            "info: thread 1 at 2013e0, threads [2-9], of the program true\n";
           has env "restores in main" out "restored in the thread 1\n";
           taint out);
     ]

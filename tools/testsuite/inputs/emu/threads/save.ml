@@ -7,7 +7,7 @@ module Emu = Bap_emu
    switch. The script taints R8 of the thread 2, saves the checkpoint,
    while main runs, and the thread 2 doesn't, and checks, that R8 keeps
    its taint in the thread 2 only, also in the restored program, see
-   restore.ml. *)
+   restore.ml, and reads the checkpoint, before it restores it. *)
 
 let pause emu addr =
   match Emu.run emu ~until:addr with
@@ -45,9 +45,13 @@ let () =
     finish emu
   end
   else
+    let proj = Bap_script.project ~disassemble:true file in
+    let info = Emu.Checkpoint.info "threads.ckpt" in
+    Printf.printf "info: thread %d at %Lx, threads %d, of the program %b\n%!"
+      info.thread info.pc (List.length info.threads)
+      (Emu.Checkpoint.is_of info proj);
     let emu =
-      Emu.create ~components:Emu.Taint.components ~restore:"threads.ckpt"
-        (Bap_script.project ~disassemble:true file)
+      Emu.create ~components:Emu.Taint.components ~restore:"threads.ckpt" proj
     in
     Printf.printf "restored in the thread %d\n%!" (Emu.thread emu);
     check emu;

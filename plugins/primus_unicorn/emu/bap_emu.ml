@@ -284,6 +284,55 @@ let save t file =
   resume t (X.Save (file, pc t));
   match t.session.saved with Ok () -> () | Error msg -> failwith msg
 
+module Checkpoint = struct
+  module C = Bap_primus_unicorn_plugin.Primus_unicorn_checkpoint
+
+  type thread = { tid : int; pc : int64; waiting : int64 list option }
+
+  type info = {
+    target : string;
+    digest : string;
+    pc : int64;
+    thread : int;
+    threads : thread list;
+    frames : (string option * string option) list;
+    symbols : (string * int64) list;
+    components : string list;
+  }
+
+  let info file =
+    match C.load file with
+    | Error msg -> failwith msg
+    | Ok (c : C.t) ->
+        let current, others =
+          match c.threads with
+          | None -> (1, [])
+          | Some t ->
+              ( t.current,
+                List.map t.others ~f:(fun (o : C.thread) ->
+                    { tid = o.tid; pc = o.next; waiting = o.waiting }) )
+        in
+        {
+          target = c.target;
+          digest = c.digest;
+          pc = c.pc;
+          thread = current;
+          threads =
+            { tid = current; pc = c.pc; waiting = None }
+            :: List.sort others ~compare:(fun x y -> Int.compare x.tid y.tid);
+          frames =
+            List.map c.frames ~f:(fun (f : C.frame) -> (f.callee, f.caller));
+          symbols = c.symbols;
+          components = List.map c.extensions ~f:fst;
+        }
+
+  let is_of info proj =
+    match Project.get proj filename with
+    | None -> false
+    | Some file -> (
+        try String.equal (C.digest file) info.digest with Sys_error _ -> false)
+end
+
 (* pauses the program before the next instruction, from a hook *)
 let stop t =
   let e = engine t in

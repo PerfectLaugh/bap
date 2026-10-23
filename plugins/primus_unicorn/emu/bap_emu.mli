@@ -448,6 +448,42 @@ val save : t -> string -> unit
     Raises [Invalid_argument], if the program is not paused, e.g., in a hook,
     and [Failure], if the checkpoint can't be saved. *)
 
+(** The checkpoints, that {!save} wrote, which a script inspects, without
+    loading their program, e.g., to choose one in a pipeline. *)
+module Checkpoint : sig
+  type thread = {
+    tid : int;
+    pc : int64;
+        (** the address, from which it continues, with the lower bit set in the
+            Thumb state of ARM *)
+    waiting : int64 list option;
+        (** the addresses, e.g., of the futexes, on which it waits, if it waits
+        *)
+  }
+
+  type info = {
+    target : string;  (** the target of the program, e.g., [bap:amd64] *)
+    digest : string;  (** the hex MD5 digest of the file of the program *)
+    pc : int64;  (** from which the thread, that ran, continues *)
+    thread : int;  (** the TID of the thread, that ran *)
+    threads : thread list;
+        (** all threads, the one that ran first, the others by their TIDs *)
+    frames : (string option * string option) list;
+        (** the runs of the program, that Primus called, the innermost first,
+            with the function, that runs, and the stub, that called it *)
+    symbols : (string * int64) list;  (** of {!add_symbol} *)
+    components : string list;
+        (** the components, whose states are saved, see [Primus.Checkpoint] *)
+  }
+
+  val info : string -> info
+  (** [info file] reads the checkpoint, raises [Failure], if it is not one, or
+      of another version, or broken. *)
+
+  val is_of : info -> project -> bool
+  (** [is_of info proj] if the checkpoint is of the file of the program *)
+end
+
 (** what a stub does, after the function, that it called, returns, see
     {!complete} *)
 module type Completion = functor
