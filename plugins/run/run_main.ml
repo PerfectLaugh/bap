@@ -84,8 +84,11 @@ module Param = struct
       ~doc:
         "Runs the specified Primus systems. If several systems are specified \
          then runs all entry points for each specified system. By default, \
-         runs bap:unicorn-executor, in which the code runs in Unicorn, if the \
-         primus-unicorn plugin is installed, otherwise bap:legacy-main, which \
+         runs bap:lifted-executor, in which the code runs in the lifted \
+         engine, which runs the semantics of its instructions, that BAP lifts, \
+         if the primus-lifted plugin is loaded, or else bap:unicorn-executor, \
+         in which the code runs in Unicorn, or else, if the plugins, which are \
+         licensed under GPL, aren't installed, bap:legacy-main, which \
          interprets the lifted code."
 
   let components =
@@ -307,15 +310,18 @@ let find_first_unvisited_blk prog =
           let blk = Graphs.Ir.Node.label blk in
           if not (Term.has_attr blk Term.visited) then Some blk else None))
 
-(* the code runs in Unicorn, unless the plugin, which is licensed under
-   GPL, isn't installed *)
+(* the code runs in the lifted engine, or in Unicorn, if the plugin of
+   the lifted executor isn't loaded, unless the plugins of the executors,
+   which are licensed under GPL, aren't installed, then it is interpreted *)
 let default_system () =
-  if
+  let exists name =
     Option.is_some
       (Primus.System.Repository.find
-         (Knowledge.Name.create ~package:"bap" "unicorn-executor"))
-  then "bap:unicorn-executor"
-  else "bap:legacy-main"
+         (Knowledge.Name.create ~package:"bap" name))
+  in
+  match List.find [ "lifted-executor"; "unicorn-executor" ] ~f:exists with
+  | Some name -> "bap:" ^ name
+  | None -> "bap:legacy-main"
 
 let main { Config.get = ( ! ) } proj =
   let open Param in

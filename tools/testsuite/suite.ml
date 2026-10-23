@@ -3,9 +3,13 @@ open OUnit2
 
 (* with BAP_TESTSUITE_EXECUTOR=lifted, the cases run the native code in
    the lifted engine, see Bap_lifted: the commands run the executors of
-   the lifted engine, e.g., bap:lifted-executor, with their options, and
-   the scripts make the emulators of it, see Bap_emu.create *)
+   the lifted engine, e.g., bap:lifted-executor, with their options,
+   rather than the ones of Unicorn, that they name, and with
+   BAP_TESTSUITE_EXECUTOR=unicorn, the cases, that name no executor, run
+   the ones of Unicorn, rather than the default, bap:lifted-executor, and
+   the scripts make the emulators of the engine, see Bap_emu.create *)
 let lifted = Sys.getenv_opt "BAP_TESTSUITE_EXECUTOR" = Some "lifted"
+let unicorn = Sys.getenv_opt "BAP_TESTSUITE_EXECUTOR" = Some "unicorn"
 
 type data = string
 
@@ -74,8 +78,13 @@ let variables env =
     | Some dir -> [ ("BAP_PRIMUS_LISP_CACHE", dir) ]
     | None -> [])
   @
-  (* the engine of the scripts, see [lifted] *)
-  if lifted then [ ("BAP_EMU_ENGINE", "lifted") ] else []
+  (* the engine of the scripts, and of the run pass, see [lifted] *)
+  if lifted then [ ("BAP_EMU_ENGINE", "lifted") ]
+  else if unicorn then
+    [
+      ("BAP_EMU_ENGINE", "unicorn"); ("BAP_RUN_SYSTEMS", "bap:unicorn-executor");
+    ]
+  else []
 
 (* the environment of the commands, without the variables of BAP, e.g.,
    the options of the plugins, or BAP_PLUGIN_PATH, which the commands

@@ -88,12 +88,13 @@ val run :
   project ->
   project
 (** [run project] runs the program of the [project] in the Primus [system], by
-    default [bap:unicorn-executor], or [bap:legacy-main], if the primus-unicorn
-    plugin, which is licensed under GPL, isn't installed, with the [components]
-    of the repository, e.g., [bap:debugger], from the [entry], by default the
-    entry point of the program, or [_start], with the program arguments [args],
-    without the name of the program, and the environment [envp], e.g.,
-    [["HOME=/root"]].
+    default [bap:lifted-executor], or [bap:unicorn-executor], if the
+    primus-lifted plugin isn't loaded, or [bap:legacy-main], if the plugins of
+    the executors, which are licensed under GPL, aren't installed, with the
+    [components] of the repository, e.g., [bap:debugger], from the [entry], by
+    default the entry point of the program, or [_start], with the program
+    arguments [args], without the name of the program, and the environment
+    [envp], e.g., [["HOME=/root"]].
 
     The components of [init] run in the machine after the components of the
     system, before the program starts, e.g., the components of the script, that

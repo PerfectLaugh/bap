@@ -160,18 +160,22 @@ let lifts proj =
 let create ?system ?(components = []) ?(init = []) ?(redirects = [])
     ?(args = []) ?(envp = []) ?entry ?restore ?engine proj =
   (* the engine of the system, if it is of one, or else of BAP_EMU_ENGINE,
-     e.g., of the testsuite, see bap_emu.mli *)
+     e.g., of the testsuite, by default the lifted one, see bap_emu.mli *)
   let engine : X.kind =
     match (engine, system) with
     | Some engine, _ -> engine
     | None, Some system
       when String.is_substring system ~substring:"lifted-executor" ->
         `Lifted
+    | None, Some system
+      when String.is_substring system ~substring:"unicorn-executor" ->
+        `Unicorn
     | None, None
-      when Option.equal String.equal (Sys.getenv "BAP_EMU_ENGINE")
-             (Some "lifted") ->
-        `Lifted
-    | None, _ -> `Unicorn
+      when Option.equal String.equal
+             (Sys.getenv "BAP_EMU_ENGINE")
+             (Some "unicorn") ->
+        `Unicorn
+    | None, _ -> `Lifted
   in
   let system =
     Option.value system

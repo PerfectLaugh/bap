@@ -325,15 +325,18 @@ let system_of ?(components = []) name =
 let pass name proj =
   match Project.find_pass name with None -> proj | Some pass -> run pass proj
 
-(* the code runs in Unicorn, unless the plugin, which is licensed under
-   GPL, isn't installed *)
+(* the code runs in the lifted engine, or in Unicorn, if the plugin of
+   the lifted executor isn't loaded, unless the plugins of the executors,
+   which are licensed under GPL, aren't installed, then it is interpreted *)
 let default_system () =
-  if
+  let exists name =
     Option.is_some
       (Primus.System.Repository.find
-         (Knowledge.Name.create ~package:"bap" "unicorn-executor"))
-  then "bap:unicorn-executor"
-  else "bap:legacy-main"
+         (Knowledge.Name.create ~package:"bap" name))
+  in
+  match List.find [ "lifted-executor"; "unicorn-executor" ] ~f:exists with
+  | Some name -> "bap:" ^ name
+  | None -> "bap:legacy-main"
 
 (* the components of [init] run in the machine,
    after the components of the system, before the program starts *)

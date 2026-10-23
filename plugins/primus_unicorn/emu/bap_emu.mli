@@ -65,11 +65,10 @@ val create :
   t
 (** [create project] starts the program of [project], from [entry], by default
     its entry point, or [_start], in the [system], by default
-    [bap:unicorn-executor], or [bap:lifted-executor] of the lifted [engine],
-    with the [components], e.g., [bap:debugger], the
-    program arguments [args], without the name of the program, and the
-    environment [envp], and pauses it before its first instruction runs in
-    Unicorn.
+    [bap:lifted-executor], or [bap:unicorn-executor] of the Unicorn [engine],
+    with the [components], e.g., [bap:debugger], the program arguments [args],
+    without the name of the program, and the environment [envp], and pauses it
+    before its first instruction runs in Unicorn.
 
     The components of [init], e.g., [Bap_script_debugger.component], and the
     [redirects] of the channels of the program, e.g.,
@@ -80,12 +79,12 @@ val create :
     {!save}, instead of the [entry], and pauses before its address.
 
     The native code runs in the [engine]: [`Unicorn], or [`Lifted], the lifted
-    engine, see [Bap_lifted], which runs the semantics of the instructions,
-    that BAP lifts. By default, it is the engine of the [system], e.g., of
-    [bap:lifted-executor], or, without the [system], [`Lifted], if the
-    environment variable [BAP_EMU_ENGINE] is [lifted], e.g., in the
-    testsuite, or else [`Unicorn]. The options of the plugin of the engine,
-    e.g., [--primus-lifted-timeout], apply to the program. *)
+    engine, see [Bap_lifted], which runs the semantics of the instructions, that
+    BAP lifts. By default, it is the engine of the [system], e.g., [`Unicorn] of
+    [bap:unicorn-executor], or, without the [system], [`Unicorn], if the
+    environment variable [BAP_EMU_ENGINE] is [unicorn], e.g., in the testsuite,
+    or else [`Lifted]. The options of the plugin of the engine, e.g.,
+    [--primus-lifted-timeout], apply to the program. *)
 
 val run : ?until:int64 -> t -> status
 (** [run emu] continues the program, until it pauses, e.g., before the

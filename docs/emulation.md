@@ -14,10 +14,12 @@ All three run the program in a Primus system. A system is a set of components, e
 |--------|------------------|-------|
 | `bap:legacy-main` | the Primus interpreter | the lifted program |
 | `bap:stubbed-executor` | the Primus interpreter | the lifted program, with the Lisp stubs of libc |
-| `bap:unicorn-executor` | Unicorn, natively | the default; the stubs and the system calls still run in Primus |
+| `bap:lifted-executor` | the lifted engine, natively | the default; runs the semantics, that BAP lifts, see below; the stubs and the system calls still run in Primus |
+| `bap:terminating-lifted-executor` | the lifted engine | with `bap:limit`, so that the program always ends |
+| `bap:unicorn-executor` | Unicorn, natively | the stubs and the system calls still run in Primus |
 | `bap:terminating-unicorn-executor` | Unicorn | with `bap:limit`, so that the program always ends |
 
-The `run` pass and the scripts run `bap:unicorn-executor`, unless they name another system, or the `primus-unicorn` plugin, which is licensed under GPL, isn't installed, then they run `bap:legacy-main`. The Unicorn executor is many times faster than the interpreter. It hands an instruction to the interpreter only when Primus has to see it, e.g., when it reads a tainted or symbolic value, when it traps, or when the program writes code.
+The `run` pass, the scripts, and `Emu.create` run `bap:lifted-executor`, unless they name another system, or `bap:unicorn-executor`, if the `primus-lifted` plugin isn't loaded, or `bap:legacy-main`, if the plugins of the executors, which are licensed under GPL, aren't installed. The executors are many times faster than the interpreter, and Unicorn is the fastest, e.g., in the hot loops, see the lifted executor below. Each executor hands an instruction to the interpreter only when Primus has to see it, e.g., when it reads a tainted or symbolic value, when it traps, or when the program writes code.
 
 ## The `run` pass
 

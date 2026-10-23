@@ -157,7 +157,7 @@ The `bap script` command, which runs before the other options are parsed, takes 
 
 ## Running programs
 
-BAP runs binary programs in [Primus][primus], its emulation framework. A Primus system, e.g., `bap:stubbed-executor`, interprets the lifted program with the Lisp stubs of libc, and `bap:unicorn-executor`, the default, runs the code natively in Unicorn, which is many times faster, while the stubs and the system calls still run in Primus, e.g.,
+BAP runs binary programs in [Primus][primus], its emulation framework. A Primus system, e.g., `bap:stubbed-executor`, interprets the lifted program with the Lisp stubs of libc, and `bap:lifted-executor`, the default, runs the code natively, in the lifted engine, which runs the semantics, that BAP lifts, compiled by the JIT of LLVM, or `bap:unicorn-executor` in Unicorn, which is faster still, both many times faster than the interpreter, while the stubs and the system calls still run in Primus, e.g.,
 
 ```bash
 bap ./echo --passes=run --run-argv=hello,world
