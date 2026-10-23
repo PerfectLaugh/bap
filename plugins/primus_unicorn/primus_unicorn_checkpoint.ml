@@ -88,16 +88,27 @@ let magic = "bap-primus-unicorn-checkpoint 5\n"
 let digest path = Stdlib.Digest.(to_hex (file path))
 
 (* the checkpoint is written to a temporary file first, so that the file
-   is never partly written *)
+   is never partly written, which is new, rather than a file of a known
+   name, which another user may have made, e.g., a link, in a directory,
+   that they can write *)
 let save path t =
-  let tmp = path ^ ".tmp" in
-  try
-    Out_channel.with_file ~binary:true tmp ~f:(fun out ->
-        Out_channel.output_string out magic;
-        Out_channel.output_string out (Binable.to_string (module T) t));
-    Stdlib.Sys.rename tmp path;
-    Ok ()
-  with Sys_error msg -> Error msg
+  match
+    Stdlib.Filename.temp_file
+      ~temp_dir:(Stdlib.Filename.dirname path)
+      (Stdlib.Filename.basename path)
+      ".tmp"
+  with
+  | exception Sys_error msg -> Error msg
+  | tmp -> (
+      try
+        Out_channel.with_file ~binary:true tmp ~f:(fun out ->
+            Out_channel.output_string out magic;
+            Out_channel.output_string out (Binable.to_string (module T) t));
+        Stdlib.Sys.rename tmp path;
+        Ok ()
+      with Sys_error msg ->
+        (try Stdlib.Sys.remove tmp with Sys_error _ -> ());
+        Error msg)
 
 let load path =
   match In_channel.read_all path with

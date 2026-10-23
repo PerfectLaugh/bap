@@ -452,6 +452,18 @@ type threads = {
   woken : bool;  (** the [woken] of the thread, that runs *)
 }
 
+(* the threads of a program, that runs at once, at most, as the program,
+   which may be hostile, would make the switches of the threads, and the
+   memory of their states, unbounded *)
+let max_threads = 1024
+
+(* the threads, that a program creates, at most, as the registers of
+   each one, that ended, stay in the environment of Primus *)
+let max_created = 0x10000
+
+let too_many_threads st =
+  List.length st.others >= max_threads || st.last >= max_created
+
 (* the registers of a thread, that Primus doesn't have, e.g., of TLS,
    which the checkpoints keep too *)
 let extra_regs (e : engine) =
@@ -481,7 +493,12 @@ let read_extra (e : engine) id =
   | Some name -> Target.Segments.get e.uc name
   | None -> Uc.reg_read_bytes e.uc id
 
+(* the registers, that aren't the extra ones, e.g., of a checkpoint, that
+   is crafted, are not written, as they may be the registers of the
+   system, e.g., CR3 of x86 *)
 let write_extra (e : engine) id data =
+  if not (List.mem (extra_regs e) id ~equal:Int.equal) then ()
+  else
   match segment_base e id with
   | Some name ->
       let base =
@@ -1368,6 +1385,7 @@ let written_page e addr =
    and may read, which are in Unicorn, raises [Missing] for the first
    address of a page that is not copied yet, see [Native] *)
 let uc_readable e addr n =
+  if n < 0 then raise Native.Denied;
   let rec count addr n acc =
     if n = 0 then acc
     else
@@ -2580,8 +2598,18 @@ module Make (Machine : Primus.Machine.S) = struct
      Primus, for [Lift.insn], which reads them from the instruction at
      [addr], or before it, see [trap]. *)
   let code_reader e addr =
-    let lo = Int64.(max 0L (addr - of_int Primus.Lift.max_size)) in
-    let n = Int64.to_int_exn Int64.(addr + of_int Primus.Lift.max_size - lo) in
+    (* the bytes around the address, which may be any, e.g., of the
+       program, that jumped near the end of the address space, without
+       wrapping around it *)
+    let max = Int64.of_int Primus.Lift.max_size in
+    let below x = Stdlib.Int64.unsigned_compare x max < 0 in
+    let before = if below addr then addr else max in
+    let after =
+      if Int64.(addr <> 0L) && below (Int64.neg addr) then Int64.neg addr
+      else max
+    in
+    let lo = Int64.(addr - before) in
+    let n = Int64.to_int_exn Int64.(before + after) in
     let in_uc x = Hashtbl.mem e.pages (page_of x) in
     let+ loaded =
       if in_uc lo && in_uc Int64.(lo + of_int n - 1L) then Machine.return [||]
@@ -3264,6 +3292,8 @@ module Make (Machine : Primus.Machine.S) = struct
                   let settls = flag flags 0x80000L in
                   (* the processes, that don't share the memory *)
                   if not (flag flags 0x100L) then error 38L
+                  (* EAGAIN, as RLIMIT_NPROC *)
+                  else if too_many_threads st then error 11L
                   else
                     let tid = st.last + 1 in
                     let* () =
@@ -3644,10 +3674,14 @@ module Make (Machine : Primus.Machine.S) = struct
       let create e st ~start ~param ~size ~suspended =
         let tid = st.last + 1 in
         let t = teb e in
+        (* the size of the program, which may be any, is at most 256 MB *)
         let size =
           if Int64.(size <= 0L) then 0x40000
           else
-            Int64.(to_int_exn ((max size 0x10000L + 0xFFFFL) land lnot 0xFFFFL))
+            Int64.(
+              to_int_exn
+                ((min (max size 0x10000L) 0x1000_0000L + 0xFFFFL)
+                land lnot 0xFFFFL))
         in
         let* stack = allocate e size in
         let* teb = allocate e 0x2000 in
@@ -3861,6 +3895,10 @@ module Make (Machine : Primus.Machine.S) = struct
                   else Machine.return (Some ret)
                 in
                 let create ~start ~param ~size ~flags ~ptid =
+                  (* NULL, as the threads, that the program may create,
+                     are limited *)
+                  if too_many_threads st then return 0L
+                  else
                   let* h =
                     create e st ~start ~param ~size ~suspended:(flag flags 4L)
                   in
@@ -3926,7 +3964,10 @@ module Make (Machine : Primus.Machine.S) = struct
                         | true -> acquire e ~me h kind >>= fun () -> return 0L
                         | false -> wait ~ms:(arg 1) [ h ]))
                 | "WaitForMultipleObjects" | "WaitForMultipleObjectsEx" -> (
-                    let count = Int64.to_int_exn (arg 0) in
+                    (* at most MAXIMUM_WAIT_OBJECTS handles, a DWORD *)
+                    let count = Int64.(to_int_trunc (arg 0 land 0xFFFF_FFFFL)) in
+                    if count < 1 || count > 64 then return failed
+                    else
                     let* handles =
                       Machine.List.map (List.init count ~f:Fn.id) ~f:(fun i ->
                           loadw e Int64.(arg 1 + of_int Int.(i * e.bytes))
@@ -4096,7 +4137,10 @@ module Make (Machine : Primus.Machine.S) = struct
                 | "WakeAllConditionVariable" ->
                     wake_all e st (arg 0) >>= fun _ -> return 0L
                 | "WaitOnAddress" -> (
-                    let addr = arg 0 and size = Int64.to_int_exn (arg 2) in
+                    match arg 2 with
+                    (* the sizes of the addresses, that it compares *)
+                    | (1L | 2L | 4L | 8L) as size -> (
+                    let addr = arg 0 and size = Int64.to_int_exn size in
                     let* x = load e addr size in
                     let* y = load e (arg 1) size in
                     match (x, y) with
@@ -4113,6 +4157,7 @@ module Make (Machine : Primus.Machine.S) = struct
                                    set e (result e) 0L;
                                    Machine.return (Some ret)))
                     | _ -> return 1L)
+                    | _ -> return 0L)
                 | "WakeByAddressSingle" ->
                     let st, _ = wake st (arg 0) 1 in
                     let* () = Machine.Local.put threads st in
@@ -4748,9 +4793,13 @@ module Elapsed (Machine : Primus.Machine.S) = struct
 
   let save = Machine.Local.get elapsed >>| fun t -> Some (Float.to_string t)
 
+  (* the time is finite, and not negative, so that it doesn't disable the
+     timeout, e.g., in a checkpoint, that is crafted *)
   let restore data =
     Machine.Local.put elapsed
-      (Option.value (Float.of_string_opt data) ~default:0.)
+      (match Float.of_string_opt data with
+      | Some t when Float.is_finite t && Float.(t >= 0.) -> t
+      | _ -> 0.)
 end
 
 let () =
@@ -4992,11 +5041,12 @@ module Loader (Machine : Primus.Machine.S) = struct
     let* program = Machine.gets (fun proj -> Project.get proj filename) in
     (* the program, which the checkpoint is of, has the same digest *)
     let same digest =
-      String.is_empty digest
-      ||
       match program with
       | None -> true
+      (* the checkpoint of the file has its digest *)
       | Some file -> (
+          (not (String.is_empty digest))
+          &&
           try String.equal digest (Checkpoint.digest file)
           with Sys_error _ -> true)
     in

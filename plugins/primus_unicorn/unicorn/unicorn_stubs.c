@@ -148,7 +148,16 @@ struct engine {
 };
 
 #define Engine_val(v) (*((struct engine **)Data_custom_val(v)))
-#define Context_val(v) (*((uc_context **)Data_custom_val(v)))
+/* the context, and the engine, whose context it is, as Unicorn restores
+   the bytes of the context into the engine, of whatever size it is */
+struct saved_context {
+    uc_context *ctx;
+    uc_arch arch;
+    size_t size;
+};
+
+#define Saved_val(v) ((struct saved_context *)Data_custom_val(v))
+#define Context_val(v) (Saved_val(v)->ctx)
 
 static void fail(uc_err err) {
     CAMLparam0();
@@ -283,6 +292,9 @@ value bap_uc_open(value arch, value mode) {
 }
 
 value bap_uc_close(value v) {
+    /* the engine, that runs, e.g., whose hook closes it, is in use */
+    if (Engine_val(v) != NULL && Engine_val(v)->running)
+        caml_invalid_argument("Bap_unicorn.close: the engine runs");
     close_engine(Engine_val(v));
     return Val_unit;
 }
@@ -407,6 +419,8 @@ value bap_uc_mem_read(value v, value addr, value len) {
     CAMLparam3(v, addr, len);
     CAMLlocal1(r);
     uc_engine *uc = engine_uc(v);
+    if (Long_val(len) < 0)
+        caml_invalid_argument("Bap_unicorn.mem_read: a negative size");
     r = caml_alloc_string(Long_val(len));
     check(uc_mem_read(uc, Int64_val(addr), Bytes_val(r), Long_val(len)));
     CAMLreturn(r);
@@ -883,13 +897,20 @@ value bap_uc_context_save(value v) {
         uc_context_free(ctx);
         fail(err);
     }
-    r = caml_alloc_custom(&context_ops, sizeof(uc_context *), 0, 1);
-    Context_val(r) = ctx;
+    r = caml_alloc_custom(&context_ops, sizeof(struct saved_context), 0, 1);
+    Saved_val(r)->ctx = ctx;
+    Saved_val(r)->arch = Engine_val(v)->arch;
+    Saved_val(r)->size = uc_context_size(uc);
     CAMLreturn(r);
 }
 
 value bap_uc_context_restore(value v, value ctx) {
-    check(uc_context_restore(engine_uc(v), Context_val(ctx)));
+    uc_engine *uc = engine_uc(v);
+    if (Saved_val(ctx)->arch != Engine_val(v)->arch ||
+        Saved_val(ctx)->size != uc_context_size(uc))
+        caml_invalid_argument("Bap_unicorn.restore: the context of another "
+                              "engine");
+    check(uc_context_restore(uc, Context_val(ctx)));
     return Val_unit;
 }
 
@@ -977,6 +998,8 @@ static uint64_t ring_size(intnat n) {
 /* the trace of [size] program counters, rounded up to a power of two,
    of every [every] instruction, with the sizes of the blocks, if
    [blocks], and with [accesses] accesses to the memory, if positive */
+#define MAX_RING ((intnat)1 << 36)
+
 value bap_uc_trace_create(value size, value every, value blocks,
                           value accesses) {
     CAMLparam4(size, every, blocks, accesses);
@@ -984,6 +1007,11 @@ value bap_uc_trace_create(value size, value every, value blocks,
     struct trace *t = calloc(1, sizeof(struct trace));
     if (t == NULL) {
         caml_raise_out_of_memory();
+    }
+    /* the sizes, whose bytes would overflow, are too large */
+    if (Long_val(size) > MAX_RING || Long_val(accesses) > MAX_RING) {
+        free(t);
+        caml_invalid_argument("Bap_unicorn.Trace.create: too large");
     }
     uint64_t n = ring_size(Long_val(size) < 1 ? 2 : Long_val(size) + 1);
     t->mask = n - 1;

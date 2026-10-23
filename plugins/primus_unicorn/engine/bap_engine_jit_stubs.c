@@ -9,6 +9,7 @@
    the registers, which are in the heap of OCaml, stay, while it runs. */
 
 #include <stdint.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -51,6 +52,7 @@ struct jit_mem {
     frame frame;
     entry *table; /* the pages, with the open addressing */
     size_t capacity, count;
+    uint64_t seed; /* of the hash, which the program can't predict */
     entry tlb[TLB_SIZE];
     uint8_t *undo_at[UNDO_SIZE];
     uint8_t undo_old[UNDO_SIZE];
@@ -72,8 +74,13 @@ static struct custom_operations mem_ops = {
     custom_serialize_default,   custom_deserialize_default,
     custom_compare_ext_default, custom_fixed_length_default};
 
-static size_t hash(uint64_t page, size_t capacity) {
-    uint64_t x = (page >> PAGE_BITS) * 0x9E3779B97F4A7C15ULL;
+/* the hash of the page, whose seed is random, so that the program can't
+   map the pages, whose hashes collide, which would make the accesses
+   slow */
+static size_t hash(uint64_t seed, uint64_t page, size_t capacity) {
+    uint64_t x = ((page >> PAGE_BITS) ^ seed) * 0x9E3779B97F4A7C15ULL;
+    x ^= x >> 29;
+    x *= 0xBF58476D1CE4E5B9ULL;
     return (size_t)(x >> 32) & (capacity - 1);
 }
 
@@ -81,8 +88,8 @@ static void flush_tlb(jit_mem *m) {
     for (int i = 0; i < TLB_SIZE; i++) m->tlb[i].page = EMPTY;
 }
 
-static void insert(entry *table, size_t capacity, entry e) {
-    size_t i = hash(e.page, capacity);
+static void insert(uint64_t seed, entry *table, size_t capacity, entry e) {
+    size_t i = hash(seed, e.page, capacity);
     while (table[i].page != EMPTY && table[i].page != e.page)
         i = (i + 1) & (capacity - 1);
     table[i] = e;
@@ -93,24 +100,29 @@ static void rehash(jit_mem *m, size_t capacity) {
     if (!table) caml_raise_out_of_memory();
     for (size_t i = 0; i < capacity; i++) table[i].page = EMPTY;
     for (size_t i = 0; i < m->capacity; i++)
-        if (m->table[i].page != EMPTY) insert(table, capacity, m->table[i]);
+        if (m->table[i].page != EMPTY)
+            insert(m->seed, table, capacity, m->table[i]);
     free(m->table);
     m->table = table;
     m->capacity = capacity;
 }
 
+/* the index of the page in the table, or of the empty entry, where it
+   would be */
+static size_t slot_of(jit_mem *m, uint64_t page) {
+    size_t i = hash(m->seed, page, m->capacity);
+    while (m->table[i].page != EMPTY && m->table[i].page != page)
+        i = (i + 1) & (m->capacity - 1);
+    return i;
+}
+
 static entry *find(jit_mem *m, uint64_t page) {
     entry *t = &m->tlb[(page >> PAGE_BITS) & (TLB_SIZE - 1)];
     if (t->page == page) return t;
-    size_t i = hash(page, m->capacity);
-    while (m->table[i].page != EMPTY) {
-        if (m->table[i].page == page) {
-            *t = m->table[i];
-            return t;
-        }
-        i = (i + 1) & (m->capacity - 1);
-    }
-    return NULL;
+    size_t i = slot_of(m, page);
+    if (m->table[i].page != page) return NULL;
+    *t = m->table[i];
+    return t;
 }
 
 value bap_jit_mem_create(value unit) {
@@ -119,6 +131,8 @@ value bap_jit_mem_create(value unit) {
     jit_mem *m = calloc(1, sizeof(jit_mem));
     if (!m) caml_raise_out_of_memory();
     m->frame.mem = m;
+    m->seed = ((uint64_t)(uintptr_t)m << 16) ^ (uint64_t)time(NULL) ^
+              ((uint64_t)clock() << 32);
     v = caml_alloc_custom(&mem_ops, sizeof(jit_mem *), 0, 1);
     Mem_val(v) = m;
     rehash(m, 64);
@@ -137,7 +151,7 @@ value bap_jit_mem_map(value mem, value page, value data, value perm) {
     if (find(m, p)) caml_invalid_argument("Bap_engine_jit.Runtime.map: mapped");
     if (2 * (m->count + 1) > m->capacity) rehash(m, 2 * m->capacity);
     entry e = {p, Caml_ba_data_val(data), Int_val(perm)};
-    insert(m->table, m->capacity, e);
+    insert(m->seed, m->table, m->capacity, e);
     m->count++;
     flush_tlb(m);
     return Val_unit;
@@ -146,29 +160,37 @@ value bap_jit_mem_map(value mem, value page, value data, value perm) {
 value bap_jit_mem_unmap(value mem, value page) {
     jit_mem *m = Mem_val(mem);
     uint64_t p = (uint64_t)Int64_val(page);
-    for (size_t i = 0; i < m->capacity; i++)
-        if (m->table[i].page == p) {
-            m->table[i].page = EMPTY;
-            m->count--;
-            /* the pages after it are inserted again */
-            rehash(m, m->capacity);
-            break;
+    size_t mask = m->capacity - 1;
+    size_t i = slot_of(m, p);
+    if (m->table[i].page == p) {
+        /* the entries of the cluster after it, which the hole would cut
+           off from their homes, move into it, as the deletions of the
+           linear probing do, rather than the table is made anew */
+        m->table[i].page = EMPTY;
+        m->count--;
+        size_t hole = i;
+        for (size_t j = (i + 1) & mask; m->table[j].page != EMPTY;
+             j = (j + 1) & mask) {
+            size_t home = hash(m->seed, m->table[j].page, m->capacity);
+            /* the entry stays, if its home is cyclically in (hole, j] */
+            int stays = hole <= j ? (hole < home && home <= j)
+                                  : (hole < home || home <= j);
+            if (!stays) {
+                m->table[hole] = m->table[j];
+                m->table[j].page = EMPTY;
+                hole = j;
+            }
         }
+    }
     flush_tlb(m);
     return Val_unit;
 }
 
 value bap_jit_mem_protect(value mem, value page, value perm) {
     jit_mem *m = Mem_val(mem);
-    flush_tlb(m);
-    entry *e = find(m, (uint64_t)Int64_val(page));
-    if (e) {
-        e->perm = Int_val(perm);
-        /* the entry is the one of the TLB, whose table entry changes too */
-        size_t i = hash(e->page, m->capacity);
-        while (m->table[i].page != e->page) i = (i + 1) & (m->capacity - 1);
-        m->table[i].perm = e->perm;
-    }
+    uint64_t p = (uint64_t)Int64_val(page);
+    size_t i = slot_of(m, p);
+    if (m->table[i].page == p) m->table[i].perm = Int_val(perm);
     flush_tlb(m);
     return Val_unit;
 }
@@ -198,7 +220,11 @@ int32_t bap_jit_load(frame *f, uint64_t addr, uint32_t n, uint8_t *out) {
 static int writable(jit_mem *m, uint64_t addr, uint32_t n) {
     while (n > 0) {
         entry *e = find(m, PAGE_OF(addr));
-        if (!e || !(e->perm & PERM_WRITE)) return 0;
+        /* the store to the code, which may be of the block, that runs,
+           whose code is checked only, when it starts, stops it, so that
+           the closures run the instruction, and the next block checks
+           the code */
+        if (!e || !(e->perm & PERM_WRITE) || (e->perm & PERM_EXEC)) return 0;
         uint64_t off = addr - e->page;
         uint32_t k = PAGE_SIZE - off < n ? (uint32_t)(PAGE_SIZE - off) : n;
         addr += k;

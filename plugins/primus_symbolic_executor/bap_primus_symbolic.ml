@@ -324,7 +324,59 @@ end = struct
     Z3.SMT.benchmark_to_smtstring ctxt "checkpoint" "" "unknown" "" equalities
       (Bool.mk_true ctxt)
 
+  (* the commands of the benchmarks, that [serialize] makes, which are
+     the only ones, that the checkpoint, which may be crafted, has, as Z3
+     runs the commands, that it parses, e.g., set-option, which may open
+     the files of the host *)
+  let commands = [ "set-info"; "declare-fun"; "declare-const"; "assert"; "check-sat" ]
+
+  let check_commands data =
+    let n = String.length data in
+    let rec skip_string i =
+      if i >= n then i
+      else if Char.equal data.[i] '"' then
+        if i + 1 < n && Char.equal data.[i + 1] '"' then skip_string (i + 2)
+        else i + 1
+      else skip_string (i + 1)
+    in
+    let rec skip_until c i =
+      if i >= n || Char.equal data.[i] c then i + 1 else skip_until c (i + 1)
+    in
+    let command i =
+      let j = ref i in
+      while
+        !j < n
+        && not (Char.is_whitespace data.[!j] || Char.equal data.[!j] '('
+                || Char.equal data.[!j] ')')
+      do
+        incr j
+      done;
+      String.sub data ~pos:i ~len:(!j - i)
+    in
+    let rec loop depth i =
+      if i >= n then if depth = 0 then Ok () else Error "unbalanced"
+      else
+        match data.[i] with
+        | ';' -> loop depth (skip_until '\n' i)
+        | '"' -> loop depth (skip_string (i + 1))
+        | '|' -> loop depth (skip_until '|' (i + 1))
+        | '(' when depth = 0 ->
+            let name = command (i + 1) in
+            if List.mem commands name ~equal:String.equal then
+              loop 1 (i + 1)
+            else Error name
+        | '(' -> loop (depth + 1) (i + 1)
+        | ')' when depth = 0 -> Error "unbalanced"
+        | ')' -> loop (depth - 1) (i + 1)
+        | c when depth = 0 && not (Char.is_whitespace c) -> Error "an atom"
+        | _ -> loop depth (i + 1)
+    in
+    match loop 0 0 with
+    | Ok () -> ()
+    | Error what -> failwithf "the formulas of the checkpoint have %s" what ()
+
   let deserialize data ~exprs =
+    check_commands data;
     Z3.SMT.parse_smtlib2_string ctxt data [] [] [] []
     |> Z3.AST.ASTVector.to_expr_list
     |> List.filter_map ~f:(fun x ->

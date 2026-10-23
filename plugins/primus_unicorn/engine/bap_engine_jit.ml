@@ -184,6 +184,7 @@ let read_var t s v =
 (* the access to the memory, which stops the instruction, if it faults *)
 let access t s ~load addr bytes =
   if bytes > 64 then unsupported "an access of %d bytes" bytes;
+  if bytes < 1 then unsupported "an access of no bytes";
   let ok =
     assign t "call i32 @bap_jit_%s(ptr %%f, i64 %s, i32 %d, ptr %%buf)"
       (if load then "load" else "store")
@@ -195,6 +196,7 @@ let access t s ~load addr bytes =
   start t l
 
 let load t s addr endian bits =
+  if bits mod 8 <> 0 then unsupported "a load of %d bits" bits;
   let bytes = bits / 8 in
   access t s ~load:true addr bytes;
   let x = assign t "load %s, ptr %%buf, align 1" (ty bits) in
@@ -203,6 +205,7 @@ let load t s addr endian bits =
   | BigEndian -> bswap t x bits
 
 let store t s (addr, x, bits, endian) =
+  if bits mod 8 <> 0 then unsupported "a store of %d bits" bits;
   let x = match endian with LittleEndian -> x | BigEndian -> bswap t x bits in
   emit t "  store %s %s, ptr %%buf, align 1\n" (ty bits) x;
   access t s ~load:false addr (bits / 8)

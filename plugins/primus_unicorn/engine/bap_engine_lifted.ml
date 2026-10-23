@@ -606,8 +606,17 @@ let is_zero = function
 
 let bool b = S (1, if b then 1L else 0L)
 
+(* the operations, whose operands the semantics may make wrong, e.g., of
+   the widths, that don't match, which raise, make the instruction
+   unsupported, rather than end the emulation, as the hooks aren't
+   called in them *)
+let semantic f =
+  try f () with
+  | Invalid_argument msg | Failure msg -> raise (Unsupported_insn msg)
+  | Division_by_zero -> raise (Unsupported_insn "a division by zero")
+
 (* the operations of BIL, see [Bil.Apply], on the small values *)
-let binop (op : binop) x y =
+let binop (op : binop) x y = semantic @@ fun () ->
   match (x, y) with
   | S (w, a), S (w', b) -> (
       let same = Int.equal w w' in
@@ -647,14 +656,14 @@ let binop (op : binop) x y =
       | _ -> of_word (Bil.Apply.binop op (word x) (word y)))
   | _ -> of_word (Bil.Apply.binop op (word x) (word y))
 
-let unop (op : unop) = function
+let unop (op : unop) x = semantic @@ fun () -> match x with
   | S (w, a) -> (
       match op with
       | NEG -> S (w, norm w (Int64.neg a))
       | NOT -> S (w, norm w (Int64.lnot a)))
   | x -> of_word (Bil.Apply.unop op (word x))
 
-let cast (kind : cast) n = function
+let cast (kind : cast) n x = semantic @@ fun () -> match x with
   | S (w, a) when n <= 64 -> (
       match kind with
       | UNSIGNED -> S (n, norm n a)
@@ -663,13 +672,13 @@ let cast (kind : cast) n = function
       | HIGH -> S (n, norm n (if w > n then Int64.(a lsr Int.(w - n)) else a)))
   | x -> of_word (Bil.Apply.cast kind n (word x))
 
-let extract ~hi ~lo = function
+let extract ~hi ~lo x = semantic @@ fun () -> match x with
   | S (_, a) when hi < 64 && lo <= hi ->
       let w = hi - lo + 1 in
       S (w, norm w Int64.(a lsr lo))
   | x -> of_word (Word.extract_exn ~hi ~lo (word x))
 
-let concat x y =
+let concat x y = semantic @@ fun () ->
   match (x, y) with
   | S (a, x), S (b, y) when a + b <= 64 -> S (a + b, Int64.((x lsl b) lor y))
   | _ -> of_word (Word.concat (word x) (word y))

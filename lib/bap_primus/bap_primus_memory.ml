@@ -288,6 +288,20 @@ let empty_state =
     protections = [];
   }
 
+(* the protected ranges of a machine, at most, see [protect] *)
+let max_protections = 65530
+
+type exn += Too_many_protections of addr * addr
+
+let () =
+  Exn.add_printer (function
+    | Too_many_protections (lower, upper) ->
+        Some
+          (Format.asprintf
+             "the protection of [%a,%a] makes more than %d protected ranges"
+             Addr.pp lower Addr.pp upper max_protections)
+    | _ -> None)
+
 let find_protection addr { protections } =
   List.find_map protections ~f:(fun (lower, upper, protection) ->
       Option.some_if Addr.(addr >= lower && addr <= upper) protection)
@@ -745,12 +759,31 @@ module Make (Machine : Machine) = struct
     fetch addr (String.length data) >>= fun () ->
     store_bytes_unbacked addr data >>= fun () -> stored addr data
 
+  (* the range, that has the same protection, as the range before it, or
+     after it, joins them, e.g., of the pages, that the program protects
+     one at a time, and the ranges are at most as many, as Linux allows,
+     see vm.max_map_count, as each access looks them up *)
   let protect ~lower ~upper protection =
-    update (fun s ->
-        let s = unprotect lower upper s in
-        { s with protections = (lower, upper, protection) :: s.protections })
-    >>= fun () ->
-    Machine.Observation.make on_protected (lower, upper, protection)
+    let joined s =
+      let s = unprotect lower upper s in
+      let lower, upper, others =
+        List.fold s.protections ~init:(lower, upper, [])
+          ~f:(fun (lower, upper, others) ((lo, hi, p) as range) ->
+            if Poly.equal p protection && Addr.(succ hi = lower) then
+              (lo, upper, others)
+            else if Poly.equal p protection && Addr.(succ upper = lo) then
+              (lower, hi, others)
+            else (lower, upper, range :: others))
+      in
+      { s with protections = (lower, upper, protection) :: List.rev others }
+    in
+    get_curr >>= fun curr ->
+    let s = joined curr in
+    if List.length s.protections > max_protections then
+      Machine.raise (Too_many_protections (lower, upper))
+    else
+      update (fun _ -> s) >>= fun () ->
+      Machine.Observation.make on_protected (lower, upper, protection)
 
   let snapshot =
     (backing @@ fun b id -> store_fetched (b.fetch_all id)) >>= fun () ->

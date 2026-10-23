@@ -60,6 +60,15 @@ let init_channels =
           in
           Map.set chans ~key:fd ~data:chan)
 
+(* the files of the host, that the redirections of the options, or of
+   the scripts, see [redirect], name, which are the only files, that the
+   program may open, also when its channels are restored from a
+   checkpoint, which may be crafted *)
+let allowed = ref String.Set.empty
+
+let allow redirections =
+  allowed := Set.union !allowed (String.Set.of_list (List.map redirections ~f:snd))
+
 let init_redirections =
   List.fold ~init:String.Map.empty ~f:(fun redirs (oldname, newname) ->
       match fd_of_name oldname with
@@ -69,11 +78,24 @@ let init_redirections =
 let init redirs =
   { redirections = init_redirections redirs; channels = init_channels redirs }
 
+(* the files are closed, when no machine has their channels, e.g., after
+   the program closed them, as the machines, that forked, share them, so
+   that the program, that opens a file again and again, doesn't use all
+   descriptors of the host *)
+let closing_input ch =
+  Stdlib.Gc.finalise (fun ch -> try In_channel.close ch with _ -> ()) ch;
+  ch
+
+let closing_output ch =
+  Stdlib.Gc.finalise (fun ch -> try Out_channel.close ch with _ -> ()) ch;
+  ch
+
 let try_open path =
   Or_error.try_with (fun () ->
       {
-        input = Some (In_channel.create path);
-        output = Some (Out_channel.create ~append:true path);
+        input = Some (closing_input (In_channel.create path));
+        output =
+          Some (closing_output (Out_channel.create ~append:true path));
         source = File path;
       })
 
@@ -128,15 +150,29 @@ module Persistent = struct
             Option.some_if output
               (if n = 2 then Out_channel.stderr else Out_channel.stdout);
         }
+    (* the checkpoint, which may be crafted, reopens the files, that it
+       only reads, e.g., the input of the program, that the restored
+       machine reads on, which are regular, rather than, e.g., the pipes,
+       that would block, and the files, that it writes, only if they are
+       redirected now *)
+    | File path when output && not (Set.mem !allowed path) ->
+        failwithf "%s, that the channel writes, is not redirected" path ()
+    | File path
+      when not
+             (Set.mem !allowed path
+             || Stdlib.Sys.is_regular_file path) ->
+        failwithf "%s is not a regular file" path ()
     | File path ->
         {
           source;
           input =
             Option.map input ~f:(fun pos ->
-                let ch = In_channel.create path in
+                let ch = closing_input (In_channel.create path) in
                 In_channel.seek ch pos;
                 ch);
-          output = Option.some_if output (Out_channel.create ~append:true path);
+          output =
+            Option.some_if output
+              (closing_output (Out_channel.create ~append:true path));
         }
 
   module Extension (Machine : Primus.Machine.S) = struct
@@ -169,13 +205,25 @@ module Persistent = struct
             match open_channel ch with
             | Some chan -> Some (ch.fd, chan)
             | None ->
-                warning "can't open the channel %d anew, it is closed" ch.fd;
+                warning
+                  "can't open the channel %d anew, e.g., as its file isn't \
+                   redirected, it is closed"
+                  ch.fd;
                 None)
       in
+      (* the redirections of the checkpoint, to the files, that are
+         redirected now, and the ones of now *)
+      let redirections =
+        List.filter saved.redirections ~f:(fun (_, path) ->
+            Set.mem !allowed path)
+        |> String.Map.of_alist_reduce ~f:(fun _ x -> x)
+      in
+      Machine.Local.get state >>= fun current ->
       Machine.Local.put state
         {
           redirections =
-            String.Map.of_alist_reduce saved.redirections ~f:(fun _ x -> x);
+            Map.merge_skewed redirections current.redirections
+              ~combine:(fun ~key:_ _ now -> now);
           channels = Int.Map.of_alist_reduce channels ~f:(fun _ x -> x);
         }
   end
@@ -185,6 +233,7 @@ module Persistent = struct
 end
 
 let init redirections =
+  allow redirections;
   let module Lib (Machine : Primus.Machine.S) = struct
     include Machine.Syntax
     module Eval = Primus.Interpreter.Make (Machine)
@@ -505,6 +554,7 @@ let init redirections =
 
 (* the redirections of the machine, instead of those of the options *)
 let redirect redirections =
+  allow redirections;
   let module Redirect (Machine : Primus.Machine.S) = struct
     let init () =
       Machine.Local.put state

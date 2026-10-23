@@ -59,11 +59,18 @@
             (ptr (if fixed addr
                    (or *mmap/next*
                        (if (= (word-width) 64) 0x7f0000000000 0x60000000)))))
-        (when (not fixed)
-          (set *mmap/next* (+ ptr len)))
-        (memory-allocate ptr len 0)
-        (memory-protect ptr len prot)
-        ptr)))))
+        ;; the length, that wraps around, when it is rounded, or that is
+        ;; larger than the user space of Linux, and the mapping, that
+        ;; wraps around the address space, are ENOMEM
+        (if (or (= len 0)
+                (> len (if (= (word-width) 64) 0x800000000000 0xC0000000))
+                (< (+ ptr len) ptr))
+            (mman/fail 12)
+          (when (not fixed)
+            (set *mmap/next* (+ ptr len)))
+          (memory-allocate ptr len 0)
+          (memory-protect ptr len prot)
+          ptr))))))
 
 (defun munmap (addr len)
   "denies the access to the pages of [addr,addr+len), which stay
