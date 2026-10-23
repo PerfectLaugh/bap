@@ -140,6 +140,8 @@ type engine = {
       (** the offsets in the pages of the slots, e.g., of GOT, which refer to
           the external functions, and their trampolines *)
   big_endian : bool;
+  r6 : bool;
+      (** the release 6 of MIPS, whose compact branches have no delay slots *)
   mutable owner : Primus.Machine.id option;
   mutable reason : reason option;
   mutable frames : frame list;
@@ -837,6 +839,13 @@ let sync_stops e =
     Uc.flush_tb e.uc
   end
 
+(* the targets of the release 6 of MIPS, by their nicknames, see
+   Bap_mips_target *)
+let mips_r6 target =
+  List.exists
+    [ "mipsisa32r6"; "mipsisa32r6el"; "mipsisa64r6"; "mipsisa64r6el" ]
+    ~f:(Theory.Target.matches target)
+
 let create session target ~foreign ~externals =
   let arch, mode =
     match Target.engine target with
@@ -854,6 +863,10 @@ let create session target ~foreign ~externals =
      instructions of the release 2, e.g., seb, and rdhwr, which reads the
      pointer of TLS, that the programs of Linux use *)
   (match arch with
+  | Mips when mips_r6 target ->
+      Uc.set_cpu_model uc
+        (if Theory.Target.bits target = 64 then Uc.Cpu.mips64_i6400
+         else Uc.Cpu.mips32r6_generic)
   | Mips when Theory.Target.bits target = 64 ->
       Uc.set_cpu_model uc Uc.Cpu.mips64r2_generic
   | _ -> ());
@@ -917,6 +930,7 @@ let create session target ~foreign ~externals =
       slots = Int64.Table.create ();
       big_endian =
         Theory.Endianness.(equal eb) (Theory.Target.endianness target);
+      r6 = mips_r6 target;
       hooked = Int64.Hash_set.create ();
       stops = -1;
       stepper = None;
@@ -2456,22 +2470,32 @@ module Make (Machine : Primus.Machine.S) = struct
   (* if the instruction of MIPS is a branch or a jump, which has a delay
      slot, by its encoding: J, JAL, BEQ, BNE, BLEZ, BGTZ, and their likely
      forms, the branches of REGIMM, e.g., BLTZ and BGEZAL, JR and JALR of
-     SPECIAL, and BC1 of COP1 *)
-  let mips_delayed word =
+     SPECIAL, and BC1 of COP1. The release 6 has no likely forms, its
+     compact branches, e.g., BEQC of the former opcodes of BLEZL, or of
+     BLEZ, whose rt isn't 0, have no delay slots, and its BC1EQZ and
+     BC1NEZ have *)
+  let mips_delayed ~r6 word =
     let op = Int64.(to_int_exn ((word lsr 26) land 0x3FL)) in
     let rs = Int64.(to_int_exn ((word lsr 21) land 0x1FL)) in
     let rt = Int64.(to_int_exn ((word lsr 16) land 0x1FL)) in
     let funct = Int64.(to_int_exn (word land 0x3FL)) in
     match op with
-    | 0x02 | 0x03 | 0x04 | 0x05 | 0x06 | 0x07 | 0x14 | 0x15 | 0x16 | 0x17 ->
-        true
+    | 0x02 | 0x03 | 0x04 | 0x05 -> true
+    | 0x06 | 0x07 -> (not r6) || rt = 0
+    | 0x14 | 0x15 | 0x16 | 0x17 -> not r6
     | 0x01 ->
         List.mem
-          [ 0x00; 0x01; 0x02; 0x03; 0x10; 0x11; 0x12; 0x13 ]
+          (if r6 then [ 0x00; 0x01; 0x10; 0x11 ]
+           else [ 0x00; 0x01; 0x02; 0x03; 0x10; 0x11; 0x12; 0x13 ])
           rt ~equal:Int.equal
     | 0x00 -> funct = 0x08 || funct = 0x09
-    | 0x11 -> rs = 0x08
+    | 0x11 -> if r6 then rs = 0x09 || rs = 0x0D else rs = 0x08
     | _ -> false
+
+  let word_of_insn e data =
+    String.foldi data ~init:0L ~f:(fun i acc c ->
+        let shift = if e.big_endian then 8 * (3 - i) else 8 * i in
+        Int64.(acc lor (of_int (Char.to_int c) lsl shift)))
 
   (* Unicorn continues anew from [pc], outside of a delay slot of MIPS,
      whose branch, of the thread, that ran, or that Primus interpreted,
@@ -2490,12 +2514,7 @@ module Make (Machine : Primus.Machine.S) = struct
         let+ () = ensure_page e branch in
         match uc_read e branch 4 with
         | data ->
-            let word =
-              String.foldi data ~init:0L ~f:(fun i acc c ->
-                  let shift = if e.big_endian then 8 * (3 - i) else 8 * i in
-                  Int64.(acc lor (of_int (Char.to_int c) lsl shift)))
-            in
-            if mips_delayed word then branch else pc
+            if mips_delayed ~r6:e.r6 (word_of_insn e data) then branch else pc
         | exception (Native.Missing _ | Native.Denied) -> pc)
     | _ -> Machine.return pc
 
@@ -4131,11 +4150,20 @@ module Make (Machine : Primus.Machine.S) = struct
                 | Mips -> (
                     (* the branch, that is taken, runs its delay slot,
                        after its condition and its link, as the lifter
-                       lifts the branches without their delay slots *)
+                       lifts the branches without their delay slots, and
+                       the compact branch of the release 6 doesn't run
+                       the instruction after it, its forbidden slot *)
                     let* dst = Interpreter.step ~next blks in
                     let dst = int64_of_word (Primus.Value.to_word dst) in
                     let slot = Int64.(pc + of_int size) in
-                    if Int64.(dst = slot) then Machine.return dst
+                    let delayed =
+                      (not e.r6)
+                      ||
+                      match uc_read e pc 4 with
+                      | data -> mips_delayed ~r6:true (word_of_insn e data)
+                      | exception (Native.Missing _ | Native.Denied) -> true
+                    in
+                    if Int64.(dst = slot) || not delayed then Machine.return dst
                     else
                       lift e slot >>= function
                       | None ->

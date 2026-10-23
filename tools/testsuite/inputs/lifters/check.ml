@@ -8,8 +8,8 @@
    flags, the buffer, the address of the next instruction, and the
    status, e.g., of a fault, are compared:
 
-     bap script check.ml PROGRAM INSNS [thumb] [api=DIR] [seed=N] [runs=N]
-       [flags=all]
+     bap script check.ml PROGRAM INSNS [thumb] [r6] [api=DIR] [seed=N]
+       [runs=N] [flags=all]
 
    where PROGRAM is a program of the target, whose entry the
    instructions overwrite, and INSNS the file of the instructions, a line
@@ -94,21 +94,40 @@ let flags =
       (List.init 8 Fun.id)
   @ [ "SO"; "OV"; "CA" ]
 
+(* the release 6 of MIPS, whose compact branches have no delay slots,
+   e.g., of the program mips32r6el with r6 *)
+let r6 = flag "r6"
+
 (* if the instruction of MIPS has a delay slot, by its encoding, as
    [Primus_unicorn_executor.mips_delayed] tells *)
+let word_of code =
+  let b i = Char.code code.[if String.starts_with ~prefix:"mipsel" target || String.starts_with ~prefix:"mips64el" target || String.ends_with ~suffix:"el" target then 3 - i else i] in
+  (b 0 lsl 24) lor (b 1 lsl 16) lor (b 2 lsl 8) lor b 3
+
 let delayed code =
   String.length code = 4
   &&
-  let b i = Char.code code.[if String.starts_with ~prefix:"mipsel" target || String.starts_with ~prefix:"mips64el" target then 3 - i else i] in
-  let word = (b 0 lsl 24) lor (b 1 lsl 16) lor (b 2 lsl 8) lor b 3 in
+  let word = word_of code in
   let op = (word lsr 26) land 0x3F and rs = (word lsr 21) land 0x1F in
   let rt = (word lsr 16) land 0x1F and funct = word land 0x3F in
   match op with
-  | 0x02 | 0x03 | 0x04 | 0x05 | 0x06 | 0x07 | 0x14 | 0x15 | 0x16 | 0x17 -> true
+  | 0x02 | 0x03 | 0x04 | 0x05 -> true
+  (* BLEZ and BGTZ, the others of their opcodes are compact *)
+  | 0x06 | 0x07 when r6 -> rt = 0
+  | 0x06 | 0x07 | 0x14 | 0x15 | 0x16 | 0x17 -> not r6
+  | 0x01 when r6 -> List.mem rt [ 0x00; 0x01; 0x10; 0x11 ]
   | 0x01 -> List.mem rt [ 0x00; 0x01; 0x02; 0x03; 0x10; 0x11; 0x12; 0x13 ]
   | 0x00 -> funct = 0x08 || funct = 0x09
+  | 0x11 when r6 -> rs = 0x09 || rs = 0x0d
   | 0x11 -> rs = 0x08
   | _ -> false
+
+(* if the instruction is a conditional compact branch of the release 6,
+   whose forbidden slot, after it, Unicorn runs with it, if it is not
+   taken *)
+let compact code =
+  r6 && String.length code = 4 && (not (delayed code))
+  && List.mem ((word_of code lsr 26) land 0x3F) [ 0x06; 0x07; 0x08; 0x16; 0x17; 0x18; 0x36; 0x3E ]
 
 (* the nops, that follow the instruction *)
 let nops =
@@ -254,7 +273,7 @@ let () =
           match Emu.interpret emu with
           (* the branch of MIPS, that is not taken, runs its delay slot
              next *)
-          | Paused when mips && delayed code && Int64.equal (Emu.pc emu) (Int64.add entry 4L) ->
+          | Paused when mips && (delayed code || compact code) && Int64.equal (Emu.pc emu) (Int64.add entry 4L) ->
               Emu.interpret emu
           | status -> status
         in

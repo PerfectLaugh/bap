@@ -80,10 +80,30 @@ int addr_size(const Triple &target, const object::ObjectFile *obj) {
     }
 }
 
+// the subarchitecture, or the release 6 of MIPS, which the flags of ELF
+// tell, as the triple doesn't
+std::string subarch(const Triple &target, const object::ObjectFile *obj) {
+    switch (target.getArch()) {
+    case Triple::mips:
+    case Triple::mipsel:
+    case Triple::mips64:
+    case Triple::mips64el:
+        if (auto elf = dyn_cast<ELFObjectFileBase>(obj)) {
+            auto arch = elf->getPlatformFlags() & ELF::EF_MIPS_ARCH;
+            if (arch == ELF::EF_MIPS_ARCH_32R6 || arch == ELF::EF_MIPS_ARCH_64R6)
+                return "r6";
+        }
+        break;
+    default:
+        break;
+    }
+    return prim::string_of_subarch(target.getSubArch());
+}
+
 void emit_common_header(tables &s, const object::ObjectFile *obj) {
     auto target = obj->makeTriple();
     s.entry("arch") << Triple::getArchTypeName(target.getArch());
-    s.entry("subarch") << prim::string_of_subarch(target.getSubArch());
+    s.entry("subarch") << subarch(target, obj);
     s.entry("vendor") << target.getVendorName();
     s.entry("system") << target.getOSName();
     s.entry("abi") << prim::string_of_abi(target.getEnvironment());

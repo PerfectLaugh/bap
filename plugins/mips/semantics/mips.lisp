@@ -5,8 +5,20 @@
 (defpackage llvm-mips32le (:use mips))
 (defpackage llvm-mips64 (:use mips))
 (defpackage llvm-mips64le (:use mips))
+(defpackage llvm-mips32r6 (:use mips))
+(defpackage llvm-mips32r6le (:use mips))
+(defpackage llvm-mips64r6 (:use mips))
+(defpackage llvm-mips64r6le (:use mips))
 
 (in-package mips)
+
+;; the release 6 targets, whose instructions are defined at the end of
+;; the file, and whose FPU is of IEEE 754-2008, see below
+(defun release6 () false)
+(defun release6 () (declare (context (target mipsr6))) true)
+(defun release6 () (declare (context (target mipsr6el))) true)
+(defun release6 () (declare (context (target mips64r6))) true)
+(defun release6 () (declare (context (target mips64r6el))) true)
 
 ;;; MIPS32 AND MIPS64 RELEASE 2 INTEGER INSTRUCTIONS
 ;;
@@ -416,7 +428,11 @@
 ;; signaling NaNs: an operation, whose operand is a signaling NaN, or
 ;; which is invalid, e.g., 0/0, returns the default NaN, 0x7FBFFFFF or
 ;; 0x7FF7FFFFFFFFFFFF, and else the quiet NaN of its first operand,
-;; that is a NaN.
+;; that is a NaN. The Release 6 has the NaNs of IEEE 754-2008
+;; (FCSR.NAN2008 = 1), whose quiet bit is clear in the signaling NaNs:
+;; a signaling NaN operand is quieted, i.e., its quiet bit is set,
+;; instead, the default NaN is 0x7FC00000 or 0x7FF8000000000000, and
+;; the invalid conversions to integers saturate, a NaN converts to 0.
 ;;
 ;; The values are chosen with fp-select, which masks them, instead of
 ;; with a dynamic if, as Primus, which evaluates both arms of an
@@ -462,8 +478,9 @@
 ;; the registers
 
 (defun fpr64 ()
-  "true if the F registers are 64-bit"
-  (= (word-width) 64))
+  "true if the F registers are 64-bit, also on the MIPS32 of the
+   Release 6"
+  (logor (= (word-width) 64) (release6)))
 
 (defun get-s (r)
   "(get-s R) is the single of the operand R"
@@ -525,15 +542,31 @@
                (lnot (cast-unsigned (- (word-width x) f 1) 0)))
             (not (is-zero (cast-low f x))))))
 
+(defun fp-quiet-bit (x)
+  "(fp-quiet-bit X) is the most significant bit of the fraction of X"
+  (select (- (fp-frac x) 1) x))
+
 (defun fp-snan (x)
-  "(fp-snan X) is true if X is a signaling NaN of the legacy encoding"
-  (logand (fp-nan x) (select (- (fp-frac x) 1) x)))
+  "(fp-snan X) is true if X is a signaling NaN"
+  (logand (fp-nan x)
+          (if (release6) (not (fp-quiet-bit x)) (fp-quiet-bit x))))
 
 (defun fp-default-nan (x)
-  "the default NaN of the legacy encoding in the format of X"
-  (if (= (word-width x) 32)
-      (cast-low 32 0x7fbfffff)
-    0x7ff7ffffffffffff:64))
+  "the default NaN in the format of X"
+  (if (release6)
+      (if (= (word-width x) 32)
+          (cast-low 32 0x7fc00000)
+        0x7ff8000000000000:64)
+    (if (= (word-width x) 32)
+        (cast-low 32 0x7fbfffff)
+      0x7ff7ffffffffffff:64)))
+
+(defun fp-quiet (x)
+  "(fp-quiet X) is the signaling NaN X quieted, which is the default NaN
+   of the legacy encoding"
+  (if (release6)
+      (logor x (lshift (cast-unsigned (word-width x) 1:1) (- (fp-frac x) 1)))
+    (fp-default-nan x)))
 
 (defun fp-lt (x y)
   "(fp-lt X Y) is true if X < Y, false if they are unordered"
@@ -546,17 +579,18 @@
 
 (defun fp-result1 (r x)
   "(fp-result1 R X) is the result R of an operation on X or the NaN"
-  (fp-select (fp-snan x) (fp-default-nan x)
+  (fp-select (fp-snan x) (fp-quiet x)
     (fp-select (fp-nan x) x
       (fp-select (fp-nan r) (fp-default-nan x) r))))
 
 (defun fp-result2 (r x y)
   "(fp-result2 R X Y) is the result R of an operation on X and Y or the
    NaN"
-  (fp-select (logor (fp-snan x) (fp-snan y)) (fp-default-nan x)
+  (fp-select (fp-snan x) (fp-quiet x)
+    (fp-select (fp-snan y) (fp-quiet y)
     (fp-select (fp-nan x) x
       (fp-select (fp-nan y) y
-        (fp-select (fp-nan r) (fp-default-nan x) r)))))
+        (fp-select (fp-nan r) (fp-default-nan x) r))))))
 
 (defun fp-size (n)
   (case n
@@ -702,7 +736,16 @@
     (if (= n 32) 0x41e0000000000000:64 0x43e0000000000000:64)))
 
 ;; a NaN, an infinity, or a value, that is out of the range after the
-;; rounding, is invalid, and converts to the largest integer
+;; rounding, is invalid, and converts to the largest integer, or on the
+;; Release 6, saturates, and a NaN converts to 0
+(defun fp-invalid-int (n x)
+  "(fp-invalid-int N X) is the N-bit integer of the invalid X"
+  (let ((max (rshift (cast-signed n 1:1) 1)))
+    (if (release6)
+        (fp-select (fp-nan x) (cast-unsigned n 0)
+                   (fp-select (msb x) (lnot max) max))
+      max)))
+
 (defun fp-to-int (mode n x)
   "(fp-to-int MODE N X) is X rounded with MODE, one of 'rne, 'rtz, 'rtn
    and 'rtp, to an N-bit integer"
@@ -715,7 +758,7 @@
                (intrinsic (symbol-concat 'cast_sint 'rtz 'ieee754_binary
                                          (fp-size m) (fp-size n) :sep '_)
                           r :result n)
-               (rshift (cast-signed n 1:1) 1))))
+               (fp-invalid-int n x))))
 
 (defun fp-of-int (n x)
   "(fp-of-int N X) is the signed integer X converted to the N-bit
@@ -726,14 +769,15 @@
 
 (defun fp-convert-nan (x n)
   "(fp-convert-nan X N) is the NaN X converted to the N-bit format,
-   with the fraction truncated or extended, or the default NaN if X is
-   a signaling NaN"
-  (if (= n 64)
-      (fp-select (fp-snan x) 0x7ff7ffffffffffff:64
-                 (concat (msb x) (cast-low 11 0x7ff) (cast-low 23 x)
-                         (cast-low 29 0)))
-    (fp-select (fp-snan x) (cast-low 32 0x7fbfffff)
-               (concat (msb x) (cast-low 8 0xff) (extract 51 29 x)))))
+   with the fraction truncated or extended, and quieted, or of the
+   legacy encoding, the default NaN if X is a signaling NaN"
+  (let ((r (if (= n 64)
+               (concat (msb x) (cast-low 11 0x7ff) (cast-low 23 x)
+                       (cast-low 29 0))
+             (concat (msb x) (cast-low 8 0xff) (extract 51 29 x)))))
+    (if (release6)
+        (fp-quiet r)
+      (fp-select (fp-snan x) (fp-default-nan r) r))))
 
 (defun fp-convert (x n)
   (fp-select (fp-nan x) (fp-convert-nan x n)
@@ -851,3 +895,381 @@
 (defun BC1F (cc off) (branch (not (fcc cc)) off))
 (defun BC1TL (cc off) (BC1T cc off))
 (defun BC1FL (cc off) (BC1F cc off))
+
+;;; MIPS32 AND MIPS64 RELEASE 6 INSTRUCTIONS
+;;
+;; The Release 6 removes HI and LO, the likely branches, the condition
+;; codes of the FPU and the unfused multiply-add, and adds the
+;; instructions below. Its compact branches have no delay slot, so their
+;; link is the address of the next instruction, the forbidden slot.
+;; LLVM names the operations on the 64-bit registers of some of the
+;; MIPS32 instructions with the suffix 64, e.g., BEQZC64.
+
+(defun sext16 (x)
+  "(sext16 X) is the low 16 bits of X sign-extended to a word"
+  (cast-signed (word-width) (cast-low 16 x)))
+
+(defun compact-link () (+ (get-program-counter) 4))
+
+;; MULTIPLICATION AND DIVISION, the results are in the registers, the
+;; divisions by zero and the overflows are of the division by 1, as of
+;; QEMU, see divisor above
+
+(defmacro mul-high (cast rs rt)
+  (sext32 (cast-high 32 (* (cast 64 (low32 rs)) (cast 64 (low32 rt))))))
+
+(defmacro dmul-high (cast rs rt)
+  (cast-high 64 (* (cast 128 rs) (cast 128 rt))))
+
+(defun MUL_R6 (rd rs rt) (MUL rd rs rt))
+(defun MULU (rd rs rt) (MUL rd rs rt))
+(defun MUH (rd rs rt) (set$ rd (mul-high cast-signed rs rt)))
+(defun MUHU (rd rs rt) (set$ rd (mul-high cast-unsigned rs rt)))
+(defun DMUL_R6 (rd rs rt) (set$ rd (* rs rt)))
+(defun DMULU (rd rs rt) (set$ rd (* rs rt)))
+(defun DMUH (rd rs rt) (set$ rd (dmul-high cast-signed rs rt)))
+(defun DMUHU (rd rs rt) (set$ rd (dmul-high cast-unsigned rs rt)))
+
+(defmacro quotient (div signed x y)
+  (let ((d (divisor signed x y)))
+    (div x d)))
+
+(defmacro remainder (div signed x y)
+  (let ((d (divisor signed x y)))
+    (- x (* (div x d) d))))
+
+(defun DIV (rd rs rt) (set$ rd (sext32 (quotient s/ true (low32 rs) (low32 rt)))))
+(defun MOD (rd rs rt) (set$ rd (sext32 (remainder s/ true (low32 rs) (low32 rt)))))
+(defun DIVU (rd rs rt) (set$ rd (sext32 (quotient / false (low32 rs) (low32 rt)))))
+(defun MODU (rd rs rt) (set$ rd (sext32 (remainder / false (low32 rs) (low32 rt)))))
+(defun DDIV (rd rs rt) (set$ rd (quotient s/ true rs rt)))
+(defun DMOD (rd rs rt) (set$ rd (remainder s/ true rs rt)))
+(defun DDIVU (rd rs rt) (set$ rd (quotient / false rs rt)))
+(defun DMODU (rd rs rt) (set$ rd (remainder / false rs rt)))
+
+;; ARITHMETIC AND BIT OPERATIONS
+
+(defun mask-of (c)
+  "(mask-of C) is the word of ones if C is true and of zeros otherwise"
+  (neg (zext c)))
+
+(defun SELEQZ (rd rs rt) (set$ rd (logand rs (mask-of (is-zero rt)))))
+(defun SELNEZ (rd rs rt) (set$ rd (logand rs (mask-of (not (is-zero rt))))))
+(defun SELEQZ64 (rd rs rt) (SELEQZ rd rs rt))
+(defun SELNEZ64 (rd rs rt) (SELNEZ rd rs rt))
+
+;; the immediates are the upper parts of the addends
+(defun AUI (rt rs imm) (set$ rt (sext32 (+ rs (lshift imm 16)))))
+(defun DAUI (rt rs imm) (set$ rt (+ rs (lshift (sext16 imm) 16))))
+(defun DAHI (rs _ imm) (set$ rs (+ rs (lshift (sext16 imm) 32))))
+(defun DATI (rs _ imm) (set$ rs (+ rs (lshift (sext16 imm) 48))))
+
+;; the shift amount of LSA is the operand, i.e., the encoded one plus 1
+(defun LSA_R6 (rd rs rt sa) (set$ rd (sext32 (+ (lshift (low32 rs) sa) rt))))
+(defun DLSA_R6 (rd rs rt sa) (set$ rd (+ (lshift rs sa) rt)))
+
+;; (ALIGN rd rs rt bp) concatenates rt and rs and extracts a word at the
+;; byte bp from the most significant end
+(defun ALIGN (rd rs rt bp)
+  (set$ rd (sext32 (logor (lshift (low32 rt) (* 8 bp))
+                          (rshift (low32 rs) (- 32 (* 8 bp)))))))
+(defun DALIGN (rd rs rt bp)
+  (set$ rd (logor (lshift rt (* 8 bp)) (rshift rs (- 64 (* 8 bp))))))
+
+(defun swap-bits (x n m)
+  "swaps the adjacent N-bit groups of X, which the mask M selects"
+  (let ((m (cast-unsigned (word-width x) m)))
+    (logor (logand (rshift x n) m) (lshift (logand x m) n))))
+
+(defun reverse-bits-in-bytes (x)
+  (swap-bits (swap-bits (swap-bits x 1 0x5555555555555555)
+                        2 0x3333333333333333)
+             4 0x0f0f0f0f0f0f0f0f))
+
+(defun BITSWAP (rd rt) (set$ rd (sext32 (reverse-bits-in-bytes (low32 rt)))))
+(defun DBITSWAP (rd rt) (set$ rd (reverse-bits-in-bytes rt)))
+
+(defun CLZ_R6 (rd rs) (CLZ rd rs))
+(defun CLO_R6 (rd rs) (CLO rd rs))
+(defun DCLZ_R6 (rd rs) (DCLZ rd rs))
+(defun DCLO_R6 (rd rs) (DCLO rd rs))
+
+;; THE PC-RELATIVE INSTRUCTIONS, whose offsets are scaled by LLVM
+
+(defun ADDIUPC (rs off) (set$ rs (+ (get-program-counter) off)))
+(defun AUIPC (rs imm) (set$ rs (+ (get-program-counter) (lshift imm 16))))
+(defun ALUIPC (rs imm)
+  (set$ rs (logand (+ (get-program-counter) (lshift imm 16)) (lnot 0xffff))))
+(defun LWPC (rs off) (LW rs (get-program-counter) off))
+(defun LWUPC (rs off) (LWu rs (get-program-counter) off))
+;; the address of LDPC is of the doubleword of the instruction
+(defun LDPC (rs off) (LD rs (aligned 8 (get-program-counter)) off))
+
+;; the offsets of the loads and stores are 9-bit
+(defun LL_R6 (rt base off) (LL rt base off))
+(defun LL64_R6 (rt base off) (LL rt base off))
+(defun LLD_R6 (rt base off) (LLD rt base off))
+(defun SC_R6 (rt _ base off) (SC rt _ base off))
+(defun SC64_R6 (rt _ base off) (SC rt _ base off))
+(defun SCD_R6 (rt _ base off) (SCD rt _ base off))
+
+;; BRANCHES AND JUMPS
+
+(defun BC (off) (exec-addr (+ (get-program-counter) off)))
+(defun BALC (off)
+  (set RA (compact-link))
+  (BC off))
+
+(defun BEQZC (rs off) (branch (is-zero rs) off))
+(defun BNEZC (rs off) (branch (not (is-zero rs)) off))
+(defun BLEZC (rt off) (branch (s<= rt 0) off))
+(defun BGEZC (rt off) (branch (s>= rt 0) off))
+(defun BGTZC (rt off) (branch (s> rt 0) off))
+(defun BLTZC (rt off) (branch (s< rt 0) off))
+(defun BEQC (rs rt off) (branch (= rs rt) off))
+(defun BNEC (rs rt off) (branch (/= rs rt) off))
+(defun BLTC (rs rt off) (branch (s< rs rt) off))
+(defun BGEC (rs rt off) (branch (s>= rs rt) off))
+(defun BLTUC (rs rt off) (branch (< rs rt) off))
+(defun BGEUC (rs rt off) (branch (>= rs rt) off))
+(defun BEQZC64 (rs off) (BEQZC rs off))
+(defun BNEZC64 (rs off) (BNEZC rs off))
+(defun BLEZC64 (rt off) (BLEZC rt off))
+(defun BGEZC64 (rt off) (BGEZC rt off))
+(defun BGTZC64 (rt off) (BGTZC rt off))
+(defun BLTZC64 (rt off) (BLTZC rt off))
+(defun BEQC64 (rs rt off) (BEQC rs rt off))
+(defun BNEC64 (rs rt off) (BNEC rs rt off))
+(defun BLTC64 (rs rt off) (BLTC rs rt off))
+(defun BGEC64 (rs rt off) (BGEC rs rt off))
+(defun BLTUC64 (rs rt off) (BLTUC rs rt off))
+(defun BGEUC64 (rs rt off) (BGEUC rs rt off))
+
+;; the link is written whether the branch is taken or not
+(defun branch-link (cnd off)
+  (set RA (compact-link))
+  (branch cnd off))
+
+(defun BEQZALC (rt off) (branch-link (is-zero rt) off))
+(defun BNEZALC (rt off) (branch-link (not (is-zero rt)) off))
+(defun BLEZALC (rt off) (branch-link (s<= rt 0) off))
+(defun BGEZALC (rt off) (branch-link (s>= rt 0) off))
+(defun BGTZALC (rt off) (branch-link (s> rt 0) off))
+(defun BLTZALC (rt off) (branch-link (s< rt 0) off))
+
+;; the 32-bit addition overflows, also if an operand isn't a
+;; sign-extended word, as on MIPS64
+(defun add-overflows (rs rt)
+  (let ((r (+ (low32 rs) (low32 rt))))
+    (logor (signed-overflow 32 rs rt r)
+           (/= rs (sext32 rs))
+           (/= rt (sext32 rt)))))
+
+(defun BOVC (rs rt off) (branch (add-overflows rs rt) off))
+(defun BNVC (rs rt off) (branch (not (add-overflows rs rt)) off))
+
+;; the offsets of JIC and JIALC are 16-bit and not scaled
+(defun JIC (rt off) (exec-addr (+ rt (sext16 off))))
+(defun JIALC (rt off)
+  (let ((dst (+ rt (sext16 off))))
+    (set RA (compact-link))
+    (exec-addr dst)))
+(defun JIC64 (rt off) (JIC rt off))
+(defun JIALC64 (rt off) (JIALC rt off))
+
+;; BAL and NAL are BGEZAL and BLTZAL of the register 0, with the delay
+;; slot
+(defun BAL (off)
+  (set RA (link))
+  (BC off))
+(defun NAL () (set RA (link)))
+
+;; the hazard barriers are not modeled
+(defun JR_HB (rs) (JR rs))
+(defun JR_HB_R6 (rs) (JR rs))
+(defun JR_HB64 (rs) (JR rs))
+(defun JR_HB64_R6 (rs) (JR rs))
+(defun JALR_HB (rd rs) (JALR rd rs))
+(defun JALR_HB64 (rd rs) (JALR rd rs))
+(defun JALR64 (rd rs) (JALR rd rs))
+
+;; FLOATING-POINT INSTRUCTIONS
+;;
+;; The F registers are 64-bit, see fpr64, the NaNs are of IEEE 754-2008,
+;; see fp-snan, and the instructions use bit 0 of an F register as the
+;; condition instead of the condition codes.
+
+(defun fp-bit0 (r) (select 0 (get-s r)))
+
+;; (SEL fd fd ft fs) is ft if bit 0 of fd is set, and fs otherwise
+(defun SEL_S (fd _ fs ft) (set-s fd (fp-select (fp-bit0 fd) (get-s ft) (get-s fs))))
+(defun SEL_D (fd _ fs ft) (set-d fd (fp-select (fp-bit0 fd) (get-d ft) (get-d fs))))
+(defun SELEQZ_S (fd fs ft) (set-s fd (logand (get-s fs) (neg (cast-unsigned 32 (not (fp-bit0 ft)))))))
+(defun SELEQZ_D (fd fs ft) (set-d fd (logand (get-d fs) (neg (cast-unsigned 64 (not (fp-bit0 ft)))))))
+(defun SELNEZ_S (fd fs ft) (set-s fd (logand (get-s fs) (neg (cast-unsigned 32 (fp-bit0 ft))))))
+(defun SELNEZ_D (fd fs ft) (set-d fd (logand (get-d fs) (neg (cast-unsigned 64 (fp-bit0 ft))))))
+
+;; the branches on bit 0 of an F register, with the delay slot
+(defun BC1EQZ (ft off) (branch (not (fp-bit0 ft)) off))
+(defun BC1NEZ (ft off) (branch (fp-bit0 ft) off))
+
+;; the comparisons write the mask of the result, the signaling ones
+;; (bit 3 of the condition) only signal an invalid operation on a quiet
+;; NaN, whose exception is disabled, so the condition is of fp-compare
+
+(defun cmp-s (c fd fs ft)
+  (set-s fd (cast-signed 32 (fp-compare c (get-s fs) (get-s ft)))))
+(defun cmp-d (c fd fs ft)
+  (set-d fd (cast-signed 64 (fp-compare c (get-d fs) (get-d ft)))))
+
+(defun CMP_F_S (fd fs ft) (cmp-s 0 fd fs ft))
+(defun CMP_F_D (fd fs ft) (cmp-d 0 fd fs ft))
+(defun CMP_UN_S (fd fs ft) (cmp-s 1 fd fs ft))
+(defun CMP_UN_D (fd fs ft) (cmp-d 1 fd fs ft))
+(defun CMP_EQ_S (fd fs ft) (cmp-s 2 fd fs ft))
+(defun CMP_EQ_D (fd fs ft) (cmp-d 2 fd fs ft))
+(defun CMP_UEQ_S (fd fs ft) (cmp-s 3 fd fs ft))
+(defun CMP_UEQ_D (fd fs ft) (cmp-d 3 fd fs ft))
+(defun CMP_LT_S (fd fs ft) (cmp-s 4 fd fs ft))
+(defun CMP_LT_D (fd fs ft) (cmp-d 4 fd fs ft))
+(defun CMP_ULT_S (fd fs ft) (cmp-s 5 fd fs ft))
+(defun CMP_ULT_D (fd fs ft) (cmp-d 5 fd fs ft))
+(defun CMP_LE_S (fd fs ft) (cmp-s 6 fd fs ft))
+(defun CMP_LE_D (fd fs ft) (cmp-d 6 fd fs ft))
+(defun CMP_ULE_S (fd fs ft) (cmp-s 7 fd fs ft))
+(defun CMP_ULE_D (fd fs ft) (cmp-d 7 fd fs ft))
+(defun CMP_SAF_S (fd fs ft) (cmp-s 0 fd fs ft))
+(defun CMP_SAF_D (fd fs ft) (cmp-d 0 fd fs ft))
+(defun CMP_SUN_S (fd fs ft) (cmp-s 1 fd fs ft))
+(defun CMP_SUN_D (fd fs ft) (cmp-d 1 fd fs ft))
+(defun CMP_SEQ_S (fd fs ft) (cmp-s 2 fd fs ft))
+(defun CMP_SEQ_D (fd fs ft) (cmp-d 2 fd fs ft))
+(defun CMP_SUEQ_S (fd fs ft) (cmp-s 3 fd fs ft))
+(defun CMP_SUEQ_D (fd fs ft) (cmp-d 3 fd fs ft))
+(defun CMP_SLT_S (fd fs ft) (cmp-s 4 fd fs ft))
+(defun CMP_SLT_D (fd fs ft) (cmp-d 4 fd fs ft))
+(defun CMP_SULT_S (fd fs ft) (cmp-s 5 fd fs ft))
+(defun CMP_SULT_D (fd fs ft) (cmp-d 5 fd fs ft))
+(defun CMP_SLE_S (fd fs ft) (cmp-s 6 fd fs ft))
+(defun CMP_SLE_D (fd fs ft) (cmp-d 6 fd fs ft))
+(defun CMP_SULE_S (fd fs ft) (cmp-s 7 fd fs ft))
+(defun CMP_SULE_D (fd fs ft) (cmp-d 7 fd fs ft))
+
+;; The multiply-add is fused, i.e., it rounds only once, the product is
+;; computed with the fmad intrinsic. The result is a signaling NaN of
+;; the addend, of the first and of the second factor, in that order,
+;; quieted, then a quiet one, as of QEMU, also when the product is of an
+;; infinity and a zero, and else the default NaN, if it is invalid. The
+;; negated product of MSUBF doesn't negate a NaN operand.
+
+(defun fp-fmad (d s t)
+  "(fp-fmad D S T) is D + S * T rounded once"
+  (intrinsic (symbol-concat 'fmad 'rne 'ieee754_binary
+                            (fp-size (word-width d)) :sep '_)
+             s t d :result (word-width d)))
+
+(defun fp-result3 (r d s t)
+  "(fp-result3 R D S T) is the result R of a multiply-add of D, S and T
+   or the NaN"
+  (fp-select (fp-snan d) (fp-quiet d)
+    (fp-select (fp-snan s) (fp-quiet s)
+      (fp-select (fp-snan t) (fp-quiet t)
+        (fp-select (fp-nan d) d
+          (fp-select (fp-nan s) s
+            (fp-select (fp-nan t) t
+              (fp-select (fp-nan r) (fp-default-nan d) r))))))))
+
+(defun fp-maddf (d s t) (fp-result3 (fp-fmad d s t) d s t))
+(defun fp-msubf (d s t) (fp-result3 (fp-fmad d (fp-neg s) t) d s t))
+
+;; (MADDF fd fd fs ft) is fd + fs * ft, and MSUBF is fd - fs * ft
+(defun MADDF_S (fd _ fs ft) (set-s fd (fp-maddf (get-s fd) (get-s fs) (get-s ft))))
+(defun MADDF_D (fd _ fs ft) (set-d fd (fp-maddf (get-d fd) (get-d fs) (get-d ft))))
+(defun MSUBF_S (fd _ fs ft) (set-s fd (fp-msubf (get-s fd) (get-s fs) (get-s ft))))
+(defun MSUBF_D (fd _ fs ft) (set-d fd (fp-msubf (get-d fd) (get-d fs) (get-d ft))))
+
+;; The minimum and the maximum are minNum and maxNum of IEEE 754-2008: a
+;; quiet NaN is ignored if the other operand is a number, a signaling
+;; NaN is quieted. The negative zero is less than the positive one. The
+;; MINA and MAXA compare the absolute values, and, if they are equal,
+;; the values.
+
+(defun fp-min-num (x y)
+  (fp-select (fp-lt x y) x (fp-select (fp-lt y x) y (fp-select (msb x) x y))))
+
+(defun fp-max-num (x y)
+  (fp-select (fp-lt x y) y (fp-select (fp-lt y x) x (fp-select (msb x) y x))))
+
+(defun fp-min-mag (x y)
+  (fp-select (fp-lt (fp-abs x) (fp-abs y)) x
+    (fp-select (fp-lt (fp-abs y) (fp-abs x)) y (fp-min-num x y))))
+
+(defun fp-max-mag (x y)
+  (fp-select (fp-lt (fp-abs x) (fp-abs y)) y
+    (fp-select (fp-lt (fp-abs y) (fp-abs x)) x (fp-max-num x y))))
+
+(defun fp-num-result (r x y)
+  "(fp-num-result R X Y) is the result R of minNum or maxNum of X and Y
+   or the NaN"
+  (fp-select (logor (fp-snan x) (fp-snan y)) (fp-result2 r x y)
+    (fp-select (fp-nan x) (fp-select (fp-nan y) x y)
+      (fp-select (fp-nan y) x r))))
+
+(defun MIN_S (fd fs ft)
+  (let ((x (get-s fs)) (y (get-s ft))) (set-s fd (fp-num-result (fp-min-num x y) x y))))
+(defun MIN_D (fd fs ft)
+  (let ((x (get-d fs)) (y (get-d ft))) (set-d fd (fp-num-result (fp-min-num x y) x y))))
+(defun MAX_S (fd fs ft)
+  (let ((x (get-s fs)) (y (get-s ft))) (set-s fd (fp-num-result (fp-max-num x y) x y))))
+(defun MAX_D (fd fs ft)
+  (let ((x (get-d fs)) (y (get-d ft))) (set-d fd (fp-num-result (fp-max-num x y) x y))))
+(defun MINA_S (fd fs ft)
+  (let ((x (get-s fs)) (y (get-s ft))) (set-s fd (fp-num-result (fp-min-mag x y) x y))))
+(defun MINA_D (fd fs ft)
+  (let ((x (get-d fs)) (y (get-d ft))) (set-d fd (fp-num-result (fp-min-mag x y) x y))))
+(defun MAXA_S (fd fs ft)
+  (let ((x (get-s fs)) (y (get-s ft))) (set-s fd (fp-num-result (fp-max-mag x y) x y))))
+(defun MAXA_D (fd fs ft)
+  (let ((x (get-d fs)) (y (get-d ft))) (set-d fd (fp-num-result (fp-max-mag x y) x y))))
+
+;; the rounding to an integral value, of the current rounding mode,
+;; which is to nearest
+(defun fp-rint (x)
+  (fp-result1 (intrinsic (symbol-concat 'fround 'rne 'ieee754_binary
+                                        (fp-size (word-width x)) :sep '_)
+                         x :result (word-width x))
+              x))
+
+(defun RINT_S (fd fs) (set-s fd (fp-rint (get-s fs))))
+(defun RINT_D (fd fs) (set-d fd (fp-rint (get-d fs))))
+
+;; the class is the mask of one of the bits: 0 a signaling NaN, 1 a
+;; quiet NaN, 2-5 a negative infinity, normal, subnormal, and zero, and
+;; 6-9 the positive ones
+(defun fp-class (x)
+  (let ((w (word-width x))
+        (f (fp-frac x))
+        (e (extract (- w 2) f x))
+        (top (= e (lnot (cast-unsigned (- w f 1) 0))))
+        (zexp (is-zero e))
+        (zfrac (is-zero (cast-low f x)))
+        (neg (msb x))
+        (inf (logand top zfrac))
+        (norm (not (logor top zexp)))
+        (sub (logand zexp (not zfrac)))
+        (zero (logand zexp zfrac)))
+    (logor (fp-class-bit w 0 (fp-snan x))
+           (fp-class-bit w 1 (logand (fp-nan x) (not (fp-snan x))))
+           (fp-class-bit w 2 (logand neg inf))
+           (fp-class-bit w 3 (logand neg norm))
+           (fp-class-bit w 4 (logand neg sub))
+           (fp-class-bit w 5 (logand neg zero))
+           (fp-class-bit w 6 (logand (not neg) inf))
+           (fp-class-bit w 7 (logand (not neg) norm))
+           (fp-class-bit w 8 (logand (not neg) sub))
+           (fp-class-bit w 9 (logand (not neg) zero)))))
+
+(defun fp-class-bit (w n c) (lshift (cast-unsigned w c) n))
+
+(defun CLASS_S (fd fs) (set-s fd (fp-class (get-s fs))))
+(defun CLASS_D (fd fs) (set-d fd (fp-class (get-d fs))))

@@ -32,6 +32,20 @@ val mips64eb : Theory.Target.t
 val mips64le : Theory.Target.t
 (** The little endian MIPS64 *)
 
+(** {3 The release 6}
+
+    The targets of the release 6, whose encodings differ, e.g., of the compact
+    branches, which have no delay slots, and whose FPU is 64-bit, also on
+    MIPS32. *)
+
+val mips32r6eb : Theory.Target.t
+val mips32r6le : Theory.Target.t
+val mips64r6eb : Theory.Target.t
+val mips64r6le : Theory.Target.t
+
+val is_r6 : Theory.Target.t -> bool
+(** [is_r6 t] if [t] is of the release 6. *)
+
 (** {2 MIPS encodings} *)
 
 val llvm_mips32 : Theory.language

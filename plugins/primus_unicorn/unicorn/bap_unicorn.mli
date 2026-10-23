@@ -72,9 +72,15 @@ module Cpu : sig
   (** [arm64_max] is the AArch64 CPU with all the features of QEMU, e.g., the
       LSE atomics of ARMv8.1, which the default Cortex-A72 lacks. *)
 
+  val mips32r6_generic : int
+  (** [mips32r6_generic] is the MIPS32 CPU of the release 6. *)
+
   val mips64r2_generic : int
   (** [mips64r2_generic] is the MIPS64 CPU of the release 2, e.g., with seb and
       rdhwr, which the default R4000 of MIPS III lacks. *)
+
+  val mips64_i6400 : int
+  (** [mips64_i6400] is the MIPS64 CPU of the release 6, I6400. *)
 end
 
 val set_cpu_model : t -> int -> unit

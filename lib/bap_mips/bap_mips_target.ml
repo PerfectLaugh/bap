@@ -73,10 +73,10 @@ let gpr_names =
 let untyped = List.map ~f:Theory.Var.forget
 let ( @< ) xs ys = untyped xs @ untyped ys
 
-let name size order =
+let name ?(release = "") size order =
   let ends = Theory.Endianness.name order in
   let size = if size = 32 then "" else "64" in
-  sprintf "mips%s%s" size
+  sprintf "mips%s%s%s" size release
   @@
   if Theory.Endianness.(equal eb) order then ""
   else if Theory.Endianness.(equal le) order then "el"
@@ -87,10 +87,13 @@ let parent = Theory.Target.declare ~package "mips-family"
 let array ?(from = 0) bits pref n =
   List.init n ~f:(fun i -> reg bits (sprintf "%s%d" pref (i + from)))
 
-let define ?(parent = parent) ?nicknames bits endianness =
+(* the FPU of the release 6 is 64-bit (Status.FR = 1), also on MIPS32 *)
+let define ?(parent = parent) ?(r6 = false) ?nicknames bits endianness =
   let size = Theory.Bitv.size bits in
   let gprs = array bits "R" 32 in
-  let fprs = array bits "F" 32 in
+  let fprs =
+    if r6 then untyped (array r64 "F" 32) else untyped (array bits "F" 32)
+  in
   let mems = Theory.Mem.define bits r8 in
   let data = Theory.Var.define mems "mem" in
   let hilo = [ reg bits "HI"; reg bits "LO" ] in
@@ -100,10 +103,12 @@ let define ?(parent = parent) ?nicknames bits endianness =
   (* the condition codes of the FPU, of FCSR, which c.cond.fmt sets, and
      bc1t, bc1f, movt, and movf read *)
   let fccs =
-    List.init 8 ~f:(fun i -> Theory.Var.define Theory.Bool.t (sprintf "FCC%d" i))
+    List.init 8 ~f:(fun i ->
+        Theory.Var.define Theory.Bool.t (sprintf "FCC%d" i))
   in
   let vars =
-    gprs @< fprs @< hilo @< [ userlocal ] @< untyped fccs @ untyped [ data ]
+    untyped gprs @ fprs @ untyped hilo @< [ userlocal ] @< untyped fccs
+    @ untyped [ data ]
   in
   let regs = List.map ~f:(fun name -> Theory.Var.forget (reg bits name)) in
   let aliases = List.map gpr_names ~f:(reg bits) in
@@ -114,7 +119,10 @@ let define ?(parent = parent) ?nicknames bits endianness =
   in
   let args = if size = 32 then 4 else 8 in
   let iargs = array bits "R" ~from:4 args in
-  let fargs = array bits "F" ~from:1 args in
+  (* the floating-point arguments and results are the registers of the
+     FPU, which are 64-bit on the release 6 *)
+  let fpr n = List.nth_exn fprs n in
+  let fargs = List.init args ~f:(fun i -> fpr (i + 1)) in
   let aliasing =
     List.map2_exn gprs aliases ~f:(fun r p -> Theory.Alias.(def r [ reg p ]))
     @
@@ -123,20 +131,22 @@ let define ?(parent = parent) ?nicknames bits endianness =
           Theory.Alias.(def r [ reg p ]))
     else []
   in
-  Theory.Target.declare ~package (name size endianness) ~parent ?nicknames
-    ~bits:size ~endianness ~aliasing ~code:data ~data ~vars
+  let release = if r6 then "r6" else "" in
+  Theory.Target.declare ~package
+    (name ~release size endianness)
+    ~parent ?nicknames ~bits:size ~endianness ~aliasing ~code:data ~data ~vars
     ~regs:
       Theory.Role.Register.
         [
           ([ general; integer ], regs gpr_names);
-          ([ general; floating ], untyped fprs);
+          ([ general; floating ], fprs);
           ([ special; integer ], untyped hilo);
           ( [ constant; zero; pseudo ],
             regs ([ "ZERO"; "R0" ] @ if size = 64 then [ "ZERO_64" ] else []) );
           ([ function_argument; integer ], untyped iargs);
-          ([ function_argument; floating ], untyped fargs);
+          ([ function_argument; floating ], fargs);
           ([ function_return; integer ], regs [ "R2" ]);
-          ([ function_return; floating ], regs [ "F0" ]);
+          ([ function_return; floating ], [ fpr 0 ]);
           ([ stack_pointer ], regs [ "R29" ]);
           ([ frame_pointer ], regs [ "R30" ]);
           ([ link ], regs [ "R31" ]);
@@ -165,8 +175,31 @@ let mips64eb =
   define r64 Theory.Endianness.eb ~parent
     ~nicknames:[ "mips64"; "mips64eb"; "mips64be" ]
 
+(* the release 6, whose encodings of the branches differ, e.g., the
+   compact branches, which have no delay slots, and whose FPU is 64-bit *)
+let mips32r6eb =
+  define r32 Theory.Endianness.eb ~r6:true
+    ~nicknames:[ "mipsisa32r6"; "mips32r6eb"; "mips32r6be" ]
+
+let mips32r6le =
+  define r32 Theory.Endianness.le ~r6:true
+    ~nicknames:[ "mipsisa32r6el"; "mips32r6le"; "mips32r6el" ]
+
+let mips64r6eb =
+  define r64 Theory.Endianness.eb ~r6:true
+    ~nicknames:[ "mipsisa64r6"; "mips64r6eb"; "mips64r6be" ]
+
+let mips64r6le =
+  define r64 Theory.Endianness.le ~r6:true
+    ~nicknames:[ "mipsisa64r6el"; "mips64r6le"; "mips64r6el" ]
+
+let r6 = [ mips32r6eb; mips32r6le; mips64r6eb; mips64r6le ]
+let is_r6 t = List.exists r6 ~f:(fun p -> Theory.Target.belongs p t)
+
 let register_subtargets () =
-  List.iter [ mips32eb; mips32le; mips64eb; mips64le ] ~f:(fun parent ->
+  List.iter
+    ([ mips32eb; mips32le; mips64eb; mips64le ] @ r6)
+    ~f:(fun parent ->
       Theory.Target.register parent
         ~abis:Theory.Abi.[ unknown; gnu ]
         ~systems:Theory.System.[ unknown; linux; freebsd; openbsd ]
@@ -200,27 +233,29 @@ let enable_loader () =
       Ogre.request Image.Scheme.is_little_endian >>= fun little ->
       Ogre.request Image.Scheme.bits >>= fun bits ->
       Ogre.request Image.Scheme.format >>= fun format ->
-      Ogre.return (arch, little, bits, format)
+      Ogre.request Image.Scheme.subarch >>= fun subarch ->
+      Ogre.return (arch, little, bits, format, subarch)
     in
     match Ogre.eval request doc with
-    | Error _ -> (None, None, None, None)
+    | Error _ -> (None, None, None, None, None)
     | Ok info -> info
   in
   KB.promise Theory.Unit.target @@ fun unit ->
   KB.collect Image.Spec.slot unit >>| request_info
-  >>| fun (arch, is_little, bits, format) ->
+  >>| fun (arch, is_little, bits, format, subarch) ->
   if is_mips arch then
     let abi, filetype =
       match format with
       | Some "elf" -> (Theory.Abi.gnu, Theory.Filetype.elf)
       | _ -> (Theory.Abi.unknown, Theory.Filetype.unknown)
     in
+    let r6 = Option.equal String.equal subarch (Some "r6") in
     let parent =
       match (is_32bit arch bits, is_little) with
-      | true, Some true -> mips32le
-      | true, Some false -> mips32eb
-      | false, Some true -> mips64le
-      | false, Some false -> mips64eb
+      | true, Some true -> if r6 then mips32r6le else mips32le
+      | true, Some false -> if r6 then mips32r6eb else mips32eb
+      | false, Some true -> if r6 then mips64r6le else mips64le
+      | false, Some false -> if r6 then mips64r6eb else mips64eb
       | true, None -> mips32bi
       | false, None -> mips64bi
     in
@@ -257,6 +292,10 @@ let llvm_mips32 = Theory.Language.declare ~package "llvm-mips32"
 let llvm_mips64 = Theory.Language.declare ~package "llvm-mips64"
 let llvm_mips32le = Theory.Language.declare ~package "llvm-mips32le"
 let llvm_mips64le = Theory.Language.declare ~package "llvm-mips64le"
+let llvm_mips32r6 = Theory.Language.declare ~package "llvm-mips32r6"
+let llvm_mips64r6 = Theory.Language.declare ~package "llvm-mips64r6"
+let llvm_mips32r6le = Theory.Language.declare ~package "llvm-mips32r6le"
+let llvm_mips64r6le = Theory.Language.declare ~package "llvm-mips64r6le"
 
 (* the release 2 instructions, e.g., ROTR, EXT and SEB, are decoded *)
 let register encoding triple cpu =
@@ -268,15 +307,23 @@ let enable_llvm_decoder () =
   register llvm_mips64 "mips64" "mips64r2";
   register llvm_mips32le "mipsel" "mips32r2";
   register llvm_mips64le "mips64el" "mips64r2";
+  register llvm_mips32r6 "mips" "mips32r6";
+  register llvm_mips64r6 "mips64" "mips64r6";
+  register llvm_mips32r6le "mipsel" "mips32r6";
+  register llvm_mips64r6le "mips64el" "mips64r6";
   KB.promise Theory.Label.encoding @@ fun label ->
   Theory.Label.target label >>| fun t ->
   if Theory.Target.belongs parent t then
     let dir = Theory.Target.endianness t in
-    match (Theory.Target.bits t, Theory.Endianness.(equal dir le)) with
-    | 32, true -> llvm_mips32le
-    | 64, true -> llvm_mips64le
-    | 32, _ -> llvm_mips32
-    | 64, _ -> llvm_mips64
+    match (Theory.Target.bits t, Theory.Endianness.(equal dir le), is_r6 t) with
+    | 32, true, false -> llvm_mips32le
+    | 64, true, false -> llvm_mips64le
+    | 32, _, false -> llvm_mips32
+    | 64, _, false -> llvm_mips64
+    | 32, true, true -> llvm_mips32r6le
+    | 64, true, true -> llvm_mips64r6le
+    | 32, _, true -> llvm_mips32r6
+    | 64, _, true -> llvm_mips64r6
     | _ -> Theory.Language.unknown
   else Theory.Language.unknown
 

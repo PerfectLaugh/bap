@@ -1,0 +1,147 @@
+# the instructions of the cases lifters/mips64r6/N, the instructions of the
+# release 6 of MIPS, that llvm-mc assembles, whose results in Unicorn
+# and in Primus agree, as check.ml compares them, with runs=2 r6, but
+# jic and jialc, which crash Unicorn
+
+00 85 10 98  # mul	$2, $4, $5
+00 85 10 d8  # muh	$2, $4, $5
+00 85 10 99  # mulu	$2, $4, $5
+00 85 10 d9  # muhu	$2, $4, $5
+00 85 10 9a  # div	$2, $4, $5
+00 85 10 da  # mod	$2, $4, $5
+00 85 10 9b  # divu	$2, $4, $5
+00 85 10 db  # modu	$2, $4, $5
+00 85 10 35  # seleqz	$2, $4, $5
+00 85 10 37  # selnez	$2, $4, $5
+3c 82 12 34  # aui	$2, $4, 4660
+00 85 10 85  # lsa	$2, $4, $5, 3
+7c 85 12 60  # align	$2, $4, $5, 1
+7c 04 10 20  # bitswap	$2, $4
+00 80 10 50  # clz	$2, $4
+00 80 10 51  # clo	$2, $4
+ec 48 00 40  # lwpc	$2, 256
+7c 82 04 36  # ll	$2, 8($4)
+c8 00 00 10  # bc	64
+e8 00 00 10  # balc	64
+d8 80 00 10  # beqzc	$4, 64
+f8 80 00 10  # bnezc	$4, 64
+20 85 00 10  # beqc	$4, $5, 64
+60 85 00 10  # bnec	$4, $5, 64
+5c 85 00 10  # bltc	$4, $5, 64
+58 85 00 10  # bgec	$4, $5, 64
+1c 85 00 10  # bltuc	$4, $5, 64
+18 85 00 10  # bgeuc	$4, $5, 64
+58 04 00 10  # blezc	$4, 64
+58 84 00 10  # bgezc	$4, 64
+5c 04 00 10  # bgtzc	$4, 64
+5c 84 00 10  # bltzc	$4, 64
+20 04 00 10  # beqzalc	$4, 64
+60 04 00 10  # bnezalc	$4, 64
+18 04 00 10  # blezalc	$4, 64
+18 84 00 10  # bgezalc	$4, 64
+1c 04 00 10  # bgtzalc	$4, 64
+1c 84 00 10  # bltzalc	$4, 64
+20 a4 00 10  # bovc	$4, $5, 64
+60 a4 00 10  # bnvc	$4, $5, 64
+04 10 00 00  # nal
+04 11 00 10  # bal	64
+03 e0 00 09  # jr	$ra
+00 80 f8 09  # jalr	$4
+00 80 04 09  # jr.hb	$4
+00 80 fc 09  # jalr.hb	$4
+10 85 00 10  # beq	$4, $5, 64
+14 85 00 10  # bne	$4, $5, 64
+18 80 00 10  # blez	$4, 64
+1c 80 00 10  # bgtz	$4, 64
+04 80 00 10  # bltz	$4, 64
+04 81 00 10  # bgez	$4, 64
+46 84 10 00  # cmp.af.s	$f0, $f2, $f4
+46 84 10 01  # cmp.un.s	$f0, $f2, $f4
+46 84 10 02  # cmp.eq.s	$f0, $f2, $f4
+46 84 10 03  # cmp.ueq.s	$f0, $f2, $f4
+46 84 10 04  # cmp.lt.s	$f0, $f2, $f4
+46 84 10 05  # cmp.ult.s	$f0, $f2, $f4
+46 84 10 06  # cmp.le.s	$f0, $f2, $f4
+46 84 10 07  # cmp.ule.s	$f0, $f2, $f4
+46 84 10 08  # cmp.saf.s	$f0, $f2, $f4
+46 84 10 09  # cmp.sun.s	$f0, $f2, $f4
+46 84 10 0a  # cmp.seq.s	$f0, $f2, $f4
+46 84 10 0b  # cmp.sueq.s	$f0, $f2, $f4
+46 84 10 0c  # cmp.slt.s	$f0, $f2, $f4
+46 84 10 0d  # cmp.sult.s	$f0, $f2, $f4
+46 84 10 0e  # cmp.sle.s	$f0, $f2, $f4
+46 84 10 0f  # cmp.sule.s	$f0, $f2, $f4
+46 a4 10 00  # cmp.af.d	$f0, $f2, $f4
+46 a4 10 01  # cmp.un.d	$f0, $f2, $f4
+46 a4 10 02  # cmp.eq.d	$f0, $f2, $f4
+46 a4 10 03  # cmp.ueq.d	$f0, $f2, $f4
+46 a4 10 04  # cmp.lt.d	$f0, $f2, $f4
+46 a4 10 05  # cmp.ult.d	$f0, $f2, $f4
+46 a4 10 06  # cmp.le.d	$f0, $f2, $f4
+46 a4 10 07  # cmp.ule.d	$f0, $f2, $f4
+46 a4 10 08  # cmp.saf.d	$f0, $f2, $f4
+46 a4 10 09  # cmp.sun.d	$f0, $f2, $f4
+46 a4 10 0a  # cmp.seq.d	$f0, $f2, $f4
+46 a4 10 0b  # cmp.sueq.d	$f0, $f2, $f4
+46 a4 10 0c  # cmp.slt.d	$f0, $f2, $f4
+46 a4 10 0d  # cmp.sult.d	$f0, $f2, $f4
+46 a4 10 0e  # cmp.sle.d	$f0, $f2, $f4
+46 a4 10 0f  # cmp.sule.d	$f0, $f2, $f4
+46 04 10 10  # sel.s	$f0, $f2, $f4
+46 24 10 10  # sel.d	$f0, $f2, $f4
+46 04 10 14  # seleqz.s	$f0, $f2, $f4
+46 24 10 14  # seleqz.d	$f0, $f2, $f4
+46 04 10 17  # selnez.s	$f0, $f2, $f4
+46 24 10 17  # selnez.d	$f0, $f2, $f4
+46 04 10 18  # maddf.s	$f0, $f2, $f4
+46 24 10 18  # maddf.d	$f0, $f2, $f4
+46 04 10 19  # msubf.s	$f0, $f2, $f4
+46 24 10 19  # msubf.d	$f0, $f2, $f4
+46 04 10 1c  # min.s	$f0, $f2, $f4
+46 24 10 1c  # min.d	$f0, $f2, $f4
+46 04 10 1e  # max.s	$f0, $f2, $f4
+46 24 10 1e  # max.d	$f0, $f2, $f4
+46 04 10 1d  # mina.s	$f0, $f2, $f4
+46 24 10 1d  # mina.d	$f0, $f2, $f4
+46 04 10 1f  # maxa.s	$f0, $f2, $f4
+46 24 10 1f  # maxa.d	$f0, $f2, $f4
+46 00 10 1a  # rint.s	$f0, $f2
+46 20 10 1a  # rint.d	$f0, $f2
+46 00 10 1b  # class.s	$f0, $f2
+46 20 10 1b  # class.d	$f0, $f2
+45 21 00 10  # bc1eqz $f1, 64
+45 a1 00 10  # bc1nez $f1, 64
+44 62 20 00  # mfhc1	$2, $f4
+44 e2 20 00  # mthc1	$2, $f4
+46 24 10 00  # add.d	$f0, $f2, $f4
+00 85 10 9c  # dmul	$2, $4, $5
+00 85 10 dc  # dmuh	$2, $4, $5
+00 85 10 9d  # dmulu	$2, $4, $5
+00 85 10 dd  # dmuhu	$2, $4, $5
+00 85 10 9e  # ddiv	$2, $4, $5
+00 85 10 de  # dmod	$2, $4, $5
+00 85 10 9f  # ddivu	$2, $4, $5
+00 85 10 df  # dmodu	$2, $4, $5
+74 82 12 34  # daui	$2, $4, 4660
+00 85 10 95  # dlsa	$2, $4, $5, 3
+7c 85 12 e4  # dalign	$2, $4, $5, 3
+7c 04 10 24  # dbitswap	$2, $4
+00 80 10 52  # dclz	$2, $4
+00 80 10 53  # dclo	$2, $4
+ec 50 00 40  # lwupc	$2, 256
+ec 58 00 20  # ldpc	$2, 256
+7c 82 04 37  # lld	$2, 8($4)
+
+# the instructions, whose results differ, as Unicorn or the checker
+# differ, e.g., the ones of a random address, or that Unicorn
+# doesn't have, and why
+# ec 40 00 40  # lapc	$2, 256
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 20294; R2 0x3FFE1060 / 0x20390; memory 
+# ec 5e 12 34  # auipc	$2, 4660
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 20294; R2 0x3FFE10B0 / 0x12360290; memo
+# ec 5f 12 34  # aluipc	$2, 4660
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 20294; R2 0x3FFE1290 / 0x12360000; memo
+# 7c 82 04 26  # sc	$2, 8($4)
+#   R2 0 / 1; memory at 3ffe1148
+# 7c 82 04 27  # scd	$2, 8($4)
+#   R2 0 / 1; memory at 3ffe1778

@@ -56,7 +56,9 @@ external close : t -> unit = "bap_uc_close"
 (* the values of uc_cpu_* *)
 module Cpu = struct
   let arm64_max = 3
+  let mips32r6_generic = 14
   let mips64r2_generic = 5
+  let mips64_i6400 = 8
 end
 
 external set_cpu_model : t -> int -> unit = "bap_uc_set_cpu_model"

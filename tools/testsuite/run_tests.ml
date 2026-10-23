@@ -1882,6 +1882,8 @@ let lifters data =
       ("thumb", "arm-linux-gnueabi-echo", [ "thumb" ]);
       ("mips", "mips-linux-gnu-echo", []);
       ("mips64", "mips64-linux-gnueabi-echo", []);
+      ("mips32r6", "mipsisa32r6-linux-gnu-r6", [ "r6" ]);
+      ("mips64r6", "mipsisa64r6-linux-gnuabi64-r6", [ "r6" ]);
       ("riscv64", "riscv64-linux-gnu-echo", []);
       ( "powerpc",
         "powerpc-linux-gnu-threads-weird",

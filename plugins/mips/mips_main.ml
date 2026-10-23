@@ -51,6 +51,15 @@ let delayed =
       "BC1F";
       "BC1TL";
       "BC1FL";
+      (* the release 6, whose compact branches have no delay slots *)
+      "BAL";
+      "NAL";
+      "BC1EQZ";
+      "BC1NEZ";
+      "JALR_HB64";
+      "JR_HB_R6";
+      "JR_HB64_R6";
+      "JALR64_R6";
     ]
 
 let promise_delay_slots () =
