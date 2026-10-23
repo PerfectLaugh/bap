@@ -963,3 +963,607 @@
 
 ;; the memory forms of the instructions of x86-sse.lisp
 (defun SHUFPDrmi (rd x base scale index off seg n) (SHUFPDrri rd x (load-n 128 (ea base scale index off seg)) n))
+
+;;; BLENDS, BROADCASTS, PERMUTATIONS AND THE OTHER SSE4 AND AVX2 INSTRUCTIONS
+;;
+;; The blends select the lanes of the second source, whose bits of the
+;; immediate, or of the mask, are set, and the other lanes of the first
+;; source. The 256-bit permutations of AVX are in each 128-bit half, as
+;; the other 256-bit instructions, but VPERMQ, VPERMPD, VPERMD, VPERMPS,
+;; VPERM2F128 and VPERM2I128, which cross the halves.
+
+(defun blend-by (mask x y)
+  "(blend-by MASK X Y) is the bits of Y, where MASK is set, else of X"
+  (logor (logand y mask) (logand x (lnot mask))))
+
+(defun imm-lane (imm n size)
+  "(imm-lane IMM N SIZE) is a SIZE-bit lane of ones, if the bit N of
+   IMM is set, else of zeros"
+  (if (= (logand (rshift imm n) 1) 1) (ones size) (zeros size)))
+
+(defun lane-sign (x _)
+  "(lane-sign X _) is the lane of the sign of X"
+  (arshift x (- (lane-size x) (one-of x))))
+
+(defun blend-pd-mask (imm)
+  (concat (imm-lane imm 1 64) (imm-lane imm 0 64)))
+(defun blend-pd-ymask (imm)
+  (concat (imm-lane imm 3 64) (imm-lane imm 2 64) (imm-lane imm 1 64) (imm-lane imm 0 64)))
+(defun blend-ps-mask (imm)
+  (concat (imm-lane imm 3 32) (imm-lane imm 2 32) (imm-lane imm 1 32) (imm-lane imm 0 32)))
+(defun blend-ps-ymask (imm)
+  (concat (imm-lane imm 7 32) (imm-lane imm 6 32) (imm-lane imm 5 32) (imm-lane imm 4 32) (imm-lane imm 3 32) (imm-lane imm 2 32) (imm-lane imm 1 32) (imm-lane imm 0 32)))
+(defun blend-w-mask (imm)
+  (concat (imm-lane imm 7 16) (imm-lane imm 6 16) (imm-lane imm 5 16) (imm-lane imm 4 16) (imm-lane imm 3 16) (imm-lane imm 2 16) (imm-lane imm 1 16) (imm-lane imm 0 16)))
+(defun blend-w-ymask (imm)
+  (concat (imm-lane imm 7 16) (imm-lane imm 6 16) (imm-lane imm 5 16) (imm-lane imm 4 16) (imm-lane imm 3 16) (imm-lane imm 2 16) (imm-lane imm 1 16) (imm-lane imm 0 16) (imm-lane imm 7 16) (imm-lane imm 6 16) (imm-lane imm 5 16) (imm-lane imm 4 16) (imm-lane imm 3 16) (imm-lane imm 2 16) (imm-lane imm 1 16) (imm-lane imm 0 16)))
+(defun blend-d-mask (imm)
+  (concat (imm-lane imm 3 32) (imm-lane imm 2 32) (imm-lane imm 1 32) (imm-lane imm 0 32)))
+(defun blend-d-ymask (imm)
+  (concat (imm-lane imm 7 32) (imm-lane imm 6 32) (imm-lane imm 5 32) (imm-lane imm 4 32) (imm-lane imm 3 32) (imm-lane imm 2 32) (imm-lane imm 1 32) (imm-lane imm 0 32)))
+
+;; the blends by the immediate
+
+(defun BLENDPDrri (rd x y imm) (set$ rd (blend-by (blend-pd-mask imm) x y)))
+(defun BLENDPDrmi (rd x b s i off seg imm) (set$ rd (blend-by (blend-pd-mask imm) x (load-n 128 (ea b s i off seg)))))
+(defun VBLENDPDrri (rd x y imm) (set-vex rd (blend-by (blend-pd-mask imm) x y)))
+(defun VBLENDPDrmi (rd x b s i off seg imm) (set-vex rd (blend-by (blend-pd-mask imm) x (load-n 128 (ea b s i off seg)))))
+(defun VBLENDPDYrri (rd x y imm) (set$ rd (blend-by (blend-pd-ymask imm) x y)))
+(defun VBLENDPDYrmi (rd x b s i off seg imm) (set$ rd (blend-by (blend-pd-ymask imm) x (load-n 256 (ea b s i off seg)))))
+(defun BLENDPSrri (rd x y imm) (set$ rd (blend-by (blend-ps-mask imm) x y)))
+(defun BLENDPSrmi (rd x b s i off seg imm) (set$ rd (blend-by (blend-ps-mask imm) x (load-n 128 (ea b s i off seg)))))
+(defun VBLENDPSrri (rd x y imm) (set-vex rd (blend-by (blend-ps-mask imm) x y)))
+(defun VBLENDPSrmi (rd x b s i off seg imm) (set-vex rd (blend-by (blend-ps-mask imm) x (load-n 128 (ea b s i off seg)))))
+(defun VBLENDPSYrri (rd x y imm) (set$ rd (blend-by (blend-ps-ymask imm) x y)))
+(defun VBLENDPSYrmi (rd x b s i off seg imm) (set$ rd (blend-by (blend-ps-ymask imm) x (load-n 256 (ea b s i off seg)))))
+(defun PBLENDWrri (rd x y imm) (set$ rd (blend-by (blend-w-mask imm) x y)))
+(defun PBLENDWrmi (rd x b s i off seg imm) (set$ rd (blend-by (blend-w-mask imm) x (load-n 128 (ea b s i off seg)))))
+(defun VPBLENDWrri (rd x y imm) (set-vex rd (blend-by (blend-w-mask imm) x y)))
+(defun VPBLENDWrmi (rd x b s i off seg imm) (set-vex rd (blend-by (blend-w-mask imm) x (load-n 128 (ea b s i off seg)))))
+(defun VPBLENDWYrri (rd x y imm) (set$ rd (blend-by (blend-w-ymask imm) x y)))
+(defun VPBLENDWYrmi (rd x b s i off seg imm) (set$ rd (blend-by (blend-w-ymask imm) x (load-n 256 (ea b s i off seg)))))
+(defun VPBLENDDrri (rd x y imm) (set-vex rd (blend-by (blend-d-mask imm) x y)))
+(defun VPBLENDDrmi (rd x b s i off seg imm) (set-vex rd (blend-by (blend-d-mask imm) x (load-n 128 (ea b s i off seg)))))
+(defun VPBLENDDYrri (rd x y imm) (set$ rd (blend-by (blend-d-ymask imm) x y)))
+(defun VPBLENDDYrmi (rd x b s i off seg imm) (set$ rd (blend-by (blend-d-ymask imm) x (load-n 256 (ea b s i off seg)))))
+
+;; the blends by the signs of the lanes of the mask, XMM0 of the legacy ones
+
+(defun BLENDVPDrr0 (rd x y) (set$ rd (blend-by (lanes64 lane-sign XMM0 XMM0) x y)))
+(defun BLENDVPDrm0 (rd x b s i off seg) (set$ rd (blend-by (lanes64 lane-sign XMM0 XMM0) x (load-n 128 (ea b s i off seg)))))
+(defun VBLENDVPDrrr (rd x y m) (set-vex rd (blend-by (lanes64 lane-sign m m) x y)))
+(defun VBLENDVPDrmr (rd x b s i off seg m) (set-vex rd (blend-by (lanes64 lane-sign m m) x (load-n 128 (ea b s i off seg)))))
+(defun VBLENDVPDYrrr (rd x y m) (set$ rd (blend-by (ylanes lanes64 lane-sign m m) x y)))
+(defun VBLENDVPDYrmr (rd x b s i off seg m) (set$ rd (blend-by (ylanes lanes64 lane-sign m m) x (load-n 256 (ea b s i off seg)))))
+(defun BLENDVPSrr0 (rd x y) (set$ rd (blend-by (lanes32 lane-sign XMM0 XMM0) x y)))
+(defun BLENDVPSrm0 (rd x b s i off seg) (set$ rd (blend-by (lanes32 lane-sign XMM0 XMM0) x (load-n 128 (ea b s i off seg)))))
+(defun VBLENDVPSrrr (rd x y m) (set-vex rd (blend-by (lanes32 lane-sign m m) x y)))
+(defun VBLENDVPSrmr (rd x b s i off seg m) (set-vex rd (blend-by (lanes32 lane-sign m m) x (load-n 128 (ea b s i off seg)))))
+(defun VBLENDVPSYrrr (rd x y m) (set$ rd (blend-by (ylanes lanes32 lane-sign m m) x y)))
+(defun VBLENDVPSYrmr (rd x b s i off seg m) (set$ rd (blend-by (ylanes lanes32 lane-sign m m) x (load-n 256 (ea b s i off seg)))))
+(defun PBLENDVBrr0 (rd x y) (set$ rd (blend-by (lanes8 lane-sign XMM0 XMM0) x y)))
+(defun PBLENDVBrm0 (rd x b s i off seg) (set$ rd (blend-by (lanes8 lane-sign XMM0 XMM0) x (load-n 128 (ea b s i off seg)))))
+(defun VPBLENDVBrrr (rd x y m) (set-vex rd (blend-by (lanes8 lane-sign m m) x y)))
+(defun VPBLENDVBrmr (rd x b s i off seg m) (set-vex rd (blend-by (lanes8 lane-sign m m) x (load-n 128 (ea b s i off seg)))))
+(defun VPBLENDVBYrrr (rd x y m) (set$ rd (blend-by (ylanes lanes8 lane-sign m m) x y)))
+(defun VPBLENDVBYrmr (rd x b s i off seg m) (set$ rd (blend-by (ylanes lanes8 lane-sign m m) x (load-n 256 (ea b s i off seg)))))
+
+;; the broadcasts of the low lane
+
+(defun repeat-2 (x) (concat x x))
+(defun repeat-4 (x) (concat x x x x))
+(defun repeat-8 (x) (concat x x x x x x x x))
+(defun repeat-16 (x) (concat x x x x x x x x x x x x x x x x))
+(defun repeat-32 (x) (concat (repeat-16 x) (repeat-16 x)))
+
+(defun VBROADCASTSSrr (rd x) (set-vex rd (repeat-4 (cast-low 32 x))))
+(defun VBROADCASTSSrm (rd b s i off seg) (set-vex rd (repeat-4 (load-n 32 (ea b s i off seg)))))
+(defun VBROADCASTSSYrr (rd x) (set$ rd (repeat-8 (cast-low 32 x))))
+(defun VBROADCASTSSYrm (rd b s i off seg) (set$ rd (repeat-8 (load-n 32 (ea b s i off seg)))))
+(defun VPBROADCASTDrr (rd x) (set-vex rd (repeat-4 (cast-low 32 x))))
+(defun VPBROADCASTDrm (rd b s i off seg) (set-vex rd (repeat-4 (load-n 32 (ea b s i off seg)))))
+(defun VPBROADCASTDYrr (rd x) (set$ rd (repeat-8 (cast-low 32 x))))
+(defun VPBROADCASTDYrm (rd b s i off seg) (set$ rd (repeat-8 (load-n 32 (ea b s i off seg)))))
+(defun VPBROADCASTQrr (rd x) (set-vex rd (repeat-2 (cast-low 64 x))))
+(defun VPBROADCASTQrm (rd b s i off seg) (set-vex rd (repeat-2 (load-n 64 (ea b s i off seg)))))
+(defun VPBROADCASTQYrr (rd x) (set$ rd (repeat-4 (cast-low 64 x))))
+(defun VPBROADCASTQYrm (rd b s i off seg) (set$ rd (repeat-4 (load-n 64 (ea b s i off seg)))))
+(defun VPBROADCASTWrr (rd x) (set-vex rd (repeat-8 (cast-low 16 x))))
+(defun VPBROADCASTWrm (rd b s i off seg) (set-vex rd (repeat-8 (load-n 16 (ea b s i off seg)))))
+(defun VPBROADCASTWYrr (rd x) (set$ rd (repeat-16 (cast-low 16 x))))
+(defun VPBROADCASTWYrm (rd b s i off seg) (set$ rd (repeat-16 (load-n 16 (ea b s i off seg)))))
+(defun VPBROADCASTBrr (rd x) (set-vex rd (repeat-16 (cast-low 8 x))))
+(defun VPBROADCASTBrm (rd b s i off seg) (set-vex rd (repeat-16 (load-n 8 (ea b s i off seg)))))
+(defun VPBROADCASTBYrr (rd x) (set$ rd (repeat-32 (cast-low 8 x))))
+(defun VPBROADCASTBYrm (rd b s i off seg) (set$ rd (repeat-32 (load-n 8 (ea b s i off seg)))))
+(defun VBROADCASTSDYrr (rd x) (set$ rd (repeat-4 (cast-low 64 x))))
+(defun VBROADCASTSDYrm (rd b s i off seg) (set$ rd (repeat-4 (load-n 64 (ea b s i off seg)))))
+(defun VBROADCASTF128rm (rd b s i off seg) (set$ rd (repeat-2 (load-n 128 (ea b s i off seg)))))
+(defun VBROADCASTI128rm (rd b s i off seg) (set$ rd (repeat-2 (load-n 128 (ea b s i off seg)))))
+
+;; the halves of the 256-bit registers
+
+(defun half-of (x imm)
+  (if (= (logand imm 1) 1) (cast-high 128 x) (cast-low 128 x)))
+
+(defun insert-half (x y imm)
+  (if (= (logand imm 1) 1)
+      (concat y (cast-low 128 x))
+    (concat (cast-high 128 x) y)))
+
+;; the half of VPERM2F128 is a half of X or Y, by the bits 1:0 of its
+;; selector, or zero, by the bit 3
+(defun perm2-half (x y sel)
+  (if (= (logand sel 8) 8) 0:128
+    (case (logand sel 3)
+      0 (cast-low 128 x)
+      1 (cast-high 128 x)
+      2 (cast-low 128 y)
+      (cast-high 128 y))))
+
+(defun perm2 (x y imm)
+  (concat (perm2-half x y (rshift imm 4)) (perm2-half x y imm)))
+
+(defun VEXTRACTF128rri (rd x imm) (set-vex rd (half-of x imm)))
+(defun VEXTRACTF128mri (b s i off seg x imm) (store-word (ea b s i off seg) (half-of x imm)))
+(defun VINSERTF128rri (rd x y imm) (set$ rd (insert-half x y imm)))
+(defun VINSERTF128rmi (rd x b s i off seg imm) (set$ rd (insert-half x (load-n 128 (ea b s i off seg)) imm)))
+(defun VINSERTF128rm (rd x b s i off seg imm) (set$ rd (insert-half x (load-n 128 (ea b s i off seg)) imm)))
+(defun VPERM2F128rri (rd x y imm) (set$ rd (perm2 x y imm)))
+(defun VPERM2F128rmi (rd x b s i off seg imm) (set$ rd (perm2 x (load-n 256 (ea b s i off seg)) imm)))
+(defun VPERM2F128rm (rd x b s i off seg imm) (set$ rd (perm2 x (load-n 256 (ea b s i off seg)) imm)))
+(defun VEXTRACTI128rri (rd x imm) (set-vex rd (half-of x imm)))
+(defun VEXTRACTI128mri (b s i off seg x imm) (store-word (ea b s i off seg) (half-of x imm)))
+(defun VINSERTI128rri (rd x y imm) (set$ rd (insert-half x y imm)))
+(defun VINSERTI128rmi (rd x b s i off seg imm) (set$ rd (insert-half x (load-n 128 (ea b s i off seg)) imm)))
+(defun VINSERTI128rm (rd x b s i off seg imm) (set$ rd (insert-half x (load-n 128 (ea b s i off seg)) imm)))
+(defun VPERM2I128rri (rd x y imm) (set$ rd (perm2 x y imm)))
+(defun VPERM2I128rmi (rd x b s i off seg imm) (set$ rd (perm2 x (load-n 256 (ea b s i off seg)) imm)))
+(defun VPERM2I128rm (rd x b s i off seg imm) (set$ rd (perm2 x (load-n 256 (ea b s i off seg)) imm)))
+
+;; the permutations of the lanes, by the immediate, or by the indices of
+;; the lanes of a register
+
+(defun select-lane (size x n)
+  "(select-lane SIZE X N) is the SIZE-bit lane N of X"
+  (cast-low size (rshift x (cast-unsigned (word-width x) (* size n)))))
+
+(defun permq (x imm)
+  (concat (select-lane 64 x (logand (rshift imm 6) 3))
+          (select-lane 64 x (logand (rshift imm 4) 3))
+          (select-lane 64 x (logand (rshift imm 2) 3))
+          (select-lane 64 x (logand imm 3))))
+
+(defun permd-lane (x idx n)
+  (select-lane 32 x (logand (rshift idx (cast-unsigned 256 (* 32 n))) 7:256)))
+
+(defun permd (idx x)
+  (concat (permd-lane x idx 7) (permd-lane x idx 6) (permd-lane x idx 5) (permd-lane x idx 4)
+          (permd-lane x idx 3) (permd-lane x idx 2) (permd-lane x idx 1) (permd-lane x idx 0)))
+
+;; VPERMILPS selects the dwords of each half by the immediate, or by the
+;; bits 1:0 of the dwords of the control, VPERMILPD the qwords by a bit
+;; of the immediate, or by the bit 1 of the qwords of the control
+
+(defun permilps-imm (x imm)
+  (concat (select-lane 32 x (logand (rshift imm 6) 3))
+          (select-lane 32 x (logand (rshift imm 4) 3))
+          (select-lane 32 x (logand (rshift imm 2) 3))
+          (select-lane 32 x (logand imm 3))))
+
+(defun permilps-var (x c)
+  (concat (select-lane 32 x (cast-unsigned 128 (extract 97 96 c)))
+          (select-lane 32 x (cast-unsigned 128 (extract 65 64 c)))
+          (select-lane 32 x (cast-unsigned 128 (extract 33 32 c)))
+          (select-lane 32 x (cast-unsigned 128 (extract 1 0 c)))))
+
+(defun permilpd-imm (x imm)
+  (concat (select-lane 64 x (logand (rshift imm 1) 1))
+          (select-lane 64 x (logand imm 1))))
+
+(defun permilpd-var (x c)
+  (concat (select-lane 64 x (cast-unsigned 128 (extract 65 65 c)))
+          (select-lane 64 x (cast-unsigned 128 (extract 1 1 c)))))
+
+(defun VPERMQYri (rd x imm) (set$ rd (permq x imm)))
+(defun VPERMQYmi (rd b s i off seg imm) (set$ rd (permq (load-n 256 (ea b s i off seg)) imm)))
+(defun VPERMPDYri (rd x imm) (set$ rd (permq x imm)))
+(defun VPERMPDYmi (rd b s i off seg imm) (set$ rd (permq (load-n 256 (ea b s i off seg)) imm)))
+(defun VPERMDYrr (rd idx x) (set$ rd (permd idx x)))
+(defun VPERMDYrm (rd idx b s i off seg) (set$ rd (permd idx (load-n 256 (ea b s i off seg)))))
+(defun VPERMPSYrr (rd idx x) (set$ rd (permd idx x)))
+(defun VPERMPSYrm (rd idx b s i off seg) (set$ rd (permd idx (load-n 256 (ea b s i off seg)))))
+(defun VPERMILPSri (rd x imm) (set-vex rd (permilps-imm x imm)))
+(defun VPERMILPSmi (rd b s i off seg imm) (set-vex rd (permilps-imm (load-n 128 (ea b s i off seg)) imm)))
+(defun VPERMILPSYri (rd x imm) (set$ rd (concat (permilps-imm (cast-high 128 x) imm) (permilps-imm (cast-low 128 x) imm))))
+(defun VPERMILPSYmi (rd b s i off seg imm) (set$ rd (let ((x (load-n 256 (ea b s i off seg)))) (concat (permilps-imm (cast-high 128 x) imm) (permilps-imm (cast-low 128 x) imm)))))
+(defun VPERMILPSrr (rd x c) (set-vex rd (permilps-var x c)))
+(defun VPERMILPSrm (rd x b s i off seg) (set-vex rd (permilps-var x (load-n 128 (ea b s i off seg)))))
+(defun VPERMILPSYrr (rd x c) (set$ rd (concat (permilps-var (cast-high 128 x) (cast-high 128 c)) (permilps-var (cast-low 128 x) (cast-low 128 c)))))
+(defun VPERMILPSYrm (rd x b s i off seg) (set$ rd (let ((c (load-n 256 (ea b s i off seg)))) (concat (permilps-var (cast-high 128 x) (cast-high 128 c)) (permilps-var (cast-low 128 x) (cast-low 128 c))))))
+(defun VPERMILPDri (rd x imm) (set-vex rd (permilpd-imm x imm)))
+(defun VPERMILPDmi (rd b s i off seg imm) (set-vex rd (permilpd-imm (load-n 128 (ea b s i off seg)) imm)))
+(defun VPERMILPDYri (rd x imm) (set$ rd (concat (permilpd-imm (cast-high 128 x) (rshift imm 2)) (permilpd-imm (cast-low 128 x) imm))))
+(defun VPERMILPDYmi (rd b s i off seg imm) (set$ rd (let ((x (load-n 256 (ea b s i off seg)))) (concat (permilpd-imm (cast-high 128 x) (rshift imm 2)) (permilpd-imm (cast-low 128 x) imm)))))
+(defun VPERMILPDrr (rd x c) (set-vex rd (permilpd-var x c)))
+(defun VPERMILPDrm (rd x b s i off seg) (set-vex rd (permilpd-var x (load-n 128 (ea b s i off seg)))))
+(defun VPERMILPDYrr (rd x c) (set$ rd (concat (permilpd-var (cast-high 128 x) (cast-high 128 c)) (permilpd-var (cast-low 128 x) (cast-low 128 c)))))
+(defun VPERMILPDYrm (rd x b s i off seg) (set$ rd (let ((c (load-n 256 (ea b s i off seg)))) (concat (permilpd-var (cast-high 128 x) (cast-high 128 c)) (permilpd-var (cast-low 128 x) (cast-low 128 c))))))
+
+;; the shifts of the lanes by the counts in the lanes of the second source
+
+(defun VPSLLVDrr (rd x y) (set-vex rd (lanes32 lane-sll x y)))
+(defun VPSLLVDrm (rd x b s i off seg) (set-vex rd (lanes32 lane-sll x (load-n 128 (ea b s i off seg)))))
+(defun VPSLLVDYrr (rd x y) (set$ rd (ylanes lanes32 lane-sll x y)))
+(defun VPSLLVDYrm (rd x b s i off seg) (set$ rd (ylanes lanes32 lane-sll x (load-n 256 (ea b s i off seg)))))
+(defun VPSLLVQrr (rd x y) (set-vex rd (lanes64 lane-sll x y)))
+(defun VPSLLVQrm (rd x b s i off seg) (set-vex rd (lanes64 lane-sll x (load-n 128 (ea b s i off seg)))))
+(defun VPSLLVQYrr (rd x y) (set$ rd (ylanes lanes64 lane-sll x y)))
+(defun VPSLLVQYrm (rd x b s i off seg) (set$ rd (ylanes lanes64 lane-sll x (load-n 256 (ea b s i off seg)))))
+(defun VPSRLVDrr (rd x y) (set-vex rd (lanes32 lane-srl x y)))
+(defun VPSRLVDrm (rd x b s i off seg) (set-vex rd (lanes32 lane-srl x (load-n 128 (ea b s i off seg)))))
+(defun VPSRLVDYrr (rd x y) (set$ rd (ylanes lanes32 lane-srl x y)))
+(defun VPSRLVDYrm (rd x b s i off seg) (set$ rd (ylanes lanes32 lane-srl x (load-n 256 (ea b s i off seg)))))
+(defun VPSRLVQrr (rd x y) (set-vex rd (lanes64 lane-srl x y)))
+(defun VPSRLVQrm (rd x b s i off seg) (set-vex rd (lanes64 lane-srl x (load-n 128 (ea b s i off seg)))))
+(defun VPSRLVQYrr (rd x y) (set$ rd (ylanes lanes64 lane-srl x y)))
+(defun VPSRLVQYrm (rd x b s i off seg) (set$ rd (ylanes lanes64 lane-srl x (load-n 256 (ea b s i off seg)))))
+(defun VPSRAVDrr (rd x y) (set-vex rd (lanes32 lane-sra x y)))
+(defun VPSRAVDrm (rd x b s i off seg) (set-vex rd (lanes32 lane-sra x (load-n 128 (ea b s i off seg)))))
+(defun VPSRAVDYrr (rd x y) (set$ rd (ylanes lanes32 lane-sra x y)))
+(defun VPSRAVDYrm (rd x b s i off seg) (set$ rd (ylanes lanes32 lane-sra x (load-n 256 (ea b s i off seg)))))
+
+;; the multiplications of SSSE3, PMADDUBSW multiplies the unsigned bytes
+;; of the first source by the signed bytes of the second, and adds the
+;; adjacent products with the signed saturation, PMULHRSW is the high
+;; half of the product of the signed words, rounded
+
+(defun madd-ubsw (x y)
+  (cast-saturate :signed 16
+                 (+ (* (cast-unsigned 32 (extract 15 8 x)) (cast-signed 32 (extract 15 8 y)))
+                    (* (cast-unsigned 32 (extract 7 0 x)) (cast-signed 32 (extract 7 0 y))))))
+
+(defun mul-high-round (x y)
+  (let ((p (* (cast-signed 32 x) (cast-signed 32 y))))
+    (cast-low 16 (rshift (+ (rshift p 14) 1:32) 1))))
+
+;; PSIGN negates the lanes of the first source, whose lane of the
+;; second is negative, and clears them, where it is zero
+(defun lane-psign (x y)
+  (let ((negative (msb y))
+        (zero (is-zero y)))
+    (logand (if negative (neg x) x)
+            (if zero (zeros (word-width x)) (ones (word-width x))))))
+
+(defun PMADDUBSWrr (rd x y) (set$ rd (lanes16 madd-ubsw x y)))
+(defun PMADDUBSWrm (rd x b s i off seg) (set$ rd (lanes16 madd-ubsw x (load-n 128 (ea b s i off seg)))))
+(defun VPMADDUBSWrr (rd x y) (set-vex rd (lanes16 madd-ubsw x y)))
+(defun VPMADDUBSWrm (rd x b s i off seg) (set-vex rd (lanes16 madd-ubsw x (load-n 128 (ea b s i off seg)))))
+(defun VPMADDUBSWYrr (rd x y) (set$ rd (ylanes lanes16 madd-ubsw x y)))
+(defun VPMADDUBSWYrm (rd x b s i off seg) (set$ rd (ylanes lanes16 madd-ubsw x (load-n 256 (ea b s i off seg)))))
+(defun MMX_PMADDUBSWrr (rd x y) (set$ rd (mlanes lanes16 madd-ubsw x y)))
+(defun MMX_PMADDUBSWrm (rd x b s i off seg) (set$ rd (mlanes lanes16 madd-ubsw x (load-n 64 (ea b s i off seg)))))
+(defun PMULHRSWrr (rd x y) (set$ rd (lanes16 mul-high-round x y)))
+(defun PMULHRSWrm (rd x b s i off seg) (set$ rd (lanes16 mul-high-round x (load-n 128 (ea b s i off seg)))))
+(defun VPMULHRSWrr (rd x y) (set-vex rd (lanes16 mul-high-round x y)))
+(defun VPMULHRSWrm (rd x b s i off seg) (set-vex rd (lanes16 mul-high-round x (load-n 128 (ea b s i off seg)))))
+(defun VPMULHRSWYrr (rd x y) (set$ rd (ylanes lanes16 mul-high-round x y)))
+(defun VPMULHRSWYrm (rd x b s i off seg) (set$ rd (ylanes lanes16 mul-high-round x (load-n 256 (ea b s i off seg)))))
+(defun MMX_PMULHRSWrr (rd x y) (set$ rd (mlanes lanes16 mul-high-round x y)))
+(defun MMX_PMULHRSWrm (rd x b s i off seg) (set$ rd (mlanes lanes16 mul-high-round x (load-n 64 (ea b s i off seg)))))
+(defun PSIGNBrr (rd x y) (set$ rd (lanes8 lane-psign x y)))
+(defun PSIGNBrm (rd x b s i off seg) (set$ rd (lanes8 lane-psign x (load-n 128 (ea b s i off seg)))))
+(defun VPSIGNBrr (rd x y) (set-vex rd (lanes8 lane-psign x y)))
+(defun VPSIGNBrm (rd x b s i off seg) (set-vex rd (lanes8 lane-psign x (load-n 128 (ea b s i off seg)))))
+(defun VPSIGNBYrr (rd x y) (set$ rd (ylanes lanes8 lane-psign x y)))
+(defun VPSIGNBYrm (rd x b s i off seg) (set$ rd (ylanes lanes8 lane-psign x (load-n 256 (ea b s i off seg)))))
+(defun MMX_PSIGNBrr (rd x y) (set$ rd (mlanes lanes8 lane-psign x y)))
+(defun MMX_PSIGNBrm (rd x b s i off seg) (set$ rd (mlanes lanes8 lane-psign x (load-n 64 (ea b s i off seg)))))
+(defun PSIGNWrr (rd x y) (set$ rd (lanes16 lane-psign x y)))
+(defun PSIGNWrm (rd x b s i off seg) (set$ rd (lanes16 lane-psign x (load-n 128 (ea b s i off seg)))))
+(defun VPSIGNWrr (rd x y) (set-vex rd (lanes16 lane-psign x y)))
+(defun VPSIGNWrm (rd x b s i off seg) (set-vex rd (lanes16 lane-psign x (load-n 128 (ea b s i off seg)))))
+(defun VPSIGNWYrr (rd x y) (set$ rd (ylanes lanes16 lane-psign x y)))
+(defun VPSIGNWYrm (rd x b s i off seg) (set$ rd (ylanes lanes16 lane-psign x (load-n 256 (ea b s i off seg)))))
+(defun MMX_PSIGNWrr (rd x y) (set$ rd (mlanes lanes16 lane-psign x y)))
+(defun MMX_PSIGNWrm (rd x b s i off seg) (set$ rd (mlanes lanes16 lane-psign x (load-n 64 (ea b s i off seg)))))
+(defun PSIGNDrr (rd x y) (set$ rd (lanes32 lane-psign x y)))
+(defun PSIGNDrm (rd x b s i off seg) (set$ rd (lanes32 lane-psign x (load-n 128 (ea b s i off seg)))))
+(defun VPSIGNDrr (rd x y) (set-vex rd (lanes32 lane-psign x y)))
+(defun VPSIGNDrm (rd x b s i off seg) (set-vex rd (lanes32 lane-psign x (load-n 128 (ea b s i off seg)))))
+(defun VPSIGNDYrr (rd x y) (set$ rd (ylanes lanes32 lane-psign x y)))
+(defun VPSIGNDYrm (rd x b s i off seg) (set$ rd (ylanes lanes32 lane-psign x (load-n 256 (ea b s i off seg)))))
+(defun MMX_PSIGNDrr (rd x y) (set$ rd (mlanes lanes32 lane-psign x y)))
+(defun MMX_PSIGNDrm (rd x b s i off seg) (set$ rd (mlanes lanes32 lane-psign x (load-n 64 (ea b s i off seg)))))
+
+;; the horizontal additions and subtractions of the adjacent lanes, the
+;; pairs of the first source are the low half of the result, the
+;; subtractions subtract the odd lane from the even one
+
+(defun phaddw (x y)
+  (concat (lane-add (extract 111 96 y) (extract 127 112 y)) (lane-add (extract 79 64 y) (extract 95 80 y)) (lane-add (extract 47 32 y) (extract 63 48 y)) (lane-add (extract 15 0 y) (extract 31 16 y)) (lane-add (extract 111 96 x) (extract 127 112 x)) (lane-add (extract 79 64 x) (extract 95 80 x)) (lane-add (extract 47 32 x) (extract 63 48 x)) (lane-add (extract 15 0 x) (extract 31 16 x))))
+(defun mmx-phaddw (x y)
+  (concat (lane-add (extract 47 32 y) (extract 63 48 y)) (lane-add (extract 15 0 y) (extract 31 16 y)) (lane-add (extract 47 32 x) (extract 63 48 x)) (lane-add (extract 15 0 x) (extract 31 16 x))))
+(defun phaddd (x y)
+  (concat (lane-add (extract 95 64 y) (extract 127 96 y)) (lane-add (extract 31 0 y) (extract 63 32 y)) (lane-add (extract 95 64 x) (extract 127 96 x)) (lane-add (extract 31 0 x) (extract 63 32 x))))
+(defun mmx-phaddd (x y)
+  (concat (lane-add (extract 31 0 y) (extract 63 32 y)) (lane-add (extract 31 0 x) (extract 63 32 x))))
+(defun phaddsw (x y)
+  (concat (add-ssat (extract 111 96 y) (extract 127 112 y)) (add-ssat (extract 79 64 y) (extract 95 80 y)) (add-ssat (extract 47 32 y) (extract 63 48 y)) (add-ssat (extract 15 0 y) (extract 31 16 y)) (add-ssat (extract 111 96 x) (extract 127 112 x)) (add-ssat (extract 79 64 x) (extract 95 80 x)) (add-ssat (extract 47 32 x) (extract 63 48 x)) (add-ssat (extract 15 0 x) (extract 31 16 x))))
+(defun mmx-phaddsw (x y)
+  (concat (add-ssat (extract 47 32 y) (extract 63 48 y)) (add-ssat (extract 15 0 y) (extract 31 16 y)) (add-ssat (extract 47 32 x) (extract 63 48 x)) (add-ssat (extract 15 0 x) (extract 31 16 x))))
+(defun phsubw (x y)
+  (concat (lane-sub (extract 111 96 y) (extract 127 112 y)) (lane-sub (extract 79 64 y) (extract 95 80 y)) (lane-sub (extract 47 32 y) (extract 63 48 y)) (lane-sub (extract 15 0 y) (extract 31 16 y)) (lane-sub (extract 111 96 x) (extract 127 112 x)) (lane-sub (extract 79 64 x) (extract 95 80 x)) (lane-sub (extract 47 32 x) (extract 63 48 x)) (lane-sub (extract 15 0 x) (extract 31 16 x))))
+(defun mmx-phsubw (x y)
+  (concat (lane-sub (extract 47 32 y) (extract 63 48 y)) (lane-sub (extract 15 0 y) (extract 31 16 y)) (lane-sub (extract 47 32 x) (extract 63 48 x)) (lane-sub (extract 15 0 x) (extract 31 16 x))))
+(defun phsubd (x y)
+  (concat (lane-sub (extract 95 64 y) (extract 127 96 y)) (lane-sub (extract 31 0 y) (extract 63 32 y)) (lane-sub (extract 95 64 x) (extract 127 96 x)) (lane-sub (extract 31 0 x) (extract 63 32 x))))
+(defun mmx-phsubd (x y)
+  (concat (lane-sub (extract 31 0 y) (extract 63 32 y)) (lane-sub (extract 31 0 x) (extract 63 32 x))))
+(defun phsubsw (x y)
+  (concat (sub-ssat (extract 111 96 y) (extract 127 112 y)) (sub-ssat (extract 79 64 y) (extract 95 80 y)) (sub-ssat (extract 47 32 y) (extract 63 48 y)) (sub-ssat (extract 15 0 y) (extract 31 16 y)) (sub-ssat (extract 111 96 x) (extract 127 112 x)) (sub-ssat (extract 79 64 x) (extract 95 80 x)) (sub-ssat (extract 47 32 x) (extract 63 48 x)) (sub-ssat (extract 15 0 x) (extract 31 16 x))))
+(defun mmx-phsubsw (x y)
+  (concat (sub-ssat (extract 47 32 y) (extract 63 48 y)) (sub-ssat (extract 15 0 y) (extract 31 16 y)) (sub-ssat (extract 47 32 x) (extract 63 48 x)) (sub-ssat (extract 15 0 x) (extract 31 16 x))))
+(defun PHADDWrr (rd x y) (set$ rd (phaddw x y)))
+(defun PHADDWrm (rd x b s i off seg) (set$ rd (phaddw x (load-n 128 (ea b s i off seg)))))
+(defun VPHADDWrr (rd x y) (set-vex rd (phaddw x y)))
+(defun VPHADDWrm (rd x b s i off seg) (set-vex rd (phaddw x (load-n 128 (ea b s i off seg)))))
+(defun VPHADDWYrr (rd x y) (set$ rd (concat (phaddw (cast-high 128 x) (cast-high 128 y)) (phaddw (cast-low 128 x) (cast-low 128 y)))))
+(defun VPHADDWYrm (rd x b s i off seg) (set$ rd (let ((y (load-n 256 (ea b s i off seg)))) (concat (phaddw (cast-high 128 x) (cast-high 128 y)) (phaddw (cast-low 128 x) (cast-low 128 y))))))
+(defun MMX_PHADDWrr (rd x y) (set$ rd (mmx-phaddw x y)))
+(defun MMX_PHADDWrm (rd x b s i off seg) (set$ rd (mmx-phaddw x (load-n 64 (ea b s i off seg)))))
+(defun PHADDDrr (rd x y) (set$ rd (phaddd x y)))
+(defun PHADDDrm (rd x b s i off seg) (set$ rd (phaddd x (load-n 128 (ea b s i off seg)))))
+(defun VPHADDDrr (rd x y) (set-vex rd (phaddd x y)))
+(defun VPHADDDrm (rd x b s i off seg) (set-vex rd (phaddd x (load-n 128 (ea b s i off seg)))))
+(defun VPHADDDYrr (rd x y) (set$ rd (concat (phaddd (cast-high 128 x) (cast-high 128 y)) (phaddd (cast-low 128 x) (cast-low 128 y)))))
+(defun VPHADDDYrm (rd x b s i off seg) (set$ rd (let ((y (load-n 256 (ea b s i off seg)))) (concat (phaddd (cast-high 128 x) (cast-high 128 y)) (phaddd (cast-low 128 x) (cast-low 128 y))))))
+(defun MMX_PHADDDrr (rd x y) (set$ rd (mmx-phaddd x y)))
+(defun MMX_PHADDDrm (rd x b s i off seg) (set$ rd (mmx-phaddd x (load-n 64 (ea b s i off seg)))))
+(defun PHADDSWrr (rd x y) (set$ rd (phaddsw x y)))
+(defun PHADDSWrm (rd x b s i off seg) (set$ rd (phaddsw x (load-n 128 (ea b s i off seg)))))
+(defun VPHADDSWrr (rd x y) (set-vex rd (phaddsw x y)))
+(defun VPHADDSWrm (rd x b s i off seg) (set-vex rd (phaddsw x (load-n 128 (ea b s i off seg)))))
+(defun VPHADDSWYrr (rd x y) (set$ rd (concat (phaddsw (cast-high 128 x) (cast-high 128 y)) (phaddsw (cast-low 128 x) (cast-low 128 y)))))
+(defun VPHADDSWYrm (rd x b s i off seg) (set$ rd (let ((y (load-n 256 (ea b s i off seg)))) (concat (phaddsw (cast-high 128 x) (cast-high 128 y)) (phaddsw (cast-low 128 x) (cast-low 128 y))))))
+(defun MMX_PHADDSWrr (rd x y) (set$ rd (mmx-phaddsw x y)))
+(defun MMX_PHADDSWrm (rd x b s i off seg) (set$ rd (mmx-phaddsw x (load-n 64 (ea b s i off seg)))))
+(defun PHSUBWrr (rd x y) (set$ rd (phsubw x y)))
+(defun PHSUBWrm (rd x b s i off seg) (set$ rd (phsubw x (load-n 128 (ea b s i off seg)))))
+(defun VPHSUBWrr (rd x y) (set-vex rd (phsubw x y)))
+(defun VPHSUBWrm (rd x b s i off seg) (set-vex rd (phsubw x (load-n 128 (ea b s i off seg)))))
+(defun VPHSUBWYrr (rd x y) (set$ rd (concat (phsubw (cast-high 128 x) (cast-high 128 y)) (phsubw (cast-low 128 x) (cast-low 128 y)))))
+(defun VPHSUBWYrm (rd x b s i off seg) (set$ rd (let ((y (load-n 256 (ea b s i off seg)))) (concat (phsubw (cast-high 128 x) (cast-high 128 y)) (phsubw (cast-low 128 x) (cast-low 128 y))))))
+(defun MMX_PHSUBWrr (rd x y) (set$ rd (mmx-phsubw x y)))
+(defun MMX_PHSUBWrm (rd x b s i off seg) (set$ rd (mmx-phsubw x (load-n 64 (ea b s i off seg)))))
+(defun PHSUBDrr (rd x y) (set$ rd (phsubd x y)))
+(defun PHSUBDrm (rd x b s i off seg) (set$ rd (phsubd x (load-n 128 (ea b s i off seg)))))
+(defun VPHSUBDrr (rd x y) (set-vex rd (phsubd x y)))
+(defun VPHSUBDrm (rd x b s i off seg) (set-vex rd (phsubd x (load-n 128 (ea b s i off seg)))))
+(defun VPHSUBDYrr (rd x y) (set$ rd (concat (phsubd (cast-high 128 x) (cast-high 128 y)) (phsubd (cast-low 128 x) (cast-low 128 y)))))
+(defun VPHSUBDYrm (rd x b s i off seg) (set$ rd (let ((y (load-n 256 (ea b s i off seg)))) (concat (phsubd (cast-high 128 x) (cast-high 128 y)) (phsubd (cast-low 128 x) (cast-low 128 y))))))
+(defun MMX_PHSUBDrr (rd x y) (set$ rd (mmx-phsubd x y)))
+(defun MMX_PHSUBDrm (rd x b s i off seg) (set$ rd (mmx-phsubd x (load-n 64 (ea b s i off seg)))))
+(defun PHSUBSWrr (rd x y) (set$ rd (phsubsw x y)))
+(defun PHSUBSWrm (rd x b s i off seg) (set$ rd (phsubsw x (load-n 128 (ea b s i off seg)))))
+(defun VPHSUBSWrr (rd x y) (set-vex rd (phsubsw x y)))
+(defun VPHSUBSWrm (rd x b s i off seg) (set-vex rd (phsubsw x (load-n 128 (ea b s i off seg)))))
+(defun VPHSUBSWYrr (rd x y) (set$ rd (concat (phsubsw (cast-high 128 x) (cast-high 128 y)) (phsubsw (cast-low 128 x) (cast-low 128 y)))))
+(defun VPHSUBSWYrm (rd x b s i off seg) (set$ rd (let ((y (load-n 256 (ea b s i off seg)))) (concat (phsubsw (cast-high 128 x) (cast-high 128 y)) (phsubsw (cast-low 128 x) (cast-low 128 y))))))
+(defun MMX_PHSUBSWrr (rd x y) (set$ rd (mmx-phsubsw x y)))
+(defun MMX_PHSUBSWrm (rd x b s i off seg) (set$ rd (mmx-phsubsw x (load-n 64 (ea b s i off seg)))))
+
+;; PHMINPOSUW is the minimum of the unsigned words, and its index, the
+;; first one of the equal words
+
+(defun min-pos (m i x j)
+  "(min-pos M I X J) is the pair of the minimum and its index, as the
+   word M of index I, or X of index J, which is less"
+  (if (< x (cast-low 16 m)) (concat j x) m))
+
+(defun phminposuw (x)
+  (let ((m (concat 0:3 (extract 15 0 x)))
+        (m (min-pos m 0 (extract 31 16 x) 1:3))
+        (m (min-pos m 0 (extract 47 32 x) 2:3))
+        (m (min-pos m 0 (extract 63 48 x) 3:3))
+        (m (min-pos m 0 (extract 79 64 x) 4:3))
+        (m (min-pos m 0 (extract 95 80 x) 5:3))
+        (m (min-pos m 0 (extract 111 96 x) 6:3))
+        (m (min-pos m 0 (extract 127 112 x) 7:3)))
+    (cast-unsigned 128 m)))
+
+(defun PHMINPOSUWrr (rd x) (set$ rd (phminposuw x)))
+(defun PHMINPOSUWrm (rd b s i off seg) (set$ rd (phminposuw (load-n 128 (ea b s i off seg)))))
+(defun VPHMINPOSUWrr (rd x) (set-vex rd (phminposuw x)))
+(defun VPHMINPOSUWrm (rd b s i off seg) (set-vex rd (phminposuw (load-n 128 (ea b s i off seg)))))
+
+;; MPSADBW is the eight sums of the absolute differences of four
+;; consecutive bytes of the first source, from the byte offset 4 * imm[2]
+;; and the next ones, and the four bytes of the second source at the
+;; offset 4 * imm[1:0]
+
+(defun mpsadbw (x y imm)
+  (let ((a (cast-low 88 (rshift x (cast-unsigned 128 (* 32 (logand (rshift imm 2) 1))))))
+        (b (cast-low 32 (rshift y (cast-unsigned 128 (* 32 (logand imm 3)))))))
+    (concat (+ (absdiff (extract 63 56 a) (extract 7 0 b)) (absdiff (extract 71 64 a) (extract 15 8 b)) (absdiff (extract 79 72 a) (extract 23 16 b)) (absdiff (extract 87 80 a) (extract 31 24 b))) (+ (absdiff (extract 55 48 a) (extract 7 0 b)) (absdiff (extract 63 56 a) (extract 15 8 b)) (absdiff (extract 71 64 a) (extract 23 16 b)) (absdiff (extract 79 72 a) (extract 31 24 b))) (+ (absdiff (extract 47 40 a) (extract 7 0 b)) (absdiff (extract 55 48 a) (extract 15 8 b)) (absdiff (extract 63 56 a) (extract 23 16 b)) (absdiff (extract 71 64 a) (extract 31 24 b))) (+ (absdiff (extract 39 32 a) (extract 7 0 b)) (absdiff (extract 47 40 a) (extract 15 8 b)) (absdiff (extract 55 48 a) (extract 23 16 b)) (absdiff (extract 63 56 a) (extract 31 24 b))) (+ (absdiff (extract 31 24 a) (extract 7 0 b)) (absdiff (extract 39 32 a) (extract 15 8 b)) (absdiff (extract 47 40 a) (extract 23 16 b)) (absdiff (extract 55 48 a) (extract 31 24 b))) (+ (absdiff (extract 23 16 a) (extract 7 0 b)) (absdiff (extract 31 24 a) (extract 15 8 b)) (absdiff (extract 39 32 a) (extract 23 16 b)) (absdiff (extract 47 40 a) (extract 31 24 b))) (+ (absdiff (extract 15 8 a) (extract 7 0 b)) (absdiff (extract 23 16 a) (extract 15 8 b)) (absdiff (extract 31 24 a) (extract 23 16 b)) (absdiff (extract 39 32 a) (extract 31 24 b))) (+ (absdiff (extract 7 0 a) (extract 7 0 b)) (absdiff (extract 15 8 a) (extract 15 8 b)) (absdiff (extract 23 16 a) (extract 23 16 b)) (absdiff (extract 31 24 a) (extract 31 24 b))))))
+(defun MPSADBWrri (rd x y imm) (set$ rd (mpsadbw x y imm)))
+(defun MPSADBWrmi (rd x b s i off seg imm) (set$ rd (mpsadbw x (load-n 128 (ea b s i off seg)) imm)))
+(defun VMPSADBWrri (rd x y imm) (set-vex rd (mpsadbw x y imm)))
+(defun VMPSADBWrmi (rd x b s i off seg imm) (set-vex rd (mpsadbw x (load-n 128 (ea b s i off seg)) imm)))
+(defun VMPSADBWYrri (rd x y imm) (set$ rd (concat (mpsadbw (cast-high 128 x) (cast-high 128 y) (rshift imm 3)) (mpsadbw (cast-low 128 x) (cast-low 128 y) imm))))
+(defun VMPSADBWYrmi (rd x b s i off seg imm) (set$ rd (let ((y (load-n 256 (ea b s i off seg)))) (concat (mpsadbw (cast-high 128 x) (cast-high 128 y) (rshift imm 3)) (mpsadbw (cast-low 128 x) (cast-low 128 y) imm)))))
+
+;; the insertions and the extractions of the lanes
+
+(defun PINSRBrmi (rd x b s i off seg imm) (set$ rd (insert-lane 8 x (load-n 8 (ea b s i off seg)) imm)))
+(defun VPINSRBrri (rd x y imm) (set-vex rd (insert-lane 8 x y imm)))
+(defun VPINSRBrmi (rd x b s i off seg imm) (set-vex rd (insert-lane 8 x (load-n 8 (ea b s i off seg)) imm)))
+(defun VPEXTRBrri (rd x imm) (set-gpr rd (cast-unsigned 32 (extract-lane 8 x imm))))
+(defun PEXTRBmri (b s i off seg x imm) (store-n 8 (ea b s i off seg) (extract-lane 8 x imm)))
+(defun VPEXTRBmri (b s i off seg x imm) (store-n 8 (ea b s i off seg) (extract-lane 8 x imm)))
+(defun PINSRWrmi (rd x b s i off seg imm) (set$ rd (insert-lane 16 x (load-n 16 (ea b s i off seg)) imm)))
+(defun VPINSRWrri (rd x y imm) (set-vex rd (insert-lane 16 x y imm)))
+(defun VPINSRWrmi (rd x b s i off seg imm) (set-vex rd (insert-lane 16 x (load-n 16 (ea b s i off seg)) imm)))
+(defun VPEXTRWrri (rd x imm) (set-gpr rd (cast-unsigned 32 (extract-lane 16 x imm))))
+(defun PEXTRWmri (b s i off seg x imm) (store-n 16 (ea b s i off seg) (extract-lane 16 x imm)))
+(defun VPEXTRWmri (b s i off seg x imm) (store-n 16 (ea b s i off seg) (extract-lane 16 x imm)))
+(defun PINSRDrmi (rd x b s i off seg imm) (set$ rd (insert-lane 32 x (load-n 32 (ea b s i off seg)) imm)))
+(defun VPINSRDrri (rd x y imm) (set-vex rd (insert-lane 32 x y imm)))
+(defun VPINSRDrmi (rd x b s i off seg imm) (set-vex rd (insert-lane 32 x (load-n 32 (ea b s i off seg)) imm)))
+(defun VPEXTRDrri (rd x imm) (set-gpr rd (extract-lane 32 x imm)))
+(defun PEXTRDmri (b s i off seg x imm) (store-n 32 (ea b s i off seg) (extract-lane 32 x imm)))
+(defun VPEXTRDmri (b s i off seg x imm) (store-n 32 (ea b s i off seg) (extract-lane 32 x imm)))
+(defun PINSRQrmi (rd x b s i off seg imm) (set$ rd (insert-lane 64 x (load-n 64 (ea b s i off seg)) imm)))
+(defun VPINSRQrri (rd x y imm) (set-vex rd (insert-lane 64 x y imm)))
+(defun VPINSRQrmi (rd x b s i off seg imm) (set-vex rd (insert-lane 64 x (load-n 64 (ea b s i off seg)) imm)))
+(defun VPEXTRQrri (rd x imm) (set-gpr rd (extract-lane 64 x imm)))
+(defun PEXTRQmri (b s i off seg x imm) (store-n 64 (ea b s i off seg) (extract-lane 64 x imm)))
+(defun VPEXTRQmri (b s i off seg x imm) (store-n 64 (ea b s i off seg) (extract-lane 64 x imm)))
+(defun EXTRACTPSrri (rd x imm) (set-gpr rd (extract-lane 32 x imm)))
+(defun EXTRACTPSmri (b s i off seg x imm) (store-n 32 (ea b s i off seg) (extract-lane 32 x imm)))
+(defun VEXTRACTPSrri (rd x imm) (set-gpr rd (extract-lane 32 x imm)))
+(defun VEXTRACTPSmri (b s i off seg x imm) (store-n 32 (ea b s i off seg) (extract-lane 32 x imm)))
+
+;; the masks of the signs of the lanes
+
+(defun VMOVMSKPSrr (rd x) (set-gpr rd (cast-unsigned 32 (concat (select 127 x) (select 95 x) (select 63 x) (select 31 x)))))
+(defun VMOVMSKPDrr (rd x) (set-gpr rd (cast-unsigned 32 (concat (select 127 x) (select 63 x)))))
+(defun VMOVMSKPSYrr (rd x) (set-gpr rd (cast-unsigned 32 (concat (select 255 x) (select 223 x) (select 191 x) (select 159 x) (select 127 x) (select 95 x) (select 63 x) (select 31 x)))))
+(defun VMOVMSKPDYrr (rd x) (set-gpr rd (cast-unsigned 32 (concat (select 255 x) (select 191 x) (select 127 x) (select 63 x)))))
+
+;; VTESTPS and VTESTPD test the signs of the lanes, as PTEST tests
+;; the bits
+
+(defun sign-bits (size x)
+  (if (= size 64)
+      (logand x (repeat-2 0x8000000000000000:64))
+    (logand x (repeat-4 0x80000000:32))))
+
+(defun VTESTPSrr (x y) (ptest (sign-bits 32 x) (sign-bits 32 y)))
+(defun VTESTPSrm (x b s i off seg) (ptest (sign-bits 32 x) (sign-bits 32 (load-n 128 (ea b s i off seg)))))
+(defun VTESTPSYrr (x y) (ptest (concat (sign-bits 32 (cast-high 128 x)) (sign-bits 32 (cast-low 128 x))) (concat (sign-bits 32 (cast-high 128 y)) (sign-bits 32 (cast-low 128 y)))))
+(defun VTESTPSYrm (x b s i off seg) (let ((y (load-n 256 (ea b s i off seg)))) (ptest (concat (sign-bits 32 (cast-high 128 x)) (sign-bits 32 (cast-low 128 x))) (concat (sign-bits 32 (cast-high 128 y)) (sign-bits 32 (cast-low 128 y))))))
+(defun VTESTPDrr (x y) (ptest (sign-bits 64 x) (sign-bits 64 y)))
+(defun VTESTPDrm (x b s i off seg) (ptest (sign-bits 64 x) (sign-bits 64 (load-n 128 (ea b s i off seg)))))
+(defun VTESTPDYrr (x y) (ptest (concat (sign-bits 64 (cast-high 128 x)) (sign-bits 64 (cast-low 128 x))) (concat (sign-bits 64 (cast-high 128 y)) (sign-bits 64 (cast-low 128 y)))))
+(defun VTESTPDYrm (x b s i off seg) (let ((y (load-n 256 (ea b s i off seg)))) (ptest (concat (sign-bits 64 (cast-high 128 x)) (sign-bits 64 (cast-low 128 x))) (concat (sign-bits 64 (cast-high 128 y)) (sign-bits 64 (cast-low 128 y))))))
+
+;; the masked loads and stores, the lanes, whose mask is not negative,
+;; are not accessed, and are cleared by the loads
+
+(defun masked-lane-load (size rd addr m n)
+  (when (msb (select-lane size m n))
+    (set$ rd (logor rd (lshift (cast-unsigned (word-width rd)
+                                              (load-n size (+ addr (* (/ size 8) n))))
+                               (cast-unsigned (word-width rd) (* size n)))))))
+
+(defun masked-lane-store (size addr m x n)
+  (when (msb (select-lane size m n))
+    (store-n size (+ addr (* (/ size 8) n)) (select-lane size x n))))
+
+(defun VMASKMOVPSrm (rd m b s i off seg) (let ((a (ea b s i off seg)) (mask m)) (set-vex rd 0:128) (masked-lane-load 32 rd a mask 0) (masked-lane-load 32 rd a mask 1) (masked-lane-load 32 rd a mask 2) (masked-lane-load 32 rd a mask 3)))
+(defun VMASKMOVPSYrm (rd m b s i off seg) (let ((a (ea b s i off seg)) (mask m)) (set$ rd 0:256) (masked-lane-load 32 rd a mask 0) (masked-lane-load 32 rd a mask 1) (masked-lane-load 32 rd a mask 2) (masked-lane-load 32 rd a mask 3) (masked-lane-load 32 rd a mask 4) (masked-lane-load 32 rd a mask 5) (masked-lane-load 32 rd a mask 6) (masked-lane-load 32 rd a mask 7)))
+(defun VMASKMOVPSmr (b s i off seg m x) (let ((a (ea b s i off seg))) (masked-lane-store 32 a m x 0) (masked-lane-store 32 a m x 1) (masked-lane-store 32 a m x 2) (masked-lane-store 32 a m x 3)))
+(defun VMASKMOVPSYmr (b s i off seg m x) (let ((a (ea b s i off seg))) (masked-lane-store 32 a m x 0) (masked-lane-store 32 a m x 1) (masked-lane-store 32 a m x 2) (masked-lane-store 32 a m x 3) (masked-lane-store 32 a m x 4) (masked-lane-store 32 a m x 5) (masked-lane-store 32 a m x 6) (masked-lane-store 32 a m x 7)))
+(defun VMASKMOVPDrm (rd m b s i off seg) (let ((a (ea b s i off seg)) (mask m)) (set-vex rd 0:128) (masked-lane-load 64 rd a mask 0) (masked-lane-load 64 rd a mask 1)))
+(defun VMASKMOVPDYrm (rd m b s i off seg) (let ((a (ea b s i off seg)) (mask m)) (set$ rd 0:256) (masked-lane-load 64 rd a mask 0) (masked-lane-load 64 rd a mask 1) (masked-lane-load 64 rd a mask 2) (masked-lane-load 64 rd a mask 3)))
+(defun VMASKMOVPDmr (b s i off seg m x) (let ((a (ea b s i off seg))) (masked-lane-store 64 a m x 0) (masked-lane-store 64 a m x 1)))
+(defun VMASKMOVPDYmr (b s i off seg m x) (let ((a (ea b s i off seg))) (masked-lane-store 64 a m x 0) (masked-lane-store 64 a m x 1) (masked-lane-store 64 a m x 2) (masked-lane-store 64 a m x 3)))
+(defun VPMASKMOVDrm (rd m b s i off seg) (let ((a (ea b s i off seg)) (mask m)) (set-vex rd 0:128) (masked-lane-load 32 rd a mask 0) (masked-lane-load 32 rd a mask 1) (masked-lane-load 32 rd a mask 2) (masked-lane-load 32 rd a mask 3)))
+(defun VPMASKMOVDYrm (rd m b s i off seg) (let ((a (ea b s i off seg)) (mask m)) (set$ rd 0:256) (masked-lane-load 32 rd a mask 0) (masked-lane-load 32 rd a mask 1) (masked-lane-load 32 rd a mask 2) (masked-lane-load 32 rd a mask 3) (masked-lane-load 32 rd a mask 4) (masked-lane-load 32 rd a mask 5) (masked-lane-load 32 rd a mask 6) (masked-lane-load 32 rd a mask 7)))
+(defun VPMASKMOVDmr (b s i off seg m x) (let ((a (ea b s i off seg))) (masked-lane-store 32 a m x 0) (masked-lane-store 32 a m x 1) (masked-lane-store 32 a m x 2) (masked-lane-store 32 a m x 3)))
+(defun VPMASKMOVDYmr (b s i off seg m x) (let ((a (ea b s i off seg))) (masked-lane-store 32 a m x 0) (masked-lane-store 32 a m x 1) (masked-lane-store 32 a m x 2) (masked-lane-store 32 a m x 3) (masked-lane-store 32 a m x 4) (masked-lane-store 32 a m x 5) (masked-lane-store 32 a m x 6) (masked-lane-store 32 a m x 7)))
+(defun VPMASKMOVQrm (rd m b s i off seg) (let ((a (ea b s i off seg)) (mask m)) (set-vex rd 0:128) (masked-lane-load 64 rd a mask 0) (masked-lane-load 64 rd a mask 1)))
+(defun VPMASKMOVQYrm (rd m b s i off seg) (let ((a (ea b s i off seg)) (mask m)) (set$ rd 0:256) (masked-lane-load 64 rd a mask 0) (masked-lane-load 64 rd a mask 1) (masked-lane-load 64 rd a mask 2) (masked-lane-load 64 rd a mask 3)))
+(defun VPMASKMOVQmr (b s i off seg m x) (let ((a (ea b s i off seg))) (masked-lane-store 64 a m x 0) (masked-lane-store 64 a m x 1)))
+(defun VPMASKMOVQYmr (b s i off seg m x) (let ((a (ea b s i off seg))) (masked-lane-store 64 a m x 0) (masked-lane-store 64 a m x 1) (masked-lane-store 64 a m x 2) (masked-lane-store 64 a m x 3)))
+
+;; MASKMOVDQU stores the bytes, whose mask is negative, at DS:RDI
+(defun maskmov-byte (addr m x n)
+  (when (msb (select-lane 8 m n))
+    (store-n 8 (+ addr n) (select-lane 8 x n))))
+
+(defun MASKMOVDQU64 (x m) (declare (context (bits 64))) (let ((a RDI)) (maskmov-byte a m x 0) (maskmov-byte a m x 1) (maskmov-byte a m x 2) (maskmov-byte a m x 3) (maskmov-byte a m x 4) (maskmov-byte a m x 5) (maskmov-byte a m x 6) (maskmov-byte a m x 7) (maskmov-byte a m x 8) (maskmov-byte a m x 9) (maskmov-byte a m x 10) (maskmov-byte a m x 11) (maskmov-byte a m x 12) (maskmov-byte a m x 13) (maskmov-byte a m x 14) (maskmov-byte a m x 15)))
+(defun VMASKMOVDQU64 (x m) (declare (context (bits 64))) (let ((a RDI)) (maskmov-byte a m x 0) (maskmov-byte a m x 1) (maskmov-byte a m x 2) (maskmov-byte a m x 3) (maskmov-byte a m x 4) (maskmov-byte a m x 5) (maskmov-byte a m x 6) (maskmov-byte a m x 7) (maskmov-byte a m x 8) (maskmov-byte a m x 9) (maskmov-byte a m x 10) (maskmov-byte a m x 11) (maskmov-byte a m x 12) (maskmov-byte a m x 13) (maskmov-byte a m x 14) (maskmov-byte a m x 15)))
+(defun MASKMOVDQU (x m) (let ((a (cast-unsigned (word-width EDI) EDI))) (maskmov-byte a m x 0) (maskmov-byte a m x 1) (maskmov-byte a m x 2) (maskmov-byte a m x 3) (maskmov-byte a m x 4) (maskmov-byte a m x 5) (maskmov-byte a m x 6) (maskmov-byte a m x 7) (maskmov-byte a m x 8) (maskmov-byte a m x 9) (maskmov-byte a m x 10) (maskmov-byte a m x 11) (maskmov-byte a m x 12) (maskmov-byte a m x 13) (maskmov-byte a m x 14) (maskmov-byte a m x 15)))
+(defun VMASKMOVDQU (x m) (let ((a (cast-unsigned (word-width EDI) EDI))) (maskmov-byte a m x 0) (maskmov-byte a m x 1) (maskmov-byte a m x 2) (maskmov-byte a m x 3) (maskmov-byte a m x 4) (maskmov-byte a m x 5) (maskmov-byte a m x 6) (maskmov-byte a m x 7) (maskmov-byte a m x 8) (maskmov-byte a m x 9) (maskmov-byte a m x 10) (maskmov-byte a m x 11) (maskmov-byte a m x 12) (maskmov-byte a m x 13) (maskmov-byte a m x 14) (maskmov-byte a m x 15)))
+
+;; the non-temporal loads and stores
+
+(defun MOVNTDQArm (rd b s i off seg) (set$ rd (load-n 128 (ea b s i off seg))))
+(defun VMOVNTDQArm (rd b s i off seg) (set-vex rd (load-n 128 (ea b s i off seg))))
+(defun VMOVNTDQAYrm (rd b s i off seg) (set$ rd (load-n 256 (ea b s i off seg))))
+(defun MOVNTImr (b s i off seg x) (store-n 32 (ea b s i off seg) x))
+(defun MOVNTI_64mr (b s i off seg x) (store-n 64 (ea b s i off seg) x))
+
+;; CRC32 accumulates the CRC-32C, of the reflected polynomial
+;; 0x82F63B78, of the bytes of the source, from the least significant
+
+(defun crc32c-bit (c)
+  (logxor (rshift c 1) (if (lsb c) 0x82f63b78:32 0:32)))
+
+(defun crc32c-byte (crc b)
+  (let ((c (logxor crc (cast-unsigned 32 b)))
+        (c (crc32c-bit c))
+        (c (crc32c-bit c))
+        (c (crc32c-bit c))
+        (c (crc32c-bit c))
+        (c (crc32c-bit c))
+        (c (crc32c-bit c))
+        (c (crc32c-bit c))
+        (c (crc32c-bit c)))
+    c))
+
+(defun crc32c-16 (crc x)
+  (crc32c-byte (crc32c-byte crc (extract 7 0 x)) (extract 15 8 x)))
+
+(defun crc32c-32 (crc x)
+  (crc32c-16 (crc32c-16 crc (extract 15 0 x)) (extract 31 16 x)))
+
+(defun crc32c-64 (crc x)
+  (crc32c-32 (crc32c-32 crc (extract 31 0 x)) (extract 63 32 x)))
+
+(defun CRC32r32r8 (rd c x) (set-gpr rd (cast-low 32 (crc32c-byte (cast-low 32 c) x))))
+(defun CRC32r32m8 (rd c b s i off seg) (set-gpr rd (cast-low 32 (crc32c-byte (cast-low 32 c) (load-n 8 (ea b s i off seg))))))
+(defun CRC32r32r16 (rd c x) (set-gpr rd (cast-low 32 (crc32c-16 (cast-low 32 c) x))))
+(defun CRC32r32m16 (rd c b s i off seg) (set-gpr rd (cast-low 32 (crc32c-16 (cast-low 32 c) (load-n 16 (ea b s i off seg))))))
+(defun CRC32r32r32 (rd c x) (set-gpr rd (cast-low 32 (crc32c-32 (cast-low 32 c) x))))
+(defun CRC32r32m32 (rd c b s i off seg) (set-gpr rd (cast-low 32 (crc32c-32 (cast-low 32 c) (load-n 32 (ea b s i off seg))))))
+(defun CRC32r64r8 (rd c x) (set$ rd (cast-unsigned 64 (crc32c-byte (cast-low 32 c) x))))
+(defun CRC32r64m8 (rd c b s i off seg) (set$ rd (cast-unsigned 64 (crc32c-byte (cast-low 32 c) (load-n 8 (ea b s i off seg))))))
+(defun CRC32r64r64 (rd c x) (set$ rd (cast-unsigned 64 (crc32c-64 (cast-low 32 c) x))))
+(defun CRC32r64m64 (rd c b s i off seg) (set$ rd (cast-unsigned 64 (crc32c-64 (cast-low 32 c) (load-n 64 (ea b s i off seg))))))
+
+;; the shuffles of AVX, the low lanes of each half are selected from
+;; the first source, the high ones from the second
+
+(defun shufps-lanes (x y imm)
+  (concat (select-lane 32 y (logand (rshift imm 6) 3))
+          (select-lane 32 y (logand (rshift imm 4) 3))
+          (select-lane 32 x (logand (rshift imm 2) 3))
+          (select-lane 32 x (logand imm 3))))
+
+(defun shufpd-lanes (x y imm)
+  (concat (select-lane 64 y (logand (rshift imm 1) 1))
+          (select-lane 64 x (logand imm 1))))
+
+(defun VSHUFPSrri (rd x y imm) (set-vex rd (shufps-lanes x y imm)))
+(defun VSHUFPSrmi (rd x b s i off seg imm) (set-vex rd (shufps-lanes x (load-n 128 (ea b s i off seg)) imm)))
+(defun VSHUFPSYrri (rd x y imm) (set$ rd (concat (shufps-lanes (cast-high 128 x) (cast-high 128 y) imm) (shufps-lanes (cast-low 128 x) (cast-low 128 y) imm))))
+(defun VSHUFPSYrmi (rd x b s i off seg imm) (set$ rd (let ((y (load-n 256 (ea b s i off seg)))) (concat (shufps-lanes (cast-high 128 x) (cast-high 128 y) imm) (shufps-lanes (cast-low 128 x) (cast-low 128 y) imm)))))
+(defun VSHUFPDrri (rd x y imm) (set-vex rd (shufpd-lanes x y imm)))
+(defun VSHUFPDrmi (rd x b s i off seg imm) (set-vex rd (shufpd-lanes x (load-n 128 (ea b s i off seg)) imm)))
+(defun VSHUFPDYrri (rd x y imm) (set$ rd (concat (shufpd-lanes (cast-high 128 x) (cast-high 128 y) (rshift imm 2)) (shufpd-lanes (cast-low 128 x) (cast-low 128 y) imm))))
+(defun VSHUFPDYrmi (rd x b s i off seg imm) (set$ rd (let ((y (load-n 256 (ea b s i off seg)))) (concat (shufpd-lanes (cast-high 128 x) (cast-high 128 y) (rshift imm 2)) (shufpd-lanes (cast-low 128 x) (cast-low 128 y) imm)))))
+
+;; the shuffles of the words of each half of AVX2
+
+(defun pshufhw-half (x ctl) (concat (shuffle-words (extract 127 64 x) ctl) (extract 63 0 x)))
+(defun pshuflw-half (x ctl) (concat (extract 127 64 x) (shuffle-words (extract 63 0 x) ctl)))
+(defun VPSHUFHWYri (rd x ctl) (set$ rd (concat (pshufhw-half (cast-high 128 x) ctl) (pshufhw-half (cast-low 128 x) ctl))))
+(defun VPSHUFHWYmi (rd b s i off seg ctl) (set$ rd (let ((x (load-n 256 (ea b s i off seg)))) (concat (pshufhw-half (cast-high 128 x) ctl) (pshufhw-half (cast-low 128 x) ctl)))))
+(defun VPSHUFHWmi (rd b s i off seg ctl) (set-vex rd (pshufhw-half (load-n 128 (ea b s i off seg)) ctl)))
+(defun VPSHUFLWYri (rd x ctl) (set$ rd (concat (pshuflw-half (cast-high 128 x) ctl) (pshuflw-half (cast-low 128 x) ctl))))
+(defun VPSHUFLWYmi (rd b s i off seg ctl) (set$ rd (let ((x (load-n 256 (ea b s i off seg)))) (concat (pshuflw-half (cast-high 128 x) ctl) (pshuflw-half (cast-low 128 x) ctl)))))
+(defun VPSHUFLWmi (rd b s i off seg ctl) (set-vex rd (pshuflw-half (load-n 128 (ea b s i off seg)) ctl)))
+

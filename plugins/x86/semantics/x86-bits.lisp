@@ -137,15 +137,18 @@
 
 ;; BSF and BSR don't change the destination if the source is zero, the
 ;; flags but ZF are undefined and are not changed
+;; the counts are computed before the choice, as their computation is
+;; a sequence of statements, whose temporaries the choice reads
 (defun bsf-op (x y)
-  (set ZF (is-zero y))
-  (if (is-zero y) x (resize (word-width x) (clz (reverse-bits y)))))
+  (let ((r (resize (word-width x) (clz (reverse-bits y)))))
+    (set ZF (is-zero y))
+    (if (is-zero y) x r)))
 
 (defun bsr-op (x y)
-  (set ZF (is-zero y))
-  (if (is-zero y) x
-    (- (resize (word-width x) (- (word-width y) 1))
-       (resize (word-width x) (clz y)))))
+  (let ((r (- (resize (word-width x) (- (word-width y) 1))
+              (resize (word-width x) (clz y)))))
+    (set ZF (is-zero y))
+    (if (is-zero y) x r)))
 
 ;; POPCNT clears the flags but ZF, LZCNT and TZCNT set CF if the source
 ;; is zero and ZF if the result is zero

@@ -290,49 +290,49 @@
 ;; pack{u,s}sdw/pack{u,s}swb
 ;; converts 4 32-bit words into 8 16-bit words
 (defun PACKSSDWrr (dst _ src)
-  (packsdw/128 :signed dst dst src))
+  (set$ dst (packsdw/128 :signed dst src)))
 
 (defun PACKSSDWrm (dst _ base scale index off _)
   (let ((src (load-bits 128 (operand-address base scale index off))))
-    (packsdw/128 :signed dst dst src)))
+    (set$ dst (packsdw/128 :signed dst src))))
 
 (defun VPACKSSDWrr (dst src1 src2)
-  (packsdw/128 :signed dst src1 src2))
+  (set-vex dst (packsdw/128 :signed src1 src2)))
 
 (defun VPACKSSDWYrr (dst src1 src2)
-  (packsdw/256 :signed dst src1 src2))
+  (set$ dst (packsdw/256 :signed src1 src2)))
 
 (defun VPACKSSDWrm (dst src1 base scale index off _)
   (let ((src2 (load-bits 128 (operand-address base scale index off))))
-    (packsdw/128 :signed dst src1 src2)))
+    (set-vex dst (packsdw/128 :signed src1 src2))))
 
 (defun VPACKSSDWYrm (dst src1 base scale index off _)
   (let ((src2 (load-bits 256 (operand-address base scale index off))))
-    (packsdw/256 :signed dst src1 src2)))
+    (set$ dst (packsdw/256 :signed src1 src2))))
 
 
 (defun PACKUSDWrr (dst _ src)
-  (packsdw/128 :unsigned dst dst src))
+  (set$ dst (packsdw/128 :unsigned dst src)))
 
 (defun PACKUSDWrm (dst _ base scale index off _)
   (let ((src (load-bits 128 (operand-address base scale index off))))
-    (packsdw/128 :unsigned dst dst src)))
+    (set$ dst (packsdw/128 :unsigned dst src))))
 
 (defun VPACKUSDWrr (dst src1 src2)
-  (packsdw/128 :unsigned dst src1 src2))
+  (set-vex dst (packsdw/128 :unsigned src1 src2)))
 
 (defun VPACKUSDWYrr (dst src1 src2)
-  (packsdw/256 :unsigned dst src1 src2))
+  (set$ dst (packsdw/256 :unsigned src1 src2)))
 
 (defun VPACKUSDWrm (dst src1 base scale index off _)
   (let ((src2 (load-bits 128 (operand-address base scale index off))))
-    (packsdw/128 :unsigned dst src1 src2)))
+    (set-vex dst (packsdw/128 :unsigned src1 src2))))
 
 (defun VPACKUSDWYrm (dst src1 base scale index off _)
   (let ((src2 (load-bits 256 (operand-address base scale index off))))
-    (packsdw/256 :unsigned dst src1 src2)))
+    (set$ dst (packsdw/256 :unsigned src1 src2))))
 
-(defun packsdw/128 (kind dst src1 src2)
+(defun packsdw/128 (kind src1 src2)
   (let ((w0 (extract-saturate kind 16  31  0 src1))
         (w1 (extract-saturate kind 16  63 32 src1))
         (w2 (extract-saturate kind 16  95 64 src1))
@@ -341,9 +341,9 @@
         (w5 (extract-saturate kind 16  63 32 src2))
         (w6 (extract-saturate kind 16  95 64 src2))
         (w7 (extract-saturate kind 16 127 96 src2)))
-    (set$ dst (concat w7 w6 w5 w4 w3 w2 w1 w0))))
+    (concat w7 w6 w5 w4 w3 w2 w1 w0)))
 
-(defun packsdw/256 (kind dst src1 src2)
+(defun packsdw/256 (kind src1 src2)
   (let ((w0  (extract-saturate kind 16  31   0 src1))
         (w1  (extract-saturate kind 16  63  32 src1))
         (w2  (extract-saturate kind 16  95  64 src1))
@@ -360,54 +360,53 @@
         (w13 (extract-saturate kind 16 191 160 src2))
         (w14 (extract-saturate kind 16 223 192 src2))
         (w15 (extract-saturate kind 16 255 224 src2)))
-    (set$ dst (concat
-               w15 w14 w13 w12 w11 w10 w9 w8
-                w7  w6  w5  w4  w3  w2 w1 w0))))
+    (concat w15 w14 w13 w12 w11 w10 w9 w8
+            w7  w6  w5  w4  w3  w2 w1 w0)))
 
 (defun PACKSSWBrr (dst _ src)
-  (packswb/128 :signed dst dst src))
+  (set$ dst (packswb/128 :signed dst src)))
 
 (defun VPACKSSWBrr (dst src1 src2)
-  (packswb/128 :signed dst src1 src2))
+  (set-vex dst (packswb/128 :signed src1 src2)))
 
 (defun VPACKSSWBYrr (dst src1 src2)
-  (packswb/256 :signed dst src1 src2))
+  (set$ dst (packswb/256 :signed src1 src2)))
 
 (defun PACKSSWBrm (dst _ base scale index off _)
   (let ((src (load-bits 128 (operand-address base scale index off))))
-    (packswb/128 :signed dst dst src)))
+    (set$ dst (packswb/128 :signed dst src))))
 
 (defun VPACKSSWBrm (dst src1 base scale index off _)
   (let ((src2 (load-bits 128 (operand-address base scale index off))))
-    (packswb/128 :signed dst src1 src2)))
+    (set-vex dst (packswb/128 :signed src1 src2))))
 
 (defun VPACKSSWBYrm (dst src1 base scale index off _)
   (let ((src2 (load-bits 256 (operand-address base scale index off))))
-    (packswb/128 :signed dst src1 src2)))
+    (set$ dst (packswb/256 :signed src1 src2))))
 
 
 (defun PACKUSWBrr (dst _ src)
-  (packswb/128 :unsigned dst dst src))
+  (set$ dst (packswb/128 :unsigned dst src)))
 
 (defun VPACKUSWBrr (dst src1 src2)
-  (packswb/128 :unsigned dst src1 src2))
+  (set-vex dst (packswb/128 :unsigned src1 src2)))
 
 (defun VPACKUSWBYrr (dst src1 src2)
-  (packswb/256 :unsigned dst src1 src2))
+  (set$ dst (packswb/256 :unsigned src1 src2)))
 
 (defun PACKUSWBrm (dst _ base scale index off _)
   (let ((src (load-bits 128 (operand-address base scale index off))))
-    (packswb/128 :unsigned dst dst src)))
+    (set$ dst (packswb/128 :unsigned dst src))))
 
 (defun VPACKUSWBrm (dst src1 base scale index off _)
   (let ((src2 (load-bits 128 (operand-address base scale index off))))
-    (packswb/128 :unsigned dst src1 src2)))
+    (set-vex dst (packswb/128 :unsigned src1 src2))))
 
 (defun VPACKUSWBYrm (dst src1 base scale index off _)
   (let ((src2 (load-bits 256 (operand-address base scale index off))))
-    (packswb/128 :unsigned dst src1 src2)))
+    (set$ dst (packswb/256 :unsigned src1 src2))))
 
-(defun packswb/128 (kind dst src1 src2)
+(defun packswb/128 (kind src1 src2)
   (let ((b0  (extract-saturate kind 8  15   0 src1))
         (b1  (extract-saturate kind 8  31  16 src1))
         (b2  (extract-saturate kind 8  47  32 src1))
@@ -424,11 +423,10 @@
         (b13 (extract-saturate kind 8  95  80 src2))
         (b14 (extract-saturate kind 8 111  96 src2))
         (b15 (extract-saturate kind 8 127 112 src2)))
-    (set$ dst (concat
-               b15 b14 b13 b12 b11 b10 b9 b8
-                b7  b6  b5  b4  b3  b2 b1 b0))))
+    (concat b15 b14 b13 b12 b11 b10 b9 b8
+            b7  b6  b5  b4  b3  b2 b1 b0)))
 
-(defun packswb/256 (kind dst src1 src2)
+(defun packswb/256 (kind src1 src2)
   (let ((b0  (extract-saturate kind 8  15   0 src1))
         (b1  (extract-saturate kind 8  31  16 src1))
         (b2  (extract-saturate kind 8  47  32 src1))
@@ -461,23 +459,42 @@
         (b29 (extract-saturate kind 8 223 208 src2))
         (b30 (extract-saturate kind 8 239 224 src2))
         (b31 (extract-saturate kind 8 255 240 src2)))
-    (set$ dst (concat
-               b31 b30 b29 b28 b27 b26 b25 b24
-               b23 b22 b21 b20 b19 b18 b17 b16
-               b15 b14 b13 b12 b11 b10  b9  b8
-                b7  b6  b5  b4  b3  b2  b1  b0))))
+    (concat b31 b30 b29 b28 b27 b26 b25 b24
+            b23 b22 b21 b20 b19 b18 b17 b16
+            b15 b14 b13 b12 b11 b10  b9  b8
+            b7  b6  b5  b4  b3  b2  b1  b0)))
 
 (defun extract-saturate (type size hi lo src)
   (let ((x (extract hi lo src)))
     (cast-saturate type size x)))
 
+;; the 32-bit mode has the registers YMM0-YMM7 only
 (defun VZEROUPPER ()
+  (declare (context (bits 64)))
   (dolist zero-high-128-bits
     'YMM0 'YMM1 'YMM2  'YMM3  'YMM4  'YMM5  'YMM6  'YMM7
     'YMM8 'YMM9 'YMM10 'YMM11 'YMM12 'YMM13 'YMM14 'YMM15))
 
+(defun VZEROUPPER ()
+  (declare (context (bits 32)))
+  (dolist zero-high-128-bits
+    'YMM0 'YMM1 'YMM2  'YMM3  'YMM4  'YMM5  'YMM6  'YMM7))
+
 (defun zero-high-128-bits (reg)
   (set$ reg (concat 0:128 (cast-low 128 (unquote reg)))))
+
+(defun VZEROALL ()
+  (declare (context (bits 64)))
+  (dolist zero-register
+    'YMM0 'YMM1 'YMM2  'YMM3  'YMM4  'YMM5  'YMM6  'YMM7
+    'YMM8 'YMM9 'YMM10 'YMM11 'YMM12 'YMM13 'YMM14 'YMM15))
+
+(defun VZEROALL ()
+  (declare (context (bits 32)))
+  (dolist zero-register
+    'YMM0 'YMM1 'YMM2  'YMM3  'YMM4  'YMM5  'YMM6  'YMM7))
+
+(defun zero-register (reg) (set$ reg 0:256))
 
 ;; MOVNTDQ - Store packed Integers Using Non-Temporal Hint
 (defun MOVNTDQmr (base scale index off _ src)

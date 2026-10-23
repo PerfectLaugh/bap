@@ -37,6 +37,7 @@ sub __mingw_enum_import_library_names(__mingw_enum_import_library_names_result)
   calls _FindPESection sub_402560
 sub __mingw_invalidParameterHandler(__mingw_invalidParameterHandler_result)
 sub __mingw_raise_matherr(__mingw_raise_matherr_result)
+  calls intrinsic:fconvert_rne_ieee754_binary_64_80 intrinsic:fconvert_rne_ieee754_binary_80_64 intrinsic:fconvert_rtn_ieee754_binary_80_64 intrinsic:fconvert_rtp_ieee754_binary_80_64 intrinsic:fconvert_rtz_ieee754_binary_80_64
 sub __mingw_setusermatherr(__mingw_setusermatherr_result)
   calls __setusermatherr
 sub __report_error(__report_error_result)
@@ -58,7 +59,7 @@ sub _fu0___set_invalid_parameter_handler(_fu0___set_invalid_parameter_handler_re
 sub _initterm(_initterm_begin, _initterm_end)
 sub _lock(_lock_lock)
 sub _matherr(_matherr_result)
-  calls fprintf
+  calls fprintf intrinsic:fconvert_rne_ieee754_binary_64_80 intrinsic:fconvert_rne_ieee754_binary_80_64 intrinsic:fconvert_rtn_ieee754_binary_80_64 intrinsic:fconvert_rtp_ieee754_binary_80_64 intrinsic:fconvert_rtz_ieee754_binary_80_64
 sub _pei386_runtime_relocator(_pei386_runtime_relocator_result)
   calls sub_401e60
 sub _setargv(_setargv_result)
@@ -234,6 +235,11 @@ sub sub_40297a(sub_40297a_result)
 sub sub_4029b8(sub_4029b8_result)
   calls register_frame_ctor
 sub vfprintf(vfprintf_result)
+sub intrinsic:fconvert_rne_ieee754_binary_64_80()
+sub intrinsic:fconvert_rne_ieee754_binary_80_64()
+sub intrinsic:fconvert_rtn_ieee754_binary_80_64()
+sub intrinsic:fconvert_rtp_ieee754_binary_80_64()
+sub intrinsic:fconvert_rtz_ieee754_binary_80_64()
 sub intrinsic:breakpoint()
 sub _imp___set_invalid_parameter_handler(_imp___set_invalid_parameter_handler_result)
 sub DeleteCriticalSection(DeleteCriticalSection_section)
