@@ -106,6 +106,8 @@ let parts ~bits : Uc.arch -> (string * part) list = function
         ("AC", Bit ("EFLAGS", 18));
         ("ID", Bit ("EFLAGS", 21));
         ("FPU_CONTROL", Reg "FPCW");
+        ("FPU_STATUS", Reg "FPSW");
+        ("FPU_TAG", Reg "FPTAG");
       ]
       (* MMX uses the mantissas of the physical x87 registers *)
       @ numbered "MM" 7 (fun n -> Bits (sprintf "FP%d" n, 0, 64))

@@ -191,6 +191,10 @@ module M32 = struct
 
   (* the control words of x87 and SSE *)
   let fpcw = reg r16 "FPU_CONTROL"
+
+  (* the status and the tag words of x87, see x86-sse-intrinsics.lisp *)
+  let fpsw = reg r16 "FPU_STATUS"
+  let fptw = reg r16 "FPU_TAG"
   let mxsr = reg r32 "MXCSR"
   let mmx = array r64 "MM" 8
   let xmmx = array r128 "XMM" 8
@@ -201,7 +205,7 @@ module M32 = struct
   let mems = Theory.Mem.define r32 r8
   let data = Theory.Var.define mems "mem"
   let i386 = main @< index @< segment @< flags @< bases @< [ data ]
-  let i486 = i386 @< stx @< [ fpcw ]
+  let i486 = i386 @< stx @< [ fpcw; fpsw; fptw ]
   let i586 = i486 @< mmx
   let i686 = i586 @< ymmx @< [ mxsr ]
   let aliases = M16.main @< M16.index @< M16.aliases
@@ -224,7 +228,10 @@ module M32 = struct
   let i486regs =
     i386regs
     @ Theory.Role.Register.
-        [ ([ general; floating ], untyped stx); ([ status ], untyped [ fpcw ]) ]
+        [
+          ([ general; floating ], untyped stx);
+          ([ status ], untyped [ fpcw; fpsw; fptw ]);
+        ]
 
   let i586regs =
     i486regs @ Theory.Role.Register.[ ([ general; floating ], untyped mmx) ]
@@ -261,6 +268,8 @@ module M64 = struct
   let ymmx = array r256 "YMM" 16
   let mxsr = M32.mxsr
   let fpcw = M32.fpcw
+  let fpsw = M32.fpsw
+  let fptw = M32.fptw
   let flags = M32.flags
   let mems = Theory.Mem.define r64 r8
   let data = Theory.Var.define mems "mem"
@@ -271,7 +280,7 @@ module M64 = struct
 
   let vars =
     main @< index @< segment @< rx @< stx @< mmx @< ymmx @< flags @< [ data ]
-    @< [ mxsr ] @< [ fpcw ] @< bases
+    @< [ mxsr ] @< [ fpcw; fpsw; fptw ] @< bases
 
   let regs =
     Theory.Role.Register.
@@ -285,7 +294,7 @@ module M64 = struct
         ([ frame_pointer ], untyped [ reg r64 "RBP" ]);
         ([ Role.index ], untyped index);
         ([ Role.segment ], untyped segment);
-        ([ status ], untyped [ mxsr ] @ untyped [ fpcw ]);
+        ([ status ], untyped [ mxsr ] @ untyped [ fpcw; fpsw; fptw ]);
         ([ alias ], aliases);
       ]
     @ M16.flag_roles

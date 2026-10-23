@@ -213,6 +213,27 @@
 (defun SYSENTER () (intrinsic 'sysenter))
 (defun TRAP () (intrinsic '__ud2 :aborts))
 
+;; The extensions, that the processor of Unicorn doesn't have, see its
+;; CPUID, whose instructions are invalid, as on such a processor: the
+;; shadow stacks of CET, but RDSSP and INCSSP, which are NOPs there, as
+;; the shadow stack is disabled, the transactions of TSX, and the
+;; protection keys.
+(defun RDSSPD (_ _) (empty))
+(defun RDSSPQ (_ _) (empty))
+(defun INCSSPD (_) (empty))
+(defun INCSSPQ (_) (empty))
+(defun RSTORSSP (_ _ _ _ _) (TRAP))
+(defun SAVEPREVSSP () (TRAP))
+(defun SETSSBSY () (TRAP))
+(defun CLRSSBSY (_ _ _ _ _) (TRAP))
+(defun WRSSD (_ _ _ _ _ _) (TRAP))
+(defun WRSSQ (_ _ _ _ _ _) (TRAP))
+(defun WRUSSD (_ _ _ _ _ _) (TRAP))
+(defun WRUSSQ (_ _ _ _ _ _) (TRAP))
+(defun XTEST () (TRAP))
+(defun RDPKRUr () (TRAP))
+(defun WRPKRUr () (TRAP))
+
 ;; ENDBR are calls to the endbr intrinsic if --x86-cet-enabled
 (defun ENDBR32 () (empty))
 (defun ENDBR64 () (empty))

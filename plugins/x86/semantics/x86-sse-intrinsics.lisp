@@ -276,7 +276,26 @@
 ;; changes of FPU_CONTROL, round as its rounding control, the bits
 ;; 11:10, tells.
 
+;; The top of the stack, TOP of FPU_STATUS, and the tags of FPU_TAG, of
+;; the physical registers, which the pushes and the pops keep, as the
+;; registers ST0-ST7 are renamed: the empty register has the tag 11, and
+;; the others 00, which FNSTENV classifies, as the processor does, see
+;; [x87-tags].
+(defun x87-top () (extract 13 11 FPU_STATUS))
+
+(defun x87-set-top (top)
+  (set FPU_STATUS (logor (logand FPU_STATUS 0xc7ff:16)
+                         (lshift (cast-unsigned 16 top) 11))))
+
+(defun x87-set-tag (i empty)
+  (let ((shift (* 2 (cast-unsigned 16 i))))
+    (set FPU_TAG (logor (logand FPU_TAG (lnot (lshift 3:16 shift)))
+                        (if empty (lshift 3:16 shift) 0:16)))))
+
 (defun x87-push (x)
+  (let ((top (- (x87-top) 1:3)))
+    (x87-set-top top)
+    (x87-set-tag top false))
   (let ((v x))
     (set ST7 ST6)
     (set ST6 ST5)
@@ -288,6 +307,9 @@
     (set ST0 v)))
 
 (defun x87-pop ()
+  (let ((top (x87-top)))
+    (x87-set-tag top true)
+    (x87-set-top (+ top 1:3)))
   (let ((v ST0))
     (set ST0 ST1)
     (set ST1 ST2)
@@ -478,8 +500,21 @@
     (set ST0 r)
     (set$ r x)))
 
-(defun FINCSTP () (x87-pop))
+;; the rotations of the stack, which don't change the tags
+(defun x87-rotate-down ()
+  (let ((v ST0))
+    (set ST0 ST1)
+    (set ST1 ST2)
+    (set ST2 ST3)
+    (set ST3 ST4)
+    (set ST4 ST5)
+    (set ST5 ST6)
+    (set ST6 ST7)
+    (set ST7 v)))
+
+(defun FINCSTP () (x87-rotate-down) (x87-set-top (+ (x87-top) 1:3)))
 (defun FDECSTP ()
+  (x87-set-top (- (x87-top) 1:3))
   (let ((v ST7))
     (set ST7 ST6)
     (set ST6 ST5)
@@ -490,7 +525,101 @@
     (set ST1 ST0)
     (set ST0 v)))
 (defun FFREE (_) (empty))
-(defun FNCLEX () (empty))
+
+;; The status word of x87, whose exceptions are not raised, as the
+;; operations are of the intrinsics, the condition codes C0-C3, of FXAM,
+;; and the top of the stack, which is not modeled, as the stack is the
+;; registers ST0-ST7, and its tags.
+(defun FNCLEX () (set FPU_STATUS (logand FPU_STATUS 0x7f00:16)))
+
+;; the default control word, to the nearest, of 64 bits, all exceptions
+;; masked, the status cleared, and the stack empty
+(defun FNINIT ()
+  (set FPU_CONTROL 0x37f:16)
+  (set FPU_STATUS 0:16)
+  (set FPU_TAG 0xffff:16))
+
+(defun FNSTSW16r () (set-ax FPU_STATUS))
+(defun FNSTSWm (base scale index off seg)
+  (store-n 16 (ea base scale index off seg) FPU_STATUS))
+
+;; the tag of the value: valid 00, zero 01, and special 10, i.e., a NaN,
+;; an infinity, a denormal, or an unsupported one
+(defun x87-classify (x)
+  (let ((e (extract 78 64 x))
+        (j (extract 63 63 x)))
+    (if (= (extract 78 0 x) 0) 0b01:2
+      (if (or (= e 0x7fff) (= e 0) (not j)) 0b10:2 0b00:2))))
+
+;; the register ST of the physical register I
+(defun x87-physical (i)
+  (case (- i (x87-top))
+    0 ST0 1 ST1 2 ST2 3 ST3 4 ST4 5 ST5 6 ST6 ST7))
+
+;; the tag word, whose empty registers have the tag 11, and the others
+;; the tags of their values
+(defun x87-tags ()
+  (concat
+   (x87-tag-of 7:3) (x87-tag-of 6:3) (x87-tag-of 5:3) (x87-tag-of 4:3)
+   (x87-tag-of 3:3) (x87-tag-of 2:3) (x87-tag-of 1:3) (x87-tag-of 0:3)))
+
+(defun x87-tag-of (i)
+  (let ((empty (= (extract 1 0 (rshift FPU_TAG (* 2 (cast-unsigned 16 i)))) 3)))
+    (if empty 0b11:2 (x87-classify (x87-physical i)))))
+
+;; the environment, of the 32-bit and the 64-bit modes, of 28 bytes: the
+;; control, the status, and the tag words, and the pointers of the last
+;; instruction and operand, which are not modeled, as zeros; FNSTENV
+;; masks all exceptions then
+(defun FSTENVm (base scale index off seg)
+  (let ((a (ea base scale index off seg)))
+    (store-n 32 a (cast-unsigned 32 FPU_CONTROL))
+    (store-n 32 (+ a 4) (cast-unsigned 32 FPU_STATUS))
+    (store-n 32 (+ a 8) (cast-unsigned 32 (x87-tags)))
+    (store-n 32 (+ a 12) 0:32)
+    (store-n 32 (+ a 16) 0:32)
+    (store-n 32 (+ a 20) 0:32)
+    (store-n 32 (+ a 24) 0:32)
+    (set FPU_CONTROL (logor FPU_CONTROL 0x3f:16))))
+
+(defun FLDENVm (base scale index off seg)
+  (let ((a (ea base scale index off seg)))
+    (set FPU_CONTROL (load-n 16 a))
+    (set FPU_STATUS (load-n 16 (+ a 4)))
+    (set FPU_TAG (load-n 16 (+ a 8)))))
+
+;; the class of ST0, in C3, C2, and C0, and its sign in C1: the NaN 001,
+;; the normal 010, the infinity 011, the zero 100, the denormal 110, and
+;; the unsupported, e.g., the unnormal, 000, as the stack is not empty
+(defun XAM_F ()
+  (let ((x ST0)
+        (e (extract 78 64 x))
+        (j (extract 63 63 x))
+        (f (extract 62 0 x))
+        (c (if (= e 0x7fff)
+               (if (and j (= f 0)) 0b011 (if j 0b001 0b000))
+             (if (= e 0)
+                 (if (and (not j) (= f 0)) 0b100 0b110)
+               (if j 0b010 0b000)))))
+    (set FPU_STATUS
+         (logor (logand FPU_STATUS 0xb8ff:16)
+                (lshift (cast-unsigned 16 (extract 2 2 c)) 14)
+                (lshift (cast-unsigned 16 (extract 1 1 c)) 10)
+                (lshift (cast-unsigned 16 (extract 79 79 x)) 9)
+                (lshift (cast-unsigned 16 (extract 0 0 c)) 8)))))
+
+;; ST0 times 2 to ST1, rounded toward zero, which is clamped, so that the
+;; product overflows or underflows, as the powers of two are exact, in
+;; two steps, whose exponents are in the range of the format
+(defun x87-pow2 (n)
+  (concat (cast-low 16 (+ n 16383)) 0x8000000000000000:64))
+
+(defun FSCALE ()
+  (let ((n (x87-to-int 'rtz 32 ST1))
+        (n (if (< 40000 n) 40000 (if (< n -40000) -40000 n)))
+        (h (arshift n 1)))
+    (set ST0 (x87-binary 'fmul (x87-binary 'fmul ST0 (x87-pow2 h))
+                         (x87-pow2 (- n h))))))
 
 ;; the comparisons, which set ZF, PF and CF, as UCOMISD does
 

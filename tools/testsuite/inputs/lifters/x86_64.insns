@@ -97,6 +97,15 @@ de c1  # faddp %st, %st(1)
 db 6d 10  # fldt 0x10(%rbp)
 d8 c9  # fmul %st(1), %st
 db 7d e0  # fstpt -0x20(%rbp)
+df e0  # fnstsw %ax
+d9 e5  # fxam
+d9 fd  # fscale
+db e3  # fninit
+0f 38 f0 07  # movbel (%rdi), %eax
+48 0f 38 f1 07  # movbeq %rax, (%rdi)
+f3 48 0f 1e c8  # rdsspq %rax
+f3 48 0f ae eb  # incsspq %rbx
+0f a2  # cpuid
 48 f7 7d f0  # idivq -0x10(%rbp)
 0f af c1  # imull %ecx, %eax
 48 0f af 45 f0  # imulq -0x10(%rbp), %rax
