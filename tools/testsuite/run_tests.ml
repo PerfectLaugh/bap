@@ -1302,6 +1302,26 @@ let smc data =
           contains env "runs the patched code" out "s 250216 250216"))
     [ "bap:unicorn-executor"; "bap:lifted-executor" ]
 
+(* the hooks of the memory see the same reads and writes of the
+   crc-loop in Unicorn and in the lifted engine, whose loop runs compiled,
+   as the code, that doesn't access the hooked pages, runs compiled also
+   with the hooks, and in time, see emu/hooks/script.ml *)
+let memory_hooks data =
+  List.map
+    (fun engine ->
+      case ("emu/hooks/" ^ engine) (fun env ->
+          let out =
+            bap ~timeout:30. env
+              [
+                "script";
+                input "emu/hooks/script.ml";
+                engine;
+                path data "bin/x86_64-linux-gnu-crc-loop";
+              ]
+          in
+          has env "sees the accesses" out "reads 26 writes 28\n"))
+    [ "unicorn"; "lifted" ]
+
 (* the taint of the bytes of the page of the bss, which are generated,
    when they are read, stays, and the code, that doesn't use the
    tainted values, runs in the engine, without the events of its loads
@@ -2268,6 +2288,7 @@ let tests =
     smc;
     calloc;
     taint_bss;
+    memory_hooks;
     printf_family;
     mmap;
     pages;

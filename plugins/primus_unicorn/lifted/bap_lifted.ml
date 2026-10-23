@@ -118,8 +118,6 @@ type jit = {
   mem : Bap_lifted_jit.Runtime.mem;
   blocks : compiled Int64.Table.t;
   mutable gen : int;  (** the version of the hooks *)
-  mutable allowed : bool;
-      (** if no hook, e.g., of the memory, needs the closures *)
   mutable traced : bool;
       (** if the traces of the code record the instructions of the blocks *)
   mutable whole : bool;
@@ -147,6 +145,10 @@ type t = {
   pages : page Int64.Table.t;
   insns : insn Int64.Table.t;
   mutable hooks : hook list;
+  mutable checked : bool;
+      (** if a hook of the memory is, before which the reads are checked, see
+          [load_value], but not the writes, as Unicorn calls the hooks of the
+          writes before it checks them *)
   mutable stopped : bool;
   mutable closed : bool;
   mutable undo : (unit -> unit) list;
@@ -309,6 +311,7 @@ let create config arch mode =
       wrote_all = false;
       fresh = Int64.Table.create ();
       reads = [];
+      checked = false;
       ran = 0;
       linked = None;
       stale = [];
@@ -321,7 +324,6 @@ let create config arch mode =
                mem = Bap_lifted_jit.Runtime.create ();
                blocks = Int64.Table.create ();
                gen = 0;
-               allowed = true;
                traced = false;
                whole = not (Poly.equal arch Uc.Arm);
                jitted = 0;
@@ -445,6 +447,38 @@ let code_written ?range t (p : page) =
     end
   end
 
+(* the permissions of the page, that the compiled blocks see, without
+   the reads or the writes, that the hooks of the memory, or the traces,
+   of the page see, so that its accesses stop the block, as their faults
+   do, and the closures run them, and call the hooks, while the rest of
+   the code runs compiled *)
+let effective t page (perm : Uc.Perm.t) =
+  let last = Int64.(page + page_size - 1L) in
+  let overlaps h =
+    (not h.deleted)
+    &&
+    match (h.first, h.last) with
+    | Some first, Some l when Int64.(first <= l) ->
+        Int64.(first <= last && l >= page)
+    | _ -> true
+  in
+  let hooked access =
+    List.exists t.hooks ~f:(fun h ->
+        overlaps h
+        &&
+        match h.kind with
+        | Trace_mem _ -> true
+        | Mem (accesses, _) ->
+            List.exists accesses ~f:(fun a ->
+                match (a, access) with
+                | (Uc.Read | Read_after), `read | Write, `write -> true
+                | _ -> false)
+        | _ -> false)
+  in
+  let perm = (perm :> int) in
+  let perm = if hooked `read then perm land lnot 1 else perm in
+  if hooked `write then perm land lnot 2 else perm
+
 let mem_map t addr size perm =
   check t;
   if not (aligned addr size) then error 15 "Invalid argument (UC_ERR_ARG)";
@@ -458,7 +492,7 @@ let mem_map t addr size perm =
       Hashtbl.set t.fresh ~key:page ~data:();
       Hashtbl.set t.pages ~key:page ~data:{ data; perm; code = [] };
       Option.iter t.jit ~f:(fun j ->
-          Bap_lifted_jit.Runtime.map j.mem page data (perm :> int)))
+          Bap_lifted_jit.Runtime.map j.mem page data (effective t page perm)))
 
 let mem_unmap t addr size =
   check t;
@@ -478,7 +512,7 @@ let mem_protect t addr size perm =
           if not Uc.Perm.(mem perm exec) then code_written t p;
           p.perm <- perm;
           Option.iter t.jit ~f:(fun j ->
-              Bap_lifted_jit.Runtime.protect j.mem page (perm :> int))
+              Bap_lifted_jit.Runtime.protect j.mem page (effective t page perm))
       | None -> error 11 "Invalid memory mapping (UC_ERR_NOMEM)")
 
 let offset addr = Int64.(to_int_exn (addr - page_of addr))
@@ -531,13 +565,14 @@ let unchain (j : jit) =
     | Counting _ | Failed -> ())
 
 let hooks_changed t =
+  t.checked <-
+    List.exists t.hooks ~f:(fun h ->
+        (not h.deleted) && match h.kind with Mem _ -> true | _ -> false);
   Option.iter t.jit ~f:(fun j ->
       unchain j;
       j.gen <- j.gen + 1;
-      j.allowed <-
-        not
-          (List.exists t.hooks ~f:(fun h ->
-               match h.kind with Mem _ | Trace_mem _ -> true | _ -> false));
+      Hashtbl.iteri t.pages ~f:(fun ~key:page ~data:p ->
+          Bap_lifted_jit.Runtime.protect j.mem page (effective t page p.perm));
       j.traced <-
         List.exists t.hooks ~f:(fun h ->
             match h.kind with Trace_code _ -> true | _ -> false);
@@ -908,6 +943,10 @@ let load_value t stores addr endian size =
   | None ->
       (* the hooks see a read once, as in Unicorn *)
       let again = read_again t addr n in
+      (* the read faults before the hooks, as in Unicorn, so that they
+         don't see it again, when the instruction runs again, though the
+         write faults after them, see [write_stores] *)
+      if t.checked && not again then ignore (load t addr n : string);
       if not again then mem_hooks t Read addr n 0L;
       let x = value_of_bytes endian (load t addr n) in
       if not again then mem_hooks t Read_after addr n (bits x);
@@ -2037,9 +2076,7 @@ let start ?until ?timeout ?count t pc =
     else
       let fast =
         match t.jit with
-        | Some j
-          when j.allowed && t.block && Option.is_none pending && not forbidden
-          ->
+        | Some j when t.block && Option.is_none pending && not forbidden ->
             fast_block t j pc ~until ~count n
         | _ -> None
       in
@@ -2083,8 +2120,7 @@ let start ?until ?timeout ?count t pc =
                 let block =
                   match t.jit with
                   | Some j
-                    when j.allowed && t.block && Option.is_none pending
-                         && not forbidden ->
+                    when t.block && Option.is_none pending && not forbidden ->
                       run_block t j insn pc ~until ~count n
                   | _ -> None
                 in
