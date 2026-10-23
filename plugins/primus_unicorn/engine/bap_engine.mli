@@ -49,8 +49,8 @@ module Lifted : sig
     big_endian : bool;  (** the order of the bytes of the memory *)
     bits : int;  (** the size of an address *)
     jit : bool;
-        (** if the blocks, that run often, are compiled to the native code,
-            see {!Bap_lifted} *)
+        (** if the blocks, that run often, are compiled to the native code, see
+            {!Bap_lifted} *)
   }
 end
 
@@ -100,6 +100,14 @@ val reg_write_bytes : t -> int -> string -> unit
 
 val start : ?until:int64 -> ?timeout:int -> ?count:int -> t -> int64 -> unit
 val stop : t -> unit
+
+val in_atomic : t -> bool
+(** [in_atomic t] if the lifted engine stopped in an atomic sequence, e.g.,
+    between ll and sc of MIPS, in which the threads don't switch, as its store
+    conditional succeeds, whatever another thread wrote, see
+    {!Bap_lifted.in_atomic}. Unicorn is never in one, as its store conditional
+    fails, if the memory changed. *)
+
 val interrupted : unit -> bool
 val process_signals : unit -> unit
 

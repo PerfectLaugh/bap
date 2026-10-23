@@ -4535,7 +4535,10 @@ module Make (Machine : Primus.Machine.S) = struct
           let* sliced = Machine.Local.get threads >>| Threads.ready e in
           let now = Stdlib.Sys.time () in
           let ends = s.sliced_at +. Threads.slice in
-          if sliced && Float.(now >= ends) then Threads.preempt e pc >>= loop
+          (* the thread doesn't switch in an atomic sequence of the
+             lifted engine, see [Uc.in_atomic] *)
+          if sliced && Float.(now >= ends) && not (Uc.in_atomic e.uc) then
+            Threads.preempt e pc >>= loop
           else
             let deadline = Option.map remaining ~f:(fun t -> now +. t) in
             let deadline =
@@ -4557,7 +4560,8 @@ module Make (Machine : Primus.Machine.S) = struct
                 s.resumed_at <- s.skipped_at
             | _ -> ());
             match (e.reason, error) with
-            | None, None when sliced -> Threads.preempt e pc >>= loop
+            | None, None when sliced && not (Uc.in_atomic e.uc) ->
+                Threads.preempt e pc >>= loop
             | None, None when Option.is_some remaining -> loop pc
             | Some Returned, _ | None, None -> pull e
             | Some (Foreign addr), _ -> (

@@ -175,7 +175,9 @@
     (store-n 64 a r)))
 
 ;; CMPXCHG compares the accumulator with the destination, which is
-;; replaced if they are equal, the accumulator is loaded otherwise
+;; replaced if they are equal, the accumulator is loaded otherwise, and
+;; the destination in the memory is written back, as the processor
+;; never makes a locked read without a locked write
 (defmacro cmpxchg-r (acc set-acc rd y)
   (let ((x rd) (v y))
     (sub-op acc x)
@@ -184,7 +186,7 @@
 (defmacro cmpxchg-m (acc set-acc n y base scale index off seg)
   (let ((a (ea base scale index off seg)) (x (load-n n a)))
     (sub-op acc x)
-    (if ZF (store-n n a y) (set-acc x))))
+    (if ZF (store-n n a y) (prog (store-n n a x) (set-acc x)))))
 
 (defun CMPXCHG8rr (rd y) (cmpxchg-r AL set-al rd y))
 (defun CMPXCHG8rm (base scale index off seg y) (cmpxchg-m AL set-al 8 y base scale index off seg))
@@ -201,6 +203,7 @@
         (prog (set ZF 1:1) (store-n 64 a (concat ECX EBX)))
       (prog
         (set ZF 0:1)
+        (store-n 64 a x)
         (set-edx (cast-high 32 x))
         (set-eax (cast-low 32 x))))))
 
@@ -211,6 +214,7 @@
         (prog (set ZF 1:1) (store-n 128 a (concat RCX RBX)))
       (prog
         (set ZF 0:1)
+        (store-n 128 a x)
         (set RDX (cast-high 64 x))
         (set RAX (cast-low 64 x))))))
 

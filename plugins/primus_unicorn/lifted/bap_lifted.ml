@@ -119,6 +119,10 @@ type t = {
   mutable block : bool;  (** the next instruction starts a block *)
   mutable running : bool;
   mutable current : int64;  (** the instruction, that runs *)
+  mutable current_size : int;
+  mutable recorded : bool;
+      (** if the traces recorded the instruction, that runs, which they do after
+          its hooks *)
   (* the writes of the registers and the memory, while the emulation is
      stopped, which make a boundary of the traces, when it starts, see
      [Uc.Trace.bounds], but the fills of the pages, that are mapped *)
@@ -196,6 +200,10 @@ let link t insn =
 (* the time doesn't stop the engine in an atomic sequence, of at most so
    many instructions, as the threads switch, when it stops *)
 let max_linked = 32
+
+(* if the engine stopped in an atomic sequence, whose store would succeed,
+   if another thread wrote in between, so that the threads don't switch *)
+let in_atomic t = Option.exists t.linked ~f:(fun at -> t.ran - at < max_linked)
 let page_size = 0x1000L
 let page_of addr = Int64.(addr land lnot (page_size - 1L))
 
@@ -234,6 +242,8 @@ let create config arch mode =
       block = true;
       running = false;
       current = 0L;
+      current_size = 0;
+      recorded = false;
       wrote_regs = false;
       wrote = [];
       wrote_all = false;
@@ -473,11 +483,18 @@ let ranges_array ranges =
 
 (* the boundary, before the instruction, that runs, of the writes of a
    hook *)
+(* the boundary of the writes of a hook, before the instruction, that
+   runs, which the trace of the blocks has, as Unicorn has the whole
+   block, when its hooks run, though the engine extends the block with
+   the instruction after them, so it is extended, and trimmed back *)
 let bound_running t ~regs ~mem ranges =
   each t (fun h ->
       match h.kind with
       | Trace_code tr ->
-          Record.bound tr regs mem true t.current (ranges_array ranges) false
+          let early = Uc.Trace.blocks tr && (not t.block) && not t.recorded in
+          if early then Record.extend tr t.current_size;
+          Record.bound tr regs mem true t.current (ranges_array ranges) false;
+          if early then Record.unrun tr t.current
       | _ -> ())
 
 let wrote_regs t =
@@ -554,6 +571,7 @@ let trace_insn t pc size thumb =
           if Uc.Trace.blocks tr && not t.block then Record.extend tr size
           else Record.record tr pc size thumb
       | _ -> ());
+  t.recorded <- true;
   t.block <- false
 
 (* the instruction, that didn't run, e.g., as it faulted *)
@@ -1081,6 +1099,35 @@ let compile_intrinsic ctx tid : unit -> unit =
             | Some x ->
                 result (of_word (Word.create (Bitvec.bigint_unsafe x) dst))))
 
+(* the block, that the first block only jumps to, and the others jump
+   back to, e.g., the head of the loop of rep movs of x86, so that the
+   jump back to it runs the instruction again, as Unicorn runs each
+   iteration, with its hooks, and its records in the traces, and the
+   instruction ends its block, as in Unicorn *)
+let loop_head (blks : blk term list) =
+  match blks with
+  | [] -> None
+  | first :: rest -> (
+      let gotos blk =
+        Term.enum jmp_t blk |> Seq.to_list
+        |> List.filter_map ~f:(fun jmp ->
+            match Jmp.kind jmp with Goto (Direct tid) -> Some tid | _ -> None)
+      in
+      match Term.enum jmp_t first |> Seq.to_list with
+      | [ jmp ]
+        when Seq.is_empty (Term.enum def_t first)
+             &&
+             match Jmp.cond jmp with
+             | Int x -> not (Word.is_zero x)
+             | _ -> false -> (
+          match Jmp.kind jmp with
+          | Goto (Direct tid)
+            when List.exists rest ~f:(fun blk ->
+                     List.mem (gotos blk) tid ~equal:Tid.equal) ->
+              Some tid
+          | _ -> None)
+      | _ -> None)
+
 (* the instruction, whose blocks run from the first one *)
 let compile t ~pc ~next (blks : blk term list) : unit -> next =
   let ctx =
@@ -1094,7 +1141,12 @@ let compile t ~pc ~next (blks : blk term list) : unit -> next =
     let exp = compile_exp ctx exp in
     fun () -> addr_of (exp ())
   in
-  let goto : label -> unit -> next = function
+  let head =
+    Option.bind
+      (loop_head (Array.to_list blks))
+      ~f:(fun tid -> Option.map (index tid) ~f:fst)
+  in
+  let goto ?(from = 0) : label -> unit -> next = function
     | Indirect exp ->
         let a = addr exp in
         fun () ->
@@ -1103,6 +1155,12 @@ let compile t ~pc ~next (blks : blk term list) : unit -> next =
     (* the jump to the instruction itself, e.g., b . of ARM, runs it
        again, after the hooks *)
     | Direct tid when Option.exists (index tid) ~f:(fun (i, _) -> i = 0) ->
+        fun () -> Jump pc
+    (* the loop back to the head, from any block, but the first one,
+       which enters it *)
+    | Direct tid
+      when Option.exists (index tid) ~f:(fun (i, _) ->
+               from > 0 && Option.equal Int.equal (Some i) head) ->
         fun () -> Jump pc
     | Direct tid -> (
         match index tid with
@@ -1142,7 +1200,7 @@ let compile t ~pc ~next (blks : blk term list) : unit -> next =
             let cond = compile_exp ctx (Jmp.cond jmp) in
             let target =
               match Jmp.kind jmp with
-              | Goto label | Ret label -> goto label
+              | Goto label | Ret label -> goto ~from:i label
               | Call c -> call c
               | Int (n, _) -> fun () -> Interrupt_at (n, next)
             in
@@ -1196,7 +1254,8 @@ let may_jump blks =
   let internal tid =
     List.existsi blks ~f:(fun i b -> i > 0 && Tid.equal (Term.tid b) tid)
   in
-  List.exists blks ~f:(fun blk ->
+  Option.is_some (loop_head blks)
+  || List.exists blks ~f:(fun blk ->
       Term.enum jmp_t blk
       |> Seq.exists ~f:(fun jmp ->
           match Jmp.kind jmp with
@@ -1250,6 +1309,84 @@ let jump t insn ~next a =
       set_thumb t thumb;
       Word.to_int64_exn dst
   | _ -> a
+
+(* The IT blocks of Thumb, whose state is the IT bits of CPSR, as QEMU
+   keeps it: IT[1:0] are the bits 26:25, and IT[7:2] are 15:10, and the
+   condition of the instruction is IT[7:4], while IT[3:0] isn't zero. *)
+
+let itstate t =
+  match t.cpsr with
+  | Some id when Poly.equal t.arch Uc.Arm ->
+      let c = reg_read t id in
+      Int64.(
+        to_int_exn ((c lsr 25) land 3L lor (((c lsr 10) land 0x3FL) lsl 2)))
+  | _ -> 0
+
+let set_itstate t it =
+  Option.iter t.cpsr ~f:(fun id ->
+      let c = reg_read t id in
+      let c = Int64.(c land lnot ((3L lsl 25) lor (0x3FL lsl 10))) in
+      write_reg t id
+        Int64.(
+          c
+          lor (of_int Int.(it land 3) lsl 25)
+          lor (of_int Int.((it lsr 2) land 0x3F) lsl 10)))
+
+let advance_it it =
+  if it land 7 = 0 then 0 else it land 0xE0 lor ((it lsl 1) land 0x1F)
+
+(* if the instruction is IT of Thumb, rather than a hint, whose mask is
+   zero, then its firstcond and mask *)
+let it_insn insn =
+  if
+    insn.thumb && insn.size = 2
+    && Char.equal insn.code.[1] '\xBF'
+    && Char.to_int insn.code.[0] land 0xF <> 0
+  then Some (Char.to_int insn.code.[0])
+  else None
+
+let flag t name =
+  match t.config.locate name with
+  | Some (id, lo, _) -> Int64.((reg_read t id lsr lo) land 1L = 1L)
+  | None -> false
+
+let holds t cond =
+  let n = flag t "NF"
+  and z = flag t "ZF"
+  and c = flag t "CF"
+  and v = flag t "VF" in
+  match cond with
+  | 0 -> z
+  | 1 -> not z
+  | 2 -> c
+  | 3 -> not c
+  | 4 -> n
+  | 5 -> not n
+  | 6 -> v
+  | 7 -> not v
+  | 8 -> c && not z
+  | 9 -> (not c) || z
+  | 10 -> Bool.equal n v
+  | 11 -> not (Bool.equal n v)
+  | 12 -> (not z) && Bool.equal n v
+  | 13 -> z || not (Bool.equal n v)
+  | _ -> true
+
+(* if the instruction is in an IT block, and its condition fails *)
+let skipped t insn =
+  insn.thumb
+  &&
+  let it = itstate t in
+  it land 0xF <> 0 && not (holds t (it lsr 4))
+
+(* the IT state after the instruction, that ran *)
+let next_it t insn =
+  if insn.thumb then
+    match it_insn insn with
+    | Some it -> set_itstate t it
+    | None ->
+        let it = itstate t in
+        if it land 0xF <> 0 then set_itstate t (advance_it it)
 
 (* the code of the block, that is dropped, is released, as the program
    may make the blocks anew, e.g., as it patches its code *)
@@ -1363,6 +1500,8 @@ let candidates t pc =
       match lifted t addr with
       | exception Fault _ -> List.rev acc
       | None -> List.rev acc
+      (* the IT blocks of Thumb run in the closures, see [skipped] *)
+      | Some insn when Option.is_some (it_insn insn) -> List.rev acc
       | Some insn -> (
           match t.config.delay insn.code with
           | `None ->
@@ -1483,6 +1622,7 @@ let fast_block t j pc ~until ~count n =
   match Hashtbl.find j.blocks pc with
   | Some (Compiled b)
     when (not b.entry_hooked) && b.gen = j.gen
+         && itstate t = 0
          && Bool.equal b.insns.(0).thumb (thumb t)
          && (not (Option.exists count ~f:(fun c -> n + Array.length b.pcs > c)))
          && not
@@ -1506,6 +1646,7 @@ let run_block t j insn pc ~until ~count n =
       Hashtbl.set j.blocks ~key:pc
         ~data:(if c + 1 < hot then Counting (c + 1) else compile_block t j pc);
       None
+  | Some (Compiled _) when itstate t <> 0 -> None
   | Some (Compiled b) ->
       let length = Array.length b.pcs in
       if not (phys_equal b.insns.(0) insn) then (
@@ -1575,8 +1716,22 @@ let start ?until ?timeout ?count t pc =
               else
                 error uc_err_insn_invalid
                   "Invalid instruction (UC_ERR_INSN_INVALID)"
+          | Some insn when skipped t insn ->
+              (* the instruction of an IT block of Thumb, whose condition
+                 fails, which Unicorn skips, without its hooks, and its
+                 records, but in the size of the block *)
+              set_itstate t (advance_it (itstate t));
+              each t (fun h ->
+                  match h.kind with
+                  | Trace_code tr when Uc.Trace.blocks tr && not t.block ->
+                      Record.extend tr insn.size
+                  | _ -> ());
+              t.ran <- t.ran + 1;
+              loop Int64.(pc + of_int insn.size) (n + 1)
           | Some insn ->
               t.current <- pc;
+              t.current_size <- insn.size;
+              t.recorded <- false;
               code_hooks t pc insn.size;
               (* the stop in a delay slot stops at the target of its branch,
              after the slot, as Unicorn doesn't stop in a delay slot *)
@@ -1603,6 +1758,7 @@ let start ?until ?timeout ?count t pc =
                     | outcome -> (
                         t.undo <- [];
                         link t insn;
+                        next_it t insn;
                         t.ran <- t.ran + 1;
                         if
                           t.ran land 0xFFFFF = 0

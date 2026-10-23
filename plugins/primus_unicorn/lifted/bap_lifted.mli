@@ -2,9 +2,9 @@
     lifts, with the interface of {!Bap_unicorn}.
 
     Each instruction is lifted, when it runs first, and compiled to the
-    closures, and the blocks, that run often, are compiled by the JIT of LLVM
-    to the native code of the host. The instruction, that the engine can't
-    run, e.g., whose semantics call an intrinsic, calls the hooks of
+    closures, and the blocks, that run often, are compiled by the JIT of LLVM to
+    the native code of the host. The instruction, that the engine can't run,
+    e.g., whose semantics call an intrinsic, calls the hooks of
     {!on_unsupported}, which stop the engine, so that it is interpreted, e.g.,
     by Primus. An instruction runs as a transaction: its writes are undone, if
     it faults, so that it runs again after the hooks of the invalid access, as
@@ -12,8 +12,7 @@
 
     The registers are the ones of Unicorn, by their identifiers, and of their
     sizes, see {!Bap_unicorn.regs}, whose bits are the registers of BAP, see
-    [config.locate], and the memory is the pages of 4 KB with their
-    permissions.
+    [config.locate], and the memory is the pages of 4 KB with their permissions.
 
     The program, that the engine runs, is untrusted: its accesses check the
     pages, and its code, that the JIT compiles, is limited, see
@@ -64,8 +63,8 @@ val mem_regions : t -> (int64 * int64 * Bap_unicorn.Perm.t) list
 
 val set_unmapped : t -> string -> Bap.Std.word -> unit
 (** [set_unmapped t name x] sets the register [name] of BAP, that Unicorn
-    hasn't, e.g., the base of a segment of x86, see
-    [Bap_engine.set_unmapped]. *)
+    hasn't, e.g., the base of a segment of x86, see [Bap_engine.set_unmapped].
+*)
 
 val reg_size : t -> int -> int
 val reg_read : t -> int -> int64
@@ -78,6 +77,12 @@ val reg_write_bytes : t -> int -> string -> unit
 val start : ?until:int64 -> ?timeout:int -> ?count:int -> t -> int64 -> unit
 val stop : t -> unit
 
+val in_atomic : t -> bool
+(** [in_atomic t] if the engine stopped between a load linked and its store
+    conditional, e.g., ll and sc of MIPS, whose semantics have no reservation,
+    so that the store succeeds, if another thread writes in between, which the
+    threads must not do, see [Bap_engine.in_atomic]. *)
+
 (** {2 Hooks} *)
 
 val on_code : ?first:int64 -> ?last:int64 -> t -> (int64 -> int -> unit) -> hook
@@ -89,9 +94,8 @@ val on_interrupt : t -> (int -> unit) -> hook
 val on_invalid_insn : t -> (unit -> bool) -> hook
 
 val on_unsupported : t -> (int64 -> unit) -> hook
-(** [on_unsupported t f] calls [f addr], before the instruction at [addr],
-    that the engine can't run, which stops it, see
-    [Bap_engine.on_unsupported]. *)
+(** [on_unsupported t f] calls [f addr], before the instruction at [addr], that
+    the engine can't run, which stops it, see [Bap_engine.on_unsupported]. *)
 
 val on_mem :
   ?first:int64 ->

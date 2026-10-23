@@ -106,6 +106,7 @@ let start ?until ?timeout ?count t pc =
   | Lifted l -> L.start ?until ?timeout ?count l pc
 
 let stop = function Unicorn u -> Uc.stop u | Lifted l -> L.stop l
+let in_atomic = function Unicorn _ -> false | Lifted l -> L.in_atomic l
 let interrupted = Uc.interrupted
 let process_signals = Uc.process_signals
 
