@@ -155,6 +155,15 @@ foreach(file ${overlay_files})
     COPYONLY)
 endforeach()
 
+# the changes of the files, that are too large for the overlay, e.g., the
+# translators of QEMU, see overlay/README.md
+patch(qemu/target/mips/translate.c
+  "    switch (MASK_OPC_PCREL_TOP2BITS(opc)) {"
+  "    switch ((uint32_t)MASK_OPC_PCREL_TOP2BITS(opc)) { /* BAP */")
+patch(qemu/target/mips/translate.c
+  "        switch (MASK_OPC_PCREL_TOP5BITS(opc)) {"
+  "        switch ((uint32_t)MASK_OPC_PCREL_TOP5BITS(opc)) { /* BAP */")
+
 # On Windows, Unicorn generates its configuration headers with the
 # configure script of QEMU, which needs a POSIX shell, and when there is
 # none it leaves them empty. So after it is configured, we write the

@@ -128,23 +128,20 @@ f8 80 00 10  # bnezc	$4, 64
 00 80 10 52  # dclz	$2, $4
 00 80 10 53  # dclo	$2, $4
 7c 82 04 37  # lld	$2, 8($4)
+ec 40 00 40  # lapc	$2, 256
+ec 5e 12 34  # auipc	$2, 4660
+ec 5f 12 34  # aluipc	$2, 4660
 
 # the instructions, whose results differ, as Unicorn or the checker
 # differ, e.g., the ones of a random address, or that Unicorn
 # doesn't have, and why
-# ec 40 00 40  # lapc	$2, 256
-#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 20294; R2 0x3FFE1060 / 0x20390; memory 
-# ec 5e 12 34  # auipc	$2, 4660
-#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 20294; R2 0x3FFE10B0 / 0x12360290; memo
-# ec 5f 12 34  # aluipc	$2, 4660
-#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 20294; R2 0x3FFE1290 / 0x12360000; memo
 # 7c 82 04 26  # sc	$2, 8($4)
 #   R2 0 / 1; memory at 3ffe1148
 # 7c 82 04 27  # scd	$2, 8($4)
 #   R2 0 / 1; memory at 3ffe1778
 # ec 48 00 40  # lwpc	$2, 256
-#   Unicorn: an unhandled interrupt 20, its CPU of the release 6 has no PC-relative loads
+#   the load reads past the segment, which Primus hasn't, as Unicorn maps its whole page
 # ec 50 00 40  # lwupc	$2, 256
-#   Unicorn: an unhandled interrupt 20, its CPU of the release 6 has no PC-relative loads
+#   the load reads past the segment, which Primus hasn't, as Unicorn maps its whole page
 # ec 58 00 20  # ldpc	$2, 256
-#   Unicorn: an unhandled interrupt 20, its CPU of the release 6 has no PC-relative loads
+#   the load reads past the segment, which Primus hasn't, as Unicorn maps its whole page

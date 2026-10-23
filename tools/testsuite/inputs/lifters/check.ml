@@ -267,6 +267,9 @@ let () =
         in
         let prepare emu =
           Emu.write emu entry (code ^ nops);
+          (* the instruction before it, of the program, isn't a branch of
+             MIPS, whose delay slot the instruction would be *)
+          if mips then Emu.write emu (Int64.sub entry 4L) "\000\000\000\000";
           Emu.write emu buf data;
           List.iter (fun (r, x) -> Emu.set_reg_word emu r x) regs;
           Emu.set_reg emu sp (Int64.add buf 0x2000L);

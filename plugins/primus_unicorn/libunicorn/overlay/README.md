@@ -10,8 +10,9 @@ Unicorn changes, the changes are merged into its new files, e.g., with
     cd unicorn-NEW && patch -p1 < ../bap.diff
 
 and the files of the new version, with the changes, replace these. The
-fixes of the platforms, e.g., of Windows, stay the patches of
-`build.cmake`.
+fixes of the platforms, e.g., of Windows, and the changes of the files,
+that are too large to keep, e.g., the translators of QEMU, of about a
+megabyte, are the patches of `build.cmake`.
 
 ## The exits after the accesses of the memory
 
@@ -64,3 +65,14 @@ targets have the same names, so that one target would call the other's.
 The conversions, e.g., `fctiwz`, saturate, as softfloat does, and as the
 Power ISA tells, and only the NaNs are the values of the invalid
 conversions, rather than every invalid conversion.
+
+## The PC-relative instructions of MIPS
+
+`qemu/target/mips/translate.c`, a patch of `build.cmake`
+
+The instructions of the release 6, `addiupc`, `auipc`, `aluipc`,
+`lwpc`, `lwupc`, and `ldpc`, raised the reserved instruction, as the
+switches of `gen_pcrel` were on the masks of `unsigned long`, while
+the opcodes of their cases are the negative `int`s, e.g., `0x3B << 26`,
+which differ, when they are converted to it. The switches are on the
+32 bits.
