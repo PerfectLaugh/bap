@@ -81,7 +81,7 @@ module Exact (Machine : Primus.Machine.S) = struct
   open Taint.Rel
 
   module Id = struct
-    let name = "propagate-exactly"
+    let name = "propagate-taint-exact"
   end
 
   module Eval = Primus.Interpreter.Make (Machine)

@@ -26,7 +26,10 @@ let () =
       let components =
         match policy with
         | "exact" ->
-            [ "bap:propagate-taint-exact"; "bap:select-default-taint-policy" ]
+            [
+              "bap:propagate-taint-exact";
+              "bap:select-propagate-taint-exact-policy";
+            ]
         | _ -> Emu.Taint.components
       in
       let emu =

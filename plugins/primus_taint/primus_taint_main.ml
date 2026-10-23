@@ -252,9 +252,9 @@ manpage
       \    assigned, then the default is used (selectable using this module).\n\
       \    It is possible to implement custom policy. This module provides\n\
       \    two policies: $(b,propagate-by-computation) (default) and\n\
-      \    $(b,propagate-exactly).  The $(b,propagate-by-computation) policy\n\
+      \    $(b,propagate-taint-exact).  The $(b,propagate-by-computation) policy\n\
       \    propagates a taint to the result of any computation. The\n\
-      \    $(b,propagate-exactly) policy is more strict and propagate taint\n\
+      \    $(b,propagate-taint-exact) policy is more strict and propagate taint\n\
       \    if is an operation is store, load, cast, or concat.";
     `S "Taint Garbage Collectors";
     `P

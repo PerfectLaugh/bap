@@ -1343,13 +1343,7 @@ let taint_ops data =
             (fun env ->
               let out =
                 bap env
-                  ~env:
-                    [
-                      ("BAP_LIFTED_TAINT", shadow);
-                      ( "BAP_PRIMUS_TAINT_DEFAULT_POLICY",
-                        if policy = "exact" then "propagate-exactly"
-                        else "propagate-by-computation" );
-                    ]
+                  ~env:[ ("BAP_LIFTED_TAINT", shadow) ]
                   [
                     "script";
                     input "emu/taint-ops/script.ml";
