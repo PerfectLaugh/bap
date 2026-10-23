@@ -65,11 +65,11 @@ typedef struct {
     int flags; /* see LINK_ARM */
     uint8_t *code; /* the copy of its bytes */
     size_t size;
-} link;
+} jit_link;
 
 struct jit_mem {
     frame frame;
-    link *links; /* the blocks, by their addresses, with open addressing */
+    jit_link *links; /* the blocks, by their addresses, with open addressing */
     size_t lcapacity, lcount;
     int chain; /* if the blocks continue with the linked ones */
     uint64_t budget; /* the instructions, that the linked blocks may run */
@@ -159,7 +159,7 @@ static entry *find(jit_mem *m, uint64_t page) {
 }
 
 /* the slot of the block at [pc], or the free one, where it would be */
-static size_t link_slot(jit_mem *m, link *links, size_t capacity,
+static size_t link_slot(jit_mem *m, jit_link *links, size_t capacity,
                         uint64_t pc) {
     size_t i = hash(m->seed, pc << PAGE_BITS, capacity);
     while (links[i].pc != EMPTY && links[i].pc != pc)
@@ -168,7 +168,7 @@ static size_t link_slot(jit_mem *m, link *links, size_t capacity,
 }
 
 static void relink(jit_mem *m, size_t capacity) {
-    link *links = malloc(capacity * sizeof(link));
+    jit_link *links = malloc(capacity * sizeof(jit_link));
     if (!links) caml_raise_out_of_memory();
     for (size_t i = 0; i < capacity; i++) links[i].pc = EMPTY;
     for (size_t i = 0; i < m->lcapacity; i++)
@@ -180,8 +180,8 @@ static void relink(jit_mem *m, size_t capacity) {
     m->lcapacity = capacity;
 }
 
-static link *find_link(jit_mem *m, uint64_t pc) {
-    link *l = &m->links[link_slot(m, m->links, m->lcapacity, pc)];
+static jit_link *find_link(jit_mem *m, uint64_t pc) {
+    jit_link *l = &m->links[link_slot(m, m->links, m->lcapacity, pc)];
     return l->pc == pc ? l : NULL;
 }
 
@@ -360,7 +360,7 @@ value bap_jit_link(value mem, value pc, value fn, value code, value length,
     uint8_t *copy = malloc(n);
     if (!copy) caml_raise_out_of_memory();
     memcpy(copy, String_val(code), n);
-    link l = {p,    Nativeint_val(fn), (uint64_t)Int64_val(end),
+    jit_link l = {p,    Nativeint_val(fn), (uint64_t)Int64_val(end),
               (uint32_t)Long_val(length), Int_val(flags), copy, n};
     m->links[link_slot(m, m->links, m->lcapacity, p)] = l;
     m->lcount++;
@@ -376,7 +376,7 @@ value bap_jit_link_byte(value *argv, int argc) {
 /* the block at [pc] isn't linked, e.g., as its code is released */
 value bap_jit_unlink(value mem, value pc) {
     jit_mem *m = Mem_val(mem);
-    link *l = find_link(m, (uint64_t)Int64_val(pc));
+    jit_link *l = find_link(m, (uint64_t)Int64_val(pc));
     if (l) {
         free(l->code);
         l->pc = EMPTY;
@@ -424,7 +424,7 @@ intnat bap_jit_run(intnat fn, value mem, value regs, value code,
         return -1;
     for (size_t i = 0; i < nregs; i++) ptrs[i] = Bytes_val(Field(regs, i));
     uint64_t pc = (uint64_t)addr;
-    link *current = m->chain ? find_link(m, pc) : NULL;
+    jit_link *current = m->chain ? find_link(m, pc) : NULL;
     for (;;) {
         m->frame.undo = 0;
         int32_t r = ((block)fn)(&m->frame, ptrs);
@@ -447,7 +447,7 @@ intnat bap_jit_run(intnat fn, value mem, value regs, value code,
             if (!mode != !thumb) return r;
             next = dst;
         }
-        link *l = find_link(m, next);
+        jit_link *l = find_link(m, next);
         if (!l || (l->flags & LINK_THUMB) != thumb || next == m->until ||
             (m->until > l->pc && m->until < l->end) ||
             m->chained + ran + l->length > m->budget)
