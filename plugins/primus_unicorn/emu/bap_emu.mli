@@ -278,6 +278,18 @@ module Trace : sig
   val accesses : ?last:int -> t -> access list
   (** the last accesses to the memory, the oldest first *)
 
+  val hot : ?last:int -> ?top:int -> t -> (int64 * int) list
+  (** [hot trace] the program counters of the last [last] records, by default of
+      all, that the ring keeps, of the instructions, or of the blocks, with
+      their numbers, the [top] ones, by default all, that run most, first, e.g.,
+      the loop, in which the program spins *)
+
+  val addresses : ?last:int -> ?top:int -> t -> (int64 * int * int) list
+  (** [addresses trace] the addresses of the last [last] accesses, as {!hot},
+      with the numbers of their reads and their writes, the [top] ones, that are
+      accessed most, first, e.g., the slot, that a loop polls, in a trace, that
+      records the accesses, or watches them *)
+
   val insns :
     ?last:int ->
     t ->
@@ -508,6 +520,14 @@ module Checkpoint : sig
   val is_of : info -> project -> bool
   (** [is_of info proj] if the checkpoint is of the file of the program *)
 end
+
+val threads : t -> Checkpoint.thread list
+(** [threads emu] the threads of the paused program, the one, that runs, at the
+    address, at which it paused, first, and the others, with the addresses, from
+    which they continue, and the addresses, on which they wait, e.g., their
+    futexes, by their TIDs, e.g., to tell, why a program, that stops
+    progressing, spins, with {!Trace.hot} and {!Trace.addresses}. Raises
+    [Invalid_argument], if the program is not paused. *)
 
 (** what a stub does, after the function, that it called, returns, see
     {!complete} *)

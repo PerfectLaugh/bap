@@ -860,9 +860,13 @@ let emu data =
         sequence env out
           [
             ( "watches in unicorn",
-              "unicorn: reads 512, writes 0, inside true, by 4004eb 400523\n" );
+              "unicorn: reads 512, writes 0, inside true, by 4004eb 400523\n\
+               hot block 4004a0, 1334385 times, hot address 403040, 2 reads, 0 \
+               writes\n" );
             ( "watches in the lifted engine",
-              "lifted: reads 512, writes 0, inside true, by 4004eb 400523\n" );
+              "lifted: reads 512, writes 0, inside true, by 4004eb 400523\n\
+               hot block 4004a0, 1334385 times, hot address 403040, 2 reads, 0 \
+               writes\n" );
           ]);
     (* the slices of the odd cases of slice-weird.c, the partial
        registers and bytes, the conditional moves and exchanges, the
@@ -1811,6 +1815,9 @@ let threads data =
             sequence env out
               [
                 ("spawns the threads", "spawned 2 and 3\n");
+                ( "lists the threads",
+                  "thread 1 at main\nthread 2 at worker\nthread 3 at worker\n"
+                );
                 ("runs them", "11 21\n");
                 ("exits", "exited\n");
               ]))

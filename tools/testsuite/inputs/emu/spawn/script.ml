@@ -22,6 +22,14 @@ let () =
   let first = Emu.spawn_thread emu ~start:worker ~arg:1L in
   let second = Emu.spawn_thread emu ~start:worker ~arg:2L in
   Printf.printf "spawned %d and %d\n%!" first second;
+  List.iter
+    (fun ({ tid; pc; waiting } : Emu.Checkpoint.thread) ->
+      Printf.printf "thread %d at %s%s\n" tid
+        (if Int64.equal (Int64.logand pc (-2L)) (addr "main") then "main"
+         else if Int64.equal (Int64.logand pc (-2L)) worker then "worker"
+         else Printf.sprintf "%Lx" pc)
+        (if Option.is_some waiting then ", waiting" else ""))
+    (Emu.threads emu);
   match Emu.run emu with
   | Exited (Some 0) -> print_endline "exited"
   | Failed msg -> print_endline ("failed: " ^ msg)

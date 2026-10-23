@@ -699,6 +699,39 @@ module Trace = struct
     let rows = Uc.Trace.accesses ?last t.trace in
     List.init (Bigarray.Array2.dim1 rows) ~f:(access rows)
 
+  (* the [top] values, that occur most, with their numbers, the most
+     first, and the lower first, of the same number *)
+  let most ?top counts =
+    let all =
+      Hashtbl.to_alist counts
+      |> List.sort ~compare:(fun (a, n) (b, m) ->
+          match Int.compare m n with 0 -> Int64.compare a b | c -> c)
+    in
+    match top with Some n -> List.take all n | None -> all
+
+  let hot ?last ?top t =
+    let pcs = pcs ?last t in
+    let counts = Int64.Table.create () in
+    for i = 0 to Bigarray.Array1.dim pcs - 1 do
+      Hashtbl.incr counts (Bigarray.Array1.get pcs i)
+    done;
+    most ?top counts
+
+  let addresses ?last ?top t =
+    let reads = Int64.Table.create () and writes = Int64.Table.create () in
+    List.iter (accesses ?last t) ~f:(fun a ->
+        Hashtbl.incr (if a.write then writes else reads) a.addr);
+    let counts = Int64.Table.create () in
+    Hashtbl.iteri reads ~f:(fun ~key ~data ->
+        Hashtbl.update counts key ~f:(fun n -> Option.value n ~default:0 + data));
+    Hashtbl.iteri writes ~f:(fun ~key ~data ->
+        Hashtbl.update counts key ~f:(fun n -> Option.value n ~default:0 + data));
+    most ?top counts
+    |> List.map ~f:(fun (addr, _) ->
+        ( addr,
+          Option.value (Hashtbl.find reads addr) ~default:0,
+          Option.value (Hashtbl.find writes addr) ~default:0 ))
+
   (* the instructions of the block of [size] bytes at [addr], in the
      mode, which are decoded once, as the sizes of the instructions, that
      are lifted *)
@@ -1501,6 +1534,37 @@ let thread t =
                   tid := current
               end);
   !tid
+
+(* the thread, that runs, at the address, at which it paused, and the
+   others, where they continue, by their TIDs *)
+let threads t =
+  let pc = pc t in
+  let st = ref None in
+  primus t
+    (module functor
+              (Machine : Primus.Machine.S)
+              ->
+              struct
+                open Machine.Syntax
+
+                let init () =
+                  Machine.Local.get X.threads >>| fun s -> st := Some s
+              end);
+  match !st with
+  | None -> [ { Checkpoint.tid = 1; pc; waiting = None } ]
+  | Some (s : X.threads) ->
+      { Checkpoint.tid = s.current; pc; waiting = None }
+      :: (List.map s.others ~f:(fun (o : X.thread) ->
+              {
+                Checkpoint.tid = o.tid;
+                pc = o.next;
+                waiting =
+                  (match o.wait with
+                  | Ready -> None
+                  | Waiting addrs -> Some addrs);
+              })
+         |> List.sort ~compare:(fun (x : Checkpoint.thread) y ->
+             Int.compare x.tid y.tid))
 
 (* the system, whose program ended, finishes, as its knowledge is the
    result of the system *)
