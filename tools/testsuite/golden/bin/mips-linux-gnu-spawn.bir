@@ -1,0 +1,108 @@
+# exited with 0
+sub _start(_start_result)
+  calls sub_20500
+sub main(main_argc, main_argv, main_result)
+  calls intrinsic:syscall print sub_204f0
+sub print(print_result)
+  calls print sub_204f0
+sub sub_204f0(sub_204f0_result)
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+sub worker(worker_result)
+sub intrinsic:syscall()
+sub putchar(putchar_c, putchar_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = R4
+#2: main_argv :: in out u32 = R5
+#3: main_result :: out u32 = R2
+
+#4:
+#5: R29 := R29 - 0x18
+#6: mem := mem with [R29 + 0x14, be]:u32 <- R31
+#7: mem := mem with [R29 + 0x10, be]:u32 <- R16
+#8: R1 := 0x30000
+#9: R28 := R1 + 0x540
+#10: R16 := 0
+#11: R4 := 0
+#12: R5 := 0
+#13: R6 := 0
+#14: goto %#15
+
+#15:
+#16: R1 := mem[R28 + 4, be]:u32
+#17: #5 := R1 = 0
+#18: when #5 goto %#19
+#20: goto %#21
+
+#21:
+#22: R1 := mem[R28 + 8, be]:u32
+#23: #6 := R1 = 0
+#24: when #6 goto %#19
+#25: goto %#26
+
+#26:
+#27: R28 := 0x14
+#28: R16 := 0
+#29: R4 := 0
+#30: R5 := 0
+#31: R6 := 0
+#32: goto %#33
+
+#33:
+#34: R2 := 0x1042
+#35: R7 := 0
+#36: R29 := R29 - 0x20
+#37: mem := mem with [R29 + 0x10, be]:u32 <- R16
+#38: mem := mem with [R29 + 0x14, be]:u32 <- R16
+#39: intrinsic:x0 := 0
+#40: call @intrinsic:syscall with return %#41
+
+#41:
+#42: R29 := R29 + 0x20
+#43: R28 := R28 - 1
+#44: #7 := R28 <> 0
+#45: when #7 goto %#33
+#46: goto %#47
+
+#47:
+#48: R1 := 0x30000
+#49: R16 := R1 + 0x540
+#50: R4 := mem[R16 + 4, be]:u32
+#51: R31 := 0x203E8
+#52: call @print with return %#53
+
+#53:
+#54: R4 := 0x20
+#55: R31 := 0x203F0
+#56: call @sub_204f0 with return %#57
+
+#57:
+#58: R4 := mem[R16 + 8, be]:u32
+#59: R31 := 0x203FC
+#60: call @print with return %#61
+
+#61:
+#62: R4 := 0xA
+#63: R31 := 0x20404
+#64: call @sub_204f0 with return %#65
+
+#65:
+#66: R2 := 0
+#67: R16 := mem[R29 + 0x10, be]:u32
+#68: R31 := mem[R29 + 0x14, be]:u32
+#69: R29 := R29 + 0x18
+#70: call R31 with noreturn
+
+#19:
+#71: R2 := 0x1042
+#72: R7 := 0
+#73: R29 := R29 - 0x20
+#74: mem := mem with [R29 + 0x10, be]:u32 <- R16
+#75: mem := mem with [R29 + 0x14, be]:u32 <- R16
+#76: intrinsic:x0 := 0
+#77: call @intrinsic:syscall with return %#78
+
+#78:
+#79: R29 := R29 + 0x20
+#80: goto %#15
+

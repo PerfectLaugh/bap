@@ -1772,6 +1772,39 @@ let threads data =
           has env "restores in main" out "restored in the thread 1\n";
           taint out);
     ]
+  @ List.map
+      (fun target ->
+        let bin = target ^ "-spawn" in
+        (* the threads, that the script creates, call a function of the
+           program, and exit, when it returns, see spawn.c *)
+        case ("emu/" ^ bin) (fun env ->
+            let out =
+              bap env
+                ([
+                   "script";
+                   input "emu/spawn/script.ml";
+                   path data ("bin/" ^ bin);
+                 ]
+                @
+                if String.starts_with ~prefix:"powerpc" bin then
+                  [ "api=" ^ path data "api/powerpc" ]
+                else [])
+            in
+            sequence env out
+              [
+                ("spawns the threads", "spawned 2 and 3\n");
+                ("runs them", "11 21\n");
+                ("exits", "exited\n");
+              ]))
+      [
+        "x86_64-linux-gnu";
+        "aarch64-linux-gnu";
+        "i686-linux-gnu";
+        "arm-linux-gnueabihf";
+        "mips-linux-gnu";
+        "powerpc-linux-gnu";
+        "riscv64-linux-gnu";
+      ]
   @ List.concat_map
       (fun target ->
         let bin = target ^ "-threads-weird" in

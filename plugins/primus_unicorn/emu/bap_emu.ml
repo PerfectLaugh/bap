@@ -132,7 +132,7 @@ let start init (entry : Primus.Linker.name) =
         let module Component = Component (Machine) in
         Component.init () >>= ended
     | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ | X.Save _ | X.Interpret
-    | X.Set_pc _ ->
+    | X.Set_pc _ | X.Spawn _ ->
         Machine.return ()
   in
   ended ()
@@ -332,6 +332,13 @@ module Checkpoint = struct
     | Some file -> (
         try String.equal (C.digest file) info.digest with Sys_error _ -> false)
 end
+
+let spawn_thread ?stack t ~start ~arg =
+  if not (paused t) then
+    invalid_arg
+      "Bap_emu.spawn_thread: the program is not paused, e.g., in a hook";
+  resume t (X.Spawn (start, arg, stack));
+  match t.session.spawned with Ok tid -> tid | Error msg -> failwith msg
 
 (* pauses the program before the next instruction, from a hook *)
 let stop t =

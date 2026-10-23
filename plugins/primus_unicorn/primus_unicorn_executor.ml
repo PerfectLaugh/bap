@@ -307,6 +307,7 @@ and session = {
           [pause] is set *)
   mutable pause : bool;
   mutable saved : (unit, string) result;  (** the result of the last [Save] *)
+  mutable spawned : (int, string) result;  (** the result of the last [Spawn] *)
   mutable starts : int;
       (** the number of the starts of Unicorn, which tells the instruction that
           runs again, e.g., after its fault, from the next one *)
@@ -400,6 +401,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     driven = false;
     pause = false;
     saved = Ok ();
+    spawned = Error "no thread spawned";
     starts = 0;
     stopped_at = None;
     restarted_at = None;
@@ -631,6 +633,9 @@ type request =
   | Save of string * int64
       (** the checkpoint of the machine, which continues from the address, is
           saved to the file, see [Bap_emu.save] *)
+  | Spawn of int64 * int64 * int64 option
+      (** the thread, that calls the function at the address with the argument,
+          on the stack, is created, see [Bap_emu.spawn_thread] *)
 
 type _ Effect.t +=
   | Paused : int64 * Primus.Machine.id -> request Effect.t
@@ -3722,6 +3727,22 @@ module Make (Machine : Primus.Machine.S) = struct
                 fail "the threads wait, the last one on %s"
                   (String.concat ~sep:", " (List.map addrs ~f:(sprintf "%Lx"))))
 
+    (* the thread, that runs, exits with the [code], its TID is cleared,
+       and the process exits, if it was the last one *)
+    let exit_thread e st code =
+      let* st =
+        match st.cleared with
+        | None -> Machine.return st
+        | Some addr ->
+            let+ _ = store32 e addr 0L in
+            fst (wake st addr 1)
+      in
+      if List.is_empty st.others then exit_process e code
+      else
+        switch e st >>= function
+        | Some pc -> Machine.return (Some pc)
+        | None -> fail "the threads wait, after the thread %d exited" st.current
+
     (* the call of the thread, that runs, after which the thread, that
        runs then, continues from the address, or [None], if it isn't a
        call of the threads *)
@@ -3917,21 +3938,7 @@ module Make (Machine : Primus.Machine.S) = struct
                       let* () = Machine.Local.put threads st in
                       return (Int64.of_int woken)
                   | _ -> error 38L)
-              | Exit -> (
-                  let* st =
-                    match st.cleared with
-                    | None -> Machine.return st
-                    | Some addr ->
-                        let+ _ = store32 e addr 0L in
-                        fst (wake st addr 1)
-                  in
-                  if List.is_empty st.others then exit_process e (arg 0)
-                  else
-                    switch e st >>= function
-                    | Some pc -> Machine.return (Some pc)
-                    | None ->
-                        fail "the threads wait, after the thread %d exited"
-                          st.current)))
+              | Exit -> exit_thread e st (arg 0)))
 
     (* The threads of the programs of Windows, that the functions of
        KERNEL32, e.g., CreateThread, and of msvcrt, e.g., _beginthreadex,
@@ -4731,6 +4738,124 @@ module Make (Machine : Primus.Machine.S) = struct
               let* st = Machine.Local.get threads in
               exit_thread e st (get e (result e))
     end
+
+    (* the threads, that [spawn] created, return to [exit_addr], which
+       is not mapped, also on the other targets *)
+    let exit_addr = Windows.exit_addr
+
+    (* the thread, that the script creates, see [Bap_emu.spawn_thread],
+       which calls [start] with [arg], on the [stack], whose top is the
+       address, or on the new one, of 256 KB, and exits, when [start]
+       returns, with its result, and is the TID of the thread, on the
+       targets, whose threads Linux or Windows create *)
+    let spawn e ~start ~arg ~stack =
+      (* the function of Thumb, whose symbol has the lower bit *)
+      let start =
+        if
+          Poly.equal e.arch Arm
+          && Int64.(start land 1L = 0L)
+          && Hash_set.mem e.session.thumb (word e start)
+        then Int64.(start lor 1L)
+        else start
+      in
+      let* st = Machine.Local.get threads in
+      if too_many_threads st then fail "too many threads"
+      else
+        Windows.is_pe >>= function
+        | true ->
+            let+ _ =
+              Windows.create e st ~start ~param:arg ~size:0L ~suspended:false
+            in
+            st.last + 1
+        | false -> (
+            match abi e with
+            | None -> fail "the threads of the target are not supported"
+            | Some abi ->
+                let tid = st.last + 1 in
+                let* top =
+                  match stack with
+                  | Some top -> Machine.return Int64.(top land lnot 15L)
+                  | None ->
+                      let size = 0x40000 in
+                      let+ base = Windows.allocate e size in
+                      Int64.(base + of_int size)
+                in
+                (* the return address is on the stack on x86, with the
+                   argument after it on x86, at the entry of the function,
+                   whose stack is aligned before the call, and else in the
+                   link register, and the stack has the space, that the
+                   callee may use, e.g., of the arguments of MIPS *)
+                let* sp =
+                  match (e.arch, e.link) with
+                  | X86, _ when e.bytes = 8 ->
+                      let sp = Int64.(top - 8L) in
+                      let+ _ = storew e sp exit_addr in
+                      sp
+                  | X86, _ ->
+                      let sp = Int64.(top - 0x14L) in
+                      let* _ = storew e sp exit_addr in
+                      let+ _ = storew e Int64.(sp + 4L) arg in
+                      sp
+                  | _ -> Machine.return Int64.(top - 64L)
+                in
+                let first = List.hd abi.args in
+                let* () =
+                  copy e tid ~changed:(fun v x ->
+                      let name = Var.name v in
+                      if Var.equal v e.sp then like x sp
+                      else if
+                        Option.exists e.link ~f:(Var.equal v)
+                        && not (Poly.equal e.arch X86)
+                      then like x exit_addr
+                      else if
+                        (not (Poly.equal e.arch X86 && e.bytes = 4))
+                        && Option.equal String.equal first (Some name)
+                      then like x arg
+                        (* the PIC code of MIPS finds its GOT from T9,
+                           which is the address of the function *)
+                      else if Poly.equal e.arch Mips && String.equal name "R25"
+                      then like x Int64.(start land lnot 1L)
+                      else Machine.return x)
+                in
+                let child =
+                  {
+                    tid;
+                    saved_extra =
+                      List.map (extra e) ~f:(fun id -> (id, read_extra e id));
+                    next = start;
+                    wait = Ready;
+                    clear = None;
+                    woken = false;
+                  }
+                in
+                let+ () =
+                  Machine.Local.put threads
+                    {
+                      st with
+                      others = st.others @ [ child ];
+                      last = tid;
+                      depth =
+                        Some
+                          (Option.value st.depth ~default:(List.length e.frames));
+                    }
+                in
+                tid)
+
+    (* the thread, whose function returned to [exit_addr], exits with
+       its result, see [spawn] *)
+    let returned e addr =
+      Windows.returned e addr >>= function
+      | Some pc -> Machine.return (Some pc)
+      | None -> (
+          if Int64.(addr <> exit_addr) then Machine.return None
+          else
+            match abi e with
+            | None -> Machine.return None
+            | Some abi ->
+                let* () = pull e in
+                let* st = Machine.Local.get threads in
+                if st.current = 1 then Machine.return None
+                else exit_thread e st (get e abi.result))
   end
 
   (* the instruction at [pc], which Primus interprets after the one it
@@ -4984,6 +5109,14 @@ module Make (Machine : Primus.Machine.S) = struct
         let* r = save e pc' file in
         e.session.saved <- r;
         serve pc
+    | Spawn (start, arg, stack) ->
+        let* r =
+          Machine.catch
+            (Threads.spawn e ~start ~arg ~stack >>| Result.return)
+            (fun exn -> Machine.return (Error (Primus.Exn.to_string exn)))
+        in
+        e.session.spawned <- r;
+        serve pc
     | Snapshot -> pull e >>= fun () -> snapshot id pc
     | Restore snapshot ->
         let* () = Machine.kill id in
@@ -5086,7 +5219,7 @@ module Make (Machine : Primus.Machine.S) = struct
                 loop pc
             | Some (Jump pc), _ -> loop pc
             | Some (Fault (access, addr)), _ -> (
-                Threads.Windows.returned e addr >>= function
+                Threads.returned e addr >>= function
                 | Some pc -> loop pc
                 | None -> (
                     fault e access addr >>= function

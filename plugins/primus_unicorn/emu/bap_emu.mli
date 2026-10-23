@@ -395,6 +395,22 @@ val thread : t -> int
     clone, on x86-64 and AArch64, which run one at a time, and are preempted.
     Raises [Invalid_argument], if the program is not paused. *)
 
+val spawn_thread : ?stack:int64 -> t -> start:int64 -> arg:int64 -> int
+(** [spawn_thread emu ~start ~arg] creates a thread of the paused program, which
+    calls the function at [start], with the lower bit set for Thumb, with [arg]
+    as its first argument, as the C ABI passes it, and exits with the result of
+    the function, when it returns, and returns its TID. The thread runs, when
+    the threads switch, after the program continues, as the threads, that the
+    program creates, see {!thread}, on the [stack], whose top is the address, by
+    default on its own, of 256 KB, which malloc allocates. It has the registers
+    of the thread, that runs, e.g., its TLS, but the stack pointer, the
+    argument, and the return address, also on Windows, where it is created as
+    with CreateThread, whose stack is its own.
+
+    Raises [Invalid_argument], if the program is not paused, and [Failure], if
+    the threads of the target are not supported, e.g., of PowerPC64, or there
+    are too many. *)
+
 val knowledge : t -> Bap_knowledge.Knowledge.state option
 (** the knowledge of the system, when it finished, e.g., of the instructions,
     that it lifted, see [Primus.Lift], and what its components computed, or

@@ -1,0 +1,181 @@
+# exited with 0
+sub __Thumbv7ABSLongThunk_putchar(__Thumbv7ABSLongThunk_putchar_result)
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+sub _start(_start_result)
+  calls __libc_start_main
+sub main(main_argc, main_argv, main_result)
+  calls intrinsic:svc print putchar
+sub print(print_result)
+  calls __Thumbv7ABSLongThunk_putchar print
+sub putchar(putchar_c, putchar_result)
+sub worker(worker_result)
+sub intrinsic:svc()
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = R0
+#2: main_argv :: in out u32 = R1
+#3: main_result :: out u32 = R0
+
+#4:
+#5: #58 := SP
+#6: #60 := #58 - 0x18
+#7: mem := mem with [#60, el]:u32 <- R4
+#8: mem := mem with [#60 + 4, el]:u32 <- R5
+#9: mem := mem with [#60 + 8, el]:u32 <- R6
+#10: mem := mem with [#60 + 0xC, el]:u32 <- R7
+#11: mem := mem with [#60 + 0x10, el]:u32 <- R8
+#12: mem := mem with [#60 + 0x14, el]:u32 <- LR
+#13: SP := #58 - 0x18
+#14: R8 := 0x424
+#15: R8 := R8 & 0xFFFF | 0x40000
+#16: #64 := 0x9E
+#17: NF := 1
+#18: ZF := 0
+#19: R7 := #64
+#20: #65 := 0
+#21: NF := 0
+#22: ZF := 1
+#23: R1 := #65
+#24: #66 := 0
+#25: NF := 0
+#26: ZF := 1
+#27: R2 := #66
+#28: #67 := 0
+#29: NF := 0
+#30: ZF := 1
+#31: R3 := #67
+#32: #68 := 0
+#33: NF := 0
+#34: ZF := 1
+#35: R4 := #68
+#36: #69 := 0
+#37: NF := 0
+#38: ZF := 1
+#39: R5 := #69
+#40: goto %#41
+
+#41:
+#42: R0 := mem[R8 + 4, el]:u32
+#43: #71 := R0
+#44: NF := 31:31[#71]
+#45: ZF := #71 = 0
+#46: CF := 0 <= R0
+#47: VF := 31:31[R0 & (R0 ^ #71)]
+#48: #73 := ~ZF <> 0
+#49: goto %#50
+
+#50:
+#51: when #73 goto %#52
+#53: goto %#54
+
+#52:
+#55: R0 := mem[R8 + 8, el]:u32
+#56: goto %#54
+
+#54:
+#57: #74 := R0
+#58: NF := 31:31[#74]
+#59: ZF := #74 = 0
+#60: CF := 0 <= R0
+#61: VF := 31:31[R0 & (R0 ^ #74)]
+#62: when ZF goto %#63
+#64: goto %#65
+
+#65:
+#66: #77 := 0x14
+#67: NF := 0
+#68: ZF := 0
+#69: R6 := #77
+#70: #78 := 0x9E
+#71: NF := 1
+#72: ZF := 0
+#73: R7 := #78
+#74: #79 := 0
+#75: NF := 0
+#76: ZF := 1
+#77: R1 := #79
+#78: #80 := 0
+#79: NF := 0
+#80: ZF := 1
+#81: R2 := #80
+#82: #81 := 0
+#83: NF := 0
+#84: ZF := 1
+#85: R3 := #81
+#86: #82 := 0
+#87: NF := 0
+#88: ZF := 1
+#89: R4 := #82
+#90: #83 := 0
+#91: NF := 0
+#92: ZF := 1
+#93: R5 := #83
+#94: goto %#95
+
+#95:
+#96: #84 := 0
+#97: NF := 0
+#98: ZF := 1
+#99: R0 := #84
+#100: intrinsic:x0 := 0
+#101: call @intrinsic:svc with return %#102
+
+#102:
+#103: #86 := R6 - 1
+#104: NF := 31:31[#86]
+#105: ZF := #86 = 0
+#106: CF := 1 <= R6
+#107: VF := 31:31[(R6 ^ 1) & (R6 ^ #86)]
+#108: R6 := #86
+#109: when ~ZF goto %#95
+#110: goto %#111
+
+#111:
+#112: R0 := mem[R8 + 4, el]:u32
+#113: LR := 0x202DF
+#114: call @print with return %#115
+
+#115:
+#116: #139 := 0x20
+#117: NF := 0
+#118: ZF := 0
+#119: R0 := #139
+#120: LR := 0x202E5
+#121: call @putchar with return %#122
+
+#122:
+#123: R0 := mem[R8 + 8, el]:u32
+#124: LR := 0x202ED
+#125: call @print with return %#126
+
+#126:
+#127: #141 := 0xA
+#128: NF := 0
+#129: ZF := 0
+#130: R0 := #141
+#131: LR := 0x202F3
+#132: call @putchar with return %#133
+
+#133:
+#134: #142 := 0
+#135: NF := 0
+#136: ZF := 1
+#137: R0 := #142
+#138: #144 := SP
+#139: #146 := #144
+#140: SP := #144 + 0x18
+#141: R4 := mem[#146, el]:u32
+#142: R5 := mem[#146 + 4, el]:u32
+#143: R6 := mem[#146 + 8, el]:u32
+#144: R7 := mem[#146 + 0xC, el]:u32
+#145: R8 := mem[#146 + 0x10, el]:u32
+#146: call mem[#146 + 0x14, el]:u32 & 0xFFFFFFFE with noreturn
+
+#63:
+#147: #75 := 0
+#148: NF := 0
+#149: ZF := 1
+#150: R0 := #75
+#151: intrinsic:x0 := 0
+#152: call @intrinsic:svc with return %#41
+

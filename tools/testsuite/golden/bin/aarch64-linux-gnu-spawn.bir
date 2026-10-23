@@ -1,0 +1,108 @@
+# exited with 0
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+sub _start(_start_result)
+  calls __libc_start_main
+sub main(main_argc, main_argv, main_result)
+  calls intrinsic:svc print putchar
+sub print(print_result)
+  calls print putchar
+sub putchar(putchar_c, putchar_result)
+sub sub_2104c4(sub_2104c4_result)
+sub worker(worker_result)
+sub intrinsic:svc()
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[R0]
+#2: main_argv :: in out u64 = R1
+#3: main_result :: out u32 = low:32[R0]
+
+#4:
+#5: mem := mem with [R31 - 0x20, el]:u64 <- R29
+#6: mem := mem with [R31 - 0x18, el]:u64 <- R30
+#7: R31 := R31 - 0x20
+#8: R9 := 0x230000
+#9: R10 := 0x230000
+#10: R1 := 0
+#11: R2 := 0
+#12: R3 := 0
+#13: R4 := 0
+#14: R5 := 0
+#15: mem := mem with [R31 + 0x10, el]:u64 <- R19
+#16: R29 := R31
+#17: goto %#18
+
+#18:
+#19: R8 := mem[R9 + 0x5F0, el]:u64
+#20: #33 := R8 = 0
+#21: when #33 goto %#22
+#23: goto %#24
+
+#24:
+#25: R8 := mem[R10 + 0x5F8, el]:u64
+#26: #37 := R8 = 0
+#27: when #37 goto %#22
+#28: goto %#29
+
+#29:
+#30: R9 := 0x14
+#31: R1 := 0
+#32: R2 := 0
+#33: R3 := 0
+#34: R4 := 0
+#35: R5 := 0
+#36: goto %#37
+
+#37:
+#38: R0 := 0
+#39: R8 := 0x7C
+#40: #59 := 0xFFFFFFFF + 31:0[R9]
+#41: NF := 31:31[#59]
+#42: VF := 31:31[R9] & ~31:31[#59]
+#43: ZF := #59 = 0
+#44: CF := 31:31[R9] | 31:31[R9] & ~31:31[#59] | ~31:31[#59]
+#45: R9 := pad:64[#59]
+#46: intrinsic:x0 := 0
+#47: call @intrinsic:svc with return %#48
+
+#48:
+#49: #61 := ~ZF <> 0
+#50: when #61 goto %#37
+#51: goto %#52
+
+#52:
+#53: R19 := 0x230000
+#54: R19 := R19 + 0x5F0
+#55: R0 := mem[R19, el]:u64
+#56: R30 := 0x210410
+#57: call @print with return %#58
+
+#58:
+#59: R0 := 0x20
+#60: R30 := 0x210418
+#61: call @putchar with return %#62
+
+#62:
+#63: R0 := mem[R19 + 8, el]:u64
+#64: R30 := 0x210420
+#65: call @print with return %#66
+
+#66:
+#67: R0 := 0xA
+#68: R30 := 0x210428
+#69: call @putchar with return %#70
+
+#70:
+#71: R19 := mem[R31 + 0x10, el]:u64
+#72: R0 := 0
+#73: #148 := R31
+#74: R29 := mem[#148, el]:u64
+#75: R30 := mem[#148 + 8, el]:u64
+#76: R31 := R31 + 0x20
+#77: call R30 with noreturn
+
+#22:
+#78: R0 := 0
+#79: R8 := 0x7C
+#80: intrinsic:x0 := 0
+#81: call @intrinsic:svc with return %#18
+
