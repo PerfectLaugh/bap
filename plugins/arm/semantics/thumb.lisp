@@ -71,13 +71,6 @@
   (when (condition-holds cnd)
     (set$ rd (+ rn (t2reg rm)))))
 
-(defun tSBC (rd _ rn rm cnd _)
-  (add-with-carry/it-block rd rn (lnot rm) CF cnd))
-
-(defun tRSB (rd _ rn cnd _)
-  "rsbs	r3, r2, #0"
-  (add-with-carry/it-block rd 0 (lnot rn) 1 cnd))
-
 (defun tMUL (rd _ rn rm cnd _)
   (when (condition-holds cnd)
     (set$ rd (* rn rm))
@@ -147,7 +140,7 @@
   "ldrd rt, rt2, [rn, #imm]; the address is computed before rt,
    which may be the base, is written"
   (when (condition-holds cnd)
-    (let ((addr (+ rn imm)))
+    (let ((addr (+ (if (is-pc rn) (logand (t2pc) 0xfffffffc) rn) imm)))
       (set$ rt (load-word addr))
       (set$ rt2 (load-word (+ addr 4))))))
 

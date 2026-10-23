@@ -28,12 +28,18 @@ module Make (CT : Theory.Core) = struct
   let ldrpci rd pc off =
     rd <-? load s32 @@ (bitv W32.(pc land ~~(int 3)) + const off)
 
+  (* the base, that is in the list, is loaded last, so that the other
+     addresses are of the original base, and isn't written back *)
   let ldm b regs cnd =
+    let is_base r = String.equal (Theory.Var.name r) (Theory.Var.name b) in
+    let loads = List.mapi regs ~f:(fun i r -> (i, r)) in
+    let base, others = List.partition_tf loads ~f:(fun (_, r) -> is_base r) in
     branch cnd
       [
-        ( foreachi regs @@ fun i r ->
+        ( foreachi (others @ base) @@ fun _ (i, r) ->
           [ r := load s32 @@ (var b + const Int.(i * 4)) ] );
-        b += const Int.(List.length regs * 4);
+        (if List.is_empty base then b += const Int.(List.length regs * 4)
+         else seq []);
       ]
       []
 

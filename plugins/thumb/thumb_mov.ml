@@ -50,12 +50,17 @@ module Make (CT : Theory.Core) = struct
       vf := overflow_from_add ~r:(var r) ~rn:(var rn) ~rm:(var rm);
     ]
 
+  (* the carry out of the sum with the carry in is also of the sum, that
+     equals the first operand, e.g., 0xFFFFFFFF + 0 + 1 *)
   let adcs rd rn rm =
     it_set rd (var rn + var rm + CT.unsigned s32 (var cf)) @@ fun r ->
     [
       nf := msb (var r);
       zf := is_zero (var r);
-      cf := carry_from_add ~r:(var r) ~rn:(var rn);
+      cf :=
+        CT.logor
+          (carry_from_add ~r:(var r) ~rn:(var rn))
+          (CT.logand (var cf) (bit (CT.eq (var r) (var rn))));
       vf := overflow_from_add ~r:(var r) ~rn:(var rn) ~rm:(var rm);
     ]
 

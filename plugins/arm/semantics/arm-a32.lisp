@@ -486,6 +486,95 @@
     (a32-set64 lo hi (+ (concat hi0 lo0)
                         (a32-s64 (* (a32-half rn false) (a32-half rm true)))))))
 
+;; the parallel saturating and halving additions and subtractions of
+;; the halfwords and the bytes, the GE flags are not modeled, so the
+;; ones that set them, e.g., SADD16, are not defined
+
+(defun a32-lane-qadds (x y)
+  (let ((e (word-width x))
+        (r (+ (cast-signed (+ e 1) x) (cast-signed (+ e 1) y)))
+        (hi (cast-unsigned (+ e 1) (- (lshift (cast-unsigned 32 1) (- e 1)) 1)))
+        (lo (lnot hi)))
+    (cast-low e (a32-mux (s> r hi) hi (a32-mux (s< r lo) lo r)))))
+
+(defun a32-lane-qsubs (x y)
+  (let ((e (word-width x))
+        (r (- (cast-signed (+ e 1) x) (cast-signed (+ e 1) y)))
+        (hi (cast-unsigned (+ e 1) (- (lshift (cast-unsigned 32 1) (- e 1)) 1)))
+        (lo (lnot hi)))
+    (cast-low e (a32-mux (s> r hi) hi (a32-mux (s< r lo) lo r)))))
+
+(defun a32-lane-qaddu (x y)
+  (let ((e (word-width x))
+        (r (+ (cast-unsigned (+ e 1) x) (cast-unsigned (+ e 1) y))))
+    (a32-mux (msb r) (lnot (cast-unsigned e 0)) (cast-low e r))))
+
+(defun a32-lane-qsubu (x y)
+  (let ((e (word-width x))
+        (r (- (cast-unsigned (+ e 1) x) (cast-unsigned (+ e 1) y))))
+    (a32-mux (msb r) (cast-unsigned e 0) (cast-low e r))))
+
+(defun a32-lane-hadds (x y)
+  (let ((e (word-width x)))
+    (cast-high e (+ (cast-signed (+ e 1) x) (cast-signed (+ e 1) y)))))
+(defun a32-lane-hsubs (x y)
+  (let ((e (word-width x)))
+    (cast-high e (- (cast-signed (+ e 1) x) (cast-signed (+ e 1) y)))))
+(defun a32-lane-haddu (x y)
+  (let ((e (word-width x)))
+    (cast-high e (+ (cast-unsigned (+ e 1) x) (cast-unsigned (+ e 1) y)))))
+(defun a32-lane-hsubu (x y)
+  (let ((e (word-width x)))
+    (cast-high e (- (cast-unsigned (+ e 1) x) (cast-unsigned (+ e 1) y)))))
+
+(defmacro a32-par16 (f x y)
+  (concat (f (cast-high 16 x) (cast-high 16 y))
+          (f (cast-low 16 x) (cast-low 16 y))))
+
+(defmacro a32-par8 (f x y)
+  (concat (f (extract 31 24 x) (extract 31 24 y))
+          (f (extract 23 16 x) (extract 23 16 y))
+          (f (extract 15 8 x) (extract 15 8 y))
+          (f (extract 7 0 x) (extract 7 0 y))))
+
+(defmacro a32-asx (add sub x y)
+  "the sum of the top half of X and the bottom one of Y, and the
+   difference of the bottom half of X and the top one of Y"
+  (concat (add (cast-high 16 x) (cast-low 16 y))
+          (sub (cast-low 16 x) (cast-high 16 y))))
+
+(defmacro a32-sax (add sub x y)
+  (concat (sub (cast-high 16 x) (cast-low 16 y))
+          (add (cast-low 16 x) (cast-high 16 y))))
+
+(defmacro a32-par (rd x cnd)
+  (a32-cond cnd (set$ rd x)))
+
+(defun QADD16 (rd rn rm cnd _) (a32-par rd (a32-par16 a32-lane-qadds rn rm) cnd))
+(defun QSUB16 (rd rn rm cnd _) (a32-par rd (a32-par16 a32-lane-qsubs rn rm) cnd))
+(defun QADD8 (rd rn rm cnd _) (a32-par rd (a32-par8 a32-lane-qadds rn rm) cnd))
+(defun QSUB8 (rd rn rm cnd _) (a32-par rd (a32-par8 a32-lane-qsubs rn rm) cnd))
+(defun QASX (rd rn rm cnd _) (a32-par rd (a32-asx a32-lane-qadds a32-lane-qsubs rn rm) cnd))
+(defun QSAX (rd rn rm cnd _) (a32-par rd (a32-sax a32-lane-qadds a32-lane-qsubs rn rm) cnd))
+(defun UQADD16 (rd rn rm cnd _) (a32-par rd (a32-par16 a32-lane-qaddu rn rm) cnd))
+(defun UQSUB16 (rd rn rm cnd _) (a32-par rd (a32-par16 a32-lane-qsubu rn rm) cnd))
+(defun UQADD8 (rd rn rm cnd _) (a32-par rd (a32-par8 a32-lane-qaddu rn rm) cnd))
+(defun UQSUB8 (rd rn rm cnd _) (a32-par rd (a32-par8 a32-lane-qsubu rn rm) cnd))
+(defun UQASX (rd rn rm cnd _) (a32-par rd (a32-asx a32-lane-qaddu a32-lane-qsubu rn rm) cnd))
+(defun UQSAX (rd rn rm cnd _) (a32-par rd (a32-sax a32-lane-qaddu a32-lane-qsubu rn rm) cnd))
+(defun SHADD16 (rd rn rm cnd _) (a32-par rd (a32-par16 a32-lane-hadds rn rm) cnd))
+(defun SHSUB16 (rd rn rm cnd _) (a32-par rd (a32-par16 a32-lane-hsubs rn rm) cnd))
+(defun SHADD8 (rd rn rm cnd _) (a32-par rd (a32-par8 a32-lane-hadds rn rm) cnd))
+(defun SHSUB8 (rd rn rm cnd _) (a32-par rd (a32-par8 a32-lane-hsubs rn rm) cnd))
+(defun SHASX (rd rn rm cnd _) (a32-par rd (a32-asx a32-lane-hadds a32-lane-hsubs rn rm) cnd))
+(defun SHSAX (rd rn rm cnd _) (a32-par rd (a32-sax a32-lane-hadds a32-lane-hsubs rn rm) cnd))
+(defun UHADD16 (rd rn rm cnd _) (a32-par rd (a32-par16 a32-lane-haddu rn rm) cnd))
+(defun UHSUB16 (rd rn rm cnd _) (a32-par rd (a32-par16 a32-lane-hsubu rn rm) cnd))
+(defun UHADD8 (rd rn rm cnd _) (a32-par rd (a32-par8 a32-lane-haddu rn rm) cnd))
+(defun UHSUB8 (rd rn rm cnd _) (a32-par rd (a32-par8 a32-lane-hsubu rn rm) cnd))
+(defun UHASX (rd rn rm cnd _) (a32-par rd (a32-asx a32-lane-haddu a32-lane-hsubu rn rm) cnd))
+(defun UHSAX (rd rn rm cnd _) (a32-par rd (a32-sax a32-lane-haddu a32-lane-hsubu rn rm) cnd))
+
 ;; branches, BX and BLX may change the instruction set, which is
 ;; chosen by the label of the destination, the bit 0 of the register
 ;; is not a part of the address, as in the writes to PC
@@ -535,3 +624,9 @@
 (defun PLIi12 (_ _) (empty))
 (defun PLIrs (_ _ _) (empty))
 (defun CLREX () (empty))
+
+;; the coprocessor instructions, the moves to the system control
+;; coprocessor in the user mode are the barriers of ARMv6, e.g., the
+;; DMB is c7, c10, 5, and have no effect
+(defun MCR (_ _ _ _ _ _ _ _) (empty))
+(defun MCR2 (_ _ _ _ _ _) (empty))
