@@ -176,14 +176,66 @@ static void check_exit_request_mem(TCGContext *tcg_ctx)
 static void tcg_gen_req_mo(TCGContext *tcg_ctx, TCGBar type)
 ]=])
 # BAP: SO, OV, and CA of XER of PowerPC are the fields of their own of
-# QEMU, which cpu_read_xer and cpu_write_xer merge, so that the carry,
-# e.g., of adde, is the one of the register, that is written
+# QEMU, which are merged, as cpu_read_xer and cpu_write_xer do, so that
+# the carry, e.g., of adde, is the one of the register, that is written.
+# They are merged here, as the functions of the 32-bit and the 64-bit
+# targets have the same names, so that one target may call the other's
 patch(qemu/target/ppc/unicorn.c
   "*(uint32_t *)value = env->xer;"
-  "*(uint32_t *)value = cpu_read_xer(env);")
+  [=[*(uint32_t *)value =
+                env->xer | (env->so << XER_SO) | (env->ov << XER_OV) |
+                (env->ca << XER_CA) |
+                (is_isa300(env) ? (env->ov32 << XER_OV32) |
+                                      (env->ca32 << XER_CA32)
+                                : 0);]=])
 patch(qemu/target/ppc/unicorn.c
   "env->xer = *(uint32_t *)value;"
-  "cpu_write_xer(env, *(uint32_t *)value);")
+  [=[{
+                uint32_t xer = *(uint32_t *)value;
+                env->so = (xer >> XER_SO) & 1;
+                env->ov = (xer >> XER_OV) & 1;
+                env->ca = (xer >> XER_CA) & 1;
+                env->ov32 = (xer >> XER_OV32) & 1;
+                env->ca32 = (xer >> XER_CA32) & 1;
+                env->xer = xer & ~((1u << XER_SO) | (1u << XER_OV) |
+                                   (1u << XER_CA) | (1u << XER_OV32) |
+                                   (1u << XER_CA32));
+            }]=])
+# BAP: the store to the memory, that is not mapped, or not writable, which
+# the hooks don't handle, exits at the instruction, which runs again, as
+# the loads do, rather than dropping the store, as the instruction, whose
+# store is in a helper, e.g., fstpt of x86, or stvewx of PowerPC, would
+# complete without it. The stores of MIPS, which are not in helpers, exit
+# after the access, as the branch, whose delay slot it is, must not run
+# again, see check_exit_request_mem
+patch(qemu/accel/tcg/cputlb.c
+  [=[            // printf("***** Invalid memory write at " TARGET_FMT_lx "\n", addr);
+            cpu_exit(uc->cpu);
+            return;]=]
+  [=[            // printf("***** Invalid memory write at " TARGET_FMT_lx "\n", addr);
+            cpu_exit(uc->cpu);
+            if (uc->nested_level > 0 && !uc->cpu->stopped &&
+                uc->arch != UC_ARCH_MIPS) {
+                cpu_loop_exit_restore(uc->cpu, retaddr);
+            }
+            return;]=])
+patch(qemu/accel/tcg/cputlb.c
+  [=[            // printf("***** Invalid memory write (ro) at " TARGET_FMT_lx "\n", addr);
+            cpu_exit(uc->cpu);
+            return;]=]
+  [=[            // printf("***** Invalid memory write (ro) at " TARGET_FMT_lx "\n", addr);
+            cpu_exit(uc->cpu);
+            if (uc->nested_level > 0 && !uc->cpu->stopped &&
+                uc->arch != UC_ARCH_MIPS) {
+                cpu_loop_exit_restore(uc->cpu, retaddr);
+            }
+            return;]=])
+# BAP: the conversions of PowerPC to the integers, e.g., fctiwz, saturate,
+# as softfloat does, and as the Power ISA tells, and only the NaNs are the
+# values of the invalid conversions, rather than every invalid conversion
+patch(qemu/target/ppc/fpu_helper.c
+  "            ret = nanval;                                              \\"
+  "            ret = float64_is_any_nan(arg) ? nanval : ret;              \\")
 # BAP: the PC, that is written, starts anew, outside of a delay slot of
 # MIPS, as the branch, whose delay slot it was, e.g., of another thread,
 # that ran, is not pending, while uc_emu_start keeps it, so that the
