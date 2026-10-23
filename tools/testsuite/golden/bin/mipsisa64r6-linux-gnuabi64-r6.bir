@@ -1,0 +1,6 @@
+# exited with 0
+sub _start(_start_result)
+sub add(add_result)
+  calls pick
+sub pick(pick_result)
+  calls _start

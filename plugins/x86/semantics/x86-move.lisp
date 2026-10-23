@@ -220,14 +220,18 @@
 ;; decremented, the ones of POP are computed after it is incremented.
 
 (defun push-n (n x)
+  "the value is read before the stack pointer is decremented, e.g., of
+   push %rsp, which pushes its old value"
   (declare (context (bits 64)))
-  (set RSP (- RSP (/ n 8)))
-  (store-n n RSP x))
+  (let ((v x))
+    (set RSP (- RSP (/ n 8)))
+    (store-n n RSP v)))
 
 (defun push-n (n x)
   (declare (context (bits 32)))
-  (set ESP (- ESP (/ n 8)))
-  (store-n n ESP x))
+  (let ((v x))
+    (set ESP (- ESP (/ n 8)))
+    (store-n n ESP v)))
 
 (defun pop-n (n)
   (declare (context (bits 64)))

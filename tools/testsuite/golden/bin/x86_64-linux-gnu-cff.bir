@@ -26,26 +26,27 @@ sub main(main_argc, main_argv, main_result)
 #3: main_result :: out u32 = low:32[RAX]
 
 #4:
-#5: RSP := RSP - 8
-#6: mem := mem with [RSP, el]:u64 <- RBP
-#7: RBP := RSP
-#8: RDI := 0x1B
-#9: RSP := RSP - 8
-#10: mem := mem with [RSP, el]:u64 <- 0x400665
-#11: call @steps with return %#12
+#5: #218 := RBP
+#6: RSP := RSP - 8
+#7: mem := mem with [RSP, el]:u64 <- #218
+#8: RBP := RSP
+#9: RDI := 0x1B
+#10: RSP := RSP - 8
+#11: mem := mem with [RSP, el]:u64 <- 0x400665
+#12: call @steps with return %#13
 
-#12:
-#13: RDI := pad:64[31:0[RAX]]
-#14: RSP := RSP - 8
-#15: mem := mem with [RSP, el]:u64 <- 0x40066C
-#16: call @print with return %#17
+#13:
+#14: RDI := pad:64[31:0[RAX]]
+#15: RSP := RSP - 8
+#16: mem := mem with [RSP, el]:u64 <- 0x40066C
+#17: call @print with return %#18
 
-#17:
-#18: RAX := 0
-#19: #213 := mem[RSP, el]:u64
-#20: RSP := RSP + 8
-#21: RBP := #213
-#22: #214 := mem[RSP, el]:u64
-#23: RSP := RSP + 8
-#24: call #214 with noreturn
+#18:
+#19: RAX := 0
+#20: #223 := mem[RSP, el]:u64
+#21: RSP := RSP + 8
+#22: RBP := #223
+#23: #224 := mem[RSP, el]:u64
+#24: RSP := RSP + 8
+#25: call #224 with noreturn
 

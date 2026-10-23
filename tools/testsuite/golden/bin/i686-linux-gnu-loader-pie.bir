@@ -25,41 +25,45 @@ sub main(main_argc, main_argv, main_result)
 #3: main_result :: out u32 = EAX
 
 #4:
-#5: ESP := ESP - 4
-#6: mem := mem with [ESP, el]:u32 <- EBP
-#7: EBP := ESP
-#8: ESP := ESP - 4
-#9: mem := mem with [ESP, el]:u32 <- EBX
+#5: #15 := EBP
+#6: ESP := ESP - 4
+#7: mem := mem with [ESP, el]:u32 <- #15
+#8: EBP := ESP
+#9: #16 := EBX
 #10: ESP := ESP - 4
-#11: mem := mem with [ESP, el]:u32 <- EDI
-#12: ESP := ESP - 4
-#13: mem := mem with [ESP, el]:u32 <- ESI
-#14: CF := 0
-#15: OF := 0
-#16: SF := 31:31[ESP & 0xFFFFFFF0]
-#17: ZF := (ESP & 0xFFFFFFF0) = 0
-#18: #12 := low:8[ESP & 0xFFFFFFF0]
-#19: #13 := #12 ^ #12 >> 4
-#20: #14 := #13 ^ #13 >> 2
-#21: #15 := #14 ^ #14 >> 1
-#22: PF := ~0:0[#15]
-#23: ESP := ESP & 0xFFFFFFF0
-#24: #16 := ESP - 0x20
-#25: CF := 31:31[~ESP & 0x20 | ~(ESP ^ 0x20) & #16]
-#26: OF := 31:31[(ESP ^ 0x20) & (ESP ^ #16)]
-#27: AF := 0:0[(#16 ^ ESP ^ 0x20) >> 4]
-#28: SF := 31:31[#16]
-#29: ZF := #16 = 0
-#30: #17 := low:8[#16]
-#31: #18 := #17 ^ #17 >> 4
-#32: #19 := #18 ^ #18 >> 2
-#33: #20 := #19 ^ #19 >> 1
-#34: PF := ~0:0[#20]
-#35: ESP := #16
-#36: ESP := ESP - 4
-#37: mem := mem with [ESP, el]:u32 <- 0x1271
-#38: call @sub_1271 with return %#39
+#11: mem := mem with [ESP, el]:u32 <- #16
+#12: #17 := EDI
+#13: ESP := ESP - 4
+#14: mem := mem with [ESP, el]:u32 <- #17
+#15: #18 := ESI
+#16: ESP := ESP - 4
+#17: mem := mem with [ESP, el]:u32 <- #18
+#18: CF := 0
+#19: OF := 0
+#20: SF := 31:31[ESP & 0xFFFFFFF0]
+#21: ZF := (ESP & 0xFFFFFFF0) = 0
+#22: #19 := low:8[ESP & 0xFFFFFFF0]
+#23: #20 := #19 ^ #19 >> 4
+#24: #21 := #20 ^ #20 >> 2
+#25: #22 := #21 ^ #21 >> 1
+#26: PF := ~0:0[#22]
+#27: ESP := ESP & 0xFFFFFFF0
+#28: #23 := ESP - 0x20
+#29: CF := 31:31[~ESP & 0x20 | ~(ESP ^ 0x20) & #23]
+#30: OF := 31:31[(ESP ^ 0x20) & (ESP ^ #23)]
+#31: AF := 0:0[(#23 ^ ESP ^ 0x20) >> 4]
+#32: SF := 31:31[#23]
+#33: ZF := #23 = 0
+#34: #24 := low:8[#23]
+#35: #25 := #24 ^ #24 >> 4
+#36: #26 := #25 ^ #25 >> 2
+#37: #27 := #26 ^ #26 >> 1
+#38: PF := ~0:0[#27]
+#39: ESP := #23
+#40: ESP := ESP - 4
+#41: mem := mem with [ESP, el]:u32 <- 0x1271
+#42: call @sub_1271 with return %#43
 
-#39:
-#40: call @sub_1271 with noreturn
+#43:
+#44: call @sub_1271 with noreturn
 
