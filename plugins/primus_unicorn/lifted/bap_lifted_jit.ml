@@ -234,18 +234,118 @@ let access t s ~load addr bytes =
   emit t "  br i1 %s, label %%i%d.stop, label %%%s\n" failed s.k l;
   start t l
 
+(* The accesses of 1, 2, 4, or 8 bytes in a page, that the cache of the
+   runtime has, whose permissions allow them, are made by the code, and
+   the others by the runtime, see [access]: the entries of the cache, of
+   the type {i64, ptr, i32}, are the address of the page, its bytes, and
+   its permissions, see [entry] of bap_lifted_jit_stubs.c, and the store
+   writes the bytes, that it overwrites, to the undo log, whose entries,
+   of the type {ptr, i64, i32}, are their address, the bytes, and their
+   number, see [undo_entry], of at most [undo_size] entries. *)
+
+let undo_size = 4096
+
+let fast_access t ~load addr bytes =
+  let page = assign t "and i64 %s, -4096" addr in
+  let index = assign t "lshr i64 %s, 12" addr in
+  let index = assign t "and i64 %s, 255" index in
+  let entry =
+    assign t "getelementptr {i64, ptr, i32}, ptr %%tlb, i64 %s" index
+  in
+  let base = assign t "load i64, ptr %s" entry in
+  let hit = assign t "icmp eq i64 %s, %s" base page in
+  let permp =
+    assign t "getelementptr {i64, ptr, i32}, ptr %s, i64 0, i32 2" entry
+  in
+  let perm = assign t "load i32, ptr %s" permp in
+  let off = assign t "and i64 %s, 4095" addr in
+  let fits = assign t "icmp ule i64 %s, %d" off (4096 - bytes) in
+  let allowed =
+    if load then
+      let r = assign t "and i32 %s, 1" perm in
+      assign t "icmp ne i32 %s, 0" r
+    else
+      (* writable, and not executable, as the code doesn't write the code *)
+      let r = assign t "and i32 %s, 6" perm in
+      let w = assign t "icmp eq i32 %s, 2" r in
+      let u = assign t "load i32, ptr %%undo" in
+      let room = assign t "icmp ult i32 %s, %d" u undo_size in
+      assign t "and i1 %s, %s" w room
+  in
+  let ok = assign t "and i1 %s, %s" hit fits in
+  let ok = assign t "and i1 %s, %s" ok allowed in
+  let datap =
+    assign t "getelementptr {i64, ptr, i32}, ptr %s, i64 0, i32 1" entry
+  in
+  (ok, datap, off)
+
 let load t s addr endian bits =
   if bits mod 8 <> 0 then unsupported "a load of %d bits" bits;
   let bytes = bits / 8 in
-  access t s ~load:true addr bytes;
-  let x = assign t "load %s, ptr %%buf, align 1" (ty bits) in
+  let x =
+    if List.mem [ 1; 2; 4; 8 ] bytes ~equal:Int.equal then begin
+      let ok, datap, off = fast_access t ~load:true addr bytes in
+      let fast = label t and slow = label t and join = label t in
+      emit t "  br i1 %s, label %%%s, label %%%s\n" ok fast slow;
+      start t fast;
+      let data = assign t "load ptr, ptr %s" datap in
+      let p = assign t "getelementptr i8, ptr %s, i64 %s" data off in
+      let x = assign t "load %s, ptr %s, align 1" (ty bits) p in
+      let fast_end = label t in
+      emit t "  br label %%%s\n%s:\n  br label %%%s\n" fast_end fast_end join;
+      start t slow;
+      access t s ~load:true addr bytes;
+      let y = assign t "load %s, ptr %%buf, align 1" (ty bits) in
+      let slow_end = label t in
+      emit t "  br label %%%s\n%s:\n  br label %%%s\n" slow_end slow_end join;
+      start t join;
+      assign t "phi %s [%s, %%%s], [%s, %%%s]" (ty bits) x fast_end y slow_end
+    end
+    else begin
+      access t s ~load:true addr bytes;
+      assign t "load %s, ptr %%buf, align 1" (ty bits)
+    end
+  in
   match endian with LittleEndian -> x | BigEndian -> bswap t x bits
 
 let store t s (addr, x, bits, endian) =
   if bits mod 8 <> 0 then unsupported "a store of %d bits" bits;
+  let bytes = bits / 8 in
   let x = match endian with LittleEndian -> x | BigEndian -> bswap t x bits in
-  emit t "  store %s %s, ptr %%buf, align 1\n" (ty bits) x;
-  access t s ~load:false addr (bits / 8)
+  if List.mem [ 1; 2; 4; 8 ] bytes ~equal:Int.equal then begin
+    let ok, datap, off = fast_access t ~load:false addr bytes in
+    let fast = label t and slow = label t and join = label t in
+    emit t "  br i1 %s, label %%%s, label %%%s\n" ok fast slow;
+    start t fast;
+    let data = assign t "load ptr, ptr %s" datap in
+    let p = assign t "getelementptr i8, ptr %s, i64 %s" data off in
+    let u = assign t "load i32, ptr %%undo" in
+    let e = assign t "getelementptr {ptr, i64, i32}, ptr %%log, i32 %s" u in
+    emit t "  store ptr %s, ptr %s\n" p e;
+    let old = assign t "load %s, ptr %s, align 1" (ty bits) p in
+    let old = resize t old bits 64 in
+    let oldp =
+      assign t "getelementptr {ptr, i64, i32}, ptr %s, i64 0, i32 1" e
+    in
+    emit t "  store i64 %s, ptr %s\n" old oldp;
+    let sizep =
+      assign t "getelementptr {ptr, i64, i32}, ptr %s, i64 0, i32 2" e
+    in
+    emit t "  store i32 %d, ptr %s\n" bytes sizep;
+    let u' = assign t "add i32 %s, 1" u in
+    emit t "  store i32 %s, ptr %%undo\n" u';
+    emit t "  store %s %s, ptr %s, align 1\n  br label %%%s\n" (ty bits) x p
+      join;
+    start t slow;
+    emit t "  store %s %s, ptr %%buf, align 1\n" (ty bits) x;
+    access t s ~load:false addr bytes;
+    emit t "  br label %%%s\n" join;
+    start t join
+  end
+  else begin
+    emit t "  store %s %s, ptr %%buf, align 1\n" (ty bits) x;
+    access t s ~load:false addr bytes
+  end
 
 let write_var t s v x =
   let name = Var.name v in
@@ -710,6 +810,10 @@ let header t name =
   add "  %%budget = load i64, ptr %%budgetp\n";
   add "  %%untilp = getelementptr inbounds i8, ptr %%f, i64 48\n";
   add "  %%until = load i64, ptr %%untilp\n";
+  add "  %%tlbp = getelementptr inbounds i8, ptr %%f, i64 64\n";
+  add "  %%tlb = load ptr, ptr %%tlbp\n";
+  add "  %%logp = getelementptr inbounds i8, ptr %%f, i64 72\n";
+  add "  %%log = load ptr, ptr %%logp\n";
   add "  %%onp = getelementptr inbounds i8, ptr %%f, i64 56\n";
   add "  %%on0 = load i32, ptr %%onp\n";
   add "  %%on = icmp ne i32 %%on0, 0\n";

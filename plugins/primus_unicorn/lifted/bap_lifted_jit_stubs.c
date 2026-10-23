@@ -46,7 +46,17 @@ typedef struct {
     uint64_t budget; /* the instructions, that the linked blocks may run */
     uint64_t until; /* the address, at which the run stops */
     int32_t chain; /* if the blocks continue with the linked ones */
+    void *tlb; /* the pages, that the code accesses itself, see [entry] */
+    void *log; /* the undo log, see [undo_entry] */
 } frame;
+
+/* the bytes, that a store of at most 8 bytes overwrote, which are
+   restored, if the instruction stops, in the reverse order */
+typedef struct {
+    uint8_t *at;
+    uint64_t old;
+    uint32_t size;
+} undo_entry;
 
 /* the offsets, that the code of the blocks reads, see [exit_to] of
    bap_lifted_jit.ml */
@@ -55,6 +65,9 @@ _Static_assert(offsetof(frame, last) == 32, "last");
 _Static_assert(offsetof(frame, budget) == 40, "budget");
 _Static_assert(offsetof(frame, until) == 48, "until");
 _Static_assert(offsetof(frame, chain) == 56, "chain");
+_Static_assert(offsetof(frame, tlb) == 64, "tlb");
+_Static_assert(offsetof(frame, log) == 72, "log");
+_Static_assert(sizeof(undo_entry) == 24, "undo_entry");
 
 /* the entries of the next blocks of a block, @block_slots of its module,
    keyed by the targets of its exits, which the code calls, and the
@@ -70,6 +83,12 @@ typedef struct {
     uint8_t *data;
     int perm;
 } entry;
+
+/* the layout, that the code reads, see [fast_access] of bap_lifted_jit.ml,
+   whose undo log has UNDO_SIZE entries too */
+_Static_assert(sizeof(entry) == 24 && offsetof(entry, data) == 8 &&
+                   offsetof(entry, perm) == 16,
+               "entry");
 
 /* the flags of a block of ARM, its mode, Thumb, and the modes, after
    the jump of its last instruction to an even and to an odd address, see
@@ -100,8 +119,7 @@ struct jit_mem {
     size_t capacity, count;
     uint64_t seed; /* of the hash, which the program can't predict */
     entry tlb[TLB_SIZE];
-    uint8_t *undo_at[UNDO_SIZE];
-    uint8_t undo_old[UNDO_SIZE];
+    undo_entry undo[UNDO_SIZE];
 };
 
 #define EMPTY UINT64_MAX
@@ -211,6 +229,8 @@ value bap_jit_mem_create(value unit) {
     jit_mem *m = calloc(1, sizeof(jit_mem));
     if (!m) caml_raise_out_of_memory();
     m->frame.mem = m;
+    m->frame.tlb = m->tlb;
+    m->frame.log = m->undo;
     m->frame.until = EMPTY;
     m->seed = ((uint64_t)(uintptr_t)m << 16) ^ (uint64_t)time(NULL) ^
               ((uint64_t)clock() << 32);
@@ -320,15 +340,17 @@ int32_t bap_jit_store(frame *f, uint64_t addr, uint32_t n,
     jit_mem *m = f->mem;
     /* the store is checked as a whole, so that it writes all of its
        bytes, or none */
-    if (n > UNDO_SIZE - f->undo || !writable(m, addr, n)) return 0;
+    if (n / 8 + 2 > UNDO_SIZE - f->undo || !writable(m, addr, n)) return 0;
     while (n > 0) {
         entry *e = find(m, PAGE_OF(addr));
         uint64_t off = addr - e->page;
         uint32_t k = PAGE_SIZE - off < n ? (uint32_t)(PAGE_SIZE - off) : n;
-        for (uint32_t i = 0; i < k; i++) {
-            m->undo_at[f->undo] = e->data + off + i;
-            m->undo_old[f->undo] = e->data[off + i];
-            f->undo++;
+        for (uint32_t i = 0; i < k; i += 8) {
+            undo_entry *u = &m->undo[f->undo++];
+            u->at = e->data + off + i;
+            u->size = k - i < 8 ? k - i : 8;
+            u->old = 0;
+            memcpy(&u->old, u->at, u->size);
         }
         memcpy(e->data + off, in, k);
         in += k;
@@ -457,7 +479,7 @@ intnat bap_jit_run(intnat fn, value mem, value regs, value code,
         if ((r & 3) == 0) {
             /* the instruction, that stopped, didn't run */
             for (uint32_t i = f->undo; i-- > 0;)
-                *m->undo_at[i] = m->undo_old[i];
+                memcpy(m->undo[i].at, &m->undo[i].old, m->undo[i].size);
             return r;
         }
         /* the block may have continued with the next ones, by the tail
