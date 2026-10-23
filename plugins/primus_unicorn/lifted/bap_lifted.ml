@@ -2800,6 +2800,46 @@ let set_mem_labels t addr ls =
 let tainted_regs t = Hashtbl.keys t.shadow.sregs
 let tainted_mem t = Hashtbl.keys t.shadow.smem
 
+(* the taint of the values, e.g., of the native functions of the executor,
+   see [Primus_unicorn_native] *)
+type taint = int
+
+let no_taint = 0
+let tainted x = x <> 0
+let taint_jumps t = t.shadow.jumps
+let union_taint t a b = union t.shadow a b
+let moves_taint t a = moves t.shadow a
+
+let mem_range_taint t addr n =
+  let x = ref 0 in
+  if not (Hashtbl.is_empty t.shadow.smem) then
+    for i = 0 to n - 1 do
+      x := union t.shadow !x (mem_taint t Int64.(addr + of_int i))
+    done;
+  !x
+
+let set_reg_taint t name x = set_reg_taint_id t name x
+
+let fill_mem_taint t addr n x =
+  let x = moves t.shadow x in
+  for i = 0 to n - 1 do
+    set_mem_taint_id t Int64.(addr + of_int i) x
+  done
+
+(* byte by byte, from the first, so that the destination inside the
+   source repeats the bytes before it *)
+let copy_mem_taint t ~dst ~src n =
+  for i = 0 to n - 1 do
+    set_mem_taint_id t
+      Int64.(dst + of_int i)
+      (moves t.shadow (mem_taint t Int64.(src + of_int i)))
+  done
+
+let move_mem_taint t ~dst ~src n =
+  let taints = Array.init n ~f:(fun i -> mem_taint t Int64.(src + of_int i)) in
+  Array.iteri taints ~f:(fun i x ->
+      set_mem_taint_id t Int64.(dst + of_int i) (moves t.shadow x))
+
 let taint_changes t =
   let s = t.shadow in
   let regs = Hash_set.to_list s.dirty_regs

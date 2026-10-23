@@ -2559,6 +2559,60 @@ module Make (Machine : Primus.Machine.S) = struct
      which Unicorn continues, or [None], if the function can't run, e.g.,
      when it would fault, so that the stub runs, as the faults are of
      Primus *)
+  (* the taint of the native function, as its Lisp stub propagates it,
+     which writes the taint of its writes, and of its result, or [None],
+     if the function can't run, as it computes its result from the
+     tainted bytes or arguments, e.g., memcmp, see [Shadow]; the loops of
+     the stubs make no jumps of the interpreter, which the observers see *)
+  let native_taint e (call : native) (r : Native.result) reads =
+    let owner name =
+      Option.value (Target.Regs.owner e.regs name) ~default:name
+    in
+    let rec taint_of = function
+      | Bil.Var v -> Some (Uc.reg_taint e.uc (owner (Var.name v)))
+      | Cast (_, _, x) | Extract (_, _, x) ->
+          Option.map (taint_of x) ~f:(Uc.moves_taint e.uc)
+      | Load (_, addr, _, size) -> (
+          match eval_uc e addr with
+          | a ->
+              Some
+                (Uc.mem_range_taint e.uc (int64_of_word a) (Size.in_bytes size))
+          | exception (Native.Missing _ | Native.Denied) -> None)
+      | _ -> None
+    in
+    match Option.all (List.map call.args ~f:taint_of) with
+    | None -> None
+    | Some args ->
+        let tainted = List.exists args ~f:Uc.tainted in
+        let read =
+          List.exists reads ~f:(fun (addr, n) ->
+              Uc.tainted (Uc.mem_range_taint e.uc addr n))
+        in
+        if Option.is_none r.taints && (tainted || read) then None
+        else
+          Some
+            (fun () ->
+              Option.iter r.taints ~f:(fun taints ->
+                  List.iter taints ~f:(function
+                    | Native.Copy { dst; src; n } ->
+                        Uc.copy_mem_taint e.uc ~dst ~src n
+                    | Move { dst; src; n } -> Uc.move_mem_taint e.uc ~dst ~src n
+                    | Fill { dst; n; arg } ->
+                        Uc.fill_mem_taint e.uc dst n
+                          (Option.value (List.nth args arg) ~default:Uc.no_taint)
+                    | Clean { dst; n } ->
+                        Uc.fill_mem_taint e.uc dst n Uc.no_taint));
+              (* the result is the argument, or isn't tainted *)
+              Option.iter call.result ~f:(fun (exp, _) ->
+                  match exp with
+                  | Bil.Var v | Cast (_, _, Var v) | Extract (_, _, Var v) ->
+                      Uc.set_reg_taint e.uc
+                        (owner (Var.name v))
+                        (Option.value_map r.returns ~default:Uc.no_taint
+                           ~f:(fun i ->
+                             Option.value (List.nth args i) ~default:Uc.no_taint))
+                  | _ -> ()))
+
   let native e addr =
     let name =
       match Hashtbl.find e.trampolines addr with
@@ -2576,8 +2630,6 @@ module Make (Machine : Primus.Machine.S) = struct
     | Some _ when e.watching.reads || e.watching.writes -> Machine.return None
     (* the native functions compute the concrete values *)
     | Some (_, call) when reads_tracked e call.args -> Machine.return None
-    (* and they don't propagate the taint, see [Shadow] *)
-    | Some _ when e.shadowing && Uc.taint_any e.uc -> Machine.return None
     | Some (name, call) ->
         let* linked = Linker.is_linked (`symbol name) in
         let* unreplaced = unreplaced_stub e (`symbol name) in
@@ -2585,14 +2637,38 @@ module Make (Machine : Primus.Machine.S) = struct
         if (not linked) || Option.is_some unreplaced || advised then
           Machine.return None
         else
+          (* the taint, that the lifted engine propagates, see
+             [native_taint] *)
+          let shadow = e.shadowing && Uc.taint_any e.uc in
           let rec attempt tries =
             match
               let args = List.map call.args ~f:(eval_uc e) in
               let frame = frame_uc e in
-              let r = call.fn (uc_memory e) (List.map args ~f:int64_of_word) in
+              let reads = ref [] in
+              let memory : Native.memory =
+                {
+                  read =
+                    (fun addr n ->
+                      reads := (addr, n) :: !reads;
+                      uc_read e addr n);
+                  prefix =
+                    (fun addr n ->
+                      let data = uc_prefix e addr n in
+                      reads := (addr, String.length data) :: !reads;
+                      data);
+                }
+              in
+              let r = call.fn memory (List.map args ~f:int64_of_word) in
               List.iter r.writes ~f:(fun (addr, data) ->
                   uc_check_write e addr (String.length data));
-              (args, frame, r)
+              let taint =
+                if not shadow then ignore
+                else
+                  match native_taint e call r !reads with
+                  | Some taint -> taint
+                  | None -> raise Native.Denied
+              in
+              (args, frame, r, taint)
             with
             | exception Native.Missing addr when tries > 0 ->
                 let* () = ensure_page e addr in
@@ -2600,7 +2676,7 @@ module Make (Machine : Primus.Machine.S) = struct
                 else Machine.return None
             | exception (Native.Missing _ | Native.Denied) ->
                 Machine.return None
-            | args, frame, r ->
+            | args, frame, r, taint ->
                 let* () =
                   Machine.Observation.post Primus.Linker.Trace.call_entered
                     ~f:(fun notify ->
@@ -2614,6 +2690,7 @@ module Make (Machine : Primus.Machine.S) = struct
                       ignore (assign_uc e exp x : bool);
                       x)
                 in
+                taint ();
                 if Option.is_none e.link then
                   ignore
                     (Target.Regs.write e.regs e.sp (word e frame.sp) : bool);

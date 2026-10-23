@@ -179,6 +179,40 @@ val taint_changes : t -> string list * int64 list
 (** [taint_changes t] the registers and the bytes, whose taint the instructions
     changed, since it was called last, rather than [set_*_labels] *)
 
+(** The taint of the values, that the engine doesn't compute, e.g., the native
+    functions of the executor, whose changes are among the changes of
+    {!taint_changes}. *)
+
+type taint
+
+val no_taint : taint
+val tainted : taint -> bool
+val taint_jumps : t -> bool
+val union_taint : t -> taint -> taint -> taint
+
+val moves_taint : t -> taint -> taint
+(** [moves_taint t x] the labels of [x], that the moves propagate *)
+
+val reg_taint : t -> string -> taint
+(** [reg_taint t name] the taint of the register, by the name of its base *)
+
+val mem_range_taint : t -> int64 -> int -> taint
+(** [mem_range_taint t addr n] the taint of the bytes *)
+
+val set_reg_taint : t -> string -> taint -> unit
+
+val fill_mem_taint : t -> int64 -> int -> taint -> unit
+(** [fill_mem_taint t addr n x] the bytes have the labels of [x], that the moves
+    propagate *)
+
+val copy_mem_taint : t -> dst:int64 -> src:int64 -> int -> unit
+(** [copy_mem_taint t ~dst ~src n] the bytes have the taint of the source, as
+    they are copied by one, from the first, by the moves *)
+
+val move_mem_taint : t -> dst:int64 -> src:int64 -> int -> unit
+(** [move_mem_taint t ~dst ~src n] as [copy_mem_taint], as if the source is read
+    first *)
+
 (** {2 Contexts} *)
 
 type context

@@ -132,6 +132,21 @@ val set_mem_labels : t -> int64 -> int list -> unit
 val tainted_regs : t -> string list
 val tainted_mem : t -> int64 list
 val taint_changes : t -> string list * int64 list
+
+type taint = Bap_lifted.taint
+(** see {!Bap_lifted.taint} *)
+
+val no_taint : taint
+val tainted : taint -> bool
+val taint_jumps : t -> bool
+val union_taint : t -> taint -> taint -> taint
+val moves_taint : t -> taint -> taint
+val reg_taint : t -> string -> taint
+val mem_range_taint : t -> int64 -> int -> taint
+val set_reg_taint : t -> string -> taint -> unit
+val fill_mem_taint : t -> int64 -> int -> taint -> unit
+val copy_mem_taint : t -> dst:int64 -> src:int64 -> int -> unit
+val move_mem_taint : t -> dst:int64 -> src:int64 -> int -> unit
 val interrupted : unit -> bool
 val process_signals : unit -> unit
 

@@ -26,7 +26,29 @@ type memory = {
           byte, on which Primus would fault *)
 }
 
-type result = { writes : (int64 * string) list; value : int64 }
+(* the taint of the bytes, that a function writes, as its Lisp stub
+   propagates it, for the lifted engine, that propagates the taint
+   itself, see [Primus_unicorn_executor.Shadow]: copied from the source,
+   byte by byte, from the first, as memcpy does, or as if the source is
+   read first, as memmove does, of an argument, e.g., the byte of
+   memset, or none, e.g., the terminator of strcpy *)
+type taint =
+  | Copy of { dst : int64; src : int64; n : int }
+  | Move of { dst : int64; src : int64; n : int }
+  | Fill of { dst : int64; n : int; arg : int }
+  | Clean of { dst : int64; n : int }
+
+type result = {
+  writes : (int64 * string) list;
+  value : int64;
+  taints : taint list option;
+      (** the taint of the writes, or [None], if the result is computed from the
+          bytes, that the function reads, e.g., of memcmp *)
+  returns : int option;  (** the argument, that the function returns *)
+}
+
+let computed ?(writes = []) value =
+  { writes; value; taints = None; returns = None }
 
 let page_size = 0x1000L
 let page_of addr = Int64.(addr land lnot (page_size - 1L))
@@ -69,7 +91,16 @@ let compare_bytes x y =
   loop 0
 
 let memset _ p c n =
-  { writes = [ (p, String.make (size n) (byte c)) ]; value = p }
+  let n = size n in
+  {
+    writes = [ (p, String.make n (byte c)) ];
+    value = p;
+    taints = Some [ Fill { dst = p; n; arg = 1 } ];
+    returns = Some 0;
+  }
+
+let copied d taints writes =
+  { writes; value = d; taints = Some taints; returns = Some 0 }
 
 (* the destination inside the source repeats the bytes before it *)
 let memcpy mem d s n =
@@ -80,15 +111,19 @@ let memcpy mem d s n =
     for i = 0 to n - 1 do
       Bytes.set buf (shift + i) (Bytes.get buf i)
     done;
-    { writes = [ (d, Bytes.To_string.sub buf ~pos:shift ~len:n) ]; value = d }
+    copied d
+      [ Copy { dst = d; src = s; n } ]
+      [ (d, Bytes.To_string.sub buf ~pos:shift ~len:n) ]
   end
-  else { writes = [ (d, mem.read s n) ]; value = d }
+  else copied d [ Copy { dst = d; src = s; n } ] [ (d, mem.read s n) ]
 
-let memmove mem d s n = { writes = [ (d, mem.read s (size n)) ]; value = d }
+let memmove mem d s n =
+  let n = size n in
+  copied d [ Move { dst = d; src = s; n } ] [ (d, mem.read s n) ]
 
 let memcmp mem a b n =
   let n = size n in
-  { writes = []; value = compare_bytes (mem.read a n) (mem.read b n) }
+  computed (compare_bytes (mem.read a n) (mem.read b n))
 
 let memchr mem p c n =
   let data = mem.read p (size n) in
@@ -97,9 +132,9 @@ let memchr mem p c n =
     | Some i -> Int64.(p + of_int i)
     | None -> 0L
   in
-  { writes = []; value }
+  computed value
 
-let strlen' mem p = { writes = []; value = Int64.of_int (strlen mem p) }
+let strlen' mem p = computed (Int64.of_int (strlen mem p))
 
 (* compares the strings up to the first zero of either of them, and at
    most [n] bytes *)
@@ -109,16 +144,24 @@ let strncmp mem a b n =
 
 let strcmp mem a b = strncmp mem a b (Int64.of_int limit)
 
+(* the bytes of the string, whose terminator the stub writes itself *)
 let copy_string mem d s =
   let n = strlen mem s + 1 in
   if overlap d n s n then raise Denied;
-  (d, mem.read s n)
+  ( (d, mem.read s n),
+    [
+      Copy { dst = d; src = s; n = n - 1 };
+      Clean { dst = Int64.(d + of_int Int.(n - 1)); n = 1 };
+    ] )
 
-let strcpy mem d s = { writes = [ copy_string mem d s ]; value = d }
+let strcpy mem d s =
+  let write, taints = copy_string mem d s in
+  copied d taints [ write ]
 
 let strcat mem d s =
   let tail = Int64.(d + of_int (strlen mem d)) in
-  { writes = [ copy_string mem tail s ]; value = d }
+  let write, taints = copy_string mem tail s in
+  copied d taints [ write ]
 
 let strchr mem p c = memchr mem p c (Int64.of_int (strlen mem p + 1))
 

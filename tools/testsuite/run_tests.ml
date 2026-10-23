@@ -1356,6 +1356,32 @@ let taint_ops data =
         [ ("lifted", "true"); ("interpreted", "false") ])
     [ "computation"; "exact" ]
 
+(* the copies of libc, which run natively, while the lifted engine
+   propagates the taint, propagate it as their Lisp stubs, see
+   taint-natives.c *)
+let taint_natives data =
+  List.map
+    (fun (mode, shadow) ->
+      case ("emu/taint-natives/" ^ mode) (fun env ->
+          let out =
+            bap env
+              ~env:[ ("BAP_LIFTED_TAINT", shadow) ]
+              [
+                "script";
+                input "emu/taint-natives/script.ml";
+                path data "bin/x86_64-linux-gnu-taint-natives";
+              ]
+          in
+          let tainted n =
+            String.concat " "
+              (List.init 18 (fun i -> if i < n then "input" else "-"))
+          in
+          has env "propagates the taint of the copies" out
+            (Printf.sprintf "memcpy: %s\nmemset: %s\nstrcpy: %s\nmemmove: %s\n"
+               (tainted 9) (tainted 8) (tainted 8) (tainted 4));
+          has env "exits" out "abcdefgh 98 8\nexited\n"))
+    [ ("lifted", "true"); ("interpreted", "false") ]
+
 (* the hooks of the memory see the same reads and writes of the
    crc-loop in Unicorn and in the lifted engine, whose loop runs compiled,
    as the code, that doesn't access the hooked pages, runs compiled also
@@ -2344,6 +2370,7 @@ let tests =
     taint_bss;
     memory_hooks;
     taint_ops;
+    taint_natives;
     printf_family;
     mmap;
     pages;

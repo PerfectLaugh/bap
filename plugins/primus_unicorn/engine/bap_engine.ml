@@ -139,6 +139,33 @@ let set_mem_labels t addr ls =
 let tainted_regs = lifted L.tainted_regs ~default:[]
 let tainted_mem = lifted L.tainted_mem ~default:[]
 let taint_changes = lifted L.taint_changes ~default:([], [])
+
+type taint = L.taint
+
+let no_taint = L.no_taint
+let tainted = L.tainted
+let taint_jumps = lifted L.taint_jumps ~default:false
+
+let union_taint t a b =
+  lifted (fun l -> L.union_taint l a b) ~default:no_taint t
+
+let moves_taint t a = lifted (fun l -> L.moves_taint l a) ~default:no_taint t
+let reg_taint t r = lifted (fun l -> L.reg_taint l r) ~default:no_taint t
+
+let mem_range_taint t a n =
+  lifted (fun l -> L.mem_range_taint l a n) ~default:no_taint t
+
+let set_reg_taint t r x = lifted (fun l -> L.set_reg_taint l r x) ~default:() t
+
+let fill_mem_taint t a n x =
+  lifted (fun l -> L.fill_mem_taint l a n x) ~default:() t
+
+let copy_mem_taint t ~dst ~src n =
+  lifted (fun l -> L.copy_mem_taint l ~dst ~src n) ~default:() t
+
+let move_mem_taint t ~dst ~src n =
+  lifted (fun l -> L.move_mem_taint l ~dst ~src n) ~default:() t
+
 let interrupted = Uc.interrupted
 let process_signals = Uc.process_signals
 
