@@ -657,6 +657,39 @@ let renumber text =
       let prefix = if (Re.Group.get group 0).[0] = '%' then "%" else "" in
       Printf.sprintf "%s#%d" prefix id)
 
+(* the temporaries of the lifters, e.g., #165, whose numbers are of a
+   global counter, so they depend on what was lifted before, numbered in
+   the order of their occurrences, as #v1, #v2, ..., but the term
+   identifiers, that [renumber] made, which start the lines, or follow
+   %, e.g., of the jumps *)
+let temporaries text =
+  let vars = Hashtbl.create 64 in
+  let re =
+    Re.(
+      compile
+        (seq
+           [
+             group (alt [ bol; diff any (set "\n%") ]);
+             char '#';
+             group (rep1 digit);
+             eow;
+           ]))
+  in
+  Re.replace re text ~f:(fun group ->
+      let before = Re.Group.get group 1 in
+      let n = Re.Group.get group 2 in
+      if before = "" then Re.Group.get group 0
+      else
+        let id =
+          match Hashtbl.find_opt vars n with
+          | Some id -> id
+          | None ->
+              let id = Hashtbl.length vars + 1 in
+              Hashtbl.add vars n id;
+              id
+        in
+        Printf.sprintf "%s#v%d" before id)
+
 (* the names of the anonymous subroutines, e.g., %00000560, which are
    their term identifiers, numbered in the order of their occurrences *)
 let anonymous text =
@@ -705,7 +738,7 @@ let summary text =
   List.iter
     (fun (header, body, _) ->
       if String.starts_with ~prefix:"main(" header then
-        Printf.bprintf buf "\nsub %s" (renumber body))
+        Printf.bprintf buf "\nsub %s" (temporaries (renumber body)))
     subs;
   Buffer.contents buf
 

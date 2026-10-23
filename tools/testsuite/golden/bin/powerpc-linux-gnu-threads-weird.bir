@@ -31,9 +31,9 @@ sub main(main_argc, main_argv, main_result)
 
 #4:
 #5: R0 := LR
-#6: #4 := R1 - 0x60
-#7: mem := mem with [#4, be]:u32 <- R1
-#8: R1 := #4
+#6: #v1 := R1 - 0x60
+#7: mem := mem with [#v1, be]:u32 <- R1
+#8: R1 := #v1
 #9: mem := mem with [R1 + 0x64, be]:u32 <- R0
 #10: mem := mem with [R1 + 0x58, be]:u32 <- R30
 #11: R30 := 0x10030000
@@ -71,8 +71,8 @@ sub main(main_argc, main_argv, main_result)
 #42: call @intrinsic:syscall with return %#43
 
 #43:
-#44: #6 := ~CR0UN <> 0
-#45: when #6 goto %#46
+#44: #v2 := ~CR0UN <> 0
+#45: when #v2 goto %#46
 #47: goto %#48
 
 #46:
@@ -80,16 +80,16 @@ sub main(main_argc, main_argv, main_result)
 #50: CR0GT := 2:2[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #51: CR0EQ := 1:1[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #52: CR0UN := 0:0[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
-#53: #8 := ~CR0EQ <> 0
-#54: when #8 goto %#55
+#53: #v3 := ~CR0EQ <> 0
+#54: when #v3 goto %#55
 #56: goto %#57
 
 #57:
 #58: R3 := R31
 #59: CTR := R30
-#60: #432 := CTR & 0xFFFFFFFC
+#60: #v4 := CTR & 0xFFFFFFFC
 #61: LR := 0x1001033C
-#62: call #432 with return %#63
+#62: call #v4 with return %#63
 
 #63:
 #64: R0 := 1
@@ -111,13 +111,13 @@ sub main(main_argc, main_argv, main_result)
 #76: CR7GT := 2:2[1.SO] <> 0
 #77: CR7EQ := 1:1[1.SO] <> 0
 #78: CR7UN := 0:0[1.SO] <> 0
-#79: #10 := ~CR7EQ <> 0
-#80: when #10 goto %#81
+#79: #v5 := ~CR7EQ <> 0
+#80: when #v5 goto %#81
 #82: goto %#81
 
 #81:
-#83: #12 := CR0EQ <> 0
-#84: when #12 goto %#85
+#83: #v6 := CR0EQ <> 0
+#84: when #v6 goto %#85
 #86: goto %#87
 
 #85:
@@ -137,8 +137,8 @@ sub main(main_argc, main_argv, main_result)
 #100: call @intrinsic:syscall with return %#101
 
 #101:
-#102: #14 := ~CR0UN <> 0
-#103: when #14 goto %#104
+#102: #v7 := ~CR0UN <> 0
+#103: when #v7 goto %#104
 #105: goto %#106
 
 #106:
@@ -155,13 +155,13 @@ sub main(main_argc, main_argv, main_result)
 #115: CR7GT := 2:2[1.SO] <> 0
 #116: CR7EQ := 1:1[1.SO] <> 0
 #117: CR7UN := 0:0[1.SO] <> 0
-#118: #16 := ~CR7EQ <> 0
-#119: when #16 goto %#120
+#118: #v8 := ~CR7EQ <> 0
+#119: when #v8 goto %#120
 #121: goto %#120
 
 #120:
-#122: #18 := CR0EQ <> 0
-#123: when #18 goto %#124
+#122: #v9 := CR0EQ <> 0
+#123: when #v9 goto %#124
 #125: goto %#126
 
 #126:
@@ -181,8 +181,8 @@ sub main(main_argc, main_argv, main_result)
 #139: call @intrinsic:syscall with return %#140
 
 #140:
-#141: #425 := ~CR0UN <> 0
-#142: when #425 goto %#143
+#141: #v10 := ~CR0UN <> 0
+#142: when #v10 goto %#143
 #144: goto %#145
 
 #145:
@@ -199,13 +199,13 @@ sub main(main_argc, main_argv, main_result)
 #154: CR7GT := 2:2[1.SO] <> 0
 #155: CR7EQ := 1:1[1.SO] <> 0
 #156: CR7UN := 0:0[1.SO] <> 0
-#157: #427 := ~CR7EQ <> 0
-#158: when #427 goto %#159
+#157: #v11 := ~CR7EQ <> 0
+#158: when #v11 goto %#159
 #160: goto %#159
 
 #159:
-#161: #429 := ~CR0EQ <> 0
-#162: when #429 goto %#131
+#161: #v12 := ~CR0EQ <> 0
+#162: when #v12 goto %#131
 #163: goto %#124
 
 #124:
@@ -226,11 +226,11 @@ sub main(main_argc, main_argv, main_result)
 #177: goto %#178
 
 #178:
-#179: #19 := R3
-#180: R3 := low:32[((#19.#19) | (#19.#19) >> 0x40) & 0xFF]
-#181: #24 := R29 + 1
-#182: R28 := pad:32[mem[#24]]
-#183: R29 := #24
+#179: #v13 := R3
+#180: R3 := low:32[((#v13.#v13) | (#v13.#v13) >> 0x40) & 0xFF]
+#181: #v14 := R29 + 1
+#182: R28 := pad:32[mem[#v14]]
+#183: R29 := #v14
 #184: LR := 0x10010454
 #185: call @putchar with return %#186
 
@@ -241,8 +241,8 @@ sub main(main_argc, main_argv, main_result)
 #190: CR0EQ := 1:1[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #191: CR0UN := 0:0[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #192: R3 := R28
-#193: #26 := CR0GT <> 0
-#194: when #26 goto %#178
+#193: #v15 := CR0GT <> 0
+#194: when #v15 goto %#178
 #195: goto %#196
 
 #196:
@@ -259,14 +259,14 @@ sub main(main_argc, main_argv, main_result)
 #207: CR0GT := 0 <$ R3
 #208: CR0EQ := R3 = 0
 #209: CR0UN := SO
-#210: #27 := extend:64[R3] & 0x7FFFFFFF
-#211: #28 := 63:63[extend:64[R3]] & ~#27 = 0
-#212: CA := #28
-#213: CA32 := #28
+#210: #v16 := extend:64[R3] & 0x7FFFFFFF
+#211: #v17 := 63:63[extend:64[R3]] & ~#v16 = 0
+#212: CA := #v17
+#213: CA32 := #v17
 #214: R30 := low:32[extend:64[R3] ~>> 0x1F]
 #215: R29 := R3 ^ R30
-#216: #30 := ~CR0LT <> 0
-#217: when #30 goto %#218
+#216: #v18 := ~CR0LT <> 0
+#217: when #v18 goto %#218
 #219: goto %#220
 
 #220:
@@ -284,8 +284,8 @@ sub main(main_argc, main_argv, main_result)
 
 #230:
 #231: R8 := high:32[pad:64[R5] * pad:64[R4]]
-#232: #31 := R8
-#233: R8 := low:32[((#31.#31) << 0x1D | (#31.#31) >> 0x23) & 0x1FFFFFFF]
+#232: #v19 := R8
+#233: R8 := low:32[((#v19.#v19) << 0x1D | (#v19.#v19) >> 0x23) & 0x1FFFFFFF]
 #234: R7 := R6
 #235: R6 := R6 + 1
 #236: CR0LT := 3:3[R5 < 9.9 < R5.R5 = 9.SO] <> 0
@@ -295,12 +295,12 @@ sub main(main_argc, main_argv, main_result)
 #240: R9 := R8 * 0xA
 #241: R9 := R5 - R9
 #242: R9 := R9 | 0x30
-#243: #36 := R3 + 1
-#244: mem := mem with [#36] <- low:8[R9]
-#245: R3 := #36
+#243: #v20 := R3 + 1
+#244: mem := mem with [#v20] <- low:8[R9]
+#245: R3 := #v20
 #246: R5 := R8
-#247: #38 := CR0GT <> 0
-#248: when #38 goto %#230
+#247: #v21 := CR0GT <> 0
+#248: when #v21 goto %#230
 #249: goto %#250
 
 #250:
@@ -310,9 +310,9 @@ sub main(main_argc, main_argv, main_result)
 #254: goto %#255
 
 #255:
-#256: #39 := R29 - 1
-#257: R3 := pad:32[mem[#39]]
-#258: R29 := #39
+#256: #v22 := R29 - 1
+#257: R3 := pad:32[mem[#v22]]
+#258: R29 := #v22
 #259: LR := 0x100104F0
 #260: call @putchar with return %#261
 
@@ -322,8 +322,8 @@ sub main(main_argc, main_argv, main_result)
 #264: CR0GT := 2:2[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #265: CR0EQ := 1:1[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #266: CR0UN := 0:0[R30 < 0.0 < R30.R30 = 0.SO] <> 0
-#267: #41 := CR0GT <> 0
-#268: when #41 goto %#255
+#267: #v23 := CR0GT <> 0
+#268: when #v23 goto %#255
 #269: goto %#270
 
 #270:
@@ -356,9 +356,9 @@ sub main(main_argc, main_argv, main_result)
 #295: R5 := R28
 #296: R6 := R26
 #297: R7 := R28
-#298: #42 := R21 + 0x10
-#299: mem := mem with [#42, be]:u32 <- R26
-#300: R21 := #42
+#298: #v24 := R21 + 0x10
+#299: mem := mem with [#v24, be]:u32 <- R26
+#300: R21 := #v24
 #301: R0 := 0x78
 #302: R31 := R29
 #303: R22 := R22 - 1
@@ -366,8 +366,8 @@ sub main(main_argc, main_argv, main_result)
 #305: call @intrinsic:syscall with return %#306
 
 #306:
-#307: #44 := ~CR0UN <> 0
-#308: when #44 goto %#309
+#307: #v25 := ~CR0UN <> 0
+#308: when #v25 goto %#309
 #310: goto %#311
 
 #309:
@@ -375,16 +375,16 @@ sub main(main_argc, main_argv, main_result)
 #313: CR0GT := 2:2[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #314: CR0EQ := 1:1[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #315: CR0UN := 0:0[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
-#316: #46 := ~CR0EQ <> 0
-#317: when #46 goto %#318
+#316: #v26 := ~CR0EQ <> 0
+#317: when #v26 goto %#318
 #319: goto %#320
 
 #320:
 #321: R3 := R31
 #322: CTR := R30
-#323: #422 := CTR & 0xFFFFFFFC
+#323: #v27 := CTR & 0xFFFFFFFC
 #324: LR := 0x1001058C
-#325: call #422 with return %#326
+#325: call #v27 with return %#326
 
 #326:
 #327: R0 := 1
@@ -405,8 +405,8 @@ sub main(main_argc, main_argv, main_result)
 #338: CR0EQ := 1:1[R22 < 0.0 < R22.R22 = 0.SO] <> 0
 #339: CR0UN := 0:0[R22 < 0.0 < R22.R22 = 0.SO] <> 0
 #340: R26 := R26 + 0x10
-#341: #48 := CR0GT <> 0
-#342: when #48 goto %#292
+#341: #v28 := CR0GT <> 0
+#342: when #v28 goto %#292
 #343: goto %#344
 
 #344:
@@ -416,8 +416,8 @@ sub main(main_argc, main_argv, main_result)
 #348: goto %#349
 
 #349:
-#350: #49 := R29
-#351: R3 := low:32[((#49.#49) << 2 | (#49.#49) >> 0x3E) & 0xFFFFFFFC]
+#350: #v29 := R29
+#351: R3 := low:32[((#v29.#v29) << 2 | (#v29.#v29) >> 0x3E) & 0xFFFFFFFC]
 #352: R27 := R28 + R3
 #353: R5 := mem[R27 + 0x80, be]:u32
 #354: CR0LT := 3:3[R5 < 0.0 < R5.R5 = 0.SO] <> 0
@@ -428,13 +428,13 @@ sub main(main_argc, main_argv, main_result)
 #359: CR7GT := 2:2[1.SO] <> 0
 #360: CR7EQ := 1:1[1.SO] <> 0
 #361: CR7UN := 0:0[1.SO] <> 0
-#362: #55 := ~CR7EQ <> 0
-#363: when #55 goto %#364
+#362: #v30 := ~CR7EQ <> 0
+#363: when #v30 goto %#364
 #365: goto %#364
 
 #364:
-#366: #57 := CR0EQ <> 0
-#367: when #57 goto %#368
+#366: #v31 := CR0EQ <> 0
+#367: when #v31 goto %#368
 #369: goto %#370
 
 #370:
@@ -452,8 +452,8 @@ sub main(main_argc, main_argv, main_result)
 #381: call @intrinsic:syscall with return %#382
 
 #382:
-#383: #417 := ~CR0UN <> 0
-#384: when #417 goto %#385
+#383: #v32 := ~CR0UN <> 0
+#384: when #v32 goto %#385
 #386: goto %#387
 
 #387:
@@ -470,13 +470,13 @@ sub main(main_argc, main_argv, main_result)
 #396: CR7GT := 2:2[1.SO] <> 0
 #397: CR7EQ := 1:1[1.SO] <> 0
 #398: CR7UN := 0:0[1.SO] <> 0
-#399: #419 := ~CR7EQ <> 0
-#400: when #419 goto %#401
+#399: #v33 := ~CR7EQ <> 0
+#400: when #v33 goto %#401
 #402: goto %#401
 
 #401:
-#403: #421 := ~CR0EQ <> 0
-#404: when #421 goto %#373
+#403: #v34 := ~CR0EQ <> 0
+#404: when #v34 goto %#373
 #405: goto %#406
 
 #406:
@@ -488,8 +488,8 @@ sub main(main_argc, main_argv, main_result)
 #410: CR0GT := 2:2[R29 < 3.3 < R29.R29 = 3.SO] <> 0
 #411: CR0EQ := 1:1[R29 < 3.3 < R29.R29 = 3.SO] <> 0
 #412: CR0UN := 0:0[R29 < 3.3 < R29.R29 = 3.SO] <> 0
-#413: #59 := CR0EQ <> 0
-#414: when #59 goto %#415
+#413: #v35 := CR0EQ <> 0
+#414: when #v35 goto %#415
 #416: goto %#349
 
 #415:
@@ -497,35 +497,35 @@ sub main(main_argc, main_argv, main_result)
 #418: R4 := 0x100B0000
 #419: R3 := R3 ^ R23
 #420: R4 := R4 + 0x1690
-#421: #61 := R3
-#422: #61 := #61 | #61 >> 1
-#423: #61 := #61 | #61 >> 2
-#424: #61 := #61 | #61 >> 4
-#425: #61 := #61 | #61 >> 8
-#426: #61 := #61 | #61 >> 0x10
-#427: #61 := ~#61
-#428: #62 := #61
-#429: #62 := #62 - (#62 >> 1 & 0x55555555)
-#430: #62 := (#62 & 0x33333333) + (#62 >> 2 & 0x33333333)
-#431: #62 := #62 + (#62 >> 4) & 0xF0F0F0F
-#432: R5 := #62 * 0x1010101 >> 0x18
+#421: #v36 := R3
+#422: #v36 := #v36 | #v36 >> 1
+#423: #v36 := #v36 | #v36 >> 2
+#424: #v36 := #v36 | #v36 >> 4
+#425: #v36 := #v36 | #v36 >> 8
+#426: #v36 := #v36 | #v36 >> 0x10
+#427: #v36 := ~#v36
+#428: #v37 := #v36
+#429: #v37 := #v37 - (#v37 >> 1 & 0x55555555)
+#430: #v37 := (#v37 & 0x33333333) + (#v37 >> 2 & 0x33333333)
+#431: #v37 := #v37 + (#v37 >> 4) & 0xF0F0F0F
+#432: R5 := #v37 * 0x1010101 >> 0x18
 #433: R3 := R4 + 0x30
 #434: R4 := R4 + 0x50
-#435: #63 := R5
-#436: R5 := low:32[((#63.#63) << 0x1B | (#63.#63) >> 0x25) & 0x7FFFFFF]
+#435: #v38 := R5
+#436: R5 := low:32[((#v38.#v38) << 0x1B | (#v38.#v38) >> 0x25) & 0x7FFFFFF]
 #437: R6 := 0
 #438: goto %#439
 
 #439:
-#440: #68 := R3 + 4
-#441: R7 := mem[#68, be]:u32
-#442: R3 := #68
+#440: #v39 := R3 + 4
+#441: R7 := mem[#v39, be]:u32
+#442: R3 := #v39
 #443: CR0LT := 3:3[R4 < R7.R7 < R4.R4 = R7.SO] <> 0
 #444: CR0GT := 2:2[R4 < R7.R7 < R4.R4 = R7.SO] <> 0
 #445: CR0EQ := 1:1[R4 < R7.R7 < R4.R4 = R7.SO] <> 0
 #446: CR0UN := 0:0[R4 < R7.R7 < R4.R4 = R7.SO] <> 0
-#447: #70 := CR0EQ <> 0
-#448: when #70 goto %#449
+#447: #v40 := CR0EQ <> 0
+#448: when #v40 goto %#449
 #450: goto %#451
 
 #451:
@@ -539,8 +539,8 @@ sub main(main_argc, main_argv, main_result)
 #457: CR0EQ := 1:1[R6 < 3.3 < R6.R6 = 3.SO] <> 0
 #458: CR0UN := 0:0[R6 < 3.3 < R6.R6 = 3.SO] <> 0
 #459: R4 := R4 + 0x10
-#460: #72 := CR0EQ <> 0
-#461: when #72 goto %#462
+#460: #v41 := CR0EQ <> 0
+#461: when #v41 goto %#462
 #463: goto %#439
 
 #462:
@@ -549,8 +549,8 @@ sub main(main_argc, main_argv, main_result)
 #466: CR0EQ := 1:1[R5 < 0.0 < R5.R5 = 0.SO] <> 0
 #467: CR0UN := 0:0[R5 < 0.0 < R5.R5 = 0.SO] <> 0
 #468: R3 := 0x2D
-#469: #74 := CR0EQ <> 0
-#470: when #74 goto %#471
+#469: #v42 := CR0EQ <> 0
+#470: when #v42 goto %#471
 #472: goto %#473
 
 #473:
@@ -560,8 +560,8 @@ sub main(main_argc, main_argv, main_result)
 #471:
 #476: R4 := 0x10000000
 #477: R4 := R4 + 0x230
-#478: #76 := CR0EQ <> 0
-#479: when #76 goto %#480
+#478: #v43 := CR0EQ <> 0
+#479: when #v43 goto %#480
 #481: goto %#482
 
 #480:
@@ -578,16 +578,16 @@ sub main(main_argc, main_argv, main_result)
 #490: CR0GT := 2:2[R3 < 0.0 < R3.R3 = 0.SO] <> 0
 #491: CR0EQ := 1:1[R3 < 0.0 < R3.R3 = 0.SO] <> 0
 #492: CR0UN := 0:0[R3 < 0.0 < R3.R3 = 0.SO] <> 0
-#493: #78 := CR0EQ <> 0
-#494: when #78 goto %#495
+#493: #v44 := CR0EQ <> 0
+#494: when #v44 goto %#495
 #496: goto %#497
 
 #497:
-#498: #408 := R3
-#499: R3 := low:32[((#408.#408) | (#408.#408) >> 0x40) & 0xFF]
-#500: #413 := R30 + 1
-#501: R29 := pad:32[mem[#413]]
-#502: R30 := #413
+#498: #v45 := R3
+#499: R3 := low:32[((#v45.#v45) | (#v45.#v45) >> 0x40) & 0xFF]
+#500: #v46 := R30 + 1
+#501: R29 := pad:32[mem[#v46]]
+#502: R30 := #v46
 #503: LR := 0x100106BC
 #504: call @putchar with return %#505
 
@@ -597,8 +597,8 @@ sub main(main_argc, main_argv, main_result)
 #508: CR0EQ := 1:1[R29 < 0.0 < R29.R29 = 0.SO] <> 0
 #509: CR0UN := 0:0[R29 < 0.0 < R29.R29 = 0.SO] <> 0
 #510: R3 := R29
-#511: #415 := ~CR0EQ <> 0
-#512: when #415 goto %#497
+#511: #v47 := ~CR0EQ <> 0
+#512: when #v47 goto %#497
 #513: goto %#495
 
 #495:
@@ -621,8 +621,8 @@ sub main(main_argc, main_argv, main_result)
 #530: call @intrinsic:syscall with return %#531
 
 #531:
-#532: #80 := ~CR0UN <> 0
-#533: when #80 goto %#534
+#532: #v48 := ~CR0UN <> 0
+#533: when #v48 goto %#534
 #535: goto %#536
 
 #534:
@@ -630,16 +630,16 @@ sub main(main_argc, main_argv, main_result)
 #538: CR0GT := 2:2[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #539: CR0EQ := 1:1[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #540: CR0UN := 0:0[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
-#541: #82 := ~CR0EQ <> 0
-#542: when #82 goto %#543
+#541: #v49 := ~CR0EQ <> 0
+#542: when #v49 goto %#543
 #544: goto %#545
 
 #545:
 #546: R3 := R31
 #547: CTR := R30
-#548: #406 := CTR & 0xFFFFFFFC
+#548: #v50 := CTR & 0xFFFFFFFC
 #549: LR := 0x10010728
-#550: call #406 with return %#551
+#550: call #v50 with return %#551
 
 #551:
 #552: R0 := 1
@@ -661,13 +661,13 @@ sub main(main_argc, main_argv, main_result)
 #564: CR7GT := 2:2[1.SO] <> 0
 #565: CR7EQ := 1:1[1.SO] <> 0
 #566: CR7UN := 0:0[1.SO] <> 0
-#567: #84 := ~CR7EQ <> 0
-#568: when #84 goto %#569
+#567: #v51 := ~CR7EQ <> 0
+#568: when #v51 goto %#569
 #570: goto %#569
 
 #569:
-#571: #86 := CR0EQ <> 0
-#572: when #86 goto %#573
+#571: #v52 := CR0EQ <> 0
+#572: when #v52 goto %#573
 #574: goto %#575
 
 #573:
@@ -679,11 +679,11 @@ sub main(main_argc, main_argv, main_result)
 #581: goto %#582
 
 #582:
-#583: #87 := R3
-#584: R3 := low:32[((#87.#87) | (#87.#87) >> 0x40) & 0xFF]
-#585: #92 := R29 + 1
-#586: R28 := pad:32[mem[#92]]
-#587: R29 := #92
+#583: #v53 := R3
+#584: R3 := low:32[((#v53.#v53) | (#v53.#v53) >> 0x40) & 0xFF]
+#585: #v54 := R29 + 1
+#586: R28 := pad:32[mem[#v54]]
+#587: R29 := #v54
 #588: LR := 0x10010794
 #589: call @putchar with return %#590
 
@@ -694,26 +694,26 @@ sub main(main_argc, main_argv, main_result)
 #594: CR0EQ := 1:1[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #595: CR0UN := 0:0[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #596: R3 := R28
-#597: #94 := CR0GT <> 0
-#598: when #94 goto %#582
+#597: #v55 := CR0GT <> 0
+#598: when #v55 goto %#582
 #599: goto %#600
 
 #600:
 #601: R3 := 0x100B0000
 #602: R3 := R3 + 0x1690
 #603: R3 := mem[R3 + 0x14, be]:u32
-#604: #95 := extend:64[R3] & 0x7FFFFFFF
-#605: #96 := 63:63[extend:64[R3]] & ~#95 = 0
-#606: CA := #96
-#607: CA32 := #96
+#604: #v56 := extend:64[R3] & 0x7FFFFFFF
+#605: #v57 := 63:63[extend:64[R3]] & ~#v56 = 0
+#606: CA := #v57
+#607: CA32 := #v57
 #608: R30 := low:32[extend:64[R3] ~>> 0x1F]
 #609: CR0LT := 3:3[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #610: CR0GT := 2:2[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #611: CR0EQ := 1:1[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #612: CR0UN := 0:0[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #613: R29 := R3 ^ R30
-#614: #98 := ~CR0LT <> 0
-#615: when #98 goto %#616
+#614: #v58 := ~CR0LT <> 0
+#615: when #v58 goto %#616
 #617: goto %#618
 
 #618:
@@ -731,8 +731,8 @@ sub main(main_argc, main_argv, main_result)
 
 #628:
 #629: R8 := high:32[pad:64[R5] * pad:64[R4]]
-#630: #99 := R8
-#631: R8 := low:32[((#99.#99) << 0x1D | (#99.#99) >> 0x23) & 0x1FFFFFFF]
+#630: #v59 := R8
+#631: R8 := low:32[((#v59.#v59) << 0x1D | (#v59.#v59) >> 0x23) & 0x1FFFFFFF]
 #632: R7 := R6
 #633: R6 := R6 + 1
 #634: CR0LT := 3:3[R5 < 9.9 < R5.R5 = 9.SO] <> 0
@@ -742,12 +742,12 @@ sub main(main_argc, main_argv, main_result)
 #638: R9 := R8 * 0xA
 #639: R9 := R5 - R9
 #640: R9 := R9 | 0x30
-#641: #104 := R3 + 1
-#642: mem := mem with [#104] <- low:8[R9]
-#643: R3 := #104
+#641: #v60 := R3 + 1
+#642: mem := mem with [#v60] <- low:8[R9]
+#643: R3 := #v60
 #644: R5 := R8
-#645: #106 := CR0GT <> 0
-#646: when #106 goto %#628
+#645: #v61 := CR0GT <> 0
+#646: when #v61 goto %#628
 #647: goto %#648
 
 #648:
@@ -756,9 +756,9 @@ sub main(main_argc, main_argv, main_result)
 #651: goto %#652
 
 #652:
-#653: #107 := R29 - 1
-#654: R3 := pad:32[mem[#107]]
-#655: R29 := #107
+#653: #v62 := R29 - 1
+#654: R3 := pad:32[mem[#v62]]
+#655: R29 := #v62
 #656: LR := 0x10010818
 #657: call @putchar with return %#658
 
@@ -768,8 +768,8 @@ sub main(main_argc, main_argv, main_result)
 #661: CR0GT := 2:2[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #662: CR0EQ := 1:1[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #663: CR0UN := 0:0[R30 < 0.0 < R30.R30 = 0.SO] <> 0
-#664: #109 := CR0GT <> 0
-#665: when #109 goto %#652
+#664: #v63 := CR0GT <> 0
+#665: when #v63 goto %#652
 #666: goto %#667
 
 #667:
@@ -800,8 +800,8 @@ sub main(main_argc, main_argv, main_result)
 #691: call @intrinsic:syscall with return %#692
 
 #692:
-#693: #111 := ~CR0UN <> 0
-#694: when #111 goto %#695
+#693: #v64 := ~CR0UN <> 0
+#694: when #v64 goto %#695
 #696: goto %#697
 
 #695:
@@ -809,16 +809,16 @@ sub main(main_argc, main_argv, main_result)
 #699: CR0GT := 2:2[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #700: CR0EQ := 1:1[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #701: CR0UN := 0:0[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
-#702: #113 := ~CR0EQ <> 0
-#703: when #113 goto %#704
+#702: #v65 := ~CR0EQ <> 0
+#703: when #v65 goto %#704
 #705: goto %#706
 
 #706:
 #707: R3 := R31
 #708: CTR := R30
-#709: #402 := CTR & 0xFFFFFFFC
+#709: #v66 := CTR & 0xFFFFFFFC
 #710: LR := 0x10010898
-#711: call #402 with return %#712
+#711: call #v66 with return %#712
 
 #712:
 #713: R0 := 1
@@ -842,8 +842,8 @@ sub main(main_argc, main_argv, main_result)
 #727: call @intrinsic:syscall with return %#728
 
 #728:
-#729: #115 := ~CR0UN <> 0
-#730: when #115 goto %#731
+#729: #v67 := ~CR0UN <> 0
+#730: when #v67 goto %#731
 #732: goto %#733
 
 #731:
@@ -851,16 +851,16 @@ sub main(main_argc, main_argv, main_result)
 #735: CR0GT := 2:2[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #736: CR0EQ := 1:1[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #737: CR0UN := 0:0[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
-#738: #117 := ~CR0EQ <> 0
-#739: when #117 goto %#740
+#738: #v68 := ~CR0EQ <> 0
+#739: when #v68 goto %#740
 #741: goto %#742
 
 #742:
 #743: R3 := R31
 #744: CTR := R30
-#745: #400 := CTR & 0xFFFFFFFC
+#745: #v69 := CTR & 0xFFFFFFFC
 #746: LR := 0x100108E4
-#747: call #400 with return %#748
+#747: call #v69 with return %#748
 
 #748:
 #749: R0 := 1
@@ -882,13 +882,13 @@ sub main(main_argc, main_argv, main_result)
 #761: CR7GT := 2:2[1.SO] <> 0
 #762: CR7EQ := 1:1[1.SO] <> 0
 #763: CR7UN := 0:0[1.SO] <> 0
-#764: #119 := ~CR7EQ <> 0
-#765: when #119 goto %#766
+#764: #v70 := ~CR7EQ <> 0
+#765: when #v70 goto %#766
 #767: goto %#766
 
 #766:
-#768: #121 := CR0EQ <> 0
-#769: when #121 goto %#770
+#768: #v71 := CR0EQ <> 0
+#769: when #v71 goto %#770
 #771: goto %#772
 
 #770:
@@ -901,13 +901,13 @@ sub main(main_argc, main_argv, main_result)
 #779: CR7GT := 2:2[1.SO] <> 0
 #780: CR7EQ := 1:1[1.SO] <> 0
 #781: CR7UN := 0:0[1.SO] <> 0
-#782: #123 := ~CR7EQ <> 0
-#783: when #123 goto %#784
+#782: #v72 := ~CR7EQ <> 0
+#783: when #v72 goto %#784
 #785: goto %#784
 
 #784:
-#786: #125 := CR0EQ <> 0
-#787: when #125 goto %#788
+#786: #v73 := CR0EQ <> 0
+#787: when #v73 goto %#788
 #789: goto %#790
 
 #790:
@@ -927,8 +927,8 @@ sub main(main_argc, main_argv, main_result)
 #803: call @intrinsic:syscall with return %#804
 
 #804:
-#805: #393 := ~CR0UN <> 0
-#806: when #393 goto %#807
+#805: #v74 := ~CR0UN <> 0
+#806: when #v74 goto %#807
 #808: goto %#809
 
 #809:
@@ -945,13 +945,13 @@ sub main(main_argc, main_argv, main_result)
 #818: CR7GT := 2:2[1.SO] <> 0
 #819: CR7EQ := 1:1[1.SO] <> 0
 #820: CR7UN := 0:0[1.SO] <> 0
-#821: #395 := ~CR7EQ <> 0
-#822: when #395 goto %#823
+#821: #v75 := ~CR7EQ <> 0
+#822: when #v75 goto %#823
 #824: goto %#823
 
 #823:
-#825: #397 := ~CR0EQ <> 0
-#826: when #397 goto %#795
+#825: #v76 := ~CR0EQ <> 0
+#826: when #v76 goto %#795
 #827: goto %#788
 
 #788:
@@ -959,27 +959,27 @@ sub main(main_argc, main_argv, main_result)
 #829: R4 := R3 + 0x1690
 #830: R5 := mem[R4 + 0x1C, be]:u32
 #831: R3 := R5 ^ 0xC8
-#832: #127 := R3
-#833: #127 := #127 | #127 >> 1
-#834: #127 := #127 | #127 >> 2
-#835: #127 := #127 | #127 >> 4
-#836: #127 := #127 | #127 >> 8
-#837: #127 := #127 | #127 >> 0x10
-#838: #127 := ~#127
-#839: #128 := #127
-#840: #128 := #128 - (#128 >> 1 & 0x55555555)
-#841: #128 := (#128 & 0x33333333) + (#128 >> 2 & 0x33333333)
-#842: #128 := #128 + (#128 >> 4) & 0xF0F0F0F
-#843: R3 := #128 * 0x1010101 >> 0x18
+#832: #v77 := R3
+#833: #v77 := #v77 | #v77 >> 1
+#834: #v77 := #v77 | #v77 >> 2
+#835: #v77 := #v77 | #v77 >> 4
+#836: #v77 := #v77 | #v77 >> 8
+#837: #v77 := #v77 | #v77 >> 0x10
+#838: #v77 := ~#v77
+#839: #v78 := #v77
+#840: #v78 := #v78 - (#v78 >> 1 & 0x55555555)
+#841: #v78 := (#v78 & 0x33333333) + (#v78 >> 2 & 0x33333333)
+#842: #v78 := #v78 + (#v78 >> 4) & 0xF0F0F0F
+#843: R3 := #v78 * 0x1010101 >> 0x18
 #844: CR0LT := 3:3[R5 <$ 0.0 <$ R5.R5 = 0.SO] <> 0
 #845: CR0GT := 2:2[R5 <$ 0.0 <$ R5.R5 = 0.SO] <> 0
 #846: CR0EQ := 1:1[R5 <$ 0.0 <$ R5.R5 = 0.SO] <> 0
 #847: CR0UN := 0:0[R5 <$ 0.0 <$ R5.R5 = 0.SO] <> 0
-#848: #129 := R3
-#849: R3 := low:32[((#129.#129) << 0x1B | (#129.#129) >> 0x25) &
+#848: #v79 := R3
+#849: R3 := low:32[((#v79.#v79) << 0x1B | (#v79.#v79) >> 0x25) &
           0x7FFFFFF]
-#850: #135 := ~CR0GT <> 0
-#851: when #135 goto %#852
+#850: #v80 := ~CR0GT <> 0
+#851: when #v80 goto %#852
 #853: goto %#854
 
 #854:
@@ -989,17 +989,17 @@ sub main(main_argc, main_argv, main_result)
 #858: goto %#859
 
 #859:
-#860: #382 := R4 + 1
-#861: R6 := pad:32[mem[#382]]
-#862: R4 := #382
-#863: #383 := R5
-#864: R7 := low:32[((#383.#383) | (#383.#383) >> 0x40) & 1]
+#860: #v81 := R4 + 1
+#861: R6 := pad:32[mem[#v81]]
+#862: R4 := #v81
+#863: #v82 := R5
+#864: R7 := low:32[((#v82.#v82) | (#v82.#v82) >> 0x40) & 1]
 #865: CR0LT := 3:3[R7 < R6.R6 < R7.R7 = R6.SO] <> 0
 #866: CR0GT := 2:2[R7 < R6.R6 < R7.R7 = R6.SO] <> 0
 #867: CR0EQ := 1:1[R7 < R6.R6 < R7.R7 = R6.SO] <> 0
 #868: CR0UN := 0:0[R7 < R6.R6 < R7.R7 = R6.SO] <> 0
-#869: #389 := CR0EQ <> 0
-#870: when #389 goto %#871
+#869: #v83 := CR0EQ <> 0
+#870: when #v83 goto %#871
 #872: goto %#873
 
 #873:
@@ -1009,9 +1009,9 @@ sub main(main_argc, main_argv, main_result)
 #871:
 #876: R5 := R5 + 1
 #877: CTR := CTR - 1
-#878: #390 := CTR = 0
-#879: #391 := #390 <> 0
-#880: when #391 goto %#852
+#878: #v84 := CTR = 0
+#879: #v85 := #v84 <> 0
+#880: when #v85 goto %#852
 #881: goto %#859
 
 #852:
@@ -1020,8 +1020,8 @@ sub main(main_argc, main_argv, main_result)
 #884: CR0EQ := 1:1[R3 < 0.0 < R3.R3 = 0.SO] <> 0
 #885: CR0UN := 0:0[R3 < 0.0 < R3.R3 = 0.SO] <> 0
 #886: R3 := 0x43
-#887: #137 := CR0EQ <> 0
-#888: when #137 goto %#889
+#887: #v86 := CR0EQ <> 0
+#888: when #v86 goto %#889
 #890: goto %#891
 
 #891:
@@ -1031,8 +1031,8 @@ sub main(main_argc, main_argv, main_result)
 #889:
 #894: R4 := 0x10000000
 #895: R4 := R4 + 0x230
-#896: #139 := CR0EQ <> 0
-#897: when #139 goto %#898
+#896: #v87 := CR0EQ <> 0
+#897: when #v87 goto %#898
 #899: goto %#900
 
 #898:
@@ -1049,16 +1049,16 @@ sub main(main_argc, main_argv, main_result)
 #908: CR0GT := 2:2[R3 < 0.0 < R3.R3 = 0.SO] <> 0
 #909: CR0EQ := 1:1[R3 < 0.0 < R3.R3 = 0.SO] <> 0
 #910: CR0UN := 0:0[R3 < 0.0 < R3.R3 = 0.SO] <> 0
-#911: #141 := CR0EQ <> 0
-#912: when #141 goto %#913
+#911: #v88 := CR0EQ <> 0
+#912: when #v88 goto %#913
 #914: goto %#915
 
 #915:
-#916: #374 := R3
-#917: R3 := low:32[((#374.#374) | (#374.#374) >> 0x40) & 0xFF]
-#918: #379 := R30 + 1
-#919: R29 := pad:32[mem[#379]]
-#920: R30 := #379
+#916: #v89 := R3
+#917: R3 := low:32[((#v89.#v89) | (#v89.#v89) >> 0x40) & 0xFF]
+#918: #v90 := R30 + 1
+#919: R29 := pad:32[mem[#v90]]
+#920: R30 := #v90
 #921: LR := 0x10010A20
 #922: call @putchar with return %#923
 
@@ -1068,8 +1068,8 @@ sub main(main_argc, main_argv, main_result)
 #926: CR0EQ := 1:1[R29 < 0.0 < R29.R29 = 0.SO] <> 0
 #927: CR0UN := 0:0[R29 < 0.0 < R29.R29 = 0.SO] <> 0
 #928: R3 := R29
-#929: #381 := ~CR0EQ <> 0
-#930: when #381 goto %#915
+#929: #v91 := ~CR0EQ <> 0
+#930: when #v91 goto %#915
 #931: goto %#913
 
 #913:
@@ -1093,8 +1093,8 @@ sub main(main_argc, main_argv, main_result)
 #949: call @intrinsic:syscall with return %#950
 
 #950:
-#951: #143 := ~CR0UN <> 0
-#952: when #143 goto %#953
+#951: #v92 := ~CR0UN <> 0
+#952: when #v92 goto %#953
 #954: goto %#955
 
 #955:
@@ -1114,8 +1114,8 @@ sub main(main_argc, main_argv, main_result)
 #967: call @intrinsic:syscall with return %#968
 
 #968:
-#969: #145 := ~CR0UN <> 0
-#970: when #145 goto %#971
+#969: #v93 := ~CR0UN <> 0
+#970: when #v93 goto %#971
 #972: goto %#973
 
 #973:
@@ -1135,8 +1135,8 @@ sub main(main_argc, main_argv, main_result)
 #985: call @intrinsic:syscall with return %#986
 
 #986:
-#987: #147 := ~CR0UN <> 0
-#988: when #147 goto %#989
+#987: #v94 := ~CR0UN <> 0
+#988: when #v94 goto %#989
 #990: goto %#991
 
 #991:
@@ -1158,8 +1158,8 @@ sub main(main_argc, main_argv, main_result)
 #1005: call @intrinsic:syscall with return %#1006
 
 #1006:
-#1007: #149 := ~CR0UN <> 0
-#1008: when #149 goto %#1009
+#1007: #v95 := ~CR0UN <> 0
+#1008: when #v95 goto %#1009
 #1010: goto %#1011
 
 #1011:
@@ -1174,11 +1174,11 @@ sub main(main_argc, main_argv, main_result)
 #1018: goto %#1019
 
 #1019:
-#1020: #150 := R3
-#1021: R3 := low:32[((#150.#150) | (#150.#150) >> 0x40) & 0xFF]
-#1022: #155 := R25 + 1
-#1023: R23 := pad:32[mem[#155]]
-#1024: R25 := #155
+#1020: #v96 := R3
+#1021: R3 := low:32[((#v96.#v96) | (#v96.#v96) >> 0x40) & 0xFF]
+#1022: #v97 := R25 + 1
+#1023: R23 := pad:32[mem[#v97]]
+#1024: R25 := #v97
 #1025: LR := 0x10010B20
 #1026: call @putchar with return %#1027
 
@@ -1189,15 +1189,15 @@ sub main(main_argc, main_argv, main_result)
 #1031: CR0EQ := 1:1[R26 < 0.0 < R26.R26 = 0.SO] <> 0
 #1032: CR0UN := 0:0[R26 < 0.0 < R26.R26 = 0.SO] <> 0
 #1033: R3 := R23
-#1034: #157 := CR0GT <> 0
-#1035: when #157 goto %#1019
+#1034: #v98 := CR0GT <> 0
+#1035: when #v98 goto %#1019
 #1036: goto %#1037
 
 #1037:
-#1038: #158 := extend:64[R27] & 0x7FFFFFFF
-#1039: #159 := 63:63[extend:64[R27]] & ~#158 = 0
-#1040: CA := #159
-#1041: CA32 := #159
+#1038: #v99 := extend:64[R27] & 0x7FFFFFFF
+#1039: #v100 := 63:63[extend:64[R27]] & ~#v99 = 0
+#1040: CA := #v100
+#1041: CA32 := #v100
 #1042: R26 := low:32[extend:64[R27] ~>> 0x1F]
 #1043: CR0LT := 3:3[R27 <$ 0xFFFFFFFF.0xFFFFFFFF <$ R27.R27 =
           0xFFFFFFFF.SO] <> 0
@@ -1208,8 +1208,8 @@ sub main(main_argc, main_argv, main_result)
 #1046: CR0UN := 0:0[R27 <$ 0xFFFFFFFF.0xFFFFFFFF <$ R27.R27 =
           0xFFFFFFFF.SO] <> 0
 #1047: R27 := R27 ^ R26
-#1048: #161 := CR0GT <> 0
-#1049: when #161 goto %#1050
+#1048: #v101 := CR0GT <> 0
+#1049: when #v101 goto %#1050
 #1051: goto %#1052
 
 #1052:
@@ -1227,8 +1227,8 @@ sub main(main_argc, main_argv, main_result)
 
 #1062:
 #1063: R8 := high:32[pad:64[R5] * pad:64[R4]]
-#1064: #162 := R8
-#1065: R8 := low:32[((#162.#162) << 0x1D | (#162.#162) >> 0x23) &
+#1064: #v102 := R8
+#1065: R8 := low:32[((#v102.#v102) << 0x1D | (#v102.#v102) >> 0x23) &
           0x1FFFFFFF]
 #1066: R7 := R6
 #1067: R6 := R6 + 1
@@ -1239,12 +1239,12 @@ sub main(main_argc, main_argv, main_result)
 #1072: R9 := R8 * 0xA
 #1073: R9 := R5 - R9
 #1074: R9 := R9 | 0x30
-#1075: #167 := R3 + 1
-#1076: mem := mem with [#167] <- low:8[R9]
-#1077: R3 := #167
+#1075: #v103 := R3 + 1
+#1076: mem := mem with [#v103] <- low:8[R9]
+#1077: R3 := #v103
 #1078: R5 := R8
-#1079: #169 := CR0GT <> 0
-#1080: when #169 goto %#1062
+#1079: #v104 := CR0GT <> 0
+#1080: when #v104 goto %#1062
 #1081: goto %#1082
 
 #1082:
@@ -1253,9 +1253,9 @@ sub main(main_argc, main_argv, main_result)
 #1085: goto %#1086
 
 #1086:
-#1087: #170 := R26 - 1
-#1088: R3 := pad:32[mem[#170]]
-#1089: R26 := #170
+#1087: #v105 := R26 - 1
+#1088: R3 := pad:32[mem[#v105]]
+#1089: R26 := #v105
 #1090: LR := 0x10010B98
 #1091: call @putchar with return %#1092
 
@@ -1265,8 +1265,8 @@ sub main(main_argc, main_argv, main_result)
 #1095: CR0GT := 2:2[R27 < 0.0 < R27.R27 = 0.SO] <> 0
 #1096: CR0EQ := 1:1[R27 < 0.0 < R27.R27 = 0.SO] <> 0
 #1097: CR0UN := 0:0[R27 < 0.0 < R27.R27 = 0.SO] <> 0
-#1098: #172 := CR0GT <> 0
-#1099: when #172 goto %#1086
+#1098: #v106 := CR0GT <> 0
+#1099: when #v106 goto %#1086
 #1100: goto %#1101
 
 #1101:
@@ -1275,10 +1275,10 @@ sub main(main_argc, main_argv, main_result)
 #1104: call @putchar with return %#1105
 
 #1105:
-#1106: #173 := extend:64[R28] & 0x7FFFFFFF
-#1107: #174 := 63:63[extend:64[R28]] & ~#173 = 0
-#1108: CA := #174
-#1109: CA32 := #174
+#1106: #v107 := extend:64[R28] & 0x7FFFFFFF
+#1107: #v108 := 63:63[extend:64[R28]] & ~#v107 = 0
+#1108: CA := #v108
+#1109: CA32 := #v108
 #1110: R27 := low:32[extend:64[R28] ~>> 0x1F]
 #1111: CR0LT := 3:3[R28 <$ 0xFFFFFFFF.0xFFFFFFFF <$ R28.R28 =
           0xFFFFFFFF.SO] <> 0
@@ -1289,8 +1289,8 @@ sub main(main_argc, main_argv, main_result)
 #1114: CR0UN := 0:0[R28 <$ 0xFFFFFFFF.0xFFFFFFFF <$ R28.R28 =
           0xFFFFFFFF.SO] <> 0
 #1115: R28 := R28 ^ R27
-#1116: #176 := CR0GT <> 0
-#1117: when #176 goto %#1118
+#1116: #v109 := CR0GT <> 0
+#1117: when #v109 goto %#1118
 #1119: goto %#1120
 
 #1120:
@@ -1308,8 +1308,8 @@ sub main(main_argc, main_argv, main_result)
 
 #1130:
 #1131: R8 := high:32[pad:64[R5] * pad:64[R4]]
-#1132: #177 := R8
-#1133: R8 := low:32[((#177.#177) << 0x1D | (#177.#177) >> 0x23) &
+#1132: #v110 := R8
+#1133: R8 := low:32[((#v110.#v110) << 0x1D | (#v110.#v110) >> 0x23) &
           0x1FFFFFFF]
 #1134: R7 := R6
 #1135: R6 := R6 + 1
@@ -1320,12 +1320,12 @@ sub main(main_argc, main_argv, main_result)
 #1140: R9 := R8 * 0xA
 #1141: R9 := R5 - R9
 #1142: R9 := R9 | 0x30
-#1143: #182 := R3 + 1
-#1144: mem := mem with [#182] <- low:8[R9]
-#1145: R3 := #182
+#1143: #v111 := R3 + 1
+#1144: mem := mem with [#v111] <- low:8[R9]
+#1145: R3 := #v111
 #1146: R5 := R8
-#1147: #184 := CR0GT <> 0
-#1148: when #184 goto %#1130
+#1147: #v112 := CR0GT <> 0
+#1148: when #v112 goto %#1130
 #1149: goto %#1150
 
 #1150:
@@ -1334,9 +1334,9 @@ sub main(main_argc, main_argv, main_result)
 #1153: goto %#1154
 
 #1154:
-#1155: #185 := R27 - 1
-#1156: R3 := pad:32[mem[#185]]
-#1157: R27 := #185
+#1155: #v113 := R27 - 1
+#1156: R3 := pad:32[mem[#v113]]
+#1157: R27 := #v113
 #1158: LR := 0x10010C14
 #1159: call @putchar with return %#1160
 
@@ -1346,8 +1346,8 @@ sub main(main_argc, main_argv, main_result)
 #1163: CR0GT := 2:2[R28 < 0.0 < R28.R28 = 0.SO] <> 0
 #1164: CR0EQ := 1:1[R28 < 0.0 < R28.R28 = 0.SO] <> 0
 #1165: CR0UN := 0:0[R28 < 0.0 < R28.R28 = 0.SO] <> 0
-#1166: #187 := CR0GT <> 0
-#1167: when #187 goto %#1154
+#1166: #v114 := CR0GT <> 0
+#1167: when #v114 goto %#1154
 #1168: goto %#1169
 
 #1169:
@@ -1356,10 +1356,10 @@ sub main(main_argc, main_argv, main_result)
 #1172: call @putchar with return %#1173
 
 #1173:
-#1174: #188 := extend:64[R29] & 0x7FFFFFFF
-#1175: #189 := 63:63[extend:64[R29]] & ~#188 = 0
-#1176: CA := #189
-#1177: CA32 := #189
+#1174: #v115 := extend:64[R29] & 0x7FFFFFFF
+#1175: #v116 := 63:63[extend:64[R29]] & ~#v115 = 0
+#1176: CA := #v116
+#1177: CA32 := #v116
 #1178: R28 := low:32[extend:64[R29] ~>> 0x1F]
 #1179: CR0LT := 3:3[R29 <$ 0xFFFFFFFF.0xFFFFFFFF <$ R29.R29 =
           0xFFFFFFFF.SO] <> 0
@@ -1370,8 +1370,8 @@ sub main(main_argc, main_argv, main_result)
 #1182: CR0UN := 0:0[R29 <$ 0xFFFFFFFF.0xFFFFFFFF <$ R29.R29 =
           0xFFFFFFFF.SO] <> 0
 #1183: R29 := R29 ^ R28
-#1184: #191 := CR0GT <> 0
-#1185: when #191 goto %#1186
+#1184: #v117 := CR0GT <> 0
+#1185: when #v117 goto %#1186
 #1187: goto %#1188
 
 #1188:
@@ -1389,8 +1389,8 @@ sub main(main_argc, main_argv, main_result)
 
 #1198:
 #1199: R8 := high:32[pad:64[R5] * pad:64[R4]]
-#1200: #192 := R8
-#1201: R8 := low:32[((#192.#192) << 0x1D | (#192.#192) >> 0x23) &
+#1200: #v118 := R8
+#1201: R8 := low:32[((#v118.#v118) << 0x1D | (#v118.#v118) >> 0x23) &
           0x1FFFFFFF]
 #1202: R7 := R6
 #1203: R6 := R6 + 1
@@ -1401,12 +1401,12 @@ sub main(main_argc, main_argv, main_result)
 #1208: R9 := R8 * 0xA
 #1209: R9 := R5 - R9
 #1210: R9 := R9 | 0x30
-#1211: #197 := R3 + 1
-#1212: mem := mem with [#197] <- low:8[R9]
-#1213: R3 := #197
+#1211: #v119 := R3 + 1
+#1212: mem := mem with [#v119] <- low:8[R9]
+#1213: R3 := #v119
 #1214: R5 := R8
-#1215: #199 := CR0GT <> 0
-#1216: when #199 goto %#1198
+#1215: #v120 := CR0GT <> 0
+#1216: when #v120 goto %#1198
 #1217: goto %#1218
 
 #1218:
@@ -1415,9 +1415,9 @@ sub main(main_argc, main_argv, main_result)
 #1221: goto %#1222
 
 #1222:
-#1223: #200 := R28 - 1
-#1224: R3 := pad:32[mem[#200]]
-#1225: R28 := #200
+#1223: #v121 := R28 - 1
+#1224: R3 := pad:32[mem[#v121]]
+#1225: R28 := #v121
 #1226: LR := 0x10010C90
 #1227: call @putchar with return %#1228
 
@@ -1427,8 +1427,8 @@ sub main(main_argc, main_argv, main_result)
 #1231: CR0GT := 2:2[R29 < 0.0 < R29.R29 = 0.SO] <> 0
 #1232: CR0EQ := 1:1[R29 < 0.0 < R29.R29 = 0.SO] <> 0
 #1233: CR0UN := 0:0[R29 < 0.0 < R29.R29 = 0.SO] <> 0
-#1234: #202 := CR0GT <> 0
-#1235: when #202 goto %#1222
+#1234: #v122 := CR0GT <> 0
+#1235: when #v122 goto %#1222
 #1236: goto %#1237
 
 #1237:
@@ -1437,10 +1437,10 @@ sub main(main_argc, main_argv, main_result)
 #1240: call @putchar with return %#1241
 
 #1241:
-#1242: #203 := extend:64[R30] & 0x7FFFFFFF
-#1243: #204 := 63:63[extend:64[R30]] & ~#203 = 0
-#1244: CA := #204
-#1245: CA32 := #204
+#1242: #v123 := extend:64[R30] & 0x7FFFFFFF
+#1243: #v124 := 63:63[extend:64[R30]] & ~#v123 = 0
+#1244: CA := #v124
+#1245: CA32 := #v124
 #1246: R29 := low:32[extend:64[R30] ~>> 0x1F]
 #1247: CR0LT := 3:3[R30 <$ 0xFFFFFFFF.0xFFFFFFFF <$ R30.R30 =
           0xFFFFFFFF.SO] <> 0
@@ -1451,8 +1451,8 @@ sub main(main_argc, main_argv, main_result)
 #1250: CR0UN := 0:0[R30 <$ 0xFFFFFFFF.0xFFFFFFFF <$ R30.R30 =
           0xFFFFFFFF.SO] <> 0
 #1251: R30 := R30 ^ R29
-#1252: #206 := CR0GT <> 0
-#1253: when #206 goto %#1254
+#1252: #v125 := CR0GT <> 0
+#1253: when #v125 goto %#1254
 #1255: goto %#1256
 
 #1256:
@@ -1470,8 +1470,8 @@ sub main(main_argc, main_argv, main_result)
 
 #1266:
 #1267: R8 := high:32[pad:64[R5] * pad:64[R4]]
-#1268: #207 := R8
-#1269: R8 := low:32[((#207.#207) << 0x1D | (#207.#207) >> 0x23) &
+#1268: #v126 := R8
+#1269: R8 := low:32[((#v126.#v126) << 0x1D | (#v126.#v126) >> 0x23) &
           0x1FFFFFFF]
 #1270: R7 := R6
 #1271: R6 := R6 + 1
@@ -1482,12 +1482,12 @@ sub main(main_argc, main_argv, main_result)
 #1276: R9 := R8 * 0xA
 #1277: R9 := R5 - R9
 #1278: R9 := R9 | 0x30
-#1279: #212 := R3 + 1
-#1280: mem := mem with [#212] <- low:8[R9]
-#1281: R3 := #212
+#1279: #v127 := R3 + 1
+#1280: mem := mem with [#v127] <- low:8[R9]
+#1281: R3 := #v127
 #1282: R5 := R8
-#1283: #214 := CR0GT <> 0
-#1284: when #214 goto %#1266
+#1283: #v128 := CR0GT <> 0
+#1284: when #v128 goto %#1266
 #1285: goto %#1286
 
 #1286:
@@ -1496,9 +1496,9 @@ sub main(main_argc, main_argv, main_result)
 #1289: goto %#1290
 
 #1290:
-#1291: #215 := R29 - 1
-#1292: R3 := pad:32[mem[#215]]
-#1293: R29 := #215
+#1291: #v129 := R29 - 1
+#1292: R3 := pad:32[mem[#v129]]
+#1293: R29 := #v129
 #1294: LR := 0x10010D0C
 #1295: call @putchar with return %#1296
 
@@ -1508,8 +1508,8 @@ sub main(main_argc, main_argv, main_result)
 #1299: CR0GT := 2:2[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #1300: CR0EQ := 1:1[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #1301: CR0UN := 0:0[R30 < 0.0 < R30.R30 = 0.SO] <> 0
-#1302: #217 := CR0GT <> 0
-#1303: when #217 goto %#1290
+#1302: #v130 := CR0GT <> 0
+#1303: when #v130 goto %#1290
 #1304: goto %#1305
 
 #1305:
@@ -1545,8 +1545,8 @@ sub main(main_argc, main_argv, main_result)
 #1333: call @intrinsic:syscall with return %#1334
 
 #1334:
-#1335: #219 := ~CR0UN <> 0
-#1336: when #219 goto %#1337
+#1335: #v131 := ~CR0UN <> 0
+#1336: when #v131 goto %#1337
 #1338: goto %#1339
 
 #1337:
@@ -1554,16 +1554,16 @@ sub main(main_argc, main_argv, main_result)
 #1341: CR0GT := 2:2[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #1342: CR0EQ := 1:1[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #1343: CR0UN := 0:0[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
-#1344: #221 := ~CR0EQ <> 0
-#1345: when #221 goto %#1346
+#1344: #v132 := ~CR0EQ <> 0
+#1345: when #v132 goto %#1346
 #1347: goto %#1348
 
 #1348:
 #1349: R3 := R31
 #1350: CTR := R30
-#1351: #372 := CTR & 0xFFFFFFFC
+#1351: #v133 := CTR & 0xFFFFFFFC
 #1352: LR := 0x10010D94
-#1353: call #372 with return %#1354
+#1353: call #v133 with return %#1354
 
 #1354:
 #1355: R0 := 1
@@ -1583,8 +1583,8 @@ sub main(main_argc, main_argv, main_result)
 #1365: CR0EQ := 1:1[R25 < 0.0 < R25.R25 = 0.SO] <> 0
 #1366: CR0UN := 0:0[R25 < 0.0 < R25.R25 = 0.SO] <> 0
 #1367: R27 := R27 + 0x4000
-#1368: #223 := CR0GT <> 0
-#1369: when #223 goto %#1323
+#1368: #v134 := CR0GT <> 0
+#1369: when #v134 goto %#1323
 #1370: goto %#1371
 
 #1371:
@@ -1594,8 +1594,8 @@ sub main(main_argc, main_argv, main_result)
 #1375: goto %#1376
 
 #1376:
-#1377: #224 := R29
-#1378: R3 := low:32[((#224.#224) << 2 | (#224.#224) >> 0x3E) & 0xFFFFFFFC]
+#1377: #v135 := R29
+#1378: R3 := low:32[((#v135.#v135) << 2 | (#v135.#v135) >> 0x3E) & 0xFFFFFFFC]
 #1379: R27 := R28 + R3
 #1380: R5 := mem[R27 + 0x80, be]:u32
 #1381: CR0LT := 3:3[R5 < 0.0 < R5.R5 = 0.SO] <> 0
@@ -1606,13 +1606,13 @@ sub main(main_argc, main_argv, main_result)
 #1386: CR7GT := 2:2[1.SO] <> 0
 #1387: CR7EQ := 1:1[1.SO] <> 0
 #1388: CR7UN := 0:0[1.SO] <> 0
-#1389: #230 := ~CR7EQ <> 0
-#1390: when #230 goto %#1391
+#1389: #v136 := ~CR7EQ <> 0
+#1390: when #v136 goto %#1391
 #1392: goto %#1391
 
 #1391:
-#1393: #232 := CR0EQ <> 0
-#1394: when #232 goto %#1395
+#1393: #v137 := CR0EQ <> 0
+#1394: when #v137 goto %#1395
 #1396: goto %#1397
 
 #1397:
@@ -1630,8 +1630,8 @@ sub main(main_argc, main_argv, main_result)
 #1408: call @intrinsic:syscall with return %#1409
 
 #1409:
-#1410: #367 := ~CR0UN <> 0
-#1411: when #367 goto %#1412
+#1410: #v138 := ~CR0UN <> 0
+#1411: when #v138 goto %#1412
 #1413: goto %#1414
 
 #1414:
@@ -1648,13 +1648,13 @@ sub main(main_argc, main_argv, main_result)
 #1423: CR7GT := 2:2[1.SO] <> 0
 #1424: CR7EQ := 1:1[1.SO] <> 0
 #1425: CR7UN := 0:0[1.SO] <> 0
-#1426: #369 := ~CR7EQ <> 0
-#1427: when #369 goto %#1428
+#1426: #v139 := ~CR7EQ <> 0
+#1427: when #v139 goto %#1428
 #1429: goto %#1428
 
 #1428:
-#1430: #371 := ~CR0EQ <> 0
-#1431: when #371 goto %#1400
+#1430: #v140 := ~CR0EQ <> 0
+#1431: when #v140 goto %#1400
 #1432: goto %#1433
 
 #1433:
@@ -1666,8 +1666,8 @@ sub main(main_argc, main_argv, main_result)
 #1437: CR0GT := 2:2[R29 < 0x18.0x18 < R29.R29 = 0x18.SO] <> 0
 #1438: CR0EQ := 1:1[R29 < 0x18.0x18 < R29.R29 = 0x18.SO] <> 0
 #1439: CR0UN := 0:0[R29 < 0x18.0x18 < R29.R29 = 0x18.SO] <> 0
-#1440: #234 := CR0EQ <> 0
-#1441: when #234 goto %#1442
+#1440: #v141 := CR0EQ <> 0
+#1441: when #v141 goto %#1442
 #1443: goto %#1376
 
 #1442:
@@ -1678,11 +1678,11 @@ sub main(main_argc, main_argv, main_result)
 #1448: goto %#1449
 
 #1449:
-#1450: #235 := R3
-#1451: R3 := low:32[((#235.#235) | (#235.#235) >> 0x40) & 0xFF]
-#1452: #240 := R29 + 1
-#1453: R28 := pad:32[mem[#240]]
-#1454: R29 := #240
+#1450: #v142 := R3
+#1451: R3 := low:32[((#v142.#v142) | (#v142.#v142) >> 0x40) & 0xFF]
+#1452: #v143 := R29 + 1
+#1453: R28 := pad:32[mem[#v143]]
+#1454: R29 := #v143
 #1455: LR := 0x10010E50
 #1456: call @putchar with return %#1457
 
@@ -1693,26 +1693,26 @@ sub main(main_argc, main_argv, main_result)
 #1461: CR0EQ := 1:1[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #1462: CR0UN := 0:0[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #1463: R3 := R28
-#1464: #242 := CR0GT <> 0
-#1465: when #242 goto %#1449
+#1464: #v144 := CR0GT <> 0
+#1465: when #v144 goto %#1449
 #1466: goto %#1467
 
 #1467:
 #1468: R3 := 0x100B0000
 #1469: R3 := R3 + 0x1690
 #1470: R3 := mem[R3 + 0x24, be]:u32
-#1471: #243 := extend:64[R3] & 0x7FFFFFFF
-#1472: #244 := 63:63[extend:64[R3]] & ~#243 = 0
-#1473: CA := #244
-#1474: CA32 := #244
+#1471: #v145 := extend:64[R3] & 0x7FFFFFFF
+#1472: #v146 := 63:63[extend:64[R3]] & ~#v145 = 0
+#1473: CA := #v146
+#1474: CA32 := #v146
 #1475: R30 := low:32[extend:64[R3] ~>> 0x1F]
 #1476: CR0LT := 3:3[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #1477: CR0GT := 2:2[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #1478: CR0EQ := 1:1[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #1479: CR0UN := 0:0[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #1480: R29 := R3 ^ R30
-#1481: #246 := ~CR0LT <> 0
-#1482: when #246 goto %#1483
+#1481: #v147 := ~CR0LT <> 0
+#1482: when #v147 goto %#1483
 #1484: goto %#1485
 
 #1485:
@@ -1730,8 +1730,8 @@ sub main(main_argc, main_argv, main_result)
 
 #1495:
 #1496: R8 := high:32[pad:64[R5] * pad:64[R4]]
-#1497: #247 := R8
-#1498: R8 := low:32[((#247.#247) << 0x1D | (#247.#247) >> 0x23) &
+#1497: #v148 := R8
+#1498: R8 := low:32[((#v148.#v148) << 0x1D | (#v148.#v148) >> 0x23) &
           0x1FFFFFFF]
 #1499: R7 := R6
 #1500: R6 := R6 + 1
@@ -1742,12 +1742,12 @@ sub main(main_argc, main_argv, main_result)
 #1505: R9 := R8 * 0xA
 #1506: R9 := R5 - R9
 #1507: R9 := R9 | 0x30
-#1508: #252 := R3 + 1
-#1509: mem := mem with [#252] <- low:8[R9]
-#1510: R3 := #252
+#1508: #v149 := R3 + 1
+#1509: mem := mem with [#v149] <- low:8[R9]
+#1510: R3 := #v149
 #1511: R5 := R8
-#1512: #254 := CR0GT <> 0
-#1513: when #254 goto %#1495
+#1512: #v150 := CR0GT <> 0
+#1513: when #v150 goto %#1495
 #1514: goto %#1515
 
 #1515:
@@ -1756,9 +1756,9 @@ sub main(main_argc, main_argv, main_result)
 #1518: goto %#1519
 
 #1519:
-#1520: #255 := R29 - 1
-#1521: R3 := pad:32[mem[#255]]
-#1522: R29 := #255
+#1520: #v151 := R29 - 1
+#1521: R3 := pad:32[mem[#v151]]
+#1522: R29 := #v151
 #1523: LR := 0x10010ED4
 #1524: call @putchar with return %#1525
 
@@ -1768,8 +1768,8 @@ sub main(main_argc, main_argv, main_result)
 #1528: CR0GT := 2:2[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #1529: CR0EQ := 1:1[R30 < 0.0 < R30.R30 = 0.SO] <> 0
 #1530: CR0UN := 0:0[R30 < 0.0 < R30.R30 = 0.SO] <> 0
-#1531: #257 := CR0GT <> 0
-#1532: when #257 goto %#1519
+#1531: #v152 := CR0GT <> 0
+#1532: when #v152 goto %#1519
 #1533: goto %#1534
 
 #1534:
@@ -1799,8 +1799,8 @@ sub main(main_argc, main_argv, main_result)
 #1557: call @intrinsic:syscall with return %#1558
 
 #1558:
-#1559: #259 := ~CR0UN <> 0
-#1560: when #259 goto %#1561
+#1559: #v153 := ~CR0UN <> 0
+#1560: when #v153 goto %#1561
 #1562: goto %#1563
 
 #1563:
@@ -1820,8 +1820,8 @@ sub main(main_argc, main_argv, main_result)
 #1575: call @intrinsic:syscall with return %#1576
 
 #1576:
-#1577: #261 := ~CR0UN <> 0
-#1578: when #261 goto %#1579
+#1577: #v154 := ~CR0UN <> 0
+#1578: when #v154 goto %#1579
 #1580: goto %#1581
 
 #1579:
@@ -1829,16 +1829,16 @@ sub main(main_argc, main_argv, main_result)
 #1583: CR0GT := 2:2[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #1584: CR0EQ := 1:1[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
 #1585: CR0UN := 0:0[R3 <$ 0.0 <$ R3.R3 = 0.SO] <> 0
-#1586: #263 := ~CR0EQ <> 0
-#1587: when #263 goto %#1588
+#1586: #v155 := ~CR0EQ <> 0
+#1587: when #v155 goto %#1588
 #1589: goto %#1590
 
 #1590:
 #1591: R3 := R31
 #1592: CTR := R30
-#1593: #364 := CTR & 0xFFFFFFFC
+#1593: #v156 := CTR & 0xFFFFFFFC
 #1594: LR := 0x10010F7C
-#1595: call #364 with return %#1596
+#1595: call #v156 with return %#1596
 
 #1596:
 #1597: R0 := 1
@@ -1862,8 +1862,8 @@ sub main(main_argc, main_argv, main_result)
 #1611: call @intrinsic:syscall with return %#1612
 
 #1612:
-#1613: #265 := ~CR0UN <> 0
-#1614: when #265 goto %#1615
+#1613: #v157 := ~CR0UN <> 0
+#1614: when #v157 goto %#1615
 #1616: goto %#1617
 
 #1617:
@@ -1899,8 +1899,8 @@ sub main(main_argc, main_argv, main_result)
 #1643: call @intrinsic:syscall with return %#1644
 
 #1644:
-#1645: #399 := ~CR0UN <> 0
-#1646: when #399 goto %#1647
+#1645: #v158 := ~CR0UN <> 0
+#1646: when #v158 goto %#1647
 #1648: goto %#1649
 
 #1649:
@@ -1921,8 +1921,8 @@ sub main(main_argc, main_argv, main_result)
 #1660: call @intrinsic:syscall with return %#1661
 
 #1661:
-#1662: #405 := ~CR0UN <> 0
-#1663: when #405 goto %#1664
+#1662: #v159 := ~CR0UN <> 0
+#1663: when #v159 goto %#1664
 #1665: goto %#1666
 
 #1666:
@@ -1943,8 +1943,8 @@ sub main(main_argc, main_argv, main_result)
 #1677: call @intrinsic:syscall with return %#1678
 
 #1678:
-#1679: #431 := ~CR0UN <> 0
-#1680: when #431 goto %#1681
+#1679: #v160 := ~CR0UN <> 0
+#1680: when #v160 goto %#1681
 #1682: goto %#1683
 
 #1683:

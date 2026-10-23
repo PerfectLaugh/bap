@@ -36,8 +36,8 @@ sub main(main_argc, main_argv, main_result)
 #20: R1 := R16 + 1
 #21: R2 := pad:32[mem[R16]]
 #22: R16 := R1
-#23: #2 := R1 <> R17
-#24: when #2 goto %#15
+#23: #v1 := R1 <> R17
+#24: when #v1 goto %#15
 #25: goto %#26
 
 #26:
@@ -66,8 +66,8 @@ sub main(main_argc, main_argv, main_result)
 #46: mem := mem with [R17 - 2] <- low:8[R2]
 #47: R16 := R16 >> 4
 #48: R17 := R17 - 1
-#49: #3 := R16 <> 0
-#50: when #3 goto %#42
+#49: #v2 := R16 <> 0
+#50: when #v2 goto %#42
 #51: goto %#52
 
 #52:
@@ -79,8 +79,8 @@ sub main(main_argc, main_argv, main_result)
 #57: R1 := R17 + 1
 #58: R2 := pad:32[mem[R17]]
 #59: R17 := R1
-#60: #4 := R2 <> 0
-#61: when #4 goto %#52
+#60: #v3 := R2 <> 0
+#61: when #v3 goto %#52
 #62: goto %#63
 
 #63:

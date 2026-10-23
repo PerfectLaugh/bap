@@ -31,24 +31,24 @@ sub main(main_argc, main_argv, main_result)
 #3: main_result :: out u32 = low:32[RAX]
 
 #4:
-#5: #208 := RBP
+#5: #v1 := RBP
 #6: RSP := RSP - 8
-#7: mem := mem with [RSP, el]:u64 <- #208
-#8: #209 := RBX
+#7: mem := mem with [RSP, el]:u64 <- #v1
+#8: #v2 := RBX
 #9: RSP := RSP - 8
-#10: mem := mem with [RSP, el]:u64 <- #209
-#11: #210 := RSP - 8
-#12: CF := 63:63[~RSP & 8 | ~(RSP ^ 8) & #210]
-#13: OF := 63:63[(RSP ^ 8) & (RSP ^ #210)]
-#14: AF := 0:0[(#210 ^ RSP ^ 8) >> 4]
-#15: SF := 63:63[#210]
-#16: ZF := #210 = 0
-#17: #211 := low:8[#210]
-#18: #212 := #211 ^ #211 >> 4
-#19: #213 := #212 ^ #212 >> 2
-#20: #214 := #213 ^ #213 >> 1
-#21: PF := ~0:0[#214]
-#22: RSP := #210
+#10: mem := mem with [RSP, el]:u64 <- #v2
+#11: #v3 := RSP - 8
+#12: CF := 63:63[~RSP & 8 | ~(RSP ^ 8) & #v3]
+#13: OF := 63:63[(RSP ^ 8) & (RSP ^ #v3)]
+#14: AF := 0:0[(#v3 ^ RSP ^ 8) >> 4]
+#15: SF := 63:63[#v3]
+#16: ZF := #v3 = 0
+#17: #v4 := low:8[#v3]
+#18: #v5 := #v4 ^ #v4 >> 4
+#19: #v6 := #v5 ^ #v5 >> 2
+#20: #v7 := #v6 ^ #v6 >> 1
+#21: PF := ~0:0[#v7]
+#22: RSP := #v3
 #23: RSP := RSP - 8
 #24: mem := mem with [RSP, el]:u64 <- 0x400611
 #25: call @getpagesize with return %#26
@@ -72,17 +72,17 @@ sub main(main_argc, main_argv, main_result)
 
 #41:
 #42: RBX := RAX
-#43: #221 := RAX - 0xFFFFFFFFFFFFFFFF
-#44: CF := 63:63[~RAX | ~(RAX ^ 0xFFFFFFFFFFFFFFFF) & #221]
-#45: OF := 63:63[(RAX ^ 0xFFFFFFFFFFFFFFFF) & (RAX ^ #221)]
-#46: AF := 0:0[(#221 ^ RAX ^ 0xFFFFFFFFFFFFFFFF) >> 4]
-#47: SF := 63:63[#221]
-#48: ZF := #221 = 0
-#49: #222 := low:8[#221]
-#50: #223 := #222 ^ #222 >> 4
-#51: #224 := #223 ^ #223 >> 2
-#52: #225 := #224 ^ #224 >> 1
-#53: PF := ~0:0[#225]
+#43: #v8 := RAX - 0xFFFFFFFFFFFFFFFF
+#44: CF := 63:63[~RAX | ~(RAX ^ 0xFFFFFFFFFFFFFFFF) & #v8]
+#45: OF := 63:63[(RAX ^ 0xFFFFFFFFFFFFFFFF) & (RAX ^ #v8)]
+#46: AF := 0:0[(#v8 ^ RAX ^ 0xFFFFFFFFFFFFFFFF) >> 4]
+#47: SF := 63:63[#v8]
+#48: ZF := #v8 = 0
+#49: #v9 := low:8[#v8]
+#50: #v10 := #v9 ^ #v9 >> 4
+#51: #v11 := #v10 ^ #v10 >> 2
+#52: #v12 := #v11 ^ #v11 >> 1
+#53: PF := ~0:0[#v12]
 #54: RDI := high:56[RDI].pad:8[ZF]
 #55: RDI := pad:64[7:0[RDI]]
 #56: RSP := RSP - 8
@@ -196,25 +196,25 @@ sub main(main_argc, main_argv, main_result)
 
 #150:
 #151: RAX := 0
-#152: #262 := RSP + 8
-#153: CF := 63:63[RSP] & ~63:63[#262]
-#154: OF := ~63:63[RSP] & 63:63[#262]
-#155: AF := 0:0[(#262 ^ RSP ^ 8) >> 4]
-#156: SF := 63:63[#262]
-#157: ZF := #262 = 0
-#158: #263 := low:8[#262]
-#159: #264 := #263 ^ #263 >> 4
-#160: #265 := #264 ^ #264 >> 2
-#161: #266 := #265 ^ #265 >> 1
-#162: PF := ~0:0[#266]
-#163: RSP := #262
-#164: #267 := mem[RSP, el]:u64
+#152: #v13 := RSP + 8
+#153: CF := 63:63[RSP] & ~63:63[#v13]
+#154: OF := ~63:63[RSP] & 63:63[#v13]
+#155: AF := 0:0[(#v13 ^ RSP ^ 8) >> 4]
+#156: SF := 63:63[#v13]
+#157: ZF := #v13 = 0
+#158: #v14 := low:8[#v13]
+#159: #v15 := #v14 ^ #v14 >> 4
+#160: #v16 := #v15 ^ #v15 >> 2
+#161: #v17 := #v16 ^ #v16 >> 1
+#162: PF := ~0:0[#v17]
+#163: RSP := #v13
+#164: #v18 := mem[RSP, el]:u64
 #165: RSP := RSP + 8
-#166: RBX := #267
-#167: #268 := mem[RSP, el]:u64
+#166: RBX := #v18
+#167: #v19 := mem[RSP, el]:u64
 #168: RSP := RSP + 8
-#169: RBP := #268
-#170: #269 := mem[RSP, el]:u64
+#169: RBP := #v19
+#170: #v20 := mem[RSP, el]:u64
 #171: RSP := RSP + 8
-#172: call #269 with noreturn
+#172: call #v20 with noreturn
 

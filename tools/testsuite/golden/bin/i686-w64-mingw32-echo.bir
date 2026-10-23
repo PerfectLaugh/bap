@@ -277,14 +277,14 @@ sub main(main_argc, main_argv, main_result)
 #7: OF := 0
 #8: SF := 31:31[ESP & 0xFFFFFFF0]
 #9: ZF := (ESP & 0xFFFFFFF0) = 0
-#10: #241 := low:8[ESP & 0xFFFFFFF0]
-#11: #242 := #241 ^ #241 >> 4
-#12: #243 := #242 ^ #242 >> 2
-#13: #244 := #243 ^ #243 >> 1
-#14: PF := ~0:0[#244]
+#10: #v1 := low:8[ESP & 0xFFFFFFF0]
+#11: #v2 := #v1 ^ #v1 >> 4
+#12: #v3 := #v2 ^ #v2 >> 2
+#13: #v4 := #v3 ^ #v3 >> 1
+#14: PF := ~0:0[#v4]
 #15: ESP := ESP & 0xFFFFFFF0
-#16: #246 := mem[ECX - 4, el]:u32
+#16: #v5 := mem[ECX - 4, el]:u32
 #17: ESP := ESP - 4
-#18: mem := mem with [ESP, el]:u32 <- #246
+#18: mem := mem with [ESP, el]:u32 <- #v5
 #19: call @sub_4015d1 with noreturn
 

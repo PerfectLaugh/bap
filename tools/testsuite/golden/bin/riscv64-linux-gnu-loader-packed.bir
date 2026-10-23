@@ -40,8 +40,8 @@ sub main(main_argc, main_argv, main_result)
 #23:
 #24: X10 := pad:64[mem[X9]]
 #25: X9 := X9 + 1
-#26: #3 := X9 <> X18
-#27: when #3 goto %#20
+#26: #v1 := X9 <> X18
+#27: when #v1 goto %#20
 #28: goto %#29
 
 #29:
@@ -63,8 +63,8 @@ sub main(main_argc, main_argv, main_result)
 #43: X8 := X8 >> 4
 #44: mem := mem with [X9 - 2] <- low:8[X10]
 #45: X9 := X9 - 1
-#46: #6 := ~X8 = 0
-#47: when #6 goto %#39
+#46: #v2 := ~X8 = 0
+#47: when #v2 goto %#39
 #48: goto %#49
 
 #49:
@@ -74,8 +74,8 @@ sub main(main_argc, main_argv, main_result)
 #52:
 #53: X10 := pad:64[mem[X9]]
 #54: X9 := X9 + 1
-#55: #9 := ~X10 = 0
-#56: when #9 goto %#49
+#55: #v3 := ~X10 = 0
+#56: when #v3 goto %#49
 #57: goto %#58
 
 #58:
@@ -98,8 +98,8 @@ sub main(main_argc, main_argv, main_result)
 #72:
 #73: X10 := pad:64[mem[X8]]
 #74: X8 := X8 + 1
-#75: #13 := X8 <> X9
-#76: when #13 goto %#69
+#75: #v4 := X8 <> X9
+#76: when #v4 goto %#69
 #77: goto %#78
 
 #78:
@@ -120,8 +120,8 @@ sub main(main_argc, main_argv, main_result)
 #91: X10 := X10 >> 4
 #92: mem := mem with [X8 - 2] <- low:8[X11]
 #93: X8 := X8 - 1
-#94: #16 := ~X10 = 0
-#95: when #16 goto %#87
+#94: #v5 := ~X10 = 0
+#95: when #v5 goto %#87
 #96: goto %#97
 
 #97:
@@ -135,8 +135,8 @@ sub main(main_argc, main_argv, main_result)
 #103:
 #104: X10 := pad:64[mem[X8]]
 #105: X8 := X8 + 1
-#106: #19 := ~X10 = 0
-#107: when #19 goto %#100
+#106: #v6 := ~X10 = 0
+#107: when #v6 goto %#100
 #108: goto %#109
 
 #109:

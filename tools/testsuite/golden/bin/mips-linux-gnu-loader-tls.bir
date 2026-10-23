@@ -44,8 +44,8 @@ sub main(main_argc, main_argv, main_result)
 #29: R1 := R16 + 1
 #30: R2 := pad:32[mem[R16]]
 #31: R16 := R1
-#32: #1 := R1 <> R19
-#33: when #1 goto %#24
+#32: #v1 := R1 <> R19
+#33: when #v1 goto %#24
 #34: goto %#35
 
 #35:
@@ -68,8 +68,8 @@ sub main(main_argc, main_argv, main_result)
 #50: mem := mem with [R19 - 2] <- low:8[R2]
 #51: R18 := R18 >> 4
 #52: R19 := R19 - 1
-#53: #2 := R18 <> 0
-#54: when #2 goto %#46
+#53: #v2 := R18 <> 0
+#54: when #v2 goto %#46
 #55: goto %#56
 
 #56:
@@ -81,8 +81,8 @@ sub main(main_argc, main_argv, main_result)
 #61: R1 := R19 + 1
 #62: R2 := pad:32[mem[R19]]
 #63: R19 := R1
-#64: #3 := R2 <> 0
-#65: when #3 goto %#56
+#64: #v3 := R2 <> 0
+#65: when #v3 goto %#56
 #66: goto %#67
 
 #67:
@@ -112,8 +112,8 @@ sub main(main_argc, main_argv, main_result)
 #88: R1 := R20 + 1
 #89: R2 := pad:32[mem[R20]]
 #90: R20 := R1
-#91: #4 := R1 <> R21
-#92: when #4 goto %#83
+#91: #v4 := R1 <> R21
+#92: when #v4 goto %#83
 #93: goto %#94
 
 #94:
@@ -135,8 +135,8 @@ sub main(main_argc, main_argv, main_result)
 #108: mem := mem with [R20 - 2] <- low:8[R2]
 #109: R19 := R19 >> 4
 #110: R20 := R20 - 1
-#111: #5 := R19 <> 0
-#112: when #5 goto %#104
+#111: #v5 := R19 <> 0
+#112: when #v5 goto %#104
 #113: goto %#114
 
 #114:
@@ -148,8 +148,8 @@ sub main(main_argc, main_argv, main_result)
 #119: R1 := R20 + 1
 #120: R2 := pad:32[mem[R20]]
 #121: R20 := R1
-#122: #6 := R2 <> 0
-#123: when #6 goto %#114
+#122: #v6 := R2 <> 0
+#123: when #v6 goto %#114
 #124: goto %#125
 
 #125:
@@ -183,8 +183,8 @@ sub main(main_argc, main_argv, main_result)
 #150: R1 := R18 + 1
 #151: R2 := pad:32[mem[R18]]
 #152: R18 := R1
-#153: #7 := R1 <> R19
-#154: when #7 goto %#145
+#153: #v7 := R1 <> R19
+#154: when #v7 goto %#145
 #155: goto %#156
 
 #156:
@@ -207,8 +207,8 @@ sub main(main_argc, main_argv, main_result)
 #171: mem := mem with [R16 - 2] <- low:8[R2]
 #172: R3 := R3 >> 4
 #173: R16 := R16 - 1
-#174: #8 := R3 <> 0
-#175: when #8 goto %#167
+#174: #v8 := R3 <> 0
+#175: when #v8 goto %#167
 #176: goto %#177
 
 #177:
@@ -220,8 +220,8 @@ sub main(main_argc, main_argv, main_result)
 #182: R1 := R16 + 1
 #183: R2 := pad:32[mem[R16]]
 #184: R16 := R1
-#185: #9 := R2 <> 0
-#186: when #9 goto %#177
+#185: #v9 := R2 <> 0
+#186: when #v9 goto %#177
 #187: goto %#188
 
 #188:

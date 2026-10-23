@@ -88,21 +88,21 @@ sub main(main_argc, main_argv, main_result)
 #58: call @intrinsic:syscall with return %#59
 
 #59:
-#60: #0 := R7 <> 0
-#61: when #0 goto %#62
+#60: #v1 := R7 <> 0
+#61: when #v1 goto %#62
 #63: goto %#64
 
 #64:
-#65: #1 := R2 <> 0
-#66: when #1 goto %#62
+#65: #v2 := R2 <> 0
+#66: when #v2 goto %#62
 #67: goto %#68
 
 #68:
 #69: R4 := R17
 #70: R25 := R16
-#71: #2 := R25
+#71: #v3 := R25
 #72: R31 := 0x203E4
-#73: call #2 with return %#74
+#73: call #v3 with return %#74
 
 #74:
 #75: R2 := 0x13C2
@@ -112,8 +112,8 @@ sub main(main_argc, main_argv, main_result)
 
 #62:
 #79: R2 := extend:64[mem[R20 + 0x1B40, be]:u32]
-#80: #3 := R2 = R19
-#81: when #3 goto %#82
+#80: #v4 := R2 = R19
+#81: when #v4 goto %#82
 #83: goto %#84
 
 #84:
@@ -132,8 +132,8 @@ sub main(main_argc, main_argv, main_result)
 
 #96:
 #97: R2 := extend:64[mem[R20 + 0x1B40, be]:u32]
-#98: #4 := R2 <> R19
-#99: when #4 goto %#90
+#98: #v5 := R2 <> R19
+#99: when #v5 goto %#90
 #100: goto %#82
 
 #82:
@@ -159,8 +159,8 @@ sub main(main_argc, main_argv, main_result)
 
 #119:
 #120: R2 := extend:64[mem[R18 + 0x1B48, be]:u32]
-#121: #5 := R2 = 0
-#122: when #5 goto %#123
+#121: #v6 := R2 = 0
+#122: when #v6 goto %#123
 #124: goto %#125
 
 #125:
@@ -184,8 +184,8 @@ sub main(main_argc, main_argv, main_result)
 
 #142:
 #143: R2 := extend:64[mem[R16 + 0x1B48, be]:u32]
-#144: #6 := R2 <> 0
-#145: when #6 goto %#136
+#144: #v7 := R2 <> 0
+#145: when #v7 goto %#136
 #146: goto %#123
 
 #123:
@@ -231,8 +231,8 @@ sub main(main_argc, main_argv, main_result)
 #183: R1 := R16 + 1
 #184: R2 := pad:64[mem[R16]]
 #185: R16 := R1
-#186: #7 := R1 <> R17
-#187: when #7 goto %#178
+#186: #v8 := R1 <> R17
+#187: when #v8 goto %#178
 #188: goto %#189
 
 #189:
@@ -261,8 +261,8 @@ sub main(main_argc, main_argv, main_result)
 #212: R1 := R1 ^ R2
 #213: R16 := R1 ~>> 0x3F
 #214: R17 := R1 ^ R16
-#215: #8 := 0 <=$ R1
-#216: when #8 goto %#217
+#215: #v9 := 0 <=$ R1
+#216: when #v9 goto %#217
 #218: goto %#219
 
 #219:
@@ -283,9 +283,9 @@ sub main(main_argc, main_argv, main_result)
 #232: goto %#233
 
 #233:
-#234: #9 := pad:128[R4] * pad:128[R5]
-#235: HI := high:64[#9]
-#236: LO := low:64[#9]
+#234: #v10 := pad:128[R4] * pad:128[R5]
+#235: HI := high:64[#v10]
+#236: LO := low:64[#v10]
 #237: R1 := HI
 #238: R6 := R3 + 1
 #239: R2 := extend:64[low:32[R2 + 1]]
@@ -300,8 +300,8 @@ sub main(main_argc, main_argv, main_result)
 #248: mem := mem with [R3] <- low:8[R4]
 #249: R3 := R6
 #250: R4 := R1
-#251: #10 := R7 = 0
-#252: when #10 goto %#233
+#251: #v11 := R7 = 0
+#252: when #v11 goto %#233
 #253: goto %#254
 
 #254:
@@ -318,8 +318,8 @@ sub main(main_argc, main_argv, main_result)
 
 #264:
 #265: R17 := R17 - 1
-#266: #11 := R17 <> R16
-#267: when #11 goto %#260
+#266: #v12 := R17 <> R16
+#267: when #v12 goto %#260
 #268: goto %#269
 
 #269:
@@ -378,21 +378,21 @@ sub main(main_argc, main_argv, main_result)
 #320: call @intrinsic:syscall with return %#321
 
 #321:
-#322: #12 := R7 <> 0
-#323: when #12 goto %#324
+#322: #v13 := R7 <> 0
+#323: when #v13 goto %#324
 #325: goto %#326
 
 #326:
-#327: #13 := R2 <> 0
-#328: when #13 goto %#324
+#327: #v14 := R2 <> 0
+#328: when #v14 goto %#324
 #329: goto %#330
 
 #330:
 #331: R4 := R17
 #332: R25 := R16
-#333: #14 := R25
+#333: #v15 := R25
 #334: R31 := 0x20724
-#335: call #14 with return %#336
+#335: call #v15 with return %#336
 
 #336:
 #337: R2 := 0x13C2
@@ -406,8 +406,8 @@ sub main(main_argc, main_argv, main_result)
 #343: R5 := R5 + 0x4000
 #344: R17 := R17 + 1
 #345: R6 := R6 + 4
-#346: #15 := R17 <> R21
-#347: when #15 goto %#314
+#346: #v16 := R17 <> R21
+#347: when #v16 goto %#314
 #348: goto %#349
 
 #349:
@@ -428,8 +428,8 @@ sub main(main_argc, main_argv, main_result)
 #363: R1 := R16 << 2
 #364: R4 := R17 + R1
 #365: R2 := extend:64[mem[R4, be]:u32]
-#366: #17 := R2 = 0
-#367: when #17 goto %#368
+#366: #v17 := R2 = 0
+#367: when #v17 goto %#368
 #369: goto %#370
 
 #370:
@@ -441,8 +441,8 @@ sub main(main_argc, main_argv, main_result)
 
 #376:
 #377: R2 := extend:64[mem[R4, be]:u32]
-#378: #18 := R2 <> 0
-#379: when #18 goto %#370
+#378: #v18 := R2 <> 0
+#379: when #v18 goto %#370
 #380: goto %#381
 
 #381:
@@ -450,8 +450,8 @@ sub main(main_argc, main_argv, main_result)
 
 #368:
 #383: R16 := R16 + 1
-#384: #16 := R16 = R18
-#385: when #16 goto %#386
+#384: #v19 := R16 = R18
+#385: when #v19 goto %#386
 #387: goto %#362
 
 #386:
@@ -478,11 +478,11 @@ sub main(main_argc, main_argv, main_result)
 #407: R1 := mem[R4, be]:u64
 #408: R1 := R3 ^ R1
 #409: R4 := R4 + 8
-#410: #19 := ~R1 = 0
+#410: #v20 := ~R1 = 0
 #411: goto %#412
 
 #412:
-#413: when #19 goto %#414
+#413: when #v20 goto %#414
 #415: goto %#416
 
 #414:
@@ -491,8 +491,8 @@ sub main(main_argc, main_argv, main_result)
 
 #416:
 #419: R3 := R3 + 0x20
-#420: #20 := R4 <> R5
-#421: when #20 goto %#406
+#420: #v21 := R4 <> R5
+#421: when #v21 goto %#406
 #422: goto %#423
 
 #423:
@@ -508,11 +508,11 @@ sub main(main_argc, main_argv, main_result)
 #433: R1 := R1 + 1
 #434: R1 := R1 << 0x10
 #435: R1 := R1 + 0x2A0
-#436: #21 := R2 = 0
+#436: #v22 := R2 = 0
 #437: goto %#438
 
 #438:
-#439: when #21 goto %#440
+#439: when #v22 goto %#440
 #441: goto %#442
 
 #440:
@@ -521,8 +521,8 @@ sub main(main_argc, main_argv, main_result)
 
 #442:
 #445: R2 := pad:64[mem[R3]]
-#446: #22 := R2 = 0
-#447: when #22 goto %#448
+#446: #v23 := R2 = 0
+#447: when #v23 goto %#448
 #449: goto %#450
 
 #450:
@@ -537,8 +537,8 @@ sub main(main_argc, main_argv, main_result)
 #457:
 #458: R2 := pad:64[mem[R16]]
 #459: R16 := R16 + 1
-#460: #23 := R2 <> 0
-#461: when #23 goto %#453
+#460: #v24 := R2 <> 0
+#461: when #v24 goto %#453
 #462: goto %#448
 
 #448:
@@ -572,21 +572,21 @@ sub main(main_argc, main_argv, main_result)
 #490: call @intrinsic:syscall with return %#491
 
 #491:
-#492: #24 := R7 <> 0
-#493: when #24 goto %#494
+#492: #v25 := R7 <> 0
+#493: when #v25 goto %#494
 #495: goto %#496
 
 #496:
-#497: #25 := R2 <> 0
-#498: when #25 goto %#494
+#497: #v26 := R2 <> 0
+#498: when #v26 goto %#494
 #499: goto %#500
 
 #500:
 #501: R4 := R17
 #502: R25 := R16
-#503: #26 := R25
+#503: #v27 := R25
 #504: R31 := 0x20904
-#505: call #26 with return %#506
+#505: call #v27 with return %#506
 
 #506:
 #507: R2 := 0x13C2
@@ -596,8 +596,8 @@ sub main(main_argc, main_argv, main_result)
 
 #494:
 #511: R2 := extend:64[mem[R20 + 0x1B48, be]:u32]
-#512: #27 := R2 = 0
-#513: when #27 goto %#514
+#512: #v28 := R2 = 0
+#513: when #v28 goto %#514
 #515: goto %#516
 
 #516:
@@ -616,8 +616,8 @@ sub main(main_argc, main_argv, main_result)
 
 #528:
 #529: R2 := extend:64[mem[R20 + 0x1B48, be]:u32]
-#530: #28 := R2 <> 0
-#531: when #28 goto %#521
+#530: #v29 := R2 <> 0
+#531: when #v29 goto %#521
 #532: goto %#514
 
 #514:
@@ -641,8 +641,8 @@ sub main(main_argc, main_argv, main_result)
 #548: R1 := R16 + 1
 #549: R2 := pad:64[mem[R16]]
 #550: R16 := R1
-#551: #29 := R1 <> R17
-#552: when #29 goto %#543
+#551: #v30 := R1 <> R17
+#552: when #v30 goto %#543
 #553: goto %#554
 
 #554:
@@ -654,8 +654,8 @@ sub main(main_argc, main_argv, main_result)
 #560: R1 := mem[R1 + 0x1C90, be]:u64
 #561: R16 := R1 ~>> 0x3F
 #562: R17 := R1 ^ R16
-#563: #30 := 0 <=$ R1
-#564: when #30 goto %#565
+#563: #v31 := 0 <=$ R1
+#564: when #v31 goto %#565
 #566: goto %#567
 
 #567:
@@ -675,9 +675,9 @@ sub main(main_argc, main_argv, main_result)
 #579: goto %#580
 
 #580:
-#581: #31 := pad:128[R4] * pad:128[R3]
-#582: HI := high:64[#31]
-#583: LO := low:64[#31]
+#581: #v32 := pad:128[R4] * pad:128[R3]
+#582: HI := high:64[#v32]
+#583: LO := low:64[#v32]
 #584: R1 := HI
 #585: R5 := R19 + 1
 #586: R2 := extend:64[low:32[R2 + 1]]
@@ -692,8 +692,8 @@ sub main(main_argc, main_argv, main_result)
 #595: mem := mem with [R19] <- low:8[R4]
 #596: R19 := R5
 #597: R4 := R1
-#598: #32 := R6 = 0
-#599: when #32 goto %#580
+#598: #v33 := R6 = 0
+#599: when #v33 goto %#580
 #600: goto %#601
 
 #601:
@@ -710,8 +710,8 @@ sub main(main_argc, main_argv, main_result)
 
 #611:
 #612: R17 := R17 - 1
-#613: #33 := R17 <> R16
-#614: when #33 goto %#607
+#613: #v34 := R17 <> R16
+#614: when #v34 goto %#607
 #615: goto %#616
 
 #616:
@@ -752,21 +752,21 @@ sub main(main_argc, main_argv, main_result)
 #650: call @intrinsic:syscall with return %#651
 
 #651:
-#652: #34 := R7 <> 0
-#653: when #34 goto %#654
+#652: #v35 := R7 <> 0
+#653: when #v35 goto %#654
 #655: goto %#656
 
 #656:
-#657: #35 := R2 <> 0
-#658: when #35 goto %#654
+#657: #v36 := R2 <> 0
+#658: when #v36 goto %#654
 #659: goto %#660
 
 #660:
 #661: R4 := R17
 #662: R25 := R16
-#663: #36 := R25
+#663: #v37 := R25
 #664: R31 := 0x20ADC
-#665: call #36 with return %#666
+#665: call #v37 with return %#666
 
 #666:
 #667: R2 := 0x13C2
@@ -785,21 +785,21 @@ sub main(main_argc, main_argv, main_result)
 #678: call @intrinsic:syscall with return %#679
 
 #679:
-#680: #37 := R7 <> 0
-#681: when #37 goto %#682
+#680: #v38 := R7 <> 0
+#681: when #v38 goto %#682
 #683: goto %#684
 
 #684:
-#685: #38 := R2 <> 0
-#686: when #38 goto %#682
+#685: #v39 := R2 <> 0
+#686: when #v39 goto %#682
 #687: goto %#688
 
 #688:
 #689: R4 := R17
 #690: R25 := R16
-#691: #39 := R25
+#691: #v40 := R25
 #692: R31 := 0x20B24
-#693: call #39 with return %#694
+#693: call #v40 with return %#694
 
 #694:
 #695: R2 := 0x13C2
@@ -809,8 +809,8 @@ sub main(main_argc, main_argv, main_result)
 
 #682:
 #699: R2 := extend:64[mem[R21 + 0x1B48, be]:u32]
-#700: #40 := R2 = 0
-#701: when #40 goto %#702
+#700: #v41 := R2 = 0
+#701: when #v41 goto %#702
 #703: goto %#704
 
 #704:
@@ -829,14 +829,14 @@ sub main(main_argc, main_argv, main_result)
 
 #716:
 #717: R2 := extend:64[mem[R21 + 0x1B48, be]:u32]
-#718: #41 := R2 <> 0
-#719: when #41 goto %#709
+#718: #v42 := R2 <> 0
+#719: when #v42 goto %#709
 #720: goto %#702
 
 #702:
 #721: R2 := extend:64[mem[R18 + 4, be]:u32]
-#722: #42 := R2 = 0
-#723: when #42 goto %#724
+#722: #v43 := R2 = 0
+#723: when #v43 goto %#724
 #725: goto %#726
 
 #726:
@@ -861,8 +861,8 @@ sub main(main_argc, main_argv, main_result)
 
 #744:
 #745: R2 := extend:64[mem[R16 + 4, be]:u32]
-#746: #43 := R2 <> 0
-#747: when #43 goto %#738
+#746: #v44 := R2 <> 0
+#747: when #v44 goto %#738
 #748: goto %#724
 
 #724:
@@ -875,8 +875,8 @@ sub main(main_argc, main_argv, main_result)
 #755: R1 := 0xC8
 #756: R1 := R3 ^ R1
 #757: R2 := pad:64[R1 < 1]
-#758: #44 := R3 <=$ 0
-#759: when #44 goto %#760
+#758: #v45 := R3 <=$ 0
+#759: when #v45 goto %#760
 #761: goto %#762
 
 #762:
@@ -895,11 +895,11 @@ sub main(main_argc, main_argv, main_result)
 #774: R1 := extend:64[mem[R3]]
 #775: R6 := R5 & 1
 #776: R1 := R6 ^ R1
-#777: #45 := ~R1 = 0
+#777: #v46 := ~R1 = 0
 #778: goto %#779
 
 #779:
-#780: when #45 goto %#781
+#780: when #v46 goto %#781
 #782: goto %#783
 
 #781:
@@ -909,8 +909,8 @@ sub main(main_argc, main_argv, main_result)
 #783:
 #786: R3 := R3 + 1
 #787: R5 := extend:64[low:32[R5 + 1]]
-#788: #46 := R3 <> R4
-#789: when #46 goto %#773
+#788: #v47 := R3 <> R4
+#789: when #v47 goto %#773
 #790: goto %#760
 
 #760:
@@ -926,11 +926,11 @@ sub main(main_argc, main_argv, main_result)
 #800: R1 := R1 + 1
 #801: R1 := R1 << 0x10
 #802: R1 := R1 + 0x26E
-#803: #47 := R2 = 0
+#803: #v48 := R2 = 0
 #804: goto %#805
 
 #805:
-#806: when #47 goto %#807
+#806: when #v48 goto %#807
 #808: goto %#809
 
 #807:
@@ -939,8 +939,8 @@ sub main(main_argc, main_argv, main_result)
 
 #809:
 #812: R2 := pad:64[mem[R3]]
-#813: #48 := R2 = 0
-#814: when #48 goto %#815
+#813: #v49 := R2 = 0
+#814: when #v49 goto %#815
 #816: goto %#817
 
 #817:
@@ -955,8 +955,8 @@ sub main(main_argc, main_argv, main_result)
 #824:
 #825: R2 := pad:64[mem[R16]]
 #826: R16 := R16 + 1
-#827: #49 := R2 <> 0
-#828: when #49 goto %#820
+#827: #v50 := R2 <> 0
+#828: when #v50 goto %#820
 #829: goto %#815
 
 #815:
@@ -1044,8 +1044,8 @@ sub main(main_argc, main_argv, main_result)
 #905: R1 := R19 + 1
 #906: R31 := pad:64[mem[R19]]
 #907: R19 := R1
-#908: #50 := R1 <> R16
-#909: when #50 goto %#900
+#908: #v51 := R1 <> R16
+#909: when #v51 goto %#900
 #910: goto %#911
 
 #911:
@@ -1056,11 +1056,11 @@ sub main(main_argc, main_argv, main_result)
 #916: R19 := -R18
 #917: R2 := mem[R29 + 0x18, be]:u64
 #918: R4 := mem[R29 + 0x10, be]:u64
-#919: #51 := R4 = 0
+#919: #v52 := R4 = 0
 #920: goto %#921
 
 #921:
-#922: when #51 goto %#923
+#922: when #v52 goto %#923
 #924: goto %#925
 
 #923:
@@ -1069,8 +1069,8 @@ sub main(main_argc, main_argv, main_result)
 
 #925:
 #928: R3 := -R2
-#929: #52 := 0 <=$ R1
-#930: when #52 goto %#931
+#929: #v53 := 0 <=$ R1
+#930: when #v53 goto %#931
 #932: goto %#933
 
 #933:
@@ -1085,11 +1085,11 @@ sub main(main_argc, main_argv, main_result)
 #941: goto %#931
 
 #931:
-#942: #53 := R22 = 0
+#942: #v54 := R22 = 0
 #943: goto %#944
 
 #944:
-#945: when #53 goto %#946
+#945: when #v54 goto %#946
 #947: goto %#948
 
 #946:
@@ -1098,11 +1098,11 @@ sub main(main_argc, main_argv, main_result)
 
 #948:
 #951: R1 := mem[R29, be]:u64
-#952: #54 := R1 = 0
+#952: #v55 := R1 = 0
 #953: goto %#954
 
 #954:
-#955: when #54 goto %#956
+#955: when #v55 goto %#956
 #957: goto %#958
 
 #956:
@@ -1112,11 +1112,11 @@ sub main(main_argc, main_argv, main_result)
 #958:
 #961: mem := mem with [R29 + 0x10, be]:u64 <- R3
 #962: R1 := mem[R29 + 8, be]:u64
-#963: #55 := R1 = 0
+#963: #v56 := R1 = 0
 #964: goto %#965
 
 #965:
-#966: when #55 goto %#967
+#966: when #v56 goto %#967
 #968: goto %#969
 
 #967:
@@ -1136,9 +1136,9 @@ sub main(main_argc, main_argv, main_result)
 #981: goto %#982
 
 #982:
-#983: #56 := pad:128[R4] * pad:128[R3]
-#984: HI := high:64[#56]
-#985: LO := low:64[#56]
+#983: #v57 := pad:128[R4] * pad:128[R3]
+#984: HI := high:64[#v57]
+#985: LO := low:64[#v57]
 #986: R1 := HI
 #987: R5 := R30 + 1
 #988: R2 := extend:64[low:32[R2 + 1]]
@@ -1153,8 +1153,8 @@ sub main(main_argc, main_argv, main_result)
 #997: mem := mem with [R30] <- low:8[R4]
 #998: R30 := R5
 #999: R4 := R1
-#1000: #57 := R6 = 0
-#1001: when #57 goto %#982
+#1000: #v58 := R6 = 0
+#1001: when #v58 goto %#982
 #1002: goto %#1003
 
 #1003:
@@ -1171,8 +1171,8 @@ sub main(main_argc, main_argv, main_result)
 
 #1013:
 #1014: R21 := R21 - 1
-#1015: #58 := R21 <> R16
-#1016: when #58 goto %#1009
+#1015: #v59 := R21 <> R16
+#1016: when #v59 goto %#1009
 #1017: goto %#1018
 
 #1018:
@@ -1183,8 +1183,8 @@ sub main(main_argc, main_argv, main_result)
 #1022:
 #1023: R16 := R18 ~>> 0x3F
 #1024: R18 := R18 ^ R16
-#1025: #59 := 0 <=$ R19
-#1026: when #59 goto %#1027
+#1025: #v60 := 0 <=$ R19
+#1026: when #v60 goto %#1027
 #1028: goto %#1029
 
 #1029:
@@ -1204,9 +1204,9 @@ sub main(main_argc, main_argv, main_result)
 #1041: goto %#1042
 
 #1042:
-#1043: #60 := pad:128[R4] * pad:128[R3]
-#1044: HI := high:64[#60]
-#1045: LO := low:64[#60]
+#1043: #v61 := pad:128[R4] * pad:128[R3]
+#1044: HI := high:64[#v61]
+#1045: LO := low:64[#v61]
 #1046: R1 := HI
 #1047: R5 := R20 + 1
 #1048: R2 := extend:64[low:32[R2 + 1]]
@@ -1221,8 +1221,8 @@ sub main(main_argc, main_argv, main_result)
 #1057: mem := mem with [R20] <- low:8[R4]
 #1058: R20 := R5
 #1059: R4 := R1
-#1060: #61 := R6 = 0
-#1061: when #61 goto %#1042
+#1060: #v62 := R6 = 0
+#1061: when #v62 goto %#1042
 #1062: goto %#1063
 
 #1063:
@@ -1239,8 +1239,8 @@ sub main(main_argc, main_argv, main_result)
 
 #1073:
 #1074: R19 := R19 - 1
-#1075: #62 := R19 <> R16
-#1076: when #62 goto %#1069
+#1075: #v63 := R19 <> R16
+#1076: when #v63 goto %#1069
 #1077: goto %#1078
 
 #1078:
@@ -1253,8 +1253,8 @@ sub main(main_argc, main_argv, main_result)
 #1084: R16 := R1 ~>> 0x3F
 #1085: R17 := R1 ^ R16
 #1086: R1 := mem[R29 + 0x10, be]:u64
-#1087: #63 := 0 <=$ R1
-#1088: when #63 goto %#1089
+#1087: #v64 := 0 <=$ R1
+#1088: when #v64 goto %#1089
 #1090: goto %#1091
 
 #1091:
@@ -1274,9 +1274,9 @@ sub main(main_argc, main_argv, main_result)
 #1103: goto %#1104
 
 #1104:
-#1105: #64 := pad:128[R4] * pad:128[R3]
-#1106: HI := high:64[#64]
-#1107: LO := low:64[#64]
+#1105: #v65 := pad:128[R4] * pad:128[R3]
+#1106: HI := high:64[#v65]
+#1107: LO := low:64[#v65]
 #1108: R1 := HI
 #1109: R5 := R18 + 1
 #1110: R2 := extend:64[low:32[R2 + 1]]
@@ -1291,8 +1291,8 @@ sub main(main_argc, main_argv, main_result)
 #1119: mem := mem with [R18] <- low:8[R4]
 #1120: R18 := R5
 #1121: R4 := R1
-#1122: #65 := R6 = 0
-#1123: when #65 goto %#1104
+#1122: #v66 := R6 = 0
+#1123: when #v66 goto %#1104
 #1124: goto %#1125
 
 #1125:
@@ -1309,8 +1309,8 @@ sub main(main_argc, main_argv, main_result)
 
 #1135:
 #1136: R18 := R18 - 1
-#1137: #66 := R18 <> R17
-#1138: when #66 goto %#1131
+#1137: #v67 := R18 <> R17
+#1138: when #v67 goto %#1131
 #1139: goto %#1140
 
 #1140:
@@ -1321,8 +1321,8 @@ sub main(main_argc, main_argv, main_result)
 #1144:
 #1145: R17 := R22 ~>> 0x3F
 #1146: R18 := R22 ^ R17
-#1147: #67 := 0 <=$ R23
-#1148: when #67 goto %#1149
+#1147: #v68 := 0 <=$ R23
+#1148: when #v68 goto %#1149
 #1150: goto %#1151
 
 #1151:
@@ -1342,9 +1342,9 @@ sub main(main_argc, main_argv, main_result)
 #1163: goto %#1164
 
 #1164:
-#1165: #68 := pad:128[R4] * pad:128[R3]
-#1166: HI := high:64[#68]
-#1167: LO := low:64[#68]
+#1165: #v69 := pad:128[R4] * pad:128[R3]
+#1166: HI := high:64[#v69]
+#1167: LO := low:64[#v69]
 #1168: R1 := HI
 #1169: R5 := R16 + 1
 #1170: R2 := extend:64[low:32[R2 + 1]]
@@ -1359,8 +1359,8 @@ sub main(main_argc, main_argv, main_result)
 #1179: mem := mem with [R16] <- low:8[R4]
 #1180: R16 := R5
 #1181: R4 := R1
-#1182: #69 := R6 = 0
-#1183: when #69 goto %#1164
+#1182: #v70 := R6 = 0
+#1183: when #v70 goto %#1164
 #1184: goto %#1185
 
 #1185:
@@ -1377,8 +1377,8 @@ sub main(main_argc, main_argv, main_result)
 
 #1195:
 #1196: R17 := R17 - 1
-#1197: #70 := R17 <> R16
-#1198: when #70 goto %#1191
+#1197: #v71 := R17 <> R16
+#1198: when #v71 goto %#1191
 #1199: goto %#1200
 
 #1200:
@@ -1420,21 +1420,21 @@ sub main(main_argc, main_argv, main_result)
 #1234: call @intrinsic:syscall with return %#1235
 
 #1235:
-#1236: #71 := R7 <> 0
-#1237: when #71 goto %#1238
+#1236: #v72 := R7 <> 0
+#1237: when #v72 goto %#1238
 #1239: goto %#1240
 
 #1240:
-#1241: #72 := R2 <> 0
-#1242: when #72 goto %#1238
+#1241: #v73 := R2 <> 0
+#1242: when #v73 goto %#1238
 #1243: goto %#1244
 
 #1244:
 #1245: R4 := R17
 #1246: R25 := R16
-#1247: #73 := R25
+#1247: #v74 := R25
 #1248: R31 := 0x21104
-#1249: call #73 with return %#1250
+#1249: call #v74 with return %#1250
 
 #1250:
 #1251: R2 := 0x13C2
@@ -1446,8 +1446,8 @@ sub main(main_argc, main_argv, main_result)
 #1255: R5 := R5 + 0x4000
 #1256: R17 := R17 + 1
 #1257: R6 := R6 + 4
-#1258: #74 := R17 <> R19
-#1259: when #74 goto %#1229
+#1258: #v75 := R17 <> R19
+#1259: when #v75 goto %#1229
 #1260: goto %#1261
 
 #1261:
@@ -1468,8 +1468,8 @@ sub main(main_argc, main_argv, main_result)
 #1275: R1 := R16 << 2
 #1276: R4 := R17 + R1
 #1277: R2 := extend:64[mem[R4, be]:u32]
-#1278: #76 := R2 = 0
-#1279: when #76 goto %#1280
+#1278: #v76 := R2 = 0
+#1279: when #v76 goto %#1280
 #1281: goto %#1282
 
 #1282:
@@ -1481,8 +1481,8 @@ sub main(main_argc, main_argv, main_result)
 
 #1288:
 #1289: R2 := extend:64[mem[R4, be]:u32]
-#1290: #77 := R2 <> 0
-#1291: when #77 goto %#1282
+#1290: #v77 := R2 <> 0
+#1291: when #v77 goto %#1282
 #1292: goto %#1293
 
 #1293:
@@ -1490,8 +1490,8 @@ sub main(main_argc, main_argv, main_result)
 
 #1280:
 #1295: R16 := R16 + 1
-#1296: #75 := R16 = R19
-#1297: when #75 goto %#1298
+#1296: #v78 := R16 = R19
+#1297: when #v78 goto %#1298
 #1299: goto %#1274
 
 #1298:
@@ -1515,8 +1515,8 @@ sub main(main_argc, main_argv, main_result)
 #1315: R1 := R16 + 1
 #1316: R2 := pad:64[mem[R16]]
 #1317: R16 := R1
-#1318: #78 := R1 <> R17
-#1319: when #78 goto %#1310
+#1318: #v79 := R1 <> R17
+#1319: when #v79 goto %#1310
 #1320: goto %#1321
 
 #1321:
@@ -1529,8 +1529,8 @@ sub main(main_argc, main_argv, main_result)
 #1328: R2 := extend:64[low:32[R1] ~>> 0x1F]
 #1329: R3 := R1 ^ R2
 #1330: R16 := extend:64[low:32[R3 - R2]]
-#1331: #79 := 0 <=$ R1
-#1332: when #79 goto %#1333
+#1331: #v80 := 0 <=$ R1
+#1332: when #v80 goto %#1333
 #1334: goto %#1335
 
 #1335:
@@ -1550,9 +1550,9 @@ sub main(main_argc, main_argv, main_result)
 #1347: goto %#1348
 
 #1348:
-#1349: #80 := pad:128[R4] * pad:128[R3]
-#1350: HI := high:64[#80]
-#1351: LO := low:64[#80]
+#1349: #v81 := pad:128[R4] * pad:128[R3]
+#1350: HI := high:64[#v81]
+#1351: LO := low:64[#v81]
 #1352: R1 := HI
 #1353: R5 := R18 + 1
 #1354: R2 := extend:64[low:32[R2 + 1]]
@@ -1567,8 +1567,8 @@ sub main(main_argc, main_argv, main_result)
 #1363: mem := mem with [R18] <- low:8[R4]
 #1364: R18 := R5
 #1365: R4 := R1
-#1366: #81 := R6 = 0
-#1367: when #81 goto %#1348
+#1366: #v82 := R6 = 0
+#1367: when #v82 goto %#1348
 #1368: goto %#1369
 
 #1369:
@@ -1585,8 +1585,8 @@ sub main(main_argc, main_argv, main_result)
 
 #1379:
 #1380: R17 := R17 - 1
-#1381: #82 := R17 <> R16
-#1382: when #82 goto %#1375
+#1381: #v83 := R17 <> R16
+#1382: when #v83 goto %#1375
 #1383: goto %#1384
 
 #1384:
@@ -1633,11 +1633,11 @@ sub main(main_argc, main_argv, main_result)
 #1423: R16 := R3 + 0x19C8
 #1424: R5 := R1 + 0x3FC0
 #1425: R1 := -R2
-#1426: #83 := R7 = 0
+#1426: #v84 := R7 = 0
 #1427: goto %#1428
 
 #1428:
-#1429: when #83 goto %#1430
+#1429: when #v84 goto %#1430
 #1431: goto %#1432
 
 #1430:
@@ -1654,21 +1654,21 @@ sub main(main_argc, main_argv, main_result)
 #1441: call @intrinsic:syscall with return %#1442
 
 #1442:
-#1443: #84 := R7 <> 0
-#1444: when #84 goto %#1445
+#1443: #v85 := R7 <> 0
+#1444: when #v85 goto %#1445
 #1446: goto %#1447
 
 #1447:
-#1448: #85 := R2 <> 0
-#1449: when #85 goto %#1445
+#1448: #v86 := R2 <> 0
+#1449: when #v86 goto %#1445
 #1450: goto %#1451
 
 #1451:
 #1452: R4 := R17
 #1453: R25 := R16
-#1454: #86 := R25
+#1454: #v87 := R25
 #1455: R31 := 0x21360
-#1456: call #86 with return %#1457
+#1456: call #v87 with return %#1457
 
 #1457:
 #1458: R2 := 0x13C2

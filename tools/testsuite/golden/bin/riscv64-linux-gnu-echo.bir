@@ -84,8 +84,8 @@ sub main(main_argc, main_argv, main_result)
 #45: X15 := extend:64[mem[X8 - 0x74, el]:u32]
 #46: X14 := extend:64[low:32[X14]]
 #47: X15 := extend:64[low:32[X15]]
-#48: #16 := X14 <$ X15
-#49: when #16 goto %#50
+#48: #v1 := X14 <$ X15
+#49: when #v1 goto %#50
 #51: goto %#52
 
 #52:
@@ -97,8 +97,8 @@ sub main(main_argc, main_argv, main_result)
 #57: X15 := extend:64[mem[X8 - 0x5C, el]:u32]
 #58: X14 := extend:64[low:32[X14]]
 #59: X15 := extend:64[low:32[X15]]
-#60: #21 := X14 <$ X15
-#61: when #21 goto %#62
+#60: #v2 := X14 <$ X15
+#61: when #v2 goto %#62
 #63: goto %#64
 
 #64:
@@ -123,8 +123,8 @@ sub main(main_argc, main_argv, main_result)
 #81: X15 := extend:64[mem[X8 - 0x58, el]:u32]
 #82: X14 := extend:64[low:32[X14]]
 #83: X15 := extend:64[low:32[X15]]
-#84: #28 := X14 <$ X15
-#85: when #28 goto %#86
+#84: #v3 := X14 <$ X15
+#85: when #v3 goto %#86
 #87: goto %#88
 
 #88:
@@ -134,8 +134,8 @@ sub main(main_argc, main_argv, main_result)
 #92: X15 := 0x12000
 #93: X14 := mem[X8 - 0x28, el]:u64
 #94: X15 := mem[X15 - 0x1E8, el]:u64
-#95: #31 := X14 = X15
-#96: when #31 goto %#97
+#95: #v4 := X14 = X15
+#96: when #v4 goto %#97
 #98: goto %#99
 
 #97:

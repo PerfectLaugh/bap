@@ -41,13 +41,13 @@ sub main(main_argc, main_argv, main_result)
 #24:
 #25: R0 := high:32[R0].pad:64[mem[R21 + R20]]
 #26: R20 := R20 + 1
-#27: #11 := 0xFFFFFFFFFFFFFFF8 + R20
-#28: NF := 63:63[#11]
-#29: VF := 63:63[R20] & ~63:63[#11]
-#30: ZF := #11 = 0
-#31: CF := 63:63[R20] | ~63:63[#11] | 63:63[R20] & ~63:63[#11]
-#32: #13 := ~ZF <> 0
-#33: when #13 goto %#21
+#27: #v1 := 0xFFFFFFFFFFFFFFF8 + R20
+#28: NF := 63:63[#v1]
+#29: VF := 63:63[R20] & ~63:63[#v1]
+#30: ZF := #v1 = 0
+#31: CF := 63:63[R20] | ~63:63[#v1] | 63:63[R20] & ~63:63[#v1]
+#32: #v2 := ~ZF <> 0
+#33: when #v2 goto %#21
 #34: goto %#35
 
 #35:
@@ -70,8 +70,8 @@ sub main(main_argc, main_argv, main_result)
 #50: R0 := high:32[R0].pad:64[mem[R19 + R8]]
 #51: mem := mem with [R20 - 2] <- low:8[31:0[R0]]
 #52: R20 := R20 - 1
-#53: #40 := ~R21 = 0
-#54: when #40 goto %#47
+#53: #v3 := ~R21 = 0
+#54: when #v3 goto %#47
 #55: goto %#56
 
 #56:
@@ -81,8 +81,8 @@ sub main(main_argc, main_argv, main_result)
 #59:
 #60: R0 := pad:64[low:32[pad:64[mem[R20]]]]
 #61: R20 := R20 + 1
-#62: #41 := ~31:0[R0] = 0
-#63: when #41 goto %#56
+#62: #v4 := ~31:0[R0] = 0
+#63: when #v4 goto %#56
 #64: goto %#65
 
 #65:
@@ -105,13 +105,13 @@ sub main(main_argc, main_argv, main_result)
 
 #80:
 #81: R0 := pad:64[low:32[pad:64[mem[R22 + 1]]]]
-#82: #48 := 0xFFFFFFFFFFFFFFF8 + R21
-#83: NF := 63:63[#48]
-#84: VF := 63:63[R21] & ~63:63[#48]
-#85: ZF := #48 = 0
-#86: CF := 63:63[R21] | ~63:63[#48] | 63:63[R21] & ~63:63[#48]
-#87: #50 := ~ZF <> 0
-#88: when #50 goto %#75
+#82: #v5 := 0xFFFFFFFFFFFFFFF8 + R21
+#83: NF := 63:63[#v5]
+#84: VF := 63:63[R21] & ~63:63[#v5]
+#85: ZF := #v5 = 0
+#86: CF := 63:63[R21] | ~63:63[#v5] | 63:63[R21] & ~63:63[#v5]
+#87: #v6 := ~ZF <> 0
+#88: when #v6 goto %#75
 #89: goto %#90
 
 #90:
@@ -132,8 +132,8 @@ sub main(main_argc, main_argv, main_result)
 #103: R10 := high:32[R10].pad:64[mem[R19 + R10]]
 #104: mem := mem with [R8] <- low:8[31:0[R10]]
 #105: R8 := R8 - 1
-#106: #76 := ~R9 = 0
-#107: when #76 goto %#100
+#106: #v7 := ~R9 = 0
+#107: when #v7 goto %#100
 #108: goto %#109
 
 #109:
@@ -149,8 +149,8 @@ sub main(main_argc, main_argv, main_result)
 #117:
 #118: R0 := pad:64[low:32[pad:64[mem[R19]]]]
 #119: R19 := R19 + 1
-#120: #77 := ~31:0[R0] = 0
-#121: when #77 goto %#114
+#120: #v8 := ~31:0[R0] = 0
+#121: when #v8 goto %#114
 #122: goto %#123
 
 #123:
@@ -159,16 +159,16 @@ sub main(main_argc, main_argv, main_result)
 #126: call @putchar with return %#127
 
 #127:
-#128: #78 := R31 + 0x40
-#129: R20 := mem[#78, el]:u64
-#130: R19 := mem[#78 + 8, el]:u64
+#128: #v9 := R31 + 0x40
+#129: R20 := mem[#v9, el]:u64
+#130: R19 := mem[#v9 + 8, el]:u64
 #131: R0 := 0
-#132: #82 := R31 + 0x30
-#133: R22 := mem[#82, el]:u64
-#134: R21 := mem[#82 + 8, el]:u64
-#135: #83 := R31 + 0x20
-#136: R29 := mem[#83, el]:u64
-#137: R30 := mem[#83 + 8, el]:u64
+#132: #v10 := R31 + 0x30
+#133: R22 := mem[#v10, el]:u64
+#134: R21 := mem[#v10 + 8, el]:u64
+#135: #v11 := R31 + 0x20
+#136: R29 := mem[#v11, el]:u64
+#137: R30 := mem[#v11 + 8, el]:u64
 #138: R31 := R31 + 0x50
 #139: call R30 with noreturn
 

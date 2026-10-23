@@ -26,9 +26,9 @@ sub main(main_argc, main_argv, main_result)
 #3: main_result :: out u32 = low:32[RAX]
 
 #4:
-#5: #218 := RBP
+#5: #v1 := RBP
 #6: RSP := RSP - 8
-#7: mem := mem with [RSP, el]:u64 <- #218
+#7: mem := mem with [RSP, el]:u64 <- #v1
 #8: RBP := RSP
 #9: RDI := 0x1B
 #10: RSP := RSP - 8
@@ -43,10 +43,10 @@ sub main(main_argc, main_argv, main_result)
 
 #18:
 #19: RAX := 0
-#20: #223 := mem[RSP, el]:u64
+#20: #v2 := mem[RSP, el]:u64
 #21: RSP := RSP + 8
-#22: RBP := #223
-#23: #224 := mem[RSP, el]:u64
+#22: RBP := #v2
+#23: #v3 := mem[RSP, el]:u64
 #24: RSP := RSP + 8
-#25: call #224 with noreturn
+#25: call #v3 with noreturn
 

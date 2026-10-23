@@ -41,9 +41,9 @@ sub main(main_argc, main_argv, main_result)
 #3: main_result :: out u32 = R3
 
 #4:
-#5: #67 := R1 - 0x50
-#6: mem := mem with [#67, be]:u32 <- R1
-#7: R1 := #67
+#5: #v1 := R1 - 0x50
+#6: mem := mem with [#v1, be]:u32 <- R1
+#7: R1 := #v1
 #8: R0 := LR
 #9: mem := mem with [R1 + 0x54, be]:u32 <- R0
 #10: mem := mem with [R1 + 0x48, be]:u32 <- R30
@@ -69,45 +69,45 @@ sub main(main_argc, main_argv, main_result)
 #30: R4 := mem[R31 + 0x20, be]:u32
 #31: R8 := R4
 #32: R7 := 0
-#33: #68 := R8
-#34: R4 := low:32[((#68.#68) << 5 | (#68.#68) >> 0x3B) & 0x1F]
-#35: #73 := R7
-#36: R11 := low:32[((#73.#73) << 5 | (#73.#73) >> 0x3B) & 0xFFFFFFE0]
+#33: #v2 := R8
+#34: R4 := low:32[((#v2.#v2) << 5 | (#v2.#v2) >> 0x3B) & 0x1F]
+#35: #v3 := R7
+#36: R11 := low:32[((#v3.#v3) << 5 | (#v3.#v3) >> 0x3B) & 0xFFFFFFE0]
 #37: R11 := R4 | R11
-#38: #78 := R8
-#39: R12 := low:32[((#78.#78) << 5 | (#78.#78) >> 0x3B) & 0xFFFFFFE0]
+#38: #v4 := R8
+#39: R12 := low:32[((#v4.#v4) << 5 | (#v4.#v4) >> 0x3B) & 0xFFFFFFE0]
 #40: R8 := mem[R31 + 0x20, be]:u32
 #41: R10 := R8
 #42: R9 := 0
-#43: #83 := R10
-#44: R8 := low:32[((#83.#83) << 5 | (#83.#83) >> 0x3B) & 0x1F]
-#45: #88 := R9
-#46: R5 := low:32[((#88.#88) << 5 | (#88.#88) >> 0x3B) & 0xFFFFFFE0]
+#43: #v5 := R10
+#44: R8 := low:32[((#v5.#v5) << 5 | (#v5.#v5) >> 0x3B) & 0x1F]
+#45: #v6 := R9
+#46: R5 := low:32[((#v6.#v6) << 5 | (#v6.#v6) >> 0x3B) & 0xFFFFFFE0]
 #47: R5 := R8 | R5
-#48: #93 := R10
-#49: R6 := low:32[((#93.#93) << 5 | (#93.#93) >> 0x3B) & 0xFFFFFFE0]
+#48: #v7 := R10
+#49: R6 := low:32[((#v7.#v7) << 5 | (#v7.#v7) >> 0x3B) & 0xFFFFFFE0]
 #50: R9 := mem[R31 + 0x20, be]:u32
-#51: #98 := R9
-#52: R9 := low:32[((#98.#98) << 2 | (#98.#98) >> 0x3E) & 0xFFFFFFFC]
+#51: #v8 := R9
+#52: R9 := low:32[((#v8.#v8) << 2 | (#v8.#v8) >> 0x3E) & 0xFFFFFFFC]
 #53: R9 := R9 + 3
 #54: R9 := R9 + 0xF
-#55: #103 := R9
-#56: R9 := low:32[((#103.#103) << 0x1C | (#103.#103) >> 0x24) &
+#55: #v9 := R9
+#56: R9 := low:32[((#v9.#v9) << 0x1C | (#v9.#v9) >> 0x24) &
           0xFFFFFFF]
-#57: #108 := R9
-#58: R9 := low:32[((#108.#108) << 4 | (#108.#108) >> 0x3C) & 0xFFFFFFF0]
+#57: #v10 := R9
+#58: R9 := low:32[((#v10.#v10) << 4 | (#v10.#v10) >> 0x3C) & 0xFFFFFFF0]
 #59: R10 := mem[R1, be]:u32
 #60: R9 := -R9
-#61: #113 := R1 + R9
-#62: mem := mem with [#113, be]:u32 <- R10
-#63: R1 := #113
+#61: #v11 := R1 + R9
+#62: mem := mem with [#v11, be]:u32 <- R10
+#63: R1 := #v11
 #64: R9 := R1 + 8
 #65: R9 := R9 + 3
-#66: #114 := R9
-#67: R9 := low:32[((#114.#114) << 0x1E | (#114.#114) >> 0x22) &
+#66: #v12 := R9
+#67: R9 := low:32[((#v12.#v12) << 0x1E | (#v12.#v12) >> 0x22) &
           0x3FFFFFFF]
-#68: #119 := R9
-#69: R9 := low:32[((#119.#119) << 2 | (#119.#119) >> 0x3E) & 0xFFFFFFFC]
+#68: #v13 := R9
+#69: R9 := low:32[((#v13.#v13) << 2 | (#v13.#v13) >> 0x3E) & 0xFFFFFFFC]
 #70: mem := mem with [R31 + 0x28, be]:u32 <- R9
 #71: R9 := 0
 #72: mem := mem with [R31 + 0x14, be]:u32 <- R9
@@ -120,8 +120,8 @@ sub main(main_argc, main_argv, main_result)
 #78: CR7GT := 2:2[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
 #79: CR7EQ := 1:1[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
 #80: CR7UN := 0:0[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
-#81: #125 := CR7LT <> 0
-#82: when #125 goto %#83
+#81: #v14 := CR7LT <> 0
+#82: when #v14 goto %#83
 #84: goto %#85
 
 #85:
@@ -136,16 +136,16 @@ sub main(main_argc, main_argv, main_result)
 #93: CR7GT := 2:2[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
 #94: CR7EQ := 1:1[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
 #95: CR7UN := 0:0[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
-#96: #142 := CR7LT <> 0
-#97: when #142 goto %#98
+#96: #v15 := CR7LT <> 0
+#97: when #v15 goto %#98
 #99: goto %#100
 
 #100:
 #101: R9 := mem[R31 + 0x20, be]:u32
 #102: R9 := R9 - 1
 #103: R10 := mem[R31 + 0x28, be]:u32
-#104: #153 := R9
-#105: R9 := low:32[((#153.#153) << 2 | (#153.#153) >> 0x3E) & 0xFFFFFFFC]
+#104: #v16 := R9
+#105: R9 := low:32[((#v16.#v16) << 2 | (#v16.#v16) >> 0x3E) & 0xFFFFFFFC]
 #106: R9 := R10 + R9
 #107: R10 := 0
 #108: mem := mem with [R9, be]:u32 <- R10
@@ -166,8 +166,8 @@ sub main(main_argc, main_argv, main_result)
 #121: CR7GT := 2:2[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
 #122: CR7EQ := 1:1[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
 #123: CR7UN := 0:0[R10 <$ R9.R9 <$ R10.R10 = R9.SO] <> 0
-#124: #159 := CR7LT <> 0
-#125: when #159 goto %#126
+#124: #v17 := CR7LT <> 0
+#125: when #v17 goto %#126
 #127: goto %#128
 
 #128:
@@ -185,8 +185,8 @@ sub main(main_argc, main_argv, main_result)
 #140: CR7UN := 0:0[R10 < R9.R9 < R10.R10 = R9.SO] <> 0
 #141: R10 := 0
 #142: R9 := 0
-#143: #166 := CR7EQ <> 0
-#144: when #166 goto %#145
+#143: #v18 := CR7EQ <> 0
+#144: when #v18 goto %#145
 #146: goto %#147
 
 #145:
@@ -205,8 +205,8 @@ sub main(main_argc, main_argv, main_result)
 #126:
 #157: R10 := mem[R31 + 0x28, be]:u32
 #158: R9 := mem[R31 + 0x14, be]:u32
-#159: #160 := R9
-#160: R9 := low:32[((#160.#160) << 2 | (#160.#160) >> 0x3E) & 0xFFFFFFFC]
+#159: #v19 := R9
+#160: R9 := low:32[((#v19.#v19) << 2 | (#v19.#v19) >> 0x3E) & 0xFFFFFFFC]
 #161: R9 := R10 + R9
 #162: R9 := mem[R9, be]:u32
 #163: R3 := R9
@@ -223,8 +223,8 @@ sub main(main_argc, main_argv, main_result)
 #171: R9 := 0x10020000
 #172: R10 := R9 + 0x30
 #173: R9 := mem[R31 + 0x18, be]:u32
-#174: #143 := R9
-#175: R9 := low:32[((#143.#143) << 2 | (#143.#143) >> 0x3E) & 0xFFFFFFFC]
+#174: #v20 := R9
+#175: R9 := low:32[((#v20.#v20) << 2 | (#v20.#v20) >> 0x3E) & 0xFFFFFFFC]
 #176: R9 := R10 + R9
 #177: R9 := mem[R9, be]:u32
 #178: R3 := R9
@@ -272,8 +272,8 @@ sub main(main_argc, main_argv, main_result)
 #216: mem := mem with [R9] <- low:8[R10]
 #217: R10 := mem[R31 + 0x28, be]:u32
 #218: R9 := mem[R31 + 0x14, be]:u32
-#219: #148 := R9
-#220: R9 := low:32[((#148.#148) << 2 | (#148.#148) >> 0x3E) & 0xFFFFFFFC]
+#219: #v21 := R9
+#220: R9 := low:32[((#v21.#v21) << 2 | (#v21.#v21) >> 0x3E) & 0xFFFFFFFC]
 #221: R9 := R10 + R9
 #222: R10 := mem[R31 + 0x38, be]:u32
 #223: mem := mem with [R9, be]:u32 <- R10
@@ -287,8 +287,8 @@ sub main(main_argc, main_argv, main_result)
 
 #83:
 #231: R9 := mem[R31 + 0x14, be]:u32
-#232: #126 := R9
-#233: R9 := low:32[((#126.#126) << 2 | (#126.#126) >> 0x3E) & 0xFFFFFFFC]
+#232: #v22 := R9
+#233: R9 := low:32[((#v22.#v22) << 2 | (#v22.#v22) >> 0x3E) & 0xFFFFFFFC]
 #234: R10 := mem[R31 + 8, be]:u32
 #235: R9 := R10 + R9
 #236: R9 := mem[R9, be]:u32
@@ -307,8 +307,8 @@ sub main(main_argc, main_argv, main_result)
 #247: R9 := R3
 #248: R8 := R9
 #249: R9 := mem[R31 + 0x14, be]:u32
-#250: #131 := R9
-#251: R9 := low:32[((#131.#131) << 2 | (#131.#131) >> 0x3E) & 0xFFFFFFFC]
+#250: #v23 := R9
+#251: R9 := low:32[((#v23.#v23) << 2 | (#v23.#v23) >> 0x3E) & 0xFFFFFFFC]
 #252: R10 := mem[R31 + 8, be]:u32
 #253: R9 := R10 + R9
 #254: R9 := mem[R9, be]:u32
@@ -321,8 +321,8 @@ sub main(main_argc, main_argv, main_result)
 #260: R8 := R3
 #261: R10 := mem[R31 + 0x28, be]:u32
 #262: R9 := mem[R31 + 0x14, be]:u32
-#263: #136 := R9
-#264: R9 := low:32[((#136.#136) << 2 | (#136.#136) >> 0x3E) & 0xFFFFFFFC]
+#263: #v24 := R9
+#264: R9 := low:32[((#v24.#v24) << 2 | (#v24.#v24) >> 0x3E) & 0xFFFFFFFC]
 #265: R9 := R10 + R9
 #266: mem := mem with [R9, be]:u32 <- R8
 #267: R9 := mem[R31 + 0x14, be]:u32

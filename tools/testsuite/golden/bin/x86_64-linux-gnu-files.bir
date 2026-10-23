@@ -47,13 +47,13 @@ sub main(main_argc, main_argv, main_result)
 #17: OF := 0
 #18: SF := 31:31[RBX]
 #19: ZF := 31:0[RBX] = 0
-#20: #88 := low:8[31:0[RBX]]
-#21: #89 := #88 ^ #88 >> 4
-#22: #90 := #89 ^ #89 >> 2
-#23: #91 := #90 ^ #90 >> 1
-#24: PF := ~0:0[#91]
-#25: #93 := SF
-#26: when #93 goto %#27
+#20: #v1 := low:8[31:0[RBX]]
+#21: #v2 := #v1 ^ #v1 >> 4
+#22: #v3 := #v2 ^ #v2 >> 2
+#23: #v4 := #v3 ^ #v3 >> 1
+#24: PF := ~0:0[#v4]
+#25: #v5 := SF
+#26: when #v5 goto %#27
 #28: goto %#29
 
 #29:
@@ -191,7 +191,7 @@ sub main(main_argc, main_argv, main_result)
 #27:
 #145: RBX := mem[RSP + 0x58, el]:u64
 #146: RSP := RSP + 0x78
-#147: #95 := mem[RSP, el]:u64
+#147: #v6 := mem[RSP, el]:u64
 #148: RSP := RSP + 8
-#149: call #95 with noreturn
+#149: call #v6 with noreturn
 

@@ -65,14 +65,14 @@ sub main(main_argc, main_argv, main_result)
 #7: OF := 0
 #8: SF := 31:31[ESP & 0xFFFFFFF0]
 #9: ZF := (ESP & 0xFFFFFFF0) = 0
-#10: #219 := low:8[ESP & 0xFFFFFFF0]
-#11: #220 := #219 ^ #219 >> 4
-#12: #221 := #220 ^ #220 >> 2
-#13: #222 := #221 ^ #221 >> 1
-#14: PF := ~0:0[#222]
+#10: #v1 := low:8[ESP & 0xFFFFFFF0]
+#11: #v2 := #v1 ^ #v1 >> 4
+#12: #v3 := #v2 ^ #v2 >> 2
+#13: #v4 := #v3 ^ #v3 >> 1
+#14: PF := ~0:0[#v4]
 #15: ESP := ESP & 0xFFFFFFF0
-#16: #224 := mem[ECX - 4, el]:u32
+#16: #v5 := mem[ECX - 4, el]:u32
 #17: ESP := ESP - 4
-#18: mem := mem with [ESP, el]:u32 <- #224
+#18: mem := mem with [ESP, el]:u32 <- #v5
 #19: call @sub_80485ae with noreturn
 

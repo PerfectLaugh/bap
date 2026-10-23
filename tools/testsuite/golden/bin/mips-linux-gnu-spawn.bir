@@ -30,14 +30,14 @@ sub main(main_argc, main_argv, main_result)
 
 #15:
 #16: R1 := mem[R28 + 4, be]:u32
-#17: #5 := R1 = 0
-#18: when #5 goto %#19
+#17: #v1 := R1 = 0
+#18: when #v1 goto %#19
 #20: goto %#21
 
 #21:
 #22: R1 := mem[R28 + 8, be]:u32
-#23: #6 := R1 = 0
-#24: when #6 goto %#19
+#23: #v2 := R1 = 0
+#24: when #v2 goto %#19
 #25: goto %#26
 
 #26:
@@ -60,8 +60,8 @@ sub main(main_argc, main_argv, main_result)
 #41:
 #42: R29 := R29 + 0x20
 #43: R28 := R28 - 1
-#44: #7 := R28 <> 0
-#45: when #7 goto %#33
+#44: #v3 := R28 <> 0
+#45: when #v3 goto %#33
 #46: goto %#47
 
 #47:

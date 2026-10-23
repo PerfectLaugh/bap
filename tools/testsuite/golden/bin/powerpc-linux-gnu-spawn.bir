@@ -17,9 +17,9 @@ sub main(main_argc, main_argv, main_result)
 
 #4:
 #5: R0 := LR
-#6: #10 := R1 - 0x10
-#7: mem := mem with [#10, be]:u32 <- R1
-#8: R1 := #10
+#6: #v1 := R1 - 0x10
+#7: mem := mem with [#v1, be]:u32 <- R1
+#8: R1 := #v1
 #9: R3 := 0x10030000
 #10: mem := mem with [R1 + 0x14, be]:u32 <- R0
 #11: mem := mem with [R1 + 8, be]:u32 <- R30
@@ -32,8 +32,8 @@ sub main(main_argc, main_argv, main_result)
 #17: CR0GT := 2:2[R3 < 0.0 < R3.R3 = 0.SO] <> 0
 #18: CR0EQ := 1:1[R3 < 0.0 < R3.R3 = 0.SO] <> 0
 #19: CR0UN := 0:0[R3 < 0.0 < R3.R3 = 0.SO] <> 0
-#20: #12 := CR0EQ <> 0
-#21: when #12 goto %#22
+#20: #v2 := CR0EQ <> 0
+#21: when #v2 goto %#22
 #23: goto %#24
 
 #24:
@@ -42,8 +42,8 @@ sub main(main_argc, main_argv, main_result)
 #27: CR0GT := 2:2[R3 < 0.0 < R3.R3 = 0.SO] <> 0
 #28: CR0EQ := 1:1[R3 < 0.0 < R3.R3 = 0.SO] <> 0
 #29: CR0UN := 0:0[R3 < 0.0 < R3.R3 = 0.SO] <> 0
-#30: #16 := CR0EQ <> 0
-#31: when #16 goto %#22
+#30: #v3 := CR0EQ <> 0
+#31: when #v3 goto %#22
 #32: goto %#33
 
 #33:
@@ -67,8 +67,8 @@ sub main(main_argc, main_argv, main_result)
 #50: call @intrinsic:syscall with return %#51
 
 #51:
-#52: #18 := ~CR0UN <> 0
-#53: when #18 goto %#54
+#52: #v4 := ~CR0UN <> 0
+#53: when #v4 goto %#54
 #55: goto %#56
 
 #56:
@@ -76,8 +76,8 @@ sub main(main_argc, main_argv, main_result)
 #58: goto %#54
 
 #54:
-#59: #20 := CR1GT <> 0
-#60: when #20 goto %#36
+#59: #v5 := CR1GT <> 0
+#60: when #v5 goto %#36
 #61: goto %#62
 
 #62:
@@ -122,8 +122,8 @@ sub main(main_argc, main_argv, main_result)
 #95: call @intrinsic:syscall with return %#96
 
 #96:
-#97: #14 := ~CR0UN <> 0
-#98: when #14 goto %#14
+#97: #v6 := ~CR0UN <> 0
+#98: when #v6 goto %#14
 #99: goto %#100
 
 #100:

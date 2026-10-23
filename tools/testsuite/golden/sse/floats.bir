@@ -30,22 +30,22 @@ sub main(main_argc, main_argv, main_result)
 #3: main_result :: out u32 = low:32[RAX]
 
 #4:
-#5: #103 := RBP
+#5: #v1 := RBP
 #6: RSP := RSP - 8
-#7: mem := mem with [RSP, el]:u64 <- #103
+#7: mem := mem with [RSP, el]:u64 <- #v1
 #8: RBP := RSP
-#9: #104 := RSP - 0x20
-#10: CF := 63:63[~RSP & 0x20 | ~(RSP ^ 0x20) & #104]
-#11: OF := 63:63[(RSP ^ 0x20) & (RSP ^ #104)]
-#12: AF := 0:0[(#104 ^ RSP ^ 0x20) >> 4]
-#13: SF := 63:63[#104]
-#14: ZF := #104 = 0
-#15: #105 := low:8[#104]
-#16: #106 := #105 ^ #105 >> 4
-#17: #107 := #106 ^ #106 >> 2
-#18: #108 := #107 ^ #107 >> 1
-#19: PF := ~0:0[#108]
-#20: RSP := #104
+#9: #v2 := RSP - 0x20
+#10: CF := 63:63[~RSP & 0x20 | ~(RSP ^ 0x20) & #v2]
+#11: OF := 63:63[(RSP ^ 0x20) & (RSP ^ #v2)]
+#12: AF := 0:0[(#v2 ^ RSP ^ 0x20) >> 4]
+#13: SF := 63:63[#v2]
+#14: ZF := #v2 = 0
+#15: #v3 := low:8[#v2]
+#16: #v4 := #v3 ^ #v3 >> 4
+#17: #v5 := #v4 ^ #v4 >> 2
+#18: #v6 := #v5 ^ #v5 >> 1
+#19: PF := ~0:0[#v6]
+#20: RSP := #v2
 #21: YMM0 := high:128[YMM0].pad:128[mem[0x400868, el]:u64]
 #22: mem := mem with [RBP - 0x20, el]:u64 <- low:64[127:0[YMM0]]
 #23: YMM0 := high:128[YMM0].pad:128[mem[0x400870, el]:u64]
@@ -58,8 +58,8 @@ sub main(main_argc, main_argv, main_result)
 #30: call @intrinsic:fadd_rne_ieee754_binary_64 with return %#31
 
 #31:
-#32: #121 := intrinsic:y0
-#33: YMM0 := high:192[YMM0].#121
+#32: #v7 := intrinsic:y0
+#33: YMM0 := high:192[YMM0].#v7
 #34: goto %#35
 
 #35:
@@ -68,8 +68,8 @@ sub main(main_argc, main_argv, main_result)
 #38: call @intrinsic:fadd_rne_ieee754_binary_64 with return %#39
 
 #39:
-#40: #127 := intrinsic:y0
-#41: YMM0 := high:192[YMM0].#127
+#40: #v8 := intrinsic:y0
+#41: YMM0 := high:192[YMM0].#v8
 #42: goto %#43
 
 #43:
@@ -79,8 +79,8 @@ sub main(main_argc, main_argv, main_result)
 #47: call @intrinsic:fdiv_rne_ieee754_binary_64 with return %#48
 
 #48:
-#49: #134 := intrinsic:y0
-#50: YMM0 := high:192[YMM0].#134
+#49: #v9 := intrinsic:y0
+#50: YMM0 := high:192[YMM0].#v9
 #51: goto %#52
 
 #52:
@@ -90,39 +90,39 @@ sub main(main_argc, main_argv, main_result)
 #56: call @intrinsic:is_nan_ieee754_binary_64 with return %#57
 
 #57:
-#58: #138 := intrinsic:y0
-#59: #139 := #138
+#58: #v10 := intrinsic:y0
+#59: #v11 := #v10
 #60: intrinsic:x0 := mem[0x400868, el]:u64
 #61: call @intrinsic:is_nan_ieee754_binary_64 with return %#62
 
 #62:
-#63: #141 := intrinsic:y0
-#64: #142 := #141
+#63: #v12 := intrinsic:y0
+#64: #v13 := #v12
 #65: intrinsic:x0 := low:64[127:0[YMM0]]
 #66: intrinsic:x1 := mem[0x400868, el]:u64
 #67: call @intrinsic:forder_ieee754_binary_64 with return %#68
 
 #68:
-#69: #144 := intrinsic:y0
-#70: #145 := #144
+#69: #v14 := intrinsic:y0
+#70: #v15 := #v14
 #71: intrinsic:x0 := mem[0x400868, el]:u64
 #72: intrinsic:x1 := low:64[127:0[YMM0]]
 #73: call @intrinsic:forder_ieee754_binary_64 with return %#74
 
 #74:
-#75: #147 := intrinsic:y0
-#76: #148 := #147
-#77: PF := #139 | #142
-#78: CF := PF | #145
-#79: ZF := PF | ~(#145 | #148)
+#75: #v16 := intrinsic:y0
+#76: #v17 := #v16
+#77: PF := #v11 | #v13
+#78: CF := PF | #v15
+#79: ZF := PF | ~(#v15 | #v17)
 #80: OF := 0
 #81: SF := 0
 #82: AF := 0
 #83: goto %#84
 
 #84:
-#85: #150 := PF
-#86: when #150 goto %#87
+#85: #v18 := PF
+#86: when #v18 goto %#87
 #88: goto %#89
 
 #89:
@@ -131,39 +131,39 @@ sub main(main_argc, main_argv, main_result)
 #92: call @intrinsic:is_nan_ieee754_binary_64 with return %#93
 
 #93:
-#94: #368 := intrinsic:y0
-#95: #369 := #368
+#94: #v19 := intrinsic:y0
+#95: #v20 := #v19
 #96: intrinsic:x0 := mem[0x400868, el]:u64
 #97: call @intrinsic:is_nan_ieee754_binary_64 with return %#98
 
 #98:
-#99: #371 := intrinsic:y0
-#100: #372 := #371
+#99: #v21 := intrinsic:y0
+#100: #v22 := #v21
 #101: intrinsic:x0 := low:64[127:0[YMM0]]
 #102: intrinsic:x1 := mem[0x400868, el]:u64
 #103: call @intrinsic:forder_ieee754_binary_64 with return %#104
 
 #104:
-#105: #374 := intrinsic:y0
-#106: #375 := #374
+#105: #v23 := intrinsic:y0
+#106: #v24 := #v23
 #107: intrinsic:x0 := mem[0x400868, el]:u64
 #108: intrinsic:x1 := low:64[127:0[YMM0]]
 #109: call @intrinsic:forder_ieee754_binary_64 with return %#110
 
 #110:
-#111: #377 := intrinsic:y0
-#112: #378 := #377
-#113: PF := #369 | #372
-#114: CF := PF | #375
-#115: ZF := PF | ~(#375 | #378)
+#111: #v25 := intrinsic:y0
+#112: #v26 := #v25
+#113: PF := #v20 | #v22
+#114: CF := PF | #v24
+#115: ZF := PF | ~(#v24 | #v26)
 #116: OF := 0
 #117: SF := 0
 #118: AF := 0
 #119: goto %#120
 
 #120:
-#121: #380 := ~ZF
-#122: when #380 goto %#87
+#121: #v27 := ~ZF
+#122: when #v27 goto %#87
 #123: goto %#124
 
 #87:
@@ -187,39 +187,39 @@ sub main(main_argc, main_argv, main_result)
 #138: call @intrinsic:is_nan_ieee754_binary_64 with return %#139
 
 #139:
-#140: #155 := intrinsic:y0
-#141: #156 := #155
+#140: #v28 := intrinsic:y0
+#141: #v29 := #v28
 #142: intrinsic:x0 := mem[RBP - 0x18, el]:u64
 #143: call @intrinsic:is_nan_ieee754_binary_64 with return %#144
 
 #144:
-#145: #158 := intrinsic:y0
-#146: #159 := #158
+#145: #v30 := intrinsic:y0
+#146: #v31 := #v30
 #147: intrinsic:x0 := low:64[127:0[YMM0]]
 #148: intrinsic:x1 := mem[RBP - 0x18, el]:u64
 #149: call @intrinsic:forder_ieee754_binary_64 with return %#150
 
 #150:
-#151: #161 := intrinsic:y0
-#152: #162 := #161
+#151: #v32 := intrinsic:y0
+#152: #v33 := #v32
 #153: intrinsic:x0 := mem[RBP - 0x18, el]:u64
 #154: intrinsic:x1 := low:64[127:0[YMM0]]
 #155: call @intrinsic:forder_ieee754_binary_64 with return %#156
 
 #156:
-#157: #164 := intrinsic:y0
-#158: #165 := #164
-#159: PF := #156 | #159
-#160: CF := PF | #162
-#161: ZF := PF | ~(#162 | #165)
+#157: #v34 := intrinsic:y0
+#158: #v35 := #v34
+#159: PF := #v29 | #v31
+#160: CF := PF | #v33
+#161: ZF := PF | ~(#v33 | #v35)
 #162: OF := 0
 #163: SF := 0
 #164: AF := 0
 #165: goto %#166
 
 #166:
-#167: #167 := PF
-#168: when #167 goto %#169
+#167: #v36 := PF
+#168: when #v36 goto %#169
 #170: goto %#171
 
 #171:
@@ -228,39 +228,39 @@ sub main(main_argc, main_argv, main_result)
 #174: call @intrinsic:is_nan_ieee754_binary_64 with return %#175
 
 #175:
-#176: #353 := intrinsic:y0
-#177: #354 := #353
+#176: #v37 := intrinsic:y0
+#177: #v38 := #v37
 #178: intrinsic:x0 := mem[RBP - 0x18, el]:u64
 #179: call @intrinsic:is_nan_ieee754_binary_64 with return %#180
 
 #180:
-#181: #356 := intrinsic:y0
-#182: #357 := #356
+#181: #v39 := intrinsic:y0
+#182: #v40 := #v39
 #183: intrinsic:x0 := low:64[127:0[YMM0]]
 #184: intrinsic:x1 := mem[RBP - 0x18, el]:u64
 #185: call @intrinsic:forder_ieee754_binary_64 with return %#186
 
 #186:
-#187: #359 := intrinsic:y0
-#188: #360 := #359
+#187: #v41 := intrinsic:y0
+#188: #v42 := #v41
 #189: intrinsic:x0 := mem[RBP - 0x18, el]:u64
 #190: intrinsic:x1 := low:64[127:0[YMM0]]
 #191: call @intrinsic:forder_ieee754_binary_64 with return %#192
 
 #192:
-#193: #362 := intrinsic:y0
-#194: #363 := #362
-#195: PF := #354 | #357
-#196: CF := PF | #360
-#197: ZF := PF | ~(#360 | #363)
+#193: #v43 := intrinsic:y0
+#194: #v44 := #v43
+#195: PF := #v38 | #v40
+#196: CF := PF | #v42
+#197: ZF := PF | ~(#v42 | #v44)
 #198: OF := 0
 #199: SF := 0
 #200: AF := 0
 #201: goto %#202
 
 #202:
-#203: #365 := ZF
-#204: when #365 goto %#205
+#203: #v45 := ZF
+#204: when #v45 goto %#205
 #206: goto %#169
 
 #205:
@@ -284,39 +284,39 @@ sub main(main_argc, main_argv, main_result)
 #220: call @intrinsic:is_nan_ieee754_binary_64 with return %#221
 
 #221:
-#222: #172 := intrinsic:y0
-#223: #173 := #172
+#222: #v46 := intrinsic:y0
+#223: #v47 := #v46
 #224: intrinsic:x0 := mem[RBP - 0x20, el]:u64
 #225: call @intrinsic:is_nan_ieee754_binary_64 with return %#226
 
 #226:
-#227: #175 := intrinsic:y0
-#228: #176 := #175
+#227: #v48 := intrinsic:y0
+#228: #v49 := #v48
 #229: intrinsic:x0 := low:64[127:0[YMM0]]
 #230: intrinsic:x1 := mem[RBP - 0x20, el]:u64
 #231: call @intrinsic:forder_ieee754_binary_64 with return %#232
 
 #232:
-#233: #178 := intrinsic:y0
-#234: #179 := #178
+#233: #v50 := intrinsic:y0
+#234: #v51 := #v50
 #235: intrinsic:x0 := mem[RBP - 0x20, el]:u64
 #236: intrinsic:x1 := low:64[127:0[YMM0]]
 #237: call @intrinsic:forder_ieee754_binary_64 with return %#238
 
 #238:
-#239: #181 := intrinsic:y0
-#240: #182 := #181
-#241: PF := #173 | #176
-#242: CF := PF | #179
-#243: ZF := PF | ~(#179 | #182)
+#239: #v52 := intrinsic:y0
+#240: #v53 := #v52
+#241: PF := #v47 | #v49
+#242: CF := PF | #v51
+#243: ZF := PF | ~(#v51 | #v53)
 #244: OF := 0
 #245: SF := 0
 #246: AF := 0
 #247: goto %#248
 
 #248:
-#249: #184 := CF
-#250: when #184 goto %#251
+#249: #v54 := CF
+#250: when #v54 goto %#251
 #252: goto %#253
 
 #251:
@@ -340,39 +340,39 @@ sub main(main_argc, main_argv, main_result)
 #267: call @intrinsic:is_nan_ieee754_binary_64 with return %#268
 
 #268:
-#269: #189 := intrinsic:y0
-#270: #190 := #189
+#269: #v55 := intrinsic:y0
+#270: #v56 := #v55
 #271: intrinsic:x0 := mem[0x400890, el]:u64
 #272: call @intrinsic:is_nan_ieee754_binary_64 with return %#273
 
 #273:
-#274: #192 := intrinsic:y0
-#275: #193 := #192
+#274: #v57 := intrinsic:y0
+#275: #v58 := #v57
 #276: intrinsic:x0 := low:64[127:0[YMM0]]
 #277: intrinsic:x1 := mem[0x400890, el]:u64
 #278: call @intrinsic:forder_ieee754_binary_64 with return %#279
 
 #279:
-#280: #195 := intrinsic:y0
-#281: #196 := #195
+#280: #v59 := intrinsic:y0
+#281: #v60 := #v59
 #282: intrinsic:x0 := mem[0x400890, el]:u64
 #283: intrinsic:x1 := low:64[127:0[YMM0]]
 #284: call @intrinsic:forder_ieee754_binary_64 with return %#285
 
 #285:
-#286: #198 := intrinsic:y0
-#287: #199 := #198
-#288: PF := #190 | #193
-#289: CF := PF | #196
-#290: ZF := PF | ~(#196 | #199)
+#286: #v61 := intrinsic:y0
+#287: #v62 := #v61
+#288: PF := #v56 | #v58
+#289: CF := PF | #v60
+#290: ZF := PF | ~(#v60 | #v62)
 #291: OF := 0
 #292: SF := 0
 #293: AF := 0
 #294: goto %#295
 
 #295:
-#296: #201 := (CF | ZF) <> 0
-#297: when #201 goto %#298
+#296: #v63 := (CF | ZF) <> 0
+#297: when #v63 goto %#298
 #299: goto %#300
 
 #298:
@@ -396,39 +396,39 @@ sub main(main_argc, main_argv, main_result)
 #314: call @intrinsic:is_nan_ieee754_binary_64 with return %#315
 
 #315:
-#316: #206 := intrinsic:y0
-#317: #207 := #206
+#316: #v64 := intrinsic:y0
+#317: #v65 := #v64
 #318: intrinsic:x0 := mem[RBP - 8, el]:u64
 #319: call @intrinsic:is_nan_ieee754_binary_64 with return %#320
 
 #320:
-#321: #209 := intrinsic:y0
-#322: #210 := #209
+#321: #v66 := intrinsic:y0
+#322: #v67 := #v66
 #323: intrinsic:x0 := low:64[127:0[YMM0]]
 #324: intrinsic:x1 := mem[RBP - 8, el]:u64
 #325: call @intrinsic:forder_ieee754_binary_64 with return %#326
 
 #326:
-#327: #212 := intrinsic:y0
-#328: #213 := #212
+#327: #v68 := intrinsic:y0
+#328: #v69 := #v68
 #329: intrinsic:x0 := mem[RBP - 8, el]:u64
 #330: intrinsic:x1 := low:64[127:0[YMM0]]
 #331: call @intrinsic:forder_ieee754_binary_64 with return %#332
 
 #332:
-#333: #215 := intrinsic:y0
-#334: #216 := #215
-#335: PF := #207 | #210
-#336: CF := PF | #213
-#337: ZF := PF | ~(#213 | #216)
+#333: #v70 := intrinsic:y0
+#334: #v71 := #v70
+#335: PF := #v65 | #v67
+#336: CF := PF | #v69
+#337: ZF := PF | ~(#v69 | #v71)
 #338: OF := 0
 #339: SF := 0
 #340: AF := 0
 #341: goto %#342
 
 #342:
-#343: #218 := (CF | ZF) <> 0
-#344: when #218 goto %#345
+#343: #v72 := (CF | ZF) <> 0
+#344: when #v72 goto %#345
 #346: goto %#347
 
 #345:
@@ -452,31 +452,31 @@ sub main(main_argc, main_argv, main_result)
 #361: call @intrinsic:is_nan_ieee754_binary_64 with return %#362
 
 #362:
-#363: #223 := intrinsic:y0
-#364: #224 := #223
+#363: #v73 := intrinsic:y0
+#364: #v74 := #v73
 #365: intrinsic:x0 := mem[RBP - 8, el]:u64
 #366: call @intrinsic:is_nan_ieee754_binary_64 with return %#367
 
 #367:
-#368: #226 := intrinsic:y0
-#369: #227 := #226
+#368: #v75 := intrinsic:y0
+#369: #v76 := #v75
 #370: intrinsic:x0 := low:64[127:0[YMM0]]
 #371: intrinsic:x1 := mem[RBP - 8, el]:u64
 #372: call @intrinsic:forder_ieee754_binary_64 with return %#373
 
 #373:
-#374: #229 := intrinsic:y0
-#375: #230 := #229
+#374: #v77 := intrinsic:y0
+#375: #v78 := #v77
 #376: intrinsic:x0 := mem[RBP - 8, el]:u64
 #377: intrinsic:x1 := low:64[127:0[YMM0]]
 #378: call @intrinsic:forder_ieee754_binary_64 with return %#379
 
 #379:
-#380: #232 := intrinsic:y0
-#381: #233 := #232
-#382: PF := #224 | #227
-#383: CF := PF | #230
-#384: ZF := PF | ~(#230 | #233)
+#380: #v79 := intrinsic:y0
+#381: #v80 := #v79
+#382: PF := #v74 | #v76
+#383: CF := PF | #v78
+#384: ZF := PF | ~(#v78 | #v80)
 #385: OF := 0
 #386: SF := 0
 #387: AF := 0
@@ -488,23 +488,23 @@ sub main(main_argc, main_argv, main_result)
 #392: OF := 0
 #393: SF := 31:31[31:0[RAX] ^ 1]
 #394: ZF := (31:0[RAX] ^ 1) = 0
-#395: #235 := low:8[31:0[RAX] ^ 1]
-#396: #236 := #235 ^ #235 >> 4
-#397: #237 := #236 ^ #236 >> 2
-#398: #238 := #237 ^ #237 >> 1
-#399: PF := ~0:0[#238]
+#395: #v81 := low:8[31:0[RAX] ^ 1]
+#396: #v82 := #v81 ^ #v81 >> 4
+#397: #v83 := #v82 ^ #v82 >> 2
+#398: #v84 := #v83 ^ #v83 >> 1
+#399: PF := ~0:0[#v84]
 #400: RAX := pad:64[31:0[RAX] ^ 1]
 #401: CF := 0
 #402: OF := 0
 #403: SF := 7:7[RAX]
 #404: ZF := 7:0[RAX] = 0
-#405: #239 := 7:0[RAX]
-#406: #240 := #239 ^ #239 >> 4
-#407: #241 := #240 ^ #240 >> 2
-#408: #242 := #241 ^ #241 >> 1
-#409: PF := ~0:0[#242]
-#410: #244 := ZF
-#411: when #244 goto %#412
+#405: #v85 := 7:0[RAX]
+#406: #v86 := #v85 ^ #v85 >> 4
+#407: #v87 := #v86 ^ #v86 >> 2
+#408: #v88 := #v87 ^ #v87 >> 1
+#409: PF := ~0:0[#v88]
+#410: #v89 := ZF
+#411: when #v89 goto %#412
 #413: goto %#414
 
 #412:
@@ -528,31 +528,31 @@ sub main(main_argc, main_argv, main_result)
 #428: call @intrinsic:is_nan_ieee754_binary_64 with return %#429
 
 #429:
-#430: #249 := intrinsic:y0
-#431: #250 := #249
+#430: #v90 := intrinsic:y0
+#431: #v91 := #v90
 #432: intrinsic:x0 := mem[0x400898, el]:u64
 #433: call @intrinsic:is_nan_ieee754_binary_64 with return %#434
 
 #434:
-#435: #252 := intrinsic:y0
-#436: #253 := #252
+#435: #v92 := intrinsic:y0
+#436: #v93 := #v92
 #437: intrinsic:x0 := low:64[127:0[YMM0]]
 #438: intrinsic:x1 := mem[0x400898, el]:u64
 #439: call @intrinsic:forder_ieee754_binary_64 with return %#440
 
 #440:
-#441: #255 := intrinsic:y0
-#442: #256 := #255
+#441: #v94 := intrinsic:y0
+#442: #v95 := #v94
 #443: intrinsic:x0 := mem[0x400898, el]:u64
 #444: intrinsic:x1 := low:64[127:0[YMM0]]
 #445: call @intrinsic:forder_ieee754_binary_64 with return %#446
 
 #446:
-#447: #258 := intrinsic:y0
-#448: #259 := #258
-#449: PF := #250 | #253
-#450: CF := PF | #256
-#451: ZF := PF | ~(#256 | #259)
+#447: #v96 := intrinsic:y0
+#448: #v97 := #v96
+#449: PF := #v91 | #v93
+#450: CF := PF | #v95
+#451: ZF := PF | ~(#v95 | #v97)
 #452: OF := 0
 #453: SF := 0
 #454: AF := 0
@@ -564,23 +564,23 @@ sub main(main_argc, main_argv, main_result)
 #459: OF := 0
 #460: SF := 31:31[31:0[RAX] ^ 1]
 #461: ZF := (31:0[RAX] ^ 1) = 0
-#462: #261 := low:8[31:0[RAX] ^ 1]
-#463: #262 := #261 ^ #261 >> 4
-#464: #263 := #262 ^ #262 >> 2
-#465: #264 := #263 ^ #263 >> 1
-#466: PF := ~0:0[#264]
+#462: #v98 := low:8[31:0[RAX] ^ 1]
+#463: #v99 := #v98 ^ #v98 >> 4
+#464: #v100 := #v99 ^ #v99 >> 2
+#465: #v101 := #v100 ^ #v100 >> 1
+#466: PF := ~0:0[#v101]
 #467: RAX := pad:64[31:0[RAX] ^ 1]
 #468: CF := 0
 #469: OF := 0
 #470: SF := 7:7[RAX]
 #471: ZF := 7:0[RAX] = 0
-#472: #265 := 7:0[RAX]
-#473: #266 := #265 ^ #265 >> 4
-#474: #267 := #266 ^ #266 >> 2
-#475: #268 := #267 ^ #267 >> 1
-#476: PF := ~0:0[#268]
-#477: #270 := ZF
-#478: when #270 goto %#479
+#472: #v102 := 7:0[RAX]
+#473: #v103 := #v102 ^ #v102 >> 4
+#474: #v104 := #v103 ^ #v103 >> 2
+#475: #v105 := #v104 ^ #v104 >> 1
+#476: PF := ~0:0[#v105]
+#477: #v106 := ZF
+#478: when #v106 goto %#479
 #480: goto %#481
 
 #479:
@@ -601,10 +601,10 @@ sub main(main_argc, main_argv, main_result)
 #486:
 #493: RAX := 0
 #494: RSP := RBP
-#495: #273 := mem[RSP, el]:u64
+#495: #v107 := mem[RSP, el]:u64
 #496: RSP := RSP + 8
-#497: RBP := #273
-#498: #274 := mem[RSP, el]:u64
+#497: RBP := #v107
+#498: #v108 := mem[RSP, el]:u64
 #499: RSP := RSP + 8
-#500: call #274 with noreturn
+#500: call #v108 with noreturn
 

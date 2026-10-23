@@ -39,8 +39,8 @@ sub main(main_argc, main_argv, main_result)
 #24:
 #25: X10 := pad:64[mem[X8]]
 #26: X8 := X8 + 1
-#27: #2 := X8 <> X19
-#28: when #2 goto %#21
+#27: #v1 := X8 <> X19
+#28: when #v1 goto %#21
 #29: goto %#30
 
 #30:
@@ -62,8 +62,8 @@ sub main(main_argc, main_argv, main_result)
 #44: X9 := X9 >> 4
 #45: mem := mem with [X8 - 2] <- low:8[X10]
 #46: X8 := X8 - 1
-#47: #5 := ~X9 = 0
-#48: when #5 goto %#40
+#47: #v2 := ~X9 = 0
+#48: when #v2 goto %#40
 #49: goto %#50
 
 #50:
@@ -73,8 +73,8 @@ sub main(main_argc, main_argv, main_result)
 #53:
 #54: X10 := pad:64[mem[X8]]
 #55: X8 := X8 + 1
-#56: #8 := ~X10 = 0
-#57: when #8 goto %#50
+#56: #v3 := ~X10 = 0
+#57: when #v3 goto %#50
 #58: goto %#59
 
 #59:
@@ -99,8 +99,8 @@ sub main(main_argc, main_argv, main_result)
 #75:
 #76: X10 := pad:64[mem[X8]]
 #77: X8 := X8 + 1
-#78: #12 := X8 <> X21
-#79: when #12 goto %#72
+#78: #v4 := X8 <> X21
+#79: when #v4 goto %#72
 #80: goto %#81
 
 #81:
@@ -120,8 +120,8 @@ sub main(main_argc, main_argv, main_result)
 #93: X9 := X9 >> 4
 #94: mem := mem with [X8 - 2] <- low:8[X10]
 #95: X8 := X8 - 1
-#96: #15 := ~X9 = 0
-#97: when #15 goto %#89
+#96: #v5 := ~X9 = 0
+#97: when #v5 goto %#89
 #98: goto %#99
 
 #99:
@@ -131,8 +131,8 @@ sub main(main_argc, main_argv, main_result)
 #102:
 #103: X10 := pad:64[mem[X8]]
 #104: X8 := X8 + 1
-#105: #18 := ~X10 = 0
-#106: when #18 goto %#99
+#105: #v6 := ~X10 = 0
+#106: when #v6 goto %#99
 #107: goto %#108
 
 #108:
@@ -161,8 +161,8 @@ sub main(main_argc, main_argv, main_result)
 #128:
 #129: X10 := pad:64[mem[X9]]
 #130: X9 := X9 + 1
-#131: #22 := X9 <> X8
-#132: when #22 goto %#125
+#131: #v7 := X9 <> X8
+#132: when #v7 goto %#125
 #133: goto %#134
 
 #134:
@@ -183,8 +183,8 @@ sub main(main_argc, main_argv, main_result)
 #147: X9 := X9 >> 4
 #148: mem := mem with [X8 - 2] <- low:8[X10]
 #149: X8 := X8 - 1
-#150: #25 := ~X9 = 0
-#151: when #25 goto %#143
+#150: #v8 := ~X9 = 0
+#151: when #v8 goto %#143
 #152: goto %#153
 
 #153:
@@ -194,8 +194,8 @@ sub main(main_argc, main_argv, main_result)
 #156:
 #157: X10 := pad:64[mem[X8]]
 #158: X8 := X8 + 1
-#159: #28 := ~X10 = 0
-#160: when #28 goto %#153
+#159: #v9 := ~X10 = 0
+#160: when #v9 goto %#153
 #161: goto %#162
 
 #162:

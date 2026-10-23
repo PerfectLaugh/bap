@@ -101,8 +101,8 @@ sub main(main_argc, main_argv, main_result)
 #53: R2 := R2 << 3
 #54: mem := mem with [R30 + 0x18, be]:u64 <- R2
 #55: mem := mem with [R30, be]:u32 <- 0
-#56: #39 := 1
-#57: when #39 goto %#58
+#56: #v1 := 1
+#57: when #v1 goto %#58
 #59: goto %#60
 
 #60:
@@ -114,18 +114,18 @@ sub main(main_argc, main_argv, main_result)
 #66: R4 := R2
 #67: R2 := mem[R28 - 0x7F28, be]:u64
 #68: R25 := R2
-#69: #40 := R25
+#69: #v2 := R25
 #70: R31 := 0x120000F44
-#71: call #40 with return %#72
+#71: call #v2 with return %#72
 
 #72:
 #73: R2 := R2 + 1
 #74: R4 := R2
 #75: R2 := mem[R28 - 0x7F10, be]:u64
 #76: R25 := R2
-#77: #41 := R25
+#77: #v3 := R25
 #78: R31 := 0x120000F5C
-#79: call #41 with return %#80
+#79: call #v3 with return %#80
 
 #80:
 #81: R4 := R2
@@ -137,9 +137,9 @@ sub main(main_argc, main_argv, main_result)
 #87: R5 := R2
 #88: R2 := mem[R28 - 0x7F08, be]:u64
 #89: R25 := R2
-#90: #42 := R25
+#90: #v4 := R25
 #91: R31 := 0x120000F88
-#92: call #42 with return %#93
+#92: call #v4 with return %#93
 
 #93:
 #94: R4 := R2
@@ -157,14 +157,14 @@ sub main(main_argc, main_argv, main_result)
 #104: R3 := extend:64[mem[R30, be]:u32]
 #105: R2 := extend:64[mem[R30 + 0x40, be]:u32]
 #106: R2 := pad:64[R3 <$ R2]
-#107: #43 := R2 <> 0
-#108: when #43 goto %#60
+#107: #v5 := R2 <> 0
+#108: when #v5 goto %#60
 #109: goto %#110
 
 #110:
 #111: mem := mem with [R30 + 4, be]:u32 <- 0
-#112: #44 := 1
-#113: when #44 goto %#114
+#112: #v6 := 1
+#113: when #v6 goto %#114
 #115: goto %#116
 
 #116:
@@ -177,9 +177,9 @@ sub main(main_argc, main_argv, main_result)
 #123: R4 := R2
 #124: R2 := mem[R28 - 0x7F20, be]:u64
 #125: R25 := R2
-#126: #45 := R25
+#126: #v7 := R25
 #127: R31 := 0x120000FF8
-#128: call #45 with return %#129
+#128: call #v7 with return %#129
 
 #129:
 #130: R2 := R2 + 1
@@ -188,9 +188,9 @@ sub main(main_argc, main_argv, main_result)
 #133: R4 := mem[R30 + 0x20, be]:u64
 #134: R2 := mem[R28 - 0x7F20, be]:u64
 #135: R25 := R2
-#136: #46 := R25
+#136: #v8 := R25
 #137: R31 := 0x120001018
-#138: call #46 with return %#139
+#138: call #v8 with return %#139
 
 #139:
 #140: mem := mem with [R30 + 0x28, be]:u64 <- R2
@@ -204,9 +204,9 @@ sub main(main_argc, main_argv, main_result)
 #148: R4 := R2
 #149: R2 := mem[R28 - 0x7F10, be]:u64
 #150: R25 := R2
-#151: #47 := R25
+#151: #v9 := R25
 #152: R31 := 0x12000104C
-#153: call #47 with return %#154
+#153: call #v9 with return %#154
 
 #154:
 #155: mem := mem with [R30 + 0x38, be]:u64 <- R2
@@ -216,9 +216,9 @@ sub main(main_argc, main_argv, main_result)
 #159: R4 := mem[R30 + 0x38, be]:u64
 #160: R2 := mem[R28 - 0x7EF8, be]:u64
 #161: R25 := R2
-#162: #48 := R25
+#162: #v10 := R25
 #163: R31 := 0x120001070
-#164: call #48 with return %#165
+#164: call #v10 with return %#165
 
 #165:
 #166: R2 := extend:64[mem[R30 + 0x30, be]:u32]
@@ -244,8 +244,8 @@ sub main(main_argc, main_argv, main_result)
 #184: R3 := extend:64[mem[R30 + 4, be]:u32]
 #185: R2 := extend:64[mem[R30 + 8, be]:u32]
 #186: R2 := pad:64[R3 <$ R2]
-#187: #49 := R2 <> 0
-#188: when #49 goto %#116
+#187: #v11 := R2 <> 0
+#188: when #v11 goto %#116
 #189: goto %#190
 
 #190:
@@ -259,16 +259,16 @@ sub main(main_argc, main_argv, main_result)
 #198: R4 := R2
 #199: R2 := mem[R28 - 0x7F88, be]:u64
 #200: R25 := R2
-#201: #50 := 1
+#201: #v12 := 1
 #202: R31 := 0x1200010F8
-#203: #51 := #50
-#204: when #51 call @print_strings with noreturn
+#203: #v13 := #v12
+#204: when #v13 call @print_strings with noreturn
 #205: goto %#206
 
 #206:
 #207: mem := mem with [R30, be]:u32 <- 0
-#208: #52 := 1
-#209: when #52 goto %#210
+#208: #v14 := 1
+#209: when #v14 goto %#210
 #211: goto %#212
 
 #212:
@@ -280,9 +280,9 @@ sub main(main_argc, main_argv, main_result)
 #218: R4 := R2
 #219: R2 := mem[R28 - 0x7F00, be]:u64
 #220: R25 := R2
-#221: #53 := R25
+#221: #v15 := R25
 #222: R31 := 0x12000112C
-#223: call #53 with return %#224
+#223: call #v15 with return %#224
 
 #224:
 #225: R2 := extend:64[mem[R30, be]:u32]
@@ -294,8 +294,8 @@ sub main(main_argc, main_argv, main_result)
 #229: R3 := extend:64[mem[R30, be]:u32]
 #230: R2 := extend:64[mem[R30 + 0xC, be]:u32]
 #231: R2 := pad:64[R3 <$ R2]
-#232: #54 := R2 <> 0
-#233: when #54 goto %#212
+#232: #v16 := R2 <> 0
+#233: when #v16 goto %#212
 #234: goto %#235
 
 #235:

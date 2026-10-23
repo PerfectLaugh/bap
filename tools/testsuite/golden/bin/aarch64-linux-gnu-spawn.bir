@@ -33,14 +33,14 @@ sub main(main_argc, main_argv, main_result)
 
 #18:
 #19: R8 := mem[R9 + 0x5F0, el]:u64
-#20: #33 := R8 = 0
-#21: when #33 goto %#22
+#20: #v1 := R8 = 0
+#21: when #v1 goto %#22
 #23: goto %#24
 
 #24:
 #25: R8 := mem[R10 + 0x5F8, el]:u64
-#26: #37 := R8 = 0
-#27: when #37 goto %#22
+#26: #v2 := R8 = 0
+#27: when #v2 goto %#22
 #28: goto %#29
 
 #29:
@@ -55,18 +55,18 @@ sub main(main_argc, main_argv, main_result)
 #37:
 #38: R0 := 0
 #39: R8 := 0x7C
-#40: #59 := 0xFFFFFFFF + 31:0[R9]
-#41: NF := 31:31[#59]
-#42: VF := 31:31[R9] & ~31:31[#59]
-#43: ZF := #59 = 0
-#44: CF := 31:31[R9] | 31:31[R9] & ~31:31[#59] | ~31:31[#59]
-#45: R9 := pad:64[#59]
+#40: #v3 := 0xFFFFFFFF + 31:0[R9]
+#41: NF := 31:31[#v3]
+#42: VF := 31:31[R9] & ~31:31[#v3]
+#43: ZF := #v3 = 0
+#44: CF := 31:31[R9] | 31:31[R9] & ~31:31[#v3] | ~31:31[#v3]
+#45: R9 := pad:64[#v3]
 #46: intrinsic:x0 := 0
 #47: call @intrinsic:svc with return %#48
 
 #48:
-#49: #61 := ~ZF <> 0
-#50: when #61 goto %#37
+#49: #v4 := ~ZF <> 0
+#50: when #v4 goto %#37
 #51: goto %#52
 
 #52:
@@ -94,9 +94,9 @@ sub main(main_argc, main_argv, main_result)
 #70:
 #71: R19 := mem[R31 + 0x10, el]:u64
 #72: R0 := 0
-#73: #148 := R31
-#74: R29 := mem[#148, el]:u64
-#75: R30 := mem[#148 + 8, el]:u64
+#73: #v5 := R31
+#74: R29 := mem[#v5, el]:u64
+#75: R30 := mem[#v5 + 8, el]:u64
 #76: R31 := R31 + 0x20
 #77: call R30 with noreturn
 
