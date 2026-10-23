@@ -8,6 +8,7 @@
   (dir unicorn))
  (deps
   build.cmake
+  (source_tree overlay)
   (:tarball
    (glob_files %{project_root}/unicorn-2.1.4.tar.gz)))
  (action

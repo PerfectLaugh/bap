@@ -11,6 +11,7 @@
 # The Unicorn sources are taken from TARBALL, if it is specified (e.g.,
 # when opam has already fetched it as an extra-source), otherwise they
 # are downloaded from GitHub. In both cases the checksum is verified.
+# The files of overlay/, the changes of BAP, replace their files.
 #
 # CC is the command of the C compiler, e.g., the %{cc} of dune, whose
 # flags are ignored, so that Unicorn is built with the compiler of OCaml.
@@ -142,116 +143,17 @@ if(CMAKE_HOST_WIN32)
     "__mingw_aligned_malloc(size, alignment < 16 ? 16 : alignment)")
 endif()
 
-# After each memory access, Unicorn exits, if an exit is requested, and
-# restores the instruction of the access, so that it runs again, when the
-# emulation continues, which repeats a store, e.g., when uc_emu_stop is
-# called from another thread, e.g., by the timeout of Unicorn, or by the
-# watcher of the signals of the plugin. The check after an access exits
-# only if the access was invalid, and the other requests exit at the next
-# check, e.g., at the start of the next block, at its address.
-patch(qemu/tcg/tcg-op.c
-  "check_exit_request(tcg_ctx);"
-  "check_exit_request_mem(tcg_ctx);")
-patch(qemu/tcg/tcg-op.c
-  "static void tcg_gen_req_mo(TCGContext *tcg_ctx, TCGBar type)\n"
-  [=[// BAP: after a memory access, the emulation exits only if the access
-// was invalid, see build.cmake
-static void check_exit_request_mem(TCGContext *tcg_ctx)
-{
-    if (tcg_ctx->uc->no_exit_request) {
-        return;
-    }
-
-    TCGv_ptr puc = tcg_const_ptr(tcg_ctx, tcg_ctx->uc);
-    TCGv_i32 tmp = tcg_const_i32(tcg_ctx, 0);
-    if (tcg_ctx->delay_slot_flag != NULL) {
-        tcg_gen_mov_i32(tcg_ctx, tmp, tcg_ctx->delay_slot_flag);
-    }
-    tcg_gen_ori_i32(tcg_ctx, tmp, tmp, 0x80000000);
-    gen_helper_check_exit_request(tcg_ctx, puc, tmp);
-    tcg_temp_free_i32(tcg_ctx, tmp);
-    tcg_temp_free_ptr(tcg_ctx, puc);
-}
-
-static void tcg_gen_req_mo(TCGContext *tcg_ctx, TCGBar type)
-]=])
-# BAP: SO, OV, and CA of XER of PowerPC are the fields of their own of
-# QEMU, which are merged, as cpu_read_xer and cpu_write_xer do, so that
-# the carry, e.g., of adde, is the one of the register, that is written.
-# They are merged here, as the functions of the 32-bit and the 64-bit
-# targets have the same names, so that one target may call the other's
-patch(qemu/target/ppc/unicorn.c
-  "*(uint32_t *)value = env->xer;"
-  [=[*(uint32_t *)value =
-                env->xer | (env->so << XER_SO) | (env->ov << XER_OV) |
-                (env->ca << XER_CA) |
-                (is_isa300(env) ? (env->ov32 << XER_OV32) |
-                                      (env->ca32 << XER_CA32)
-                                : 0);]=])
-patch(qemu/target/ppc/unicorn.c
-  "env->xer = *(uint32_t *)value;"
-  [=[{
-                uint32_t xer = *(uint32_t *)value;
-                env->so = (xer >> XER_SO) & 1;
-                env->ov = (xer >> XER_OV) & 1;
-                env->ca = (xer >> XER_CA) & 1;
-                env->ov32 = (xer >> XER_OV32) & 1;
-                env->ca32 = (xer >> XER_CA32) & 1;
-                env->xer = xer & ~((1u << XER_SO) | (1u << XER_OV) |
-                                   (1u << XER_CA) | (1u << XER_OV32) |
-                                   (1u << XER_CA32));
-            }]=])
-# BAP: the store to the memory, that is not mapped, or not writable, which
-# the hooks don't handle, exits at the instruction, which runs again, as
-# the loads do, rather than dropping the store, as the instruction, whose
-# store is in a helper, e.g., fstpt of x86, or stvewx of PowerPC, would
-# complete without it. The stores of MIPS, which are not in helpers, exit
-# after the access, as the branch, whose delay slot it is, must not run
-# again, see check_exit_request_mem
-patch(qemu/accel/tcg/cputlb.c
-  [=[            // printf("***** Invalid memory write at " TARGET_FMT_lx "\n", addr);
-            cpu_exit(uc->cpu);
-            return;]=]
-  [=[            // printf("***** Invalid memory write at " TARGET_FMT_lx "\n", addr);
-            cpu_exit(uc->cpu);
-            if (uc->nested_level > 0 && !uc->cpu->stopped &&
-                uc->arch != UC_ARCH_MIPS) {
-                cpu_loop_exit_restore(uc->cpu, retaddr);
-            }
-            return;]=])
-patch(qemu/accel/tcg/cputlb.c
-  [=[            // printf("***** Invalid memory write (ro) at " TARGET_FMT_lx "\n", addr);
-            cpu_exit(uc->cpu);
-            return;]=]
-  [=[            // printf("***** Invalid memory write (ro) at " TARGET_FMT_lx "\n", addr);
-            cpu_exit(uc->cpu);
-            if (uc->nested_level > 0 && !uc->cpu->stopped &&
-                uc->arch != UC_ARCH_MIPS) {
-                cpu_loop_exit_restore(uc->cpu, retaddr);
-            }
-            return;]=])
-# BAP: the conversions of PowerPC to the integers, e.g., fctiwz, saturate,
-# as softfloat does, and as the Power ISA tells, and only the NaNs are the
-# values of the invalid conversions, rather than every invalid conversion
-patch(qemu/target/ppc/fpu_helper.c
-  "            ret = nanval;                                              \\"
-  "            ret = float64_is_any_nan(arg) ? nanval : ret;              \\")
-# BAP: the PC, that is written, starts anew, outside of a delay slot of
-# MIPS, as the branch, whose delay slot it was, e.g., of another thread,
-# that ran, is not pending, while uc_emu_start keeps it, so that the
-# emulation, that stopped in a delay slot, continues there
-patch(qemu/target/mips/unicorn.c
-  "            env->active_tc.PC = *(mipsreg_t *)value & ~1ULL;"
-  "            env->active_tc.PC = *(mipsreg_t *)value & ~1ULL;
-            env->hflags &= ~MIPS_HFLAG_BMASK;")
-patch(qemu/accel/tcg/tcg-runtime.c
-  "    if (cpu_loop_exit_requested(uc->cpu) && !in_delay_slot) {"
-  [=[    // BAP: the high bit marks the check after a memory access, which
-    // exits only if the access was invalid, see build.cmake
-    bool after_access = in_delay_slot & 0x80000000;
-    in_delay_slot &= 0x7fffffff;
-    if (cpu_loop_exit_requested(uc->cpu) && !in_delay_slot &&
-        (!after_access || uc->invalid_error != UC_ERR_OK)) {]=])
+# the changes of BAP to the sources of Unicorn, the files of overlay/,
+# which replace its files, see overlay/README.md
+set(OVERLAY "${CMAKE_CURRENT_LIST_DIR}/overlay")
+file(GLOB_RECURSE overlay_files RELATIVE "${OVERLAY}" "${OVERLAY}/qemu/*")
+foreach(file ${overlay_files})
+  if(NOT EXISTS "${WORK}/${UNICORN_ROOT}/${file}")
+    fail("${file} of the overlay isn't a file of Unicorn ${UNICORN_VERSION}")
+  endif()
+  configure_file("${OVERLAY}/${file}" "${WORK}/${UNICORN_ROOT}/${file}"
+    COPYONLY)
+endforeach()
 
 # On Windows, Unicorn generates its configuration headers with the
 # configure script of QEMU, which needs a POSIX shell, and when there is
