@@ -174,6 +174,7 @@ let regsv8 =
     [
       ([ general; integer ], untyped rs);
       ([ general; floating ], untyped xs);
+      ([ floating; vector ], untyped vs);
       ([ stack_pointer ], untyped [ reg r64 "R31" ]);
       ([ frame_pointer ], untyped [ reg r64 "R29" ]);
       ( [ function_argument; function_return ],
@@ -834,6 +835,10 @@ let max_v8a_version = 3
 let v8aversions =
   List.init max_v8a_version ~f:(fun i -> sprintf "+v8.%da" (i + 1))
 
+(* the AArch64 decoder also decodes the half-precision floats of v8.2,
+   the encodings of which are unallocated without them *)
+let a64_extensions = [ "fullfp16" ]
+
 let is_normal_feature s =
   String.length s > 0 && match s.[0] with '+' | '-' -> true | _ -> false
 
@@ -851,7 +856,7 @@ let enable_llvm ?(features = []) ?interworking () =
   let features xs = normalize_features (xs @ features) in
   register llvm_a32 "armv7" ~attrs:(features a32_extensions);
   register llvm_t32 "thumbv7" ~attrs:(features ("thumb2" :: a32_extensions));
-  register llvm_a64 "aarch64" ~attrs:(features v8aversions);
+  register llvm_a64 "aarch64" ~attrs:(features (v8aversions @ a64_extensions));
   KB.promise CT.Label.encoding @@ fun label ->
   let* target = CT.Label.target label in
   let* mode = KB.collect Mode.slot label in
