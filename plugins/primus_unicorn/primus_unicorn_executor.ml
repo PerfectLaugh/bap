@@ -33,6 +33,15 @@ open Bap_primus.Std
 module Uc = Bap_engine
 module Target = Primus_unicorn_target
 module Checkpoint = Primus_unicorn_checkpoint
+
+(* the seconds of the monotonic clock, which measures the time slices of
+   the threads, and the time, that the machines run, see [Make.account],
+   and which the timeouts of the engines are of, rather than the processor
+   time, of Sys.time, which the engines don't measure, which would make
+   the slices and the timeouts take more and more time, while the system
+   is loaded, and whose steps are 15.6 ms on Windows, longer than a slice *)
+let clock () = Mtime.Span.to_float_ns (Mtime_clock.elapsed ()) *. 1e-9
+
 module Native = Primus_unicorn_native
 include Bap_main.Loggers ()
 
@@ -266,7 +275,7 @@ and session = {
       (** the seconds that a machine may run, in Unicorn and in Primus, e.g., in
           the Lisp stubs *)
   mutable accounted : float;
-      (** the processor time, which the machines have accounted for, see
+      (** the time of [clock], which the machines have accounted for, see
           [account] *)
   mutable ticks : int;
       (** the clock ticks of Primus since the time was last checked, see
@@ -330,7 +339,7 @@ and session = {
           may be created anew, see [broken] *)
   events : event Queue.t;  (** the events, that the observers see *)
   mutable sliced_at : float;
-      (** the processor time, at which the thread, that runs, started its time
+      (** the time of [clock], at which the thread, that runs, started its time
           slice, see [Make.Threads], which the pauses of the script shift, as
           the thread doesn't run, while it is paused *)
   mutable resumed : bool;
@@ -392,7 +401,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     thumb_symbols = Int64.Hash_set.create ();
     bare_mode = false;
     timeout = o.timeout;
-    accounted = Stdlib.Sys.time ();
+    accounted = clock ();
     ticks = 0;
     checkpoint = o.checkpoint;
     checkpoint_addr = None;
@@ -2934,7 +2943,7 @@ module Make (Machine : Primus.Machine.S) = struct
     match s.timeout with
     | None -> Machine.return ()
     | Some _ ->
-        let now = Stdlib.Sys.time () in
+        let now = clock () in
         let spent = now -. s.accounted in
         s.accounted <- now;
         Machine.Local.update elapsed ~f:(fun t -> t +. spent)
@@ -3013,8 +3022,7 @@ module Make (Machine : Primus.Machine.S) = struct
         Uc.start e.uc pc ?count
           ?timeout:
             (Option.map deadline ~f:(fun t ->
-                 Int.max 1
-                   (Float.iround_up_exn ((t -. Stdlib.Sys.time ()) *. 1e6))));
+                 Int.max 1 (Float.iround_up_exn ((t -. clock ()) *. 1e6))));
         None
       with Uc.Error (_, msg) -> Some msg
     in
@@ -3682,7 +3690,7 @@ module Make (Machine : Primus.Machine.S) = struct
       | Some (i, next) ->
           let* () = resume e next in
           fresh e next.next;
-          e.session.sliced_at <- Stdlib.Sys.time ();
+          e.session.sliced_at <- clock ();
           let+ () =
             Machine.Local.put threads
               {
@@ -5162,9 +5170,12 @@ module Make (Machine : Primus.Machine.S) = struct
          that pauses it more often than the slice, would starve the
          other threads, and it runs the instruction, at which it paused,
          before it is preempted *)
-      let paused = Stdlib.Sys.time () in
+      let paused = clock () in
       serve pc >>= fun pc ->
-      s.sliced_at <- s.sliced_at +. (Stdlib.Sys.time () -. paused);
+      let pause = clock () -. paused in
+      s.sliced_at <- s.sliced_at +. pause;
+      (* nor does the pause count, as the time, that the machine ran *)
+      s.accounted <- s.accounted +. pause;
       (* the program, that paused elsewhere, e.g., after a stub, whose
          call a hook saw, didn't skip a hook, so it may be preempted *)
       s.resumed <- Option.equal Int64.equal s.hooked_at (Some pc);
@@ -5186,7 +5197,7 @@ module Make (Machine : Primus.Machine.S) = struct
              which ends, however often Unicorn stops, e.g., at each
              load, that the observers see *)
           let* sliced = Machine.Local.get threads >>| Threads.ready e in
-          let now = Stdlib.Sys.time () in
+          let now = clock () in
           let ends = s.sliced_at +. Threads.slice in
           (* the thread doesn't switch in an atomic sequence of the
              lifted engine, see [Uc.in_atomic] *)
@@ -5892,7 +5903,7 @@ module Loader (Machine : Primus.Machine.S) = struct
         (* the time of the timeout starts, when the engine is created, as
            the lifter of the lifted engine loads the semantics of Primus
            Lisp then, which isn't the time, that the machine runs *)
-        s.accounted <- Stdlib.Sys.time ();
+        s.accounted <- clock ();
         Hashtbl.clear s.parked;
         s.parked_pages <- 0;
         Memory.set_backing

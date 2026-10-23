@@ -2611,13 +2611,16 @@ let run_block t j insn pc ~until ~count n =
         None)
       else exec ?until ?count t j b pc n
 
+(* the seconds of the monotonic clock, as the executor measures the time
+   slices of the threads, and the timeouts, see [Primus_unicorn_executor] *)
+let clock () = Mtime.Span.to_float_ns (Mtime_clock.elapsed ()) *. 1e-9
+
 let start ?until ?timeout ?count t pc =
   check t;
   t.stopped <- false;
   t.last_block <- None;
   let deadline =
-    Option.map timeout ~f:(fun us ->
-        Time_float.(add (now ()) (Span.of_us (Float.of_int us))))
+    Option.map timeout ~f:(fun us -> clock () +. (Float.of_int us *. 1e-6))
   in
   (* [pending] is the target of the branch, whose delay slot is at [pc] *)
   let checked = ref 0 in
@@ -2638,7 +2641,7 @@ let start ?until ?timeout ?count t pc =
           && n - !checked >= 0x100
           && begin
             checked := n;
-            Time_float.(now () >= d)
+            Float.(clock () >= d)
           end
       | None -> false
     in

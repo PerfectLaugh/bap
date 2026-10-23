@@ -25,6 +25,7 @@ depends: [
   "bitvec" {= version}
   "core"
   "monads" {= version}
+  "mtime" {>= "2.0"}
   "ppx_bap" {= version}
   "bap-arm" {with-test & = version}
   "bap-mips" {with-test & = version}

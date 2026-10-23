@@ -1041,6 +1041,7 @@ so this package is distributed under GPL-2.0, unlike the rest of BAP.")
   (bitvec (= :version))
   core
   (monads (= :version))
+  (mtime (>= 2.0))
   (ppx_bap (= :version))
   (bap-arm (and :with-test (= :version)))
   (bap-mips (and :with-test (= :version)))

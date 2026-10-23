@@ -28,8 +28,8 @@ let declare ~(engine : Executor.kind) ~name ~doc ~runs_in =
       ~doc:
         (sprintf
            "Terminates a Primus machine, after it has run for the given number \
-            of seconds of the processor time, both in %s and in Primus, e.g., \
-            in the Lisp stubs."
+            of seconds, both in %s and in Primus, e.g., in the Lisp stubs, by \
+            the monotonic clock, not counting the pauses of the scripts."
            runs_in)
   in
   let checkpoint =

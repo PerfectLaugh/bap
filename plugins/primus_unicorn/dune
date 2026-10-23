@@ -19,7 +19,8 @@
   bap-taint
   bitvec
   core
-  monads))
+  monads
+  mtime.clock))
 
 (library
  (name bap_primus_unicorn_main)
