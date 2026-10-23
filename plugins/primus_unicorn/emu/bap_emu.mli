@@ -75,6 +75,23 @@ val create :
     [[ ("<stdin>", "input.txt") ]], run in the machine after the components of
     the system, before the program starts.
 
+    The [redirects] serve the files of the host to the program, by the paths,
+    that it opens, which are the only files, that it may open, e.g.,
+
+    {[
+    Emu.create
+      ~redirects:[ ("/data/app/base.apk", "app.apk"); ("<stdout>", "out.txt") ]
+      proj
+    ]}
+
+    and the stubs of Primus Lisp, [open], [fopen], [read], [fread], [fgets],
+    [lseek], [fseek], [ftell], and [close], read them, also the read-only ones,
+    with the descriptors, that [open] returns, or [-1], for the paths, that
+    aren't redirected. The program, that maps a file with [mmap], gets [ENODEV],
+    and a script, that serves its own descriptors, e.g., of the file, that the
+    program reads with the system calls, replaces their functions with
+    {!on_call}.
+
     With [restore] the program continues from the checkpoint in the file, see
     {!save}, instead of the [entry], and pauses before its address.
 

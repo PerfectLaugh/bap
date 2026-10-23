@@ -67,7 +67,8 @@ let init_channels =
 let allowed = ref String.Set.empty
 
 let allow redirections =
-  allowed := Set.union !allowed (String.Set.of_list (List.map redirections ~f:snd))
+  allowed :=
+    Set.union !allowed (String.Set.of_list (List.map redirections ~f:snd))
 
 let init_redirections =
   List.fold ~init:String.Map.empty ~f:(fun redirs (oldname, newname) ->
@@ -90,14 +91,17 @@ let closing_output ch =
   Stdlib.Gc.finalise (fun ch -> try Out_channel.close ch with _ -> ()) ch;
   ch
 
+(* the file, that the program may read and write, or only read, e.g.,
+   a read-only file, that it can't write, or only write *)
 let try_open path =
-  Or_error.try_with (fun () ->
-      {
-        input = Some (closing_input (In_channel.create path));
-        output =
-          Some (closing_output (Out_channel.create ~append:true path));
-        source = File path;
-      })
+  let input = Option.try_with (fun () -> closing_input (In_channel.create path))
+  and output =
+    Option.try_with (fun () ->
+        closing_output (Out_channel.create ~append:true path))
+  in
+  match (input, output) with
+  | None, None -> Or_error.errorf "%s can't be opened" path
+  | _ -> Ok { input; output; source = File path }
 
 let try_flush { output } =
   Or_error.try_with @@ fun () -> Option.iter ~f:Out_channel.flush output
@@ -158,9 +162,7 @@ module Persistent = struct
     | File path when output && not (Set.mem !allowed path) ->
         failwithf "%s, that the channel writes, is not redirected" path ()
     | File path
-      when not
-             (Set.mem !allowed path
-             || Stdlib.Sys.is_regular_file path) ->
+      when not (Set.mem !allowed path || Stdlib.Sys.is_regular_file path) ->
         failwithf "%s is not a regular file" path ()
     | File path ->
         {
@@ -418,7 +420,7 @@ let init redirections =
       | [ fd; offset; whence ] -> (
           match
             ( value_to_fd fd,
-              Word.to_int64 (Value.to_word offset),
+              Word.to_int64 (Word.signed (Value.to_word offset)),
               Word.to_int (Value.to_word whence) )
           with
           | Some fd, Ok offset, Ok whence -> (
@@ -442,6 +444,22 @@ let init redirections =
                       | Error _ -> error
                       | Ok () -> ok))
               | _ -> error)
+          | _ -> error)
+      | _ -> wrong_arity ()
+  end in
+  let module Position (Machine : Primus.Machine.S) = struct
+    include Lib (Machine)
+
+    let run = function
+      | [ fd ] -> (
+          Machine.Local.get state >>= fun s ->
+          match Option.bind (value_to_fd fd) ~f:(Map.find s.channels) with
+          | Some { input = Some ch; _ } -> (
+              match Option.try_with (fun () -> In_channel.pos ch) with
+              | Some pos ->
+                  addr_width >>= fun width ->
+                  Value.of_word (Word.of_int64 ~width pos)
+              | None -> error)
           | _ -> error)
       | _ -> wrong_arity ()
   end in
@@ -516,6 +534,12 @@ let init redirections =
             of a readable channel. WHENCE is interpreted as in fseek: zero
             seeks from the beginning, one from the current position, and two
             from the end. Returns zero on success and -1 on failure.|};
+          def "channel-position"
+            (one int @-> int)
+            (module Position)
+            {|(channel-position DESC) the current position of a readable
+            channel, or -1, if no such channel exists, or it is not
+            readable.|};
           def "channel-printf"
             ((tuple [ int; int ] // all any) @-> int)
             (module Printf)

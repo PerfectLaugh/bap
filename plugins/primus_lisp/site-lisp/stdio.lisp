@@ -69,17 +69,53 @@
 ;; file descriptors, as they both are represented as integers. We are currently
 ;; ignoring modes, we will add them later, of course.
 (defun fopen (path mode)
-  (declare (external "fopen" "open" "fdopen"))
+  (declare (external "fopen" "fdopen"))
   (let ((file (channel-open path)))
     (if (is-negative file) 0 file)))
+
+(defun close (fd)
+  "flushes and closes the channel, -1 if it isn't open"
+  (declare (external "close" "fclose"))
+  (channel-flush fd)
+  (channel-close fd))
+
+(defun fseek (stream off whence)
+  "moves the position of the channel, which it reads, 0 on success"
+  (declare (external "fseek" "fseeko"))
+  (channel-seek stream off whence))
+
+(defun ftell (stream)
+  "the position of the channel, which it reads, or -1"
+  (declare (external "ftell" "ftello"))
+  (channel-position stream))
+
+(defun rewind (stream)
+  (declare (external "rewind"))
+  (channel-seek stream 0 0)
+  0)
+
+(defun lseek (fd off whence)
+  "moves the position of the channel, which it reads, and returns it,
+   or -1"
+  (declare (external "lseek" "lseek64"))
+  (if (= 0 (channel-seek fd off whence))
+      (channel-position fd)
+    -1))
 
 (defun fileno (stream)
   (declare (external "fileno"))
   stream)
 
+(defun open2 (path flags)
+  "the descriptor of the file, that is redirected, or -1, rather than
+   the null of fopen, which is the descriptor of the standard input"
+  (declare (external "open"))
+  (let ((fd (channel-open path)))
+    (if (is-negative fd) -1 fd)))
+
 (defun open3 (path flags mode)
   (declare (external "open"))
-  (fopen path mode))
+  (open2 path flags))
 
 (defun output-item-nth-char (ptr size item fd i)
   (= 0 (channel-output

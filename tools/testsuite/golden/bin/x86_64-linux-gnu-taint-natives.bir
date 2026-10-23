@@ -1,0 +1,140 @@
+# exited with 0
+sub __do_global_dtors_aux(__do_global_dtors_aux_result)
+  calls deregister_tm_clones
+sub _dl_relocate_static_pie(_dl_relocate_static_pie_result)
+sub _fini(_fini_result)
+sub _init(_init_result)
+sub _start(_start_result)
+  calls __libc_start_main _dl_relocate_static_pie intrinsic:hlt
+sub deregister_tm_clones(deregister_tm_clones_result)
+sub frame_dummy(frame_dummy_result)
+  calls register_tm_clones
+sub main(main_argc, main_argv, main_result)
+  calls mark memcpy memmove memset printf ready strcpy strlen
+sub mark(mark_result)
+sub memcpy(memcpy_dst, memcpy_src, memcpy_n, memcpy_result)
+sub memmove(memmove_dst, memmove_src, memmove_n, memmove_result)
+sub memset(memset_buf, memset_c, memset_n, memset_result)
+sub printf(printf_format, printf_result)
+sub ready(ready_result)
+sub register_tm_clones(register_tm_clones_result)
+sub strcpy(strcpy_dst, strcpy_src, strcpy_result)
+sub strlen(strlen_s, strlen_result)
+sub intrinsic:hlt()
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[RDI]
+#2: main_argv :: in out u64 = RSI
+#3: main_result :: out u32 = low:32[RAX]
+
+#4:
+#5: #87 := RBX
+#6: RSP := RSP - 8
+#7: mem := mem with [RSP, el]:u64 <- #87
+#8: RAX := 0
+#9: goto %#10
+
+#10:
+#11: RCX := pad:64[low:32[RAX + 0x61]]
+#12: RDX := extend:64[31:0[RAX]]
+#13: mem := mem with [RDX + 0x403160] <- 7:0[RCX]
+#14: #89 := 31:0[RAX] + 1
+#15: CF := 31:31[RAX] & ~31:31[#89]
+#16: OF := ~31:31[RAX] & 31:31[#89]
+#17: AF := 0:0[(#89 ^ 31:0[RAX] ^ 1) >> 4]
+#18: SF := 31:31[#89]
+#19: ZF := #89 = 0
+#20: #90 := low:8[#89]
+#21: #91 := #90 ^ #90 >> 4
+#22: #92 := #91 ^ #91 >> 2
+#23: #93 := #92 ^ #92 >> 1
+#24: PF := ~0:0[#93]
+#25: RAX := pad:64[#89]
+#26: #94 := 31:0[RAX] - 8
+#27: CF := 31:31[~31:0[RAX] & 8 | ~(31:0[RAX] ^ 8) & #94]
+#28: OF := 31:31[(31:0[RAX] ^ 8) & (31:0[RAX] ^ #94)]
+#29: AF := 0:0[(#94 ^ 31:0[RAX] ^ 8) >> 4]
+#30: SF := 31:31[#94]
+#31: ZF := #94 = 0
+#32: #95 := low:8[#94]
+#33: #96 := #95 ^ #95 >> 4
+#34: #97 := #96 ^ #96 >> 2
+#35: #98 := #97 ^ #97 >> 1
+#36: PF := ~0:0[#98]
+#37: #100 := ~ZF
+#38: when #100 goto %#10
+#39: goto %#40
+
+#40:
+#41: mem := mem with [0x403168] <- 0
+#42: RSP := RSP - 8
+#43: mem := mem with [RSP, el]:u64 <- 0x400520
+#44: call @ready with return %#45
+
+#45:
+#46: RDX := 0x10
+#47: RSI := 0x403160
+#48: RDI := 0x403120
+#49: RSP := RSP - 8
+#50: mem := mem with [RSP, el]:u64 <- 0x400534
+#51: call @memcpy with return %#52
+
+#52:
+#53: RBX := RAX
+#54: RSI := pad:64[mem[0x403161]]
+#55: RDX := 8
+#56: RDI := 0x4030E0
+#57: RSP := RSP - 8
+#58: mem := mem with [RSP, el]:u64 <- 0x40054D
+#59: call @memset with return %#60
+
+#60:
+#61: RSI := 0x403160
+#62: RDI := 0x4030A0
+#63: RSP := RSP - 8
+#64: mem := mem with [RSP, el]:u64 <- 0x40055C
+#65: call @strcpy with return %#66
+
+#66:
+#67: RDX := 4
+#68: RSI := 0x403160
+#69: RDI := 0x403060
+#70: RSP := RSP - 8
+#71: mem := mem with [RSP, el]:u64 <- 0x400570
+#72: call @memmove with return %#73
+
+#73:
+#74: RCX := 0x403060
+#75: RDX := 0x4030A0
+#76: RSI := 0x4030E0
+#77: RDI := RBX
+#78: RSP := RSP - 8
+#79: mem := mem with [RSP, el]:u64 <- 0x400587
+#80: call @mark with return %#81
+
+#81:
+#82: RDI := 0x4030A0
+#83: RSP := RSP - 8
+#84: mem := mem with [RSP, el]:u64 <- 0x400591
+#85: call @strlen with return %#86
+
+#86:
+#87: RCX := RAX
+#88: RDX := pad:64[extend:32[mem[0x4030E0]]]
+#89: RSI := 0x4030A0
+#90: RDI := 0x4012B8
+#91: RAX := 0
+#92: RSP := RSP - 8
+#93: mem := mem with [RSP, el]:u64 <- 0x4005AF
+#94: call @printf with return %#95
+
+#95:
+#96: RAX := 0
+#97: #120 := mem[RSP, el]:u64
+#98: RSP := RSP + 8
+#99: RBX := #120
+#100: #121 := mem[RSP, el]:u64
+#101: RSP := RSP + 8
+#102: call #121 with noreturn
+

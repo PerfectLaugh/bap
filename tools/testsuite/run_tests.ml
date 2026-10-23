@@ -1488,6 +1488,35 @@ let calloc data =
             ]))
     [ "bap:stubbed-executor"; "bap:unicorn-executor"; "bap:lifted-executor" ]
 
+(* the program reads a read-only file, that the redirections serve, with
+   open, lseek, read, fopen, fseek, ftell, and close, and fails to open
+   the files, that they don't serve, see files.c *)
+let open_files data =
+  List.map
+    (fun system ->
+      case ("run/files/" ^ system) (fun env ->
+          let input = file env "input" in
+          Out_channel.with_open_bin input (fun ch ->
+              output_string ch "hello world\nsecond line END!");
+          Unix.chmod input 0o444;
+          let out =
+            bap env
+              [
+                path data "bin/x86_64-linux-gnu-files";
+                "--passes=run";
+                "--run-systems=" ^ system;
+                "--primus-lisp-channel-redirect=/data/input:" ^ input;
+              ]
+          in
+          sequence env out
+            [
+              ("seeks and reads", "size 28 tail END! back 0 close 0\n");
+              ("reads a line", "line hello world\n");
+              ("tells", "tell 12\n");
+              ("fails to open the others", "missing -1\n");
+            ]))
+    [ "bap:stubbed-executor"; "bap:unicorn-executor"; "bap:lifted-executor" ]
+
 (* the stubs of the printf family format the words, that the C ABI
    passes, also on the stack, the streams of libc are the channels of
    Lisp, whether the program refers to them with a copy relocation, or
@@ -2442,6 +2471,7 @@ let tests =
     mprotect;
     smc;
     calloc;
+    open_files;
     taint_bss;
     memory_hooks;
     taint_ops;

@@ -1,0 +1,197 @@
+# exited with 0
+sub __do_global_dtors_aux(__do_global_dtors_aux_result)
+  calls deregister_tm_clones
+sub _dl_relocate_static_pie(_dl_relocate_static_pie_result)
+sub _fini(_fini_result)
+sub _init(_init_result)
+sub _start(_start_result)
+  calls __libc_start_main _dl_relocate_static_pie intrinsic:hlt
+sub close(close_fd, close_result)
+sub deregister_tm_clones(deregister_tm_clones_result)
+sub fclose(fclose_fp, fclose_result)
+sub fgets(fgets_s, fgets_size, fgets_stream, fgets_result)
+sub fopen(fopen_path, fopen_mode, fopen_result)
+sub frame_dummy(frame_dummy_result)
+  calls register_tm_clones
+sub fseek(fseek_stream, fseek_offset, fseek_whence, fseek_result)
+sub ftell(ftell_stream, ftell_result)
+sub lseek(lseek_fd, lseek_off, lseek_whence, lseek_result)
+sub main(main_argc, main_argv, main_result)
+  calls close fclose fgets fopen fseek ftell lseek open printf read
+sub open(open_pathname, open_flags, open_result)
+sub printf(printf_format, printf_result)
+sub read(read_fd, read_buf, read_nbytes, read_result)
+sub register_tm_clones(register_tm_clones_result)
+sub intrinsic:hlt()
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[RDI]
+#2: main_argv :: in out u64 = RSI
+#3: main_result :: out u32 = low:32[RAX]
+
+#4:
+#5: RSP := RSP - 0x78
+#6: mem := mem with [RSP + 0x58, el]:u64 <- RBX
+#7: RSI := 0
+#8: RDI := 0x401368
+#9: RAX := 0
+#10: RSP := RSP - 8
+#11: mem := mem with [RSP, el]:u64 <- 0x400514
+#12: call @open with return %#13
+
+#13:
+#14: RBX := pad:64[31:0[RAX]]
+#15: RAX := 1
+#16: CF := 0
+#17: OF := 0
+#18: SF := 31:31[RBX]
+#19: ZF := 31:0[RBX] = 0
+#20: #88 := low:8[31:0[RBX]]
+#21: #89 := #88 ^ #88 >> 4
+#22: #90 := #89 ^ #89 >> 2
+#23: #91 := #90 ^ #90 >> 1
+#24: PF := ~0:0[#91]
+#25: #93 := SF
+#26: when #93 goto %#27
+#28: goto %#29
+
+#29:
+#30: mem := mem with [RSP + 0x60, el]:u64 <- RBP
+#31: mem := mem with [RSP + 0x68, el]:u64 <- R14
+#32: mem := mem with [RSP + 0x70, el]:u64 <- R15
+#33: RDX := 2
+#34: RSI := 0
+#35: RDI := pad:64[31:0[RBX]]
+#36: RSP := RSP - 8
+#37: mem := mem with [RSP, el]:u64 <- 0x400543
+#38: call @lseek with return %#39
+
+#39:
+#40: R15 := RAX
+#41: mem := mem with [RSP + 0x4B, el]:u32 <- 0
+#42: mem := mem with [RSP + 0x4F] <- 0
+#43: RDX := 2
+#44: RSI := 0xFFFFFFFFFFFFFFFC
+#45: RDI := pad:64[31:0[RBX]]
+#46: RSP := RSP - 8
+#47: mem := mem with [RSP, el]:u64 <- 0x400566
+#48: call @lseek with return %#49
+
+#49:
+#50: RBP := RSP + 0x4B
+#51: RDX := 4
+#52: RSI := RBP
+#53: RDI := pad:64[31:0[RBX]]
+#54: RSP := RSP - 8
+#55: mem := mem with [RSP, el]:u64 <- 0x40057A
+#56: call @read with return %#57
+
+#57:
+#58: RDX := 0
+#59: RSI := 0
+#60: RDI := pad:64[31:0[RBX]]
+#61: RSP := RSP - 8
+#62: mem := mem with [RSP, el]:u64 <- 0x40058B
+#63: call @lseek with return %#64
+
+#64:
+#65: R14 := RAX
+#66: RDI := pad:64[31:0[RBX]]
+#67: RSP := RSP - 8
+#68: mem := mem with [RSP, el]:u64 <- 0x400595
+#69: call @close with return %#70
+
+#70:
+#71: R8 := pad:64[31:0[RAX]]
+#72: RCX := R14
+#73: RDX := RBP
+#74: RSI := R15
+#75: RDI := 0x4013A8
+#76: RAX := 0
+#77: RSP := RSP - 8
+#78: mem := mem with [RSP, el]:u64 <- 0x4005B0
+#79: call @printf with return %#80
+
+#80:
+#81: RSI := 0x401374
+#82: RDI := 0x401368
+#83: RSP := RSP - 8
+#84: mem := mem with [RSP, el]:u64 <- 0x4005BF
+#85: call @fopen with return %#86
+
+#86:
+#87: RBX := RAX
+#88: RDX := 0
+#89: RSI := 0
+#90: RDI := RAX
+#91: RSP := RSP - 8
+#92: mem := mem with [RSP, el]:u64 <- 0x4005D4
+#93: call @fseek with return %#94
+
+#94:
+#95: RDX := RBX
+#96: RSI := 0x40
+#97: RDI := RSP
+#98: RSP := RSP - 8
+#99: mem := mem with [RSP, el]:u64 <- 0x4005E4
+#100: call @fgets with return %#101
+
+#101:
+#102: RSI := RSP
+#103: RDI := 0x401376
+#104: RAX := 0
+#105: RSP := RSP - 8
+#106: mem := mem with [RSP, el]:u64 <- 0x4005F6
+#107: call @printf with return %#108
+
+#108:
+#109: RDI := RBX
+#110: RSP := RSP - 8
+#111: mem := mem with [RSP, el]:u64 <- 0x4005FE
+#112: call @ftell with return %#113
+
+#113:
+#114: RSI := RAX
+#115: RDI := 0x40137E
+#116: RAX := 0
+#117: RSP := RSP - 8
+#118: mem := mem with [RSP, el]:u64 <- 0x400610
+#119: call @printf with return %#120
+
+#120:
+#121: RDI := RBX
+#122: RSP := RSP - 8
+#123: mem := mem with [RSP, el]:u64 <- 0x400618
+#124: call @fclose with return %#125
+
+#125:
+#126: RSI := 0
+#127: RDI := 0x401388
+#128: RAX := 0
+#129: RSP := RSP - 8
+#130: mem := mem with [RSP, el]:u64 <- 0x40062C
+#131: call @open with return %#132
+
+#132:
+#133: RSI := pad:64[31:0[RAX]]
+#134: RDI := 0x401396
+#135: RAX := 0
+#136: RSP := RSP - 8
+#137: mem := mem with [RSP, el]:u64 <- 0x40063D
+#138: call @printf with return %#139
+
+#139:
+#140: RAX := 0
+#141: RBP := mem[RSP + 0x60, el]:u64
+#142: R14 := mem[RSP + 0x68, el]:u64
+#143: R15 := mem[RSP + 0x70, el]:u64
+#144: goto %#27
+
+#27:
+#145: RBX := mem[RSP + 0x58, el]:u64
+#146: RSP := RSP + 0x78
+#147: #95 := mem[RSP, el]:u64
+#148: RSP := RSP + 8
+#149: call #95 with noreturn
+
