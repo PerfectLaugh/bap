@@ -25,6 +25,7 @@ module Lifted = struct
     big_endian : bool;
     bits : int;
     jit : bool;
+    cache : string option;
   }
 end
 

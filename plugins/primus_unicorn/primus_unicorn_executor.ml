@@ -138,6 +138,12 @@ type options = {
   mutable restore : string option;
   mutable native_stubs : String.Set.t;
   mutable jit : bool;
+  mutable cache : string option;
+      (** the folder of the caches of the lifted engine, of its compiled blocks,
+          and of its lifted instructions, see [lifter] *)
+  mutable digest : string;
+      (** the digest of the version of BAP, and of the configuration of its
+          plugins, that lift the instructions, see [lifter] *)
 }
 
 type engine = {
@@ -280,9 +286,12 @@ and session = {
       (** the machines run in the lifted engine, see [Bap_lifted], of
           bap:lifted-executor, rather than in Unicorn *)
   jit : bool;  (** the lifted engine compiles the blocks, that run often *)
+  cache : string option;  (** see [options.cache] *)
+  digest : string;  (** see [options.digest] *)
   mutable lifter :
     ((thumb:bool -> int64 -> string -> (int * string * blk term list) option)
-    * (tid -> string option))
+    * (tid -> string option)
+    * bool)
     option;
       (** lifts the instructions for the lifted engine, see [lifter] *)
   mutable driven : bool;
@@ -316,6 +325,14 @@ and session = {
           slice, see [Make.Threads] *)
 }
 
+(* the folder, and its parents, which are made, if they aren't there *)
+let rec mkdirs dir =
+  if not (Stdlib.Sys.file_exists dir) then begin
+    ignore (mkdirs (Stdlib.Filename.dirname dir) : string);
+    try Stdlib.Sys.mkdir dir 0o755 with Sys_error _ -> ()
+  end;
+  dir
+
 let default_options () =
   {
     timeout = None;
@@ -323,6 +340,8 @@ let default_options () =
     restore = None;
     native_stubs = String.Set.of_list Native.names;
     jit = true;
+    cache = None;
+    digest = "";
   }
 
 let unicorn_options = default_options ()
@@ -338,6 +357,8 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
   {
     lifted = Poly.equal engine `Lifted;
     jit = o.jit;
+    cache = o.cache;
+    digest = o.digest;
     lifter = None;
     active = None;
     recipe = None;
@@ -959,9 +980,72 @@ let mips_r6 target =
    in the knowledge, that starts from the toplevel one, and keeps the
    semantics, e.g., the Primus Lisp program of x86, as Bap_emu lifts the
    instructions in the hooks *)
-let lifter ~arm project =
+(* The instructions, that the lifter lifted, in the other runs of the
+   program, which the lifted engine runs, rather than it lifts them again,
+   whose file is in the cache, by the digest of the version of BAP, the
+   configuration of its plugins, the file of the program, and its target,
+   see [lifter]. The labels of the calls, e.g., of the intrinsics, are
+   the objects of the knowledge of the run, that lifted them, which are
+   made anew, when they are read, with their names. *)
+module Lifts = struct
+  type entry = {
+    addr : int64;
+    thumb : bool;
+    code : string;
+    size : int;
+    name : string;
+    blks : blk term list;
+    calls : (tid * string) list;
+  }
+  [@@deriving bin_io]
+
+  type t = entry list [@@deriving bin_io]
+
+  let magic = "bap-lifted-lifts 1\n"
+
+  let load file =
+    try
+      let data = In_channel.read_all file in
+      if String.is_prefix data ~prefix:magic then
+        Binable.of_string
+          (module struct
+            type nonrec t = t [@@deriving bin_io]
+          end)
+          (String.drop_prefix data (String.length magic))
+      else []
+    with _ -> []
+
+  let save file entries =
+    try
+      let tmp =
+        Stdlib.Filename.temp_file
+          ~temp_dir:(Stdlib.Filename.dirname file)
+          (Stdlib.Filename.basename file)
+          ".tmp"
+      in
+      Out_channel.with_file ~binary:true tmp ~f:(fun out ->
+          Out_channel.output_string out magic;
+          Out_channel.output_string out
+            (Binable.to_string
+               (module struct
+                 type nonrec t = t [@@deriving bin_io]
+               end)
+               entries));
+      Stdlib.Sys.rename tmp file
+    with _ -> ()
+end
+
+let lifter ?cache ~arm project =
   let state = ref None in
   let names = Tid.Table.create () in
+  let entries = Hashtbl.Poly.create () in
+  let dirty = ref false in
+  Option.iter cache ~f:(fun file ->
+      List.iter (Lifts.load file) ~f:(fun (e : Lifts.entry) ->
+          Hashtbl.set entries ~key:(e.addr, e.thumb) ~data:(e, ref false));
+      at_exit (fun () ->
+          if !dirty then
+            Lifts.save file (Hashtbl.data entries |> List.map ~f:fst)));
   (* the names of the labels, that the instruction calls, e.g., of the
      intrinsics, @intrinsic:fadd_rne_ieee754_binary_64, in the knowledge
      of the lifter *)
@@ -979,29 +1063,113 @@ let lifter ~arm project =
                 | Indirect _ -> ())
             | _ -> ()))
   in
-  let lift ~thumb addr code =
+  (* the labels of the calls of the cached instruction, that are made
+     anew, once, with their names *)
+  let fresh (e : Lifts.entry) =
+    let renamed =
+      List.map e.calls ~f:(fun (tid, name) ->
+          let tid' = Tid.create () in
+          Hashtbl.set names ~key:tid' ~data:name;
+          (tid, tid'))
+    in
+    let rename tid =
+      List.Assoc.find renamed tid ~equal:Tid.equal |> Option.value ~default:tid
+    in
+    let blks =
+      List.map e.blks ~f:(fun blk ->
+          Term.map jmp_t blk ~f:(fun jmp ->
+              match Jmp.kind jmp with
+              | Call call -> (
+                  match Call.target call with
+                  | Direct tid ->
+                      Jmp.with_kind jmp
+                        (Call (Call.with_target call (Direct (rename tid))))
+                  | Indirect _ -> jmp)
+              | _ -> jmp))
+    in
+    {
+      e with
+      blks;
+      calls = List.map e.calls ~f:(fun (tid, name) -> (rename tid, name));
+    }
+  in
+  let in_state f =
     let toplevel = Toplevel.current () in
-    let result = ref None in
     Toplevel.set (Option.value !state ~default:toplevel);
     Exn.protect
       ~finally:(fun () ->
         state := Some (Toplevel.current ());
         Toplevel.set toplevel)
-      ~f:(fun () ->
-        try
-          Toplevel.exec
-            KB.Syntax.(
-              Primus.Lift.named
-                ?encoding:
-                  (if arm then Primus.Interworking.encoding ~thumb else None)
-                project addr code
-              >>| fun insn ->
-              result := insn;
-              Option.iter insn ~f:(fun (_, _, blks) -> called blks))
-        with _ -> ());
-    !result
+      ~f
   in
-  (lift, Hashtbl.find names)
+  let lift ~thumb addr code =
+    match Hashtbl.find entries (addr, thumb) with
+    | Some (e, renamed) when String.is_prefix code ~prefix:e.code ->
+        let e =
+          if !renamed then e
+          else begin
+            let e = in_state (fun () -> fresh e) in
+            Hashtbl.set entries ~key:(addr, thumb) ~data:(e, ref true);
+            e
+          end
+        in
+        Some (e.size, e.name, e.blks)
+    | _ ->
+        let result = ref None in
+        in_state (fun () ->
+            try
+              Toplevel.exec
+                KB.Syntax.(
+                  Primus.Lift.named
+                    ?encoding:
+                      (if arm then Primus.Interworking.encoding ~thumb else None)
+                    project addr code
+                  >>| fun insn ->
+                  result := insn;
+                  Option.iter insn ~f:(fun (_, _, blks) -> called blks))
+            with _ -> ());
+        Option.iter !result ~f:(fun (size, name, blks) ->
+            if Option.is_some cache && size <= String.length code then begin
+              let calls =
+                List.concat_map blks ~f:(fun blk ->
+                    Term.enum jmp_t blk |> Seq.to_list
+                    |> List.filter_map ~f:(fun jmp ->
+                        match Jmp.kind jmp with
+                        | Call call -> (
+                            match Call.target call with
+                            | Direct tid ->
+                                Option.map (Hashtbl.find names tid)
+                                  ~f:(fun name -> (tid, name))
+                            | Indirect _ -> None)
+                        | _ -> None))
+              in
+              Hashtbl.set entries ~key:(addr, thumb)
+                ~data:
+                  ( {
+                      Lifts.addr;
+                      thumb;
+                      code = String.prefix code size;
+                      size;
+                      name;
+                      (* the engine doesn't read the attributes, e.g.,
+                         the instructions, which are most of the file *)
+                      blks =
+                        List.map blks ~f:(fun blk ->
+                            let blk =
+                              Term.map def_t blk ~f:(fun t ->
+                                  Term.with_attrs t Dict.empty)
+                              |> Term.map jmp_t ~f:(fun t ->
+                                  Term.with_attrs t Dict.empty)
+                            in
+                            Term.with_attrs blk Dict.empty);
+                      calls;
+                    },
+                    ref true );
+              dirty := true
+            end);
+        !result
+  in
+  (lift, Hashtbl.find names, not (Hashtbl.is_empty entries))
 
 (* the NaNs and the invalid integers of the target, as ieee754-policy of
    ieee754-intrinsics.lisp *)
@@ -1042,7 +1210,7 @@ let create session target ~foreign ~externals =
   let locate = ref (fun _ -> None) in
   let uc =
     match session.lifter with
-    | Some (lift, name) when session.lifted ->
+    | Some (lift, name, _) when session.lifted ->
         Uc.create_lifted
           {
             lift;
@@ -1055,6 +1223,8 @@ let create session target ~foreign ~externals =
               Theory.Endianness.(equal eb) (Theory.Target.endianness target);
             bits = Theory.Target.bits target;
             jit = session.jit;
+            cache =
+              Option.map session.cache ~f:(fun dir -> mkdirs (dir ^/ "objects"));
           }
           arch mode
     | _ -> Uc.create arch mode
@@ -5176,22 +5346,42 @@ module Loader (Machine : Primus.Machine.S) = struct
         Machine.get () >>| fun proj ->
         let target = Project.target proj in
         let engine = Target.engine target in
-        let ((lift, _) as l) =
-          lifter ~arm:(Poly.equal (Option.map engine ~f:fst) (Some Uc.Arm)) proj
+        (* the lifted instructions of the program, see [Lifts] *)
+        let cache =
+          Option.bind s.cache ~f:(fun dir ->
+              Option.map (Project.get proj filename) ~f:(fun file ->
+                  let program =
+                    try Checkpoint.digest file with Sys_error _ -> file
+                  in
+                  let key =
+                    Stdlib.Digest.to_hex
+                      (Stdlib.Digest.string
+                         (String.concat ~sep:"\000"
+                            [
+                              s.digest; program; Theory.Target.to_string target;
+                            ]))
+                  in
+                  mkdirs (dir ^/ "lifts") ^/ key ^ ".lifts"))
+        in
+        let ((lift, _, cached) as l) =
+          lifter ?cache
+            ~arm:(Poly.equal (Option.map engine ~f:fst) (Some Uc.Arm))
+            proj
         in
         s.lifter <- Some l;
         (* the first instruction, that is lifted, loads the semantics of
            Primus Lisp, which takes a second or two, so it is lifted now,
            before the program runs, rather than as it runs, e.g., while
            the timer of a script, that stops it, runs *)
-        Option.iter engine ~f:(fun (arch, _) ->
-            ignore
-              (lift ~thumb:false 0L
-                 (nop arch
-                    ~big_endian:
-                      Theory.Endianness.(
-                        equal eb (Theory.Target.endianness target)))
-                : _ option)))
+        if not cached then
+          Option.iter engine ~f:(fun (arch, _) ->
+              ignore
+                (lift ~thumb:false 0L
+                   (nop arch
+                      ~big_endian:
+                        Theory.Endianness.(
+                          equal eb (Theory.Target.endianness target)))
+                  : _ option)))
       else Machine.return ()
     in
     match create s target ~foreign ~externals with

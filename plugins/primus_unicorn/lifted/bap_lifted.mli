@@ -41,6 +41,9 @@ type config = {
   big_endian : bool;  (** the order of the bytes of the memory *)
   bits : int;  (** the size of an address *)
   jit : bool;  (** if the blocks, that run often, are compiled *)
+  cache : string option;
+      (** the folder of the objects of the blocks, that the JIT compiled, which
+          the other runs of the same code read, rather than compile them *)
 }
 
 type t

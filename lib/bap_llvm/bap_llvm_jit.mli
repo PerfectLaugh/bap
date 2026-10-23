@@ -19,10 +19,15 @@ val define : t -> string -> nativeint -> unit
 type code
 (** the code of a module, which stays, until it is released *)
 
-val compile : t -> string -> string -> code
+val compile : ?cache:string -> t -> string -> string -> code
 (** [compile jit ir name] optimizes the module, whose text is [ir], compiles it,
     and returns its code, whose function [name] is called. Raises [Failure], if
-    the module is invalid. *)
+    the module is invalid.
+
+    With [cache], the object of the module is read from the file, if it is
+    there, rather than compiled, or else written to it, so that the module,
+    whose text, and so the names of its symbols, are the same, e.g., in another
+    run of the program, isn't compiled again. *)
 
 val address : code -> nativeint
 (** [address code] the address of the function of the code. Raises

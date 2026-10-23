@@ -51,6 +51,8 @@ module Lifted : sig
     jit : bool;
         (** if the blocks, that run often, are compiled to the native code, see
             {!Bap_lifted} *)
+    cache : string option;
+        (** the folder of the compiled blocks, see {!Bap_lifted.config} *)
   }
 end
 

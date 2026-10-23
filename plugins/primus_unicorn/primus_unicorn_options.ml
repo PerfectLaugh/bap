@@ -99,9 +99,9 @@ let declare ~(engine : Executor.kind) ~name ~doc ~runs_in =
              Extension.Type.(bool =? true)
              "jit"
              ~doc:
-               "Compiles the blocks of the lifted engine, that run often, \
-                with the JIT of LLVM, to the native code of the host, rather \
-                than runs only their closures.")
+               "Compiles the blocks of the lifted engine, that run often, with \
+                the JIT of LLVM, to the native code of the host, rather than \
+                runs only their closures.")
   in
   Extension.declare ~doc ~provides:[ "primus"; name ] @@ fun ctxt ->
   let options = Executor.options engine in
@@ -109,6 +109,16 @@ let declare ~(engine : Executor.kind) ~name ~doc ~runs_in =
   options.restore <- Extension.Configuration.get ctxt restore;
   Option.iter jit ~f:(fun jit ->
       options.jit <- Extension.Configuration.get ctxt jit);
+  options.cache <-
+    Option.map (Extension.Configuration.cachedir ()) ~f:(fun dir ->
+        Stdlib.Filename.concat dir "lifted");
+  options.digest <-
+    String.concat ~sep:"\000"
+      [
+        Extension.Configuration.version;
+        Extension.Configuration.build_id;
+        Extension.Configuration.digest ctxt;
+      ];
   let natives =
     List.filter
       (Extension.Configuration.get ctxt native_stubs)
@@ -132,8 +142,8 @@ let declare ~(engine : Executor.kind) ~name ~doc ~runs_in =
           ~desc:
             "Links the binary program, like load-binary, so that its \
              subroutines run in Unicorn, or in the lifted engine, see \
-             bap:lifted-emulator, except those that other components \
-             replace, e.g., with Lisp stubs."
+             bap:lifted-emulator, except those that other components replace, \
+             e.g., with Lisp stubs."
       end;
       let engine_components =
         match engine with

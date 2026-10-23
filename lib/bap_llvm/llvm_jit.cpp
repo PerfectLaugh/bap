@@ -5,6 +5,11 @@
 #include <string>
 
 #include <llvm/AsmParser/Parser.h>
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Support/Path.h>
+#include <llvm/Target/TargetMachine.h>
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
@@ -46,6 +51,9 @@ namespace {
 // may be called anytime
 struct jit {
     std::unique_ptr<LLJIT> lljit;
+    // the code generator of the objects, that the JIT links, which are
+    // cached, see [compile]
+    std::unique_ptr<TargetMachine> tm;
 };
 
 jit *jit_val(value v) { return *static_cast<jit **>(Data_custom_val(v)); }
@@ -134,10 +142,13 @@ extern "C" value bap_llvm_jit_create(value unit) {
     auto host = JITTargetMachineBuilder::detectHost();
     if (!host) fail(message(host.takeError()));
     host->setCodeModel(CodeModel::Large);
+    auto tm = host->createTargetMachine();
+    if (!tm) fail(message(tm.takeError()));
     auto lljit = LLJITBuilder().setJITTargetMachineBuilder(std::move(*host)).create();
     if (!lljit) fail(message(lljit.takeError()));
     r = caml_alloc_custom(&jit_ops, sizeof(jit *), 0, 1);
-    *static_cast<jit **>(Data_custom_val(r)) = new jit{std::move(*lljit)};
+    *static_cast<jit **>(Data_custom_val(r)) =
+        new jit{std::move(*lljit), std::move(*tm)};
     CAMLreturn(r);
 }
 
@@ -155,12 +166,11 @@ extern "C" value bap_llvm_jit_define(value v, value name, value addr) {
     CAMLreturn(Val_unit);
 }
 
-// [compile jit ir name] the code of the module, whose text is [ir],
-// which is optimized, and the address of its function [name]
-extern "C" value bap_llvm_jit_compile(value v, value ir, value name) {
-    CAMLparam3(v, ir, name);
-    CAMLlocal1(r);
-    jit *j = jit_val(v);
+namespace {
+
+// the object of the module, whose text is [ir], which is optimized
+std::unique_ptr<MemoryBuffer> compile_object(jit *j, value ir,
+                                             const char *name) {
     auto ctx = std::make_unique<LLVMContext>();
     SMDiagnostic diag;
     auto m = parseAssemblyString(
@@ -177,20 +187,86 @@ extern "C" value bap_llvm_jit_compile(value v, value ir, value name) {
     m->setDataLayout(j->lljit->getDataLayout());
     m->setTargetTriple(j->lljit->getTargetTriple());
     optimize(*m);
-    auto tracker = j->lljit->getMainJITDylib().createResourceTracker();
-    if (auto err = j->lljit->addIRModule(
-            tracker, ThreadSafeModule(std::move(m), std::move(ctx))))
-        fail(message(std::move(err)));
-    auto sym = j->lljit->lookup(String_val(name));
-    if (!sym) {
-        std::string msg = message(sym.takeError());
-        if (auto err = tracker->remove()) consumeError(std::move(err));
-        fail(msg);
+    SmallVector<char, 0> buf;
+    raw_svector_ostream out(buf);
+    legacy::PassManager pm;
+    if (j->tm->addPassesToEmitFile(pm, out, nullptr,
+                                   CodeGenFileType::ObjectFile))
+        fail("the code generator can't emit the objects");
+    pm.run(*m);
+    return MemoryBuffer::getMemBufferCopy(StringRef(buf.data(), buf.size()),
+                                          name);
+}
+
+// writes the object to the file, through a new temporary file in its
+// folder, so that the file is never partly written
+void save(const std::string &path, const MemoryBuffer &obj) {
+    SmallString<256> tmp;
+    int fd;
+    if (sys::fs::createUniqueFile(path + ".%%%%%%.tmp", fd, tmp)) return;
+    {
+        raw_fd_ostream out(fd, /*shouldClose=*/true);
+        out << obj.getBuffer();
+        if (out.has_error()) {
+            out.clear_error();
+            sys::fs::remove(tmp);
+            return;
+        }
     }
-    r = caml_alloc_custom(&code_ops, sizeof(code *), 0, 1);
-    *static_cast<code **>(Data_custom_val(r)) =
-        new code{tracker, sym->getValue()};
-    CAMLreturn(r);
+    if (sys::fs::rename(tmp, path)) sys::fs::remove(tmp);
+}
+
+} // namespace
+
+// [compile jit ir name path] the code of the module, whose text is [ir],
+// which is optimized, and the address of its function [name], whose
+// object is cached in the file [path], unless it is empty, and is read
+// from it, if it is there
+extern "C" value bap_llvm_jit_compile(value v, value ir, value name,
+                                      value path) {
+    CAMLparam4(v, ir, name, path);
+    CAMLlocal1(r);
+    jit *j = jit_val(v);
+    std::string file(String_val(path), caml_string_length(path));
+    std::unique_ptr<MemoryBuffer> obj;
+    bool cached = false;
+    if (!file.empty()) {
+        auto b = MemoryBuffer::getFile(file);
+        if (b) {
+            obj = std::move(*b);
+            cached = true;
+        }
+    }
+    for (;;) {
+        if (!obj) {
+            obj = compile_object(j, ir, String_val(name));
+            if (!file.empty()) save(file, *obj);
+        }
+        auto tracker = j->lljit->getMainJITDylib().createResourceTracker();
+        uint64_t address = 0;
+        Error err = j->lljit->addObjectFile(tracker, std::move(obj));
+        if (!err) {
+            auto sym = j->lljit->lookup(String_val(name));
+            if (sym)
+                address = sym->getValue();
+            else
+                err = sym.takeError();
+        }
+        if (err) {
+            std::string msg = message(std::move(err));
+            if (auto e = tracker->remove()) consumeError(std::move(e));
+            // the cached object, that is broken, is compiled anew
+            if (cached) {
+                cached = false;
+                sys::fs::remove(file);
+                continue;
+            }
+            fail(msg);
+        }
+        r = caml_alloc_custom(&code_ops, sizeof(code *), 0, 1);
+        *static_cast<code **>(Data_custom_val(r)) = new code{tracker, address};
+        CAMLreturn(r);
+    }
 }
 
 // [symbol jit name] the address of the symbol [name] of a module, e.g.,

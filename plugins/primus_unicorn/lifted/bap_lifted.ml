@@ -29,6 +29,7 @@ type config = {
   big_endian : bool;
   bits : int;
   jit : bool;
+  cache : string option;
 }
 
 type kind =
@@ -127,6 +128,7 @@ type jit = {
   mutable jitted : int;  (** the instructions, that the blocks ran *)
   compiles : int Int64.Table.t;  (** the blocks compiled at the addresses *)
   mutable live : int;  (** the blocks, that are not released *)
+  llvm : Bap_llvm_jit.t Lazy.t;  (** the JIT of the engine *)
   globals : int Int.Table.t;
       (** the indices of the registers in [registers], see [global] *)
   mutable registers : Bytes.t array;
@@ -242,6 +244,26 @@ let max_linked = 32
 (* if the engine stopped in an atomic sequence, whose store would succeed,
    if another thread wrote in between, so that the threads don't switch *)
 let in_atomic t = Option.exists t.linked ~f:(fun at -> t.ran - at < max_linked)
+
+(* the times of the lifts, the compiles of the JIT, and the runs of the
+   blocks, with BAP_LIFTED_STATS, which are not measured else, as the
+   time is not free to get *)
+let stats = Option.is_some (Sys.getenv "BAP_LIFTED_STATS")
+let lift_time = ref 0.
+let compile_time = ref 0.
+let run_time = ref 0.
+let lifted_count = ref 0
+let compiled_count = ref 0
+
+let timed time f =
+  if not stats then f ()
+  else
+    let start = Time_float.now () in
+    Exn.protect ~f ~finally:(fun () ->
+        time :=
+          !time
+          +. Time_float.Span.to_sec (Time_float.diff (Time_float.now ()) start))
+
 let page_size = 0x1000L
 let page_of addr = Int64.(addr land lnot (page_size - 1L))
 
@@ -305,6 +327,7 @@ let create config arch mode =
                jitted = 0;
                compiles = Int64.Table.create ();
                live = 0;
+               llvm = lazy (Bap_lifted_jit.create ());
                globals = Int.Table.create ();
                registers = [||];
              });
@@ -314,9 +337,12 @@ let create config arch mode =
   if Option.is_some (Sys.getenv "BAP_LIFTED_STATS") then
     at_exit (fun () ->
         Printf.eprintf
-          "lifted engine: %d instructions run, %d unsupported, %d jitted\n%!"
+          "lifted engine: %d instructions run, %d unsupported, %d jitted, %d \
+           lifts in %.3f s, %d compiles in %.3f s, the blocks ran %.3f s\n\
+           %!"
           t.ran t.unsupported
-          (Option.value_map t.jit ~default:0 ~f:(fun j -> j.jitted)));
+          (Option.value_map t.jit ~default:0 ~f:(fun j -> j.jitted))
+          !lifted_count !lift_time !compiled_count !compile_time !run_time);
   t
 
 let check t = if t.closed then invalid_arg "the engine is closed"
@@ -1351,7 +1377,8 @@ let lifted t pc =
     ->
       Some insn
   | _ -> (
-      match t.config.lift ~thumb pc code with
+      incr lifted_count;
+      match timed lift_time (fun () -> t.config.lift ~thumb pc code) with
       | None -> None
       | Some (size, name, blks) ->
           (* the jumps of ARM tell the mode, see [Primus.Interworking] *)
@@ -1718,7 +1745,11 @@ let compile_block t j pc =
     | Ok b -> (
         if verbose () then
           Printf.eprintf "lifted engine: a block of %d at %Lx\n%!" b.length pc;
-        match Bap_lifted_jit.native b with
+        incr compiled_count;
+        match
+          timed compile_time (fun () ->
+              Bap_lifted_jit.native ?cache:t.config.cache (Lazy.force j.llvm) b)
+        with
         | exception Failure msg ->
             if verbose () then
               Printf.eprintf "lifted engine: the block at %Lx failed: %s\n%!" pc
@@ -1852,7 +1883,12 @@ let exec ?until ?count t j (b : block) pc n =
     | Some c -> Int.min (c - n) max_chained
     | None -> max_chained)
     (Option.value until ~default:(-1L));
-  let r = Bap_lifted_jit.Runtime.run b.fn j.mem j.registers b.code pc in
+  let r =
+    if stats then
+      timed run_time (fun () ->
+          Bap_lifted_jit.Runtime.run b.fn j.mem j.registers b.code pc)
+    else Bap_lifted_jit.Runtime.run b.fn j.mem j.registers b.code pc
+  in
   (* the instructions of the blocks, that ran before the last one *)
   let chained = Bap_lifted_jit.Runtime.chained j.mem in
   let pc, b =

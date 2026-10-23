@@ -1077,29 +1077,33 @@ module Runtime = struct
   [@@noalloc]
 end
 
-(* the JIT of the program, whose blocks call the runtime *)
-let llvm =
-  lazy
-    (let jit = Bap_llvm_jit.create () in
-     let load, store = Runtime.helpers () in
-     Bap_llvm_jit.define jit "bap_jit_load" load;
-     Bap_llvm_jit.define jit "bap_jit_store" store;
-     jit)
+(* the JIT of an engine, whose blocks call the runtime, which has its
+   own, as the blocks of the same code, e.g., of two emulators of the
+   same program, have the same names *)
+let create () =
+  let jit = Bap_llvm_jit.create () in
+  let load, store = Runtime.helpers () in
+  Bap_llvm_jit.define jit "bap_jit_load" load;
+  Bap_llvm_jit.define jit "bap_jit_store" store;
+  jit
 
-let blocks = ref 0
-
-(* the code of the block *)
-let native block =
-  incr blocks;
-  let name = sprintf "bap_block_%d" !blocks in
+(* the code of the block, whose name is the digest of its IR, so that its
+   object is the same, in the other runs of the program, which is in the
+   [cache], if any, and the IR of which BAP_LIFTED_IR=DIR writes *)
+let native ?cache llvm block =
+  let name = "bap_block_" ^ Stdlib.Digest.(to_hex (string block.ir)) in
   let ir =
     String.substr_replace_first block.ir ~pattern:"@block("
       ~with_:("@" ^ name ^ "(")
     |> String.substr_replace_all ~pattern:"@block_slots"
          ~with_:("@" ^ name ^ "_slots")
   in
-  (match Sys.getenv "BAP_DUMP_IR" with
-  | Some dir -> Out_channel.write_all (dir ^ "/" ^ name ^ ".ll") ~data:ir
+  (match Sys.getenv "BAP_LIFTED_IR" with
+  | Some dir ->
+      Out_channel.write_all (Filename.concat dir (name ^ ".ll")) ~data:ir
   | None -> ());
-  let code = Bap_llvm_jit.compile (Lazy.force llvm) ir name in
-  (code, Bap_llvm_jit.symbol (Lazy.force llvm) (name ^ "_slots"))
+  let cache =
+    Option.map cache ~f:(fun dir -> Filename.concat dir (name ^ ".o"))
+  in
+  let code = Bap_llvm_jit.compile ?cache llvm ir name in
+  (code, Bap_llvm_jit.symbol llvm (name ^ "_slots"))
