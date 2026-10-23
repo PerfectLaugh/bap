@@ -1,7 +1,7 @@
 #require "bap-primus-unicorn.emu"
 
 (* The code of the program, that is hostile to the JIT of the lifted
-   engine, see bap_engine_jit.ml, runs in Unicorn and in the lifted
+   engine, see bap_lifted_jit.ml, runs in Unicorn and in the lifted
    engine, whose results must be the same:
 
      bap script hostile.ml x86_64-linux-gnu-echo
@@ -22,8 +22,8 @@ let status = function
   | Exited _ -> "exited"
   | Failed _ -> "failed"
 
-let run name lifted =
-  let emu = Emu.create ~lifted (Bap_script.project ~disassemble:true file) in
+let run name engine =
+  let emu = Emu.create ~engine (Bap_script.project ~disassemble:true file) in
   (* the scenarios start at their own addresses, as the JIT counts the
      blocks, that it compiled, by the address *)
   let start = Emu.pc emu in
@@ -79,5 +79,5 @@ let run name lifted =
   print "wrap %s, %s" (status hot) wrapped
 
 let () =
-  run "unicorn" false;
-  run "lifted" true
+  run "unicorn" `Unicorn;
+  run "lifted" `Lifted

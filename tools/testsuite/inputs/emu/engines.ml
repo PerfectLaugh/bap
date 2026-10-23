@@ -8,15 +8,15 @@ module Emu = Bap_emu
    same instructions and accesses, while the blocks may end elsewhere *)
 let () =
   let file = List.hd_exn (Bap_script.args ()) in
-  let run lifted blocks =
-    let emu = Emu.create ~lifted ~args:[ "hi" ] (Bap_script.project file) in
+  let run engine blocks =
+    let emu = Emu.create ~engine ~args:[ "hi" ] (Bap_script.project file) in
     let trace = Emu.Trace.start ~size:(1 lsl 16) ~blocks ~accesses:4096 emu in
     ignore (Emu.run emu);
     (Emu.Trace.insns trace, Emu.Trace.accesses trace)
   in
   List.iter [ false; true ] ~f:(fun blocks ->
-      let insns, accesses = run false blocks in
-      let insns', accesses' = run true blocks in
+      let insns, accesses = run `Unicorn blocks in
+      let insns', accesses' = run `Lifted blocks in
       let key (a : Emu.Trace.access) =
         (a.addr, a.size, a.write, a.value, if blocks then a.pc else 0L)
       in

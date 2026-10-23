@@ -6,6 +6,7 @@
  (inline_tests)
  (libraries
   bap
+  bap-primus-lisp.softfloat
   bap-c
   bap-core-theory
   bap-knowledge

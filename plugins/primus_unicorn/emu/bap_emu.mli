@@ -60,12 +60,13 @@ val create :
   ?envp:string list ->
   ?entry:string ->
   ?restore:string ->
-  ?lifted:bool ->
+  ?engine:[ `Unicorn | `Lifted ] ->
   project ->
   t
 (** [create project] starts the program of [project], from [entry], by default
     its entry point, or [_start], in the [system], by default
-    [bap:unicorn-executor], with the [components], e.g., [bap:debugger], the
+    [bap:unicorn-executor], or [bap:lifted-executor] of the lifted [engine],
+    with the [components], e.g., [bap:debugger], the
     program arguments [args], without the name of the program, and the
     environment [envp], and pauses it before its first instruction runs in
     Unicorn.
@@ -78,9 +79,13 @@ val create :
     With [restore] the program continues from the checkpoint in the file, see
     {!save}, instead of the [entry], and pauses before its address.
 
-    If [lifted], by default [--primus-unicorn-engine=lifted], the native code
-    runs in the lifted engine, see [Bap_engine], which runs the semantics of the
-    instructions, that BAP lifts, rather than in Unicorn. *)
+    The native code runs in the [engine]: [`Unicorn], or [`Lifted], the lifted
+    engine, see [Bap_lifted], which runs the semantics of the instructions,
+    that BAP lifts. By default, it is the engine of the [system], e.g., of
+    [bap:lifted-executor], or, without the [system], [`Lifted], if the
+    environment variable [BAP_EMU_ENGINE] is [lifted], e.g., in the
+    testsuite, or else [`Unicorn]. The options of the plugin of the engine,
+    e.g., [--primus-lifted-timeout], apply to the program. *)
 
 val run : ?until:int64 -> t -> status
 (** [run emu] continues the program, until it pauses, e.g., before the

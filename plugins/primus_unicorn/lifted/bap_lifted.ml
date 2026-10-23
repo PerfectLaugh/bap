@@ -1,5 +1,5 @@
 (* The lifted engine, which runs the IR of the instructions, that BAP
-   lifts, with the interface of Unicorn, see bap_engine.mli.
+   lifts, with the interface of Unicorn, see bap_lifted.mli.
 
    The registers are the registers of Unicorn, their bytes in the order
    of the host, by their identifiers, so that the registers of BAP are
@@ -28,6 +28,7 @@ type config = {
   pc : int;
   big_endian : bool;
   bits : int;
+  jit : bool;
 }
 
 type kind =
@@ -49,7 +50,7 @@ type hook = {
 }
 
 (* the bytes of the pages are outside of the heap, as the blocks, that
-   the JIT compiled, access them, see Bap_engine_jit *)
+   the JIT compiled, access them, see Bap_lifted_jit *)
 type page = { data : Bigstring.t; mutable perm : Uc.Perm.t }
 
 (* the outcome of an instruction *)
@@ -70,7 +71,7 @@ type insn = {
 }
 
 (* the block, that the JIT compiled, of the instructions, that start at
-   the addresses, see Bap_engine_jit *)
+   the addresses, see Bap_lifted_jit *)
 type block = {
   native : Bap_llvm_jit.code;
   fn : nativeint;
@@ -88,7 +89,7 @@ type block = {
 type compiled = Counting of int | Compiled of block | Failed
 
 type jit = {
-  mem : Bap_engine_jit.Runtime.mem;
+  mem : Bap_lifted_jit.Runtime.mem;
   blocks : compiled Int64.Table.t;
   mutable gen : int;  (** the version of the hooks *)
   mutable allowed : bool;
@@ -131,7 +132,7 @@ type t = {
           record once, as Unicorn reads it once *)
   mutable ran : int;  (** the instructions, that the engine ran *)
   mutable unsupported : int;  (** the instructions, that it couldn't run *)
-  jit : jit option;  (** unless BAP_LIFTED_JIT is 0, or LLVM can't *)
+  jit : jit option;  (** if [config.jit], on a little-endian host *)
 }
 
 exception Fault of Uc.access * int64
@@ -189,14 +190,11 @@ let create config arch mode =
       ran = 0;
       unsupported = 0;
       jit =
-        (if
-           Sys.big_endian
-           || Option.equal String.equal (Sys.getenv "BAP_LIFTED_JIT") (Some "0")
-         then None
+        (if Sys.big_endian || not config.jit then None
          else
            Some
              {
-               mem = Bap_engine_jit.Runtime.create ();
+               mem = Bap_lifted_jit.Runtime.create ();
                blocks = Int64.Table.create ();
                gen = 0;
                allowed = true;
@@ -308,7 +306,7 @@ let mem_map t addr size perm =
       Hashtbl.set t.fresh ~key:page ~data:();
       Hashtbl.set t.pages ~key:page ~data:{ data; perm };
       Option.iter t.jit ~f:(fun j ->
-          Bap_engine_jit.Runtime.map j.mem page data (perm :> int)))
+          Bap_lifted_jit.Runtime.map j.mem page data (perm :> int)))
 
 let mem_unmap t addr size =
   check t;
@@ -316,7 +314,7 @@ let mem_unmap t addr size =
       if not (Hashtbl.mem t.pages page) then
         error 11 "Invalid memory mapping (UC_ERR_NOMEM)");
   pages_of addr size (fun page ->
-      Option.iter t.jit ~f:(fun j -> Bap_engine_jit.Runtime.unmap j.mem page);
+      Option.iter t.jit ~f:(fun j -> Bap_lifted_jit.Runtime.unmap j.mem page);
       Hashtbl.remove t.pages page)
 
 let mem_protect t addr size perm =
@@ -326,7 +324,7 @@ let mem_protect t addr size perm =
       | Some p ->
           p.perm <- perm;
           Option.iter t.jit ~f:(fun j ->
-              Bap_engine_jit.Runtime.protect j.mem page (perm :> int))
+              Bap_lifted_jit.Runtime.protect j.mem page (perm :> int))
       | None -> error 11 "Invalid memory mapping (UC_ERR_NOMEM)")
 
 let offset addr = Int64.(to_int_exn (addr - page_of addr))
@@ -762,7 +760,7 @@ let write_host b x =
    lets, are the slots of an array, so that an instruction, that runs
    again, doesn't look up the names of its variables. *)
 
-module F = Primus_lisp_library_plugin.Primus_lisp_softfloat
+module F = Primus_lisp_softfloat
 
 type ctx = {
   t : t;
@@ -1251,7 +1249,7 @@ let fault_error (access : Uc.access) =
       (uc_err_fetch_prot, "Fetch from non-executable memory (UC_ERR_FETCH_PROT)")
   | Read | Write | Fetch | Read_after -> (11, "Invalid memory access")
 
-(* The blocks, that the JIT compiles, see Bap_engine_jit, which start at
+(* The blocks, that the JIT compiles, see Bap_lifted_jit, which start at
    the targets of the jumps, that run [hot] times, and run the
    instructions after them, until the one, that may jump, which ends the
    block, as in Unicorn, at most [max_block] of them, that don't have
@@ -1316,13 +1314,13 @@ let compile_block t j pc =
   let insns =
     List.map candidates ~f:(fun (pc, insn) ->
         {
-          Bap_engine_jit.pc;
+          Bap_lifted_jit.pc;
           next = Int64.(pc + of_int insn.size);
           blks = insn.blks;
         })
   in
   match
-    Bap_engine_jit.compile ~locate:t.config.locate ~reg_size:(reg_size t) insns
+    Bap_lifted_jit.compile ~locate:t.config.locate ~reg_size:(reg_size t) insns
   with
   | Error reason ->
       if verbose () then
@@ -1331,7 +1329,7 @@ let compile_block t j pc =
   | Ok b -> (
       if verbose () then
         Printf.eprintf "lifted engine: a block of %d at %Lx\n%!" b.length pc;
-      match Bap_engine_jit.native b with
+      match Bap_lifted_jit.native b with
       | exception Failure msg ->
           if verbose () then
             Printf.eprintf "lifted engine: the block at %Lx failed: %s\n%!" pc
@@ -1383,7 +1381,7 @@ let exec t j (b : block) pc =
         trace_insn t b.pcs.(i) insn.size insn.thumb
       done
   in
-  let r = Bap_engine_jit.Runtime.run b.fn j.mem b.regs b.code pc in
+  let r = Bap_lifted_jit.Runtime.run b.fn j.mem b.regs b.code pc in
   let k = r lsr 2 in
   let next k = Int64.(b.pcs.(k) + of_int b.insns.(k).size) in
   if r < 0 then (
@@ -1399,7 +1397,7 @@ let exec t j (b : block) pc =
         Some (b.pcs.(k), k, false)
     | 1 ->
         ran (k + 1);
-        let target = Bap_engine_jit.Runtime.next j.mem in
+        let target = Bap_lifted_jit.Runtime.next j.mem in
         Some (jump t b.insns.(k) ~next:(next k) target, k + 1, true)
     | _ ->
         ran (k + 1);

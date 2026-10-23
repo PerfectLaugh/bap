@@ -48,6 +48,9 @@ module Lifted : sig
     pc : int;  (** the register of the engine, that is the program counter *)
     big_endian : bool;  (** the order of the bytes of the memory *)
     bits : int;  (** the size of an address *)
+    jit : bool;
+        (** if the blocks, that run often, are compiled to the native code,
+            see {!Bap_lifted} *)
   }
 end
 

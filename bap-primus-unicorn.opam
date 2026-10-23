@@ -18,6 +18,7 @@ depends: [
   "bap-llvm" {= version}
   "bap-main" {= version}
   "bap-primus" {= version}
+  "bap-primus-lisp" {= version}
   "bap-std" {= version}
   "bitvec" {= version}
   "core"

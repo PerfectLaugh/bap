@@ -123,6 +123,24 @@ type event = Loaded of int64 * int * int64 | Stored of int64 * int * int64
 
 module Id = Monads.Std.Monad.State.Multi.Id
 
+(* the engines of the executors, bap:unicorn-executor, and
+   bap:lifted-executor, see [Bap_lifted] *)
+type kind = [ `Unicorn | `Lifted ]
+
+(* the options of the plugin of an engine, primus-unicorn, or
+   primus-lifted, which are the defaults of its sessions: the seconds that
+   a machine may run, the file of the checkpoint and its point, the file
+   of the checkpoint to continue from, the functions of libc that run
+   natively, and if the lifted engine compiles its blocks *)
+type options = {
+  mutable timeout : float option;
+  mutable checkpoint : (string * string) option;
+  mutable restore : string option;
+  mutable native_stubs : String.Set.t;
+  mutable jit : bool;
+}
+
+
 type engine = {
   session : session;  (** the system, whose machines run in the engine *)
   uc : Uc.t;
@@ -260,8 +278,9 @@ and session = {
   mutable stepping : bool;
   stop_addrs : Int64.Hash_set.t;
   lifted : bool;
-      (** the machines run in the lifted engine, see [Bap_engine], rather than
-          in Unicorn *)
+      (** the machines run in the lifted engine, see [Bap_lifted], of
+          bap:lifted-executor, rather than in Unicorn *)
+  jit : bool;  (** the lifted engine compiles the blocks, that run often *)
   mutable lifter :
     ((thumb:bool -> int64 -> string -> (int * string * blk term list) option)
     * (tid -> string option))
@@ -298,19 +317,28 @@ and session = {
           slice, see [Make.Threads] *)
 }
 
-(* the options of the plugin, which are the defaults of the sessions: the
-   seconds that a machine may run, the file of the checkpoint and its
-   point, the file of the checkpoint to continue from, and the functions
-   of libc that run natively *)
-let timeout : float option ref = ref None
-let checkpoint : (string * string) option ref = ref None
-let restore : string option ref = ref None
-let native_stubs : String.Set.t ref = ref (String.Set.of_list Native.names)
-let lifted : bool ref = ref false
-
-let create_session ?(restore = !restore) ?(lifted = !lifted) () =
+let default_options () =
   {
-    lifted;
+    timeout = None;
+    checkpoint = None;
+    restore = None;
+    native_stubs = String.Set.of_list Native.names;
+    jit = true;
+  }
+
+let unicorn_options = default_options ()
+let lifted_options = default_options ()
+
+let options : kind -> options = function
+  | `Unicorn -> unicorn_options
+  | `Lifted -> lifted_options
+
+let create_session ?restore ?(engine : kind = `Unicorn) () =
+  let o = options engine in
+  let restore = Option.value restore ~default:o.restore in
+  {
+    lifted = Poly.equal engine `Lifted;
+    jit = o.jit;
     lifter = None;
     active = None;
     recipe = None;
@@ -319,7 +347,7 @@ let create_session ?(restore = !restore) ?(lifted = !lifted) () =
     dead = Id.Hash_set.create ();
     own_code = Addr.Table.create ();
     stubs = Addr.Table.create ();
-    native_stubs = !native_stubs;
+    native_stubs = o.native_stubs;
     natives = String.Table.create ();
     signatures = String.Table.create ();
     names = Int64.Table.create ();
@@ -328,10 +356,10 @@ let create_session ?(restore = !restore) ?(lifted = !lifted) () =
     thumb = Addr.Hash_set.create ();
     thumb_symbols = Int64.Hash_set.create ();
     bare_mode = false;
-    timeout = !timeout;
+    timeout = o.timeout;
     accounted = Stdlib.Sys.time ();
     ticks = 0;
-    checkpoint = !checkpoint;
+    checkpoint = o.checkpoint;
     checkpoint_addr = None;
     checkpointed = false;
     restore;
@@ -1027,6 +1055,7 @@ let create session target ~foreign ~externals =
             big_endian =
               Theory.Endianness.(equal eb) (Theory.Target.endianness target);
             bits = Theory.Target.bits target;
+            jit = session.jit;
           }
           arch mode
     | _ -> Uc.create arch mode
@@ -4808,6 +4837,28 @@ let () =
 (* links the program, as load-binary does, except that its subroutines
    run in Unicorn, and keeps the linked code to tell the addresses of the
    subroutines that other components replace *)
+(* The engine of the new sessions of the system, which the component
+   bap:lifted-emulator of the lifted executors chooses, see
+   [Lifted_emulator], while the scripts choose the engines of theirs, see
+   [Bap_emu.create].
+
+   The components initialize in the order of the hashes of their names,
+   see [Primus.System], so the executors share the loader, whose place in
+   the order is tested, and the name of the component, that chooses the
+   engine, is before it, which the loader checks, see [chosen]. *)
+let engine_kind =
+  Primus.Machine.State.declare ~uuid:"0e5d8a3c-6f21-4b9e-9c47-3a1f2d8e7b60"
+    ~name:"executor-engine" (fun _ -> (`Unicorn : kind))
+
+(* the engine, that the loader chose for its new session *)
+let chosen =
+  Primus.Machine.State.declare ~uuid:"5b7c2e19-8d4a-4f63-a1e0-9c6b3d2f8a47"
+    ~name:"executor-engine-chosen" (fun _ -> (None : kind option))
+
+module Lifted_emulator (Machine : Primus.Machine.S) = struct
+  let init () = Machine.Global.put engine_kind `Lifted
+end
+
 module Loader (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
   open Machine.Let
@@ -5131,25 +5182,41 @@ module Loader (Machine : Primus.Machine.S) = struct
      [Bap_emu.create], or a new one *)
   let start_session =
     let* proj = Machine.get () in
-    let s =
+    let* s =
       match
         Option.bind
           (Project.get proj session_tag)
           ~f:(Hashtbl.find_and_remove sessions)
       with
-      | Some s -> s
-      | None -> create_session ()
+      | Some s -> Machine.return s
+      | None ->
+          let* engine = Machine.Global.get engine_kind in
+          let+ () = Machine.Global.put chosen (Some engine) in
+          create_session ~engine ()
     in
     s.bare_mode <- not (Project.disassembled proj);
     index_thumb_symbols s (Project.specification proj);
     let* () = Machine.Global.put session_state s in
     link_program s
 
+  (* the component, that chose the engine, initialized before the
+     loader, see [engine_kind] *)
+  let check_engine () =
+    let* engine = Machine.Global.get engine_kind in
+    Machine.Global.get chosen >>= function
+    | Some chosen when not (Poly.equal chosen engine) ->
+        Machine.raise
+          (Unicorn_failure
+             "the engine was chosen after the loader started, as the order \
+              of the components of Primus changed")
+    | _ -> Machine.return ()
+
   let init () =
     let module Exec = Make (Machine) in
     Machine.sequence
       [
         start_session;
+        Primus.System.init >>> check_engine;
         Primus.System.init >>> create_engine;
         Primus.Machine.fork >>> Exec.forked;
         Primus.Linker.unresolved >>> link_unresolved;

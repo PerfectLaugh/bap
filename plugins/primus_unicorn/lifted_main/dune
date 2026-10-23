@@ -1,0 +1,15 @@
+; The plugin of the executors of the lifted engine, see bap_lifted.mli,
+; whose options are --primus-lifted-*.
+
+(library
+ (name bap_primus_lifted_main)
+ (public_name bap-primus-unicorn.lifted-main)
+ (modules primus_lifted_main)
+ (libraries bap-primus-unicorn.plugin))
+
+(plugin
+ (name primus-lifted)
+ (package bap-primus-unicorn)
+ (libraries bap-primus-unicorn.lifted-main)
+ (site
+  (bap-common plugins)))

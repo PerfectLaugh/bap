@@ -1034,6 +1034,7 @@ so this package is distributed under GPL-2.0, unlike the rest of BAP.")
   (bap-llvm (= :version))
   (bap-main (= :version))
   (bap-primus (= :version))
+  (bap-primus-lisp (= :version))
   (bap-std (= :version))
   (bitvec (= :version))
   core

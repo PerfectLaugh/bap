@@ -1,0 +1,8 @@
+(* the executors of the lifted engine, see Primus_unicorn_options *)
+
+let () =
+  Bap_primus_unicorn_plugin.Primus_unicorn_options.declare ~engine:`Lifted
+    ~name:"lifted" ~runs_in:"the lifted engine"
+    ~doc:
+      "runs the binary programs in Primus with the lifted engine, which runs \
+       the semantics of the instructions, that BAP lifts, see Bap_lifted"

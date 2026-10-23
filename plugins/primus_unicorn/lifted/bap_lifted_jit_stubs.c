@@ -1,5 +1,5 @@
 /* The runtime of the blocks of the lifted engine, that the JIT of LLVM
-   compiled, see bap_engine_jit.ml: the memory, whose pages are the
+   compiled, see bap_lifted_jit.ml: the memory, whose pages are the
    bigarrays of the engine, and the accesses of the blocks, which check
    the permissions, and log the bytes, that the stores overwrite, so that
    the instruction, whose access faults, is undone, as the lifted engine
@@ -35,7 +35,7 @@
 typedef struct jit_mem jit_mem;
 
 /* the frame, whose fields the code reads and writes, see the type %frame
-   of bap_engine_jit.ml */
+   of bap_lifted_jit.ml */
 typedef struct {
     jit_mem *mem;
     uint64_t next;  /* the target of the jump of the block */
@@ -146,9 +146,9 @@ value bap_jit_mem_map(value mem, value page, value data, value perm) {
     jit_mem *m = Mem_val(mem);
     uint64_t p = (uint64_t)Int64_val(page);
     if (p != PAGE_OF(p) || Caml_ba_array_val(data)->dim[0] != PAGE_SIZE)
-        caml_invalid_argument("Bap_engine_jit.Runtime.map");
+        caml_invalid_argument("Bap_lifted_jit.Runtime.map");
     flush_tlb(m);
-    if (find(m, p)) caml_invalid_argument("Bap_engine_jit.Runtime.map: mapped");
+    if (find(m, p)) caml_invalid_argument("Bap_lifted_jit.Runtime.map: mapped");
     if (2 * (m->count + 1) > m->capacity) rehash(m, 2 * m->capacity);
     entry e = {p, Caml_ba_data_val(data), Int_val(perm)};
     insert(m->seed, m->table, m->capacity, e);
@@ -287,7 +287,7 @@ typedef int32_t (*block)(frame *, uint8_t **);
 
 /* [run fn mem regs code addr] runs the block [fn], whose instructions
    are the bytes [code] at [addr], and whose registers are [regs], see
-   bap_engine_jit.ml for the result, or returns -1, if the code changed */
+   bap_lifted_jit.ml for the result, or returns -1, if the code changed */
 intnat bap_jit_run(intnat fn, value mem, value regs, value code,
                    int64_t addr) {
     jit_mem *m = Mem_val(mem);

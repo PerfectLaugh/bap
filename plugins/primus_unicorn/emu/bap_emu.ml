@@ -157,8 +157,29 @@ let lifts proj =
    [restore], with its names, which the executor loads, when it starts.
    The system gets the session of the emulator with its project, see
    [X.with_session] *)
-let create ?(system = "bap:unicorn-executor") ?(components = []) ?(init = [])
-    ?(redirects = []) ?(args = []) ?(envp = []) ?entry ?restore ?lifted proj =
+let create ?system ?(components = []) ?(init = []) ?(redirects = [])
+    ?(args = []) ?(envp = []) ?entry ?restore ?engine proj =
+  (* the engine of the system, if it is of one, or else of BAP_EMU_ENGINE,
+     e.g., of the testsuite, see bap_emu.mli *)
+  let engine : X.kind =
+    match (engine, system) with
+    | Some engine, _ -> engine
+    | None, Some system
+      when String.is_substring system ~substring:"lifted-executor" ->
+        `Lifted
+    | None, None
+      when Option.equal String.equal (Sys.getenv "BAP_EMU_ENGINE")
+             (Some "lifted") ->
+        `Lifted
+    | None, _ -> `Unicorn
+  in
+  let system =
+    Option.value system
+      ~default:
+        (match engine with
+        | `Unicorn -> "bap:unicorn-executor"
+        | `Lifted -> "bap:lifted-executor")
+  in
   let init =
     init @ if List.is_empty redirects then [] else [ Io.redirect redirects ]
   in
@@ -188,7 +209,7 @@ let create ?(system = "bap:unicorn-executor") ?(components = []) ?(init = [])
   in
   let program = Option.value (Project.get proj filename) ~default:"a.out" in
   let session =
-    X.create_session ?restore:(Option.map restore ~f:Option.return) ?lifted ()
+    X.create_session ?restore:(Option.map restore ~f:Option.return) ~engine ()
   in
   session.driven <- true;
   session.pause <- true;

@@ -1,0 +1,18 @@
+; The lifted engine, see bap_lifted.mli.
+
+(library
+ (name bap_lifted)
+ (public_name bap-primus-unicorn.lifted)
+ (modules bap_lifted bap_lifted_jit)
+ (private_modules bap_lifted_jit)
+ (foreign_stubs
+  (language c)
+  (names bap_lifted_jit_stubs))
+ (libraries
+  bap
+  bap-llvm
+  bap-primus
+  bap-primus-lisp.softfloat
+  bap-primus-unicorn.unicorn
+  core
+  zarith))

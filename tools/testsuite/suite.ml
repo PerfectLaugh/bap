@@ -1,6 +1,12 @@
 open Printf
 open OUnit2
 
+(* with BAP_TESTSUITE_EXECUTOR=lifted, the cases run the native code in
+   the lifted engine, see Bap_lifted: the commands run the executors of
+   the lifted engine, e.g., bap:lifted-executor, with their options, and
+   the scripts make the emulators of it, see Bap_emu.create *)
+let lifted = Sys.getenv_opt "BAP_TESTSUITE_EXECUTOR" = Some "lifted"
+
 type data = string
 
 let data dir = dir
@@ -68,10 +74,8 @@ let variables env =
     | Some dir -> [ ("BAP_PRIMUS_LISP_CACHE", dir) ]
     | None -> [])
   @
-  (* the engine, that runs the native code, see BAP_TESTSUITE_ENGINE *)
-  match Sys.getenv_opt "BAP_TESTSUITE_ENGINE" with
-  | Some engine -> [ ("BAP_PRIMUS_UNICORN_ENGINE", engine) ]
-  | None -> []
+  (* the engine of the scripts, see [lifted] *)
+  if lifted then [ ("BAP_EMU_ENGINE", "lifted") ] else []
 
 (* the environment of the commands, without the variables of BAP, e.g.,
    the options of the plugins, or BAP_PLUGIN_PATH, which the commands
@@ -144,8 +148,52 @@ let run_command ?(timeout = 600.) ?until ?(env = []) ?(unset = []) case prog
   case.calls <- { command = prog :: args; out; result = status } :: case.calls;
   { text = read_output out; status }
 
+(* [replace ~by pattern s] replaces the occurrences of [pattern] in [s] *)
+let replace ~by pattern s =
+  let n = String.length pattern and b = Buffer.create (String.length s) in
+  let rec loop i =
+    if i > String.length s - n then
+      Buffer.add_string b (String.sub s i (String.length s - i))
+    else if String.sub s i n = pattern then (
+      Buffer.add_string b by;
+      loop (i + n))
+    else (
+      Buffer.add_char b s.[i];
+      loop (i + 1))
+  in
+  loop 0;
+  Buffer.contents b
+
+(* the arguments of bap, whose executors of Unicorn, and their options,
+   are of the lifted engine, see [lifted], but the other arguments, e.g.,
+   the paths of the files of the cases, whose names may have them *)
+let executor args =
+  let systems arg =
+    List.fold_left
+      (fun arg (unicorn, lifted) -> replace ~by:lifted unicorn arg)
+      arg
+      [
+        ("bap:unicorn-executor", "bap:lifted-executor");
+        ("bap:terminating-unicorn-executor", "bap:terminating-lifted-executor");
+        ("bap:unicorn-binary-executor", "bap:lifted-binary-executor");
+      ]
+  in
+  let option = "--primus-unicorn-" in
+  if not lifted then args
+  else
+    List.map
+      (fun arg ->
+        if String.starts_with ~prefix:"--run-systems=" arg then systems arg
+        else if String.starts_with ~prefix:option arg then
+          "--primus-lifted-"
+          ^ String.sub arg (String.length option)
+              (String.length arg - String.length option)
+        else if String.starts_with ~prefix:"bap:" arg then systems arg
+        else arg)
+      args
+
 let bap ?timeout ?until ?env ?unset case args =
-  run_command ?timeout ?until ?env ?unset case case.tools.bap args
+  run_command ?timeout ?until ?env ?unset case case.tools.bap (executor args)
 
 let mc case args = run_command case case.tools.mc args
 let check env name ok = if not ok then env.failed <- name :: env.failed

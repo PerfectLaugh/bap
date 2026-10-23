@@ -18,7 +18,7 @@
    instructions, whose results differ, with their registers.
 
    With engine=lifted, the instructions run in the lifted engine, see
-   Bap_engine, rather than in Primus, from the same state in an emulator
+   Bap_lifted, rather than in Primus, from the same state in an emulator
    of their own, so that the engine is checked against Unicorn. *)
 
 module Emu = Bap_emu
@@ -205,13 +205,13 @@ let engine = opt "engine" "" = "lifted"
 
 let () =
   let emu =
-    Emu.create ~components:Emu.Taint.components
+    Emu.create ~engine:`Unicorn ~components:Emu.Taint.components
       (Bap_script.project ~api ~disassemble:true file)
   in
   let other =
     if engine then
       let other =
-        Emu.create ~lifted:true ~components:Emu.Taint.components
+        Emu.create ~engine:`Lifted ~components:Emu.Taint.components
           (Bap_script.project ~api ~disassemble:true file)
       in
       (* the state, from which each instruction starts, as it may fault *)

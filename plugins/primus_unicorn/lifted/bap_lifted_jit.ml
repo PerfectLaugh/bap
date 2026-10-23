@@ -1,5 +1,5 @@
 (* The blocks of the lifted engine, that the JIT of LLVM compiles, see
-   bap_engine_lifted.ml, which runs them.
+   bap_lifted.ml, which runs them.
 
    A block is the instructions, that run one after another, the IR of
    whose semantics are the functions of LLVM IR
@@ -10,7 +10,7 @@
    the registers of the engine, which are read at the start of the block,
    and written at the end of each instruction, which writes them, so that
    the instruction, whose access faults, writes none. The frame is the
-   one of bap_engine_jit_stubs.c, and the accesses to the memory are the
+   one of bap_lifted_jit_stubs.c, and the accesses to the memory are the
    calls of its functions, which return zero, if they fault.
 
    The block returns 4k, if its instruction k stopped, before it ran,
@@ -551,7 +551,7 @@ let compile ~locate ~reg_size insns =
     Ok { ir = Buffer.contents b; regs; length }
   end
 
-(* the runtime of the blocks, see bap_engine_jit_stubs.c *)
+(* the runtime of the blocks, see bap_lifted_jit_stubs.c *)
 module Runtime = struct
   type mem
 

@@ -1,5 +1,5 @@
 module Uc = Bap_unicorn
-module L = Bap_engine_lifted
+module L = Bap_lifted
 
 exception Error = Bap_unicorn.Error
 
@@ -24,6 +24,7 @@ module Lifted = struct
     pc : int;
     big_endian : bool;
     bits : int;
+    jit : bool;
   }
 end
 
