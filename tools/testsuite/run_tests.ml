@@ -1859,6 +1859,20 @@ let threads data =
         "powerpc-linux-gnu";
         "riscv64-linux-gnu";
       ]
+  @ [
+      (* the thread, that the script pauses more often, than its time
+         slice ends, is preempted, so that main runs, see starve.c *)
+      case "emu/x86_64-linux-gnu-starve" (fun env ->
+          let out =
+            bap env
+              [
+                "script";
+                input "emu/starve.ml";
+                path data "bin/x86_64-linux-gnu-starve";
+              ]
+          in
+          has env "preempts the paused thread" out "ok\nexited\n");
+    ]
   @ List.concat_map
       (fun target ->
         let bin = target ^ "-threads-weird" in

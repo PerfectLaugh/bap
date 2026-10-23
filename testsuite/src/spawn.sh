@@ -1,5 +1,6 @@
 #!/bin/sh
-# builds spawn.c, as threads.sh builds threads-weird.c
+# builds spawn.c, as threads.sh builds threads-weird.c, and starve.c
+# for x86-64
 set -e
 cd "$(dirname "$0")"
 work=$(mktemp -d)
@@ -14,6 +15,11 @@ build() {
         -o $work/libc.so.6
     clang $T -fno-pie -no-pie -Wl,-e,_start -Wl,--dynamic-linker=$loader \
         spawn.c $work/libc.so.6 -o ../bin/$target-spawn
+    if [ "$target" = x86_64-linux-gnu ]; then
+        clang $T -fno-pie -no-pie -Wl,-e,_start \
+            -Wl,--dynamic-linker=$loader starve.c $work/libc.so.6 \
+            -o ../bin/$target-starve
+    fi
     echo "$target: done"
 }
 

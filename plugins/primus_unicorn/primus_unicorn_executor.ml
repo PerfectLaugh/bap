@@ -331,7 +331,10 @@ and session = {
   events : event Queue.t;  (** the events, that the observers see *)
   mutable sliced_at : float;
       (** the processor time, at which the thread, that runs, started its time
-          slice, see [Make.Threads] *)
+          slice, see [Make.Threads], which the pauses of the script shift, as
+          the thread doesn't run, while it is paused *)
+  mutable resumed : bool;
+      (** the thread, that paused, runs, before it is preempted *)
 }
 
 (* the folder, and its parents, which are made, if they aren't there *)
@@ -410,6 +413,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     engine_hooks = [];
     events = Queue.create ();
     sliced_at = 0.;
+    resumed = false;
   }
 
 (* the session of the system, which [Loader.init] creates *)
@@ -2976,7 +2980,7 @@ module Make (Machine : Primus.Machine.S) = struct
      the pages, see [written_page], which are frequent, so they don't go
      through [loop]; the stop at the instruction, which wrote, is skipped
      again, as in [loop] *)
-  let rec start_uc e pc deadline =
+  let rec start_uc ?count e pc deadline =
     let s = e.session in
     e.reason <- None;
     s.skipped_at <- None;
@@ -2987,7 +2991,7 @@ module Make (Machine : Primus.Machine.S) = struct
        else None);
     let error =
       try
-        Uc.start e.uc pc
+        Uc.start e.uc pc ?count
           ?timeout:
             (Option.map deadline ~f:(fun t ->
                  Int.max 1
@@ -3008,7 +3012,7 @@ module Make (Machine : Primus.Machine.S) = struct
         let pc = current_pc e in
         if Option.equal Int64.equal s.skipped_at (Some (code_addr e pc)) then
           s.resumed_at <- s.skipped_at;
-        start_uc e pc deadline
+        start_uc ?count e pc deadline
     | _ -> error
 
   (* the stops of the system, which the hooks see, see [is_stop], and
@@ -5134,11 +5138,15 @@ module Make (Machine : Primus.Machine.S) = struct
     let* e = prepare () in
     let s = e.session in
     if s.driven && s.pause then (
-      (* the thread, that paused, didn't run, so its time slice starts
-         anew, and it runs the instruction, at which it paused *)
-      serve pc
-      >>= fun pc ->
-      s.sliced_at <- Stdlib.Sys.time ();
+      (* the thread, that paused, didn't run, so its time slice is
+         shifted by the pause, rather than started anew, as a script,
+         that pauses it more often than the slice, would starve the
+         other threads, and it runs the instruction, at which it paused,
+         before it is preempted *)
+      let paused = Stdlib.Sys.time () in
+      serve pc >>= fun pc ->
+      s.sliced_at <- s.sliced_at +. (Stdlib.Sys.time () -. paused);
+      s.resumed <- true;
       loop pc)
     else
       check_pages e >>= fun () ->
@@ -5160,8 +5168,12 @@ module Make (Machine : Primus.Machine.S) = struct
           let ends = s.sliced_at +. Threads.slice in
           (* the thread doesn't switch in an atomic sequence of the
              lifted engine, see [Uc.in_atomic] *)
-          if sliced && Float.(now >= ends) && not (Uc.in_atomic e.uc) then
-            Threads.preempt e pc >>= loop
+          let resumed = s.resumed in
+          s.resumed <- false;
+          let expired =
+            sliced && Float.(now >= ends) && not (Uc.in_atomic e.uc)
+          in
+          if expired && not resumed then Threads.preempt e pc >>= loop
           else
             let deadline = Option.map remaining ~f:(fun t -> now +. t) in
             let deadline =
@@ -5172,7 +5184,11 @@ module Make (Machine : Primus.Machine.S) = struct
                      ends)
               else deadline
             in
-            let error = start_uc e pc deadline in
+            (* the thread, whose slice ended, while it was paused, runs
+               the instruction, at which it paused, which the hooks saw,
+               and is preempted after it *)
+            let count = Option.some_if (expired && resumed) 1 in
+            let error = start_uc ?count e pc deadline in
             let* () = account () in
             (* the taint, that the engine changed, goes to Primus, before
                anything sees it, e.g., a script, see [Shadow] *)
