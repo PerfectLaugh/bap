@@ -1302,6 +1302,28 @@ let smc data =
           contains env "runs the patched code" out "s 250216 250216"))
     [ "bap:unicorn-executor"; "bap:lifted-executor" ]
 
+(* calloc of Primus Lisp returns the zeros, also in the arena, whose
+   values are random, which the engine has, and null, if the size
+   overflows, see calloc.c *)
+let calloc data =
+  List.map
+    (fun system ->
+      case ("run/calloc/" ^ system) (fun env ->
+          let out =
+            bap env
+              [
+                path data "bin/x86_64-linux-gnu-calloc";
+                "--passes=run";
+                "--run-systems=" ^ system;
+              ]
+          in
+          sequence env out
+            [
+              ("zeroes the memory", "calloc 0 ");
+              ("fails on the overflow", "overflow \\(nil\\)");
+            ]))
+    [ "bap:stubbed-executor"; "bap:unicorn-executor"; "bap:lifted-executor" ]
+
 (* the stubs of the printf family format the words, that the C ABI
    passes, also on the stack, the streams of libc are the channels of
    Lisp, whether the program refers to them with a copy relocation, or
@@ -2217,6 +2239,7 @@ let tests =
     script_debugger;
     mprotect;
     smc;
+    calloc;
     printf_family;
     mmap;
     pages;

@@ -106,11 +106,18 @@
   (declare (external "free")))
 
 (defun calloc (n s)
-  "allocates memory and initializes it with zero"
+  "allocates memory and initializes it with zero, or returns null, if
+   the size N*S overflows. The zeros are written, rather than allocated,
+   as the chunk may be in the memory, that the program already used,
+   e.g., in the arena, whose values are random, or in the pages, that an
+   emulator, e.g., Unicorn, already has, which the allocation of the
+   memory doesn't change."
   (declare (external "calloc"))
-  (let ((*malloc-initialize-memory* true)
-        (*malloc-initial-value* 0))
-    (malloc (* n s))))
+  (let ((len (* n s)))
+    (if (and n (/= (/ len n) s)) 0
+      (let ((ptr (malloc len)))
+        (when ptr (memset ptr 0 len))
+        ptr))))
 
 
 (defun malloc-heap-size ()
