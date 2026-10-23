@@ -846,6 +846,24 @@ let emu data =
             ("slices the blocks", "slice of blocks: " ^ slice);
             ("has the gap of the blocks", "gap at main: true, complete: false\n");
           ]);
+    (* the trace, that watches a range, records its accesses only, see
+       the script *)
+    case "emu/watch" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/watch.ml";
+              path data "bin/x86_64-linux-gnu-taint-bss";
+            ]
+        in
+        sequence env out
+          [
+            ( "watches in unicorn",
+              "unicorn: reads 512, writes 0, inside true, by 4004eb 400523\n" );
+            ( "watches in the lifted engine",
+              "lifted: reads 512, writes 0, inside true, by 4004eb 400523\n" );
+          ]);
     (* the slices of the odd cases of slice-weird.c, the partial
        registers and bytes, the conditional moves and exchanges, the
        repeated moves, the recursion, the code, that patches itself, in

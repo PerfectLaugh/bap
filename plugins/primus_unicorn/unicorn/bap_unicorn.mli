@@ -301,8 +301,7 @@ module Trace : sig
 
     val record : t -> int64 -> int -> bool -> unit
     (** [record trace pc size thumb] records the instruction, of every [every]
-        one, or the block, of [size] bytes, that starts at [pc], in the mode.
-    *)
+        one, or the block, of [size] bytes, that starts at [pc], in the mode. *)
 
     val extend : t -> int -> unit
     (** [extend trace size] the last block runs the next instruction of [size]
@@ -317,7 +316,8 @@ module Trace : sig
         didn't run, e.g., as it faulted, so that it is recorded again, when it
         runs. *)
 
-    val bound : t -> bool -> bool -> bool -> int64 -> int64 array -> bool -> unit
+    val bound :
+      t -> bool -> bool -> bool -> int64 -> int64 array -> bool -> unit
     (** [bound trace regs mem running pc ranges unknown] the boundary of the
         written registers and memory, whose addresses and sizes are the pairs of
         [ranges], or are [unknown], as {!bounds}, made while the emulation runs,
@@ -326,10 +326,17 @@ module Trace : sig
 end
 
 val trace :
-  ?first:int64 -> ?last:int64 -> ?memory:bool -> t -> Trace.t -> hook list
+  ?first:int64 ->
+  ?last:int64 ->
+  ?watch:int64 * int64 ->
+  ?memory:bool ->
+  t ->
+  Trace.t ->
+  hook list
 (** [trace uc trace] records the instructions from [first] to [last], or the
-    blocks, see {!Trace.create}, and the accesses to the memory, if [memory].
-    The hooks keep the trace alive.
+    blocks, see {!Trace.create}, and the accesses to the memory, if [memory],
+    only the ones, that start from [lower] to [upper] of [watch], inclusive, if
+    it is given. The hooks keep the trace alive.
 
     The instruction, that the emulation stopped at, before it ran it, e.g., at a
     fault, which the emulation repeats, or at a hook, that stops it, isn't

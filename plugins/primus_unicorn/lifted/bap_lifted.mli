@@ -127,6 +127,7 @@ val delete : t -> hook -> unit
 val trace :
   ?first:int64 ->
   ?last:int64 ->
+  ?watch:int64 * int64 ->
   ?memory:bool ->
   t ->
   Bap_unicorn.Trace.t ->

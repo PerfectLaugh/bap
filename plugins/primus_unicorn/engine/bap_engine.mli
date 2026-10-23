@@ -205,7 +205,13 @@ val delete : t -> hook -> unit
 module Trace = Bap_unicorn.Trace
 
 val trace :
-  ?first:int64 -> ?last:int64 -> ?memory:bool -> t -> Trace.t -> hook list
+  ?first:int64 ->
+  ?last:int64 ->
+  ?watch:int64 * int64 ->
+  ?memory:bool ->
+  t ->
+  Trace.t ->
+  hook list
 (** [trace t trace] records the trace, see {!Bap_unicorn.trace}, in either
     engine. *)
 

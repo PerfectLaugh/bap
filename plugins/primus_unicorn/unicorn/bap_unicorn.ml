@@ -219,7 +219,8 @@ module Trace = struct
     external record : t -> int64 -> int -> bool -> unit = "bap_uc_trace_record"
     external extend : t -> int -> unit = "bap_uc_trace_extend"
 
-    external access : t -> bool -> int64 -> int -> int64 -> int64 -> int64 -> unit
+    external access :
+      t -> bool -> int64 -> int -> int64 -> int64 -> int64 -> unit
       = "bap_uc_trace_access_bytecode" "bap_uc_trace_access"
 
     external unrun : t -> int64 -> unit = "bap_uc_trace_unrun"
@@ -228,6 +229,7 @@ module Trace = struct
       t -> bool -> bool -> bool -> int64 -> int64 array -> bool -> unit
       = "bap_uc_trace_bound_bytecode" "bap_uc_trace_bound"
   end
+
   external blocks : t -> bool = "bap_uc_trace_blocks"
   external pcs : t -> int -> pcs = "bap_uc_trace_pcs"
   external sizes : t -> int -> sizes = "bap_uc_trace_sizes"
@@ -255,13 +257,16 @@ external trace_add : t -> Trace.t -> trace_kind -> int64 -> int64 -> int64
 
 (* the trace of the code of ARM has the modes of its blocks, whose hook
    isn't there on the other targets *)
-let trace ?(first = 1L) ?(last = 0L) ?(memory = false) uc trace =
+let trace ?(first = 1L) ?(last = 0L) ?watch ?(memory = false) uc trace =
   let kind = if Trace.blocks trace then Trace_block else Trace_code in
   let mode = trace_add uc trace Trace_mode 1L 0L in
   let code = trace_add uc trace kind first last in
+  (* the hooks of the memory of Unicorn are of the addresses, that the
+     accesses start at *)
+  let lower, upper = Option.value watch ~default:(1L, 0L) in
   List.filter (( <> ) (-1L))
     ([ mode; code ]
-    @ if memory then [ trace_add uc trace Trace_mem 1L 0L ] else [])
+    @ if memory then [ trace_add uc trace Trace_mem lower upper ] else [])
 
 type context
 

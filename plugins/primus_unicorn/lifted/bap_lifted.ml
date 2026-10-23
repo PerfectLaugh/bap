@@ -2734,10 +2734,17 @@ let on_unsupported t f = add t (Unsupported f)
 let on_mem ?first ?last t accesses f =
   add t ?first ?last (Mem (accesses_of accesses, f))
 
-let trace ?first ?last ?(memory = false) t trace =
+let trace ?first ?last ?watch ?(memory = false) t trace =
   Record.prepare trace (Poly.equal t.arch Uc.Arm);
+  (* the range of the hook of the accesses is of their addresses *)
+  let lower, upper =
+    match watch with
+    | Some (lower, upper) -> (Some lower, Some upper)
+    | None -> (None, None)
+  in
   add t ?first ?last (Trace_code trace)
-  :: (if memory then [ add t ?first ?last (Trace_mem trace) ] else [])
+  ::
+  (if memory then [ add t ?first:lower ?last:upper (Trace_mem trace) ] else [])
 
 let on_mem_invalid ?first ?last t accesses kinds f =
   add t ?first ?last (Mem_invalid (invalid_accesses accesses kinds, f))

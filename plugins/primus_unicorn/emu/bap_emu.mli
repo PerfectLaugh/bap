@@ -205,6 +205,7 @@ module Trace : sig
     ?every:int ->
     ?blocks:bool ->
     ?accesses:int ->
+    ?watch:int64 * int64 ->
     ?first:int64 ->
     ?last:int64 ->
     emu ->
@@ -222,8 +223,16 @@ module Trace : sig
       it leaves there, ends there, unless only every [every]-th instruction is
       recorded, which may record it twice.
 
-      Raises [Invalid_argument], if [accesses] is positive, and the instructions
-      are sampled, or the ones of a range are recorded. *)
+      With [watch], [(lower, upper)], only the accesses, whose first byte is
+      from [lower] to [upper], inclusive, are recorded, by default the last
+      2{^ 16} of them, natively, as the others, so that the ring keeps them over
+      a long run, e.g., to find, who writes a slot of a queue, while the program
+      spins on it, with a trace of the blocks, which costs the least, and
+      {!slice} doesn't follow the memory in such a trace.
+
+      Raises [Invalid_argument], if [accesses] is positive, or a range is
+      watched, and the instructions are sampled, or the ones of a range are
+      recorded. *)
 
   val stop : t -> unit
   (** [stop trace] stops recording, the trace keeps the records *)

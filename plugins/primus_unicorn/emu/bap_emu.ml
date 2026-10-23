@@ -612,6 +612,9 @@ module Trace = struct
     emu : emu;
     trace : Uc.Trace.t;
     memory : bool;
+        (** if all accesses are recorded, which the slices follow, not only the
+            ones, that the trace watches *)
+    watch : (int64 * int64) option;
     mutable active : bool;
     mutable hooks : (Uc.t * Uc.hook list) option;  (** on the engine *)
     blocks : (int * int64 array) list Int64.Table.t;
@@ -621,8 +624,11 @@ module Trace = struct
 
   (* the hooks are native, see [Uc.trace], and go to the new engines too,
      until the trace stops *)
-  let start ?(size = 1 lsl 20) ?every ?(blocks = false) ?(accesses = 0) ?first
-      ?last emu =
+  let start ?(size = 1 lsl 20) ?every ?(blocks = false) ?(accesses = 0) ?watch
+      ?first ?last emu =
+    let accesses =
+      if Option.is_some watch && accesses = 0 then 1 lsl 16 else accesses
+    in
     let memory = accesses > 0 in
     if
       memory
@@ -637,7 +643,8 @@ module Trace = struct
       {
         emu;
         trace;
-        memory;
+        memory = memory && Option.is_none watch;
+        watch;
         active = true;
         hooks = None;
         blocks = Int64.Table.create ();
@@ -645,7 +652,7 @@ module Trace = struct
     in
     installed emu (fun e ->
         if t.active then
-          t.hooks <- Some (e.uc, Uc.trace ?first ?last ~memory e.uc trace));
+          t.hooks <- Some (e.uc, Uc.trace ?first ?last ?watch ~memory e.uc trace));
     t
 
   (* the hooks of a closed engine are gone with it *)
