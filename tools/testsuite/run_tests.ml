@@ -1283,6 +1283,25 @@ let mprotect data =
           lacks env "stops" out "\\bX\\b"))
     [ "bap:stubbed-executor"; "bap:unicorn-executor" ]
 
+(* the code, that patches the instruction after it, in the same block,
+   and restores it, runs patched, also in the blocks, that the JIT of
+   the lifted engine compiled, see smc.c, whose stores to the code stop
+   the block, in both executors *)
+let smc data =
+  List.map
+    (fun system ->
+      case ("run/smc/" ^ system) (fun env ->
+          let out =
+            bap env
+              [
+                path data "bin/x86_64-linux-gnu-smc";
+                "--passes=run";
+                "--run-systems=" ^ system;
+              ]
+          in
+          contains env "runs the patched code" out "s 250216 250216"))
+    [ "bap:unicorn-executor"; "bap:lifted-executor" ]
+
 (* the stubs of the printf family format the words, that the C ABI
    passes, also on the stack, the streams of libc are the channels of
    Lisp, whether the program refers to them with a copy relocation, or
@@ -2195,6 +2214,7 @@ let tests =
     unicorn_symexec;
     script_debugger;
     mprotect;
+    smc;
     printf_family;
     mmap;
     pages;
