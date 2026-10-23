@@ -5,17 +5,18 @@
 
 ;;; ATOMIC OPERATIONS
 
-(defmacro CASord* (set load store rs rt rn acquire release)
-  "(CASord* set load store rs rt rn acquire release)
-   implements a generic compare-and-swap instruction on a W or X register.
-   set is the function to assign to the size of rs and rt.
-   load and store are functions to load/store to/from the size of rs and rt.
-   acquire and release are booleans indicating whether load-acquire and
-   store-release ordering is to be enforced."
+;; The compare and swap instructions compare the N lowest bits of rs with
+;; the memory at rn, and store rt there if they are equal, and set rs to
+;; the old value of the memory. The acquire and release orderings have
+;; no effect on a single thread.
+
+(defmacro CASord* (set load store n rs rt rn)
+  "(CASord* set load store n rs rt rn) implements a generic
+   compare-and-swap instruction on N bits. set is the function to
+   assign to the size of rs and rt. load and store are functions to
+   load/store to/from the size of rs and rt."
    (let ((data (load rn)))
-    (when acquire (intrinsic 'load-acquire))
-    (when (= data rs)
-      (when release (intrinsic 'store-release))
+    (when (= data (cast-low n rs))
       (store rn rt))
     (set rs data)))
 
@@ -23,21 +24,21 @@
 (defmacro load-quarter-word (addr) (load-bits 16 addr))
 (defmacro store-quarter-word (dst src) (store-word dst (cast-low 16 src)))
 
-(defmacro CASordX (rs rt rn acquire release)
+(defmacro CASordX (rs rt rn _ _)
   "Specialisation of CASord* for X registers."
-  (CASord* set$ load-word store-word rs rt rn acquire release))
+  (CASord* set$ load-word store-word 64 rs rt rn))
 
-(defmacro CASordW (rs rt rn acquire release)
+(defmacro CASordW (rs rt rn _ _)
   "Specialisation of CASord* for W registers."
-  (CASord* setw load-hword store-hword rs rt rn acquire release))
+  (CASord* setw load-hword store-hword 32 rs rt rn))
 
-(defmacro CASordB (rs rt rn acquire release)
+(defmacro CASordB (rs rt rn _ _)
   "Specialisation of CASord* operating on individual bytes."
-  (CASord* setw memory-read store-byte rs rt rn acquire release))
+  (CASord* setw memory-read store-byte 8 rs rt rn))
 
-(defmacro CASordH (rs rt rn acquire release)
+(defmacro CASordH (rs rt rn _ _)
   "Specialisation of CASord* for 16-bit values."
-  (CASord* setw load-quarter-word store-quarter-word rs rt rn acquire release))
+  (CASord* setw load-quarter-word store-quarter-word 16 rs rt rn))
 
 ;; not sure why llvm returns 4 arguments.
 ;; when i've tested it, the first and second arguments are always the same value
