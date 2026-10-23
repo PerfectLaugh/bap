@@ -1,0 +1,197 @@
+# the instructions of the cases lifters/powerpc/N, one of each mnemonic of
+# the corpus of testsuite/src/corpus, see sample.py, whose results in
+# Unicorn and in Primus agree, as check.ml compares them, with runs=2
+
+7c 1b f2 14  # add 0, 27, 30 
+7c 63 28 14  # addc 3, 3, 5 
+7d 80 61 14  # adde 12, 0, 12 
+38 21 00 80  # addi 1, 1, 128 
+30 66 ff ff  # addic 3, 6, -1 
+7c a3 01 d4  # addme 5, 3 
+7c 63 01 94  # addze 3, 3 
+7c e4 01 95  # addze. 7, 4 
+7d 4a 38 38  # and 10, 10, 7 
+7d 0a 38 78  # andc 10, 8, 7 
+71 2a 00 01  # andi. 10, 9, 1 
+74 63 80 00  # andis. 3, 3, 32768 
+4b ff ff d4  # b 0x1018 <max_u64+0x28> 
+42 00 ff e0  # bdnz 0x1000 <vsub_u64+0x14> 
+42 40 00 14  # bdz 0x238 <tail+0x1c> 
+4e 40 00 20  # bdzlr 
+40 80 00 2c  # bf 0, 0x6fc <atomic_max_u32+0x38>
+40 c2 00 3c  # bf- 2, 0x200 <atomic_cas_u8+0x5c>
+41 81 00 14  # bt 1, 0x848 <atomic_cas_u64+0x4c>
+41 e2 00 1c  # bt+ 2, 0x680 <atomic_cas_u32+0x34>
+54 63 06 3e  # clrlwi 3, 3, 24
+7c 03 20 40  # cmplw 3, 4
+28 03 00 00  # cmplwi 3, 0
+7c 03 20 00  # cmpw 3, 4
+2c 04 00 1f  # cmpwi 4, 31
+7c 63 00 34  # cntlzw 3, 3
+4e 82 22 02  # crand 20, 2, 4 
+4e 80 11 02  # crandc 20, 0, 2 
+4e 94 a1 82  # crclr 20
+4e 80 10 42  # crnor 20, 0, 2 
+4e 95 a3 82  # cror 20, 21, 20 
+4e 94 a2 42  # crset 20
+7c 63 23 d6  # divw 3, 3, 4 
+7c 63 23 96  # divwu 3, 3, 4 
+7c 63 07 74  # extsb 3, 3 
+7c 63 07 34  # extsh 3, 3 
+fc 00 02 10  # fabs 0, 0 
+fc 00 08 2a  # fadd 0, 0, 1 
+ec 00 08 2a  # fadds 0, 0, 1 
+fc 00 08 00  # fcmpu 0, 0, 1 
+fc 00 00 1e  # fctiwz 0, 0 
+fc 00 08 24  # fdiv 0, 0, 1 
+ec 00 08 24  # fdivs 0, 0, 1 
+fc 00 08 7a  # fmadd 0, 0, 1, 1 
+ec 00 08 7a  # fmadds 0, 0, 1, 1 
+fc 20 10 90  # fmr 1, 2 
+fc 00 00 72  # fmul 0, 0, 1 
+ec 20 00 72  # fmuls 1, 0, 1 
+fc 00 01 10  # fnabs 0, 0 
+fc 20 00 50  # fneg 1, 0 
+fc 00 00 18  # frsp 0, 0 
+fc 00 08 28  # fsub 0, 0, 1 
+ec 20 08 28  # fsubs 1, 0, 1 
+4c 00 01 2c  # isync 
+88 63 00 00  # lbz 3, 0(3) 
+8c 65 00 01  # lbzu 3, 1(5) 
+7c 63 20 ae  # lbzx 3, 3, 4 
+c8 03 00 00  # lfd 0, 0(3) 
+cc 04 00 10  # lfdu 0, 16(4) 
+7c 07 34 ee  # lfdux 0, 7, 6 
+7c 03 24 ae  # lfdx 0, 3, 4 
+c0 03 00 00  # lfs 0, 0(3) 
+c4 1c 00 04  # lfsu 0, 4(28) 
+7c 03 24 2e  # lfsx 0, 3, 4 
+a8 7f 00 0a  # lha 3, 10(31) 
+ac a4 00 02  # lhau 5, 2(4) 
+7c 63 22 ae  # lhax 3, 3, 4 
+7c 60 1e 2c  # lhbrx 3, 0, 3 
+a0 63 00 00  # lhz 3, 0(3) 
+a4 a3 00 02  # lhzu 5, 2(3) 
+7c 63 22 2e  # lhzx 3, 3, 4 
+39 40 00 00  # li 10, 0 
+3c 60 cc cc  # lis 3, -13108 
+7c 03 38 0c  # lvsl 0, 3, 7 
+7c 00 20 ce  # lvx 0, 0, 4 
+7d 40 28 28  # lwarx 10, 0, 5 
+7c 60 1c 2c  # lwbrx 3, 0, 3 
+7c 20 04 ac  # lwsync 
+80 03 00 0c  # lwz 0, 12(3) 
+85 43 00 10  # lwzu 10, 16(3) 
+7d 49 30 6e  # lwzux 10, 9, 6 
+7c 63 20 2e  # lwzx 3, 3, 4 
+7c 60 00 26  # mfcr 3 
+7c 08 02 a6  # mflr 0 
+7c 65 1b 78  # mr 5, 3
+7c 64 1b 79  # mr. 4, 3
+7c 80 11 20  # mtcrf 1, 4 
+7f a9 03 a6  # mtctr 29 
+7c 08 03 a6  # mtlr 0 
+7c 64 18 96  # mulhw 3, 4, 3 
+7c 0b 60 16  # mulhwu 0, 11, 12 
+1c 63 00 0a  # mulli 3, 3, 10 
+7c 1d 01 d6  # mullw 0, 29, 0 
+7d 4a 00 d0  # neg 10, 10 
+7c 63 18 f8  # not 3, 3
+7d 4a 2b 78  # or 10, 10, 5 
+7c c7 2b 79  # or. 7, 6, 5 
+7c 63 2b 38  # orc 3, 3, 5 
+60 63 66 67  # ori 3, 3, 26215 
+50 e0 f0 02  # rlwimi 0, 7, 30, 0, 1 
+54 63 00 00  # rlwinm 3, 3, 0, 0, 0 
+5c 63 20 3e  # rotlw 3, 3, 4
+54 65 f0 3e  # rotlwi 5, 3, 30
+7c 63 20 30  # slw 3, 3, 4 
+54 63 60 26  # slwi 3, 3, 12 
+7c 63 26 30  # sraw 3, 3, 4 
+7d 4a 0e 70  # srawi 10, 10, 1 
+7c ca 1c 30  # srw 10, 6, 3 
+54 eb f0 be  # srwi 11, 7, 2 
+98 64 00 00  # stb 3, 0(4) 
+9c a3 00 01  # stbu 5, 1(3) 
+7c 64 29 ae  # stbx 3, 4, 5 
+d8 01 00 10  # stfd 0, 16(1) 
+dc 03 00 10  # stfdu 0, 16(3) 
+7c 07 35 ee  # stfdux 0, 7, 6 
+7c 03 25 ae  # stfdx 0, 3, 4 
+d0 1f 00 0c  # stfs 0, 12(31) 
+d4 1c 00 04  # stfsu 0, 4(28) 
+7c 03 25 2e  # stfsx 0, 3, 4 
+b0 64 00 00  # sth 3, 0(4) 
+b4 a3 00 02  # sthu 5, 2(3) 
+7c 64 2b 2e  # sthx 3, 4, 5 
+7c 00 31 ce  # stvx 0, 0, 6 
+90 01 00 84  # stw 0, 132(1) 
+94 21 ff 80  # stwu 1, -128(1) 
+7d 6a 29 6e  # stwux 11, 10, 5 
+7c 64 29 2e  # stwx 3, 4, 5 
+7c 64 18 50  # sub 3, 3, 4
+7c 85 20 10  # subc 4, 4, 5
+7d 80 61 10  # subfe 12, 0, 12 
+20 63 00 00  # subfic 3, 3, 0 
+7c 63 01 90  # subfze 3, 3 
+7c 00 04 ac  # sync 
+10 42 10 00  # vaddubm 2, 2, 2 
+10 42 10 40  # vadduhm 2, 2, 2 
+10 00 08 80  # vadduwm 0, 0, 1 
+10 43 14 04  # vand 2, 3, 2 
+10 42 1c 44  # vandc 2, 2, 3 
+10 04 00 06  # vcmpequb 0, 4, 0 
+10 04 00 46  # vcmpequh 0, 4, 0 
+10 04 00 86  # vcmpequw 0, 4, 0 
+10 43 10 ae  # vmaddfp 2, 3, 2, 2 
+10 42 01 02  # vmaxsb 2, 2, 0 
+10 42 19 42  # vmaxsh 2, 2, 3 
+10 42 19 82  # vmaxsw 2, 2, 3 
+10 42 18 02  # vmaxub 2, 2, 3 
+10 42 18 42  # vmaxuh 2, 2, 3 
+10 42 18 82  # vmaxuw 2, 2, 3 
+10 42 1b 02  # vminsb 2, 2, 3 
+10 42 1b 42  # vminsh 2, 2, 3 
+10 42 1b 82  # vminsw 2, 2, 3 
+10 42 1a 02  # vminub 2, 2, 3 
+10 42 1a 42  # vminuh 2, 2, 3 
+10 42 1a 82  # vminuw 2, 2, 3 
+10 00 30 e2  # vmladduhm 0, 0, 6, 3 
+10 c3 1c 84  # vmr 6, 3
+10 00 68 a6  # vmsumuhm 0, 0, 13, 2 
+10 43 12 08  # vmuleub 2, 3, 2 
+10 01 20 08  # vmuloub 0, 1, 4 
+10 03 20 48  # vmulouh 0, 3, 4 
+10 a2 24 84  # vor 5, 2, 4 
+10 00 0b eb  # vperm 0, 0, 1, 15 
+11 ad 20 84  # vrlw 13, 13, 4 
+10 00 41 aa  # vsel 0, 0, 8, 6 
+10 62 12 2c  # vsldoi 3, 2, 2, 8 
+10 00 21 84  # vslw 0, 0, 4 
+10 61 12 0c  # vspltb 3, 2, 1 
+10 61 12 4c  # vsplth 3, 2, 1 
+10 61 03 0c  # vspltisb 3, 1 
+10 43 03 4c  # vspltish 2, 3 
+10 38 03 8c  # vspltisw 1, -8 
+10 00 02 8c  # vspltw 0, 0, 0 
+10 02 2b 04  # vsrab 0, 2, 5 
+10 04 1b 44  # vsrah 0, 4, 3 
+10 04 1b 84  # vsraw 0, 4, 3 
+10 00 1a 04  # vsrb 0, 0, 3 
+10 04 1a 44  # vsrh 0, 4, 3 
+10 04 1a 84  # vsrw 0, 4, 3 
+10 03 14 00  # vsububm 0, 3, 2 
+10 02 24 40  # vsubuhm 0, 2, 4 
+10 02 24 80  # vsubuwm 0, 2, 4 
+10 00 34 c4  # vxor 0, 0, 6 
+7d 0a 52 78  # xor 10, 8, 10 
+68 63 00 01  # xori 3, 3, 1 
+6c 63 80 00  # xoris 3, 3, 32768 
+
+# the instructions, whose results differ, as Unicorn or the checker
+# differ, e.g., the ones of a random address, or that Unicorn
+# doesn't have, and why
+# 4c 80 00 20  # bclr 4, 0
+#   Unicorn faults: Segmentation fault at 0 / paused
+# 7d 40 29 2d  # stwcx. 10, 0, 5 
+#   memory at 3ffe10b0

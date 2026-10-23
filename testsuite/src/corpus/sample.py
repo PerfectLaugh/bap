@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """samples the instructions of the objects of corpus.sh, at most N of
-each mnemonic, with their distinct encodings, as the input of check.ml:
+each mnemonic, with their distinct encodings, as the input of
+tools/testsuite/inputs/lifters/check.ml:
 
   sample.py N OBJECT... > INSNS
 """

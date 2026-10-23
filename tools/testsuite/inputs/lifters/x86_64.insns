@@ -1,0 +1,608 @@
+# the instructions of the cases lifters/x86_64/N, one of each mnemonic of
+# the corpus of testsuite/src/corpus, see sample.py, whose results in
+# Unicorn and in Primus agree, as check.ml compares them, with runs=2
+
+48 11 ca  # adcq %rcx, %rdx
+00 c8  # addb %cl, %al
+01 c8  # addl %ecx, %eax
+66 0f 58 c8  # addpd %xmm0, %xmm1
+0f 58 c8  # addps %xmm0, %xmm1
+48 01 c8  # addq %rcx, %rax
+f2 0f 58 45 f0  # addsd -0x10(%rbp), %xmm0
+f3 0f 58 45 f8  # addss -0x8(%rbp), %xmm0
+66 01 f7  # addw %si, %di
+20 c8  # andb %cl, %al
+21 f2  # andl %esi, %edx
+66 0f 55 d1  # andnpd %xmm1, %xmm2
+0f 55 c2  # andnps %xmm2, %xmm0
+c4 e2 c8 f2 c7  # andnq %rdi, %rsi, %rax
+66 0f 54 d3  # andpd %xmm3, %xmm2
+0f 54 05 00 00 00 00  # andps (%rip), %xmm0           # 0x57 <fabs_float+0x7>
+48 21 d0  # andq %rdx, %rax
+66 0f 38 15 ca  # blendvpd %xmm0, %xmm2, %xmm1
+66 0f 38 14 ca  # blendvps %xmm0, %xmm2, %xmm1
+c4 e2 f8 f3 df  # blsiq %rdi, %rax
+c4 e2 f8 f3 d7  # blsmskq %rdi, %rax
+c4 e2 f8 f3 cf  # blsrq %rdi, %rax
+0f bc c7  # bsfl %edi, %eax
+48 0f bc c7  # bsfq %rdi, %rax
+0f bd c1  # bsrl %ecx, %eax
+48 0f bd c1  # bsrq %rcx, %rax
+0f c8  # bswapl %eax
+48 0f c8  # bswapq %rax
+99  # cltd 
+48 98  # cltq 
+0f 43 c1  # cmovael %ecx, %eax
+0f 47 c7  # cmoval %edi, %eax
+48 0f 47 c7  # cmovaq %rdi, %rax
+48 0f 42 c7  # cmovbq %rdi, %rax
+0f 44 c1  # cmovel %ecx, %eax
+48 0f 44 c1  # cmoveq %rcx, %rax
+0f 4d c1  # cmovgel %ecx, %eax
+0f 4f c7  # cmovgl %edi, %eax
+48 0f 4f c7  # cmovgq %rdi, %rax
+0f 4e c2  # cmovlel %edx, %eax
+0f 4c c7  # cmovll %edi, %eax
+48 0f 4c c7  # cmovlq %rdi, %rax
+0f 45 c1  # cmovnel %ecx, %eax
+48 0f 45 c1  # cmovneq %rcx, %rax
+0f 41 c7  # cmovnol %edi, %eax
+0f 48 c7  # cmovsl %edi, %eax
+48 0f 48 c7  # cmovsq %rdi, %rax
+66 0f 48 c7  # cmovsw %di, %ax
+40 38 f0  # cmpb %sil, %al
+f2 0f c2 c1 00  # cmpeqsd %xmm1, %xmm0
+f3 0f c2 c1 00  # cmpeqss %xmm1, %xmm0
+39 d1  # cmpl %edx, %ecx
+66 0f c2 da 01  # cmpltpd %xmm2, %xmm3
+0f c2 c4 01  # cmpltps %xmm4, %xmm0
+f2 0f c2 d8 01  # cmpltsd %xmm0, %xmm3
+f3 0f c2 d8 01  # cmpltss %xmm0, %xmm3
+48 3b 4d f0  # cmpq -0x10(%rbp), %rcx
+f2 0f c2 c0 03  # cmpunordsd %xmm0, %xmm0
+f3 0f c2 c0 03  # cmpunordss %xmm0, %xmm0
+66 39 c7  # cmpw %ax, %di
+0f b0 0f  # cmpxchgb %cl, (%rdi)
+0f b1 0f  # cmpxchgl %ecx, (%rdi)
+48 0f b1 0f  # cmpxchgq %rcx, (%rdi)
+48 99  # cqto 
+f3 0f e6 06  # cvtdq2pd (%rsi), %xmm0
+0f 5b c0  # cvtdq2ps %xmm0, %xmm0
+66 0f 5a c9  # cvtpd2ps %xmm1, %xmm1
+0f 5a c9  # cvtps2pd %xmm1, %xmm1
+f2 0f 5a c0  # cvtsd2ss %xmm0, %xmm0
+f2 0f 2a c7  # cvtsi2sd %edi, %xmm0
+f2 0f 2a 04 86  # cvtsi2sdl (%rsi,%rax,4), %xmm0
+f2 48 0f 2a 45 f8  # cvtsi2sdq -0x8(%rbp), %xmm0
+f3 48 0f 2a c0  # cvtsi2ss %rax, %xmm0
+f3 0f 2a 04 86  # cvtsi2ssl (%rsi,%rax,4), %xmm0
+f3 48 0f 2a 45 f8  # cvtsi2ssq -0x8(%rbp), %xmm0
+f3 0f 5a c0  # cvtss2sd %xmm0, %xmm0
+66 0f e6 c0  # cvttpd2dq %xmm0, %xmm0
+f3 0f 5b c0  # cvttps2dq %xmm0, %xmm0
+f2 0f 2c 45 f8  # cvttsd2si -0x8(%rbp), %eax
+f3 0f 2c 45 fc  # cvttss2si -0x4(%rbp), %eax
+66 99  # cwtd 
+98  # cwtl 
+41 ff c8  # decl %r8d
+40 f6 f6  # divb %sil
+f7 75 f8  # divl -0x8(%rbp)
+66 0f 5e c1  # divpd %xmm1, %xmm0
+0f 5e c1  # divps %xmm1, %xmm0
+48 f7 75 f0  # divq -0x10(%rbp)
+f2 0f 5e 04 c8  # divsd (%rax,%rcx,8), %xmm0
+f3 0f 5e 04 88  # divss (%rax,%rcx,4), %xmm0
+66 f7 f6  # divw %si
+de c1  # faddp %st, %st(1)
+db 6d 10  # fldt 0x10(%rbp)
+d8 c9  # fmul %st(1), %st
+db 7d e0  # fstpt -0x20(%rbp)
+48 f7 7d f0  # idivq -0x10(%rbp)
+0f af c1  # imull %ecx, %eax
+48 0f af 45 f0  # imulq -0x10(%rbp), %rax
+66 0f af 0c 46  # imulw (%rsi,%rax,2), %cx
+ff c0  # incl %eax
+48 ff c0  # incq %rax
+77 09  # ja 0x143 <jump_table+0x13>
+73 08  # jae 0x1aea <min_u32+0x1a>
+0f 82 79 00 00 00  # jb 0x240 <recursive+0x90>
+76 08  # jbe 0x1b1a <max_u32+0x1a>
+74 0c  # je 0x129 <ctz32+0x19>
+7f 0a  # jg 0x2fb <recursive+0x1b>
+7d 09  # jge 0x305 <min_i8+0x25>
+0f 8c df 00 00 00  # jl 0x29d <recursive+0xed>
+7e 08  # jle 0xb2a <max_i32+0x1a>
+eb 02  # jmp 0x2c2 <atomic_max_u8+0x72>
+75 02  # jne 0xab <atomic_and_u8+0x4b>
+79 1c  # jns 0x25b1 <abs_i128+0x31>
+78 06  # js 0x19b <ultof_float+0xb>
+8d 04 48  # leal (%rax,%rcx,2), %eax
+48 8d 04 48  # leaq (%rax,%rcx,2), %rax
+66 f0 0f c1 01  # lock  xaddw %ax, (%rcx)
+f3 0f bd c7  # lzcntl %edi, %eax
+f3 48 0f bd c7  # lzcntq %rdi, %rax
+66 0f 5f c8  # maxpd %xmm0, %xmm1
+f2 0f 5f c1  # maxsd %xmm1, %xmm0
+f3 0f 5f c8  # maxss %xmm0, %xmm1
+f2 0f 5d c1  # minsd %xmm1, %xmm0
+f3 0f 5d c1  # minss %xmm1, %xmm0
+48 b9 0f 0f 0f 0f 0f 0f 0f 0f  # movabsq $0xf0f0f0f0f0f0f0f, %rcx # imm = 0xF0F0F0F0F0F0F0F
+66 0f 28 0d 00 00 00 00  # movapd (%rip), %xmm1           # 0x8f0 <ultof_double+0x20>
+0f 28 0d 00 00 00 00  # movaps (%rip), %xmm1           # 0xb9 <fabs_float+0x19>
+40 88 f0  # movb %sil, %al
+66 0f 6e c0  # movd %eax, %xmm0
+f2 0f 12 54 86 08  # movddup 0x8(%rsi,%rax,4), %xmm2 # xmm2 = mem[0,0]
+66 0f 6f 0d 00 00 00 00  # movdqa (%rip), %xmm1           # 0x1ea <recursive+0x3a>
+f3 0f 6f 06  # movdqu (%rsi), %xmm0
+0f 12 c9  # movhlps %xmm1, %xmm1            # xmm1 = xmm1[1,1]
+89 45 f0  # movl %eax, -0x10(%rbp)
+66 0f 13 04 87  # movlpd %xmm0, (%rdi,%rax,4)
+48 89 7d f8  # movq %rdi, -0x8(%rbp)
+f2 0f 10 45 f8  # movsd -0x8(%rbp), %xmm0
+48 63 45 fc  # movslq -0x4(%rbp), %rax
+f3 0f 10 45 fc  # movss -0x4(%rbp), %xmm0
+0f bf 45 fc  # movswl -0x4(%rbp), %eax
+66 0f 10 04 c6  # movupd (%rsi,%rax,8), %xmm0
+0f 10 46 40  # movups 0x40(%rsi), %xmm0
+66 89 45 f6  # movw %ax, -0xa(%rbp)
+0f b7 45 f4  # movzwl -0xc(%rbp), %eax
+40 f6 e7  # mulb %dil
+66 0f 59 c8  # mulpd %xmm0, %xmm1
+0f 59 c8  # mulps %xmm0, %xmm1
+48 f7 e1  # mulq %rcx
+f2 0f 59 45 f0  # mulsd -0x10(%rbp), %xmm0
+f3 0f 59 45 f8  # mulss -0x8(%rbp), %xmm0
+c4 62 fb f6 c7  # mulxq %rdi, %rax, %r8
+40 f6 de  # negb %sil
+41 f7 d8  # negl %r8d
+48 f7 d8  # negq %rax
+66 f7 d8  # negw %ax
+66 90  # nop 
+0f 1f 00  # nopl (%rax)
+66 0f 1f 84 00 00 00 00 00  # nopw (%rax,%rax)
+f6 d0  # notb %al
+f7 d0  # notl %eax
+48 f7 d0  # notq %rax
+40 08 f1  # orb %sil, %cl
+09 c8  # orl %ecx, %eax
+66 0f 56 d3  # orpd %xmm3, %xmm2
+0f 56 c1  # orps %xmm1, %xmm0
+48 09 c8  # orq %rcx, %rax
+66 0f 38 1c c0  # pabsb %xmm0, %xmm0
+66 0f 38 1e c0  # pabsd %xmm0, %xmm0
+66 0f 38 1d c0  # pabsw %xmm0, %xmm0
+66 0f 6b c0  # packssdw %xmm0, %xmm0
+66 0f 67 cd  # packuswb %xmm5, %xmm1
+66 0f fc c1  # paddb %xmm1, %xmm0
+66 0f fe 05 00 00 00 00  # paddd (%rip), %xmm0           # 0x1e2 <recursive+0x32>
+66 0f d4 c1  # paddq %xmm1, %xmm0
+66 0f fd c1  # paddw %xmm1, %xmm0
+66 0f db c1  # pand %xmm1, %xmm0
+66 0f df c2  # pandn %xmm2, %xmm0
+66 0f e0 c1  # pavgb %xmm1, %xmm0
+66 0f 3a 0e da cc  # pblendw $0xcc, %xmm2, %xmm3     # xmm3 = xmm3[0,1],xmm2[2,3],xmm3[4,5],xmm2[6,7]
+66 0f 74 c1  # pcmpeqb %xmm1, %xmm0
+66 0f 76 c9  # pcmpeqd %xmm1, %xmm1
+66 0f 38 29 d0  # pcmpeqq %xmm0, %xmm2
+66 0f 75 c8  # pcmpeqw %xmm0, %xmm1
+66 0f 64 c1  # pcmpgtb %xmm1, %xmm0
+66 0f 66 c1  # pcmpgtd %xmm1, %xmm0
+66 0f 38 37 c1  # pcmpgtq %xmm1, %xmm0
+66 0f 38 04 de  # pmaddubsw %xmm6, %xmm3
+66 0f f5 ca  # pmaddwd %xmm2, %xmm1
+66 0f 38 3c c1  # pmaxsb %xmm1, %xmm0
+66 0f 38 3d c1  # pmaxsd %xmm1, %xmm0
+66 0f ee c1  # pmaxsw %xmm1, %xmm0
+66 0f de c1  # pmaxub %xmm1, %xmm0
+66 0f 38 3f c1  # pmaxud %xmm1, %xmm0
+66 0f 38 3e c1  # pmaxuw %xmm1, %xmm0
+66 0f 38 38 c1  # pminsb %xmm1, %xmm0
+66 0f 38 39 c1  # pminsd %xmm1, %xmm0
+66 0f ea c1  # pminsw %xmm1, %xmm0
+66 0f da c1  # pminub %xmm1, %xmm0
+66 0f 38 3b c1  # pminud %xmm1, %xmm0
+66 0f 38 3a c1  # pminuw %xmm1, %xmm0
+66 0f d7 c0  # pmovmskb %xmm0, %eax
+66 0f 38 31 12  # pmovzxbd (%rdx), %xmm2
+66 0f 38 33 06  # pmovzxwd (%rsi), %xmm0
+66 0f 38 40 c4  # pmulld %xmm4, %xmm0
+66 0f d5 cc  # pmullw %xmm4, %xmm1
+66 0f f4 eb  # pmuludq %xmm3, %xmm5
+f3 0f b8 c7  # popcntl %edi, %eax
+f3 48 0f b8 c7  # popcntq %rdi, %rax
+58  # popq %rax
+66 0f eb c1  # por %xmm1, %xmm0
+66 0f f6 c1  # psadbw %xmm1, %xmm0
+66 0f 70 c0 00  # pshufd $0x0, %xmm0, %xmm0      # xmm0 = xmm0[0,0,0,0]
+66 0f 72 f0 1f  # pslld $0x1f, %xmm0
+66 0f 73 f4 20  # psllq $0x20, %xmm4
+66 0f 71 f3 08  # psllw $0x8, %xmm3
+66 0f 72 e4 01  # psrad $0x1, %xmm4
+66 0f 71 e1 02  # psraw $0x2, %xmm1
+66 0f 72 d0 10  # psrld $0x10, %xmm0
+66 0f 73 d2 20  # psrlq $0x20, %xmm2
+66 0f 71 d2 02  # psrlw $0x2, %xmm2
+66 0f f8 c2  # psubb %xmm2, %xmm0
+66 0f fa c2  # psubd %xmm2, %xmm0
+66 0f fb c1  # psubq %xmm1, %xmm0
+66 0f d9 d0  # psubusw %xmm0, %xmm2
+66 0f f9 c2  # psubw %xmm2, %xmm0
+66 0f 68 c0  # punpckhbw %xmm0, %xmm0    # xmm0 = xmm0[8,8,9,9,10,10,11,11,12,12,13,13,14,14,15,15]
+66 0f 60 c9  # punpcklbw %xmm1, %xmm1    # xmm1 = xmm1[0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7]
+66 0f 62 0d 00 00 00 00  # punpckldq (%rip), %xmm1   # xmm1 = xmm1[0],mem[0],xmm1[1],mem[1]
+66 0f 61 c8  # punpcklwd %xmm0, %xmm1    # xmm1 = xmm1[0],xmm0[0],xmm1[1],xmm0[1],xmm1[2],xmm0[2],xmm1[3],xmm0[3]
+41 56  # pushq %r14
+66 0f ef c0  # pxor %xmm0, %xmm0
+d2 c0  # rolb %cl, %al
+d3 c0  # roll %cl, %eax
+48 d3 c0  # rolq %cl, %rax
+66 c1 c0 08  # rolw $0x8, %ax
+66 0f 3a 0b c0 09  # roundsd $0x9, %xmm0, %xmm0
+66 0f 3a 0a c0 09  # roundss $0x9, %xmm0, %xmm0
+c0 f8 02  # sarb $0x2, %al
+c1 f8 14  # sarl $0x14, %eax
+48 c1 f8 03  # sarq $0x3, %rax
+c4 e2 4a f7 c7  # sarxl %esi, %edi, %eax
+c4 e2 ca f7 c7  # sarxq %rsi, %rdi, %rax
+48 19 c8  # sbbq %rcx, %rax
+0f 97 c0  # seta %al
+0f 93 c0  # setae %al
+0f 92 c0  # setb %al
+0f 96 c0  # setbe %al
+0f 94 c0  # sete %al
+0f 9d c0  # setge %al
+0f 9c c0  # setl %al
+0f 9e c0  # setle %al
+0f 9b c0  # setnp %al
+0f 90 c0  # seto %al
+0f 9a c0  # setp %al
+48 0f a4 c8 3d  # shldq $0x3d, %rcx, %rax
+c1 e1 02  # shll $0x2, %ecx
+48 c1 e0 03  # shlq $0x3, %rax
+c4 e2 49 f7 c1  # shlxl %esi, %ecx, %eax
+c4 e2 c9 f7 c7  # shlxq %rsi, %rdi, %rax
+c0 e8 03  # shrb $0x3, %al
+48 0f ad f8  # shrdq %cl, %rdi, %rax
+c1 e9 02  # shrl $0x2, %ecx
+48 c1 e9 02  # shrq $0x2, %rcx
+c4 e2 4b f7 c7  # shrxl %esi, %edi, %eax
+c4 e2 cb f7 c7  # shrxq %rsi, %rdi, %rax
+28 c8  # subb %cl, %al
+66 0f 5c 0d 00 00 00 00  # subpd (%rip), %xmm1           # 0x405 <ultof_double+0x15>
+48 29 c1  # subq %rax, %rcx
+f2 0f 5c 45 f0  # subsd -0x10(%rbp), %xmm0
+f3 0f 5c 45 f8  # subss -0x8(%rbp), %xmm0
+66 29 c8  # subw %cx, %ax
+40 f6 c6 40  # testb $0x40, %sil
+45 85 c0  # testl %r8d, %r8d
+48 85 c0  # testq %rax, %rax
+66 85 f6  # testw %si, %si
+f3 0f bc c1  # tzcntl %ecx, %eax
+f3 48 0f bc c1  # tzcntq %rcx, %rax
+66 0f 2e 45 f0  # ucomisd -0x10(%rbp), %xmm0
+0f 2e 45 f8  # ucomiss -0x8(%rbp), %xmm0
+66 0f 15 c0  # unpckhpd %xmm0, %xmm0            # xmm0 = xmm0[1,1]
+66 0f 14 c1  # unpcklpd %xmm1, %xmm0            # xmm0 = xmm0[0],xmm1[0]
+0f 14 c1  # unpcklps %xmm1, %xmm0            # xmm0 = xmm0[0],xmm1[0],xmm0[1],xmm1[1]
+c5 fa 58 04 87  # vaddss (%rdi,%rax,4), %xmm0, %xmm0
+c5 f0 54 ca  # vandps %xmm2, %xmm1, %xmm1
+c5 ea 5a d2  # vcvtss2sd %xmm2, %xmm2, %xmm2
+c4 e1 fb 2c c0  # vcvttsd2si %xmm0, %rax
+c4 e1 fa 2c c0  # vcvttss2si %xmm0, %rax
+c5 fb 5e c1  # vdivsd %xmm1, %xmm0, %xmm0
+c5 fb 5d c1  # vminsd %xmm1, %xmm0, %xmm0
+c5 fb 12 15 00 00 00 00  # vmovddup (%rip), %xmm2           # xmm2 = mem[0,0]
+c4 81 7b 11 04 fe  # vmovsd %xmm0, (%r14,%r15,8)
+c4 81 7a 11 04 be  # vmovss %xmm0, (%r14,%r15,4)
+c5 fb 59 c1  # vmulsd %xmm1, %xmm0, %xmm0
+c5 e9 6b 56 50  # vpackssdw 0x50(%rsi), %xmm2, %xmm2
+c4 a3 79 22 04 b6 01  # vpinsrd $0x1, (%rsi,%r14,4), %xmm0, %xmm0
+c4 e3 79 0b c0 09  # vroundsd $0x9, %xmm0, %xmm0, %xmm0
+c5 f9 c6 c8 01  # vshufpd $0x1, %xmm0, %xmm0, %xmm1 # xmm1 = xmm0[1,0]
+c5 fa 5c 05 00 00 00 00  # vsubss (%rip), %xmm0, %xmm0    # 0x144 <ftoul_float+0x14>
+c5 f9 2e c1  # vucomisd %xmm1, %xmm0
+c5 f8 2e c1  # vucomiss %xmm1, %xmm0
+0f c0 01  # xaddb %al, (%rcx)
+0f c1 01  # xaddl %eax, (%rcx)
+48 0f c1 01  # xaddq %rax, (%rcx)
+40 86 37  # xchgb %sil, (%rdi)
+87 01  # xchgl %eax, (%rcx)
+48 87 01  # xchgq %rax, (%rcx)
+66 87 01  # xchgw %ax, (%rcx)
+34 ff  # xorb $-0x1, %al
+31 c0  # xorl %eax, %eax
+66 0f 57 c0  # xorpd %xmm0, %xmm0
+0f 57 05 00 00 00 00  # xorps (%rip), %xmm0           # 0x47 <fneg_float+0x7>
+48 31 f2  # xorq %rsi, %rdx
+
+# the instructions, whose results differ, as Unicorn or the checker
+# differ, e.g., the ones of a random address, or that Unicorn
+# doesn't have, and why
+# f7 7d f8  # idivl -0x8(%rbp)
+#   status failed Unicorn: an unhandled interrupt 0 at 400600 / paused; pc 0 / 400603; RAX 0x3FFE1530 / 0x4F0C082C
+# 66 f7 f9  # idivw %cx
+#   status failed Unicorn: an unhandled interrupt 8 at 400600 / paused; pc 0 / 400603; RAX 0x3FFE14B0 / 0x3FFE0223
+# ff e0  # jmpq *%rax
+#   Unicorn faults: Segmentation fault at 0x3FFE15A0 / paused
+# c5 f8 93 c0  # kmovw %k0, %eax
+#   RAX 0x3FFE1401 / 0x3FFE14F0
+# c5 fd 46 c8  # kxnorb %k0, %k0, %k1
+#   RCX 0xFFFF / 0
+# c3  # retq 
+#   Unicorn faults: Segmentation fault at 0x352E9765BABA03C0 / paused
+# c5 f3 58 c0  # vaddsd %xmm0, %xmm1, %xmm0
+#   YMM0 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF / 0xFFFFFFFFFFFFFFFF
+# c5 f4 55 ca  # vandnps %ymm2, %ymm1, %ymm1
+#   Unicorn doesn't have it
+# 62 f1 fd 18 54 05 00 00 00 00  # vandpd (%rip){1to2}, %xmm0, %xmm0 # 0x28a <fabs_double+0xa>
+#   Unicorn doesn't have it
+# c4 e3 5d 4b c0 50  # vblendvpd %ymm5, %ymm0, %ymm4, %ymm0
+#   Unicorn doesn't have it
+# c4 e3 35 4a ed d0  # vblendvps %ymm13, %ymm5, %ymm9, %ymm5
+#   Unicorn doesn't have it
+# c4 e2 7d 19 05 00 00 00 00  # vbroadcastsd (%rip), %ymm0   # 0x1c4c <vneg_i64+0x1c>
+#   Unicorn doesn't have it
+# c4 e2 79 18 0d 00 00 00 00  # vbroadcastss (%rip), %xmm1   # 0x49 <fneg_float+0x9>
+#   Unicorn doesn't have it
+# 62 f1 ff 08 c2 c1 00  # vcmpeqsd %xmm1, %xmm0, %k0
+#   Unicorn doesn't have it
+# 62 f1 7e 08 c2 c1 00  # vcmpeqss %xmm1, %xmm0, %k0
+#   Unicorn doesn't have it
+# 62 f1 6c 28 c2 56 02 0e  # vcmpgtps 0x40(%rsi), %ymm2, %k2
+#   Unicorn doesn't have it
+# c5 65 c2 df 01  # vcmpltpd %ymm7, %ymm3, %ymm11
+#   Unicorn doesn't have it
+# c5 f4 c2 ca 01  # vcmpltps %ymm2, %ymm1, %ymm1
+#   Unicorn doesn't have it
+# 62 f1 f7 08 c2 c8 01  # vcmpltsd %xmm0, %xmm1, %k1
+#   Unicorn doesn't have it
+# 62 f1 76 08 c2 c8 01  # vcmpltss %xmm0, %xmm1, %k1
+#   Unicorn doesn't have it
+# 62 f1 ff 08 c2 c8 03  # vcmpunordsd %xmm0, %xmm0, %k1
+#   Unicorn doesn't have it
+# 62 f1 7e 08 c2 c8 03  # vcmpunordss %xmm0, %xmm0, %k1
+#   Unicorn doesn't have it
+# c5 fe e6 06  # vcvtdq2pd (%rsi), %ymm0
+#   Unicorn doesn't have it
+# c5 fc 5b 06  # vcvtdq2ps (%rsi), %ymm0
+#   Unicorn doesn't have it
+# c5 fd 5a d2  # vcvtpd2ps %ymm2, %xmm2
+#   Unicorn doesn't have it
+# c5 fc 5a 16  # vcvtps2pd (%rsi), %ymm2
+#   Unicorn doesn't have it
+# c5 eb 5a c2  # vcvtsd2ss %xmm2, %xmm2, %xmm0
+#   YMM0 0x80000000 / 0xD0ADFD8CE7AC452682CCDA4B80000000
+# c4 e1 83 2a c0  # vcvtsi2sd %rax, %xmm15, %xmm0
+#   YMM0 0x41CFFF0A08000000 / 0x335423631DD30A9741CFFF0A08000000
+# c4 e1 82 2a c0  # vcvtsi2ss %rax, %xmm15, %xmm0
+#   YMM0 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5E2C7E54 / 0xE5577C0759A02AAD202F69F55E2C7E54
+# c5 fd e6 06  # vcvttpd2dqy (%rsi), %xmm0
+#   Unicorn doesn't have it
+# c5 fe 5b 06  # vcvttps2dq (%rsi), %ymm0
+#   Unicorn doesn't have it
+# 62 f1 7f 08 78 c0  # vcvttsd2usi %xmm0, %eax
+#   Unicorn doesn't have it
+# 62 f1 7e 08 78 c0  # vcvttss2usi %xmm0, %eax
+#   Unicorn doesn't have it
+# 62 f1 07 08 7b c7  # vcvtusi2sd %edi, %xmm15, %xmm0
+#   Unicorn doesn't have it
+# 62 f1 06 08 7b c7  # vcvtusi2ss %edi, %xmm15, %xmm0
+#   Unicorn doesn't have it
+# c5 f5 5e 4a 20  # vdivpd 0x20(%rdx), %ymm1, %ymm1
+#   Unicorn doesn't have it
+# c5 ec 5e 52 40  # vdivps 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# c5 fa 5e c1  # vdivss %xmm1, %xmm0, %xmm0
+#   YMM0 0xBA91C2D327714B35150425D5972B4060A0F74AD8562AEBAEFC3E562FD70012CD / 0xA0F74AD8562AEBAEFC3E562FD70012CD
+# c4 e3 7d 39 c1 01  # vextracti128 $0x1, %ymm0, %xmm1
+#   Unicorn doesn't have it
+# c4 e2 ed 98 52 40  # vfmadd132pd 0x40(%rdx), %ymm2, %ymm2 # ymm2 = (ymm2 * mem) + ymm2
+#   Unicorn doesn't have it
+# c4 e2 6d 98 52 40  # vfmadd132ps 0x40(%rdx), %ymm2, %ymm2 # ymm2 = (ymm2 * mem) + ymm2
+#   Unicorn doesn't have it
+# c4 e2 f1 a9 05 00 00 00 00  # vfmadd213sd (%rip), %xmm1, %xmm0 # xmm0 = (xmm1 * xmm0) + mem
+#   Unicorn doesn't have it
+# c4 e2 71 a9 05 00 00 00 00  # vfmadd213ss (%rip), %xmm1, %xmm0 # xmm0 = (xmm1 * xmm0) + mem
+#   Unicorn doesn't have it
+# c4 e2 f9 b9 d1  # vfmadd231sd %xmm1, %xmm0, %xmm2 # xmm2 = (xmm0 * xmm1) + xmm2
+#   Unicorn doesn't have it
+# c4 e3 65 18 c0 01  # vinsertf128 $0x1, %xmm0, %ymm3, %ymm0
+#   Unicorn doesn't have it
+# 62 d3 3d 2a 18 d1 01  # vinsertf32x4 $0x1, %xmm9, %ymm8, %ymm2 {%k2}
+#   Unicorn doesn't have it
+# c5 dd 5f e0  # vmaxpd %ymm0, %ymm4, %ymm4
+#   Unicorn doesn't have it
+# c5 f3 5f d0  # vmaxsd %xmm0, %xmm1, %xmm2
+#   YMM2 0xDC3654DEEF73E861C5100BE5DBD33A327FF68590E84342B150B69A68D83D4C8F / 9
+# c5 f2 5f d0  # vmaxss %xmm0, %xmm1, %xmm2
+#   YMM2 0x433E2FFA3903CA12C5D3B7312FEFB5804C84E3EE31BCCDAB1F99B5100000000 / 0xFFFFFFFFFFFFFFFFFFFFFFFF00000000
+# c5 fa 5d c1  # vminss %xmm1, %xmm0, %xmm0
+#   YMM0 0x45C7BF348E2781E733CD850E15D4E4C1E414C46C68D3CE5B9F5BA61800000002 / 0xE414C46C68D3CE5B9F5BA61800000002
+# c5 f9 28 c1  # vmovapd %xmm1, %xmm0
+#   YMM0 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFB / 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFB
+# c5 f8 28 c1  # vmovaps %xmm1, %xmm0
+#   YMM0 0xB71B70838FB97E809BA945BE94198A35FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF8 / 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF8
+# c5 f9 6e c7  # vmovd %edi, %xmm0
+#   YMM0 0x6EF6F8BD74CB9B3EE8C6833D5E70FC260000000000000000000000003FFE11D0 / 0x3FFE11D0
+# c5 7d 6f c0  # vmovdqa %ymm0, %ymm8
+#   Unicorn doesn't have it
+# 62 f1 7d a9 6f c0  # vmovdqa32 %ymm0, %ymm0 {%k1} {z}
+#   Unicorn doesn't have it
+# 62 f1 fd a9 6f c0  # vmovdqa64 %ymm0, %ymm0 {%k1} {z}
+#   Unicorn doesn't have it
+# c5 fe 6f 2c 37  # vmovdqu (%rdi,%rsi), %ymm5
+#   Unicorn doesn't have it
+# 62 f1 ff a9 6f c0  # vmovdqu16 %ymm0, %ymm0 {%k1} {z}
+#   Unicorn doesn't have it
+# 62 f1 7f a9 6f c0  # vmovdqu8 %ymm0, %ymm0 {%k1} {z}
+#   Unicorn doesn't have it
+# c4 e1 f9 6e c7  # vmovq %rdi, %xmm0
+#   YMM0 0x9D1F736DAE2F4D8CA724C1A361FED0870000000000000000000000003FFE13A0 / 0x3FFE13A0
+# c5 fd 11 07  # vmovupd %ymm0, (%rdi)
+#   Unicorn doesn't have it
+# c5 fc 10 06  # vmovups (%rsi), %ymm0
+#   Unicorn doesn't have it
+# c5 fa 59 c1  # vmulss %xmm1, %xmm0, %xmm0
+#   YMM0 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE / 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE
+# c5 f1 56 ca  # vorpd %xmm2, %xmm1, %xmm1
+#   YMM1 0xEFAA973C5352748209A82B40010C95A5A095C393D1138AE37326D9B477F7A6E6 / 0xA095C393D1138AE37326D9B477F7A6E6
+# c5 f0 56 ca  # vorps %xmm2, %xmm1, %xmm1
+#   YMM1 0x976205C6A77A75A0F4B188F818D7580CF2A82D814FADCA699231339B21C6218C / 0xF2A82D814FADCA699231339B21C6218C
+# c4 e2 7d 1c 06  # vpabsb (%rsi), %ymm0
+#   Unicorn doesn't have it
+# c4 e2 7d 1e 06  # vpabsd (%rsi), %ymm0
+#   Unicorn doesn't have it
+# 62 f2 fd 28 1f 06  # vpabsq (%rsi), %ymm0
+#   Unicorn doesn't have it
+# c4 e2 7d 1d 06  # vpabsw (%rsi), %ymm0
+#   Unicorn doesn't have it
+# c5 e9 67 c9  # vpackuswb %xmm1, %xmm2, %xmm1
+#   YMM1 0x2226CA9FD968D8CD7BD521CF4C7D7DAD00FFFFFF0000000000FFFFFF00000000 / 0xFFFFFF0000000000FF00FFFF0000FF
+# c5 f5 fc 4e 20  # vpaddb 0x20(%rsi), %ymm1, %ymm1
+#   Unicorn doesn't have it
+# c5 75 fe ca  # vpaddd %ymm2, %ymm1, %ymm9
+#   Unicorn doesn't have it
+# c5 ed d4 56 40  # vpaddq 0x40(%rsi), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# c5 ed fd 56 40  # vpaddw 0x40(%rsi), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# c5 dd db e5  # vpand %ymm5, %ymm4, %ymm4
+#   Unicorn doesn't have it
+# c5 d5 df c0  # vpandn %ymm0, %ymm5, %ymm0
+#   Unicorn doesn't have it
+# c5 fd e0 06  # vpavgb (%rsi), %ymm0, %ymm0
+#   Unicorn doesn't have it
+# c4 e3 45 02 f6 aa  # vpblendd $0xaa, %ymm6, %ymm7, %ymm6 # ymm6 = ymm7[0],ymm6[1],ymm7[2],ymm6[3],ymm7[4],ymm6[5],ymm7[6],ymm6[7]
+#   Unicorn doesn't have it
+# c4 e2 7d 58 05 00 00 00 00  # vpbroadcastd (%rip), %ymm0   # 0x20b <recursive+0x4b>
+#   Unicorn doesn't have it
+# c4 e2 79 59 0d 00 00 00 00  # vpbroadcastq (%rip), %xmm1   # 0x3b9 <fround_double+0x9>
+#   Unicorn doesn't have it
+# 62 f1 7d 28 74 0a  # vpcmpeqb (%rdx), %ymm0, %k1
+#   Unicorn doesn't have it
+# c5 ed 76 72 40  # vpcmpeqd 0x40(%rdx), %ymm2, %ymm6
+#   Unicorn doesn't have it
+# c4 e2 6d 29 72 40  # vpcmpeqq 0x40(%rdx), %ymm2, %ymm6
+#   Unicorn doesn't have it
+# c5 ed 75 72 40  # vpcmpeqw 0x40(%rdx), %ymm2, %ymm6
+#   Unicorn doesn't have it
+# c4 e2 5d 37 e8  # vpcmpgtq %ymm0, %ymm4, %ymm5
+#   Unicorn doesn't have it
+# c4 e3 75 06 d0 20  # vperm2f128 $0x20, %ymm0, %ymm1, %ymm2 # ymm2 = ymm1[0,1],ymm0[0,1]
+#   Unicorn doesn't have it
+# c4 e3 fd 01 c1 d8  # vpermpd $0xd8, %ymm1, %ymm0     # ymm0 = ymm1[0,2,1,3]
+#   Unicorn doesn't have it
+# 62 f2 4d 28 7f e8  # vpermt2ps %ymm0, %ymm6, %ymm5
+#   Unicorn doesn't have it
+# 62 f2 7d 29 90 0c 96  # vpgatherdd (%rsi,%ymm2,4), %ymm1 {%k1}
+#   Unicorn doesn't have it
+# c4 e2 65 04 c9  # vpmaddubsw %ymm1, %ymm3, %ymm1
+#   Unicorn doesn't have it
+# c5 d5 f5 c9  # vpmaddwd %ymm1, %ymm5, %ymm1
+#   Unicorn doesn't have it
+# c4 e2 75 3c 4a 20  # vpmaxsb 0x20(%rdx), %ymm1, %ymm1
+#   Unicorn doesn't have it
+# c4 e2 6d 3d 52 40  # vpmaxsd 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# 62 f2 ed 28 3d 52 02  # vpmaxsq 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# c5 ed ee 52 40  # vpmaxsw 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# c5 f5 de 4a 20  # vpmaxub 0x20(%rdx), %ymm1, %ymm1
+#   Unicorn doesn't have it
+# c4 e2 6d 3f 52 40  # vpmaxud 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# 62 f2 ed 28 3f 52 02  # vpmaxuq 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# c4 e2 6d 3e 52 40  # vpmaxuw 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# c4 e2 75 38 4a 20  # vpminsb 0x20(%rdx), %ymm1, %ymm1
+#   Unicorn doesn't have it
+# c4 e2 6d 39 52 40  # vpminsd 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# 62 f2 ed 28 39 52 02  # vpminsq 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# c5 ed ea 52 40  # vpminsw 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# c5 f5 da 4a 20  # vpminub 0x20(%rdx), %ymm1, %ymm1
+#   Unicorn doesn't have it
+# c4 e2 6d 3b 52 40  # vpminud 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# 62 f2 ed 28 3b 52 02  # vpminuq 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# c4 e2 6d 3a 52 40  # vpminuw 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# 62 f2 7e 28 11 0f  # vpmovusdb %ymm1, (%rdi)
+#   Unicorn doesn't have it
+# c4 e2 7d 31 22  # vpmovzxbd (%rdx), %ymm4
+#   Unicorn doesn't have it
+# c4 e2 7d 35 16  # vpmovzxdq (%rsi), %ymm2
+#   Unicorn doesn't have it
+# c4 e2 7d 33 06  # vpmovzxwd (%rsi), %ymm0
+#   Unicorn doesn't have it
+# c4 42 35 40 c0  # vpmulld %ymm8, %ymm9, %ymm8
+#   Unicorn doesn't have it
+# 62 f2 ed 28 40 56 02  # vpmullq 0x40(%rsi), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# c5 e5 d5 d1  # vpmullw %ymm1, %ymm3, %ymm2
+#   Unicorn doesn't have it
+# c5 35 f4 cc  # vpmuludq %ymm4, %ymm9, %ymm9
+#   Unicorn doesn't have it
+# c5 dd eb c0  # vpor %ymm0, %ymm4, %ymm0
+#   Unicorn doesn't have it
+# c5 f9 f6 c1  # vpsadbw %xmm1, %xmm0, %xmm0
+#   YMM0 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000000007F800000000000007EC / 0x7F800000000000007EC
+# c5 f9 70 c8 55  # vpshufd $0x55, %xmm0, %xmm1     # xmm1 = xmm0[1,1,1,1]
+#   YMM1 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000000000000000000000000000 / 0
+# c5 95 72 f5 1f  # vpslld $0x1f, %ymm5, %ymm13
+#   Unicorn doesn't have it
+# c4 c1 1d 73 f4 20  # vpsllq $0x20, %ymm12, %ymm12
+#   Unicorn doesn't have it
+# c5 f5 71 f1 08  # vpsllw $0x8, %ymm1, %ymm1
+#   Unicorn doesn't have it
+# c5 a5 72 e7 01  # vpsrad $0x1, %ymm7, %ymm11
+#   Unicorn doesn't have it
+# 62 f1 cd 28 72 e2 02  # vpsraq $0x2, %ymm2, %ymm6
+#   Unicorn doesn't have it
+# c5 cd 71 e2 02  # vpsraw $0x2, %ymm2, %ymm6
+#   Unicorn doesn't have it
+# c5 d5 72 d1 02  # vpsrld $0x2, %ymm1, %ymm5
+#   Unicorn doesn't have it
+# c5 b5 73 d1 20  # vpsrlq $0x20, %ymm1, %ymm9
+#   Unicorn doesn't have it
+# c5 d5 71 d1 02  # vpsrlw $0x2, %ymm1, %ymm5
+#   Unicorn doesn't have it
+# c5 ed f8 d4  # vpsubb %ymm4, %ymm2, %ymm2
+#   Unicorn doesn't have it
+# c4 41 7d fa c9  # vpsubd %ymm9, %ymm0, %ymm9
+#   Unicorn doesn't have it
+# c5 ed fb 52 40  # vpsubq 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# c5 ed f9 52 40  # vpsubw 0x40(%rdx), %ymm2, %ymm2
+#   Unicorn doesn't have it
+# 62 f3 75 18 25 05 00 00 00 00 e4  # vpternlogd $0xe4, (%rip){1to4}, %xmm1, %xmm0 # xmm0 = xmm1 ^ (m32bcst & (xmm0 ^ xmm1))
+#   Unicorn doesn't have it
+# 62 f3 dd 28 25 c5 f8  # vpternlogq $0xf8, %ymm5, %ymm4, %ymm0 # ymm0 = ymm0 | (ymm4 & ymm5)
+#   Unicorn doesn't have it
+# 62 f2 3e 28 27 e1  # vptestnmd %ymm1, %ymm8, %k4
+#   Unicorn doesn't have it
+# c5 f9 62 05 00 00 00 00  # vpunpckldq (%rip), %xmm0, %xmm0 # xmm0 = xmm0[0],mem[0],xmm0[1],mem[1]
+#   YMM0 0x3082EE3A399AFE389ADC20A61EC28D6B90909090997AEBB190909090689E10CD / 0x90909090997AEBB190909090689E10CD
+# c5 e9 ef d2  # vpxor %xmm2, %xmm2, %xmm2
+#   YMM2 0xA96ED537C3AE7BCC380E32C91CD054A600000000000000000000000000000000 / 0
+# c4 e3 79 0a c0 09  # vroundss $0x9, %xmm0, %xmm0, %xmm0
+#   YMM0 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF / 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+# c5 f9 5c 05 00 00 00 00  # vsubpd (%rip), %xmm0, %xmm0    # 0x3e5 <ultof_double+0x15>
+#   YMM0 0xC351E614E21DC7D6F0B9EC553885A4913516F4AA967A0CA7A979D5C9881752DF / 0x3516F4AA967A0CA7A979D5C9881752DF
+# c5 fb 5c 05 00 00 00 00  # vsubsd (%rip), %xmm0, %xmm0    # 0x394 <ftoul_double+0x14>
+#   YMM0 0x40D41560809AD62DC0C76F56FDB0BE277C0E45EDA0B15C699E7D2369D6D1749A / 0x7C0E45EDA0B15C699E7D2369D6D1749A
+# c5 f4 15 c3  # vunpckhps %ymm3, %ymm1, %ymm0 # ymm0 = ymm1[2],ymm3[2],ymm1[3],ymm3[3],ymm1[6],ymm3[6],ymm1[7],ymm3[7]
+#   Unicorn doesn't have it
+# c5 f4 14 cb  # vunpcklps %ymm3, %ymm1, %ymm1 # ymm1 = ymm1[0],ymm3[0],ymm1[1],ymm3[1],ymm1[4],ymm3[4],ymm1[5],ymm3[5]
+#   Unicorn doesn't have it
+# 62 f1 fd 18 57 05 00 00 00 00  # vxorpd (%rip){1to2}, %xmm0, %xmm0 # 0x27a <fneg_double+0xa>
+#   Unicorn doesn't have it
+# c5 f8 57 05 00 00 00 00  # vxorps (%rip), %xmm0, %xmm0    # 0x2a8 <fneg_double+0x8>
+#   YMM0 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F / 0x6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F
+# c5 f8 77  # vzeroupper 
+#   YMM2 0xB17500642601E0DEE363618A6C369F19F53FB1E59A0B528FD66CF9C642500E2B / 0xF53FB1E59A0B528FD66CF9C642500E2B; 

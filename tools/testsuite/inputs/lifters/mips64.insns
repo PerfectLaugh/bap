@@ -1,0 +1,226 @@
+# the instructions of the cases lifters/mips64/N, one of each mnemonic of
+# the corpus of testsuite/src/corpus, see sample.py, whose results in
+# Unicorn and in Primus agree, as check.ml compares them, with runs=2
+
+46 20 60 05  # abs.d $f0, $f12
+46 00 60 05  # abs.s $f0, $f12
+46 20 08 00  # add.d $f0, $f1, $f0
+46 00 00 40  # add.s $f1, $f0, $f0
+24 01 00 20  # addiu $1, $zero, 0x20 <popcount32+0x20>
+00 22 08 21  # addu $1, $1, $2
+00 43 28 24  # and $5, $2, $3
+30 42 00 03  # andi $2, $2, 0x3 <atomic_add_u8+0x3>
+3c 01 55 55  # aui $1, $zero, 0x5555 <bitfield_set+0x522d>
+10 00 00 01  # b 0x4d4 <atomic_cas_u8+0xcc>
+45 00 00 07  # bc1f 0x2d4 <fmin_float+0x44>
+45 01 00 07  # bc1t 0x978 <fsel_float+0x48>
+10 22 00 07  # beq $1, $2, 0x6b8 <atomic_max_u8+0x110>
+20 22 00 01  # beqc $1, $2, 0x290 <atomic_cas_u8+0x70>
+10 40 ff f8  # beqz $2, 0x47c <atomic_cas_u8+0x74>
+04 21 00 09  # bgez $1, 0x6f4 <abs_i8+0x44>
+18 a0 00 0f  # blez $5, 0x400 <loops+0x40>
+14 22 00 0a  # bne $1, $2, 0x448 <vsel_i8+0x88>
+60 22 00 03  # bnec $1, $2, 0x73c <atomic_cas_u32+0x1c>
+14 20 00 07  # bnez $1, 0x798 <bzhi+0x48>
+46 21 00 32  # c.eq.d $f0, $f1
+46 01 00 32  # c.eq.s $f0, $f1
+46 21 00 36  # c.ole.d $f0, $f1
+46 01 00 36  # c.ole.s $f0, $f1
+46 20 60 34  # c.olt.d $f12, $f0
+46 00 60 34  # c.olt.s $f12, $f0
+46 21 00 37  # c.ule.d $f0, $f1
+46 01 00 37  # c.ule.s $f0, $f1
+46 21 00 31  # c.un.d $f0, $f1
+46 01 00 31  # c.un.s $f0, $f1
+70 21 08 20  # clz $1, $1
+46 a0 00 21  # cvt.d.l $f0, $f0
+46 00 00 21  # cvt.d.s $f0, $f0
+46 80 00 21  # cvt.d.w $f0, $f0
+46 20 00 20  # cvt.s.d $f0, $f0
+46 a0 00 20  # cvt.s.l $f0, $f0
+46 80 00 20  # cvt.s.w $f0, $f0
+64 03 ff fc  # daddiu $3, $zero, -0x4 <fence_acq+0xffffffffffffe7dc>
+00 22 08 2d  # daddu $1, $1, $2
+70 21 08 24  # dclz $1, $1
+00 41 00 1e  # ddiv $zero, $2, $1
+00 41 00 1f  # ddivu $zero, $2, $1
+7c 22 f8 03  # dext $2, $1, 0x0, 0x20 <fadd_float+0x20>
+7c 01 ff c6  # dins $1, $zero, 0x3f, 0x1 <fadd_float+0x1>
+00 41 00 1a  # div $zero, $2, $1
+46 20 08 03  # div.d $f0, $f1, $f0
+46 00 08 03  # div.s $f0, $f1, $f0
+00 41 00 1b  # divu $zero, $2, $1
+44 21 00 00  # dmfc1 $1, $f0
+44 a1 00 00  # dmtc1 $1, $f0
+00 22 00 1c  # dmult $1, $2
+00 22 00 1d  # dmultu $1, $2
+00 01 08 2f  # dnegu $1, $1
+00 24 10 56  # drotrv $2, $4, $1
+7c 01 08 a4  # dsbh $1, $1
+7c 01 11 64  # dshd $2, $1
+00 01 0c 38  # dsll $1, $1, 0x10 <popcount32+0x10>
+00 02 17 fc  # dsll32 $2, $2, 0x1f <fadd_float+0x1f>
+00 22 10 14  # dsllv $2, $2, $1
+00 01 08 7b  # dsra $1, $1, 0x1 <add_i8+0x1>
+00 01 0f ff  # dsra32 $1, $1, 0x1f <add_i8+0x1f>
+00 41 10 17  # dsrav $2, $1, $2
+00 01 10 7a  # dsrl $2, $1, 0x1 <popcount32+0x1>
+00 01 16 3e  # dsrl32 $2, $1, 0x18 <popcount32+0x18>
+00 41 10 16  # dsrlv $2, $1, $2
+00 22 08 2f  # dsubu $1, $1, $2
+7c 21 49 40  # ext $1, $1, 0x5, 0xa <popcount32+0xa>
+7c 01 ff c4  # ins $1, $zero, 0x1f, 0x1
+03 20 f8 09  # jalr $25
+00 20 00 08  # jr $1
+80 21 00 00  # lb $1, 0x0($1)
+93 c1 00 06  # lbu $1, 0x6($fp)
+df be 00 10  # ld $fp, 0x10($sp)
+d4 21 00 00  # ldc1 $f1, 0x0($1)
+68 41 00 03  # ldl $1, 0x3($2)
+6c 41 00 0a  # ldr $1, 0xa($2)
+4c 22 00 01  # ldxc1 $f0, $2($1) <vsub_i8+0x78>
+84 21 00 00  # lh $1, 0x0($1)
+97 c1 00 14  # lhu $1, 0x14($fp)
+c0 61 00 00  # ll $1, 0x0($3)
+d0 61 00 00  # lld $1, 0x0($3)
+3c 01 33 33  # lui $1, 0x3333 <bitfield_set+0x2abb>
+8f c1 00 00  # lw $1, 0x0($fp)
+c7 c0 00 04  # lwc1 $f0, 0x4($fp)
+88 41 00 01  # lwl $1, 0x1($2)
+98 41 00 04  # lwr $1, 0x4($2)
+9f c1 00 0c  # lwu $1, 0xc($fp)
+4c 22 00 00  # lwxc1 $f0, $2($1) <vsub_i8+0x78>
+4c 00 08 21  # madd.d $f0, $f0, $f1, $f0
+4c 00 08 20  # madd.s $f0, $f0, $f1, $f0
+44 01 00 00  # mfc1 $1, $f0
+00 00 08 10  # mfhi $1
+00 00 08 12  # mflo $1
+46 20 03 06  # mov.d $f12, $f0
+46 00 68 06  # mov.s $f0, $f13
+00 a0 08 25  # move $1, $5
+00 00 08 01  # movf $1, $zero, $fcc0
+46 20 70 11  # movf.d $f0, $f14, $fcc0
+46 00 70 11  # movf.s $f0, $f14, $fcc0
+00 01 18 0b  # movn $3, $zero, $1
+46 01 08 13  # movn.s $f0, $f1, $1
+00 21 10 01  # movt $2, $1, $fcc0
+46 21 00 51  # movt.d $f1, $f0, $fcc0
+46 01 60 11  # movt.s $f0, $f12, $fcc0
+00 02 08 0a  # movz $1, $zero, $2
+44 80 00 00  # mtc1 $zero, $f0
+00 60 00 11  # mthi $3
+00 60 00 13  # mtlo $3
+70 22 08 02  # mul $1, $1, $2
+46 20 08 02  # mul.d $f0, $f1, $f0
+46 00 60 02  # mul.s $f0, $f12, $f0
+00 22 00 18  # mult $1, $2
+00 22 00 19  # multu $1, $2
+46 20 00 07  # neg.d $f0, $f0
+46 00 00 07  # neg.s $f0, $f0
+00 01 08 23  # negu $1, $1
+00 00 00 00  # nop <add_i8> 
+00 04 30 27  # nor $6, $zero, $4
+00 20 08 27  # not $1, $1
+00 46 18 25  # or $3, $2, $6
+34 02 00 ff  # ori $2, $zero, 0xff <atomic_sub_u8+0x4f>
+00 21 0c 02  # rotr $1, $1, 0x10 <popcount32+0x10>
+00 24 08 46  # rotrv $1, $4, $1
+a3 c1 00 05  # sb $1, 0x5($fp)
+ff be 00 10  # sd $fp, 0x10($sp)
+f7 cc 00 00  # sdc1 $f12, 0x0($fp)
+4c 22 00 09  # sdxc1 $f0, $2($1) <vsub_i8+0x78>
+7c 01 0c 20  # seb $1, $1
+7c 01 0e 20  # seh $1, $1
+a7 c1 00 12  # sh $1, 0x12($fp)
+00 01 12 00  # sll $2, $1, 0x8 <popcount32+0x8>
+01 21 30 04  # sllv $6, $1, $9
+00 22 08 2a  # slt $1, $1, $2
+28 21 00 00  # slti $1, $1, 0x0 <add_i8>
+2c 21 00 01  # sltiu $1, $1, 0x1 <add_i8+0x1>
+00 22 08 2b  # sltu $1, $1, $2
+00 41 08 07  # srav $1, $1, $2
+00 01 10 42  # srl $2, $1, 0x1 <popcount32+0x1>
+00 41 10 06  # srlv $2, $1, $2
+46 21 00 01  # sub.d $f0, $f0, $f1
+46 01 00 01  # sub.s $f0, $f0, $f1
+00 22 08 23  # subu $1, $1, $2
+af c1 00 00  # sw $1, 0x0($fp)
+e7 cc 00 04  # swc1 $f12, 0x4($fp)
+4c 22 00 08  # swxc1 $f0, $2($1) <vsub_i8+0x78>
+00 00 00 0f  # sync <atomic_add_u8> 
+00 20 01 f4  # teq $1, $zero, 0x7 <add_i8+0x7>
+46 20 00 09  # trunc.l.d $f0, $f0
+46 00 00 09  # trunc.l.s $f0, $f0
+46 20 00 0d  # trunc.w.d $f0, $f0
+46 00 00 0d  # trunc.w.s $f0, $f0
+7c 01 08 a0  # wsbh $1, $1
+00 22 18 26  # xor $3, $1, $2
+38 21 00 01  # xori $1, $1, 0x1 <atomic_add_u8+0x1>
+
+# the instructions, whose results differ, as Unicorn or the checker
+# differ, e.g., the ones of a random address, or that Unicorn
+# doesn't have, and why
+# d9 3f ff f9  # beqzc $9, 0x28 <atomic_add_u8+0x28>
+#   status failed Unicorn: an unhandled interrupt 19 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 18 45 00 0f  # bgeuc $2, $5, 0x328 <atomic_max_u8+0x70>
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af8; memory at 3ffe0000
+# 58 05 00 10  # blezc $5, 0x3f4 <loops+0x44>
+#   pc 120000b34 / 120000af8
+# 5c 81 00 06  # bltc $4, $1, 0x2a4 <recursive+0x24>
+#   pc 120000b0c / 120000af8
+# 46 ad 60 02  # cmp.eq.d $f0, $f12, $f13
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 46 8d 60 02  # cmp.eq.s $f0, $f12, $f13
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 46 ad 60 06  # cmp.le.d $f0, $f12, $f13
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 46 8d 60 06  # cmp.le.s $f0, $f12, $f13
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 46 a0 60 04  # cmp.lt.d $f0, $f12, $f0
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 46 80 60 04  # cmp.lt.s $f0, $f12, $f0
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 46 ad 60 01  # cmp.un.d $f0, $f12, $f13
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 46 8d 60 01  # cmp.un.s $f0, $f12, $f13
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 00 85 10 de  # dmod $2, $4, $5
+#   HI 0x3FFE10F0 / 0x3FFE1210; LO 0 / 0x3FFE1720
+# 00 85 10 df  # dmodu $2, $4, $5
+#   HI 0x50 / 0x3FFE1710; LO 1 / 0x3FFE10A0
+# 00 81 08 dc  # dmuh $1, $4, $1
+#   HI 0 / 0x3FFE12A0; LO 0xFFF09C3B3727C00 / 0x3FFE11C0
+# 00 81 08 dd  # dmuhu $1, $4, $1
+#   HI 0 / 0x3FFE1750; LO 0xFFF0A43AF9F7700 / 0x3FFE1250
+# 00 22 08 9c  # dmul $1, $1, $2
+#   HI 0 / 0x3FFE14D0; LO 0xFFF0A1BB0D6F900 / 0x3FFE11C0
+# f8 19 00 00  # jalrc $25 <fadd_float>
+#   status failed Unicorn: an unhandled interrupt 19 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# d8 1f 00 00  # jrc $ra <atomic_add_u8>
+#   status failed Unicorn: an unhandled interrupt 19 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 46 20 08 9e  # max.d $f2, $f1, $f0
+#   F2 0x7FF0000000000000 / 0
+# 46 0d 60 1e  # max.s $f0, $f12, $f13
+#   F0 0x64B504F3 / 0
+# 00 85 10 da  # mod $2, $4, $5
+#   HI 0x3FFE1020 / 0x3FFE1370; LO 0 / 0x3FFE16C0
+# 00 85 10 db  # modu $2, $4, $5
+#   HI 0x3FFE12A0 / 0x3FFE14C0; LO 0 / 0x3FFE1340
+# 00 81 08 d8  # muh $1, $4, $1
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 00 81 08 d9  # muhu $1, $4, $1
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# e0 62 00 00  # sc $2, 0x0($3)
+#   R2 0 / 1; memory at 3ffe1000
+# f0 62 00 00  # scd $2, 0x0($3)
+#   R2 0 / 1; memory at 3ffe12b0
+# 46 22 18 50  # sel.d $f1, $f3, $f2
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 46 01 10 10  # sel.s $f0, $f2, $f1
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 00 22 08 35  # seleqz $1, $1, $2
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 00 24 08 37  # selnez $1, $1, $4
+#   status failed Unicorn: an unhandled interrupt 20 at 0 / paused; pc 0 / 120000af4; memory at 3ffe0000
+# 00 01 0d 03  # sra $1, $1, 0x14 <popcount32+0x14>
+#   R1 0x7CBC59816F8 / 0x6F8

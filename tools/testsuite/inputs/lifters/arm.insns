@@ -1,0 +1,354 @@
+# the instructions of the cases lifters/arm/N, one of each mnemonic of
+# the corpus of testsuite/src/corpus, see sample.py, whose results in
+# Unicorn and in Primus agree, as check.ml compares them, with runs=2
+
+90 01 02 e0  # <unknown> 
+00 10 a1 e2  # adc r1, r1, #0
+01 10 b0 e0  # adcs r1, r0, r1
+00 c0 81 e0  # add r12, r1, r0
+01 00 81 12  # addne r0, r1, #1
+00 00 92 e0  # adds r0, r2, r0
+00 00 02 e0  # and r0, r2, r0
+ff 00 00 02  # andeq r0, r0, #255
+01 00 10 e0  # ands r0, r0, r1
+40 0a a0 e1  # asr r0, r0, #20
+52 03 a0 51  # asrpl r0, r2, r3
+d7 ff ff ea  # b 0x4c4 <atomic_max_u8+0x28> @ imm = #-0xa4
+00 00 00 0a  # beq 0x564 <atomic_max_u8+0xc8> @ imm = #0x0
+11 04 cf e7  # bfi r0, r1, #8, #8
+02 00 00 aa  # bge 0x3d8 <min_i8+0x30>     @ imm = #0x8
+02 00 00 ca  # bgt 0x3c4 <recursive+0x28>  @ imm = #0x8
+23 00 00 8a  # bhi 0x340 <jump_table+0xb0> @ imm = #0x8c
+02 00 00 2a  # bhs 0x26f0 <min_u32+0x30>   @ imm = #0x8
+02 10 c1 e1  # bic r1, r1, r2
+12 01 c0 d1  # bicle r0, r0, r2, lsl r1
+02 00 00 da  # ble 0x540 <fsel_float+0x38> @ imm = #0x8
+12 00 00 3a  # blo 0x420 <loops+0x70>      @ imm = #0x48
+02 00 00 9a  # bls 0x2734 <max_u32+0x30>   @ imm = #0x8
+02 00 00 ba  # blt 0x5b4 <bzhi+0x2c>       @ imm = #0x8
+01 00 00 1a  # bne 0x538 <atomic_max_u8+0x9c> @ imm = #0x4
+02 00 00 5a  # bpl 0x1b4 <fmin_float+0x34> @ imm = #0x8
+1f f0 7f f5  # clrex 
+10 0f 6f e1  # clz r0, r0
+11 0f 6f 11  # clzne r0, r1
+01 00 70 e3  # cmn r0, #1
+00 00 51 e1  # cmp r1, r0
+00 00 53 03  # cmpeq r3, #0
+5b f0 7f f5  # dmb ish
+00 c0 21 e0  # eor r12, r1, r0
+70 00 96 e8  # ldm r6, {r4, r5, r6}
+f4 00 90 e9  # ldmib r0, {r2, r4, r5, r6, r7}
+04 00 1b e5  # ldr r0, [r11, #-0x4]
+00 00 d0 e5  # ldrb r0, [r0]
+d0 60 c1 e1  # ldrd r6, r7, [r1]
+9f 0f 93 e1  # ldrex r0, [r3]
+9f 0f d3 e1  # ldrexb r0, [r3]
+9f 2f b0 e1  # ldrexd r2, r3, [r0]
+9f 0f f3 e1  # ldrexh r0, [r3]
+b0 00 d0 e1  # ldrh r0, [r0]
+01 01 90 97  # ldrls r0, [r0, r1, lsl #2]
+d1 00 5b e1  # ldrsb r0, [r11, #-1]
+f0 10 dd e1  # ldrsh r1, [sp]
+01 11 a0 e1  # lsl r1, r1, #2
+10 13 a0 51  # lslpl r1, r0, r3
+20 0c a0 e1  # lsr r0, r0, #24
+31 03 a0 51  # lsrpl r0, r1, r3
+a1 10 b0 e1  # lsrs r1, r1, #1
+ba 0f 07 ee  # mcr p15, #0x0, r0, c7, c10, #0x5
+ba cf 07 0e  # mcreq p15, #0x0, r12, c7, c10, #0x5
+91 32 21 e0  # mla r1, r1, r2, r3
+90 21 61 e0  # mls r1, r0, r1, r2
+92 01 60 10  # mlsne r0, r2, r1, r0
+0b d0 a0 e1  # mov sp, r11
+00 00 a0 03  # moveq r0, #0
+01 00 a0 a1  # movge r0, r1
+03 e0 a0 c1  # movgt lr, r3
+03 e0 a0 81  # movhi lr, r3
+01 00 a0 21  # movhs r0, r1
+01 00 a0 d1  # movle r0, r1
+01 00 a0 33  # movlo r0, #1
+01 00 a0 91  # movls r0, r1
+01 00 a0 b3  # movlt r0, #1
+01 00 a0 43  # movmi r0, #1
+01 00 a0 11  # movne r0, r1
+00 00 a0 53  # movpl r0, #0
+0f 1f 40 e3  # movt r1, #0xf0f
+00 00 40 93  # movtls r0, #0x0
+00 00 a0 73  # movvc r0, #0
+01 00 a0 63  # movvs r0, #1
+00 00 00 e3  # movw r0, #0x0
+01 00 00 03  # movweq r0, #0x1
+01 00 00 a3  # movwge r0, #0x1
+01 00 00 23  # movwhs r0, #0x1
+01 20 00 d3  # movwle r2, #0x1
+01 00 00 33  # movwlo r0, #0x1
+00 00 00 93  # movwls r0, #0x0
+01 00 00 b3  # movwlt r0, #0x1
+01 00 00 43  # movwmi r0, #0x1
+01 00 00 13  # movwne r0, #0x1
+00 00 00 53  # movwpl r0, #0x0
+00 00 00 73  # movwvc r0, #0x0
+01 00 00 63  # movwvs r0, #0x1
+90 01 00 e0  # mul r0, r0, r1
+00 10 e0 e3  # mvn r1, #0
+00 f0 20 e3  # nop 
+00 00 82 e1  # orr r0, r2, r0
+03 c0 92 e1  # orrs r12, r2, r3
+00 48 2d e9  # push {r11, lr}
+50 00 01 e1  # qadd r0, r0, r1
+11 0f 20 e6  # qadd16 r0, r0, r1
+30 0f ff e6  # rbit r0, r0
+30 0f bf e6  # rev r0, r0
+b0 0f bf e6  # rev16 r0, r0
+70 01 a0 e1  # ror r0, r0, r1
+6c 10 a0 e1  # rrx r1, r12
+20 00 62 e2  # rsb r0, r2, #32
+00 00 60 42  # rsbmi r0, r0, #0
+20 10 62 12  # rsbne r1, r2, #32
+00 00 70 e2  # rsbs r0, r0, #0
+00 00 e0 e2  # rsc r0, r0, #0
+00 20 c1 e2  # sbc r2, r1, #0
+01 00 d0 e0  # sbcs r0, r0, r1
+50 04 ab e7  # sbfx r0, r0, #0x8, #0xc
+10 f1 10 17  # sdivne r0, r0, r1
+81 20 00 e1  # smlabb r0, r1, r0, r2
+10 01 50 e7  # smmla r0, r0, r1, r0
+10 f1 51 e7  # smmul r1, r0, r1
+80 01 60 e1  # smulbb r0, r0, r1
+90 01 c1 e0  # smull r0, r1, r0, r1
+21 00 8c e8  # stm r12, {r0, r5}
+04 00 0b e5  # str r0, [r11, #-0x4]
+05 10 4b e5  # strb r1, [r11, #-0x5]
+00 00 c4 05  # strbeq r0, [r4]
+f0 00 c5 e1  # strd r0, r1, [r5]
+f0 40 c1 01  # strdeq r4, r5, [r1]
+f0 20 c4 11  # strdne r2, r3, [r4]
+00 00 84 05  # streq r0, [r4]
+b6 10 4b e1  # strh r1, [r11, #-6]
+b0 00 c4 01  # strheq r0, [r4]
+00 c0 41 e0  # sub r12, r1, r0
+c3 30 4c 00  # subeq r3, r12, r3, asr #1
+00 00 52 e0  # subs r0, r2, r0
+70 00 af e6  # sxtb r0, r0
+70 00 af 06  # sxtbeq r0, r0
+70 00 bf e6  # sxth r0, r0
+70 00 bf 06  # sxtheq r0, r0
+01 00 10 e3  # tst r0, #1
+50 04 ec e7  # ubfx r0, r0, #0x8, #0xd
+10 f1 30 17  # udivne r0, r0, r1
+90 02 83 e0  # umull r0, r3, r0, r2
+13 30 e8 e6  # usat r3, #0x8, r3
+70 00 ef e6  # uxtb r0, r0
+70 00 ef 06  # uxtbeq r0, r0
+73 00 ef 26  # uxtbhs r0, r3
+72 00 ef 16  # uxtbne r0, r2
+70 00 ff e6  # uxth r0, r0
+70 00 ff 06  # uxtheq r0, r0
+73 00 ff 26  # uxthhs r0, r3
+72 00 ff 16  # uxthne r0, r2
+c0 0a b0 ee  # vabs.f32 s0, s0
+c0 0b b0 ee  # vabs.f64 d0, d0
+60 03 f5 f3  # vabs.s16 q8, q8
+60 03 f9 f3  # vabs.s32 q8, q8
+60 03 f1 f3  # vabs.s8 q8, q8
+00 0a 31 ee  # vadd.f32 s0, s2, s0
+01 0b 30 ee  # vadd.f64 d0, d0, d1
+e2 08 50 f2  # vadd.i16 q8, q8, q9
+e0 08 64 f2  # vadd.i32 q8, q10, q8
+a1 08 70 f2  # vadd.i64 d16, d16, d17
+e0 08 42 f2  # vadd.i8 q8, q9, q8
+f0 01 42 f2  # vand q8, q9, q8
+f0 01 52 f2  # vbic q8, q9, q8
+f8 41 76 f3  # vbif q10, q11, q12
+30 01 21 f3  # vbit d0, d1, d16
+b2 01 11 f3  # vbsl d0, d17, d18
+f0 08 52 f3  # vceq.i16 q8, q9, q8
+f0 08 62 f3  # vceq.i32 q8, q9, q8
+f2 28 40 f3  # vceq.i8 q9, q8, q9
+e2 23 64 f3  # vcgt.u32 q9, q10, q9
+40 1a b4 ee  # vcmp.f32 s2, s0
+41 0b b4 ee  # vcmp.f64 d0, d1
+c0 0b b7 ee  # vcvt.f32.f64 s0, d0
+60 06 fb f3  # vcvt.f32.s32 q8, q8
+40 0a b8 ee  # vcvt.f32.u32 s0, s0
+c0 0a b7 ee  # vcvt.f64.f32 d0, s0
+c0 0b b8 ee  # vcvt.f64.s32 d0, s0
+40 0b b8 ee  # vcvt.f64.u32 d0, s0
+60 07 fb f3  # vcvt.s32.f32 q8, q8
+c0 0b bd ee  # vcvt.s32.f64 s0, d0
+c0 0a bc ee  # vcvt.u32.f32 s0, s0
+c0 0b bc ee  # vcvt.u32.f64 s0, d0
+00 0a 81 ee  # vdiv.f32 s0, s2, s0
+01 0b 80 ee  # vdiv.f64 d0, d0, d1
+90 0b a2 ee  # vdup.32 q9, r0
+f4 01 40 f3  # veor q8, q8, q10
+00 0a a1 ee  # vfma.f32 s0, s2, s0
+a0 0b e1 ee  # vfma.f64 d16, d17, d16
+4d 0a 62 f4  # vld1.16 {d16, d17}, [r2]!
+8d 0a 62 f4  # vld1.32 {d16, d17}, [r2]!
+cf 0a 63 f4  # vld1.64 {d16, d17}, [r3]
+0d 0a 61 f4  # vld1.8 {d16, d17}, [r1]!
+02 0b f1 ec  # vldmia r1!, {d16}
+00 0a 9d ed  # vldr s0, [sp]
+e2 06 50 f2  # vmax.s16 q8, q8, q9
+e2 06 60 f2  # vmax.s32 q8, q8, q9
+e0 06 42 f2  # vmax.s8 q8, q9, q8
+e2 06 50 f3  # vmax.u16 q8, q8, q9
+e2 06 60 f3  # vmax.u32 q8, q8, q9
+e0 06 42 f3  # vmax.u8 q8, q9, q8
+f2 06 50 f2  # vmin.s16 q8, q8, q9
+f2 06 60 f2  # vmin.s32 q8, q8, q9
+f0 06 42 f2  # vmin.s8 q8, q9, q8
+f2 06 50 f3  # vmin.u16 q8, q8, q9
+f2 06 60 f3  # vmin.u32 q8, q8, q9
+f0 06 42 f3  # vmin.u8 q8, q9, q8
+e2 09 54 f2  # vmla.i16 q8, q10, q9
+e2 09 64 f2  # vmla.i32 q8, q10, q9
+e0 49 42 f2  # vmla.i8 q10, q9, q8
+10 0a 00 ee  # vmov s0, r0
+90 1b 30 ee  # vmov.32 r1, d16[1]
+00 0a b5 ee  # vmov.f32 s0, #2.500000e-01
+00 0b b5 ee  # vmov.f64 d0, #2.500000e-01
+53 08 c0 f2  # vmov.i16 q8, #0x3
+10 06 c0 f3  # vmov.i32 d16, #0x80000000
+53 0e c0 f2  # vmov.i8 q8, #0x3
+b0 1b 90 ee  # vmov.u16 r1, d16[0]
+90 1b d0 ee  # vmov.u8 r1, d16[0]
+41 0a f0 ce  # vmovgt.f32 s1, s2
+42 1b b0 ce  # vmovgt.f64 d1, d2
+35 ca d0 f2  # vmovl.s16 q14, d21
+10 0a 90 f3  # vmovl.u16 q0, d0
+30 ea c8 f3  # vmovl.u8 q15, d16
+40 0a f0 4e  # vmovmi.f32 s1, s0
+40 1b b0 4e  # vmovmi.f64 d1, d0
+24 42 f6 f3  # vmovn.i32 d20, q10
+10 fa f1 ee  # vmrs APSR_nzcv, fpscr
+00 1a 21 ee  # vmul.f32 s2, s2, s0
+01 0b 20 ee  # vmul.f64 d0, d0, d1
+f0 09 52 f2  # vmul.i16 q8, q9, q8
+b1 09 60 f2  # vmul.i32 d16, d16, d17
+f0 09 42 f2  # vmul.i8 q8, q9, q8
+73 40 c0 f2  # vmvn.i32 q10, #0x3
+40 0a b1 ee  # vneg.f32 s0, s0
+40 0b b1 ee  # vneg.f64 d0, d0
+e6 63 f9 f3  # vneg.s32 q11, q11
+18 01 28 f2  # vorr d0, d8, d8
+04 8b bd ec  # vpop {d8, d9}
+04 8b 2d ed  # vpush {d8, d9}
+f0 02 72 f3  # vqsub.u64 q8, q9, q8
+60 40 b8 f3  # vrev64.32 q2, q8
+70 45 d1 f2  # vshl.i16 q10, q8, #0x1
+70 45 e1 f2  # vshl.i32 q10, q8, #0x1
+b0 05 e0 f2  # vshl.i64 d16, d16, #0x20
+70 45 c9 f2  # vshl.i8 q10, q8, #0x1
+70 00 de f2  # vshr.s16 q8, q8, #0x2
+70 00 fe f2  # vshr.s32 q8, q8, #0x2
+f0 00 fe f2  # vshr.s64 q8, q8, #0x2
+70 00 ce f2  # vshr.s8 q8, q8, #0x2
+70 00 de f3  # vshr.u16 q8, q8, #0x2
+70 00 fe f3  # vshr.u32 q8, q8, #0x2
+f0 00 fe f3  # vshr.u64 q8, q8, #0x2
+70 00 ce f3  # vshr.u8 q8, q8, #0x2
+4d 0a 40 f4  # vst1.16 {d16, d17}, [r0]!
+8d 0a 40 f4  # vst1.32 {d16, d17}, [r0]!
+cd 0a 40 f4  # vst1.64 {d16, d17}, [r0]!
+0d 0a 40 f4  # vst1.8 {d16, d17}, [r0]!
+8f 03 43 f4  # vst2.32 {d16, d17, d18, d19}, [r3]
+02 0b a0 ec  # vstmia r0!, {d0}
+00 0a 8d ed  # vstr s0, [sp]
+41 0a 30 ee  # vsub.f32 s0, s0, s2
+41 0b 30 ee  # vsub.f64 d0, d0, d1
+e2 08 50 f3  # vsub.i16 q8, q8, q9
+e2 08 60 f3  # vsub.i32 q8, q8, q9
+e0 08 72 f3  # vsub.i64 q8, q9, q8
+e0 08 42 f3  # vsub.i8 q8, q9, q8
+f2 88 64 f2  # vtst.32 q12, q10, q9
+25 41 f2 f3  # vuzp.8 d20, d21
+
+# the instructions, whose results differ, as Unicorn or the checker
+# differ, e.g., the ones of a random address, or that Unicorn
+# doesn't have, and why
+# 31 ff 2f e1  # blx r1
+#   Unicorn faults: Segmentation fault at 0x3FFE1780 / paused
+# 1e ff 2f e1  # bx lr
+#   Unicorn faults: Segmentation fault at 0x3FFE12D0 / paused
+# 1e ff 2f 01  # bxeq lr
+#   Unicorn faults: Segmentation fault at 0x3FFE1440 / paused
+# 1e ff 2f 21  # bxhs lr
+#   Unicorn faults: Segmentation fault at 0x3FFE10C0 / paused
+# 1e ff 2f b1  # bxlt lr
+#   Unicorn faults: Segmentation fault at 0x3FFE1490 / paused
+# 1e ff 2f 11  # bxne lr
+#   Unicorn faults: Segmentation fault at 0x3FFE14D0 / paused
+# 9f 0c 90 e1  # lda r0, [r0]
+#   Unicorn doesn't have it
+# 9f 0c d0 e1  # ldab r0, [r0]
+#   Unicorn doesn't have it
+# 9f 2e 90 e1  # ldaex r2, [r0]
+#   Unicorn doesn't have it
+# 9f 2e d0 e1  # ldaexb r2, [r0]
+#   Unicorn doesn't have it
+# 9f 0e b0 e1  # ldaexd r0, r1, [r0]
+#   Unicorn doesn't have it
+# 9f 2e f0 e1  # ldaexh r2, [r0]
+#   Unicorn doesn't have it
+# 9f 0c f0 e1  # ldah r0, [r0]
+#   Unicorn doesn't have it
+# 00 88 bd e8  # pop {r11, pc}
+#   Unicorn faults: Segmentation fault at 0xB2825302 / paused
+# f0 8b bd 08  # popeq {r4, r5, r6, r7, r8, r9, r11, pc}
+#   Unicorn faults: Segmentation fault at 0x528A1D8 / paused
+# 91 fc 80 e1  # stl r1, [r0]
+#   Unicorn doesn't have it
+# 91 fc c0 e1  # stlb r1, [r0]
+#   Unicorn doesn't have it
+# 91 3e 80 e1  # stlex r3, r1, [r0]
+#   Unicorn doesn't have it
+# 91 3e c0 e1  # stlexb r3, r1, [r0]
+#   Unicorn doesn't have it
+# 92 ee ac e1  # stlexd lr, r2, r3, [r12]
+#   Unicorn doesn't have it
+# 91 3e e0 e1  # stlexh r3, r1, [r0]
+#   Unicorn doesn't have it
+# 91 fc e0 e1  # stlh r1, [r0]
+#   Unicorn doesn't have it
+# 92 3f 80 e1  # strex r3, r2, [r0]
+#   R3 1 / 0; memory at 3ffe1610
+# 92 3f c0 e1  # strexb r3, r2, [r0]
+#   R3 1 / 0; memory at 3ffe11b0
+# 91 3f c0 01  # strexbeq r3, r1, [r0]
+#   status paused / failed Segmentation fault at 2; pc 843c / 0; R3 1 / 2; memory at 3ffe0000
+# 90 7f a6 e1  # strexd r7, r0, r1, [r6]
+#   R7 1 / 0; memory at 3ffe16d0
+# 92 6f a0 01  # strexdeq r6, r2, r3, [r0]
+#   status paused / failed Segmentation fault at 0xCA077D00; pc 843c / 0; memory at 3ffe0000
+# 91 3f 80 01  # strexeq r3, r1, [r0]
+#   status paused / failed Segmentation fault at 0xAF23645C; pc 843c / 0; memory at 3ffe0000
+# 92 3f e0 e1  # strexh r3, r2, [r0]
+#   R3 1 / 0; memory at 3ffe1740
+# 91 3f e0 01  # strexheq r3, r1, [r0]
+#   status paused / failed Segmentation fault at 0xFFFFFFFF; pc 843c / 0; R3 1 / 0; memory at 3ffe0000
+# 20 0a 80 fe  # vmaxnm.f32 s0, s0, s1
+#   Unicorn doesn't have it
+# 01 0b 80 fe  # vmaxnm.f64 d0, d0, d1
+#   Unicorn doesn't have it
+# 40 0a b8 fe  # vrinta.f32 s0, s0
+#   Unicorn doesn't have it
+# 40 0b b8 fe  # vrinta.f64 d0, d0
+#   Unicorn doesn't have it
+# 40 0a bb fe  # vrintm.f32 s0, s0
+#   Unicorn doesn't have it
+# 40 0b bb fe  # vrintm.f64 d0, d0
+#   Unicorn doesn't have it
+# 40 0a ba fe  # vrintp.f32 s0, s0
+#   Unicorn doesn't have it
+# 40 0b ba fe  # vrintp.f64 d0, d0
+#   Unicorn doesn't have it
+# c0 0a b6 ee  # vrintz.f32 s0, s0
+#   Unicorn doesn't have it
+# c0 0b b6 ee  # vrintz.f64 d0, d0
+#   Unicorn doesn't have it
+# 01 0a 32 fe  # vselgt.f32 s0, s4, s2
+#   Unicorn doesn't have it
+# 01 0b 30 fe  # vselgt.f64 d0, d0, d1
+#   Unicorn doesn't have it

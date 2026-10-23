@@ -1,0 +1,341 @@
+# the instructions of the cases lifters/riscv64/N, one of each mnemonic of
+# the corpus of testsuite/src/corpus, see sample.py, whose results in
+# Unicorn and in Primus agree, as check.ml compares them, with runs=2
+
+2e 95  # add a0, a0, a1
+7d 15  # addi a0, a0, -0x1
+1b 05 14 00  # addiw a0, s0, 0x1
+2d 9d  # addw a0, a0, a1
+2f 35 b5 06  # amoadd.d.aqrl a0, a1, (a0)
+2f 25 b5 06  # amoadd.w.aqrl a0, a1, (a0)
+2f 35 b5 60  # amoand.d a0, a1, (a0)
+2f 25 a6 60  # amoand.w a0, a0, (a2)
+2f 35 b5 42  # amoor.d.rl a0, a1, (a0)
+2f 25 a6 42  # amoor.w.rl a0, a0, (a2)
+2f 35 b5 0e  # amoswap.d.aqrl a0, a1, (a0)
+2f 25 b5 0e  # amoswap.w.aqrl a0, a1, (a0)
+2f 35 b5 24  # amoxor.d.aq a0, a1, (a0)
+2f 25 a6 24  # amoxor.w.aq a0, a0, (a2)
+33 f6 a8 00  # and a2, a7, a0
+05 89  # andi a0, a0, 0x1
+17 03 00 00  # auipc t1, 0x0
+63 00 c7 00  # beq a4, a2, 0x128 <atomic_cas_u8+0x44>
+01 c1  # beqz a0, 0xce <fround_float+0x10>
+63 50 b5 00  # bge a0, a1, 0x336 <atomic_max_u8+0x34>
+63 70 b5 00  # bgeu a0, a1, 0x16e <atomic_max_u8+0x1c>
+63 50 05 00  # bgez a0, 0x384 <abs_i8+0x10>
+63 50 b0 00  # blez a1, 0x1d4 <loops+0x2>
+63 40 b5 00  # blt a0, a1, 0x5a6 <bzhi+0x18>
+63 60 b5 00  # bltu a0, a1, 0x3744 <sat_add_u8+0x26>
+63 40 07 00  # bltz a4, 0x876 <shr_i128+0x8>
+63 10 e6 00  # bne a2, a4, 0x108 <atomic_cas_u8+0x24>
+73 50 a0 00  # csrwi vxrm, 0x0
+33 45 b5 02  # div a0, a0, a1
+33 55 b5 02  # divu a0, a0, a1
+3b 55 b5 02  # divuw a0, a0, a1
+3b 45 b5 02  # divw a0, a0, a1
+53 25 a5 22  # fabs.d fa0, fa0
+53 75 b5 02  # fadd.d fa0, fa0, fa1
+53 75 25 d2  # fcvt.d.l fa0, a0
+53 75 35 d2  # fcvt.d.lu fa0, a0
+53 05 05 42  # fcvt.d.s fa0, fa0
+53 05 05 d2  # fcvt.d.w fa0, a0
+53 05 15 d2  # fcvt.d.wu fa0, a0
+53 15 25 c2  # fcvt.l.d a0, fa0, rtz
+53 15 35 c2  # fcvt.lu.d a0, fa0, rtz
+53 15 05 c2  # fcvt.w.d a0, fa0, rtz
+53 15 15 c2  # fcvt.wu.d a0, fa0, rtz
+53 15 15 c0  # fcvt.wu.s a0, fa0, rtz
+53 75 b5 1a  # fdiv.d fa0, fa0, fa1
+0f 00 10 03  # fence rw, w
+53 25 b5 a2  # feq.d a0, fa0, fa1
+53 25 b5 a0  # feq.s a0, fa0, fa1
+08 20  # fld fa0, 0x0(s0)
+53 05 b5 a2  # fle.d a0, fa0, fa1
+53 15 b5 a2  # flt.d a0, fa0, fa1
+07 27 06 00  # flw fa4, 0x0(a2)
+43 75 b5 62  # fmadd.d fa0, fa0, fa1, fa2
+53 15 b5 2a  # fmax.d fa0, fa0, fa1
+53 75 b5 12  # fmul.d fa0, fa0, fa1
+53 05 c6 22  # fmv.d fa0, fa2
+53 07 05 f2  # fmv.d.x fa4, a0
+53 15 a5 22  # fneg.d fa0, fa0
+18 a1  # fsd fa4, 0x0(a0)
+53 05 b5 22  # fsgnj.d fa0, fa0, fa1
+53 75 b5 0a  # fsub.d fa0, fa0, fa1
+27 20 e5 00  # fsw fa4, 0x0(a0)
+01 a0  # j 0x850 <shl_i128+0x10>
+03 05 45 00  # lb a0, 0x4(a0)
+03 45 05 00  # lbu a0, 0x0(a0)
+08 61  # ld a0, 0x0(a0)
+03 16 05 00  # lh a2, 0x0(a0)
+03 55 05 00  # lhu a0, 0x0(a0)
+13 05 f0 0f  # li a0, 0xff
+2f 35 06 16  # lr.d.aqrl a0, (a2)
+2f 25 07 14  # lr.w.aq a0, (a4)
+2f 26 08 16  # lr.w.aqrl a2, (a6)
+41 65  # lui a0, 0x10
+08 41  # lw a0, 0x0(a0)
+03 65 c4 fe  # lwu a0, -0x14(s0)
+33 05 b5 02  # mul a0, a0, a1
+33 15 b5 02  # mulh a0, a0, a1
+33 37 a6 02  # mulhu a4, a2, a0
+3b 05 b5 02  # mulw a0, a0, a1
+32 85  # mv a0, a2
+33 06 b0 40  # neg a2, a1
+3b 05 a0 40  # negw a0, a0
+13 45 f5 ff  # not a0, a0
+4d 8d  # or a0, a0, a1
+93 e5 35 00  # ori a1, a1, 0x3
+33 65 b5 02  # rem a0, a0, a1
+33 75 b5 02  # remu a0, a0, a1
+3b 75 b5 02  # remuw a0, a0, a1
+3b 65 b5 02  # remw a0, a0, a1
+23 00 b5 00  # sb a1, 0x0(a0)
+06 e4  # sd ra, 0x8(sp)
+13 35 15 00  # seqz a0, a0
+01 25  # sext.w a0, a0
+33 27 d0 00  # sgtz a4, a3
+23 10 b5 00  # sh a1, 0x0(a0)
+33 15 b5 00  # sll a0, a0, a1
+0e 05  # slli a0, a0, 0x3
+1b 15 15 00  # slliw a0, a0, 0x1
+3b 97 a5 00  # sllw a4, a1, a0
+33 25 b5 00  # slt a0, a0, a1
+13 a6 05 02  # slti a2, a1, 0x20
+33 35 b5 00  # sltu a0, a0, a1
+33 35 a0 00  # snez a0, a0
+33 55 b5 40  # sra a0, a0, a1
+01 95  # srai a0, a0, 0x20
+1b 55 25 40  # sraiw a0, a0, 0x2
+3b 55 b5 40  # sraw a0, a0, a1
+33 55 b5 00  # srl a0, a0, a1
+13 56 45 02  # srli a2, a0, 0x24
+1b 55 35 00  # srliw a0, a0, 0x3
+3b 55 a7 00  # srlw a0, a4, a0
+0d 8d  # sub a0, a0, a1
+0d 9d  # subw a0, a0, a1
+0c c1  # sw a1, 0x0(a0)
+33 c6 f8 00  # xor a2, a7, a5
+13 45 15 00  # xori a0, a0, 0x1
+13 75 f5 0f  # zext.b a0, a0
+
+# the instructions, whose results differ, as Unicorn or the checker
+# differ, e.g., the ones of a random address, or that Unicorn
+# doesn't have, and why
+# 33 75 b5 40  # andn a0, a0, a1
+#   Unicorn doesn't have it
+# 93 55 75 48  # bexti a1, a0, 0x7
+#   Unicorn doesn't have it
+# 7d f6  # bnez a2, 0x42 <atomic_sub_u8+0x12>
+#   Unicorn doesn't have it
+# 13 15 05 60  # clz a0, a0
+#   Unicorn doesn't have it
+# 1b 15 05 60  # clzw a0, a0
+#   Unicorn doesn't have it
+# 13 15 25 60  # cpop a0, a0
+#   Unicorn doesn't have it
+# 1b 15 25 60  # cpopw a0, a0
+#   Unicorn doesn't have it
+# 13 15 15 60  # ctz a0, a0
+#   Unicorn doesn't have it
+# 1b 15 15 60  # ctzw a0, a0
+#   Unicorn doesn't have it
+# 53 25 a5 20  # fabs.s fa0, fa0
+#   F10 0x7FFFFFF3 / 0xFFFFFFFF7FFFFFF3
+# 53 75 b5 00  # fadd.s fa0, fa0, fa1
+#   F10 0x367122B7 / 0xFFFFFFFF7FC00000
+# 53 15 25 c0  # fcvt.l.s a0, fa0, rtz
+#   X10 0 / 0x7FFFFFFFFFFFFFFF
+# 53 15 35 c0  # fcvt.lu.s a0, fa0, rtz
+#   X10 0 / 0xFFFFFFFFFFFFFFFF
+# 53 75 15 40  # fcvt.s.d fa0, fa0
+#   F10 0x80000000 / 0xFFFFFFFF80000000
+# 53 75 25 d0  # fcvt.s.l fa0, a0
+#   F10 0x4E7FF840 / 0xFFFFFFFF4E7FF840
+# 53 75 35 d0  # fcvt.s.lu fa0, a0
+#   F10 0x4E7FF85D / 0xFFFFFFFF4E7FF85D
+# 53 75 05 d0  # fcvt.s.w fa0, a0
+#   F10 0x4E7FF840 / 0xFFFFFFFF4E7FF840
+# 53 75 15 d0  # fcvt.s.wu fa0, a0
+#   F10 0x4E7FF85F / 0xFFFFFFFF4E7FF85F
+# 53 15 05 c0  # fcvt.w.s a0, fa0, rtz
+#   X10 0 / 0x7FFFFFFF
+# 53 75 b5 18  # fdiv.s fa0, fa0, fa1
+#   F10 0x7FC00000 / 0xFFFFFFFF7FC00000
+# 53 05 b5 a0  # fle.s a0, fa0, fa1
+#   X10 1 / 0
+# 53 15 b5 a0  # flt.s a0, fa0, fa1
+#   X10 1 / 0
+# 43 75 b5 60  # fmadd.s fa0, fa0, fa1, fa2
+#   F10 0 / 0xFFFFFFFF7FC00000
+# 53 15 b5 28  # fmax.s fa0, fa0, fa1
+#   F10 0 / 0xFFFFFFFF7FC00000
+# 53 75 b5 10  # fmul.s fa0, fa0, fa1
+#   F10 0x7FC00000 / 0xFFFFFFFF7FC00000
+# 53 05 c6 20  # fmv.s fa0, fa2
+#   F10 0xA7806EA92499F033 / 0xFFFFFFFF7FC00000
+# 53 05 00 f0  # fmv.w.x fa0, zero
+#   F10 0 / 0xFFFFFFFF00000000
+# 53 15 a5 20  # fneg.s fa0, fa0
+#   F10 0xFFFFFFFF80000001 / 0xFFFFFFFFFFC00000
+# 53 05 b5 20  # fsgnj.s fa0, fa0, fa1
+#   F10 0xF6B052E8FEDB20C1 / 0xFFFFFFFF7FC00000
+# 53 75 b5 08  # fsub.s fa0, fa0, fa1
+#   F10 0x9E3E5A8F / 0xFFFFFFFF7FC00000
+# 82 94  # jalr s1
+#   Unicorn faults: Segmentation fault at 0x3FFE14B0 / paused
+# 02 85  # jr a0
+#   Unicorn faults: Segmentation fault at 0x3FFE1650 / paused
+# 33 65 b5 0a  # max a0, a0, a1
+#   Unicorn doesn't have it
+# 33 75 b5 0a  # maxu a0, a0, a1
+#   Unicorn doesn't have it
+# 33 45 b5 0a  # min a0, a0, a1
+#   Unicorn doesn't have it
+# 33 55 b5 0a  # minu a0, a0, a1
+#   Unicorn doesn't have it
+# 33 65 b5 40  # orn a0, a0, a1
+#   Unicorn doesn't have it
+# 82 80  # ret 
+#   Unicorn faults: Segmentation fault at 0x3FFE11D0 / paused
+# 13 55 85 6b  # rev8 a0, a0
+#   Unicorn doesn't have it
+# 33 15 b5 60  # rol a0, a0, a1
+#   Unicorn doesn't have it
+# 3b 15 b5 60  # rolw a0, a0, a1
+#   Unicorn doesn't have it
+# 2f 37 b5 1a  # sc.d.rl a4, a1, (a0)
+#   X14 1 / 0; memory at 3ffe1220
+# 2f 26 c8 1a  # sc.w.rl a2, a2, (a6)
+#   X12 1 / 0; memory at 3ffe1020
+# 13 15 45 60  # sext.b a0, a0
+#   Unicorn doesn't have it
+# 13 15 55 60  # sext.h a0, a0
+#   Unicorn doesn't have it
+# 33 a5 a5 20  # sh1add a0, a1, a0
+#   Unicorn doesn't have it
+# b3 45 b6 20  # sh2add a1, a2, a1
+#   Unicorn doesn't have it
+# b3 65 a5 20  # sh3add a1, a0, a0
+#   Unicorn doesn't have it
+# 57 24 85 22  # vaaddu.vv v8, v8, v10
+#   Unicorn doesn't have it
+# 57 35 a8 02  # vadd.vi v10, v10, -0x10
+#   Unicorn doesn't have it
+# 57 04 84 02  # vadd.vv v8, v8, v8
+#   Unicorn doesn't have it
+# 57 45 a5 02  # vadd.vx v10, v10, a0
+#   Unicorn doesn't have it
+# 57 b4 81 26  # vand.vi v8, v8, 0x3
+#   Unicorn doesn't have it
+# 57 46 88 26  # vand.vx v12, v8, a6
+#   Unicorn doesn't have it
+# 57 94 81 4a  # vfcvt.f.x.v v8, v8
+#   Unicorn doesn't have it
+# 57 94 83 4a  # vfcvt.rtz.x.f.v v8, v8
+#   Unicorn doesn't have it
+# 57 14 85 82  # vfdiv.vv v8, v8, v10
+#   Unicorn doesn't have it
+# 57 15 84 a2  # vfmadd.vv v10, v8, v8
+#   Unicorn doesn't have it
+# 57 d4 87 1a  # vfmax.vf v8, v8, fa5
+#   Unicorn doesn't have it
+# 57 15 80 42  # vfmv.f.s fa0, v8
+#   Unicorn doesn't have it
+# 57 17 8a 48  # vfncvt.f.f.w v14, v8, v0.t
+#   Unicorn doesn't have it
+# 57 95 8b 4a  # vfncvt.rtz.x.f.w v10, v8
+#   Unicorn doesn't have it
+# 57 14 a4 0e  # vfredosum.vs v8, v10, v8
+#   Unicorn doesn't have it
+# 57 14 c6 4a  # vfwcvt.f.f.v v8, v12
+#   Unicorn doesn't have it
+# 57 94 a5 4a  # vfwcvt.f.x.v v8, v10
+#   Unicorn doesn't have it
+# 57 a5 08 52  # vid.v v10
+#   Unicorn doesn't have it
+# 07 d4 07 02  # vle16.v v8, (a5)
+#   Unicorn doesn't have it
+# 07 65 07 02  # vle32.v v10, (a4)
+#   Unicorn doesn't have it
+# 07 f4 05 02  # vle64.v v8, (a1)
+#   Unicorn doesn't have it
+# 07 84 06 02  # vle8.v v8, (a3)
+#   Unicorn doesn't have it
+# 07 f6 85 06  # vluxei64.v v12, (a1), v8
+#   Unicorn doesn't have it
+# 57 24 a6 b6  # vmacc.vv v8, v12, v10
+#   Unicorn doesn't have it
+# 57 04 85 1e  # vmax.vv v8, v8, v10
+#   Unicorn doesn't have it
+# 57 44 80 1e  # vmax.vx v8, v8, zero
+#   Unicorn doesn't have it
+# 57 04 85 1a  # vmaxu.vv v8, v8, v10
+#   Unicorn doesn't have it
+# 57 05 85 5c  # vmerge.vvm v10, v8, v10, v0
+#   Unicorn doesn't have it
+# 57 10 85 6e  # vmflt.vv v0, v8, v10
+#   Unicorn doesn't have it
+# 57 04 85 16  # vmin.vv v8, v8, v10
+#   Unicorn doesn't have it
+# 57 04 85 12  # vminu.vv v8, v8, v10
+#   Unicorn doesn't have it
+# 57 30 c0 62  # vmseq.vi v0, v12, 0x0
+#   Unicorn doesn't have it
+# 57 00 a6 62  # vmseq.vv v0, v10, v12
+#   Unicorn doesn't have it
+# 57 24 a4 96  # vmul.vv v8, v10, v8
+#   Unicorn doesn't have it
+# 57 64 00 42  # vmv.s.x v8, zero
+#   Unicorn doesn't have it
+# 57 34 00 5e  # vmv.v.i v8, 0x0
+#   Unicorn doesn't have it
+# 57 25 80 42  # vmv.x.s a0, v8
+#   Unicorn doesn't have it
+# 57 34 a0 ba  # vnclipu.wi v8, v10, 0x0
+#   Unicorn doesn't have it
+# 57 b4 8f 2e  # vnot.v v8, v8
+#   Unicorn doesn't have it
+# 57 24 85 02  # vredsum.vs v8, v8, v10
+#   Unicorn doesn't have it
+# 57 b5 80 32  # vrgather.vi v10, v8, 0x1
+#   Unicorn doesn't have it
+# 57 35 80 0e  # vrsub.vi v10, v8, 0x0
+#   Unicorn doesn't have it
+# 27 54 07 02  # vse16.v v8, (a4)
+#   Unicorn doesn't have it
+# 27 64 07 02  # vse32.v v8, (a4)
+#   Unicorn doesn't have it
+# 27 74 05 02  # vse64.v v8, (a0)
+#   Unicorn doesn't have it
+# 27 84 06 02  # vse8.v v8, (a3)
+#   Unicorn doesn't have it
+# 57 70 81 cd  # vsetivli zero, 0x2, e64, m1, ta, ma
+#   Unicorn doesn't have it
+# 57 70 10 09  # vsetvli zero, zero, e32, m2, tu, ma
+#   Unicorn doesn't have it
+# 57 35 81 3e  # vslidedown.vi v10, v8, 0x2
+#   Unicorn doesn't have it
+# 57 35 81 a6  # vsra.vi v10, v8, 0x2
+#   Unicorn doesn't have it
+# 57 35 81 a2  # vsrl.vi v10, v8, 0x2
+#   Unicorn doesn't have it
+# 27 e4 07 22  # vsseg2e32.v v8, (a5)
+#   Unicorn doesn't have it
+# 57 04 85 0a  # vsub.vv v8, v8, v10
+#   Unicorn doesn't have it
+# 57 a4 a5 ea  # vwmulsu.vv v8, v10, v11
+#   Unicorn doesn't have it
+# 57 e4 c8 e2  # vwmulu.vx v8, v12, a7
+#   Unicorn doesn't have it
+# 57 04 a4 2e  # vxor.vv v8, v10, v8
+#   Unicorn doesn't have it
+# d7 25 83 4a  # vzext.vf2 v11, v8
+#   Unicorn doesn't have it
+# 33 45 b5 40  # xnor a0, a0, a1
+#   Unicorn doesn't have it
+# 3b 45 05 08  # zext.h a0, a0
+#   Unicorn doesn't have it
+# 3b 05 05 08  # zext.w a0, a0
+#   Unicorn doesn't have it

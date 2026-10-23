@@ -1,0 +1,212 @@
+# the instructions of the cases lifters/aarch64/N, one of each mnemonic of
+# the corpus of testsuite/src/corpus, see sample.py, whose results in
+# Unicorn and in Primus agree, as check.ml compares them, with runs=2
+
+00 b8 20 4e  # abs v0.16b, v0.16b
+01 01 05 9a  # adc x1, x8, x5
+01 01 09 ba  # adcs x1, x8, x9
+20 01 08 0b  # add w0, w9, w8
+00 b8 f1 5e  # addp d0, v0.2d
+20 01 04 ab  # adds x0, x9, x4
+00 b8 31 0e  # addv b0, v0.8b
+08 00 00 90  # adrp x8, 0x0 <copy_big>
+00 01 00 12  # and w0, w8, #0x1
+4a 19 40 f2  # ands x10, x10, #0x7f
+00 29 c9 1a  # asr w0, w8, w9
+00 00 00 14  # b 0x168 <fsqrt_double>
+40 00 00 54  # b.eq 0x58 <atomic_cas_u8+0x1c>
+4a 03 00 54  # b.ge 0x2fc <atomic_max_u8+0xa8>
+ac 00 00 54  # b.gt 0x3c0 <recursive+0x2c>
+a8 00 00 54  # b.hi 0x214 <jump_table+0x18>
+82 00 00 54  # b.hs 0x280 <recursive+0x24>
+0d 02 00 54  # b.le 0x6c0 <select_chain+0x5c>
+63 ff ff 54  # b.lo 0x3504 <interleave+0x88>
+69 00 00 54  # b.ls 0x18 <vadd_i8+0x18>
+8b 01 00 54  # b.lt 0x210 <loops+0x34>
+21 ff ff 54  # b.ne 0x70 <atomic_max_u8+0x4>
+25 01 00 54  # b.pl 0x2f88 <fvminmax_double+0x68>
+00 f9 7f b3  # bfi x0, x8, #1, #63
+28 50 00 33  # bfxil w8, w1, #0, #21
+00 00 21 8a  # bic x0, x0, x1
+07 1e f3 6e  # bif v7.16b, v16.16b, v19.16b
+04 1e a6 6e  # bit v4.16b, v16.16b, v6.16b
+41 1c 63 6e  # bsl v1.16b, v2.16b, v3.16b
+01 fc e9 88  # casal w9, w1, [x0]
+01 fc e9 08  # casalb w9, w1, [x0]
+a0 ff ff 35  # cbnz w0, 0x158 <tail+0x4>
+61 00 00 34  # cbz w1, 0x354 <div_i32+0xc>
+20 00 43 fa  # ccmp x1, x3, #0x0, eq
+29 35 89 9a  # cinc x9, x9, hs
+00 10 c0 5a  # clz w0, w0
+20 8c 20 6e  # cmeq v0.16b, v1.16b, v0.16b
+04 34 e1 4e  # cmgt v4.2d, v0.2d, v1.2d
+04 34 e1 6e  # cmhi v4.2d, v0.2d, v1.2d
+1f 21 40 31  # cmn w8, #0x8, lsl #12       // =0x8000
+1f 01 09 6b  # cmp w8, w9
+00 54 80 5a  # cneg w0, w0, mi
+00 58 20 0e  # cnt v0.8b, v0.8b
+20 b1 88 1a  # csel w0, w9, w8, lt
+e0 17 9f 1a  # cset w0, eq
+00 05 89 1a  # csinc w0, w8, w9, eq
+08 c1 89 5a  # csinv w8, w8, w9, gt
+4a 15 8b 5a  # csneg w10, w10, w11, ne
+bf 39 03 d5  # dmb ishld
+00 0d 04 4e  # dup v0.4s, w8
+08 11 48 4a  # eor w8, w8, w8, lsr #4
+01 40 00 6e  # ext v1.16b, v0.16b, v0.16b, #0x8
+20 0c c0 93  # extr x0, x1, x0, #0x3
+00 c0 20 1e  # fabs s0, s0
+00 28 21 1e  # fadd s0, s0, s1
+02 e6 a2 6e  # fcmgt v2.4s, v16.4s, v2.4s
+00 20 21 1e  # fcmp s0, s1
+00 4c 21 1e  # fcsel s0, s0, s1, mi
+00 40 62 1e  # fcvt s0, d0
+23 78 61 0e  # fcvtl v3.2d, v1.2s
+25 78 61 4e  # fcvtl2 v5.2d, v1.4s
+31 6a 61 0e  # fcvtn v17.2s, v17.2d
+91 6a 61 4e  # fcvtn2 v17.4s, v20.2d
+00 00 38 1e  # fcvtzs w0, s0
+00 00 39 1e  # fcvtzu w0, s0
+00 18 21 1e  # fdiv s0, s0, s1
+00 04 02 1f  # fmadd s0, s0, s2, s1
+00 68 21 1e  # fmaxnm s0, s0, s1
+00 cc 24 4e  # fmla v0.4s, v0.4s, v4.4s
+00 00 26 1e  # fmov w0, s0
+00 08 21 1e  # fmul s0, s0, s1
+00 40 21 1e  # fneg s0, s0
+00 40 26 1e  # frinta s0, s0
+00 40 25 1e  # frintm s0, s0
+00 c0 24 1e  # frintp s0, s0
+00 c0 25 1e  # frintz s0, s0
+00 38 21 1e  # fsub s0, s0, s1
+00 00 e1 b8  # ldaddal w1, w0, [x0]
+00 00 e1 38  # ldaddalb w1, w0, [x0]
+00 00 e1 78  # ldaddalh w1, w0, [x0]
+00 fc df 88  # ldar w0, [x0]
+00 fc df 08  # ldarb w0, [x0]
+00 fc df 48  # ldarh w0, [x0]
+00 10 28 b8  # ldclr w8, w0, [x0]
+00 10 28 38  # ldclrb w8, w0, [x0]
+00 10 28 78  # ldclrh w8, w0, [x0]
+00 20 a1 b8  # ldeora w1, w0, [x0]
+00 20 a1 38  # ldeorab w1, w0, [x0]
+00 20 a1 78  # ldeorah w1, w0, [x0]
+21 00 40 ad  # ldp q1, q0, [x1]
+09 00 40 b9  # ldr w9, [x0]
+09 00 40 39  # ldrb w9, [x0]
+09 00 40 79  # ldrh w9, [x0]
+e8 3b c0 39  # ldrsb w8, [sp, #0xe]
+e8 1b c0 79  # ldrsh w8, [sp, #0xc]
+e9 07 80 b9  # ldrsw x9, [sp, #0x4]
+00 30 61 b8  # ldsetl w1, w0, [x0]
+00 30 61 38  # ldsetlb w1, w0, [x0]
+00 30 61 78  # ldsetlh w1, w0, [x0]
+00 10 40 b8  # ldur w0, [x0, #0x1]
+a1 e3 5e 38  # ldurb w1, [x29, #-0x12]
+a0 23 5f 78  # ldurh w0, [x29, #-0xe]
+00 21 c9 1a  # lsl w0, w8, w9
+00 25 c9 1a  # lsr w0, w8, w9
+20 08 00 1b  # madd w0, w1, w0, w2
+80 94 22 4e  # mla v0.16b, v4.16b, v2.16b
+e0 03 08 2a  # mov w0, w8
+00 e4 00 6f  # movi v0.2d, #0000000000000000
+28 49 b2 72  # movk w8, #0x9249, lsl #16
+00 81 09 1b  # msub w0, w8, w9, w0
+00 7c 08 1b  # mul w0, w0, w8
+e0 03 20 2a  # mvn w0, w0
+02 64 04 6f  # mvni v2.4s, #0x80, lsl #24
+e8 03 00 cb  # neg x8, x0
+e0 03 00 eb  # negs x0, x0
+e1 03 01 da  # ngc x1, x1
+00 00 21 aa  # orn x0, x0, x1
+20 00 00 2a  # orr w0, w1, w0
+00 00 c0 5a  # rbit w0, w0
+00 08 c0 5a  # rev w0, w0
+00 04 c0 5a  # rev16 w0, w0
+00 2c c8 1a  # ror w0, w0, w8
+21 00 03 da  # sbc x1, x1, x3
+01 01 09 fa  # sbcs x1, x8, x9
+00 1c 03 13  # sbfx w0, w0, #3, #5
+00 00 22 1e  # scvtf s0, w0
+00 0d c9 1a  # sdiv w0, w8, w9
+20 64 20 4e  # smax v0.16b, v1.16b, v0.16b
+20 6c 20 4e  # smin v0.16b, v1.16b, v0.16b
+08 7c 48 9b  # smulh x8, x0, x8
+08 7c 21 9b  # smull x8, w0, w1
+10 c0 64 4e  # smull2 v16.4s, v0.8h, v4.8h
+00 a4 20 0f  # sshll v0.2d, v0.2s, #0x0
+02 a4 20 4f  # sshll2 v2.2d, v0.4s, #0x0
+02 04 0e 4f  # sshr v2.16b, v0.16b, #0x2
+00 89 00 4c  # st2 { v0.4s, v1.4s }, [x8]
+01 fc 9f 88  # stlr w1, [x0]
+01 fc 9f 08  # stlrb w1, [x0]
+01 fc 9f 48  # stlrh w1, [x0]
+01 00 00 ad  # stp q1, q0, [x0]
+08 00 00 b9  # str w8, [x0]
+28 00 00 39  # strb w8, [x1]
+28 00 00 79  # strh w8, [x1]
+a0 83 1f f8  # stur x0, [x29, #-0x8]
+a2 f3 1e 38  # sturb w2, [x29, #-0x11]
+a1 63 1f 78  # sturh w1, [x29, #-0xa]
+00 01 01 4b  # sub w0, w8, w1
+00 00 02 eb  # subs x0, x0, x2
+00 80 e1 b8  # swpal w1, w0, [x0]
+00 80 e1 38  # swpalb w1, w0, [x0]
+00 80 e1 78  # swpalh w1, w0, [x0]
+08 1c 00 13  # sxtb w8, w0
+08 3c 00 13  # sxth w8, w0
+00 7c 40 93  # sxtw x0, w0
+08 01 00 37  # tbnz w8, #0x0, 0x2b40 <min_i128+0x84>
+68 00 00 36  # tbz w8, #0x0, 0x30c <atomic_max_u8+0xb8>
+3f 01 7a f2  # tst x9, #0x40
+00 38 30 2e  # uaddlv h0, v0.8b
+00 1c 03 53  # ubfx w0, w0, #3, #5
+00 00 23 1e  # ucvtf s0, w0
+00 08 c1 1a  # udiv w0, w0, w1
+20 64 20 6e  # umax v0.16b, v1.16b, v0.16b
+20 6c 20 6e  # umin v0.16b, v1.16b, v0.16b
+08 7c c8 9b  # umulh x8, x0, x8
+08 7c a8 9b  # umull x8, w0, w8
+20 14 20 6e  # urhadd v0.16b, v1.16b, v0.16b
+00 a4 08 2f  # ushll v0.8h, v0.8b, #0x0
+02 a4 08 6f  # ushll2 v2.8h, v0.16b, #0x0
+02 04 0e 6f  # ushr v2.16b, v0.16b, #0x2
+00 18 81 4e  # uzp1 v0.4s, v0.4s, v1.4s
+
+# the instructions, whose results differ, as Unicorn or the checker
+# differ, e.g., the ones of a random address, or that Unicorn
+# doesn't have, and why
+# 01 fc e9 48  # casalh w9, w1, [x0]
+#   Unicorn faults: Segmentation fault at 0 / paused
+# 21 a0 02 24  # cmpeq p1.b, p0/z, z1.b, z2.b
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# e8 e3 60 04  # cnth x8
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# 20 20 98 65  # fadda s0, p0, s0, z1.s
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# 20 84 a0 65  # fmad z0.s, p1/m, z1.s, z0.s
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# 02 40 bf 04  # index z2.s, #0x0, #-0x1
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# 20 40 09 a4  # ld1b { z0.b }, p0/z, [x1, x9]
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# 20 40 e9 a5  # ld1d { z0.d }, p0/z, [x1, x9, lsl #3]
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# 21 40 49 a5  # ld1w { z1.s }, p0/z, [x1, x9, lsl #2]
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# e0 e3 18 25  # ptrue p0.b
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# 28 50 bf 04  # rdvl x8, #0x1
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# c0 03 5f d6  # ret 
+#   Unicorn faults: Segmentation fault at 0x3FFE14D0 / paused
+# 21 c4 20 05  # sel z1.b, p1, z1.b, z0.b
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# 00 40 09 e4  # st1b { z0.b }, p0, [x0, x9]
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# e0 e1 30 e5  # st2w { z0.s, z1.s }, p0, [x15]
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# 06 c0 a3 25  # subr z6.s, z6.s, #0x0        // =0
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+# 00 20 01 04  # uaddv d0, p0, z0.b
+#   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused

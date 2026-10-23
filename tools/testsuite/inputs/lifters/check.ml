@@ -44,7 +44,7 @@ let thumb = flag "thumb"
    x86, so they are compared with flags=all only *)
 let all_flags = opt "flags" "" = "all"
 let runs = int_of_string (opt "runs" "4")
-let () = Random.init (int_of_string (opt "seed" "1"))
+let seed = int_of_string (opt "seed" "1")
 let api = match opt "api" "" with "" -> [] | dir -> [ dir ]
 
 let target = Filename.basename file
@@ -109,6 +109,19 @@ let delayed code =
   | 0x00 -> funct = 0x08 || funct = 0x09
   | 0x11 -> rs = 0x08
   | _ -> false
+
+(* the nops, that follow the instruction *)
+let nops =
+  let nop =
+    if starts "x86" || starts "i686" then "\x90"
+    else if thumb then "\x00\xbf"
+    else if starts "aarch64" then "\x1f\x20\x03\xd5"
+    else if starts "arm" then "\x00\xf0\x20\xe3"
+    else if starts "riscv" then "\x13\x00\x00\x00"
+    else if starts "powerpc" then "\x60\x00\x00\x00"
+    else "\x00\x00\x00\x00"
+  in
+  String.concat "" (List.init (16 / String.length nop) (fun _ -> nop))
 
 let bytes_of_hex line =
   String.split_on_char ' ' line
@@ -192,12 +205,15 @@ let () =
   List.iter
     (fun (code, comment, hex) ->
       incr total;
+      (* the states of an instruction are the same in every list *)
+      Random.full_init [| seed; Hashtbl.hash hex |];
       let failures = ref [] in
       for run = 1 to runs do
         let pointers = run mod 2 = 1 in
         (* the state, from which the instruction runs both times, with
-           the delay slot of MIPS, which is nop *)
-        Emu.write emu entry (if mips then code ^ "\000\000\000\000" else code);
+           the nops after it, e.g., in the delay slot of MIPS, rather
+           than the bytes of the previous instruction *)
+        Emu.write emu entry (code ^ nops);
         Emu.write emu buf (String.init size (fun _ -> Char.chr (Random.int 256)));
         List.iter
           (fun r ->
@@ -221,7 +237,11 @@ let () =
            page, that Unicorn copies, continues *)
         let status =
           match Emu.step emu with
-          | Paused when Int64.equal (Int64.logand (Emu.pc emu) (Int64.lognot 1L)) entry ->
+          | Paused
+            when Int64.equal
+                   (Int64.logand (Emu.pc emu)
+                      (if thumb then Int64.lognot 1L else -1L))
+                   entry ->
               Emu.step emu
           (* the branch of MIPS stops in its delay slot *)
           | Paused when mips && delayed code && Int64.equal (Emu.pc emu) (Int64.add entry 4L) ->
@@ -256,6 +276,10 @@ let () =
              (* the unaligned accesses, e.g., of MIPS, are the exceptions
                 of Unicorn *)
              || String.starts_with ~prefix:"failed Unicorn: an unhandled interrupt" s
+             (* the exceptions of the divisions, and of the traps, e.g.,
+                teq of MIPS, which are intrinsic in Primus *)
+             || String.starts_with ~prefix:"failed Division by zero" s
+             || String.starts_with ~prefix:"failed unbound function intrinsic:trap" s
            in
            if native.status <> lifted.status
               && not (fault native.status && fault lifted.status)

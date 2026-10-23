@@ -1,0 +1,271 @@
+# the instructions of the cases lifters/i686/N, one of each mnemonic of
+# the corpus of testsuite/src/corpus, see sample.py, whose results in
+# Unicorn and in Primus agree, as check.ml compares them, with runs=2
+
+11 ca  # adcl %ecx, %edx
+00 cc  # addb %cl, %ah
+83 c4 04  # addl $0x4, %esp
+66 0f 58 c8  # addpd %xmm0, %xmm1
+0f 58 c8  # addps %xmm0, %xmm1
+f2 0f 58 44 24 18  # addsd 0x18(%esp), %xmm0
+f3 0f 58 44 24 0c  # addss 0xc(%esp), %xmm0
+66 01 ca  # addw %cx, %dx
+20 c8  # andb %cl, %al
+21 d0  # andl %edx, %eax
+66 0f 55 c8  # andnpd %xmm0, %xmm1
+0f 55 c2  # andnps %xmm2, %xmm0
+66 0f 54 d1  # andpd %xmm1, %xmm2
+0f 54 05 10 00 00 00  # andps 0x10, %xmm0
+66 23 44 24 04  # andw 0x4(%esp), %ax
+0f bc 4c 24 04  # bsfl 0x4(%esp), %ecx
+0f bd c1  # bsrl %ecx, %eax
+0f c8  # bswapl %eax
+99  # cltd 
+0f 43 c1  # cmovael %ecx, %eax
+0f 47 c1  # cmoval %ecx, %eax
+0f 44 c1  # cmovel %ecx, %eax
+0f 4d c2  # cmovgel %edx, %eax
+0f 4f c1  # cmovgl %ecx, %eax
+0f 4e c1  # cmovlel %ecx, %eax
+0f 4c c1  # cmovll %ecx, %eax
+0f 45 c1  # cmovnel %ecx, %eax
+0f 40 c2  # cmovol %edx, %eax
+0f 48 c1  # cmovsl %ecx, %eax
+66 0f 48 c1  # cmovsw %cx, %ax
+38 c8  # cmpb %cl, %al
+f2 0f c2 44 24 04 00  # cmpeqsd 0x4(%esp), %xmm0
+f3 0f c2 44 24 04 00  # cmpeqss 0x4(%esp), %xmm0
+39 d1  # cmpl %edx, %ecx
+66 0f c2 d6 01  # cmpltpd %xmm6, %xmm2
+0f c2 ca 01  # cmpltps %xmm2, %xmm1
+f2 0f c2 4c 24 10 01  # cmpltsd 0x10(%esp), %xmm1
+f3 0f c2 4c 24 08 01  # cmpltss 0x8(%esp), %xmm1
+f2 0f c2 c0 03  # cmpunordsd %xmm0, %xmm0
+f3 0f c2 d0 03  # cmpunordss %xmm0, %xmm2
+66 39 c1  # cmpw %ax, %cx
+0f b0 11  # cmpxchgb %dl, (%ecx)
+0f b1 11  # cmpxchgl %edx, (%ecx)
+f3 0f e6 c0  # cvtdq2pd %xmm0, %xmm0
+0f 5b c0  # cvtdq2ps %xmm0, %xmm0
+66 0f 5a db  # cvtpd2ps %xmm3, %xmm3
+0f 5a db  # cvtps2pd %xmm3, %xmm3
+f2 0f 5a 44 24 08  # cvtsd2ss 0x8(%esp), %xmm0
+f3 0f 5a c0  # cvtss2sd %xmm0, %xmm0
+66 0f e6 c0  # cvttpd2dq %xmm0, %xmm0
+f3 0f 5b c0  # cvttps2dq %xmm0, %xmm0
+f2 0f 2c 45 08  # cvttsd2si 0x8(%ebp), %eax
+f3 0f 2c 45 08  # cvttss2si 0x8(%ebp), %eax
+66 99  # cwtd 
+98  # cwtl 
+48  # decl %eax
+f7 75 0c  # divl 0xc(%ebp)
+66 0f 5e c1  # divpd %xmm1, %xmm0
+0f 5e c1  # divps %xmm1, %xmm0
+d9 e1  # fabs 
+dc 04 c1  # faddl (%ecx,%eax,8)
+de c1  # faddp %st, %st(1)
+d8 04 85 08 00 00 00  # fadds 0x8(,%eax,4)
+d9 e0  # fchs 
+da d1  # fcmovbe %st(1), %st
+db d1  # fcmovnbe %st(1), %st
+db c9  # fcmovne %st(1), %st
+dc 34 c1  # fdivl (%ecx,%eax,8)
+d8 34 81  # fdivs (%ecx,%eax,4)
+db 04 24  # fildl (%esp)
+df 6c 24 08  # fildll 0x8(%esp)
+db 5c 24 04  # fistpl 0x4(%esp)
+df 7c 24 08  # fistpll 0x8(%esp)
+d9 c0  # fld %st(0)
+d9 6c 24 06  # fldcw 0x6(%esp)
+dd 45 e8  # fldl -0x18(%ebp)
+d9 04 85 08 00 00 00  # flds 0x8(,%eax,4)
+db 6d 08  # fldt 0x8(%ebp)
+d9 ee  # fldz 
+d8 c9  # fmul %st(1), %st
+dc 0c c1  # fmull (%ecx,%eax,8)
+d8 0d 04 00 00 00  # fmuls 0x4
+d9 3c 24  # fnstcw (%esp)
+dd 55 f8  # fstl -0x8(%ebp)
+dd d8  # fstp %st(0)
+dd 1c 24  # fstpl (%esp)
+d9 5d f4  # fstps -0xc(%ebp)
+db 7d e8  # fstpt -0x18(%ebp)
+de e9  # fsubrp %st, %st(1)
+d8 64 24 08  # fsubs 0x8(%esp)
+db e9  # fucomi %st(1), %st
+df e9  # fucompi %st(1), %st
+d9 c9  # fxch %st(1)
+0f af c1  # imull %ecx, %eax
+66 0f af 3c 42  # imulw (%edx,%eax,2), %di
+40  # incl %eax
+77 07  # ja 0x185 <jump_table+0x15>
+73 08  # jae 0x1b2a <min_u32+0x1a>
+0f 82 ad 00 00 00  # jb 0x490 <loops+0xd0>
+76 08  # jbe 0x1b5a <max_u32+0x1a>
+74 0e  # je 0xcb <clz32+0x1b>
+7f 0a  # jg 0x329 <recursive+0x19>
+7d 09  # jge 0x28f <min_i8+0x1f>
+0f 8c e8 00 00 00  # jl 0x2db <recursive+0xfb>
+7e 08  # jle 0xa1a <max_i32+0x1a>
+eb 02  # jmp 0x2be <atomic_max_u8+0x6e>
+75 02  # jne 0xa4 <atomic_and_u8+0x44>
+79 16  # jns 0xfd9 <abs_i64+0x29>
+8d 55 e0  # leal -0x20(%ebp), %edx
+66 f0 0f c1 01  # lock  xaddw %ax, (%ecx)
+66 0f 5f d8  # maxpd %xmm0, %xmm3
+f2 0f 5f c1  # maxsd %xmm1, %xmm0
+f3 0f 5f c8  # maxss %xmm0, %xmm1
+0f ae f0  # mfence 
+f2 0f 5d 44 24 18  # minsd 0x18(%esp), %xmm0
+f3 0f 5d 44 24 0c  # minss 0xc(%esp), %xmm0
+66 0f 28 0d 90 00 00 00  # movapd 0x90, %xmm1
+0f 28 15 00 00 00 00  # movaps 0x0, %xmm2
+88 45 ff  # movb %al, -0x1(%ebp)
+66 0f 6e 45 08  # movd 0x8(%ebp), %xmm0
+66 0f 6f 0d 10 00 00 00  # movdqa 0x10, %xmm1
+f3 0f 6f 02  # movdqu (%edx), %xmm0
+0f 12 db  # movhlps %xmm3, %xmm3            # xmm3 = xmm3[1,1]
+89 e5  # movl %esp, %ebp
+66 0f 13 0c 24  # movlpd %xmm1, (%esp)
+0f 13 04 24  # movlps %xmm0, (%esp)
+f3 0f 7e 44 24 04  # movq 0x4(%esp), %xmm0
+f2 0f 10 45 d8  # movsd -0x28(%ebp), %xmm0
+f3 0f 10 45 08  # movss 0x8(%ebp), %xmm0
+0f bf 45 08  # movswl 0x8(%ebp), %eax
+0f 10 41 4c  # movups 0x4c(%ecx), %xmm0
+66 89 45 fe  # movw %ax, -0x2(%ebp)
+0f b7 45 fe  # movzwl -0x2(%ebp), %eax
+f6 24 0e  # mulb (%esi,%ecx)
+f7 e1  # mull %ecx
+66 0f 59 c8  # mulpd %xmm0, %xmm1
+0f 59 c8  # mulps %xmm0, %xmm1
+f2 0f 59 45 38  # mulsd 0x38(%ebp), %xmm0
+f3 0f 59 44 24 0c  # mulss 0xc(%esp), %xmm0
+f6 d8  # negb %al
+f7 d8  # negl %eax
+66 f7 d8  # negw %ax
+66 90  # nop 
+0f 1f 00  # nopl (%eax)
+66 66 2e 0f 1f 84 00 00 00 00 00  # nopw %cs:(%eax,%eax)
+f6 d0  # notb %al
+f7 d0  # notl %eax
+08 cc  # orb %cl, %ah
+09 d0  # orl %edx, %eax
+66 0f 56 05 20 00 00 00  # orpd 0x20, %xmm0
+0f 56 c8  # orps %xmm0, %xmm1
+66 0b 44 24 04  # orw 0x4(%esp), %ax
+66 0f 6b c0  # packssdw %xmm0, %xmm0
+66 0f 67 cd  # packuswb %xmm5, %xmm1
+66 0f fc c1  # paddb %xmm1, %xmm0
+66 0f fe 05 00 00 00 00  # paddd 0x0, %xmm0
+66 0f d4 c1  # paddq %xmm1, %xmm0
+66 0f fd c1  # paddw %xmm1, %xmm0
+66 0f db c1  # pand %xmm1, %xmm0
+66 0f df c2  # pandn %xmm2, %xmm0
+66 0f e0 c1  # pavgb %xmm1, %xmm0
+66 0f 74 c8  # pcmpeqb %xmm0, %xmm1
+66 0f 76 d0  # pcmpeqd %xmm0, %xmm2
+66 0f 75 c8  # pcmpeqw %xmm0, %xmm1
+66 0f 64 c8  # pcmpgtb %xmm0, %xmm1
+66 0f 66 c8  # pcmpgtd %xmm0, %xmm1
+66 0f f5 cb  # pmaddwd %xmm3, %xmm1
+66 0f ee c1  # pmaxsw %xmm1, %xmm0
+66 0f de c1  # pmaxub %xmm1, %xmm0
+66 0f ea c1  # pminsw %xmm1, %xmm0
+66 0f da c2  # pminub %xmm2, %xmm0
+66 0f d5 cc  # pmullw %xmm4, %xmm1
+66 0f f4 eb  # pmuludq %xmm3, %xmm5
+5d  # popl %ebp
+66 0f eb c1  # por %xmm1, %xmm0
+66 0f f6 c1  # psadbw %xmm1, %xmm0
+66 0f 70 c0 00  # pshufd $0x0, %xmm0, %xmm0      # xmm0 = xmm0[0,0,0,0]
+66 0f 72 f4 1f  # pslld $0x1f, %xmm4
+66 0f 73 f4 20  # psllq $0x20, %xmm4
+66 0f 72 e3 01  # psrad $0x1, %xmm3
+66 0f 71 e1 02  # psraw $0x2, %xmm1
+66 0f 72 d0 10  # psrld $0x10, %xmm0
+66 0f 73 d3 20  # psrlq $0x20, %xmm3
+66 0f 71 d0 01  # psrlw $0x1, %xmm0
+66 0f f8 c1  # psubb %xmm1, %xmm0
+66 0f fa c2  # psubd %xmm2, %xmm0
+66 0f fb c1  # psubq %xmm1, %xmm0
+66 0f d9 d0  # psubusw %xmm0, %xmm2
+66 0f f9 c2  # psubw %xmm2, %xmm0
+66 0f 68 c0  # punpckhbw %xmm0, %xmm0    # xmm0 = xmm0[8,8,9,9,10,10,11,11,12,12,13,13,14,14,15,15]
+66 0f 60 c9  # punpcklbw %xmm1, %xmm1    # xmm1 = xmm1[0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7]
+66 0f 62 c1  # punpckldq %xmm1, %xmm0    # xmm0 = xmm0[0],xmm1[0],xmm0[1],xmm1[1]
+66 0f 61 c8  # punpcklwd %xmm0, %xmm1    # xmm1 = xmm1[0],xmm0[0],xmm1[1],xmm0[1],xmm1[2],xmm0[2],xmm1[3],xmm0[3]
+50  # pushl %eax
+66 0f ef c0  # pxor %xmm0, %xmm0
+d2 c0  # rolb %cl, %al
+d3 c0  # roll %cl, %eax
+66 c1 c0 08  # rolw $0x8, %ax
+c0 f8 03  # sarb $0x3, %al
+c1 f8 14  # sarl $0x14, %eax
+0f 97 c0  # seta %al
+0f 93 c0  # setae %al
+0f 92 c0  # setb %al
+0f 96 c0  # setbe %al
+0f 94 c0  # sete %al
+0f 9d c0  # setge %al
+0f 9c c0  # setl %al
+0f 9e c0  # setle %al
+0f 9b c0  # setnp %al
+0f 90 c0  # seto %al
+0f 9a c0  # setp %al
+c0 e0 03  # shlb $0x3, %al
+0f a4 c8 1d  # shldl $0x1d, %ecx, %eax
+c1 e1 02  # shll $0x2, %ecx
+c0 e8 03  # shrb $0x3, %al
+0f ad c6  # shrdl %cl, %eax, %esi
+c1 e9 02  # shrl $0x2, %ecx
+28 c8  # subb %cl, %al
+66 0f 5c 05 90 00 00 00  # subpd 0x90, %xmm0
+f2 0f 5c 05 00 00 00 00  # subsd 0x0, %xmm0
+f3 0f 5c 44 24 0c  # subss 0xc(%esp), %xmm0
+66 29 c8  # subw %cx, %ax
+84 d2  # testb %dl, %dl
+85 c0  # testl %eax, %eax
+66 85 c0  # testw %ax, %ax
+f3 0f bc 45 0c  # tzcntl 0xc(%ebp), %eax
+66 0f 2e 44 24 04  # ucomisd 0x4(%esp), %xmm0
+0f 2e 44 24 04  # ucomiss 0x4(%esp), %xmm0
+66 0f 15 c0  # unpckhpd %xmm0, %xmm0            # xmm0 = xmm0[1,1]
+66 0f 14 c1  # unpcklpd %xmm1, %xmm0            # xmm0 = xmm0[0],xmm1[0]
+0f 14 05 80 00 00 00  # unpcklps 0x80, %xmm0             # xmm0 = xmm0[0],mem[0],xmm0[1],mem[1]
+0f c0 01  # xaddb %al, (%ecx)
+0f c1 01  # xaddl %eax, (%ecx)
+86 01  # xchgb %al, (%ecx)
+87 01  # xchgl %eax, (%ecx)
+66 87 01  # xchgw %ax, (%ecx)
+30 cc  # xorb %cl, %ah
+31 c0  # xorl %eax, %eax
+66 0f 57 c0  # xorpd %xmm0, %xmm0
+0f 57 05 00 00 00 00  # xorps 0x0, %xmm0
+66 33 44 24 04  # xorw 0x4(%esp), %ax
+
+# the instructions, whose results differ, as Unicorn or the checker
+# differ, e.g., the ones of a random address, or that Unicorn
+# doesn't have, and why
+# f2 0f 2a 04 88  # cvtsi2sdl (%eax,%ecx,4), %xmm0
+#   YMM0 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF4062A00000000000 / 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+# f3 0f 2a 04 88  # cvtsi2ssl (%eax,%ecx,4), %xmm0
+#   YMM0 0xECC0CC18DF496538B86A261FD387413EC4FBCC30E0401261355EFD4C43510000 / 0xECC0CC18DF496538B86A261FD387413EC4
+# f6 f1  # divb %cl
+#   status failed Unicorn: an unhandled interrupt 0 at 401be0 / paused; pc 0 / 401be2; EAX 0x3FFE1010 / 0x3FFE0001
+# f2 0f 5e 04 c8  # divsd (%eax,%ecx,8), %xmm0
+#   YMM0 0 / 0x8000000000000000
+# f3 0f 5e 04 88  # divss (%eax,%ecx,4), %xmm0
+#   YMM0 0xB4CF0BC0B0972F747ABE451F6241471CD180559A461FD42CE9C2C0FFF800000 / 0xB4CF0BC0B0972F747ABE451F6241471CD18
+# 66 f7 f1  # divw %cx
+#   status failed Unicorn: an unhandled interrupt 0 at 401be0 / paused; pc 0 / 401be3; EAX 0x3FFE13E0 / 0x3FFE4FE2
+# f7 7d 0c  # idivl 0xc(%ebp)
+#   status failed Unicorn: an unhandled interrupt 0 at 401be0 / paused; pc 0 / 401be3; EAX 0x3FFE1680 / 0x8B55F574
+# 66 f7 f9  # idivw %cx
+#   status failed Unicorn: an unhandled interrupt 0 at 401be0 / paused; pc 0 / 401be3; EAX 0x3FFE14B0 / 0x3FFE0223
+# ff e0  # jmpl *%eax
+#   Unicorn faults: Segmentation fault at 0x3FFE15A0 / paused
+# 66 0f 10 04 c2  # movupd (%edx,%eax,8), %xmm0
+#   YMM0 0xDE00000008000000F4000000E8 / 0xABBFB44F8A8D9053B700442CDCFD7F36
+# c2 04 00  # retl $0x4
+#   Unicorn faults: Segmentation fault at 0x4BB26A0D / paused
