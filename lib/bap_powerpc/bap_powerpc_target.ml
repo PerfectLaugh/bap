@@ -204,8 +204,11 @@ let enable_loader () =
     match (arch, is_little) with
     | Some "powerpc", (None | Some false) -> powerpc32eb
     | Some "powerpc64", (None | Some false) -> powerpc64eb
-    | Some "powerpc", Some true -> powerpc32le
-    | Some "powerpc64", Some true -> powerpc64le
+    | Some ("powerpc" | "powerpcle"), Some true -> powerpc32le
+    | Some ("powerpc64" | "powerpc64le"), Some true -> powerpc64le
+    (* LLVM names the little endian ones with the le suffix *)
+    | Some "powerpcle", None -> powerpc32le
+    | Some "powerpc64le", None -> powerpc64le
     | _ -> Theory.Target.unknown
   in
   if Theory.Target.is_unknown parent then parent

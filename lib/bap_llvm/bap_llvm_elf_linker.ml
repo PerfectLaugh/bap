@@ -88,6 +88,8 @@ module Elf = struct
   (* machines (e_machine) *)
   let em_386 = 3
   let em_mips = 8
+  let em_ppc = 20
+  let em_ppc64 = 21
   let em_arm = 40
   let em_x86_64 = 62
   let em_aarch64 = 183
@@ -772,6 +774,37 @@ let riscv env =
   in
   { prescan; apply; finish = Fn.id }
 
+(* PowerPC and PowerPC64 psABI, the relocations are RELA, the ones of
+   the TOC are not applied, as there is no TOC, e.g., the second words of
+   the function descriptors of the ELFv1 ABI *)
+let powerpc _env =
+  simple @@ fun ({ rel; p; s; a; _ } as site) ->
+  let open Int64 in
+  let store = store site and update f = update_insn site f in
+  let x = s + a in
+  let lo x = x land 0xffffL
+  and hi x = (x asr 16) land 0xffffL
+  and ha x = ((x + 0x8000L) asr 16) land 0xffffL in
+  match rel.typ with
+  | 0 -> Done (* NONE *)
+  | 1 -> store 4 x (* ADDR32 *)
+  | 2 ->
+      update (fun i -> i land 0xfc000003L lor (x land 0x3fffffcL)) (* ADDR24 *)
+  | 3 | 4 -> store 2 (lo x) (* ADDR16, ADDR16_LO *)
+  | 5 -> store 2 (hi x) (* ADDR16_HI *)
+  | 6 -> store 2 (ha x) (* ADDR16_HA *)
+  | 7 -> update (fun i -> i land 0xffff0003L lor (x land 0xfffcL)) (* ADDR14 *)
+  (* REL24, PLTREL24 of PowerPC, the branches and the calls *)
+  | 10 | 18 ->
+      update (fun i -> i land 0xfc000003L lor ((x - p) land 0x3fffffcL))
+  | 11 ->
+      update (fun i -> i land 0xffff0003L lor ((x - p) land 0xfffcL))
+      (* REL14 *)
+  | 26 -> store 4 (x - p) (* REL32 *)
+  | 38 -> store 8 x (* ADDR64 *)
+  | 44 -> store 8 (x - p) (* REL64 *)
+  | _ -> Unsupported
+
 let handler { machine; width; _ } =
   match machine with
   | m when m = Elf.em_x86_64 -> Some x86_64
@@ -780,6 +813,7 @@ let handler { machine; width; _ } =
   | m when m = Elf.em_arm -> Some arm
   | m when m = Elf.em_mips && width = 32 -> Some mips
   | m when m = Elf.em_riscv -> Some riscv
+  | m when m = Elf.em_ppc || m = Elf.em_ppc64 -> Some powerpc
   | _ -> None
 
 let null_symbol =
@@ -1008,6 +1042,17 @@ let link input =
           warn "%d relocations of type %d (machine %d) were not applied" data
             key input.machine));
   let got_region = synthetic ~off:got_off ~w:true "%got" got_base in
+  (* the functions of the ELFv1 ABI of PowerPC64 are their descriptors in
+     .opd, whose first words, that are relocated, are their code *)
+  let descriptor (sym : symbol) =
+    match Hashtbl.find section_table sym.shndx with
+    | Some sec
+      when Int.(input.machine = Elf.em_ppc64)
+           && String.equal sec.name ".opd"
+           && sym.value + 8L <= sec.size ->
+        Some (Memory.read mem ~little:input.little (sec.off + sym.value) 8)
+    | _ -> None
+  in
   let functions =
     Map.fold_right input.symbols ~init:[] ~f:(fun ~key ~data:sym acc ->
         let is_code = is_function sym && not (String.is_empty sym.name) in
@@ -1015,12 +1060,15 @@ let link input =
         | Some value
           when is_code
                && (sym.extended || Int.(sym.shndx < Elf.shn_loreserve))
-               && Hashtbl.mem section_addrs sym.shndx ->
-            let addr =
-              if Int.(input.machine = Elf.em_arm) then value land lnot 1L
-              else value
-            in
-            (sym.name, addr, sym.size, value) :: acc
+               && Hashtbl.mem section_addrs sym.shndx -> (
+            match descriptor sym with
+            | Some code -> (sym.name, code, 0L, code) :: acc
+            | None ->
+                let addr =
+                  if Int.(input.machine = Elf.em_arm) then value land lnot 1L
+                  else value
+                in
+                (sym.name, addr, sym.size, value) :: acc)
         | _ -> acc)
   in
   {

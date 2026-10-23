@@ -52,7 +52,8 @@ let enable_loader () =
   in
   KB.promise CT.Unit.target @@ fun unit ->
   KB.collect Image.Spec.slot unit >>| request_arch >>| function
-  | Some "systemz" -> Target.z9
+  (* LLVM names it s390x *)
+  | Some ("systemz" | "s390x") -> Target.z9
   | _ -> CT.Target.unknown
 
 (* the main function registers all our providers right now,

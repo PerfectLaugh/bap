@@ -289,12 +289,42 @@ let provide_base_and_bias (llvm : LLVM.t) ?file new_base =
             Ogre.provide base_address base;
           ])
 
-let provide_entry (llvm : LLVM.t) =
+(* the functions of the ELFv1 ABI of PowerPC64, and its entry, are their
+   descriptors in .opd, whose first words are their code, see also the
+   linker of the relocatable files. The section tells the ABI, as the
+   linkers may set the flags of ELFv2 regardless, e.g., lld *)
+let elfv1_code (llvm : LLVM.t) (data : Bigstring.t) =
+  let none _ = None in
+  match llvm.elf_header with
+  | [ (typ, 21L, _) ] when Int64.(typ <> 1L) -> (
+      List.find llvm.section_entry ~f:(fun (name, _, _, _) ->
+          String.equal name ".opd")
+      |> function
+      | None -> none
+      | Some (_, start, size, off) ->
+          fun addr ->
+            let at = Int64.(off + addr - start) in
+            if
+              Int64.(addr >= start && addr + 8L <= start + size)
+              && Int64.(at + 8L <= of_int (Bigstring.length data))
+            then
+              Some
+                (List.init 8 ~f:(fun i ->
+                     Char.to_int data.{Int64.to_int_exn at + i})
+                |> List.fold ~init:0L ~f:(fun x b ->
+                    Int64.((x lsl 8) lor of_int b)))
+            else None)
+  | _ -> none
+
+let provide_entry (llvm : LLVM.t) data =
+  let code = elfv1_code llvm data in
   Ogre.require bias >>= fun bias ->
   one "llvm:entry-point" llvm.entry_point >>= fun addr ->
+  let addr = Option.value (code addr) ~default:addr in
   Ogre.provide entry_point Int64.(addr + bias)
 
-let provide_symbols (llvm : LLVM.t) =
+let provide_symbols (llvm : LLVM.t) data =
+  let code = elfv1_code llvm data in
   let is_code =
     let entries = Hash_set.create (module String) in
     List.iter llvm.code_entry ~f:(fun (name, off, size) ->
@@ -304,14 +334,24 @@ let provide_symbols (llvm : LLVM.t) =
   in
   Ogre.require bias >>= fun bias ->
   iter llvm.symbol_entry @@ fun (name, addr, size, off, value) ->
-  let addr = Int64.(addr + bias) in
-  provide_if
-    Int64.(size > 0L)
-    ([ Ogre.provide symbol_chunk addr size addr ]
-    @ provide_if (is_code name off size) [ Ogre.provide code_start addr ])
-  @ [
-      Ogre.provide symbol_value addr value; Ogre.provide named_symbol addr name;
-    ]
+  match code addr with
+  | Some code ->
+      let code = Int64.(code + bias) in
+      [
+        Ogre.provide code_start code;
+        Ogre.provide symbol_value code value;
+        Ogre.provide named_symbol code name;
+      ]
+  | None ->
+      let addr = Int64.(addr + bias) in
+      provide_if
+        Int64.(size > 0L)
+        ([ Ogre.provide symbol_chunk addr size addr ]
+        @ provide_if (is_code name off size) [ Ogre.provide code_start addr ])
+      @ [
+          Ogre.provide symbol_value addr value;
+          Ogre.provide named_symbol addr name;
+        ]
 
 let provide_generic_sections (llvm : LLVM.t) =
   Ogre.require bias >>= fun bias ->
@@ -703,14 +743,14 @@ let translate ?file data user_base (llvm : LLVM.t) =
     [
       provide_header llvm.header;
       provide_base_and_bias llvm user_base ?file;
-      provide_entry llvm;
+      provide_entry llvm data;
       Ogre.sequence
         [
           overload "elf" @@ provide_elf_segmentation_and_patches llvm data;
           overload "coff" @@ provide_coff_segmentation llvm;
           overload "macho" @@ provide_macho_segmentation llvm;
         ];
-      provide_symbols llvm;
+      provide_symbols llvm data;
       provide_relocations llvm;
       provide_relative_relocations llvm;
       provide_name_references llvm;
