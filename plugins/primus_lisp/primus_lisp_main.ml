@@ -397,12 +397,75 @@ module Semantics = struct
            folder"
           path ()
 
+  (* the targets and the bits of the context of the file, e.g., of
+     (declare (context (target arm-family) (bits 64))), which it starts
+     with, or [None], if it has no context *)
+  let file_context path =
+    let head =
+      try
+        In_channel.with_file path ~f:(fun ch ->
+            let buf = Bytes.create 1024 in
+            let n = In_channel.input ch ~buf ~pos:0 ~len:1024 in
+            Bytes.To_string.sub buf ~pos:0 ~len:n)
+      with Sys_error _ -> ""
+    in
+    match String.substr_index head ~pattern:"(declare (context" with
+    | None -> None
+    | Some start ->
+        let decl = String.drop_prefix head start in
+        let field name =
+          match String.substr_index decl ~pattern:("(" ^ name ^ " ") with
+          | None -> []
+          | Some i ->
+              let rest = String.drop_prefix decl (i + String.length name + 2) in
+              String.take_while rest ~f:(Char.( <> ) ')')
+              |> String.split_on_chars ~on:[ ' '; '\n'; '\t'; '"' ]
+              |> List.filter ~f:(Fn.non String.is_empty)
+        in
+        Some (field "target", field "bits")
+
+  (* the names of the targets, that are of the family of the target,
+     e.g., of x86, the parent of the target below the root of all *)
+  let family target =
+    (* the ancestor below the root of all targets *)
+    let root t =
+      let chain = t :: Theory.Target.parents t in
+      match List.rev chain with _ :: family :: _ -> family | _ -> t
+    in
+    let r = root target in
+    Theory.Target.declared ()
+    |> List.filter ~f:(fun t -> Theory.Target.equal (root t) r)
+    |> List.concat_map ~f:(fun t ->
+        KB.Name.unqualified (Theory.Target.name t)
+        :: Set.to_list (Theory.Target.nicknames t))
+
+  (* if the file is of the family of the target, e.g., x86-64.lisp of
+     i686, as the files of a family use the definitions of each other,
+     by the targets of its context, so that the semantics of the other
+     families are not loaded *)
+  let applies family path =
+    match file_context path with
+    | None | Some ([], _) -> true
+    | Some (targets, _) ->
+        List.exists targets ~f:(List.mem family ~equal:String.equal)
+
   let load_lisp_sources paths =
     check_user_provided paths;
     let paths = List.filter ~f:is_folder (paths @ default_paths) in
-    let features = "core" :: List.concat_map ~f:collect_features paths in
+    let files =
+      List.concat_map paths ~f:(fun folder ->
+          collect_features folder
+          |> List.map ~f:(fun name ->
+              (name, Filename.concat folder (name ^ ".lisp"))))
+    in
+    let features target =
+      let family = family target in
+      "core"
+      :: List.filter_map files ~f:(fun (name, path) ->
+          Option.some_if (applies family path) name)
+    in
     let paths = paths @ library_paths in
-    let prog t = pack @@ load_target_program paths features t in
+    let prog t = pack @@ load_target_program paths (features t) t in
     KB.promise Theory.Unit.source @@ fun this ->
     Primus.Lisp.Unit.is_lisp this >>= function
     | true -> !!empty
