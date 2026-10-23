@@ -67,6 +67,12 @@ type insn = {
   jumps : bool;
       (** if it may jump, so that it ends the block, even if it doesn't jump, as
           in Unicorn *)
+  atomic : [ `None | `Load | `Store ];
+      (** if it is a load linked, or a store conditional, see [link] *)
+  it : int option;  (** the firstcond and the mask of IT of Thumb *)
+  modes : (bool * bool) option;
+      (** the modes of ARM, Thumb or not, after the jumps of the instruction to
+          the even and to the odd addresses, see [jump] *)
   run : unit -> next;  (** the compiled instruction *)
 }
 
@@ -80,6 +86,8 @@ type block = {
   pcs : int64 array;
   insns : insn array;
   mutable gen : int;  (** the hooks, that it was checked against *)
+  atomic : bool;  (** if an instruction is atomic, see [link] *)
+  has_it : bool;  (** if an instruction is IT of Thumb *)
   mutable entry_hooked : bool;
       (** if the hooks of the code or of the blocks hook its first instruction,
           which are called before it runs *)
@@ -193,9 +201,11 @@ let store_conditional name =
   || List.mem [ "SC"; "SCD"; "SC64"; "SCD64" ] name ~equal:String.equal
 
 (* the instruction, that ran, starts or ends an atomic sequence *)
-let link t insn =
-  if load_linked insn.name then t.linked <- Some t.ran
-  else if store_conditional insn.name then t.linked <- None
+let link t (insn : insn) =
+  match insn.atomic with
+  | `Load -> t.linked <- Some t.ran
+  | `Store -> t.linked <- None
+  | `None -> ()
 
 (* the time doesn't stop the engine in an atomic sequence, of at most so
    many instructions, as the threads switch, when it stops *)
@@ -1289,6 +1299,30 @@ let lifted t pc =
               thumb;
               blks;
               jumps = may_jump blks;
+              atomic =
+                (if load_linked name then `Load
+                 else if store_conditional name then `Store
+                 else `None);
+              (* IT, rather than a hint, whose mask is zero *)
+              it =
+                (if
+                   thumb && size = 2
+                   && Char.equal code.[1] '\xBF'
+                   && Char.to_int code.[0] land 0xF <> 0
+                 then Some (Char.to_int code.[0])
+                 else None);
+              modes =
+                (match t.arch with
+                | Arm ->
+                    let width = t.config.bits in
+                    let mode dst =
+                      snd
+                        (Bap_primus.Std.Primus.Interworking.jump ~name ~thumb
+                           ~next:(Word.of_int64 ~width next)
+                           blks (Word.of_int64 ~width dst))
+                    in
+                    Some (mode Int64.(next + 4L), mode Int64.(next + 5L))
+                | _ -> None);
               run = compile t ~pc ~next blks;
             }
           in
@@ -1296,19 +1330,19 @@ let lifted t pc =
           Some insn)
 
 (* the target of the jump of the instruction, and its mode on ARM *)
-let jump t insn ~next a =
-  match t.arch with
-  | Arm ->
-      let width = t.config.bits in
-      let dst, thumb =
-        Bap_primus.Std.Primus.Interworking.jump ~name:insn.name
-          ~thumb:insn.thumb
-          ~next:(Word.of_int64 ~width next)
-          insn.blks (Word.of_int64 ~width a)
-      in
-      set_thumb t thumb;
-      Word.to_int64_exn dst
-  | _ -> a
+(* the target of the jump, whose mode, after the jump, is the one, that
+   [Primus.Interworking.jump] tells, which depends on the parity of the
+   target, and on the instruction only, but for the next instruction *)
+let jump t (insn : insn) ~next a =
+  match insn.modes with
+  | Some (even, odd) ->
+      let dst = Int64.(a land lnot 1L) in
+      set_thumb t
+        (if Int64.equal dst next then insn.thumb
+         else if Int64.(a land 1L = 1L) then odd
+         else even);
+      dst
+  | None -> a
 
 (* The IT blocks of Thumb, whose state is the IT bits of CPSR, as QEMU
    keeps it: IT[1:0] are the bits 26:25, and IT[7:2] are 15:10, and the
@@ -1337,13 +1371,7 @@ let advance_it it =
 
 (* if the instruction is IT of Thumb, rather than a hint, whose mask is
    zero, then its firstcond and mask *)
-let it_insn insn =
-  if
-    insn.thumb && insn.size = 2
-    && Char.equal insn.code.[1] '\xBF'
-    && Char.to_int insn.code.[0] land 0xF <> 0
-  then Some (Char.to_int insn.code.[0])
-  else None
+let it_insn (insn : insn) = insn.it
 
 let flag t name =
   match t.config.locate name with
@@ -1500,8 +1528,6 @@ let candidates t pc =
       match lifted t addr with
       | exception Fault _ -> List.rev acc
       | None -> List.rev acc
-      (* the IT blocks of Thumb run in the closures, see [skipped] *)
-      | Some insn when Option.is_some (it_insn insn) -> List.rev acc
       | Some insn -> (
           match t.config.delay insn.code with
           | `None ->
@@ -1556,6 +1582,12 @@ let compile_block t j pc =
                 pcs = Array.of_list_map candidates ~f:fst;
                 insns = Array.of_list_map candidates ~f:snd;
                 gen = j.gen;
+                atomic =
+                  List.exists candidates ~f:(fun (_, (i : insn)) ->
+                      not (Poly.equal i.atomic `None));
+                has_it =
+                  List.exists candidates ~f:(fun (_, (i : insn)) ->
+                      Option.is_some i.it);
                 entry_hooked = hooked ~blocks:true t pc;
               })
   end
@@ -1581,10 +1613,18 @@ let exec t j (b : block) pc =
   (* the instructions, that ran, are recorded, after they ran, in their
      order, as the closures record them *)
   let ran k =
-    for i = 0 to k - 1 do
-      link t b.insns.(i);
-      t.ran <- t.ran + 1
-    done;
+    if b.atomic then
+      for i = 0 to k - 1 do
+        link t b.insns.(i);
+        t.ran <- t.ran + 1
+      done
+    else t.ran <- t.ran + k;
+    (* the IT state after the instructions, whose IT blocks the block
+       ran, whose conditions are in their semantics *)
+    if b.has_it then
+      for i = 0 to k - 1 do
+        next_it t b.insns.(i)
+      done;
     j.jitted <- j.jitted + k;
     if j.traced then
       for i = 0 to k - 1 do
@@ -1623,6 +1663,7 @@ let fast_block t j pc ~until ~count n =
   | Some (Compiled b)
     when (not b.entry_hooked) && b.gen = j.gen
          && itstate t = 0
+         && (not (j.traced && b.has_it))
          && Bool.equal b.insns.(0).thumb (thumb t)
          && (not (Option.exists count ~f:(fun c -> n + Array.length b.pcs > c)))
          && not
@@ -1646,7 +1687,9 @@ let run_block t j insn pc ~until ~count n =
       Hashtbl.set j.blocks ~key:pc
         ~data:(if c + 1 < hot then Counting (c + 1) else compile_block t j pc);
       None
-  | Some (Compiled _) when itstate t <> 0 -> None
+  (* the traces record the instructions of the IT blocks of Thumb, whose
+     conditions fail, which the closures skip, see [skipped] *)
+  | Some (Compiled b) when itstate t <> 0 || (j.traced && b.has_it) -> None
   | Some (Compiled b) ->
       let length = Array.length b.pcs in
       if not (phys_equal b.insns.(0) insn) then (

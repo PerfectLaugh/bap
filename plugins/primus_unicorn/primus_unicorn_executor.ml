@@ -5198,6 +5198,10 @@ module Loader (Machine : Primus.Machine.S) = struct
     | exception Unsupported msg -> Machine.raise (Unicorn_failure msg)
     | e ->
         s.active <- Some e;
+        (* the time of the timeout starts, when the engine is created, as
+           the lifter of the lifted engine loads the semantics of Primus
+           Lisp then, which isn't the time, that the machine runs *)
+        s.accounted <- Stdlib.Sys.time ();
         Hashtbl.clear s.parked;
         s.parked_pages <- 0;
         Memory.set_backing
