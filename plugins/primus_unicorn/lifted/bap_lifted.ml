@@ -81,13 +81,17 @@ type insn = {
 type block = {
   native : Bap_llvm_jit.code;
   fn : nativeint;
-  regs : Bytes.t array;  (** the registers of its slots *)
+  mutable chained : bool;
+      (** if the runs of the other blocks continue with it, see [chainable] *)
   code : string;  (** the bytes of its instructions *)
   pcs : int64 array;
   insns : insn array;
   mutable gen : int;  (** the hooks, that it was checked against *)
   atomic : bool;  (** if an instruction is atomic, see [link] *)
   has_it : bool;  (** if an instruction is IT of Thumb *)
+  it_closed : bool;
+      (** if its IT blocks end in it, so that the IT state is zero, when it
+          ends, as when it starts *)
   mutable entry_hooked : bool;
       (** if the hooks of the code or of the blocks hook its first instruction,
           which are called before it runs *)
@@ -107,6 +111,11 @@ type jit = {
   mutable jitted : int;  (** the instructions, that the blocks ran *)
   compiles : int Int64.Table.t;  (** the blocks compiled at the addresses *)
   mutable live : int;  (** the blocks, that are not released *)
+  globals : int Int.Table.t;
+      (** the indices of the registers in [registers], see [global] *)
+  mutable registers : Bytes.t array;
+      (** the bytes of the registers, that the blocks share, so that the run of
+          a block continues with the next one, see [chainable] *)
 }
 
 type t = {
@@ -275,6 +284,8 @@ let create config arch mode =
                jitted = 0;
                compiles = Int64.Table.create ();
                live = 0;
+               globals = Int.Table.create ();
+               registers = [||];
              });
     }
   in
@@ -443,8 +454,15 @@ let mem_regions t =
 (* the blocks of the JIT run, unless a hook needs the accesses, or the
    instructions, that the blocks run, and they are checked again against
    the hooks of the code *)
+let unchain (j : jit) =
+  Bap_lifted_jit.Runtime.unlink_all j.mem;
+  Hashtbl.iter j.blocks ~f:(function
+    | Compiled b -> b.chained <- false
+    | Counting _ | Failed -> ())
+
 let hooks_changed t =
   Option.iter t.jit ~f:(fun j ->
+      unchain j;
       j.gen <- j.gen + 1;
       j.allowed <-
         not
@@ -1420,6 +1438,7 @@ let next_it t insn =
    may make the blocks anew, e.g., as it patches its code *)
 let release (j : jit) = function
   | Compiled b ->
+      Bap_lifted_jit.Runtime.unlink j.mem b.pcs.(0);
       Bap_llvm_jit.release b.native;
       j.live <- j.live - 1
   | Counting _ | Failed -> ()
@@ -1427,6 +1446,8 @@ let release (j : jit) = function
 let flush_tb t =
   Hashtbl.clear t.insns;
   Option.iter t.jit ~f:(fun j ->
+      (* the links go at once, rather than with each block *)
+      unchain j;
       Hashtbl.iter j.blocks ~f:(release j);
       Hashtbl.clear j.blocks)
 
@@ -1538,6 +1559,16 @@ let candidates t pc =
   in
   loop 0 pc []
 
+(* the index of the register in the bytes, that the blocks share *)
+let global t (j : jit) id =
+  match Hashtbl.find j.globals id with
+  | Some i -> i
+  | None ->
+      let i = Array.length j.registers in
+      Hashtbl.set j.globals ~key:id ~data:i;
+      j.registers <- Array.append j.registers [| reg_bytes t id |];
+      i
+
 let compile_block t j pc =
   let compiles = Option.value (Hashtbl.find j.compiles pc) ~default:0 in
   if compiles >= max_compiles || j.live >= max_live then Failed
@@ -1554,7 +1585,7 @@ let compile_block t j pc =
     in
     match
       Bap_lifted_jit.compile ~locate:t.config.locate ~reg_size:(reg_size t)
-        insns
+        ~global:(global t j) insns
     with
     | Error reason ->
         if verbose () then
@@ -1576,7 +1607,7 @@ let compile_block t j pc =
               {
                 native;
                 fn = Bap_llvm_jit.address native;
-                regs = Array.map b.regs ~f:(reg_bytes t);
+                chained = false;
                 code =
                   String.concat (List.map candidates ~f:(fun (_, i) -> i.code));
                 pcs = Array.of_list_map candidates ~f:fst;
@@ -1588,6 +1619,12 @@ let compile_block t j pc =
                 has_it =
                   List.exists candidates ~f:(fun (_, (i : insn)) ->
                       Option.is_some i.it);
+                it_closed =
+                  List.fold candidates ~init:0 ~f:(fun it (_, (i : insn)) ->
+                      match i.it with
+                      | Some it -> it
+                      | None -> if it land 0xF <> 0 then advance_it it else it)
+                  = 0;
                 entry_hooked = hooked ~blocks:true t pc;
               })
   end
@@ -1609,7 +1646,34 @@ let unhooked t (j : jit) (b : block) =
    were called, if it is compiled, and returns the next instruction, the
    number of the instructions, that it ran, and if the next one starts a
    block *)
-let exec t j (b : block) pc =
+(* The run of a block continues with the next block, that the runtime
+   links, in C, rather than in the loop of OCaml, if the next block runs,
+   as if the loop entered it, see [fast_block]: its first instruction has
+   no hooks, and it has no instructions, whose state the engine keeps,
+   e.g., the atomics, see [link], and the IT blocks of Thumb, and the
+   traces don't record its instructions, and its jump, if any, doesn't
+   change the mode of ARM, while the run is limited, so that the loop checks the time,
+   the stops, and the signals. *)
+
+let max_chained = 4096
+
+let chainable (j : jit) (b : block) =
+  (not b.atomic)
+  && ((not b.has_it) || b.it_closed)
+  && (not b.entry_hooked) && b.gen = j.gen
+
+(* the flags of the link of the block, see LINK_ARM of the stubs *)
+let link_flags (b : block) =
+  let last = b.insns.(Array.length b.insns - 1) in
+  match last.modes with
+  | None -> 0
+  | Some (even, odd) ->
+      8
+      lor (if last.thumb then 1 else 0)
+      lor (if even then 2 else 0)
+      lor if odd then 4 else 0
+
+let exec ?until ?count t j (b : block) pc n =
   (* the instructions, that ran, are recorded, after they ran, in their
      order, as the closures record them *)
   let ran k =
@@ -1633,27 +1697,58 @@ let exec t j (b : block) pc =
         trace_insn t b.pcs.(i) insn.size insn.thumb
       done
   in
-  let r = Bap_lifted_jit.Runtime.run b.fn j.mem b.regs b.code pc in
+  if (not b.chained) && chainable j b then begin
+    let last = Array.length b.pcs - 1 in
+    Bap_lifted_jit.Runtime.link j.mem pc b.fn b.code (Array.length b.pcs)
+      Int64.(b.pcs.(last) + of_int b.insns.(last).size)
+      (link_flags b);
+    b.chained <- true
+  end;
+  Bap_lifted_jit.Runtime.limits j.mem
+    (b.chained && not j.traced)
+    (match count with
+    | Some c -> Int.min (c - n) max_chained
+    | None -> max_chained)
+    (Option.value until ~default:(-1L));
+  let r = Bap_lifted_jit.Runtime.run b.fn j.mem j.registers b.code pc in
+  (* the instructions of the blocks, that ran before the last one *)
+  let chained = Bap_lifted_jit.Runtime.chained j.mem in
+  let pc, b =
+    if chained = 0 then (pc, b)
+    else begin
+      t.ran <- t.ran + chained;
+      j.jitted <- j.jitted + chained;
+      let last = Bap_lifted_jit.Runtime.last j.mem in
+      match Hashtbl.find j.blocks last with
+      | Some (Compiled b) -> (last, b)
+      | _ -> failwith "Bap_lifted: a linked block, that isn't compiled"
+    end
+  in
+  let ran k =
+    ran k;
+    k + chained
+  in
   let k = r lsr 2 in
   let next k = Int64.(b.pcs.(k) + of_int b.insns.(k).size) in
   if r < 0 then (
     (* the code changed *)
     release j (Compiled b);
     Hashtbl.set j.blocks ~key:pc ~data:(Counting 0);
-    None)
+    if chained = 0 then None else Some (pc, chained, true))
   else
     match r land 3 with
-    | 0 when k = 0 -> None
+    | 0 when k = 0 && chained = 0 -> None
+    | 0 when k = 0 -> Some (pc, chained, true)
     | 0 ->
-        ran k;
-        Some (b.pcs.(k), k, false)
+        let k' = ran k in
+        Some (b.pcs.(k), k', false)
     | 1 ->
-        ran (k + 1);
+        let k' = ran (k + 1) in
         let target = Bap_lifted_jit.Runtime.next j.mem in
-        Some (jump t b.insns.(k) ~next:(next k) target, k + 1, true)
+        Some (jump t b.insns.(k) ~next:(next k) target, k', true)
     | _ ->
-        ran (k + 1);
-        Some (next k, k + 1, b.insns.(k).jumps)
+        let k' = ran (k + 1) in
+        Some (next k, k', b.insns.(k).jumps)
 
 (* the block at [pc], that runs, before its first instruction is lifted
    again, and before the hooks, if its code isn't hooked, as the code of
@@ -1670,7 +1765,7 @@ let fast_block t j pc ~until ~count n =
               (Option.exists until ~f:(fun u ->
                    Array.existsi b.pcs ~f:(fun i a -> i > 0 && Int64.equal a u)))
     ->
-      exec t j b pc
+      exec ?until ?count t j b pc n
   | _ -> None
 
 let run_block t j insn pc ~until ~count n =
@@ -1703,7 +1798,7 @@ let run_block t j insn pc ~until ~count n =
       else if not (unhooked t j b) then (
         recount ();
         None)
-      else exec t j b pc
+      else exec ?until ?count t j b pc n
 
 let start ?until ?timeout ?count t pc =
   check t;

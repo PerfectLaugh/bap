@@ -8,8 +8,11 @@
 
    whose registers are the slots of [%regs], the pointers to the bytes of
    the registers of the engine, which are read at the start of the block,
-   and written at the end of each instruction, which writes them, so that
-   the instruction, whose access faults, writes none. The frame is the
+   and written, when it ends, so that LLVM removes the values, that the
+   block doesn't keep, e.g., the flags, that the next instruction sets
+   again. The instruction, whose access faults, writes none: the block,
+   that it stops, writes the registers, as the previous instructions
+   left them, which each instruction copies, before it changes them. The frame is the
    one of bap_lifted_jit_stubs.c, and the accesses to the memory are the
    calls of its functions, which return zero, if they fault.
 
@@ -52,17 +55,23 @@ let max_slot_bytes = 1024
 type value =
   | Val of string * int  (** the operand, and its width *)
   | Mem of (string * string * int * endian) list
-      (** the stores, the latest first, their addresses, the values, of
-          their widths, which are the sizes, in bits *)
+      (** the stores, the latest first, their addresses, the values, of their
+          widths, which are the sizes, in bits *)
 
 type t = {
   locate : string -> (int * int * int) option;
   reg_size : int -> int;
+  global : int -> int;
+      (** the index of the register in the pointers, that the blocks of the
+          engine share *)
   body : Buffer.t;
   slots : (int, int) Hashtbl.t;  (** the registers of the slots *)
   mutable temps : int;
   mutable vars : (string * int) list;  (** the allocas of the variables *)
   mutable decls : String.Set.t;  (** the intrinsics of LLVM *)
+  mutable written_before : Int.Set.t;
+      (** the slots, that the instructions before the one, that is compiled,
+          write *)
 }
 
 type insn_state = {
@@ -131,6 +140,8 @@ let slot t id =
   | None ->
       let i = Hashtbl.length t.slots in
       if i = max_slots then unsupported "more than %d registers" max_slots;
+      if t.global id >= max_slots then
+        unsupported "more than %d registers of the engine" max_slots;
       let bytes =
         Hashtbl.fold t.slots ~init:(t.reg_size id) ~f:(fun ~key ~data:_ n ->
             n + t.reg_size key)
@@ -141,7 +152,6 @@ let slot t id =
       i
 
 let reg_width t id = t.reg_size id * 8
-
 let declare t decl = t.decls <- Set.add t.decls decl
 
 let bswap t x w =
@@ -210,9 +220,7 @@ let load t s addr endian bits =
   let bytes = bits / 8 in
   access t s ~load:true addr bytes;
   let x = assign t "load %s, ptr %%buf, align 1" (ty bits) in
-  match endian with
-  | LittleEndian -> x
-  | BigEndian -> bswap t x bits
+  match endian with LittleEndian -> x | BigEndian -> bswap t x bits
 
 let store t s (addr, x, bits, endian) =
   if bits mod 8 <> 0 then unsupported "a store of %d bits" bits;
@@ -284,7 +292,9 @@ let shift t op x w a wa =
   assign t "select i1 %s, %s %s, %s %s" over (ty w) saturated (ty w) shifted
 
 let binop t s (op : binop) (x, w) (y, w') =
-  let same () = if w <> w' then unsupported "the operands of %d and %d bits" w w' in
+  let same () =
+    if w <> w' then unsupported "the operands of %d and %d bits" w w'
+  in
   let arith name =
     same ();
     Val (assign t "%s %s %s, %s" name (ty w) x y, w)
@@ -319,7 +329,8 @@ let binop t s (op : binop) (x, w) (y, w') =
       let special =
         if Poly.equal op SDIVIDE then assign t "sub %s 0, %s" (ty w) x else "0"
       in
-      Val (assign t "select i1 %s, %s %s, %s %s" minus1 (ty w) special (ty w) r, w)
+      Val
+        (assign t "select i1 %s, %s %s, %s %s" minus1 (ty w) special (ty w) r, w)
   | LSHIFT -> Val (shift t `shl x w y w', w)
   | RSHIFT -> Val (shift t `lshr x w y w', w)
   | ARSHIFT -> Val (shift t `ashr x w y w', w)
@@ -366,7 +377,9 @@ let rec exp t s : exp -> value = function
       | UNSIGNED | LOW -> Val (resize t x w n, n)
       | SIGNED -> Val (sresize t x w n, n)
       | HIGH ->
-          let x = if w > n then assign t "lshr %s %s, %d" (ty w) x (w - n) else x in
+          let x =
+            if w > n then assign t "lshr %s %s, %d" (ty w) x (w - n) else x
+          in
           Val (resize t x w n, n))
   | Let (v, x, body) ->
       let x = exp t s x in
@@ -410,6 +423,23 @@ let rec exp t s : exp -> value = function
       let x = assign t "shl %s %s, %d" (ty w) x b in
       Val (assign t "or %s %s, %s" (ty w) x y, w)
 
+let slot_width t i =
+  Hashtbl.to_alist t.slots
+  |> List.find_map_exn ~f:(fun (id, i') -> Option.some_if (i = i') id)
+  |> reg_width t
+
+(* the slots are written to the registers, from their copies of the
+   start of the instruction [k], if they are [copy] *)
+let commit ?copy t slots =
+  Set.iter slots ~f:(fun i ->
+      let ty = ty (slot_width t i) in
+      let x =
+        match copy with
+        | Some (k, copied) when Set.mem copied i -> sprintf "%%copy%d_%d" k i
+        | _ -> assign t "load %s, ptr %%sh%d" ty i
+      in
+      emit t "  store %s %s, ptr %%rp%d, align 1\n" ty x i)
+
 (* the instruction [k], whose blocks are the labels i<k>b<j>, and which
    ends at i<k>.done, if it doesn't jump, at i<k>.jump, with the target in
    %tgt, if it jumps, and at i<k>.stop, if it stops *)
@@ -419,8 +449,13 @@ let insn t k (ins : insn) =
     Array.findi blks ~f:(fun _ b -> Tid.equal (Term.tid b) tid)
     |> Option.map ~f:fst
   in
-  let s = { k; ins; index; written = Int.Set.empty; lets = []; virtuals = [] } in
-  emit t "i%d:\n  store i32 0, ptr %%undo\n  br label %%i%db0\n" k k;
+  let s =
+    { k; ins; index; written = Int.Set.empty; lets = []; virtuals = [] }
+  in
+  (* the body of the instruction is compiled first, so that its start
+     copies the slots, that it writes, see [stop] *)
+  let before = Buffer.contents t.body in
+  Buffer.clear t.body;
   let jump_to a =
     emit t "  store i64 %s, ptr %%tgt\n  br label %%i%d.jump\n" a k
   in
@@ -445,7 +480,8 @@ let insn t k (ins : insn) =
   Array.iteri blks ~f:(fun j blk ->
       emit t "i%db%d:\n" k j;
       Term.enum def_t blk
-      |> Seq.iter ~f:(fun def -> write_var t s (Def.lhs def) (exp t s (Def.rhs def)));
+      |> Seq.iter ~f:(fun def ->
+          write_var t s (Def.lhs def) (exp t s (Def.rhs def)));
       Term.enum jmp_t blk
       |> Seq.iter ~f:(fun jmp ->
           let c, w = value (exp t s (Jmp.cond jmp)) in
@@ -466,24 +502,25 @@ let insn t k (ins : insn) =
       if j + 1 < Array.length blks then emit t "  br label %%i%db%d\n" k (j + 1)
       else emit t "  br label %%i%d.done\n" k);
   if Array.is_empty blks then emit t "i%db0:\n  br label %%i%d.done\n" k k;
-  let commit () =
-    Set.iter s.written ~f:(fun i ->
-        let id =
-          Hashtbl.to_alist t.slots
-          |> List.find_map_exn ~f:(fun (id, i') -> Option.some_if (i = i') id)
-        in
-        let size = reg_width t id in
-        let x = assign t "load %s, ptr %%sh%d" (ty size) i in
-        emit t "  store %s %s, ptr %%rp%d, align 1\n" (ty size) x i)
-  in
-  emit t "i%d.done:\n" k;
-  commit ();
-  emit t "  br label %%i%d\n" (k + 1);
+  let copied = Set.inter t.written_before s.written in
+  emit t "i%d.done:\n  br label %%i%d\n" k (k + 1);
   emit t "i%d.jump:\n" k;
-  commit ();
+  commit t (Set.union t.written_before s.written);
   let a = assign t "load i64, ptr %%tgt" in
   emit t "  store i64 %s, ptr %%next\n  ret i32 %d\n" a ((4 * k) + 1);
-  emit t "i%d.stop:\n  ret i32 %d\n" k (4 * k)
+  (* the registers, as the previous instructions left them *)
+  emit t "i%d.stop:\n" k;
+  commit t ~copy:(k, copied) t.written_before;
+  emit t "  ret i32 %d\n" (4 * k);
+  let body = Buffer.contents t.body in
+  Buffer.clear t.body;
+  Buffer.add_string t.body before;
+  emit t "i%d:\n  store i32 0, ptr %%undo\n" k;
+  Set.iter copied ~f:(fun i ->
+      emit t "  %%copy%d_%d = load %s, ptr %%sh%d\n" k i (ty (slot_width t i)) i);
+  emit t "  br label %%i%db0\n" k;
+  Buffer.add_string t.body body;
+  t.written_before <- Set.union t.written_before s.written
 
 let header t name =
   let b = Buffer.create 4096 in
@@ -502,7 +539,8 @@ let header t name =
   |> List.sort ~compare:(fun (_, i) (_, j) -> Int.compare i j)
   |> List.iter ~f:(fun (id, i) ->
       let w = reg_width t id in
-      add "  %%rpp%d = getelementptr inbounds ptr, ptr %%regs, i64 %d\n" i i;
+      add "  %%rpp%d = getelementptr inbounds ptr, ptr %%regs, i64 %d\n" i
+        (t.global id);
       add "  %%rp%d = load ptr, ptr %%rpp%d\n" i i;
       add "  %%sh%d = alloca %s\n" i (ty w);
       add "  %%ld%d = load %s, ptr %%rp%d, align 1\n" i (ty w) i;
@@ -519,32 +557,41 @@ type block = {
 (* [compile ~locate ~reg_size insns] the block of the longest prefix
    of [insns], that it can run, with the reasons, why the next
    instruction is not in it, or [None], if it can't run the first one *)
-let compile ~locate ~reg_size insns =
+let compile ~locate ~reg_size ~global insns =
   let t =
     {
       locate;
       reg_size;
+      global;
       body = Buffer.create 4096;
       slots = Hashtbl.create (module Int);
       temps = 0;
       vars = [];
       decls = String.Set.empty;
+      written_before = Int.Set.empty;
     }
   in
   let rec loop k = function
     | [] -> (k, None)
     | ins :: rest -> (
         let saved =
-          (Buffer.contents t.body, Hashtbl.copy t.slots, t.vars, t.decls, t.temps)
+          ( Buffer.contents t.body,
+            Hashtbl.copy t.slots,
+            t.vars,
+            t.decls,
+            t.temps,
+            t.written_before )
         in
         match insn t k ins with
         | () -> loop (k + 1) rest
         | exception Unsupported reason ->
-            let body, slots, vars, decls, temps = saved in
+            let body, slots, vars, decls, temps, written_before = saved in
+            t.written_before <- written_before;
             Buffer.clear t.body;
             Buffer.add_string t.body body;
             Hashtbl.clear t.slots;
-            Hashtbl.iteri slots ~f:(fun ~key ~data -> Hashtbl.set t.slots ~key ~data);
+            Hashtbl.iteri slots ~f:(fun ~key ~data ->
+                Hashtbl.set t.slots ~key ~data);
             t.vars <- vars;
             t.decls <- decls;
             t.temps <- temps;
@@ -553,7 +600,9 @@ let compile ~locate ~reg_size insns =
   let length, reason = loop 0 insns in
   if length = 0 then Error (Option.value reason ~default:"no instructions")
   else begin
-    emit t "i%d:\n  ret i32 %d\n}\n" length ((4 * (length - 1)) + 2);
+    emit t "i%d:\n" length;
+    commit t t.written_before;
+    emit t "  ret i32 %d\n}\n" ((4 * (length - 1)) + 2);
     let b = header t "block" in
     Buffer.add_buffer b t.body;
     let regs = Array.create ~len:(Hashtbl.length t.slots) 0 in
@@ -585,6 +634,21 @@ module Runtime = struct
 
   external next : mem -> (int64[@unboxed]) = "bap_jit_next_byte" "bap_jit_next"
   [@@noalloc]
+
+  external link :
+    mem -> int64 -> nativeint -> string -> int -> int64 -> int -> unit
+    = "bap_jit_link_byte" "bap_jit_link"
+
+  external unlink : mem -> int64 -> unit = "bap_jit_unlink"
+  external unlink_all : mem -> unit = "bap_jit_unlink_all"
+  external limits : mem -> bool -> int -> int64 -> unit = "bap_jit_limits"
+
+  external last : mem -> (int64[@unboxed]) = "bap_jit_last_byte" "bap_jit_last"
+  [@@noalloc]
+
+  external chained : mem -> (int[@untagged])
+    = "bap_jit_chained_byte" "bap_jit_chained"
+  [@@noalloc]
 end
 
 (* the JIT of the program, whose blocks call the runtime *)
@@ -603,6 +667,7 @@ let native block =
   incr blocks;
   let name = sprintf "bap_block_%d" !blocks in
   let ir =
-    String.substr_replace_first block.ir ~pattern:"@block(" ~with_:("@" ^ name ^ "(")
+    String.substr_replace_first block.ir ~pattern:"@block("
+      ~with_:("@" ^ name ^ "(")
   in
   Bap_llvm_jit.compile (Lazy.force llvm) ir name

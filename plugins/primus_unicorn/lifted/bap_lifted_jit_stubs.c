@@ -48,8 +48,34 @@ typedef struct {
     int perm;
 } entry;
 
+/* the flags of a block of ARM, its mode, Thumb, and the modes, after
+   the jump of its last instruction to an even and to an odd address, see
+   [jump] of bap_lifted.ml */
+#define LINK_ARM 8
+#define LINK_THUMB 1
+#define LINK_EVEN 2
+#define LINK_ODD 4
+
+/* the block, that the run of another one continues with, see [run] */
+typedef struct {
+    uint64_t pc; /* EMPTY, if the slot is free */
+    intnat fn;
+    uint64_t end; /* the address after its instructions */
+    uint32_t length; /* its instructions */
+    int flags; /* see LINK_ARM */
+    uint8_t *code; /* the copy of its bytes */
+    size_t size;
+} link;
+
 struct jit_mem {
     frame frame;
+    link *links; /* the blocks, by their addresses, with open addressing */
+    size_t lcapacity, lcount;
+    int chain; /* if the blocks continue with the linked ones */
+    uint64_t budget; /* the instructions, that the linked blocks may run */
+    uint64_t until; /* the address, at which the run stops */
+    uint64_t chained; /* the instructions of the blocks before the last */
+    uint64_t last; /* the address of the last block, that ran */
     entry *table; /* the pages, with the open addressing */
     size_t capacity, count;
     uint64_t seed; /* of the hash, which the program can't predict */
@@ -62,8 +88,15 @@ struct jit_mem {
 
 #define Mem_val(v) (*(jit_mem **)Data_custom_val(v))
 
+static void free_links(jit_mem *m) {
+    for (size_t i = 0; i < m->lcapacity; i++)
+        if (m->links[i].pc != EMPTY) free(m->links[i].code);
+}
+
 static void finalize(value v) {
     jit_mem *m = Mem_val(v);
+    free_links(m);
+    free(m->links);
     free(m->table);
     free(m);
 }
@@ -125,17 +158,46 @@ static entry *find(jit_mem *m, uint64_t page) {
     return t;
 }
 
+/* the slot of the block at [pc], or the free one, where it would be */
+static size_t link_slot(jit_mem *m, link *links, size_t capacity,
+                        uint64_t pc) {
+    size_t i = hash(m->seed, pc << PAGE_BITS, capacity);
+    while (links[i].pc != EMPTY && links[i].pc != pc)
+        i = (i + 1) & (capacity - 1);
+    return i;
+}
+
+static void relink(jit_mem *m, size_t capacity) {
+    link *links = malloc(capacity * sizeof(link));
+    if (!links) caml_raise_out_of_memory();
+    for (size_t i = 0; i < capacity; i++) links[i].pc = EMPTY;
+    for (size_t i = 0; i < m->lcapacity; i++)
+        if (m->links[i].pc != EMPTY)
+            links[link_slot(m, links, capacity, m->links[i].pc)] =
+                m->links[i];
+    free(m->links);
+    m->links = links;
+    m->lcapacity = capacity;
+}
+
+static link *find_link(jit_mem *m, uint64_t pc) {
+    link *l = &m->links[link_slot(m, m->links, m->lcapacity, pc)];
+    return l->pc == pc ? l : NULL;
+}
+
 value bap_jit_mem_create(value unit) {
     CAMLparam1(unit);
     CAMLlocal1(v);
     jit_mem *m = calloc(1, sizeof(jit_mem));
     if (!m) caml_raise_out_of_memory();
     m->frame.mem = m;
+    m->until = EMPTY;
     m->seed = ((uint64_t)(uintptr_t)m << 16) ^ (uint64_t)time(NULL) ^
               ((uint64_t)clock() << 32);
     v = caml_alloc_custom(&mem_ops, sizeof(jit_mem *), 0, 1);
     Mem_val(v) = m;
     rehash(m, 64);
+    relink(m, 64);
     flush_tlb(m);
     CAMLreturn(v);
 }
@@ -285,26 +347,118 @@ static int same_code(jit_mem *m, uint64_t addr, const uint8_t *code,
 
 typedef int32_t (*block)(frame *, uint8_t **);
 
+/* [link mem pc fn code length end] the block [fn] at [pc], whose bytes
+   are [code], and whose [length] instructions end at [end], which the
+   runs of the blocks continue with, see [run] */
+value bap_jit_link(value mem, value pc, value fn, value code, value length,
+                   value end, value flags) {
+    jit_mem *m = Mem_val(mem);
+    uint64_t p = (uint64_t)Int64_val(pc);
+    if (find_link(m, p)) return Val_unit;
+    if (2 * (m->lcount + 1) > m->lcapacity) relink(m, 2 * m->lcapacity);
+    size_t n = caml_string_length(code);
+    uint8_t *copy = malloc(n);
+    if (!copy) caml_raise_out_of_memory();
+    memcpy(copy, String_val(code), n);
+    link l = {p,    Nativeint_val(fn), (uint64_t)Int64_val(end),
+              (uint32_t)Long_val(length), Int_val(flags), copy, n};
+    m->links[link_slot(m, m->links, m->lcapacity, p)] = l;
+    m->lcount++;
+    return Val_unit;
+}
+
+value bap_jit_link_byte(value *argv, int argc) {
+    (void)argc;
+    return bap_jit_link(argv[0], argv[1], argv[2], argv[3], argv[4],
+                        argv[5], argv[6]);
+}
+
+/* the block at [pc] isn't linked, e.g., as its code is released */
+value bap_jit_unlink(value mem, value pc) {
+    jit_mem *m = Mem_val(mem);
+    link *l = find_link(m, (uint64_t)Int64_val(pc));
+    if (l) {
+        free(l->code);
+        l->pc = EMPTY;
+        m->lcount--;
+        /* the links after it are inserted again */
+        relink(m, m->lcapacity);
+    }
+    return Val_unit;
+}
+
+value bap_jit_unlink_all(value mem) {
+    jit_mem *m = Mem_val(mem);
+    free_links(m);
+    for (size_t i = 0; i < m->lcapacity; i++) m->links[i].pc = EMPTY;
+    m->lcount = 0;
+    return Val_unit;
+}
+
+/* [limits mem chain budget until] the runs continue with the linked
+   blocks, if [chain], at most for [budget] instructions, until [until] */
+value bap_jit_limits(value mem, value chain, value budget, value until) {
+    jit_mem *m = Mem_val(mem);
+    m->chain = Bool_val(chain);
+    m->budget = (uint64_t)Long_val(budget);
+    m->until = (uint64_t)Int64_val(until);
+    return Val_unit;
+}
+
 /* [run fn mem regs code addr] runs the block [fn], whose instructions
-   are the bytes [code] at [addr], and whose registers are [regs], see
-   bap_lifted_jit.ml for the result, or returns -1, if the code changed */
+   are the bytes [code] at [addr], whose registers are [regs], and then
+   the linked blocks, that the blocks continue with, see [limits], and
+   returns the result of the last one, see bap_lifted_jit.ml, or -1, if
+   its code changed, whose address is [last], after the [chained]
+   instructions of the blocks before it */
 intnat bap_jit_run(intnat fn, value mem, value regs, value code,
                    int64_t addr) {
     jit_mem *m = Mem_val(mem);
     size_t nregs = Wosize_val(regs);
     uint8_t *ptrs[MAX_REGS];
+    m->chained = 0;
+    m->last = (uint64_t)addr;
     if (nregs > MAX_REGS) return -1;
     if (!same_code(m, (uint64_t)addr, (const uint8_t *)String_val(code),
                    caml_string_length(code)))
         return -1;
     for (size_t i = 0; i < nregs; i++) ptrs[i] = Bytes_val(Field(regs, i));
-    m->frame.undo = 0;
-    int32_t r = ((block)fn)(&m->frame, ptrs);
-    /* the instruction, that stopped, didn't run */
-    if ((r & 3) == 0)
-        for (uint32_t i = m->frame.undo; i-- > 0;)
-            *m->undo_at[i] = m->undo_old[i];
-    return r;
+    uint64_t pc = (uint64_t)addr;
+    link *current = m->chain ? find_link(m, pc) : NULL;
+    for (;;) {
+        m->frame.undo = 0;
+        int32_t r = ((block)fn)(&m->frame, ptrs);
+        if ((r & 3) == 0) {
+            /* the instruction, that stopped, didn't run */
+            for (uint32_t i = m->frame.undo; i-- > 0;)
+                *m->undo_at[i] = m->undo_old[i];
+            return r;
+        }
+        if (!current) return r;
+        uint64_t ran = (uint64_t)(r >> 2) + 1;
+        uint64_t next = (r & 3) == 1 ? m->frame.next : current->end;
+        int thumb = current->flags & LINK_THUMB;
+        if ((current->flags & LINK_ARM) && (r & 3) == 1) {
+            /* the jump, that changes the mode, returns to the engine */
+            uint64_t dst = next & ~(uint64_t)1;
+            int mode = dst == current->end ? thumb
+                       : (next & 1)       ? current->flags & LINK_ODD
+                                          : current->flags & LINK_EVEN;
+            if (!mode != !thumb) return r;
+            next = dst;
+        }
+        link *l = find_link(m, next);
+        if (!l || (l->flags & LINK_THUMB) != thumb || next == m->until ||
+            (m->until > l->pc && m->until < l->end) ||
+            m->chained + ran + l->length > m->budget)
+            return r;
+        m->chained += ran;
+        m->last = next;
+        if (!same_code(m, next, l->code, l->size)) return -1;
+        current = l;
+        fn = l->fn;
+        pc = next;
+    }
 }
 
 value bap_jit_run_byte(value fn, value mem, value regs, value code,
@@ -314,6 +468,18 @@ value bap_jit_run_byte(value fn, value mem, value regs, value code,
 }
 
 int64_t bap_jit_next(value mem) { return (int64_t)Mem_val(mem)->frame.next; }
+
+int64_t bap_jit_last(value mem) { return (int64_t)Mem_val(mem)->last; }
+
+value bap_jit_last_byte(value mem) {
+    return caml_copy_int64(bap_jit_last(mem));
+}
+
+intnat bap_jit_chained(value mem) { return (intnat)Mem_val(mem)->chained; }
+
+value bap_jit_chained_byte(value mem) {
+    return Val_long(bap_jit_chained(mem));
+}
 
 value bap_jit_next_byte(value mem) {
     return caml_copy_int64(bap_jit_next(mem));
