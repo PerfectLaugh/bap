@@ -9,6 +9,7 @@ sub getchar(getchar_result)
 sub main(main_argc, main_argv, main_result)
   calls answer putchar
 sub putchar(putchar_c, putchar_result)
+sub intrinsic:undefined-instruction()
 
 sub main(main_argc, main_argv, main_result)
 #1: main_argc :: in u32 = low:32[X10]

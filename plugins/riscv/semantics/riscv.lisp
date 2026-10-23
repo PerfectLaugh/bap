@@ -256,6 +256,14 @@
 (defun C_NOP ()
   (empty))
 
+;; the hints, which have no effect: C.NOP with an immediate, the
+;; prefetches of Zicbop, and WFI, as no interrupt is modeled
+(defun C_NOP_HINT (_) (empty))
+(defun PREFETCH_R (_ _) (empty))
+(defun PREFETCH_W (_ _) (empty))
+(defun PREFETCH_I (_ _) (empty))
+(defun WFI () (empty))
+
 (defun NOP ()
   (empty))
 
@@ -418,6 +426,11 @@
 
 ;; the system call, which the emulators run, e.g., the threads of Linux
 (defun ECALL () (intrinsic 'syscall))
+
+;; the breakpoints, and the instruction, that is defined to be illegal
+(defun EBREAK () (intrinsic 'breakpoint :aborts))
+(defun C_EBREAK () (intrinsic 'breakpoint :aborts))
+(defun C_UNIMP () (intrinsic 'undefined-instruction :aborts))
 
 
 ;;; ATOMICS, the A extension, whose orderings are of no concern here, as
@@ -1456,28 +1469,35 @@
 ;;; ignored. The other registers, e.g., the counters, are read with the
 ;;; intrinsic riscv_csr_<number>, and written with riscv_set_csr_<number>.
 
-(defun csr-name (prefix csr)
-  (declare (visibility :private))
-  (symbol-concat prefix (case csr
-                          0xC00 'cycle
-                          0xC01 'time
-                          0xC02 'instret
-                          'other)
-                 :sep '_))
-
 (defun fcsr (csr)
   (declare (visibility :private))
   (logand (<= 1 csr) (<= csr 3)))
 
+;; the counters, that the programs read, which the emulators provide,
+;; e.g., from the clock, which they don't write
+(defun counter (csr)
+  (declare (visibility :private))
+  (logand (<= 0xC00 csr) (<= csr 0xC02)))
+
+(defun read-counter (csr)
+  (declare (visibility :private))
+  (case csr
+    0xC00 (intrinsic 'riscv_csr_cycle :result (word-width))
+    0xC01 (intrinsic 'riscv_csr_time :result (word-width))
+    (intrinsic 'riscv_csr_instret :result (word-width))))
+
 (defun csr-access (rd csr x write)
-  "reads the CSR to RD, and writes X to it, if WRITE"
+  "reads the CSR to RD, and writes X to it, if WRITE: the flags and the
+   rounding mode of the floats, which are not modeled, are 0, and their
+   writes are ignored, the counters are read, and the other CSRs, e.g.,
+   of the extensions, that are not modeled, and the writes of the
+   counters, are illegal, as in the user mode of Linux"
   (declare (visibility :private))
   (if (fcsr csr)
       (set$ rd 0)
-    (let ((old (intrinsic (csr-name 'riscv_csr csr) csr :result (word-width))))
-      (when write
-        (intrinsic (csr-name 'riscv_set_csr csr) csr x))
-      (set$ rd old))))
+    (if (logand (counter csr) (not write))
+        (set$ rd (read-counter csr))
+      (intrinsic 'undefined-instruction :aborts))))
 
 (defun CSRRW (rd csr rs1) (csr-access rd csr rs1 true))
 (defun CSRRS (rd csr rs1) (csr-access rd csr rs1 (/= (symbol rs1) 'X0)))

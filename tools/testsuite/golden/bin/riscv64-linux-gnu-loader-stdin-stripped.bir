@@ -8,3 +8,4 @@ sub sub_1416(sub_1416_result)
   calls fgetc putchar
 sub sub_149a(sub_149a_result)
   calls exit sub_1416
+sub intrinsic:undefined-instruction()
