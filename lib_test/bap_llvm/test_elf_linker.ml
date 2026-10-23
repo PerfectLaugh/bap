@@ -235,9 +235,10 @@ let merged_patches ctxt =
     ]
     out.patches
 
+(* EM_SPARC, whose relocations the linker doesn't apply *)
 let unsupported_machine ctxt =
   let out =
-    link ~machine:21 ~base:0L ~bytes:(String.make 0x48 '\000')
+    link ~machine:2 ~base:0L ~bytes:(String.make 0x48 '\000')
       [ text 1 ".text" ~off:0x40L ~size:8L ]
       [ (1, symbol "" 1 ~typ:3 ~bind:0) ]
       [ rel 1 0L 1 1 ]
