@@ -122,7 +122,8 @@ val in_atomic : t -> bool
 val taint_start : ?jumps:bool -> t -> unit
 val taint_stop : t -> unit
 val taint_active : t -> bool
-val taint_clear : t -> unit
+val taint_any : t -> bool
+val taint_clear : ?regs:bool -> ?mem:bool -> t -> unit
 val taint_labels : t -> (int * [ `All | `Moves | `None ]) list -> unit
 val reg_labels : t -> string -> int list
 val set_reg_labels : t -> string -> int list -> unit

@@ -118,7 +118,10 @@ let taint_start ?jumps = function
 let lifted f ~default = function Unicorn _ -> default | Lifted l -> f l
 let taint_stop = lifted L.taint_stop ~default:()
 let taint_active = lifted L.taint_active ~default:false
-let taint_clear = lifted L.taint_clear ~default:()
+let taint_any = lifted L.taint_any ~default:false
+
+let taint_clear ?regs ?mem t =
+  lifted (fun l -> L.taint_clear ?regs ?mem l) ~default:() t
 
 let taint_labels t classes =
   lifted (fun l -> L.taint_labels l classes) ~default:() t

@@ -156,7 +156,13 @@ val taint_stop : t -> unit
 (** [taint_stop t] stops it, and clears the taint *)
 
 val taint_active : t -> bool
-val taint_clear : t -> unit
+
+val taint_any : t -> bool
+(** [taint_any t] if a register or a byte is tainted *)
+
+val taint_clear : ?regs:bool -> ?mem:bool -> t -> unit
+(** [taint_clear t] clears the taint of the registers, unless [regs] is [false],
+    and of the memory, unless [mem] is [false] *)
 
 val taint_labels : t -> (int * [ `All | `Moves | `None ]) list -> unit
 (** [taint_labels t classes] the classes of the labels, the others are [`None]

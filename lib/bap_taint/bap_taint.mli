@@ -294,6 +294,16 @@ module Std : sig
 
             @since 2.6.0 *)
 
+        val indirect_changes :
+          [ `All | `Changed of (Primus.value * Set.M(Object).t) list ] Machine.t
+        (** [indirect_changes] the addresses, whose indirect objects changed,
+            with their objects, since it was called last, e.g., by an emulator,
+            that propagates the taint itself, or [`All], if it wasn't called
+            before, or the objects were sanitized, or restored. The changes of
+            {!set_indirect} are not among them.
+
+            @since 2.6.0 *)
+
         val indirect_taints : (Primus.value * Set.M(Object).t) list Machine.t
         (** [indirect_taints] the addresses, that are related to the objects
             indirectly, and their objects, e.g., which an emulator, that

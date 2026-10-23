@@ -2747,15 +2747,19 @@ let on_mem_invalid ?first ?last t accesses kinds f =
 let reprotect_all t =
   Hashtbl.iter_keys t.pages ~f:(fun page -> reprotect t page)
 
-let taint_clear t =
+let taint_clear ?(regs = true) ?(mem = true) t =
   let s = t.shadow in
-  let pages = Hashtbl.keys s.spages in
-  Hashtbl.clear s.sregs;
-  Hashtbl.clear s.smem;
-  Hashtbl.clear s.spages;
-  Hash_set.clear s.dirty_regs;
-  Hash_set.clear s.dirty_mem;
-  List.iter pages ~f:(reprotect t)
+  if regs then begin
+    Hashtbl.clear s.sregs;
+    Hash_set.clear s.dirty_regs
+  end;
+  if mem then begin
+    let pages = Hashtbl.keys s.spages in
+    Hashtbl.clear s.smem;
+    Hashtbl.clear s.spages;
+    Hash_set.clear s.dirty_mem;
+    List.iter pages ~f:(reprotect t)
+  end
 
 let taint_start ?(jumps = false) t =
   let s = t.shadow in
@@ -2771,6 +2775,9 @@ let taint_stop t =
   reprotect_all t
 
 let taint_active t = t.shadow.on
+
+let taint_any t =
+  not (Hashtbl.is_empty t.shadow.sregs && Hashtbl.is_empty t.shadow.smem)
 
 let taint_labels t classes =
   let s = t.shadow in

@@ -206,6 +206,12 @@ type engine = {
   mutable seen : int;  (** the version of [Primus.Track], that is seen *)
   mutable shadowing : bool;
       (** if the lifted engine propagates the taint, see [Make.Shadow] *)
+  mutable shadowed : bool;
+      (** if the engine has the taint of the memory, so that it gets only its
+          changes, see [Make.Shadow.import] *)
+  known : Primus.value Int.Table.t;
+      (** the objects of the labels, that the engine has seen, whose classes it
+          has, see [Make.Shadow.import] *)
 }
 
 (* the events of the code, that the observers of the machine see, which
@@ -1324,6 +1330,8 @@ let create session target ~foreign ~externals =
       tracer = None;
       seen = -1;
       shadowing = false;
+      shadowed = false;
+      known = Int.Table.create ();
     }
   in
   let base = trampolines_base target in
@@ -1835,7 +1843,11 @@ module Make (Machine : Primus.Machine.S) = struct
           (not attached) && (not finalized) && (not opaque)
           && List.length shadows = 1
         in
-        if on then Uc.taint_start ~jumps e.uc else Uc.taint_stop e.uc;
+        if on then Uc.taint_start ~jumps e.uc
+        else begin
+          Uc.taint_stop e.uc;
+          e.shadowed <- false
+        end;
         e.shadowing <- on;
         on
 
@@ -1874,29 +1886,64 @@ module Make (Machine : Primus.Machine.S) = struct
             (List.dedup_and_sort ~compare (Uc.reg_labels e.uc r @ ls))
 
     (* the taint of Primus goes to the engine, after its changes went to
-       Primus, see [export] *)
+       Primus, see [export]: of the registers, and of the locations, whose
+       taint changed, or of all, if the engine has none, with the classes
+       of the labels, that the engine has seen *)
     let import (e : engine) =
-      Uc.taint_clear e.uc;
-      let* objs = Tracker.objects in
-      let* classes = classes objs in
-      Uc.taint_labels e.uc classes;
-      let* () =
-        Machine.List.iter (Target.Regs.vars e.regs) ~f:(fun v ->
+      (* the labels of the sets, which the locations share *)
+      let sets = Hashtbl.Poly.create () in
+      let labels_of objs =
+        let key = Set.to_list objs in
+        match Hashtbl.find sets key with
+        | Some ls -> Machine.return ls
+        | None ->
+            let+ ls =
+              Machine.List.map (Set.to_list objs) ~f:(fun o ->
+                  let* l = label o in
+                  let+ v = Objects.to_value o in
+                  if not (Hashtbl.mem e.known l) then
+                    Hashtbl.set e.known ~key:l ~data:v;
+                  l)
+            in
+            Hashtbl.set sets ~key ~data:ls;
+            ls
+      in
+      let* regs =
+        Machine.List.filter_map (Target.Regs.vars e.regs) ~f:(fun v ->
             let* set = Env.is_set v in
-            if not set then Machine.return ()
+            if not set then Machine.return None
             else
               let* x = Env.get v in
               let* objs = Tracker.lookup x T.Rel.direct in
-              let+ ls = labels objs in
-              if not (List.is_empty ls) then
-                let r = owner e v in
-                Uc.set_reg_labels e.uc r
-                  (List.dedup_and_sort ~compare (Uc.reg_labels e.uc r @ ls)))
+              if Set.is_empty objs then Machine.return None
+              else
+                let+ ls = labels_of objs in
+                Some (owner e v, ls))
       in
-      let* indirect = Tracker.indirect_taints in
-      Machine.List.iter indirect ~f:(fun (addr, objs) ->
-          let+ ls = labels objs in
-          Uc.set_mem_labels e.uc (int64_of_word (Primus.Value.to_word addr)) ls)
+      let* changes = Tracker.indirect_changes in
+      let* full, taints =
+        match changes with
+        | `Changed taints when e.shadowed -> Machine.return (false, taints)
+        | _ ->
+            let+ taints = Tracker.indirect_taints in
+            (true, taints)
+      in
+      let* mem =
+        Machine.List.map taints ~f:(fun (addr, objs) ->
+            let+ ls = labels_of objs in
+            (int64_of_word (Primus.Value.to_word addr), ls))
+      in
+      let* known =
+        Machine.List.map (Hashtbl.data e.known) ~f:Objects.of_value
+      in
+      let+ classes = classes (T.Object.Set.of_list known) in
+      Uc.taint_labels e.uc classes;
+      Uc.taint_clear ~mem:full e.uc;
+      e.shadowed <- true;
+      List.iter regs ~f:(fun (r, ls) ->
+          Uc.set_reg_labels e.uc r
+            (List.dedup_and_sort ~compare (Uc.reg_labels e.uc r @ ls)));
+      List.iter mem ~f:(fun (addr, ls) -> Uc.set_mem_labels e.uc addr ls)
 
     (* the taint, that the engine changed, goes to Primus, to the values
        of the registers, which are new, if their taint changed, as the
@@ -2530,12 +2577,7 @@ module Make (Machine : Primus.Machine.S) = struct
     (* the native functions compute the concrete values *)
     | Some (_, call) when reads_tracked e call.args -> Machine.return None
     (* and they don't propagate the taint, see [Shadow] *)
-    | Some _
-      when e.shadowing && Uc.taint_active e.uc
-           && not
-                (List.is_empty (Uc.tainted_regs e.uc)
-                && List.is_empty (Uc.tainted_mem e.uc)) ->
-        Machine.return None
+    | Some _ when e.shadowing && Uc.taint_any e.uc -> Machine.return None
     | Some (name, call) ->
         let* linked = Linker.is_linked (`symbol name) in
         let* unreplaced = unreplaced_stub e (`symbol name) in
@@ -2972,6 +3014,7 @@ module Make (Machine : Primus.Machine.S) = struct
         in
         if not active then (
           Uc.taint_clear e.uc;
+          e.shadowed <- false;
           Machine.return ())
         else if shadowing then Shadow.import e
         else

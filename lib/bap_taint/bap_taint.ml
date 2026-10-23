@@ -140,6 +140,28 @@ let gc =
 
 let vid = Primus.Value.id
 
+(* the addresses, whose objects changed, since an emulator, that
+   propagates the taint itself, got them, see [indirect_changes], which
+   are recorded, after it asked first, or all of them changed *)
+type journal = { on : bool; full : bool; addrs : Primus.Value.Set.t }
+
+let journal =
+  Primus.Machine.State.declare ~name:"taint-journal"
+    ~uuid:"5b2e8d17-3c4a-4f6e-a1d9-7e0c2b9f4a63" (fun _ ->
+      { on = false; full = true; addrs = Primus.Value.Set.empty })
+
+module Journal (Machine : Primus.Machine.S) = struct
+  let note addr =
+    Machine.Local.update journal ~f:(fun j ->
+        if (not j.on) || j.full then j
+        else { j with addrs = Set.add j.addrs addr })
+
+  let full =
+    Machine.Local.update journal ~f:(fun j ->
+        if j.on then { j with full = true; addrs = Primus.Value.Set.empty }
+        else j)
+end
+
 let indirect =
   Rel { field = Fields_of_tainter.indirect; key = Fn.id; kind = Indirect }
 
@@ -205,9 +227,13 @@ module Taint = struct
       | Direct -> Track.track v
       | Indirect -> Track.mark (Primus.Value.to_word v)
 
-    let change v (Rel { field; key }) ~f =
+    module Journal = Journal (Machine)
+
+    let change v (Rel { field; key; kind }) ~f =
       Machine.Local.update tainter ~f:(fun t ->
           Field.fset field t @@ Map.change (Field.get field t) (key v) ~f)
+      >>= fun () ->
+      match kind with Indirect -> Journal.note v | Direct -> Machine.return ()
 
     let attach v r ts =
       change v r ~f:(function
@@ -257,6 +283,7 @@ module Taint = struct
       Seq.range 0 len
       |> Machine.Seq.fold ~init:s.indirect ~f:(fun indirect off ->
           Value.nsucc addr off >>= fun addr ->
+          Journal.note addr >>= fun () ->
           Track.mark (Primus.Value.to_word addr) >>= fun () ->
           report_attached Rel.indirect taint addr >>| fun () ->
           Map.update indirect addr ~f:(function
@@ -284,11 +311,27 @@ module Taint = struct
             direct = kill_objects kill direct;
             indirect = kill_objects kill indirect;
           })
+      >>= fun () -> Journal.full
 
     let objects = Machine.Local.get tainter >>| objects
 
     let indirect_taints =
       Machine.Local.get tainter >>| fun { indirect; _ } -> Map.to_alist indirect
+
+    let indirect_changes =
+      Machine.Local.get journal >>= fun j ->
+      Machine.Local.put journal
+        { on = true; full = false; addrs = Primus.Value.Set.empty }
+      >>= fun () ->
+      if (not j.on) || j.full then Machine.return `All
+      else
+        Machine.Local.get tainter >>| fun { indirect; _ } ->
+        `Changed
+          (Set.to_list j.addrs
+          |> List.map ~f:(fun addr ->
+              ( addr,
+                Option.value (Map.find indirect addr) ~default:Object.Set.empty
+              )))
 
     let set_indirect taints =
       Machine.Local.update tainter ~f:(fun s ->
@@ -557,8 +600,9 @@ module Persistent = struct
           Map.set indirect ~key:addr ~data:objects)
       >>= fun indirect ->
       let restored = { direct; indirect } in
+      let module Journal = Journal (Machine) in
       Machine.Local.put tainter restored >>= fun () ->
-      Machine.Local.put gc { old = restored }
+      Journal.full >>= fun () -> Machine.Local.put gc { old = restored }
   end
 
   let () = Primus.Checkpoint.register ~package:"bap" "taint" (module Extension)
