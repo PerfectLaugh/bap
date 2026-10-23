@@ -102,6 +102,9 @@ type block = {
   it_closed : bool;
       (** if its IT blocks end in it, so that the IT state is zero, when it
           ends, as when it starts *)
+  super : bool;
+      (** if it runs on after the branches, that aren't taken, see [jit.whole]
+      *)
   mutable entry_hooked : bool;
       (** if the hooks of the code or of the blocks hook its first instruction,
           which are called before it runs *)
@@ -118,6 +121,9 @@ type jit = {
       (** if no hook, e.g., of the memory, needs the closures *)
   mutable traced : bool;
       (** if the traces of the code record the instructions of the blocks *)
+  mutable whole : bool;
+      (** if the blocks may run on after the branches, that aren't taken, as no
+          hook or trace needs the blocks of Unicorn, see [falls] *)
   mutable jitted : int;  (** the instructions, that the blocks ran *)
   compiles : int Int64.Table.t;  (** the blocks compiled at the addresses *)
   mutable live : int;  (** the blocks, that are not released *)
@@ -295,6 +301,7 @@ let create config arch mode =
                gen = 0;
                allowed = true;
                traced = false;
+               whole = not (Poly.equal arch Uc.Arm);
                jitted = 0;
                compiles = Int64.Table.create ();
                live = 0;
@@ -507,7 +514,14 @@ let hooks_changed t =
                match h.kind with Mem _ | Trace_mem _ -> true | _ -> false));
       j.traced <-
         List.exists t.hooks ~f:(fun h ->
-            match h.kind with Trace_code _ -> true | _ -> false))
+            match h.kind with Trace_code _ -> true | _ -> false);
+      j.whole <-
+        (not (Poly.equal t.arch Uc.Arm))
+        && not
+             (List.exists t.hooks ~f:(fun h ->
+                  match h.kind with
+                  | Trace_code _ | Block _ -> true
+                  | _ -> false)))
 
 let add t ?first ?last kind =
   check t;
@@ -1574,7 +1588,51 @@ let hooked ?(blocks = false) t addr =
 (* the instructions, that may be in the block at [pc], whose bytes are
    fetched only from the executable pages, as the hooks of the invalid
    fetches are not called *)
-let candidates t pc =
+(* if the instruction at [pc], that may jump, may run on, after its
+   branch, that isn't taken, by its blocks, that reach its end, and its
+   branch goes forward, rather than back, e.g., of a loop, which is taken
+   rather, and whose target starts its own block *)
+let falls pc (insn : insn) =
+  let backward =
+    List.exists insn.blks ~f:(fun blk ->
+        Term.enum jmp_t blk
+        |> Seq.exists ~f:(fun jmp ->
+            match Jmp.kind jmp with
+            | Goto (Indirect (Int x)) ->
+                Stdlib.Int64.unsigned_compare
+                  (Word.to_int64_exn (Word.extract_exn ~hi:63 x))
+                  pc
+                <= 0
+            | _ -> false))
+  in
+  (not backward)
+  &&
+  let blks = Array.of_list insn.blks in
+  let index tid = Array.findi blks ~f:(fun _ b -> Tid.equal (Term.tid b) tid) in
+  let seen = Array.create ~len:(Array.length blks) false in
+  let rec visit i =
+    i >= Array.length blks
+    || (not seen.(i))
+       && begin
+         seen.(i) <- true;
+         let jmps = Term.enum jmp_t blks.(i) |> Seq.to_list in
+         let always jmp =
+           match Jmp.cond jmp with Int x -> not (Word.is_zero x) | _ -> false
+         in
+         let target jmp =
+           match Jmp.kind jmp with
+           | Goto (Direct tid) | Ret (Direct tid) ->
+               Option.map (index tid) ~f:fst
+           | _ -> None
+         in
+         List.exists jmps ~f:(fun jmp ->
+             match target jmp with Some j when j > 0 -> visit j | _ -> false)
+         || ((not (List.exists jmps ~f:always)) && visit (i + 1))
+       end
+  in
+  visit 0
+
+let candidates t (j : jit) pc =
   let executable addr =
     match Hashtbl.find t.pages (page_of addr) with
     | Some p -> Uc.Perm.(mem p.perm exec)
@@ -1591,7 +1649,8 @@ let candidates t pc =
           match t.config.delay insn.code with
           | `None ->
               let acc = (addr, insn) :: acc in
-              if insn.jumps then List.rev acc
+              if insn.jumps && not (j.whole && falls addr insn) then
+                List.rev acc
               else loop (i + 1) Int64.(addr + of_int insn.size) acc
           (* the branch, whose delay slot ends the block with it, see
              [Bap_lifted_jit.insn], if the slot doesn't jump *)
@@ -1625,7 +1684,7 @@ let compile_block t j pc =
   if compiles >= max_compiles || j.live >= max_live then Failed
   else begin
     Hashtbl.set j.compiles ~key:pc ~data:(compiles + 1);
-    let candidates = candidates t pc in
+    let candidates = candidates t j pc in
     let insns =
       List.map candidates ~f:(fun (pc, insn) ->
           {
@@ -1704,6 +1763,9 @@ let compile_block t j pc =
                       | Some it -> it
                       | None -> if it land 0xF <> 0 then advance_it it else it)
                   = 0;
+                super =
+                  List.exists (List.drop_last_exn candidates)
+                    ~f:(fun (_, (i : insn)) -> i.jumps);
                 entry_hooked = hooked ~blocks:true t pc;
               })
   end
@@ -1711,15 +1773,16 @@ let compile_block t j pc =
 (* the block, whose hooks of the code changed, is checked again *)
 let unhooked t (j : jit) (b : block) =
   b.gen = j.gen
-  ||
-  let unhooked =
-    Array.for_alli b.pcs ~f:(fun i pc -> i = 0 || not (hooked t pc))
-  in
-  if unhooked then begin
-    b.gen <- j.gen;
-    b.entry_hooked <- hooked ~blocks:true t b.pcs.(0)
-  end;
-  unhooked
+  || ((not b.super) || j.whole)
+     &&
+     let unhooked =
+       Array.for_alli b.pcs ~f:(fun i pc -> i = 0 || not (hooked t pc))
+     in
+     if unhooked then begin
+       b.gen <- j.gen;
+       b.entry_hooked <- hooked ~blocks:true t b.pcs.(0)
+     end;
+     unhooked
 
 (* runs the block at [pc], whose first instruction is [insn], whose hooks
    were called, if it is compiled, and returns the next instruction, the
