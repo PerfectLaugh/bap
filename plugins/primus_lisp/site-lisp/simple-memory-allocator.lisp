@@ -49,23 +49,38 @@
 
 (defparameter *malloc/total-bytes-allocated* 0)
 
+(defparameter *malloc-alignment* 16
+  "the alignment of the chunks, that malloc returns, a power of two,
+   as of the libc of Linux on the 64-bit targets, which the vector
+   instructions and the exclusive accesses, e.g., of AArch64, need")
+
 (defun malloc (n)
-  "allocates a memory region of size N"
+  "allocates a memory region of size N, aligned to *malloc-alignment*,
+   after the size of the chunk, which takes the word before it, and
+   the guard edge"
   (declare (external "malloc"))
   (if (= n 0) *malloc-zero-sentinel*
     (if (malloc-will-reach-limit n) 0
-      (malloc/grow-arena-if-needed
-       (+ n (* 2 *malloc-guard-edges*) (sizeof int)))
-      (+= *malloc/total-bytes-allocated* n)
       (let ((header-size (sizeof int))
-            (chunk-size (+ n (* 2 *malloc-guard-edges*) header-size))
-            (ptr *malloc/brk*))
-        (malloc/initialize ptr chunk-size)
-        (+= *malloc/brk* chunk-size)
-        (malloc/fill-edges ptr chunk-size)
-        (+= ptr *malloc-guard-edges*)
-        (malloc/put-chunk-size ptr n)
-        (+ ptr header-size)))))
+            (most (+ n (* 2 *malloc-guard-edges*) header-size
+                     (- *malloc-alignment* 1))))
+        (malloc/grow-arena-if-needed most)
+        (+= *malloc/total-bytes-allocated* n)
+        (let ((start *malloc/brk*)
+              (ptr (malloc/align
+                    (+ start *malloc-guard-edges* header-size)))
+              (chunk-size (- (+ ptr n *malloc-guard-edges*) start)))
+          (malloc/initialize start chunk-size)
+          (set *malloc/brk* (+ start chunk-size))
+          (malloc/fill-edges (- ptr header-size *malloc-guard-edges*)
+                             (+ n header-size (* 2 *malloc-guard-edges*)))
+          (malloc/put-chunk-size ptr n)
+          ptr)))))
+
+(defun malloc/align (addr)
+  (declare (visibility :private))
+  (logand (+ addr (- *malloc-alignment* 1))
+          (lnot (- *malloc-alignment* 1))))
 
 (defun brk (val)
   (declare (external "brk"))
@@ -183,8 +198,9 @@
   ptr)
 
 (defun malloc/put-chunk-size (ptr len)
+  "writes the size of the chunk at PTR to the word before it"
   (declare (visibility :private))
-  (write-word int ptr len))
+  (write-word int (- ptr (sizeof int)) len))
 
 (defun malloc/get-chunk-size (ptr)
   (declare (visibility :private))

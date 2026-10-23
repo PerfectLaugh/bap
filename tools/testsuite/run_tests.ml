@@ -1431,7 +1431,8 @@ let taint_bss data =
 
 (* calloc of Primus Lisp returns the zeros, also in the arena, whose
    values are random, which the engine has, and null, if the size
-   overflows, see calloc.c *)
+   overflows, malloc aligns its chunks to 16 bytes, and realloc keeps
+   the bytes of the chunk, that it shrinks, see calloc.c *)
 let calloc data =
   List.map
     (fun system ->
@@ -1448,6 +1449,8 @@ let calloc data =
             [
               ("zeroes the memory", "calloc 0 ");
               ("fails on the overflow", "overflow \\(nil\\)");
+              ("aligns the chunks", "misaligned 0 ");
+              ("keeps the bytes of a shrunk chunk", "realloc 0 7");
             ]))
     [ "bap:stubbed-executor"; "bap:unicorn-executor"; "bap:lifted-executor" ]
 
