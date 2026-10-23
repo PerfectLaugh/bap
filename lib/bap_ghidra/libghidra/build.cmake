@@ -107,6 +107,18 @@ file(ARCHIVE_EXTRACT
     ${GHIDRA_ROOT}/Ghidra/Processors)
 set(SRC "${WORK}/${DECOMPILER}")
 
+# the Sleigh compiler parses the numbers with std::stoul, whose unsigned
+# long has 32 bits on Windows, so the 64-bit constants of the
+# specifications, e.g., of 68000.sinc, overflow, and it fails; they are
+# parsed with std::stoull, which has 64 bits everywhere, as uintb has
+file(READ "${SRC}/slghscan.cc" scanner)
+string(REPLACE "val = std::stoul(numtext," "val = std::stoull(numtext,"
+  patched "${scanner}")
+if(patched STREQUAL scanner)
+  fail("failed to patch the scanner of Sleigh, slghscan.cc")
+endif()
+file(WRITE "${SRC}/slghscan.cc" "${patched}")
+
 # the lists of the modules of the Makefile of the decompiler, e.g., CORE
 file(READ "${SRC}/Makefile" makefile)
 string(REGEX REPLACE "\\\\\r?\n" " " makefile "${makefile}")
