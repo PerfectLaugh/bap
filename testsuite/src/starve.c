@@ -11,7 +11,17 @@ int putchar(int);
 
 volatile long stop, ticks, done;
 
+int lock(volatile long *);
+
 __attribute__((noinline)) void tick(void) { ticks++; }
+
+/* the thread, that calls the external function, through its slot and
+   its trampoline, at which the script pauses */
+long locker(long arg) {
+    while (!stop) lock(&ticks);
+    done = 1;
+    return 0;
+}
 
 long spinner(long arg) {
     while (!stop) tick();

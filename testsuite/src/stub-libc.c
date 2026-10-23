@@ -11,3 +11,8 @@ void *memcpy(void *dst, const void *src, unsigned n) {
     for (unsigned i = 0; i < n; i++) ((char *)dst)[i] = ((const char *)src)[i];
     return dst;
 }
+
+#ifdef LOCK
+/* the external function of starve.c, which the script replaces */
+int lock(volatile long *p) { return 0; }
+#endif

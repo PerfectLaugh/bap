@@ -16,6 +16,8 @@ build() {
     clang $T -fno-pie -no-pie -Wl,-e,_start -Wl,--dynamic-linker=$loader \
         spawn.c $work/libc.so.6 -o ../bin/$target-spawn
     if [ "$target" = x86_64-linux-gnu ]; then
+        clang $T -shared -fPIC -Wl,-soname,libc.so.6 -DLOCK stub-libc.c \
+            -o $work/libc.so.6
         clang $T -fno-pie -no-pie -Wl,-e,_start \
             -Wl,--dynamic-linker=$loader starve.c $work/libc.so.6 \
             -o ../bin/$target-starve

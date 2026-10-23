@@ -335,6 +335,9 @@ and session = {
           the thread doesn't run, while it is paused *)
   mutable resumed : bool;
       (** the thread, that paused, runs, before it is preempted *)
+  mutable hooked_at : int64 option;
+      (** the address, at which a hook of the code paused the program, before
+          its instruction ran, which runs, before the thread is preempted *)
 }
 
 (* the folder, and its parents, which are made, if they aren't there *)
@@ -414,6 +417,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     events = Queue.create ();
     sliced_at = 0.;
     resumed = false;
+    hooked_at = None;
   }
 
 (* the session of the system, which [Loader.init] creates *)
@@ -1756,8 +1760,23 @@ let watch e (w : watching) =
     Uc.flush_tb e.uc
   end
 
+(* the entry of the trampoline, whose instructions are at [addr], as
+   Unicorn may run the instructions after the entry, which do nothing,
+   e.g., when the stop of the hook of the entry is lost, as the timeout
+   stops Unicorn too, so that the function is called, and a thread, that
+   is preempted there, continues, from the entry, or [addr] *)
+let trampoline e addr =
+  let base = if e.bytes = 8 then 0x7FFF_FFF0_0000L else 0xFFFF_0000L in
+  if Int64.(addr < base) || Hashtbl.mem e.trampolines addr then addr
+  else
+    let entry =
+      Int64.(base + ((addr - base) / trampoline_size * trampoline_size))
+    in
+    if Hashtbl.mem e.trampolines entry then entry else addr
+
 (* the name of the function at the address, which Unicorn calls *)
 let function_name e addr =
+  let addr = trampoline e addr in
   match Hashtbl.find e.trampolines addr with
   | Some name -> Some name
   | None -> Hashtbl.find e.session.names addr
@@ -3708,7 +3727,7 @@ module Make (Machine : Primus.Machine.S) = struct
     (* the thread, that runs, is preempted at [pc], see [loop] *)
     let preempt e pc =
       let* st = Machine.Local.get threads in
-      let* pc = branch_of_slot e pc in
+      let* pc = branch_of_slot e (trampoline e pc) in
       let* parked = park e ~next:pc ~wait:Ready st in
       switch e ~parked st >>| function Some pc -> pc | None -> pc
 
@@ -5146,7 +5165,10 @@ module Make (Machine : Primus.Machine.S) = struct
       let paused = Stdlib.Sys.time () in
       serve pc >>= fun pc ->
       s.sliced_at <- s.sliced_at +. (Stdlib.Sys.time () -. paused);
-      s.resumed <- true;
+      (* the program, that paused elsewhere, e.g., after a stub, whose
+         call a hook saw, didn't skip a hook, so it may be preempted *)
+      s.resumed <- Option.equal Int64.equal s.hooked_at (Some pc);
+      s.hooked_at <- None;
       loop pc)
     else
       check_pages e >>= fun () ->
@@ -5188,6 +5210,9 @@ module Make (Machine : Primus.Machine.S) = struct
                the instruction, at which it paused, which the hooks saw,
                and is preempted after it *)
             let count = Option.some_if (expired && resumed) 1 in
+            (* the one instruction runs without the timeout, whose stop
+               would race with the stops of the hooks *)
+            let deadline = if Option.is_some count then None else deadline in
             let error = start_uc ?count e pc deadline in
             let* () = account () in
             (* the taint, that the engine changed, goes to Primus, before
@@ -5207,6 +5232,7 @@ module Make (Machine : Primus.Machine.S) = struct
             | None, None when Option.is_some remaining -> loop pc
             | Some Returned, _ | None, None -> pull e
             | Some (Foreign addr), _ -> (
+                let addr = trampoline e addr in
                 match
                   Option.bind (function_name e addr) ~f:(call_returns e)
                 with
@@ -5221,7 +5247,10 @@ module Make (Machine : Primus.Machine.S) = struct
                         native e addr >>= function
                         | Some pc -> loop pc
                         | None -> call_foreign e addr >>= loop)))
-            | Some (Pause | Interrupted), _ -> loop pc
+            | Some Pause, _ ->
+                s.hooked_at <- Some pc;
+                loop pc
+            | Some Interrupted, _ -> loop pc
             | Some (Observe _), _ ->
                 let* () =
                   Machine.Observation.observed Primus.Interpreter.pc_change
