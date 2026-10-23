@@ -79,6 +79,12 @@ val mem_regions : t -> (int64 * int64 * Perm.t) list
 
 (** {2 Registers} *)
 
+val set_unmapped : t -> string -> Bap.Std.word -> unit
+(** [set_unmapped t name x] sets the register [name] of BAP, that Unicorn
+    hasn't, e.g., the base of a segment of x86, in the protected mode, which the
+    lifted engine reads, as the semantics of BAP do, and which Unicorn reads
+    from the descriptor of the segment. Unicorn ignores it. *)
+
 val regs : arch -> (string * int) list
 val reg : arch -> string -> int option
 val reg_size : t -> int -> int

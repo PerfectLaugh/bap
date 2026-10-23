@@ -72,6 +72,9 @@ let mem_regions = function
   | Unicorn u -> Uc.mem_regions u
   | Lifted l -> L.mem_regions l
 
+let set_unmapped t name x =
+  match t with Unicorn _ -> () | Lifted l -> L.set_unmapped l name x
+
 let regs = Uc.regs
 let reg = Uc.reg
 

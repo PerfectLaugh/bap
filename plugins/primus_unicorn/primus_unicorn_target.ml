@@ -446,6 +446,8 @@ module Segments = struct
   let set uc name base =
     match (entry name, Uc.reg X86 "GDTR") with
     | Some (index, selector), Some id -> (
+        (* the lifted engine reads the base, as the semantics of BAP do *)
+        Uc.set_unmapped uc name (Word.of_int64 ~width:32 base);
         if not (mapped uc) then begin
           Uc.mem_map uc gdt_base gdt_size Uc.Perm.(read + write);
           Uc.reg_write_bytes uc id gdtr;

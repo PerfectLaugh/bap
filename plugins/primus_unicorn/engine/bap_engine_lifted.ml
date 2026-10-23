@@ -102,6 +102,10 @@ exception Fault of Uc.access * int64
 (* the instruction, that the engine can't run *)
 exception Unsupported_insn of string
 
+(* the system call of the instruction, which interrupts the engine, as it
+   interrupts Unicorn, with the number of its interrupt *)
+exception Trap of int
+
 let page_size = 0x1000L
 let page_of addr = Int64.(addr land lnot (page_size - 1L))
 
@@ -870,6 +874,21 @@ let compile_intrinsic ctx tid : unit -> unit =
   let t = ctx.t in
   match t.config.name tid with
   | None -> unsupported_now ("a call of " ^ Tid.name tid)
+  | Some "intrinsic:interrupt" ->
+      (* int n of x86, whose interrupt is n *)
+      let n = read_var ctx (Var.create "intrinsic:x0" (Type.imm 8)) in
+      fun () -> raise (Trap (Int64.to_int_exn (bits (n ()))))
+  | Some ("intrinsic:syscall" | "intrinsic:svc" | "intrinsic:sysenter") ->
+      (* the interrupts of the system calls of Unicorn, after which its
+         program counter is the next instruction *)
+      let n =
+        match t.arch with
+        | Arm | Arm64 -> 2
+        | Mips -> 17
+        | Ppc | Riscv -> 8
+        | X86 -> -1
+      in
+      fun () -> raise (Trap n)
   | Some name -> (
       let short = String.chop_prefix_if_exists name ~prefix:"intrinsic:" in
       match F.intrinsic short with
@@ -932,7 +951,7 @@ let compile t ~pc ~next (blks : blk term list) : unit -> next =
   in
   let call c : unit -> next =
     match Call.target c with
-    | Direct tid when Option.is_none (index tid) ->
+    | Direct tid when Option.is_none (index tid) -> (
         let intrinsic = compile_intrinsic ctx tid in
         let return =
           match Call.return c with
@@ -940,8 +959,9 @@ let compile t ~pc ~next (blks : blk term list) : unit -> next =
           | None -> fun () -> Next
         in
         fun () ->
-          intrinsic ();
-          return ()
+          match intrinsic () with
+          | () -> return ()
+          | exception Trap n -> Interrupt_at (n, next))
     | Indirect exp ->
         let a = addr exp in
         fun () -> Jump (a ())
@@ -1060,14 +1080,20 @@ let jump t insn ~next a =
 
 let flush_tb t = Hashtbl.clear t.insns
 
+(* the hooks of the blocks, at the starts of the blocks, and then of the
+   instruction, in their order, but the ones after the hook, that stops
+   the emulation, as Unicorn calls them *)
 let code_hooks t pc size =
-  each t (fun h ->
+  let call f = if not t.stopped then f () in
+  if t.block then
+    List.iter t.hooks ~f:(fun h ->
+        match h.kind with
+        | Block f when (not h.deleted) && covers h pc ->
+            call (fun () -> f pc size)
+        | _ -> ());
+  List.iter t.hooks ~f:(fun h ->
       match h.kind with
-      | Code f when covers h pc -> f pc size
-      | Block f
-        when covers h pc
-             && not (Option.equal Int64.equal t.last_block (Some pc)) ->
-          f pc size
+      | Code f when (not h.deleted) && covers h pc -> call (fun () -> f pc size)
       | _ -> ())
 
 let stop t = t.stopped <- true
@@ -1232,6 +1258,8 @@ let start ?until ?timeout ?count t pc =
       if Option.is_some (Sys.getenv "BAP_LIFTED_STATS") then
         Printf.eprintf "lifted engine: %d run, %d unsupported, at %Lx\n%!" t.ran
           t.unsupported (reg_read t t.config.pc))
+
+let set_unmapped t name x = Hashtbl.set t.others ~key:name ~data:x
 
 (* the hook constructors *)
 

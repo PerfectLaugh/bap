@@ -43,6 +43,8 @@
 - adds `Primus.Lift.named`, the name of the instruction, that it lifts
 - records the traces of `Bap_emu.Trace` in the lifted engine too, into the rings of Unicorn, with `Bap_unicorn.Trace.Record`, and the cases `lifted/traces/TARGET` compare them with the ones of Unicorn
 - pushes the old value of the stack pointer, e.g., `push %rsp` of x86, which pushed the decremented one
+- runs the PC-relative instructions of the release 6 of MIPS in Unicorn, e.g., `lwpc`, whose decoding of QEMU raised the reserved instruction on the 64-bit hosts
+- runs the system calls, e.g., `syscall`, `svc`, and `int 0x80`, in the lifted engine, which interrupts, as Unicorn does, so that the programs with the threads run in it, and the hooks of a stop in the order of Unicorn
 - continues MIPS from the branch, whose delay slot Unicorn stopped in, and outside of a delay slot, after Primus interpreted, or another thread ran, as Unicorn keeps the pending branch
 - jumps, in `Primus.Interpreter.step`, to the address of the label, that the knowledge has, e.g., of a function of the program, that a stub replaced, and keeps the position of the interpreter at the subroutine of the instruction, after it runs
 - fixes the arena of the Lisp `malloc`, which didn't grow for the header of the chunk, that filled it
