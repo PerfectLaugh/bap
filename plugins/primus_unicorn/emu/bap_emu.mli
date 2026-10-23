@@ -512,6 +512,29 @@ val symbols : t -> (string * int64) list
 (** the names of the functions and their addresses, of the program and of
     {!add_symbol}, in the order of the addresses *)
 
+type import = {
+  slot : int64;  (** the address of the slot, e.g., of GOT *)
+  name : string;
+      (** the name of the function, which the loader resolved from the
+          relocation of the slot, e.g., from [.rela.plt] and [.dynsym] *)
+  value : int64 option;
+      (** the address, that the slot holds now, or [None], if it is not
+          readable, which {!function_at} names *)
+}
+
+val imports : t -> import list
+(** [imports emu] the slots of the external functions of the program, in the
+    order of their addresses, as the loader resolved them, and as the program
+    left them, e.g., after its own resolver wrote them, so that a script
+    compares them, between the runs, or with its own view of the relocations,
+    e.g., of a program, whose protector rewrote the tables of the dynamic
+    symbols. Raises [Invalid_argument], if the program is not paused. *)
+
+val function_at : t -> int64 -> string option
+(** [function_at emu addr] the name of the function at [addr], e.g., of the stub
+    of an external function, to which the slots of {!imports} refer, or of the
+    program, or of {!add_symbol} *)
+
 val unstub : t -> string -> unit
 (** [unstub emu name] runs the code of the function of the program in Unicorn
     again, instead of the stub, that replaced it, e.g., the Lisp stub of

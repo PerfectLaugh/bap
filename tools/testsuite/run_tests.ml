@@ -656,6 +656,18 @@ let emu data =
             ( "pauses the restored program",
               "paused at 400733\n.*\nhello\n.*exited 0" );
           ]);
+    (* the slots of the external functions, which the loader resolved,
+       refer to their stubs *)
+    case "emu/x86_64-linux-gnu-echo/imports" (fun env ->
+        let out =
+          script env "x86_64-linux-gnu-echo" (input "emu/imports/script.ml")
+        in
+        sequence env out
+          [
+            ("resolves strlen", "import strlen -> strlen\n");
+            ("resolves malloc", "import malloc -> malloc\n");
+          ];
+        lacks env "resolves all" out "-> \\?");
     (* the checkpoint keeps the memory, that the script changed, and the
        names, that it gave, which another run of bap loads *)
     case "emu/x86_64-linux-gnu-echo/checkpoint" (fun env ->

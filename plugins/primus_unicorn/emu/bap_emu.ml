@@ -1411,6 +1411,29 @@ let symbols t =
   |> List.sort ~compare:(fun (a, _) (b, _) -> Int64.compare a b)
   |> List.map ~f:(fun (addr, name) -> (name, addr))
 
+type import = { slot : int64; name : string; value : int64 option }
+
+(* the slots of the relocations of the external functions, which the
+   loader resolved, and the addresses, that they hold now *)
+let imports t =
+  let e = engine t in
+  let externals =
+    match t.session.recipe with Some (_, _, xs) -> xs | None -> []
+  in
+  let word slot =
+    match read t slot e.bytes with
+    | exception Invalid_argument _ -> None
+    | data ->
+        let bytes = if e.big_endian then data else String.rev data in
+        Some
+          (String.fold bytes ~init:0L ~f:(fun x c ->
+               Int64.((x lsl 8) lor of_int (Char.to_int c))))
+  in
+  List.map externals ~f:(fun (slot, name) -> { slot; name; value = word slot })
+  |> List.sort ~compare:(fun x y -> Int64.compare x.slot y.slot)
+
+let function_at t addr = X.function_name (engine t) addr
+
 (* the functions of the program, whose code runs again in Unicorn,
    instead of the stubs, that replaced them *)
 let unstub t name =
