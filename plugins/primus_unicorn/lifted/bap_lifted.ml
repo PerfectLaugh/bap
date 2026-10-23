@@ -51,6 +51,39 @@ type hook = {
   mutable deleted : bool;
 }
 
+(* the hooks by their kinds, and the pages of the hooks of the code and
+   of the blocks, if they are all ranged, which [hooks_changed] makes *)
+type by_kind = {
+  code : hook array;
+  blocks : hook array;
+  code_pages : Int64.Hash_set.t option;
+      (** the pages, that the hooks of the code, and of the blocks, cover, or
+          [None], if one of them covers too many *)
+  reads : hook array;  (** the hooks of the memory, that see the reads *)
+  writes : hook array;  (** the hooks of the memory, that see the writes *)
+  invalid_mem : hook array;
+  trace_code : hook array;
+  trace_mem : hook array;
+  interrupts : hook array;
+  invalid_insns : hook array;
+  unsupported_insns : hook array;
+}
+
+let no_hooks =
+  {
+    code = [||];
+    blocks = [||];
+    code_pages = Some (Int64.Hash_set.create ());
+    reads = [||];
+    writes = [||];
+    invalid_mem = [||];
+    trace_code = [||];
+    trace_mem = [||];
+    interrupts = [||];
+    invalid_insns = [||];
+    unsupported_insns = [||];
+  }
+
 (* the bytes of the pages are outside of the heap, as the blocks, that
    the JIT compiled, access them, see Bap_lifted_jit *)
 type page = {
@@ -187,10 +220,9 @@ type t = {
   pages : page Int64.Table.t;
   insns : insn Int64.Table.t;
   mutable hooks : hook list;
-  mutable checked : bool;
-      (** if a hook of the memory is, before which the reads are checked, see
-          [load_value], but not the writes, as Unicorn calls the hooks of the
-          writes before it checks them *)
+  mutable by_kind : by_kind;
+      (** the hooks, that aren't deleted, by their kinds, in their order, see
+          [hooks_changed], so that each event walks only its own hooks *)
   mutable stopped : bool;
   mutable closed : bool;
   mutable undo : (unit -> unit) list;
@@ -354,7 +386,7 @@ let create config arch mode =
       wrote_all = false;
       fresh = Int64.Table.create ();
       reads = [];
-      checked = false;
+      by_kind = no_hooks;
       ran = 0;
       linked = None;
       stale = [];
@@ -737,10 +769,53 @@ let unchain (j : jit) =
     | Compiled b -> b.chained <- false
     | Counting _ | Failed -> ())
 
+(* the ranges of the hooks of the code, that span at most this number of
+   pages, are indexed by their pages *)
+let max_hooked_pages = 64L
+
+let partition hooks =
+  let live = List.filter hooks ~f:(fun h -> not h.deleted) in
+  let only f = Array.of_list (List.filter live ~f:(fun h -> f h.kind)) in
+  let mem access = function
+    | Mem (accesses, _) ->
+        List.exists accesses ~f:(List.mem access ~equal:Poly.equal)
+    | _ -> false
+  in
+  let code = only (function Code _ -> true | _ -> false)
+  and blocks = only (function Block _ -> true | _ -> false) in
+  let code_pages =
+    let pages = Int64.Hash_set.create () in
+    Array.fold (Array.append code blocks) ~init:(Some pages) ~f:(fun acc h ->
+        match (acc, h.first, h.last) with
+        | Some pages, Some first, Some last
+          when Int64.(first <= last)
+               && Int64.(
+                    (page_of last - page_of first) / page_size
+                    <= max_hooked_pages) ->
+            let rec add page =
+              Hash_set.add pages page;
+              if Int64.(page < page_of last) then add Int64.(page + page_size)
+            in
+            add (page_of first);
+            Some pages
+        | _ -> None)
+  in
+  {
+    code;
+    blocks;
+    code_pages;
+    reads = only (mem [ Uc.Read; Read_after ]);
+    writes = only (mem [ Uc.Write ]);
+    invalid_mem = only (function Mem_invalid _ -> true | _ -> false);
+    trace_code = only (function Trace_code _ -> true | _ -> false);
+    trace_mem = only (function Trace_mem _ -> true | _ -> false);
+    interrupts = only (function Interrupt _ -> true | _ -> false);
+    invalid_insns = only (function Invalid_insn _ -> true | _ -> false);
+    unsupported_insns = only (function Unsupported _ -> true | _ -> false);
+  }
+
 let hooks_changed t =
-  t.checked <-
-    List.exists t.hooks ~f:(fun h ->
-        (not h.deleted) && match h.kind with Mem _ -> true | _ -> false);
+  t.by_kind <- partition t.hooks;
   Option.iter t.jit ~f:(fun j ->
       unchain j;
       j.gen <- j.gen + 1;
@@ -775,15 +850,25 @@ let covers h addr =
       Int64.(addr >= first && addr <= last)
   | _ -> true
 
-let each t f = List.iter t.hooks ~f:(fun h -> if not h.deleted then f h)
+(* the hooks of a kind, but the ones, that the hooks before them deleted *)
+let each hooks f = Array.iter hooks ~f:(fun h -> if not h.deleted then f h)
 
 let mem_hooks t access addr size value =
-  each t (fun h ->
+  let hooks =
+    match access with Uc.Write -> t.by_kind.writes | _ -> t.by_kind.reads
+  in
+  each hooks (fun h ->
       match h.kind with
       | Mem (accesses, f)
         when covers h addr && List.mem accesses access ~equal:Poly.equal ->
           f access addr size value
       | _ -> ())
+
+(* if a hook of the reads sees the access, before which the read is
+   checked, see [load_value], but not the writes, as Unicorn calls the
+   hooks of the writes before it checks them *)
+let reads_hooked t addr =
+  Array.exists t.by_kind.reads ~f:(fun h -> (not h.deleted) && covers h addr)
 
 (* The traces, that the engine records, as the native hooks of Unicorn
    record them, see [Uc.Trace]. *)
@@ -801,7 +886,7 @@ let ranges_array ranges =
    block, when its hooks run, though the engine extends the block with
    the instruction after them, so it is extended, and trimmed back *)
 let bound_running t ~regs ~mem ranges =
-  each t (fun h ->
+  each t.by_kind.trace_code (fun h ->
       match h.kind with
       | Trace_code tr ->
           let early = Uc.Trace.blocks tr && (not t.block) && not t.recorded in
@@ -829,7 +914,7 @@ let wrote_mem t addr size =
 let mark t =
   let mem = (not (List.is_empty t.wrote)) || t.wrote_all in
   if t.wrote_regs || mem then
-    each t (fun h ->
+    each t.by_kind.trace_code (fun h ->
         match h.kind with
         | Trace_code tr ->
             Record.bound tr t.wrote_regs mem false 0L
@@ -869,7 +954,7 @@ let trace_access t ~write addr size value old =
           Int64.(a + of_int n <= addr || addr + of_int size <= a))
   else if not again then t.reads <- read :: t.reads;
   if not again then
-    each t (fun h ->
+    each t.by_kind.trace_mem (fun h ->
         match h.kind with
         | Trace_mem tr when covers h addr ->
             Record.access tr write addr size value old t.current
@@ -878,7 +963,7 @@ let trace_access t ~write addr size value old =
 (* the instruction, that runs, in the traces of the code *)
 let trace_insn t pc size thumb =
   t.reads <- [];
-  each t (fun h ->
+  each t.by_kind.trace_code (fun h ->
       match h.kind with
       | Trace_code tr when covers h pc ->
           if Uc.Trace.blocks tr && not t.block then Record.extend tr size
@@ -889,14 +974,14 @@ let trace_insn t pc size thumb =
 
 (* the instruction, that didn't run, e.g., as it faulted *)
 let unrun t pc =
-  each t (fun h ->
+  each t.by_kind.trace_code (fun h ->
       match h.kind with Trace_code tr -> Record.unrun tr pc | _ -> ())
 
 (* the hooks of the invalid access, the access is retried, if one of them
    handled it, and else the instruction faults *)
 let invalid t access addr size value =
   let handled = ref false in
-  each t (fun h ->
+  each t.by_kind.invalid_mem (fun h ->
       match h.kind with
       | Mem_invalid (accesses, f)
         when (not !handled) && covers h addr
@@ -1123,7 +1208,7 @@ let load_value t stores addr endian size =
       (* the read faults before the hooks, as in Unicorn, so that they
          don't see it again, when the instruction runs again, though the
          write faults after them, see [write_stores] *)
-      if t.checked && not again then ignore (load t addr n : string);
+      if (not again) && reads_hooked t addr then ignore (load t addr n : string);
       if not again then mem_hooks t Read addr n 0L;
       let x = value_of_bytes endian (load t addr n) in
       if not again then mem_hooks t Read_after addr n (bits x);
@@ -2015,37 +2100,45 @@ let flush_tb t =
    instruction, in their order, but the ones after the hook, that stops
    the emulation, as Unicorn calls them *)
 let code_hooks t pc size =
-  let call f = if not t.stopped then f () in
-  if t.block then
-    List.iter t.hooks ~f:(fun h ->
+  let k = t.by_kind in
+  let unhooked =
+    match k.code_pages with
+    | Some pages -> not (Hash_set.mem pages (page_of pc))
+    | None -> false
+  in
+  if not unhooked then begin
+    let call f = if not t.stopped then f () in
+    if t.block then
+      each k.blocks (fun h ->
+          match h.kind with
+          | Block f when covers h pc -> call (fun () -> f pc size)
+          | _ -> ());
+    each k.code (fun h ->
         match h.kind with
-        | Block f when (not h.deleted) && covers h pc ->
-            call (fun () -> f pc size)
-        | _ -> ());
-  List.iter t.hooks ~f:(fun h ->
-      match h.kind with
-      | Code f when (not h.deleted) && covers h pc -> call (fun () -> f pc size)
-      | _ -> ())
+        | Code f when covers h pc -> call (fun () -> f pc size)
+        | _ -> ())
+  end
 
 let stop t = t.stopped <- true
 
 let unsupported t pc =
   t.unsupported <- t.unsupported + 1;
-  each t (fun h ->
+  each t.by_kind.unsupported_insns (fun h ->
       match h.kind with Unsupported f when covers h pc -> f pc | _ -> ());
   (* the instruction is never run here *)
   t.stopped <- true
 
 let invalid_insn t =
   let handled = ref false in
-  each t (fun h ->
+  each t.by_kind.invalid_insns (fun h ->
       match h.kind with
       | Invalid_insn f when not !handled -> handled := f ()
       | _ -> ());
   !handled
 
 let interrupt t n =
-  each t (fun h -> match h.kind with Interrupt f -> f n | _ -> ())
+  each t.by_kind.interrupts (fun h ->
+      match h.kind with Interrupt f -> f n | _ -> ())
 
 let fault_error (access : Uc.access) =
   match access with
@@ -2087,11 +2180,12 @@ let verbose () =
   Option.equal String.equal (Sys.getenv "BAP_LIFTED_STATS") (Some "verbose")
 
 let hooked ?(blocks = false) t addr =
-  List.exists t.hooks ~f:(fun h ->
-      match h.kind with
-      | Code _ -> (not h.deleted) && covers h addr
-      | Block _ when blocks -> (not h.deleted) && covers h addr
-      | _ -> false)
+  let k = t.by_kind in
+  let covering = Array.exists ~f:(fun h -> (not h.deleted) && covers h addr) in
+  (match k.code_pages with
+    | Some pages -> Hash_set.mem pages (page_of addr)
+    | None -> true)
+  && (covering k.code || (blocks && covering k.blocks))
 
 (* the instructions, that may be in the block at [pc], whose bytes are
    fetched only from the executable pages, as the hooks of the invalid
@@ -2582,7 +2676,7 @@ let start ?until ?timeout ?count t pc =
                  fails, which Unicorn skips, without its hooks, and its
                  records, but in the size of the block *)
               set_itstate t (advance_it (itstate t));
-              each t (fun h ->
+              each t.by_kind.trace_code (fun h ->
                   match h.kind with
                   | Trace_code tr when Uc.Trace.blocks tr && not t.block ->
                       Record.extend tr insn.size
