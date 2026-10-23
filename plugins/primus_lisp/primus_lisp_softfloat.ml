@@ -484,3 +484,108 @@ let%test_module _ =
       Z.equal one Z.(logor (shift_left (of_int 16383) 64) (shift_left one 63))
       && of64 (convert p f80 f64 Rne (add p f80 Rne one one ~sub:false)) = 2.
   end)
+
+(* the policy of [ieee754-op], see ieee754-intrinsics.lisp: the bit 0, the
+   negative default NaN, the bit 1, the canonical NaNs, the bit 2, the
+   first NaN operand, and the bits 4 and 5, the invalid integers *)
+let policy_of_int policy =
+  {
+    default_negative = policy land 1 <> 0;
+    canonical = policy land 2 <> 0;
+    first = policy land 4 <> 0;
+    invalid_int =
+      (match (policy lsr 4) land 3 with
+      | 1 -> `Indefinite
+      | 2 -> `Saturate_max
+      | 3 -> `Saturate_min
+      | _ -> `Saturate_zero);
+  }
+
+let rmode_of_int = function
+  | 1 -> Rtz
+  | 2 -> Rtp
+  | 3 -> Rtn
+  | 4 -> Rna
+  | _ -> Rne
+
+(* the operation [op] of [ieee754-op], whose operands are of [src] bits,
+   and the result of [dst] bits, a boolean of 1 bit, or [None] *)
+let apply ~op ~rm ~src ~dst policy args =
+  match (format src, format dst) with
+  | exception _ -> None
+  | fsrc, fdst -> (
+      let fmt = function Some f -> f | None -> raise Not_found in
+      let mask width x = Z.logand x (Z.pred (Z.shift_left Z.one width)) in
+      let word x = Some (mask dst x) in
+      let bool b = Some (if b then Z.one else Z.zero) in
+      try
+        match (op, args) with
+        | 1, [ x; y ] -> word (add policy (fmt fsrc) rm x y ~sub:false)
+        | 2, [ x; y ] -> word (add policy (fmt fsrc) rm x y ~sub:true)
+        | 3, [ x; y ] -> word (mul policy (fmt fsrc) rm x y)
+        | 4, [ x; y ] -> word (div policy (fmt fsrc) rm x y)
+        | 5, [ x ] -> word (sqrt policy (fmt fsrc) rm x)
+        | 6, [ x ] -> word (round_integral policy (fmt fsrc) rm x)
+        | 7, [ x ] -> word (convert policy (fmt fsrc) (fmt fdst) rm x)
+        | 8, [ x ] -> word (of_int (fmt fdst) rm ~signed:false ~width:src x)
+        | 9, [ x ] -> word (of_int (fmt fdst) rm ~signed:true ~width:src x)
+        | 10, [ x ] ->
+            word (to_int policy (fmt fsrc) rm ~signed:false ~width:dst x)
+        | 11, [ x ] ->
+            word (to_int policy (fmt fsrc) rm ~signed:true ~width:dst x)
+        | 12, [ x; y ] -> bool (less (fmt fsrc) x y)
+        | 13, [ x ] -> bool (is_nan (fmt fsrc) x)
+        | 14, [ x ] -> bool (is_inf (fmt fsrc) x)
+        | 15, [ x; y; z ] -> word (fma policy (fmt fsrc) rm x y z)
+        | _ -> None
+      with Not_found -> None)
+
+(* the operations of the intrinsics, see ieee754-intrinsics.py *)
+let ops =
+  [
+    ("fadd", 1);
+    ("fsub", 2);
+    ("fmul", 3);
+    ("fdiv", 4);
+    ("fsqrt", 5);
+    ("fround", 6);
+    ("fconvert", 7);
+    ("cast_float", 8);
+    ("cast_sfloat", 9);
+    ("cast_int", 10);
+    ("cast_sint", 11);
+    ("forder", 12);
+    ("is_nan", 13);
+    ("is_inf", 14);
+    ("fmad", 15);
+  ]
+
+let rmodes = [ ("rne", 0); ("rtz", 1); ("rtp", 2); ("rtn", 3); ("rna", 4) ]
+
+(* the intrinsic, e.g., fadd_rtz_ieee754_binary_32, or
+   cast_int_rne_ieee754_binary_64_32, as its operation, its rounding
+   mode, and the sizes of its operands and of its result *)
+let intrinsic name =
+  match Core.String.substr_index name ~pattern:"ieee754_binary_" with
+  | None -> None
+  | Some i -> (
+      let prefix = Core.String.prefix name i in
+      let sizes =
+        Core.String.drop_prefix name (i + Core.String.length "ieee754_binary_")
+        |> Core.String.split ~on:'_'
+        |> Core.List.map ~f:Core.Int.of_string_opt
+      in
+      let prefix = Core.String.chop_suffix_if_exists prefix ~suffix:"_" in
+      let op, rm =
+        match Core.String.rsplit2 prefix ~on:'_' with
+        | Some (op, rm)
+          when Core.List.Assoc.mem rmodes rm ~equal:Core.String.equal ->
+            (op, Core.List.Assoc.find_exn rmodes rm ~equal:Core.String.equal)
+        | _ -> (prefix, 0)
+      in
+      match (Core.List.Assoc.find ops op ~equal:Core.String.equal, sizes) with
+      | Some op, [ Some src ] ->
+          let dst = if op >= 12 && op <= 14 then 1 else src in
+          Some (op, rm, src, dst)
+      | Some op, [ Some src; Some dst ] -> Some (op, rm, src, dst)
+      | _ -> None)

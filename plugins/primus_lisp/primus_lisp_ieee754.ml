@@ -122,67 +122,15 @@ module Primitives (Machine : Primus.Machine.S) = struct
       let run = function
         | op :: rm :: src :: dst :: policy :: args -> (
             let op = int op and src = int src and dst = int dst in
-            let policy = int policy in
-            let rm =
-              match int rm with
-              | 1 -> F.Rtz
-              | 2 -> F.Rtp
-              | 3 -> F.Rtn
-              | 4 -> F.Rna
-              | _ -> F.Rne
-            in
-            let policy =
-              {
-                F.default_negative = policy land 1 <> 0;
-                canonical = policy land 2 <> 0;
-                first = policy land 4 <> 0;
-                invalid_int =
-                  (match (policy lsr 4) land 3 with
-                  | 1 -> `Indefinite
-                  | 2 -> `Saturate_max
-                  | 3 -> `Saturate_min
-                  | _ -> `Saturate_zero);
-              }
-            in
-            let fmt n =
-              match F.format n with
-              | Some f -> f
-              | None -> invalid_argf "ieee754-op: no binary%d format" n ()
-            in
+            let rm = F.rmode_of_int (int rm) in
+            let policy = F.policy_of_int (int policy) in
             let args = List.map args ~f:z in
-            let word width x =
-              Value.of_word
-                (Word.create
-                   (Bitvec.bigint_unsafe
-                      (Z.logand x (Z.pred (Z.shift_left Z.one width))))
-                   width)
-            in
-            let bool b = Value.of_word (Word.of_bool b) in
-            match (op, args) with
-            | 1, [ x; y ] -> word dst (F.add policy (fmt src) rm x y ~sub:false)
-            | 2, [ x; y ] -> word dst (F.add policy (fmt src) rm x y ~sub:true)
-            | 3, [ x; y ] -> word dst (F.mul policy (fmt src) rm x y)
-            | 4, [ x; y ] -> word dst (F.div policy (fmt src) rm x y)
-            | 5, [ x ] -> word dst (F.sqrt policy (fmt src) rm x)
-            | 6, [ x ] -> word dst (F.round_integral policy (fmt src) rm x)
-            | 7, [ x ] -> word dst (F.convert policy (fmt src) (fmt dst) rm x)
-            | 8, [ x ] ->
-                word dst (F.of_int (fmt dst) rm ~signed:false ~width:src x)
-            | 9, [ x ] ->
-                word dst (F.of_int (fmt dst) rm ~signed:true ~width:src x)
-            | 10, [ x ] ->
-                word dst
-                  (F.to_int policy (fmt src) rm ~signed:false ~width:dst x)
-            | 11, [ x ] ->
-                word dst
-                  (F.to_int policy (fmt src) rm ~signed:true ~width:dst x)
-            | 12, [ x; y ] -> bool (F.less (fmt src) x y)
-            | 13, [ x ] -> bool (F.is_nan (fmt src) x)
-            | 14, [ x ] -> bool (F.is_inf (fmt src) x)
-            | 15, [ x; y; z ] -> word dst (F.fma policy (fmt src) rm x y z)
-            | _ ->
-                Lisp.failf "ieee754-op: the operation %d with %d operands" op
-                  (List.length args) ())
+            match F.apply ~op ~rm ~src ~dst policy args with
+            | Some x -> Value.of_word (Word.create (Bitvec.bigint_unsafe x) dst)
+            | None ->
+                Lisp.failf
+                  "ieee754-op: the operation %d with %d operands of binary%d" op
+                  (List.length args) src ())
         | _ -> Lisp.failf "ieee754-op: expects OP RMODE FROM TO POLICY X ..." ()
     end in
     Lisp.define "ieee754-op"
