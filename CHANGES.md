@@ -37,6 +37,10 @@
 - reads and writes the carry of PowerPC, CA of XER, in Unicorn, as the patch of libunicorn called the functions of the other target, i.e., of the 64-bit or the 32-bit PowerPC, and saturates the conversions of PowerPC to the integers, e.g., fctiwz, as the Power ISA does
 - runs again the instruction, whose store to a page, that Unicorn hasn't yet, or that is read-only, is in a helper of Unicorn, e.g., fstpt of x86, which dropped the store
 - loads the release 6 of MIPS, e.g., mipsisa32r6, from the flags of ELF, as its targets, whose FPU is 64-bit, decodes it, and runs it in Unicorn on its CPUs, whose compact branches have no delay slots
+- runs the native code in an engine of `Bap_engine`, Unicorn, or, with `--primus-unicorn-engine=lifted`, the lifted engine, which runs the semantics of the instructions, that BAP lifts, compiled to the closures, and the intrinsics of the floats, and interprets in Primus the instructions, that it can't run, and `Bap_emu.create ~lifted`, and the cases `lifted/TARGET/N`, which check it against Unicorn, instruction by instruction, on every target
+- keeps the changes to Unicorn as the files of an overlay of its sources, see plugins/primus_unicorn/libunicorn/overlay/README.md
+- locates the aliases of the registers, e.g., D0 of V0 of AArch64, through their origins, also in Unicorn, whose registers of their own share the bits
+- adds `Primus.Lift.named`, the name of the instruction, that it lifts
 - continues MIPS from the branch, whose delay slot Unicorn stopped in, and outside of a delay slot, after Primus interpreted, or another thread ran, as Unicorn keeps the pending branch
 - jumps, in `Primus.Interpreter.step`, to the address of the label, that the knowledge has, e.g., of a function of the program, that a stub replaced, and keeps the position of the interpreter at the subroutine of the instruction, after it runs
 - fixes the arena of the Lisp `malloc`, which didn't grow for the header of the chunk, that filled it

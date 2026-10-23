@@ -13,7 +13,7 @@
   bap-c
   bap-core-theory
   bap-primus
-  bap-primus-unicorn.unicorn
+  bap-primus-unicorn.engine
   bitvec
   core
   monads))

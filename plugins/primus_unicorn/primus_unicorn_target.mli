@@ -3,11 +3,11 @@
 open Bap_core_theory
 open Bap.Std
 
-val engine : Theory.Target.t -> (Bap_unicorn.arch * Bap_unicorn.Mode.t) option
+val engine : Theory.Target.t -> (Bap_engine.arch * Bap_engine.Mode.t) option
 (** [engine target] the architecture and mode of Unicorn that runs the code of
     [target], if Unicorn supports it. *)
 
-val pc : Bap_unicorn.arch -> Bap_unicorn.Mode.t -> int
+val pc : Bap_engine.arch -> Bap_engine.Mode.t -> int
 (** [pc arch mode] the program counter of Unicorn. *)
 
 (** The registers of BAP in the registers of Unicorn.
@@ -19,7 +19,7 @@ val pc : Bap_unicorn.arch -> Bap_unicorn.Mode.t -> int
 module Regs : sig
   type t
 
-  val create : Theory.Target.t -> Bap_unicorn.arch -> Bap_unicorn.t -> t
+  val create : Theory.Target.t -> Bap_engine.arch -> Bap_engine.t -> t
   (** [create target arch uc] maps the registers of [target] to the registers of
       [uc]. *)
 
@@ -52,6 +52,10 @@ module Regs : sig
 
   val names : t -> string list
   (** the names of the registers that have counterparts *)
+
+  val locate : t -> string -> (int * int * int) option
+  (** [locate t name] the register of the engine, the lowest of its bits, and
+      their number, of the register [name] of BAP. *)
 end
 
 (** the bases of the segments of x86 in the protected mode, e.g., of FS, in the
@@ -61,11 +65,11 @@ module Segments : sig
   val is_base : string -> bool
   (** [is_base name] if [name] is a base register, e.g., FS_BASE *)
 
-  val get : Bap_unicorn.t -> string -> string
+  val get : Bap_engine.t -> string -> string
   (** [get uc name] the base of the segment of the base register [name], in its
       4 little-endian bytes, which are zero, if Unicorn has no descriptor *)
 
-  val set : Bap_unicorn.t -> string -> int64 -> bool
+  val set : Bap_engine.t -> string -> int64 -> bool
   (** [set uc name base] the segment of the base register [name] has the [base],
       [false], if [name] is not a base register *)
 end

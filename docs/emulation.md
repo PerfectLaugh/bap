@@ -35,6 +35,19 @@ The options of the Unicorn executor:
 | `--primus-unicorn-checkpoint=FILE` and `--primus-unicorn-checkpoint-at=ADDR\|NAME` | save the state of the machine to `FILE`, when the code at the address first runs; the machine then continues |
 | `--primus-unicorn-restore=FILE` | continues from a saved checkpoint, instead of the entry point |
 | `--primus-unicorn-native-stubs=NAME,...` | runs these functions of libc on the state of Unicorn, instead of their Lisp stubs |
+| `--primus-unicorn-engine=unicorn\|lifted` | the engine of the native code, see below |
+
+### The engines
+
+The native code runs in an engine: `unicorn`, the CPU emulator, by default, or `lifted`, which runs the semantics of the instructions, that BAP lifts, so that the program runs as the lifters see it. The lifted engine compiles each instruction, once, to the closures, and runs the intrinsics of the floats natively, as Primus Lisp runs them. The instructions, that it can't run, e.g., the system calls, or the traps, are interpreted in Primus. It runs about a million instructions per second, and has no traces, see `Emu.Trace`, yet.
+
+```bash
+bap ./prog --passes=run --primus-unicorn-engine=lifted
+```
+
+`BAP_LIFTED_STATS=1` prints the numbers of the instructions, that the lifted engine ran, and couldn't run, and `BAP_LIFTED_STATS=verbose` the ones, that it couldn't run, and why. The cases `lifted/TARGET/N` of the testsuite check the lifted engine against Unicorn, instruction by instruction, and `BAP_TESTSUITE_ENGINE=lifted` runs the other cases in it.
+
+The changes of BAP to Unicorn, e.g., the restarted stores of its helpers, are the files of `plugins/primus_unicorn/libunicorn/overlay`, see its README.
 
 `--run-components=NAME,...` adds components to the system, e.g., the debugger or the taint tracker:
 
@@ -354,6 +367,8 @@ let b = Emu.create (Bap_script.project arm_file) in
 ignore (Emu.step a);
 ignore (Emu.step b)
 ```
+
+`Emu.create ~lifted:true` runs the program in the lifted engine, e.g., beside the same program in Unicorn, as `lifted/check.ml` of the testsuite compares them.
 
 The script runs one of them at a time. `Emu.knowledge emu` returns the knowledge of a system after its program ended, e.g., the instructions that it lifted.
 

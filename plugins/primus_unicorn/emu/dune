@@ -11,7 +11,7 @@
   bap-primus
   bap-primus-unicorn.plugin
   bap-primus-lisp.plugin
-  bap-primus-unicorn.unicorn
+  bap-primus-unicorn.engine
   bap-primus-symbolic-executor.symbolic
   bap-taint
   core))

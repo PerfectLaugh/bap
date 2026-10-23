@@ -2736,6 +2736,17 @@ module Std : sig
           toplevel one, outside of a machine, as {!Make.insn} lifts it, but
           without its cache. *)
 
+      val named :
+        ?encoding:Theory.language ->
+        project ->
+        int64 ->
+        string ->
+        (int * string * blk term list) option knowledge
+      (** [named project addr code] the size, the name, e.g., [tBLXi] of
+          LLVM, and the IR of the instruction, as {!instruction}.
+
+          @since 3.0.0 *)
+
       (** [Make(Machine)] lifts the instructions in the knowledge of the system,
           that runs the machine, see {!Machine.S.knowledge}, which caches them,
           so that the systems, e.g., the emulators of a script, have their own

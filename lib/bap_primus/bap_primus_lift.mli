@@ -10,6 +10,13 @@ val instruction :
   string ->
   (int * blk term list) option KB.t
 
+val named :
+  ?encoding:Theory.language ->
+  project ->
+  int64 ->
+  string ->
+  (int * string * blk term list) option KB.t
+
 module Make (Machine : Bap_primus_types.Machine) : sig
   val insn :
     ?disassembled_only:bool ->

@@ -60,6 +60,7 @@ val create :
   ?envp:string list ->
   ?entry:string ->
   ?restore:string ->
+  ?lifted:bool ->
   project ->
   t
 (** [create project] starts the program of [project], from [entry], by default
@@ -75,7 +76,11 @@ val create :
     the system, before the program starts.
 
     With [restore] the program continues from the checkpoint in the file, see
-    {!save}, instead of the [entry], and pauses before its address. *)
+    {!save}, instead of the [entry], and pauses before its address.
+
+    If [lifted], by default [--primus-unicorn-engine=lifted], the native code
+    runs in the lifted engine, see [Bap_engine], which runs the semantics of the
+    instructions, that BAP lifts, rather than in Unicorn. *)
 
 val run : ?until:int64 -> t -> status
 (** [run emu] continues the program, until it pauses, e.g., before the

@@ -5,7 +5,7 @@ open Bap_primus.Std
 module X = Bap_primus_unicorn_plugin.Primus_unicorn_executor
 module Native = Bap_primus_unicorn_plugin.Primus_unicorn_native
 module Target = Bap_primus_unicorn_plugin.Primus_unicorn_target
-module Uc = Bap_unicorn
+module Uc = Bap_engine
 module Io = Primus_lisp_library_plugin.Primus_lisp_io
 
 type status = Paused | Running | Exited of int option | Failed of string
@@ -158,7 +158,7 @@ let lifts proj =
    The system gets the session of the emulator with its project, see
    [X.with_session] *)
 let create ?(system = "bap:unicorn-executor") ?(components = []) ?(init = [])
-    ?(redirects = []) ?(args = []) ?(envp = []) ?entry ?restore proj =
+    ?(redirects = []) ?(args = []) ?(envp = []) ?entry ?restore ?lifted proj =
   let init =
     init @ if List.is_empty redirects then [] else [ Io.redirect redirects ]
   in
@@ -188,7 +188,7 @@ let create ?(system = "bap:unicorn-executor") ?(components = []) ?(init = [])
   in
   let program = Option.value (Project.get proj filename) ~default:"a.out" in
   let session =
-    X.create_session ?restore:(Option.map restore ~f:Option.return) ()
+    X.create_session ?restore:(Option.map restore ~f:Option.return) ?lifted ()
   in
   session.driven <- true;
   session.pause <- true;

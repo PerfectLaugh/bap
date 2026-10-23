@@ -1871,7 +1871,9 @@ let emu_targets data =
 (* the semantics of the lifters, that lifters/check.ml compares with
    Unicorn, on the instructions of lifters/TARGET.insns, one of each
    mnemonic of the corpus of testsuite/src/corpus, whose results agree,
-   in the parts of 32 instructions, which run in parallel *)
+   in the parts of 32 instructions, which run in parallel, interpreted by
+   Primus, in the cases lifters/TARGET/N, and run by the lifted engine,
+   in the cases lifted/TARGET/N *)
 let lifters data =
   let targets =
     [
@@ -1895,36 +1897,43 @@ let lifters data =
     | [] -> []
     | part -> part :: parts (List.filteri (fun i _ -> i >= 32) lines)
   in
+  (* the lifted engine, see Bap_engine, runs the instructions, rather than
+     Primus, in the cases lifted/TARGET/N *)
   List.concat_map
-    (fun (target, bin, args) ->
-      let insns = input ("lifters/" ^ target ^ ".insns") in
-      In_channel.with_open_text insns In_channel.input_lines
-      |> List.filter (fun l ->
-          match String.index_opt l '#' with
-          | Some i -> String.trim (String.sub l 0 i) <> ""
-          | None -> String.trim l <> "")
-      |> parts
-      |> List.mapi (fun n part ->
-          case
-            (Printf.sprintf "lifters/%s/%d" target (n + 1))
-            (fun env ->
-              let insns = write env "insns" (String.concat "\n" part ^ "\n") in
-              let out =
-                bap ~timeout:300. env
-                  ([
-                     "script";
-                     input "lifters/check.ml";
-                     path data ("bin/" ^ bin);
-                     insns;
-                     "runs=2";
-                   ]
-                  @ args)
-              in
-              lacks env "the results differ" out "DIFF ";
-              has env "agrees with Unicorn" out
-                (Printf.sprintf "checked %d instructions, 0 differ"
-                   (List.length part)))))
-    targets
+    (fun (kind, engine) ->
+      List.concat_map
+        (fun (target, bin, args) ->
+          let insns = input ("lifters/" ^ target ^ ".insns") in
+          In_channel.with_open_text insns In_channel.input_lines
+          |> List.filter (fun l ->
+              match String.index_opt l '#' with
+              | Some i -> String.trim (String.sub l 0 i) <> ""
+              | None -> String.trim l <> "")
+          |> parts
+          |> List.mapi (fun n part ->
+              case
+                (Printf.sprintf "%s/%s/%d" kind target (n + 1))
+                (fun env ->
+                  let insns =
+                    write env "insns" (String.concat "\n" part ^ "\n")
+                  in
+                  let out =
+                    bap ~timeout:300. env
+                      ([
+                         "script";
+                         input "lifters/check.ml";
+                         path data ("bin/" ^ bin);
+                         insns;
+                         "runs=2";
+                       ]
+                      @ args @ engine)
+                  in
+                  lacks env "the results differ" out "DIFF ";
+                  has env "agrees with Unicorn" out
+                    (Printf.sprintf "checked %d instructions, 0 differ"
+                       (List.length part)))))
+        targets)
+    [ ("lifters", []); ("lifted", [ "engine=lifted" ]) ]
 
 (* the loaders: the sections of PE without the contents, e.g., .bss, are
    zero-filled segments, and the data objects, that the programs import,

@@ -19,7 +19,6 @@
 7c 04 10 20  # bitswap	$2, $4
 00 80 10 50  # clz	$2, $4
 00 80 10 51  # clo	$2, $4
-ec 48 00 40  # lwpc	$2, 256
 7c 82 04 36  # ll	$2, 8($4)
 c8 00 00 10  # bc	64
 e8 00 00 10  # balc	64
@@ -128,3 +127,5 @@ f8 80 00 10  # bnezc	$4, 64
 #   pc fffffffe / ffffffff
 # 00 80 04 09  # jr.hb	$4
 #   pc 7ed57d78 / 7ed57d79
+# ec 48 00 40  # lwpc	$2, 256
+#   Unicorn: an unhandled interrupt 20, its CPU of the release 6 has no PC-relative loads

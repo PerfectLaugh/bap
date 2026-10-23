@@ -1,7 +1,7 @@
 open Core
 open Bap_core_theory
 open Bap.Std
-module Uc = Bap_unicorn
+module Uc = Bap_engine
 
 let is_in root target =
   List.exists (target :: Theory.Target.parents target) ~f:(fun t ->
@@ -137,7 +137,7 @@ let parts ~bits : Uc.arch -> (string * part) list = function
   | Mips ->
       ("R0", Skip)
       :: ("USERLOCAL", Reg "CP0_USERLOCAL")
-      (* the condition codes of the FPU are the bits 23, and 25 to 31, of
+         (* the condition codes of the FPU are the bits 23, and 25 to 31, of
          FCSR *)
       :: ("FCC0", Bit ("FCSR", 23))
       :: numbered "FCC" ~first:1 7 (fun n -> Bit ("FCSR", 24 + n))
@@ -244,31 +244,39 @@ module Regs = struct
       | Some (Bits (r, lo, width)) -> whole uc arch r ~lo ~width
       | Some Same | None -> whole uc arch name ~lo:0 ~width
     in
+    (* an alias is a part of its origin, e.g., D0 of V0 of AArch64, which
+       Unicorn has as the registers of their own, that share the bits, so
+       that the engines, that have the registers by their identifiers,
+       e.g., the lifted one, see the same bits *)
+    let origin v width =
+      match Theory.Target.unalias target v with
+      | None -> None
+      | Some origin -> (
+          match Theory.Origin.cast_sub origin with
+          | None -> None
+          | Some sub ->
+              let base = Theory.Origin.reg sub in
+              let lo = Theory.Origin.lo sub in
+              let bits = Theory.Bitv.size (Theory.Var.sort base) in
+              Option.bind
+                (basis (Theory.Var.name base) bits)
+                ~f:(fun loc ->
+                  if loc.lo = 0 && lo + width <= loc.width then
+                    Some { loc with lo; width }
+                  else None))
+    in
     let locate v =
       let name = Theory.Var.name v in
       match width_of_var v with
       | None -> None
       | Some width -> (
-          match basis name width with
-          | Some loc -> Some loc
-          | None when Map.mem parts name -> None
-          | None -> (
-              (* an alias is a part of its origin *)
-              match Theory.Target.unalias target v with
-              | None -> None
-              | Some origin -> (
-                  match Theory.Origin.cast_sub origin with
-                  | None -> None
-                  | Some sub ->
-                      let base = Theory.Origin.reg sub in
-                      let lo = Theory.Origin.lo sub in
-                      let bits = Theory.Bitv.size (Theory.Var.sort base) in
-                      Option.bind
-                        (basis (Theory.Var.name base) bits)
-                        ~f:(fun loc ->
-                          if loc.lo = 0 && lo + width <= loc.width then
-                            Some { loc with lo; width }
-                          else None))))
+          match origin v width with
+          | Some loc when not (Map.mem parts name) -> Some loc
+          | _ -> (
+              match basis name width with
+              | Some loc -> Some loc
+              | None when Map.mem parts name -> None
+              | None -> origin v width))
     in
     let locs, unmapped =
       Set.fold regs ~init:(String.Map.empty, []) ~f:(fun (locs, unmapped) v ->
@@ -359,6 +367,10 @@ module Regs = struct
         true
 
   let names t = Map.keys t.locs
+
+  let locate t name =
+    Option.map (Map.find t.locs name) ~f:(fun { id; lo; width; _ } ->
+        (id, lo, width))
 end
 
 (* The bases of the segments of x86 in the protected mode, e.g., of FS,

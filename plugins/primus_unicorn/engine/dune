@@ -1,0 +1,8 @@
+; The engines, that run the native code, see bap_engine.mli.
+
+(library
+ (name bap_engine)
+ (public_name bap-primus-unicorn.engine)
+ (modules bap_engine bap_engine_lifted)
+ (private_modules bap_engine_lifted)
+ (libraries bap bap-primus bap-primus-lisp.plugin bap-primus-unicorn.unicorn core zarith))

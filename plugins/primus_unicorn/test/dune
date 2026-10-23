@@ -11,6 +11,7 @@
   bap-powerpc
   bap-primus-unicorn.plugin
   bap-primus-unicorn.unicorn
+  bap-primus-unicorn.engine
   bap-riscv
   bap-x86
   core))

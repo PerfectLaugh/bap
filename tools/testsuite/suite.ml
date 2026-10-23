@@ -64,9 +64,13 @@ let variables env =
     (* the messages are plain text *)
     ("TERM", "dumb");
   ]
+  @ (match !lisp_cache with
+    | Some dir -> [ ("BAP_PRIMUS_LISP_CACHE", dir) ]
+    | None -> [])
   @
-  match !lisp_cache with
-  | Some dir -> [ ("BAP_PRIMUS_LISP_CACHE", dir) ]
+  (* the engine, that runs the native code, see BAP_TESTSUITE_ENGINE *)
+  match Sys.getenv_opt "BAP_TESTSUITE_ENGINE" with
+  | Some engine -> [ ("BAP_PRIMUS_UNICORN_ENGINE", engine) ]
   | None -> []
 
 (* the environment of the commands, without the variables of BAP, e.g.,

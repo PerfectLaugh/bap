@@ -9,8 +9,10 @@
 ;
 ; and select the cases whose names contain one of the words of BAP_TESTS,
 ; e.g., BAP_TESTS="taint mc/" dune build @testsuite. The cases run in 16
-; threads, OUNIT_SHARDS sets their number, and BAP_TESTSUITE_WORK keeps
-; the outputs of the failed cases in its directory. Run
+; threads, OUNIT_SHARDS sets their number, BAP_TESTSUITE_WORK keeps
+; the outputs of the failed cases in its directory, and
+; BAP_TESTSUITE_ENGINE=lifted runs the native code in the lifted engine,
+; rather than in Unicorn, see --primus-unicorn-engine. Run
 ;
 ;   dune build @install && dune exec -- tools/testsuite/run.exe -help
 ;

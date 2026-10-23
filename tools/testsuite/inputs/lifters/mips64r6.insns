@@ -19,7 +19,6 @@
 7c 04 10 20  # bitswap	$2, $4
 00 80 10 50  # clz	$2, $4
 00 80 10 51  # clo	$2, $4
-ec 48 00 40  # lwpc	$2, 256
 7c 82 04 36  # ll	$2, 8($4)
 c8 00 00 10  # bc	64
 e8 00 00 10  # balc	64
@@ -128,8 +127,6 @@ f8 80 00 10  # bnezc	$4, 64
 7c 04 10 24  # dbitswap	$2, $4
 00 80 10 52  # dclz	$2, $4
 00 80 10 53  # dclo	$2, $4
-ec 50 00 40  # lwupc	$2, 256
-ec 58 00 20  # ldpc	$2, 256
 7c 82 04 37  # lld	$2, 8($4)
 
 # the instructions, whose results differ, as Unicorn or the checker
@@ -145,3 +142,9 @@ ec 58 00 20  # ldpc	$2, 256
 #   R2 0 / 1; memory at 3ffe1148
 # 7c 82 04 27  # scd	$2, 8($4)
 #   R2 0 / 1; memory at 3ffe1778
+# ec 48 00 40  # lwpc	$2, 256
+#   Unicorn: an unhandled interrupt 20, its CPU of the release 6 has no PC-relative loads
+# ec 50 00 40  # lwupc	$2, 256
+#   Unicorn: an unhandled interrupt 20, its CPU of the release 6 has no PC-relative loads
+# ec 58 00 20  # ldpc	$2, 256
+#   Unicorn: an unhandled interrupt 20, its CPU of the release 6 has no PC-relative loads

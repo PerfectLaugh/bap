@@ -46,6 +46,17 @@ let restore =
        that called it completes, if it is known, e.g., __libc_start_main exits \
        with the result of main, as the code of the stubs is not saved."
 
+let engine : [ `Unicorn | `Lifted ] Extension.Configuration.param =
+  Extension.Configuration.parameter
+    Extension.Type.(
+      enum [ ("unicorn", `Unicorn); ("lifted", `Lifted) ] =? `Unicorn)
+    "engine"
+    ~doc:
+      "The engine, that runs the native code: $(b,unicorn), the CPU emulator, \
+       or $(b,lifted), which runs the semantics of the instructions, that BAP \
+       lifts, and interprets in Primus the instructions, that it can't run, \
+       e.g., whose semantics call the intrinsics."
+
 let native_stubs =
   let module Native = Bap_primus_unicorn_plugin.Primus_unicorn_native in
   Extension.Configuration.parameter
@@ -70,6 +81,8 @@ let () =
   let module Executor = Bap_primus_unicorn_plugin.Primus_unicorn_executor in
   Executor.timeout := Extension.Configuration.get ctxt timeout;
   Executor.restore := Extension.Configuration.get ctxt restore;
+  Executor.lifted :=
+    Poly.equal (Extension.Configuration.get ctxt engine) `Lifted;
   let module Native = Bap_primus_unicorn_plugin.Primus_unicorn_native in
   let natives =
     List.filter

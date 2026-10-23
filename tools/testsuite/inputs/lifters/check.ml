@@ -9,13 +9,17 @@
    status, e.g., of a fault, are compared:
 
      bap script check.ml PROGRAM INSNS [thumb] [r6] [api=DIR] [seed=N]
-       [runs=N] [flags=all]
+       [runs=N] [flags=all] [engine=lifted]
 
    where PROGRAM is a program of the target, whose entry the
    instructions overwrite, and INSNS the file of the instructions, a line
    of their bytes in hex each, e.g., "48 01 d8", in the order of the
    memory, optionally followed by a comment after #. It prints the
-   instructions, whose results differ, with their registers. *)
+   instructions, whose results differ, with their registers.
+
+   With engine=lifted, the instructions run in the lifted engine, see
+   Bap_engine, rather than in Primus, from the same state in an emulator
+   of their own, so that the engine is checked against Unicorn. *)
 
 module Emu = Bap_emu
 open Bap.Std
@@ -197,10 +201,22 @@ let capture emu buf size status =
   in
   { status; pc; regs; buffer }
 
+let engine = opt "engine" "" = "lifted"
+
 let () =
   let emu =
     Emu.create ~components:Emu.Taint.components
       (Bap_script.project ~api ~disassemble:true file)
+  in
+  let other =
+    if engine then
+      let other =
+        Emu.create ~lifted:true ~components:Emu.Taint.components
+          (Bap_script.project ~api ~disassemble:true file)
+      in
+      (* the state, from which each instruction starts, as it may fault *)
+      Some (other, Emu.snapshot other)
+    else None
   in
   let entry = Int64.logand (Emu.pc emu) (Int64.lognot 1L) in
   let size = 0x4000 in
@@ -232,29 +248,35 @@ let () =
         (* the state, from which the instruction runs both times, with
            the nops after it, e.g., in the delay slot of MIPS, rather
            than the bytes of the previous instruction *)
-        Emu.write emu entry (code ^ nops);
-        Emu.write emu buf (String.init size (fun _ -> Char.chr (Random.int 256)));
-        List.iter
-          (fun r ->
-            match Emu.reg_word emu r with
-            | exception Invalid_argument _ -> ()
-            | w ->
-                let width = Word.bitwidth w in
-                let x =
-                  if pointers && List.mem r gprs then
-                    Word.of_int64 ~width
-                      (Int64.add buf
-                         (Int64.of_int (0x1000 + (16 * Random.int 128))))
-                  else random_word width
-                in
-                Emu.set_reg_word emu r x)
-          (gprs @ others);
-        Emu.set_reg emu sp (Int64.add buf 0x2000L);
-        Emu.set_pc emu (if thumb then Int64.logor entry 1L else entry);
+        let data = String.init size (fun _ -> Char.chr (Random.int 256)) in
+        let regs =
+          List.filter_map
+            (fun r ->
+              match Emu.reg_word emu r with
+              | exception Invalid_argument _ -> None
+              | w ->
+                  let width = Word.bitwidth w in
+                  Some
+                    ( r,
+                      if pointers && List.mem r gprs then
+                        Word.of_int64 ~width
+                          (Int64.add buf
+                             (Int64.of_int (0x1000 + (16 * Random.int 128))))
+                      else random_word width ))
+            (gprs @ others)
+        in
+        let prepare emu =
+          Emu.write emu entry (code ^ nops);
+          Emu.write emu buf data;
+          List.iter (fun (r, x) -> Emu.set_reg_word emu r x) regs;
+          Emu.set_reg emu sp (Int64.add buf 0x2000L);
+          Emu.set_pc emu (if thumb then Int64.logor entry 1L else entry)
+        in
+        prepare emu;
         let snapshot = Emu.snapshot emu in
         (* the step, that stopped at the instruction, as it faulted on a
            page, that Unicorn copies, continues *)
-        let status =
+        let step emu =
           match Emu.step emu with
           | Paused
             when Int64.equal
@@ -267,8 +289,15 @@ let () =
               Emu.step emu
           | status -> status
         in
-        let native = capture emu buf size (status_name status) in
+        let native = capture emu buf size (status_name (step emu)) in
         Emu.restore emu snapshot;
+        let lifted =
+          match other with
+          | Some (other, start) ->
+              Emu.restore other start;
+              prepare other;
+              capture other buf size (status_name (step other))
+          | None ->
         let status =
           match Emu.interpret emu with
           (* the branch of MIPS, that is not taken, runs its delay slot
@@ -279,6 +308,8 @@ let () =
         in
         let lifted = capture emu buf size (status_name status) in
         Emu.restore emu snapshot;
+        lifted
+        in
         let unchecked =
           String.starts_with ~prefix:"failed Unicorn: an invalid instruction"
             native.status

@@ -30,7 +30,7 @@ open Core
 open Bap_core_theory
 open Bap.Std
 open Bap_primus.Std
-module Uc = Bap_unicorn
+module Uc = Bap_engine
 module Target = Primus_unicorn_target
 module Checkpoint = Primus_unicorn_checkpoint
 module Native = Primus_unicorn_native
@@ -259,6 +259,14 @@ and session = {
           [Primus.Interpreter.Stops], whose copy the hooks see *)
   mutable stepping : bool;
   stop_addrs : Int64.Hash_set.t;
+  lifted : bool;
+      (** the machines run in the lifted engine, see [Bap_engine], rather than
+          in Unicorn *)
+  mutable lifter :
+    ((thumb:bool -> int64 -> string -> (int * string * blk term list) option)
+    * (tid -> string option))
+    option;
+      (** lifts the instructions for the lifted engine, see [lifter] *)
   mutable driven : bool;
       (** the script drives the machines, see [Bap_emu], which pause, when
           [pause] is set *)
@@ -298,9 +306,12 @@ let timeout : float option ref = ref None
 let checkpoint : (string * string) option ref = ref None
 let restore : string option ref = ref None
 let native_stubs : String.Set.t ref = ref (String.Set.of_list Native.names)
+let lifted : bool ref = ref false
 
-let create_session ?(restore = !restore) () =
+let create_session ?(restore = !restore) ?(lifted = !lifted) () =
   {
+    lifted;
+    lifter = None;
     active = None;
     recipe = None;
     parked = Id.Table.create ();
@@ -839,12 +850,141 @@ let sync_stops e =
     Uc.flush_tb e.uc
   end
 
+(* if the instruction of MIPS is a branch or a jump, which has a delay
+   slot, by its encoding: J, JAL, BEQ, BNE, BLEZ, BGTZ, and their likely
+   forms, the branches of REGIMM, e.g., BLTZ and BGEZAL, JR and JALR of
+   SPECIAL, and BC1 of COP1. The release 6 has no likely forms, its
+   compact branches, e.g., BEQC of the former opcodes of BLEZL, or of
+   BLEZ, whose rt isn't 0, have no delay slots, and its BC1EQZ and
+   BC1NEZ have *)
+let mips_delayed ~r6 word =
+  let op = Int64.(to_int_exn ((word lsr 26) land 0x3FL)) in
+  let rs = Int64.(to_int_exn ((word lsr 21) land 0x1FL)) in
+  let rt = Int64.(to_int_exn ((word lsr 16) land 0x1FL)) in
+  let funct = Int64.(to_int_exn (word land 0x3FL)) in
+  match op with
+  | 0x02 | 0x03 | 0x04 | 0x05 -> true
+  | 0x06 | 0x07 -> (not r6) || rt = 0
+  | 0x14 | 0x15 | 0x16 | 0x17 -> not r6
+  | 0x01 ->
+      List.mem
+        (if r6 then [ 0x00; 0x01; 0x10; 0x11 ]
+         else [ 0x00; 0x01; 0x02; 0x03; 0x10; 0x11; 0x12; 0x13 ])
+        rt ~equal:Int.equal
+  | 0x00 -> funct = 0x08 || funct = 0x09
+  | 0x11 -> if r6 then rs = 0x09 || rs = 0x0D else rs = 0x08
+  | _ -> false
+
+(* if the branch of MIPS, which has a delay slot, is likely, whose delay
+   slot runs only if it is taken: BEQL, BNEL, BLEZL, BGTZL, the likely
+   branches of REGIMM, and BC1FL and BC1TL, the release 6 has none *)
+let mips_likely ~r6 word =
+  let op = Int64.(to_int_exn ((word lsr 26) land 0x3FL)) in
+  let rs = Int64.(to_int_exn ((word lsr 21) land 0x1FL)) in
+  let rt = Int64.(to_int_exn ((word lsr 16) land 0x1FL)) in
+  (not r6)
+  &&
+  match op with
+  | 0x14 | 0x15 | 0x16 | 0x17 -> true
+  | 0x01 -> List.mem [ 0x02; 0x03; 0x12; 0x13 ] rt ~equal:Int.equal
+  | 0x11 -> rs = 0x08 && rt land 2 <> 0
+  | _ -> false
+
+(* if the instruction of the release 6 of MIPS is a conditional compact
+   branch, whose forbidden slot, the next instruction, runs only if it
+   isn't taken: of POP06, POP07, POP26, and POP27, whose rt isn't 0, or
+   of POP10 and POP30, or BEQZC and BNEZC, whose rs isn't 0 *)
+let mips_compact word =
+  let op = Int64.(to_int_exn ((word lsr 26) land 0x3FL)) in
+  let rs = Int64.(to_int_exn ((word lsr 21) land 0x1FL)) in
+  let rt = Int64.(to_int_exn ((word lsr 16) land 0x1FL)) in
+  match op with
+  | 0x06 | 0x07 | 0x16 | 0x17 -> rt <> 0
+  | 0x08 | 0x18 -> true
+  | 0x36 | 0x3E -> rs <> 0
+  | _ -> false
+
 (* the targets of the release 6 of MIPS, by their nicknames, see
    Bap_mips_target *)
 let mips_r6 target =
   List.exists
     [ "mipsisa32r6"; "mipsisa32r6el"; "mipsisa64r6"; "mipsisa64r6el" ]
     ~f:(Theory.Target.matches target)
+
+(* lifts the instruction for the lifted engine, outside of the machine,
+   in the knowledge, that starts from the toplevel one, and keeps the
+   semantics, e.g., the Primus Lisp program of x86, as Bap_emu lifts the
+   instructions in the hooks *)
+let lifter ~arm project =
+  let state = ref None in
+  let names = Tid.Table.create () in
+  (* the names of the labels, that the instruction calls, e.g., of the
+     intrinsics, @intrinsic:fadd_rne_ieee754_binary_64, in the knowledge
+     of the lifter *)
+  let called blks =
+    List.iter blks ~f:(fun blk ->
+        Term.enum jmp_t blk
+        |> Seq.iter ~f:(fun jmp ->
+            match Jmp.kind jmp with
+            | Call call -> (
+                match Call.target call with
+                | Direct tid -> (
+                    match String.chop_prefix (Tid.name tid) ~prefix:"@" with
+                    | Some name -> Hashtbl.set names ~key:tid ~data:name
+                    | None -> ())
+                | Indirect _ -> ())
+            | _ -> ()))
+  in
+  let lift ~thumb addr code =
+    let toplevel = Toplevel.current () in
+    let result = ref None in
+    Toplevel.set (Option.value !state ~default:toplevel);
+    Exn.protect
+      ~finally:(fun () ->
+        state := Some (Toplevel.current ());
+        Toplevel.set toplevel)
+      ~f:(fun () ->
+        try
+          Toplevel.exec
+            KB.Syntax.(
+              Primus.Lift.named
+                ?encoding:
+                  (if arm then Primus.Interworking.encoding ~thumb else None)
+                project addr code
+              >>| fun insn ->
+              result := insn;
+              Option.iter insn ~f:(fun (_, _, blks) -> called blks))
+        with _ -> ());
+    !result
+  in
+  (lift, Hashtbl.find names)
+
+(* the NaNs and the invalid integers of the target, as ieee754-policy of
+   ieee754-intrinsics.lisp *)
+let ieee754_policy target =
+  if Theory.Target.matches target "x86" then 0x15
+  else if Theory.Target.matches target "riscv" then 0x22
+  else if Theory.Target.matches target "powerpc-family" then 0x34
+  else if Theory.Target.matches target "mips-family" then 0x20
+  else 0
+
+(* the delay slots of the branches, of MIPS, by their encodings *)
+let delay_of target (arch : Uc.arch) =
+  let r6 = mips_r6 target in
+  let big = Theory.Endianness.(equal eb) (Theory.Target.endianness target) in
+  fun code ->
+    match arch with
+    | Mips when String.length code >= 4 ->
+        let word =
+          List.init 4 ~f:(fun i -> Char.to_int code.[if big then i else 3 - i])
+          |> List.fold ~init:0L ~f:(fun acc b ->
+              Int64.((acc lsl 8) lor of_int b))
+        in
+        if mips_likely ~r6 word then `Likely
+        else if mips_delayed ~r6 word then `Delayed
+        else if r6 && mips_compact word then `Forbidden
+        else `None
+    | _ -> `None
 
 let create session target ~foreign ~externals =
   let arch, mode =
@@ -853,7 +993,27 @@ let create session target ~foreign ~externals =
     | None ->
         failf "the target %s is not supported" (Theory.Target.to_string target)
   in
-  let uc = Uc.create arch mode in
+  (* the registers of BAP, that the lifted engine runs, are located, when
+     the engine is created, see [regs] *)
+  let locate = ref (fun _ -> None) in
+  let uc =
+    match session.lifter with
+    | Some (lift, name) when session.lifted ->
+        Uc.create_lifted
+          {
+            lift;
+            name;
+            policy = ieee754_policy target;
+            delay = delay_of target arch;
+            locate = (fun name -> !locate name);
+            pc = Target.pc arch mode;
+            big_endian =
+              Theory.Endianness.(equal eb) (Theory.Target.endianness target);
+            bits = Theory.Target.bits target;
+          }
+          arch mode
+    | _ -> Uc.create arch mode
+  in
   (* the default CPU of AArch64, Cortex-A72, is ARMv8.0, which has no LSE
      atomics of ARMv8.1, e.g., ldadd and cas, that the programs compiled
      for the later ones, or with outline atomics, run; the maximum one has
@@ -898,6 +1058,7 @@ let create session target ~foreign ~externals =
           Uc.reg_write uc fpexc 0x40000000L)
   | _ -> ());
   let regs = Target.Regs.create target arch uc in
+  (locate := fun name -> Target.Regs.locate regs name);
   let sp =
     match reg_of_role target Theory.Role.Register.stack_pointer with
     | Some sp -> sp
@@ -1017,6 +1178,8 @@ let create session target ~foreign ~externals =
   @@ Uc.on_invalid_insn uc (fun () ->
       e.reason <- Some Invalid;
       false);
+  (* the instruction, that the lifted engine can't run, is interpreted *)
+  ignore @@ Uc.on_unsupported uc (fun addr -> e.reason <- Some (Interpret addr));
   List.iter (List.rev session.engine_hooks) ~f:(fun install -> install e);
   e
 
@@ -2466,31 +2629,6 @@ module Make (Machine : Primus.Machine.S) = struct
         in
         Hashtbl.set e.accesses ~key:addr ~data:access;
         access
-
-  (* if the instruction of MIPS is a branch or a jump, which has a delay
-     slot, by its encoding: J, JAL, BEQ, BNE, BLEZ, BGTZ, and their likely
-     forms, the branches of REGIMM, e.g., BLTZ and BGEZAL, JR and JALR of
-     SPECIAL, and BC1 of COP1. The release 6 has no likely forms, its
-     compact branches, e.g., BEQC of the former opcodes of BLEZL, or of
-     BLEZ, whose rt isn't 0, have no delay slots, and its BC1EQZ and
-     BC1NEZ have *)
-  let mips_delayed ~r6 word =
-    let op = Int64.(to_int_exn ((word lsr 26) land 0x3FL)) in
-    let rs = Int64.(to_int_exn ((word lsr 21) land 0x1FL)) in
-    let rt = Int64.(to_int_exn ((word lsr 16) land 0x1FL)) in
-    let funct = Int64.(to_int_exn (word land 0x3FL)) in
-    match op with
-    | 0x02 | 0x03 | 0x04 | 0x05 -> true
-    | 0x06 | 0x07 -> (not r6) || rt = 0
-    | 0x14 | 0x15 | 0x16 | 0x17 -> not r6
-    | 0x01 ->
-        List.mem
-          (if r6 then [ 0x00; 0x01; 0x10; 0x11 ]
-           else [ 0x00; 0x01; 0x02; 0x03; 0x10; 0x11; 0x12; 0x13 ])
-          rt ~equal:Int.equal
-    | 0x00 -> funct = 0x08 || funct = 0x09
-    | 0x11 -> if r6 then rs = 0x09 || rs = 0x0D else rs = 0x08
-    | _ -> false
 
   let word_of_insn e data =
     String.foldi data ~init:0L ~f:(fun i acc c ->
@@ -4917,6 +5055,19 @@ module Loader (Machine : Primus.Machine.S) = struct
     s.active <- None;
     let* externals = externals s in
     s.recipe <- Some (target, foreign, externals);
+    let* () =
+      if s.lifted && Option.is_none s.lifter then
+        Machine.get () >>| fun proj ->
+        s.lifter <-
+          Some
+            (lifter
+               ~arm:
+                 (Poly.equal
+                    (Option.map (Target.engine (Project.target proj)) ~f:fst)
+                    (Some Uc.Arm))
+               proj)
+      else Machine.return ()
+    in
     match create s target ~foreign ~externals with
     | exception Unsupported msg -> Machine.raise (Unicorn_failure msg)
     | e ->
