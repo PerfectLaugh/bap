@@ -1,0 +1,16 @@
+worker sees R12 = 1234
+worker(1) = 1, R12 back true
+Bap_emu.call: Unicorn: the target has no register NOPE
+diff 2035d8+1 205698+8 2156b8+8
+since the checkpoint 2035d8+1 205698+8 2156b8+8
+2035d8 stored
+205698 stored
+2156b8 stored
+the stack generated, the code mapped, nowhere unmapped
+the stack, that was read, generated
+paused in the thread 2, with 2,1,3,4,5
+worker sees R12 = 0
+worker sees R12 = 4
+worker sees R12 = 1
+R12 back true
+Bap_emu.call: Unicorn: the program has no thread 9

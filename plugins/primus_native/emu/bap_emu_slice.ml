@@ -38,6 +38,7 @@ let union a b =
 let is_subset a ~of_ =
   Set.is_subset a.regs ~of_:of_.regs && Set.is_subset a.bytes ~of_:of_.bytes
 
+let equal_state a b = is_subset a ~of_:b && is_subset b ~of_:a
 let is_empty { regs; bytes } = Set.is_empty regs && Set.is_empty bytes
 
 let range byte n =
@@ -46,6 +47,13 @@ let range byte n =
       | Byte.Const a -> Byte.Const Int64.(a + of_int i)
       | Slot (b, off) -> Slot (b, Int64.(off + of_int i)))
   |> Set.of_list (module Byte)
+
+let is_const = function Byte.Const _ -> true | Slot _ -> false
+
+(* the bytes of the memory, that a function passes to its callees, and
+   gets back, as the slots of its frame are its own *)
+let consts s = { s with bytes = Set.filter s.bytes ~f:is_const }
+let slots s = { s with bytes = Set.filter s.bytes ~f:(Fn.non is_const) }
 
 (* the register of the target, by its name, or the one, that it is an
    alias of, e.g., R0 for X0 of AArch64, as the variables of BIR *)
@@ -226,6 +234,8 @@ let leaves j =
   | Call c -> Option.is_none (Call.return c)
   | Goto _ | Int _ -> false
 
+let has_exit blk = Term.enum jmp_t blk |> Seq.exists ~f:leaves
+
 (* the sub of the program, that has the instruction at [addr], and the
    block and the indices of the terms of the instruction *)
 let find proj addr =
@@ -246,25 +256,39 @@ let find proj addr =
           | Some first, Some last -> Some (sub, blk, first, last)
           | _ -> None))
 
-let slice ?(forward = false) ?(addresses = false) proj addr locations =
+let slice ?(forward = false) ?(addresses = false) ?(depth = 0) proj addr
+    locations =
   match find proj addr with
   | None -> invalid_argf "Bap_emu.Static.slice: no instruction at %Lx" addr ()
   | Some (sub, start, first, last) ->
       let target = Project.target proj in
       let bases = bases target in
       let args, results = abi target in
-      let folded = Bap_emu_fold.(defs (fold sub)) in
-      let rhs d =
-        Option.value (Hashtbl.find folded (Term.tid d)) ~default:(Def.rhs d)
-      in
       let uses = uses ~bases ~addresses in
       let stores = stores ~bases in
-      let cfg = Sub.to_cfg sub in
+      let prog = Project.program proj in
+      (* the subs, by their tids, which the direct calls name *)
+      let subs = Tid.Table.create () in
+      Term.enum sub_t prog
+      |> Seq.iter ~f:(fun sub -> Hashtbl.set subs ~key:(Term.tid sub) ~data:sub);
+      let callee c =
+        match Call.target c with
+        | Direct tid -> Hashtbl.find subs tid
+        | Indirect _ -> None
+      in
+      (* the folded defs of the subs, once each *)
+      let folded = Tid.Table.create () in
+      let rhs sub =
+        let table =
+          Hashtbl.find_or_add folded (Term.tid sub) ~default:(fun () ->
+              Bap_emu_fold.(defs (fold sub)))
+        in
+        fun d ->
+          Option.value (Hashtbl.find table (Term.tid d)) ~default:(Def.rhs d)
+      in
       let sites = Int64.Hash_set.create () in
       let calls = Int64.Hash_set.create () in
       let complete = ref true in
-      let boundary = ref empty in
-      let seen = Tid.Table.create () in
       let site blk t = Option.map (site blk t) ~f:int64_of_word in
       let mark blk t = Option.iter (site blk t) ~f:(Hash_set.add sites) in
       let mark_call blk t =
@@ -331,166 +355,244 @@ let slice ?(forward = false) ?(addresses = false) proj addr locations =
             in
             { s with bytes = Set.union kept aliases }
       in
-      (* backward: the live locations before the item, from those after it *)
-      let step_back blk s = function
-        | Jmp j -> (
-            match Jmp.kind j with
-            | Call c
-              when Option.is_some (Call.return c) && intersects s.regs results
-              ->
-                mark_call blk (Jmp j);
-                { s with regs = Set.diff s.regs results }
-            | _ -> s)
-        | Def d -> (
-            let v = Def.lhs d in
-            match Var.typ v with
-            | Mem _ ->
-                List.fold
-                  (List.rev (stores (rhs d)))
-                  ~init:s
-                  ~f:(fun s st ->
-                    match st.addr with
-                    | Known byte ->
-                        let hit = Set.inter s.bytes (range byte st.size) in
-                        if Set.is_empty hit then s
-                        else begin
-                          mark blk (Def d);
-                          let u = uses st.value in
-                          let u =
-                            if addresses then join u (uses st.index) else u
-                          in
-                          if u.unknown then complete := false;
-                          union { s with bytes = Set.diff s.bytes hit } u.read
-                        end
-                    | Unknown ->
-                        if not (Set.is_empty s.bytes) then complete := false;
-                        s)
-            | _ ->
-                let n = name v in
-                let s =
-                  if Set.mem s.regs n then begin
-                    mark blk (Def d);
-                    let u = uses (rhs d) in
-                    if u.unknown then complete := false;
-                    union { s with regs = Set.remove s.regs n } u.read
-                  end
-                  else s
-                in
-                if Set.mem bases n then
-                  rekey_back s n (address_of ~bases (rhs d))
-                else s)
-      in
-      (* forward: the tainted locations after the item, from those before it *)
-      let step_forth blk s = function
-        | Jmp j -> (
-            let u = uses (Jmp.cond j) in
-            let u =
-              match Jmp.kind j with
-              | Goto (Indirect e) | Ret (Indirect e) -> join u (uses e)
-              | Call c -> (
-                  match Call.target c with
-                  | Indirect e -> join u (uses e)
-                  | Direct _ -> u)
-              | Goto (Direct _) | Ret (Direct _) | Int _ -> u
-            in
-            if tainted s u then mark blk (Jmp j);
-            match Jmp.kind j with
-            | Call c when Option.is_some (Call.return c) || not (leaves j) ->
-                (* the arguments flow to the callee, which defines the
-                   results, when it returns *)
-                if intersects s.regs args then mark_call blk (Jmp j);
-                { s with regs = Set.diff s.regs results }
-            | Call c -> (
-                (* a tail call, unless it is a return *)
-                match Call.target c with
-                | Direct _ ->
-                    if intersects s.regs args then mark_call blk (Jmp j);
-                    s
-                | Indirect _ -> s)
-            | _ -> s)
-        | Def d -> (
-            let v = Def.lhs d in
-            match Var.typ v with
-            | Mem _ ->
-                List.fold
-                  (stores (rhs d))
-                  ~init:s
-                  ~f:(fun s st ->
-                    let u = uses st.value in
-                    let u = if addresses then join u (uses st.index) else u in
-                    let from = tainted s u in
-                    if u.unknown && not (Set.is_empty s.bytes) then
-                      complete := false;
-                    match st.addr with
-                    | Known byte ->
-                        let bytes = range byte st.size in
-                        if from then begin
-                          mark blk (Def d);
-                          { s with bytes = Set.union s.bytes bytes }
-                        end
-                        else { s with bytes = Set.diff s.bytes bytes }
-                    | Unknown ->
-                        if from then begin
-                          mark blk (Def d);
-                          complete := false
-                        end;
-                        s)
-            | _ ->
-                let u = uses (rhs d) in
-                let n = name v in
-                if u.unknown && not (Set.is_empty s.bytes) then
-                  complete := false;
-                let s =
-                  if tainted s u then begin
-                    mark blk (Def d);
-                    { s with regs = Set.add s.regs n }
-                  end
-                  else { s with regs = Set.remove s.regs n }
-                in
-                if Set.mem bases n then
-                  rekey_forth s n (address_of ~bases (rhs d))
-                else s)
-      in
-      let node blk = Graphs.Ir.Node.create blk in
-      let next blk =
-        (if forward then Graphs.Ir.Node.succs else Graphs.Ir.Node.preds)
-          (node blk) cfg
-        |> Seq.map ~f:Graphs.Ir.Node.label
-        |> Seq.to_list
-      in
-      let is_exit blk =
-        List.is_empty (next blk)
-        || (forward && Term.enum jmp_t blk |> Seq.exists ~f:leaves)
-      in
-      (* the items of the block, from the position, in the direction *)
-      let run blk ~from s =
-        let ts = items blk in
-        let ts =
-          if forward then List.drop ts from else List.rev (List.take ts from)
+      (* the summaries of the callees, by their seeds, as the calls repeat *)
+      let summaries = Tid.Table.create () in
+      (* The locations, that flow to the [seed], backward, or from it,
+         forward, over the [sub], from the positions, [starts], in the
+         blocks, to its boundary, the entry, or the exits, whose state is
+         the result, and through the callees, up to the [depth], whose
+         summaries stand for the calls. *)
+      let rec analyze ~depth sub ~starts seed =
+        let rhs = rhs sub in
+        let cfg = Sub.to_cfg sub in
+        let boundary = ref empty in
+        let seen = Tid.Table.create () in
+        (* the callee runs with the state, and gives the state after it,
+           or [None], if it isn't followed *)
+        let follow blk t c s =
+          match callee c with
+          | Some callee when depth > 0 -> (
+              let seed = consts s in
+              let starts =
+                if forward then
+                  Option.to_list (Term.first blk_t callee)
+                  |> List.map ~f:(fun b -> (b, 0))
+                else
+                  Term.enum blk_t callee |> Seq.to_list
+                  |> List.filter ~f:has_exit
+                  |> List.map ~f:(fun b -> (b, List.length (items b)))
+              in
+              match starts with
+              | [] -> None
+              | _ ->
+                  mark_call blk t;
+                  let out =
+                    match
+                      Hashtbl.find_multi summaries (Term.tid callee)
+                      |> List.find ~f:(fun (seed', _) -> equal_state seed seed')
+                    with
+                    | Some (_, out) -> out
+                    | None ->
+                        let out =
+                          analyze ~depth:(depth - 1) callee ~starts seed
+                        in
+                        Hashtbl.add_multi summaries ~key:(Term.tid callee)
+                          ~data:(seed, out);
+                        out
+                  in
+                  Some (union (slots s) (consts out)))
+          | _ -> None
         in
-        List.fold ts ~init:s
-          ~f:(if forward then step_forth blk else step_back blk)
-      in
-      let rec visit blk ~from s =
-        if not (is_empty s) then begin
-          let s' = run blk ~from s in
-          if is_exit blk then boundary := union !boundary s';
-          List.iter (next blk) ~f:(fun b -> arrive b s')
-        end
-      and arrive blk s =
-        let tid = Term.tid blk in
-        let known = Option.value (Hashtbl.find seen tid) ~default:empty in
-        if not (is_subset s ~of_:known) then begin
-          let s = union known s in
-          Hashtbl.set seen ~key:tid ~data:s;
-          visit blk ~from:(if forward then 0 else List.length (items blk)) s
-        end
+        (* backward: the live locations before the item, from those after
+           it *)
+        let step_back blk s = function
+          | Jmp j -> (
+              match Jmp.kind j with
+              | Call c
+                when Option.is_some (Call.return c) && intersects s.regs results
+                -> (
+                  let live = Set.inter s.regs results in
+                  let s = { s with regs = Set.diff s.regs results } in
+                  match follow blk (Jmp j) c { s with regs = live } with
+                  | Some s' -> s'
+                  | None ->
+                      mark_call blk (Jmp j);
+                      s)
+              | _ -> s)
+          | Def d -> (
+              let v = Def.lhs d in
+              match Var.typ v with
+              | Mem _ ->
+                  List.fold
+                    (List.rev (stores (rhs d)))
+                    ~init:s
+                    ~f:(fun s st ->
+                      match st.addr with
+                      | Known byte ->
+                          let hit = Set.inter s.bytes (range byte st.size) in
+                          if Set.is_empty hit then s
+                          else begin
+                            mark blk (Def d);
+                            let u = uses st.value in
+                            let u =
+                              if addresses then join u (uses st.index) else u
+                            in
+                            if u.unknown then complete := false;
+                            union { s with bytes = Set.diff s.bytes hit } u.read
+                          end
+                      | Unknown ->
+                          if not (Set.is_empty s.bytes) then complete := false;
+                          s)
+              | _ ->
+                  let n = name v in
+                  let s =
+                    if Set.mem s.regs n then begin
+                      mark blk (Def d);
+                      let u = uses (rhs d) in
+                      if u.unknown then complete := false;
+                      union { s with regs = Set.remove s.regs n } u.read
+                    end
+                    else s
+                  in
+                  if Set.mem bases n then
+                    rekey_back s n (address_of ~bases (rhs d))
+                  else s)
+        in
+        (* forward: the tainted locations after the item, from those before
+           it *)
+        let step_forth blk s = function
+          | Jmp j -> (
+              let u = uses (Jmp.cond j) in
+              let u =
+                match Jmp.kind j with
+                | Goto (Indirect e) | Ret (Indirect e) -> join u (uses e)
+                | Call c -> (
+                    match Call.target c with
+                    | Indirect e -> join u (uses e)
+                    | Direct _ -> u)
+                | Goto (Direct _) | Ret (Direct _) | Int _ -> u
+              in
+              if tainted s u then mark blk (Jmp j);
+              match Jmp.kind j with
+              | Call c when Option.is_some (Call.return c) -> (
+                  (* the arguments flow to the callee, which defines the
+                     results, when it returns *)
+                  let passes = intersects s.regs args in
+                  match if passes then follow blk (Jmp j) c s else None with
+                  | Some s' -> s'
+                  | None ->
+                      if passes then mark_call blk (Jmp j);
+                      { s with regs = Set.diff s.regs results })
+              | Call c -> (
+                  (* a tail call, whose exits are the exits of the
+                     function, unless it is a return *)
+                  match Call.target c with
+                  | Direct _ ->
+                      let passes = intersects s.regs args in
+                      (match
+                         if passes then follow blk (Jmp j) c s else None
+                       with
+                      | Some s' -> boundary := union !boundary s'
+                      | None ->
+                          if passes then mark_call blk (Jmp j);
+                          boundary := union !boundary s);
+                      s
+                  | Indirect _ ->
+                      boundary := union !boundary s;
+                      s)
+              | Ret _ ->
+                  boundary := union !boundary s;
+                  s
+              | _ -> s)
+          | Def d -> (
+              let v = Def.lhs d in
+              match Var.typ v with
+              | Mem _ ->
+                  List.fold
+                    (stores (rhs d))
+                    ~init:s
+                    ~f:(fun s st ->
+                      let u = uses st.value in
+                      let u = if addresses then join u (uses st.index) else u in
+                      let from = tainted s u in
+                      if u.unknown && not (Set.is_empty s.bytes) then
+                        complete := false;
+                      match st.addr with
+                      | Known byte ->
+                          let bytes = range byte st.size in
+                          if from then begin
+                            mark blk (Def d);
+                            { s with bytes = Set.union s.bytes bytes }
+                          end
+                          else { s with bytes = Set.diff s.bytes bytes }
+                      | Unknown ->
+                          if from then begin
+                            mark blk (Def d);
+                            complete := false
+                          end;
+                          s)
+              | _ ->
+                  let u = uses (rhs d) in
+                  let n = name v in
+                  if u.unknown && not (Set.is_empty s.bytes) then
+                    complete := false;
+                  let s =
+                    if tainted s u then begin
+                      mark blk (Def d);
+                      { s with regs = Set.add s.regs n }
+                    end
+                    else { s with regs = Set.remove s.regs n }
+                  in
+                  if Set.mem bases n then
+                    rekey_forth s n (address_of ~bases (rhs d))
+                  else s)
+        in
+        let node blk = Graphs.Ir.Node.create blk in
+        let next blk =
+          (if forward then Graphs.Ir.Node.succs else Graphs.Ir.Node.preds)
+            (node blk) cfg
+          |> Seq.map ~f:Graphs.Ir.Node.label
+          |> Seq.to_list
+        in
+        (* the exits, forward, put their states to the boundary themselves,
+           as the jumps are stepped *)
+        let is_exit blk = List.is_empty (next blk) && not forward in
+        (* the items of the block, from the position, in the direction *)
+        let run blk ~from s =
+          let ts = items blk in
+          let ts =
+            if forward then List.drop ts from else List.rev (List.take ts from)
+          in
+          List.fold ts ~init:s
+            ~f:(if forward then step_forth blk else step_back blk)
+        in
+        let rec visit blk ~from s =
+          if not (is_empty s) then begin
+            let s' = run blk ~from s in
+            if is_exit blk then boundary := union !boundary s';
+            (* a block, that falls off, forward, e.g., without a jump *)
+            if forward && List.is_empty (next blk) && not (has_exit blk) then
+              boundary := union !boundary s';
+            List.iter (next blk) ~f:(fun b -> arrive b s')
+          end
+        and arrive blk s =
+          let tid = Term.tid blk in
+          let known = Option.value (Hashtbl.find seen tid) ~default:empty in
+          if not (is_subset s ~of_:known) then begin
+            let s = union known s in
+            Hashtbl.set seen ~key:tid ~data:s;
+            visit blk ~from:(if forward then 0 else List.length (items blk)) s
+          end
+        in
+        List.iter starts ~f:(fun (blk, from) -> visit blk ~from seed);
+        !boundary
       in
       (* without the locations, the slice is of what the instruction
          writes, forward, or reads, backward *)
       let seed =
         if not (List.is_empty locations) then of_locations target locations
         else
+          let rhs = rhs sub in
           List.sub (items start) ~pos:first ~len:(last - first + 1)
           |> List.fold ~init:empty ~f:(fun s t ->
               match t with
@@ -526,10 +628,14 @@ let slice ?(forward = false) ?(addresses = false) proj addr locations =
                   not (String.is_prefix r ~prefix:"#"));
           }
       in
-      visit start ~from:(if forward then last + 1 else first) seed;
+      let boundary =
+        analyze ~depth sub
+          ~starts:[ (start, if forward then last + 1 else first) ]
+          seed
+      in
       {
         sites = Hash_set.to_list sites |> List.sort ~compare:Int64.compare;
-        live = to_locations !boundary;
+        live = to_locations boundary;
         calls = Hash_set.to_list calls |> List.sort ~compare:Int64.compare;
         complete = !complete;
       }

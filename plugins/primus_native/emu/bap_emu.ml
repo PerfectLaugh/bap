@@ -139,7 +139,7 @@ let start init (entry : Primus.Linker.name) =
         let module Component = Component (Machine) in
         Component.init () >>= ended
     | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ | X.Save _ | X.Interpret
-    | X.Set_pc _ | X.Spawn _ | X.Call _ | X.Regions | X.Dump _ ->
+    | X.Set_pc _ | X.Spawn _ | X.Call _ | X.Regions | X.Dump _ | X.Values _ ->
         Machine.return ()
   in
   ended ()
@@ -381,11 +381,11 @@ let spawn_thread ?stack t ~start ~arg =
   resume t (X.Spawn (start, arg, stack));
   match t.session.spawned with Ok tid -> tid | Error msg -> failwith msg
 
-let call ?stack ?(args = []) t addr =
+let call ?stack ?(args = []) ?(regs = []) ?thread t addr =
   if not (paused t) then
     invalid_arg "Bap_emu.call: the program is not paused, e.g., in a hook";
   t.session.called <- None;
-  resume t (X.Call (addr, args, stack));
+  resume t (X.Call (addr, args, regs, thread, stack));
   match t.session.called with
   | Some (Ok x) -> Some x
   | Some (Error msg) -> failwithf "Bap_emu.call: %s" msg ()
@@ -414,6 +414,45 @@ let regions t =
         writable = p.writable;
         executable = p.executable;
       })
+
+(* the bytes, that the machine, or the snapshot, stored, with the
+   generated ones, if [generated] *)
+let values ?(generated = false) t id =
+  resume t (X.Values (id, generated));
+  t.session.values
+
+(* the addresses, coalesced into the ranges, the lowest first *)
+let coalesce addrs =
+  List.dedup_and_sort addrs ~compare:Int64.compare
+  |> List.fold ~init:[] ~f:(fun acc a ->
+      match acc with
+      | (lo, n) :: rest when Int64.(lo + of_int n = a) -> (lo, n + 1) :: rest
+      | _ -> (a, 1) :: acc)
+  |> List.rev
+
+(* the bytes, that differ between the stored values *)
+let changed mine theirs =
+  let table values =
+    let t = Int64.Table.create () in
+    List.iter values ~f:(fun (key, data) -> Hashtbl.set t ~key ~data);
+    t
+  in
+  let mine = table mine and theirs = table theirs in
+  let differ a b =
+    Hashtbl.fold a ~init:[] ~f:(fun ~key ~data acc ->
+        match Hashtbl.find b key with
+        | Some x when x = data -> acc
+        | _ -> key :: acc)
+  in
+  coalesce (differ mine theirs @ differ theirs mine)
+
+let diff t { owner; id } =
+  if not (phys_equal owner t.session) then
+    invalid_arg "Bap_emu.diff: the snapshot is of another emulator";
+  if not (paused t) then
+    invalid_arg "Bap_emu.diff: the program is not paused, e.g., in a hook";
+  let mine = values t None in
+  changed mine (values t (Some id))
 
 (* pauses the program before the next instruction, from a hook *)
 let stop t =
@@ -561,6 +600,32 @@ let primus_bytes t addr n =
                         (String.of_array
                            (Array.map loaded ~f:(fun b ->
                                 fst (Option.value_exn b))))
+              end);
+  !result
+
+type provenance = Stored | Generated | Mapped | Unmapped
+
+let provenance t addr =
+  if not (paused t) then
+    invalid_arg "Bap_emu.provenance: the program is not paused, e.g., in a hook";
+  let width = (engine t).bytes * 8 in
+  let result = ref Unmapped in
+  primus t
+    (module functor
+              (Machine : Primus.Machine.S)
+              ->
+              struct
+                module Memory = Primus.Memory.Make (Machine)
+                open Machine.Syntax
+
+                let init () =
+                  Memory.origin (Word.of_int64 ~width addr) >>| fun origin ->
+                  result :=
+                    match origin with
+                    | Primus.Memory.Stored -> Stored
+                    | Generated -> Generated
+                    | Mapped -> Mapped
+                    | Unmapped -> Unmapped
               end);
   !result
 
@@ -1749,55 +1814,87 @@ module Static = Bap_emu_slice
    changes between them *)
 let projects = ref 0
 
+(* the digest of the code, that a project of the memory is made of *)
+let live_digest =
+  Value.Tag.register ~name:"live-digest"
+    ~uuid:"5b1c7a2e-8d43-4f6a-9e21-3c0b7d5f8a64"
+    (module String)
+
+let project_digest proj = Project.get proj live_digest
+
+(* the readable regions, with their bytes, from Primus, which has them
+   all, as Unicorn has only the pages, that the code touched, without the
+   bytes, that were never stored, e.g., of the stack, which are zero *)
+let dump ?(only = fun _ -> true) t =
+  List.filter_map (regions t) ~f:(fun r ->
+      let len = Int64.(to_int_exn (r.upper - r.lower + 1L)) in
+      if r.readable && only r then begin
+        resume t (X.Dump (r.lower, len));
+        Some (r, t.session.dumped)
+      end
+      else None)
+
+let region_name (r : region) =
+  sprintf "live:%s%s%s" "r"
+    (if r.writable then "w" else "-")
+    (if r.executable then "x" else "-")
+
+(* the names of the script, and of the caller *)
+let names t symbols =
+  Hashtbl.to_alist t.session.symbols
+  |> List.map ~f:(fun (addr, name) -> (name, addr))
+  |> fun names -> names @ symbols
+
+let digest t ~symbols dumped =
+  let module Theory = Bap_core_theory.Theory in
+  let buf = Buffer.create 4096 in
+  Buffer.add_string buf (Theory.Target.to_string t.target);
+  List.iter dumped ~f:(fun ((r : region), bytes) ->
+      if r.executable then begin
+        Buffer.add_string buf (sprintf "%Lx-%Lx\n" r.lower r.upper);
+        Buffer.add_string buf bytes
+      end);
+  List.iter (names t symbols) ~f:(fun (name, addr) ->
+      Buffer.add_string buf (sprintf "%s@%Lx\n" name addr));
+  Md5.to_hex (Md5.digest_string (Buffer.contents buf))
+
+let code_digest ?(symbols = []) t =
+  if not (paused t) then
+    invalid_arg
+      "Bap_emu.code_digest: the program is not paused, e.g., in a hook";
+  digest t ~symbols (dump ~only:(fun r -> r.executable) t)
+
+let endian target =
+  let module Theory = Bap_core_theory.Theory in
+  if Theory.Endianness.(Theory.Target.endianness target = le) then LittleEndian
+  else BigEndian
+
 let project ?(symbols = []) t =
   if not (paused t) then
     invalid_arg "Bap_emu.project: the program is not paused, e.g., in a hook";
   let target = t.target in
   let module Theory = Bap_core_theory.Theory in
   let width = Theory.Target.code_addr_size target in
-  let endian =
-    if Theory.Endianness.(Theory.Target.endianness target = le) then
-      LittleEndian
-    else BigEndian
-  in
-  (* the bytes of the readable regions, from Primus, which has them all,
-     as Unicorn has only the pages, that the code touched, without the
-     bytes, that were never stored, e.g., of the stack, which are zero *)
+  let endian = endian target in
+  let dumped = dump t in
   let code, data =
-    List.fold (regions t) ~init:(Memmap.empty, Memmap.empty)
-      ~f:(fun (code, data) r ->
-        let len = Int64.(to_int_exn (r.upper - r.lower + 1L)) in
-        if not r.readable then (code, data)
-        else
-          match
-            resume t (X.Dump (r.lower, len));
-            t.session.dumped
-          with
-          | bytes ->
-              let mem =
-                Memory.create endian
-                  (Addr.of_int64 ~width r.lower)
-                  (Bigstring.of_string bytes)
-                |> Or_error.ok_exn
-              in
-              let name =
-                sprintf "live:%s%s%s" "r"
-                  (if r.writable then "w" else "-")
-                  (if r.executable then "x" else "-")
-              in
-              let tag = Value.create Image.section name in
-              if r.executable then (Memmap.add code mem tag, data)
-              else (code, Memmap.add data mem tag))
+    List.fold dumped ~init:(Memmap.empty, Memmap.empty)
+      ~f:(fun (code, data) (r, bytes) ->
+        let mem =
+          Memory.create endian
+            (Addr.of_int64 ~width r.lower)
+            (Bigstring.of_string bytes)
+          |> Or_error.ok_exn
+        in
+        let tag = Value.create Image.section (region_name r) in
+        if r.executable then (Memmap.add code mem tag, data)
+        else (code, Memmap.add data mem tag))
   in
   (* the specification of the file, with the names of the script *)
   let spec =
-    let names =
-      Hashtbl.to_alist t.session.symbols
-      |> List.map ~f:(fun (addr, name) -> (name, addr))
-    in
     let facts =
       Ogre.sequence
-        (List.concat_map (names @ symbols) ~f:(fun (name, addr) ->
+        (List.concat_map (names t symbols) ~f:(fun (name, addr) ->
              [
                Ogre.provide Image.Scheme.code_start addr;
                Ogre.provide Image.Scheme.named_symbol addr name;
@@ -1812,8 +1909,103 @@ let project ?(symbols = []) t =
     Project.create ~package:filename
       (Project.Input.custom ~filename ~code ~data ~spec target)
   with
-  | Ok proj -> proj
+  | Ok proj -> Project.set proj live_digest (digest t ~symbols dumped)
   | Error err -> failwithf "Bap_emu.project: %s" (Error.to_string_hum err) ()
+
+(* The saved projects of the memory: the program, the memory, the
+   target, and the digest, as the files, from which they are loaded,
+   without the disassembly, which they keep. *)
+module Saved = struct
+  type region = { lower : int64; name : string; bytes : string }
+  [@@deriving bin_io]
+
+  type t = {
+    target : string;
+    filename : string;
+    digest : string;
+    program : string;
+    code : region list;
+    data : region list;
+  }
+  [@@deriving bin_io]
+
+  let magic = "bap-emu-project 1\n"
+end
+
+let save_project proj file =
+  let module Theory = Bap_core_theory.Theory in
+  let regions memmap =
+    Memmap.to_sequence memmap
+    |> Seq.map ~f:(fun (mem, v) ->
+        {
+          Saved.lower = Bitvec.to_int64 (Word.to_bitvec (Memory.min_addr mem));
+          name = Option.value (Value.get Image.section v) ~default:"";
+          bytes = Memory.to_buffer mem |> Bigsubstring.to_string;
+        })
+    |> Seq.to_list
+  in
+  let code, data =
+    Memmap.to_sequence (Project.memory proj)
+    |> Seq.to_list
+    |> List.partition_tf ~f:(fun (_, v) ->
+        Option.exists (Value.get Image.section v) ~f:(fun name ->
+            String.is_suffix name ~suffix:"x"))
+  in
+  let memmap =
+    List.fold ~init:Memmap.empty ~f:(fun m (mem, v) -> Memmap.add m mem v)
+  in
+  let saved =
+    {
+      Saved.target = Theory.Target.to_string (Project.target proj);
+      filename = Option.value (Project.get proj filename) ~default:"a.out";
+      digest = Option.value (project_digest proj) ~default:"";
+      program = Binable.to_string (module Program) (Project.program proj);
+      code = regions (memmap code);
+      data = regions (memmap data);
+    }
+  in
+  Out_channel.write_all file
+    ~data:(Saved.magic ^ Binable.to_string (module Saved) saved)
+
+let load_project file =
+  let module Theory = Bap_core_theory.Theory in
+  let data =
+    try In_channel.read_all file
+    with Sys_error msg -> failwithf "Bap_emu.load_project: %s" msg ()
+  in
+  match String.chop_prefix data ~prefix:Saved.magic with
+  | None -> failwithf "Bap_emu.load_project: %s is not a saved project" file ()
+  | Some data -> (
+      let saved =
+        try Binable.of_string (module Saved) data
+        with exn ->
+          failwithf "Bap_emu.load_project: %s is broken: %s" file
+            (Exn.to_string exn) ()
+      in
+      let target = Theory.Target.read saved.target in
+      let width = Theory.Target.code_addr_size target in
+      let endian = endian target in
+      let memmap regions =
+        List.fold regions ~init:Memmap.empty ~f:(fun m (r : Saved.region) ->
+            let mem =
+              Memory.create endian
+                (Addr.of_int64 ~width r.lower)
+                (Bigstring.of_string r.bytes)
+              |> Or_error.ok_exn
+            in
+            Memmap.add m mem (Value.create Image.section r.name))
+      in
+      let program = Binable.of_string (module Program) saved.program in
+      match
+        Project.create ~package:saved.filename ~state:Project.empty_state
+          (Project.Input.custom ~filename:saved.filename
+             ~code:(memmap saved.code) ~data:(memmap saved.data) target)
+      with
+      | Ok proj ->
+          Project.with_program proj program |> fun proj ->
+          Project.set proj live_digest saved.digest
+      | Error err ->
+          failwithf "Bap_emu.load_project: %s" (Error.to_string_hum err) ())
 
 type import = { slot : int64; name : string; value : int64 option }
 
@@ -1894,6 +2086,42 @@ let thread t =
 
 (* the thread, that runs, at the address, at which it paused, and the
    others, where they continue, by their TIDs *)
+let changed_since t file =
+  if not (paused t) then
+    invalid_arg
+      "Bap_emu.changed_since: the program is not paused, e.g., in a hook";
+  match Checkpoint.C.load file with
+  | Error msg -> failwith msg
+  | Ok (c : Checkpoint.C.t) ->
+      let theirs =
+        Primus.Memory.Snapshot.values c.memory
+        |> List.map ~f:(fun (addr, x) ->
+            (Bitvec.to_int64 (Word.to_bitvec addr), Word.to_int_exn x land 0xFF))
+      in
+      (* the bytes, that the checkpoint has, are compared with all bytes,
+         also the generated ones, which the checkpoint keeps as stored,
+         and the other bytes only with the stored ones, as the ones,
+         that the loads generated since, aren't changes *)
+      let table values =
+        let t = Int64.Table.create () in
+        List.iter values ~f:(fun (key, data) -> Hashtbl.set t ~key ~data);
+        t
+      in
+      let all = table (values ~generated:true t None) in
+      let stored = table (values t None) in
+      let theirs = table theirs in
+      let differ a b =
+        Hashtbl.fold a ~init:[] ~f:(fun ~key ~data acc ->
+            match Hashtbl.find b key with
+            | Some x when x = data -> acc
+            | _ -> key :: acc)
+      in
+      let extra =
+        Hashtbl.fold stored ~init:[] ~f:(fun ~key ~data:_ acc ->
+            if Hashtbl.mem theirs key then acc else key :: acc)
+      in
+      coalesce (differ theirs all @ extra)
+
 let threads t =
   let pc = pc t in
   let st = ref None in

@@ -53,7 +53,13 @@ type slice = {
 }
 
 val slice :
-  ?forward:bool -> ?addresses:bool -> project -> int64 -> location list -> slice
+  ?forward:bool ->
+  ?addresses:bool ->
+  ?depth:int ->
+  project ->
+  int64 ->
+  location list ->
+  slice
 (** [slice proj addr locations] the backward slice of the values of the
     [locations], as the instruction at [addr] has them before it runs, or, with
     [forward], the forward slice of the values, that the instruction leaves in
@@ -66,5 +72,14 @@ val slice :
     the instruction, so that the forward slice from a store tells, who reads its
     bytes, also the slots of the frame, which the locations don't name. The
     instruction at [addr] isn't in the slice.
+
+    The calls are opaque, unless the [depth] is positive, by default 0: then the
+    slice follows the values through the functions, that the direct calls call,
+    [depth] calls deep, e.g., backward, from the result of a call into the
+    callee, to its arguments, and on in the caller, or, forward, from the
+    arguments of a call into the callee, to its results, and on after the call,
+    through the registers and the memory at the constant addresses, as the slots
+    of the frame are of each function. The instructions of the callees are in
+    [sites], and the calls, that were followed, in [calls].
 
     Raises [Invalid_argument], if no instruction of the program is at [addr]. *)

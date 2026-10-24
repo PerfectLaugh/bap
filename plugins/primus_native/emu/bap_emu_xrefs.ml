@@ -3,10 +3,10 @@ open Bap.Std
 open Bap_core_theory
 
 type kind = Call | Jump | Load | Store | Address
-[@@deriving compare, equal, sexp]
+[@@deriving bin_io, compare, equal, sexp]
 
 type xref = { site : int64; target : int64; kind : kind; slot : int64 option }
-[@@deriving compare, equal, sexp]
+[@@deriving bin_io, compare, equal, sexp]
 
 type t = {
   width : int;
@@ -82,10 +82,13 @@ let create proj =
     }
   in
   let prog = Project.program proj in
-  let address_of_sub tid =
-    Option.bind (Term.find sub_t prog tid) ~f:(fun sub ->
-        Term.get_attr sub address |> Option.map ~f:int64_of_word)
-  in
+  (* the addresses of the subs, by their tids, once, as the subs are many *)
+  let subs = Tid.Table.create () in
+  Term.enum sub_t prog
+  |> Seq.iter ~f:(fun sub ->
+      Option.iter (Term.get_attr sub address) ~f:(fun a ->
+          Hashtbl.set subs ~key:(Term.tid sub) ~data:(int64_of_word a)));
+  let address_of_sub = Hashtbl.find subs in
   Term.enum sub_t prog
   |> Seq.iter ~f:(fun sub ->
       match Term.get_attr sub address with
@@ -99,6 +102,11 @@ let create proj =
           let sites = Int64.Hash_set.create () in
           (* the return addresses of the calls, which the calls of x86
              push, aren't references *)
+          let blks = Tid.Table.create () in
+          Term.enum blk_t sub
+          |> Seq.iter ~f:(fun b ->
+              Option.iter (Term.get_attr b address) ~f:(fun a ->
+                  Hashtbl.set blks ~key:(Term.tid b) ~data:(int64_of_word a)));
           let returns =
             Term.enum blk_t sub
             |> Seq.concat_map ~f:(Term.enum jmp_t)
@@ -106,10 +114,7 @@ let create proj =
                 match Jmp.kind j with
                 | Call c -> (
                     match Call.return c with
-                    | Some (Direct tid) ->
-                        Option.bind (Term.find blk_t sub tid) ~f:(fun b ->
-                            Term.get_attr b address)
-                        |> Option.map ~f:int64_of_word
+                    | Some (Direct tid) -> Hashtbl.find blks tid
                     | _ -> None)
                 | _ -> None)
             |> Seq.to_list |> Int64.Hash_set.of_list
@@ -200,3 +205,62 @@ let callees t addr =
 
 let all t = Hashtbl.data t.sites |> List.concat |> by_site
 let functions t = Hashtbl.keys t.names |> List.sort ~compare:Int64.compare
+
+(* the calls, that a trace recorded, see [Bap_emu.Trace.calls], are the
+   references too, e.g., through the slots, that the program fills at
+   run time *)
+let add_calls t calls =
+  List.iter calls ~f:(fun (site, targets) ->
+      List.iter targets ~f:(fun (target, _) ->
+          let x = { site; target; kind = Call; slot = None } in
+          if
+            not (List.mem (Hashtbl.find_multi t.sites site) x ~equal:equal_xref)
+          then begin
+            Hashtbl.add_multi t.refs ~key:target ~data:x;
+            Hashtbl.add_multi t.sites ~key:site ~data:x
+          end))
+
+(* the index, as the files keep it, without the memory, which only
+   [create] reads *)
+module Saved = struct
+  type t = {
+    width : int;
+    refs : xref list Int64.Table.t;
+    sites : xref list Int64.Table.t;
+    owners : int64 Int64.Table.t;
+    bodies : int64 list Int64.Table.t;
+    names : string Int64.Table.t;
+  }
+  [@@deriving bin_io]
+
+  let magic = "bap-emu-xrefs 1\n"
+end
+
+let save t file =
+  let saved =
+    {
+      Saved.width = t.width;
+      refs = t.refs;
+      sites = t.sites;
+      owners = t.owners;
+      bodies = t.bodies;
+      names = t.names;
+    }
+  in
+  Out_channel.write_all file
+    ~data:(Saved.magic ^ Binable.to_string (module Saved) saved)
+
+let load file =
+  let data =
+    try In_channel.read_all file
+    with Sys_error msg -> failwithf "Bap_emu.Xrefs.load: %s" msg ()
+  in
+  match String.chop_prefix data ~prefix:Saved.magic with
+  | None -> failwithf "Bap_emu.Xrefs.load: %s is not a saved index" file ()
+  | Some data -> (
+      match Binable.of_string (module Saved) data with
+      | { Saved.width; refs; sites; owners; bodies; names } ->
+          { width; memory = Memmap.empty; refs; sites; owners; bodies; names }
+      | exception exn ->
+          failwithf "Bap_emu.Xrefs.load: %s is broken: %s" file
+            (Exn.to_string exn) ())

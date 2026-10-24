@@ -1058,6 +1058,8 @@ let emu data =
               "b:400764:";
               "f:400733:RDI";
               "f:400743:";
+              "f1:400750:RDI";
+              "b1:400758:RAX";
             ]
         in
         golden env "emu/live/slice-x86_64.txt" out.text);
@@ -1072,9 +1074,40 @@ let emu data =
               "b:ae8:";
               "f:ab4:X0";
               "f:abc:";
+              "f1:ad0:X0";
             ]
         in
         golden env "emu/live/slice-aarch64.txt" out.text);
+    (* the context of the calls, the registers, that the ABI doesn't pass,
+       and the thread, and the memory, that they change, by the diff
+       with a snapshot, and with a checkpoint, and where the bytes come
+       from, see context.ml *)
+    case "emu/live/context" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/live/context.ml";
+              path data "bin/x86_64-linux-gnu-spawn";
+              path data "bin/x86_64-linux-gnu-threads";
+              dir env;
+            ]
+        in
+        golden env "emu/live/context.txt" out.text);
+    (* the project of the memory, and its cross references, saved and
+       loaded, with the digest of the code, and the calls of the trace in
+       the references, see cache.ml *)
+    case "emu/live/cache" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/live/cache.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              dir env;
+            ]
+        in
+        golden env "emu/live/cache.txt" out.text);
     (* the emulators run side by side, each in its own engine, also of
        another target, with their own registers, memory, names and
        hooks *)

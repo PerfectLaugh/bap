@@ -345,6 +345,7 @@ and session = {
   mutable regions : (int64 * int64 * Primus.Memory.protection) list;
       (** the result of the last [Regions] *)
   mutable dumped : string;  (** the result of the last [Dump] *)
+  mutable values : (int64 * int) list;  (** the result of the last [Values] *)
   mutable starts : int;
       (** the number of the starts of Unicorn, which tells the instruction that
           runs again, e.g., after its fault, from the next one *)
@@ -448,6 +449,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     called = None;
     regions = [];
     dumped = "";
+    values = [];
     starts = 0;
     stopped_at = None;
     restarted_at = None;
@@ -684,10 +686,13 @@ type request =
   | Spawn of int64 * int64 * int64 option
       (** the thread, that calls the function at the address with the argument,
           on the stack, is created, see [Bap_emu.spawn_thread] *)
-  | Call of int64 * int64 list * int option
-      (** the function at the address is called with the arguments, on a new
-          stack of the size, and the machine pauses again, when it returns, see
-          [Bap_emu.call] *)
+  | Call of int64 * int64 list * (string * int64) list * int option * int option
+      (** the function at the address is called with the arguments, the
+          registers, in the context of the thread, on a new stack of the size,
+          and the machine pauses again, when it returns, see [Bap_emu.call] *)
+  | Values of Primus.Machine.id option * bool
+      (** the bytes, that the machine, or the snapshot, stored, with the
+          generated ones, if the flag is set, see [Bap_emu.diff] *)
   | Regions
       (** the mapped memory of the machine, with its protections, see
           [Bap_emu.regions] *)
@@ -1612,6 +1617,14 @@ let pending_changes e =
 
 (* the changed bytes of the page, which Primus fetches, see [backing],
    after which the page is clean, if it didn't change *)
+(* the changed bytes of the pending page, which stays pending, see
+   [Primus.Memory.Backing.peek_all] *)
+let peek_page e page =
+  match Hashtbl.find e.pages page with
+  | Some ({ snapshot = Some known; _ } as p) when pending e p ->
+      changes page (read_page e page) known
+  | _ -> []
+
 let fetch_page e page =
   match Hashtbl.find e.pages page with
   | Some ({ snapshot = Some known; _ } as p) when pending e p ->
@@ -1703,6 +1716,19 @@ let backing s memory : Primus.Memory.Backing.t =
                  | Some pages ->
                      Hashtbl.fold pages ~init:[] ~f:(fun ~key ~data acc ->
                          fetch_parked key data @ acc)
+                 | None -> []));
+    peek_all =
+      (fun id ->
+        match s.active with
+        | None -> []
+        | Some e ->
+            words e
+              (if is_owner e id then List.concat_map e.dirty ~f:(peek_page e)
+               else
+                 match Hashtbl.find s.parked id with
+                 | Some pages ->
+                     Hashtbl.fold pages ~init:[] ~f:(fun ~key ~data acc ->
+                         parked_changes key data @ acc)
                  | None -> []));
     stored =
       (fun id addr data ->
@@ -5393,86 +5419,126 @@ module Make (Machine : Primus.Machine.S) = struct
        default 64 KB, zeroed, and gives its result, as the ABI returns
        it, the registers are as before, and the memory as the function
        left it *)
-    let call ~loop e ~pc ~addr ~args ~stack =
+    (* the registers of the thread [tid], which doesn't run, go to the
+       engine, so that the function runs in its context, e.g., its TLS *)
+    let enter e tid =
+      let* st = Machine.Local.get threads in
+      if tid = st.current then Machine.return ()
+      else
+        match List.find st.others ~f:(fun t -> t.tid = tid) with
+        | None -> fail "the program has no thread %d" tid
+        | Some t ->
+            let+ () =
+              Machine.List.iter (Target.Regs.basis e.regs) ~f:(fun v ->
+                  let tv = thread_var tid v in
+                  Env.is_set tv >>= function
+                  | false -> Machine.return ()
+                  | true ->
+                      let+ x = Env.get tv in
+                      ignore
+                        (Target.Regs.write e.regs v (Primus.Value.to_word x)
+                          : bool))
+            in
+            List.iter t.saved_extra ~f:(fun (id, data) -> write_extra e id data)
+
+    let call ~loop e ~pc ~addr ~args ~regs ~thread ~stack =
       let* inputs, output = signature (List.length args) in
       let* () = pull e in
       let saved = registers e in
+      let* pending = Machine.Local.get frames in
+      let* called = Machine.Local.get calls in
       let size = (Option.value stack ~default:0x10000 + 15) land lnot 15 in
       let* base = Threads.Windows.allocate e size in
-      let* zeroed = Threads.store e base (String.make size '\000') in
-      if not zeroed then fail "can't zero the stack at %Lx" base
-      else
-        let top = Int64.(base + of_int size) in
-        (* the arguments on the stack, and the space, that the callee
-           may use, e.g., the save area of MIPS, are above the stack
-           pointer, which is aligned, at the call *)
-        let room = (64 + (8 * List.length args) + 15) land lnot 15 in
-        let sp = Int64.(top - of_int room) in
-        let start =
-          match e.arch with
-          | Arm
-            when Int64.(addr land 1L = 1L)
-                 || Hash_set.mem e.session.thumb
-                      (word e Int64.(addr land lnot 1L)) ->
-              Int64.(addr lor 1L)
-          | _ -> addr
-        in
-        (* the return address is on the stack on x86, at the entry of
-           the function, and else in the link register *)
-        let* frame =
-          match (e.arch, e.link) with
-          | X86, _ -> (
-              let sp = Int64.(sp - of_int e.bytes) in
-              ignore (Target.Regs.write e.regs e.sp (word e sp) : bool);
-              Threads.storew e sp return_addr >>= function
-              | true ->
-                  Machine.return
-                    { ret = return_addr; sp = Int64.(sp + of_int e.bytes) }
-              | false -> fail "can't push the return address at %Lx" sp)
-          | _, Some lr ->
-              ignore (Target.Regs.write e.regs e.sp (word e sp) : bool);
-              ignore (Target.Regs.write e.regs lr (word e return_addr) : bool);
-              Machine.return { ret = return_addr; sp }
-          | _, None -> fail "the target has no link register"
-        in
+      let top = Int64.(base + of_int size) in
+      (* the stack is freed, as the function returned, or failed, so that
+         the calls don't exhaust the heap, and its bytes are forgotten, as
+         they were never stored, so that the memory differs from a
+         snapshot only in what the function stored elsewhere, see
+         [Bap_emu.diff], and the registers are as before the call *)
+      let finish () =
+        let* () = Machine.Local.put frames pending in
+        let* () = Machine.Local.put calls called in
+        let* () = restore e saved in
+        Uc.reg_write e.uc e.pc (code_addr e pc);
+        let* p = Value.of_word (word e base) in
+        let* _ = Lisp.eval_fun "free" [ p ] in
+        let* () = drop (word e base) (word e Int64.(top - 1L)) in
         let* () =
-          Machine.List.iter (List.zip_exn inputs args) ~f:(fun (exp, x) ->
-              pass e exp x)
+          Machine.List.iter (List.init size ~f:Fn.id) ~f:(fun i ->
+              Memory.del (word e Int64.(base + of_int i)))
         in
-        (* the PIC code of MIPS finds its GOT from T9, the address of
-           the function *)
-        if Poly.equal e.arch Mips then
-          ignore
-            (Target.Regs.write_name e.regs "R25"
-               (word e Int64.(addr land lnot 1L))
-              : bool);
-        let* () = pull e in
-        let* pending = Machine.Local.get frames in
-        let* called = Machine.Local.get calls in
-        let callee = Hashtbl.find e.session.names (code_addr e start) in
-        let* () = Machine.Local.put frames (frame :: pending) in
-        let* () = Machine.Local.put calls ((callee, None) :: called) in
-        (* the stack is freed, as the function returned, so that the
-           calls don't exhaust the heap *)
-        let finish () =
-          let* () = Machine.Local.put frames pending in
-          let* () = Machine.Local.put calls called in
-          let* () = restore e saved in
-          Uc.reg_write e.uc e.pc (code_addr e pc);
-          let* p = Value.of_word (word e base) in
-          let* _ = Lisp.eval_fun "free" [ p ] in
-          pull e
+        pull e
+      in
+      let run () =
+        let* () =
+          Option.value_map thread ~default:(Machine.return ()) ~f:(enter e)
         in
-        Machine.catch
-          (let* () = loop start in
-           let result =
-             Option.map output ~f:(fun exp -> int64_of_word (eval_uc e exp))
-           in
-           let+ () = finish () in
-           Ok (Option.value result ~default:0L))
-          (fun exn ->
-            let+ () = finish () in
-            Error (Primus.Exn.to_string exn))
+        let* zeroed = Threads.store e base (String.make size '\000') in
+        if not zeroed then fail "can't zero the stack at %Lx" base
+        else
+          (* the arguments on the stack, and the space, that the callee
+             may use, e.g., the save area of MIPS, are above the stack
+             pointer, which is aligned, at the call *)
+          let room = (64 + (8 * List.length args) + 15) land lnot 15 in
+          let sp = Int64.(top - of_int room) in
+          let start =
+            match e.arch with
+            | Arm
+              when Int64.(addr land 1L = 1L)
+                   || Hash_set.mem e.session.thumb
+                        (word e Int64.(addr land lnot 1L)) ->
+                Int64.(addr lor 1L)
+            | _ -> addr
+          in
+          (* the return address is on the stack on x86, at the entry of
+             the function, and else in the link register *)
+          let* frame =
+            match (e.arch, e.link) with
+            | X86, _ -> (
+                let sp = Int64.(sp - of_int e.bytes) in
+                ignore (Target.Regs.write e.regs e.sp (word e sp) : bool);
+                Threads.storew e sp return_addr >>= function
+                | true ->
+                    Machine.return
+                      { ret = return_addr; sp = Int64.(sp + of_int e.bytes) }
+                | false -> fail "can't push the return address at %Lx" sp)
+            | _, Some lr ->
+                ignore (Target.Regs.write e.regs e.sp (word e sp) : bool);
+                ignore (Target.Regs.write e.regs lr (word e return_addr) : bool);
+                Machine.return { ret = return_addr; sp }
+            | _, None -> fail "the target has no link register"
+          in
+          let* () =
+            Machine.List.iter (List.zip_exn inputs args) ~f:(fun (exp, x) ->
+                pass e exp x)
+          in
+          let* () =
+            Machine.List.iter regs ~f:(fun (name, x) ->
+                if Target.Regs.write_name e.regs name (word e x) then
+                  Machine.return ()
+                else fail "the target has no register %s" name)
+          in
+          (* the PIC code of MIPS finds its GOT from T9, the address of
+             the function *)
+          if Poly.equal e.arch Mips then
+            ignore
+              (Target.Regs.write_name e.regs "R25"
+                 (word e Int64.(addr land lnot 1L))
+                : bool);
+          let* () = pull e in
+          let callee = Hashtbl.find e.session.names (code_addr e start) in
+          let* () = Machine.Local.put frames (frame :: pending) in
+          let* () = Machine.Local.put calls ((callee, None) :: called) in
+          let* () = loop start in
+          let result =
+            Option.map output ~f:(fun exp -> int64_of_word (eval_uc e exp))
+          in
+          let+ () = finish () in
+          Ok (Option.value result ~default:0L)
+      in
+      Machine.catch (run ()) (fun exn ->
+          let+ () = finish () in
+          Error (Primus.Exn.to_string exn))
   end
 
   (* The machine, which the script drives, pauses, and serves the
@@ -5557,13 +5623,24 @@ module Make (Machine : Primus.Machine.S) = struct
         in
         e.session.spawned <- r;
         serve pc
-    | Call (addr, args, stack) ->
+    | Call (addr, args, regs, thread, stack) ->
         e.session.called <- None;
         let* r =
-          Machine.catch (Calls.call ~loop e ~pc ~addr ~args ~stack) (fun exn ->
-              Machine.return (Error (Primus.Exn.to_string exn)))
+          Machine.catch
+            (Calls.call ~loop e ~pc ~addr ~args ~regs ~thread ~stack)
+            (fun exn -> Machine.return (Error (Primus.Exn.to_string exn)))
         in
         e.session.called <- Some r;
+        serve pc
+    | Values (other, generated) ->
+        let* () = pull e in
+        let* me = Machine.current () in
+        let* values =
+          Memory.values_of ~generated (Option.value other ~default:me)
+        in
+        e.session.values <-
+          List.map values ~f:(fun (addr, x) ->
+              (int64_of_word addr, Word.to_int_exn x land 0xFF));
         serve pc
     | Regions ->
         let* () = pull e in

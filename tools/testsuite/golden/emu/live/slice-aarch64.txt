@@ -6,3 +6,5 @@ forward X0 from ab4: sites abc ac0 ac4 acc ad8 adc ae0 ae4 | live  | calls  | co
 forward X0 from ab4 with addresses: sites abc ac0 ac4 acc ad0 ad4 ad8 adc ae0 ae4 ae8 aec af0 | live CF,NF,R0,VF,ZF | calls ad4 | complete false
 forward  from abc: sites ac0 ac4 acc ad8 adc ae0 ae4 | live  | calls  | complete false
 forward  from abc with addresses: sites ac0 ac4 acc ad0 ad4 ad8 adc ae0 ae4 ae8 aec af0 | live CF,NF,R0,VF,ZF | calls ad4 | complete false
+forward 1 deep X0 from ad0: sites a6c a70 a74 a7c a80 a84 a8c a90 aa4 ad4 | live R1 | calls a8c aa4 ad4 | complete false
+forward 1 deep X0 from ad0 with addresses: sites a6c a70 a74 a7c a80 a84 a88 a8c a90 a94 a98 a9c aa4 ad4 | live R1 | calls a8c aa4 ad4 | complete false

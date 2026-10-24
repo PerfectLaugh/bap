@@ -35,14 +35,23 @@ let () =
           match String.split case ~on:':' with
           | [ dir; addr; reg ] ->
               let addr = Int64.of_string ("0x" ^ addr) in
-              let forward = String.equal dir "f" in
+              let forward = String.is_prefix dir ~prefix:"f" in
+              (* the digit after the direction is the depth of the calls *)
+              let depth =
+                if String.length dir > 1 then
+                  Int.of_string (String.drop_prefix dir 1)
+                else 0
+              in
               let locs = if String.is_empty reg then [] else [ Emu.Reg reg ] in
-              let dir = if forward then "forward" else "backward" in
+              let dir =
+                (if forward then "forward" else "backward")
+                ^ if depth > 0 then sprintf " %d deep" depth else ""
+              in
               show
                 (sprintf "%s %s from %Lx" dir reg addr)
-                (Emu.Static.slice ~forward proj addr locs);
+                (Emu.Static.slice ~forward ~depth proj addr locs);
               show
                 (sprintf "%s %s from %Lx with addresses" dir reg addr)
-                (Emu.Static.slice ~forward ~addresses:true proj addr locs)
+                (Emu.Static.slice ~forward ~depth ~addresses:true proj addr locs)
           | _ -> failwithf "the case %s isn't DIRECTION:ADDR:REGISTER" case ())
   | _ -> failwith "expected FILE CASE..."
