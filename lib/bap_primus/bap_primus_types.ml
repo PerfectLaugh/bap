@@ -72,6 +72,7 @@ module type Machine = sig
     val update : id -> 'a state -> f:('a -> 'a) -> unit t
   end
 
+  val discard : id -> unit t
   val raise : exn -> 'a t
   val catch : 'a t -> (exn -> 'a t) -> 'a t
   val project : project t

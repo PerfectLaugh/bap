@@ -368,6 +368,12 @@ module Make (M : Monad.S) = struct
             restrict false >>= fun () ->
             switch cid >>= fun () -> do_kill id
 
+  (* the machine is dropped, without switching to it, which would run
+     it, so that nothing observes it *)
+  let discard id =
+    current () >>= fun cid ->
+    if Id.(id = global) || Id.(id = cid) then return () else do_kill id
+
   let start sys = Observation.make started sys
 
   let stop sys =

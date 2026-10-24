@@ -562,6 +562,15 @@ module Std : sig
           *)
         end
 
+        val discard : id -> unit t
+        (** [discard machine] removes the [machine], which isn't the current
+            one, with its state, without switching to it, which would run it, as
+            [kill] does, so its observers aren't told, e.g., a fork, that is
+            never switched to again, see [Bap_emu.drop_snapshot]. Does nothing
+            for the current machine, and the global one.
+
+            @since 2.6.0 *)
+
         val raise : exn -> 'a t
         (** [raise exn] raises the machine exception [exn], intiating an
             abonormal control flow *)

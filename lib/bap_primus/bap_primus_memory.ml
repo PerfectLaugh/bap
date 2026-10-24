@@ -940,7 +940,9 @@ module Make (Machine : Machine) = struct
      bytes, that were never stored, which are zero, as the unmapped ones *)
   let peek addr len =
     check_bytes "peek" >>= fun () ->
-    fetch addr len >>= fun () ->
+    Machine.current () >>= fun id ->
+    Machine.Global.get Backing.state >>= fun backing ->
+    memory >>= fun { name = memory_name; _ } ->
     get_curr >>| fun s ->
     let bytes = Bytes.make len '\000' in
     let last = Addr.nsucc addr (len - 1) in
@@ -973,6 +975,17 @@ module Make (Machine : Machine) = struct
       ~f:(fun ~key ~data () ->
         Bytes.set bytes (offset key)
           (Char.of_int_exn (Word.to_int_exn (Value.to_word data) land 0xFF)));
+    (* the pending bytes of the backing, e.g., the pages, that an emulator
+       wrote, go over them, without being stored, so that a dump doesn't
+       fill the memory with them *)
+    (match backing with
+    | Some b when String.equal memory_name b.memory ->
+        List.iter (b.peek_all id) ~f:(fun (a, data) ->
+            String.iteri data ~f:(fun i c ->
+                let a = Addr.nsucc a i in
+                if Addr.(a >= addr && a <= last) then
+                  Bytes.set bytes (offset a) c))
+    | _ -> ());
     Bytes.to_string bytes
 
   let store_bytes addr data =
