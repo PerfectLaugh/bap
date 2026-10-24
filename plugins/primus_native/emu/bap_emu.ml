@@ -695,9 +695,17 @@ let hooked t ?encoding ~thumb ~block addr bytes =
       let toplevel = Toplevel.current () in
       let result = ref None in
       Toplevel.set (Option.value t.hooked ~default:toplevel);
+      let started = Caml_unix.gettimeofday () in
       Exn.protect
         ~finally:(fun () ->
-          t.hooked <- Some (Toplevel.current ());
+          (* the knowledge after the lifts, that take long, e.g., the
+             first one, which loads the semantics, is kept, and the one
+             after the others is dropped, so that it doesn't grow with
+             the instructions, that are lifted, which it would keep *)
+          if
+            Option.is_none t.hooked
+            || Float.(Caml_unix.gettimeofday () -. started > 0.1)
+          then t.hooked <- Some (Toplevel.current ());
           Toplevel.set toplevel)
         ~f:(fun () ->
           Toplevel.exec

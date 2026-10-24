@@ -1162,8 +1162,10 @@ let lifter ?cache ~arm project =
                 | Indirect _ -> ())
             | _ -> ()))
   in
-  (* the labels of the calls of the cached instruction, that are made
-     anew, once, with their names *)
+  (* the labels of the calls of the instruction, that are made anew, in
+     the toplevel knowledge, once, with their names, as the labels of the
+     knowledge of the lifter are dropped with it, see [in_state], or are
+     of the cache *)
   let fresh (e : Lifts.entry) =
     let renamed =
       List.map e.calls ~f:(fun (tid, name) ->
@@ -1192,12 +1194,22 @@ let lifter ?cache ~arm project =
       calls = List.map e.calls ~f:(fun (tid, name) -> (rename tid, name));
     }
   in
+  (* the knowledge of the lifter, in which [f] runs: the knowledge after
+     the lifts, that take long, e.g., the first one, which loads the
+     semantics, e.g., the Lisp program of x86, is kept, and the
+     knowledge after the other lifts is dropped, so that it doesn't grow
+     with the instructions, that are lifted, whose labels, code and
+     semantics it would keep, see Primus.Lift; the labels, that the
+     dropped knowledge made, e.g., of the calls, are made anew, see
+     [fresh] *)
   let in_state f =
     let toplevel = Toplevel.current () in
     Toplevel.set (Option.value !state ~default:toplevel);
+    let started = clock () in
     Exn.protect
       ~finally:(fun () ->
-        state := Some (Toplevel.current ());
+        if Option.is_none !state || Float.(clock () -. started > 0.1) then
+          state := Some (Toplevel.current ());
         Toplevel.set toplevel)
       ~f
   in
@@ -1207,7 +1219,7 @@ let lifter ?cache ~arm project =
         let e =
           if !renamed then e
           else begin
-            let e = in_state (fun () -> fresh e) in
+            let e = fresh e in
             Hashtbl.set entries ~key:(addr, thumb) ~data:(e, ref true);
             e
           end
@@ -1228,8 +1240,9 @@ let lifter ?cache ~arm project =
                   Option.iter insn ~f:(fun (_, _, blks) -> called blks))
             with _ -> ());
         (* the instruction is kept for the engines of the session, e.g., of
-           the forks, and for the cache, if there is one *)
-        Option.iter !result ~f:(fun (size, name, blks) ->
+           the forks, and for the cache, if there is one, with the labels
+           of its calls made anew, see [fresh] *)
+        Option.map !result ~f:(fun (size, name, blks) ->
             if size <= String.length code then begin
               let calls =
                 List.concat_map blks ~f:(fun blk ->
@@ -1244,31 +1257,33 @@ let lifter ?cache ~arm project =
                             | Indirect _ -> None)
                         | _ -> None))
               in
-              Hashtbl.set entries ~key:(addr, thumb)
-                ~data:
-                  ( {
-                      Lifts.addr;
-                      thumb;
-                      code = String.prefix code size;
-                      size;
-                      name;
-                      (* the engine doesn't read the attributes, e.g.,
-                         the instructions, which are most of the file *)
-                      blks =
-                        List.map blks ~f:(fun blk ->
-                            let blk =
-                              Term.map def_t blk ~f:(fun t ->
-                                  Term.with_attrs t Dict.empty)
-                              |> Term.map jmp_t ~f:(fun t ->
-                                  Term.with_attrs t Dict.empty)
-                            in
-                            Term.with_attrs blk Dict.empty);
-                      calls;
-                    },
-                    ref true );
-              dirty := true
-            end);
-        !result
+              let e =
+                fresh
+                  {
+                    Lifts.addr;
+                    thumb;
+                    code = String.prefix code size;
+                    size;
+                    name;
+                    (* the engine doesn't read the attributes, e.g., the
+                       instructions, which are most of the file *)
+                    blks =
+                      List.map blks ~f:(fun blk ->
+                          let blk =
+                            Term.map def_t blk ~f:(fun t ->
+                                Term.with_attrs t Dict.empty)
+                            |> Term.map jmp_t ~f:(fun t ->
+                                Term.with_attrs t Dict.empty)
+                          in
+                          Term.with_attrs blk Dict.empty);
+                    calls;
+                  }
+              in
+              Hashtbl.set entries ~key:(addr, thumb) ~data:(e, ref true);
+              dirty := true;
+              (size, name, e.blks)
+            end
+            else (size, name, blks))
   in
   (lift, Hashtbl.find names, not (Hashtbl.is_empty entries))
 
