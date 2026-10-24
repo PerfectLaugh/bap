@@ -1517,6 +1517,29 @@ let open_files data =
             ]))
     [ "bap:stubbed-executor"; "bap:unicorn-executor"; "bap:lifted-executor" ]
 
+(* the cryptographic, CRC32, and saturating instructions of AArch64, in
+   loops, which the lifted engine compiles, agree with Unicorn, see
+   a64-crypto.c *)
+let a64_crypto data =
+  List.map
+    (fun system ->
+      case ("run/a64-crypto/" ^ system) (fun env ->
+          let out =
+            bap env
+              [
+                path data "bin/aarch64-linux-gnu-a64-crypto";
+                "--passes=run";
+                "--run-systems=" ^ system;
+              ]
+          in
+          has env "computes the checksums" out
+            "446c73700787af1d\n\
+             db97a91ac763dad2\n\
+             00000000d96bbdef\n\
+             0000000000000000\n\
+             011e011e011e011e\n"))
+    [ "bap:unicorn-executor"; "bap:lifted-executor" ]
+
 (* the stubs of the printf family format the words, that the C ABI
    passes, also on the stack, the streams of libc are the channels of
    Lisp, whether the program refers to them with a copy relocation, or
@@ -2491,6 +2514,7 @@ let tests =
     smc;
     calloc;
     open_files;
+    a64_crypto;
     taint_bss;
     memory_hooks;
     taint_ops;

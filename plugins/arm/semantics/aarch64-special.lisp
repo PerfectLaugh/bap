@@ -9,6 +9,10 @@
 
 (defun DMB (_) (empty))
 
+;; the speculation barrier, which the decoder of FEAT_SB decodes, and
+;; else decodes as MSR, see below
+(defun SB () (empty))
+
 (defun DSB (_) (empty))
 
 (defun ISB (_) (empty))

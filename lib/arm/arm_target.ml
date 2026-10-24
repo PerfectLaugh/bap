@@ -849,8 +849,36 @@ let v8aversions =
   List.init max_v8a_version ~f:(fun i -> sprintf "+v8.%da" (i + 1))
 
 (* the AArch64 decoder also decodes the half-precision floats of v8.2,
-   the encodings of which are unallocated without them *)
-let a64_extensions = [ "fullfp16" ]
+   the encodings of which are unallocated without them, and the other
+   extensions, that the processor of Unicorn has, as its identification
+   registers tell, e.g., the cryptography, CRC32, the dot products, and
+   SVE, so that their instructions are decoded, as the programs run them,
+   e.g., after they check the hardware capabilities, rather than invalid *)
+let a64_extensions =
+  [
+    "fullfp16";
+    "aes";
+    "sha2";
+    "sha3";
+    "sm4";
+    "crc";
+    "lse";
+    "rdm";
+    "dotprod";
+    "fp16fml";
+    "flagm";
+    "rand";
+    "pauth";
+    "jsconv";
+    "complxnum";
+    "rcpc";
+    "rcpc-immo";
+    "fptoint";
+    "sb";
+    "predres";
+    "ccdp";
+    "sve";
+  ]
 
 let is_normal_feature s =
   String.length s > 0 && match s.[0] with '+' | '-' -> true | _ -> false
