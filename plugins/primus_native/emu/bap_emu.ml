@@ -47,9 +47,10 @@ type t = {
   insns : Int64.Hash_set.t Lazy.t;
       (** the addresses of the instructions of the program, that the
           disassembler computed, if any, see [it_blocks_of] *)
-  thumb_insns : Int64.Hash_set.t;
-      (** the addresses of the instructions of Thumb, that [bir] lifted, which
-          are the instructions, see [it_blocks_of] *)
+  thumb_insns : string Int64.Table.t;
+      (** the instructions of Thumb, that [bir] lifted, by their addresses, with
+          their first halfwords, which are the instructions, while the halfwords
+          are the same, see [it_blocks_of] *)
 }
 
 let engine t =
@@ -252,7 +253,7 @@ let create ?system ?(components = []) ?(init = []) ?(redirects = [])
              (Disasm.insns (Project.disasm proj))
              ~f:(fun (mem, _) -> add (Memory.min_addr mem));
            insns);
-      thumb_insns = Int64.Hash_set.create ();
+      thumb_insns = Int64.Table.create ();
     }
   in
   finish t
@@ -611,17 +612,29 @@ let it_blocks read addr =
 let lift_in_it_block ?encoding proj block addr bytes =
   let open Knowledge.Syntax in
   let decode =
-    Knowledge.List.iter ~f:(fun (a, code) ->
+    Knowledge.List.map ~f:(fun (a, code) ->
         Primus.Lift.instruction ?encoding ~disassembled:false proj a code
-        >>| ignore)
+        >>| fun insn -> (a, code, insn))
   in
   match block with
-  | None -> Primus.Lift.instruction ?encoding proj addr bytes
+  | None ->
+      Primus.Lift.instruction ?encoding proj addr bytes >>| fun insn ->
+      (insn, [])
   | Some (before, after) ->
-      decode before >>= fun () ->
+      decode before >>= fun before ->
       Primus.Lift.instruction ?encoding ~disassembled:false proj addr bytes
       >>= fun insn ->
-      decode after >>| fun () -> insn
+      decode after >>| fun after -> (insn, before @ after)
+
+(* the instructions of Thumb at [addr], whose bytes are [bytes], and the
+   others of its IT block, that were decoded with it, see
+   [lift_in_it_block], are cached in [lifts], and known as the
+   instructions, see [it_blocks_of] *)
+let remember t lifts addr bytes others =
+  Hashtbl.set t.thumb_insns ~key:addr ~data:(String.prefix bytes 2);
+  List.iter others ~f:(fun (a, code, insn) ->
+      Hashtbl.set lifts ~key:(a, code, true) ~data:insn;
+      Hashtbl.set t.thumb_insns ~key:a ~data:(String.prefix code 2))
 
 (* the IT block of Thumb, that the instruction at [addr] is in, if
    [thumb], the first of [it_blocks], whose IT instruction is an
@@ -636,7 +649,10 @@ let it_blocks_of t ~thumb addr =
   else
     let read a n = try read t a n with Invalid_argument _ -> "" in
     let known a =
-      Hash_set.mem t.thumb_insns a || Hash_set.mem (Lazy.force t.insns) a
+      (match Hashtbl.find t.thumb_insns a with
+        | Some halfword -> String.equal halfword (read a 2)
+        | None -> false)
+      || Hash_set.mem (Lazy.force t.insns) a
     in
     (* the instructions from [a], that reach [addr] *)
     let rec walk a acc =
@@ -673,7 +689,6 @@ let it_blocks_of t ~thumb addr =
    is looked for, when the instruction is not cached *)
 let hooked t ?encoding ~thumb ~block addr bytes =
   let key = (addr, bytes, thumb) in
-  if thumb then Hash_set.add t.thumb_insns addr;
   match Hashtbl.find t.lifted key with
   | Some insn -> insn
   | None ->
@@ -688,7 +703,9 @@ let hooked t ?encoding ~thumb ~block addr bytes =
           Toplevel.exec
             Knowledge.Syntax.(
               lift_in_it_block ?encoding t.project (block ()) addr bytes
-              >>| fun insn -> result := insn));
+              >>| fun (insn, others) ->
+              result := insn;
+              if thumb then remember t t.lifted addr bytes others));
       Hashtbl.set t.lifted ~key ~data:!result;
       !result
 
@@ -726,7 +743,6 @@ let bir ?thumb t addr =
         ~default:(fun () ->
           let result = ref None in
           let block = block () in
-          if thumb then Hash_set.add t.thumb_insns addr;
           primus t
             (module functor
                       (Machine : Primus.Machine.S)
@@ -738,12 +754,17 @@ let bir ?thumb t addr =
                         let init () =
                           Machine.get () >>= fun proj ->
                           (match block with
-                            | None -> Lift.insn ?encoding ~read addr
+                            | None ->
+                                Lift.insn ?encoding ~read addr >>| fun insn ->
+                                (insn, [])
                             | Some _ ->
                                 Machine.knowledge
                                   (lift_in_it_block ?encoding proj block addr
                                      bytes))
-                          >>| fun insn -> result := insn
+                          >>| fun (insn, others) ->
+                          result := insn;
+                          if thumb then
+                            remember t t.paused_lifts addr bytes others
                       end);
           !result)
 
