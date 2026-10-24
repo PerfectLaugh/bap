@@ -9,6 +9,7 @@ type protection = { readable : bool; writable : bool; executable : bool }
 [@@deriving equal]
 
 val protected : (addr * addr * protection) Bap_primus_observation.t
+val allocated : (addr * addr) Bap_primus_observation.t
 
 type exn += Pagefault of addr
 type exn += Unknown_segment of addr * addr
@@ -87,6 +88,7 @@ module Make (Machine : Machine) : sig
   val regions : (addr * addr * protection) list Machine.t
   val origin : addr -> origin Machine.t
   val values_of : ?generated:bool -> id -> (addr * word) list Machine.t
+  val origins_of : id -> addr list -> origin list Machine.t
   val peek : addr -> int -> string Machine.t
   val load_bytes : addr -> int -> (char * protection) option array Machine.t
   val store_bytes : addr -> string -> unit Machine.t

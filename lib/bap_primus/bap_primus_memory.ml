@@ -171,6 +171,15 @@ let protected, on_protected =
     ~package:"bap"
     ~desc:"Occurs when the protection of a range of the memory changes"
 
+let allocated, on_allocated =
+  Bap_primus_observation.provide "memory-allocated"
+    ~inspect:(fun (lower, upper) ->
+      Sexp.List [ sexp_of_addr lower; sexp_of_addr upper ])
+    ~package:"bap"
+    ~desc:
+      "Occurs before a region of the memory is allocated over the range, whose \
+       bytes it replaces"
+
 let generated, on_generated =
   Bap_primus_observation.provide "load-generated" ~inspect:inspect_generated
     ~package:"bap"
@@ -636,10 +645,15 @@ module Make (Machine : Machine) = struct
     in
     loop values lower
 
+  (* the bytes of a new region are its own, so the values, that were
+     stored, or generated, in its range, e.g., by the program, that used
+     the memory before, are forgotten, after the backings, e.g., an
+     emulator, give their pending bytes, which the observation asks for *)
   let add_region ?(readonly = false) ?(executable = false) ?init ?generator
       ~lower ~upper () =
     Machine.gets Project.target >>| Theory.Target.bits >>= fun width ->
-    get_curr
+    Machine.Observation.make on_allocated (lower, upper) >>= fun () ->
+    ( get_curr
     >>| add_layer
           {
             perms = { readonly; executable };
@@ -654,6 +668,16 @@ module Make (Machine : Machine) = struct
                     | None -> Generator.Random.Seeded.lcg ~width ());
                 };
           }
+    >>| fun s ->
+      let stale =
+        Map.fold_range_inclusive s.values ~min:lower ~max:upper ~init:[]
+          ~f:(fun ~key ~data:_ acc -> key :: acc)
+      in
+      {
+        s with
+        values = List.fold stale ~init:s.values ~f:Map.remove;
+        generated = List.fold stale ~init:s.generated ~f:Set.remove;
+      } )
     >>= fun s ->
     match init with
     | None -> put_curr s
@@ -1028,6 +1052,32 @@ module Make (Machine : Machine) = struct
       | None -> []
     in
     stored @ pending
+
+  (* where the bytes of the [machine] come from, as [origin] tells, by
+     the state of the machine, and the pending bytes of the backing,
+     which stay pending *)
+  let origins_of machine addrs =
+    Machine.Other.get machine state >>= fun { curr; mems } ->
+    Machine.Global.get Backing.state >>| fun backing ->
+    let s = Option.value (Map.find mems curr) ~default:empty_state in
+    let pending =
+      match backing with
+      | None -> Set.empty (module Addr)
+      | Some b ->
+          List.concat_map (b.peek_all machine) ~f:(fun (addr, data) ->
+              List.init (String.length data) ~f:(Addr.nsucc addr))
+          |> Set.of_list (module Addr)
+    in
+    List.map addrs ~f:(fun addr ->
+        if Set.mem s.generated addr then Generated
+        else if Map.mem s.values addr || Set.mem pending addr then Stored
+        else
+          match find_layer addr s with
+          | None -> Unmapped
+          | Some { mem = Static _ } -> Mapped
+          | Some { mem = Dynamic { value; _ } } ->
+              if Option.is_some (Generator.fill value) then Mapped
+              else Generated)
 
   let restore_state current (m : Snapshot.mem) =
     match

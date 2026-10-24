@@ -2434,6 +2434,15 @@ module Std : sig
 
           @since 2.6.0 *)
 
+      val allocated : (addr * addr) observation
+      (** [allocated] occurs before a region is allocated over the range
+          [(lower,upper)], see {!Make.add_region}, whose bytes, that were
+          stored, or generated, before, it replaces, so that a backing, e.g., an
+          emulator, gives the bytes, that are pending, and drops its copies of
+          the range.
+
+          @since 2.6.0 *)
+
       type exn +=
         | Unknown_segment of addr * addr
               (** [Unknown_segment (lower, upper)] occurs when a snapshot, which
@@ -2734,6 +2743,14 @@ module Std : sig
             checkpoints have them.
 
             Precondition: the data of the memories are bytes.
+
+            @since 2.6.0 *)
+
+        val origins_of :
+          Monad.State.Multi.id -> addr list -> origin list Machine.t
+        (** [origins_of machine addrs] where the bytes at [addrs] of the
+            [machine] come from, as {!origin} tells, e.g., of a snapshot, by its
+            state, which doesn't change.
 
             @since 2.6.0 *)
 
