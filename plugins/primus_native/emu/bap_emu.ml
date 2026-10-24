@@ -140,7 +140,7 @@ let start init (entry : Primus.Linker.name) =
         Component.init () >>= ended
     | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ | X.Save _ | X.Interpret
     | X.Set_pc _ | X.Spawn _ | X.Call _ | X.Regions | X.Dump _ | X.Values _
-    | X.Origins _ ->
+    | X.Origins _ | X.Drop _ ->
         Machine.return ()
   in
   ended ()
@@ -311,13 +311,57 @@ let snapshot t =
 let restore t { owner; id } =
   if not (phys_equal owner t.session) then
     invalid_arg "Bap_emu.restore: the snapshot is of another emulator";
+  if Hash_set.mem t.session.dead id then
+    invalid_arg "Bap_emu.restore: the snapshot was dropped";
   t.session.exit_code <- None;
   resume t (X.Restore id)
+
+let drop_snapshot t { owner; id } =
+  if not (phys_equal owner t.session) then
+    invalid_arg "Bap_emu.drop_snapshot: the snapshot is of another emulator";
+  if not (paused t) then
+    invalid_arg
+      "Bap_emu.drop_snapshot: the program is not paused, e.g., in a hook";
+  if not (Hash_set.mem t.session.dead id) then resume t (X.Drop id)
 
 module type Completion = X.Completion
 
 let complete = X.complete
 let save_lifts t = Option.iter t.session.lifter ~f:(fun l -> l.save ())
+
+(* the lifted instructions, that the lifter keeps for the engines and
+   the cache, and that the hooks lifted, are dropped, after they are
+   saved, so that a long run gives their memory back *)
+let forget_lifts t =
+  Option.iter t.session.lifter ~f:(fun l -> l.forget ());
+  Hashtbl.clear t.lifted;
+  Hashtbl.clear t.paused_lifts;
+  Hashtbl.clear t.thumb_insns
+
+type footprint = { heap : int; top_heap : int; rss : int option }
+
+(* the resident size of the process, which Linux tells *)
+let rss () =
+  match In_channel.read_lines "/proc/self/status" with
+  | lines ->
+      List.find_map lines ~f:(fun line ->
+          match String.chop_prefix line ~prefix:"VmRSS:" with
+          | Some rest -> (
+              match String.split (String.strip rest) ~on:' ' with
+              | kb :: _ ->
+                  Option.map (Int.of_string_opt kb) ~f:(fun kb -> kb * 1024)
+              | [] -> None)
+          | None -> None)
+  | exception Sys_error _ -> None
+
+let footprint () =
+  let s = Gc.quick_stat () in
+  let word = Stdlib.Sys.word_size / 8 in
+  {
+    heap = s.heap_words * word;
+    top_heap = s.top_heap_words * word;
+    rss = rss ();
+  }
 
 let save t file =
   if not (paused t) then

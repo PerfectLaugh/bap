@@ -1,0 +1,15 @@
+footprint: heap true, top true, rss known
+Bap_emu.restore: the snapshot was dropped
+lifts main again true
+restored the kept snapshot at main true
+/mnt/data/Dev/bap/testsuite/bin/x86_64-linux-gnu-echo
+hello
+we
+not
+are
+some
+thine
+the
+be
+course
+exited 0

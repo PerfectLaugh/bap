@@ -701,7 +701,15 @@ val restore : t -> snapshot -> unit
     continues from the [snapshot], paused at its address. The hooks of the
     script stay.
 
-    Raises [Invalid_argument], if the [snapshot] is of another emulator. *)
+    Raises [Invalid_argument], if the [snapshot] is of another emulator, or was
+    dropped, see {!drop_snapshot}. *)
+
+val drop_snapshot : t -> snapshot -> unit
+(** [drop_snapshot emu snapshot] frees the [snapshot], which keeps the state of
+    the program, as it was: its machine, and the pages, that the engine holds
+    for it, so that a script, that snapshots each experiment, doesn't keep them
+    all, see {!footprint}. Raises [Invalid_argument], if the snapshot is of
+    another emulator, or the program is not paused. *)
 
 val diff : t -> snapshot -> (int64 * int) list
 (** [diff emu snapshot] the bytes of the memory, that differ between the
@@ -773,6 +781,30 @@ val save_lifts : t -> unit
     does, when it exits, also when a signal terminates it, e.g., the timeout of
     a script, see [SIGTERM], and as {!save} does, so that the next run starts
     with them. *)
+
+val forget_lifts : t -> unit
+(** [forget_lifts emu] drops the instructions, that the lifted engine lifted,
+    whose semantics it keeps for its engines, e.g., of the snapshots, and for
+    its cache, to which {!save_lifts} saves them first, and the ones, that
+    {!bir} lifted in the hooks, so that a long run of a program with much code
+    gives their memory back, e.g., when {!footprint} crosses a line. The code,
+    that the engine compiled, stays, so the program runs on, and the
+    instructions, that are lifted again, e.g., in a new engine, cost a lift
+    each, as at the start. *)
+
+type footprint = {
+  heap : int;  (** the bytes of the heap of OCaml *)
+  top_heap : int;  (** the most, that the heap had *)
+  rss : int option;
+      (** the resident size of the process, in bytes, which Linux tells, see
+          [/proc/self/status] *)
+}
+
+val footprint : unit -> footprint
+(** [footprint ()] the memory, that bap takes, so that a long run tells, when to
+    forget its lifts, see {!forget_lifts}, to drop its snapshots, see
+    {!drop_snapshot}, or to save a checkpoint, see {!save}, and start anew, see
+    [docs/emulation.md]. *)
 
 (** The checkpoints, that {!save} wrote, which a script inspects, without
     loading their program, e.g., to choose one in a pipeline. *)

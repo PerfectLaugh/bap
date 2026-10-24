@@ -255,6 +255,9 @@ and lifter = {
   save : unit -> unit;
       (** saves the instructions to the cache, if it has one, and they changed,
           as the run does, when it exits *)
+  forget : unit -> unit;
+      (** saves the instructions, and drops them, so that the ones, that run
+          again, are lifted again, see [Bap_emu.forget_lifts] *)
 }
 
 and session = {
@@ -699,6 +702,9 @@ type request =
   | Origins of Primus.Machine.id option * int64 list
       (** where the bytes of the machine, or of the snapshot, come from, see
           [Bap_emu.changes] *)
+  | Drop of Primus.Machine.id
+      (** the snapshot is killed, and its pages are freed, see
+          [Bap_emu.drop_snapshot] *)
   | Regions
       (** the mapped memory of the machine, with its protections, see
           [Bap_emu.regions] *)
@@ -1178,12 +1184,32 @@ let lifter ?cache ~arm project =
   let names = Tid.Table.create () in
   let entries = Hashtbl.Poly.create () in
   let dirty = ref false in
+  (* the instructions, that were forgotten, are in the file, which the
+     ones, that are kept, join *)
+  let forgotten = ref false in
   let save () =
     Option.iter cache ~f:(fun file ->
         if !dirty then begin
           dirty := false;
-          Lifts.save file (Hashtbl.data entries |> List.map ~f:fst)
+          let kept = Hashtbl.data entries |> List.map ~f:fst in
+          let all =
+            if not !forgotten then kept
+            else begin
+              let merged = Hashtbl.Poly.create () in
+              List.iter (Lifts.load file) ~f:(fun (e : Lifts.entry) ->
+                  Hashtbl.set merged ~key:(e.addr, e.thumb) ~data:e);
+              List.iter kept ~f:(fun (e : Lifts.entry) ->
+                  Hashtbl.set merged ~key:(e.addr, e.thumb) ~data:e);
+              Hashtbl.data merged
+            end
+          in
+          Lifts.save file all
         end)
+  in
+  let forget () =
+    save ();
+    Hashtbl.clear entries;
+    forgotten := true
   in
   Option.iter cache ~f:(fun file ->
       List.iter (Lifts.load file) ~f:(fun (e : Lifts.entry) ->
@@ -1345,6 +1371,7 @@ let lifter ?cache ~arm project =
     name = Hashtbl.find names;
     cached = not (Hashtbl.is_empty entries);
     save;
+    forget;
   }
 
 (* the NaNs and the invalid integers of the target, as ieee754-policy of
@@ -5679,6 +5706,13 @@ module Make (Machine : Primus.Machine.S) = struct
         let* () = Machine.kill id in
         let* () = Machine.switch snapshot in
         (* the killed machine never continues *)
+        serve pc
+    | Drop snapshot ->
+        (* the snapshot is dropped without running, as a kill would, and
+           its parked pages are freed *)
+        let* () = Machine.discard snapshot in
+        unpark_all e.session snapshot;
+        Hash_set.add e.session.dead snapshot;
         serve pc
 
   and snapshot id pc =

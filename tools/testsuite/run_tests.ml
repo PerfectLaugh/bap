@@ -1108,6 +1108,19 @@ let emu data =
             ]
         in
         golden env "emu/live/cache.txt" out.text);
+    (* the memory of a long run: the footprint, the lifted instructions,
+       that are forgotten, after which the program runs on, and the
+       snapshots, that are dropped, see long.ml *)
+    case "emu/live/long" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/live/long.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+            ]
+        in
+        golden env "emu/live/long.txt" out.text);
     (* the emulators run side by side, each in its own engine, also of
        another target, with their own registers, memory, names and
        hooks *)

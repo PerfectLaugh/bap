@@ -484,6 +484,32 @@ ignore (Emu.step b)
 
 The script runs one of them at a time. `Emu.knowledge emu` returns the knowledge of a system after its program ended, e.g., the instructions that it lifted.
 
+### Long runs
+
+A run, that executes much new code, grows: the lifted engine keeps the semantics of each instruction, that it lifted, for its engines and its cache, the memory of Primus keeps each byte, that the program stored, as a value of its own, which costs about a hundred bytes, and a snapshot keeps a machine, with the pages, that the engine holds for it. The heap of OCaml takes about twice the live data, by default, see `space_overhead`. A script, that runs for long, watches its footprint, and gives the memory back:
+
+```ocaml
+let check emu =
+  let f = Emu.footprint () in
+  if f.heap > 4_000_000_000 then begin
+    Emu.forget_lifts emu;            (* the lifted instructions, saved first *)
+    List.iter !old ~f:(Emu.drop_snapshot emu);  (* the snapshots, that are done *)
+    Gc.compact ()
+  end;
+  if Option.exists f.rss ~f:(fun rss -> rss > 16_000_000_000) then begin
+    Emu.save emu "resume.ckpt";      (* and start anew from the checkpoint *)
+    exit 3
+  end
+```
+
+- `footprint ()` is the heap of OCaml, the most it had, and the resident size of the process, which Linux tells.
+- `forget_lifts emu` saves the lifted instructions to the cache, if bap has one, and drops them, with the ones, that `bir` lifted in the hooks; the code, that the engine compiled, stays, so the program runs on at full speed, and an instruction, that is lifted again, e.g., in a new engine, costs a lift, as at the start.
+- `drop_snapshot emu snapshot` frees a snapshot, that the script doesn't restore anymore; `restore` of a dropped snapshot raises.
+- The garbage collector of OCaml trades memory for time: `OCAMLRUNPARAM='o=40'` in the environment, or `Gc.set { (Gc.get ()) with space_overhead = 40 }` in the script, keeps the heap closer to the live data, at the cost of more collections; the default is 120.
+- The bytes, that the program stores in Unicorn, go to Primus, when it reads them, e.g., at a snapshot, a checkpoint, or a `project`, as values; `peek` and the diffs read the pending pages without storing them.
+
+A wrapper, that is killed, e.g., `timeout`, or a task runner, leaves bap running, so a long run installs its own watchdog: `Sys.set_signal Sys.sigalrm` with `Unix.alarm`, or a handler of `SIGTERM`, that stops the program, see the signals above, saves what it needs, and exits; the lifted engine saves its instructions on `SIGTERM` and `SIGINT` itself, unless the script handles them.
+
 ## See also
 
 - The API reference of `Bap_emu`, `Bap_script`, and `Bap_script_debugger`, in `dune build @doc`.
