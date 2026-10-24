@@ -18,6 +18,8 @@ module Make (Machine : Machine) : sig
   val version : int Machine.t
   val cover : 'a Bap_primus_observation.t -> unit Machine.t
   val uncovered : 'a Bap_primus_observation.t -> bool Machine.t
+  val cover_code : 'a Bap_primus_observation.t -> unit Machine.t
+  val code_covered : 'a Bap_primus_observation.t -> bool Machine.t
   val opaque : unit Machine.t
   val is_opaque : bool Machine.t
 end

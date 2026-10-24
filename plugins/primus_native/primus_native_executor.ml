@@ -199,6 +199,9 @@ type engine = {
   mutable stepper : Uc.hook option;
       (** the hook of every address, while the stepping is on *)
   mutable watching : watching;  (** the events that the observers see *)
+  mutable code_segments : (int64 * int64) list;
+      (** the executable segments of the program, whose writes are watched, see
+          [watching], as the dynamic code of Primus sees them *)
   mutable watchers : Uc.hook list;  (** the hooks of the events *)
   mutable observed : (int64 * int) option;
       (** the address of the last observation and the start of Unicorn *)
@@ -225,7 +228,14 @@ type engine = {
 
 (* the events of the code, that the observers of the machine see, which
    are hooked, only when they are observed, see [Make.watching] *)
-and watching = { pcs : bool; reads : bool; writes : bool }
+and watching = {
+  pcs : bool;
+  reads : bool;
+  writes : bool;
+  code_writes : bool;
+      (** the writes to the code of the program only, see [code_segments], if
+          not all of the writes, see [Primus.Track.cover_code] *)
+}
 
 (* The state of a system, whose machines run in Unicorn, which is of the
    system, see [session_state], as the systems, e.g., the emulators of a
@@ -1398,7 +1408,9 @@ let create session target ~foreign ~externals =
       hooked = Int64.Hash_set.create ();
       stops = -1;
       stepper = None;
-      watching = { pcs = false; reads = false; writes = false };
+      watching =
+        { pcs = false; reads = false; writes = false; code_writes = false };
+      code_segments = [];
       watchers = [];
       observed = None;
       accesses = Int64.Table.create ();
@@ -1804,10 +1816,16 @@ let watch e (w : watching) =
       add
         (Uc.on_mem e.uc [ `read_after ] (fun _ addr size value ->
              Queue.enqueue e.session.events (Loaded (addr, size, value))));
-    if w.writes then
-      add
-        (Uc.on_mem e.uc [ `write ] (fun _ addr size value ->
-             Queue.enqueue e.session.events (Stored (addr, size, value))));
+    let stored _ addr size value =
+      Queue.enqueue e.session.events (Stored (addr, size, value))
+    in
+    if w.writes then add (Uc.on_mem e.uc [ `write ] stored)
+    else if w.code_writes then
+      (* the writes to the code are seen, when the engine stops, before
+         the interpreter runs the code, rather than at once, so that the
+         engine isn't stopped at each instruction *)
+      List.iter e.code_segments ~f:(fun (first, last) ->
+          add (Uc.on_mem ~first ~last e.uc [ `write ] stored));
     if w.pcs || w.reads || w.writes then
       add
         (Uc.on_code e.uc (fun addr _ ->
@@ -2776,7 +2794,23 @@ module Make (Machine : Primus.Machine.S) = struct
                       let* args = Machine.List.map args ~f:Value.of_word in
                       notify (name, args))
                 in
-                List.iter r.writes ~f:(fun (addr, data) -> uc_write e addr data);
+                List.iter r.writes ~f:(fun (addr, data) ->
+                    uc_write e addr data;
+                    (* the writes to the code are seen, see [watch] *)
+                    if e.watching.code_writes then
+                      let last =
+                        Int64.(addr + of_int (String.length data) - 1L)
+                      in
+                      if
+                        List.exists e.code_segments ~f:(fun (first, l) ->
+                            Int64.(first <= last && addr <= l))
+                      then
+                        String.iteri data ~f:(fun i c ->
+                            Queue.enqueue e.session.events
+                              (Stored
+                                 ( Int64.(addr + of_int i),
+                                   1,
+                                   Int64.of_int (Char.to_int c) ))));
                 let result =
                   Option.map call.result ~f:(fun (exp, width) ->
                       let x = Word.of_int64 ~width r.value in
@@ -3137,8 +3171,32 @@ module Make (Machine : Primus.Machine.S) = struct
        tracked values, e.g., of the taint, see them in the interpreter,
        which runs the code, that uses them, see [Primus.Track.cover] *)
     let* loaded = Track.uncovered Primus.Interpreter.loaded in
-    let+ stored = Track.uncovered Primus.Interpreter.stored in
-    watch e { pcs; reads = loading || loaded; writes = storing || stored }
+    let* stored = Track.uncovered Primus.Interpreter.stored in
+    (* the observers of the stores to the code, e.g., the dynamic code,
+       see them only, see [Primus.Track.cover_code] *)
+    let* code_writes = Track.code_covered Primus.Interpreter.stored in
+    let+ () =
+      if code_writes && List.is_empty e.code_segments then
+        let+ memory = Machine.gets Project.memory in
+        e.code_segments <-
+          Memmap.to_sequence memory
+          |> Seq.filter_map ~f:(fun (mem, tag) ->
+              match Bap.Std.Value.get Image.segment tag with
+              | Some seg when Image.Segment.is_executable seg ->
+                  Some
+                    ( int64_of_word (Bap.Std.Memory.min_addr mem),
+                      int64_of_word (Bap.Std.Memory.max_addr mem) )
+              | _ -> None)
+          |> Seq.to_list
+      else Machine.return ()
+    in
+    watch e
+      {
+        pcs;
+        reads = loading || loaded;
+        writes = storing || stored;
+        code_writes;
+      }
 
   (* the loads and the stores of the code, that Unicorn ran, which the
      observers see byte by byte, as they see those of Primus *)

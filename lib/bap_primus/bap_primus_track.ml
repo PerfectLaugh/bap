@@ -18,6 +18,9 @@ type t = {
   covered : int String.Map.t;
       (** the numbers of the observers of the observations, by their names, that
           need the events of the tracked values only, see [cover] *)
+  code_covered : int String.Map.t;
+      (** the numbers of the observers of the observations, by their names, that
+          need the events of the code of the program only, see [cover_code] *)
   opaque : bool;  (** see [opaque] *)
 }
 
@@ -30,6 +33,7 @@ let state =
         pages = Int64.Map.empty;
         version = 0;
         covered = String.Map.empty;
+        code_covered = String.Map.empty;
         opaque = false;
       })
 
@@ -76,6 +80,7 @@ module Make (Machine : Machine) = struct
           values = s.values;
           version = s.version + 1;
           covered = s.covered;
+          code_covered = s.code_covered;
           opaque = s.opaque;
         }
       >>= fun () -> Machine.Observation.make on_marked addr
@@ -164,8 +169,27 @@ module Make (Machine : Machine) = struct
   let opaque = Machine.Local.update state ~f:(fun s -> { s with opaque = true })
   let is_opaque = Machine.Local.get state >>| fun s -> s.opaque
 
+  let cover_code key =
+    Machine.Local.update state ~f:(fun s ->
+        {
+          s with
+          code_covered =
+            Map.update s.code_covered (Observation.name key) ~f:(function
+              | None -> 1
+              | Some n -> n + 1);
+        })
+
+  let count covered key =
+    Option.value (Map.find covered (Observation.name key)) ~default:0
+
   let uncovered key =
     Machine.Observation.observers key >>= fun n ->
     Machine.Local.get state >>| fun s ->
-    n > Option.value (Map.find s.covered (Observation.name key)) ~default:0
+    n > count s.covered key + count s.code_covered key
+
+  let code_covered key =
+    Machine.Observation.observers key >>= fun n ->
+    Machine.Local.get state >>| fun s ->
+    let code = count s.code_covered key in
+    code > 0 && n <= count s.covered key + code
 end

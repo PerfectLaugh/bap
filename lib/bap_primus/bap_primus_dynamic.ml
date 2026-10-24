@@ -275,6 +275,7 @@ module LinkBinaryProgram (Machine : Machine) = struct
   module Linker = Linker.Make (Machine)
   module Memory = Primus.Memory.Make (Machine)
   module Interp = Interpreter.Make (Machine)
+  module Track = Bap_primus_track.Make (Machine)
 
   let link_dynamic ?tid ?name addr =
     Machine.Local.update dynamic ~f:(fun linked -> Set.add linked addr)
@@ -305,49 +306,53 @@ module LinkBinaryProgram (Machine : Machine) = struct
 
   (* the block of the program, that the program stores to, in the
      virtual memory, not in another memory, e.g., of the symbolic
-     executor, whose addresses are not of the code *)
-  let changed (a, _) =
+     executor, whose addresses are not of the code; the stores outside
+     of the code, see [segments], e.g., to the stack, which are most of
+     them, return at once, without the state of the machine *)
+  let changed segments (a, _) =
     let addr = Value.to_word a in
-    Machine.Global.get code >>= fun { segments; index } ->
-    Memory.memory >>= fun memory ->
-    Machine.gets Project.target >>= fun target ->
-    let virtual_memory () =
-      String.equal
-        (Primus.Memory.Descriptor.name memory)
-        (Theory.Var.name (Theory.Target.data target))
-    in
     if
-      (not
-         (List.exists segments ~f:(fun (lower, upper) ->
-              Addr.(lower <= addr && addr <= upper))))
-      || not (virtual_memory ())
+      not
+        (List.exists segments ~f:(fun (lower, upper) ->
+             Addr.(lower <= addr && addr <= upper)))
     then Machine.return ()
     else
-      let { blocks; blks; subs } = Lazy.force index in
-      Interp.code_stored addr >>= fun () ->
-      match Map.closest_key blocks `Less_or_equal_to addr with
-      | Some (start, last) when Addr.(addr <= last) ->
-          Machine.Local.get dynamic >>= fun linked ->
-          if Set.mem linked start then Machine.return ()
-          else
-            (* the Thumb code of ARM is linked at the odd address too *)
-            Machine.gets Project.arch >>= fun arch ->
-            let starts =
-              match arch with
-              | #Arch.arm | #Arch.thumb ->
-                  [ Word.(start lor one (bitwidth start)); start ]
-              | _ -> [ start ]
-            in
-            Machine.List.iter starts ~f:(fun addr ->
-                let tids = Map.find_multi blks start in
-                (if List.is_empty tids then link_dynamic addr
-                 else
-                   Machine.List.iter tids ~f:(fun tid -> link_dynamic ~tid addr))
-                >>= fun () ->
-                match Map.find subs start with
-                | Some sub -> link_sub sub addr
-                | None -> Machine.return ())
-      | _ -> Machine.return ()
+      Memory.memory >>= fun memory ->
+      Machine.gets Project.target >>= fun target ->
+      if
+        not
+          (String.equal
+             (Primus.Memory.Descriptor.name memory)
+             (Theory.Var.name (Theory.Target.data target)))
+      then Machine.return ()
+      else
+        Machine.Global.get code >>= fun { index; _ } ->
+        let { blocks; blks; subs } = Lazy.force index in
+        Interp.code_stored addr >>= fun () ->
+        match Map.closest_key blocks `Less_or_equal_to addr with
+        | Some (start, last) when Addr.(addr <= last) ->
+            Machine.Local.get dynamic >>= fun linked ->
+            if Set.mem linked start then Machine.return ()
+            else
+              (* the Thumb code of ARM is linked at the odd address too *)
+              Machine.gets Project.arch >>= fun arch ->
+              let starts =
+                match arch with
+                | #Arch.arm | #Arch.thumb ->
+                    [ Word.(start lor one (bitwidth start)); start ]
+                | _ -> [ start ]
+              in
+              Machine.List.iter starts ~f:(fun addr ->
+                  let tids = Map.find_multi blks start in
+                  (if List.is_empty tids then link_dynamic addr
+                   else
+                     Machine.List.iter tids ~f:(fun tid ->
+                         link_dynamic ~tid addr))
+                  >>= fun () ->
+                  match Map.find subs start with
+                  | Some sub -> link_sub sub addr
+                  | None -> Machine.return ())
+        | _ -> Machine.return ()
 
   (* the executable address, that nothing is linked to, see the
      [unresolved] observation of the linker *)
@@ -495,9 +500,14 @@ module LinkBinaryProgram (Machine : Machine) = struct
     in
     (linker ~arm linked)#run prog !!() >>= fun () ->
     info "Finished linking binary program%!";
+    Machine.Global.get code >>= fun { segments; _ } ->
     Machine.sequence
       [
-        Machine.Observation.observe Interpreter.stored changed;
+        (* the stores to the code only, see [changed], so that the
+           executors, that run the code natively, don't make the events
+           of all the stores, see [Primus.Track.cover_code] *)
+        Track.cover_code Interpreter.stored;
+        Machine.Observation.observe Interpreter.stored (changed segments);
         Machine.Observation.observe Bap_primus_linker.unresolved unresolved;
       ]
 end

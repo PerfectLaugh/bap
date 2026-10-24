@@ -2931,7 +2931,25 @@ module Std : sig
 
         val uncovered : 'a observation -> bool Machine.t
         (** [uncovered observation] if the [observation] has an observer, or a
-            watcher, that isn't covered, see {!cover} *)
+            watcher, that isn't covered, see {!cover} and {!cover_code} *)
+
+        val cover_code : 'a observation -> unit Machine.t
+        (** [cover_code observation] declares, that an observer of the
+            [observation], which the caller adds, needs only the events of the
+            code of the program, e.g., the stores to it, which may change it,
+            see the dynamic code of {!Linker}, so that the executors, that run
+            the code natively, make only them, and not at once, but before the
+            interpreter runs the code.
+
+            @since 3.0.0 *)
+
+        val code_covered : 'a observation -> bool Machine.t
+        (** [code_covered observation] if an observer of the [observation] needs
+            the events of the code, see {!cover_code}, and no observer needs all
+            of them, see {!uncovered}, so that the executors make only the
+            events of the code.
+
+            @since 3.0.0 *)
 
         val opaque : unit Machine.t
         (** [opaque] declares, that the caller tracks the values, that only the
