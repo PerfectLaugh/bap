@@ -2732,6 +2732,7 @@ module Std : sig
 
       val instruction :
         ?encoding:Theory.language ->
+        ?disassembled:bool ->
         project ->
         int64 ->
         string ->
@@ -2740,7 +2741,14 @@ module Std : sig
           at [addr], decoded from [code], its bytes, at most {!max_size} of
           them, in the knowledge, that the computation runs in, e.g., the
           toplevel one, outside of a machine, as {!Make.insn} lifts it, but
-          without its cache. *)
+          without its cache.
+
+          The instruction is the one, that the disassembler computed, if it has
+          the bytes, unless [disassembled] is [false], so that the decoder
+          decodes it, and keeps its state, e.g., of an IT block of Thumb, whose
+          instructions are decoded from its IT instruction.
+
+          @since 3.0.0 [disassembled] *)
 
       val named :
         ?encoding:Theory.language ->

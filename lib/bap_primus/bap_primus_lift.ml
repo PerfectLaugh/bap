@@ -191,40 +191,48 @@ let disassembled_insn ?encoding proj addr code =
   | Some (size, coding, insn) -> ir ~width ~addr ~size coding insn
   | None -> KB.return None
 
+(* the size and the IR of the instruction at [addr], that the decoder
+   decodes from [code], the bytes from [addr], in the unit of [file] *)
+let decoded ?encoding proj file addr code =
+  let open KB.Syntax in
+  let target = Project.target proj in
+  let width = width_of proj in
+  let addr = Word.of_int64 ~width addr in
+  let endian =
+    if Theory.Endianness.(equal eb) (Theory.Target.endianness target) then
+      BigEndian
+    else LittleEndian
+  in
+  match Memory.create endian addr (Bigstring.of_string code) with
+  | Error _ -> KB.return None
+  | Ok mem -> (
+      unit_of_file file >>= fun unit ->
+      (* the labels, that the lifters create, e.g., to find the target,
+         which unaliases the registers, belong to the unit, as the
+         project does it *)
+      KB.promising Theory.Label.unit ~promise:(fun _ -> KB.return (Some unit))
+      @@ fun () ->
+      decode ?encoding unit mem >>= fun (label, size) ->
+      match size with
+      | None -> KB.return None
+      | Some (size, coding) ->
+          KB.collect Theory.Semantics.slot label
+          >>= ir ~width ~addr ~size coding)
+
 (* the size and the IR of the instruction at [addr], if [code], the
-   bytes from [addr], has it *)
-let lift ?encoding proj addr code =
+   bytes from [addr], has it, as the disassembler computed it, unless
+   [disassembled] is false, e.g., so that the decoder decodes it, and
+   keeps its state, see the IT blocks of Thumb *)
+let lift ?encoding ?(disassembled = true) proj addr code =
   let open KB.Syntax in
   match Project.get proj filename with
   | None -> KB.return None
   | Some file -> (
-      disassembled_insn ?encoding proj addr code >>= function
+      (if disassembled then disassembled_insn ?encoding proj addr code
+       else KB.return None)
+      >>= function
       | Some _ as insn -> KB.return insn
-      | None -> (
-          let target = Project.target proj in
-          let width = width_of proj in
-          let addr = Word.of_int64 ~width addr in
-          let endian =
-            if Theory.Endianness.(equal eb) (Theory.Target.endianness target)
-            then BigEndian
-            else LittleEndian
-          in
-          match Memory.create endian addr (Bigstring.of_string code) with
-          | Error _ -> KB.return None
-          | Ok mem -> (
-              unit_of_file file >>= fun unit ->
-              (* the labels, that the lifters create, e.g., to find the
-                 target, which unaliases the registers, belong to the
-                 unit, as the project does it *)
-              KB.promising Theory.Label.unit ~promise:(fun _ ->
-                  KB.return (Some unit))
-              @@ fun () ->
-              decode ?encoding unit mem >>= fun (label, size) ->
-              match size with
-              | None -> KB.return None
-              | Some (size, coding) ->
-                  KB.collect Theory.Semantics.slot label
-                  >>= ir ~width ~addr ~size coding)))
+      | None -> decoded ?encoding proj file addr code)
 
 (* the name of the instruction at [addr], that [code] has, which no
    lifter defined, so that it is not lifted, see [ir] *)
@@ -269,10 +277,10 @@ let max_size = 16
 (* the instruction, outside of a machine, in the toplevel knowledge, e.g.,
    of a script, whose conflicts, e.g., of an invalid instruction, are no
    instruction *)
-let instruction ?encoding proj addr code =
+let instruction ?encoding ?disassembled proj addr code =
   let open KB.Syntax in
   KB.catch
-    (lift ?encoding proj addr code
+    (lift ?encoding ?disassembled proj addr code
     >>| Option.map ~f:(fun (size, _, _, blks) -> (size, blks)))
     (fun _ -> KB.return None)
 

@@ -5,6 +5,7 @@ val max_size : int
 
 val instruction :
   ?encoding:Theory.language ->
+  ?disassembled:bool ->
   project ->
   int64 ->
   string ->

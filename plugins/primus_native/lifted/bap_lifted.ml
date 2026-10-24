@@ -219,6 +219,7 @@ type t = {
   regs : Bytes.t Int.Table.t;
   sizes : int Int.Table.t;
   probe : Uc.t Lazy.t;  (** the Unicorn, whose registers have the sizes *)
+  reset : int list;  (** the registers, that start as the reset of Unicorn *)
   others : word String.Table.t;  (** the registers, that are not mapped *)
   pages : page Int64.Table.t;
   insns : insn Int64.Table.t;
@@ -359,6 +360,16 @@ let uc_err_write_prot = 12
 let uc_err_read_prot = 13
 let uc_err_fetch_prot = 14
 
+(* the registers, that start with their values of the reset of Unicorn,
+   rather than 0: PSTATE of AArch64, whose masks of DAIF are set, and
+   whose SPSel selects SP_EL1, as Unicorn runs at EL1. The others, e.g.,
+   FCSR of RISC-V, which Unicorn doesn't read, while the floats are off,
+   are 0. *)
+let reset_regs arch =
+  match (arch : Uc.arch) with
+  | Arm64 -> List.filter_opt [ Uc.reg arch "PSTATE" ]
+  | Arm | X86 | Mips | Ppc | Riscv -> []
+
 let create config arch mode =
   (* the sizes of the registers are the ones of Unicorn, which is asked
      about the registers, that are used *)
@@ -371,6 +382,7 @@ let create config arch mode =
       regs = Int.Table.create ();
       sizes = Int.Table.create ();
       probe;
+      reset = reset_regs arch;
       others = String.Table.create ();
       pages = Int64.Table.create ();
       insns = Int64.Table.create ();
@@ -467,23 +479,13 @@ let reg_size t id =
       Hashtbl.set t.sizes ~key:id ~data:size;
       size
 
-(* the registers, that start with their values of the reset of Unicorn,
-   rather than 0: PSTATE of AArch64, whose masks of DAIF are set, and
-   whose SPSel selects SP_EL1, as Unicorn runs at EL1. The others, e.g.,
-   FCSR of RISC-V, which Unicorn doesn't read, while the floats are off,
-   are 0. *)
-let reset_regs arch =
-  match (arch : Uc.arch) with
-  | Arm64 -> List.filter_opt [ Uc.reg arch "PSTATE" ]
-  | Arm | X86 | Mips | Ppc | Riscv -> []
-
 let reg_bytes t id =
   match Hashtbl.find t.regs id with
   | Some b -> b
   | None ->
       let size = reg_size t id in
       let b =
-        if List.mem (reset_regs t.arch) id ~equal:Int.equal then
+        if List.mem t.reset id ~equal:Int.equal then
           Bytes.of_string (Uc.reg_read_bytes (Lazy.force t.probe) id)
         else Bytes.make size '\000'
       in
