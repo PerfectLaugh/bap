@@ -9,13 +9,13 @@
 
 (defun DMB (_) (empty))
 
-;; the speculation barrier, which the decoder of FEAT_SB decodes, and
-;; else decodes as MSR, see below
-(defun SB () (empty))
-
 (defun DSB (_) (empty))
 
 (defun ISB (_) (empty))
+
+;; the speculation barrier, which the decoder of FEAT_SB decodes, and
+;; else decodes as MSR, see below
+(defun SB () (empty))
 
 ;; The hints, e.g., YIELD, WFE, WFI, SEV, SEVL, DGH, ESB, PSB CSYNC,
 ;; TSB CSYNC, CSDB, and BTI, which have no effect on a single thread, and
@@ -130,13 +130,13 @@
     0x1987 (empty)                              ; SB
     (a64-undefined)))
 
-;; The fields of PSTATE, that MSR sets to an immediate, which Unicorn
-;; runs, at EL1, with no effect on the program: DAIFSet, DAIFClr, SPSel,
-;; UAO, and PAN.
 ;; SMSTART and SMSTOP of SME, which the processor of Unicorn doesn't
 ;; have, as the programs, e.g., glibc, run them, only if it has SME
 (defun MSRpstatesvcrImm1 (_ _) (a64-undefined))
 
+;; The fields of PSTATE, that MSR sets to an immediate, which Unicorn
+;; runs, at EL1, with no effect on the program: DAIFSet, DAIFClr, SPSel,
+;; UAO, and PAN.
 (defun MSRpstateImm4 (field _)
   (case field
     0x1e (empty)

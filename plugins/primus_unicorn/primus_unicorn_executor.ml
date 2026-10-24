@@ -3251,8 +3251,6 @@ module Make (Machine : Primus.Machine.S) = struct
       in
       String.of_char_list (List.rev (bytes 0 []))
 
-  (* the instruction at [addr], decoded from its current bytes, in
-     the Thumb mode, if Unicorn runs the Thumb code *)
   (* the failure at the instruction at [pc], that couldn't run, e.g.,
      that no lifter defined, which isn't lifted, see
      [Primus.Lift.undefined], or that is invalid *)
@@ -3271,6 +3269,8 @@ module Make (Machine : Primus.Machine.S) = struct
     | Some name -> fail "the instruction %s at %Lx has no semantics" name pc
     | None -> fail "%s at %Lx" what pc
 
+  (* the instruction at [addr], decoded from its current bytes, in
+     the Thumb mode, if Unicorn runs the Thumb code *)
   let lift ?(thumb = false) e addr =
     let* read = code_reader e addr in
     Lift.insn ?encoding:(arm_encoding e ~thumb) ~read addr
@@ -5279,10 +5279,12 @@ module Make (Machine : Primus.Machine.S) = struct
           let* sliced = Machine.Local.get threads >>| Threads.ready e in
           let now = clock () in
           let ends = s.sliced_at +. Threads.slice in
-          (* the thread doesn't switch in an atomic sequence of the
-             lifted engine, see [Uc.in_atomic] *)
+          (* the thread, that a hook of the code paused, runs the
+             instruction, at which it paused, before it is preempted *)
           let resumed = s.resumed in
           s.resumed <- false;
+          (* the thread doesn't switch in an atomic sequence of the
+             lifted engine, see [Uc.in_atomic] *)
           let expired =
             sliced && Float.(now >= ends) && not (Uc.in_atomic e.uc)
           in

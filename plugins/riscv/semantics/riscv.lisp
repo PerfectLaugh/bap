@@ -256,6 +256,9 @@
 (defun C_NOP ()
   (empty))
 
+(defun NOP ()
+  (empty))
+
 ;; the hints, which have no effect: C.NOP with an immediate, the
 ;; prefetches of Zicbop, and WFI, as no interrupt is modeled
 (defun C_NOP_HINT (_) (empty))
@@ -263,9 +266,6 @@
 (defun PREFETCH_W (_ _) (empty))
 (defun PREFETCH_I (_ _) (empty))
 (defun WFI () (empty))
-
-(defun NOP ()
-  (empty))
 
 
 ;;; The register forms of the operations, and the word operations of

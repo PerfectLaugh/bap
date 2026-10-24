@@ -267,14 +267,15 @@
 ;; The registers ST0-ST7 are the registers of the stack, relative to
 ;; its top, as the operands name them, so a push rotates them, ST0 is
 ;; the new value, which overwrites the old ST7, and a pop rotates them
-;; back, ST7 is the popped value. The tags, the status word, e.g., its
-;; condition codes C0-C3, and the exceptions are not modeled. The
-;; operations are of the 80-bit extended format, rounded to nearest,
-;; ties to even, as the precision control and the rounding control of
-;; FPU_CONTROL of the System V ABI tell, the conversions to the integers
-;; and to the smaller formats, which the compilers precede with the
-;; changes of FPU_CONTROL, round as its rounding control, the bits
-;; 11:10, tells.
+;; back, ST7 is the popped value. The top of the stack and the tags
+;; are kept in FPU_STATUS and FPU_TAG, see [x87-push], the condition
+;; codes C0-C3 of the status word are set by FXAM only, and the
+;; exceptions are not modeled. The operations are of the 80-bit
+;; extended format, rounded to nearest, ties to even, as the precision
+;; control and the rounding control of FPU_CONTROL of the System V ABI
+;; tell, the conversions to the integers and to the smaller formats,
+;; which the compilers precede with the changes of FPU_CONTROL, round
+;; as its rounding control, the bits 11:10, tells.
 
 ;; The top of the stack, TOP of FPU_STATUS, and the tags of FPU_TAG, of
 ;; the physical registers, which the pushes and the pops keep, as the

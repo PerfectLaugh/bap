@@ -205,6 +205,12 @@
   (set-gpr rd (concat (extract 7 0 x) (extract 15 8 x)
                       (extract 23 16 x) (extract 31 24 x))))
 
+(defun BSWAP64r (rd x)
+  (set-gpr rd (concat (extract 7 0 x) (extract 15 8 x)
+                      (extract 23 16 x) (extract 31 24 x)
+                      (extract 39 32 x) (extract 47 40 x)
+                      (extract 55 48 x) (extract 63 56 x))))
+
 ;; MOVBE, the moves, that swap the bytes, of the loads and the stores
 (defun bswap-n (n x)
   (case n
@@ -228,9 +234,3 @@
   (store-n 32 (ea base scale index off seg) (bswap-n 32 (cast-low 32 x))))
 (defun MOVBE64mr (base scale index off seg x)
   (store-n 64 (ea base scale index off seg) (bswap-n 64 x)))
-
-(defun BSWAP64r (rd x)
-  (set-gpr rd (concat (extract 7 0 x) (extract 15 8 x)
-                      (extract 23 16 x) (extract 31 24 x)
-                      (extract 39 32 x) (extract 47 40 x)
-                      (extract 55 48 x) (extract 63 56 x))))

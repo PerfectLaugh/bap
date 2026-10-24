@@ -161,15 +161,14 @@ let calls ~next blks =
                 (Call (Call.create ~return:(Indirect next) ~target:l ()))
           | _ -> jmp))
 
-(* the size, the encoding, the name and the IR of the instruction of
-   [size] bytes at [addr] *)
 (* the instruction, that no lifter defined, e.g., whose Primus Lisp
    definition is missing, which has no name, rather than the one, whose
    definition does nothing, e.g., NOP *)
 let is_undefined insn = String.equal (Insn.name insn) (Insn.name Insn.empty)
 
-(* the instruction, that no lifter defined, is no instruction, rather
-   than the one, that does nothing, so that it fails, where it runs *)
+(* the size, the encoding, the name and the IR of the instruction of
+   [size] bytes at [addr], or none, if no lifter defined it, rather than
+   the instruction, that does nothing, so that it fails, where it runs *)
 let ir ~width ~addr ~size coding insn =
   if is_undefined insn then KB.return None
   else
