@@ -186,7 +186,9 @@ val bir : ?thumb:bool -> t -> int64 -> (int * blk term list) option
     {!write}, as Primus lifts it, when it interprets the instruction, e.g., of
     the tainted or the symbolic values, or [None], if the bytes aren't an
     instruction. The instruction is in the Thumb state of ARM, if [thumb], by
-    default, if the lower bit of [addr] is set, as in the program counter.
+    default, if the lower bit of [addr] is set, as in the program counter. The
+    instruction of an IT block of Thumb has its condition, as the block is
+    decoded from its IT instruction.
 
     The jumps to the addresses outside of the instruction are the indirect jumps
     to the constant addresses, and the instruction, that falls through, has no

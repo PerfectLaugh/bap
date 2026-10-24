@@ -777,6 +777,10 @@ let emu data =
             ("lifts the code", "400727: 5 bytes\n.*RDI := 0xA\n");
             ("lifts the patched code", "400727: 5 bytes\n.*RDI := 0x2B\n");
             ("lifts the Thumb code", "202dd: 2 bytes\n.*<- LR");
+            ( "lifts the member of the IT block",
+              "2028d: 2 bytes\n.*R2 := if ZF then R4 >> 1 else R2\n" );
+            ( "lifts the instruction after the IT block",
+              "2028f: 2 bytes\n.*R3 := #" );
             ("lifts the unwritten code", "unwritten 405000: 2 bytes\n");
             ( "lifts the written code in a hook",
               "written hook 405000: 5 bytes\n.*RAX := 0x2A\n" );

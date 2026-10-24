@@ -519,7 +519,7 @@ let write t addr data =
    starts from the toplevel one, and keeps the semantics, e.g., the Lisp
    program of x86, which it loads once, and the instructions, which are
    cached by their addresses and bytes *)
-let hooked t ?encoding ~thumb addr bytes =
+let hooked t ?encoding ~thumb ?(block = ([], [])) addr bytes =
   let key = (addr, bytes, thumb) in
   match Hashtbl.find t.lifted key with
   | Some insn -> insn
@@ -532,12 +532,76 @@ let hooked t ?encoding ~thumb addr bytes =
           t.hooked <- Some (Toplevel.current ());
           Toplevel.set toplevel)
         ~f:(fun () ->
+          let decode =
+            Knowledge.List.iter ~f:(fun (a, code) ->
+                Knowledge.Syntax.(
+                  Primus.Lift.instruction ?encoding t.project a code >>| ignore))
+          in
+          let before, after = block in
           Toplevel.exec
             Knowledge.Syntax.(
+              decode before >>= fun () ->
               Primus.Lift.instruction ?encoding t.project addr bytes
-              >>| fun insn -> result := insn));
+              >>= fun insn ->
+              result := insn;
+              decode after));
       Hashtbl.set t.lifted ~key ~data:!result;
       !result
+
+(* The instructions of an IT block of Thumb have the conditions, that
+   the decoder of LLVM keeps, as it decodes the IT instruction, and the
+   next ones, so the instruction of the block is lifted after them, from
+   the IT instruction, at most 4 instructions before it, and the members
+   after it are lifted then, so that the decoder leaves the block: the
+   instructions, whose bytes [read addr n] reads, before and after the
+   instruction at [addr], by their addresses and bytes, or none, if it
+   is not in an IT block. *)
+let it_block read addr =
+  let halfword a =
+    match read a 2 with
+    | b when String.length b = 2 ->
+        Some (Char.to_int b.[0] lor (Char.to_int b.[1] lsl 8))
+    | _ -> None
+  in
+  (* the 32-bit instructions of Thumb start with 0b11101, 0b11110, or
+     0b11111 *)
+  let size a =
+    match halfword a with
+    | Some h when h lsr 11 >= 0b11101 -> Some 4
+    | Some _ -> Some 2
+    | None -> None
+  in
+  let members it =
+    match halfword it with
+    | Some h when h land 0xFF00 = 0xBF00 && h land 0xF <> 0 ->
+        Some (4 - Int.ctz (h land 0xF))
+    | _ -> None
+  in
+  (* the [n] instructions from [a] *)
+  let rec next a n acc =
+    match size a with
+    | Some k when n > 0 ->
+        next Int64.(a + of_int k) (n - 1) ((a, read a k) :: acc)
+    | _ -> List.rev acc
+  in
+  (* the instructions from [a], before [addr], and the ones after it, if
+     one of the [n] members of the block is at [addr] *)
+  let rec walk a n acc =
+    if n = 0 || Int64.(a > addr) then None
+    else
+      match size a with
+      | None -> None
+      | Some k when Int64.(a = addr) ->
+          Some (List.rev acc, next Int64.(a + of_int k) (n - 1) [])
+      | Some k -> walk Int64.(a + of_int k) (n - 1) ((a, read a k) :: acc)
+  in
+  List.range 1 8
+  |> List.find_map ~f:(fun i ->
+      let it = Int64.(addr - of_int Int.(2 * i)) in
+      match members it with
+      | None -> None
+      | Some n -> walk Int64.(it + 2L) n [ (it, read it 2) ])
+  |> Option.value ~default:([], [])
 
 (* the bytes are read before the instruction is lifted in the machine,
    as the reading may copy the pages to Unicorn, and the instruction may
@@ -557,6 +621,11 @@ let bir ?thumb t addr =
         try Some (read t addr n) with Invalid_argument _ -> None)
     |> Option.value_exn ~message:(sprintf "Bap_emu.bir: %Lx is not mapped" addr)
   in
+  let block =
+    if not thumb then ([], [])
+    else
+      it_block (fun a n -> try read t a n with Invalid_argument _ -> "") addr
+  in
   let read a n =
     let off = Int64.(to_int_exn (a - addr)) in
     if off < 0 || off >= String.length bytes then ""
@@ -566,7 +635,7 @@ let bir ?thumb t addr =
     match e.arch with Arm -> Primus.Interworking.encoding ~thumb | _ -> None
   in
   match t.state with
-  | Running -> hooked t ?encoding ~thumb addr bytes
+  | Running -> hooked t ?encoding ~thumb ~block addr bytes
   | _ ->
       Hashtbl.find_or_add t.paused_lifts (addr, bytes, thumb)
         ~default:(fun () ->
@@ -579,9 +648,29 @@ let bir ?thumb t addr =
                         module Lift = Primus.Lift.Make (Machine)
                         open Machine.Syntax
 
+                        let decode proj =
+                          Machine.List.iter ~f:(fun (a, code) ->
+                              Machine.knowledge
+                                (Primus.Lift.instruction ?encoding proj a code)
+                              >>| ignore)
+
                         let init () =
-                          Lift.insn ?encoding ~read addr >>| fun insn ->
-                          result := insn
+                          Machine.get () >>= fun proj ->
+                          match block with
+                          | [], [] ->
+                              Lift.insn ?encoding ~read addr >>| fun insn ->
+                              result := insn
+                          | before, after ->
+                              (* the instruction is decoded, rather than
+                                 taken from the cache, after the ones
+                                 before it *)
+                              decode proj before >>= fun () ->
+                              Machine.knowledge
+                                (Primus.Lift.instruction ?encoding proj addr
+                                   bytes)
+                              >>= fun insn ->
+                              result := insn;
+                              decode proj after
                       end);
           !result)
 

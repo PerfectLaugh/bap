@@ -33,6 +33,11 @@ let () =
       let arm = Emu.create (Bap_script.project thumb) in
       printf "thumb pc %Lx\n" (Emu.pc arm);
       show arm (Emu.pc arm);
+      (* the member of the IT block, it eq; lsreq r2, r4, #1, lifted
+         before the IT instruction, has its condition, and the instruction
+         after the block, subs r3, #1, has none *)
+      show arm 0x2028dL;
+      show arm 0x2028fL;
       (* the code, that the program writes to its buffer at 0x405000, is
          lifted from its bytes, the zeros before, mov $42, %eax after *)
       let code = 0x405000L in
