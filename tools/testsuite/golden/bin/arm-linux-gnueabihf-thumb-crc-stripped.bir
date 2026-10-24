@@ -1,0 +1,5 @@
+# exited with 0
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+sub sub_202dc(sub_202dc_result)
+  calls __libc_start_main
+sub putchar(putchar_c, putchar_result)

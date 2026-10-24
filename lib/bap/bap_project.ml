@@ -302,6 +302,14 @@ module Input = struct
           let bias = next_bias img ?bias in
           let spec = Image.spec img in
           Signal.send Info.got_img img;
+          (* the entry of Thumb has its lower bit set, unlike the
+             address of its subroutine *)
+          let entry = Image.entry_point img in
+          let is_entry a =
+            Addr.equal a entry
+            || Addr.is_one (Addr.extract_exn ~hi:0 entry)
+               && Addr.equal a (Addr.pred entry)
+          in
           let finish proj =
             {
               proj with
@@ -309,7 +317,7 @@ module Input = struct
               program =
                 Term.map sub_t proj.program ~f:(fun sub ->
                     match Term.get_attr sub address with
-                    | Some a when Addr.equal a (Image.entry_point img) ->
+                    | Some a when is_entry a ->
                         Term.set_attr sub Sub.entry_point ()
                     | _ -> sub);
             }

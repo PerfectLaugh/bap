@@ -125,11 +125,20 @@ let unicorn data =
         let bin = "aarch64-linux-gnu-lse-crc" in
         crc data (Printf.sprintf "run/%s/%s" system bin) bin system "1489580789")
       [ "bap:stubbed-executor"; "bap:legacy-main"; "bap:unicorn-executor" ]
-  @ List.map
-      (fun system ->
-        let bin = "arm-linux-gnueabihf-thumb-crc" in
-        crc data (Printf.sprintf "run/%s/%s" system bin) bin system "1489580789")
-      [ "bap:stubbed-executor"; "bap:legacy-main"; "bap:unicorn-executor" ]
+  (* the stripped program, made with llvm-strip, has no _start, so it
+     runs from its entry, whose lower bit is set, as it is of Thumb *)
+  @ List.concat_map
+      (fun bin ->
+        List.map
+          (fun system ->
+            crc data
+              (Printf.sprintf "run/%s/%s" system bin)
+              bin system "1489580789")
+          [ "bap:stubbed-executor"; "bap:legacy-main"; "bap:unicorn-executor" ])
+      [
+        "arm-linux-gnueabihf-thumb-crc";
+        "arm-linux-gnueabihf-thumb-crc-stripped";
+      ]
 
 (* the write system calls of Linux, which Primus Lisp doesn't model, so
    the cases define the intrinsics of the system calls, in the directory
