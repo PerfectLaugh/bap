@@ -2626,6 +2626,15 @@ module Std : sig
 
             @since 2.6.0 *)
 
+        val regions : (addr * addr * protection) list Machine.t
+        (** [regions] the mapped ranges of the memory, [(lower, upper)],
+            inclusive, with their protections, as the segments, and {!protect},
+            give them, the lowest first, the adjacent ones with the same
+            protection joined, e.g., the memory map of the program, without the
+            bytes, that were stored outside of the segments.
+
+            @since 2.6.0 *)
+
         val load_bytes :
           addr -> int -> (char * protection) option array Machine.t
         (** [load_bytes addr n] the [n] bytes from [addr] with their
@@ -2635,6 +2644,18 @@ module Std : sig
             as {!load} does, but the {!generated} observation is not posted, as
             the bytes are copies, e.g., for an emulator, not the inputs of the
             program.
+
+            Precondition: the data of the current [memory] are bytes.
+
+            @since 2.6.0 *)
+
+        val peek : addr -> int -> string Machine.t
+        (** [peek addr n] the [n] bytes from [addr], as the loads read them: the
+            stored values, over the bytes of the segments of the program, and
+            the fills of the allocated regions, e.g., to dump the memory of the
+            machine, without generating the bytes, that were never stored, which
+            are zero, as the bytes, that are not mapped, so that the machine
+            doesn't remember them, as {!load_bytes} makes it.
 
             Precondition: the data of the current [memory] are bytes.
 

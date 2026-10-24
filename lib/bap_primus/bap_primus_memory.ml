@@ -746,6 +746,44 @@ module Make (Machine : Machine) = struct
 
   let protection addr = get_curr >>| protection_of addr
 
+  (* the ranges of the layers, and of the protections, which split them,
+     each with the protection of its first byte, as the layer, that
+     covers it, and the protection over it, give it, the lowest first,
+     joined, if they are the same *)
+  let regions =
+    get_curr >>| fun s ->
+    let points =
+      List.concat_map s.layers ~f:(fun { mem; _ } ->
+          let lower, upper = bounds mem in
+          [ lower; Addr.succ upper ])
+      @ List.concat_map s.protections ~f:(fun (lower, upper, _) ->
+          [ lower; Addr.succ upper ])
+      |> List.dedup_and_sort ~compare:Addr.compare
+    in
+    let rec go acc = function
+      | lower :: (next :: _ as rest) ->
+          let acc =
+            match find_layer lower s with
+            | None -> acc
+            | Some { perms = { readonly; executable } } -> (
+                let p =
+                  match find_protection lower s with
+                  | Some p -> p
+                  | None ->
+                      { readable = true; writable = not readonly; executable }
+                in
+                let upper = Addr.pred next in
+                match acc with
+                | (lo, hi, q) :: acc'
+                  when Addr.equal (Addr.succ hi) lower && Poly.equal p q ->
+                    (lo, upper, q) :: acc'
+                | _ -> (lower, upper, p) :: acc)
+          in
+          go acc rest
+      | _ -> List.rev acc
+    in
+    go [] points
+
   let is_writable addr =
     protection addr >>| function Some p -> p.writable | None -> false
 
@@ -834,6 +872,47 @@ module Make (Machine : Machine) = struct
                 loop (i + 1) s
         in
         loop 0 s
+
+  (* the bytes from [addr], as the loads read them, the stored values
+     over the layers, the newest first, i.e., the bytes of the program,
+     and the fills of the allocated regions, without generating the
+     bytes, that were never stored, which are zero, as the unmapped ones *)
+  let peek addr len =
+    check_bytes "peek" >>= fun () ->
+    fetch addr len >>= fun () ->
+    get_curr >>| fun s ->
+    let bytes = Bytes.make len '\000' in
+    let last = Addr.nsucc addr (len - 1) in
+    let offset a = Word.to_int_exn Addr.(a - addr) in
+    let clip lower upper =
+      let lo = if Addr.(lower > addr) then lower else addr in
+      let hi = if Addr.(upper < last) then upper else last in
+      if Addr.(lo <= hi) then Some (lo, offset hi - offset lo + 1) else None
+    in
+    List.iter (List.rev s.layers) ~f:(fun { mem; _ } ->
+        let lower, upper = bounds mem in
+        match clip lower upper with
+        | None -> ()
+        | Some (lo, n) -> (
+            match mem with
+            | Static mem ->
+                let data =
+                  Memory.view_exn ~from:lo ~words:n mem
+                  |> Memory.to_buffer |> Bigsubstring.to_string
+                in
+                Bytes.From_string.blit ~src:data ~src_pos:0 ~dst:bytes
+                  ~dst_pos:(offset lo) ~len:n
+            | Dynamic { value; _ } -> (
+                match Generator.fill value with
+                | None -> ()
+                | Some x ->
+                    let c = Char.of_int_exn (Bitvec.to_int x land 0xFF) in
+                    Bytes.fill bytes ~pos:(offset lo) ~len:n c)));
+    Map.fold_range_inclusive s.values ~min:addr ~max:last ~init:()
+      ~f:(fun ~key ~data () ->
+        Bytes.set bytes (offset key)
+          (Char.of_int_exn (Word.to_int_exn (Value.to_word data) land 0xFF)));
+    Bytes.to_string bytes
 
   let store_bytes addr data =
     check_bytes "store_bytes" >>= fun () ->

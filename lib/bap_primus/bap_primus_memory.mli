@@ -78,6 +78,8 @@ module Make (Machine : Machine) : sig
   val is_writable : addr -> bool Machine.t
   val is_executable : addr -> bool Machine.t
   val protection : addr -> protection option Machine.t
+  val regions : (addr * addr * protection) list Machine.t
+  val peek : addr -> int -> string Machine.t
   val load_bytes : addr -> int -> (char * protection) option array Machine.t
   val store_bytes : addr -> string -> unit Machine.t
   val protect : lower:addr -> upper:addr -> protection -> unit Machine.t

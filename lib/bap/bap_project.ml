@@ -201,7 +201,7 @@ module Input = struct
   type t = unit -> result list
 
   let custom ?(finish = Fn.id) ?(filename = "") ?(code = Memmap.empty)
-      ?(data = Memmap.empty) target () =
+      ?(data = Memmap.empty) ?(spec = Ogre.Doc.empty) target () =
     {
       arch = `unknown;
       file = filename;
@@ -209,7 +209,7 @@ module Input = struct
       data;
       finish;
       target;
-      spec = Ogre.Doc.empty;
+      spec;
       memory = union_memory code data;
     }
     |> List.return

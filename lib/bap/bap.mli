@@ -10240,6 +10240,7 @@ module Std : sig
         ?filename:string ->
         ?code:value memmap ->
         ?data:value memmap ->
+        ?spec:Ogre.doc ->
         Theory.Target.t ->
         t
       (** [custom target] creates a custom input.
@@ -10248,6 +10249,11 @@ module Std : sig
           The [code] and [data] parameters are stored in the [Project.memory]
           and [code] is disassembled and lifted if the specified [target] has a
           disassembler and lifter.
+
+          The [spec] is the specification of the input, see [Image.Spec], e.g.,
+          with its symbols, [code-start] and [named-symbol], which the
+          disassembler starts from, and names the subroutines with, by default
+          empty.
 
           The [filename] is used to communicate with external tools and will be
           broadcasted via [Info.file] stream and stored in the filename property

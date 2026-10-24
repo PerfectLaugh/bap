@@ -102,6 +102,7 @@ module Input : sig
     ?filename:string ->
     ?code:value memmap ->
     ?data:value memmap ->
+    ?spec:Ogre.doc ->
     Theory.Target.t ->
     t
 
