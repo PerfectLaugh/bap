@@ -1795,7 +1795,7 @@ let emu_signals data =
 (* the threads of threads.c, that the system calls of Linux create, which
    are preempted, and wait on the futexes, of threads-weird.c, on the
    targets of Linux, and of threads-win.c, that the functions of Windows
-   create, see Primus_unicorn_executor *)
+   create, see Primus_native_executor *)
 let threads data =
   List.map
     (fun target ->

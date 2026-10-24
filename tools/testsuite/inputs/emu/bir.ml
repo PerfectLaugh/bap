@@ -1,4 +1,4 @@
-#require "bap-primus-unicorn.emu"
+#require "bap-primus-native.emu"
 
 open Core
 open Bap.Std

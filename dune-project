@@ -1021,11 +1021,15 @@ be seen as a common denominator between Lwt and Async libraries.")
   core))
 
 (package
- (name bap-primus-unicorn)
- (synopsis "Runs the code in Primus with the Unicorn CPU emulator")
+ (name bap-primus-native)
+ (synopsis "Runs the code of Primus natively, in Unicorn or in the lifted engine")
  (description
-  "Links the Unicorn emulator engine, which is licensed under GPL-2.0,
-so this package is distributed under GPL-2.0, unlike the rest of BAP.")
+  "The executors of Primus, that run the native code in the Unicorn CPU
+emulator, the plugin primus-unicorn, or in the lifted engine, which
+compiles the semantics of BAP with LLVM, the plugin primus-lifted, and
+the Bap_emu library of the scripts. It links the Unicorn emulator
+engine, which is licensed under GPL-2.0, so this package is distributed
+under GPL-2.0, unlike the rest of BAP.")
  (license GPL-2.0-only)
  (tags (bap bap-primus unicorn))
  (depends

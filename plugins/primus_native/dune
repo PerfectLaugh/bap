@@ -1,0 +1,36 @@
+(library
+ (name bap_primus_native_plugin)
+ (public_name bap-primus-native.plugin)
+ (modules
+  primus_native_target
+  primus_native_checkpoint
+  primus_native_libc
+  primus_native_executor
+  primus_native_options)
+ (preprocess
+  (pps ppx_bap))
+ (libraries
+  bap
+  bap-c
+  bap-core-theory
+  bap-main
+  bap-primus
+  bap-primus-native.engine
+  bap-taint
+  bitvec
+  core
+  monads
+  mtime.clock))
+
+(library
+ (name bap_primus_unicorn_main)
+ (public_name bap-primus-native.unicorn-main)
+ (modules primus_unicorn_main)
+ (libraries bap-primus-native.plugin))
+
+(plugin
+ (name primus-unicorn)
+ (package bap-primus-native)
+ (libraries bap-primus-native.unicorn-main)
+ (site
+  (bap-common plugins)))

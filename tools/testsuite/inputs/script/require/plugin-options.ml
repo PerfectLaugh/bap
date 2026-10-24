@@ -1,4 +1,4 @@
-#require "bap-primus-unicorn.emu"
+#require "bap-primus-native.emu"
 
 (* the library uses the library of the primus-lisp plugin, whose options
    are still its own, e.g., the redirection of the standard input *)

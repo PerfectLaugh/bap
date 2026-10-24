@@ -1,4 +1,4 @@
-#require "bap-primus-unicorn.emu"
+#require "bap-primus-native.emu"
 
 open Core
 module Emu = Bap_emu

@@ -163,7 +163,7 @@ BAP runs binary programs in [Primus][primus], its emulation framework. A Primus 
 bap ./echo --passes=run --run-argv=hello,world
 ```
 
-Without the `bap-primus-unicorn` package, which is licensed under GPL, the default is `bap:legacy-main`, which interprets the lifted program, as `--run-systems=bap:legacy-main` does.
+Without the `bap-primus-native` package, which is licensed under GPL, the default is `bap:legacy-main`, which interprets the lifted program, as `--run-systems=bap:legacy-main` does.
 
 The `bap:debugger` component stops the program at its breakpoints, e.g., `--run-components=bap:debugger --primus-debugger-break=main`, and the Unicorn executor saves and restores checkpoints of the program with `--primus-unicorn-checkpoint` and `--primus-unicorn-restore`.
 

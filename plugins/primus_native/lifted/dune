@@ -2,7 +2,7 @@
 
 (library
  (name bap_lifted)
- (public_name bap-primus-unicorn.lifted)
+ (public_name bap-primus-native.lifted)
  (modules bap_lifted bap_lifted_jit)
  (private_modules bap_lifted_jit)
  (foreign_stubs
@@ -13,7 +13,7 @@
   bap-llvm
   bap-primus
   bap-primus-lisp.softfloat
-  bap-primus-unicorn.unicorn
+  bap-primus-native.unicorn
   core
   mtime.clock
   zarith))

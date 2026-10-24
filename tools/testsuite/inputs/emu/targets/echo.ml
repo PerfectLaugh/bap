@@ -1,4 +1,4 @@
-#require "bap-primus-unicorn.emu"
+#require "bap-primus-native.emu"
 
 module Emu = Bap_emu
 

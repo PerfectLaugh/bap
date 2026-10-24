@@ -6,7 +6,7 @@ open Core
 open Bap_core_theory
 open Bap.Std
 module Uc = Bap_engine
-module Target = Bap_primus_unicorn_plugin.Primus_unicorn_target
+module Target = Bap_primus_native_plugin.Primus_native_target
 
 let () =
   Arm_target.load ();
@@ -40,8 +40,10 @@ let with_engine name f =
         ~finally:(fun () -> Uc.close uc)
         ~f:(fun () -> f target arch mode uc regs)
 
-(* the registers with the bits that the hardware fixes *)
-let masked = [ "EFLAGS"; "FPSCR" ]
+(* the registers with the bits that the hardware fixes, e.g., the reserved
+   ones of FPCR and FPSR of AArch64, and the tags of x87, which Unicorn
+   classifies, when they are read *)
+let masked = [ "EFLAGS"; "FPSCR"; "FPCR"; "FPSR"; "FPU_STATUS"; "FPU_TAG" ]
 
 let pattern w =
   let x = Word.of_int64 ~width:64 0x5A3C_96E1_2B4D_7F18L in

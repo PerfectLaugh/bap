@@ -48,7 +48,7 @@ bap ./prog --passes=run --run-systems=bap:lifted-executor
 
 `BAP_LIFTED_STATS=1` prints the numbers of the instructions, that the lifted engine ran, couldn't run, and ran in the compiled blocks, and `BAP_LIFTED_STATS=verbose` the ones, that it couldn't run, and the blocks, that it compiled, or couldn't, and why. The cases `lifted/TARGET/N` of the testsuite check the lifted engine against Unicorn, instruction by instruction, and `BAP_TESTSUITE_EXECUTOR=lifted` runs the other cases with its executors.
 
-The changes of BAP to Unicorn, e.g., the restarted stores of its helpers, are the files of `plugins/primus_unicorn/libunicorn/overlay`, see its README.
+The changes of BAP to Unicorn, e.g., the restarted stores of its helpers, are the files of `plugins/primus_native/libunicorn/overlay`, see its README.
 
 `--run-components=NAME,...` adds components to the system, e.g., the debugger or the taint tracker:
 
@@ -159,10 +159,10 @@ let () =
 
 ## The emulator: `Bap_emu`
 
-`Bap_emu` (`#require "bap-primus-unicorn.emu"`) runs a program in Unicorn and lets the script drive it, much as one drives Unicorn itself. The program pauses before its first instruction:
+`Bap_emu` (`#require "bap-primus-native.emu"`) runs a program in Unicorn and lets the script drive it, much as one drives Unicorn itself. The program pauses before its first instruction:
 
 ```ocaml
-#require "bap-primus-unicorn.emu"
+#require "bap-primus-native.emu"
 module Emu = Bap_emu
 
 let () =

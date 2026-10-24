@@ -1,6 +1,6 @@
 (tests
  (names test_unicorn test_regs test_native)
- (package bap-primus-unicorn)
+ (package bap-primus-native)
  (preprocess
   (pps ppx_bap))
  (libraries
@@ -9,9 +9,9 @@
   bap-core-theory
   bap-mips
   bap-powerpc
-  bap-primus-unicorn.plugin
-  bap-primus-unicorn.unicorn
-  bap-primus-unicorn.engine
+  bap-primus-native.plugin
+  bap-primus-native.unicorn
+  bap-primus-native.engine
   bap-riscv
   bap-x86
   core))

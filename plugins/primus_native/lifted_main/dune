@@ -3,13 +3,13 @@
 
 (library
  (name bap_primus_lifted_main)
- (public_name bap-primus-unicorn.lifted-main)
+ (public_name bap-primus-native.lifted-main)
  (modules primus_lifted_main)
- (libraries bap-primus-unicorn.plugin))
+ (libraries bap-primus-native.plugin))
 
 (plugin
  (name primus-lifted)
- (package bap-primus-unicorn)
- (libraries bap-primus-unicorn.lifted-main)
+ (package bap-primus-native)
+ (libraries bap-primus-native.lifted-main)
  (site
   (bap-common plugins)))

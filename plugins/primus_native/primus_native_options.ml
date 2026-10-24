@@ -8,8 +8,8 @@
 open Core
 open Bap_main
 open Bap_primus.Std
-module Executor = Primus_unicorn_executor
-module Native = Primus_unicorn_native
+module Executor = Primus_native_executor
+module Native = Primus_native_libc
 
 let package = "bap"
 

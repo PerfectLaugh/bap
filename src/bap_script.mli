@@ -16,7 +16,7 @@
 
     The plugins of BAP are loaded, when the script first needs them, e.g., by
     {!project}, or before the script runs, if it requires libraries, as they may
-    use the libraries of the plugins, e.g., [bap-primus-unicorn.emu] uses the
+    use the libraries of the plugins, e.g., [bap-primus-native.emu] uses the
     one of the primus-lisp plugin, whose options are its own, only if the plugin
     loads it. A script starts bap without the options of the command line, so
     the options of the plugins come from the environment, whose variable is the

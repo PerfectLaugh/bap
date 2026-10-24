@@ -2,9 +2,9 @@
 
 (library
  (name bap_engine)
- (public_name bap-primus-unicorn.engine)
+ (public_name bap-primus-native.engine)
  (modules bap_engine)
  (libraries
   bap
-  bap-primus-unicorn.lifted
-  bap-primus-unicorn.unicorn))
+  bap-primus-native.lifted
+  bap-primus-native.unicorn))

@@ -3,7 +3,7 @@
    third has a hole from 0x3800, on which Primus faults. *)
 
 open Core
-module Native = Bap_primus_unicorn_plugin.Primus_unicorn_native
+module Native = Bap_primus_native_plugin.Primus_native_libc
 
 let base = 0x1000L
 let data = Bytes.make 0x3000 '\000'

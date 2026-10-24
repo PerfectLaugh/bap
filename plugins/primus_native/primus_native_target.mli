@@ -39,7 +39,7 @@ module Regs : sig
   val vars : t -> var list
   (** the mapped registers, the aliases too, e.g., to find the ones, that are
       set in Primus, without all of its variables, e.g., the ones of the
-      threads, see [Primus_unicorn_executor] *)
+      threads, see [Primus_native_executor] *)
 
   val owner : t -> string -> string option
   (** [owner regs name] the register of the basis, which holds the register

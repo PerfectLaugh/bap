@@ -3,7 +3,7 @@
 
    The registers are the registers of Unicorn, their bytes in the order
    of the host, by their identifiers, so that the registers of BAP are
-   the bits of them, as Primus_unicorn_target.Regs maps them, and the
+   the bits of them, as Primus_native_target.Regs maps them, and the
    registers, that the semantics read, which are not mapped, e.g., the
    temporaries, are the values of a table. The memory is the pages of
    4 KB, with their permissions.
@@ -2640,7 +2640,7 @@ let run_block t j insn pc ~until ~count n =
       else exec ?until ?count t j b pc n
 
 (* the seconds of the monotonic clock, as the executor measures the time
-   slices of the threads, and the timeouts, see [Primus_unicorn_executor] *)
+   slices of the threads, and the timeouts, see [Primus_native_executor] *)
 let clock () = Mtime.Span.to_float_ns (Mtime_clock.elapsed ()) *. 1e-9
 
 let start ?until ?timeout ?count t pc =
@@ -2933,7 +2933,7 @@ let tainted_regs t = Hashtbl.keys t.shadow.sregs
 let tainted_mem t = Hashtbl.keys t.shadow.smem
 
 (* the taint of the values, e.g., of the native functions of the executor,
-   see [Primus_unicorn_native] *)
+   see [Primus_native_libc] *)
 type taint = int
 
 let no_taint = 0

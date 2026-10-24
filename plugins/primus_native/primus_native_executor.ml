@@ -15,7 +15,7 @@
      stubs, stops Unicorn at its address and is called by the Primus
      linker, after which Unicorn continues from the return address,
      except the functions of libc that run on the state of Unicorn,
-     e.g., memcpy, see [Primus_unicorn_native], which don't copy it to
+     e.g., memcpy, see [Primus_native_libc], which don't copy it to
      Primus.
 
    A run ends when the subroutine returns, i.e., when the code reaches
@@ -24,15 +24,15 @@
    A checkpoint of the machine is saved when Unicorn reaches its address
    for the first time, and a machine that restores it continues from
    there, instead of the first subroutine that it runs, e.g., the entry
-   point, see [Primus_unicorn_checkpoint]. *)
+   point, see [Primus_native_checkpoint]. *)
 
 open Core
 open Bap_core_theory
 open Bap.Std
 open Bap_primus.Std
 module Uc = Bap_engine
-module Target = Primus_unicorn_target
-module Checkpoint = Primus_unicorn_checkpoint
+module Target = Primus_native_target
+module Checkpoint = Primus_native_checkpoint
 
 (* the seconds of the monotonic clock, which measures the time slices of
    the threads, and the time, that the machines run, see [Make.account],
@@ -42,7 +42,7 @@ module Checkpoint = Primus_unicorn_checkpoint
    is loaded, and whose steps are 15.6 ms on Windows, longer than a slice *)
 let clock () = Mtime.Span.to_float_ns (Mtime_clock.elapsed ()) *. 1e-9
 
-module Native = Primus_unicorn_native
+module Native = Primus_native_libc
 include Bap_main.Loggers ()
 
 type Primus.exn += Unicorn_failure of string

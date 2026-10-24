@@ -1,4 +1,4 @@
-#require "bap-primus-unicorn.emu"
+#require "bap-primus-native.emu"
 
 (* The code of the program, that is hostile to the JIT of the lifted
    engine, see bap_lifted_jit.ml, runs in Unicorn and in the lifted

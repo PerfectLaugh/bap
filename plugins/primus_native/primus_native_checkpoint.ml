@@ -1,6 +1,6 @@
 (* The checkpoint of a machine that runs in Unicorn.
 
-   The state of the machine is in Primus, see [Primus_unicorn_executor],
+   The state of the machine is in Primus, see [Primus_native_executor],
    so the checkpoint has the values of the variables and the memory of
    the machine, the states of the components, that extend the
    checkpoints, see [Primus.Checkpoint], e.g., the channels of Lisp, and
@@ -9,7 +9,7 @@
    runs, e.g., for a Lisp stub, are not kept, as their code is not data,
    but their frames are, with the stubs, that called them, so that the
    known stubs are completed, when the run returns, see
-   [Primus_unicorn_executor.complete]. *)
+   [Primus_native_executor.complete]. *)
 
 open Core
 open Bap.Std
@@ -25,7 +25,7 @@ type frame = {
 [@@deriving bin_io]
 
 (* a thread, that doesn't run, whose registers are the variables, see
-   [Primus_unicorn_executor.thread_var] *)
+   [Primus_native_executor.thread_var] *)
 type thread = {
   tid : int;
   extra : (int * string) list;
@@ -39,7 +39,7 @@ type thread = {
 }
 [@@deriving bin_io]
 
-(* the threads of the machine, see [Primus_unicorn_executor.threads] *)
+(* the threads of the machine, see [Primus_native_executor.threads] *)
 type threads = {
   current : int;  (** the TID of the thread, that runs *)
   cleared : int64 option;  (** its [clear] *)

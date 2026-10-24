@@ -43,7 +43,7 @@ module Lifted : sig
     locate : string -> (int * int * int) option;
         (** [locate name] the register of the engine, and the bits of it, from
             the lowest, and their number, of the register [name] of BAP, as
-            [Primus_unicorn_target.Regs] maps them; the registers have the sizes
+            [Primus_native_target.Regs] maps them; the registers have the sizes
             of the registers of Unicorn *)
     owner : string -> string option;
         (** [owner name] the register of the basis, that holds the register

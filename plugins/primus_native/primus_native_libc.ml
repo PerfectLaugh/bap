@@ -1,5 +1,5 @@
 (* The functions of libc that run on the memory of Unicorn, instead of
-   their Lisp stubs, see [Primus_unicorn_executor].
+   their Lisp stubs, see [Primus_native_executor].
 
    A function reads the memory and returns the bytes that it writes,
    which the executor checks and writes, so that it changes nothing, if
@@ -28,7 +28,7 @@ type memory = {
 
 (* the taint of the bytes, that a function writes, as its Lisp stub
    propagates it, for the lifted engine, that propagates the taint
-   itself, see [Primus_unicorn_executor.Shadow]: copied from the source,
+   itself, see [Primus_native_executor.Shadow]: copied from the source,
    byte by byte, from the first, as memcpy does, or as if the source is
    read first, as memmove does, of an argument, e.g., the byte of
    memset, or none, e.g., the terminator of strcpy *)

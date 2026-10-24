@@ -1,4 +1,4 @@
-#require "bap-primus-unicorn.emu"
+#require "bap-primus-native.emu"
 
 (* Checks the semantics of the lifters against Unicorn: each instruction
    runs once in Unicorn, and once in Primus, which interprets its lifted
@@ -103,7 +103,7 @@ let flags =
 let r6 = flag "r6"
 
 (* if the instruction of MIPS has a delay slot, by its encoding, as
-   [Primus_unicorn_executor.mips_delayed] tells *)
+   [Primus_native_executor.mips_delayed] tells *)
 let word_of code =
   let b i = Char.code code.[if String.starts_with ~prefix:"mipsel" target || String.starts_with ~prefix:"mips64el" target || String.ends_with ~suffix:"el" target then 3 - i else i] in
   (b 0 lsl 24) lor (b 1 lsl 16) lor (b 2 lsl 8) lor b 3

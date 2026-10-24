@@ -2,9 +2,9 @@ open Core
 open Bap_knowledge
 open Bap.Std
 open Bap_primus.Std
-module X = Bap_primus_unicorn_plugin.Primus_unicorn_executor
-module Native = Bap_primus_unicorn_plugin.Primus_unicorn_native
-module Target = Bap_primus_unicorn_plugin.Primus_unicorn_target
+module X = Bap_primus_native_plugin.Primus_native_executor
+module Native = Bap_primus_native_plugin.Primus_native_libc
+module Target = Bap_primus_native_plugin.Primus_native_target
 module Uc = Bap_engine
 module Io = Primus_lisp_library_plugin.Primus_lisp_io
 
@@ -285,7 +285,7 @@ let save t file =
   match t.session.saved with Ok () -> () | Error msg -> failwith msg
 
 module Checkpoint = struct
-  module C = Bap_primus_unicorn_plugin.Primus_unicorn_checkpoint
+  module C = Bap_primus_native_plugin.Primus_native_checkpoint
 
   type thread = { tid : int; pc : int64; waiting : int64 list option }
 
