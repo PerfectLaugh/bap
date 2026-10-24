@@ -104,3 +104,13 @@ NaN, and set them in their results, e.g., of `fadd.s`, `fcvt.s.d`, or
 `fmv.w.x`, and the sign of `fneg.s`, `fabs.s`, and `fsgnjx.s` is the
 bit 31, rather than `INT32_MIN`, whose upper bits are ones, too, which
 changed them.
+
+## TPIDRURW of ARM
+
+`qemu/target/arm/unicorn_arm.c`
+
+The register `UC_ARM_REG_C13_C0_2`, the thread ID register of the user,
+that the user mode writes, TPIDRURW, which Unicorn declares, but neither
+reads nor writes, is the register `tpidr_el[0]` of the CPU, as
+`UC_ARM_REG_C13_C0_3`, TPIDRURO, is `tpidrro_el[0]`, so that the
+executors see the writes of `mcr p15, 0, Rt, c13, c0, 2`.

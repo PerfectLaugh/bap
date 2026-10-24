@@ -41,9 +41,11 @@ let with_engine name f =
         ~f:(fun () -> f target arch mode uc regs)
 
 (* the registers with the bits that the hardware fixes, e.g., the reserved
-   ones of FPCR and FPSR of AArch64, and the tags of x87, which Unicorn
-   classifies, when they are read *)
-let masked = [ "EFLAGS"; "FPSCR"; "FPCR"; "FPSR"; "FPU_STATUS"; "FPU_TAG" ]
+   ones of FPCR and FPSR of AArch64, the tags of x87, which Unicorn
+   classifies, when they are read, and FCSR of RISC-V, whose 8 bits
+   Unicorn accesses only while the floats are on *)
+let masked =
+  [ "EFLAGS"; "FPSCR"; "FPCR"; "FPSR"; "FPU_STATUS"; "FPU_TAG"; "FCSR" ]
 
 let pattern w =
   let x = Word.of_int64 ~width:64 0x5A3C_96E1_2B4D_7F18L in

@@ -14,7 +14,10 @@
    where PROGRAM is a program of the target, whose entry the
    instructions overwrite, and INSNS the file of the instructions, a line
    of their bytes in hex each, e.g., "48 01 d8", in the order of the
-   memory, optionally followed by a comment after #. It prints the
+   memory, optionally followed by a comment after #. The instructions of
+   a line, that are separated by ;, run one after another, e.g., a write
+   of a system register and its read, so that the state, that the
+   registers, which are not compared, hold, is checked. It prints the
    instructions, whose results differ, with their registers.
 
    With engine=lifted, the instructions run in the lifted engine, see
@@ -147,7 +150,7 @@ let nops =
   String.concat "" (List.init (16 / String.length nop) (fun _ -> nop))
 
 let bytes_of_hex line =
-  String.split_on_char ' ' line
+  String.split_on_char ' ' (String.map (fun c -> if c = ';' then ' ' else c) line)
   |> List.filter (fun s -> s <> "")
   |> List.map (fun h -> Char.chr (int_of_string ("0x" ^ h)))
   |> List.to_seq |> String.of_seq
@@ -234,11 +237,13 @@ let () =
           | None -> (l, "")
         in
         if String.trim code = "" then None
-        else Some (bytes_of_hex code, String.trim comment, String.trim code))
+        else
+          let steps = List.length (String.split_on_char ';' code) in
+          Some (bytes_of_hex code, String.trim comment, String.trim code, steps))
   in
   let differ = ref 0 and total = ref 0 in
   List.iter
-    (fun (code, comment, hex) ->
+    (fun (code, comment, hex, steps) ->
       incr total;
       (* the states of an instruction are the same in every list *)
       Random.full_init [| seed; Hashtbl.hash hex |];
@@ -292,6 +297,13 @@ let () =
               Emu.step emu
           | status -> status
         in
+        (* the instructions of the line, until one of them stops *)
+        let rec steps_of step emu n =
+          match step emu with
+          | Emu.Paused when n > 1 -> steps_of step emu (n - 1)
+          | status -> status
+        in
+        let step emu = steps_of step emu steps in
         let native = capture emu buf size (status_name (step emu)) in
         Emu.restore emu snapshot;
         let lifted =
@@ -301,7 +313,7 @@ let () =
               prepare other;
               capture other buf size (status_name (step other))
           | None ->
-        let status =
+        let interpret emu =
           match Emu.interpret emu with
           (* the branch of MIPS, that is not taken, runs its delay slot
              next *)
@@ -309,6 +321,7 @@ let () =
               Emu.interpret emu
           | status -> status
         in
+        let status = steps_of interpret emu steps in
         let lifted = capture emu buf size (status_name status) in
         Emu.restore emu snapshot;
         lifted

@@ -525,7 +525,14 @@
     (set ST2 ST1)
     (set ST1 ST0)
     (set ST0 v)))
-(defun FFREE (_) (empty))
+;; FFREE marks the physical register of STi empty, without popping
+(defun FFREE (r) (x87-set-tag (+ (x87-top) (x87-index r)) true))
+
+;; the number i of STi
+(defun x87-index (r)
+  (case (symbol r)
+    'ST0 0:3 'ST1 1:3 'ST2 2:3 'ST3 3:3
+    'ST4 4:3 'ST5 5:3 'ST6 6:3 7:3))
 
 ;; The status word of x87, whose exceptions are not raised, as the
 ;; operations are of the intrinsics, the condition codes C0-C3, of FXAM,

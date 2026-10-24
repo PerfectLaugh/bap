@@ -254,3 +254,18 @@ a1 63 1f 78  # sturh w1, [x29, #-0xa]
 #   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
 # 00 20 01 04  # uaddv d0, p0, z0.b
 #   Unicorn faults: Unicorn: an unhandled interrupt 1 at 960 / paused
+20 42 3b d5 # mrs x0, daif
+df 42 03 d5 ; 20 42 3b d5 # daifset 2; mrs
+ff 4f 03 d5 ; 20 42 3b d5 # daifclr 15; mrs
+21 42 1b d5 ; 20 42 3b d5 # msr daif x1; mrs
+02 42 38 d5 # mrs spsel
+bf 40 00 d5 ; 02 42 38 d5 # spsel 0; mrs
+63 42 38 d5 # mrs pan
+9f 41 00 d5 ; 63 42 38 d5 # pan 1 ; mrs
+84 42 38 d5 # mrs uao
+7f 41 00 d5 ; 84 42 38 d5 # uao 1; mrs
+bf 40 00 d5 ; bf 41 00 d5 # spsel 0; spsel 1
+01 41 38 d5 # mrs x1, sp_el0
+01 41 18 d5 ; bf 40 00 d5 # msr sp_el0, x1; spsel 0
+01 42 18 d5 ; 02 42 38 d5 # msr spsel, x1; mrs
+21 42 18 d5 ; 63 42 38 d5 # msr pan, x1; mrs

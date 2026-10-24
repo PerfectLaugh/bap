@@ -309,13 +309,39 @@
 (defun MOVPCLR (cnd _) (when (condition-holds cnd) (a32-write-pc LR)))
 (defun MOVi16 (rd imm cnd _) (when (condition-holds cnd) (set$ rd imm)))
 
+(defun cp15-reg (cop opc1 crn crm opc2)
+  "the register of the system control coprocessor, p15, by its crn, crm,
+   and opc2, as a number crn:crm:opc2, or -1, if it isn't of p15"
+  (declare (visibility :private))
+  (if (and (= cop 15) (= opc1 0))
+      (logor (lshift crn 8) (lshift crm 4) opc2)
+    -1))
+
 (defun read-coprocessor (rt cop opc1 crn crm opc2 cnd)
-  "reads the thread ID register of the user (TPIDRURO), which is the
-   register c13, c0, 3 of the system control coprocessor, p15, e.g., the
-   thread pointer of Linux, the other registers are not modeled"
-  (when (and (condition-holds cnd)
-             (= cop 15) (= opc1 0) (= crn 13) (= crm 0) (= opc2 3))
-    (set$ rt TPIDRURO)))
+  "reads the thread ID registers of the user, that the user mode reads,
+   TPIDRURW (c13, c0, 2), and TPIDRURO (c13, c0, 3), e.g., the thread
+   pointer of Linux, the other registers are not modeled"
+  (when (condition-holds cnd)
+    (case (cp15-reg cop opc1 crn crm opc2)
+      0xd02 (set$ rt TPIDRURW)
+      0xd03 (set$ rt TPIDRURO)
+      (intrinsic 'undefined-instruction :aborts))))
+
+(defun write-coprocessor (cop opc1 rt crn crm opc2 cnd)
+  "writes the thread ID registers of the user, TPIDRURW (c13, c0, 2),
+   and TPIDRURO (c13, c0, 3), which Unicorn writes, as it runs in a
+   privileged mode, the other moves to p15, that the user mode runs, are
+   the barriers of ARMv6, ISB (c7, c5, 4), DSB (c7, c10, 4), and DMB
+   (c7, c10, 5), which have no effect, and the other registers are not
+   modeled"
+  (when (condition-holds cnd)
+    (case (cp15-reg cop opc1 crn crm opc2)
+      0xd02 (set TPIDRURW rt)
+      0xd03 (set TPIDRURO rt)
+      0x754 (empty)
+      0x7a4 (empty)
+      0x7a5 (empty)
+      (intrinsic 'undefined-instruction :aborts))))
 
 (defun MRC (rt cop opc1 crn crm opc2 cnd _)
   (read-coprocessor rt cop opc1 crn crm opc2 cnd))
@@ -625,8 +651,8 @@
 (defun PLIrs (_ _ _) (empty))
 (defun CLREX () (empty))
 
-;; the coprocessor instructions, the moves to the system control
-;; coprocessor in the user mode are the barriers of ARMv6, e.g., the
-;; DMB is c7, c10, 5, and have no effect
-(defun MCR (_ _ _ _ _ _ _ _) (empty))
-(defun MCR2 (_ _ _ _ _ _) (empty))
+;; the moves to the coprocessors, see [write-coprocessor], and MCR2,
+;; whose coprocessors are not modeled
+(defun MCR (cop opc1 rt crn crm opc2 cnd _)
+  (write-coprocessor cop opc1 rt crn crm opc2 cnd))
+(defun MCR2 (_ _ _ _ _ _) (intrinsic 'undefined-instruction :aborts))

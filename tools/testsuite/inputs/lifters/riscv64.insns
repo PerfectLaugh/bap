@@ -318,3 +318,12 @@
 #   Unicorn doesn't have it
 # 3b 05 05 08  # zext.w a0, a0
 #   Unicorn doesn't have it
+73 95 35 00 ; 73 26 30 00 # csrrw a0, fcsr, a1|frcsr a2
+73 a5 15 00 ; 73 26 30 00 # csrrs a0, fflags, a1|frcsr a2
+73 b5 35 00 ; 73 26 30 00 # csrrc a0, fcsr, a1|frcsr a2
+73 90 25 00 ; 73 26 30 00 # fsrm a1|frcsr a2
+73 d5 21 00 ; 73 26 20 00 # csrrwi a0, frm, 3|frrm a2
+73 e5 12 00 ; 73 26 10 00 # csrrsi a0, fflags, 5|frflags a2
+73 f5 30 00 ; 73 26 30 00 # csrrci a0, fcsr, 1|frcsr a2
+73 26 30 00 # frcsr a2
+73 95 15 00 ; 73 26 30 00 # fsflags a0, a1|frcsr a2

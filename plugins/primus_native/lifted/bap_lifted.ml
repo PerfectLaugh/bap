@@ -467,11 +467,26 @@ let reg_size t id =
       Hashtbl.set t.sizes ~key:id ~data:size;
       size
 
+(* the registers, that start with their values of the reset of Unicorn,
+   rather than 0: PSTATE of AArch64, whose masks of DAIF are set, and
+   whose SPSel selects SP_EL1, as Unicorn runs at EL1. The others, e.g.,
+   FCSR of RISC-V, which Unicorn doesn't read, while the floats are off,
+   are 0. *)
+let reset_regs arch =
+  match (arch : Uc.arch) with
+  | Arm64 -> List.filter_opt [ Uc.reg arch "PSTATE" ]
+  | Arm | X86 | Mips | Ppc | Riscv -> []
+
 let reg_bytes t id =
   match Hashtbl.find t.regs id with
   | Some b -> b
   | None ->
-      let b = Bytes.make (reg_size t id) '\000' in
+      let size = reg_size t id in
+      let b =
+        if List.mem (reset_regs t.arch) id ~equal:Int.equal then
+          Bytes.of_string (Uc.reg_read_bytes (Lazy.force t.probe) id)
+        else Bytes.make size '\000'
+      in
       Hashtbl.set t.regs ~key:id ~data:b;
       b
 

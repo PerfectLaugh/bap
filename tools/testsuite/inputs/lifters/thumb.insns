@@ -364,3 +364,5 @@ f2 ff 25 41  # vuzp.8 d20, d21
 #   R3 1 / 0; memory at 3ffe10f0
 # df e8 01 f0  # tbb [pc, r1]
 #   pc 8448 / 85f2
+0d ee 50 1f ; 1d ee 50 2f # mcr p15, 0, r1, c13, c0, 2|mrc p15, 0, r2, c13, c0, 2
+07 ee ba 1f # mcr p15, 0, r1, c7, c10, 5

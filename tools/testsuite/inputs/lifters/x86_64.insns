@@ -615,3 +615,8 @@ c5 f8 2e c1  # vucomiss %xmm1, %xmm0
 #   YMM0 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F / 0x6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F
 # c5 f8 77  # vzeroupper 
 #   YMM2 0xB17500642601E0DEE363618A6C369F19F53FB1E59A0B528FD66CF9C642500E2B / 0xF53FB1E59A0B528FD66CF9C642500E2B; 
+dd c0 ; d9 74 24 c0 ; 48 c7 44 24 cc 00 00 00 00 ; 48 c7 44 24 d4 00 00 00 00 ; c7 44 24 dc 00 00 00 00 ; 8b 44 24 c8 # ffree %st(0)|fnstenv -64(%rsp)|movq $0, -52(%rsp)|movq $0, -44(%rsp)|movl $0, -36(%rsp)|movl -56(%rsp), %eax
+dd c3 ; d9 74 24 c0 ; 48 c7 44 24 cc 00 00 00 00 ; 48 c7 44 24 d4 00 00 00 00 ; c7 44 24 dc 00 00 00 00 ; 8b 44 24 c8 # ffree %st(3)|fnstenv -64(%rsp)|movq $0, -52(%rsp)|movq $0, -44(%rsp)|movl $0, -36(%rsp)|movl -56(%rsp), %eax
+d9 e8 ; dd c0 ; d9 74 24 c0 ; 48 c7 44 24 cc 00 00 00 00 ; 48 c7 44 24 d4 00 00 00 00 ; c7 44 24 dc 00 00 00 00 ; 8b 44 24 c8 # fld1|ffree %st(0)|fnstenv -64(%rsp)|movq $0, -52(%rsp)|movq $0, -44(%rsp)|movl $0, -36(%rsp)|movl -56(%rsp), %eax
+d9 e8 ; d9 e8 ; dd c1 ; d9 74 24 c0 ; 48 c7 44 24 cc 00 00 00 00 ; 48 c7 44 24 d4 00 00 00 00 ; c7 44 24 dc 00 00 00 00 ; 8b 44 24 c8 # fld1|fld1|ffree %st(1)|fnstenv -64(%rsp)|movq $0, -52(%rsp)|movq $0, -44(%rsp)|movl $0, -36(%rsp)|movl -56(%rsp), %eax
+d9 e8 ; d9 e8 ; dd c1 ; dd d8 ; d9 74 24 c0 ; 48 c7 44 24 cc 00 00 00 00 ; 48 c7 44 24 d4 00 00 00 00 ; c7 44 24 dc 00 00 00 00 ; 8b 44 24 c8 # fld1|fld1|ffree %st(1)|fstp %st(0)|fnstenv -64(%rsp)|movq $0, -52(%rsp)|movq $0, -44(%rsp)|movl $0, -36(%rsp)|movl -56(%rsp), %eax

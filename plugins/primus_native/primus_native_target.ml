@@ -83,11 +83,16 @@ let parts ~bits : Uc.arch -> (string * part) list = function
           ("CF", Bit ("NZCV", 29));
           ("VF", Bit ("NZCV", 28));
           ("QF", Bit ("FPSR", 27));
+          ("DAIF", Bits ("PSTATE", 6, 4));
+          ("PAN", Bit ("PSTATE", 22));
+          ("UAO", Bit ("PSTATE", 23));
+          ("SPSel", Bit ("PSTATE", 0));
         ]
   | Arm ->
       (* APSR holds only the flags, so writing it keeps the mode *)
       [
         ("TPIDRURO", Reg "C13_C0_3");
+        ("TPIDRURW", Reg "C13_C0_2");
         ("NF", Bit ("APSR", 31));
         ("ZF", Bit ("APSR", 30));
         ("CF", Bit ("APSR", 29));

@@ -63,10 +63,15 @@ end
    thread-local storage of Linux *)
 let tpidruro = reg r32 "TPIDRURO"
 
+(* the thread ID register of the user, that the code also writes
+   (TPIDRURW), with mcr p15, 0, Rt, c13, c0, 2 *)
+let tpidrurw = reg r32 "TPIDRURW"
+
 let vars32 =
   untyped
     Gpr32.[ r0; r1; r2; r3; r4; r5; r6; r7; r8; r9; r10; r11; r12; sp; lr ]
-  @ untyped [ tpidruro ] @ untyped [ data ]
+  @ untyped [ tpidruro; tpidrurw ]
+  @ untyped [ data ]
   @ untyped Gpr32.[ nf; zf; cf; vf; qf ]
 
 let thumb = Theory.Role.declare ~package:"arm" "thumb"
@@ -123,7 +128,7 @@ let regs32 =
       ([ function_return ], untyped Gpr32.[ r0; r1 ]);
       ([ caller_saved ], untyped Gpr32.[ r0; r1; r2; r3; r12; lr ]);
       ([ callee_saved ], untyped Gpr32.[ r4; r5; r6; r7; r8; r9; r10; r11; sp ]);
-      ([ thread ], untyped [ tpidruro ]);
+      ([ thread ], untyped [ tpidruro; tpidrurw ]);
     ]
   @ status_regs
 
@@ -167,6 +172,18 @@ let fpcr = reg r32 "FPCR"
 let fpsr = reg r32 "FPSR"
 let tpidrro_el0 = reg r64 "TPIDRRO_EL0"
 let cntvct_el0 = reg r64 "CNTVCT_EL0"
+
+(* the fields of PSTATE, that MSR and MRS access, besides the flags: the
+   masks of the exceptions (DAIF), the privileged access never (PAN),
+   the user access override (UAO), and the selection of the stack
+   pointer (SPSel), which, when it changes, banks SP to SP_EL0 or
+   SP_EL1, as Unicorn runs the program at EL1 *)
+let daif = reg (Theory.Bitv.define 4) "DAIF"
+let pan = reg bool "PAN"
+let uao = reg bool "UAO"
+let spsel = reg bool "SPSel"
+let sp_el0 = reg r64 "SP_EL0"
+let sp_el1 = reg r64 "SP_EL1"
 let memsv8 = CT.Mem.define r64 r8
 let datav8 = CT.Var.define memsv8 "mem"
 let flagsv8 = [ reg bool "NF"; reg bool "ZF"; reg bool "CF"; reg bool "VF" ]
@@ -179,7 +196,7 @@ let aliases =
 let varsv8 =
   rs @< flagsv8 @< [ datav8 ]
   @< [ tpidr_el0; tpidrro_el0; cntvct_el0 ]
-  @< [ fpcr; fpsr ]
+  @< [ fpcr; fpsr ] @< [ daif ] @< [ pan; uao; spsel ] @< [ sp_el0; sp_el1 ]
 
 let regsv8 =
   Theory.Role.Register.
@@ -195,7 +212,11 @@ let regsv8 =
       ([ constant; zero; pseudo ], untyped [ reg r32 "WZR" ]);
       ([ link ], untyped [ reg r64 "R30" ]);
       ([ thread ], untyped [ tpidr_el0; tpidrro_el0 ]);
-      ([ system ], untyped [ fpcr; fpsr ] @< untyped [ cntvct_el0 ]);
+      ( [ system ],
+        untyped [ fpcr; fpsr ]
+        @< untyped [ cntvct_el0 ] @< untyped [ daif ]
+        @< untyped [ pan; uao; spsel ]
+        @< untyped [ sp_el0; sp_el1 ] );
       ([ alias ], aliases);
     ]
   @ status_regs

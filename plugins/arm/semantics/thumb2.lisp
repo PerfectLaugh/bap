@@ -383,7 +383,8 @@
 (defun t2ISB (_ _ _) (empty))
 (defun t2HINT (_ _ _) (empty))
 (defun tHINT (_ _ _) (empty))
-(defun t2MCR (_ _ _ _ _ _ _ _) (empty))
+(defun t2MCR (cop opc1 rt crn crm opc2 cnd _)
+  (write-coprocessor cop opc1 rt crn crm opc2 cnd))
 
 ;; the 16-bit subtractions with the carry, the flags are set outside of
 ;; an IT block, where the second operand is CPSR

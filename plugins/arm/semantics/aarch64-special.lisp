@@ -90,13 +90,19 @@
 ;; The system registers by their encodings, op0:op1:CRn:CRm:op2, that
 ;; the programs read, the ones, that the processor of Unicorn has, with
 ;; its values, e.g., of its identification, as Linux emulates their reads
-;; at EL0, and the counter, see [a64-counter].
+;; at EL0, the counter, see [a64-counter], and the fields of PSTATE, see
+;; [a64-set-spsel], and SP_EL0, while SPSel selects SP_EL1, as it is
+;; undefined, while SP is SP_EL0.
 (defun MRS (dst reg)
   (case reg
     0xde82 (set$ dst TPIDR_EL0)
     0xde83 (set$ dst TPIDRRO_EL0)
     0xda10 (set$ dst (a64-nzcv))
-    0xda11 (set$ dst 0x3c0)                     ; DAIF, the interrupts are masked
+    0xda11 (set$ dst (lshift (cast-unsigned 64 DAIF) 6))
+    0xc210 (set$ dst (cast-unsigned 64 SPSel))
+    0xc213 (set$ dst (lshift (cast-unsigned 64 PAN) 22))
+    0xc214 (set$ dst (lshift (cast-unsigned 64 UAO) 23))
+    0xc208 (if SPSel (set$ dst SP_EL0) (a64-undefined))
     0xda20 (set$ dst (cast-unsigned 64 FPCR))
     0xda21 (set$ dst (cast-unsigned 64 FPSR))
     0xd807 (set$ dst 4)                         ; DCZID_EL0, the blocks of 64 bytes
@@ -127,6 +133,11 @@
     0xda10 (set-nzcv (cast-low 4 (rshift src 28)))
     0xda20 (set FPCR (cast-low 32 src))
     0xda21 (set FPSR (cast-low 32 src))
+    0xda11 (set DAIF (extract 9 6 src))
+    0xc210 (a64-set-spsel (extract 0 0 src))
+    0xc213 (set PAN (extract 22 22 src))
+    0xc214 (set UAO (extract 23 23 src))
+    0xc208 (if SPSel (set SP_EL0 src) (a64-undefined))
     0x1987 (empty)                              ; SB
     (a64-undefined)))
 
@@ -134,16 +145,27 @@
 ;; have, as the programs, e.g., glibc, run them, only if it has SME
 (defun MSRpstatesvcrImm1 (_ _) (a64-undefined))
 
+;; The selection of the stack pointer, SPSel, which Unicorn runs at
+;; EL1, so that SP is banked to SP_EL1, when SPSel is 1, and to SP_EL0,
+;; when it is 0: the change saves SP to the bank of the old one and
+;; loads the bank of the new one.
+(defun a64-set-spsel (sel)
+  (when (/= sel SPSel)
+    (if SPSel
+        (prog (set SP_EL1 R31) (set R31 SP_EL0))
+      (prog (set SP_EL0 R31) (set R31 SP_EL1)))
+    (set SPSel sel)))
+
 ;; The fields of PSTATE, that MSR sets to an immediate, which Unicorn
-;; runs, at EL1, with no effect on the program: DAIFSet, DAIFClr, SPSel,
-;; UAO, and PAN.
-(defun MSRpstateImm4 (field _)
+;; runs at EL1: DAIFSet and DAIFClr set and clear the masks of DAIF,
+;; and SPSel, UAO, and PAN are set to the bit of the immediate.
+(defun MSRpstateImm4 (field imm)
   (case field
-    0x1e (empty)
-    0x1f (empty)
-    0x05 (empty)
-    0x03 (empty)
-    0x04 (empty)
+    0x1e (set DAIF (logor DAIF (cast-low 4 imm)))
+    0x1f (set DAIF (logand DAIF (lnot (cast-low 4 imm))))
+    0x05 (a64-set-spsel (extract 0 0 imm))
+    0x03 (set UAO (extract 0 0 imm))
+    0x04 (set PAN (extract 0 0 imm))
     (a64-undefined)))
 
 ;; The cache maintenance, by op1:CRn:CRm:op2: DC ZVA zeroes its block,

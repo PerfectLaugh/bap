@@ -960,8 +960,8 @@
 ;; with the canonical NaNs, and the saturated integers, of RISC-V, see
 ;; ieee754-intrinsics.lisp. The fused multiply-adds round once, with
 ;; fmad. The rounding mode is the static rm field of the instruction,
-;; and the dynamic one (7) is to nearest, ties to even, as frm, as
-;; fcsr, is not modeled, neither are the accrued exception flags.
+;; and the dynamic one (7) is to nearest, ties to even, rather than
+;; frm of FCSR, and the accrued exception flags are not raised.
 ;;
 ;; The F registers are of 64 bits (FLEN), on RV32 too, and the
 ;; single-precision values in them are NaN-boxed, i.e., their upper 32
@@ -1464,10 +1464,10 @@
 
 ;;; CONTROL AND STATUS REGISTERS, as far as the compilers emit them,
 ;;; i.e., the ones of the floating point: fflags (1), frm (2), and fcsr
-;;; (3), which are not modeled, so their reads are 0, i.e., no
-;;; exceptions, and the rounding to nearest, and their writes are
-;;; ignored. The other registers, e.g., the counters, are read with the
-;;; intrinsic riscv_csr_<number>, and written with riscv_set_csr_<number>.
+;;; (3), which are the fields of FCSR, whose writes are kept, though
+;;; the operations don't accrue the exceptions, and don't round by frm,
+;;; and the counters, which are read with the intrinsics
+;;; riscv_csr_<name>.
 
 (defun fcsr (csr)
   (declare (visibility :private))
@@ -1486,22 +1486,39 @@
     0xC01 (intrinsic 'riscv_csr_time :result (word-width))
     (intrinsic 'riscv_csr_instret :result (word-width))))
 
-(defun csr-access (rd csr x write)
-  "reads the CSR to RD, and writes X to it, if WRITE: the flags and the
-   rounding mode of the floats, which are not modeled, are 0, and their
-   writes are ignored, the counters are read, and the other CSRs, e.g.,
-   of the extensions, that are not modeled, and the writes of the
-   counters, are illegal, as in the user mode of Linux"
+;; the field of FCSR, that the CSR accesses, by its position and mask
+(defun fcsr-shift (csr)
+  (declare (visibility :private))
+  (if (= csr 2) 5 0))
+
+(defun fcsr-mask (csr)
+  (declare (visibility :private))
+  (case csr 1 0x1f 2 0x7 0xff))
+
+(defun csr-access (rd csr keep x write)
+  "reads the CSR to RD, and writes to it, if WRITE, its old bits, that
+   KEEP masks, with the bits of X, i.e., CSRRW keeps none, CSRRS all,
+   and CSRRC the ones, that X doesn't clear: the fields of FCSR are
+   written, the counters are read, and the other CSRs, e.g., of the
+   extensions, that are not modeled, and the writes of the counters,
+   are illegal, as in the user mode of Linux"
   (declare (visibility :private))
   (if (fcsr csr)
-      (set$ rd 0)
+      (let ((shift (fcsr-shift csr))
+            (mask (fcsr-mask csr))
+            (old (logand (rshift FCSR shift) mask))
+            (new (logand (logor (logand old (cast-low 32 keep)) (cast-low 32 x)) mask)))
+        (when write
+          (set FCSR (logor (logand FCSR (lnot (lshift mask shift)))
+                           (lshift new shift))))
+        (set$ rd (cast-unsigned (word-width) old)))
     (if (logand (counter csr) (not write))
         (set$ rd (read-counter csr))
       (intrinsic 'undefined-instruction :aborts))))
 
-(defun CSRRW (rd csr rs1) (csr-access rd csr rs1 true))
-(defun CSRRS (rd csr rs1) (csr-access rd csr rs1 (/= (symbol rs1) 'X0)))
-(defun CSRRC (rd csr rs1) (csr-access rd csr rs1 (/= (symbol rs1) 'X0)))
-(defun CSRRWI (rd csr imm) (csr-access rd csr imm true))
-(defun CSRRSI (rd csr imm) (csr-access rd csr imm (/= imm 0)))
-(defun CSRRCI (rd csr imm) (csr-access rd csr imm (/= imm 0)))
+(defun CSRRW (rd csr rs1) (csr-access rd csr 0 rs1 true))
+(defun CSRRS (rd csr rs1) (csr-access rd csr -1 rs1 (/= (symbol rs1) 'X0)))
+(defun CSRRC (rd csr rs1) (csr-access rd csr (lnot rs1) 0 (/= (symbol rs1) 'X0)))
+(defun CSRRWI (rd csr imm) (csr-access rd csr 0 imm true))
+(defun CSRRSI (rd csr imm) (csr-access rd csr -1 imm (/= imm 0)))
+(defun CSRRCI (rd csr imm) (csr-access rd csr (lnot imm) 0 (/= imm 0)))

@@ -352,3 +352,10 @@ f2 88 64 f2  # vtst.32 q12, q10, q9
 #   Unicorn doesn't have it
 # 01 0b 30 fe  # vselgt.f64 d0, d0, d1
 #   Unicorn doesn't have it
+50 1f 0d ee ; 50 2f 1d ee # mcr p15, 0, r1, c13, c0, 2|mrc p15, 0, r2, c13, c0, 2
+50 2f 1d ee # mrc p15, 0, r2, c13, c0, 2
+ba 1f 07 ee # mcr p15, 0, r1, c7, c10, 5
+9a 1f 07 ee # mcr p15, 0, r1, c7, c10, 4
+95 1f 07 ee # mcr p15, 0, r1, c7, c5, 4
+70 1f 0d ee ; 70 2f 1d ee # mcr p15, 0, r1, c13, c0, 3|mrc p15, 0, r2, c13, c0, 3
+50 1f 0d 1e ; 50 2f 1d ee # mcrne p15, 0, r1, c13, c0, 2|mrc p15, 0, r2, c13, c0, 2
