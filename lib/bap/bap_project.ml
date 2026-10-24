@@ -303,11 +303,13 @@ module Input = struct
           let spec = Image.spec img in
           Signal.send Info.got_img img;
           (* the entry of Thumb has its lower bit set, unlike the
-             address of its subroutine *)
+             address of its subroutine, as an odd address is not of an
+             instruction, whose code is aligned to more than a byte *)
           let entry = Image.entry_point img in
-          let is_entry a =
+          let is_entry proj a =
             Addr.equal a entry
-            || Addr.is_one (Addr.extract_exn ~hi:0 entry)
+            || Theory.Target.code_alignment proj.main.target > 8
+               && Addr.is_one (Addr.extract_exn ~hi:0 entry)
                && Addr.equal a (Addr.pred entry)
           in
           let finish proj =
@@ -317,7 +319,7 @@ module Input = struct
               program =
                 Term.map sub_t proj.program ~f:(fun sub ->
                     match Term.get_attr sub address with
-                    | Some a when is_entry a ->
+                    | Some a when is_entry proj a ->
                         Term.set_attr sub Sub.entry_point ()
                     | _ -> sub);
             }
