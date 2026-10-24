@@ -244,6 +244,19 @@ and watching = {
    system, see [session_state], as the systems, e.g., the emulators of a
    script, see [Bap_emu], run in the same process, each with its own
    engine. *)
+(* the lifter of the lifted engine, see [lifter] *)
+and lifter = {
+  lift : thumb:bool -> int64 -> string -> (int * string * blk term list) option;
+      (** lifts the instruction at the address, in the mode, from its bytes *)
+  name : tid -> string option;
+      (** the name of the label, that the instruction calls, e.g., of an
+          intrinsic *)
+  cached : bool;  (** if the cache had the instructions *)
+  save : unit -> unit;
+      (** saves the instructions to the cache, if it has one, and they changed,
+          as the run does, when it exits *)
+}
+
 and session = {
   mutable active : engine option;  (** the engine of the machines *)
   mutable recipe :
@@ -318,11 +331,7 @@ and session = {
   jit : bool;  (** the lifted engine compiles the blocks, that run often *)
   cache : string option;  (** see [options.cache] *)
   digest : string;  (** see [options.digest] *)
-  mutable lifter :
-    ((thumb:bool -> int64 -> string -> (int * string * blk term list) option)
-    * (tid -> string option)
-    * bool)
-    option;
+  mutable lifter : lifter option;
       (** lifts the instructions for the lifted engine, see [lifter] *)
   mutable driven : bool;
       (** the script drives the machines, see [Bap_emu], which pause, when
@@ -1139,12 +1148,28 @@ let lifter ?cache ~arm project =
   let names = Tid.Table.create () in
   let entries = Hashtbl.Poly.create () in
   let dirty = ref false in
+  let save () =
+    Option.iter cache ~f:(fun file ->
+        if !dirty then begin
+          dirty := false;
+          Lifts.save file (Hashtbl.data entries |> List.map ~f:fst)
+        end)
+  in
   Option.iter cache ~f:(fun file ->
       List.iter (Lifts.load file) ~f:(fun (e : Lifts.entry) ->
           Hashtbl.set entries ~key:(e.addr, e.thumb) ~data:(e, ref false));
-      at_exit (fun () ->
-          if !dirty then
-            Lifts.save file (Hashtbl.data entries |> List.map ~f:fst)));
+      at_exit save;
+      (* the run, that a signal terminates, e.g., the timeout of a
+         script, exits, so that the instructions are saved, and the next
+         run starts with them, unless the signal is handled already *)
+      List.iter
+        [ (Stdlib.Sys.sigterm, 143); (Stdlib.Sys.sigint, 130) ]
+        ~f:(fun (signal, code) ->
+          match Stdlib.Sys.signal signal Stdlib.Sys.Signal_default with
+          | Stdlib.Sys.Signal_default ->
+              Stdlib.Sys.set_signal signal
+                (Stdlib.Sys.Signal_handle (fun _ -> Stdlib.exit code))
+          | handler -> Stdlib.Sys.set_signal signal handler));
   (* the names of the labels, that the instruction calls, e.g., of the
      intrinsics, @intrinsic:fadd_rne_ieee754_binary_64, in the knowledge
      of the lifter *)
@@ -1285,7 +1310,12 @@ let lifter ?cache ~arm project =
             end
             else (size, name, blks))
   in
-  (lift, Hashtbl.find names, not (Hashtbl.is_empty entries))
+  {
+    lift;
+    name = Hashtbl.find names;
+    cached = not (Hashtbl.is_empty entries);
+    save;
+  }
 
 (* the NaNs and the invalid integers of the target, as ieee754-policy of
    ieee754-intrinsics.lisp *)
@@ -1326,7 +1356,7 @@ let create session target ~foreign ~externals =
   let locate = ref (fun _ -> None) and owner = ref (fun _ -> None) in
   let uc =
     match session.lifter with
-    | Some (lift, name, _) when session.lifted ->
+    | Some { lift; name; _ } when session.lifted ->
         Uc.create_lifted
           {
             lift;
@@ -6079,7 +6109,7 @@ module Loader (Machine : Primus.Machine.S) = struct
                   in
                   mkdirs (dir ^/ "lifts") ^/ key ^ ".lifts"))
         in
-        let ((lift, _, cached) as l) =
+        let ({ lift; cached; _ } as l) =
           lifter ?cache
             ~arm:(Poly.equal (Option.map engine ~f:fst) (Some Uc.Arm))
             proj

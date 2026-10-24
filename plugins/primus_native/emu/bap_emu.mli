@@ -505,6 +505,13 @@ val save : t -> string -> unit
     Raises [Invalid_argument], if the program is not paused, e.g., in a hook,
     and [Failure], if the checkpoint can't be saved. *)
 
+val save_lifts : t -> unit
+(** [save_lifts emu] saves the instructions, that the lifted engine lifted, to
+    its cache, if bap has one, see [--cache-dir], and they changed, as the run
+    does, when it exits, also when a signal terminates it, e.g., the timeout of
+    a script, see [SIGTERM], and as {!save} does, so that the next run starts
+    with them. *)
+
 (** The checkpoints, that {!save} wrote, which a script inspects, without
     loading their program, e.g., to choose one in a pipeline. *)
 module Checkpoint : sig

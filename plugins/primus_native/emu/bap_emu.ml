@@ -316,11 +316,13 @@ let restore t { owner; id } =
 module type Completion = X.Completion
 
 let complete = X.complete
+let save_lifts t = Option.iter t.session.lifter ~f:(fun l -> l.save ())
 
 let save t file =
   if not (paused t) then
     invalid_arg "Bap_emu.save: the program is not paused, e.g., in a hook";
   resume t (X.Save (file, pc t));
+  save_lifts t;
   match t.session.saved with Ok () -> () | Error msg -> failwith msg
 
 module Checkpoint = struct

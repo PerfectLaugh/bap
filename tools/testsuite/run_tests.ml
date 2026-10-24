@@ -792,6 +792,27 @@ let emu data =
             ( "lifts the written code",
               "written 405000: 5 bytes\n.*RAX := 0x2A\n" );
           ]);
+    (* the instructions, that the lifted engine lifted, are saved to the
+       cache by Emu.save_lifts, and when a signal terminates the run, see
+       lifts.ml *)
+    case "emu/lifts" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/lifts.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+            ]
+        in
+        sequence env out
+          [
+            ("has no lifts before saving", "before saving: 0\n");
+            ("saves the lifts", "after saving: 1\n");
+            ("starts without the lifts", "before the signal: 0\n");
+          ];
+        check env "exits on the signal" (out.status = Exited 143);
+        check env "saves the lifts on the signal"
+          (Array.length (Sys.readdir (file env "cache/lifted/lifts")) = 1));
     (* the hooks of the memory see the instruction, that accesses it, see
        hook-pc.ml *)
     case "emu/hook-pc" (fun env ->
