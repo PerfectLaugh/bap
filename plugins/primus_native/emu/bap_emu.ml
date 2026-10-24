@@ -1332,7 +1332,64 @@ module Trace = struct
           Map.to_alist targets
           |> List.sort ~compare:(fun (a, n) (b, m) ->
               match Int.compare m n with 0 -> Int64.compare a b | c -> c) ))
+
+  (* the conditional branches of the trace, in their order, with the
+     addresses, that they went to, and whether they were taken, i.e.,
+     didn't fall through: the instructions, whose jumps on a condition
+     leave them, as the jumps inside an instruction, e.g., over the body
+     of a conditional instruction of ARM, aren't branches *)
+  let branches ?last t =
+    let pcs, _, modes = window ?last t in
+    let sizes = Int64.Table.create () in
+    let branching thumb pc =
+      let key = if thumb then Int64.(pc lor 1L) else pc in
+      Hashtbl.find_or_add sizes key ~default:(fun () ->
+          match lift ~thumb t.emu pc with
+          | Some (size, blks) ->
+              let inside = List.map blks ~f:Term.tid |> Tid.Hash_set.of_list in
+              let leaves jmp =
+                match Jmp.kind jmp with
+                | Goto (Direct tid) -> not (Hash_set.mem inside tid)
+                | Goto (Indirect _) | Call _ | Ret _ -> true
+                | Int _ -> false
+              in
+              let conditional jmp =
+                match Jmp.cond jmp with Int _ -> false | _ -> true
+              in
+              if
+                List.exists blks ~f:(fun blk ->
+                    Term.enum jmp_t blk
+                    |> Seq.exists ~f:(fun jmp -> conditional jmp && leaves jmp))
+              then Some size
+              else None
+          | None -> None)
+    in
+    let branches = ref [] in
+    for i = 0 to Bigarray.Array1.dim pcs - 2 do
+      let pc = Bigarray.Array1.unsafe_get pcs i in
+      let thumb = Bigarray.Array1.unsafe_get modes i = 1 in
+      match branching thumb pc with
+      | Some size ->
+          let next = Bigarray.Array1.unsafe_get pcs (i + 1) in
+          branches := (pc, next, Int64.(next <> pc + of_int size)) :: !branches
+      | None -> ()
+    done;
+    List.rev !branches
 end
+
+type 'a recorded = { result : ('a, string) result; trace : Trace.t }
+
+(* [f] runs with a trace of its own, e.g., a call, so that the trace has
+   the path of the callee only, also when it fails *)
+let record ?size t f =
+  let trace = Trace.start ?size t in
+  let result =
+    Exn.protect
+      ~f:(fun () ->
+        match f () with x -> Ok x | exception Failure msg -> Error msg)
+      ~finally:(fun () -> Trace.stop trace)
+  in
+  { result; trace }
 
 type location = Bap_emu_slice.location = Reg of string | Mem of int64 * int
 type step = { index : int64; pc : int64 }

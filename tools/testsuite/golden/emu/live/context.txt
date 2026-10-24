@@ -10,6 +10,8 @@ changes 2035d8+1:mapped>stored 205698+8:unmapped>stored 2156b8+8:unmapped>stored
 worker sees R12 = 0
 served 1 pause(s) in worker true, worker(2) = 2
 captured 1: worker(2,0)
+123print(123) returned, 65 instructions, branches 4>6:fell 4>6:fell 4>2a:taken
+call of 0 failed, 0 instructions
 out[1] before the allocation "\011"
 out[1] after the allocation "\000", mapped
 the stack generated, the code mapped, nowhere unmapped

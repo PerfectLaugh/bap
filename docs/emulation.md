@@ -287,6 +287,15 @@ match Emu.call emu decrypt ~args:[ buf; 16L ] with
 
 A function, that a hook pauses, continues with `run`, after which the program pauses where it was, with the result in `returned emu`. A snapshot before the call undoes its memory effects, and `diff emu snapshot` lists them, see below. `call` raises `Failure` if the function can't be called, e.g., the C ABI of the target is unknown, or if it fails, e.g., with a segmentation fault, after which the program is paused where it was.
 
+`record emu (fun () -> Emu.call emu f ~args)` runs the call with a trace of its own, and gives its result, or the message of its failure, with the trace, whose `Trace.branches` are the conditional branches, that the callee took, in their order, with the address each went to, and whether it was taken, so one call tells, which check rejected its inputs:
+
+```ocaml
+let r = Emu.record emu (fun () -> Emu.call emu check ~args:[ stream ]) in
+(match r.result with Ok x -> printf "returned %s\n" (Option.value_map x ~default:"nothing" ~f:Int64.to_string) | Error msg -> printf "failed: %s\n" msg);
+List.iter (Emu.Trace.branches r.trace) ~f:(fun (site, dst, taken) ->
+    printf "%Lx -> %Lx %s\n" site dst (if taken then "taken" else "fell through"))
+```
+
 `~service:(fun emu pc -> ...)` serves the pauses of the function instead: when a hook stops it, e.g., at a system call, or an import, that the script models, the service runs, and the function continues, until it returns, so that a routine, that does IO, runs end to end in one expression, with the script's own handlers.
 
 `~regs:[ ("X8", ctx) ]` sets the registers, that the ABI doesn't pass, e.g., the context of a hand-written dispatcher, after the arguments, and `~thread:tid` runs the function in the context of another thread of the program, see `threads emu`, i.e., with its registers, e.g., its TLS, which a routine reads, when the program paused in a thread, that wouldn't call it:

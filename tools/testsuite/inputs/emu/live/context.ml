@@ -80,6 +80,25 @@ let () =
                 sprintf "%s(%s)"
                   (if Int64.(site = worker) then "worker" else "?")
                   (String.concat ~sep:"," (List.map regs ~f:Int64.to_string)))));
+      (* the path of a call: print of spawn.c branches on x >= 10 at each
+         level of its recursion, and a call of nothing fails *)
+      let print =
+        List.Assoc.find_exn (Emu.symbols emu) ~equal:String.equal "print"
+      in
+      let r = Emu.record emu (fun () -> Emu.call emu print ~args:[ 123L ]) in
+      printf "print(123) %s, %d instructions, branches %s\n"
+        (match r.result with Ok _ -> "returned" | Error _ -> "failed")
+        (Bigarray.Array1.dim (Emu.Trace.insns r.trace))
+        (String.concat ~sep:" "
+           (List.map (Emu.Trace.branches r.trace) ~f:(fun (site, dst, taken) ->
+                sprintf "%Lx>%Lx:%s"
+                  Int64.(site - print)
+                  Int64.(dst - print)
+                  (if taken then "taken" else "fell"))));
+      let r = Emu.record emu (fun () -> Emu.call emu 0L) in
+      printf "call of 0 %s, %d instructions\n"
+        (match r.result with Ok _ -> "returned" | Error _ -> "failed")
+        (Bigarray.Array1.dim (Emu.Trace.insns r.trace));
       (* a region, that is allocated over the bytes, that were stored,
          replaces them, in Primus, and in Unicorn *)
       let out1 = List.hd_exn changed |> fst in

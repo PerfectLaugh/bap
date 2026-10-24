@@ -352,7 +352,43 @@ module Trace : sig
       whose next instruction is the one after it, isn't taken, e.g., a
       conditional one. The instructions are those of {!insns}, so a trace of the
       blocks has them. *)
+
+  val branches : ?last:int -> t -> (int64 * int64 * bool) list
+  (** [branches trace] the conditional branches of the last [last] records, by
+      default of all, that the ring keeps, in their order: the address of the
+      branch, the address, that the program went to, and if the branch was
+      taken, i.e., the program didn't fall through, e.g., the path, that a call
+      took, see {!Bap_emu.record}, whose branches tell, which check rejected its
+      inputs. A branch is an instruction, whose jump on a condition leaves it,
+      so a conditional instruction of ARM, which jumps over its own body, isn't
+      one. The instructions are those of {!insns}, so a trace of the blocks has
+      them. *)
 end
+
+type 'a recorded = {
+  result : ('a, string) result;
+      (** what the function returned, or the message of the [Failure], that it
+          raised, e.g., of a call, whose function failed *)
+  trace : Trace.t;  (** the trace of the instructions, that ran *)
+}
+
+val record : ?size:int -> t -> (unit -> 'a) -> 'a recorded
+(** [record emu f] runs [f], e.g., a {!call}, with a trace of all instructions
+    of its own, see {!Trace.start}, of the last [size] records, by default
+    2{^ 20}, which stops, when [f] returns, or raises, so that the trace has the
+    path, that the program took in [f] only, e.g., of the callee: its
+    instructions, {!Trace.insns}, its conditional branches, {!Trace.branches},
+    and its calls, {!Trace.calls}, also when the call failed, e.g., with a
+    segmentation fault, whose message is the result, so that one call tells,
+    which branch rejected its inputs, e.g.,
+
+    {[
+    let r = Emu.record emu (fun () -> Emu.call emu check ~args:[ stream ]) in
+    List.iter (Emu.Trace.branches r.trace) ~f:(fun (site, dst, taken) ->
+        printf "%Lx -> %Lx %s\n" site dst (if taken then "taken" else "fell"))
+    ]}
+
+    The other exceptions of [f], e.g., [Invalid_argument], are raised. *)
 
 type location = Bap_emu_slice.location =
   | Reg of string
