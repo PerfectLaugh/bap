@@ -792,6 +792,27 @@ let emu data =
             ( "lifts the written code",
               "written 405000: 5 bytes\n.*RAX := 0x2A\n" );
           ]);
+    (* the observer of the stores, that needs the stores to the code only,
+       e.g., the dynamic code, sees them in both engines, which hook the
+       writes to the code only, and keep them, until they stop, see
+       code-stores.ml and smc-text.c *)
+    case "emu/code-stores" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/code-stores.ml";
+              path data "bin/x86_64-linux-gnu-smc-text";
+            ]
+        in
+        let stores = "40200b=00 402032=ff 402033=b9 402034=00 402035=00\n" in
+        sequence env out
+          [
+            ( "sees the stores to the code in Unicorn",
+              "unicorn: code stores: " ^ stores );
+            ( "sees the stores to the code in the lifted engine",
+              "lifted: code stores: " ^ stores );
+          ]);
     (* the code, that ran, and that memcpy, a native function, rewrites,
        runs anew, as Unicorn translates it anew, also after the store of
        the program *)

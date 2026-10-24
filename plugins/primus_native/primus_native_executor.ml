@@ -202,6 +202,9 @@ type engine = {
   mutable code_segments : (int64 * int64) list;
       (** the executable segments of the program, whose writes are watched, see
           [watching], as the dynamic code of Primus sees them *)
+  code_written : (int64 * int64) list Int64.Table.t;
+      (** the ranges of the addresses of the code, that the program wrote, since
+          the engine stopped, by their pages, merged, see [code_written] *)
   mutable watchers : Uc.hook list;  (** the hooks of the events *)
   mutable observed : (int64 * int) option;
       (** the address of the last observation and the start of Unicorn *)
@@ -1411,6 +1414,7 @@ let create session target ~foreign ~externals =
       watching =
         { pcs = false; reads = false; writes = false; code_writes = false };
       code_segments = [];
+      code_written = Int64.Table.create ();
       watchers = [];
       observed = None;
       accesses = Int64.Table.create ();
@@ -1806,6 +1810,30 @@ let frame_uc e =
    Primus, and may change it. The instruction, that runs again, e.g.,
    after its fault, or from the address, at which Unicorn stopped, is not
    observed again, as Unicorn starts anew, see [starts]. *)
+(* the write of [size] bytes at [addr] to the code, that the observers,
+   which need the writes to the code only, see [watching], see when the
+   engine stops, see [Make.observe], as the ranges of the addresses, by
+   their pages, merged, so that the program, that writes much code, e.g.,
+   a packer, or writes the same code often, e.g., a loop, that patches its
+   instruction, keeps as much as the code, that it wrote, rather than its
+   writes *)
+let code_written e addr size =
+  let last = Int64.(addr + of_int size - 1L) in
+  let rec pages a =
+    let page = page_of a in
+    let hi = Int64.min last Int64.(page + page_size - 1L) in
+    let ranges = Option.value (Hashtbl.find e.code_written page) ~default:[] in
+    let merged, rest =
+      List.partition_tf ranges ~f:(fun (lo, hi') ->
+          Int64.(lo <= hi + 1L && a <= hi' + 1L))
+    in
+    let lo = List.fold merged ~init:a ~f:(fun lo (l, _) -> Int64.min lo l)
+    and hi = List.fold merged ~init:hi ~f:(fun hi (_, h) -> Int64.max hi h) in
+    Hashtbl.set e.code_written ~key:page ~data:((lo, hi) :: rest);
+    if Int64.(hi < last) then pages Int64.(page + page_size)
+  in
+  pages addr
+
 let watch e (w : watching) =
   if not (Poly.equal e.watching w) then begin
     List.iter e.watchers ~f:(Uc.delete e.uc);
@@ -1823,9 +1851,11 @@ let watch e (w : watching) =
     else if w.code_writes then
       (* the writes to the code are seen, when the engine stops, before
          the interpreter runs the code, rather than at once, so that the
-         engine isn't stopped at each instruction *)
+         engine isn't stopped at each instruction, see [code_written] *)
       List.iter e.code_segments ~f:(fun (first, last) ->
-          add (Uc.on_mem ~first ~last e.uc [ `write ] stored));
+          add
+            (Uc.on_mem ~first ~last e.uc [ `write ] (fun _ addr size _ ->
+                 code_written e addr size)));
     if w.pcs || w.reads || w.writes then
       add
         (Uc.on_code e.uc (fun addr _ ->
@@ -2804,13 +2834,7 @@ module Make (Machine : Primus.Machine.S) = struct
                       if
                         List.exists e.code_segments ~f:(fun (first, l) ->
                             Int64.(first <= last && addr <= l))
-                      then
-                        String.iteri data ~f:(fun i c ->
-                            Queue.enqueue e.session.events
-                              (Stored
-                                 ( Int64.(addr + of_int i),
-                                   1,
-                                   Int64.of_int (Char.to_int c) ))));
+                      then code_written e addr (String.length data));
                 let result =
                   Option.map call.result ~f:(fun (exp, width) ->
                       let x = Word.of_int64 ~width r.value in
@@ -3199,13 +3223,22 @@ module Make (Machine : Primus.Machine.S) = struct
       }
 
   (* the loads and the stores of the code, that Unicorn ran, which the
-     observers see byte by byte, as they see those of Primus *)
+     observers see byte by byte, as they see those of Primus, and the
+     writes to the code, see [code_written], whose bytes they see, as
+     they are now, in the order of their addresses *)
   let observe e =
     let events = e.session.events in
-    if Queue.is_empty events then Machine.return ()
+    if Queue.is_empty events && Hashtbl.is_empty e.code_written then
+      Machine.return ()
     else
       let happened = Queue.to_list events in
       Queue.clear events;
+      let written =
+        Hashtbl.data e.code_written
+        |> List.concat
+        |> List.sort ~compare:(fun (a, _) (b, _) -> Int64.compare a b)
+      in
+      Hashtbl.clear e.code_written;
       let* () = pull e in
       let bytes addr size value =
         List.init size ~f:(fun i ->
@@ -3227,6 +3260,20 @@ module Make (Machine : Primus.Machine.S) = struct
                 let* addr = Value.of_word addr in
                 let* byte = Value.of_word byte in
                 notify addr byte))
+      in
+      let* () =
+        Machine.List.iter written ~f:(fun (lo, hi) ->
+            match Uc.mem_read e.uc lo Int64.(to_int_exn (hi - lo + 1L)) with
+            | exception Uc.Error _ -> Machine.return ()
+            | data ->
+                String.to_list data
+                |> List.mapi ~f:(fun i c -> (Int64.(lo + of_int i), c))
+                |> Machine.List.iter ~f:(fun (a, c) ->
+                    let* addr = Value.of_word (word e a) in
+                    let* byte =
+                      Value.of_word (Word.of_int ~width:8 (Char.to_int c))
+                    in
+                    Interpreter.notify_store addr byte))
       in
       push_owned e
 
