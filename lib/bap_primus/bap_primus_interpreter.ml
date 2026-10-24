@@ -301,6 +301,9 @@ type state = {
   curr : pos;
   lets : scope; (* lexical context *)
   prompts : tid list;
+  patched : addr option;
+      (* the least address of the code, that the program stored to, while
+         the block runs, see [blk_body] *)
 }
 
 let sexp_of_state { curr } = Pos.sexp_of_t curr
@@ -318,6 +321,7 @@ let state =
           curr = Top { me = prog; up = Nil };
           lets = empty_scope;
           prompts = [];
+          patched = None;
         })
 
 type exn += Halt
@@ -821,9 +825,69 @@ module Make (Machine : Machine) = struct
 
   let jmp = term normal jmp_t jmp
 
+  (* the instructions, that x86 has, are at most 15 bytes long *)
+  let max_insn_size = 16
+
+  let code_stored addr =
+    Machine.Local.update state ~f:(fun s ->
+        match s.patched with
+        | Some p when Addr.(p <= addr) -> s
+        | _ -> { s with patched = Some addr })
+
+  (* the address of the instruction of the term [t], if it is the next
+     one after the instruction at [last], whose code may be changed, as
+     the program stored to its address, or to an address after it, in
+     the block, whose last instruction is at [hi], and if no term, that
+     is yet to run, see [rest], is of an instruction before it, e.g., the
+     branch of MIPS, whose delay slot it is *)
+  let patched ~hi last rest t =
+    match Term.get_attr t address with
+    | Some addr when not (Option.equal Addr.equal last (Some addr)) -> (
+        Machine.Local.get state >>| fun s ->
+        match (s.patched, hi) with
+        | Some p, Some hi
+          when Addr.(addr <= p)
+               && Word.(p < hi ++ max_insn_size)
+               && List.for_all (rest ()) ~f:(fun a -> Addr.(addr <= a)) ->
+            Some addr
+        | _ -> None)
+    | _ -> Machine.return None
+
+  (* the instructions of the block run, unless the program changes the
+     code of the next one, e.g., as the block stores to it, which then
+     runs, as it is in the memory, from its address, see
+     [Bap_primus_dynamic], as the jump to it does *)
   let blk_body () t =
-    Machine.Seq.iter (Term.enum def_t t) ~f:def >>= fun () ->
-    Machine.Seq.fold ~init:Init (Term.enum jmp_t t) ~f:jmp
+    let addr_of t = Term.get_attr t address in
+    let defs = Seq.to_list (Term.enum def_t t) in
+    let jumps = Seq.to_list (Term.enum jmp_t t) in
+    let jmp_addrs = List.filter_map jumps ~f:addr_of in
+    let hi =
+      List.max_elt ~compare:Addr.compare
+        (jmp_addrs @ List.filter_map defs ~f:addr_of)
+    in
+    let from addr = Code.exec (`addr addr) >>| fun () -> Init in
+    let rec run last = function
+      | [] -> (
+          match jumps with
+          | [] -> jmps ()
+          | jmp :: _ -> (
+              patched ~hi last (fun () -> jmp_addrs) jmp >>= function
+              | Some addr -> from addr
+              | None -> jmps ()))
+      | d :: ds -> (
+          let rest () = List.filter_map ds ~f:addr_of @ jmp_addrs in
+          patched ~hi last rest d >>= function
+          | Some addr -> from addr
+          | None ->
+              def d >>= fun () ->
+              let last =
+                match addr_of d with Some addr -> Some addr | None -> last
+              in
+              run last ds)
+    and jmps () = Machine.List.fold ~init:Init jumps ~f:jmp in
+    Machine.Local.update state ~f:(fun s -> { s with patched = None })
+    >>= fun () -> run None defs
 
   let finish = function
     | Init | Conj _ -> Machine.return () (* return from sub *)

@@ -24,12 +24,14 @@ module Interworking = Bap_primus_interworking
    to, and its subroutine, which starts there, are linked to the dynamic
    code, as well as the executable address, that nothing is linked to.
 
-   Limits:
+   The block, that the program changes, while it runs, e.g., the next
+   instructions of the block, that stores to them, runs from the
+   instruction, that may be changed, as the dynamic code, see
+   [Interpreter.code_stored], and the subroutine without the blocks,
+   e.g., of the call to the code, that the program writes to its data,
+   runs the code at its address.
 
-   - the block, that the program changes, while it runs, e.g., the next
-     instructions of the block, that stores to them, runs as it was,
-     until the program jumps to it again, as the interpreter runs the
-     blocks, not the instructions;
+   Limits:
 
    - the dynamic code of a subroutine, that the program calls, e.g., as
      it changed its first block, posts no [call] and [call-return]
@@ -299,6 +301,7 @@ module LinkBinaryProgram (Machine : Machine) = struct
     then Machine.return ()
     else
       let { blocks; blks; subs } = Lazy.force index in
+      Interp.code_stored addr >>= fun () ->
       match Map.closest_key blocks `Less_or_equal_to addr with
       | Some (start, last) when Addr.(addr <= last) ->
           Machine.Local.get dynamic >>= fun linked ->
@@ -399,6 +402,34 @@ module LinkBinaryProgram (Machine : Machine) = struct
      else Machine.return ())
     >>= fun () -> Linker.link ~name:(name t) ~tid:(Term.tid t) ?addr code
 
+  (* the subroutine without the blocks, e.g., of the call to the code,
+     that the program writes to its data, runs the code at its address,
+     when it is called, as the knowledge is of the system, if the address
+     is executable, unlike, e.g., the slot of an import of PE, whose
+     subroutine does nothing, as before *)
+  let empty_sub sub : Bap_primus_linker.code =
+    let module Code (Machine : Machine) = struct
+      open Machine.Syntax
+      module Interp = Interpreter.Make (Machine)
+      module Memory = Primus.Memory.Make (Machine)
+
+      let exec =
+        Machine.knowledge
+          (Bap_knowledge.Knowledge.collect Theory.Label.addr (Term.tid sub))
+        >>= function
+        | None -> Interp.sub sub
+        | Some addr -> (
+            Machine.gets Project.target >>= fun target ->
+            let addr = Word.create addr (Theory.Target.code_addr_size target) in
+            Memory.is_executable addr >>= function
+            | false -> Interp.sub sub
+            | true ->
+                let module Dynamic = (val dynamic_code addr) in
+                let module Dynamic = Dynamic (Machine) in
+                Dynamic.exec)
+    end in
+    (module Code)
+
   let linker ~arm linked =
     object
       inherit [unit Machine.t] Term.visitor
@@ -415,7 +446,9 @@ module LinkBinaryProgram (Machine : Machine) = struct
         else m
 
       method! enter_sub t m =
-        if not @@ Set.mem linked @@ Term.tid t then (
+        if Term.length blk_t t = 0 && not (Set.mem linked (Term.tid t)) then
+          link Sub.name (empty_sub t) t m
+        else if not @@ Set.mem linked @@ Term.tid t then (
           let sub = if arm then Arm.unmask_sub t else t in
           let module Code (Machine : Machine) = struct
             module Interp = Interpreter.Make (Machine)

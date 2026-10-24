@@ -96,6 +96,12 @@ module Make (Machine : Machine) : sig
   val blk : blk term -> unit m
   val step : next:addr -> blk term list -> value m
   val continue_at : addr -> unit m
+
+  val code_stored : addr -> unit m
+  (** [code_stored addr] tells, that the program stored to its code at [addr],
+      so that the instructions of the running block, from the one, that may be
+      changed, run, as they are in the memory *)
+
   val call_at : addr -> return:tid -> unit m
   val exp : exp -> value m
   val get : var -> value m

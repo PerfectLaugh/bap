@@ -1336,21 +1336,35 @@ let mprotect data =
 (* the code, that patches the instruction after it, in the same block,
    and restores it, runs patched, also in the blocks, that the JIT of
    the lifted engine compiled, see smc.c, whose stores to the code stop
-   the block, in both executors *)
+   the block, in the executors and in the interpreter *)
 let smc data =
-  List.map
-    (fun system ->
-      case ("run/smc/" ^ system) (fun env ->
-          let out =
-            bap env
-              [
-                path data "bin/x86_64-linux-gnu-smc";
-                "--passes=run";
-                "--run-systems=" ^ system;
-              ]
-          in
-          contains env "runs the patched code" out "s 250216 250216"))
-    [ "bap:unicorn-executor"; "bap:lifted-executor" ]
+  List.concat_map
+    (fun (name, bin) ->
+      List.map
+        (fun system ->
+          case
+            ("run/" ^ name ^ "/" ^ system)
+            (fun env ->
+              let out =
+                bap env
+                  [
+                    path data ("bin/" ^ bin);
+                    "--passes=run";
+                    "--run-systems=" ^ system;
+                  ]
+              in
+              contains env "runs the patched code" out "s 250216 250216"))
+        [
+          "bap:unicorn-executor";
+          "bap:lifted-executor";
+          "bap:stubbed-executor";
+          "bap:legacy-main";
+        ])
+    (* the code, that the program writes to its data, and the code of the
+       program, whose block changes, while it runs, see smc-text.c *)
+    [
+      ("smc", "x86_64-linux-gnu-smc"); ("smc-text", "x86_64-linux-gnu-smc-text");
+    ]
 
 (* the taint, that the lifted engine propagates itself, is the one, that
    the interpreter propagates, by the policy of the computations, and of
