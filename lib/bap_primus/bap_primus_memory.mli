@@ -32,13 +32,19 @@ module Backing : sig
     pending : id -> addr -> bool;
     fetch : id -> addr -> (addr * string) list;
     fetch_all : id -> (addr * string) list;
+    peek_all : id -> (addr * string) list;
     stored : id -> addr -> string -> unit;
   }
 end
 
 module Snapshot : sig
   type t [@@deriving bin_io]
+
+  val values : t -> (addr * word) list
 end
+
+type origin = Stored | Generated | Mapped | Unmapped
+[@@deriving compare, equal, sexp]
 
 module Make (Machine : Machine) : sig
   val set_backing : Backing.t option -> unit Machine.t
@@ -79,6 +85,8 @@ module Make (Machine : Machine) : sig
   val is_executable : addr -> bool Machine.t
   val protection : addr -> protection option Machine.t
   val regions : (addr * addr * protection) list Machine.t
+  val origin : addr -> origin Machine.t
+  val values_of : ?generated:bool -> id -> (addr * word) list Machine.t
   val peek : addr -> int -> string Machine.t
   val load_bytes : addr -> int -> (char * protection) option array Machine.t
   val store_bytes : addr -> string -> unit Machine.t

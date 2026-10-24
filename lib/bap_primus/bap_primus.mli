@@ -2449,7 +2449,29 @@ module Std : sig
           @since 2.6.0 *)
       module Snapshot : sig
         type t [@@deriving bin_io]
+
+        val values : t -> (addr * word) list
+        (** [values snapshot] the bytes, that the machine stored, by their
+            addresses, e.g., to compare the snapshots.
+
+            @since 2.6.0 *)
       end
+
+      (** where a byte of the memory comes from, see {!Make.origin}
+
+          @since 2.6.0 *)
+      type origin =
+        | Stored
+            (** a store, of the program, or of the machine, e.g., of a stub, or
+                a copy from an emulator *)
+        | Generated
+            (** a generator, when the byte was loaded, which remembers it, or
+                will, when it is loaded, as the region has no bytes *)
+        | Mapped
+            (** the segments of the program, i.e., its file, or the fill of an
+                allocated region, e.g., the zeros of BSS *)
+        | Unmapped
+      [@@deriving compare, equal, sexp]
 
       (** The memory, whose bytes are elsewhere, e.g., in an emulator, until a
           machine accesses them.
@@ -2478,6 +2500,11 @@ module Std : sig
                   pending *)
           fetch_all : Machine.id -> (addr * string) list;
               (** [fetch_all id] all pending bytes of the machine [id] *)
+          peek_all : Machine.id -> (addr * string) list;
+              (** [peek_all id] all pending bytes of the machine [id], which
+                  stay pending, see {!Make.values_of}
+
+                  @since 2.6.0 *)
           stored : Machine.id -> addr -> string -> unit;
               (** [stored id addr data] the machine [id] has stored the bytes
                   [data] from [addr] *)
@@ -2626,6 +2653,15 @@ module Std : sig
 
             @since 2.6.0 *)
 
+        val origin : addr -> origin Machine.t
+        (** [origin addr] where the byte at [addr] comes from, see {!origin}: a
+            store, a generator, the segments of the program, or nowhere, as it
+            is not mapped. A byte, that a generator generated, is one of the
+            run, e.g., of the order of the loads, so it differs between the
+            runs, e.g., the uninitialized memory, that a program reads.
+
+            @since 2.6.0 *)
+
         val regions : (addr * addr * protection) list Machine.t
         (** [regions] the mapped ranges of the memory, [(lower, upper)],
             inclusive, with their protections, as the segments, and {!protect},
@@ -2682,6 +2718,22 @@ module Std : sig
         val snapshot : Snapshot.t Machine.t
         (** [snapshot] the state of the memories of the machine: their segments,
             the stored values, and the protections.
+
+            @since 2.6.0 *)
+
+        val values_of :
+          ?generated:bool ->
+          Monad.State.Multi.id ->
+          (addr * word) list Machine.t
+        (** [values_of machine] the bytes, that the [machine] stored, by their
+            addresses, e.g., of another machine, a snapshot, to compare the
+            memories, see [Bap_emu.diff], the bytes, that are pending in the
+            backing, e.g., in an emulator, last, which aren't stored, unlike
+            {!values}, so the machine doesn't change, and without the bytes,
+            that the loads generated, see {!origin}, unless [generated], as the
+            checkpoints have them.
+
+            Precondition: the data of the memories are bytes.
 
             @since 2.6.0 *)
 

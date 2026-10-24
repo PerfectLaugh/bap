@@ -73,7 +73,13 @@ type state = {
   layers : layer list;
   index : index;
   protections : (addr * addr * protection) list;
+  generated : Addr.Set.t;
+      (** the addresses of the values, that the generators generated, when they
+          were loaded, and that are remembered, until they are stored *)
 }
+
+type origin = Stored | Generated | Mapped | Unmapped
+[@@deriving compare, equal, sexp]
 
 type t = { curr : Descriptor.t; mems : state Descriptor.Map.t }
 
@@ -83,6 +89,7 @@ module Backing = struct
     pending : id -> addr -> bool;
     fetch : id -> addr -> (addr * string) list;
     fetch_all : id -> (addr * string) list;
+    peek_all : id -> (addr * string) list;
     stored : id -> addr -> string -> unit;
   }
 
@@ -314,6 +321,7 @@ let empty_state =
     layers = [];
     index = { segments = Map.empty (module Int); others = []; count = 0 };
     protections = [];
+    generated = Addr.Set.empty;
   }
 
 (* the protected ranges of a machine, at most, see [protect] *)
@@ -382,6 +390,8 @@ module Snapshot = struct
 
   type t = { curr : Descriptor.t; mems : (Descriptor.t * mem) list }
   [@@deriving bin_io]
+
+  let values { mems; _ } = List.concat_map mems ~f:(fun (_, m) -> m.values)
 
   let of_layer ({ mem; perms = { readonly; executable } } : layer) : area =
     let lower, upper = bounds mem in
@@ -570,7 +580,8 @@ module Make (Machine : Machine) = struct
     memory >>= fun { size } ->
     Machine.gets Project.arch >>= fun arch ->
     store_word ?notify arch size ~addr word s.values >>= fun (values, keys) ->
-    put_curr { s with values } >>= fun () ->
+    let generated = List.fold keys ~init:s.generated ~f:Set.add in
+    put_curr { s with values; generated } >>= fun () ->
     Machine.List.iter keys ~f:(fun key ->
         Track.generated key (Map.find_exn values key))
     >>| fun () -> Map.find_exn values addr
@@ -592,7 +603,13 @@ module Make (Machine : Machine) = struct
                     Generate.word g (Generator.width g) >>= remembered s addr)))
 
   let set_value addr value s =
-    { s with values = Map.set s.values ~key:addr ~data:value }
+    {
+      s with
+      values = Map.set s.values ~key:addr ~data:value;
+      generated =
+        (if Set.is_empty s.generated then s.generated
+         else Set.remove s.generated addr);
+    }
 
   let write addr value s =
     match find_protection addr s with
@@ -664,7 +681,13 @@ module Make (Machine : Machine) = struct
       Array.foldi xs ~init:s.values ~f:(fun i values x ->
           Map.set values ~key:(Addr.nsucc addr i) ~data:x)
     in
-    { s with values }
+    let generated =
+      if Set.is_empty s.generated then s.generated
+      else
+        Array.foldi xs ~init:s.generated ~f:(fun i generated _ ->
+            Set.remove generated (Addr.nsucc addr i))
+    in
+    { s with values; generated }
 
   let set_backing backing = Machine.Global.put Backing.state backing
 
@@ -725,6 +748,20 @@ module Make (Machine : Machine) = struct
   let store addr value = Value.of_word value >>= set addr
   let store_never_fail addr value = Value.of_word value >>= set_never_fail addr
   let is_mapped addr = get_curr >>| is_mapped addr
+
+  (* where the byte comes from, after the backing, e.g., an emulator, gave
+     it, if it has it *)
+  let origin addr =
+    fetch addr 1 >>= fun () ->
+    get_curr >>| fun s ->
+    if Set.mem s.generated addr then Generated
+    else if Map.mem s.values addr then Stored
+    else
+      match find_layer addr s with
+      | None -> Unmapped
+      | Some { mem = Static _ } -> Mapped
+      | Some { mem = Dynamic { value; _ } } ->
+          if Option.is_some (Generator.fill value) then Mapped else Generated
 
   (* the permissions of the layer, a byte that was stored without a layer is
      writable, as well as a byte of a read-only layer that was stored *)
@@ -962,6 +999,35 @@ module Make (Machine : Machine) = struct
     Map.to_alist mems
     |> List.concat_map ~f:(fun (desc, (s : state)) ->
         Map.to_alist s.values |> List.map ~f:(fun (addr, x) -> (desc, addr, x)))
+
+  (* the bytes, that the [machine] stored, by their addresses, the pending
+     ones of the backing, e.g., the pages, that the emulator holds for it,
+     last, without storing them, e.g., of a snapshot, which is another
+     machine, see [Bap_emu.diff], as the stored values are of all
+     memories of the machine *)
+  let values_of ?(generated = false) machine =
+    Machine.Other.get machine state >>= fun { mems; _ } ->
+    Machine.Global.get Backing.state >>| fun backing ->
+    let stored =
+      Map.to_alist mems
+      |> List.concat_map ~f:(fun (_, (s : state)) ->
+          Map.to_alist s.values
+          |> List.filter_map ~f:(fun (addr, x) ->
+              (* the generated values, which the loads remember, aren't
+                 stored, unless they are asked for *)
+              if (not generated) && Set.mem s.generated addr then None
+              else Some (addr, Value.to_word x)))
+    in
+    let pending =
+      match backing with
+      | Some b ->
+          List.concat_map (b.peek_all machine) ~f:(fun (addr, data) ->
+              List.init (String.length data) ~f:(fun i ->
+                  ( Addr.nsucc addr i,
+                    Word.of_int ~width:8 (Char.to_int data.[i]) )))
+      | None -> []
+    in
+    stored @ pending
 
   let restore_state current (m : Snapshot.mem) =
     match
