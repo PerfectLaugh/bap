@@ -275,6 +275,34 @@ let find_layer addr { layers; index } =
     | Some { layer }, None | None, Some (_, layer) -> Some layer
     | None, None -> None
 
+(* the layer of all bytes of [addr, last], if they are in one segment of
+   the index, with no layer outside of it, see [find_layer], no value,
+   and no protection, which the loads of the ranges read at once *)
+let uniform_layer addr last s =
+  if
+    (not (is_unsigned addr))
+    || (not (List.is_empty s.index.others))
+    || List.exists s.protections ~f:(fun (lo, hi, _) ->
+        Addr.(hi >= addr && lo <= last))
+  then None
+  else
+    match Map.closest_key s.values `Greater_or_equal_to addr with
+    | Some (k, _) when Addr.(k <= last) -> None
+    | _ -> (
+        match Map.find s.index.segments (Addr.bitwidth addr) with
+        | None -> None
+        | Some segments -> (
+            let segment x =
+              match Map.closest_key segments `Less_or_equal_to x with
+              | Some (_, seg) when Bitvec.compare x seg.hi <= 0 -> Some seg
+              | _ -> None
+            in
+            match
+              (segment (Word.to_bitvec addr), segment (Word.to_bitvec last))
+            with
+            | Some a, Some b when phys_equal a b -> Some a.layer
+            | _ -> None))
+
 let is_mapped addr s =
   Map.mem s.values addr || Option.is_some (find_layer addr s)
 
@@ -733,12 +761,21 @@ module Make (Machine : Machine) = struct
   (* the byte at [addr], which is mapped and readable, the generated
      value is remembered, as [read] does, but it is not an input, e.g.,
      of the symbolic executor, as it is a copy of the memory *)
-  let read_byte s addr =
+  let read_byte ~quiet s addr =
     match Map.find s.values addr with
     | Some v -> Machine.return (Value.to_word v, s)
     | None -> (
         match find_layer addr s with
         | Some { mem = Static mem } -> Machine.return (read_word mem addr 8, s)
+        (* the byte of the layer, whose generator is static, e.g., of the
+           zeros of BSS, is its value, which is not remembered, as it is
+           the same, when it is read again, and not tracked, which saves
+           the map of the values of the large layers, e.g., which an
+           emulator copies, see [load_bytes] *)
+        | Some { mem = Dynamic { value = g } }
+          when quiet && Option.is_some (Generator.fill g) ->
+            Machine.return
+              (Word.create (Option.value_exn (Generator.fill g)) 8, s)
         | Some { mem = Dynamic { value = g } } ->
             Generate.word g (Generator.width g)
             >>= remembered ~notify:false s addr
@@ -746,26 +783,57 @@ module Make (Machine : Machine) = struct
             get_curr >>| fun s -> (Value.to_word v, s)
         | None -> assert false)
 
+  (* the bytes of the range in one layer, of a static generator, or of the
+     image, at once, see [uniform_layer] *)
+  let load_uniform addr len s =
+    if len = 0 then None
+    else
+      match uniform_layer addr (Addr.nsucc addr (len - 1)) s with
+      | None -> None
+      | Some { mem; perms = { readonly; executable } } -> (
+          let p = { readable = true; writable = not readonly; executable } in
+          match mem with
+          | Dynamic { value = g } -> (
+              match Generator.fill g with
+              | Some v ->
+                  let c = Char.of_int_exn (Bitvec.to_int v land 0xFF) in
+                  Some (Array.create ~len (Some (c, p)))
+              | None -> None)
+          | Static mem ->
+              Some
+                (Array.init len ~f:(fun i ->
+                     let x = read_word mem (Addr.nsucc addr i) 8 in
+                     Some (Char.of_int_exn (Word.to_int_exn x), p))))
+
+  (* the bytes of the layers of the static generators are neither
+     remembered, nor read one by one, unless the generated values are
+     observed, e.g., by the symbolic executor, whose inputs they are, when
+     they are read later, unless they were remembered, see [read] *)
   let load_bytes addr len =
     check_bytes "load_bytes" >>= fun () ->
     fetch addr len >>= fun () ->
+    Machine.Observation.observed generated >>= fun observed ->
+    let quiet = not observed in
     get_curr >>= fun s ->
-    let bytes = Array.create ~len None in
-    let rec loop i s =
-      if i = len then Machine.return bytes
-      else
-        let a = Addr.nsucc addr i in
-        match protection_of a s with
-        | None -> loop (i + 1) s
-        | Some p when not p.readable ->
-            bytes.(i) <- Some ('\000', p);
-            loop (i + 1) s
-        | Some p ->
-            read_byte s a >>= fun (x, s) ->
-            bytes.(i) <- Some (Char.of_int_exn (Word.to_int_exn x), p);
-            loop (i + 1) s
-    in
-    loop 0 s
+    match if quiet then load_uniform addr len s else None with
+    | Some bytes -> Machine.return bytes
+    | None ->
+        let bytes = Array.create ~len None in
+        let rec loop i s =
+          if i = len then Machine.return bytes
+          else
+            let a = Addr.nsucc addr i in
+            match protection_of a s with
+            | None -> loop (i + 1) s
+            | Some p when not p.readable ->
+                bytes.(i) <- Some ('\000', p);
+                loop (i + 1) s
+            | Some p ->
+                read_byte ~quiet s a >>= fun (x, s) ->
+                bytes.(i) <- Some (Char.of_int_exn (Word.to_int_exn x), p);
+                loop (i + 1) s
+        in
+        loop 0 s
 
   let store_bytes addr data =
     check_bytes "store_bytes" >>= fun () ->
