@@ -75,6 +75,12 @@ val set_unmapped : t -> string -> Bap.Std.word -> unit
 val reg_size : t -> int -> int
 val reg_read : t -> int -> int64
 val reg_write : t -> int -> int64 -> unit
+
+val current : t -> int64
+(** [current t] the address of the instruction, that runs, e.g., in a hook of
+    the memory, or of the next one, when the engine is stopped, see
+    [Bap_engine.current] *)
+
 val reg_read_bytes : t -> int -> string
 val reg_write_bytes : t -> int -> string -> unit
 

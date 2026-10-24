@@ -98,6 +98,12 @@ val reg : arch -> string -> int option
 val reg_size : t -> int -> int
 val reg_read : t -> int -> int64
 val reg_write : t -> int -> int64 -> unit
+
+val current : t -> pc:int -> int64
+(** [current t ~pc] the address of the instruction, that runs, e.g., in a hook
+    of the memory, which Unicorn has in its register [pc], or of the next one,
+    when the engine is stopped *)
+
 val reg_read_bytes : t -> int -> string
 val reg_write_bytes : t -> int -> string -> unit
 

@@ -126,7 +126,8 @@ val stop : t -> unit
 
 val pc : t -> int64
 (** the address of the next instruction, with the lower bit set in the Thumb
-    state of ARM *)
+    state of ARM, or, in a hook, e.g., of {!on_write}, of the instruction, that
+    runs, e.g., the one, that stores *)
 
 val set_pc : t -> int64 -> unit
 (** [set_pc emu addr] continues the program from [addr], when it is paused *)

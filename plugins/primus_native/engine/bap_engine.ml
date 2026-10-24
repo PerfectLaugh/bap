@@ -87,6 +87,9 @@ let reg_size t id =
 let reg_read t id =
   match t with Unicorn u -> Uc.reg_read u id | Lifted l -> L.reg_read l id
 
+let current t ~pc =
+  match t with Unicorn u -> Uc.reg_read u pc | Lifted l -> L.current l
+
 let reg_write t id x =
   match t with
   | Unicorn u -> Uc.reg_write u id x

@@ -524,6 +524,10 @@ let write_reg t id x =
 
 let pc t = reg_read t t.config.pc
 
+(* the instruction, that runs, e.g., in a hook, or the next one, when the
+   engine is stopped *)
+let current t = if t.running then t.current else pc t
+
 let set_pc t pc =
   if reg_size t t.config.pc > 8 then invalid_arg "the program counter is wide"
   else write_reg t t.config.pc pc

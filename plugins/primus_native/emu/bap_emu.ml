@@ -268,6 +268,19 @@ let create ?system ?(components = []) ?(init = []) ?(redirects = [])
 let pc t =
   match t.state with
   | Suspended (pc, _, _) -> pc
+  | Running ->
+      (* in a hook, the instruction, that runs, with the lower bit set
+         in the Thumb state of ARM, as Unicorn has it *)
+      let e = engine t in
+      let pc = Uc.current e.uc ~pc:e.pc in
+      if
+        Poly.equal e.arch Uc.Arm
+        && Int64.(
+             Uc.reg_read e.uc (Option.value_exn (Uc.reg Uc.Arm "CPSR"))
+             land 0x20L
+             <> 0L)
+      then Int64.(pc lor 1L)
+      else pc
   | _ -> invalid_arg "Bap_emu: the program is not paused"
 
 (* the machine continues from the address, also after the other

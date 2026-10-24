@@ -792,6 +792,24 @@ let emu data =
             ( "lifts the written code",
               "written 405000: 5 bytes\n.*RAX := 0x2A\n" );
           ]);
+    (* the hooks of the memory see the instruction, that accesses it, see
+       hook-pc.ml *)
+    case "emu/hook-pc" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/hook-pc.ml";
+              path data "bin/x86_64-linux-gnu-smc-text";
+            ]
+        in
+        sequence env out
+          [
+            ( "sees the sites in Unicorn",
+              "unicorn: stores to 40200b from 402004 40200f\n" );
+            ( "sees the sites in the lifted engine",
+              "lifted: stores to 40200b from 402004 40200f\n" );
+          ]);
     (* the observer of the stores, that needs the stores to the code only,
        e.g., the dynamic code, sees them in both engines, which hook the
        writes to the code only, and keep them, until they stop, see
