@@ -29,15 +29,15 @@ module Interworking = Bap_primus_interworking
    instruction, that may be changed, as the dynamic code, see
    [Interpreter.code_stored], and the subroutine without the blocks,
    e.g., of the call to the code, that the program writes to its data,
-   runs the code at its address.
+   runs the code at its address. The subroutine of the program, whose
+   first block the program changes, posts the [call] and [call-return]
+   observations, with its arguments, see [link_sub].
 
    Limits:
 
-   - the dynamic code of a subroutine, that the program calls, e.g., as
-     it changed its first block, posts no [call] and [call-return]
-     observations, which the interpreter posts for the subroutines of the
-     program, as the dynamic code has no arguments, and neither do the
-     calls, that the dynamic code makes;
+   - the calls, that the dynamic code makes, post no [call] and
+     [call-return] observations, as they have no arguments, unless they
+     call the subroutines of the program;
 
    - the dynamic code of ARM runs in the mode, Thumb or A32, that the
      jumps enter, as ARMv7 does, see [Interworking], or that the
@@ -52,7 +52,7 @@ module Interworking = Bap_primus_interworking
 type blocks = {
   blocks : addr Addr.Map.t;
   blks : tid list Addr.Map.t;
-  subs : (tid * string) Addr.Map.t;
+  subs : sub term Addr.Map.t;
 }
 
 type code = { segments : (addr * addr) list; index : blocks Lazy.t }
@@ -78,7 +78,7 @@ let index proj =
     Term.enum sub_t prog
     |> Seq.fold ~init:Addr.Map.empty ~f:(fun subs sub ->
         match Term.get_attr sub address with
-        | Some addr -> Map.set subs ~key:addr ~data:(Term.tid sub, Sub.name sub)
+        | Some addr -> Map.set subs ~key:addr ~data:sub
         | None -> subs)
   in
   { blocks; blks; subs }
@@ -280,6 +280,29 @@ module LinkBinaryProgram (Machine : Machine) = struct
     Machine.Local.update dynamic ~f:(fun linked -> Set.add linked addr)
     >>= fun () -> Linker.link ~addr ?tid ?name (dynamic_code addr)
 
+  (* the subroutine, whose first block the program changed, which runs
+     the dynamic code at [addr], from its block, that jumps there, so that
+     the interpreter posts the [call] and [call-return] observations, with
+     its arguments, as it does for the subroutines of the program *)
+  let link_sub sub addr =
+    let entry =
+      Term.append jmp_t (Blk.create ())
+        (Jmp.create_goto (Indirect (Bil.int addr)))
+    in
+    let sub =
+      Sub.create ~tid:(Term.tid sub) ~name:(Sub.name sub)
+        ~args:(Seq.to_list (Term.enum arg_t sub))
+        ~blks:[ entry ] ()
+    in
+    let module Code (Machine : Machine) = struct
+      module Interp = Interpreter.Make (Machine)
+
+      let exec = Interp.sub sub
+    end in
+    Machine.Local.update dynamic ~f:(fun linked -> Set.add linked addr)
+    >>= fun () ->
+    Linker.link ~tid:(Term.tid sub) ~name:(Sub.name sub) (module Code)
+
   (* the block of the program, that the program stores to, in the
      virtual memory, not in another memory, e.g., of the symbolic
      executor, whose addresses are not of the code *)
@@ -322,7 +345,7 @@ module LinkBinaryProgram (Machine : Machine) = struct
                    Machine.List.iter tids ~f:(fun tid -> link_dynamic ~tid addr))
                 >>= fun () ->
                 match Map.find subs start with
-                | Some (tid, name) -> link_dynamic ~tid ~name addr
+                | Some sub -> link_sub sub addr
                 | None -> Machine.return ())
       | _ -> Machine.return ()
 

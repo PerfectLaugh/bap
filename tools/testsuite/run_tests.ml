@@ -1155,8 +1155,31 @@ let patched_code data =
             ]
         else contains env "prints + from the generated code" out "1489580789+")
   in
+  (* the calls of print_endline, whose first instruction is rewritten,
+     so that it runs as the dynamic code, are observed, with their
+     returns, in the interpreter *)
+  let entry system =
+    case
+      ("run/patched-code/" ^ system ^ "/entry")
+      (fun env ->
+        let out =
+          bap env
+            [
+              path data "bin/x86_64-linux-gnu-echo";
+              "--passes=run";
+              "--run-argv=hello,cruel,world";
+              "--run-systems=" ^ system;
+              "--primus-lisp-add=" ^ input "patched-code/entry";
+              "--primus-lisp-load=posix,patching";
+              "--primus-print-observations=lisp-message";
+            ]
+        in
+        contains env "observes the calls" out
+          "print_endline is called and returns 11 times")
+  in
   let systems = [ "bap:stubbed-executor"; "bap:unicorn-executor" ] in
-  List.map taint (systems @ [ "bap:lifted-executor" ])
+  List.map entry [ "bap:stubbed-executor"; "bap:legacy-main" ]
+  @ List.map taint (systems @ [ "bap:lifted-executor" ])
   @ List.map thumb systems
   @ List.map (generated ~taint:false) systems
   @ [
