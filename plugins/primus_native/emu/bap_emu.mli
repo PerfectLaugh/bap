@@ -318,6 +318,31 @@ module Trace : sig
       default of all, that the ring keeps, the oldest first, of the blocks too,
       whose instructions are decoded once, from the bytes, that they have now *)
 
+  type capture
+  (** the registers at the sites, see {!capture} *)
+
+  val capture : ?size:int -> ?regs:string list -> emu -> int64 list -> capture
+  (** [capture emu sites] records the [regs], by default the registers, that the
+      C ABI of the target passes the arguments in, in their order, e.g., X0 to
+      X7 of AArch64, each time the program reaches one of the [sites], the
+      addresses of the instructions, e.g., the sites of the calls of a function,
+      see {!calls}, in a ring of the last [size] records, by default 2{^ 16},
+      which is its own, so that a long run doesn't lose them, e.g., to map the
+      arguments, that a function gets, in one run. The sites are hooked as
+      {!Bap_emu.on_code} does, so they cost a call to OCaml each time. *)
+
+  val captured : ?last:int -> capture -> (int64 * int64 list) list
+  (** [captured c] the last records, at most [last], by default all, that the
+      ring keeps, the oldest first: the site, and the values of the registers,
+      in the order of [regs] *)
+
+  val captures : capture -> int64
+  (** the number of the records, also of those, that the ring doesn't keep
+      anymore *)
+
+  val stop_capture : capture -> unit
+  (** [stop_capture c] stops recording, the ring keeps the records *)
+
   val calls : ?last:int -> t -> (int64 * (int64 * int) list) list
   (** [calls trace] the calls of the last [last] records, by default of all,
       that the ring keeps, by their sites, the instructions, that call, in the
@@ -467,6 +492,7 @@ val call :
   ?args:int64 list ->
   ?regs:(string * int64) list ->
   ?thread:int ->
+  ?service:(t -> int64 -> unit) ->
   t ->
   int64 ->
   int64 option
@@ -497,7 +523,16 @@ val call :
 
     Returns [None], if the program paused in the function, e.g., as a hook
     stopped it, or ended, see {!status}; {!run} continues the function, after
-    which the program pauses where it was, with the result in {!returned}.
+    which the program pauses where it was, with the result in {!returned}. With
+    [service], the function, that pauses, is served instead: [service emu pc]
+    runs at each pause, e.g., the handlers of the script, that serve the system
+    calls, or the imports, that the hooks stopped at, and the function
+    continues, until it returns, or the program ends, so that a routine runs end
+    to end in one expression, e.g.,
+
+    {[
+    Emu.call emu routine ~args:[ ctx ] ~service:(fun emu pc -> handle emu pc)
+    ]}
 
     Raises [Invalid_argument], if the program is not paused, and [Failure], if
     the function can't be called, e.g., the C ABI of the target is not known,
@@ -545,17 +580,25 @@ val provenance : t -> int64 -> provenance
     and the checkpoints keep them as stored, as they were loaded. Raises
     [Invalid_argument], if the program is not paused. *)
 
-val project : ?symbols:(string * int64) list -> t -> project
+val project :
+  ?symbols:(string * int64) list ->
+  ?roots:int64 list ->
+  ?cache:string ->
+  t ->
+  project
 (** [project emu] the project of the memory of the paused program, as it is now,
     e.g., after the program unpacked, or wrote its code: its executable regions,
     see {!regions}, are disassembled and lifted from the bytes, that the program
     has there now, as the disassemble command does, from the subroutines of the
     symbols of the program, of {!add_symbol}, and of [symbols], e.g., the
     entries, that the script found in the tables, that the program built, which
-    name the subroutines too, and its other regions are its data, so that the
-    analyses of the whole program, e.g., {!Xrefs}, or the passes, e.g.,
-    [recompile-optimize], see [Bap_script.run_pass], work on the code, that
-    runs, rather than on the file, whose bytes differ, e.g.,
+    name the subroutines too, and of the [roots], the addresses of the code,
+    that the disassembler starts from too, which it names by their addresses,
+    e.g., the targets of the calls of a trace, see [Trace.calls], so that the
+    functions, that the trace found, are of the project, and its other regions
+    are its data, so that the analyses of the whole program, e.g., {!Xrefs}, or
+    the passes, e.g., [recompile-optimize], see [Bap_script.run_pass], work on
+    the code, that runs, rather than on the file, whose bytes differ, e.g.,
 
     {[
     ignore (Emu.run emu ~until:after_unpack);
@@ -570,18 +613,26 @@ val project : ?symbols:(string * int64) list -> t -> project
     between the projects, and the name of the file, with [#live] and the number
     of the project, so that the knowledge of the file isn't confused with it.
     The disassembly of a large program takes its time, e.g., a few seconds for a
-    megabyte of code.
+    megabyte of code, so with [cache], the file of a saved project, see
+    {!save_project}, the project is loaded from the file, if it is of the same
+    code, see {!code_digest}, and else built, and saved there, so that the
+    scripts, that run again and again, pay for the disassembly once, e.g.,
+
+    {[
+      let proj = Emu.project emu ~cache:"unpacked.proj" in
+    ]}
 
     Raises [Invalid_argument], if the program is not paused, and [Failure], if
     the project can't be created. *)
 
-val code_digest : ?symbols:(string * int64) list -> t -> string
+val code_digest :
+  ?symbols:(string * int64) list -> ?roots:int64 list -> t -> string
 (** [code_digest emu] the digest of the code of the paused program: the bytes of
-    its executable regions, its symbols, with [symbols], as {!project} takes
-    them, and its target, which changes, when the program changes its code, so
-    that a script tells, if a saved project, see {!save_project}, is of the
-    code, that the program has now. Raises [Invalid_argument], if the program is
-    not paused. *)
+    its executable regions, its symbols and roots, with [symbols] and [roots],
+    as {!project} takes them, and its target, which changes, when the program
+    changes its code, so that a script tells, if a saved project, see
+    {!save_project}, is of the code, that the program has now. Raises
+    [Invalid_argument], if the program is not paused. *)
 
 val project_digest : project -> string option
 (** [project_digest proj] the digest of the code, that the project of
@@ -596,14 +647,22 @@ val save_project : project -> string -> unit
     {[
     let proj =
       match Emu.load_project cache with
-      | proj when Emu.project_digest proj = Some (Emu.code_digest emu) -> proj
+      | proj
+        when Option.equal String.equal (Emu.project_digest proj)
+               (Some (Emu.code_digest emu)) ->
+          proj
       | _ | (exception Failure _) ->
           let proj = Emu.project emu in
           Emu.save_project proj cache;
           proj
     ]}
 
-    Raises [Sys_error], if the file can't be written. *)
+    which {!project} does with [cache]. The program is saved with the addresses
+    of its terms only, as the instructions, that the terms carry, take most of
+    the space, and the analyses of the saved projects, e.g., {!Xrefs} and
+    {!Static}, don't read them, so a saved project is a few times the size of
+    the memory, that it has. Raises [Sys_error], if the file can't be written.
+*)
 
 val load_project : string -> project
 (** [load_project file] the project, that {!save_project} saved, with its
@@ -661,6 +720,22 @@ val changed_since : t -> string -> (int64 * int) list
     of the checkpoint are compared with the bytes, that the program has, also
     the ones, that the loads generated, as the checkpoint keeps them as stored.
     Raises [Failure], if the file is not a checkpoint. *)
+
+type change = {
+  addr : int64;
+  size : int;
+  before : provenance;  (** in the snapshot *)
+  after : provenance;  (** in the paused program *)
+}
+(** a range of the bytes, that changed, see {!changes} *)
+
+val changes : t -> snapshot -> change list
+(** [changes emu snapshot] the ranges of {!diff}, split where the provenance of
+    the bytes differs, with the provenance of their first byte in the snapshot
+    and in the paused program, e.g., a range from [Generated] to [Stored] is the
+    first real write of the memory, e.g., an output of a routine, while a range
+    from [Stored] to [Stored] overwrote the data of the program. Raises as
+    {!diff}. *)
 
 val save : t -> string -> unit
 (** [save emu file] saves the checkpoint of the paused program to the [file],

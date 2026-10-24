@@ -62,6 +62,9 @@ let () =
       let code = 0x405000L in
       let emu = Emu.create (Bap_script.project mprotect) in
       ignore (Emu.run emu ~until:code : Emu.status);
+      (* the code, that the program wrote, as a root, which is named by
+         its address, and as a symbol *)
+      show (Emu.project emu ~roots:[ code ]);
       Emu.add_symbol emu "written" code;
       let proj = Emu.project emu in
       show proj;

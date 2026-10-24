@@ -346,6 +346,8 @@ and session = {
       (** the result of the last [Regions] *)
   mutable dumped : string;  (** the result of the last [Dump] *)
   mutable values : (int64 * int) list;  (** the result of the last [Values] *)
+  mutable origins : Primus.Memory.origin list;
+      (** the result of the last [Origins] *)
   mutable starts : int;
       (** the number of the starts of Unicorn, which tells the instruction that
           runs again, e.g., after its fault, from the next one *)
@@ -450,6 +452,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     regions = [];
     dumped = "";
     values = [];
+    origins = [];
     starts = 0;
     stopped_at = None;
     restarted_at = None;
@@ -693,6 +696,9 @@ type request =
   | Values of Primus.Machine.id option * bool
       (** the bytes, that the machine, or the snapshot, stored, with the
           generated ones, if the flag is set, see [Bap_emu.diff] *)
+  | Origins of Primus.Machine.id option * int64 list
+      (** where the bytes of the machine, or of the snapshot, come from, see
+          [Bap_emu.changes] *)
   | Regions
       (** the mapped memory of the machine, with its protections, see
           [Bap_emu.regions] *)
@@ -2594,6 +2600,10 @@ module Make (Machine : Primus.Machine.S) = struct
   (* the pages, whose protection changes, are copied anew, after their
      changes go to Primus *)
   let rec protected (lower, upper, _) = drop lower upper
+
+  (* the pages of a region, that is allocated anew, go to Primus, which
+     forgets their bytes, and are copied anew *)
+  and allocated (lower, upper) = drop lower upper
 
   (* the page, which has a tracked location, goes to Primus, see
      [ensure_page] *)
@@ -5642,6 +5652,16 @@ module Make (Machine : Primus.Machine.S) = struct
           List.map values ~f:(fun (addr, x) ->
               (int64_of_word addr, Word.to_int_exn x land 0xFF));
         serve pc
+    | Origins (other, addrs) ->
+        let* () = pull e in
+        let* me = Machine.current () in
+        let* origins =
+          Memory.origins_of
+            (Option.value other ~default:me)
+            (List.map addrs ~f:(word e))
+        in
+        e.session.origins <- origins;
+        serve pc
     | Regions ->
         let* () = pull e in
         let* regions = Memory.regions in
@@ -6551,6 +6571,7 @@ module Loader (Machine : Primus.Machine.S) = struct
         Primus.System.stop >>> Exec.system_stopped;
         Primus.Interpreter.written >>> Exec.written;
         Primus.Memory.protected >>> Exec.protected;
+        Primus.Memory.allocated >>> Exec.allocated;
         Primus.Track.marked >>> Exec.marked;
         Primus.Interpreter.clock >>> Exec.clocked;
         ( Primus.Linker.Trace.lisp_call >>> fun (name, _) ->

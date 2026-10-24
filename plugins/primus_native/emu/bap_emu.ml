@@ -139,7 +139,8 @@ let start init (entry : Primus.Linker.name) =
         let module Component = Component (Machine) in
         Component.init () >>= ended
     | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ | X.Save _ | X.Interpret
-    | X.Set_pc _ | X.Spawn _ | X.Call _ | X.Regions | X.Dump _ | X.Values _ ->
+    | X.Set_pc _ | X.Spawn _ | X.Call _ | X.Regions | X.Dump _ | X.Values _
+    | X.Origins _ ->
         Machine.return ()
   in
   ended ()
@@ -381,18 +382,6 @@ let spawn_thread ?stack t ~start ~arg =
   resume t (X.Spawn (start, arg, stack));
   match t.session.spawned with Ok tid -> tid | Error msg -> failwith msg
 
-let call ?stack ?(args = []) ?(regs = []) ?thread t addr =
-  if not (paused t) then
-    invalid_arg "Bap_emu.call: the program is not paused, e.g., in a hook";
-  t.session.called <- None;
-  resume t (X.Call (addr, args, regs, thread, stack));
-  match t.session.called with
-  | Some (Ok x) -> Some x
-  | Some (Error msg) -> failwithf "Bap_emu.call: %s" msg ()
-  | None -> None
-
-let returned t = match t.session.called with Some (Ok x) -> Some x | _ -> None
-
 type region = {
   lower : int64;
   upper : int64;
@@ -532,6 +521,28 @@ let interpret t =
   resume t X.Interpret;
   status t
 
+let call ?stack ?(args = []) ?(regs = []) ?thread ?service t addr =
+  if not (paused t) then
+    invalid_arg "Bap_emu.call: the program is not paused, e.g., in a hook";
+  t.session.called <- None;
+  resume t (X.Call (addr, args, regs, thread, stack));
+  (* the function, that pauses, is served, and continues, until it
+     returns, or the program ends *)
+  let rec serve () =
+    match (t.session.called, service, status t) with
+    | None, Some service, Paused ->
+        service t (pc t);
+        ignore (run t : status);
+        serve ()
+    | _ -> ()
+  in
+  serve ();
+  match t.session.called with
+  | Some (Ok x) -> Some x
+  | Some (Error msg) -> failwithf "Bap_emu.call: %s" msg ()
+  | None -> None
+
+let returned t = match t.session.called with Some (Ok x) -> Some x | _ -> None
 let registers t = Target.Regs.names (engine t).regs
 
 let reg t name =
@@ -628,6 +639,39 @@ let provenance t addr =
                     | Unmapped -> Unmapped
               end);
   !result
+
+type change = {
+  addr : int64;
+  size : int;
+  before : provenance;
+  after : provenance;
+}
+
+(* where the bytes come from, in the machine, or in the snapshot *)
+let origins t id addrs =
+  resume t (X.Origins (id, addrs));
+  List.map t.session.origins ~f:(function
+    | Primus.Memory.Stored -> Stored
+    | Generated -> Generated
+    | Mapped -> Mapped
+    | Unmapped -> Unmapped)
+
+let changes t ({ id; _ } as snapshot) =
+  let ranges = diff t snapshot in
+  let addrs =
+    List.concat_map ranges ~f:(fun (a, n) ->
+        List.init n ~f:(fun i -> Int64.(a + of_int i)))
+  in
+  let before = origins t (Some id) addrs and after = origins t None addrs in
+  List.zip_exn addrs (List.zip_exn before after)
+  |> List.fold ~init:[] ~f:(fun acc (addr, (before, after)) ->
+      match acc with
+      | c :: rest
+        when Int64.(c.addr + of_int c.size = addr)
+             && Poly.equal c.before before && Poly.equal c.after after ->
+          { c with size = c.size + 1 } :: rest
+      | _ -> { addr; size = 1; before; after } :: acc)
+  |> List.rev
 
 let read t addr n =
   match accessible t addr n (fun () -> X.uc_read (engine t) addr n) with
@@ -1047,15 +1091,18 @@ module Trace = struct
     | Some insns -> insns
     | None ->
         let last = Int64.(addr + of_int size) in
+        (* the block, whose instruction can't be lifted, e.g., as its
+           page isn't in Unicorn yet, ends there, and isn't cached, so
+           that it is decoded again *)
         let rec loop pc acc =
-          if Int64.(pc >= last) then Array.of_list_rev acc
+          if Int64.(pc >= last) then (Array.of_list_rev acc, true)
           else
             match lift ~thumb t.emu pc with
             | Some (n, _) when n > 0 -> loop Int64.(pc + of_int n) (pc :: acc)
-            | _ -> Array.of_list_rev (pc :: acc)
+            | _ -> (Array.of_list_rev (pc :: acc), false)
         in
-        let insns = loop addr [] in
-        Hashtbl.set t.blocks ~key ~data:((size, insns) :: known);
+        let insns, complete = loop addr [] in
+        if complete then Hashtbl.set t.blocks ~key ~data:((size, insns) :: known);
         insns
 
   type words = (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t
@@ -1135,6 +1182,76 @@ module Trace = struct
      of ARM, which is checked once per instruction, and the call, whose
      next instruction is the one after it, isn't taken, e.g., a
      conditional one *)
+  (* the registers at the sites, which the hooks of the sites record,
+     see [Bap_emu.on_code], in a ring of their own *)
+  type capture = {
+    entries : (int64 * int64 list) Queue.t;
+    limit : int;
+    mutable total : int64;
+    mutable recording : bool;
+  }
+
+  (* the registers, that the C ABI of the target passes the arguments in,
+     in their order *)
+  let argument_registers target =
+    match Bap_c.Std.C.Abi.lookup target with
+    | None -> []
+    | Some abi ->
+        let long = Bap_c.Std.C.Type.basic `slong in
+        let proto : Bap_c.Std.C.Type.proto =
+          {
+            return = long;
+            args = List.init 8 ~f:(fun i -> (sprintf "a%d" i, long));
+            variadic = false;
+          }
+        in
+        Bap_c.Std.C.Abi.apply abi
+          (Bap_c.Std.C.Abi.model target)
+          [] proto (Sub.create ())
+        |> Term.enum arg_t |> Seq.to_list
+        |> List.filter_map ~f:(fun a ->
+            match (Arg.intent a, Arg.rhs a) with
+            | Some In, Var v -> Some (Var.name v)
+            | Some In, (Cast (_, _, Var v) | Extract (_, _, Var v)) ->
+                Some (Var.name v)
+            | _ -> None)
+
+  let capture ?(size = 1 lsl 16) ?regs emu sites =
+    let regs =
+      match regs with
+      | Some regs -> regs
+      | None -> argument_registers emu.target
+    in
+    let c =
+      { entries = Queue.create (); limit = size; total = 0L; recording = true }
+    in
+    List.iter sites ~f:(fun site ->
+        let code =
+          match (engine emu).arch with
+          | Arm -> Int64.(site land lnot 1L)
+          | _ -> site
+        in
+        installed emu (fun e ->
+            let fresh = instructions emu in
+            ignore
+              (Uc.on_code ~first:code ~last:code e.uc (fun addr _ ->
+                   if c.recording && fresh addr then begin
+                     if Queue.length c.entries >= c.limit then
+                       ignore (Queue.dequeue_exn c.entries : int64 * int64 list);
+                     Queue.enqueue c.entries (site, List.map regs ~f:(reg emu));
+                     c.total <- Int64.succ c.total
+                   end))));
+    c
+
+  let stop_capture c = c.recording <- false
+  let captures c = c.total
+
+  let captured ?last c =
+    let all = Queue.to_list c.entries in
+    match last with
+    | Some n when n < List.length all -> List.drop all (List.length all - n)
+    | _ -> all
+
   let calls ?last t =
     let pcs, _, modes = window ?last t in
     let sizes = Int64.Table.create () in
@@ -1845,7 +1962,7 @@ let names t symbols =
   |> List.map ~f:(fun (addr, name) -> (name, addr))
   |> fun names -> names @ symbols
 
-let digest t ~symbols dumped =
+let digest t ~symbols ~roots dumped =
   let module Theory = Bap_core_theory.Theory in
   let buf = Buffer.create 4096 in
   Buffer.add_string buf (Theory.Target.to_string t.target);
@@ -1856,68 +1973,61 @@ let digest t ~symbols dumped =
       end);
   List.iter (names t symbols) ~f:(fun (name, addr) ->
       Buffer.add_string buf (sprintf "%s@%Lx\n" name addr));
+  List.iter (List.dedup_and_sort roots ~compare:Int64.compare) ~f:(fun addr ->
+      Buffer.add_string buf (sprintf "@%Lx\n" addr));
   Md5.to_hex (Md5.digest_string (Buffer.contents buf))
 
-let code_digest ?(symbols = []) t =
+let code_digest ?(symbols = []) ?(roots = []) t =
   if not (paused t) then
     invalid_arg
       "Bap_emu.code_digest: the program is not paused, e.g., in a hook";
-  digest t ~symbols (dump ~only:(fun r -> r.executable) t)
+  digest t ~symbols ~roots (dump ~only:(fun r -> r.executable) t)
 
 let endian target =
   let module Theory = Bap_core_theory.Theory in
   if Theory.Endianness.(Theory.Target.endianness target = le) then LittleEndian
   else BigEndian
 
-let project ?(symbols = []) t =
-  if not (paused t) then
-    invalid_arg "Bap_emu.project: the program is not paused, e.g., in a hook";
-  let target = t.target in
-  let module Theory = Bap_core_theory.Theory in
-  let width = Theory.Target.code_addr_size target in
-  let endian = endian target in
-  let dumped = dump t in
-  let code, data =
-    List.fold dumped ~init:(Memmap.empty, Memmap.empty)
-      ~f:(fun (code, data) (r, bytes) ->
-        let mem =
-          Memory.create endian
-            (Addr.of_int64 ~width r.lower)
-            (Bigstring.of_string bytes)
-          |> Or_error.ok_exn
-        in
-        let tag = Value.create Image.section (region_name r) in
-        if r.executable then (Memmap.add code mem tag, data)
-        else (code, Memmap.add data mem tag))
-  in
-  (* the specification of the file, with the names of the script *)
-  let spec =
-    let facts =
-      Ogre.sequence
-        (List.concat_map (names t symbols) ~f:(fun (name, addr) ->
-             [
-               Ogre.provide Image.Scheme.code_start addr;
-               Ogre.provide Image.Scheme.named_symbol addr name;
-             ]))
-    in
-    Ogre.exec facts (Project.specification t.project) |> Or_error.ok_exn
-  in
-  incr projects;
-  let file = Option.value (Project.get t.project filename) ~default:"a.out" in
-  let filename = sprintf "%s#live%d" file !projects in
-  match
-    Project.create ~package:filename
-      (Project.Input.custom ~filename ~code ~data ~spec target)
-  with
-  | Ok proj -> Project.set proj live_digest (digest t ~symbols dumped)
-  | Error err -> failwithf "Bap_emu.project: %s" (Error.to_string_hum err) ()
-
 (* The saved projects of the memory: the program, the memory, the
    target, and the digest, as the files, from which they are loaded,
    without the disassembly, which they keep. *)
 module Saved = struct
-  type region = { lower : int64; name : string; bytes : string }
+  (* the bytes of a region, whose runs of zeros, e.g., of the stack, that
+     the program never stored, are their lengths *)
+  type piece = Bytes of string | Zeros of int [@@deriving bin_io]
+
+  type region = { lower : int64; name : string; pieces : piece list }
   [@@deriving bin_io]
+
+  let pieces bytes =
+    let n = String.length bytes in
+    let rec go i acc =
+      if i >= n then List.rev acc
+      else
+        let j = ref i in
+        while !j < n && Char.equal bytes.[!j] '\000' do
+          incr j
+        done;
+        if !j - i >= 64 then go !j (Zeros (!j - i) :: acc)
+        else begin
+          (* the bytes up to the next long run of zeros *)
+          let k = ref !j in
+          let zeros = ref 0 in
+          while !k < n && !zeros < 64 do
+            if Char.equal bytes.[!k] '\000' then incr zeros else zeros := 0;
+            incr k
+          done;
+          let stop = if !zeros >= 64 then !k - !zeros else !k in
+          go stop (Bytes (String.sub bytes ~pos:i ~len:(stop - i)) :: acc)
+        end
+    in
+    go 0 []
+
+  let bytes pieces =
+    String.concat
+      (List.map pieces ~f:(function
+        | Bytes s -> s
+        | Zeros n -> String.make n '\000'))
 
   type t = {
     target : string;
@@ -1929,8 +2039,25 @@ module Saved = struct
   }
   [@@deriving bin_io]
 
-  let magic = "bap-emu-project 1\n"
+  let magic = "bap-emu-project 2\n"
 end
+
+(* the program, with the addresses of its terms only, as the other
+   attributes, e.g., the instructions, that each term carries, take
+   most of the space, and the analyses of the saved projects don't read
+   them *)
+let slim prog =
+  let keep t =
+    Term.with_attrs t
+      (match Term.get_attr t address with
+      | Some a -> Dict.set Dict.empty address a
+      | None -> Dict.empty)
+  in
+  Term.map sub_t prog ~f:(fun sub ->
+      keep sub
+      |> Term.map blk_t ~f:(fun blk ->
+          keep blk |> Term.map def_t ~f:keep |> Term.map jmp_t ~f:keep
+          |> Term.map phi_t ~f:keep))
 
 let save_project proj file =
   let module Theory = Bap_core_theory.Theory in
@@ -1940,7 +2067,7 @@ let save_project proj file =
         {
           Saved.lower = Bitvec.to_int64 (Word.to_bitvec (Memory.min_addr mem));
           name = Option.value (Value.get Image.section v) ~default:"";
-          bytes = Memory.to_buffer mem |> Bigsubstring.to_string;
+          pieces = Saved.pieces (Memory.to_buffer mem |> Bigsubstring.to_string);
         })
     |> Seq.to_list
   in
@@ -1959,7 +2086,7 @@ let save_project proj file =
       Saved.target = Theory.Target.to_string (Project.target proj);
       filename = Option.value (Project.get proj filename) ~default:"a.out";
       digest = Option.value (project_digest proj) ~default:"";
-      program = Binable.to_string (module Program) (Project.program proj);
+      program = Binable.to_string (module Program) (slim (Project.program proj));
       code = regions (memmap code);
       data = regions (memmap data);
     }
@@ -1990,7 +2117,7 @@ let load_project file =
             let mem =
               Memory.create endian
                 (Addr.of_int64 ~width r.lower)
-                (Bigstring.of_string r.bytes)
+                (Bigstring.of_string (Saved.bytes r.pieces))
               |> Or_error.ok_exn
             in
             Memmap.add m mem (Value.create Image.section r.name))
@@ -2006,6 +2133,66 @@ let load_project file =
           Project.set proj live_digest saved.digest
       | Error err ->
           failwithf "Bap_emu.load_project: %s" (Error.to_string_hum err) ())
+
+let project ?(symbols = []) ?(roots = []) ?cache t =
+  if not (paused t) then
+    invalid_arg "Bap_emu.project: the program is not paused, e.g., in a hook";
+  let target = t.target in
+  let module Theory = Bap_core_theory.Theory in
+  let width = Theory.Target.code_addr_size target in
+  let endian = endian target in
+  let dumped = dump t in
+  let digest = digest t ~symbols ~roots dumped in
+  let build () =
+    let code, data =
+      List.fold dumped ~init:(Memmap.empty, Memmap.empty)
+        ~f:(fun (code, data) (r, bytes) ->
+          let mem =
+            Memory.create endian
+              (Addr.of_int64 ~width r.lower)
+              (Bigstring.of_string bytes)
+            |> Or_error.ok_exn
+          in
+          let tag = Value.create Image.section (region_name r) in
+          if r.executable then (Memmap.add code mem tag, data)
+          else (code, Memmap.add data mem tag))
+    in
+    (* the specification of the file, with the names of the script, and
+       the roots, which the disassembler names by their addresses *)
+    let spec =
+      let facts =
+        Ogre.sequence
+          (List.concat_map (names t symbols) ~f:(fun (name, addr) ->
+               [
+                 Ogre.provide Image.Scheme.code_start addr;
+                 Ogre.provide Image.Scheme.named_symbol addr name;
+               ])
+          @ List.map roots ~f:(Ogre.provide Image.Scheme.code_start))
+      in
+      Ogre.exec facts (Project.specification t.project) |> Or_error.ok_exn
+    in
+    incr projects;
+    let file = Option.value (Project.get t.project filename) ~default:"a.out" in
+    let filename = sprintf "%s#live%d" file !projects in
+    match
+      Project.create ~package:filename
+        (Project.Input.custom ~filename ~code ~data ~spec target)
+    with
+    | Ok proj -> Project.set proj live_digest digest
+    | Error err -> failwithf "Bap_emu.project: %s" (Error.to_string_hum err) ()
+  in
+  (* the cache has the project of the same code, or gets it *)
+  match cache with
+  | None -> build ()
+  | Some file -> (
+      match load_project file with
+      | proj when Option.equal String.equal (project_digest proj) (Some digest)
+        ->
+          proj
+      | _ | (exception Failure _) ->
+          let proj = build () in
+          save_project proj file;
+          proj)
 
 type import = { slot : int64; name : string; value : int64 option }
 

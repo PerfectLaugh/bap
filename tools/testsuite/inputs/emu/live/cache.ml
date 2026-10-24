@@ -37,6 +37,17 @@ let () =
       (match Emu.load_project echo with
       | exception Failure _ -> print_endline "the program isn't a saved project"
       | _ -> print_endline "loaded the program as a project");
+      (* the cache of the project loads it, if the code is the same *)
+      let cached = Filename.concat dir "echo.cache" in
+      let t0 = Caml_unix.gettimeofday () in
+      ignore (Emu.project emu ~cache:cached : Project.t);
+      let built = Caml_unix.gettimeofday () -. t0 in
+      let t0 = Caml_unix.gettimeofday () in
+      let again = Emu.project emu ~cache:cached in
+      let loaded_again = Caml_unix.gettimeofday () -. t0 in
+      printf "the cache is of the code %b, and loads faster %b\n"
+        (Option.equal String.equal (Emu.project_digest again) (Some digest))
+        Float.(loaded_again < built);
       let xrefs = Xrefs.create loaded in
       let xfile = Filename.concat dir "echo.xrefs" in
       Xrefs.save xrefs xfile;

@@ -2,6 +2,7 @@ regions: 4, the file: 400000-400ce3 r-x 600e10-6030c7 rw- 603168-60316f rw-
 22 subs, 21 with code: __do_global_dtors_aux@4006a0 __libc_csu_fini@400a00 __libc_csu_init@400990 __libc_start_main@4005c0 _fini@400a04 _init@400538 _start@400600 deregister_tm_clones@400630 frame_dummy@4006c0 free@400570 main@40076b malloc@4005e0 memmove@4005f0 print_endline@4006ed print_strings@400733 putchar@400580 register_tm_clones@400660 strchr@4005b0 strcpy@400590 strlen@4005a0 sub_4005d0@4005d0
 400727: RDI := 0xA
 patched 400727: RDI := 0x2B
+13 subs, 12 with code: __do_global_dtors_aux@400470 _dl_relocate_static_pie@4003f0 _fini@400630 _init@40033c _start@4003c0 deregister_tm_clones@400400 frame_dummy@4004a0 main@4004c0 mprotect@400380 putc@400370 register_tm_clones@400430 sub_405000@405000
 13 subs, 12 with code: __do_global_dtors_aux@400470 _dl_relocate_static_pie@4003f0 _fini@400630 _init@40033c _start@4003c0 deregister_tm_clones@400400 frame_dummy@4004a0 main@4004c0 mprotect@400380 putc@400370 register_tm_clones@400430 written@405000
   RAX := 0x2A
   RSP := RSP + 8

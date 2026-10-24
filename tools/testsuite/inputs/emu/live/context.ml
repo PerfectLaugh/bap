@@ -48,6 +48,58 @@ let () =
       printf "since the checkpoint %s\n" (ranges (Emu.changed_since emu ckpt));
       List.iter changed ~f:(fun (a, _) ->
           printf "%Lx %s\n" a (provenance emu a));
+      let name = function
+        | Emu.Stored -> "stored"
+        | Generated -> "generated"
+        | Mapped -> "mapped"
+        | Unmapped -> "unmapped"
+      in
+      printf "changes %s\n"
+        (String.concat ~sep:" "
+           (List.map (Emu.changes emu snap) ~f:(fun c ->
+                sprintf "%Lx+%d:%s>%s" c.addr c.size (name c.before)
+                  (name c.after))));
+      (* the arguments at the entry of worker, and the service of the
+         calls, that a hook pauses *)
+      let capture = Emu.Trace.capture emu [ worker ] ~regs:[ "RDI"; "RSI" ] in
+      let stops = ref 0 in
+      Emu.on_code emu ~first:worker ~last:worker (fun emu _ -> Emu.stop emu);
+      let served = ref [] in
+      let r =
+        Emu.call emu worker ~args:[ 2L ] ~service:(fun emu pc ->
+            incr stops;
+            served := Int64.(pc land -2L = worker) :: !served)
+      in
+      printf "served %d pause(s) in worker %b, worker(2) = %s\n" !stops
+        (List.for_all !served ~f:Fn.id)
+        (Option.value_map r ~default:"none" ~f:Int64.to_string);
+      printf "captured %Ld: %s\n"
+        (Emu.Trace.captures capture)
+        (String.concat ~sep:" "
+           (List.map (Emu.Trace.captured capture) ~f:(fun (site, regs) ->
+                sprintf "%s(%s)"
+                  (if Int64.(site = worker) then "worker" else "?")
+                  (String.concat ~sep:"," (List.map regs ~f:Int64.to_string)))));
+      (* a region, that is allocated over the bytes, that were stored,
+         replaces them, in Primus, and in Unicorn *)
+      let out1 = List.hd_exn changed |> fst in
+      printf "out[1] before the allocation %S\n" (Emu.read emu out1 1);
+      Emu.primus emu
+        (module functor
+                  (Machine : Bap_primus.Std.Primus.Machine.S)
+                  ->
+                  struct
+                    module Memory = Bap_primus.Std.Primus.Memory.Make (Machine)
+
+                    let init () =
+                      let a = Bap.Std.Word.of_int64 out1 in
+                      Memory.add_region ~lower:a
+                        ~upper:(Bap.Std.Word.nsucc a 15)
+                        ~generator:(Bap_primus.Std.Primus.Generator.static 0)
+                        ()
+                  end);
+      printf "out[1] after the allocation %S, %s\n" (Emu.read emu out1 1)
+        (provenance emu out1);
       let sp = Emu.reg emu "RSP" in
       printf "the stack %s, the code %s, nowhere %s\n"
         (provenance emu Int64.(sp - 0x2000L))
