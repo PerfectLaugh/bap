@@ -87,6 +87,10 @@ let parts ~bits : Uc.arch -> (string * part) list = function
           ("PAN", Bit ("PSTATE", 22));
           ("UAO", Bit ("PSTATE", 23));
           ("SPSel", Bit ("PSTATE", 0));
+          (* the stack pointers, that SPSel doesn't select, which Unicorn
+             keeps, as it saves the selected one, when SPSel changes *)
+          ("SP_EL0", Reg "SP_EL0");
+          ("SP_EL1", Reg "SP_EL1");
         ]
   | Arm ->
       (* APSR holds only the flags, so writing it keeps the mode *)
