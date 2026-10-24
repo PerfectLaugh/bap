@@ -2499,9 +2499,11 @@ let loaders data =
    the entry at the end of the code, the thread-local storage, the weak
    symbols, that nothing defines, the streams, that the programs import
    through the GOT, also without the sections, the tables of a PIE and an
-   indirect function, and the programs of PE, whose bss is in the data,
-   whose sections share the pages, whose image is at the top, and that
-   import a function by its ordinal *)
+   indirect function, the entry at an odd address, after a function of a
+   byte, the loop of MIPS, that stores to the code after its branch, whose
+   delay slot runs before it, and the programs of PE, whose bss is in the
+   data, whose sections share the pages, whose image is at the top, and
+   that import a function by its ordinal *)
 let loader_layouts data =
   let expected name file =
     let wide =
@@ -2518,6 +2520,8 @@ let loader_layouts data =
           (Printf.sprintf "high 1234\naddress %s\n"
              (if wide then "7ffffff" else "fff"))
     | "entry" -> Some "entry 2a\n"
+    | "odd-entry" -> Some "odd entry 2a\n"
+    | "delay" -> Some "delay 14\n"
     | "tls" -> Some "initialized 77\nzeroed 0\nwritten 81\n"
     | "weak" -> Some "function 0\ndata 0\n"
     | "stdin" | "stdin-stripped" -> Some "read 41\n"

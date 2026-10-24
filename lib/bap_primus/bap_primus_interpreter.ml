@@ -834,22 +834,30 @@ module Make (Machine : Machine) = struct
 
   (* the address of the instruction of the term [t], if it is after the
      instruction at [last], that ran, and its code may be changed, as the
-     program stored to its address, or to an address after it, in the
-     block, whose last instruction is at [hi], and if no term, that is
-     yet to run, see [rest], is of an instruction before it, e.g., the
-     branch of MIPS, whose delay slot it is, or the delay slot, that ran
-     before its branch *)
+     program stored to its bytes, before the next instruction, which is
+     at the least address after it of the terms, that are yet to run, see
+     [rest], or at most the size of an instruction after the last
+     instruction of the block, at [hi], and if no term, that is yet to
+     run, is of an instruction before it, e.g., the branch of MIPS, whose
+     delay slot it is, or the delay slot, that ran before its branch *)
   let patched ~hi last rest t =
     match Term.get_attr t address with
     | Some addr when Option.for_all last ~f:(fun last -> Addr.(last < addr))
       -> (
         Machine.Local.get state >>| fun s ->
         match (s.patched, hi) with
-        | Some (lo, up), Some hi
-          when Addr.(addr <= up)
-               && Word.(lo < hi ++ Bap_primus_lift.max_size)
-               && List.for_all (rest ()) ~f:(fun a -> Addr.(addr <= a)) ->
-            Some addr
+        | Some (lo, up), Some hi when Addr.(addr <= up) ->
+            let rest = rest () in
+            let next =
+              List.filter rest ~f:(fun a -> Addr.(addr < a))
+              |> List.min_elt ~compare:Addr.compare
+              |> Option.value ~default:Word.(hi ++ Bap_primus_lift.max_size)
+            in
+            if
+              Addr.(lo < next)
+              && List.for_all rest ~f:(fun a -> Addr.(addr <= a))
+            then Some addr
+            else None
         | _ -> None)
     | _ -> Machine.return None
 

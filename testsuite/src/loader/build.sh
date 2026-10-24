@@ -62,6 +62,10 @@ dynamic() {
         -o $out/$target-loader-$name
 }
 
+# the entry at an odd address, of x86-64, and the delay slot of MIPS
+odd_entry() { static x86_64-linux-gnu odd-entry ""; }
+delay() { static mips-linux-gnu delay rwx.ld -Wl,--no-check-sections; }
+
 for target in ${TARGETS:-x86_64-linux-gnu i686-linux-gnu aarch64-linux-gnu \
                 arm-linux-gnueabi mips-linux-gnu riscv64-linux-gnu}; do
     static $target bss ""
@@ -80,3 +84,6 @@ for target in ${TARGETS:-x86_64-linux-gnu i686-linux-gnu aarch64-linux-gnu \
     esac
     echo "$target: done"
 done
+
+odd_entry
+delay

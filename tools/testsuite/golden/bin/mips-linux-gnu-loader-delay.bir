@@ -1,0 +1,100 @@
+# exited with 0
+sub _start(_start_result)
+  calls exit main
+sub exit(exit_code)
+  calls exit
+sub fgetc(fgetc_stream, fgetc_result)
+sub getchar(getchar_result)
+sub loop(loop_result)
+sub main(main_argc, main_argv, main_result)
+  calls loop putchar
+sub putchar(putchar_c, putchar_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = R4
+#2: main_argv :: in out u32 = R5
+#3: main_result :: out u32 = R2
+
+#4:
+#5: R29 := R29 - 0x38
+#6: mem := mem with [R29 + 0x34, be]:u32 <- R31
+#7: mem := mem with [R29 + 0x30, be]:u32 <- R18
+#8: mem := mem with [R29 + 0x2C, be]:u32 <- R17
+#9: mem := mem with [R29 + 0x28, be]:u32 <- R16
+#10: R4 := 0xA
+#11: R31 := 0x2004C
+#12: call @loop with return %#13
+
+#13:
+#14: R16 := R2
+#15: R1 := 0x20000
+#16: R1 := R1 + 0x140
+#17: R17 := R1 + 1
+#18: R2 := 0x64
+#19: R18 := R1 + 6
+#20: goto %#21
+
+#21:
+#22: R4 := extend:32[low:8[R2]]
+#23: R31 := 0x2006C
+#24: call @putchar with return %#25
+
+#25:
+#26: R1 := R17 + 1
+#27: R2 := pad:32[mem[R17]]
+#28: R17 := R1
+#29: #v1 := R1 <> R18
+#30: when #v1 goto %#21
+#31: goto %#32
+
+#32:
+#33: R4 := 0x20
+#34: R31 := 0x20084
+#35: call @putchar with return %#36
+
+#36:
+#37: mem := mem with [R29 + 0x27] <- 0
+#38: R1 := R29 + 0x17
+#39: R17 := R1 + 0x11
+#40: R1 := 0x20000
+#41: R3 := R1 + 0x146
+#42: goto %#43
+
+#43:
+#44: R1 := R16 & 0xF
+#45: R1 := R3 + R1
+#46: R2 := pad:32[mem[R1]]
+#47: mem := mem with [R17 - 2] <- low:8[R2]
+#48: R16 := R16 >> 4
+#49: R17 := R17 - 1
+#50: #v2 := R16 <> 0
+#51: when #v2 goto %#43
+#52: goto %#53
+
+#53:
+#54: R4 := extend:32[low:8[R2]]
+#55: R31 := 0x200BC
+#56: call @putchar with return %#57
+
+#57:
+#58: R1 := R17 + 1
+#59: R2 := pad:32[mem[R17]]
+#60: R17 := R1
+#61: #v3 := R2 <> 0
+#62: when #v3 goto %#53
+#63: goto %#64
+
+#64:
+#65: R4 := 0xA
+#66: R31 := 0x200D4
+#67: call @putchar with return %#68
+
+#68:
+#69: R2 := 0
+#70: R16 := mem[R29 + 0x28, be]:u32
+#71: R17 := mem[R29 + 0x2C, be]:u32
+#72: R18 := mem[R29 + 0x30, be]:u32
+#73: R31 := mem[R29 + 0x34, be]:u32
+#74: R29 := R29 + 0x38
+#75: call R31 with noreturn
+
