@@ -1227,8 +1227,10 @@ let lifter ?cache ~arm project =
                   result := insn;
                   Option.iter insn ~f:(fun (_, _, blks) -> called blks))
             with _ -> ());
+        (* the instruction is kept for the engines of the session, e.g., of
+           the forks, and for the cache, if there is one *)
         Option.iter !result ~f:(fun (size, name, blks) ->
-            if Option.is_some cache && size <= String.length code then begin
+            if size <= String.length code then begin
               let calls =
                 List.concat_map blks ~f:(fun blk ->
                     Term.enum jmp_t blk |> Seq.to_list
