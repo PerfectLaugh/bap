@@ -270,6 +270,20 @@ let rec dynamic_code addr : Linker.code =
   end in
   (module Code)
 
+(* the subroutine [sub], with its name and its arguments, whose block
+   jumps to the code at [addr], e.g., the code, that the program wrote
+   there, so that the interpreter runs the code, as it runs the
+   subroutine, and posts the [call] and [call-return] observations, with
+   the arguments *)
+let sub_at sub addr =
+  let entry =
+    Term.append jmp_t (Blk.create ())
+      (Jmp.create_goto (Indirect (Bil.int addr)))
+  in
+  Sub.create ~tid:(Term.tid sub) ~name:(Sub.name sub)
+    ~args:(Seq.to_list (Term.enum arg_t sub))
+    ~blks:[ entry ] ()
+
 module LinkBinaryProgram (Machine : Machine) = struct
   open Machine.Syntax
   module Linker = Linker.Make (Machine)
@@ -286,15 +300,7 @@ module LinkBinaryProgram (Machine : Machine) = struct
      the interpreter posts the [call] and [call-return] observations, with
      its arguments, as it does for the subroutines of the program *)
   let link_sub sub addr =
-    let entry =
-      Term.append jmp_t (Blk.create ())
-        (Jmp.create_goto (Indirect (Bil.int addr)))
-    in
-    let sub =
-      Sub.create ~tid:(Term.tid sub) ~name:(Sub.name sub)
-        ~args:(Seq.to_list (Term.enum arg_t sub))
-        ~blks:[ entry ] ()
-    in
+    let sub = sub_at sub addr in
     let module Code (Machine : Machine) = struct
       module Interp = Interpreter.Make (Machine)
 
@@ -433,8 +439,8 @@ module LinkBinaryProgram (Machine : Machine) = struct
   (* the subroutine without the blocks, e.g., of the call to the code,
      that the program writes to its data, runs the code at its address,
      when it is called, as the knowledge is of the system, if the address
-     is executable, unlike, e.g., the slot of an import of PE, whose
-     subroutine does nothing, as before *)
+     is executable, see [sub_at], unlike, e.g., the slot of an import of
+     PE, whose subroutine does nothing, as before *)
   let empty_sub sub : Bap_primus_linker.code =
     let module Code (Machine : Machine) = struct
       open Machine.Syntax
@@ -451,10 +457,7 @@ module LinkBinaryProgram (Machine : Machine) = struct
             let addr = Word.create addr (Theory.Target.code_addr_size target) in
             Memory.is_executable addr >>= function
             | false -> Interp.sub sub
-            | true ->
-                let module Dynamic = (val dynamic_code addr) in
-                let module Dynamic = Dynamic (Machine) in
-                Dynamic.exec)
+            | true -> Interp.sub (sub_at sub addr))
     end in
     (module Code)
 

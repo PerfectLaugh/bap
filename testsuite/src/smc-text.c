@@ -1,9 +1,9 @@
 /* Runs the code of the program, that patches the instruction after it,
    in the same basic block, in a loop, as smc.c does with the code, that
    it writes to its data, so that the block of the program, that the
-   interpreter runs, changes, while it runs, and prints the sum, that the
-   code computes, and the sum, that C computes, which are the same,
-   unless the instruction runs as it was:
+   interpreter runs, changes, while it runs, and prints the sums, that
+   the code computes, in f and in g, and the sum, that C computes, which
+   are the same, unless the instruction runs as it was:
 
    gcc -O1 -fno-builtin -no-pie smc-text.c -o ../bin/x86_64-linux-gnu-smc-text */
 
@@ -30,6 +30,30 @@ __asm__(".text\n"
         "    ret\n"
         ".size f, .-f\n");
 
+/* unsigned g(unsigned n), as f, whose store of 4 bytes starts in its
+   own displacement, whose last byte, 0xff, it keeps, and ends in the
+   next instruction, whose opcode, 0xb9, it keeps, and whose immediate it
+   patches, so that the store, that reaches the next instruction, is
+   seen, though it starts before it */
+unsigned g(unsigned n);
+__asm__(".text\n"
+        ".globl g\n"
+        ".type g, @function\n"
+        "g:\n"
+        "    xor %edx, %edx\n"
+        "1:  movzbl %dil, %eax\n"
+        "    shl $16, %eax\n"
+        "    or $0xb9ff, %eax\n"
+        "    mov %eax, 2f-1(%rip)\n"
+        "2:  mov $0, %ecx\n"
+        "    movb $0, 2b+1(%rip)\n"
+        "    add %ecx, %edx\n"
+        "    dec %edi\n"
+        "    jnz 1b\n"
+        "    mov %edx, %eax\n"
+        "    ret\n"
+        ".size g, .-g\n");
+
 static void print(unsigned x) {
     char buf[16];
     int n = 0;
@@ -48,6 +72,8 @@ int main(void) {
     putchar('s');
     putchar(' ');
     print(f(n));
+    putchar(' ');
+    print(g(n));
     putchar(' ');
     print(expected);
     putchar('\n');

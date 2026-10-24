@@ -10,8 +10,9 @@ sub deregister_tm_clones(deregister_tm_clones_result)
 sub f(f_result)
 sub frame_dummy(frame_dummy_result)
   calls register_tm_clones
+sub g(g_result)
 sub main(main_argc, main_argv, main_result)
-  calls f mprotect print putc
+  calls f g mprotect print putc
 sub mprotect(mprotect_addr, mprotect_len, mprotect_prot, mprotect_result)
 sub print(print_result)
   calls putc
@@ -32,7 +33,7 @@ sub main(main_argc, main_argv, main_result)
 #8: RSI := 0x1000
 #9: RDI := 0x402000
 #10: RSP := RSP - 8
-#11: mem := mem with [RSP, el]:u64 <- 0x4020D2
+#11: mem := mem with [RSP, el]:u64 <- 0x402112
 #12: call @mprotect with return %#13
 
 #13:
@@ -104,57 +105,76 @@ sub main(main_argc, main_argv, main_result)
 #75: RSI := mem[0x405018, el]:u64
 #76: RDI := 0x73
 #77: RSP := RSP - 8
-#78: mem := mem with [RSP, el]:u64 <- 0x402110
+#78: mem := mem with [RSP, el]:u64 <- 0x402150
 #79: call @putc with return %#80
 
 #80:
 #81: RSI := mem[0x405018, el]:u64
 #82: RDI := 0x20
 #83: RSP := RSP - 8
-#84: mem := mem with [RSP, el]:u64 <- 0x402121
+#84: mem := mem with [RSP, el]:u64 <- 0x402161
 #85: call @putc with return %#86
 
 #86:
 #87: RDI := 0x7D0
 #88: RSP := RSP - 8
-#89: mem := mem with [RSP, el]:u64 <- 0x40212B
+#89: mem := mem with [RSP, el]:u64 <- 0x40216B
 #90: call @f with return %#91
 
 #91:
 #92: RDI := pad:64[31:0[RAX]]
 #93: RSP := RSP - 8
-#94: mem := mem with [RSP, el]:u64 <- 0x402132
+#94: mem := mem with [RSP, el]:u64 <- 0x402172
 #95: call @print with return %#96
 
 #96:
 #97: RSI := mem[0x405018, el]:u64
 #98: RDI := 0x20
 #99: RSP := RSP - 8
-#100: mem := mem with [RSP, el]:u64 <- 0x402143
+#100: mem := mem with [RSP, el]:u64 <- 0x402183
 #101: call @putc with return %#102
 
 #102:
-#103: RDI := pad:64[31:0[RBX]]
+#103: RDI := 0x7D0
 #104: RSP := RSP - 8
-#105: mem := mem with [RSP, el]:u64 <- 0x40214A
-#106: call @print with return %#107
+#105: mem := mem with [RSP, el]:u64 <- 0x40218D
+#106: call @g with return %#107
 
 #107:
-#108: RSI := mem[0x405018, el]:u64
-#109: RDI := 0xA
-#110: RSP := RSP - 8
-#111: mem := mem with [RSP, el]:u64 <- 0x40215B
-#112: call @putc with return %#113
+#108: RDI := pad:64[31:0[RAX]]
+#109: RSP := RSP - 8
+#110: mem := mem with [RSP, el]:u64 <- 0x402194
+#111: call @print with return %#112
 
-#113:
-#114: RBX := mem[RSP + 8, el]:u64
-#115: goto %#26
+#112:
+#113: RSI := mem[0x405018, el]:u64
+#114: RDI := 0x20
+#115: RSP := RSP - 8
+#116: mem := mem with [RSP, el]:u64 <- 0x4021A5
+#117: call @putc with return %#118
+
+#118:
+#119: RDI := pad:64[31:0[RBX]]
+#120: RSP := RSP - 8
+#121: mem := mem with [RSP, el]:u64 <- 0x4021AC
+#122: call @print with return %#123
+
+#123:
+#124: RSI := mem[0x405018, el]:u64
+#125: RDI := 0xA
+#126: RSP := RSP - 8
+#127: mem := mem with [RSP, el]:u64 <- 0x4021BD
+#128: call @putc with return %#129
+
+#129:
+#130: RBX := mem[RSP + 8, el]:u64
+#131: goto %#26
 
 #26:
-#116: RAX := pad:64[31:0[RBP]]
-#117: RBP := mem[RSP + 0x10, el]:u64
-#118: RSP := RSP + 0x18
-#119: #v22 := mem[RSP, el]:u64
-#120: RSP := RSP + 8
-#121: call #v22 with noreturn
+#132: RAX := pad:64[31:0[RBP]]
+#133: RBP := mem[RSP + 0x10, el]:u64
+#134: RSP := RSP + 0x18
+#135: #v22 := mem[RSP, el]:u64
+#136: RSP := RSP + 8
+#137: call #v22 with noreturn
 

@@ -301,9 +301,9 @@ type state = {
   curr : pos;
   lets : scope; (* lexical context *)
   prompts : tid list;
-  patched : addr option;
-      (* the least address of the code, that the program stored to, while
-         the block runs, see [blk_body] *)
+  patched : (addr * addr) option;
+      (* the least and the greatest addresses of the code, that the
+         program stored to, while the block runs, see [blk_body] *)
 }
 
 let sexp_of_state { curr } = Pos.sexp_of_t curr
@@ -825,29 +825,29 @@ module Make (Machine : Machine) = struct
 
   let jmp = term normal jmp_t jmp
 
-  (* the instructions, that x86 has, are at most 15 bytes long *)
-  let max_insn_size = 16
-
   let code_stored addr =
     Machine.Local.update state ~f:(fun s ->
         match s.patched with
-        | Some p when Addr.(p <= addr) -> s
-        | _ -> { s with patched = Some addr })
+        | None -> { s with patched = Some (addr, addr) }
+        | Some (lo, hi) ->
+            { s with patched = Some (Addr.min lo addr, Addr.max hi addr) })
 
-  (* the address of the instruction of the term [t], if it is the next
-     one after the instruction at [last], whose code may be changed, as
-     the program stored to its address, or to an address after it, in
-     the block, whose last instruction is at [hi], and if no term, that
-     is yet to run, see [rest], is of an instruction before it, e.g., the
-     branch of MIPS, whose delay slot it is *)
+  (* the address of the instruction of the term [t], if it is after the
+     instruction at [last], that ran, and its code may be changed, as the
+     program stored to its address, or to an address after it, in the
+     block, whose last instruction is at [hi], and if no term, that is
+     yet to run, see [rest], is of an instruction before it, e.g., the
+     branch of MIPS, whose delay slot it is, or the delay slot, that ran
+     before its branch *)
   let patched ~hi last rest t =
     match Term.get_attr t address with
-    | Some addr when not (Option.equal Addr.equal last (Some addr)) -> (
+    | Some addr when Option.for_all last ~f:(fun last -> Addr.(last < addr))
+      -> (
         Machine.Local.get state >>| fun s ->
         match (s.patched, hi) with
-        | Some p, Some hi
-          when Addr.(addr <= p)
-               && Word.(p < hi ++ max_insn_size)
+        | Some (lo, up), Some hi
+          when Addr.(addr <= up)
+               && Word.(lo < hi ++ Bap_primus_lift.max_size)
                && List.for_all (rest ()) ~f:(fun a -> Addr.(addr <= a)) ->
             Some addr
         | _ -> None)

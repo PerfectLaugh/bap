@@ -1371,21 +1371,33 @@ let mprotect data =
    the block, in the executors and in the interpreter *)
 let smc data =
   List.concat_map
-    (fun (name, bin) ->
+    (fun (name, bin, sums) ->
       List.map
         (fun system ->
           case
             ("run/" ^ name ^ "/" ^ system)
             (fun env ->
-              let out =
+              let run args =
                 bap env
-                  [
-                    path data ("bin/" ^ bin);
-                    "--passes=run";
-                    "--run-systems=" ^ system;
-                  ]
+                  ([
+                     path data ("bin/" ^ bin);
+                     "--passes=run";
+                     "--run-systems=" ^ system;
+                   ]
+                  @ args)
               in
-              contains env "runs the patched code" out "s 250216 250216"))
+              contains env "runs the patched code" (run []) sums;
+              (* the call of the code, whose symbol is a function in the
+                 data, see smc.c, so that its subroutine has no blocks,
+                 which the interpreter runs, as the subroutine, with its
+                 observations, which are printed among the output *)
+              if
+                name = "smc"
+                && List.mem system [ "bap:stubbed-executor"; "bap:legacy-main" ]
+              then
+                contains env "observes the call of the code"
+                  (run [ "--primus-print-observations=call" ])
+                  "(call (code"))
         [
           "bap:unicorn-executor";
           "bap:lifted-executor";
@@ -1393,9 +1405,11 @@ let smc data =
           "bap:legacy-main";
         ])
     (* the code, that the program writes to its data, and the code of the
-       program, whose block changes, while it runs, see smc-text.c *)
+       program, whose block changes, while it runs, see smc-text.c, whose
+       g stores over the boundary of the next instruction *)
     [
-      ("smc", "x86_64-linux-gnu-smc"); ("smc-text", "x86_64-linux-gnu-smc-text");
+      ("smc", "x86_64-linux-gnu-smc", "s 250216 250216");
+      ("smc-text", "x86_64-linux-gnu-smc-text", "s 250216 250216 250216");
     ]
 
 (* the taint, that the lifted engine propagates itself, is the one, that

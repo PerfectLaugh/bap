@@ -8,7 +8,18 @@
 #include <stdio.h>
 #include <sys/mman.h>
 
-static unsigned char code[4096] __attribute__((aligned(4096)));
+/* the code, whose symbol is a function in the data, as a function, that
+   the program loads, so that its subroutine has no blocks, until the
+   program writes the code, and the call of the subroutine runs the
+   code, see the dynamic code of Primus */
+__asm__(".bss\n"
+        ".balign 4096\n"
+        ".type code, @function\n"
+        "code:\n"
+        "    .skip 4096\n"
+        ".size code, 4096\n"
+        ".text\n");
+extern unsigned char code[4096] __attribute__((visibility("hidden")));
 
 static void print(unsigned x) {
     char buf[16];
