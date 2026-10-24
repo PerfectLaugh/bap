@@ -317,6 +317,16 @@ module Trace : sig
   (** the program counters of the instructions of the last [last] records, by
       default of all, that the ring keeps, the oldest first, of the blocks too,
       whose instructions are decoded once, from the bytes, that they have now *)
+
+  val calls : ?last:int -> t -> (int64 * (int64 * int) list) list
+  (** [calls trace] the calls of the last [last] records, by default of all,
+      that the ring keeps, by their sites, the instructions, that call, in the
+      order of their addresses, with the addresses, that they called, which the
+      next instructions are at, and how many times each, the most often first,
+      e.g., the targets, that the indirect call of a dispatcher took. The call,
+      whose next instruction is the one after it, isn't taken, e.g., a
+      conditional one. The instructions are those of {!insns}, so a trace of the
+      blocks has them. *)
 end
 
 type location =

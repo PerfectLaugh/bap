@@ -792,6 +792,31 @@ let emu data =
             ( "lifts the written code",
               "written 405000: 5 bytes\n.*RAX := 0x2A\n" );
           ]);
+    (* the calls of the trace, by their sites, with their targets, from
+       the traces of the instructions, and of the blocks, see calls.ml *)
+    case "emu/calls" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/calls.ml";
+              path data "bin/x86_64-linux-gnu-smc-text";
+            ]
+        in
+        (* the parentheses are escaped, as the checks are regular
+           expressions *)
+        let calls =
+          "40210d->400380\\(1\\) 40214b->400370\\(1\\) 40215c->400370\\(1\\) \
+           402166->402000\\(1\\) 40216d->402048\\(1\\) 40217e->400370\\(1\\) \
+           402188->40201f\\(1\\) 40218f->402048\\(1\\) 4021a0->400370\\(1\\) \
+           4021a7->402048\\(1\\) 4021b8->400370\\(1\\)"
+        in
+        sequence env out
+          [
+            ( "finds the calls in the instructions",
+              "instructions: " ^ calls ^ "\n" );
+            ("finds the calls in the blocks", "blocks: " ^ calls ^ "\n");
+          ]);
     (* the instructions, that the lifted engine lifted, are saved to the
        cache by Emu.save_lifts, and when a signal terminates the run, see
        lifts.ml *)

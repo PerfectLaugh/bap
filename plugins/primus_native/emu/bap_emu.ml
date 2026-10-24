@@ -1028,6 +1028,50 @@ module Trace = struct
       let pcs, _, _ = window ~records:false ?last t in
       pcs
     else pcs ?last t
+
+  (* the calls of the instructions of the last [last] records, by their
+     sites, with the addresses, that they called, which the next
+     instructions are at, and how many times, the most often first: an
+     instruction calls, if its IR has a call, e.g., call of x86, or bl
+     of ARM, which is checked once per instruction, and the call, whose
+     next instruction is the one after it, isn't taken, e.g., a
+     conditional one *)
+  let calls ?last t =
+    let pcs, _, modes = window ?last t in
+    let sizes = Int64.Table.create () in
+    let calling thumb pc =
+      let key = if thumb then Int64.(pc lor 1L) else pc in
+      Hashtbl.find_or_add sizes key ~default:(fun () ->
+          match lift ~thumb t.emu pc with
+          | Some (size, blks)
+            when List.exists blks ~f:(fun blk ->
+                     Term.enum jmp_t blk
+                     |> Seq.exists ~f:(fun jmp ->
+                         match Jmp.kind jmp with Call _ -> true | _ -> false))
+            ->
+              Some size
+          | _ -> None)
+    in
+    let sites = Int64.Table.create () in
+    for i = 0 to Bigarray.Array1.dim pcs - 2 do
+      let pc = Bigarray.Array1.unsafe_get pcs i in
+      let thumb = Bigarray.Array1.unsafe_get modes i = 1 in
+      match calling thumb pc with
+      | Some size ->
+          let next = Bigarray.Array1.unsafe_get pcs (i + 1) in
+          if Int64.(next <> pc + of_int size) then
+            Hashtbl.update sites pc ~f:(fun targets ->
+                Map.update (Option.value targets ~default:Int64.Map.empty) next
+                  ~f:(fun n -> Option.value n ~default:0 + 1))
+      | None -> ()
+    done;
+    Hashtbl.to_alist sites
+    |> List.sort ~compare:(fun (a, _) (b, _) -> Int64.compare a b)
+    |> List.map ~f:(fun (site, targets) ->
+        ( site,
+          Map.to_alist targets
+          |> List.sort ~compare:(fun (a, n) (b, m) ->
+              match Int.compare m n with 0 -> Int64.compare a b | c -> c) ))
 end
 
 type location = Reg of string | Mem of int64 * int
