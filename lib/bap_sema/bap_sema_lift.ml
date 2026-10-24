@@ -518,27 +518,35 @@ module KB = struct
   let insns = insns
 end
 
+(* the variables of the toplevel, that hold the results, are declared
+   once, as each declaration adds a property to the class of the toplevel,
+   which every evaluation in the toplevel enumerates *)
+let program_result = Toplevel.var "program"
+
 let program symtab =
-  let result = Toplevel.var "program" in
-  Toplevel.put result @@ KB.program symtab;
-  Toplevel.get result
+  Toplevel.put program_result @@ KB.program symtab;
+  Toplevel.get program_result
+
+let sub_result = Toplevel.var "sub"
 
 let sub blk cfg =
-  let result = Toplevel.var "sub" in
-  Toplevel.put result @@ KB.sub blk cfg;
-  Toplevel.get result
+  Toplevel.put sub_result @@ KB.sub blk cfg;
+  Toplevel.get sub_result
+
+let blk_result = Toplevel.var "blk"
 
 let blk cfg block =
-  let result = Toplevel.var "blk" in
-  Toplevel.put result @@ KB.blk cfg block;
-  Toplevel.get result
+  Toplevel.put blk_result @@ KB.blk cfg block;
+  Toplevel.get blk_result
+
+let insn_result = Toplevel.var "insn"
 
 let insn ?addr insn =
-  let result = Toplevel.var "insn" in
-  Toplevel.put result @@ KB.insn ?addr insn;
-  Toplevel.get result
+  Toplevel.put insn_result @@ KB.insn ?addr insn;
+  Toplevel.get insn_result
+
+let insns_result = Toplevel.var "insns"
 
 let insns ?fall ?addr insns =
-  let result = Toplevel.var "insns" in
-  Toplevel.put result @@ KB.insns ?fall ?addr insns;
-  Toplevel.get result
+  Toplevel.put insns_result @@ KB.insns ?fall ?addr insns;
+  Toplevel.get insns_result

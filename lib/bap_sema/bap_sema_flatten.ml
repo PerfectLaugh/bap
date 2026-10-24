@@ -145,12 +145,17 @@ module KB = struct
   let flatten_sub = flatten_sub
 end
 
+(* the variables of the toplevel, that hold the results, are declared
+   once, as each declaration adds a property to the class of the toplevel,
+   which every evaluation in the toplevel enumerates *)
+let flatten_blk_result = Toplevel.var "flatten-blk"
+
 let flatten_blk blk =
-  let result = Toplevel.var "flatten-blk" in
-  Toplevel.put result @@ flatten_blk blk;
-  Toplevel.get result
+  Toplevel.put flatten_blk_result @@ flatten_blk blk;
+  Toplevel.get flatten_blk_result
+
+let flatten_sub_result = Toplevel.var "flatten-sub"
 
 let flatten_sub sub =
-  let result = Toplevel.var "flatten-sub" in
-  Toplevel.put result @@ flatten_sub sub;
-  Toplevel.get result
+  Toplevel.put flatten_sub_result @@ flatten_sub sub;
+  Toplevel.get flatten_sub_result

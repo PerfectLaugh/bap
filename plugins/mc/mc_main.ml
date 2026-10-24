@@ -472,6 +472,11 @@ let cpu_must_not_be_set x = check Option.is_none x Cpu_must_not_be_set
 let bits_must_not_be_set x = check Option.is_none x Bits_must_not_be_set
 let order_must_not_be_set x = check Option.is_none x Order_must_not_be_set
 
+(* the variable of the toplevel is declared once, as each declaration adds
+   a property to the class of the toplevel, which every evaluation in the
+   toplevel enumerates *)
+let target_and_encoding = Toplevel.var "target-and-encoding"
+
 let compute_target provide =
   let extract_target =
     let open KB.Syntax in
@@ -483,9 +488,8 @@ let compute_target provide =
     KB.collect Theory.Label.encoding label >>| fun encoding ->
     Target { name; encoding }
   in
-  let result = Toplevel.var "target-and-encoding" in
-  Toplevel.put result extract_target;
-  Toplevel.get result
+  Toplevel.put target_and_encoding extract_target;
+  Toplevel.get target_and_encoding
 
 let target_of_arch arch bits order =
   let provide_bits =

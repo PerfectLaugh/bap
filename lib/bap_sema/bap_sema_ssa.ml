@@ -216,7 +216,11 @@ module KB = struct
   let sub = sub
 end
 
+(* the variables of the toplevel, that hold the results, are declared
+   once, as each declaration adds a property to the class of the toplevel,
+   which every evaluation in the toplevel enumerates *)
+let ssa_result = Toplevel.var "ssa"
+
 let sub sub =
-  let result = Toplevel.var "ssa" in
-  Toplevel.put result @@ KB.sub sub;
-  Toplevel.get result
+  Toplevel.put ssa_result @@ KB.sub sub;
+  Toplevel.get ssa_result

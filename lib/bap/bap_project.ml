@@ -109,8 +109,13 @@ module State = struct
     @@ KB.Domain.flat ~empty ~equal "disassembly" ~inspect
 
   module Toplevel = struct
+    (* the variables of the toplevel are declared once, as each
+       declaration adds a property to the class of the toplevel, which
+       every evaluation in the toplevel enumerates *)
+    let target_result = Toplevel.var "target"
+
     let compute_target ?file spec : Theory.target =
-      let result = Toplevel.var "target" in
+      let result = target_result in
       let create_unit =
         match file with
         | None | Some "" -> KB.Object.create Theory.Unit.cls
@@ -514,6 +519,9 @@ let compute_units ?package ?state main libs =
 let empty_state = State.empty
 let disassembled t = not (State.equal t.main.state State.empty)
 
+(* the variable of the toplevel is declared once, see [compute_target] *)
+let disassembly_result = Toplevel.var "disassembly-result"
+
 let create ?package ?state ?disassembler:p1 ?brancher:p2 ?symbolizer:p3
     ?rooter:p4 ?reconstructor:p5 (read : input) =
   try
@@ -528,7 +536,7 @@ let create ?package ?state ?disassembler:p1 ?brancher:p2 ?symbolizer:p3
     match read () with
     | [] -> assert false
     | main_in :: libs_in ->
-        let result = Toplevel.var "disassembly-result" in
+        let result = disassembly_result in
         Toplevel.put result @@ compute_units main_in libs_in ?package ?state;
         let main, libraries, program = Toplevel.get result in
         Result.return
