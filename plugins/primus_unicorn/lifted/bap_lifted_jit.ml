@@ -101,6 +101,9 @@ type insn_state = {
   mutable written : Int.Set.t;  (** the slots, that the instruction writes *)
   mutable lets : (string * value) list;
   mutable virtuals : (string * (string * int)) list;
+  undo : bool;
+      (** if the stores log the bytes, that they overwrite, as an access or a
+          division may stop the instruction after them, see [undoable] *)
 }
 
 let emit t fmt = ksprintf (fun s -> Buffer.add_string t.body s) fmt
@@ -240,6 +243,21 @@ let access t s ~load addr bytes =
   emit t "  br i1 %s, label %%i%d.stop, label %%%s\n" failed s.k l;
   start t l
 
+(* the types of the accesses for the alias analysis of LLVM, so that the
+   loads of the cache of the pages, and the stores of the undo log, which
+   are of the host, are not reloaded after the stores of the program, to
+   its memory, which are of the guest, e.g., the cache entry of the same
+   page, which is loaded once, for the accesses of a block *)
+let tbaa =
+  "!0 = !{!\"bap-jit\"}\n\
+   !1 = !{!\"guest\", !0, i64 0}\n\
+   !2 = !{!\"host\", !0, i64 0}\n\
+   !3 = !{!1, !1, i64 0}\n\
+   !4 = !{!2, !2, i64 0}\n"
+
+let guest = ", !tbaa !3"
+let host = ", !tbaa !4"
+
 (* The accesses of 1, 2, 4, or 8 bytes in a page, that the cache of the
    runtime has, whose permissions allow them, are made by the code, and
    the others by the runtime, see [access]: the entries of the cache, of
@@ -251,19 +269,19 @@ let access t s ~load addr bytes =
 
 let undo_size = 4096
 
-let fast_access t ~load addr bytes =
+let fast_access ?(undo = true) t ~load addr bytes =
   let page = assign t "and i64 %s, -4096" addr in
   let index = assign t "lshr i64 %s, 12" addr in
   let index = assign t "and i64 %s, 255" index in
   let entry =
     assign t "getelementptr {i64, ptr, i32}, ptr %%tlb, i64 %s" index
   in
-  let base = assign t "load i64, ptr %s" entry in
+  let base = assign t "load i64, ptr %s%s" entry host in
   let hit = assign t "icmp eq i64 %s, %s" base page in
   let permp =
     assign t "getelementptr {i64, ptr, i32}, ptr %s, i64 0, i32 2" entry
   in
-  let perm = assign t "load i32, ptr %s" permp in
+  let perm = assign t "load i32, ptr %s%s" permp host in
   let off = assign t "and i64 %s, 4095" addr in
   let fits = assign t "icmp ule i64 %s, %d" off (4096 - bytes) in
   let allowed =
@@ -274,9 +292,11 @@ let fast_access t ~load addr bytes =
       (* writable, and not executable, as the code doesn't write the code *)
       let r = assign t "and i32 %s, 6" perm in
       let w = assign t "icmp eq i32 %s, 2" r in
-      let u = assign t "load i32, ptr %%undo" in
-      let room = assign t "icmp ult i32 %s, %d" u undo_size in
-      assign t "and i1 %s, %s" w room
+      if not undo then w
+      else
+        let u = assign t "load i32, ptr %%undo%s" host in
+        let room = assign t "icmp ult i32 %s, %d" u undo_size in
+        assign t "and i1 %s, %s" w room
   in
   let ok = assign t "and i1 %s, %s" hit fits in
   let ok = assign t "and i1 %s, %s" ok allowed in
@@ -294,9 +314,9 @@ let load t s addr endian bits =
       let fast = label t and slow = label t and join = label t in
       emit t "  br i1 %s, label %%%s, label %%%s\n" ok fast slow;
       start t fast;
-      let data = assign t "load ptr, ptr %s" datap in
+      let data = assign t "load ptr, ptr %s%s" datap host in
       let p = assign t "getelementptr i8, ptr %s, i64 %s" data off in
-      let x = assign t "load %s, ptr %s, align 1" (ty bits) p in
+      let x = assign t "load %s, ptr %s, align 1%s" (ty bits) p guest in
       let fast_end = label t in
       emit t "  br label %%%s\n%s:\n  br label %%%s\n" fast_end fast_end join;
       start t slow;
@@ -319,29 +339,31 @@ let store t s (addr, x, bits, endian) =
   let bytes = bits / 8 in
   let x = match endian with LittleEndian -> x | BigEndian -> bswap t x bits in
   if List.mem [ 1; 2; 4; 8 ] bytes ~equal:Int.equal then begin
-    let ok, datap, off = fast_access t ~load:false addr bytes in
+    let ok, datap, off = fast_access ~undo:s.undo t ~load:false addr bytes in
     let fast = label t and slow = label t and join = label t in
     emit t "  br i1 %s, label %%%s, label %%%s\n" ok fast slow;
     start t fast;
-    let data = assign t "load ptr, ptr %s" datap in
+    let data = assign t "load ptr, ptr %s%s" datap host in
     let p = assign t "getelementptr i8, ptr %s, i64 %s" data off in
-    let u = assign t "load i32, ptr %%undo" in
-    let e = assign t "getelementptr {ptr, i64, i32}, ptr %%log, i32 %s" u in
-    emit t "  store ptr %s, ptr %s\n" p e;
-    let old = assign t "load %s, ptr %s, align 1" (ty bits) p in
-    let old = resize t old bits 64 in
-    let oldp =
-      assign t "getelementptr {ptr, i64, i32}, ptr %s, i64 0, i32 1" e
-    in
-    emit t "  store i64 %s, ptr %s\n" old oldp;
-    let sizep =
-      assign t "getelementptr {ptr, i64, i32}, ptr %s, i64 0, i32 2" e
-    in
-    emit t "  store i32 %d, ptr %s\n" bytes sizep;
-    let u' = assign t "add i32 %s, 1" u in
-    emit t "  store i32 %s, ptr %%undo\n" u';
-    emit t "  store %s %s, ptr %s, align 1\n  br label %%%s\n" (ty bits) x p
-      join;
+    if s.undo then begin
+      let u = assign t "load i32, ptr %%undo%s" host in
+      let e = assign t "getelementptr {ptr, i64, i32}, ptr %%log, i32 %s" u in
+      emit t "  store ptr %s, ptr %s%s\n" p e host;
+      let old = assign t "load %s, ptr %s, align 1%s" (ty bits) p guest in
+      let old = resize t old bits 64 in
+      let oldp =
+        assign t "getelementptr {ptr, i64, i32}, ptr %s, i64 0, i32 1" e
+      in
+      emit t "  store i64 %s, ptr %s%s\n" old oldp host;
+      let sizep =
+        assign t "getelementptr {ptr, i64, i32}, ptr %s, i64 0, i32 2" e
+      in
+      emit t "  store i32 %d, ptr %s%s\n" bytes sizep host;
+      let u' = assign t "add i32 %s, 1" u in
+      emit t "  store i32 %s, ptr %%undo%s\n" u' host
+    end;
+    emit t "  store %s %s, ptr %s, align 1%s\n  br label %%%s\n" (ty bits) x p
+      guest join;
     start t slow;
     emit t "  store %s %s, ptr %%buf, align 1\n" (ty bits) x;
     access t s ~load:false addr bytes;
@@ -690,6 +712,37 @@ let loop_back t ~start ~target ~ran =
   emit t "  store i64 %s, ptr %%chained\n  br label %%i0\n" total;
   start_label t out
 
+(* if a store of the instruction may be followed by an access or a
+   division, which may stop it, so that the store is undone, i.e., if it
+   has more than one access, or a division, as most instructions access
+   the memory at most once, whose stores don't log their bytes *)
+let undoable blks =
+  let fallible =
+    object
+      inherit [int] Exp.visitor
+      method! enter_load ~mem:_ ~addr:_ _ _ n = n + 1
+      method! enter_store ~mem:_ ~addr:_ ~exp:_ _ _ n = n + 1
+
+      method! enter_binop op _ _ n =
+        match op with Bil.DIVIDE | SDIVIDE | MOD | SMOD -> n + 2 | _ -> n
+    end
+  in
+  let count e n = fallible#visit_exp e n in
+  List.fold blks ~init:0 ~f:(fun n blk ->
+      let n =
+        Term.enum def_t blk
+        |> Seq.fold ~init:n ~f:(fun n def -> count (Def.rhs def) n)
+      in
+      Term.enum jmp_t blk
+      |> Seq.fold ~init:n ~f:(fun n jmp ->
+          let n = count (Jmp.cond jmp) n in
+          match Jmp.kind jmp with
+          | Call c -> (
+              match Call.target c with Indirect e -> count e n | _ -> n)
+          | Goto (Indirect e) | Ret (Indirect e) -> count e n
+          | _ -> n))
+  > 1
+
 (* the instruction [k], whose blocks are the labels i<k>b<j>, and which
    ends at i<k>.done, if it doesn't jump, at i<k>.jump, with the target in
    %tgt, if it jumps, and at i<k>.stop, if it stops *)
@@ -700,7 +753,15 @@ let insn ?(role = `Plain) t k (ins : insn) =
     |> Option.map ~f:fst
   in
   let s =
-    { k; ins; index; written = Int.Set.empty; lets = []; virtuals = [] }
+    {
+      k;
+      ins;
+      index;
+      written = Int.Set.empty;
+      lets = [];
+      virtuals = [];
+      undo = undoable ins.blks;
+    }
   in
   (* the body of the instruction is compiled first, so that its start
      copies the slots, that it writes, see [stop] *)
@@ -814,7 +875,7 @@ let insn ?(role = `Plain) t k (ins : insn) =
   let body = Buffer.contents t.body in
   Buffer.clear t.body;
   Buffer.add_string t.body before;
-  emit t "i%d:\n  store i32 0, ptr %%undo\n" k;
+  emit t "i%d:\n  store i32 0, ptr %%undo%s\n" k host;
   Set.iter copied ~f:(fun i ->
       match Hashtbl.find t.fields (slot_id t i) with
       | Some fields ->
@@ -1024,6 +1085,7 @@ let compile ?loop ~locate ~reg_size ~global insns =
     emit t "}\n";
     let b = header t "block" in
     Buffer.add_buffer b t.body;
+    Buffer.add_string b tbaa;
     let regs = Array.create ~len:(Hashtbl.length t.slots) 0 in
     Hashtbl.iteri t.slots ~f:(fun ~key ~data -> regs.(data) <- key);
     Ok { ir = Buffer.contents b; regs; length }
