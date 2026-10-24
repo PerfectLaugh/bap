@@ -27,6 +27,21 @@ sets the high bit of its argument, exits only if the access was invalid,
 and the other requests exit at the next check, e.g., at the start of the
 next block, at its address.
 
+## The stops from the other threads
+
+`qemu/softmmu/cpus.c`
+
+The stop, that `uc_emu_stop` requests in another thread, e.g., by the
+timeout of Unicorn, whose thread starts before the CPU is resumed, sets
+the exit request of the CPU, which the resume, and the continuation
+after a quit request, reset, after they checked the stop, so that the
+stop was lost, and the emulation, that nothing else stopped, ran
+forever, e.g., a thread, whose slice ended, while it spun on a lock of
+another thread. The CPU exits again, if the stop was requested, after
+the exit request is reset. The short timeouts, e.g., at the ends of the
+slices, on Windows, whose `usleep` of the timer doesn't sleep, lost it
+often.
+
 ## The stores of the helpers
 
 `qemu/accel/tcg/cputlb.c`
