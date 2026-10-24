@@ -1002,6 +1002,79 @@ let emu data =
             ]
         in
         golden env "emu/arm-slice.txt" out.text);
+    (* the project of the memory of the paused program, see
+       Emu.project: of echo, with the subroutines of its symbols, and the
+       patched instruction, and of mprotect, with the code, that it
+       wrote, which the script names *)
+    case "emu/live/project" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/live/project.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              path data "bin/x86_64-linux-gnu-mprotect";
+            ]
+        in
+        golden env "emu/live/project.txt" out.text);
+    (* the cross references of echo, see Emu.Xrefs: the callers, the
+       callees, the loads and the stores of a slot of .bss, through the
+       address, that adrp and add build on AArch64, and the jumps of the
+       PLT stubs through the slots of GOT *)
+    case "emu/live/xrefs/x86_64-linux-gnu" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/live/xrefs.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              "0x6010c0";
+            ]
+        in
+        golden env "emu/live/xrefs-x86_64.txt" out.text);
+    case "emu/live/xrefs/aarch64-linux-gnu" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/live/xrefs.ml";
+              path data "bin/aarch64-linux-gnu-echo";
+              "0x12050";
+            ]
+        in
+        golden env "emu/live/xrefs-aarch64.txt" out.text);
+    (* the static slices of print_strings of echo, see Emu.Static.slice,
+       through the slots of the frame and the loop, backward from the
+       test of the pointer, and forward from the argument, and from the
+       store of the pointer to its slot, and of its alias on AArch64 *)
+    case "emu/live/slice/x86_64-linux-gnu" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/live/slice.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              "b:400764:RAX";
+              "b:400764:";
+              "f:400733:RDI";
+              "f:400743:";
+            ]
+        in
+        golden env "emu/live/slice-x86_64.txt" out.text);
+    case "emu/live/slice/aarch64-linux-gnu" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/live/slice.ml";
+              path data "bin/aarch64-linux-gnu-echo";
+              "b:ae8:X0";
+              "b:ae8:";
+              "f:ab4:X0";
+              "f:abc:";
+            ]
+        in
+        golden env "emu/live/slice-aarch64.txt" out.text);
     (* the emulators run side by side, each in its own engine, also of
        another target, with their own registers, memory, names and
        hooks *)
@@ -2000,6 +2073,44 @@ let threads data =
           has env "restores in main" out "restored in the thread 1\n";
           taint out);
     ]
+  @ List.map
+      (fun target ->
+        let bin = target ^ "-spawn" in
+        (* the script calls worker of the program, see Emu.call, with the
+           registers restored after, and a call, that a hook pauses,
+           continues with run *)
+        case ("emu/call/" ^ target) (fun env ->
+            let out =
+              bap env
+                ([
+                   "script"; input "emu/call/script.ml"; path data ("bin/" ^ bin);
+                 ]
+                @
+                if String.starts_with ~prefix:"powerpc" bin then
+                  [ "api=" ^ path data "api/powerpc" ]
+                else [])
+            in
+            sequence env out
+              [
+                ("calls worker with 1", "worker\\(1\\) = 1\n");
+                ("calls worker with 2", "worker\\(2\\) = 2\n");
+                ("restores the state", "pc back true, registers back true\n");
+                ("tells the result", "returned 2\n");
+                ("pauses in the function", "paused in worker true\n");
+                ( "continues the function",
+                  "paused back at main true, returned 1\n" );
+                ("the program sees the results", "11 21\n");
+                ("exits", "exited\n");
+              ]))
+      [
+        "x86_64-linux-gnu";
+        "aarch64-linux-gnu";
+        "i686-linux-gnu";
+        "arm-linux-gnueabihf";
+        "mips-linux-gnu";
+        "powerpc-linux-gnu";
+        "riscv64-linux-gnu";
+      ]
   @ List.map
       (fun target ->
         let bin = target ^ "-spawn" in

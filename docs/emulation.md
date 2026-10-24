@@ -196,6 +196,8 @@ let () =
 | `bir emu addr` | the size and the BIR of the instruction at the address, lifted on demand from its current bytes, also in the hooks; Thumb on ARM by the lower bit of the address |
 | `symbols`, `add_symbol` | the names of the functions; name new code, e.g., code that the program unpacked |
 | `unstub emu name` | run the program's own code of a function, instead of its Lisp stub |
+| `call emu addr ~args` | call a function with the arguments, on a zeroed stack, and get its result, see below |
+| `regions`, `project` | the memory map, and the project of the memory, disassembled from the bytes, that the program has now, see below |
 
 `write` stores the bytes to the memory of Primus, from which they go to Unicorn, so the change stays, also of a read-only page, e.g., of the code:
 
@@ -270,6 +272,66 @@ The slice handles these cases, see `testsuite/src/slice-weird.c` and the `emu/sl
 - On ARM, the traces record the mode of each record, A32 or Thumb, as the program counters of Thumb have no lower bit, and the instructions are lifted in it. The IT blocks of Thumb are lifted in their order, from the IT instruction, as the decoder gives their conditions; the instructions, whose conditions fail, have no records in a trace of the instructions. Unicorn enables VFP and NEON, as Linux does. On AArch64, Unicorn runs its maximal CPU, which has the LSE atomics of ARMv8.1 and later, that the default Cortex-A72 lacks.
 
 The limits: the instructions of a trace of blocks are decoded with the bytes, that the code has now. The patches, that the stubs or the script made, aren't undone. The registers are followed whole, e.g., `AL` of `RAX`, or `S1` of `D0`. An IT block, that starts before the window, isn't known. The slice is of the data, not of the control.
+
+### Calling a function
+
+`call emu addr ~args` calls a function of the paused program with the given arguments, as the C ABI of the target passes `long`s, on a new stack of `~stack` bytes (64 KB by default), which `malloc` allocates and the call zeroes, and returns its result. The function runs as the program does, so the hooks see it, and after it returns the registers are as they were, the memory is as the function left it, and the program pauses where it was:
+
+```ocaml
+match Emu.call emu decrypt ~args:[ buf; 16L ] with
+| Some n -> printf "decrypted %Ld bytes: %S\n" n (Emu.read emu buf 16)
+| None -> (* the function paused, e.g., a hook stopped it, or the program ended *) ()
+```
+
+A function, that a hook pauses, continues with `run`, after which the program pauses where it was, with the result in `returned emu`. A snapshot before the call undoes its memory effects. `call` raises `Failure` if the function can't be called, e.g., the C ABI of the target is unknown, or if it fails, e.g., with a segmentation fault, after which the program is paused where it was.
+
+### The project of the memory
+
+A program, that writes its code as it runs, e.g., unpacks or decrypts it, executes bytes, that the file doesn't have. `project emu` builds a `Project.t` from the memory of the paused program, as it is now: its executable regions, see `regions emu`, the memory map with the protections, are disassembled and lifted from the bytes, that the program has there, from the symbols of the program, of `add_symbol`, and of `~symbols`, e.g., the entries, that the script found in a table, and its other regions are its data, as the program has it, e.g., the tables of pointers, that it built. The analyses of the whole program then work on the code, that runs:
+
+```ocaml
+ignore (Emu.run emu ~until:after_unpack);
+Emu.add_symbol emu "decrypt" 0x602000L;
+let proj = Emu.project emu in
+let proj = Bap_script.run_pass "recompile-optimize" proj in
+...
+```
+
+The project is in a unit of its own, named after the file with `#live` and a number, so that it isn't confused with the knowledge of the file, and the memory, that the program never stored, e.g., most of the stack, is zero, without being generated, as the loads generate it.
+
+### Cross references
+
+`Emu.Xrefs` finds the addresses, that the instructions of a project refer to, e.g., of the project of the memory. The constants of each subroutine are folded, so that the addresses, that the code builds, e.g., with `adrp` and `add` of AArch64, or `mov` and `movk`, are found, and the targets of the indirect calls and jumps through the slots at constant addresses, e.g., GOT, or a table of pointers to functions, are read from the memory of the project:
+
+```ocaml
+let xrefs = Emu.Xrefs.create proj in
+Emu.Xrefs.callers xrefs decrypt   (* the functions, that call decrypt, directly, or through a slot *)
+|> List.iter ~f:(fun f -> printf "%s\n" (Option.value (Emu.Xrefs.name xrefs f) ~default:"?"));
+Emu.Xrefs.find xrefs table        (* who loads, stores, or passes the address of the table *)
+|> List.iter ~f:(fun x -> printf "%Lx %s\n" x.site (match x.kind with Store -> "stores" | Load -> "loads" | _ -> "refers"))
+```
+
+| Function | Result |
+|----------|--------|
+| `find xrefs addr` | the references to the address: the site, the kind (`Call`, `Jump`, `Load`, `Store`, `Address`), and the slot, that an indirect call went through |
+| `of_insn`, `of_function` | the references of an instruction, or of a function |
+| `callers`, `callees` | the call graph, by the addresses of the functions |
+| `function_of`, `name`, `functions` | the function of a site, the name of a function, all functions |
+
+A reference is to an address of the mapped memory, so a constant, that happens to be an address, is one too, e.g., in a program loaded at zero.
+
+### Static slices
+
+`Emu.Static.slice proj addr locations` is the backward slice of the values of the locations, e.g., `Reg "X0"`, or `Mem (addr, 8)`, as the instruction at `addr` has them, over the function, that the instruction is in, as BAP lifted it, e.g., from the memory of the program, and with `~forward:true` the forward slice of the values, that the instruction leaves in them. Without the locations, it is the slice of what the instruction reads, or, forward, writes, e.g., who reads the slot, that a store writes:
+
+```ocaml
+let s = Emu.Static.slice proj store [] in
+List.iter s.sites ~f:(printf "%Lx\n");   (* how the stored value is computed *)
+let s = Emu.Static.slice ~forward:true proj store [] in
+List.iter s.sites ~f:(printf "%Lx\n");   (* who reads the stored bytes *)
+```
+
+The slice follows the registers, their aliases, e.g., `X0` of `R0` of AArch64, the slots of the frame at the offsets from the stack and the frame pointers, through their adjustments, e.g., the local variables of code compiled without optimizations, and the memory at the constant addresses, that the folded code computes, and, with `~addresses:true`, the addresses of the loads and the stores too. The loads and stores through pointers aren't followed through the memory, and `complete` is false, if their values may come from, or go to, the memory, that the slice follows. The calls are opaque: `calls` are the ones, whose results flow to the locations, or that the values flow to, as arguments, by the registers of the C ABI. `live` are the locations, that come from before the function, e.g., its arguments, or go out of it, e.g., its results. The dynamic `slice` of a trace, see above, follows the values, that the program had, through any memory.
 
 ### Snapshots and checkpoints
 

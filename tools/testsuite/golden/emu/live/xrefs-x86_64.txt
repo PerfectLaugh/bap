@@ -1,0 +1,14 @@
+print_endline: callers print_strings
+print_strings: callers main
+main: callers 
+main calls free strcpy strlen strchr malloc memmove print_strings
+to 0x6010c0:
+  400652 addr 6010c0 in deregister_tm_clones
+  400660 addr 6010c0 in register_tm_clones
+  400692 addr 6010c0 in register_tm_clones
+  4006a0 load 6010c0 in __do_global_dtors_aux
+  4006b3 store 6010c0 in __do_global_dtors_aux
+strlen:
+  4005a0 call 7ffffff00030 via 601030 in strlen
+to main:
+  40061d addr 40076b in _start

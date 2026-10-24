@@ -1,0 +1,16 @@
+print_endline: callers print_strings
+print_strings: callers main
+main: callers 
+main calls memmove strlen malloc __stack_chk_fail free strchr strcpy print_strings
+to 0x12050:
+  9b4 addr 12050 in deregister_tm_clones
+  9bc addr 12050 in deregister_tm_clones
+  9e4 addr 12050 in register_tm_clones
+  9ec addr 12050 in register_tm_clones
+  a28 load 12050 in __do_global_dtors_aux
+  a50 store 12050 in __do_global_dtors_aux
+strlen:
+  8b4 load 11f60 in strlen
+  8b8 addr 11f60 in strlen
+  8bc call 7ffffff00010 via 11f60 in strlen
+to main:

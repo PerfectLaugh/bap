@@ -4,8 +4,11 @@
 (library
  (name bap_emu)
  (public_name bap-primus-native.emu)
+ (preprocess
+  (pps ppx_bap))
  (libraries
   bap
+  bap-c
   bap-core-theory
   bap-knowledge
   bap-primus

@@ -339,6 +339,12 @@ and session = {
   mutable pause : bool;
   mutable saved : (unit, string) result;  (** the result of the last [Save] *)
   mutable spawned : (int, string) result;  (** the result of the last [Spawn] *)
+  mutable called : (int64, string) result option;
+      (** the result of the last [Call], or [None], while the function runs,
+          e.g., paused *)
+  mutable regions : (int64 * int64 * Primus.Memory.protection) list;
+      (** the result of the last [Regions] *)
+  mutable dumped : string;  (** the result of the last [Dump] *)
   mutable starts : int;
       (** the number of the starts of Unicorn, which tells the instruction that
           runs again, e.g., after its fault, from the next one *)
@@ -439,6 +445,9 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     pause = false;
     saved = Ok ();
     spawned = Error "no thread spawned";
+    called = None;
+    regions = [];
+    dumped = "";
     starts = 0;
     stopped_at = None;
     restarted_at = None;
@@ -675,6 +684,16 @@ type request =
   | Spawn of int64 * int64 * int64 option
       (** the thread, that calls the function at the address with the argument,
           on the stack, is created, see [Bap_emu.spawn_thread] *)
+  | Call of int64 * int64 list * int option
+      (** the function at the address is called with the arguments, on a new
+          stack of the size, and the machine pauses again, when it returns, see
+          [Bap_emu.call] *)
+  | Regions
+      (** the mapped memory of the machine, with its protections, see
+          [Bap_emu.regions] *)
+  | Dump of int64 * int
+      (** the bytes of the memory of the machine, without generating them, see
+          [Bap_emu.project] *)
 
 type _ Effect.t +=
   | Paused : int64 * Primus.Machine.id -> request Effect.t
@@ -5298,6 +5317,164 @@ module Make (Machine : Primus.Machine.S) = struct
     fresh e pc;
     pc
 
+  (* The calls of the functions of the program, that the script makes,
+     see [Bap_emu.call], as the stubs call them: the function runs on a
+     new stack, with its arguments, as the C ABI of the target passes
+     them, and returns to [return_addr], which is not mapped, where its
+     run ends, after which the registers are as they were before the
+     call, and the machine pauses again, where it was. *)
+  module Calls = struct
+    let return_addr = 0xFFFF_E000L
+
+    (* the arguments of a function of [n] arguments of the type long,
+       and its result, as the C ABI of the target passes them, e.g., in
+       the registers, or on the stack at the entry *)
+    let signature n =
+      let* target = Machine.gets Project.target in
+      match Bap_c.Std.C.Abi.lookup target with
+      | None -> fail "the C ABI of the target is not known"
+      | Some abi ->
+          let long = Bap_c.Std.C.Type.basic `slong in
+          let proto : Bap_c.Std.C.Type.proto =
+            {
+              return = long;
+              args = List.init n ~f:(fun i -> (sprintf "a%d" i, long));
+              variadic = false;
+            }
+          in
+          let args =
+            Bap_c.Std.C.Abi.apply abi
+              (Bap_c.Std.C.Abi.model target)
+              [] proto (Sub.create ())
+            |> Term.enum arg_t |> Seq.to_list
+          in
+          let outs, ins =
+            List.partition_tf args ~f:(fun arg ->
+                match Arg.intent arg with Some Out -> true | _ -> false)
+          in
+          if List.length ins <> n then
+            fail "the C ABI of the target passes %d of %d arguments"
+              (List.length ins) n
+          else
+            Machine.return
+              (List.map ins ~f:Arg.rhs, Option.map (List.hd outs) ~f:Arg.rhs)
+
+    (* the argument [x] goes where the ABI passes it, [exp], a register,
+       or the stack *)
+    let pass e exp x =
+      let width =
+        match Type.infer exp with Ok (Imm n) -> n | _ -> e.bytes * 8
+      in
+      if assign_uc e exp (Word.of_int64 ~width x) then Machine.return ()
+      else
+        match exp with
+        | Load (_, addr, _, size) -> (
+            let addr = int64_of_word (eval_uc e addr) in
+            Threads.store e addr (Threads.bytes e x (Size.in_bytes size))
+            >>= function
+            | true -> Machine.return ()
+            | false -> fail "can't pass an argument at %Lx" addr)
+        | _ -> fail "can't pass an argument in %a" Exp.pps exp
+
+    (* the registers of the engine, which are restored after the call *)
+    let registers e =
+      ( List.filter_map (Target.Regs.basis e.regs) ~f:(fun v ->
+            Option.map (Target.Regs.read e.regs v) ~f:(fun x -> (v, x))),
+        List.map (extra_regs e) ~f:(fun id -> (id, read_extra e id)) )
+
+    let restore e (basis, extra) =
+      List.iter basis ~f:(fun (v, x) ->
+          ignore (Target.Regs.write e.regs v x : bool));
+      List.iter extra ~f:(fun (id, data) -> write_extra e id data);
+      pull e
+
+    (* calls the function at [addr] with [args], in the run of the
+       machine, which paused at [pc], on a stack of [stack] bytes, by
+       default 64 KB, zeroed, and gives its result, as the ABI returns
+       it, the registers are as before, and the memory as the function
+       left it *)
+    let call ~loop e ~pc ~addr ~args ~stack =
+      let* inputs, output = signature (List.length args) in
+      let* () = pull e in
+      let saved = registers e in
+      let size = (Option.value stack ~default:0x10000 + 15) land lnot 15 in
+      let* base = Threads.Windows.allocate e size in
+      let* zeroed = Threads.store e base (String.make size '\000') in
+      if not zeroed then fail "can't zero the stack at %Lx" base
+      else
+        let top = Int64.(base + of_int size) in
+        (* the arguments on the stack, and the space, that the callee
+           may use, e.g., the save area of MIPS, are above the stack
+           pointer, which is aligned, at the call *)
+        let room = (64 + (8 * List.length args) + 15) land lnot 15 in
+        let sp = Int64.(top - of_int room) in
+        let start =
+          match e.arch with
+          | Arm
+            when Int64.(addr land 1L = 1L)
+                 || Hash_set.mem e.session.thumb
+                      (word e Int64.(addr land lnot 1L)) ->
+              Int64.(addr lor 1L)
+          | _ -> addr
+        in
+        (* the return address is on the stack on x86, at the entry of
+           the function, and else in the link register *)
+        let* frame =
+          match (e.arch, e.link) with
+          | X86, _ -> (
+              let sp = Int64.(sp - of_int e.bytes) in
+              ignore (Target.Regs.write e.regs e.sp (word e sp) : bool);
+              Threads.storew e sp return_addr >>= function
+              | true ->
+                  Machine.return
+                    { ret = return_addr; sp = Int64.(sp + of_int e.bytes) }
+              | false -> fail "can't push the return address at %Lx" sp)
+          | _, Some lr ->
+              ignore (Target.Regs.write e.regs e.sp (word e sp) : bool);
+              ignore (Target.Regs.write e.regs lr (word e return_addr) : bool);
+              Machine.return { ret = return_addr; sp }
+          | _, None -> fail "the target has no link register"
+        in
+        let* () =
+          Machine.List.iter (List.zip_exn inputs args) ~f:(fun (exp, x) ->
+              pass e exp x)
+        in
+        (* the PIC code of MIPS finds its GOT from T9, the address of
+           the function *)
+        if Poly.equal e.arch Mips then
+          ignore
+            (Target.Regs.write_name e.regs "R25"
+               (word e Int64.(addr land lnot 1L))
+              : bool);
+        let* () = pull e in
+        let* pending = Machine.Local.get frames in
+        let* called = Machine.Local.get calls in
+        let callee = Hashtbl.find e.session.names (code_addr e start) in
+        let* () = Machine.Local.put frames (frame :: pending) in
+        let* () = Machine.Local.put calls ((callee, None) :: called) in
+        (* the stack is freed, as the function returned, so that the
+           calls don't exhaust the heap *)
+        let finish () =
+          let* () = Machine.Local.put frames pending in
+          let* () = Machine.Local.put calls called in
+          let* () = restore e saved in
+          Uc.reg_write e.uc e.pc (code_addr e pc);
+          let* p = Value.of_word (word e base) in
+          let* _ = Lisp.eval_fun "free" [ p ] in
+          pull e
+        in
+        Machine.catch
+          (let* () = loop start in
+           let result =
+             Option.map output ~f:(fun exp -> int64_of_word (eval_uc e exp))
+           in
+           let+ () = finish () in
+           Ok (Option.value result ~default:0L))
+          (fun exn ->
+            let+ () = finish () in
+            Error (Primus.Exn.to_string exn))
+  end
+
   (* The machine, which the script drives, pauses, and serves the
      requests of the script, until it continues. The machine, which
      takes a snapshot, forks, and its parent stays paused, as the
@@ -5380,6 +5557,26 @@ module Make (Machine : Primus.Machine.S) = struct
         in
         e.session.spawned <- r;
         serve pc
+    | Call (addr, args, stack) ->
+        e.session.called <- None;
+        let* r =
+          Machine.catch (Calls.call ~loop e ~pc ~addr ~args ~stack) (fun exn ->
+              Machine.return (Error (Primus.Exn.to_string exn)))
+        in
+        e.session.called <- Some r;
+        serve pc
+    | Regions ->
+        let* () = pull e in
+        let* regions = Memory.regions in
+        e.session.regions <-
+          List.map regions ~f:(fun (lower, upper, p) ->
+              (int64_of_word lower, int64_of_word upper, p));
+        serve pc
+    | Dump (addr, n) ->
+        let* () = pull e in
+        let* data = Memory.peek (word e addr) n in
+        e.session.dumped <- data;
+        serve pc
     | Snapshot -> pull e >>= fun () -> snapshot id pc
     | Restore snapshot ->
         let* () = Machine.kill id in
@@ -5393,7 +5590,7 @@ module Make (Machine : Primus.Machine.S) = struct
     if Monads.Std.Monad.State.Multi.Id.equal self id then snapshot id pc
     else serve pc
 
-  let rec loop pc =
+  and loop pc =
     let* e = prepare () in
     let s = e.session in
     if s.driven && s.pause then (

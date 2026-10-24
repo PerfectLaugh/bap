@@ -1,0 +1,8 @@
+backward X0 from ae8: sites abc ac0 ac4 ad8 adc ae0 ae4 | live R0 | calls  | complete true
+backward X0 from ae8 with addresses: sites ab4 ab8 abc ac0 ac4 ad8 adc ae0 ae4 | live R0,R31 | calls  | complete true
+backward  from ae8: sites  | live  | calls  | complete false
+backward  from ae8 with addresses: sites ab4 ab8 abc ac0 ac4 ad8 adc ae0 ae4 | live R0,R31 | calls  | complete false
+forward X0 from ab4: sites abc ac0 ac4 acc ad8 adc ae0 ae4 | live  | calls  | complete false
+forward X0 from ab4 with addresses: sites abc ac0 ac4 acc ad0 ad4 ad8 adc ae0 ae4 ae8 aec af0 | live CF,NF,R0,VF,ZF | calls ad4 | complete false
+forward  from abc: sites ac0 ac4 acc ad8 adc ae0 ae4 | live  | calls  | complete false
+forward  from abc with addresses: sites ac0 ac4 acc ad0 ad4 ad8 adc ae0 ae4 ae8 aec af0 | live CF,NF,R0,VF,ZF | calls ad4 | complete false

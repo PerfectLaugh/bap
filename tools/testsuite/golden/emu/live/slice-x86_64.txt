@@ -1,0 +1,8 @@
+backward RAX from 400764: sites 400761 | live  | calls  | complete false
+backward RAX from 400764 with addresses: sites 400733 400734 40073b 40073f 400743 40075d 400761 | live RDI,RSP | calls  | complete false
+backward  from 400764: sites 400761 | live  | calls  | complete false
+backward  from 400764 with addresses: sites 400733 400734 40073b 40073f 400743 40075d 400761 | live RDI,RSP | calls  | complete false
+forward RDI from 400733: sites 40073b 40073f 400743 400749 40075d | live RDI | calls  | complete false
+forward RDI from 400733 with addresses: sites 40073b 40073f 400743 400749 40074d 400750 400753 40075d 400761 400764 400767 | live PF,RAX,RDI,SF,ZF | calls 400753 | complete false
+forward  from 400743: sites 400749 40075d | live  | calls  | complete false
+forward  from 400743 with addresses: sites 400749 40074d 400750 400753 40075d 400761 400764 400767 | live PF,RAX,RDI,SF,ZF | calls 400753 | complete false

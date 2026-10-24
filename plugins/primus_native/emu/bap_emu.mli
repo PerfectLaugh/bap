@@ -329,7 +329,7 @@ module Trace : sig
       blocks has them. *)
 end
 
-type location =
+type location = Bap_emu_slice.location =
   | Reg of string
   | Mem of int64 * int
       (** a register, by the name of the variable of BIR, e.g., [RAX], the case
@@ -461,6 +461,94 @@ val spawn_thread : ?stack:int64 -> t -> start:int64 -> arg:int64 -> int
     Raises [Invalid_argument], if the program is not paused, and [Failure], if
     the threads of the target are not supported, e.g., of PowerPC64, or there
     are too many. *)
+
+val call : ?stack:int -> ?args:int64 list -> t -> int64 -> int64 option
+(** [call emu addr ~args] calls the function at [addr], with the lower bit set
+    for Thumb, of the paused program, with the [args], which the C ABI of the
+    target passes as the arguments of the type [long], in the registers, or on
+    the stack, on a new stack of [stack] bytes, by default 64 KB, which malloc
+    allocates, and which is zeroed, with the return address, at which the
+    function returns to the script, e.g.,
+
+    {[
+      match Emu.call emu decrypt ~args:[ buf; 16L ] with
+      | Some n -> printf "decrypted %Ld bytes: %S\n" n (Emu.read emu buf 16)
+      | None -> ...
+    ]}
+
+    The function runs as the program does, e.g., the hooks see it, in the
+    thread, that the program paused in, and returns its result, as the ABI
+    returns a [long], after which the registers are as they were before the
+    call, the memory as the function left it, e.g., its output buffers, which a
+    {!snapshot} undoes, and the program pauses where it was, so that a script
+    runs a routine, e.g., a codec, or a dispatcher, with the inputs of its
+    choice, as many times as it likes.
+
+    Returns [None], if the program paused in the function, e.g., as a hook
+    stopped it, or ended, see {!status}; {!run} continues the function, after
+    which the program pauses where it was, with the result in {!returned}.
+
+    Raises [Invalid_argument], if the program is not paused, and [Failure], if
+    the function can't be called, e.g., the C ABI of the target is not known, or
+    the function failed, e.g., with a segmentation fault, after which the
+    program is paused where it was, as before the call. *)
+
+val returned : t -> int64 option
+(** the result of the last {!call}, that returned *)
+
+type region = {
+  lower : int64;
+  upper : int64;  (** inclusive *)
+  readable : bool;
+  writable : bool;
+  executable : bool;
+}
+(** a range of the mapped memory, with its protection *)
+
+val regions : t -> region list
+(** [regions emu] the memory map of the paused program: the ranges of its
+    memory, the lowest first, which the program and the loader mapped, and which
+    have the same protection, e.g., after the program unpacked itself, or
+    changed the protection of its pages. Raises [Invalid_argument], if the
+    program is not paused. *)
+
+val project : ?symbols:(string * int64) list -> t -> project
+(** [project emu] the project of the memory of the paused program, as it is now,
+    e.g., after the program unpacked, or wrote its code: its executable regions,
+    see {!regions}, are disassembled and lifted from the bytes, that the program
+    has there now, as the disassemble command does, from the subroutines of the
+    symbols of the program, of {!add_symbol}, and of [symbols], e.g., the
+    entries, that the script found in the tables, that the program built, which
+    name the subroutines too, and its other regions are its data, so that the
+    analyses of the whole program, e.g., {!Xrefs}, or the passes, e.g.,
+    [recompile-optimize], see [Bap_script.run_pass], work on the code, that
+    runs, rather than on the file, whose bytes differ, e.g.,
+
+    {[
+    ignore (Emu.run emu ~until:after_unpack);
+    let proj = Emu.project emu in
+    let xrefs = Emu.Xrefs.create proj in
+    Emu.Xrefs.callers xrefs decrypt
+    ]}
+
+    The project has the specification of the file, with the names, and the
+    memory of the program, which the analyses read, e.g., the tables of the
+    pointers to the functions, in a unit of its own, as the memory changes
+    between the projects, and the name of the file, with [#live] and the number
+    of the project, so that the knowledge of the file isn't confused with it.
+    The disassembly of a large program takes its time, e.g., a few seconds for a
+    megabyte of code.
+
+    Raises [Invalid_argument], if the program is not paused, and [Failure], if
+    the project can't be created. *)
+
+module Xrefs = Bap_emu_xrefs
+(** the cross references of a program, e.g., of {!project}, see [Bap_emu_xrefs]
+*)
+
+module Static = Bap_emu_slice
+(** the static slices of the code of a program, e.g., of {!project}, see
+    [Bap_emu_slice] *)
 
 val knowledge : t -> Bap_knowledge.Knowledge.state option
 (** the knowledge of the system, when it finished, e.g., of the instructions,

@@ -139,7 +139,7 @@ let start init (entry : Primus.Linker.name) =
         let module Component = Component (Machine) in
         Component.init () >>= ended
     | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ | X.Save _ | X.Interpret
-    | X.Set_pc _ | X.Spawn _ ->
+    | X.Set_pc _ | X.Spawn _ | X.Call _ | X.Regions | X.Dump _ ->
         Machine.return ()
   in
   ended ()
@@ -380,6 +380,40 @@ let spawn_thread ?stack t ~start ~arg =
       "Bap_emu.spawn_thread: the program is not paused, e.g., in a hook";
   resume t (X.Spawn (start, arg, stack));
   match t.session.spawned with Ok tid -> tid | Error msg -> failwith msg
+
+let call ?stack ?(args = []) t addr =
+  if not (paused t) then
+    invalid_arg "Bap_emu.call: the program is not paused, e.g., in a hook";
+  t.session.called <- None;
+  resume t (X.Call (addr, args, stack));
+  match t.session.called with
+  | Some (Ok x) -> Some x
+  | Some (Error msg) -> failwithf "Bap_emu.call: %s" msg ()
+  | None -> None
+
+let returned t = match t.session.called with Some (Ok x) -> Some x | _ -> None
+
+type region = {
+  lower : int64;
+  upper : int64;
+  readable : bool;
+  writable : bool;
+  executable : bool;
+}
+
+let regions t =
+  if not (paused t) then
+    invalid_arg "Bap_emu.regions: the program is not paused, e.g., in a hook";
+  resume t X.Regions;
+  List.map t.session.regions
+    ~f:(fun (lower, upper, (p : Primus.Memory.protection)) ->
+      {
+        lower;
+        upper;
+        readable = p.readable;
+        writable = p.writable;
+        executable = p.executable;
+      })
 
 (* pauses the program before the next instruction, from a hook *)
 let stop t =
@@ -1074,7 +1108,7 @@ module Trace = struct
               match Int.compare m n with 0 -> Int64.compare a b | c -> c) ))
 end
 
-type location = Reg of string | Mem of int64 * int
+type location = Bap_emu_slice.location = Reg of string | Mem of int64 * int
 type step = { index : int64; pc : int64 }
 
 type slice = {
@@ -1707,6 +1741,79 @@ let symbols t =
   Hashtbl.to_alist t.session.names
   |> List.sort ~compare:(fun (a, _) (b, _) -> Int64.compare a b)
   |> List.map ~f:(fun (addr, name) -> (name, addr))
+
+module Xrefs = Bap_emu_xrefs
+module Static = Bap_emu_slice
+
+(* the projects of the memory, each in a unit of its own, as the memory
+   changes between them *)
+let projects = ref 0
+
+let project ?(symbols = []) t =
+  if not (paused t) then
+    invalid_arg "Bap_emu.project: the program is not paused, e.g., in a hook";
+  let target = t.target in
+  let module Theory = Bap_core_theory.Theory in
+  let width = Theory.Target.code_addr_size target in
+  let endian =
+    if Theory.Endianness.(Theory.Target.endianness target = le) then
+      LittleEndian
+    else BigEndian
+  in
+  (* the bytes of the readable regions, from Primus, which has them all,
+     as Unicorn has only the pages, that the code touched, without the
+     bytes, that were never stored, e.g., of the stack, which are zero *)
+  let code, data =
+    List.fold (regions t) ~init:(Memmap.empty, Memmap.empty)
+      ~f:(fun (code, data) r ->
+        let len = Int64.(to_int_exn (r.upper - r.lower + 1L)) in
+        if not r.readable then (code, data)
+        else
+          match
+            resume t (X.Dump (r.lower, len));
+            t.session.dumped
+          with
+          | bytes ->
+              let mem =
+                Memory.create endian
+                  (Addr.of_int64 ~width r.lower)
+                  (Bigstring.of_string bytes)
+                |> Or_error.ok_exn
+              in
+              let name =
+                sprintf "live:%s%s%s" "r"
+                  (if r.writable then "w" else "-")
+                  (if r.executable then "x" else "-")
+              in
+              let tag = Value.create Image.section name in
+              if r.executable then (Memmap.add code mem tag, data)
+              else (code, Memmap.add data mem tag))
+  in
+  (* the specification of the file, with the names of the script *)
+  let spec =
+    let names =
+      Hashtbl.to_alist t.session.symbols
+      |> List.map ~f:(fun (addr, name) -> (name, addr))
+    in
+    let facts =
+      Ogre.sequence
+        (List.concat_map (names @ symbols) ~f:(fun (name, addr) ->
+             [
+               Ogre.provide Image.Scheme.code_start addr;
+               Ogre.provide Image.Scheme.named_symbol addr name;
+             ]))
+    in
+    Ogre.exec facts (Project.specification t.project) |> Or_error.ok_exn
+  in
+  incr projects;
+  let file = Option.value (Project.get t.project filename) ~default:"a.out" in
+  let filename = sprintf "%s#live%d" file !projects in
+  match
+    Project.create ~package:filename
+      (Project.Input.custom ~filename ~code ~data ~spec target)
+  with
+  | Ok proj -> proj
+  | Error err -> failwithf "Bap_emu.project: %s" (Error.to_string_hum err) ()
 
 type import = { slot : int64; name : string; value : int64 option }
 
