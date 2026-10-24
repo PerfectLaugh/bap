@@ -106,6 +106,13 @@ _Static_assert(sizeof(entry) == 24 && offsetof(entry, data) == 8 &&
 void *bap_uc_trace_of(value tv);
 void bap_uc_trace_block(void *t, uint64_t pc, uint32_t size, int thumb,
                         int starts);
+/* they are of the stubs of Unicorn, in the library of another plugin,
+   which Windows may load further than 2 GB away, where the relative
+   calls, that flexdll relocates, don't reach, so they are called by
+   their addresses, which the compiler doesn't fold into the calls */
+static void *(*volatile trace_of)(value) = bap_uc_trace_of;
+static void (*volatile trace_block)(void *, uint64_t, uint32_t, int, int) =
+    bap_uc_trace_block;
 
 /* the block, that the run of another one continues with, see [run] */
 typedef struct {
@@ -463,7 +470,7 @@ value bap_jit_traces(value mem, value traces) {
     jit_mem *m = Mem_val(mem);
     size_t n = Wosize_val(traces);
     if (n > MAX_TRACES) caml_invalid_argument("Bap_lifted_jit: too many traces");
-    for (size_t i = 0; i < n; i++) m->traces[i] = bap_uc_trace_of(Field(traces, i));
+    for (size_t i = 0; i < n; i++) m->traces[i] = trace_of(Field(traces, i));
     m->ntraces = (int)n;
     return Val_unit;
 }
@@ -471,8 +478,8 @@ value bap_jit_traces(value mem, value traces) {
 /* the block, that ran whole, before the next one, in the traces */
 static void record(jit_mem *m, jit_link *l) {
     for (int i = 0; i < m->ntraces; i++)
-        bap_uc_trace_block(m->traces[i], l->pc, (uint32_t)(l->end - l->pc),
-                           l->flags & LINK_THUMB, m->starts);
+        trace_block(m->traces[i], l->pc, (uint32_t)(l->end - l->pc),
+                    l->flags & LINK_THUMB, m->starts);
     m->starts = (l->flags & LINK_JUMPS) != 0;
 }
 
