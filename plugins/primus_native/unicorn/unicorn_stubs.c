@@ -1707,6 +1707,11 @@ static uint64_t kept(uint64_t count, uint64_t mask, intnat n) {
     return n >= 0 && (uint64_t)n < k ? (uint64_t)n : k;
 }
 
+value bap_uc_trace_retained(value tv) {
+    struct trace *t = Trace_val(tv);
+    return Val_long(kept(t->count, t->mask, -1));
+}
+
 /* the last [n] program counters, the oldest first, and their indices */
 value bap_uc_trace_pcs(value tv, value n) {
     CAMLparam2(tv, n);

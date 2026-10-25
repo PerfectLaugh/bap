@@ -88,6 +88,7 @@ module Make (Machine : Machine) : sig
   val regions : (addr * addr * protection) list Machine.t
   val origin : addr -> origin Machine.t
   val values_of : ?generated:bool -> id -> (addr * word) list Machine.t
+  val stored_count_of : ?generated:bool -> id -> int Machine.t
   val origins_of : id -> addr list -> origin list Machine.t
   val peek : addr -> int -> string Machine.t
   val load_bytes : addr -> int -> (char * protection) option array Machine.t

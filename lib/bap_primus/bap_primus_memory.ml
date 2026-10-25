@@ -1042,6 +1042,16 @@ module Make (Machine : Machine) = struct
      last, without storing them, e.g., of a snapshot, which is another
      machine, see [Bap_emu.diff], as the stored values are of all
      memories of the machine *)
+  let stored_count_of ?(generated = false) machine =
+    Machine.Other.get machine state >>| fun { mems; _ } ->
+    Map.fold mems ~init:0 ~f:(fun ~key:_ ~data:(s : state) total ->
+        total
+        +
+        if generated then Map.length s.values
+        else
+          Map.fold s.values ~init:0 ~f:(fun ~key:addr ~data:_ count ->
+              if Set.mem s.generated addr then count else count + 1))
+
   let values_of ?(generated = false) machine =
     Machine.Other.get machine state >>= fun { mems; _ } ->
     Machine.Global.get Backing.state >>| fun backing ->

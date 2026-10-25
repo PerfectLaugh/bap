@@ -319,6 +319,9 @@ and lifter = {
           [Bap_emu.insn_at] *)
   ran : unit -> Lifts.entry list;
       (** the instructions, that [lifted] has, in no order *)
+  inventory : unit -> int * int;
+      (** the retained entries and their BIR blocks, including the cache
+          entries, that this run didn't hit *)
 }
 
 and journal_event = { kind : string; detail : string }
@@ -335,6 +338,7 @@ and session = {
       *)
   mutable parked_pages : int;  (** the number of the parked pages *)
   dead : Id.Hash_set.t;  (** the killed machines, whose pages are not parked *)
+  snapshots : Id.Hash_set.t;  (** the live snapshots of the script *)
   own_code : Primus.Linker.code Addr.Table.t;
       (** the code that runs the subroutines in Unicorn, see [Loader] *)
   stubs : Primus.Linker.code Addr.Table.t;
@@ -419,6 +423,7 @@ and session = {
       (** the result of the last [Regions] *)
   mutable dumped : string;  (** the result of the last [Dump] *)
   mutable values : (int64 * int) list;  (** the result of the last [Values] *)
+  mutable stored_bytes : int;  (** the result of the last [Stored_count] *)
   mutable origins : Primus.Memory.origin list;
       (** the result of the last [Origins] *)
   mutable starts : int;
@@ -563,6 +568,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     parked = Id.Table.create ();
     parked_pages = 0;
     dead = Id.Hash_set.create ();
+    snapshots = Id.Hash_set.create ();
     own_code = Addr.Table.create ();
     stubs = Addr.Table.create ();
     native_stubs = o.native_stubs;
@@ -595,6 +601,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     regions = [];
     dumped = "";
     values = [];
+    stored_bytes = 0;
     origins = [];
     starts = 0;
     stopped_at = None;
@@ -898,6 +905,7 @@ type request =
   | Values of Primus.Machine.id option * bool
       (** the bytes, that the machine, or the snapshot, stored, with the
           generated ones, if the flag is set, see [Bap_emu.diff] *)
+  | Stored_count  (** the number of stored byte entries of the machine *)
   | Origins of Primus.Machine.id option * int64 list
       (** where the bytes of the machine, or of the snapshot, come from, see
           [Bap_emu.changes] *)
@@ -1521,6 +1529,11 @@ let lifter ?cache ~arm project =
     Hashtbl.fold entries ~init:[] ~f:(fun ~key:_ ~data:(e, renamed) ran ->
         if !renamed then e :: ran else ran)
   in
+  let inventory () =
+    Hashtbl.fold entries ~init:(0, 0)
+      ~f:(fun ~key:_ ~data:((e : Lifts.entry), _) (entries, blocks) ->
+        (entries + 1, blocks + List.length e.blks))
+  in
   {
     lift;
     name = Hashtbl.find names;
@@ -1529,6 +1542,7 @@ let lifter ?cache ~arm project =
     forget;
     lifted;
     ran;
+    inventory;
   }
 
 (* the NaNs and the invalid integers of the target, as ieee754-policy of
@@ -6306,6 +6320,12 @@ module Make (Machine : Primus.Machine.S) = struct
         e.session.values <-
           List.map values ~f:(fun (addr, x) ->
               (int64_of_word addr, Word.to_int_exn x land 0xFF));
+        serve pc
+    | Stored_count ->
+        let* () = pull e in
+        let* me = Machine.current () in
+        let* count = Memory.stored_count_of me in
+        e.session.stored_bytes <- count;
         serve pc
     | Origins (other, addrs) ->
         let* () = pull e in

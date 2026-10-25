@@ -86,6 +86,8 @@ val insn_addrs : t -> int64 list
 (** the addresses of the instructions, that {!insn_at} has, in no order, none in
     Unicorn *)
 
+val inventory : t -> int * int * int
+
 (** {2 Memory} *)
 
 val mem_map : t -> int64 -> int64 -> Perm.t -> unit

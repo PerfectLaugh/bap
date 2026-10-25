@@ -47,6 +47,7 @@ let set_tlb_virtual = function
 let flush_tb = function Unicorn u -> Uc.flush_tb u | Lifted l -> L.flush_tb l
 let insn_at t pc = match t with Unicorn _ -> None | Lifted l -> L.insn_at l pc
 let insn_addrs = function Unicorn _ -> [] | Lifted l -> L.insn_addrs l
+let inventory = function Unicorn _ -> (0, 0, 0) | Lifted l -> L.inventory l
 
 let mem_map t addr size perm =
   match t with

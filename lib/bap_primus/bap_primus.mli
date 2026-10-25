@@ -2755,6 +2755,12 @@ module Std : sig
 
             @since 2.6.0 *)
 
+        val stored_count_of :
+          ?generated:bool -> Monad.State.Multi.id -> int Machine.t
+        (** [stored_count_of machine] is the number of stored byte entries in
+            the memories of [machine], without constructing their values or
+            including pending backing bytes. *)
+
         val origins_of :
           Monad.State.Multi.id -> addr list -> origin list Machine.t
         (** [origins_of machine addrs] where the bytes at [addrs] of the

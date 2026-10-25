@@ -233,6 +233,7 @@ module Trace = struct
 
   external create : int -> int -> bool -> int -> t = "bap_uc_trace_create"
   external count : t -> int64 = "bap_uc_trace_count"
+  external retained : t -> int = "bap_uc_trace_retained"
   external accesses_count : t -> int64 = "bap_uc_trace_accesses_count"
   external clear : t -> unit = "bap_uc_trace_clear"
 

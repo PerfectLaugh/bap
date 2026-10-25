@@ -2151,6 +2151,14 @@ let insn_at t pc =
    [insn_at] *)
 let insn_addrs t = Hashtbl.keys t.insns
 
+let inventory t =
+  let blocks =
+    Hashtbl.fold t.insns ~init:0 ~f:(fun ~key:_ ~data:(insn : insn) n ->
+        n + List.length insn.blks)
+  in
+  let live = Option.value_map t.jit ~default:0 ~f:(fun j -> j.live) in
+  (Hashtbl.length t.insns, blocks, live)
+
 (* the instructions stay, as their bytes are checked, when they run, see
    [lifted], so that [insn_at] has them, when the code is written, and
    the blocks, that the JIT compiled, go *)

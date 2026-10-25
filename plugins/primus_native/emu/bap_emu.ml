@@ -256,7 +256,7 @@ let start init (entry : Primus.Linker.name) =
         Component.init () >>= ended
     | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ | X.Save _ | X.Interpret
     | X.Set_pc _ | X.Spawn _ | X.Resume_thread _ | X.Call _ | X.Regions
-    | X.Dump _ | X.Values _ | X.Origins _ | X.Drop _ ->
+    | X.Dump _ | X.Values _ | X.Stored_count | X.Origins _ | X.Drop _ ->
         Machine.return ()
   in
   ended ()
@@ -424,6 +424,7 @@ let machine t =
 let snapshot t =
   let id = machine t in
   resume t X.Snapshot;
+  Hash_set.add t.session.snapshots id;
   { owner = t.session; id }
 
 let restore t { owner; id } =
@@ -432,13 +433,16 @@ let restore t { owner; id } =
   if Hash_set.mem t.session.dead id then
     invalid_arg "Bap_emu.restore: the snapshot was dropped";
   t.session.exit_code <- None;
-  resume t (X.Restore id)
+  resume t (X.Restore id);
+  Hash_set.remove t.session.snapshots id
 
 let drop_snapshot t { owner; id } =
   if not (phys_equal owner t.session) then
     invalid_arg "Bap_emu.drop_snapshot: the snapshot is of another emulator";
   if not (paused t) then not_paused ~fn:"drop_snapshot" t;
-  if not (Hash_set.mem t.session.dead id) then resume t (X.Drop id)
+  if not (Hash_set.mem t.session.dead id) then (
+    resume t (X.Drop id);
+    Hash_set.remove t.session.snapshots id)
 
 module type Completion = X.Completion
 
@@ -477,6 +481,42 @@ let footprint () =
     heap = s.heap_words * word;
     top_heap = s.top_heap_words * word;
     rss = rss ();
+  }
+
+type component_footprint = {
+  lifter_entries : int;
+  lifter_blocks : int;
+  engine_entries : int;
+  engine_blocks : int;
+  jit_blocks : int;
+  hook_entries : int;
+  stored_bytes : int;
+  snapshots : int;
+  parked_pages : int;
+  script_models : int;
+}
+
+let model_registrations = ref 0
+
+let components t =
+  if not (paused t) then not_paused ~fn:"components" t;
+  resume t X.Stored_count;
+  let lifter_entries, lifter_blocks =
+    Option.value_map t.session.lifter ~default:(0, 0) ~f:(fun l ->
+        l.inventory ())
+  in
+  let engine_entries, engine_blocks, jit_blocks = Uc.inventory (engine t).uc in
+  {
+    lifter_entries;
+    lifter_blocks;
+    engine_entries;
+    engine_blocks;
+    jit_blocks;
+    hook_entries = Hashtbl.length t.lifted + Hashtbl.length t.paused_lifts;
+    stored_bytes = t.session.stored_bytes;
+    snapshots = Hash_set.length t.session.snapshots;
+    parked_pages = t.session.parked_pages;
+    script_models = !model_registrations;
   }
 
 (* the checkpoint of the paused program, or, from a hook, of the
@@ -524,7 +564,8 @@ module Checkpoint = struct
       let restore data = Machine.return (restore data)
     end in
     Primus.Checkpoint.register ?package ?version ?required name
-      (module Extension)
+      (module Extension);
+    incr model_registrations
 
   let register_ref ?package ?version ?required name binable state =
     register ?package ?version ?required name
@@ -1460,6 +1501,7 @@ module Trace = struct
     end
 
   let count t = Uc.Trace.count t.trace
+  let retained t = Uc.Trace.retained t.trace
   let clear t = Uc.Trace.clear t.trace
   let blocks t = Uc.Trace.blocks t.trace
   let pcs ?last t = Uc.Trace.pcs ?last t.trace

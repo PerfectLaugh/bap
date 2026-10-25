@@ -734,6 +734,7 @@ let check emu =
 ```
 
 - `footprint ()` is the heap of OCaml, the most it had, and the resident size of the process, which Linux tells.
+- `components emu` breaks retention into logical counts: session-lifter entries and BIR blocks, lifted-engine entries, BIR and live JIT blocks, hook lifts, stored-byte entries, snapshots, parked pages, and process-global script-model registrations. These counts are not estimated heap bytes and are not additive; `Trace.retained trace` separately reports the records that a trace ring still holds.
 - `forget_lifts emu` saves the lifted instructions to the cache, if bap has one, and drops them, with the ones, that `bir` lifted in the hooks; the code, that the engine compiled, stays, so the program runs on at full speed, and an instruction, that is lifted again, e.g., in a new engine, costs a lift, as at the start.
 - `drop_snapshot emu snapshot` frees a snapshot, that the script doesn't restore anymore; `restore` of a dropped snapshot raises.
 - The garbage collector of OCaml trades memory for time: `OCAMLRUNPARAM='o=40'` in the environment, or `Gc.set { (Gc.get ()) with space_overhead = 40 }` in the script, keeps the heap closer to the live data, at the cost of more collections; the default is 120.

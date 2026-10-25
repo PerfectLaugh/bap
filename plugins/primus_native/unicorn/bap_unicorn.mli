@@ -267,6 +267,10 @@ module Trace : sig
   (** the number of the recorded instructions, or blocks, also of those, that
       the ring doesn't keep anymore *)
 
+  val retained : t -> int
+  (** the number of instruction or block records that the ring currently keeps
+  *)
+
   val accesses_count : t -> int64
   (** the number of the recorded accesses *)
 

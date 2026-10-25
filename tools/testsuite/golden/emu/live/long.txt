@@ -1,7 +1,15 @@
 footprint: heap true, top true, rss known
+inventory: lifter true, engine true, blocks true, stored true, models true, snapshots 0, pages false
+inventory: lifter true, engine true, blocks true, stored true, models true, snapshots 2, pages true
+inventory: lifter true, engine true, blocks true, stored true, models true, snapshots 1, pages false
+pages released true
 Bap_emu.restore: the snapshot was dropped
+forgotten: lifter true, hooks true
 lifts main again true
+hook lifts retained true
+inventory: lifter false, engine true, blocks false, stored true, models true, snapshots 0, pages false
 restored the kept snapshot at main true
+trace retained true
 ran main: PUSH64r of 1 bytes, the ones in memory true, lifted true
 the bytes, that were lifted, from main: 4 of 32
 scrubbed: in memory true, as they ran true

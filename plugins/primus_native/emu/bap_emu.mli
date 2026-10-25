@@ -398,6 +398,9 @@ module Trace : sig
   (** the number of the recorded instructions, or blocks, also of those, that
       the ring doesn't keep anymore *)
 
+  val retained : t -> int
+  (** the number of instruction or block records that the ring currently keeps *)
+
   val clear : t -> unit
   val blocks : t -> bool
 
@@ -1225,6 +1228,27 @@ val footprint : unit -> footprint
     forget its lifts, see {!forget_lifts}, to drop its snapshots, see
     {!drop_snapshot}, or to save a checkpoint, see {!save}, and start anew, see
     [docs/emulation.md]. *)
+
+type component_footprint = {
+  lifter_entries : int;  (** retained session-lifter instructions *)
+  lifter_blocks : int;  (** BIR blocks retained by the session lifter *)
+  engine_entries : int;  (** instructions retained by the lifted engine *)
+  engine_blocks : int;  (** BIR blocks retained by the lifted engine *)
+  jit_blocks : int;  (** live compiled blocks of the lifted engine *)
+  hook_entries : int;  (** shared and paused script-hook lift entries *)
+  stored_bytes : int;  (** logical stored byte entries, not heap bytes *)
+  snapshots : int;  (** live snapshots created by the script *)
+  parked_pages : int;  (** native pages retained for snapshots *)
+  script_models : int;  (** process-global checkpoint model registrations *)
+}
+
+val components : t -> component_footprint
+(** [components emu] is a logical retention inventory of the paused emulator.
+    Counts are not estimated heap sizes and are not additive: hook lifts may be
+    shared between emulators, persistent byte maps may share structure, and
+    [script_models] is process-global. Use {!Trace.retained} for the records
+    retained by a particular live trace. Raises [Invalid_argument] if the
+    program is not paused. *)
 
 (** The checkpoints, that {!save} wrote, which a script inspects, without
     loading their program, e.g., to choose one in a pipeline. *)
