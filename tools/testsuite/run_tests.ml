@@ -1283,6 +1283,29 @@ let emu data =
             ]
         in
         golden env "emu/live/long.txt" out.text);
+    case "emu/lifetime-controls" (fun env ->
+        let run mode bin =
+          bap ~timeout:300. env
+            [
+              "script";
+              input "emu/lifetime-controls.ml";
+              mode;
+              path data ("bin/" ^ bin);
+            ]
+        in
+        let out = run "stats" "x86_64-linux-gnu-crc-loop" in
+        check env "statistics run succeeds" (out.status = Exited 0);
+        has env "reports periodic statistics" out
+          "stats: reports true, valid true, captured true\n";
+        let out = run "deadline" "x86_64-linux-gnu-signal-loop" in
+        check env "native deadline terminates BAP" (out.status = Exited 124);
+        let out = run "cancel" "x86_64-linux-gnu-echo" in
+        sequence env out
+          [
+            ("cancels the deadline", "deadline cancelled\n");
+            ("rejects a negative deadline", "negative deadline rejected\n");
+            ("rejects an invalid interval", "invalid stats rejected\n");
+          ]);
     (* what a hook may do, while the program runs: save a checkpoint, or
        defer an action to the pause, that it asks for, after which the
        program continues, see hooks.ml *)

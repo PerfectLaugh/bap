@@ -741,7 +741,9 @@ let check emu =
 - The garbage collector of OCaml trades memory for time: `OCAMLRUNPARAM='o=40'` in the environment, or `Gc.set { (Gc.get ()) with space_overhead = 40 }` in the script, keeps the heap closer to the live data, at the cost of more collections; the default is 120.
 - The bytes, that the program stores in Unicorn, go to Primus, when it reads them, e.g., at a snapshot, a checkpoint, or a `project`, as page-backed concrete bytes; scalar reads promote them to stable values for tracking and symbolic state. `peek` and the diffs read pending pages without storing them, and checkpoint serialization keeps its existing byte format.
 
-A wrapper, that is killed, e.g., `timeout`, or a task runner, leaves bap running, so a long run installs its own watchdog: `Sys.set_signal Sys.sigalrm` with `Unix.alarm`, or a handler of `SIGTERM`, that stops the program, see the signals above, saves what it needs, and exits; the lifted engine saves its instructions on `SIGTERM` and `SIGINT` itself, unless the script handles them.
+A wrapper, that is killed, e.g., `timeout`, or a task runner, leaves bap running, so a long run installs its own watchdog: `start_deadline ~code:124 seconds` terminates the actual BAP process even while native execution holds the OCaml runtime lock, and `cancel_deadline` disarms it. Expiry is an immediate operating-system process exit, not a guest pause or a checkpoint opportunity.
+
+`start_stats emu ~interval callback` counts fresh guest instructions and pauses briefly at each interval to report current lifted blocks, active threads, native write-hook dispatches, RSS, and last guest PC. The callback runs in a safe paused state; `stop_stats` removes the hook and suppresses pending reports. `execution_stats emu` captures the same record on demand while paused.
 
 ## See also
 

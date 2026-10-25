@@ -11,6 +11,9 @@
 exception Error of int * string
 (** [Error (code, message)] is the error of Unicorn with its code. *)
 
+val deadline_start : float -> int -> int64
+val deadline_cancel : int64 -> unit
+
 type t
 (** an instance of the emulator *)
 

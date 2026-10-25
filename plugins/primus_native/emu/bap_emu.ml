@@ -87,7 +87,25 @@ type t = {
   mutable write_dispatches : int;
   mutable write_callbacks : int;
   mutable write_seconds : float;
+  mutable instructions : int64;
   shell : shell_state;
+}
+
+type execution_stats = {
+  instructions : int64;
+  lifted_blocks : int;
+  active_threads : int;
+  hook_dispatches : int;
+  rss : int option;
+  last_pc : int64;
+}
+
+type stats_subscription = {
+  interval : float;
+  callback : execution_stats -> unit;
+  mutable next : float;
+  mutable active : bool;
+  mutable stop : unit -> unit;
 }
 
 type write_subscription = {
@@ -378,6 +396,7 @@ let create ?system ?(components = []) ?(init = []) ?(redirects = [])
       write_dispatches = 0;
       write_callbacks = 0;
       write_seconds = 0.;
+      instructions = 0L;
       shell = { breaks = Int64.Table.create (); snaps = [] };
     }
   in
@@ -488,6 +507,15 @@ let footprint () =
     top_heap = s.top_heap_words * word;
     rss = rss ();
   }
+
+type deadline = int64
+
+let start_deadline ?(code = 124) seconds =
+  if Float.(seconds < 0.) || not (Float.is_finite seconds) then
+    invalid_arg "Bap_emu.start_deadline: invalid seconds";
+  Bap_unicorn.deadline_start seconds code
+
+let cancel_deadline = Bap_unicorn.deadline_cancel
 
 type component_footprint = {
   lifter_entries : int;
@@ -3132,6 +3160,69 @@ let thread_journal t =
   Queue.to_list t.session.thread_journal
   |> List.map ~f:(fun (event : X.journal_event) ->
       { kind = event.kind; detail = event.detail })
+
+let execution_stats t =
+  if not (paused t) then not_paused ~fn:"execution_stats" t;
+  let last_pc = pc t in
+  let active_threads = List.length (threads t) in
+  let _, lifted_blocks, _ = Uc.inventory (engine t).uc in
+  {
+    instructions = t.instructions;
+    lifted_blocks;
+    active_threads;
+    hook_dispatches = t.write_dispatches;
+    rss = rss ();
+    last_pc;
+  }
+
+let start_stats t ~interval callback =
+  if Float.(interval <= 0.) || not (Float.is_finite interval) then
+    invalid_arg "Bap_emu.start_stats: invalid interval";
+  if not (paused t) then not_paused ~fn:"start_stats" t;
+  let subscription =
+    {
+      interval;
+      callback;
+      next = X.clock () +. interval;
+      active = true;
+      stop = (fun () -> ());
+    }
+  in
+  let hooks = ref [] in
+  let install (e : X.engine) =
+    let fresh = instructions t in
+    let hook =
+      Uc.on_code e.uc (fun addr _ ->
+          if subscription.active && fresh addr then begin
+            t.instructions <- Int64.succ t.instructions;
+            let now = X.clock () in
+            if Float.(now >= subscription.next) then begin
+              subscription.next <- now +. interval;
+              defer t (fun t ->
+                  if subscription.active then
+                    subscription.callback (execution_stats t))
+            end
+          end)
+    in
+    hooks := (e.uc, hook) :: !hooks
+  in
+  installed t install;
+  let stop () =
+    if subscription.active then begin
+      subscription.active <- false;
+      t.session.engine_hooks <-
+        List.filter t.session.engine_hooks ~f:(fun g ->
+            not (phys_equal g install));
+      List.iter !hooks ~f:(fun (uc, hook) ->
+          try Uc.delete uc hook with Invalid_argument _ | Uc.Error _ -> ());
+      hooks := []
+    end
+  in
+  subscription.stop <- stop;
+  scope t stop;
+  subscription
+
+let stop_stats subscription = subscription.stop ()
 
 (* the registers of the thread, without the aliases: of the engine, for
    the thread, that runs, or the ones, that Primus keeps for the thread,

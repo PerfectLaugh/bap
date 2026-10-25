@@ -1237,6 +1237,18 @@ val footprint : unit -> footprint
     {!drop_snapshot}, or to save a checkpoint, see {!save}, and start anew, see
     [docs/emulation.md]. *)
 
+type deadline
+
+val start_deadline : ?code:int -> float -> deadline
+(** [start_deadline ~code seconds] starts a native watchdog that terminates the
+    actual BAP process with [code] (124 by default) after [seconds], including
+    during native execution that holds the OCaml runtime lock. This is an
+    immediate operating-system process exit, not a guest pause. Raises
+    [Invalid_argument] for a negative or non-finite duration. *)
+
+val cancel_deadline : deadline -> unit
+(** [cancel_deadline deadline] prevents an active deadline from expiring. *)
+
 type component_footprint = {
   lifter_entries : int;  (** retained session-lifter instructions *)
   lifter_blocks : int;  (** BIR blocks retained by the session lifter *)
@@ -1417,6 +1429,33 @@ val thread_journal : t -> event list
     startup argument or raw-clone stack; exits record the TID and status;
     switches record both TIDs and the resume PC. This runtime journal is
     separate from the bounded model-event journal kept in checkpoints. *)
+
+type execution_stats = {
+  instructions : int64;  (** fresh guest instructions since subscription *)
+  lifted_blocks : int;  (** BIR blocks currently retained by the engine *)
+  active_threads : int;  (** active and parked guest threads *)
+  hook_dispatches : int;  (** cumulative native write-hook dispatches *)
+  rss : int option;  (** process resident bytes, where available *)
+  last_pc : int64;  (** guest PC at the report pause *)
+}
+
+val execution_stats : t -> execution_stats
+(** [execution_stats emu] captures the counters of the paused emulator. Raises
+    [Invalid_argument] if the program is not paused. *)
+
+type stats_subscription
+
+val start_stats :
+  t -> interval:float -> (execution_stats -> unit) -> stats_subscription
+(** [start_stats emu ~interval f] counts fresh guest instructions and pauses
+    briefly every [interval] seconds to call [f] with current statistics. The
+    callback runs at a safe paused state, and execution continues unless the
+    callback stops it. Raises [Invalid_argument] for a nonpositive or
+    non-finite interval, or if the program is not paused. *)
+
+val stop_stats : stats_subscription -> unit
+(** [stop_stats subscription] removes the instruction hook and suppresses any
+    deferred report. Statistics subscriptions also respect {!scoped}. *)
 
 (** what a stub does, after the function, that it called, returns, see
     {!complete} *)
