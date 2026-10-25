@@ -2221,6 +2221,27 @@ let threads data =
       (* the checkpoint, that is saved, while a call of the script runs,
          is of the program at the call, with its threads, see
          call-save.ml *)
+      (* the functions of the threads of POSIX, that the executor runs,
+         with the threads of clone, see pthreads.c *)
+    ]
+  @ List.concat_map
+      (fun target ->
+        List.map
+          (fun engine ->
+            case (Printf.sprintf "emu/%s-pthreads/%s" target engine) (fun env ->
+                let out =
+                  bap env
+                    [
+                      "script";
+                      input "emu/pthreads/run.ml";
+                      path data ("bin/" ^ target ^ "-pthreads");
+                      engine;
+                    ]
+                in
+                golden env "emu/pthreads.txt" out.text))
+          [ "lifted"; "unicorn" ])
+      [ "x86_64-linux-gnu"; "aarch64-linux-gnu" ]
+  @ [
       (* the call, that waits, or spins, parks, and the registers of the
          threads, see drive.ml *)
       case "emu/x86_64-linux-gnu-threads/drive" (fun env ->

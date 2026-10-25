@@ -1,0 +1,7 @@
+created
+ok
+cloned
+ok
+attributes
+ok
+exited 0

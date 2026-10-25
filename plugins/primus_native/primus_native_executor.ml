@@ -736,6 +736,40 @@ let threads =
         woken = false;
       })
 
+(* The threads of POSIX, whose handles, pthread_t, are their TIDs, of
+   the threads, that pthread_create, or clone, created, see [Make.Posix]:
+   the ones, that are detached, and the results of the ones, that exited,
+   and aren't joined, which the checkpoints keep. *)
+type posix = { detached : int list; exited : (int * int64) list }
+[@@deriving bin_io]
+
+let posix_threads =
+  Primus.Machine.State.declare ~uuid:"9d4b2e71-3c8a-4f05-b6e2-1a7f5c9d0e83"
+    ~name:"unicorn-posix-threads" (fun _ -> { detached = []; exited = [] })
+
+(* the functions of the threads of POSIX, by their names, and the numbers
+   of their arguments, that the executor runs, see [Make.Posix], which
+   the imports of the bare project call, as they call their stubs *)
+let posix_functions =
+  [
+    ("pthread_create", 4);
+    ("pthread_self", 0);
+    ("pthread_equal", 2);
+    ("pthread_detach", 1);
+    ("pthread_join", 2);
+    ("pthread_exit", 1);
+    ("pthread_attr_init", 1);
+    ("pthread_attr_destroy", 1);
+    ("pthread_attr_setdetachstate", 2);
+    ("pthread_attr_getdetachstate", 2);
+    ("pthread_attr_setstacksize", 2);
+    ("pthread_attr_getstacksize", 2);
+  ]
+
+(* the key, on which the threads, that join the thread [tid], wait, which
+   is not an address of the program *)
+let join_key tid = Int64.(0x4A4F_494E_0000_0000L lor of_int tid)
+
 (* What a stub does, after the function, that it called, returns, e.g.,
    __libc_start_main exits with the result of main, as the run of the
    function continues from a checkpoint, without the stub, whose code is
@@ -4184,6 +4218,19 @@ module Make (Machine : Primus.Machine.S) = struct
             let+ _ = store32 e addr 0L in
             fst (wake st addr 1)
       in
+      (* the result of the thread, that isn't detached, is kept, until a
+         thread joins it, see [Posix] *)
+      let* p = Machine.Local.get posix_threads in
+      let* () =
+        Machine.Local.put posix_threads
+          (if List.mem p.detached st.current ~equal:Int.equal then
+             {
+               p with
+               detached = List.filter p.detached ~f:(fun t -> t <> st.current);
+             }
+           else { p with exited = (st.current, code) :: p.exited })
+      in
+      let st, _ = wake st (join_key st.current) Int.max_value in
       if List.is_empty st.others then exit_process e code
       else
         switch e st >>= function
@@ -5693,6 +5740,193 @@ module Make (Machine : Primus.Machine.S) = struct
           Error (Primus.Exn.to_string exn))
   end
 
+  (* The functions of the threads of POSIX, that the program imports,
+     e.g., of a payload, whose libc isn't loaded, which the executor runs
+     instead of their stubs, on the targets, whose threads Linux creates,
+     see [Threads]: the handle of a thread, pthread_t, is its TID, so the
+     threads, that pthread_create creates, and the ones, that the program
+     creates with clone itself, are the same to pthread_join,
+     pthread_detach, pthread_self, and pthread_equal, as on Linux. A
+     thread, that pthread_create creates, calls its function on a new
+     stack, see [Threads.spawn], and exits with its result, as with
+     pthread_exit. The attributes keep the detach state in their first
+     word, and the size of the stack in their second one. *)
+  module Posix = struct
+    let functions = posix_functions
+    let einval = 22L
+    let esrch = 3L
+    let edeadlk = 35L
+    let eagain = 11L
+
+    (* the size of the stack of a thread, by default, see [Threads.spawn] *)
+    let stack_size = 0x40000L
+    let int x = Int64.(x land 0xFFFF_FFFFL)
+
+    (* the function of POSIX at [entry], which the thread, that runs,
+       calls, after which the thread, that runs then, continues from the
+       address, or [None], if it isn't a function of the threads *)
+    let call e entry =
+      match
+        Option.bind (function_name e entry) ~f:(fun name ->
+            Option.map (List.Assoc.find functions ~equal:String.equal name)
+              ~f:(fun n -> (name, n)))
+      with
+      | None -> Machine.return None
+      | Some _ when Option.is_none (Threads.abi e) -> Machine.return None
+      | Some (name, n) -> (
+          Threads.Windows.is_pe >>= function
+          | true -> Machine.return None
+          | false -> (
+              let* () = pull e in
+              let* inputs, output = Calls.signature n in
+              let args =
+                List.map inputs ~f:(fun exp -> int64_of_word (eval_uc e exp))
+              in
+              let arg i = List.nth_exn args i in
+              let* st = Machine.Local.get threads in
+              let* p = Machine.Local.get posix_threads in
+              let me = st.current in
+              let alive tid =
+                tid = me || List.exists st.others ~f:(fun t -> t.tid = tid)
+              in
+              let return x =
+                let frame = frame_uc e in
+                Option.iter output ~f:(fun exp ->
+                    let width =
+                      match Type.infer exp with
+                      | Ok (Imm n) -> n
+                      | _ -> e.bytes * 8
+                    in
+                    ignore (assign_uc e exp (Word.of_int64 ~width x) : bool));
+                if Option.is_none e.link then
+                  ignore
+                    (Target.Regs.write e.regs e.sp (word e frame.sp) : bool);
+                Machine.return (Some frame.ret)
+              in
+              let put p = Machine.Local.put posix_threads p in
+              let tid_of x = Int64.to_int_trunc x in
+              match name with
+              | "pthread_create" ->
+                  if too_many_threads st then return eagain
+                  else
+                    let attr = arg 1 in
+                    let* detached, size =
+                      if Int64.(attr = 0L) then Machine.return (false, 0L)
+                      else
+                        let* state =
+                          Threads.load32 e attr >>| Option.value ~default:0L
+                        in
+                        let+ size =
+                          Threads.loadw e Int64.(attr + of_int e.bytes)
+                          >>| Option.value ~default:0L
+                        in
+                        (Int64.(state = 1L), size)
+                    in
+                    let* stack =
+                      if Int64.(size <= 0L || size > 0x1000_0000L) then
+                        Machine.return None
+                      else
+                        let size = Int64.to_int_exn size in
+                        let+ base = Threads.Windows.allocate e size in
+                        Some Int64.(base + of_int size)
+                    in
+                    let* tid =
+                      Threads.spawn e ~start:(arg 2) ~arg:(arg 3) ~stack
+                    in
+                    let* _ = Threads.storew e (arg 0) (Int64.of_int tid) in
+                    let* () =
+                      if detached then
+                        put { p with detached = tid :: p.detached }
+                      else Machine.return ()
+                    in
+                    return 0L
+              | "pthread_self" -> return (Int64.of_int me)
+              | "pthread_equal" ->
+                  return (if Int64.(arg 0 = arg 1) then 1L else 0L)
+              | "pthread_detach" -> (
+                  let tid = tid_of (arg 0) in
+                  match List.Assoc.find p.exited tid ~equal:Int.equal with
+                  | Some _ ->
+                      let* () =
+                        put
+                          {
+                            p with
+                            exited =
+                              List.Assoc.remove p.exited tid ~equal:Int.equal;
+                          }
+                      in
+                      return 0L
+                  | None ->
+                      if List.mem p.detached tid ~equal:Int.equal then
+                        return einval
+                      else if alive tid then
+                        let* () = put { p with detached = tid :: p.detached } in
+                        return 0L
+                      else return esrch)
+              | "pthread_join" -> (
+                  let tid = tid_of (arg 0) in
+                  if tid = me then return edeadlk
+                  else if List.mem p.detached tid ~equal:Int.equal then
+                    return einval
+                  else
+                    match List.Assoc.find p.exited tid ~equal:Int.equal with
+                    | Some result ->
+                        let* () =
+                          if Int64.(arg 1 <> 0L) then
+                            Threads.storew e (arg 1) result >>| ignore
+                          else Machine.return ()
+                        in
+                        let* () =
+                          put
+                            {
+                              p with
+                              exited =
+                                List.Assoc.remove p.exited tid ~equal:Int.equal;
+                            }
+                        in
+                        return 0L
+                    | None ->
+                        (* the thread waits, until the thread exits, and
+                           then calls the function again *)
+                        if alive tid then
+                          Threads.block e st ~next:entry
+                            ~addrs:[ join_key tid ]
+                            ~timeout:None
+                        else return esrch)
+              | "pthread_exit" -> Threads.exit_thread e st (arg 0)
+              | "pthread_attr_init" ->
+                  let* _ = Threads.store32 e (arg 0) 0L in
+                  let* _ = Threads.storew e Int64.(arg 0 + of_int e.bytes) 0L in
+                  return 0L
+              | "pthread_attr_destroy" -> return 0L
+              | "pthread_attr_setdetachstate" ->
+                  let state = int (arg 1) in
+                  if Int64.(state > 1L) then return einval
+                  else
+                    let* _ = Threads.store32 e (arg 0) state in
+                    return 0L
+              | "pthread_attr_getdetachstate" ->
+                  let* state =
+                    Threads.load32 e (arg 0) >>| Option.value ~default:0L
+                  in
+                  let* _ = Threads.store32 e (arg 1) state in
+                  return 0L
+              | "pthread_attr_setstacksize" ->
+                  let* _ =
+                    Threads.storew e Int64.(arg 0 + of_int e.bytes) (arg 1)
+                  in
+                  return 0L
+              | "pthread_attr_getstacksize" ->
+                  let* size =
+                    Threads.loadw e Int64.(arg 0 + of_int e.bytes)
+                    >>| Option.value ~default:0L
+                  in
+                  let size = if Int64.(size = 0L) then stack_size else size in
+                  let* _ = Threads.storew e (arg 1) size in
+                  return 0L
+              | _ -> Machine.return None))
+  end
+
   (* The machine, which the script drives, pauses, and serves the
      requests of the script, until it continues. The machine, which
      takes a snapshot, forks, and its parent stays paused, as the
@@ -5949,9 +6183,14 @@ module Make (Machine : Primus.Machine.S) = struct
                     >>= function
                     | Some pc -> loop pc
                     | None -> (
-                        native e addr >>= function
+                        (* and of POSIX, see [Posix] *)
+                        Posix.call e addr
+                        >>= function
                         | Some pc -> loop pc
-                        | None -> call_foreign e addr >>= loop)))
+                        | None -> (
+                            native e addr >>= function
+                            | Some pc -> loop pc
+                            | None -> call_foreign e addr >>= loop))))
             | Some Pause, _ ->
                 s.hooked_at <- Some pc;
                 loop pc
@@ -6292,6 +6531,31 @@ end
 
 let () = Primus.Checkpoint.register ~package:"bap" "lifted-ran" (module Ran)
 
+(* the threads of POSIX, that are detached, or exited, see [Make.Posix] *)
+module Posix_threads (Machine : Primus.Machine.S) = struct
+  open Machine.Syntax
+
+  module P = struct
+    type t = posix [@@deriving bin_io]
+  end
+
+  let save =
+    Machine.Local.get posix_threads >>| fun p ->
+    if List.is_empty p.detached && List.is_empty p.exited then None
+    else Some (Binable.to_string (module P) p)
+
+  let restore data =
+    match Binable.of_string (module P) data with
+    | exception _ ->
+        warning "the threads of POSIX are not restored";
+        Machine.return ()
+    | p -> Machine.Local.put posix_threads p
+end
+
+let () =
+  Primus.Checkpoint.register ~package:"bap" "posix-threads"
+    (module Posix_threads)
+
 (* links the program, as load-binary does, except that its subroutines
    run in Unicorn, and keeps the linked code to tell the addresses of the
    subroutines that other components replace *)
@@ -6474,7 +6738,9 @@ module Loader (Machine : Primus.Machine.S) = struct
        data objects, so the functions there are those, that the
        components, e.g., the Lisp machine, link, e.g., the stubs *)
     let* functions =
-      if s.bare_mode then Linker.linked_symbols >>| String.Set.of_list
+      if s.bare_mode then
+        Linker.linked_symbols >>| fun linked ->
+        String.Set.of_list (linked @ List.map posix_functions ~f:fst)
       else
         Machine.return
           (Term.enum sub_t (Project.program proj)

@@ -1,0 +1,663 @@
+# exited with 0
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+sub _start(_start_result)
+  calls __libc_start_main
+sub cloned(cloned_result)
+  calls intrinsic:svc
+sub held(held_result)
+  calls intrinsic:svc
+sub main(main_argc, main_argv, main_result)
+  calls intrinsic:svc pthread_attr_destroy pthread_attr_init pthread_attr_setdetachstate pthread_create pthread_detach pthread_equal pthread_join pthread_self putchar
+sub pthread_attr_destroy(pthread_attr_destroy_result)
+sub pthread_attr_init(pthread_attr_init_result)
+sub pthread_attr_setdetachstate(pthread_attr_setdetachstate_result)
+sub pthread_create(pthread_create_result)
+sub pthread_detach(pthread_detach_result)
+sub pthread_equal(pthread_equal_result)
+sub pthread_join(pthread_join_result)
+sub pthread_self(pthread_self_result)
+sub putchar(putchar_c, putchar_result)
+sub sub_210a34(sub_210a34_result)
+sub worker(worker_result)
+sub intrinsic:svc()
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[R0]
+#2: main_argv :: in out u64 = R1
+#3: main_result :: out u32 = low:32[R0]
+
+#4:
+#5: R31 := R31 - 0x90
+#6: R2 := 0x210000
+#7: R2 := R2 + 0x988
+#8: R0 := R31 + 0x20
+#9: R1 := 0
+#10: R3 := 1
+#11: mem := mem with [R31 + 0x60, el]:u64 <- R29
+#12: mem := mem with [R31 + 0x68, el]:u64 <- R30
+#13: mem := mem with [R31 + 0x70, el]:u64 <- R22
+#14: mem := mem with [R31 + 0x78, el]:u64 <- R21
+#15: R29 := R31 + 0x60
+#16: mem := mem with [R31 + 0x80, el]:u64 <- R20
+#17: mem := mem with [R31 + 0x88, el]:u64 <- R19
+#18: mem := mem with [R31 + 8, el]:u64 <- 0
+#19: mem := mem with [R31 + 0x10, el]:u64 <- 0
+#20: R30 := 0x2105CC
+#21: call @pthread_create with return %#22
+
+#22:
+#23: #v1 := ~31:0[R0] = 0
+#24: when #v1 goto %#25
+#26: goto %#27
+
+#27:
+#28: R2 := 0x210000
+#29: R2 := R2 + 0x988
+#30: R0 := R31 + 0x18
+#31: R1 := 0
+#32: R3 := 2
+#33: R30 := 0x2105E8
+#34: call @pthread_create with return %#35
+
+#35:
+#36: #v2 := ~31:0[R0] = 0
+#37: when #v2 goto %#25
+#38: goto %#39
+
+#39:
+#40: R0 := mem[R31 + 0x20, el]:u64
+#41: R1 := R31 + 0x10
+#42: R30 := 0x2105F8
+#43: call @pthread_join with return %#44
+
+#44:
+#45: #v3 := 31:0[R0] = 0
+#46: when #v3 goto %#47
+#48: goto %#25
+
+#47:
+#49: R0 := mem[R31 + 0x18, el]:u64
+#50: R1 := R31 + 8
+#51: R30 := 0x210924
+#52: call @pthread_join with return %#53
+
+#53:
+#54: R19 := 0x200000
+#55: R19 := R19 + 0x578
+#56: #v4 := ~31:0[R0] = 0
+#57: when #v4 goto %#58
+#59: goto %#60
+
+#60:
+#61: R8 := mem[R31 + 0x10, el]:u64
+#62: #v5 := 0xFFFFFFFFFFFFFFF6 + R8
+#63: NF := 63:63[#v5]
+#64: VF := 63:63[R8] & ~63:63[#v5]
+#65: ZF := #v5 = 0
+#66: CF := 63:63[R8] | ~63:63[#v5] | 63:63[R8] & ~63:63[#v5]
+#67: #v6 := ~ZF <> 0
+#68: when #v6 goto %#58
+#69: goto %#70
+
+#70:
+#71: R8 := mem[R31 + 8, el]:u64
+#72: #v7 := 0xFFFFFFFFFFFFFFEC + R8
+#73: NF := 63:63[#v7]
+#74: VF := 63:63[R8] & ~63:63[#v7]
+#75: ZF := #v7 = 0
+#76: CF := 63:63[R8] | ~63:63[#v7] | 63:63[R8] & ~63:63[#v7]
+#77: #v8 := ~ZF <> 0
+#78: when #v8 goto %#58
+#79: goto %#80
+
+#80:
+#81: #v9 := R31 + 0x18
+#82: R1 := mem[#v9, el]:u64
+#83: R0 := mem[#v9 + 8, el]:u64
+#84: R30 := 0x210950
+#85: call @pthread_equal with return %#86
+
+#86:
+#87: #v10 := 31:0[R0]
+#88: NF := 31:31[#v10]
+#89: VF := 31:31[R0] & ~31:31[#v10]
+#90: ZF := #v10 = 0
+#91: CF := 31:31[R0] | 31:31[R0] & ~31:31[#v10] | ~31:31[#v10]
+#92: R8 := 0x200000
+#93: R8 := R8 + 0x58E
+#94: #v11 := ZF
+#95: goto %#96
+
+#96:
+#97: when #v11 goto %#98
+#99: goto %#100
+
+#100:
+#101: R19 := R19
+#102: goto %#103
+
+#98:
+#104: R19 := R8
+#105: goto %#103
+
+#103:
+#106: goto %#58
+
+#25:
+#107: R19 := 0x200000
+#108: R19 := R19 + 0x578
+#109: goto %#58
+
+#58:
+#110: R0 := 0x63
+#111: R20 := 1
+#112: R21 := 0x200586
+#113: goto %#114
+
+#114:
+#115: R30 := 0x210618
+#116: call @putchar with return %#117
+
+#117:
+#118: R0 := high:32[R0].pad:64[mem[R21 + R20]]
+#119: R20 := R20 + 1
+#120: #v12 := 0xFFFFFFFFFFFFFFF8 + R20
+#121: NF := 63:63[#v12]
+#122: VF := 63:63[R20] & ~63:63[#v12]
+#123: ZF := #v12 = 0
+#124: CF := 63:63[R20] | ~63:63[#v12] | 63:63[R20] & ~63:63[#v12]
+#125: #v13 := ~ZF <> 0
+#126: when #v13 goto %#114
+#127: goto %#128
+
+#128:
+#129: R0 := 0xA
+#130: R30 := 0x210630
+#131: call @putchar with return %#132
+
+#132:
+#133: R0 := pad:64[low:32[pad:64[mem[R19]]]]
+#134: R19 := R19 + 1
+#135: #v14 := 31:0[R0] = 0
+#136: when #v14 goto %#137
+#138: goto %#139
+
+#139:
+#140: R30 := 0x21063C
+#141: call @putchar with return %#142
+
+#142:
+#143: R0 := pad:64[low:32[pad:64[mem[R19]]]]
+#144: R19 := R19 + 1
+#145: #v15 := ~31:0[R0] = 0
+#146: when #v15 goto %#139
+#147: goto %#137
+
+#137:
+#148: R0 := 0xA
+#149: R30 := 0x21064C
+#150: call @putchar with return %#151
+
+#151:
+#152: R0 := 0xF00
+#153: R4 := 0x230000
+#154: R4 := R4 + 0xC2C
+#155: R0 := pad:64[31:0[R0] & 0xFFFF | 0x350000]
+#156: R3 := 0
+#157: R19 := 0
+#158: R8 := 0xDC
+#159: R1 := 0x234000
+#160: R1 := R1 + 0xC00
+#161: R20 := 0x210000
+#162: R20 := R20 + 0x9AC
+#163: R2 := R4
+#164: intrinsic:x0 := 0
+#165: call @intrinsic:svc with return %#166
+
+#166:
+#167: #v16 := ~R0 = 0
+#168: when #v16 goto %#169
+#170: goto %#171
+
+#171:
+#172: R29 := 0
+#173: R0 := R19
+#174: R30 := 0x210690
+#175: call R20 with return %#176
+
+#176:
+#177: R8 := 0x5D
+#178: R0 := 0
+#179: intrinsic:x0 := 0
+#180: call @intrinsic:svc with return %#169
+
+#169:
+#181: R21 := R0
+#182: R19 := 1
+#183: R0 := 0xF00
+#184: R22 := 1
+#185: R1 := R1 + 0x4000
+#186: R0 := pad:64[31:0[R0] & 0xFFFF | 0x350000]
+#187: R2 := R4 + 4
+#188: R4 := R4 + 4
+#189: #v17 := 0xFFFFFFFF + 31:0[R21]
+#190: NF := 31:31[#v17]
+#191: VF := 31:31[R21] & ~31:31[#v17]
+#192: ZF := #v17 = 0
+#193: CF := 31:31[R21] | 31:31[R21] & ~31:31[#v17] | ~31:31[#v17]
+#194: R8 := 0xDC
+#195: R3 := 0
+#196: intrinsic:x0 := 0
+#197: call @intrinsic:svc with return %#198
+
+#198:
+#199: #v18 := ~R0 = 0
+#200: when #v18 goto %#201
+#202: goto %#203
+
+#203:
+#204: R29 := 0
+#205: R0 := R19
+#206: R30 := 0x2106DC
+#207: call R20 with return %#208
+
+#208:
+#209: R8 := 0x5D
+#210: R0 := 0
+#211: intrinsic:x0 := 0
+#212: call @intrinsic:svc with return %#201
+
+#201:
+#213: R19 := R0
+#214: #v19 := NF <> VF
+#215: when #v19 goto %#216
+#217: goto %#218
+
+#218:
+#219: R0 := R21 & 0x7FFFFFFF
+#220: R30 := 0x2106F8
+#221: call @pthread_detach with return %#222
+
+#222:
+#223: #v20 := 31:0[R0] = 0
+#224: when #v20 goto %#225
+#226: goto %#216
+
+#225:
+#227: R0 := R21 & 0x7FFFFFFF
+#228: R30 := 0x21070C
+#229: call @pthread_detach with return %#230
+
+#230:
+#231: #v21 := 0xFFFFFFEA + 31:0[R0]
+#232: NF := 31:31[#v21]
+#233: VF := 31:31[R0] & ~31:31[#v21]
+#234: ZF := #v21 = 0
+#235: CF := 31:31[R0] | 31:31[R0] & ~31:31[#v21] | ~31:31[#v21]
+#236: #v22 := ~ZF <> 0
+#237: goto %#238
+
+#238:
+#239: when #v22 goto %#240
+#241: goto %#242
+
+#242:
+#243: R9 := 1
+#244: goto %#245
+
+#240:
+#246: R9 := 0
+#247: goto %#245
+
+#245:
+#248: goto %#249
+
+#216:
+#250: R9 := 0
+#251: goto %#249
+
+#249:
+#252: R8 := 0x230000
+#253: R10 := 0x230000
+#254: R10 := R10 + 0xC30
+#255: mem := mem with [R8 + 0xC24, el]:u32 <- 31:0[R22]
+#256: R8 := pad:64[low:32[pad:64[mem[R10, el]:u32]]]
+#257: #v23 := 31:0[R8] = 0
+#258: when #v23 goto %#259
+#260: goto %#261
+
+#261:
+#262: R1 := 0
+#263: R2 := 0
+#264: R3 := 0
+#265: R4 := 0
+#266: R5 := 0
+#267: goto %#268
+
+#268:
+#269: R0 := 0
+#270: R8 := 0x7C
+#271: intrinsic:x0 := 0
+#272: call @intrinsic:svc with return %#273
+
+#273:
+#274: R8 := pad:64[low:32[pad:64[mem[R10, el]:u32]]]
+#275: #v24 := ~31:0[R8] = 0
+#276: when #v24 goto %#268
+#277: goto %#259
+
+#259:
+#278: R8 := 1
+#279: mem := mem with [R31 + 0x20, el]:u64 <- R8
+#280: #v25 := 31:0[R9] = 0
+#281: when #v25 goto %#282
+#283: goto %#284
+
+#282:
+#285: R19 := 0x200000
+#286: R19 := R19 + 0x578
+#287: goto %#288
+
+#284:
+#289: R0 := extend:64[31:0[R19]]
+#290: R1 := R31 + 0x20
+#291: R30 := 0x21076C
+#292: call @pthread_join with return %#293
+
+#293:
+#294: R19 := 0x200000
+#295: R19 := R19 + 0x578
+#296: #v26 := ~31:0[R0] = 0
+#297: when #v26 goto %#288
+#298: goto %#299
+
+#299:
+#300: R8 := mem[R31 + 0x20, el]:u64
+#301: #v27 := R8
+#302: NF := 63:63[#v27]
+#303: VF := 63:63[R8] & ~63:63[#v27]
+#304: ZF := #v27 = 0
+#305: CF := 63:63[R8] | ~63:63[#v27] | 63:63[R8] & ~63:63[#v27]
+#306: R8 := 0x200000
+#307: R8 := R8 + 0x58E
+#308: #v28 := ZF
+#309: goto %#310
+
+#310:
+#311: when #v28 goto %#312
+#313: goto %#314
+
+#314:
+#315: R19 := R19
+#316: goto %#317
+
+#312:
+#318: R19 := R8
+#319: goto %#317
+
+#317:
+#320: goto %#288
+
+#288:
+#321: R0 := 0x63
+#322: R20 := 1
+#323: R21 := 0x200000
+#324: R21 := R21 + 0x57F
+#325: goto %#326
+
+#326:
+#327: R30 := 0x2107AC
+#328: call @putchar with return %#329
+
+#329:
+#330: R0 := high:32[R0].pad:64[mem[R21 + R20]]
+#331: R20 := R20 + 1
+#332: #v29 := 0xFFFFFFFFFFFFFFF9 + R20
+#333: NF := 63:63[#v29]
+#334: VF := 63:63[R20] & ~63:63[#v29]
+#335: ZF := #v29 = 0
+#336: CF := 63:63[R20] | ~63:63[#v29] | 63:63[R20] & ~63:63[#v29]
+#337: #v30 := ~ZF <> 0
+#338: when #v30 goto %#326
+#339: goto %#340
+
+#340:
+#341: R0 := 0xA
+#342: R30 := 0x2107C4
+#343: call @putchar with return %#344
+
+#344:
+#345: R0 := pad:64[low:32[pad:64[mem[R19]]]]
+#346: R19 := R19 + 1
+#347: #v31 := 31:0[R0] = 0
+#348: when #v31 goto %#349
+#350: goto %#351
+
+#351:
+#352: R30 := 0x2107D0
+#353: call @putchar with return %#354
+
+#354:
+#355: R0 := pad:64[low:32[pad:64[mem[R19]]]]
+#356: R19 := R19 + 1
+#357: #v32 := ~31:0[R0] = 0
+#358: when #v32 goto %#351
+#359: goto %#349
+
+#349:
+#360: R0 := 0xA
+#361: R30 := 0x2107E0
+#362: call @putchar with return %#363
+
+#363:
+#364: R0 := R31 + 0x20
+#365: R30 := 0x2107E8
+#366: call @pthread_attr_init with return %#367
+
+#367:
+#368: #v33 := ~31:0[R0] = 0
+#369: when #v33 goto %#370
+#371: goto %#372
+
+#372:
+#373: R0 := R31 + 0x20
+#374: R1 := 1
+#375: R30 := 0x2107F8
+#376: call @pthread_attr_setdetachstate with return %#377
+
+#377:
+#378: #v34 := ~31:0[R0] = 0
+#379: when #v34 goto %#370
+#380: goto %#381
+
+#381:
+#382: R2 := 0x210000
+#383: R2 := R2 + 0x9E4
+#384: R0 := R31 + 0x18
+#385: R1 := R31 + 0x20
+#386: R3 := 0
+#387: R30 := 0x210814
+#388: call @pthread_create with return %#389
+
+#389:
+#390: #v35 := ~31:0[R0] = 0
+#391: when #v35 goto %#370
+#392: goto %#393
+
+#393:
+#394: R0 := mem[R31 + 0x18, el]:u64
+#395: R1 := 0
+#396: R30 := 0x210824
+#397: call @pthread_join with return %#398
+
+#398:
+#399: #v36 := 0xFFFFFFEA + 31:0[R0]
+#400: NF := 31:31[#v36]
+#401: VF := 31:31[R0] & ~31:31[#v36]
+#402: ZF := #v36 = 0
+#403: CF := 31:31[R0] | 31:31[R0] & ~31:31[#v36] | ~31:31[#v36]
+#404: #v37 := ~ZF <> 0
+#405: when #v37 goto %#370
+#406: goto %#407
+
+#370:
+#408: R8 := 0x230000
+#409: R9 := 1
+#410: mem := mem with [R8 + 0xC28, el]:u32 <- 31:0[R9]
+#411: R30 := 0x2108B0
+#412: call @pthread_self with return %#413
+
+#407:
+#414: R0 := R31 + 0x20
+#415: R30 := 0x210834
+#416: call @pthread_attr_destroy with return %#417
+
+#417:
+#418: R8 := 0x230000
+#419: R9 := 1
+#420: R20 := pad:64[31:0[R0]]
+#421: mem := mem with [R8 + 0xC28, el]:u32 <- 31:0[R9]
+#422: R30 := 0x210848
+#423: call @pthread_self with return %#424
+
+#424:
+#425: #v38 := ~31:0[R20] = 0
+#426: when #v38 goto %#413
+#427: goto %#428
+
+#428:
+#429: R19 := R0
+#430: R30 := 0x210854
+#431: call @pthread_self with return %#432
+
+#432:
+#433: R1 := R0
+#434: R0 := R19
+#435: R30 := 0x210860
+#436: call @pthread_equal with return %#437
+
+#437:
+#438: #v39 := 31:0[R0] = 0
+#439: when #v39 goto %#413
+#440: goto %#441
+
+#413:
+#442: R19 := 0x200000
+#443: R19 := R19 + 0x578
+#444: goto %#445
+
+#441:
+#446: R0 := R19
+#447: R1 := 0
+#448: R30 := 0x210870
+#449: call @pthread_join with return %#450
+
+#450:
+#451: #v40 := 0xFFFFFFDD + 31:0[R0]
+#452: NF := 31:31[#v40]
+#453: VF := 31:31[R0] & ~31:31[#v40]
+#454: ZF := #v40 = 0
+#455: CF := 31:31[R0] | 31:31[R0] & ~31:31[#v40] | ~31:31[#v40]
+#456: R19 := 0x200000
+#457: R19 := R19 + 0x578
+#458: #v41 := ~ZF <> 0
+#459: when #v41 goto %#445
+#460: goto %#461
+
+#461:
+#462: R0 := 0x270F
+#463: R1 := 0
+#464: R30 := 0x21088C
+#465: call @pthread_join with return %#466
+
+#466:
+#467: #v42 := 0xFFFFFFFD + 31:0[R0]
+#468: NF := 31:31[#v42]
+#469: VF := 31:31[R0] & ~31:31[#v42]
+#470: ZF := #v42 = 0
+#471: CF := 31:31[R0] | 31:31[R0] & ~31:31[#v42] | ~31:31[#v42]
+#472: R8 := 0x200000
+#473: R8 := R8 + 0x58E
+#474: #v43 := ZF
+#475: goto %#476
+
+#476:
+#477: when #v43 goto %#478
+#479: goto %#480
+
+#480:
+#481: R19 := R19
+#482: goto %#483
+
+#478:
+#484: R19 := R8
+#485: goto %#483
+
+#483:
+#486: goto %#445
+
+#445:
+#487: R0 := 0x61
+#488: R20 := 1
+#489: R21 := 0x200000
+#490: R21 := R21 + 0x591
+#491: goto %#492
+
+#492:
+#493: R30 := 0x2108CC
+#494: call @putchar with return %#495
+
+#495:
+#496: R0 := high:32[R0].pad:64[mem[R21 + R20]]
+#497: R20 := R20 + 1
+#498: #v44 := 0xFFFFFFFFFFFFFFF5 + R20
+#499: NF := 63:63[#v44]
+#500: VF := 63:63[R20] & ~63:63[#v44]
+#501: ZF := #v44 = 0
+#502: CF := 63:63[R20] | ~63:63[#v44] | 63:63[R20] & ~63:63[#v44]
+#503: #v45 := ~ZF <> 0
+#504: when #v45 goto %#492
+#505: goto %#506
+
+#506:
+#507: R0 := 0xA
+#508: R30 := 0x2108E4
+#509: call @putchar with return %#510
+
+#510:
+#511: R0 := pad:64[low:32[pad:64[mem[R19]]]]
+#512: R19 := R19 + 1
+#513: #v46 := 31:0[R0] = 0
+#514: when #v46 goto %#515
+#516: goto %#517
+
+#517:
+#518: R30 := 0x2108F0
+#519: call @putchar with return %#520
+
+#520:
+#521: R0 := pad:64[low:32[pad:64[mem[R19]]]]
+#522: R19 := R19 + 1
+#523: #v47 := ~31:0[R0] = 0
+#524: when #v47 goto %#517
+#525: goto %#515
+
+#515:
+#526: R0 := 0xA
+#527: R30 := 0x210900
+#528: call @putchar with return %#529
+
+#529:
+#530: #v48 := R31 + 0x80
+#531: R20 := mem[#v48, el]:u64
+#532: R19 := mem[#v48 + 8, el]:u64
+#533: R0 := 0
+#534: #v49 := R31 + 0x70
+#535: R22 := mem[#v49, el]:u64
+#536: R21 := mem[#v49 + 8, el]:u64
+#537: #v50 := R31 + 0x60
+#538: R29 := mem[#v50, el]:u64
+#539: R30 := mem[#v50 + 8, el]:u64
+#540: R31 := R31 + 0x90
+#541: call R30 with noreturn
+
