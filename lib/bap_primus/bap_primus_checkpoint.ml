@@ -10,13 +10,25 @@ module type S = functor (Machine : Machine) -> sig
   val restore : string -> unit Machine.t
 end
 
-let extensions : (module S) String.Table.t = String.Table.create ()
+type policy = { version : int; required : bool }
+type entry = { extension : (module S); policy : policy }
 
-let register ?(package = "user") name ext =
+let extensions : entry String.Table.t = String.Table.create ()
+
+let register ?(package = "user") ?(version = 1) ?(required = false) name
+    extension =
+  if version <= 0 then
+    invalid_argf "Primus.Checkpoint: invalid schema version %d" version ();
   let name = sprintf "%s:%s" package name in
   if Hashtbl.mem extensions name then
     invalid_argf "Primus.Checkpoint: %s is already registered" name ();
-  Hashtbl.set extensions ~key:name ~data:ext
+  Hashtbl.set extensions ~key:name
+    ~data:{ extension; policy = { version; required } }
 
-let find = Hashtbl.find extensions
+let find name =
+  Option.map (Hashtbl.find extensions name) ~f:(fun e -> e.extension)
+
+let policy name =
+  Option.map (Hashtbl.find extensions name) ~f:(fun e -> e.policy)
+
 let names () = Hashtbl.keys extensions |> List.sort ~compare:String.compare

@@ -1159,18 +1159,45 @@ val footprint : unit -> footprint
 module Checkpoint : sig
   val register :
     ?package:string ->
+    ?version:int ->
+    ?required:bool ->
     string ->
     save:(unit -> string option) ->
     restore:(string -> unit) ->
     unit
-  (** [register ?package name ~save ~restore] registers the state of a model of
-      the script under [package:name], where [package] is ["user"] by default.
-      Every checkpoint saves [save ()], unless it is [None], and a program,
-      which continues from it, restores the state with [restore]. Register the
-      same name in the restored run before its first {!run}. The callbacks run
-      with the machine, whose state is saved or restored, and their exceptions
-      abort the operation. Raises [Invalid_argument], if the name is registered.
-  *)
+  (** [register ?package ?version ?required name ~save ~restore] registers the
+      state of a model of the script under [package:name], where [package] is
+      ["user"], [version] is 1, and [required] is [false] by default. Every
+      checkpoint saves [save ()], unless it is [None], and a program, which
+      continues from it, restores the state with [restore]. Register the same
+      name and schema before {!create} restores the checkpoint. A required model
+      must have state and a matching schema. A mismatch of optional models is
+      skipped with a warning. The callbacks run with the machine, whose state is
+      saved or restored, and their exceptions abort the operation. Raises
+      [Invalid_argument], if the name is registered or the version is not
+      positive. *)
+
+  val register_ref :
+    ?package:string ->
+    ?version:int ->
+    ?required:bool ->
+    string ->
+    (module Core.Binable.S with type t = 'a) ->
+    'a ref ->
+    unit
+  (** [register_ref name binable state] registers the contents of [state], as
+      {!register} does with [binable]. *)
+
+  val register_table :
+    ?package:string ->
+    ?version:int ->
+    ?required:bool ->
+    string ->
+    (module Core.Binable.S with type t = ('key * 'value) list) ->
+    ('key, 'value) Core.Hashtbl.t ->
+    unit
+  (** [register_table name binable table] registers the bindings of [table]. The
+      restored bindings are decoded before the table is changed. *)
 
   type thread = {
     tid : int;
@@ -1206,6 +1233,12 @@ module Checkpoint : sig
   val info : string -> info
   (** [info file] reads the checkpoint, raises [Failure], if it is not one, or
       of another version, or broken. *)
+
+  type model_state = { name : string; version : int; required : bool }
+
+  val models : string -> model_state list option
+  (** [models file] is the model-state manifest of the checkpoint, or [None] for
+      a legacy checkpoint without one. Raises as {!info}. *)
 
   val is_of : info -> project -> bool
   (** [is_of info proj] if the checkpoint is of the file of the program *)

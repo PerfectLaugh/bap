@@ -3,6 +3,7 @@ write in the hook: Bap_emu.write: the program is not paused, as it runs, e.g., i
 paused at print_endline true, after the hook of print_strings
 deferred: 4096 bytes, at 0 of print_strings, paused true
 the checkpoint is at print_strings true
+script model in manifest true
 deferred at print_endline true, seen 1 time(s)
 stopped at print_endline true
 at once, paused true

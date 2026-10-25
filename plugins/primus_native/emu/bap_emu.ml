@@ -479,12 +479,32 @@ and save_failed t file =
 module Checkpoint = struct
   module C = Bap_primus_native_plugin.Primus_native_checkpoint
 
-  let register ?package name ~save ~restore =
+  let register ?package ?version ?required name ~save ~restore =
     let module Extension (Machine : Primus.Machine.S) = struct
       let save = Machine.return (save ())
       let restore data = Machine.return (restore data)
     end in
-    Primus.Checkpoint.register ?package name (module Extension)
+    Primus.Checkpoint.register ?package ?version ?required name
+      (module Extension)
+
+  let register_ref ?package ?version ?required name binable state =
+    register ?package ?version ?required name
+      ~save:(fun () -> Some (Binable.to_string binable !state))
+      ~restore:(fun data -> state := Binable.of_string binable data)
+
+  let register_table ?package ?version ?required name binable table =
+    register ?package ?version ?required name
+      ~save:(fun () ->
+        Some (Binable.to_string binable (Hashtbl.to_alist table)))
+      ~restore:(fun data ->
+        let values = Binable.of_string binable data in
+        let restored = Hashtbl.copy table in
+        Hashtbl.clear restored;
+        List.iter values ~f:(fun (key, data) ->
+            ignore (Hashtbl.add restored key data));
+        Hashtbl.clear table;
+        Hashtbl.iteri restored ~f:(fun ~key ~data ->
+            ignore (Hashtbl.add table key data)))
 
   type thread = { tid : int; pc : int64; waiting : int64 list option }
 
@@ -524,6 +544,16 @@ module Checkpoint = struct
           symbols = c.symbols;
           components = List.map c.extensions ~f:fst;
         }
+
+  type model_state = { name : string; version : int; required : bool }
+
+  let models file =
+    match C.load file with
+    | Error msg -> failwith msg
+    | Ok (c : C.t) ->
+        Option.map c.model_states ~f:(fun models ->
+            List.map models ~f:(fun (m : C.model_state) ->
+                { name = m.name; version = m.version; required = m.required }))
 
   let is_of info proj =
     match Project.get proj filename with

@@ -5,6 +5,16 @@ module type S = functor (Machine : Machine) -> sig
   val restore : string -> unit Machine.t
 end
 
-val register : ?package:string -> string -> (module S) -> unit
+type policy = { version : int; required : bool }
+
+val register :
+  ?package:string ->
+  ?version:int ->
+  ?required:bool ->
+  string ->
+  (module S) ->
+  unit
+
 val find : string -> (module S) option
+val policy : string -> policy option
 val names : unit -> string list

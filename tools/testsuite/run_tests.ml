@@ -1147,6 +1147,62 @@ let emu data =
             ]
         in
         golden env "emu/live/cache.txt" out.text);
+    (* model schemas are validated before a checkpoint restores, see
+       checkpoint-models.ml *)
+    case "emu/checkpoint-models" (fun env ->
+        let cache = dir env in
+        let script = input "emu/checkpoint-models.ml" in
+        let bin = path data "bin/x86_64-linux-gnu-echo" in
+        let ckpt = Filename.concat cache "models.ckpt" in
+        let run args =
+          bap ~timeout:300. env
+            ([ "script"; "--cache-dir"; cache; script ] @ args)
+        in
+        let out = run [ "save"; bin; ckpt; "41" ] in
+        check env "saves a required model" (out.status = Exited 0);
+        has env "writes the manifest" out
+          "model test:checkpoint-model version=1 required=true";
+        let out = run [ "restore"; bin; ckpt; "true"; "1" ] in
+        has env "restores the matching model" out "paused; model=41";
+        let out = run [ "missing"; bin; ckpt ] in
+        has env "rejects a missing required handler" out
+          "required model test:checkpoint-model is not registered";
+        let out = run [ "restore"; bin; ckpt; "true"; "2" ] in
+        has env "rejects a required schema mismatch" out
+          "test:checkpoint-model has schema version 1, but the script requires \
+           2";
+        let out = run [ "save-optional"; bin; ckpt; "41" ] in
+        check env "saves an optional model" (out.status = Exited 0);
+        let out = run [ "restore"; bin; ckpt; "false"; "2" ] in
+        has env "skips an optional schema mismatch" out "paused; model=0";
+        let out = run [ "legacy"; ckpt ] in
+        check env "converts the fixture to v5" (out.status = Exited 0);
+        let out = run [ "legacy-restore"; bin; ckpt; "false" ] in
+        has env "restores an optional legacy model" out "paused; model=41";
+        let out = run [ "legacy-restore"; bin; ckpt; "true" ] in
+        has env "rejects required state without a manifest" out
+          "no model manifest for the required model test:checkpoint-model";
+        let out = run [ "save-none"; bin; ckpt ] in
+        has env "rejects a required empty state" out
+          "required model test:checkpoint-model has no state to save";
+        has env "preserves the old checkpoint" out "destination: preserved";
+        let out = run [ "helpers-save"; bin; ckpt ] in
+        check env "saves typed helpers" (out.status = Exited 0);
+        let out = run [ "helpers-restore"; bin; ckpt ] in
+        has env "restores typed helpers" out
+          "paused; ref=42; answer=43; empty=false";
+        let out = run [ "corrupt-helper"; ckpt ] in
+        check env "writes a corrupted table fixture" (out.status = Exited 0);
+        let out = run [ "helpers-restore"; bin; ckpt ] in
+        has env "does not mutate a table after invalid data" out "empty=true";
+        let out = run [ "duplicate-manifest"; ckpt ] in
+        has env "rejects a duplicate manifest" out "duplicate model";
+        let out = run [ "atomic-save"; bin; ckpt ] in
+        check env "saves the preflight fixture" (out.status = Exited 0);
+        let out = run [ "atomic-restore"; bin; ckpt ] in
+        has env "preflights every model before callbacks" out "good=0; bad=0";
+        let out = run [ "invalid-version"; "0" ] in
+        has env "rejects a nonpositive schema" out "invalid schema version 0");
     (* the memory of a long run: the footprint, the lifted instructions,
        that are forgotten, after which the program runs on, and the
        snapshots, that are dropped, see long.ml *)

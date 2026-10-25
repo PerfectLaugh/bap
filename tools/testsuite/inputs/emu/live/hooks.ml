@@ -26,7 +26,8 @@ let () =
       let ckpt = Filename.concat dir "hook.ckpt" in
       let deferred = ref [] in
       let script_state = ref 41 in
-      Emu.Checkpoint.register ~package:"test" "script-state"
+      Emu.Checkpoint.register ~package:"test" ~required:true ~version:1
+        "script-state"
         ~save:(fun () -> Some (Int.to_string !script_state))
         ~restore:(fun data -> script_state := Int.of_string data);
       Emu.on_code emu ~first:print_strings ~last:print_strings (fun emu pc ->
@@ -56,6 +57,11 @@ let () =
       let info = Emu.Checkpoint.info ckpt in
       printf "the checkpoint is at print_strings %b\n"
         Int64.(info.pc = print_strings);
+      printf "script model in manifest %b\n"
+        (Option.exists (Emu.Checkpoint.models ckpt) ~f:(fun models ->
+             List.exists models ~f:(fun (m : Emu.Checkpoint.model_state) ->
+                 String.equal m.name "test:script-state"
+                 && m.version = 1 && m.required)));
       (* the hook, that stops the program too, keeps it paused *)
       let seen = ref 0 in
       Emu.on_code emu ~first:endline ~last:endline (fun emu _ ->

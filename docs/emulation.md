@@ -570,12 +570,16 @@ A JNI model exports its handles, object and class identities, method and field I
 
 ```ocaml
 let register_jni jni =
-  Emu.Checkpoint.register "jni"
+  Emu.Checkpoint.register "jni" ~required:true ~version:1
     ~save:(fun () -> Some (Emu.Jni.export_state jni))
     ~restore:(Emu.Jni.import_state jni)
 ```
 
-Call `register_jni jni` before the first `Emu.run` of the restored program. Native argument pointers are not saved in place of strings, whose original contents may outlive reused guest buffers. Other OCaml-side models, such as allocators, TLS mappings, file offsets, and clocks, must register their own state too; restoring guest memory alone cannot restore it.
+Call `register_jni jni` before `Emu.create ~restore`, so checkpoint validation can see the model's policy. Native argument pointers are not saved in place of strings, whose original contents may outlive reused guest buffers. Other OCaml-side models, such as allocators, TLS mappings, file offsets, and clocks, must register their own state too; restoring guest memory alone cannot restore it. `register_ref` and `register_table` serialize references and hash tables through a `Binable` module, and decode the new value before changing the model.
+
+Every checkpoint has a manifest of the registered model names, schema versions, and whether their state is required. A required model must have saved state, a registered restore handler, and a matching schema; otherwise restore fails before guest memory, model callbacks, or execution. An optional mismatch is skipped with a warning. A required save that returns `None` fails without replacing an existing checkpoint. Use `Checkpoint.models file` to inspect the manifest without loading the program. Callbacks and default handlers are not serialized: the restored script registers them under the same model name and schema.
+
+Checkpoints written before the manifest format remain supported for optional models. Registering a required model rejects such a legacy checkpoint because its schema and producer-side requirement cannot be proved.
 
 A checkpoint is untrusted input, as it may be crafted, so its restore checks it: the program must be of the same digest, and the channels of Primus Lisp reopen their files only if the restored run allows them. A channel, that only reads, e.g., of the redirected input, reopens a regular file, and a channel, that writes, and the redirections, that the program may open, only the files, that `--primus-lisp-channel-redirect`, or the `redirects` of the script, redirect in the restored run; the others are closed, with a warning.
 

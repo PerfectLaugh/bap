@@ -2138,6 +2138,90 @@ let call_returns e name =
                 : bool);
           Some frame.ret)
 
+type model_action =
+  | Restore_model of string * string
+  | Skip_model of string
+  | Fail_model of string
+
+let model_decisions (cp : Checkpoint.t) =
+  let registered name = Primus.Checkpoint.policy name in
+  let required name =
+    Option.value_map (registered name) ~default:false ~f:(fun p -> p.required)
+  in
+  let missing_manifest name =
+    Fail_model
+      (sprintf "the checkpoint has no model manifest for the required model %s"
+         name)
+  in
+  match cp.model_states with
+  | None -> (
+      match
+        List.find (Primus.Checkpoint.names ()) ~f:(fun name -> required name)
+      with
+      | Some name -> [ missing_manifest name ]
+      | None ->
+          List.map cp.extensions ~f:(fun (name, data) ->
+              if Option.is_some (Primus.Checkpoint.find name) then
+                Restore_model (name, data)
+              else
+                Skip_model
+                  (sprintf
+                     "the state of %s is not restored, as it is not loaded" name))
+      )
+  | Some models -> (
+      match
+        List.find (Primus.Checkpoint.names ()) ~f:(fun name ->
+            required name
+            && not
+                 (List.exists models ~f:(fun (m : Checkpoint.model_state) ->
+                      String.equal m.name name)))
+      with
+      | Some name -> [ missing_manifest name ]
+      | None ->
+          List.map models ~f:(fun (m : Checkpoint.model_state) ->
+              let policy = registered m.name in
+              let data =
+                List.Assoc.find cp.extensions ~equal:String.equal m.name
+              in
+              let strict =
+                m.required
+                || Option.value_map policy ~default:false ~f:(fun p ->
+                    p.required)
+              in
+              match (policy, data) with
+              | None, _ when strict ->
+                  Fail_model
+                    (sprintf "the required model %s is not registered" m.name)
+              | None, _ ->
+                  Skip_model
+                    (sprintf
+                       "the state of %s is not restored, as it is not loaded"
+                       m.name)
+              | _, None when strict ->
+                  Fail_model
+                    (sprintf "the required model %s has no saved state" m.name)
+              | _, None ->
+                  Skip_model
+                    (sprintf "the optional model %s has no saved state" m.name)
+              | Some p, Some _ when p.version <> m.version && strict ->
+                  Fail_model
+                    (sprintf
+                       "the model %s has schema version %d, but the script \
+                        requires %d"
+                       m.name m.version p.version)
+              | Some p, Some _ when p.version <> m.version ->
+                  Skip_model
+                    (sprintf
+                       "the state of %s is not restored: schema version %d \
+                        does not match %d"
+                       m.name m.version p.version)
+              | Some _, Some data -> Restore_model (m.name, data)))
+
+let model_problem cp =
+  List.find_map (model_decisions cp) ~f:(function
+    | Fail_model msg -> Some msg
+    | _ -> None)
+
 module Make (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
   open Machine.Let
@@ -3208,15 +3292,23 @@ module Make (Machine : Primus.Machine.S) = struct
               (v, Option.value (Map.find before v) ~default:x))
     in
     let* memory = Memory.snapshot in
+    let missing_required = ref None in
     let* extensions =
       Primus.Checkpoint.names ()
       |> Machine.List.filter_map ~f:(fun name ->
           match Primus.Checkpoint.find name with
           | None -> Machine.return None
-          | Some (module Ext) ->
+          | Some (module Ext) -> (
               let module Ext = Ext (Machine) in
-              let+ data = Ext.save in
-              Option.map data ~f:(fun data -> (name, data)))
+              let* data = Ext.save in
+              let policy = Option.value_exn (Primus.Checkpoint.policy name) in
+              match (data, policy.required) with
+              | None, true ->
+                  missing_required := Some name;
+                  Machine.return None
+              | _ ->
+                  Machine.return (Option.map data ~f:(fun data -> (name, data)))
+              ))
     in
     let* pending = Machine.Local.get frames in
     let* called = Machine.Local.get calls in
@@ -3238,59 +3330,85 @@ module Make (Machine : Primus.Machine.S) = struct
           { Checkpoint.ret; sp; callee; caller })
     in
     let saved =
-      match frames with
-      | [] -> Error (sprintf "%Lx is outside of a run" pc)
-      | _
-        when (not (List.is_empty threads.others))
-             && not
-                  (Option.equal Int.equal threads.depth
-                     (Some (List.length pending))) ->
-          Error "a thread runs a function of the program, that a stub called"
-      | frames ->
-          Checkpoint.save file
-            {
-              target = Theory.Target.to_string target;
-              digest;
-              pc;
-              frames;
-              vars;
-              memory;
-              symbols =
-                Hashtbl.to_alist e.session.symbols
-                |> List.map ~f:(fun (addr, name) -> (name, addr));
-              unstubbed = Hash_set.to_list e.session.unstubbed;
-              extensions;
-              extra =
-                (match site with
-                | Some s -> s.site_extra
-                | None ->
-                    List.map (extra_regs e) ~f:(fun id -> (id, read_extra e id)));
-              threads =
-                (if threads.last = 1 then None
-                 else
-                   Some
-                     {
-                       current = threads.current;
-                       cleared = threads.cleared;
-                       last = threads.last;
-                       woken = threads.woken;
-                       others =
-                         List.map threads.others
-                           ~f:(fun
-                               { tid; saved_extra; next; wait; clear; woken } ->
-                             {
-                               Checkpoint.tid;
-                               extra = saved_extra;
-                               next;
-                               clear;
-                               woken;
-                               waiting =
-                                 (match wait with
-                                 | Ready -> None
-                                 | Waiting addrs -> Some addrs);
-                             });
-                     });
-            }
+      match !missing_required with
+      | Some name ->
+          Error (sprintf "the required model %s has no state to save" name)
+      | None -> (
+          match frames with
+          | [] -> Error (sprintf "%Lx is outside of a run" pc)
+          | _
+            when (not (List.is_empty threads.others))
+                 && not
+                      (Option.equal Int.equal threads.depth
+                         (Some (List.length pending))) ->
+              Error
+                "a thread runs a function of the program, that a stub called"
+          | frames ->
+              Checkpoint.save file
+                {
+                  target = Theory.Target.to_string target;
+                  digest;
+                  pc;
+                  frames;
+                  vars;
+                  memory;
+                  symbols =
+                    Hashtbl.to_alist e.session.symbols
+                    |> List.map ~f:(fun (addr, name) -> (name, addr));
+                  unstubbed = Hash_set.to_list e.session.unstubbed;
+                  extensions;
+                  extra =
+                    (match site with
+                    | Some s -> s.site_extra
+                    | None ->
+                        List.map (extra_regs e) ~f:(fun id ->
+                            (id, read_extra e id)));
+                  threads =
+                    (if threads.last = 1 then None
+                     else
+                       Some
+                         {
+                           current = threads.current;
+                           cleared = threads.cleared;
+                           last = threads.last;
+                           woken = threads.woken;
+                           others =
+                             List.map threads.others
+                               ~f:(fun
+                                   {
+                                     tid;
+                                     saved_extra;
+                                     next;
+                                     wait;
+                                     clear;
+                                     woken;
+                                   }
+                                 ->
+                                 {
+                                   Checkpoint.tid;
+                                   extra = saved_extra;
+                                   next;
+                                   clear;
+                                   woken;
+                                   waiting =
+                                     (match wait with
+                                     | Ready -> None
+                                     | Waiting addrs -> Some addrs);
+                                 });
+                         });
+                  model_states =
+                    Some
+                      (Primus.Checkpoint.names ()
+                      |> List.map ~f:(fun name ->
+                          let policy =
+                            Option.value_exn (Primus.Checkpoint.policy name)
+                          in
+                          {
+                            Checkpoint.name;
+                            version = policy.version;
+                            required = policy.required;
+                          }));
+                })
     in
     Result.iter saved ~f:(fun () ->
         info "saved the checkpoint at %Lx to %s" pc file);
@@ -6326,14 +6444,20 @@ module Make (Machine : Primus.Machine.S) = struct
   (* the states of the components, that extend the checkpoint, see
      [Primus.Checkpoint] *)
   let restore_extensions (cp : Checkpoint.t) =
-    Machine.List.iter cp.extensions ~f:(fun (name, data) ->
-        match Primus.Checkpoint.find name with
-        | Some (module Ext) ->
-            let module Ext = Ext (Machine) in
-            Ext.restore data
-        | None ->
-            warning "the state of %s is not restored, as it is not loaded" name;
-            Machine.return ())
+    match model_problem cp with
+    | Some msg -> fail "%s" msg
+    | None ->
+        Machine.List.iter (model_decisions cp) ~f:(function
+          | Restore_model (name, data) -> (
+              match Primus.Checkpoint.find name with
+              | Some (module Ext) ->
+                  let module Ext = Ext (Machine) in
+                  Ext.restore data
+              | None -> Machine.return ())
+          | Skip_model msg ->
+              warning "%s" msg;
+              Machine.return ()
+          | Fail_model _ -> Machine.return ())
 
   (* the stub, that called the function of the run, which returned,
      completes, if it is known, see [Completion] *)
@@ -6898,8 +7022,11 @@ module Loader (Machine : Primus.Machine.S) = struct
             Machine.raise
               (Unicorn_failure
                  (sprintf "the checkpoint %s is of another program" file))
-        | Ok cp when String.equal cp.target (Theory.Target.to_string target) ->
-            Machine.return (Some cp)
+        | Ok cp when String.equal cp.target (Theory.Target.to_string target)
+          -> (
+            match model_problem cp with
+            | Some msg -> Machine.raise (Unicorn_failure msg)
+            | None -> Machine.return (Some cp))
         | Ok cp ->
             Machine.raise
               (Unicorn_failure

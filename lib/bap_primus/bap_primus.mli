@@ -2805,13 +2805,27 @@ module Std : sig
             machine, which continues from the checkpoint *)
       end
 
-      val register : ?package:string -> string -> (module S) -> unit
-      (** [register ~package name ext] registers the extension, whose state the
-          checkpoints keep with the name [package:name], raises
-          [Invalid_argument], if the name is registered. *)
+      type policy = { version : int; required : bool }
+
+      val register :
+        ?package:string ->
+        ?version:int ->
+        ?required:bool ->
+        string ->
+        (module S) ->
+        unit
+      (** [register ~package ~version ~required name ext] registers the
+          extension, whose state the checkpoints keep with the name
+          [package:name], its schema [version], by default 1, and whether its
+          state is [required] for a faithful restore, by default [false]. Raises
+          [Invalid_argument], if the name is registered or the version is not
+          positive. *)
 
       val find : string -> (module S) option
       (** [find name] the extension with the full name [package:name] *)
+
+      val policy : string -> policy option
+      (** [policy name] the schema version and requirement of [name] *)
 
       val names : unit -> string list
       (** the full names of the registered extensions *)
