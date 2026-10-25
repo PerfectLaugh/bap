@@ -12,7 +12,7 @@ module Emu = Bap_emu
 
 let () =
   match Bap_script.args () with
-  | [ echo; dir ] -> (
+  | [ echo; dir ] ->
       let emu = Emu.create ~args:[ "hello" ] (Bap_script.project echo) in
       let addr name =
         List.Assoc.find_exn (Emu.symbols emu) ~equal:String.equal name
@@ -25,6 +25,10 @@ let () =
       let far = Int64.(Emu.reg emu "RSP" - 0x400000L) in
       let ckpt = Filename.concat dir "hook.ckpt" in
       let deferred = ref [] in
+      let script_state = ref 41 in
+      Emu.Checkpoint.register ~package:"test" "script-state"
+        ~save:(fun () -> Some (Int.to_string !script_state))
+        ~restore:(fun data -> script_state := Int.of_string data);
       Emu.on_code emu ~first:print_strings ~last:print_strings (fun emu pc ->
           (match Emu.read emu far 4096 with
           | exception Invalid_argument msg ->
@@ -70,10 +74,12 @@ let () =
           printf "at once, paused %b\n"
             (Emu.status emu |> function Paused -> true | _ -> false));
       (* the checkpoint continues the program from print_strings *)
+      script_state := 99;
       let again = Emu.create ~restore:ckpt (Bap_script.project echo) in
       printf "restored at print_strings %b\n"
         Int64.(Emu.pc again = print_strings);
-      match Emu.run again ~until:endline with
+      (match Emu.run again ~until:endline with
       | Paused -> print_endline "the restored program reached print_endline"
-      | _ -> print_endline "the restored program didn't reach print_endline")
+      | _ -> print_endline "the restored program didn't reach print_endline");
+      printf "restored script state: %d\n" !script_state
   | _ -> failwith "expected ECHO DIR"

@@ -703,7 +703,11 @@ val on_syscall : t -> (t -> int64 -> int64 list -> action) -> unit
     that a catch-all serves all calls, also of the code, that the program
     writes. The instructions, that Primus interprets, e.g., which read the
     tainted registers, call the Lisp function of the intrinsic without the
-    hooks. The targets without an ABI of Linux, e.g., Windows, call no hook. *)
+    hooks. The targets without an ABI of Linux, e.g., Windows, call no hook.
+
+    A handler chooses [Return] or [Default] immediately. If serving the call
+    needs a paused-only operation, e.g., {!write}, allocation, or {!save}, use
+    {!defer} for it before returning from the handler. *)
 
 val arg : t -> int -> int64
 (** [arg emu n] the [n]th argument of the function, which is called, from 0, as
@@ -1064,12 +1068,13 @@ val save : t -> string -> unit
     The checkpoint has the registers, the memory, as the program and the script
     changed it, the names of {!add_symbol}, the functions of {!unstub}, the
     states of the components, that extend the checkpoints, see
-    [Primus.Checkpoint], e.g., the channels of Primus Lisp, which are opened
-    anew, with the positions of their inputs, the digest of the file of the
-    program, which the checkpoint is of, the runs of Unicorn, that Primus
-    called, with the stubs, that called them, and the bytes of the instructions,
-    that the lifted engine ran, see {!insn_at}. The names of the program and its
-    stubs are of its file, which is loaded anew.
+    [Primus.Checkpoint] and {!Checkpoint.register}, e.g., the channels of Primus
+    Lisp, which are opened anew, with the positions of their inputs, and the
+    states of script models, the digest of the file of the program, which the
+    checkpoint is of, the runs of Unicorn, that Primus called, with the stubs,
+    that called them, and the bytes of the instructions, that the lifted engine
+    ran, see {!insn_at}. The names of the program and its stubs are of its file,
+    which is loaded anew.
 
     The program, that continues from the checkpoint, continues the innermost
     run, after which the stub, that called it, completes, if it is known, see
@@ -1138,6 +1143,21 @@ val footprint : unit -> footprint
 (** The checkpoints, that {!save} wrote, which a script inspects, without
     loading their program, e.g., to choose one in a pipeline. *)
 module Checkpoint : sig
+  val register :
+    ?package:string ->
+    string ->
+    save:(unit -> string option) ->
+    restore:(string -> unit) ->
+    unit
+  (** [register ?package name ~save ~restore] registers the state of a model of
+      the script under [package:name], where [package] is ["user"] by default.
+      Every checkpoint saves [save ()], unless it is [None], and a program,
+      which continues from it, restores the state with [restore]. Register the
+      same name in the restored run before its first {!run}. The callbacks run
+      with the machine, whose state is saved or restored, and their exceptions
+      abort the operation. Raises [Invalid_argument], if the name is registered.
+  *)
+
   type thread = {
     tid : int;
     pc : int64;

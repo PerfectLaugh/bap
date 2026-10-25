@@ -90,6 +90,7 @@ val create :
   ?class_of:(object_id -> string option) ->
   ?default:handler ->
   ?version:int64 ->
+  ?versions:int64 list ->
   ?log:(call_record -> unit) ->
   ?classes:class_decl list ->
   ?objects:object_decl list ->
@@ -100,9 +101,24 @@ val create :
     and returns its address; it is needed by [GetStringChars] and
     [GetStringUTFChars]. [class_of] supplies the class name of an object not in
     [objects]. [default] answers calls without a built-in or declared answer and
-    returns [Value 0L] by default. [version] is the JNI version, [0x10006] by
-    default. [first_handle] is [0x52030000] by default; handles increase by 16
-    and are never reused. *)
+    returns [Value 0L] by default. [version] is the JNI version that
+    [GetVersion] returns, [0x10006] by default, and [versions] are the versions
+    that [GetEnv] accepts, by default only [version]. [first_handle] is
+    [0x52030000] by default; handles increase by 16 and are never reused. *)
+
+val export_state : t -> string
+(** [export_state jni] serializes the dynamic state of [jni], including its
+    handles, object and class identities, method and field IDs, arrays, strings,
+    and allocator counters. String arguments are stored by value, not as native
+    pointers. Use with [Bap_emu.Checkpoint.register] to keep the state with the
+    guest checkpoint. *)
+
+val import_state : t -> string -> unit
+(** [import_state jni data] replaces the dynamic state of [jni] with the state
+    that {!export_state} saved. Construct [jni] with the same declarations and
+    callbacks as the saved model before importing. The declarations and
+    callbacks themselves are not serialized. Raises [Invalid_argument], if
+    [data] is not a valid JNI model state. *)
 
 val intern : ?global:bool -> t -> object_id -> int64
 (** [intern t id] returns the stable local handle of [id], or its stable global

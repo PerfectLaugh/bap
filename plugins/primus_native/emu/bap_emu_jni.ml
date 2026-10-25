@@ -1,6 +1,6 @@
 open Core
 
-type object_id = int64
+type object_id = int64 [@@deriving bin_io]
 type call = { index : int; args : int64 array }
 
 type answer =
@@ -9,6 +9,13 @@ type answer =
   | String of string
   | Handle of int64
   | Fresh
+[@@deriving bin_io]
+
+type identity = External of int64 | Internal of int [@@deriving bin_io]
+type ref_kind = Local | Global | Weak [@@deriving bin_io]
+
+type string_info = { content : string; mutable address : int64 option }
+[@@deriving bin_io]
 
 type handler = t -> call -> answer
 and method_decl = { name : string; signature : string; answer : handler }
@@ -35,11 +42,8 @@ and call_record = {
   result : int64;
 }
 
-and identity = External of int64 | Internal of int
-and ref_kind = Local | Global | Weak
 and method_info = { method_decl : method_decl; owner : identity; static : bool }
 and field_info = { field_decl : field_decl; owner : identity; static : bool }
-and string_info = { content : string; mutable address : int64 option }
 
 and t = {
   mutable next_handle : int64;
@@ -61,10 +65,122 @@ and t = {
   class_of : object_id -> string option;
   default : handler;
   version : int64;
+  versions : int64 list;
   log : (call_record -> unit) option;
   mutable env : int64;
   mutable vm : int64;
 }
+
+module Saved_state = struct
+  type t = {
+    format : int;
+    next_handle : int64;
+    next_identity : int;
+    handles : ((ref_kind * identity) * int64) list;
+    sources : (int64 * identity) list;
+    classes : (string * identity) list;
+    class_names : (identity * string) list;
+    object_classes : (identity * identity) list;
+    arrays : (identity * answer list) list;
+    method_ids : ((identity * string * string * bool) * identity) list;
+    field_ids : ((identity * string * string * bool) * identity) list;
+    strings : (identity * string_info) list;
+    strings_by_content : (string * identity) list;
+    env : int64;
+    vm : int64;
+  }
+  [@@deriving bin_io]
+end
+
+let export_state (t : t) =
+  Binable.to_string
+    (module Saved_state)
+    {
+      format = 1;
+      next_handle = t.next_handle;
+      next_identity = t.next_identity;
+      handles = Hashtbl.to_alist t.handles;
+      sources = Hashtbl.to_alist t.sources;
+      classes = Hashtbl.to_alist t.classes;
+      class_names = Hashtbl.to_alist t.class_names;
+      object_classes = Hashtbl.to_alist t.object_classes;
+      arrays = Hashtbl.to_alist t.arrays;
+      method_ids = Hashtbl.to_alist t.method_ids;
+      field_ids = Hashtbl.to_alist t.field_ids;
+      strings = Hashtbl.to_alist t.strings;
+      strings_by_content = Hashtbl.to_alist t.strings_by_content;
+      env = t.env;
+      vm = t.vm;
+    }
+
+let import_state (t : t) data =
+  let invalid () = invalid_arg "Bap_emu.Jni: invalid saved state" in
+  let (state : Saved_state.t) =
+    match Binable.of_string (module Saved_state) data with
+    | exception _ -> invalid ()
+    | state -> state
+  in
+  if state.format <> 1 || state.next_identity < 0 then invalid ();
+  let valid_identity = function
+    | External _ -> true
+    | Internal id -> id >= 0 && id < state.next_identity
+  in
+  let check_identity id = if not (valid_identity id) then invalid () in
+  let check_pairs identities =
+    List.iter identities ~f:(fun (a, b) ->
+        check_identity a;
+        check_identity b)
+  in
+  List.iter state.handles ~f:(fun ((_, id), _) -> check_identity id);
+  List.iter state.sources ~f:(fun (_, id) -> check_identity id);
+  List.iter state.classes ~f:(fun (_, id) -> check_identity id);
+  List.iter state.class_names ~f:(fun (id, _) -> check_identity id);
+  check_pairs state.object_classes;
+  List.iter state.arrays ~f:(fun (id, _) -> check_identity id);
+  List.iter state.method_ids ~f:(fun ((owner, _, _, _), id) ->
+      check_identity owner;
+      check_identity id);
+  List.iter state.field_ids ~f:(fun ((owner, _, _, _), id) ->
+      check_identity owner;
+      check_identity id);
+  List.iter state.strings ~f:(fun (id, _) -> check_identity id);
+  List.iter state.strings_by_content ~f:(fun (_, id) -> check_identity id);
+  let table pairs =
+    let result = Hashtbl.Poly.create () in
+    List.iter pairs ~f:(fun (key, data) ->
+        if Hashtbl.mem result key then invalid ();
+        Hashtbl.set result ~key ~data);
+    result
+  in
+  let handles = table state.handles
+  and sources = table state.sources
+  and classes = table state.classes
+  and class_names = table state.class_names
+  and object_classes = table state.object_classes
+  and arrays = table state.arrays
+  and method_ids = table state.method_ids
+  and field_ids = table state.field_ids
+  and strings = table state.strings
+  and strings_by_content = table state.strings_by_content in
+  let replace destination source =
+    Hashtbl.clear destination;
+    Hashtbl.iteri source ~f:(fun ~key ~data ->
+        Hashtbl.set destination ~key ~data)
+  in
+  t.next_handle <- state.next_handle;
+  t.next_identity <- state.next_identity;
+  replace t.handles handles;
+  replace t.sources sources;
+  replace t.classes classes;
+  replace t.class_names class_names;
+  replace t.object_classes object_classes;
+  replace t.arrays arrays;
+  replace t.method_ids method_ids;
+  replace t.field_ids field_ids;
+  replace t.strings strings;
+  replace t.strings_by_content strings_by_content;
+  t.env <- state.env;
+  t.vm <- state.vm
 
 let arg call n = if n < Array.length call.args then call.args.(n) else 0L
 
@@ -374,7 +490,8 @@ and register_class t (decl : class_decl) =
 
 let create ?(first_handle = 0x52030000L) ?read_string ?alloc_string
     ?(class_of = fun _ -> None) ?(default = fun _ _ -> Value 0L)
-    ?(version = 0x10006L) ?log ?(classes = []) ?(objects = []) () =
+    ?(version = 0x10006L) ?versions ?log ?(classes = []) ?(objects = []) () =
+  let versions = Option.value versions ~default:[ version ] in
   let t =
     {
       next_handle = first_handle;
@@ -396,6 +513,7 @@ let create ?(first_handle = 0x52030000L) ?read_string ?alloc_string
       class_of;
       default;
       version;
+      versions;
       log;
       env = 0L;
       vm = 0L;
@@ -459,6 +577,8 @@ let get_object_class t object_handle =
   let class_id =
     match Hashtbl.find t.object_classes object_id with
     | Some id -> id
+    | None when Hashtbl.mem t.strings object_id ->
+        class_identity t "java/lang/String"
     | None -> (
         let declared =
           match object_id with
@@ -557,6 +677,13 @@ let compute t call =
       if length < 0 || length > 1_000_000 then
         invalid_arg "Bap_emu.Jni: unreasonable object-array length";
       let id = fresh_identity t in
+      let component = resolve t (arg call 2) in
+      let class_name =
+        match Hashtbl.find t.class_names component with
+        | Some name -> sprintf "[L%s;" name
+        | None -> "[Ljava/lang/Object;"
+      in
+      Hashtbl.set t.object_classes ~key:id ~data:(class_identity t class_name);
       let initial = Handle (arg call 3) in
       Hashtbl.set t.arrays ~key:id
         ~data:(List.init length ~f:(fun _ -> initial));
@@ -680,7 +807,7 @@ module Make (E : Emulator) = struct
       match index with
       | 6 ->
           let requested = E.reg emu "X2" in
-          if Int64.equal requested t.version then (
+          if List.mem t.versions requested ~equal:Int64.equal then (
             write_word emu (E.reg emu "X1") t.env;
             0L)
           else -2L

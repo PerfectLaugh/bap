@@ -479,6 +479,13 @@ and save_failed t file =
 module Checkpoint = struct
   module C = Bap_primus_native_plugin.Primus_native_checkpoint
 
+  let register ?package name ~save ~restore =
+    let module Extension (Machine : Primus.Machine.S) = struct
+      let save = Machine.return (save ())
+      let restore data = Machine.return (restore data)
+    end in
+    Primus.Checkpoint.register ?package name (module Extension)
+
   type thread = { tid : int; pc : int64; waiting : int64 list option }
 
   type info = {

@@ -295,6 +295,18 @@ Emu.on_syscall emu (fun emu number args ->
     | _ -> Return (-38L))                     (* ENOSYS *)
 ```
 
+A syscall handler chooses `Return` or `Default` immediately. If serving it needs a paused-only operation, such as `Emu.write`, allocation through `Emu.primus`, or another checkpoint, defer that operation before returning from the handler:
+
+```ocaml
+Emu.on_syscall emu (fun emu number args ->
+    match (number, args) with
+    | 222L, [ dst; src; len; _; _; _ ] ->
+        Emu.defer emu (fun emu ->
+            Emu.write emu dst (Emu.read emu src (Int64.to_int_exn len)));
+        Return len
+    | _ -> Default)
+```
+
 The instructions, that Primus interprets, e.g., that read the tainted registers, call the Lisp function without the hooks.
 
 ```ocaml
@@ -541,6 +553,18 @@ A checkpoint keeps:
 - the names from `add_symbol` and the functions from `unstub`
 - the digest of the program's file, so that it isn't restored on another program
 - the states of the components that extend the checkpoints, see `Primus.Checkpoint`, e.g., the channels of Primus Lisp, the taint, and the symbolic inputs
+- the states that script models register with `Emu.Checkpoint.register`, saved together with the guest state before the checkpoint file is replaced
+
+A JNI model exports its handles, object and class identities, method and field IDs, arrays, allocator counters, and string contents. Register it in both the saving and restored runs, constructing it with the same declarations and callbacks each time:
+
+```ocaml
+let register_jni jni =
+  Emu.Checkpoint.register "jni"
+    ~save:(fun () -> Some (Emu.Jni.export_state jni))
+    ~restore:(Emu.Jni.import_state jni)
+```
+
+Call `register_jni jni` before the first `Emu.run` of the restored program. Native argument pointers are not saved in place of strings, whose original contents may outlive reused guest buffers. Other OCaml-side models, such as allocators, TLS mappings, file offsets, and clocks, must register their own state too; restoring guest memory alone cannot restore it.
 
 A checkpoint is untrusted input, as it may be crafted, so its restore checks it: the program must be of the same digest, and the channels of Primus Lisp reopen their files only if the restored run allows them. A channel, that only reads, e.g., of the redirected input, reopens a regular file, and a channel, that writes, and the redirections, that the program may open, only the files, that `--primus-lisp-channel-redirect`, or the `redirects` of the script, redirect in the restored run; the others are closed, with a warning.
 
