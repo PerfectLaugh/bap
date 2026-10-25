@@ -2187,6 +2187,14 @@ let hook_calls t addr =
                  | None -> ())))
   end
 
+(* the hooks of the system calls, which the ABI of Linux of the target
+   tells, see [X.Make.Threads.hooked] *)
+let on_syscall t f =
+  t.session.syscall_hooks <-
+    (fun number args ->
+      match f t number args with Default -> X.Default | Return x -> X.Return x)
+    :: t.session.syscall_hooks
+
 let on_call t name f =
   let hook () =
     t.call <- Some name;

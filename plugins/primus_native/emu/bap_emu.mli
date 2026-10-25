@@ -591,6 +591,38 @@ val on_call : t -> string -> (t -> action) -> unit
     e.g., an external one, before its stub, or one of the program, which [f] may
     replace, see {!action}, and whose arguments {!arg} reads. *)
 
+val on_syscall : t -> (t -> int64 -> int64 list -> action) -> unit
+(** [on_syscall emu f] calls [f emu number args] at each system call of the
+    program, that runs in Unicorn or in the lifted engine, e.g., [svc #0] of
+    AArch64, or [syscall] of x86-64, with its [number], e.g., of [X8] of
+    AArch64, and its six [args], as the ABI of Linux of the target passes them,
+    whose result [Return x] returns from the call, as the ABI does, e.g., in
+    [X0], and which the program then continues after, and [Default] serves, as
+    without the hook: the calls of the threads, e.g., clone and futex, natively,
+    and the others by the Lisp function of its intrinsic, e.g., [intrinsic:svc],
+    if one is defined, or else the program fails, with the unbound function,
+    e.g.,
+
+    {[
+    Emu.on_syscall emu (fun emu number args ->
+        match (number, args) with
+        | 64L, [ _; buf; len; _; _; _ ] ->
+            print_string (Emu.read emu buf (Int64.to_int_exn len));
+            Return len
+        | 172L, _ -> Return 1000L (* getpid *)
+        (* exit, exit_group, set_tid_address, futex, sched_yield, gettid,
+           clone, and clone3 of AArch64, which the executor runs *)
+        | (93L | 94L | 96L | 98L | 124L | 178L | 220L | 435L), _ -> Default
+        | _ -> Return (-38L)
+        (* ENOSYS *))
+    ]}
+
+    The hooks run, in the order of their adding, until one returns a value, so
+    that a catch-all serves all calls, also of the code, that the program
+    writes. The instructions, that Primus interprets, e.g., which read the
+    tainted registers, call the Lisp function of the intrinsic without the
+    hooks. The targets without an ABI of Linux, e.g., Windows, call no hook. *)
+
 val arg : t -> int -> int64
 (** [arg emu n] the [n]th argument of the function, which is called, from 0, as
     its prototype tells, e.g., from the api files. *)

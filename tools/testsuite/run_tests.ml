@@ -1160,75 +1160,97 @@ let emu data =
             ]
         in
         golden env "emu/live/ran.txt" out.text);
-    (* the program, that failed, is saved at the instruction, that
+    (* the hook of all system calls serves the ones, that no Lisp
+       function serves, see syscall.ml *)
+  ]
+  @ List.concat_map
+      (fun bin ->
+        List.map
+          (fun engine ->
+            case (Printf.sprintf "emu/live/syscall/%s/%s" bin engine)
+              (fun env ->
+                let out =
+                  bap env
+                    [
+                      "script";
+                      input "emu/live/syscall.ml";
+                      path data ("bin/" ^ bin);
+                      engine;
+                    ]
+                in
+                golden env "emu/live/syscall.txt" out.text))
+          [ "lifted"; "unicorn" ])
+      [ "aarch64-linux-gnu-svc-crc"; "x86_64-linux-gnu-syscall-crc" ]
+  @ [
+      (* the program, that failed, is saved at the instruction, that
        faulted, see failed.ml *)
-    case "emu/live/failed/lifted" (fun env ->
-        let out =
-          bap env
-            [
-              "script";
-              input "emu/live/failed.ml";
-              path data "bin/x86_64-linux-gnu-echo";
-              dir env;
-              "lifted";
-            ]
-        in
-        golden env "emu/live/failed.txt" out.text);
-    case "emu/live/failed/unicorn" (fun env ->
-        let out =
-          bap env
-            [
-              "script";
-              input "emu/live/failed.ml";
-              path data "bin/x86_64-linux-gnu-echo";
-              dir env;
-              "unicorn";
-            ]
-        in
-        golden env "emu/live/failed.txt" out.text);
-    (* the shell, with the commands of the debugger, at a pause, and from
+      case "emu/live/failed/lifted" (fun env ->
+          let out =
+            bap env
+              [
+                "script";
+                input "emu/live/failed.ml";
+                path data "bin/x86_64-linux-gnu-echo";
+                dir env;
+                "lifted";
+              ]
+          in
+          golden env "emu/live/failed.txt" out.text);
+      case "emu/live/failed/unicorn" (fun env ->
+          let out =
+            bap env
+              [
+                "script";
+                input "emu/live/failed.ml";
+                path data "bin/x86_64-linux-gnu-echo";
+                dir env;
+                "unicorn";
+              ]
+          in
+          golden env "emu/live/failed.txt" out.text);
+      (* the shell, with the commands of the debugger, at a pause, and from
        a hook, see shell.ml *)
-    case "emu/live/shell" (fun env ->
-        let out =
-          bap env
-            [
-              "script";
-              input "emu/live/shell.ml";
-              path data "bin/x86_64-linux-gnu-echo";
-              dir env;
-            ]
-        in
-        golden env "emu/live/shell.txt" out.text);
-    (* the emulators run side by side, each in its own engine, also of
+      case "emu/live/shell" (fun env ->
+          let out =
+            bap env
+              [
+                "script";
+                input "emu/live/shell.ml";
+                path data "bin/x86_64-linux-gnu-echo";
+                dir env;
+              ]
+          in
+          golden env "emu/live/shell.txt" out.text);
+      (* the emulators run side by side, each in its own engine, also of
        another target, with their own registers, memory, names and
        hooks *)
-    case "emu/side-by-side" (fun env ->
-        let out =
-          bap ~timeout:300. env
+      case "emu/side-by-side" (fun env ->
+          let out =
+            bap ~timeout:300. env
+              [
+                "script";
+                input "emu/side-by-side.ml";
+                path data "bin/x86_64-linux-gnu-echo";
+                path data "bin/arm-linux-gnueabihf-thumb-crc";
+              ]
+          in
+          sequence env out
             [
-              "script";
-              input "emu/side-by-side.ml";
-              path data "bin/x86_64-linux-gnu-echo";
-              path data "bin/arm-linux-gnueabihf-thumb-crc";
-            ]
-        in
-        sequence env out
-          [
-            ("pauses a", "a paused at 40076b");
-            ("pauses c", "c paused at 40076b");
-            ("has the registers of each", "argc: a 2, c 3");
-            ("has the names of each", "names: a true, c false");
-            ("has the snapshots of each", "the snapshot of a is not of c");
-            ( "steps them in turns",
-              "steps: 40076c/202df/40076c 40076f/202e1/40076f \
-               400771/202e3/400771" );
-            ("runs b", "== b\n.*1489580789.*b exited 0");
-            ("runs c", "== c\n.*\nworld\nagain\n.*c exited 0");
-            ("runs a with its memory", "== a\n.*\nHELLO\n.*a exited 0");
-            ("hooks the calls of each", "print_endline: a 10, c 11");
-            ("has the knowledge of each", "knowledge: a true, b true");
-          ]);
-  ]
+              ("pauses a", "a paused at 40076b");
+              ("pauses c", "c paused at 40076b");
+              ("has the registers of each", "argc: a 2, c 3");
+              ("has the names of each", "names: a true, c false");
+              ("has the snapshots of each", "the snapshot of a is not of c");
+              ( "steps them in turns",
+                "steps: 40076c/202df/40076c 40076f/202e1/40076f \
+                 400771/202e3/400771" );
+              ("runs b", "== b\n.*1489580789.*b exited 0");
+              ("runs c", "== c\n.*\nworld\nagain\n.*c exited 0");
+              ("runs a with its memory", "== a\n.*\nHELLO\n.*a exited 0");
+              ("hooks the calls of each", "print_endline: a 10, c 11");
+              ("has the knowledge of each", "knowledge: a true, b true");
+            ]);
+    ]
 
 (* the observers of Lisp see the instructions, the loads and the stores
    of the code, which runs in Unicorn, as they see those of the

@@ -1,0 +1,3 @@
+fails without the hook, as it's unbound true
+write 1: "1489580789\n"
+exited 0

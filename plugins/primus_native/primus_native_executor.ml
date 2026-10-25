@@ -432,6 +432,9 @@ and session = {
   call_hooks : (unit -> action) list String.Table.t;
       (** the hooks of the calls of the functions, by their names, the latest
           first *)
+  mutable syscall_hooks : (int64 -> int64 list -> action) list;
+      (** the hooks of the system calls, with their numbers and arguments, the
+          latest first, see [Bap_emu.on_syscall] *)
   mutable exit_code : int option;
       (** the code, with which the program exited *)
   mutable engine_hooks : (engine -> unit) list;
@@ -527,6 +530,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     stopped_at = None;
     restarted_at = None;
     call_hooks = String.Table.create ();
+    syscall_hooks = [];
     exit_code = None;
     engine_hooks = [];
     events = Queue.create ();
@@ -3841,6 +3845,28 @@ module Make (Machine : Primus.Machine.S) = struct
               | _ -> false)
       | _ -> false
 
+    (* the hooks of the system calls, the first of which, that returns a
+       value, returns it from the system call [site], as the ABI does,
+       which then is not served otherwise *)
+    let hooked e site =
+      match (e.session.syscall_hooks, abi e) with
+      | [], _ | _, None -> false
+      | hooks, Some abi -> (
+          is_trap site
+          &&
+          let number = get e abi.number in
+          let args = List.map abi.args ~f:(get e) in
+          match
+            List.find_map (List.rev hooks) ~f:(fun hook ->
+                match hook number args with
+                | Return x -> Some x
+                | Default -> None)
+          with
+          | Some x ->
+              succeed e abi x;
+              true
+          | None -> false)
+
     (* if the call of the intrinsic function [site] is of the threads,
        by its [number] *)
     let is_call e site number =
@@ -5932,9 +5958,11 @@ module Make (Machine : Primus.Machine.S) = struct
                 >>= function
                 | Some (site, next) -> (
                     let next = if thumb then Int64.(next lor 1L) else next in
-                    Threads.syscall e ~next >>= function
-                    | Some pc -> loop pc
-                    | None -> call_intrinsic e site >>= fun () -> loop next)
+                    if Threads.hooked e site then loop next
+                    else
+                      Threads.syscall e ~next >>= function
+                      | Some pc -> loop pc
+                      | None -> call_intrinsic e site >>= fun () -> loop next)
                 | None ->
                     pull e >>= fun () ->
                     fail "an unhandled interrupt %d at %Lx" n pc)

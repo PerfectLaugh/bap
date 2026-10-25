@@ -248,11 +248,27 @@ Emu.insns emu
 | `on_code ?first ?last emu f` | before each instruction in the range |
 | `on_read`, `on_write` | before each load or store in the range |
 | `on_call emu name f` | when the program calls the function; `f` returns `Default` to run it, or `Return x` to return `x` at once |
+| `on_syscall emu f` | at each system call, `f emu number args`, with the number and the six arguments, as the ABI of Linux passes them, e.g., `X8` and `X0`..`X5` of AArch64; `Return x` returns `x` from the call, and `Default` serves it as without the hook |
 | `shell emu` | a prompt with the commands of the debugger on the paused program, see below |
 
 A hook doesn't see again the instruction, before which it paused the program, when the program continues from there, so `on_code` may `stop` the program at an address unconditionally, and `run` stops there the next time the code reaches it.
 
 `arg emu n` reads the arguments of the called function, as its prototype tells, e.g., from the api files.
+
+`on_syscall` serves the system calls, that no Lisp function of their intrinsic serves, e.g., `svc #0` of AArch64, without which the program fails with `unbound function intrinsic:svc`, wherever the program makes them, also in the code, that it writes later. `Default` leaves a call to the executor, which runs the calls of the threads natively, e.g., `clone`, `futex`, and `exit`, so a catch-all serves the others by their numbers:
+
+```ocaml
+Emu.on_syscall emu (fun emu number args ->
+    match (number, args) with
+    | 64L, [ _; buf; len; _; _; _ ] ->       (* write *)
+        print_string (Emu.read emu buf (Int64.to_int_exn len));
+        Return len
+    | 172L, _ -> Return 1000L                 (* getpid *)
+    | (93L | 94L | 96L | 98L | 124L | 178L | 220L | 435L), _ -> Default  (* the threads *)
+    | _ -> Return (-38L))                     (* ENOSYS *)
+```
+
+The instructions, that Primus interprets, e.g., that read the tainted registers, call the Lisp function without the hooks.
 
 ```ocaml
 Emu.on_call emu "putchar" (fun emu ->
