@@ -4,4 +4,8 @@
  (name bap_engine)
  (public_name bap-primus-native.engine)
  (modules bap_engine)
- (libraries bap bap-primus-native.lifted bap-primus-native.unicorn))
+ (libraries
+  bap
+  bap-primus-native.lifted
+  bap-primus-native.trace
+  bap-primus-native.unicorn))

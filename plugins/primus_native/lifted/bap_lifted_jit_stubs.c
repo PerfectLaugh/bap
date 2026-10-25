@@ -21,6 +21,8 @@
 #include <caml/memory.h>
 #include <caml/mlvalues.h>
 
+#include "bap_native_trace.h"
+
 #define PAGE_BITS 12
 #define PAGE_SIZE ((uint64_t)1 << PAGE_BITS)
 #define PAGE_OF(addr) ((addr) & ~(PAGE_SIZE - 1))
@@ -103,16 +105,13 @@ _Static_assert(sizeof(entry) == 24 && offsetof(entry, data) == 8 &&
 
 /* the traces of the blocks, that the runs record, see [record] */
 #define MAX_TRACES 4
-void *bap_uc_trace_of(value tv);
-void bap_uc_trace_block(void *t, uint64_t pc, uint32_t size, int thumb,
-                        int starts);
-/* they are of the stubs of Unicorn, in the library of another plugin,
-   which Windows may load further than 2 GB away, where the relative
-   calls, that flexdll relocates, don't reach, so they are called by
-   their addresses, which the compiler doesn't fold into the calls */
-static void *(*volatile trace_of)(value) = bap_uc_trace_of;
+/* they are in the shared trace library, which Windows may load further than
+   2 GB away, where the relative calls, that flexdll relocates, don't reach, so
+   they are called by their addresses, which the compiler doesn't fold into the
+   calls */
+static void *(*volatile trace_of)(value) = bap_native_trace_of;
 static void (*volatile trace_block)(void *, uint64_t, uint32_t, int, int) =
-    bap_uc_trace_block;
+    bap_native_trace_block;
 
 /* the block, that the run of another one continues with, see [run] */
 typedef struct {
@@ -464,7 +463,7 @@ value bap_jit_unlink_all(value mem) {
 }
 
 /* [traces mem traces] the blocks, that the runs chain, are recorded in
-   the [traces] of the blocks, see [Uc.Trace], and they return to the
+   the [traces] of the blocks, see [Bap_native_trace], and they return to the
    runtime, rather than call the next ones themselves */
 value bap_jit_traces(value mem, value traces) {
     jit_mem *m = Mem_val(mem);

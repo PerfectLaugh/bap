@@ -1,0 +1,8 @@
+; The native trace rings shared by the execution engines.
+
+(library
+ (name bap_native_trace)
+ (public_name bap-primus-native.trace)
+ (foreign_stubs
+  (language c)
+  (names bap_native_trace_stubs)))

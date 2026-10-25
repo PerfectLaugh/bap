@@ -18,6 +18,7 @@
 open Core
 open Bap.Std
 module Uc = Bap_unicorn
+module Trace = Bap_native_trace
 
 type config = {
   lift : thumb:bool -> int64 -> string -> (int * string * blk term list) option;
@@ -43,8 +44,8 @@ type kind =
   | Unsupported of (int64 -> unit)
   | Mem of Uc.access list * (Uc.access -> int64 -> int -> int64 -> unit)
   | Mem_invalid of Uc.access list * (Uc.access -> int64 -> int -> int64 -> bool)
-  | Trace_code of Uc.Trace.t  (** records the instructions, or the blocks *)
-  | Trace_mem of Uc.Trace.t  (** records the accesses *)
+  | Trace_code of Trace.t  (** records the instructions, or the blocks *)
+  | Trace_mem of Trace.t  (** records the accesses *)
 
 type hook = {
   first : int64 option;
@@ -242,7 +243,7 @@ type t = {
           its hooks *)
   (* the writes of the registers and the memory, while the emulation is
      stopped, which make a boundary of the traces, when it starts, see
-     [Uc.Trace.bounds], but the fills of the pages, that are mapped *)
+     [Trace.bounds], but the fills of the pages, that are mapped *)
   mutable wrote_regs : bool;
   mutable wrote : (int64 * int64) list;
   mutable wrote_all : bool;
@@ -861,7 +862,7 @@ let hooks_changed t =
         Array.for_all t.by_kind.trace_code ~f:(fun h ->
             match h.kind with
             | Trace_code tr ->
-                Uc.Trace.blocks tr && Option.is_none h.first
+                Trace.blocks tr && Option.is_none h.first
                 && Option.is_none h.last
             | _ -> false)
         && Array.is_empty t.by_kind.trace_mem
@@ -923,9 +924,9 @@ let reads_hooked t addr =
   Array.exists t.by_kind.reads ~f:(fun h -> (not h.deleted) && covers h addr)
 
 (* The traces, that the engine records, as the native hooks of Unicorn
-   record them, see [Uc.Trace]. *)
+   record them, see [Trace]. *)
 
-module Record = Uc.Trace.Record
+module Record = Trace.Record
 
 let ranges_array ranges =
   List.concat_map ranges ~f:(fun (addr, size) -> [ addr; size ])
@@ -941,7 +942,7 @@ let bound_running t ~regs ~mem ranges =
   each t.by_kind.trace_code (fun h ->
       match h.kind with
       | Trace_code tr ->
-          let early = Uc.Trace.blocks tr && (not t.block) && not t.recorded in
+          let early = Trace.blocks tr && (not t.block) && not t.recorded in
           if early then Record.extend tr t.current_size;
           Record.bound tr regs mem true t.current (ranges_array ranges) false;
           if early then Record.unrun tr t.current
@@ -1018,7 +1019,7 @@ let trace_insn t pc size thumb =
   each t.by_kind.trace_code (fun h ->
       match h.kind with
       | Trace_code tr when covers h pc ->
-          if Uc.Trace.blocks tr && not t.block then Record.extend tr size
+          if Trace.blocks tr && not t.block then Record.extend tr size
           else Record.record tr pc size thumb
       | _ -> ());
   t.recorded <- true;
@@ -1393,7 +1394,7 @@ let write_stores t stores =
       let n = Size.in_bytes size in
       let data = bytes_of_value endian x in
       mem_hooks t Write addr n (bits x);
-      (* the bytes, that the write overwrites, see [Uc.Trace.accesses] *)
+      (* the bytes, that the write overwrites, see [Trace.accesses] *)
       let old =
         if n > 8 then 0L
         else
@@ -2763,7 +2764,7 @@ let start ?until ?timeout ?count t pc =
               set_itstate t (advance_it (itstate t));
               each t.by_kind.trace_code (fun h ->
                   match h.kind with
-                  | Trace_code tr when Uc.Trace.blocks tr && not t.block ->
+                  | Trace_code tr when Trace.blocks tr && not t.block ->
                       Record.extend tr insn.size
                   | _ -> ());
               t.ran <- t.ran + 1;

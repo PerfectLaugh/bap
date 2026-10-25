@@ -22,8 +22,7 @@
 #include <unicorn/unicorn.h>
 
 #include "unicorn_regs.h"
-
-struct trace;
+#include "bap_native_trace.h"
 
 struct hook {
     uc_hook handle;
@@ -32,9 +31,9 @@ struct hook {
     int write;
     /* the trace, that the native hook of the code records, see
        [fixup], or NULL */
-    struct trace *trace;
+    struct bap_native_trace *trace;
     /* the trace, that the native hook of the accesses records, or NULL */
-    struct trace *mem;
+    struct bap_native_trace *mem;
     /* the sorted addresses, whose instructions the hook of the sites
        sees, see [on_sites], or NULL */
     uint64_t *sites;
@@ -127,12 +126,6 @@ struct fresh {
     struct fresh *next;
 };
 
-/* the bytes, that were written outside of the traces, see [mark] */
-struct range {
-    uint64_t addr;
-    uint64_t size;
-};
-
 #define PENDING 65536
 
 struct engine {
@@ -146,7 +139,7 @@ struct engine {
     int running;
     int wrote_regs;
     int wrote_mem;
-    struct range *wrote; /* the bytes, unless too many, see [PENDING] */
+    struct bap_native_trace_range *wrote; /* the bytes, unless too many, see [PENDING] */
     size_t nwrote;
     int wrote_all;
     struct fresh *fresh;
@@ -386,14 +379,14 @@ static void wrote(struct engine *e, uint64_t addr, uint64_t size) {
         return;
     }
     if (e->nwrote > 0) {
-        struct range *r = &e->wrote[e->nwrote - 1];
+        struct bap_native_trace_range *r = &e->wrote[e->nwrote - 1];
         if (r->addr + r->size == addr) {
             r->size += size;
             return;
         }
     }
     if (e->wrote == NULL) {
-        e->wrote = malloc(PENDING * sizeof(struct range));
+        e->wrote = malloc(PENDING * sizeof(struct bap_native_trace_range));
     }
     if (e->wrote == NULL || e->nwrote == PENDING) {
         e->wrote_all = 1;
@@ -1017,141 +1010,12 @@ value bap_uc_context_restore(value v, value ctx) {
     return Val_unit;
 }
 
-/* The traces of the code, that the native hooks record, with no call
-   to OCaml, see Bap_unicorn.Trace. The program counters are in a ring,
-   whose size is a power of two, of every instruction, of every [every]
-   one, or of the first ones of the blocks, and the accesses to the
-   memory, if they are recorded, in another ring, with the index of the
-   instruction, that made them, i.e., its position in all instructions,
-   that the trace has recorded. */
+/* Unicorn's native hooks record into the shared trace rings. */
 
-struct access {
-    uint64_t insn;
-    uint64_t pc; /* of the instruction in a trace of blocks */
-    uint64_t addr;
-    uint64_t value;
-    uint64_t old; /* the bytes, that a write overwrote, see [trace_mem] */
-    uint32_t size;
-    uint32_t write;
-};
-
-struct trace {
-    uint64_t count; /* the recorded instructions, or blocks */
-    uint64_t mask;
-    uint64_t *pcs;
-    uint32_t *sizes; /* of the blocks */
-    uint8_t *modes;  /* the Thumb bits of the records, on ARM */
-    uint8_t thumb;   /* of the block, that runs, see [trace_mode] */
-    uint64_t every;
-    uint64_t skip;
-    uint64_t accesses; /* the recorded accesses */
-    uint64_t amask;
-    struct access *mem;
-    uc_arch arch;
-    /* the boundaries, see [mark], and the program counters of the ones,
-       that the hooks made, see [mark_running] */
-    uint64_t marks;
-    uint64_t *bounds;
-    uint64_t *at;
-    /* the written bytes of the boundaries, the first one and the number,
-       or [UNKNOWN], in the ring of [RANGES] */
-    uint64_t *first;
-    uint64_t *nranges;
-    uint64_t ranges_count;
-    struct range *ranges;
-};
-
-#define RANGES 65536
-#define UNKNOWN UINT64_MAX
-
-#define MID (1ULL << 61)
-
-#define BOUNDS 65536
-
-#define Trace_val(v) (*((struct trace **)Data_custom_val(v)))
-
-static void finalize_trace(value v) {
-    struct trace *t = Trace_val(v);
-    free(t->bounds);
-    free(t->at);
-    free(t->first);
-    free(t->nranges);
-    free(t->ranges);
-    free(t->pcs);
-    free(t->sizes);
-    free(t->modes);
-    free(t->mem);
-    free(t);
-}
-
-static struct custom_operations trace_ops = {
-    "bap.unicorn.trace.1",      finalize_trace,
-    custom_compare_default,     custom_hash_default,
-    custom_serialize_default,   custom_deserialize_default,
-    custom_compare_ext_default, custom_fixed_length_default};
-
-static uint64_t ring_size(intnat n) {
-    uint64_t size = 1;
-    while (size < (uint64_t)n) {
-        size <<= 1;
-    }
-    return size;
-}
-
-/* the trace of [size] program counters, rounded up to a power of two,
-   of every [every] instruction, with the sizes of the blocks, if
-   [blocks], and with [accesses] accesses to the memory, if positive */
-#define MAX_RING ((intnat)1 << 36)
-
-value bap_uc_trace_create(value size, value every, value blocks,
-                          value accesses) {
-    CAMLparam4(size, every, blocks, accesses);
-    CAMLlocal1(r);
-    struct trace *t = calloc(1, sizeof(struct trace));
-    if (t == NULL) {
-        caml_raise_out_of_memory();
-    }
-    /* the sizes, whose bytes would overflow, are too large */
-    if (Long_val(size) > MAX_RING || Long_val(accesses) > MAX_RING) {
-        free(t);
-        caml_invalid_argument("Bap_unicorn.Trace.create: too large");
-    }
-    uint64_t n = ring_size(Long_val(size) < 1 ? 2 : Long_val(size) + 1);
-    t->mask = n - 1;
-    t->pcs = malloc(n * sizeof(uint64_t));
-    t->sizes = Bool_val(blocks) ? malloc(n * sizeof(uint32_t)) : NULL;
-    t->every = Long_val(every) < 1 ? 1 : Long_val(every);
-    t->bounds = malloc(BOUNDS * sizeof(uint64_t));
-    t->at = malloc(BOUNDS * sizeof(uint64_t));
-    t->first = malloc(BOUNDS * sizeof(uint64_t));
-    t->nranges = malloc(BOUNDS * sizeof(uint64_t));
-    t->ranges = malloc(RANGES * sizeof(struct range));
-    t->skip = t->every;
-    if (Long_val(accesses) > 0) {
-        uint64_t m = ring_size(Long_val(accesses) + 1);
-        t->amask = m - 1;
-        t->mem = malloc(m * sizeof(struct access));
-    }
-    if (t->pcs == NULL || t->bounds == NULL || t->at == NULL ||
-        t->first == NULL || t->nranges == NULL || t->ranges == NULL ||
-        (Bool_val(blocks) && t->sizes == NULL) ||
-        (Long_val(accesses) > 0 && t->mem == NULL)) {
-        free(t->bounds);
-        free(t->at);
-        free(t->first);
-        free(t->nranges);
-        free(t->ranges);
-        free(t->pcs);
-        free(t->sizes);
-        free(t->mem);
-        free(t);
-        caml_raise_out_of_memory();
-    }
-    r = caml_alloc_custom_mem(&trace_ops, sizeof(struct trace *),
-                              n * sizeof(uint64_t));
-    Trace_val(r) = t;
-    CAMLreturn(r);
-}
+#define UNKNOWN BAP_NATIVE_TRACE_UNKNOWN
+#define MID BAP_NATIVE_TRACE_MID
+#define BOUNDS BAP_NATIVE_TRACE_BOUNDS
+#define Trace_val(v) Bap_native_trace_val(v)
 
 /* the mode of ARM, that the instruction runs in, which the slices
    decode it in, as the program counters of Thumb have no lower bit, and
@@ -1164,7 +1028,7 @@ static uint8_t thumb(uc_engine *uc) {
 
 static void trace_code(uc_engine *uc, uint64_t addr, uint32_t size,
                        void *data) {
-    struct trace *t = data;
+    struct bap_native_trace *t = data;
     if (--t->skip) {
         return;
     }
@@ -1181,13 +1045,13 @@ static void trace_code(uc_engine *uc, uint64_t addr, uint32_t size,
    blocks run before the ones of their instructions */
 static void trace_mode(uc_engine *uc, uint64_t addr, uint32_t size,
                        void *data) {
-    struct trace *t = data;
+    struct bap_native_trace *t = data;
     t->thumb = thumb(uc);
 }
 
 static void trace_block(uc_engine *uc, uint64_t addr, uint32_t size,
                         void *data) {
-    struct trace *t = data;
+    struct bap_native_trace *t = data;
     t->pcs[t->count & t->mask] = addr;
     t->sizes[t->count & t->mask] = size;
     if (t->modes != NULL) {
@@ -1206,14 +1070,14 @@ static int read_pc(uc_engine *uc, uc_arch arch, uint64_t *pc);
 static void trace_mem(uc_engine *uc, uc_mem_type type, uint64_t addr,
                       int size, int64_t x, void *data) {
     struct hook *h = data;
-    struct trace *t = h->mem;
+    struct bap_native_trace *t = h->mem;
     if (t->count == 0) {
         return;
     }
-    struct access *a = &t->mem[t->accesses & t->amask];
+    struct bap_native_trace_access *a = &t->mem[t->accesses & t->amask];
     a->insn = t->count - 1;
     a->pc = 0;
-    if (t->sizes != NULL && !read_pc(uc, t->arch, &a->pc)) {
+    if (t->sizes != NULL && !read_pc(uc, h->engine->arch, &a->pc)) {
         a->pc = 0;
     }
     a->addr = addr;
@@ -1277,7 +1141,7 @@ static void fixup(struct engine *e) {
     uint64_t pc;
     int known = 0;
     for (struct hook *h = e->hooks; h != NULL; h = h->next) {
-        struct trace *t = h->trace;
+        struct bap_native_trace *t = h->trace;
         if (t == NULL || t->every != 1 || t->count == 0) {
             continue;
         }
@@ -1313,7 +1177,7 @@ static void fixup(struct engine *e) {
                     }
                 }
                 while (t->accesses > 0) {
-                    struct access *a = &t->mem[(t->accesses - 1) & t->amask];
+                    struct bap_native_trace_access *a = &t->mem[(t->accesses - 1) & t->amask];
                     if (a->insn != last || a->pc < pc) {
                         break;
                     }
@@ -1339,40 +1203,15 @@ static void fixup(struct engine *e) {
    follows it, with the written registers in the bit 62, and the memory
    in the bit 63, so that the slices see, that the values of the
    locations may come from outside of the trace. */
-/* the boundary, with the written bytes, which are unknown, if [n] is
-   [UNKNOWN], which joins the last one, if they are at the same place */
-static void bound(struct trace *t, uint64_t bound, uint64_t pc,
-                  struct range *ranges, uint64_t n) {
-    uint64_t i = (t->marks - 1) & (BOUNDS - 1);
-    uint64_t last = t->bounds[i];
-    if (t->marks > 0 && (last & ~(3ULL << 62)) == (bound & ~(3ULL << 62)) &&
-        (!(bound & MID) || t->at[i] == pc) &&
-        (t->nranges[i] == UNKNOWN ||
-         t->first[i] + t->nranges[i] == t->ranges_count)) {
-        t->bounds[i] = last | bound;
-    } else {
-        i = t->marks & (BOUNDS - 1);
-        t->bounds[i] = bound;
-        t->at[i] = pc;
-        t->first[i] = t->ranges_count;
-        t->nranges[i] = 0;
-        t->marks++;
-    }
-    if (n == UNKNOWN || t->nranges[i] == UNKNOWN) {
-        t->nranges[i] = UNKNOWN;
-        return;
-    }
-    for (uint64_t k = 0; k < n; k++) {
-        t->ranges[t->ranges_count & (RANGES - 1)] = ranges[k];
-        t->ranges_count++;
-    }
-    t->nranges[i] += n;
+static void bound(struct bap_native_trace *t, uint64_t bound, uint64_t pc,
+                  struct bap_native_trace_range *ranges, uint64_t n) {
+    bap_native_trace_add_bound(t, bound, pc, ranges, n);
 }
 
 static void mark(struct engine *e) {
     if (e->wrote_regs || e->wrote_mem) {
         for (struct hook *h = e->hooks; h != NULL; h = h->next) {
-            struct trace *t = h->trace;
+            struct bap_native_trace *t = h->trace;
             if (t == NULL) {
                 continue;
             }
@@ -1407,9 +1246,9 @@ static void mark_running(struct engine *e, int regs, int mem, uint64_t addr,
         }
         return;
     }
-    struct range range = {addr, size};
+    struct bap_native_trace_range range = {addr, size};
     for (struct hook *h = e->hooks; h != NULL; h = h->next) {
-        struct trace *t = h->trace;
+        struct bap_native_trace *t = h->trace;
         if (t == NULL) {
             continue;
         }
@@ -1435,7 +1274,7 @@ value bap_uc_trace_add(value v, value tv, value kind, value start,
     CAMLparam5(v, tv, kind, start, stop);
     struct engine *e = Engine_val(v);
     uc_engine *uc = engine_uc(v);
-    struct trace *t = Trace_val(tv);
+    struct bap_native_trace *t = Trace_val(tv);
     void *callback;
     int type;
     switch (Int_val(kind)) {
@@ -1478,7 +1317,6 @@ value bap_uc_trace_add(value v, value tv, value kind, value start,
                    ? t
                    : NULL;
     h->mem = Int_val(kind) == TRACE_MEM ? t : NULL;
-    t->arch = e->arch;
     if (e->arch == UC_ARCH_ARM && t->modes == NULL) {
         t->modes = calloc(t->mask + 1, 1);
         if (t->modes == NULL) {
@@ -1498,361 +1336,4 @@ value bap_uc_trace_add(value v, value tv, value kind, value start,
     h->next = e->hooks;
     e->hooks = h;
     CAMLreturn(caml_copy_int64((int64_t)h->handle));
-}
-
-/* The records of the engines, that record the traces themselves, e.g.,
-   the lifted one of Bap_engine, as the native hooks do. */
-
-/* the trace of the target, whose modes are recorded, if it is ARM */
-value bap_uc_trace_prepare(value tv, value arm) {
-    struct trace *t = Trace_val(tv);
-    if (Bool_val(arm) && t->modes == NULL) {
-        t->modes = calloc(t->mask + 1, 1);
-        if (t->modes == NULL) {
-            caml_raise_out_of_memory();
-        }
-        t->arch = UC_ARCH_ARM;
-    }
-    return Val_unit;
-}
-
-/* the instruction, or the block, at [pc], of [size] bytes, in the mode,
-   see [trace_code] and [trace_block] */
-value bap_uc_trace_record(value tv, value pc, value size, value thumb) {
-    struct trace *t = Trace_val(tv);
-    uint64_t addr = Int64_val(pc);
-    if (t->sizes == NULL) {
-        if (--t->skip) {
-            return Val_unit;
-        }
-        t->skip = t->every;
-    } else {
-        t->sizes[t->count & t->mask] = Long_val(size);
-    }
-    t->pcs[t->count & t->mask] = addr;
-    if (t->modes != NULL) {
-        t->modes[t->count & t->mask] = Bool_val(thumb);
-    }
-    t->count++;
-    return Val_unit;
-}
-
-/* the instruction of [size] bytes, that the block, which the trace of the
-   blocks recorded last, runs next */
-value bap_uc_trace_extend(value tv, value size) {
-    struct trace *t = Trace_val(tv);
-    if (t->sizes != NULL && t->count > 0) {
-        t->sizes[(t->count - 1) & t->mask] += Long_val(size);
-    }
-    return Val_unit;
-}
-
-/* the trace, whose blocks the lifted engine records natively, with no
-   call to OCaml, see bap_lifted_jit_stubs.c, which keeps it alive */
-void *bap_uc_trace_of(value tv) { return Trace_val(tv); }
-
-/* the block at [pc] of [size] bytes, in the mode, or its bytes, that
-   the block, which was recorded last, continues with, unless it [starts]
-   a block, as [bap_uc_trace_record] and [bap_uc_trace_extend] */
-void bap_uc_trace_block(void *tp, uint64_t pc, uint32_t size, int thumb,
-                        int starts) {
-    struct trace *t = tp;
-    if (t->sizes == NULL) {
-        return;
-    }
-    if (!starts) {
-        if (t->count > 0) {
-            t->sizes[(t->count - 1) & t->mask] += size;
-        }
-        return;
-    }
-    t->sizes[t->count & t->mask] = size;
-    t->pcs[t->count & t->mask] = pc;
-    if (t->modes != NULL) {
-        t->modes[t->count & t->mask] = thumb;
-    }
-    t->count++;
-}
-
-/* the access of the instruction at [pc], see [trace_mem] */
-value bap_uc_trace_access(value tv, value write, value addr, value size,
-                          value x, value old, value pc) {
-    struct trace *t = Trace_val(tv);
-    if (t->mem == NULL || t->count == 0) {
-        return Val_unit;
-    }
-    struct access *a = &t->mem[t->accesses & t->amask];
-    a->insn = t->count - 1;
-    a->pc = t->sizes != NULL ? Int64_val(pc) : 0;
-    a->addr = Int64_val(addr);
-    a->size = Long_val(size);
-    a->write = Bool_val(write);
-    a->value = Bool_val(write) ? (uint64_t)Int64_val(x) : 0;
-    a->old = Bool_val(write) ? (uint64_t)Int64_val(old) : 0;
-    t->accesses++;
-    return Val_unit;
-}
-
-/* the instruction at [pc], that the trace recorded last, didn't run,
-   e.g., as it faulted, see [fixup] */
-value bap_uc_trace_unrun(value tv, value pcv) {
-    struct trace *t = Trace_val(tv);
-    uint64_t pc = Int64_val(pcv);
-    if (t->every != 1 || t->count == 0) {
-        return Val_unit;
-    }
-    uint64_t last = t->count - 1;
-    uint64_t start = t->pcs[last & t->mask];
-    if (t->sizes != NULL) {
-        uint32_t size = t->sizes[last & t->mask];
-        if (pc < start || pc >= start + size) {
-            return Val_unit;
-        }
-        if (pc > start) {
-            t->sizes[last & t->mask] = pc - start;
-            while (t->accesses > 0) {
-                struct access *a = &t->mem[(t->accesses - 1) & t->amask];
-                if (a->insn != last || a->pc < pc) {
-                    break;
-                }
-                t->accesses--;
-            }
-            return Val_unit;
-        }
-    } else if (start != pc) {
-        return Val_unit;
-    }
-    t->count--;
-    while (t->accesses > 0 &&
-           t->mem[(t->accesses - 1) & t->amask].insn == last) {
-        t->accesses--;
-    }
-    return Val_unit;
-}
-
-/* the boundary of the written registers and memory, the ranges are the
-   pairs of the addresses and the sizes, or unknown, see [mark] and
-   [mark_running], while the emulation runs, before the instruction at
-   [pc] */
-value bap_uc_trace_bound(value tv, value regs, value mem, value running,
-                         value pcv, value ranges, value unknown) {
-    struct trace *t = Trace_val(tv);
-    uint64_t pc = Int64_val(pcv);
-    uint64_t n = Wosize_val(ranges) / 2;
-    struct range *rs = n > 0 ? malloc(n * sizeof(struct range)) : NULL;
-    if (n > 0 && rs == NULL) {
-        caml_raise_out_of_memory();
-    }
-    for (uint64_t i = 0; i < n; i++) {
-        rs[i].addr = Int64_val(Field(ranges, 2 * i));
-        rs[i].size = Int64_val(Field(ranges, 2 * i + 1));
-    }
-    uint64_t record = t->count;
-    uint64_t flags =
-        ((uint64_t)Bool_val(regs) << 62) | ((uint64_t)Bool_val(mem) << 63);
-    if (Bool_val(running)) {
-        if (t->count > 0) {
-            uint64_t last = (t->count - 1) & t->mask;
-            uint64_t start = t->pcs[last];
-            if (t->sizes != NULL ? pc >= start && pc < start + t->sizes[last]
-                                 : pc == start) {
-                record = t->count - 1;
-            }
-        }
-        flags |= MID;
-    }
-    bound(t, record | flags, Bool_val(running) ? pc : 0, rs,
-          Bool_val(unknown) ? UNKNOWN : n);
-    free(rs);
-    return Val_unit;
-}
-
-value bap_uc_trace_access_bytecode(value *argv, int argn) {
-    return bap_uc_trace_access(argv[0], argv[1], argv[2], argv[3], argv[4],
-                               argv[5], argv[6]);
-}
-
-value bap_uc_trace_bound_bytecode(value *argv, int argn) {
-    return bap_uc_trace_bound(argv[0], argv[1], argv[2], argv[3], argv[4],
-                              argv[5], argv[6]);
-}
-
-value bap_uc_trace_count(value tv) {
-    return caml_copy_int64(Trace_val(tv)->count);
-}
-
-value bap_uc_trace_accesses_count(value tv) {
-    return caml_copy_int64(Trace_val(tv)->accesses);
-}
-
-value bap_uc_trace_blocks(value tv) {
-    return Val_bool(Trace_val(tv)->sizes != NULL);
-}
-
-value bap_uc_trace_clear(value tv) {
-    struct trace *t = Trace_val(tv);
-    t->count = 0;
-    t->accesses = 0;
-    t->marks = 0;
-    t->ranges_count = 0;
-    t->skip = t->every;
-    return Val_unit;
-}
-
-/* the number of the last records, at most [n], that the ring keeps,
-   whose slot of the next record, which may have a record, that [fixup]
-   dropped, is not one of them */
-static uint64_t kept(uint64_t count, uint64_t mask, intnat n) {
-    uint64_t k = count < mask ? count : mask;
-    return n >= 0 && (uint64_t)n < k ? (uint64_t)n : k;
-}
-
-value bap_uc_trace_retained(value tv) {
-    struct trace *t = Trace_val(tv);
-    return Val_long(kept(t->count, t->mask, -1));
-}
-
-/* the last [n] program counters, the oldest first, and their indices */
-value bap_uc_trace_pcs(value tv, value n) {
-    CAMLparam2(tv, n);
-    CAMLlocal1(r);
-    struct trace *t = Trace_val(tv);
-    uint64_t k = kept(t->count, t->mask, Long_val(n));
-    r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 1, NULL, k);
-    int64_t *data = Caml_ba_data_val(r);
-    uint64_t first = t->count - k;
-    for (uint64_t i = 0; i < k; i++) {
-        data[i] = t->pcs[(first + i) & t->mask];
-    }
-    CAMLreturn(r);
-}
-
-value bap_uc_trace_sizes(value tv, value n) {
-    CAMLparam2(tv, n);
-    CAMLlocal1(r);
-    struct trace *t = Trace_val(tv);
-    uint64_t k = t->sizes == NULL ? 0 : kept(t->count, t->mask, Long_val(n));
-    r = caml_ba_alloc_dims(CAML_BA_INT32 | CAML_BA_C_LAYOUT, 1, NULL, k);
-    int32_t *data = Caml_ba_data_val(r);
-    uint64_t first = t->count - k;
-    for (uint64_t i = 0; i < k; i++) {
-        data[i] = t->sizes[(first + i) & t->mask];
-    }
-    CAMLreturn(r);
-}
-
-/* the Thumb bits of the last [n] records, as [bap_uc_trace_pcs], which
-   are zeros, if the trace isn't of ARM */
-value bap_uc_trace_modes(value tv, value n) {
-    CAMLparam2(tv, n);
-    CAMLlocal1(r);
-    struct trace *t = Trace_val(tv);
-    uint64_t k = kept(t->count, t->mask, Long_val(n));
-    r = caml_ba_alloc_dims(CAML_BA_UINT8 | CAML_BA_C_LAYOUT, 1, NULL, k);
-    uint8_t *data = Caml_ba_data_val(r);
-    uint64_t first = t->count - k;
-    for (uint64_t i = 0; i < k; i++) {
-        data[i] = t->modes == NULL ? 0 : t->modes[(first + i) & t->mask];
-    }
-    CAMLreturn(r);
-}
-
-/* the last [n] accesses, the oldest first, six words each: the index
-   of the instruction, the address, the written value, the size, with
-   the write in the bit 32, the program counter, of a trace of blocks,
-   and the overwritten bytes, see [trace_mem] */
-value bap_uc_trace_mem(value tv, value n) {
-    CAMLparam2(tv, n);
-    CAMLlocal1(r);
-    struct trace *t = Trace_val(tv);
-    uint64_t k = t->mem == NULL ? 0 : kept(t->accesses, t->amask, Long_val(n));
-    r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 2, NULL, k,
-                           (intnat)6);
-    int64_t *data = Caml_ba_data_val(r);
-    uint64_t first = t->accesses - k;
-    for (uint64_t i = 0; i < k; i++) {
-        struct access *a = &t->mem[(first + i) & t->amask];
-        data[6 * i] = a->insn;
-        data[6 * i + 1] = a->addr;
-        data[6 * i + 2] = a->value;
-        data[6 * i + 3] = (int64_t)a->size | ((int64_t)a->write << 32);
-        data[6 * i + 4] = a->pc;
-        data[6 * i + 5] = a->old;
-    }
-    CAMLreturn(r);
-}
-
-/* writes the last [n] program counters, one in hex a line, the oldest
-   first, to the file, and returns their number */
-value bap_uc_trace_save(value tv, value n, value path) {
-    CAMLparam3(tv, n, path);
-    struct trace *t = Trace_val(tv);
-    FILE *f = fopen(String_val(path), "w");
-    if (f == NULL) {
-        caml_failwith("Unicorn.Trace.save: can't open the file");
-    }
-    uint64_t k = kept(t->count, t->mask, Long_val(n));
-    uint64_t first = t->count - k;
-    for (uint64_t i = 0; i < k; i++) {
-        fprintf(f, "%llx\n", (unsigned long long)t->pcs[(first + i) & t->mask]);
-    }
-    if (fclose(f) != 0) {
-        caml_failwith("Unicorn.Trace.save: can't write the file");
-    }
-    CAMLreturn(caml_copy_int64(k));
-}
-
-/* the written bytes of the boundary, unless the ring lost them */
-static uint64_t written(struct trace *t, uint64_t i) {
-    uint64_t n = t->nranges[i];
-    return n != UNKNOWN && t->ranges_count - t->first[i] <= RANGES ? n
-                                                                  : UNKNOWN;
-}
-
-/* the boundaries, that the ring keeps, the oldest first, each with its
-   program counter, see [mark] and [mark_running], and the number of
-   its written bytes, see [bap_uc_trace_ranges], or -1 */
-value bap_uc_trace_bounds(value tv) {
-    CAMLparam1(tv);
-    CAMLlocal1(r);
-    struct trace *t = Trace_val(tv);
-    uint64_t k = t->marks < BOUNDS ? t->marks : BOUNDS;
-    r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 1, NULL, 3 * k);
-    int64_t *data = Caml_ba_data_val(r);
-    uint64_t first = t->marks - k;
-    for (uint64_t i = 0; i < k; i++) {
-        uint64_t j = (first + i) & (BOUNDS - 1);
-        data[3 * i] = t->bounds[j];
-        data[3 * i + 1] = t->at[j];
-        data[3 * i + 2] = written(t, j);
-    }
-    CAMLreturn(r);
-}
-
-/* the addresses and the sizes of the written bytes of the boundaries,
-   that [bap_uc_trace_bounds] has, in its order */
-value bap_uc_trace_ranges(value tv) {
-    CAMLparam1(tv);
-    CAMLlocal1(r);
-    struct trace *t = Trace_val(tv);
-    uint64_t k = t->marks < BOUNDS ? t->marks : BOUNDS;
-    uint64_t first = t->marks - k, total = 0;
-    for (uint64_t i = 0; i < k; i++) {
-        uint64_t n = written(t, (first + i) & (BOUNDS - 1));
-        total += n == UNKNOWN ? 0 : n;
-    }
-    r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 1, NULL,
-                           2 * total);
-    int64_t *data = Caml_ba_data_val(r);
-    uint64_t pos = 0;
-    for (uint64_t i = 0; i < k; i++) {
-        uint64_t j = (first + i) & (BOUNDS - 1);
-        uint64_t n = written(t, j);
-        for (uint64_t m = 0; n != UNKNOWN && m < n; m++) {
-            struct range *x = &t->ranges[(t->first[j] + m) & (RANGES - 1)];
-            data[pos++] = x->addr;
-            data[pos++] = x->size;
-        }
-    }
-    CAMLreturn(r);
 }

@@ -246,7 +246,7 @@ let delete t h =
   | _, No_hook -> ()
   | _ -> invalid_arg "Bap_engine.delete: the hook is of another engine"
 
-module Trace = Bap_unicorn.Trace
+module Trace = Bap_native_trace
 
 let trace ?first ?last ?watch ?memory t trace =
   match t with

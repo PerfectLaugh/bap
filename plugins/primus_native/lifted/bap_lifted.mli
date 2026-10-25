@@ -155,7 +155,7 @@ val trace :
   ?watch:int64 * int64 ->
   ?memory:bool ->
   t ->
-  Bap_unicorn.Trace.t ->
+  Bap_native_trace.t ->
   hook list
 (** [trace t trace] records the trace, as {!Bap_unicorn.trace} does. *)
 

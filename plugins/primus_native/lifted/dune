@@ -7,12 +7,15 @@
  (private_modules bap_lifted_jit)
  (foreign_stubs
   (language c)
-  (names bap_lifted_jit_stubs))
+  (names bap_lifted_jit_stubs)
+  (extra_deps ../trace/bap_native_trace.h)
+  (flags :standard -I../trace))
  (libraries
   bap
   bap-llvm
   bap-primus
   bap-primus-lisp.softfloat
+  bap-primus-native.trace
   bap-primus-native.unicorn
   core
   mtime.clock

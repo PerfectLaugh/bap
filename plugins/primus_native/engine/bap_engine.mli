@@ -228,7 +228,7 @@ val delete : t -> hook -> unit
 
 (** {2 Traces} *)
 
-module Trace = Bap_unicorn.Trace
+module Trace = Bap_native_trace
 
 val trace :
   ?first:int64 ->
