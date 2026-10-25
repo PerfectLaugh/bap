@@ -121,6 +121,11 @@ val on_unsupported : t -> (int64 -> unit) -> hook
 (** [on_unsupported t f] calls [f addr], before the instruction at [addr], that
     the engine can't run, which stops it, see [Bap_engine.on_unsupported]. *)
 
+val on_sites : t -> int64 list -> (int64 -> int -> unit) -> hook
+(** [on_sites t sites f] calls [f addr size] before each instruction at one of
+    the [sites], which a set keeps, so that many sites cost one lookup, rather
+    than one range each. *)
+
 val on_mem :
   ?first:int64 ->
   ?last:int64 ->

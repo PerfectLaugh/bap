@@ -35,6 +35,8 @@ type config = {
 
 type kind =
   | Code of (int64 -> int -> unit)
+  | Sites of Int64.Hash_set.t * (int64 -> int -> unit)
+      (** the instructions at the addresses of the set *)
   | Block of (int64 -> int -> unit)
   | Interrupt of (int -> unit)
   | Invalid_insn of (unit -> bool)
@@ -806,12 +808,19 @@ let partition hooks =
         List.exists accesses ~f:(List.mem access ~equal:Poly.equal)
     | _ -> false
   in
-  let code = only (function Code _ -> true | _ -> false)
+  let code = only (function Code _ | Sites _ -> true | _ -> false)
   and blocks = only (function Block _ -> true | _ -> false) in
   let code_pages =
     let pages = Int64.Hash_set.create () in
     Array.fold (Array.append code blocks) ~init:(Some pages) ~f:(fun acc h ->
         match (acc, h.first, h.last) with
+        | Some pages, _, _ when match h.kind with Sites _ -> true | _ -> false
+          -> (
+            match h.kind with
+            | Sites (sites, _) ->
+                Hash_set.iter sites ~f:(fun a -> Hash_set.add pages (page_of a));
+                Some pages
+            | _ -> acc)
         | Some pages, Some first, Some last
           when Int64.(first <= last)
                && Int64.(
@@ -885,10 +894,13 @@ let delete t h =
   hooks_changed t
 
 let covers h addr =
-  match (h.first, h.last) with
-  | Some first, Some last when Int64.(first <= last) ->
-      Int64.(addr >= first && addr <= last)
-  | _ -> true
+  match h.kind with
+  | Sites (sites, _) -> Hash_set.mem sites addr
+  | _ -> (
+      match (h.first, h.last) with
+      | Some first, Some last when Int64.(first <= last) ->
+          Int64.(addr >= first && addr <= last)
+      | _ -> true)
 
 (* the hooks of a kind, but the ones, that the hooks before them deleted *)
 let each hooks f = Array.iter hooks ~f:(fun h -> if not h.deleted then f h)
@@ -2168,7 +2180,7 @@ let code_hooks t pc size =
           | _ -> ());
     each k.code (fun h ->
         match h.kind with
-        | Code f when covers h pc -> call (fun () -> f pc size)
+        | (Code f | Sites (_, f)) when covers h pc -> call (fun () -> f pc size)
         | _ -> ())
   end
 
@@ -2885,6 +2897,7 @@ let invalid_accesses accesses kinds =
           | `fetch, `prot -> Some Fetch_prot))
 
 let on_code ?first ?last t f = add t ?first ?last (Code f)
+let on_sites t sites f = add t (Sites (Int64.Hash_set.of_list sites, f))
 let on_block ?first ?last t f = add t ?first ?last (Block f)
 let on_interrupt t f = add t (Interrupt f)
 let on_invalid_insn t f = add t (Invalid_insn f)

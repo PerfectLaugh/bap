@@ -346,6 +346,9 @@ let () =
                 teq of MIPS, which are intrinsic in Primus *)
              || String.starts_with ~prefix:"failed Division by zero" s
              || String.starts_with ~prefix:"failed unbound function intrinsic:trap" s
+             (* the trap, that the executor locates, see [located] *)
+             || (String.starts_with ~prefix:"failed Unicorn: the instruction" s
+                 && String.ends_with ~suffix:"calls the unbound function intrinsic:trap" s)
            in
            if native.status <> lifted.status
               && not (fault native.status && fault lifted.status)

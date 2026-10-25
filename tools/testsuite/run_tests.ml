@@ -1208,6 +1208,27 @@ let emu data =
               ]
           in
           golden env "emu/live/failed.txt" out.text);
+      (* the stores of Primus, the scopes of the hooks, the hook of the
+         sites, and the failures, that tell, why and where, see observe.ml *)
+    ]
+  @ List.map
+      (fun engine ->
+        case ("emu/live/observe/" ^ engine) (fun env ->
+            let out =
+              bap env
+                [
+                  "script";
+                  input "emu/live/observe.ml";
+                  path data "bin/x86_64-linux-gnu-files";
+                  path data "bin/aarch64-linux-gnu-echo";
+                  input "emu/live/observe.txt";
+                  dir env;
+                  engine;
+                ]
+            in
+            golden env "emu/live/observe.txt" out.text))
+      [ "lifted"; "unicorn" ]
+  @ [
       (* the shell, with the commands of the debugger, at a pause, and from
        a hook, see shell.ml *)
       case "emu/live/shell" (fun env ->

@@ -193,6 +193,11 @@ let on_code ?first ?last t f =
   | Unicorn u -> Unicorn_hook (Uc.on_code ?first ?last u f)
   | Lifted l -> Lifted_hook (L.on_code ?first ?last l f)
 
+let on_sites t sites f =
+  match t with
+  | Unicorn u -> List.map (fun h -> Unicorn_hook h) (Uc.on_sites u sites f)
+  | Lifted l -> [ Lifted_hook (L.on_sites l sites f) ]
+
 let on_block ?first ?last t f =
   match t with
   | Unicorn u -> Unicorn_hook (Uc.on_block ?first ?last u f)

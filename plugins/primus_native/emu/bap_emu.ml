@@ -67,6 +67,9 @@ type t = {
   mutable stopped : bool;
       (** if a hook stopped the program, see [stop], so that it stays paused
           after the deferred actions *)
+  mutable scopes : (unit -> unit) list ref list;
+      (** the functions, that remove the hooks, that the scopes added, the
+          innermost scope first, see [scoped] *)
   shell : shell_state;
 }
 
@@ -104,33 +107,6 @@ let finish t state =
   | Suspended _ | Ended _ | Running -> ()
   | Finished _ | Crashed _ -> t.session.driven <- false
 
-(* continues the paused system with the request, and serves the
-   actions, that the hooks deferred to the pause, see [defer] *)
-let rec resume t request =
-  match t.state with
-  | Suspended (_, _, k) | Ended (_, k) ->
-      (* the hooks see, that the program runs, and its continuation is
-         not resumed again *)
-      t.state <- Running;
-      t.stopped <- false;
-      finish t (Effect.Deep.continue k request);
-      served t
-  | _ -> invalid_arg "Bap_emu: the program is not paused"
-
-(* the deferred actions run at the pause, that they asked for, which
-   is before the instruction, that the hook saw, after which the program
-   continues, unless a hook stopped it too, or it ended *)
-and served t =
-  if not (Queue.is_empty t.deferred) then begin
-    let stopped = t.stopped in
-    let actions = Queue.to_list t.deferred in
-    Queue.clear t.deferred;
-    List.iter actions ~f:(fun f -> f t);
-    match t.state with
-    | Suspended (pc, _, _) when not stopped -> resume t (X.Continue pc)
-    | _ -> ()
-  end
-
 let status t =
   match t.state with
   | Suspended _ -> Paused
@@ -146,6 +122,55 @@ let status t =
   | Crashed exn -> Failed (Exn.to_string exn)
 
 let paused t = match t.state with Suspended _ -> true | _ -> false
+
+(* the failure of [fn], whose program is not paused, which tells, why:
+   it runs, e.g., in a hook, where the machine serves no request, or
+   it ended, with its code, or its failure *)
+let not_paused ?fn t =
+  let fn = Option.value_map fn ~default:"Bap_emu" ~f:(( ^ ) "Bap_emu.") in
+  match status t with
+  | Running ->
+      invalid_argf
+        "%s: the program is not paused, as it runs, e.g., in a hook, where the \
+         machine serves no request: stop it there, see Bap_emu.stop, or defer \
+         the action to the pause, see Bap_emu.defer"
+        fn ()
+  | Exited (Some code) ->
+      invalid_argf
+        "%s: the program is not paused, as it exited with the code %d" fn code
+        ()
+  | Exited None ->
+      invalid_argf "%s: the program is not paused, as it exited" fn ()
+  | Failed msg ->
+      invalid_argf "%s: the program is not paused, as it failed: %s" fn msg ()
+  | Paused -> invalid_argf "%s: the program is paused" fn ()
+
+(* continues the paused system with the request, and serves the
+   actions, that the hooks deferred to the pause, see [defer] *)
+let rec resume t request =
+  match t.state with
+  | Suspended (_, _, k) | Ended (_, k) ->
+      (* the hooks see, that the program runs, and its continuation is
+         not resumed again *)
+      t.state <- Running;
+      t.stopped <- false;
+      finish t (Effect.Deep.continue k request);
+      served t
+  | _ -> not_paused t
+
+(* the deferred actions run at the pause, that they asked for, which
+   is before the instruction, that the hook saw, after which the program
+   continues, unless a hook stopped it too, or it ended *)
+and served t =
+  if not (Queue.is_empty t.deferred) then begin
+    let stopped = t.stopped in
+    let actions = Queue.to_list t.deferred in
+    Queue.clear t.deferred;
+    List.iter actions ~f:(fun f -> f t);
+    match t.state with
+    | Suspended (pc, _, _) when not stopped -> resume t (X.Continue pc)
+    | _ -> ()
+  end
 
 (* pauses the program before the next instruction, from a hook *)
 let pause t =
@@ -313,6 +338,7 @@ let create ?system ?(components = []) ?(init = []) ?(redirects = [])
       thumb_insns = Int64.Table.create ();
       deferred = Queue.create ();
       stopped = false;
+      scopes = [];
       shell = { breaks = Int64.Table.create (); snaps = [] };
     }
   in
@@ -341,7 +367,7 @@ let pc t =
              <> 0L)
       then Int64.(pc lor 1L)
       else pc
-  | _ -> invalid_arg "Bap_emu: the program is not paused"
+  | _ -> not_paused t
 
 (* the machine continues from the address, also after the other
    requests, e.g., of the snapshots, which the machine serves at its
@@ -349,12 +375,10 @@ let pc t =
 let set_pc t addr =
   match t.state with
   | Suspended _ -> resume t (X.Set_pc addr)
-  | _ -> invalid_arg "Bap_emu: the program is not paused"
+  | _ -> not_paused t
 
 let machine t =
-  match t.state with
-  | Suspended (_, id, _) -> id
-  | _ -> invalid_arg "Bap_emu: the program is not paused"
+  match t.state with Suspended (_, id, _) -> id | _ -> not_paused t
 
 (* the machine, that takes the snapshot, forks, and stays paused, as the
    snapshot, and its fork continues *)
@@ -374,10 +398,7 @@ let restore t { owner; id } =
 let drop_snapshot t { owner; id } =
   if not (phys_equal owner t.session) then
     invalid_arg "Bap_emu.drop_snapshot: the snapshot is of another emulator";
-  if not (paused t) then
-    invalid_arg
-      "Bap_emu.drop_snapshot: the program is not paused, as it runs, e.g., in \
-       a hook, or ended";
+  if not (paused t) then not_paused ~fn:"drop_snapshot" t;
   if not (Hash_set.mem t.session.dead id) then resume t (X.Drop id)
 
 module type Completion = X.Completion
@@ -429,10 +450,9 @@ let rec save t file =
       save_lifts t;
       match t.session.saved with Ok () -> () | Error msg -> failwith msg)
   | Running -> defer t (fun t -> save t file)
-  | Ended (Exn Primus.Interpreter.Halt, _) ->
-      invalid_arg "Bap_emu.save: the program is not paused, as it exited"
+  | Ended (Exn Primus.Interpreter.Halt, _) -> not_paused ~fn:"save" t
   | Ended (Exn _, _) -> save_failed t file
-  | _ -> invalid_arg "Bap_emu.save: the program is not paused, as it ended"
+  | _ -> not_paused ~fn:"save" t
 
 (* the checkpoint of the program, that failed, e.g., at the instruction,
    that faulted, from which it continues, as the runs, that the failure
@@ -530,10 +550,7 @@ module Checkpoint = struct
 end
 
 let spawn_thread ?stack t ~start ~arg =
-  if not (paused t) then
-    invalid_arg
-      "Bap_emu.spawn_thread: the program is not paused, as it runs, e.g., in a \
-       hook, or ended";
+  if not (paused t) then not_paused ~fn:"spawn_thread" t;
   resume t (X.Spawn (start, arg, stack));
   match t.session.spawned with Ok tid -> tid | Error msg -> failwith msg
 
@@ -546,10 +563,7 @@ type region = {
 }
 
 let regions t =
-  if not (paused t) then
-    invalid_arg
-      "Bap_emu.regions: the program is not paused, as it runs, e.g., in a \
-       hook, or ended";
+  if not (paused t) then not_paused ~fn:"regions" t;
   resume t X.Regions;
   List.map t.session.regions
     ~f:(fun (lower, upper, (p : Primus.Memory.protection)) ->
@@ -595,10 +609,7 @@ let changed mine theirs =
 let diff t { owner; id } =
   if not (phys_equal owner t.session) then
     invalid_arg "Bap_emu.diff: the snapshot is of another emulator";
-  if not (paused t) then
-    invalid_arg
-      "Bap_emu.diff: the program is not paused, as it runs, e.g., in a hook, \
-       or ended";
+  if not (paused t) then not_paused ~fn:"diff" t;
   let mine = values t None in
   changed mine (values t (Some id))
 
@@ -626,6 +637,49 @@ let instructions t =
 let installed t f =
   t.session.engine_hooks <- f :: t.session.engine_hooks;
   Option.iter t.session.active ~f
+
+(* the hook is removed by [remove], when the innermost scope, that added
+   it, ends, see [scoped], or stays *)
+let scope t remove =
+  match t.scopes with [] -> () | removes :: _ -> removes := remove :: !removes
+
+let scoped t f =
+  let removes = ref [] in
+  t.scopes <- removes :: t.scopes;
+  Exn.protect ~f ~finally:(fun () ->
+      t.scopes <- List.tl_exn t.scopes;
+      List.iter !removes ~f:(fun remove -> remove ()))
+
+(* the hook of the script, which goes to the engines of the emulator, see
+   [installed], and is deleted from them, when its scope ends, as the
+   engines, that it was deleted from, e.g., closed ones, are gone with it *)
+let hook t f =
+  let hooks = ref [] in
+  let install (e : X.engine) =
+    hooks := List.map (f e) ~f:(fun h -> (e.uc, h)) @ !hooks
+  in
+  installed t install;
+  scope t (fun () ->
+      t.session.engine_hooks <-
+        List.filter t.session.engine_hooks ~f:(fun g ->
+            not (phys_equal g install));
+      List.iter !hooks ~f:(fun (uc, h) ->
+          try Uc.delete uc h with Invalid_argument _ | Uc.Error _ -> ());
+      hooks := [])
+
+(* the address of the code of the instruction, without the lower bit of
+   the Thumb state of ARM *)
+let code_of t addr =
+  match (engine t).arch with Arm -> Int64.(addr land lnot 1L) | _ -> addr
+
+(* the instructions at the sites are seen by one hook, which the engine
+   finds natively, see [Uc.on_sites] *)
+let sites_hook t sites f =
+  let sites = List.map sites ~f:(code_of t) in
+  if not (List.is_empty sites) then
+    hook t (fun e ->
+        let fresh = instructions t in
+        Uc.on_sites e.uc sites (fun addr _ -> if fresh addr then f addr))
 
 let run ?until t =
   if paused t then begin
@@ -668,10 +722,7 @@ let step t =
   status t
 
 let interpret t =
-  if not (paused t) then
-    invalid_arg
-      "Bap_emu.interpret: the program is not paused, as it runs, e.g., in a \
-       hook, or ended";
+  if not (paused t) then not_paused ~fn:"interpret" t;
   resume t X.Interpret;
   status t
 
@@ -681,11 +732,7 @@ let interpret t =
    runs *)
 let call_served ~fn ?budget ?timeout ?stack ?(args = []) ?(regs = []) ?thread
     ?service t addr =
-  if not (paused t) then
-    invalid_argf
-      "Bap_emu.%s: the program is not paused, as it runs, e.g., in a hook, or \
-       ended"
-      fn ();
+  if not (paused t) then not_paused ~fn t;
   (match budget with
   | Some n when n < 0 -> invalid_argf "Bap_emu.%s: the budget is %d" fn n ()
   | _ -> ());
@@ -764,10 +811,7 @@ let rec accessible t addr n f =
 let primus t component =
   match t.state with
   | Suspended _ | Ended _ -> resume t (X.Run component)
-  | _ ->
-      invalid_arg
-        "Bap_emu.primus: the program is not paused, as it runs, e.g., in a \
-         hook, or ended"
+  | _ -> not_paused ~fn:"primus" t
 
 (* the bytes, that Primus has, and Unicorn doesn't, as their page is
    marked, e.g., tainted, see [X.ensure_page] *)
@@ -801,10 +845,7 @@ let primus_bytes t addr n =
 type provenance = Stored | Generated | Mapped | Unmapped
 
 let provenance t addr =
-  if not (paused t) then
-    invalid_arg
-      "Bap_emu.provenance: the program is not paused, as it runs, e.g., in a \
-       hook, or ended";
+  if not (paused t) then not_paused ~fn:"provenance" t;
   let width = (engine t).bytes * 8 in
   let result = ref Unmapped in
   primus t
@@ -878,10 +919,7 @@ let write_direct t addr data =
 (* the bytes go to Primus, from which they go to Unicorn, see
    [X.backing], and the code, that it translated, is translated anew *)
 let write t addr data =
-  if not (paused t) then
-    invalid_arg
-      "Bap_emu.write: the program is not paused, as it runs, e.g., in a hook, \
-       or ended";
+  if not (paused t) then not_paused ~fn:"write" t;
   (* the bytes are mapped and readable *)
   ignore (read t addr (String.length data) : string);
   resume t (X.Store (addr, data))
@@ -1508,22 +1546,19 @@ module Trace = struct
     let c =
       { entries = Queue.create (); limit = size; total = 0L; recording = true }
     in
+    (* the site, as the script gave it, e.g., with the lower bit of
+       Thumb, by the address of its code *)
+    let given = Int64.Table.create () in
     List.iter sites ~f:(fun site ->
-        let code =
-          match (engine emu).arch with
-          | Arm -> Int64.(site land lnot 1L)
-          | _ -> site
-        in
-        installed emu (fun e ->
-            let fresh = instructions emu in
-            ignore
-              (Uc.on_code ~first:code ~last:code e.uc (fun addr _ ->
-                   if c.recording && fresh addr then begin
-                     if Queue.length c.entries >= c.limit then
-                       ignore (Queue.dequeue_exn c.entries : int64 * int64 list);
-                     Queue.enqueue c.entries (site, List.map regs ~f:(reg emu));
-                     c.total <- Int64.succ c.total
-                   end))));
+        Hashtbl.set given ~key:(code_of emu site) ~data:site);
+    sites_hook emu sites (fun addr ->
+        if c.recording then begin
+          if Queue.length c.entries >= c.limit then
+            ignore (Queue.dequeue_exn c.entries : int64 * int64 list);
+          let site = Option.value (Hashtbl.find given addr) ~default:addr in
+          Queue.enqueue c.entries (site, List.map regs ~f:(reg emu));
+          c.total <- Int64.succ c.total
+        end);
     c
 
   let stop_capture c = c.recording <- false
@@ -2196,23 +2231,68 @@ let slice ?(addresses = false) ?window (tr : Trace.t) criterion =
   }
 
 let on_code ?first ?last t f =
-  installed t (fun e ->
+  hook t (fun e ->
       let fresh = instructions t in
-      ignore
-        (Uc.on_code ?first ?last e.uc (fun addr _ ->
-             if fresh addr then f t addr)))
+      [
+        Uc.on_code ?first ?last e.uc (fun addr _ -> if fresh addr then f t addr);
+      ])
+
+let on_sites t sites f = sites_hook t sites (fun addr -> f t addr)
 
 let on_read ?first ?last t f =
-  installed t (fun e ->
-      ignore
-        (Uc.on_mem ?first ?last e.uc [ `read ] (fun _ addr size _ ->
-             f t addr size)))
+  hook t (fun e ->
+      [
+        Uc.on_mem ?first ?last e.uc [ `read ] (fun _ addr size _ ->
+            f t addr size);
+      ])
 
-let on_write ?first ?last t f =
-  installed t (fun e ->
-      ignore
-        (Uc.on_mem ?first ?last e.uc [ `write ] (fun _ addr size value ->
-             f t addr size value)))
+(* the bytes, that Primus, or a native function, stored from [addr], in
+   [first] to [last], go to the hook in the pieces of at most 8 bytes,
+   whose values are of the endianness of the target, as Unicorn tells
+   them *)
+let stored t ?first ?last f addr data =
+  let module Theory = Bap_core_theory.Theory in
+  let big = Theory.Endianness.(equal eb) (Theory.Target.endianness t.target) in
+  let inside x =
+    Option.for_all first ~f:(fun a -> Stdlib.Int64.unsigned_compare a x <= 0)
+    && Option.for_all last ~f:(fun b -> Stdlib.Int64.unsigned_compare x b <= 0)
+  in
+  let value piece =
+    let bytes = String.to_list piece in
+    let bytes = if big then bytes else List.rev bytes in
+    List.fold bytes ~init:0L ~f:(fun x c ->
+        Int64.(shift_left x 8 lor of_int (Char.to_int c)))
+  in
+  let n = String.length data in
+  let rec go i =
+    if i < n then (
+      if not (inside Int64.(addr + of_int i)) then go (i + 1)
+      else
+        let rec stop j =
+          if j < n && j - i < 8 && inside Int64.(addr + of_int j) then
+            stop (j + 1)
+          else j
+        in
+        let j = stop i in
+        let piece = String.sub data ~pos:i ~len:(j - i) in
+        f t Int64.(addr + of_int i) (j - i) (value piece);
+        go j)
+  in
+  go 0
+
+let on_write ?first ?last ?(primus = false) t f =
+  hook t (fun e ->
+      [
+        Uc.on_mem ?first ?last e.uc [ `write ] (fun _ addr size value ->
+            f t addr size value);
+      ]);
+  if primus then begin
+    let h = stored t ?first ?last f in
+    t.session.store_hooks <- h :: t.session.store_hooks;
+    scope t (fun () ->
+        t.session.store_hooks <-
+          List.filter t.session.store_hooks ~f:(fun g -> not (phys_equal g h)))
+  end
 
 (* the functions of the program, which no stub replaces, are hooked at
    their addresses, once, by the name, that the address has, when it is
@@ -2243,10 +2323,13 @@ let hook_calls t addr =
 (* the hooks of the system calls, which the ABI of Linux of the target
    tells, see [X.Make.Threads.hooked] *)
 let on_syscall t f =
-  t.session.syscall_hooks <-
-    (fun number args ->
-      match f t number args with Default -> X.Default | Return x -> X.Return x)
-    :: t.session.syscall_hooks
+  let h number args =
+    match f t number args with Default -> X.Default | Return x -> X.Return x
+  in
+  t.session.syscall_hooks <- h :: t.session.syscall_hooks;
+  scope t (fun () ->
+      t.session.syscall_hooks <-
+        List.filter t.session.syscall_hooks ~f:(fun g -> not (phys_equal g h)))
 
 let on_call t name f =
   let hook () =
@@ -2257,6 +2340,15 @@ let on_call t name f =
       ~finally:(fun () -> t.call <- None)
   in
   Hashtbl.add_multi t.session.call_hooks ~key:name ~data:hook;
+  (* the addresses stay hooked, and their hooks see no hooks of the
+     calls by the name, see [X.call_returns] *)
+  scope t (fun () ->
+      Hashtbl.change t.session.call_hooks name ~f:(function
+        | None -> None
+        | Some hooks -> (
+            match List.filter hooks ~f:(fun g -> not (phys_equal g hook)) with
+            | [] -> None
+            | hooks -> Some hooks)));
   Hashtbl.iteri t.session.names ~f:(fun ~key:addr ~data ->
       if String.equal data name then hook_calls t addr)
 
@@ -2326,10 +2418,7 @@ let digest t ~symbols ~roots dumped =
   Md5.to_hex (Md5.digest_string (Buffer.contents buf))
 
 let code_digest ?(symbols = []) ?(roots = []) t =
-  if not (paused t) then
-    invalid_arg
-      "Bap_emu.code_digest: the program is not paused, as it runs, e.g., in a \
-       hook, or ended";
+  if not (paused t) then not_paused ~fn:"code_digest" t;
   digest t ~symbols ~roots (dump ~only:(fun r -> r.executable) t)
 
 let endian target =
@@ -2484,10 +2573,7 @@ let load_project file =
           failwithf "Bap_emu.load_project: %s" (Error.to_string_hum err) ())
 
 let project ?(symbols = []) ?(roots = []) ?cache t =
-  if not (paused t) then
-    invalid_arg
-      "Bap_emu.project: the program is not paused, as it runs, e.g., in a \
-       hook, or ended";
+  if not (paused t) then not_paused ~fn:"project" t;
   let target = t.target in
   let module Theory = Bap_core_theory.Theory in
   let width = Theory.Target.code_addr_size target in
@@ -2625,10 +2711,7 @@ let thread t =
 (* the thread, that runs, at the address, at which it paused, and the
    others, where they continue, by their TIDs *)
 let changed_since t file =
-  if not (paused t) then
-    invalid_arg
-      "Bap_emu.changed_since: the program is not paused, as it runs, e.g., in \
-       a hook, or ended";
+  if not (paused t) then not_paused ~fn:"changed_since" t;
   match Checkpoint.C.load file with
   | Error msg -> failwith msg
   | Ok (c : Checkpoint.C.t) ->

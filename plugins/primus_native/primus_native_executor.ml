@@ -438,6 +438,11 @@ and session = {
   mutable syscall_hooks : (int64 -> int64 list -> action) list;
       (** the hooks of the system calls, with their numbers and arguments, the
           latest first, see [Bap_emu.on_syscall] *)
+  mutable store_hooks : (int64 -> string -> unit) list;
+      (** the hooks of the stores, that the engine doesn't see, with their
+          addresses and bytes, the latest first: of Primus, e.g., of the Lisp
+          stubs, and of the instructions, that it interprets, and of the native
+          functions of libc, see [Bap_emu.on_write] *)
   mutable exit_code : int option;
       (** the code, with which the program exited *)
   mutable engine_hooks : (engine -> unit) list;
@@ -534,6 +539,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     restarted_at = None;
     call_hooks = String.Table.create ();
     syscall_hooks = [];
+    store_hooks = [];
     call_deadline = None;
     exit_code = None;
     engine_hooks = [];
@@ -2651,6 +2657,19 @@ module Make (Machine : Primus.Machine.S) = struct
     let* owned = owns e in
     if owned then push_written e else Machine.return ()
 
+  (* the bytes, that Primus stores, e.g., the Lisp stubs, go to the hooks
+     of the stores, see [Bap_emu.on_write], as the engine doesn't see
+     them *)
+  let stored (addr, x) =
+    let+ s = session in
+    match s.store_hooks with
+    | [] -> ()
+    | hooks ->
+        let addr = int64_of_word (Primus.Value.to_word addr) in
+        let byte = Word.to_int_exn (Primus.Value.to_word x) land 0xFF in
+        let data = String.of_char (Char.of_int_exn byte) in
+        List.iter (List.rev hooks) ~f:(fun h -> h addr data)
+
   (* the registers, that Primus writes, go to Unicorn, and they are
      tracked, if their values are, see [trace] *)
   let written (v, x) =
@@ -3038,6 +3057,8 @@ module Make (Machine : Primus.Machine.S) = struct
                       notify (name, args))
                 in
                 List.iter r.writes ~f:(fun (addr, data) ->
+                    List.iter (List.rev e.session.store_hooks) ~f:(fun h ->
+                        h addr data);
                     uc_write e addr data;
                     (* the writes to the code are seen, see [watch] *)
                     if e.watching.code_writes then
@@ -3614,6 +3635,33 @@ module Make (Machine : Primus.Machine.S) = struct
   let lift ?(thumb = false) e addr =
     let* read = code_reader e addr in
     Lift.insn ?encoding:(arm_encoding e ~thumb) ~read addr
+
+  (* the instruction at [pc], that calls an intrinsic, which no Lisp
+     function defines, e.g., intrinsic:undefined-instruction of UDF, as
+     the program ran into the data, fails with its address, its name,
+     and its bytes, rather than with the name of the intrinsic alone *)
+  let located e pc m =
+    Machine.catch m (function
+      | Primus.Linker.Unbound_name (`symbol intrinsic)
+        when String.is_prefix intrinsic ~prefix:"intrinsic:" ->
+          let addr = code_addr e pc in
+          let* read = code_reader e addr in
+          let* insn = lift ~thumb:(in_thumb e pc) e addr in
+          let* name = Lift.name addr in
+          let size =
+            match insn with Some (n, _) -> n | None -> Primus.Lift.max_size
+          in
+          let bytes =
+            String.to_list (read addr size)
+            |> List.map ~f:(fun c -> sprintf "%02x" (Char.to_int c))
+            |> String.concat ~sep:" "
+          in
+          fail
+            "the instruction %sat %Lx, of the bytes %s, calls the unbound \
+             function %s"
+            (Option.value_map name ~default:"" ~f:(fun n -> n ^ " "))
+            pc bytes intrinsic
+      | exn -> Machine.raise exn)
 
   (* the accesses of the instruction at [addr], which are analyzed
      anew, if its bytes changed *)
@@ -5451,6 +5499,8 @@ module Make (Machine : Primus.Machine.S) = struct
       | Some (size, blks) ->
           let next = Int64.(pc + of_int size) in
           let* pc =
+            located e insn
+            @@
             match site_of_blocks blks with
             | Some site -> (
                 threads_call site >>= function
@@ -6230,7 +6280,9 @@ module Make (Machine : Primus.Machine.S) = struct
                     else
                       Threads.syscall e ~next >>= function
                       | Some pc -> loop pc
-                      | None -> call_intrinsic e site >>= fun () -> loop next)
+                      | None ->
+                          located e pc (call_intrinsic e site) >>= fun () ->
+                          loop next)
                 | None ->
                     pull e >>= fun () ->
                     fail "an unhandled interrupt %d at %Lx" n pc)
@@ -7069,6 +7121,13 @@ module Loader (Machine : Primus.Machine.S) = struct
         Primus.System.fini >>> Exec.finished;
         Primus.System.stop >>> Exec.system_stopped;
         Primus.Interpreter.written >>> Exec.written;
+        (* the observer of the stores of Primus is covered, as it needs
+           no stores of the engine, which it doesn't make Primus watch,
+           see [watching] *)
+        ( Primus.System.init >>> fun () ->
+          let module Track = Primus.Track.Make (Machine) in
+          Track.cover Primus.Interpreter.stored );
+        Primus.Interpreter.stored >>> Exec.stored;
         Primus.Memory.protected >>> Exec.protected;
         Primus.Memory.allocated >>> Exec.allocated;
         Primus.Track.marked >>> Exec.marked;

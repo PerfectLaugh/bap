@@ -1,0 +1,6 @@
+the engine stored 0 bytes of the tail, all stores: 1:6f 1:6e 1:64 1:0a
+the scope saw true, after it 0 instructions and 0 calls
+the sites are seen true, as by their hooks true
+Bap_emu.call: the program is not paused, as it runs, e.g., in a hook, where the machine serves no request: stop it there, see Bap_emu.stop, or defer the action to the pause, see Bap_emu.defer
+failed: Unicorn: the instruction UDF at 960, of the bytes 00 00 00 00, calls the unbound function intrinsic:undefined-instruction
+Bap_emu.call: the program is not paused, as it failed: Unicorn: the instruction UDF at 960, of the bytes 00 00 00 00, calls the unbound function intrinsic:undefined-instruction

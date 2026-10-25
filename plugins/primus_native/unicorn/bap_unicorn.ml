@@ -146,6 +146,27 @@ let hook ?(first = 1L) ?(last = 0L) uc kind types f =
 let on_code ?first ?last uc (f : int64 -> int -> unit) =
   hook ?first ?last uc Code 0 f
 
+external hook_sites : t -> int64 array -> 'f -> int64 = "bap_uc_hook_sites"
+
+(* the sites go to the hooks of their clusters, whose ranges are from
+   their first sites to their last ones, which are at most [gap] bytes
+   apart, and which find the sites natively, as Unicorn calls a hook at
+   each instruction of its range, so that a range spans few instructions,
+   that aren't sites, e.g., of a loop, that runs between two sites *)
+let on_sites uc sites (f : int64 -> int -> unit) =
+  let gap = 16L in
+  List.sort_uniq Int64.unsigned_compare sites
+  |> List.fold_left
+       (fun clusters x ->
+         match clusters with
+         | (y :: _ as cluster) :: rest
+           when Int64.unsigned_compare (Int64.sub x y) gap <= 0 ->
+             (x :: cluster) :: rest
+         | _ -> [ x ] :: clusters)
+       []
+  |> List.rev_map (fun cluster ->
+      hook_sites uc (Array.of_list (List.rev cluster)) f)
+
 let on_block ?first ?last uc (f : int64 -> int -> unit) =
   hook ?first ?last uc Block 0 f
 

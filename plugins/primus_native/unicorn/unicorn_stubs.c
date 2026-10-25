@@ -34,6 +34,10 @@ struct hook {
     struct trace *trace;
     /* the trace, that the native hook of the accesses records, or NULL */
     struct trace *mem;
+    /* the sorted addresses, whose instructions the hook of the sites
+       sees, see [on_sites], or NULL */
+    uint64_t *sites;
+    size_t nsites;
     struct hook *next;
 };
 
@@ -191,6 +195,7 @@ static void free_hooks(struct engine *e) {
     while (h != NULL) {
         struct hook *next = h->next;
         caml_remove_generational_global_root(&h->closure);
+        free(h->sites);
         free(h);
         h = next;
     }
@@ -837,6 +842,8 @@ value bap_uc_hook_add(value v, value kind, value types, value start,
     h->engine = e;
     h->trace = NULL;
     h->mem = NULL;
+    h->sites = NULL;
+    h->nsites = 0;
     caml_register_generational_global_root(&h->closure);
     uc_err err =
         Int_val(kind) == HOOK_INSN
@@ -857,6 +864,65 @@ value bap_uc_hook_add(value v, value kind, value types, value start,
 value bap_uc_hook_add_bytecode(value *argv, int argn) {
     return bap_uc_hook_add(argv[0], argv[1], argv[2], argv[3], argv[4],
                            argv[5]);
+}
+
+/* calls the hook of the sites at the instructions of its addresses
+   only, which it finds by the binary search, so that the instructions
+   of its range, that aren't sites, don't call OCaml */
+static void on_sites(uc_engine *uc, uint64_t addr, uint32_t size,
+                     void *data) {
+    struct hook *h = data;
+    size_t lo = 0, hi = h->nsites;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (h->sites[mid] < addr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo < h->nsites && h->sites[lo] == addr) {
+        on_code(uc, addr, size, data);
+    }
+}
+
+/* the hook of the code at the [sites], the sorted array of the
+   addresses, from the first to the last one */
+value bap_uc_hook_sites(value v, value sites, value closure) {
+    CAMLparam3(v, sites, closure);
+    struct engine *e = Engine_val(v);
+    size_t n = Wosize_val(sites);
+    if (n == 0) {
+        caml_invalid_argument("Unicorn.on_sites: no sites");
+    }
+    uint64_t *addrs = malloc(n * sizeof(uint64_t));
+    struct hook *h = malloc(sizeof(struct hook));
+    if (addrs == NULL || h == NULL) {
+        free(addrs);
+        free(h);
+        caml_raise_out_of_memory();
+    }
+    for (size_t i = 0; i < n; i++) {
+        addrs[i] = (uint64_t)Int64_val(Field(sites, i));
+    }
+    h->closure = closure;
+    h->engine = e;
+    h->trace = NULL;
+    h->mem = NULL;
+    h->sites = addrs;
+    h->nsites = n;
+    caml_register_generational_global_root(&h->closure);
+    uc_err err = uc_hook_add(engine_uc(v), &h->handle, UC_HOOK_CODE, on_sites,
+                             h, addrs[0], addrs[n - 1]);
+    if (err != UC_ERR_OK) {
+        caml_remove_generational_global_root(&h->closure);
+        free(addrs);
+        free(h);
+        fail(err);
+    }
+    h->next = e->hooks;
+    e->hooks = h;
+    CAMLreturn(caml_copy_int64((int64_t)h->handle));
 }
 
 value bap_uc_x86_syscalls(value unit) {
@@ -882,6 +948,7 @@ value bap_uc_hook_del(value v, value handle) {
     check(uc_hook_del(engine_uc(v), hh));
     *p = h->next;
     caml_remove_generational_global_root(&h->closure);
+    free(h->sites);
     free(h);
     return Val_unit;
 }
@@ -1369,6 +1436,8 @@ value bap_uc_trace_add(value v, value tv, value kind, value start,
     }
     h->closure = tv;
     h->engine = e;
+    h->sites = NULL;
+    h->nsites = 0;
     h->trace = Int_val(kind) == TRACE_CODE || Int_val(kind) == TRACE_BLOCK
                    ? t
                    : NULL;

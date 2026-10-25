@@ -445,7 +445,8 @@ module Trace : sig
       see {!calls}, in a ring of the last [size] records, by default 2{^ 16},
       which is its own, so that a long run doesn't lose them, e.g., to map the
       arguments, that a function gets, in one run. The sites are hooked as
-      {!Bap_emu.on_code} does, so they cost a call to OCaml each time. *)
+      {!Bap_emu.on_sites} does, so each record costs a call to OCaml, and the
+      other instructions don't. *)
 
   val captured : ?last:int -> capture -> (int64 * int64 list) list
   (** [captured c] the last records, at most [last], by default all, that the
@@ -594,6 +595,23 @@ val on_code : ?first:int64 -> ?last:int64 -> t -> (t -> int64 -> unit) -> unit
     again, when the program continues from it, so the hook may stop the program
     unconditionally. *)
 
+val on_sites : t -> int64 list -> (t -> int64 -> unit) -> unit
+(** [on_sites emu sites f] calls [f emu addr] before each instruction at one of
+    the [sites], with the lower bit set for Thumb, as {!on_code} does, at
+    [addr], without the lower bit, with one hook, which the engine finds the
+    sites of natively: the lifted engine looks the address up in a set, rather
+    than checking each hook, and Unicorn has a hook for each cluster of the
+    sites, that are close, which finds them in C, so that only the sites call
+    OCaml, e.g., for a table of thousands of the addresses, that a script
+    watches, which, with a hook of {!on_code} each, would cost a check of each
+    hook at each of their instructions, and a change of the hooks of the engine
+    each:
+
+    {[
+    Emu.on_sites emu (List.map handlers ~f:snd) (fun emu addr ->
+        Hashtbl.incr hits addr)
+    ]} *)
+
 val on_read :
   ?first:int64 -> ?last:int64 -> t -> (t -> int64 -> int -> unit) -> unit
 (** [on_read emu f] calls [f emu addr size] before each load. *)
@@ -601,10 +619,54 @@ val on_read :
 val on_write :
   ?first:int64 ->
   ?last:int64 ->
+  ?primus:bool ->
   t ->
   (t -> int64 -> int -> int64 -> unit) ->
   unit
-(** [on_write emu f] calls [f emu addr size value] before each store. *)
+(** [on_write emu f] calls [f emu addr size value] before each store, that the
+    engine runs, from [first] to [last], inclusive, by default of all.
+
+    With [primus], it also sees the stores, that the engine doesn't run: of
+    Primus, e.g., of the Lisp stubs, e.g., [strcpy] or [fread], and of the
+    instructions, that it interprets, e.g., of the tainted values, after each
+    byte is stored, a byte at a time, and of the native functions of libc, which
+    replace their Lisp stubs, e.g., [memcpy], before their bytes are stored, in
+    the pieces of at most 8 bytes, whose values are of the endianness of the
+    target, as the stores of the engine are, e.g., to watch a buffer, that the
+    program fills with a function of libc:
+
+    {[
+    Emu.on_write emu ~first:buf
+      ~last:Int64.(buf + 63L)
+      ~primus:true
+      (fun emu addr size _ ->
+        printf "%Lx: %d bytes at %Lx\n" (Emu.pc emu) size addr)
+    ]}
+
+    The writes of the script, e.g., {!write}, aren't seen. A hook, that sees a
+    store of Primus, runs in Primus, where the engine doesn't run, so {!pc} is
+    of the instruction, that the engine ran last, e.g., the call of the stub,
+    and {!stop} pauses the program before the next instruction, that runs in the
+    engine. *)
+
+val scoped : t -> (unit -> 'a) -> 'a
+(** [scoped emu f] runs [f], and removes the hooks, that it added, when it
+    returns, or raises: of {!on_code}, {!on_sites}, {!on_read}, {!on_write},
+    {!on_call}, {!on_syscall}, and {!Trace.capture}, also the ones, that the
+    scopes, that it runs, added, so that an experiment, e.g., of a {!call}, or
+    of a {!drive}, doesn't leave its hooks to the program, that runs after it:
+
+    {[
+    let r =
+      Emu.scoped emu (fun () ->
+          Emu.on_call emu "getuid" (fun _ -> Return 0L);
+          Emu.on_write emu ~first:buf ~last:Int64.(buf + 63L) ~primus:true log;
+          Emu.drive emu handler ~args:[ request ] ~budget:100 ~service)
+    ]}
+
+    The function, that parked, see {!Parked}, continues without them, after the
+    scope. The traces, see {!Trace.start}, the breakpoints of the shell, and the
+    callbacks of {!Taint} and {!Symbolic} stay. *)
 
 val on_call : t -> string -> (t -> action) -> unit
 (** [on_call emu name f] calls [f emu] when the program calls the function,
@@ -1071,7 +1133,13 @@ module Checkpoint : sig
             Thumb state of ARM *)
     waiting : int64 list option;
         (** the addresses, e.g., of the futexes, on which it waits, if it waits
-        *)
+            in a wait, that the executor runs, and in which it parked: a wait of
+            a futex of Linux, or of an object, or of a lock, of Windows. A
+            thread, that waits otherwise, runs, e.g., in a loop of the program,
+            that polls a flag, in a [sched_yield], or in a stub of Primus Lisp,
+            which models the wait without a futex, so it isn't waiting, but
+            spinning, as {!Trace.hot} tells, nor is the thread, that runs, also
+            when it paused in a wait, see {!Parked}. *)
   }
 
   type info = {
@@ -1123,8 +1191,10 @@ val threads : t -> Checkpoint.thread list
     address, at which it paused, first, and the others, with the addresses, from
     which they continue, and the addresses, on which they wait, e.g., their
     futexes, by their TIDs, e.g., to tell, why a program, that stops
-    progressing, spins, with {!Trace.hot} and {!Trace.addresses}. Raises
-    [Invalid_argument], if the program is not paused. *)
+    progressing, spins, with {!Trace.hot} and {!Trace.addresses}. The threads,
+    that wait without a futex, e.g., on a flag, that they poll, aren't waiting,
+    see {!Checkpoint.thread.waiting}. Raises [Invalid_argument], if the program
+    is not paused. *)
 
 (** what a stub does, after the function, that it called, returns, see
     {!complete} *)

@@ -184,6 +184,11 @@ type access = Bap_unicorn.access =
 
 val on_code : ?first:int64 -> ?last:int64 -> t -> (int64 -> int -> unit) -> hook
 
+val on_sites : t -> int64 list -> (int64 -> int -> unit) -> hook list
+(** [on_sites t sites f] calls [f addr size] before each instruction at one of
+    the [sites], which the engine finds natively, e.g., in a set, so that many
+    sites cost about as much as one, rather than a hook each. *)
+
 val on_block :
   ?first:int64 -> ?last:int64 -> t -> (int64 -> int -> unit) -> hook
 

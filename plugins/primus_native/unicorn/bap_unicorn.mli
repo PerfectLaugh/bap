@@ -180,6 +180,13 @@ type access =
 val on_code : ?first:int64 -> ?last:int64 -> t -> (int64 -> int -> unit) -> hook
 (** [on_code uc f] calls [f addr size] before each instruction. *)
 
+val on_sites : t -> int64 list -> (int64 -> int -> unit) -> hook list
+(** [on_sites uc sites f] calls [f addr size] before each instruction at one of
+    the [sites], with a hook for each cluster of the sites, that are at most 16
+    bytes apart, whose range is from its first site to its last one, and which
+    finds the sites natively, so that the few other instructions in the range
+    don't call [f]. *)
+
 val on_block :
   ?first:int64 -> ?last:int64 -> t -> (int64 -> int -> unit) -> hook
 (** [on_block uc f] calls [f addr size] before each basic block. *)

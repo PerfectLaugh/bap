@@ -255,12 +255,30 @@ Emu.insns_since emu "before.ckpt" |> List.iter ~f:(printf "%Lx\n")
 | Function | Calls `f` |
 |----------|-----------|
 | `on_code ?first ?last emu f` | before each instruction in the range |
-| `on_read`, `on_write` | before each load or store in the range |
+| `on_sites emu sites f` | before each instruction at one of the sites, with one hook, that the engine finds them natively with |
+| `on_read`, `on_write` | before each load or store in the range; `on_write ~primus:true` also sees the stores of Primus and of the native functions of libc |
 | `on_call emu name f` | when the program calls the function; `f` returns `Default` to run it, or `Return x` to return `x` at once |
 | `on_syscall emu f` | at each system call, `f emu number args`, with the number and the six arguments, as the ABI of Linux passes them, e.g., `X8` and `X0`..`X5` of AArch64; `Return x` returns `x` from the call, and `Default` serves it as without the hook |
 | `shell emu` | a prompt with the commands of the debugger on the paused program, see below |
 
 A hook doesn't see again the instruction, before which it paused the program, when the program continues from there, so `on_code` may `stop` the program at an address unconditionally, and `run` stops there the next time the code reaches it.
+
+The hooks of the engine don't see the stores, that it doesn't run: of the Lisp stubs, e.g., `fread` or `strcpy`, of the instructions, that Primus interprets, and of the native functions of libc, that replace their stubs, e.g., `memcpy`. `on_write ~primus:true` sees them too, the ones of Primus after each byte, and the ones of the native functions before them, in the pieces of at most 8 bytes, so a watch of a buffer sees, whoever fills it:
+
+```ocaml
+Emu.on_write emu ~first:buf ~last:Int64.(buf + 63L) ~primus:true (fun emu addr size _ ->
+    printf "%d bytes at %Lx\n" size addr)
+```
+
+A watch of many addresses, e.g., of a table of handlers, costs a hook of `on_code` each, which the lifted engine checks one by one at their instructions, and changes its hooks for, while `on_sites emu sites f` is one hook, which finds the sites in a set, or, in Unicorn, in C, so only the sites call OCaml.
+
+The hooks stay, until the emulator is gone, unless a scope added them: `Emu.scoped emu f` removes the hooks of `on_code`, `on_sites`, `on_read`, `on_write`, `on_call`, `on_syscall`, and `Trace.capture`, that `f` added, when it returns or raises, so an experiment, e.g., a `call` or a `drive`, doesn't leave them to the run after it:
+
+```ocaml
+Emu.scoped emu (fun () ->
+    Emu.on_call emu "getuid" (fun _ -> Return 0L);
+    Emu.drive emu handler ~args:[ request ] ~budget:100 ~service)
+```
 
 `arg emu n` reads the arguments of the called function, as its prototype tells, e.g., from the api files.
 
@@ -597,6 +615,8 @@ The programs of Linux run their threads, that the system calls create, e.g., `cl
 The programs of Windows, on x86-64 and x86, run their threads, that `CreateThread`, or `_beginthreadex` and `_beginthread` of msvcrt, create, with their objects, as the executor runs these functions of KERNEL32 instead of their stubs: `ExitThread`, `GetCurrentThreadId`, `GetThreadId`, `GetExitCodeThread`, `ResumeThread` (of `CREATE_SUSPENDED`), `CloseHandle`, `Sleep`, `SwitchToThread`, `WaitForSingleObject` and `WaitForMultipleObjects` (of the threads, the events, the mutexes, and the semaphores), `CreateEvent`, `SetEvent`, `ResetEvent`, `CreateMutex`, `ReleaseMutex`, `CreateSemaphore`, `ReleaseSemaphore`, the critical sections, the SRW locks, the condition variables, `WaitOnAddress` and `WakeByAddress*`, and the slots of `TlsAlloc` and `FlsAlloc`, in the TEBs of the threads. The handles are the addresses of the objects, that `malloc` allocates, as the stacks and the TEBs of the threads, so the checkpoints keep them. A thread, that waits, calls the function again, when it is woken, and a thread, whose function returns, exits with its result. The timeouts expire only when no thread is ready, as the time doesn't pass.
 
 The programs of Linux, that import the functions of the threads of POSIX, without the libc, that has them, e.g., a payload of Android, whose bionic isn't loaded, run them in the executor, instead of their stubs: `pthread_create`, `pthread_join`, `pthread_detach`, `pthread_self`, `pthread_equal`, `pthread_exit`, and the detach state and the size of the stack of `pthread_attr_*`. The handle of a thread, `pthread_t`, is its TID, so the threads, that the program creates with `clone` itself, and the ones of `pthread_create`, are the same to them, as on Linux, e.g., `std::thread::detach` of a thread of `clone`, and `pthread_join` gives the result of the function, or the code of the `exit` of a thread of `clone`. A thread, that `pthread_create` creates, calls its function on a new stack, of 256 KB, or of its attributes, and exits with its result. The threads, that are detached, and the results of the ones, that exited, and aren't joined, are in the checkpoints. A program, whose libc runs, e.g., glibc, runs its own functions, and a hook of `on_call` replaces them too.
+
+`Emu.threads` tells the threads, and the addresses, that they wait on, e.g., their futexes, as `waiting`, only for the waits, that the executor runs, and in which it parked them: of the futexes, and of the objects of Windows. A thread, that waits otherwise, e.g., spins on a flag, or in a `pthread_cond_wait` of a stub, that doesn't use a futex, runs, so it isn't `waiting`, and `Trace.hot` tells, where it spins.
 
 `Emu.thread` tells the thread, that the paused program runs, and `Emu.thread_regs emu tid` the registers of a thread, without the aliases, e.g., of the one, that waits, to tell, which lock it holds, from its arguments. A thread, that doesn't run, keeps the values of its registers in the variables of Primus, `thread_<tid>_<register>`, so they keep their taint and their symbolic formulas, while the threads switch, and the checkpoints keep them, with the threads, e.g., to continue a program, that was saved in one thread, while the others wait. The futexes, the TIDs, and the objects of Windows may be in the tainted memory, which only Primus has, and the atomic sequences, e.g., `ldrex` and `strex`, `lwarx` and `stwcx.`, or `ll` and `sc`, which Primus interprets there, are interpreted whole.
 
