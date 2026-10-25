@@ -2288,10 +2288,56 @@ let stored t ?first ?last f addr data =
   go 0
 
 let on_write ?first ?last ?(primus = false) t f =
+  let last_attempt = ref None in
+  let active_attempt = ref None in
+  let events = ref [] in
+  let replay = ref [] in
   hook t (fun e ->
       [
         Uc.on_mem ?first ?last e.uc [ `write ] (fun _ addr size value ->
-            f t addr size value);
+            let pc = code_of t (pc t) in
+            let start = t.session.starts in
+            let attempt = Uc.attempt e.uc in
+            let fresh =
+              match !active_attempt with
+              | Some (previous_pc, previous_start, previous_attempt) -> (
+                  (not (Int64.equal previous_pc pc))
+                  ||
+                  match (attempt, previous_attempt) with
+                  | Some current, Some previous ->
+                      not (Int64.equal current previous)
+                  | _ -> previous_start <> start)
+              | None -> true
+            in
+            if fresh then begin
+              active_attempt := Some (pc, start, attempt);
+              events := [];
+              replay :=
+                match !last_attempt with
+                | Some
+                    ( previous_pc,
+                      previous_start,
+                      previous_attempt,
+                      previous_events )
+                  when Int64.equal previous_pc pc
+                       && (match (attempt, previous_attempt) with
+                         | Some current, Some previous ->
+                             Int64.(current > previous)
+                         | _ -> previous_start < start)
+                       && (previous_start = start
+                          || Option.equal Int64.equal t.session.restarted_at
+                               (Some pc)) ->
+                    List.rev previous_events
+                | _ -> []
+            end;
+            let event = (addr, size, value) in
+            events := event :: !events;
+            last_attempt := Some (pc, start, attempt, !events);
+            match !replay with
+            | expected :: rest when Poly.equal expected event -> replay := rest
+            | _ ->
+                replay := [];
+                f t addr size value);
       ]);
   if primus then begin
     let h = stored t ?first ?last f in
@@ -2425,7 +2471,11 @@ let names t symbols =
   |> List.map ~f:(fun (addr, name) -> (name, addr))
   |> fun names -> names @ symbols
 
-let digest t ~symbols ~roots dumped =
+let selected ?regions (r : region) =
+  r.executable
+  && Option.value_map regions ~default:true ~f:(fun select -> select r)
+
+let digest ?regions t ~symbols ~roots dumped =
   let module Theory = Bap_core_theory.Theory in
   let buf = Buffer.create 4096 in
   Buffer.add_string buf (Theory.Target.to_string t.target);
@@ -2434,15 +2484,23 @@ let digest t ~symbols ~roots dumped =
         Buffer.add_string buf (sprintf "%Lx-%Lx\n" r.lower r.upper);
         Buffer.add_string buf bytes
       end);
+  Option.iter regions ~f:(fun _ ->
+      Buffer.add_string buf "scoped-regions\n";
+      List.filter dumped ~f:(fun (r, _) -> selected ?regions r)
+      |> List.map ~f:(fun ((r : region), _) -> (r.lower, r.upper))
+      |> List.sort ~compare:(fun (a, b) (c, d) ->
+          match Int64.compare a c with 0 -> Int64.compare b d | order -> order)
+      |> List.iter ~f:(fun (lower, upper) ->
+          Buffer.add_string buf (sprintf "%Lx-%Lx\n" lower upper)));
   List.iter (names t symbols) ~f:(fun (name, addr) ->
       Buffer.add_string buf (sprintf "%s@%Lx\n" name addr));
   List.iter (List.dedup_and_sort roots ~compare:Int64.compare) ~f:(fun addr ->
       Buffer.add_string buf (sprintf "@%Lx\n" addr));
   Md5.to_hex (Md5.digest_string (Buffer.contents buf))
 
-let code_digest ?(symbols = []) ?(roots = []) t =
+let code_digest ?regions ?(symbols = []) ?(roots = []) t =
   if not (paused t) then not_paused ~fn:"code_digest" t;
-  digest t ~symbols ~roots (dump ~only:(fun r -> r.executable) t)
+  digest ?regions t ~symbols ~roots (dump ~only:(fun r -> r.executable) t)
 
 let endian target =
   let module Theory = Bap_core_theory.Theory in
@@ -2595,14 +2653,14 @@ let load_project file =
       | Error err ->
           failwithf "Bap_emu.load_project: %s" (Error.to_string_hum err) ())
 
-let project ?(symbols = []) ?(roots = []) ?cache t =
+let project ?regions ?(symbols = []) ?(roots = []) ?cache t =
   if not (paused t) then not_paused ~fn:"project" t;
   let target = t.target in
   let module Theory = Bap_core_theory.Theory in
   let width = Theory.Target.code_addr_size target in
   let endian = endian target in
   let dumped = dump t in
-  let digest = digest t ~symbols ~roots dumped in
+  let digest = digest ?regions t ~symbols ~roots dumped in
   let build () =
     let code, data =
       List.fold dumped ~init:(Memmap.empty, Memmap.empty)
@@ -2614,7 +2672,7 @@ let project ?(symbols = []) ?(roots = []) ?cache t =
             |> Or_error.ok_exn
           in
           let tag = Value.create Image.section (region_name r) in
-          if r.executable then (Memmap.add code mem tag, data)
+          if selected ?regions r then (Memmap.add code mem tag, data)
           else (code, Memmap.add data mem tag))
     in
     (* the specification of the file, with the names of the script, and

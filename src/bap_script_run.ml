@@ -122,10 +122,12 @@ let rec load ~recompile file cmxs =
       | Some compile ->
           Stdlib.Sys.remove cmxs;
           load ~recompile:None file (compile ())
-      | None -> fail "%s" (Dynlink.error_message err))
+      | None -> fail "%s: %s" cmxs (Dynlink.error_message err))
 
 (* with [check], the script is compiled, and cached, if there is the
-   cache, but not run, and the errors of the compiler are of its lines *)
+   cache, but not run, and the errors of the compiler are of its lines.
+   It is compiled even when the cache has it, as the key can't include the
+   interfaces of the libraries, which a new bap may have changed *)
 let run ?cache ?(check = false) file args =
   let source =
     try In_channel.read_all file with Sys_error msg -> fail "%s" msg
@@ -138,7 +140,8 @@ let run ?cache ?(check = false) file args =
   let compile () = compile ~cache ~unit ~libs source in
   let cached = Filename.concat cache (unit ^ ".cmxs") in
   let cmxs, recompile =
-    if Stdlib.Sys.file_exists cached then (cached, Some compile)
+    if check then (compile (), None)
+    else if Stdlib.Sys.file_exists cached then (cached, Some compile)
     else (compile (), None)
   in
   if check then Stdlib.exit 0;

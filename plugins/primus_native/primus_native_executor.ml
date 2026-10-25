@@ -443,6 +443,9 @@ and session = {
           addresses and bytes, the latest first: of Primus, e.g., of the Lisp
           stubs, and of the instructions, that it interprets, and of the native
           functions of libc, see [Bap_emu.on_write] *)
+  mutable mirroring_stores : bool;
+      (** engine stores are being mirrored to the observers of Primus, so they
+          are not stores of Primus for [store_hooks] *)
   mutable exit_code : int option;
       (** the code, with which the program exited *)
   mutable engine_hooks : (engine -> unit) list;
@@ -540,6 +543,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     call_hooks = String.Table.create ();
     syscall_hooks = [];
     store_hooks = [];
+    mirroring_stores = false;
     call_deadline = None;
     exit_code = None;
     engine_hooks = [];
@@ -2662,8 +2666,11 @@ module Make (Machine : Primus.Machine.S) = struct
      them *)
   let stored (addr, x) =
     let+ s = session in
+    let mirrored = s.mirroring_stores in
+    s.mirroring_stores <- false;
     match s.store_hooks with
     | [] -> ()
+    | _ when mirrored -> ()
     | hooks ->
         let addr = int64_of_word (Primus.Value.to_word addr) in
         let byte = Word.to_int_exn (Primus.Value.to_word x) land 0xFF in
@@ -3503,14 +3510,19 @@ module Make (Machine : Primus.Machine.S) = struct
               Word.of_int64 ~width:8
                 Int64.(shift_right_logical value Int.(8 * shift) land 0xFFL) ))
       in
+      let stored addr byte =
+        e.session.mirroring_stores <- true;
+        let* () = Interpreter.notify_store addr byte in
+        e.session.mirroring_stores <- false;
+        Machine.return ()
+      in
       let* () =
         Machine.List.iter happened ~f:(fun event ->
             let notify, addr, size, value =
               match event with
               | Loaded (addr, size, value) ->
                   (Interpreter.notify_load, addr, size, value)
-              | Stored (addr, size, value) ->
-                  (Interpreter.notify_store, addr, size, value)
+              | Stored (addr, size, value) -> (stored, addr, size, value)
             in
             Machine.List.iter (bytes addr size value) ~f:(fun (addr, byte) ->
                 let* addr = Value.of_word addr in
@@ -3529,7 +3541,7 @@ module Make (Machine : Primus.Machine.S) = struct
                     let* byte =
                       Value.of_word (Word.of_int ~width:8 (Char.to_int c))
                     in
-                    Interpreter.notify_store addr byte))
+                    stored addr byte))
       in
       push_owned e
 

@@ -48,6 +48,26 @@ let () =
       printf "the cache is of the code %b, and loads faster %b\n"
         (Option.equal String.equal (Emu.project_digest again) (Some digest))
         Float.(loaded_again < built);
+      let main = addr "main" in
+      let only_main (r : Emu.region) =
+        Int64.(r.executable && r.lower <= main && main <= r.upper)
+      in
+      let scoped_digest = Emu.code_digest ~regions:only_main emu in
+      let scoped = Emu.project ~regions:only_main ~cache:cached emu in
+      let scoped_file = Filename.concat dir "scoped.proj" in
+      Emu.save_project scoped scoped_file;
+      let loaded_scoped = Emu.load_project scoped_file in
+      printf "scoped cache: of its code %b, %d of %d subs, %d of %d regions\n"
+        (Option.equal String.equal
+           (Emu.project_digest loaded_scoped)
+           (Some scoped_digest))
+        (Term.length sub_t (Project.program scoped))
+        (Term.length sub_t (Project.program proj))
+        (Sequence.length (Memmap.to_sequence (Project.memory loaded_scoped)))
+        (Sequence.length (Memmap.to_sequence (Project.memory proj)));
+      let full = Emu.project ~cache:cached emu in
+      printf "the scoped cache didn't change the full project %b\n"
+        (Option.equal String.equal (Emu.project_digest full) (Some digest));
       let xrefs = Xrefs.create loaded in
       let xfile = Filename.concat dir "echo.xrefs" in
       Xrefs.save xrefs xfile;

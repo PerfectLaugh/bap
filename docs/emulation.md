@@ -469,6 +469,17 @@ The project is in a unit of its own, named after the file with `#live` and a num
 
 `~roots:[ addr; ... ]` adds the addresses of code, that the disassembler starts from too, e.g., the targets of the calls of a trace, `Trace.calls`, which it names by their addresses, so that the functions, that only a run found, are functions of the project, with `Xrefs.function_of` and `callers`.
 
+For a focused query, `~regions:(fun r -> ...)` limits disassembly to the executable regions that the predicate selects. The other regions remain in `Project.memory`, so xrefs still read tables and pointers in them, but their symbols and roots do not start disassembly. For example, this disassembles only the region containing the discovered code:
+
+```ocaml
+let scope (r : Emu.region) =
+  Int64.(r.executable && r.lower <= discovered && discovered <= r.upper) in
+let proj = Emu.project emu ~regions:scope ~roots:[discovered]
+    ~cache:"unpacked.proj"
+```
+
+The selected extents are part of the project digest, so one cache filename is safe across different scopes. Pass the same `~regions`, `~symbols`, and `~roots` to `code_digest` when checking a saved project manually. For repeated queries, keep using `~cache` and `Xrefs.save`/`Xrefs.load` rather than rebuilding the scoped project and index.
+
 The disassembly of a large program takes minutes, so `project emu ~cache:"unpacked.proj"` loads the project from the file, if it is of the same code, and else builds it and saves it there. Underneath, `save_project proj file` saves the project, its program, with the addresses of its terms only, its memory, target, and the digest of the code, and `load_project file` loads it, without the disassembly; `code_digest emu` is the digest of the code of the paused program, its executable regions, symbols and roots, which tells, if a saved project is still of it:
 
 ```ocaml

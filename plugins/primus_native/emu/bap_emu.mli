@@ -643,11 +643,13 @@ val on_write :
         printf "%Lx: %d bytes at %Lx\n" (Emu.pc emu) size addr)
     ]}
 
-    The writes of the script, e.g., {!write}, aren't seen. A hook, that sees a
-    store of Primus, runs in Primus, where the engine doesn't run, so {!pc} is
-    of the instruction, that the engine ran last, e.g., the call of the stub,
-    and {!stop} pauses the program before the next instruction, that runs in the
-    engine. *)
+    A store is reported once, even when an access fault makes the engine retry
+    its instruction, and the engine's stores mirrored to Primus observers are
+    not reported again as stores of Primus. The writes of the script, e.g.,
+    {!write}, aren't seen. A hook, that sees a store of Primus, runs in Primus,
+    where the engine doesn't run, so {!pc} is of the instruction, that the
+    engine ran last, e.g., the call of the stub, and {!stop} pauses the program
+    before the next instruction, that runs in the engine. *)
 
 val scoped : t -> (unit -> 'a) -> 'a
 (** [scoped emu f] runs [f], and removes the hooks, that it added, when it
@@ -876,6 +878,7 @@ val provenance : t -> int64 -> provenance
     [Invalid_argument], if the program is not paused. *)
 
 val project :
+  ?regions:(region -> bool) ->
   ?symbols:(string * int64) list ->
   ?roots:int64 list ->
   ?cache:string ->
@@ -917,17 +920,28 @@ val project :
       let proj = Emu.project emu ~cache:"unpacked.proj" in
     ]}
 
+    With [regions], only the executable regions, for which the predicate returns
+    [true], are disassembled. The other regions stay in the memory of the
+    project, which the analyses read, but roots and symbols in them are not
+    disassembly starts. The selected extents are part of the cache digest, so
+    the same [cache] is safe to use with different scopes.
+
     Raises [Invalid_argument], if the program is not paused, and [Failure], if
     the project can't be created. *)
 
 val code_digest :
-  ?symbols:(string * int64) list -> ?roots:int64 list -> t -> string
+  ?regions:(region -> bool) ->
+  ?symbols:(string * int64) list ->
+  ?roots:int64 list ->
+  t ->
+  string
 (** [code_digest emu] the digest of the code of the paused program: the bytes of
     its executable regions, its symbols and roots, with [symbols] and [roots],
-    as {!project} takes them, and its target, which changes, when the program
-    changes its code, so that a script tells, if a saved project, see
-    {!save_project}, is of the code, that the program has now. Raises
-    [Invalid_argument], if the program is not paused. *)
+    as {!project} takes them, its target, and the extents selected by [regions],
+    which changes, when the program changes its code, so that a script tells, if
+    a saved project, see {!save_project}, is of the code, that the program has
+    now. Use the same [regions], [symbols], and [roots] as for {!project}.
+    Raises [Invalid_argument], if the program is not paused. *)
 
 val project_digest : project -> string option
 (** [project_digest proj] the digest of the code, that the project of

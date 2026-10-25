@@ -475,7 +475,35 @@ let scripts data =
         lacks env "doesn't run the script" ok "1635920155";
         let bad = check_script (input "script/error/script.ml") in
         check env "fails" (bad.status = Exited 1);
-        has env "tells the line of the script" bad "script\\.ml\", line 2");
+        has env "tells the line of the script" bad "script\\.ml\", line 2";
+        let cache = dir env in
+        let cached file =
+          bap ~timeout:300. env
+            [ "script"; "--cache-dir"; cache; "--check"; file; crc ]
+        in
+        let run = input "script/run.ml" in
+        check env "populates the cache" ((cached run).status = Exited 0);
+        let scripts = Filename.concat cache "scripts" in
+        let artifacts =
+          Sys.readdir scripts |> Array.to_list
+          |> List.filter (fun file -> Filename.check_suffix file ".cmxs")
+          |> Array.of_list
+        in
+        check env "has a cached artifact" (Array.length artifacts = 1);
+        Array.iter
+          (fun artifact ->
+            let out = Stdlib.open_out_bin (Filename.concat scripts artifact) in
+            Stdlib.output_string out "stale artifact";
+            Stdlib.close_out out)
+          artifacts;
+        let checked = cached run in
+        check env "rebuilds a stale artifact" (checked.status = Exited 0);
+        lacks env "still doesn't run the script" checked "1635920155";
+        let executed =
+          bap ~timeout:300. env [ "script"; "--cache-dir"; cache; run; crc ]
+        in
+        check env "runs the rebuilt artifact" (executed.status = Exited 0);
+        has env "has the script output" executed "1635920155");
   ]
 
 (* the bare projects of the scripts, which are not disassembled, run in
@@ -862,10 +890,10 @@ let emu data =
         in
         sequence env out
           [
-            ( "sees the sites in Unicorn",
-              "unicorn: stores to 40200b from 402004 40200f\n" );
-            ( "sees the sites in the lifted engine",
-              "lifted: stores to 40200b from 402004 40200f\n" );
+            ( "sees each store once in Unicorn",
+              "unicorn: stores to 40200b from 402004:2000 40200f:2000\n" );
+            ( "sees each store once in the lifted engine",
+              "lifted: stores to 40200b from 402004:2000 40200f:2000\n" );
           ]);
     (* the observer of the stores, that needs the stores to the code only,
        e.g., the dynamic code, sees them in both engines, which hook the

@@ -64,7 +64,16 @@ let () =
       ignore (Emu.run emu ~until:code : Emu.status);
       (* the code, that the program wrote, as a root, which is named by
          its address, and as a symbol *)
-      show (Emu.project emu ~roots:[ code ]);
+      let full = Emu.project emu ~roots:[ code ] in
+      show full;
+      let scoped =
+        Emu.project emu ~roots:[ code ] ~regions:(fun r ->
+            Int64.(r.executable && r.lower <= code && code <= r.upper))
+      in
+      show scoped;
+      printf "scoped memory: %d of %d regions\n"
+        (Sequence.length (Memmap.to_sequence (Project.memory scoped)))
+        (Sequence.length (Memmap.to_sequence (Project.memory full)));
       Emu.add_symbol emu "written" code;
       let proj = Emu.project emu in
       show proj;

@@ -12,12 +12,12 @@ let () =
     [ (`Unicorn, "unicorn"); (`Lifted, "lifted") ]
     ~f:(fun (engine, name) ->
       let emu = Emu.create ~engine (Bap_script.project file) in
-      let sites = Int64.Hash_set.create () in
-      Emu.on_write ~first:0x40200bL ~last:0x40200bL emu (fun emu _ _ _ ->
-          Hash_set.add sites (Emu.pc emu));
+      let stores = Int64.Table.create () in
+      Emu.on_write ~primus:true ~first:0x40200bL ~last:0x40200bL emu
+        (fun emu _ _ _ -> Hashtbl.incr stores (Emu.pc emu));
       ignore (Emu.run emu : Emu.status);
       printf "%s: stores to 40200b from%s\n" name
-        (Hash_set.to_list sites
-        |> List.sort ~compare:Int64.compare
-        |> List.map ~f:(sprintf " %Lx")
+        (Hashtbl.to_alist stores
+        |> List.sort ~compare:(fun (a, _) (b, _) -> Int64.compare a b)
+        |> List.map ~f:(fun (pc, count) -> sprintf " %Lx:%d" pc count)
         |> String.concat))

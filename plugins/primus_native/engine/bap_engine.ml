@@ -188,6 +188,8 @@ type access = Bap_unicorn.access =
   | Fetch_prot
   | Read_after
 
+let attempt = function Unicorn u -> Some (Uc.attempt u) | Lifted _ -> None
+
 let on_code ?first ?last t f =
   match t with
   | Unicorn u -> Unicorn_hook (Uc.on_code ?first ?last u f)

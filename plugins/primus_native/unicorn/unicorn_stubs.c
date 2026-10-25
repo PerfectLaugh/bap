@@ -29,6 +29,7 @@ struct hook {
     uc_hook handle;
     value closure;
     struct engine *engine;
+    int write;
     /* the trace, that the native hook of the code records, see
        [fixup], or NULL */
     struct trace *trace;
@@ -138,6 +139,9 @@ struct engine {
     uc_engine *uc;
     uc_arch arch;
     struct hook *hooks;
+    uc_hook attempt_hook;
+    int write_hooks;
+    uint64_t attempt;
     /* the writes, since the emulation stopped, see [mark] */
     int running;
     int wrote_regs;
@@ -279,6 +283,9 @@ value bap_uc_open(value arch, value mode) {
     e->uc = uc;
     e->arch = Int_val(arch);
     e->hooks = NULL;
+    e->attempt_hook = 0;
+    e->write_hooks = 0;
+    e->attempt = 0;
     e->running = 0;
     e->wrote_regs = 0;
     e->wrote_mem = 0;
@@ -745,6 +752,12 @@ static value call(struct hook *h, int n, value *args) {
     return r;
 }
 
+static void on_attempt(uc_engine *uc, uint64_t addr, uint32_t size,
+                       void *data) {
+    struct engine *e = data;
+    e->attempt++;
+}
+
 static void on_code(uc_engine *uc, uint64_t addr, uint32_t size,
                     void *data) {
     CAMLparam0();
@@ -840,18 +853,33 @@ value bap_uc_hook_add(value v, value kind, value types, value start,
     }
     h->closure = closure;
     h->engine = e;
+    h->write = Int_val(kind) == HOOK_MEM && (type & UC_HOOK_MEM_WRITE);
     h->trace = NULL;
     h->mem = NULL;
     h->sites = NULL;
     h->nsites = 0;
     caml_register_generational_global_root(&h->closure);
-    uc_err err =
-        Int_val(kind) == HOOK_INSN
-            ? uc_hook_add(uc, &h->handle, type, callback, h, Int64_val(start),
-                          Int64_val(stop), Int_val(types))
-            : uc_hook_add(uc, &h->handle, type, callback, h, Int64_val(start),
-                          Int64_val(stop));
+    uc_err err = UC_ERR_OK;
+    if (h->write && e->write_hooks++ == 0) {
+        err = uc_hook_add(uc, &e->attempt_hook, UC_HOOK_CODE, on_attempt, e, 1,
+                          0);
+        if (err != UC_ERR_OK) {
+            e->write_hooks--;
+        }
+    }
+    if (err == UC_ERR_OK) {
+        err = Int_val(kind) == HOOK_INSN
+                  ? uc_hook_add(uc, &h->handle, type, callback, h,
+                                Int64_val(start), Int64_val(stop),
+                                Int_val(types))
+                  : uc_hook_add(uc, &h->handle, type, callback, h,
+                                Int64_val(start), Int64_val(stop));
+    }
     if (err != UC_ERR_OK) {
+        if (h->write && e->write_hooks > 0 && --e->write_hooks == 0) {
+            uc_hook_del(uc, e->attempt_hook);
+            e->attempt_hook = 0;
+        }
         caml_remove_generational_global_root(&h->closure);
         free(h);
         fail(err);
@@ -946,11 +974,19 @@ value bap_uc_hook_del(value v, value handle) {
     }
     struct hook *h = *p;
     check(uc_hook_del(engine_uc(v), hh));
+    if (h->write && --e->write_hooks == 0) {
+        check(uc_hook_del(engine_uc(v), e->attempt_hook));
+        e->attempt_hook = 0;
+    }
     *p = h->next;
     caml_remove_generational_global_root(&h->closure);
     free(h->sites);
     free(h);
     return Val_unit;
+}
+
+value bap_uc_attempt(value v) {
+    return caml_copy_int64(Engine_val(v)->attempt);
 }
 
 value bap_uc_context_save(value v) {

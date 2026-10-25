@@ -2,6 +2,8 @@ the project is of the code true
 loaded: of the code true, 22 of 22 subs, 4 of 4 regions
 the program isn't a saved project
 the cache is of the code true, and loads faster true
+scoped cache: of its code true, 22 of 22 subs, 4 of 4 regions
+the scoped cache didn't change the full project true
 xrefs 47, print_endline is called by print_strings
 the slice of the loaded project 400733 400734 40073b 40073f 400743 40075d 400761
 the patched code is of the project false

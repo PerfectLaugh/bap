@@ -3,6 +3,8 @@ regions: 4, the file: 400000-400ce3 r-x 600e10-6030c7 rw- 603168-60316f rw-
 400727: RDI := 0xA
 patched 400727: RDI := 0x2B
 13 subs, 12 with code: __do_global_dtors_aux@400470 _dl_relocate_static_pie@4003f0 _fini@400630 _init@40033c _start@4003c0 deregister_tm_clones@400400 frame_dummy@4004a0 main@4004c0 mprotect@400380 putc@400370 register_tm_clones@400430 sub_405000@405000
+1 subs, 1 with code: sub_405000@405000
+scoped memory: 7 of 7 regions
 13 subs, 12 with code: __do_global_dtors_aux@400470 _dl_relocate_static_pie@4003f0 _fini@400630 _init@40033c _start@4003c0 deregister_tm_clones@400400 frame_dummy@4004a0 main@4004c0 mprotect@400380 putc@400370 register_tm_clones@400430 written@405000
   RAX := 0x2A
   RSP := RSP + 8

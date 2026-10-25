@@ -87,6 +87,7 @@ external stop : t -> unit = "bap_uc_emu_stop"
 external interrupted : unit -> bool = "bap_uc_interrupted"
 external process_signals : unit -> unit = "bap_uc_process_signals"
 external hook_del : t -> int64 -> unit = "bap_uc_hook_del"
+external attempt : t -> int64 = "bap_uc_attempt"
 
 let supported arch = supported_code (arch_code arch)
 let create arch mode = create_code (arch_code arch) mode

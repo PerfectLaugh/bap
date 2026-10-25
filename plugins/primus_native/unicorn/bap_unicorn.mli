@@ -180,6 +180,10 @@ type access =
 val on_code : ?first:int64 -> ?last:int64 -> t -> (int64 -> int -> unit) -> hook
 (** [on_code uc f] calls [f addr size] before each instruction. *)
 
+val attempt : t -> int64
+(** [attempt uc] is the number of instruction attempts, counted while a write
+    hook is registered. *)
+
 val on_sites : t -> int64 list -> (int64 -> int -> unit) -> hook list
 (** [on_sites uc sites f] calls [f addr size] before each instruction at one of
     the [sites], with a hook for each cluster of the sites, that are at most 16
