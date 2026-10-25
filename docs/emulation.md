@@ -236,6 +236,7 @@ The engine lifts the instructions of a block, that it compiles, a few ahead of t
 | `on_code ?first ?last emu f` | before each instruction in the range |
 | `on_read`, `on_write` | before each load or store in the range |
 | `on_call emu name f` | when the program calls the function; `f` returns `Default` to run it, or `Return x` to return `x` at once |
+| `shell emu` | a prompt with the commands of the debugger on the paused program, see below |
 
 A hook doesn't see again the instruction, before which it paused the program, when the program continues from there, so `on_code` may `stop` the program at an address unconditionally, and `run` stops there the next time the code reaches it.
 
@@ -258,6 +259,37 @@ Emu.on_code emu ~first:unpacked ~last:unpacked (fun emu _ ->
 ```
 
 `save` from a hook defers itself, so a checkpoint is saved before the instruction the hook sees.
+
+### The shell
+
+`shell emu` turns a pause into a prompt: it reads the commands of the [debugger](#the-debugger) from the standard input, or from `~input`, runs them on the paused program, and returns the status of the program at `q`, or at the end of the input, so the script goes on:
+
+```ocaml
+match Emu.run emu ~until:suspicious with
+| Paused -> ignore (Emu.shell emu)
+| _ -> ()
+```
+
+```
+(emu) pc
+paused at 400596 in decrypt
+(emu) x RDI 32
+3f8ffea0: 4e 6f 77 20 77 65 20 77 69 6c 6c 20 70 72 69 6e  |Now we will prin|
+3f8ffeb0: 74 20 73 6f 6d 65 20 72 61 6e 64 6f 6d 20 73 74  |t some random st|
+(emu) b print_endline
+breakpoint at 400726
+(emu) c
+paused at 400726 in print_endline
+(emu) q
+```
+
+Besides the commands of the debugger, `c ADDR` continues to an address, `s N` steps `N` instructions, `insn ADDR` and `lifted ADDR LEN` show the code as the lifted engine ran it, `bir ADDR` lifts the instruction from its bytes, `call NAME ARG...` calls a function of the program, `sym PREFIX`, `regions`, and `origin ADDR` show the functions, the memory map, and where a byte comes from, `snap` and `restore N` take and restore snapshots, `save FILE` saves a checkpoint, `q` leaves the shell, and `exit CODE` exits bap. An address is a number, a function, or a register. The breakpoints stay, and stop the program when the script runs it too. From a hook, `shell` opens at the pause the hook asks for, see `defer`, so a breakpoint of the script becomes a prompt:
+
+```ocaml
+Emu.on_code emu ~first:decrypt ~last:decrypt (fun emu _ -> ignore (Emu.shell emu))
+```
+
+The script's own code doesn't run at the prompt, as the script is compiled to native code; for OCaml at a prompt, run the script in `baptop`, which loads `bap-primus-native.emu` like any library.
 
 ### Traces and slices
 

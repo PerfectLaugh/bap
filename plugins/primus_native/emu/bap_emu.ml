@@ -24,6 +24,17 @@ type state =
   | Ended of Primus.exit_status * (X.request, state) Effect.Deep.continuation
   | Running  (** the program runs, e.g., in a hook *)
 
+(* the machine, which is of the system of the emulator, as the systems
+   number their machines alike *)
+type snapshot = { owner : X.session; id : Primus.Machine.id }
+
+(* the state of the shell, see [shell]: the breakpoints, with the
+   functions, that remove them, and the snapshots, the last first *)
+type shell_state = {
+  breaks : (unit -> unit) Int64.Table.t;
+  mutable snaps : snapshot list;
+}
+
 (* the emulator, whose system has its own session, i.e., its own engine
    and the state of the executor, so that the emulators run side by side *)
 type t = {
@@ -56,6 +67,7 @@ type t = {
   mutable stopped : bool;
       (** if a hook stopped the program, see [stop], so that it stays paused
           after the deferred actions *)
+  shell : shell_state;
 }
 
 let engine t =
@@ -301,6 +313,7 @@ let create ?system ?(components = []) ?(init = []) ?(redirects = [])
       thumb_insns = Int64.Table.create ();
       deferred = Queue.create ();
       stopped = false;
+      shell = { breaks = Int64.Table.create (); snaps = [] };
     }
   in
   finish t
@@ -337,10 +350,6 @@ let set_pc t addr =
   match t.state with
   | Suspended _ -> resume t (X.Set_pc addr)
   | _ -> invalid_arg "Bap_emu: the program is not paused"
-
-(* the machine, which is of the system of the emulator, as the systems
-   number their machines alike *)
-type snapshot = { owner : X.session; id : Primus.Machine.id }
 
 let machine t =
   match t.state with
@@ -2865,3 +2874,324 @@ module Symbolic = struct
     S.SMT.check ?timeout (S.SMT.inverse b.formula :: b.path)
     |> Option.map ~f:(model b.inputs)
 end
+
+(* The shell, which reads the commands of the debugger, see bap:debugger,
+   and runs them on the paused program, so that a script drops into it at
+   a pause, e.g., at a breakpoint, and the user inspects and continues
+   the program, see [shell]. *)
+
+let shell_help =
+  {|commands:
+  c, continue [ADDR|NAME]  continue, to the address, or to the next stop
+  s, step [N]              run N (1) instructions
+  b, break ADDR|NAME       stop at the address, or the function
+  d, delete ADDR|NAME      remove the breakpoint
+  breaks                   list the breakpoints
+  pc                       show the program counter, and its function
+  regs                     show the registers, without the aliases
+  reg NAME                 show the register
+  set NAME VALUE           set the register
+  x ADDR [LEN]             dump LEN (64) bytes of the memory
+  write ADDR BYTE...       store the bytes to the memory
+  insn ADDR                the instruction, that the lifted engine ran at the
+                           address, with the bytes it was lifted from
+  lifted ADDR [LEN]        dump LEN (64) bytes of the code, that the lifted
+                           engine ran, as it was lifted
+  bir ADDR                 the BIR of the instruction at the address, lifted
+                           from the bytes, that the memory has
+  call ADDR|NAME ARG...    call the function with the arguments, and show
+                           its result
+  sym [PREFIX]             the functions, whose names have the prefix
+  regions                  the memory map
+  origin ADDR              where the byte comes from: stored, generated,
+                           mapped, or unmapped
+  snap                     take a snapshot, and show its number
+  restore [N]              restore the snapshot, the last by default
+  save FILE                save the checkpoint
+  q, quit                  leave the shell, after which the script goes on
+  exit [CODE]              exit bap with CODE (0)
+  help                     show this help
+an ADDR is a number, e.g., 0x400000, a function, or a register|}
+
+let number s = match Int64.of_string s with x -> Some x | exception _ -> None
+
+(* the address: a number, the address of a function, or the value of a
+   register *)
+let resolve t s =
+  match number s with
+  | Some x -> Some x
+  | None -> (
+      match List.Assoc.find (symbols t) ~equal:String.equal s with
+      | Some a -> Some a
+      | None -> (
+          match reg t s with
+          | x -> Some x
+          | exception Invalid_argument _ -> None))
+
+(* the bytes, that are readable, by one, where the line isn't *)
+let bytes_at t addr n =
+  match read t addr n with
+  | s -> List.map (String.to_list s) ~f:Option.some
+  | exception Invalid_argument _ ->
+      List.init n ~f:(fun i ->
+          match read t Int64.(addr + of_int i) 1 with
+          | s -> Some s.[0]
+          | exception Invalid_argument _ -> None)
+
+(* the lines of 16 bytes, as the debugger dumps them *)
+let dump out base bytes =
+  let say fmt = ksprintf out fmt in
+  List.chunks_of bytes ~length:16
+  |> List.iteri ~f:(fun i line ->
+      let hex =
+        List.map line ~f:(function
+          | Some c -> sprintf "%02x" (Char.to_int c)
+          | None -> "??")
+      in
+      let chars =
+        List.map line ~f:(function
+          | Some c when Char.is_print c -> c
+          | _ -> '.')
+      in
+      say "%Lx: %-47s |%s|"
+        Int64.(base + of_int Int.(i * 16))
+        (String.concat ~sep:" " hex)
+        (String.of_char_list chars))
+
+let hex_bytes s =
+  String.concat ~sep:" "
+    (List.map (String.to_list s) ~f:(fun c -> sprintf "%02x" (Char.to_int c)))
+
+(* the breakpoint stops the program at the address, in the engines of
+   the emulator, see [installed], until it is removed, after which its
+   hooks stay, idle *)
+let add_break t addr =
+  let addr = match arch t with Arm -> Int64.(addr land lnot 1L) | _ -> addr in
+  if not (Hashtbl.mem t.shell.breaks addr) then begin
+    let active = ref true in
+    let install (e : X.engine) =
+      let fresh = instructions t in
+      ignore
+        (Uc.on_code ~first:addr ~last:addr e.uc (fun a _ ->
+             if !active && fresh a then stop t)
+          : Uc.hook)
+    in
+    installed t install;
+    Hashtbl.set t.shell.breaks ~key:addr ~data:(fun () ->
+        active := false;
+        t.session.engine_hooks <-
+          List.filter t.session.engine_hooks ~f:(fun f ->
+              not (phys_equal f install)))
+  end
+
+let delete_break t addr =
+  let addr = match arch t with Arm -> Int64.(addr land lnot 1L) | _ -> addr in
+  match Hashtbl.find_and_remove t.shell.breaks addr with
+  | Some remove -> remove ()
+  | None -> ()
+
+(* where the program is, after a command, that ran it *)
+let where out t =
+  let say fmt = ksprintf out fmt in
+  match status t with
+  | Paused ->
+      let pc = pc t in
+      let f = try function_at t pc with Invalid_argument _ -> None in
+      say "paused at %Lx%s" pc
+        (Option.value_map f ~default:"" ~f:(( ^ ) " in "))
+  | Running -> say "running"
+  | Exited code ->
+      say "exited%s" (Option.value_map code ~default:"" ~f:(sprintf " with %d"))
+  | Failed msg -> say "failed: %s" msg
+
+(* the registers of the target, without the aliases, e.g., EAX of RAX *)
+let main_registers t =
+  let module Theory = Bap_core_theory.Theory in
+  let names =
+    Theory.Target.regs ~exclude:[ Theory.Role.Register.alias ] t.target
+    |> Set.to_list
+    |> List.map ~f:Theory.Var.name
+    |> String.Set.of_list
+  in
+  List.filter (registers t) ~f:(Set.mem names)
+
+let show_reg out t name =
+  let say fmt = ksprintf out fmt in
+  say "%s = %s" name (Format.asprintf "%a" Word.pp_hex (reg_word t name))
+
+(* runs the command, and tells, whether the shell stays *)
+let execute t out words =
+  let say fmt = ksprintf out fmt in
+  let stay = true and leave = false in
+  let with_addr s f =
+    match resolve t s with
+    | Some a -> f a
+    | None -> say "%s is not an address" s
+  in
+  let len rest default =
+    match rest with
+    | [ n ] -> Option.value_map (number n) ~default ~f:Int64.to_int_exn
+    | _ -> default
+  in
+  (match words with
+  | [] -> ()
+  | ("c" | "continue") :: rest ->
+      (match rest with
+      | [ point ] ->
+          with_addr point (fun until -> ignore (run t ~until : status))
+      | _ -> ignore (run t : status));
+      where out t
+  | ("s" | "step") :: rest ->
+      let n = len rest 1 in
+      let rec steps i =
+        if i < n && Poly.equal (status t) Paused then begin
+          ignore (step t : status);
+          steps (i + 1)
+        end
+      in
+      steps 0;
+      where out t
+  | ("b" | "break") :: [ point ] ->
+      with_addr point (fun a ->
+          add_break t a;
+          say "breakpoint at %Lx" a)
+  | ("d" | "delete") :: [ point ] -> with_addr point (delete_break t)
+  | [ "breaks" ] ->
+      Hashtbl.keys t.shell.breaks
+      |> List.sort ~compare:Int64.compare
+      |> List.iter ~f:(fun a ->
+          say "%Lx%s" a
+            (Option.value_map (function_at t a) ~default:"" ~f:(( ^ ) " ")))
+  | [ "pc" ] -> where out t
+  | [ "regs" ] -> List.iter (main_registers t) ~f:(show_reg out t)
+  | [ "reg"; name ] -> show_reg out t name
+  | [ "set"; name; value ] -> (
+      match resolve t value with
+      | Some x -> set_reg t name x
+      | None -> say "%s is not a value" value)
+  | "x" :: addr :: rest ->
+      with_addr addr (fun a -> dump out a (bytes_at t a (len rest 64)))
+  | "write" :: addr :: (_ :: _ as bytes) ->
+      with_addr addr (fun a ->
+          match
+            List.map bytes ~f:(fun b ->
+                match number b with
+                | Some x when Int64.(x >= 0L && x < 256L) ->
+                    Char.of_int_exn (Int64.to_int_exn x)
+                | _ -> failwithf "%s is not a byte" b ())
+          with
+          | bytes -> write t a (String.of_char_list bytes)
+          | exception Failure msg -> say "%s" msg)
+  | [ "insn"; addr ] ->
+      with_addr addr (fun a ->
+          match insn_at t a with
+          | Some i ->
+              say "%s %s%s" i.name (hex_bytes i.bytes)
+                (if i.thumb then " (thumb)" else "")
+          | None -> say "the lifted engine ran nothing at %Lx" a)
+  | "lifted" :: addr :: rest ->
+      with_addr addr (fun a ->
+          let code = lifted_bytes t a (len rest 64) in
+          if String.is_empty code then
+            say "the lifted engine ran nothing at %Lx" a
+          else dump out a (List.map (String.to_list code) ~f:Option.some))
+  | [ "bir"; addr ] ->
+      with_addr addr (fun a ->
+          match bir t a with
+          | Some (size, blks) ->
+              say "%d bytes" size;
+              List.iter blks ~f:(fun blk -> say "%s" (Blk.to_string blk))
+          | None -> say "not an instruction at %Lx" a)
+  | "call" :: f :: args ->
+      with_addr f (fun a ->
+          match
+            List.map args ~f:(fun x ->
+                match resolve t x with
+                | Some x -> x
+                | None -> failwithf "%s is not an argument" x ())
+          with
+          | exception Failure msg -> say "%s" msg
+          | args -> (
+              match call t a ~args with
+              | Some x -> say "%Ld (%Lx)" x x
+              | None -> say "the call paused, see pc"))
+  | "sym" :: rest ->
+      let prefix = match rest with [ p ] -> p | _ -> "" in
+      List.iter (symbols t) ~f:(fun (name, a) ->
+          if String.is_prefix name ~prefix then say "%Lx %s" a name)
+  | [ "regions" ] ->
+      List.iter (regions t) ~f:(fun r ->
+          say "%Lx-%Lx %c%c%c" r.lower r.upper
+            (if r.readable then 'r' else '-')
+            (if r.writable then 'w' else '-')
+            (if r.executable then 'x' else '-'))
+  | [ "origin"; addr ] ->
+      with_addr addr (fun a ->
+          say "%s"
+            (match provenance t a with
+            | Stored -> "stored"
+            | Generated -> "generated"
+            | Mapped -> "mapped"
+            | Unmapped -> "unmapped"))
+  | [ "snap" ] ->
+      t.shell.snaps <- snapshot t :: t.shell.snaps;
+      say "snapshot %d" (List.length t.shell.snaps)
+  | "restore" :: rest -> (
+      let n = len rest (List.length t.shell.snaps) in
+      match List.nth (List.rev t.shell.snaps) (n - 1) with
+      | Some snap ->
+          restore t snap;
+          where out t
+      | None -> say "no snapshot %d" n)
+  | [ "save"; file ] ->
+      save t file;
+      say "saved"
+  | ("q" | "quit") :: _ -> ()
+  | "exit" :: rest -> Stdlib.exit (len rest 0)
+  | _ -> say "%s" shell_help);
+  match words with ("q" | "quit") :: _ -> leave | _ -> stay
+
+(* a failed command, e.g., a store to a page, that isn't mapped, doesn't
+   leave the shell *)
+let execute t out words =
+  try execute t out words
+  with Invalid_argument msg | Failure msg ->
+    out (sprintf "error: %s" msg);
+    true
+
+let rec shell ?(input = In_channel.stdin) ?(output = Out_channel.stdout)
+    ?(prompt = "(emu) ") t =
+  match t.state with
+  | Running ->
+      (* the shell opens at the pause, that the hook asks for *)
+      defer t (fun t -> ignore (shell ~input ~output ~prompt t : status));
+      status t
+  | _ ->
+      let out s =
+        Out_channel.output_string output s;
+        Out_channel.newline output;
+        Out_channel.flush output
+      in
+      (* the commands of a file are shown, as the ones, that are typed,
+         are *)
+      let tty =
+        try Caml_unix.isatty (Caml_unix.descr_of_in_channel input)
+        with _ -> false
+      in
+      let rec loop () =
+        Out_channel.output_string output prompt;
+        Out_channel.flush output;
+        match In_channel.input_line input with
+        | None ->
+            Out_channel.newline output;
+            Out_channel.flush output
+        | Some line ->
+            if not tty then out line;
+            let words =
+              String.split_on_chars line ~on:[ ' '; '\t' ]
+              |> List.filter ~f:(Fn.non String.is_empty)
+            in
+            if execute t out words then loop ()
+      in
+      loop ();
+      status t

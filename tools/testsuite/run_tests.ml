@@ -1136,6 +1136,19 @@ let emu data =
             ]
         in
         golden env "emu/live/hooks.txt" out.text);
+    (* the shell, with the commands of the debugger, at a pause, and from
+       a hook, see shell.ml *)
+    case "emu/live/shell" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/live/shell.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              dir env;
+            ]
+        in
+        golden env "emu/live/shell.txt" out.text);
     (* the emulators run side by side, each in its own engine, also of
        another target, with their own registers, memory, names and
        hooks *)

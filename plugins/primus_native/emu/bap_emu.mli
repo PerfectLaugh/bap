@@ -147,6 +147,35 @@ val defer : t -> (t -> unit) -> unit
 
     Raises [Invalid_argument], if the program ended. *)
 
+val shell :
+  ?input:In_channel.t -> ?output:Out_channel.t -> ?prompt:string -> t -> status
+(** [shell emu] reads the commands of the debugger, see [bap:debugger], from
+    [input], the standard input by default, and runs them on the paused program,
+    until [q], or the end of the input, after which it returns the status of the
+    program, so that the script goes on, e.g., at a breakpoint:
+
+    {[
+    match Emu.run emu ~until:suspicious with
+    | Paused -> ignore (Emu.shell emu)
+    | _ -> ()
+    ]}
+
+    The commands continue and step the program, set and delete breakpoints, show
+    and set the registers, dump and write the memory, show the instruction the
+    lifted engine ran at an address, see {!insn_at}, and its BIR, see {!bir},
+    call a function, see {!call}, list the functions and the regions, take and
+    restore snapshots, save a checkpoint, and exit bap; [help] lists them. An
+    address is a number, e.g., [0x400000], the name of a function, or a
+    register, whose value it is, e.g., [x RDI 16]. The breakpoints stay, while
+    the emulator does, and stop the program, also when the script runs it. A
+    command, that fails, says so, and the shell stays. The commands of a file
+    are shown after the prompt, as the ones, that are typed, are. The prompt,
+    [(emu) ] by default, and the output go to [output], the standard output by
+    default.
+
+    In a hook, the shell opens at the pause, that the hook asks for, see
+    {!defer}, and returns [Running] at once. *)
+
 val pc : t -> int64
 (** the address of the next instruction, with the lower bit set in the Thumb
     state of ARM, or, in a hook, e.g., of {!on_write}, of the instruction, that

@@ -1,0 +1,116 @@
+(emu) pc
+paused at 40076b in main
+(emu) b print_endline
+breakpoint at 4006ed
+(emu) b 0x400727
+breakpoint at 400727
+(emu) breaks
+4006ed print_endline
+400727
+(emu) c
+paused at 4006ed in print_endline
+(emu) x RSP 8
+3ffffee0: 58 07 40 00 00 00 00 00                         |X.@.....|
+(emu) s 2
+paused at 4006f1
+(emu) reg RDI
+RDI = 0x603180
+(emu) set RSI RDI
+(emu) reg RSI
+RSI = 0x603180
+(emu) snap
+snapshot 1
+(emu) c print_strings
+paused at 400727
+(emu) c
+paused at 4006ed in print_endline
+(emu) x RDI 16
+6031c0: 68 65 6c 6c 6f 00 00 00 03 00 00 00 00 00 00 00 |hello...........|
+(emu) restore
+paused at 4006f1
+(emu) reg RDI
+RDI = 0x603180
+(emu) d 0x400727
+(emu) d print_endline
+(emu) breaks
+(emu) write RDI 0x4e 0x4f 0x57
+(emu) x RDI 3
+603180: 4e 4f 57                                        |NOW|
+(emu) origin RDI
+stored
+(emu) origin main
+mapped
+(emu) insn main
+PUSH64r 55
+(emu) lifted main
+40076b: 55 48 89 e5 41 54 53 48 83 ec 50 89 7d ac 48 89 |UH..ATSH..P.}.H.|
+40077b: 75 a0 48 89 e6 49 89 f4 c7 45 bc 08 00 00 00 8b |u.H..I...E......|
+40078b: 75 bc 8b 7d ac 01 fe 83 c6 01 89 75 c0 8b 75 c0 |u..}.......u..u.|
+40079b: 48 63 f6 48 83 ee 01 48 89 75 c8 8b 75 c0 48 63 |Hc.H...H.u..u.Hc|
+(emu) bir main
+1 bytes
+000026d1:
+000026c6: #0 := RBP
+000026ca: RSP := RSP - 8
+000026d0: mem := mem with [RSP, el]:u64 <- #0
+(emu) sym print
+4006ed print_endline
+400733 print_strings
+(emu) regions
+400000-400ce3 r-x
+600e10-6030c7 rw-
+603168-64316f rw-
+3f800000-40000183 rw-
+(emu) call print_endline RDI
+10 (a)
+(emu) save shell.ckpt
+saved
+(emu) nonsense
+commands:
+  c, continue [ADDR|NAME]  continue, to the address, or to the next stop
+  s, step [N]              run N (1) instructions
+  b, break ADDR|NAME       stop at the address, or the function
+  d, delete ADDR|NAME      remove the breakpoint
+  breaks                   list the breakpoints
+  pc                       show the program counter, and its function
+  regs                     show the registers, without the aliases
+  reg NAME                 show the register
+  set NAME VALUE           set the register
+  x ADDR [LEN]             dump LEN (64) bytes of the memory
+  write ADDR BYTE...       store the bytes to the memory
+  insn ADDR                the instruction, that the lifted engine ran at the
+                           address, with the bytes it was lifted from
+  lifted ADDR [LEN]        dump LEN (64) bytes of the code, that the lifted
+                           engine ran, as it was lifted
+  bir ADDR                 the BIR of the instruction at the address, lifted
+                           from the bytes, that the memory has
+  call ADDR|NAME ARG...    call the function with the arguments, and show
+                           its result
+  sym [PREFIX]             the functions, whose names have the prefix
+  regions                  the memory map
+  origin ADDR              where the byte comes from: stored, generated,
+                           mapped, or unmapped
+  snap                     take a snapshot, and show its number
+  restore [N]              restore the snapshot, the last by default
+  save FILE                save the checkpoint
+  q, quit                  leave the shell, after which the script goes on
+  exit [CODE]              exit bap with CODE (0)
+  help                     show this help
+an ADDR is a number, e.g., 0x400000, a function, or a register
+(emu) x nowhere
+nowhere is not an address
+(emu) x 0x12
+12: ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? |................|
+22: ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? |................|
+32: ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? |................|
+42: ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? |................|
+(emu) q
+left the shell, paused at 4006f1
+the checkpoint is at the pause true
+the shell opens at the pause
+(hook) pc
+paused at 40094d
+(hook) reg RDI
+RDI = 0xA
+(hook) q
+exited 0
