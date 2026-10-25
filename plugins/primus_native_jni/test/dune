@@ -1,0 +1,19 @@
+(tests
+ (names test_jni test_android)
+ (package bap-primus-native-jni)
+ (preprocess
+  (pps ppx_bap))
+ (libraries
+  bap
+  bap-arm
+  bap-core-theory
+  bap-mips
+  bap-powerpc
+  bap-primus-native.plugin
+  bap-primus-native.unicorn
+  bap-primus-native.engine
+  bap-primus-native.emu
+  bap-primus-native-jni.jni
+  bap-riscv
+  bap-x86
+  core))

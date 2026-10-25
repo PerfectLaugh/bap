@@ -1039,6 +1039,7 @@ under GPL-2.0, unlike the rest of BAP.")
   (bap-main (= :version))
   (bap-primus (= :version))
   (bap-primus-lisp (= :version))
+  (bap-primus-native-jni (= :version))
   (bap-primus-symbolic-executor (= :version))
   (bap-std (= :version))
   (bap-taint (= :version))
@@ -1052,6 +1053,15 @@ under GPL-2.0, unlike the rest of BAP.")
   (bap-powerpc (and :with-test (= :version)))
   (bap-riscv (and :with-test (= :version)))
   (bap-x86 (and :with-test (= :version)))))
+
+(package
+ (name bap-primus-native-jni)
+ (synopsis "JNI and Android models for native BAP emulators")
+ (tags (bap bap-primus jni android))
+ (depends
+  (bap-common (= :version))
+  core
+  (ppx_bap (= :version))))
 
 (package
  (name bap-primus-wandering-scheduler)

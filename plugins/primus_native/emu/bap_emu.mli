@@ -1033,7 +1033,22 @@ module Static = Bap_emu_slice
 module Jni : sig
   type emulator = t
 
-  include module type of Bap_emu_jni
+  include
+    module type of Bap_emu_jni with
+      type t = Bap_emu_jni.t and
+      type object_id = Bap_emu_jni.object_id and
+      type call = Bap_emu_jni.call and
+      type answer = Bap_emu_jni.answer and
+      type handler = Bap_emu_jni.handler and
+      type method_decl = Bap_emu_jni.method_decl and
+      type field_decl = Bap_emu_jni.field_decl and
+      type class_decl = Bap_emu_jni.class_decl and
+      type object_decl = Bap_emu_jni.object_decl and
+      type call_record = Bap_emu_jni.call_record and
+      type identity = Bap_emu_jni.identity and
+      type kind = Bap_emu_jni.kind and
+      type event = Bap_emu_jni.event and
+      type layout = Bap_emu_jni.layout
 
   val install : t -> emulator -> layout -> unit
   val serve : t -> emulator -> unit

@@ -1,5 +1,5 @@
 (tests
- (names test_unicorn test_regs test_native test_jni test_android)
+ (names test_unicorn test_regs test_native)
  (package bap-primus-native)
  (preprocess
   (pps ppx_bap))

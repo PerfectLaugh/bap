@@ -1,0 +1,21 @@
+(library
+ (name bap_emu_jni)
+ (public_name bap-primus-native-jni.jni)
+ (wrapped false)
+ (modules bap_emu_jni bap_emu_android)
+ (preprocess
+  (pps ppx_bap))
+ (libraries core))
+
+(library
+ (name bap_primus_native_jni_main)
+ (public_name bap-primus-native-jni.plugin)
+ (modules primus_native_jni_main)
+ (libraries bap-primus-native-jni.jni))
+
+(plugin
+ (name primus-native-jni)
+ (package bap-primus-native-jni)
+ (libraries bap-primus-native-jni.plugin)
+ (site
+  (bap-common plugins)))

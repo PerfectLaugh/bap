@@ -599,6 +599,8 @@ Replay injects the recorded string values instead of rereading native argument b
 
 ### Android models
 
+JNI and Android models live in the separate `bap-primus-native-jni` package and plugin. `bap-primus-native.emu` depends on it and keeps the `Emu.Jni` and `Emu.Android` aliases, so existing scripts do not need changes; direct users may require `bap-primus-native-jni.jni`.
+
 `Emu.Android` complements JNI with ServiceManager, IBinder, and stateful Parcel objects. Service declarations provide stable identities, return classes, and transaction handlers. Parcels support `obtain`, `writeInterfaceToken`, `writeInt`, `readInt`, `transact`, and `readException`:
 
 ```ocaml
