@@ -73,9 +73,11 @@ let riscv t =
      extension, also on RV32 *)
   let flts = untyped @@ vars 'F' r64 in
   (* the control and status of the floats, the accrued exceptions
-     (fflags) and the rounding mode (frm), that the CSRs 1-3 access *)
+     (fflags) and the rounding mode (frm), that the CSRs 1-3 access,
+     and the vector rounding mode, that CSR 0xa accesses *)
   let fcsr = reg r32 "FCSR" in
-  let vars = ints @< flts @< [ pc ] @< [ mem ] @< [ fcsr ] in
+  let vxrm = reg r32 "VXRM" in
+  let vars = ints @< flts @< [ pc ] @< [ mem ] @< [ fcsr ] @< [ vxrm ] in
   let bits = Theory.Bitv.size t in
   let name = sprintf "riscv%d" bits in
   let x i = select ints ~mask:i in
@@ -88,7 +90,7 @@ let riscv t =
           ([ general; floating ], flts);
           ([ constant; zero; pseudo ], x [ 0 ]);
           ([ pseudo ], untyped @@ [ pc ]);
-          ([ system ], untyped @@ [ fcsr ]);
+          ([ system ], untyped @@ [ fcsr; vxrm ]);
           ([ function_argument ], x (10 -- 17) @ f (10 -- 17));
           ([ function_return ], x (10 -- 12) @ f (10 -- 12));
           ([ link ], x [ 1 ]);

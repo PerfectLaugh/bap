@@ -29,7 +29,6 @@
 63 60 b5 00  # bltu a0, a1, 0x3744 <sat_add_u8+0x26>
 63 40 07 00  # bltz a4, 0x876 <shr_i128+0x8>
 63 10 e6 00  # bne a2, a4, 0x108 <atomic_cas_u8+0x24>
-73 50 a0 00  # csrwi vxrm, 0x0
 33 45 b5 02  # div a0, a0, a1
 33 55 b5 02  # divu a0, a0, a1
 3b 55 b5 02  # divuw a0, a0, a1

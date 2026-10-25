@@ -971,6 +971,18 @@ module Static = Bap_emu_slice
 (** the static slices of the code of a program, e.g., of {!project}, see
     [Bap_emu_slice] *)
 
+(** the Java Native Interface model, see [Bap_emu_jni] *)
+module Jni : sig
+  type emulator = t
+
+  include module type of Bap_emu_jni
+
+  val install : t -> emulator -> layout -> unit
+  val serve : t -> emulator -> unit
+  val serve_vm : t -> emulator -> unit
+  val read_string : emulator -> int64 -> string
+end
+
 val knowledge : t -> Bap_knowledge.Knowledge.state option
 (** the knowledge of the system, when it finished, e.g., of the instructions,
     that it lifted, see [Primus.Lift], and what its components computed, or

@@ -2367,6 +2367,22 @@ let symbols t =
 module Xrefs = Bap_emu_xrefs
 module Static = Bap_emu_slice
 
+module Jni = struct
+  type emulator = t
+
+  include Bap_emu_jni
+
+  include Bap_emu_jni.Make (struct
+    type t = emulator
+
+    let read = read
+    let write = write
+    let reg = reg
+    let set_reg = set_reg
+    let set_pc = set_pc
+  end)
+end
+
 (* the projects of the memory, each in a unit of its own, as the memory
    changes between them *)
 let projects = ref 0

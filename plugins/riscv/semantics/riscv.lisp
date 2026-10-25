@@ -1466,8 +1466,8 @@
 ;;; i.e., the ones of the floating point: fflags (1), frm (2), and fcsr
 ;;; (3), which are the fields of FCSR, whose writes are kept, though
 ;;; the operations don't accrue the exceptions, and don't round by frm,
-;;; and the counters, which are read with the intrinsics
-;;; riscv_csr_<name>.
+;;; the vector rounding mode vxrm (0xa), and the counters, which are read
+;;; with the intrinsics riscv_csr_<name>.
 
 (defun fcsr (csr)
   (declare (visibility :private))
@@ -1498,8 +1498,8 @@
 (defun csr-access (rd csr keep x write)
   "reads the CSR to RD, and writes to it, if WRITE, its old bits, that
    KEEP masks, with the bits of X, i.e., CSRRW keeps none, CSRRS all,
-   and CSRRC the ones, that X doesn't clear: the fields of FCSR are
-   written, the counters are read, and the other CSRs, e.g., of the
+   and CSRRC the ones, that X doesn't clear: the fields of FCSR and
+   VXRM are written, the counters are read, and the other CSRs, e.g., of the
    extensions, that are not modeled, and the writes of the counters,
    are illegal, as in the user mode of Linux"
   (declare (visibility :private))
@@ -1512,9 +1512,15 @@
           (set FCSR (logor (logand FCSR (lnot (lshift mask shift)))
                            (lshift new shift))))
         (set$ rd (cast-unsigned (word-width) old)))
-    (if (logand (counter csr) (not write))
-        (set$ rd (read-counter csr))
-      (intrinsic 'undefined-instruction :aborts))))
+    (if (= csr 0xa)
+        (let ((old (logand VXRM 3))
+              (new (logand (logor (logand old (cast-low 32 keep))
+                                  (cast-low 32 x)) 3)))
+          (when write (set VXRM new))
+          (set$ rd (cast-unsigned (word-width) old)))
+      (if (logand (counter csr) (not write))
+          (set$ rd (read-counter csr))
+        (intrinsic 'undefined-instruction :aborts)))))
 
 (defun CSRRW (rd csr rs1) (csr-access rd csr 0 rs1 true))
 (defun CSRRS (rd csr rs1) (csr-access rd csr -1 rs1 (/= (symbol rs1) 'X0)))

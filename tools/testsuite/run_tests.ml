@@ -2717,41 +2717,60 @@ let lifters data =
   in
   (* the lifted engine, see Bap_engine, runs the instructions, rather than
      Primus, in the cases lifted/TARGET/N *)
-  List.concat_map
-    (fun (kind, engine) ->
-      List.concat_map
-        (fun (target, bin, args) ->
-          let insns = input ("lifters/" ^ target ^ ".insns") in
-          In_channel.with_open_text insns In_channel.input_lines
-          |> List.filter (fun l ->
-              match String.index_opt l '#' with
-              | Some i -> String.trim (String.sub l 0 i) <> ""
-              | None -> String.trim l <> "")
-          |> parts
-          |> List.mapi (fun n part ->
-              case
-                (Printf.sprintf "%s/%s/%d" kind target (n + 1))
-                (fun env ->
-                  let insns =
-                    write env "insns" (String.concat "\n" part ^ "\n")
-                  in
-                  let out =
-                    bap ~timeout:300. env
-                      ([
-                         "script";
-                         input "lifters/check.ml";
-                         path data ("bin/" ^ bin);
-                         insns;
-                         "runs=2";
-                       ]
-                      @ args @ engine)
-                  in
-                  lacks env "the results differ" out "DIFF ";
-                  has env "agrees with Unicorn" out
-                    (Printf.sprintf "checked %d instructions, 0 differ"
-                       (List.length part)))))
-        targets)
-    [ ("lifters", []); ("lifted", [ "engine=lifted" ]) ]
+  let comparisons =
+    List.concat_map
+      (fun (kind, engine) ->
+        List.concat_map
+          (fun (target, bin, args) ->
+            let insns = input ("lifters/" ^ target ^ ".insns") in
+            In_channel.with_open_text insns In_channel.input_lines
+            |> List.filter (fun l ->
+                match String.index_opt l '#' with
+                | Some i -> String.trim (String.sub l 0 i) <> ""
+                | None -> String.trim l <> "")
+            |> parts
+            |> List.mapi (fun n part ->
+                case
+                  (Printf.sprintf "%s/%s/%d" kind target (n + 1))
+                  (fun env ->
+                    let insns =
+                      write env "insns" (String.concat "\n" part ^ "\n")
+                    in
+                    let out =
+                      bap ~timeout:300. env
+                        ([
+                           "script";
+                           input "lifters/check.ml";
+                           path data ("bin/" ^ bin);
+                           insns;
+                           "runs=2";
+                         ]
+                        @ args @ engine)
+                    in
+                    lacks env "the results differ" out "DIFF ";
+                    has env "agrees with Unicorn" out
+                      (Printf.sprintf "checked %d instructions, 0 differ"
+                         (List.length part)))))
+          targets)
+      [ ("lifters", []); ("lifted", [ "engine=lifted" ]) ]
+  in
+  comparisons
+  @ [
+      case "lifters/riscv64-vxrm" (fun env ->
+          let out =
+            bap env
+              [
+                "script";
+                input "lifters/riscv_vxrm.ml";
+                path data "bin/riscv64-linux-gnu-echo";
+              ]
+          in
+          sequence env out
+            [
+              ("checks Primus", "primus: vxrm write/read passed");
+              ("checks the lifted engine", "lifted: vxrm write/read passed");
+            ]);
+    ]
 
 (* the traces of the lifted engine, see engines.ml, are the ones of
    Unicorn, but on x86, whose Unicorn reads the descriptors of the

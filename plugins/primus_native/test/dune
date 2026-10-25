@@ -1,5 +1,5 @@
 (tests
- (names test_unicorn test_regs test_native)
+ (names test_unicorn test_regs test_native test_jni)
  (package bap-primus-native)
  (preprocess
   (pps ppx_bap))
@@ -12,6 +12,7 @@
   bap-primus-native.plugin
   bap-primus-native.unicorn
   bap-primus-native.engine
+  bap-primus-native.emu
   bap-riscv
   bap-x86
   core))
