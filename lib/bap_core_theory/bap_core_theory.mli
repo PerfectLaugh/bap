@@ -1472,8 +1472,8 @@ module Theory : sig
     (** [current ()] is the target of the code, whose semantics the theories
         denote, or [unknown], see {!with_current}.
 
-        The theories may use it for the details, that the target defines,
-        e.g., the default NaN of its floating-point operations.
+        The theories may use it for the details, that the target defines, e.g.,
+        the default NaN of its floating-point operations.
 
         @since 3.0.0 *)
 

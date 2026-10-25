@@ -326,8 +326,7 @@ module Interpreter (Machine : Machine) = struct
       | None, _ -> Var.reify @@ Lisp.Var.reify ~width v
       (* the reference of the size, e.g., x0:64 of a global of the size of
          the word, e.g., of the intrinsics, is to the variable of the size *)
-      | Some p, Type t when (match Var.typ p with Imm w -> w <> t | _ -> false)
-        ->
+      | Some p, Type t when match Var.typ p with Imm w -> w <> t | _ -> false ->
           Var.create (Var.name p) (Type.imm t)
       | Some p, _ -> p
     in
