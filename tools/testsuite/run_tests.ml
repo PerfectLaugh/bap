@@ -1855,7 +1855,7 @@ let memory_hooks data =
                 path data "bin/x86_64-linux-gnu-crc-loop";
               ]
           in
-          has env "sees the accesses" out "reads 26 writes 28\n"))
+          has env "sees each access once" out "reads 26 writes 26\n"))
     [ "unicorn"; "lifted" ]
 
 (* the taint of the bytes of the page of the bss, which are generated,

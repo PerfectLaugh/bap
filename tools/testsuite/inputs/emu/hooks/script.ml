@@ -5,8 +5,8 @@ module Emu = Bap_emu
 (* bap script script.ml ENGINE PROGRAM: counts the reads and the writes,
    that the hooks of the memory see, which are the same in Unicorn and in
    the lifted engine, whose blocks run compiled, also with the hooks, and
-   whose reads, that fault, e.g., of a page, that the executor maps then,
-   the hooks see once *)
+   whose reads and writes, that fault, e.g., of a page, that the executor maps
+   then, the hooks see once, not at every attempt *)
 let () =
   match Bap_script.args () with
   | [ engine; file ] ->
