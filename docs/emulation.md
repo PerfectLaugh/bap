@@ -717,7 +717,7 @@ The script runs one of them at a time. `Emu.knowledge emu` returns the knowledge
 
 ### Long runs
 
-A run, that executes much new code, grows: the lifted engine keeps the semantics of each instruction, that it lifted, for its engines and its cache, the memory of Primus keeps each byte, that the program stored, as a value of its own, which costs about a hundred bytes, and a snapshot keeps a machine, with the pages, that the engine holds for it. The heap of OCaml takes about twice the live data, by default, see `space_overhead`. A script, that runs for long, watches its footprint, and gives the memory back:
+A run, that executes much new code, grows: the lifted engine keeps the semantics of each instruction, that it lifted, for its engines and its cache, and a snapshot keeps a machine, with the pages, that the engine holds for it. Primus keeps bulk concrete bytes in sparse 4 KiB pages with copy-on-write snapshots, and promotes a byte to an individual value only when scalar or tracked access needs a stable identity. The heap of OCaml takes about twice the live data, by default, see `space_overhead`. A script, that runs for long, watches its footprint, and gives the memory back:
 
 ```ocaml
 let check emu =
@@ -739,7 +739,7 @@ let check emu =
 - `set_lift_cache_limit emu (Some n)` keeps only the `n` most recently used session-lifter entries, while `Some 0` keeps none and `None` removes the bound. Eviction preserves raw-byte checkpoint history and disk-cache contents, and does not remove code retained by the lifted engine.
 - `drop_snapshot emu snapshot` frees a snapshot, that the script doesn't restore anymore; `restore` of a dropped snapshot raises.
 - The garbage collector of OCaml trades memory for time: `OCAMLRUNPARAM='o=40'` in the environment, or `Gc.set { (Gc.get ()) with space_overhead = 40 }` in the script, keeps the heap closer to the live data, at the cost of more collections; the default is 120.
-- The bytes, that the program stores in Unicorn, go to Primus, when it reads them, e.g., at a snapshot, a checkpoint, or a `project`, as values; `peek` and the diffs read the pending pages without storing them.
+- The bytes, that the program stores in Unicorn, go to Primus, when it reads them, e.g., at a snapshot, a checkpoint, or a `project`, as page-backed concrete bytes; scalar reads promote them to stable values for tracking and symbolic state. `peek` and the diffs read pending pages without storing them, and checkpoint serialization keeps its existing byte format.
 
 A wrapper, that is killed, e.g., `timeout`, or a task runner, leaves bap running, so a long run installs its own watchdog: `Sys.set_signal Sys.sigalrm` with `Unix.alarm`, or a handler of `SIGTERM`, that stops the program, see the signals above, saves what it needs, and exits; the lifted engine saves its instructions on `SIGTERM` and `SIGINT` itself, unless the script handles them.
 

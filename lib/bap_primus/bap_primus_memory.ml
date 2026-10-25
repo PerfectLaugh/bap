@@ -66,10 +66,16 @@ module Descriptor = struct
   end)
 end
 
+let page_size = 4096
+
+type page = { bytes : Bytes.t; presence : Bytes.t; count : int }
+
 (* the protections of the ranges [lower,upper], that override the
    permissions of their layers, the newest first, they don't overlap *)
 type state = {
   values : value Addr.Map.t;
+  pages : page Addr.Map.t;
+  page_count : int;
   layers : layer list;
   index : index;
   protections : (addr * addr * protection) list;
@@ -131,7 +137,152 @@ let sexp_of_layer { mem; perms = { readonly; executable } } =
   in
   Sexp.(List [ sexp_of_mem mem; Atom flags ])
 
-let inspect_state { values; layers } =
+let page_offset addr =
+  Word.to_int_exn
+  @@ Word.logand addr (Word.of_int ~width:(Addr.bitwidth addr) (page_size - 1))
+
+let page_base addr = Addr.nsucc addr (-page_offset addr)
+
+let page_byte pages addr =
+  match Map.find pages (page_base addr) with
+  | None -> None
+  | Some page ->
+      let offset = page_offset addr in
+      if Char.equal (Bytes.get page.presence offset) '\000' then None
+      else Some (Bytes.get page.bytes offset)
+
+let has_page_byte pages addr = Option.is_some (page_byte pages addr)
+let has_stored addr s = Map.mem s.values addr || has_page_byte s.pages addr
+
+let copy_page { bytes; presence; count } =
+  { bytes = Bytes.copy bytes; presence = Bytes.copy presence; count }
+
+let remove_page_byte addr s =
+  match Map.find s.pages (page_base addr) with
+  | None -> s
+  | Some page ->
+      let offset = page_offset addr in
+      if Char.equal (Bytes.get page.presence offset) '\000' then s
+      else
+        let page = copy_page page in
+        Bytes.set page.presence offset '\000';
+        let count = page.count - 1 in
+        let pages =
+          if count = 0 then Map.remove s.pages (page_base addr)
+          else Map.set s.pages ~key:(page_base addr) ~data:{ page with count }
+        in
+        { s with pages; page_count = s.page_count - 1 }
+
+let in_range lower upper addr =
+  if Addr.(lower <= upper) then Addr.(addr >= lower && addr <= upper)
+  else Addr.(addr >= lower || addr <= upper)
+
+let fold_addr_range map lower upper ~key ~init ~f =
+  let fold lower upper init =
+    Map.fold_range_inclusive map ~min:(key lower) ~max:(key upper) ~init ~f
+  in
+  if Addr.(lower <= upper) then fold lower upper init
+  else
+    let width = Addr.bitwidth lower in
+    fold (Word.zero width) upper (fold lower (Word.ones width) init)
+
+let clear_values_range lower upper s =
+  let stale =
+    fold_addr_range s.values lower upper ~key:Fn.id ~init:[]
+      ~f:(fun ~key ~data:_ keys -> key :: keys)
+  in
+  {
+    s with
+    values = List.fold stale ~init:s.values ~f:Map.remove;
+    generated = List.fold stale ~init:s.generated ~f:Set.remove;
+  }
+
+let clear_stored_range lower upper s =
+  let s = clear_values_range lower upper s in
+  let pages, page_count =
+    fold_addr_range s.pages lower upper ~key:page_base
+      ~init:(s.pages, s.page_count)
+      ~f:(fun ~key:base ~data:page (pages, page_count) ->
+        let removed = ref 0 in
+        for offset = 0 to page_size - 1 do
+          if
+            Char.equal (Bytes.get page.presence offset) '\001'
+            && in_range lower upper (Addr.nsucc base offset)
+          then incr removed
+        done;
+        if !removed = 0 then (pages, page_count)
+        else
+          let page = copy_page page in
+          for offset = 0 to page_size - 1 do
+            if
+              Char.equal (Bytes.get page.presence offset) '\001'
+              && in_range lower upper (Addr.nsucc base offset)
+            then Bytes.set page.presence offset '\000'
+          done;
+          let count = page.count - !removed in
+          let pages =
+            if count = 0 then Map.remove pages base
+            else Map.set pages ~key:base ~data:{ page with count }
+          in
+          (pages, page_count - !removed))
+  in
+  { s with pages; page_count }
+
+let store_pages addr data s =
+  let len = String.length data in
+  if len = 0 then s
+  else
+    let s = clear_values_range addr (Addr.nsucc addr (len - 1)) s in
+    let rec store pos addr pages page_count =
+      if pos < len then (
+        let base = page_base addr and offset = page_offset addr in
+        let n = min (len - pos) (page_size - offset) in
+        let original =
+          match Map.find pages base with
+          | Some page -> page
+          | None ->
+              {
+                bytes = Bytes.make page_size '\000';
+                presence = Bytes.make page_size '\000';
+                count = 0;
+              }
+        in
+        let occupied = ref 0 in
+        for i = offset to offset + n - 1 do
+          if Char.equal (Bytes.get original.presence i) '\001' then
+            incr occupied
+        done;
+        let page = copy_page original in
+        Bytes.From_string.blit ~src:data ~src_pos:pos ~dst:page.bytes
+          ~dst_pos:offset ~len:n;
+        Bytes.fill page.presence ~pos:offset ~len:n '\001';
+        let count = page.count + n - !occupied in
+        let pages = Map.set pages ~key:base ~data:{ page with count } in
+        store (pos + n) (Addr.nsucc addr n) pages (page_count + n - !occupied))
+      else (pages, page_count)
+    in
+    let pages, page_count = store 0 addr s.pages s.page_count in
+    { s with pages; page_count }
+
+let page_values s =
+  Map.fold s.pages ~init:[] ~f:(fun ~key:base ~data:page values ->
+      let rec collect offset values =
+        if offset = page_size then values
+        else
+          let values =
+            if Char.equal (Bytes.get page.presence offset) '\000' then values
+            else
+              ( Addr.nsucc base offset,
+                Word.of_int ~width:8 (Char.to_int (Bytes.get page.bytes offset))
+              )
+              :: values
+          in
+          collect (offset + 1) values
+      in
+      collect 0 values)
+  |> List.rev
+
+let inspect_state { values; pages; page_count; layers; _ } =
   let values =
     Map.to_sequence values
     |> Seq.map ~f:(fun (key, value) ->
@@ -139,10 +290,17 @@ let inspect_state { values; layers } =
     |> Seq.to_list_rev
   in
   let layers = List.map layers ~f:sexp_of_layer in
+  let page_total = Map.length pages in
   Sexp.(
     List
       [
-        List [ Atom "values"; List values ]; List [ Atom "layers"; List layers ];
+        List [ Atom "values"; List values ];
+        List
+          [
+            Atom "pages";
+            Atom (sprintf "%d bytes in %d pages" page_count page_total);
+          ];
+        List [ Atom "layers"; List layers ];
       ])
 
 let inspect_memory { curr; mems } =
@@ -300,6 +458,10 @@ let uniform_layer addr last s =
     || (not (List.is_empty s.index.others))
     || List.exists s.protections ~f:(fun (lo, hi, _) ->
         Addr.(hi >= addr && lo <= last))
+    ||
+    match Map.closest_key s.pages `Greater_or_equal_to (page_base addr) with
+    | Some (key, _) when Addr.(key <= page_base last) -> true
+    | _ -> false
   then None
   else
     match Map.closest_key s.values `Greater_or_equal_to addr with
@@ -319,14 +481,14 @@ let uniform_layer addr last s =
             | Some a, Some b when phys_equal a b -> Some a.layer
             | _ -> None))
 
-let is_mapped addr s =
-  Map.mem s.values addr || Option.is_some (find_layer addr s)
-
+let is_mapped addr s = has_stored addr s || Option.is_some (find_layer addr s)
 let mapped = is_mapped
 
 let empty_state =
   {
     values = Addr.Map.empty;
+    pages = Addr.Map.empty;
+    page_count = 0;
     layers = [];
     index = { segments = Map.empty (module Int); others = []; count = 0 };
     protections = [];
@@ -419,12 +581,17 @@ module Snapshot = struct
     in
     { lower; upper; readonly; executable; kind }
 
-  let of_state ({ values; layers; protections; _ } : state) : mem =
+  let of_state ({ values; layers; protections; _ } as s : state) : mem =
+    let values =
+      Map.to_alist values
+      |> List.map ~f:(fun (addr, x) -> (addr, Bap_primus_value.to_word x))
+    in
     {
       layers = List.rev_map layers ~f:of_layer;
       values =
-        Map.to_alist values
-        |> List.map ~f:(fun (addr, x) -> (addr, Bap_primus_value.to_word x));
+        List.sort
+          (values @ page_values s)
+          ~compare:(fun (x, _) (y, _) -> Addr.compare x y);
       protections;
     }
 
@@ -589,29 +756,15 @@ module Make (Machine : Machine) = struct
     memory >>= fun { size } ->
     Machine.gets Project.arch >>= fun arch ->
     store_word ?notify arch size ~addr word s.values >>= fun (values, keys) ->
+    let s = List.fold keys ~init:s ~f:(Fn.flip remove_page_byte) in
     let generated = List.fold keys ~init:s.generated ~f:Set.add in
     put_curr { s with values; generated } >>= fun () ->
     Machine.List.iter keys ~f:(fun key ->
         Track.generated key (Map.find_exn values key))
     >>| fun () -> Map.find_exn values addr
 
-  let read addr ({ values } as s) =
-    match find_protection addr s with
-    | Some { readable = false } when is_mapped addr s -> pagefault addr
-    | _ -> (
-        match Map.find values addr with
-        | Some v -> Machine.return v
-        | None -> (
-            match find_layer addr s with
-            | None -> pagefault addr
-            | Some layer -> (
-                memory >>= fun { size } ->
-                match layer.mem with
-                | Static mem -> Value.of_word (read_word mem addr size)
-                | Dynamic { value = g } ->
-                    Generate.word g (Generator.width g) >>= remembered s addr)))
-
   let set_value addr value s =
+    let s = remove_page_byte addr s in
     {
       s with
       values = Map.set s.values ~key:addr ~data:value;
@@ -620,13 +773,36 @@ module Make (Machine : Machine) = struct
          else Set.remove s.generated addr);
     }
 
+  let read addr ({ values } as s) =
+    match find_protection addr s with
+    | Some { readable = false } when is_mapped addr s -> pagefault addr
+    | _ -> (
+        match Map.find values addr with
+        | Some v -> Machine.return v
+        | None -> (
+            match page_byte s.pages addr with
+            | Some x ->
+                Value.of_word (Word.of_int ~width:8 (Char.to_int x))
+                >>= fun value ->
+                put_curr (set_value addr value s) >>| fun () -> value
+            | None -> (
+                match find_layer addr s with
+                | None -> pagefault addr
+                | Some layer -> (
+                    memory >>= fun { size } ->
+                    match layer.mem with
+                    | Static mem -> Value.of_word (read_word mem addr size)
+                    | Dynamic { value = g } ->
+                        Generate.word g (Generator.width g)
+                        >>= remembered s addr))))
+
   let write addr value s =
     match find_protection addr s with
     | Some { writable = false } when is_mapped addr s -> pagefault addr
     | Some { writable = true } when is_mapped addr s ->
         Machine.return @@ set_value addr value s
     | _ -> (
-        if Map.mem s.values addr then Machine.return @@ set_value addr value s
+        if has_stored addr s then Machine.return @@ set_value addr value s
         else
           match find_layer addr s with
           | None -> pagefault addr
@@ -653,7 +829,7 @@ module Make (Machine : Machine) = struct
       ~lower ~upper () =
     Machine.gets Project.target >>| Theory.Target.bits >>= fun width ->
     Machine.Observation.make on_allocated (lower, upper) >>= fun () ->
-    ( get_curr
+    get_curr
     >>| add_layer
           {
             perms = { readonly; executable };
@@ -668,16 +844,7 @@ module Make (Machine : Machine) = struct
                     | None -> Generator.Random.Seeded.lcg ~width ());
                 };
           }
-    >>| fun s ->
-      let stale =
-        Map.fold_range_inclusive s.values ~min:lower ~max:upper ~init:[]
-          ~f:(fun ~key ~data:_ acc -> key :: acc)
-      in
-      {
-        s with
-        values = List.fold stale ~init:s.values ~f:Map.remove;
-        generated = List.fold stale ~init:s.generated ~f:Set.remove;
-      } )
+    >>| clear_stored_range lower upper
     >>= fun s ->
     match init with
     | None -> put_curr s
@@ -694,25 +861,7 @@ module Make (Machine : Machine) = struct
 
   let add_text mem = map mem ~readonly:true ~executable:true
   let add_data mem = map mem ~readonly:false ~executable:false
-
-  let store_bytes_unbacked addr data =
-    Value.of_words
-      (Array.init (String.length data) ~f:(fun i ->
-           Word.of_int ~width:8 (Char.to_int data.[i])))
-    >>= fun xs ->
-    update @@ fun s ->
-    let values =
-      Array.foldi xs ~init:s.values ~f:(fun i values x ->
-          Map.set values ~key:(Addr.nsucc addr i) ~data:x)
-    in
-    let generated =
-      if Set.is_empty s.generated then s.generated
-      else
-        Array.foldi xs ~init:s.generated ~f:(fun i generated _ ->
-            Set.remove generated (Addr.nsucc addr i))
-    in
-    { s with values; generated }
-
+  let store_bytes_unbacked addr data = update @@ store_pages addr data
   let set_backing backing = Machine.Global.put Backing.state backing
 
   (* calls [f] with the backing of the current memory, if it has one *)
@@ -766,7 +915,13 @@ module Make (Machine : Machine) = struct
 
   let del addr =
     fetch addr 1 >>= fun () ->
-    update @@ fun s -> { s with values = Map.remove s.values addr }
+    update @@ fun s ->
+    let s = remove_page_byte addr s in
+    {
+      s with
+      values = Map.remove s.values addr;
+      generated = Set.remove s.generated addr;
+    }
 
   let load addr = get addr >>| Value.to_word
   let store addr value = Value.of_word value >>= set addr
@@ -779,7 +934,7 @@ module Make (Machine : Machine) = struct
     fetch addr 1 >>= fun () ->
     get_curr >>| fun s ->
     if Set.mem s.generated addr then Generated
-    else if Map.mem s.values addr then Stored
+    else if has_stored addr s then Stored
     else
       match find_layer addr s with
       | None -> Unmapped
@@ -798,10 +953,10 @@ module Make (Machine : Machine) = struct
             Some
               {
                 readable = true;
-                writable = (not readonly) || Map.mem s.values addr;
+                writable = (not readonly) || has_stored addr s;
                 executable;
               }
-        | None when Map.mem s.values addr ->
+        | None when has_stored addr s ->
             Some { readable = true; writable = true; executable = false }
         | None -> None)
 
@@ -864,23 +1019,27 @@ module Make (Machine : Machine) = struct
     match Map.find s.values addr with
     | Some v -> Machine.return (Value.to_word v, s)
     | None -> (
-        match find_layer addr s with
-        | Some { mem = Static mem } -> Machine.return (read_word mem addr 8, s)
-        (* the byte of the layer, whose generator is static, e.g., of the
-           zeros of BSS, is its value, which is not remembered, as it is
-           the same, when it is read again, and not tracked, which saves
-           the map of the values of the large layers, e.g., which an
-           emulator copies, see [load_bytes] *)
-        | Some { mem = Dynamic { value = g } }
-          when quiet && Option.is_some (Generator.fill g) ->
-            Machine.return
-              (Word.create (Option.value_exn (Generator.fill g)) 8, s)
-        | Some { mem = Dynamic { value = g } } ->
-            Generate.word g (Generator.width g)
-            >>= remembered ~notify:false s addr
-            >>= fun v ->
-            get_curr >>| fun s -> (Value.to_word v, s)
-        | None -> assert false)
+        match page_byte s.pages addr with
+        | Some x -> Machine.return (Word.of_int ~width:8 (Char.to_int x), s)
+        | None -> (
+            match find_layer addr s with
+            | Some { mem = Static mem } ->
+                Machine.return (read_word mem addr 8, s)
+            (* the byte of the layer, whose generator is static, e.g., of the
+               zeros of BSS, is its value, which is not remembered, as it is
+               the same, when it is read again, and not tracked, which saves
+               the map of the values of the large layers, e.g., which an
+               emulator copies, see [load_bytes] *)
+            | Some { mem = Dynamic { value = g } }
+              when quiet && Option.is_some (Generator.fill g) ->
+                Machine.return
+                  (Word.create (Option.value_exn (Generator.fill g)) 8, s)
+            | Some { mem = Dynamic { value = g } } ->
+                Generate.word g (Generator.width g)
+                >>= remembered ~notify:false s addr
+                >>= fun v ->
+                get_curr >>| fun s -> (Value.to_word v, s)
+            | None -> assert false))
 
   (* the bytes of the range in one layer, of a static generator, or of the
      image, at once, see [uniform_layer] *)
@@ -975,6 +1134,15 @@ module Make (Machine : Machine) = struct
       ~f:(fun ~key ~data () ->
         Bytes.set bytes (offset key)
           (Char.of_int_exn (Word.to_int_exn (Value.to_word data) land 0xFF)));
+    Map.fold_range_inclusive s.pages ~min:(page_base addr) ~max:(page_base last)
+      ~init:() ~f:(fun ~key:base ~data:page () ->
+        for i = 0 to page_size - 1 do
+          let a = Addr.nsucc base i in
+          if
+            Char.equal (Bytes.get page.presence i) '\001'
+            && in_range addr last a
+          then Bytes.set bytes (offset a) (Bytes.get page.bytes i)
+        done);
     (* the pending bytes of the backing, e.g., the pages, that an emulator
        wrote, go over them, without being stored, so that a dump doesn't
        fill the memory with them *)
@@ -1029,12 +1197,27 @@ module Make (Machine : Machine) = struct
         |> List.map ~f:(fun (desc, s) -> (desc, Snapshot.of_state s));
     }
 
+  let materialize_values s =
+    let stored = Array.of_list (page_values s) in
+    if Array.is_empty stored then Machine.return s
+    else
+      Value.of_words (Array.map stored ~f:snd) >>| fun xs ->
+      let values =
+        Array.foldi xs ~init:s.values ~f:(fun i values value ->
+            Map.set values ~key:(fst stored.(i)) ~data:value)
+      in
+      { s with values; pages = Addr.Map.empty; page_count = 0 }
+
   (* the values of all memories, with their identities *)
   let values =
     (backing @@ fun b id -> store_fetched (b.fetch_all id)) >>= fun () ->
-    Machine.Local.get state >>| fun { mems; _ } ->
-    Map.to_alist mems
-    |> List.concat_map ~f:(fun (desc, (s : state)) ->
+    Machine.Local.get state >>= fun { curr; mems } ->
+    Machine.List.map (Map.to_alist mems) ~f:(fun (desc, s) ->
+        materialize_values s >>| fun s -> (desc, s))
+    >>= fun mems ->
+    Machine.Local.put state { curr; mems = Descriptor.Map.of_alist_exn mems }
+    >>| fun () ->
+    List.concat_map mems ~f:(fun (desc, s) ->
         Map.to_alist s.values |> List.map ~f:(fun (addr, x) -> (desc, addr, x)))
 
   (* the bytes, that the [machine] stored, by their addresses, the pending
@@ -1045,9 +1228,10 @@ module Make (Machine : Machine) = struct
   let stored_count_of ?(generated = false) machine =
     Machine.Other.get machine state >>| fun { mems; _ } ->
     Map.fold mems ~init:0 ~f:(fun ~key:_ ~data:(s : state) total ->
-        total
+        total + s.page_count
         +
-        if generated then Map.length s.values
+        if generated then
+          Map.fold s.values ~init:0 ~f:(fun ~key:_ ~data:_ count -> count + 1)
         else
           Map.fold s.values ~init:0 ~f:(fun ~key:addr ~data:_ count ->
               if Set.mem s.generated addr then count else count + 1))
@@ -1058,12 +1242,17 @@ module Make (Machine : Machine) = struct
     let stored =
       Map.to_alist mems
       |> List.concat_map ~f:(fun (_, (s : state)) ->
-          Map.to_alist s.values
-          |> List.filter_map ~f:(fun (addr, x) ->
-              (* the generated values, which the loads remember, aren't
-                 stored, unless they are asked for *)
-              if (not generated) && Set.mem s.generated addr then None
-              else Some (addr, Value.to_word x)))
+          let values =
+            Map.to_alist s.values
+            |> List.filter_map ~f:(fun (addr, x) ->
+                (* the generated values, which the loads remember, aren't
+                   stored, unless they are asked for *)
+                if (not generated) && Set.mem s.generated addr then None
+                else Some (addr, Value.to_word x))
+          in
+          List.sort
+            (values @ page_values s)
+            ~compare:(fun (x, _) (y, _) -> Addr.compare x y))
     in
     let pending =
       match backing with
@@ -1093,7 +1282,7 @@ module Make (Machine : Machine) = struct
     in
     List.map addrs ~f:(fun addr ->
         if Set.mem s.generated addr then Generated
-        else if Map.mem s.values addr || Set.mem pending addr then Stored
+        else if has_stored addr s || Set.mem pending addr then Stored
         else
           match find_layer addr s with
           | None -> Unmapped

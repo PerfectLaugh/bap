@@ -15,6 +15,7 @@ end
 
 open Machine.Syntax
 module Memory = Primus.Memory.Make (Machine)
+module Value = Primus.Value.Make (Machine)
 
 let addr x = Word.of_int ~width:32 x
 let byte x = Word.of_int ~width:8 x
@@ -80,6 +81,135 @@ let store () =
       Memory.is_mapped (addr 0x2003) >>| fun mapped ->
       check "store_bytes stores only its bytes" (not mapped) )
 
+let check_string name expected actual =
+  check
+    (sprintf "%s: expected %S, got %S" name expected actual)
+    (String.equal expected actual)
+
+let string_of_loaded bytes =
+  String.init (Array.length bytes) ~f:(fun i ->
+      fst (Option.value_exn bytes.(i)))
+
+let expected_words base data =
+  List.init (String.length data) ~f:(fun i ->
+      (addr (base + i), byte (Char.to_int data.[i])))
+
+let check_words name expected actual =
+  check name
+    (List.equal
+       (fun (a, x) (b, y) -> Word.equal a b && Word.equal x y)
+       expected actual)
+
+let page_crossing () =
+  let base = 0x2FFC and data = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09" in
+  run
+    ( Memory.store_bytes (addr base) data >>= fun () ->
+      Memory.peek (addr base) (String.length data) >>= fun peeked ->
+      check_string "page-crossing peek" data peeked;
+      Memory.load_bytes (addr base) (String.length data) >>= fun loaded ->
+      check_string "page-crossing load_bytes" data (string_of_loaded loaded);
+      Machine.current () >>= fun self ->
+      Memory.stored_count_of self >>= fun count ->
+      check "page-crossing stored count" (count = String.length data);
+      Memory.values_of self >>| fun values ->
+      check_words "page-crossing values_of" (expected_words base data) values )
+
+let scalar_values () =
+  let base = 0x4000 in
+  run
+    ( Memory.store_bytes (addr base) "abc" >>= fun () ->
+      Memory.get (addr base) >>= fun first ->
+      Memory.load_bytes (addr base) 3 >>= fun _ ->
+      Memory.get (addr base) >>= fun second ->
+      check "scalar reads have a stable identity" (phys_equal first second);
+      Value.of_int ~width:8 0x7A >>= fun replacement ->
+      Memory.set (addr base) replacement >>= fun () ->
+      Memory.get (addr base) >>= fun stored ->
+      check "scalar overwrite preserves the written identity"
+        (phys_equal replacement stored);
+      Memory.store_bytes (addr base) "z" >>= fun () ->
+      Memory.get (addr base) >>= fun bulk ->
+      check "bulk overwrite replaces a scalar identity"
+        ((not (phys_equal replacement bulk))
+        && Word.equal (Primus.Value.to_word bulk) (byte 0x7A));
+      Memory.del (addr base) >>= fun () ->
+      Memory.is_mapped (addr base) >>= fun mapped ->
+      check "delete removes a page byte" (not mapped);
+      Memory.peek (addr base) 3 >>= fun remaining ->
+      check_string "delete preserves the other page bytes" "\x00bc" remaining;
+      Memory.values >>= fun values ->
+      Memory.values >>| fun again ->
+      let identities = List.map values ~f:(fun (_, _, value) -> value) in
+      let identities' = List.map again ~f:(fun (_, _, value) -> value) in
+      check "values materializes stable identities"
+        (List.equal phys_equal identities identities') )
+
+let snapshot_roundtrip () =
+  let base = 0x5FFE and data = "abcdef" in
+  run
+    ( Memory.store_bytes (addr base) data >>= fun () ->
+      Memory.get (addr (base + 2)) >>= fun _ ->
+      Memory.snapshot >>= fun snapshot ->
+      check_words "snapshot flattens pages and values"
+        (expected_words base data)
+        (Primus.Memory.Snapshot.values snapshot);
+      Memory.store_bytes (addr base) "XXXXXX" >>= fun () ->
+      Memory.restore snapshot >>= fun () ->
+      Memory.peek (addr base) (String.length data) >>| fun restored ->
+      check_string "snapshot restores flattened pages" data restored )
+
+let copy_on_write () =
+  let base = 0x6FFE and data = "\x10\x11\x12\x13" in
+  let child_ran = ref false in
+  run
+    ( Memory.store_bytes (addr base) data >>= fun () ->
+      Machine.current () >>= fun parent ->
+      Machine.fork () >>= fun () ->
+      Machine.current () >>= fun self ->
+      if Monad.State.Multi.Id.equal self parent then (
+        Memory.peek (addr base) (String.length data) >>= fun parent_data ->
+        check_string "fork writes are isolated" data parent_data;
+        Memory.get (addr base) >>= fun value ->
+        check "fork promotion is isolated"
+          (Word.equal (Primus.Value.to_word value) (byte 0x10));
+        Machine.current () >>= fun self ->
+        Memory.stored_count_of self >>| fun count ->
+        check "fork deletion is isolated" (count = String.length data))
+      else (
+        child_ran := true;
+        Memory.get (addr base) >>= fun _ ->
+        Memory.store_bytes (addr (base + 1)) "\xAA\xBB" >>= fun () ->
+        Memory.del (addr (base + 3)) >>= fun () -> Machine.switch parent) );
+  check "the fork child executed" !child_ran
+
+let region_clears_pages () =
+  let base = 0x7000 in
+  run
+    ( Memory.store_bytes (addr base) "abcdef" >>= fun () ->
+      Memory.get (addr (base + 2)) >>= fun _ ->
+      Memory.add_region
+        ~lower:(addr (base + 1))
+        ~upper:(addr (base + 4))
+        ~generator:(Primus.Generator.static ~width:8 0x55)
+        ()
+      >>= fun () ->
+      Memory.peek (addr base) 6 >>= fun data ->
+      check_string "new regions clear pages and values" "aUUUUf" data;
+      Memory.origin (addr base) >>= fun before ->
+      Memory.origin (addr (base + 2)) >>= fun inside ->
+      check "region clearing preserves outside stores"
+        (match before with Primus.Memory.Stored -> true | _ -> false);
+      check "region clearing replaces inside stores"
+        (match inside with Primus.Memory.Mapped -> true | _ -> false);
+      Machine.current () >>= fun self ->
+      Memory.stored_count_of self >>| fun count ->
+      check "region clearing updates the logical count" (count = 2) )
+
 let () =
   load ();
-  store ()
+  store ();
+  page_crossing ();
+  scalar_values ();
+  snapshot_roundtrip ();
+  copy_on_write ();
+  region_clears_pages ()
