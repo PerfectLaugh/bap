@@ -82,6 +82,10 @@ val insn_at :
     run it, see {!Lifted.insn_at}, or [None] in Unicorn, which translates the
     code in itself. *)
 
+val insn_addrs : t -> int64 list
+(** the addresses of the instructions, that {!insn_at} has, in no order, none in
+    Unicorn *)
+
 (** {2 Memory} *)
 
 val mem_map : t -> int64 -> int64 -> Perm.t -> unit

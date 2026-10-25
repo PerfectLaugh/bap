@@ -1,0 +1,7 @@
+ran main true, PUSH64r
+restored the instructions true
+main: PUSH64r, the bytes, that ran true, in memory false
+lifted true
+the bytes of main, that ran, from the checkpoint: 16 of 16
+exited 0
+ran more true

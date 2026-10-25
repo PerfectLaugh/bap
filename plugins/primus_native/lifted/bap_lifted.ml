@@ -2135,6 +2135,10 @@ let insn_at t pc =
   Option.map (Hashtbl.find t.insns pc) ~f:(fun (i : insn) ->
       (i.code, i.name, i.thumb, i.blks))
 
+(* the addresses of the instructions, that the engine lifted, see
+   [insn_at] *)
+let insn_addrs t = Hashtbl.keys t.insns
+
 (* the instructions stay, as their bytes are checked, when they run, see
    [lifted], so that [insn_at] has them, when the code is written, and
    the blocks, that the JIT compiled, go *)

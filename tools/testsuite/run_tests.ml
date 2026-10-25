@@ -1136,6 +1136,19 @@ let emu data =
             ]
         in
         golden env "emu/live/hooks.txt" out.text);
+    (* the checkpoint keeps the instructions, that the lifted engine ran,
+       see ran.ml *)
+    case "emu/live/ran" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/live/ran.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              dir env;
+            ]
+        in
+        golden env "emu/live/ran.txt" out.text);
     (* the shell, with the commands of the debugger, at a pause, and from
        a hook, see shell.ml *)
     case "emu/live/shell" (fun env ->

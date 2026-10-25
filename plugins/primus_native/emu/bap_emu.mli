@@ -278,7 +278,18 @@ val insn_at : ?thumb:bool -> t -> int64 -> executed option
     engine lifted nothing at [pc], or the engine is Unicorn, which translates
     the code in itself, where the script doesn't see it. The instruction is in
     the Thumb state, if [thumb], by default, if the lower bit of [pc] is set, as
-    in {!bir}. Also in the hooks. *)
+    in {!bir}. Also in the hooks.
+
+    The checkpoints keep the bytes of the instructions, that ran, see {!save},
+    so the program, that continues from one, has the instructions, that ran
+    before it, which are lifted anew from them, unless they ran again since. *)
+
+val insns : t -> int64 list
+(** [insns emu] the addresses of the instructions, that {!insn_at} has, in their
+    order, also of the ones, that ran before the checkpoint, from which the
+    program continues, with the lower bit set in the Thumb state of ARM, e.g.,
+    to list the code, that the program unpacked and ran, after it scrubbed it,
+    or none, if the engine is Unicorn. *)
 
 val lifted_bytes : ?thumb:bool -> t -> int64 -> int -> string
 (** [lifted_bytes emu addr n] are the bytes of the instructions, that the lifted
@@ -885,8 +896,9 @@ val save : t -> string -> unit
     states of the components, that extend the checkpoints, see
     [Primus.Checkpoint], e.g., the channels of Primus Lisp, which are opened
     anew, with the positions of their inputs, the digest of the file of the
-    program, which the checkpoint is of, and the runs of Unicorn, that Primus
-    called, with the stubs, that called them. The names of the program and its
+    program, which the checkpoint is of, the runs of Unicorn, that Primus
+    called, with the stubs, that called them, and the bytes of the instructions,
+    that the lifted engine ran, see {!insn_at}. The names of the program and its
     stubs are of its file, which is loaded anew.
 
     The program, that continues from the checkpoint, continues the innermost

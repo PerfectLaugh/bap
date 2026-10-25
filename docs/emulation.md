@@ -195,6 +195,7 @@ let () =
 | `write_direct emu addr data` | the bytes of Unicorn's copy of the memory, also in the hooks |
 | `bir emu addr` | the size and the BIR of the instruction at the address, lifted on demand from its current bytes, also in the hooks; Thumb on ARM by the lower bit of the address |
 | `insn_at emu pc`, `lifted_bytes emu addr n` | the instruction, that the lifted engine lifted at the address, to run it, with the bytes it was lifted from, and the bytes of the instructions from an address, as far as they were lifted, see below |
+| `insns emu` | the addresses of the instructions, that `insn_at` has, in their order |
 | `symbols`, `add_symbol` | the names of the functions; name new code, e.g., code that the program unpacked |
 | `unstub emu name` | run the program's own code of a function, instead of its Lisp stub |
 | `call emu addr ~args` | call a function with the arguments, on a zeroed stack, and get its result, see below |
@@ -228,6 +229,17 @@ Out_channel.write_all "decrypted.bin" ~data:(Emu.lifted_bytes emu decrypted 0x40
 ```
 
 The engine lifts the instructions of a block, that it compiles, a few ahead of the one, that runs, so an instruction right after a branch may be lifted without running. Unicorn translates the code in itself, where the script doesn't see it, so `insn_at` is `None` there: catch the writes with `on_write`, or read the code while it is in memory.
+
+`insns` lists the addresses of the instructions, that ran, e.g., to dump the code, that the program unpacked, without knowing where it is. A checkpoint keeps the bytes of these instructions, so the program, that continues from it, in another run too, has the instructions, that ran before it, which `insn_at` lifts anew from their bytes, unless they ran again since:
+
+```ocaml
+let emu = Emu.create ~restore:"unpacked.ckpt" proj in
+Emu.insns emu
+|> List.filter ~f:(fun pc -> Option.is_none (Emu.function_at emu pc))
+|> List.iter ~f:(fun pc ->
+       let insn = Option.value_exn (Emu.insn_at emu pc) in
+       printf "%Lx: %s\n" pc insn.name)
+```
 
 ### Hooks
 

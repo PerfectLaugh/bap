@@ -317,6 +317,8 @@ and lifter = {
       (** the instruction at the address, in the mode, that the engine lifted in
           this run, with the bytes, from which it was lifted, see
           [Bap_emu.insn_at] *)
+  ran : unit -> Lifts.entry list;
+      (** the instructions, that [lifted] has, in no order *)
 }
 
 and session = {
@@ -395,6 +397,11 @@ and session = {
   digest : string;  (** see [options.digest] *)
   mutable lifter : lifter option;
       (** lifts the instructions for the lifted engine, see [lifter] *)
+  ran_before : (int64 * bool, string) Hashtbl.t;
+      (** the bytes of the instructions, that the lifted engine ran, by their
+          addresses and modes, before the checkpoint, from which the machines
+          continue, which the checkpoints keep, see [Ran], so that
+          [Bap_emu.insn_at] lifts them anew *)
   mutable driven : bool;
       (** the script drives the machines, see [Bap_emu], which pause, when
           [pause] is set *)
@@ -477,6 +484,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     cache = o.cache;
     digest = o.digest;
     lifter = None;
+    ran_before = Hashtbl.Poly.create ();
     active = None;
     recipe = None;
     parked = Id.Table.create ();
@@ -1377,6 +1385,10 @@ let lifter ?cache ~arm project =
     | Some (e, renamed) when !renamed -> Some e
     | _ -> None
   in
+  let ran () =
+    Hashtbl.fold entries ~init:[] ~f:(fun ~key:_ ~data:(e, renamed) ran ->
+        if !renamed then e :: ran else ran)
+  in
   {
     lift;
     name = Hashtbl.find names;
@@ -1384,6 +1396,7 @@ let lifter ?cache ~arm project =
     save;
     forget;
     lifted;
+    ran;
   }
 
 (* the NaNs and the invalid integers of the target, as ieee754-policy of
@@ -6104,6 +6117,59 @@ end
 
 let () =
   Primus.Checkpoint.register ~package:"bap" "unicorn-elapsed" (module Elapsed)
+
+(* the instructions, that the lifted engine ran, by their addresses, modes
+   and bytes, before the checkpoint and since, the ones of the engine
+   last, as they are the latest, see [Bap_emu.insn_at] *)
+module Ran (Machine : Primus.Machine.S) = struct
+  open Machine.Syntax
+
+  type t = (int64 * bool * string) list [@@deriving bin_io]
+
+  let save =
+    Machine.Global.get session_state >>| fun s ->
+    let ran = Hashtbl.copy s.ran_before in
+    Option.iter s.lifter ~f:(fun l ->
+        List.iter (l.ran ()) ~f:(fun (e : Lifts.entry) ->
+            Hashtbl.set ran ~key:(e.addr, e.thumb) ~data:e.code));
+    Option.iter s.active ~f:(fun e ->
+        List.iter (Uc.insn_addrs e.uc) ~f:(fun pc ->
+            match Uc.insn_at e.uc pc with
+            | Some (code, _, thumb, _) ->
+                Hashtbl.set ran ~key:(pc, thumb) ~data:code
+            | None -> ()));
+    if Hashtbl.is_empty ran then None
+    else
+      Some
+        (Binable.to_string
+           (module struct
+             type nonrec t = t [@@deriving bin_io]
+           end)
+           (Hashtbl.fold ran ~init:[] ~f:(fun ~key:(pc, thumb) ~data t ->
+                (pc, thumb, data) :: t)))
+
+  (* the bytes are at most of an instruction, see [Primus.Lift.max_size],
+     as the checkpoint may be crafted *)
+  let restore data =
+    Machine.Global.get session_state >>| fun s ->
+    match
+      Binable.of_string
+        (module struct
+          type nonrec t = t [@@deriving bin_io]
+        end)
+        data
+    with
+    | exception _ -> warning "the instructions, that ran, are not restored"
+    | ran ->
+        Hashtbl.clear s.ran_before;
+        List.iter ran ~f:(fun (pc, thumb, code) ->
+            if
+              (not (String.is_empty code))
+              && String.length code <= Primus.Lift.max_size
+            then Hashtbl.set s.ran_before ~key:(pc, thumb) ~data:code)
+end
+
+let () = Primus.Checkpoint.register ~package:"bap" "lifted-ran" (module Ran)
 
 (* links the program, as load-binary does, except that its subroutines
    run in Unicorn, and keeps the linked code to tell the addresses of the

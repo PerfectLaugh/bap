@@ -1104,12 +1104,38 @@ let executed_at ?thumb t pc =
   match Option.bind t.session.active ~f:(fun e -> Uc.insn_at e.uc pc) with
   | Some (bytes, name, thumb', bir) when Bool.equal thumb thumb' ->
       Some { bytes; name; thumb; bir }
-  | _ ->
-      Option.bind t.session.lifter ~f:(fun l -> l.lifted ~thumb pc)
-      |> Option.map ~f:(fun (e : X.Lifts.entry) ->
-          { bytes = e.code; name = e.name; thumb = e.thumb; bir = e.blks })
+  | _ -> (
+      match Option.bind t.session.lifter ~f:(fun l -> l.lifted ~thumb pc) with
+      | Some (e : X.Lifts.entry) ->
+          Some { bytes = e.code; name = e.name; thumb = e.thumb; bir = e.blks }
+      | None ->
+          (* the instruction ran before the checkpoint, from which the
+             program continues, and is lifted anew from its bytes, that
+             the checkpoint keeps *)
+          Option.both t.session.lifter
+            (Hashtbl.find t.session.ran_before (pc, thumb))
+          |> Option.bind ~f:(fun ((l : X.lifter), code) ->
+              Option.map (l.lift ~thumb pc code) ~f:(fun (size, name, bir) ->
+                  { bytes = String.prefix code size; name; thumb; bir })))
 
 let insn_at ?thumb t pc = executed_at ?thumb t pc
+
+(* the addresses of the instructions, that the lifted engine ran, also
+   before the checkpoint, from which the program continues, with the
+   lower bit set in the Thumb state of ARM *)
+let insns t =
+  let addr (pc, thumb) = if thumb then Int64.(pc lor 1L) else pc in
+  let ran = Hash_set.Poly.create () in
+  Hashtbl.iter_keys t.session.ran_before ~f:(fun k -> Hash_set.add ran (addr k));
+  Option.iter t.session.lifter ~f:(fun (l : X.lifter) ->
+      List.iter (l.ran ()) ~f:(fun (e : X.Lifts.entry) ->
+          Hash_set.add ran (addr (e.addr, e.thumb))));
+  Option.iter t.session.active ~f:(fun e ->
+      List.iter (Uc.insn_addrs e.uc) ~f:(fun pc ->
+          match Uc.insn_at e.uc pc with
+          | Some (_, _, thumb, _) -> Hash_set.add ran (addr (pc, thumb))
+          | None -> ()));
+  Hash_set.to_list ran |> List.sort ~compare:Int64.compare
 
 (* the bytes of the instructions, that ran, from the address, one after
    another, as far as they go, at most [n] *)

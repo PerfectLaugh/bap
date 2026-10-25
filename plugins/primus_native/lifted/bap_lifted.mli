@@ -65,6 +65,9 @@ val insn_at :
     lifted there. {!flush_tb} keeps the instructions, whose bytes are checked,
     when they run, and drops the blocks, that the JIT compiled. *)
 
+val insn_addrs : t -> int64 list
+(** the addresses of the instructions, that {!insn_at} has, in no order *)
+
 (** {2 Memory} *)
 
 val mem_map : t -> int64 -> int64 -> Bap_unicorn.Perm.t -> unit
