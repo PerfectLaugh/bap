@@ -693,10 +693,10 @@ val on_write :
 val scoped : t -> (unit -> 'a) -> 'a
 (** [scoped emu f] runs [f], and removes the hooks, that it added, when it
     returns, or raises: of {!on_code}, {!on_sites}, {!on_read}, {!on_write},
-    {!on_writes}, {!on_call}, {!on_syscall}, and {!Trace.capture}, also the
-    ones, that the scopes, that it runs, added, so that an experiment, e.g., of
-    a {!call}, or of a {!drive}, doesn't leave its hooks to the program, that
-    runs after it:
+    {!on_writes}, {!on_call}, {!on_import}, {!on_syscall}, and {!Trace.capture},
+    also the ones, that the scopes, that it runs, added, so that an experiment,
+    e.g., of a {!call}, or of a {!drive}, doesn't leave its hooks to the
+    program, that runs after it:
 
     {[
     let r =
@@ -714,6 +714,20 @@ val on_call : t -> string -> (t -> action) -> unit
 (** [on_call emu name f] calls [f emu] when the program calls the function,
     e.g., an external one, before its stub, or one of the program, which [f] may
     replace, see {!action}, and whose arguments {!arg} reads. *)
+
+val on_import : t -> site:int64 -> name:string -> (t -> action) -> unit
+(** [on_import emu ~site ~name f] calls [f emu] at the import call [site].
+    [Return x] returns [x] directly from the call site and records a relocation;
+    [Default] runs the callee. The prototype of [name] remains available to
+    {!arg}. *)
+
+val relocation_journal : t -> event list
+(** the relocation events recorded by {!on_import}, in call order. *)
+
+val register_stub : t -> name:string -> address:int64 -> unit
+(** [register_stub emu ~name ~address] names a harness-owned synthetic stub and
+    warns if execution enters it before [name] is registered with {!on_call} or
+    {!on_import}. *)
 
 val on_syscall : t -> (t -> int64 -> int64 list -> action) -> unit
 (** [on_syscall emu f] calls [f emu number args] at each system call of the

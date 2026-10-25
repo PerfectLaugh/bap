@@ -2167,6 +2167,19 @@ let function_name e addr =
   | Some name -> Some name
   | None -> Hashtbl.find e.session.names addr
 
+let import_return e name x =
+  let frame = frame_uc e in
+  (match Hashtbl.find e.session.signatures name with
+  | Some { output = Some (exp, width); _ } ->
+      ignore (assign_uc e exp (Word.of_int64 ~width x) : bool)
+  | _ -> ());
+  if Option.is_none e.link then
+    ignore
+      (Target.Regs.write e.regs e.sp
+         (Word.of_int64 ~width:(e.bytes * 8) frame.sp)
+        : bool);
+  frame.ret
+
 (* runs the hooks of the call of the function, the first of which, that
    returns a value, returns it from the call, so that Unicorn continues
    from the return address, which is the result *)
@@ -2179,18 +2192,7 @@ let call_returns e name =
             match hook () with Return x -> Some x | Default -> None)
       with
       | None -> None
-      | Some x ->
-          let frame = frame_uc e in
-          (match Hashtbl.find e.session.signatures name with
-          | Some { output = Some (exp, width); _ } ->
-              ignore (assign_uc e exp (Word.of_int64 ~width x) : bool)
-          | _ -> ());
-          if Option.is_none e.link then
-            ignore
-              (Target.Regs.write e.regs e.sp
-                 (Word.of_int64 ~width:(e.bytes * 8) frame.sp)
-                : bool);
-          Some frame.ret)
+      | Some x -> Some (import_return e name x))
 
 type model_action =
   | Restore_model of string * string

@@ -7,6 +7,7 @@ module Native = Bap_primus_native_plugin.Primus_native_libc
 module Target = Bap_primus_native_plugin.Primus_native_target
 module Uc = Bap_engine
 module Io = Primus_lisp_library_plugin.Primus_lisp_io
+include Bap_main.Loggers ()
 
 type status = Paused | Running | Exited of int option | Failed of string
 type action = Default | Return of int64
@@ -66,6 +67,8 @@ type t = {
           not free to call *)
   hooked_calls : Int64.Hash_set.t;
       (** the addresses, whose calls the script hooks, see [on_call] *)
+  services : int String.Table.t;
+      (** the active hooks of each import, that the script services *)
   insns : Int64.Hash_set.t Lazy.t;
       (** the addresses of the instructions of the program, that the
           disassembler computed, if any, see [it_blocks_of] *)
@@ -349,6 +352,7 @@ let create ?system ?(components = []) ?(init = []) ?(redirects = [])
       lifted = lifts proj;
       paused_lifts = Hashtbl.Poly.create ();
       hooked_calls = Int64.Hash_set.create ();
+      services = String.Table.create ();
       insns =
         lazy
           (let insns = Int64.Hash_set.create () in
@@ -2509,6 +2513,41 @@ let write_profile t =
     seconds = t.write_seconds;
   }
 
+let add_service t name =
+  Hashtbl.update t.services name ~f:(function
+    | None -> 1
+    | Some count -> count + 1)
+
+let remove_service t name =
+  Hashtbl.change t.services name ~f:(function
+    | None | Some 1 -> None
+    | Some count -> Some (count - 1))
+
+let on_import t ~site ~name f =
+  add_service t name;
+  let hook () =
+    t.call <- Some name;
+    Exn.protect
+      ~f:(fun () ->
+        match f t with
+        | Default -> ()
+        | Return x ->
+            record_event t "relocation" (sprintf "%Lx:%s:0x%Lx" site name x);
+            let e = engine t in
+            let ret = X.import_return e name x in
+            e.reason <- Some (X.Jump ret);
+            Uc.stop e.uc)
+      ~finally:(fun () -> t.call <- None)
+  in
+  sites_hook t [ site ] (fun _ -> hook ());
+  scope t (fun () -> remove_service t name)
+
+let relocation_journal t =
+  Queue.to_list t.session.journal
+  |> List.map ~f:(fun (event : X.journal_event) ->
+      { kind = event.kind; detail = event.detail })
+  |> List.filter ~f:(fun event -> String.equal event.kind "relocation")
+
 (* the functions of the program, which no stub replaces, are hooked at
    their addresses, once, by the name, that the address has, when it is
    called, see [add_symbol], and the others stop Unicorn, see
@@ -2553,6 +2592,7 @@ let on_syscall t f =
         List.filter t.session.syscall_hooks ~f:(fun g -> not (phys_equal g h)))
 
 let on_call t name f =
+  add_service t name;
   let hook () =
     t.call <- Some name;
     Exn.protect
@@ -2571,7 +2611,8 @@ let on_call t name f =
         | Some hooks -> (
             match List.filter hooks ~f:(fun g -> not (phys_equal g hook)) with
             | [] -> None
-            | hooks -> Some hooks)));
+            | hooks -> Some hooks));
+      remove_service t name);
   Hashtbl.iteri t.session.names ~f:(fun ~key:addr ~data ->
       if String.equal data name then hook_calls t addr)
 
@@ -2581,6 +2622,18 @@ let add_symbol t name addr =
   Hashtbl.set t.session.symbols ~key:addr ~data:name;
   Hashtbl.set t.session.names ~key:addr ~data:name;
   if Hashtbl.mem t.session.call_hooks name then hook_calls t addr
+
+let register_stub t ~name ~address =
+  add_symbol t name address;
+  hook t (fun e ->
+      let fresh = instructions t in
+      [
+        Uc.on_code e.uc ~first:address ~last:address (fun _ _ ->
+            if fresh address && not (Hashtbl.mem t.services name) then
+              warning
+                "Bap_emu: synthetic stub %s at %Lx has no registered service"
+                name address);
+      ])
 
 let symbols t =
   Hashtbl.to_alist t.session.names

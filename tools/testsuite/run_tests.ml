@@ -716,6 +716,48 @@ let emu data =
             ("resolves malloc", "import malloc -> malloc\n");
           ];
         lacks env "resolves all" out "-> \\?");
+    (* call-site import overrides return directly, and synthetic stubs warn
+       only when no service is registered, see import-model.ml *)
+    case "emu/import-model" (fun env ->
+        let run mode =
+          let log = file env (mode ^ "-log") in
+          let out =
+            bap ~timeout:300. env ~unset:[ "BAP_LOG_DIR" ]
+              ~env:[ ("BAP_LOG_DIR", log) ]
+              [
+                "script";
+                input "emu/import-model.ml";
+                path data "bin/x86_64-linux-gnu-echo";
+                mode;
+              ]
+          in
+          let log =
+            {
+              text =
+                In_channel.with_open_bin
+                  (Filename.concat log "log")
+                  In_channel.input_all;
+              status = Exited 0;
+            }
+          in
+          (out, log)
+        in
+        let out, _ = run "override" in
+        sequence env out
+          [
+            ("overrides the call site", "override result: 2a\n");
+            ( "records the relocation",
+              "relocation events: 1, 40075d:strlen:0x2a\n" );
+          ];
+        let out, _ = run "default" in
+        has env "runs the callee by default" out "default result: 603180\n";
+        let _, log = run "unserviced" in
+        contains env "warns about an unserviced stub" log
+          "synthetic stub synthetic at 40076b has no registered service";
+        let out, log = run "serviced" in
+        has env "runs a serviced stub" out "stub serviced: true\n";
+        lacks env "does not warn about a serviced stub" log
+          "has no registered service");
     (* the checkpoint keeps the memory, that the script changed, and the
        names, that it gave, which another run of bap loads *)
     case "emu/x86_64-linux-gnu-echo/checkpoint" (fun env ->
