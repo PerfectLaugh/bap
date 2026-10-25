@@ -33,7 +33,17 @@ let () =
       let good = Emu.reg emu "RDI" in
       Emu.set_reg emu "RDI" 0x10L;
       (match Emu.run emu with
-      | Failed msg -> printf "failed: %s\n" msg
+      | Failed msg -> (
+          printf "failed: %s\n" msg;
+          match Emu.failure emu with
+          | Some fault ->
+              printf "fault: thread=%d pc=%Lx addr=%Lx operation=%s\n"
+                fault.thread fault.pc fault.addr
+                (match fault.operation with
+                | Emu.Read -> "read"
+                | Emu.Write -> "write"
+                | Emu.Fetch -> "fetch")
+          | None -> print_endline "no structured fault")
       | _ -> print_endline "didn't fail");
       Emu.save emu ckpt;
       printf "saved at %Lx\n" (Emu.Checkpoint.info ckpt).pc;

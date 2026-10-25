@@ -10,6 +10,14 @@ module Io = Primus_lisp_library_plugin.Primus_lisp_io
 
 type status = Paused | Running | Exited of int option | Failed of string
 type action = Default | Return of int64
+type memory_operation = Read | Write | Fetch
+
+type failure = {
+  thread : int;
+  pc : int64;
+  addr : int64;
+  operation : memory_operation;
+}
 
 (* the system, which runs in the fiber of the script, either paused,
    with the address, from which it continues, or finished *)
@@ -121,6 +129,16 @@ let status t =
       Failed (Format.asprintf "%a" Knowledge.Conflict.pp conflict)
   | Crashed exn -> Failed (Exn.to_string exn)
 
+let failure t =
+  Option.map t.session.last_fault ~f:(fun (fault : X.fault) ->
+      let operation =
+        match fault.access with
+        | Uc.Read | Uc.Read_after | Uc.Read_unmapped | Uc.Read_prot -> Read
+        | Uc.Write | Uc.Write_unmapped | Uc.Write_prot -> Write
+        | Uc.Fetch | Uc.Fetch_unmapped | Uc.Fetch_prot -> Fetch
+      in
+      { thread = fault.tid; pc = fault.pc; addr = fault.addr; operation })
+
 let paused t = match t.state with Suspended _ -> true | _ -> false
 
 (* the failure of [fn], whose program is not paused, which tells, why:
@@ -220,8 +238,8 @@ let start init (entry : Primus.Linker.name) =
         let module Component = Component (Machine) in
         Component.init () >>= ended
     | X.Continue _ | X.Map _ | X.Snapshot | X.Store _ | X.Save _ | X.Interpret
-    | X.Set_pc _ | X.Spawn _ | X.Call _ | X.Regions | X.Dump _ | X.Values _
-    | X.Origins _ | X.Drop _ ->
+    | X.Set_pc _ | X.Spawn _ | X.Resume_thread _ | X.Call _ | X.Regions
+    | X.Dump _ | X.Values _ | X.Origins _ | X.Drop _ ->
         Machine.return ()
   in
   ended ()
@@ -2929,6 +2947,76 @@ and unsorted_thread_regs t tid =
                     >>| fun saved -> regs := saved
                 end);
     !regs
+
+let require_thread t tid =
+  if
+    tid <> thread t
+    && not
+         (List.exists (threads t) ~f:(fun (th : Checkpoint.thread) ->
+              th.tid = tid))
+  then invalid_argf "Bap_emu: the program has no thread %d" tid ()
+
+let set_thread_reg t tid name value =
+  if tid = thread t then set_reg t name value
+  else
+    let e = engine t in
+    let basis = Target.Regs.basis e.regs in
+    match List.find basis ~f:(fun v -> String.equal (Var.name v) name) with
+    | None -> invalid_argf "Bap_emu: unknown register %s" name ()
+    | Some v ->
+        require_thread t tid;
+        let width =
+          match Var.typ v with
+          | Type.Imm width -> width
+          | _ -> invalid_argf "Bap_emu: register %s is not an integer" name ()
+        in
+        primus t
+          (module functor
+                    (Machine : Primus.Machine.S)
+                    ->
+                    struct
+                      module Env = Primus.Env.Make (Machine)
+                      module Value = Primus.Value.Make (Machine)
+                      open Machine.Syntax
+
+                      let init () =
+                        let saved = X.thread_var tid v in
+                        Value.of_word (Word.of_int64 ~width value)
+                        >>= Env.set saved
+                    end)
+
+let set_thread_pc t tid addr =
+  if tid = thread t then set_pc t addr
+  else (
+    require_thread t tid;
+    primus t
+      (module functor
+                (Machine : Primus.Machine.S)
+                ->
+                struct
+                  open Machine.Syntax
+
+                  let init () =
+                    Machine.Local.get X.threads >>= fun state ->
+                    let others =
+                      List.map state.others ~f:(fun (other : X.thread) ->
+                          if other.tid = tid then { other with next = addr }
+                          else other)
+                    in
+                    Machine.Local.put X.threads { state with others }
+                end))
+
+let resume_thread t tid =
+  if tid <> thread t then begin
+    require_thread t tid;
+    let waiting =
+      List.find_exn (threads t) ~f:(fun (th : Checkpoint.thread) ->
+          th.tid = tid)
+    in
+    if Option.is_some waiting.waiting then
+      invalid_argf "Bap_emu.resume_thread: thread %d is waiting" tid ();
+    resume t (X.Resume_thread tid)
+  end
 
 type called =
   | Returned of int64

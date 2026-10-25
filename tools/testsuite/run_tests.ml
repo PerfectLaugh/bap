@@ -2323,6 +2323,25 @@ let threads data =
             "info: thread 1 at 2013e0, threads [2-9], of the program true\n";
           has env "restores in main" out "restored in the thread 1\n";
           taint out);
+      (* parked threads have their registers and PCs changed, and a ready
+         thread resumes, but a missing or waiting thread is rejected *)
+      case "emu/thread-controls" (fun env ->
+          let out =
+            bap ~timeout:300. env
+              [
+                "script";
+                input "emu/thread-controls.ml";
+                path data "bin/x86_64-linux-gnu-threads";
+              ]
+          in
+          sequence env out
+            [
+              ( "resumes the selected thread",
+                "resumed thread 2 at 201513 with R8 = 42\n" );
+              ("runs the selected thread", "continued thread 2 with R8 = 42\n");
+              ("rejects a missing thread", "missing thread:");
+              ("rejects a waiting thread", "waiting thread:");
+            ]);
       (* the checkpoint, that is saved, while a call of the script runs,
          is of the program at the call, with its threads, see
          call-save.ml *)

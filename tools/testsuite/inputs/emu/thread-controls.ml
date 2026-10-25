@@ -1,0 +1,38 @@
+#require "bap-primus-native.emu"
+
+open Core
+module Emu = Bap_emu
+
+let pause emu addr =
+  match Emu.run emu ~until:addr with
+  | Paused -> ()
+  | _ -> failwithf "doesn't pause at %Lx" addr ()
+
+let () =
+  let file = List.hd_exn (Bap_script.args ()) in
+  let emu = Emu.create (Bap_script.project ~disassemble:true file) in
+  pause emu 0x2013e0L;
+  let current = Emu.thread emu in
+  let other =
+    List.find_exn (Emu.threads emu) ~f:(fun (thread : Emu.Checkpoint.thread) ->
+        thread.tid <> current)
+  in
+  if Option.is_some other.waiting then failwith "expected a ready thread";
+  Emu.set_thread_reg emu other.tid "R8" 0x42L;
+  Emu.set_thread_pc emu other.tid 0x201513L;
+  Emu.resume_thread emu other.tid;
+  printf "resumed thread %d at %Lx with R8 = %Lx\n" (Emu.thread emu)
+    (Emu.pc emu) (Emu.reg emu "R8");
+  pause emu 0x201537L;
+  printf "continued thread %d with R8 = %Lx\n" (Emu.thread emu)
+    (Emu.reg emu "R8");
+  (match Emu.resume_thread emu 999 with
+  | exception Invalid_argument msg -> printf "missing thread: %s\n" msg
+  | () -> print_endline "resumed a missing thread");
+  let waiting =
+    List.find_exn (Emu.threads emu) ~f:(fun (thread : Emu.Checkpoint.thread) ->
+        thread.tid <> Emu.thread emu && Option.is_some thread.waiting)
+  in
+  match Emu.resume_thread emu waiting.tid with
+  | exception Invalid_argument msg -> printf "waiting thread: %s\n" msg
+  | () -> print_endline "resumed a waiting thread"

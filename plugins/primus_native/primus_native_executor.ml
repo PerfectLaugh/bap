@@ -321,8 +321,11 @@ and lifter = {
       (** the instructions, that [lifted] has, in no order *)
 }
 
+and fault = { tid : int; pc : int64; addr : int64; access : Uc.access }
+
 and session = {
-  mutable active : engine option;  (** the engine of the machines *)
+  mutable active : engine option;
+  mutable last_fault : fault option;  (** the engine of the machines *)
   mutable recipe :
     (Theory.Target.t * int64 list * (int64 * string) list) option;
       (** the arguments of [create] *)
@@ -500,6 +503,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     lifter = None;
     ran_before = Hashtbl.Poly.create ();
     active = None;
+    last_fault = None;
     recipe = None;
     parked = Id.Table.create ();
     parked_pages = 0;
@@ -828,6 +832,8 @@ type request =
   | Spawn of int64 * int64 * int64 option
       (** the thread, that calls the function at the address with the argument,
           on the stack, is created, see [Bap_emu.spawn_thread] *)
+  | Resume_thread of int
+      (** the ready thread, that runs next, see [Bap_emu.resume_thread] *)
   | Call of int64 * int64 list * (string * int64) list * int option * int option
       (** the function at the address is called with the arguments, the
           registers, in the context of the thread, on a new stack of the size,
@@ -2949,34 +2955,41 @@ module Make (Machine : Primus.Machine.S) = struct
       Uc.mem_unmap e.uc page page_size;
       Hashtbl.remove e.pages page)
 
+  let remember_fault e access addr =
+    let pc = Uc.reg_read e.uc e.pc in
+    Machine.Local.get threads >>| fun { current; _ } ->
+    e.session.last_fault <- Some { tid = current; pc; addr; access }
+
   (* repeats the access, that Unicorn denied, in Primus, which signals
      the pagefault trap, as the interpreter does, and raises the
      segmentation fault, unless the pagefault handler fixes the access,
      after which the page is copied anew *)
   let repeat e access addr =
-    let a = word e addr in
-    let* () = pull e in
-    let* v = Value.of_word a in
-    let* () =
-      match (access : Uc.access) with
-      | Write_unmapped | Write_prot ->
-          let* x =
-            Memory.protection a >>= function
-            | Some p when p.readable -> Memory.get a
-            | _ -> Value.zero 8
-          in
-          Interpreter.store v x LittleEndian `r8
-      | Fetch_unmapped | Fetch_prot ->
-          (* Primus doesn't fetch the code, so it checks only the access *)
-          let* _ = Interpreter.load v LittleEndian `r8 in
-          let* executable = Memory.is_executable a in
-          if executable then Machine.return ()
-          else Machine.raise (Primus.Interpreter.Segmentation_fault a)
-      | _ -> Interpreter.load v LittleEndian `r8 >>| ignore
-    in
-    let+ () = sync_page e (page_of addr) in
-    drop_page e (page_of addr);
-    `Continue
+    Machine.catch
+      (let a = word e addr in
+       let* () = pull e in
+       let* v = Value.of_word a in
+       let* () =
+         match (access : Uc.access) with
+         | Write_unmapped | Write_prot ->
+             let* x =
+               Memory.protection a >>= function
+               | Some p when p.readable -> Memory.get a
+               | _ -> Value.zero 8
+             in
+             Interpreter.store v x LittleEndian `r8
+         | Fetch_unmapped | Fetch_prot ->
+             (* Primus doesn't fetch the code, so it checks only the access *)
+             let* _ = Interpreter.load v LittleEndian `r8 in
+             let* executable = Memory.is_executable a in
+             if executable then Machine.return ()
+             else Machine.raise (Primus.Interpreter.Segmentation_fault a)
+         | _ -> Interpreter.load v LittleEndian `r8 >>| ignore
+       in
+       let+ () = sync_page e (page_of addr) in
+       drop_page e (page_of addr);
+       `Continue)
+      (fun exn -> remember_fault e access addr >>= fun () -> Machine.raise exn)
 
   let fault e access addr =
     match (access : Uc.access) with
@@ -2989,6 +3002,7 @@ module Make (Machine : Primus.Machine.S) = struct
         else repeat e access addr
     | Read_prot | Write_prot | Fetch_prot -> repeat e access addr
     | Read | Write | Fetch | Read_after ->
+        remember_fault e access addr >>= fun () ->
         pull e >>= fun () -> fail "access to %Lx is denied" addr
 
   (* the interpreted stub, if the function is linked to the stub of the
@@ -3512,6 +3526,7 @@ module Make (Machine : Primus.Machine.S) = struct
   let rec start_uc ?count e pc deadline =
     let s = e.session in
     e.reason <- None;
+    s.last_fault <- None;
     s.skipped_at <- None;
     s.starts <- s.starts + 1;
     s.restarted_at <-
@@ -6189,6 +6204,19 @@ module Make (Machine : Primus.Machine.S) = struct
         in
         e.session.spawned <- r;
         serve pc
+    | Resume_thread tid -> (
+        let* st = Machine.Local.get threads in
+        if tid = st.current then serve pc
+        else
+          match
+            List.find st.others ~f:(fun thread ->
+                thread.tid = tid && Poly.equal thread.wait Ready)
+          with
+          | None -> serve pc
+          | Some _ ->
+              let* parked = Threads.park e ~next:pc ~wait:Ready st in
+              Threads.switch e ~parked st >>= fun next ->
+              serve (Option.value next ~default:pc))
     | Call (addr, args, regs, thread, stack) ->
         e.session.called <- None;
         let* r =

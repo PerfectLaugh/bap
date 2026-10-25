@@ -48,6 +48,21 @@ type status =
   | Exited of int option  (** the program exited, with the code, if known *)
   | Failed of string  (** the program or the emulator failed *)
 
+type memory_operation = Read | Write | Fetch
+
+type failure = {
+  thread : int;
+  pc : int64;
+  addr : int64;
+  operation : memory_operation;
+}
+(** the last unrecoverable memory fault, with its thread, instruction, address,
+    and operation *)
+
+val failure : t -> failure option
+(** [failure emu] is the last unrecoverable memory fault, or [None] if the
+    program has not had one. Recoverable page faults are not included. *)
+
 (** what a hook of a call does *)
 type action =
   | Default  (** the function runs, e.g., its stub *)
@@ -1267,6 +1282,19 @@ val thread_regs : t -> int -> (string * int64) list
     engine, for the thread, that runs, and else, as the thread had them, when it
     stopped running. Raises [Invalid_argument], if the program is not paused, or
     has no such thread. *)
+
+val set_thread_reg : t -> int -> string -> int64 -> unit
+(** [set_thread_reg emu tid name value] sets the register of an active or parked
+    thread. Raises [Invalid_argument] for an unknown thread or register. *)
+
+val set_thread_pc : t -> int -> int64 -> unit
+(** [set_thread_pc emu tid addr] sets the address from which an active or parked
+    thread continues. Raises [Invalid_argument] for an unknown thread. *)
+
+val resume_thread : t -> int -> unit
+(** [resume_thread emu tid] resumes a ready parked thread, or does nothing for
+    the active thread. Raises [Invalid_argument] for an unknown or waiting
+    thread. *)
 
 val threads : t -> Checkpoint.thread list
 (** [threads emu] the threads of the paused program, the one, that runs, at the
