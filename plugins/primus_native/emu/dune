@@ -4,6 +4,11 @@
 (library
  (name bap_emu)
  (public_name bap-primus-native.emu)
+ (foreign_stubs
+  (language c)
+  (names process_stubs))
+ (c_library_flags
+  (:include threads.flags))
  (preprocess
   (pps ppx_bap))
  (libraries
@@ -15,8 +20,23 @@
   bap-primus-native.plugin
   bap-primus-lisp.plugin
   bap-primus-native.engine
-  bap-primus-native.unicorn
   bap-primus-native-jni.jni
   bap-primus-symbolic-executor.symbolic
   bap-taint
   core))
+
+(rule
+ (enabled_if
+  (<> %{os_type} Win32))
+ (action
+  (with-stdout-to
+   threads.flags
+   (echo "(-lpthread)"))))
+
+(rule
+ (enabled_if
+  (= %{os_type} Win32))
+ (action
+  (with-stdout-to
+   threads.flags
+   (echo "()"))))

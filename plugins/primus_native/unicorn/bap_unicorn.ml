@@ -2,9 +2,6 @@ exception Error of int * string
 
 let () = Callback.register_exception "Bap_unicorn.Error" (Error (0, ""))
 
-external deadline_start : float -> int -> int64 = "bap_uc_deadline_start"
-external deadline_cancel : int64 -> unit = "bap_uc_deadline_cancel"
-
 type t
 type arch = Arm | Arm64 | Mips | X86 | Ppc | Riscv
 

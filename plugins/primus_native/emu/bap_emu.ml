@@ -513,9 +513,9 @@ type deadline = int64
 let start_deadline ?(code = 124) seconds =
   if Float.(seconds < 0.) || not (Float.is_finite seconds) then
     invalid_arg "Bap_emu.start_deadline: invalid seconds";
-  Bap_unicorn.deadline_start seconds code
+  Bap_emu_process.start_deadline seconds code
 
-let cancel_deadline = Bap_unicorn.deadline_cancel
+let cancel_deadline = Bap_emu_process.cancel_deadline
 
 type component_footprint = {
   lifter_entries : int;
