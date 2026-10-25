@@ -1,6 +1,7 @@
 failed: Segmentation fault at 0x10
 fault: thread=1 pc=400720 addr=10 operation=read
 saved at 400720
+context: thread=1 frames=true model=true fault=10 allocator=true import=true syscall=false
 continues at 400720, with RAX = 10
 exited 0
 Bap_emu.save: the program is not paused, as it exited with the code 0

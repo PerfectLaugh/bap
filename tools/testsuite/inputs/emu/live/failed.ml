@@ -21,6 +21,10 @@ let () =
       in
       let ckpt = Filename.concat dir "failed.ckpt" in
       let redirects = [ ("<stdout>", Filename.concat dir "failed.out") ] in
+      let allocator = ref 0x1000L in
+      Emu.Checkpoint.register_ref ~package:"test" ~required:true "allocator"
+        (module Int64)
+        allocator;
       let emu =
         Emu.create ~engine ~redirects ~args:[ "hello" ]
           (Bap_script.project echo)
@@ -28,10 +32,14 @@ let () =
       let addr name =
         List.Assoc.find_exn (Emu.symbols emu) ~equal:String.equal name
       in
+      Emu.on_call emu "strlen" (fun _ -> Default);
+      Emu.on_syscall emu (fun _ _ _ -> Default);
       ignore (Emu.run emu ~until:(addr "print_endline") : Emu.status);
       (* the string, that print_endline prints, is at 0x10 *)
       let good = Emu.reg emu "RDI" in
       Emu.set_reg emu "RDI" 0x10L;
+      allocator := 0x2000L;
+      Emu.record_event emu "allocator" (sprintf "cursor=%Lx" !allocator);
       (match Emu.run emu with
       | Failed msg -> (
           printf "failed: %s\n" msg;
@@ -47,6 +55,21 @@ let () =
       | _ -> print_endline "didn't fail");
       Emu.save emu ckpt;
       printf "saved at %Lx\n" (Emu.Checkpoint.info ckpt).pc;
+      let context = Emu.Checkpoint.context ckpt in
+      let has kind =
+        List.exists context.events ~f:(fun (event : Emu.event) ->
+            String.equal event.kind kind)
+      in
+      printf
+        "context: thread=%d frames=%b model=%b fault=%Lx allocator=%b \
+         import=%b syscall=%b\n"
+        context.thread.tid
+        (not (List.is_empty context.frames))
+        (Option.exists context.models ~f:(fun models ->
+             List.exists models ~f:(fun (model : Emu.Checkpoint.model_state) ->
+                 String.equal model.name "test:allocator" && model.required)))
+        (Option.value_exn context.failure).addr (has "allocator") (has "import")
+        (has "syscall");
       let again =
         Emu.create ~engine ~redirects ~restore:ckpt (Bap_script.project echo)
       in

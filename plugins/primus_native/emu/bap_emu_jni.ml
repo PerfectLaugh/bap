@@ -874,6 +874,7 @@ module type Emulator = sig
   val reg : t -> string -> int64
   val set_reg : t -> string -> int64 -> unit
   val set_pc : t -> int64 -> unit
+  val event : t -> string -> unit
 end
 
 type layout = {
@@ -957,6 +958,7 @@ module Make (E : Emulator) = struct
     in
     if call.index = 219 then write_word emu (arg call 1) t.vm;
     let result = dispatch t call in
+    E.event emu (sprintf "%s result=%Lx" (name_of_index call.index) result);
     E.set_reg emu "X0" result;
     E.set_pc emu (E.reg emu "X30")
 
@@ -969,6 +971,11 @@ module Make (E : Emulator) = struct
       call.index = 4 || call.index = 7
       || (call.index = 6 && Int64.equal result 0L)
     then write_word emu (E.reg emu "X1") t.env;
+    E.event emu
+      (sprintf "%s result=%Lx"
+         (if call.index = 6 then "JavaVM.GetEnv"
+          else sprintf "JavaVM[%d]" call.index)
+         result);
     E.set_reg emu "X0" result;
     E.set_pc emu (E.reg emu "X30")
 end

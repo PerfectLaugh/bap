@@ -208,6 +208,7 @@ module Test_emulator = struct
   let reg emu name = Option.value (Hashtbl.find emu.regs name) ~default:0L
   let set_reg emu name value = Hashtbl.set emu.regs ~key:name ~data:value
   let set_pc emu value = set_reg emu "PC" value
+  let event _ _ = ()
 
   let word emu address =
     let bytes = Stdlib.Bytes.create 8 in

@@ -626,6 +626,8 @@ Emu.set_reg emu "RAX" valid;
 Emu.run emu
 ```
 
+`Checkpoint.context file` describes a failure checkpoint without running it: the active thread, native frames, model manifest, last unrecoverable fault, and the last 32 model events. JNI and named import/syscall outcomes are recorded automatically. Allocator and other models add positions with `record_event emu "allocator" detail`. The journal is informational and bounded; the actual model state still comes from registered extensions, and missing or incompatible required state is rejected before guest execution.
+
 While a function, that the script called, runs, e.g., paused in it by a hook, see `call`, the checkpoint is of the program at the call: the registers, the runs of Unicorn, and the threads, that the program had, when the script called the function, and the memory, as the function changed it, as the call is of the script, and not of the program, which continues from where it paused for the call.
 
 A failure outside of a run of Unicorn, e.g., of a stub, that the program called before it started, has no checkpoint, and `save` raises `Failure`; the program, that exited, or whose emulator failed, e.g., with an exception of the script, raises `Invalid_argument`.

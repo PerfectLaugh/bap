@@ -321,6 +321,7 @@ and lifter = {
       (** the instructions, that [lifted] has, in no order *)
 }
 
+and journal_event = { kind : string; detail : string }
 and fault = { tid : int; pc : int64; addr : int64; access : Uc.access }
 
 and session = {
@@ -455,6 +456,8 @@ and session = {
       (** the hooks of the script, which every new engine gets, as the engine
           may be created anew, see [broken] *)
   events : event Queue.t;  (** the events, that the observers see *)
+  journal : journal_event Queue.t;
+      (** the last model events, that the checkpoints keep *)
   mutable sliced_at : float;
       (** the time of [clock], at which the thread, that runs, started its time
           slice, see [Make.Threads], which the pauses of the script shift, as
@@ -465,6 +468,50 @@ and session = {
       (** the address, at which a hook of the code paused the program, before
           its instruction ran, which runs, before the thread is preempted *)
 }
+
+type fault_record = { tid : int; pc : int64; addr : int64; operation : string }
+[@@deriving bin_io]
+
+type journal_event_record = { kind : string; detail : string }
+[@@deriving bin_io]
+
+type context = {
+  fault : fault_record option;
+  events : journal_event_record list;
+}
+[@@deriving bin_io]
+
+let fault_record (fault : fault) =
+  let operation =
+    match fault.access with
+    | Uc.Read | Uc.Read_after | Uc.Read_unmapped | Uc.Read_prot -> "read"
+    | Uc.Write | Uc.Write_unmapped | Uc.Write_prot -> "write"
+    | Uc.Fetch | Uc.Fetch_unmapped | Uc.Fetch_prot -> "fetch"
+  in
+  { tid = fault.tid; pc = fault.pc; addr = fault.addr; operation }
+
+let fault_of_record (fault : fault_record) =
+  let access =
+    match fault.operation with
+    | "read" -> Uc.Read_unmapped
+    | "write" -> Uc.Write_unmapped
+    | "fetch" -> Uc.Fetch_unmapped
+    | _ -> Uc.Read_unmapped
+  in
+  { tid = fault.tid; pc = fault.pc; addr = fault.addr; access }
+
+let context_extension = "bap:emu-context"
+
+let record_event session kind detail =
+  Queue.enqueue session.journal { kind; detail };
+  if Queue.length session.journal > 32 then
+    ignore (Queue.dequeue_exn session.journal : journal_event)
+
+let context_of_string =
+  Binable.of_string
+    (module struct
+      type t = context [@@deriving bin_io]
+    end)
 
 (* the folder, and its parents, which are made, if they aren't there *)
 let rec mkdirs dir =
@@ -552,6 +599,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     exit_code = None;
     engine_hooks = [];
     events = Queue.create ();
+    journal = Queue.create ();
     sliced_at = 0.;
     resumed = false;
     hooked_at = None;
@@ -6746,6 +6794,42 @@ module Ran (Machine : Primus.Machine.S) = struct
 end
 
 let () = Primus.Checkpoint.register ~package:"bap" "lifted-ran" (module Ran)
+
+module Context (Machine : Primus.Machine.S) = struct
+  open Machine.Syntax
+
+  let save =
+    Machine.Global.get session_state >>| fun s ->
+    if Option.is_none s.last_fault && Queue.is_empty s.journal then None
+    else
+      Some
+        (Binable.to_string
+           (module struct
+             type t = context [@@deriving bin_io]
+           end)
+           {
+             fault = Option.map s.last_fault ~f:fault_record;
+             events =
+               Queue.to_list s.journal
+               |> List.map ~f:(fun (event : journal_event) ->
+                   { kind = event.kind; detail = event.detail });
+           })
+
+  let restore data =
+    match context_of_string data with
+    | exception _ ->
+        warning "the failure context is not restored";
+        Machine.return ()
+    | saved ->
+        Machine.Global.get session_state >>| fun s ->
+        s.last_fault <- Option.map saved.fault ~f:fault_of_record;
+        Queue.clear s.journal;
+        List.iter (List.take saved.events 32) ~f:(fun event ->
+            record_event s event.kind event.detail)
+end
+
+let () =
+  Primus.Checkpoint.register ~package:"bap" "emu-context" (module Context)
 
 (* the threads of POSIX, that are detached, or exited, see [Make.Posix] *)
 module Posix_threads (Machine : Primus.Machine.S) = struct

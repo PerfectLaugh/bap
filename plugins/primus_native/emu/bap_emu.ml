@@ -19,6 +19,8 @@ type failure = {
   operation : memory_operation;
 }
 
+type event = { kind : string; detail : string }
+
 (* the system, which runs in the fiber of the script, either paused,
    with the address, from which it continues, or finished *)
 type state =
@@ -139,6 +141,7 @@ let failure t =
       in
       { thread = fault.tid; pc = fault.pc; addr = fault.addr; operation })
 
+let record_event t kind detail = X.record_event t.session kind detail
 let paused t = match t.state with Suspended _ -> true | _ -> false
 
 (* the failure of [fn], whose program is not paused, which tells, why:
@@ -598,6 +601,54 @@ module Checkpoint = struct
                 List.map ran ~f:(fun (pc, thumb, _) ->
                     if thumb then Int64.(pc lor 1L) else pc)
                 |> List.dedup_and_sort ~compare:Int64.compare))
+
+  type context = {
+    thread : thread;
+    frames : (string option * string option) list;
+    models : model_state list option;
+    failure : failure option;
+    events : event list;
+  }
+
+  let context file =
+    let info = info file in
+    let fault, events =
+      match C.load file with
+      | Error msg -> failwith msg
+      | Ok (c : C.t) -> (
+          match
+            List.Assoc.find c.extensions ~equal:String.equal X.context_extension
+          with
+          | None -> (None, [])
+          | Some data ->
+              let context = X.context_of_string data in
+              let failure =
+                Option.map context.fault ~f:(fun (fault : X.fault_record) ->
+                    let operation =
+                      match fault.operation with
+                      | "read" -> Read
+                      | "write" -> Write
+                      | "fetch" -> Fetch
+                      | _ -> Read
+                    in
+                    {
+                      thread = fault.tid;
+                      pc = fault.pc;
+                      addr = fault.addr;
+                      operation;
+                    })
+              in
+              ( failure,
+                List.map context.events ~f:(fun event ->
+                    { kind = event.kind; detail = event.detail }) ))
+    in
+    {
+      thread = List.hd_exn info.threads;
+      frames = info.frames;
+      models = models file;
+      failure = fault;
+      events;
+    }
 
   let insns_diff before after =
     let seen = Int64.Hash_set.of_list (insns before) in
@@ -2423,9 +2474,15 @@ let hook_calls t addr =
 
 (* the hooks of the system calls, which the ABI of Linux of the target
    tells, see [X.Make.Threads.hooked] *)
+let action_result = function
+  | Default -> "default"
+  | Return value -> sprintf "0x%Lx" value
+
 let on_syscall t f =
   let h number args =
-    match f t number args with Default -> X.Default | Return x -> X.Return x
+    let result = f t number args in
+    record_event t "syscall" (sprintf "%Ld:%s" number (action_result result));
+    match result with Default -> X.Default | Return x -> X.Return x
   in
   t.session.syscall_hooks <- h :: t.session.syscall_hooks;
   scope t (fun () ->
@@ -2437,7 +2494,9 @@ let on_call t name f =
     t.call <- Some name;
     Exn.protect
       ~f:(fun () ->
-        match f t with Default -> X.Default | Return x -> X.Return x)
+        let result = f t in
+        record_event t "import" (sprintf "%s:%s" name (action_result result));
+        match result with Default -> X.Default | Return x -> X.Return x)
       ~finally:(fun () -> t.call <- None)
   in
   Hashtbl.add_multi t.session.call_hooks ~key:name ~data:hook;
@@ -2481,6 +2540,7 @@ module Jni = struct
     let reg = reg
     let set_reg = set_reg
     let set_pc = set_pc
+    let event t detail = record_event t "jni" detail
   end)
 end
 

@@ -63,6 +63,12 @@ val failure : t -> failure option
 (** [failure emu] is the last unrecoverable memory fault, or [None] if the
     program has not had one. Recoverable page faults are not included. *)
 
+type event = { kind : string; detail : string }
+
+val record_event : t -> string -> string -> unit
+(** [record_event emu kind detail] appends a model event, e.g., an allocator
+    position, to the bounded journal kept in checkpoints. *)
+
 (** what a hook of a call does *)
 type action =
   | Default  (** the function runs, e.g., its stub *)
@@ -1257,6 +1263,18 @@ module Checkpoint : sig
   val models : string -> model_state list option
   (** [models file] is the model-state manifest of the checkpoint, or [None] for
       a legacy checkpoint without one. Raises as {!info}. *)
+
+  type context = {
+    thread : thread;
+    frames : (string option * string option) list;
+    models : model_state list option;
+    failure : failure option;
+    events : event list;
+  }
+
+  val context : string -> context
+  (** [context file] is the active thread, native frames, model manifest, last
+      unrecoverable fault, and last 32 model events in the checkpoint. *)
 
   val is_of : info -> project -> bool
   (** [is_of info proj] if the checkpoint is of the file of the program *)

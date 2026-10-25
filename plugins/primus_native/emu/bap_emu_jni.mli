@@ -192,6 +192,7 @@ module type Emulator = sig
   val reg : t -> string -> int64
   val set_reg : t -> string -> int64 -> unit
   val set_pc : t -> int64 -> unit
+  val event : t -> string -> unit
 end
 
 type layout = {
