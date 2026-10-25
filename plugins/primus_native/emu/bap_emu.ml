@@ -2466,6 +2466,8 @@ module Jni = struct
   end)
 end
 
+module Android = Bap_emu_android
+
 (* the projects of the memory, each in a unit of its own, as the memory
    changes between them *)
 let projects = ref 0

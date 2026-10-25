@@ -45,6 +45,12 @@ type t
 type object_id = int64
 (** an identity chosen by the target for a native-side Java object *)
 
+type identity =
+  | External of int64
+  | Internal of int
+      (** an external object identity or a model-created class, method, field,
+          string, array, or synthesized identity *)
+
 type call = { index : int; args : int64 array }
 (** a JNI function-table index and its arguments, including [JNIEnv *] *)
 
@@ -82,6 +88,22 @@ type call_record = {
   result : int64;
 }
 (** a completed call, passed to the logger after its answer is computed *)
+
+type kind = JNIEnv | JavaVM
+
+type event = {
+  ordinal : int;
+  kind : kind;
+  name : string;
+  call : call;
+  strings : (int * string) list;
+  identities : (int * identity) list;
+  detail : string option;
+  result : int64;
+  result_identity : identity option;
+}
+(** a recorded JNI or JavaVM operation. String arguments and identities are
+    stored by value, not as native pointers. *)
 
 val create :
   ?first_handle:int64 ->
@@ -128,8 +150,36 @@ val identity : t -> int64 -> object_id option
 (** [identity t handle] resolves a model-created handle to its object identity.
     Class, method, field, string, and synthesized identities return [None]. *)
 
+val string_value : t -> int64 -> string option
+(** [string_value t handle] is the content of a modeled Java string, or [None]
+    for another kind of handle. *)
+
 val dispatch : t -> call -> int64
 (** [dispatch t call] answers a JNI call and logs it. *)
+
+val start_recording : t -> unit
+(** [start_recording jni] starts a journal with no events. *)
+
+val stop_recording : t -> unit
+(** [stop_recording jni] stops adding events to the journal. *)
+
+val journal : t -> event list
+(** [journal jni] returns the recorded events in call order. *)
+
+val export_journal : event list -> string
+(** [export_journal events] serializes a journal for replay in another run. *)
+
+val import_journal : string -> event list
+(** [import_journal data] parses a journal. Raises [Invalid_argument] for
+    malformed data or an unsupported version. *)
+
+val replay : t -> event list -> unit
+(** [replay jni events] recomputes each operation with the recorded string
+    values and checks its ordinal, operation, detail, result, and identities.
+    Raises [Failure] on the first mismatch, naming its ordinal, operation, and
+    the expected and actual values. Use a fresh or appropriately restored model:
+    replay is not transactional and does not append events. New checkpoints
+    should prefer {!export_state}; journals also support older checkpoints. *)
 
 val name_of_index : int -> string
 (** the standard JNI function name, or ["JNIEnv[index]"] for an unknown index *)

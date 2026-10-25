@@ -15,6 +15,15 @@ let expect_int label expected actual =
 let expect_string label expected actual =
   if not (String.equal expected actual) then fail label expected actual
 
+let expect_failure label fragments f =
+  match f () with
+  | exception Failure msg ->
+      List.iter fragments ~f:(fun fragment ->
+          if not (String.is_substring msg ~substring:fragment) then
+            failwithf "%s: missing %s in %s" label fragment msg ())
+  | () -> failwith (label ^ ": expected a replay mismatch")
+  | exception exn -> failwith (label ^ ": " ^ Exn.to_string exn)
+
 let args values =
   let result = Array.create ~len:8 0L in
   List.iteri values ~f:(fun index value -> result.(index) <- value);
@@ -66,7 +75,7 @@ let objects =
     };
   ]
 
-let make ?log ?versions () =
+let make ?log ?versions ?default () =
   let strings = Int64.Table.create () in
   let next_string = ref 0x7000L in
   List.iter
@@ -98,7 +107,8 @@ let make ?log ?versions () =
         if String.equal text value then Some address else None)
     |> Option.value_exn
   in
-  ( Jni.create ~read_string ~alloc_string ~classes ~objects ?log ?versions (),
+  ( Jni.create ~read_string ~alloc_string ~classes ~objects ?log ?versions
+      ?default (),
     address )
 
 let test_identity () =
@@ -336,24 +346,111 @@ let test_state () =
   expect_string "invalid import is atomic" before_invalid_import
     (Jni.export_state restored)
 
+let test_replay () =
+  let jni, address = make () in
+  let emu = Test_emulator.create () in
+  Adapter.install jni emu layout;
+  Jni.start_recording jni;
+  let class_handle = dispatch jni 6 [ 0L; address "com/example/Example" ] in
+  let method_handle =
+    dispatch jni 33 [ 0L; class_handle; address "isDirectory"; address "()Z" ]
+  in
+  ignore method_handle;
+  let created = dispatch jni 167 [ 0L; address "created" ] in
+  let array = dispatch jni 172 [ 0L; 2L; class_handle; created ] in
+  ignore array;
+  Test_emulator.set_reg emu "X8" 4L;
+  Test_emulator.set_reg emu "X1" 0x5000L;
+  Adapter.serve_vm jni emu;
+  ignore (Jni.dispatch jni { index = 999; args = args [] });
+  Jni.stop_recording jni;
+  let events = Jni.export_journal (Jni.journal jni) |> Jni.import_journal in
+  expect_int "recorded operations" 6 (List.length events);
+  let created_event = List.nth_exn events 2 in
+  expect_int "recorded string argument" 1 (List.length created_event.strings);
+  expect_string "recorded string value" "created"
+    (snd (List.hd_exn created_event.strings));
+  let vm_event = List.nth_exn events 4 in
+  if not (Poly.equal vm_event.kind Jni.JavaVM) then
+    failwith "JavaVM event has the wrong kind";
+  let fresh, _ = make () in
+  Jni.start_recording fresh;
+  Jni.replay fresh events;
+  Jni.stop_recording fresh;
+  expect_int "replay does not append" 0 (List.length (Jni.journal fresh));
+  let change ordinal f =
+    List.map events ~f:(fun (event : Jni.event) ->
+        if event.ordinal = ordinal then f event else event)
+  in
+  let wrong_kind = change 1 (fun event -> { event with kind = Jni.JavaVM }) in
+  expect_failure "wrong operation kind"
+    [ "ordinal 1"; "FindClass"; "JavaVM.GetEnv" ] (fun () ->
+      let model, _ = make () in
+      Jni.replay model wrong_kind);
+  let wrong_result =
+    change 1 (fun event -> { event with result = Int64.(event.result + 0x10L) })
+  in
+  expect_failure "wrong result" [ "ordinal 1"; "expected result"; "got result" ]
+    (fun () ->
+      let model, _ = make () in
+      Jni.replay model wrong_result);
+  let wrong_identity =
+    change 1 (fun event -> { event with result_identity = Some (Internal 999) })
+  in
+  expect_failure "wrong identity"
+    [
+      "ordinal 1";
+      "result identity internal 999";
+      "got result identity internal 0";
+    ] (fun () ->
+      let model, _ = make () in
+      Jni.replay model wrong_identity);
+  let wrong_detail =
+    change 2 (fun event -> { event with detail = Some "wrong detail" })
+  in
+  expect_failure "wrong detail"
+    [ "ordinal 2"; "GetMethodID"; "wrong detail"; "isDirectory" ] (fun () ->
+      let model, _ = make () in
+      Jni.replay model wrong_detail);
+  expect_failure "wrong default result"
+    [ "ordinal 6"; "JNIEnv[999]"; "result 0x0"; "result 0x99" ] (fun () ->
+      let model, _ = make ~default:(fun _ _ -> Value 0x99L) () in
+      Jni.replay model events);
+  expect_failure "wrong starting ordinal"
+    [ "expected ordinal 1"; "got ordinal 2" ] (fun () ->
+      let model, _ = make () in
+      ignore (Jni.dispatch model { index = 999; args = args [] });
+      Jni.replay model events);
+  match Jni.import_journal "broken" with
+  | exception Invalid_argument _ -> ()
+  | _ -> failwith "invalid journal was accepted"
+
 let test_stale_string_buffer () =
   let strings = Int64.Table.create () in
   let source = 0x9000L in
-  let next = ref 0xa000L in
   Hashtbl.set strings ~key:source ~data:"created";
   let read_string address = Hashtbl.find_exn strings address in
-  let alloc_string text =
-    let address = !next in
-    (next := Int64.(address + 0x100L));
-    Hashtbl.set strings ~key:address ~data:text;
-    address
+  let make_native () =
+    let next = ref 0xa000L in
+    let alloc_string text =
+      let address = !next in
+      (next := Int64.(address + 0x100L));
+      Hashtbl.set strings ~key:address ~data:text;
+      address
+    in
+    Jni.create ~read_string ~alloc_string ()
   in
-  let make_native () = Jni.create ~read_string ~alloc_string () in
   let jni = make_native () in
+  Jni.start_recording jni;
   let created = dispatch jni 167 [ 0L; source ] in
   let chars = dispatch jni 169 [ 0L; created ] in
+  Jni.stop_recording jni;
+  let journal = Jni.export_journal (Jni.journal jni) |> Jni.import_journal in
   let saved = Jni.export_state jni in
   Hashtbl.set strings ~key:source ~data:"reused";
+  let replayed = make_native () in
+  Jni.replay replayed journal;
+  expect "replayed saved string" 7L (dispatch replayed 168 [ 0L; created ]);
   let restored = make_native () in
   Jni.import_state restored saved;
   expect "saved content, not current pointer" 7L
@@ -390,6 +487,7 @@ let () =
   test_declarations_and_logging ();
   test_adapter ();
   test_state ();
+  test_replay ();
   test_stale_string_buffer ();
   test_versions ();
   print_endline "JNI model tests passed"

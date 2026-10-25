@@ -1001,6 +1001,9 @@ module Jni : sig
   val read_string : emulator -> int64 -> string
 end
 
+module Android = Bap_emu_android
+(** reusable Android ServiceManager, IBinder, and Parcel models *)
+
 val knowledge : t -> Bap_knowledge.Knowledge.state option
 (** the knowledge of the system, when it finished, e.g., of the instructions,
     that it lifted, see [Primus.Lift], and what its components computed, or

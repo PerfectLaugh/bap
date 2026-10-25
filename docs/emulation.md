@@ -581,6 +581,35 @@ Every checkpoint has a manifest of the registered model names, schema versions, 
 
 Checkpoints written before the manifest format remain supported for optional models. Registering a required model rejects such a legacy checkpoint because its schema and producer-side requirement cannot be proved.
 
+For divergence investigation and older checkpoints without `export_state`, the JNI model also records portable replay journals. Each event has the call ordinal, operation, raw arguments, string arguments by value, model-created argument identities, method/field details, result, and result identity:
+
+```ocaml
+Emu.Jni.start_recording jni;
+(* serve JNI and JavaVM calls *)
+Emu.Jni.stop_recording jni;
+let data = Emu.Jni.export_journal (Emu.Jni.journal jni) in
+let events = Emu.Jni.import_journal data in
+let replayed = make_jni () in
+Emu.Jni.replay replayed events
+```
+
+Replay injects the recorded string values instead of rereading native argument buffers, which may have been reused. It checks ordinals, operations, details, results, and identities, and raises an error naming the ordinal, operation, and expected and actual values on the first mismatch. Use a fresh or appropriately restored model with the same declarations and deterministic external models, such as allocators. Replay is not transactional and does not append journal events. New checkpoints should prefer `export_state`.
+
+### Android models
+
+`Emu.Android` complements JNI with ServiceManager, IBinder, and stateful Parcel objects. Service declarations provide stable identities, return classes, and transaction handlers. Parcels support `obtain`, `writeInterfaceToken`, `writeInt`, `readInt`, `transact`, and `readException`:
+
+```ocaml
+let android = Android.create ~services:[demo_service] () in
+let jni =
+  Jni.create ~class_of:(Android.class_of android)
+    ~classes:(Android.jni_classes android) ~read_string ~alloc_string ()
+```
+
+The declarations include ServiceManager.getService, Parcel.obtain/writeInterfaceToken/writeInt/readException, and IBinder.transact. Repeated calls share service and return-class identities but obtain distinct parcels, producing a consistent object graph rather than unrelated fresh objects.
+
+`Android.export_state` and `import_state` preserve service metadata, live parcels, cursors, exceptions, return classes, and the identity cursor. Register them as a required model and recreate service declarations and handlers in the restored run; handlers are not serialized. Use `Android.find_parcel` to inspect restored parcels.
+
 A checkpoint is untrusted input, as it may be crafted, so its restore checks it: the program must be of the same digest, and the channels of Primus Lisp reopen their files only if the restored run allows them. A channel, that only reads, e.g., of the redirected input, reopens a regular file, and a channel, that writes, and the redirections, that the program may open, only the files, that `--primus-lisp-channel-redirect`, or the `redirects` of the script, redirect in the restored run; the others are closed, with a warning.
 
 The program continues the innermost run of Unicorn. Afterwards, the stub that started it completes, if it is known, see `Emu.complete`; e.g., `__libc_start_main` exits with the result of `main`.

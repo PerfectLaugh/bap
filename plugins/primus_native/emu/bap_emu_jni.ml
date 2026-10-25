@@ -1,7 +1,7 @@
 open Core
 
 type object_id = int64 [@@deriving bin_io]
-type call = { index : int; args : int64 array }
+type call = { index : int; args : int64 array } [@@deriving bin_io]
 
 type answer =
   | Value of int64
@@ -13,6 +13,20 @@ type answer =
 
 type identity = External of int64 | Internal of int [@@deriving bin_io]
 type ref_kind = Local | Global | Weak [@@deriving bin_io]
+type kind = JNIEnv | JavaVM [@@deriving bin_io]
+
+type event = {
+  ordinal : int;
+  kind : kind;
+  name : string;
+  call : call;
+  strings : (int * string) list;
+  identities : (int * identity) list;
+  detail : string option;
+  result : int64;
+  result_identity : identity option;
+}
+[@@deriving bin_io]
 
 type string_info = { content : string; mutable address : int64 option }
 [@@deriving bin_io]
@@ -69,6 +83,10 @@ and t = {
   log : (call_record -> unit) option;
   mutable env : int64;
   mutable vm : int64;
+  mutable next_ordinal : int;
+  mutable recording : bool;
+  mutable events : event list;
+  mutable replay_strings : (int * string) list option;
 }
 
 module Saved_state = struct
@@ -454,6 +472,11 @@ let identity t handle =
   | Some (External id) -> Some id
   | _ -> None
 
+let string_value t handle =
+  Option.map
+    (Hashtbl.find t.strings (resolve t handle))
+    ~f:(fun info -> info.content)
+
 let rec class_identity t name =
   match Hashtbl.find t.classes name with
   | Some id -> id
@@ -517,6 +540,10 @@ let create ?(first_handle = 0x52030000L) ?read_string ?alloc_string
       log;
       env = 0L;
       vm = 0L;
+      next_ordinal = 1;
+      recording = false;
+      events = [];
+      replay_strings = None;
     }
   in
   List.iter classes ~f:(register_class t);
@@ -526,8 +553,10 @@ let create ?(first_handle = 0x52030000L) ?read_string ?alloc_string
       Hashtbl.set t.arrays ~key:(External obj.identity) ~data:obj.elements);
   t
 
-let read_string t address =
-  Option.map t.read_string ~f:(fun read -> read address)
+let read_string t call index =
+  match t.replay_strings with
+  | Some strings -> List.Assoc.find strings index ~equal:Int.equal
+  | None -> Option.map t.read_string ~f:(fun read -> read (arg call index))
 
 let string_identity ?(fresh = false) t content =
   let reuse =
@@ -615,7 +644,7 @@ let compute t call =
   match index with
   | 4 -> (t.version, None)
   | 6 ->
-      let name = Option.value (read_string t (arg call 1)) ~default:"" in
+      let name = Option.value (read_string t call 1) ~default:"" in
       (intern_identity t Local (class_identity t name), Some name)
   | 21 -> (intern_identity t Global (resolve t (arg call 1)), None)
   | 22 | 23 | 166 | 170 | 227 -> (0L, None)
@@ -631,8 +660,8 @@ let compute t call =
   | 31 -> (get_object_class t (arg call 1), None)
   | 33 | 113 ->
       let static = index = 113 in
-      let name = Option.value (read_string t (arg call 2)) ~default:"" in
-      let signature = Option.value (read_string t (arg call 3)) ~default:"" in
+      let name = Option.value (read_string t call 2) ~default:"" in
+      let signature = Option.value (read_string t call 3) ~default:"" in
       let result =
         match method_id t ~static (arg call 1) name signature with
         | Some id -> id
@@ -641,8 +670,8 @@ let compute t call =
       (result, detail2 name signature)
   | 94 | 144 ->
       let static = index = 144 in
-      let name = Option.value (read_string t (arg call 2)) ~default:"" in
-      let signature = Option.value (read_string t (arg call 3)) ~default:"" in
+      let name = Option.value (read_string t call 2) ~default:"" in
+      let signature = Option.value (read_string t call 3) ~default:"" in
       let result =
         match field_id t ~static (arg call 1) name signature with
         | Some id -> id
@@ -660,7 +689,7 @@ let compute t call =
   | _ when index >= 145 && index <= 153 ->
       (get_field t call ~static:true (arg call 2), None)
   | 167 ->
-      let content = Option.value (read_string t (arg call 1)) ~default:"" in
+      let content = Option.value (read_string t call 1) ~default:"" in
       ( intern_identity t Local (string_identity ~fresh:true t content),
         Some content )
   | 164 | 168 -> (
@@ -699,13 +728,143 @@ let compute t call =
   | 226 -> (intern_identity t Weak (resolve t (arg call 1)), None)
   | _ -> (answer t (t.default t call), None)
 
-let dispatch (t : t) (call : call) =
-  let result, detail = compute t call in
+let string_arguments t call =
+  let read index =
+    (index, Option.value (read_string t call index) ~default:"")
+  in
+  match call.index with
+  | 6 | 167 -> [ read 1 ]
+  | 33 | 94 | 113 | 144 -> [ read 2; read 3 ]
+  | _ -> []
+
+let argument_identities t call =
+  Array.to_list call.args
+  |> List.filter_mapi ~f:(fun index handle ->
+      Option.map (Hashtbl.find t.sources handle) ~f:(fun id -> (index, id)))
+
+let finish t kind name call strings (result, detail) =
+  let ordinal = t.next_ordinal in
+  t.next_ordinal <- ordinal + 1;
+  let event =
+    {
+      ordinal;
+      kind;
+      name;
+      call;
+      strings;
+      identities = argument_identities t call;
+      detail;
+      result;
+      result_identity = Hashtbl.find t.sources result;
+    }
+  in
+  if t.recording then t.events <- event :: t.events;
   Option.iter t.log ~f:(fun log ->
-      log
-        ({ call; name = name_of_index call.index; detail; result }
-          : call_record));
+      log ({ call; name; detail; result } : call_record));
   result
+
+let dispatch (t : t) (call : call) =
+  let strings = string_arguments t call in
+  finish t JNIEnv (name_of_index call.index) call strings (compute t call)
+
+let compute_vm (t : t) (call : call) =
+  match call.index with
+  | 4 | 7 -> (0L, None)
+  | 6 ->
+      if List.mem t.versions (arg call 2) ~equal:Int64.equal then (0L, None)
+      else (-2L, None)
+  | _ -> (0L, None)
+
+let dispatch_vm (t : t) (call : call) =
+  let name =
+    if call.index = 6 then "JavaVM.GetEnv" else sprintf "JavaVM[%d]" call.index
+  in
+  finish t JavaVM name call [] (compute_vm t call)
+
+let start_recording t =
+  t.events <- [];
+  t.recording <- true
+
+let stop_recording t = t.recording <- false
+let journal t = List.rev t.events
+
+module Journal = struct
+  type t = { format : int; events : event list } [@@deriving bin_io]
+end
+
+let export_journal events =
+  Binable.to_string (module Journal) { format = 1; events }
+
+let import_journal data =
+  match Binable.of_string (module Journal) data with
+  | exception _ -> invalid_arg "Bap_emu.Jni: invalid journal"
+  | { format; events } ->
+      if format <> 1 then invalid_arg "Bap_emu.Jni: unsupported journal version";
+      events
+
+let show_identity = function
+  | External id -> sprintf "external 0x%Lx" id
+  | Internal id -> sprintf "internal %d" id
+
+let show_identities identities =
+  List.map identities ~f:(fun (index, id) ->
+      sprintf "%d:%s" index (show_identity id))
+  |> String.concat ~sep:","
+
+let show_detail = function None -> "-" | Some detail -> detail
+
+let mismatch (event : event) expected actual =
+  failwithf "JNI replay mismatch at ordinal %d (%s): expected %s, got %s"
+    event.ordinal event.name expected actual ()
+
+let replay t events =
+  List.iter events ~f:(fun (event : event) ->
+      if event.ordinal <> t.next_ordinal then
+        mismatch event
+          (sprintf "ordinal %d" event.ordinal)
+          (sprintf "ordinal %d" t.next_ordinal);
+      let actual_name =
+        match event.kind with
+        | JNIEnv -> name_of_index event.call.index
+        | JavaVM ->
+            if event.call.index = 6 then "JavaVM.GetEnv"
+            else sprintf "JavaVM[%d]" event.call.index
+      in
+      if not (String.equal event.name actual_name) then
+        mismatch event
+          (sprintf "operation %s" event.name)
+          (sprintf "operation %s" actual_name);
+      let result, detail =
+        t.replay_strings <- Some event.strings;
+        Exn.protect
+          ~f:(fun () ->
+            match event.kind with
+            | JNIEnv -> compute t event.call
+            | JavaVM -> compute_vm t event.call)
+          ~finally:(fun () -> t.replay_strings <- None)
+      in
+      t.next_ordinal <- t.next_ordinal + 1;
+      if not (Option.equal String.equal event.detail detail) then
+        mismatch event
+          (sprintf "detail %s" (show_detail event.detail))
+          (sprintf "detail %s" (show_detail detail));
+      if not (Int64.equal event.result result) then
+        mismatch event
+          (sprintf "result 0x%Lx" event.result)
+          (sprintf "result 0x%Lx" result);
+      let identities = argument_identities t event.call in
+      if not (Poly.equal event.identities identities) then
+        mismatch event
+          (sprintf "identities [%s]" (show_identities event.identities))
+          (sprintf "identities [%s]" (show_identities identities));
+      let result_identity = Hashtbl.find t.sources result in
+      if not (Poly.equal event.result_identity result_identity) then
+        mismatch event
+          (sprintf "result identity %s"
+             (Option.value_map event.result_identity ~default:"-"
+                ~f:show_identity))
+          (sprintf "result identity %s"
+             (Option.value_map result_identity ~default:"-" ~f:show_identity)))
 
 module type Emulator = sig
   type t
@@ -802,29 +961,14 @@ module Make (E : Emulator) = struct
     E.set_pc emu (E.reg emu "X30")
 
   let serve_vm (t : t) emu =
-    let index = Int64.to_int_exn (E.reg emu "X8") in
-    let result =
-      match index with
-      | 4 | 7 ->
-          write_word emu (E.reg emu "X1") t.env;
-          0L
-      | 6 ->
-          let requested = E.reg emu "X2" in
-          if List.mem t.versions requested ~equal:Int64.equal then (
-            write_word emu (E.reg emu "X1") t.env;
-            0L)
-          else -2L
-      | _ -> 0L
+    let call : call =
+      { index = Int64.to_int_exn (E.reg emu "X8"); args = args emu }
     in
-    Option.iter t.log ~f:(fun log ->
-        log
-          {
-            call = { index; args = args emu };
-            name =
-              (if index = 6 then "JavaVM.GetEnv" else sprintf "JavaVM[%d]" index);
-            detail = None;
-            result;
-          });
+    let result = dispatch_vm t call in
+    if
+      call.index = 4 || call.index = 7
+      || (call.index = 6 && Int64.equal result 0L)
+    then write_word emu (E.reg emu "X1") t.env;
     E.set_reg emu "X0" result;
     E.set_pc emu (E.reg emu "X30")
 end
