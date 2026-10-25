@@ -923,6 +923,13 @@ val save : t -> string -> unit
     | _ -> ()
     ]}
 
+    While a function, that the script called, runs, e.g., paused in it, see
+    {!call}, the checkpoint is of the program at the call, with the registers,
+    the runs, and the threads, that it had then, and the memory, as the function
+    changed it, e.g., with the stack, that the call allocated, as the call is of
+    the script, and not of the program, which continues from the address, at
+    which it paused for the call.
+
     Raises [Invalid_argument], if the program exited, or its emulator failed,
     e.g., with an exception of the script, and [Failure], if the checkpoint
     can't be saved, e.g., as the program failed outside of a run of Unicorn. *)

@@ -589,6 +589,23 @@ let calls : (string option * string option) list Primus.Machine.State.t =
   Primus.Machine.State.declare ~uuid:"b5e2d8a4-6c13-4f97-8e0b-3a9d1c7f2e65"
     ~name:"unicorn-calls" (fun _ -> [])
 
+(* the call of a function of the program, that the script made, see
+   [Bap_emu.call], which runs, e.g., paused in the function, with the
+   machine, as it was, when the call started, from which the checkpoint
+   is saved, see [Make.save] *)
+type call_site = {
+  site_pc : int64;  (** the address, at which the machine paused *)
+  site_frames : frame list;  (** the pending returns *)
+  site_calls : (string option * string option) list;  (** see [calls] *)
+  site_basis : (var * word) list;  (** the registers, without the aliases *)
+  site_extra : (int * string) list;  (** the extra registers *)
+}
+
+(* the calls, that run, the innermost first *)
+let call_sites : call_site list Primus.Machine.State.t =
+  Primus.Machine.State.declare ~uuid:"2f6c9e18-7a3b-4d50-b1e4-9c8d0a5f3e27"
+    ~name:"unicorn-call-sites" (fun _ -> [])
+
 (* the Lisp stubs, that the machine runs, the innermost first *)
 let lisp_calls : string list Primus.Machine.State.t =
   Primus.Machine.State.declare ~uuid:"4d7a1e93-b2c8-4f05-9a6e-e1f3b0c82d57"
@@ -3090,9 +3107,16 @@ module Make (Machine : Primus.Machine.S) = struct
 
   (* saves the state of the machine, which is in Primus, after it is
      copied from Unicorn, and the innermost run, from which Unicorn
-     continues, to the file, or the error *)
+     continues, to the file, or the error. While the script calls a
+     function, e.g., paused in it, the machine is saved, as the outermost
+     call started, with its registers, its runs, and its address, and
+     the memory, as the function changed it, as the call, which the
+     script made, is not of the program, and doesn't continue *)
   let save e pc file =
     let* () = pull e in
+    let* sites = Machine.Local.get call_sites in
+    let site = List.last sites in
+    let pc = Option.value_map site ~default:pc ~f:(fun s -> s.site_pc) in
     let* target = Machine.gets Project.target in
     let* vars = Env.all in
     let* vars =
@@ -3104,6 +3128,14 @@ module Make (Machine : Primus.Machine.S) = struct
       Machine.List.map vars ~f:(fun v ->
           let+ x = Env.get v in
           (v, Primus.Value.to_word x))
+    in
+    let vars =
+      match site with
+      | None -> vars
+      | Some s ->
+          let before = Var.Map.of_alist_reduce s.site_basis ~f:(fun _ x -> x) in
+          List.map vars ~f:(fun (v, x) ->
+              (v, Option.value (Map.find before v) ~default:x))
     in
     let* memory = Memory.snapshot in
     let* extensions =
@@ -3118,6 +3150,10 @@ module Make (Machine : Primus.Machine.S) = struct
     in
     let* pending = Machine.Local.get frames in
     let* called = Machine.Local.get calls in
+    let pending, called =
+      Option.value_map site ~default:(pending, called) ~f:(fun s ->
+          (s.site_frames, s.site_calls))
+    in
     let* threads = Machine.Local.get threads in
     let+ digest =
       Machine.gets (fun proj -> Project.get proj filename) >>| function
@@ -3155,7 +3191,10 @@ module Make (Machine : Primus.Machine.S) = struct
               unstubbed = Hash_set.to_list e.session.unstubbed;
               extensions;
               extra =
-                List.map (extra_regs e) ~f:(fun id -> (id, read_extra e id));
+                (match site with
+                | Some s -> s.site_extra
+                | None ->
+                    List.map (extra_regs e) ~f:(fun id -> (id, read_extra e id)));
               threads =
                 (if threads.last = 1 then None
                  else
@@ -5509,6 +5548,7 @@ module Make (Machine : Primus.Machine.S) = struct
       let saved = registers e in
       let* pending = Machine.Local.get frames in
       let* called = Machine.Local.get calls in
+      let* sites = Machine.Local.get call_sites in
       let size = (Option.value stack ~default:0x10000 + 15) land lnot 15 in
       let* base = Threads.Windows.allocate e size in
       let top = Int64.(base + of_int size) in
@@ -5520,6 +5560,7 @@ module Make (Machine : Primus.Machine.S) = struct
       let finish () =
         let* () = Machine.Local.put frames pending in
         let* () = Machine.Local.put calls called in
+        let* () = Machine.Local.put call_sites sites in
         let* () = restore e saved in
         Uc.reg_write e.uc e.pc (code_addr e pc);
         let* p = Value.of_word (word e base) in
@@ -5589,6 +5630,17 @@ module Make (Machine : Primus.Machine.S) = struct
                 : bool);
           let* () = pull e in
           let callee = Hashtbl.find e.session.names (code_addr e start) in
+          let* () =
+            Machine.Local.put call_sites
+              ({
+                 site_pc = pc;
+                 site_frames = pending;
+                 site_calls = called;
+                 site_basis = fst saved;
+                 site_extra = snd saved;
+               }
+              :: sites)
+          in
           let* () = Machine.Local.put frames (frame :: pending) in
           let* () = Machine.Local.put calls ((callee, None) :: called) in
           let* () = loop start in

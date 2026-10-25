@@ -1,0 +1,7 @@
+paused at 2013e0 in the thread 1
+the call paused at 201513
+saved at the call true, with the threads true
+restored at the call true, with its stack true
+8000
+ok
+exited 0

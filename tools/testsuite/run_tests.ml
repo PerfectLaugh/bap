@@ -2196,6 +2196,20 @@ let threads data =
             "info: thread 1 at 2013e0, threads [2-9], of the program true\n";
           has env "restores in main" out "restored in the thread 1\n";
           taint out);
+      (* the checkpoint, that is saved, while a call of the script runs,
+         is of the program at the call, with its threads, see
+         call-save.ml *)
+      case "emu/x86_64-linux-gnu-threads/call-save" (fun env ->
+          let out =
+            bap env
+              [
+                "script";
+                input "emu/threads/call-save.ml";
+                path data "bin/x86_64-linux-gnu-threads";
+                dir env;
+              ]
+          in
+          golden env "emu/threads/call-save.txt" out.text);
     ]
   @ List.map
       (fun target ->
