@@ -503,6 +503,30 @@ module Checkpoint = struct
     | None -> false
     | Some file -> (
         try String.equal (C.digest file) info.digest with Sys_error _ -> false)
+
+  (* the addresses of the instructions, that ran, as [insns] tells them,
+     with the lower bit set in the Thumb state of ARM *)
+  let insns file =
+    match C.load file with
+    | Error msg -> failwith msg
+    | Ok (c : C.t) -> (
+        match
+          List.Assoc.find c.extensions ~equal:String.equal X.ran_extension
+        with
+        | None -> []
+        | Some data -> (
+            match X.ran_of_string data with
+            | exception _ ->
+                failwithf "Bap_emu.Checkpoint.insns: %s has broken instructions"
+                  file ()
+            | ran ->
+                List.map ran ~f:(fun (pc, thumb, _) ->
+                    if thumb then Int64.(pc lor 1L) else pc)
+                |> List.dedup_and_sort ~compare:Int64.compare))
+
+  let insns_diff before after =
+    let seen = Int64.Hash_set.of_list (insns before) in
+    List.filter (insns after) ~f:(Fn.non (Hash_set.mem seen))
 end
 
 let spawn_thread ?stack t ~start ~arg =
@@ -1184,6 +1208,12 @@ let insns t =
           | Some (_, _, thumb, _) -> Hash_set.add ran (addr (pc, thumb))
           | None -> ()));
   Hash_set.to_list ran |> List.sort ~compare:Int64.compare
+
+(* the instructions, that ran since the checkpoint was saved, that the
+   checkpoint doesn't have *)
+let insns_since t file =
+  let seen = Int64.Hash_set.of_list (Checkpoint.insns file) in
+  List.filter (insns t) ~f:(Fn.non (Hash_set.mem seen))
 
 (* the bytes of the instructions, that ran, from the address, one after
    another, as far as they go, at most [n] *)

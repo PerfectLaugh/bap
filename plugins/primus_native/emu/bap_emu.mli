@@ -291,6 +291,26 @@ val insns : t -> int64 list
     to list the code, that the program unpacked and ran, after it scrubbed it,
     or none, if the engine is Unicorn. *)
 
+val insns_since : t -> string -> int64 list
+(** [insns_since emu file] the addresses of the instructions, that {!insns} has,
+    and the checkpoint in the [file] doesn't, see {!Checkpoint.insns}, e.g., of
+    the code, that an action ran for the first time, after the checkpoint was
+    saved before it, in their order:
+
+    {[
+    Emu.save emu "before.ckpt";
+    ignore (Emu.call emu handler ~args:[ request ]);
+    List.iter (Emu.insns_since emu "before.ckpt") ~f:(fun pc ->
+        printf "%Lx %s\n" pc
+          (Option.value (Emu.function_at emu pc) ~default:"?"))
+    ]}
+
+    The instructions are the ones, that ran for the first time: an instruction,
+    that ran before the checkpoint, and again since, is not there, which a trace
+    of the action tells, see {!Trace}, as are the few, that the engine lifted
+    after a branch, without running them. Raises [Failure], if the file is not a
+    checkpoint. *)
+
 val lifted_bytes : ?thumb:bool -> t -> int64 -> int -> string
 (** [lifted_bytes emu addr n] are the bytes of the instructions, that the lifted
     engine ran, see {!insn_at}, from [addr], one after another, as far as they
@@ -1075,6 +1095,19 @@ module Checkpoint : sig
 
   val is_of : info -> project -> bool
   (** [is_of info proj] if the checkpoint is of the file of the program *)
+
+  val insns : string -> int64 list
+  (** [insns file] the addresses of the instructions, that the lifted engine
+      ran, before the checkpoint was saved, in their order, with the lower bit
+      set in the Thumb state of ARM, or none, if the program ran in Unicorn.
+      Raises [Failure], if the file is not a checkpoint. *)
+
+  val insns_diff : string -> string -> int64 list
+  (** [insns_diff before after] the addresses of the instructions, that the
+      checkpoint [after] has, and the checkpoint [before] doesn't, in their
+      order, e.g., of the code, that an experiment ran for the first time,
+      between the checkpoint of its baseline and the one after it, see
+      {!insns_since}. *)
 end
 
 val thread_regs : t -> int -> (string * int64) list

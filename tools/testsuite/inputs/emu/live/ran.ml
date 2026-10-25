@@ -5,7 +5,8 @@ module Emu = Bap_emu
 
 (* The checkpoint keeps the bytes of the instructions, that the lifted
    engine ran, so the program, that continues from it, has them, see
-   Emu.insn_at, also of main, whose code the script scrubbed before. The
+   Emu.insn_at, also of main, whose code the script scrubbed before, and
+   tells the ones, that ran since, see Emu.insns_since. The
    program writes to a file, as its first string is the path of the
    binary. *)
 
@@ -50,6 +51,23 @@ let () =
       | None -> print_endline "main is not restored");
       printf "the bytes of main, that ran, from the checkpoint: %d of 16\n"
         (String.length (Emu.lifted_bytes again main 16));
+      (* the loop of print_endline, which runs its first characters,
+         ran for the first time, since the checkpoint at its entry, see
+         Emu.insns_since, and between the checkpoints *)
+      let entry = addr "print_endline" in
+      ignore (Emu.run again ~until:0x400727L : Emu.status);
+      let since = Emu.insns_since again ckpt in
+      printf "ran since the checkpoint: the loop %b, the entry %b, main %b\n"
+        (List.for_all [ 0x400703L; 0x40071cL ]
+           ~f:(List.mem since ~equal:Int64.equal))
+        (List.mem since entry ~equal:Int64.equal)
+        (List.mem since main ~equal:Int64.equal);
+      let after = Filename.concat dir "after.ckpt" in
+      Emu.save again after;
+      printf "between the checkpoints the same %b\n"
+        (List.equal Int64.equal (Emu.Checkpoint.insns_diff ckpt after) since);
+      printf "the checkpoint has its instructions %b\n"
+        (List.equal Int64.equal (Emu.Checkpoint.insns ckpt) ran);
       (match Emu.run again with
       | Exited (Some 0) -> print_endline "exited 0"
       | _ -> print_endline "didn't exit 0");

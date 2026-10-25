@@ -6230,10 +6230,22 @@ let () =
 (* the instructions, that the lifted engine ran, by their addresses, modes
    and bytes, before the checkpoint and since, the ones of the engine
    last, as they are the latest, see [Bap_emu.insn_at] *)
+type ran = (int64 * bool * string) list [@@deriving bin_io]
+
+(* the name of the extension, and its state, in a checkpoint, e.g., that
+   [Bap_emu.Checkpoint.insns] reads, see [Ran] *)
+let ran_extension = "bap:lifted-ran"
+
+let ran_of_string =
+  Binable.of_string
+    (module struct
+      type t = ran [@@deriving bin_io]
+    end)
+
 module Ran (Machine : Primus.Machine.S) = struct
   open Machine.Syntax
 
-  type t = (int64 * bool * string) list [@@deriving bin_io]
+  type t = ran [@@deriving bin_io]
 
   let save =
     Machine.Global.get session_state >>| fun s ->

@@ -196,6 +196,7 @@ let () =
 | `bir emu addr` | the size and the BIR of the instruction at the address, lifted on demand from its current bytes, also in the hooks; Thumb on ARM by the lower bit of the address |
 | `insn_at emu pc`, `lifted_bytes emu addr n` | the instruction, that the lifted engine lifted at the address, to run it, with the bytes it was lifted from, and the bytes of the instructions from an address, as far as they were lifted, see below |
 | `insns emu` | the addresses of the instructions, that `insn_at` has, in their order |
+| `insns_since emu file`, `Checkpoint.insns_diff before after` | the instructions, that ran for the first time since the checkpoint, or between two checkpoints |
 | `symbols`, `add_symbol` | the names of the functions; name new code, e.g., code that the program unpacked |
 | `unstub emu name` | run the program's own code of a function, instead of its Lisp stub |
 | `call emu addr ~args` | call a function with the arguments, on a zeroed stack, and get its result, see below |
@@ -239,6 +240,14 @@ Emu.insns emu
 |> List.iter ~f:(fun pc ->
        let insn = Option.value_exn (Emu.insn_at emu pc) in
        printf "%Lx: %s\n" pc insn.name)
+```
+
+`insns_since emu file` tells the instructions, that ran for the first time since the checkpoint in the file was saved, e.g., to answer, what code an action ran, and `Checkpoint.insns_diff before after` the ones between two checkpoints, e.g., of a baseline and of the run after an experiment, without loading them; `Checkpoint.insns file` lists the ones of a checkpoint. An instruction, that ran before the checkpoint, and again since, isn't there, which a trace of the action tells, and the few, that the engine lifted after a branch, without running them, are:
+
+```ocaml
+Emu.save emu "before.ckpt";
+ignore (Emu.call emu handler ~args:[ request ]);
+Emu.insns_since emu "before.ckpt" |> List.iter ~f:(printf "%Lx\n")
 ```
 
 ### Hooks
