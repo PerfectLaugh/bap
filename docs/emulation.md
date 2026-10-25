@@ -391,6 +391,17 @@ let worker = List.find_exn (Emu.threads emu) ~f:(fun t -> t.tid <> Emu.thread em
 Emu.call emu routine ~args:[ ctx ] ~regs:[ ("X8", table) ] ~thread:worker.tid
 ```
 
+`drive` calls a function as `call` does, and tells how the call came out: `Returned x`, `Parked { pc; thread }`, if the function still runs, paused at `pc`, or `Ended status`, if the program ended in it. It serves at most `~budget` of the pauses with `~service`, and runs the function for at most `~timeout` seconds, after which it parks. The other threads don't run in a call, so a function, that waits on a futex, e.g., of a condition variable, or on an object of Windows, pauses at the wait, and continues, as if it was woken spuriously, e.g., to wait again, and a function, that spins on a flag, runs out of its time:
+
+```ocaml
+match Emu.drive emu routine ~args:[ ctx ] ~budget:100 ~timeout:1.0 ~service with
+| Returned x -> printf "returned %Ld\n" x
+| Parked { pc; thread } ->
+    printf "parked at %Lx in the thread %d, X0 = %Lx\n" pc thread
+      (List.Assoc.find_exn (Emu.thread_regs emu thread) ~equal:String.equal "R0")
+| Ended _ -> print_endline "the program ended"
+```
+
 ### What changed, and where a byte comes from
 
 `diff emu snapshot` is the list of the ranges of the memory, `(addr, bytes)`, that differ between a snapshot and the paused program, and `changed_since emu file` the same against a checkpoint in a file, e.g., the outputs of a routine, that `call` ran, in the static storage, without dumping the regions:

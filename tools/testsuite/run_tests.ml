@@ -2221,6 +2221,18 @@ let threads data =
       (* the checkpoint, that is saved, while a call of the script runs,
          is of the program at the call, with its threads, see
          call-save.ml *)
+      (* the call, that waits, or spins, parks, and the registers of the
+         threads, see drive.ml *)
+      case "emu/x86_64-linux-gnu-threads/drive" (fun env ->
+          let out =
+            bap env
+              [
+                "script";
+                input "emu/threads/drive.ml";
+                path data "bin/x86_64-linux-gnu-threads";
+              ]
+          in
+          golden env "emu/threads/drive.txt" out.text);
       case "emu/x86_64-linux-gnu-threads/call-save" (fun env ->
           let out =
             bap env

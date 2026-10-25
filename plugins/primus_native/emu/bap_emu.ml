@@ -651,28 +651,51 @@ let interpret t =
   resume t X.Interpret;
   status t
 
-let call ?stack ?(args = []) ?(regs = []) ?thread ?service t addr =
+(* calls the function, and serves its pauses, at most [budget] of them,
+   until it returns, or the program ends, or its [timeout] runs out, see
+   [X.session.call_deadline], and gives its result, or [None], while it
+   runs *)
+let call_served ~fn ?budget ?timeout ?stack ?(args = []) ?(regs = []) ?thread
+    ?service t addr =
   if not (paused t) then
-    invalid_arg
-      "Bap_emu.call: the program is not paused, as it runs, e.g., in a hook, \
-       or ended";
+    invalid_argf
+      "Bap_emu.%s: the program is not paused, as it runs, e.g., in a hook, or \
+       ended"
+      fn ();
+  (match budget with
+  | Some n when n < 0 -> invalid_argf "Bap_emu.%s: the budget is %d" fn n ()
+  | _ -> ());
+  (match timeout with
+  | Some s when Float.(s < 0. || is_nan s) ->
+      invalid_argf "Bap_emu.%s: the timeout is %g" fn s ()
+  | _ -> ());
   t.session.called <- None;
-  resume t (X.Call (addr, args, regs, thread, stack));
-  (* the function, that pauses, is served, and continues, until it
-     returns, or the program ends *)
-  let rec serve () =
+  t.session.call_deadline <- Option.map timeout ~f:(fun s -> X.clock () +. s);
+  (* the call, whose time ran out, isn't served, as it would run on *)
+  let expired () =
+    Option.is_some timeout && Option.is_none t.session.call_deadline
+  in
+  let rec serve served =
     match (t.session.called, service, status t) with
-    | None, Some service, Paused ->
+    | None, Some service, Paused
+      when Option.for_all budget ~f:(fun n -> served < n) && not (expired ()) ->
         service t (pc t);
         ignore (run t : status);
-        serve ()
+        serve (served + 1)
     | _ -> ()
   in
-  serve ();
+  Exn.protect
+    ~f:(fun () ->
+      resume t (X.Call (addr, args, regs, thread, stack));
+      serve 0)
+    ~finally:(fun () -> t.session.call_deadline <- None);
   match t.session.called with
   | Some (Ok x) -> Some x
-  | Some (Error msg) -> failwithf "Bap_emu.call: %s" msg ()
+  | Some (Error msg) -> failwithf "Bap_emu.%s: %s" fn msg ()
   | None -> None
+
+let call ?stack ?args ?regs ?thread ?service t addr =
+  call_served ~fn:"call" ?stack ?args ?regs ?thread ?service t addr
 
 let returned t = match t.session.called with Some (Ok x) -> Some x | _ -> None
 let registers t = Target.Regs.names (engine t).regs
@@ -2680,6 +2703,24 @@ and unsorted_thread_regs t tid =
                     >>| fun saved -> regs := saved
                 end);
     !regs
+
+type called =
+  | Returned of int64
+  | Parked of { pc : int64; thread : int }
+  | Ended of status
+
+(* the call, whose pauses are served, at most [budget] of them, and
+   which tells, where it parked, if it still runs *)
+let drive ?budget ?timeout ?stack ?args ?regs ?thread:tid ?service t addr =
+  match
+    call_served ~fn:"drive" ?budget ?timeout ?stack ?args ?regs ?thread:tid
+      ?service t addr
+  with
+  | Some x -> Returned x
+  | None -> (
+      match status t with
+      | Paused -> Parked { pc = pc t; thread = thread t }
+      | s -> Ended s)
 
 (* the system, whose program ended, finishes, as its knowledge is the
    result of the system *)

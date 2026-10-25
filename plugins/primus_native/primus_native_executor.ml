@@ -432,6 +432,9 @@ and session = {
   call_hooks : (unit -> action) list String.Table.t;
       (** the hooks of the calls of the functions, by their names, the latest
           first *)
+  mutable call_deadline : float option;
+      (** the time of [clock], after which the call of the script, that runs,
+          pauses, see [Bap_emu.drive] *)
   mutable syscall_hooks : (int64 -> int64 list -> action) list;
       (** the hooks of the system calls, with their numbers and arguments, the
           latest first, see [Bap_emu.on_syscall] *)
@@ -531,6 +534,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     restarted_at = None;
     call_hooks = String.Table.create ();
     syscall_hooks = [];
+    call_deadline = None;
     exit_code = None;
     engine_hooks = [];
     events = Queue.create ();
@@ -4150,7 +4154,15 @@ module Make (Machine : Primus.Machine.S) = struct
        is ready, e.g., with the error of the timeout *)
     let block e st ~next ~addrs ~timeout =
       if not (switchable e st) then
-        fail "the thread %d waits in a run of a stub" st.current
+        let* sites = Machine.Local.get call_sites in
+        (* in a call of the script, see [Bap_emu.call], the other threads
+           don't run, so the thread pauses, and continues from [next], as
+           if it was woken spuriously, e.g., to wait again *)
+        if e.session.driven && not (List.is_empty sites) then begin
+          e.session.pause <- true;
+          Machine.return (Some next)
+        end
+        else fail "the thread %d waits in a run of a stub" st.current
       else
         let* parked = park e ~next ~wait:(Waiting addrs) st in
         switch e ~parked st >>= function
@@ -5850,8 +5862,17 @@ module Make (Machine : Primus.Machine.S) = struct
       let* () = account () in
       let* used = Machine.Local.get elapsed in
       let remaining = Option.map s.timeout ~f:(fun t -> t -. used) in
+      let* in_call = Machine.Local.get call_sites >>| Fn.non List.is_empty in
+      let call_deadline = Option.filter s.call_deadline ~f:(fun _ -> in_call) in
       match remaining with
       | Some t when Float.(t <= 0.) -> terminate e
+      | _ when Option.exists call_deadline ~f:(fun d -> Float.(clock () >= d))
+        ->
+          (* the call of the script ran out of its time, and pauses, see
+             [Bap_emu.drive] *)
+          s.call_deadline <- None;
+          s.pause <- true;
+          loop pc
       | _ -> (
           let* () = sync_stops e in
           let* () = tracking e in
@@ -5874,6 +5895,12 @@ module Make (Machine : Primus.Machine.S) = struct
           if expired && not resumed then Threads.preempt e pc >>= loop
           else
             let deadline = Option.map remaining ~f:(fun t -> now +. t) in
+            let deadline =
+              match (deadline, call_deadline) with
+              | Some d, Some c -> Some (Float.min d c)
+              | d, None -> d
+              | None, c -> c
+            in
             let deadline =
               if sliced then
                 Some
@@ -5905,7 +5932,9 @@ module Make (Machine : Primus.Machine.S) = struct
             match (e.reason, error) with
             | None, None when sliced && not (Uc.in_atomic e.uc) ->
                 Threads.preempt e pc >>= loop
-            | None, None when Option.is_some remaining -> loop pc
+            | None, None
+              when Option.is_some remaining || Option.is_some call_deadline ->
+                loop pc
             | Some Returned, _ | None, None -> pull e
             | Some (Foreign addr), _ -> (
                 let addr = trampoline e addr in

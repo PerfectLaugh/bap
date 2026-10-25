@@ -1,0 +1,5 @@
+parked after the wait true, in the thread true, served 3
+parked in the spin true
+the registers of the call true
+the threads have their own stacks true
+Bap_emu.thread_regs: the program has no thread 99

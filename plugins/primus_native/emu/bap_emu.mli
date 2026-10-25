@@ -687,13 +687,14 @@ val call :
     inputs of its choice, as many times as it likes.
 
     Returns [None], if the program paused in the function, e.g., as a hook
-    stopped it, or ended, see {!status}; {!run} continues the function, after
-    which the program pauses where it was, with the result in {!returned}. With
-    [service], the function, that pauses, is served instead: [service emu pc]
-    runs at each pause, e.g., the handlers of the script, that serve the system
-    calls, or the imports, that the hooks stopped at, and the function
-    continues, until it returns, or the program ends, so that a routine runs end
-    to end in one expression, e.g.,
+    stopped it, or as it waits on a futex, which the other threads, that don't
+    run in the call, would wake, see {!drive}, or ended, see {!status}; {!run}
+    continues the function, after which the program pauses where it was, with
+    the result in {!returned}. With [service], the function, that pauses, is
+    served instead: [service emu pc] runs at each pause, e.g., the handlers of
+    the script, that serve the system calls, or the imports, that the hooks
+    stopped at, and the function continues, until it returns, or the program
+    ends, so that a routine runs end to end in one expression, e.g.,
 
     {[
     Emu.call emu routine ~args:[ ctx ] ~service:(fun emu pc -> handle emu pc)
@@ -704,6 +705,49 @@ val call :
     the target has no such register, or the program no such thread, or the
     function failed, e.g., with a segmentation fault, after which the program is
     paused where it was, as before the call. *)
+
+(** the outcome of {!drive} *)
+type called =
+  | Returned of int64  (** the function returned the value *)
+  | Parked of { pc : int64; thread : int }
+      (** the function still runs, paused at [pc], in the [thread], e.g., as a
+          hook stopped it, and [service] was not given, or the [budget] of the
+          pauses, or the [timeout] ran out, e.g., as it waits, that another
+          thread wakes it, which doesn't run in the call: a wait of a futex, or
+          of an object of Windows, pauses then, after which the function
+          continues, as if it was woken spuriously, and a spin runs out of the
+          time; {!run} continues it, as after {!call} *)
+  | Ended of status  (** the program ended in the function, e.g., it exited *)
+
+val drive :
+  ?budget:int ->
+  ?timeout:float ->
+  ?stack:int ->
+  ?args:int64 list ->
+  ?regs:(string * int64) list ->
+  ?thread:int ->
+  ?service:(t -> int64 -> unit) ->
+  t ->
+  int64 ->
+  called
+(** [drive emu addr] calls the function at [addr], as {!call} does, and serves
+    at most [budget] of its pauses, by default all, with [service], for at most
+    [timeout] seconds, by default without the limit, with the pauses, after
+    which the function pauses, e.g., as it spins, and tells, how the call came
+    out, also, where the function parked, if it still runs, e.g.,
+
+    {[
+    match Emu.drive emu routine ~args:[ ctx ] ~budget:100 ~service with
+    | Returned x -> printf "returned %Ld\n" x
+    | Parked { pc; thread } ->
+        printf "parked at %Lx in the thread %d\n" pc thread;
+        List.iter (Emu.thread_regs emu thread) ~f:(fun (r, x) ->
+            printf "%s = %Lx\n" r x)
+    | Ended _ -> print_endline "the program ended"
+    ]}
+
+    Raises as {!call}, and [Invalid_argument], if [budget], or [timeout], is
+    negative. *)
 
 val returned : t -> int64 option
 (** the result of the last {!call}, that returned *)
