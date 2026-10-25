@@ -154,13 +154,13 @@ type layout = {
   vm_stubs : int64;  (** room for eight eight-byte AArch64 stubs *)
   vm_dispatcher : int64;
 }
-(** addresses of the fake objects, tables, and code, in already-mapped writable
-    memory. Each dispatcher must be within the AArch64 branch range of its
-    stubs. *)
+(** addresses of the modeled objects, tables, and code, in already-mapped
+    writable memory. Each dispatcher must be within the AArch64 branch range of
+    its stubs. *)
 
 module Make (E : Emulator) : sig
   val install : t -> E.t -> layout -> unit
-  (** [install jni emu layout] writes the fake objects, function tables, and
+  (** [install jni emu layout] writes the modeled objects, function tables, and
       AArch64 stubs. JNIEnv entries call [env_dispatcher] with the table index
       in [W8]. JavaVM entries likewise call [vm_dispatcher]. *)
 
@@ -170,8 +170,10 @@ module Make (E : Emulator) : sig
 
   val serve_vm : t -> E.t -> unit
   (** [serve_vm jni emu] serves a pause at [vm_dispatcher]. [GetEnv] writes the
-      fake JNIEnv pointer and returns [JNI_OK], or [JNI_EVERSION] for an
-      unsupported version. *)
+      modeled JNIEnv pointer and returns [JNI_OK], or [JNI_EVERSION] for an
+      unsupported version. [AttachCurrentThread] and
+      [AttachCurrentThreadAsDaemon] write the same pointer and return [JNI_OK].
+  *)
 
   val read_string : E.t -> int64 -> string
   (** reads at most 4096 bytes, including the terminating NUL *)

@@ -805,6 +805,9 @@ module Make (E : Emulator) = struct
     let index = Int64.to_int_exn (E.reg emu "X8") in
     let result =
       match index with
+      | 4 | 7 ->
+          write_word emu (E.reg emu "X1") t.env;
+          0L
       | 6 ->
           let requested = E.reg emu "X2" in
           if List.mem t.versions requested ~equal:Int64.equal then (

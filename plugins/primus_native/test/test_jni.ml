@@ -179,7 +179,7 @@ let test_declarations_and_logging () =
        (Jni.create ~default:(fun _ _ -> Value 0x99L) ())
        { index = 999; args = args [] })
 
-module Fake = struct
+module Test_emulator = struct
   type t = { regs : int64 String.Table.t; memory : (int64, char) Hashtbl.t }
 
   let create () =
@@ -205,7 +205,7 @@ module Fake = struct
     Stdlib.Bytes.get_int64_le bytes 0
 end
 
-module Adapter = Jni.Make (Fake)
+module Adapter = Jni.Make (Test_emulator)
 
 let layout =
   {
@@ -221,37 +221,50 @@ let layout =
 
 let test_adapter () =
   let jni, _ = make () in
-  let emu = Fake.create () in
+  let emu = Test_emulator.create () in
   Adapter.install jni emu layout;
-  expect "vm table" layout.vm_functions (Fake.word emu layout.vm);
-  expect "env table" layout.env_functions (Fake.word emu layout.env);
+  expect "vm table" layout.vm_functions (Test_emulator.word emu layout.vm);
+  expect "env table" layout.env_functions (Test_emulator.word emu layout.env);
   expect "indexed env entry"
     Int64.(layout.env_stubs + (31L * 8L))
-    (Fake.word emu Int64.(layout.env_functions + (31L * 8L)));
-  Fake.set_reg emu "X8" 31L;
-  Fake.set_reg emu "X1" (Jni.intern jni 0x1111L);
-  Fake.set_reg emu "X30" 0x1234L;
+    (Test_emulator.word emu Int64.(layout.env_functions + (31L * 8L)));
+  Test_emulator.set_reg emu "X8" 31L;
+  Test_emulator.set_reg emu "X1" (Jni.intern jni 0x1111L);
+  Test_emulator.set_reg emu "X30" 0x1234L;
   Adapter.serve jni emu;
   expect "serve class"
     (dispatch jni 31 [ 0L; Jni.intern jni 0x1111L ])
-    (Fake.reg emu "X0");
-  expect "serve return" 0x1234L (Fake.reg emu "PC");
-  Fake.set_reg emu "X8" 6L;
-  Fake.set_reg emu "X1" 0x5000L;
-  Fake.set_reg emu "X2" 0x10006L;
+    (Test_emulator.reg emu "X0");
+  expect "serve return" 0x1234L (Test_emulator.reg emu "PC");
+  Test_emulator.set_reg emu "X8" 6L;
+  Test_emulator.set_reg emu "X1" 0x5000L;
+  Test_emulator.set_reg emu "X2" 0x10006L;
   Adapter.serve_vm jni emu;
-  expect "GetEnv status" 0L (Fake.reg emu "X0");
-  expect "GetEnv output" layout.env (Fake.word emu 0x5000L);
-  Fake.set_reg emu "X2" 0x10004L;
+  expect "GetEnv status" 0L (Test_emulator.reg emu "X0");
+  expect "GetEnv output" layout.env (Test_emulator.word emu 0x5000L);
+  Test_emulator.set_reg emu "X2" 0x10004L;
   Adapter.serve_vm jni emu;
-  expect "GetEnv wrong version" (-2L) (Fake.reg emu "X0");
-  Fake.set_reg emu "X8" 219L;
-  Fake.set_reg emu "X1" 0x5008L;
+  expect "GetEnv wrong version" (-2L) (Test_emulator.reg emu "X0");
+  List.iter [ 4; 7 ] ~f:(fun index ->
+      let output = Int64.(0x5010L + of_int Int.(index * 8)) in
+      Test_emulator.set_reg emu "X8" (Int64.of_int index);
+      Test_emulator.set_reg emu "X1" output;
+      Adapter.serve_vm jni emu;
+      expect
+        (sprintf "attach status at index %d" index)
+        0L
+        (Test_emulator.reg emu "X0");
+      expect
+        (sprintf "attach output at index %d" index)
+        layout.env
+        (Test_emulator.word emu output));
+  Test_emulator.set_reg emu "X8" 219L;
+  Test_emulator.set_reg emu "X1" 0x5008L;
   Adapter.serve jni emu;
-  expect "GetJavaVM status" 0L (Fake.reg emu "X0");
-  expect "GetJavaVM output" layout.vm (Fake.word emu 0x5008L);
+  expect "GetJavaVM status" 0L (Test_emulator.reg emu "X0");
+  expect "GetJavaVM output" layout.vm (Test_emulator.word emu 0x5008L);
   expect_string "adapter read_string" "hello"
-    (Fake.write emu 0x16000L "hello\000ignored";
+    (Test_emulator.write emu 0x16000L "hello\000ignored";
      Adapter.read_string emu 0x16000L)
 
 let test_state () =
@@ -354,17 +367,17 @@ let test_stale_string_buffer () =
 let test_versions () =
   let versions = [ 0x10002L; 0x10004L; 0x10006L ] in
   let jni, _ = make ~versions () in
-  let emu = Fake.create () in
+  let emu = Test_emulator.create () in
   Adapter.install jni emu layout;
   List.iter versions ~f:(fun version ->
-      Fake.set_reg emu "X8" 6L;
-      Fake.set_reg emu "X1" 0x5000L;
-      Fake.set_reg emu "X2" version;
+      Test_emulator.set_reg emu "X8" 6L;
+      Test_emulator.set_reg emu "X1" 0x5000L;
+      Test_emulator.set_reg emu "X2" version;
       Adapter.serve_vm jni emu;
-      expect "supported GetEnv version" 0L (Fake.reg emu "X0"));
-  Fake.set_reg emu "X2" 0x10008L;
+      expect "supported GetEnv version" 0L (Test_emulator.reg emu "X0"));
+  Test_emulator.set_reg emu "X2" 0x10008L;
   Adapter.serve_vm jni emu;
-  expect "unsupported GetEnv version" (-2L) (Fake.reg emu "X0");
+  expect "unsupported GetEnv version" (-2L) (Test_emulator.reg emu "X0");
   expect "reported JNI version" 0x10006L (dispatch jni 4 [])
 
 let () =
