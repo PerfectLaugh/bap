@@ -2128,8 +2128,17 @@ let release (j : jit) = function
       j.live <- j.live - 1
   | Counting _ | Failed -> ()
 
+(* the instruction, that the engine lifted at the address, to run it,
+   with the bytes, that it was lifted from, which stay, when the memory
+   changes, until it is lifted anew, see [lifted] *)
+let insn_at t pc =
+  Option.map (Hashtbl.find t.insns pc) ~f:(fun (i : insn) ->
+      (i.code, i.name, i.thumb, i.blks))
+
+(* the instructions stay, as their bytes are checked, when they run, see
+   [lifted], so that [insn_at] has them, when the code is written, and
+   the blocks, that the JIT compiled, go *)
 let flush_tb t =
-  Hashtbl.clear t.insns;
   Option.iter t.jit ~f:(fun j ->
       (* the links go at once, rather than with each block *)
       unchain j;

@@ -76,6 +76,12 @@ val set_cpu_model : t -> int -> unit
 val set_tlb_virtual : t -> unit
 val flush_tb : t -> unit
 
+val insn_at :
+  t -> int64 -> (string * string * bool * Bap.Std.blk Bap.Std.term list) option
+(** [insn_at t pc] the instruction, that the lifted engine lifted at [pc], to
+    run it, see {!Lifted.insn_at}, or [None] in Unicorn, which translates the
+    code in itself. *)
+
 (** {2 Memory} *)
 
 val mem_map : t -> int64 -> int64 -> Perm.t -> unit

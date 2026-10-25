@@ -194,6 +194,7 @@ let () =
 | `read emu addr n`, `write emu addr data` | the bytes of the memory, also of the code, so that the change stays |
 | `write_direct emu addr data` | the bytes of Unicorn's copy of the memory, also in the hooks |
 | `bir emu addr` | the size and the BIR of the instruction at the address, lifted on demand from its current bytes, also in the hooks; Thumb on ARM by the lower bit of the address |
+| `insn_at emu pc`, `lifted_bytes emu addr n` | the instruction, that the lifted engine lifted at the address, to run it, with the bytes it was lifted from, and the bytes of the instructions from an address, as far as they were lifted, see below |
 | `symbols`, `add_symbol` | the names of the functions; name new code, e.g., code that the program unpacked |
 | `unstub emu name` | run the program's own code of a function, instead of its Lisp stub |
 | `call emu addr ~args` | call a function with the arguments, on a zeroed stack, and get its result, see below |
@@ -216,6 +217,18 @@ match Emu.bir emu 0x400727L with
 | None -> print_endline "not an instruction"
 ```
 
+`read` and `bir` are of the bytes, that the memory has now. The lifted engine keeps each instruction, that it lifted to run it, with the bytes it was lifted from, until it lifts the instruction anew, when the bytes change before it runs again, so `insn_at` recovers the code, that ran, after the program overwrote or scrubbed it, e.g., the code it unpacked, and `lifted_bytes` reassembles a function from them, as far as its instructions were lifted:
+
+```ocaml
+(* after the run: the decrypted routine, as it executed, though the program zeroed it *)
+match Emu.insn_at emu decrypted with
+| Some { bytes; name; bir; _ } -> printf "%s %S\n" name bytes
+| None -> print_endline "never lifted there";
+Out_channel.write_all "decrypted.bin" ~data:(Emu.lifted_bytes emu decrypted 0x400)
+```
+
+The engine lifts the instructions of a block, that it compiles, a few ahead of the one, that runs, so an instruction right after a branch may be lifted without running. Unicorn translates the code in itself, where the script doesn't see it, so `insn_at` is `None` there: catch the writes with `on_write`, or read the code while it is in memory.
+
 ### Hooks
 
 | Function | Calls `f` |
@@ -226,12 +239,25 @@ match Emu.bir emu 0x400727L with
 
 A hook doesn't see again the instruction, before which it paused the program, when the program continues from there, so `on_code` may `stop` the program at an address unconditionally, and `run` stops there the next time the code reaches it.
 
-`arg emu n` reads the arguments of the called function, as its prototype tells, e.g., from the api files. While the program runs, a hook may only `stop` it, or `read` and `write_direct` the memory:
+`arg emu n` reads the arguments of the called function, as its prototype tells, e.g., from the api files.
 
 ```ocaml
 Emu.on_call emu "putchar" (fun emu ->
     if Emu.arg emu 0 = Int64.of_int (Char.code 'l') then Return 108L else Default)
 ```
+
+While the program runs, the machine of Primus runs it, and serves no request of the script, so a hook may `stop` the program, read the registers, `read` the memory, that Unicorn has, i.e., the pages the program touched, and `write_direct` it, and `bir` and `insn_at` the code; the other functions raise `Invalid_argument`, which says the program is not paused, as it runs, and `read` raises for a page, that is not in Unicorn yet, rather than making bytes up. For the rest, `defer` an action to the pause, that the hook asks for, before the instruction it sees, or after the access, in `on_read` and `on_write`; the program continues after the action, unless the hook also stopped it, and an error of the action raises from `run`:
+
+```ocaml
+Emu.on_code emu ~first:unpacked ~last:unpacked (fun emu _ ->
+    Emu.save emu "unpacked.ckpt";               (* saved at the pause, see below *)
+    Emu.defer emu (fun emu ->
+        let region = Emu.read emu base 0x540000 in   (* every page, as Primus has it *)
+        Out_channel.write_all "region.bin" ~data:region;
+        Emu.add_symbol emu "decrypt" (Emu.reg emu "X0")))
+```
+
+`save` from a hook defers itself, so a checkpoint is saved before the instruction the hook sees.
 
 ### Traces and slices
 

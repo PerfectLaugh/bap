@@ -155,6 +155,61 @@ type options = {
           plugins, that lift the instructions, see [lifter] *)
 }
 
+(* The instructions, that the lifter lifted, in the other runs of the
+   program, which the lifted engine runs, rather than it lifts them again,
+   whose file is in the cache, by the digest of the version of BAP, the
+   configuration of its plugins, the file of the program, and its target,
+   see [lifter]. The labels of the calls, e.g., of the intrinsics, are
+   the objects of the knowledge of the run, that lifted them, which are
+   made anew, when they are read, with their names. *)
+module Lifts = struct
+  type entry = {
+    addr : int64;
+    thumb : bool;
+    code : string;
+    size : int;
+    name : string;
+    blks : blk term list;
+    calls : (tid * string) list;
+  }
+  [@@deriving bin_io]
+
+  type t = entry list [@@deriving bin_io]
+
+  let magic = "bap-lifted-lifts 1\n"
+
+  let load file =
+    try
+      let data = In_channel.read_all file in
+      if String.is_prefix data ~prefix:magic then
+        Binable.of_string
+          (module struct
+            type nonrec t = t [@@deriving bin_io]
+          end)
+          (String.drop_prefix data (String.length magic))
+      else []
+    with _ -> []
+
+  let save file entries =
+    try
+      let tmp =
+        Stdlib.Filename.temp_file
+          ~temp_dir:(Stdlib.Filename.dirname file)
+          (Stdlib.Filename.basename file)
+          ".tmp"
+      in
+      Out_channel.with_file ~binary:true tmp ~f:(fun out ->
+          Out_channel.output_string out magic;
+          Out_channel.output_string out
+            (Binable.to_string
+               (module struct
+                 type nonrec t = t [@@deriving bin_io]
+               end)
+               entries));
+      Stdlib.Sys.rename tmp file
+    with _ -> ()
+end
+
 type engine = {
   session : session;  (** the system, whose machines run in the engine *)
   uc : Uc.t;
@@ -258,6 +313,10 @@ and lifter = {
   forget : unit -> unit;
       (** saves the instructions, and drops them, so that the ones, that run
           again, are lifted again, see [Bap_emu.forget_lifts] *)
+  lifted : thumb:bool -> int64 -> Lifts.entry option;
+      (** the instruction at the address, in the mode, that the engine lifted in
+          this run, with the bytes, from which it was lifted, see
+          [Bap_emu.insn_at] *)
 }
 
 and session = {
@@ -1084,61 +1143,6 @@ let mips_r6 target =
    in the knowledge, that starts from the toplevel one, and keeps the
    semantics, e.g., the Primus Lisp program of x86, as Bap_emu lifts the
    instructions in the hooks *)
-(* The instructions, that the lifter lifted, in the other runs of the
-   program, which the lifted engine runs, rather than it lifts them again,
-   whose file is in the cache, by the digest of the version of BAP, the
-   configuration of its plugins, the file of the program, and its target,
-   see [lifter]. The labels of the calls, e.g., of the intrinsics, are
-   the objects of the knowledge of the run, that lifted them, which are
-   made anew, when they are read, with their names. *)
-module Lifts = struct
-  type entry = {
-    addr : int64;
-    thumb : bool;
-    code : string;
-    size : int;
-    name : string;
-    blks : blk term list;
-    calls : (tid * string) list;
-  }
-  [@@deriving bin_io]
-
-  type t = entry list [@@deriving bin_io]
-
-  let magic = "bap-lifted-lifts 1\n"
-
-  let load file =
-    try
-      let data = In_channel.read_all file in
-      if String.is_prefix data ~prefix:magic then
-        Binable.of_string
-          (module struct
-            type nonrec t = t [@@deriving bin_io]
-          end)
-          (String.drop_prefix data (String.length magic))
-      else []
-    with _ -> []
-
-  let save file entries =
-    try
-      let tmp =
-        Stdlib.Filename.temp_file
-          ~temp_dir:(Stdlib.Filename.dirname file)
-          (Stdlib.Filename.basename file)
-          ".tmp"
-      in
-      Out_channel.with_file ~binary:true tmp ~f:(fun out ->
-          Out_channel.output_string out magic;
-          Out_channel.output_string out
-            (Binable.to_string
-               (module struct
-                 type nonrec t = t [@@deriving bin_io]
-               end)
-               entries));
-      Stdlib.Sys.rename tmp file
-    with _ -> ()
-end
-
 (* The intrinsics of x86, that Unicorn runs natively, and that Primus
    and the lifted engine call, see CPUID of x86-control.lisp: CPUID and
    XGETBV run in a Unicorn of their own, of the mode of the target, so
@@ -1366,12 +1370,20 @@ let lifter ?cache ~arm project =
             end
             else (size, name, blks))
   in
+  (* the entries of the cache, that no instruction of this run hit, are
+     not lifted in it, see [fresh] *)
+  let lifted ~thumb addr =
+    match Hashtbl.find entries (addr, thumb) with
+    | Some (e, renamed) when !renamed -> Some e
+    | _ -> None
+  in
   {
     lift;
     name = Hashtbl.find names;
     cached = not (Hashtbl.is_empty entries);
     save;
     forget;
+    lifted;
   }
 
 (* the NaNs and the invalid integers of the target, as ieee754-policy of

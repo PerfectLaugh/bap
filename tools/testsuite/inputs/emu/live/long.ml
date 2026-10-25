@@ -11,8 +11,11 @@ module Emu = Bap_emu
 
 let () =
   let file = List.hd_exn (Bap_script.args ()) in
+  let out = Filename.concat (List.nth_exn (Bap_script.args ()) 1) "out.txt" in
   let emu =
-    Emu.create ~engine:`Lifted ~args:[ "hello" ] (Bap_script.project file)
+    Emu.create ~engine:`Lifted ~args:[ "hello" ]
+      ~redirects:[ ("<stdout>", out) ]
+      (Bap_script.project file)
   in
   let main = List.Assoc.find_exn (Emu.symbols emu) ~equal:String.equal "main" in
   ignore (Emu.run emu ~until:main : Emu.status);
@@ -33,6 +36,26 @@ let () =
   printf "lifts main again %b\n" (Option.is_some (Emu.bir emu main));
   Emu.restore emu kept;
   printf "restored the kept snapshot at main %b\n" Int64.(Emu.pc emu = main);
+  (* the instructions, that ran, as the engine lifted them, from the
+     bytes, that they had, see Emu.insn_at: the first instruction of
+     main runs, whose bytes stay, when the code is scrubbed *)
+  ignore (Emu.step emu : Emu.status);
+  (match Emu.insn_at emu main with
+  | Some insn ->
+      let n = String.length insn.bytes in
+      printf "ran main: %s of %d bytes, the ones in memory %b, lifted %b\n"
+        insn.name n
+        (String.equal insn.bytes (Emu.read emu main n))
+        (not (List.is_empty insn.bir));
+      printf "the bytes, that were lifted, from main: %d of 32\n"
+        (String.length (Emu.lifted_bytes emu main 32));
+      Emu.write emu main (String.make n '\000');
+      printf "scrubbed: in memory %b, as they ran %b\n"
+        (String.for_all (Emu.read emu main n) ~f:(Char.equal '\000'))
+        (Option.exists (Emu.insn_at emu main) ~f:(fun i ->
+             String.equal i.bytes insn.bytes))
+  | None -> print_endline "main didn't run");
+  Emu.restore emu kept;
   match Emu.run emu with
   | Exited (Some 0) -> print_endline "exited 0"
   | Exited _ -> print_endline "exited otherwise"

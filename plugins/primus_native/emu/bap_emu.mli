@@ -42,7 +42,9 @@ type t
 (** the state of the program *)
 type status =
   | Paused  (** the program pauses, e.g., at the address of [until] *)
-  | Running  (** the program runs, e.g., in a hook, which may only {!stop} it *)
+  | Running
+      (** the program runs, e.g., in a hook, which may {!stop} it, or {!defer}
+          an action to the pause *)
   | Exited of int option  (** the program exited, with the code, if known *)
   | Failed of string  (** the program or the emulator failed *)
 
@@ -124,6 +126,27 @@ val stop : t -> unit
 (** [stop emu] pauses the program, e.g., in a hook, before the next instruction.
 *)
 
+val defer : t -> (t -> unit) -> unit
+(** [defer emu f] runs [f emu], when the program is paused: at once, if it is,
+    or, in a hook, where the machine runs the program and serves no request of
+    the script, so that most of the functions raise, at the pause, that the hook
+    asks for, i.e., before the instruction, that a hook of the code sees, or
+    after the one, that accessed the memory, in a hook of {!on_read} or
+    {!on_write}, after which the program continues, unless a hook also
+    {!stop}ped it. [f] may do what a paused program allows, e.g., {!save},
+    {!read} a page, that is not in Unicorn yet, {!regions}, {!project}, or
+    {!snapshot}, and raises from the function, that runs the program, e.g.,
+    {!run}, if it raises:
+
+    {[
+      Emu.on_code emu ~first:decrypted ~last:decrypted (fun emu _ ->
+          Emu.defer emu (fun emu ->
+              let proj = Emu.project emu in
+              ...))
+    ]}
+
+    Raises [Invalid_argument], if the program ended. *)
+
 val pc : t -> int64
 (** the address of the next instruction, with the lower bit set in the Thumb
     state of ARM, or, in a hook, e.g., of {!on_write}, of the instruction, that
@@ -153,7 +176,10 @@ val set_reg_word : t -> string -> word -> unit
 val read : t -> int64 -> int -> string
 (** [read emu addr n] reads [n] bytes from [addr], raises [Invalid_argument], if
     Primus would fault on any of them, or, in a hook, if their page is not in
-    Unicorn yet, which a paused program copies. *)
+    Unicorn yet, which a paused program copies, as the machine runs the program
+    and can't be asked for the page: {!defer} the read to the pause, to read it.
+    A read never makes bytes up: the bytes, that it returns, are the ones, that
+    the program has. *)
 
 val write : t -> int64 -> string -> unit
 (** [write emu addr data] stores the bytes to the memory of the machine in
@@ -164,7 +190,8 @@ val write : t -> int64 -> string -> unit
     the executor tracks, are decoded and lifted anew from them.
 
     Raises [Invalid_argument] as {!read} does, or if the program is not paused,
-    e.g., in a hook, where {!write_direct} writes. *)
+    as it runs, e.g., in a hook, where {!write_direct} writes, or {!defer}
+    writes at the pause. *)
 
 val write_direct : t -> int64 -> string -> unit
 (** [write_direct emu addr data] writes the bytes to Unicorn, also to the code,
@@ -201,6 +228,35 @@ val bir : ?thumb:bool -> t -> int64 -> (int * blk term list) option
 
     Raises [Invalid_argument], if [addr] is not mapped, e.g., in a hook, if its
     page is not in Unicorn yet. *)
+
+type executed = {
+  bytes : string;  (** the bytes of the instruction, from which it was lifted *)
+  name : string;  (** the name of the instruction, e.g., [MOV64rr] *)
+  thumb : bool;  (** if it is in the Thumb state of ARM *)
+  bir : blk term list;  (** its semantics, that the engine runs *)
+}
+(** an instruction, that the lifted engine ran, see {!insn_at} *)
+
+val insn_at : ?thumb:bool -> t -> int64 -> executed option
+(** [insn_at emu pc] is the instruction, that the lifted engine lifted at [pc],
+    to run it, in this run, from the bytes, that the program had there then,
+    which the engine keeps, while the memory may not have them anymore, e.g.,
+    when the program scrubbed the code, that it unpacked, after it ran, or
+    overwrote it, so {!read} gives other bytes, and {!bir} lifts them. The
+    instruction is the last one lifted at [pc]: the engine lifts the code anew,
+    when its bytes change, before it runs it, and it lifts the instructions of a
+    block, which it compiles, a few ahead of the one, that runs. [None], if the
+    engine lifted nothing at [pc], or the engine is Unicorn, which translates
+    the code in itself, where the script doesn't see it. The instruction is in
+    the Thumb state, if [thumb], by default, if the lower bit of [pc] is set, as
+    in {!bir}. Also in the hooks. *)
+
+val lifted_bytes : ?thumb:bool -> t -> int64 -> int -> string
+(** [lifted_bytes emu addr n] are the bytes of the instructions, that the lifted
+    engine ran, see {!insn_at}, from [addr], one after another, as far as they
+    go, at most [n], e.g., of a function, that ran, whose bytes the program
+    scrubbed: fewer, than [n], if an instruction after them didn't run, e.g.,
+    after a branch, that was never taken, or none. *)
 
 (** The traces of the program counters, which the native hooks of Unicorn record
     in a ring, with no call to OCaml. The trace of the blocks costs the least,
@@ -468,7 +524,8 @@ val primus : t -> Bap_primus.Std.Primus.Machine.component -> unit
 
     The [init] may observe the program, e.g., with
     [Machine.Observation.observe], as the components do, and its observers stay.
-    Raises [Invalid_argument], if the program is not paused, e.g., in a hook. *)
+    Raises [Invalid_argument], if the program is not paused, as it runs, e.g.,
+    in a hook. *)
 
 val on_code : ?first:int64 -> ?last:int64 -> t -> (t -> int64 -> unit) -> unit
 (** [on_code emu f] calls [f emu addr] before each instruction from [first] to
@@ -808,8 +865,14 @@ val save : t -> string -> unit
     {!complete}, e.g., __libc_start_main exits with the result of main, as the
     code of the stubs is not data, and the program ends.
 
-    Raises [Invalid_argument], if the program is not paused, e.g., in a hook,
-    and [Failure], if the checkpoint can't be saved. *)
+    In a hook, where the machine runs the program, the checkpoint is saved at
+    the pause, that the hook asks for, i.e., before the instruction, that a hook
+    of the code sees, after which the program continues, unless a hook also
+    {!stop}ped it, see {!defer}, so an error of the save raises from the
+    function, that runs the program, e.g., {!run}.
+
+    Raises [Invalid_argument], if the program ended, and [Failure], if the
+    checkpoint can't be saved. *)
 
 val save_lifts : t -> unit
 (** [save_lifts emu] saves the instructions, that the lifted engine lifted, to
@@ -945,7 +1008,7 @@ val unstub : t -> string -> unit
     checkpoints keep it, see {!save}.
 
     Raises [Invalid_argument], if the program has no code of the function, e.g.,
-    if it is external, or if it is not paused, e.g., in a hook. *)
+    if it is external, or if it is not paused, as it runs, e.g., in a hook. *)
 
 (** The taint of the values, that the program computes.
 

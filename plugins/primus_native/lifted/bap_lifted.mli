@@ -56,6 +56,15 @@ val create : config -> Bap_unicorn.arch -> Bap_unicorn.Mode.t -> t
 val close : t -> unit
 val flush_tb : t -> unit
 
+val insn_at :
+  t -> int64 -> (string * string * bool * Bap.Std.blk Bap.Std.term list) option
+(** [insn_at t pc] the bytes, the name, the mode, Thumb or not, and the
+    semantics of the instruction, that the engine lifted at [pc], to run it,
+    from the bytes, that the memory had then, which stay, when the memory
+    changes, until the engine lifts the instruction anew, or [None], if none was
+    lifted there. {!flush_tb} keeps the instructions, whose bytes are checked,
+    when they run, and drops the blocks, that the JIT compiled. *)
+
 (** {2 Memory} *)
 
 val mem_map : t -> int64 -> int64 -> Bap_unicorn.Perm.t -> unit

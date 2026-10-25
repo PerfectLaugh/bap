@@ -1118,9 +1118,24 @@ let emu data =
               "script";
               input "emu/live/long.ml";
               path data "bin/x86_64-linux-gnu-echo";
+              dir env;
             ]
         in
         golden env "emu/live/long.txt" out.text);
+    (* what a hook may do, while the program runs: save a checkpoint, or
+       defer an action to the pause, that it asks for, after which the
+       program continues, see hooks.ml *)
+    case "emu/live/hooks" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/live/hooks.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              dir env;
+            ]
+        in
+        golden env "emu/live/hooks.txt" out.text);
     (* the emulators run side by side, each in its own engine, also of
        another target, with their own registers, memory, names and
        hooks *)
