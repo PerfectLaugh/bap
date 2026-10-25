@@ -153,7 +153,7 @@ For example, to cache the disassembled binaries, which makes the subsequent runs
 bap /bin/echo -d --cache-dir=$HOME/.cache/bap
 ```
 
-The `bap script` command, which runs before the other options are parsed, takes its own `--cache-dir` option, where it keeps the compiled scripts, e.g., `bap script --cache-dir=DIR script.ml`, and the history of `bap analyze` is kept only when its `--history` option is specified.
+The `bap script` command, which runs before the other options are parsed, takes its own `--cache-dir` option, where it keeps the compiled scripts, e.g., `bap script --cache-dir=DIR script.ml`, and `--check`, which compiles the script without running it, and the history of `bap analyze` is kept only when its `--history` option is specified.
 
 ## Running programs
 

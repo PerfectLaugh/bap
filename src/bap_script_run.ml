@@ -1,7 +1,8 @@
-(* [bap script [--cache-dir=DIR] FILE.ml ARG...] compiles the script to a plugin of the
-   native code with the compiler of bap, which is the ocamlopt of the
-   environment, as in opam or in dune exec, loads the libraries that it
-   requires, and then the script, which starts bap, see Bap_script. *)
+(* [bap script [--cache-dir=DIR] [--check] FILE.ml ARG...] compiles the
+   script to a plugin of the native code with the compiler of bap, which
+   is the ocamlopt of the environment, as in opam or in dune exec, loads
+   the libraries that it requires, and then the script, which starts
+   bap, see Bap_script, or, with --check, only compiles it. *)
 
 open Core
 
@@ -123,7 +124,9 @@ let rec load ~recompile file cmxs =
           load ~recompile:None file (compile ())
       | None -> fail "%s" (Dynlink.error_message err))
 
-let run ?cache file args =
+(* with [check], the script is compiled, and cached, if there is the
+   cache, but not run, and the errors of the compiler are of its lines *)
+let run ?cache ?(check = false) file args =
   let source =
     try In_channel.read_all file with Sys_error msg -> fail "%s" msg
   in
@@ -138,6 +141,7 @@ let run ?cache file args =
     if Stdlib.Sys.file_exists cached then (cached, Some compile)
     else (compile (), None)
   in
+  if check then Stdlib.exit 0;
   Bap_script.set_args args;
   (* the plugins are loaded before the libraries, that the script
      requires, as the libraries may use the libraries of the plugins,
@@ -151,14 +155,20 @@ let run ?cache file args =
       with exn -> fail "can't load %s: %s" lib (Exn.to_string exn));
   load ~recompile file cmxs
 
-let usage = "usage: bap script [--cache-dir=DIR] FILE.ml [ARG]..."
+let usage =
+  "usage: bap script [--cache-dir=DIR] [--check] FILE.ml [ARG]...\n\
+   --check  compile the script, without running it, and exit with 0, if it \
+   compiles"
 
-let rec main ?cache = function
-  | "--cache-dir" :: dir :: args -> main ~cache:dir args
+let rec main ?cache ?check = function
+  | "--cache-dir" :: dir :: args -> main ~cache:dir ?check args
   | opt :: args when String.is_prefix opt ~prefix:"--cache-dir=" ->
-      main ~cache:(String.chop_prefix_exn opt ~prefix:"--cache-dir=") args
+      main
+        ~cache:(String.chop_prefix_exn opt ~prefix:"--cache-dir=")
+        ?check args
+  | "--check" :: args -> main ?cache ~check:true args
   | ("-h" | "--help") :: _ ->
       print_endline usage;
       Stdlib.exit 0
-  | file :: args -> run ?cache file args
+  | file :: args -> run ?cache ?check file args
   | [] -> fail "%s" usage

@@ -91,10 +91,10 @@ The debugger behaves the same in the interpreter and in Unicorn. It observes onl
 `bap script` compiles an OCaml script to native code and runs it. The script links the libraries of BAP, plus those that its `#require` lines name:
 
 ```bash
-bap script [--cache-dir=DIR] script.ml ARG...
+bap script [--cache-dir=DIR] [--check] script.ml ARG...
 ```
 
-With `--cache-dir`, the compiled script is cached, and the next run skips the compilation. `Bap_script.args ()` returns the arguments after the file.
+With `--cache-dir`, the compiled script is cached, and the next run skips the compilation. With `--check`, the script is compiled, but not run, so bap exits with 0, if it compiles, or prints the errors of the compiler, with the lines of the script, and exits with 1, e.g., in an editor or a hook of the commits; with `--cache-dir` too, the run, that follows, skips the compilation. `Bap_script.args ()` returns the arguments after the file.
 
 A script configures the analyses with the arguments of the functions that it calls:
 

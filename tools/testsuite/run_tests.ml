@@ -465,6 +465,17 @@ let scripts data =
         let out = script env (input "script/error/script.ml") in
         check env "fails" (out.status = Exited 1);
         has env "tells the line of the script" out "script\\.ml\", line 2");
+    (* --check compiles the script, and doesn't run it *)
+    case "script/check" (fun env ->
+        let check_script file =
+          bap ~timeout:300. env [ "script"; "--check"; file; crc ]
+        in
+        let ok = check_script (input "script/run.ml") in
+        check env "compiles" (ok.status = Exited 0);
+        lacks env "doesn't run the script" ok "1635920155";
+        let bad = check_script (input "script/error/script.ml") in
+        check env "fails" (bad.status = Exited 1);
+        has env "tells the line of the script" bad "script\\.ml\", line 2");
   ]
 
 (* the bare projects of the scripts, which are not disassembled, run in
