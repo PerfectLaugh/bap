@@ -53,11 +53,14 @@ let all_flags = opt "flags" "" = "all"
 let runs = int_of_string (opt "runs" "4")
 let seed = int_of_string (opt "seed" "1")
 let api = match opt "api" "" with "" -> [] | dir -> [ dir ]
-
 let target = Filename.basename file
 let mips = String.starts_with ~prefix:"mips" target
 let starts prefix = String.starts_with ~prefix target
-let numbered prefix first last = List.init (last - first + 1) (fun i -> Printf.sprintf "%s%d" prefix (first + i))
+
+let numbered prefix first last =
+  List.init
+    (last - first + 1)
+    (fun i -> Printf.sprintf "%s%d" prefix (first + i))
 
 (* the registers, that the instructions read and write, without their
    aliases, the pointer of the stack, which points to the buffer, and
@@ -78,9 +81,7 @@ let sp, gprs, others =
       numbered "R" 0 12 @ [ "LR" ],
       [ "NF"; "ZF"; "CF"; "VF"; "QF" ] @ numbered "D" 0 31 )
   else if starts "mips" then
-    ( "R29",
-      numbered "R" 1 28 @ [ "R30"; "R31"; "HI"; "LO" ],
-      numbered "F" 0 31 )
+    ("R29", numbered "R" 1 28 @ [ "R30"; "R31"; "HI"; "LO" ], numbered "F" 0 31)
   else if starts "riscv" then
     ("X2", "X1" :: numbered "X" 3 31, numbered "F" 0 31)
   else if starts "powerpc" then
@@ -108,7 +109,15 @@ let r6 = flag "r6"
 (* if the instruction of MIPS has a delay slot, by its encoding, as
    [Primus_native_executor.mips_delayed] tells *)
 let word_of code =
-  let b i = Char.code code.[if String.starts_with ~prefix:"mipsel" target || String.starts_with ~prefix:"mips64el" target || String.ends_with ~suffix:"el" target then 3 - i else i] in
+  let b i =
+    Char.code
+      code.[if
+              String.starts_with ~prefix:"mipsel" target
+              || String.starts_with ~prefix:"mips64el" target
+              || String.ends_with ~suffix:"el" target
+            then 3 - i
+            else i]
+  in
   (b 0 lsl 24) lor (b 1 lsl 16) lor (b 2 lsl 8) lor b 3
 
 let delayed code =
@@ -120,7 +129,7 @@ let delayed code =
   match op with
   | 0x02 | 0x03 | 0x04 | 0x05 -> true
   (* BLEZ and BGTZ, the others of their opcodes are compact *)
-  | 0x06 | 0x07 when r6 -> rt = 0
+  | (0x06 | 0x07) when r6 -> rt = 0
   | 0x06 | 0x07 | 0x14 | 0x15 | 0x16 | 0x17 -> not r6
   | 0x01 when r6 -> List.mem rt [ 0x00; 0x01; 0x10; 0x11 ]
   | 0x01 -> List.mem rt [ 0x00; 0x01; 0x02; 0x03; 0x10; 0x11; 0x12; 0x13 ]
@@ -133,8 +142,12 @@ let delayed code =
    whose forbidden slot, after it, Unicorn runs with it, if it is not
    taken *)
 let compact code =
-  r6 && String.length code = 4 && (not (delayed code))
-  && List.mem ((word_of code lsr 26) land 0x3F) [ 0x06; 0x07; 0x08; 0x16; 0x17; 0x18; 0x36; 0x3E ]
+  r6
+  && String.length code = 4
+  && (not (delayed code))
+  && List.mem
+       ((word_of code lsr 26) land 0x3F)
+       [ 0x06; 0x07; 0x08; 0x16; 0x17; 0x18; 0x36; 0x3E ]
 
 (* the nops, that follow the instruction *)
 let nops =
@@ -150,7 +163,8 @@ let nops =
   String.concat "" (List.init (16 / String.length nop) (fun _ -> nop))
 
 let bytes_of_hex line =
-  String.split_on_char ' ' (String.map (fun c -> if c = ';' then ' ' else c) line)
+  String.split_on_char ' '
+    (String.map (fun c -> if c = ';' then ' ' else c) line)
   |> List.filter (fun s -> s <> "")
   |> List.map (fun h -> Char.chr (int_of_string ("0x" ^ h)))
   |> List.to_seq |> String.of_seq
@@ -224,16 +238,15 @@ let () =
   let entry = Int64.logand (Emu.pc emu) (Int64.lognot 1L) in
   let size = 0x4000 in
   let buf =
-    Int64.logand
-      (Int64.sub (Emu.reg emu sp) 0x20000L)
-      (Int64.lognot 0xFFFL)
+    Int64.logand (Int64.sub (Emu.reg emu sp) 0x20000L) (Int64.lognot 0xFFFL)
   in
   let lines =
     In_channel.with_open_text insns In_channel.input_lines
     |> List.filter_map (fun l ->
         let code, comment =
           match String.index_opt l '#' with
-          | Some i -> (String.sub l 0 i, String.sub l (i + 1) (String.length l - i - 1))
+          | Some i ->
+              (String.sub l 0 i, String.sub l (i + 1) (String.length l - i - 1))
           | None -> (l, "")
         in
         if String.trim code = "" then None
@@ -293,7 +306,9 @@ let () =
                    entry ->
               Emu.step emu
           (* the branch of MIPS stops in its delay slot *)
-          | Paused when mips && delayed code && Int64.equal (Emu.pc emu) (Int64.add entry 4L) ->
+          | Paused
+            when mips && delayed code
+                 && Int64.equal (Emu.pc emu) (Int64.add entry 4L) ->
               Emu.step emu
           | status -> status
         in
@@ -313,73 +328,86 @@ let () =
               prepare other;
               capture other buf size (status_name (step other))
           | None ->
-        let interpret emu =
-          match Emu.interpret emu with
-          (* the branch of MIPS, that is not taken, runs its delay slot
+              let interpret emu =
+                match Emu.interpret emu with
+                (* the branch of MIPS, that is not taken, runs its delay slot
              next *)
-          | Paused when mips && (delayed code || compact code) && Int64.equal (Emu.pc emu) (Int64.add entry 4L) ->
-              Emu.interpret emu
-          | status -> status
-        in
-        let status = steps_of interpret emu steps in
-        let lifted = capture emu buf size (status_name status) in
-        Emu.restore emu snapshot;
-        lifted
+                | Paused
+                  when mips
+                       && (delayed code || compact code)
+                       && Int64.equal (Emu.pc emu) (Int64.add entry 4L) ->
+                    Emu.interpret emu
+                | status -> status
+              in
+              let status = steps_of interpret emu steps in
+              let lifted = capture emu buf size (status_name status) in
+              Emu.restore emu snapshot;
+              lifted
         in
         let unchecked =
           String.starts_with ~prefix:"failed Unicorn: an invalid instruction"
             native.status
           (* the illegal instructions of RISC-V are its exception 2 *)
           || String.starts_with target ~prefix:"riscv"
-             && String.starts_with ~prefix:"failed Unicorn: an unhandled interrupt 2 "
+             && String.starts_with
+                  ~prefix:"failed Unicorn: an unhandled interrupt 2 "
                   native.status
         in
         let diffs =
           if unchecked then [ "unchecked, as Unicorn doesn't have it" ]
           else
-          (let fault s =
-             String.starts_with ~prefix:"failed Segmentation fault" s
-             (* the unaligned accesses, e.g., of MIPS, are the exceptions
+            (let fault s =
+               String.starts_with ~prefix:"failed Segmentation fault" s
+               (* the unaligned accesses, e.g., of MIPS, are the exceptions
                 of Unicorn *)
-             || String.starts_with ~prefix:"failed Unicorn: an unhandled interrupt" s
-             (* the exceptions of the divisions, and of the traps, e.g.,
+               || String.starts_with
+                    ~prefix:"failed Unicorn: an unhandled interrupt" s
+               (* the exceptions of the divisions, and of the traps, e.g.,
                 teq of MIPS, which are intrinsic in Primus *)
-             || String.starts_with ~prefix:"failed Division by zero" s
-             || String.starts_with ~prefix:"failed unbound function intrinsic:trap" s
-             (* the trap, that the executor locates, see [located] *)
-             || (String.starts_with ~prefix:"failed Unicorn: the instruction" s
-                 && String.ends_with ~suffix:"calls the unbound function intrinsic:trap" s)
-           in
-           if native.status <> lifted.status
-              && not (fault native.status && fault lifted.status)
-           then
-             [ Printf.sprintf "status %s / %s" native.status lifted.status ]
-           else [])
-          @ (if native.pc <> lifted.pc then
-               [ Printf.sprintf "pc %Lx / %Lx" native.pc lifted.pc ]
+               || String.starts_with ~prefix:"failed Division by zero" s
+               || String.starts_with
+                    ~prefix:"failed unbound function intrinsic:trap" s
+               (* the trap, that the executor locates, see [located] *)
+               || String.starts_with ~prefix:"failed Unicorn: the instruction" s
+                  && String.ends_with
+                       ~suffix:"calls the unbound function intrinsic:trap" s
+             in
+             if
+               native.status <> lifted.status
+               && not (fault native.status && fault lifted.status)
+             then
+               [ Printf.sprintf "status %s / %s" native.status lifted.status ]
              else [])
-          @ List.filter_map
-              (fun (r, x) ->
-                match List.assoc_opt r lifted.regs with
-                | Some y when not (Word.equal x y) && List.mem r flags && not all_flags -> None
-                | Some y when not (Word.equal x y) ->
-                    Some
-                      (Format.asprintf "%s %a / %a" r Word.pp_hex x Word.pp_hex
-                         y)
-                | _ -> None)
-              native.regs
-          @
-          if native.buffer <> lifted.buffer then
-            let i = ref 0 in
-            while
-              !i < String.length native.buffer
-              && !i < String.length lifted.buffer
-              && native.buffer.[!i] = lifted.buffer.[!i]
-            do
-              incr i
-            done;
-            [ Printf.sprintf "memory at %Lx" (Int64.add buf (Int64.of_int !i)) ]
-          else []
+            @ (if native.pc <> lifted.pc then
+                 [ Printf.sprintf "pc %Lx / %Lx" native.pc lifted.pc ]
+               else [])
+            @ List.filter_map
+                (fun (r, x) ->
+                  match List.assoc_opt r lifted.regs with
+                  | Some y
+                    when (not (Word.equal x y))
+                         && List.mem r flags && not all_flags ->
+                      None
+                  | Some y when not (Word.equal x y) ->
+                      Some
+                        (Format.asprintf "%s %a / %a" r Word.pp_hex x
+                           Word.pp_hex y)
+                  | _ -> None)
+                native.regs
+            @
+            if native.buffer <> lifted.buffer then (
+              let i = ref 0 in
+              while
+                !i < String.length native.buffer
+                && !i < String.length lifted.buffer
+                && native.buffer.[!i] = lifted.buffer.[!i]
+              do
+                incr i
+              done;
+              [
+                Printf.sprintf "memory at %Lx" (Int64.add buf (Int64.of_int !i));
+              ])
+            else []
         in
         if diffs <> [] then
           failures :=
