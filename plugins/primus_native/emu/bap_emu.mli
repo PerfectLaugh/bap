@@ -1215,6 +1215,14 @@ val forget_lifts : t -> unit
     instructions, that are lifted again, e.g., in a new engine, cost a lift
     each, as at the start. *)
 
+val set_lift_cache_limit : t -> int option -> unit
+(** [set_lift_cache_limit emu limit] bounds the session lifter to the [limit]
+    least-recently-used entries, or makes it unbounded with [None]. [Some 0]
+    retains no entries. Eviction does not remove code already retained by the
+    lifted engine, and executed instructions keep their raw-byte checkpoint
+    history. Disk caches merge evicted entries on save. Raises
+    [Invalid_argument] for a negative limit. *)
+
 type footprint = {
   heap : int;  (** the bytes of the heap of OCaml *)
   top_heap : int;  (** the most, that the heap had *)

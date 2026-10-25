@@ -458,6 +458,12 @@ let forget_lifts t =
   Hashtbl.clear t.paused_lifts;
   Hashtbl.clear t.thumb_insns
 
+let set_lift_cache_limit t limit =
+  Option.iter limit ~f:(fun capacity ->
+      if capacity < 0 then
+        invalid_arg "Bap_emu: the lift-cache limit must be nonnegative");
+  Option.iter t.session.lifter ~f:(fun l -> l.set_limit limit)
+
 type footprint = { heap : int; top_heap : int; rss : int option }
 
 (* the resident size of the process, which Linux tells *)
@@ -1403,8 +1409,8 @@ let insns t =
   let ran = Hash_set.Poly.create () in
   Hashtbl.iter_keys t.session.ran_before ~f:(fun k -> Hash_set.add ran (addr k));
   Option.iter t.session.lifter ~f:(fun (l : X.lifter) ->
-      List.iter (l.ran ()) ~f:(fun (e : X.Lifts.entry) ->
-          Hash_set.add ran (addr (e.addr, e.thumb))));
+      List.iter (l.ran ()) ~f:(fun (pc, thumb, _) ->
+          Hash_set.add ran (addr (pc, thumb))));
   Option.iter t.session.active ~f:(fun e ->
       List.iter (Uc.insn_addrs e.uc) ~f:(fun pc ->
           match Uc.insn_at e.uc pc with

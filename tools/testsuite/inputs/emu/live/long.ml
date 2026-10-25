@@ -38,6 +38,20 @@ let () =
     | Some rss -> if rss >= f.heap then "known" else "small"
     | None -> "unknown");
   ignore (show_inventory emu);
+  Emu.set_lift_cache_limit emu (Some 2);
+  printf "lift cache bounded %b\n" ((Emu.components emu).lifter_entries <= 2);
+  let lifted =
+    Filename.concat (List.nth_exn (Bap_script.args ()) 1) "lifts.ckpt"
+  in
+  Emu.save emu lifted;
+  printf "checkpoint keeps evicted lifts %b\n"
+    (List.mem (Emu.Checkpoint.insns lifted) main ~equal:Int64.equal);
+  Emu.set_lift_cache_limit emu (Some 0);
+  printf "lift cache disabled %b\n" ((Emu.components emu).lifter_entries = 0);
+  Emu.set_lift_cache_limit emu (Some 2);
+  (match Emu.set_lift_cache_limit emu (Some (-1)) with
+  | exception Invalid_argument _ -> print_endline "negative lift cache rejected"
+  | () -> print_endline "negative lift cache accepted");
   let snap = Emu.snapshot emu in
   let kept = Emu.snapshot emu in
   let both = show_inventory emu in

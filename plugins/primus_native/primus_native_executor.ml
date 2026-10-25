@@ -317,11 +317,14 @@ and lifter = {
       (** the instruction at the address, in the mode, that the engine lifted in
           this run, with the bytes, from which it was lifted, see
           [Bap_emu.insn_at] *)
-  ran : unit -> Lifts.entry list;
-      (** the instructions, that [lifted] has, in no order *)
+  ran : unit -> (int64 * bool * string) list;
+      (** the addresses, modes, and bytes of the instructions that ran,
+          including the evicted ones *)
   inventory : unit -> int * int;
       (** the retained entries and their BIR blocks, including the cache
           entries, that this run didn't hit *)
+  set_limit : int option -> unit;
+      (** bounds the retained entries, or makes them unbounded with [None] *)
 }
 
 and journal_event = { kind : string; detail : string }
@@ -1335,10 +1338,61 @@ let lifter ?cache ~arm project =
   let state = ref None in
   let names = Tid.Table.create () in
   let entries = Hashtbl.Poly.create () in
+  let history = Hashtbl.Poly.create () in
+  let archived = Hashtbl.Poly.create () in
+  let flush = ref (fun () -> ()) in
   let dirty = ref false in
   (* the instructions, that were forgotten, are in the file, which the
      ones, that are kept, join *)
   let forgotten = ref false in
+  let limit = ref None in
+  let used = Hashtbl.Poly.create () in
+  let recent = ref Set.Poly.empty in
+  let lru_clock = ref 0 in
+  let remember (e : Lifts.entry) =
+    Hashtbl.set history ~key:(e.addr, e.thumb) ~data:e.code
+  in
+  let touch key =
+    match !limit with
+    | None -> ()
+    | Some _ ->
+        Option.iter (Hashtbl.find used key) ~f:(fun previous ->
+            recent := Set.remove !recent (previous, key));
+        incr lru_clock;
+        Hashtbl.set used ~key ~data:!lru_clock;
+        recent := Set.add !recent (!lru_clock, key)
+  in
+  let rec trim () =
+    match !limit with
+    | None -> ()
+    | Some capacity -> (
+        if Hashtbl.length entries > capacity then
+          match Set.min_elt !recent with
+          | None -> ()
+          | Some (_, key) ->
+              Option.iter (Hashtbl.find entries key)
+                ~f:(fun ((e : Lifts.entry), renamed) ->
+                  if !renamed then remember e;
+                  Option.iter cache ~f:(fun _ ->
+                      Hashtbl.set archived ~key:(e.addr, e.thumb) ~data:e));
+              Hashtbl.remove entries key;
+              recent := Set.remove !recent (Hashtbl.find_exn used key, key);
+              Hashtbl.remove used key;
+              dirty := true;
+              forgotten := true;
+              if Hashtbl.length archived >= 64 then !flush ();
+              trim ())
+  in
+  let set_limit value =
+    Option.iter value ~f:(fun capacity ->
+        if capacity < 0 then
+          invalid_arg "Bap_emu: the lift-cache limit must be nonnegative");
+    limit := value;
+    Hashtbl.clear used;
+    recent := Set.Poly.empty;
+    Option.iter value ~f:(fun _ -> Hashtbl.iter_keys entries ~f:touch);
+    trim ()
+  in
   let save () =
     Option.iter cache ~f:(fun file ->
         if !dirty then begin
@@ -1350,22 +1404,29 @@ let lifter ?cache ~arm project =
               let merged = Hashtbl.Poly.create () in
               List.iter (Lifts.load file) ~f:(fun (e : Lifts.entry) ->
                   Hashtbl.set merged ~key:(e.addr, e.thumb) ~data:e);
+              List.iter (Hashtbl.data archived) ~f:(fun (e : Lifts.entry) ->
+                  Hashtbl.set merged ~key:(e.addr, e.thumb) ~data:e);
               List.iter kept ~f:(fun (e : Lifts.entry) ->
                   Hashtbl.set merged ~key:(e.addr, e.thumb) ~data:e);
               Hashtbl.data merged
             end
           in
-          Lifts.save file all
+          Lifts.save file all;
+          Hashtbl.clear archived
         end)
   in
+  flush := save;
   let forget () =
     save ();
     Hashtbl.clear entries;
+    Hashtbl.clear used;
+    recent := Set.Poly.empty;
     forgotten := true
   in
   Option.iter cache ~f:(fun file ->
       List.iter (Lifts.load file) ~f:(fun (e : Lifts.entry) ->
-          Hashtbl.set entries ~key:(e.addr, e.thumb) ~data:(e, ref false));
+          Hashtbl.set entries ~key:(e.addr, e.thumb) ~data:(e, ref false);
+          touch (e.addr, e.thumb));
       at_exit save;
       (* the run, that a signal terminates, e.g., the timeout of a
          script, exits, so that the instructions are saved, and the next
@@ -1457,6 +1518,8 @@ let lifter ?cache ~arm project =
             e
           end
         in
+        remember e;
+        touch (addr, thumb);
         Some (e.size, e.name, e.blks)
     | _ ->
         let result = ref None in
@@ -1513,6 +1576,9 @@ let lifter ?cache ~arm project =
                   }
               in
               Hashtbl.set entries ~key:(addr, thumb) ~data:(e, ref true);
+              remember e;
+              touch (addr, thumb);
+              trim ();
               dirty := true;
               (size, name, e.blks)
             end
@@ -1526,8 +1592,8 @@ let lifter ?cache ~arm project =
     | _ -> None
   in
   let ran () =
-    Hashtbl.fold entries ~init:[] ~f:(fun ~key:_ ~data:(e, renamed) ran ->
-        if !renamed then e :: ran else ran)
+    Hashtbl.to_alist history
+    |> List.map ~f:(fun ((addr, thumb), code) -> (addr, thumb, code))
   in
   let inventory () =
     Hashtbl.fold entries ~init:(0, 0)
@@ -1543,6 +1609,7 @@ let lifter ?cache ~arm project =
     lifted;
     ran;
     inventory;
+    set_limit;
   }
 
 (* the NaNs and the invalid integers of the target, as ieee754-policy of
@@ -6797,8 +6864,8 @@ module Ran (Machine : Primus.Machine.S) = struct
     Machine.Global.get session_state >>| fun s ->
     let ran = Hashtbl.copy s.ran_before in
     Option.iter s.lifter ~f:(fun l ->
-        List.iter (l.ran ()) ~f:(fun (e : Lifts.entry) ->
-            Hashtbl.set ran ~key:(e.addr, e.thumb) ~data:e.code));
+        List.iter (l.ran ()) ~f:(fun (addr, thumb, code) ->
+            Hashtbl.set ran ~key:(addr, thumb) ~data:code));
     Option.iter s.active ~f:(fun e ->
         List.iter (Uc.insn_addrs e.uc) ~f:(fun pc ->
             match Uc.insn_at e.uc pc with

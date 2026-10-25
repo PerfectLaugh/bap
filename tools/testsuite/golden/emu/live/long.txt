@@ -1,7 +1,11 @@
 footprint: heap true, top true, rss known
 inventory: lifter true, engine true, blocks true, stored true, models true, snapshots 0, pages false
-inventory: lifter true, engine true, blocks true, stored true, models true, snapshots 2, pages true
-inventory: lifter true, engine true, blocks true, stored true, models true, snapshots 1, pages false
+lift cache bounded true
+checkpoint keeps evicted lifts true
+lift cache disabled true
+negative lift cache rejected
+inventory: lifter false, engine true, blocks false, stored true, models true, snapshots 2, pages true
+inventory: lifter false, engine true, blocks false, stored true, models true, snapshots 1, pages false
 pages released true
 Bap_emu.restore: the snapshot was dropped
 forgotten: lifter true, hooks true
