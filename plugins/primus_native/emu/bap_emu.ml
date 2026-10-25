@@ -2637,6 +2637,50 @@ let threads t =
          |> List.sort ~compare:(fun (x : Checkpoint.thread) y ->
              Int.compare x.tid y.tid))
 
+(* the registers of the thread, without the aliases: of the engine, for
+   the thread, that runs, or the ones, that Primus keeps for the thread,
+   that doesn't, see [X.Make.Threads.park] *)
+let rec thread_regs t tid =
+  List.sort (unsorted_thread_regs t tid) ~compare:(fun (a, _) (b, _) ->
+      String.compare a b)
+
+and unsorted_thread_regs t tid =
+  let e = engine t in
+  let basis = Target.Regs.basis e.regs in
+  let value v =
+    Option.map (Target.Regs.read e.regs v) ~f:(fun w ->
+        (Var.name v, Bitvec.to_int64 (Word.to_bitvec w)))
+  in
+  if tid = thread t then List.filter_map basis ~f:value
+  else if
+    not
+      (List.exists (threads t) ~f:(fun (th : Checkpoint.thread) -> th.tid = tid))
+  then invalid_argf "Bap_emu.thread_regs: the program has no thread %d" tid ()
+  else
+    let regs = ref [] in
+    primus t
+      (module functor
+                (Machine : Primus.Machine.S)
+                ->
+                struct
+                  module Env = Primus.Env.Make (Machine)
+                  open Machine.Syntax
+
+                  let init () =
+                    Machine.List.filter_map basis ~f:(fun v ->
+                        let saved = X.thread_var tid v in
+                        Env.is_set saved >>= function
+                        | false -> Machine.return None
+                        | true ->
+                            Env.get saved >>| fun x ->
+                            Some
+                              ( Var.name v,
+                                Bitvec.to_int64
+                                  (Word.to_bitvec (Primus.Value.to_word x)) ))
+                    >>| fun saved -> regs := saved
+                end);
+    !regs
+
 (* the system, whose program ended, finishes, as its knowledge is the
    result of the system *)
 let knowledge t =

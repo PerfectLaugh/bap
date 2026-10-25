@@ -1033,6 +1033,14 @@ module Checkpoint : sig
   (** [is_of info proj] if the checkpoint is of the file of the program *)
 end
 
+val thread_regs : t -> int -> (string * int64) list
+(** [thread_regs emu tid] the registers, without the aliases, of the thread of
+    the paused program, by its TID, see {!threads}, e.g., of the one, that waits
+    on a lock, to tell, which lock it waits on, from its arguments: of the
+    engine, for the thread, that runs, and else, as the thread had them, when it
+    stopped running. Raises [Invalid_argument], if the program is not paused, or
+    has no such thread. *)
+
 val threads : t -> Checkpoint.thread list
 (** [threads emu] the threads of the paused program, the one, that runs, at the
     address, at which it paused, first, and the others, with the addresses, from
