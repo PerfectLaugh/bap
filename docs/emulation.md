@@ -492,6 +492,20 @@ A checkpoint is untrusted input, as it may be crafted, so its restore checks it:
 
 The program continues the innermost run of Unicorn. Afterwards, the stub that started it completes, if it is known, see `Emu.complete`; e.g., `__libc_start_main` exits with the result of `main`.
 
+The program, that failed, e.g., at an instruction, that faulted, is saved too, at the address, from which Unicorn would continue, i.e., of that instruction, so the restored program runs it again, e.g., after the script fixed the pointer or patched the code, in another run too:
+
+```ocaml
+match Emu.run emu with
+| Failed _ -> Emu.save emu "crash.ckpt"
+| _ -> ()
+(* ... later *)
+let emu = Emu.create ~restore:"crash.ckpt" proj in
+Emu.set_reg emu "RAX" valid;
+Emu.run emu
+```
+
+A failure outside of a run of Unicorn, e.g., of a stub, that the program called before it started, has no checkpoint, and `save` raises `Failure`; the program, that exited, or whose emulator failed, e.g., with an exception of the script, raises `Invalid_argument`.
+
 A signal, e.g., of `kill`, may save the checkpoint: its handler stops the program, which pauses, and the script saves it:
 
 ```ocaml

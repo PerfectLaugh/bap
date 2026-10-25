@@ -429,7 +429,32 @@ let rec save t file =
       save_lifts t;
       match t.session.saved with Ok () -> () | Error msg -> failwith msg)
   | Running -> defer t (fun t -> save t file)
+  | Ended (Exn Primus.Interpreter.Halt, _) ->
+      invalid_arg "Bap_emu.save: the program is not paused, as it exited"
+  | Ended (Exn _, _) -> save_failed t file
   | _ -> invalid_arg "Bap_emu.save: the program is not paused, as it ended"
+
+(* the checkpoint of the program, that failed, e.g., at the instruction,
+   that faulted, from which it continues, as the runs, that the failure
+   unwound, are still in the machine, see [X.Make.run] *)
+and save_failed t file =
+  let saved = ref (Error "the program failed outside of a run") in
+  resume t
+    (X.Run
+       (module functor
+                 (Machine : Primus.Machine.S)
+                 ->
+                 struct
+                   module Exec = X.Make (Machine)
+                   open Machine.Syntax
+
+                   let init () =
+                     Exec.engine () >>= fun e ->
+                     Exec.save e (Exec.current_pc e) file >>| fun r ->
+                     saved := r
+                 end));
+  save_lifts t;
+  match !saved with Ok () -> () | Error msg -> failwith msg
 
 module Checkpoint = struct
   module C = Bap_primus_native_plugin.Primus_native_checkpoint

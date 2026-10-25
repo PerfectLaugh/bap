@@ -1160,6 +1160,32 @@ let emu data =
             ]
         in
         golden env "emu/live/ran.txt" out.text);
+    (* the program, that failed, is saved at the instruction, that
+       faulted, see failed.ml *)
+    case "emu/live/failed/lifted" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/live/failed.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              dir env;
+              "lifted";
+            ]
+        in
+        golden env "emu/live/failed.txt" out.text);
+    case "emu/live/failed/unicorn" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/live/failed.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              dir env;
+              "unicorn";
+            ]
+        in
+        golden env "emu/live/failed.txt" out.text);
     (* the shell, with the commands of the debugger, at a pause, and from
        a hook, see shell.ml *)
     case "emu/live/shell" (fun env ->

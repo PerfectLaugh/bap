@@ -912,8 +912,20 @@ val save : t -> string -> unit
     {!stop}ped it, see {!defer}, so an error of the save raises from the
     function, that runs the program, e.g., {!run}.
 
-    Raises [Invalid_argument], if the program ended, and [Failure], if the
-    checkpoint can't be saved. *)
+    The program, that failed, e.g., at an instruction, that faulted, is saved at
+    the address, from which Unicorn would continue, i.e., of that instruction,
+    so the program, that continues from the checkpoint, in another run too,
+    e.g., after the script fixed the pointer or patched the code, runs it again:
+
+    {[
+    match Bap_emu.run emu with
+    | Failed _ -> Bap_emu.save emu "crash.ckpt"
+    | _ -> ()
+    ]}
+
+    Raises [Invalid_argument], if the program exited, or its emulator failed,
+    e.g., with an exception of the script, and [Failure], if the checkpoint
+    can't be saved, e.g., as the program failed outside of a run of Unicorn. *)
 
 val save_lifts : t -> unit
 (** [save_lifts emu] saves the instructions, that the lifted engine lifted, to
