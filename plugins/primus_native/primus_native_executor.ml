@@ -458,6 +458,9 @@ and session = {
   events : event Queue.t;  (** the events, that the observers see *)
   journal : journal_event Queue.t;
       (** the last model events, that the checkpoints keep *)
+  thread_journal : journal_event Queue.t;
+      (** the last thread events, separately from the model events, which the
+          frequent switches would otherwise evict *)
   mutable sliced_at : float;
       (** the time of [clock], at which the thread, that runs, started its time
           slice, see [Make.Threads], which the pauses of the script shift, as
@@ -506,6 +509,11 @@ let record_event session kind detail =
   Queue.enqueue session.journal { kind; detail };
   if Queue.length session.journal > 32 then
     ignore (Queue.dequeue_exn session.journal : journal_event)
+
+let record_thread_event session kind detail =
+  Queue.enqueue session.thread_journal { kind; detail };
+  if Queue.length session.thread_journal > 256 then
+    ignore (Queue.dequeue_exn session.thread_journal : journal_event)
 
 let context_of_string =
   Binable.of_string
@@ -600,6 +608,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     engine_hooks = [];
     events = Queue.create ();
     journal = Queue.create ();
+    thread_journal = Queue.create ();
     sliced_at = 0.;
     resumed = false;
     hooked_at = None;
@@ -4386,6 +4395,8 @@ module Make (Machine : Primus.Machine.S) = struct
                 others = List.filteri others ~f:(fun j _ -> j <> i);
               }
           in
+          record_thread_event e.session "thread-switch"
+            (sprintf "old=%d;new=%d;pc=0x%Lx" st.current next.tid next.next);
           Some next.next
 
     (* the threads, that wait on [addr], at most [n], are ready, the
@@ -4454,6 +4465,8 @@ module Make (Machine : Primus.Machine.S) = struct
     (* the thread, that runs, exits with the [code], its TID is cleared,
        and the process exits, if it was the last one *)
     let exit_thread e st code =
+      record_thread_event e.session "thread-exit"
+        (sprintf "tid=%d;status=0x%Lx" st.current code);
       let* st =
         match st.cleared with
         | None -> Machine.return st
@@ -4653,6 +4666,8 @@ module Make (Machine : Primus.Machine.S) = struct
                                  ~default:(List.length e.frames));
                         }
                     in
+                    record_thread_event e.session "thread-create"
+                      (sprintf "tid=%d;start=0x%Lx;stack=0x%Lx" tid next stack);
                     return (Int64.of_int tid)
               | Futex -> (
                   let addr = arg 0
@@ -5014,11 +5029,15 @@ module Make (Machine : Primus.Machine.S) = struct
                 Some (Option.value st.depth ~default:(List.length e.frames));
             }
         in
+        record_thread_event e.session "thread-create"
+          (sprintf "tid=%d;start=0x%Lx;arg=0x%Lx" tid start param);
         h
 
       (* the thread, that runs, exits with the [code], whose object is
          signaled, and the process exits, if it was the last one *)
       let exit_thread e st code =
+        record_thread_event e.session "thread-exit"
+          (sprintf "tid=%d;status=0x%Lx" st.current code);
         let t = teb e in
         let* h =
           loadw e Int64.(current_teb e + of_int t.info)
@@ -5576,6 +5595,8 @@ module Make (Machine : Primus.Machine.S) = struct
                           (Option.value st.depth ~default:(List.length e.frames));
                     }
                 in
+                record_thread_event e.session "thread-create"
+                  (sprintf "tid=%d;start=0x%Lx;arg=0x%Lx" tid start arg);
                 tid)
 
     (* the thread, whose function returned to [exit_addr], exits with

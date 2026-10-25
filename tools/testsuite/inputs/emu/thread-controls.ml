@@ -18,6 +18,12 @@ let () =
         thread.tid <> current)
   in
   if Option.is_some other.waiting then failwith "expected a ready thread";
+  printf "frames: active %d, parked %d\n"
+    (List.length (Emu.backtrace emu))
+    (List.length (Emu.backtrace emu ~thread:other.tid));
+  (match Emu.backtrace emu ~thread:999 with
+  | exception Invalid_argument msg -> printf "missing backtrace: %s\n" msg
+  | _ -> print_endline "traced a missing thread");
   Emu.set_thread_reg emu other.tid "R8" 0x42L;
   Emu.set_thread_pc emu other.tid 0x201513L;
   Emu.resume_thread emu other.tid;
@@ -33,6 +39,9 @@ let () =
     List.find_exn (Emu.threads emu) ~f:(fun (thread : Emu.Checkpoint.thread) ->
         thread.tid <> Emu.thread emu && Option.is_some thread.waiting)
   in
-  match Emu.resume_thread emu waiting.tid with
+  (match Emu.resume_thread emu waiting.tid with
   | exception Invalid_argument msg -> printf "waiting thread: %s\n" msg
-  | () -> print_endline "resumed a waiting thread"
+  | () -> print_endline "resumed a waiting thread");
+  ignore (Emu.run emu : Emu.status);
+  List.iter (Emu.thread_journal emu) ~f:(fun (event : Emu.event) ->
+      printf "%s %s\n" event.kind event.detail)

@@ -1341,6 +1341,13 @@ module Checkpoint : sig
       {!insns_since}. *)
 end
 
+val backtrace : ?thread:int -> t -> (string option * string option) list
+(** [backtrace emu ~thread:tid] is the run frames of the selected thread, the
+    innermost first, with the function that runs and the stub that called it.
+    These are Primus-to-native runs, not every native-to-native call. Threads
+    switch at the same run depth, so active and parked threads share these
+    surrounding frames. Raises [Invalid_argument] for an unknown thread. *)
+
 val thread_regs : t -> int -> (string * int64) list
 (** [thread_regs emu tid] the registers, without the aliases, of the thread of
     the paused program, by its TID, see {!threads}, e.g., of the one, that waits
@@ -1371,6 +1378,13 @@ val threads : t -> Checkpoint.thread list
     that wait without a futex, e.g., on a flag, that they poll, aren't waiting,
     see {!Checkpoint.thread.waiting}. Raises [Invalid_argument], if the program
     is not paused. *)
+
+val thread_journal : t -> event list
+(** [thread_journal emu] is the last 256 thread creation, exit, and switch
+    events, in execution order. Creation records the child TID, entry, and
+    startup argument or raw-clone stack; exits record the TID and status;
+    switches record both TIDs and the resume PC. This runtime journal is
+    separate from the bounded model-event journal kept in checkpoints. *)
 
 (** what a stub does, after the function, that it called, returns, see
     {!complete} *)

@@ -3080,6 +3080,11 @@ let threads t =
          |> List.sort ~compare:(fun (x : Checkpoint.thread) y ->
              Int.compare x.tid y.tid))
 
+let thread_journal t =
+  Queue.to_list t.session.thread_journal
+  |> List.map ~f:(fun (event : X.journal_event) ->
+      { kind = event.kind; detail = event.detail })
+
 (* the registers of the thread, without the aliases: of the engine, for
    the thread, that runs, or the ones, that Primus keeps for the thread,
    that doesn't, see [X.Make.Threads.park] *)
@@ -3131,6 +3136,26 @@ let require_thread t tid =
          (List.exists (threads t) ~f:(fun (th : Checkpoint.thread) ->
               th.tid = tid))
   then invalid_argf "Bap_emu: the program has no thread %d" tid ()
+
+let backtrace ?thread:tid t =
+  let tid = Option.value tid ~default:(thread t) in
+  require_thread t tid;
+  let result = ref [] in
+  primus t
+    (module functor
+              (Machine : Primus.Machine.S)
+              ->
+              struct
+                open Machine.Syntax
+
+                let init () =
+                  Machine.Local.get X.frames >>= fun frames ->
+                  Machine.Local.get X.calls >>| fun calls ->
+                  result :=
+                    List.mapi frames ~f:(fun i _ ->
+                        Option.value (List.nth calls i) ~default:(None, None))
+              end);
+  !result
 
 let set_thread_reg t tid name value =
   if tid = thread t then set_reg t name value
