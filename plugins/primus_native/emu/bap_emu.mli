@@ -637,6 +637,24 @@ val on_read :
   ?first:int64 -> ?last:int64 -> t -> (t -> int64 -> int -> unit) -> unit
 (** [on_read emu f] calls [f emu addr size] before each load. *)
 
+type write_subscription = {
+  first : int64 option;
+  last : int64 option;
+  primus : bool;
+  callback : t -> int64 -> int -> int64 -> unit;
+}
+
+val on_writes : t -> write_subscription list -> unit
+(** [on_writes emu subscriptions] subscribes several callbacks with one native
+    memory hook per distinct range. Each callback has independent exact-once
+    replay state and, when [primus] is true, also sees Primus/native stores. *)
+
+type write_profile = { dispatches : int; callbacks : int; seconds : float }
+
+val write_profile : t -> write_profile
+(** [write_profile emu] is the number of native write dispatches, total callback
+    invocations, and seconds spent in write callbacks for this emulator. *)
+
 val on_write :
   ?first:int64 ->
   ?last:int64 ->
@@ -675,9 +693,10 @@ val on_write :
 val scoped : t -> (unit -> 'a) -> 'a
 (** [scoped emu f] runs [f], and removes the hooks, that it added, when it
     returns, or raises: of {!on_code}, {!on_sites}, {!on_read}, {!on_write},
-    {!on_call}, {!on_syscall}, and {!Trace.capture}, also the ones, that the
-    scopes, that it runs, added, so that an experiment, e.g., of a {!call}, or
-    of a {!drive}, doesn't leave its hooks to the program, that runs after it:
+    {!on_writes}, {!on_call}, {!on_syscall}, and {!Trace.capture}, also the
+    ones, that the scopes, that it runs, added, so that an experiment, e.g., of
+    a {!call}, or of a {!drive}, doesn't leave its hooks to the program, that
+    runs after it:
 
     {[
     let r =

@@ -20,6 +20,7 @@ type failure = {
 }
 
 type event = { kind : string; detail : string }
+type write_profile = { dispatches : int; callbacks : int; seconds : float }
 
 (* the system, which runs in the fiber of the script, either paused,
    with the address, from which it continues, or finished *)
@@ -80,7 +81,17 @@ type t = {
   mutable scopes : (unit -> unit) list ref list;
       (** the functions, that remove the hooks, that the scopes added, the
           innermost scope first, see [scoped] *)
+  mutable write_dispatches : int;
+  mutable write_callbacks : int;
+  mutable write_seconds : float;
   shell : shell_state;
+}
+
+type write_subscription = {
+  first : int64 option;
+  last : int64 option;
+  primus : bool;
+  callback : t -> int64 -> int -> int64 -> unit;
 }
 
 let engine t =
@@ -360,6 +371,9 @@ let create ?system ?(components = []) ?(init = []) ?(redirects = [])
       deferred = Queue.create ();
       stopped = false;
       scopes = [];
+      write_dispatches = 0;
+      write_callbacks = 0;
+      write_seconds = 0.;
       shell = { breaks = Int64.Table.create (); snaps = [] };
     }
   in
@@ -2386,65 +2400,114 @@ let stored t ?first ?last f addr data =
   in
   go 0
 
+type write_handler = {
+  subscription : write_subscription;
+  mutable last_attempt :
+    (int64 * int * int64 option * (int64 * int * int64) list) option;
+  mutable active_attempt : (int64 * int * int64 option) option;
+  mutable events : (int64 * int * int64) list;
+  mutable replay : (int64 * int * int64) list;
+}
+
+let invoke_write t handler addr size value =
+  t.write_callbacks <- t.write_callbacks + 1;
+  let started = Caml_unix.gettimeofday () in
+  Exn.protect
+    ~f:(fun () -> handler.subscription.callback t addr size value)
+    ~finally:(fun () ->
+      t.write_seconds <-
+        t.write_seconds +. (Caml_unix.gettimeofday () -. started))
+
+let deliver_write t handler addr size value =
+  let pc = code_of t (pc t) in
+  let start = t.session.starts in
+  let attempt =
+    match t.session.active with Some e -> Uc.attempt e.uc | None -> None
+  in
+  let fresh =
+    match handler.active_attempt with
+    | Some (previous_pc, previous_start, previous_attempt) -> (
+        (not (Int64.equal previous_pc pc))
+        ||
+        match (attempt, previous_attempt) with
+        | Some current, Some previous -> not (Int64.equal current previous)
+        | _ -> previous_start <> start)
+    | None -> true
+  in
+  if fresh then begin
+    handler.active_attempt <- Some (pc, start, attempt);
+    handler.events <- [];
+    handler.replay <-
+      (match handler.last_attempt with
+      | Some (previous_pc, previous_start, previous_attempt, previous_events)
+        when Int64.equal previous_pc pc
+             && (match (attempt, previous_attempt) with
+               | Some current, Some previous -> Int64.(current > previous)
+               | _ -> previous_start < start)
+             && (previous_start = start
+                || Option.equal Int64.equal t.session.restarted_at (Some pc)) ->
+          List.rev previous_events
+      | _ -> [])
+  end;
+  let event = (addr, size, value) in
+  handler.events <- event :: handler.events;
+  handler.last_attempt <- Some (pc, start, attempt, handler.events);
+  match handler.replay with
+  | expected :: rest when Poly.equal expected event -> handler.replay <- rest
+  | _ ->
+      handler.replay <- [];
+      invoke_write t handler addr size value
+
+let on_writes t subscriptions =
+  let handlers =
+    List.map subscriptions ~f:(fun subscription ->
+        {
+          subscription;
+          last_attempt = None;
+          active_attempt = None;
+          events = [];
+          replay = [];
+        })
+  in
+  let groups =
+    List.fold handlers ~init:[] ~f:(fun groups handler ->
+        let range = (handler.subscription.first, handler.subscription.last) in
+        match groups with
+        | (other, handlers) :: rest when Poly.equal range other ->
+            (range, handler :: handlers) :: rest
+        | _ -> (range, [ handler ]) :: groups)
+  in
+  List.iter groups ~f:(fun ((first, last), handlers) ->
+      hook t (fun e ->
+          [
+            Uc.on_mem ?first ?last e.uc [ `write ] (fun _ addr size value ->
+                t.write_dispatches <- t.write_dispatches + 1;
+                List.iter (List.rev handlers) ~f:(fun handler ->
+                    deliver_write t handler addr size value));
+          ]));
+  List.iter handlers ~f:(fun handler ->
+      if handler.subscription.primus then begin
+        let h =
+          stored t ?first:handler.subscription.first
+            ?last:handler.subscription.last (fun _ addr size value ->
+              invoke_write t handler addr size value)
+        in
+        t.session.store_hooks <- h :: t.session.store_hooks;
+        scope t (fun () ->
+            t.session.store_hooks <-
+              List.filter t.session.store_hooks ~f:(fun g ->
+                  not (phys_equal g h)))
+      end)
+
 let on_write ?first ?last ?(primus = false) t f =
-  let last_attempt = ref None in
-  let active_attempt = ref None in
-  let events = ref [] in
-  let replay = ref [] in
-  hook t (fun e ->
-      [
-        Uc.on_mem ?first ?last e.uc [ `write ] (fun _ addr size value ->
-            let pc = code_of t (pc t) in
-            let start = t.session.starts in
-            let attempt = Uc.attempt e.uc in
-            let fresh =
-              match !active_attempt with
-              | Some (previous_pc, previous_start, previous_attempt) -> (
-                  (not (Int64.equal previous_pc pc))
-                  ||
-                  match (attempt, previous_attempt) with
-                  | Some current, Some previous ->
-                      not (Int64.equal current previous)
-                  | _ -> previous_start <> start)
-              | None -> true
-            in
-            if fresh then begin
-              active_attempt := Some (pc, start, attempt);
-              events := [];
-              replay :=
-                match !last_attempt with
-                | Some
-                    ( previous_pc,
-                      previous_start,
-                      previous_attempt,
-                      previous_events )
-                  when Int64.equal previous_pc pc
-                       && (match (attempt, previous_attempt) with
-                         | Some current, Some previous ->
-                             Int64.(current > previous)
-                         | _ -> previous_start < start)
-                       && (previous_start = start
-                          || Option.equal Int64.equal t.session.restarted_at
-                               (Some pc)) ->
-                    List.rev previous_events
-                | _ -> []
-            end;
-            let event = (addr, size, value) in
-            events := event :: !events;
-            last_attempt := Some (pc, start, attempt, !events);
-            match !replay with
-            | expected :: rest when Poly.equal expected event -> replay := rest
-            | _ ->
-                replay := [];
-                f t addr size value);
-      ]);
-  if primus then begin
-    let h = stored t ?first ?last f in
-    t.session.store_hooks <- h :: t.session.store_hooks;
-    scope t (fun () ->
-        t.session.store_hooks <-
-          List.filter t.session.store_hooks ~f:(fun g -> not (phys_equal g h)))
-  end
+  on_writes t [ { first; last; primus; callback = f } ]
+
+let write_profile t =
+  {
+    dispatches = t.write_dispatches;
+    callbacks = t.write_callbacks;
+    seconds = t.write_seconds;
+  }
 
 (* the functions of the program, which no stub replaces, are hooked at
    their addresses, once, by the name, that the address has, when it is

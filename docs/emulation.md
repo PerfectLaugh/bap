@@ -270,9 +270,11 @@ Emu.on_write emu ~first:buf ~last:Int64.(buf + 63L) ~primus:true (fun emu addr s
     printf "%d bytes at %Lx\n" size addr)
 ```
 
+For several write predicates, `Emu.on_writes` shares one native hook per distinct range and gives every callback independent exact-once replay state. A subscription has optional `first`/`last`, `primus`, and `callback`; singleton `on_write` is the same API with one subscription. `write_profile emu` reports native dispatches, callback invocations, and callback seconds for that emulator, so grouped dispatch and per-callback costs are distinguishable.
+
 A watch of many addresses, e.g., of a table of handlers, costs a hook of `on_code` each, which the lifted engine checks one by one at their instructions, and changes its hooks for, while `on_sites emu sites f` is one hook, which finds the sites in a set, or, in Unicorn, in C, so only the sites call OCaml.
 
-The hooks stay, until the emulator is gone, unless a scope added them: `Emu.scoped emu f` removes the hooks of `on_code`, `on_sites`, `on_read`, `on_write`, `on_call`, `on_syscall`, and `Trace.capture`, that `f` added, when it returns or raises, so an experiment, e.g., a `call` or a `drive`, doesn't leave them to the run after it:
+The hooks stay, until the emulator is gone, unless a scope added them: `Emu.scoped emu f` removes the hooks of `on_code`, `on_sites`, `on_read`, `on_write`, `on_writes`, `on_call`, `on_syscall`, and `Trace.capture`, that `f` added, when it returns or raises, so an experiment, e.g., a `call` or a `drive`, doesn't leave them to the run after it:
 
 ```ocaml
 Emu.scoped emu (fun () ->

@@ -895,6 +895,30 @@ let emu data =
             ( "sees each store once in the lifted engine",
               "lifted: stores to 40200b from 402004:2000 40200f:2000\n" );
           ]);
+    (* combined write subscriptions share native ranges, keep their callbacks,
+       and are removed by scopes, see write-profile.ml *)
+    case "emu/write-profile" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/write-profile.ml";
+              path data "bin/x86_64-linux-gnu-smc-text";
+            ]
+        in
+        sequence env out
+          [
+            ( "profiles combined writes in Unicorn",
+              "unicorn: first=4000 second=4000 disjoint=0 dispatch=8001 \
+               callbacks=8000 time=true\n" );
+            ( "removes combined hooks in Unicorn",
+              "unicorn: after scope callbacks=0\n" );
+            ( "profiles combined writes in the lifted engine",
+              "lifted: first=4000 second=4000 disjoint=0 dispatch=4001 \
+               callbacks=8000 time=true\n" );
+            ( "removes combined hooks in the lifted engine",
+              "lifted: after scope callbacks=0\n" );
+          ]);
     (* the observer of the stores, that needs the stores to the code only,
        e.g., the dynamic code, sees them in both engines, which hook the
        writes to the code only, and keep them, until they stop, see
