@@ -2163,7 +2163,7 @@ let pending_changes e =
 (* the changed bytes of the page, which Primus fetches, see [backing],
    after which the page is clean, if it didn't change *)
 (* the changed bytes of the pending page, which stays pending, see
-   [Primus.Memory.Backing.peek_all] *)
+   [Primus.Memory.Backing.peek] and [Primus.Memory.Backing.peek_all] *)
 let peek_page e page =
   match Hashtbl.find e.pages page with
   | Some ({ snapshot = Some known; _ } as p) when pending e p ->
@@ -2261,6 +2261,21 @@ let backing s memory : Primus.Memory.Backing.t =
                  | Some pages ->
                      Hashtbl.fold pages ~init:[] ~f:(fun ~key ~data acc ->
                          fetch_parked key data @ acc)
+                 | None -> []));
+    peek =
+      (fun id addr ->
+        match s.active with
+        | None -> []
+        | Some e ->
+            let page = page_of (int64_of_word addr) in
+            words e
+              (if is_owner e id then peek_page e page
+               else
+                 match Hashtbl.find s.parked id with
+                 | Some pages -> (
+                     match Hashtbl.find pages page with
+                     | Some stash -> parked_changes page stash
+                     | None -> [])
                  | None -> []));
     peek_all =
       (fun id ->

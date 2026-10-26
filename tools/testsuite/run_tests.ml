@@ -1118,6 +1118,22 @@ let emu data =
         in
         has env "synchronizes memory in Unicorn" out
           "unicorn: memory synchronization ok\n");
+    case "emu/find-bytes" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/find-bytes.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+            ]
+        in
+        List.iter
+          (fun engine ->
+            has env
+              ("searches bytes in " ^ engine)
+              out
+              (engine ^ ": find bytes ok\n"))
+          [ "unicorn"; "lifted" ]);
     (* the code, that ran, and that memcpy, a native function, rewrites,
        runs anew, as Unicorn translates it anew, also after the store of
        the program *)

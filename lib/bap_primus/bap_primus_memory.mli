@@ -33,6 +33,7 @@ module Backing : sig
     pending : id -> addr -> bool;
     fetch : id -> addr -> (addr * string) list;
     fetch_all : id -> (addr * string) list;
+    peek : id -> addr -> (addr * string) list;
     peek_all : id -> (addr * string) list;
     stored : id -> addr -> string -> unit;
   }
@@ -92,6 +93,13 @@ module Make (Machine : Machine) : sig
   val stored_count_of : ?generated:bool -> id -> int Machine.t
   val origins_of : id -> addr list -> origin list Machine.t
   val peek : addr -> int -> string Machine.t
+
+  val find_bytes :
+    pattern:string ->
+    origins:origin list ->
+    ranges:(addr * addr) list ->
+    addr list Machine.t
+
   val load_bytes : addr -> int -> (char * protection) option array Machine.t
   val store_bytes : addr -> string -> unit Machine.t
   val protect : lower:addr -> upper:addr -> protection -> unit Machine.t

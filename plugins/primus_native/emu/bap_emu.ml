@@ -1208,6 +1208,38 @@ let provenance t addr =
               end);
   !result
 
+let find_bytes ?(provenance = [ Stored; Mapped ]) t ~pattern ~ranges =
+  if String.is_empty pattern then
+    invalid_arg "Bap_emu.find_bytes: the pattern is empty";
+  if not (paused t) then not_paused ~fn:"find_bytes" t;
+  let width = (engine t).bytes * 8 in
+  let result = ref [] in
+  primus t
+    (module functor
+              (Machine : Primus.Machine.S)
+              ->
+              struct
+                module Memory = Primus.Memory.Make (Machine)
+                open Machine.Syntax
+
+                let init () =
+                  let origins =
+                    List.map provenance ~f:(function
+                      | Stored -> Primus.Memory.Stored
+                      | Generated -> Generated
+                      | Mapped -> Mapped
+                      | Unmapped -> Unmapped)
+                  in
+                  let addr = Word.of_int64 ~width in
+                  let ranges =
+                    List.map ranges ~f:(fun (lower, upper) ->
+                        (addr lower, addr upper))
+                  in
+                  Memory.find_bytes ~pattern ~origins ~ranges >>| fun hits ->
+                  result := List.map hits ~f:Word.to_int64_exn
+              end);
+  !result
+
 type change = {
   addr : int64;
   size : int;

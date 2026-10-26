@@ -1117,6 +1117,23 @@ val provenance : t -> int64 -> provenance
     and the checkpoints keep them as stored, as they were loaded. Raises
     [Invalid_argument], if the program is not paused. *)
 
+val find_bytes :
+  ?provenance:provenance list ->
+  t ->
+  pattern:string ->
+  ranges:(int64 * int64) list ->
+  int64 list
+(** [find_bytes emu ~pattern ~ranges] searches the readable bytes of the paused
+    program in the inclusive ranges and returns the unaligned match addresses,
+    lowest first, without duplicates. Adjacent and overlapping ranges are
+    merged. Every byte of a match must have an accepted [provenance], by default
+    [Stored] or [Mapped]. [Generated] includes only values already materialized
+    by earlier loads; searching never generates or stores bytes. Unmapped and
+    unreadable holes are skipped. The scan uses page-sized chunks rather than
+    materializing regions or per-byte maps. Empty ranges or provenance return no
+    hits. Raises [Invalid_argument] for an empty pattern or if the program is
+    not paused. *)
+
 val project :
   ?regions:(region -> bool) ->
   ?symbols:(string * int64) list ->

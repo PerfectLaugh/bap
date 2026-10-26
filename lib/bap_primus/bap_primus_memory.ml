@@ -95,6 +95,7 @@ module Backing = struct
     pending : id -> addr -> bool;
     fetch : id -> addr -> (addr * string) list;
     fetch_all : id -> (addr * string) list;
+    peek : id -> addr -> (addr * string) list;
     peek_all : id -> (addr * string) list;
     stored : id -> addr -> string -> unit;
   }
@@ -1155,6 +1156,218 @@ module Make (Machine : Machine) = struct
                   Bytes.set bytes (offset a) c))
     | _ -> ());
     Bytes.to_string bytes
+
+  let find_bytes ~pattern ~origins ~ranges =
+    if String.is_empty pattern then
+      invalid_arg "Primus.Memory.find_bytes: the pattern is empty"
+    else if List.is_empty origins || List.is_empty ranges then Machine.return []
+    else
+      check_bytes "find_bytes" >>= fun () ->
+      Machine.current () >>= fun id ->
+      Machine.Global.get Backing.state >>= fun backing ->
+      memory >>= fun { name = memory_name; _ } ->
+      get_curr >>| fun s ->
+      let accepted origin = List.exists origins ~f:(equal_origin origin) in
+      let ranges =
+        List.concat_map ranges ~f:(fun (lower, upper) ->
+            if Addr.(lower <= upper) then [ (lower, upper) ]
+            else
+              let width = Addr.bitwidth lower in
+              [ (Word.zero width, upper); (lower, Word.ones width) ])
+        |> List.sort ~compare:(fun (x, _) (y, _) -> Addr.compare x y)
+        |> List.fold ~init:[] ~f:(fun merged (lower, upper) ->
+            match merged with
+            | (lo, hi) :: rest
+              when Addr.(lower <= hi)
+                   || (not (Word.equal hi (Word.ones (Addr.bitwidth hi))))
+                      && Addr.equal (Addr.succ hi) lower ->
+                (lo, if Addr.(upper > hi) then upper else hi) :: rest
+            | _ -> (lower, upper) :: merged)
+        |> List.rev
+      in
+      let length = String.length pattern in
+      let capacity = page_size + length - 1 in
+      let read_chunk start last =
+        let len = Word.to_int_exn Addr.(last - start) + 1 in
+        let offset addr = Word.to_int_exn Addr.(addr - start) in
+        let bytes = Array.create ~len None in
+        let set addr origin c =
+          if in_range start last addr then
+            bytes.(offset addr) <- Some (c, origin)
+        in
+        let clip lower upper =
+          let lo = if Addr.(lower > start) then lower else start in
+          let hi = if Addr.(upper < last) then upper else last in
+          if Addr.(lo <= hi) then Some (lo, offset hi - offset lo + 1) else None
+        in
+        List.iter (List.rev s.layers) ~f:(fun { mem; _ } ->
+            let lower, upper = bounds mem in
+            match clip lower upper with
+            | None -> ()
+            | Some (lo, n) -> (
+                match mem with
+                | Static mem ->
+                    let data =
+                      Memory.view_exn ~from:lo ~words:n mem
+                      |> Memory.to_buffer |> Bigsubstring.to_string
+                    in
+                    String.iteri data ~f:(fun i c ->
+                        set (Addr.nsucc lo i) Mapped c)
+                | Dynamic { value; _ } -> (
+                    match Generator.fill value with
+                    | None -> ()
+                    | Some x ->
+                        let c = Char.of_int_exn (Bitvec.to_int x land 0xFF) in
+                        for i = 0 to n - 1 do
+                          set (Addr.nsucc lo i) Mapped c
+                        done)));
+        Map.fold_range_inclusive s.values ~min:start ~max:last ~init:()
+          ~f:(fun ~key:addr ~data:value () ->
+            let origin =
+              if Set.mem s.generated addr then Generated else Stored
+            in
+            let c =
+              Char.of_int_exn (Word.to_int_exn (Value.to_word value) land 0xFF)
+            in
+            set addr origin c);
+        Map.fold_range_inclusive s.pages ~min:(page_base start)
+          ~max:(page_base last) ~init:() ~f:(fun ~key:base ~data:page () ->
+            for i = 0 to page_size - 1 do
+              if Char.equal (Bytes.get page.presence i) '\001' then
+                set (Addr.nsucc base i) Stored (Bytes.get page.bytes i)
+            done);
+        (match backing with
+        | Some b when String.equal memory_name b.memory ->
+            let rec read_page base =
+              List.iter (b.peek id base) ~f:(fun (addr, data) ->
+                  String.iteri data ~f:(fun i c ->
+                      set (Addr.nsucc addr i) Stored c));
+              let next = Addr.nsucc base page_size in
+              if Addr.(next > base && next <= page_base last) then
+                read_page next
+            in
+            read_page (page_base start)
+        | _ -> ());
+        Array.mapi bytes ~f:(fun i -> function
+          | None -> None
+          | Some (c, origin) -> (
+              let addr = Addr.nsucc start i in
+              let pending =
+                match backing with
+                | Some b when String.equal memory_name b.memory ->
+                    b.pending id addr
+                | _ -> false
+              in
+              let protection =
+                match find_protection addr s with
+                | Some p when mapped addr s || pending -> Some p
+                | _ -> (
+                    match find_layer addr s with
+                    | Some { perms = { readonly; executable } } ->
+                        Some
+                          {
+                            readable = true;
+                            writable = (not readonly) || has_stored addr s;
+                            executable;
+                          }
+                    | None when has_stored addr s || pending ->
+                        Some
+                          {
+                            readable = true;
+                            writable = true;
+                            executable = false;
+                          }
+                    | None -> None)
+              in
+              match protection with
+              | Some p when p.readable && accepted origin -> Some c
+              | _ -> None))
+      in
+      let interesting start last =
+        let base = page_base start in
+        let in_page addr =
+          Addr.(addr >= start && addr <= last && page_base addr = base)
+        in
+        let layer =
+          List.exists s.layers ~f:(fun { mem; _ } ->
+              let lower, upper = bounds mem in
+              Addr.(lower <= last && upper >= start))
+        in
+        let scalar =
+          match Map.closest_key s.values `Greater_or_equal_to start with
+          | Some (addr, _) -> in_page addr
+          | None -> false
+        in
+        let page =
+          match Map.closest_key s.pages `Greater_or_equal_to base with
+          | Some (addr, _) -> Addr.equal addr base
+          | None -> false
+        in
+        let pending =
+          match backing with
+          | Some b when String.equal memory_name b.memory -> b.pending id start
+          | _ -> false
+        in
+        layer || scalar || page || pending
+      in
+      let next_interesting start =
+        let layers =
+          List.filter_map s.layers ~f:(fun { mem; _ } ->
+              let lower, _ = bounds mem in
+              if Addr.(lower > start) then Some lower else None)
+        in
+        let values =
+          match Map.closest_key s.values `Greater_or_equal_to start with
+          | Some (addr, _) when Addr.(addr > start) -> [ addr ]
+          | _ -> []
+        in
+        let pages =
+          match Map.closest_key s.pages `Greater_or_equal_to start with
+          | Some (addr, _) when Addr.(addr > start) -> [ addr ]
+          | _ -> []
+        in
+        List.fold
+          (layers @ values @ pages)
+          ~init:None
+          ~f:(fun next addr ->
+            match next with
+            | Some next when Addr.(next <= addr) -> Some next
+            | _ -> Some addr)
+      in
+      let scan_range hits (lower, upper) =
+        let rec scan start hits =
+          let candidate = Addr.nsucc start (capacity - 1) in
+          let last =
+            if Addr.(candidate >= start && candidate <= upper) then candidate
+            else upper
+          in
+          if not (interesting start last) then
+            match next_interesting start with
+            | Some next when Addr.(next <= upper) -> scan next hits
+            | _ -> hits
+          else
+            let bytes = read_chunk start last in
+            let hits = ref hits in
+            let starts = min page_size (Array.length bytes - length + 1) in
+            for i = 0 to starts - 1 do
+              let rec matches j =
+                if j = length then true
+                else
+                  match bytes.(i + j) with
+                  | Some c when Char.equal c pattern.[j] -> matches (j + 1)
+                  | _ -> false
+              in
+              if matches 0 then hits := Addr.nsucc start i :: !hits
+            done;
+            let next = Addr.nsucc start page_size in
+            if Addr.equal last upper || Addr.(next <= start || next > upper)
+            then !hits
+            else scan next !hits
+        in
+        scan lower hits
+      in
+      List.fold ranges ~init:[] ~f:scan_range
+      |> List.dedup_and_sort ~compare:Addr.compare
 
   let store_bytes addr data =
     check_bytes "store_bytes" >>= fun () ->
