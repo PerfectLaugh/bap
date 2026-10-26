@@ -21,6 +21,6 @@ restored the kept snapshot at main true, retained true
 restored again at main true, retained true
 trace retained true, inventory true
 ran main: PUSH64r of 1 bytes, the ones in memory true, lifted true
-the bytes, that were lifted, from main: 4 of 32
+the bytes, that were lifted, from main: 6 of 32
 scrubbed: in memory true, as they ran true
 exited 0

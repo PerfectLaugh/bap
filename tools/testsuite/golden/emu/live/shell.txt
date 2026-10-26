@@ -51,10 +51,10 @@ PUSH64r 55
 40079b: 48 63 f6 48 83 ee 01 48 89 75 c8 8b 75 c0 48 63 |Hc.H...H.u..u.Hc|
 (emu) bir main
 1 bytes
-000026d1:
-000026c6: #0 := RBP
-000026ca: RSP := RSP - 8
-000026d0: mem := mem with [RSP, el]:u64 <- #0
+000026be:
+000026b3: #0 := RBP
+000026b7: RSP := RSP - 8
+000026bd: mem := mem with [RSP, el]:u64 <- #0
 (emu) sym print
 4006ed print_endline
 400733 print_strings
