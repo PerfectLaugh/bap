@@ -22,6 +22,7 @@ let () =
         List.Assoc.find_exn (Emu.symbols emu) ~equal:String.equal name
       in
       ignore (Emu.run emu ~until:(addr "main") : Emu.status);
+      Emu.set_snapshot_limit emu (Some 1);
       let commands name lines =
         Out_channel.write_lines name lines;
         In_channel.create name
@@ -39,6 +40,7 @@ let () =
             "reg RDI";
             "set RSI RDI";
             "reg RSI";
+            "snap";
             "snap";
             "c print_strings";
             "c";

@@ -31,6 +31,9 @@ val count : t -> int64
 val retained : t -> int
 (** the number of instruction or block records that the ring currently keeps *)
 
+val retained_accesses : t -> int
+(** the number of access records that the ring currently keeps *)
+
 val accesses_count : t -> int64
 (** the number of the recorded accesses *)
 

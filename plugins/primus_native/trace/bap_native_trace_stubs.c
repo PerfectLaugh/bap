@@ -329,6 +329,11 @@ value bap_native_trace_retained(value tv) {
     return Val_long(kept(t->count, t->mask, -1));
 }
 
+value bap_native_trace_retained_accesses(value tv) {
+    struct bap_native_trace *t = Bap_native_trace_val(tv);
+    return Val_long(kept(t->accesses, t->amask, -1));
+}
+
 value bap_native_trace_pcs(value tv, value n) {
     CAMLparam2(tv, n);
     CAMLlocal1(r);

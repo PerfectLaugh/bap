@@ -38,7 +38,11 @@ let () =
     (match f.rss with
     | Some rss -> if rss >= f.heap then "known" else "small"
     | None -> "unknown");
-  ignore (show_inventory emu);
+  let initial = show_inventory emu in
+  printf "owned history %b, sparse pages %b, empty traces %b\n"
+    (initial.lift_history > 0) (initial.sparse_pages > 0)
+    (initial.trace_records = 0 && initial.trace_accesses = 0
+   && initial.decoded_blocks = 0);
   Emu.set_lift_cache_limit emu (Some 2);
   printf "lift cache bounded %b\n" ((Emu.components emu).lifter_entries <= 2);
   let lifted =
@@ -48,20 +52,33 @@ let () =
   printf "checkpoint keeps evicted lifts %b\n"
     (List.mem (Emu.Checkpoint.insns lifted) main ~equal:Int64.equal);
   Emu.set_lift_cache_limit emu (Some 0);
-  printf "lift cache disabled %b\n" ((Emu.components emu).lifter_entries = 0);
+  let unbounded = Emu.components emu in
+  printf "lift cache disabled %b, history retained %b\n"
+    (unbounded.lifter_entries = 0)
+    (unbounded.lift_history > 0);
   Emu.set_lift_cache_limit emu (Some 2);
   (match Emu.set_lift_cache_limit emu (Some (-1)) with
   | exception Invalid_argument _ -> print_endline "negative lift cache rejected"
   | () -> print_endline "negative lift cache accepted");
   let snap = Emu.snapshot emu in
   let kept = Emu.snapshot emu in
-  let both = show_inventory emu in
-  Emu.drop_snapshot emu snap;
+  let extra = Emu.snapshot emu in
+  let all = show_inventory emu in
+  printf "snapshot memory retained %b\n" (all.snapshot_bytes > 0);
+  Emu.drop_snapshot emu extra;
   let remaining = show_inventory emu in
-  printf "pages released %b\n" (remaining.parked_pages < both.parked_pages);
+  printf "explicit drop %b\n" (remaining.snapshots = 2);
+  Emu.set_snapshot_limit emu (Some 1);
+  let evicted = show_inventory emu in
+  printf "managed eviction %b\n" (evicted.snapshots = 1);
+  (match Emu.set_snapshot_limit emu (Some (-1)) with
+  | exception Invalid_argument _ ->
+      print_endline "negative snapshot limit rejected"
+  | () -> print_endline "negative snapshot limit accepted");
   (match Emu.restore emu snap with
   | exception Invalid_argument msg -> printf "%s\n" msg
   | () -> print_endline "restored a dropped snapshot");
+  Emu.set_snapshot_limit emu None;
   Emu.forget_lifts emu;
   let cleared = Emu.components emu in
   printf "forgotten: lifter %b, hooks %b\n"
@@ -71,16 +88,28 @@ let () =
   printf "lifts main again %b\n" (Option.is_some (Emu.bir emu main));
   printf "hook lifts retained %b\n" ((Emu.components emu).hook_entries > 0);
   Emu.restore emu kept;
-  ignore (show_inventory emu);
-  printf "restored the kept snapshot at main %b\n" Int64.(Emu.pc emu = main);
+  let restored = show_inventory emu in
+  printf "restored the kept snapshot at main %b, retained %b\n"
+    Int64.(Emu.pc emu = main)
+    (restored.snapshots = 1);
+  Emu.restore emu kept;
+  printf "restored again at main %b, retained %b\n"
+    Int64.(Emu.pc emu = main)
+    ((Emu.components emu).snapshots = 1);
   (* the instructions, that ran, as the engine lifted them, from the
      bytes, that they had, see Emu.insn_at: the first instruction of
      main runs, whose bytes stay, when the code is scrubbed *)
-  let trace = Emu.Trace.start ~size:2 emu in
+  let trace = Emu.Trace.start ~size:2 ~blocks:true ~accesses:3 emu in
   ignore (Emu.step emu : Emu.status);
   Emu.Trace.stop trace;
+  ignore (Emu.Trace.insns trace);
+  let traced = Emu.components emu in
   let retained = Emu.Trace.retained trace in
-  printf "trace retained %b\n" (retained > 0 && retained <= 2);
+  printf "trace retained %b, inventory %b\n"
+    (retained > 0 && retained <= 2)
+    (traced.trace_records = retained
+    && traced.trace_accesses > 0 && traced.trace_accesses <= 3
+    && traced.decoded_blocks > 0);
   (match Emu.insn_at emu main with
   | Some insn ->
       let n = String.length insn.bytes in

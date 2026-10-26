@@ -10,6 +10,7 @@ type accesses = (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array2.t
 external create : int -> int -> bool -> int -> t = "bap_native_trace_create"
 external count : t -> int64 = "bap_native_trace_count"
 external retained : t -> int = "bap_native_trace_retained"
+external retained_accesses : t -> int = "bap_native_trace_retained_accesses"
 external accesses_count : t -> int64 = "bap_native_trace_accesses_count"
 external clear : t -> unit = "bap_native_trace_clear"
 

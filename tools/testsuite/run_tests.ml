@@ -1308,6 +1308,25 @@ let emu data =
         check env "statistics run succeeds" (out.status = Exited 0);
         has env "reports periodic statistics" out
           "stats: reports true, valid true, captured true\n";
+        let out = run "snapshots" "x86_64-linux-gnu-echo" in
+        sequence env out
+          [
+            ( "unicorn snapshot retention",
+              "unicorn snapshots: explicit true, managed true, evicted true, \
+               restores true, negative true, empty true\n" );
+            ( "lifted snapshot retention",
+              "lifted snapshots: explicit true, managed true, evicted true, \
+               restores true, negative true, empty true\n" );
+          ];
+        let out = run "maintenance" "x86_64-linux-gnu-echo" in
+        sequence env out
+          [
+            ( "unicorn periodic maintenance",
+              "unicorn maintenance: bounded true, sparse true, at main true\n"
+            );
+            ( "lifted periodic maintenance",
+              "lifted maintenance: bounded true, sparse true, at main true\n" );
+          ];
         let out = run "deadline" "x86_64-linux-gnu-signal-loop" in
         check env "native deadline terminates BAP" (out.status = Exited 124);
         let out = run "cancel" "x86_64-linux-gnu-echo" in

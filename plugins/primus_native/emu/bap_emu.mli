@@ -1181,6 +1181,16 @@ val drop_snapshot : t -> snapshot -> unit
     all, see {!footprint}. Raises [Invalid_argument], if the snapshot is of
     another emulator, or the program is not paused. *)
 
+val set_snapshot_limit : t -> int option -> unit
+(** [set_snapshot_limit emu limit] retains at most [limit] snapshots, or all of
+    them with [None], which is the default. Snapshots are managed in creation
+    order; creating a snapshot or lowering the limit drops the oldest snapshots
+    through {!drop_snapshot}. [Some 0] drops every snapshot as it is created.
+    Explicit drops and snapshots made by the interactive shell share the same
+    bookkeeping. Restoring a retained snapshot does not consume it or change its
+    age. Raises [Invalid_argument] for a negative limit or if the program is not
+    paused. *)
+
 val diff : t -> snapshot -> (int64 * int) list
 (** [diff emu snapshot] the bytes of the memory, that differ between the
     [snapshot] and the paused program, as the ranges, the address and the number
@@ -1326,21 +1336,34 @@ val cancel_deadline : deadline -> unit
 type component_footprint = {
   lifter_entries : int;  (** retained session-lifter instructions *)
   lifter_blocks : int;  (** BIR blocks retained by the session lifter *)
+  lift_history : int;  (** raw-byte history entries, including restored ones *)
   engine_entries : int;  (** instructions retained by the lifted engine *)
   engine_blocks : int;  (** BIR blocks retained by the lifted engine *)
   jit_blocks : int;  (** live compiled blocks of the lifted engine *)
   hook_entries : int;  (** shared and paused script-hook lift entries *)
   stored_bytes : int;  (** logical stored byte entries, not heap bytes *)
+  sparse_pages : int;  (** sparse pages of the current machine *)
   snapshots : int;  (** live snapshots created by the script *)
+  snapshot_bytes : int;  (** logical stored byte entries of live snapshots *)
+  snapshot_pages : int;  (** sparse pages of live snapshots *)
   parked_pages : int;  (** native pages retained for snapshots *)
+  trace_records : int;
+      (** records in live trace rings owned by this emulator *)
+  trace_accesses : int;  (** access records in those rings *)
+  decoded_blocks : int;  (** cached block expansions of those traces *)
   script_models : int;  (** checkpoint models registered for this emulator *)
 }
 
 val components : t -> component_footprint
 (** [components emu] is a logical retention inventory of the paused emulator.
     Counts are not estimated heap sizes and are not additive: hook lifts may be
-    shared between emulators and persistent byte maps may share structure. Use
-    {!Trace.retained} for the records retained by a particular live trace.
+    shared between emulators, persistent byte maps and snapshot sparse pages may
+    share structure and contents, and raw-byte history may overlap after
+    restore. Snapshot counts aggregate the live snapshots' logical states;
+    [parked_pages] separately counts their native backing pages. Trace counts
+    include live rings owned by the emulator, whether recording or stopped, and
+    [decoded_blocks] counts their cached block expansions. Unicorn does not
+    expose its internal translation inventory, so engine counts are zero there.
     Raises [Invalid_argument] if the program is not paused. *)
 
 (** The checkpoints, that {!save} wrote, which a script inspects, without
@@ -1547,6 +1570,29 @@ val start_stats :
 val stop_stats : stats_subscription -> unit
 (** [stop_stats subscription] removes the instruction hook and suppresses any
     deferred report. Statistics subscriptions also respect {!scoped}. *)
+
+val start_maintenance :
+  t ->
+  interval:float ->
+  ?lift_cache_limit:int ->
+  ?forget_lifts:bool ->
+  ?reclaim_blocks:bool ->
+  ?compact_heap:bool ->
+  unit ->
+  stats_subscription
+(** [start_maintenance emu ~interval ()] performs periodic maintenance at the
+    safe paused reports of {!start_stats}. [lift_cache_limit] applies
+    {!set_lift_cache_limit} once at startup. If [forget_lifts] is true, each
+    report calls {!forget_lifts}; if [reclaim_blocks] is true, it drops the
+    engine's translated blocks, which are translated again as execution
+    continues; and if [compact_heap] is true, it calls [Gc.compact]. All
+    maintenance actions default to false or absent, and no maintenance is
+    installed unless this function is called.
+
+    Stop the returned subscription with {!stop_stats}; subscriptions also
+    respect {!scoped}. Stopping suppresses future maintenance but does not undo
+    the lift-cache limit. Raises [Invalid_argument] for an invalid interval or
+    negative lift-cache limit, or if the program is not paused. *)
 
 (** what a stub does, after the function, that it called, returns, see
     {!complete} *)

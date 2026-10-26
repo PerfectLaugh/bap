@@ -92,6 +92,10 @@ type t = {
   mutable write_callbacks : int;
   mutable write_seconds : float;
   mutable instructions : int64;
+  mutable snapshots : snapshot list;  (** the managed snapshots, oldest first *)
+  mutable snapshot_limit : int option;
+  mutable traces :
+    (Uc.Trace.t Weak.t * (int * int64 array) list Int64.Table.t Weak.t) list;
   shell : shell_state;
 }
 
@@ -424,6 +428,9 @@ let create ?system ?(components = []) ?(init = []) ?(redirects = [])
       write_callbacks = 0;
       write_seconds = 0.;
       instructions = 0L;
+      snapshots = [];
+      snapshot_limit = None;
+      traces = [];
       shell = { breaks = Int64.Table.create (); snaps = [] };
     }
   in
@@ -465,30 +472,56 @@ let set_pc t addr =
 let machine t =
   match t.state with Suspended (_, id, _) -> id | _ -> not_paused t
 
+let same_snapshot id (snap : snapshot) =
+  Monads.Std.Monad.State.Multi.Id.equal id snap.id
+
+let unmanage_snapshot t id =
+  t.snapshots <- List.filter t.snapshots ~f:(fun s -> not (same_snapshot id s));
+  t.shell.snaps <-
+    List.filter t.shell.snaps ~f:(fun s -> not (same_snapshot id s))
+
 (* the machine, that takes the snapshot, forks, and stays paused, as the
    snapshot, and its fork continues *)
-let snapshot t =
+let rec snapshot t =
   let id = machine t in
   resume t X.Snapshot;
   Hash_set.add t.session.snapshots id;
-  { owner = t.session; id }
+  let snap = { owner = t.session; id } in
+  t.snapshots <- t.snapshots @ [ snap ];
+  trim_snapshots t;
+  snap
 
-let restore t { owner; id } =
+and trim_snapshots t =
+  match (t.snapshot_limit, t.snapshots) with
+  | Some limit, oldest :: _ when List.length t.snapshots > limit ->
+      drop_snapshot t oldest;
+      trim_snapshots t
+  | _ -> ()
+
+and restore t { owner; id } =
   if not (phys_equal owner t.session) then
     invalid_arg "Bap_emu.restore: the snapshot is of another emulator";
   if Hash_set.mem t.session.dead id then
     invalid_arg "Bap_emu.restore: the snapshot was dropped";
   t.session.exit_code <- None;
-  resume t (X.Restore id);
-  Hash_set.remove t.session.snapshots id
+  resume t (X.Restore id)
 
-let drop_snapshot t { owner; id } =
+and drop_snapshot t { owner; id } =
   if not (phys_equal owner t.session) then
     invalid_arg "Bap_emu.drop_snapshot: the snapshot is of another emulator";
   if not (paused t) then not_paused ~fn:"drop_snapshot" t;
+  unmanage_snapshot t id;
   if not (Hash_set.mem t.session.dead id) then (
     resume t (X.Drop id);
     Hash_set.remove t.session.snapshots id)
+
+and set_snapshot_limit t limit =
+  Option.iter limit ~f:(fun capacity ->
+      if capacity < 0 then
+        invalid_arg "Bap_emu.set_snapshot_limit: the limit must be nonnegative");
+  if not (paused t) then not_paused ~fn:"set_snapshot_limit" t;
+  t.snapshot_limit <- limit;
+  trim_snapshots t
 
 module type Completion = X.Completion
 
@@ -547,34 +580,74 @@ let cancel_deadline = Bap_emu_process.cancel_deadline
 type component_footprint = {
   lifter_entries : int;
   lifter_blocks : int;
+  lift_history : int;
   engine_entries : int;
   engine_blocks : int;
   jit_blocks : int;
   hook_entries : int;
   stored_bytes : int;
+  sparse_pages : int;
   snapshots : int;
+  snapshot_bytes : int;
+  snapshot_pages : int;
   parked_pages : int;
+  trace_records : int;
+  trace_accesses : int;
+  decoded_blocks : int;
   script_models : int;
 }
 
 let components t =
   if not (paused t) then not_paused ~fn:"components" t;
   resume t X.Stored_count;
-  let lifter_entries, lifter_blocks =
-    Option.value_map t.session.lifter ~default:(0, 0) ~f:(fun l ->
-        l.inventory ())
+  let lifter_entries, lifter_blocks, lift_history =
+    Option.value_map t.session.lifter ~default:(0, 0, 0) ~f:(fun l ->
+        let entries, blocks = l.inventory () in
+        ( entries,
+          blocks,
+          List.length (l.ran ()) + Hashtbl.length t.session.ran_before ))
   in
   let engine_entries, engine_blocks, jit_blocks = Uc.inventory (engine t).uc in
+  let traces =
+    List.filter_map t.traces ~f:(fun ((trace_slot, blocks_slot) as slots) ->
+        match (Weak.get trace_slot 0, Weak.get blocks_slot 0) with
+        | None, None -> None
+        | trace, blocks -> Some (slots, trace, blocks))
+  in
+  t.traces <- List.map traces ~f:(fun (slots, _, _) -> slots);
+  let trace_records, trace_accesses, decoded_blocks =
+    List.fold traces ~init:(0, 0, 0)
+      ~f:(fun (records, accesses, decoded) (_, trace, blocks) ->
+        let records, accesses =
+          Option.value_map trace ~default:(records, accesses) ~f:(fun trace ->
+              ( records + Uc.Trace.retained trace,
+                accesses + Uc.Trace.retained_accesses trace ))
+        in
+        let decoded =
+          Option.value_map blocks ~default:decoded ~f:(fun blocks ->
+              decoded
+              + Hashtbl.fold blocks ~init:0 ~f:(fun ~key:_ ~data:blocks count ->
+                  count + List.length blocks))
+        in
+        (records, accesses, decoded))
+  in
   {
     lifter_entries;
     lifter_blocks;
+    lift_history;
     engine_entries;
     engine_blocks;
     jit_blocks;
     hook_entries = Hashtbl.length t.lifted + Hashtbl.length t.paused_lifts;
     stored_bytes = t.session.stored_bytes;
+    sparse_pages = t.session.sparse_pages;
     snapshots = Hash_set.length t.session.snapshots;
+    snapshot_bytes = t.session.snapshot_bytes;
+    snapshot_pages = t.session.snapshot_pages;
     parked_pages = t.session.parked_pages;
+    trace_records;
+    trace_accesses;
+    decoded_blocks;
     script_models = Hashtbl.length t.session.models;
   }
 
@@ -1541,6 +1614,7 @@ module Trace = struct
         "Bap_emu.Trace.start: the accesses are recorded only with all \
          instructions, or blocks";
     let trace = Uc.Trace.create ?every ~blocks ~accesses size in
+    let blocks = Int64.Table.create () in
     let t =
       {
         emu;
@@ -1549,9 +1623,13 @@ module Trace = struct
         watch;
         active = true;
         hooks = None;
-        blocks = Int64.Table.create ();
+        blocks;
       }
     in
+    let owned_trace = Weak.create 1 and owned_blocks = Weak.create 1 in
+    Weak.set owned_trace 0 (Some trace);
+    Weak.set owned_blocks 0 (Some blocks);
+    emu.traces <- (owned_trace, owned_blocks) :: emu.traces;
     installed emu (fun e ->
         if t.active then
           t.hooks <- Some (e.uc, Uc.trace ?first ?last ?watch ~memory e.uc trace));
@@ -3345,6 +3423,16 @@ let start_stats t ~interval callback =
 
 let stop_stats subscription = subscription.stop ()
 
+let start_maintenance t ~interval ?lift_cache_limit
+    ?forget_lifts:(forget = false) ?(reclaim_blocks = false)
+    ?(compact_heap = false) () =
+  Option.iter lift_cache_limit ~f:(fun limit ->
+      set_lift_cache_limit t (Some limit));
+  start_stats t ~interval (fun _ ->
+      if forget then forget_lifts t;
+      if reclaim_blocks then Uc.flush_tb (engine t).uc;
+      if compact_heap then Gc.compact ())
+
 (* the registers of the thread, without the aliases: of the engine, for
    the thread, that runs, or the ones, that Primus keeps for the thread,
    that doesn't, see [X.Make.Threads.park] *)
@@ -4055,8 +4143,12 @@ let execute t out words =
             | Mapped -> "mapped"
             | Unmapped -> "unmapped"))
   | [ "snap" ] ->
-      t.shell.snaps <- snapshot t :: t.shell.snaps;
-      say "snapshot %d" (List.length t.shell.snaps)
+      let snap = snapshot t in
+      if Hash_set.mem t.session.dead snap.id then
+        say "snapshot dropped by the retention limit"
+      else (
+        t.shell.snaps <- snap :: t.shell.snaps;
+        say "snapshot %d" (List.length t.shell.snaps))
   | "restore" :: rest -> (
       let n = len rest (List.length t.shell.snaps) in
       match List.nth (List.rev t.shell.snaps) (n - 1) with

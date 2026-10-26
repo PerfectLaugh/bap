@@ -742,9 +742,10 @@ let check emu =
 ```
 
 - `footprint ()` is the heap of OCaml, the most it had, and the resident size of the process, which Linux tells.
-- `components emu` breaks retention into logical counts: session-lifter entries and BIR blocks, lifted-engine entries, BIR and live JIT blocks, hook lifts, stored-byte entries, snapshots, parked pages, and per-emulator script-model registrations. These counts are not estimated heap bytes and are not additive; `Trace.retained trace` separately reports the records that a trace ring still holds.
+- `components emu` breaks retention into logical counts: session-lifter entries, BIR blocks and raw-byte history; lifted-engine entries, BIR and live JIT blocks; hook lifts; current and snapshot stored-byte entries and sparse pages; live snapshots and their native parked pages; live trace records, access records and decoded block expansions; and per-emulator script-model registrations. These counts are not estimated heap bytes and are not additive. Hook lifts and persistent maps may be shared, snapshots share copy-on-write pages with each other and the current machine, and restored raw-byte history may overlap. Unicorn's internal translation counts are unavailable, so its lifted-engine counts are zero.
 - `forget_lifts emu` saves the lifted instructions to the cache, if bap has one, and drops them, with the ones, that `bir` lifted in the hooks; the code, that the engine compiled, stays, so the program runs on at full speed, and an instruction, that is lifted again, e.g., in a new engine, costs a lift, as at the start.
 - `set_lift_cache_limit emu (Some n)` keeps only the `n` most recently used session-lifter entries, while `Some 0` keeps none and `None` removes the bound. Eviction preserves raw-byte checkpoint history and disk-cache contents, and does not remove code retained by the lifted engine.
+- `set_snapshot_limit emu (Some n)` keeps the newest `n` snapshots, evicting older ones through `drop_snapshot` when a snapshot is created or the limit is lowered. `Some 0` retains none and `None`, the default, is unlimited. Restore is non-consuming and doesn't change creation order. Explicit drops and shell snapshots use the same bookkeeping.
 - `drop_snapshot emu snapshot` frees a snapshot, that the script doesn't restore anymore; `restore` of a dropped snapshot raises.
 - The garbage collector of OCaml trades memory for time: `OCAMLRUNPARAM='o=40'` in the environment, or `Gc.set { (Gc.get ()) with space_overhead = 40 }` in the script, keeps the heap closer to the live data, at the cost of more collections; the default is 120.
 - The bytes, that the program stores in Unicorn, go to Primus, when it reads them, e.g., at a snapshot, a checkpoint, or a `project`, as page-backed concrete bytes; scalar reads promote them to stable values for tracking and symbolic state. `peek` and the diffs read pending pages without storing them, and checkpoint serialization keeps its existing byte format.
@@ -752,6 +753,20 @@ let check emu =
 A wrapper, that is killed, e.g., `timeout`, or a task runner, leaves bap running, so a long run installs its own watchdog: `start_deadline ~code:124 seconds` terminates the actual BAP process even while native execution holds the OCaml runtime lock, and `cancel_deadline` disarms it. Expiry is an immediate operating-system process exit, not a guest pause or a checkpoint opportunity.
 
 `start_stats emu ~interval callback` counts fresh guest instructions and pauses briefly at each interval to report current lifted blocks, active threads, native write-hook dispatches, RSS, and last guest PC. The callback runs in a safe paused state; `stop_stats` removes the hook and suppresses pending reports. `execution_stats emu` captures the same record on demand while paused.
+
+`start_maintenance emu ~interval ()` uses the same safe periodic pauses for opt-in maintenance. `~lift_cache_limit:n` installs a session-lifter bound once, `~forget_lifts:true` forgets accumulated lifts at each report, `~reclaim_blocks:true` flushes translated blocks for later retranslation, and `~compact_heap:true` calls `Gc.compact`. For example:
+
+```ocaml
+let maintenance =
+  Emu.start_maintenance emu ~interval:30.0
+    ~lift_cache_limit:100_000 ~forget_lifts:true
+    ~reclaim_blocks:true ~compact_heap:true ()
+in
+(* later; this leaves the lift-cache limit in effect *)
+Emu.stop_stats maintenance
+```
+
+No maintenance runs by default. These operations reclaim logical retained state, not a guaranteed amount of RSS; translated blocks are recreated as needed, and compaction may make a long pause longer.
 
 ## See also
 

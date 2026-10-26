@@ -437,6 +437,9 @@ and session = {
   mutable dumped : string;  (** the result of the last [Dump] *)
   mutable values : (int64 * int) list;  (** the result of the last [Values] *)
   mutable stored_bytes : int;  (** the result of the last [Stored_count] *)
+  mutable sparse_pages : int;
+  mutable snapshot_bytes : int;
+  mutable snapshot_pages : int;
   mutable origins : Primus.Memory.origin list;
       (** the result of the last [Origins] *)
   mutable starts : int;
@@ -632,6 +635,9 @@ let create_session ?restore ?models ?(engine : kind = `Unicorn) () =
     dumped = "";
     values = [];
     stored_bytes = 0;
+    sparse_pages = 0;
+    snapshot_bytes = 0;
+    snapshot_pages = 0;
     origins = [];
     starts = 0;
     stopped_at = None;
@@ -6443,7 +6449,18 @@ module Make (Machine : Primus.Machine.S) = struct
         let* () = pull e in
         let* me = Machine.current () in
         let* count = Memory.stored_count_of me in
+        let* pages = Memory.sparse_page_count_of me in
+        let* snapshot_bytes, snapshot_pages =
+          Machine.List.fold (Hash_set.to_list e.session.snapshots) ~init:(0, 0)
+            ~f:(fun (bytes, pages) snapshot ->
+              let* bytes' = Memory.stored_count_of snapshot in
+              let* pages' = Memory.sparse_page_count_of snapshot in
+              Machine.return (bytes + bytes', pages + pages'))
+        in
         e.session.stored_bytes <- count;
+        e.session.sparse_pages <- pages;
+        e.session.snapshot_bytes <- snapshot_bytes;
+        e.session.snapshot_pages <- snapshot_pages;
         serve pc
     | Origins (other, addrs) ->
         let* () = pull e in

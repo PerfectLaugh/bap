@@ -20,6 +20,8 @@ RDI = 0x603180
 RSI = 0x603180
 (emu) snap
 snapshot 1
+(emu) snap
+snapshot 1
 (emu) c print_strings
 paused at 400727
 (emu) c

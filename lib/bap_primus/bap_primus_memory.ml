@@ -1225,6 +1225,11 @@ module Make (Machine : Machine) = struct
      last, without storing them, e.g., of a snapshot, which is another
      machine, see [Bap_emu.diff], as the stored values are of all
      memories of the machine *)
+  let sparse_page_count_of machine =
+    Machine.Other.get machine state >>| fun { mems; _ } ->
+    Map.fold mems ~init:0 ~f:(fun ~key:_ ~data:(s : state) total ->
+        total + Map.length s.pages)
+
   let stored_count_of ?(generated = false) machine =
     Machine.Other.get machine state >>| fun { mems; _ } ->
     Map.fold mems ~init:0 ~f:(fun ~key:_ ~data:(s : state) total ->

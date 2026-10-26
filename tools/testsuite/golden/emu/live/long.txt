@@ -1,19 +1,25 @@
 footprint: heap true, top true, rss known
 inventory: lifter true, engine true, blocks true, stored true, models true, snapshots 0, pages false
+owned history true, sparse pages true, empty traces true
 lift cache bounded true
 checkpoint keeps evicted lifts true
-lift cache disabled true
+lift cache disabled true, history retained true
 negative lift cache rejected
+inventory: lifter false, engine true, blocks false, stored true, models true, snapshots 3, pages true
+snapshot memory retained true
 inventory: lifter false, engine true, blocks false, stored true, models true, snapshots 2, pages true
+explicit drop true
 inventory: lifter false, engine true, blocks false, stored true, models true, snapshots 1, pages false
-pages released true
+managed eviction true
+negative snapshot limit rejected
 Bap_emu.restore: the snapshot was dropped
 forgotten: lifter true, hooks true
 lifts main again true
 hook lifts retained true
-inventory: lifter false, engine true, blocks false, stored true, models true, snapshots 0, pages false
-restored the kept snapshot at main true
-trace retained true
+inventory: lifter false, engine true, blocks false, stored true, models true, snapshots 1, pages false
+restored the kept snapshot at main true, retained true
+restored again at main true, retained true
+trace retained true, inventory true
 ran main: PUSH64r of 1 bytes, the ones in memory true, lifted true
 the bytes, that were lifted, from main: 4 of 32
 scrubbed: in memory true, as they ran true

@@ -2755,6 +2755,11 @@ module Std : sig
 
             @since 2.6.0 *)
 
+        val sparse_page_count_of : Monad.State.Multi.id -> int Machine.t
+        (** [sparse_page_count_of machine] is the number of sparse pages in the
+            memories of [machine]. Snapshots may share the pages and their
+            contents, so counts of different machines are not additive. *)
+
         val stored_count_of :
           ?generated:bool -> Monad.State.Multi.id -> int Machine.t
         (** [stored_count_of machine] is the number of stored byte entries in
