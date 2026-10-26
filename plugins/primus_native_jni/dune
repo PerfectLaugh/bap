@@ -2,7 +2,7 @@
  (name bap_emu_jni)
  (public_name bap-primus-native-jni.jni)
  (wrapped false)
- (modules bap_emu_jni bap_emu_android)
+ (modules bap_emu_aarch64 bap_emu_jni bap_emu_android)
  (preprocess
   (pps ppx_bap))
  (libraries core))

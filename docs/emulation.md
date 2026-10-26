@@ -286,6 +286,8 @@ Emu.scoped emu (fun () ->
 
 For an import whose relocation target is wrong or unresolved, `on_import emu ~site ~name f` overrides a particular call site rather than a callee name. `Return x` returns directly from the site and records a relocation; `Default` runs the callee. `relocation_journal emu` lists the site, name, and result of each override. `register_stub emu ~name ~address` marks a harness-owned synthetic stub and warns if execution enters it without an `on_call` or `on_import` service, which catches missing harness models before the later unbound-function failure.
 
+For synthetic AArch64 code, `Emu.AArch64.b ~pc target` encodes an unconditional branch relative to the branch instruction's PC, checking four-byte alignment and the signed 28-bit byte displacement. `Emu.AArch64.ret` is the standard `ret` word, and `Emu.AArch64.bytes` converts either word to its four-byte little-endian encoding for `Emu.write`. This is a stub-encoding interface, not a general assembler.
+
 `on_syscall` serves the system calls, that no Lisp function of their intrinsic serves, e.g., `svc #0` of AArch64, without which the program fails with `unbound function intrinsic:svc`, wherever the program makes them, also in the code, that it writes later. `Default` leaves a call to the executor, which runs the calls of the threads natively, e.g., `clone`, `futex`, and `exit`, so a catch-all serves the others by their numbers:
 
 ```ocaml

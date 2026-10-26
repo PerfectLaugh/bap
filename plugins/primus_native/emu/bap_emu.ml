@@ -2904,6 +2904,7 @@ let symbols t =
 
 module Xrefs = Bap_emu_xrefs
 module Static = Bap_emu_slice
+module AArch64 = Bap_emu_aarch64
 
 module Jni = struct
   type emulator = t

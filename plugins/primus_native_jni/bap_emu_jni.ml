@@ -1047,21 +1047,12 @@ module Make (E : Emulator) = struct
   let write_stubs emu ~stubs ~dispatcher count =
     for index = 0 to count - 1 do
       let at = Int64.(stubs + of_int Int.(index * 8)) in
-      let branch = Int64.(dispatcher - (at + 4L)) in
-      if
-        Int64.(branch % 4L <> 0L || branch < -0x8000000L || branch > 0x7fffffcL)
-      then
-        invalid_arg
-          "Bap_emu.Jni: dispatcher is outside the AArch64 branch range";
+      let branch_at = Int64.(at + 4L) in
       let movz =
         Int32.(0x52800008l lor shift_left (Int32.of_int_exn index) 5)
       in
-      let offset = Int64.to_int32_trunc Int64.(branch / 4L) in
-      let branch = Int32.(0x14000000l lor (offset land 0x03ffffffl)) in
-      let bytes = Stdlib.Bytes.create 8 in
-      Stdlib.Bytes.set_int32_le bytes 0 movz;
-      Stdlib.Bytes.set_int32_le bytes 4 branch;
-      E.write emu at (Stdlib.Bytes.to_string bytes)
+      let branch = Bap_emu_aarch64.b ~pc:branch_at dispatcher in
+      E.write emu at (Bap_emu_aarch64.bytes movz ^ Bap_emu_aarch64.bytes branch)
     done
 
   let install (t : t) emu (layout : layout) =

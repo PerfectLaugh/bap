@@ -848,6 +848,7 @@ let emu data =
               path data "bin/x86_64-linux-gnu-echo";
               path data "bin/arm-linux-gnueabihf-thumb-crc";
               path data "bin/x86_64-linux-gnu-mprotect";
+              path data "bin/aarch64-linux-gnu-echo";
             ]
         in
         sequence env out
@@ -872,6 +873,8 @@ let emu data =
               "written hook 405000: 5 bytes\n.*RAX := 0x2A\n" );
             ( "lifts the written code",
               "written 405000: 5 bytes\n.*RAX := 0x2A\n" );
+            ( "returns from the synthetic AArch64 stub",
+              "synthetic AArch64 stub returned 42\n" );
           ]);
     (* the calls of the trace, by their sites, with their targets, from
        the traces of the instructions, and of the blocks, see calls.ml *)

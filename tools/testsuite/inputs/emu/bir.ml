@@ -13,7 +13,7 @@ let show emu addr =
 
 let () =
   match Bap_script.args () with
-  | [ echo; thumb; mprotect ] ->
+  | [ echo; thumb; mprotect; aarch64 ] -> (
       let emu = Emu.create ~args:[ "hello" ] (Bap_script.project echo) in
       show emu (Emu.pc emu);
       (* in a hook, where the program runs, at the address of the code *)
@@ -59,5 +59,15 @@ let () =
           show emu addr);
       ignore (Emu.run emu ~until:code);
       printf "written ";
-      show emu (Emu.pc emu)
-  | _ -> failwith "expected ECHO THUMB MPROTECT"
+      show emu (Emu.pc emu);
+      (* a synthetic AArch64 stub returns to the caller of Emu.call *)
+      let emu = Emu.create (Bap_script.project aarch64) in
+      let stub = Emu.pc emu in
+      Emu.write emu stub (Emu.AArch64.bytes Emu.AArch64.ret);
+      match Emu.call emu stub ~args:[ 42L ] with
+      | Some 42L -> print_endline "synthetic AArch64 stub returned 42"
+      | result ->
+          failwithf "synthetic AArch64 stub returned %s"
+            (Option.value_map result ~default:"nothing" ~f:Int64.to_string)
+            ())
+  | _ -> failwith "expected ECHO THUMB MPROTECT AARCH64"

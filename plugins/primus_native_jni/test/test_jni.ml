@@ -1,5 +1,8 @@
 open Core
+open Bap.Std
+module Dis = Disasm_expert.Basic
 module Jni = Bap_emu.Jni
+module AArch64 = Bap_emu.AArch64
 
 let fail label expected actual =
   failwithf "%s: expected %s, got %s" label expected actual ()
@@ -218,6 +221,53 @@ end
 
 module Adapter = Jni.Make (Test_emulator)
 
+let decode_backward_branch emu at target =
+  let data = Test_emulator.read emu at 4 in
+  let mem =
+    Memory.create LittleEndian
+      (Addr.of_int64 ~width:64 at)
+      (Bigstring.of_string data)
+    |> Or_error.ok_exn
+  in
+  Dis.with_disasm ~backend:"llvm" "aarch64" ~f:(fun dis ->
+      match Dis.insn_of_mem dis mem |> Or_error.ok_exn with
+      | _, Some insn, _ ->
+          expect_string
+            (sprintf "JNI opcode at %Lx" at)
+            "B" (Dis.Insn.name insn);
+          let operand =
+            Dis.Insn.ops insn |> Array.to_list |> List.map ~f:Op.to_string
+            |> List.hd_exn |> Int64.of_string
+          in
+          expect
+            (sprintf "JNI backward target at %Lx" at)
+            target
+            Int64.(at + (operand * 4L));
+          Or_error.return ()
+      | _, None, _ -> Or_error.errorf "failed to decode JNI branch at %Lx" at)
+  |> Or_error.ok_exn
+
+let expect_invalid label f =
+  match f () with
+  | exception Invalid_argument _ -> ()
+  | exception exn -> failwith (label ^ ": " ^ Exn.to_string exn)
+  | _ -> failwith (label ^ ": invalid encoding was accepted")
+
+let test_aarch64_encoding () =
+  expect_string "RET bytes" "\xc0\x03\x5f\xd6" (AArch64.bytes AArch64.ret);
+  expect "branch to self" 0x14000000L
+    (Int64.of_int32 (AArch64.b ~pc:0x1000L 0x1000L));
+  expect "backward branch" 0x17ffffffL
+    (Int64.of_int32 (AArch64.b ~pc:0x1000L 0xffcL));
+  ignore (AArch64.b ~pc:0L (-0x8000000L));
+  ignore (AArch64.b ~pc:0L 0x7fffffcL);
+  expect_invalid "unaligned branch PC" (fun () -> AArch64.b ~pc:1L 0L);
+  expect_invalid "unaligned branch target" (fun () -> AArch64.b ~pc:0L 1L);
+  expect_invalid "positive branch overflow" (fun () ->
+      AArch64.b ~pc:0L 0x8000000L);
+  expect_invalid "negative branch overflow" (fun () ->
+      AArch64.b ~pc:0L (-0x8000004L))
+
 let layout =
   {
     Jni.vm = 0x1000L;
@@ -234,6 +284,8 @@ let test_adapter () =
   let jni, _ = make () in
   let emu = Test_emulator.create () in
   Adapter.install jni emu layout;
+  decode_backward_branch emu Int64.(layout.env_stubs + 4L) layout.env_dispatcher;
+  decode_backward_branch emu Int64.(layout.vm_stubs + 4L) layout.vm_dispatcher;
   expect "vm table" layout.vm_functions (Test_emulator.word emu layout.vm);
   expect "env table" layout.env_functions (Test_emulator.word emu layout.env);
   expect "indexed env entry"
@@ -496,16 +548,23 @@ let test_versions () =
   expect "reported JNI version" 0x10006L (dispatch jni 4 [])
 
 let () =
-  expect_string "last method table name" "GetObjectRefType"
-    (Jni.name_of_index 232);
-  expect_string "method table end" "JNIEnv[233]" (Jni.name_of_index 233);
-  expect_string "method table name" "GetObjectClass" (Jni.name_of_index 31);
-  expect_string "unknown method name" "JNIEnv[999]" (Jni.name_of_index 999);
-  test_identity ();
-  test_declarations_and_logging ();
-  test_adapter ();
-  test_state ();
-  test_replay ();
-  test_stale_string_buffer ();
-  test_versions ();
-  print_endline "JNI model tests passed"
+  match Bap_main.init () with
+  | Error err ->
+      Format.eprintf "Failed to initialize BAP: %a@\n%!"
+        Bap_main.Extension.Error.pp err;
+      exit 1
+  | Ok () ->
+      expect_string "last method table name" "GetObjectRefType"
+        (Jni.name_of_index 232);
+      expect_string "method table end" "JNIEnv[233]" (Jni.name_of_index 233);
+      expect_string "method table name" "GetObjectClass" (Jni.name_of_index 31);
+      expect_string "unknown method name" "JNIEnv[999]" (Jni.name_of_index 999);
+      test_identity ();
+      test_declarations_and_logging ();
+      test_aarch64_encoding ();
+      test_adapter ();
+      test_state ();
+      test_replay ();
+      test_stale_string_buffer ();
+      test_versions ();
+      print_endline "JNI model tests passed"
