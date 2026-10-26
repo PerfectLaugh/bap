@@ -158,6 +158,190 @@ let snapshot_roundtrip () =
       Memory.peek (addr base) (String.length data) >>| fun restored ->
       check_string "snapshot restores flattened pages" data restored )
 
+let snapshot_encoding snapshot =
+  let size = Primus.Memory.Snapshot.bin_size_t snapshot in
+  let buffer = Bigstring.create size in
+  let written = Primus.Memory.Snapshot.bin_write_t buffer ~pos:0 snapshot in
+  check "snapshot bin_io wrote the expected size" (written = size);
+  String.init size ~f:(Bigstring.get buffer)
+
+let check_snapshot name expected actual =
+  check name
+    (String.equal (snapshot_encoding expected) (snapshot_encoding actual))
+
+let snapshot_many_pages () =
+  let pages = 64 and size = 4096 and base = 0x600000 in
+  let page n =
+    String.init size ~f:(fun i -> Char.of_int_exn ((n + i + 1) land 0xff))
+  in
+  let expected = String.concat (List.init pages ~f:page) in
+  run
+    ( Memory.allocate (addr base) (pages * size) >>= fun () ->
+      Machine.List.iter (List.init pages ~f:Fn.id) ~f:(fun n ->
+          Memory.store_bytes (addr (base + (n * size))) (page n))
+      >>= fun () ->
+      Memory.snapshot >>= fun snapshot ->
+      let encoded = snapshot_encoding snapshot in
+      let buffer = Bigstring.of_string encoded in
+      let pos_ref = ref 0 in
+      let decoded = Primus.Memory.Snapshot.bin_read_t buffer ~pos_ref in
+      check "many-page snapshot bin_io read the expected size"
+        (!pos_ref = String.length encoded);
+      Memory.store_bytes (addr base) (String.make (pages * size) '\x00')
+      >>= fun () ->
+      Memory.restore decoded >>= fun () ->
+      Machine.List.map (List.init pages ~f:Fn.id) ~f:(fun n ->
+          Memory.load_bytes (addr (base + (n * size))) size >>| string_of_loaded)
+      >>= fun loaded ->
+      check_string "many-page snapshot bulk-loads every page" expected
+        (String.concat loaded);
+      Memory.peek (addr base) (pages * size) >>| fun restored ->
+      check_string "many-page snapshot restores every page" expected restored )
+
+let delta_roundtrip name parent child =
+  let delta = Primus.Memory.Snapshot.diff parent child in
+  check_snapshot (name ^ ": direct apply") child
+    (Primus.Memory.Snapshot.apply parent delta);
+  let size = Primus.Memory.Snapshot.bin_size_delta delta in
+  let buffer = Bigstring.create size in
+  let written = Primus.Memory.Snapshot.bin_write_delta buffer ~pos:0 delta in
+  check (name ^ ": delta bin_io wrote the expected size") (written = size);
+  let pos_ref = ref 0 in
+  let decoded = Primus.Memory.Snapshot.bin_read_delta buffer ~pos_ref in
+  check (name ^ ": delta bin_io read the expected size") (!pos_ref = size);
+  let applied = Primus.Memory.Snapshot.apply parent decoded in
+  check_snapshot (name ^ ": bin_io apply") child applied;
+  (delta, applied)
+
+let snapshot_delta_sparse_page () =
+  let base = 0xE000 in
+  let other_page = Bytes.make 4096 '\x61' in
+  run
+    ( Memory.store_bytes (addr base) "abc" >>= fun () ->
+      Memory.store_bytes (addr (base + 4096)) (Bytes.to_string other_page)
+      >>= fun () ->
+      Memory.snapshot >>= fun parent ->
+      Memory.store_bytes (addr (base + 2)) "Z" >>= fun () ->
+      Memory.del (addr (base + 1)) >>= fun () ->
+      Memory.store_bytes (addr (base + 3)) "!" >>= fun () ->
+      Memory.snapshot >>= fun child ->
+      let delta, applied = delta_roundtrip "sparse page delta" parent child in
+      check "one-page delta is smaller than its snapshot"
+        (Primus.Memory.Snapshot.bin_size_delta delta
+        < Primus.Memory.Snapshot.bin_size_t child);
+      Memory.restore applied >>= fun () ->
+      Memory.peek (addr base) 4 >>= fun changed ->
+      check_string "delta restores writes, addition, and deletion" "a\x00Z!"
+        changed;
+      Memory.is_mapped (addr (base + 1)) >>= fun deleted ->
+      check "delta restores a deleted sparse byte" (not deleted);
+      Memory.peek (addr (base + 4096)) 4096 >>| fun unchanged ->
+      check_string "delta leaves other pages unchanged"
+        (Bytes.to_string other_page)
+        unchanged )
+
+let snapshot_delta_generated_metadata () =
+  let base = 0xE100 in
+  run
+    ( Memory.allocate (addr base) 1 ~generator:(Primus.Generator.Random.byte 7)
+    >>= fun () ->
+      Memory.load (addr base) >>= fun generated ->
+      Memory.snapshot >>= fun parent ->
+      Memory.restore parent >>= fun () ->
+      Memory.origin (addr base) >>= fun restored_origin ->
+      check "snapshot restore preserves generated metadata"
+        (match restored_origin with
+        | Primus.Memory.Generated -> true
+        | _ -> false);
+      Memory.store (addr base) generated >>= fun () ->
+      Memory.snapshot >>= fun child ->
+      let _, applied =
+        delta_roundtrip "generated metadata delta" parent child
+      in
+      Memory.restore applied >>= fun () ->
+      Memory.origin (addr base) >>= fun stored_origin ->
+      check "delta preserves generated-to-stored change"
+        (match stored_origin with Primus.Memory.Stored -> true | _ -> false);
+      Memory.del (addr base) >>= fun () ->
+      Memory.snapshot >>| fun deleted ->
+      ignore (delta_roundtrip "generated deletion delta" child deleted) )
+
+let snapshot_delta_flattened_pages () =
+  let base = 0xE200 in
+  run
+    ( Memory.store_bytes (addr base) "flattened" >>= fun () ->
+      Memory.snapshot >>= fun parent ->
+      Memory.get (addr base) >>= fun _ ->
+      Memory.snapshot >>| fun child ->
+      ignore (delta_roundtrip "flattened page delta" parent child) )
+
+let snapshot_delta_layers_and_protections () =
+  let base = 0xE300 in
+  let mem =
+    ok_exn
+    @@ Bap.Std.Memory.create LittleEndian (addr base)
+         (Bigstring.of_string "CODE")
+  in
+  run
+    ( Memory.map ~readonly:true ~executable:true mem >>= fun () ->
+      Memory.allocate
+        (addr (base + 0x100))
+        4
+        ~generator:(Primus.Generator.static ~width:8 0x55)
+      >>= fun () ->
+      Memory.protect
+        ~lower:(addr (base + 1))
+        ~upper:(addr (base + 1))
+        { readable = false; writable = false; executable = false }
+      >>= fun () ->
+      Memory.snapshot >>= fun parent ->
+      Memory.allocate
+        (addr (base + 0x200))
+        8 ~readonly:true ~executable:true
+        ~generator:(Primus.Generator.static ~width:8 0xAA)
+      >>= fun () ->
+      Memory.protect
+        ~lower:(addr (base + 2))
+        ~upper:(addr (base + 3))
+        { readable = true; writable = false; executable = false }
+      >>= fun () ->
+      Memory.snapshot >>= fun child ->
+      Memory.regions >>= fun expected_regions ->
+      let _, applied = delta_roundtrip "layer delta" parent child in
+      Memory.restore applied >>= fun () ->
+      Memory.regions >>| fun restored_regions ->
+      check "delta restores layers and protections"
+        (List.equal Poly.equal expected_regions restored_regions) )
+
+let snapshot_delta_memory_add_remove_and_selection () =
+  let other =
+    Primus.Memory.Descriptor.create ~addr_size:32 ~data_size:8 "other"
+  in
+  run
+    ( Memory.store_bytes (addr 0xE400) "main" >>= fun () ->
+      Memory.snapshot >>= fun parent ->
+      Memory.switch other >>= fun () ->
+      Memory.store_bytes (addr 0xE500) "other" >>= fun () ->
+      Memory.snapshot >>= fun child ->
+      let _, added = delta_roundtrip "memory addition delta" parent child in
+      Memory.restore added >>= fun () ->
+      Memory.memory >>= fun selected ->
+      check "delta restores selected added memory"
+        (String.equal (Primus.Memory.Descriptor.name selected) "other");
+      Memory.peek (addr 0xE500) 5 >>= fun data ->
+      check_string "delta restores added memory bytes" "other" data;
+      Memory.restore parent >>= fun () ->
+      Memory.snapshot >>= fun removed_child ->
+      let _, removed =
+        delta_roundtrip "memory removal delta" child removed_child
+      in
+      Memory.restore removed >>= fun () ->
+      Memory.memory >>= fun selected ->
+      check "delta restores selection after memory removal"
+        (String.equal (Primus.Memory.Descriptor.name selected) "mem");
+      Memory.peek (addr 0xE400) 4 >>| fun data ->
+      check_string "delta preserves parent memory after removal" "main" data )
+
 let copy_on_write () =
   let base = 0x6FFE and data = "\x10\x11\x12\x13" in
   let child_ran = ref false in
@@ -388,6 +572,12 @@ let () =
   page_crossing ();
   scalar_values ();
   snapshot_roundtrip ();
+  snapshot_many_pages ();
+  snapshot_delta_sparse_page ();
+  snapshot_delta_generated_metadata ();
+  snapshot_delta_flattened_pages ();
+  snapshot_delta_layers_and_protections ();
+  snapshot_delta_memory_add_remove_and_selection ();
   copy_on_write ();
   region_clears_pages ();
   find_mapped_and_stored ();

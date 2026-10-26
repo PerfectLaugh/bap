@@ -40,6 +40,7 @@ type state =
 (* the machine, which is of the system of the emulator, as the systems
    number their machines alike *)
 type snapshot = { owner : X.session; id : Primus.Machine.id }
+type save_request = { file : string; parent : string option }
 
 (* the state of the shell, see [shell]: the breakpoints, with the
    functions, that remove them, and the snapshots, the last first *)
@@ -79,7 +80,7 @@ type t = {
           are the same, see [it_blocks_of] *)
   deferred : (t -> unit) Queue.t;
       (** the actions, that the hooks deferred to the next pause, see [defer] *)
-  saves : string Queue.t;
+  saves : save_request Queue.t;
       (** checkpoints, that wait until all deferred model mutations finish *)
   mutable serving : bool;
   mutable stopped : bool;
@@ -266,9 +267,9 @@ and served t =
           (Queue.dequeue_exn t.deferred) t
         done;
         while not (Queue.is_empty t.saves) do
-          let file = Queue.dequeue_exn t.saves in
+          let { file; parent } = Queue.dequeue_exn t.saves in
           (match t.state with
-          | Suspended (pc, _, _) -> resume t (X.Save (file, pc))
+          | Suspended (pc, _, _) -> resume t (X.Save (file, pc, parent))
           | _ -> not_paused ~fn:"save" t);
           Option.iter t.session.lifter ~f:(fun l -> l.save ());
           match t.session.saved with Ok () -> () | Error msg -> failwith msg
@@ -692,22 +693,22 @@ let components t =
 (* the checkpoint of the paused program, or, from a hook, of the
    program, as it pauses before the instruction, that the hook sees, see
    [defer] *)
-let rec save t file =
+let rec save ?parent t file =
   match t.state with
-  | Suspended _ when t.serving -> Queue.enqueue t.saves file
+  | Suspended _ when t.serving -> Queue.enqueue t.saves { file; parent }
   | Suspended _ -> (
-      resume t (X.Save (file, pc t));
+      resume t (X.Save (file, pc t, parent));
       save_lifts t;
       match t.session.saved with Ok () -> () | Error msg -> failwith msg)
-  | Running -> defer t (fun t -> save t file)
+  | Running -> defer t (fun t -> save ?parent t file)
   | Ended (Exn Primus.Interpreter.Halt, _) -> not_paused ~fn:"save" t
-  | Ended (Exn _, _) -> save_failed t file
+  | Ended (Exn _, _) -> save_failed ?parent t file
   | _ -> not_paused ~fn:"save" t
 
 (* the checkpoint of the program, that failed, e.g., at the instruction,
    that faulted, from which it continues, as the runs, that the failure
    unwound, are still in the machine, see [X.Make.run] *)
-and save_failed t file =
+and save_failed ?parent t file =
   let saved = ref (Error "the program failed outside of a run") in
   resume t
     (X.Run
@@ -720,7 +721,7 @@ and save_failed t file =
 
                    let init () =
                      Exec.engine () >>= fun e ->
-                     Exec.save e (Exec.current_pc e) file >>| fun r ->
+                     Exec.save e (Exec.current_pc e) ?parent file >>| fun r ->
                      saved := r
                  end));
   save_lifts t;
@@ -813,7 +814,35 @@ module Checkpoint = struct
             List.map models ~f:(fun (m : C.model_state) ->
                 { name = m.name; version = m.version; required = m.required }))
 
-  let is_of info proj =
+  type link = {
+    file : string;
+    version : int;
+    digest : string;
+    parent : (string * string) option;
+    models : model_state list option;
+  }
+
+  let chain file =
+    match C.chain file with
+    | Error msg -> failwith msg
+    | Ok links ->
+        List.map links ~f:(fun (link : C.link) ->
+            {
+              file = link.file;
+              version = link.version;
+              digest = link.digest;
+              parent = link.parent;
+              models =
+                Option.map link.models ~f:(fun models ->
+                    List.map models ~f:(fun (m : C.model_state) ->
+                        {
+                          name = m.name;
+                          version = m.version;
+                          required = m.required;
+                        }));
+            })
+
+  let is_of (info : info) proj =
     match Project.get proj filename with
     | None -> false
     | Some file -> (

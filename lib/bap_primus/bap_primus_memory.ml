@@ -556,6 +556,7 @@ module Snapshot = struct
   type mem = {
     layers : area list;  (** the oldest first *)
     values : (Addr.t * Word.t) list;
+    generated : Addr.t list;
     protections : (Addr.t * Addr.t * protection) list;
   }
   [@@deriving bin_io]
@@ -563,7 +564,159 @@ module Snapshot = struct
   type t = { curr : Descriptor.t; mems : (Descriptor.t * mem) list }
   [@@deriving bin_io]
 
-  let values { mems; _ } = List.concat_map mems ~f:(fun (_, m) -> m.values)
+  type byte_change = Removed | Written of Word.t * bool [@@deriving bin_io]
+
+  type page_delta = { base : Addr.t; changes : (int * byte_change) list }
+  [@@deriving bin_io]
+
+  type mem_delta = {
+    layers : area list option;
+    protections : (Addr.t * Addr.t * protection) list option;
+    pages : page_delta list;
+  }
+  [@@deriving bin_io]
+
+  type mem_change =
+    | Remove_memory
+    | Add_memory of mem
+    | Change_memory of mem_delta
+  [@@deriving bin_io]
+
+  type delta = {
+    curr : Descriptor.t option;
+    mems : (Descriptor.t * mem_change) list;
+  }
+  [@@deriving bin_io]
+
+  let values ({ mems; _ } : t) =
+    List.concat_map mems ~f:(fun (_, m) -> m.values)
+
+  let entries m =
+    let generated = Set.of_list (module Addr) m.generated in
+    List.map m.values ~f:(fun (addr, value) ->
+        (addr, (value, Set.mem generated addr)))
+    |> Addr.Map.of_alist_exn
+
+  let equal_entry (x, generated) (y, generated') =
+    Word.equal x y && Bool.equal generated generated'
+
+  let diff_values parent child =
+    let parent = entries parent and child = entries child in
+    Set.union (Map.key_set parent) (Map.key_set child)
+    |> Set.fold ~init:[] ~f:(fun changes addr ->
+        let before = Map.find parent addr and after = Map.find child addr in
+        let unchanged =
+          match (before, after) with
+          | Some before, Some after -> equal_entry before after
+          | None, None -> true
+          | _ -> false
+        in
+        if unchanged then changes
+        else
+          let change =
+            match after with
+            | None -> Removed
+            | Some (value, generated) -> Written (value, generated)
+          in
+          (addr, change) :: changes)
+    |> List.fold ~init:Addr.Map.empty ~f:(fun pages (addr, change) ->
+        Map.update pages (page_base addr) ~f:(fun changes ->
+            (page_offset addr, change) :: Option.value changes ~default:[]))
+    |> Map.to_alist
+    |> List.map ~f:(fun (base, changes) -> { base; changes = List.rev changes })
+
+  let diff_mem (parent : mem) (child : mem) =
+    let layers =
+      if Poly.equal parent.layers child.layers then None else Some child.layers
+    in
+    let protections =
+      if Poly.equal parent.protections child.protections then None
+      else Some child.protections
+    in
+    let pages = diff_values parent child in
+    if
+      Option.is_none layers && Option.is_none protections && List.is_empty pages
+    then None
+    else Some { layers; protections; pages }
+
+  let apply_values parent pages =
+    let values = entries parent in
+    let values =
+      List.fold pages ~init:values ~f:(fun values { base; changes } ->
+          List.fold changes ~init:values ~f:(fun values (offset, change) ->
+              let addr = Addr.nsucc base offset in
+              match change with
+              | Removed -> Map.remove values addr
+              | Written (value, generated) ->
+                  Map.set values ~key:addr ~data:(value, generated)))
+    in
+    let values = Map.to_alist values in
+    {
+      parent with
+      values = List.map values ~f:(fun (addr, (value, _)) -> (addr, value));
+      generated =
+        List.filter_map values ~f:(fun (addr, (_, generated)) ->
+            Option.some_if generated addr);
+    }
+
+  let apply_mem (parent : mem) ({ layers; protections; pages } : mem_delta) =
+    let parent =
+      {
+        parent with
+        layers = Option.value layers ~default:parent.layers;
+        protections = Option.value protections ~default:parent.protections;
+      }
+    in
+    apply_values parent pages
+
+  let find_mem mems desc =
+    List.find_map mems ~f:(fun (desc', mem) ->
+        Option.some_if (Descriptor.compare desc desc' = 0) mem)
+
+  let diff (parent : t) (child : t) =
+    let removed =
+      List.filter_map parent.mems ~f:(fun (desc, _) ->
+          match find_mem child.mems desc with
+          | None -> Some (desc, Remove_memory)
+          | Some _ -> None)
+    in
+    let changed =
+      List.filter_map child.mems ~f:(fun (desc, child_mem) ->
+          match find_mem parent.mems desc with
+          | None -> Some (desc, Add_memory child_mem)
+          | Some parent_mem ->
+              Option.map (diff_mem parent_mem child_mem) ~f:(fun delta ->
+                  (desc, Change_memory delta)))
+    in
+    {
+      curr =
+        (if Poly.equal parent.curr child.curr then None else Some child.curr);
+      mems = removed @ changed;
+    }
+
+  let apply (parent : t) (delta : delta) =
+    let mems =
+      List.fold delta.mems ~init:parent.mems ~f:(fun mems (desc, change) ->
+          let mems =
+            List.filter mems ~f:(fun (desc', _) ->
+                Descriptor.compare desc desc' <> 0)
+          in
+          match change with
+          | Remove_memory -> mems
+          | Add_memory mem -> (desc, mem) :: mems
+          | Change_memory delta -> (
+              match find_mem parent.mems desc with
+              | None ->
+                  invalid_argf "Primus.Memory.Snapshot.apply: unknown memory %s"
+                    (Descriptor.name desc) ()
+              | Some mem -> (desc, apply_mem mem delta) :: mems))
+    in
+    ({
+       curr = Option.value delta.curr ~default:parent.curr;
+       mems =
+         List.sort mems ~compare:(fun (x, _) (y, _) -> Descriptor.compare x y);
+     }
+      : t)
 
   let of_layer ({ mem; perms = { readonly; executable } } : layer) : area =
     let lower, upper = bounds mem in
@@ -582,7 +735,8 @@ module Snapshot = struct
     in
     { lower; upper; readonly; executable; kind }
 
-  let of_state ({ values; layers; protections; _ } as s : state) : mem =
+  let of_state ({ values; layers; protections; generated; _ } as s : state) :
+      mem =
     let values =
       Map.to_alist values
       |> List.map ~f:(fun (addr, x) -> (addr, Bap_primus_value.to_word x))
@@ -593,6 +747,7 @@ module Snapshot = struct
         List.sort
           (values @ page_values s)
           ~compare:(fun (x, _) (y, _) -> Addr.compare x y);
+      generated = Set.to_list generated;
       protections;
     }
 
@@ -1403,12 +1558,13 @@ module Make (Machine : Machine) = struct
   let snapshot =
     (backing @@ fun b id -> store_fetched (b.fetch_all id)) >>= fun () ->
     Machine.Local.get state >>| fun { curr; mems } ->
-    {
-      Snapshot.curr;
-      mems =
-        Map.to_alist mems
-        |> List.map ~f:(fun (desc, s) -> (desc, Snapshot.of_state s));
-    }
+    ({
+       Snapshot.curr;
+       mems =
+         Map.to_alist mems
+         |> List.map ~f:(fun (desc, s) -> (desc, Snapshot.of_state s));
+     }
+      : Snapshot.t)
 
   let materialize_values s =
     let stored = Array.of_list (page_values s) in
@@ -1523,6 +1679,7 @@ module Make (Machine : Machine) = struct
         {
           s with
           values = Addr.Map.of_alist_exn values;
+          generated = Set.of_list (module Addr) m.generated;
           protections = m.protections;
         }
 

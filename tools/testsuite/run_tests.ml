@@ -1514,6 +1514,26 @@ let emu data =
           "isolated 11,22; registered 1,1";
         let out = run [ "invalid-version"; "0" ] in
         has env "rejects a nonpositive schema" out "invalid schema version 0");
+    case "emu/checkpoint-delta" (fun env ->
+        let out =
+          bap ~timeout:55. env
+            [
+              "script";
+              "--cache-dir";
+              dir env;
+              input "emu/checkpoint-delta.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              dir env;
+            ]
+        in
+        check env "checkpoint-delta script succeeds" (out.status = Exited 0);
+        List.iter
+          (fun engine ->
+            has env
+              ("checks checkpoint deltas in " ^ engine)
+              out
+              (engine ^ ": delta [0-9]+/[0-9]+ bytes; checkpoint delta ok\n"))
+          [ "unicorn"; "lifted" ]);
     (* the memory of a long run: the footprint, the lifted instructions,
        that are forgotten, after which the program runs on, and the
        snapshots, that are dropped, see long.ml *)

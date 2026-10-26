@@ -1424,9 +1424,16 @@ val changes : t -> snapshot -> change list
     from [Stored] to [Stored] overwrote the data of the program. Raises as
     {!diff}. *)
 
-val save : t -> string -> unit
+val save : ?parent:string -> t -> string -> unit
 (** [save emu file] saves the checkpoint of the paused program to the [file],
-    from which {!create} continues it, in another run of bap too, e.g.,
+    from which {!create} continues it, in another run of bap too. With [parent],
+    saves a versioned delta whose sparse memory changes are relative to that
+    checkpoint, while retaining the complete non-memory state. The parent is
+    resolved, and its canonical path and actual file digest are recorded;
+    relative parent paths in deltas are resolved from the delta's directory.
+    Delta publication is atomic and refuses any existing destination. Without
+    [parent], the existing full format and its atomic replacement behavior are
+    unchanged, e.g.,
 
     {[
       ignore (Bap_emu.run emu ~until:after_unpack);
@@ -1677,6 +1684,23 @@ module Checkpoint : sig
   val models : string -> model_state list option
   (** [models file] is the model-state manifest of the checkpoint, or [None] for
       a legacy checkpoint without one. Raises as {!info}. *)
+
+  type link = {
+    file : string;  (** the canonical checkpoint path *)
+    version : int;  (** the full or delta envelope version *)
+    digest : string;  (** the hex MD5 digest of this checkpoint file *)
+    parent : (string * string) option;
+        (** the stored parent path and expected file digest, or [None] at the
+            root *)
+    models : model_state list option;  (** this link's model-state manifest *)
+  }
+
+  val chain : string -> link list
+  (** [chain file] resolves [file] and returns every link, root first. Parent
+      paths are interpreted relative to the containing delta. Resolution rejects
+      missing or truncated files, digest mismatches, cycles, unsupported
+      versions, and malformed states. Raises [Failure] with the resolution
+      error. *)
 
   type context = {
     thread : thread;

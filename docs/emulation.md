@@ -614,6 +614,21 @@ let emu = Emu.create ~restore:"unpacked.ckpt" proj in
 Emu.on_call emu "decrypt" (fun _ -> Default)
 ```
 
+`save ~parent` writes a sparse delta checkpoint instead. The delta has its own versioned envelope with the parent's path and file digest. It keeps the complete non-memory state—registers, frames, symbols, unstubs, extensions, model manifests, threads, journals, and the scheduler quantum—and only the memory changes relative to its parent:
+
+```ocaml
+Emu.save emu "root.ckpt";
+ignore (Emu.run emu ~until:after_unpack);
+Emu.save emu ~parent:"root.ckpt" "unpacked.delta";
+let emu = Emu.create ~restore:"unpacked.delta" proj
+```
+
+Saving a delta resolves the parent first and stores its canonical path and actual file digest. A relative parent path in a delta is interpreted relative to that delta's directory. Loading recursively reconstructs the chain from its full root, applying each sparse memory delta in order. Missing or truncated files, changed parent digests, cycles, unsupported versions, and malformed states are rejected. Before memory is restored or any model callback runs, every link is preflighted against the current program digest, target, and model registry.
+
+A delta is published atomically and never replaces an existing destination, even when the destination is the parent itself. A full save keeps the existing full format and atomic replacement behavior. Keep every ancestor available and unchanged for as long as a delta may be loaded.
+
+`Checkpoint.chain file` returns root-first metadata without loading the program. Each record contains the canonical checkpoint path, envelope version, actual file digest, stored parent path and expected digest, and model manifest. `Checkpoint.info`, `models`, `journal`, `context`, and instruction queries also accept a delta and describe its reconstructed leaf state.
+
 A checkpoint keeps:
 - the registers and the memory, as the program and the script changed them
 - the names from `add_symbol` and the functions from `unstub`

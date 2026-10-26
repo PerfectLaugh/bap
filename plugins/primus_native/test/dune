@@ -1,5 +1,5 @@
 (tests
- (names test_unicorn test_regs test_native test_engine)
+ (names test_unicorn test_regs test_native test_engine test_checkpoint)
  (package bap-primus-native)
  (preprocess
   (pps ppx_bap))

@@ -41,7 +41,10 @@ end
 
 module Snapshot : sig
   type t [@@deriving bin_io]
+  type delta [@@deriving bin_io]
 
+  val diff : t -> t -> delta
+  val apply : t -> delta -> t
   val values : t -> (addr * word) list
 end
 

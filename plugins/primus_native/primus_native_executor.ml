@@ -990,9 +990,10 @@ type request =
   | Interpret
       (** the instruction, at which the machine paused, runs in Primus, as its
           lifted semantics, see [Bap_emu.interpret] *)
-  | Save of string * int64
+  | Save of string * int64 * string option
       (** the checkpoint of the machine, which continues from the address, is
-          saved to the file, see [Bap_emu.save] *)
+          saved to the file, as a delta of the optional parent, see
+          [Bap_emu.save] *)
   | Spawn of int64 * int64 * int64 option
       (** the thread, that calls the function at the address with the argument,
           on the stack, is created, see [Bap_emu.spawn_thread] *)
@@ -3726,7 +3727,7 @@ module Make (Machine : Primus.Machine.S) = struct
      call started, with its registers, its runs, and its address, and
      the memory, as the function changed it, as the call, which the
      script made, is not of the program, and doesn't continue *)
-  let save e pc file =
+  let save e pc ?parent file =
     let* () = pull e in
     let* sites = Machine.Local.get call_sites in
     let site = List.last sites in
@@ -3811,7 +3812,7 @@ module Make (Machine : Primus.Machine.S) = struct
               Error
                 "a thread runs a function of the program, that a stub called"
           | frames ->
-              Checkpoint.save file
+              Checkpoint.save ?parent file
                 {
                   target = Theory.Target.to_string target;
                   digest;
@@ -6455,7 +6456,7 @@ module Make (Machine : Primus.Machine.S) = struct
           Ok (Option.value result ~default:0L)
       in
       Machine.catch (run ()) (fun exn ->
-          let+ () = finish ~failed:(!started) () in
+          let+ () = finish ~failed:!started () in
           Error (Primus.Exn.to_string exn))
   end
 
@@ -6717,8 +6718,8 @@ module Make (Machine : Primus.Machine.S) = struct
                  | _ -> key :: acc))
         in
         serve pc
-    | Save (file, pc') ->
-        let* r = save e pc' file in
+    | Save (file, pc', parent) ->
+        let* r = save e pc' ?parent file in
         e.session.saved <- r;
         serve pc
     | Spawn (start, arg, stack) ->
@@ -7646,22 +7647,27 @@ module Loader (Machine : Primus.Machine.S) = struct
     match s.restore with
     | None -> Machine.return None
     | Some file -> (
-        match Checkpoint.load file with
+        match Checkpoint.resolve file with
         | Error msg -> Machine.raise (Unicorn_failure msg)
-        | Ok cp when not (same cp.digest) ->
-            Machine.raise
-              (Unicorn_failure
-                 (sprintf "the checkpoint %s is of another program" file))
-        | Ok cp when String.equal cp.target (Theory.Target.to_string target)
-          -> (
-            match model_problem s cp with
+        | Ok resolved -> (
+            let target = Theory.Target.to_string target in
+            let problem =
+              List.zip_exn resolved.chain resolved.states
+              |> List.find_map
+                   ~f:(fun ((link : Checkpoint.link), (cp : Checkpoint.t)) ->
+                     if not (same cp.digest) then
+                       Some
+                         (sprintf "the checkpoint %s is of another program"
+                            link.file)
+                     else if not (String.equal cp.target target) then
+                       Some
+                         (sprintf "the checkpoint %s is of the target %s"
+                            link.file cp.target)
+                     else model_problem s cp)
+            in
+            match problem with
             | Some msg -> Machine.raise (Unicorn_failure msg)
-            | None -> Machine.return (Some cp))
-        | Ok cp ->
-            Machine.raise
-              (Unicorn_failure
-                 (sprintf "the checkpoint %s is of the target %s" file cp.target))
-        )
+            | None -> Machine.return (Some resolved.checkpoint)))
 
   (* the subroutines, whose code the other components replaced, stop
      Unicorn *)

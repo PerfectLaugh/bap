@@ -2467,6 +2467,15 @@ module Std : sig
           @since 2.6.0 *)
       module Snapshot : sig
         type t [@@deriving bin_io]
+        type delta [@@deriving bin_io]
+
+        val diff : t -> t -> delta
+        (** [diff parent child] is the delta that transforms [parent] into
+            [child]. Byte changes are grouped by their 4 KiB pages. *)
+
+        val apply : t -> delta -> t
+        (** [apply parent delta] applies [delta] to [parent]. For a delta made
+            by [diff parent child], the result is exactly [child]. *)
 
         val values : t -> (addr * word) list
         (** [values snapshot] the bytes, that the machine stored, by their
