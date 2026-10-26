@@ -142,6 +142,31 @@ let dirty () =
   dirty Ppc Uc.Mode.(ppc32 + big_endian) "\x90\x85\x00\x00" ("4", "5", "pc");
   dirty Riscv Uc.Mode.riscv64 "\x23\x30\xb6\x00" ("a1", "a2", "pc")
 
+let read_values () =
+  with_engine Ppc Uc.Mode.(ppc32 + big_endian) "\x80\x85\x00\x00" @@ fun uc ->
+  let data = 0x10000L in
+  Uc.mem_map uc data 0x1000L Uc.Perm.all;
+  Uc.mem_write uc data "\x11\x22\x33\x44";
+  Uc.reg_write uc (reg Ppc "5") data;
+  let trace = Uc.Trace.create ~accesses:16 ~read_values:true 16 in
+  let _ = Uc.trace ~memory:true uc trace in
+  Uc.start uc code ~until:(Int64.add code 4L);
+  check "big-endian loaded register" 0x11223344L (Uc.reg_read uc (reg Ppc "4"));
+  let accesses = Uc.Trace.accesses trace in
+  if Bigarray.Array2.dim1 accesses <> 1 then
+    failwith
+      (Printf.sprintf "read_values: wrong access count %d (%Ld total)"
+         (Bigarray.Array2.dim1 accesses)
+         (Uc.Trace.accesses_count trace));
+  let open Bigarray.Array2 in
+  check "big-endian loaded bytes" 0x44332211L (get accesses 0 2);
+  if
+    not
+      (Int64.equal
+         Int64.(logand (shift_right_logical (get accesses 0 3) 33) 1L)
+         1L)
+  then failwith "read_values: the loaded value is unavailable"
+
 let error () =
   let uc = Uc.create X86 Uc.Mode.mode64 in
   match Uc.mem_map uc 0x1001L 0x1000L Uc.Perm.all with
@@ -157,6 +182,7 @@ let () =
   exn ();
   stop ();
   dirty ();
+  read_values ();
   error ();
   let major, minor = Uc.version () in
   Printf.printf "Unicorn %d.%d: ok\n" major minor

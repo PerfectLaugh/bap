@@ -51,13 +51,14 @@ static uint64_t ring_size(intnat n) {
 #define MAX_RING ((intnat)1 << 36)
 
 value bap_native_trace_create(value size, value every, value blocks,
-                              value accesses) {
-    CAMLparam4(size, every, blocks, accesses);
+                              value accesses, value read_values) {
+    CAMLparam5(size, every, blocks, accesses, read_values);
     CAMLlocal1(r);
     struct bap_native_trace *t = calloc(1, sizeof(struct bap_native_trace));
     if (t == NULL) {
         caml_raise_out_of_memory();
     }
+    t->read_values = Bool_val(read_values);
     if (Long_val(size) > MAX_RING || Long_val(accesses) > MAX_RING) {
         free(t);
         caml_invalid_argument("Bap_unicorn.Trace.create: too large");
@@ -177,8 +178,11 @@ value bap_native_trace_access(value tv, value write, value addr, value size,
     a->pc = t->sizes != NULL ? Int64_val(pc) : 0;
     a->addr = Int64_val(addr);
     a->size = Long_val(size);
-    a->write = Bool_val(write);
-    a->value = Bool_val(write) ? (uint64_t)Int64_val(x) : 0;
+    a->write = Bool_val(write) |
+               (!Bool_val(write) && t->read_values && Long_val(size) <= 8 ? 2 : 0);
+    a->value = Bool_val(write) || (t->read_values && Long_val(size) <= 8)
+                   ? (uint64_t)Int64_val(x)
+                   : 0;
     a->old = Bool_val(write) ? (uint64_t)Int64_val(old) : 0;
     a->tid = t->tid;
     t->accesses++;
@@ -307,6 +311,10 @@ value bap_native_trace_accesses_count(value tv) {
 
 value bap_native_trace_blocks(value tv) {
     return Val_bool(Bap_native_trace_val(tv)->sizes != NULL);
+}
+
+value bap_native_trace_read_values(value tv) {
+    return Val_bool(Bap_native_trace_val(tv)->read_values);
 }
 
 value bap_native_trace_clear(value tv) {
@@ -489,7 +497,7 @@ value bap_native_trace_ranges(value tv) {
 /* Compatibility with the former Unicorn-owned trace implementation. */
 value bap_uc_trace_create(value size, value every, value blocks,
                           value accesses) {
-    return bap_native_trace_create(size, every, blocks, accesses);
+    return bap_native_trace_create(size, every, blocks, accesses, Val_false);
 }
 
 value bap_uc_trace_count(value tv) { return bap_native_trace_count(tv); }

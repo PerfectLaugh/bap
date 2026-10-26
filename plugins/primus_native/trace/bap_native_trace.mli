@@ -9,17 +9,23 @@ type modes =
 
 type accesses = (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array2.t
 (** the accesses, a row each: the index of the instruction, that made it, in all
-    instructions, that the trace recorded, the address, the written value, the
-    size, with the bit 32 set, if it is a write, the program counter of the
-    instruction, in a trace of blocks, the bytes, that a write of at most 8
-    bytes overwrote, the first one in the lowest byte, and the TID *)
+    instructions, that the trace recorded, the address, the written value, or
+    the loaded value if bit 33 is set, the size, with bit 32 set for a write,
+    the program counter of the instruction in a trace of blocks, the bytes that
+    a write of at most 8 bytes overwrote, the first one in the lowest byte, and
+    the TID *)
 
-val create : ?every:int -> ?blocks:bool -> ?accesses:int -> int -> t
+val create :
+  ?every:int -> ?blocks:bool -> ?accesses:int -> ?read_values:bool -> int -> t
 (** [create size] the trace of the last [size] instructions, at least, as the
     ring has the size of a power of two, of every [every] one, by default of
     all, or of the first instructions of the blocks, with their sizes, if
     [blocks], and of the last [accesses] accesses to the memory, at least, by
-    default of none. *)
+    default of none. If [read_values], successful reads of at most eight bytes
+    record their values. *)
+
+val read_values : t -> bool
+(** if successful reads record their values *)
 
 val blocks : t -> bool
 (** if it is a trace of blocks *)
@@ -94,7 +100,9 @@ module Record : sig
 
   val access : t -> bool -> int64 -> int -> int64 -> int64 -> int64 -> unit
   (** [access trace write addr size value old pc] records the access of the
-      instruction at [pc], the [old] bytes of a write, as {!accesses}. *)
+      instruction at [pc], the [old] bytes of a write, as {!accesses}. If read
+      values are enabled, [value] contains the loaded bytes of a read of at most
+      eight bytes, the first one in the lowest byte. *)
 
   val unrun : t -> int64 -> unit
   (** [unrun trace pc] the instruction at [pc], that the trace recorded last,

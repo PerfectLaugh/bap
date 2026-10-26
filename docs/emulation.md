@@ -384,11 +384,13 @@ The script's own code doesn't run at the prompt, as the script is compiled to na
 
 | Function | Action |
 |----------|--------|
-| `Trace.start ?size ?blocks ?every ?accesses ?first ?last emu` | record the last `size` instructions, by default 2^20, or only the blocks with `~blocks:true`, or every `every`-th instruction, and the last `accesses` loads and stores |
+| `Trace.start ?size ?blocks ?every ?accesses ?read_values ?first ?last emu` | record the last `size` instructions, by default 2^20, or only the blocks with `~blocks:true`, or every `every`-th instruction, and the last `accesses` loads and stores; with `~read_values:true`, retain successful loaded values |
 | `Trace.insns ?last trace` | the program counters of the last instructions, also of a trace of blocks, whose blocks are decoded once |
 | `Trace.pcs`, `Trace.tids` | the recorded program counters and their effective TIDs, in aligned arrays |
 | `Trace.save ?last trace file` | write the recorded program counters, one in hex a line |
 | `Trace.count`, `Trace.accesses`, `Trace.stop` | the number of records, the recorded accesses with their TIDs, and the end of recording |
+
+With `~read_values:true`, each successful read of one to eight bytes has `access.read_value = Some value`, where the byte at the lowest address occupies the lowest byte and unused upper bits are zero. This is independent of target endianness and of signed register extension. Wider, failed, or partial reads and all writes have `read_value = None`; `value` and `old` retain their existing write meanings. Leaving the option disabled preserves the previous read hooks, records, and overhead.
 
 `Trace.capture emu sites` records the registers at the sites, by default the registers, that the C ABI passes the arguments in, e.g., `X0` to `X7`, each time the program reaches one of them, in a ring of its own, so that a long run doesn't lose them, e.g., to map the arguments of a function from the sites of its calls, `Trace.calls`, in one run; `Trace.captured` lists them, the oldest first. Calls and conditional branches are records with their effective `thread`. `Trace.calls ~thread:tid` and `Trace.branches ~thread:tid` select one TID, and neither query derives a call or branch from adjacent records of different TIDs.
 

@@ -1190,6 +1190,23 @@ let emu data =
             ("slices the blocks", "slice of blocks: " ^ slice);
             ("has the gap of the blocks", "gap at main: true, complete: false\n");
           ]);
+    case "emu/read-values" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/read-values.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+            ]
+        in
+        let check engine blocks =
+          has env "records read values and their disabled defaults" out
+            (engine ^ " blocks " ^ blocks
+           ^ ": enabled and disabled read values are correct\n")
+        in
+        List.iter
+          (fun engine -> List.iter (check engine) [ "false"; "true" ])
+          [ "unicorn"; "lifted" ]);
     (* structured comparison is deterministic and works on the traces of both
        engines, including the memory criteria for the slices *)
     case "emu/compare" (fun env ->
@@ -3281,9 +3298,11 @@ let engines data =
           in
           List.iter
             (fun blocks ->
-              has env "records the same instructions and accesses" out
+              has env "records the same instructions, accesses, and read values"
+                out
                 ("blocks " ^ blocks
-               ^ ": the instructions are the same true, the accesses true"))
+               ^ ": the instructions are the same true, the accesses true, \
+                  read values true"))
             [ "false"; "true" ]))
     [
       "x86_64-linux-gnu";

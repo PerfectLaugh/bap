@@ -40,6 +40,7 @@ struct bap_native_trace {
     uint64_t skip;
     uint64_t accesses;
     uint64_t amask;
+    int read_values;
     struct bap_native_trace_access *mem;
     uint64_t marks;
     uint64_t *bounds;

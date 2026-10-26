@@ -584,6 +584,8 @@ value bap_uc_regs(value arch) {
 
 static void fixup(struct engine *e);
 static void mark(struct engine *e);
+static int read_pc(uc_engine *uc, uc_arch arch, uint64_t *pc);
+static void invalidate_read_values(struct engine *e, uint64_t pc, int known);
 
 /* The signals, whose OCaml handlers are pending, stop the engine, that
    runs, as OCaml runs its handlers only, when its code runs, e.g., in
@@ -723,6 +725,11 @@ value bap_uc_emu_start(value v, value start, value until, value timeout,
                               Int64_val(until), usec, Long_val(count));
     last_interrupted = unwatch();
     e->running = 0;
+    if (err != UC_ERR_OK) {
+        uint64_t pc = 0;
+        int known = read_pc(e->uc, e->arch, &pc);
+        invalidate_read_values(e, pc, known);
+    }
     fixup(e);
     if (e->exn != Val_unit) {
         exn = e->exn;
@@ -812,11 +819,34 @@ static void on_mem(uc_engine *uc, uc_mem_type type, uint64_t addr, int size,
     CAMLreturn0;
 }
 
+static int read_pc(uc_engine *uc, uc_arch arch, uint64_t *pc);
+
+static void invalidate_read_values(struct engine *e, uint64_t pc, int known) {
+    for (struct hook *h = e->hooks; h != NULL; h = h->next) {
+        struct bap_native_trace *t = h->trace;
+        if (t == NULL || t->count == 0) continue;
+        uint64_t last = t->count - 1;
+        for (uint64_t i = t->accesses; i > 0; i--) {
+            struct bap_native_trace_access *a = &t->mem[(i - 1) & t->amask];
+            if (a->insn != last) break;
+            if (known && t->sizes != NULL && a->pc != pc) continue;
+            if (!(a->write & 1)) {
+                a->write = 0;
+                a->value = 0;
+            }
+        }
+    }
+}
+
 static bool on_mem_event(uc_engine *uc, uc_mem_type type, uint64_t addr,
                          int size, int64_t x, void *data) {
     CAMLparam0();
     CAMLlocalN(args, 4);
     CAMLlocal1(r);
+    struct hook *h = data;
+    uint64_t pc = 0;
+    int known = read_pc(uc, h->engine->arch, &pc);
+    invalidate_read_values(h->engine, pc, known);
     mem_args(args, type, addr, size, x);
     r = call(data, 4, args);
     CAMLreturnT(bool, r != Val_unit && Bool_val(r));
@@ -1100,8 +1130,22 @@ static void trace_mem(uc_engine *uc, uc_mem_type type, uint64_t addr,
     }
     a->addr = addr;
     a->size = size;
-    a->write = type == UC_MEM_WRITE;
-    a->value = type == UC_MEM_WRITE ? (uint64_t)x : 0;
+    int write = type == UC_MEM_WRITE;
+    int read_value = !write && t->read_values && size <= 8;
+    uint64_t value = (uint64_t)x;
+    if (read_value) {
+        uint8_t bytes[8];
+        if (uc_mem_read(uc, addr, bytes, size) == UC_ERR_OK) {
+            value = 0;
+            for (int i = 0; i < size; i++) {
+                value |= (uint64_t)bytes[i] << (8 * i);
+            }
+        } else {
+            read_value = 0;
+        }
+    }
+    a->write = write | (read_value ? 2 : 0);
+    a->value = write || read_value ? value : 0;
     a->old = 0;
     a->tid = t->tid;
     if (type == UC_MEM_WRITE && size <= 8 && h->engine->code.size > 0 &&
@@ -1310,7 +1354,8 @@ value bap_uc_trace_add(value v, value tv, value kind, value start,
             caml_invalid_argument("Unicorn.trace: no accesses are recorded");
         }
         callback = trace_mem;
-        type = UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE;
+        type = t->read_values ? UC_HOOK_MEM_READ_AFTER | UC_HOOK_MEM_WRITE
+                              : UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE;
         break;
     case TRACE_MODE:
         /* only ARM has the modes, and its trace of the code, as the one

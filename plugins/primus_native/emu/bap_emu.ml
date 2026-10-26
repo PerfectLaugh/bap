@@ -1656,8 +1656,8 @@ module Trace = struct
 
   (* the hooks are native, see [Engine.trace], and go to the new engines too,
      until the trace stops *)
-  let start ?(size = 1 lsl 20) ?every ?(blocks = false) ?(accesses = 0) ?watch
-      ?first ?last emu =
+  let start ?(size = 1 lsl 20) ?every ?(blocks = false) ?(accesses = 0)
+      ?(read_values = false) ?watch ?first ?last emu =
     let accesses =
       if Option.is_some watch && accesses = 0 then 1 lsl 16 else accesses
     in
@@ -1670,7 +1670,9 @@ module Trace = struct
       invalid_arg
         "Bap_emu.Trace.start: the accesses are recorded only with all \
          instructions, or blocks";
-    let trace = Engine.Trace.create ?every ~blocks ~accesses size in
+    let trace =
+      Engine.Trace.create ?every ~blocks ~accesses ~read_values size
+    in
     let blocks = Int64.Table.create () in
     let t =
       {
@@ -1720,6 +1722,7 @@ module Trace = struct
     write : bool;
     value : int64;
     old : int64;
+    read_value : int64 option;
     thread : int;
   }
 
@@ -1730,6 +1733,10 @@ module Trace = struct
       insn = get rows i 0;
       addr = get rows i 1;
       value = get rows i 2;
+      read_value =
+        (if Int64.(shift_right_logical info 33 land 1L = 1L) then
+           Some (get rows i 2)
+         else None);
       size = Int64.(to_int_exn (info land 0xFFFF_FFFFL));
       write = Int64.(shift_right_logical info 32 land 1L = 1L);
       pc = get rows i 4;

@@ -393,6 +393,7 @@ module Trace : sig
     ?every:int ->
     ?blocks:bool ->
     ?accesses:int ->
+    ?read_values:bool ->
     ?watch:int64 * int64 ->
     ?first:int64 ->
     ?last:int64 ->
@@ -417,6 +418,12 @@ module Trace : sig
       a long run, e.g., to find, who writes a slot of a queue, while the program
       spins on it, with a trace of the blocks, which costs the least, and
       {!slice} doesn't follow the memory in such a trace.
+
+      If [read_values], successful reads of one to eight bytes also record their
+      loaded bytes, zero-extended with the byte at the lowest address in the
+      lowest byte. Reads wider than eight bytes, failed or partial reads, and
+      all writes have no loaded value. It is false by default, preserving the
+      existing read hooks and access records.
 
       Raises [Invalid_argument], if [accesses] is positive, or a range is
       watched, and the instructions are sampled, or the ones of a range are
@@ -471,6 +478,10 @@ module Trace : sig
     old : int64;
         (** the bytes, that a write of at most 8 bytes overwrote, the first one
             in the lowest byte *)
+    read_value : int64 option;
+        (** the successfully loaded bytes, zero-extended with the first one in
+            the lowest byte, if {!start} enabled [read_values] and the read was
+            one to eight bytes; otherwise [None] *)
     thread : int;  (** the effective TID, which made the access *)
   }
 

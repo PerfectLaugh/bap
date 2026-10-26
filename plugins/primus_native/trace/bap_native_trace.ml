@@ -7,8 +7,11 @@ type modes =
 
 type accesses = (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array2.t
 
-external create : int -> int -> bool -> int -> t = "bap_native_trace_create"
+external create : int -> int -> bool -> int -> bool -> t
+  = "bap_native_trace_create"
+
 external count : t -> int64 = "bap_native_trace_count"
+external read_values : t -> bool = "bap_native_trace_read_values"
 external retained : t -> int = "bap_native_trace_retained"
 external retained_accesses : t -> int = "bap_native_trace_retained_accesses"
 external accesses_count : t -> int64 = "bap_native_trace_accesses_count"
@@ -43,8 +46,9 @@ external save : t -> int -> string -> int64 = "bap_native_trace_save"
 external bounds : t -> pcs = "bap_native_trace_bounds"
 external ranges : t -> pcs = "bap_native_trace_ranges"
 
-let create ?(every = 1) ?(blocks = false) ?(accesses = 0) size =
-  create size every blocks accesses
+let create ?(every = 1) ?(blocks = false) ?(accesses = 0) ?(read_values = false)
+    size =
+  create size every blocks accesses read_values
 
 let pcs ?(last = -1) t = pcs t last
 let tids ?(last = -1) t = tids t last

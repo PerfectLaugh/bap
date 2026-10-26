@@ -997,7 +997,7 @@ let read_again t addr size =
   List.mem t.reads (addr, size) ~equal:(fun (a, n) (b, m) ->
       Int64.equal a b && n = m)
 
-let trace_access t ~write addr size value old =
+let trace_access t ~write ?data addr size value old =
   let read = (addr, size) in
   let again = (not write) && read_again t addr size in
   if write then
@@ -1009,6 +1009,13 @@ let trace_access t ~write addr size value old =
     each t.by_kind.trace_mem (fun h ->
         match h.kind with
         | Trace_mem tr when covers h addr ->
+            let value =
+              match data with
+              | Some data when Trace.read_values tr && size <= 8 ->
+                  String.foldi data ~init:0L ~f:(fun i x c ->
+                      Int64.(x lor (of_int (Char.to_int c) lsl Int.(8 * i))))
+              | _ -> value
+            in
             Record.access tr write addr size value old t.current
         | _ -> ())
 
@@ -1262,9 +1269,10 @@ let load_value t stores addr endian size =
          write faults after them, see [write_stores] *)
       if (not again) && reads_hooked t addr then ignore (load t addr n : string);
       if not again then mem_hooks t Read addr n 0L;
-      let x = value_of_bytes endian (load t addr n) in
+      let data = load t addr n in
+      let x = value_of_bytes endian data in
       if not again then mem_hooks t Read_after addr n (bits x);
-      trace_access t ~write:false addr n (bits x) 0L;
+      trace_access t ~write:false ~data addr n (bits x) 0L;
       if sh.on then begin
         let taint = ref 0 in
         if not (Hashtbl.is_empty sh.smem) then
