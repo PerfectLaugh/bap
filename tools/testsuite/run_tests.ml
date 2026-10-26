@@ -884,6 +884,43 @@ let emu data =
             ( "keeps call stack statistics after cleanup",
               "valid emulated call stack stats: bounds=4096,max_usage=64\n" );
           ]);
+    case "emu/cold-block" (fun env ->
+        let out =
+          bap ~timeout:300. env
+            [
+              "script";
+              input "emu/cold-block.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              path data "bin/arm-linux-gnueabihf-thumb-crc";
+              path data "bin/aarch64-linux-gnu-echo";
+              path data "bin/powerpc32-linux-gnu-echo";
+            ]
+        in
+        sequence env out
+          [
+            ( "batches straight-line x86",
+              "parity x86 straight-line: [4-8] instructions, 1 vs [4-8] \
+               evaluations\n" );
+            ( "stops at a call",
+              "parity x86 call: 2 instructions, 1 vs 2 evaluations\n" );
+            ( "bounds the bytes",
+              "parity x86 byte budget: 2 instructions, 1 vs 2 evaluations\n" );
+            ( "keeps the Thumb decoder state",
+              "parity Thumb IT: [3-8] instructions, 1 vs [3-8] evaluations\n" );
+            ( "lifts little-endian AArch64",
+              "parity AArch64 little endian: [2-8] instructions, 1 vs [2-8] \
+               evaluations\n" );
+            ( "lifts big-endian PowerPC",
+              "parity PowerPC big endian: [2-8] instructions, 1 vs [2-8] \
+               evaluations\n" );
+            ( "preserves undefined instructions",
+              "undefined instruction: no BIR in named or block\n" );
+            ( "keeps the native trajectory",
+              "running: 8 instructions, identical call/jump trajectory, \
+               patched result 9\n" );
+            ( "uses fewer native evaluations",
+              "lifted lifter: 7 toplevel evaluations\n" );
+          ]);
     (* the calls of the trace, by their sites, with their targets, from
        the traces of the instructions, and of the blocks, see calls.ml *)
     case "emu/calls" (fun env ->

@@ -1925,12 +1925,12 @@ let taint_info t ~pc ~next blks =
     shadowed = compile ~shadow:t.shadow t ~pc ~next blks;
   }
 
-(* the bytes of the instruction at [pc], at most [max] of them, which
-   the instruction may fetch *)
+(* the bytes at [pc], which the lifter may use for its bounded block, with
+   the reads ending at an unmapped or non-executable byte *)
 let fetch t pc =
   let p = page_for t `fetch pc 1 0L in
   ignore p;
-  let max = 16 in
+  let max = 64 in
   let rec bytes i acc =
     if i = max then acc
     else

@@ -18,6 +18,15 @@ val named :
   string ->
   (int * string * blk term list) option KB.t
 
+val block :
+  ?encoding:Theory.language ->
+  budget:int ->
+  count:int ->
+  project ->
+  int64 ->
+  string ->
+  (int * Theory.language * string * blk term list) list KB.t
+
 val undefined :
   ?encoding:Theory.language -> project -> int64 -> string -> string option KB.t
 

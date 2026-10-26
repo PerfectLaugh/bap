@@ -291,6 +291,47 @@ let named ?encoding proj addr code =
     >>| Option.map ~f:(fun (size, _, name, blks) -> (size, name, blks)))
     (fun _ -> KB.return None)
 
+let leaves blks =
+  let inside tid = List.exists blks ~f:(fun b -> Tid.equal (Term.tid b) tid) in
+  List.exists blks ~f:(fun blk ->
+      Term.enum jmp_t blk
+      |> Seq.exists ~f:(fun jmp ->
+          match Jmp.kind jmp with
+          | Goto (Direct tid) -> not (inside tid)
+          | Goto (Indirect _) | Ret _ | Call _ | Int _ -> true))
+
+let block ?encoding ~budget ~count proj addr code =
+  let open KB.Syntax in
+  let rec lift_run addr offset used remaining acc =
+    if used = budget || remaining = 0 || offset = String.length code then
+      KB.return (List.rev acc)
+    else
+      KB.catch
+        (lift ?encoding proj addr (String.drop_prefix code offset))
+        (fun _ -> KB.return None)
+      >>= function
+      | None -> KB.return (List.rev acc)
+      | Some (size, coding, name, blks)
+        when size > 0
+             && used + size <= budget
+             && offset + size <= String.length code -> (
+          let previous =
+            match acc with [] -> None | (_, coding, _, _) :: _ -> Some coding
+          in
+          match previous with
+          | Some previous when not (Theory.Language.equal previous coding) ->
+              KB.return (List.rev acc)
+          | _ ->
+              let acc = (size, coding, name, blks) :: acc in
+              if leaves blks then KB.return (List.rev acc)
+              else
+                lift_run
+                  Int64.(addr + of_int size)
+                  (offset + size) (used + size) (remaining - 1) acc)
+      | Some _ -> KB.return (List.rev acc)
+  in
+  if budget <= 0 || count <= 0 then KB.return [] else lift_run addr 0 0 count []
+
 type entry = {
   code : string;
   encoding : Theory.language option;  (** that the caller asked for *)

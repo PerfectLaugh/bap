@@ -1443,6 +1443,10 @@ end
 
 let lifter ?cache ~arm project =
   let state = ref None in
+  let evaluations = ref 0 in
+  if Option.is_some (Sys.getenv "BAP_LIFTED_STATS") then
+    at_exit (fun () ->
+        Printf.eprintf "lifted lifter: %d toplevel evaluations\n%!" !evaluations);
   let names = Tid.Table.create () in
   let entries = Hashtbl.Poly.create () in
   let history = Hashtbl.Poly.create () in
@@ -1604,6 +1608,7 @@ let lifter ?cache ~arm project =
      dropped knowledge made, e.g., of the calls, are made anew, see
      [fresh] *)
   let in_state f =
+    incr evaluations;
     let toplevel = Toplevel.current () in
     Toplevel.set (Option.value !state ~default:toplevel);
     let started = clock () in
@@ -1613,6 +1618,53 @@ let lifter ?cache ~arm project =
           state := Some (Toplevel.current ());
         Toplevel.set toplevel)
       ~f
+  in
+  (* the instruction is kept for the engines of the session, e.g., of the
+     forks, and for the cache, if there is one, with the labels of its calls
+     made anew, see [fresh] *)
+  let store ~thumb addr code (size, _, name, blks) =
+    if size <= 0 || size > String.length code then None
+    else begin
+      called blks;
+      let calls =
+        List.concat_map blks ~f:(fun blk ->
+            Term.enum jmp_t blk |> Seq.to_list
+            |> List.filter_map ~f:(fun jmp ->
+                match Jmp.kind jmp with
+                | Call call -> (
+                    match Call.target call with
+                    | Direct tid ->
+                        Option.map (Hashtbl.find names tid) ~f:(fun name ->
+                            (tid, name))
+                    | Indirect _ -> None)
+                | _ -> None))
+      in
+      let e =
+        fresh
+          {
+            Lifts.addr;
+            thumb;
+            code = String.prefix code size;
+            size;
+            name;
+            (* the engine doesn't read the attributes, e.g., the instructions,
+               which are most of the file *)
+            blks =
+              List.map blks ~f:(fun blk ->
+                  let blk =
+                    Term.map def_t blk ~f:(fun t ->
+                        Term.with_attrs t Dict.empty)
+                    |> Term.map jmp_t ~f:(fun t -> Term.with_attrs t Dict.empty)
+                  in
+                  Term.with_attrs blk Dict.empty);
+            calls;
+          }
+      in
+      Hashtbl.set entries ~key:(addr, thumb) ~data:(e, ref true);
+      touch (addr, thumb);
+      dirty := true;
+      Some e
+    end
   in
   let lift ~thumb addr code =
     match Hashtbl.find entries (addr, thumb) with
@@ -1629,67 +1681,36 @@ let lifter ?cache ~arm project =
         touch (addr, thumb);
         Some (e.size, e.name, e.blks)
     | _ ->
-        let result = ref None in
+        let result = ref [] in
         in_state (fun () ->
             try
               Toplevel.exec
                 KB.Syntax.(
-                  Primus.Lift.named
+                  Primus.Lift.block ~budget:64 ~count:8
                     ?encoding:
                       (if arm then Primus.Interworking.encoding ~thumb else None)
                     project addr code
-                  >>| fun insn ->
-                  result := insn;
-                  Option.iter insn ~f:(fun (_, _, blks) -> called blks))
+                  >>| fun insns -> result := insns)
             with _ -> ());
-        (* the instruction is kept for the engines of the session, e.g., of
-           the forks, and for the cache, if there is one, with the labels
-           of its calls made anew, see [fresh] *)
-        Option.map !result ~f:(fun (size, name, blks) ->
-            if size <= String.length code then begin
-              let calls =
-                List.concat_map blks ~f:(fun blk ->
-                    Term.enum jmp_t blk |> Seq.to_list
-                    |> List.filter_map ~f:(fun jmp ->
-                        match Jmp.kind jmp with
-                        | Call call -> (
-                            match Call.target call with
-                            | Direct tid ->
-                                Option.map (Hashtbl.find names tid)
-                                  ~f:(fun name -> (tid, name))
-                            | Indirect _ -> None)
-                        | _ -> None))
-              in
-              let e =
-                fresh
-                  {
-                    Lifts.addr;
-                    thumb;
-                    code = String.prefix code size;
-                    size;
-                    name;
-                    (* the engine doesn't read the attributes, e.g., the
-                       instructions, which are most of the file *)
-                    blks =
-                      List.map blks ~f:(fun blk ->
-                          let blk =
-                            Term.map def_t blk ~f:(fun t ->
-                                Term.with_attrs t Dict.empty)
-                            |> Term.map jmp_t ~f:(fun t ->
-                                Term.with_attrs t Dict.empty)
-                          in
-                          Term.with_attrs blk Dict.empty);
-                    calls;
-                  }
-              in
-              Hashtbl.set entries ~key:(addr, thumb) ~data:(e, ref true);
-              remember e;
-              touch (addr, thumb);
-              trim ();
-              dirty := true;
-              (size, name, e.blks)
-            end
-            else (size, name, blks))
+        let rec continuations addr code = function
+          | [] -> []
+          | ((size, _, _, _) as insn) :: rest -> (
+              match store ~thumb addr code insn with
+              | None -> []
+              | Some e ->
+                  e
+                  :: continuations
+                       Int64.(addr + of_int size)
+                       (String.drop_prefix code size)
+                       rest)
+        in
+        let saved = continuations addr code !result in
+        trim ();
+        (* only the requested instruction ran; the continuations enter the
+           history when their own cache entries are hit *)
+        Option.map (List.hd saved) ~f:(fun e ->
+            remember e;
+            (e.size, e.name, e.blks))
   in
   (* the entries of the cache, that no instruction of this run hit, are
      not lifted in it, see [fresh] *)
