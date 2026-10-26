@@ -1573,6 +1573,18 @@ let executed_at ?thumb t pc =
 
 let insn_at ?thumb t pc = executed_at ?thumb t pc
 
+let lift_with_history ?bytes ?(executed_bytes = false) ~thumb t pc =
+  match lift ?bytes ~thumb t pc with
+  | Some (size, blks) when size > 0 && not (List.is_empty blks) ->
+      Some (size, blks)
+  | _ when executed_bytes -> (
+      match executed_at ~thumb t pc with
+      | Some { bytes; bir; _ }
+        when (not (String.is_empty bytes)) && not (List.is_empty bir) ->
+          Some (String.length bytes, bir)
+      | _ -> None)
+  | _ -> None
+
 (* the addresses of the instructions, that the lifted engine ran, also
    before the checkpoint, from which the program continues, with the
    lower bit set in the Thumb state of ARM *)
@@ -1617,6 +1629,13 @@ let lifted_bytes ?thumb t addr n =
   in
   collect addr;
   String.prefix (Buffer.contents buf) n
+
+type decode_failure = {
+  index : int64;
+  pc : int64;
+  block : int64 option;
+  thread : int;
+}
 
 module Trace = struct
   type emu = t
@@ -1757,38 +1776,62 @@ module Trace = struct
 
   (* the instructions of the block of [size] bytes at [addr], in the
      mode, which are decoded once, as the sizes of the instructions, that
-     are lifted *)
-  let block t ~thumb addr size =
+     are lifted, and the instruction, at which decoding failed *)
+  let block t ~executed_bytes ~thumb addr size =
     let key = if thumb then Int64.(addr lor 1L) else addr in
-    let known = Option.value (Hashtbl.find t.blocks key) ~default:[] in
+    let known =
+      if executed_bytes then []
+      else Option.value (Hashtbl.find t.blocks key) ~default:[]
+    in
     match List.Assoc.find known size ~equal:Int.equal with
-    | Some insns -> insns
+    | Some insns -> (insns, None)
     | None ->
         let last = Int64.(addr + of_int size) in
         (* the block, whose instruction can't be lifted, e.g., as its
            page isn't in Unicorn yet, ends there, and isn't cached, so
            that it is decoded again *)
         let rec loop pc acc =
-          if Int64.(pc >= last) then (Array.of_list_rev acc, true)
+          if Int64.(pc >= last) then (Array.of_list_rev acc, None)
           else
-            match lift ~thumb t.emu pc with
+            match lift_with_history ~executed_bytes ~thumb t.emu pc with
             | Some (n, _) when n > 0 -> loop Int64.(pc + of_int n) (pc :: acc)
-            | _ -> (Array.of_list_rev (pc :: acc), false)
+            | _ -> (Array.of_list_rev (pc :: acc), Some pc)
         in
-        let insns, complete = loop addr [] in
-        if complete then Hashtbl.set t.blocks ~key ~data:((size, insns) :: known);
-        insns
+        let insns, failed = loop addr [] in
+        (* recovered instructions don't enter the current-byte cache *)
+        if Option.is_none failed && not executed_bytes then
+          Hashtbl.set t.blocks ~key ~data:((size, insns) :: known);
+        (insns, failed)
 
   type words = (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t
 
   let words n : words =
     Bigarray.Array1.create Bigarray.int64 Bigarray.c_layout n
 
+  type decode_status = Decoded | Decode_failed
+
+  type window_instruction = {
+    index : int64;
+    pc : int64;
+    block : int64 option;
+    thread : int;
+    decode : decode_status;
+  }
+
+  type expanded_window = {
+    pcs : words;
+    records : words;
+    modes : Engine.Trace.modes;
+    tids : words;
+    sources : int64 option array;
+    failures : decode_failure list;
+  }
+
   (* the program counters of the instructions of the last [last] records,
      their global record indices, modes, and TIDs, also of the instructions,
      into which the blocks expand *)
-  let window ?(records = true) ?thread ?last t :
-      words * words * Engine.Trace.modes * words =
+  let expanded_window ?(records = true) ?(executed_bytes = false) ?thread ?last
+      t =
     let raw_pcs = pcs ?last t in
     let raw_tids = tids ?last t in
     let raw_modes = Engine.Trace.modes ?last t.trace in
@@ -1819,15 +1862,22 @@ module Trace = struct
       if records then
         Array.iteri selected ~f:(fun i raw ->
             Bigarray.Array1.unsafe_set indices i Int64.(first + of_int raw));
-      (pcs, indices, modes, selected_tids)
+      {
+        pcs;
+        records = indices;
+        modes;
+        tids = selected_tids;
+        sources = Array.create ~len:n None;
+        failures = [];
+      }
     end
     else
       let sizes = sizes ?last t in
       (* the blocks of the loops repeat, so they are cached by the lower
          bits of their addresses first *)
       let slots = 4096 in
-      let cache = Array.create ~len:slots (-1L, -1, [||]) in
-      let insns =
+      let cache = Array.create ~len:slots (-1L, -1, [||], None) in
+      let expanded =
         Array.init n ~f:(fun i ->
             let thumb = Bigarray.Array1.unsafe_get modes i = 1 in
             let addr = Bigarray.Array1.unsafe_get pcs i in
@@ -1837,33 +1887,84 @@ module Trace = struct
                 (Bigarray.Array1.unsafe_get sizes (Array.unsafe_get selected i))
             in
             let slot = Int64.to_int_trunc key land (slots - 1) in
-            let a, sz, b = Array.unsafe_get cache slot in
-            if Int64.(a = key) && sz = size then b
+            let a, sz, b, failed = Array.unsafe_get cache slot in
+            if Int64.(a = key) && sz = size then (b, failed)
             else
-              let b = block t ~thumb addr size in
-              Array.unsafe_set cache slot (key, size, b);
-              b)
+              let b, failed = block t ~executed_bytes ~thumb addr size in
+              Array.unsafe_set cache slot (key, size, b, failed);
+              (b, failed))
       in
-      let total = Array.sum (module Int) insns ~f:Array.length in
+      let total =
+        Array.sum (module Int) expanded ~f:(fun (b, _) -> Array.length b)
+      in
       let out = words total
       and out_tids = words total
       and indices = words (if records then total else 0)
-      and expanded =
+      and decoded_modes =
         Bigarray.Array1.create Bigarray.int8_unsigned Bigarray.c_layout total
       in
-      let pos = ref 0 in
-      Array.iteri insns ~f:(fun i b ->
+      let sources = Array.create ~len:total None in
+      let failures = ref [] and pos = ref 0 in
+      Array.iteri expanded ~f:(fun i (b, failed) ->
           let record = Int64.(first + of_int (Array.unsafe_get selected i)) in
           let mode = Bigarray.Array1.unsafe_get modes i in
           let tid = Bigarray.Array1.unsafe_get selected_tids i in
+          let addr = Bigarray.Array1.unsafe_get pcs i in
           for j = 0 to Array.length b - 1 do
             Bigarray.Array1.unsafe_set out (!pos + j) (Array.unsafe_get b j);
             Bigarray.Array1.unsafe_set out_tids (!pos + j) tid;
-            Bigarray.Array1.unsafe_set expanded (!pos + j) mode;
-            if records then Bigarray.Array1.unsafe_set indices (!pos + j) record
+            Bigarray.Array1.unsafe_set decoded_modes (!pos + j) mode;
+            if records then Bigarray.Array1.unsafe_set indices (!pos + j) record;
+            Array.unsafe_set sources (!pos + j) (Some addr)
           done;
+          Option.iter failed ~f:(fun pc ->
+              failures :=
+                {
+                  index = record;
+                  pc;
+                  block = Some addr;
+                  thread = Int64.to_int_exn tid;
+                }
+                :: !failures);
           pos := !pos + Array.length b);
-      (out, indices, expanded, out_tids)
+      {
+        pcs = out;
+        records = indices;
+        modes = decoded_modes;
+        tids = out_tids;
+        sources;
+        failures = List.rev !failures;
+      }
+
+  let window ?(records = true) ?thread ?last t :
+      words * words * Engine.Trace.modes * words =
+    let w = expanded_window ~records ?thread ?last t in
+    (w.pcs, w.records, w.modes, w.tids)
+
+  let inspect ?(executed_bytes = false) ?thread ?last t =
+    let w = expanded_window ~executed_bytes ?thread ?last t in
+    let failed = Hashtbl.Poly.create () in
+    List.iter w.failures ~f:(fun f ->
+        Hashtbl.add_exn failed ~key:(f.index, f.pc) ~data:());
+    List.init (Bigarray.Array1.dim w.pcs) ~f:(fun i ->
+        let index = Bigarray.Array1.unsafe_get w.records i in
+        let pc = Bigarray.Array1.unsafe_get w.pcs i in
+        let thumb = Bigarray.Array1.unsafe_get w.modes i = 1 in
+        let decode =
+          if Hashtbl.mem failed (index, pc) then Decode_failed
+          else if blocks t then Decoded
+          else
+            match lift_with_history ~executed_bytes ~thumb t.emu pc with
+            | Some (size, _) when size > 0 -> Decoded
+            | _ -> Decode_failed
+        in
+        {
+          index;
+          pc;
+          block = Array.unsafe_get w.sources i;
+          thread = Int64.to_int_exn (Bigarray.Array1.unsafe_get w.tids i);
+          decode;
+        })
 
   let insns ?last t =
     if blocks t then
@@ -2133,11 +2234,19 @@ let record ?size t f =
 type location = Bap_emu_slice.location = Reg of string | Mem of int64 * int
 type step = { index : int64; pc : int64; thread : int }
 
+type empty_slice_reason =
+  | No_dataflow
+  | Unresolved_inputs
+  | Outside_trace_writes
+  | Instruction_decode
+
 type slice = {
   steps : step list;
   live : location list;
   gaps : int64 list;
   complete : bool;
+  reason : empty_slice_reason option;
+  decode_failures : decode_failure list;
 }
 
 (* The registers, that an instruction writes, and, for the ones, that are
@@ -2386,11 +2495,17 @@ let ranges bytes =
    The instructions of a trace of blocks are of their blocks, and their
    accesses are found by their program counters. The instructions are
    lifted once, from the bytes, that they have now, outside of the
-   machine, as in the hooks. *)
-let slice ?(addresses = false) ?window ?thread (tr : Trace.t) criterion =
+   machine, as in the hooks, or from the executed history, if their
+   current bytes don't decode and [executed_bytes] is set. *)
+let slice ?(addresses = false) ?(executed_bytes = false) ?window ?thread
+    (tr : Trace.t) criterion =
   let t = tr.emu in
-  let pcs, records, modes, tids = Trace.window ?thread ?last:window tr in
+  let w = Trace.expanded_window ~executed_bytes ?thread ?last:window tr in
+  let pcs, records, modes, tids = (w.pcs, w.records, w.modes, w.tids) in
   let n = Bigarray.Array1.dim pcs in
+  let decode_failures = Hashtbl.Poly.create () in
+  List.iter w.failures ~f:(fun f ->
+      Hashtbl.set decode_failures ~key:(f.index, f.pc) ~data:f);
   let blocks = Trace.blocks tr in
   let rows = Engine.Trace.accesses tr.trace in
   let rows_n = Bigarray.Array2.dim1 rows in
@@ -2528,8 +2643,8 @@ let slice ?(addresses = false) ?window ?thread (tr : Trace.t) criterion =
     let now () =
       let key = if thumb then Int64.(pc lor 1L) else pc in
       Hashtbl.find_or_add lifted key ~default:(fun () ->
-          Option.map (lift ~thumb t pc) ~f:(fun (size, blks) ->
-              Insn.of_blks size blks))
+          Option.map (lift_with_history ~executed_bytes ~thumb t pc)
+            ~f:(fun (size, blks) -> Insn.of_blks size blks))
     in
     if Hashtbl.is_empty earlier then now ()
     else
@@ -2547,8 +2662,8 @@ let slice ?(addresses = false) ?window ?thread (tr : Trace.t) criterion =
             | None -> c)
       in
       if !changed && !known then
-        Option.map (lift ~thumb ~bytes:old t pc) ~f:(fun (size, blks) ->
-            Insn.of_blks size blks)
+        Option.map (lift_with_history ~executed_bytes ~thumb ~bytes:old t pc)
+          ~f:(fun (size, blks) -> Insn.of_blks size blks)
       else now ()
   in
   (* The instructions of an IT block of Thumb have the conditions, that
@@ -2653,6 +2768,14 @@ let slice ?(addresses = false) ?window ?thread (tr : Trace.t) criterion =
       if thumb then in_order k;
       match insn ~thumb pc with
       | None ->
+          Hashtbl.set decode_failures ~key:(record, pc)
+            ~data:
+              {
+                index = record;
+                pc;
+                block = Array.unsafe_get w.sources k;
+                thread = Int64.to_int_exn (Bigarray.Array1.get tids k);
+              };
           crossed k;
           loop (k - 1) row steps
       | Some i ->
@@ -2708,11 +2831,26 @@ let slice ?(addresses = false) ?window ?thread (tr : Trace.t) criterion =
     @ ranges live_mem
   in
   let gaps = List.rev !gaps in
+  let decode_failures =
+    List.init n ~f:Fn.id
+    |> List.filter_map ~f:(fun k ->
+        let key = (Bigarray.Array1.get records k, Bigarray.Array1.get pcs k) in
+        Hashtbl.find decode_failures key)
+  in
+  let reason =
+    if not (List.is_empty steps) then None
+    else if not (List.is_empty decode_failures) then Some Instruction_decode
+    else if not (List.is_empty gaps) then Some Outside_trace_writes
+    else if not (List.is_empty live) then Some Unresolved_inputs
+    else Some No_dataflow
+  in
   {
     steps;
     live;
     gaps;
     complete = List.is_empty live && List.is_empty gaps && not !untracked;
+    reason;
+    decode_failures;
   }
 
 let observe ~deferred t f = if deferred then defer t (fun t -> f t) else f t

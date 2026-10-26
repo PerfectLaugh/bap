@@ -1225,6 +1225,29 @@ let emu data =
             ]
         in
         golden env "emu/slice.txt" out.text);
+    case "emu/slice-diagnostics" (fun env ->
+        let out =
+          bap ~timeout:60. env
+            [
+              "script";
+              input "emu/slice-diagnostics.ml";
+              path data "bin/aarch64-linux-gnu-echo";
+              path data "bin/x86_64-linux-gnu-slice-weird";
+            ]
+        in
+        sequence env out
+          [
+            ( "recovers a scrubbed instruction trace",
+              "scrubbed instructions: metadata true, explicit true, recovered \
+               true\n" );
+            ( "recovers a scrubbed block trace",
+              "scrubbed blocks: metadata true, explicit true, recovered true\n"
+            );
+            ( "classifies empty slices",
+              "empty reasons: none inputs, complete true\n" );
+            ( "keeps native writes as gaps",
+              "native gap: instructions true, blocks true\n" );
+          ]);
     (* the slices of the odd cases of ARM, of arm-slice-weird.c, in A32 and
        in Thumb, whose modes the traces record, the conditional ones, the
        IT blocks, the loads and stores of multiple registers, by their

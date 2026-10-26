@@ -360,6 +360,16 @@ val lifted_bytes : ?thumb:bool -> t -> int64 -> int -> string
     scrubbed: fewer, than [n], if an instruction after them didn't run, e.g.,
     after a branch, that was never taken, or none. *)
 
+type decode_failure = {
+  index : int64;  (** the global index of the instruction's trace record *)
+  pc : int64;  (** the instruction, that couldn't be decoded *)
+  block : int64 option;
+      (** the source block in a trace of blocks, or [None] in a trace of
+          instructions *)
+  thread : int;  (** the effective TID of the record *)
+}
+(** an instruction, that a slice or the expansion of a block couldn't decode *)
+
 (** The traces of the program counters, which the native hooks of Unicorn record
     in a ring, with no call to OCaml. The trace of the blocks costs the least,
     the program runs about three times slower, and {!Trace.insns} gives the
@@ -487,6 +497,37 @@ module Trace : sig
       default of all, that the ring keeps, the oldest first, of the blocks too,
       whose instructions are decoded once, from the bytes, that they have now *)
 
+  type decode_status = Decoded | Decode_failed
+
+  type window_instruction = {
+    index : int64;  (** the global index of the instruction's trace record *)
+    pc : int64;
+    block : int64 option;
+        (** the block, from which the instruction expands, or [None] in a trace
+            of instructions *)
+    thread : int;  (** the effective TID, which ran the instruction *)
+    decode : decode_status;
+  }
+
+  val inspect :
+    ?executed_bytes:bool ->
+    ?thread:int ->
+    ?last:int ->
+    t ->
+    window_instruction list
+  (** [inspect trace] is the expanded instruction window, that {!slice} uses,
+      with the global record indices, effective TIDs, and decode status of its
+      instructions. In a trace of blocks, [block] is the address of the block,
+      whose expansion produced the instruction, including when decoding stops at
+      a failed instruction.
+
+      Instructions are decoded from their current bytes by default. With
+      [executed_bytes], an instruction, whose current bytes don't decode, is
+      recovered from the executed-instruction history of the lifted engine, see
+      {!insn_at}. This history is unavailable with Unicorn and keeps only the
+      last instruction lifted at each address and mode, not every version that
+      ran. *)
+
   type capture
   (** the registers at the sites, see {!capture} *)
 
@@ -608,6 +649,14 @@ type step = {
   thread : int;  (** the effective TID, which ran the instruction *)
 }
 
+type empty_slice_reason =
+  | No_dataflow
+      (** no location is live, no gap was crossed, and nothing failed *)
+  | Unresolved_inputs  (** initial inputs remain live at the window boundary *)
+  | Outside_trace_writes  (** a live location crossed an outside-write gap *)
+  | Instruction_decode
+      (** an instruction or block expansion couldn't be decoded *)
+
 type slice = {
   steps : step list;  (** the oldest first *)
   live : location list;
@@ -621,10 +670,18 @@ type slice = {
   complete : bool;
       (** if nothing comes from before the window, or from outside of the trace,
           and the memory, that the steps load, is in the trace *)
+  reason : empty_slice_reason option;
+      (** why [steps] is empty, or [None] when it isn't. Decode failure takes
+          precedence over outside writes, which take precedence over unresolved
+          inputs; the existing [live], [gaps], and [complete] retain all their
+          independent information *)
+  decode_failures : decode_failure list;
+      (** the instructions, that couldn't be decoded, in window order *)
 }
 
 val slice :
   ?addresses:bool ->
+  ?executed_bytes:bool ->
   ?window:int ->
   ?thread:int ->
   Trace.t ->
@@ -654,7 +711,15 @@ val slice :
     followed further.
 
     The instructions of a trace of the blocks are those of {!Trace.insns}, and
-    their steps have the indices of their blocks. *)
+    their steps have the indices of their blocks. {!Trace.inspect} exposes the
+    expanded window and its decode status without computing a slice.
+
+    Current or reconstructed bytes remain the default. With [executed_bytes], a
+    failed lift falls back to the executed-instruction history of the lifted
+    engine, see {!insn_at}, for both instruction and block traces. The history
+    is unavailable with Unicorn and is the last lifted instruction at each
+    address and mode, rather than a version for every execution; traced writes
+    remain the more precise source when they can reconstruct an instruction. *)
 
 val primus : t -> Bap_primus.Std.Primus.Machine.component -> unit
 (** [primus emu component] runs the [init] of the [component] in the Primus

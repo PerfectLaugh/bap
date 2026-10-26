@@ -409,6 +409,10 @@ let s = Emu.slice trace [ Emu.Reg "RAX" ] in
 List.iter s.steps ~f:(fun { Emu.pc; _ } -> printf "%Lx\n" pc)
 ```
 
+Before slicing, `Trace.inspect ?thread ?last trace` exposes the exact expanded instruction window: each entry has its PC, global record `index`, effective `thread`, source `block` for a block trace, and `Decoded` or `Decode_failed` status. This checks block chaining and decode assumptions without computing a slice. If `s.steps` is empty, `s.reason` is `Some Instruction_decode`, `Outside_trace_writes`, `Unresolved_inputs`, or `No_dataflow`, in that precedence order when more than one condition holds; it is `None` for a nonempty slice. `s.decode_failures` gives the instruction PC, source block PC when applicable, record index, and TID. The existing `live`, `gaps`, and `complete` fields retain their independent meanings, so no producer is inferred across a gap or a failed instruction.
+
+Instructions still lift from current bytes, or from old bytes reconstructed from traced writes, by default. `Emu.slice ~executed_bytes:true` and `Trace.inspect ~executed_bytes:true` additionally fall back to `insn_at` history when that lifting fails, for both instruction and block traces. Executed history is available only in the lifted engine and keeps the last lifted instruction per PC and mode, not a version for every execution; traced writes remain the more precise source. Use the fallback for code that was scrubbed or overwritten after running, not to change the intentional current-byte default.
+
 The slice handles these cases, see `testsuite/src/slice-weird.c` and the `emu/slice` case of the testsuite:
 
 - The registers and the memory are followed by the byte, e.g., through the partial registers, the overlapping stores, and the bytes, that a later store overwrites, and through the repeated moves, each of whose iterations is a record.
@@ -419,7 +423,7 @@ The slice handles these cases, see `testsuite/src/slice-weird.c` and the `emu/sl
 - The loads and the stores of an instruction are its accesses, in their order, if their sizes are the same, so that a load or a store of multiple registers, e.g., `push` and `pop` of ARM, or `ldrd`, moves each register by its own bytes.
 - On ARM, the traces record the mode of each record, A32 or Thumb, as the program counters of Thumb have no lower bit, and the instructions are lifted in it. The IT blocks of Thumb are lifted in their order, from the IT instruction, as the decoder gives their conditions; the instructions, whose conditions fail, have no records in a trace of the instructions. Unicorn enables VFP and NEON, as Linux does. On AArch64, Unicorn runs its maximal CPU, which has the LSE atomics of ARMv8.1 and later, that the default Cortex-A72 lacks.
 
-The limits: the instructions of a trace of blocks are decoded with the bytes, that the code has now. The patches, that the stubs or the script made, aren't undone. The registers are followed whole, e.g., `AL` of `RAX`, or `S1` of `D0`. An IT block, that starts before the window, isn't known. The slice is of the data, not of the control.
+The limits: without `executed_bytes`, the instructions of a trace of blocks are decoded with the bytes, that the code has now. The patches, that the stubs or the script made, aren't undone. The registers are followed whole, e.g., `AL` of `RAX`, or `S1` of `D0`. An IT block, that starts before the window, isn't known. The slice is of the data, not of the control.
 
 ### Comparing traces
 
