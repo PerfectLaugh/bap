@@ -200,6 +200,10 @@ let running file =
   (match Emu.call emu entry with
   | Some 42L -> ()
   | _ -> failwith "the warm batched function did not return 42");
+  Emu.write emu Int64.(entry + 4L) (word 0xd503201fl);
+  (match Emu.call emu entry with
+  | Some 42L -> ()
+  | _ -> failwith "the patched store continuation did not return 42");
   Emu.write emu callee (mov9 ^ ret);
   (match Emu.call emu entry with
   | Some 9L -> ()
@@ -222,12 +226,13 @@ let () =
       and thumb = Bap_script.project thumb
       and aarch64 = Bap_script.project aarch64
       and powerpc = Bap_script.project powerpc in
-      parity ~minimum:4 "x86 straight-line" x86 0x40076bL
-        (bytes x86 0x40076bL 64);
+      parity ~minimum:4 "x86 straight-line" x86 0x400602L
+        (bytes x86 0x400602L 64);
       parity ~count:16 ~minimum:2 "x86 call" x86 0x40061dL
         (bytes x86 0x40061dL 64);
-      parity ~budget:5 ~minimum:2 "x86 byte budget" x86 0x40076bL
-        (bytes x86 0x40076bL 64);
+      parity ~budget:5 ~minimum:2 "x86 byte budget" x86 0x400602L
+        (bytes x86 0x400602L 64);
+      parity "x86 store boundary" x86 0x40076bL (bytes x86 0x40076bL 64);
       let encoding = Primus.Interworking.encoding ~thumb:true in
       parity ?encoding ~minimum:3 "Thumb IT" thumb 0x2028aL
         (bytes thumb 0x2028aL 64);

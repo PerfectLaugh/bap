@@ -905,6 +905,9 @@ let emu data =
               "parity x86 call: 2 instructions, 1 vs 2 evaluations\n" );
             ( "bounds the bytes",
               "parity x86 byte budget: 2 instructions, 1 vs 2 evaluations\n" );
+            ( "stops at a store",
+              "parity x86 store boundary: 1 instructions, 1 vs 1 evaluations\n"
+            );
             ( "keeps the Thumb decoder state",
               "parity Thumb IT: [3-8] instructions, 1 vs [3-8] evaluations\n" );
             ( "lifts little-endian AArch64",
@@ -919,7 +922,7 @@ let emu data =
               "running: 8 instructions, identical call/jump trajectory, \
                patched result 9\n" );
             ( "uses fewer native evaluations",
-              "lifted lifter: 7 toplevel evaluations\n" );
+              "lifted lifter: 9 toplevel evaluations\n" );
           ]);
     (* the calls of the trace, by their sites, with their targets, from
        the traces of the instructions, and of the blocks, see calls.ml *)

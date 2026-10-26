@@ -2896,9 +2896,11 @@ module Std : sig
       (** [block ~budget ~count project addr code] lifts at most [count]
           instructions, occupying at most [budget] bytes, in one knowledge
           computation. Each result has the size, encoding, name, and IR that
-          {!named} computes at its address. A control-flow instruction is the
-          last result; an encoding change, an undefined or invalid instruction,
-          or exhausted input ends the block before that instruction. *)
+          {!named} computes at its address. A control-flow or memory-writing
+          instruction is the last result, so that self-modifying code doesn't
+          invalidate speculatively lifted continuations. An encoding change, an
+          undefined or invalid instruction, or exhausted input ends the block
+          before that instruction. *)
 
       val undefined :
         ?encoding:Theory.language ->

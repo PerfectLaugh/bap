@@ -300,6 +300,12 @@ let leaves blks =
           | Goto (Direct tid) -> not (inside tid)
           | Goto (Indirect _) | Ret _ | Call _ | Int _ -> true))
 
+let stores blks =
+  List.exists blks ~f:(fun blk ->
+      Term.enum def_t blk
+      |> Seq.exists ~f:(fun def ->
+          match Var.typ (Def.lhs def) with Type.Mem _ -> true | _ -> false))
+
 let block ?encoding ~budget ~count proj addr code =
   let open KB.Syntax in
   let rec lift_run addr offset used remaining acc =
@@ -323,7 +329,7 @@ let block ?encoding ~budget ~count proj addr code =
               KB.return (List.rev acc)
           | _ ->
               let acc = (size, coding, name, blks) :: acc in
-              if leaves blks then KB.return (List.rev acc)
+              if leaves blks || stores blks then KB.return (List.rev acc)
               else
                 lift_run
                   Int64.(addr + of_int size)
