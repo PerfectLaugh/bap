@@ -1017,11 +1017,11 @@ val call :
     the target has no such register, or the program no such thread, or the
     function failed, e.g., with a segmentation fault, after which the program is
     paused where it was, as before the call. A successful call frees its
-    temporary stack and forgets its bytes. A failed call restores the outer
-    registers and frames but retains the stack allocation and its bytes, so
-    failed-state reads and checkpoints preserve the callee's stack-local values
-    for diagnosis. The retained allocation lives until the emulator is
-    discarded. *)
+    temporary stack and forgets its bytes. A call that starts and then fails
+    restores the outer registers and frames but retains the stack allocation and
+    its bytes, so failed-state reads and checkpoints preserve the callee's
+    stack-local values for diagnosis. Setup failures use the same cleanup as
+    returns. The retained allocation lives until the emulator is discarded. *)
 
 (** the outcome of {!drive} *)
 type called =

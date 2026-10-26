@@ -6317,13 +6317,15 @@ module Make (Machine : Primus.Machine.S) = struct
       let size = (Option.value stack ~default:0x10000 + 15) land lnot 15 in
       let* base = Threads.Windows.allocate e size in
       let top = Int64.(base + of_int size) in
+      let started = ref false in
       (* the registers and frames are restored whether the function returned
          or failed. A returned function's stack is freed and its bytes are
          forgotten, as they were never stored, so that calls don't exhaust the
          heap and the memory differs from a snapshot only in what the function
          stored elsewhere, see [Bap_emu.diff]. A failed function's stack stays
          allocated with its bytes for failed-state diagnostics and checkpoints,
-         until the emulator is discarded. *)
+         until the emulator is discarded. Setup failures use the same cleanup as
+         returns. *)
       let finish ~failed () =
         let* active = Machine.Local.get call_sites in
         let* () =
@@ -6429,6 +6431,7 @@ module Make (Machine : Primus.Machine.S) = struct
           sync_stack_hook e;
           let* () = Machine.Local.put frames (frame :: pending) in
           let* () = Machine.Local.put calls ((callee, None) :: called) in
+          started := true;
           let* () = loop start in
           let result =
             Option.map output ~f:(fun exp -> int64_of_word (eval_engine e exp))
@@ -6437,7 +6440,7 @@ module Make (Machine : Primus.Machine.S) = struct
           Ok (Option.value result ~default:0L)
       in
       Machine.catch (run ()) (fun exn ->
-          let+ () = finish ~failed:true () in
+          let+ () = finish ~failed:(!started) () in
           Error (Primus.Exn.to_string exn))
   end
 
