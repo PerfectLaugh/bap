@@ -58,8 +58,16 @@ exception Unsupported of string
 let page_size = 0x1000L
 let page_of addr = Int64.(addr land lnot (page_size - 1L))
 
+type call_stack = {
+  site_pc : int64;
+  lower : int64;
+  upper : int64;
+  mutable lowest_sp : int64;
+}
+
 type reason =
   | Returned
+  | Stack of call_stack * int64 * int64
   | Foreign of int64
   | Fault of Uc.access * int64
   | Interrupt of int  (** an interrupt or a system call *)
@@ -234,6 +242,9 @@ type engine = {
   mutable reason : reason option;
   mutable frames : frame list;
       (** the pending returns of the machine that runs, see [frames] *)
+  mutable stack : call_stack option;
+      (** the stack of the innermost call of the script, see [call_sites] *)
+  mutable stack_hook : Uc.hook option;
   returns : unit Int64.Table.t;
       (** the addresses of the hooks of the returns, which stay, as the
           addresses are few *)
@@ -723,12 +734,17 @@ type call_site = {
   site_calls : (string option * string option) list;  (** see [calls] *)
   site_basis : (var * word) list;  (** the registers, without the aliases *)
   site_extra : (int * string) list;  (** the extra registers *)
+  site_stack : call_stack;
 }
 
 (* the calls, that run, the innermost first *)
 let call_sites : call_site list Primus.Machine.State.t =
   Primus.Machine.State.declare ~uuid:"2f6c9e18-7a3b-4d50-b1e4-9c8d0a5f3e27"
     ~name:"unicorn-call-sites" (fun _ -> [])
+
+let last_call_stack : call_stack option Primus.Machine.State.t =
+  Primus.Machine.State.declare ~uuid:"81a12951-9257-4e1d-b1f4-e16ae56319ab"
+    ~name:"unicorn-last-call-stack" (fun _ -> None)
 
 (* the Lisp stubs, that the machine runs, the innermost first *)
 let lisp_calls : string list Primus.Machine.State.t =
@@ -1121,6 +1137,42 @@ let nop (arch : Uc.arch) ~big_endian =
 let halt_at e reason =
   e.reason <- Some reason;
   Uc.stop e.uc
+
+let stack_error (stack : call_stack) pc sp =
+  sprintf
+    "emulated call stack exhausted at PC 0x%Lx (outer call-site PC 0x%Lx): SP \
+     0x%Lx is outside [0x%Lx,0x%Lx)"
+    pc stack.site_pc sp stack.lower stack.upper
+
+let note_stack stack sp =
+  if Stdlib.Int64.unsigned_compare sp stack.lowest_sp < 0 then
+    stack.lowest_sp <- sp
+
+let check_native_stack e pc =
+  match e.stack with
+  | None -> ()
+  | Some stack -> (
+      match Target.Regs.read e.regs e.sp with
+      | None -> ()
+      | Some value ->
+          let sp = int64_of_word value in
+          note_stack stack sp;
+          if
+            Stdlib.Int64.unsigned_compare sp stack.lower < 0
+            || Stdlib.Int64.unsigned_compare sp stack.upper >= 0
+          then halt_at e (Stack (stack, pc, sp)))
+
+let sync_stack_hook e =
+  match (e.stack, e.stack_hook) with
+  | Some _, None ->
+      e.stack_hook <-
+        Some (Uc.on_code e.uc (fun pc _ -> check_native_stack e pc));
+      Uc.flush_tb e.uc
+  | None, Some hook ->
+      Uc.delete e.uc hook;
+      e.stack_hook <- None;
+      Uc.flush_tb e.uc
+  | _ -> ()
 
 (* the stops of the system, as they were, when Unicorn started, see
    [Make.sync_stops] *)
@@ -1773,6 +1825,8 @@ let create session target ~foreign ~externals =
       owner = None;
       reason = None;
       frames = [];
+      stack = None;
+      stack_hook = None;
       returns = Int64.Table.create ();
       synced = String.Table.create ();
       written = [];
@@ -3709,8 +3763,11 @@ module Make (Machine : Primus.Machine.S) = struct
     let* () =
       if claimed then map_code e >>= fun () -> push e else Machine.return ()
     in
-    let+ pending = Machine.Local.get frames in
+    let* pending = Machine.Local.get frames in
+    let+ sites = Machine.Local.get call_sites in
     e.frames <- pending;
+    e.stack <- Option.map (List.hd sites) ~f:(fun site -> site.site_stack);
+    sync_stack_hook e;
     (match pending with top :: _ -> ensure_return e top.ret | [] -> ());
     e
 
@@ -3728,16 +3785,21 @@ module Make (Machine : Primus.Machine.S) = struct
       (if Option.equal Int64.equal s.stopped_at (Some (code_addr e pc)) then
          s.stopped_at
        else None);
+    check_native_stack e pc;
     let error =
-      try
-        Uc.start e.uc pc ?count ~thread
-          ?timeout:
-            (Option.map deadline ~f:(fun t ->
-                 Int.max 1 (Float.iround_up_exn ((t -. clock ()) *. 1e6))));
-        None
-      with Uc.Error (_, msg) -> Some msg
+      match e.reason with
+      | Some _ -> None
+      | None -> (
+          try
+            Uc.start e.uc pc ?count ~thread
+              ?timeout:
+                (Option.map deadline ~f:(fun t ->
+                     Int.max 1 (Float.iround_up_exn ((t -. clock ()) *. 1e6))));
+            None
+          with Uc.Error (_, msg) -> Some msg)
     in
     e.runs <- e.runs + 1;
+    if Option.is_none e.reason then check_native_stack e (current_pc e);
     s.stopped_at <- Some (code_addr e (current_pc e));
     (* the handlers of the signals run, e.g., of the script, which may
        pause the program, and else it continues *)
@@ -5819,6 +5881,19 @@ module Make (Machine : Primus.Machine.S) = struct
       ] ~f:(fun prefix -> String.is_prefix name ~prefix)
     || List.mem [ "SC"; "SCD"; "SC64"; "SCD64" ] name ~equal:String.equal
 
+  let check_interpreted_stack e pc =
+    match e.stack with
+    | None -> Machine.return ()
+    | Some stack ->
+        let* value = Env.get e.sp in
+        let sp = int64_of_word (Primus.Value.to_word value) in
+        note_stack stack sp;
+        if
+          Stdlib.Int64.unsigned_compare sp stack.lower < 0
+          || Stdlib.Int64.unsigned_compare sp stack.upper >= 0
+        then Machine.raise (Unicorn_failure (stack_error stack pc sp))
+        else Machine.return ()
+
   (* Primus interprets the instructions from [pc], see [trace], while
      they continue, see [continues], and returns the address of the next
      one, which on ARM stays in the Thumb state, unless the jump sets the
@@ -5837,6 +5912,7 @@ module Make (Machine : Primus.Machine.S) = struct
     let stopped = ref false and linked = ref false in
     let rec run pc n =
       let insn = pc in
+      let* () = check_interpreted_stack e insn in
       lift ~thumb:(in_thumb e pc) e (code_addr e pc) >>= function
       | None -> unrunnable e pc "can't interpret the instruction"
       (* the instruction, that Unicorn left to Primus, e.g., as it
@@ -5909,6 +5985,7 @@ module Make (Machine : Primus.Machine.S) = struct
                     let+ dst = Interpreter.step ~next blks in
                     int64_of_word (Primus.Value.to_word dst))
           in
+          let* () = check_interpreted_stack e insn in
           (* the store, that is conditional on the load, that Primus
              interpreted, is interpreted too, as Unicorn has no
              reservation of the load *)
@@ -6046,6 +6123,13 @@ module Make (Machine : Primus.Machine.S) = struct
          snapshot only in what the function stored elsewhere, see
          [Bap_emu.diff], and the registers are as before the call *)
       let finish () =
+        let* active = Machine.Local.get call_sites in
+        let* () =
+          match active with
+          | site :: _ ->
+              Machine.Local.put last_call_stack (Some site.site_stack)
+          | [] -> Machine.return ()
+        in
         let* () = Machine.Local.put frames pending in
         let* () = Machine.Local.put calls called in
         let* () = Machine.Local.put call_sites sites in
@@ -6058,7 +6142,9 @@ module Make (Machine : Primus.Machine.S) = struct
           Machine.List.iter (List.init size ~f:Fn.id) ~f:(fun i ->
               Memory.del (word e Int64.(base + of_int i)))
         in
-        pull e
+        let+ () = pull e in
+        e.stack <- Option.map (List.hd sites) ~f:(fun site -> site.site_stack);
+        sync_stack_hook e
       in
       let run () =
         let* () =
@@ -6072,6 +6158,9 @@ module Make (Machine : Primus.Machine.S) = struct
              pointer, which is aligned, at the call *)
           let room = (64 + (8 * List.length args) + 15) land lnot 15 in
           let sp = Int64.(top - of_int room) in
+          let bounds =
+            { site_pc = pc; lower = base; upper = top; lowest_sp = sp }
+          in
           let start =
             match e.arch with
             | Arm
@@ -6127,9 +6216,13 @@ module Make (Machine : Primus.Machine.S) = struct
                  site_calls = called;
                  site_basis = fst saved;
                  site_extra = snd saved;
+                 site_stack = bounds;
                }
               :: sites)
           in
+          let* () = Machine.Local.put last_call_stack (Some bounds) in
+          e.stack <- Some bounds;
+          sync_stack_hook e;
           let* () = Machine.Local.put frames (frame :: pending) in
           let* () = Machine.Local.put calls ((callee, None) :: called) in
           let* () = loop start in
@@ -6650,6 +6743,8 @@ module Make (Machine : Primus.Machine.S) = struct
                 in
                 loop pc
             | Some (Jump pc), _ -> loop pc
+            | Some (Stack (stack, at, sp)), _ ->
+                pull e >>= fun () -> fail "%s" (stack_error stack at sp)
             | Some (Fault (access, addr)), _ -> (
                 Threads.returned e addr >>= function
                 | Some pc -> loop pc

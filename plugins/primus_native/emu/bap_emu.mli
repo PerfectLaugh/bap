@@ -897,6 +897,12 @@ val call :
     so that a script runs a routine, e.g., a codec, or a dispatcher, with the
     inputs of its choice, as many times as it likes.
 
+    The stack pointer is checked against the allocated stack before and after
+    native and Primus-interpreted instructions. If it leaves the stack, the call
+    fails with [emulated call stack exhausted], identifying the instruction and
+    outer call-site PCs, SP, and bounds. The check covers nested calls and
+    engine recreation; no stack grows beyond its allocation.
+
     Returns [None], if the program paused in the function, e.g., as a hook
     stopped it, or as it waits on a futex, which the other threads, that don't
     run in the call, would wake, see {!drive}, or ended, see {!status}; {!run}
@@ -1562,6 +1568,13 @@ val thread_journal : t -> event list
     switches record both TIDs and the resume PC. This runtime journal is
     separate from the bounded model-event journal kept in checkpoints. *)
 
+type stack_stats = {
+  lower : int64;  (** inclusive lower bound of the call stack *)
+  upper : int64;  (** exclusive upper bound of the call stack *)
+  lowest_sp : int64;  (** lowest SP observed at an instruction boundary *)
+  max_usage : int64;  (** [upper - lowest_sp] *)
+}
+
 type execution_stats = {
   instructions : int64;  (** fresh guest instructions since subscription *)
   lifted_blocks : int;  (** BIR blocks currently retained by the engine *)
@@ -1569,11 +1582,16 @@ type execution_stats = {
   hook_dispatches : int;  (** cumulative native write-hook dispatches *)
   rss : int option;  (** process resident bytes, where available *)
   last_pc : int64;  (** guest PC at the report pause *)
+  stack : stack_stats option;
+      (** the innermost active or most recently finished {!call}/{!drive} stack
+      *)
 }
 
 val execution_stats : t -> execution_stats
-(** [execution_stats emu] captures the counters of the paused emulator. Raises
-    [Invalid_argument] if the program is not paused. *)
+(** [execution_stats emu] captures the counters of the paused emulator. [stack]
+    describes the innermost active call stack, or the most recently finished one
+    after its allocation has been cleaned up; it is [None] before the first
+    call. Raises [Invalid_argument] if the program is not paused. *)
 
 type stats_subscription
 

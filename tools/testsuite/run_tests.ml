@@ -875,6 +875,14 @@ let emu data =
               "written 405000: 5 bytes\n.*RAX := 0x2A\n" );
             ( "returns from the synthetic AArch64 stub",
               "synthetic AArch64 stub returned 42\n" );
+            ( "branches backward across high pages",
+              "high backward B returned 42 via 50001000,48001000\n" );
+            ( "restores the outer call after a nested call",
+              "nested emulated calls restored outer stack and result\n" );
+            ( "checks the emulated call stack",
+              "tiny emulated call stack reported exhaustion\n" );
+            ( "keeps call stack statistics after cleanup",
+              "valid emulated call stack stats: bounds=4096,max_usage=64\n" );
           ]);
     (* the calls of the trace, by their sites, with their targets, from
        the traces of the instructions, and of the blocks, see calls.ml *)

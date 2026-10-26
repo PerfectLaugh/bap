@@ -99,6 +99,13 @@ type t = {
   shell : shell_state;
 }
 
+type stack_stats = {
+  lower : int64;
+  upper : int64;
+  lowest_sp : int64;
+  max_usage : int64;
+}
+
 type execution_stats = {
   instructions : int64;
   lifted_blocks : int;
@@ -106,6 +113,7 @@ type execution_stats = {
   hook_dispatches : int;
   rss : int option;
   last_pc : int64;
+  stack : stack_stats option;
 }
 
 type stats_subscription = {
@@ -3365,6 +3373,31 @@ let execution_stats t =
   if not (paused t) then not_paused ~fn:"execution_stats" t;
   let last_pc = pc t in
   let active_threads = List.length (threads t) in
+  let stack = ref None in
+  primus t
+    (module functor
+              (Machine : Primus.Machine.S)
+              ->
+              struct
+                open Machine.Syntax
+
+                let init () =
+                  Machine.Local.get X.call_sites >>= fun sites ->
+                  Machine.Local.get X.last_call_stack >>| fun last ->
+                  let current =
+                    match sites with
+                    | (site : X.call_site) :: _ -> Some site.site_stack
+                    | [] -> last
+                  in
+                  stack :=
+                    Option.map current ~f:(fun (s : X.call_stack) ->
+                        {
+                          lower = s.lower;
+                          upper = s.upper;
+                          lowest_sp = s.lowest_sp;
+                          max_usage = Int64.(s.upper - s.lowest_sp);
+                        })
+              end);
   let _, lifted_blocks, _ = Uc.inventory (engine t).uc in
   {
     instructions = t.instructions;
@@ -3373,6 +3406,7 @@ let execution_stats t =
     hook_dispatches = t.write_dispatches;
     rss = rss ();
     last_pc;
+    stack = !stack;
   }
 
 let start_stats t ~interval callback =

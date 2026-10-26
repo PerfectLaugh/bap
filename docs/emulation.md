@@ -421,6 +421,8 @@ match Emu.call emu decrypt ~args:[ buf; 16L ] with
 
 A function, that a hook pauses, continues with `run`, after which the program pauses where it was, with the result in `returned emu`. A snapshot before the call undoes its memory effects, and `diff emu snapshot` lists them, see below. `call` raises `Failure` if the function can't be called, e.g., the C ABI of the target is unknown, or if it fails, e.g., with a segmentation fault, after which the program is paused where it was.
 
+The stack is bounded by its allocation. Native and Primus-interpreted execution check SP before and after instructions, including nested calls and recreated engines. Leaving the allocated range fails with `emulated call stack exhausted`, with the fault PC, outer call-site PC, SP, and lower/upper bounds, rather than a later unrelated memory fault. Stacks never grow to accommodate an underflow.
+
 `record emu (fun () -> Emu.call emu f ~args)` runs the call with a trace of its own, and gives its result, or the message of its failure, with the trace, whose `Trace.branches` are the conditional branches, that the callee took, in their order, with the address each went to, and whether it was taken, so one call tells, which check rejected its inputs:
 
 ```ocaml
@@ -754,7 +756,7 @@ let check emu =
 
 A wrapper, that is killed, e.g., `timeout`, or a task runner, leaves bap running, so a long run installs its own watchdog: `start_deadline ~code:124 seconds` terminates the actual BAP process even while native execution holds the OCaml runtime lock, and `cancel_deadline` disarms it. Expiry is an immediate operating-system process exit, not a guest pause or a checkpoint opportunity.
 
-`start_stats emu ~interval callback` counts fresh guest instructions and pauses briefly at each interval to report current lifted blocks, active threads, native write-hook dispatches, RSS, and last guest PC. The callback runs in a safe paused state; `stop_stats` removes the hook and suppresses pending reports. `execution_stats emu` captures the same record on demand while paused.
+`start_stats emu ~interval callback` counts fresh guest instructions and pauses briefly at each interval to report current lifted blocks, active threads, native write-hook dispatches, RSS, and last guest PC. The callback runs in a safe paused state; `stop_stats` removes the hook and suppresses pending reports. `execution_stats emu` captures the same record on demand while paused. Its optional `stack` record describes the innermost active or most recently finished call stack, with `lower`, `upper`, `lowest_sp`, and `max_usage = upper - lowest_sp`; the record remains available after the call frees its allocation.
 
 `start_maintenance emu ~interval ()` uses the same safe periodic pauses for opt-in maintenance. `~lift_cache_limit:n` installs a session-lifter bound once, `~forget_lifts:true` forgets accumulated lifts at each report, `~reclaim_blocks:true` flushes translated blocks for later retranslation, and `~compact_heap:true` calls `Gc.compact`. For example:
 
