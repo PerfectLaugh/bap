@@ -16,9 +16,7 @@
   bap-primus
   bap-primus-lisp.softfloat
   bap-primus-native.engine
-  bap-primus-native.engine-unicorn
   bap-primus-native.trace
-  bap-primus-native.unicorn
   core
   mtime.clock
   zarith))

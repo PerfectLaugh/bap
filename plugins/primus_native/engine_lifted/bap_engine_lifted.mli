@@ -1,4 +1,7 @@
-(** The lifted backend of {!Bap_engine}. *)
+(** The lifted backend of {!Bap_engine}.
+
+    The engine uses the backend-neutral physical register layouts and reset
+    states of {!Bap_engine.Register}; it has no Unicorn dependency. *)
 
 exception Error of int * string
 

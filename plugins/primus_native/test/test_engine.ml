@@ -7,8 +7,9 @@ let finish = 0x1002L
 
 let reg name =
   Option.value_exn
-    (Bap_engine_unicorn.reg Engine.X86 name)
+    (Engine.Register.by_name Engine.X86 ~bits:32 name)
     ~message:("no register " ^ name)
+  |> fun r -> r.id
 
 let check name expected got =
   if Int64.(expected <> got) then
@@ -43,6 +44,72 @@ let config : Bap_engine_lifted.config =
     jit = false;
     cache = None;
   }
+
+let layout_config arch bits pc : Bap_engine_lifted.config =
+  {
+    config with
+    lift = (fun ~thumb:_ _ _ -> None);
+    locate =
+      (fun name ->
+        Option.map (Engine.Register.by_name arch ~bits name) ~f:(fun r ->
+            (r.id, 0, r.size * 8)));
+    pc;
+    bits;
+  }
+
+let check_bytes label expected got =
+  if not (String.equal expected got) then
+    failwithf "%s: register bytes differ" label ()
+
+let compare_layouts label arch bits mode =
+  let raw = Bap_unicorn.create arch mode in
+  Exn.protect
+    ~finally:(fun () -> Bap_unicorn.close raw)
+    ~f:(fun () ->
+      let regs = Bap_unicorn.regs arch in
+      let pc = snd (List.hd_exn regs) in
+      let lifted =
+        Bap_engine_lifted.create (layout_config arch bits pc) arch mode
+      in
+      Exn.protect
+        ~finally:(fun () -> Engine.close lifted)
+        ~f:(fun () ->
+          List.iter regs ~f:(fun (name, id) ->
+              let expected = Bap_unicorn.reg_size raw id in
+              let got = Engine.reg_size lifted id in
+              if expected <> got then
+                failwithf "%s: %s: expected width %d, got %d" label name
+                  expected got ();
+              let expected =
+                if Poly.equal arch Engine.Arm64 && String.equal name "PSTATE"
+                then Bap_unicorn.reg_read_bytes raw id
+                else String.make expected '\000'
+              in
+              check_bytes
+                (label ^ ":" ^ name)
+                expected
+                (Engine.reg_read_bytes lifted id));
+          let id, size =
+            List.fold regs ~init:(pc, 0)
+              ~f:(fun ((_, best) as current) (_, id) ->
+                let size = Bap_unicorn.reg_size raw id in
+                if size > best then (id, size) else current)
+          in
+          let initial_raw = Bap_unicorn.reg_read_bytes raw id in
+          let initial_lifted = Engine.reg_read_bytes lifted id in
+          let saved_raw = Bap_unicorn.save raw in
+          let saved_lifted = Engine.save lifted in
+          let changed = String.make size '\x5a' in
+          Bap_unicorn.reg_write_bytes raw id changed;
+          Engine.reg_write_bytes lifted id changed;
+          Bap_unicorn.restore raw saved_raw;
+          Engine.restore saved_lifted;
+          check_bytes (label ^ ":raw context") initial_raw
+            (Bap_unicorn.reg_read_bytes raw id);
+          check_bytes
+            (label ^ ":lifted context")
+            initial_lifted
+            (Engine.reg_read_bytes lifted id)))
 
 let exercise name uc =
   Exn.protect
@@ -106,4 +173,20 @@ let () =
       match Engine.taint_start uc with
       | exception Invalid_argument _ -> ()
       | () -> failwith "Unicorn unexpectedly propagated taint");
+  List.iter
+    [
+      ("x86-16", Engine.X86, 16, Engine.Mode.mode16);
+      ("x86-32", Engine.X86, 32, Engine.Mode.mode32);
+      ("x86-64", Engine.X86, 64, Engine.Mode.mode64);
+      ("arm", Engine.Arm, 32, Engine.Mode.(arm + little_endian));
+      ("arm64-le", Engine.Arm64, 64, Engine.Mode.(arm + little_endian));
+      ("arm64-be", Engine.Arm64, 64, Engine.Mode.(arm + big_endian));
+      ("mips32", Engine.Mips, 32, Engine.Mode.(mips32 + little_endian));
+      ("mips64", Engine.Mips, 64, Engine.Mode.(mips64 + little_endian));
+      ("ppc32", Engine.Ppc, 32, Engine.Mode.(ppc32 + big_endian));
+      ("ppc64", Engine.Ppc, 64, Engine.Mode.(ppc64 + big_endian));
+      ("riscv32", Engine.Riscv, 32, Engine.Mode.riscv32);
+      ("riscv64", Engine.Riscv, 64, Engine.Mode.riscv64);
+    ]
+    ~f:(fun (label, arch, bits, mode) -> compare_layouts label arch bits mode);
   print_endline "engine adapters: ok"

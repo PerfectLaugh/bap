@@ -43,6 +43,42 @@ module Cpu = struct
   let mips64_i6400 = 8
 end
 
+module Register = struct
+  type t = { id : int; size : int; reset : int64 option }
+
+  let tables =
+    lazy
+      (let names = Hashtbl.create 4096 and ids = Hashtbl.create 4096 in
+       List.iter
+         (fun (entry : Bap_engine_registers.entry) ->
+           let arch =
+             match entry.arch with
+             | `Arm -> Arm
+             | `Arm64 -> Arm64
+             | `Mips -> Mips
+             | `Ppc -> Ppc
+             | `Riscv -> Riscv
+             | `X86 -> X86
+           in
+           let value =
+             { id = entry.id; size = entry.size; reset = entry.reset }
+           in
+           let name = (arch, entry.bits, String.uppercase_ascii entry.name) in
+           if not (Hashtbl.mem names name) then Hashtbl.add names name value;
+           let id = (arch, entry.bits, entry.id) in
+           if not (Hashtbl.mem ids id) then Hashtbl.add ids id value)
+         Bap_engine_registers.entries;
+       (names, ids))
+
+  let by_name arch ~bits name =
+    let names, _ = Lazy.force tables in
+    Hashtbl.find_opt names (arch, bits, String.uppercase_ascii name)
+
+  let by_id arch ~bits id =
+    let _, ids = Lazy.force tables in
+    Hashtbl.find_opt ids (arch, bits, id)
+end
+
 module Trace = Bap_native_trace
 
 type taint = int

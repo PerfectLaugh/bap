@@ -17,7 +17,7 @@
 
 open Core
 open Bap.Std
-module Uc = Bap_unicorn
+module Engine = Bap_engine
 module Trace = Bap_native_trace
 
 type config = {
@@ -42,8 +42,9 @@ type kind =
   | Interrupt of (int -> unit)
   | Invalid_insn of (unit -> bool)
   | Unsupported of (int64 -> unit)
-  | Mem of Uc.access list * (Uc.access -> int64 -> int -> int64 -> unit)
-  | Mem_invalid of Uc.access list * (Uc.access -> int64 -> int -> int64 -> bool)
+  | Mem of Engine.access list * (Engine.access -> int64 -> int -> int64 -> unit)
+  | Mem_invalid of
+      Engine.access list * (Engine.access -> int64 -> int -> int64 -> bool)
   | Trace_code of Trace.t  (** records the instructions, or the blocks *)
   | Trace_mem of Trace.t  (** records the accesses *)
 
@@ -91,7 +92,7 @@ let no_hooks =
    the JIT compiled, access them, see Bap_lifted_jit *)
 type page = {
   data : Bigstring.t;
-  mutable perm : Uc.Perm.t;
+  mutable perm : Engine.Perm.t;
   mutable code : (int64 * int64 * int64) list;
       (** the blocks, that the JIT compiled, whose bytes are on the page, their
           addresses, and the first and the last address of their bytes, which
@@ -217,12 +218,10 @@ type shadow = {
 
 type t = {
   config : config;
-  arch : Uc.arch;
+  arch : Engine.arch;
   cpsr : int option;  (** CPSR of ARM, whose bit T is the Thumb state *)
   regs : Bytes.t Int.Table.t;
   sizes : int Int.Table.t;
-  probe : Uc.t Lazy.t;  (** the Unicorn, whose registers have the sizes *)
-  reset : int list;  (** the registers, that start as the reset of Unicorn *)
   others : word String.Table.t;  (** the registers, that are not mapped *)
   pages : page Int64.Table.t;
   insns : insn Int64.Table.t;
@@ -264,7 +263,7 @@ type t = {
   shadow : shadow;
 }
 
-exception Fault of Uc.access * int64
+exception Fault of Engine.access * int64
 
 (* the instruction, that the engine can't run *)
 exception Unsupported_insn of string
@@ -352,7 +351,7 @@ let page_size = 0x1000L
 let page_of addr = Int64.(addr land lnot (page_size - 1L))
 
 let error code fmt =
-  Printf.ksprintf (fun msg -> raise (Uc.Error (code, msg))) fmt
+  Printf.ksprintf (fun msg -> raise (Engine.Error (code, msg))) fmt
 
 (* the codes of the errors of Unicorn *)
 let uc_err_read_unmapped = 6
@@ -363,32 +362,19 @@ let uc_err_write_prot = 12
 let uc_err_read_prot = 13
 let uc_err_fetch_prot = 14
 
-(* the registers, that start with their values of the reset of Unicorn,
-   rather than 0: PSTATE of AArch64, whose masks of DAIF are set, and
-   whose SPSel selects SP_EL1, as Unicorn runs at EL1. The others, e.g.,
-   FCSR of RISC-V, which Unicorn doesn't read, while the floats are off,
-   are 0. *)
-let reset_regs arch =
-  match (arch : Uc.arch) with
-  | Arm64 -> List.filter_opt [ Bap_engine_unicorn.reg arch "PSTATE" ]
-  | Arm | X86 | Mips | Ppc | Riscv -> []
-
-let create config arch mode =
-  (* the sizes of the registers are the ones of Unicorn, which is asked
-     about the registers, that are used *)
-  let probe = lazy (Uc.create arch mode) in
+let create config arch _mode =
   let t =
     {
       config;
       arch;
       cpsr =
         (match arch with
-        | Arm -> Bap_engine_unicorn.reg arch "CPSR"
+        | Arm ->
+            Option.map (Engine.Register.by_name arch ~bits:config.bits "CPSR")
+              ~f:(fun r -> r.id)
         | _ -> None);
       regs = Int.Table.create ();
       sizes = Int.Table.create ();
-      probe;
-      reset = reset_regs arch;
       others = String.Table.create ();
       pages = Int64.Table.create ();
       insns = Int64.Table.create ();
@@ -440,7 +426,7 @@ let create config arch mode =
                gen = 0;
                traced = false;
                native = false;
-               whole = not (Poly.equal arch Uc.Arm);
+               whole = not (Poly.equal arch Engine.Arm);
                jitted = 0;
                compiles = Int64.Table.create ();
                live = 0;
@@ -465,7 +451,6 @@ let create config arch mode =
 let check t = if t.closed then invalid_arg "the engine is closed"
 
 let close t =
-  if Lazy.is_val t.probe then Uc.close (Lazy.force t.probe);
   Option.iter t.jit ~f:(fun j ->
       Hashtbl.iter j.blocks ~f:(function
         | Compiled b -> Bap_llvm_jit.release b.native
@@ -476,25 +461,34 @@ let close t =
 
 (* the registers *)
 
+let register t id =
+  match Engine.Register.by_id t.arch ~bits:t.config.bits id with
+  | Some r -> r
+  | None -> error 15 "Invalid argument (UC_ERR_ARG)"
+
 let reg_size t id =
   check t;
   match Hashtbl.find t.sizes id with
   | Some size -> size
   | None ->
-      let size = Uc.reg_size (Lazy.force t.probe) id in
-      Hashtbl.set t.sizes ~key:id ~data:size;
-      size
+      let r = register t id in
+      Hashtbl.set t.sizes ~key:id ~data:r.size;
+      r.size
 
 let reg_bytes t id =
   match Hashtbl.find t.regs id with
   | Some b -> b
   | None ->
-      let size = reg_size t id in
-      let b =
-        if List.mem t.reset id ~equal:Int.equal then
-          Bytes.of_string (Uc.reg_read_bytes (Lazy.force t.probe) id)
-        else Bytes.make size '\000'
-      in
+      let r = register t id in
+      let b = Bytes.make r.size '\000' in
+      Option.iter r.reset ~f:(fun x ->
+          let n = Int.min r.size 8 in
+          for i = 0 to n - 1 do
+            let shift = if Sys.big_endian then 8 * (n - 1 - i) else 8 * i in
+            Bytes.set b i
+              (Char.of_int_exn
+                 Int64.(to_int_exn (shift_right_logical x shift land 0xFFL)))
+          done);
       Hashtbl.set t.regs ~key:id ~data:b;
       b
 
@@ -507,7 +501,7 @@ let write_reg_bytes t id data =
   Bytes.From_string.blit ~src:data ~src_pos:0 ~dst:b ~dst_pos:0
     ~len:(String.length data)
 
-(* the bytes of the host, which is little endian, see [Uc.reg_read] *)
+(* the bytes of the host, which is little endian, see [Engine.reg_read] *)
 let int64_of_bytes b n =
   let x = ref 0L in
   for i = Int.min n 8 - 1 downto 0 do
@@ -576,7 +570,7 @@ let code_written ?range t (p : page) =
    of the page see, so that its accesses stop the block, as their faults
    do, and the closures run them, and call the hooks, while the rest of
    the code runs compiled *)
-let effective t page (perm : Uc.Perm.t) =
+let effective t page (perm : Engine.Perm.t) =
   let last = Int64.(page + page_size - 1L) in
   let overlaps h =
     (not h.deleted)
@@ -595,7 +589,7 @@ let effective t page (perm : Uc.Perm.t) =
         | Mem (accesses, _) ->
             List.exists accesses ~f:(fun a ->
                 match (a, access) with
-                | (Uc.Read | Read_after), `read | Write, `write -> true
+                | (Engine.Read | Read_after), `read | Write, `write -> true
                 | _ -> false)
         | _ -> false)
   in
@@ -635,7 +629,7 @@ let mem_protect t addr size perm =
   pages_of addr size (fun page ->
       match Hashtbl.find t.pages page with
       | Some p ->
-          if not Uc.Perm.(mem perm exec) then code_written t p;
+          if not Engine.Perm.(mem perm exec) then code_written t p;
           p.perm <- perm;
           Option.iter t.jit ~f:(fun j ->
               Bap_lifted_jit.Runtime.protect j.mem page (effective t page perm))
@@ -784,7 +778,7 @@ let mem_regions t =
       match acc with
       | (first, prev, perm) :: rest
         when Int64.(prev + 1L = page)
-             && Uc.Perm.(mem perm p.perm && mem p.perm perm) ->
+             && Engine.Perm.(mem perm p.perm && mem p.perm perm) ->
           (first, last, perm) :: rest
       | _ -> (page, last, p.perm) :: acc)
   |> List.rev
@@ -842,8 +836,8 @@ let partition hooks =
     code;
     blocks;
     code_pages;
-    reads = only (mem [ Uc.Read; Read_after ]);
-    writes = only (mem [ Uc.Write ]);
+    reads = only (mem [ Engine.Read; Read_after ]);
+    writes = only (mem [ Engine.Write ]);
     invalid_mem = only (function Mem_invalid _ -> true | _ -> false);
     trace_code = only (function Trace_code _ -> true | _ -> false);
     trace_mem = only (function Trace_mem _ -> true | _ -> false);
@@ -878,7 +872,7 @@ let hooks_changed t =
                match h.kind with Trace_code tr -> Some tr | _ -> None)
          else [||]);
       j.whole <-
-        (not (Poly.equal t.arch Uc.Arm))
+        (not (Poly.equal t.arch Engine.Arm))
         && not
              (List.exists t.hooks ~f:(fun h ->
                   match h.kind with
@@ -911,7 +905,7 @@ let each hooks f = Array.iter hooks ~f:(fun h -> if not h.deleted then f h)
 
 let mem_hooks t access addr size value =
   let hooks =
-    match access with Uc.Write -> t.by_kind.writes | _ -> t.by_kind.reads
+    match access with Engine.Write -> t.by_kind.writes | _ -> t.by_kind.reads
   in
   each hooks (fun h ->
       match h.kind with
@@ -1053,7 +1047,7 @@ let invalid t access addr size value =
 let rec page_for t access addr size value =
   match Hashtbl.find t.pages (page_of addr) with
   | None ->
-      let unmapped : Uc.access =
+      let unmapped : Engine.access =
         match access with
         | `read -> Read_unmapped
         | `write -> Write_unmapped
@@ -1064,11 +1058,11 @@ let rec page_for t access addr size value =
   | Some p ->
       let needed, prot =
         match access with
-        | `read -> (Uc.Perm.read, Uc.Read_prot)
-        | `write -> (Uc.Perm.write, Uc.Write_prot)
-        | `fetch -> (Uc.Perm.exec, Uc.Fetch_prot)
+        | `read -> (Engine.Perm.read, Engine.Read_prot)
+        | `write -> (Engine.Perm.write, Engine.Write_prot)
+        | `fetch -> (Engine.Perm.exec, Engine.Fetch_prot)
       in
-      if Uc.Perm.mem p.perm needed then p
+      if Engine.Perm.mem p.perm needed then p
       else begin
         invalid t prot addr size value;
         page_for t access addr size value
@@ -1407,7 +1401,7 @@ let write_stores t stores =
           | old ->
               String.foldi old ~init:0L ~f:(fun i acc c ->
                   Int64.(acc lor (of_int (Char.to_int c) lsl Int.(8 * i))))
-          | exception Uc.Error _ -> 0L
+          | exception Engine.Error _ -> 0L
       in
       trace_access t ~write:true addr n (bits x) old;
       store t addr data 0L;
@@ -1942,7 +1936,7 @@ let fetch t pc =
     else
       let addr = Int64.(pc + of_int i) in
       match Hashtbl.find t.pages (page_of addr) with
-      | Some p when Uc.Perm.(mem p.perm exec) ->
+      | Some p when Engine.Perm.(mem p.perm exec) ->
           bytes (i + 1) (Bigstring.get p.data (offset addr) :: acc)
       | _ -> acc
   in
@@ -2071,7 +2065,7 @@ let jump t (insn : insn) ~next a =
 
 let itstate t =
   match t.cpsr with
-  | Some id when Poly.equal t.arch Uc.Arm ->
+  | Some id when Poly.equal t.arch Engine.Arm ->
       let c = reg_read t id in
       Int64.(
         to_int_exn ((c lsr 25) land 3L lor (((c lsr 10) land 0x3FL) lsl 2)))
@@ -2219,7 +2213,7 @@ let interrupt t n =
   each t.by_kind.interrupts (fun h ->
       match h.kind with Interrupt f -> f n | _ -> ())
 
-let fault_error (access : Uc.access) =
+let fault_error (access : Engine.access) =
   match access with
   | Read_unmapped ->
       (uc_err_read_unmapped, "Invalid memory read (UC_ERR_READ_UNMAPPED)")
@@ -2316,7 +2310,7 @@ let falls pc (insn : insn) =
 let candidates t (j : jit) pc =
   let executable addr =
     match Hashtbl.find t.pages (page_of addr) with
-    | Some p -> Uc.Perm.(mem p.perm exec)
+    | Some p -> Engine.Perm.(mem p.perm exec)
     | None -> false
   in
   let rec loop i addr acc =
@@ -2760,7 +2754,7 @@ let start ?until ?timeout ?count ?(thread = 0) t pc =
               set_pc t (faulted ?pending pc);
               ignore addr;
               let code, msg = fault_error access in
-              raise (Uc.Error (code, msg))
+              raise (Engine.Error (code, msg))
           | None ->
               if invalid_insn t then loop pc n
               else
@@ -2870,7 +2864,7 @@ let start ?until ?timeout ?count ?(thread = 0) t pc =
                         unrun t pc;
                         set_pc t (faulted ?pending pc);
                         let code, msg = fault_error access in
-                        raise (Uc.Error (code, msg)))
+                        raise (Engine.Error (code, msg)))
               end)
   in
   (* the lower bit of the address of ARM is the Thumb state *)
@@ -2898,7 +2892,7 @@ let set_unmapped t name x = Hashtbl.set t.others ~key:name ~data:x
 
 let accesses_of kinds =
   List.map kinds ~f:(function
-    | `read -> Uc.Read
+    | `read -> Engine.Read
     | `write -> Write
     | `fetch -> Fetch
     | `read_after -> Read_after)
@@ -2907,7 +2901,7 @@ let invalid_accesses accesses kinds =
   List.concat_map accesses ~f:(fun a ->
       List.filter_map kinds ~f:(fun k ->
           match (a, k) with
-          | `read, `unmapped -> Some Uc.Read_unmapped
+          | `read, `unmapped -> Some Engine.Read_unmapped
           | `write, `unmapped -> Some Write_unmapped
           | `fetch, `unmapped -> Some Fetch_unmapped
           | `read, `prot -> Some Read_prot
@@ -2925,7 +2919,7 @@ let on_mem ?first ?last t accesses f =
   add t ?first ?last (Mem (accesses_of accesses, f))
 
 let trace ?first ?last ?watch ?(memory = false) t trace =
-  Record.prepare trace (Poly.equal t.arch Uc.Arm);
+  Record.prepare trace (Poly.equal t.arch Engine.Arm);
   (* the range of the hook of the accesses is of their addresses *)
   let lower, upper =
     match watch with

@@ -1,5 +1,5 @@
 (** The lifted engine, which runs the semantics of the instructions, that BAP
-    lifts, with the interface of {!Bap_unicorn}.
+    lifts, with the interface of {!Bap_engine}.
 
     Each instruction is lifted, when it runs first, and compiled to the
     closures, and the blocks, that run often, are compiled by the JIT of LLVM to
@@ -10,16 +10,15 @@
     it faults, so that it runs again after the hooks of the invalid access, as
     in Unicorn.
 
-    The registers are the ones of Unicorn, by their identifiers, and of their
-    sizes, see {!Bap_engine_unicorn.regs}, whose bits are the registers of BAP,
-    see [config.locate], and the memory is the pages of 4 KB with their
-    permissions.
+    The physical register identifiers, widths, and reset states come from
+    {!Bap_engine.Register}, whose bits are the registers of BAP, see
+    [config.locate], and the memory is the pages of 4 KB with their permissions.
 
     The program, that the engine runs, is untrusted: its accesses check the
     pages, and its code, that the JIT compiles, is limited, see
     bap_lifted_jit.ml.
 
-    See {!Bap_unicorn} for the documentation of the functions. *)
+    See {!Bap_engine} for the documentation of the functions. *)
 
 type config = {
   lift :
@@ -53,7 +52,7 @@ type config = {
 type t
 type hook
 
-val create : config -> Bap_unicorn.arch -> Bap_unicorn.Mode.t -> t
+val create : config -> Bap_engine.arch -> Bap_engine.Mode.t -> t
 val close : t -> unit
 val flush_tb : t -> unit
 
@@ -73,12 +72,12 @@ val inventory : t -> int * int * int
 
 (** {2 Memory} *)
 
-val mem_map : t -> int64 -> int64 -> Bap_unicorn.Perm.t -> unit
+val mem_map : t -> int64 -> int64 -> Bap_engine.Perm.t -> unit
 val mem_unmap : t -> int64 -> int64 -> unit
-val mem_protect : t -> int64 -> int64 -> Bap_unicorn.Perm.t -> unit
+val mem_protect : t -> int64 -> int64 -> Bap_engine.Perm.t -> unit
 val mem_write : t -> int64 -> string -> unit
 val mem_read : t -> int64 -> int -> string
-val mem_regions : t -> (int64 * int64 * Bap_unicorn.Perm.t) list
+val mem_regions : t -> (int64 * int64 * Bap_engine.Perm.t) list
 
 (** {2 Registers} *)
 
@@ -143,7 +142,7 @@ val on_mem :
   ?last:int64 ->
   t ->
   [ `read | `write | `fetch | `read_after ] list ->
-  (Bap_unicorn.access -> int64 -> int -> int64 -> unit) ->
+  (Bap_engine.access -> int64 -> int -> int64 -> unit) ->
   hook
 
 val on_mem_invalid :
@@ -152,7 +151,7 @@ val on_mem_invalid :
   t ->
   [ `read | `write | `fetch ] list ->
   [ `unmapped | `prot ] list ->
-  (Bap_unicorn.access -> int64 -> int -> int64 -> bool) ->
+  (Bap_engine.access -> int64 -> int -> int64 -> bool) ->
   hook
 
 val delete : t -> hook -> unit
@@ -167,7 +166,7 @@ val trace :
   t ->
   Bap_native_trace.t ->
   hook list
-(** [trace t trace] records the trace, as {!Bap_unicorn.trace} does. *)
+(** [trace t trace] records the trace, as {!Bap_engine.trace} does. *)
 
 (** {2 Taint}
 

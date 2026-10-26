@@ -56,6 +56,24 @@ module Cpu : sig
   val mips64_i6400 : int
 end
 
+(** Backend-neutral physical register layouts. *)
+module Register : sig
+  type t = {
+    id : int;
+    size : int;  (** the width in bytes, including wide registers *)
+    reset : int64 option;
+        (** the nonzero reset value, if the register has one *)
+  }
+
+  val by_name : arch -> bits:int -> string -> t option
+  (** [by_name arch ~bits name] describes [name] in the [bits]-bit layout of
+      [arch]. Names are case-insensitive. *)
+
+  val by_id : arch -> bits:int -> int -> t option
+  (** [by_id arch ~bits id] describes the physical register [id], including its
+      width and reset state. *)
+end
+
 module Trace = Bap_native_trace
 
 type taint = int
