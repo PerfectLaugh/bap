@@ -2670,6 +2670,7 @@ let threads data =
                   "paused back at main true, returned 1\n" );
                 ("the program sees the results", "11 21\n");
                 ("exits", "exited\n");
+                ("continues after a syscall", "syscall continued\n");
               ]))
       [
         "x86_64-linux-gnu";

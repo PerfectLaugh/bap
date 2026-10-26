@@ -1626,7 +1626,6 @@ let lifter ?cache ~arm project =
   let store ~thumb addr code (size, _, name, blks) =
     if size <= 0 || size > String.length code then None
     else begin
-      called blks;
       let calls =
         List.concat_map blks ~f:(fun blk ->
             Term.enum jmp_t blk |> Seq.to_list
@@ -1681,7 +1680,7 @@ let lifter ?cache ~arm project =
         remember e;
         touch (addr, thumb);
         Some (e.size, e.name, e.blks)
-    | _ ->
+    | _ -> (
         let result = ref [] in
         in_state (fun () ->
             try
@@ -1691,27 +1690,79 @@ let lifter ?cache ~arm project =
                     ?encoding:
                       (if arm then Primus.Interworking.encoding ~thumb else None)
                     project addr code
-                  >>| fun insns -> result := insns)
+                  >>| fun insns ->
+                  result := insns;
+                  Option.iter (List.hd insns) ~f:(fun (_, _, _, blks) ->
+                      called blks);
+                  List.iter (List.tl_exn insns) ~f:(fun (_, _, _, blks) ->
+                      called blks))
             with _ -> ());
         let rec continuations addr code = function
-          | [] -> []
-          | ((size, _, _, _) as insn) :: rest -> (
-              match store ~thumb addr code insn with
-              | None -> []
-              | Some e ->
-                  e
-                  :: continuations
-                       Int64.(addr + of_int size)
-                       (String.drop_prefix code size)
-                       rest)
+          | [] -> ()
+          | ((size, _, _, _) as insn) :: rest ->
+              if Option.is_some (store ~thumb addr code insn) then
+                continuations
+                  Int64.(addr + of_int size)
+                  (String.drop_prefix code size)
+                  rest
         in
-        let saved = continuations addr code !result in
-        trim ();
-        (* only the requested instruction ran; the continuations enter the
-           history when their own cache entries are hit *)
-        Option.map (List.hd saved) ~f:(fun e ->
-            remember e;
-            (e.size, e.name, e.blks))
+        match !result with
+        | [] -> None
+        | (size, _, name, blks) :: rest ->
+            if size <= String.length code then begin
+              let calls =
+                List.concat_map blks ~f:(fun blk ->
+                    Term.enum jmp_t blk |> Seq.to_list
+                    |> List.filter_map ~f:(fun jmp ->
+                        match Jmp.kind jmp with
+                        | Call call -> (
+                            match Call.target call with
+                            | Direct tid ->
+                                Option.map (Hashtbl.find names tid)
+                                  ~f:(fun name -> (tid, name))
+                            | Indirect _ -> None)
+                        | _ -> None))
+              in
+              let e =
+                fresh
+                  {
+                    Lifts.addr;
+                    thumb;
+                    code = String.prefix code size;
+                    size;
+                    name;
+                    (* the engine doesn't read the attributes, e.g., the
+                       instructions, which are most of the file *)
+                    blks =
+                      List.map blks ~f:(fun blk ->
+                          let blk =
+                            Term.map def_t blk ~f:(fun t ->
+                                Term.with_attrs t Dict.empty)
+                            |> Term.map jmp_t ~f:(fun t ->
+                                Term.with_attrs t Dict.empty)
+                          in
+                          Term.with_attrs blk Dict.empty);
+                    calls;
+                  }
+              in
+              Hashtbl.set entries ~key:(addr, thumb) ~data:(e, ref true);
+              remember e;
+              touch (addr, thumb);
+              trim ();
+              dirty := true;
+              let first = (size, name, e.blks) in
+              if not (List.is_empty rest) then begin
+                (* the continuations enter the history when their own cache
+                   entries are hit *)
+                continuations
+                  Int64.(addr + of_int size)
+                  (String.drop_prefix code size)
+                  rest;
+                trim ()
+              end;
+              Some first
+            end
+            else Some (size, name, blks))
   in
   (* the entries of the cache, that no instruction of this run hit, are
      not lifted in it, see [fresh] *)

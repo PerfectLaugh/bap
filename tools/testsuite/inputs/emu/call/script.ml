@@ -14,6 +14,17 @@ let () =
   let args = Bap_script.args () in
   let api = List.filter_map args ~f:(String.chop_prefix ~prefix:"api=") in
   let emu = Emu.create (Bap_script.project ~api (List.hd_exn args)) in
+  let last_pc = ref 0L and syscall = ref None and continued = ref false in
+  Emu.on_code emu (fun _ pc ->
+      (match !syscall with
+      | Some site when not (Int64.equal site pc) ->
+          continued := true;
+          syscall := None
+      | _ -> ());
+      last_pc := pc);
+  Emu.on_syscall emu (fun _ _ _ ->
+      syscall := Some !last_pc;
+      Default);
   let addr name =
     List.Assoc.find_exn (Emu.symbols emu) ~equal:String.equal name
   in
@@ -54,8 +65,10 @@ let () =
         Int64.(Emu.pc emu = pc)
         (Option.value_map (Emu.returned emu) ~default:"none" ~f:Int64.to_string)
   | _ -> print_endline "didn't pause");
-  match Emu.run emu with
+  (match Emu.run emu with
   | Exited (Some 0) -> print_endline "exited"
   | Exited _ -> print_endline "exited otherwise"
   | Failed msg -> print_endline ("failed: " ^ msg)
-  | _ -> print_endline "not exited"
+  | _ -> print_endline "not exited");
+  if not !continued then failwith "no syscall continued to the next instruction";
+  print_endline "syscall continued"
