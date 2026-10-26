@@ -2448,6 +2448,46 @@ let threads data =
          with the threads of clone, see pthreads.c *)
     ]
   @ List.concat_map
+      (fun engine ->
+        List.map
+          (fun mode ->
+            case
+              (Printf.sprintf "emu/x86_64-linux-gnu-thread-trace/%s/%s" engine
+                 mode) (fun env ->
+                let out =
+                  bap env
+                    [
+                      "script";
+                      input "emu/thread-trace.ml";
+                      path data "bin/x86_64-linux-gnu-pthreads";
+                      engine;
+                      mode;
+                    ]
+                in
+                has env "tags the native records" out
+                  "tids 1,2,3,4,5,6; accesses true; calls true; branches true\n";
+                has env "keeps the thread slices and dynamic calls" out
+                  "register slice true; indices true; shared gap true; \
+                   callback true\n"))
+          [ "instructions"; "blocks" ])
+      [ "lifted"; "unicorn" ]
+  @ List.map
+      (fun engine ->
+        case (Printf.sprintf "emu/x86_64-linux-gnu-thread-call-trace/%s" engine)
+          (fun env ->
+            let out =
+              bap env
+                [
+                  "script";
+                  input "emu/thread-call-trace.ml";
+                  path data "bin/x86_64-linux-gnu-pthreads";
+                  engine;
+                ]
+            in
+            has env "tags the call with its effective thread" out
+              "current 2; returned true; call tids true\n"))
+      [ "lifted"; "unicorn" ]
+  @ List.concat_map
       (fun target ->
         List.map
           (fun engine ->

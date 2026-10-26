@@ -97,10 +97,19 @@ val current : t -> int64
 
 val reg_read_bytes : t -> int -> string
 val reg_write_bytes : t -> int -> string -> unit
+val registers_restored : t -> unit
 
 (** {2 Emulation} *)
 
-val start : ?until:int64 -> ?timeout:int -> ?count:int -> t -> int64 -> unit
+val start :
+  ?until:int64 ->
+  ?timeout:int ->
+  ?count:int ->
+  ?thread:int ->
+  t ->
+  int64 ->
+  unit
+
 val stop : t -> unit
 
 val in_atomic : t -> bool

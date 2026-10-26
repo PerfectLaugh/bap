@@ -51,6 +51,9 @@ type xref = {
 }
 [@@deriving bin_io, compare, equal, sexp]
 
+type call = { site : int64; targets : (int64 * int) list; thread : int }
+(** a call site recorded by a trace, with its targets and effective TID *)
+
 val create : project -> t
 (** [create proj] the references of the program of [proj], which is
     disassembled, e.g., of [Bap_emu.project], or of
@@ -94,7 +97,7 @@ val functions : t -> int64 list
 val all : t -> xref list
 (** all references, in the order of their sites *)
 
-val add_calls : t -> (int64 * (int64 * int) list) list -> unit
+val add_calls : t -> call list -> unit
 (** [add_calls xrefs calls] adds the calls, that a trace recorded, see
     [Bap_emu.Trace.calls], by their sites, with their targets, as the references
     of the kind [Call], e.g., the calls through the slots, that the program

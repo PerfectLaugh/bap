@@ -412,6 +412,12 @@ module Trace : sig
   (** the last program counters, at most [last], by default all, that the ring
       keeps, the oldest first *)
 
+  val tids :
+    ?last:int ->
+    t ->
+    (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t
+  (** the effective TIDs of the last records, aligned with {!pcs} *)
+
   val sizes :
     ?last:int ->
     t ->
@@ -434,6 +440,7 @@ module Trace : sig
     old : int64;
         (** the bytes, that a write of at most 8 bytes overwrote, the first one
             in the lowest byte *)
+    thread : int;  (** the effective TID, which made the access *)
   }
 
   val accesses : ?last:int -> t -> access list
@@ -485,26 +492,29 @@ module Trace : sig
   val stop_capture : capture -> unit
   (** [stop_capture c] stops recording, the ring keeps the records *)
 
-  val calls : ?last:int -> t -> (int64 * (int64 * int) list) list
-  (** [calls trace] the calls of the last [last] records, by default of all,
-      that the ring keeps, by their sites, the instructions, that call, in the
-      order of their addresses, with the addresses, that they called, which the
-      next instructions are at, and how many times each, the most often first,
-      e.g., the targets, that the indirect call of a dispatcher took. The call,
-      whose next instruction is the one after it, isn't taken, e.g., a
-      conditional one. The instructions are those of {!insns}, so a trace of the
-      blocks has them. *)
+  type call = Bap_emu_xrefs.call = {
+    site : int64;
+    targets : (int64 * int) list;
+    thread : int;
+  }
 
-  val branches : ?last:int -> t -> (int64 * int64 * bool) list
+  val calls : ?thread:int -> ?last:int -> t -> call list
+  (** [calls trace] the calls of the last [last] records, by default of all,
+      that the ring keeps, grouped by their effective TIDs and sites. The
+      targets are the next same-thread instructions, with their counts, the most
+      often first. With [thread], only that TID is selected. A call, whose next
+      instruction is the one after it, isn't taken. The instructions are those
+      of {!insns}, so a trace of blocks has them. Adjacent instructions of
+      different TIDs never make a call. *)
+
+  type branch = { site : int64; target : int64; taken : bool; thread : int }
+
+  val branches : ?thread:int -> ?last:int -> t -> branch list
   (** [branches trace] the conditional branches of the last [last] records, by
-      default of all, that the ring keeps, in their order: the address of the
-      branch, the address, that the program went to, and if the branch was
-      taken, i.e., the program didn't fall through, e.g., the path, that a call
-      took, see {!Bap_emu.record}, whose branches tell, which check rejected its
-      inputs. A branch is an instruction, whose jump on a condition leaves it,
-      so a conditional instruction of ARM, which jumps over its own body, isn't
-      one. The instructions are those of {!insns}, so a trace of the blocks has
-      them. *)
+      default of all, in their order, optionally only of [thread]. The target is
+      the next same-thread instruction, and [taken] tells whether it isn't the
+      fallthrough. Adjacent instructions of different TIDs never make a branch.
+      The instructions are those of {!insns}, so a trace of blocks has them. *)
 end
 
 type 'a recorded = {
@@ -526,8 +536,9 @@ val record : ?size:int -> t -> (unit -> 'a) -> 'a recorded
 
     {[
     let r = Emu.record emu (fun () -> Emu.call emu check ~args:[ stream ]) in
-    List.iter (Emu.Trace.branches r.trace) ~f:(fun (site, dst, taken) ->
-        printf "%Lx -> %Lx %s\n" site dst (if taken then "taken" else "fell"))
+    List.iter (Emu.Trace.branches r.trace) ~f:(fun b ->
+        printf "%Lx -> %Lx %s\n" b.site b.target
+          (if b.taken then "taken" else "fell"))
     ]}
 
     The other exceptions of [f], e.g., [Invalid_argument], are raised. *)
@@ -540,9 +551,10 @@ type location = Bap_emu_slice.location =
 
 type step = {
   index : int64;
-      (** the position of the instruction in the trace, from the first recorded
-          one *)
+      (** the global position of the instruction's record in the trace, from the
+          first recorded one *)
   pc : int64;
+  thread : int;  (** the effective TID, which ran the instruction *)
 }
 
 type slice = {
@@ -560,13 +572,22 @@ type slice = {
           and the memory, that the steps load, is in the trace *)
 }
 
-val slice : ?addresses:bool -> ?window:int -> Trace.t -> location list -> slice
+val slice :
+  ?addresses:bool ->
+  ?window:int ->
+  ?thread:int ->
+  Trace.t ->
+  location list ->
+  slice
 (** [slice trace locations] the dynamic backward slice of the values of the
     [locations], as the paused program has them, over the last [window]
     instructions of the trace, by default all, that it keeps: the instructions,
     whose values flow to them, through the registers, and, if the trace has the
     accesses, through the memory, at the addresses, that they had, and through
-    the addresses of the loads and the stores, if [addresses].
+    the addresses of the loads and the stores, if [addresses]. With [thread],
+    only that TID's instructions and register flow are followed, and the step
+    indices remain global. Stores to shared memory by other TIDs make
+    conservative gaps rather than thread-local dataflow.
 
     It is a slice of the data: the jumps aren't followed, but the conditions of
     the defs, that an instruction may skip, e.g., of a compare and exchange,

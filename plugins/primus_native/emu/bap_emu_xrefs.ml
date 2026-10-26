@@ -8,6 +8,8 @@ type kind = Call | Jump | Load | Store | Address
 type xref = { site : int64; target : int64; kind : kind; slot : int64 option }
 [@@deriving bin_io, compare, equal, sexp]
 
+type call = { site : int64; targets : (int64 * int) list; thread : int }
+
 type t = {
   width : int;
   digest : string option;
@@ -217,7 +219,7 @@ let create_focused proj entry =
       |> scan_program proj
 
 let by_site xs =
-  List.dedup_and_sort xs ~compare:(fun a b ->
+  List.dedup_and_sort xs ~compare:(fun (a : xref) b ->
       match Int64.compare a.site b.site with 0 -> compare_xref a b | n -> n)
 
 let find t addr = Hashtbl.find_multi t.refs addr |> by_site
@@ -249,7 +251,7 @@ let functions t = Hashtbl.keys t.names |> List.sort ~compare:Int64.compare
    references too, e.g., through the slots, that the program fills at
    run time *)
 let add_calls t calls =
-  List.iter calls ~f:(fun (site, targets) ->
+  List.iter calls ~f:(fun { site; targets; _ } ->
       List.iter targets ~f:(fun (target, _) ->
           let x = { site; target; kind = Call; slot = None } in
           if

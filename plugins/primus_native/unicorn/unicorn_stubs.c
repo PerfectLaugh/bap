@@ -548,6 +548,11 @@ value bap_uc_reg_write_bytes(value v, value reg, value data) {
     return Val_unit;
 }
 
+value bap_uc_registers_restored(value v) {
+    Engine_val(v)->wrote_regs = 0;
+    return Val_unit;
+}
+
 value bap_uc_reg_size(value v, value reg) {
     uint8_t buf[REG_BUF];
     return Val_long(reg_read(engine_uc(v), Int_val(reg), buf));
@@ -702,10 +707,15 @@ value bap_uc_process_signals(value unit) {
 }
 
 value bap_uc_emu_start(value v, value start, value until, value timeout,
-                       value count) {
+                       value count, value tid) {
     CAMLparam5(v, start, until, timeout, count);
+    CAMLxparam1(tid);
     CAMLlocal1(exn);
     struct engine *e = Engine_val(v);
+    for (struct hook *h = e->hooks; h != NULL; h = h->next) {
+        if (h->trace != NULL) h->trace->tid = (uint64_t)Long_val(tid);
+        if (h->mem != NULL) h->mem->tid = (uint64_t)Long_val(tid);
+    }
     mark(e);
     e->running = 1;
     uint64_t usec = watch(engine_uc(v), Int64_val(timeout));
@@ -721,6 +731,12 @@ value bap_uc_emu_start(value v, value start, value until, value timeout,
     }
     check(err);
     CAMLreturn(Val_unit);
+}
+
+value bap_uc_emu_start_bytecode(value *argv, int argn) {
+    (void)argn;
+    return bap_uc_emu_start(argv[0], argv[1], argv[2], argv[3], argv[4],
+                            argv[5]);
 }
 
 value bap_uc_emu_stop(value v) {
@@ -1034,6 +1050,7 @@ static void trace_code(uc_engine *uc, uint64_t addr, uint32_t size,
     }
     t->skip = t->every;
     t->pcs[t->count & t->mask] = addr;
+    t->tids[t->count & t->mask] = t->tid;
     if (t->modes != NULL) {
         t->modes[t->count & t->mask] = t->thumb;
     }
@@ -1053,6 +1070,7 @@ static void trace_block(uc_engine *uc, uint64_t addr, uint32_t size,
                         void *data) {
     struct bap_native_trace *t = data;
     t->pcs[t->count & t->mask] = addr;
+    t->tids[t->count & t->mask] = t->tid;
     t->sizes[t->count & t->mask] = size;
     if (t->modes != NULL) {
         t->modes[t->count & t->mask] = thumb(uc);
@@ -1085,6 +1103,7 @@ static void trace_mem(uc_engine *uc, uc_mem_type type, uint64_t addr,
     a->write = type == UC_MEM_WRITE;
     a->value = type == UC_MEM_WRITE ? (uint64_t)x : 0;
     a->old = 0;
+    a->tid = t->tid;
     if (type == UC_MEM_WRITE && size <= 8 && h->engine->code.size > 0 &&
         (pages_mem(&h->engine->code, addr >> 12) ||
          pages_mem(&h->engine->code, (addr + size - 1) >> 12))) {

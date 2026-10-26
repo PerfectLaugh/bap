@@ -684,6 +684,7 @@ let calls : (string option * string option) list Primus.Machine.State.t =
    is saved, see [Make.save] *)
 type call_site = {
   site_pc : int64;  (** the address, at which the machine paused *)
+  site_tid : int;  (** the effective TID, at which the call runs *)
   site_frames : frame list;  (** the pending returns *)
   site_calls : (string option * string option) list;  (** see [calls] *)
   site_basis : (var * word) list;  (** the registers, without the aliases *)
@@ -3663,7 +3664,7 @@ module Make (Machine : Primus.Machine.S) = struct
      the pages, see [written_page], which are frequent, so they don't go
      through [loop]; the stop at the instruction, which wrote, is skipped
      again, as in [loop] *)
-  let rec start_uc ?count e pc deadline =
+  let rec start_uc ?count ~thread e pc deadline =
     let s = e.session in
     e.reason <- None;
     s.last_fault <- None;
@@ -3675,7 +3676,7 @@ module Make (Machine : Primus.Machine.S) = struct
        else None);
     let error =
       try
-        Uc.start e.uc pc ?count
+        Uc.start e.uc pc ?count ~thread
           ?timeout:
             (Option.map deadline ~f:(fun t ->
                  Int.max 1 (Float.iround_up_exn ((t -. clock ()) *. 1e6))));
@@ -3695,7 +3696,7 @@ module Make (Machine : Primus.Machine.S) = struct
         let pc = current_pc e in
         if Option.equal Int64.equal s.skipped_at (Some (code_addr e pc)) then
           s.resumed_at <- s.skipped_at;
-        start_uc ?count e pc deadline
+        start_uc ?count ~thread e pc deadline
     | _ -> error
 
   (* the stops of the system, which the hooks see, see [is_stop], and
@@ -4442,15 +4443,18 @@ module Make (Machine : Primus.Machine.S) = struct
       let* () = if e.shadowing then Shadow.import e else Machine.return () in
       (* the bases of the segments of x86 are of the thread in Primus
          too, if it has them *)
-      Machine.List.iter thread.saved_extra ~f:(fun (id, data) ->
-          match segment_base e id with
-          | None -> Machine.return ()
-          | Some name -> (
-              let v = Var.create name (Type.imm (e.bytes * 8)) in
-              let x = value { e with big_endian = false } data in
-              Env.is_set v >>= function
-              | false when Int64.(x = 0L) -> Machine.return ()
-              | _ -> Value.of_word (word e x) >>= set_base e name))
+      let+ () =
+        Machine.List.iter thread.saved_extra ~f:(fun (id, data) ->
+            match segment_base e id with
+            | None -> Machine.return ()
+            | Some name -> (
+                let v = Var.create name (Type.imm (e.bytes * 8)) in
+                let x = value { e with big_endian = false } data in
+                Env.is_set v >>= function
+                | false when Int64.(x = 0L) -> Machine.return ()
+                | _ -> Value.of_word (word e x) >>= set_base e name))
+      in
+      Uc.registers_restored e.uc
 
     (* the next thread, that is ready, runs, after [parked], which was
        the thread, that ran, if it is not exited, or [None], if no thread
@@ -5981,6 +5985,8 @@ module Make (Machine : Primus.Machine.S) = struct
       let* pending = Machine.Local.get frames in
       let* called = Machine.Local.get calls in
       let* sites = Machine.Local.get call_sites in
+      let* st = Machine.Local.get threads in
+      let site_tid = Option.value thread ~default:st.current in
       let size = (Option.value stack ~default:0x10000 + 15) land lnot 15 in
       let* base = Threads.Windows.allocate e size in
       let top = Int64.(base + of_int size) in
@@ -6066,6 +6072,7 @@ module Make (Machine : Primus.Machine.S) = struct
             Machine.Local.put call_sites
               ({
                  site_pc = pc;
+                 site_tid;
                  site_frames = pending;
                  site_calls = called;
                  site_basis = fst saved;
@@ -6462,7 +6469,8 @@ module Make (Machine : Primus.Machine.S) = struct
       let* () = account () in
       let* used = Machine.Local.get elapsed in
       let remaining = Option.map s.timeout ~f:(fun t -> t -. used) in
-      let* in_call = Machine.Local.get call_sites >>| Fn.non List.is_empty in
+      let* sites = Machine.Local.get call_sites in
+      let in_call = not (List.is_empty sites) in
       let call_deadline = Option.filter s.call_deadline ~f:(fun _ -> in_call) in
       match remaining with
       | Some t when Float.(t <= 0.) -> terminate e
@@ -6516,7 +6524,13 @@ module Make (Machine : Primus.Machine.S) = struct
             (* the one instruction runs without the timeout, whose stop
                would race with the stops of the hooks *)
             let deadline = if Option.is_some count then None else deadline in
-            let error = start_uc ?count e pc deadline in
+            let* st = Machine.Local.get threads in
+            let thread =
+              match sites with
+              | { site_tid; _ } :: _ -> site_tid
+              | [] -> st.current
+            in
+            let error = start_uc ?count ~thread e pc deadline in
             let* () = account () in
             (* the taint, that the engine changed, goes to Primus, before
                anything sees it, e.g., a script, see [Shadow] *)

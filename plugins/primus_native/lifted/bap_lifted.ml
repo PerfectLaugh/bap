@@ -987,6 +987,8 @@ let reg_write_bytes t id data =
   wrote_regs t;
   write_reg_bytes t id data
 
+let registers_restored t = t.wrote_regs <- false
+
 let mem_write t addr data =
   wrote_mem t addr (String.length data);
   write_mem t addr data
@@ -2698,8 +2700,12 @@ let run_block t j insn pc ~until ~count n =
    slices of the threads, and the timeouts, see [Primus_native_executor] *)
 let clock () = Mtime.Span.to_float_ns (Mtime_clock.elapsed ()) *. 1e-9
 
-let start ?until ?timeout ?count t pc =
+let start ?until ?timeout ?count ?(thread = 0) t pc =
   check t;
+  each t.by_kind.trace_code (fun h ->
+      match h.kind with Trace_code tr -> Trace.set_thread tr thread | _ -> ());
+  each t.by_kind.trace_mem (fun h ->
+      match h.kind with Trace_mem tr -> Trace.set_thread tr thread | _ -> ());
   t.stopped <- false;
   t.last_block <- None;
   let deadline =

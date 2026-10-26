@@ -90,11 +90,11 @@ let () =
         (match r.result with Ok _ -> "returned" | Error _ -> "failed")
         (Bigarray.Array1.dim (Emu.Trace.insns r.trace))
         (String.concat ~sep:" "
-           (List.map (Emu.Trace.branches r.trace) ~f:(fun (site, dst, taken) ->
+           (List.map (Emu.Trace.branches r.trace) ~f:(fun b ->
                 sprintf "%Lx>%Lx:%s"
-                  Int64.(site - print)
-                  Int64.(dst - print)
-                  (if taken then "taken" else "fell"))));
+                  Int64.(b.site - print)
+                  Int64.(b.target - print)
+                  (if b.taken then "taken" else "fell"))));
       let r = Emu.record emu (fun () -> Emu.call emu 0L) in
       printf "call of 0 %s, %d instructions\n"
         (match r.result with Ok _ -> "returned" | Error _ -> "failed")

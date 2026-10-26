@@ -370,10 +370,11 @@ The script's own code doesn't run at the prompt, as the script is compiled to na
 |----------|--------|
 | `Trace.start ?size ?blocks ?every ?accesses ?first ?last emu` | record the last `size` instructions, by default 2^20, or only the blocks with `~blocks:true`, or every `every`-th instruction, and the last `accesses` loads and stores |
 | `Trace.insns ?last trace` | the program counters of the last instructions, also of a trace of blocks, whose blocks are decoded once |
+| `Trace.pcs`, `Trace.tids` | the recorded program counters and their effective TIDs, in aligned arrays |
 | `Trace.save ?last trace file` | write the recorded program counters, one in hex a line |
-| `Trace.count`, `Trace.accesses`, `Trace.stop` | the number of records, the recorded accesses, and the end of recording |
+| `Trace.count`, `Trace.accesses`, `Trace.stop` | the number of records, the recorded accesses with their TIDs, and the end of recording |
 
-`Trace.capture emu sites` records the registers at the sites, by default the registers, that the C ABI passes the arguments in, e.g., `X0` to `X7`, each time the program reaches one of them, in a ring of its own, so that a long run doesn't lose them, e.g., to map the arguments of a function from the sites of its calls, `Trace.calls`, in one run; `Trace.captured` lists them, the oldest first.
+`Trace.capture emu sites` records the registers at the sites, by default the registers, that the C ABI passes the arguments in, e.g., `X0` to `X7`, each time the program reaches one of them, in a ring of its own, so that a long run doesn't lose them, e.g., to map the arguments of a function from the sites of its calls, `Trace.calls`, in one run; `Trace.captured` lists them, the oldest first. Calls and conditional branches are records with their effective `thread`. `Trace.calls ~thread:tid` and `Trace.branches ~thread:tid` select one TID, and neither query derives a call or branch from adjacent records of different TIDs.
 
 The trace of the blocks costs the least, about three times the time of the program, and its `insns` are the instructions of the trace of each instruction, which costs tens of times the time, as Unicorn calls a hook for each instruction:
 
@@ -383,7 +384,7 @@ ignore (Emu.run emu);
 ignore (Emu.Trace.save trace "pcs.txt")
 ```
 
-`slice trace locations` is the dynamic backward slice of the values, that the paused program has in the registers, e.g., `Reg "RAX"`, or the memory, e.g., `Mem (addr, 4)`, over the trace: the instructions, whose values flow to them, through the registers, and, if the trace records the accesses, through the memory, at the addresses, that they had. It is a slice of the data, and with `~addresses:true` it follows the addresses of the loads and the stores too. The code, that Primus runs, e.g., the Lisp stubs, isn't in the trace, so the slice marks the `gaps`, where the registers or the memory, that it follows, were written outside of the trace:
+`slice trace locations` is the dynamic backward slice of the values, that the paused program has in the registers, e.g., `Reg "RAX"`, or the memory, e.g., `Mem (addr, 4)`, over the trace: the instructions, whose values flow to them, through the registers, and, if the trace records the accesses, through the memory, at the addresses, that they had. It is a slice of the data, and with `~addresses:true` it follows the addresses of the loads and the stores too. With `~thread:tid`, only that TID's instructions and register flow are followed; each step has its `thread` and its global record `index`, and stores to shared memory by other TIDs remain conservative gaps. The code, that Primus runs, e.g., the Lisp stubs, isn't in the trace, so the slice marks the `gaps`, where the registers or the memory, that it follows, were written outside of the trace:
 
 ```ocaml
 let trace = Emu.Trace.start ~blocks:true ~accesses:(1 lsl 20) emu in
@@ -421,8 +422,9 @@ A function, that a hook pauses, continues with `run`, after which the program pa
 ```ocaml
 let r = Emu.record emu (fun () -> Emu.call emu check ~args:[ stream ]) in
 (match r.result with Ok x -> printf "returned %s\n" (Option.value_map x ~default:"nothing" ~f:Int64.to_string) | Error msg -> printf "failed: %s\n" msg);
-List.iter (Emu.Trace.branches r.trace) ~f:(fun (site, dst, taken) ->
-    printf "%Lx -> %Lx %s\n" site dst (if taken then "taken" else "fell through"))
+List.iter (Emu.Trace.branches r.trace) ~f:(fun b ->
+    printf "%Lx -> %Lx %s\n" b.site b.target
+      (if b.taken then "taken" else "fell through"))
 ```
 
 `~service:(fun emu pc -> ...)` serves the pauses of the function instead: when a hook stops it, e.g., at a system call, or an import, that the script models, the service runs, and the function continues, until it returns, so that a routine, that does IO, runs end to end in one expression, with the script's own handlers.

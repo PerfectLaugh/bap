@@ -108,10 +108,14 @@ let reg_write_bytes t id data =
   | Unicorn u -> Uc.reg_write_bytes u id data
   | Lifted l -> L.reg_write_bytes l id data
 
-let start ?until ?timeout ?count t pc =
+let registers_restored = function
+  | Unicorn u -> Uc.registers_restored u
+  | Lifted l -> L.registers_restored l
+
+let start ?until ?timeout ?count ?thread t pc =
   match t with
-  | Unicorn u -> Uc.start ?until ?timeout ?count u pc
-  | Lifted l -> L.start ?until ?timeout ?count l pc
+  | Unicorn u -> Uc.start ?until ?timeout ?count ?thread u pc
+  | Lifted l -> L.start ?until ?timeout ?count ?thread l pc
 
 let stop = function Unicorn u -> Uc.stop u | Lifted l -> L.stop l
 let in_atomic = function Unicorn _ -> false | Lifted l -> L.in_atomic l

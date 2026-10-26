@@ -33,6 +33,8 @@ end
 
 external blocks : t -> bool = "bap_native_trace_blocks"
 external pcs : t -> int -> pcs = "bap_native_trace_pcs"
+external tids : t -> int -> pcs = "bap_native_trace_tids"
+external set_thread : t -> int -> unit = "bap_native_trace_set_thread"
 external sizes : t -> int -> sizes = "bap_native_trace_sizes"
 external modes : t -> int -> modes = "bap_native_trace_modes"
 external accesses : t -> int -> accesses = "bap_native_trace_mem"
@@ -44,6 +46,7 @@ let create ?(every = 1) ?(blocks = false) ?(accesses = 0) size =
   create size every blocks accesses
 
 let pcs ?(last = -1) t = pcs t last
+let tids ?(last = -1) t = tids t last
 let sizes ?(last = -1) t = sizes t last
 let modes ?(last = -1) t = modes t last
 let accesses ?(last = -1) t = accesses t last

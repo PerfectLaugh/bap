@@ -127,6 +127,9 @@ val reg_read : t -> int -> int64
 (** [reg_read uc reg] the value of the register, which is at most 8 bytes wide,
     zero-extended. *)
 
+val registers_restored : t -> unit
+(** clears pending register boundaries after a scheduler context restore *)
+
 val reg_write : t -> int -> int64 -> unit
 (** [reg_write uc reg x] writes [x], truncated to the size of the register,
     which is at most 8 bytes wide. *)
@@ -141,11 +144,19 @@ val reg_write_bytes : t -> int -> string -> unit
 
 (** {2 Emulation} *)
 
-val start : ?until:int64 -> ?timeout:int -> ?count:int -> t -> int64 -> unit
+val start :
+  ?until:int64 ->
+  ?timeout:int ->
+  ?count:int ->
+  ?thread:int ->
+  t ->
+  int64 ->
+  unit
 (** [start uc pc] runs the code from [pc] until it reaches [until], runs out of
     [timeout] microseconds, executes [count] instructions, or {!stop} is called.
-    Reraises the exception of a hook, which stops the emulation. By default,
-    there are no limits. *)
+    Its trace records have the TID [thread], by default zero. Reraises the
+    exception of a hook, which stops the emulation. By default, there are no
+    limits. *)
 
 val stop : t -> unit
 (** [stop uc] stops the emulation, e.g., from a hook. *)

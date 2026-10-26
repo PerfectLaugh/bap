@@ -79,9 +79,10 @@ external reg_read : t -> int -> int64 = "bap_uc_reg_read"
 external reg_write : t -> int -> int64 -> unit = "bap_uc_reg_write"
 external reg_read_bytes : t -> int -> string = "bap_uc_reg_read_bytes"
 external reg_write_bytes : t -> int -> string -> unit = "bap_uc_reg_write_bytes"
+external registers_restored : t -> unit = "bap_uc_registers_restored"
 
-external emu_start : t -> int64 -> int64 -> int64 -> int -> unit
-  = "bap_uc_emu_start"
+external emu_start : t -> int64 -> int64 -> int64 -> int -> int -> unit
+  = "bap_uc_emu_start_bytecode" "bap_uc_emu_start"
 
 external stop : t -> unit = "bap_uc_emu_stop"
 external interrupted : unit -> bool = "bap_uc_interrupted"
@@ -117,8 +118,8 @@ let reg arch name =
 
 (* Unicorn stops at [until], which is never reached by default, as the
    program counter, even of 64 bits, is never all ones *)
-let start ?(until = -1L) ?(timeout = 0) ?(count = 0) uc pc =
-  emu_start uc pc until (Int64.of_int timeout) count
+let start ?(until = -1L) ?(timeout = 0) ?(count = 0) ?(thread = 0) uc pc =
+  emu_start uc pc until (Int64.of_int timeout) count thread
 
 type hook = int64
 

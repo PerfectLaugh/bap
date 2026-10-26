@@ -11,8 +11,8 @@ type accesses = (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array2.t
 (** the accesses, a row each: the index of the instruction, that made it, in all
     instructions, that the trace recorded, the address, the written value, the
     size, with the bit 32 set, if it is a write, the program counter of the
-    instruction, in a trace of blocks, and the bytes, that a write of at most 8
-    bytes overwrote, the first one in the lowest byte *)
+    instruction, in a trace of blocks, the bytes, that a write of at most 8
+    bytes overwrote, the first one in the lowest byte, and the TID *)
 
 val create : ?every:int -> ?blocks:bool -> ?accesses:int -> int -> t
 (** [create size] the trace of the last [size] instructions, at least, as the
@@ -40,6 +40,13 @@ val pcs : ?last:int -> t -> pcs
 (** the last program counters, at most [last], the oldest first, by default all,
     that the ring keeps *)
 
+val tids : ?last:int -> t -> pcs
+(** the TIDs of the last records, aligned with {!pcs} *)
+
+val set_thread : t -> int -> unit
+(** [set_thread trace tid] sets the TID of the records made by the next native
+    run *)
+
 val sizes : ?last:int -> t -> sizes
 (** the sizes of the last blocks, as {!pcs} *)
 
@@ -51,14 +58,14 @@ val accesses : ?last:int -> t -> accesses
 (** the last accesses, as {!pcs} *)
 
 val bounds : t -> pcs
-(** the boundaries, the oldest first, each as three words, the index of the
+(** the boundaries, the oldest first, each as four words: the index of the
     record, which follows the registers, if the bit 62 is set, or the memory, if
     the bit 63 is, which were written, while the emulation was stopped, except
-    the pages, that were filled, as they were mapped, the program counter, and
-    the number of the written ranges of the bytes, see {!ranges}, or [-1], if
-    they are unknown, e.g., too many. If the bit 61 is set, a hook wrote them,
-    while the emulation ran, before the instruction at the program counter, in
-    the record. *)
+    the pages, that were filled, as they were mapped; the program counter; the
+    number of the written ranges of the bytes, see {!ranges}, or [-1], if they
+    are unknown, e.g., too many; and the TID. If the bit 61 is set, a hook wrote
+    them, while the emulation ran, before the instruction at the program
+    counter, in the record. *)
 
 val ranges : t -> pcs
 (** the addresses and the sizes of the written ranges of the {!bounds}, in their

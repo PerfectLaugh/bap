@@ -117,7 +117,8 @@ let () =
       printf "strlen: %d references, %d with the %d calls of the trace\n" before
         (List.length (Xrefs.find xrefs strlen))
         (List.length calls);
-      Xrefs.add_calls xrefs [ (0x400753L, [ (strlen, 1) ]) ];
+      Xrefs.add_calls xrefs
+        [ { site = 0x400753L; targets = [ (strlen, 1) ]; thread = 0 } ];
       printf "with a call of a dispatcher: %d, from %s\n"
         (List.length (Xrefs.find xrefs strlen))
         (String.concat ~sep:","

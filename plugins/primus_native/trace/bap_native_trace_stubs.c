@@ -21,11 +21,13 @@
 static void finalize_trace(value v) {
     struct bap_native_trace *t = Bap_native_trace_val(v);
     free(t->bounds);
+    free(t->bound_tids);
     free(t->at);
     free(t->first);
     free(t->nranges);
     free(t->ranges);
     free(t->pcs);
+    free(t->tids);
     free(t->sizes);
     free(t->modes);
     free(t->mem);
@@ -63,9 +65,11 @@ value bap_native_trace_create(value size, value every, value blocks,
     uint64_t n = ring_size(Long_val(size) < 1 ? 2 : Long_val(size) + 1);
     t->mask = n - 1;
     t->pcs = malloc(n * sizeof(uint64_t));
+    t->tids = malloc(n * sizeof(uint64_t));
     t->sizes = Bool_val(blocks) ? malloc(n * sizeof(uint32_t)) : NULL;
     t->every = Long_val(every) < 1 ? 1 : Long_val(every);
     t->bounds = malloc(BOUNDS * sizeof(uint64_t));
+    t->bound_tids = malloc(BOUNDS * sizeof(uint64_t));
     t->at = malloc(BOUNDS * sizeof(uint64_t));
     t->first = malloc(BOUNDS * sizeof(uint64_t));
     t->nranges = malloc(BOUNDS * sizeof(uint64_t));
@@ -76,16 +80,19 @@ value bap_native_trace_create(value size, value every, value blocks,
         t->amask = m - 1;
         t->mem = malloc(m * sizeof(struct bap_native_trace_access));
     }
-    if (t->pcs == NULL || t->bounds == NULL || t->at == NULL ||
-        t->first == NULL || t->nranges == NULL || t->ranges == NULL ||
+    if (t->pcs == NULL || t->tids == NULL || t->bounds == NULL ||
+        t->bound_tids == NULL || t->at == NULL || t->first == NULL ||
+        t->nranges == NULL || t->ranges == NULL ||
         (Bool_val(blocks) && t->sizes == NULL) ||
         (Long_val(accesses) > 0 && t->mem == NULL)) {
         free(t->bounds);
+        free(t->bound_tids);
         free(t->at);
         free(t->first);
         free(t->nranges);
         free(t->ranges);
         free(t->pcs);
+        free(t->tids);
         free(t->sizes);
         free(t->mem);
         free(t);
@@ -120,6 +127,7 @@ value bap_native_trace_record(value tv, value pc, value size, value thumb) {
         t->sizes[t->count & t->mask] = Long_val(size);
     }
     t->pcs[t->count & t->mask] = addr;
+    t->tids[t->count & t->mask] = t->tid;
     if (t->modes != NULL) {
         t->modes[t->count & t->mask] = Bool_val(thumb);
     }
@@ -151,6 +159,7 @@ void bap_native_trace_block(void *tp, uint64_t pc, uint32_t size, int thumb,
     }
     t->sizes[t->count & t->mask] = size;
     t->pcs[t->count & t->mask] = pc;
+    t->tids[t->count & t->mask] = t->tid;
     if (t->modes != NULL) {
         t->modes[t->count & t->mask] = thumb;
     }
@@ -171,6 +180,7 @@ value bap_native_trace_access(value tv, value write, value addr, value size,
     a->write = Bool_val(write);
     a->value = Bool_val(write) ? (uint64_t)Int64_val(x) : 0;
     a->old = Bool_val(write) ? (uint64_t)Int64_val(old) : 0;
+    a->tid = t->tid;
     t->accesses++;
     return Val_unit;
 }
@@ -217,7 +227,8 @@ void bap_native_trace_add_bound(struct bap_native_trace *t, uint64_t bound,
                                 uint64_t n) {
     uint64_t i = (t->marks - 1) & (BOUNDS - 1);
     uint64_t last = t->bounds[i];
-    if (t->marks > 0 && (last & ~(3ULL << 62)) == (bound & ~(3ULL << 62)) &&
+    if (t->marks > 0 && t->bound_tids[i] == t->tid &&
+        (last & ~(3ULL << 62)) == (bound & ~(3ULL << 62)) &&
         (!(bound & MID) || t->at[i] == pc) &&
         (t->nranges[i] == UNKNOWN ||
          t->first[i] + t->nranges[i] == t->ranges_count)) {
@@ -225,6 +236,7 @@ void bap_native_trace_add_bound(struct bap_native_trace *t, uint64_t bound,
     } else {
         i = t->marks & (BOUNDS - 1);
         t->bounds[i] = bound;
+        t->bound_tids[i] = t->tid;
         t->at[i] = pc;
         t->first[i] = t->ranges_count;
         t->nranges[i] = 0;
@@ -331,6 +343,25 @@ value bap_native_trace_pcs(value tv, value n) {
     CAMLreturn(r);
 }
 
+value bap_native_trace_tids(value tv, value n) {
+    CAMLparam2(tv, n);
+    CAMLlocal1(r);
+    struct bap_native_trace *t = Bap_native_trace_val(tv);
+    uint64_t k = kept(t->count, t->mask, Long_val(n));
+    r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 1, NULL, k);
+    int64_t *data = Caml_ba_data_val(r);
+    uint64_t first = t->count - k;
+    for (uint64_t i = 0; i < k; i++) {
+        data[i] = t->tids[(first + i) & t->mask];
+    }
+    CAMLreturn(r);
+}
+
+value bap_native_trace_set_thread(value tv, value tid) {
+    Bap_native_trace_val(tv)->tid = (uint64_t)Long_val(tid);
+    return Val_unit;
+}
+
 value bap_native_trace_sizes(value tv, value n) {
     CAMLparam2(tv, n);
     CAMLlocal1(r);
@@ -365,17 +396,18 @@ value bap_native_trace_mem(value tv, value n) {
     struct bap_native_trace *t = Bap_native_trace_val(tv);
     uint64_t k = t->mem == NULL ? 0 : kept(t->accesses, t->amask, Long_val(n));
     r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 2, NULL, k,
-                           (intnat)6);
+                           (intnat)7);
     int64_t *data = Caml_ba_data_val(r);
     uint64_t first = t->accesses - k;
     for (uint64_t i = 0; i < k; i++) {
         struct bap_native_trace_access *a = &t->mem[(first + i) & t->amask];
-        data[6 * i] = a->insn;
-        data[6 * i + 1] = a->addr;
-        data[6 * i + 2] = a->value;
-        data[6 * i + 3] = (int64_t)a->size | ((int64_t)a->write << 32);
-        data[6 * i + 4] = a->pc;
-        data[6 * i + 5] = a->old;
+        data[7 * i] = a->insn;
+        data[7 * i + 1] = a->addr;
+        data[7 * i + 2] = a->value;
+        data[7 * i + 3] = (int64_t)a->size | ((int64_t)a->write << 32);
+        data[7 * i + 4] = a->pc;
+        data[7 * i + 5] = a->old;
+        data[7 * i + 6] = a->tid;
     }
     CAMLreturn(r);
 }
@@ -409,14 +441,15 @@ value bap_native_trace_bounds(value tv) {
     CAMLlocal1(r);
     struct bap_native_trace *t = Bap_native_trace_val(tv);
     uint64_t k = t->marks < BOUNDS ? t->marks : BOUNDS;
-    r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 1, NULL, 3 * k);
+    r = caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT, 1, NULL, 4 * k);
     int64_t *data = Caml_ba_data_val(r);
     uint64_t first = t->marks - k;
     for (uint64_t i = 0; i < k; i++) {
         uint64_t j = (first + i) & (BOUNDS - 1);
-        data[3 * i] = t->bounds[j];
-        data[3 * i + 1] = t->at[j];
-        data[3 * i + 2] = written(t, j);
+        data[4 * i] = t->bounds[j];
+        data[4 * i + 1] = t->at[j];
+        data[4 * i + 2] = written(t, j);
+        data[4 * i + 3] = t->bound_tids[j];
     }
     CAMLreturn(r);
 }

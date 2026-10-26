@@ -1539,6 +1539,7 @@ module Trace = struct
   let clear t = Uc.Trace.clear t.trace
   let blocks t = Uc.Trace.blocks t.trace
   let pcs ?last t = Uc.Trace.pcs ?last t.trace
+  let tids ?last t = Uc.Trace.tids ?last t.trace
   let sizes ?last t = Uc.Trace.sizes ?last t.trace
   let save ?last t file = Uc.Trace.save ?last t.trace file
 
@@ -1550,6 +1551,7 @@ module Trace = struct
     write : bool;
     value : int64;
     old : int64;
+    thread : int;
   }
 
   let access rows i =
@@ -1563,6 +1565,7 @@ module Trace = struct
       write = Int64.(shift_right_logical info 32 land 1L = 1L);
       pc = get rows i 4;
       old = get rows i 5;
+      thread = Int64.to_int_exn (get rows i 6);
     }
 
   let accesses ?last t =
@@ -1632,20 +1635,41 @@ module Trace = struct
     Bigarray.Array1.create Bigarray.int64 Bigarray.c_layout n
 
   (* the program counters of the instructions of the last [last] records,
-     and the indices of their records, which are unboxed, and their modes,
-     see [Uc.Trace.modes] *)
-  let window ?(records = true) ?last t : words * words * Uc.Trace.modes =
-    let pcs = pcs ?last t in
-    let n = Bigarray.Array1.dim pcs in
-    let first = Int64.(count t - of_int n) in
-    let modes = Uc.Trace.modes ?last t.trace in
+     their global record indices, modes, and TIDs, also of the instructions,
+     into which the blocks expand *)
+  let window ?(records = true) ?thread ?last t :
+      words * words * Uc.Trace.modes * words =
+    let raw_pcs = pcs ?last t in
+    let raw_tids = tids ?last t in
+    let raw_modes = Uc.Trace.modes ?last t.trace in
+    let raw_n = Bigarray.Array1.dim raw_pcs in
+    let first = Int64.(count t - of_int raw_n) in
+    let selected =
+      Array.init raw_n ~f:Fn.id
+      |> Array.filter ~f:(fun i ->
+          Option.for_all thread ~f:(fun tid ->
+              Int64.equal
+                (Bigarray.Array1.unsafe_get raw_tids i)
+                (Int64.of_int tid)))
+    in
+    let n = Array.length selected in
+    let pcs = words n and selected_tids = words n in
+    let modes =
+      Bigarray.Array1.create Bigarray.int8_unsigned Bigarray.c_layout n
+    in
+    Array.iteri selected ~f:(fun i raw ->
+        Bigarray.Array1.unsafe_set pcs i
+          (Bigarray.Array1.unsafe_get raw_pcs raw);
+        Bigarray.Array1.unsafe_set selected_tids i
+          (Bigarray.Array1.unsafe_get raw_tids raw);
+        Bigarray.Array1.unsafe_set modes i
+          (Bigarray.Array1.unsafe_get raw_modes raw));
     if not (blocks t) then begin
       let indices = words (if records then n else 0) in
       if records then
-        for i = 0 to n - 1 do
-          Bigarray.Array1.unsafe_set indices i Int64.(first + of_int i)
-        done;
-      (pcs, indices, modes)
+        Array.iteri selected ~f:(fun i raw ->
+            Bigarray.Array1.unsafe_set indices i Int64.(first + of_int raw));
+      (pcs, indices, modes, selected_tids)
     end
     else
       let sizes = sizes ?last t in
@@ -1659,7 +1683,8 @@ module Trace = struct
             let addr = Bigarray.Array1.unsafe_get pcs i in
             let key = if thumb then Int64.(addr lor 1L) else addr in
             let size =
-              Int32.to_int_trunc (Bigarray.Array1.unsafe_get sizes i)
+              Int32.to_int_trunc
+                (Bigarray.Array1.unsafe_get sizes (Array.unsafe_get selected i))
             in
             let slot = Int64.to_int_trunc key land (slots - 1) in
             let a, sz, b = Array.unsafe_get cache slot in
@@ -1671,28 +1696,28 @@ module Trace = struct
       in
       let total = Array.sum (module Int) insns ~f:Array.length in
       let out = words total
+      and out_tids = words total
       and indices = words (if records then total else 0)
       and expanded =
-        Bigarray.Array1.create Bigarray.int8_unsigned Bigarray.c_layout
-          (if records then total else 0)
+        Bigarray.Array1.create Bigarray.int8_unsigned Bigarray.c_layout total
       in
       let pos = ref 0 in
       Array.iteri insns ~f:(fun i b ->
-          let record = Int64.(first + of_int i) in
+          let record = Int64.(first + of_int (Array.unsafe_get selected i)) in
           let mode = Bigarray.Array1.unsafe_get modes i in
+          let tid = Bigarray.Array1.unsafe_get selected_tids i in
           for j = 0 to Array.length b - 1 do
             Bigarray.Array1.unsafe_set out (!pos + j) (Array.unsafe_get b j);
-            if records then begin
-              Bigarray.Array1.unsafe_set indices (!pos + j) record;
-              Bigarray.Array1.unsafe_set expanded (!pos + j) mode
-            end
+            Bigarray.Array1.unsafe_set out_tids (!pos + j) tid;
+            Bigarray.Array1.unsafe_set expanded (!pos + j) mode;
+            if records then Bigarray.Array1.unsafe_set indices (!pos + j) record
           done;
           pos := !pos + Array.length b);
-      (out, indices, expanded)
+      (out, indices, expanded, out_tids)
 
   let insns ?last t =
     if blocks t then
-      let pcs, _, _ = window ~records:false ?last t in
+      let pcs, _, _, _ = window ~records:false ?last t in
       pcs
     else pcs ?last t
 
@@ -1770,8 +1795,14 @@ module Trace = struct
     | Some n when n < List.length all -> List.drop all (List.length all - n)
     | _ -> all
 
-  let calls ?last t =
-    let pcs, _, modes = window ?last t in
+  type call = Bap_emu_xrefs.call = {
+    site : int64;
+    targets : (int64 * int) list;
+    thread : int;
+  }
+
+  let calls ?thread ?last t =
+    let pcs, _, modes, tids = window ?thread ?last t in
     let sizes = Int64.Table.create () in
     let calling thumb pc =
       let key = if thumb then Int64.(pc lor 1L) else pc in
@@ -1786,34 +1817,45 @@ module Trace = struct
               Some size
           | _ -> None)
     in
-    let sites = Int64.Table.create () in
+    let sites = Hashtbl.Poly.create () in
     for i = 0 to Bigarray.Array1.dim pcs - 2 do
       let pc = Bigarray.Array1.unsafe_get pcs i in
       let thumb = Bigarray.Array1.unsafe_get modes i = 1 in
-      match calling thumb pc with
-      | Some size ->
-          let next = Bigarray.Array1.unsafe_get pcs (i + 1) in
-          if Int64.(next <> pc + of_int size) then
-            Hashtbl.update sites pc ~f:(fun targets ->
-                Map.update (Option.value targets ~default:Int64.Map.empty) next
-                  ~f:(fun n -> Option.value n ~default:0 + 1))
-      | None -> ()
+      let tid = Bigarray.Array1.unsafe_get tids i in
+      if Int64.equal tid (Bigarray.Array1.unsafe_get tids (i + 1)) then
+        match calling thumb pc with
+        | Some size ->
+            let next = Bigarray.Array1.unsafe_get pcs (i + 1) in
+            if Int64.(next <> pc + of_int size) then
+              Hashtbl.update sites
+                (Int64.to_int_exn tid, pc)
+                ~f:(fun targets ->
+                  Map.update (Option.value targets ~default:Int64.Map.empty)
+                    next ~f:(fun n -> Option.value n ~default:0 + 1))
+        | None -> ()
     done;
     Hashtbl.to_alist sites
-    |> List.sort ~compare:(fun (a, _) (b, _) -> Int64.compare a b)
-    |> List.map ~f:(fun (site, targets) ->
-        ( site,
-          Map.to_alist targets
-          |> List.sort ~compare:(fun (a, n) (b, m) ->
-              match Int.compare m n with 0 -> Int64.compare a b | c -> c) ))
+    |> List.sort ~compare:(fun ((ta, a), _) ((tb, b), _) ->
+        match Int.compare ta tb with 0 -> Int64.compare a b | c -> c)
+    |> List.map ~f:(fun ((thread, site), targets) ->
+        {
+          thread;
+          site;
+          targets =
+            Map.to_alist targets
+            |> List.sort ~compare:(fun (a, n) (b, m) ->
+                match Int.compare m n with 0 -> Int64.compare a b | c -> c);
+        })
 
   (* the conditional branches of the trace, in their order, with the
      addresses, that they went to, and whether they were taken, i.e.,
      didn't fall through: the instructions, whose jumps on a condition
      leave them, as the jumps inside an instruction, e.g., over the body
      of a conditional instruction of ARM, aren't branches *)
-  let branches ?last t =
-    let pcs, _, modes = window ?last t in
+  type branch = { site : int64; target : int64; taken : bool; thread : int }
+
+  let branches ?thread ?last t =
+    let pcs, _, modes, tids = window ?thread ?last t in
     let sizes = Int64.Table.create () in
     let branching thumb pc =
       let key = if thumb then Int64.(pc lor 1L) else pc in
@@ -1842,11 +1884,20 @@ module Trace = struct
     for i = 0 to Bigarray.Array1.dim pcs - 2 do
       let pc = Bigarray.Array1.unsafe_get pcs i in
       let thumb = Bigarray.Array1.unsafe_get modes i = 1 in
-      match branching thumb pc with
-      | Some size ->
-          let next = Bigarray.Array1.unsafe_get pcs (i + 1) in
-          branches := (pc, next, Int64.(next <> pc + of_int size)) :: !branches
-      | None -> ()
+      let tid = Bigarray.Array1.unsafe_get tids i in
+      if Int64.equal tid (Bigarray.Array1.unsafe_get tids (i + 1)) then
+        match branching thumb pc with
+        | Some size ->
+            let target = Bigarray.Array1.unsafe_get pcs (i + 1) in
+            branches :=
+              {
+                site = pc;
+                target;
+                taken = Int64.(target <> pc + of_int size);
+                thread = Int64.to_int_exn tid;
+              }
+              :: !branches
+        | None -> ()
     done;
     List.rev !branches
 end
@@ -1866,7 +1917,7 @@ let record ?size t f =
   { result; trace }
 
 type location = Bap_emu_slice.location = Reg of string | Mem of int64 * int
-type step = { index : int64; pc : int64 }
+type step = { index : int64; pc : int64; thread : int }
 
 type slice = {
   steps : step list;
@@ -2122,9 +2173,9 @@ let ranges bytes =
    accesses are found by their program counters. The instructions are
    lifted once, from the bytes, that they have now, outside of the
    machine, as in the hooks. *)
-let slice ?(addresses = false) ?window (tr : Trace.t) criterion =
+let slice ?(addresses = false) ?window ?thread (tr : Trace.t) criterion =
   let t = tr.emu in
-  let pcs, records, modes = Trace.window ?last:window tr in
+  let pcs, records, modes, tids = Trace.window ?thread ?last:window tr in
   let n = Bigarray.Array1.dim pcs in
   let blocks = Trace.blocks tr in
   let rows = Uc.Trace.accesses tr.trace in
@@ -2161,12 +2212,12 @@ let slice ?(addresses = false) ?window (tr : Trace.t) criterion =
   let bounds = Int64.Table.create () and inside = Hashtbl.Poly.create () in
   let marks = Uc.Trace.bounds tr.trace and written = Uc.Trace.ranges tr.trace in
   let pos = ref 0 in
-  for i = 0 to (Bigarray.Array1.dim marks / 3) - 1 do
-    let b = Bigarray.Array1.get marks (3 * i) in
+  for i = 0 to (Bigarray.Array1.dim marks / 4) - 1 do
+    let b = Bigarray.Array1.get marks (4 * i) in
     let record = Int64.(b land 0x1FFF_FFFF_FFFF_FFFFL) in
     let regs = Int64.(b land 0x4000_0000_0000_0000L <> 0L) in
     let mem = Int64.(b < 0L) in
-    let n = Int64.to_int_exn (Bigarray.Array1.get marks ((3 * i) + 2)) in
+    let n = Int64.to_int_exn (Bigarray.Array1.get marks ((4 * i) + 2)) in
     let ranges =
       if n < 0 then None
       else
@@ -2176,39 +2227,40 @@ let slice ?(addresses = false) ?window (tr : Trace.t) criterion =
                Bigarray.Array1.(get written k, get written (k + 1))))
     in
     pos := !pos + Int.max n 0;
+    let tid = Int64.to_int_exn (Bigarray.Array1.get marks ((4 * i) + 3)) in
     let merge = function
-      | None -> (regs, mem, ranges)
-      | Some (r, m, w) ->
-          (r || regs, m || mem, Option.map2 w ranges ~f:List.append)
+      | None -> [ (tid, (regs, mem, ranges)) ]
+      | Some marks -> (tid, (regs, mem, ranges)) :: marks
     in
     if Int64.(b land 0x2000_0000_0000_0000L = 0L) then
-      Hashtbl.update bounds record ~f:merge
+      Hashtbl.update bounds record ~f:(fun old ->
+          Option.value_map old
+            ~default:[ (tid, (regs, mem, ranges)) ]
+            ~f:(fun marks -> (tid, (regs, mem, ranges)) :: marks))
     else
-      let pc = Bigarray.Array1.get marks ((3 * i) + 1) in
+      let pc = Bigarray.Array1.get marks ((4 * i) + 1) in
       Hashtbl.update inside (record, pc) ~f:merge
   done;
   let gaps = ref [] in
   (* the live bytes, that were written outside, come from there, and
      aren't live before, unless the written ones are unknown *)
-  let gap record = function
-    | Some (regs, mem, ranges) ->
-        let outside =
-          match ranges with
-          | Some ranges when mem ->
-              Hash_set.filter live_mem ~f:(fun a ->
-                  List.exists ranges ~f:(fun (b, n) ->
-                      Int64.(a >= b && a - b < n)))
-          | _ -> Int64.Hash_set.create ()
-        in
-        if
-          (regs && not (Hash_set.is_empty live_regs))
-          || mem
-             &&
-             if Option.is_some ranges then not (Hash_set.is_empty outside)
-             else not (Hash_set.is_empty live_mem)
-        then gaps := record :: !gaps;
-        Hash_set.iter outside ~f:(Hash_set.remove live_mem)
-    | None -> ()
+  let gap record tid (regs, mem, ranges) =
+    let outside =
+      match ranges with
+      | Some ranges when mem ->
+          Hash_set.filter live_mem ~f:(fun a ->
+              List.exists ranges ~f:(fun (b, n) -> Int64.(a >= b && a - b < n)))
+      | _ -> Int64.Hash_set.create ()
+    in
+    let our_regs = Option.for_all thread ~f:(Int.equal tid) in
+    if
+      (our_regs && regs && not (Hash_set.is_empty live_regs))
+      || mem
+         &&
+         if Option.is_some ranges then not (Hash_set.is_empty outside)
+         else not (Hash_set.is_empty live_mem)
+    then gaps := record :: !gaps;
+    Hash_set.iter outside ~f:(Hash_set.remove live_mem)
   in
   (* the values of the live locations may come from outside of the trace,
      before the instruction, that a hook wrote them before, or before the
@@ -2216,9 +2268,16 @@ let slice ?(addresses = false) ?window (tr : Trace.t) criterion =
   let crossed k =
     let record = Bigarray.Array1.get records k in
     if not (Hashtbl.is_empty inside) then
-      gap record (Hashtbl.find inside (record, Bigarray.Array1.get pcs k));
+      List.iter
+        (Option.value
+           (Hashtbl.find inside (record, Bigarray.Array1.get pcs k))
+           ~default:[])
+        ~f:(fun (tid, marks) -> gap record tid marks);
     if k = 0 || not (Int64.equal (Bigarray.Array1.get records (k - 1)) record)
-    then gap record (Hashtbl.find bounds record)
+    then
+      List.iter
+        (Option.value (Hashtbl.find bounds record) ~default:[])
+        ~f:(fun (tid, marks) -> gap record tid marks)
   in
   (* the bytes of the code, that the later writes changed, as they were
      at the instruction, which the walk is at, i.e., the bytes, that the
@@ -2331,6 +2390,10 @@ let slice ?(addresses = false) ?window (tr : Trace.t) criterion =
       else if Int64.(a.pc < pc) then `Earlier
       else `Ours
   in
+  let before_next k (a : Trace.access) =
+    k + 1 < n
+    && match order (k + 1) a with `Earlier -> true | `Ours | `Later -> false
+  in
   let rec loop k row steps =
     if
       k < 0
@@ -2347,6 +2410,12 @@ let slice ?(addresses = false) ?window (tr : Trace.t) criterion =
           match order k a with
           | `Later ->
               overwrote a;
+              if
+                a.write && before_next k a
+                && Option.exists thread ~f:(fun tid -> a.thread <> tid)
+              then
+                gap a.insn a.thread
+                  (false, true, Some [ (a.addr, Int64.of_int a.size) ]);
               accesses (row - 1) reads writes
           | `Ours ->
               overwrote a;
@@ -2412,7 +2481,8 @@ let slice ?(addresses = false) ?window (tr : Trace.t) criterion =
                 | None -> List.iter read_bytes ~f:(Hash_set.add live_mem)
               else untracked := true;
             crossed k;
-            loop (k - 1) row ({ index = record; pc } :: steps)
+            let thread = Int64.to_int_exn (Bigarray.Array1.get tids k) in
+            loop (k - 1) row ({ index = record; pc; thread } :: steps)
           end
   in
   let steps = loop (n - 1) (rows_n - 1) [] in

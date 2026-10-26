@@ -22,6 +22,7 @@ struct bap_native_trace_access {
     uint64_t addr;
     uint64_t value;
     uint64_t old;
+    uint64_t tid;
     uint32_t size;
     uint32_t write;
 };
@@ -30,6 +31,8 @@ struct bap_native_trace {
     uint64_t count;
     uint64_t mask;
     uint64_t *pcs;
+    uint64_t *tids;
+    uint64_t tid;
     uint32_t *sizes;
     uint8_t *modes;
     uint8_t thumb;
@@ -40,6 +43,7 @@ struct bap_native_trace {
     struct bap_native_trace_access *mem;
     uint64_t marks;
     uint64_t *bounds;
+    uint64_t *bound_tids;
     uint64_t *at;
     uint64_t *first;
     uint64_t *nranges;

@@ -15,12 +15,13 @@ let () =
       ignore (Emu.run emu : Emu.status);
       let calls =
         Emu.Trace.calls trace
-        |> List.filter ~f:(fun (site, _) -> Int64.(site >= 0x402100L))
+        |> List.filter ~f:(fun (c : Emu.Trace.call) ->
+            Int64.(c.site >= 0x402100L))
       in
       printf "%s:%s\n" name
         (String.concat
-           (List.map calls ~f:(fun (site, targets) ->
-                sprintf " %Lx->%s" site
+           (List.map calls ~f:(fun c ->
+                sprintf " %Lx->%s" c.site
                   (String.concat ~sep:","
-                     (List.map targets ~f:(fun (target, n) ->
+                     (List.map c.targets ~f:(fun (target, n) ->
                           sprintf "%Lx(%d)" target n)))))))

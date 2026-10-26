@@ -34,7 +34,7 @@ let () =
       List.iter [ "print_endline"; "print_strings"; "main" ] ~f:(fun f ->
           printf "%s: callers %s\n" f (names (Xrefs.callers xrefs (addr f))));
       printf "main calls %s\n" (names (Xrefs.callees xrefs (addr "main")));
-      let show x =
+      let show (x : Xrefs.xref) =
         printf "  %Lx %s %Lx%s in %s\n" x.Xrefs.site (kind x.kind) x.target
           (Option.value_map x.slot ~default:"" ~f:(sprintf " via %Lx"))
           (Option.value_map
