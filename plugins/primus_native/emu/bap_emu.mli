@@ -1016,7 +1016,12 @@ val call :
     the function can't be called, e.g., the C ABI of the target is not known,
     the target has no such register, or the program no such thread, or the
     function failed, e.g., with a segmentation fault, after which the program is
-    paused where it was, as before the call. *)
+    paused where it was, as before the call. A successful call frees its
+    temporary stack and forgets its bytes. A failed call restores the outer
+    registers and frames but retains the stack allocation and its bytes, so
+    failed-state reads and checkpoints preserve the callee's stack-local values
+    for diagnosis. The retained allocation lives until the emulator is
+    discarded. *)
 
 (** the outcome of {!drive} *)
 type called =
@@ -1694,9 +1699,10 @@ type execution_stats = {
 
 val execution_stats : t -> execution_stats
 (** [execution_stats emu] captures the counters of the paused emulator. [stack]
-    describes the innermost active call stack, or the most recently finished one
-    after its allocation has been cleaned up; it is [None] before the first
-    call. Raises [Invalid_argument] if the program is not paused. *)
+    describes the innermost active call stack, or the most recently finished
+    one, whose allocation is retained after failure and cleaned up after
+    success; it is [None] before the first call. Raises [Invalid_argument] if
+    the program is not paused. *)
 
 type operation_stats = {
   count : int;  (** operations performed, or entries for entry eviction *)

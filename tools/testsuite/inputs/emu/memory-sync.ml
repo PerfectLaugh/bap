@@ -160,6 +160,70 @@ let run file dir engine =
     check
       (sprintf "failed-state read after restore %d is stale" round)
       (byte restored crashed = 0xa5)
+  done;
+
+  let emu = Emu.create ~engine (project ()) in
+  (match Emu.run emu ~until:main with
+  | Emu.Paused -> ()
+  | _ -> failwith "didn't reach main for the failed call");
+  allocate emu ~code ~data ~generated;
+  (* mov byte [rsp-1], 0xa5; movzx eax, byte [rsp-1];
+     mov rax, [0x10]; ret *)
+  Emu.write emu code
+    "\xc6\x44\x24\xff\xa5\x0f\xb6\x44\x24\xff\x48\xa1\x10\x00\x00\x00\x00\x00\x00\x00\xc3";
+  let stack_fault = Int64.(code + 10L) in
+  let outer_pc = Emu.pc emu and outer_sp = Emu.reg emu "RSP" in
+  let tid = Emu.spawn_thread emu ~start:code ~arg:data in
+  let stack_reads = ref [] in
+  (match
+     Emu.scoped emu (fun () ->
+         Emu.on_read emu (fun emu addr size ->
+             stack_reads := (addr, Emu.read emu addr size) :: !stack_reads);
+         Emu.call emu code ~thread:tid)
+   with
+  | exception Failure _ -> ()
+  | _ -> failwith "the stack-local routine didn't fail");
+  let stack = Option.value_exn (Emu.execution_stats emu).stack in
+  let local = Int64.(stack.lowest_sp - 1L) in
+  check "failed call didn't restore the outer pc" Int64.(Emu.pc emu = outer_pc);
+  check "failed call didn't restore the outer stack"
+    Int64.(Emu.reg emu "RSP" = outer_sp);
+  check "thread-local stack address is outside the call stack"
+    Int64.(local >= stack.lower && local < stack.upper);
+  check "failed call lost its temporary stack byte" (byte emu local = 0xa5);
+  check "executed stack-local load saw a different value"
+    (List.exists !stack_reads ~f:(fun (addr, data) ->
+         Int64.equal addr local && String.equal data "\xa5"));
+  (match Emu.failure emu with
+  | Some failure ->
+      check "failed call has the wrong pc" Int64.(failure.pc = stack_fault)
+  | None -> failwith "failed call has no structured fault");
+  Emu.set_reg emu "RSP" stack.lowest_sp;
+  Emu.set_pc emu stack_fault;
+  (match Emu.run emu with
+  | Emu.Failed _ -> ()
+  | _ -> failwith "the stack-local crash didn't fault");
+  check "failed crash read lost the temporary stack byte" (byte emu local = 0xa5);
+  let call_checkpoint = Filename.concat dir "failed-call-stack.ckpt" in
+  Emu.save emu call_checkpoint;
+  for round = 1 to 2 do
+    let restored = Emu.create ~engine ~restore:call_checkpoint (project ()) in
+    check
+      (sprintf "fresh restore %d lost the failed call stack" round)
+      (byte restored local = 0xa5);
+    (match Emu.run restored with
+    | Emu.Failed _ -> ()
+    | _ -> failwithf "restored call crash %d didn't fault again" round ());
+    (match Emu.failure restored with
+    | Some failure ->
+        check "restored call fault has the wrong pc"
+          Int64.(failure.pc = stack_fault);
+        check "restored call fault has the wrong address"
+          Int64.(failure.addr = 0x10L)
+    | None -> failwith "restored call crash has no structured fault");
+    check
+      (sprintf "failed call stack read after restore %d is stale" round)
+      (byte restored local = 0xa5)
   done
 
 let () =

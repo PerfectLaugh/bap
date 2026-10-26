@@ -6317,12 +6317,14 @@ module Make (Machine : Primus.Machine.S) = struct
       let size = (Option.value stack ~default:0x10000 + 15) land lnot 15 in
       let* base = Threads.Windows.allocate e size in
       let top = Int64.(base + of_int size) in
-      (* the stack is freed, as the function returned, or failed, so that
-         the calls don't exhaust the heap, and its bytes are forgotten, as
-         they were never stored, so that the memory differs from a
-         snapshot only in what the function stored elsewhere, see
-         [Bap_emu.diff], and the registers are as before the call *)
-      let finish () =
+      (* the registers and frames are restored whether the function returned
+         or failed. A returned function's stack is freed and its bytes are
+         forgotten, as they were never stored, so that calls don't exhaust the
+         heap and the memory differs from a snapshot only in what the function
+         stored elsewhere, see [Bap_emu.diff]. A failed function's stack stays
+         allocated with its bytes for failed-state diagnostics and checkpoints,
+         until the emulator is discarded. *)
+      let finish ~failed () =
         let* active = Machine.Local.get call_sites in
         let* () =
           match active with
@@ -6335,12 +6337,14 @@ module Make (Machine : Primus.Machine.S) = struct
         let* () = Machine.Local.put call_sites sites in
         let* () = restore e saved in
         Engine.reg_write e.engine e.pc (code_addr e pc);
-        let* p = Value.of_word (word e base) in
-        let* _ = Lisp.eval_fun "free" [ p ] in
-        let* () = drop (word e base) (word e Int64.(top - 1L)) in
         let* () =
-          Machine.List.iter (List.init size ~f:Fn.id) ~f:(fun i ->
-              Memory.del (word e Int64.(base + of_int i)))
+          if failed then Machine.return ()
+          else
+            let* p = Value.of_word (word e base) in
+            let* _ = Lisp.eval_fun "free" [ p ] in
+            let* () = drop (word e base) (word e Int64.(top - 1L)) in
+            Machine.List.iter (List.init size ~f:Fn.id) ~f:(fun i ->
+                Memory.del (word e Int64.(base + of_int i)))
         in
         let+ () = pull e in
         e.stack <- Option.map (List.hd sites) ~f:(fun site -> site.site_stack);
@@ -6429,11 +6433,11 @@ module Make (Machine : Primus.Machine.S) = struct
           let result =
             Option.map output ~f:(fun exp -> int64_of_word (eval_engine e exp))
           in
-          let+ () = finish () in
+          let+ () = finish ~failed:false () in
           Ok (Option.value result ~default:0L)
       in
       Machine.catch (run ()) (fun exn ->
-          let+ () = finish () in
+          let+ () = finish ~failed:true () in
           Error (Primus.Exn.to_string exn))
   end
 
