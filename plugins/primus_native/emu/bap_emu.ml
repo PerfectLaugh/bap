@@ -3446,8 +3446,10 @@ and unsorted_thread_regs t tid =
   let e = engine t in
   let basis = Target.Regs.basis e.regs in
   let value v =
-    Option.map (Target.Regs.read e.regs v) ~f:(fun w ->
-        (Var.name v, Bitvec.to_int64 (Word.to_bitvec w)))
+    Option.bind (Target.Regs.read e.regs v) ~f:(fun w ->
+        match Word.to_int64 w with
+        | Ok x -> Some (Var.name v, x)
+        | Error _ -> None)
   in
   if tid = thread t then List.filter_map basis ~f:value
   else if
@@ -3469,12 +3471,11 @@ and unsorted_thread_regs t tid =
                         let saved = X.thread_var tid v in
                         Env.is_set saved >>= function
                         | false -> Machine.return None
-                        | true ->
+                        | true -> (
                             Env.get saved >>| fun x ->
-                            Some
-                              ( Var.name v,
-                                Bitvec.to_int64
-                                  (Word.to_bitvec (Primus.Value.to_word x)) ))
+                            match Word.to_int64 (Primus.Value.to_word x) with
+                            | Ok value -> Some (Var.name v, value)
+                            | Error _ -> None))
                     >>| fun saved -> regs := saved
                 end);
     !regs

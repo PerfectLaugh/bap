@@ -1005,7 +1005,8 @@ let raise_sub ~mem sub exits (blocks : Parse.block list) =
   in
   let target pred succ =
     match Map.find phis succ with
-    | None | Some [] -> tid succ
+    | None -> raise (Error (sprintf "no successor %s from %s" succ pred))
+    | Some [] -> tid succ
     | Some ps ->
         let e = Tid.create () in
         let incoming =

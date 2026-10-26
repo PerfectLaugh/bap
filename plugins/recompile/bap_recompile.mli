@@ -131,7 +131,8 @@ val deflatten :
     a block passes to it, a constant, or a select of the constants, as long as
     its blocks have no effects, and the block jumps to the block, that the
     dispatcher leads to, with the variables, that the dispatcher defined on the
-    way. *)
+    way. Each round rejects a direct local destination that is neither a block
+    of the result nor an external destination of the original [sub]. *)
 
 val optimize_program :
   ?target:Theory.Target.t ->

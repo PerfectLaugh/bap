@@ -1,0 +1,14 @@
+(executable
+ (name controlled_opt)
+ (modules controlled_opt))
+
+(test
+ (name run_tests)
+ (modules run_tests)
+ (libraries bap-recompile core ounit2)
+ (deps controlled_opt.exe)
+ (action
+  (setenv
+   BAP_RECOMPILE_TEST_OPT
+   %{exe:controlled_opt.exe}
+   (run %{test}))))

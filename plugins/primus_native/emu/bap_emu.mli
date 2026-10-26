@@ -1526,8 +1526,11 @@ val thread_regs : t -> int -> (string * int64) list
     the paused program, by its TID, see {!threads}, e.g., of the one, that waits
     on a lock, to tell, which lock it waits on, from its arguments: of the
     engine, for the thread, that runs, and else, as the thread had them, when it
-    stopped running. Raises [Invalid_argument], if the program is not paused, or
-    has no such thread. *)
+    stopped running. The values preserve all 64 bits, including the highest bit.
+    Registers whose values aren't representable in 64 bits are omitted;
+    {!reg_word} reads the full-width value of a register of the active thread.
+    Raises [Invalid_argument], if the program is not paused, or has no such
+    thread. *)
 
 val set_thread_reg : t -> int -> string -> int64 -> unit
 (** [set_thread_reg emu tid name value] sets the register of an active or parked

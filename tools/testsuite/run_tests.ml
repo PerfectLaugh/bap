@@ -2488,6 +2488,32 @@ let threads data =
       (* the functions of the threads of POSIX, that the executor runs,
          with the threads of clone, see pthreads.c *)
     ]
+  @ List.map
+      (fun engine ->
+        case (Printf.sprintf "emu/aarch64-thread-regs/%s" engine) (fun env ->
+            let out =
+              bap ~timeout:300. env
+                [
+                  "script";
+                  input "emu/thread-regs-aarch64.ml";
+                  path data "bin/aarch64-linux-gnu-threads";
+                  dir env;
+                  engine;
+                ]
+            in
+            sequence env out
+              [
+                ("reads the initial backtraces", "initial backtraces true\n");
+                ( "reads active and parked narrow views",
+                  "before save: active true, parked true, full true\n" );
+                ( "restores active and parked narrow views",
+                  "after restore: active true, parked true, full true\n" );
+                ("restores the backtraces", "restored backtraces true\n");
+                ("preserves the program outcome", "restored outcome true\n");
+                ( "preserves the timeout and diagnostics",
+                  "timeout outcome true, backtraces true, views true\n" );
+              ]))
+      [ "lifted"; "unicorn" ]
   @ List.concat_map
       (fun engine ->
         List.map

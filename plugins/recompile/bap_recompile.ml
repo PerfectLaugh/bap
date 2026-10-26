@@ -164,16 +164,61 @@ module Region = struct
     Term.with_attrs updated (Term.attrs sub)
 end
 
+let direct_destinations jmp =
+  let direct = function Some (Direct tid) -> [ tid ] | _ -> [] in
+  match Jmp.kind jmp with
+  | Goto label | Ret label -> direct (Some label)
+  | Call call -> direct (Call.return call)
+  | Int (_, tid) -> [ tid ]
+
+let external_boundary sub =
+  let blocks =
+    Term.enum blk_t sub |> Seq.map ~f:Term.tid |> Tid.Set.of_sequence
+  in
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Set.empty ~f:(fun boundary blk ->
+      Term.enum jmp_t blk
+      |> Seq.fold ~init:boundary ~f:(fun boundary jmp ->
+          List.fold (direct_destinations jmp) ~init:boundary
+            ~f:(fun boundary tid ->
+              if Set.mem blocks tid then boundary else Set.add boundary tid)))
+
+let validate_destinations ~boundary sub =
+  let blocks =
+    Term.enum blk_t sub |> Seq.map ~f:Term.tid |> Tid.Set.of_sequence
+  in
+  Term.enum blk_t sub
+  |> Seq.fold ~init:(Ok ()) ~f:(fun result blk ->
+      Result.bind result ~f:(fun () ->
+          Term.enum jmp_t blk
+          |> Seq.fold ~init:(Ok ()) ~f:(fun result jmp ->
+              Result.bind result ~f:(fun () ->
+                  List.fold (direct_destinations jmp) ~init:(Ok ())
+                    ~f:(fun result tid ->
+                      Result.bind result ~f:(fun () ->
+                          if Set.mem blocks tid || Set.mem boundary tid then
+                            Ok ()
+                          else
+                            Or_error.errorf
+                              "the sub %s has the jump %s in the block %s to \
+                               the missing destination %s"
+                              (Sub.name sub)
+                              (Tid.to_string (Term.tid jmp))
+                              (Tid.to_string (Term.tid blk))
+                              (Tid.to_string tid)))))))
+
 (* the rounds of the optimization, until the number of the blocks
    doesn't change, as each round threads the dispatchers, that the
    previous one revealed *)
 let deflatten ?target ?opt ?(passes = deflatten_passes) ?(rounds = 4) sub =
+  let boundary = external_boundary sub in
   let blocks sub = Term.length blk_t sub in
   let rec loop n sub =
     if n = 0 then Ok sub
     else
       Result.bind (optimize ?target ?opt ~passes sub) ~f:(fun sub' ->
-          if blocks sub' = blocks sub then Ok sub' else loop (n - 1) sub')
+          Result.bind (validate_destinations ~boundary sub') ~f:(fun () ->
+              if blocks sub' = blocks sub then Ok sub' else loop (n - 1) sub'))
   in
   loop rounds sub
 
