@@ -30,7 +30,7 @@ open Core
 open Bap_core_theory
 open Bap.Std
 open Bap_primus.Std
-module Uc = Bap_engine
+module Engine = Bap_engine
 module Target = Primus_native_target
 module Checkpoint = Primus_native_checkpoint
 
@@ -69,7 +69,7 @@ type reason =
   | Returned
   | Stack of call_stack * int64 * int64
   | Foreign of int64
-  | Fault of Uc.access * int64
+  | Fault of Engine.access * int64
   | Interrupt of int  (** an interrupt or a system call *)
   | Invalid
   | Checkpoint
@@ -103,7 +103,7 @@ type frame = { ret : int64; sp : int64 }
 type page = {
   snapshot : Bytes.t option;
   holes : (int * int) list;
-  perm : Uc.Perm.t;  (** the access to the page in Primus *)
+  perm : Engine.Perm.t;  (** the access to the page in Primus *)
   mutable dirty : bool;
   mutable fetched : int;  (** the run of Unicorn, after which it is fetched *)
 }
@@ -146,7 +146,8 @@ module Id = Monads.Std.Monad.State.Multi.Id
 type kind = [ `Unicorn | `Lifted ]
 
 type engine_factory = {
-  create : Bap_engine_lifted.config option -> Uc.arch -> Uc.Mode.t -> Uc.t;
+  create :
+    Bap_engine_lifted.config option -> Engine.arch -> Engine.Mode.t -> Engine.t;
 }
 
 (* the options of the plugin of an engine, primus-unicorn, or
@@ -225,8 +226,8 @@ end
 
 type engine = {
   session : session;  (** the system, whose machines run in the engine *)
-  uc : Uc.t;
-  arch : Uc.arch;
+  uc : Engine.t;
+  arch : Engine.arch;
   regs : Target.Regs.t;
   pc : int;
   sp : var;
@@ -248,7 +249,7 @@ type engine = {
       (** the pending returns of the machine that runs, see [frames] *)
   mutable stack : call_stack option;
       (** the stack of the innermost call of the script, see [call_sites] *)
-  mutable stack_hook : Uc.hook option;
+  mutable stack_hook : Engine.hook option;
   returns : unit Int64.Table.t;
       (** the addresses of the hooks of the returns, which stay, as the
           addresses are few *)
@@ -267,7 +268,7 @@ type engine = {
       (** the addresses of the checkpoint and of the stops, which have the hook,
           see [dispatch] *)
   mutable stops : int;  (** the version of the stops, which are hooked *)
-  mutable stepper : Uc.hook option;
+  mutable stepper : Engine.hook option;
       (** the hook of every address, while the stepping is on *)
   mutable watching : watching;  (** the events that the observers see *)
   mutable code_segments : (int64 * int64) list;
@@ -276,7 +277,7 @@ type engine = {
   code_written : (int64 * int64) list Int64.Table.t;
       (** the ranges of the addresses of the code, that the program wrote, since
           the engine stopped, by their pages, merged, see [code_written] *)
-  mutable watchers : Uc.hook list;  (** the hooks of the events *)
+  mutable watchers : Engine.hook list;  (** the hooks of the events *)
   mutable observed : (int64 * int) option;
       (** the address of the last observation and the start of Unicorn *)
   accesses : access Int64.Table.t;  (** the accesses of the instructions *)
@@ -287,7 +288,7 @@ type engine = {
           [Primus.Track] *)
   mutable clobbered : string list;
       (** the tracked registers, that the code in Unicorn wrote *)
-  mutable tracer : Uc.hook option;
+  mutable tracer : Engine.hook option;
       (** the hook of every address, while a register is tracked *)
   mutable seen : int;  (** the version of [Primus.Track], that is seen *)
   mutable shadowing : bool;
@@ -352,7 +353,7 @@ and script_model = {
 
 and model_registry = script_model String.Table.t
 and journal_event = { kind : string; detail : string }
-and fault = { tid : int; pc : int64; addr : int64; access : Uc.access }
+and fault = { tid : int; pc : int64; addr : int64; access : Engine.access }
 
 and session = {
   models : model_registry;
@@ -528,19 +529,21 @@ type context = {
 let fault_record (fault : fault) =
   let operation =
     match fault.access with
-    | Uc.Read | Uc.Read_after | Uc.Read_unmapped | Uc.Read_prot -> "read"
-    | Uc.Write | Uc.Write_unmapped | Uc.Write_prot -> "write"
-    | Uc.Fetch | Uc.Fetch_unmapped | Uc.Fetch_prot -> "fetch"
+    | Engine.Read | Engine.Read_after | Engine.Read_unmapped | Engine.Read_prot
+      ->
+        "read"
+    | Engine.Write | Engine.Write_unmapped | Engine.Write_prot -> "write"
+    | Engine.Fetch | Engine.Fetch_unmapped | Engine.Fetch_prot -> "fetch"
   in
   { tid = fault.tid; pc = fault.pc; addr = fault.addr; operation }
 
 let fault_of_record (fault : fault_record) =
   let access =
     match fault.operation with
-    | "read" -> Uc.Read_unmapped
-    | "write" -> Uc.Write_unmapped
-    | "fetch" -> Uc.Fetch_unmapped
-    | _ -> Uc.Read_unmapped
+    | "read" -> Engine.Read_unmapped
+    | "write" -> Engine.Write_unmapped
+    | "fetch" -> Engine.Fetch_unmapped
+    | _ -> Engine.Read_unmapped
   in
   { tid = fault.tid; pc = fault.pc; addr = fault.addr; access }
 
@@ -843,7 +846,7 @@ let segment_base (e : engine) id =
 let read_extra (e : engine) id =
   match segment_base e id with
   | Some name -> Target.Segments.get e.uc name
-  | None -> Uc.reg_read_bytes e.uc id
+  | None -> Engine.reg_read_bytes e.uc id
 
 (* the registers, that aren't the extra ones, e.g., of a checkpoint, that
    is crafted, are not written, as they may be the registers of the
@@ -858,7 +861,7 @@ let write_extra (e : engine) id data =
               Int64.(acc lor (of_int (Char.to_int c) lsl Int.(8 * i))))
         in
         ignore (Target.Segments.set e.uc name base : bool)
-    | None -> Uc.reg_write_bytes e.uc id data
+    | None -> Engine.reg_write_bytes e.uc id data
 
 (* the variable of the register [v] of the thread, that doesn't run,
    which are made once, as the threads switch often *)
@@ -1049,7 +1052,7 @@ let site_of_blocks blks =
 (* the exceptions of Unicorn, that it raises at the instruction, which
    doesn't run, e.g., the breakpoints of ARM, and the faults of x86, the
    others, e.g., the system calls, are raised after the instruction *)
-let raised_at (arch : Uc.arch) n =
+let raised_at (arch : Engine.arch) n =
   match arch with
   | Arm | Arm64 -> n = 1 || n = 7
   | X86 -> n >= 0 && n < 32 && n <> 3 && n <> 4
@@ -1110,7 +1113,7 @@ let reg_of_role target role =
           Var.create (Theory.Var.name v) (Type.imm (Theory.Bitv.size s))))
 
 (* the register that holds the return address *)
-let link_register target (arch : Uc.arch) =
+let link_register target (arch : Engine.arch) =
   let bits = Theory.Target.bits target in
   let reg name = Some (Var.create name (Type.imm bits)) in
   match arch with
@@ -1134,7 +1137,7 @@ let trampoline_size = 16L
 (* the instruction that does nothing, which fills the trampolines, since
    Unicorn raises an interrupt, before it calls the hooks of the address,
    if the instruction is invalid, as the zeros are on RISC-V *)
-let nop (arch : Uc.arch) ~big_endian =
+let nop (arch : Engine.arch) ~big_endian =
   let word ~big x =
     String.init 4 ~f:(fun i ->
         let i = if big then 3 - i else i in
@@ -1150,7 +1153,7 @@ let nop (arch : Uc.arch) ~big_endian =
 
 let halt_at e reason =
   e.reason <- Some reason;
-  Uc.stop e.uc
+  Engine.stop e.uc
 
 let stack_error (stack : call_stack) pc sp =
   sprintf
@@ -1180,12 +1183,12 @@ let sync_stack_hook e =
   match (e.stack, e.stack_hook) with
   | Some _, None ->
       e.stack_hook <-
-        Some (Uc.on_code e.uc (fun pc _ -> check_native_stack e pc));
-      Uc.flush_tb e.uc
+        Some (Engine.on_code e.uc (fun pc _ -> check_native_stack e pc));
+      Engine.flush_tb e.uc
   | None, Some hook ->
-      Uc.delete hook;
+      Engine.delete hook;
       e.stack_hook <- None;
-      Uc.flush_tb e.uc
+      Engine.flush_tb e.uc
   | _ -> ()
 
 (* the stops of the system, as they were, when Unicorn started, see
@@ -1227,9 +1230,9 @@ let trace e addr =
   let unchanged { code; _ } =
     String.is_empty code
     ||
-    match Uc.mem_read e.uc addr (String.length code) with
+    match Engine.mem_read e.uc addr (String.length code) with
     | bytes -> String.equal bytes code
-    | exception Uc.Error _ -> false
+    | exception Engine.Error _ -> false
   in
   match Hashtbl.find e.accesses addr with
   | Some ({ uses; defs; _ } as access) when unchanged access ->
@@ -1248,12 +1251,12 @@ let trace e addr =
 let sync_tracer e =
   match (Hash_set.is_empty e.tracked, e.tracer) with
   | false, None ->
-      e.tracer <- Some (Uc.on_code e.uc (fun addr _ -> trace e addr));
-      Uc.flush_tb e.uc
+      e.tracer <- Some (Engine.on_code e.uc (fun addr _ -> trace e addr));
+      Engine.flush_tb e.uc
   | true, Some hook ->
-      Uc.delete hook;
+      Engine.delete hook;
       e.tracer <- None;
-      Uc.flush_tb e.uc
+      Engine.flush_tb e.uc
   | _ -> ()
 
 (* the registers of the basis, that the instruction reads and writes *)
@@ -1308,7 +1311,7 @@ let hook_stop e addr =
   if not (Hash_set.mem e.hooked addr) then begin
     Hash_set.add e.hooked addr;
     ignore
-    @@ Uc.on_code e.uc ~first:addr ~last:addr (fun _ _ -> dispatch e addr)
+    @@ Engine.on_code e.uc ~first:addr ~last:addr (fun _ _ -> dispatch e addr)
   end
 
 (* the stops, which changed, are hooked, and the hook of every address
@@ -1322,12 +1325,12 @@ let sync_stops e =
     Hash_set.iter e.session.stop_addrs ~f:(hook_stop e);
     (match (e.session.stepping, e.stepper) with
     | true, None ->
-        e.stepper <- Some (Uc.on_code e.uc (fun addr _ -> dispatch e addr))
+        e.stepper <- Some (Engine.on_code e.uc (fun addr _ -> dispatch e addr))
     | false, Some hook ->
-        Uc.delete hook;
+        Engine.delete hook;
         e.stepper <- None
     | _ -> ());
-    Uc.flush_tb e.uc
+    Engine.flush_tb e.uc
   end
 
 (* if the instruction of MIPS is a branch or a jump, which has a delay
@@ -1408,7 +1411,7 @@ module X86_intrinsics = struct
   let uc mode =
     Hashtbl.find_or_add scratch mode ~default:(fun () ->
         let uc = Bap_engine_unicorn.create X86 mode in
-        Uc.mem_map uc code_addr 0x1000L Uc.Perm.(read + exec);
+        Engine.mem_map uc code_addr 0x1000L Engine.Perm.(read + exec);
         uc)
 
   let reg name = Option.value_exn (Bap_engine_unicorn.reg X86 name)
@@ -1418,19 +1421,19 @@ module X86_intrinsics = struct
   let run mode code a c =
     Hashtbl.find_or_add results (mode, code, a, c) ~default:(fun () ->
         let uc = uc mode in
-        Uc.mem_write uc code_addr code;
+        Engine.mem_write uc code_addr code;
         (* Unicorn runs the code, that it translated, unless it flushes it *)
-        Uc.flush_tb uc;
+        Engine.flush_tb uc;
         List.iter [ "RAX"; "RBX"; "RCX"; "RDX" ] ~f:(fun r ->
-            Uc.reg_write uc (reg r) 0L);
-        Uc.reg_write uc (reg "RAX") a;
-        Uc.reg_write uc (reg "RCX") c;
-        match Uc.start ~count:1 uc code_addr with
+            Engine.reg_write uc (reg r) 0L);
+        Engine.reg_write uc (reg "RAX") a;
+        Engine.reg_write uc (reg "RCX") c;
+        match Engine.start ~count:1 uc code_addr with
         | () ->
             Some
               (List.map [ "RAX"; "RBX"; "RCX"; "RDX" ] ~f:(fun r ->
-                   Int64.(Uc.reg_read uc (reg r) land 0xFFFF_FFFFL)))
-        | exception Uc.Error _ -> None)
+                   Int64.(Engine.reg_read uc (reg r) land 0xFFFF_FFFFL)))
+        | exception Engine.Error _ -> None)
 
   let tsc () = Int64.of_float (clock () *. 1e9)
 end
@@ -1723,7 +1726,7 @@ let ieee754_policy target =
   else 0
 
 (* the delay slots of the branches, of MIPS, by their encodings *)
-let delay_of target (arch : Uc.arch) =
+let delay_of target (arch : Engine.arch) =
   let r6 = mips_r6 target in
   let big = Theory.Endianness.(equal eb) (Theory.Target.endianness target) in
   fun code ->
@@ -1776,20 +1779,22 @@ let create session target ~foreign ~externals =
      atomics of ARMv8.1, e.g., ldadd and cas, that the programs compiled
      for the later ones, or with outline atomics, run; the maximum one has
      all of them, and must be selected before anything else *)
-  (match arch with Arm64 -> Uc.set_cpu_model uc Uc.Cpu.arm64_max | _ -> ());
+  (match arch with
+  | Arm64 -> Engine.set_cpu_model uc Engine.Cpu.arm64_max
+  | _ -> ());
   (* the default CPU of MIPS64, R4000, is MIPS III, which has no
      instructions of the release 2, e.g., seb, and rdhwr, which reads the
      pointer of TLS, that the programs of Linux use *)
   (match arch with
   | Mips when mips_r6 target ->
-      Uc.set_cpu_model uc
-        (if Theory.Target.bits target = 64 then Uc.Cpu.mips64_i6400
-         else Uc.Cpu.mips32r6_generic)
+      Engine.set_cpu_model uc
+        (if Theory.Target.bits target = 64 then Engine.Cpu.mips64_i6400
+         else Engine.Cpu.mips32r6_generic)
   | Mips when Theory.Target.bits target = 64 ->
-      Uc.set_cpu_model uc Uc.Cpu.mips64r2_generic
+      Engine.set_cpu_model uc Engine.Cpu.mips64r2_generic
   | _ -> ());
   (* the addresses of the program are the addresses of Unicorn *)
-  Uc.set_tlb_virtual uc;
+  Engine.set_tlb_virtual uc;
   (* the 64-bit addresses of MIPS are enabled by the KX, SX, and UX bits *)
   (match arch with
   | Mips when Theory.Target.bits target = 64 ->
@@ -1797,25 +1802,28 @@ let create session target ~foreign ~externals =
         Option.value_exn (Bap_engine_unicorn.reg Mips "CP0_STATUS")
       in
       (* and the 64-bit FPU registers, FR, of the n64 ABI *)
-      Uc.reg_write uc status Int64.(Uc.reg_read uc status lor 0x040000E0L)
+      Engine.reg_write uc status
+        Int64.(Engine.reg_read uc status lor 0x040000E0L)
   (* the FPU and AltiVec of PowerPC, which Linux enables, are off at the
      reset, as MSR.FP and MSR.VEC are 0 *)
   | Ppc ->
       Option.iter (Bap_engine_unicorn.reg Ppc "MSR") ~f:(fun msr ->
-          Uc.reg_write uc msr Int64.(Uc.reg_read uc msr lor 0x02002000L))
+          Engine.reg_write uc msr Int64.(Engine.reg_read uc msr lor 0x02002000L))
   (* the FPU of RISC-V, which Linux enables, is off at the reset, as
      mstatus.FS is 0 *)
   | Riscv ->
       Option.iter (Bap_engine_unicorn.reg Riscv "MSTATUS") ~f:(fun mstatus ->
-          Uc.reg_write uc mstatus Int64.(Uc.reg_read uc mstatus lor 0x6000L))
+          Engine.reg_write uc mstatus
+            Int64.(Engine.reg_read uc mstatus lor 0x6000L))
   (* the VFP and NEON of ARM, which Linux enables, are disabled at the
      reset: the coprocessors 10 and 11 are accessible in CPACR, and
      FPEXC enables them *)
   | Arm ->
       Option.iter (Bap_engine_unicorn.reg Arm "C1_C0_2") ~f:(fun cpacr ->
-          Uc.reg_write uc cpacr Int64.(Uc.reg_read uc cpacr lor 0xF00000L));
+          Engine.reg_write uc cpacr
+            Int64.(Engine.reg_read uc cpacr lor 0xF00000L));
       Option.iter (Bap_engine_unicorn.reg Arm "FPEXC") ~f:(fun fpexc ->
-          Uc.reg_write uc fpexc 0x40000000L)
+          Engine.reg_write uc fpexc 0x40000000L)
   | _ -> ());
   let regs = Target.Regs.create target arch uc in
   (locate := fun name -> Target.Regs.locate regs name);
@@ -1894,23 +1902,23 @@ let create session target ~foreign ~externals =
         page_of
           ((of_int (Hashtbl.length addrs) * trampoline_size) + page_size - 1L))
     in
-    Uc.mem_map uc base size Uc.Perm.(read + exec);
+    Engine.mem_map uc base size Engine.Perm.(read + exec);
     let nop = nop arch ~big_endian:e.big_endian in
-    Uc.mem_write uc base
+    Engine.mem_write uc base
       (String.concat
          (List.init
             (Int64.to_int_exn size / String.length nop)
             ~f:(fun _ -> nop)));
     ignore
-    @@ Uc.on_code uc ~first:base
+    @@ Engine.on_code uc ~first:base
          ~last:Int64.(base + size - 1L)
          (fun addr _ ->
            e.reason <- Some (Foreign addr);
-           Uc.stop uc)
+           Engine.stop uc)
   end;
   let stop reason =
     e.reason <- Some reason;
-    Uc.stop uc
+    Engine.stop uc
   in
   (* the first hook of an address that stops Unicorn is the last one
      called, so the checkpoint goes before the foreign code, which runs
@@ -1919,7 +1927,7 @@ let create session target ~foreign ~externals =
   (* the function may run in Unicorn again, see [Make.unstub] *)
   List.iter foreign ~f:(fun addr ->
       ignore
-      @@ Uc.on_code uc ~first:addr ~last:addr (fun _ _ ->
+      @@ Engine.on_code uc ~first:addr ~last:addr (fun _ _ ->
           if Hash_set.mem e.foreign addr then stop (Foreign addr)));
   let returns addr =
     match e.frames with
@@ -1930,7 +1938,7 @@ let create session target ~foreign ~externals =
     | [] -> false
   in
   ignore
-  @@ Uc.on_mem_invalid uc [ `read; `write; `fetch ] [ `unmapped; `prot ]
+  @@ Engine.on_mem_invalid uc [ `read; `write; `fetch ] [ `unmapped; `prot ]
        (fun access addr _ _ ->
          (match access with
          | Fetch_unmapped when returns addr -> e.reason <- Some Returned
@@ -1939,16 +1947,17 @@ let create session target ~foreign ~externals =
          | Fetch_unmapped, Mips -> e.broken <- true
          | _ -> ());
          false);
-  ignore @@ Uc.on_interrupt uc (fun n -> stop (Interrupt n));
+  ignore @@ Engine.on_interrupt uc (fun n -> stop (Interrupt n));
   (match arch with
-  | X86 -> ignore @@ Uc.on_x86_syscall uc (fun () -> stop (Interrupt (-1)))
+  | X86 -> ignore @@ Engine.on_x86_syscall uc (fun () -> stop (Interrupt (-1)))
   | _ -> ());
   ignore
-  @@ Uc.on_invalid_insn uc (fun () ->
+  @@ Engine.on_invalid_insn uc (fun () ->
       e.reason <- Some Invalid;
       false);
   (* the instruction, that the lifted engine can't run, is interpreted *)
-  ignore @@ Uc.on_unsupported uc (fun addr -> e.reason <- Some (Interpret addr));
+  ignore
+  @@ Engine.on_unsupported uc (fun addr -> e.reason <- Some (Interpret addr));
   List.iter (List.rev session.engine_hooks) ~f:(fun install -> install e);
   e
 
@@ -1978,7 +1987,7 @@ let changes base data known =
   runs 0 []
 
 let read_page e page =
-  Bytes.of_string (Uc.mem_read e.uc page (Int64.to_int_exn page_size))
+  Bytes.of_string (Engine.mem_read e.uc page (Int64.to_int_exn page_size))
 
 (* the dirty page, which Unicorn may have changed since it was fetched *)
 let pending e (p : page) = p.dirty && p.fetched <> e.runs
@@ -2012,7 +2021,7 @@ let fetch_page e page =
       if List.is_empty changed then begin
         p.dirty <- false;
         e.dirty <- List.filter e.dirty ~f:(fun x -> Int64.(x <> page));
-        Uc.mem_protect e.uc page page_size Uc.Perm.(p.perm - write)
+        Engine.mem_protect e.uc page page_size Engine.Perm.(p.perm - write)
       end;
       changed
   | _ -> []
@@ -2122,11 +2131,11 @@ let backing s memory : Primus.Memory.Backing.t =
                         Bytes.set known
                           Int64.(to_int_exn (addr - page_of addr))
                           c);
-                    Uc.mem_write e.uc addr (String.of_char c);
-                    if Uc.Perm.mem perm Uc.Perm.exec then code := true
+                    Engine.mem_write e.uc addr (String.of_char c);
+                    if Engine.Perm.mem perm Engine.Perm.exec then code := true
                 | None -> ());
             (* the code, which Unicorn translated, is translated anew *)
-            if !code then Uc.flush_tb e.uc
+            if !code then Engine.flush_tb e.uc
         | _ -> (
             match Hashtbl.find s.parked id with
             | None -> ()
@@ -2150,7 +2159,7 @@ let written_page e addr =
   | Some ({ snapshot = Some _; dirty = false; perm; _ } as p) ->
       p.dirty <- true;
       e.dirty <- page_of addr :: e.dirty;
-      Uc.mem_protect e.uc (page_of addr) page_size perm;
+      Engine.mem_protect e.uc (page_of addr) page_size perm;
       true
   | _ -> false
 
@@ -2167,7 +2176,7 @@ let uc_readable e addr n =
       let len = Int.min n (Int64.to_int_exn page_size - off) in
       match Hashtbl.find e.pages page with
       | None -> raise (Native.Missing addr)
-      | Some { perm; _ } when not (Uc.Perm.mem perm Uc.Perm.read) -> acc
+      | Some { perm; _ } when not (Engine.Perm.mem perm Engine.Perm.read) -> acc
       | Some { holes; _ } -> (
           let hole =
             List.filter_map holes ~f:(fun (lo, hi) ->
@@ -2184,10 +2193,10 @@ let uc_readable e addr n =
 let uc_read e addr n =
   if uc_readable e addr n < n then raise Native.Denied
   else if n = 0 then ""
-  else Uc.mem_read e.uc addr n
+  else Engine.mem_read e.uc addr n
 
 let uc_prefix e addr n =
-  match uc_readable e addr n with 0 -> "" | n -> Uc.mem_read e.uc addr n
+  match uc_readable e addr n with 0 -> "" | n -> Engine.mem_read e.uc addr n
 
 let uc_memory e : Native.memory = { read = uc_read e; prefix = uc_prefix e }
 
@@ -2218,13 +2227,13 @@ let uc_write e addr data =
         ignore (written_page e page : bool);
         Option.iter (Hashtbl.find e.pages page) ~f:(fun p ->
             p.fetched <- -1;
-            if Uc.Perm.mem p.perm Uc.Perm.exec then code := true);
+            if Engine.Perm.mem p.perm Engine.Perm.exec then code := true);
         dirty Int64.(page + page_size)
       end
     in
     dirty (page_of addr);
-    Uc.mem_write e.uc addr data;
-    if !code then Uc.flush_tb e.uc
+    Engine.mem_write e.uc addr data;
+    if !code then Engine.flush_tb e.uc
   end
 
 (* the value of an expression in Unicorn *)
@@ -2304,29 +2313,29 @@ let code_written e addr size =
 
 let watch e (w : watching) =
   if not (Poly.equal e.watching w) then begin
-    List.iter e.watchers ~f:Uc.delete;
+    List.iter e.watchers ~f:Engine.delete;
     e.watchers <- [];
     e.watching <- w;
     let add hook = e.watchers <- hook :: e.watchers in
     if w.reads then
       add
-        (Uc.on_mem e.uc [ `read_after ] (fun _ addr size value ->
+        (Engine.on_mem e.uc [ `read_after ] (fun _ addr size value ->
              Queue.enqueue e.session.events (Loaded (addr, size, value))));
     let stored _ addr size value =
       Queue.enqueue e.session.events (Stored (addr, size, value))
     in
-    if w.writes then add (Uc.on_mem e.uc [ `write ] stored)
+    if w.writes then add (Engine.on_mem e.uc [ `write ] stored)
     else if w.code_writes then
       (* the writes to the code are seen, when the engine stops, before
          the interpreter runs the code, rather than at once, so that the
          engine isn't stopped at each instruction, see [code_written] *)
       List.iter e.code_segments ~f:(fun (first, last) ->
           add
-            (Uc.on_mem ~first ~last e.uc [ `write ] (fun _ addr size _ ->
+            (Engine.on_mem ~first ~last e.uc [ `write ] (fun _ addr size _ ->
                  code_written e addr size)));
     if w.pcs || w.reads || w.writes then
       add
-        (Uc.on_code e.uc (fun addr _ ->
+        (Engine.on_code e.uc (fun addr _ ->
              if w.pcs || not (Queue.is_empty e.session.events) then
                match e.observed with
                | Some (last, start)
@@ -2335,10 +2344,10 @@ let watch e (w : watching) =
                | _ ->
                    e.observed <- Some (addr, e.session.starts);
                    e.reason <- Some (Observe addr);
-                   Uc.stop e.uc));
+                   Engine.stop e.uc));
     (* the hooks of the code apply to the code, that Unicorn translates
        after them *)
-    Uc.flush_tb e.uc
+    Engine.flush_tb e.uc
   end
 
 (* the entry of the trampoline, whose instructions are at [addr], as
@@ -2544,9 +2553,9 @@ module Make (Machine : Primus.Machine.S) = struct
           (not attached) && (not finalized) && (not opaque)
           && List.length shadows = 1
         in
-        if on then Uc.taint_start ~jumps e.uc
+        if on then Engine.taint_start ~jumps e.uc
         else begin
-          Uc.taint_stop e.uc;
+          Engine.taint_stop e.uc;
           e.shadowed <- false
         end;
         e.shadowing <- on;
@@ -2581,10 +2590,10 @@ module Make (Machine : Primus.Machine.S) = struct
         let* objs = Tracker.lookup x T.Rel.direct in
         let+ ls = labels objs in
         let r = owner e v in
-        if String.equal r (Var.name v) then Uc.set_reg_labels e.uc r ls
+        if String.equal r (Var.name v) then Engine.set_reg_labels e.uc r ls
         else if not (List.is_empty ls) then
-          Uc.set_reg_labels e.uc r
-            (List.dedup_and_sort ~compare (Uc.reg_labels e.uc r @ ls))
+          Engine.set_reg_labels e.uc r
+            (List.dedup_and_sort ~compare (Engine.reg_labels e.uc r @ ls))
 
     (* the taint of Primus goes to the engine, after its changes went to
        Primus, see [export]: of the registers, and of the locations, whose
@@ -2638,21 +2647,22 @@ module Make (Machine : Primus.Machine.S) = struct
         Machine.List.map (Hashtbl.data e.known) ~f:Objects.of_value
       in
       let+ classes = classes (T.Object.Set.of_list known) in
-      Uc.taint_labels e.uc classes;
-      Uc.taint_clear ~mem:full e.uc;
+      Engine.taint_labels e.uc classes;
+      Engine.taint_clear ~mem:full e.uc;
       e.shadowed <- true;
       List.iter regs ~f:(fun (r, ls) ->
-          Uc.set_reg_labels e.uc r
-            (List.dedup_and_sort ~compare (Uc.reg_labels e.uc r @ ls)));
-      List.iter mem ~f:(fun (addr, ls) -> Uc.set_mem_labels e.uc addr ls)
+          Engine.set_reg_labels e.uc r
+            (List.dedup_and_sort ~compare (Engine.reg_labels e.uc r @ ls)));
+      List.iter mem ~f:(fun (addr, ls) -> Engine.set_mem_labels e.uc addr ls)
 
     (* the taint, that the engine changed, goes to Primus, to the values
        of the registers, which are new, if their taint changed, as the
        other variables may have the old ones, and to the locations *)
     let export (e : engine) =
-      let regs, mem = Uc.taint_changes e.uc in
+      let regs, mem = Engine.taint_changes e.uc in
       let regs =
-        List.dedup_and_sort ~compare:String.compare (regs @ Uc.tainted_regs e.uc)
+        List.dedup_and_sort ~compare:String.compare
+          (regs @ Engine.tainted_regs e.uc)
       in
       if List.is_empty regs && List.is_empty mem then Machine.return ()
       else
@@ -2669,7 +2679,7 @@ module Make (Machine : Primus.Machine.S) = struct
                   else
                     let* x = Env.get v in
                     let* have = Tracker.lookup x T.Rel.direct in
-                    let* want = objects (Uc.reg_labels e.uc r) in
+                    let* want = objects (Engine.reg_labels e.uc r) in
                     if Set.equal have want then Machine.return ()
                     else
                       let* x = Value.of_word (Primus.Value.to_word x) in
@@ -2682,7 +2692,7 @@ module Make (Machine : Primus.Machine.S) = struct
         let* taints =
           Machine.List.map mem ~f:(fun addr ->
               let* a = Value.of_word (word e addr) in
-              let ls = Uc.mem_labels e.uc addr in
+              let ls = Engine.mem_labels e.uc addr in
               let+ objs =
                 match Hashtbl.find sets ls with
                 | Some objs -> Machine.return objs
@@ -2705,7 +2715,7 @@ module Make (Machine : Primus.Machine.S) = struct
      reads, see [Lift.insn]. The instruction is at [pc], or ends there,
      as Unicorn raises the interrupt, see [raised_at], and returns the
      address, from which Unicorn continues. *)
-  let trap ~read ?encoding (arch : Uc.arch) ~thumb n pc =
+  let trap ~read ?encoding (arch : Engine.arch) ~thumb n pc =
     let sizes =
       match arch with
       | X86 -> List.range 1 16
@@ -2740,7 +2750,8 @@ module Make (Machine : Primus.Machine.S) = struct
 
   (* drops the pages, which are copied anew *)
   let forget e =
-    Hashtbl.iter_keys e.pages ~f:(fun page -> Uc.mem_unmap e.uc page page_size);
+    Hashtbl.iter_keys e.pages ~f:(fun page ->
+        Engine.mem_unmap e.uc page page_size);
     Hashtbl.clear e.pages;
     e.unchecked <- [];
     e.dirty <- [];
@@ -2782,10 +2793,10 @@ module Make (Machine : Primus.Machine.S) = struct
         unpark_all e.session id;
         Hashtbl.iteri pages ~f:(fun ~key:page ~data:{ data; copy; unfetched } ->
             let perm =
-              if unfetched then copy.perm else Uc.Perm.(copy.perm - write)
+              if unfetched then copy.perm else Engine.Perm.(copy.perm - write)
             in
-            Uc.mem_map e.uc page page_size perm;
-            Uc.mem_write e.uc page (Bytes.to_string data);
+            Engine.mem_map e.uc page page_size perm;
+            Engine.mem_write e.uc page (Bytes.to_string data);
             copy.dirty <- unfetched;
             copy.fetched <- -1;
             if unfetched then e.dirty <- page :: e.dirty;
@@ -2860,13 +2871,13 @@ module Make (Machine : Primus.Machine.S) = struct
                 (Char.of_int_exn (Int64.to_int_exn byte))));
     let data = Bytes.to_string bytes in
     let perm =
-      Uc.Perm.(
+      Engine.Perm.(
         (if access.readable then read else none)
         + (if writable then write else none)
         + if access.executable then exec else none)
     in
-    Uc.mem_map e.uc page page_size Uc.Perm.(perm - write);
-    Uc.mem_write e.uc page data;
+    Engine.mem_map e.uc page page_size Engine.Perm.(perm - write);
+    Engine.mem_write e.uc page data;
     Hashtbl.set e.pages ~key:page
       ~data:
         {
@@ -2943,7 +2954,7 @@ module Make (Machine : Primus.Machine.S) = struct
     (* the bases of the segments of x86 in the protected mode are in its
        descriptors, see [Target.Segments] *)
     let* () =
-      if Poly.(e.arch = Uc.X86) && e.bytes = 4 then
+      if Poly.(e.arch = Engine.X86) && e.bytes = 4 then
         Machine.List.iter vars ~f:(fun v ->
             if Target.Segments.is_base (Var.name v) then
               let+ x = Env.get v in
@@ -3070,7 +3081,7 @@ module Make (Machine : Primus.Machine.S) = struct
         in
         if allocated && Hashtbl.mem e.pages page then begin
           let+ () = sync_page e page in
-          Uc.mem_unmap e.uc page page_size;
+          Engine.mem_unmap e.uc page page_size;
           Hashtbl.remove e.pages page
         end
         else Machine.return ())
@@ -3107,7 +3118,7 @@ module Make (Machine : Primus.Machine.S) = struct
           let pages = Hashtbl.keys e.pages |> List.filter ~f:inside in
           Machine.List.iter pages ~f:(fun page ->
               let+ () = sync_page e page in
-              Uc.mem_unmap e.uc page page_size;
+              Engine.mem_unmap e.uc page page_size;
               Hashtbl.remove e.pages page)
         else
           match Hashtbl.find s.parked id with
@@ -3164,7 +3175,7 @@ module Make (Machine : Primus.Machine.S) = struct
         let* () = if owned then pull e else Machine.return () in
         (* the pages go to the new engine, when their machine claims it *)
         park e;
-        Uc.close e.uc;
+        Engine.close e.uc;
         let e = create s target ~foreign ~externals in
         s.active <- Some e;
         Machine.return e
@@ -3203,11 +3214,11 @@ module Make (Machine : Primus.Machine.S) = struct
 
   let drop_page e page =
     if Hashtbl.mem e.pages page then (
-      Uc.mem_unmap e.uc page page_size;
+      Engine.mem_unmap e.uc page page_size;
       Hashtbl.remove e.pages page)
 
   let remember_fault e access addr =
-    let pc = Uc.reg_read e.uc e.pc in
+    let pc = Engine.reg_read e.uc e.pc in
     Machine.Local.get threads >>| fun { current; _ } ->
     e.session.last_fault <- Some { tid = current; pc; addr; access }
 
@@ -3221,7 +3232,7 @@ module Make (Machine : Primus.Machine.S) = struct
        let* () = pull e in
        let* v = Value.of_word a in
        let* () =
-         match (access : Uc.access) with
+         match (access : Engine.access) with
          | Write_unmapped | Write_prot ->
              let* x =
                Memory.protection a >>= function
@@ -3243,7 +3254,7 @@ module Make (Machine : Primus.Machine.S) = struct
       (fun exn -> remember_fault e access addr >>= fun () -> Machine.raise exn)
 
   let fault e access addr =
-    match (access : Uc.access) with
+    match (access : Engine.access) with
     | Write_prot when written_page e addr -> Machine.return `Continue
     | Read_unmapped | Write_unmapped | Fetch_unmapped ->
         let* mapped = Memory.is_mapped (word e addr) in
@@ -3298,24 +3309,25 @@ module Make (Machine : Primus.Machine.S) = struct
       Option.value (Target.Regs.owner e.regs name) ~default:name
     in
     let rec taint_of = function
-      | Bil.Var v -> Some (Uc.reg_taint e.uc (owner (Var.name v)))
+      | Bil.Var v -> Some (Engine.reg_taint e.uc (owner (Var.name v)))
       | Cast (_, _, x) | Extract (_, _, x) ->
-          Option.map (taint_of x) ~f:(Uc.moves_taint e.uc)
+          Option.map (taint_of x) ~f:(Engine.moves_taint e.uc)
       | Load (_, addr, _, size) -> (
           match eval_uc e addr with
           | a ->
               Some
-                (Uc.mem_range_taint e.uc (int64_of_word a) (Size.in_bytes size))
+                (Engine.mem_range_taint e.uc (int64_of_word a)
+                   (Size.in_bytes size))
           | exception (Native.Missing _ | Native.Denied) -> None)
       | _ -> None
     in
     match Option.all (List.map call.args ~f:taint_of) with
     | None -> None
     | Some args ->
-        let tainted = List.exists args ~f:Uc.tainted in
+        let tainted = List.exists args ~f:Engine.tainted in
         let read =
           List.exists reads ~f:(fun (addr, n) ->
-              Uc.tainted (Uc.mem_range_taint e.uc addr n))
+              Engine.tainted (Engine.mem_range_taint e.uc addr n))
         in
         if Option.is_none r.taints && (tainted || read) then None
         else
@@ -3324,22 +3336,25 @@ module Make (Machine : Primus.Machine.S) = struct
               Option.iter r.taints ~f:(fun taints ->
                   List.iter taints ~f:(function
                     | Native.Copy { dst; src; n } ->
-                        Uc.copy_mem_taint e.uc ~dst ~src n
-                    | Move { dst; src; n } -> Uc.move_mem_taint e.uc ~dst ~src n
+                        Engine.copy_mem_taint e.uc ~dst ~src n
+                    | Move { dst; src; n } ->
+                        Engine.move_mem_taint e.uc ~dst ~src n
                     | Fill { dst; n; arg } ->
-                        Uc.fill_mem_taint e.uc dst n
-                          (Option.value (List.nth args arg) ~default:Uc.no_taint)
+                        Engine.fill_mem_taint e.uc dst n
+                          (Option.value (List.nth args arg)
+                             ~default:Engine.no_taint)
                     | Clean { dst; n } ->
-                        Uc.fill_mem_taint e.uc dst n Uc.no_taint));
+                        Engine.fill_mem_taint e.uc dst n Engine.no_taint));
               (* the result is the argument, or isn't tainted *)
               Option.iter call.result ~f:(fun (exp, _) ->
                   match exp with
                   | Bil.Var v | Cast (_, _, Var v) | Extract (_, _, Var v) ->
-                      Uc.set_reg_taint e.uc
+                      Engine.set_reg_taint e.uc
                         (owner (Var.name v))
-                        (Option.value_map r.returns ~default:Uc.no_taint
+                        (Option.value_map r.returns ~default:Engine.no_taint
                            ~f:(fun i ->
-                             Option.value (List.nth args i) ~default:Uc.no_taint))
+                             Option.value (List.nth args i)
+                               ~default:Engine.no_taint))
                   | _ -> ()))
 
   let native e addr =
@@ -3368,7 +3383,7 @@ module Make (Machine : Primus.Machine.S) = struct
         else
           (* the taint, that the lifted engine propagates, see
              [native_taint] *)
-          let shadow = e.shadowing && Uc.taint_any e.uc in
+          let shadow = e.shadowing && Engine.taint_any e.uc in
           let rec attempt tries =
             match
               let args = List.map call.args ~f:(eval_uc e) in
@@ -3489,10 +3504,10 @@ module Make (Machine : Primus.Machine.S) = struct
   (* the address, from which Unicorn continues, with the lower bit set in
      the Thumb state of ARM *)
   let current_pc e =
-    let pc = Uc.reg_read e.uc e.pc in
+    let pc = Engine.reg_read e.uc e.pc in
     match e.arch with
     | Arm ->
-        if Int64.(Uc.reg_read e.uc (force cpsr) land 0x20L <> 0L) then
+        if Int64.(Engine.reg_read e.uc (force cpsr) land 0x20L <> 0L) then
           Int64.(pc lor 1L)
         else pc
     | _ -> pc
@@ -3761,13 +3776,13 @@ module Make (Machine : Primus.Machine.S) = struct
     if not (Hashtbl.mem e.returns ret) then (
       Hashtbl.set e.returns ~key:ret ~data:();
       ignore
-      @@ Uc.on_code e.uc ~first:ret ~last:ret (fun _ _ ->
+      @@ Engine.on_code e.uc ~first:ret ~last:ret (fun _ _ ->
           match e.frames with
           | top :: _ when Int64.(top.ret = ret) -> (
               match Target.Regs.read e.regs e.sp with
               | Some sp when Int64.(int64_of_word sp = top.sp) ->
                   e.reason <- Some Returned;
-                  Uc.stop e.uc
+                  Engine.stop e.uc
               | _ -> ())
           | _ -> ()))
 
@@ -3807,12 +3822,12 @@ module Make (Machine : Primus.Machine.S) = struct
       | Some _ -> None
       | None -> (
           try
-            Uc.start e.uc pc ?count ~thread
+            Engine.start e.uc pc ?count ~thread
               ?timeout:
                 (Option.map deadline ~f:(fun t ->
                      Int.max 1 (Float.iround_up_exn ((t -. clock ()) *. 1e6))));
             None
-          with Uc.Error (_, msg) -> Some msg)
+          with Engine.Error (_, msg) -> Some msg)
     in
     e.runs <- e.runs + 1;
     if Option.is_none e.reason then check_native_stack e (current_pc e);
@@ -3937,8 +3952,8 @@ module Make (Machine : Primus.Machine.S) = struct
       in
       let* () =
         Machine.List.iter written ~f:(fun (lo, hi) ->
-            match Uc.mem_read e.uc lo Int64.(to_int_exn (hi - lo + 1L)) with
-            | exception Uc.Error _ -> Machine.return ()
+            match Engine.mem_read e.uc lo Int64.(to_int_exn (hi - lo + 1L)) with
+            | exception Engine.Error _ -> Machine.return ()
             | data ->
                 String.to_list data
                 |> List.mapi ~f:(fun i c -> (Int64.(lo + of_int i), c))
@@ -3967,7 +3982,7 @@ module Make (Machine : Primus.Machine.S) = struct
           if active then Shadow.decide e else Machine.return e.shadowing
         in
         if not active then (
-          Uc.taint_clear e.uc;
+          Engine.taint_clear e.uc;
           e.shadowed <- false;
           Machine.return ())
         else if shadowing then Shadow.import e
@@ -4012,9 +4027,9 @@ module Make (Machine : Primus.Machine.S) = struct
     in
     let byte x =
       if in_uc x then
-        match Uc.mem_read e.uc x 1 with
+        match Engine.mem_read e.uc x 1 with
         | b -> Some b.[0]
-        | exception Uc.Error _ -> None
+        | exception Engine.Error _ -> None
       else
         let i = Int64.(to_int_exn (x - lo)) in
         if i >= 0 && i < Array.length loaded then Option.map loaded.(i) ~f:fst
@@ -4107,7 +4122,7 @@ module Make (Machine : Primus.Machine.S) = struct
      whose branch, of the thread, that ran, or that Primus interpreted,
      is not pending, see build.cmake of libunicorn *)
   let fresh e pc =
-    match e.arch with Mips -> Uc.reg_write e.uc e.pc pc | _ -> ()
+    match e.arch with Mips -> Engine.reg_write e.uc e.pc pc | _ -> ()
 
   (* the branch of MIPS, whose delay slot is at [pc], or [pc], as
      Unicorn stops in the delay slot, e.g., at its fault, while the
@@ -4586,7 +4601,7 @@ module Make (Machine : Primus.Machine.S) = struct
                 | false when Int64.(x = 0L) -> Machine.return ()
                 | _ -> Value.of_word (word e x) >>= set_base e name))
       in
-      Uc.registers_restored e.uc
+      Engine.registers_restored e.uc
 
     (* the next thread, that is ready, runs, after [parked], which was
        the thread, that ran, if it is not exited, or [None], if no thread
@@ -4758,7 +4773,7 @@ module Make (Machine : Primus.Machine.S) = struct
                   | Extra name -> (
                       match Bap_engine_unicorn.reg e.arch name with
                       | Some id ->
-                          Uc.reg_write e.uc id (arg 0);
+                          Engine.reg_write e.uc id (arg 0);
                           return 0L
                       | None -> error 38L)
                   | Reg name ->
@@ -5354,7 +5369,7 @@ module Make (Machine : Primus.Machine.S) = struct
                 ~f:(fun n -> (name, n)))
         with
         | None -> Machine.return None
-        | Some _ when not (Poly.equal e.arch Uc.X86) -> Machine.return None
+        | Some _ when not (Poly.equal e.arch Engine.X86) -> Machine.return None
         | Some (name, n) -> (
             is_pe >>= function
             | false -> Machine.return None
@@ -5697,8 +5712,8 @@ module Make (Machine : Primus.Machine.S) = struct
       (* the thread, whose function returned to [exit_addr], exits with
          its result *)
       let returned e addr =
-        if (not (Poly.equal e.arch Uc.X86)) || Int64.(addr <> exit_addr) then
-          Machine.return None
+        if (not (Poly.equal e.arch Engine.X86)) || Int64.(addr <> exit_addr)
+        then Machine.return None
         else
           is_pe >>= function
           | false -> Machine.return None
@@ -6150,7 +6165,7 @@ module Make (Machine : Primus.Machine.S) = struct
         let* () = Machine.Local.put calls called in
         let* () = Machine.Local.put call_sites sites in
         let* () = restore e saved in
-        Uc.reg_write e.uc e.pc (code_addr e pc);
+        Engine.reg_write e.uc e.pc (code_addr e pc);
         let* p = Value.of_word (word e base) in
         let* _ = Lisp.eval_fun "free" [ p ] in
         let* () = drop (word e base) (word e Int64.(top - 1L)) in
@@ -6668,9 +6683,9 @@ module Make (Machine : Primus.Machine.S) = struct
           let resumed = s.resumed in
           s.resumed <- false;
           (* the thread doesn't switch in an atomic sequence of the
-             lifted engine, see [Uc.in_atomic] *)
+             lifted engine, see [Engine.in_atomic] *)
           let expired =
-            sliced && Float.(now >= ends) && not (Uc.in_atomic e.uc)
+            sliced && Float.(now >= ends) && not (Engine.in_atomic e.uc)
           in
           if expired && not resumed then Threads.preempt e pc >>= loop
           else
@@ -6716,7 +6731,7 @@ module Make (Machine : Primus.Machine.S) = struct
                 s.resumed_at <- s.skipped_at
             | _ -> ());
             match (e.reason, error) with
-            | None, None when sliced && not (Uc.in_atomic e.uc) ->
+            | None, None when sliced && not (Engine.in_atomic e.uc) ->
                 Threads.preempt e pc >>= loop
             | None, None
               when Option.is_some remaining || Option.is_some call_deadline ->
@@ -7065,8 +7080,8 @@ module Ran (Machine : Primus.Machine.S) = struct
         List.iter (l.ran ()) ~f:(fun (addr, thumb, code) ->
             Hashtbl.set ran ~key:(addr, thumb) ~data:code));
     Option.iter s.active ~f:(fun e ->
-        List.iter (Uc.insn_addrs e.uc) ~f:(fun pc ->
-            match Uc.insn_at e.uc pc with
+        List.iter (Engine.insn_addrs e.uc) ~f:(fun pc ->
+            match Engine.insn_at e.uc pc with
             | Some (code, _, thumb, _) ->
                 Hashtbl.set ran ~key:(pc, thumb) ~data:code
             | None -> ()));
@@ -7487,7 +7502,7 @@ module Loader (Machine : Primus.Machine.S) = struct
               None
           | _ -> Some (int64_of_word addr))
     in
-    (match s.active with Some e -> Uc.close e.uc | None -> ());
+    (match s.active with Some e -> Engine.close e.uc | None -> ());
     s.active <- None;
     let* externals = externals s in
     s.recipe <- Some (target, foreign, externals);
@@ -7515,7 +7530,7 @@ module Loader (Machine : Primus.Machine.S) = struct
         in
         let ({ lift; cached; _ } as l) =
           lifter ?cache
-            ~arm:(Poly.equal (Option.map engine ~f:fst) (Some Uc.Arm))
+            ~arm:(Poly.equal (Option.map engine ~f:fst) (Some Engine.Arm))
             proj
         in
         s.lifter <- Some l;

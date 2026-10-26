@@ -5,7 +5,7 @@ open Bap_primus.Std
 module X = Bap_primus_native_plugin.Primus_native_executor
 module Native = Bap_primus_native_plugin.Primus_native_libc
 module Target = Bap_primus_native_plugin.Primus_native_target
-module Uc = Bap_engine
+module Engine = Bap_engine
 module Io = Primus_lisp_library_plugin.Primus_lisp_io
 include Bap_main.Loggers ()
 
@@ -95,7 +95,7 @@ type t = {
   mutable snapshots : snapshot list;  (** the managed snapshots, oldest first *)
   mutable snapshot_limit : int option;
   mutable traces :
-    (Uc.Trace.t Weak.t * (int * int64 array) list Int64.Table.t Weak.t) list;
+    (Engine.Trace.t Weak.t * (int * int64 array) list Int64.Table.t Weak.t) list;
   shell : shell_state;
 }
 
@@ -184,9 +184,11 @@ let failure t =
   Option.map t.session.last_fault ~f:(fun (fault : X.fault) ->
       let operation =
         match fault.access with
-        | Uc.Read | Uc.Read_after | Uc.Read_unmapped | Uc.Read_prot -> Read
-        | Uc.Write | Uc.Write_unmapped | Uc.Write_prot -> Write
-        | Uc.Fetch | Uc.Fetch_unmapped | Uc.Fetch_prot -> Fetch
+        | Engine.Read | Engine.Read_after | Engine.Read_unmapped
+        | Engine.Read_prot ->
+            Read
+        | Engine.Write | Engine.Write_unmapped | Engine.Write_prot -> Write
+        | Engine.Fetch | Engine.Fetch_unmapped | Engine.Fetch_prot -> Fetch
       in
       { thread = fault.tid; pc = fault.pc; addr = fault.addr; operation })
 
@@ -265,7 +267,7 @@ let pause t =
   let e = engine t in
   t.session.pause <- true;
   e.reason <- Some X.Pause;
-  Uc.stop e.uc
+  Engine.stop e.uc
 
 let stop t =
   t.stopped <- true;
@@ -458,12 +460,12 @@ let pc t =
       (* in a hook, the instruction, that runs, with the lower bit set
          in the Thumb state of ARM, as Unicorn has it *)
       let e = engine t in
-      let pc = Uc.current e.uc ~pc:e.pc in
+      let pc = Engine.current e.uc ~pc:e.pc in
       if
-        Poly.equal e.arch Uc.Arm
+        Poly.equal e.arch Engine.Arm
         && Int64.(
-             Uc.reg_read e.uc
-               (Option.value_exn (Bap_engine_unicorn.reg Uc.Arm "CPSR"))
+             Engine.reg_read e.uc
+               (Option.value_exn (Bap_engine_unicorn.reg Engine.Arm "CPSR"))
              land 0x20L
              <> 0L)
       then Int64.(pc lor 1L)
@@ -616,7 +618,9 @@ let components t =
           blocks,
           List.length (l.ran ()) + Hashtbl.length t.session.ran_before ))
   in
-  let engine_entries, engine_blocks, jit_blocks = Uc.inventory (engine t).uc in
+  let engine_entries, engine_blocks, jit_blocks =
+    Engine.inventory (engine t).uc
+  in
   let traces =
     List.filter_map t.traces ~f:(fun ((trace_slot, blocks_slot) as slots) ->
         match (Weak.get trace_slot 0, Weak.get blocks_slot 0) with
@@ -629,8 +633,8 @@ let components t =
       ~f:(fun (records, accesses, decoded) (_, trace, blocks) ->
         let records, accesses =
           Option.value_map trace ~default:(records, accesses) ~f:(fun trace ->
-              ( records + Uc.Trace.retained trace,
-                accesses + Uc.Trace.retained_accesses trace ))
+              ( records + Engine.Trace.retained trace,
+                accesses + Engine.Trace.retained_accesses trace ))
         in
         let decoded =
           Option.value_map blocks ~default:decoded ~f:(fun blocks ->
@@ -976,7 +980,7 @@ let hook t f =
         List.filter t.session.engine_hooks ~f:(fun g ->
             not (phys_equal g install));
       List.iter !hooks ~f:(fun h ->
-          try Uc.delete h with Invalid_argument _ | Uc.Error _ -> ());
+          try Engine.delete h with Invalid_argument _ | Engine.Error _ -> ());
       hooks := [])
 
 (* the address of the code of the instruction, without the lower bit of
@@ -985,13 +989,13 @@ let code_of t addr =
   match (engine t).arch with Arm -> Int64.(addr land lnot 1L) | _ -> addr
 
 (* the instructions at the sites are seen by one hook, which the engine
-   finds natively, see [Uc.on_sites] *)
+   finds natively, see [Engine.on_sites] *)
 let sites_hook t sites f =
   let sites = List.map sites ~f:(code_of t) in
   if not (List.is_empty sites) then
     hook t (fun e ->
         let fresh = instructions t in
-        Uc.on_sites e.uc sites (fun addr _ -> if fresh addr then f addr))
+        Engine.on_sites e.uc sites (fun addr _ -> if fresh addr then f addr))
 
 let run ?until t =
   if paused t then begin
@@ -1006,13 +1010,13 @@ let run ?until t =
           let skip = ref (Int64.equal addr code) in
           let fresh = instructions t in
           ( e,
-            Uc.on_code e.uc ~first:addr ~last:addr (fun addr _ ->
+            Engine.on_code e.uc ~first:addr ~last:addr (fun addr _ ->
                 if fresh addr then if !skip then skip := false else stop t) ))
     in
     resume t (X.Continue (pc t));
     Option.iter hook ~f:(fun (e', hook) ->
         match t.session.active with
-        | Some e when phys_equal e e' -> Uc.delete hook
+        | Some e when phys_equal e e' -> Engine.delete hook
         | _ -> ())
   end;
   status t
@@ -1023,12 +1027,12 @@ let step t =
     let first = ref true in
     let fresh = instructions t in
     let hook =
-      Uc.on_code e.uc (fun addr _ ->
+      Engine.on_code e.uc (fun addr _ ->
           if fresh addr then if !first then first := false else stop t)
     in
     resume t (X.Continue (pc t));
     match t.session.active with
-    | Some e' when phys_equal e e' -> Uc.delete hook
+    | Some e' when phys_equal e e' -> Engine.delete hook
     | _ -> ()
   end;
   status t
@@ -1523,7 +1527,7 @@ let executed_at ?thumb t pc =
   (* the engine, that runs, has the instruction, unless it dropped
      them, e.g., when the script wrote the code, after which the lifter
      has the last one, that was lifted, until the engine lifts it anew *)
-  match Option.bind t.session.active ~f:(fun e -> Uc.insn_at e.uc pc) with
+  match Option.bind t.session.active ~f:(fun e -> Engine.insn_at e.uc pc) with
   | Some (bytes, name, thumb', bir) when Bool.equal thumb thumb' ->
       Some { bytes; name; thumb; bir }
   | _ -> (
@@ -1553,8 +1557,8 @@ let insns t =
       List.iter (l.ran ()) ~f:(fun (pc, thumb, _) ->
           Hash_set.add ran (addr (pc, thumb))));
   Option.iter t.session.active ~f:(fun e ->
-      List.iter (Uc.insn_addrs e.uc) ~f:(fun pc ->
-          match Uc.insn_at e.uc pc with
+      List.iter (Engine.insn_addrs e.uc) ~f:(fun pc ->
+          match Engine.insn_at e.uc pc with
           | Some (_, _, thumb, _) -> Hash_set.add ran (addr (pc, thumb))
           | None -> ()));
   Hash_set.to_list ran |> List.sort ~compare:Int64.compare
@@ -1592,19 +1596,19 @@ module Trace = struct
 
   type t = {
     emu : emu;
-    trace : Uc.Trace.t;
+    trace : Engine.Trace.t;
     memory : bool;
         (** if all accesses are recorded, which the slices follow, not only the
             ones, that the trace watches *)
     watch : (int64 * int64) option;
     mutable active : bool;
-    mutable hooks : Uc.hook list option;
+    mutable hooks : Engine.hook list option;
     blocks : (int * int64 array) list Int64.Table.t;
         (** the instructions of the blocks, by their addresses, with the lower
             bit of Thumb, and sizes, see [insns] *)
   }
 
-  (* the hooks are native, see [Uc.trace], and go to the new engines too,
+  (* the hooks are native, see [Engine.trace], and go to the new engines too,
      until the trace stops *)
   let start ?(size = 1 lsl 20) ?every ?(blocks = false) ?(accesses = 0) ?watch
       ?first ?last emu =
@@ -1620,7 +1624,7 @@ module Trace = struct
       invalid_arg
         "Bap_emu.Trace.start: the accesses are recorded only with all \
          instructions, or blocks";
-    let trace = Uc.Trace.create ?every ~blocks ~accesses size in
+    let trace = Engine.Trace.create ?every ~blocks ~accesses size in
     let blocks = Int64.Table.create () in
     let t =
       {
@@ -1639,7 +1643,7 @@ module Trace = struct
     emu.traces <- (owned_trace, owned_blocks) :: emu.traces;
     installed emu (fun e ->
         if t.active then
-          t.hooks <- Some (Uc.trace ?first ?last ?watch ~memory e.uc trace));
+          t.hooks <- Some (Engine.trace ?first ?last ?watch ~memory e.uc trace));
     t
 
   (* the hooks of a closed engine are gone with it *)
@@ -1648,18 +1652,18 @@ module Trace = struct
       t.active <- false;
       Option.iter t.hooks ~f:(fun hooks ->
           List.iter hooks ~f:(fun hook ->
-              try Uc.delete hook with Invalid_argument _ -> ()));
+              try Engine.delete hook with Invalid_argument _ -> ()));
       t.hooks <- None
     end
 
-  let count t = Uc.Trace.count t.trace
-  let retained t = Uc.Trace.retained t.trace
-  let clear t = Uc.Trace.clear t.trace
-  let blocks t = Uc.Trace.blocks t.trace
-  let pcs ?last t = Uc.Trace.pcs ?last t.trace
-  let tids ?last t = Uc.Trace.tids ?last t.trace
-  let sizes ?last t = Uc.Trace.sizes ?last t.trace
-  let save ?last t file = Uc.Trace.save ?last t.trace file
+  let count t = Engine.Trace.count t.trace
+  let retained t = Engine.Trace.retained t.trace
+  let clear t = Engine.Trace.clear t.trace
+  let blocks t = Engine.Trace.blocks t.trace
+  let pcs ?last t = Engine.Trace.pcs ?last t.trace
+  let tids ?last t = Engine.Trace.tids ?last t.trace
+  let sizes ?last t = Engine.Trace.sizes ?last t.trace
+  let save ?last t file = Engine.Trace.save ?last t.trace file
 
   type access = {
     insn : int64;
@@ -1687,7 +1691,7 @@ module Trace = struct
     }
 
   let accesses ?last t =
-    let rows = Uc.Trace.accesses ?last t.trace in
+    let rows = Engine.Trace.accesses ?last t.trace in
     List.init (Bigarray.Array2.dim1 rows) ~f:(access rows)
 
   (* the [top] values, that occur most, with their numbers, the most
@@ -1756,10 +1760,10 @@ module Trace = struct
      their global record indices, modes, and TIDs, also of the instructions,
      into which the blocks expand *)
   let window ?(records = true) ?thread ?last t :
-      words * words * Uc.Trace.modes * words =
+      words * words * Engine.Trace.modes * words =
     let raw_pcs = pcs ?last t in
     let raw_tids = tids ?last t in
-    let raw_modes = Uc.Trace.modes ?last t.trace in
+    let raw_modes = Engine.Trace.modes ?last t.trace in
     let raw_n = Bigarray.Array1.dim raw_pcs in
     let first = Int64.(count t - of_int raw_n) in
     let selected =
@@ -2296,7 +2300,7 @@ let slice ?(addresses = false) ?window ?thread (tr : Trace.t) criterion =
   let pcs, records, modes, tids = Trace.window ?thread ?last:window tr in
   let n = Bigarray.Array1.dim pcs in
   let blocks = Trace.blocks tr in
-  let rows = Uc.Trace.accesses tr.trace in
+  let rows = Engine.Trace.accesses tr.trace in
   let rows_n = Bigarray.Array2.dim1 rows in
   let first_record =
     if n = 0 then Trace.count tr else Bigarray.Array1.get records 0
@@ -2307,7 +2311,7 @@ let slice ?(addresses = false) ?window ?thread (tr : Trace.t) criterion =
   let covered =
     if
       (not tr.memory)
-      || Int64.(Uc.Trace.accesses_count tr.trace = of_int rows_n)
+      || Int64.(Engine.Trace.accesses_count tr.trace = of_int rows_n)
     then first_record
     else if rows_n = 0 then Trace.count tr
     else Int64.(max first_record ((Trace.access rows 0).insn + 1L))
@@ -2326,9 +2330,10 @@ let slice ?(addresses = false) ?window ?thread (tr : Trace.t) criterion =
      the bit 63, were written outside of the trace, with the written
      bytes, if they are known, and the ones, whose instructions, by the
      records and the program counters, a hook wrote them before, the bit
-     61, see [Uc.Trace.bounds] *)
+     61, see [Engine.Trace.bounds] *)
   let bounds = Int64.Table.create () and inside = Hashtbl.Poly.create () in
-  let marks = Uc.Trace.bounds tr.trace and written = Uc.Trace.ranges tr.trace in
+  let marks = Engine.Trace.bounds tr.trace
+  and written = Engine.Trace.ranges tr.trace in
   let pos = ref 0 in
   for i = 0 to (Bigarray.Array1.dim marks / 4) - 1 do
     let b = Bigarray.Array1.get marks (4 * i) in
@@ -2407,7 +2412,7 @@ let slice ?(addresses = false) ?window ?thread (tr : Trace.t) criterion =
     let page = X.page_of addr in
     Hashtbl.find_or_add executable page ~default:(fun () ->
         match Hashtbl.find (engine t).pages page with
-        | Some { perm; _ } -> Uc.Perm.(mem perm exec)
+        | Some { perm; _ } -> Engine.Perm.(mem perm exec)
         | None -> false)
   in
   let overwrote (a : Trace.access) =
@@ -2624,7 +2629,7 @@ let on_code ?first ?last ?(deferred = false) t f =
   hook t (fun e ->
       let fresh = instructions t in
       [
-        Uc.on_code ?first ?last e.uc (fun addr _ ->
+        Engine.on_code ?first ?last e.uc (fun addr _ ->
             if fresh addr then observe ~deferred t (fun t -> f t addr));
       ])
 
@@ -2634,7 +2639,7 @@ let on_sites ?(deferred = false) t sites f =
 let on_read ?first ?last ?(deferred = false) t f =
   hook t (fun e ->
       [
-        Uc.on_mem ?first ?last e.uc [ `read ] (fun _ addr size _ ->
+        Engine.on_mem ?first ?last e.uc [ `read ] (fun _ addr size _ ->
             observe ~deferred t (fun t -> f t addr size));
       ])
 
@@ -2695,7 +2700,7 @@ let deliver_write t handler addr size value =
   let pc = code_of t (pc t) in
   let start = t.session.starts in
   let attempt =
-    match t.session.active with Some e -> Uc.attempt e.uc | None -> None
+    match t.session.active with Some e -> Engine.attempt e.uc | None -> None
   in
   let fresh =
     match handler.active_attempt with
@@ -2753,7 +2758,7 @@ let on_writes t subscriptions =
   List.iter groups ~f:(fun ((first, last), handlers) ->
       hook t (fun e ->
           [
-            Uc.on_mem ?first ?last e.uc [ `write ] (fun _ addr size value ->
+            Engine.on_mem ?first ?last e.uc [ `write ] (fun _ addr size value ->
                 t.write_dispatches <- t.write_dispatches + 1;
                 List.iter (List.rev handlers) ~f:(fun handler ->
                     deliver_write t handler addr size value));
@@ -2805,7 +2810,7 @@ let on_import t ~site ~name f =
             let e = engine t in
             let ret = X.import_return e name x in
             e.reason <- Some (X.Jump ret);
-            Uc.stop e.uc)
+            Engine.stop e.uc)
       ~finally:(fun () -> t.call <- None)
   in
   sites_hook t [ site ] (fun _ -> hook ());
@@ -2831,7 +2836,7 @@ let hook_calls t addr =
            stops it *)
         let fresh = instructions t in
         ignore
-          (Uc.on_code e.uc ~first:addr ~last:addr (fun addr _ ->
+          (Engine.on_code e.uc ~first:addr ~last:addr (fun addr _ ->
                let s = t.session in
                if fresh addr && not (Hash_set.mem e.foreign addr) then
                  match
@@ -2839,7 +2844,7 @@ let hook_calls t addr =
                  with
                  | Some ret ->
                      e.reason <- Some (X.Jump ret);
-                     Uc.stop e.uc
+                     Engine.stop e.uc
                  | None -> ())))
   end
 
@@ -2897,7 +2902,7 @@ let register_stub t ~name ~address =
   hook t (fun e ->
       let fresh = instructions t in
       [
-        Uc.on_code e.uc ~first:address ~last:address (fun _ _ ->
+        Engine.on_code e.uc ~first:address ~last:address (fun _ _ ->
             if fresh address && not (Hashtbl.mem t.services name) then
               warning
                 "Bap_emu: synthetic stub %s at %Lx has no registered service"
@@ -3397,7 +3402,7 @@ let execution_stats t =
                           max_usage = Int64.(s.upper - s.lowest_sp);
                         })
               end);
-  let _, lifted_blocks, _ = Uc.inventory (engine t).uc in
+  let _, lifted_blocks, _ = Engine.inventory (engine t).uc in
   {
     instructions = t.instructions;
     lifted_blocks;
@@ -3425,7 +3430,7 @@ let start_stats t ~interval callback =
   let install (e : X.engine) =
     let fresh = instructions t in
     let hook =
-      Uc.on_code e.uc (fun addr _ ->
+      Engine.on_code e.uc (fun addr _ ->
           if subscription.active && fresh addr then begin
             t.instructions <- Int64.succ t.instructions;
             let now = X.clock () in
@@ -3447,7 +3452,8 @@ let start_stats t ~interval callback =
         List.filter t.session.engine_hooks ~f:(fun g ->
             not (phys_equal g install));
       List.iter !hooks ~f:(fun hook ->
-          try Uc.delete hook with Invalid_argument _ | Uc.Error _ -> ());
+          try Engine.delete hook
+          with Invalid_argument _ | Engine.Error _ -> ());
       hooks := []
     end
   in
@@ -3464,7 +3470,7 @@ let start_maintenance t ~interval ?lift_cache_limit
       set_lift_cache_limit t (Some limit));
   start_stats t ~interval (fun _ ->
       if forget then forget_lifts t;
-      if reclaim_blocks then Uc.flush_tb (engine t).uc;
+      if reclaim_blocks then Engine.flush_tb (engine t).uc;
       if compact_heap then Gc.compact ())
 
 (* the registers of the thread, without the aliases: of the engine, for
@@ -4016,9 +4022,9 @@ let add_break t addr =
     let install (e : X.engine) =
       let fresh = instructions t in
       ignore
-        (Uc.on_code ~first:addr ~last:addr e.uc (fun a _ ->
+        (Engine.on_code ~first:addr ~last:addr e.uc (fun a _ ->
              if !active && fresh a then stop t)
-          : Uc.hook)
+          : Engine.hook)
     in
     installed t install;
     Hashtbl.set t.shell.breaks ~key:addr ~data:(fun () ->
