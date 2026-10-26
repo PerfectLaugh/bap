@@ -9826,6 +9826,7 @@ module Std : sig
     val create :
       ?package:string ->
       ?state:state ->
+      ?program:program term ->
       ?disassembler:string ->
       ?brancher:brancher source ->
       ?symbolizer:symbolizer source ->
@@ -9918,6 +9919,10 @@ module Std : sig
         @param state
           if specified then the provided [state] will be used as the initial
           state
+
+        @param program
+          if specified then the provided already lifted [program] will be used
+          for the main input instead of lifting the reconstructed symbols again
 
         @param package
           if specified, then all symbols during the disassembly will be created

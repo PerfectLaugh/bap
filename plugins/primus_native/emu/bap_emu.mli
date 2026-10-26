@@ -399,7 +399,8 @@ module Trace : sig
       the ring doesn't keep anymore *)
 
   val retained : t -> int
-  (** the number of instruction or block records that the ring currently keeps *)
+  (** the number of instruction or block records that the ring currently keeps
+  *)
 
   val clear : t -> unit
   val blocks : t -> bool
@@ -1007,8 +1008,9 @@ val project_digest : project -> string option
 val save_project : project -> string -> unit
 (** [save_project proj file] saves the project of {!project} to the [file]: its
     program, i.e., the subroutines, that were disassembled and lifted, its
-    memory, its target, and its digest, so that the next script loads it with
-    {!load_project}, instead of disassembling the memory again, e.g.,
+    disassembly state and specification, memory, target, and digest, so that the
+    next script loads it with {!load_project}, instead of disassembling the
+    memory again, e.g.,
 
     {[
     let proj =
@@ -1032,8 +1034,8 @@ val save_project : project -> string -> unit
 
 val load_project : string -> project
 (** [load_project file] the project, that {!save_project} saved, with its
-    program, its memory, its target, and its digest, see {!project_digest},
-    without the disassembly state, so that it is as the project of the memory
+    program, disassembly state and symbols, specification, memory, target, and
+    digest, see {!project_digest}, so that it is as the project of the memory
     for the analyses of the program, e.g., {!Xrefs} and {!Static}. Raises
     [Failure], if the file is not a saved project, or is broken, e.g., of
     another version. *)
@@ -1051,21 +1053,21 @@ module Jni : sig
   type emulator = t
 
   include
-    module type of Bap_emu_jni with
-      type t = Bap_emu_jni.t and
-      type object_id = Bap_emu_jni.object_id and
-      type call = Bap_emu_jni.call and
-      type answer = Bap_emu_jni.answer and
-      type handler = Bap_emu_jni.handler and
-      type method_decl = Bap_emu_jni.method_decl and
-      type field_decl = Bap_emu_jni.field_decl and
-      type class_decl = Bap_emu_jni.class_decl and
-      type object_decl = Bap_emu_jni.object_decl and
-      type call_record = Bap_emu_jni.call_record and
-      type identity = Bap_emu_jni.identity and
-      type kind = Bap_emu_jni.kind and
-      type event = Bap_emu_jni.event and
-      type layout = Bap_emu_jni.layout
+    module type of Bap_emu_jni
+      with type t = Bap_emu_jni.t
+       and type object_id = Bap_emu_jni.object_id
+       and type call = Bap_emu_jni.call
+       and type answer = Bap_emu_jni.answer
+       and type handler = Bap_emu_jni.handler
+       and type method_decl = Bap_emu_jni.method_decl
+       and type field_decl = Bap_emu_jni.field_decl
+       and type class_decl = Bap_emu_jni.class_decl
+       and type object_decl = Bap_emu_jni.object_decl
+       and type call_record = Bap_emu_jni.call_record
+       and type identity = Bap_emu_jni.identity
+       and type kind = Bap_emu_jni.kind
+       and type event = Bap_emu_jni.event
+       and type layout = Bap_emu_jni.layout
 
   val install : t -> emulator -> layout -> unit
   val serve : t -> emulator -> unit
@@ -1450,8 +1452,8 @@ val start_stats :
 (** [start_stats emu ~interval f] counts fresh guest instructions and pauses
     briefly every [interval] seconds to call [f] with current statistics. The
     callback runs at a safe paused state, and execution continues unless the
-    callback stops it. Raises [Invalid_argument] for a nonpositive or
-    non-finite interval, or if the program is not paused. *)
+    callback stops it. Raises [Invalid_argument] for a nonpositive or non-finite
+    interval, or if the program is not paused. *)
 
 val stop_stats : stats_subscription -> unit
 (** [stop_stats subscription] removes the instruction hook and suppresses any

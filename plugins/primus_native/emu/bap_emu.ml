@@ -2743,12 +2743,7 @@ module Android = Bap_emu_android
 let projects = ref 0
 
 (* the digest of the code, that a project of the memory is made of *)
-let live_digest =
-  Value.Tag.register ~name:"live-digest"
-    ~uuid:"5b1c7a2e-8d43-4f6a-9e21-3c0b7d5f8a64"
-    (module String)
-
-let project_digest proj = Project.get proj live_digest
+let project_digest = Bap_emu_xrefs.project_digest
 
 (* the readable regions, with their bytes, from Primus, which has them
    all, as Unicorn has only the pages, that the code touched, without the
@@ -2855,12 +2850,14 @@ module Saved = struct
     filename : string;
     digest : string;
     program : string;
+    state : Project.state;
+    spec : Ogre.Doc.t;
     code : region list;
     data : region list;
   }
   [@@deriving bin_io]
 
-  let magic = "bap-emu-project 2\n"
+  let magic = "bap-emu-project 3\n"
 end
 
 (* the program, with the addresses of its terms only, as the other
@@ -2908,6 +2905,8 @@ let save_project proj file =
       filename = Option.value (Project.get proj filename) ~default:"a.out";
       digest = Option.value (project_digest proj) ~default:"";
       program = Binable.to_string (module Program) (slim (Project.program proj));
+      state = Project.state proj;
+      spec = Project.specification proj;
       code = regions (memmap code);
       data = regions (memmap data);
     }
@@ -2945,13 +2944,11 @@ let load_project file =
       in
       let program = Binable.of_string (module Program) saved.program in
       match
-        Project.create ~package:saved.filename ~state:Project.empty_state
-          (Project.Input.custom ~filename:saved.filename
+        Project.create ~package:saved.filename ~state:saved.state ~program
+          (Project.Input.custom ~filename:saved.filename ~spec:saved.spec
              ~code:(memmap saved.code) ~data:(memmap saved.data) target)
       with
-      | Ok proj ->
-          Project.with_program proj program |> fun proj ->
-          Project.set proj live_digest saved.digest
+      | Ok proj -> Bap_emu_xrefs.set_project_digest proj saved.digest
       | Error err ->
           failwithf "Bap_emu.load_project: %s" (Error.to_string_hum err) ())
 
@@ -2998,7 +2995,7 @@ let project ?regions ?(symbols = []) ?(roots = []) ?cache t =
       Project.create ~package:filename
         (Project.Input.custom ~filename ~code ~data ~spec target)
     with
-    | Ok proj -> Project.set proj live_digest digest
+    | Ok proj -> Bap_emu_xrefs.set_project_digest proj digest
     | Error err -> failwithf "Bap_emu.project: %s" (Error.to_string_hum err) ()
   in
   (* the cache has the project of the same code, or gets it *)

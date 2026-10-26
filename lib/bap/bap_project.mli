@@ -24,6 +24,7 @@ val disassembled : t -> bool
 val create :
   ?package:string ->
   ?state:state ->
+  ?program:program term ->
   ?disassembler:string ->
   ?brancher:brancher source ->
   ?symbolizer:symbolizer source ->
@@ -31,6 +32,11 @@ val create :
   ?reconstructor:reconstructor source ->
   input ->
   t Or_error.t
+(** [create input] constructs a project from [input]. If [program] is provided,
+    it is used as the already lifted program of the main input instead of
+    lifting the reconstructed symbols again. Disassembly and symbol information
+    are still computed, unless [state] is provided. Library inputs are always
+    lifted. *)
 
 val arch : t -> arch
 val target : t -> Theory.Target.t

@@ -34,6 +34,12 @@ let () =
         (Term.length sub_t (Project.program proj))
         (Sequence.length (Memmap.to_sequence (Project.memory loaded)))
         (Sequence.length (Memmap.to_sequence (Project.memory proj)));
+      printf "loaded: %d of %d instructions, symbols %b, disassembled %b\n"
+        (Sequence.length (Disasm.insns (Project.disasm loaded)))
+        (Sequence.length (Disasm.insns (Project.disasm proj)))
+        (Option.is_some
+           (Symtab.find_by_name (Project.symbols loaded) "print_strings"))
+        (Project.disassembled loaded);
       (match Emu.load_project echo with
       | exception Failure _ -> print_endline "the program isn't a saved project"
       | _ -> print_endline "loaded the program as a project");
@@ -71,13 +77,23 @@ let () =
       let xrefs = Xrefs.create loaded in
       let xfile = Filename.concat dir "echo.xrefs" in
       Xrefs.save xrefs xfile;
-      let xrefs = Xrefs.load xfile in
+      let xrefs = Xrefs.load loaded xfile in
       printf "xrefs %d, print_endline is called by %s\n"
         (List.length (Xrefs.all xrefs))
         (String.concat ~sep:","
            (List.map
               (Xrefs.callers xrefs (addr "print_endline"))
               ~f:(fun f -> Option.value (Xrefs.name xrefs f) ~default:"?")));
+      let focused = Xrefs.create_focused loaded (addr "print_endline") in
+      printf "focused: %d functions, print_endline is called by %s\n"
+        (List.length (Xrefs.functions focused))
+        (String.concat ~sep:","
+           (List.map
+              (Xrefs.callers focused (addr "print_endline"))
+              ~f:(fun f -> Option.value (Xrefs.name focused f) ~default:"?")));
+      (match Xrefs.load scoped xfile with
+      | exception Failure _ -> print_endline "stale xrefs are rejected"
+      | _ -> print_endline "stale xrefs are accepted");
       let s =
         Emu.Static.slice loaded 0x400764L [ Emu.Reg "RAX" ] ~addresses:true
       in
@@ -106,5 +122,12 @@ let () =
         (List.length (Xrefs.find xrefs strlen))
         (String.concat ~sep:","
            (List.map (Xrefs.callers xrefs strlen) ~f:(fun f ->
-                Option.value (Xrefs.name xrefs f) ~default:"?")))
+                Option.value (Xrefs.name xrefs f) ~default:"?")));
+      Xrefs.save xrefs xfile;
+      let restored = Xrefs.load loaded xfile in
+      printf "restored dynamic calls: %d, from %s\n"
+        (List.length (Xrefs.find restored strlen))
+        (String.concat ~sep:","
+           (List.map (Xrefs.callers restored strlen) ~f:(fun f ->
+                Option.value (Xrefs.name restored f) ~default:"?")))
   | _ -> failwith "expected ECHO DIR"

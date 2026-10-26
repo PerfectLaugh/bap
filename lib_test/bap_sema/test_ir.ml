@@ -287,6 +287,36 @@ end
 
 open Term
 
+let partial_cfg_direct_goto _ctxt =
+  Toplevel.reset ();
+  let mem =
+    Memory.create LittleEndian (Addr.of_int64 0L)
+      (Bigstring.of_string "\xe9\x01\x00\x00\x00\xc3\xc3")
+    |> Or_error.ok_exn
+  in
+  let dis = Disasm_expert.Recursive.run `x86_64 mem |> Or_error.ok_exn in
+  let cfg = Disasm_expert.Recursive.cfg dis in
+  let entry =
+    Graphs.Cfg.nodes cfg
+    |> Seq.min_elt ~compare:Block.ascending
+    |> Option.value_exn
+  in
+  let partial =
+    Graphs.Cfg.nodes cfg
+    |> Seq.fold ~init:cfg ~f:(fun partial blk ->
+        if Block.equal blk entry then partial
+        else Graphs.Cfg.Node.remove blk partial)
+  in
+  let sub = Sub.lift entry partial in
+  Term.enum blk_t sub
+  |> Seq.concat_map ~f:(Term.enum jmp_t)
+  |> Seq.iter ~f:(fun jmp ->
+      match Jmp.kind jmp with
+      | Goto (Direct tid) ->
+          assert_bool "a direct goto leaves the partial subroutine"
+            (Option.is_some (Term.find blk_t sub tid))
+      | _ -> ())
+
 let suite () =
   "Sema.IR"
   >::: [
@@ -358,5 +388,6 @@ let suite () =
          "lookup(r)" >:: lookup def_t def_r;
          "lookup(goto_xyz)" >:: lookup jmp_t goto_xyz;
          "lookup(call_xyz)" >:: lookup jmp_t call_sub1;
+         "partial_cfg_direct_goto" >:: partial_cfg_direct_goto;
        ]
        @ Example.tests

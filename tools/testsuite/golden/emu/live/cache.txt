@@ -1,11 +1,15 @@
 the project is of the code true
 loaded: of the code true, 22 of 22 subs, 4 of 4 regions
+loaded: 375 of 375 instructions, symbols true, disassembled true
 the program isn't a saved project
 the cache is of the code true, and loads faster true
 scoped cache: of its code true, 22 of 22 subs, 4 of 4 regions
 the scoped cache didn't change the full project true
 xrefs 47, print_endline is called by print_strings
+focused: 2 functions, print_endline is called by print_strings
+stale xrefs are rejected
 the slice of the loaded project 400733 400734 40073b 40073f 400743 40075d 400761
 the patched code is of the project false
 strlen: 1 references, 1 with the 7 calls of the trace
 with a call of a dispatcher: 2, from print_strings,main
+restored dynamic calls: 2, from print_strings,main

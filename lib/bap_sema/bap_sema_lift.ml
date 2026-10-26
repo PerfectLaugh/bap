@@ -505,6 +505,9 @@ let program symtab =
 let sub blk cfg =
   lift_sub blk cfg >>| fun (addr, blks, tid) ->
   let sub = Ir_sub.create () ~blks ~tid in
+  let sub =
+    Term.map blk_t sub ~f:(Term.map jmp_t ~f:(alternate_nonlocal sub))
+  in
   Term.set_attr sub address addr
 
 let insn = lift_insn

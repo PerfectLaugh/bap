@@ -459,7 +459,7 @@ let empty target =
 
 let ( =? ) name = Option.map ~f:(fun _ -> name)
 
-let compute_unit ?package ?state input =
+let compute_unit ?package ?state ?program input =
   let open KB.Syntax in
   let compute_target target spec =
     if Theory.Target.is_unknown target then target_of_spec spec else !!target
@@ -495,7 +495,8 @@ let compute_unit ?package ?state input =
   in
   State.cfg state >>= fun cfg ->
   State.symbols state >>= fun symbols ->
-  Program.KB.lift symbols >>| fun prog ->
+  (match program with Some prog -> !!prog | None -> Program.KB.lift symbols)
+  >>| fun prog ->
   let prog =
     Term.map sub_t prog ~f:(fun sub ->
         if Term.has_attr sub Bap_attributes.address then
@@ -505,9 +506,9 @@ let compute_unit ?package ?state input =
   let disasm = Disasm.create cfg in
   ({ spec; arch; target; state; disasm; memory; symbols }, prog, unit)
 
-let compute_units ?package ?state main libs =
+let compute_units ?package ?state ?program main libs =
   let open KB.Syntax in
-  compute_unit main ?package ?state >>= fun (main, prog, _) ->
+  compute_unit main ?package ?state ?program >>= fun (main, prog, _) ->
   KB.List.map libs ~f:compute_unit >>= fun libs ->
   let prog, libs =
     List.fold libs ~init:(prog, []) ~f:(fun (p, l) (info, prog, unit) ->
@@ -522,7 +523,7 @@ let disassembled t = not (State.equal t.main.state State.empty)
 (* the variable of the toplevel is declared once, see [compute_target] *)
 let disassembly_result = Toplevel.var "disassembly-result"
 
-let create ?package ?state ?disassembler:p1 ?brancher:p2 ?symbolizer:p3
+let create ?package ?state ?program ?disassembler:p1 ?brancher:p2 ?symbolizer:p3
     ?rooter:p4 ?reconstructor:p5 (read : input) =
   try
     unused_options
@@ -537,7 +538,8 @@ let create ?package ?state ?disassembler:p1 ?brancher:p2 ?symbolizer:p3
     | [] -> assert false
     | main_in :: libs_in ->
         let result = disassembly_result in
-        Toplevel.put result @@ compute_units main_in libs_in ?package ?state;
+        Toplevel.put result
+        @@ compute_units main_in libs_in ?package ?state ?program;
         let main, libraries, program = Toplevel.get result in
         Result.return
         @@ main_in.finish

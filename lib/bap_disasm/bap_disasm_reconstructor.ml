@@ -94,10 +94,9 @@ let sub roots prog start =
       ~init:(cfg, update_inputs node inputs)
       ~f:(fun (cfg, inputs) edge ->
         if is_call edge then (cfg, inputs)
-        else
-          let cfg' = Cfg.Edge.insert edge cfg in
-          if Cfg.Node.mem (Cfg.Edge.dst edge) cfg then (cfg', inputs)
-          else loop cfg' inputs (Cfg.Edge.dst edge))
+        else if Cfg.Node.mem (Cfg.Edge.dst edge) cfg then
+          (Cfg.Edge.insert edge cfg, inputs)
+        else loop (Cfg.Edge.insert edge cfg) inputs (Cfg.Edge.dst edge))
   in
   let cfg = Cfg.Node.insert start Cfg.empty in
   loop cfg Cfg.Edge.Set.empty start

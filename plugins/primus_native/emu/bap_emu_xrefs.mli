@@ -25,6 +25,13 @@ open Bap.Std
 
 type t
 
+(**/**)
+
+val project_digest : project -> string option
+val set_project_digest : project -> string -> project
+
+(**/**)
+
 (** what the instruction does with the address *)
 type kind =
   | Call  (** calls the function, directly, or through a slot *)
@@ -48,6 +55,12 @@ val create : project -> t
 (** [create proj] the references of the program of [proj], which is
     disassembled, e.g., of [Bap_emu.project], or of
     [Bap_script.project ~disassemble:true] *)
+
+val create_focused : project -> int64 -> t
+(** [create_focused proj addr] the references of the function at [addr] and of
+    its direct callers. Direct callers are discovered from the BIR without
+    folding or indexing the other functions. Indirect callers can be added from
+    a trace with {!add_calls}. *)
 
 val find : t -> int64 -> xref list
 (** [find xrefs addr] the references to [addr], in the order of their sites,
@@ -101,6 +114,7 @@ val save : t -> string -> unit
     script loads them with {!load}, instead of computing them again. Raises
     [Sys_error], if the file can't be written. *)
 
-val load : string -> t
-(** [load file] the references, that {!save} saved. Raises [Failure], if the
-    file is not a saved index, or is broken, e.g., of another version. *)
+val load : project -> string -> t
+(** [load proj file] the references, that {!save} saved for [proj]. Raises
+    [Failure], if the file is not a saved index, is broken, e.g., of another
+    version, or has a different code digest from [proj]. *)

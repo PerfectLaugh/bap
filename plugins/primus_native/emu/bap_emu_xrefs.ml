@@ -10,6 +10,7 @@ type xref = { site : int64; target : int64; kind : kind; slot : int64 option }
 
 type t = {
   width : int;
+  digest : string option;
   memory : value memmap;
   refs : xref list Int64.Table.t;  (** by the targets *)
   sites : xref list Int64.Table.t;  (** by the sites *)
@@ -18,6 +19,13 @@ type t = {
   names : string Int64.Table.t;  (** the names of the functions *)
 }
 
+let live_digest =
+  Value.Tag.register ~name:"live-digest"
+    ~uuid:"5b1c7a2e-8d43-4f6a-9e21-3c0b7d5f8a64"
+    (module String)
+
+let project_digest proj = Project.get proj live_digest
+let set_project_digest proj digest = Project.set proj live_digest digest
 let int64_of_word w = Bitvec.to_int64 (Word.to_bitvec w)
 
 (* the word of the width of the addresses at [addr], from the memory *)
@@ -68,11 +76,12 @@ let indirect t ~site kind (e : exp) acc =
       | None -> acc)
   | _ -> scan t ~site acc e
 
-let create proj =
+let scan_program proj selected =
   let width = Theory.Target.code_addr_size (Project.target proj) in
   let t =
     {
       width;
+      digest = project_digest proj;
       memory = Project.memory proj;
       refs = Int64.Table.create ();
       sites = Int64.Table.create ();
@@ -89,7 +98,7 @@ let create proj =
       Option.iter (Term.get_attr sub address) ~f:(fun a ->
           Hashtbl.set subs ~key:(Term.tid sub) ~data:(int64_of_word a)));
   let address_of_sub = Hashtbl.find subs in
-  Term.enum sub_t prog
+  selected
   |> Seq.iter ~f:(fun sub ->
       match Term.get_attr sub address with
       | None -> ()
@@ -177,6 +186,36 @@ let create proj =
             ~data:(List.sort sites ~compare:Int64.compare));
   t
 
+let create proj = scan_program proj (Term.enum sub_t (Project.program proj))
+
+let create_focused proj entry =
+  let prog = Project.program proj in
+  let target =
+    Term.enum sub_t prog
+    |> Seq.find ~f:(fun sub ->
+        Option.exists (Term.get_attr sub address) ~f:(fun addr ->
+            Int64.equal (int64_of_word addr) entry))
+  in
+  match target with
+  | None -> scan_program proj Seq.empty
+  | Some target ->
+      let tid = Term.tid target in
+      let calls_target sub =
+        Term.enum blk_t sub
+        |> Seq.concat_map ~f:(Term.enum jmp_t)
+        |> Seq.exists ~f:(fun jmp ->
+            match Jmp.kind jmp with
+            | Call call -> (
+                match Call.target call with
+                | Direct callee -> Tid.equal callee tid
+                | Indirect _ -> false)
+            | _ -> false)
+      in
+      Term.enum sub_t prog
+      |> Seq.filter ~f:(fun sub ->
+          Tid.equal (Term.tid sub) tid || calls_target sub)
+      |> scan_program proj
+
 let by_site xs =
   List.dedup_and_sort xs ~compare:(fun a b ->
       match Int64.compare a.site b.site with 0 -> compare_xref a b | n -> n)
@@ -225,6 +264,7 @@ let add_calls t calls =
 module Saved = struct
   type t = {
     width : int;
+    digest : string option;
     refs : xref list Int64.Table.t;
     sites : xref list Int64.Table.t;
     owners : int64 Int64.Table.t;
@@ -233,13 +273,14 @@ module Saved = struct
   }
   [@@deriving bin_io]
 
-  let magic = "bap-emu-xrefs 1\n"
+  let magic = "bap-emu-xrefs 2\n"
 end
 
 let save t file =
   let saved =
     {
       Saved.width = t.width;
+      digest = t.digest;
       refs = t.refs;
       sites = t.sites;
       owners = t.owners;
@@ -250,7 +291,7 @@ let save t file =
   Out_channel.write_all file
     ~data:(Saved.magic ^ Binable.to_string (module Saved) saved)
 
-let load file =
+let load proj file =
   let data =
     try In_channel.read_all file
     with Sys_error msg -> failwithf "Bap_emu.Xrefs.load: %s" msg ()
@@ -259,8 +300,19 @@ let load file =
   | None -> failwithf "Bap_emu.Xrefs.load: %s is not a saved index" file ()
   | Some data -> (
       match Binable.of_string (module Saved) data with
-      | { Saved.width; refs; sites; owners; bodies; names } ->
-          { width; memory = Memmap.empty; refs; sites; owners; bodies; names }
+      | { Saved.width; digest; refs; sites; owners; bodies; names } ->
+          if not (Option.equal String.equal digest (project_digest proj)) then
+            failwithf "Bap_emu.Xrefs.load: %s is of another project" file ();
+          {
+            width;
+            digest;
+            memory = Memmap.empty;
+            refs;
+            sites;
+            owners;
+            bodies;
+            names;
+          }
       | exception exn ->
           failwithf "Bap_emu.Xrefs.load: %s is broken: %s" file
             (Exn.to_string exn) ())

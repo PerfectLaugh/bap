@@ -371,6 +371,18 @@ let call1_3ret _ctxt =
       assert_bool "b3 has no succs" @@ Seq.is_empty (Cfg.Node.succs b3 cfg)
   | _ -> assert false
 
+let reconstructor_recursion _ctxt =
+  Toplevel.reset ();
+  let cfg = Rec.cfg (run_rec () |> Or_error.ok_exn) in
+  let roots = [ Addr.of_int32 0x840Cl ] in
+  let syms =
+    Reconstructor.run (Reconstructor.default Addr.to_string roots) cfg
+  in
+  match Seq.to_list (Symtab.to_sequence syms) with
+  | [ (_, _, cfg) ] ->
+      assert_equal ~printer:Int.to_string 4 (Cfg.number_of_nodes cfg)
+  | _ -> assert_string "expected one reconstructed subroutine"
+
 let suite () =
   "Disasm.Basic"
   >::: [
@@ -382,4 +394,5 @@ let suite () =
          "ret" >:: test_micro_cfg ret;
          "call" >:: test_micro_cfg call;
          "call1_3ret" >:: call1_3ret;
+         "reconstructor_recursion" >:: reconstructor_recursion;
        ]
