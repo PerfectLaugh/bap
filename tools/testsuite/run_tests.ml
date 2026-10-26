@@ -1090,6 +1090,34 @@ let emu data =
             ( "sees the stores to the code in the lifted engine",
               "lifted: code stores: " ^ stores );
           ]);
+    (* engine stores stay synchronized with live and failed-state reads,
+       snapshots, checkpoints, provenance, and native and thread writes *)
+    case "emu/memory-sync/lifted" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/memory-sync.ml";
+              path data "bin/x86_64-linux-gnu-rewrite";
+              dir env;
+              "lifted";
+            ]
+        in
+        has env "synchronizes memory in the lifted engine" out
+          "lifted: memory synchronization ok\n");
+    case "emu/memory-sync/unicorn" (fun env ->
+        let out =
+          bap env
+            [
+              "script";
+              input "emu/memory-sync.ml";
+              path data "bin/x86_64-linux-gnu-rewrite";
+              dir env;
+              "unicorn";
+            ]
+        in
+        has env "synchronizes memory in Unicorn" out
+          "unicorn: memory synchronization ok\n");
     (* the code, that ran, and that memcpy, a native function, rewrites,
        runs anew, as Unicorn translates it anew, also after the store of
        the program *)

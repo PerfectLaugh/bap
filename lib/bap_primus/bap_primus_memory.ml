@@ -1286,8 +1286,9 @@ module Make (Machine : Machine) = struct
           |> Set.of_list (module Addr)
     in
     List.map addrs ~f:(fun addr ->
-        if Set.mem s.generated addr then Generated
-        else if has_stored addr s || Set.mem pending addr then Stored
+        if Set.mem pending addr then Stored
+        else if Set.mem s.generated addr then Generated
+        else if has_stored addr s then Stored
         else
           match find_layer addr s with
           | None -> Unmapped

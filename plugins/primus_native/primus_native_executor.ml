@@ -3593,9 +3593,9 @@ module Make (Machine : Primus.Machine.S) = struct
                       notify (name, args))
                 in
                 List.iter r.writes ~f:(fun (addr, data) ->
+                    engine_write e addr data;
                     List.iter (List.rev e.session.store_hooks) ~f:(fun h ->
                         h addr data);
-                    engine_write e addr data;
                     (* the writes to the code are seen, see [watch] *)
                     if e.watching.code_writes then
                       let last =
@@ -6778,7 +6778,10 @@ module Make (Machine : Primus.Machine.S) = struct
         let* data = Memory.peek (word e addr) n in
         e.session.dumped <- data;
         serve pc
-    | Snapshot -> pull e >>= fun () -> snapshot id pc
+    | Snapshot ->
+        let* () = pull e in
+        let* () = sync e in
+        snapshot id pc
     | Restore snapshot ->
         let* () = Machine.kill id in
         let* () = Machine.switch snapshot in
