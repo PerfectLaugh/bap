@@ -195,24 +195,24 @@ let word_of_bytes s =
   let s = if Sys.big_endian then String.rev s else s in
   Word.of_binary ~width:(String.length s * 8) LittleEndian s
 
-let read_loc uc { id; lo; width; _ } =
-  let x = word_of_bytes (Engine.reg_read_bytes uc id) in
+let read_loc engine { id; lo; width; _ } =
+  let x = word_of_bytes (Engine.reg_read_bytes engine id) in
   Word.extract_exn ~hi:(lo + width - 1) ~lo x
 
-let write_loc uc { id; size; lo; width } x =
+let write_loc engine { id; size; lo; width } x =
   let x = Word.extract_exn ~hi:(width - 1) x in
   let bits = size * 8 in
   let x =
     if lo = 0 && width = bits then x
     else
-      let old = word_of_bytes (Engine.reg_read_bytes uc id) in
+      let old = word_of_bytes (Engine.reg_read_bytes engine id) in
       let x =
         if lo = 0 then x else Word.concat x (Word.extract_exn ~hi:(lo - 1) old)
       in
       if lo + width = bits then x
       else Word.concat (Word.extract_exn ~hi:(bits - 1) ~lo:(lo + width) old) x
   in
-  Engine.reg_write_bytes uc id (bytes_of_word size x)
+  Engine.reg_write_bytes engine id (bytes_of_word size x)
 
 let width_of_var v =
   match Theory.Bitv.refine (Theory.Var.sort v) with
@@ -223,7 +223,7 @@ let width_of_var v =
 
 module Regs = struct
   type t = {
-    uc : Engine.t;
+    engine : Engine.t;
     locs : loc String.Map.t;
     vars : var list;
     basis : var list;
@@ -231,19 +231,19 @@ module Regs = struct
     unmapped : string list;
   }
 
-  let size uc id =
-    try Some (Engine.reg_size uc id) with Engine.Error _ -> None
+  let size engine id =
+    try Some (Engine.reg_size engine id) with Engine.Error _ -> None
 
   (* the register of Unicorn, provided it has enough bits *)
-  let whole uc arch name ~lo ~width =
+  let whole engine arch name ~lo ~width =
     match Bap_engine_unicorn.reg arch name with
     | None -> None
     | Some id -> (
-        match size uc id with
+        match size engine id with
         | Some size when lo + width <= size * 8 -> Some { id; size; lo; width }
         | _ -> None)
 
-  let create target arch uc =
+  let create target arch engine =
     let parts =
       String.Map.of_alist_reduce
         (parts ~bits:(Theory.Target.bits target) arch)
@@ -253,10 +253,10 @@ module Regs = struct
     let basis name width =
       match Map.find parts name with
       | Some Skip -> None
-      | Some (Reg r) -> whole uc arch r ~lo:0 ~width
-      | Some (Bit (r, lo)) -> whole uc arch r ~lo ~width:1
-      | Some (Bits (r, lo, width)) -> whole uc arch r ~lo ~width
-      | Some Same | None -> whole uc arch name ~lo:0 ~width
+      | Some (Reg r) -> whole engine arch r ~lo:0 ~width
+      | Some (Bit (r, lo)) -> whole engine arch r ~lo ~width:1
+      | Some (Bits (r, lo, width)) -> whole engine arch r ~lo ~width
+      | Some Same | None -> whole engine arch name ~lo:0 ~width
     in
     (* an alias is a part of its origin, e.g., D0 of V0 of AArch64, which
        Unicorn has as the registers of their own, that share the bits, so
@@ -350,7 +350,7 @@ module Regs = struct
       Map.fold locs ~init:[] ~f:(fun ~key ~data acc ->
           Var.create key (Type.imm data.width) :: acc)
     in
-    { uc; locs; vars; basis; owners; unmapped = List.rev unmapped }
+    { engine; locs; vars; basis; owners; unmapped = List.rev unmapped }
 
   let basis t = t.basis
   let vars t = t.vars
@@ -366,23 +366,25 @@ module Regs = struct
     | _ -> None
 
   let mem t v = Option.is_some (find t v)
-  let read t v = Option.map (find t v) ~f:(read_loc t.uc)
+  let read t v = Option.map (find t v) ~f:(read_loc t.engine)
 
   let write t v x =
     match find t v with
     | None -> false
     | Some loc ->
-        write_loc t.uc loc x;
+        write_loc t.engine loc x;
         true
 
   let unmapped t = t.unmapped
-  let read_name t name = Option.map (Map.find t.locs name) ~f:(read_loc t.uc)
+
+  let read_name t name =
+    Option.map (Map.find t.locs name) ~f:(read_loc t.engine)
 
   let write_name t name x =
     match Map.find t.locs name with
     | None -> false
     | Some loc ->
-        write_loc t.uc loc (Word.extract_exn ~hi:(loc.width - 1) x);
+        write_loc t.engine loc (Word.extract_exn ~hi:(loc.width - 1) x);
         true
 
   let names t = Map.keys t.locs
@@ -430,7 +432,7 @@ module Segments = struct
     String.init 8 ~f:(fun i ->
         if Int.(i < 4) then byte low i else byte high Int.(i - 4))
 
-  (* the GDTR, which is uc_x86_mmr: the selector, the base, the limit,
+  (* the GDTR, which is engine_x86_mmr: the selector, the base, the limit,
      and the flags, as the C compiler lays them out *)
   let gdtr =
     let le x n =
@@ -446,45 +448,45 @@ module Segments = struct
         le 0L 4;
       ]
 
-  let mapped uc =
-    List.exists (Engine.mem_regions uc) ~f:(fun (lower, _, _) ->
+  let mapped engine =
+    List.exists (Engine.mem_regions engine) ~f:(fun (lower, _, _) ->
         Int64.equal lower gdt_base)
 
-  (* [get uc name] the base of the segment of the base register [name],
+  (* [get engine name] the base of the segment of the base register [name],
      in the little-endian bytes of 32 bits, which is 0, if the table is
      not mapped *)
-  let get uc name =
+  let get engine name =
     match entry name with
-    | Some (index, _) when mapped uc ->
+    | Some (index, _) when mapped engine ->
         let d =
-          Engine.mem_read uc Int64.(gdt_base + of_int Int.(index * 8)) 8
+          Engine.mem_read engine Int64.(gdt_base + of_int Int.(index * 8)) 8
         in
         String.of_char_list [ d.[2]; d.[3]; d.[4]; d.[7] ]
     | _ -> String.make 4 '\000'
 
-  (* [set uc name base] the segment of the base register [name], e.g.,
+  (* [set engine name base] the segment of the base register [name], e.g.,
      FS_BASE, has the [base], returns [false], if it is not a base *)
-  let set uc name base =
+  let set engine name base =
     match (entry name, Bap_engine_unicorn.reg X86 "GDTR") with
     | Some (index, selector), Some id -> (
         (* the lifted engine reads the base, as the semantics of BAP do *)
-        Engine.set_unmapped uc name (Word.of_int64 ~width:32 base);
-        if not (mapped uc) then begin
-          Engine.mem_map uc gdt_base gdt_size Engine.Perm.(read + write);
-          Engine.reg_write_bytes uc id gdtr;
-          Engine.mem_write uc
+        Engine.set_unmapped engine name (Word.of_int64 ~width:32 base);
+        if not (mapped engine) then begin
+          Engine.mem_map engine gdt_base gdt_size Engine.Perm.(read + write);
+          Engine.reg_write_bytes engine id gdtr;
+          Engine.mem_write engine
             Int64.(gdt_base + 24L)
             (descriptor ~access:0x92L 0L);
           Option.iter (Bap_engine_unicorn.reg X86 "SS") ~f:(fun ss ->
-              Engine.reg_write uc ss 0x18L)
+              Engine.reg_write engine ss 0x18L)
         end;
-        Engine.mem_write uc
+        Engine.mem_write engine
           Int64.(gdt_base + of_int Int.(index * 8))
           (descriptor base);
         match Bap_engine_unicorn.reg X86 selector with
         | Some sel ->
             (* the selector of the entry, with the privilege level 3 *)
-            Engine.reg_write uc sel (Int64.of_int ((index lsl 3) lor 3));
+            Engine.reg_write engine sel (Int64.of_int ((index lsl 3) lor 3));
             true
         | None -> false)
     | _ -> false

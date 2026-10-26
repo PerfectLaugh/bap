@@ -354,13 +354,13 @@ let error code fmt =
   Printf.ksprintf (fun msg -> raise (Engine.Error (code, msg))) fmt
 
 (* the codes of the errors of Unicorn *)
-let uc_err_read_unmapped = 6
-let uc_err_write_unmapped = 7
-let uc_err_fetch_unmapped = 8
-let uc_err_insn_invalid = 10
-let uc_err_write_prot = 12
-let uc_err_read_prot = 13
-let uc_err_fetch_prot = 14
+let engine_err_read_unmapped = 6
+let engine_err_write_unmapped = 7
+let engine_err_fetch_unmapped = 8
+let engine_err_insn_invalid = 10
+let engine_err_write_prot = 12
+let engine_err_read_prot = 13
+let engine_err_fetch_prot = 14
 
 let create config arch _mode =
   let t =
@@ -755,7 +755,7 @@ let mem_read t addr n =
       match Hashtbl.find t.pages (page_of addr) with
       | Some p -> Bigstring.get p.data (offset addr)
       | None ->
-          error uc_err_read_unmapped
+          error engine_err_read_unmapped
             "Invalid memory read (UC_ERR_READ_UNMAPPED)")
 
 let write_mem t addr data =
@@ -767,7 +767,7 @@ let write_mem t addr data =
           code_written t p ~range:(addr, 1L);
           Bigstring.set p.data (offset addr) c
       | None ->
-          error uc_err_write_unmapped
+          error engine_err_write_unmapped
             "Invalid memory write (UC_ERR_WRITE_UNMAPPED)")
 
 let mem_regions t =
@@ -2216,17 +2216,19 @@ let interrupt t n =
 let fault_error (access : Engine.access) =
   match access with
   | Read_unmapped ->
-      (uc_err_read_unmapped, "Invalid memory read (UC_ERR_READ_UNMAPPED)")
+      (engine_err_read_unmapped, "Invalid memory read (UC_ERR_READ_UNMAPPED)")
   | Write_unmapped ->
-      (uc_err_write_unmapped, "Invalid memory write (UC_ERR_WRITE_UNMAPPED)")
+      (engine_err_write_unmapped, "Invalid memory write (UC_ERR_WRITE_UNMAPPED)")
   | Fetch_unmapped ->
-      (uc_err_fetch_unmapped, "Invalid memory fetch (UC_ERR_FETCH_UNMAPPED)")
+      (engine_err_fetch_unmapped, "Invalid memory fetch (UC_ERR_FETCH_UNMAPPED)")
   | Write_prot ->
-      (uc_err_write_prot, "Write to write-protected memory (UC_ERR_WRITE_PROT)")
+      ( engine_err_write_prot,
+        "Write to write-protected memory (UC_ERR_WRITE_PROT)" )
   | Read_prot ->
-      (uc_err_read_prot, "Read from non-readable memory (UC_ERR_READ_PROT)")
+      (engine_err_read_prot, "Read from non-readable memory (UC_ERR_READ_PROT)")
   | Fetch_prot ->
-      (uc_err_fetch_prot, "Fetch from non-executable memory (UC_ERR_FETCH_PROT)")
+      ( engine_err_fetch_prot,
+        "Fetch from non-executable memory (UC_ERR_FETCH_PROT)" )
   | Read | Write | Fetch | Read_after -> (11, "Invalid memory access")
 
 (* The blocks, that the JIT compiles, see Bap_lifted_jit, which start at
@@ -2758,7 +2760,7 @@ let start ?until ?timeout ?count ?(thread = 0) t pc =
           | None ->
               if invalid_insn t then loop pc n
               else
-                error uc_err_insn_invalid
+                error engine_err_insn_invalid
                   "Invalid instruction (UC_ERR_INSN_INVALID)"
           | Some insn when skipped t insn ->
               (* the instruction of an IT block of Thumb, whose condition

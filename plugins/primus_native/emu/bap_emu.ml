@@ -267,7 +267,7 @@ let pause t =
   let e = engine t in
   t.session.pause <- true;
   e.reason <- Some X.Pause;
-  Engine.stop e.uc
+  Engine.stop e.engine
 
 let stop t =
   t.stopped <- true;
@@ -460,11 +460,11 @@ let pc t =
       (* in a hook, the instruction, that runs, with the lower bit set
          in the Thumb state of ARM, as Unicorn has it *)
       let e = engine t in
-      let pc = Engine.current e.uc ~pc:e.pc in
+      let pc = Engine.current e.engine ~pc:e.pc in
       if
         Poly.equal e.arch Engine.Arm
         && Int64.(
-             Engine.reg_read e.uc
+             Engine.reg_read e.engine
                (Option.value_exn (Bap_engine_unicorn.reg Engine.Arm "CPSR"))
              land 0x20L
              <> 0L)
@@ -619,7 +619,7 @@ let components t =
           List.length (l.ran ()) + Hashtbl.length t.session.ran_before ))
   in
   let engine_entries, engine_blocks, jit_blocks =
-    Engine.inventory (engine t).uc
+    Engine.inventory (engine t).engine
   in
   let traces =
     List.filter_map t.traces ~f:(fun ((trace_slot, blocks_slot) as slots) ->
@@ -995,7 +995,7 @@ let sites_hook t sites f =
   if not (List.is_empty sites) then
     hook t (fun e ->
         let fresh = instructions t in
-        Engine.on_sites e.uc sites (fun addr _ -> if fresh addr then f addr))
+        Engine.on_sites e.engine sites (fun addr _ -> if fresh addr then f addr))
 
 let run ?until t =
   if paused t then begin
@@ -1010,7 +1010,7 @@ let run ?until t =
           let skip = ref (Int64.equal addr code) in
           let fresh = instructions t in
           ( e,
-            Engine.on_code e.uc ~first:addr ~last:addr (fun addr _ ->
+            Engine.on_code e.engine ~first:addr ~last:addr (fun addr _ ->
                 if fresh addr then if !skip then skip := false else stop t) ))
     in
     resume t (X.Continue (pc t));
@@ -1027,7 +1027,7 @@ let step t =
     let first = ref true in
     let fresh = instructions t in
     let hook =
-      Engine.on_code e.uc (fun addr _ ->
+      Engine.on_code e.engine (fun addr _ ->
           if fresh addr then if !first then first := false else stop t)
     in
     resume t (X.Continue (pc t));
@@ -1217,20 +1217,20 @@ let changes t ({ id; _ } as snapshot) =
   |> List.rev
 
 let read t addr n =
-  match accessible t addr n (fun () -> X.uc_read (engine t) addr n) with
+  match accessible t addr n (fun () -> X.engine_read (engine t) addr n) with
   | data -> data
   | exception (Invalid_argument _ as exn)
     when match t.state with Suspended _ | Ended _ -> true | _ -> false -> (
       match primus_bytes t addr n with Some data -> data | None -> raise exn)
 
 (* the bytes go only to Unicorn, which translates the code anew, see
-   [X.uc_write] *)
+   [X.engine_write] *)
 let write_direct t addr data =
   let n = String.length data in
   accessible t addr n (fun () ->
       let e = engine t in
-      if X.uc_readable e addr n < n then raise Native.Denied;
-      X.uc_write e addr data)
+      if X.engine_readable e addr n < n then raise Native.Denied;
+      X.engine_write e addr data)
 
 (* the bytes go to Primus, from which they go to Unicorn, see
    [X.backing], and the code, that it translated, is translated anew *)
@@ -1527,7 +1527,9 @@ let executed_at ?thumb t pc =
   (* the engine, that runs, has the instruction, unless it dropped
      them, e.g., when the script wrote the code, after which the lifter
      has the last one, that was lifted, until the engine lifts it anew *)
-  match Option.bind t.session.active ~f:(fun e -> Engine.insn_at e.uc pc) with
+  match
+    Option.bind t.session.active ~f:(fun e -> Engine.insn_at e.engine pc)
+  with
   | Some (bytes, name, thumb', bir) when Bool.equal thumb thumb' ->
       Some { bytes; name; thumb; bir }
   | _ -> (
@@ -1557,8 +1559,8 @@ let insns t =
       List.iter (l.ran ()) ~f:(fun (pc, thumb, _) ->
           Hash_set.add ran (addr (pc, thumb))));
   Option.iter t.session.active ~f:(fun e ->
-      List.iter (Engine.insn_addrs e.uc) ~f:(fun pc ->
-          match Engine.insn_at e.uc pc with
+      List.iter (Engine.insn_addrs e.engine) ~f:(fun pc ->
+          match Engine.insn_at e.engine pc with
           | Some (_, _, thumb, _) -> Hash_set.add ran (addr (pc, thumb))
           | None -> ()));
   Hash_set.to_list ran |> List.sort ~compare:Int64.compare
@@ -1643,7 +1645,8 @@ module Trace = struct
     emu.traces <- (owned_trace, owned_blocks) :: emu.traces;
     installed emu (fun e ->
         if t.active then
-          t.hooks <- Some (Engine.trace ?first ?last ?watch ~memory e.uc trace));
+          t.hooks <-
+            Some (Engine.trace ?first ?last ?watch ~memory e.engine trace));
     t
 
   (* the hooks of a closed engine are gone with it *)
@@ -2629,7 +2632,7 @@ let on_code ?first ?last ?(deferred = false) t f =
   hook t (fun e ->
       let fresh = instructions t in
       [
-        Engine.on_code ?first ?last e.uc (fun addr _ ->
+        Engine.on_code ?first ?last e.engine (fun addr _ ->
             if fresh addr then observe ~deferred t (fun t -> f t addr));
       ])
 
@@ -2639,7 +2642,7 @@ let on_sites ?(deferred = false) t sites f =
 let on_read ?first ?last ?(deferred = false) t f =
   hook t (fun e ->
       [
-        Engine.on_mem ?first ?last e.uc [ `read ] (fun _ addr size _ ->
+        Engine.on_mem ?first ?last e.engine [ `read ] (fun _ addr size _ ->
             observe ~deferred t (fun t -> f t addr size));
       ])
 
@@ -2700,7 +2703,9 @@ let deliver_write t handler addr size value =
   let pc = code_of t (pc t) in
   let start = t.session.starts in
   let attempt =
-    match t.session.active with Some e -> Engine.attempt e.uc | None -> None
+    match t.session.active with
+    | Some e -> Engine.attempt e.engine
+    | None -> None
   in
   let fresh =
     match handler.active_attempt with
@@ -2758,7 +2763,8 @@ let on_writes t subscriptions =
   List.iter groups ~f:(fun ((first, last), handlers) ->
       hook t (fun e ->
           [
-            Engine.on_mem ?first ?last e.uc [ `write ] (fun _ addr size value ->
+            Engine.on_mem ?first ?last e.engine [ `write ]
+              (fun _ addr size value ->
                 t.write_dispatches <- t.write_dispatches + 1;
                 List.iter (List.rev handlers) ~f:(fun handler ->
                     deliver_write t handler addr size value));
@@ -2810,7 +2816,7 @@ let on_import t ~site ~name f =
             let e = engine t in
             let ret = X.import_return e name x in
             e.reason <- Some (X.Jump ret);
-            Engine.stop e.uc)
+            Engine.stop e.engine)
       ~finally:(fun () -> t.call <- None)
   in
   sites_hook t [ site ] (fun _ -> hook ());
@@ -2836,7 +2842,7 @@ let hook_calls t addr =
            stops it *)
         let fresh = instructions t in
         ignore
-          (Engine.on_code e.uc ~first:addr ~last:addr (fun addr _ ->
+          (Engine.on_code e.engine ~first:addr ~last:addr (fun addr _ ->
                let s = t.session in
                if fresh addr && not (Hash_set.mem e.foreign addr) then
                  match
@@ -2844,7 +2850,7 @@ let hook_calls t addr =
                  with
                  | Some ret ->
                      e.reason <- Some (X.Jump ret);
-                     Engine.stop e.uc
+                     Engine.stop e.engine
                  | None -> ())))
   end
 
@@ -2902,7 +2908,7 @@ let register_stub t ~name ~address =
   hook t (fun e ->
       let fresh = instructions t in
       [
-        Engine.on_code e.uc ~first:address ~last:address (fun _ _ ->
+        Engine.on_code e.engine ~first:address ~last:address (fun _ _ ->
             if fresh address && not (Hashtbl.mem t.services name) then
               warning
                 "Bap_emu: synthetic stub %s at %Lx has no registered service"
@@ -3279,7 +3285,7 @@ let arg t n =
       match List.nth inputs n with
       | Some exp ->
           accessible t 0L 0 (fun () ->
-              Bitvec.to_int64 (Word.to_bitvec (X.eval_uc (engine t) exp)))
+              Bitvec.to_int64 (Word.to_bitvec (X.eval_engine (engine t) exp)))
       | None -> invalid_argf "Bap_emu.arg: %s has no argument %d" name n ())
   | None -> invalid_argf "Bap_emu.arg: the prototype of %s is unknown" name ()
 
@@ -3402,7 +3408,7 @@ let execution_stats t =
                           max_usage = Int64.(s.upper - s.lowest_sp);
                         })
               end);
-  let _, lifted_blocks, _ = Engine.inventory (engine t).uc in
+  let _, lifted_blocks, _ = Engine.inventory (engine t).engine in
   {
     instructions = t.instructions;
     lifted_blocks;
@@ -3430,7 +3436,7 @@ let start_stats t ~interval callback =
   let install (e : X.engine) =
     let fresh = instructions t in
     let hook =
-      Engine.on_code e.uc (fun addr _ ->
+      Engine.on_code e.engine (fun addr _ ->
           if subscription.active && fresh addr then begin
             t.instructions <- Int64.succ t.instructions;
             let now = X.clock () in
@@ -3470,7 +3476,7 @@ let start_maintenance t ~interval ?lift_cache_limit
       set_lift_cache_limit t (Some limit));
   start_stats t ~interval (fun _ ->
       if forget then forget_lifts t;
-      if reclaim_blocks then Engine.flush_tb (engine t).uc;
+      if reclaim_blocks then Engine.flush_tb (engine t).engine;
       if compact_heap then Gc.compact ())
 
 (* the registers of the thread, without the aliases: of the engine, for
@@ -4022,7 +4028,7 @@ let add_break t addr =
     let install (e : X.engine) =
       let fresh = instructions t in
       ignore
-        (Engine.on_code ~first:addr ~last:addr e.uc (fun a _ ->
+        (Engine.on_code ~first:addr ~last:addr e.engine (fun a _ ->
              if !active && fresh a then stop t)
           : Engine.hook)
     in

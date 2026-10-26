@@ -111,54 +111,54 @@ let compare_layouts label arch bits mode =
             initial_lifted
             (Engine.reg_read_bytes lifted id)))
 
-let exercise name uc =
+let exercise name engine =
   Exn.protect
-    ~finally:(fun () -> Engine.close uc)
+    ~finally:(fun () -> Engine.close engine)
     ~f:(fun () ->
-      Engine.mem_map uc code 0x1000L Engine.Perm.all;
-      Engine.mem_write uc code "\x41\x4a";
-      Engine.reg_write uc (reg "ECX") 0x1234L;
-      Engine.reg_write uc (reg "EDX") 0x7890L;
+      Engine.mem_map engine code 0x1000L Engine.Perm.all;
+      Engine.mem_write engine code "\x41\x4a";
+      Engine.reg_write engine (reg "ECX") 0x1234L;
+      Engine.reg_write engine (reg "EDX") 0x7890L;
       let calls = ref 0 in
-      let hook = Engine.on_code uc (fun _ _ -> incr calls) in
-      Engine.start uc code ~until:finish;
-      check (name ^ " ecx") 0x1235L (Engine.reg_read uc (reg "ECX"));
-      check (name ^ " edx") 0x788fL (Engine.reg_read uc (reg "EDX"));
+      let hook = Engine.on_code engine (fun _ _ -> incr calls) in
+      Engine.start engine code ~until:finish;
+      check (name ^ " ecx") 0x1235L (Engine.reg_read engine (reg "ECX"));
+      check (name ^ " edx") 0x788fL (Engine.reg_read engine (reg "EDX"));
       if !calls <> 2 then failwithf "%s: wrong hook count %d" name !calls ();
-      let saved = Engine.save uc in
-      Engine.reg_write uc (reg "ECX") 0L;
+      let saved = Engine.save engine in
+      Engine.reg_write engine (reg "ECX") 0L;
       Engine.restore saved;
-      check (name ^ " restored") 0x1235L (Engine.reg_read uc (reg "ECX"));
+      check (name ^ " restored") 0x1235L (Engine.reg_read engine (reg "ECX"));
       Engine.delete hook;
-      Engine.flush_tb uc;
-      Engine.start uc code ~until:finish;
+      Engine.flush_tb engine;
+      Engine.start engine code ~until:finish;
       if !calls <> 2 then failwithf "%s: deleted hook ran" name ())
 
 let direct_unicorn () =
   let module D = Bap_engine_unicorn.Direct in
-  let uc = D.create Engine.X86 Engine.Mode.mode32 in
+  let engine = D.create Engine.X86 Engine.Mode.mode32 in
   Exn.protect
-    ~finally:(fun () -> D.close uc)
+    ~finally:(fun () -> D.close engine)
     ~f:(fun () ->
-      D.reg_write uc (reg "ECX") 42L;
-      let saved = D.save uc in
-      D.reg_write uc (reg "ECX") 0L;
+      D.reg_write engine (reg "ECX") 42L;
+      let saved = D.save engine in
+      D.reg_write engine (reg "ECX") 0L;
       D.restore saved;
-      check "direct unicorn" 42L (D.reg_read uc (reg "ECX"));
-      D.delete (D.on_unsupported uc ignore))
+      check "direct unicorn" 42L (D.reg_read engine (reg "ECX"));
+      D.delete (D.on_unsupported engine ignore))
 
 let direct_lifted () =
   let module D = Bap_engine_lifted.Direct in
-  let uc = D.create config Engine.X86 Engine.Mode.mode32 in
+  let engine = D.create config Engine.X86 Engine.Mode.mode32 in
   Exn.protect
-    ~finally:(fun () -> D.close uc)
+    ~finally:(fun () -> D.close engine)
     ~f:(fun () ->
-      D.reg_write uc (reg "EDX") 42L;
-      let saved = D.save uc in
-      D.reg_write uc (reg "EDX") 0L;
+      D.reg_write engine (reg "EDX") 42L;
+      let saved = D.save engine in
+      D.reg_write engine (reg "EDX") 0L;
       D.restore saved;
-      check "direct lifted" 42L (D.reg_read uc (reg "EDX"));
-      D.delete (D.on_unsupported uc ignore))
+      check "direct lifted" 42L (D.reg_read engine (reg "EDX"));
+      D.delete (D.on_unsupported engine ignore))
 
 let () =
   exercise "unicorn" (Bap_engine_unicorn.create Engine.X86 Engine.Mode.mode32);
@@ -166,11 +166,11 @@ let () =
     (Bap_engine_lifted.create config Engine.X86 Engine.Mode.mode32);
   direct_unicorn ();
   direct_lifted ();
-  let uc = Bap_engine_unicorn.create Engine.X86 Engine.Mode.mode32 in
+  let engine = Bap_engine_unicorn.create Engine.X86 Engine.Mode.mode32 in
   Exn.protect
-    ~finally:(fun () -> Engine.close uc)
+    ~finally:(fun () -> Engine.close engine)
     ~f:(fun () ->
-      match Engine.taint_start uc with
+      match Engine.taint_start engine with
       | exception Invalid_argument _ -> ()
       | () -> failwith "Unicorn unexpectedly propagated taint");
   List.iter
