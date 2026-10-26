@@ -78,10 +78,16 @@ let maintenance file =
       ignore (Emu.run emu ~until:main : Emu.status);
       Emu.stop_stats subscription;
       let inventory = Emu.components emu in
-      printf "%s maintenance: bounded %b, sparse %b, at main %b\n"
+      let knowledge =
+        match engine with
+        | `Unicorn -> inventory.knowledge_objects = 0
+        | `Lifted -> inventory.knowledge_objects > 0
+      in
+      printf "%s maintenance: bounded %b, sparse %b, knowledge %b, at main %b\n"
         (match engine with `Unicorn -> "unicorn" | `Lifted -> "lifted")
         (inventory.lifter_entries <= 2)
         (inventory.sparse_pages > 0)
+        knowledge
         Int64.(Emu.pc emu = main))
 
 let deadline file =

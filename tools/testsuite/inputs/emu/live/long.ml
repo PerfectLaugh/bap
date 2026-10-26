@@ -12,11 +12,12 @@ module Emu = Bap_emu
 let show_inventory emu =
   let c = Emu.components emu in
   printf
-    "inventory: lifter %b, engine %b, blocks %b, stored %b, models %b, \
-     snapshots %d, pages %b\n"
+    "inventory: lifter %b, engine %b, blocks %b, knowledge %b, stored %b, \
+     models %b, snapshots %d, pages %b\n"
     (c.lifter_entries > 0) (c.engine_entries > 0)
     (c.lifter_blocks > 0 && c.engine_blocks > 0)
-    (c.stored_bytes > 0) (c.script_models > 0) c.snapshots (c.parked_pages > 0);
+    (c.knowledge_objects > 0) (c.stored_bytes > 0) (c.script_models > 0)
+    c.snapshots (c.parked_pages > 0);
   c
 
 let () =
@@ -81,9 +82,10 @@ let () =
   Emu.set_snapshot_limit emu None;
   Emu.forget_lifts emu;
   let cleared = Emu.components emu in
-  printf "forgotten: lifter %b, hooks %b\n"
+  printf "forgotten: lifter %b, hooks %b, knowledge retained %b\n"
     (cleared.lifter_entries = 0)
-    (cleared.hook_entries = 0);
+    (cleared.hook_entries = 0)
+    (cleared.knowledge_objects > 0);
   (* the instruction is lifted again, in the hooks too *)
   printf "lifts main again %b\n" (Option.is_some (Emu.bir emu main));
   printf "hook lifts retained %b\n" ((Emu.components emu).hook_entries > 0);

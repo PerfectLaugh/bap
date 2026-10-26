@@ -591,6 +591,7 @@ let cancel_deadline = Bap_emu_process.cancel_deadline
 type component_footprint = {
   lifter_entries : int;
   lifter_blocks : int;
+  knowledge_objects : int;
   lift_history : int;
   engine_entries : int;
   engine_blocks : int;
@@ -611,11 +612,12 @@ type component_footprint = {
 let components t =
   if not (paused t) then not_paused ~fn:"components" t;
   resume t X.Stored_count;
-  let lifter_entries, lifter_blocks, lift_history =
-    Option.value_map t.session.lifter ~default:(0, 0, 0) ~f:(fun l ->
-        let entries, blocks = l.inventory () in
+  let lifter_entries, lifter_blocks, knowledge_objects, lift_history =
+    Option.value_map t.session.lifter ~default:(0, 0, 0, 0) ~f:(fun l ->
+        let entries, blocks, knowledge_objects = l.inventory () in
         ( entries,
           blocks,
+          knowledge_objects,
           List.length (l.ran ()) + Hashtbl.length t.session.ran_before ))
   in
   let engine_entries, engine_blocks, jit_blocks =
@@ -647,6 +649,7 @@ let components t =
   {
     lifter_entries;
     lifter_blocks;
+    knowledge_objects;
     lift_history;
     engine_entries;
     engine_blocks;

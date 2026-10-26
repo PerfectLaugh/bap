@@ -1370,10 +1370,11 @@ let emu data =
         sequence env out
           [
             ( "unicorn periodic maintenance",
-              "unicorn maintenance: bounded true, sparse true, at main true\n"
-            );
+              "unicorn maintenance: bounded true, sparse true, knowledge true, \
+               at main true\n" );
             ( "lifted periodic maintenance",
-              "lifted maintenance: bounded true, sparse true, at main true\n" );
+              "lifted maintenance: bounded true, sparse true, knowledge true, \
+               at main true\n" );
           ];
         let out = run "deadline" "x86_64-linux-gnu-signal-loop" in
         check env "native deadline terminates BAP" (out.status = Exited 124);

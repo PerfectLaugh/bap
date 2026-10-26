@@ -338,9 +338,10 @@ and lifter = {
   ran : unit -> (int64 * bool * string) list;
       (** the addresses, modes, and bytes of the instructions that ran,
           including the evicted ones *)
-  inventory : unit -> int * int;
-      (** the retained entries and their BIR blocks, including the cache
-          entries, that this run didn't hit *)
+  inventory : unit -> int * int * int;
+      (** the retained entries, their BIR blocks, and the live program objects
+          in the retained knowledge, including the cache entries, that this run
+          didn't hit *)
   set_limit : int option -> unit;
       (** bounds the retained entries, or makes them unbounded with [None] *)
 }
@@ -1724,9 +1725,26 @@ let lifter ?cache ~arm project =
     |> List.map ~f:(fun ((addr, thumb), code) -> (addr, thumb, code))
   in
   let inventory () =
-    Hashtbl.fold entries ~init:(0, 0)
-      ~f:(fun ~key:_ ~data:((e : Lifts.entry), _) (entries, blocks) ->
-        (entries + 1, blocks + List.length e.blks))
+    let entries, blocks =
+      Hashtbl.fold entries ~init:(0, 0)
+        ~f:(fun ~key:_ ~data:((e : Lifts.entry), _) (entries, blocks) ->
+          (entries + 1, blocks + List.length e.blks))
+    in
+    let knowledge_objects =
+      Option.value_map !state ~default:0 ~f:(fun state ->
+          let toplevel = Toplevel.current () in
+          Exn.protect
+            ~finally:(fun () -> Toplevel.set toplevel)
+            ~f:(fun () ->
+              Toplevel.set state;
+              let count = ref 0 in
+              Toplevel.exec
+                KB.Syntax.(
+                  KB.objects Theory.Program.cls >>| fun objects ->
+                  count := Seq.length objects);
+              !count))
+    in
+    (entries, blocks, knowledge_objects)
   in
   {
     lift;

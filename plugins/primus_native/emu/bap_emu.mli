@@ -1357,6 +1357,9 @@ val cancel_deadline : deadline -> unit
 type component_footprint = {
   lifter_entries : int;  (** retained session-lifter instructions *)
   lifter_blocks : int;  (** BIR blocks retained by the session lifter *)
+  knowledge_objects : int;
+      (** live [Theory.Program.cls] objects in the session lifter's retained
+          [Knowledge.state], or zero if no state is retained *)
   lift_history : int;  (** raw-byte history entries, including restored ones *)
   engine_entries : int;  (** instructions retained by the lifted engine *)
   engine_blocks : int;  (** BIR blocks retained by the lifted engine *)
@@ -1377,10 +1380,12 @@ type component_footprint = {
 
 val components : t -> component_footprint
 (** [components emu] is a logical retention inventory of the paused emulator.
-    Counts are not estimated heap sizes and are not additive: hook lifts may be
-    shared between emulators, persistent byte maps and snapshot sparse pages may
-    share structure and contents, and raw-byte history may overlap after
-    restore. Snapshot counts aggregate the live snapshots' logical states;
+    [knowledge_objects] is computed on demand and is independent of the lift
+    entries: {!forget_lifts} doesn't discard the lifter's retained semantics
+    state. Counts are not estimated heap sizes and are not additive: hook lifts
+    may be shared between emulators, persistent byte maps and snapshot sparse
+    pages may share structure and contents, and raw-byte history may overlap
+    after restore. Snapshot counts aggregate the live snapshots' logical states;
     [parked_pages] separately counts their native backing pages. Trace counts
     include live rings owned by the emulator, whether recording or stopped, and
     [decoded_blocks] counts their cached block expansions. Unicorn does not
