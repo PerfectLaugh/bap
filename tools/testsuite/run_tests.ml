@@ -987,7 +987,9 @@ let emu data =
             ("runs the baseline", "baseline: exited 0\n");
             ("populates a large cache", "populated: [0-9]+ entries\n");
             ("bounds the cache", "bulk trim: 8 entries\n");
+            ("saves once for the bulk trim", "bulk telemetry: true\n");
             ("accepts a zero limit", "zero trim: 0 entries\n");
+            ("counts cache maintenance", "cache telemetry: true\n");
             ( "preserves every entry and its BIR",
               "restored cache: [0-9]+ entries, limits true, BIR true\n" );
             ("reuses the saved lifts", "reused execution: exited 0\n");
@@ -1407,10 +1409,10 @@ let emu data =
           [
             ( "unicorn periodic maintenance",
               "unicorn maintenance: bounded true, sparse true, knowledge true, \
-               at main true\n" );
+               at main true, telemetry true\n" );
             ( "lifted periodic maintenance",
               "lifted maintenance: bounded true, sparse true, knowledge true, \
-               at main true\n" );
+               at main true, telemetry true\n" );
           ];
         let out = run "deadline" "x86_64-linux-gnu-signal-loop" in
         check env "native deadline terminates BAP" (out.status = Exited 124);

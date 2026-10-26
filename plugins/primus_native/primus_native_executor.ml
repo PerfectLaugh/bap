@@ -43,6 +43,18 @@ module Checkpoint = Primus_native_checkpoint
 let clock () = Mtime.Span.to_float_ns (Mtime_clock.elapsed ()) *. 1e-9
 let scheduler_slice = 0.005
 
+type operation = { mutable count : int; mutable seconds : float }
+
+let operation () = { count = 0; seconds = 0. }
+
+let measure operation f =
+  let started = clock () in
+  Exn.protect
+    ~finally:(fun () ->
+      operation.count <- operation.count + 1;
+      operation.seconds <- operation.seconds +. (clock () -. started))
+    ~f
+
 module Native = Primus_native_libc
 include Bap_main.Loggers ()
 
@@ -213,16 +225,19 @@ module Lifts = struct
           (Stdlib.Filename.basename file)
           ".tmp"
       in
+      let data =
+        Binable.to_string
+          (module struct
+            type nonrec t = t [@@deriving bin_io]
+          end)
+          entries
+      in
       Out_channel.with_file ~binary:true tmp ~f:(fun out ->
           Out_channel.output_string out magic;
-          Out_channel.output_string out
-            (Binable.to_string
-               (module struct
-                 type nonrec t = t [@@deriving bin_io]
-               end)
-               entries));
-      Stdlib.Sys.rename tmp file
-    with _ -> ()
+          Out_channel.output_string out data);
+      Stdlib.Sys.rename tmp file;
+      String.length magic + String.length data
+    with _ -> 0
 end
 
 type engine = {
@@ -342,8 +357,20 @@ and lifter = {
       (** the retained entries, their BIR blocks, and the live program objects
           in the retained knowledge, including the cache entries, that this run
           didn't hit *)
+  maintenance : unit -> lifter_maintenance;
+      (** the cumulative cache maintenance counters *)
   set_limit : int option -> unit;
       (** bounds the retained entries, or makes them unbounded with [None] *)
+}
+
+and lifter_maintenance = {
+  lru_reconstruction : operation;
+  entry_eviction : operation;
+  cache_load : operation;
+  cache_merge : operation;
+  cache_write : operation;
+  mutable cache_entries_written : int;
+  mutable cache_bytes_written : int;
 }
 
 and script_model = {
@@ -1445,14 +1472,24 @@ end
 let lifter ?cache ~arm project =
   let state = ref None in
   let evaluations = ref 0 in
-  let cache_saves = ref 0 in
+  let maintenance =
+    {
+      lru_reconstruction = operation ();
+      entry_eviction = operation ();
+      cache_load = operation ();
+      cache_merge = operation ();
+      cache_write = operation ();
+      cache_entries_written = 0;
+      cache_bytes_written = 0;
+    }
+  in
   if Option.is_some (Sys.getenv "BAP_LIFTED_STATS") then
     at_exit (fun () ->
         Printf.eprintf
           "lifted lifter: %d toplevel evaluations\n\
            lifted lifter: %d full cache saves\n\
            %!"
-          !evaluations !cache_saves);
+          !evaluations maintenance.cache_write.count);
   let names = Tid.Table.create () in
   let entries = Hashtbl.Poly.create () in
   let history = Hashtbl.Poly.create () in
@@ -1487,16 +1524,17 @@ let lifter ?cache ~arm project =
           match Set.min_elt !recent with
           | None -> ()
           | Some (_, key) ->
-              Option.iter (Hashtbl.find entries key)
-                ~f:(fun ((e : Lifts.entry), renamed) ->
-                  if !renamed then remember e;
-                  Option.iter cache ~f:(fun _ ->
-                      Hashtbl.set archived ~key:(e.addr, e.thumb) ~data:e));
-              Hashtbl.remove entries key;
-              recent := Set.remove !recent (Hashtbl.find_exn used key, key);
-              Hashtbl.remove used key;
-              dirty := true;
-              forgotten := true;
+              measure maintenance.entry_eviction (fun () ->
+                  Option.iter (Hashtbl.find entries key)
+                    ~f:(fun ((e : Lifts.entry), renamed) ->
+                      if !renamed then remember e;
+                      Option.iter cache ~f:(fun _ ->
+                          Hashtbl.set archived ~key:(e.addr, e.thumb) ~data:e));
+                  Hashtbl.remove entries key;
+                  recent := Set.remove !recent (Hashtbl.find_exn used key, key);
+                  Hashtbl.remove used key;
+                  dirty := true;
+                  forgotten := true);
               if (not bulk) && Hashtbl.length archived >= 64 then !flush ();
               trim ~bulk ())
   in
@@ -1507,7 +1545,9 @@ let lifter ?cache ~arm project =
     limit := value;
     Hashtbl.clear used;
     recent := Set.Poly.empty;
-    Option.iter value ~f:(fun _ -> Hashtbl.iter_keys entries ~f:touch);
+    Option.iter value ~f:(fun _ ->
+        measure maintenance.lru_reconstruction (fun () ->
+            Hashtbl.iter_keys entries ~f:touch));
     trim ~bulk:true ();
     if !dirty then !flush ()
   in
@@ -1518,19 +1558,29 @@ let lifter ?cache ~arm project =
           let kept = Hashtbl.data entries |> List.map ~f:fst in
           let all =
             if not !forgotten then kept
-            else begin
-              let merged = Hashtbl.Poly.create () in
-              List.iter (Lifts.load file) ~f:(fun (e : Lifts.entry) ->
-                  Hashtbl.set merged ~key:(e.addr, e.thumb) ~data:e);
-              List.iter (Hashtbl.data archived) ~f:(fun (e : Lifts.entry) ->
-                  Hashtbl.set merged ~key:(e.addr, e.thumb) ~data:e);
-              List.iter kept ~f:(fun (e : Lifts.entry) ->
-                  Hashtbl.set merged ~key:(e.addr, e.thumb) ~data:e);
-              Hashtbl.data merged
-            end
+            else
+              let loaded =
+                measure maintenance.cache_load (fun () -> Lifts.load file)
+              in
+              measure maintenance.cache_merge (fun () ->
+                  let merged = Hashtbl.Poly.create () in
+                  List.iter loaded ~f:(fun (e : Lifts.entry) ->
+                      Hashtbl.set merged ~key:(e.addr, e.thumb) ~data:e);
+                  List.iter (Hashtbl.data archived) ~f:(fun (e : Lifts.entry) ->
+                      Hashtbl.set merged ~key:(e.addr, e.thumb) ~data:e);
+                  List.iter kept ~f:(fun (e : Lifts.entry) ->
+                      Hashtbl.set merged ~key:(e.addr, e.thumb) ~data:e);
+                  Hashtbl.data merged)
           in
-          incr cache_saves;
-          Lifts.save file all;
+          let bytes =
+            measure maintenance.cache_write (fun () -> Lifts.save file all)
+          in
+          if bytes > 0 then begin
+            maintenance.cache_entries_written <-
+              maintenance.cache_entries_written + List.length all;
+            maintenance.cache_bytes_written <-
+              maintenance.cache_bytes_written + bytes
+          end;
           Hashtbl.clear archived
         end)
   in
@@ -1543,7 +1593,8 @@ let lifter ?cache ~arm project =
     forgotten := true
   in
   Option.iter cache ~f:(fun file ->
-      List.iter (Lifts.load file) ~f:(fun (e : Lifts.entry) ->
+      let loaded = measure maintenance.cache_load (fun () -> Lifts.load file) in
+      List.iter loaded ~f:(fun (e : Lifts.entry) ->
           Hashtbl.set entries ~key:(e.addr, e.thumb) ~data:(e, ref false);
           touch (e.addr, e.thumb));
       at_exit save;
@@ -1813,6 +1864,7 @@ let lifter ?cache ~arm project =
     lifted;
     ran;
     inventory;
+    maintenance = (fun () -> maintenance);
     set_limit;
   }
 

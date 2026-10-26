@@ -78,17 +78,38 @@ let maintenance file =
       ignore (Emu.run emu ~until:main : Emu.status);
       Emu.stop_stats subscription;
       let inventory = Emu.components emu in
+      let telemetry = Emu.maintenance_stats emu in
       let knowledge =
         match engine with
         | `Unicorn -> inventory.knowledge_objects = 0
         | `Lifted -> inventory.knowledge_objects > 0
       in
-      printf "%s maintenance: bounded %b, sparse %b, knowledge %b, at main %b\n"
+      let measured =
+        telemetry.lift_cleanup.count > 0
+        && telemetry.lift_cleanup.count = telemetry.block_reclamation.count
+        && telemetry.lift_cleanup.count = telemetry.heap_compaction.count
+        && List.for_all
+             [
+               telemetry.lru_reconstruction;
+               telemetry.entry_eviction;
+               telemetry.cache_load;
+               telemetry.cache_merge;
+               telemetry.cache_write;
+               telemetry.lift_cleanup;
+               telemetry.block_reclamation;
+               telemetry.heap_compaction;
+             ] ~f:(fun operation ->
+               operation.count >= 0 && Float.(operation.seconds >= 0.))
+      in
+      printf
+        "%s maintenance: bounded %b, sparse %b, knowledge %b, at main %b, \
+         telemetry %b\n"
         (match engine with `Unicorn -> "unicorn" | `Lifted -> "lifted")
         (inventory.lifter_entries <= 2)
         (inventory.sparse_pages > 0)
         knowledge
-        Int64.(Emu.pc emu = main))
+        Int64.(Emu.pc emu = main)
+        measured)
 
 let deadline file =
   let emu = create ~engine:`Unicorn file in

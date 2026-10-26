@@ -1598,6 +1598,41 @@ val execution_stats : t -> execution_stats
     after its allocation has been cleaned up; it is [None] before the first
     call. Raises [Invalid_argument] if the program is not paused. *)
 
+type operation_stats = {
+  count : int;  (** operations performed, or entries for entry eviction *)
+  seconds : float;  (** cumulative monotonic duration of those operations *)
+}
+
+type maintenance_stats = {
+  lru_reconstruction : operation_stats;
+  entry_eviction : operation_stats;
+  cache_load : operation_stats;
+  cache_merge : operation_stats;
+  cache_write : operation_stats;
+  lift_cleanup : operation_stats;
+  block_reclamation : operation_stats;
+  heap_compaction : operation_stats;
+  cache_entries_written : int;
+      (** entries in all successfully written cache files, including entries
+          written again by a merge *)
+  cache_bytes_written : int;  (** bytes of those files, including their magic *)
+}
+
+val maintenance_stats : t -> maintenance_stats
+(** [maintenance_stats emu] returns the cumulative maintenance telemetry of the
+    paused emulator. It covers LRU reconstruction and entry eviction by
+    {!set_lift_cache_limit}, cache loading, merging and writing, explicit and
+    periodic {!forget_lifts} cleanup, and the block reclamation and heap
+    compaction requested through {!start_maintenance}. Cache counters are zero
+    without a persistent lift cache, and operations that do not run have zero
+    count and duration.
+
+    Counters start at zero when {!create} creates the emulator and are never
+    reset individually. Snapshot restore keeps them; checkpoints do not
+    serialize them, so an emulator created with [~restore] starts a fresh set.
+    Creating a new emulator is the only reset. Raises [Invalid_argument] if the
+    program is not paused. *)
+
 type stats_subscription
 
 val start_stats :

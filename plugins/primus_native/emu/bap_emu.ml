@@ -92,6 +92,9 @@ type t = {
   mutable write_callbacks : int;
   mutable write_seconds : float;
   mutable instructions : int64;
+  lift_cleanup : X.operation;
+  block_reclamation : X.operation;
+  heap_compaction : X.operation;
   mutable snapshots : snapshot list;  (** the managed snapshots, oldest first *)
   mutable snapshot_limit : int option;
   mutable traces :
@@ -114,6 +117,21 @@ type execution_stats = {
   rss : int option;
   last_pc : int64;
   stack : stack_stats option;
+}
+
+type operation_stats = { count : int; seconds : float }
+
+type maintenance_stats = {
+  lru_reconstruction : operation_stats;
+  entry_eviction : operation_stats;
+  cache_load : operation_stats;
+  cache_merge : operation_stats;
+  cache_write : operation_stats;
+  lift_cleanup : operation_stats;
+  block_reclamation : operation_stats;
+  heap_compaction : operation_stats;
+  cache_entries_written : int;
+  cache_bytes_written : int;
 }
 
 type stats_subscription = {
@@ -438,6 +456,9 @@ let create ?system ?(components = []) ?(init = []) ?(redirects = [])
       write_callbacks = 0;
       write_seconds = 0.;
       instructions = 0L;
+      lift_cleanup = X.operation ();
+      block_reclamation = X.operation ();
+      heap_compaction = X.operation ();
       snapshots = [];
       snapshot_limit = None;
       traces = [];
@@ -542,11 +563,12 @@ let save_lifts t = Option.iter t.session.lifter ~f:(fun l -> l.save ())
 (* the lifted instructions, that the lifter keeps for the engines and
    the cache, and that the hooks lifted, are dropped, after they are
    saved, so that a long run gives their memory back *)
-let forget_lifts t =
-  Option.iter t.session.lifter ~f:(fun l -> l.forget ());
-  Hashtbl.clear t.lifted;
-  Hashtbl.clear t.paused_lifts;
-  Hashtbl.clear t.thumb_insns
+let forget_lifts (t : t) =
+  X.measure t.lift_cleanup (fun () ->
+      Option.iter t.session.lifter ~f:(fun l -> l.forget ());
+      Hashtbl.clear t.lifted;
+      Hashtbl.clear t.paused_lifts;
+      Hashtbl.clear t.thumb_insns)
 
 let set_lift_cache_limit t limit =
   Option.iter limit ~f:(fun capacity ->
@@ -3382,6 +3404,44 @@ let thread_journal t =
   |> List.map ~f:(fun (event : X.journal_event) ->
       { kind = event.kind; detail = event.detail })
 
+let maintenance_stats t =
+  if not (paused t) then not_paused ~fn:"maintenance_stats" t;
+  let snapshot (operation : X.operation) =
+    { count = operation.count; seconds = operation.seconds }
+  in
+  let zero () = { count = 0; seconds = 0. } in
+  let lift_cleanup = snapshot t.lift_cleanup in
+  let block_reclamation = snapshot t.block_reclamation in
+  let heap_compaction = snapshot t.heap_compaction in
+  match t.session.lifter with
+  | None ->
+      {
+        lru_reconstruction = zero ();
+        entry_eviction = zero ();
+        cache_load = zero ();
+        cache_merge = zero ();
+        cache_write = zero ();
+        lift_cleanup;
+        block_reclamation;
+        heap_compaction;
+        cache_entries_written = 0;
+        cache_bytes_written = 0;
+      }
+  | Some lifter ->
+      let maintenance = lifter.maintenance () in
+      {
+        lru_reconstruction = snapshot maintenance.lru_reconstruction;
+        entry_eviction = snapshot maintenance.entry_eviction;
+        cache_load = snapshot maintenance.cache_load;
+        cache_merge = snapshot maintenance.cache_merge;
+        cache_write = snapshot maintenance.cache_write;
+        lift_cleanup;
+        block_reclamation;
+        heap_compaction;
+        cache_entries_written = maintenance.cache_entries_written;
+        cache_bytes_written = maintenance.cache_bytes_written;
+      }
+
 let execution_stats t =
   if not (paused t) then not_paused ~fn:"execution_stats" t;
   let last_pc = pc t in
@@ -3472,15 +3532,17 @@ let start_stats t ~interval callback =
 
 let stop_stats subscription = subscription.stop ()
 
-let start_maintenance t ~interval ?lift_cache_limit
+let start_maintenance (t : t) ~interval ?lift_cache_limit
     ?forget_lifts:(forget = false) ?(reclaim_blocks = false)
     ?(compact_heap = false) () =
   Option.iter lift_cache_limit ~f:(fun limit ->
       set_lift_cache_limit t (Some limit));
   start_stats t ~interval (fun _ ->
       if forget then forget_lifts t;
-      if reclaim_blocks then Engine.flush_tb (engine t).engine;
-      if compact_heap then Gc.compact ())
+      if reclaim_blocks then
+        X.measure t.block_reclamation (fun () ->
+            Engine.flush_tb (engine t).engine);
+      if compact_heap then X.measure t.heap_compaction Gc.compact)
 
 (* the registers of the thread, without the aliases: of the engine, for
    the thread, that runs, or the ones, that Primus keeps for the thread,

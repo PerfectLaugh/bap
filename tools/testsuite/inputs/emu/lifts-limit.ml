@@ -95,16 +95,59 @@ let () =
         | None -> failwithf "no baseline BIR at %Lx" addr ())
   in
   printf "populated: %d entries\n%!" initial;
+  let valid (stats : Emu.maintenance_stats) =
+    List.for_all
+      [
+        stats.lru_reconstruction;
+        stats.entry_eviction;
+        stats.cache_load;
+        stats.cache_merge;
+        stats.cache_write;
+        stats.lift_cleanup;
+        stats.block_reclamation;
+        stats.heap_compaction;
+      ] ~f:(fun operation ->
+        operation.count >= 0 && Float.(operation.seconds >= 0.))
+    && stats.cache_entries_written >= 0
+    && stats.cache_bytes_written >= 0
+  in
   Emu.save_lifts baseline;
+  let saved = Emu.maintenance_stats baseline in
   Emu.set_lift_cache_limit baseline (Some 8);
+  let bulk = Emu.maintenance_stats baseline in
   let trimmed = (Emu.components baseline).lifter_entries in
   printf "bulk trim: %d entries\n%!" trimmed;
   if trimmed <> 8 then failwith "bulk trimming didn't retain eight entries";
+  let bulk_once =
+    bulk.cache_write.count = saved.cache_write.count + 1
+    && bulk.cache_entries_written > saved.cache_entries_written
+    && bulk.cache_bytes_written > saved.cache_bytes_written
+    && bulk.entry_eviction.count = initial - 8
+    && valid saved && valid bulk
+  in
+  printf "bulk telemetry: %b\n%!" bulk_once;
+  if not bulk_once then failwith "bulk trim telemetry differs";
   Emu.set_lift_cache_limit baseline (Some 0);
   let empty = (Emu.components baseline).lifter_entries in
+  let totals = Emu.maintenance_stats baseline in
+  let expected =
+    totals.lru_reconstruction.count = 2
+    && totals.entry_eviction.count = initial
+    && totals.cache_load.count = 3
+    && totals.cache_merge.count = 2
+    && totals.cache_write.count = 3
+    && totals.cache_entries_written = 3 * initial
+    && totals.cache_bytes_written > 0
+    && valid totals
+  in
   printf "zero trim: %d entries\n%!" empty;
+  printf "cache telemetry: %b\n%!" expected;
   if empty <> 0 then failwith "zero limit retained entries";
+  if not expected then failwith "cumulative cache telemetry differs";
   let reused = create file reused_output in
+  let fresh = Emu.maintenance_stats reused in
+  if fresh.cache_write.count <> 0 || fresh.lru_reconstruction.count <> 0 then
+    failwith "a new emulator inherited maintenance telemetry";
   let restored = (Emu.components reused).lifter_entries in
   Emu.set_lift_cache_limit reused (Some initial);
   let exact = (Emu.components reused).lifter_entries in

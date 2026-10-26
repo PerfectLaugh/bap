@@ -800,6 +800,8 @@ Emu.stop_stats maintenance
 
 No maintenance runs by default. These operations reclaim logical retained state, not a guaranteed amount of RSS; translated blocks are recreated as needed, and compaction may make a long pause longer.
 
+`maintenance_stats emu` reads a separate telemetry record at a safe pause. Each operation has a cumulative `count` and monotonic `seconds`: LRU reconstruction, entry eviction (one count per entry), cache load, merge and write, lift cleanup, translated-block reclamation, and heap compaction. `cache_entries_written` and `cache_bytes_written` total the entries and bytes of successfully written cache files, including entries written again by merges. Timing is added only around operations that run; there is no always-on profiling or wall-clock speed assertion. Counts and durations start at zero for each `Emu.create`, survive snapshot restores, and have no individual reset. They are not checkpointed: an emulator created with `~restore` starts fresh telemetry, as does any other new emulator.
+
 ## See also
 
 - The API reference of `Bap_emu`, `Bap_script`, and `Bap_script_debugger`, in `dune build @doc`.
