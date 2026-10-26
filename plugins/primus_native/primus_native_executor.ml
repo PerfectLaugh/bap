@@ -1535,7 +1535,12 @@ let lifter ?cache ~arm project =
                   Hashtbl.remove used key;
                   dirty := true;
                   forgotten := true);
-              if (not bulk) && Hashtbl.length archived >= 64 then !flush ();
+              (* Ordinary eviction defers the full save to maintenance,
+                 checkpoints, explicit saves, and exit. The conservative
+                 1024-entry high-water bound is sixteen times the old batch;
+                 cache_write count, entries, bytes, and duration expose its
+                 cost so that measurements can justify a different bound. *)
+              if (not bulk) && Hashtbl.length archived >= 1024 then !flush ();
               trim ~bulk ())
   in
   let set_limit value =

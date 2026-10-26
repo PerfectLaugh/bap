@@ -970,17 +970,15 @@ let emu data =
         check env "exits on the signal" (out.status = Exited 143);
         check env "saves the lifts on the signal"
           (Array.length (Sys.readdir (file env "cache/lifted/lifts")) = 1));
-    (* bulk lift-cache trimming saves once, and the cache remains reusable *)
+    (* lift-cache trimming coalesces saves, and the cache remains reusable *)
     case "emu/lifts-limit" (fun env ->
-        let out =
+        let run args =
           bap ~timeout:55. env
-            [
-              "script";
-              input "emu/lifts-limit.ml";
-              path data "bin/x86_64-linux-gnu-echo";
-              dir env;
-            ]
+            ([ "script"; input "emu/lifts-limit.ml" ]
+            @ args
+            @ [ path data "bin/x86_64-linux-gnu-echo"; dir env ])
         in
+        let out = run [] in
         check env "cache-limit script succeeds" (out.status = Exited 0);
         sequence env out
           [
@@ -990,6 +988,12 @@ let emu data =
             ("saves once for the bulk trim", "bulk telemetry: true\n");
             ("accepts a zero limit", "zero trim: 0 entries\n");
             ("counts cache maintenance", "cache telemetry: true\n");
+            ( "defers incremental eviction saves",
+              "incremental eviction: [0-9]+ entries, deferred true\n" );
+            ( "saves at maintenance without cleanup",
+              "scheduled persistence: true\n" );
+            ( "saves once at the archived high-water mark",
+              "high-water persistence: true\n" );
             ( "preserves every entry and its BIR",
               "restored cache: [0-9]+ entries, limits true, BIR true\n" );
             ("reuses the saved lifts", "reused execution: exited 0\n");
@@ -1004,7 +1008,25 @@ let emu data =
             In_channel.input_all
         in
         check env "execution output is identical after cache reuse"
-          (String.equal (output "baseline.txt") (output "reused.txt")));
+          (String.equal (output "baseline.txt") (output "reused.txt"));
+        let out = run [ "clean" ] in
+        check env "clean-exit script succeeds" (out.status = Exited 0);
+        has env "populates dirty archived entries before clean exit" out
+          "clean exit: populated [0-9]+ entries\n";
+        has env "clean exit performs one final save" out
+          "lifted lifter: 2 full cache saves\n";
+        let out = run [ "check" ] in
+        check env "clean-exit reuse script succeeds" (out.status = Exited 0);
+        sequence env out
+          [
+            ( "restores the clean-exit cache union",
+              "clean-exit reuse: [0-9]+ entries, BIR true\n" );
+            ("reuses the clean-exit cache", "clean-exit execution: exited 0\n");
+          ];
+        check env "clean-exit execution output is identical"
+          (String.equal
+             (output "clean-baseline.txt")
+             (output "clean-reused.txt")));
     (* the hooks of the memory see the instruction, that accesses it, see
        hook-pc.ml *)
     case "emu/hook-pc" (fun env ->

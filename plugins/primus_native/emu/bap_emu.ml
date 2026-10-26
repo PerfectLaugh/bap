@@ -3538,7 +3538,7 @@ let start_maintenance (t : t) ~interval ?lift_cache_limit
   Option.iter lift_cache_limit ~f:(fun limit ->
       set_lift_cache_limit t (Some limit));
   start_stats t ~interval (fun _ ->
-      if forget then forget_lifts t;
+      if forget then forget_lifts t else save_lifts t;
       if reclaim_blocks then
         X.measure t.block_reclamation (fun () ->
             Engine.flush_tb (engine t).engine);

@@ -1325,8 +1325,13 @@ val set_lift_cache_limit : t -> int option -> unit
     least-recently-used entries, or makes it unbounded with [None]. [Some 0]
     retains no entries. Eviction does not remove code already retained by the
     lifted engine, and executed instructions keep their raw-byte checkpoint
-    history. Disk caches merge evicted entries on save. Raises
-    [Invalid_argument] for a negative limit. *)
+    history. Ordinary eviction defers disk writes to scheduled maintenance,
+    checkpoints, {!forget_lifts}, {!save_lifts}, and clean exit, with one
+    coalesced save if 1024 entries are archived. This conservative high-water
+    bound replaces the former 64-entry save cadence; {!maintenance_stats}
+    exposes save counts, durations, entries, and bytes for evaluating it. Every
+    save merges retained and archived entries with the existing disk cache.
+    Raises [Invalid_argument] for a negative limit. *)
 
 type footprint = {
   heap : int;  (** the bytes of the heap of OCaml *)
@@ -1658,12 +1663,13 @@ val start_maintenance :
   stats_subscription
 (** [start_maintenance emu ~interval ()] performs periodic maintenance at the
     safe paused reports of {!start_stats}. [lift_cache_limit] applies
-    {!set_lift_cache_limit} once at startup. If [forget_lifts] is true, each
-    report calls {!forget_lifts}; if [reclaim_blocks] is true, it drops the
-    engine's translated blocks, which are translated again as execution
-    continues; and if [compact_heap] is true, it calls [Gc.compact]. All
-    maintenance actions default to false or absent, and no maintenance is
-    installed unless this function is called.
+    {!set_lift_cache_limit} once at startup. Every report saves dirty lifts,
+    even when all cleanup and reclamation options are false. If [forget_lifts]
+    is true, each report calls {!forget_lifts}, including its save; if
+    [reclaim_blocks] is true, it drops the engine's translated blocks, which are
+    translated again as execution continues; and if [compact_heap] is true, it
+    calls [Gc.compact]. All maintenance actions default to false or absent, and
+    no maintenance is installed unless this function is called.
 
     Stop the returned subscription with {!stop_stats}; subscriptions also
     respect {!scoped}. Stopping suppresses future maintenance but does not undo
