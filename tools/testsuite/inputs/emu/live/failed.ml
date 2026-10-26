@@ -22,11 +22,13 @@ let () =
       let ckpt = Filename.concat dir "failed.ckpt" in
       let redirects = [ ("<stdout>", Filename.concat dir "failed.out") ] in
       let allocator = ref 0x1000L in
-      Emu.Checkpoint.register_ref ~package:"test" ~required:true "allocator"
+      let models = Emu.Checkpoint.create () in
+      Emu.Checkpoint.register_ref ~package:"test" ~required:true models
+        "allocator"
         (module Int64)
         allocator;
       let emu =
-        Emu.create ~engine ~redirects ~args:[ "hello" ]
+        Emu.create ~models ~engine ~redirects ~args:[ "hello" ]
           (Bap_script.project echo)
       in
       let addr name =
@@ -71,7 +73,8 @@ let () =
         (Option.value_exn context.failure).addr (has "allocator") (has "import")
         (has "syscall");
       let again =
-        Emu.create ~engine ~redirects ~restore:ckpt (Bap_script.project echo)
+        Emu.create ~models ~engine ~redirects ~restore:ckpt
+          (Bap_script.project echo)
       in
       printf "continues at %Lx, with RAX = %Lx\n" (Emu.pc again)
         (Emu.reg again "RAX");

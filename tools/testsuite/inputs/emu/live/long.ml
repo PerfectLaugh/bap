@@ -23,9 +23,10 @@ let () =
   let file = List.hd_exn (Bap_script.args ()) in
   let out = Filename.concat (List.nth_exn (Bap_script.args ()) 1) "out.txt" in
   let model = ref 42 in
-  Emu.Checkpoint.register_ref "live-long" (module Int) model;
+  let models = Emu.Checkpoint.create () in
+  Emu.Checkpoint.register_ref models "live-long" (module Int) model;
   let emu =
-    Emu.create ~engine:`Lifted ~args:[ "hello" ]
+    Emu.create ~models ~engine:`Lifted ~args:[ "hello" ]
       ~redirects:[ ("<stdout>", out) ]
       (Bap_script.project file)
   in

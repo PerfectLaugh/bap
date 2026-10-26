@@ -21,6 +21,7 @@ type failure = {
 }
 
 type event = { kind : string; detail : string }
+type checkpoint_models = X.model_registry
 type write_profile = { dispatches : int; callbacks : int; seconds : float }
 
 (* the system, which runs in the fiber of the script, either paused,
@@ -78,6 +79,9 @@ type t = {
           are the same, see [it_blocks_of] *)
   deferred : (t -> unit) Queue.t;
       (** the actions, that the hooks deferred to the next pause, see [defer] *)
+  saves : string Queue.t;
+      (** checkpoints, that wait until all deferred model mutations finish *)
+  mutable serving : bool;
   mutable stopped : bool;
       (** if a hook stopped the program, see [stop], so that it stays paused
           after the deferred actions *)
@@ -215,11 +219,26 @@ let rec resume t request =
    is before the instruction, that the hook saw, after which the program
    continues, unless a hook stopped it too, or it ended *)
 and served t =
-  if not (Queue.is_empty t.deferred) then begin
+  if
+    (not t.serving)
+    && ((not (Queue.is_empty t.deferred)) || not (Queue.is_empty t.saves))
+  then begin
     let stopped = t.stopped in
-    let actions = Queue.to_list t.deferred in
-    Queue.clear t.deferred;
-    List.iter actions ~f:(fun f -> f t);
+    t.serving <- true;
+    Exn.protect
+      ~f:(fun () ->
+        while not (Queue.is_empty t.deferred) do
+          (Queue.dequeue_exn t.deferred) t
+        done;
+        while not (Queue.is_empty t.saves) do
+          let file = Queue.dequeue_exn t.saves in
+          (match t.state with
+          | Suspended (pc, _, _) -> resume t (X.Save (file, pc))
+          | _ -> not_paused ~fn:"save" t);
+          Option.iter t.session.lifter ~f:(fun l -> l.save ());
+          match t.session.saved with Ok () -> () | Error msg -> failwith msg
+        done)
+      ~finally:(fun () -> t.serving <- false);
     match t.state with
     | Suspended (pc, _, _) when not stopped -> resume t (X.Continue pc)
     | _ -> ()
@@ -300,7 +319,7 @@ let lifts proj =
    The system gets the session of the emulator with its project, see
    [X.with_session] *)
 let create ?system ?(components = []) ?(init = []) ?(redirects = [])
-    ?(args = []) ?(envp = []) ?entry ?restore ?engine proj =
+    ?(args = []) ?(envp = []) ?entry ?restore ?models ?engine proj =
   (* the engine of the system, if it is of one, or else of BAP_EMU_ENGINE,
      e.g., of the testsuite, by default the lifted one, see bap_emu.mli *)
   let engine : X.kind =
@@ -355,7 +374,9 @@ let create ?system ?(components = []) ?(init = []) ?(redirects = [])
   in
   let program = Option.value (Project.get proj filename) ~default:"a.out" in
   let session =
-    X.create_session ?restore:(Option.map restore ~f:Option.return) ~engine ()
+    X.create_session
+      ?restore:(Option.map restore ~f:Option.return)
+      ?models ~engine ()
   in
   session.driven <- true;
   session.pause <- true;
@@ -391,6 +412,8 @@ let create ?system ?(components = []) ?(init = []) ?(redirects = [])
            insns);
       thumb_insns = Int64.Table.create ();
       deferred = Queue.create ();
+      saves = Queue.create ();
+      serving = false;
       stopped = false;
       scopes = [];
       write_dispatches = 0;
@@ -530,8 +553,6 @@ type component_footprint = {
   script_models : int;
 }
 
-let model_registrations = ref 0
-
 let components t =
   if not (paused t) then not_paused ~fn:"components" t;
   resume t X.Stored_count;
@@ -550,7 +571,7 @@ let components t =
     stored_bytes = t.session.stored_bytes;
     snapshots = Hash_set.length t.session.snapshots;
     parked_pages = t.session.parked_pages;
-    script_models = !model_registrations;
+    script_models = Hashtbl.length t.session.models;
   }
 
 (* the checkpoint of the paused program, or, from a hook, of the
@@ -558,6 +579,7 @@ let components t =
    [defer] *)
 let rec save t file =
   match t.state with
+  | Suspended _ when t.serving -> Queue.enqueue t.saves file
   | Suspended _ -> (
       resume t (X.Save (file, pc t));
       save_lifts t;
@@ -592,22 +614,20 @@ and save_failed t file =
 module Checkpoint = struct
   module C = Bap_primus_native_plugin.Primus_native_checkpoint
 
-  let register ?package ?version ?required name ~save ~restore =
-    let module Extension (Machine : Primus.Machine.S) = struct
-      let save = Machine.return (save ())
-      let restore data = Machine.return (restore data)
-    end in
-    Primus.Checkpoint.register ?package ?version ?required name
-      (module Extension);
-    incr model_registrations
+  type registry = checkpoint_models
 
-  let register_ref ?package ?version ?required name binable state =
-    register ?package ?version ?required name
+  let create = X.create_model_registry
+
+  let register ?package ?version ?required registry name ~save ~restore =
+    X.register_model registry ?package ?version ?required name ~save ~restore
+
+  let register_ref ?package ?version ?required registry name binable state =
+    register ?package ?version ?required registry name
       ~save:(fun () -> Some (Binable.to_string binable !state))
       ~restore:(fun data -> state := Binable.of_string binable data)
 
-  let register_table ?package ?version ?required name binable table =
-    register ?package ?version ?required name
+  let register_table ?package ?version ?required registry name binable table =
+    register ?package ?version ?required registry name
       ~save:(fun () ->
         Some (Binable.to_string binable (Hashtbl.to_alist table)))
       ~restore:(fun data ->
@@ -631,6 +651,7 @@ module Checkpoint = struct
     frames : (string option * string option) list;
     symbols : (string * int64) list;
     components : string list;
+    quantum_remaining : float;
   }
 
   let info file =
@@ -657,7 +678,15 @@ module Checkpoint = struct
             List.map c.frames ~f:(fun (f : C.frame) -> (f.callee, f.caller));
           symbols = c.symbols;
           components = List.map c.extensions ~f:fst;
+          quantum_remaining = c.quantum_remaining;
         }
+
+  let journal file =
+    match C.load file with
+    | Error msg -> failwith msg
+    | Ok (c : C.t) ->
+        List.map c.thread_journal ~f:(fun (event : C.journal_event) ->
+            { kind = event.kind; detail = event.detail })
 
   type model_state = { name : string; version : int; required : bool }
 
@@ -2804,9 +2833,23 @@ module Jni = struct
     let set_pc = set_pc
     let event t detail = record_event t "jni" detail
   end)
+
+  let bind_checkpoint ?(package = "user") ?(version = 1) ?(required = true)
+      models jni =
+    Checkpoint.register ~package ~version ~required models "jni"
+      ~save:(fun () -> Some (export_state jni))
+      ~restore:(import_state jni)
 end
 
-module Android = Bap_emu_android
+module Android = struct
+  include Bap_emu_android
+
+  let bind_checkpoint ?(package = "user") ?(version = 1) ?(required = true)
+      models android =
+    Checkpoint.register ~package ~version ~required models "android"
+      ~save:(fun () -> Some (export_state android))
+      ~restore:(import_state android)
+end
 
 (* the projects of the memory, each in a unit of its own, as the memory
    changes between them *)

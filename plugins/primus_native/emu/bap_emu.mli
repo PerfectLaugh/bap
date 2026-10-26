@@ -39,6 +39,9 @@ open Bap.Std
 type t
 (** the emulator *)
 
+type checkpoint_models
+(** the per-emulator registry of serializable script-model state *)
+
 (** the state of the program *)
 type status =
   | Paused  (** the program pauses, e.g., at the address of [until] *)
@@ -83,6 +86,7 @@ val create :
   ?envp:string list ->
   ?entry:string ->
   ?restore:string ->
+  ?models:checkpoint_models ->
   ?engine:[ `Unicorn | `Lifted ] ->
   project ->
   t
@@ -116,7 +120,9 @@ val create :
     {!on_call}.
 
     With [restore] the program continues from the checkpoint in the file, see
-    {!save}, instead of the [entry], and pauses before its address.
+    {!save}, instead of the [entry], and pauses before its address. [models]
+    supplies the emulator's checkpoint models, registered before this call so
+    required state and schemas can be preflighted.
 
     The native code runs in the [engine]: [`Unicorn], or [`Lifted], the lifted
     engine, see [Bap_lifted], which runs the semantics of the instructions, that
@@ -1094,10 +1100,32 @@ module Jni : sig
   val serve : t -> emulator -> unit
   val serve_vm : t -> emulator -> unit
   val read_string : emulator -> int64 -> string
+
+  val bind_checkpoint :
+    ?package:string ->
+    ?version:int ->
+    ?required:bool ->
+    checkpoint_models ->
+    t ->
+    unit
+  (** [bind_checkpoint models jni] registers JNI state as [user:jni], required
+      and at schema version 1 by default. *)
 end
 
-module Android = Bap_emu_android
 (** reusable Android ServiceManager, IBinder, and Parcel models *)
+module Android : sig
+  include module type of Bap_emu_android
+
+  val bind_checkpoint :
+    ?package:string ->
+    ?version:int ->
+    ?required:bool ->
+    checkpoint_models ->
+    t ->
+    unit
+  (** [bind_checkpoint models android] registers Android state as
+      [user:android], required and at schema version 1 by default. *)
+end
 
 val knowledge : t -> Bap_knowledge.Knowledge.state option
 (** the knowledge of the system, when it finished, e.g., of the instructions,
@@ -1282,61 +1310,71 @@ type component_footprint = {
   stored_bytes : int;  (** logical stored byte entries, not heap bytes *)
   snapshots : int;  (** live snapshots created by the script *)
   parked_pages : int;  (** native pages retained for snapshots *)
-  script_models : int;  (** process-global checkpoint model registrations *)
+  script_models : int;  (** checkpoint models registered for this emulator *)
 }
 
 val components : t -> component_footprint
 (** [components emu] is a logical retention inventory of the paused emulator.
     Counts are not estimated heap sizes and are not additive: hook lifts may be
-    shared between emulators, persistent byte maps may share structure, and
-    [script_models] is process-global. Use {!Trace.retained} for the records
-    retained by a particular live trace. Raises [Invalid_argument] if the
-    program is not paused. *)
+    shared between emulators and persistent byte maps may share structure. Use
+    {!Trace.retained} for the records retained by a particular live trace.
+    Raises [Invalid_argument] if the program is not paused. *)
 
 (** The checkpoints, that {!save} wrote, which a script inspects, without
     loading their program, e.g., to choose one in a pipeline. *)
 module Checkpoint : sig
+  type registry = checkpoint_models
+
+  val create : unit -> registry
+  (** [create ()] constructs an empty per-emulator model registry. Pass it to
+      {!Bap_emu.create} with [~models]. Independent registries may reuse model
+      names without sharing callbacks or state. *)
+
   val register :
     ?package:string ->
     ?version:int ->
     ?required:bool ->
+    registry ->
     string ->
     save:(unit -> string option) ->
     restore:(string -> unit) ->
     unit
-  (** [register ?package ?version ?required name ~save ~restore] registers the
-      state of a model of the script under [package:name], where [package] is
-      ["user"], [version] is 1, and [required] is [false] by default. Every
-      checkpoint saves [save ()], unless it is [None], and a program, which
-      continues from it, restores the state with [restore]. Register the same
-      name and schema before {!create} restores the checkpoint. A required model
-      must have state and a matching schema. A mismatch of optional models is
-      skipped with a warning. The callbacks run with the machine, whose state is
-      saved or restored, and their exceptions abort the operation. Raises
-      [Invalid_argument], if the name is registered or the version is not
+  (** [register models ?package ?version ?required name ~save ~restore]
+      registers serializable model state under [package:name], where [package]
+      is ["user"], [version] is 1, and [required] is [false] by default. Every
+      checkpoint of an emulator using [models] saves [save ()], unless it is
+      [None], and restore calls [restore]. Register the same name and schema
+      before {!Bap_emu.create} restores a checkpoint. A required model must have
+      state and a matching schema. Optional mismatches are skipped with a
+      warning. Callback exceptions abort the operation. Host closures and
+      handles are not serialized; scripts reinstall them and register only their
+      serializable state. Raises [Invalid_argument] if the name is registered in
+      this registry or is a built-in extension, or if the version is not
       positive. *)
 
   val register_ref :
     ?package:string ->
     ?version:int ->
     ?required:bool ->
+    registry ->
     string ->
     (module Core.Binable.S with type t = 'a) ->
     'a ref ->
     unit
-  (** [register_ref name binable state] registers the contents of [state], as
-      {!register} does with [binable]. *)
+  (** [register_ref models name binable state] registers the contents of
+      [state], as {!register} does with [binable]. *)
 
   val register_table :
     ?package:string ->
     ?version:int ->
     ?required:bool ->
+    registry ->
     string ->
     (module Core.Binable.S with type t = ('key * 'value) list) ->
     ('key, 'value) Core.Hashtbl.t ->
     unit
-  (** [register_table name binable table] registers the bindings of [table]. The
-      restored bindings are decoded before the table is changed. *)
+  (** [register_table models name binable table] registers the bindings of
+      [table]. The restored bindings are decoded before the table is changed. *)
 
   type thread = {
     tid : int;
@@ -1367,11 +1405,17 @@ module Checkpoint : sig
     symbols : (string * int64) list;  (** of {!add_symbol} *)
     components : string list;
         (** the components, whose states are saved, see [Primus.Checkpoint] *)
+    quantum_remaining : float;
+        (** the active thread's remaining scheduler slice in seconds *)
   }
 
   val info : string -> info
   (** [info file] reads the checkpoint, raises [Failure], if it is not one, or
       of another version, or broken. *)
+
+  val journal : string -> event list
+  (** [journal file] is the saved thread creation, exit, and switch journal, in
+      execution order. Raises as {!info}. *)
 
   type model_state = { name : string; version : int; required : bool }
 

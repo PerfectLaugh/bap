@@ -52,6 +52,8 @@ type threads = {
 type model_state = { name : string; version : int; required : bool }
 [@@deriving bin_io]
 
+type journal_event = { kind : string; detail : string } [@@deriving bin_io]
+
 module V5 = struct
   type t = {
     target : string;
@@ -65,6 +67,24 @@ module V5 = struct
     extensions : (string * string) list;
     extra : (int * string) list;
     threads : threads option;
+  }
+  [@@deriving bin_io]
+end
+
+module V6 = struct
+  type t = {
+    target : string;
+    digest : string;
+    pc : int64;
+    frames : frame list;
+    vars : (Var.t * Word.t) list;
+    memory : Primus.Memory.Snapshot.t;
+    symbols : (string * int64) list;
+    unstubbed : int64 list;
+    extensions : (string * string) list;
+    extra : (int * string) list;
+    threads : threads option;
+    model_states : model_state list option;
   }
   [@@deriving bin_io]
 end
@@ -83,6 +103,8 @@ module T = struct
     extra : (int * string) list;
     threads : threads option;
     model_states : model_state list option;
+    thread_journal : journal_event list;
+    quantum_remaining : float;
   }
   [@@deriving bin_io]
 end
@@ -90,9 +112,14 @@ end
 include T
 
 let magic5 = "bap-primus-unicorn-checkpoint 5\n"
-let magic = "bap-primus-unicorn-checkpoint 6\n"
+let magic6 = "bap-primus-unicorn-checkpoint 6\n"
+let magic = "bap-primus-unicorn-checkpoint 7\n"
 
 let validate (t : t) =
+  if
+    (not (Float.is_finite t.quantum_remaining))
+    || Float.(t.quantum_remaining < 0. || t.quantum_remaining > 0.005)
+  then failwith "the checkpoint has an invalid scheduler quantum";
   match t.model_states with
   | None -> ()
   | Some models ->
@@ -112,7 +139,7 @@ let validate (t : t) =
                List.exists names ~f:(String.equal payload)))
       then failwith "an extension state has no model manifest entry"
 
-let of_v5 (v : V5.t) : t =
+let of_v6 (v : V6.t) : t =
   {
     target = v.target;
     digest = v.digest;
@@ -125,8 +152,27 @@ let of_v5 (v : V5.t) : t =
     extensions = v.extensions;
     extra = v.extra;
     threads = v.threads;
-    model_states = None;
+    model_states = v.model_states;
+    thread_journal = [];
+    quantum_remaining = 0.005;
   }
+
+let of_v5 (v : V5.t) : t =
+  of_v6
+    {
+      target = v.target;
+      digest = v.digest;
+      pc = v.pc;
+      frames = v.frames;
+      vars = v.vars;
+      memory = v.memory;
+      symbols = v.symbols;
+      unstubbed = v.unstubbed;
+      extensions = v.extensions;
+      extra = v.extra;
+      threads = v.threads;
+      model_states = None;
+    }
 
 (* the digest of the file of the program, which the checkpoint is of *)
 let digest path = Stdlib.Digest.(to_hex (file path))
@@ -161,18 +207,18 @@ let load path =
   match In_channel.read_all path with
   | exception Sys_error msg -> Error msg
   | data -> (
-      match
-        ( String.chop_prefix data ~prefix:magic,
-          String.chop_prefix data ~prefix:magic5 )
-      with
-      | None, None
+      let current = String.chop_prefix data ~prefix:magic in
+      let v6 = String.chop_prefix data ~prefix:magic6 in
+      let v5 = String.chop_prefix data ~prefix:magic5 in
+      match (current, v6, v5) with
+      | None, None, None
         when String.is_prefix data ~prefix:"bap-primus-unicorn-checkpoint " ->
           Error
             (sprintf "the checkpoint %s is of another version of primus-unicorn"
                path)
-      | None, None ->
+      | None, None, None ->
           Error (sprintf "%s is not a checkpoint of primus-unicorn" path)
-      | Some data, _ -> (
+      | Some data, _, _ -> (
           try
             let (t : t) = Binable.of_string (module T) data in
             validate t;
@@ -181,7 +227,13 @@ let load path =
             Error
               (sprintf "the checkpoint %s is broken: %s" path
                  (Exn.to_string exn)))
-      | _, Some data -> (
+      | _, Some data, _ -> (
+          try Ok (of_v6 (Binable.of_string (module V6) data))
+          with exn ->
+            Error
+              (sprintf "the checkpoint %s is broken: %s" path
+                 (Exn.to_string exn)))
+      | _, _, Some data -> (
           try Ok (of_v5 (Binable.of_string (module V5) data))
           with exn ->
             Error

@@ -7,6 +7,7 @@ script model in manifest true
 deferred at print_endline true, seen 1 time(s)
 stopped at print_endline true
 at once, paused true
+missing required hook binding true
 restored at print_strings true
 the restored program reached print_endline
-restored script state: 41
+restored script state: 42

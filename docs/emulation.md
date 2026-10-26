@@ -571,19 +571,23 @@ A checkpoint keeps:
 - the digest of the program's file, so that it isn't restored on another program
 - the states of the components that extend the checkpoints, see `Primus.Checkpoint`, e.g., the channels of Primus Lisp, the taint, and the symbolic inputs
 - the states that script models register with `Emu.Checkpoint.register`, saved together with the guest state before the checkpoint file is replaced
+- the thread lifecycle journal and the active thread's remaining scheduler quantum, stored as a relative duration rather than host time; `Checkpoint.journal` reads the saved journal and `Checkpoint.info` reports the quantum
 
-A JNI model exports its handles, object and class identities, method and field IDs, arrays, allocator counters, and string contents. Register it in both the saving and restored runs, constructing it with the same declarations and callbacks each time:
+Script models belong to an explicit per-emulator registry, not to process-global Primus registration. Construct and bind the registry before creating either the saving or restoring emulator:
 
 ```ocaml
-let register_jni jni =
-  Emu.Checkpoint.register "jni" ~required:true ~version:1
-    ~save:(fun () -> Some (Emu.Jni.export_state jni))
-    ~restore:(Emu.Jni.import_state jni)
+let models = Emu.Checkpoint.create () in
+Emu.Jni.bind_checkpoint models jni;
+let emu = Emu.create ~models ~restore:"unpacked.ckpt" proj
 ```
 
-Call `register_jni jni` before `Emu.create ~restore`, so checkpoint validation can see the model's policy. Native argument pointers are not saved in place of strings, whose original contents may outlive reused guest buffers. Other OCaml-side models, such as allocators, TLS mappings, file offsets, and clocks, must register their own state too; restoring guest memory alone cannot restore it. `register_ref` and `register_table` serialize references and hash tables through a `Binable` module, and decode the new value before changing the model.
+Independent registries may reuse the same model names without sharing state. Native argument pointers are not saved in place of strings, whose original contents may outlive reused guest buffers. Other OCaml-side models, such as allocators, TLS mappings, file offsets, clocks, and hook-owned tables, must register their own state too; restoring guest memory alone cannot restore it. `register_ref` and `register_table` serialize references and hash tables through a `Binable` module, and decode the new value before changing the model. Host closures and handles are never serialized: reinstall them in the script and bind only the serializable state. A missing required binding fails restore preflight.
 
 Every checkpoint has a manifest of the registered model names, schema versions, and whether their state is required. A required model must have saved state, a registered restore handler, and a matching schema; otherwise restore fails before guest memory, model callbacks, or execution. An optional mismatch is skipped with a warning. A required save that returns `None` fails without replacing an existing checkpoint. Use `Checkpoint.models file` to inspect the manifest without loading the program. Callbacks and default handlers are not serialized: the restored script registers them under the same model name and schema.
+
+JNI state includes the next call ordinal, event journal, recording flag, and declaration fingerprint. Import validates the fingerprint, identities, and tables before replacing live state; declaration mismatches are rejected. `Jni.export_state`/`import_state` and `Android.export_state`/`import_state` remain available directly, while `Jni.bind_checkpoint` and `Android.bind_checkpoint` are the convenient required-by-default registry bindings.
+
+When a hook queues model mutations and a checkpoint with `defer`/`save`, all deferred mutations finish before the checkpoint is written. This quiescent boundary also covers native and protobuf initialization performed by deferred hook actions. Checkpoints that require unsupported nested multi-thread stub frames are still rejected.
 
 Checkpoints written before the manifest format remain supported for optional models. Registering a required model rejects such a legacy checkpoint because its schema and producer-side requirement cannot be proved.
 
@@ -616,7 +620,7 @@ let jni =
 
 The declarations include ServiceManager.getService, Parcel.obtain/writeInterfaceToken/writeInt/readException, and IBinder.transact. Repeated calls share service and return-class identities but obtain distinct parcels, producing a consistent object graph rather than unrelated fresh objects.
 
-`Android.export_state` and `import_state` preserve service metadata, live parcels, cursors, exceptions, return classes, and the identity cursor. Register them as a required model and recreate service declarations and handlers in the restored run; handlers are not serialized. Use `Android.find_parcel` to inspect restored parcels.
+`Android.export_state` and `import_state` preserve service metadata, live parcels, cursors, exceptions, return classes, and the identity cursor. `Android.bind_checkpoint models android` registers them as a required model by default. Recreate service declarations and handlers in the restored run; handlers are not serialized. Use `Android.find_parcel` to inspect restored parcels.
 
 A checkpoint is untrusted input, as it may be crafted, so its restore checks it: the program must be of the same digest, and the channels of Primus Lisp reopen their files only if the restored run allows them. A channel, that only reads, e.g., of the redirected input, reopens a regular file, and a channel, that writes, and the redirections, that the program may open, only the files, that `--primus-lisp-channel-redirect`, or the `redirects` of the script, redirect in the restored run; the others are closed, with a warning.
 
@@ -736,7 +740,7 @@ let check emu =
 ```
 
 - `footprint ()` is the heap of OCaml, the most it had, and the resident size of the process, which Linux tells.
-- `components emu` breaks retention into logical counts: session-lifter entries and BIR blocks, lifted-engine entries, BIR and live JIT blocks, hook lifts, stored-byte entries, snapshots, parked pages, and process-global script-model registrations. These counts are not estimated heap bytes and are not additive; `Trace.retained trace` separately reports the records that a trace ring still holds.
+- `components emu` breaks retention into logical counts: session-lifter entries and BIR blocks, lifted-engine entries, BIR and live JIT blocks, hook lifts, stored-byte entries, snapshots, parked pages, and per-emulator script-model registrations. These counts are not estimated heap bytes and are not additive; `Trace.retained trace` separately reports the records that a trace ring still holds.
 - `forget_lifts emu` saves the lifted instructions to the cache, if bap has one, and drops them, with the ones, that `bir` lifted in the hooks; the code, that the engine compiled, stays, so the program runs on at full speed, and an instruction, that is lifted again, e.g., in a new engine, costs a lift, as at the start.
 - `set_lift_cache_limit emu (Some n)` keeps only the `n` most recently used session-lifter entries, while `Some 0` keeps none and `None` removes the bound. Eviction preserves raw-byte checkpoint history and disk-cache contents, and does not remove code retained by the lifted engine.
 - `drop_snapshot emu snapshot` frees a snapshot, that the script doesn't restore anymore; `restore` of a dropped snapshot raises.

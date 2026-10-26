@@ -131,16 +131,19 @@ val create :
 val export_state : t -> string
 (** [export_state jni] serializes the dynamic state of [jni], including its
     handles, object and class identities, method and field IDs, arrays, strings,
-    and allocator counters. String arguments are stored by value, not as native
-    pointers. Use with [Bap_emu.Checkpoint.register] to keep the state with the
-    guest checkpoint. *)
+    allocator counters, call ordinal, recording flag, event journal, and a
+    declaration fingerprint. String arguments are stored by value, not as native
+    pointers. Use [Bap_emu.Jni.bind_checkpoint] to keep the state with the guest
+    checkpoint. *)
 
 val import_state : t -> string -> unit
 (** [import_state jni data] replaces the dynamic state of [jni] with the state
     that {!export_state} saved. Construct [jni] with the same declarations and
     callbacks as the saved model before importing. The declarations and
-    callbacks themselves are not serialized. Raises [Invalid_argument], if
-    [data] is not a valid JNI model state. *)
+    callbacks themselves are not serialized. The fingerprint, identities, and
+    tables are validated before any live state changes. [replay_strings] remains
+    external. Raises [Invalid_argument] for invalid state or a declaration
+    fingerprint mismatch. *)
 
 val intern : ?global:bool -> t -> object_id -> int64
 (** [intern t id] returns the stable local handle of [id], or its stable global

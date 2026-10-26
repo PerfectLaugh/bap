@@ -6,9 +6,10 @@ module C = Bap_primus_native_plugin.Primus_native_checkpoint
 
 let model = "checkpoint-model"
 let other = "checkpoint-other"
+let models = Emu.Checkpoint.create ()
 
 let register ?(required = true) ?(version = 1) name state =
-  Emu.Checkpoint.register ~package:"test" ~required ~version name
+  Emu.Checkpoint.register ~package:"test" ~required ~version models name
     ~save:(fun () -> Some (Int.to_string !state))
     ~restore:(fun data -> state := Int.of_string data)
 
@@ -18,7 +19,8 @@ let pause_at_main emu =
   | Paused -> ()
   | _ -> failwith "can't pause at main"
 
-let create ?restore file = Emu.create ?restore (Bap_script.project file)
+let create ?(models = models) ?restore file =
+  Emu.create ~models ?restore (Bap_script.project file)
 
 let save file ckpt state =
   let emu = create file in
@@ -160,7 +162,7 @@ let () =
       print_endline (show_status emu)
   | [ "save-none"; file; ckpt ] ->
       Out_channel.write_all ckpt ~data:"preserved";
-      Emu.Checkpoint.register ~package:"test" ~required:true model
+      Emu.Checkpoint.register ~package:"test" ~required:true models model
         ~save:(fun () -> None)
         ~restore:ignore;
       let emu = create file in
@@ -176,10 +178,11 @@ let () =
       let state = ref 42 in
       let table = String.Table.create () in
       Hashtbl.set table ~key:"answer" ~data:43;
-      Emu.Checkpoint.register_ref ~package:"test" ~required:true "ref"
+      Emu.Checkpoint.register_ref ~package:"test" ~required:true models "ref"
         (module Int)
         state;
-      Emu.Checkpoint.register_table ~package:"test" ~required:true "table"
+      Emu.Checkpoint.register_table ~package:"test" ~required:true models
+        "table"
         (module Int_pair_list)
         table;
       save file ckpt !state
@@ -188,10 +191,11 @@ let () =
   | [ "helpers-restore"; file; ckpt ] ->
       let state = ref 0 in
       let table = String.Table.create () in
-      Emu.Checkpoint.register_ref ~package:"test" ~required:true "ref"
+      Emu.Checkpoint.register_ref ~package:"test" ~required:true models "ref"
         (module Int)
         state;
-      Emu.Checkpoint.register_table ~package:"test" ~required:true "table"
+      Emu.Checkpoint.register_table ~package:"test" ~required:true models
+        "table"
         (module Int_pair_list)
         table;
       let emu = create ~restore:ckpt file in
@@ -209,9 +213,35 @@ let () =
       register ~version:2 other bad;
       let emu = create ~restore:ckpt file in
       printf "%s; good=%d; bad=%d\n" (show_status emu) !good !bad
+  | [ "isolation"; file; first_ckpt; second_ckpt ] ->
+      let registry state =
+        let registry = Emu.Checkpoint.create () in
+        Emu.Checkpoint.register ~package:"test" ~required:true registry model
+          ~save:(fun () -> Some (Int.to_string !state))
+          ~restore:(fun data -> state := Int.of_string data);
+        registry
+      in
+      let save_isolated ckpt value =
+        let emu = create ~models:(registry (ref value)) file in
+        pause_at_main emu;
+        Emu.save emu ckpt
+      in
+      save_isolated first_ckpt 11;
+      save_isolated second_ckpt 22;
+      let first = ref 0 in
+      let second = ref 0 in
+      let first_emu =
+        create ~models:(registry first) ~restore:first_ckpt file
+      in
+      let second_emu =
+        create ~models:(registry second) ~restore:second_ckpt file
+      in
+      printf "isolated %d,%d; registered %d,%d\n" !first !second
+        (Emu.components first_emu).script_models
+        (Emu.components second_emu).script_models
   | [ "invalid-version"; version ] -> (
       match
-        Emu.Checkpoint.register ~version:(Int.of_string version) model
+        Emu.Checkpoint.register ~version:(Int.of_string version) models model
           ~save:(fun () -> None)
           ~restore:ignore
       with

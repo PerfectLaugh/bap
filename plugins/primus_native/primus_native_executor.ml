@@ -41,6 +41,7 @@ module Checkpoint = Primus_native_checkpoint
    the slices and the timeouts take more and more time, while the system
    is loaded, and whose steps are 15.6 ms on Windows, longer than a slice *)
 let clock () = Mtime.Span.to_float_ns (Mtime_clock.elapsed ()) *. 1e-9
+let scheduler_slice = 0.005
 
 module Native = Primus_native_libc
 include Bap_main.Loggers ()
@@ -327,10 +328,19 @@ and lifter = {
       (** bounds the retained entries, or makes them unbounded with [None] *)
 }
 
+and script_model = {
+  version : int;
+  required : bool;
+  save : unit -> string option;
+  restore : string -> unit;
+}
+
+and model_registry = script_model String.Table.t
 and journal_event = { kind : string; detail : string }
 and fault = { tid : int; pc : int64; addr : int64; access : Uc.access }
 
 and session = {
+  models : model_registry;
   mutable active : engine option;
   mutable last_fault : fault option;  (** the engine of the machines *)
   mutable recipe :
@@ -473,6 +483,9 @@ and session = {
       (** the time of [clock], at which the thread, that runs, started its time
           slice, see [Make.Threads], which the pauses of the script shift, as
           the thread doesn't run, while it is paused *)
+  mutable paused_at : float option;
+      (** the pause boundary, from which script time doesn't consume the slice
+      *)
   mutable resumed : bool;
       (** the thread, that paused, runs, before it is preempted *)
   mutable hooked_at : int64 option;
@@ -555,10 +568,24 @@ let options : kind -> options = function
   | `Unicorn -> unicorn_options
   | `Lifted -> lifted_options
 
-let create_session ?restore ?(engine : kind = `Unicorn) () =
+let create_model_registry () = String.Table.create ()
+
+let register_model registry ?(package = "user") ?(version = 1)
+    ?(required = false) name ~save ~restore =
+  if version <= 0 then invalid_argf "invalid schema version %d" version ();
+  let name = package ^ ":" ^ name in
+  if Option.is_some (Primus.Checkpoint.find name) || Hashtbl.mem registry name
+  then invalid_argf "the checkpoint model %s is already registered" name ();
+  Hashtbl.set registry ~key:name ~data:{ version; required; save; restore }
+
+let create_session ?restore ?models ?(engine : kind = `Unicorn) () =
   let o = options engine in
   let restore = Option.value restore ~default:o.restore in
   {
+    models =
+      (match models with
+      | Some models -> models
+      | None -> create_model_registry ());
     lifted = Poly.equal engine `Lifted;
     jit = o.jit;
     cache = o.cache;
@@ -620,6 +647,7 @@ let create_session ?restore ?(engine : kind = `Unicorn) () =
     journal = Queue.create ();
     thread_journal = Queue.create ();
     sliced_at = 0.;
+    paused_at = None;
     resumed = false;
     hooked_at = None;
   }
@@ -2290,10 +2318,21 @@ type model_action =
   | Skip_model of string
   | Fail_model of string
 
-let model_decisions (cp : Checkpoint.t) =
-  let registered name = Primus.Checkpoint.policy name in
+let model_names s =
+  Primus.Checkpoint.names () @ Hashtbl.keys s.models
+  |> List.dedup_and_sort ~compare:String.compare
+
+let model_policy s name =
+  match Hashtbl.find s.models name with
+  | Some model -> Some (model.version, model.required)
+  | None ->
+      Option.map (Primus.Checkpoint.policy name) ~f:(fun policy ->
+          (policy.version, policy.required))
+
+let model_decisions s (cp : Checkpoint.t) =
+  let registered name = model_policy s name in
   let required name =
-    Option.value_map (registered name) ~default:false ~f:(fun p -> p.required)
+    Option.value_map (registered name) ~default:false ~f:snd
   in
   let missing_manifest name =
     Fail_model
@@ -2302,14 +2341,11 @@ let model_decisions (cp : Checkpoint.t) =
   in
   match cp.model_states with
   | None -> (
-      match
-        List.find (Primus.Checkpoint.names ()) ~f:(fun name -> required name)
-      with
+      match List.find (model_names s) ~f:(fun name -> required name) with
       | Some name -> [ missing_manifest name ]
       | None ->
           List.map cp.extensions ~f:(fun (name, data) ->
-              if Option.is_some (Primus.Checkpoint.find name) then
-                Restore_model (name, data)
+              if Option.is_some (registered name) then Restore_model (name, data)
               else
                 Skip_model
                   (sprintf
@@ -2317,7 +2353,7 @@ let model_decisions (cp : Checkpoint.t) =
       )
   | Some models -> (
       match
-        List.find (Primus.Checkpoint.names ()) ~f:(fun name ->
+        List.find (model_names s) ~f:(fun name ->
             required name
             && not
                  (List.exists models ~f:(fun (m : Checkpoint.model_state) ->
@@ -2331,9 +2367,7 @@ let model_decisions (cp : Checkpoint.t) =
                 List.Assoc.find cp.extensions ~equal:String.equal m.name
               in
               let strict =
-                m.required
-                || Option.value_map policy ~default:false ~f:(fun p ->
-                    p.required)
+                m.required || Option.value_map policy ~default:false ~f:snd
               in
               match (policy, data) with
               | None, _ when strict ->
@@ -2350,22 +2384,22 @@ let model_decisions (cp : Checkpoint.t) =
               | _, None ->
                   Skip_model
                     (sprintf "the optional model %s has no saved state" m.name)
-              | Some p, Some _ when p.version <> m.version && strict ->
+              | Some (version, _), Some _ when version <> m.version && strict ->
                   Fail_model
                     (sprintf
                        "the model %s has schema version %d, but the script \
                         requires %d"
-                       m.name m.version p.version)
-              | Some p, Some _ when p.version <> m.version ->
+                       m.name m.version version)
+              | Some (version, _), Some _ when version <> m.version ->
                   Skip_model
                     (sprintf
                        "the state of %s is not restored: schema version %d \
                         does not match %d"
-                       m.name m.version p.version)
+                       m.name m.version version)
               | Some _, Some data -> Restore_model (m.name, data)))
 
-let model_problem cp =
-  List.find_map (model_decisions cp) ~f:(function
+let model_problem s cp =
+  List.find_map (model_decisions s cp) ~f:(function
     | Fail_model msg -> Some msg
     | _ -> None)
 
@@ -3449,21 +3483,28 @@ module Make (Machine : Primus.Machine.S) = struct
     let* memory = Memory.snapshot in
     let missing_required = ref None in
     let* extensions =
-      Primus.Checkpoint.names ()
+      model_names e.session
       |> Machine.List.filter_map ~f:(fun name ->
-          match Primus.Checkpoint.find name with
-          | None -> Machine.return None
-          | Some (module Ext) -> (
-              let module Ext = Ext (Machine) in
-              let* data = Ext.save in
-              let policy = Option.value_exn (Primus.Checkpoint.policy name) in
-              match (data, policy.required) with
-              | None, true ->
-                  missing_required := Some name;
-                  Machine.return None
-              | _ ->
-                  Machine.return (Option.map data ~f:(fun data -> (name, data)))
-              ))
+          let keep data required =
+            match (data, required) with
+            | None, true ->
+                missing_required := Some name;
+                Machine.return None
+            | _ ->
+                Machine.return (Option.map data ~f:(fun data -> (name, data)))
+          in
+          match Hashtbl.find e.session.models name with
+          | Some model -> keep (model.save ()) model.required
+          | None -> (
+              match Primus.Checkpoint.find name with
+              | None -> Machine.return None
+              | Some (module Ext) ->
+                  let module Ext = Ext (Machine) in
+                  let* data = Ext.save in
+                  let policy =
+                    Option.value_exn (Primus.Checkpoint.policy name)
+                  in
+                  keep data policy.required))
     in
     let* pending = Machine.Local.get frames in
     let* called = Machine.Local.get calls in
@@ -3553,16 +3594,23 @@ module Make (Machine : Primus.Machine.S) = struct
                          });
                   model_states =
                     Some
-                      (Primus.Checkpoint.names ()
+                      (model_names e.session
                       |> List.map ~f:(fun name ->
-                          let policy =
-                            Option.value_exn (Primus.Checkpoint.policy name)
+                          let version, required =
+                            Option.value_exn (model_policy e.session name)
                           in
-                          {
-                            Checkpoint.name;
-                            version = policy.version;
-                            required = policy.required;
-                          }));
+                          { Checkpoint.name; version; required }));
+                  thread_journal =
+                    Queue.to_list e.session.thread_journal
+                    |> List.map ~f:(fun (event : journal_event) ->
+                        { Checkpoint.kind = event.kind; detail = event.detail });
+                  quantum_remaining =
+                    (let now =
+                       Option.value e.session.paused_at ~default:(clock ())
+                     in
+                     Float.max 0.
+                       (Float.min scheduler_slice
+                          (scheduler_slice -. (now -. e.session.sliced_at))));
                 })
     in
     Result.iter saved ~f:(fun () ->
@@ -4503,10 +4551,6 @@ module Make (Machine : Primus.Machine.S) = struct
       let* code = Value.of_word (word e code) in
       let+ _ = Lisp.eval_fun "exit" [ code ] in
       None
-
-    (* the time slice of a thread, while the other threads are ready,
-       which is about the one of Linux *)
-    let slice = 0.005
 
     let ready e st =
       switchable e st
@@ -6453,9 +6497,11 @@ module Make (Machine : Primus.Machine.S) = struct
          other threads, and it runs the instruction, at which it paused,
          before it is preempted *)
       let paused = clock () in
+      s.paused_at <- Some paused;
       serve pc >>= fun pc ->
       let pause = clock () -. paused in
       s.sliced_at <- s.sliced_at +. pause;
+      s.paused_at <- None;
       (* nor does the pause count, as the time, that the machine ran *)
       s.accounted <- s.accounted +. pause;
       (* the program, that paused elsewhere, e.g., after a stub, whose
@@ -6490,7 +6536,7 @@ module Make (Machine : Primus.Machine.S) = struct
              load, that the observers see *)
           let* sliced = Machine.Local.get threads >>| Threads.ready e in
           let now = clock () in
-          let ends = s.sliced_at +. Threads.slice in
+          let ends = s.sliced_at +. scheduler_slice in
           (* the thread, that a hook of the code paused, runs the
              instruction, at which it paused, before it is preempted *)
           let resumed = s.resumed in
@@ -6643,17 +6689,22 @@ module Make (Machine : Primus.Machine.S) = struct
 
   (* the states of the components, that extend the checkpoint, see
      [Primus.Checkpoint] *)
-  let restore_extensions (cp : Checkpoint.t) =
-    match model_problem cp with
+  let restore_extensions s (cp : Checkpoint.t) =
+    match model_problem s cp with
     | Some msg -> fail "%s" msg
     | None ->
-        Machine.List.iter (model_decisions cp) ~f:(function
+        Machine.List.iter (model_decisions s cp) ~f:(function
           | Restore_model (name, data) -> (
-              match Primus.Checkpoint.find name with
-              | Some (module Ext) ->
-                  let module Ext = Ext (Machine) in
-                  Ext.restore data
-              | None -> Machine.return ())
+              match Hashtbl.find s.models name with
+              | Some model ->
+                  model.restore data;
+                  Machine.return ()
+              | None -> (
+                  match Primus.Checkpoint.find name with
+                  | Some (module Ext) ->
+                      let module Ext = Ext (Machine) in
+                      Ext.restore data
+                  | None -> Machine.return ()))
           | Skip_model msg ->
               warning "%s" msg;
               Machine.return ()
@@ -6684,8 +6735,13 @@ module Make (Machine : Primus.Machine.S) = struct
     let* () =
       Machine.List.iter cp.vars ~f:(fun (v, x) -> Value.of_word x >>= Env.set v)
     in
-    let* () = restore_extensions cp in
     let* e = engine () in
+    let* () = restore_extensions e.session cp in
+    Queue.clear e.session.thread_journal;
+    List.iter (List.take cp.thread_journal 256)
+      ~f:(fun (event : Checkpoint.journal_event) ->
+        record_thread_event e.session event.kind event.detail);
+    e.session.sliced_at <- clock () -. (scheduler_slice -. cp.quantum_remaining);
     let* id = Machine.current () in
     (* the memory of the machine is replaced, and the parked pages of
        another machine, that owns Unicorn, are kept *)
@@ -7236,7 +7292,7 @@ module Loader (Machine : Primus.Machine.S) = struct
               (Unicorn_failure
                  (sprintf "the checkpoint is at %s, which is not found" point)))
 
-  let load_checkpoint s target =
+  let load_checkpoint (s : session) target =
     let* program = Machine.gets (fun proj -> Project.get proj filename) in
     (* the program, which the checkpoint is of, has the same digest *)
     let same digest =
@@ -7260,7 +7316,7 @@ module Loader (Machine : Primus.Machine.S) = struct
                  (sprintf "the checkpoint %s is of another program" file))
         | Ok cp when String.equal cp.target (Theory.Target.to_string target)
           -> (
-            match model_problem cp with
+            match model_problem s cp with
             | Some msg -> Machine.raise (Unicorn_failure msg)
             | None -> Machine.return (Some cp))
         | Ok cp ->

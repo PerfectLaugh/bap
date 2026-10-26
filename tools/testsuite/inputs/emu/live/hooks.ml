@@ -13,7 +13,10 @@ module Emu = Bap_emu
 let () =
   match Bap_script.args () with
   | [ echo; dir ] ->
-      let emu = Emu.create ~args:[ "hello" ] (Bap_script.project echo) in
+      let models = Emu.Checkpoint.create () in
+      let emu =
+        Emu.create ~models ~args:[ "hello" ] (Bap_script.project echo)
+      in
       let addr name =
         List.Assoc.find_exn (Emu.symbols emu) ~equal:String.equal name
       in
@@ -26,7 +29,7 @@ let () =
       let ckpt = Filename.concat dir "hook.ckpt" in
       let deferred = ref [] in
       let script_state = ref 41 in
-      Emu.Checkpoint.register ~package:"test" ~required:true ~version:1
+      Emu.Checkpoint.register ~package:"test" ~required:true ~version:1 models
         "script-state"
         ~save:(fun () -> Some (Int.to_string !script_state))
         ~restore:(fun data -> script_state := Int.of_string data);
@@ -40,6 +43,7 @@ let () =
               printf "write in the hook: %s\n" msg
           | () -> print_endline "wrote in the hook");
           Emu.save emu ckpt;
+          Emu.defer emu (fun _ -> script_state := 42);
           Emu.defer emu (fun emu ->
               let page = Emu.read emu far 4096 in
               deferred :=
@@ -81,7 +85,17 @@ let () =
             (Emu.status emu |> function Paused -> true | _ -> false));
       (* the checkpoint continues the program from print_strings *)
       script_state := 99;
-      let again = Emu.create ~restore:ckpt (Bap_script.project echo) in
+      let unbound =
+        Emu.create ~models:(Emu.Checkpoint.create ()) ~restore:ckpt
+          (Bap_script.project echo)
+      in
+      printf "missing required hook binding %b\n"
+        (match Emu.status unbound with
+        | Failed msg ->
+            String.is_substring msg
+              ~substring:"test:script-state is not registered"
+        | _ -> false);
+      let again = Emu.create ~models ~restore:ckpt (Bap_script.project echo) in
       printf "restored at print_strings %b\n"
         Int64.(Emu.pc again = print_strings);
       (match Emu.run again ~until:endline with

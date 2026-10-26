@@ -1267,6 +1267,17 @@ let emu data =
         check env "saves the preflight fixture" (out.status = Exited 0);
         let out = run [ "atomic-restore"; bin; ckpt ] in
         has env "preflights every model before callbacks" out "good=0; bad=0";
+        let out =
+          run
+            [
+              "isolation";
+              bin;
+              Filename.concat cache "first.ckpt";
+              Filename.concat cache "second.ckpt";
+            ]
+        in
+        has env "isolates same-name per-emulator models" out
+          "isolated 11,22; registered 1,1";
         let out = run [ "invalid-version"; "0" ] in
         has env "rejects a nonpositive schema" out "invalid schema version 0");
     (* the memory of a long run: the footprint, the lifted instructions,
@@ -2422,6 +2433,7 @@ let threads data =
                 "script";
                 input "emu/thread-controls.ml";
                 path data "bin/x86_64-linux-gnu-threads";
+                dir env;
               ]
           in
           sequence env out
@@ -2440,7 +2452,11 @@ let threads data =
           has env "records thread switches" out
             "thread-switch old=1;new=2;pc=0x201513";
           has env "records thread exits" out
-            "thread-exit tid=[0-9]+;status=0x[0-9a-f]+");
+            "thread-exit tid=[0-9]+;status=0x[0-9a-f]+";
+          has env "saves scheduler phase and lifecycle journal" out
+            "saved quantum true, journal true";
+          has env "restores scheduler phase and lifecycle journal" out
+            "restored journal true, quantum true");
       (* the checkpoint, that is saved, while a call of the script runs,
          is of the program at the call, with its threads, see
          call-save.ml *)

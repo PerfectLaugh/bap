@@ -80,6 +80,7 @@ and t = {
   default : handler;
   version : int64;
   versions : int64 list;
+  declaration_fingerprint : string;
   log : (call_record -> unit) option;
   mutable env : int64;
   mutable vm : int64;
@@ -92,6 +93,7 @@ and t = {
 module Saved_state = struct
   type t = {
     format : int;
+    fingerprint : string;
     next_handle : int64;
     next_identity : int;
     handles : ((ref_kind * identity) * int64) list;
@@ -106,6 +108,9 @@ module Saved_state = struct
     strings_by_content : (string * identity) list;
     env : int64;
     vm : int64;
+    next_ordinal : int;
+    events : event list;
+    recording : bool;
   }
   [@@deriving bin_io]
 end
@@ -114,7 +119,8 @@ let export_state (t : t) =
   Binable.to_string
     (module Saved_state)
     {
-      format = 1;
+      format = 2;
+      fingerprint = t.declaration_fingerprint;
       next_handle = t.next_handle;
       next_identity = t.next_identity;
       handles = Hashtbl.to_alist t.handles;
@@ -129,6 +135,9 @@ let export_state (t : t) =
       strings_by_content = Hashtbl.to_alist t.strings_by_content;
       env = t.env;
       vm = t.vm;
+      next_ordinal = t.next_ordinal;
+      events = List.rev t.events;
+      recording = t.recording;
     }
 
 let import_state (t : t) data =
@@ -138,7 +147,10 @@ let import_state (t : t) data =
     | exception _ -> invalid ()
     | state -> state
   in
-  if state.format <> 1 || state.next_identity < 0 then invalid ();
+  if not (String.equal state.fingerprint t.declaration_fingerprint) then
+    invalid_arg "Bap_emu.Jni: declaration fingerprint mismatch";
+  if state.format <> 2 || state.next_identity < 0 || state.next_ordinal < 1 then
+    invalid ();
   let valid_identity = function
     | External _ -> true
     | Internal id -> id >= 0 && id < state.next_identity
@@ -163,6 +175,18 @@ let import_state (t : t) data =
       check_identity id);
   List.iter state.strings ~f:(fun (id, _) -> check_identity id);
   List.iter state.strings_by_content ~f:(fun (_, id) -> check_identity id);
+  List.iter state.events ~f:(fun event ->
+      if event.ordinal < 1 || event.ordinal >= state.next_ordinal then
+        invalid ();
+      List.iter event.identities ~f:(fun (_, id) -> check_identity id);
+      Option.iter event.result_identity ~f:check_identity);
+  let ordered =
+    List.fold state.events ~init:(Some 0) ~f:(fun previous event ->
+        match previous with
+        | Some ordinal when event.ordinal > ordinal -> Some event.ordinal
+        | _ -> None)
+  in
+  if Option.is_none ordered then invalid ();
   let table pairs =
     let result = Hashtbl.Poly.create () in
     List.iter pairs ~f:(fun (key, data) ->
@@ -180,6 +204,57 @@ let import_state (t : t) data =
   and field_ids = table state.field_ids
   and strings = table state.strings
   and strings_by_content = table state.strings_by_content in
+  if Hashtbl.length handles <> Hashtbl.length sources then invalid ();
+  Hashtbl.iteri handles ~f:(fun ~key:(_, id) ~data:handle ->
+      match Hashtbl.find sources handle with
+      | Some source when Poly.equal source id -> ()
+      | _ -> invalid ());
+  Hashtbl.iteri sources ~f:(fun ~key:handle ~data:id ->
+      if
+        not
+          (List.exists [ Local; Global; Weak ] ~f:(fun kind ->
+               Hashtbl.mem handles (kind, id)
+               && Poly.equal (Hashtbl.find_exn handles (kind, id)) handle))
+      then invalid ());
+  if Hashtbl.length classes <> Hashtbl.length class_names then invalid ();
+  Hashtbl.iteri classes ~f:(fun ~key:name ~data:id ->
+      match Hashtbl.find class_names id with
+      | Some saved when String.equal name saved -> ()
+      | _ -> invalid ());
+  Hashtbl.iteri strings_by_content ~f:(fun ~key:content ~data:id ->
+      match Hashtbl.find strings id with
+      | Some info when String.equal content info.content -> ()
+      | _ -> invalid ());
+  if Hashtbl.length method_ids <> Hashtbl.length t.method_ids then invalid ();
+  Hashtbl.iteri method_ids
+    ~f:(fun ~key:(owner, name, signature, static) ~data:id ->
+      match
+        ( Hashtbl.find t.methods id,
+          Hashtbl.find t.method_ids (owner, name, signature, static) )
+      with
+      | Some info, Some declared
+        when Poly.equal declared id
+             && Poly.equal info.owner owner
+             && Bool.equal info.static static
+             && String.equal info.method_decl.name name
+             && String.equal info.method_decl.signature signature ->
+          ()
+      | _ -> invalid ());
+  if Hashtbl.length field_ids <> Hashtbl.length t.field_ids then invalid ();
+  Hashtbl.iteri field_ids
+    ~f:(fun ~key:(owner, name, signature, static) ~data:id ->
+      match
+        ( Hashtbl.find t.fields id,
+          Hashtbl.find t.field_ids (owner, name, signature, static) )
+      with
+      | Some info, Some declared
+        when Poly.equal declared id
+             && Poly.equal info.owner owner
+             && Bool.equal info.static static
+             && String.equal info.field_decl.name name
+             && String.equal info.field_decl.signature signature ->
+          ()
+      | _ -> invalid ());
   let replace destination source =
     Hashtbl.clear destination;
     Hashtbl.iteri source ~f:(fun ~key ~data ->
@@ -198,7 +273,10 @@ let import_state (t : t) data =
   replace t.strings strings;
   replace t.strings_by_content strings_by_content;
   t.env <- state.env;
-  t.vm <- state.vm
+  t.vm <- state.vm;
+  t.next_ordinal <- state.next_ordinal;
+  t.events <- List.rev state.events;
+  t.recording <- state.recording
 
 let arg call n = if n < Array.length call.args then call.args.(n) else 0L
 
@@ -511,6 +589,59 @@ and register_class t (decl : class_decl) =
   register_fields false decl.fields;
   register_fields true decl.static_fields
 
+module Declaration = struct
+  type class_state = {
+    name : string;
+    methods : (string * string * bool) list;
+    fields : (string * string * answer * bool) list;
+  }
+  [@@deriving bin_io]
+
+  type object_state = {
+    identity : object_id;
+    class_name : string;
+    elements : answer list;
+  }
+  [@@deriving bin_io]
+
+  type t = {
+    version : int64;
+    versions : int64 list;
+    classes : class_state list;
+    objects : object_state list;
+  }
+  [@@deriving bin_io]
+end
+
+let declaration_fingerprint ~version ~versions ~(classes : class_decl list)
+    ~(objects : object_decl list) =
+  let methods static (decls : method_decl list) =
+    List.map decls ~f:(fun decl -> (decl.name, decl.signature, static))
+  in
+  let fields static (decls : field_decl list) =
+    List.map decls ~f:(fun decl ->
+        (decl.name, decl.signature, decl.value, static))
+  in
+  let classes =
+    List.map classes ~f:(fun decl ->
+        {
+          Declaration.name = decl.name;
+          methods =
+            methods false decl.methods @ methods true decl.static_methods;
+          fields = fields false decl.fields @ fields true decl.static_fields;
+        })
+  in
+  let objects =
+    List.map objects ~f:(fun decl ->
+        {
+          Declaration.identity = decl.identity;
+          class_name = decl.class_name;
+          elements = decl.elements;
+        })
+  in
+  Binable.to_string (module Declaration) { version; versions; classes; objects }
+  |> Stdlib.Digest.string |> Stdlib.Digest.to_hex
+
 let create ?(first_handle = 0x52030000L) ?read_string ?alloc_string
     ?(class_of = fun _ -> None) ?(default = fun _ _ -> Value 0L)
     ?(version = 0x10006L) ?versions ?log ?(classes = []) ?(objects = []) () =
@@ -537,6 +668,8 @@ let create ?(first_handle = 0x52030000L) ?read_string ?alloc_string
       default;
       version;
       versions;
+      declaration_fingerprint =
+        declaration_fingerprint ~version ~versions ~classes ~objects;
       log;
       env = 0L;
       vm = 0L;

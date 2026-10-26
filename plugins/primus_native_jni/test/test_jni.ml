@@ -280,6 +280,7 @@ let test_adapter () =
 
 let test_state () =
   let jni, address = make () in
+  Jni.start_recording jni;
   let class_handle = dispatch jni 6 [ 0L; address "com/example/Example" ] in
   let method_handle =
     dispatch jni 33 [ 0L; class_handle; address "isDirectory"; address "()Z" ]
@@ -302,8 +303,11 @@ let test_state () =
   expect "array classes before export" array_class
     (dispatch jni 31 [ 0L; other_array ]);
   let saved = Jni.export_state jni in
+  let saved_events = Jni.journal jni in
   let restored, restored_address = make () in
   Jni.import_state restored saved;
+  if not (Poly.equal saved_events (Jni.journal restored)) then
+    failwith "restored JNI journal differs";
   expect "restored class" class_handle
     (dispatch restored 6 [ 0L; restored_address "com/example/Example" ]);
   expect "restored method" method_handle
@@ -340,12 +344,25 @@ let test_state () =
   let next_object = Jni.intern restored 0x3333L in
   if Int64.equal next_object object_handle || Int64.equal next_object global
   then failwith "restored model recycled an object handle";
+  let restored_events = Jni.journal restored in
+  expect_int "restored JNI ordinal"
+    (List.length restored_events)
+    (List.last_exn restored_events).ordinal;
   let before_invalid_import = Jni.export_state restored in
   (match Jni.import_state restored "broken" with
   | exception Invalid_argument _ -> ()
   | () -> failwith "invalid JNI state was accepted");
   expect_string "invalid import is atomic" before_invalid_import
-    (Jni.export_state restored)
+    (Jni.export_state restored);
+  let mismatched = Jni.create ~classes:(List.tl_exn classes) () in
+  let before_mismatch = Jni.export_state mismatched in
+  (match Jni.import_state mismatched saved with
+  | exception Invalid_argument msg ->
+      if not (String.is_substring msg ~substring:"declaration fingerprint") then
+        failwith msg
+  | () -> failwith "mismatched JNI declarations were accepted");
+  expect_string "mismatched import is atomic" before_mismatch
+    (Jni.export_state mismatched)
 
 let test_replay () =
   let jni, address = make () in
