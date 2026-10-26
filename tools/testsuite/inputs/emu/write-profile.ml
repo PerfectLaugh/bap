@@ -10,22 +10,24 @@ let () =
     ~f:(fun (engine, name) ->
       let emu = Emu.create ~engine (Bap_script.project file) in
       let first = ref 0 and second = ref 0 and disjoint = ref 0 in
-      let subscription callback : Emu.write_subscription =
+      let subscription ~deferred callback : Emu.write_subscription =
         {
           first = Some 0x40200bL;
           last = Some 0x40200bL;
           primus = true;
+          deferred;
           callback;
         }
       in
       Emu.on_writes emu
         [
-          subscription (fun _ _ _ _ -> incr first);
-          subscription (fun _ _ _ _ -> incr second);
+          subscription ~deferred:true (fun _ _ _ _ -> incr first);
+          subscription ~deferred:false (fun _ _ _ _ -> incr second);
           {
             first = Some 0x1L;
             last = Some 0x1L;
             primus = false;
+            deferred = false;
             callback = (fun _ _ _ _ -> incr disjoint);
           };
         ];
@@ -43,6 +45,7 @@ let () =
                 first = None;
                 last = None;
                 primus = false;
+                deferred = false;
                 callback = (fun _ _ _ _ -> incr first);
               };
             ]);

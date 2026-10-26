@@ -42,6 +42,17 @@ let () =
           | exception Invalid_argument msg ->
               printf "write in the hook: %s\n" msg
           | () -> print_endline "wrote in the hook");
+          let rejected name f =
+            match f () with
+            | exception Invalid_argument msg ->
+                printf "%s names its context error %b\n" name
+                  (String.is_prefix msg ~prefix:(sprintf "Bap_emu.%s:" name))
+            | () -> printf "%s ran in the hook\n" name
+          in
+          rejected "thread" (fun () -> ignore (Emu.thread emu));
+          rejected "threads" (fun () -> ignore (Emu.threads emu));
+          rejected "thread_regs" (fun () -> ignore (Emu.thread_regs emu 1));
+          rejected "backtrace" (fun () -> ignore (Emu.backtrace emu));
           Emu.save emu ckpt;
           Emu.defer emu (fun _ -> script_state := 42);
           Emu.defer emu (fun emu ->
@@ -101,5 +112,67 @@ let () =
       (match Emu.run again ~until:endline with
       | Paused -> print_endline "the restored program reached print_endline"
       | _ -> print_endline "the restored program didn't reach print_endline");
-      printf "restored script state: %d\n" !script_state
+      printf "restored script state: %d\n" !script_state;
+      let live = Emu.create (Bap_script.project echo) in
+      ignore (Emu.run live ~until:(addr "main") : Emu.status);
+      let live_far = Int64.(Emu.reg live "RSP" - 0x400000L) in
+      let code_seen = ref false and site_seen = ref false in
+      Emu.scoped live (fun () ->
+          Emu.on_code live ~deferred:true ~first:print_strings
+            ~last:print_strings (fun emu pc ->
+              let page = Emu.read emu live_far 4096 in
+              let tid = Emu.thread emu in
+              ignore (Emu.backtrace emu);
+              code_seen :=
+                String.length page = 4096
+                && Int64.(pc = print_strings && Emu.pc emu = pc)
+                && List.exists (Emu.threads emu)
+                     ~f:(fun (thread : Emu.Checkpoint.thread) ->
+                       thread.tid = tid)
+                && (not (List.is_empty (Emu.thread_regs emu tid)))
+                && match Emu.status emu with Paused -> true | _ -> false);
+          Emu.on_sites live ~deferred:true [ print_strings ] (fun emu pc ->
+              site_seen :=
+                Int64.(pc = print_strings && Emu.pc emu = pc)
+                && match Emu.status emu with Paused -> true | _ -> false);
+          match Emu.run live ~until:endline with
+          | Paused ->
+              printf "deferred code continued to print_endline %b\n"
+                Int64.(Emu.pc live = endline)
+          | _ -> print_endline "deferred code didn't continue");
+      printf "deferred code inspected memory and thread %b, sites %b\n"
+        !code_seen !site_seen;
+      let read_seen = ref false in
+      Emu.scoped live (fun () ->
+          Emu.on_read live ~deferred:true (fun emu _ size ->
+              let page = Emu.read emu live_far 4096 in
+              (read_seen :=
+                 size > 0
+                 && String.length page = 4096
+                 && match Emu.status emu with Paused -> true | _ -> false);
+              Emu.stop emu);
+          match Emu.run live with
+          | Paused -> print_endline "deferred read callback stopped"
+          | _ -> print_endline "deferred read callback didn't stop");
+      printf "deferred read captured args and read a new page %b\n" !read_seen;
+      let write_seen = ref false in
+      Emu.scoped live (fun () ->
+          Emu.on_write live ~deferred:true (fun emu _ size _ ->
+              (write_seen :=
+                 size > 0
+                 && match Emu.status emu with Paused -> true | _ -> false);
+              Emu.stop emu);
+          match Emu.run live with
+          | Paused -> print_endline "deferred write callback stopped"
+          | _ -> print_endline "deferred write callback didn't stop");
+      printf "deferred write captured args %b\n" !write_seen;
+      let error =
+        Emu.scoped live (fun () ->
+            Emu.on_code live ~deferred:true (fun _ _ ->
+                failwith "deferred observer failure");
+            match Emu.run live with
+            | exception Failure msg -> msg
+            | _ -> "deferred observer error didn't propagate")
+      in
+      printf "deferred error: %s\n" error
   | _ -> failwith "expected ECHO DIR"

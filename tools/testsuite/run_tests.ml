@@ -2443,6 +2443,9 @@ let threads data =
               ("rejects a missing backtrace", "missing backtrace:");
               ( "resumes the selected thread",
                 "resumed thread 2 at 201513 with R8 = 42\n" );
+              ( "inspects active and parked threads from a deferred hook",
+                "deferred inspection: active true, parked true, backtraces true\n"
+              );
               ("runs the selected thread", "continued thread 2 with R8 = 42\n");
               ("rejects a missing thread", "missing thread:");
               ("rejects a waiting thread", "waiting thread:");

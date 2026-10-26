@@ -116,6 +116,7 @@ type write_subscription = {
   first : int64 option;
   last : int64 option;
   primus : bool;
+  deferred : bool;
   callback : t -> int64 -> int -> int64 -> unit;
 }
 
@@ -210,7 +211,9 @@ let rec resume t request =
       (* the hooks see, that the program runs, and its continuation is
          not resumed again *)
       t.state <- Running;
-      t.stopped <- false;
+      (match request with
+      | X.Continue _ | X.Call _ | X.Interpret -> t.stopped <- false
+      | _ -> ());
       finish t (Effect.Deep.continue k request);
       served t
   | _ -> not_paused t
@@ -240,7 +243,8 @@ and served t =
         done)
       ~finally:(fun () -> t.serving <- false);
     match t.state with
-    | Suspended (pc, _, _) when not stopped -> resume t (X.Continue pc)
+    | Suspended (pc, _, _) when not (stopped || t.stopped) ->
+        resume t (X.Continue pc)
     | _ -> ()
   end
 
@@ -253,7 +257,7 @@ let pause t =
 
 let stop t =
   t.stopped <- true;
-  pause t
+  if not (paused t) then pause t
 
 (* the action runs, when the program is paused: now, or, in a hook,
    where the machine runs the program, and serves no request, at the
@@ -2529,20 +2533,24 @@ let slice ?(addresses = false) ?window ?thread (tr : Trace.t) criterion =
     complete = List.is_empty live && List.is_empty gaps && not !untracked;
   }
 
-let on_code ?first ?last t f =
+let observe ~deferred t f = if deferred then defer t (fun t -> f t) else f t
+
+let on_code ?first ?last ?(deferred = false) t f =
   hook t (fun e ->
       let fresh = instructions t in
       [
-        Uc.on_code ?first ?last e.uc (fun addr _ -> if fresh addr then f t addr);
+        Uc.on_code ?first ?last e.uc (fun addr _ ->
+            if fresh addr then observe ~deferred t (fun t -> f t addr));
       ])
 
-let on_sites t sites f = sites_hook t sites (fun addr -> f t addr)
+let on_sites ?(deferred = false) t sites f =
+  sites_hook t sites (fun addr -> observe ~deferred t (fun t -> f t addr))
 
-let on_read ?first ?last t f =
+let on_read ?first ?last ?(deferred = false) t f =
   hook t (fun e ->
       [
         Uc.on_mem ?first ?last e.uc [ `read ] (fun _ addr size _ ->
-            f t addr size);
+            observe ~deferred t (fun t -> f t addr size));
       ])
 
 (* the bytes, that Primus, or a native function, stored from [addr], in
@@ -2589,13 +2597,14 @@ type write_handler = {
 }
 
 let invoke_write t handler addr size value =
-  t.write_callbacks <- t.write_callbacks + 1;
-  let started = Caml_unix.gettimeofday () in
-  Exn.protect
-    ~f:(fun () -> handler.subscription.callback t addr size value)
-    ~finally:(fun () ->
-      t.write_seconds <-
-        t.write_seconds +. (Caml_unix.gettimeofday () -. started))
+  observe ~deferred:handler.subscription.deferred t (fun t ->
+      t.write_callbacks <- t.write_callbacks + 1;
+      let started = Caml_unix.gettimeofday () in
+      Exn.protect
+        ~f:(fun () -> handler.subscription.callback t addr size value)
+        ~finally:(fun () ->
+          t.write_seconds <-
+            t.write_seconds +. (Caml_unix.gettimeofday () -. started)))
 
 let deliver_write t handler addr size value =
   let pc = code_of t (pc t) in
@@ -2678,8 +2687,8 @@ let on_writes t subscriptions =
                   not (phys_equal g h)))
       end)
 
-let on_write ?first ?last ?(primus = false) t f =
-  on_writes t [ { first; last; primus; callback = f } ]
+let on_write ?first ?last ?(primus = false) ?(deferred = false) t f =
+  on_writes t [ { first; last; primus; deferred; callback = f } ]
 
 let write_profile t =
   {
@@ -3187,6 +3196,7 @@ let exit_code t = t.session.exit_code
 
 (* the threads are of the machine, see [X.threads] *)
 let thread t =
+  if not (paused t) then not_paused ~fn:"thread" t;
   let tid = ref 1 in
   primus t
     (module functor
@@ -3238,6 +3248,7 @@ let changed_since t file =
       coalesce (differ theirs all @ extra)
 
 let threads t =
+  if not (paused t) then not_paused ~fn:"threads" t;
   let pc = pc t in
   let st = ref None in
   primus t
@@ -3338,6 +3349,7 @@ let stop_stats subscription = subscription.stop ()
    the thread, that runs, or the ones, that Primus keeps for the thread,
    that doesn't, see [X.Make.Threads.park] *)
 let rec thread_regs t tid =
+  if not (paused t) then not_paused ~fn:"thread_regs" t;
   List.sort (unsorted_thread_regs t tid) ~compare:(fun (a, _) (b, _) ->
       String.compare a b)
 
@@ -3387,6 +3399,7 @@ let require_thread t tid =
   then invalid_argf "Bap_emu: the program has no thread %d" tid ()
 
 let backtrace ?thread:tid t =
+  if not (paused t) then not_paused ~fn:"backtrace" t;
   let tid = Option.value tid ~default:(thread t) in
   require_thread t tid;
   let result = ref [] in

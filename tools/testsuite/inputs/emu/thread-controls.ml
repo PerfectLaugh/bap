@@ -37,7 +37,22 @@ let () =
       Emu.resume_thread emu other.tid;
       printf "resumed thread %d at %Lx with R8 = %Lx\n" (Emu.thread emu)
         (Emu.pc emu) (Emu.reg emu "R8");
-      pause emu 0x201537L;
+      Emu.scoped emu (fun () ->
+          Emu.on_code emu ~deferred:true ~first:0x201513L ~last:0x201513L
+            (fun emu _ ->
+              let current = Emu.thread emu in
+              let other =
+                List.find_exn (Emu.threads emu)
+                  ~f:(fun (thread : Emu.Checkpoint.thread) ->
+                    thread.tid <> current)
+              in
+              printf
+                "deferred inspection: active %b, parked %b, backtraces %b\n"
+                (not (List.is_empty (Emu.thread_regs emu current)))
+                (not (List.is_empty (Emu.thread_regs emu other.tid)))
+                (List.length (Emu.backtrace emu) = 2
+                && List.length (Emu.backtrace emu ~thread:other.tid) = 2));
+          pause emu 0x201537L);
       printf "continued thread %d with R8 = %Lx\n" (Emu.thread emu)
         (Emu.reg emu "R8");
       (match Emu.resume_thread emu 999 with

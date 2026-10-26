@@ -640,14 +640,22 @@ val primus : t -> Bap_primus.Std.Primus.Machine.component -> unit
     Raises [Invalid_argument], if the program is not paused, as it runs, e.g.,
     in a hook. *)
 
-val on_code : ?first:int64 -> ?last:int64 -> t -> (t -> int64 -> unit) -> unit
+val on_code :
+  ?first:int64 ->
+  ?last:int64 ->
+  ?deferred:bool ->
+  t ->
+  (t -> int64 -> unit) ->
+  unit
 (** [on_code emu f] calls [f emu addr] before each instruction from [first] to
     [last], inclusive, by default of all. The instruction, that the hook saw,
     when the program paused before it, e.g., as the hook stopped it, is not seen
     again, when the program continues from it, so the hook may stop the program
-    unconditionally. *)
+    unconditionally. With [deferred], the callback runs at the safe pause as by
+    {!defer}, with [addr] captured at the event, and the program continues
+    afterwards unless the callback stopped it. *)
 
-val on_sites : t -> int64 list -> (t -> int64 -> unit) -> unit
+val on_sites : ?deferred:bool -> t -> int64 list -> (t -> int64 -> unit) -> unit
 (** [on_sites emu sites f] calls [f emu addr] before each instruction at one of
     the [sites], with the lower bit set for Thumb, as {!on_code} does, at
     [addr], without the lower bit, with one hook, which the engine finds the
@@ -662,23 +670,35 @@ val on_sites : t -> int64 list -> (t -> int64 -> unit) -> unit
     {[
     Emu.on_sites emu (List.map handlers ~f:snd) (fun emu addr ->
         Hashtbl.incr hits addr)
-    ]} *)
+    ]}
+
+    With [deferred], the callback runs at the safe pause as {!on_code} does. *)
 
 val on_read :
-  ?first:int64 -> ?last:int64 -> t -> (t -> int64 -> int -> unit) -> unit
-(** [on_read emu f] calls [f emu addr size] before each load. *)
+  ?first:int64 ->
+  ?last:int64 ->
+  ?deferred:bool ->
+  t ->
+  (t -> int64 -> int -> unit) ->
+  unit
+(** [on_read emu f] calls [f emu addr size] before each load. With [deferred],
+    the callback runs after the load at the safe pause as by {!defer}, with the
+    event arguments captured immediately. *)
 
 type write_subscription = {
   first : int64 option;
   last : int64 option;
   primus : bool;
+  deferred : bool;
   callback : t -> int64 -> int -> int64 -> unit;
 }
 
 val on_writes : t -> write_subscription list -> unit
 (** [on_writes emu subscriptions] subscribes several callbacks with one native
     memory hook per distinct range. Each callback has independent exact-once
-    replay state and, when [primus] is true, also sees Primus/native stores. *)
+    replay state and, when [primus] is true, also sees Primus/native stores.
+    With [deferred], its callback runs at the safe pause as by {!defer};
+    replayed stores are not queued again. *)
 
 type write_profile = { dispatches : int; callbacks : int; seconds : float }
 
@@ -690,11 +710,14 @@ val on_write :
   ?first:int64 ->
   ?last:int64 ->
   ?primus:bool ->
+  ?deferred:bool ->
   t ->
   (t -> int64 -> int -> int64 -> unit) ->
   unit
 (** [on_write emu f] calls [f emu addr size value] before each store, that the
-    engine runs, from [first] to [last], inclusive, by default of all.
+    engine runs, from [first] to [last], inclusive, by default of all. With
+    [deferred], the callback runs after the store at the safe pause as by
+    {!defer}, with the event arguments captured immediately.
 
     With [primus], it also sees the stores, that the engine doesn't run: of
     Primus, e.g., of the Lisp stubs, e.g., [strcpy] or [fread], and of the
@@ -1457,7 +1480,8 @@ val backtrace : ?thread:int -> t -> (string option * string option) list
     innermost first, with the function that runs and the stub that called it.
     These are Primus-to-native runs, not every native-to-native call. Threads
     switch at the same run depth, so active and parked threads share these
-    surrounding frames. Raises [Invalid_argument] for an unknown thread. *)
+    surrounding frames. Raises [Invalid_argument] if the program is not paused,
+    or for an unknown thread. *)
 
 val thread_regs : t -> int -> (string * int64) list
 (** [thread_regs emu tid] the registers, without the aliases, of the thread of

@@ -254,9 +254,9 @@ Emu.insns_since emu "before.ckpt" |> List.iter ~f:(printf "%Lx\n")
 
 | Function | Calls `f` |
 |----------|-----------|
-| `on_code ?first ?last emu f` | before each instruction in the range |
-| `on_sites emu sites f` | before each instruction at one of the sites, with one hook, that the engine finds them natively with |
-| `on_read`, `on_write` | before each load or store in the range; `on_write ~primus:true` also sees the stores of Primus and of the native functions of libc |
+| `on_code ?first ?last ?deferred emu f` | before each instruction in the range |
+| `on_sites ?deferred emu sites f` | before each instruction at one of the sites, with one hook, that the engine finds them natively with |
+| `on_read`, `on_write` | before each load or store in the range, also with optional `deferred`; `on_write ~primus:true` also sees the stores of Primus and of the native functions of libc |
 | `on_call emu name f` | when the program calls the function; `f` returns `Default` to run it, or `Return x` to return `x` at once |
 | `on_syscall emu f` | at each system call, `f emu number args`, with the number and the six arguments, as the ABI of Linux passes them, e.g., `X8` and `X0`..`X5` of AArch64; `Return x` returns `x` from the call, and `Default` serves it as without the hook |
 | `shell emu` | a prompt with the commands of the debugger on the paused program, see below |
@@ -270,7 +270,7 @@ Emu.on_write emu ~first:buf ~last:Int64.(buf + 63L) ~primus:true (fun emu addr s
     printf "%d bytes at %Lx\n" size addr)
 ```
 
-For several write predicates, `Emu.on_writes` shares one native hook per distinct range and gives every callback independent exact-once replay state. A subscription has optional `first`/`last`, `primus`, and `callback`; singleton `on_write` is the same API with one subscription. `write_profile emu` reports native dispatches, callback invocations, and callback seconds for that emulator, so grouped dispatch and per-callback costs are distinguishable.
+For several write predicates, `Emu.on_writes` shares one native hook per distinct range and gives every callback independent exact-once replay state. A subscription has `first`/`last`, `primus`, `deferred`, and `callback`; singleton `on_write` is the same API with one subscription. A replayed store doesn't queue a deferred callback again. `write_profile emu` reports native dispatches, callback invocations, and callback seconds for that emulator, so grouped dispatch and per-callback costs are distinguishable.
 
 A watch of many addresses, e.g., of a table of handlers, costs a hook of `on_code` each, which the lifted engine checks one by one at their instructions, and changes its hooks for, while `on_sites emu sites f` is one hook, which finds the sites in a set, or, in Unicorn, in C, so only the sites call OCaml.
 
@@ -328,6 +328,8 @@ Emu.on_code emu ~first:unpacked ~last:unpacked (fun emu _ ->
         Out_channel.write_all "region.bin" ~data:region;
         Emu.add_symbol emu "decrypt" (Emu.reg emu "X0")))
 ```
+
+The observation hooks `on_code`, `on_sites`, `on_read`, and `on_write` also take `~deferred:true`, which captures the event arguments immediately and runs the whole callback through `defer`. The callback can therefore read pages that were not materialized yet and inspect `thread`, `threads`, `thread_regs`, and `backtrace`. Execution continues automatically unless the callback calls `stop`; callback errors propagate from `run`. Scoped removal covers deferred subscriptions in the same way as synchronous ones, and deferred actions still finish before a queued checkpoint. Call and syscall handlers remain immediate, since they must choose their results before execution continues.
 
 `save` from a hook defers itself, so a checkpoint is saved before the instruction the hook sees.
 

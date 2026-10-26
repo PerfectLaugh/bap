@@ -1,5 +1,9 @@
 read in the hook: Bap_emu: the page of 3fbfffe0 is not in Unicorn yet, as the program runs, e.g., in a hook; pause it to read the page, see Bap_emu.defer
 write in the hook: Bap_emu.write: the program is not paused, as it runs, e.g., in a hook, where the machine serves no request: stop it there, see Bap_emu.stop, or defer the action to the pause, see Bap_emu.defer
+thread names its context error true
+threads names its context error true
+thread_regs names its context error true
+backtrace names its context error true
 paused at print_endline true, after the hook of print_strings
 deferred: 4096 bytes, at 0 of print_strings, paused true
 the checkpoint is at print_strings true
@@ -11,3 +15,10 @@ missing required hook binding true
 restored at print_strings true
 the restored program reached print_endline
 restored script state: 42
+deferred code continued to print_endline true
+deferred code inspected memory and thread true, sites true
+deferred read callback stopped
+deferred read captured args and read a new page true
+deferred write callback stopped
+deferred write captured args true
+deferred error: deferred observer failure
