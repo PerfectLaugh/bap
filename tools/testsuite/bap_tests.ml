@@ -368,14 +368,18 @@ let obj data =
 let plugins _ =
   [
     case "plugins" (fun env ->
+        let out = bap env [ "list"; "plugins" ] in
+        check env "bap list plugins exited with 0" (out.status = Exited 0);
         let plugins =
-          (bap env [ "list"; "plugins" ]).text |> String.split_on_char '\n'
+          out.text |> String.split_on_char '\n'
           |> List.filter_map (fun line ->
               match String.split_on_char ' ' line with
               | "" :: "" :: name :: _ when name <> "" -> Some name
               | _ -> None)
         in
-        ignore (bap env [ "--version" ]);
+        check env "bap listed at least one plugin" (plugins <> []);
+        let version = bap env [ "--version" ] in
+        check env "bap --version exited with 0" (version.status = Exited 0);
         let log =
           {
             text =

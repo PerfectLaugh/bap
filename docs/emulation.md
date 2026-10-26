@@ -320,7 +320,19 @@ Emu.on_call emu "putchar" (fun emu ->
     if Emu.arg emu 0 = Int64.of_int (Char.code 'l') then Return 108L else Default)
 ```
 
-While the program runs, the machine of Primus runs it, and serves no request of the script, so a hook may `stop` the program, read the registers, `read` the memory, that Unicorn has, i.e., the pages the program touched, and `write_direct` it, and `bir` and `insn_at` the code; the other functions raise `Invalid_argument`, which says the program is not paused, as it runs, and `read` raises for a page, that is not in Unicorn yet, rather than making bytes up. For the rest, `defer` an action to the pause, that the hook asks for, before the instruction it sees, or after the access, in `on_read` and `on_write`; the program continues after the action, unless the hook also stopped it, and an error of the action raises from `run`:
+While the program runs, the machine of Primus serves no request of the script. The state determines what a callback or the driver may do:
+
+| State | Immediate operations | Operations that need a safe pause |
+|-------|----------------------|-----------------------------------|
+| Running observation hook (`on_code`, `on_sites`, `on_read`, `on_write`) | `stop`; `registers`, `reg`, and `set_reg`; `read`, `write_direct`, and `bir` on pages already materialized in Unicorn; `insn_at` | Use `defer` for `read` of an unmaterialized page, `write`, `primus` (including allocation), `regions`, `project`, snapshots, and `thread`/`threads`/`thread_regs`/`backtrace`. `save` defers itself. |
+| Deferred action, including a `~deferred:true` observer | The full paused API, including all memory, Primus, project, snapshot, and thread operations above | Already paused. A code event runs before its instruction; a memory event runs after its access. Event arguments were captured at the event. |
+| Paused script driver | The full paused API; `save` is immediate and `defer` runs its action immediately | Call `run` or `step` to continue. |
+| `Failed _` | Inspect the original error, `failure`, and retained local data; `primus` may inspect the ended machine | Not paused: `stop`, `defer`, `regions`, `project`, snapshots, and thread inspection are rejected. Only a failure in a native run may be saved as a crash checkpoint. |
+| `Exited _` | Inspect `status`, `exit_code`, and retained local data; `primus` may inspect the ended machine | Not paused: `stop`, `defer`, `save`, `regions`, `project`, snapshots, and thread inspection are rejected. |
+
+An `on_call` or `on_syscall` handler must still answer `Default` or `Return` immediately; it may queue paused-only work with `defer` before answering. A synchronous hook failure keeps its original error in `Failed _`, an error of a deferred action raises from `run`, and a checkpoint error remains its original `Failure`. These are distinct from API misuse, which raises `Invalid_argument` naming the operation and the running or ended state. A running-hook `read` of an unmaterialized page also raises rather than making bytes up.
+
+For an immediate observation hook, the deferred action runs before the instruction it sees, or after the access in `on_read` and `on_write`; the program continues after the action unless the hook also stopped it:
 
 ```ocaml
 Emu.on_code emu ~first:unpacked ~last:unpacked (fun emu _ ->
@@ -647,6 +659,22 @@ Emu.run emu
 `Checkpoint.context file` describes a failure checkpoint without running it: the active thread, native frames, model manifest, last unrecoverable fault, and the last 32 model events. JNI and named import/syscall outcomes are recorded automatically. Allocator and other models add positions with `record_event emu "allocator" detail`. The journal is informational and bounded; the actual model state still comes from registered extensions, and missing or incompatible required state is rejected before guest execution.
 
 While a function, that the script called, runs, e.g., paused in it by a hook, see `call`, the checkpoint is of the program at the call: the registers, the runs of Unicorn, and the threads, that the program had, when the script called the function, and the memory, as the function changed it, as the call is of the script, and not of the program, which continues from where it paused for the call.
+
+For example, after a hook parks a `drive`, restoring the checkpoint gives the outer program's original call-site PC and stack, not the parked PC or the call's temporary stack. The callee's memory writes are kept:
+
+```ocaml
+let outer_pc = Emu.pc emu and outer_sp = Emu.reg emu "RSP" in
+match Emu.drive emu worker ~args:[ output ] with
+| Parked _ ->
+    Emu.save emu "parked.ckpt";
+    let resumed = Emu.create ~restore:"parked.ckpt" proj in
+    assert Int64.(Emu.pc resumed = outer_pc);
+    assert Int64.(Emu.reg resumed "RSP" = outer_sp);
+    printf "callee output: %S\n" (Emu.read resumed output 16)
+| Returned _ | Ended _ -> ()
+```
+
+The script-call frame and its return catcher are not resumed, so `run` on `resumed` continues the outer program. If the callee must return its result to the script, keep and continue the original emulator's call; install an `on_code` stop hook at a return site when that return needs inspection.
 
 A failure outside of a run of Unicorn, e.g., of a stub, that the program called before it started, has no checkpoint, and `save` raises `Failure`; the program, that exited, or whose emulator failed, e.g., with an exception of the script, raises `Invalid_argument`.
 
