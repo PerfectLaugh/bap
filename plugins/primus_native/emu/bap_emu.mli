@@ -538,6 +538,36 @@ module Trace : sig
       The instructions are those of {!insns}, so a trace of blocks has them. *)
 end
 
+(** Opt-in structured comparison of trace-derived execution events. *)
+module Compare : sig
+  include module type of Bap_emu_compare
+
+  val instructions : ?thread:int -> Trace.t -> event list
+  (** [instructions trace] converts the retained instructions, including the
+      expansion of block records, preserving each instruction's effective TID.
+      With [thread], selects only that TID. *)
+
+  val blocks : ?thread:int -> Trace.t -> event list
+  (** [blocks trace] converts the retained block records without expanding them.
+  *)
+
+  val branches : ?thread:int -> Trace.t -> event list
+  (** [branches trace] converts the ordered conditional-branch decisions. *)
+
+  val calls : ?thread:int -> Trace.t -> event list
+  (** [calls trace] converts the existing call aggregates, grouped by effective
+      TID and site, with target counts; these are not individual call records.
+  *)
+
+  val captures : thread:int -> Trace.capture -> event list
+  (** [captures ~thread capture] converts register captures, attributing them to
+      the caller-selected TID. *)
+
+  val writes : ?thread:int -> Trace.t -> event list
+  (** [writes trace] converts the retained memory writes with their PCs,
+      addresses, sizes, values, and effective TIDs. *)
+end
+
 type 'a recorded = {
   result : ('a, string) result;
       (** what the function returned, or the message of the [Failure], that it

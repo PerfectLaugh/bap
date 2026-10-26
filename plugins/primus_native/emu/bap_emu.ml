@@ -2052,6 +2052,70 @@ module Trace = struct
     List.rev !branches
 end
 
+module Compare = struct
+  include Bap_emu_compare
+
+  let instructions ?thread trace =
+    let pcs, _, _, tids = Trace.window ~records:false ?thread trace in
+    List.init (Bigarray.Array1.dim pcs) ~f:(fun i ->
+        Instruction
+          {
+            pc = Bigarray.Array1.unsafe_get pcs i;
+            thread = Int64.to_int_exn (Bigarray.Array1.unsafe_get tids i);
+          })
+
+  let blocks ?thread trace =
+    let pcs = Trace.pcs trace and tids = Trace.tids trace in
+    let sizes = Trace.sizes trace in
+    List.filter_map
+      (List.init (Bigarray.Array1.dim pcs) ~f:Fn.id)
+      ~f:(fun i ->
+        let tid = Int64.to_int_exn (Bigarray.Array1.unsafe_get tids i) in
+        Option.some_if
+          (Option.for_all thread ~f:(fun selected -> tid = selected))
+          (Block
+             {
+               pc = Bigarray.Array1.unsafe_get pcs i;
+               size = Int32.to_int_trunc (Bigarray.Array1.unsafe_get sizes i);
+               thread = tid;
+             }))
+
+  let branches ?thread trace =
+    Trace.branches ?thread trace
+    |> List.map ~f:(fun (branch : Trace.branch) ->
+        Branch
+          {
+            site = branch.site;
+            target = branch.target;
+            taken = branch.taken;
+            thread = branch.thread;
+          })
+
+  let calls ?thread trace =
+    Trace.calls ?thread trace
+    |> List.map ~f:(fun (call : Trace.call) ->
+        Call { site = call.site; targets = call.targets; thread = call.thread })
+
+  let captures ~thread capture =
+    Trace.captured capture
+    |> List.map ~f:(fun (site, values) -> Capture { site; values; thread })
+
+  let writes ?thread trace =
+    Trace.accesses trace
+    |> List.filter ~f:(fun (access : Trace.access) ->
+        access.write
+        && Option.for_all thread ~f:(fun selected -> access.thread = selected))
+    |> List.map ~f:(fun (access : Trace.access) ->
+        Write
+          {
+            pc = access.pc;
+            addr = access.addr;
+            size = access.size;
+            value = access.value;
+            thread = access.thread;
+          })
+end
+
 type 'a recorded = { result : ('a, string) result; trace : Trace.t }
 
 (* [f] runs with a trace of its own, e.g., a call, so that the trace has

@@ -421,6 +421,27 @@ The slice handles these cases, see `testsuite/src/slice-weird.c` and the `emu/sl
 
 The limits: the instructions of a trace of blocks are decoded with the bytes, that the code has now. The patches, that the stubs or the script made, aren't undone. The registers are followed whole, e.g., `AL` of `RAX`, or `S1` of `D0`. An IT block, that starts before the window, isn't known. The slice is of the data, not of the control.
 
+### Comparing traces
+
+`Emu.Compare` is an opt-in structured comparison layer over existing traces; it adds no execution hooks. `Compare.instructions`, `blocks`, `branches`, `calls`, and `writes` convert trace records into events with explicit effective TIDs, and each converter takes `~thread` to select one. Instruction conversion expands block traces while keeping each expanded instruction's TID. `Compare.captures ~thread:tid capture` converts register captures with the caller-selected TID, and `Compare.syscall ~thread:tid number args` constructs an event from `on_syscall` data. Call events retain the existing `Trace.calls` aggregates—site, effective TID, targets, and counts—rather than individual invocations.
+
+`Compare.compare ?context ?normalize left right` returns `Equal` or `Difference {index; reason; before; left; right}` at the first unexplained difference, including a missing tail. `context`, 3 by default, bounds both the common-prefix events in `before` and the following windows in `left` and `right`; the windows start at the differing event. Reasons are typed by event kind, thread, address, size, branch decision, syscall number and arguments, captured registers, call targets and counts, or memory fields. A `normalization ~address ~value ()` maps relocation- or run-dependent addresses and values before comparison. Retained neighborhood events remain original, while reason values are normalized.
+
+Differences in a write's address, size, or value carry a `criterion` built from the original left write. It can be passed directly to `slice`, with the thread from the left event, to follow the differing value to its producers:
+
+```ocaml
+match Emu.Compare.compare (Emu.Compare.writes before) (Emu.Compare.writes after) with
+| Emu.Compare.Equal -> ()
+| Emu.Compare.Difference {
+    reason = Emu.Compare.Memory_value_mismatch { criterion; _ };
+    left = Emu.Compare.Write { thread; _ } :: _;
+    _;
+  } ->
+    let s = Emu.slice ~thread before [ criterion ] in
+    List.iter s.steps ~f:(fun step -> printf "%Lx\n" step.Emu.pc)
+| Emu.Compare.Difference _ -> ()
+```
+
 ### Calling a function
 
 `call emu addr ~args` calls a function of the paused program with the given arguments, as the C ABI of the target passes `long`s, on a new stack of `~stack` bytes (64 KB by default), which `malloc` allocates and the call zeroes, and returns its result. The function runs as the program does, so the hooks see it, and after it returns the registers are as they were, the memory is as the function left it, and the program pauses where it was:

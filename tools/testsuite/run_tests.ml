@@ -1162,6 +1162,31 @@ let emu data =
             ("slices the blocks", "slice of blocks: " ^ slice);
             ("has the gap of the blocks", "gap at main: true, complete: false\n");
           ]);
+    (* structured comparison is deterministic and works on the traces of both
+       engines, including the memory criteria for the slices *)
+    case "emu/compare" (fun env ->
+        let out =
+          bap ~timeout:60. env
+            [
+              "script";
+              input "emu/compare.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              path data "bin/x86_64-linux-gnu-slice-weird";
+            ]
+        in
+        sequence env out
+          [
+            ( "compares every event",
+              "synthetic: differences true, thread true, normalized true, \
+               windows true, missing true\n" );
+            ( "compares the instruction traces",
+              "engines blocks false: instructions true, branches true, calls \
+               true, writes true, tids true, raw blocks true\n" );
+            ( "compares the expanded block traces",
+              "engines blocks true: instructions true, branches true, calls \
+               true, writes true, tids true, raw blocks true\n" );
+            ("slices a memory difference", "capture true, memory slice true\n");
+          ]);
     (* the trace, that watches a range, records its accesses only, see
        the script *)
     case "emu/watch" (fun env ->
