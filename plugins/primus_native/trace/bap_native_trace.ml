@@ -17,6 +17,34 @@ external retained_accesses : t -> int = "bap_native_trace_retained_accesses"
 external accesses_count : t -> int64 = "bap_native_trace_accesses_count"
 external clear : t -> unit = "bap_native_trace_clear"
 
+module State = struct
+  type reg = int * int * int
+  type field = int * int * int * int64 * int
+
+  type record = {
+    site : int64;
+    index : int64;
+    thread : int;
+    regs : int64 array;
+    fields : int64 option array;
+  }
+
+  external configure : t -> int64 array -> reg array -> field array -> unit
+    = "bap_native_trace_state_configure"
+
+  external records : t -> int -> record list = "bap_native_trace_state_records"
+  external captures : t -> int64 -> bool = "bap_native_trace_state_captures"
+  external enabled : t -> bool = "bap_native_trace_state_enabled"
+  external registers : t -> reg array = "bap_native_trace_state_registers"
+  external fields : t -> field array = "bap_native_trace_state_fields"
+
+  let configure t sites regs fields =
+    configure t (Array.of_list sites) (Array.of_list regs)
+      (Array.of_list fields)
+
+  let records ?(last = -1) t = records t last
+end
+
 module Record = struct
   external prepare : t -> bool -> unit = "bap_native_trace_prepare"
 
@@ -29,6 +57,9 @@ module Record = struct
     = "bap_native_trace_access_bytecode" "bap_native_trace_access"
 
   external unrun : t -> int64 -> unit = "bap_native_trace_unrun"
+
+  external capture : t -> int64 -> int64 array -> int64 option array -> unit
+    = "bap_native_trace_state_capture"
 
   external bound :
     t -> bool -> bool -> bool -> int64 -> int64 array -> bool -> unit

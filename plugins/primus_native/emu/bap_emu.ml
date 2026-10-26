@@ -2018,6 +2018,128 @@ module Trace = struct
      of ARM, which is checked once per instruction, and the call, whose
      next instruction is the one after it, isn't taken, e.g., a
      conditional one *)
+  type state_field = {
+    base : string;
+    offset : int64;
+    size : int;
+    value : int64 option;
+  }
+  [@@deriving bin_io]
+
+  type state = {
+    site : int64;
+    index : int64;
+    thread : int;
+    regs : (string * int64) list;
+    fields : state_field list;
+  }
+  [@@deriving bin_io]
+
+  module Saved_states = struct
+    type t = state list [@@deriving bin_io]
+
+    let magic = "bap-emu-state-capture 1\n"
+  end
+
+  type state_capture = {
+    trace : Engine.Trace.t;
+    regs : string list;
+    fields : (string * int64 * int) list;
+    given : int64 Int64.Table.t;
+    mutable active : bool;
+    mutable hooks : Engine.hook list option;
+  }
+
+  let capture_state ?(size = 1 lsl 16) ?(regs = []) ?(fields = []) emu sites =
+    let located name =
+      match Target.Regs.locate (engine emu).regs name with
+      | Some (id, lo, width)
+        when lo mod 8 = 0 && width mod 8 = 0 && width > 0 && width <= 64 ->
+          (id, lo / 8, width / 8)
+      | Some _ ->
+          invalid_argf
+            "Bap_emu.Trace.capture_state: register %s is not a byte-aligned \
+             value of at most 64 bits"
+            name ()
+      | None ->
+          invalid_argf "Bap_emu.Trace.capture_state: unknown register %s" name
+            ()
+    in
+    let located_regs = List.map regs ~f:located in
+    let located_fields =
+      List.map fields ~f:(fun (base, offset, size) ->
+          if size < 1 || size > 8 then
+            invalid_argf
+              "Bap_emu.Trace.capture_state: field size %d is not in 1..8" size
+              ();
+          let id, lo, width = located base in
+          (id, lo, width, offset, size))
+    in
+    let given = Int64.Table.create () in
+    let sites =
+      List.map sites ~f:(fun site ->
+          let code = code_of emu site in
+          Hashtbl.set given ~key:code ~data:site;
+          code)
+    in
+    let trace = Engine.Trace.create size in
+    Engine.Trace.State.configure trace sites located_regs located_fields;
+    let c = { trace; regs; fields; given; active = true; hooks = None } in
+    let owned_trace = Weak.create 1 and owned_blocks = Weak.create 1 in
+    Weak.set owned_trace 0 (Some trace);
+    Weak.set owned_blocks 0 None;
+    emu.traces <- (owned_trace, owned_blocks) :: emu.traces;
+    installed emu (fun e ->
+        if c.active then
+          c.hooks <- Some (Engine.trace ~memory:false e.engine trace));
+    c
+
+  let stop_state_capture c =
+    if c.active then begin
+      c.active <- false;
+      Option.iter c.hooks ~f:(fun hooks ->
+          List.iter hooks ~f:(fun hook ->
+              try Engine.delete hook with Invalid_argument _ -> ()));
+      c.hooks <- None
+    end
+
+  let captured_states ?last c =
+    Engine.Trace.State.records ?last c.trace
+    |> List.map ~f:(fun (r : Engine.Trace.State.record) ->
+        if List.length c.regs <> Array.length r.regs then
+          failwithf "capture-state register shape: %d <> %d"
+            (List.length c.regs) (Array.length r.regs) ();
+        if List.length c.fields <> Array.length r.fields then
+          failwithf "capture-state field shape: %d <> %d" (List.length c.fields)
+            (Array.length r.fields) ();
+        {
+          site = Option.value (Hashtbl.find c.given r.site) ~default:r.site;
+          index = r.index;
+          thread = r.thread;
+          regs = List.zip_exn c.regs (Array.to_list r.regs);
+          fields =
+            List.map2_exn c.fields (Array.to_list r.fields)
+              ~f:(fun (base, offset, size) value ->
+                { base; offset; size; value });
+        })
+
+  let save_states c file =
+    Out_channel.write_all file
+      ~data:
+        (Saved_states.magic
+        ^ Binable.to_string (module Saved_states) (captured_states c))
+
+  let load_states file =
+    let data = In_channel.read_all file in
+    match String.chop_prefix data ~prefix:Saved_states.magic with
+    | None ->
+        failwithf "Bap_emu.Trace.load_states: %s has another format" file ()
+    | Some data -> (
+        try Binable.of_string (module Saved_states) data
+        with exn ->
+          failwithf "Bap_emu.Trace.load_states: %s is broken: %s" file
+            (Exn.to_string exn) ())
+
   (* the registers at the sites, which the hooks of the sites record,
      see [Bap_emu.on_code], in a ring of their own *)
   type capture = {

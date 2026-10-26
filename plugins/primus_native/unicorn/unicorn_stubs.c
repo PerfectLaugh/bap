@@ -1072,9 +1072,93 @@ static uint8_t thumb(uc_engine *uc) {
     return (cpsr >> 5) & 1;
 }
 
+static int capture_reg(uc_engine *uc, int id, uint32_t offset, uint32_t size,
+                       uint64_t *value) {
+    uint8_t buf[REG_BUF];
+    size_t reg_size = REG_BUF;
+    memset(buf, 0, REG_BUF);
+    if (uc_reg_read2(uc, id, buf, &reg_size) != UC_ERR_OK ||
+        offset > reg_size || size > reg_size - offset) {
+        return 0;
+    }
+    *value = 0;
+    for (uint32_t i = 0; i < size; i++) {
+        *value |= (uint64_t)buf[offset + i] << (8 * i);
+    }
+    return 1;
+}
+
+static int capture_readable(uc_engine *uc, uint64_t addr, uint32_t size) {
+    uc_mem_region *regions;
+    uint32_t count;
+    if (addr + size - 1 < addr ||
+        uc_mem_regions(uc, &regions, &count) != UC_ERR_OK) {
+        return 0;
+    }
+    uint64_t current = addr;
+    uint32_t left = size;
+    while (left > 0) {
+        uint32_t i;
+        for (i = 0; i < count; i++) {
+            if (regions[i].begin <= current && current <= regions[i].end) {
+                break;
+            }
+        }
+        if (i == count || !(regions[i].perms & UC_PROT_READ)) {
+            uc_free(regions);
+            return 0;
+        }
+        uint64_t available = regions[i].end - current;
+        if (available >= left - 1) {
+            left = 0;
+        } else {
+            uint32_t step = (uint32_t)available + 1;
+            current += step;
+            left -= step;
+        }
+    }
+    uc_free(regions);
+    return 1;
+}
+
+static void capture_state(uc_engine *uc, struct bap_native_trace *t,
+                          uint64_t site) {
+    if (!bap_native_trace_captures(t, site)) {
+        return;
+    }
+    for (size_t i = 0; i < t->nregs; i++) {
+        struct bap_native_capture_reg *r = &t->capture_regs[i];
+        if (!capture_reg(uc, r->id, r->offset, r->size,
+                         &t->capture_reg_scratch[i])) {
+            t->capture_reg_scratch[i] = 0;
+        }
+    }
+    for (size_t i = 0; i < t->nfields; i++) {
+        struct bap_native_capture_field *f = &t->capture_fields[i];
+        uint64_t base;
+        uint8_t bytes[8];
+        t->capture_present_scratch[i] = 0;
+        t->capture_field_scratch[i] = 0;
+        if (capture_reg(uc, f->id, f->offset, f->size, &base) &&
+            capture_readable(uc, base + f->at, f->field_size) &&
+            uc_mem_read(uc, base + f->at, bytes, f->field_size) == UC_ERR_OK) {
+            uint64_t value = 0;
+            for (uint32_t k = 0; k < f->field_size; k++) {
+                value |= (uint64_t)bytes[k] << (8 * k);
+            }
+            t->capture_field_scratch[i] = value;
+            t->capture_present_scratch[i] = 1;
+        }
+    }
+    bap_native_trace_capture(t, site, t->capture_reg_scratch,
+                             t->capture_field_scratch,
+                             t->capture_present_scratch);
+}
+
 static void trace_code(uc_engine *uc, uint64_t addr, uint32_t size,
                        void *data) {
-    struct bap_native_trace *t = data;
+    struct hook *h = data;
+    struct bap_native_trace *t = h->trace;
     if (--t->skip) {
         return;
     }
@@ -1085,6 +1169,7 @@ static void trace_code(uc_engine *uc, uint64_t addr, uint32_t size,
         t->modes[t->count & t->mask] = t->thumb;
     }
     t->count++;
+    capture_state(uc, t, addr);
 }
 
 /* the mode of the block, whose instructions the trace of the code
@@ -1225,6 +1310,7 @@ static void fixup(struct engine *e) {
             }
             if (pc > start) {
                 t->sizes[last & t->mask] = pc - start;
+                bap_native_trace_forget_captures(t, last, pc);
                 /* the hooks of the instructions, that didn't run, made
                    their boundaries before the next block */
                 for (uint64_t i = t->marks; i > 0 && t->marks - i < BOUNDS;
@@ -1251,6 +1337,7 @@ static void fixup(struct engine *e) {
         } else if (start != pc) {
             continue;
         }
+        bap_native_trace_forget_captures(t, last, pc);
         t->count--;
         while (t->accesses > 0 &&
                t->mem[(t->accesses - 1) & t->amask].insn == last) {
@@ -1389,9 +1476,11 @@ value bap_uc_trace_add(value v, value tv, value kind, value start,
         }
     }
     caml_register_generational_global_root(&h->closure);
-    uc_err err = uc_hook_add(uc, &h->handle, type, callback,
-                             Int_val(kind) == TRACE_MEM ? (void *)h : (void *)t,
-                             Int64_val(start), Int64_val(stop));
+    int with_engine = Int_val(kind) == TRACE_CODE || Int_val(kind) == TRACE_MEM;
+    uc_err err =
+        uc_hook_add(uc, &h->handle, type, callback,
+                    with_engine ? (void *)h : (void *)t, Int64_val(start),
+                    Int64_val(stop));
     if (err != UC_ERR_OK) {
         caml_remove_generational_global_root(&h->closure);
         free(h);

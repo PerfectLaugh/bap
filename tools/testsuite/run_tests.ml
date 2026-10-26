@@ -1248,6 +1248,23 @@ let emu data =
                true, writes true, tids true, raw blocks true\n" );
             ("slices a memory difference", "capture true, memory slice true\n");
           ]);
+    case "emu/capture-state" (fun env ->
+        let out =
+          bap ~timeout:55. env
+            [
+              "script";
+              input "emu/capture-state.ml";
+              path data "bin/aarch64-linux-gnu-spawn";
+              dir env;
+            ]
+        in
+        List.iter
+          (fun engine ->
+            has env
+              ("captures states in " ^ engine)
+              out
+              (engine ^ ": capture state ok\n"))
+          [ "unicorn"; "lifted" ]);
     (* the trace, that watches a range, records its accesses only, see
        the script *)
     case "emu/watch" (fun env ->

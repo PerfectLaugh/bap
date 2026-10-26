@@ -27,6 +27,26 @@ struct bap_native_trace_access {
     uint32_t write;
 };
 
+struct bap_native_capture_reg {
+    int id;
+    uint32_t offset;
+    uint32_t size;
+};
+
+struct bap_native_capture_field {
+    int id;
+    uint32_t offset;
+    uint32_t size;
+    uint64_t at;
+    uint32_t field_size;
+};
+
+struct bap_native_capture {
+    uint64_t site;
+    uint64_t index;
+    uint64_t tid;
+};
+
 struct bap_native_trace {
     uint64_t count;
     uint64_t mask;
@@ -50,6 +70,23 @@ struct bap_native_trace {
     uint64_t *nranges;
     uint64_t ranges_count;
     struct bap_native_trace_range *ranges;
+    uint64_t *capture_sites;
+    size_t nsites;
+    struct bap_native_capture_reg *capture_regs;
+    size_t nregs;
+    struct bap_native_capture_field *capture_fields;
+    size_t nfields;
+    uint64_t captures;
+    struct bap_native_capture *capture;
+    uint64_t *capture_values;
+    uint64_t *capture_field_values;
+    uint8_t *capture_present;
+    uint64_t *capture_reg_scratch;
+    uint64_t *capture_field_scratch;
+    uint8_t *capture_present_scratch;
+    value capture_reg_desc;
+    value capture_field_desc;
+    int capture_rooted;
 };
 
 #define Bap_native_trace_val(v) \
@@ -62,5 +99,11 @@ void bap_native_trace_add_bound(struct bap_native_trace *t, uint64_t bound,
                                 uint64_t pc,
                                 struct bap_native_trace_range *ranges,
                                 uint64_t n);
+int bap_native_trace_captures(struct bap_native_trace *t, uint64_t site);
+void bap_native_trace_capture(struct bap_native_trace *t, uint64_t site,
+                              const uint64_t *regs, const uint64_t *fields,
+                              const uint8_t *present);
+void bap_native_trace_forget_captures(struct bap_native_trace *t,
+                                      uint64_t index, uint64_t pc);
 
 #endif

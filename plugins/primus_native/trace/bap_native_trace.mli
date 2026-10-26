@@ -84,6 +84,43 @@ val save : ?last:int -> t -> string -> int64
 (** [save trace file] writes the last program counters, as {!pcs}, one in hex a
     line, and returns their number. *)
 
+module State : sig
+  type reg = int * int * int
+  (** a physical register identifier, a byte offset, and a byte size *)
+
+  type field = int * int * int * int64 * int
+  (** a physical register containing an address, its byte offset and size, the
+      offset from the address, and the field size *)
+
+  type record = {
+    site : int64;
+    index : int64;
+    thread : int;
+    regs : int64 array;
+    fields : int64 option array;
+  }
+
+  val configure : t -> int64 list -> reg list -> field list -> unit
+  (** [configure trace sites regs fields] captures the registers and fields
+      before the instructions at [sites]. The capture ring has the retention of
+      the instruction ring. *)
+
+  val records : ?last:int -> t -> record list
+  (** the retained captures, the oldest first, at most [last], by default all *)
+
+  val captures : t -> int64 -> bool
+  (** if the trace captures the instruction at the address; for the engines *)
+
+  val enabled : t -> bool
+  (** if any capture sites are configured; for the engines *)
+
+  val registers : t -> reg array
+  (** the configured registers; for the lifted engine *)
+
+  val fields : t -> field array
+  (** the configured fields; for the lifted engine *)
+end
+
 (** The records of the engines, that record the traces themselves, as the native
     hooks do, e.g., the lifted engine of [Bap_engine]. *)
 module Record : sig
@@ -108,6 +145,10 @@ module Record : sig
   (** [unrun trace pc] the instruction at [pc], that the trace recorded last,
       didn't run, e.g., as it faulted, so that it is recorded again, when it
       runs. *)
+
+  val capture : t -> int64 -> int64 array -> int64 option array -> unit
+  (** [capture trace site regs fields] records values, that the lifted engine
+      read before the instruction at [site], which the trace recorded last. *)
 
   val bound : t -> bool -> bool -> bool -> int64 -> int64 array -> bool -> unit
   (** [bound trace regs mem running pc ranges unknown] the boundary of the

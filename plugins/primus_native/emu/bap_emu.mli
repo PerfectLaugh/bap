@@ -539,6 +539,56 @@ module Trace : sig
       last instruction lifted at each address and mode, not every version that
       ran. *)
 
+  type state_field = {
+    base : string;
+    offset : int64;
+    size : int;
+    value : int64 option;
+  }
+
+  type state = {
+    site : int64;
+    index : int64;
+    thread : int;
+    regs : (string * int64) list;
+    fields : state_field list;
+  }
+  (** a pre-instruction state at [site], with its global instruction-trace
+      [index], effective [thread], named register values, and indirect fields. A
+      field [value] is [None] if any requested byte is unmapped or unreadable.
+  *)
+
+  type state_capture
+
+  val capture_state :
+    ?size:int ->
+    ?regs:string list ->
+    ?fields:(string * int64 * int) list ->
+    emu ->
+    int64 list ->
+    state_capture
+  (** [capture_state emu sites] captures [regs] and [fields], specified as
+      [(base_register, offset, size)], before instructions at [sites], without
+      per-site OCaml hooks. Fields are one to eight bytes, packed with the byte
+      at the lowest address in the lowest byte, and read exactly with no partial
+      result. The last [size] records are retained, by default 2{^ 16}. Unknown
+      registers, non-byte-aligned or wider-than-64-bit values, and invalid field
+      widths are rejected. *)
+
+  val captured_states : ?last:int -> state_capture -> state list
+  (** the retained states, oldest first, at most [last] if specified *)
+
+  val stop_state_capture : state_capture -> unit
+  (** stop recording and retain the captured states *)
+
+  val save_states : state_capture -> string -> unit
+  (** save the retained immutable states in a versioned binary format; live
+      hooks and engine pointers are not serialized *)
+
+  val load_states : string -> state list
+  (** load states saved by {!save_states}, or fail clearly on another format or
+      broken input *)
+
   type capture
   (** the registers at the sites, see {!capture} *)
 

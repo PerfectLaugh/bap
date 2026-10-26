@@ -1,5 +1,6 @@
 /* Native trace rings shared by the execution engines. */
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -18,8 +19,36 @@
 #define UNKNOWN BAP_NATIVE_TRACE_UNKNOWN
 #define MID BAP_NATIVE_TRACE_MID
 
+static void free_capture(struct bap_native_trace *t) {
+    free(t->capture_sites);
+    free(t->capture_regs);
+    free(t->capture_fields);
+    free(t->capture);
+    free(t->capture_values);
+    free(t->capture_field_values);
+    free(t->capture_present);
+    free(t->capture_reg_scratch);
+    free(t->capture_field_scratch);
+    free(t->capture_present_scratch);
+    t->capture_sites = NULL;
+    t->capture_regs = NULL;
+    t->capture_fields = NULL;
+    t->capture = NULL;
+    t->capture_values = NULL;
+    t->capture_field_values = NULL;
+    t->capture_present = NULL;
+    t->capture_reg_scratch = NULL;
+    t->capture_field_scratch = NULL;
+    t->capture_present_scratch = NULL;
+}
+
 static void finalize_trace(value v) {
     struct bap_native_trace *t = Bap_native_trace_val(v);
+    if (t->capture_rooted) {
+        caml_remove_generational_global_root(&t->capture_reg_desc);
+        caml_remove_generational_global_root(&t->capture_field_desc);
+    }
+    free_capture(t);
     free(t->bounds);
     free(t->bound_tids);
     free(t->at);
@@ -103,6 +132,244 @@ value bap_native_trace_create(value size, value every, value blocks,
                               n * sizeof(uint64_t));
     Bap_native_trace_val(r) = t;
     CAMLreturn(r);
+}
+
+static int compare_sites(const void *xp, const void *yp) {
+    uint64_t x = *(const uint64_t *)xp;
+    uint64_t y = *(const uint64_t *)yp;
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+int bap_native_trace_captures(struct bap_native_trace *t, uint64_t site) {
+    size_t lo = 0, hi = t->nsites;
+    while (lo < hi) {
+        size_t i = lo + (hi - lo) / 2;
+        if (t->capture_sites[i] < site) {
+            lo = i + 1;
+        } else {
+            hi = i;
+        }
+    }
+    return lo < t->nsites && t->capture_sites[lo] == site;
+}
+
+static size_t capture_size(uint64_t ring, size_t n, size_t size) {
+    if (ring == 0 || n == 0) {
+        return 0;
+    }
+    if (n > SIZE_MAX / size || ring > SIZE_MAX / (n * size)) {
+        caml_invalid_argument("Bap_native_trace.State.configure: too large");
+    }
+    return (size_t)ring * n * size;
+}
+
+static void capture_slice(value tuple, int *id, uint32_t *offset,
+                          uint32_t *size) {
+    intnat r = Long_val(Field(tuple, 0));
+    intnat o = Long_val(Field(tuple, 1));
+    intnat n = Long_val(Field(tuple, 2));
+    if (r < 0 || r > INT_MAX || o < 0 || n < 1 || n > 8 ||
+        (uintnat)o > UINT32_MAX - (uintnat)n) {
+        caml_invalid_argument("Bap_native_trace.State.configure: bad slice");
+    }
+    *id = (int)r;
+    *offset = (uint32_t)o;
+    *size = (uint32_t)n;
+}
+
+value bap_native_trace_state_configure(value tv, value sites, value regs,
+                                       value fields) {
+    CAMLparam4(tv, sites, regs, fields);
+    struct bap_native_trace *t = Bap_native_trace_val(tv);
+    size_t nsites = Wosize_val(sites), nregs = Wosize_val(regs);
+    size_t nfields = Wosize_val(fields);
+    for (size_t i = 0; i < nregs; i++) {
+        int id;
+        uint32_t offset, size;
+        capture_slice(Field(regs, i), &id, &offset, &size);
+    }
+    for (size_t i = 0; i < nfields; i++) {
+        value f = Field(fields, i);
+        int id;
+        uint32_t offset, size;
+        capture_slice(f, &id, &offset, &size);
+        intnat n = Long_val(Field(f, 4));
+        if (n < 1 || n > 8) {
+            caml_invalid_argument(
+                "Bap_native_trace.State.configure: bad field size");
+        }
+    }
+    uint64_t ring = t->mask + 1;
+    size_t sites_size = capture_size(1, nsites, sizeof(uint64_t));
+    size_t regs_size =
+        capture_size(1, nregs, sizeof(struct bap_native_capture_reg));
+    size_t fields_size =
+        capture_size(1, nfields, sizeof(struct bap_native_capture_field));
+    size_t records_size =
+        capture_size(ring, 1, sizeof(struct bap_native_capture));
+    size_t values_size = capture_size(ring, nregs, sizeof(uint64_t));
+    size_t field_values_size = capture_size(ring, nfields, sizeof(uint64_t));
+    size_t present_size = capture_size(ring, nfields, sizeof(uint8_t));
+    uint64_t *new_sites = malloc(sites_size ? sites_size : 1);
+    struct bap_native_capture_reg *new_regs = malloc(regs_size ? regs_size : 1);
+    struct bap_native_capture_field *new_fields =
+        malloc(fields_size ? fields_size : 1);
+    struct bap_native_capture *capture = malloc(records_size);
+    uint64_t *values = malloc(values_size ? values_size : 1);
+    uint64_t *field_values = malloc(field_values_size ? field_values_size : 1);
+    uint8_t *present = malloc(present_size ? present_size : 1);
+    uint64_t *reg_scratch = malloc(values_size ? nregs * sizeof(uint64_t) : 1);
+    uint64_t *field_scratch =
+        malloc(field_values_size ? nfields * sizeof(uint64_t) : 1);
+    uint8_t *present_scratch =
+        malloc(present_size ? nfields * sizeof(uint8_t) : 1);
+    if (new_sites == NULL || new_regs == NULL || new_fields == NULL ||
+        capture == NULL || values == NULL || field_values == NULL ||
+        present == NULL || reg_scratch == NULL || field_scratch == NULL ||
+        present_scratch == NULL) {
+        free(new_sites);
+        free(new_regs);
+        free(new_fields);
+        free(capture);
+        free(values);
+        free(field_values);
+        free(present);
+        free(reg_scratch);
+        free(field_scratch);
+        free(present_scratch);
+        caml_raise_out_of_memory();
+    }
+    for (size_t i = 0; i < nsites; i++) {
+        new_sites[i] = (uint64_t)Int64_val(Field(sites, i));
+    }
+    qsort(new_sites, nsites, sizeof(uint64_t), compare_sites);
+    for (size_t i = 0; i < nregs; i++) {
+        capture_slice(Field(regs, i), &new_regs[i].id, &new_regs[i].offset,
+                      &new_regs[i].size);
+    }
+    for (size_t i = 0; i < nfields; i++) {
+        value f = Field(fields, i);
+        capture_slice(f, &new_fields[i].id, &new_fields[i].offset,
+                      &new_fields[i].size);
+        new_fields[i].at = (uint64_t)Int64_val(Field(f, 3));
+        new_fields[i].field_size = (uint32_t)Long_val(Field(f, 4));
+    }
+    free_capture(t);
+    t->capture_sites = new_sites;
+    t->nsites = nsites;
+    t->capture_regs = new_regs;
+    t->nregs = nregs;
+    t->capture_fields = new_fields;
+    t->nfields = nfields;
+    t->capture = capture;
+    t->capture_values = values;
+    t->capture_field_values = field_values;
+    t->capture_present = present;
+    t->capture_reg_scratch = reg_scratch;
+    t->capture_field_scratch = field_scratch;
+    t->capture_present_scratch = present_scratch;
+    t->captures = 0;
+    if (t->capture_rooted) {
+        caml_modify_generational_global_root(&t->capture_reg_desc, regs);
+        caml_modify_generational_global_root(&t->capture_field_desc, fields);
+    } else {
+        t->capture_reg_desc = regs;
+        t->capture_field_desc = fields;
+        caml_register_generational_global_root(&t->capture_reg_desc);
+        caml_register_generational_global_root(&t->capture_field_desc);
+        t->capture_rooted = 1;
+    }
+    CAMLreturn(Val_unit);
+}
+
+value bap_native_trace_state_captures(value tv, value site) {
+    return Val_bool(bap_native_trace_captures(Bap_native_trace_val(tv),
+                                              (uint64_t)Int64_val(site)));
+}
+
+value bap_native_trace_state_enabled(value tv) {
+    return Val_bool(Bap_native_trace_val(tv)->nsites > 0);
+}
+
+value bap_native_trace_state_registers(value tv) {
+    struct bap_native_trace *t = Bap_native_trace_val(tv);
+    return t->capture_rooted ? t->capture_reg_desc : caml_alloc(0, 0);
+}
+
+value bap_native_trace_state_fields(value tv) {
+    struct bap_native_trace *t = Bap_native_trace_val(tv);
+    return t->capture_rooted ? t->capture_field_desc : caml_alloc(0, 0);
+}
+
+void bap_native_trace_capture(struct bap_native_trace *t, uint64_t site,
+                              const uint64_t *regs, const uint64_t *fields,
+                              const uint8_t *present) {
+    if (t->count == 0 || t->capture == NULL) {
+        return;
+    }
+    uint64_t i = t->captures & t->mask;
+    t->capture[i].site = site;
+    t->capture[i].index = t->count - 1;
+    t->capture[i].tid = t->tid;
+    for (size_t k = 0; k < t->nregs; k++) {
+        t->capture_values[i * t->nregs + k] = regs[k];
+    }
+    for (size_t k = 0; k < t->nfields; k++) {
+        t->capture_field_values[i * t->nfields + k] = fields[k];
+        t->capture_present[i * t->nfields + k] = present[k];
+    }
+    t->captures++;
+}
+
+value bap_native_trace_state_capture(value tv, value sitev, value regs,
+                                     value fields) {
+    CAMLparam4(tv, sitev, regs, fields);
+    CAMLlocal1(ignored);
+    struct bap_native_trace *t = Bap_native_trace_val(tv);
+    uint64_t site = (uint64_t)Int64_val(sitev);
+    if (!bap_native_trace_captures(t, site) || Wosize_val(regs) != t->nregs ||
+        Wosize_val(fields) != t->nfields) {
+        caml_invalid_argument("Bap_native_trace.Record.capture: bad values");
+    }
+    if (t->count == 0) {
+        caml_invalid_argument("Bap_native_trace.Record.capture: no instruction");
+    }
+    uint64_t *rv = malloc(capture_size(1, t->nregs, sizeof(uint64_t)));
+    uint64_t *fv = malloc(capture_size(1, t->nfields, sizeof(uint64_t)));
+    uint8_t *present = malloc(capture_size(1, t->nfields, sizeof(uint8_t)));
+    if ((t->nregs > 0 && rv == NULL) ||
+        (t->nfields > 0 && (fv == NULL || present == NULL))) {
+        free(rv);
+        free(fv);
+        free(present);
+        caml_raise_out_of_memory();
+    }
+    for (size_t i = 0; i < t->nregs; i++) {
+        rv[i] = (uint64_t)Int64_val(Field(regs, i));
+    }
+    for (size_t i = 0; i < t->nfields; i++) {
+        value x = Field(fields, i);
+        present[i] = !Is_long(x);
+        fv[i] = present[i] ? (uint64_t)Int64_val(Field(x, 0)) : 0;
+    }
+    bap_native_trace_capture(t, site, rv, fv, present);
+    free(rv);
+    free(fv);
+    free(present);
+    ignored = Val_unit;
+    CAMLreturn(ignored);
+}
+
+void bap_native_trace_forget_captures(struct bap_native_trace *t,
+                                      uint64_t index, uint64_t pc) {
+    while (t->captures > 0) {
+        struct bap_native_capture *c =
+            &t->capture[(t->captures - 1) & t->mask];
+        if (c->index != index || c->site < pc) {
+            break;
+        }
+        t->captures--;
+    }
 }
 
 value bap_native_trace_prepare(value tv, value arm) {
@@ -204,6 +471,7 @@ value bap_native_trace_unrun(value tv, value pcv) {
         }
         if (pc > start) {
             t->sizes[last & t->mask] = pc - start;
+            bap_native_trace_forget_captures(t, last, pc);
             while (t->accesses > 0) {
                 struct bap_native_trace_access *a =
                     &t->mem[(t->accesses - 1) & t->amask];
@@ -217,6 +485,7 @@ value bap_native_trace_unrun(value tv, value pcv) {
     } else if (start != pc) {
         return Val_unit;
     }
+    bap_native_trace_forget_captures(t, last, pc);
     t->count--;
     while (t->accesses > 0 &&
            t->mem[(t->accesses - 1) & t->amask].insn == last) {
@@ -323,6 +592,7 @@ value bap_native_trace_clear(value tv) {
     t->accesses = 0;
     t->marks = 0;
     t->ranges_count = 0;
+    t->captures = 0;
     t->skip = t->every;
     return Val_unit;
 }
@@ -330,6 +600,52 @@ value bap_native_trace_clear(value tv) {
 static uint64_t kept(uint64_t count, uint64_t mask, intnat n) {
     uint64_t k = count < mask ? count : mask;
     return n >= 0 && (uint64_t)n < k ? (uint64_t)n : k;
+}
+
+value bap_native_trace_state_records(value tv, value nv) {
+    CAMLparam2(tv, nv);
+    CAMLlocal5(result, cell, record, regs, fields);
+    CAMLlocal1(x);
+    struct bap_native_trace *t = Bap_native_trace_val(tv);
+    uint64_t k = t->capture == NULL
+                     ? 0
+                     : kept(t->captures, t->mask, Long_val(nv));
+    uint64_t first = t->captures - k;
+    result = Val_emptylist;
+    for (uint64_t i = k; i > 0; i--) {
+        uint64_t at = (first + i - 1) & t->mask;
+        struct bap_native_capture *c = &t->capture[at];
+        regs = caml_alloc_tuple(t->nregs);
+        for (size_t j = 0; j < t->nregs; j++) {
+            x = caml_copy_int64(t->capture_values[at * t->nregs + j]);
+            Store_field(regs, j, x);
+        }
+        fields = caml_alloc_tuple(t->nfields);
+        for (size_t j = 0; j < t->nfields; j++) {
+            size_t pos = at * t->nfields + j;
+            if (t->capture_present[pos]) {
+                x = caml_copy_int64(t->capture_field_values[pos]);
+                cell = caml_alloc_small(1, 0);
+                Store_field(cell, 0, x);
+                Store_field(fields, j, cell);
+            } else {
+                Store_field(fields, j, Val_int(0));
+            }
+        }
+        record = caml_alloc_tuple(5);
+        x = caml_copy_int64(c->site);
+        Store_field(record, 0, x);
+        x = caml_copy_int64(c->index);
+        Store_field(record, 1, x);
+        Store_field(record, 2, Val_long(c->tid));
+        Store_field(record, 3, regs);
+        Store_field(record, 4, fields);
+        cell = caml_alloc_small(2, Tag_cons);
+        Store_field(cell, 0, record);
+        Store_field(cell, 1, result);
+        result = cell;
+    }
+    CAMLreturn(result);
 }
 
 value bap_native_trace_retained(value tv) {

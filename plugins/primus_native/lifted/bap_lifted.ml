@@ -1019,6 +1019,67 @@ let trace_access t ~write ?data addr size value old =
             Record.access tr write addr size value old t.current
         | _ -> ())
 
+let capture_site t pc =
+  Array.exists t.by_kind.trace_code ~f:(fun h ->
+      match h.kind with
+      | Trace_code tr ->
+          (not h.deleted) && covers h pc && Trace.State.captures tr pc
+      | _ -> false)
+
+let capture_active t =
+  Array.exists t.by_kind.trace_code ~f:(fun h ->
+      match h.kind with
+      | Trace_code tr -> (not h.deleted) && Trace.State.enabled tr
+      | _ -> false)
+
+let capture_reg t (id, offset, size) =
+  let bytes = reg_bytes t id in
+  if offset > Bytes.length bytes || size > Bytes.length bytes - offset then None
+  else
+    let value = ref 0L in
+    for i = size - 1 downto 0 do
+      value :=
+        Int64.(
+          (!value lsl 8)
+          lor of_int (Char.to_int (Bytes.get bytes Stdlib.(offset + i))))
+    done;
+    Some !value
+
+let capture_field t (id, reg_offset, size, at, field_size) =
+  match capture_reg t (id, reg_offset, size) with
+  | None -> None
+  | Some base ->
+      let addr = Int64.(base + at) in
+      let last = Int64.(addr + of_int Stdlib.(field_size - 1)) in
+      if Stdlib.Int64.unsigned_compare last addr < 0 then None
+      else
+        let rec readable i =
+          i = field_size
+          ||
+          match Hashtbl.find t.pages (page_of Int64.(addr + of_int i)) with
+          | Some p -> Engine.Perm.(mem p.perm read) && readable (i + 1)
+          | None -> false
+        in
+        if not (readable 0) then None
+        else
+          let rec read i value =
+            if i = field_size then value
+            else
+              let addr = Int64.(addr + of_int i) in
+              let p = Hashtbl.find_exn t.pages (page_of addr) in
+              let byte = Char.to_int (Bigstring.get p.data (offset addr)) in
+              read (i + 1) Int64.(value lor (of_int byte lsl Stdlib.(8 * i)))
+          in
+          Some (read 0 0L)
+
+let capture_state t tr pc =
+  let regs =
+    Array.map (Trace.State.registers tr) ~f:(fun reg ->
+        Option.value (capture_reg t reg) ~default:0L)
+  in
+  let fields = Array.map (Trace.State.fields tr) ~f:(capture_field t) in
+  Record.capture tr pc regs fields
+
 (* the instruction, that runs, in the traces of the code *)
 let trace_insn t pc size thumb =
   t.reads <- [];
@@ -1026,7 +1087,8 @@ let trace_insn t pc size thumb =
       match h.kind with
       | Trace_code tr when covers h pc ->
           if Trace.blocks tr && not t.block then Record.extend tr size
-          else Record.record tr pc size thumb
+          else Record.record tr pc size thumb;
+          if Trace.State.captures tr pc then capture_state t tr pc
       | _ -> ());
   t.recorded <- true;
   t.block <- false
@@ -2265,10 +2327,11 @@ let verbose () =
 let hooked ?(blocks = false) t addr =
   let k = t.by_kind in
   let covering = Array.exists ~f:(fun h -> (not h.deleted) && covers h addr) in
-  (match k.code_pages with
-    | Some pages -> Hash_set.mem pages (page_of addr)
-    | None -> true)
-  && (covering k.code || (blocks && covering k.blocks))
+  capture_site t addr
+  || (match k.code_pages with
+       | Some pages -> Hash_set.mem pages (page_of addr)
+       | None -> true)
+     && (covering k.code || (blocks && covering k.blocks))
 
 (* the instructions, that may be in the block at [pc], whose bytes are
    fetched only from the executable pages, as the hooks of the invalid
@@ -2488,10 +2551,11 @@ let unhooked t (j : jit) (b : block) =
 
 let max_chained = 0x10000
 
-let chainable (j : jit) (b : block) =
+let chainable t (j : jit) (b : block) =
   (not b.atomic)
   && ((not b.has_it) || b.it_closed)
   && (not b.entry_hooked) && b.gen = j.gen
+  && not (Array.exists b.pcs ~f:(capture_site t))
 
 (* the flags of the link of the block, see LINK_ARM of the stubs *)
 let link_flags (b : block) =
@@ -2569,7 +2633,7 @@ let exec ?until ?count t j (b : block) pc n =
         trace_insn t b.pcs.(i) insn.size insn.thumb
       done
   in
-  if (not b.chained) && chainable j b then begin
+  if (not b.chained) && chainable t j b then begin
     let last = Array.length b.pcs - 1 in
     Bap_lifted_jit.Runtime.link j.mem pc b.fn b.code (Array.length b.pcs)
       Int64.(b.pcs.(last) + of_int b.insns.(last).size)
@@ -2657,6 +2721,7 @@ let fast_block t j pc ~until ~count n =
   match Hashtbl.find j.blocks pc with
   | Some (Compiled b)
     when (not b.entry_hooked) && b.gen = j.gen
+         && (not (Array.exists b.pcs ~f:(capture_site t)))
          && itstate t = 0
          && (not (j.traced && b.has_it))
          && Bool.equal b.insns.(0).thumb (thumb t)
@@ -2693,6 +2758,7 @@ let run_block t j insn pc ~until ~count n =
       if not (phys_equal b.insns.(0) insn) then (
         recount ();
         None)
+      else if Array.exists b.pcs ~f:(capture_site t) then None
       else if
         Option.exists count ~f:(fun c -> n + length > c)
         || Option.exists until ~f:(fun u ->
@@ -2709,6 +2775,7 @@ let clock () = Mtime.Span.to_float_ns (Mtime_clock.elapsed ()) *. 1e-9
 
 let start ?until ?timeout ?count ?(thread = 0) t pc =
   check t;
+  if capture_active t then Option.iter t.jit ~f:unchain;
   each t.by_kind.trace_code (fun h ->
       match h.kind with Trace_code tr -> Trace.set_thread tr thread | _ -> ());
   each t.by_kind.trace_mem (fun h ->

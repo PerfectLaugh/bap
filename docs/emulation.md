@@ -394,6 +394,8 @@ With `~read_values:true`, each successful read of one to eight bytes has `access
 
 `Trace.capture emu sites` records the registers at the sites, by default the registers, that the C ABI passes the arguments in, e.g., `X0` to `X7`, each time the program reaches one of them, in a ring of its own, so that a long run doesn't lose them, e.g., to map the arguments of a function from the sites of its calls, `Trace.calls`, in one run; `Trace.captured` lists them, the oldest first. Calls and conditional branches are records with their effective `thread`. `Trace.calls ~thread:tid` and `Trace.branches ~thread:tid` select one TID, and neither query derives a call or branch from adjacent records of different TIDs.
 
+`Trace.capture_state emu sites ~regs ~fields` is the native pre-instruction form for structured handler state. Each record has the original site, global instruction-trace index, effective TID, named registers, and indirect fields specified as `(base_register, offset, size)`. Fields are read exactly, one to eight bytes with the lowest-address byte first; unmapped or unreadable fields produce `None`, never a partial value. `captured_states` reads the retained window and `stop_state_capture` ends recording. `save_states`/`load_states` provide a versioned binary round trip of immutable records without serializing live hooks. A decoded record can guide `Emu.drive emu state.site ~thread:state.thread ~regs:state.regs`.
+
 The trace of the blocks costs the least, about three times the time of the program, and its `insns` are the instructions of the trace of each instruction, which costs tens of times the time, as Unicorn calls a hook for each instruction:
 
 ```ocaml

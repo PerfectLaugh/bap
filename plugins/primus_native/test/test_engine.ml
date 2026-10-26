@@ -3,6 +3,7 @@ open Bap.Std
 module Engine = Bap_engine
 
 let code = 0x1000L
+let second = 0x1001L
 let finish = 0x1002L
 
 let reg name =
@@ -26,7 +27,7 @@ let config : Bap_engine_lifted.config =
       (fun ~thumb:_ addr _ ->
         if Int64.(addr = code) then
           Some (1, "INC", [ Blk.create ~defs:[ increment ] () ])
-        else if Int64.(addr = code + 1L) then
+        else if Int64.(addr = second) then
           Some (1, "DEC", [ Blk.create ~defs:[ decrement ] () ])
         else None);
     name = (fun _ -> None);
@@ -160,12 +161,117 @@ let direct_lifted () =
       check "direct lifted" 42L (D.reg_read engine (reg "EDX"));
       D.delete (D.on_unsupported engine ignore))
 
+module Trace = Engine.Trace
+
+let check_int name expected got =
+  if not (Int.equal expected got) then
+    failwithf "%s: expected %d, got %d" name expected got ()
+
+let check_option name expected got =
+  if not (Option.equal Int64.equal expected got) then
+    failwithf "%s: wrong optional value" name ()
+
+let state_ring () =
+  let trace = Trace.create 1 in
+  Trace.State.configure trace [ code; second ] [] [];
+  Trace.set_thread trace 9;
+  Trace.Record.record trace code 1 false;
+  Trace.Record.capture trace code [||] [||];
+  Trace.Record.unrun trace code;
+  check_int "state unrun" 0 (List.length (Trace.State.records trace));
+  Trace.Record.record trace code 1 false;
+  Trace.Record.capture trace code [||] [||];
+  Trace.Record.record trace second 1 false;
+  Trace.Record.capture trace second [||] [||];
+  match Trace.State.records trace with
+  | [ r ] ->
+      check "state retained site" second r.site;
+      check "state retained index" 1L r.index;
+      check_int "state retained thread" 9 r.thread;
+      Trace.clear trace;
+      check_int "state clear" 0 (List.length (Trace.State.records trace));
+      check "state clear count" 0L (Trace.count trace)
+  | rs ->
+      failwithf "state ring: expected one record, got %d" (List.length rs) ()
+
+let state name engine =
+  Exn.protect
+    ~finally:(fun () -> Engine.close engine)
+    ~f:(fun () ->
+      let data = 0x10000L in
+      Engine.mem_map engine code 0x1000L Engine.Perm.all;
+      Engine.mem_map engine data 0x1000L Engine.Perm.read;
+      Engine.mem_map engine 0x20000L 0x1000L Engine.Perm.exec;
+      Engine.mem_write engine code "\x41\x4a";
+      Engine.mem_write engine data "\x11\x22\x33\x44";
+      Engine.reg_write engine (reg "ECX") 0x1234L;
+      Engine.reg_write engine (reg "EBX") data;
+      let trace = Trace.create 16 in
+      Trace.State.configure trace [ second; code ]
+        [ (reg "ECX", 0, 4); (reg "EBX", 0, 3) ]
+        [
+          (reg "EBX", 0, 3, 1L, 2);
+          (reg "EBX", 0, 4, 0x10000L, 4);
+          (reg "EBX", 0, 4, 0xfffL, 2);
+        ];
+      let (_ : Engine.hook list) = Engine.trace engine trace in
+      Engine.start engine code ~until:finish ~thread:7;
+      (match Trace.State.records trace with
+      | [ first; other ] ->
+          check (name ^ " first site") code first.site;
+          check (name ^ " second site") second other.site;
+          check (name ^ " first index") 0L first.index;
+          check (name ^ " second index") 1L other.index;
+          check_int (name ^ " thread") 7 other.thread;
+          check (name ^ " first pre-reg") 0x1234L first.regs.(0);
+          check (name ^ " second pre-reg") 0x1235L other.regs.(0);
+          check (name ^ " register slice") data other.regs.(1);
+          check_option (name ^ " field") (Some 0x3322L) other.fields.(0);
+          check_option (name ^ " denied field") None other.fields.(1);
+          check_option (name ^ " partial field") None other.fields.(2)
+      | rs ->
+          failwithf "%s: expected two records, got %d" name (List.length rs) ());
+      (match Trace.State.records ~last:1 trace with
+      | [ r ] -> check (name ^ " last") second r.site
+      | _ -> failwith (name ^ ": wrong last records"));
+      Trace.clear trace;
+      check_int (name ^ " clear") 0 (List.length (Trace.State.records trace)))
+
+let state_jit () =
+  let config = { config with jit = true } in
+  let engine = Bap_engine_lifted.create config Engine.X86 Engine.Mode.mode32 in
+  Exn.protect
+    ~finally:(fun () -> Engine.close engine)
+    ~f:(fun () ->
+      Engine.mem_map engine code 0x1000L Engine.Perm.all;
+      Engine.mem_write engine code "\x41\x4a";
+      Engine.reg_write engine (reg "ECX") 0L;
+      let trace = Trace.create 256 in
+      Trace.State.configure trace [] [] [];
+      let (_ : Engine.hook list) = Engine.trace engine trace in
+      for _ = 1 to 40 do
+        Engine.start engine code ~until:finish
+      done;
+      Trace.State.configure trace [ second ] [ (reg "ECX", 0, 4) ] [];
+      Engine.start engine code ~until:finish;
+      match Trace.State.records trace with
+      | [ r ] ->
+          check "state jit site" second r.site;
+          check "state jit index" Int64.(Trace.count trace - 1L) r.index;
+          check "state jit pre-reg" 41L r.regs.(0)
+      | rs ->
+          failwithf "state jit: expected one record, got %d" (List.length rs) ())
+
 let () =
   exercise "unicorn" (Bap_engine_unicorn.create Engine.X86 Engine.Mode.mode32);
   exercise "lifted"
     (Bap_engine_lifted.create config Engine.X86 Engine.Mode.mode32);
   direct_unicorn ();
   direct_lifted ();
+  state_ring ();
+  state "unicorn" (Bap_engine_unicorn.create Engine.X86 Engine.Mode.mode32);
+  state "lifted" (Bap_engine_lifted.create config Engine.X86 Engine.Mode.mode32);
+  state_jit ();
   let engine = Bap_engine_unicorn.create Engine.X86 Engine.Mode.mode32 in
   Exn.protect
     ~finally:(fun () -> Engine.close engine)

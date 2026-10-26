@@ -82,10 +82,19 @@ let stop () =
   with_engine X86 Uc.Mode.mode32 "\x41\x41\x41\x41" @@ fun uc ->
   let ecx = reg X86 "ecx" and eip = reg X86 "eip" in
   Uc.reg_write uc ecx 0L;
+  let trace = Uc.Trace.create 8 in
+  Uc.Trace.State.configure trace [ code; 0x1001L; 0x1002L; 0x1003L ] [] [];
+  let (_ : Uc.hook list) = Uc.trace uc trace in
   let _ = Uc.on_code uc ~first:0x1002L ~last:0x1002L (fun _ _ -> Uc.stop uc) in
   Uc.start uc code ~until:(Int64.add code 4L);
   check "ecx" 2L (Uc.reg_read uc ecx);
   check "eip" 0x1002L (Uc.reg_read uc eip);
+  (match Uc.Trace.State.records trace with
+  | [ first; second ] ->
+      check "capture before stop" code first.site;
+      check "capture rollback" 0x1001L second.site
+  | rs ->
+      failwith (Printf.sprintf "capture rollback: %d records" (List.length rs)));
   (* and it can be resumed from there *)
   Uc.start uc 0x1003L ~until:(Int64.add code 4L);
   check "resumed ecx" 3L (Uc.reg_read uc ecx)
