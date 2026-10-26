@@ -970,6 +970,39 @@ let emu data =
         check env "exits on the signal" (out.status = Exited 143);
         check env "saves the lifts on the signal"
           (Array.length (Sys.readdir (file env "cache/lifted/lifts")) = 1));
+    (* bulk lift-cache trimming saves once, and the cache remains reusable *)
+    case "emu/lifts-limit" (fun env ->
+        let out =
+          bap ~timeout:55. env
+            [
+              "script";
+              input "emu/lifts-limit.ml";
+              path data "bin/x86_64-linux-gnu-echo";
+              dir env;
+            ]
+        in
+        check env "cache-limit script succeeds" (out.status = Exited 0);
+        sequence env out
+          [
+            ("runs the baseline", "baseline: exited 0\n");
+            ("populates a large cache", "populated: [0-9]+ entries\n");
+            ("bounds the cache", "bulk trim: 8 entries\n");
+            ("accepts a zero limit", "zero trim: 0 entries\n");
+            ( "preserves every entry and its BIR",
+              "restored cache: [0-9]+ entries, limits true, BIR true\n" );
+            ("reuses the saved lifts", "reused execution: exited 0\n");
+          ];
+        has env "saves once per dirty bulk operation" out
+          "lifted lifter: 3 full cache saves\n";
+        has env "doesn't save for exact or greater limits" out
+          "lifted lifter: 0 full cache saves\n";
+        let output name =
+          In_channel.with_open_bin
+            (Filename.concat (dir env) name)
+            In_channel.input_all
+        in
+        check env "execution output is identical after cache reuse"
+          (String.equal (output "baseline.txt") (output "reused.txt")));
     (* the hooks of the memory see the instruction, that accesses it, see
        hook-pc.ml *)
     case "emu/hook-pc" (fun env ->

@@ -1445,9 +1445,14 @@ end
 let lifter ?cache ~arm project =
   let state = ref None in
   let evaluations = ref 0 in
+  let cache_saves = ref 0 in
   if Option.is_some (Sys.getenv "BAP_LIFTED_STATS") then
     at_exit (fun () ->
-        Printf.eprintf "lifted lifter: %d toplevel evaluations\n%!" !evaluations);
+        Printf.eprintf
+          "lifted lifter: %d toplevel evaluations\n\
+           lifted lifter: %d full cache saves\n\
+           %!"
+          !evaluations !cache_saves);
   let names = Tid.Table.create () in
   let entries = Hashtbl.Poly.create () in
   let history = Hashtbl.Poly.create () in
@@ -1474,7 +1479,7 @@ let lifter ?cache ~arm project =
         Hashtbl.set used ~key ~data:!lru_clock;
         recent := Set.add !recent (!lru_clock, key)
   in
-  let rec trim () =
+  let rec trim ?(bulk = false) () =
     match !limit with
     | None -> ()
     | Some capacity -> (
@@ -1492,8 +1497,8 @@ let lifter ?cache ~arm project =
               Hashtbl.remove used key;
               dirty := true;
               forgotten := true;
-              if Hashtbl.length archived >= 64 then !flush ();
-              trim ())
+              if (not bulk) && Hashtbl.length archived >= 64 then !flush ();
+              trim ~bulk ())
   in
   let set_limit value =
     Option.iter value ~f:(fun capacity ->
@@ -1503,7 +1508,8 @@ let lifter ?cache ~arm project =
     Hashtbl.clear used;
     recent := Set.Poly.empty;
     Option.iter value ~f:(fun _ -> Hashtbl.iter_keys entries ~f:touch);
-    trim ()
+    trim ~bulk:true ();
+    if !dirty then !flush ()
   in
   let save () =
     Option.iter cache ~f:(fun file ->
@@ -1523,6 +1529,7 @@ let lifter ?cache ~arm project =
               Hashtbl.data merged
             end
           in
+          incr cache_saves;
           Lifts.save file all;
           Hashtbl.clear archived
         end)
