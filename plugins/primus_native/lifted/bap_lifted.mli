@@ -11,8 +11,9 @@
     in Unicorn.
 
     The registers are the ones of Unicorn, by their identifiers, and of their
-    sizes, see {!Bap_unicorn.regs}, whose bits are the registers of BAP, see
-    [config.locate], and the memory is the pages of 4 KB with their permissions.
+    sizes, see {!Bap_engine_unicorn.regs}, whose bits are the registers of BAP,
+    see [config.locate], and the memory is the pages of 4 KB with their
+    permissions.
 
     The program, that the engine runs, is untrusted: its accesses check the
     pages, and its code, that the JIT compiles, is limited, see
@@ -28,7 +29,7 @@ type config = {
     (int * string * Bap.Std.blk Bap.Std.term list) option;
       (** [lift ~thumb addr bytes] the size, the name, and the lifted blocks of
           the instruction, which starts the bytes at [addr], see
-          [Bap_engine.Lifted.config] *)
+          [Bap_engine_lifted.config] *)
   name : Bap.Std.tid -> string option;
       (** the name of the label, that an instruction calls, e.g., of an
           intrinsic *)
@@ -218,7 +219,7 @@ val taint_changes : t -> string list * int64 list
     functions of the executor, whose changes are among the changes of
     {!taint_changes}. *)
 
-type taint
+type taint = Bap_engine.taint
 
 val no_taint : taint
 val tainted : taint -> bool

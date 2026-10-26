@@ -1,63 +1,31 @@
 (** The bindings to the Unicorn emulator engine.
 
     A thin layer over the C API of Unicorn, which raises [Error] when a function
-    of Unicorn fails. The addresses and the values are unsigned 64-bit integers,
-    represented with [int64].
+    of Unicorn fails. The common engine types are owned by {!Bap_engine}. The
+    addresses and the values are unsigned 64-bit integers, represented with
+    [int64].
 
     The hooks hold their closures until they are deleted or the engine is
     closed. A closure that captures the engine keeps it alive, so the engines
     with such hooks should be closed explicitly. *)
 
 exception Error of int * string
-(** [Error (code, message)] is the error of Unicorn with its code. *)
+(** [Error (code, message)] is the error of Unicorn with its code, equal to
+    {!Bap_engine.Error}. *)
 
 type t
 (** an instance of the emulator *)
 
-type arch = Arm | Arm64 | Mips | X86 | Ppc | Riscv
+type arch = Bap_engine.arch = Arm | Arm64 | Mips | X86 | Ppc | Riscv
+
+module Mode = Bap_engine.Mode
+module Perm = Bap_engine.Perm
 
 val version : unit -> int * int
 (** the major and minor versions of the library *)
 
 val supported : arch -> bool
 (** [supported arch] if the engine of [arch] is linked. *)
-
-module Mode : sig
-  type t = private int
-
-  val ( + ) : t -> t -> t
-  val little_endian : t
-  val big_endian : t
-  val arm : t
-  val thumb : t
-  val mclass : t
-  val v8 : t
-  val mips32 : t
-  val mips64 : t
-  val mode16 : t
-  val mode32 : t
-  val mode64 : t
-  val ppc32 : t
-  val ppc64 : t
-  val riscv32 : t
-  val riscv64 : t
-end
-
-module Perm : sig
-  type t = private int
-
-  val ( + ) : t -> t -> t
-
-  val ( - ) : t -> t -> t
-  (** [p - q] the access of [p] without the access of [q] *)
-
-  val none : t
-  val read : t
-  val write : t
-  val exec : t
-  val all : t
-  val mem : t -> t -> bool
-end
 
 val create : arch -> Mode.t -> t
 (** [create arch mode] opens the emulator. *)
@@ -66,22 +34,8 @@ val close : t -> unit
 (** [close uc] releases the emulator and its hooks. Using a closed emulator
     raises [Invalid_argument]. Closing it again does nothing. *)
 
+module Cpu = Bap_engine.Cpu
 (** The CPU models of Unicorn. *)
-module Cpu : sig
-  val arm64_max : int
-  (** [arm64_max] is the AArch64 CPU with all the features of QEMU, e.g., the
-      LSE atomics of ARMv8.1, which the default Cortex-A72 lacks. *)
-
-  val mips32r6_generic : int
-  (** [mips32r6_generic] is the MIPS32 CPU of the release 6. *)
-
-  val mips64r2_generic : int
-  (** [mips64r2_generic] is the MIPS64 CPU of the release 2, e.g., with seb and
-      rdhwr, which the default R4000 of MIPS III lacks. *)
-
-  val mips64_i6400 : int
-  (** [mips64_i6400] is the MIPS64 CPU of the release 6, I6400. *)
-end
 
 val set_cpu_model : t -> int -> unit
 (** [set_cpu_model uc model] selects the CPU, one of the UC_CPU_* constants of
@@ -176,7 +130,7 @@ val process_signals : unit -> unit
 
 type hook
 
-type access =
+type access = Bap_engine.access =
   | Read
   | Write
   | Fetch

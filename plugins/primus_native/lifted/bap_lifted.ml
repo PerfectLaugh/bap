@@ -370,7 +370,7 @@ let uc_err_fetch_prot = 14
    are 0. *)
 let reset_regs arch =
   match (arch : Uc.arch) with
-  | Arm64 -> List.filter_opt [ Uc.reg arch "PSTATE" ]
+  | Arm64 -> List.filter_opt [ Bap_engine_unicorn.reg arch "PSTATE" ]
   | Arm | X86 | Mips | Ppc | Riscv -> []
 
 let create config arch mode =
@@ -381,7 +381,10 @@ let create config arch mode =
     {
       config;
       arch;
-      cpsr = (match arch with Arm -> Uc.reg arch "CPSR" | _ -> None);
+      cpsr =
+        (match arch with
+        | Arm -> Bap_engine_unicorn.reg arch "CPSR"
+        | _ -> None);
       regs = Int.Table.create ();
       sizes = Int.Table.create ();
       probe;

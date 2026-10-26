@@ -1,187 +1,56 @@
-module Uc = Bap_unicorn
-module L = Bap_lifted
+exception Error of int * string
 
-exception Error = Bap_unicorn.Error
+type arch = Arm | Arm64 | Mips | X86 | Ppc | Riscv
 
-type t = Unicorn of Uc.t | Lifted of L.t
-type arch = Bap_unicorn.arch = Arm | Arm64 | Mips | X86 | Ppc | Riscv
+module Mode = struct
+  type t = int
 
-module Mode = Bap_unicorn.Mode
-module Perm = Bap_unicorn.Perm
-module Cpu = Bap_unicorn.Cpu
-
-module Lifted = struct
-  type config = L.config = {
-    lift :
-      thumb:bool ->
-      int64 ->
-      string ->
-      (int * string * Bap.Std.blk Bap.Std.term list) option;
-    name : Bap.Std.tid -> string option;
-    policy : int;
-    delay : string -> [ `None | `Delayed | `Likely | `Forbidden ];
-    locate : string -> (int * int * int) option;
-    owner : string -> string option;
-    pc : int;
-    big_endian : bool;
-    bits : int;
-    jit : bool;
-    cache : string option;
-  }
+  let ( + ) = ( lor )
+  let little_endian = 0
+  let big_endian = 1 lsl 30
+  let arm = 0
+  let thumb = 1 lsl 4
+  let mclass = 1 lsl 5
+  let v8 = 1 lsl 6
+  let mips32 = 1 lsl 2
+  let mips64 = 1 lsl 3
+  let mode16 = 1 lsl 1
+  let mode32 = 1 lsl 2
+  let mode64 = 1 lsl 3
+  let ppc32 = 1 lsl 2
+  let ppc64 = 1 lsl 3
+  let riscv32 = 1 lsl 2
+  let riscv64 = 1 lsl 3
 end
 
-let version = Uc.version
-let supported = Uc.supported
-let create arch mode = Unicorn (Uc.create arch mode)
-let create_lifted config arch mode = Lifted (L.create config arch mode)
-let is_lifted = function Unicorn _ -> false | Lifted _ -> true
-let close = function Unicorn u -> Uc.close u | Lifted l -> L.close l
+module Perm = struct
+  type t = int
 
-let set_cpu_model t model =
-  match t with Unicorn u -> Uc.set_cpu_model u model | Lifted _ -> ()
+  let ( + ) = ( lor )
+  let ( - ) x y = x land lnot y
+  let none = 0
+  let read = 1
+  let write = 2
+  let exec = 4
+  let all = 7
+  let mem perms perm = perms land perm = perm
+end
 
-let set_tlb_virtual = function
-  | Unicorn u -> Uc.set_tlb_virtual u
-  | Lifted _ -> ()
+module Cpu = struct
+  let arm64_max = 3
+  let mips32r6_generic = 14
+  let mips64r2_generic = 5
+  let mips64_i6400 = 8
+end
 
-let flush_tb = function Unicorn u -> Uc.flush_tb u | Lifted l -> L.flush_tb l
-let insn_at t pc = match t with Unicorn _ -> None | Lifted l -> L.insn_at l pc
-let insn_addrs = function Unicorn _ -> [] | Lifted l -> L.insn_addrs l
-let inventory = function Unicorn _ -> (0, 0, 0) | Lifted l -> L.inventory l
+module Trace = Bap_native_trace
 
-let mem_map t addr size perm =
-  match t with
-  | Unicorn u -> Uc.mem_map u addr size perm
-  | Lifted l -> L.mem_map l addr size perm
+type taint = int
 
-let mem_unmap t addr size =
-  match t with
-  | Unicorn u -> Uc.mem_unmap u addr size
-  | Lifted l -> L.mem_unmap l addr size
+let no_taint = 0
+let tainted x = x <> 0
 
-let mem_protect t addr size perm =
-  match t with
-  | Unicorn u -> Uc.mem_protect u addr size perm
-  | Lifted l -> L.mem_protect l addr size perm
-
-let mem_write t addr data =
-  match t with
-  | Unicorn u -> Uc.mem_write u addr data
-  | Lifted l -> L.mem_write l addr data
-
-let mem_read t addr n =
-  match t with
-  | Unicorn u -> Uc.mem_read u addr n
-  | Lifted l -> L.mem_read l addr n
-
-let mem_regions = function
-  | Unicorn u -> Uc.mem_regions u
-  | Lifted l -> L.mem_regions l
-
-let set_unmapped t name x =
-  match t with Unicorn _ -> () | Lifted l -> L.set_unmapped l name x
-
-let regs = Uc.regs
-let reg = Uc.reg
-
-let reg_size t id =
-  match t with Unicorn u -> Uc.reg_size u id | Lifted l -> L.reg_size l id
-
-let reg_read t id =
-  match t with Unicorn u -> Uc.reg_read u id | Lifted l -> L.reg_read l id
-
-let current t ~pc =
-  match t with Unicorn u -> Uc.reg_read u pc | Lifted l -> L.current l
-
-let reg_write t id x =
-  match t with
-  | Unicorn u -> Uc.reg_write u id x
-  | Lifted l -> L.reg_write l id x
-
-let reg_read_bytes t id =
-  match t with
-  | Unicorn u -> Uc.reg_read_bytes u id
-  | Lifted l -> L.reg_read_bytes l id
-
-let reg_write_bytes t id data =
-  match t with
-  | Unicorn u -> Uc.reg_write_bytes u id data
-  | Lifted l -> L.reg_write_bytes l id data
-
-let registers_restored = function
-  | Unicorn u -> Uc.registers_restored u
-  | Lifted l -> L.registers_restored l
-
-let start ?until ?timeout ?count ?thread t pc =
-  match t with
-  | Unicorn u -> Uc.start ?until ?timeout ?count ?thread u pc
-  | Lifted l -> L.start ?until ?timeout ?count ?thread l pc
-
-let stop = function Unicorn u -> Uc.stop u | Lifted l -> L.stop l
-let in_atomic = function Unicorn _ -> false | Lifted l -> L.in_atomic l
-
-(* the taint, that the lifted engine propagates, see [Bap_lifted] *)
-let taint_start ?jumps = function
-  | Unicorn _ -> invalid_arg "Unicorn doesn't propagate the taint"
-  | Lifted l -> L.taint_start ?jumps l
-
-let lifted f ~default = function Unicorn _ -> default | Lifted l -> f l
-let taint_stop = lifted L.taint_stop ~default:()
-let taint_active = lifted L.taint_active ~default:false
-let taint_any = lifted L.taint_any ~default:false
-
-let taint_clear ?regs ?mem t =
-  lifted (fun l -> L.taint_clear ?regs ?mem l) ~default:() t
-
-let taint_labels t classes =
-  lifted (fun l -> L.taint_labels l classes) ~default:() t
-
-let reg_labels t name = lifted (fun l -> L.reg_labels l name) ~default:[] t
-
-let set_reg_labels t name ls =
-  lifted (fun l -> L.set_reg_labels l name ls) ~default:() t
-
-let mem_labels t addr = lifted (fun l -> L.mem_labels l addr) ~default:[] t
-
-let set_mem_labels t addr ls =
-  lifted (fun l -> L.set_mem_labels l addr ls) ~default:() t
-
-let tainted_regs = lifted L.tainted_regs ~default:[]
-let tainted_mem = lifted L.tainted_mem ~default:[]
-let taint_changes = lifted L.taint_changes ~default:([], [])
-
-type taint = L.taint
-
-let no_taint = L.no_taint
-let tainted = L.tainted
-let taint_jumps = lifted L.taint_jumps ~default:false
-
-let union_taint t a b =
-  lifted (fun l -> L.union_taint l a b) ~default:no_taint t
-
-let moves_taint t a = lifted (fun l -> L.moves_taint l a) ~default:no_taint t
-let reg_taint t r = lifted (fun l -> L.reg_taint l r) ~default:no_taint t
-
-let mem_range_taint t a n =
-  lifted (fun l -> L.mem_range_taint l a n) ~default:no_taint t
-
-let set_reg_taint t r x = lifted (fun l -> L.set_reg_taint l r x) ~default:() t
-
-let fill_mem_taint t a n x =
-  lifted (fun l -> L.fill_mem_taint l a n x) ~default:() t
-
-let copy_mem_taint t ~dst ~src n =
-  lifted (fun l -> L.copy_mem_taint l ~dst ~src n) ~default:() t
-
-let move_mem_taint t ~dst ~src n =
-  lifted (fun l -> L.move_mem_taint l ~dst ~src n) ~default:() t
-
-let interrupted = Uc.interrupted
-let process_signals = Uc.process_signals
-
-type hook = Unicorn_hook of Uc.hook | Lifted_hook of L.hook | No_hook
-
-type access = Bap_unicorn.access =
+type access =
   | Read
   | Write
   | Fetch
@@ -193,84 +62,345 @@ type access = Bap_unicorn.access =
   | Fetch_prot
   | Read_after
 
-let attempt = function Unicorn u -> Some (Uc.attempt u) | Lifted _ -> None
+type hook = { delete : unit -> unit }
+type context = { restore : unit -> unit }
 
-let on_code ?first ?last t f =
-  match t with
-  | Unicorn u -> Unicorn_hook (Uc.on_code ?first ?last u f)
-  | Lifted l -> Lifted_hook (L.on_code ?first ?last l f)
+type t = {
+  close : unit -> unit;
+  set_cpu_model : int -> unit;
+  set_tlb_virtual : unit -> unit;
+  flush_tb : unit -> unit;
+  insn_at :
+    int64 -> (string * string * bool * Bap.Std.blk Bap.Std.term list) option;
+  insn_addrs : unit -> int64 list;
+  inventory : unit -> int * int * int;
+  mem_map : int64 -> int64 -> Perm.t -> unit;
+  mem_unmap : int64 -> int64 -> unit;
+  mem_protect : int64 -> int64 -> Perm.t -> unit;
+  mem_write : int64 -> string -> unit;
+  mem_read : int64 -> int -> string;
+  mem_regions : unit -> (int64 * int64 * Perm.t) list;
+  set_unmapped : string -> Bap.Std.word -> unit;
+  reg_size : int -> int;
+  reg_read : int -> int64;
+  reg_write : int -> int64 -> unit;
+  current : pc:int -> int64;
+  reg_read_bytes : int -> string;
+  reg_write_bytes : int -> string -> unit;
+  registers_restored : unit -> unit;
+  start :
+    ?until:int64 -> ?timeout:int -> ?count:int -> ?thread:int -> int64 -> unit;
+  stop : unit -> unit;
+  in_atomic : unit -> bool;
+  taint_start : ?jumps:bool -> unit -> unit;
+  taint_stop : unit -> unit;
+  taint_active : unit -> bool;
+  taint_any : unit -> bool;
+  taint_clear : ?regs:bool -> ?mem:bool -> unit -> unit;
+  taint_labels : (int * [ `All | `Moves | `None ]) list -> unit;
+  reg_labels : string -> int list;
+  set_reg_labels : string -> int list -> unit;
+  mem_labels : int64 -> int list;
+  set_mem_labels : int64 -> int list -> unit;
+  tainted_regs : unit -> string list;
+  tainted_mem : unit -> int64 list;
+  taint_changes : unit -> string list * int64 list;
+  taint_jumps : unit -> bool;
+  union_taint : taint -> taint -> taint;
+  moves_taint : taint -> taint;
+  reg_taint : string -> taint;
+  mem_range_taint : int64 -> int -> taint;
+  set_reg_taint : string -> taint -> unit;
+  fill_mem_taint : int64 -> int -> taint -> unit;
+  copy_mem_taint : dst:int64 -> src:int64 -> int -> unit;
+  move_mem_taint : dst:int64 -> src:int64 -> int -> unit;
+  attempt : unit -> int64 option;
+  on_code : ?first:int64 -> ?last:int64 -> (int64 -> int -> unit) -> hook;
+  on_sites : int64 list -> (int64 -> int -> unit) -> hook list;
+  on_block : ?first:int64 -> ?last:int64 -> (int64 -> int -> unit) -> hook;
+  on_interrupt : (int -> unit) -> hook;
+  on_x86_syscall : (unit -> unit) -> hook list;
+  on_invalid_insn : (unit -> bool) -> hook;
+  on_unsupported : (int64 -> unit) -> hook;
+  on_mem :
+    ?first:int64 ->
+    ?last:int64 ->
+    [ `read | `write | `fetch | `read_after ] list ->
+    (access -> int64 -> int -> int64 -> unit) ->
+    hook;
+  on_mem_invalid :
+    ?first:int64 ->
+    ?last:int64 ->
+    [ `read | `write | `fetch ] list ->
+    [ `unmapped | `prot ] list ->
+    (access -> int64 -> int -> int64 -> bool) ->
+    hook;
+  trace :
+    ?first:int64 ->
+    ?last:int64 ->
+    ?watch:int64 * int64 ->
+    ?memory:bool ->
+    Trace.t ->
+    hook list;
+  save : unit -> context;
+}
 
-let on_sites t sites f =
-  match t with
-  | Unicorn u -> List.map (fun h -> Unicorn_hook h) (Uc.on_sites u sites f)
-  | Lifted l -> [ Lifted_hook (L.on_sites l sites f) ]
+type engine = t
 
-let on_block ?first ?last t f =
-  match t with
-  | Unicorn u -> Unicorn_hook (Uc.on_block ?first ?last u f)
-  | Lifted l -> Lifted_hook (L.on_block ?first ?last l f)
+let close t = t.close ()
+let set_cpu_model t = t.set_cpu_model
+let set_tlb_virtual t = t.set_tlb_virtual ()
+let flush_tb t = t.flush_tb ()
+let insn_at t = t.insn_at
+let insn_addrs t = t.insn_addrs ()
+let inventory t = t.inventory ()
+let mem_map t = t.mem_map
+let mem_unmap t = t.mem_unmap
+let mem_protect t = t.mem_protect
+let mem_write t = t.mem_write
+let mem_read t = t.mem_read
+let mem_regions t = t.mem_regions ()
+let set_unmapped t = t.set_unmapped
+let reg_size t = t.reg_size
+let reg_read t = t.reg_read
+let reg_write t = t.reg_write
+let current t ~pc = t.current ~pc
+let reg_read_bytes t = t.reg_read_bytes
+let reg_write_bytes t = t.reg_write_bytes
+let registers_restored t = t.registers_restored ()
 
-let on_interrupt t f =
-  match t with
-  | Unicorn u -> Unicorn_hook (Uc.on_interrupt u f)
-  | Lifted l -> Lifted_hook (L.on_interrupt l f)
+let start ?until ?timeout ?count ?thread t =
+  t.start ?until ?timeout ?count ?thread
 
-(* the lifted engine runs no system call, its instructions are
-   interpreted, see [on_unsupported] *)
-let on_x86_syscall t f =
-  match t with
-  | Unicorn u -> List.map (fun h -> Unicorn_hook h) (Uc.on_x86_syscall u f)
-  | Lifted _ -> []
+let stop t = t.stop ()
+let in_atomic t = t.in_atomic ()
+let taint_start ?jumps t = t.taint_start ?jumps ()
+let taint_stop t = t.taint_stop ()
+let taint_active t = t.taint_active ()
+let taint_any t = t.taint_any ()
+let taint_clear ?regs ?mem t = t.taint_clear ?regs ?mem ()
+let taint_labels t = t.taint_labels
+let reg_labels t = t.reg_labels
+let set_reg_labels t = t.set_reg_labels
+let mem_labels t = t.mem_labels
+let set_mem_labels t = t.set_mem_labels
+let tainted_regs t = t.tainted_regs ()
+let tainted_mem t = t.tainted_mem ()
+let taint_changes t = t.taint_changes ()
+let taint_jumps t = t.taint_jumps ()
+let union_taint t = t.union_taint
+let moves_taint t = t.moves_taint
+let reg_taint t = t.reg_taint
+let mem_range_taint t = t.mem_range_taint
+let set_reg_taint t = t.set_reg_taint
+let fill_mem_taint t = t.fill_mem_taint
+let copy_mem_taint t = t.copy_mem_taint
+let move_mem_taint t = t.move_mem_taint
+let attempt t = t.attempt ()
+let on_code ?first ?last t = t.on_code ?first ?last
+let on_sites t = t.on_sites
+let on_block ?first ?last t = t.on_block ?first ?last
+let on_interrupt t = t.on_interrupt
+let on_x86_syscall t = t.on_x86_syscall
+let on_invalid_insn t = t.on_invalid_insn
+let on_unsupported t = t.on_unsupported
+let on_mem ?first ?last t = t.on_mem ?first ?last
+let on_mem_invalid ?first ?last t = t.on_mem_invalid ?first ?last
+let delete h = h.delete ()
+let trace ?first ?last ?watch ?memory t = t.trace ?first ?last ?watch ?memory
+let save t = t.save ()
+let restore c = c.restore ()
 
-let on_invalid_insn t f =
-  match t with
-  | Unicorn u -> Unicorn_hook (Uc.on_invalid_insn u f)
-  | Lifted l -> Lifted_hook (L.on_invalid_insn l f)
+module type S = sig
+  type t
+  type hook
+  type context
 
-let on_unsupported t f =
-  match t with
-  | Unicorn _ -> No_hook
-  | Lifted l -> Lifted_hook (L.on_unsupported l f)
+  val close : t -> unit
+  val set_cpu_model : t -> int -> unit
+  val set_tlb_virtual : t -> unit
+  val flush_tb : t -> unit
 
-let on_mem ?first ?last t accesses f =
-  match t with
-  | Unicorn u -> Unicorn_hook (Uc.on_mem ?first ?last u accesses f)
-  | Lifted l -> Lifted_hook (L.on_mem ?first ?last l accesses f)
+  val insn_at :
+    t ->
+    int64 ->
+    (string * string * bool * Bap.Std.blk Bap.Std.term list) option
 
-let on_mem_invalid ?first ?last t accesses kinds f =
-  match t with
-  | Unicorn u ->
-      Unicorn_hook (Uc.on_mem_invalid ?first ?last u accesses kinds f)
-  | Lifted l -> Lifted_hook (L.on_mem_invalid ?first ?last l accesses kinds f)
+  val insn_addrs : t -> int64 list
+  val inventory : t -> int * int * int
+  val mem_map : t -> int64 -> int64 -> Perm.t -> unit
+  val mem_unmap : t -> int64 -> int64 -> unit
+  val mem_protect : t -> int64 -> int64 -> Perm.t -> unit
+  val mem_write : t -> int64 -> string -> unit
+  val mem_read : t -> int64 -> int -> string
+  val mem_regions : t -> (int64 * int64 * Perm.t) list
+  val set_unmapped : t -> string -> Bap.Std.word -> unit
+  val reg_size : t -> int -> int
+  val reg_read : t -> int -> int64
+  val reg_write : t -> int -> int64 -> unit
+  val current : t -> pc:int -> int64
+  val reg_read_bytes : t -> int -> string
+  val reg_write_bytes : t -> int -> string -> unit
+  val registers_restored : t -> unit
 
-let delete t h =
-  match (t, h) with
-  | Unicorn u, Unicorn_hook h -> Uc.delete u h
-  | Lifted l, Lifted_hook h -> L.delete l h
-  | _, No_hook -> ()
-  | _ -> invalid_arg "Bap_engine.delete: the hook is of another engine"
+  val start :
+    ?until:int64 ->
+    ?timeout:int ->
+    ?count:int ->
+    ?thread:int ->
+    t ->
+    int64 ->
+    unit
 
-module Trace = Bap_native_trace
+  val stop : t -> unit
+  val in_atomic : t -> bool
+  val taint_start : ?jumps:bool -> t -> unit
+  val taint_stop : t -> unit
+  val taint_active : t -> bool
+  val taint_any : t -> bool
+  val taint_clear : ?regs:bool -> ?mem:bool -> t -> unit
+  val taint_labels : t -> (int * [ `All | `Moves | `None ]) list -> unit
+  val reg_labels : t -> string -> int list
+  val set_reg_labels : t -> string -> int list -> unit
+  val mem_labels : t -> int64 -> int list
+  val set_mem_labels : t -> int64 -> int list -> unit
+  val tainted_regs : t -> string list
+  val tainted_mem : t -> int64 list
+  val taint_changes : t -> string list * int64 list
+  val no_taint : taint
+  val tainted : taint -> bool
+  val taint_jumps : t -> bool
+  val union_taint : t -> taint -> taint -> taint
+  val moves_taint : t -> taint -> taint
+  val reg_taint : t -> string -> taint
+  val mem_range_taint : t -> int64 -> int -> taint
+  val set_reg_taint : t -> string -> taint -> unit
+  val fill_mem_taint : t -> int64 -> int -> taint -> unit
+  val copy_mem_taint : t -> dst:int64 -> src:int64 -> int -> unit
+  val move_mem_taint : t -> dst:int64 -> src:int64 -> int -> unit
+  val attempt : t -> int64 option
 
-let trace ?first ?last ?watch ?memory t trace =
-  match t with
-  | Unicorn u ->
-      List.map
-        (fun h -> Unicorn_hook h)
-        (Uc.trace ?first ?last ?watch ?memory u trace)
-  | Lifted l ->
-      List.map
-        (fun h -> Lifted_hook h)
-        (L.trace ?first ?last ?watch ?memory l trace)
+  val on_code :
+    ?first:int64 -> ?last:int64 -> t -> (int64 -> int -> unit) -> hook
 
-type context = Unicorn_context of Uc.context | Lifted_context of L.context
+  val on_sites : t -> int64 list -> (int64 -> int -> unit) -> hook list
 
-let save = function
-  | Unicorn u -> Unicorn_context (Uc.save u)
-  | Lifted l -> Lifted_context (L.save l)
+  val on_block :
+    ?first:int64 -> ?last:int64 -> t -> (int64 -> int -> unit) -> hook
 
-let restore t c =
-  match (t, c) with
-  | Unicorn u, Unicorn_context c -> Uc.restore u c
-  | Lifted l, Lifted_context c -> L.restore l c
-  | _ -> invalid_arg "Bap_engine.restore: the context is of another engine"
+  val on_interrupt : t -> (int -> unit) -> hook
+  val on_x86_syscall : t -> (unit -> unit) -> hook list
+  val on_invalid_insn : t -> (unit -> bool) -> hook
+  val on_unsupported : t -> (int64 -> unit) -> hook
+
+  val on_mem :
+    ?first:int64 ->
+    ?last:int64 ->
+    t ->
+    [ `read | `write | `fetch | `read_after ] list ->
+    (access -> int64 -> int -> int64 -> unit) ->
+    hook
+
+  val on_mem_invalid :
+    ?first:int64 ->
+    ?last:int64 ->
+    t ->
+    [ `read | `write | `fetch ] list ->
+    [ `unmapped | `prot ] list ->
+    (access -> int64 -> int -> int64 -> bool) ->
+    hook
+
+  val delete : hook -> unit
+
+  val trace :
+    ?first:int64 ->
+    ?last:int64 ->
+    ?watch:int64 * int64 ->
+    ?memory:bool ->
+    t ->
+    Trace.t ->
+    hook list
+
+  val save : t -> context
+  val restore : context -> unit
+end
+
+module type BACKEND = S
+
+module Make (B : BACKEND) = struct
+  include B
+
+  let erase t =
+    let hook h = { delete = (fun () -> B.delete h) } in
+    {
+      close = (fun () -> B.close t);
+      set_cpu_model = B.set_cpu_model t;
+      set_tlb_virtual = (fun () -> B.set_tlb_virtual t);
+      flush_tb = (fun () -> B.flush_tb t);
+      insn_at = B.insn_at t;
+      insn_addrs = (fun () -> B.insn_addrs t);
+      inventory = (fun () -> B.inventory t);
+      mem_map = B.mem_map t;
+      mem_unmap = B.mem_unmap t;
+      mem_protect = B.mem_protect t;
+      mem_write = B.mem_write t;
+      mem_read = B.mem_read t;
+      mem_regions = (fun () -> B.mem_regions t);
+      set_unmapped = B.set_unmapped t;
+      reg_size = B.reg_size t;
+      reg_read = B.reg_read t;
+      reg_write = B.reg_write t;
+      current = (fun ~pc -> B.current t ~pc);
+      reg_read_bytes = B.reg_read_bytes t;
+      reg_write_bytes = B.reg_write_bytes t;
+      registers_restored = (fun () -> B.registers_restored t);
+      start =
+        (fun ?until ?timeout ?count ?thread pc ->
+          B.start ?until ?timeout ?count ?thread t pc);
+      stop = (fun () -> B.stop t);
+      in_atomic = (fun () -> B.in_atomic t);
+      taint_start = (fun ?jumps () -> B.taint_start ?jumps t);
+      taint_stop = (fun () -> B.taint_stop t);
+      taint_active = (fun () -> B.taint_active t);
+      taint_any = (fun () -> B.taint_any t);
+      taint_clear = (fun ?regs ?mem () -> B.taint_clear ?regs ?mem t);
+      taint_labels = B.taint_labels t;
+      reg_labels = B.reg_labels t;
+      set_reg_labels = B.set_reg_labels t;
+      mem_labels = B.mem_labels t;
+      set_mem_labels = B.set_mem_labels t;
+      tainted_regs = (fun () -> B.tainted_regs t);
+      tainted_mem = (fun () -> B.tainted_mem t);
+      taint_changes = (fun () -> B.taint_changes t);
+      taint_jumps = (fun () -> B.taint_jumps t);
+      union_taint = B.union_taint t;
+      moves_taint = B.moves_taint t;
+      reg_taint = B.reg_taint t;
+      mem_range_taint = B.mem_range_taint t;
+      set_reg_taint = B.set_reg_taint t;
+      fill_mem_taint = B.fill_mem_taint t;
+      copy_mem_taint = B.copy_mem_taint t;
+      move_mem_taint = B.move_mem_taint t;
+      attempt = (fun () -> B.attempt t);
+      on_code = (fun ?first ?last f -> hook (B.on_code ?first ?last t f));
+      on_sites = (fun sites f -> List.map hook (B.on_sites t sites f));
+      on_block = (fun ?first ?last f -> hook (B.on_block ?first ?last t f));
+      on_interrupt = (fun f -> hook (B.on_interrupt t f));
+      on_x86_syscall = (fun f -> List.map hook (B.on_x86_syscall t f));
+      on_invalid_insn = (fun f -> hook (B.on_invalid_insn t f));
+      on_unsupported = (fun f -> hook (B.on_unsupported t f));
+      on_mem =
+        (fun ?first ?last accesses f ->
+          hook (B.on_mem ?first ?last t accesses f));
+      on_mem_invalid =
+        (fun ?first ?last accesses kinds f ->
+          hook (B.on_mem_invalid ?first ?last t accesses kinds f));
+      trace =
+        (fun ?first ?last ?watch ?memory trace ->
+          List.map hook (B.trace ?first ?last ?watch ?memory t trace));
+      save =
+        (fun () ->
+          let c = B.save t in
+          { restore = (fun () -> B.restore c) });
+    }
+end

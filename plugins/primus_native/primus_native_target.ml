@@ -38,7 +38,7 @@ let engine target : (Uc.arch * Uc.Mode.t) option =
   else None
 
 let reg_exn arch name =
-  match Uc.reg arch name with
+  match Bap_engine_unicorn.reg arch name with
   | Some reg -> reg
   | None -> failwithf "Unicorn has no register %s" name ()
 
@@ -234,7 +234,7 @@ module Regs = struct
 
   (* the register of Unicorn, provided it has enough bits *)
   let whole uc arch name ~lo ~width =
-    match Uc.reg arch name with
+    match Bap_engine_unicorn.reg arch name with
     | None -> None
     | Some id -> (
         match size uc id with
@@ -461,7 +461,7 @@ module Segments = struct
   (* [set uc name base] the segment of the base register [name], e.g.,
      FS_BASE, has the [base], returns [false], if it is not a base *)
   let set uc name base =
-    match (entry name, Uc.reg X86 "GDTR") with
+    match (entry name, Bap_engine_unicorn.reg X86 "GDTR") with
     | Some (index, selector), Some id -> (
         (* the lifted engine reads the base, as the semantics of BAP do *)
         Uc.set_unmapped uc name (Word.of_int64 ~width:32 base);
@@ -469,12 +469,13 @@ module Segments = struct
           Uc.mem_map uc gdt_base gdt_size Uc.Perm.(read + write);
           Uc.reg_write_bytes uc id gdtr;
           Uc.mem_write uc Int64.(gdt_base + 24L) (descriptor ~access:0x92L 0L);
-          Option.iter (Uc.reg X86 "SS") ~f:(fun ss -> Uc.reg_write uc ss 0x18L)
+          Option.iter (Bap_engine_unicorn.reg X86 "SS") ~f:(fun ss ->
+              Uc.reg_write uc ss 0x18L)
         end;
         Uc.mem_write uc
           Int64.(gdt_base + of_int Int.(index * 8))
           (descriptor base);
-        match Uc.reg X86 selector with
+        match Bap_engine_unicorn.reg X86 selector with
         | Some sel ->
             (* the selector of the entry, with the privilege level 3 *)
             Uc.reg_write uc sel (Int64.of_int ((index lsl 3) lor 3));

@@ -5,7 +5,7 @@
 open Core
 open Bap_core_theory
 open Bap.Std
-module Uc = Bap_engine
+module Uc = Bap_engine_unicorn
 module Target = Bap_primus_native_plugin.Primus_native_target
 
 let () =

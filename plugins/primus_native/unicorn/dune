@@ -11,7 +11,7 @@
    ../trace/bap_native_trace.h
    ../libunicorn/unicorn)
   (flags :standard -I../trace -I../libunicorn/unicorn/include))
- (libraries bap-primus-native.trace)
+ (libraries bap-primus-native.engine bap-primus-native.trace)
  ; the archive of Unicorn, which it also installs as unicorn.o, so that it
  ; is a dependency of the links, and they are redone when it changes; it is
  ; linked from the flags too, which the linker sees before the extra objects,

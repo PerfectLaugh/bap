@@ -16,6 +16,8 @@
   bap-main
   bap-primus
   bap-primus-native.engine
+  bap-primus-native.engine-lifted
+  bap-primus-native.engine-unicorn
   bap-taint
   bitvec
   core

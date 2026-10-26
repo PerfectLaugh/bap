@@ -20,6 +20,7 @@
   bap-primus-native.plugin
   bap-primus-lisp.plugin
   bap-primus-native.engine
+  bap-primus-native.engine-unicorn
   bap-primus-native-jni.jni
   bap-primus-symbolic-executor.symbolic
   bap-taint

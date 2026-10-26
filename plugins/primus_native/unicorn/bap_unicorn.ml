@@ -1,9 +1,12 @@
-exception Error of int * string
+exception Error = Bap_engine.Error
 
 let () = Callback.register_exception "Bap_unicorn.Error" (Error (0, ""))
 
 type t
-type arch = Arm | Arm64 | Mips | X86 | Ppc | Riscv
+type arch = Bap_engine.arch = Arm | Arm64 | Mips | X86 | Ppc | Riscv
+
+module Mode = Bap_engine.Mode
+module Perm = Bap_engine.Perm
 
 (* the values of uc_arch *)
 let arch_code = function
@@ -14,52 +17,12 @@ let arch_code = function
   | Ppc -> 5
   | Riscv -> 8
 
-module Mode = struct
-  type t = int
-
-  let ( + ) = ( lor )
-  let little_endian = 0
-  let big_endian = 1 lsl 30
-  let arm = 0
-  let thumb = 1 lsl 4
-  let mclass = 1 lsl 5
-  let v8 = 1 lsl 6
-  let mips32 = 1 lsl 2
-  let mips64 = 1 lsl 3
-  let mode16 = 1 lsl 1
-  let mode32 = 1 lsl 2
-  let mode64 = 1 lsl 3
-  let ppc32 = 1 lsl 2
-  let ppc64 = 1 lsl 3
-  let riscv32 = 1 lsl 2
-  let riscv64 = 1 lsl 3
-end
-
-module Perm = struct
-  type t = int
-
-  let ( + ) = ( lor )
-  let ( - ) x y = x land lnot y
-  let none = 0
-  let read = 1
-  let write = 2
-  let exec = 4
-  let all = 7
-  let mem perms perm = perms land perm = perm
-end
-
 external version : unit -> int * int = "bap_uc_version"
 external supported_code : int -> bool = "bap_uc_arch_supported"
 external create_code : int -> Mode.t -> t = "bap_uc_open"
 external close : t -> unit = "bap_uc_close"
 
-(* the values of uc_cpu_* *)
-module Cpu = struct
-  let arm64_max = 3
-  let mips32r6_generic = 14
-  let mips64r2_generic = 5
-  let mips64_i6400 = 8
-end
+module Cpu = Bap_engine.Cpu
 
 external set_cpu_model : t -> int -> unit = "bap_uc_set_cpu_model"
 external flush_tb : t -> unit = "bap_uc_flush_tb"
@@ -123,7 +86,7 @@ let start ?(until = -1L) ?(timeout = 0) ?(count = 0) ?(thread = 0) uc pc =
 
 type hook = int64
 
-type access =
+type access = Bap_engine.access =
   | Read
   | Write
   | Fetch

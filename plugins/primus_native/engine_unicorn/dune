@@ -1,0 +1,5 @@
+(library
+ (name bap_engine_unicorn)
+ (public_name bap-primus-native.engine-unicorn)
+ (modules bap_engine_unicorn)
+ (libraries bap-primus-native.engine bap-primus-native.unicorn))

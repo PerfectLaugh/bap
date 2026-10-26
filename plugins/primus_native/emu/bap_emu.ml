@@ -462,7 +462,8 @@ let pc t =
       if
         Poly.equal e.arch Uc.Arm
         && Int64.(
-             Uc.reg_read e.uc (Option.value_exn (Uc.reg Uc.Arm "CPSR"))
+             Uc.reg_read e.uc
+               (Option.value_exn (Bap_engine_unicorn.reg Uc.Arm "CPSR"))
              land 0x20L
              <> 0L)
       then Int64.(pc lor 1L)
@@ -968,16 +969,14 @@ let scoped t f =
    engines, that it was deleted from, e.g., closed ones, are gone with it *)
 let hook t f =
   let hooks = ref [] in
-  let install (e : X.engine) =
-    hooks := List.map (f e) ~f:(fun h -> (e.uc, h)) @ !hooks
-  in
+  let install (e : X.engine) = hooks := f e @ !hooks in
   installed t install;
   scope t (fun () ->
       t.session.engine_hooks <-
         List.filter t.session.engine_hooks ~f:(fun g ->
             not (phys_equal g install));
-      List.iter !hooks ~f:(fun (uc, h) ->
-          try Uc.delete uc h with Invalid_argument _ | Uc.Error _ -> ());
+      List.iter !hooks ~f:(fun h ->
+          try Uc.delete h with Invalid_argument _ | Uc.Error _ -> ());
       hooks := [])
 
 (* the address of the code of the instruction, without the lower bit of
@@ -1013,7 +1012,7 @@ let run ?until t =
     resume t (X.Continue (pc t));
     Option.iter hook ~f:(fun (e', hook) ->
         match t.session.active with
-        | Some e when phys_equal e e' -> Uc.delete e.uc hook
+        | Some e when phys_equal e e' -> Uc.delete hook
         | _ -> ())
   end;
   status t
@@ -1029,7 +1028,7 @@ let step t =
     in
     resume t (X.Continue (pc t));
     match t.session.active with
-    | Some e' when phys_equal e e' -> Uc.delete e.uc hook
+    | Some e' when phys_equal e e' -> Uc.delete hook
     | _ -> ()
   end;
   status t
@@ -1599,7 +1598,7 @@ module Trace = struct
             ones, that the trace watches *)
     watch : (int64 * int64) option;
     mutable active : bool;
-    mutable hooks : (Uc.t * Uc.hook list) option;  (** on the engine *)
+    mutable hooks : Uc.hook list option;
     blocks : (int * int64 array) list Int64.Table.t;
         (** the instructions of the blocks, by their addresses, with the lower
             bit of Thumb, and sizes, see [insns] *)
@@ -1640,16 +1639,16 @@ module Trace = struct
     emu.traces <- (owned_trace, owned_blocks) :: emu.traces;
     installed emu (fun e ->
         if t.active then
-          t.hooks <- Some (e.uc, Uc.trace ?first ?last ?watch ~memory e.uc trace));
+          t.hooks <- Some (Uc.trace ?first ?last ?watch ~memory e.uc trace));
     t
 
   (* the hooks of a closed engine are gone with it *)
   let stop t =
     if t.active then begin
       t.active <- false;
-      Option.iter t.hooks ~f:(fun (uc, hooks) ->
+      Option.iter t.hooks ~f:(fun hooks ->
           List.iter hooks ~f:(fun hook ->
-              try Uc.delete uc hook with Invalid_argument _ -> ()));
+              try Uc.delete hook with Invalid_argument _ -> ()));
       t.hooks <- None
     end
 
@@ -3438,7 +3437,7 @@ let start_stats t ~interval callback =
             end
           end)
     in
-    hooks := (e.uc, hook) :: !hooks
+    hooks := hook :: !hooks
   in
   installed t install;
   let stop () =
@@ -3447,8 +3446,8 @@ let start_stats t ~interval callback =
       t.session.engine_hooks <-
         List.filter t.session.engine_hooks ~f:(fun g ->
             not (phys_equal g install));
-      List.iter !hooks ~f:(fun (uc, hook) ->
-          try Uc.delete uc hook with Invalid_argument _ | Uc.Error _ -> ());
+      List.iter !hooks ~f:(fun hook ->
+          try Uc.delete hook with Invalid_argument _ | Uc.Error _ -> ());
       hooks := []
     end
   in

@@ -145,6 +145,10 @@ module Id = Monads.Std.Monad.State.Multi.Id
    bap:lifted-executor, see [Bap_lifted] *)
 type kind = [ `Unicorn | `Lifted ]
 
+type engine_factory = {
+  create : Bap_engine_lifted.config option -> Uc.arch -> Uc.Mode.t -> Uc.t;
+}
+
 (* the options of the plugin of an engine, primus-unicorn, or
    primus-lifted, which are the defaults of its sessions: the seconds that
    a machine may run, the file of the checkpoint and its point, the file
@@ -421,9 +425,11 @@ and session = {
           [Primus.Interpreter.Stops], whose copy the hooks see *)
   mutable stepping : bool;
   stop_addrs : Int64.Hash_set.t;
+  factory : engine_factory;
+      (** the selected backend, which creates and recreates the engines *)
   lifted : bool;
-      (** the machines run in the lifted engine, see [Bap_lifted], of
-          bap:lifted-executor, rather than in Unicorn *)
+      (** whether lifted-only lifter setup and native taint policy are enabled
+      *)
   jit : bool;  (** the lifted engine compiles the blocks, that run often *)
   cache : string option;  (** see [options.cache] *)
   digest : string;  (** see [options.digest] *)
@@ -595,7 +601,15 @@ let register_model registry ?(package = "user") ?(version = 1)
 let create_session ?restore ?models ?(engine : kind = `Unicorn) () =
   let o = options engine in
   let restore = Option.value restore ~default:o.restore in
+  let create =
+    match engine with
+    | `Unicorn -> fun _ arch mode -> Bap_engine_unicorn.create arch mode
+    | `Lifted ->
+        fun config arch mode ->
+          Bap_engine_lifted.create (Option.value_exn config) arch mode
+  in
   {
+    factory = { create };
     models =
       (match models with
       | Some models -> models
@@ -812,7 +826,7 @@ let extra_regs (e : engine) =
     | Mips -> [ "CP0_USERLOCAL" ]
     | Ppc -> [ "XER"; "FPSCR" ]
     | _ -> [])
-  |> List.filter_map ~f:(Uc.reg e.arch)
+  |> List.filter_map ~f:(Bap_engine_unicorn.reg e.arch)
 
 (* the bases of the segments of x86 in the protected mode, which Unicorn
    reads, but doesn't write, as they are in the descriptors, see
@@ -821,7 +835,7 @@ let segment_base (e : engine) id =
   match e.arch with
   | X86 when e.bytes = 4 ->
       List.find [ "FS_BASE"; "GS_BASE" ] ~f:(fun name ->
-          Option.equal Int.equal (Uc.reg X86 name) (Some id))
+          Option.equal Int.equal (Bap_engine_unicorn.reg X86 name) (Some id))
   | _ -> None
 
 (* the base of the segment is in its descriptor, if the table is mapped,
@@ -1169,7 +1183,7 @@ let sync_stack_hook e =
         Some (Uc.on_code e.uc (fun pc _ -> check_native_stack e pc));
       Uc.flush_tb e.uc
   | None, Some hook ->
-      Uc.delete e.uc hook;
+      Uc.delete hook;
       e.stack_hook <- None;
       Uc.flush_tb e.uc
   | _ -> ()
@@ -1237,7 +1251,7 @@ let sync_tracer e =
       e.tracer <- Some (Uc.on_code e.uc (fun addr _ -> trace e addr));
       Uc.flush_tb e.uc
   | true, Some hook ->
-      Uc.delete e.uc hook;
+      Uc.delete hook;
       e.tracer <- None;
       Uc.flush_tb e.uc
   | _ -> ()
@@ -1310,7 +1324,7 @@ let sync_stops e =
     | true, None ->
         e.stepper <- Some (Uc.on_code e.uc (fun addr _ -> dispatch e addr))
     | false, Some hook ->
-        Uc.delete e.uc hook;
+        Uc.delete hook;
         e.stepper <- None
     | _ -> ());
     Uc.flush_tb e.uc
@@ -1393,11 +1407,11 @@ module X86_intrinsics = struct
 
   let uc mode =
     Hashtbl.find_or_add scratch mode ~default:(fun () ->
-        let uc = Uc.create X86 mode in
+        let uc = Bap_engine_unicorn.create X86 mode in
         Uc.mem_map uc code_addr 0x1000L Uc.Perm.(read + exec);
         uc)
 
-  let reg name = Option.value_exn (Uc.reg X86 name)
+  let reg name = Option.value_exn (Bap_engine_unicorn.reg X86 name)
 
   (* the registers RAX, RBX, RCX, RDX after the instruction [code], that
      runs from RAX = [a] and RCX = [c], or [None], if it faults *)
@@ -1736,12 +1750,12 @@ let create session target ~foreign ~externals =
   (* the registers of BAP, that the lifted engine runs, are located, when
      the engine is created, see [regs] *)
   let locate = ref (fun _ -> None) and owner = ref (fun _ -> None) in
-  let uc =
+  let config =
     match session.lifter with
     | Some { lift; name; _ } when session.lifted ->
-        Uc.create_lifted
+        Some
           {
-            lift;
+            Bap_engine_lifted.lift;
             name;
             policy = ieee754_policy target;
             delay = delay_of target arch;
@@ -1755,9 +1769,9 @@ let create session target ~foreign ~externals =
             cache =
               Option.map session.cache ~f:(fun dir -> mkdirs (dir ^/ "objects"));
           }
-          arch mode
-    | _ -> Uc.create arch mode
+    | _ -> None
   in
+  let uc = session.factory.create config arch mode in
   (* the default CPU of AArch64, Cortex-A72, is ARMv8.0, which has no LSE
      atomics of ARMv8.1, e.g., ldadd and cas, that the programs compiled
      for the later ones, or with outline atomics, run; the maximum one has
@@ -1779,26 +1793,28 @@ let create session target ~foreign ~externals =
   (* the 64-bit addresses of MIPS are enabled by the KX, SX, and UX bits *)
   (match arch with
   | Mips when Theory.Target.bits target = 64 ->
-      let status = Option.value_exn (Uc.reg Mips "CP0_STATUS") in
+      let status =
+        Option.value_exn (Bap_engine_unicorn.reg Mips "CP0_STATUS")
+      in
       (* and the 64-bit FPU registers, FR, of the n64 ABI *)
       Uc.reg_write uc status Int64.(Uc.reg_read uc status lor 0x040000E0L)
   (* the FPU and AltiVec of PowerPC, which Linux enables, are off at the
      reset, as MSR.FP and MSR.VEC are 0 *)
   | Ppc ->
-      Option.iter (Uc.reg Ppc "MSR") ~f:(fun msr ->
+      Option.iter (Bap_engine_unicorn.reg Ppc "MSR") ~f:(fun msr ->
           Uc.reg_write uc msr Int64.(Uc.reg_read uc msr lor 0x02002000L))
   (* the FPU of RISC-V, which Linux enables, is off at the reset, as
      mstatus.FS is 0 *)
   | Riscv ->
-      Option.iter (Uc.reg Riscv "MSTATUS") ~f:(fun mstatus ->
+      Option.iter (Bap_engine_unicorn.reg Riscv "MSTATUS") ~f:(fun mstatus ->
           Uc.reg_write uc mstatus Int64.(Uc.reg_read uc mstatus lor 0x6000L))
   (* the VFP and NEON of ARM, which Linux enables, are disabled at the
      reset: the coprocessors 10 and 11 are accessible in CPACR, and
      FPEXC enables them *)
   | Arm ->
-      Option.iter (Uc.reg Arm "C1_C0_2") ~f:(fun cpacr ->
+      Option.iter (Bap_engine_unicorn.reg Arm "C1_C0_2") ~f:(fun cpacr ->
           Uc.reg_write uc cpacr Int64.(Uc.reg_read uc cpacr lor 0xF00000L));
-      Option.iter (Uc.reg Arm "FPEXC") ~f:(fun fpexc ->
+      Option.iter (Bap_engine_unicorn.reg Arm "FPEXC") ~f:(fun fpexc ->
           Uc.reg_write uc fpexc 0x40000000L)
   | _ -> ());
   let regs = Target.Regs.create target arch uc in
@@ -2288,7 +2304,7 @@ let code_written e addr size =
 
 let watch e (w : watching) =
   if not (Poly.equal e.watching w) then begin
-    List.iter e.watchers ~f:(Uc.delete e.uc);
+    List.iter e.watchers ~f:Uc.delete;
     e.watchers <- [];
     e.watching <- w;
     let add hook = e.watchers <- hook :: e.watchers in
@@ -3468,7 +3484,7 @@ module Make (Machine : Primus.Machine.S) = struct
       ignore (Target.Regs.write e.regs e.sp (word e frame.sp));
     Machine.return frame.ret
 
-  let cpsr = lazy (Option.value_exn (Uc.reg Arm "CPSR"))
+  let cpsr = lazy (Option.value_exn (Bap_engine_unicorn.reg Arm "CPSR"))
 
   (* the address, from which Unicorn continues, with the lower bit set in
      the Thumb state of ARM *)
@@ -3803,8 +3819,8 @@ module Make (Machine : Primus.Machine.S) = struct
     s.stopped_at <- Some (code_addr e (current_pc e));
     (* the handlers of the signals run, e.g., of the script, which may
        pause the program, and else it continues *)
-    if Uc.interrupted () then begin
-      Uc.process_signals ();
+    if Bap_engine_unicorn.interrupted () then begin
+      Bap_engine_unicorn.process_signals ();
       if Option.is_none e.reason then e.reason <- Some Interrupted
     end;
     match e.reason with
@@ -4740,7 +4756,7 @@ module Make (Machine : Primus.Machine.S) = struct
               | Set_tls -> (
                   match abi.tls with
                   | Extra name -> (
-                      match Uc.reg e.arch name with
+                      match Bap_engine_unicorn.reg e.arch name with
                       | Some id ->
                           Uc.reg_write e.uc id (arg 0);
                           return 0L
@@ -4828,8 +4844,8 @@ module Make (Machine : Primus.Machine.S) = struct
                       if not settls then None
                       else
                         match abi.tls with
-                        | Extra name -> Uc.reg e.arch name
-                        | Descriptor -> Uc.reg e.arch "GS_BASE"
+                        | Extra name -> Bap_engine_unicorn.reg e.arch name
+                        | Descriptor -> Bap_engine_unicorn.reg e.arch "GS_BASE"
                         | Reg _ -> None
                     in
                     let child =
@@ -4963,7 +4979,7 @@ module Make (Machine : Primus.Machine.S) = struct
          the protected mode, rather than in the register, e.g., of the
          lifted engine, see [read_extra] *)
       let current_teb e =
-        match Uc.reg X86 (teb e).base with
+        match Bap_engine_unicorn.reg X86 (teb e).base with
         | Some id ->
             String.foldi (read_extra e id) ~init:0L ~f:(fun i acc c ->
                 Int64.(acc lor (of_int (Char.to_int c) lsl Int.(8 * i))))
@@ -5200,7 +5216,7 @@ module Make (Machine : Primus.Machine.S) = struct
               else if String.equal name t.base then like x teb
               else Machine.return x)
         in
-        let base = Uc.reg X86 t.base in
+        let base = Bap_engine_unicorn.reg X86 t.base in
         let child =
           {
             tid;
