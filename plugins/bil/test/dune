@@ -1,0 +1,14 @@
+(test
+ (name run_tests)
+ (modules run_tests)
+ (libraries bap bap-bil.plugin core ounit2))
+
+(executable
+ (name run_lean_tests)
+ (modules run_lean_tests)
+ (libraries bap bap-bil.plugin core ounit2))
+
+(rule
+ (alias lean-tests)
+ (action
+  (run %{exe:run_lean_tests.exe} -runner processes -shards 4)))

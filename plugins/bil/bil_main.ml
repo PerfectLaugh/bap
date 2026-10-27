@@ -36,6 +36,17 @@ A new pass could be registered via the $(b,Bil.register_pass)
 function. It won't be automatically selected, so it should be
 specified explicitly via the $(b,--bil-passes) command line
 argument.
+
+# LEAN-CHECKED CONSTANT FOLDING
+
+The $(b,lean-checked-constant-folding) pass applies constant folding and
+uses Lean 4.34.0 to check equivalence of every changed pure bit-vector
+expression. It requires $(b,elan) on $(b,PATH) or in $(b,~/.elan/bin).
+The optimized BIL is used only if all generated proofs pass. Unsupported
+changes, including changes to memory, let-bound, or undefined-value
+expressions, and Lean failures reject the transformation. Unchanged
+expressions outside the supported fragment are accepted. The pass is not
+part of the default optimization pipeline.
 |}
 
 open Bap_core_theory
@@ -57,6 +68,11 @@ let normalizations = [ ("0", []); ("1", [ bnf1 ]); ("2", [ bnf2 ]) ]
 let fold_consts =
   Bil.register_pass "constant-folding" ~desc:"constant-folding" Bil.fold_consts
 
+let lean_fold_consts =
+  Bil.register_pass "lean-checked-constant-folding"
+    ~desc:"constant-folding with Lean-checked expression equivalence"
+    Bil_lean.checked_fold_consts
+
 let consts_propagation =
   Bil.register_pass "constant-propagation" ~desc:"constant-propagation"
     Bil.propagate_consts
@@ -76,7 +92,9 @@ let print_passes () =
   exit 0
 
 let pass =
-  Type.enum (List.map (Bil.passes ()) ~f:(fun p -> (Bil.Pass.to_string p, p)))
+  Type.enum
+    (List.concat_map (Bil.passes ()) ~f:(fun p ->
+         [ (Bil.Pass.name p, p); (Bil.Pass.to_string p, p) ]))
 
 type ispec = Bil_lifter.ispec
 

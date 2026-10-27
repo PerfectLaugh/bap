@@ -11,7 +11,8 @@
   bitvec
   core
   monads
-  ogre))
+  ogre
+  unix))
 
 (plugin
  (name bil)
