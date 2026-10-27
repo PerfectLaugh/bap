@@ -356,7 +356,8 @@ let lifts proj =
    The system gets the session of the emulator with its project, see
    [X.with_session] *)
 let create ?system ?(components = []) ?(init = []) ?(redirects = [])
-    ?(args = []) ?(envp = []) ?entry ?restore ?models ?engine proj =
+    ?(args = []) ?(envp = []) ?entry ?restore ?models ?engine
+    ?(lifting = `Default) proj =
   (* the engine of the system, if it is of one, or else of BAP_EMU_ENGINE,
      e.g., of the testsuite, by default the lifted one, see bap_emu.mli *)
   let engine : X.kind =
@@ -413,7 +414,7 @@ let create ?system ?(components = []) ?(init = []) ?(redirects = [])
   let session =
     X.create_session
       ?restore:(Option.map restore ~f:Option.return)
-      ?models ~engine ()
+      ?models ~engine ~lifting ()
   in
   session.driven <- true;
   session.pause <- true;
@@ -813,6 +814,33 @@ module Checkpoint = struct
         Option.map c.model_states ~f:(fun models ->
             List.map models ~f:(fun (m : C.model_state) ->
                 { name = m.name; version = m.version; required = m.required }))
+
+  let describe file =
+    let info = info file in
+    let threads =
+      List.map info.threads ~f:(fun thread ->
+          let waiting =
+            match thread.waiting with
+            | None -> "no"
+            | Some addresses ->
+                List.map addresses ~f:(sprintf "%Lx") |> String.concat ~sep:","
+          in
+          sprintf "  tid=%d pc=%Lx waiting=%s" thread.tid thread.pc waiting)
+    in
+    let models =
+      match models file with
+      | None -> [ "models: legacy" ]
+      | Some models ->
+          sprintf "models: %d" (List.length models)
+          :: List.map models ~f:(fun model ->
+              sprintf "  %s version=%d required=%B" model.name model.version
+                model.required)
+    in
+    String.concat ~sep:"\n"
+      (sprintf "checkpoint: target=%s digest=%s threads=%d" info.target
+         info.digest (List.length info.threads)
+       :: threads
+      @ models)
 
   type link = {
     file : string;
@@ -1807,6 +1835,8 @@ module Trace = struct
     blocks : (int * int64 array) list Int64.Table.t;
         (** the instructions of the blocks, by their addresses, with the lower
             bit of Thumb, and sizes, see [insns] *)
+    watches : ((int64 * int64) * t) list;
+        (** independent native access rings, with no nested watches *)
   }
 
   let own t =
@@ -1857,13 +1887,14 @@ module Trace = struct
       | Some v when Int64.equal v.index index -> Some v
       | _ -> None
 
-  let clear t =
+  let rec clear t =
     if Option.is_some t.journal then
       invalid_arg "Bap_emu.Trace.clear: a journaled trace cannot be cleared";
     Engine.Trace.clear t.trace;
     Array.fill t.versions.entries ~pos:0 ~len:t.versions.capacity None;
     t.versions.count <- 0L;
-    t.versions.pending_block <- None
+    t.versions.pending_block <- None;
+    List.iter t.watches ~f:(fun (_, watched) -> clear watched)
 
   let program_digest ~fn emu =
     match Project.get emu.project filename with
@@ -1928,11 +1959,12 @@ module Trace = struct
       bounds : sparse;
       ranges : sparse;
       state : native;
+      watch_states : ((int64 * int64) * native) list;
     }
     [@@deriving bin_io]
 
     let prefix = "bap-emu-trace-state "
-    let magic = prefix ^ "3\n"
+    let magic = prefix ^ "4\n"
   end
 
   let journal_error t message =
@@ -2103,6 +2135,9 @@ module Trace = struct
         bounds = sparse native.bounds;
         ranges = sparse native.ranges;
         state = { native with bounds = [||]; ranges = [||] };
+        watch_states =
+          List.map t.watches ~f:(fun (range, watched) ->
+              (range, Engine.Trace.Snapshot.export watched.trace));
       }
     in
     let data = Binable.to_string (module Saved_state) saved in
@@ -2125,6 +2160,7 @@ module Trace = struct
 
   let save_state t file =
     prepare_state t;
+    List.iter t.watches ~f:(fun (_, watched) -> prepare_state watched);
     save_native_state t (Engine.Trace.Snapshot.export t.trace) file
 
   let restore_state emu file =
@@ -2220,6 +2256,39 @@ module Trace = struct
               file msg ()
         | trace ->
             retained.count <- saved.Saved_state.state.count;
+            let watches =
+              List.map saved.Saved_state.watch_states ~f:(fun (range, native) ->
+                  match Engine.Trace.Snapshot.import native with
+                  | exception Invalid_argument msg ->
+                      failwithf
+                        "Bap_emu.Trace.restore_state: %s has invalid watch \
+                         state: %s"
+                        file msg ()
+                  | trace ->
+                      let watched =
+                        {
+                          emu;
+                          trace;
+                          memory = false;
+                          watch = Some range;
+                          first = None;
+                          last = None;
+                          capacity = native.capacity;
+                          access_capacity = native.access_capacity;
+                          every = native.every;
+                          versions = empty_versions ();
+                          journal = None;
+                          digest = Some saved.Saved_state.digest;
+                          active = false;
+                          registered = false;
+                          hooks = None;
+                          blocks = Int64.Table.create ();
+                          watches = [];
+                        }
+                      in
+                      own watched;
+                      (range, watched))
+            in
             let t =
               {
                 emu;
@@ -2238,6 +2307,7 @@ module Trace = struct
                 registered = false;
                 hooks = None;
                 blocks = Int64.Table.create ();
+                watches;
               }
             in
             own t;
@@ -2523,9 +2593,16 @@ module Trace = struct
 
   (* the hooks are native, see [Engine.trace], and go to the new engines too,
      until the trace stops; code versions use the corresponding bounded hook *)
-  let start ?(size = 1 lsl 20) ?every ?(blocks = false) ?(accesses = 0)
-      ?(read_values = false) ?watch ?first ?last ?journal ?journal_interval
-      ?code_versions emu =
+  let rec start ?(size = 1 lsl 20) ?every ?(blocks = false) ?(accesses = 0)
+      ?(read_values = false) ?watch ?(watches = []) ?(watch_accesses = 1 lsl 16)
+      ?first ?last ?journal ?journal_interval ?code_versions emu =
+    if Option.is_some watch && not (List.is_empty watches) then
+      invalid_arg "Bap_emu.Trace.start: use either watch or watches";
+    if List.contains_dup watches ~compare:Poly.compare then
+      invalid_arg "Bap_emu.Trace.start: duplicate watch range";
+    List.iter watches ~f:(fun (lower, upper) ->
+        if Stdlib.Int64.unsigned_compare lower upper > 0 then
+          invalid_arg "Bap_emu.Trace.start: reversed watch range");
     let accesses =
       if Option.is_some watch && accesses = 0 then 1 lsl 16 else accesses
     in
@@ -2587,17 +2664,24 @@ module Trace = struct
         registered = false;
         hooks = None;
         blocks = Int64.Table.create ();
+        watches = [];
       }
     in
     Option.iter t.journal ~f:(fun j -> j.written <- native_counters t native);
     open_journal t;
     own t;
     register t;
-    t
+    let watched =
+      List.map watches ~f:(fun range ->
+          ( range,
+            start ~size:(min size 1024) ~blocks ~read_values ~watch:range
+              ~accesses:watch_accesses emu ))
+    in
+    { t with watches = watched }
 
   (* the hooks of a closed engine are gone with it; the final segment is
      published before the manifest is closed *)
-  let stop t =
+  let rec stop t =
     if t.active then begin
       t.active <- false;
       Option.iter t.hooks ~f:(fun hooks ->
@@ -2610,9 +2694,10 @@ module Trace = struct
              if Option.is_none j.error then j.error <- Some msg));
       close_journal t
     end;
-    check_journal t
+    check_journal t;
+    List.iter t.watches ~f:(fun (_, watched) -> stop watched)
 
-  let resume t =
+  let rec resume t =
     check_journal t;
     if not t.active then begin
       open_journal t;
@@ -2620,7 +2705,8 @@ module Trace = struct
       register t;
       Option.iter t.emu.session.active ~f:(fun e ->
           if Option.is_none t.hooks then install t e)
-    end
+    end;
+    List.iter t.watches ~f:(fun (_, watched) -> resume watched)
 
   let tids ?last t = Engine.Trace.tids ?last t.trace
   let save ?last t file = Engine.Trace.save ?last t.trace file
@@ -2658,6 +2744,79 @@ module Trace = struct
   let accesses ?last t =
     let rows = Engine.Trace.accesses ?last t.trace in
     List.init (Bigarray.Array2.dim1 rows) ~f:(access rows)
+
+  let watches t = t.watches
+  let watched t range = List.Assoc.find t.watches range ~equal:Poly.equal
+  let retained_accesses t = Engine.Trace.retained_accesses t.trace
+  let accesses_count t = Engine.Trace.accesses_count t.trace
+  let access_capacity t = t.access_capacity
+
+  let access_overflow t =
+    t.access_capacity > 0
+    && Int64.(accesses_count t > of_int (retained_accesses t))
+
+  type access_summary = {
+    count : int64;
+    retained : int;
+    capacity : int;
+    overflow : bool;
+  }
+
+  type summary = {
+    count : int64;
+    retained : int;
+    capacity : int;
+    nonzero_pcs : int;
+    nonzero_block_sizes : int;
+    overflow : bool;
+    accesses : access_summary;
+    captures : int64;
+    code_versions : int;
+    watches : ((int64 * int64) * access_summary) list;
+  }
+
+  let access_summary t =
+    {
+      count = accesses_count t;
+      retained = retained_accesses t;
+      capacity = access_capacity t;
+      overflow = access_overflow t;
+    }
+
+  let summarize t =
+    let native = Engine.Trace.Snapshot.export t.trace in
+    let retained = retained t in
+    {
+      count = count t;
+      retained;
+      capacity = native.capacity;
+      nonzero_pcs = Array.count native.pcs ~f:(Int64.( <> ) 0L);
+      nonzero_block_sizes = Array.count native.sizes ~f:(Int32.( <> ) 0l);
+      overflow = Int64.(count t > of_int retained);
+      accesses = access_summary t;
+      captures = native.captures_count;
+      code_versions = retained_versions t;
+      watches =
+        List.map t.watches ~f:(fun (range, watched) ->
+            (range, access_summary watched));
+    }
+
+  let describe t =
+    let s = summarize t in
+    let access name (a : access_summary) =
+      sprintf "%s: count=%Ld retained=%d capacity=%d overflow=%B" name a.count
+        a.retained a.capacity a.overflow
+    in
+    String.concat ~sep:"\n"
+      (sprintf
+         "trace: count=%Ld retained=%d capacity=%d nonzero-pcs=%d \
+          nonzero-block-sizes=%d overflow=%B"
+         s.count s.retained s.capacity s.nonzero_pcs s.nonzero_block_sizes
+         s.overflow
+      :: sprintf "captures=%Ld code-versions=%d" s.captures s.code_versions
+      :: access "accesses" s.accesses
+      :: List.map s.watches ~f:(fun ((lower, upper), watched) ->
+          access (sprintf "watch %Lx-%Lx" lower upper) watched))
 
   (* the [top] values, that occur most, with their numbers, the most
      first, and the lower first, of the same number *)
@@ -3233,6 +3392,236 @@ module Trace = struct
         | None -> ()
     done;
     List.rev !branches
+end
+
+module Cff = struct
+  type dispatch = {
+    site : int64;
+    state : int64;
+    thread : int;
+    regs : (string * int64) list;
+    fields : Trace.state_field list;
+  }
+
+  let dispatchers ~state capture =
+    List.map (Trace.captured_states capture) ~f:(fun record ->
+        match List.Assoc.find record.Trace.regs state ~equal:String.equal with
+        | None -> failwithf "Bap_emu.Cff.dispatchers: no register %s" state ()
+        | Some value ->
+            {
+              site = record.site;
+              state = value;
+              thread = record.thread;
+              regs = record.regs;
+              fields = record.fields;
+            })
+
+  type recovery = { sub : sub term; complete : bool; unresolved : int64 list }
+
+  let recover ?(max_blocks = 256) emu roots =
+    if max_blocks <= 0 then
+      invalid_arg "Bap_emu.Cff.recover: nonpositive block limit";
+    let width = Bap_core_theory.Theory.Target.code_addr_size emu.target in
+    let targets = Tid.Table.create () in
+    let queue = Queue.create () in
+    List.iter roots ~f:(Queue.enqueue queue);
+    let unresolved = ref [] in
+    let rec loop seen blocks =
+      if Queue.is_empty queue || List.length blocks >= max_blocks then
+        (seen, blocks)
+      else
+        let pc = Queue.dequeue_exn queue in
+        if Set.mem seen pc then loop seen blocks
+        else
+          let seen = Set.add seen pc in
+          match bir ~executed_bytes:true emu pc with
+          | None ->
+              unresolved := pc :: !unresolved;
+              loop seen blocks
+          | Some (size, blks) ->
+              let next = Int64.(pc + of_int size) in
+              let blks =
+                List.map blks ~f:(fun blk ->
+                    let fallthrough =
+                      Term.enum jmp_t blk
+                      |> Seq.for_all ~f:(fun jmp ->
+                          match Jmp.cond jmp with
+                          | Int value -> not (Word.is_one value)
+                          | _ -> true)
+                    in
+                    if fallthrough then begin
+                      let target = Tid.for_addr (Word.of_int64 ~width next) in
+                      Hashtbl.set targets ~key:target ~data:next;
+                      Term.append jmp_t blk
+                        (Jmp.create_goto (Label.direct target))
+                    end
+                    else blk)
+              in
+              let blks =
+                List.map blks ~f:(fun blk ->
+                    let tid = Tid.for_addr (Word.of_int64 ~width pc) in
+                    Hashtbl.set targets ~key:tid ~data:pc;
+                    Blk.create ~tid
+                      ~defs:(Seq.to_list (Term.enum def_t blk))
+                      ~jmps:(Seq.to_list (Term.enum jmp_t blk))
+                      ())
+              in
+              let has_edge = ref false in
+              List.iter blks ~f:(fun blk ->
+                  Term.enum jmp_t blk
+                  |> Seq.iter ~f:(fun jmp ->
+                      let destination =
+                        match Jmp.dst jmp with
+                        | None -> None
+                        | Some dst -> (
+                            match Jmp.resolve dst with
+                            | First tid -> (
+                                match Hashtbl.find targets tid with
+                                | Some addr -> Some addr
+                                | None ->
+                                    let name = Tid.name tid in
+                                    if String.is_prefix name ~prefix:"%" then
+                                      Option.try_with (fun () ->
+                                          Int64.of_string
+                                            ("0x" ^ String.drop_prefix name 1))
+                                    else None)
+                            | Second _ -> None)
+                      in
+                      match destination with
+                      | Some dst ->
+                          has_edge := true;
+                          Queue.enqueue queue dst
+                      | None -> has_edge := true));
+              if not !has_edge then Queue.enqueue queue next;
+              loop seen (blocks @ blks)
+    in
+    let seen, blks = loop Int64.Set.empty [] in
+    let complete = Queue.is_empty queue && List.is_empty !unresolved in
+    {
+      sub = Sub.create ~name:"cff-recovery" ~blks ();
+      complete;
+      unresolved = List.dedup_and_sort !unresolved ~compare:Int64.compare;
+    }
+
+  type effects = {
+    calls : string list;
+    interrupts : string list;
+    stores : string list;
+    protection_changes : string list;
+  }
+
+  let effects sub =
+    let label = function
+      | Direct tid -> Tid.to_string tid
+      | Indirect _ -> "indirect"
+    in
+    let calls, interrupts, stores =
+      Seq.fold (Term.enum blk_t sub) ~init:([], [], [])
+        ~f:(fun (calls, interrupts, stores) blk ->
+          let calls, interrupts =
+            Seq.fold (Term.enum jmp_t blk) ~init:(calls, interrupts)
+              ~f:(fun (calls, interrupts) jmp ->
+                match Jmp.kind jmp with
+                | Call call ->
+                    (("call:" ^ label (Call.target call)) :: calls, interrupts)
+                | Int (number, _) ->
+                    (calls, ("interrupt:" ^ Int.to_string number) :: interrupts)
+                | _ -> (calls, interrupts))
+          in
+          let stores =
+            Seq.fold (Term.enum def_t blk) ~init:stores ~f:(fun stores def ->
+                match Def.rhs def with
+                | Bil.Store (_, addr, _, _, _) ->
+                    ("store:" ^ Exp.to_string addr) :: stores
+                | _ -> stores)
+          in
+          (calls, interrupts, stores))
+    in
+    let sort = List.sort ~compare:String.compare in
+    let calls = sort calls in
+    {
+      calls;
+      interrupts = sort interrupts;
+      stores = sort stores;
+      protection_changes =
+        List.filter calls ~f:(fun call ->
+            String.is_substring call ~substring:"mprotect"
+            || String.is_substring call ~substring:"protect");
+    }
+
+  let exits sub =
+    let blocks =
+      Seq.to_list (Term.enum blk_t sub)
+      |> List.map ~f:Term.tid |> Tid.Set.of_list
+    in
+    let label = function
+      | Direct tid when Set.mem blocks tid -> None
+      | Direct tid -> Some (Tid.to_string tid)
+      | Indirect exp -> Some (Exp.to_string exp)
+    in
+    Seq.to_list (Term.enum blk_t sub)
+    |> List.concat_map ~f:(fun blk ->
+        Seq.to_list (Term.enum jmp_t blk)
+        |> List.filter_map ~f:(fun jmp ->
+            match Jmp.kind jmp with
+            | Goto dst | Ret dst -> label dst
+            | Call call -> label (Call.target call)
+            | Int _ -> None))
+    |> String.Set.of_list
+
+  let validate_boundaries original simplified =
+    Set.equal (exits original) (exits simplified)
+
+  type check_result = {
+    ok : bool;
+    effects : bool;
+    boundaries : bool;
+    registers : bool;
+    memory : bool;
+    continuation : bool;
+  }
+
+  let check emu ~regs ?(continuation = []) ~original ~simplified () =
+    let effects_equal = Poly.equal (effects original) (effects simplified) in
+    let boundaries = validate_boundaries original simplified in
+    let base = snapshot emu in
+    let evaluate sub =
+      restore emu base;
+      eval_sub emu sub;
+      let registers = List.map regs ~f:(fun name -> (name, reg emu name)) in
+      let changes =
+        diff emu base
+        |> List.map ~f:(fun (addr, size) -> (addr, size, read emu addr size))
+      in
+      let live =
+        List.map continuation ~f:(fun (addr, size) ->
+            (addr, size, read emu addr size))
+      in
+      (registers, changes, live)
+    in
+    Exn.protect
+      ~finally:(fun () ->
+        restore emu base;
+        drop_snapshot emu base)
+      ~f:(fun () ->
+        let original_registers, original_changes, original_live =
+          evaluate original
+        in
+        let simplified_registers, simplified_changes, simplified_live =
+          evaluate simplified
+        in
+        let registers = Poly.equal original_registers simplified_registers in
+        let memory = Poly.equal original_changes simplified_changes in
+        let continuation = Poly.equal original_live simplified_live in
+        {
+          ok =
+            effects_equal && boundaries && registers && memory && continuation;
+          effects = effects_equal;
+          boundaries;
+          registers;
+          memory;
+          continuation;
+        })
 end
 
 module Compare = struct

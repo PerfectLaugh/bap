@@ -112,7 +112,7 @@ let produce file kind work other_program other_target =
   Emu.Trace.stop restored;
   Emu.Trace.stop restored;
   let data = In_channel.read_all main_file in
-  let magic = "bap-emu-trace-state 3\n" in
+  let magic = "bap-emu-trace-state 4\n" in
   let versioned = Filename.concat work (kind ^ ".version.trace") in
   Out_channel.write_all versioned
     ~data:

@@ -18,8 +18,16 @@ val named :
   string ->
   (int * string * blk term list) option KB.t
 
+val direct :
+  ?encoding:Theory.language ->
+  project ->
+  int64 ->
+  string ->
+  (int * string * blk term list) option KB.t
+
 val block :
   ?encoding:Theory.language ->
+  ?direct:bool ->
   budget:int ->
   count:int ->
   project ->

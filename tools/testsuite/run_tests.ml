@@ -1329,6 +1329,50 @@ let emu data =
                   out "wrapped trace state restored\n")
               [ false; true ])
           [ "unicorn"; "lifted" ]);
+    case "emu/multi-watch" (fun env ->
+        List.iter
+          (fun engine ->
+            let out =
+              bap ~timeout:90. env
+                [
+                  "script";
+                  input "emu/multi-watch.ml";
+                  path data "bin/x86_64-linux-gnu-taint-bss";
+                  dir env;
+                  engine;
+                ]
+            in
+            check env
+              (engine ^ " multi-watch run failed")
+              (out.status = Exited 0);
+            has env
+              (engine ^ " multi-watch checks")
+              out "independent watch ranges restored\n")
+          [ "unicorn"; "lifted" ]);
+    case "emu/cff" (fun env ->
+        let out =
+          bap ~timeout:90. env
+            [
+              "script";
+              input "emu/cff.ml";
+              path data "bin/x86_64-linux-gnu-slice-weird";
+            ]
+        in
+        check env "CFF recovery and validation failed" (out.status = Exited 0);
+        has env "CFF recovery and validation checks" out
+          "CFF recovery and validation passed\n");
+    case "emu/direct-thumb" (fun env ->
+        let out =
+          bap ~timeout:300. env
+            [
+              "script";
+              input "emu/direct-lifting.ml";
+              path data "bin/arm-linux-gnueabihf-thumb-crc";
+            ]
+        in
+        check env "direct Thumb comparison failed" (out.status = Exited 0);
+        has env "direct Thumb agrees with the default" out
+          "direct lifting agrees with default lifting\n");
     (* bounded streaming journals retain exact executed-code versions and
        continue their deterministic segments across stop and resume *)
     case "emu/trace-journal" (fun env ->
@@ -3522,6 +3566,30 @@ let engines data =
       "riscv64-linux-gnu";
     ]
 
+let direct_engines data =
+  List.map
+    (fun target ->
+      case ("lifted/direct/" ^ target) (fun env ->
+          let out =
+            bap ~timeout:300. env
+              [
+                "script";
+                input "emu/direct-lifting.ml";
+                path data ("bin/" ^ target ^ "-echo");
+              ]
+          in
+          check env "direct-lifting comparison failed" (out.status = Exited 0);
+          has env "direct lifting agrees with the default" out
+            "direct lifting agrees with default lifting\n"))
+    [
+      "x86_64-linux-gnu";
+      "aarch64-linux-gnu";
+      "arm-linux-gnueabi";
+      "mips-linux-gnu";
+      "mips64-linux-gnueabi";
+      "riscv64-linux-gnu";
+    ]
+
 (* the loaders: the sections of PE without the contents, e.g., .bss, are
    zero-filled segments, and the data objects, that the programs import,
    e.g., stdin, through the slots of the GOT, which the GLOB_DAT
@@ -3725,6 +3793,7 @@ let tests =
     emu_targets;
     lifters;
     engines;
+    direct_engines;
     loaders;
     loader_layouts;
     observations;

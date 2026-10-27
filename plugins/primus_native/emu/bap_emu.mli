@@ -103,6 +103,7 @@ val create :
   ?restore:string ->
   ?models:checkpoint_models ->
   ?engine:[ `Unicorn | `Lifted ] ->
+  ?lifting:[ `Default | `Direct ] ->
   project ->
   t
 (** [create project] starts the program of [project], from [entry], by default
@@ -145,7 +146,12 @@ val create :
     [bap:unicorn-executor], or, without the [system], [`Unicorn], if the
     environment variable [BAP_EMU_ENGINE] is [unicorn], e.g., in the testsuite,
     or else [`Lifted]. The options of the plugin of the engine, e.g.,
-    [--primus-lifted-timeout], apply to the program. *)
+    [--primus-lifted-timeout], apply to the program.
+
+    With [~lifting:`Direct], cold cache misses use the disassembler and target
+    lifter without publishing fresh program labels and Ogre semantics. Missing
+    direct semantics fall back to the default KB path; x86 selects that path
+    directly. Direct and default policies have separate persistent caches. *)
 
 val run : ?until:int64 -> t -> status
 (** [run emu] continues the program, until it pauses, e.g., before the
@@ -414,6 +420,8 @@ module Trace : sig
     ?accesses:int ->
     ?read_values:bool ->
     ?watch:int64 * int64 ->
+    ?watches:(int64 * int64) list ->
+    ?watch_accesses:int ->
     ?first:int64 ->
     ?last:int64 ->
     ?journal:string ->
@@ -440,6 +448,14 @@ module Trace : sig
       a long run, e.g., to find, who writes a slot of a queue, while the program
       spins on it, with a trace of the blocks, which costs the least, and
       {!slice} doesn't follow the memory in such a trace.
+
+      With [watches], each range has an independent native access ring while the
+      parent trace retains its unfiltered instruction and memory history. Use
+      {!watches} and {!watched} to access the per-range traces. The parent and
+      every range are saved and restored by {!save_state} and {!restore_state}.
+      [watch_accesses] bounds each watched ring independently of the parent's
+      [accesses] ring, defaulting to 2{^ 16}. [watch] and [watches] are mutually
+      exclusive; duplicate or reversed ranges are rejected.
 
       If [read_values], successful reads of one to eight bytes also record their
       loaded bytes, zero-extended with the byte at the lowest address in the
@@ -488,10 +504,11 @@ module Trace : sig
   (** [save_state trace file] atomically writes a versioned binary snapshot of
       the complete native trace, including retained records, absolute indices,
       ring and sampling cursors, accesses, slice boundaries, and embedded native
-      captures and retained executed-code versions, together with the target,
-      program identity, and hook configuration. The trace may be recording or
-      stopped. State format 2 does not accept the earlier format. Raises
-      [Failure] with the operation and file or program error on failure. *)
+      captures, retained executed-code versions, and every independent watched
+      range and its ring, together with the target, program identity, and hook
+      configuration. The trace may be recording or stopped. State format 4 does
+      not accept earlier formats. Raises [Failure] with the operation and file
+      or program error on failure. *)
 
   val restore_state : emu -> string -> t
   (** [restore_state emu file] loads a snapshot written by {!save_state}, checks
@@ -591,6 +608,54 @@ module Trace : sig
 
   val accesses : ?last:int -> t -> access list
   (** the last accesses to the memory, the oldest first *)
+
+  val watches : t -> ((int64 * int64) * t) list
+  (** the independent watched ranges and their traces, in configuration order *)
+
+  val watched : t -> int64 * int64 -> t option
+  (** [watched trace range] returns the trace of exactly [range], if configured
+  *)
+
+  val retained_accesses : t -> int
+  (** the number of access records currently retained in this ring *)
+
+  val accesses_count : t -> int64
+  (** the absolute number of accesses recorded in this ring, including evictions
+  *)
+
+  val access_capacity : t -> int
+  (** the native access-ring capacity, zero when accesses are not recorded *)
+
+  val access_overflow : t -> bool
+  (** whether older accesses were evicted from this ring *)
+
+  type access_summary = {
+    count : int64;
+    retained : int;
+    capacity : int;
+    overflow : bool;
+  }
+
+  type summary = {
+    count : int64;
+    retained : int;
+    capacity : int;
+    nonzero_pcs : int;
+    nonzero_block_sizes : int;
+    overflow : bool;
+    accesses : access_summary;
+    captures : int64;
+    code_versions : int;
+    watches : ((int64 * int64) * access_summary) list;
+  }
+
+  val summarize : t -> summary
+  (** [summarize trace] reports absolute counts, current retention, capacities,
+      nonzero metadata, evictions, captures, code versions, and every watched
+      ring. It does not stop or mutate the trace. *)
+
+  val describe : t -> string
+  (** a human-readable rendering of {!summarize} *)
 
   val hot : ?last:int -> ?top:int -> t -> (int64 * int) list
   (** [hot trace] the program counters of the last [last] records, by default of
@@ -748,6 +813,68 @@ module Trace : sig
       the next same-thread instruction, and [taken] tells whether it isn't the
       fallthrough. Adjacent instructions of different TIDs never make a branch.
       The instructions are those of {!insns}, so a trace of blocks has them. *)
+end
+
+(** Reusable control-flow-flattening recovery and validation. *)
+module Cff : sig
+  type dispatch = {
+    site : int64;
+    state : int64;
+    thread : int;
+    regs : (string * int64) list;
+    fields : Trace.state_field list;
+  }
+
+  val dispatchers : state:string -> Trace.state_capture -> dispatch list
+  (** [dispatchers ~state capture] decodes each captured dispatcher state from
+      the named register, preserving its site, TID, registers, and fields. *)
+
+  type recovery = { sub : sub term; complete : bool; unresolved : int64 list }
+
+  val recover : ?max_blocks:int -> t -> int64 list -> recovery
+  (** [recover emu roots] reconstructs a synthetic subroutine from [roots],
+      using executed bytes when current lifting fails. It adds conditional
+      fallthroughs, retains external exits, and reports roots it could not lift.
+      No unresolved indirect target is turned into an invented direct edge. *)
+
+  type effects = {
+    calls : string list;
+    interrupts : string list;
+    stores : string list;
+    protection_changes : string list;
+  }
+
+  val effects : sub term -> effects
+  (** inventory calls, interrupts, memory stores, and protection-related calls
+  *)
+
+  val validate_boundaries : sub term -> sub term -> bool
+  (** whether two synthetic subroutines have exactly the same external exits *)
+
+  type check_result = {
+    ok : bool;
+    effects : bool;
+    boundaries : bool;
+    registers : bool;
+    memory : bool;
+    continuation : bool;
+  }
+
+  val check :
+    t ->
+    regs:string list ->
+    ?continuation:(int64 * int) list ->
+    original:sub term ->
+    simplified:sub term ->
+    unit ->
+    check_result
+  (** [check emu ~regs ~original ~simplified] evaluates both subroutines from
+      the same snapshot with {!eval_sub}. It compares their side-effect
+      inventories, external boundaries, selected registers, final writes, and
+      optional continuation-consumed byte ranges. The original snapshot is
+      restored afterwards. External control transfers are suppressed by
+      [eval_sub], so a dynamic continuation register should be included in
+      [regs]. *)
 end
 
 (** Opt-in structured comparison of trace-derived execution events. *)
@@ -1858,6 +1985,11 @@ module Checkpoint : sig
   val models : string -> model_state list option
   (** [models file] is the model-state manifest of the checkpoint, or [None] for
       a legacy checkpoint without one. Raises as {!info}. *)
+
+  val describe : string -> string
+  (** [describe file] summarizes the target, program digest, every thread's
+      resume PC and wait reason, and model names, versions, and requirements.
+      Raises as {!info}. *)
 
   type link = {
     file : string;  (** the canonical checkpoint path *)

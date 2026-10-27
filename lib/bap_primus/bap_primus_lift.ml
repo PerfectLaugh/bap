@@ -219,6 +219,46 @@ let decoded ?encoding proj file addr code =
           KB.collect Theory.Semantics.slot label
           >>= ir ~width ~addr ~size coding)
 
+(* Decode through the disassembler and target lifter without publishing a fresh
+   program label and recomputing its semantics through Ogre. Label resolution in
+   [ir] still uses the current knowledge, so external jumps keep their ordinary
+   representation. *)
+let decoded_direct ?encoding proj addr code =
+  let open KB.Syntax in
+  let target = Project.target proj in
+  let width = width_of proj in
+  let addr = Word.of_int64 ~width addr in
+  let endian =
+    if Theory.Endianness.(equal eb) (Theory.Target.endianness target) then
+      BigEndian
+    else LittleEndian
+  in
+  match Memory.create endian addr (Bigstring.of_string code) with
+  | Error _ -> KB.return None
+  | Ok mem -> (
+      (match encoding with
+        | Some coding -> KB.return coding
+        | None ->
+            Theory.Label.for_addr (Word.to_bitvec addr)
+            >>= KB.collect Theory.Label.encoding)
+      >>= fun coding ->
+      match Dis.lookup target coding with
+      | Error _ -> KB.return None
+      | Ok dis -> (
+          Dis.run dis mem ~stop_on:[ `Valid ] ~return:KB.return ~init:None
+            ~hit:(fun _ mem insn _ ->
+              KB.return (Some (Memory.length mem, mem, insn)))
+          >>| Option.map ~f:(fun (size, mem, insn) -> (size, mem, coding, insn))
+          >>= function
+          | None -> KB.return None
+          | Some (size, mem, coding, basic) -> (
+              let module Target = (val target_of_arch (Project.arch proj)) in
+              match Target.lift mem basic with
+              | Error _ | Ok [] -> KB.return None
+              | Ok bil ->
+                  let insn = Insn.of_basic ~bil basic in
+                  ir ~width ~addr ~size coding insn)))
+
 (* the size and the IR of the instruction at [addr], if [code], the
    bytes from [addr], has it, as the disassembler computed it, unless
    [disassembled] is false, e.g., so that the decoder decodes it, and
@@ -291,6 +331,28 @@ let named ?encoding proj addr code =
     >>| Option.map ~f:(fun (size, _, name, blks) -> (size, name, blks)))
     (fun _ -> KB.return None)
 
+let direct_lift ?encoding proj addr code =
+  let open KB.Syntax in
+  if Theory.Target.matches (Project.target proj) "x86" then
+    lift ?encoding proj addr code
+  else
+    disassembled_insn ?encoding proj addr code >>= function
+    | Some _ as insn -> KB.return insn
+    | None -> (
+        decoded_direct ?encoding proj addr code >>= function
+        | Some _ as insn -> KB.return insn
+        | None -> (
+            match Project.get proj filename with
+            | None -> KB.return None
+            | Some file -> decoded ?encoding proj file addr code))
+
+let direct ?encoding proj addr code =
+  let open KB.Syntax in
+  KB.catch
+    (direct_lift ?encoding proj addr code
+    >>| Option.map ~f:(fun (size, _, name, blks) -> (size, name, blks)))
+    (fun _ -> KB.return None)
+
 let leaves blks =
   let inside tid = List.exists blks ~f:(fun b -> Tid.equal (Term.tid b) tid) in
   List.exists blks ~f:(fun blk ->
@@ -306,14 +368,16 @@ let stores blks =
       |> Seq.exists ~f:(fun def ->
           match Var.typ (Def.lhs def) with Type.Mem _ -> true | _ -> false))
 
-let block ?encoding ~budget ~count proj addr code =
+let block ?encoding ?(direct = false) ~budget ~count proj addr code =
   let open KB.Syntax in
   let rec lift_run addr offset used remaining acc =
     if used = budget || remaining = 0 || offset = String.length code then
       KB.return (List.rev acc)
     else
       KB.catch
-        (lift ?encoding proj addr (String.drop_prefix code offset))
+        (if direct then
+           direct_lift ?encoding proj addr (String.drop_prefix code offset)
+         else lift ?encoding proj addr (String.drop_prefix code offset))
         (fun _ -> KB.return None)
       >>= function
       | None -> KB.return (List.rev acc)

@@ -460,6 +460,8 @@ and session = {
   lifted : bool;
       (** whether lifted-only lifter setup and native taint policy are enabled
       *)
+  direct_lifting : bool;
+      (** decode cache misses without fresh program labels and Ogre semantics *)
   jit : bool;  (** the lifted engine compiles the blocks, that run often *)
   cache : string option;  (** see [options.cache] *)
   digest : string;  (** see [options.digest] *)
@@ -630,7 +632,8 @@ let register_model registry ?(package = "user") ?(version = 1)
   then invalid_argf "the checkpoint model %s is already registered" name ();
   Hashtbl.set registry ~key:name ~data:{ version; required; save; restore }
 
-let create_session ?restore ?models ?(engine : kind = `Unicorn) () =
+let create_session ?restore ?models ?(engine : kind = `Unicorn)
+    ?(lifting = `Default) () =
   let o = options engine in
   let restore = Option.value restore ~default:o.restore in
   let create =
@@ -647,6 +650,7 @@ let create_session ?restore ?models ?(engine : kind = `Unicorn) () =
       | Some models -> models
       | None -> create_model_registry ());
     lifted = Poly.equal engine `Lifted;
+    direct_lifting = Poly.equal lifting `Direct;
     jit = o.jit;
     cache = o.cache;
     digest = o.digest;
@@ -1470,7 +1474,7 @@ module X86_intrinsics = struct
   let tsc () = Int64.of_float (clock () *. 1e9)
 end
 
-let lifter ?cache ~arm project =
+let lifter ?cache ~arm ?(direct = false) project =
   let state = ref None in
   let evaluations = ref 0 in
   let maintenance =
@@ -1750,7 +1754,7 @@ let lifter ?cache ~arm project =
             try
               Toplevel.exec
                 KB.Syntax.(
-                  Primus.Lift.block ~budget:64 ~count:8
+                  Primus.Lift.block ~direct ~budget:64 ~count:8
                     ?encoding:
                       (if arm then Primus.Interworking.encoding ~thumb else None)
                     project addr code
@@ -7731,25 +7735,25 @@ module Loader (Machine : Primus.Machine.S) = struct
                     try Checkpoint.digest file with Sys_error _ -> file
                   in
                   let key =
+                    let material =
+                      [ s.digest; program; Theory.Target.to_string target ]
+                      @ if s.direct_lifting then [ "direct" ] else []
+                    in
                     Stdlib.Digest.to_hex
                       (Stdlib.Digest.string
-                         (String.concat ~sep:"\000"
-                            [
-                              s.digest; program; Theory.Target.to_string target;
-                            ]))
+                         (String.concat ~sep:"\000" material))
                   in
                   mkdirs (dir ^/ "lifts") ^/ key ^ ".lifts"))
         in
         let ({ lift; cached; _ } as l) =
-          lifter ?cache
+          lifter ?cache ~direct:s.direct_lifting
             ~arm:(Poly.equal (Option.map engine ~f:fst) (Some Engine.Arm))
             proj
         in
         s.lifter <- Some l;
-        (* the first instruction, that is lifted, loads the semantics of
-           Primus Lisp, which takes a second or two, so it is lifted now,
-           before the program runs, rather than as it runs, e.g., while
-           the timer of a script, that stops it, runs *)
+        (* warm the selected lifter before the program runs: the default path
+           may load Primus Lisp semantics, while the direct path initializes
+           its decoder and target lifter without that KB semantics load *)
         if not cached then
           Option.iter engine ~f:(fun (arch, _) ->
               ignore

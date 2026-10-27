@@ -2913,8 +2913,21 @@ module Std : sig
 
           @since 3.0.0 *)
 
+      val direct :
+        ?encoding:Theory.language ->
+        project ->
+        int64 ->
+        string ->
+        (int * string * blk term list) option knowledge
+      (** [direct project addr code] is like {!named}, but a cache miss decodes
+          the basic instruction directly instead of publishing a fresh program
+          label and recomputing its semantics through Ogre. Already disassembled
+          instructions and external-label resolution retain their usual paths.
+      *)
+
       val block :
         ?encoding:Theory.language ->
+        ?direct:bool ->
         budget:int ->
         count:int ->
         project ->
@@ -2928,7 +2941,8 @@ module Std : sig
           instruction is the last result, so that self-modifying code doesn't
           invalidate speculatively lifted continuations. An encoding change, an
           undefined or invalid instruction, or exhausted input ends the block
-          before that instruction. *)
+          before that instruction. With [~direct:true], cache misses use
+          {!direct}. *)
 
       val undefined :
         ?encoding:Theory.language ->
