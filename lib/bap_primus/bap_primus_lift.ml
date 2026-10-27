@@ -219,31 +219,6 @@ let decoded ?encoding proj file addr code =
           KB.collect Theory.Semantics.slot label
           >>= ir ~width ~addr ~size coding)
 
-let decoded_semantics file arch coding addr mem basic =
-  let open KB.Syntax in
-  unit_of_file file >>= fun unit ->
-  (* labels that the lifters create, e.g., to unalias registers, belong to
-     the same unit as in the regular semantics provider *)
-  KB.promising Theory.Label.unit ~promise:(fun _ -> KB.return (Some unit))
-  @@ fun () ->
-  KB.Object.create Theory.Program.cls >>= fun label ->
-  KB.sequence
-    [
-      KB.provide Theory.Label.addr label (Some (Word.to_bitvec addr));
-      KB.provide Theory.Label.unit label (Some unit);
-      KB.provide Theory.Label.encoding label coding;
-      KB.provide Memory.slot label (Some mem);
-      KB.provide Dis.Insn.slot label (Some basic);
-    ]
-  >>= fun () ->
-  match arch with
-  | #Arch.arm | #Arch.armeb | #Arch.thumb | #Arch.thumbeb ->
-      KB.collect Theory.Semantics.slot label
-  | _ ->
-      Bap_primus_lisp_semantics.of_basic unit label basic >>= fun insn ->
-      if is_undefined insn then KB.collect Theory.Semantics.slot label
-      else KB.return insn
-
 (* Decode through the disassembler and invoke the target, Primus Lisp, or
    native semantics directly. Label resolution in [ir] still uses the current
    knowledge, so external jumps keep their ordinary representation. *)
@@ -283,9 +258,7 @@ let decoded_direct ?encoding ?file proj addr code =
                   match file with
                   | None -> KB.return None
                   | Some file ->
-                      decoded_semantics file (Project.arch proj) coding addr mem
-                        basic
-                      >>= ir ~width ~addr ~size coding)
+                      decoded ?encoding proj file (Word.to_int64_exn addr) code)
               | Ok bil ->
                   let insn = Insn.of_basic ~bil basic in
                   ir ~width ~addr ~size coding insn)))
@@ -365,15 +338,28 @@ let named ?encoding proj addr code =
 let direct_lift ?encoding proj addr code =
   let open KB.Syntax in
   let file = Project.get proj filename in
-  disassembled_insn ?encoding proj addr code >>= function
-  | Some _ as insn -> KB.return insn
-  | None -> (
-      decoded_direct ?encoding ?file proj addr code >>= function
-      | Some _ as insn -> KB.return insn
-      | None -> (
-          match file with
-          | None -> KB.return None
-          | Some file -> decoded ?encoding proj file addr code))
+  let width = width_of proj in
+  (match encoding with
+    | Some coding -> KB.return coding
+    | None ->
+        Theory.Label.for_addr (Word.to_bitvec (Word.of_int64 ~width addr))
+        >>= KB.collect Theory.Label.encoding)
+  >>= fun coding ->
+  if
+    String.is_substring
+      (String.lowercase (Theory.Language.to_string coding))
+      ~substring:"thumb"
+  then lift ?encoding proj addr code
+  else
+    disassembled_insn ?encoding proj addr code >>= function
+    | Some _ as insn -> KB.return insn
+    | None -> (
+        decoded_direct ?encoding ?file proj addr code >>= function
+        | Some _ as insn -> KB.return insn
+        | None -> (
+            match file with
+            | None -> KB.return None
+            | Some file -> decoded ?encoding proj file addr code))
 
 let direct ?encoding proj addr code =
   let open KB.Syntax in

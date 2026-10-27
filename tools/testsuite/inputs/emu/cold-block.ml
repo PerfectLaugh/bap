@@ -219,6 +219,32 @@ let running file =
      %!"
     (List.length trajectory)
 
+let direct_empty proj addr hex =
+  let code =
+    String.init (String.length hex / 2) ~f:(fun i ->
+        Char.of_int_exn (Int.of_string ("0x" ^ String.sub hex ~pos:(2 * i) ~len:2)))
+  in
+  let initial = Toplevel.current () in
+  Exn.protect
+    ~finally:(fun () -> Toplevel.set initial)
+    ~f:(fun () ->
+      eval (Primus.Lift.block ~direct:true ~budget:4 ~count:1 proj addr code))
+
+let direct_fallbacks proj =
+  let adrp = direct_empty proj 0x6a59e0L "90080090" in
+  let bl = direct_empty proj 0x3abb68L "ebf9fc97" in
+  let defs =
+    List.fold (adrp @ bl) ~init:0 ~f:(fun n (_, _, _, blks) ->
+        n + List.fold blks ~init:0 ~f:(fun n blk -> n + Term.length def_t blk))
+  and jmps =
+    List.fold bl ~init:0 ~f:(fun n (_, _, _, blks) ->
+        n + List.fold blks ~init:0 ~f:(fun n blk -> n + Term.length jmp_t blk))
+  in
+  if defs < 2 || jmps < 1 then
+    failwithf "direct empty-BIL fallback lost semantics: defs=%d jmps=%d" defs jmps
+    ();
+  Printf.printf "direct empty-BIL fallback: defs=%d jmps=%d\n%!" defs jmps
+
 let () =
   match Bap_script.args () with
   | [ x86; arm; thumb; aarch64; powerpc ] ->
@@ -254,6 +280,7 @@ let () =
         (bytes powerpc 0x10000420L 64);
       parity ~direct:true ~minimum:2 "direct PowerPC big endian" powerpc
         0x10000420L (bytes powerpc 0x10000420L 64);
+      direct_fallbacks aarch64;
       undefined aarch64;
       running (List.nth_exn (Bap_script.args ()) 3)
   | _ -> failwith "expected X86 ARM THUMB AARCH64 POWERPC"

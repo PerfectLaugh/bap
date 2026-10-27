@@ -849,7 +849,7 @@ ignore (Emu.step b)
 
 `Emu.create ~engine:`Lifted` runs the program in the lifted engine, e.g., beside the same program in Unicorn, `~engine:`Unicorn`, as `lifted/check.ml` of the testsuite compares them. Without `~engine`, the engine is the one of `~system`, e.g., of `bap:lifted-executor`, or, without it, `BAP_EMU_ENGINE=lifted` makes it the lifted engine.
 
-With `~lifting:`Direct`, cold cache misses use the disassembler and target lifter directly instead of publishing a fresh program label and recomputing semantics through Ogre. Already disassembled instructions and external-label resolution retain their usual paths; an instruction without direct semantics falls back to the default KB lifter. Direct and default lifting use separate persistent-cache identities. The `lifted/direct/*` tests compare entry BIR modulo generated term IDs, complete instruction and memory traces, and exit status on all six live targets.
+With `~lifting:`Direct`, cold cache misses use the disassembler and target lifter directly instead of publishing a fresh program label and recomputing semantics through Ogre. Empty legacy-BIL results and Thumb instructions use the ordinary decoder. Already disassembled instructions and external-label resolution retain their usual paths. Direct and default lifting use separate persistent-cache identities. The `lifted/direct/*` tests compare entry BIR modulo generated term IDs, complete instruction and memory traces, and exit status on all seven live targets. The cold-block regression also covers empty-BIL control-flow preservation and Thumb IT semantics.
 
 The script runs one of them at a time. `Emu.knowledge emu` returns the knowledge of a system after its program ended, e.g., the instructions that it lifted.
 
