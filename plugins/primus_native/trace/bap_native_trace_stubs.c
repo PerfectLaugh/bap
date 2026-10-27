@@ -828,7 +828,7 @@ static int live_slot(uint64_t slot, uint64_t total, uint64_t mask,
                      int keep_all) {
     uint64_t capacity = keep_all ? mask + 1 : mask;
     uint64_t k = total < capacity ? total : capacity;
-    return slot < total && total - slot <= k;
+    return slot < total && ((total - slot) & mask) <= k;
 }
 
 static value snapshot_u64_slots(const uint64_t *slots, uint64_t n,

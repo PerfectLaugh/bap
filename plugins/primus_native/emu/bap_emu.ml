@@ -2199,6 +2199,20 @@ module Trace = struct
                 "Bap_emu.Trace.restore_state: %s has duplicate code versions"
                 file ();
             retained.entries.(slot) <- Some v);
+        if
+          Int64.(saved.Saved_state.state.count > 0L)
+          && Array.for_all saved.Saved_state.state.pcs ~f:(Int64.equal 0L)
+        then
+          failwithf
+            "Bap_emu.Trace.restore_state: %s has only zero program counters"
+            file ();
+        if
+          saved.Saved_state.state.blocks
+          && Int64.(saved.Saved_state.state.count > 0L)
+          && Array.for_all saved.Saved_state.state.sizes ~f:(Int32.equal 0l)
+        then
+          failwithf "Bap_emu.Trace.restore_state: %s has only zero block sizes"
+            file ();
         match Engine.Trace.Snapshot.import saved.Saved_state.state with
         | exception Invalid_argument msg ->
             failwithf

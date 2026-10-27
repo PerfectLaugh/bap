@@ -1303,6 +1303,32 @@ let emu data =
                     In_channel.input_all)
                  "ok\n"))
           [ "unicorn"; "lifted" ]);
+    case "emu/trace-wrap-state" (fun env ->
+        List.iter
+          (fun engine ->
+            List.iter
+              (fun blocks ->
+                let out =
+                  bap ~timeout:55. env
+                    [
+                      "script";
+                      input "emu/trace-wrap-state.ml";
+                      path data "bin/x86_64-linux-gnu-slice-weird";
+                      dir env;
+                      engine;
+                      Bool.to_string blocks;
+                    ]
+                in
+                check env
+                  (Printf.sprintf "%s blocks %b wrapped trace-state run failed"
+                     engine blocks)
+                  (out.status = Exited 0);
+                has env
+                  (Printf.sprintf "%s blocks %b wrapped trace-state checks"
+                     engine blocks)
+                  out "wrapped trace state restored\n")
+              [ false; true ])
+          [ "unicorn"; "lifted" ]);
     (* bounded streaming journals retain exact executed-code versions and
        continue their deterministic segments across stop and resume *)
     case "emu/trace-journal" (fun env ->
