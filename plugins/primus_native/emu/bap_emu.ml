@@ -1701,6 +1701,47 @@ type decode_failure = {
 module Trace = struct
   type emu = t
 
+  type code_version = {
+    index : int64;
+    pc : int64;
+    bytes : string;
+    thumb : bool;
+    block : bool;
+  }
+  [@@deriving bin_io]
+
+  type versions = {
+    capacity : int;
+    entries : code_version option array;
+    mutable count : int64;
+    mutable pending_block : int64 option;
+  }
+
+  type journal_counters = {
+    records : int64;
+    accesses : int64;
+    bounds : int64;
+    ranges : int64;
+    captures : int64;
+    versions : int64;
+  }
+
+  type journal_segment = {
+    sequence : int;
+    file : string;
+    first : int64;
+    next : int64;
+  }
+
+  type journal = {
+    prefix : string;
+    interval : int;
+    mutable sequence : int;
+    mutable written : journal_counters;
+    mutable output : Out_channel.t option;
+    mutable error : string option;
+  }
+
   type t = {
     emu : emu;
     trace : Engine.Trace.t;
@@ -1710,7 +1751,12 @@ module Trace = struct
     watch : (int64 * int64) option;
     first : int64 option;
     last : int64 option;
+    capacity : int;
+    access_capacity : int;
+    versions : versions;
+    journal : journal option;
     mutable active : bool;
+    mutable registered : bool;
     mutable hooks : Engine.hook list option;
     blocks : (int * int64 array) list Int64.Table.t;
         (** the instructions of the blocks, by their addresses, with the lower
@@ -1723,64 +1769,63 @@ module Trace = struct
     Weak.set owned_blocks 0 (Some t.blocks);
     t.emu.traces <- (owned_trace, owned_blocks) :: t.emu.traces
 
-  let install t (e : X.engine) =
-    t.hooks <-
-      Some
-        (Engine.trace ?first:t.first ?last:t.last ?watch:t.watch
-           ~memory:t.memory e.engine t.trace)
+  let count t = Engine.Trace.count t.trace
+  let retained t = Engine.Trace.retained t.trace
+  let blocks t = Engine.Trace.blocks t.trace
+  let pcs ?last t = Engine.Trace.pcs ?last t.trace
+  let sizes ?last t = Engine.Trace.sizes ?last t.trace
 
-  (* the hooks are native, see [Engine.trace], and go to the new engines too,
-     until the trace stops *)
-  let start ?(size = 1 lsl 20) ?every ?(blocks = false) ?(accesses = 0)
-      ?(read_values = false) ?watch ?first ?last emu =
-    let accesses =
-      if Option.is_some watch && accesses = 0 then 1 lsl 16 else accesses
-    in
-    let memory = accesses > 0 in
-    if
-      memory
-      && (Option.value every ~default:1 > 1
-         || Option.is_some first || Option.is_some last)
-    then
-      invalid_arg
-        "Bap_emu.Trace.start: the accesses are recorded only with all \
-         instructions, or blocks";
-    let trace =
-      Engine.Trace.create ?every ~blocks ~accesses ~read_values size
-    in
-    let t =
+  let empty_versions () =
+    { capacity = 0; entries = [||]; count = 0L; pending_block = None }
+
+  let make_versions capacity =
+    if capacity = 0 then empty_versions ()
+    else
       {
-        emu;
-        trace;
-        memory = memory && Option.is_none watch;
-        watch;
-        first;
-        last;
-        active = true;
-        hooks = None;
-        blocks = Int64.Table.create ();
+        capacity;
+        entries = Array.create ~len:capacity None;
+        count = 0L;
+        pending_block = None;
       }
+
+  let retained_versions t = Array.count t.versions.entries ~f:Option.is_some
+
+  let versions ?last t =
+    let all =
+      Array.filter_map t.versions.entries ~f:Fn.id
+      |> Array.to_list
+      |> List.sort ~compare:(fun a b -> Int64.compare a.index b.index)
     in
-    own t;
-    installed emu (fun e -> if t.active then install t e);
-    t
+    match last with
+    | Some n when n >= 0 && n < List.length all ->
+        List.drop all (List.length all - n)
+    | _ -> all
 
-  (* the hooks of a closed engine are gone with it *)
-  let stop t =
-    if t.active then begin
-      t.active <- false;
-      Option.iter t.hooks ~f:(fun hooks ->
-          List.iter hooks ~f:(fun hook ->
-              try Engine.delete hook with Invalid_argument _ -> ()));
-      t.hooks <- None
-    end
+  let code_version t index =
+    if t.versions.capacity = 0 || Int64.(index < 0L) then None
+    else
+      match
+        Array.unsafe_get t.versions.entries
+          (Int64.to_int_trunc index mod t.versions.capacity)
+      with
+      | Some v when Int64.equal v.index index -> Some v
+      | _ -> None
 
-  let resume t =
-    if not t.active then begin
-      t.active <- true;
-      Option.iter t.emu.session.active ~f:(fun e ->
-          if Option.is_none t.hooks then install t e)
-    end
+  let clear t =
+    if Option.is_some t.journal then
+      invalid_arg "Bap_emu.Trace.clear: a journaled trace cannot be cleared";
+    Engine.Trace.clear t.trace;
+    Array.fill t.versions.entries ~pos:0 ~len:t.versions.capacity None;
+    t.versions.count <- 0L;
+    t.versions.pending_block <- None
+
+  let program_digest ~fn emu =
+    match Project.get emu.project filename with
+    | None ->
+        failwithf "Bap_emu.Trace.%s: the emulator has no program file" fn ()
+    | Some file -> (
+        try Checkpoint.C.digest file
+        with Sys_error msg -> failwithf "Bap_emu.Trace.%s: %s" fn msg ())
 
   module Saved_state = struct
     type reg = int * int * int [@@deriving bin_io]
@@ -1829,25 +1874,107 @@ module Trace = struct
       watch : (int64 * int64) option;
       first : int64 option;
       last : int64 option;
+      version_capacity : int;
+      versions : code_version array;
       state : native;
     }
     [@@deriving bin_io]
 
     let prefix = "bap-emu-trace-state "
-    let magic = prefix ^ "1\n"
+    let magic = prefix ^ "2\n"
   end
 
-  let program_digest ~fn emu =
-    match Project.get emu.project filename with
-    | None ->
-        failwithf "Bap_emu.Trace.%s: the emulator has no program file" fn ()
-    | Some file -> (
-        try Checkpoint.C.digest file
-        with Sys_error msg -> failwithf "Bap_emu.Trace.%s: %s" fn msg ())
+  let journal_error t message =
+    Option.iter t.journal ~f:(fun j ->
+        if Option.is_none j.error then j.error <- Some message);
+    failwith message
+
+  let finish_pending_block t =
+    match t.versions.pending_block with
+    | None -> ()
+    | Some index -> (
+        t.versions.pending_block <- None;
+        if Int64.(index >= count t) then (
+          (match code_version t index with
+          | Some _ ->
+              Array.unsafe_set t.versions.entries
+                (Int64.to_int_trunc index mod t.versions.capacity)
+                None
+          | None -> ());
+          t.versions.count <- count t)
+        else if not (Int64.equal index Int64.(count t - 1L)) then
+          journal_error t
+            "Bap_emu.Trace: the pending block is no longer in the native ring"
+        else
+          let recorded_sizes = sizes ~last:1 t in
+          if Bigarray.Array1.dim recorded_sizes <> 1 then
+            journal_error t "Bap_emu.Trace: the completed block size is missing"
+          else
+            let size =
+              Int32.to_int_exn (Bigarray.Array1.unsafe_get recorded_sizes 0)
+            in
+            match code_version t index with
+            | None ->
+                journal_error t
+                  "Bap_emu.Trace: the completed block version was evicted"
+            | Some v ->
+                if size <= 0 || size > String.length v.bytes then
+                  journal_error t
+                    (sprintf
+                       "Bap_emu.Trace: captured %d of %d bytes of block %Lx"
+                       (String.length v.bytes) size v.pc)
+                else
+                  Array.unsafe_set t.versions.entries
+                    (Int64.to_int_trunc index mod t.versions.capacity)
+                    (Some { v with bytes = String.prefix v.bytes size }))
+
+  let fill_missing_versions t =
+    if t.versions.capacity > 0 && not (blocks t) then begin
+      if Int64.(t.versions.count > count t) then t.versions.count <- count t;
+      Array.iteri t.versions.entries ~f:(fun i entry ->
+          match entry with
+          | Some v when Int64.(v.index >= count t) ->
+              Array.unsafe_set t.versions.entries i None
+          | _ -> ());
+      let missing = Int64.(count t - t.versions.count) in
+      if Int64.(missing > 0L) then begin
+        let n = Int64.to_int_exn missing in
+        if n > retained t then
+          journal_error t
+            "Bap_emu.Trace: executed records left the native ring before their \
+             bytes were captured";
+        let recorded_pcs = pcs ~last:n t
+        and recorded_modes = Engine.Trace.modes ~last:n t.trace in
+        for i = 0 to n - 1 do
+          let index = Int64.(t.versions.count + of_int i) in
+          let pc = Bigarray.Array1.unsafe_get recorded_pcs i in
+          let thumb = Bigarray.Array1.unsafe_get recorded_modes i = 1 in
+          match executed_at ~thumb t.emu pc with
+          | Some { bytes; _ } when not (String.is_empty bytes) ->
+              let slot = Int64.to_int_trunc index mod t.versions.capacity in
+              Array.unsafe_set t.versions.entries slot
+                (Some { index; pc; bytes; thumb; block = false })
+          | _ ->
+              journal_error t
+                (sprintf
+                   "Bap_emu.Trace: no executed bytes for record %Ld at %Lx"
+                   index pc)
+        done;
+        t.versions.count <- count t
+      end
+    end
+
+  let prepare_state t =
+    if t.versions.capacity > 0 then begin
+      fill_missing_versions t;
+      finish_pending_block t
+    end
 
   let remove file = try Stdlib.Sys.remove file with Sys_error _ -> ()
 
   let save_state t file =
+    prepare_state t;
+    let native = Engine.Trace.Snapshot.export t.trace in
     let saved =
       {
         Saved_state.target =
@@ -1857,7 +1984,9 @@ module Trace = struct
         watch = t.watch;
         first = t.first;
         last = t.last;
-        state = Engine.Trace.Snapshot.export t.trace;
+        version_capacity = t.versions.capacity;
+        versions = Array.of_list (versions t);
+        state = native;
       }
     in
     let data = Binable.to_string (module Saved_state) saved in
@@ -1914,12 +2043,37 @@ module Trace = struct
           failwithf
             "Bap_emu.Trace.restore_state: %s has inconsistent hook metadata"
             file ();
+        let capacity = saved.Saved_state.version_capacity in
+        if capacity < 0 then
+          failwithf "Bap_emu.Trace.restore_state: %s has invalid code versions"
+            file ();
+        let retained = make_versions capacity in
+        Array.iter saved.Saved_state.versions ~f:(fun v ->
+            if
+              capacity = 0 || String.is_empty v.bytes
+              || (not (Bool.equal v.block saved.Saved_state.state.blocks))
+              || Int64.(
+                   v.index
+                   < max 0L
+                       Int64.(saved.Saved_state.state.count - of_int capacity)
+                   || v.index >= saved.Saved_state.state.count)
+            then
+              failwithf
+                "Bap_emu.Trace.restore_state: %s has invalid code versions" file
+                ();
+            let slot = Int64.to_int_trunc v.index mod capacity in
+            if Option.is_some retained.entries.(slot) then
+              failwithf
+                "Bap_emu.Trace.restore_state: %s has duplicate code versions"
+                file ();
+            retained.entries.(slot) <- Some v);
         match Engine.Trace.Snapshot.import saved.Saved_state.state with
         | exception Invalid_argument msg ->
             failwithf
               "Bap_emu.Trace.restore_state: %s has invalid native state: %s"
               file msg ()
         | trace ->
+            retained.count <- saved.Saved_state.state.count;
             let t =
               {
                 emu;
@@ -1928,24 +2082,410 @@ module Trace = struct
                 watch = saved.Saved_state.watch;
                 first = saved.Saved_state.first;
                 last = saved.Saved_state.last;
+                capacity = saved.Saved_state.state.capacity;
+                access_capacity = saved.Saved_state.state.access_capacity;
+                versions = retained;
+                journal = None;
                 active = false;
+                registered = false;
                 hooks = None;
                 blocks = Int64.Table.create ();
               }
             in
             own t;
-            emu.session.engine_hooks <-
-              (fun e -> if t.active then install t e)
-              :: emu.session.engine_hooks;
             t)
 
-  let count t = Engine.Trace.count t.trace
-  let retained t = Engine.Trace.retained t.trace
-  let clear t = Engine.Trace.clear t.trace
-  let blocks t = Engine.Trace.blocks t.trace
-  let pcs ?last t = Engine.Trace.pcs ?last t.trace
+  let manifest_file prefix = prefix ^ ".manifest"
+  let segment_file prefix sequence = sprintf "%s.%08d.trace" prefix sequence
+  let manifest_magic = "bap-emu-trace-journal 1\n"
+
+  let fold_manifest prefix ~init ~f =
+    let file = manifest_file prefix in
+    try
+      In_channel.with_file ~binary:true file ~f:(fun input ->
+          match In_channel.input_line input with
+          | Some header when String.equal (header ^ "\n") manifest_magic ->
+              let result = ref init and line_number = ref 1 in
+              In_channel.iter_lines input ~f:(fun line ->
+                  incr line_number;
+                  if not (String.is_empty line) then
+                    result := f !result !line_number line);
+              !result
+          | _ ->
+              failwithf
+                "Bap_emu.Trace.journal_segments: %s has another or unsupported \
+                 format"
+                file ())
+    with Sys_error msg ->
+      failwithf "Bap_emu.Trace.journal_segments: %s" msg ()
+
+  let parse_segment prefix file line_number sequence next line =
+    match String.split line ~on:' ' with
+    | [ "segment"; seq; first; next'; accesses; captures; versions; name ] -> (
+        try
+          let seq = Int.of_string seq
+          and first = Int64.of_string first
+          and next' = Int64.of_string next'
+          and accesses = Int64.of_string accesses
+          and captures = Int64.of_string captures
+          and versions = Int64.of_string versions in
+          if
+            seq <> sequence
+            || Int64.(
+                 first <> next || next' < first || accesses < 0L
+                 || captures < 0L || versions < 0L)
+            || not
+                 (String.equal name
+                    (Stdlib.Filename.basename (segment_file prefix seq)))
+          then failwith "discontinuous sequence";
+          {
+            sequence = seq;
+            file = segment_file prefix seq;
+            first;
+            next = next';
+          }
+        with _ ->
+          failwithf "Bap_emu.Trace.journal_segments: %s line %d is broken" file
+            line_number ())
+    | _ ->
+        failwithf "Bap_emu.Trace.journal_segments: %s line %d is broken" file
+          line_number ()
+
+  let scan_segments prefix ~init ~f =
+    let file = manifest_file prefix in
+    let next = ref 0L and sequence = ref 0 in
+    fold_manifest prefix ~init ~f:(fun acc line_number line ->
+        let segment =
+          parse_segment prefix file line_number !sequence !next line
+        in
+        next := segment.next;
+        incr sequence;
+        f acc segment)
+
+  let journal_segments prefix =
+    scan_segments prefix ~init:[] ~f:(fun segments segment ->
+        segment :: segments)
+    |> List.rev
+
+  let journal_last prefix =
+    scan_segments prefix ~init:None ~f:(fun _ segment -> Some segment)
+
+  let load_journal emu prefix =
+    journal_segments prefix
+    |> List.map ~f:(fun segment -> restore_state emu segment.file)
+
+  let native_counters t native =
+    {
+      records = native.Engine.Trace.Snapshot.count;
+      accesses = native.accesses_count;
+      bounds = native.bounds_count;
+      ranges = native.ranges_count;
+      captures = native.captures_count;
+      versions = t.versions.count;
+    }
+
+  let zero_counters =
+    {
+      records = 0L;
+      accesses = 0L;
+      bounds = 0L;
+      ranges = 0L;
+      captures = 0L;
+      versions = 0L;
+    }
+
+  let flush_journal t =
+    Option.iter t.journal ~f:(fun j ->
+        match j.output with
+        | None -> ()
+        | Some out ->
+            prepare_state t;
+            let native = Engine.Trace.Snapshot.export t.trace in
+            let current = native_counters t native in
+            let delta name before after capacity =
+              let change = Int64.(after - before) in
+              if Int64.(change < 0L || change > of_int capacity) then
+                journal_error t
+                  (sprintf
+                     "Bap_emu.Trace.journal: %s overflow: %Ld records between \
+                      writes with capacity %d"
+                     name change capacity)
+            in
+            delta "instruction" j.written.records current.records
+              native.capacity;
+            delta "access" j.written.accesses current.accesses
+              native.access_capacity;
+            delta "boundary" j.written.bounds current.bounds 65536;
+            delta "range" j.written.ranges current.ranges 65536;
+            delta "capture" j.written.captures current.captures
+              (Int.max 0 (native.capacity - 1));
+            delta "code-version" j.written.versions current.versions
+              t.versions.capacity;
+            if Poly.( <> ) current j.written then (
+              let sequence = j.sequence in
+              let file = segment_file j.prefix sequence in
+              (try save_state t file with
+              | Failure msg -> journal_error t msg
+              | Sys_error msg ->
+                  journal_error t (sprintf "Bap_emu.Trace.journal: %s" msg));
+              try
+                Out_channel.output_string out
+                  (sprintf "segment %d %Ld %Ld %Ld %Ld %Ld %s\n" sequence
+                     j.written.records current.records current.accesses
+                     current.captures current.versions
+                     (Stdlib.Filename.basename file));
+                Out_channel.flush out;
+                j.sequence <- sequence + 1;
+                j.written <- current
+              with Sys_error msg ->
+                journal_error t (sprintf "Bap_emu.Trace.journal: %s" msg)))
+
+  let close_journal t =
+    Option.iter t.journal ~f:(fun j ->
+        Option.iter j.output ~f:(fun out ->
+            try Out_channel.close out
+            with Sys_error msg ->
+              let message = sprintf "Bap_emu.Trace.journal: %s" msg in
+              if Option.is_none j.error then j.error <- Some message);
+        j.output <- None)
+
+  let open_journal t =
+    Option.iter t.journal ~f:(fun j ->
+        if Option.is_some j.error then failwith (Option.value_exn j.error);
+        let last = journal_last j.prefix in
+        (match last with
+        | Some last when Int64.(last.next <> count t) ->
+            failwithf "Bap_emu.Trace.journal: %s ends at record %Ld, not %Ld"
+              j.prefix last.next (count t) ()
+        | _ -> ());
+        j.sequence <-
+          Option.value_map last ~default:0 ~f:(fun s -> s.sequence + 1);
+        try
+          j.output <-
+            Some
+              (Out_channel.create ~append:true ~binary:true
+                 (manifest_file j.prefix))
+        with Sys_error msg -> failwithf "Bap_emu.Trace.journal: %s" msg ())
+
+  let create_journal prefix =
+    let file = manifest_file prefix in
+    (if not (Stdlib.Sys.file_exists file) then
+       try Out_channel.write_all file ~data:manifest_magic
+       with Sys_error msg -> failwithf "Bap_emu.Trace.start: %s" msg ());
+    {
+      prefix;
+      interval = 0;
+      sequence = 0;
+      written = zero_counters;
+      output = None;
+      error = None;
+    }
+
+  let check_journal t =
+    Option.iter t.journal ~f:(fun j ->
+        Option.iter j.error ~f:(fun msg -> failwith msg))
+
+  let maybe_rotate t =
+    Option.iter t.journal ~f:(fun j ->
+        if Option.is_some j.output then begin
+          check_journal t;
+          let records = count t
+          and accesses = Engine.Trace.accesses_count t.trace in
+          if
+            Int64.(records - j.written.records >= of_int j.interval)
+            || Int64.(records - j.written.records >= of_int t.capacity)
+            || t.access_capacity > 0
+               && Int64.(
+                    accesses - j.written.accesses >= of_int t.access_capacity)
+          then flush_journal t
+        end)
+
+  let read_prefix emu addr wanted =
+    let rec loop addr remaining pieces =
+      if remaining = 0 then String.concat (List.rev pieces)
+      else
+        let page_remaining =
+          Int64.(to_int_exn (X.page_of addr + 0x1000L - addr))
+        in
+        let n = min remaining page_remaining in
+        match read emu addr n with
+        | data -> loop Int64.(addr + of_int n) (remaining - n) (data :: pieces)
+        | exception Invalid_argument _ -> String.concat (List.rev pieces)
+    in
+    loop addr wanted []
+
+  let add_version t index pc bytes thumb block =
+    if t.versions.capacity > 0 then begin
+      let slot = Int64.to_int_trunc index mod t.versions.capacity in
+      Array.unsafe_set t.versions.entries slot
+        (Some { index; pc; bytes; thumb; block });
+      t.versions.count <- Int64.(max t.versions.count (index + 1L));
+      if block then t.versions.pending_block <- Some index
+    end
+
+  let capture t addr size ~block =
+    if t.versions.capacity > 0 then begin
+      fill_missing_versions t;
+      maybe_rotate t;
+      let index = count t in
+      let thumb =
+        Poly.equal (arch t.emu) Engine.Arm && Int64.(pc t.emu land 1L <> 0L)
+      in
+      let pc = code_of t.emu addr in
+      let wanted =
+        if block then max size (32 * Primus.Lift.max_size) else size
+      in
+      let bytes = read_prefix t.emu pc wanted in
+      if String.length bytes < size then
+        journal_error t
+          (sprintf "Bap_emu.Trace: cannot capture %d bytes at %Lx" size pc);
+      add_version t index pc bytes thumb block
+    end
+
+  let callback t addr size ~block =
+    let run () =
+      if block then finish_pending_block t;
+      capture t addr size ~block
+    in
+    match t.journal with
+    | None -> run ()
+    | Some j -> (
+        if Option.is_some j.error then pause t.emu
+        else
+          try run ()
+          with exn ->
+            let msg = Exn.to_string exn in
+            if Option.is_none j.error then j.error <- Some msg;
+            pause t.emu)
+
+  let install t (e : X.engine) =
+    (* These callbacks precede the native hooks in Unicorn, so both engines
+       present the absolute index of the record that is about to be made. *)
+    let versions =
+      if t.versions.capacity = 0 then []
+      else if blocks t then
+        [
+          Engine.on_block ?first:t.first ?last:t.last e.engine (fun addr size ->
+              callback t addr size ~block:true);
+        ]
+      else
+        [
+          Engine.on_code ?first:t.first ?last:t.last e.engine (fun addr size ->
+              callback t addr size ~block:false);
+        ]
+    in
+    let native =
+      Engine.trace ?first:t.first ?last:t.last ?watch:t.watch ~memory:t.memory
+        e.engine t.trace
+    in
+    t.hooks <- Some (versions @ native)
+
+  let register t =
+    if not t.registered then begin
+      t.registered <- true;
+      installed t.emu (fun e -> if t.active then install t e)
+    end
+
+  (* the hooks are native, see [Engine.trace], and go to the new engines too,
+     until the trace stops; code versions use the corresponding bounded hook *)
+  let start ?(size = 1 lsl 20) ?every ?(blocks = false) ?(accesses = 0)
+      ?(read_values = false) ?watch ?first ?last ?journal ?journal_interval
+      ?code_versions emu =
+    let accesses =
+      if Option.is_some watch && accesses = 0 then 1 lsl 16 else accesses
+    in
+    let memory = accesses > 0 in
+    if
+      memory
+      && (Option.value every ~default:1 > 1
+         || Option.is_some first || Option.is_some last)
+    then
+      invalid_arg
+        "Bap_emu.Trace.start: the accesses are recorded only with all \
+         instructions, or blocks";
+    let trace =
+      Engine.Trace.create ?every ~blocks ~accesses ~read_values size
+    in
+    let native = Engine.Trace.Snapshot.export trace in
+    let code_versions =
+      match (code_versions, journal) with
+      | Some n, _ when n < 0 ->
+          invalid_arg "Bap_emu.Trace.start: negative code-version capacity"
+      | Some 0, Some _ ->
+          invalid_arg
+            "Bap_emu.Trace.start: a journal requires code-version capture"
+      | Some n, _ -> n
+      | None, Some _ -> native.capacity
+      | None, None -> 0
+    in
+    let interval =
+      match journal_interval with
+      | Some n when n > 0 -> n
+      | Some _ ->
+          invalid_arg "Bap_emu.Trace.start: nonpositive journal interval"
+      | None ->
+          let candidates =
+            native.capacity :: code_versions
+            ::
+            (if native.access_capacity > 0 then [ native.access_capacity ]
+             else [])
+          in
+          max 1 (min 4096 (List.fold candidates ~init:Int.max_value ~f:min))
+    in
+    let journal = Option.map journal ~f:create_journal in
+    let journal = Option.map journal ~f:(fun j -> { j with interval }) in
+    let t =
+      {
+        emu;
+        trace;
+        memory = memory && Option.is_none watch;
+        watch;
+        first;
+        last;
+        capacity = native.capacity;
+        access_capacity = native.access_capacity;
+        versions = make_versions code_versions;
+        journal;
+        active = true;
+        registered = false;
+        hooks = None;
+        blocks = Int64.Table.create ();
+      }
+    in
+    Option.iter t.journal ~f:(fun j -> j.written <- native_counters t native);
+    open_journal t;
+    own t;
+    register t;
+    t
+
+  (* the hooks of a closed engine are gone with it; the final segment is
+     published before the manifest is closed *)
+  let stop t =
+    if t.active then begin
+      t.active <- false;
+      Option.iter t.hooks ~f:(fun hooks ->
+          List.iter hooks ~f:(fun hook ->
+              try Engine.delete hook with Invalid_argument _ -> ()));
+      t.hooks <- None;
+      (try flush_journal t
+       with Failure msg ->
+         Option.iter t.journal ~f:(fun j ->
+             if Option.is_none j.error then j.error <- Some msg));
+      close_journal t
+    end;
+    check_journal t
+
+  let resume t =
+    check_journal t;
+    if not t.active then begin
+      open_journal t;
+      t.active <- true;
+      register t;
+      Option.iter t.emu.session.active ~f:(fun e ->
+          if Option.is_none t.hooks then install t e)
+    end
+
   let tids ?last t = Engine.Trace.tids ?last t.trace
-  let sizes ?last t = Engine.Trace.sizes ?last t.trace
   let save ?last t file = Engine.Trace.save ?last t.trace file
 
   type access = {
@@ -2015,10 +2555,40 @@ module Trace = struct
           Option.value (Hashtbl.find reads addr) ~default:0,
           Option.value (Hashtbl.find writes addr) ~default:0 ))
 
+  let recorded_bytes t ~index ~thumb ?block_pc pc =
+    match code_version t index with
+    | Some v when Bool.equal v.thumb thumb && v.block -> (
+        match block_pc with
+        | Some base
+          when Int64.(base = v.pc && pc >= v.pc)
+               && Int64.(pc - v.pc < of_int (String.length v.bytes)) ->
+            let offset = Int64.(to_int_exn (pc - v.pc)) in
+            Some
+              (String.sub v.bytes ~pos:offset
+                 ~len:(String.length v.bytes - offset))
+        | _ -> None)
+    | Some v when Bool.equal v.thumb thumb && (not v.block) && Int64.(v.pc = pc)
+      ->
+        Some v.bytes
+    | _ -> None
+
+  let lift_record ?(executed_bytes = false) ~index ?block_pc ~thumb t pc =
+    let recorded =
+      if executed_bytes then recorded_bytes t ~index ~thumb ?block_pc pc
+      else None
+    in
+    match recorded with
+    | Some bytes -> (
+        match lift ~bytes ~thumb t.emu pc with
+        | Some (size, blks) when size > 0 && not (List.is_empty blks) ->
+            Some (size, blks)
+        | _ -> None)
+    | None -> lift_with_history ~executed_bytes ~thumb t.emu pc
+
   (* the instructions of the block of [size] bytes at [addr], in the
      mode, which are decoded once, as the sizes of the instructions, that
      are lifted, and the instruction, at which decoding failed *)
-  let block t ~executed_bytes ~thumb addr size =
+  let block t ~executed_bytes ~index ~thumb addr size =
     let key = if thumb then Int64.(addr lor 1L) else addr in
     let known =
       if executed_bytes then []
@@ -2034,14 +2604,18 @@ module Trace = struct
         let rec loop pc acc =
           if Int64.(pc >= last) then (Array.of_list_rev acc, None)
           else
-            match lift_with_history ~executed_bytes ~thumb t.emu pc with
+            match
+              lift_record ~executed_bytes ~index ~block_pc:addr ~thumb t pc
+            with
             | Some (n, _) when n > 0 -> loop Int64.(pc + of_int n) (pc :: acc)
             | _ -> (Array.of_list_rev (pc :: acc), Some pc)
         in
         let insns, failed = loop addr [] in
         (* recovered instructions don't enter the current-byte cache *)
-        if Option.is_none failed && not executed_bytes then
-          Hashtbl.set t.blocks ~key ~data:((size, insns) :: known);
+        if Option.is_none failed && not executed_bytes then begin
+          if Hashtbl.length t.blocks >= t.capacity then Hashtbl.clear t.blocks;
+          Hashtbl.set t.blocks ~key ~data:[ (size, insns) ]
+        end;
         (insns, failed)
 
   type words = (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t
@@ -2129,9 +2703,13 @@ module Trace = struct
             in
             let slot = Int64.to_int_trunc key land (slots - 1) in
             let a, sz, b, failed = Array.unsafe_get cache slot in
-            if Int64.(a = key) && sz = size then (b, failed)
+            if (not executed_bytes) && Int64.(a = key) && sz = size then
+              (b, failed)
             else
-              let b, failed = block t ~executed_bytes ~thumb addr size in
+              let index =
+                Int64.(first + of_int (Array.unsafe_get selected i))
+              in
+              let b, failed = block t ~executed_bytes ~index ~thumb addr size in
               Array.unsafe_set cache slot (key, size, b, failed);
               (b, failed))
       in
@@ -2177,9 +2755,9 @@ module Trace = struct
         failures = List.rev !failures;
       }
 
-  let window ?(records = true) ?thread ?last t :
+  let window ?(records = true) ?(executed_bytes = false) ?thread ?last t :
       words * words * Engine.Trace.modes * words =
-    let w = expanded_window ~records ?thread ?last t in
+    let w = expanded_window ~records ~executed_bytes ?thread ?last t in
     (w.pcs, w.records, w.modes, w.tids)
 
   let inspect ?(executed_bytes = false) ?thread ?last t =
@@ -2195,7 +2773,7 @@ module Trace = struct
           if Hashtbl.mem failed (index, pc) then Decode_failed
           else if blocks t then Decoded
           else
-            match lift_with_history ~executed_bytes ~thumb t.emu pc with
+            match lift_record ~executed_bytes ~index ~thumb t pc with
             | Some (size, _) when size > 0 -> Decoded
             | _ -> Decode_failed
         in
@@ -2207,9 +2785,9 @@ module Trace = struct
           decode;
         })
 
-  let insns ?last t =
+  let insns ?(executed_bytes = false) ?last t =
     if blocks t then
-      let pcs, _, _, _ = window ~records:false ?last t in
+      let pcs, _, _, _ = window ~records:false ~executed_bytes ?last t in
       pcs
     else pcs ?last t
 
@@ -2415,13 +2993,13 @@ module Trace = struct
     thread : int;
   }
 
-  let calls ?thread ?last t =
-    let pcs, _, modes, tids = window ?thread ?last t in
-    let sizes = Int64.Table.create () in
-    let calling thumb pc =
-      let key = if thumb then Int64.(pc lor 1L) else pc in
-      Hashtbl.find_or_add sizes key ~default:(fun () ->
-          match lift ~thumb t.emu pc with
+  let calls ?(executed_bytes = false) ?thread ?last t =
+    let w = expanded_window ~executed_bytes ?thread ?last t in
+    let pcs, records, modes, tids = (w.pcs, w.records, w.modes, w.tids) in
+    let sizes = Hashtbl.Poly.create () in
+    let calling ~index ?block_pc thumb pc =
+      Hashtbl.find_or_add sizes (index, pc, thumb) ~default:(fun () ->
+          match lift_record ~executed_bytes ~index ?block_pc ~thumb t pc with
           | Some (size, blks)
             when List.exists blks ~f:(fun blk ->
                      Term.enum jmp_t blk
@@ -2434,10 +3012,12 @@ module Trace = struct
     let sites = Hashtbl.Poly.create () in
     for i = 0 to Bigarray.Array1.dim pcs - 2 do
       let pc = Bigarray.Array1.unsafe_get pcs i in
+      let index = Bigarray.Array1.unsafe_get records i in
+      let block_pc = Array.unsafe_get w.sources i in
       let thumb = Bigarray.Array1.unsafe_get modes i = 1 in
       let tid = Bigarray.Array1.unsafe_get tids i in
       if Int64.equal tid (Bigarray.Array1.unsafe_get tids (i + 1)) then
-        match calling thumb pc with
+        match calling ~index ?block_pc thumb pc with
         | Some size ->
             let next = Bigarray.Array1.unsafe_get pcs (i + 1) in
             if Int64.(next <> pc + of_int size) then
@@ -2468,13 +3048,13 @@ module Trace = struct
      of a conditional instruction of ARM, aren't branches *)
   type branch = { site : int64; target : int64; taken : bool; thread : int }
 
-  let branches ?thread ?last t =
-    let pcs, _, modes, tids = window ?thread ?last t in
-    let sizes = Int64.Table.create () in
-    let branching thumb pc =
-      let key = if thumb then Int64.(pc lor 1L) else pc in
-      Hashtbl.find_or_add sizes key ~default:(fun () ->
-          match lift ~thumb t.emu pc with
+  let branches ?(executed_bytes = false) ?thread ?last t =
+    let w = expanded_window ~executed_bytes ?thread ?last t in
+    let pcs, records, modes, tids = (w.pcs, w.records, w.modes, w.tids) in
+    let sizes = Hashtbl.Poly.create () in
+    let branching ~index ?block_pc thumb pc =
+      Hashtbl.find_or_add sizes (index, pc, thumb) ~default:(fun () ->
+          match lift_record ~executed_bytes ~index ?block_pc ~thumb t pc with
           | Some (size, blks) ->
               let inside = List.map blks ~f:Term.tid |> Tid.Hash_set.of_list in
               let leaves jmp =
@@ -2497,10 +3077,12 @@ module Trace = struct
     let branches = ref [] in
     for i = 0 to Bigarray.Array1.dim pcs - 2 do
       let pc = Bigarray.Array1.unsafe_get pcs i in
+      let index = Bigarray.Array1.unsafe_get records i in
+      let block_pc = Array.unsafe_get w.sources i in
       let thumb = Bigarray.Array1.unsafe_get modes i = 1 in
       let tid = Bigarray.Array1.unsafe_get tids i in
       if Int64.equal tid (Bigarray.Array1.unsafe_get tids (i + 1)) then
-        match branching thumb pc with
+        match branching ~index ?block_pc thumb pc with
         | Some size ->
             let target = Bigarray.Array1.unsafe_get pcs (i + 1) in
             branches :=
@@ -2999,17 +3581,22 @@ let slice ?(addresses = false) ?(executed_bytes = false) ?window ?thread
                         (shift_right_logical a.old Int.(8 * i) land 0xFFL))))
       done
   in
-  let lifted = Int64.Table.create () in
+  let lifted = Hashtbl.Poly.create () in
   (* the instruction, in its mode, as it was, if the program patched it
      later, and its bytes are known, or else as it is now *)
-  let insn ~thumb pc =
+  let insn ~index ?block_pc ~thumb pc =
     let now () =
-      let key = if thumb then Int64.(pc lor 1L) else pc in
-      Hashtbl.find_or_add lifted key ~default:(fun () ->
-          Option.map (lift_with_history ~executed_bytes ~thumb t pc)
+      Hashtbl.find_or_add lifted (index, pc, thumb, block_pc)
+        ~default:(fun () ->
+          Option.map
+            (Trace.lift_record ~executed_bytes ~index ?block_pc ~thumb tr pc)
             ~f:(fun (size, blks) -> Insn.of_blks size blks))
     in
-    if Hashtbl.is_empty earlier then now ()
+    let recorded =
+      executed_bytes
+      && Option.is_some (Trace.recorded_bytes tr ~index ~thumb ?block_pc pc)
+    in
+    if recorded || Hashtbl.is_empty earlier then now ()
     else
       let bytes = code_bytes t pc in
       let changed = ref false and known = ref true in
@@ -3035,38 +3622,47 @@ let slice ?(addresses = false) ?(executed_bytes = false) ?window ?thread
      order, from the IT instruction, that is in the 4 records before the
      instruction, before the walk, which goes backward, lifts one of
      them. The IT block before the window isn't known. *)
-  let it_length = Int64.Table.create () in
-  let it_block pc =
-    Hashtbl.find_or_add it_length pc ~default:(fun () ->
-        match code_bytes t pc with
+  let it_length = Hashtbl.Poly.create () in
+  let it_block k =
+    let index = Bigarray.Array1.get records k in
+    let pc = Bigarray.Array1.get pcs k in
+    let block_pc = Array.unsafe_get w.sources k in
+    Hashtbl.find_or_add it_length (index, pc) ~default:(fun () ->
+        let bytes =
+          if executed_bytes then
+            Trace.recorded_bytes tr ~index ~thumb:true ?block_pc pc
+          else None
+        in
+        match Option.value bytes ~default:(code_bytes t pc) with
         | b when String.length b >= 2 ->
             let h = Char.to_int b.[0] lor (Char.to_int b.[1] lsl 8) in
             let mask = h land 0xF in
             if h land 0xFF00 = 0xBF00 && mask <> 0 then 4 - Int.ctz mask else 0
         | _ -> 0)
   in
-  let grouped = Int64.Hash_set.create () in
+  let grouped = Hash_set.Poly.create () in
   let is_thumb k =
     k >= 0 && k < Bigarray.Array1.dim modes && Bigarray.Array1.get modes k = 1
   in
   let in_order k =
     Sequence.range ~stop:`inclusive (Int.max 0 (k - 4)) k
-    |> Sequence.find ~f:(fun j ->
-        is_thumb j && j < k && k - j <= it_block (Bigarray.Array1.get pcs j))
+    |> Sequence.find ~f:(fun j -> is_thumb j && j < k && k - j <= it_block j)
     |> Option.iter ~f:(fun j ->
         let it = Bigarray.Array1.get pcs j in
-        if not (Hash_set.mem grouped it) then begin
-          Hash_set.add grouped it;
+        let index = Bigarray.Array1.get records j in
+        let block_pc = Array.unsafe_get w.sources j in
+        if not (Hash_set.mem grouped (index, it)) then begin
+          Hash_set.add grouped (index, it);
           (* by the addresses, as the instructions, whose conditions
              fail, have no records *)
           let rec lift pc i =
             if i >= 0 then
-              match insn ~thumb:true pc with
+              match insn ~index ?block_pc ~thumb:true pc with
               | Some { size; _ } when size > 0 ->
                   lift Int64.(pc + of_int size) (i - 1)
               | _ -> ()
           in
-          lift it (it_block it)
+          lift it (it_block j)
         end)
   in
   (* the access is of the instruction at [k], of a later one, whose
@@ -3129,7 +3725,9 @@ let slice ?(addresses = false) ?(executed_bytes = false) ?window ?thread
       let stores = List.exists write_bytes ~f:(Hash_set.mem live_mem) in
       let thumb = is_thumb k in
       if thumb then in_order k;
-      match insn ~thumb pc with
+      match
+        insn ~index:record ?block_pc:(Array.unsafe_get w.sources k) ~thumb pc
+      with
       | None ->
           Hashtbl.set decode_failures ~key:(record, pc)
             ~data:

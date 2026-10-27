@@ -384,8 +384,10 @@ The script's own code doesn't run at the prompt, as the script is compiled to na
 
 | Function | Action |
 |----------|--------|
-| `Trace.start ?size ?blocks ?every ?accesses ?read_values ?first ?last emu` | record the last `size` instructions, by default 2^20, or only the blocks with `~blocks:true`, or every `every`-th instruction, and the last `accesses` loads and stores; with `~read_values:true`, retain successful loaded values |
-| `Trace.insns ?last trace` | the program counters of the last instructions, also of a trace of blocks, whose blocks are decoded once |
+| `Trace.start ?size ?blocks ?every ?accesses ?read_values ?first ?last ?journal ?journal_interval ?code_versions emu` | record bounded native rings; optionally stream versioned journal segments and retain exact executed-code versions |
+| `Trace.insns ?executed_bytes ?last trace` | the program counters of the last instructions, also of a trace of blocks, whose blocks are decoded from current or trace-local executed bytes |
+| `Trace.versions`, `Trace.code_version`, `Trace.retained_versions` | inspect the bounded absolute-index executed-byte ring |
+| `Trace.journal_segments`, `Trace.load_journal` | validate/enumerate a manifest and restore its detached segments |
 | `Trace.pcs`, `Trace.tids` | the recorded program counters and their effective TIDs, in aligned arrays |
 | `Trace.save ?last trace file` | write the recorded program counters, one in hex a line |
 | `Trace.count`, `Trace.accesses`, `Trace.stop` | the number of records, the recorded accesses with their TIDs, and the end of recording |
@@ -396,7 +398,28 @@ With `~read_values:true`, each successful read of one to eight bytes has `access
 
 `Trace.capture_state emu sites ~regs ~fields` is the native pre-instruction form for structured handler state. Each record has the original site, global instruction-trace index, effective TID, named registers, and indirect fields specified as `(base_register, offset, size)`. Fields are read exactly, one to eight bytes with the lowest-address byte first; unmapped or unreadable fields produce `None`, never a partial value. `captured_states` reads the retained window and `stop_state_capture` ends recording. `save_states`/`load_states` provide a versioned binary round trip of immutable records without serializing live hooks. A decoded record can guide `Emu.drive emu state.site ~thread:state.thread ~regs:state.regs`.
 
-`Trace.save_state trace file` durably saves the trace itself, rather than the machine. Its versioned binary envelope contains the complete native snapshot: retained PCs, TIDs, modes and block sizes, accesses, slice boundaries, embedded native captures, absolute counts, and ring and sampling cursors. It also records the memory/watch/code-range hook configuration and the target and program digest. Saving is atomic: the complete file is written to a temporary in the destination directory and then renamed over the destination. `Trace.restore_state emu file` validates the envelope, target, program, metadata, and every native shape, and returns the trace **detached**, with all its records available for queries but no hooks installed. `Trace.resume trace` installs the original hooks on that emulator without resetting indices or cursors. `stop`/`resume` and repeated `resume` calls are safe and do not duplicate hooks. A trace snapshot does not checkpoint registers or memory, so a new emulator must reach a compatible execution state before resuming; embedded native captures survive, while separate `state_capture` objects retain their own `save_states`/`load_states` API.
+`Trace.save_state trace file` durably saves the trace itself, rather than the machine. State format 2 contains the complete native snapshot: retained PCs, TIDs, modes and block sizes, accesses, slice boundaries, embedded native captures, absolute counts, ring and sampling cursors, and retained executed-code versions. It also records the memory/watch/code-range hook configuration and the target and program digest. Earlier state formats are rejected. Saving is atomic: the complete file is written to a temporary in the destination directory and then renamed over the destination. `Trace.restore_state emu file` validates the envelope, target, program, metadata, native shapes, and versions, and returns the trace **detached**, with all its records available for queries but no hooks installed. `Trace.resume trace` installs the original hooks on that emulator without resetting indices or cursors. `stop`/`resume` and repeated `resume` calls are safe and do not duplicate hooks. A trace snapshot does not checkpoint registers or memory, so a new emulator must reach a compatible execution state before resuming; embedded native captures and exact code bytes survive, while separate `state_capture` objects retain their own `save_states`/`load_states` API.
+
+`~code_versions:n` opts into an `n`-entry ring of exact executed bytes keyed by absolute trace-record index. Instruction traces read the exact instruction size at record time with an opt-in per-instruction OCaml callback. The lifted JIT can record a compiled block after its entry callback; at the next bounded boundary, the trace reconciles actual native PCs and sampling with the executed bytes retained by the lifted engine, and discards speculative entries that have no native record. Block traces use the native block callback and retain the block bytes and ARM mode. `Trace.code_version trace index` returns only a version actually retained at that index; `versions` enumerates the ring and `retained_versions` reports its size. Evicted or unrecorded indices return no version.
+
+`~journal:prefix` enables code-version capture automatically and streams bounded state snapshots to `prefix.00000000.trace`, `prefix.00000001.trace`, and so on. `prefix.manifest` is an append-only, versioned sequence of segment boundaries and continuity counters, not an ever-growing in-memory segment list. `journal_interval` selects the deterministic rotation cadence; its default is bounded by the configured rings. A native block callback synchronously publishes each segment, providing natural backpressure without a per-instruction OCaml callback for block traces. Instruction traces use their byte-capture callback at the same boundaries.
+
+Before every publication, instruction, access, capture, boundary, range, and code-version counter deltas are checked against the corresponding capacities. If a ring wrapped between writes, the journal reports the overflow instead of silently dropping history. Segment and manifest I/O failures are also explicit and sticky. `Trace.stop` publishes the final pending segment, flushes and closes the manifest, and raises any such error. `Trace.resume` reopens the same manifest and continues with unique sequence numbers and unchanged absolute record indices. Retained runtime state is bounded by the rings and the current manifest cursor; reopening scans and validates the manifest one entry at a time.
+
+```ocaml
+let trace =
+  Emu.Trace.start ~blocks:true ~size:1024 ~accesses:4096
+    ~code_versions:1024 ~journal:"run" ~journal_interval:512 emu
+in
+ignore (Emu.run emu ~until:finish);
+Emu.Trace.stop trace;
+let segments = Emu.Trace.journal_segments "run" in
+let restored = Emu.Trace.load_journal emu "run" in
+List.iter2_exn segments restored ~f:(fun segment trace ->
+    assert (Int64.equal segment.next (Emu.Trace.count trace)))
+```
+
+`journal_segments` validates and enumerates the on-disk manifest for verification; `load_journal` restores each segment as a detached trace. Individual `segment.file` names can also be passed to `restore_state`.
 
 The trace of the blocks costs the least, about three times the time of the program, and its `insns` are the instructions of the trace of each instruction, which costs tens of times the time, as Unicorn calls a hook for each instruction:
 
@@ -417,7 +440,7 @@ List.iter s.steps ~f:(fun { Emu.pc; _ } -> printf "%Lx\n" pc)
 
 Before slicing, `Trace.inspect ?thread ?last trace` exposes the exact expanded instruction window: each entry has its PC, global record `index`, effective `thread`, source `block` for a block trace, and `Decoded` or `Decode_failed` status. This checks block chaining and decode assumptions without computing a slice. If `s.steps` is empty, `s.reason` is `Some Instruction_decode`, `Outside_trace_writes`, `Unresolved_inputs`, or `No_dataflow`, in that precedence order when more than one condition holds; it is `None` for a nonempty slice. `s.decode_failures` gives the instruction PC, source block PC when applicable, record index, and TID. The existing `live`, `gaps`, and `complete` fields retain their independent meanings, so no producer is inferred across a gap or a failed instruction.
 
-Instructions still lift from current bytes, or from old bytes reconstructed from traced writes, by default. `Emu.slice ~executed_bytes:true` and `Trace.inspect ~executed_bytes:true` additionally fall back to `insn_at` history when that lifting fails, for both instruction and block traces. Executed history is available only in the lifted engine and keeps the last lifted instruction per PC and mode, not a version for every execution; traced writes remain the more precise source. Use the fallback for code that was scrubbed or overwritten after running, not to change the intentional current-byte default.
+Instructions still lift from current bytes, or from old bytes reconstructed from traced writes, by default. With `~executed_bytes:true`, `Emu.slice`, `Trace.inspect`, `Trace.insns`, `Trace.branches`, and `Trace.calls` first use the exact trace-local version for the absolute record index. Block expansion takes each instruction from the captured block buffer, including on Unicorn and after fresh detached restore. If no version was recorded, current or reconstructed bytes remain primary; a failed lift may fall back to `insn_at` history. That older history is available only in the lifted engine and keeps the last lifted instruction per PC and mode, not a version for every execution. No executed version is claimed for an index that was not captured and retained.
 
 The slice handles these cases, see `testsuite/src/slice-weird.c` and the `emu/slice` case of the testsuite:
 

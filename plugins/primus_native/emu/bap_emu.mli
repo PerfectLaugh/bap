@@ -397,6 +397,9 @@ module Trace : sig
     ?watch:int64 * int64 ->
     ?first:int64 ->
     ?last:int64 ->
+    ?journal:string ->
+    ?journal_interval:int ->
+    ?code_versions:int ->
     emu ->
     t
   (** [start emu] records the program counters of the last [size] instructions,
@@ -425,27 +428,51 @@ module Trace : sig
       all writes have no loaded value. It is false by default, preserving the
       existing read hooks and access records.
 
+      [code_versions] retains exact executed bytes in a ring of that many
+      entries, keyed by absolute trace-record index. Instruction traces use an
+      opt-in per-instruction OCaml callback; block traces capture block bytes
+      and mode in the bounded block callback. Capture is disabled when the
+      option is zero or absent, unless [journal] is present, which enables it
+      with the native record-ring capacity by default.
+
+      [journal = prefix] synchronously writes bounded, versioned trace-state
+      snapshots to deterministic [prefix.NNNNNNNN.trace] segment names and
+      appends their sequence and continuity metadata to [prefix.manifest].
+      Rotation happens at native block boundaries, or instruction boundaries for
+      instruction traces, every [journal_interval] records when possible. The
+      default interval is bounded by the configured ring capacities. Each write
+      checks instruction, access, capture, boundary, range, and code-version
+      counter deltas against their ring capacities. Overflow or I/O failure is
+      explicit and sticky; history is never silently discarded. The runtime
+      retains only the current manifest cursor, not a list of segments.
+
       Raises [Invalid_argument], if [accesses] is positive, or a range is
       watched, and the instructions are sampled, or the ones of a range are
-      recorded. *)
+      recorded; for a negative code-version capacity or nonpositive journal
+      interval; and when a journal disables code versions. Journal creation and
+      manifest errors raise [Failure]. *)
 
   val stop : t -> unit
   (** [stop trace] stops recording, the trace keeps the records. It is safe to
-      call [stop] on an already stopped or detached trace. *)
+      call [stop] on an already stopped or detached trace. A journal is flushed
+      and closed, and any deferred overflow or I/O error raises [Failure], also
+      on subsequent calls. *)
 
   val resume : t -> unit
   (** [resume trace] resumes recording with the configuration passed to
       {!start}, or restored by {!restore_state}, without resetting the retained
       records, absolute indices, or sampling cursors. It does nothing if the
-      trace is already recording. *)
+      trace is already recording. A stopped journal continues its manifest with
+      fresh, monotonically increasing segment sequence numbers. *)
 
   val save_state : t -> string -> unit
   (** [save_state trace file] atomically writes a versioned binary snapshot of
       the complete native trace, including retained records, absolute indices,
       ring and sampling cursors, accesses, slice boundaries, and embedded native
-      captures, together with the target, program identity, and hook
-      configuration. The trace may be recording or stopped. Raises [Failure]
-      with the operation and file or program error on failure. *)
+      captures and retained executed-code versions, together with the target,
+      program identity, and hook configuration. The trace may be recording or
+      stopped. State format 2 does not accept the earlier format. Raises
+      [Failure] with the operation and file or program error on failure. *)
 
   val restore_state : emu -> string -> t
   (** [restore_state emu file] loads a snapshot written by {!save_state}, checks
@@ -455,6 +482,40 @@ module Trace : sig
       continue recording on that emulator. Raises [Failure] with a clear error
       if the snapshot cannot be read, decoded, validated, or matched to [emu].
   *)
+
+  type code_version = {
+    index : int64;  (** absolute instruction or block trace-record index *)
+    pc : int64;
+    bytes : string;  (** exact bytes captured before this record executed *)
+    thumb : bool;
+    block : bool;  (** whether [bytes] cover a whole block record *)
+  }
+
+  val code_version : t -> int64 -> code_version option
+  (** [code_version trace index] returns the retained version at exactly
+      [index], or [None] if capture was disabled or that version was evicted. *)
+
+  val versions : ?last:int -> t -> code_version list
+  (** retained code versions, oldest absolute index first *)
+
+  val retained_versions : t -> int
+  (** the number of retained code versions, bounded by [code_versions] *)
+
+  type journal_segment = {
+    sequence : int;
+    file : string;
+    first : int64;
+    next : int64;
+  }
+
+  val journal_segments : string -> journal_segment list
+  (** [journal_segments prefix] validates and enumerates the on-disk manifest in
+      sequence order. [first] and [next] delimit each segment's absolute record
+      coverage; [file] is suitable for {!restore_state}. *)
+
+  val load_journal : emu -> string -> t list
+  (** [load_journal emu prefix] restores every manifest segment, in sequence
+      order, as a detached trace. *)
 
   val count : t -> int64
   (** the number of the recorded instructions, or blocks, also of those, that
@@ -525,12 +586,14 @@ module Trace : sig
       records the accesses, or watches them *)
 
   val insns :
+    ?executed_bytes:bool ->
     ?last:int ->
     t ->
     (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t
   (** the program counters of the instructions of the last [last] records, by
       default of all, that the ring keeps, the oldest first, of the blocks too,
-      whose instructions are decoded once, from the bytes, that they have now *)
+      whose instructions are decoded from current bytes by default, or from
+      exact trace-local versions with [executed_bytes] *)
 
   type decode_status = Decoded | Decode_failed
 
@@ -557,9 +620,12 @@ module Trace : sig
       a failed instruction.
 
       Instructions are decoded from their current bytes by default. With
-      [executed_bytes], an instruction, whose current bytes don't decode, is
-      recovered from the executed-instruction history of the lifted engine, see
-      {!insn_at}. This history is unavailable with Unicorn and keeps only the
+      [executed_bytes], an exact retained {!code_version} for the absolute
+      record index takes precedence, including on Unicorn and after detached
+      restore. Block expansion reads each instruction from its captured block.
+      If no such version was recorded, current or reconstructed bytes remain the
+      primary source; a failed lift may still use the executed-instruction
+      history of the lifted engine, see {!insn_at}. That fallback keeps only the
       last instruction lifted at each address and mode, not every version that
       ran. *)
 
@@ -645,7 +711,7 @@ module Trace : sig
     thread : int;
   }
 
-  val calls : ?thread:int -> ?last:int -> t -> call list
+  val calls : ?executed_bytes:bool -> ?thread:int -> ?last:int -> t -> call list
   (** [calls trace] the calls of the last [last] records, by default of all,
       that the ring keeps, grouped by their effective TIDs and sites. The
       targets are the next same-thread instructions, with their counts, the most
@@ -656,7 +722,8 @@ module Trace : sig
 
   type branch = { site : int64; target : int64; taken : bool; thread : int }
 
-  val branches : ?thread:int -> ?last:int -> t -> branch list
+  val branches :
+    ?executed_bytes:bool -> ?thread:int -> ?last:int -> t -> branch list
   (** [branches trace] the conditional branches of the last [last] records, by
       default of all, in their order, optionally only of [thread]. The target is
       the next same-thread instruction, and [taken] tells whether it isn't the
@@ -799,12 +866,13 @@ val slice :
     their steps have the indices of their blocks. {!Trace.inspect} exposes the
     expanded window and its decode status without computing a slice.
 
-    Current or reconstructed bytes remain the default. With [executed_bytes], a
-    failed lift falls back to the executed-instruction history of the lifted
-    engine, see {!insn_at}, for both instruction and block traces. The history
-    is unavailable with Unicorn and is the last lifted instruction at each
-    address and mode, rather than a version for every execution; traced writes
-    remain the more precise source when they can reconstruct an instruction. *)
+    Current or reconstructed bytes remain the default. With [executed_bytes], an
+    exact retained {!Trace.code_version} for the absolute record index takes
+    precedence for instruction and block traces, including after detached
+    restore. Without one, a failed lift falls back to the executed-instruction
+    history of the lifted engine, see {!insn_at}. That history is unavailable
+    with Unicorn and is the last lifted instruction at each address and mode,
+    rather than a version for every execution. *)
 
 val primus : t -> Bap_primus.Std.Primus.Machine.component -> unit
 (** [primus emu component] runs the [init] of the [component] in the Primus

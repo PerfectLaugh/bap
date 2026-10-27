@@ -112,11 +112,11 @@ let produce file kind work other_program other_target =
   Emu.Trace.stop restored;
   Emu.Trace.stop restored;
   let data = In_channel.read_all main_file in
-  let magic = "bap-emu-trace-state 1\n" in
+  let magic = "bap-emu-trace-state 2\n" in
   let versioned = Filename.concat work (kind ^ ".version.trace") in
   Out_channel.write_all versioned
     ~data:
-      ("bap-emu-trace-state 2\n"
+      ("bap-emu-trace-state 3\n"
       ^ String.sub data ~pos:(String.length magic)
           ~len:(String.length data - String.length magic));
   let truncated = Filename.concat work (kind ^ ".truncated.trace") in
