@@ -10,7 +10,7 @@ let ret tid = Jmp.create_ret (Direct tid)
 let call ?return target =
   Jmp.create_call (Call.create ?return ~target:(Direct target) ())
 
-let deflatten ir sub =
+let with_controlled_opt ir f =
   let key = "BAP_RECOMPILE_TEST_OUTPUT" in
   let previous = Sys.getenv key in
   Caml_unix.putenv key ir;
@@ -19,10 +19,13 @@ let deflatten ir sub =
       match previous with
       | Some value -> Caml_unix.putenv key value
       | None -> Caml_unix.unsetenv key)
-    (fun () ->
-      Bap_recompile.deflatten
-        ~opt:(Sys.getenv_exn "BAP_RECOMPILE_TEST_OPT")
-        ~rounds:1 sub)
+    (fun () -> f (Sys.getenv_exn "BAP_RECOMPILE_TEST_OPT"))
+
+let optimize ir sub =
+  with_controlled_opt ir (fun opt -> Bap_recompile.optimize ~opt sub)
+
+let deflatten ir sub =
+  with_controlled_opt ir (fun opt -> Bap_recompile.deflatten ~opt ~rounds:1 sub)
 
 let assert_error_contains expected = function
   | Ok _ -> assert_failure "the malformed subroutine was accepted"
@@ -152,12 +155,70 @@ let test_external_boundary _ =
         (List.exists jumps ~f:(fun jmp ->
              match Jmp.kind jmp with Int _ -> true | _ -> false))
 
+let test_lost_opaque_exit _ =
+  let source = sub "lost-exit" [ block [ call (Tid.create ()) ] ] in
+  let ir = "define void @f0() {\nentry:\n  unreachable\n}\n" in
+  assert_error_contains "changed opaque exits (1 before, 0 after)"
+    (optimize ir source)
+
+let test_duplicated_opaque_exit _ =
+  let source = sub "duplicated-exit" [ block [ call (Tid.create ()) ] ] in
+  let ir =
+    "define void @f0() {\n\
+     entry:\n\
+    \  call void @f0.exit.0()\n\
+    \  call void @f0.exit.0()\n\
+    \  unreachable\n\
+     }\n"
+  in
+  assert_error_contains "changed opaque exits (1 before, 2 after)"
+    (deflatten ir source)
+
+let test_altered_opaque_exit _ =
+  let source =
+    sub "altered-exit"
+      [ block [ goto (Tid.create ()) ]; block [ ret (Tid.create ()) ] ]
+  in
+  let ir =
+    "define void @f0() {\nentry:\n  call void @f0.exit.1()\n  unreachable\n}\n"
+  in
+  assert_error_contains "changed opaque exits (2 before, 1 after)"
+    (optimize ir source)
+
+let test_opaque_exit_attributes _ =
+  let target = Tid.create () in
+  let marked = Term.set_attr (call target) Term.dead () in
+  let source = sub "exit-attributes" [ block [ marked ] ] in
+  let ir =
+    "define void @f0() {\nentry:\n  call void @f0.exit.0()\n  unreachable\n}\n"
+  in
+  match optimize ir source with
+  | Error err -> assert_failure (Error.to_string_hum err)
+  | Ok optimized -> (
+      match jmps optimized with
+      | [ jmp ] ->
+          assert_bool "the opaque exit lost its attributes"
+            (Term.has_attr jmp Term.dead);
+          assert_bool "the opaque exit changed its target"
+            (match Jmp.kind jmp with
+            | Call call -> (
+                match Call.target call with
+                | Direct tid -> Tid.equal tid target
+                | Indirect _ -> false)
+            | _ -> false)
+      | _ ->
+          assert_failure "the valid opaque exit wasn't preserved exactly once")
+
 let suite =
   "recompile"
   >::: [
          "unknown successor" >:: test_unknown_successor;
          "valid destinations" >:: test_valid_destinations;
          "external boundary" >:: test_external_boundary;
+         "lost opaque exit" >:: test_lost_opaque_exit;
+         "duplicated opaque exit" >:: test_duplicated_opaque_exit;
+         "altered opaque exit" >:: test_altered_opaque_exit;
+         "opaque exit attributes" >:: test_opaque_exit_attributes;
        ]
 
 let () = run_test_tt_main suite

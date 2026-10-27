@@ -54,8 +54,11 @@ val optimize :
 
     The results are cached, so the same sub, with the same [passes], is
     optimized once. Fails, if LLVM IR can't express the code of [sub], e.g., a
-    block without a jump, if the optimized code can't be raised back to BIR, or
-    if opt fails. *)
+    block without a jump, if the optimized code can't be raised back to BIR, if
+    opt fails, or if the result has an invalid destination or changes the
+    multiset of opaque exits, their stable targets, or their attributes. These
+    checks validate the external control-flow boundary, not full trace
+    equivalence or preservation of internal stores. *)
 
 (** The code, that is optimized: its blocks, the first of which is its only
     entry, whose jumps to its blocks stay inside of it, while its other jumps,
@@ -131,8 +134,8 @@ val deflatten :
     a block passes to it, a constant, or a select of the constants, as long as
     its blocks have no effects, and the block jumps to the block, that the
     dispatcher leads to, with the variables, that the dispatcher defined on the
-    way. Each round rejects a direct local destination that is neither a block
-    of the result nor an external destination of the original [sub]. *)
+    way. Each round applies the destination and opaque-exit validation of
+    {!optimize} before caching or returning the result. *)
 
 val optimize_program :
   ?target:Theory.Target.t ->
