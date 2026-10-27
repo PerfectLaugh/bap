@@ -60,6 +60,18 @@ set, e.g.,
   bap ./prog --passes=recompile-optimize --recompile-deflatten -dbir
 ```
 
+With $(b,--recompile-lean-deflatten), every constant expression used to
+justify dispatcher threading is checked by Lean 4.35.0. Each constant-state
+threaded edge is also compared with the original dispatcher path in a formal
+CFG semantics: the destination and every final definition must be equal for
+arbitrary unrelated inputs. Symbolic select splits are certified by the same
+destination and definition checks for every condition value. This requires
+$(b,elan) on $(b,PATH) or in
+$(b,~/.elan/bin), and adds external proof-checking cost. A failed proof or Lean
+process rejects the optimized candidate, so the original sub is kept.
+Unchecked, expression-checked, and CFG-checked results use separate cache
+entries. The option has no effect without $(b,--recompile-deflatten).
+
 The scripts and the other plugins optimize the subs on demand with the
 library of the plugin, e.g.,
 
@@ -112,6 +124,12 @@ let deflatten =
        in the rounds of the optimization, see $(b,--recompile-opt-passes), \
        whose default is the pipeline of the deflattening then."
 
+let lean_deflatten =
+  Extension.Configuration.flag "lean-deflatten"
+    ~doc:
+      "Uses Lean to check dispatcher expressions and certify constant-state \
+       threaded CFG edges. Requires --recompile-deflatten and Lean 4.35.0."
+
 let () =
   Extension.declare ~doc ~provides:[ "pass"; "llvm"; "recompile" ]
   @@ fun ctxt ->
@@ -131,6 +149,25 @@ let () =
     List.is_empty subs || List.mem subs (Sub.name sub) ~equal:String.equal
   in
   let deflatten = ctxt --> deflatten in
+  let validate, validate_thread, validate_split =
+    if ctxt --> lean_deflatten then
+      ( Some
+          (fun before after ->
+            match Bap_bil_plugin.Bil_lean.validate_exp before after with
+            | Ok () -> true
+            | Error message -> failwith message),
+        Some
+          (fun witness ->
+            match Bap_recompile.validate_thread witness with
+            | Ok () -> true
+            | Error message -> failwith message),
+        Some
+          (fun witness ->
+            match Bap_recompile.validate_split witness with
+            | Ok () -> true
+            | Error message -> failwith message) )
+    else (None, None, None)
+  in
   Project.register_pass ~name:"optimize" (fun proj ->
       let target = Project.target proj in
       if deflatten then
@@ -147,7 +184,10 @@ let () =
                   || not (select sub)
                 then sub
                 else
-                  match Bap_recompile.deflatten ~target ~opt ~passes sub with
+                  match
+                    Bap_recompile.deflatten ~target ~opt ~passes ?validate
+                      ?validate_thread ?validate_split sub
+                  with
                   | Ok sub -> sub
                   | Error err ->
                       eprintf "bap-recompile: can't deflatten %s: %s\n%!"

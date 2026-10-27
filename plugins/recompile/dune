@@ -4,16 +4,17 @@
  (modules
   bap_recompile
   recompile_frame
+  recompile_lean
   recompile_llvm
   recompile_optimize
   recompile_runtime)
- (libraries bap bap-core-theory bap-knowledge core unix))
+ (libraries bap bap-bil.plugin bap-core-theory bap-knowledge core unix))
 
 (library
  (name bap_recompile_plugin)
  (public_name bap-recompile.plugin)
  (modules recompile_main)
- (libraries bap bap-main bap-recompile core))
+ (libraries bap bap-bil.plugin bap-main bap-recompile core))
 
 (plugin
  (name recompile)

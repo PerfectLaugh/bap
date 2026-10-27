@@ -1,6 +1,7 @@
 open Core
 open Bap.Std
 open Bap_core_theory
+module Recompile_optimize = Recompile_optimize
 
 let deflatten_passes =
   "function(sroa,early-cse,instcombine<no-verify-fixpoint>,sccp,simplifycfg,jump-threading,simplifycfg,sccp,instcombine<no-verify-fixpoint>,gvn,dse,adce,simplifycfg)"
@@ -12,12 +13,21 @@ let default_passes =
    its identifiers, so that the same sub is optimized once *)
 let cache : sub term Or_error.t String.Table.t = String.Table.create ()
 
-let key ?target passes sub =
+let key ?target ~expression_validated ~thread_validated ~split_validated passes
+    sub =
   let target =
     Option.value_map target ~default:"" ~f:(fun t ->
         KB.Name.show (Theory.Target.name t))
   in
-  String.concat ~sep:"\n" [ target; passes; Sub.to_string sub ]
+  String.concat ~sep:"\n"
+    [
+      target;
+      passes;
+      Bool.to_string expression_validated;
+      Bool.to_string thread_validated;
+      Bool.to_string split_validated;
+      Sub.to_string sub;
+    ]
 
 let has_code sub =
   not (Recompile_llvm.is_external sub || Recompile_llvm.is_intrinsic sub)
@@ -123,8 +133,14 @@ let validate_candidate original optimized =
     (validate_destinations ~boundary:(external_boundary original) optimized)
     ~f:(fun () -> validate_opaque_exits original optimized)
 
-let optimize_subs ?target ?(opt = "opt") ?(passes = default_passes) subs =
-  let key = key ?target passes in
+let optimize_subs ?target ?(opt = "opt") ?(passes = default_passes) ?validate
+    ?validate_thread ?validate_split subs =
+  let key =
+    key ?target ~expression_validated:(Option.is_some validate)
+      ~thread_validated:(Option.is_some validate_thread)
+      ~split_validated:(Option.is_some validate_split)
+      passes
+  in
   let cached, fresh =
     List.partition_map subs ~f:(fun sub ->
         match Hashtbl.find cache (key sub) with
@@ -133,7 +149,9 @@ let optimize_subs ?target ?(opt = "opt") ?(passes = default_passes) subs =
   in
   let optimized =
     if List.is_empty fresh then []
-    else Recompile_optimize.optimize_subs ?target ~opt ~pipeline:passes fresh
+    else
+      Recompile_optimize.optimize_subs ?target ?validate ?validate_thread
+        ?validate_split ~opt ~pipeline:passes fresh
   in
   let optimized =
     List.map optimized ~f:(fun (sub, result) ->
@@ -148,8 +166,12 @@ let optimize_subs ?target ?(opt = "opt") ?(passes = default_passes) subs =
       Hashtbl.set cache ~key:(key sub) ~data:result);
   cached @ optimized
 
-let optimize ?target ?opt ?passes sub =
-  match optimize_subs ?target ?opt ?passes [ sub ] with
+let optimize ?target ?opt ?passes ?validate ?validate_thread ?validate_split sub
+    =
+  match
+    optimize_subs ?target ?opt ?passes ?validate ?validate_thread
+      ?validate_split [ sub ]
+  with
   | [ (_, result) ] -> result
   | _ -> Or_error.error_string "the sub wasn't optimized"
 
@@ -277,15 +299,23 @@ end
 (* the rounds of the optimization, until the number of the blocks
    doesn't change, as each round threads the dispatchers, that the
    previous one revealed *)
-let deflatten ?target ?opt ?(passes = deflatten_passes) ?(rounds = 4) sub =
+let deflatten ?target ?opt ?(passes = deflatten_passes) ?validate
+    ?validate_thread ?validate_split ?(rounds = 4) sub =
   let blocks sub = Term.length blk_t sub in
   let rec loop n sub =
     if n = 0 then Ok sub
     else
-      Result.bind (optimize ?target ?opt ~passes sub) ~f:(fun sub' ->
+      Result.bind
+        (optimize ?target ?opt ~passes ?validate ?validate_thread
+           ?validate_split sub) ~f:(fun sub' ->
           if blocks sub' = blocks sub then Ok sub' else loop (n - 1) sub')
   in
   loop rounds sub
+
+let validate_thread = Recompile_lean.validate_thread
+let thread_proof = Recompile_lean.thread_proof
+let validate_split = Recompile_lean.validate_split
+let split_proof = Recompile_lean.split_proof
 
 let optimize_region ?target ?opt ?passes (region : Region.t) =
   let sub = Sub.create ~name:"region" ~blks:region.blks () in

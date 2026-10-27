@@ -323,6 +323,7 @@ and validate_stmt ~checker before after =
     | _ -> Error "rewrite changes the BIL statement structure"
 
 let validate_with ~checker before after = validate_stmts ~checker before after
+let validate_exp = validate_exp ~checker:check
 let validate = validate_with ~checker:check
 let validate_application = validate_application_with ~checker:check
 

@@ -730,14 +730,46 @@ let inline_values blocks =
    the constants, and goes to that block, or, for the select, branches on
    its condition to the copies of its states, so that the dispatcher
    isn't reached, and the next optimization removes it. *)
-let dispatchers (blocks : Parse.block list) =
+type thread_witness = {
+  blocks : Parse.block list;
+  header : Parse.block;
+  predecessor : string;
+  edge_predecessor : string;
+  state : var;
+  value : word;
+  edge : Parse.block;
+  leaf : Parse.block;
+  env : word Var.Map.t;
+}
+
+type split_witness = {
+  left : thread_witness;
+  right : thread_witness;
+  condition : exp;
+  split : Parse.block;
+}
+
+let dispatchers ?(validate = fun _ _ -> true) ?validate_thread ?validate_split
+    (blocks : Parse.block list) =
   let open Parse in
   let fresh = ref 0 in
   let index = String.Table.create () in
   List.iter blocks ~f:(fun b -> Hashtbl.set index ~key:b.label ~data:b);
   let find = Hashtbl.find index in
+  let cache = ref [] in
   let constant e =
-    match Exp.fold_consts e with Bil.Int w -> Some w | _ -> None
+    match List.Assoc.find !cache e ~equal:Exp.equal with
+    | Some value -> value
+    | None ->
+        let value =
+          match Exp.fold_consts e with
+          | Bil.Int w ->
+              let folded = Bil.Int w in
+              if validate e folded then Some w else None
+          | _ -> None
+        in
+        cache := (e, value) :: !cache;
+        value
   in
   let substitute env e =
     Map.fold env ~init:e ~f:(fun ~key ~data e ->
@@ -861,19 +893,19 @@ let dispatchers (blocks : Parse.block list) =
       when not (String.equal leaf.label header.label) ->
         let edge = label header.label in
         let leaf = Option.value (find leaf.label) ~default:leaf in
-        Hashtbl.set index ~key:leaf.label
-          ~data:
-            {
-              leaf with
-              phis =
-                List.map leaf.phis ~f:(fun (x, ins) ->
-                    match
-                      List.find ins ~f:(fun (_, p) -> String.equal p last)
-                    with
-                    | Some (e, _) -> (x, (substitute env e, edge) :: ins)
-                    | None -> (x, ins));
-            };
-        added :=
+        let leaf =
+          {
+            leaf with
+            phis =
+              List.map leaf.phis ~f:(fun (x, ins) ->
+                  match
+                    List.find ins ~f:(fun (_, p) -> String.equal p last)
+                  with
+                  | Some (e, _) -> (x, (substitute env e, edge) :: ins)
+                  | None -> (x, ins));
+          }
+        in
+        let edge_block =
           {
             label = edge;
             phis =
@@ -886,8 +918,31 @@ let dispatchers (blocks : Parse.block list) =
               @ List.map defs ~f:(fun (x, c) -> Assign (x, Bil.int c));
             terminator = Br leaf.label;
           }
-          :: !added;
-        Some edge
+        in
+        let witness =
+          {
+            blocks =
+              List.map blocks ~f:(fun block ->
+                  Option.value (find block.label) ~default:block);
+            header;
+            predecessor = pred.label;
+            edge_predecessor = pred_label;
+            state = v;
+            value = c;
+            edge = edge_block;
+            leaf;
+            env;
+          }
+        in
+        let accepted =
+          Option.value_map validate_thread ~default:true ~f:(fun validate ->
+              validate witness)
+        in
+        if not accepted then None
+        else (
+          Hashtbl.set index ~key:leaf.label ~data:leaf;
+          added := edge_block :: !added;
+          Some (edge, witness))
     | _ -> None
   in
   List.iter blocks ~f:(fun header ->
@@ -943,25 +998,56 @@ let dispatchers (blocks : Parse.block list) =
               if List.exists edges ~f:goes_to_header then
                 match incoming pred v header with
                 | Some (Int c) ->
-                    Option.iter (thread header v pred.label pred c) ~f:redirect
+                    Option.iter (thread header v pred.label pred c)
+                      ~f:(fun (edge, _) -> redirect edge)
+                | Some (Ite _)
+                  when Option.is_some validate_thread
+                       && Option.is_none validate_split ->
+                    ()
                 | Some (Ite (cond, Int c1, Int c2)) -> (
-                    (* the select of the state is the branch *)
-                    let split = label header.label in
-                    match
-                      ( thread header v split pred c1,
-                        thread header v split pred c2 )
-                    with
-                    | Some e1, Some e2 ->
-                        added :=
-                          {
-                            label = split;
-                            phis = [];
-                            items = [];
-                            terminator = Cbr (cond, e1, e2);
-                          }
-                          :: !added;
-                        redirect split
-                    | _ -> ())
+                    let added_before = !added
+                    and index_before = Hashtbl.copy index in
+                    let restore () =
+                      Hashtbl.clear index;
+                      Hashtbl.iteri index_before ~f:(fun ~key ~data ->
+                          Hashtbl.set index ~key ~data);
+                      added := added_before
+                    in
+                    try
+                      let split = label header.label in
+                      match
+                        ( thread header v split pred c1,
+                          thread header v split pred c2 )
+                      with
+                      | Some (e1, left), Some (e2, right) ->
+                          let split_block =
+                            {
+                              label = split;
+                              phis = [];
+                              items = [];
+                              terminator = Cbr (cond, e1, e2);
+                            }
+                          in
+                          let witness =
+                            {
+                              left;
+                              right;
+                              condition = cond;
+                              split = split_block;
+                            }
+                          in
+                          let accepted =
+                            Option.value_map validate_split ~default:true
+                              ~f:(fun validate -> validate witness)
+                          in
+                          if accepted then (
+                            added := split_block :: !added;
+                            redirect split)
+                          else restore ()
+                      | _ -> restore ()
+                    with exn ->
+                      restore ();
+                      raise exn)
                 | _ -> ())));
   List.map blocks ~f:(fun b -> Option.value (find b.label) ~default:b)
   @ List.rev !added
@@ -1215,7 +1301,8 @@ let run_opt ~opt ~pipeline input =
 
 (* the subs, optimized by the [pipeline] of LLVM, in one run of [opt], or
    the errors, why they can't be *)
-let optimize_subs ?target ~opt ~pipeline subs =
+let optimize_subs ?target ?validate ?validate_thread ?validate_split ~opt
+    ~pipeline subs =
   let out = Buffer.create 65536 in
   let registers =
     List.fold subs ~init:String.Map.empty ~f:(fun m s ->
@@ -1261,7 +1348,8 @@ let optimize_subs ?target ~opt ~pipeline subs =
                   let mem = mem
                 end) in
                 match
-                  R.blocks lines |> inline_values |> dispatchers
+                  R.blocks lines |> inline_values
+                  |> dispatchers ?validate ?validate_thread ?validate_split
                   |> raise_sub ~mem f.sub f.exits
                 with
                 | raised -> Ok raised

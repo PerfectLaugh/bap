@@ -1,0 +1,7 @@
+name = "deflatten_proofs"
+version = "0.1.0"
+defaultTargets = ["DeflattenProofs"]
+moreLeanArgs = ["--trust=0", "-DwarningAsError=true"]
+
+[[lean_lib]]
+name = "DeflattenProofs"

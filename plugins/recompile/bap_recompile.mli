@@ -16,6 +16,7 @@
 open Core
 open Bap.Std
 open Bap_core_theory
+module Recompile_optimize = Recompile_optimize
 
 val default_passes : string
 (** the pipeline of the passes of LLVM, that {!optimize} runs by default, in the
@@ -30,6 +31,9 @@ val optimize :
   ?target:Theory.Target.t ->
   ?opt:string ->
   ?passes:string ->
+  ?validate:(exp -> exp -> bool) ->
+  ?validate_thread:(Recompile_optimize.thread_witness -> bool) ->
+  ?validate_split:(Recompile_optimize.split_witness -> bool) ->
   sub term ->
   sub term Or_error.t
 (** [optimize sub] is the [sub] optimized by the [passes] of LLVM, which [opt]
@@ -113,10 +117,25 @@ val optimize_region :
 (** [optimize_region region] optimizes the code of [region], as {!optimize}
     does, which has the same entry, and the same jumps, that leave it. *)
 
+val thread_proof : Recompile_optimize.thread_witness -> (string, string) result
+(** Generates the Lean artifact for a dispatcher-threading witness. *)
+
+val validate_thread : Recompile_optimize.thread_witness -> (unit, string) result
+(** Checks a complete dispatcher-threading witness with Lean. *)
+
+val split_proof : Recompile_optimize.split_witness -> (string, string) result
+(** Generates the Lean artifact for a symbolic dispatcher split. *)
+
+val validate_split : Recompile_optimize.split_witness -> (unit, string) result
+(** Checks a symbolic dispatcher split with Lean. *)
+
 val deflatten :
   ?target:Theory.Target.t ->
   ?opt:string ->
   ?passes:string ->
+  ?validate:(exp -> exp -> bool) ->
+  ?validate_thread:(Recompile_optimize.thread_witness -> bool) ->
+  ?validate_split:(Recompile_optimize.split_witness -> bool) ->
   ?rounds:int ->
   sub term ->
   sub term Or_error.t
@@ -135,7 +154,21 @@ val deflatten :
     its blocks have no effects, and the block jumps to the block, that the
     dispatcher leads to, with the variables, that the dispatcher defined on the
     way. Each round applies the destination and opaque-exit validation of
-    {!optimize} before caching or returning the result. *)
+    {!optimize} before caching or returning the result.
+
+    When [validate] is supplied, every original/folded expression pair that
+    guides dispatcher evaluation must be accepted by it. Rejected folds are not
+    used for threading, and validator exceptions become optimization errors.
+
+    When [validate_thread] is supplied, it is called with each complete proposed
+    edge before redirection. {!validate_thread} checks in a formal CFG semantics
+    that the original and threaded paths reach the same destination and produce
+    the same final definitions for arbitrary unrelated inputs. When
+    [validate_split] is supplied, symbolic select splits receive the same
+    destination and definition checks for every condition value; otherwise they
+    are left untransformed. Unchecked, expression-checked, thread-checked, and
+    split-checked results use different cache entries, so a less checked result
+    is never returned for a more checked request. *)
 
 val optimize_program :
   ?target:Theory.Target.t ->

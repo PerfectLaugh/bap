@@ -12,3 +12,17 @@
    BAP_RECOMPILE_TEST_OPT
    %{exe:controlled_opt.exe}
    (run %{test}))))
+
+(executable
+ (name run_lean_tests)
+ (modules run_lean_tests)
+ (libraries bap-recompile bap-bil.plugin core ounit2))
+
+(rule
+ (alias lean-tests)
+ (deps controlled_opt.exe)
+ (action
+  (setenv
+   BAP_RECOMPILE_TEST_OPT
+   %{exe:controlled_opt.exe}
+   (run %{exe:run_lean_tests.exe} -runner processes -shards 2))))

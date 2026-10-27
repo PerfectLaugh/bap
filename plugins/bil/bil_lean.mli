@@ -27,5 +27,6 @@ val validate_application :
   Bil.exp list ->
   (unit, string) result
 
+val validate_exp : Bil.exp -> Bil.exp -> (unit, string) result
 val validate : Bil.t -> Bil.t -> (unit, string) result
 val checked_fold_consts : Bil.t -> Bil.t
