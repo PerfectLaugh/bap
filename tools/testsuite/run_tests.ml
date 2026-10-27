@@ -1359,6 +1359,18 @@ let emu data =
                      engine blocks))
               [ false; true ])
           [ "unicorn"; "lifted" ]);
+    case "emu/eval-sub" (fun env ->
+        let out =
+          bap ~timeout:55. env
+            [
+              "script";
+              input "emu/eval-sub.ml";
+              path data "bin/aarch64-linux-gnu-echo";
+            ]
+        in
+        check env "eval-sub run failed" (out.status = Exited 0);
+        has env "eval-sub checks" out
+          "eval_sub internal CFG and restored state ok\n");
     (* the trace, that watches a range, records its accesses only, see
        the script *)
     case "emu/watch" (fun env ->

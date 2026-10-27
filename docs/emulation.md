@@ -219,6 +219,17 @@ match Emu.bir emu 0x400727L with
 | None -> print_endline "not an instruction"
 ```
 
+With `~executed_bytes:true`, current bytes remain primary, and a failed lift
+falls back to the executed history described below. The default keeps the
+current-byte-only behavior.
+
+`eval_sub emu sub` evaluates a synthetic subroutine with the real Primus
+interpreter and the emulator's current registers and memory. It follows direct
+control transfers to blocks inside `sub` and suppresses external exits, so a
+simplified CFG can be compared with a native run without executing its successor.
+Compare calls, side effects, final registers, and changed memory explicitly;
+`eval_sub` alone is not an equivalence proof.
+
 `read` and `bir` are of the bytes, that the memory has now. The lifted engine keeps each instruction, that it lifted to run it, with the bytes it was lifted from, until it lifts the instruction anew, when the bytes change before it runs again, so `insn_at` recovers the code, that ran, after the program overwrote or scrubbed it, e.g., the code it unpacked, and `lifted_bytes` reassembles a function from them, as far as its instructions were lifted:
 
 ```ocaml

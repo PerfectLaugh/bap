@@ -1506,7 +1506,7 @@ let hooked t ?encoding ~thumb ~block addr bytes =
 (* the bytes are read before the instruction is lifted in the machine,
    as the reading may copy the pages to Unicorn, and the instruction may
    end on an unmapped page *)
-let bir ?thumb t addr =
+let bir_current ?thumb t addr =
   let e = engine t in
   let thumb =
     match (e.arch, thumb) with
@@ -1633,6 +1633,50 @@ let executed_at ?thumb t pc =
                   { bytes = String.prefix code size; name; thumb; bir })))
 
 let insn_at ?thumb t pc = executed_at ?thumb t pc
+
+let bir ?(executed_bytes = false) ?thumb t addr =
+  let history () =
+    match executed_at ?thumb t addr with
+    | Some { bytes; bir; _ }
+      when (not (String.is_empty bytes)) && not (List.is_empty bir) ->
+        Some (String.length bytes, bir)
+    | _ -> None
+  in
+  match bir_current ?thumb t addr with
+  | Some (size, blks) when size > 0 && not (List.is_empty blks) ->
+      Some (size, blks)
+  | _ when executed_bytes -> history ()
+  | _ -> None
+  | exception _ when executed_bytes -> history ()
+
+let eval_sub t sub =
+  let blocks =
+    Base.Sequence.to_list (Term.enum blk_t sub)
+    |> List.map ~f:Term.tid |> Tid.Set.of_list
+  in
+  let body =
+    Term.map blk_t sub ~f:(fun blk ->
+        Term.filter jmp_t blk ~f:(fun jmp ->
+            match Jmp.dst jmp with
+            | Some dst -> (
+                match Jmp.resolve dst with
+                | First tid -> Set.mem blocks tid
+                | Second _ -> false)
+            | None -> false))
+  in
+  let module Evaluate (Machine : Primus.Machine.S) = struct
+    module Eval = Primus.Interpreter.Make (Machine)
+    open Machine.Syntax
+
+    let init () =
+      let context = Sub.create ~name:"eval-sub-context" () in
+      Eval.sub context >>= fun () ->
+      Eval.step
+        ~next:(Word.zero ((engine t).bytes * 8))
+        (Base.Sequence.to_list (Term.enum blk_t body))
+      >>| fun _ -> ()
+  end in
+  primus t (module Evaluate)
 
 let lift_with_history ?bytes ?(executed_bytes = false) ~thumb t pc =
   match lift ?bytes ~thumb t pc with

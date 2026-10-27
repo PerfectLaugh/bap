@@ -67,9 +67,14 @@ let run file work kind blocks =
     (match Emu.read restored code 4 with
     | _ -> false
     | exception Invalid_argument _ -> true);
-  if Poly.equal engine `Lifted then
+  if Poly.equal engine `Lifted then begin
     check "restored history lost the trampoline bytes"
       (String.equal (Emu.lifted_bytes restored code 4) ret);
+    check "executed-byte BIR was not recovered"
+      (match Emu.bir ~executed_bytes:true restored code with
+      | Some (4, [ _ ]) -> true
+      | _ -> false)
+  end;
   let trace =
     if Poly.equal engine `Lifted then
       Some (Emu.Trace.start ~size:16 ~blocks ~code_versions:16 restored)

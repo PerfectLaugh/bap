@@ -279,7 +279,12 @@ val write_direct : t -> int64 -> string -> unit
 
     The writable pages have no such problem, as their changes go to Primus. *)
 
-val bir : ?thumb:bool -> t -> int64 -> (int * blk term list) option
+val bir :
+  ?executed_bytes:bool ->
+  ?thumb:bool ->
+  t ->
+  int64 ->
+  (int * blk term list) option
 (** [bir emu addr] is the size and the BIR of the instruction at [addr], lifted
     on demand from the bytes, that the program has there now, e.g., after
     {!write}, as Primus lifts it, when it interprets the instruction, e.g., of
@@ -298,7 +303,21 @@ val bir : ?thumb:bool -> t -> int64 -> (int * blk term list) option
     emulator keeps for the hooks, and is cached there.
 
     Raises [Invalid_argument], if [addr] is not mapped, e.g., in a hook, if its
-    page is not in Unicorn yet. *)
+    page is not in Unicorn yet.
+
+    If [executed_bytes], failed decoding falls back to {!insn_at} history, while
+    current bytes remain primary. The default preserves the current-byte-only
+    behavior. *)
+
+val eval_sub : t -> sub term -> unit
+(** [eval_sub emu sub] evaluates the blocks of [sub] with the real Primus
+    interpreter, starting with the emulator's current registers and memory. It
+    follows direct control transfers to blocks inside [sub] and suppresses
+    control transfers to destinations outside it. The program must be paused;
+    the resulting registers and memory remain available for comparison.
+
+    This is an execution oracle, not by itself a proof of semantic equivalence:
+    callers should compare calls, side effects, and final state. *)
 
 type executed = {
   bytes : string;  (** the bytes of the instruction, from which it was lifted *)
