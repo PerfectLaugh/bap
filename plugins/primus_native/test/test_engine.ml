@@ -262,6 +262,161 @@ let state_jit () =
       | rs ->
           failwithf "state jit: expected one record, got %d" (List.length rs) ())
 
+let check_poly name expected got =
+  if not (Poly.equal expected got) then failwith (name ^ ": values differ")
+
+let snapshot_block_trace () =
+  let trace = Trace.create ~blocks:true ~accesses:3 ~read_values:true 3 in
+  Trace.Record.prepare trace true;
+  Trace.State.configure trace [ second; code ]
+    [ (reg "ECX", 1, 4); (reg "EDX", 0, 8) ]
+    [ (reg "EBX", 2, 4, 0x20L, 3); (reg "ECX", 0, 2, -4L, 8) ];
+  Trace.set_thread trace 7;
+  for i = 0 to 5 do
+    let pc = if i mod 2 = 0 then code else second in
+    Trace.Record.record trace pc (i + 1) (i mod 2 = 1);
+    Trace.Record.extend trace 2;
+    Trace.Record.access trace
+      (i mod 2 = 0)
+      (Int64.of_int (0x2000 + (8 * i)))
+      (i + 1)
+      (Int64.of_int (0x500 + i))
+      (Int64.of_int (0x600 + i))
+      pc;
+    Trace.Record.access trace false 0x3000L 4 0x11223344L 0L pc;
+    Trace.Record.capture trace pc
+      [| Int64.of_int (0x10 + i); Int64.of_int (0x20 + i) |]
+      [| Some (Int64.of_int (0x30 + i)); None |]
+  done;
+  Trace.Record.bound trace true true false 0L [| 0x4000L; 8L |] false;
+  Trace.Record.bound trace false true false 0L [| 0x5000L; 16L |] false;
+  Trace.set_thread trace 8;
+  Trace.Record.bound trace true false false 0L [||] true;
+  trace
+
+let snapshot_round_trip () =
+  let trace = snapshot_block_trace () in
+  let snapshot = Trace.Snapshot.export trace in
+  let restored = Trace.Snapshot.import snapshot in
+  check_poly "snapshot round trip" snapshot (Trace.Snapshot.export restored);
+  check "snapshot total count" 6L (Trace.count restored);
+  check "snapshot access total" 12L (Trace.accesses_count restored);
+  check_int "snapshot retained" 3 (Trace.retained restored);
+  check_int "snapshot retained accesses" 3 (Trace.retained_accesses restored);
+  check_int "snapshot retained captures" 3
+    (List.length (Trace.State.records restored));
+  check "snapshot bounds count" 2L snapshot.bounds_count;
+  check "snapshot ranges count" 2L snapshot.ranges_count;
+  check "snapshot sampling skip" 1L snapshot.skip;
+  check "snapshot current thread" 8L snapshot.thread;
+  check_poly "snapshot registers"
+    (Trace.State.registers trace)
+    (Trace.State.registers restored);
+  check_poly "snapshot fields" (Trace.State.fields trace)
+    (Trace.State.fields restored);
+  check "snapshot unknown bound" (-1L) (Trace.bounds restored).{6};
+  (match Trace.State.records restored with
+  | first :: _ ->
+      check "snapshot original capture index" 3L first.Trace.State.index;
+      check "snapshot original capture site" second first.site;
+      check_int "snapshot original capture thread" 7 first.thread
+  | [] -> failwith "snapshot lost captures");
+  let mutate trace pc value =
+    Trace.set_thread trace 9;
+    Trace.Record.record trace pc 4 true;
+    Trace.Record.extend trace 3;
+    Trace.Record.access trace true 0x6000L 8 value 0x77L pc;
+    Trace.Record.capture trace pc
+      [| value; Int64.neg value |]
+      [| Some value; Some 0x55L |];
+    Trace.Record.bound trace true true true pc [| 0x7000L; 2L |] false
+  in
+  mutate trace second 0x88L;
+  mutate restored second 0x88L;
+  check_poly "snapshot continued recording"
+    (Trace.Snapshot.export trace)
+    (Trace.Snapshot.export restored);
+  match Trace.State.records restored with
+  | [ _; _; last ] ->
+      check "snapshot continued capture index" 6L last.index;
+      check_int "snapshot continued capture thread" 9 last.thread
+  | records ->
+      failwithf "snapshot continuation kept %d captures" (List.length records)
+        ()
+
+let snapshot_sampling () =
+  let trace = Trace.create ~every:3 4 in
+  Trace.Record.record trace code 1 false;
+  Trace.Record.record trace second 1 false;
+  let snapshot = Trace.Snapshot.export trace in
+  check "snapshot sampled count" 0L snapshot.count;
+  check "snapshot sampled skip" 1L snapshot.skip;
+  let restored = Trace.Snapshot.import snapshot in
+  let record_both pc =
+    Trace.Record.record trace pc 1 false;
+    Trace.Record.record restored pc 1 false
+  in
+  record_both finish;
+  record_both code;
+  record_both second;
+  record_both finish;
+  check_poly "snapshot continued sampling"
+    (Trace.Snapshot.export trace)
+    (Trace.Snapshot.export restored);
+  check "snapshot sampled total" 2L (Trace.count restored)
+
+let snapshot_detached () =
+  let snapshot = Trace.Snapshot.export (snapshot_block_trace ()) in
+  let restored = Trace.Snapshot.import snapshot in
+  let expected = Trace.Snapshot.export restored in
+  snapshot.pcs.(0) <- 0xdeadL;
+  snapshot.tids.(0) <- 0xbeefL;
+  snapshot.capture_sites.(0) <- 0L;
+  snapshot.capture_regs.(0) <- (1, 0, 1);
+  let record = snapshot.captures.(0) in
+  record.regs.(0) <- 0L;
+  check_poly "snapshot detached import" expected
+    (Trace.Snapshot.export restored);
+  let exported = Trace.Snapshot.export restored in
+  exported.capture_fields.(0) <- (1, 0, 1, 0L, 1);
+  check_poly "snapshot detached export" expected
+    (Trace.Snapshot.export restored)
+
+let expect_bad_snapshot name snapshot =
+  match Trace.Snapshot.import snapshot with
+  | _ -> failwith (name ^ ": malformed snapshot was accepted")
+  | exception Invalid_argument message ->
+      if
+        not
+          (String.is_prefix message ~prefix:"Bap_native_trace.Snapshot.import")
+      then failwith (name ^ ": unclear error: " ^ message)
+
+let snapshot_malformed () =
+  let valid = Trace.Snapshot.export (snapshot_block_trace ()) in
+  expect_bad_snapshot "capacity" { valid with capacity = 3 };
+  expect_bad_snapshot "allocation limit"
+    { valid with capacity = 1 lsl 38; pcs = [||]; tids = [||] };
+  expect_bad_snapshot "pcs" { valid with pcs = [||] };
+  expect_bad_snapshot "sizes" { valid with sizes = [||] };
+  expect_bad_snapshot "modes" { valid with modes = [| 0 |] };
+  expect_bad_snapshot "invalid mode"
+    { valid with modes = Array.copy valid.modes |> Array.map ~f:(fun _ -> 2) };
+  expect_bad_snapshot "accesses" { valid with access_records = [||] };
+  expect_bad_snapshot "bounds" { valid with bounds = [||] };
+  expect_bad_snapshot "ranges" { valid with ranges = [||] };
+  expect_bad_snapshot "negative count" { valid with count = -1L };
+  expect_bad_snapshot "negative ranges" { valid with ranges_count = -1L };
+  expect_bad_snapshot "sampling skip" { valid with skip = 0L };
+  expect_bad_snapshot "capture count" { valid with captures_count = 0L };
+  expect_bad_snapshot "capture register"
+    { valid with capture_regs = [| (1, 0, 0); (2, 0, 4) |] };
+  expect_bad_snapshot "capture field"
+    { valid with capture_fields = [| (1, 0, 4, 0L, 9) |] };
+  let bad_record = Array.copy valid.captures in
+  bad_record.(0) <- { (bad_record.(0)) with regs = [||] };
+  expect_bad_snapshot "capture record shape"
+    { valid with captures = bad_record }
+
 let () =
   exercise "unicorn" (Bap_engine_unicorn.create Engine.X86 Engine.Mode.mode32);
   exercise "lifted"
@@ -272,6 +427,10 @@ let () =
   state "unicorn" (Bap_engine_unicorn.create Engine.X86 Engine.Mode.mode32);
   state "lifted" (Bap_engine_lifted.create config Engine.X86 Engine.Mode.mode32);
   state_jit ();
+  snapshot_round_trip ();
+  snapshot_sampling ();
+  snapshot_detached ();
+  snapshot_malformed ();
   let engine = Bap_engine_unicorn.create Engine.X86 Engine.Mode.mode32 in
   Exn.protect
     ~finally:(fun () -> Engine.close engine)

@@ -121,6 +121,45 @@ module State : sig
   (** the configured fields; for the lifted engine *)
 end
 
+module Snapshot : sig
+  type state = {
+    capacity : int;
+    every : int;
+    blocks : bool;
+    access_capacity : int;
+    read_values : bool;
+    count : int64;
+    skip : int64;
+    thread : int64;
+    pcs : int64 array;
+    tids : int64 array;
+    sizes : int32 array;
+    modes : int array;
+    accesses_count : int64;
+    access_records : int64 array;
+    bounds_count : int64;
+    ranges_count : int64;
+    bounds : int64 array;
+    ranges : int64 array;
+    capture_sites : int64 array;
+    capture_regs : State.reg array;
+    capture_fields : State.field array;
+    captures_count : int64;
+    captures : State.record array;
+  }
+  (** A detached copy of a native trace, including its ring cursors and capture
+      configuration. Ring arrays are in native slot order; captures are oldest
+      first. The record contains only ordinary OCaml arrays and values. *)
+
+  val export : t -> state
+  (** [export trace] copies all state needed to continue recording the trace. *)
+
+  val import : state -> t
+  (** [import state] constructs a detached native trace. Raises
+      [Invalid_argument] if the configuration, array shapes, counts, or cursors
+      are inconsistent or exceed the native allocation limits. *)
+end
+
 (** The records of the engines, that record the traces themselves, as the native
     hooks do, e.g., the lifted engine of [Bap_engine]. *)
 module Record : sig

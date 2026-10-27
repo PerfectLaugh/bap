@@ -79,8 +79,8 @@ static uint64_t ring_size(intnat n) {
 
 #define MAX_RING ((intnat)1 << 36)
 
-value bap_native_trace_create(value size, value every, value blocks,
-                              value accesses, value read_values) {
+static value create_trace(value size, value every, value blocks, value accesses,
+                          value read_values, int exact) {
     CAMLparam5(size, every, blocks, accesses, read_values);
     CAMLlocal1(r);
     struct bap_native_trace *t = calloc(1, sizeof(struct bap_native_trace));
@@ -88,11 +88,14 @@ value bap_native_trace_create(value size, value every, value blocks,
         caml_raise_out_of_memory();
     }
     t->read_values = Bool_val(read_values);
-    if (Long_val(size) > MAX_RING || Long_val(accesses) > MAX_RING) {
+    if ((!exact && (Long_val(size) > MAX_RING || Long_val(accesses) > MAX_RING)) ||
+        (exact && (Long_val(size) > 2 * (intnat)MAX_RING ||
+                   Long_val(accesses) > 2 * (intnat)MAX_RING))) {
         free(t);
         caml_invalid_argument("Bap_unicorn.Trace.create: too large");
     }
-    uint64_t n = ring_size(Long_val(size) < 1 ? 2 : Long_val(size) + 1);
+    uint64_t n = exact ? (uint64_t)Long_val(size)
+                       : ring_size(Long_val(size) < 1 ? 2 : Long_val(size) + 1);
     t->mask = n - 1;
     t->pcs = malloc(n * sizeof(uint64_t));
     t->tids = malloc(n * sizeof(uint64_t));
@@ -106,7 +109,8 @@ value bap_native_trace_create(value size, value every, value blocks,
     t->ranges = malloc(RANGES * sizeof(struct bap_native_trace_range));
     t->skip = t->every;
     if (Long_val(accesses) > 0) {
-        uint64_t m = ring_size(Long_val(accesses) + 1);
+        uint64_t m = exact ? (uint64_t)Long_val(accesses)
+                           : ring_size(Long_val(accesses) + 1);
         t->amask = m - 1;
         t->mem = malloc(m * sizeof(struct bap_native_trace_access));
     }
@@ -132,6 +136,16 @@ value bap_native_trace_create(value size, value every, value blocks,
                               n * sizeof(uint64_t));
     Bap_native_trace_val(r) = t;
     CAMLreturn(r);
+}
+
+value bap_native_trace_create(value size, value every, value blocks,
+                              value accesses, value read_values) {
+    return create_trace(size, every, blocks, accesses, read_values, 0);
+}
+
+value bap_native_trace_snapshot_create(value size, value every, value blocks,
+                                       value accesses, value read_values) {
+    return create_trace(size, every, blocks, accesses, read_values, 1);
 }
 
 static int compare_sites(const void *xp, const void *yp) {
@@ -808,6 +822,270 @@ value bap_native_trace_ranges(value tv) {
         }
     }
     CAMLreturn(r);
+}
+
+static int live_slot(uint64_t slot, uint64_t total, uint64_t mask,
+                     int keep_all) {
+    uint64_t capacity = keep_all ? mask + 1 : mask;
+    uint64_t k = total < capacity ? total : capacity;
+    return slot < total && total - slot <= k;
+}
+
+static value snapshot_u64_slots(const uint64_t *slots, uint64_t n,
+                                uint64_t total, uint64_t mask, int keep_all) {
+    CAMLparam0();
+    CAMLlocal2(result, x);
+    result = caml_alloc_tuple(n);
+    for (uint64_t i = 0; i < n; i++) {
+        x = caml_copy_int64(live_slot(i, total, mask, keep_all) ? slots[i] : 0);
+        Store_field(result, i, x);
+    }
+    CAMLreturn(result);
+}
+
+static value snapshot_u32_slots(const uint32_t *slots, uint64_t n,
+                                uint64_t total, uint64_t mask) {
+    CAMLparam0();
+    CAMLlocal2(result, x);
+    result = caml_alloc_tuple(n);
+    for (uint64_t i = 0; i < n; i++) {
+        x = caml_copy_int32(live_slot(i, total, mask, 0) ? slots[i] : 0);
+        Store_field(result, i, x);
+    }
+    CAMLreturn(result);
+}
+
+static value snapshot_modes_slots(const uint8_t *slots, uint64_t n,
+                                  uint64_t total, uint64_t mask) {
+    CAMLparam0();
+    CAMLlocal1(result);
+    result = caml_alloc_tuple(n);
+    for (uint64_t i = 0; i < n; i++) {
+        Store_field(result, i,
+                    Val_long(live_slot(i, total, mask, 0) ? slots[i] : 0));
+    }
+    CAMLreturn(result);
+}
+
+static value snapshot_accesses(struct bap_native_trace *t) {
+    CAMLparam0();
+    CAMLlocal2(result, x);
+    uint64_t n = t->mem == NULL ? 0 : t->amask + 1;
+    result = caml_alloc_tuple(7 * n);
+    for (uint64_t i = 0; i < n; i++) {
+        struct bap_native_trace_access empty = {0};
+        struct bap_native_trace_access *a =
+            live_slot(i, t->accesses, t->amask, 0) ? &t->mem[i] : &empty;
+        uint64_t values[7] = {
+            a->insn, a->addr, a->value,
+            (uint64_t)a->size | ((uint64_t)a->write << 32),
+            a->pc, a->old, a->tid};
+        for (int j = 0; j < 7; j++) {
+            x = caml_copy_int64(values[j]);
+            Store_field(result, 7 * i + j, x);
+        }
+    }
+    CAMLreturn(result);
+}
+
+static value snapshot_bounds(struct bap_native_trace *t) {
+    CAMLparam0();
+    CAMLlocal2(result, x);
+    result = caml_alloc_tuple(4 * BOUNDS);
+    for (uint64_t i = 0; i < BOUNDS; i++) {
+        int live = live_slot(i, t->marks, BOUNDS - 1, 1);
+        uint64_t values[4] = {live ? t->bounds[i] : 0, live ? t->at[i] : 0,
+                              live ? t->nranges[i] : 0,
+                              live ? t->bound_tids[i] : 0};
+        for (int j = 0; j < 4; j++) {
+            x = caml_copy_int64(values[j]);
+            Store_field(result, 4 * i + j, x);
+        }
+    }
+    CAMLreturn(result);
+}
+
+static value snapshot_ranges(struct bap_native_trace *t) {
+    CAMLparam0();
+    CAMLlocal2(result, x);
+    result = caml_alloc_tuple(2 * RANGES);
+    for (uint64_t i = 0; i < RANGES; i++) {
+        int live = live_slot(i, t->ranges_count, RANGES - 1, 1);
+        x = caml_copy_int64(live ? t->ranges[i].addr : 0);
+        Store_field(result, 2 * i, x);
+        x = caml_copy_int64(live ? t->ranges[i].size : 0);
+        Store_field(result, 2 * i + 1, x);
+    }
+    CAMLreturn(result);
+}
+
+static value snapshot_captures(struct bap_native_trace *t) {
+    CAMLparam0();
+    CAMLlocal5(result, record, regs, fields, x);
+    CAMLlocal1(cell);
+    uint64_t k = t->capture == NULL
+                     ? 0
+                     : (t->captures < t->mask ? t->captures : t->mask);
+    uint64_t first = t->captures - k;
+    result = caml_alloc_tuple(k);
+    for (uint64_t i = 0; i < k; i++) {
+        uint64_t at = (first + i) & t->mask;
+        struct bap_native_capture *c = &t->capture[at];
+        regs = caml_alloc_tuple(t->nregs);
+        for (size_t j = 0; j < t->nregs; j++) {
+            x = caml_copy_int64(t->capture_values[at * t->nregs + j]);
+            Store_field(regs, j, x);
+        }
+        fields = caml_alloc_tuple(t->nfields);
+        for (size_t j = 0; j < t->nfields; j++) {
+            size_t pos = at * t->nfields + j;
+            if (t->capture_present[pos]) {
+                x = caml_copy_int64(t->capture_field_values[pos]);
+                cell = caml_alloc_small(1, 0);
+                Store_field(cell, 0, x);
+                Store_field(fields, j, cell);
+            } else {
+                Store_field(fields, j, Val_int(0));
+            }
+        }
+        record = caml_alloc_tuple(5);
+        x = caml_copy_int64(c->site);
+        Store_field(record, 0, x);
+        x = caml_copy_int64(c->index);
+        Store_field(record, 1, x);
+        Store_field(record, 2, Val_long(c->tid));
+        Store_field(record, 3, regs);
+        Store_field(record, 4, fields);
+        Store_field(result, i, record);
+    }
+    CAMLreturn(result);
+}
+
+value bap_native_trace_snapshot_export(value tv) {
+    CAMLparam1(tv);
+    CAMLlocal2(result, x);
+    struct bap_native_trace *t = Bap_native_trace_val(tv);
+    uint64_t n = t->mask + 1;
+    result = caml_alloc_tuple(23);
+    Store_field(result, 0, Val_long(n));
+    Store_field(result, 1, Val_long(t->every));
+    Store_field(result, 2, Val_bool(t->sizes != NULL));
+    Store_field(result, 3, Val_long(t->mem == NULL ? 0 : t->amask + 1));
+    Store_field(result, 4, Val_bool(t->read_values));
+    x = caml_copy_int64(t->count);
+    Store_field(result, 5, x);
+    x = caml_copy_int64(t->skip);
+    Store_field(result, 6, x);
+    x = caml_copy_int64(t->tid);
+    Store_field(result, 7, x);
+    x = snapshot_u64_slots(t->pcs, n, t->count, t->mask, 0);
+    Store_field(result, 8, x);
+    x = snapshot_u64_slots(t->tids, n, t->count, t->mask, 0);
+    Store_field(result, 9, x);
+    x = t->sizes == NULL
+            ? caml_alloc_tuple(0)
+            : snapshot_u32_slots(t->sizes, n, t->count, t->mask);
+    Store_field(result, 10, x);
+    x = t->modes == NULL
+            ? caml_alloc_tuple(0)
+            : snapshot_modes_slots(t->modes, n, t->count, t->mask);
+    Store_field(result, 11, x);
+    x = caml_copy_int64(t->accesses);
+    Store_field(result, 12, x);
+    x = snapshot_accesses(t);
+    Store_field(result, 13, x);
+    x = caml_copy_int64(t->marks);
+    Store_field(result, 14, x);
+    x = caml_copy_int64(t->ranges_count);
+    Store_field(result, 15, x);
+    x = snapshot_bounds(t);
+    Store_field(result, 16, x);
+    x = snapshot_ranges(t);
+    Store_field(result, 17, x);
+    x = caml_alloc_tuple(t->nsites);
+    for (size_t i = 0; i < t->nsites; i++) {
+        value site = caml_copy_int64(t->capture_sites[i]);
+        Store_field(x, i, site);
+    }
+    Store_field(result, 18, x);
+    Store_field(result, 19,
+                t->capture_rooted ? t->capture_reg_desc : caml_alloc_tuple(0));
+    Store_field(result, 20,
+                t->capture_rooted ? t->capture_field_desc : caml_alloc_tuple(0));
+    x = caml_copy_int64(t->captures);
+    Store_field(result, 21, x);
+    x = snapshot_captures(t);
+    Store_field(result, 22, x);
+    CAMLreturn(result);
+}
+
+value bap_native_trace_snapshot_import(value tv, value state) {
+    struct bap_native_trace *t = Bap_native_trace_val(tv);
+    uint64_t n = t->mask + 1;
+    t->count = Int64_val(Field(state, 5));
+    t->skip = Int64_val(Field(state, 6));
+    t->tid = Int64_val(Field(state, 7));
+    for (uint64_t i = 0; i < n; i++) {
+        t->pcs[i] = Int64_val(Field(Field(state, 8), i));
+        t->tids[i] = Int64_val(Field(Field(state, 9), i));
+        if (t->sizes != NULL) {
+            t->sizes[i] = Int32_val(Field(Field(state, 10), i));
+        }
+        if (t->modes != NULL) {
+            t->modes[i] = Long_val(Field(Field(state, 11), i));
+        }
+    }
+    t->accesses = Int64_val(Field(state, 12));
+    for (uint64_t i = 0; t->mem != NULL && i <= t->amask; i++) {
+        value row = Field(state, 13);
+        struct bap_native_trace_access *a = &t->mem[i];
+        uint64_t size = Int64_val(Field(row, 7 * i + 3));
+        a->insn = Int64_val(Field(row, 7 * i));
+        a->addr = Int64_val(Field(row, 7 * i + 1));
+        a->value = Int64_val(Field(row, 7 * i + 2));
+        a->size = size;
+        a->write = size >> 32;
+        a->pc = Int64_val(Field(row, 7 * i + 4));
+        a->old = Int64_val(Field(row, 7 * i + 5));
+        a->tid = Int64_val(Field(row, 7 * i + 6));
+    }
+    t->marks = Int64_val(Field(state, 14));
+    t->ranges_count = Int64_val(Field(state, 15));
+    for (uint64_t i = 0; i < BOUNDS; i++) {
+        value bounds = Field(state, 16);
+        t->bounds[i] = Int64_val(Field(bounds, 4 * i));
+        t->at[i] = Int64_val(Field(bounds, 4 * i + 1));
+        t->nranges[i] = Int64_val(Field(bounds, 4 * i + 2));
+        t->bound_tids[i] = Int64_val(Field(bounds, 4 * i + 3));
+    }
+    for (uint64_t i = 0; i < RANGES; i++) {
+        value ranges = Field(state, 17);
+        t->ranges[i].addr = Int64_val(Field(ranges, 2 * i));
+        t->ranges[i].size = Int64_val(Field(ranges, 2 * i + 1));
+    }
+    t->captures = Int64_val(Field(state, 21));
+    value captures = Field(state, 22);
+    uint64_t k = Wosize_val(captures), first = t->captures - k;
+    for (uint64_t i = 0; i < k; i++) {
+        uint64_t at = (first + i) & t->mask;
+        value record = Field(captures, i);
+        t->capture[at].site = Int64_val(Field(record, 0));
+        t->capture[at].index = Int64_val(Field(record, 1));
+        t->capture[at].tid = Long_val(Field(record, 2));
+        value regs = Field(record, 3), fields = Field(record, 4);
+        for (size_t j = 0; j < t->nregs; j++) {
+            t->capture_values[at * t->nregs + j] =
+                Int64_val(Field(regs, j));
+        }
+        for (size_t j = 0; j < t->nfields; j++) {
+            size_t pos = at * t->nfields + j;
+            value field = Field(fields, j);
+            t->capture_present[pos] = !Is_long(field);
+            t->capture_field_values[pos] =
+                Is_long(field) ? 0 : Int64_val(Field(field, 0));
+        }
+    }
+    return Val_unit;
 }
 
 /* Compatibility with the former Unicorn-owned trace implementation. */
