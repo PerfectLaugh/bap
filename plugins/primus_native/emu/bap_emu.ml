@@ -1896,6 +1896,36 @@ module Trace = struct
         if Option.is_none j.error then j.error <- Some message);
     failwith message
 
+  let read_prefix emu addr wanted =
+    let rec loop addr remaining pieces =
+      if remaining = 0 then String.concat (List.rev pieces)
+      else
+        let page_remaining =
+          Int64.(to_int_exn (X.page_of addr + 0x1000L - addr))
+        in
+        let n = min remaining page_remaining in
+        match read emu addr n with
+        | data -> loop Int64.(addr + of_int n) (remaining - n) (data :: pieces)
+        | exception Invalid_argument _ -> (
+            match emu.session.active with
+            | Some e -> (
+                match Engine.mem_read e.engine addr n with
+                | data ->
+                    loop Int64.(addr + of_int n) (remaining - n) (data :: pieces)
+                | exception Engine.Error _ -> String.concat (List.rev pieces))
+            | None -> String.concat (List.rev pieces))
+    in
+    loop addr wanted []
+
+  let capture_bytes t pc wanted =
+    let lifted =
+      if Option.is_some t.emu.session.lifter then lifted_bytes t.emu pc wanted
+      else ""
+    in
+    let have = String.length lifted in
+    if have = wanted then lifted
+    else lifted ^ read_prefix t.emu Int64.(pc + of_int have) (wanted - have)
+
   let finish_pending_block t =
     match t.versions.pending_block with
     | None -> ()
@@ -1925,15 +1955,19 @@ module Trace = struct
                 journal_error t
                   "Bap_emu.Trace: the completed block version was evicted"
             | Some v ->
-                if size <= 0 || size > String.length v.bytes then
+                let bytes =
+                  if size > String.length v.bytes then capture_bytes t v.pc size
+                  else v.bytes
+                in
+                if size <= 0 || size > String.length bytes then
                   journal_error t
                     (sprintf
                        "Bap_emu.Trace: captured %d of %d bytes of block %Lx"
-                       (String.length v.bytes) size v.pc)
+                       (String.length bytes) size v.pc)
                 else
                   Array.unsafe_set t.versions.entries
                     (Int64.to_int_trunc index mod t.versions.capacity)
-                    (Some { v with bytes = String.prefix v.bytes size }))
+                    (Some { v with bytes = String.prefix bytes size }))
 
   let fill_missing_versions t =
     if t.versions.capacity > 0 && not (blocks t) then begin
@@ -2356,20 +2390,6 @@ module Trace = struct
           then flush_journal t
         end)
 
-  let read_prefix emu addr wanted =
-    let rec loop addr remaining pieces =
-      if remaining = 0 then String.concat (List.rev pieces)
-      else
-        let page_remaining =
-          Int64.(to_int_exn (X.page_of addr + 0x1000L - addr))
-        in
-        let n = min remaining page_remaining in
-        match read emu addr n with
-        | data -> loop Int64.(addr + of_int n) (remaining - n) (data :: pieces)
-        | exception Invalid_argument _ -> String.concat (List.rev pieces)
-    in
-    loop addr wanted []
-
   let add_version t index pc bytes thumb block =
     if t.versions.capacity > 0 then begin
       let slot = Int64.to_int_trunc index mod t.versions.capacity in
@@ -2391,15 +2411,7 @@ module Trace = struct
       let wanted =
         if block then max size (32 * Primus.Lift.max_size) else size
       in
-      let lifted =
-        if Option.is_some t.emu.session.lifter then lifted_bytes t.emu pc wanted
-        else ""
-      in
-      let have = String.length lifted in
-      let bytes =
-        if have = wanted then lifted
-        else lifted ^ read_prefix t.emu Int64.(pc + of_int have) (wanted - have)
-      in
+      let bytes = capture_bytes t pc wanted in
       if String.length bytes < size then
         journal_error t
           (sprintf "Bap_emu.Trace: cannot capture %d bytes at %Lx" size pc);
