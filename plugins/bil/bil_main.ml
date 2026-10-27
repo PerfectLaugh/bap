@@ -40,7 +40,7 @@ argument.
 # LEAN-CHECKED CONSTANT FOLDING
 
 The $(b,lean-checked-constant-folding) pass applies constant folding and
-uses Lean 4.34.0 to check equivalence of every changed pure bit-vector
+uses Lean 4.35.0 to check equivalence of every changed pure bit-vector
 expression. It requires $(b,elan) on $(b,PATH) or in $(b,~/.elan/bin).
 The optimized BIL is used only if all generated proofs pass. Unsupported
 changes, including changes to memory, let-bound, or undefined-value

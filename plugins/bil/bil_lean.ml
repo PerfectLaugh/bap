@@ -2,7 +2,7 @@ open Core
 open Bap.Std
 open Result.Monad_infix
 
-let toolchain = "4.34.0"
+let toolchain = "4.35.0"
 
 type context = { mutable names : string Var.Map.t; mutable vars : Var.t list }
 
