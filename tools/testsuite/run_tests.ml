@@ -1392,6 +1392,27 @@ let emu data =
             ( "keeps native writes as gaps",
               "native gap: instructions true, blocks true\n" );
           ]);
+    case "emu/control-slice" (fun env ->
+        let out =
+          bap ~timeout:55. env
+            [
+              "script";
+              input "emu/control-slice.ml";
+              path data "bin/x86_64-linux-gnu-control-slice";
+            ]
+        in
+        let engine =
+          if Sys.getenv_opt "BAP_TESTSUITE_EXECUTOR" = Some "lifted" then
+            "lifted"
+          else "unicorn"
+        in
+        sequence env out
+          [
+            ( "slices control in instruction traces",
+              engine ^ " blocks false: control slice ok\n" );
+            ( "slices control in block traces",
+              engine ^ " blocks true: control slice ok\n" );
+          ]);
     (* the slices of the odd cases of ARM, of arm-slice-weird.c, in A32 and
        in Thumb, whose modes the traces record, the conditional ones, the
        IT blocks, the loads and stores of multiple registers, by their

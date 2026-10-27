@@ -1595,7 +1595,7 @@ type executed = {
 
 (* the architecture of the engine, also after the program ended, when
    there is no engine *)
-let arch t =
+let arch (t : t) =
   match t.session.active with
   | Some e -> e.arch
   | None -> (
@@ -3185,6 +3185,39 @@ type empty_slice_reason =
   | Outside_trace_writes
   | Instruction_decode
 
+type control_dependency = {
+  index : int64;
+  site : int64;
+  target : int64;
+  taken : bool;
+  thread : int;
+}
+
+type control_unresolved_reason =
+  | Unknown_outcome
+  | Unknown_scope
+  | Window_scope
+  | Missing_producer
+  | Access_history
+  | Outside_writes
+  | Control_decode
+
+type control_unresolved = {
+  index : int64;
+  pc : int64;
+  thread : int;
+  reason : control_unresolved_reason;
+}
+
+type control_slice = {
+  steps : step list;
+  dependencies : control_dependency list;
+  live : location list;
+  gaps : int64 list;
+  unresolved : control_unresolved list;
+  complete : bool;
+}
+
 type slice = {
   steps : step list;
   live : location list;
@@ -3192,6 +3225,7 @@ type slice = {
   complete : bool;
   reason : empty_slice_reason option;
   decode_failures : decode_failure list;
+  control : control_slice option;
 }
 
 (* The registers, that an instruction writes, and, for the ones, that are
@@ -3229,7 +3263,12 @@ module Insn = struct
     size : int;
     defs : def list;
     conds : use list;
-    load_sizes : int list;  (** of the loads, in their order *)
+    guards : use list;
+    targets : use list;
+    call : bool;
+    return : bool;
+    load_sizes : int list;  (** of the data loads, in their order *)
+    control_load_sizes : int list;  (** also of the indirect-target loads *)
     store_sizes : int list;
     written : String.Set.t;
   }
@@ -3339,6 +3378,15 @@ module Insn = struct
       (use a, List.rev !stores)
     in
     let defs = ref [] and conds = ref [] in
+    let guards = ref [] and targets = ref [] and target_exps = ref [] in
+    let call = ref false and return = ref false in
+    let inside = List.map blks ~f:Term.tid |> Tid.Hash_set.of_list in
+    let leaves kind =
+      match kind with
+      | Goto (Direct tid) -> not (Hash_set.mem inside tid)
+      | Goto (Indirect _) | Call _ | Ret _ -> true
+      | Int _ -> false
+    in
     List.iteri blks ~f:(fun i b ->
         Term.enum def_t b
         |> Seq.iter ~f:(fun d ->
@@ -3346,9 +3394,32 @@ module Insn = struct
             defs := { lhs = Def.lhs d; must = must.(i); use; stores } :: !defs);
         Term.enum jmp_t b
         |> Seq.iter ~f:(fun j ->
-            match Jmp.cond j with
+            let kind = Jmp.kind j in
+            (match Jmp.cond j with
             | Int _ -> ()
-            | c -> conds := fst (analyze c) :: !conds));
+            | c ->
+                let use = fst (analyze c) in
+                conds := use :: !conds;
+                if leaves kind then guards := use :: !guards);
+            if leaves kind then (
+              let target =
+                match kind with
+                | Goto (Indirect e) | Ret (Indirect e) -> Some e
+                | Call c -> (
+                    match Call.target c with Indirect e -> Some e | _ -> None)
+                | _ -> None
+              in
+              Option.iter target ~f:(fun e -> target_exps := e :: !target_exps);
+              (match kind with
+              | Call _ when leaves kind -> call := true
+              | _ -> ());
+              match kind with
+              | Ret _ when leaves kind -> return := true
+              | _ -> ())));
+    let data_load_sizes = List.rev !load_sizes in
+    List.iter (List.rev !target_exps) ~f:(fun e ->
+        targets := fst (analyze e) :: !targets);
+    let control_load_sizes = List.rev !load_sizes in
     let defs = List.rev !defs in
     let written =
       List.filter_map defs ~f:(fun d ->
@@ -3359,7 +3430,12 @@ module Insn = struct
       size;
       defs;
       conds = List.rev !conds;
-      load_sizes = List.rev !load_sizes;
+      guards = List.rev !guards;
+      targets = List.rev !targets;
+      call = !call;
+      return = !return;
+      load_sizes = data_load_sizes;
+      control_load_sizes;
       store_sizes = List.rev !store_sizes;
       written;
     }
@@ -3370,7 +3446,7 @@ module Insn = struct
      may not happen, as the instruction, which [rewrites] the bytes, that
      it reads, may write them back, e.g., a compare and exchange, that
      fails, which the semantics doesn't have. *)
-  let inputs ~addresses insn ~needed ~stores ~stored ~rewrites =
+  let inputs ~addresses ?(seeds = []) insn ~needed ~stores ~stored ~rewrites =
     let live = Var.Hash_set.create () in
     let loads = Int.Hash_set.create () in
     let take (u : use) =
@@ -3386,6 +3462,7 @@ module Insn = struct
     let walk ~conds =
       Hash_set.clear live;
       Hash_set.clear loads;
+      List.iter seeds ~f:take;
       List.iter insn.defs ~f:(fun d ->
           if register d.lhs && Set.mem needed (name d.lhs) then
             Hash_set.add live d.lhs);
@@ -3433,6 +3510,101 @@ let ranges bytes =
       | _ -> Mem (a, 1) :: acc)
   |> List.rev
 
+module Control_cfg = struct
+  type t = {
+    blocks : (Tid.t * Tid.t) Int64.Table.t;
+    joins : Tid.t option Tid.Table.t;
+  }
+
+  let word w = Bitvec.to_int64 (Word.to_bitvec w)
+
+  let create proj =
+    let blocks = Int64.Table.create () and joins = Tid.Table.create () in
+    Term.enum sub_t (Project.program proj)
+    |> Seq.iter ~f:(fun sub ->
+        let sid = Term.tid sub in
+        Term.enum blk_t sub
+        |> Seq.iter ~f:(fun blk ->
+            let bid = Term.tid blk in
+            let at term =
+              Option.iter (Term.get_attr term address) ~f:(fun pc ->
+                  Hashtbl.set blocks ~key:(word pc) ~data:(sid, bid))
+            in
+            at blk;
+            Seq.iter (Term.enum def_t blk) ~f:at;
+            Seq.iter (Term.enum jmp_t blk) ~f:at);
+        let module G = Graphs.Tid in
+        let succ jmp =
+          match Jmp.kind jmp with
+          | Goto (Direct tid) | Int (_, tid) -> Some tid
+          | Call call -> (
+              match Call.return call with
+              | Some (Direct tid) -> Some tid
+              | _ -> None)
+          | _ -> None
+        in
+        let cfg =
+          Term.enum blk_t sub
+          |> Seq.fold ~init:G.empty ~f:(fun cfg blk ->
+              let cfg = G.Node.insert (Term.tid blk) cfg in
+              Term.enum jmp_t blk
+              |> Seq.fold ~init:cfg ~f:(fun cfg jmp ->
+                  match succ jmp with
+                  | Some dst ->
+                      G.Edge.insert
+                        (G.Edge.create (Term.tid blk) dst (Term.tid jmp))
+                        cfg
+                  | None -> cfg))
+        in
+        let cfg =
+          G.nodes cfg
+          |> Seq.fold ~init:cfg ~f:(fun cfg bid ->
+              let cfg =
+                if G.Node.degree ~dir:`In bid cfg = 0 then
+                  G.Edge.insert (G.Edge.create G.start bid G.start) cfg
+                else cfg
+              in
+              if G.Node.degree ~dir:`Out bid cfg = 0 then
+                G.Edge.insert (G.Edge.create bid G.exit G.exit) cfg
+              else cfg)
+        in
+        let dom =
+          Graphlib.Std.Graphlib.dominators (module G) ~rev:true cfg G.exit
+        in
+        Graphs.Tid.nodes cfg
+        |> Seq.iter ~f:(fun bid ->
+            if not Tid.(equal bid Graphs.Tid.start || equal bid Graphs.Tid.exit)
+            then
+              match Graphlib.Std.Tree.parent dom bid with
+              | Some join when Tid.equal join Graphs.Tid.exit ->
+                  Hashtbl.set joins ~key:bid ~data:None
+              | parent -> Hashtbl.set joins ~key:bid ~data:parent));
+    { blocks; joins }
+
+  let empty () = { blocks = Int64.Table.create (); joins = Tid.Table.create () }
+  let block t pc = Hashtbl.find t.blocks pc
+  let join t bid = Hashtbl.find t.joins bid |> Option.join
+end
+
+type control_occurrence = {
+  index : int64;
+  pc : int64;
+  thread : int;
+  source : int64 option;
+  insn : Insn.t option;
+  next : int option;
+  reads : Trace.access list;
+  writes : Trace.access list;
+  historical : bool;
+}
+
+type control_guard = {
+  at : int;
+  sub : Tid.t;
+  join : Tid.t option;
+  dependency : control_dependency;
+}
+
 (* The slice goes backward from the last recorded instruction, whose
    defs of the live locations make it a step, which kills them, and
    makes its inputs live, the registers, that compute them, and the
@@ -3442,8 +3614,8 @@ let ranges bytes =
    lifted once, from the bytes, that they have now, outside of the
    machine, as in the hooks, or from the executed history, if their
    current bytes don't decode and [executed_bytes] is set. *)
-let slice ?(addresses = false) ?(executed_bytes = false) ?window ?thread
-    (tr : Trace.t) criterion =
+let slice_impl ?(addresses = false) ?(executed_bytes = false) ?window ?thread
+    ?(control = false) ~control_project (tr : Trace.t) criterion =
   let t = tr.emu in
   let w = Trace.expanded_window ~executed_bytes ?thread ?last:window tr in
   let pcs, records, modes, tids = (w.pcs, w.records, w.modes, w.tids) in
@@ -3519,7 +3691,8 @@ let slice ?(addresses = false) ?(executed_bytes = false) ?window ?thread
   let gaps = ref [] in
   (* the live bytes, that were written outside, come from there, and
      aren't live before, unless the written ones are unknown *)
-  let gap record tid (regs, mem, ranges) =
+  let gap_with live_regs live_mem gaps ?(on_gap = Fn.ignore) record tid
+      (regs, mem, ranges) =
     let outside =
       match ranges with
       | Some ranges when mem ->
@@ -3534,13 +3707,16 @@ let slice ?(addresses = false) ?(executed_bytes = false) ?window ?thread
          &&
          if Option.is_some ranges then not (Hash_set.is_empty outside)
          else not (Hash_set.is_empty live_mem)
-    then gaps := record :: !gaps;
+    then (
+      gaps := record :: !gaps;
+      on_gap record);
     Hash_set.iter outside ~f:(Hash_set.remove live_mem)
   in
+  let gap = gap_with live_regs live_mem gaps in
   (* the values of the live locations may come from outside of the trace,
      before the instruction, that a hook wrote them before, or before the
      first instruction of a record, that follows a boundary *)
-  let crossed k =
+  let crossed_with gap k =
     let record = Bigarray.Array1.get records k in
     if not (Hashtbl.is_empty inside) then
       List.iter
@@ -3554,6 +3730,7 @@ let slice ?(addresses = false) ?(executed_bytes = false) ?window ?thread
         (Option.value (Hashtbl.find bounds record) ~default:[])
         ~f:(fun (tid, marks) -> gap record tid marks)
   in
+  let crossed = crossed_with gap in
   (* the bytes of the code, that the later writes changed, as they were
      at the instruction, which the walk is at, i.e., the bytes, that the
      earliest of the writes, that it saw, overwrote, or [None], if they
@@ -3805,6 +3982,377 @@ let slice ?(addresses = false) ?(executed_bytes = false) ?window ?thread
     else if not (List.is_empty live) then Some Unresolved_inputs
     else Some No_dataflow
   in
+  let control =
+    if not control then None
+    else
+      let decoded = Array.create ~len:n None in
+      let read_rows = Array.create ~len:n []
+      and write_rows = Array.create ~len:n [] in
+      let historical = Array.create ~len:n false in
+      Hashtbl.clear earlier;
+      Hashtbl.clear lifted;
+      let row = ref (rows_n - 1) in
+      for k = n - 1 downto 0 do
+        let reads = ref [] and writes = ref [] in
+        let rec collect () =
+          if !row >= 0 then
+            let a = Trace.access rows !row in
+            match order k a with
+            | `Later ->
+                overwrote a;
+                decr row;
+                collect ()
+            | `Ours ->
+                overwrote a;
+                (if a.write then writes else reads)
+                := a :: !(if a.write then writes else reads);
+                decr row;
+                collect ()
+            | `Earlier -> ()
+        in
+        collect ();
+        Array.unsafe_set read_rows k !reads;
+        Array.unsafe_set write_rows k !writes;
+        let index = Bigarray.Array1.get records k in
+        let pc = Bigarray.Array1.get pcs k in
+        let source = Array.unsafe_get w.sources k in
+        let lifted_insn = insn ~index ?block_pc:source ~thumb:(is_thumb k) pc in
+        Array.unsafe_set decoded k lifted_insn;
+        let recorded =
+          if executed_bytes then
+            Trace.recorded_bytes tr ~index ~thumb:(is_thumb k) ?block_pc:source
+              pc
+          else None
+        in
+        Option.iter lifted_insn ~f:(fun i ->
+            let current = code_bytes t pc in
+            let changed =
+              Option.exists recorded ~f:(fun old ->
+                  String.length old < i.size
+                  || String.length current < i.size
+                  || not
+                       (String.equal (String.prefix old i.size)
+                          (String.prefix current i.size)))
+              || List.exists (List.init i.size ~f:Fn.id) ~f:(fun off ->
+                  match Hashtbl.find earlier Int64.(pc + of_int off) with
+                  | Some None -> true
+                  | Some (Some c) ->
+                      String.length current <= off
+                      || not (Char.equal c (String.unsafe_get current off))
+                  | None -> false)
+            in
+            Array.unsafe_set historical k changed)
+      done;
+      let next = Array.create ~len:n None in
+      let last_by_tid = Int.Table.create () in
+      for k = n - 1 downto 0 do
+        let tid = Int64.to_int_exn (Bigarray.Array1.get tids k) in
+        Array.unsafe_set next k (Hashtbl.find last_by_tid tid);
+        Hashtbl.set last_by_tid ~key:tid ~data:k
+      done;
+      let occurrences =
+        Array.init n ~f:(fun k ->
+            {
+              index = Bigarray.Array1.get records k;
+              pc = Bigarray.Array1.get pcs k;
+              thread = Int64.to_int_exn (Bigarray.Array1.get tids k);
+              source = Array.unsafe_get w.sources k;
+              insn = Array.unsafe_get decoded k;
+              next = Array.unsafe_get next k;
+              reads = Array.unsafe_get read_rows k;
+              writes = Array.unsafe_get write_rows k;
+              historical = Array.unsafe_get historical k;
+            })
+      in
+      let roots =
+        Array.filter_map occurrences ~f:(fun occ ->
+            match (occ.insn, occ.next) with
+            | Some i, Some next
+              when i.call
+                   && Int64.(occurrences.(next).pc <> occ.pc + of_int i.size) ->
+                Some occurrences.(next).pc
+            | _ -> None)
+        |> Array.to_list
+        |> List.dedup_and_sort ~compare:Int64.compare
+      in
+      let cfg =
+        try Control_cfg.create (control_project roots)
+        with _ -> Control_cfg.empty ()
+      in
+      let bad_subs = Tid.Hash_set.create () in
+      Array.iter occurrences ~f:(fun occ ->
+          if occ.historical then
+            Option.iter (Control_cfg.block cfg occ.pc) ~f:(fun (sid, _) ->
+                Hash_set.add bad_subs sid));
+      let unresolved = ref [] and unresolved_keys = Hash_set.Poly.create () in
+      let add_unresolved occ reason =
+        let key = (occ.index, occ.pc, occ.thread, reason) in
+        if not (Hash_set.mem unresolved_keys key) then begin
+          Hash_set.add unresolved_keys key;
+          unresolved :=
+            { index = occ.index; pc = occ.pc; thread = occ.thread; reason }
+            :: !unresolved
+        end
+      in
+      let native = Engine.Trace.Snapshot.export tr.trace in
+      let precise =
+        native.every = 1 && Option.is_none tr.first && Option.is_none tr.last
+      in
+      let guards_at = Array.create ~len:n []
+      and occurrences_of_guards = Array.create ~len:n [] in
+      let frames_by_tid = Int.Table.create () in
+      Array.iteri occurrences ~f:(fun k occ ->
+          if Option.is_none occ.insn then add_unresolved occ Control_decode;
+          let frames =
+            Hashtbl.find_or_add frames_by_tid occ.thread ~default:(fun () ->
+                [ ref [] ])
+          in
+          let frame = List.hd_exn frames in
+          Option.iter (Control_cfg.block cfg occ.pc) ~f:(fun (sid, bid) ->
+              frame :=
+                List.filter !frame ~f:(fun guard ->
+                    not
+                      (Tid.equal guard.sub sid
+                      && Option.equal Tid.equal guard.join (Some bid))));
+          Array.unsafe_set guards_at k
+            (List.rev_map frames ~f:(fun guards -> !guards) |> List.concat);
+          Option.iter occ.insn ~f:(fun i ->
+              if not (List.is_empty i.guards) then
+                if not precise then add_unresolved occ Unknown_outcome
+                else
+                  match occ.next with
+                  | None -> add_unresolved occ Unknown_outcome
+                  | Some next -> (
+                      let next_occ = Array.unsafe_get occurrences next in
+                      let dependency =
+                        {
+                          index = occ.index;
+                          site = occ.pc;
+                          target = next_occ.pc;
+                          taken = Int64.(next_occ.pc <> occ.pc + of_int i.size);
+                          thread = occ.thread;
+                        }
+                      in
+                      match Control_cfg.block cfg occ.pc with
+                      | None -> add_unresolved occ Unknown_scope
+                      | Some (sid, bid) when Hash_set.mem bad_subs sid ->
+                          add_unresolved occ Unknown_scope
+                      | Some (sid, bid) ->
+                          let guard =
+                            {
+                              at = k;
+                              sub = sid;
+                              join = Control_cfg.join cfg bid;
+                              dependency;
+                            }
+                          in
+                          frame := !frame @ [ guard ];
+                          Array.unsafe_set occurrences_of_guards k [ guard ]));
+          Option.iter occ.insn ~f:(fun i ->
+              match occ.next with
+              | None -> ()
+              | Some next ->
+                  let next_occ = Array.unsafe_get occurrences next in
+                  let transfer =
+                    Int64.(next_occ.pc <> occ.pc + of_int i.size)
+                  in
+                  if i.return && transfer then begin
+                    if List.length frames = 1 then
+                      add_unresolved occ Window_scope;
+                    let frames =
+                      if List.length frames = 1 then frames
+                      else List.tl_exn frames
+                    in
+                    Hashtbl.set frames_by_tid ~key:occ.thread ~data:frames
+                  end
+                  else if i.call && transfer then
+                    Hashtbl.set frames_by_tid ~key:occ.thread
+                      ~data:(ref [] :: frames)));
+      let positions = Hashtbl.Poly.create () in
+      Array.iteri occurrences ~f:(fun k occ ->
+          Hashtbl.set positions ~key:(occ.index, occ.pc, occ.thread) ~data:k);
+      let data_positions =
+        List.filter_map steps ~f:(fun step ->
+            Hashtbl.find positions (step.index, step.pc, step.thread))
+      in
+      let selected = Int.Hash_set.create ()
+      and pending = Int.Hash_set.create () in
+      let select guard =
+        Hash_set.add selected guard.at;
+        Hash_set.add pending guard.at
+      in
+      List.iter data_positions ~f:(fun k -> List.iter guards_at.(k) ~f:select);
+      let control_live_regs = String.Hash_set.create () in
+      let control_live_mem = Int64.Hash_set.create () in
+      let control_gaps = ref [] and control_untracked = ref false in
+      let on_gap record =
+        Array.find occurrences ~f:(fun occ -> Int64.equal occ.index record)
+        |> Option.iter ~f:(fun occ -> add_unresolved occ Outside_writes)
+      in
+      let control_gap =
+        gap_with control_live_regs control_live_mem control_gaps ~on_gap
+      in
+      let crossed_control = crossed_with control_gap in
+      let control_steps = ref [] in
+      let rec control_loop k =
+        if
+          k < 0
+          || Int64.(Bigarray.Array1.get records k < covered)
+          || Hash_set.is_empty pending
+             && Hash_set.is_empty control_live_regs
+             && Hash_set.is_empty control_live_mem
+        then ()
+        else
+          let occ = Array.unsafe_get occurrences k in
+          let guard =
+            if Hash_set.mem pending k then begin
+              Hash_set.remove pending k;
+              Array.unsafe_get occurrences_of_guards k
+            end
+            else []
+          in
+          let seeds =
+            List.concat_map guard ~f:(fun g ->
+                match occ.insn with
+                | None -> []
+                | Some i ->
+                    i.guards @ if g.dependency.taken then i.targets else [])
+          in
+          Option.iter occ.insn ~f:(fun i ->
+              let needed =
+                Set.filter i.written ~f:(Hash_set.mem control_live_regs)
+              in
+              let write_bytes =
+                List.concat_map occ.writes ~f:(fun a ->
+                    List.init a.size ~f:(fun off -> Int64.(a.addr + of_int off)))
+              in
+              let read_bytes =
+                List.concat_map occ.reads ~f:(fun a ->
+                    List.init a.size ~f:(fun off -> Int64.(a.addr + of_int off)))
+              in
+              let stores =
+                List.exists write_bytes ~f:(Hash_set.mem control_live_mem)
+              in
+              if Set.is_empty needed && (not stores) && List.is_empty seeds then
+                crossed_control k
+              else
+                let matched accesses sizes =
+                  let accesses = Array.of_list accesses in
+                  Option.some_if
+                    (List.equal Int.equal sizes
+                       (Array.to_list accesses
+                       |> List.map ~f:(fun (a : Trace.access) -> a.size)))
+                    (fun id ->
+                      let a = Array.unsafe_get accesses id in
+                      List.init a.size ~f:(fun off ->
+                          Int64.(a.addr + of_int off)))
+                in
+                let loaded = matched occ.reads i.control_load_sizes in
+                let stored =
+                  Option.map (matched occ.writes i.store_sizes)
+                    ~f:(fun bytes id ->
+                      List.exists (bytes id) ~f:(Hash_set.mem control_live_mem))
+                in
+                let rewrites =
+                  List.exists write_bytes
+                    ~f:(List.mem read_bytes ~equal:Int64.equal)
+                in
+                let regs, loads, kept =
+                  Insn.inputs ~addresses ~seeds i ~needed ~stores ~stored
+                    ~rewrites
+                in
+                let producer = (not (Set.is_empty needed)) || stores in
+                if producer then begin
+                  Set.iter needed ~f:(Hash_set.remove control_live_regs);
+                  if not kept then
+                    List.iter write_bytes ~f:(Hash_set.remove control_live_mem);
+                  List.iter guards_at.(k) ~f:select;
+                  control_steps :=
+                    { index = occ.index; pc = occ.pc; thread = occ.thread }
+                    :: !control_steps
+                end;
+                List.iter regs ~f:(Hash_set.add control_live_regs);
+                if not (List.is_empty loads) then
+                  if tr.memory then
+                    match loaded with
+                    | Some bytes ->
+                        List.iter loads ~f:(fun id ->
+                            List.iter (bytes id)
+                              ~f:(Hash_set.add control_live_mem))
+                    | None ->
+                        List.iter read_bytes ~f:(Hash_set.add control_live_mem)
+                  else control_untracked := true;
+                crossed_control k);
+          if
+            Option.is_none occ.insn
+            && ((not (List.is_empty seeds))
+               || (not (Hash_set.is_empty control_live_regs))
+               || not (Hash_set.is_empty control_live_mem))
+          then add_unresolved occ Control_decode;
+          control_loop (k - 1)
+      in
+      control_loop (n - 1);
+      let control_live =
+        (Hash_set.to_list control_live_regs
+        |> List.sort ~compare:String.compare
+        |> List.map ~f:(fun r -> Reg r))
+        @ ranges control_live_mem
+      in
+      let anchors = data_positions @ Hash_set.to_list selected in
+      let anchor =
+        List.min_elt anchors ~compare:Int.compare
+        |> Option.map ~f:(Array.unsafe_get occurrences)
+        |> Option.first_some (if n = 0 then None else Some occurrences.(0))
+      in
+      if Int64.(first_record > 0L) then
+        Option.iter anchor ~f:(fun occ -> add_unresolved occ Window_scope);
+      if not precise then
+        Option.iter anchor ~f:(fun occ -> add_unresolved occ Unknown_outcome);
+      if not (List.is_empty control_live) then
+        Option.iter anchor ~f:(fun occ -> add_unresolved occ Missing_producer);
+      if
+        !control_untracked
+        || (not (Hash_set.is_empty pending))
+        || (Int64.(covered > first_record) && not (List.is_empty control_live))
+      then Option.iter anchor ~f:(fun occ -> add_unresolved occ Access_history);
+      let data_keys = Hash_set.Poly.create () in
+      List.iter steps ~f:(fun step ->
+          Hash_set.add data_keys (step.index, step.pc, step.thread));
+      let control_steps =
+        List.filter !control_steps ~f:(fun step ->
+            not (Hash_set.mem data_keys (step.index, step.pc, step.thread)))
+      in
+      let dependencies =
+        Hash_set.to_list selected
+        |> List.sort ~compare:Int.compare
+        |> List.map ~f:(fun k ->
+            let guard =
+              List.hd_exn (Array.unsafe_get occurrences_of_guards k)
+            in
+            guard.dependency)
+      in
+      let unresolved =
+        List.sort !unresolved ~compare:(fun a b ->
+            match Int64.compare a.index b.index with
+            | 0 -> (
+                match Int64.compare a.pc b.pc with
+                | 0 -> Poly.compare a.reason b.reason
+                | c -> c)
+            | c -> c)
+      in
+      Some
+        {
+          steps = control_steps;
+          dependencies;
+          live = control_live;
+          gaps = List.rev !control_gaps;
+          unresolved;
+          complete =
+            List.is_empty control_live
+            && List.is_empty !control_gaps
+            && List.is_empty unresolved && not !control_untracked;
+        }
+  in
   {
     steps;
     live;
@@ -3812,6 +4360,7 @@ let slice ?(addresses = false) ?(executed_bytes = false) ?window ?thread
     complete = List.is_empty live && List.is_empty gaps && not !untracked;
     reason;
     decode_failures;
+    control;
   }
 
 let observe ~deferred t f = if deferred then defer t (fun t -> f t) else f t
@@ -3838,7 +4387,7 @@ let on_read ?first ?last ?(deferred = false) t f =
    [first] to [last], go to the hook in the pieces of at most 8 bytes,
    whose values are of the endianness of the target, as Unicorn tells
    them *)
-let stored t ?first ?last f addr data =
+let stored (t : t) ?first ?last f addr data =
   let module Theory = Bap_core_theory.Theory in
   let big = Theory.Endianness.(equal eb) (Theory.Target.endianness t.target) in
   let inside x =
@@ -4179,7 +4728,7 @@ let selected ?regions (r : region) =
   r.executable
   && Option.value_map regions ~default:true ~f:(fun select -> select r)
 
-let digest ?regions t ~symbols ~roots dumped =
+let digest ?regions (t : t) ~symbols ~roots dumped =
   let module Theory = Bap_core_theory.Theory in
   let buf = Buffer.create 4096 in
   Buffer.add_string buf (Theory.Target.to_string t.target);
@@ -4359,7 +4908,7 @@ let load_project file =
       | Error err ->
           failwithf "Bap_emu.load_project: %s" (Error.to_string_hum err) ())
 
-let project ?regions ?(symbols = []) ?(roots = []) ?cache t =
+let project ?regions ?(symbols = []) ?(roots = []) ?cache (t : t) =
   if not (paused t) then not_paused ~fn:"project" t;
   let target = t.target in
   let module Theory = Bap_core_theory.Theory in
@@ -4417,6 +4966,12 @@ let project ?regions ?(symbols = []) ?(roots = []) ?cache t =
           let proj = build () in
           save_project proj file;
           proj)
+
+let slice ?addresses ?executed_bytes ?window ?thread ?(control = false)
+    (tr : Trace.t) criterion =
+  slice_impl ?addresses ?executed_bytes ?window ?thread ~control
+    ~control_project:(fun roots -> project ~roots tr.emu)
+    tr criterion
 
 type import = { slot : int64; name : string; value : int64 option }
 
@@ -4894,7 +5449,7 @@ module Taint = struct
 
   (* the place is checked, before the component runs, as its exceptions
      end the program *)
-  let checked t place =
+  let checked (t : t) place =
     match place with
     | Reg name -> ignore (var t.target name : Var.t)
     | Mem (_, len) when len < 0 ->
@@ -5289,7 +5844,7 @@ let where out t =
   | Failed msg -> say "failed: %s" msg
 
 (* the registers of the target, without the aliases, e.g., EAX of RAX *)
-let main_registers t =
+let main_registers (t : t) =
   let module Theory = Bap_core_theory.Theory in
   let names =
     Theory.Target.regs ~exclude:[ Theory.Role.Register.alias ] t.target

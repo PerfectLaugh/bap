@@ -809,6 +809,45 @@ type empty_slice_reason =
   | Instruction_decode
       (** an instruction or block expansion couldn't be decoded *)
 
+type control_dependency = {
+  index : int64;  (** the global index of the branch's trace record *)
+  site : int64;  (** the conditional branch or call site *)
+  target : int64;  (** the actual next same-TID instruction *)
+  taken : bool;  (** whether control didn't fall through *)
+  thread : int;  (** the effective TID, which took the branch *)
+}
+
+type control_unresolved_reason =
+  | Unknown_outcome
+      (** sampling, a code range, or no next same-TID instruction *)
+  | Unknown_scope  (** no reliable historical post-dominator scope *)
+  | Window_scope  (** the window begins inside a potentially guarded scope *)
+  | Missing_producer  (** a condition input has no producer in the window *)
+  | Access_history
+      (** the access ring or a missing access trace limits the walk *)
+  | Outside_writes  (** an outside write crossed a control demand *)
+  | Control_decode
+      (** an instruction needed for control analysis didn't decode *)
+
+type control_unresolved = {
+  index : int64;
+  pc : int64;
+  thread : int;
+  reason : control_unresolved_reason;
+}
+
+type control_slice = {
+  steps : step list;  (** control-only data producers, the oldest first *)
+  dependencies : control_dependency list;
+      (** selected guards, the oldest first *)
+  live : location list;  (** condition inputs from before the window *)
+  gaps : int64 list;
+      (** outside writes crossed by control demands, latest first *)
+  unresolved : control_unresolved list;  (** explicit limits, in window order *)
+  complete : bool;
+      (** no live inputs, gaps, untracked accesses, or unresolved limits *)
+}
+
 type slice = {
   steps : step list;  (** the oldest first *)
   live : location list;
@@ -829,6 +868,8 @@ type slice = {
           independent information *)
   decode_failures : decode_failure list;
       (** the instructions, that couldn't be decoded, in window order *)
+  control : control_slice option;
+      (** the separate control closure, only with [~control:true] *)
 }
 
 val slice :
@@ -836,6 +877,7 @@ val slice :
   ?executed_bytes:bool ->
   ?window:int ->
   ?thread:int ->
+  ?control:bool ->
   Trace.t ->
   location list ->
   slice
@@ -872,7 +914,28 @@ val slice :
     restore. Without one, a failed lift falls back to the executed-instruction
     history of the lifted engine, see {!insn_at}. That history is unavailable
     with Unicorn and is the last lifted instruction at each address and mode,
-    rather than a version for every execution. *)
+    rather than a version for every execution.
+
+    With [control], [control] is present and contains a separate backward
+    closure over the guards of the selected data steps. Its [dependencies] are
+    the exact dynamic branch occurrences, with actual outcomes from the next
+    instruction of the same effective TID. Its [steps] are control-only data
+    producers of the guard conditions, and of taken indirect targets; newly
+    selected producers add their own guards until the fixed point. Branches that
+    aren't needed aren't expanded, and conditions of conditional definitions
+    stay in the data slice. The [live], [gaps], [unresolved], and [complete] of
+    this result are independent of the data result.
+
+    Guard scopes use static post-dominators of each relevant subroutine, not a
+    presumed fallthrough join. Caller guards remain active in nested callees and
+    callee guards are discarded at actual returns. This is a finite-path,
+    observed-context approximation: it explains this retained execution, not all
+    paths or unobserved calling contexts. Sampled and code-ranged traces,
+    missing next same-TID outcomes, mid-scope windows, evicted accesses or
+    producers, outside writes, decode failures, and unavailable or historically
+    mismatched CFG scopes are explicit in [unresolved] and make control
+    incomplete. In particular, current bytes are never presented as a historical
+    CFG for changed code. *)
 
 val primus : t -> Bap_primus.Std.Primus.Machine.component -> unit
 (** [primus emu component] runs the [init] of the [component] in the Primus
