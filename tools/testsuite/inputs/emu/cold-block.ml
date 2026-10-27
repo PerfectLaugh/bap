@@ -59,15 +59,15 @@ let bytes proj addr length =
       else None)
   |> Option.value_exn
 
-let parity ?encoding ?(budget = 64) ?(count = 8) ?(minimum = 1) label proj addr
-    code =
+let parity ?encoding ?(budget = 64) ?(count = 8) ?(minimum = 1) ?(direct = false)
+    label proj addr code =
   let initial = Toplevel.current () in
   evaluations := 0;
   let grouped =
     Exn.protect
       ~finally:(fun () -> Toplevel.set initial)
       ~f:(fun () ->
-        eval (Primus.Lift.block ?encoding ~budget ~count proj addr code))
+        eval (Primus.Lift.block ?encoding ~direct ~budget ~count proj addr code))
   in
   if !evaluations <> 1 then
     failwithf "%s: wrong block evaluation count" label ();
@@ -221,25 +221,39 @@ let running file =
 
 let () =
   match Bap_script.args () with
-  | [ x86; thumb; aarch64; powerpc ] ->
+  | [ x86; arm; thumb; aarch64; powerpc ] ->
       let x86 = Bap_script.project x86
+      and arm = Bap_script.project arm
       and thumb = Bap_script.project thumb
       and aarch64 = Bap_script.project aarch64
       and powerpc = Bap_script.project powerpc in
       parity ~minimum:4 "x86 straight-line" x86 0x400602L
+        (bytes x86 0x400602L 64);
+      parity ~direct:true ~minimum:4 "direct x86 straight-line" x86 0x400602L
         (bytes x86 0x400602L 64);
       parity ~count:16 ~minimum:2 "x86 call" x86 0x40061dL
         (bytes x86 0x40061dL 64);
       parity ~budget:5 ~minimum:2 "x86 byte budget" x86 0x400602L
         (bytes x86 0x400602L 64);
       parity "x86 store boundary" x86 0x40076bL (bytes x86 0x40076bL 64);
+      List.iter (List.range 0 11) ~f:(fun i ->
+          let addr = Int64.(0x8438L + (4L * of_int i)) in
+          parity ~direct:true
+            (sprintf "direct ARM %Lx" addr)
+            arm addr (bytes arm addr 64));
       let encoding = Primus.Interworking.encoding ~thumb:true in
       parity ?encoding ~minimum:3 "Thumb IT" thumb 0x2028aL
         (bytes thumb 0x2028aL 64);
+      parity ?encoding ~direct:true ~minimum:3 "direct Thumb IT" thumb 0x2028aL
+        (bytes thumb 0x2028aL 64);
       parity ~minimum:2 "AArch64 little endian" aarch64 0x960L
         (bytes aarch64 0x960L 64);
+      parity ~direct:true ~minimum:2 "direct AArch64 little endian" aarch64
+        0x960L (bytes aarch64 0x960L 64);
       parity ~minimum:2 "PowerPC big endian" powerpc 0x10000420L
         (bytes powerpc 0x10000420L 64);
+      parity ~direct:true ~minimum:2 "direct PowerPC big endian" powerpc
+        0x10000420L (bytes powerpc 0x10000420L 64);
       undefined aarch64;
-      running (List.nth_exn (Bap_script.args ()) 2)
-  | _ -> failwith "expected X86 THUMB AARCH64 POWERPC"
+      running (List.nth_exn (Bap_script.args ()) 3)
+  | _ -> failwith "expected X86 ARM THUMB AARCH64 POWERPC"

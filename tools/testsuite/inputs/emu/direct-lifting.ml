@@ -81,6 +81,25 @@ let () =
         List.iter bir' ~f:(Printf.printf "direct BIR:\n%s\n%!")
       end;
       check "entry BIR differs" (List.equal String.equal bir bir');
+      if not (Poly.equal insns insns') then begin
+        let rec difference i =
+          if i >= Bigarray.Array1.dim insns || i >= Bigarray.Array1.dim insns'
+          then i
+          else if Int64.equal insns.{i} insns'.{i} then difference (i + 1)
+          else i
+        in
+        let i = difference 0 in
+        let at trace i =
+          if i < Bigarray.Array1.dim trace then Printf.sprintf "%Lx" trace.{i}
+          else "end"
+        in
+        Printf.printf "first trace difference at %d: %s vs %s\n%!" i
+          (at insns i) (at insns' i);
+        List.iter
+          (List.range (Int.max 0 (i - 4)) (i + 1))
+          ~f:(fun j ->
+            Printf.printf "trace %d: %s vs %s\n%!" j (at insns j) (at insns' j))
+      end;
       check "instruction trace differs" (Poly.equal insns insns');
       let key (a : Emu.Trace.access) =
         (a.pc, a.addr, a.size, a.write, a.value, a.read_value)

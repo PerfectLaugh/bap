@@ -219,11 +219,35 @@ let decoded ?encoding proj file addr code =
           KB.collect Theory.Semantics.slot label
           >>= ir ~width ~addr ~size coding)
 
-(* Decode through the disassembler and target lifter without publishing a fresh
-   program label and recomputing its semantics through Ogre. Label resolution in
-   [ir] still uses the current knowledge, so external jumps keep their ordinary
-   representation. *)
-let decoded_direct ?encoding proj addr code =
+let decoded_semantics file arch coding addr mem basic =
+  let open KB.Syntax in
+  unit_of_file file >>= fun unit ->
+  (* labels that the lifters create, e.g., to unalias registers, belong to
+     the same unit as in the regular semantics provider *)
+  KB.promising Theory.Label.unit ~promise:(fun _ -> KB.return (Some unit))
+  @@ fun () ->
+  KB.Object.create Theory.Program.cls >>= fun label ->
+  KB.sequence
+    [
+      KB.provide Theory.Label.addr label (Some (Word.to_bitvec addr));
+      KB.provide Theory.Label.unit label (Some unit);
+      KB.provide Theory.Label.encoding label coding;
+      KB.provide Memory.slot label (Some mem);
+      KB.provide Dis.Insn.slot label (Some basic);
+    ]
+  >>= fun () ->
+  match arch with
+  | #Arch.arm | #Arch.armeb | #Arch.thumb | #Arch.thumbeb ->
+      KB.collect Theory.Semantics.slot label
+  | _ ->
+      Bap_primus_lisp_semantics.of_basic unit label basic >>= fun insn ->
+      if is_undefined insn then KB.collect Theory.Semantics.slot label
+      else KB.return insn
+
+(* Decode through the disassembler and invoke the target, Primus Lisp, or
+   native semantics directly. Label resolution in [ir] still uses the current
+   knowledge, so external jumps keep their ordinary representation. *)
+let decoded_direct ?encoding ?file proj addr code =
   let open KB.Syntax in
   let target = Project.target proj in
   let width = width_of proj in
@@ -254,7 +278,14 @@ let decoded_direct ?encoding proj addr code =
           | Some (size, mem, coding, basic) -> (
               let module Target = (val target_of_arch (Project.arch proj)) in
               match Target.lift mem basic with
-              | Error _ | Ok [] -> KB.return None
+              | Error _ -> KB.return None
+              | Ok [] -> (
+                  match file with
+                  | None -> KB.return None
+                  | Some file ->
+                      decoded_semantics file (Project.arch proj) coding addr mem
+                        basic
+                      >>= ir ~width ~addr ~size coding)
               | Ok bil ->
                   let insn = Insn.of_basic ~bil basic in
                   ir ~width ~addr ~size coding insn)))
@@ -333,18 +364,16 @@ let named ?encoding proj addr code =
 
 let direct_lift ?encoding proj addr code =
   let open KB.Syntax in
-  if Theory.Target.matches (Project.target proj) "x86" then
-    lift ?encoding proj addr code
-  else
-    disassembled_insn ?encoding proj addr code >>= function
-    | Some _ as insn -> KB.return insn
-    | None -> (
-        decoded_direct ?encoding proj addr code >>= function
-        | Some _ as insn -> KB.return insn
-        | None -> (
-            match Project.get proj filename with
-            | None -> KB.return None
-            | Some file -> decoded ?encoding proj file addr code))
+  let file = Project.get proj filename in
+  disassembled_insn ?encoding proj addr code >>= function
+  | Some _ as insn -> KB.return insn
+  | None -> (
+      decoded_direct ?encoding ?file proj addr code >>= function
+      | Some _ as insn -> KB.return insn
+      | None -> (
+          match file with
+          | None -> KB.return None
+          | Some file -> decoded ?encoding proj file addr code))
 
 let direct ?encoding proj addr code =
   let open KB.Syntax in

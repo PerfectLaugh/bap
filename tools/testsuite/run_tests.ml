@@ -891,6 +891,7 @@ let emu data =
               "script";
               input "emu/cold-block.ml";
               path data "bin/x86_64-linux-gnu-echo";
+              path data "bin/arm-linux-gnueabi-echo";
               path data "bin/arm-linux-gnueabihf-thumb-crc";
               path data "bin/aarch64-linux-gnu-echo";
               path data "bin/powerpc32-linux-gnu-echo";
@@ -901,6 +902,9 @@ let emu data =
             ( "batches straight-line x86",
               "parity x86 straight-line: [4-8] instructions, 1 vs [4-8] \
                evaluations\n" );
+            ( "directly lifts straight-line x86",
+              "parity direct x86 straight-line: [4-8] instructions, 1 vs [4-8] \
+               evaluations\n" );
             ( "stops at a call",
               "parity x86 call: 2 instructions, 1 vs 2 evaluations\n" );
             ( "bounds the bytes",
@@ -908,14 +912,25 @@ let emu data =
             ( "stops at a store",
               "parity x86 store boundary: 1 instructions, 1 vs 1 evaluations\n"
             );
+            ( "directly lifts the ARM entry sequence",
+              "parity direct ARM 8460: 1 instructions, 1 vs 1 evaluations\n" );
             ( "keeps the Thumb decoder state",
               "parity Thumb IT: [3-8] instructions, 1 vs [3-8] evaluations\n" );
+            ( "directly keeps the Thumb decoder state",
+              "parity direct Thumb IT: [3-8] instructions, 1 vs [3-8] \
+               evaluations\n" );
             ( "lifts little-endian AArch64",
               "parity AArch64 little endian: [2-8] instructions, 1 vs [2-8] \
                evaluations\n" );
+            ( "directly lifts little-endian AArch64",
+              "parity direct AArch64 little endian: [2-8] instructions, 1 vs \
+               [2-8] evaluations\n" );
             ( "lifts big-endian PowerPC",
               "parity PowerPC big endian: [2-8] instructions, 1 vs [2-8] \
                evaluations\n" );
+            ( "directly lifts big-endian PowerPC",
+              "parity direct PowerPC big endian: [2-8] instructions, 1 vs \
+               [2-8] evaluations\n" );
             ( "preserves undefined instructions",
               "undefined instruction: no BIR in named or block\n" );
             ( "keeps the native trajectory",
@@ -3583,6 +3598,7 @@ let direct_engines data =
             "direct lifting agrees with default lifting\n"))
     [
       "x86_64-linux-gnu";
+      "x86-linux-gnu";
       "aarch64-linux-gnu";
       "arm-linux-gnueabi";
       "mips-linux-gnu";

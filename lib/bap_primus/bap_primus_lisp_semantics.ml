@@ -816,8 +816,80 @@ let typed_program unit =
   let open KB.Syntax in
   obtain_typed_program unit >>| fun { prog } -> prog
 
+let name_of_basic insn =
+  KB.Name.create
+    ~package:(Disasm_expert.Basic.Insn.encoding insn)
+    (Disasm_expert.Basic.Insn.name insn)
+
+(* a backend may specify the width of a register that is not known to the
+   target, using the typed variable notation, e.g., ZMM0:512 *)
+let parse_reg_name name =
+  match String.rsplit2 name ~on:':' with
+  | Some (base, width) when not (String.is_empty base) -> (
+      match Int.of_string_opt width with
+      | Some w when w > 0 -> (base, Some w)
+      | _ -> (name, None))
+  | _ -> (name, None)
+
+let args_of_ops (module CT : Theory.Core) target insn =
+  let bits = Theory.Target.bits target in
+  let word = Theory.Bitv.define bits in
+  let bitv x = Bitvec.(int64 x mod modulus bits) in
+  Disasm_expert.Basic.Insn.ops insn
+  |> Array.to_list
+  |> List.map ~f:(function
+    | Op.Fmm _ -> CT.unk word >>| Theory.Value.forget
+    | Op.Imm x ->
+        let x = bitv (Imm.to_int64 x) in
+        CT.int word x >>| Theory.Value.forget >>| fun v ->
+        KB.Value.put static_slot v (Some x)
+    | Op.Reg v ->
+        let name, width = parse_reg_name (Reg.name v) in
+        let reg =
+          match Theory.Target.var target name with
+          | Some v -> v
+          | None ->
+              let sort =
+                Option.value_map width ~default:word ~f:Theory.Bitv.define
+              in
+              Theory.Var.forget @@ Theory.Var.define sort name
+        in
+        CT.var reg >>| fun v -> KB.Value.put symbol v (Some name))
+  |> KB.List.all
+
+let reify_with stdout prog obj target name args =
+  KB.direct @@ fun () ->
+  let bits = Theory.Target.bits target in
+  KB.await
+    (KB.Context.set State.var
+       State.
+         {
+           binds = Map.empty (module Theory.Var.Top);
+           scope = Map.empty (module Theory.Var.Top);
+           arith = State.arith bits;
+         });
+  let (module Core) = KB.await Theory.current in
+  let open Prelude (Core) in
+  let res =
+    KB.await
+      ( Theory.Target.with_current target @@ fun () ->
+        reify stdout prog obj target name args )
+  in
+  match KB.await (KB.collect Disasm_expert.Basic.Insn.slot obj) with
+  | Some basic when Insn.(res <> empty) -> Insn.with_basic res basic
+  | _ -> res
+
+let of_basic ?(stdout = Format.std_formatter) unit obj basic =
+  obtain_typed_program unit >>= fun prog ->
+  let name = name_of_basic basic in
+  if not (Map.mem prog.names name) then KB.return Insn.empty
+  else
+    KB.collect Theory.Unit.target unit >>= fun target ->
+    Theory.current >>= fun theory ->
+    args_of_ops theory target basic >>= fun args ->
+    reify_with stdout prog obj target name (Some args)
+
 let provide_semantics ?(stdout = Format.std_formatter) () =
-  let open KB.Syntax in
   KB.Rule.(
     declare "primus-lisp-semantics"
     |> require Property.name |> require Property.args
@@ -834,25 +906,7 @@ let provide_semantics ?(stdout = Format.std_formatter) () =
   else
     let args = KB.await (obj --> Property.args) in
     let target = KB.await (KB.collect Theory.Unit.target unit) in
-    let bits = Theory.Target.bits target in
-    KB.await
-      (KB.Context.set State.var
-         State.
-           {
-             binds = Map.empty (module Theory.Var.Top);
-             scope = Map.empty (module Theory.Var.Top);
-             arith = State.arith bits;
-           });
-    let (module Core) = KB.await Theory.current in
-    let open Prelude (Core) in
-    let res =
-      KB.await
-        ( Theory.Target.with_current target @@ fun () ->
-          reify stdout prog obj target name args )
-    in
-    match KB.await (KB.collect Disasm_expert.Basic.Insn.slot obj) with
-    | Some basic when Insn.(res <> empty) -> Insn.with_basic res basic
-    | _ -> res
+    KB.await (reify_with stdout prog obj target name args)
 
 let provide_attributes () =
   let open KB.Syntax in

@@ -2919,11 +2919,11 @@ module Std : sig
         int64 ->
         string ->
         (int * string * blk term list) option knowledge
-      (** [direct project addr code] is like {!named}, but a cache miss decodes
-          the basic instruction directly instead of publishing a fresh program
-          label and recomputing its semantics through Ogre. Already disassembled
-          instructions and external-label resolution retain their usual paths.
-      *)
+      (** [direct project addr code] is like {!named}, but a cache miss invokes
+          the target, Primus Lisp, or native lifter directly instead of
+          recomputing the decoded instruction's semantics through Ogre. Already
+          disassembled instructions and external-label resolution retain their
+          usual paths. *)
 
       val block :
         ?encoding:Theory.language ->

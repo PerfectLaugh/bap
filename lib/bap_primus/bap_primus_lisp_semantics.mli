@@ -19,6 +19,20 @@ val static : (Theory.Value.cls, Bitvec.t option) KB.slot
 val enable : ?stdout:Format.formatter -> unit -> unit
 val failp : ('a, Format.formatter, unit, 'b KB.t) format4 -> 'a
 val typed_program : Theory.Unit.t -> program KB.t
+val name_of_basic : Disasm_expert.Basic.full_insn -> KB.Name.t
+
+val args_of_ops :
+  (module Theory.Core) ->
+  Theory.Target.t ->
+  Disasm_expert.Basic.full_insn ->
+  value list KB.t
+
+val of_basic :
+  ?stdout:Format.formatter ->
+  Theory.Unit.t ->
+  Theory.Label.t ->
+  Disasm_expert.Basic.full_insn ->
+  Insn.t KB.t
 
 val declare :
   ?types:(Theory.Target.t -> Bap_primus_lisp_type.signature) ->
