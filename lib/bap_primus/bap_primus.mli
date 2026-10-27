@@ -2923,7 +2923,8 @@ module Std : sig
           the target lifter directly instead of recomputing the decoded
           instruction's semantics through Ogre. Empty legacy-BIL results and
           Thumb instructions use the ordinary decoder. Already disassembled
-          instructions and external-label resolution retain their usual paths. *)
+          instructions and external-label resolution retain their usual paths.
+      *)
 
       val block :
         ?encoding:Theory.language ->
