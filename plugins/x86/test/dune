@@ -1,0 +1,20 @@
+(executable
+ (name run_lean_tests)
+ (modules run_lean_tests)
+ (libraries
+  bap
+  bap-main
+  bap-plugins
+  bap-x86.plugin
+  core
+  lifter_test
+  ounit2
+  threads))
+
+(rule
+ (alias lean-tests)
+ (action
+  (setenv
+   OUNIT_RUN_GC_FULL_MAJOR
+   false
+   (run %{exe:run_lean_tests.exe} -runner processes -shards 4))))

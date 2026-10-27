@@ -3,7 +3,15 @@
  (public_name bap-x86.plugin)
  (preprocess
   (pps ppx_bap))
- (libraries bap bap-core-theory bap-knowledge bap-primus bap-x86 bitvec core))
+ (libraries
+  bap
+  bap-bil.plugin
+  bap-core-theory
+  bap-knowledge
+  bap-primus
+  bap-x86
+  bitvec
+  core))
 
 (plugin
  (name x86)

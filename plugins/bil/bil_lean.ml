@@ -202,6 +202,23 @@ let rec render context exp =
   | Bil.Unknown _ ->
       Error "unknown values are outside the verified pure BIL fragment"
 
+let theorem_source ~imports ~tactics context before after =
+  let variables = List.rev context.vars in
+  let binders =
+    List.map variables ~f:(fun variable ->
+        let name = Map.find_exn context.names variable in
+        match Var.typ variable with
+        | Type.Imm width -> sprintf "  (%s : BitVec %d)" name width
+        | Type.Mem _ | Type.Unk -> assert false)
+    |> String.concat ~sep:"\n"
+  in
+  let binders = if String.is_empty binders then "" else binders ^ "\n" in
+  let imports =
+    String.concat ~sep:"\n" (List.map imports ~f:(fun name -> "import " ^ name))
+  in
+  sprintf "%s\n\ntheorem bap_rewrite\n%s  : %s = %s := by\n%s\n" imports binders
+    before after tactics
+
 let proof before after =
   imm_width before >>= fun before_width ->
   imm_width after >>= fun after_width ->
@@ -213,19 +230,30 @@ let proof before after =
     let context = { names = Var.Map.empty; vars = [] } in
     render context before >>= fun before ->
     render context after >>| fun after ->
-    let variables = List.rev context.vars in
-    let binders =
-      List.map variables ~f:(fun variable ->
-          let name = Map.find_exn context.names variable in
-          match Var.typ variable with
-          | Type.Imm width -> sprintf "  (%s : BitVec %d)" name width
-          | Type.Mem _ | Type.Unk -> assert false)
-      |> String.concat ~sep:"\n"
-    in
-    let binders = if String.is_empty binders then "" else binders ^ "\n" in
-    sprintf
-      "import Lean\n\ntheorem bap_rewrite\n%s  : %s = %s := by\n  bv_decide\n"
-      binders before after
+    theorem_source ~imports:[ "Lean" ] ~tactics:"  bv_decide" context before
+      after
+
+let validate_application_with ~checker ~imports ~function_name ~projection
+    ~unfold actual arguments =
+  imm_width actual >>= fun _ ->
+  let context = { names = Var.Map.empty; vars = [] } in
+  render context actual >>= fun actual ->
+  List.map arguments ~f:(render context) |> Result.all >>= fun arguments ->
+  let projection =
+    Option.value_map projection ~default:"" ~f:(fun name -> "." ^ name)
+  in
+  let application =
+    sprintf "(%s%s)%s" function_name
+      (String.concat ~sep:"" (List.map arguments ~f:(fun arg -> " " ^ arg)))
+      projection
+  in
+  let tactics =
+    match unfold with
+    | [] -> "  bv_decide"
+    | names ->
+        sprintf "  simp [%s] <;> bv_decide" (String.concat ~sep:", " names)
+  in
+  checker (theorem_source ~imports ~tactics context actual application)
 
 let proof_with_context before after =
   match proof before after with
@@ -296,6 +324,7 @@ and validate_stmt ~checker before after =
 
 let validate_with ~checker before after = validate_stmts ~checker before after
 let validate = validate_with ~checker:check
+let validate_application = validate_application_with ~checker:check
 
 let checked_fold_consts before =
   let after = Bil.fold_consts before in
