@@ -1,0 +1,42 @@
+# exited with 0
+sub __do_global_dtors_aux(__do_global_dtors_aux_result)
+  calls deregister_tm_clones
+sub _dl_relocate_static_pie(_dl_relocate_static_pie_result)
+sub _fini(_fini_result)
+sub _init(_init_result)
+sub _start(_start_result)
+  calls __libc_start_main _dl_relocate_static_pie intrinsic:hlt
+sub c_conditional(c_conditional_result)
+sub c_loop(c_loop_result)
+sub c_middle(c_middle_result)
+  calls c_select
+sub c_outer(c_outer_result)
+  calls c_middle
+sub c_post(c_post_result)
+sub c_select(c_select_result)
+sub deregister_tm_clones(deregister_tm_clones_result)
+sub frame_dummy(frame_dummy_result)
+  calls register_tm_clones
+sub main(main_argc, main_argv, main_result)
+sub register_tm_clones(register_tm_clones_result)
+sub intrinsic:hlt()
+sub __libc_start_main(__libc_start_main_main, __libc_start_main_arg2, __libc_start_main_arg3, __libc_start_main_auxv, __libc_start_main_result)
+
+sub main(main_argc, main_argv, main_result)
+#1: main_argc :: in u32 = low:32[RDI]
+#2: main_argv :: in out u64 = RSI
+#3: main_result :: out u32 = low:32[RAX]
+
+#4:
+#5: #v1 := RBP
+#6: RSP := RSP - 8
+#7: mem := mem with [RSP, el]:u64 <- #v1
+#8: RBP := RSP
+#9: RAX := 0
+#10: #v2 := mem[RSP, el]:u64
+#11: RSP := RSP + 8
+#12: RBP := #v2
+#13: #v3 := mem[RSP, el]:u64
+#14: RSP := RSP + 8
+#15: call #v3 with noreturn
+

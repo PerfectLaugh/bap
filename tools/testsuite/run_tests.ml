@@ -1402,9 +1402,12 @@ let emu data =
             ]
         in
         let engine =
-          if Sys.getenv_opt "BAP_TESTSUITE_EXECUTOR" = Some "lifted" then
-            "lifted"
-          else "unicorn"
+          match Sys.getenv_opt "BAP_EMU_ENGINE" with
+          | Some engine -> engine
+          | None ->
+              Option.value
+                (Sys.getenv_opt "BAP_TESTSUITE_EXECUTOR")
+                ~default:"lifted"
         in
         sequence env out
           [

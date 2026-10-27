@@ -1753,8 +1753,10 @@ module Trace = struct
     last : int64 option;
     capacity : int;
     access_capacity : int;
+    every : int;
     versions : versions;
     journal : journal option;
+    mutable digest : string option;
     mutable active : bool;
     mutable registered : bool;
     mutable hooks : Engine.hook list option;
@@ -1867,6 +1869,9 @@ module Trace = struct
     }
     [@@deriving bin_io]
 
+    type sparse = { indices : int array; values : int64 array }
+    [@@deriving bin_io]
+
     type t = {
       target : string;
       digest : string;
@@ -1876,12 +1881,14 @@ module Trace = struct
       last : int64 option;
       version_capacity : int;
       versions : code_version array;
+      bounds : sparse;
+      ranges : sparse;
       state : native;
     }
     [@@deriving bin_io]
 
     let prefix = "bap-emu-trace-state "
-    let magic = prefix ^ "2\n"
+    let magic = prefix ^ "3\n"
   end
 
   let journal_error t message =
@@ -1972,21 +1979,52 @@ module Trace = struct
 
   let remove file = try Stdlib.Sys.remove file with Sys_error _ -> ()
 
-  let save_state t file =
-    prepare_state t;
-    let native = Engine.Trace.Snapshot.export t.trace in
+  let trace_digest t =
+    match t.digest with
+    | Some digest -> digest
+    | None ->
+        let digest = program_digest ~fn:"save_state" t.emu in
+        t.digest <- Some digest;
+        digest
+
+  let sparse words =
+    let entries =
+      Array.foldi words ~init:[] ~f:(fun i entries word ->
+          if Int64.equal word 0L then entries else (i, word) :: entries)
+      |> List.rev
+    in
+    {
+      Saved_state.indices = Array.of_list (List.map entries ~f:fst);
+      values = Array.of_list (List.map entries ~f:snd);
+    }
+
+  let dense size (sparse : Saved_state.sparse) =
+    if Array.length sparse.indices <> Array.length sparse.values then
+      failwith "Bap_emu.Trace.restore_state: inconsistent sparse state";
+    let words = Array.create ~len:size 0L in
+    Array.iteri sparse.indices ~f:(fun k index ->
+        if
+          index < 0 || index >= size
+          || (k > 0 && index <= Array.unsafe_get sparse.indices (k - 1))
+        then failwith "Bap_emu.Trace.restore_state: invalid sparse state";
+        Array.unsafe_set words index (Array.unsafe_get sparse.values k));
+    words
+
+  let save_native_state t (native : Engine.Trace.Snapshot.state) file =
     let saved =
       {
         Saved_state.target =
           Bap_core_theory.Theory.Target.to_string t.emu.target;
-        digest = program_digest ~fn:"save_state" t.emu;
+        digest = trace_digest t;
         memory = t.memory;
         watch = t.watch;
         first = t.first;
         last = t.last;
         version_capacity = t.versions.capacity;
         versions = Array.of_list (versions t);
-        state = native;
+        bounds = sparse native.bounds;
+        ranges = sparse native.ranges;
+        state = { native with bounds = [||]; ranges = [||] };
       }
     in
     let data = Binable.to_string (module Saved_state) saved in
@@ -2006,6 +2044,10 @@ module Trace = struct
         with Sys_error msg ->
           remove tmp;
           failwithf "Bap_emu.Trace.save_state: %s" msg ())
+
+  let save_state t file =
+    prepare_state t;
+    save_native_state t (Engine.Trace.Snapshot.export t.trace) file
 
   let restore_state emu file =
     let data =
@@ -2043,6 +2085,18 @@ module Trace = struct
           failwithf
             "Bap_emu.Trace.restore_state: %s has inconsistent hook metadata"
             file ();
+        let native = saved.Saved_state.state in
+        let saved =
+          {
+            saved with
+            Saved_state.state =
+              {
+                native with
+                bounds = dense (4 * 65536) saved.Saved_state.bounds;
+                ranges = dense (2 * 65536) saved.Saved_state.ranges;
+              };
+          }
+        in
         let capacity = saved.Saved_state.version_capacity in
         if capacity < 0 then
           failwithf "Bap_emu.Trace.restore_state: %s has invalid code versions"
@@ -2084,8 +2138,10 @@ module Trace = struct
                 last = saved.Saved_state.last;
                 capacity = saved.Saved_state.state.capacity;
                 access_capacity = saved.Saved_state.state.access_capacity;
+                every = saved.Saved_state.state.every;
                 versions = retained;
                 journal = None;
+                digest = Some saved.Saved_state.digest;
                 active = false;
                 registered = false;
                 hooks = None;
@@ -2224,7 +2280,7 @@ module Trace = struct
             if Poly.( <> ) current j.written then (
               let sequence = j.sequence in
               let file = segment_file j.prefix sequence in
-              (try save_state t file with
+              (try save_native_state t native file with
               | Failure msg -> journal_error t msg
               | Sys_error msg ->
                   journal_error t (sprintf "Bap_emu.Trace.journal: %s" msg));
@@ -2375,7 +2431,8 @@ module Trace = struct
         ]
     in
     let native =
-      Engine.trace ?first:t.first ?last:t.last ?watch:t.watch ~memory:t.memory
+      Engine.trace ?first:t.first ?last:t.last ?watch:t.watch
+        ~memory:(t.memory || Option.is_some t.watch)
         e.engine t.trace
     in
     t.hooks <- Some (versions @ native)
@@ -2444,8 +2501,10 @@ module Trace = struct
         last;
         capacity = native.capacity;
         access_capacity = native.access_capacity;
+        every = native.every;
         versions = make_versions code_versions;
         journal;
+        digest = None;
         active = true;
         registered = false;
         hooks = None;
@@ -3186,7 +3245,7 @@ type empty_slice_reason =
   | Instruction_decode
 
 type control_dependency = {
-  index : int64;
+  branch_index : int64;
   site : int64;
   target : int64;
   taken : bool;
@@ -3203,9 +3262,9 @@ type control_unresolved_reason =
   | Control_decode
 
 type control_unresolved = {
-  index : int64;
-  pc : int64;
-  thread : int;
+  control_index : int64;
+  control_pc : int64;
+  control_thread : int;
   reason : control_unresolved_reason;
 }
 
@@ -4090,13 +4149,17 @@ let slice_impl ?(addresses = false) ?(executed_bytes = false) ?window ?thread
         if not (Hash_set.mem unresolved_keys key) then begin
           Hash_set.add unresolved_keys key;
           unresolved :=
-            { index = occ.index; pc = occ.pc; thread = occ.thread; reason }
+            {
+              control_index = occ.index;
+              control_pc = occ.pc;
+              control_thread = occ.thread;
+              reason;
+            }
             :: !unresolved
         end
       in
-      let native = Engine.Trace.Snapshot.export tr.trace in
       let precise =
-        native.every = 1 && Option.is_none tr.first && Option.is_none tr.last
+        tr.every = 1 && Option.is_none tr.first && Option.is_none tr.last
       in
       let guards_at = Array.create ~len:n []
       and occurrences_of_guards = Array.create ~len:n [] in
@@ -4115,7 +4178,8 @@ let slice_impl ?(addresses = false) ?(executed_bytes = false) ?window ?thread
                       (Tid.equal guard.sub sid
                       && Option.equal Tid.equal guard.join (Some bid))));
           Array.unsafe_set guards_at k
-            (List.rev_map frames ~f:(fun guards -> !guards) |> List.concat);
+            (List.rev_map frames ~f:(fun guards -> List.rev !guards)
+            |> List.concat);
           Option.iter occ.insn ~f:(fun i ->
               if not (List.is_empty i.guards) then
                 if not precise then add_unresolved occ Unknown_outcome
@@ -4126,7 +4190,7 @@ let slice_impl ?(addresses = false) ?(executed_bytes = false) ?window ?thread
                       let next_occ = Array.unsafe_get occurrences next in
                       let dependency =
                         {
-                          index = occ.index;
+                          branch_index = occ.index;
                           site = occ.pc;
                           target = next_occ.pc;
                           taken = Int64.(next_occ.pc <> occ.pc + of_int i.size);
@@ -4146,7 +4210,7 @@ let slice_impl ?(addresses = false) ?(executed_bytes = false) ?window ?thread
                               dependency;
                             }
                           in
-                          frame := !frame @ [ guard ];
+                          frame := guard :: !frame;
                           Array.unsafe_set occurrences_of_guards k [ guard ]));
           Option.iter occ.insn ~f:(fun i ->
               match occ.next with
@@ -4333,9 +4397,9 @@ let slice_impl ?(addresses = false) ?(executed_bytes = false) ?window ?thread
       in
       let unresolved =
         List.sort !unresolved ~compare:(fun a b ->
-            match Int64.compare a.index b.index with
+            match Int64.compare a.control_index b.control_index with
             | 0 -> (
-                match Int64.compare a.pc b.pc with
+                match Int64.compare a.control_pc b.control_pc with
                 | 0 -> Poly.compare a.reason b.reason
                 | c -> c)
             | c -> c)

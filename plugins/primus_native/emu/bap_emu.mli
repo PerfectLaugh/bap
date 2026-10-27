@@ -810,7 +810,7 @@ type empty_slice_reason =
       (** an instruction or block expansion couldn't be decoded *)
 
 type control_dependency = {
-  index : int64;  (** the global index of the branch's trace record *)
+  branch_index : int64;  (** the global index of the branch's trace record *)
   site : int64;  (** the conditional branch or call site *)
   target : int64;  (** the actual next same-TID instruction *)
   taken : bool;  (** whether control didn't fall through *)
@@ -830,9 +830,9 @@ type control_unresolved_reason =
       (** an instruction needed for control analysis didn't decode *)
 
 type control_unresolved = {
-  index : int64;
-  pc : int64;
-  thread : int;
+  control_index : int64;
+  control_pc : int64;
+  control_thread : int;
   reason : control_unresolved_reason;
 }
 

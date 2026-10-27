@@ -76,7 +76,7 @@ let select emu blocks flag =
     List.iter s.steps ~f:(fun s -> printf "data %Lx:%Ld\n" s.pc s.index);
     List.iter c.steps ~f:(fun s -> printf "control %Lx:%Ld\n" s.pc s.index);
     List.iter c.dependencies ~f:(fun d -> printf "guard %Lx -> %Lx\n" d.site d.target);
-    List.iter c.unresolved ~f:(fun u -> printf "unresolved %Lx\n" u.pc)
+    List.iter c.unresolved ~f:(fun u -> printf "unresolved %Lx\n" u.control_pc)
   end;
   check (has_site s.steps selected) "selected producer missing";
   check (not (has_site s.steps unselected)) "unselected data producer selected";
@@ -86,7 +86,7 @@ let select emu blocks flag =
   check (not (has_site c.steps sites.(3))) "branch included as a data producer";
   (match c.dependencies with
   | [ d ] ->
-      check Int64.(d.index >= 0L) "negative branch index";
+      check Int64.(d.branch_index >= 0L) "negative branch index";
       check Int64.(d.site = sites.(3)) "wrong branch site";
       check Int64.(d.target = target) "wrong actual branch target";
       check (Bool.equal d.taken taken) "wrong branch outcome";
@@ -120,7 +120,7 @@ let loops emu blocks =
   | [ first; second ] ->
       check Int64.(first.site = sites.(7) && second.site = sites.(7))
         "wrong loop branch occurrences";
-      check Int64.(first.index < second.index) "loop occurrences not distinct and ordered";
+      check Int64.(first.branch_index < second.branch_index) "loop occurrences not distinct and ordered";
       check (first.taken && second.taken) "loop outcomes wrong"
   | _ -> failwith "expected two earlier loop guards"
 
@@ -131,7 +131,9 @@ let nested emu blocks flag =
   | [ outer; inner ] ->
       check Int64.(outer.site = sites.(8) && inner.site = sites.(3))
         "nested guards not retained";
-      check Int64.(outer.index < inner.index) "nested guards out of order";
+      check
+        Int64.(outer.branch_index < inner.branch_index)
+        "nested guards out of order";
       check (not outer.taken) "conditional call outcome wrong";
       check (Bool.equal inner.taken (Int64.(flag = 0L))) "nested selected path wrong"
   | _ -> failwith "expected caller and callee guards"
