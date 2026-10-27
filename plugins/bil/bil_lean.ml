@@ -202,7 +202,7 @@ let rec render context exp =
   | Bil.Unknown _ ->
       Error "unknown values are outside the verified pure BIL fragment"
 
-let theorem_source ~imports ~tactics context before after =
+let theorem_source ~imports ~tactics ?(hypotheses = []) context before after =
   let variables = List.rev context.vars in
   let binders =
     List.map variables ~f:(fun variable ->
@@ -213,11 +213,15 @@ let theorem_source ~imports ~tactics context before after =
     |> String.concat ~sep:"\n"
   in
   let binders = if String.is_empty binders then "" else binders ^ "\n" in
+  let hypotheses = String.concat ~sep:"\n" hypotheses in
+  let hypotheses =
+    if String.is_empty hypotheses then "" else hypotheses ^ "\n"
+  in
   let imports =
     String.concat ~sep:"\n" (List.map imports ~f:(fun name -> "import " ^ name))
   in
-  sprintf "%s\n\ntheorem bap_rewrite\n%s  : %s = %s := by\n%s\n" imports binders
-    before after tactics
+  sprintf "%s\n\ntheorem bap_rewrite\n%s%s  : %s = %s := by\n%s\n" imports
+    binders hypotheses before after tactics
 
 let proof before after =
   imm_width before >>= fun before_width ->
@@ -232,6 +236,75 @@ let proof before after =
     render context after >>| fun after ->
     theorem_source ~imports:[ "Lean" ] ~tactics:"  bv_decide" context before
       after
+
+let assumption_proof ~assumptions before after =
+  imm_width before >>= fun before_width ->
+  imm_width after >>= fun after_width ->
+  if before_width <> after_width then
+    Error
+      (sprintf "rewrite changes the result width from %d to %d" before_width
+         after_width)
+  else
+    let context = { names = Var.Map.empty; vars = [] } in
+    List.map assumptions ~f:(fun (var, value) ->
+        variable_name context var >>= fun name ->
+        render context value >>| fun value -> (name, value))
+    |> Result.all
+    >>= fun assumptions ->
+    render context before >>= fun before ->
+    render context after >>= fun after ->
+    let hypotheses =
+      List.mapi assumptions ~f:(fun index (name, value) ->
+          sprintf "  (h%d : %s = %s)" index name value)
+    in
+    let tactics =
+      if List.is_empty hypotheses then "  bv_decide"
+      else
+        sprintf "  simp [%s]"
+          (String.concat ~sep:", "
+             (List.mapi hypotheses ~f:(fun index _ -> sprintf "h%d" index)))
+    in
+    Ok
+      (theorem_source ~imports:[ "Lean" ] ~tactics ~hypotheses context before
+         after)
+
+let rec validate_assumptions_with ~checker ~assumptions before after =
+  if Exp.equal before after then Ok ()
+  else
+    match assumption_proof ~assumptions before after with
+    | Ok source -> checker source
+    | Error error -> (
+        let descend = validate_assumptions_with ~checker ~assumptions in
+        let descend2 (x, x') (y, y') =
+          descend x x' >>= fun () -> descend y y'
+        in
+        match (before, after) with
+        | Bil.BinOp (op, x, y), Bil.BinOp (op', x', y') when Poly.(op = op') ->
+            descend2 (x, x') (y, y')
+        | Bil.UnOp (op, x), Bil.UnOp (op', x') when Poly.(op = op') ->
+            descend x x'
+        | Bil.Cast (cast, size, x), Bil.Cast (cast', size', x')
+          when Poly.(cast = cast') && size = size' ->
+            descend x x'
+        | Bil.Let (var, value, body), Bil.Let (var', value', body')
+          when Var.same var var' ->
+            descend value value' >>= fun () -> descend body body'
+        | Bil.Ite (cond, yes, no), Bil.Ite (cond', yes', no') ->
+            descend cond cond' >>= fun () -> descend2 (yes, yes') (no, no')
+        | Bil.Extract (hi, lo, x), Bil.Extract (hi', lo', x')
+          when hi = hi' && lo = lo' ->
+            descend x x'
+        | Bil.Concat (x, y), Bil.Concat (x', y') -> descend2 (x, x') (y, y')
+        | ( Bil.Load (mem, addr, endian, size),
+            Bil.Load (mem', addr', endian', size') )
+          when Poly.(endian = endian') && Poly.(size = size') ->
+            descend2 (mem, mem') (addr, addr')
+        | ( Bil.Store (mem, addr, value, endian, size),
+            Bil.Store (mem', addr', value', endian', size') )
+          when Poly.(endian = endian') && Poly.(size = size') ->
+            descend2 (mem, mem') (addr, addr') >>= fun () ->
+            descend value value'
+        | _ -> Error error)
 
 let validate_application_with ~checker ~imports ~function_name ~projection
     ~unfold actual arguments =
@@ -266,35 +339,42 @@ let proof_with_context before after =
 let rec validate_exp ~checker before after =
   if Exp.equal before after then Ok ()
   else
-    let descend = validate_exp ~checker in
-    let descend2 (x, x') (y, y') = descend x x' >>= fun () -> descend y y' in
-    match (before, after) with
-    | Bil.BinOp (op, x, y), Bil.BinOp (op', x', y') when Poly.(op = op') ->
-        descend2 (x, x') (y, y')
-    | Bil.UnOp (op, x), Bil.UnOp (op', x') when Poly.(op = op') -> descend x x'
-    | Bil.Cast (cast, size, x), Bil.Cast (cast', size', x')
-      when Poly.(cast = cast') && size = size' ->
-        descend x x'
-    | Bil.Let (var, value, body), Bil.Let (var', value', body')
-      when Var.same var var' ->
-        descend value value' >>= fun () -> descend body body'
-    | Bil.Ite (cond, yes, no), Bil.Ite (cond', yes', no') ->
-        descend cond cond' >>= fun () -> descend2 (yes, yes') (no, no')
-    | Bil.Extract (hi, lo, x), Bil.Extract (hi', lo', x')
-      when hi = hi' && lo = lo' ->
-        descend x x'
-    | Bil.Concat (x, y), Bil.Concat (x', y') -> descend2 (x, x') (y, y')
-    | Bil.Load (mem, addr, endian, size), Bil.Load (mem', addr', endian', size')
-      when Poly.(endian = endian') && Poly.(size = size') ->
-        descend2 (mem, mem') (addr, addr')
-    | ( Bil.Store (mem, addr, value, endian, size),
-        Bil.Store (mem', addr', value', endian', size') )
-      when Poly.(endian = endian') && Poly.(size = size') ->
-        descend2 (mem, mem') (addr, addr') >>= fun () -> descend value value'
-    | _ -> (
-        match proof_with_context before after with
-        | Error _ as error -> error
-        | Ok source -> checker source)
+    match proof_with_context before after with
+    | Ok source -> checker source
+    | Error error -> (
+        let descend = validate_exp ~checker in
+        let descend2 (x, x') (y, y') =
+          descend x x' >>= fun () -> descend y y'
+        in
+        match (before, after) with
+        | Bil.BinOp (op, x, y), Bil.BinOp (op', x', y') when Poly.(op = op') ->
+            descend2 (x, x') (y, y')
+        | Bil.UnOp (op, x), Bil.UnOp (op', x') when Poly.(op = op') ->
+            descend x x'
+        | Bil.Cast (cast, size, x), Bil.Cast (cast', size', x')
+          when Poly.(cast = cast') && size = size' ->
+            descend x x'
+        | Bil.Let (var, value, body), Bil.Let (var', value', body')
+          when Var.same var var' ->
+            descend value value' >>= fun () -> descend body body'
+        | Bil.Ite (cond, yes, no), Bil.Ite (cond', yes', no') ->
+            descend cond cond' >>= fun () -> descend2 (yes, yes') (no, no')
+        | Bil.Extract (hi, lo, x), Bil.Extract (hi', lo', x')
+          when hi = hi' && lo = lo' ->
+            descend x x'
+        | Bil.Concat (x, y), Bil.Concat (x', y') -> descend2 (x, x') (y, y')
+        | ( Bil.Load (mem, addr, endian, size),
+            Bil.Load (mem', addr', endian', size') )
+          when Poly.(endian = endian') && Poly.(size = size') ->
+            descend2 (mem, mem') (addr, addr')
+        | ( Bil.Store (mem, addr, value, endian, size),
+            Bil.Store (mem', addr', value', endian', size') )
+          when Poly.(endian = endian') && Poly.(size = size') ->
+            descend2 (mem, mem') (addr, addr') >>= fun () ->
+            descend value value'
+        | _ -> Error error)
+
+let validate_exp_exact_with ~checker = validate_exp ~checker
 
 let rec validate_stmts ~checker before after =
   match (before, after) with
@@ -323,6 +403,8 @@ and validate_stmt ~checker before after =
     | _ -> Error "rewrite changes the BIL statement structure"
 
 let validate_with ~checker before after = validate_stmts ~checker before after
+let validate_assumptions = validate_assumptions_with ~checker:check
+let validate_exp_exact = validate_exp_exact_with ~checker:check
 let validate_exp = validate_exp ~checker:check
 let validate = validate_with ~checker:check
 let validate_application = validate_application_with ~checker:check

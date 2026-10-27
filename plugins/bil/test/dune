@@ -12,3 +12,25 @@
  (alias lean-tests)
  (action
   (run %{exe:run_lean_tests.exe} -runner processes -shards 4)))
+
+(executable
+ (name run_lifter_lean_tests)
+ (modules run_lifter_lean_tests)
+ (libraries
+  bap
+  bap-bil.plugin
+  bap-main
+  bap-plugins
+  bap-recompile
+  core
+  lifter_test
+  ounit2
+  threads))
+
+(rule
+ (alias lifter-lean-tests)
+ (action
+  (setenv
+   OUNIT_RUN_GC_FULL_MAJOR
+   false
+   (run %{exe:run_lifter_lean_tests.exe} -runner processes -shards 4))))

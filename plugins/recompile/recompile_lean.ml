@@ -1,8 +1,8 @@
 open Core
 open Bap.Std
 open Result.Monad_infix
-module Witness = Recompile_optimize
-module Parse = Recompile_optimize.Parse
+module Witness = Recompile_llvm_ir
+module Parse = Recompile_llvm_ir.Parse
 
 type context = {
   mutable vars : int Var.Map.t;

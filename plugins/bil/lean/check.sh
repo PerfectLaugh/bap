@@ -16,6 +16,7 @@ fi
 
 cd -- "$project_dir"
 "$elan_command" run "$toolchain" lake build
+export LEAN_PATH="$project_dir/.lake/build/lib/lean${LEAN_PATH:+:$LEAN_PATH}"
 cd -- "$repo_dir"
-dune build @plugins/bil/test/lean-tests
-printf 'BIL Lean checks passed.\n'
+dune build @plugins/bil/test/lean-tests @plugins/bil/test/lifter-lean-tests
+printf 'BIL and multi-architecture lifter Lean checks passed.\n'

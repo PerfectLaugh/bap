@@ -60,6 +60,14 @@ set, e.g.,
   bap ./prog --passes=recompile-optimize --recompile-deflatten -dbir
 ```
 
+With $(b,--recompile-mba), a bounded native optimizer canonicalizes and
+simplifies mixed Boolean-arithmetic expressions before LLVM optimization and
+before every deflattening round. It preserves BIR structure and term identifiers.
+With $(b,--recompile-lean-mba), Lean 4.35.0 must justify every rewrite, using
+prior definitions as premises for copy propagation. A failed, unsupported, or
+aborted proof rejects the optimized candidate, so the original sub is kept. Disabled, unchecked, and Lean-checked
+MBA results use separate cache entries.
+
 With $(b,--recompile-lean-deflatten), every constant expression used to
 justify dispatcher threading is checked by Lean 4.35.0. Each constant-state
 threaded edge is also compared with the original dispatcher path in a formal
@@ -85,50 +93,7 @@ open Core
 open Bap.Std
 open Bap_main
 open Extension.Syntax
-
-let output =
-  Extension.Configuration.parameter
-    Extension.Type.(some string)
-    "output" ~doc:"Writes the LLVM IR of the program to the $(docv)."
-
-let entry =
-  Extension.Configuration.parameter
-    Extension.Type.(string =? "main")
-    "entry" ~doc:"The subroutine, that the program starts from."
-
-let opt =
-  Extension.Configuration.parameter
-    Extension.Type.(string =? "opt")
-    "opt" ~doc:"The opt of LLVM, that optimizes the subs."
-
-let pipeline =
-  Extension.Configuration.parameter
-    Extension.Type.(string =? Bap_recompile.default_passes)
-    "opt-passes"
-    ~doc:
-      "The pipeline of the passes of LLVM, that optimize the subs, in the \
-       syntax of $(b,opt -passes), without the vectorizers, whose vectors \
-       aren't raised back to BIR."
-
-let subs =
-  Extension.Configuration.parameter
-    Extension.Type.(list string)
-    "opt-subs" ~doc:"Optimizes only the named subs, by default all of them."
-
-let deflatten =
-  Extension.Configuration.flag "deflatten"
-    ~doc:
-      "Undoes the flattening of the control flow of the subs, e.g., of the \
-       obfuscators, whose blocks go through a dispatcher, which switches on \
-       the state, that the blocks set, so that the blocks jump to each other, \
-       in the rounds of the optimization, see $(b,--recompile-opt-passes), \
-       whose default is the pipeline of the deflattening then."
-
-let lean_deflatten =
-  Extension.Configuration.flag "lean-deflatten"
-    ~doc:
-      "Uses Lean to check dispatcher expressions and certify constant-state \
-       threaded CFG edges. Requires --recompile-deflatten and Lean 4.35.0."
+open Recompile_config
 
 let () =
   Extension.declare ~doc ~provides:[ "pass"; "llvm"; "recompile" ]
@@ -149,6 +114,7 @@ let () =
     List.is_empty subs || List.mem subs (Sub.name sub) ~equal:String.equal
   in
   let deflatten = ctxt --> deflatten in
+  let mba = mba_mode ctxt in
   let validate, validate_thread, validate_split =
     if ctxt --> lean_deflatten then
       ( Some
@@ -185,7 +151,7 @@ let () =
                 then sub
                 else
                   match
-                    Bap_recompile.deflatten ~target ~opt ~passes ?validate
+                    Bap_recompile.deflatten ~target ~opt ~passes ~mba ?validate
                       ?validate_thread ?validate_split sub
                   with
                   | Ok sub -> sub
@@ -195,5 +161,5 @@ let () =
                       sub))
       else
         Project.map_program proj
-          ~f:(Bap_recompile.optimize_program ~target ~opt ~passes ~select));
+          ~f:(Bap_recompile.optimize_program ~target ~opt ~passes ~mba ~select));
   Ok ()

@@ -107,6 +107,25 @@ let variables_use_identity _ =
         (String.is_substring source ~substring:"(v1 : BitVec 8)")
   | _ -> assert_failure "expected one generated proof"
 
+let exact_whole_expression _ =
+  let calls = ref [] in
+  let y = Bil.var (Var.create "y" typ) in
+  let bin op left right = Bil.BinOp (op, left, right) in
+  let before =
+    bin Bil.PLUS (bin Bil.XOR var_x y)
+      (bin Bil.TIMES (Bil.int (Word.of_int ~width:8 2)) (bin Bil.AND var_x y))
+  in
+  let after = bin Bil.PLUS var_x y in
+  assert_ok
+    (Bil_lean.validate_exp_exact_with ~checker:(accepting_checker calls) before
+       after);
+  assert_equal ~printer:Int.to_string 1 (List.length !calls);
+  match !calls with
+  | [ source ] ->
+      assert_bool source (String.is_substring source ~substring:"^^^");
+      assert_bool source (String.is_substring source ~substring:" + ")
+  | _ -> assert_failure "expected one whole-expression proof"
+
 let () =
   run_test_tt_main
     ("Bil_lean"
@@ -120,4 +139,5 @@ let () =
            "rejects statement change" >:: rejects_statement_change;
            "propagates checker failure" >:: propagates_checker_failure;
            "variables use identity" >:: variables_use_identity;
+           "exact whole expression" >:: exact_whole_expression;
          ])

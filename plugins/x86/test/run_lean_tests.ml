@@ -25,6 +25,43 @@ let add32 _ = assert_ok (validate 32 "01 d8")
 let add64 _ = assert_ok (validate 64 "48 01 d8")
 let rejects_sub _ = assert_error ~substring:"error" (validate 64 "48 29 d8")
 
+let validate_operation operation width code =
+  X86_lean.validate_reg_reg ~operation ~width ~destination:"RAX" ~left:"RAX"
+    ~right:"RBX"
+    (Lifter_test.lift mode code)
+
+let operation_cases =
+  [
+    ( X86_lean.Sub,
+      "SUB",
+      [ (8, "28 d8"); (16, "66 29 d8"); (32, "29 d8"); (64, "48 29 d8") ] );
+    ( X86_lean.And,
+      "AND",
+      [ (8, "20 d8"); (16, "66 21 d8"); (32, "21 d8"); (64, "48 21 d8") ] );
+    ( X86_lean.Or,
+      "OR",
+      [ (8, "08 d8"); (16, "66 09 d8"); (32, "09 d8"); (64, "48 09 d8") ] );
+    ( X86_lean.Xor,
+      "XOR",
+      [ (8, "30 d8"); (16, "66 31 d8"); (32, "31 d8"); (64, "48 31 d8") ] );
+  ]
+
+let operation_tests =
+  List.concat_map operation_cases ~f:(fun (operation, name, cases) ->
+      List.map cases ~f:(fun (width, code) ->
+          sprintf "%s%d" name width >:: fun _ ->
+          assert_ok (validate_operation operation width code)))
+
+let rejects_wrong_operation _ =
+  validate_operation X86_lean.Sub 64 "48 01 d8"
+  |> assert_error ~substring:"error"
+
+let validates_other_destination _ =
+  X86_lean.validate_reg_reg ~operation:X86_lean.Add ~width:64 ~destination:"RCX"
+    ~left:"RCX" ~right:"RBX"
+    (Lifter_test.lift mode "48 01 d9")
+  |> assert_ok
+
 let rejects_unsupported_statement _ =
   X86_lean.validate_add ~width:64 [ Bil.Special "trap" ]
   |> assert_error ~substring:"straight-line"
@@ -71,11 +108,14 @@ let suite =
          "ADD32" >:: add32;
          "ADD64" >:: add64;
          "rejects SUB" >:: rejects_sub;
+         "rejects wrong operation" >:: rejects_wrong_operation;
+         "validates other destination" >:: validates_other_destination;
          "rejects unsupported statement" >:: rejects_unsupported_statement;
          "rejects unexpected writes" >:: rejects_unexpected_writes;
          "rejects uninitialized temporary" >:: rejects_uninitialized_temporary;
          "rejects invalid width" >:: rejects_invalid_width;
        ]
+       @ operation_tests
 
 let () =
   match Bap_main.init () with

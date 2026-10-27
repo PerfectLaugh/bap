@@ -1,7 +1,10 @@
 name = "bil_proofs"
 version = "0.1.0"
-defaultTargets = ["BilProofs"]
+defaultTargets = ["BilProofs", "LifterProofs"]
 moreLeanArgs = ["--trust=0", "-DwarningAsError=true"]
 
 [[lean_lib]]
 name = "BilProofs"
+
+[[lean_lib]]
+name = "LifterProofs"

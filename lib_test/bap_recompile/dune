@@ -13,6 +13,11 @@
    %{exe:controlled_opt.exe}
    (run %{test}))))
 
+(test
+ (name run_mba_tests)
+ (modules run_mba_tests)
+ (libraries bap-recompile core ounit2))
+
 (executable
  (name run_lean_tests)
  (modules run_lean_tests)

@@ -262,10 +262,80 @@ let test_split_unbound_input _ =
       in
       { witness with left })
 
+let test_lean_mba _ =
+  let var name = Bil.var (Var.create name (Type.imm 8)) in
+  let x = var "x" and y = var "y" in
+  let bin op left right = Bil.BinOp (op, left, right) in
+  let before =
+    bin Bil.PLUS (bin Bil.XOR x y)
+      (bin Bil.TIMES (Bil.int (Word.of_int ~width:8 2)) (bin Bil.AND x y))
+  in
+  let unchecked = Bap_recompile.simplify_exp before |> Or_error.ok_exn in
+  match Bap_recompile.simplify_exp_checked before with
+  | Error error ->
+      assert_failure
+        (Format.asprintf "%s@.before: %a@.after: %a"
+           (Error.to_string_hum error)
+           Exp.pp before Exp.pp unchecked)
+  | Ok after ->
+      assert_bool "MBA addition wasn't simplified" (Exp.equal after unchecked)
+
+let test_lean_shift_and_copy _ =
+  let typ = Type.imm 8 in
+  let x = Bil.var (Var.create "x" typ) in
+  let word value = Bil.int (Word.of_int ~width:8 value) in
+  let bin op left right = Bil.BinOp (op, left, right) in
+  let shifted = bin Bil.LSHIFT x (word 1) in
+  (match Bap_recompile.simplify_exp_checked (bin Bil.PLUS x shifted) with
+  | Error error -> assert_failure (Error.to_string_hum error)
+  | Ok after ->
+      assert_bool "shift/add wasn't proved"
+        (Exp.equal after (bin Bil.TIMES x (word 3))));
+  let temp name = Var.create ~fresh:true ~is_virtual:true name typ in
+  let t1 = temp "t1" and t2 = temp "t2" and out = temp "out" in
+  let blk =
+    Blk.create
+      ~defs:
+        [
+          Def.create t1 x;
+          Def.create t2 (bin Bil.PLUS (Bil.var t1) (word 1));
+          Def.create out (Bil.var t2);
+        ]
+      ()
+  in
+  match Bap_recompile.Recompile_mba.simplify_blk_checked blk with
+  | Error error -> assert_failure (Error.to_string_hum error)
+  | Ok after ->
+      let defs = Term.enum def_t after |> Seq.to_list in
+      assert_bool "copy propagation wasn't proved"
+        (Exp.equal (Def.rhs (List.nth_exn defs 2)) (bin Bil.PLUS x (word 1)))
+
+let test_lean_mba_dispatcher _ =
+  let source = dispatcher_source () and threads = ref 0 in
+  let validate_thread witness =
+    incr threads;
+    match Bap_recompile.validate_thread witness with
+    | Ok () -> true
+    | Error message -> failwith message
+  in
+  match
+    with_controlled_opt dispatcher_ir (fun opt ->
+        Bap_recompile.deflatten ~opt ~rounds:1 ~mba:Bap_recompile.Checked
+          ~validate_thread source)
+  with
+  | Error err -> assert_failure (Error.to_string_hum err)
+  | Ok optimized ->
+      assert_bool "the MBA-preprocessed dispatcher wasn't threaded"
+        (Term.length blk_t optimized > Term.length blk_t source);
+      assert_bool "no CFG proof followed MBA simplification" (!threads > 0)
+
 let () =
   run_test_tt_main
     ("recompile_lean"
     >::: [
+           "MBA expression" >:: test_lean_mba;
+           "MBA shift and copy" >:: test_lean_shift_and_copy;
+           "MBA dispatcher" >:: test_lean_mba_dispatcher;
            "dispatcher" >:: test_lean_dispatcher;
            "select" >:: test_lean_select;
            "swapped split" >:: test_swapped_split;

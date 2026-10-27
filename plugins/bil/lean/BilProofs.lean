@@ -27,3 +27,25 @@ example (x y : BitVec 8) : BitVec.extractLsb 15 8 (x ++ y) = x := by bv_decide
 example (x y : BitVec 8) : BitVec.extractLsb 7 0 (x ++ y) = y := by bv_decide
 example (x : BitVec 16) : BitVec.extractLsb 15 8 x ++ BitVec.extractLsb 7 0 x = x := by bv_decide
 example (x y : BitVec 8) : (if 1#1 = BitVec.ofNat 1 1 then x else y) = x := by bv_decide
+
+namespace Bil
+
+theorem mba_xor_add_two_and (x y : BitVec 8) :
+    (x ^^^ y) + 2#8 * (x &&& y) = x + y := by bv_decide
+
+theorem mba_xor_add_and (x y : BitVec 8) :
+    (x ^^^ y) + (x &&& y) = x ||| y := by bv_decide
+
+theorem mba_or_add_and (x y : BitVec 8) :
+    (x ||| y) + (x &&& y) = x + y := by bv_decide
+
+theorem mba_or_sub_and (x y : BitVec 8) :
+    (x ||| y) - (x &&& y) = x ^^^ y := by bv_decide
+
+theorem mba_or_sub_xor (x y : BitVec 8) :
+    (x ||| y) - (x ^^^ y) = x &&& y := by bv_decide
+
+theorem mba_add_sub_two_and (x y : BitVec 8) :
+    x + y - 2#8 * (x &&& y) = x ^^^ y := by bv_decide
+
+end Bil

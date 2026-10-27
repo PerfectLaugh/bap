@@ -17,6 +17,27 @@ open Core
 open Bap.Std
 open Bap_core_theory
 module Recompile_optimize = Recompile_optimize
+module Recompile_mba = Recompile_mba
+
+type mba = Disabled | Unchecked | Checked
+
+val simplify_exp :
+  ?max_iterations:int -> ?max_rewrites:int -> exp -> exp Or_error.t
+
+val simplify_exp_checked :
+  ?max_iterations:int -> ?max_rewrites:int -> exp -> exp Or_error.t
+
+val simplify_mba :
+  ?max_iterations:int -> ?max_rewrites:int -> sub term -> sub term Or_error.t
+
+val simplify_mba_checked :
+  ?max_iterations:int -> ?max_rewrites:int -> sub term -> sub term Or_error.t
+(** [simplify_mba sub] canonicalizes and simplifies pure expressions and
+    performs bounded copy propagation without changing BIR structure or term
+    identifiers. [simplify_mba_checked] accepts the result only when Lean proves
+    every rewrite, using prior definitions as premises for propagation. Both
+    functions fail on budget exhaustion; checked mode also fails on every
+    rejected or unsupported proof. *)
 
 val default_passes : string
 (** the pipeline of the passes of LLVM, that {!optimize} runs by default, in the
@@ -31,6 +52,7 @@ val optimize :
   ?target:Theory.Target.t ->
   ?opt:string ->
   ?passes:string ->
+  ?mba:mba ->
   ?validate:(exp -> exp -> bool) ->
   ?validate_thread:(Recompile_optimize.thread_witness -> bool) ->
   ?validate_split:(Recompile_optimize.split_witness -> bool) ->
@@ -39,6 +61,10 @@ val optimize :
 (** [optimize sub] is the [sub] optimized by the [passes] of LLVM, which [opt]
     runs, by default the opt in PATH, e.g., without the flags, that the code
     doesn't read, and with the simpler expressions and control flow.
+
+    The [mba] mode applies native MBA simplification before LLVM. [Checked]
+    requires a Lean proof of every changed expression and keeps the three modes
+    in separate cache entries. MBA errors reject the candidate.
 
     With the [target], the slots of the frame of [sub], i.e., the memory at the
     constant offsets from its stack pointer at the entry, are the variables of
@@ -112,6 +138,7 @@ val optimize_region :
   ?target:Theory.Target.t ->
   ?opt:string ->
   ?passes:string ->
+  ?mba:mba ->
   Region.t ->
   Region.t Or_error.t
 (** [optimize_region region] optimizes the code of [region], as {!optimize}
@@ -133,6 +160,7 @@ val deflatten :
   ?target:Theory.Target.t ->
   ?opt:string ->
   ?passes:string ->
+  ?mba:mba ->
   ?validate:(exp -> exp -> bool) ->
   ?validate_thread:(Recompile_optimize.thread_witness -> bool) ->
   ?validate_split:(Recompile_optimize.split_witness -> bool) ->
@@ -174,6 +202,7 @@ val optimize_program :
   ?target:Theory.Target.t ->
   ?opt:string ->
   ?passes:string ->
+  ?mba:mba ->
   ?select:(sub term -> bool) ->
   ?report:(sub term -> Error.t -> unit) ->
   program term ->

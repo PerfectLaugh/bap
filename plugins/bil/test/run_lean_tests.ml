@@ -74,6 +74,29 @@ let checked_constant_folding _ =
   | _ ->
       assert_failure "constant folding did not produce the expected immediate"
 
+let memory_wrapper _ =
+  let memory = Bil.var (Var.create "memory" (Type.mem `r32 `r8)) in
+  let address = Bil.var (Var.create "address" (Type.imm 32)) in
+  let zero = Bil.int (Word.zero 32) in
+  let load address = Bil.Load (memory, address, LittleEndian, `r8) in
+  check (load (bin Bil.PLUS address zero)) (load address)
+
+let assumption_memory _ =
+  let memory = Bil.var (Var.create "memory" (Type.mem `r32 `r8)) in
+  let address = Var.create "address" (Type.imm 32) in
+  let temporary =
+    Var.create ~fresh:true ~is_virtual:true "address" (Type.imm 32)
+  in
+  let load address = Bil.Load (memory, address, LittleEndian, `r8) in
+  match
+    Bil_lean.validate_assumptions
+      ~assumptions:[ (temporary, Bil.var address) ]
+      (load (Bil.var temporary))
+      (load (Bil.var address))
+  with
+  | Ok () -> ()
+  | Error message -> assert_failure message
+
 let () =
   run_test_tt_main
     ("Bil_lean_integration"
@@ -81,4 +104,6 @@ let () =
          @ [
              "false rewrite" >:: false_rewrite;
              "checked constant folding" >:: checked_constant_folding;
+             "memory wrapper" >:: memory_wrapper;
+             "assumption memory" >:: assumption_memory;
            ])
