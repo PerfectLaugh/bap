@@ -7,6 +7,7 @@
 #include <iterator>
 #include <cassert>
 #include <cstring>
+#include <utility>
 
 #include <iostream>
 
@@ -219,13 +220,13 @@ public:
 
     template <typename OpVal>
     OpVal oper_value(int i, int j) const {
-        auto insn = nth_insn(i);
+        const auto &insn = nth_insn(i);
         assert(j >= 0 && j < insn.ops.size());
         return operand_value<OpVal>(insn.ops[j]);
     }
 
     bap_disasm_op_type oper_type(int i, int j) const {
-        auto insn = nth_insn(i);
+        const auto &insn = nth_insn(i);
         assert(j >= 0 && j < insn.ops.size());
         return insn.ops[j].type;
     }
@@ -233,7 +234,7 @@ public:
 private:
     bool step() {
         dis->step(base + off);
-        auto insn = dis->get_insn();
+        const auto &insn = dis->get_insn();
         off = insn.loc.off + insn.loc.len;
         push(insn);
 
@@ -263,14 +264,15 @@ private:
         }
     }
 
-    void push(insn i) {
-        for (auto &op : i.ops) {
+    void push(const insn &i) {
+        insn copy = i;
+        for (auto &op : copy.ops) {
             if (op.type == bap_disasm_op_insn) {
                 subs.push_back(*op.sub_val);
                 op.imm_val = -subs.size();
             }
         }
-        insns.push_back(i);
+        insns.push_back(std::move(copy));
     }
 };
 

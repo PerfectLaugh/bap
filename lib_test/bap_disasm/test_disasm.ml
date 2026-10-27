@@ -383,11 +383,33 @@ let reconstructor_recursion _ctxt =
       assert_equal ~printer:Int.to_string 4 (Cfg.number_of_nodes cfg)
   | _ -> assert_string "expected one reconstructed subroutine"
 
+let test_reuse (arch, samples) ctxt =
+  Toplevel.reset ();
+  let result =
+    Dis.with_disasm ~backend:"llvm" arch ~f:(fun dis ->
+        let dis = Dis.store_kinds dis in
+        List.init 3 ~f:(fun _ ->
+            List.map samples ~f:(fun (data, expected, kinds) ->
+                let mem = memory_of_string data in
+                Dis.insn_of_mem dis mem >>| function
+                | _, None, _ -> assert_string "bad instruction"
+                | mem, Some insn, _ ->
+                    assert_strings_equal ctxt expected (strings_of_insn insn);
+                    assert_equal ~ctxt ~printer:Int.to_string
+                      (String.length data) (Memory.length mem);
+                    List.iter kinds ~f:(fun kind ->
+                        assert_bool "missing instruction kind"
+                          (Dis.Insn.is insn kind))))
+        |> List.concat |> Or_error.all >>| ignore)
+  in
+  Or_error.ok_exn result
+
 let suite () =
   "Disasm.Basic"
   >::: [
          "x86_64/one" >:: test_insn_of_mem x86_64;
          "x86_64/all" >:: test_run_all x86_64;
+         "x86_64/reuse" >:: test_reuse x86_64;
          "recurse" >:: test_cfg amount;
          "addresses" >:: test_cfg addresses;
          "structure" >:: test_cfg structure;

@@ -91,10 +91,19 @@ type disassembler = {
   dd : C.t;
   insn_table : Table.t;
   reg_table : Table.t;
+  insn_names : (string * string) Int.Table.t;
   mutable users : int;
 }
 
-type dis = { name : string; enc : string; asm : bool; kinds : bool }
+let sexp_of_disassembler _ = Sexp.Atom "#disassembler"
+
+type dis = {
+  name : string;
+  disassembler : disassembler;
+  enc : string;
+  asm : bool;
+  kinds : bool;
+}
 [@@deriving sexp_of]
 
 type ('a, 'k) t = dis
@@ -107,11 +116,7 @@ type constructor = Theory.target -> (empty, empty) t Or_error.t
 let constructors : (Theory.language, constructor) Hashtbl.t =
   Hashtbl.create (module Theory.Language)
 
-let get { name } =
-  match Hashtbl.find disassemblers name with
-  | Some d -> d
-  | None -> invalid_argf "Trying to access a closed disassembler %s" name ()
-
+let get { disassembler } = disassembler
 let ( !! ) h = (get h).dd
 
 module Reg = struct
@@ -346,12 +351,16 @@ module Insn = struct
     in
     let subs = Array.init (Hashtbl.length subs) ~f:(Hashtbl.find_exn subs) in
     let code = C.insn_code !!dis ~insn in
-    let fullname =
+    let name, encoding =
+      let disassembler = get dis in
       let off = C.insn_name !!dis ~insn in
-      KB.Name.read ~package:dis.enc @@ Table.lookup (get dis).insn_table off
+      Hashtbl.find_or_add disassembler.insn_names off ~default:(fun () ->
+          let fullname =
+            KB.Name.read ~package:dis.enc
+            @@ Table.lookup disassembler.insn_table off
+          in
+          (KB.Name.unqualified fullname, KB.Name.package fullname))
     in
-    let name = KB.Name.unqualified fullname
-    and encoding = KB.Name.package fullname in
     let insn = Option.value parent ~default:insn in
     let asm =
       if asm then (
@@ -539,6 +548,7 @@ let init dd =
     dd;
     insn_table = Table.create (C.insn_table dd);
     reg_table = Table.create (C.reg_table dd);
+    insn_names = Int.Table.create ();
     users = 1;
   }
 
@@ -573,7 +583,14 @@ let lookup target encoding =
   match Hashtbl.find disassemblers name with
   | Some d ->
       d.users <- d.users + 1;
-      Ok { name; asm = false; kinds = false; enc = encoding_name encoding }
+      Ok
+        {
+          name;
+          disassembler = d;
+          asm = false;
+          kinds = false;
+          enc = encoding_name encoding;
+        }
   | None -> (
       match Hashtbl.find constructors encoding with
       | None ->
@@ -590,13 +607,13 @@ let create ?(debug_level = 0) ?(cpu = "") ?(attrs = "") ?(backend = "llvm")
   match Hashtbl.find disassemblers name with
   | Some d ->
       d.users <- d.users + 1;
-      Ok { name; asm = false; kinds = false; enc = name }
+      Ok { name; disassembler = d; asm = false; kinds = false; enc = name }
   | None -> (
       match Prim.create ~backend ~triple ~cpu ~attrs ~debug_level with
       | n when n >= 0 ->
           let disassembler = init @@ C.create (module Prim) n in
           Hashtbl.add_exn disassemblers ~key:name ~data:disassembler;
-          Ok { name; asm = false; kinds = false; enc = name }
+          Ok { name; disassembler; asm = false; kinds = false; enc = name }
       | -2 -> errorf "Unknown backend: %s" backend
       | -3 -> errorf "Unsupported target: %s %s" triple cpu
       | n -> errorf "Disasm.Basic: Unknown error %d" n)
@@ -606,11 +623,23 @@ let custom target encoding backend t =
   match Hashtbl.find disassemblers name with
   | Some d ->
       d.users <- d.users + 1;
-      { name; asm = false; kinds = false; enc = encoding_name encoding }
+      {
+        name;
+        disassembler = d;
+        asm = false;
+        kinds = false;
+        enc = encoding_name encoding;
+      }
   | None ->
       let disassembler = init @@ C.create backend t in
       Hashtbl.add_exn disassemblers ~key:name ~data:disassembler;
-      { name; asm = false; kinds = false; enc = encoding_name encoding }
+      {
+        name;
+        disassembler;
+        asm = false;
+        kinds = false;
+        enc = encoding_name encoding;
+      }
 
 let close dis =
   let disassembler = get dis in

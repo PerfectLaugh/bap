@@ -52,7 +52,7 @@ struct disassembler_interface {
     virtual table reg_table() const = 0;
 
     // returns last disassembled instruction
-    virtual insn get_insn() const = 0;
+    virtual const insn& get_insn() const = 0;
 
     // returns a disassembly string of a current instruction.
     virtual std::string get_asm() const = 0;

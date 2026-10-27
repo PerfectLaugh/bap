@@ -455,7 +455,7 @@ public:
         }
     }
 
-    insn get_insn() const {
+    const insn& get_insn() const {
         return current;
     }
 
@@ -528,6 +528,7 @@ private:
 
     insn valid_insn(location loc) const {
         insn ins;
+        ins.ops.reserve(mcinst.getNumOperands());
 
         for (std::size_t i = 0; i < mcinst.getNumOperands(); ++i) {
             const llvm::MCOperand &op = mcinst.getOperand(i);

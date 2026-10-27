@@ -541,7 +541,7 @@ public:
         }
     }
 
-    virtual bap::insn get_insn() const {
+    virtual const bap::insn& get_insn() const {
         return current;
     }
 
