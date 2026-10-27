@@ -430,7 +430,31 @@ module Trace : sig
       recorded. *)
 
   val stop : t -> unit
-  (** [stop trace] stops recording, the trace keeps the records *)
+  (** [stop trace] stops recording, the trace keeps the records. It is safe to
+      call [stop] on an already stopped or detached trace. *)
+
+  val resume : t -> unit
+  (** [resume trace] resumes recording with the configuration passed to
+      {!start}, or restored by {!restore_state}, without resetting the retained
+      records, absolute indices, or sampling cursors. It does nothing if the
+      trace is already recording. *)
+
+  val save_state : t -> string -> unit
+  (** [save_state trace file] atomically writes a versioned binary snapshot of
+      the complete native trace, including retained records, absolute indices,
+      ring and sampling cursors, accesses, slice boundaries, and embedded native
+      captures, together with the target, program identity, and hook
+      configuration. The trace may be recording or stopped. Raises [Failure]
+      with the operation and file or program error on failure. *)
+
+  val restore_state : emu -> string -> t
+  (** [restore_state emu file] loads a snapshot written by {!save_state}, checks
+      its format, version, target, program identity, metadata, and native
+      shapes, and returns a detached trace with no live hooks. The saved trace
+      is associated with [emu] for decoding and slicing; call {!resume} to
+      continue recording on that emulator. Raises [Failure] with a clear error
+      if the snapshot cannot be read, decoded, validated, or matched to [emu].
+  *)
 
   val count : t -> int64
   (** the number of the recorded instructions, or blocks, also of those, that

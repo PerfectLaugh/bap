@@ -1265,6 +1265,44 @@ let emu data =
               out
               (engine ^ ": capture state ok\n"))
           [ "unicorn"; "lifted" ]);
+    (* durable traces restore without hooks in another process, then resume with
+       their original indices, cursors, ranges, accesses, branches, and slices *)
+    case "emu/trace-state" (fun env ->
+        let run mode engine =
+          bap ~timeout:55. env
+            [
+              "script";
+              input "emu/trace-state.ml";
+              mode;
+              path data "bin/x86_64-linux-gnu-slice";
+              engine;
+              dir env;
+              path data "bin/x86_64-linux-gnu-echo";
+              path data "bin/aarch64-linux-gnu-echo";
+            ]
+        in
+        List.iter
+          (fun engine ->
+            let reference = run "reference" engine in
+            check env
+              (engine ^ " reference run failed")
+              (reference.status = Exited 0);
+            let produced = run "produce" engine in
+            check env (engine ^ " producer failed") (produced.status = Exited 0);
+            has env
+              (engine ^ " producer checks")
+              produced
+              (engine ^ " producer ok\n");
+            let consumed = run "consume" engine in
+            check env (engine ^ " consumer failed") (consumed.status = Exited 0);
+            check env
+              (engine ^ " consumer comparison")
+              (String.equal
+                 (In_channel.with_open_bin
+                    (file env (engine ^ ".consumer-ok"))
+                    In_channel.input_all)
+                 "ok\n"))
+          [ "unicorn"; "lifted" ]);
     (* the trace, that watches a range, records its accesses only, see
        the script *)
     case "emu/watch" (fun env ->

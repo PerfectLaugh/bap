@@ -1708,12 +1708,26 @@ module Trace = struct
         (** if all accesses are recorded, which the slices follow, not only the
             ones, that the trace watches *)
     watch : (int64 * int64) option;
+    first : int64 option;
+    last : int64 option;
     mutable active : bool;
     mutable hooks : Engine.hook list option;
     blocks : (int * int64 array) list Int64.Table.t;
         (** the instructions of the blocks, by their addresses, with the lower
             bit of Thumb, and sizes, see [insns] *)
   }
+
+  let own t =
+    let owned_trace = Weak.create 1 and owned_blocks = Weak.create 1 in
+    Weak.set owned_trace 0 (Some t.trace);
+    Weak.set owned_blocks 0 (Some t.blocks);
+    t.emu.traces <- (owned_trace, owned_blocks) :: t.emu.traces
+
+  let install t (e : X.engine) =
+    t.hooks <-
+      Some
+        (Engine.trace ?first:t.first ?last:t.last ?watch:t.watch
+           ~memory:t.memory e.engine t.trace)
 
   (* the hooks are native, see [Engine.trace], and go to the new engines too,
      until the trace stops *)
@@ -1734,26 +1748,21 @@ module Trace = struct
     let trace =
       Engine.Trace.create ?every ~blocks ~accesses ~read_values size
     in
-    let blocks = Int64.Table.create () in
     let t =
       {
         emu;
         trace;
         memory = memory && Option.is_none watch;
         watch;
+        first;
+        last;
         active = true;
         hooks = None;
-        blocks;
+        blocks = Int64.Table.create ();
       }
     in
-    let owned_trace = Weak.create 1 and owned_blocks = Weak.create 1 in
-    Weak.set owned_trace 0 (Some trace);
-    Weak.set owned_blocks 0 (Some blocks);
-    emu.traces <- (owned_trace, owned_blocks) :: emu.traces;
-    installed emu (fun e ->
-        if t.active then
-          t.hooks <-
-            Some (Engine.trace ?first ?last ?watch ~memory e.engine trace));
+    own t;
+    installed emu (fun e -> if t.active then install t e);
     t
 
   (* the hooks of a closed engine are gone with it *)
@@ -1765,6 +1774,170 @@ module Trace = struct
               try Engine.delete hook with Invalid_argument _ -> ()));
       t.hooks <- None
     end
+
+  let resume t =
+    if not t.active then begin
+      t.active <- true;
+      Option.iter t.emu.session.active ~f:(fun e ->
+          if Option.is_none t.hooks then install t e)
+    end
+
+  module Saved_state = struct
+    type reg = int * int * int [@@deriving bin_io]
+    type field = int * int * int * int64 * int [@@deriving bin_io]
+
+    type capture = Engine.Trace.State.record = {
+      site : int64;
+      index : int64;
+      thread : int;
+      regs : int64 array;
+      fields : int64 option array;
+    }
+    [@@deriving bin_io]
+
+    type native = Engine.Trace.Snapshot.state = {
+      capacity : int;
+      every : int;
+      blocks : bool;
+      access_capacity : int;
+      read_values : bool;
+      count : int64;
+      skip : int64;
+      thread : int64;
+      pcs : int64 array;
+      tids : int64 array;
+      sizes : int32 array;
+      modes : int array;
+      accesses_count : int64;
+      access_records : int64 array;
+      bounds_count : int64;
+      ranges_count : int64;
+      bounds : int64 array;
+      ranges : int64 array;
+      capture_sites : int64 array;
+      capture_regs : reg array;
+      capture_fields : field array;
+      captures_count : int64;
+      captures : capture array;
+    }
+    [@@deriving bin_io]
+
+    type t = {
+      target : string;
+      digest : string;
+      memory : bool;
+      watch : (int64 * int64) option;
+      first : int64 option;
+      last : int64 option;
+      state : native;
+    }
+    [@@deriving bin_io]
+
+    let prefix = "bap-emu-trace-state "
+    let magic = prefix ^ "1\n"
+  end
+
+  let program_digest ~fn emu =
+    match Project.get emu.project filename with
+    | None ->
+        failwithf "Bap_emu.Trace.%s: the emulator has no program file" fn ()
+    | Some file -> (
+        try Checkpoint.C.digest file
+        with Sys_error msg -> failwithf "Bap_emu.Trace.%s: %s" fn msg ())
+
+  let remove file = try Stdlib.Sys.remove file with Sys_error _ -> ()
+
+  let save_state t file =
+    let saved =
+      {
+        Saved_state.target =
+          Bap_core_theory.Theory.Target.to_string t.emu.target;
+        digest = program_digest ~fn:"save_state" t.emu;
+        memory = t.memory;
+        watch = t.watch;
+        first = t.first;
+        last = t.last;
+        state = Engine.Trace.Snapshot.export t.trace;
+      }
+    in
+    let data = Binable.to_string (module Saved_state) saved in
+    match
+      Stdlib.Filename.temp_file
+        ~temp_dir:(Stdlib.Filename.dirname file)
+        (Stdlib.Filename.basename file)
+        ".tmp"
+    with
+    | exception Sys_error msg -> failwithf "Bap_emu.Trace.save_state: %s" msg ()
+    | tmp -> (
+        try
+          Out_channel.with_file ~binary:true tmp ~f:(fun out ->
+              Out_channel.output_string out Saved_state.magic;
+              Out_channel.output_string out data);
+          Stdlib.Sys.rename tmp file
+        with Sys_error msg ->
+          remove tmp;
+          failwithf "Bap_emu.Trace.save_state: %s" msg ())
+
+  let restore_state emu file =
+    let data =
+      try In_channel.read_all file
+      with Sys_error msg -> failwithf "Bap_emu.Trace.restore_state: %s" msg ()
+    in
+    match String.chop_prefix data ~prefix:Saved_state.magic with
+    | None ->
+        if String.is_prefix data ~prefix:Saved_state.prefix then
+          failwithf "Bap_emu.Trace.restore_state: %s has an unsupported version"
+            file ()
+        else
+          failwithf "Bap_emu.Trace.restore_state: %s has another format" file ()
+    | Some data -> (
+        let saved =
+          try Binable.of_string (module Saved_state) data
+          with exn ->
+            failwithf "Bap_emu.Trace.restore_state: %s is broken: %s" file
+              (Exn.to_string exn) ()
+        in
+        let target = Bap_core_theory.Theory.Target.to_string emu.target in
+        if not (String.equal target saved.Saved_state.target) then
+          failwithf "Bap_emu.Trace.restore_state: %s is for another target" file
+            ();
+        let digest = program_digest ~fn:"restore_state" emu in
+        if not (String.equal digest saved.Saved_state.digest) then
+          failwithf "Bap_emu.Trace.restore_state: %s is for another program"
+            file ();
+        if
+          not
+            (Bool.equal saved.Saved_state.memory
+               (saved.Saved_state.state.access_capacity > 0
+               && Option.is_none saved.Saved_state.watch))
+        then
+          failwithf
+            "Bap_emu.Trace.restore_state: %s has inconsistent hook metadata"
+            file ();
+        match Engine.Trace.Snapshot.import saved.Saved_state.state with
+        | exception Invalid_argument msg ->
+            failwithf
+              "Bap_emu.Trace.restore_state: %s has invalid native state: %s"
+              file msg ()
+        | trace ->
+            let t =
+              {
+                emu;
+                trace;
+                memory = saved.Saved_state.memory;
+                watch = saved.Saved_state.watch;
+                first = saved.Saved_state.first;
+                last = saved.Saved_state.last;
+                active = false;
+                hooks = None;
+                blocks = Int64.Table.create ();
+              }
+            in
+            own t;
+            emu.session.engine_hooks <-
+              (fun e -> if t.active then install t e)
+              :: emu.session.engine_hooks;
+            t)
 
   let count t = Engine.Trace.count t.trace
   let retained t = Engine.Trace.retained t.trace
