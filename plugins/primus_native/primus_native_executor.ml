@@ -3028,10 +3028,21 @@ module Make (Machine : Primus.Machine.S) = struct
     let none : Primus.Memory.protection =
       { readable = false; writable = false; executable = false }
     in
-    let+ loaded = Memory.load_bytes base (Bytes.length bytes) in
+    let* loaded = Memory.load_bytes base (Bytes.length bytes) in
+    let execute_only =
+      Array.exists loaded ~f:(function
+        | Some (_, (p : Primus.Memory.protection)) ->
+            p.executable && not p.readable
+        | None -> false)
+    in
+    let+ code =
+      if execute_only then Memory.peek base (Bytes.length bytes)
+      else Machine.return ""
+    in
     let holes, access =
       Array.foldi loaded ~init:([], none) ~f:(fun i (holes, access) -> function
         | Some (c, p) ->
+            let c = if p.executable && not p.readable then code.[i] else c in
             Bytes.set bytes i c;
             (holes, union access p)
         | None -> (

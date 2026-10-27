@@ -2391,7 +2391,15 @@ module Trace = struct
       let wanted =
         if block then max size (32 * Primus.Lift.max_size) else size
       in
-      let bytes = read_prefix t.emu pc wanted in
+      let lifted =
+        if Option.is_some t.emu.session.lifter then lifted_bytes t.emu pc wanted
+        else ""
+      in
+      let have = String.length lifted in
+      let bytes =
+        if have = wanted then lifted
+        else lifted ^ read_prefix t.emu Int64.(pc + of_int have) (wanted - have)
+      in
       if String.length bytes < size then
         journal_error t
           (sprintf "Bap_emu.Trace: cannot capture %d bytes at %Lx" size pc);

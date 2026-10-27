@@ -1331,6 +1331,34 @@ let emu data =
                   (Printf.sprintf "%s blocks %b: journal ok\n" engine blocks))
               [ false; true ])
           [ "unicorn"; "lifted" ]);
+    case "emu/code-versions" (fun env ->
+        List.iter
+          (fun engine ->
+            List.iter
+              (fun blocks ->
+                let out =
+                  bap ~timeout:55. env
+                    [
+                      "script";
+                      input "emu/code-versions.ml";
+                      path data "bin/aarch64-linux-gnu-echo";
+                      dir env;
+                      engine;
+                      Bool.to_string blocks;
+                    ]
+                in
+                check env
+                  (Printf.sprintf "%s blocks %b code-version run failed" engine
+                     blocks)
+                  (out.status = Exited 0);
+                has env
+                  (Printf.sprintf "%s blocks %b code-version checks" engine
+                     blocks)
+                  out
+                  (Printf.sprintf "%s blocks %b: execute-only restore ok\n"
+                     engine blocks))
+              [ false; true ])
+          [ "unicorn"; "lifted" ]);
     (* the trace, that watches a range, records its accesses only, see
        the script *)
     case "emu/watch" (fun env ->
