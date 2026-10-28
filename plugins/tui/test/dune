@@ -1,0 +1,13 @@
+(test
+ (name run_tests)
+ (package bap-tui)
+ (libraries bap bap-core-theory bap-llvm bap-tui bap-x86 core lambda-term)
+ (deps ../../../testsuite/bin/x86_64-linux-gnu-printf)
+ (action
+  (setenv
+   TEST_TUI_BINARY
+   %{dep:../../../testsuite/bin/x86_64-linux-gnu-printf}
+   (setenv
+    TEST_BAP
+    %{exe:../../../src/bap_frontend.exe}
+    (run %{test})))))

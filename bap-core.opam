@@ -24,6 +24,7 @@ depends: [
   "bap-callsites" {= version}
   "bap-c" {= version}
   "bap-decompile" {= version}
+  "bap-tui" {= version}
   "bap-demangle" {= version}
   "bap-dependencies" {= version}
   "bap-disassemble" {= version}

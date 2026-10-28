@@ -65,6 +65,7 @@
   (bap-callsites (= :version))
   (bap-c (= :version))
   (bap-decompile (= :version))
+  (bap-tui (= :version))
   (bap-demangle (= :version))
   (bap-dependencies (= :version))
   (bap-disassemble (= :version))
@@ -410,6 +411,27 @@ details of the program behavior.")
   (bap-main (= :version))
   core
   (bap-common (= :version))))
+
+(package
+ (name bap-tui)
+ (synopsis "Interactive Ghidra-like terminal workspace for BAP")
+ (tags (bap bap-plugin bap-library tui terminal))
+ (depends
+  (bap-decompile (= :version))
+  (bap-main (= :version))
+  core
+  lambda-term
+  lwt
+  (ppx_bap (= :version))
+  (bap-common (= :version))
+  (bap-llvm :with-test)
+  (bap-arm :with-test)
+  (bap-mips :with-test)
+  (bap-powerpc :with-test)
+  (bap-riscv :with-test)
+  (bap-systemz :with-test)
+  (bap-thumb :with-test)
+  (bap-x86 :with-test)))
 
 (package
  (name bap-decompile)

@@ -1,0 +1,14 @@
+(library
+ (name bap_tui)
+ (public_name bap-tui)
+ (modules tui_model tui_view tui_action tui_main)
+ (preprocess
+  (pps ppx_bap))
+ (libraries bap bap-decompile bap-main core lambda-term lwt.unix))
+
+(plugin
+ (name tui)
+ (package bap-tui)
+ (libraries bap-tui)
+ (site
+  (bap-common plugins)))
