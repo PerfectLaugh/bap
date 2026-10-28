@@ -92,6 +92,12 @@ let rec expression ppf (expr : Ast.expression) =
   | Ast.Conditional (condition, yes, no) ->
       Format.fprintf ppf "%a ? %a : %a" (parenthesize 3) condition expression
         yes (parenthesize 2) no
+  | Ast.Aggregate fields ->
+      Format.fprintf ppf "{ ";
+      List.iteri fields ~f:(fun index (field, value) ->
+          if index > 0 then Format.fprintf ppf ", ";
+          Format.fprintf ppf ".%s = %a" field expression value);
+      Format.fprintf ppf " }"
   | Ast.Machine (name, arguments) ->
       Format.fprintf ppf "%s(%a)" name arguments_pp arguments
   | Ast.Raw_exp exp -> Format.fprintf ppf "bir_raw(%S)" (Exp.to_string exp)

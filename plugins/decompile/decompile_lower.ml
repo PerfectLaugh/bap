@@ -36,6 +36,7 @@ type env = {
   program : program term;
   sub : sub term;
   normalized : Ssa.t;
+  high : Decompile_high.t;
   cfg : Cfg.t option;
   mutable variables : Ast.variable Var.Map.t;
   mutable locals : Ast.variable list;
@@ -49,6 +50,7 @@ type env = {
 }
 
 let variable env var =
+  let var = Decompile_high.representative env.high var in
   match Map.find env.variables var with
   | Some variable -> variable
   | None ->
@@ -461,6 +463,11 @@ let lower_actual env jmp state location =
   in
   lower_exp env state (resolve location)
 
+let return_locations env =
+  match Types.return_locations env.types env.sub with
+  | [] | [ _ ] -> []
+  | locations -> locations
+
 let lower_call env state ?(tail = false) jmp =
   match Jmp.kind jmp with
   | Call call ->
@@ -478,13 +485,34 @@ let lower_call env state ?(tail = false) jmp =
                 lower_actual env jmp state parameter.Types.location))
       in
       let expression = call_expression env state target signature arguments in
-      let statement =
+      let statements =
         match (tail, signature.Ast.return) with
-        | true, _ -> Ast.Return (Some expression)
-        | false, Ast.Unknown 0 -> Ast.Expr expression
+        | true, _ -> [ Ast.Return (Some expression) ]
+        | false, Ast.Unknown 0 -> [ Ast.Expr expression ]
+        | false, Ast.Structure _ when not (List.is_empty (return_locations env))
+          ->
+            let temp = make_local env "return_value" signature.Ast.return in
+            let versions =
+              Option.bind (caller_block env jmp) ~f:(fun blk ->
+                  Map.find env.final_versions (Term.tid blk))
+              |> Option.value ~default:Var.Map.empty
+            in
+            Ast.Assign (Ast.var temp, expression)
+            :: List.map (return_locations env) ~f:(fun location ->
+                let var = resolve_variable env versions location.Types.var in
+                Ast.Assign
+                  ( Ast.var (variable env var),
+                    {
+                      Ast.node =
+                        Ast.Field
+                          ( Ast.var temp,
+                            location.Types.field,
+                            location.Types.offset );
+                      typ = location.Types.typ;
+                    } ))
         | false, _ -> (
             match return_variable env with
-            | None -> Ast.Expr expression
+            | None -> [ Ast.Expr expression ]
             | Some base ->
                 let versions =
                   Option.bind (caller_block env jmp) ~f:(fun blk ->
@@ -492,23 +520,25 @@ let lower_call env state ?(tail = false) jmp =
                   |> Option.value ~default:Var.Map.empty
                 in
                 let var = resolve_variable env versions base in
-                Ast.Assign (Ast.var (variable env var), expression))
+                [ Ast.Assign (Ast.var (variable env var), expression) ])
       in
-      let statement =
+      let statements =
         match (tail, Call.return call) with
-        | false, Some (Direct _) | false, None -> statement
+        | false, Some (Direct _) | false, None -> statements
         | false, Some (Indirect exp) ->
-            Ast.Expr
-              {
-                Ast.node =
-                  Ast.Machine
-                    ( "bir_call_with_continuation",
-                      [ expression; lower_exp env state exp ] );
-                typ = Ast.Unknown 0;
-              }
-        | true, _ -> statement
+            [
+              Ast.Expr
+                {
+                  Ast.node =
+                    Ast.Machine
+                      ( "bir_call_with_continuation",
+                        [ expression; lower_exp env state exp ] );
+                  typ = Ast.Unknown 0;
+                };
+            ]
+        | true, _ -> statements
       in
-      [ statement ]
+      statements
   | _ -> [ Ast.Raw_jump jmp ]
 
 let return_shaped env jmp =
@@ -520,17 +550,34 @@ let return_shaped env jmp =
       | Indirect _ -> true)
   | _ -> false
 
+let return_aggregate env state =
+  match return_locations env with
+  | [] -> None
+  | locations ->
+      Some
+        {
+          Ast.node =
+            Ast.Aggregate
+              (List.map locations ~f:(fun location ->
+                   let var = resolve_variable env state location.Types.var in
+                   (location.Types.field, Ast.var (variable env var))));
+          typ = (Types.signature env.types env.sub).Ast.return;
+        }
+
 let lower_exit env state jmp =
   match Jmp.kind jmp with
   | (Ret _ | Call _) when return_shaped env jmp -> (
-      match return_variable env with
-      | None -> [ Ast.Return None ]
-      | Some base -> (
-          match Types.signature env.types env.sub with
-          | { return = Ast.Unknown 0; _ } -> [ Ast.Return None ]
-          | _ ->
-              let var = resolve_variable env state base in
-              [ Ast.Return (Some (Ast.var (variable env var))) ]))
+      match return_aggregate env state with
+      | Some expression -> [ Ast.Return (Some expression) ]
+      | None -> (
+          match return_variable env with
+          | None -> [ Ast.Return None ]
+          | Some base -> (
+              match Types.signature env.types env.sub with
+              | { return = Ast.Unknown 0; _ } -> [ Ast.Return None ]
+              | _ ->
+                  let var = resolve_variable env state base in
+                  [ Ast.Return (Some (Ast.var (variable env var))) ])))
   | Goto (Direct tid as target)
     when Option.is_some (Term.find sub_t env.program tid) ->
       let call = Call.create ~target () in
@@ -682,7 +729,7 @@ let lower_sub env id =
   let body =
     if Term.length blk_t env.sub = 0 then []
     else
-      Decompile_structure.structure (Option.value_exn env.cfg)
+      Decompile_collapse.structure (Option.value_exn env.cfg)
         ~block:(lower_block env) ~edge:(lower_edge env)
         ~call:(fun jmp ->
           let state =
@@ -720,7 +767,11 @@ let lower_sub env id =
     external_ = Term.length blk_t env.sub = 0;
   }
 
-let decompile ?(concise = false) ~target prog =
+let decompile ?(concise = false) ~target ?memory prog =
+  let prog =
+    Option.value_map memory ~default:prog ~f:(fun memory ->
+        Decompile_jump.recover ~memory prog)
+  in
   let normalized =
     Term.enum sub_t prog |> Seq.to_list
     |> List.map ~f:(fun sub -> (Term.tid sub, Ssa.normalize ~target sub))
@@ -769,6 +820,7 @@ let decompile ?(concise = false) ~target prog =
             program = prog;
             sub;
             normalized;
+            high = Decompile_high.create normalized.Ssa.sub;
             cfg;
             variables;
             locals = [];
@@ -783,5 +835,6 @@ let decompile ?(concise = false) ~target prog =
         in
         lower_sub env id)
   in
-  let program = { Ast.structures; functions } in
-  if concise then Decompile_optimize.program program else program
+  let program = { Ast.structures; functions } |> Decompile_cast.program in
+  if concise then Decompile_optimize.program program |> Decompile_cast.program
+  else program

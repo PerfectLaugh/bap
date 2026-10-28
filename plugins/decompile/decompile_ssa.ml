@@ -244,7 +244,7 @@ let copies sub src dst =
           Option.map (Phi.select phi src) ~f:(fun exp -> (Phi.lhs phi, exp)))
 
 let normalize ~target sub =
-  let sub = Decompile_simplify.sub sub in
+  let sub = Decompile_simplify.sub sub |> Decompile_range.simplify_sub in
   let live = liveness sub in
   let sub = remove_dead ~target sub live in
   let sub = Term.map blk_t sub ~f:(propagate_block ~target) in

@@ -4,11 +4,17 @@
  (modules
   bap_decompile
   decompile_ast
+  decompile_cast
   decompile_cfg
   decompile_cleanup
+  decompile_collapse
   decompile_emit
+  decompile_high
+  decompile_jump
   decompile_lower
   decompile_optimize
+  decompile_range
+  decompile_rule
   decompile_simplify
   decompile_ssa
   decompile_structure

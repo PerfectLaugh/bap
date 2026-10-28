@@ -21,7 +21,7 @@ let dummy_condition _ _ = { Ast.node = Ast.Const Word.b1; typ = Ast.Bool }
 
 let structured sub =
   let cfg = Cfg.analyze sub in
-  Structure.structure cfg
+  Collapse.structure cfg
     ~block:(fun _ -> [])
     ~edge:(fun _ -> [])
     ~call:(fun _ -> [])
@@ -108,6 +108,16 @@ let test_irreducible () =
   let ast = structured sub in
   check "irreducible goto"
     (exists_statement (function Ast.Goto _ -> true | _ -> false) ast)
+
+let test_forward_collapse () =
+  let next = block [ return () ] in
+  let sub = Sub.create ~name:"forward" ~blks:[ block [ goto next ]; next ] () in
+  let ast = structured sub in
+  check "forward single predecessor collapse"
+    (not
+       (exists_statement
+          (function Ast.Goto _ | Ast.Label _ -> true | _ -> false)
+          ast))
 
 let target () = Theory.Target.get ~package:"bap" "x86_64"
 
@@ -277,6 +287,26 @@ let test_parallel_copies () =
   check
     ("parallel phi temporaries\n" ^ output)
     (String.is_substring output ~substring:"phi_")
+
+let test_killed_parameter () =
+  let rdi = physical "RDI" 64 and rax = physical "RAX" 64 in
+  let after = block ~defs:[ Def.create rax (Bil.var rdi) ] [ return () ] in
+  let callee = Sub.create ~name:"callee" () in
+  let call =
+    Jmp.create_call
+      (Call.create
+         ~return:(Direct (Term.tid after))
+         ~target:(Direct (Term.tid callee))
+         ())
+  in
+  let caller = Sub.create ~name:"caller" ~blks:[ block [ call ]; after ] () in
+  let types =
+    Types.infer ~target:(target ()) (Program.create ~subs:[ callee; caller ] ())
+  in
+  check "parameter killed by call"
+    (not
+       (List.exists (Types.parameters types caller) ~f:(fun parameter ->
+            String.equal parameter.Types.name "RDI")))
 
 let test_implicit_parameters () =
   let rdi = physical "RDI" 64 and rax = physical "RAX" 64 in
@@ -687,6 +717,15 @@ let test_concise_source_forms () =
     when value.Ast.id = narrow.Ast.id ->
       ()
   | _ -> failwith "concise register concatenation");
+  let cast_type = Ast.Int (32, Ast.Unknown_sign) in
+  let cast =
+    { Ast.node = Ast.Cast (cast_type, Ast.var narrow); typ = cast_type }
+  in
+  (match Optimize.statements [ Ast.Return (Some cast) ] with
+  | [ Ast.Return (Some { node = Ast.Var value; _ }) ]
+    when value.Ast.id = narrow.Ast.id ->
+      ()
+  | _ -> failwith "concise same-width cast");
   let less left right =
     { Ast.node = Ast.Binary ("<", left, right); typ = Ast.Bool }
   in
@@ -844,6 +883,56 @@ let test_concise () =
     ("concise barrier preserves result\n" ^ barrier_output)
     (String.is_substring barrier_output ~substring:"return v_x + 7")
 
+let test_multi_return () =
+  let r64 = Theory.Bitv.define 64 in
+  let registers =
+    List.map [ "RAX"; "RDX" ] ~f:(fun name ->
+        Theory.Var.forget (Theory.Var.define r64 name))
+  in
+  let target =
+    Theory.Target.declare ~package:"decompile-test" "multi-return"
+      ~parent:(target ()) ~bits:64 ~vars:registers
+      ~regs:Theory.Role.Register.[ ([ function_return ], registers) ]
+  in
+  let rax = physical "RAX" 64 and rdx = physical "RDX" 64 in
+  let callee =
+    Sub.create ~name:"callee"
+      ~blks:
+        [
+          block
+            ~defs:[ Def.create rax (int 1); Def.create rdx (int 2) ]
+            [ return () ];
+        ]
+      ()
+  in
+  let after =
+    block
+      ~defs:[ Def.create rax (Bil.BinOp (PLUS, Bil.var rax, Bil.var rdx)) ]
+      [ return () ]
+  in
+  let call =
+    Jmp.create_call
+      (Call.create
+         ~return:(Direct (Term.tid after))
+         ~target:(Direct (Term.tid callee))
+         ())
+  in
+  let caller = Sub.create ~name:"caller" ~blks:[ block [ call ]; after ] () in
+  let output =
+    decompile ~target (Program.create ~subs:[ callee; caller ] ()) |> to_string
+  in
+  List.iter
+    [
+      "struct recovered_";
+      ".field_0 = v_RAX";
+      ".field_8 = v_RDX";
+      "return_value.field_0";
+      "return_value.field_8";
+    ] ~f:(fun expected ->
+      check
+        ("multi return lacks " ^ expected ^ "\n" ^ output)
+        (String.is_substring output ~substring:expected))
+
 let test_external_and_emitter () =
   let external_sub = Sub.create ~name:"external" () in
   let x = physical "x" 32 and y = physical "y" 32 in
@@ -870,6 +959,229 @@ let test_external_and_emitter () =
     (not (String.is_substring output ~substring:"bir_sub_"));
   if not (String.is_substring output ~substring:"(v_x + v_y) *") then
     failwith ("emitter precedence\n" ^ output)
+
+let test_ranges_and_conditional_move () =
+  let sum = Bil.BinOp (PLUS, int 1, int 2) in
+  check "range exact arithmetic"
+    (Option.equal Word.equal
+       (Range.value (Range.eval Var.Map.empty sum))
+       (Some (Word.of_int ~width:64 3)));
+  let x = var "range-x" 32 and result = var "range-result" 1 in
+  let extended = Bil.Cast (UNSIGNED, 64, Bil.var x) in
+  check "range unsigned sign"
+    (Range.sign_nonnegative (Range.eval Var.Map.empty extended));
+  let comparison = Def.create result (Bil.BinOp (SLT, extended, int 3)) in
+  let sub =
+    Sub.create ~name:"range"
+      ~blks:[ block ~defs:[ comparison ] [ return () ] ]
+      ()
+    |> Range.simplify_sub
+  in
+  let def =
+    Term.first def_t (Term.first blk_t sub |> Option.value_exn)
+    |> Option.value_exn
+  in
+  check "signed to unsigned comparison"
+    (match Def.rhs def with Bil.BinOp (LT, _, _) -> true | _ -> false);
+  let joined =
+    Range.join_ranges
+      (Range.constant (Word.of_int ~width:32 7))
+      (Range.constant (Word.of_int ~width:32 7))
+  in
+  check "range exact phi join"
+    (Option.equal Word.equal (Range.value joined)
+       (Some (Word.of_int ~width:32 7)));
+  let typ = Ast.Int (32, Ast.Signed) in
+  let destination = { Ast.id = 1; name = "destination"; typ } in
+  let condition = { Ast.id = 2; name = "condition"; typ = Ast.Bool } in
+  let left = { Ast.node = Ast.Const (Word.of_int ~width:32 10); typ } in
+  let right = { Ast.node = Ast.Const (Word.of_int ~width:32 20); typ } in
+  let diamond =
+    Ast.If
+      ( Ast.var condition,
+        [ Ast.Assign (Ast.var destination, left) ],
+        [ Ast.Assign (Ast.var destination, right) ] )
+  in
+  (match Optimize.statements [ diamond ] with
+  | [ Ast.Assign (_, { node = Ast.Conditional _; _ }) ] -> ()
+  | _ -> failwith "conditional move");
+  let call =
+    {
+      Ast.node =
+        Ast.Call
+          {
+            target =
+              {
+                Ast.node = Ast.Var { destination with name = "fn" };
+                typ = Ast.Function (Ast.signature []);
+              };
+            arguments = [];
+            result = typ;
+          };
+      typ;
+    }
+  in
+  match
+    Optimize.statements
+      [
+        Ast.If
+          ( Ast.var condition,
+            [ Ast.Assign (Ast.var destination, call) ],
+            [ Ast.Assign (Ast.var destination, right) ] );
+      ]
+  with
+  | [ Ast.Assign (_, { node = Ast.Conditional _; _ }) ] ->
+      failwith "conditional move side effects"
+  | _ -> ()
+
+let test_jump_tables () =
+  let index = var "switch-index" 32
+  and mem = Var.create "mem" (Type.Mem (`r64, `r8)) in
+  let first = Sub.create ~name:"first" ()
+  and second = Sub.create ~name:"second" () in
+  let first = Term.set_attr first address (Word.of_int ~width:64 0x2000) in
+  let second = Term.set_attr second address (Word.of_int ~width:64 0x3000) in
+  let target = block [ return () ] in
+  let table = Bil.Int (Word.of_int ~width:64 0x1000) in
+  let address =
+    Bil.BinOp
+      ( PLUS,
+        table,
+        Bil.BinOp
+          (TIMES, Bil.Cast (UNSIGNED, 64, Bil.var index), int ~width:64 8) )
+  in
+  let indirect =
+    Jmp.create_goto
+      (Indirect (Bil.Load (Bil.var mem, address, LittleEndian, `r64)))
+  in
+  let switch = block [ indirect ] in
+  let guard =
+    block
+      [
+        goto ~condition:(Bil.BinOp (LT, Bil.var index, int ~width:32 2)) switch;
+      ]
+  in
+  let caller = Sub.create ~name:"caller" ~blks:[ guard; switch; target ] () in
+  let make_memory values =
+    let data = Bytes.make 16 '\000' in
+    List.iteri values ~f:(fun i value ->
+        Stdlib.Bytes.set_int64_le data (i * 8) (Int64.of_int value));
+    let mem =
+      Memory.create LittleEndian
+        (Word.of_int ~width:64 0x1000)
+        (Bigstring.of_bytes data)
+      |> Or_error.ok_exn
+    in
+    Memmap.add Memmap.empty mem (Value.create Image.section "table")
+  in
+  let recover values =
+    Jump.recover ~memory:(make_memory values)
+      (Program.create ~subs:[ first; second; caller ] ())
+  in
+  let check_targets prog =
+    let caller = Term.find_exn sub_t prog (Term.tid caller) in
+    let switch = List.nth_exn (Term.enum blk_t caller |> Seq.to_list) 1 in
+    let jmps = Term.enum jmp_t switch |> Seq.to_list in
+    check "jump table branch count" (List.length jmps = 2);
+    List.iter
+      [ Term.tid first; Term.tid second ]
+      ~f:(fun tid ->
+        check
+          ("jump table target " ^ Tid.to_string tid ^ "\n"
+          ^ String.concat ~sep:"\n" (List.map jmps ~f:Jmp.to_string))
+          (List.exists jmps ~f:(fun jmp ->
+               match Jmp.kind jmp with
+               | Goto (Direct target) -> Tid.equal tid target
+               | _ -> false)))
+  in
+  check_targets (recover [ 0x2000; 0x3000 ]);
+  check_targets (recover [ 0x1000; 0x2000 ]);
+  let invalid = recover [ 0; 0 ] in
+  let caller = Term.find_exn sub_t invalid (Term.tid caller) in
+  let switch = List.nth_exn (Term.enum blk_t caller |> Seq.to_list) 1 in
+  check "invalid jump table preserved"
+    (List.exists
+       (Term.enum jmp_t switch |> Seq.to_list)
+       ~f:(fun jmp ->
+         match Jmp.kind jmp with Goto (Indirect _) -> true | _ -> false))
+
+let test_rule_scheduler () =
+  let increment =
+    Rule.rule ~operations:[ "int" ] "increment" (fun value -> Some (value + 1))
+  in
+  let result, summary =
+    Rule.run ~limit:3
+      ~key:(fun _ -> "int")
+      ~equal:Int.equal
+      ~map:(fun f value -> f value)
+      [ increment ] 0
+  in
+  if not (result = 3 && summary.changes = 3) then
+    failwithf "rule pass cap: result=%d changes=%d" result summary.changes ();
+  check "rule application count"
+    (Option.equal Int.equal
+       (List.Assoc.find summary.applications "increment" ~equal:String.equal)
+       (Some 3));
+  let unused = Rule.rule ~operations:[ "other" ] "unused" (fun _ -> Some 99) in
+  let result, _ =
+    Rule.run ~limit:3
+      ~key:(fun _ -> "int")
+      ~equal:Int.equal
+      ~map:(fun f value -> f value)
+      [ unused; increment ] 0
+  in
+  check "rule operation indexing" (result = 3)
+
+let test_high_variables () =
+  let input = var "input" 64 and a = var "a" 64 and b = var "b" 64 in
+  let result = var "result" 64 in
+  let defs =
+    [
+      Def.create a (Bil.var input);
+      Def.create b (Bil.var a);
+      Def.create result (Bil.var b);
+    ]
+  in
+  let sub = Sub.create ~name:"high" ~blks:[ block ~defs [ return () ] ] () in
+  let high = High.create sub in
+  let root = High.representative high input in
+  check "copy chain source variable"
+    (List.for_all [ a; b; result ] ~f:(fun var ->
+         Var.equal root (High.representative high var)));
+  let first = var "version" 64 and second = var "version" 64 in
+  let use = var "use" 64 in
+  let defs =
+    [
+      Def.create first (int 1);
+      Def.create second (int 2);
+      Def.create use (Bil.var first);
+    ]
+  in
+  let sub = Sub.create ~name:"overlap" ~blks:[ block ~defs [ return () ] ] () in
+  let high = High.create sub in
+  check "overlapping source versions"
+    (not
+       (Var.equal
+          (High.representative high first)
+          (High.representative high second)));
+  let phi_result = var "phi" 64 in
+  let left = block [ return () ] and right = block [ return () ] in
+  let join =
+    Blk.create
+      ~phis:
+        [
+          Phi.of_list phi_result
+            [ (Term.tid left, Bil.var a); (Term.tid right, Bil.var b) ];
+        ]
+      ()
+  in
+  let high =
+    High.create (Sub.create ~name:"phi" ~blks:[ left; right; join ] ())
+  in
+  check "phi source merge"
+    (Var.equal
+       (High.representative high phi_result)
+       (High.representative high a))
 
 let test_architecture name expected =
   let target = Theory.Target.get ~package:"bap" name in
@@ -972,6 +1284,7 @@ let () =
   test_overlap ();
   test_signature_propagation ();
   test_frame ();
+  test_killed_parameter ();
   test_implicit_parameters ();
   test_condition_propagation ();
   test_signed_comparison ();
@@ -987,5 +1300,11 @@ let () =
   test_function_target_namespace ();
   test_concise_conditional_liveness ();
   test_concise ();
+  test_multi_return ();
   test_external_and_emitter ();
+  test_ranges_and_conditional_move ();
+  test_rule_scheduler ();
+  test_high_variables ();
+  test_forward_collapse ();
+  test_jump_tables ();
   print_endline "decompiler tests passed"

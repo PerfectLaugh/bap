@@ -31,6 +31,7 @@ and expr =
   | Index of expression * expression
   | Call of call
   | Conditional of expression * expression * expression
+  | Aggregate of (string * expression) list
   | Machine of string * expression list
   | Raw_exp of exp
 

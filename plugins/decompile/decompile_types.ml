@@ -25,6 +25,7 @@ type evidence = {
 
 type t = {
   target : Theory.Target.t;
+  program : program term;
   vars : evidence Scope.Map.t;
   mutable signatures : Ast.signature Tid.Map.t;
 }
@@ -294,37 +295,20 @@ let return_arg sub =
   |> Seq.find ~f:(fun arg ->
       match Arg.intent arg with Some Out | Some Both -> true | _ -> false)
 
+type return_location = {
+  var : var;
+  field : string;
+  offset : int;
+  typ : Ast.typ;
+}
+
+let return_structure_name sub =
+  sprintf "recovered_%s_return" (Tid.to_string (Term.tid sub))
+
 let input_args sub =
   Term.enum arg_t sub |> Seq.to_list
   |> List.filter ~f:(fun arg ->
       match Arg.intent arg with Some Out -> false | _ -> true)
-
-let infer_signature t sub =
-  match Term.get_attr sub C.proto with
-  | Some proto -> of_cproto (C.Abi.model t.target) proto
-  | None ->
-      let params =
-        List.map (input_args sub) ~f:(fun arg ->
-            let var = Arg.lhs arg in
-            let info = evidence t sub var in
-            ( Var.name var,
-              Option.value info.known ~default:(Ast.Unknown info.bits) ))
-      in
-      let return =
-        match return_arg sub with
-        | Some arg ->
-            let info = evidence t sub (Arg.lhs arg) in
-            Option.value info.known ~default:(Ast.Unknown info.bits)
-        | None -> (
-            match
-              find_register t.target Theory.Role.Register.function_return sub
-            with
-            | None -> Ast.Unknown 0
-            | Some var ->
-                let info = evidence t sub var in
-                Option.value info.known ~default:(Ast.Unknown info.bits))
-      in
-      { Ast.return; params; variadic = false }
 
 let sanitize name =
   String.map name ~f:(fun c ->
@@ -353,6 +337,67 @@ let typ_of_evidence sub var info =
       | _ -> Ast.Int (info.bits, info.sign))
 
 let typ t sub var = typ_of_evidence sub (Var.base var) (evidence t sub var)
+
+let return_locations t sub : return_location list =
+  match return_arg sub with
+  | Some arg ->
+      let var = Arg.lhs arg in
+      [ { var; field = "field_0"; offset = 0; typ = typ t sub var } ]
+  | None ->
+      let registers =
+        let registers =
+          Theory.Target.regs t.target
+            ~roles:[ Theory.Role.Register.function_return ]
+          |> Set.to_list
+        in
+        let registers =
+          if List.is_empty registers then
+            List.filter_map
+              (fallback_return_registers t.target)
+              ~f:(target_var t.target)
+          else registers
+        in
+        List.filter_map registers ~f:(fun reg ->
+            let name = Theory.Var.name reg in
+            Set.find (sub_vars sub) ~f:(fun var ->
+                String.equal (Var.name var) name))
+      in
+      let _, locations =
+        List.fold registers ~init:(0, []) ~f:(fun (offset, locations) var ->
+            let location =
+              {
+                var;
+                field = sprintf "field_%x" offset;
+                offset;
+                typ = typ t sub var;
+              }
+            in
+            let bits =
+              match Var.typ var with Type.Imm bits -> bits | _ -> 64
+            in
+            (offset + (bits / 8), location :: locations))
+      in
+      List.rev locations
+
+let inferred_return t sub =
+  match return_locations t sub with
+  | [] -> Ast.Unknown 0
+  | [ location ] -> location.typ
+  | _ -> Ast.Structure (return_structure_name sub)
+
+let infer_signature t sub =
+  match Term.get_attr sub C.proto with
+  | Some proto -> of_cproto (C.Abi.model t.target) proto
+  | None ->
+      let params =
+        List.map (input_args sub) ~f:(fun arg ->
+            let var = Arg.lhs arg in
+            let info = evidence t sub var in
+            ( Var.name var,
+              Option.value info.known ~default:(Ast.Unknown info.bits) ))
+      in
+      let return = inferred_return t sub in
+      { Ast.return; params; variadic = false }
 
 let rec expression t sub exp =
   let open Ast in
@@ -400,6 +445,26 @@ let argument_registers target =
     in
     List.filter_map names ~f:(target_var target)
 
+let killed_by_call sub entry name =
+  let used = ref false in
+  let killed = ref false in
+  Term.enum def_t entry
+  |> Seq.iter ~f:(fun def ->
+      if
+        Set.exists (Def.free_vars def) ~f:(fun var ->
+            String.equal (Var.name var) name)
+      then used := true);
+  Term.enum jmp_t entry
+  |> Seq.iter ~f:(fun jmp ->
+      if
+        Set.exists (Jmp.free_vars jmp) ~f:(fun var ->
+            String.equal (Var.name var) name)
+      then used := true
+      else if
+        (not !used) && match Jmp.kind jmp with Call _ -> true | _ -> false
+      then killed := true);
+  !killed && not !used
+
 let parameters t sub =
   match input_args sub with
   | args when not (List.is_empty args) ->
@@ -420,9 +485,10 @@ let parameters t sub =
           List.filter_map candidates ~f:(fun register ->
               let name = Theory.Var.name register in
               if
-                not
-                  (Set.exists live ~f:(fun var ->
-                       String.equal (Var.name var) name))
+                killed_by_call sub entry name
+                || not
+                     (Set.exists live ~f:(fun var ->
+                          String.equal (Var.name var) name))
               then None
               else
                 Set.find (sub_vars sub) ~f:(fun var ->
@@ -448,16 +514,7 @@ let final_signature t sub =
         List.map (parameters t sub) ~f:(fun parameter ->
             (parameter.name, parameter.typ))
       in
-      let return =
-        match return_arg sub with
-        | Some arg -> typ t sub (Arg.lhs arg)
-        | None -> (
-            match
-              find_register t.target Theory.Role.Register.function_return sub
-            with
-            | None -> Ast.Unknown 0
-            | Some var -> typ t sub var)
-      in
+      let return = inferred_return t sub in
       { base with params; return }
 
 let signature = final_signature
@@ -510,6 +567,83 @@ let connect t caller actual callee formal =
       merge_info (evidence t caller var) (evidence t callee formal)
   | None -> ()
 
+let merge_variables t sub left right =
+  let left_info = evidence t sub left and right_info = evidence t sub right in
+  let before =
+    ( left_info.sign,
+      left_info.known,
+      left_info.pointee,
+      left_info.fields,
+      left_info.strides,
+      left_info.valid_layout,
+      right_info.sign,
+      right_info.known,
+      right_info.pointee,
+      right_info.fields,
+      right_info.strides,
+      right_info.valid_layout )
+  in
+  merge_info left_info right_info;
+  let after =
+    ( left_info.sign,
+      left_info.known,
+      left_info.pointee,
+      left_info.fields,
+      left_info.strides,
+      left_info.valid_layout,
+      right_info.sign,
+      right_info.known,
+      right_info.pointee,
+      right_info.fields,
+      right_info.strides,
+      right_info.valid_layout )
+  in
+  not (Poly.equal before after)
+
+let propagate_definition t sub def =
+  let changed = ref false in
+  let merge left right =
+    if merge_variables t sub left right then changed := true
+  in
+  (match Def.rhs def with
+  | Bil.Var right -> merge (Def.lhs def) right
+  | Bil.BinOp ((PLUS | MINUS), Bil.Var left, Bil.Var right) ->
+      let output = Def.lhs def in
+      if
+        List.exists [ output; left; right ] ~f:(fun var ->
+            Option.is_some (evidence t sub var).pointee)
+      then (
+        merge output left;
+        merge output right)
+  | _ -> ());
+  !changed
+
+let propagate_dataflow t prog =
+  let rec loop remaining =
+    if remaining > 0 then
+      let changed =
+        Term.enum sub_t prog
+        |> Seq.fold ~init:false ~f:(fun changed sub ->
+            Term.enum blk_t sub
+            |> Seq.fold ~init:changed ~f:(fun changed blk ->
+                let changed =
+                  Term.enum def_t blk
+                  |> Seq.fold ~init:changed ~f:(fun changed def ->
+                      propagate_definition t sub def || changed)
+                in
+                Term.enum phi_t blk
+                |> Seq.fold ~init:changed ~f:(fun changed phi ->
+                    Phi.values phi
+                    |> Seq.fold ~init:changed ~f:(fun changed (_, exp) ->
+                        match exp with
+                        | Bil.Var right ->
+                            merge_variables t sub (Phi.lhs phi) right || changed
+                        | _ -> changed))))
+      in
+      if changed then loop (remaining - 1)
+  in
+  loop 16
+
 let propagate_calls t prog =
   let rec loop () =
     refresh_signatures t prog;
@@ -540,25 +674,43 @@ let propagate_calls t prog =
   loop ()
 
 let structures t =
-  Map.to_alist t.vars
-  |> List.filter_map ~f:(fun ((tid, var), info) ->
-      if has_structural_fields info then
-        let fields =
-          List.dedup_and_sort info.fields ~compare:(fun (x, _) (y, _) ->
-              Int.compare x y)
-          |> List.map ~f:(fun (offset, bits) ->
-              ( sprintf "field_%x" offset,
-                offset,
-                Ast.Int (bits, Ast.Unknown_sign) ))
-        in
-        let sub_name = sanitize (Tid.to_string tid) in
-        Some
-          {
-            Ast.name =
-              sprintf "recovered_%s_%s" sub_name (sanitize (Var.name var));
-            fields;
-          }
-      else None)
+  let recovered =
+    Map.to_alist t.vars
+    |> List.filter_map ~f:(fun ((tid, var), info) ->
+        if has_structural_fields info then
+          let fields =
+            List.dedup_and_sort info.fields ~compare:(fun (x, _) (y, _) ->
+                Int.compare x y)
+            |> List.map ~f:(fun (offset, bits) ->
+                ( sprintf "field_%x" offset,
+                  offset,
+                  Ast.Int (bits, Ast.Unknown_sign) ))
+          in
+          let sub_name = sanitize (Tid.to_string tid) in
+          Some
+            {
+              Ast.name =
+                sprintf "recovered_%s_%s" sub_name (sanitize (Var.name var));
+              fields;
+            }
+        else None)
+  in
+  let returns =
+    Term.enum sub_t t.program
+    |> Seq.filter_map ~f:(fun sub ->
+        match return_locations t sub with
+        | [] | [ _ ] -> None
+        | locations ->
+            Some
+              {
+                Ast.name = return_structure_name sub;
+                fields =
+                  List.map locations ~f:(fun location ->
+                      (location.field, location.offset, location.typ));
+              })
+    |> Seq.to_list
+  in
+  recovered @ returns
   |> List.dedup_and_sort ~compare:(fun x y ->
       String.compare x.Ast.name y.Ast.name)
 
@@ -584,7 +736,7 @@ let infer ~target prog =
                       known = Some (of_ctype (C.Abi.model target) ctype);
                     }))
   in
-  let t = { target; vars; signatures = Tid.Map.empty } in
+  let t = { target; program = prog; vars; signatures = Tid.Map.empty } in
   Term.enum sub_t prog
   |> Seq.iter ~f:(fun sub ->
       t.signatures <-
@@ -608,5 +760,7 @@ let infer ~target prog =
                     | Direct _ -> ()
                     | Indirect exp -> scan_exp t sub exp)
               | _ -> ())));
+  propagate_dataflow t prog;
   propagate_calls t prog;
+  propagate_dataflow t prog;
   t

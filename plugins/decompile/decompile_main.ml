@@ -11,7 +11,7 @@ let concise = Extension.Configuration.flag "concise"
 let print symbols concise ppf proj =
   let recovered =
     Bap_decompile.decompile ~concise ~target:(Project.target proj)
-      (Project.program proj)
+      ~memory:(Project.memory proj) (Project.program proj)
   in
   let recovered =
     if List.is_empty symbols then recovered

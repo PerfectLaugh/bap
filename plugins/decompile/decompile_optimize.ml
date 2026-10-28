@@ -26,6 +26,10 @@ let rec map_expression f expression =
     | Ast.Conditional (condition, x, y) ->
         Ast.Conditional
           (map_expression f condition, map_expression f x, map_expression f y)
+    | Ast.Aggregate fields ->
+        Ast.Aggregate
+          (List.map fields ~f:(fun (field, value) ->
+               (field, map_expression f value)))
     | Ast.Machine (name, xs) ->
         Ast.Machine (name, List.map xs ~f:(map_expression f))
   in
@@ -199,6 +203,8 @@ let rec side_effect_free expression =
   | Ast.Binary (_, x, y) -> side_effect_free x && side_effect_free y
   | Ast.Conditional (c, x, y) ->
       side_effect_free c && side_effect_free x && side_effect_free y
+  | Ast.Aggregate fields ->
+      List.for_all fields ~f:(fun (_, value) -> side_effect_free value)
   | Ast.Deref _ | Ast.Field _ | Ast.Index _ | Ast.Call _ | Ast.Machine _
   | Ast.Raw_exp _ ->
       false
@@ -279,12 +285,24 @@ let rec optimize_statement statement =
   | Ast.Return None -> statement
   | Ast.Return (Some expression) ->
       Ast.Return (Some (simplify_expression expression))
-  | Ast.If (condition, yes, no) ->
+  | Ast.If (condition, yes, no) -> (
       let condition = simplify_expression condition in
       let yes = optimize_statements yes and no = optimize_statements no in
       if is_zero condition && List.length no = 1 then List.hd_exn no
       else if is_one condition && List.length yes = 1 then List.hd_exn yes
-      else Ast.If (condition, yes, no)
+      else
+        match (yes, no) with
+        | ( [ Ast.Assign ({ node = Ast.Var left; _ }, yes_value) ],
+            [ Ast.Assign ({ node = Ast.Var right; _ }, no_value) ] )
+          when left.Ast.id = right.Ast.id && side_effect_free condition
+               && side_effect_free yes_value && side_effect_free no_value ->
+            Ast.Assign
+              ( Ast.var left,
+                {
+                  Ast.node = Ast.Conditional (condition, yes_value, no_value);
+                  typ = yes_value.Ast.typ;
+                } )
+        | _ -> Ast.If (condition, yes, no))
   | Ast.While (condition, body) ->
       Ast.While (simplify_expression condition, optimize_statements body)
   | Ast.Do_while (body, condition) ->
@@ -326,6 +344,9 @@ let rec expression_names names expression =
         ~f:expression_names
   | Ast.Conditional (c, x, y) ->
       expression_names (expression_names (expression_names names c) x) y
+  | Ast.Aggregate fields ->
+      List.fold fields ~init:names ~f:(fun names (_, value) ->
+          expression_names names value)
   | Ast.Machine (_, xs) -> List.fold xs ~init:names ~f:expression_names
 
 let rec statement_names names statement =

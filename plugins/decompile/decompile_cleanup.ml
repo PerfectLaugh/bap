@@ -7,6 +7,8 @@ let rec pure expression =
   | Ast.Unary (_, x) | Ast.Cast (_, x) -> pure x
   | Ast.Binary (_, x, y) -> pure x && pure y
   | Ast.Conditional (c, x, y) -> pure c && pure x && pure y
+  | Ast.Aggregate fields ->
+      List.for_all fields ~f:(fun (_, value) -> pure value)
   | Ast.Deref _ | Ast.Field _ | Ast.Index _ | Ast.Call _ | Ast.Machine _
   | Ast.Raw_exp _ ->
       false
@@ -35,6 +37,9 @@ let rec expression_variables variables expression =
       expression_variables
         (expression_variables (expression_variables variables c) x)
         y
+  | Ast.Aggregate fields ->
+      List.fold fields ~init:variables ~f:(fun variables (_, value) ->
+          expression_variables variables value)
   | Ast.Machine (_, xs) -> List.fold xs ~init:variables ~f:expression_variables
 
 let rec statement_variables variables statement =
@@ -79,8 +84,8 @@ let type_width = function
   | Ast.Unknown bits | Ast.Int (bits, _) | Ast.Float bits -> Some bits
   | _ -> None
 
-let width_at_most left right =
-  match (left, right) with Some left, Some right -> left <= right | _ -> false
+let width_at_least left right =
+  match (left, right) with Some left, Some right -> left >= right | _ -> false
 
 let rec clean_expression expression =
   let node =
@@ -106,13 +111,17 @@ let rec clean_expression expression =
     | Ast.Conditional (condition, x, y) ->
         Ast.Conditional
           (clean_expression condition, clean_expression x, clean_expression y)
+    | Ast.Aggregate fields ->
+        Ast.Aggregate
+          (List.map fields ~f:(fun (field, value) ->
+               (field, clean_expression value)))
     | Ast.Machine (name, xs) ->
         Ast.Machine (name, List.map xs ~f:clean_expression)
   in
   match node with
   | Ast.Cast (typ, { node = Ast.Cast (inner, value); _ })
     when Option.equal Int.equal (type_width typ) (type_width inner)
-         || width_at_most (type_width typ) (type_width inner) ->
+         || width_at_least (type_width typ) (type_width inner) ->
       { expression with Ast.node = Ast.Cast (typ, value) }
   | Ast.Cast (typ, value) when Poly.equal typ value.Ast.typ -> value
   | _ -> { expression with Ast.node }
@@ -145,6 +154,8 @@ and cleanup_statement ~bookkeeping statement =
         uses_bookkeeping target || List.exists arguments ~f:uses_bookkeeping
     | Ast.Conditional (c, x, y) ->
         uses_bookkeeping c || uses_bookkeeping x || uses_bookkeeping y
+    | Ast.Aggregate fields ->
+        List.exists fields ~f:(fun (_, value) -> uses_bookkeeping value)
     | Ast.Machine (_, xs) -> List.exists xs ~f:uses_bookkeeping
   in
   let statement =
