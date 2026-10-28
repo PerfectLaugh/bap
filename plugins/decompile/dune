@@ -1,0 +1,31 @@
+(library
+ (name bap_decompile)
+ (public_name bap-decompile)
+ (modules
+  bap_decompile
+  decompile_ast
+  decompile_cfg
+  decompile_cleanup
+  decompile_emit
+  decompile_lower
+  decompile_optimize
+  decompile_simplify
+  decompile_ssa
+  decompile_structure
+  decompile_types)
+ (preprocess
+  (pps ppx_bap))
+ (libraries bap bap-c bap-core-theory bap-recompile core graphlib))
+
+(library
+ (name bap_decompile_plugin)
+ (public_name bap-decompile.plugin)
+ (modules decompile_main)
+ (libraries bap bap-decompile bap-main core))
+
+(plugin
+ (name decompile)
+ (package bap-decompile)
+ (libraries bap-decompile.plugin)
+ (site
+  (bap-common plugins)))

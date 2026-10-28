@@ -12,6 +12,8 @@ val r32 : r32 bitv
 val r16 : r16 bitv
 val r8 : r8 bitv
 val mem : (r64, r8) Theory.Mem.t Theory.var
+val lt : Theory.Bool.t Theory.var
+val gt : Theory.Bool.t Theory.var
 val gpr : r64 Theory.Bitv.t Theory.var list
 val fpr : r64 Theory.Bitv.t Theory.var list
 val parent : Theory.Target.t

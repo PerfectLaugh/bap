@@ -1,0 +1,15 @@
+(test
+ (name run_tests)
+ (package bap-decompile)
+ (libraries
+  bap
+  bap-arm
+  bap-core-theory
+  bap-decompile
+  bap-mips
+  bap-powerpc
+  bap-riscv
+  bap-systemz
+  bap-thumb.plugin
+  bap-x86
+  core))

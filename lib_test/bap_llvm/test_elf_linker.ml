@@ -235,6 +235,56 @@ let merged_patches ctxt =
     ]
     out.patches
 
+let mips64_got_call ctxt =
+  let bytes = String.make 0x40 '\000' ^ "\xdc\x21\x80\x00\x64\x39\x00\x00" in
+  let out =
+    link ~machine:8 ~little:false ~base:0L ~bytes
+      [ text 1 ".text" ~off:0x40L ~size:8L ]
+      [ (1, symbol ".text" 1 ~typ:3 ~bind:0) ]
+      [ rel 1 0L 20 1 ~addend:0x140L; rel 1 4L 21 1 ~addend:0x140L ]
+  in
+  assert_no_warnings out;
+  let data = patched bytes out in
+  let assert_word = assert_word ~ctxt ~little:false data in
+  assert_word ~msg:"GOT_PAGE relaxation" 0x40 4 0x3c010000L;
+  assert_word ~msg:"GOT_OFST relaxation" 0x44 4 0x64390140L
+
+let systemz_call ctxt =
+  let bytes = String.make 0x48 '\000' in
+  let out =
+    link ~machine:22 ~little:false ~base:0x1000L ~bytes
+      [ text 1 ".text" ~off:0x40L ~size:8L ]
+      [ (1, symbol "callee" 1 ~value:0x30L ~size:8L ~typ:2 ~bind:0) ]
+      [ rel 1 2L 20 1 ~addend:2L ]
+  in
+  assert_no_warnings out;
+  let data = patched bytes out in
+  assert_word ~ctxt ~little:false ~msg:"PLT32DBL" data 0x42 4 0x18L
+
+let powerpc64_descriptor_call ctxt =
+  let bytes =
+    String.make 0x40 '\000' ^ "\x48\x00\x00\x01" ^ String.make 0x6c '\000'
+  in
+  let out =
+    link ~machine:21 ~little:false ~base:0x1000L ~bytes
+      [
+        text 1 ".text" ~off:0x40L ~size:0x40L;
+        data 2 ".opd" ~off:0x80L ~size:0x30L ~align:8L;
+      ]
+      [
+        (1, symbol ".opd" 2 ~typ:3 ~bind:0);
+        (2, symbol ".text" 1 ~typ:3 ~bind:0);
+        (3, symbol "callee" 2 ~value:0x18L ~typ:2 ~bind:0);
+      ]
+      [ rel 1 0L 10 1 ~addend:0x18L; rel 2 0x18L 38 2 ~addend:0x20L ]
+  in
+  assert_no_warnings out;
+  let data = patched bytes out in
+  assert_word ~ctxt ~little:false ~msg:"REL24 through descriptor" data 0x40 4
+    0x48000021L;
+  assert_word ~ctxt ~little:false ~msg:"descriptor code" data 0x98 8 0x1020L;
+  assert_equal ~ctxt [ ("callee", 0x1020L, 0L, 0x1020L) ] out.functions
+
 (* EM_SPARC, whose relocations the linker doesn't apply *)
 let unsupported_machine ctxt =
   let out =
@@ -251,6 +301,9 @@ let suite =
   >::: [
          "x86-64" >:: x86_64;
          "mips/hi-lo" >:: mips_hi_lo;
+         "mips64/got-call" >:: mips64_got_call;
+         "systemz/call" >:: systemz_call;
+         "powerpc64/descriptor-call" >:: powerpc64_descriptor_call;
          "riscv/pcrel" >:: riscv_pcrel;
          "aarch64" >:: aarch64;
          "outside of section" >:: outside_of_section;

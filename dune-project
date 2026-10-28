@@ -64,6 +64,7 @@
   (bap-callgraph-collator (= :version))
   (bap-callsites (= :version))
   (bap-c (= :version))
+  (bap-decompile (= :version))
   (bap-demangle (= :version))
   (bap-dependencies (= :version))
   (bap-disassemble (= :version))
@@ -408,6 +409,28 @@ details of the program behavior.")
   (bap-knowledge (= :version))
   (bap-main (= :version))
   core
+  (bap-common (= :version))))
+
+(package
+ (name bap-decompile)
+ (synopsis "Recovers structured C pseudocode from BIR")
+ (tags (bap bap-plugin bap-library decompiler))
+ (depends
+  (bap-c (= :version))
+  (bap-core-theory (= :version))
+  (bap-main (= :version))
+  (bap-recompile (= :version))
+  (bap-std (= :version))
+  core
+  (graphlib (= :version))
+  (ppx_bap (= :version))
+  (bap-arm :with-test)
+  (bap-mips :with-test)
+  (bap-powerpc :with-test)
+  (bap-riscv :with-test)
+  (bap-systemz :with-test)
+  (bap-thumb :with-test)
+  (bap-x86 :with-test)
   (bap-common (= :version))))
 
 (package

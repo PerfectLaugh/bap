@@ -90,6 +90,7 @@ module Elf = struct
   let em_mips = 8
   let em_ppc = 20
   let em_ppc64 = 21
+  let em_s390 = 22
   let em_arm = 40
   let em_x86_64 = 62
   let em_aarch64 = 183
@@ -537,13 +538,12 @@ let arm env =
    pointing $gp 0x7ff0 bytes into the GOT makes 64KiB of it reachable. *)
 let mips_gp_offset = 0x7ff0L
 
-(* MIPS o32 (SYSV ABI MIPS supplement), the relocations are REL. The
-   HI16 (and local GOT16) relocations are applied when the matching LO16
-   relocation is found, since they share the addend AHL = (AHI << 16) +
-   ALO. The HI16 values are rounded by 0x8000 to compensate for the sign
-   extension of the low 16 bits by the paired instruction. GP is the
-   value of $gp. *)
-let mips env =
+(* MIPS o32 and N64 relocations. The HI16 (and local GOT16) relocations
+   are applied when the matching LO16 relocation is found, since they
+   share the addend AHL = (AHI << 16) + ALO. The HI16 values are rounded
+   by 0x8000 to compensate for the sign extension of the low 16 bits by
+   the paired instruction. GP is the value of $gp. *)
+let mips width env =
   let open Int64 in
   let gp = env.got_base + mips_gp_offset in
   let pending = ref [] in
@@ -616,6 +616,26 @@ let mips env =
         let a = sext ((insn land 0xffffL) lsl 2) 18 in
         store 4 (set_lo16 insn ((s + a - p) asr 2))
     | 12 -> store 4 (s + a32 () - gp) (* GPREL32 *)
+    | 18 when Int.(width = 64) -> store 8 (s + a32 ()) (* 64 *)
+    | 20 when Int.(width = 64) ->
+        let x = s + a16 () in
+        let insn = ld 0 4 in
+        if is_local sym && Int64.equal (sext x 32) x then
+          let rt = bits insn 16 5 in
+          store 4
+            (0x3c000000L lor (rt lsl 16)
+            lor (((x + 0x8000L) asr 16) land 0xffffL))
+        else
+          let page = (x + 0x8000L) land lnot 0xffffL in
+          store 4 (set_lo16 insn (env.got page - gp))
+    | 21 when Int.(width = 64) ->
+        let x = s + a16 () in
+        let page = (x + 0x8000L) land lnot 0xffffL in
+        let value =
+          if is_local sym && Int64.equal (sext x 32) x then x else x - page
+        in
+        store 4 (set_lo16 (ld 0 4) value)
+        (* GOT_OFST *)
     | 248 -> store 4 (s + a32 () - p) (* PC32 *)
     | _ -> Unsupported
   in
@@ -805,15 +825,25 @@ let powerpc _env =
   | 44 -> store 8 (x - p) (* REL64 *)
   | _ -> Unsupported
 
+let systemz _env =
+  simple @@ fun ({ rel; p; s; a; _ } as site) ->
+  match rel.typ with
+  | 0 -> Done
+  | 20 ->
+      site.sti 0 4 Int64.((s + a - p) asr 1);
+      Done
+  | _ -> Unsupported
+
 let handler { machine; width; _ } =
   match machine with
   | m when m = Elf.em_x86_64 -> Some x86_64
   | m when m = Elf.em_386 -> Some i386
   | m when m = Elf.em_aarch64 -> Some aarch64
   | m when m = Elf.em_arm -> Some arm
-  | m when m = Elf.em_mips && width = 32 -> Some mips
+  | m when m = Elf.em_mips -> Some (mips width)
   | m when m = Elf.em_riscv -> Some riscv
   | m when m = Elf.em_ppc || m = Elf.em_ppc64 -> Some powerpc
+  | m when m = Elf.em_s390 -> Some systemz
   | _ -> None
 
 let null_symbol =
@@ -947,6 +977,30 @@ let link input =
         then Hashtbl.set table ~key:sec.index ~data:sec);
     table
   in
+  let resolve_branch_target rel sym =
+    let descriptor_code () =
+      match Hashtbl.find section_table sym.shndx with
+      | Some sec when String.equal sec.name ".opd" ->
+          List.find_map input.relocations ~f:(fun descriptor ->
+              if
+                Int.(descriptor.section = sym.shndx && descriptor.typ = 38)
+                && Int64.equal descriptor.offset Int64.(sym.value + rel.addend)
+              then
+                let target =
+                  Map.find input.symbols descriptor.symbol
+                  |> Option.value ~default:null_symbol
+                in
+                Option.map (resolve descriptor.symbol target) ~f:(fun code ->
+                    Int64.(code + descriptor.addend))
+              else None)
+      | _ -> None
+    in
+    if Int.(input.machine = Elf.em_ppc64 && (rel.typ = 10 || rel.typ = 18)) then
+      match descriptor_code () with
+      | Some code -> Some Int64.(code - rel.addend)
+      | None -> resolve rel.symbol sym
+    else resolve rel.symbol sym
+  in
   let references = ref [] in
   (* the site of the relocation, which is made anew for each pass over
      the relocations, so that only one is live, as a file may have
@@ -963,7 +1017,7 @@ let link input =
         in
         let p = base + rel.offset in
         let off = sec.off + rel.offset in
-        match resolve rel.symbol sym with
+        match resolve_branch_target rel sym with
         | _ when rel.offset < 0L || rel.offset >= sec.size ->
             if report then
               warn "relocation at %Lx is outside of the section %s" p sec.name;

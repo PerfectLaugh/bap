@@ -26,7 +26,9 @@ let mems = Theory.Mem.define r64 r8
 let gpr = array r64 "R" 16
 let fpr = array r64 "F" 16
 let mem = reg mems "mem"
-let vars = gpr @< fpr @< [ mem ]
+let lt = reg bool "LT"
+let gt = reg bool "GT"
+let vars = gpr @< fpr @< [ lt; gt ] @< [ mem ]
 let parent = Theory.Target.declare ~package "systemz"
 
 let z9 =
@@ -37,8 +39,13 @@ let z9 =
         [
           ([ general; integer ], untyped gpr);
           ([ general; floating ], untyped fpr);
+          ( [ function_argument; integer ],
+            untyped (List.take (List.drop gpr 2) 5) );
+          ([ function_return ], untyped [ reg r64 "R2" ]);
           ([ link ], untyped [ reg r64 "R14" ]);
+          ([ frame_pointer ], untyped [ reg r64 "R11" ]);
           ([ stack_pointer ], untyped [ reg r64 "R15" ]);
+          ([ status ], untyped [ lt; gt ]);
         ]
 
 let llvm_encoding = Theory.Language.declare ~package "llvm-systemz"

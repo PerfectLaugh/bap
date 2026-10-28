@@ -19,6 +19,20 @@ open Bap_core_theory
 module Recompile_optimize = Recompile_optimize
 module Recompile_mba = Recompile_mba
 
+module Frame : sig
+  type t
+  type state
+
+  val analyze : target:Theory.Target.t -> sub term -> (t, string) result
+  val entry : t -> tid -> state
+  val step : t -> state -> def term -> state
+  val slot : t -> state -> exp -> int -> int option
+  val slots : t -> (int * int) list
+  val stack_pointer : t -> var
+  val pointer_width : t -> int
+  val big_endian : t -> bool
+end
+
 type mba = Disabled | Unchecked | Checked
 
 val simplify_exp :

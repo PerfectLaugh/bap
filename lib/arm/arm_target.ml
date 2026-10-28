@@ -447,7 +447,7 @@ let split s =
 let normalize arch sub =
   match (arch, sub) with
   | None, _ -> assert false
-  | Some arch, None -> split arch
+  | Some arch, (None | Some "") -> split arch
   | Some arch, Some sub -> (arch, sub)
 
 let enable_loader () =
@@ -664,7 +664,8 @@ module Dis = Disasm_expert.Basic
 let register ?attrs encoding triple =
   Dis.register encoding @@ fun t ->
   let triple =
-    if Theory.Endianness.(eb = Theory.Target.endianness t) then triple ^ "eb"
+    if Theory.Endianness.(eb = Theory.Target.endianness t) then
+      if String.equal triple "aarch64" then "aarch64_be" else triple ^ "eb"
     else triple
   in
   Dis.create ?attrs ~backend:"llvm" triple

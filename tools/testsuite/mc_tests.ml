@@ -68,4 +68,45 @@ let torture _ =
             (mc env [ "--stop-on-errors"; "--arch=x86"; input ])
             output))
 
-let tests = [ mov; version; prefix; torture ]
+let systemz _ =
+  [
+    case "mc/systemz/relative-branch" (fun env ->
+        has env "systemz relative branch"
+          (mc env
+             [
+               "--arch=systemz";
+               "--address=0x50";
+               "--show-bil=pretty";
+               {|\xa7\x84\x00\x0c|};
+             ])
+          "jmp 0x68");
+    case "mc/systemz/call" (fun env ->
+        let out =
+          mc env
+            [
+              "--arch=systemz";
+              "--address=0x1a";
+              "--show-bil=pretty";
+              {|\xc0\xe5\x00\x00\x00\x0b|};
+            ]
+        in
+        sequence env out
+          [ ("return link", "R14 := 0x20"); ("call target", "jmp 0x30") ]);
+    case "mc/systemz/lmg" (fun env ->
+        sequence env
+          (mc env
+             [
+               "--arch=systemz";
+               "--show-bil=pretty";
+               {|\xeb\xbf\xb1\x00\x00\x04|};
+             ])
+          [
+            ("restore r12", "R12 :=");
+            ("restore r13", "R13 :=");
+            ("restore r14", "R14 :=");
+            ("restore r15", "R15 :=");
+            ("restore base last", "R11 :=");
+          ]);
+  ]
+
+let tests = [ mov; version; prefix; torture; systemz ]

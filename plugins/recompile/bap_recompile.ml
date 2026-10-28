@@ -3,6 +3,7 @@ open Bap.Std
 open Bap_core_theory
 module Recompile_optimize = Recompile_optimize
 module Recompile_mba = Recompile_mba
+module Frame = Recompile_frame
 
 let simplify_exp = Recompile_mba.simplify_exp
 let simplify_exp_checked = Recompile_mba.simplify_exp_checked

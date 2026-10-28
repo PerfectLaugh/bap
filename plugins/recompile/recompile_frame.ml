@@ -4,8 +4,9 @@
    state of a flattened control flow, that the code keeps on the stack.
 
    The slots are promoted, only if the address of the frame doesn't
-   escape: it isn't stored, it isn't in a register, but the stack and the
-   frame pointers, at the jumps, that leave the sub, and the memory isn't
+   escape: it isn't stored outside the frame, it isn't in a register, but
+   the stack and the frame pointers, at the jumps, that leave the sub, and
+   the memory isn't
    accessed at an unknown address in the frame, so that the other
    accesses of the memory don't access the slots. The slots, whose
    accesses overlap, but are not the same, stay in the memory. *)
@@ -100,11 +101,12 @@ and memory ~ptr ~access s (m : exp) =
   match m with
   | Store (m, a, v, _, size) ->
       memory ~ptr ~access s m;
-      access a (eval ~ptr ~access s a) (Size.in_bits size);
-      (* the narrower values can't be the address *)
+      let address = eval ~ptr ~access s a in
+      access a address (Size.in_bits size);
       if
         Size.in_bits size >= ptr
-        && not (equal_value (eval ~ptr ~access s v) Other)
+        && (not (equal_value (eval ~ptr ~access s v) Other))
+        && not (match address with Off _ -> true | _ -> false)
       then raise (Escapes "stores the address of the frame")
   | Var _ -> ()
   | Ite (c, x, y) ->
