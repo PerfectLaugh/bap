@@ -1,0 +1,15 @@
+[package]
+name = "ogre"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Open Generic Representation document database"
+
+[dependencies]
+bap-sexp = { path = "../bap-sexp" }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+
+[lints]
+workspace = true

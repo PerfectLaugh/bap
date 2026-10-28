@@ -8,6 +8,7 @@
   bap-core-theory
   bap-knowledge
   bap-main
+  bap-rust
   bitvec
   core
   graphlib

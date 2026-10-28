@@ -9,6 +9,7 @@
   bap_disasm
   bap_image
   bap-knowledge
+  bap-rust
   bap_types
   core
   graphlib

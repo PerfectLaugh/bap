@@ -1,0 +1,12 @@
+[package]
+name = "bap-rust-benchmarks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+ogre = { path = "../ogre" }
+
+[lints]
+workspace = true

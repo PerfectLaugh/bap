@@ -18,6 +18,7 @@ depends: [
   "bap-main" {= version}
   "bap-plugins" {= version}
   "bap-relation" {= version}
+  "bap-rust" {= version}
   "base-unix"
   "bitvec-order" {= version}
   "bitvec" {= version}

@@ -248,6 +248,19 @@ let order _ =
     [ "a"; "b"; "c"; "d"; "e" ]
     (List.rev !log)
 
+let imports _ =
+  let r =
+    eval @@ fun _ ->
+    Knowledge.Symbol.intern ~public:true ~package:"foo" "main" cls
+    >>= fun original ->
+    Knowledge.provide x original (Some 42) >>= fun () ->
+    Knowledge.Symbol.import ~package:"bar" [ "foo" ] >>= fun () ->
+    Knowledge.Symbol.in_package "bar" (fun () ->
+        Knowledge.Symbol.intern "main" cls)
+    >>= fun imported -> Knowledge.collect x imported
+  in
+  assert_equal ~printer:opt (Some 42) r
+
 (* the recursion of the direct functions, e.g., over the instructions of a
    stub, is as deep as in the monadic style *)
 let deep _ =
@@ -282,5 +295,6 @@ let () =
            "caught-outside" >:: caught_outside;
            "callback" >:: callback;
            "order" >:: order;
+           "imports" >:: imports;
            "deep" >:: deep;
          ])

@@ -170,7 +170,7 @@ type ('a, 'k) typeinfo = ('a, 'k) Attribute.info
 
 let declare = Attribute.declare
 
-module Doc = struct
+module OCaml_doc = struct
   module Problem = Error
   module Error = Monad.Result.Error
   open Error.Syntax
@@ -459,11 +459,123 @@ module Doc = struct
 end
 
 type ('a, 'k) attribute = ('a, 'k) Attribute.t
-type doc = Doc.t
+module Name_type = struct
+  type name = Name of string | Pos of int [@@deriving compare, sexp]
+end
+
+type name = Name_type.name
 type 'a column = { attr : 'a; field : Type.header } [@@deriving compare, sexp]
 
+module Rust_doc = struct
+  type t = int64
+
+  external empty_handle : unit -> t = "ogre_rs_doc_empty"
+  external from_string_raw : string -> (t, string) result = "ogre_rs_doc_from_string"
+  external to_string_raw : t -> (string, string) result = "ogre_rs_doc_to_string"
+  external yaml_raw : t -> (string, string) result = "ogre_rs_doc_yaml"
+  external merge_raw : t -> t -> (t, string) result = "ogre_rs_doc_merge"
+  external clear_raw : t -> (t, string) result = "ogre_rs_doc_clear"
+  external counts_raw : t -> (int * int, string) result = "ogre_rs_doc_counts"
+  external put_raw :
+    t -> string -> (string * string) list -> (string * string) list ->
+    (t, string) result = "ogre_rs_doc_put"
+  external entries_raw : t -> string -> ((string * string) list list, string) result =
+    "ogre_rs_doc_entries"
+  external query_raw :
+    t -> string list ->
+    (string option * int64 * string * string) list list -> string ->
+    ((string * string) list list list, string) result = "ogre_rs_doc_query"
+
+  let unwrap = function
+    | Ok value -> value
+    | Error message -> failwith message
+
+  let result = Result.map_error ~f:Error.of_string
+  let empty = empty_handle ()
+  let to_string doc = unwrap (to_string_raw doc)
+  let is_empty doc = fst (unwrap (counts_raw doc)) = 0
+  let declarations doc = fst (unwrap (counts_raw doc))
+  let definitions doc = snd (unwrap (counts_raw doc))
+  let clear doc = clear_raw doc |> unwrap
+  let merge left right = merge_raw left right |> result
+  let from_string input = from_string_raw input |> result
+  let to_file doc path = Out_channel.write_all path ~data:(to_string doc)
+  let from_file path = from_string (In_channel.read_all path)
+  let load channel = from_string (In_channel.input_all channel)
+  let save doc channel = Out_channel.output_string channel (to_string doc)
+  let pp ppf doc = Format.pp_print_string ppf (to_string doc)
+  let pp_yaml ppf doc = Format.pp_print_string ppf (unwrap (yaml_raw doc))
+
+  let sexp_of_t doc = Sexp.List (Sexp.scan_sexps (Lexing.from_string (to_string doc)))
+
+  let t_of_sexp = function
+    | Sexp.Atom _ -> invalid_arg "Ogre.Doc.t_of_sexp: expects a list"
+    | Sexp.List entries ->
+        List.map entries ~f:Sexp.to_string |> String.concat ~sep:"\n" |> from_string
+        |> Or_error.ok_exn
+
+  module Stringable = struct
+    type nonrec t = t
+
+    let to_string = to_string
+    let of_string input = from_string input |> Or_error.ok_exn
+
+    let caller_identity =
+      Bin_shape.Uuid.of_string "cb5a334c-8166-419e-8885-708231ec8e98"
+  end
+
+  include Binable.Of_stringable_with_uuid (Stringable)
+
+  let compare left right = String.compare (to_string left) (to_string right)
+
+  let signature sign =
+    List.map sign ~f:(fun { Type.fname; ftype } ->
+        (fname, Type.string_of_typ ftype))
+
+  let fields { fields } = Map.to_alist fields
+
+  let put k attr =
+    let { Attribute.name; save; sign } = attr () in
+    save (fun packed ->
+        k (fun doc ->
+            put_raw doc name (signature sign) (fields packed) |> result))
+
+  let get doc attr =
+    let { Attribute.name; read; _ } = attr () in
+    entries_raw doc name
+    |> result
+    |> Or_error.map ~f:(fun entries ->
+        List.filter_map entries ~f:(fun fields ->
+            read { fields = String.Map.of_alist_exn fields }))
+
+  let query doc names joins where : row seq =
+    let joins =
+      List.map joins ~f:(fun cls ->
+          List.map cls ~f:(fun { attr; field = { Type.fname; ftype } } ->
+              let attr, pos =
+                match attr with
+                | None -> (None, -1L)
+                | Some name -> (Some name, -1L)
+              in
+              (attr, pos, fname, Type.string_of_typ ftype)))
+    in
+    query_raw doc names joins where
+    |> unwrap
+    |> Sequence.of_list
+    |> Sequence.map ~f:(fun entries ->
+        {
+          row =
+            Array.of_list
+              (List.map entries ~f:(fun fields ->
+                   { fields = String.Map.of_alist_exn fields }));
+        })
+end
+
+type doc = Rust_doc.t
+module Doc = Rust_doc
+
 module Exp = struct
-  type name = Name of string | Pos of int [@@deriving compare, sexp]
+  type name = Name_type.name = Name of string | Pos of int [@@deriving compare, sexp]
   type bop = And | Or | Lt | Eq | Add | Sub [@@deriving compare, sexp]
   type uop = Not [@@deriving compare, sexp]
   type var = name column [@@deriving compare, sexp]
@@ -729,14 +841,9 @@ module Exp = struct
     in
     rows [] tables
 
-  let eval names joins exp { Doc.scheme; entries } : row seq =
-    let cs = unify names scheme joins in
-    let exp = normalize_vars names Syntax.(cs && exp) |> simpl |> lambda in
-    if Stdlib.not (List.is_empty names) && has_all_attributes names entries then
-      joined_rows names scheme joins entries
-      |> Seq.filter_map ~f:(fun row ->
-          if sat row exp then Some { row } else None)
-    else Seq.empty
+  let eval names joins exp doc : row seq =
+    Rust_doc.query doc names joins
+      (Sexp.to_string (sexp_of_indexed (normalize_vars names exp)))
 
   include Syntax
 end

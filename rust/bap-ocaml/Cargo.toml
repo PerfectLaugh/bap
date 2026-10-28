@@ -1,0 +1,22 @@
+[package]
+name = "bap-ocaml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OCaml bindings for BAP OGRE, BIR, and CFG"
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+bap-bir = { path = "../bap-bir" }
+bap-bitvec = { path = "../bap-bitvec" }
+bap-cfg = { path = "../bap-cfg" }
+bap-sexp = { path = "../bap-sexp" }
+num-bigint = { workspace = true }
+ogre = { path = "../ogre" }
+ocaml = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true

@@ -2,4 +2,26 @@
  (name bitvec)
  (public_name bitvec)
  (wrapped false)
- (libraries zarith))
+ (libraries zarith)
+ (foreign_archives bap_bitvec_ocaml)
+ (c_library_flags -lpthread -ldl -lm))
+
+(rule
+ (targets libbap_bitvec_ocaml.a dllbap_bitvec_ocaml.so (dir cargo))
+ (deps
+  (glob_files_rec ../../rust/*.{rs,toml,lock}))
+ (action
+  (progn
+   (run
+    cargo
+    build
+    --locked
+    --release
+    --manifest-path
+    %{workspace_root}/rust/Cargo.toml
+    --package
+    bap-bitvec-ocaml
+    --target-dir
+    cargo)
+   (system "cp cargo/release/libbap_bitvec_ocaml.a libbap_bitvec_ocaml.a")
+   (system "cp cargo/release/libbap_bitvec_ocaml.so dllbap_bitvec_ocaml.so"))))

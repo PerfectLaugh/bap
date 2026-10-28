@@ -1,0 +1,4 @@
+(test
+ (name test_rust)
+ (package bap-rust)
+ (libraries bap-rust core ounit2))

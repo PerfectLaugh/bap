@@ -1,0 +1,20 @@
+[package]
+name = "bap-bir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "BIR terms, memory, and evaluation"
+
+[dependencies]
+bap-bitvec = { path = "../bap-bitvec" }
+bap-sexp = { path = "../bap-sexp" }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = "1.0"
+
+[lints]
+workspace = true

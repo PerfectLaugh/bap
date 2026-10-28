@@ -1,0 +1,16 @@
+[package]
+name = "bap-bitvec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Arbitrary-width bitvectors for BIR"
+
+[dependencies]
+num-bigint = { workspace = true }
+num-integer = { workspace = true }
+num-traits = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

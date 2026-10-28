@@ -13,3 +13,7 @@
   graphlib
   mtime
   ocamlgraph))
+
+(executable
+ (name knowledge_ogre_bench)
+ (libraries core bap-knowledge ogre))

@@ -4,4 +4,26 @@
  (wrapped false)
  (preprocess
   (pps ppx_bap))
- (libraries core core_kernel.caml_unix monads))
+ (libraries core core_kernel.caml_unix monads)
+ (foreign_archives bap_knowledge_ocaml)
+ (c_library_flags -lpthread -ldl -lm))
+
+(rule
+ (targets libbap_knowledge_ocaml.a dllbap_knowledge_ocaml.so (dir cargo))
+ (deps
+  (glob_files_rec ../../rust/*.{rs,toml,lock}))
+ (action
+  (progn
+   (run
+    cargo
+    build
+    --locked
+    --release
+    --manifest-path
+    %{workspace_root}/rust/Cargo.toml
+    --package
+    bap-knowledge-ocaml
+    --target-dir
+    cargo)
+   (system "cp cargo/release/libbap_knowledge_ocaml.a libbap_knowledge_ocaml.a")
+   (system "cp cargo/release/libbap_knowledge_ocaml.so dllbap_knowledge_ocaml.so"))))

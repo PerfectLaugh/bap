@@ -2098,24 +2098,19 @@ module Knowledge = struct
         pubs = Map.empty (module String);
       }
 
+    type native
+
     type t = {
       classes : objects Map.M(Name).t;
       package : string;
       context : Dict.t;
+      native : native;
     }
   end
 
   type state = Env.t
 
-  let empty : Env.t =
-    {
-      package = user_package;
-      classes = Map.empty (module Name);
-      context = Dict.empty;
-    }
-
-  let noinfo : Env.info =
-    { data = Record.empty; comp = Map.empty (module Name); name = None }
+  let unwrap = function Ok value -> value | Error message -> failwith message
 
   type 'a knowledge = {
     run :
@@ -2212,7 +2207,89 @@ module Knowledge = struct
     let promises x = Hashtbl.length x.promises
   end
 
+  let native_order (slot : ('a, 'b) Slot.t) left right =
+    match slot.Slot.dom.order left right with
+    | Order.LT -> 0
+    | Order.EQ -> 1
+    | Order.GT -> 2
+    | Order.NC -> 3
+
+  let native_commit (slot : ('a, 'b) Slot.t) old value =
+    Record.commit slot.Slot.dom slot.Slot.key old value
+
+  let native_get (slot : ('a, 'b) Slot.t) data =
+    Record.get slot.Slot.key slot.Slot.dom data
+
+  let native_is_empty (slot : ('a, 'b) Slot.t) value =
+    Domain.is_empty slot.Slot.dom value
+
+  let native_promises (slot : ('a, 'b) Slot.t) =
+    Hashtbl.keys slot.Slot.promises
+
+  let native_class (slot : ('a, 'b) Slot.t) =
+    Name.to_string slot.Slot.cls.name
+
+  let native_slot_name (slot : ('a, 'b) Slot.t) =
+    Name.to_string slot.Slot.name
+
+  let native_with_env state native = { state with Env.native }
+
+  let native_run (slot : ('a, 'b) Slot.t) pid obj state =
+    let action = Hashtbl.find_exn slot.Slot.promises pid in
+    action.Slot.run obj
+    |> fun computation ->
+    computation.run state
+      ~reject:(fun conflict -> Error conflict)
+      ~accept:(fun _ state -> Ok state)
+
+  let () =
+    Callback.register "kb_native_order" native_order;
+    Callback.register "kb_native_commit" native_commit;
+    Callback.register "kb_native_get" native_get;
+    Callback.register "kb_native_is_empty" native_is_empty;
+    Callback.register "kb_native_record_is_empty" Record.is_empty;
+    Callback.register "kb_native_empty_record" Record.empty;
+    Callback.register "kb_native_promises" native_promises;
+    Callback.register "kb_native_class" native_class;
+    Callback.register "kb_native_slot_name" native_slot_name;
+    Callback.register "kb_native_with_env" native_with_env;
+    Callback.register "kb_native_run" native_run
+
   type (+'a, 'p) slot = ('a, 'p) Slot.t
+
+  let oid_of_native value = Oid.of_int value
+
+  external kb_empty : unit -> Env.native = "kb_rs_empty"
+  external kb_create : Env.native -> string -> (Env.native * int, string) result = "kb_rs_create"
+  external kb_delete : Env.native -> string -> int -> Env.native = "kb_rs_delete"
+  external kb_objects : Env.native -> string -> int array = "kb_rs_objects"
+  external kb_intern : Env.native -> string -> string -> string -> bool -> (Env.native * int, string) result = "kb_rs_intern"
+  external kb_repr : Env.native -> string -> int -> string = "kb_rs_repr"
+  external kb_read : Env.native -> string -> string -> (Env.native * int, string) result = "kb_rs_read"
+  external kb_record : Env.native -> string -> int -> Record.t = "kb_rs_record"
+  external kb_current : Env.native -> ('a, 'p) slot -> int -> 'p = "kb_rs_current"
+  external kb_status : Env.native -> ('a, 'p) slot -> int -> int * Record.t = "kb_rs_status"
+  external kb_provide : Env.t -> ('a, 'p) slot -> int -> 'p -> (Env.t, string) result = "kb_rs_provide"
+  external kb_collect : Env.t -> ('a, 'p) slot -> int -> (Env.t * 'p, string) result = "kb_rs_collect"
+  external kb_set_package : Env.native -> string -> Env.native = "kb_rs_set_package"
+  external kb_import : Env.native -> string list -> bool -> (Env.native, string) result = "kb_rs_import"
+
+  let kb_create state name = unwrap (kb_create state name)
+  let kb_intern state cls package name public =
+    unwrap (kb_intern state cls package name public)
+
+  let kb_read state name input = unwrap (kb_read state name input)
+
+  let empty : Env.t =
+    {
+      package = user_package;
+      classes = Map.empty (module Name);
+      context = Dict.empty;
+      native = kb_empty ();
+    }
+
+  let noinfo : Env.info =
+    { data = Record.empty; comp = Map.empty (module Name); name = None }
 
   module Value = struct
     type +'a t = 'a value
@@ -2396,6 +2473,20 @@ module Knowledge = struct
     >>| fun () -> res
   [@@specialise]
 
+  let sync cls obj s =
+    put s >>= fun () ->
+    update_objects cls (fun objects ->
+        let data =
+          kb_record s.native (Name.to_string cls.Class.name)
+            (Oid.to_int obj)
+        in
+        let vals =
+          Oid.Tree.update_with objects.vals obj
+            ~nil:(fun () -> { noinfo with data })
+            ~has:(fun info -> { info with data })
+        in
+        { objects with vals })
+
   module Object = struct
     type +'a t = 'a obj
     type 'a ord = Oid.comparator_witness
@@ -2413,86 +2504,71 @@ module Knowledge = struct
 
     let create : ('a, _) cls -> 'a obj Knowledge.t =
      fun cls ->
-      objects cls >>= fun objs ->
-      with_new_object objs @@ fun obj objs ->
-      ( update @@ function
-        | { classes } as s ->
-            { s with classes = Map.set classes ~key:cls.name ~data:objs } )
+      get () >>= fun s ->
+      let native, obj =
+        let native, obj = kb_create s.native (Name.to_string cls.name) in
+        (native, oid_of_native obj)
+      in
+      let objs =
+        match Map.find s.classes cls.name with
+        | None -> { Env.empty_class with last = obj }
+        | Some objs -> { objs with last = obj }
+      in
+      put { s with native; classes = Map.set s.classes ~key:cls.name ~data:objs }
       >>| fun () -> obj
 
     let null _ = Oid.zero
     let is_null = Oid.equal Oid.zero
 
-    (* an interesting question, what we shall do if
-       1) an symbol is deleted
-       2) a data object is deleted?
-
-       So far we ignore both deletes.
-    *)
     let delete { Class.name } obj =
-      update @@ function
-      | { classes } as s ->
-          {
-            s with
-            classes =
-              Map.change classes name ~f:(function
-                | None -> None
-                | Some objs ->
-                    Some { objs with vals = Oid.Tree.remove objs.vals obj });
-          }
+      get () >>= fun s ->
+      let native = kb_delete s.native (Name.to_string name) (Oid.to_int obj) in
+      let classes =
+        Map.change s.classes name ~f:(function
+          | None -> None
+          | Some objs -> Some { objs with vals = Oid.Tree.remove objs.vals obj })
+      in
+      put { s with native; classes }
 
     let scoped cls scope =
       create cls >>= fun obj ->
       scope obj >>= fun r ->
       delete cls obj >>| fun () -> r
 
-    let do_intern =
-      let is_public { package } obj { Env.pubs } =
-        match Map.find pubs package with
-        | None -> false
-        | Some pubs -> Set.mem pubs obj
+    let do_intern ?(public = false) ?desc:_ name { Class.name = id } =
+      get () >>= fun s ->
+      let native, obj =
+        let native, obj = kb_intern s.native (Name.to_string id) name.package name.name public in
+        (native, oid_of_native obj)
       in
-      let unchanged id = Knowledge.return id in
-      let publicize { package } obj : Env.objects -> Env.objects =
-       fun objects ->
-        {
-          objects with
-          pubs =
-            Map.update objects.pubs package ~f:(function
-              | None -> Set.singleton (module Oid) obj
-              | Some pubs -> Set.add pubs obj);
-        }
+      let objects =
+        match Map.find s.classes id with
+        | None -> Env.empty_class
+        | Some objs -> objs
       in
-      let createsym ~public name classes clsid objects s =
-        with_new_object objects @@ fun obj objects ->
-        let vals =
-          Oid.Tree.update_with objects.vals obj
-            ~has:(fun info -> { info with name = Some name })
-            ~nil:(fun () -> { noinfo with name = Some name })
-        in
-        let objs = Map.add_exn objects.objs ~key:name ~data:obj in
-        let objects = { objects with objs; vals } in
-        let objects = if public then publicize name obj objects else objects in
-        put { s with classes = Map.set classes ~key:clsid ~data:objects }
-        >>| fun () -> obj
+      let data =
+        kb_record native (Name.to_string id) (Oid.to_int obj)
       in
-
-      fun ?(public = false) ?desc:_ name { Class.name = id } ->
-        get () >>= fun ({ classes } as s) ->
-        let objects =
-          match Map.find classes id with
-          | None -> Env.empty_class
-          | Some objs -> objs
-        in
-        match Map.find objects.objs name with
-        | None -> createsym ~public name classes id objects s
-        | Some obj when not public -> unchanged obj
-        | Some obj ->
-            if is_public name obj objects then unchanged obj
-            else
-              let objects = publicize name obj objects in
-              put { s with classes = Map.set classes ~key:id ~data:objects }
-              >>| fun () -> obj
+      let vals =
+        Oid.Tree.update_with objects.vals obj
+          ~has:(fun info -> { info with name = Some name; data })
+          ~nil:(fun () -> { noinfo with name = Some name; data })
+      in
+      let objs = Map.set objects.objs ~key:name ~data:obj in
+      let objects = { objects with last = Oid.max objects.last obj; objs; vals } in
+      let objects =
+        if public then
+          {
+            objects with
+            pubs =
+              Map.update objects.pubs name.package ~f:(function
+                | None -> Set.singleton (module Oid) obj
+                | Some pubs -> Set.add pubs obj);
+          }
+        else objects
+      in
+      put { s with native; classes = Map.set s.classes ~key:id ~data:objects }
+      >>| fun () -> obj
 
     (* any [:] in names here are never treated as separators,
        contrary to [read], where they are, and [do_intern] where
@@ -2524,11 +2600,15 @@ module Knowledge = struct
               else Name.Full.to_string fname
           | _ -> uninterned_repr cls obj)
 
-    let repr cls obj =
+    let repr (cls : ('a, _) cls) obj =
       if is_null obj then !!"nil"
-      else get () >>| fun env -> to_string cls env obj
+      else
+        get ()
+        >>| fun s ->
+        kb_repr s.native (Name.to_string cls.name)
+          (Oid.to_int obj)
 
-    let read cls = function
+    let read (cls : ('a, _) cls) = function
       | "nil" -> !!(null cls)
       | input -> (
           try
@@ -2648,7 +2728,10 @@ module Knowledge = struct
   let provide : type a p. (a, p) slot -> a obj -> p -> unit Knowledge.t =
    fun slot obj x ->
     if Object.is_null obj || Domain.is_empty slot.dom x then Knowledge.return ()
-    else commit slot obj x >>= fun () -> notify slot obj x
+    else
+      get () >>= fun s ->
+      let s = unwrap (kb_provide s slot (Oid.to_int obj) x) in
+      sync slot.cls obj s >>= fun () -> notify slot obj x
 
   let pids = ref Pid.zero
 
@@ -2759,19 +2842,11 @@ module Knowledge = struct
 
   let status : ('a, _) slot -> 'a obj -> slot_status knowledge =
    fun slot obj ->
-    objects slot.cls >>| fun { vals } ->
-    match Oid.Tree.find_exn vals obj with
-    | exception Stdlib.Not_found -> Sleep
-    | { data; comp = slots } -> (
-        match Map.find slots (uid slot) with
-        | Some (Work _) -> Awoke
-        | other -> (
-            match (other, Record.is_empty data) with
-            | Some (Work _), _ -> assert false
-            | None, true -> Sleep
-            | Some Done, true -> Ready Record.empty
-            | Some Done, false -> Ready data
-            | None, false -> if is_empty slot data then Sleep else Ready data))
+    get () >>| fun s ->
+    match kb_status s.native slot (Oid.to_int obj) with
+    | 0, _ -> Sleep
+    | 1, _ -> Awoke
+    | _, data -> Ready data
 
   let update_slot : ('a, _) slot -> 'a obj -> _ -> unit knowledge =
    fun slot obj f ->
@@ -2833,39 +2908,15 @@ module Knowledge = struct
   let initial_promises { Slot.promises } = Hashtbl.data promises
 
   let current : type a p. (a, p) slot -> a obj -> p Knowledge.t =
-   fun slot id ->
-    objects slot.cls >>| fun { Env.vals } ->
-    match Oid.Tree.find_exn vals id with
-    | exception Stdlib.Not_found -> slot.dom.empty
-    | { data } -> Record.get slot.key slot.dom data
-
-  let rec collect_inner : ('a, 'p) slot -> 'a obj -> _ -> _ =
-   fun slot obj promises ->
-    current slot obj >>= fun was ->
-    Knowledge.List.iter promises ~f:(fun { Slot.run; pid } ->
-        enter_promise slot obj pid >>= fun () ->
-        run obj >>= fun () -> leave_promise slot obj pid)
-    >>= fun () ->
-    dequeue_waiting slot obj >>= fun waiting ->
-    match waiting with
-    | [] -> Knowledge.return ()
-    | promises -> (
-        current slot obj >>= fun now ->
-        match slot.dom.order now was with
-        | EQ | LT -> Knowledge.return ()
-        | GT | NC -> collect_inner slot obj promises)
+   fun slot id -> get () >>| fun s -> kb_current s.native slot (Oid.to_int id)
 
   let collect : type a p. (a, p) slot -> a obj -> p Knowledge.t =
    fun slot id ->
     if Object.is_null id then !!(Domain.empty slot.dom)
     else
-      status slot id >>= function
-      | Ready v -> Knowledge.return @@ Record.get slot.key slot.dom v
-      | Awoke -> enqueue_promises slot id >>= fun () -> current slot id
-      | Sleep ->
-          enter_slot slot id >>= fun () ->
-          collect_inner slot id (initial_promises slot) >>= fun () ->
-          leave_slot slot id >>= fun () -> current slot id
+      get () >>= fun s ->
+      let s, value = unwrap (kb_collect s slot (Oid.to_int id)) in
+      sync slot.cls id s >>| fun () -> value
 
   let observe s run = ignore @@ register_watcher s run
 
@@ -2924,18 +2975,22 @@ module Knowledge = struct
     let intern = Object.intern
     let keyword = keyword_package
 
+    let set_package name =
+      get () >>= fun s ->
+      let native = kb_set_package s.native name in
+      put { s with native; package = name }
+
     let in_package package f =
-      get () >>= function
-      | { Env.package = old_package } as s ->
-          put { s with package } >>= fun () ->
-          f () >>= fun r ->
-          update (fun s -> { s with package = old_package }) >>| fun () -> r
+      get () >>= fun { Env.package = old_package } ->
+      set_package package >>= fun () ->
+      f () >>= fun r ->
+      set_package old_package >>| fun () -> r
 
     exception Import of fullname * fullname [@@deriving sexp_of]
 
     let intern_symbol name obj cls =
       Knowledge.return
-        Env.{ cls with objs = Map.add_exn cls.objs ~key:name ~data:obj }
+        Env.{ cls with objs = Map.set cls.objs ~key:name ~data:obj }
 
     (* imports names inside a class.
 
@@ -2961,7 +3016,7 @@ module Knowledge = struct
                   | Some obj' -> obj'
                 in
                 if (not strict) || Oid.(obj' = zero || obj' = obj) then
-                  intern_symbol sym obj cls
+                  intern_symbol { sym with package } obj cls
                 else
                   let info = Oid.Tree.find_exn cls.vals obj' in
                   let sym' = Option.value_exn info.name in
@@ -3012,10 +3067,13 @@ module Knowledge = struct
                ~f:(fun classes (clsid, objects) ->
                  import_class ~strict ~package ~needs_import objects
                  >>| fun objects -> Map.set classes ~key:clsid ~data:objects))
-      >>= fun classes -> put { s with classes }
+      >>= fun classes ->
+      let native = kb_set_package s.native package in
+      let native = unwrap (kb_import native imports strict) in
+      let native = kb_set_package native s.package in
+      put { s with native; classes }
 
     let package = get () >>| fun { Env.package } -> package
-    let set_package name = update @@ fun s -> { s with package = name }
   end
 
   module Syntax = struct
@@ -3094,10 +3152,10 @@ module Knowledge = struct
 
   let get_value cls obj =
     compute_value cls obj >>= fun () ->
-    objects cls >>| fun { Env.vals } ->
-    match Oid.Tree.find_exn vals obj with
-    | exception Stdlib.Not_found -> Value.empty cls
-    | { data = x } -> Value.create cls x
+    get () >>| fun s ->
+    Value.create cls
+      (kb_record s.native (Name.to_string cls.name)
+         (Oid.to_int obj))
 
   let run cls obj s =
     (obj >>= get_value cls).run s

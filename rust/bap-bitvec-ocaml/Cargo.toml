@@ -1,0 +1,20 @@
+[package]
+name = "bap-bitvec-ocaml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OCaml bindings for BAP bitvectors"
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+bap-bitvec = { path = "../bap-bitvec" }
+num-bigint = { workspace = true }
+num-integer = { workspace = true }
+num-traits = { workspace = true }
+ocaml = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true

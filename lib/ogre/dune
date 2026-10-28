@@ -4,4 +4,14 @@
  (wrapped false)
  (preprocess
   (pps ppx_bap))
- (libraries core monads))
+ (libraries core monads)
+ (foreign_archives bap_ogre)
+ (c_library_flags -lpthread -ldl -lm))
+
+(rule
+ (targets libbap_ogre.a dllbap_ogre.so)
+ (deps ../bap_rust/libbap_ocaml.a ../bap_rust/dllbap_ocaml.so)
+ (action
+  (progn
+   (copy ../bap_rust/libbap_ocaml.a libbap_ogre.a)
+   (copy ../bap_rust/dllbap_ocaml.so dllbap_ogre.so))))

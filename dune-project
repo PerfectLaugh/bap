@@ -93,6 +93,7 @@
   (bap-relocatable (= :version))
   (bap-report (= :version))
   (bap-riscv (= :version))
+  (bap-rust (= :version))
   (bap-specification (= :version))
   (bap-ssa (= :version))
   (bap-std (= :version))
@@ -432,6 +433,15 @@ details of the program behavior.")
   (bap-systemz :with-test)
   (bap-thumb :with-test)
   (bap-x86 :with-test)))
+
+(package
+ (name bap-rust)
+ (synopsis "Rust OGRE, BIR, bitvector, and CFG libraries for BAP")
+ (tags (bap bap-plugin bap-library rust ogre bir bitvector cfg))
+ (depends
+  (bap-main (= :version))
+  core
+  (bap-common (= :version))))
 
 (package
  (name bap-decompile)
@@ -1292,6 +1302,7 @@ between the sets.")
   (bap-main (= :version))
   (bap-plugins (= :version))
   (bap-relation (= :version))
+  (bap-rust (= :version))
    base-unix
   (bitvec-order (= :version))
   (bitvec (= :version))

@@ -52,6 +52,7 @@ depends: [
   "bap-relocatable" {= version}
   "bap-report" {= version}
   "bap-riscv" {= version}
+  "bap-rust" {= version}
   "bap-specification" {= version}
   "bap-ssa" {= version}
   "bap-std" {= version}

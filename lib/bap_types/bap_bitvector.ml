@@ -18,7 +18,7 @@ open Format
    however we borrown the least 15 bits for storing bitwidth and the
    signedness flag. This is basically the same representation as we
    had for BAP 1.x, except that we used Z.t directly, and now we are
-   using Bitvec.t instead (which is also Z.t underneath the hood).
+   using the Rust-backed Bitvec.t implementation.
 
 
    word format:

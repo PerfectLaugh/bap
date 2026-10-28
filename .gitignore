@@ -90,3 +90,4 @@ llvm-project-*.src.tar.xz
 # the settings of the editors
 .vscode/
 /compile_commands.json
+/rust/target/

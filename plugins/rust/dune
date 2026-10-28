@@ -1,0 +1,12 @@
+(library
+ (name bap_rust_plugin)
+ (public_name bap-rust.plugin)
+ (modules rust_main)
+ (libraries bap-main bap-rust core))
+
+(plugin
+ (name rust)
+ (package bap-rust)
+ (libraries bap-rust.plugin)
+ (site
+  (bap-common plugins)))

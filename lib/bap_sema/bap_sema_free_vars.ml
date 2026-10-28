@@ -16,19 +16,21 @@ let ssa_free_vars sub =
 
 module Live = struct
   type tran = { defs : Var.Set.t; uses : Var.Set.t }
-  type t = { blks : tran Tid.Map.t; outs : (tid, Var.Set.t) Solution.t }
+  type t = {
+    blks : tran Tid.Map.t;
+    ins : Var.Set.t Tid.Map.t;
+    outs : (tid, Var.Set.t) Solution.t;
+  }
 
   let pp_vars ppf vars =
-    Format.pp_print_list ~pp_sep:Format.pp_print_space Var.pp ppf
-      (Set.to_list vars)
+    Format.pp_print_list ~pp_sep:Format.pp_print_space Var.pp ppf (Set.to_list vars)
 
   let pp_transfer ppf { uses; defs } =
     Format.fprintf ppf "(%a) / (%a)" pp_vars uses pp_vars defs
 
   let blk_defs blk =
     Term.enum def_t blk
-    |> Seq.fold ~init:Var.Set.empty ~f:(fun defs def ->
-        Set.add defs (Ir_def.lhs def))
+    |> Seq.fold ~init:Var.Set.empty ~f:(fun defs def -> Set.add defs (Ir_def.lhs def))
 
   let update blk trans ~f =
     Map.update trans blk ~f:(function
@@ -48,51 +50,47 @@ module Live = struct
             Ir_phi.values phi
             |> Seq.fold ~init ~f:(fun fs (src, exp) ->
                 update src fs ~f:(fun { defs; uses } ->
-                    {
-                      defs = Set.add defs (Ir_phi.lhs phi);
-                      uses = uses ++ (Exp.free_vars exp -- defs);
-                    }))))
+                    { defs = Set.add defs (Ir_phi.lhs phi); uses = uses ++ (Exp.free_vars exp -- defs) }))))
 
   let lookup blks n =
     match Map.find blks n with
     | None -> { defs = Var.Set.empty; uses = Var.Set.empty }
     | Some t -> t
 
-  let is_pseudo n = Tid.equal n G.exit || Tid.equal n G.start
   let apply { defs; uses } vars = vars -- defs ++ uses
-
-  let transfer blks n vars =
-    if is_pseudo n then vars else apply (lookup blks n) vars
-
   let initialize ?(init = Var.Set.empty) sub =
-    Tid.Map.singleton G.exit
-    @@ Seq.fold (Term.enum arg_t sub) ~init ~f:(fun vars arg ->
+    Seq.fold (Term.enum arg_t sub) ~init ~f:(fun vars arg ->
         match Ir_arg.intent arg with
         | None | Some In -> vars
         | Some (Out | Both) -> vars ++ Exp.free_vars (Ir_arg.rhs arg))
 
+  let unwrap = function Ok value -> value | Error message -> failwith message
+
+  external liveness_native :
+    Bap_ir_wire.wire_sub -> Bap_bil_wire.wire_var list ->
+    (Bap_ir_wire.wire_live list, string) result = "bap_cfg_rs_liveness"
+
   let compute ?keep:init sub =
-    let g = G.create sub in
-    let init = Solution.create (initialize ?init sub) Var.Set.empty in
-    let blks = block_transitions sub in
+    let initial = initialize ?init sub in
+    let env, input = Bap_ir_wire.encode_sub_with_vars initial sub in
+    let keep = Bap_ir_wire.encode_vars env initial in
+    let ins, outs =
+      liveness_native input keep |> unwrap
+      |> Bap_ir_wire.decode_liveness env ~start:G.start ~exit:G.exit
+    in
     {
-      blks;
-      outs =
-        Graphlib.fixpoint
-          (module G)
-          ~init ~start:G.exit ~rev:true g ~merge:Set.union ~equal:Var.Set.equal
-          ~f:(transfer blks);
+      blks = block_transitions sub;
+      ins;
+      outs = Solution.create outs Var.Set.empty;
     }
 
   let outs { outs } blk = Solution.get outs blk
-  let ins { outs; blks } blk = transfer blks blk (Solution.get outs blk)
+  let ins { ins } blk = Map.find ins blk |> Option.value ~default:Var.Set.empty
   let defs { blks } blk = (lookup blks blk).defs
   let uses { blks } blk = (lookup blks blk).uses
 
   let fold live ~init ~f =
-    Map.fold live.blks ~init ~f:(fun ~key:blk ~data:trans init ->
-        let outs = Solution.get live.outs blk in
-        f init blk (apply trans outs))
+    Map.fold live.blks ~init ~f:(fun ~key:blk ~data:_ init -> f init blk (ins live blk))
 
   let blks live var =
     fold live ~init:Tid.Set.empty ~f:(fun blks blk ins ->
@@ -104,13 +102,11 @@ module Live = struct
   let pp ppf live =
     Format.pp_open_vbox ppf 0;
     fold live ~init:() ~f:(fun () blk live ->
-        Format.fprintf ppf "@[<h>%a: @[<hov 2>(%a)@]@]@;" Tid.pp blk pp_vars
-          live);
+        Format.fprintf ppf "@[<h>%a: @[<hov 2>(%a)@]@]@;" Tid.pp blk pp_vars live);
     Format.pp_close_box ppf ()
 end
 
 let compute_liveness sub = Live.(solution @@ compute sub)
 
 let free_vars_of_sub sub =
-  if Ssa.is_transformed sub then ssa_free_vars sub
-  else Live.(vars @@ compute sub)
+  if Ssa.is_transformed sub then ssa_free_vars sub else Live.(vars @@ compute sub)

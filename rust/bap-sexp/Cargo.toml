@@ -1,0 +1,10 @@
+[package]
+name = "bap-sexp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "S-expression parsing and printing for BAP native libraries"
+
+[lints]
+workspace = true

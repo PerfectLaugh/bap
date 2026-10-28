@@ -341,23 +341,23 @@ let number_of_edges t =
 
 let number_of_nodes t = Term.length blk_t t.sub
 
+external edges_native :
+  Bap_ir_wire.wire_sub -> bool -> (Bap_ir_wire.wire_edge list, string) result =
+  "bap_cfg_rs_edges"
+
 let preds_of_sub sub : Tid.Set.t Tid.Map.t =
-  Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun ins src ->
-      let src_id = Term.tid src in
-      let ins =
-        Map.change ins src_id ~f:(function
-          | None -> Some Tid.Set.empty
-          | other -> other)
-      in
-      Term.enum jmp_t src
-      |> Seq.fold ~init:ins ~f:(fun ins jmp ->
-          match succ_tid_of_jmp jmp with
-          | None -> ins
-          | Some tid ->
-              Map.change ins tid ~f:(function
-                | None -> Some (Tid.Set.singleton src_id)
-                | Some set -> Some (Set.add set src_id))))
+  let env, input = Bap_ir_wire.encode_sub sub in
+  let edges =
+    edges_native input false
+    |> (function Ok value -> value | Error message -> failwith message)
+    |> Bap_ir_wire.decode_edges env ~start:(Tid.create ()) ~exit:(Tid.create ())
+  in
+  let empty =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun preds blk -> Pred.insert (Term.tid blk) preds)
+  in
+  List.fold edges ~init:empty ~f:(fun preds (source, target, _) ->
+      Pred.update source target preds)
 
 let of_sub sub = { preds = preds_of_sub sub; sub }
 let to_sub t = t.sub

@@ -1,0 +1,18 @@
+[package]
+name = "bap-cfg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "BIR control-flow graphs and analysis passes"
+
+[dependencies]
+bap-bir = { path = "../bap-bir" }
+bap-sexp = { path = "../bap-sexp" }
+bap-bitvec = { path = "../bap-bitvec" }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true
