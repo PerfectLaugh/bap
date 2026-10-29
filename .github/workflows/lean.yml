@@ -1,0 +1,33 @@
+name: Lean
+
+on:
+  push:
+    paths:
+      - 'lean/**'
+      - '.github/workflows/lean.yml'
+  pull_request:
+    paths:
+      - 'lean/**'
+      - '.github/workflows/lean.yml'
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build clang curl libc++-dev libc++abi-dev
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: lean
+          build: 'false'
+          test: 'false'
+      - run: BAP_LIBCXX_INCLUDE=/usr/include/c++/v1 python3 native/build-static.py
+        working-directory: lean
+      - run: lake env leanchecker
+        working-directory: lean
+      - run: lake exe bap-tests
+        working-directory: lean
+      - run: lake exe bap check BapTests/Fixtures/basic.bil
+        working-directory: lean
+      - run: lake exe bap eval BapTests/Fixtures/basic.bil
+        working-directory: lean

@@ -1,0 +1,18 @@
+name = "bap"
+defaultTargets = ["Bap", "bap", "bap-tests"]
+
+[[lean_lib]]
+name = "Bap"
+
+[[lean_exe]]
+name = "bap"
+root = "Main"
+moreLinkArgs = ["@native/static-link.rsp"]
+
+[[lean_lib]]
+name = "BapTests"
+
+[[lean_exe]]
+name = "bap-tests"
+root = "BapTests.Main"
+moreLinkArgs = ["@native/static-link.rsp"]

@@ -1,0 +1,12 @@
+#pragma once
+
+#include <features.h>
+
+#undef __GLIBC_USE_C23_STRTOL
+#define __GLIBC_USE_C23_STRTOL 0
+
+#undef __GLIBC_USE_DEPRECATED_SCANF
+#define __GLIBC_USE_DEPRECATED_SCANF 1
+
+#undef _LIBCPP_HAS_COND_CLOCKWAIT
+#define _LIBCPP_HAS_COND_CLOCKWAIT 0
