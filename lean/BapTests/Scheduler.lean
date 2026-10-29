@@ -50,8 +50,7 @@ def run : IO Unit := do
   let changed ← match original.storeByte 0x1001 9 with
     | .ok memory => pure memory
     | .error error => throw <| IO.userError s!"store failed: {repr error}"
-  let changed := { changed with cells := { changed.cells with
-    cells := changed.cells.cells.filter fun cell => cell.1 != BitVec.ofNat 64 0x1002 } }
+  let changed := { changed with cells := Bap.Memory.writeByte changed.cells (BitVec.ofNat 64 0x1002) 0 }
   let delta := Delta.diff original changed
   assertEqual "checkpoint tracks changed and deleted cells" 2 delta.cells.length
   let restored := delta.apply original

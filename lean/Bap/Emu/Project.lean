@@ -32,6 +32,7 @@ private def mergeDisasm (left right : Disasm.Disasm) : Disasm.Disasm := {
 
 def project (emu : Emu) (roots : List Nat := []) (symbols : List (String × Nat) := []) :
     IO Project.Project := do
+  Bap.Emu.refreshRegions emu
   let entry ← emu.pc.get
   let mapped ← emu.regions.get
   let width ← match imageWidth emu.config with

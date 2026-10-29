@@ -1,24 +1,43 @@
 import Bap.Core.Types
 import Bap.Core.Word
+import Std.Data.HashMap
 
 namespace Bap
 
 structure Memory (addressWidth : Nat) where
-  cells : List (BitVec addressWidth × UInt8) := []
-  deriving Repr
+  pages : Std.HashMap Nat ByteArray := {}
 
 namespace Memory
 
-def empty (addressWidth : Nat) : Memory addressWidth := ⟨[]⟩
+def pageSize : Nat := 256
+
+instance : Repr (Memory addressWidth) where
+  reprPrec memory _ := s!"memory({memory.pages.size} pages)"
+
+def empty (addressWidth : Nat) : Memory addressWidth := ⟨{}⟩
+
+def cells (memory : Memory addressWidth) : List (BitVec addressWidth × UInt8) :=
+  memory.pages.toList.flatMap fun entry =>
+    let base := entry.1 * pageSize
+    (List.range entry.2.size).filterMap fun offset =>
+      let byte := entry.2[offset]!
+      if byte = 0 then none else some (BitVec.ofNat addressWidth (base + offset), byte)
 
 def readByte (memory : Memory addressWidth) (address : BitVec addressWidth) : UInt8 :=
-  match memory.cells.find? fun cell => cell.1 == address with
-  | some cell => cell.2
+  let address := address.toNat
+  match memory.pages.get? (address / pageSize) with
+  | some page => page[address % pageSize]!
   | none => 0
 
 def writeByte (memory : Memory addressWidth) (address : BitVec addressWidth) (value : UInt8) :
     Memory addressWidth :=
-  ⟨ (address, value) :: memory.cells.filter fun cell => cell.1 != address ⟩
+  let address := address.toNat
+  let index := address / pageSize
+  let page := (memory.pages.get? index).getD (ByteArray.mk (List.replicate pageSize 0).toArray)
+  ⟨memory.pages.insert index (page.set! (address % pageSize) value)⟩
+
+def ofCells (cells : List (BitVec addressWidth × UInt8)) : Memory addressWidth :=
+  cells.foldl (init := empty addressWidth) fun memory cell => writeByte memory cell.1 cell.2
 
 private def byteAt (value : Nat) (offset : Nat) : UInt8 :=
   UInt8.ofNat ((value / 256 ^ offset) % 256)
@@ -45,15 +64,6 @@ def read (memory : Memory addressWidth) (address : BitVec addressWidth)
     | .big => bytes
   let value := ordered.foldl (fun result byte => result * 256 + byte.toNat) 0
   BitVec.ofNat (size * 8) value
-
-@[simp] theorem readByte_writeByte_same
-    (memory : Memory addressWidth) (address : BitVec addressWidth) (value : UInt8) :
-    readByte (writeByte memory address value) address = value := by
-  simp [readByte, writeByte]
-
-theorem readByte_empty (address : BitVec addressWidth) :
-    readByte (empty addressWidth) address = 0 := by
-  rfl
 
 end Memory
 

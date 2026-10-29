@@ -84,18 +84,20 @@ private def primitiveNames : List String :=
     "word-width", "set", "set$", "set-symbol-value", "alias-base-register", "symbol", "empty",
     "load-bits", "load-byte", "load-hword", "load-word", "store-word", "store-byte", "exec-addr", "intrinsic",
     "get-program-counter", "get-current-program-counter", "get-next-program-counter",
-    "is-zero", "non-zero", "neg", "s<", "s<=", "s>", "s>="]
+    "is-zero", "non-zero", "neg", "s<", "s<=", "s>", "s>=", "replicate"]
 
 private def lookup (name : String) (locals : Locals) (globals : Globals) : Except String Value :=
-  match Assoc.get name locals with
-  | some value => .ok value
-  | none =>
-    match Assoc.get name globals with
+  let primitiveName := if name.startsWith "core:" then (name.drop 5).toString else name
+  if primitiveName = "replicate" then .ok (.callable (.primitive "replicate"))
+  else
+    match Assoc.get name locals with
     | some value => .ok value
     | none =>
-      let primitiveName := if name.startsWith "core:" then (name.drop 5).toString else name
-      if primitiveNames.contains primitiveName then .ok (.callable (.primitive primitiveName))
-      else .error s!"unknown Primus symbol {name}"
+      match Assoc.get name globals with
+      | some value => .ok value
+      | none =>
+        if primitiveNames.contains primitiveName then .ok (.callable (.primitive primitiveName))
+        else .error s!"unknown Primus symbol {name}"
 
 private def parseBasedNat (digits : String) (base : Nat) : Option Nat :=
   digits.toList.foldlM (fun value c => do
@@ -145,7 +147,7 @@ private def expectNat : Value → Except String Nat
 
 private def truth : Value → Except String (Option Bool)
   | .bool value => .ok (some value)
-  | .bil 1 value =>
+  | .bil _ value =>
     match Bil.evalExp [] value with
     | .ok (.bits value) => .ok (some (value != 0))
     | _ => .ok none
@@ -222,16 +224,29 @@ private def widthOf (_context : Context) : Value → Except String Nat
   | .register _ width _ => .ok width
   | _ => .error "word-width expects a bitvector"
 
+private def valueTag : Value → String
+  | .unit => "unit"
+  | .int _ => "integer"
+  | .bil width _ => s!"BIL({width})"
+  | .bool _ => "boolean"
+  | .register name _ _ => s!"register({name})"
+  | .symbol name => s!"symbol({name})"
+  | .list _ => "list"
+  | .callable _ => "callable"
+
+private def assignRegister (context : Context) (name : String) (width baseWidth : Nat)
+    (value : Value) : Except String Bil.Program := do
+  if name = "XZR" then return []
+  if width != baseWidth then
+    throw s!"direct writes to subregisters must use the target's alias operation: {name} width={width} base={baseWidth}"
+  let (valueWidth, value) ← expectBil context value
+  if valueWidth != width then throw s!"Primus assignment width mismatch: {width} versus {valueWidth}"
+  return [.move ⟨name, .imm width, 0, false⟩ value]
+
 private def assign (context : Context) (destination value : Value) : Except String Bil.Program := do
   match destination with
-  | .register name width baseWidth =>
-    if name = "XZR" then return []
-    if width != baseWidth then
-      throw "direct writes to subregisters must use the target's alias operation"
-    let (valueWidth, value) ← expectBil context value
-    if valueWidth != width then throw s!"Primus assignment width mismatch: {width} versus {valueWidth}"
-    return [.move ⟨name, .imm width, 0, false⟩ value]
-  | _ => throw "Primus assignment destination is not a register"
+  | .register name width baseWidth => assignRegister context name width baseWidth value
+  | _ => throw s!"Primus assignment destination is not a register: {valueTag destination}"
 
 private def emit (state : State) (code : Bil.Program) : State := { state with code := state.code ++ code }
 
@@ -321,11 +336,24 @@ private def applyPrimitive (context : Context) (name : String) (args : List Valu
     | _ => throw "select expects bit and value"
   | "concat" =>
     match args with
-    | [left, right] =>
-      let (leftWidth, left) ← expectBil context left
-      let (rightWidth, right) ← expectBil context right
-      valueOnly (.bil (leftWidth + rightWidth) (.concat left right))
-    | _ => throw "concat expects two values"
+    | first :: rest =>
+      let (width, first) ← expectBil context first
+      let (width, concatenated) ← rest.foldlM (init := (width, first)) fun current value => do
+        let (rightWidth, right) ← expectBil context value
+        .ok (current.1 + rightWidth, Bil.Exp.concat current.2 right)
+      valueOnly (.bil width concatenated)
+    | [] => throw "concat expects at least one value"
+  | "replicate" =>
+    match args with
+    | [value, count] =>
+      let count ← expectNat count
+      let (width, value) ← expectBil context value
+      if count = 0 then throw "Primus replicate count must be positive"
+      else
+        let repeated := (List.range (count - 1)).foldl (init := value) fun result _ =>
+          .concat result value
+        valueOnly (.bil (width * count) repeated)
+    | _ => throw "replicate expects a value and count"
   | "set" | "set$" | "set-symbol-value" =>
     match args with
     | [destination, value] => pure (value, ← assign context destination value)
@@ -452,11 +480,13 @@ private def applyPrimitiveIndex (context : Context) (operation : Nat) (args : Li
     | _ => throw "select expects bit and value"
   | 32 =>
     match args with
-    | [left, right] =>
-      let (leftWidth, left) ← expectBil context left
-      let (rightWidth, right) ← expectBil context right
-      valueOnly (.bil (leftWidth + rightWidth) (.concat left right))
-    | _ => throw "concat expects two values"
+    | first :: rest =>
+      let (width, first) ← expectBil context first
+      let (width, concatenated) ← rest.foldlM (init := (width, first)) fun current value => do
+        let (rightWidth, right) ← expectBil context value
+        .ok (current.1 + rightWidth, Bil.Exp.concat current.2 right)
+      valueOnly (.bil width concatenated)
+    | [] => throw "concat expects at least one value"
   | 33 => valueOnly (← cast context .low args)
   | 34 => valueOnly (← cast context .high args)
   | 35 => valueOnly (← cast context .signed args)
@@ -572,9 +602,12 @@ private def definitionBody (body : List Sexp) : List Sexp :=
 private def caseMatches (key : Value) (form : Sexp) : Except String Bool := do
   match form with
   | .list [.atom "quote", .atom expected] =>
-    match key with
-    | .symbol actual | .register actual _ _ => pure (actual = expected)
-    | _ => .error "quoted Primus case key is not symbolic"
+    match parseInteger expected with
+    | some (expected, _) => pure ((← expectNat key) = expected.toNat)
+    | none =>
+      match key with
+      | .symbol actual | .register actual _ _ => pure (actual = expected)
+      | _ => .ok false
   | .atom expected =>
     match parseInteger expected with
     | some (expected, _) => pure ((← expectNat key) = expected.toNat)
@@ -629,9 +662,7 @@ mutual
           let width := max yesWidth noWidth
           .ok (.bil width (.ite condition (extend width yes) (extend width no)), state)
         else
-          match yesValue, noValue with
-          | .unit, .unit => .ok (.unit, emit state [.ifElse condition yesState.code noState.code])
-          | _, _ => .error "symbolic Primus branches mix values and effects"
+          .ok (.unit, emit state [.ifElse condition yesState.code noState.code])
 
   private def apply (fuel : Nat) (context : Context) (state : State)
       (value : Value) (args : List Value) : Except String (Value × State) := do
@@ -667,6 +698,39 @@ mutual
           | .atom atom => atomValue atom
           | .list items => .list (items.map quoted)
         .ok (quoted value, state)
+      | .list [.atom "sizeof", .atom typeName] =>
+        let bits := match typeName with
+          | "word" | "ptr_t" | "int64_t" => context.bits
+          | "int" | "int32_t" => 32
+          | "hword" | "int16_t" => 16
+          | "byte" | "int8_t" => 8
+          | _ => 0
+        if bits = 0 then .error s!"unknown Primus type {typeName}"
+        else .ok (.int (BitVec.ofNat 64 (bits / 8)), state)
+      | .list [.atom "assert-msg", test, .atom message] =>
+        let (test, state) ← eval fuel locals context state test
+        match ← truth test with
+        | some true => .ok (.unit, state)
+        | _ => .error message
+      | .list [.atom "replicate", value, count] | .list [.atom "core:replicate", value, count] =>
+        let (value, state) ← eval fuel locals context state value
+        let (count, state) ← eval fuel locals context state count
+        let count ← expectNat count
+        let (width, value) ← expectBil context value
+        if count = 0 then .error "Primus replicate count must be positive"
+        else
+          let repeated := (List.range (count - 1)).foldl (init := value) fun result _ =>
+            .concat result value
+          .ok (.bil (width * count) repeated, state)
+      | .list [.atom "clz", value] =>
+        let (value, state) ← eval fuel locals context state value
+        let (width, value) ← expectBil context value
+        let rec leading (index : Nat) : Bil.Exp :=
+          if index ≥ width then .int (BitVec.ofNat width width)
+          else
+            let bit := width - 1 - index
+            .ite (.extract bit bit value) (.int (BitVec.ofNat width index)) (leading (index + 1))
+        .ok (.bil width (leading 0), state)
       | .list (.atom "if" :: [test, yes, no]) =>
         evalConditional fuel locals context state test [yes] [no]
       | .list (.atom "when" :: test :: body) =>
@@ -767,9 +831,7 @@ mutual
           let width := max yesWidth noWidth
           .ok (.bil width (.ite condition (extend width yes) (extend width no)), state)
         else
-          match yesValue, noValue with
-          | .unit, .unit => .ok (.unit, emit state [.ifElse condition yesState.code noState.code])
-          | _, _ => .error "compiled Primus branches mix values and effects"
+          .ok (.unit, emit state [.ifElse condition yesState.code noState.code])
 
   private def evalCompiled (fuel : Nat) (locals : Locals) (context : Context)
       (state : State) (form : CExp) : Except String (Value × State) := do

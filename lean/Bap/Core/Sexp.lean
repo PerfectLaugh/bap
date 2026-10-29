@@ -68,14 +68,13 @@ def dropComment : List Char → List Char
   | '\n' :: rest => rest
   | _ :: rest => dropComment rest
 
-def skipSpace : Nat → List Char → List Char
-  | 0, input => input
-  | _ + 1, [] => []
-  | fuel + 1, c :: rest =>
+partial def skipSpace : List Char → List Char
+  | [] => []
+  | c :: rest =>
     if c.isWhitespace then
-      skipSpace fuel rest
+      skipSpace rest
     else if c = ';' then
-      skipSpace fuel (dropComment rest)
+      skipSpace (dropComment rest)
     else
       c :: rest
 
@@ -106,20 +105,15 @@ private def parseQuoted : Nat → List Char → Except String (String × List Ch
     let (tail, remaining) ← parseQuoted fuel rest
     .ok (String.ofList [c] ++ tail, remaining)
 
-private def parseAtom : List Char → String × List Char
-  | [] => ("", [])
-  | c :: rest =>
-    if c.isWhitespace ∨ c = '(' ∨ c = ')' ∨ c = ';' then
-      ("", c :: rest)
-    else
-      let (tail, remaining) := parseAtom rest
-      (String.ofList [c] ++ tail, remaining)
+private def parseAtom (input : List Char) : String × List Char :=
+  let atom := input.takeWhile fun c => !(c.isWhitespace ∨ c = '(' ∨ c = ')' ∨ c = ';')
+  (String.ofList atom, input.drop atom.length)
 
 mutual
   def parseOne : Nat → List Char → Except String (Sexp × List Char)
     | 0, _ => .error "S-expression parser fuel exhausted"
     | fuel + 1, input =>
-      match skipSpace (input.length + 1) input with
+      match skipSpace input with
       | [] => .error "expected an S-expression"
       | '(' :: rest => do
         let (items, remaining) ← parseList fuel rest
@@ -138,7 +132,7 @@ mutual
   def parseList : Nat → List Char → Except String (List Sexp × List Char)
     | 0, _ => .error "unterminated S-expression list"
     | fuel + 1, input =>
-      match skipSpace (input.length + 1) input with
+      match skipSpace input with
       | [] => .error "unterminated S-expression list"
       | ')' :: rest => .ok ([], rest)
       | input => do
@@ -150,7 +144,7 @@ end
 private def parseManyAux : Nat → List Char → List Sexp → Except String (List Sexp)
   | 0, _, _ => .error "S-expression parser fuel exhausted"
   | fuel + 1, input, results =>
-    match skipSpace (input.length + 1) input with
+    match skipSpace input with
     | [] => .ok results.reverse
     | _ => do
       let (value, rest) ← parseOne fuel input
@@ -163,7 +157,7 @@ def parseMany (input : String) : Except String (List Sexp) := do
 def parse (input : String) : Except String Sexp := do
   let chars := input.toList
   let (value, rest) ← parseOne (chars.length * 2 + 2) chars
-  match skipSpace (rest.length + 1) rest with
+  match skipSpace rest with
   | [] => .ok value
   | _ => .error "trailing input after S-expression"
 

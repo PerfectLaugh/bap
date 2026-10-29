@@ -31,7 +31,7 @@ private def decodeTyp (input : Sexp) : Except String Typ := do
 private def encodeValue : Value → Sexp
   | @Value.bits width value => .tagged "bits" [nat width, hex value.toNat]
   | @Value.memory addressWidth memory => .tagged "memory" [nat addressWidth,
-      .list (memory.cells.map fun cell => .tagged "cell" [hex cell.1.toNat, nat cell.2.toNat])]
+      .list ((Memory.cells memory).map fun cell => .tagged "cell" [hex cell.1.toNat, nat cell.2.toNat])]
   | .undefined => .atom "undefined"
 
 private def decodeCells (width : Nat) (input : Sexp) : Except String (List (BitVec width × UInt8)) := do
@@ -56,7 +56,7 @@ private def decodeValue (input : Sexp) : Except String Value := do
     .ok (.bits (BitVec.ofNat width (← Bil.Wire.parseHex (← Sexp.asAtom value))))
   | .list [.atom "memory", width, cells] =>
     let width ← Sexp.nat width
-    .ok (.memory (⟨← decodeCells width cells⟩))
+    .ok (.memory (Memory.ofCells (← decodeCells width cells)))
   | _ => .error "invalid checkpoint value"
 
 private def encodeBinding (binding : Bap.Var × Value) : Sexp :=
@@ -75,13 +75,37 @@ private def decodeBinding (input : Sexp) : Except String (Bap.Var × Value) := d
     .ok (⟨name, typ, index, isVirtual⟩, value)
   | _ => .error "invalid checkpoint binding"
 
+private def encodeBytes (data : ByteArray) : String :=
+  String.intercalate "" (data.toList.map fun byte =>
+    let digits := Nat.toDigits 16 byte.toNat
+    String.ofList (if digits.length = 1 then ['0'] ++ digits else digits))
+
+private def decodeHex (text : String) : Except String ByteArray := do
+  let rec loop (chars : List Char) (result : List UInt8) := do
+    match chars with
+    | [] => .ok (ByteArray.mk result.reverse.toArray)
+    | high :: low :: rest =>
+      let value ← Bil.Wire.parseHex (String.ofList [high, low])
+      if value ≥ 256 then .error "checkpoint region byte is out of range"
+      else loop rest (UInt8.ofNat value :: result)
+    | [_] => .error "checkpoint region has an odd hex length"
+  loop text.toList []
+
+private def decodeRegionBytes (input : Sexp) : Except String ByteArray := do
+  match input with
+  | .atom text => decodeHex text
+  | .list values =>
+    let bytes ← values.mapM fun byte => Sexp.nat byte
+    if bytes.any fun byte => byte ≥ 256 then .error "checkpoint region byte is out of range"
+    else .ok (ByteArray.mk (bytes.map UInt8.ofNat).toArray)
+
 private def encodeRegion (region : Region) : Sexp :=
   .tagged "region" [
     nat region.address,
     bool region.protection.readable,
     bool region.protection.writable,
     bool region.protection.executable,
-    .list (region.data.toList.map fun byte => nat byte.toNat)
+    .atom (encodeBytes region.data)
   ]
 
 private def decodeRegion (input : Sexp) : Except String Region := do
@@ -92,11 +116,8 @@ private def decodeRegion (input : Sexp) : Except String Region := do
     let readable ← boolValue readable
     let writable ← boolValue writable
     let executable ← boolValue executable
-    let bytes ← (← Sexp.asList data).mapM fun byte => Sexp.nat byte
-    if bytes.any fun byte => byte ≥ 256 then
-      .error "checkpoint region byte is out of range"
-    else
-      .ok ⟨address, ByteArray.mk (bytes.map UInt8.ofNat).toArray, ⟨readable, writable, executable⟩⟩
+    let bytes ← decodeRegionBytes data
+    .ok ⟨address, bytes, ⟨readable, writable, executable⟩⟩
   | _ => .error "invalid checkpoint region"
 
 private def encodePending : Option PendingBranch → Sexp
@@ -160,9 +181,35 @@ def decodeSnapshot (input : Sexp) : Except String Snapshot := do
     .ok ⟨{ env := env }, pc, regions, stopped, threads, currentThread, nextThread, pending⟩
   | _ => .error "invalid checkpoint snapshot"
 
+def materializeSnapshot (emu : Emu) (snapshot : Snapshot) : IO Snapshot := do
+  if snapshot.state.env.any fun binding => binding.1 == emu.config.memory then
+    pure snapshot
+  else
+    let width ← match emu.config.memory.typ with
+      | .mem width 8 => pure width
+      | _ => throw <| IO.userError "Emu memory must have byte-wide cells"
+    let memory := snapshot.regions.foldl (init := Bap.Memory.empty width) fun memory region =>
+      (List.range region.data.size).foldl (init := memory) fun memory offset =>
+        match region.data[offset]? with
+        | some 0 => memory
+        | _ => Bap.Memory.writeByte memory (BitVec.ofNat width (region.address + offset)) region.data[offset]!
+    pure { snapshot with
+      state := { env := (emu.config.memory, .memory memory) :: snapshot.state.env }
+      threads := snapshot.threads.map fun thread =>
+        { thread with state := { env := Bil.bind thread.state.env emu.config.memory (.memory memory) } }
+    }
+
 def save (emu : Emu) (path : String) : IO Unit := do
+  let originalRegions ← emu.regions.get
+  refreshRegions emu
   let snapshot ← snapshot emu
+  let snapshot := { snapshot with
+    state := { env := snapshot.state.env.filter fun binding => binding.1 != emu.config.memory }
+    threads := snapshot.threads.map fun thread =>
+      { thread with state := { env := thread.state.env.filter fun binding => binding.1 != emu.config.memory } }
+  }
   IO.FS.writeFile path (toString (encodeSnapshot snapshot))
+  emu.regions.set originalRegions
 
 def load (emu : Emu) (path : String) : IO Unit := do
   let input ← IO.FS.readFile path
@@ -171,6 +218,6 @@ def load (emu : Emu) (path : String) : IO Unit := do
   | .ok input =>
     match decodeSnapshot input with
     | .error error => throw <| IO.userError error
-    | .ok snapshot => restore emu snapshot
+    | .ok snapshot => restore emu (← materializeSnapshot emu snapshot)
 
 end Bap.Emu

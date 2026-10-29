@@ -121,6 +121,7 @@ def main():
         "-DLLVM_ENABLE_LIBCXX=OFF", "-DLLVM_ENABLE_ZLIB=OFF",
         "-DLLVM_ENABLE_ZSTD=OFF", "-DLLVM_ENABLE_LIBXML2=OFF",
         "-DLLVM_ENABLE_TERMINFO=OFF",
+        "-DCMAKE_REQUIRED_LIBRARIES=unwind",
     ]
     if not WINDOWS:
         llvm_options += ["-DHAVE_MALLINFO2=OFF", "-DHAVE_MALLINFO=OFF",

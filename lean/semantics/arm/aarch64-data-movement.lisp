@@ -43,7 +43,7 @@
   (setw dst (cast-unsigned (word) (load-byte (+ reg off)))))
 
 (defun LDRBBroX (dst reg off _ _)
-  (set$ dst
+  (setw dst
         (cast-unsigned (word) (load-byte (+ reg off)))))
 
 (defun LDRWroX (rt rn rm _ shift)

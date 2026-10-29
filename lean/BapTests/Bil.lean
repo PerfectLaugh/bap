@@ -28,6 +28,9 @@ def run : IO Unit := do
   let a := reg "a" 8
   let nested := Exp.letIn a (int 8 2) (.letIn a (plus (.var a) (int 8 3)) (.bin .mul (.var a) (int 8 2)))
   assertBits "nested lexical let" (BitVec.ofNat 8 10) (evalExp [] nested)
+  let rebound := bind (bind [] a (.bits (BitVec.ofNat 8 2))) a (.bits (BitVec.ofNat 8 3))
+  assertEqual "BIL bind replaces older bindings" 1 rebound.length
+  assertBits "BIL bind returns newest value" (BitVec.ofNat 8 3) (lookup rebound a)
   let mem : Var := ⟨"mem", .mem 32 8, 0, false⟩
   let stored := Exp.store (.var mem) (int 32 0) (int 32 0xdeadbeef) .little 4
   let loaded := Exp.load stored (int 32 0) .big 4

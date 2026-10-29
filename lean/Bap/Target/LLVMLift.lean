@@ -8,6 +8,16 @@ private def aarch64Register (name : String) : Primus.Semantics.Value :=
   let name := if name = "LR" then "X30" else if name = "FP" then "X29" else name
   if name = "XZR" || name = "WZR" then
     .register "XZR" 64 64
+  else if name.startsWith "B" && (name.drop 1).all Char.isDigit then
+    .register ("Q" ++ name.drop 1) 8 128
+  else if name.startsWith "H" && (name.drop 1).all Char.isDigit then
+    .register ("Q" ++ name.drop 1) 16 128
+  else if name.startsWith "S" && (name.drop 1).all Char.isDigit then
+    .register ("Q" ++ name.drop 1) 32 128
+  else if name.startsWith "D" && (name.drop 1).all Char.isDigit then
+    .register ("Q" ++ name.drop 1) 64 128
+  else if name.startsWith "Q" && (name.drop 1).all Char.isDigit then
+    .register name 128 128
   else if name.startsWith "W" && (name.drop 1).all Char.isDigit then
     .register ("X" ++ name.drop 1) 32 64
   else if name.startsWith "X" && (name.drop 1).all Char.isDigit then
@@ -36,7 +46,9 @@ private def x86Register (name : String) : Primus.Semantics.Value :=
 
 private def aarch64Globals : Primus.Semantics.Globals :=
   let registers := (List.range 31).map fun n => s!"X{n}"
-  (registers ++ ["SP", "LR", "XZR", "NF", "ZF", "CF", "VF"]).map fun name => (name, aarch64Register name)
+  let vectors := (List.range 32).flatMap fun n => [s!"B{n}", s!"H{n}", s!"S{n}", s!"D{n}", s!"Q{n}"]
+  (registers ++ vectors ++ ["SP", "LR", "XZR", "NF", "ZF", "CF", "VF", "TPIDR_EL0", "TPIDRRO_EL0"]).map
+    fun name => (name, aarch64Register name)
 
 private def x86Globals : Primus.Semantics.Globals :=
   let registers := ["RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP",
@@ -193,6 +205,7 @@ def aarch64Environment : IO Primus.Semantics.Environment := do
   let definitions := Primus.Semantics.compileGlobals definitions
   let opcodes ← numericOperations "aarch64" definitions
   let names := (List.range 31).flatMap (fun n => [s!"X{n}", s!"W{n}"]) ++
+    (List.range 32).flatMap (fun n => [s!"B{n}", s!"H{n}", s!"S{n}", s!"D{n}", s!"Q{n}"]) ++
     ["SP", "WSP", "XZR", "WZR"]
   let registers ← names.mapM fun name => do
     let llvmName := if name = "X29" then "FP" else if name = "X30" then "LR" else name
@@ -380,7 +393,8 @@ private def normalizeAssembly (assembly : String) : String :=
   String.intercalate " " (tokens.filter fun token => !token.isEmpty)
 
 private def aarch64MCTarget (address : Nat) (flags : Nat) (operands : List LLVM.MCOperand) : Option Nat :=
-  match flags &&& 8 != 0 && flags &&& 16 == 0, operands.head? with
+  let selected := if flags &&& 32 != 0 then operands.getLast? else operands.head?
+  match flags &&& 8 != 0 && flags &&& 16 == 0, selected with
   | true, some (.imm displacement) =>
     let target := Int.ofNat address + displacement * 4
     if target ≥ 0 then some target.toNat else none
@@ -393,7 +407,7 @@ private def aarch64MCOperands (globals : Primus.Semantics.Environment)
     pure [aarch64Register "X30"]
   else
     match flags &&& 32 != 0, operands with
-    | true, [.imm displacement, .imm code] =>
+    | true, [.imm code, .imm displacement] =>
       pure [Primus.Semantics.immediate code, Primus.Semantics.immediate displacement]
     | _, _ => operands.mapM fun value =>
       match Primus.Semantics.machineOperand globals context value with
@@ -406,7 +420,10 @@ def decodeAArch64With (globals : Primus.Semantics.Environment) (base address : N
   let context := semanticsContext address (address + decoded.size)
   let machineOperands ← LLVM.mcOperands decoded.instruction
   let operands ← aarch64MCOperands globals context decoded.flags machineOperands
-  let bil ← Primus.Semantics.liftMC globals context (LLVM.mcOpcode decoded.instruction) operands
+  let bil ← try
+    Primus.Semantics.liftMC globals context (LLVM.mcOpcode decoded.instruction) operands
+  catch error =>
+    throw <| IO.userError s!"{decoded.assembly} operands={repr machineOperands}: {error}"
   pure {
     address := address
     size := decoded.size

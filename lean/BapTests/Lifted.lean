@@ -18,6 +18,17 @@ def run : IO Unit := do
   let (next, slots) ← Jit.run program #[0, 0]
   assertEqual "native JIT returns the next PC" 42 next
   assertEqual "native JIT updates state slots" 42 (slots[1]!.toNat)
+  let persistent ← Jit.createMemory #[0x1000] #[0]
+  let storeProgram ← Jit.compile [.set 0 0x1000, .set 1 41, .memStore 0 1 1 false, .jump 0]
+  let loadProgram ← Jit.compile [.set 0 0x1000, .memLoad 1 0 1 false, .jumpSlot 1]
+  let (_, _, changedAddresses, changedValues) ← Jit.runWithPersistentMemory storeProgram #[0, 0] persistent none
+  assertEqual "persistent JIT reports changed addresses" #[0x1000] changedAddresses
+  assertEqual "persistent JIT reports changed values" #[41] changedValues
+  let (_, loaded, _, _) ← Jit.runWithPersistentMemory loadProgram #[0, 0] persistent none
+  assertEqual "persistent JIT memory is reused across executions" 41 (loaded[1]!.toNat)
+  let (memoryAddresses, memoryValues) ← Jit.dumpMemory persistent
+  assertEqual "persistent JIT memory dump size" 1 memoryAddresses.size
+  assertEqual "persistent JIT memory dump value" 41 (memoryValues[0]!.toNat)
   let selectProgram ← Jit.compile [
     .set 0 0,
     .set 1 0xfffffffffffffffe,
@@ -456,5 +467,15 @@ def run : IO Unit := do
   assertEqual "hot cached block does not recompile" 1 reusedStats.nativeCompilations
   assertEqual "hot cached block executes natively twice" 2 reusedStats.nativeRuns
   assertEqual "hot cached block hits cache three times" 3 reusedStats.cacheHits
+
+  let evictEngine ← Primus.Lifted.Engine.create 1 2
+  let evictFetch : Primus.Lifted.Fetch := fun _ => pure ByteArray.empty
+  let evictLift : Primus.Lifted.Lift := fun address _ =>
+    pure ⟨address, address + 4, [.jmp (.int (BitVec.ofNat 64 (address + 4)))]⟩
+  for address in [0x13000, 0x13004, 0x13008, 0x13000] do
+    let _ ← Primus.Lifted.runBlock evictEngine evictFetch evictLift {} address
+  let evictStats ← Primus.Lifted.stats evictEngine
+  assertEqual "bounded cache evicts old lifts" 4 evictStats.lifts
+  assertEqual "bounded cache rejects stale entries" 0 evictStats.cacheHits
 
 end Bap.Tests.Lifted

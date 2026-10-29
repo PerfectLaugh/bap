@@ -33,6 +33,6 @@ def changedSince (emu : Emu) (path : String) : IO (List (Nat × Nat)) := do
   | .ok input =>
     match decodeSnapshot input with
     | .error error => throw <| IO.userError error
-    | .ok saved => diff emu saved
+    | .ok saved => diff emu (← materializeSnapshot emu saved)
 
 end Bap.Emu

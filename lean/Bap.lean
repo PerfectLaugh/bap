@@ -24,6 +24,7 @@ import Bap.Theory.IEEE754
 import Bap.Knowledge.Core
 import Bap.Knowledge.Persist
 import Bap.IO.Reader
+import Bap.Checkpoint.BinProt
 import Bap.Image.Basic
 import Bap.Image.Ogre
 import Bap.Image.Raw
@@ -56,6 +57,7 @@ import Bap.Primus.Scheduler
 import Bap.Primus.Checkpoint
 import Bap.Primus.System
 import Bap.Emu
+import Bap.Emu.Jni
 import Bap.Emu.Checkpoint
 import Bap.Emu.Diff
 import Bap.Emu.Shell
@@ -77,6 +79,9 @@ import Bap.Analysis.Propagate
 import Bap.Analysis.DeadCode
 import Bap.Analysis.DynamicSlice
 import Bap.Analysis.Validate
+import Bap.Analysis.Protobuf
+import Bap.Crypto.AES
+import Bap.Crypto.KeyWrap
 import Bap.ABI
 import Bap.API
 import Bap.Decompile

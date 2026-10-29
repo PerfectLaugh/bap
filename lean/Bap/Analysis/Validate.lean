@@ -19,7 +19,7 @@ private def valueEq : Value → Value → Bool
   | @Value.memory leftWidth left, @Value.memory rightWidth right =>
     if h : leftWidth = rightWidth then
       let right : Memory leftWidth := h ▸ right
-      cellsEqual left.cells right.cells
+      cellsEqual (Memory.cells left) (Memory.cells right)
     else
       false
   | .undefined, .undefined => true

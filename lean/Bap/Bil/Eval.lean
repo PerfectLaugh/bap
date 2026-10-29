@@ -10,7 +10,8 @@ def lookup (env : Env) (var : Bap.Var) : Except String Value :=
   | some binding => .ok binding.2
   | none => .error s!"unbound variable {var.name}"
 
-def bind (env : Env) (var : Bap.Var) (value : Value) : Env := (var, value) :: env
+def bind (env : Env) (var : Bap.Var) (value : Value) : Env :=
+  (var, value) :: env.filter fun binding => binding.1 != var
 
 private def expectMemory : Value → Except String (Σ width, Memory width)
   | .memory value => .ok ⟨_, value⟩

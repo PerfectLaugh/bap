@@ -25,6 +25,7 @@ import BapTests.Scheduler
 import BapTests.Symbolic
 import BapTests.SymbolicMemory
 import BapTests.Emu
+import BapTests.Jni
 import BapTests.Parity
 import BapTests.Theorems
 
@@ -56,7 +57,8 @@ def main : IO Unit := do
     Bap.Tests.Scheduler.run,
     Bap.Tests.Symbolic.run,
     Bap.Tests.SymbolicMemory.run,
-    Bap.Tests.Emu.run
+    Bap.Tests.Emu.run,
+    Bap.Tests.Jni.run
   ]
   let tasks ← tests.mapM fun test => liftM (IO.asTask test)
   tasks.forM fun task =>

@@ -97,7 +97,7 @@
   (let ((rs (word-width xd)))
     (if (< is ir)
         (set xd (lshift
-                 (cast rs (cast-low (+1 is) xr))
+                 (cast rs (cast-low (+ is 1) xr))
                  (- rs ir)))
       (set xd (cast rs (extract is ir xr))))))
 

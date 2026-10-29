@@ -121,6 +121,11 @@ def run : IO Unit := do
   assertJump "LLVM lifted AArch64 b.eq taken" 0 beqTaken
   let (_, beqNotTaken) ← executeEffect beqInsn [(z, .bits (BitVec.ofNat 1 0))]
   assertNormal "LLVM lifted AArch64 b.eq not taken" beqNotTaken
+  let backwardInsn ← Target.LLVMLift.decodeAArch64With aarch64Environment 0 0x1000
+    (ByteArray.mk (Array.replicate 0x1000 0) ++ ByteArray.mk #[0x00, 0xfe, 0xff, 0x54])
+  assertEqual "LLVM AArch64 backward conditional target" (some 0xfc0) backwardInsn.target
+  let (_, backwardTaken) ← executeEffect backwardInsn [(z, .bits (BitVec.ofNat 1 1))]
+  assertJump "LLVM lifted AArch64 backward b.eq taken" 0xfc0 backwardTaken
   let memory ← match Memory.write (Memory.empty 64) (BitVec.ofNat 64 0x1008)
     (BitVec.ofNat 64 0x1234) .little 8 with
     | .ok memory => pure memory
@@ -129,6 +134,16 @@ def run : IO Unit := do
   let ldrState ← execute ldrInsn [(reg "X0", .bits (BitVec.ofNat 64 0xffffffffffffffff)),
     (reg "X1", .bits (BitVec.ofNat 64 0x1000)), (memVar, .memory memory)]
   assertReg "LLVM lifted AArch64 LDR" "X0" 0x1234 ldrState
+  let indexedLdrInsn ← decodeAArch64 (← LLVM.assemble "aarch64" "ldr x0, [x1, w2, sxtw #3]")
+  let indexedLdrState ← execute indexedLdrInsn [(reg "X0", .bits (BitVec.ofNat 64 0)),
+    (reg "X1", .bits (BitVec.ofNat 64 0x1000)), (reg "X2", .bits (BitVec.ofNat 64 1)),
+    (memVar, .memory memory)]
+  assertReg "LLVM lifted AArch64 indexed LDR" "X0" 0x1234 indexedLdrState
+  let byteLdrInsn ← decodeAArch64 (← LLVM.assemble "aarch64" "ldrb w0, [x1, x2]")
+  let byteLdrState ← execute byteLdrInsn [(reg "X0", .bits (BitVec.ofNat 64 0xffffffffffffffff)),
+    (reg "X1", .bits (BitVec.ofNat 64 0x1000)), (reg "X2", .bits (BitVec.ofNat 64 8)),
+    (memVar, .memory memory)]
+  assertReg "LLVM lifted AArch64 byte LDR zero-extends" "X0" 0x34 byteLdrState
   let ldr32Insn ← decodeAArch64 (← LLVM.assemble "aarch64" "ldr w0, [x1, 8]")
   let ldr32State ← execute ldr32Insn [(reg "X0", .bits (BitVec.ofNat 64 0xffffffffffffffff)),
     (reg "X1", .bits (BitVec.ofNat 64 0x1000)), (memVar, .memory memory)]
@@ -147,6 +162,28 @@ def run : IO Unit := do
   let retInsn ← decodeAArch64 (ByteArray.mk #[0xc0, 0x03, 0x5f, 0xd6])
   let (_, retEffect) ← executeEffect retInsn [(reg "X30", .bits (BitVec.ofNat 64 0x1234))]
   assertJump "LLVM lifted AArch64 RET" 0x1234 retEffect
+  let moviInsn ← decodeAArch64 (← LLVM.assemble "aarch64" "movi v2.4h, #0x68")
+  let moviState ← execute moviInsn
+  let vectorVar : Bap.Var := ⟨"Q2", .imm 128, 0, false⟩
+  match Bil.lookup moviState.env vectorVar with
+  | .ok (.bits value) => assertEqual "LLVM lifted AArch64 MOVI replication" 0x0068006800680068 value.toNat
+  | .ok _ => throw <| IO.userError "Q2 is not a bitvector"
+  | .error error => throw <| IO.userError error
+  let bitmaskInsn ← decodeAArch64 (← LLVM.assemble "aarch64" "movi d1, #0xff00ff00ff00ff")
+  let bitmaskState ← execute bitmaskInsn
+  let vectorVar : Bap.Var := ⟨"Q1", .imm 128, 0, false⟩
+  match Bil.lookup bitmaskState.env vectorVar with
+  | .ok (.bits value) => assertEqual "LLVM lifted AArch64 MOVI bitmask" 0xff00ff00ff00ff value.toNat
+  | .ok _ => throw <| IO.userError "Q1 is not a bitvector"
+  | .error error => throw <| IO.userError error
+  let reverseInsn ← decodeAArch64 (← LLVM.assemble "aarch64" "rev64 v3.4s, v3.4s")
+  let reverseState ← execute reverseInsn [(⟨"Q3", .imm 128, 0, false⟩,
+    .bits (BitVec.ofNat 128 0x0f0e0d0c0b0a09080706050403020100))]
+  let vectorVar : Bap.Var := ⟨"Q3", .imm 128, 0, false⟩
+  match Bil.lookup reverseState.env vectorVar with
+  | .ok (.bits value) => assertEqual "LLVM lifted AArch64 REV64 lanes" 0x0b0a09080f0e0d0c0302010007060504 value.toNat
+  | .ok _ => throw <| IO.userError "Q3 is not a bitvector"
+  | .error error => throw <| IO.userError error
   let x86 ← expectRoundTrip "LLVM x86-64" "x86_64" "addq $-1, %rax" [0x48, 0x83, 0xc0, 0xff]
   assertEqual "LLVM x86 signed immediate operand" true (x86.operands.any fun operand => operand == .imm (-1))
   let x86AddInsn ← decodeX86 (← LLVM.assemble "x86_64" "addq $-1, %rax")

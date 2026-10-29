@@ -45,4 +45,19 @@ def run (program : Program) (state : Array UInt64) : IO (Nat × Array UInt64) :=
   let (next, state, _, _) ← runWithMemory program state #[] #[]
   pure (next, state)
 
+opaque Memory : Type
+
+@[extern "bap_jit_memory_create"]
+opaque createMemory (addresses : Array UInt64) (values : Array UInt8) : IO Memory
+
+@[extern "bap_jit_run_memory_object"]
+opaque runWithPersistentMemory (program : Program) (state : Array UInt64) (memory : Memory)
+    (observer : Option MemoryObserver) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8)
+
+@[extern "bap_jit_memory_dump"]
+opaque dumpMemory (memory : Memory) : IO (Array UInt64 × Array UInt8)
+
+@[extern "bap_jit_memory_size"]
+opaque memorySize (memory : Memory) : IO Nat
+
 end Bap.Jit

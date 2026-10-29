@@ -19,5 +19,6 @@
 (require aarch64-logical)
 (require aarch64-data-movement)
 (require aarch64-special)
+(require aarch64-pstate)
 (require aarch64-simd)
 (require aarch64-float)

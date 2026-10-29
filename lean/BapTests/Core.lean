@@ -13,6 +13,11 @@ def run : IO Unit := do
     | .ok value => pure value
     | .error error => throw <| IO.userError error
   assertEqual "S-expression parse/render round trip" parsed reparsed
+  let large := String.ofList (List.replicate 100000 'a')
+  let parsedLarge ← match Sexp.parse large with
+    | .ok value => pure value
+    | .error error => throw <| IO.userError error
+  assertEqual "large S-expression atom" (Sexp.atom large) parsedLarge
   assertEqual "four-bit wraparound" 1 (BitVec.ofNat 4 15 + BitVec.ofNat 4 2).toNat
   assertEqual "wide bitvector normalization" 0 (BitVec.ofNat 128 (2 ^ 128)).toNat
   assertEqual "unsigned division by zero" 15 (Word.udiv (BitVec.ofNat 4 7) 0).toNat

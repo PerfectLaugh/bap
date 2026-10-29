@@ -20,18 +20,17 @@ private def lookup (cells : List (BitVec 64 × UInt8)) (address : BitVec 64) : O
   | none => none
 
 def diff (old new : Memory) : Delta :=
-  let changed := new.cells.cells.filterMap fun cell =>
-    let oldValue := lookup old.cells.cells cell.1
+  let changed := (Bap.Memory.cells new.cells).filterMap fun cell =>
+    let oldValue := lookup (Bap.Memory.cells old.cells) cell.1
     if oldValue = some cell.2 then none else some ⟨cell.1, oldValue, some cell.2⟩
-  let deleted := old.cells.cells.filterMap fun cell =>
-    if (lookup new.cells.cells cell.1).isSome then none else some ⟨cell.1, some cell.2, none⟩
+  let deleted := (Bap.Memory.cells old.cells).filterMap fun cell =>
+    if (lookup (Bap.Memory.cells new.cells) cell.1).isSome then none else some ⟨cell.1, some cell.2, none⟩
   { cells := changed ++ deleted, regions := new.regions }
 
 private def applyCell (cells : Bap.Memory 64) (change : CellChange) : Bap.Memory 64 :=
-  let cells := { cells with cells := cells.cells.filter fun cell => cell.1 != change.address }
   match change.newValue with
   | some value => Bap.Memory.writeByte cells change.address value
-  | none => cells
+  | none => Bap.Memory.writeByte cells change.address 0
 
 def apply (delta : Delta) (old : Memory) : Memory :=
   { cells := delta.cells.foldl applyCell old.cells, regions := delta.regions }

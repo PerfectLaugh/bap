@@ -61,7 +61,7 @@
         (R (logand immr levels))
         (diff (- S R))) ; assuming "6-bit subtract with borrow" is regular 2'c subtraction
     (assert-msg (>= len 1) "decode-bit-masks len < 1")
-    (assert-msg (not (and immediate (= levels (logand imms levels)))) "decode-bit-masks long condition")
+    (assert-msg (not (logand immediate (= levels (logand imms levels)))) "decode-bit-masks long condition")
     (let ((esize (lshift 1 len))
           (d (extract (- len 1) 0 diff))
           (welem (cast-unsigned esize (ones (+ S 1))))
