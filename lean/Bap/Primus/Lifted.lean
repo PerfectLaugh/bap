@@ -20,6 +20,12 @@ structure Statistics where
   nativeCompilations : Nat := 0
   nativeRuns : Nat := 0
   interpretedRuns : Nat := 0
+  compileMs : Nat := 0
+  versionSaves : Nat := 0
+  versionHits : Nat := 0
+  invalidations : Nat := 0
+  evictions : Nat := 0
+  graphBlocks : Nat := 0
   deriving Repr
 
 private structure Lowering where
@@ -51,10 +57,14 @@ private structure CachedBlock where
   last : Nat
   executions : Nat
   plan : Plan
+  coverage : List (Nat × Nat) := []
+  sources : List (Nat × ByteArray) := []
 
 structure Engine where
   cache : IO.Ref (Std.HashMap Nat CachedBlock)
   ranges : IO.Ref (Std.HashMap Nat CachedBlock)
+  cacheVersions : IO.Ref (Std.HashMap Nat (List CachedBlock))
+  rangeVersions : IO.Ref (Std.HashMap Nat (List CachedBlock))
   statistics : IO.Ref Statistics
   persistentMemory : IO.Ref (Option Jit.Memory)
   persistentVariable : IO.Ref (Option Bap.Var)
@@ -65,6 +75,9 @@ structure Engine where
   writeCooldown : Nat
   nativeCooldown : IO.Ref Nat
   deferMemorySync : Bool
+  nativeLimit : Nat
+  nativeLive : IO.Ref Nat
+  dirtyCode : IO.Ref (Option (Nat × Nat))
 
 structure Result where
   state : Bil.State
@@ -74,10 +87,13 @@ structure Result where
   deriving Repr
 
 def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimit : Nat := 1)
-    (rangeCacheLimit : Nat := 16) (writeCooldown : Nat := 0) (deferMemorySync : Bool := false) : IO Engine := do
+    (rangeCacheLimit : Nat := 16) (writeCooldown : Nat := 0) (deferMemorySync : Bool := false)
+    (nativeLimit : Nat := 512) : IO Engine := do
   return {
     cache := ← IO.mkRef {}
     ranges := ← IO.mkRef {}
+    cacheVersions := ← IO.mkRef {}
+    rangeVersions := ← IO.mkRef {}
     statistics := ← IO.mkRef {}
     persistentMemory := ← IO.mkRef none
     persistentVariable := ← IO.mkRef none
@@ -88,20 +104,69 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     writeCooldown
     nativeCooldown := ← IO.mkRef 0
     deferMemorySync
+    nativeLimit := max nativeLimit 1
+    nativeLive := ← IO.mkRef 0
+    dirtyCode := ← IO.mkRef none
   }
 
 def stats (engine : Engine) : IO Statistics := engine.statistics.get
 
+private def rememberVersion (engine : Engine)
+    (versions : IO.Ref (Std.HashMap Nat (List CachedBlock))) (entry : CachedBlock) : IO Unit := do
+  match entry.plan with
+  | .interpreted _ => pure ()
+  | .native .. => do
+    let all ← versions.get
+    let existing := all.getD entry.address []
+    let previous := existing.filter fun old => old.code != entry.code || old.sources != entry.sources
+    if previous.length = existing.length then
+      engine.statistics.modify fun stats => { stats with versionSaves := stats.versionSaves + 1 }
+    let candidates := { entry with executions := 1 } :: previous
+    let dropped := candidates.drop 4
+    engine.nativeLive.modify fun count => count - min count dropped.length
+    versions.set (all.insert entry.address (candidates.take 4))
+
+private def forgetVersions (engine : Engine) (first last : Nat) : IO Unit := do
+  let blocks ← engine.cache.get
+  blocks.toList.forM fun (address, entry) =>
+    if first ≤ address && address ≤ last then rememberVersion engine engine.cacheVersions entry else pure ()
+  let ranges ← engine.ranges.get
+  ranges.toList.forM fun (_, entry) =>
+    let affected := if entry.coverage.isEmpty then first ≤ entry.address && entry.address ≤ last
+      else entry.coverage.any fun (lo, hi) => lo ≤ last && first ≤ hi
+    if affected then rememberVersion engine engine.rangeVersions entry else pure ()
+
 def clearCache (engine : Engine) : IO Unit := do
   engine.cache.set {}
   engine.ranges.set {}
+  engine.cacheVersions.set {}
+  engine.rangeVersions.set {}
+  engine.nativeLive.set 0
 
 def discardRange (engine : Engine) (first last : Nat) : IO Unit := do
+  engine.statistics.modify fun stats => { stats with invalidations := stats.invalidations + 1 }
+  forgetVersions engine first last
   engine.cache.modify fun entries => entries.filter fun address _ => address < first || last < address
-  engine.ranges.modify fun entries => entries.filter fun _ entry => entry.last < first || last < entry.address
+  engine.ranges.modify fun entries => entries.filter fun _ entry =>
+    if entry.coverage.isEmpty then entry.last < first || last < entry.address
+    else entry.coverage.all fun (lo, hi) => hi < first || last < lo
   if engine.writeCooldown > 0 then engine.nativeCooldown.set (engine.writeCooldown + 1)
 
+def markDirtyRange (engine : Engine) (first last : Nat) : IO Unit := do
+  engine.dirtyCode.modify fun current =>
+    match current with
+    | some (first', last') => some (min first first', max last last')
+    | none => some (first, last)
+
+def flushDirtyRange (engine : Engine) : IO Unit := do
+  match ← engine.dirtyCode.get with
+  | some (first, last) =>
+    engine.dirtyCode.set none
+    discardRange engine first last
+  | none => pure ()
+
 def discardMemory (engine : Engine) : IO Unit := do
+  engine.dirtyCode.set none
   engine.persistentMemory.set none
   engine.persistentVariable.set none
 
@@ -418,66 +483,191 @@ private def atCodeStop (lowering : Lowering) (pc : Nat) : Lowering :=
   | some checkpoint => { lowering with outputs := checkpoint.2 }
   | none => lowering
 
-private def lowerRange (blocks : List Block) : Option Lowering := do
-  let final ← blocks.getLast?
-  let (initial, _) := setEffect { next := final.next } 0
+private def directEdges (block : Block) : List Nat :=
+  match block.program.getLast? with
+  | some (.jmp (.int target)) => [target.toNat]
+  | some (.ifElse _ [.jmp (.int yesTarget)] [.jmp (.int noTarget)]) =>
+    [yesTarget.toNat, noTarget.toNat]
+  | _ => []
+
+private def reachable (edges : List (Nat × Nat)) (source target : Nat) : Bool :=
+  let rec loop (fuel : Nat) (visited : List Nat) (pending : List Nat) : Bool :=
+    match fuel with
+    | 0 => false
+    | fuel + 1 =>
+      match pending with
+      | [] => false
+      | current :: rest =>
+        if current = target then true
+        else if visited.contains current then loop fuel visited rest
+        else
+          let next := edges.filterMap fun (source, target) => if source = current then some target else none
+          loop (fuel - 1) (current :: visited) (next ++ rest)
+  loop (edges.length + 1) [] [source]
+
+private partial def gatherGraph (engine : Engine) (fetch : Fetch) (lift : Lift) (limit : Nat)
+    (seed : Block) (seedCode : ByteArray) : IO (List Block × List (Nat × Nat) × List (Nat × ByteArray)) := do
+  let rec visit (queue : List Block) (blocks : List Block) (edges : List (Nat × Nat))
+      (sources : List (Nat × ByteArray)) := do
+    match queue with
+    | [] => pure (blocks, edges, sources)
+    | current :: rest =>
+      if blocks.any fun block => block.address = current.address then visit rest blocks edges sources
+      else if blocks.length >= limit then pure (blocks, edges, sources)
+      else
+        let blocks := blocks ++ [current]
+        let (edges, additions, sources) ← (directEdges current).foldlM (init := (edges, [], sources)) fun state target => do
+          let (edges, additions, sources) := state
+          if target = current.address || reachable edges target current.address then pure state
+          else
+            let known := (blocks ++ queue ++ additions).any fun block => block.address = target
+            if !known && blocks.length + rest.length + additions.length >= limit then pure state
+            else if known then pure (edges ++ [(current.address, target)], additions, sources)
+            else
+              try
+                let code ← fetch target
+                engine.statistics.modify fun stats => { stats with lifts := stats.lifts + 1 }
+                let block ← lift target code
+                if block.address != target then
+                  throw <| IO.userError s!"lifted graph block address {block.address} does not match {target}"
+                pure (edges ++ [(current.address, target)], additions ++ [block], sources ++ [(target, code)])
+              catch _ =>
+                pure (edges, additions, sources)
+        visit (rest ++ additions) blocks edges sources
+  visit [seed] [] [] [(seed.address, seedCode)]
+
+private def graphEdgeOps (lowering : Lowering) (labels : List (Nat × Nat))
+    (edges : List (Nat × Nat)) (source target : Nat) : Option (List Jit.Op) :=
+  if edges.contains (source, target) then
+    match labels.find? fun (address, _) => address = target with
+    | some (_, label) => some [.goto label]
+    | none => none
+  else
+    some (jumpConstant { lowering with ops := [] } (UInt64.ofNat target)).ops
+
+private def lowerGraph (blocks : List Block) (edges : List (Nat × Nat)) : Option Lowering := do
+  let seed ← blocks.head?
+  let labels := (List.range blocks.tail.length).map fun index =>
+    (blocks.tail[index]!.address, index + 1)
+  let (initial, _) := setEffect { next := seed.next, nextLabel := labels.length + 1 } 0
   let rec go (lowering : Lowering) (remaining : List Block) : Option Lowering :=
     match remaining with
-    | [] => some { lowering with ops := lowering.ops ++ [.jump (UInt64.ofNat final.next)] }
-    | [block] => do
-      let (lowering, terminated) ← lowerStatements lowering block.program
-      if terminated then some lowering
-      else some { lowering with ops := lowering.ops ++ [.jump (UInt64.ofNat block.next)] }
+    | [] => some lowering
     | block :: rest => do
-      let (lowering, terminated) ← lowerStatements lowering block.program.dropLast
-      if terminated then none
-      else go (codeSite lowering rest.head!.address) rest
+      let lowering ← if block.address = seed.address then some lowering
+        else
+          match labels.find? fun (address, _) => address = block.address with
+          | some (_, label) => some { lowering with ops := lowering.ops ++ [.label label] }
+          | none => none
+      let lowering := if block.address = seed.address then lowering else codeSite lowering block.address
+      let lowering ← match block.program.getLast? with
+        | some (.jmp (.int target)) => do
+          let (lowered, terminated) ← lowerStatements lowering block.program.dropLast
+          if terminated then none
+          else
+            let ops ← graphEdgeOps lowered labels edges block.address target.toNat
+            some { lowered with ops := lowered.ops ++ ops }
+        | some (.ifElse condition [.jmp (.int yesTarget)] [.jmp (.int noTarget)]) => do
+          let (lowered, terminated) ← lowerStatements lowering block.program.dropLast
+          if terminated then none
+          else
+            let (lowered, condition) ← lowerExp lowered condition
+            if condition.width != 1 then none
+            else
+              let yesLabel := lowered.nextLabel
+              let noLabel := yesLabel + 1
+              let yesOps ← graphEdgeOps lowered labels edges block.address yesTarget.toNat
+              let noOps ← graphEdgeOps lowered labels edges block.address noTarget.toNat
+              some { lowered with
+                nextLabel := noLabel + 1
+                ops := lowered.ops ++ [.branch condition.slot yesLabel noLabel, .label yesLabel] ++
+                  yesOps ++ [.label noLabel] ++ noOps
+              }
+        | _ => do
+          let (lowered, terminated) ← lowerStatements lowering block.program
+          if terminated then some lowered
+          else some { lowered with ops := lowered.ops ++ [.jump (UInt64.ofNat block.next)] }
+      go lowering rest
   go initial blocks
 
-private def compileRangePlan (engine : Engine) (blocks : List Block) : IO (Option Plan) := do
-  match lowerRange blocks with
-  | none => pure none
-  | some lowering =>
-    let program ← Jit.compile lowering.ops
-    engine.statistics.modify fun stats =>
-      { stats with nativeCompilations := stats.nativeCompilations + 1 }
-    pure (some (.native lowering program blocks.head!.program))
-
 private def compilePlan (engine : Engine) (block : Block) : IO Plan := do
-  match ← compileRangePlan engine [block] with
-  | some plan => pure plan
-  | none => pure (.interpreted block.program)
+  if (← engine.nativeLive.get) ≥ engine.nativeLimit then pure (.interpreted block.program)
+  else
+    match lowerGraph [block] [] with
+    | none => pure (.interpreted block.program)
+    | some lowering =>
+      let started ← IO.monoMsNow
+      let program ← Jit.compile lowering.ops
+      let elapsed := (← IO.monoMsNow) - started
+      engine.nativeLive.modify (· + 1)
+      engine.statistics.modify fun stats =>
+        { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed }
+      pure (.native lowering program block.program)
 
-private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : ByteArray) :
-    IO CachedBlock := do
+private def coldestEntry (entries : Std.HashMap Nat CachedBlock) : Option (Nat × CachedBlock) :=
+  match entries.toList with
+  | [] => none
+  | first :: rest =>
+    some (rest.foldl (init := first) fun best entry =>
+      if entry.2.executions < best.2.executions ||
+          (entry.2.executions = best.2.executions && entry.1 < best.1) then entry else best)
+
+private def evictColdest (entries : Std.HashMap Nat CachedBlock) : Std.HashMap Nat CachedBlock :=
+  match coldestEntry entries with
+  | none => entries
+  | some (address, _) => entries.erase address
+
+private def rememberColdest (engine : Engine)
+    (versions : IO.Ref (Std.HashMap Nat (List CachedBlock)))
+    (entries : Std.HashMap Nat CachedBlock) : IO Unit :=
+  coldestEntry entries |>.forM fun (_, entry) => rememberVersion engine versions entry
+
+private def restoreBlockVersion (engine : Engine) (address : Nat) (code : ByteArray) :
+    IO (Option CachedBlock) := do
+  let versions ← engine.cacheVersions.get
+  pure ((versions.getD address []).find? fun entry => entry.code = code)
+
+private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : ByteArray)
+    (compileSingle : Bool := true) : IO CachedBlock := do
   let entries ← engine.cache.get
   let cooldown ← engine.nativeCooldown.get
   let miss := do
-    let entries ← if entries.size ≥ engine.cacheLimit then do
-      clearCache engine
-      pure {}
-    else
-      pure entries
-    engine.statistics.modify fun stats => { stats with lifts := stats.lifts + 1 }
-    let block ← lift address code
-    if block.address != address then
-      throw <| IO.userError s!"lifted block address {block.address} does not match {address}"
-    let plan ← if engine.hotThreshold = 1 && cooldown = 0 then compilePlan engine block
-      else pure (.interpreted block.program)
-    let entry : CachedBlock := {
-      address, code, next := block.next, firstNext := block.next, last := address, executions := 1, plan
-    }
-    engine.cache.set (entries.insert address entry)
-    return entry
+    let restored ← if cooldown = 0 then restoreBlockVersion engine address code else pure none
+    match restored with
+    | some entry =>
+      engine.statistics.modify fun stats => { stats with versionHits := stats.versionHits + 1 }
+      engine.cache.set (entries.insert address entry)
+      return entry
+    | none =>
+      entries.get? address |>.forM (rememberVersion engine engine.cacheVersions)
+      let entries ← if entries.size ≥ engine.cacheLimit then do
+        engine.statistics.modify fun stats => { stats with evictions := stats.evictions + 1 }
+        rememberColdest engine engine.cacheVersions entries
+        pure (evictColdest entries)
+      else pure entries
+      engine.statistics.modify fun stats => { stats with lifts := stats.lifts + 1 }
+      let block ← lift address code
+      if block.address != address then
+        throw <| IO.userError s!"lifted block address {block.address} does not match {address}"
+      let plan ← if compileSingle && engine.hotThreshold = 1 && cooldown = 0 then compilePlan engine block
+        else pure (.interpreted block.program)
+      let entry : CachedBlock := {
+        address, code, next := block.next, firstNext := block.next, last := address, executions := 1, plan
+      }
+      engine.cache.set (entries.insert address entry)
+      return entry
   match entries.get? address with
   | some entry =>
     if entry.code == code then do
       engine.statistics.modify fun stats => { stats with cacheHits := stats.cacheHits + 1 }
       match entry.plan with
-      | .native .. => return entry
+      | .native .. =>
+        let updated := { entry with executions := entry.executions + 1 }
+        engine.cache.set (entries.insert address updated)
+        return updated
       | .interpreted program =>
         let executions := entry.executions + 1
-        let shouldCompile := cooldown = 0 && executions ≥ engine.hotThreshold
+        let shouldCompile := compileSingle && cooldown = 0 && executions ≥ engine.hotThreshold
         let plan ← if shouldCompile then compilePlan engine ⟨entry.address, entry.next, program⟩
           else pure entry.plan
         let updated := { entry with executions, plan }
@@ -487,54 +677,93 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
       miss
   | none => miss
 
-private def directFallthrough (block : Block) : Bool :=
-  match block.program.getLast? with
-  | some (.jmp (.int target)) => target.toNat = block.next
-  | _ => false
+private def restoreRangeVersion (engine : Engine) (fetch : Fetch) (address : Nat) (code : ByteArray) :
+    IO (Option CachedBlock) := do
+  let versions ← engine.rangeVersions.get
+  let rec find (candidates : List CachedBlock) : IO (Option CachedBlock) := do
+    match candidates with
+    | [] => pure none
+    | entry :: rest =>
+      if entry.code != code || entry.sources.isEmpty then find rest
+      else
+        let valid ← entry.sources.allM fun (source, bytes) => do
+          try
+            let current ← fetch source
+            pure (current = bytes)
+          catch _ =>
+            pure false
+        if valid then do
+          engine.statistics.modify fun stats => { stats with versionHits := stats.versionHits + 1 }
+          pure (some entry)
+        else find rest
+  find (versions.getD address [])
 
-private def prepareRange (engine : Engine) (fetch : Fetch) (lift : Lift)
+private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
     (address : Nat) (code : ByteArray) : IO CachedBlock := do
-  if engine.rangeLimit = 1 then prepare engine lift address code
-  else
-    let ranges ← engine.ranges.get
-    match ranges.get? address with
+  let ranges ← engine.ranges.get
+  match ranges.get? address with
+  | some entry =>
+    engine.statistics.modify fun stats => { stats with cacheHits := stats.cacheHits + 1 }
+    let updated := { entry with executions := entry.executions + 1 }
+    engine.ranges.set (ranges.insert address updated)
+    return updated
+  | none => do
+    let cooldown ← engine.nativeCooldown.get
+    let restored ← if cooldown = 0 then restoreRangeVersion engine fetch address code else pure none
+    match restored with
     | some entry =>
-      engine.statistics.modify fun stats => { stats with cacheHits := stats.cacheHits + 1 }
-      return entry
+      let updated := { entry with executions := entry.executions + 1 }
+      engine.ranges.set (ranges.insert address updated)
+      return updated
     | none => do
-      let first ← prepare engine lift address code
-      match first.plan with
-      | .interpreted _ => return first
-      | .native .. => do
+      let first ← prepare engine lift address code false
+      if first.executions < engine.hotThreshold || cooldown != 0 then return first
+      else
         let firstProgram := match first.plan with
           | .native _ _ fallback => fallback
           | .interpreted program => program
-        let rec gather (remaining : Nat) (previous : Block) (blocks : List Block) : IO (List Block) := do
-          match remaining with
-          | 0 | 1 => pure blocks
-          | remaining + 2 =>
-            if !directFallthrough previous then pure blocks
-            else
-              let next := previous.next
-              let nextCode ← fetch next
-              engine.statistics.modify fun stats => { stats with lifts := stats.lifts + 1 }
-              let block ← lift next nextCode
-              if block.address != next then
-                throw <| IO.userError s!"lifted range block address {block.address} does not match {next}"
-              gather (remaining + 1) block (blocks ++ [block])
-        let blocks ← gather engine.rangeLimit ⟨first.address, first.next, firstProgram⟩ []
-        if blocks.length = 0 then return first
+        let seed : Block := ⟨first.address, first.next, firstProgram⟩
+        let (blocks, edges, sources) ← gatherGraph engine fetch lift engine.rangeLimit seed first.code
+        if blocks.length <= 1 then
+          match first.plan with
+          | .native .. => return first
+          | .interpreted program =>
+            let plan ← compilePlan engine ⟨first.address, first.next, program⟩
+            let updated := { first with plan }
+            engine.cache.modify (·.insert address updated)
+            return updated
         else
-          match ← compileRangePlan engine (⟨first.address, first.next, firstProgram⟩ :: blocks) with
+          match lowerGraph blocks edges with
           | none => return first
-          | some plan =>
-            let all := ⟨first.address, first.next, firstProgram⟩ :: blocks
-            let final := all.getLast!
-            let entry := { first with next := final.next, last := final.address, plan }
-            if ranges.size ≥ engine.rangeCacheLimit then engine.ranges.set {}
-            engine.ranges.modify (·.insert address entry)
-            engine.cache.modify (·.erase address)
-            return entry
+          | some lowering =>
+            if (← engine.nativeLive.get) ≥ engine.nativeLimit then return first
+            else
+              let started ← IO.monoMsNow
+              let program ← Jit.compile lowering.ops
+              let elapsed := (← IO.monoMsNow) - started
+              engine.nativeLive.modify (· + 1)
+              engine.statistics.modify fun stats =>
+                { stats with
+                  nativeCompilations := stats.nativeCompilations + 1
+                  compileMs := stats.compileMs + elapsed
+                  graphBlocks := stats.graphBlocks + blocks.length }
+              let plan := Plan.native lowering program firstProgram
+              let last := blocks.foldl (init := seed.address) fun current block => max current (block.next - 1)
+              let entry := { first with
+                next := lowering.next
+                last
+                plan
+                coverage := blocks.map fun block => (block.address, block.next - 1)
+                sources
+              }
+              let ranges ← if ranges.size ≥ engine.rangeCacheLimit then do
+                engine.statistics.modify fun stats => { stats with evictions := stats.evictions + 1 }
+                rememberColdest engine engine.rangeVersions ranges
+                pure (evictColdest ranges)
+              else pure ranges
+              engine.ranges.set (ranges.insert address entry)
+              engine.cache.modify (·.erase address)
+              return entry
 
 private def encodeState (lowering : Lowering) (env : Bil.Env) : Except String (Array UInt64) := do
   lowering.layout.foldlM (init := Array.replicate lowering.nextSlot 0) fun slots binding => do
@@ -595,15 +824,8 @@ private def syncMemoryDelta (lowering : Lowering) (state : Bil.State)
       | .mem width 8, .ok (@Value.memory addressWidth memory) =>
         if h : width = addressWidth then
           let memory : Bap.Memory width := h ▸ memory
-          let cells := (addresses.zip values).toList.mergeSort fun left right => left.1.toNat ≤ right.1.toNat
-          let groups := cells.foldl (init := ([] : List (Nat × List UInt8))) fun groups cell =>
-            match groups with
-            | [] => [(cell.1.toNat, [cell.2])]
-            | (start, bytes) :: rest =>
-              if cell.1.toNat = start + bytes.length then (start, bytes ++ [cell.2]) :: rest
-              else (cell.1.toNat, [cell.2]) :: (start, bytes) :: rest
-          let updated := groups.foldl (init := memory) fun memory group =>
-            Bap.Memory.writeRegion memory group.1 (ByteArray.mk group.2.toArray)
+          let cells := (addresses.zip values).toList.map fun cell => (BitVec.ofNat width cell.1.toNat, cell.2)
+          let updated := Bap.Memory.writeCells memory cells
           { env := Bil.bind state.env var (.memory updated) }
         else state
       | _, _ => state
@@ -679,7 +901,7 @@ def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bi
     (observer : Option Jit.MemoryObserver) (codeObserver : Option Jit.CodeObserver := none) : IO Result := do
   engine.nativeCooldown.modify fun cooldown => if cooldown = 0 then 0 else cooldown - 1
   let code ← fetch pc
-  let entry ← prepareRange engine fetch lift pc code
+  let entry ← prepareGraph engine fetch lift pc code
   match entry.plan with
   | .interpreted program => runInterpreted engine entry.next pc program state observer
   | .native lowering program fallback =>

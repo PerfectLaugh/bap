@@ -12,6 +12,8 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -104,10 +106,10 @@ struct BapCells {
   size_t capacity;
   lean_object *observer;
   lean_object *error;
-  CellMap *table;
+  std::array<CellMap, 64> *tables;
   CellMap *changes;
   lean_object *codeObserver;
-  std::mutex *memoryMutex;
+  std::array<std::mutex, 64> *memoryMutexes;
 };
 
 extern "C" void bap_jit_memory_notify(BapCells *cells, uint8_t write,
@@ -149,9 +151,10 @@ extern "C" uint64_t bap_jit_code_notify(BapCells *cells, uint64_t pc) {
 extern "C" uint8_t bap_jit_memory_load(BapCells *cells, uint64_t address) {
   if (cells->error != nullptr)
     return 0;
-  if (cells->table != nullptr) {
-    std::lock_guard<std::mutex> lock(*cells->memoryMutex);
-    return cells->table->get(address);
+  if (cells->tables != nullptr) {
+    size_t shard = (address >> 8) & 63;
+    std::lock_guard<std::mutex> lock((*cells->memoryMutexes)[shard]);
+    return (*cells->tables)[shard].get(address);
   }
   for (size_t index = 0; index != cells->size; ++index)
     if (cells->items[index].address == address)
@@ -163,9 +166,10 @@ extern "C" void bap_jit_memory_store(BapCells *cells, uint64_t address,
                                      uint8_t value) {
   if (cells->error != nullptr)
     return;
-  if (cells->table != nullptr) {
-    std::lock_guard<std::mutex> lock(*cells->memoryMutex);
-    cells->table->set(address, value);
+  if (cells->tables != nullptr) {
+    size_t shard = (address >> 8) & 63;
+    std::lock_guard<std::mutex> lock((*cells->memoryMutexes)[shard]);
+    (*cells->tables)[shard].set(address, value);
     if (cells->changes != nullptr)
       cells->changes->set(address, value);
     return;
@@ -182,12 +186,54 @@ extern "C" void bap_jit_memory_store(BapCells *cells, uint64_t address,
 
 namespace {
 
+struct SharedJit {
+  std::shared_ptr<llvm::orc::LLJIT> jit;
+  std::mutex mutex;
+};
+
 struct Program {
-  std::unique_ptr<llvm::orc::LLJIT> jit;
+  std::shared_ptr<SharedJit> shared;
+  llvm::orc::ResourceTrackerSP resources;
   uint64_t (*function)(uint64_t *, BapCells *) = nullptr;
   size_t maxSlot = 0;
   size_t memoryStores = 0;
+
+  ~Program() {
+    if (shared == nullptr || resources == nullptr)
+      return;
+    std::lock_guard<std::mutex> lock(shared->mutex);
+    if (llvm::Error error = resources->remove())
+      llvm::consumeError(std::move(error));
+  }
 };
+
+std::shared_ptr<SharedJit> sharedJit() {
+  static std::mutex mutex;
+  static std::shared_ptr<SharedJit> shared;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (shared != nullptr)
+    return shared;
+  auto jit = llvm::orc::LLJITBuilder().create();
+  if (!jit)
+    throw std::runtime_error("LLVM ORC JIT creation failed: " +
+                             llvm::toString(jit.takeError()));
+  llvm::orc::SymbolMap runtimeSymbols;
+  runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_load")] =
+      llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_load);
+  runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_store")] =
+      llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_store);
+  runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_notify")] =
+      llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_notify);
+  runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_code_notify")] =
+      llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_code_notify);
+  if (llvm::Error error = (*jit)->getMainJITDylib().define(
+          llvm::orc::absoluteSymbols(std::move(runtimeSymbols))))
+    throw std::runtime_error("LLVM ORC symbol definition failed: " +
+                             llvm::toString(std::move(error)));
+  shared = std::make_shared<SharedJit>();
+  shared->jit = std::move(*jit);
+  return shared;
+}
 
 lean_obj_res ioError(const std::string &message) {
   return lean_io_result_mk_error(
@@ -244,14 +290,17 @@ extern "C" lean_obj_res bap_jit_compile(lean_obj_arg ops, lean_obj_arg) {
     if (!initialize(initializationError))
       return ioError(initializationError);
 
+    static std::atomic<uint64_t> nextProgramId{1};
+    const uint64_t programId = nextProgramId.fetch_add(1);
+    const std::string functionName = "bap_block_" + std::to_string(programId);
     auto context = std::make_unique<llvm::LLVMContext>();
-    auto module = std::make_unique<llvm::Module>("bap_jit", *context);
+    auto module = std::make_unique<llvm::Module>("bap_jit_" + std::to_string(programId), *context);
     llvm::Type *word = llvm::Type::getInt64Ty(*context);
     llvm::Type *pointer = llvm::PointerType::get(*context, 0);
     llvm::FunctionType *type =
         llvm::FunctionType::get(word, {pointer, pointer}, false);
     llvm::Function *function = llvm::Function::Create(
-        type, llvm::Function::ExternalLinkage, "bap_block", *module);
+        type, llvm::Function::ExternalLinkage, functionName, *module);
     llvm::BasicBlock *entry =
         llvm::BasicBlock::Create(*context, "entry", function);
     llvm::IRBuilder<> builder(entry);
@@ -634,38 +683,26 @@ extern "C" lean_obj_res bap_jit_compile(lean_obj_arg ops, lean_obj_arg) {
     if (llvm::verifyModule(*module, &verificationStream))
       return ioError("invalid LLVM JIT module: " + verificationErrors);
 
-    auto jit = llvm::orc::LLJITBuilder().create();
-    if (!jit)
-      return ioError("LLVM ORC JIT creation failed: " +
-                     llvm::toString(jit.takeError()));
-
-    llvm::orc::SymbolMap runtimeSymbols;
-    runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_load")] =
-        llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_load);
-    runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_store")] =
-        llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_store);
-    runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_memory_notify")] =
-        llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_memory_notify);
-    runtimeSymbols[(*jit)->mangleAndIntern("bap_jit_code_notify")] =
-        llvm::orc::ExecutorSymbolDef::fromPtr(&bap_jit_code_notify);
-    if (llvm::Error error = (*jit)->getMainJITDylib().define(
-            llvm::orc::absoluteSymbols(std::move(runtimeSymbols))))
-      return ioError("LLVM ORC symbol definition failed: " +
-                     llvm::toString(std::move(error)));
-
-    if (llvm::Error error = (*jit)->addIRModule(
-            llvm::orc::ThreadSafeModule(std::move(module), std::move(context))))
+    auto shared = sharedJit();
+    std::lock_guard<std::mutex> lock(shared->mutex);
+    auto resources = shared->jit->getMainJITDylib().createResourceTracker();
+    if (llvm::Error error = shared->jit->addIRModule(
+            resources, llvm::orc::ThreadSafeModule(std::move(module), std::move(context))))
       return ioError("LLVM ORC module submission failed: " +
                      llvm::toString(std::move(error)));
-    auto address = (*jit)->lookup("bap_block");
-    if (!address)
-      return ioError("LLVM ORC lookup failed: " +
-                     llvm::toString(address.takeError()));
+    auto address = shared->jit->lookup(functionName);
+    if (!address) {
+      std::string message = llvm::toString(address.takeError());
+      if (llvm::Error error = resources->remove())
+        llvm::consumeError(std::move(error));
+      return ioError("LLVM ORC lookup failed: " + message);
+    }
 
     auto program = std::make_unique<Program>();
     program->function =
         address->toPtr<uint64_t(uint64_t *, BapCells *)>();
-    program->jit = std::move(*jit);
+    program->shared = shared;
+    program->resources = resources;
     program->maxSlot = hasSlots ? maxSlot + 1 : 0;
     program->memoryStores = memoryStores;
     return lean_io_result_mk_ok(
@@ -772,8 +809,28 @@ extern "C" lean_obj_res bap_jit_run_memory(lean_obj_arg programObject,
 
 namespace {
 struct PersistentMemory {
-  CellMap cells;
-  std::mutex mutex;
+  std::array<CellMap, 64> cells;
+  std::array<std::mutex, 64> mutexes;
+
+  size_t size() const {
+    size_t total = 0;
+    for (const auto &cell : cells)
+      total += cell.size();
+    return total;
+  }
+
+  template <typename F> void forEach(F &&action) const {
+    for (const auto &cell : cells)
+      cell.forEach(action);
+  }
+
+  std::vector<std::unique_lock<std::mutex>> lockAll() {
+    std::vector<std::unique_lock<std::mutex>> locks;
+    locks.reserve(mutexes.size());
+    for (auto &mutex : mutexes)
+      locks.emplace_back(mutex);
+    return locks;
+  }
 };
 
 void finalizeMemory(void *data) { delete static_cast<PersistentMemory *>(data); }
@@ -795,10 +852,13 @@ extern "C" lean_obj_res bap_jit_memory_create(lean_obj_arg addressesObject,
     if (addressCount != valueCount)
       return ioError("JIT memory addresses and values have different lengths");
     auto *memory = new PersistentMemory;
-    memory->cells.reserve(addressCount);
-    for (size_t index = 0; index != addressCount; ++index)
-      memory->cells.set(lean_unbox_uint64(lean_array_get_core(addressesObject, index)),
-                        static_cast<uint8_t>(lean_unbox(lean_array_get_core(valuesObject, index))));
+    for (auto &cell : memory->cells)
+      cell.reserve(addressCount / memory->cells.size() + 1);
+    for (size_t index = 0; index != addressCount; ++index) {
+      uint64_t address = lean_unbox_uint64(lean_array_get_core(addressesObject, index));
+      memory->cells[(address >> 8) & 63].set(
+          address, static_cast<uint8_t>(lean_unbox(lean_array_get_core(valuesObject, index))));
+    }
     return lean_io_result_mk_ok(lean_alloc_external(memoryClass(), memory));
   } catch (const std::exception &error) {
     return ioError(std::string("JIT memory creation failed: ") + error.what());
@@ -814,14 +874,24 @@ extern "C" lean_obj_res bap_jit_memory_write(lean_obj_arg memoryObject,
     const size_t valueCount = lean_array_size(valuesObject);
     if (addressCount != valueCount)
       return ioError("JIT memory addresses and values have different lengths");
-    std::lock_guard<std::mutex> lock(persistent->mutex);
-    for (size_t index = 0; index != addressCount; ++index)
-      persistent->cells.set(lean_unbox_uint64(lean_array_get_core(addressesObject, index)),
-                            static_cast<uint8_t>(lean_unbox(lean_array_get_core(valuesObject, index))));
+    auto locks = persistent->lockAll();
+    for (size_t index = 0; index != addressCount; ++index) {
+      uint64_t address = lean_unbox_uint64(lean_array_get_core(addressesObject, index));
+      persistent->cells[(address >> 8) & 63].set(
+          address, static_cast<uint8_t>(lean_unbox(lean_array_get_core(valuesObject, index))));
+    }
     return lean_io_result_mk_ok(lean_box(0));
   } catch (const std::exception &error) {
     return ioError(std::string("JIT persistent memory write failed: ") + error.what());
   }
+}
+
+extern "C" lean_obj_res bap_jit_memory_clone(lean_obj_arg memoryObject, lean_obj_arg) {
+  auto *persistent = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
+  auto locks = persistent->lockAll();
+  auto *copy = new PersistentMemory;
+  copy->cells = persistent->cells;
+  return lean_io_result_mk_ok(lean_alloc_external(memoryClass(), copy));
 }
 
 extern "C" lean_obj_res bap_jit_run_memory_object_code(
@@ -842,7 +912,7 @@ extern "C" lean_obj_res bap_jit_run_memory_object_code(
     lean_object *codeObserver = lean_is_scalar(codeObserverObject)
         ? nullptr : lean_ctor_get(codeObserverObject, 0);
     CellMap changes;
-    BapCells memory{nullptr, 0, 0, observer, nullptr, &persistent->cells, &changes, codeObserver, &persistent->mutex};
+    BapCells memory{nullptr, 0, 0, observer, nullptr, &persistent->cells, &changes, codeObserver, &persistent->mutexes};
     uint64_t next = program->function(state.data(), &memory);
     if (memory.error != nullptr)
       return lean_io_result_mk_error(memory.error);
@@ -881,15 +951,21 @@ extern "C" lean_obj_res bap_jit_run_memory_object(
 
 extern "C" lean_obj_res bap_jit_memory_dump(lean_obj_arg memoryObject, lean_obj_arg) {
   auto *memory = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
-  std::lock_guard<std::mutex> lock(memory->mutex);
-  lean_obj_res addresses = lean_alloc_array(memory->cells.size(), memory->cells.size());
-  lean_obj_res values = lean_alloc_array(memory->cells.size(), memory->cells.size());
-  size_t index = 0;
-  memory->cells.forEach([&](uint64_t address, uint8_t value) {
-    lean_array_set_core(addresses, index, lean_box_uint64(address));
-    lean_array_set_core(values, index, lean_box(value));
-    ++index;
+  auto locks = memory->lockAll();
+  std::vector<std::pair<uint64_t, uint8_t>> cells;
+  cells.reserve(memory->size());
+  memory->forEach([&](uint64_t address, uint8_t value) {
+    cells.emplace_back(address, value);
   });
+  std::sort(cells.begin(), cells.end());
+  lean_obj_res addresses = lean_alloc_array(cells.size(), cells.size());
+  lean_obj_res values = lean_alloc_array(cells.size(), cells.size());
+  size_t index = 0;
+  for (const auto &cell : cells) {
+    lean_array_set_core(addresses, index, lean_box_uint64(cell.first));
+    lean_array_set_core(values, index, lean_box(cell.second));
+    ++index;
+  }
   lean_obj_res result = lean_alloc_ctor(0, 2, 0);
   lean_ctor_set(result, 0, addresses);
   lean_ctor_set(result, 1, values);
@@ -898,13 +974,13 @@ extern "C" lean_obj_res bap_jit_memory_dump(lean_obj_arg memoryObject, lean_obj_
 
 extern "C" lean_obj_res bap_jit_memory_read(lean_obj_arg memoryObject, uint64_t address, lean_obj_arg) {
   auto *memory = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
-  std::lock_guard<std::mutex> lock(memory->mutex);
-  uint8_t value = memory->cells.get(address);
+  std::lock_guard<std::mutex> lock(memory->mutexes[(address >> 8) & 63]);
+  uint8_t value = memory->cells[(address >> 8) & 63].get(address);
   return lean_io_result_mk_ok(lean_uint64_to_nat(value));
 }
 
 extern "C" lean_obj_res bap_jit_memory_size(lean_obj_arg memoryObject, lean_obj_arg) {
   auto *memory = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
-  std::lock_guard<std::mutex> lock(memory->mutex);
-  return lean_io_result_mk_ok(lean_uint64_to_nat(memory->cells.size()));
+  auto locks = memory->lockAll();
+  return lean_io_result_mk_ok(lean_uint64_to_nat(memory->size()));
 }

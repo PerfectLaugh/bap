@@ -79,6 +79,27 @@ def run : IO Unit := do
   assertEqual "cached native block executed twice" 2 cachedStats.nativeRuns
   assertEqual "instruction cache hit" 1 cachedStats.cacheHits
 
+  let versionEngine ← Primus.Lifted.Engine.create
+  let versionBytes ← IO.mkRef (ByteArray.mk #[1])
+  let versionFetch : Primus.Lifted.Fetch := fun _ => versionBytes.get
+  let versionLift : Primus.Lifted.Lift := fun address code =>
+    pure ⟨address, address + 4, [.move y (int code[0]!.toNat), .jmp (.var y)]⟩
+  let _ ← Primus.Lifted.runBlock versionEngine versionFetch versionLift {} 0x17000
+  Primus.Lifted.discardRange versionEngine 0x17000 0x17000
+  let _ ← Primus.Lifted.runBlock versionEngine versionFetch versionLift {} 0x17000
+  let restoredStats ← Primus.Lifted.stats versionEngine
+  assertEqual "matching block version avoids recompilation" 1 restoredStats.nativeCompilations
+  assertEqual "matching block version avoids relifting" 1 restoredStats.lifts
+  versionBytes.set (ByteArray.mk #[2])
+  let _ ← Primus.Lifted.runBlock versionEngine versionFetch versionLift {} 0x17000
+  versionBytes.set (ByteArray.mk #[1])
+  let _ ← Primus.Lifted.runBlock versionEngine versionFetch versionLift {} 0x17000
+  let versionStats ← Primus.Lifted.stats versionEngine
+  assertEqual "changed block compiles a new version" 2 versionStats.nativeCompilations
+  assertEqual "restored block version avoids another compilation" 2 versionStats.nativeCompilations
+  assertEqual "restored block version avoids another lift" 2 versionStats.lifts
+  assertEqual "all block versions execute natively" 4 versionStats.nativeRuns
+
   let chainedEngine ← Primus.Lifted.Engine.create
   let z := reg "z"
   let chainedFetch : Primus.Lifted.Fetch := fun pc =>
@@ -520,11 +541,31 @@ def run : IO Unit := do
   for address in [0x13000, 0x13004, 0x13008, 0x13000] do
     let _ ← Primus.Lifted.runBlock evictEngine evictFetch evictLift {} address
   let evictStats ← Primus.Lifted.stats evictEngine
-  assertEqual "bounded cache evicts old lifts" 4 evictStats.lifts
+  assertEqual "evicted block version avoids relifting" 3 evictStats.lifts
+  assertEqual "evicted block version avoids recompilation" 3 evictStats.nativeCompilations
+  assertEqual "evicted block version is reused" 1 evictStats.versionHits
   assertEqual "bounded cache rejects stale entries" 0 evictStats.cacheHits
+  let retainEngine ← Primus.Lifted.Engine.create 1 2
+  for address in [0x13000, 0x13004, 0x13000, 0x13008, 0x13000] do
+    let _ ← Primus.Lifted.runBlock retainEngine evictFetch evictLift {} address
+  let retainStats ← Primus.Lifted.stats retainEngine
+  assertEqual "bounded cache retains frequently used entries" 3 retainStats.lifts
+  assertEqual "bounded cache reuses retained entries" 2 retainStats.cacheHits
+  let limitedEngine ← Primus.Lifted.Engine.create 1 128 1 16 0 false 2
+  for address in [0x13000, 0x13004, 0x13008] do
+    let _ ← Primus.Lifted.runBlock limitedEngine evictFetch evictLift {} address
+  let limitedStats ← Primus.Lifted.stats limitedEngine
+  assertEqual "native limit compiles within budget" 2 limitedStats.nativeCompilations
+  assertEqual "native limit leaves excess blocks interpreted" 1 limitedStats.interpretedRuns
+  Primus.Lifted.clearCache limitedEngine
+  let _ ← Primus.Lifted.runBlock limitedEngine evictFetch evictLift {} 0x1300c
+  let clearedStats ← Primus.Lifted.stats limitedEngine
+  assertEqual "clearing native programs releases budget" 3 clearedStats.nativeCompilations
 
   let rangeIncrement ← IO.mkRef 2
-  let rangeFetch : Primus.Lifted.Fetch := fun _ => pure (ByteArray.mk #[1])
+  let rangeFetch : Primus.Lifted.Fetch := fun _ => do
+    let increment ← rangeIncrement.get
+    pure (ByteArray.mk #[UInt8.ofNat increment])
   let rangeLift : Primus.Lifted.Lift := fun pc _ =>
     match pc with
     | 0x14000 => pure ⟨pc, pc + 4, [
@@ -557,6 +598,7 @@ def run : IO Unit := do
   assertEqual "range observes each internal block" [0x14004, 0x14008] (← rangeEvents.get).reverse
   let rangeStats ← Primus.Lifted.stats rangeEngine
   assertEqual "range executes once natively" 1 rangeStats.nativeRuns
+  assertEqual "range compiles its first block only once" 1 rangeStats.nativeCompilations
   assertEqual "range lifts each block once" 3 rangeStats.lifts
   assertEqual "range avoids interpreted fallback" 0 rangeStats.interpretedRuns
   let cachedRange ← Primus.Lifted.runBlockObserved rangeEngine rangeFetch rangeLift rangeInitial 0x14000
@@ -565,6 +607,46 @@ def run : IO Unit := do
   let cachedRangeStats ← Primus.Lifted.stats rangeEngine
   assertEqual "cached range does not relift" 3 cachedRangeStats.lifts
   assertEqual "cached range executes natively twice" 2 cachedRangeStats.nativeRuns
+
+  let graphFetch : Primus.Lifted.Fetch := fun _ => pure (ByteArray.mk #[1])
+  let graphLift : Primus.Lifted.Lift := fun pc _ =>
+    match pc with
+    | 0x16000 => pure ⟨pc, 0x16000, [
+        .ifElse (.bin .eq (.var x) (int 1)) [.jmp (int 0x16100)] [.jmp (int 0x16004)]
+      ]⟩
+    | 0x16004 => pure ⟨pc, 0x16008, [.move y (int 40), .jmp (int 0x16100)]⟩
+    | 0x16100 => pure ⟨pc, 0x16104, [.move z (.bin .add (.var y) (int 2)), .jmp (.var z)]⟩
+    | 42 => pure ⟨42, 42, []⟩
+    | _ => throw <| IO.userError s!"unexpected graph lift at {pc}"
+  let graphInitial : State := { env := [
+    (x, .bits (BitVec.ofNat 64 0)),
+    (y, .bits (BitVec.ofNat 64 0))
+  ] }
+  let graphReference ← Primus.Lifted.run singleEngine graphFetch graphLift graphInitial 0x16000 10
+  assertEqual "graph block reference continuation" 42 graphReference.pc
+  assertBits "graph block reference result" (BitVec.ofNat 64 42) (lookup graphReference.state.env z)
+  let graphEngine ← Primus.Lifted.Engine.create 1 128 8 16 0 false
+  let graphEvents ← IO.mkRef []
+  let graphObserver : Jit.CodeObserver := fun pc => do
+    graphEvents.modify fun events => pc :: events
+    pure false
+  let graphResult ← Primus.Lifted.runBlockObserved graphEngine graphFetch graphLift graphInitial 0x16000
+    none (some graphObserver)
+  assertEqual "graph preserves continuation" graphReference.pc graphResult.pc
+  assertBits "graph matches block execution" (BitVec.ofNat 64 42) (lookup graphResult.state.env z)
+  assertEqual "graph observes internal blocks" [0x16004, 0x16100] (← graphEvents.get).reverse
+  let graphStats ← Primus.Lifted.stats graphEngine
+  assertEqual "graph compiles once" 1 graphStats.nativeCompilations
+  assertEqual "graph executes natively" 1 graphStats.nativeRuns
+  assertEqual "graph avoids interpreted blocks" 0 graphStats.interpretedRuns
+  assertEqual "graph lifts each discovered block once" 3 graphStats.lifts
+  Primus.Lifted.discardRange graphEngine 0x16004 0x16007
+  let invalidatedGraph ← Primus.Lifted.runBlockObserved graphEngine graphFetch graphLift graphInitial 0x16000
+    none (some graphObserver)
+  assertEqual "invalidated graph preserves continuation" 42 invalidatedGraph.pc
+  let invalidatedGraphStats ← Primus.Lifted.stats graphEngine
+  assertEqual "matching graph version avoids recompilation" 1 invalidatedGraphStats.nativeCompilations
+  assertEqual "matching graph version avoids relifting" 3 invalidatedGraphStats.lifts
 
   let stopEngine ← Primus.Lifted.Engine.create 1 128 4
   let stopObserver : Jit.CodeObserver := fun pc => pure (pc = 0x14008)

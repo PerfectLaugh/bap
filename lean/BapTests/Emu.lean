@@ -269,8 +269,44 @@ private def testThreads : IO Unit := do
     (.ok (← Bap.Emu.threadReg parallelEmu 1 output))
   assertBits "Emu parallel scheduler preserves second thread" (BitVec.ofNat 64 11)
     (.ok (← Bap.Emu.threadReg parallelEmu parallelSecond output))
+  let contextEmu ← Bap.Emu.riscv64 parallelCode 0 0
+  Bap.Emu.setReg contextEmu output (.bits (BitVec.ofNat 64 0))
+  let contextSecond ← Bap.Emu.spawnThread contextEmu 0 10
+  let contextEvents ← IO.mkRef []
+  let _ ← Bap.Emu.onCodeWith contextEmu (4, 4) fun current _ => do
+    let tid ← Bap.Emu.thread current
+    match ← Bap.Emu.reg current output with
+    | .bits value => contextEvents.modify fun events => (tid, value.toNat) :: events
+    | _ => throw <| IO.userError "context hook register is not a bit vector"
+    Bap.Emu.stop current
+  let _ ← Bap.Emu.runPreemptiveParallel contextEmu 10
+  let sortedEvents := (← contextEvents.get).mergeSort fun left right => left.1 ≤ right.1
+  assertEqual "Emu context hooks observe the active worker" [(1, 1), (contextSecond, 11)] sortedEvents
+  assertTrue "Emu context hooks stop each active worker"
+    ((← Bap.Emu.threads contextEmu).all fun thread => thread.stopped)
+  let syscallContextEmu ← Bap.Emu.riscv64 ((← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
+    (← LLVM.assemble "riscv64" "ecall")) 0 0
+  Bap.Emu.setReg syscallContextEmu output (.bits (BitVec.ofNat 64 0))
+  Bap.Emu.setReg syscallContextEmu (reg "X17") (.bits (BitVec.ofNat 64 39))
+  (List.range 6).forM fun index =>
+    Bap.Emu.setReg syscallContextEmu (reg s!"X{10 + index}") (.bits (BitVec.ofNat 64 0))
+  let syscallContextSecond ← Bap.Emu.spawnThread syscallContextEmu 0 10
+  let syscallContextEvents ← IO.mkRef []
+  let _ ← Bap.Emu.onSyscallWith syscallContextEmu fun current _ _ => do
+    let tid ← Bap.Emu.thread current
+    match ← Bap.Emu.reg current output with
+    | .bits value => syscallContextEvents.modify fun events => (tid, value.toNat) :: events
+    | _ => throw <| IO.userError "context syscall register is not a bit vector"
+    Bap.Emu.stop current
+    pure (.returnValue 0)
+  let _ ← Bap.Emu.runPreemptiveParallel syscallContextEmu 10
+  let sortedSyscallEvents := (← syscallContextEvents.get).mergeSort fun left right => left.1 ≤ right.1
+  assertEqual "Emu context syscalls observe the active worker"
+    [(1, 1), (syscallContextSecond, 11)] sortedSyscallEvents
+  assertTrue "Emu context syscalls stop each active worker"
+    ((← Bap.Emu.threads syscallContextEmu).all fun thread => thread.stopped)
   let parallelMemoryCode := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
-    (← LLVM.assemble "riscv64" "sw a0, 0(a1)")
+    (← LLVM.assemble "riscv64" "sw a0, 0(a1)") ++ (← LLVM.assemble "riscv64" "jal 0")
   let parallelMemoryEmu ← Bap.Emu.riscv64 parallelMemoryCode 0 0
   Bap.Emu.map parallelMemoryEmu ⟨0x1000, ByteArray.mk (List.replicate 8 0).toArray, ⟨true, true, false⟩⟩
   Bap.Emu.setReg parallelMemoryEmu output (.bits (BitVec.ofNat 64 0))
@@ -285,6 +321,33 @@ private def testThreads : IO Unit := do
     ((ByteArray.mk #[11, 0, 0, 0]) == (← Bap.Emu.read parallelMemoryEmu 0x1004 4))
   assertBits "Emu parallel scheduler preserves second memory worker" (BitVec.ofNat 64 11)
     (.ok (← Bap.Emu.threadReg parallelMemoryEmu parallelMemorySecond output))
+  Bap.Emu.cloneProcessMemory parallelMemoryEmu parallelMemorySecond
+  Bap.Emu.switchThread parallelMemoryEmu 1
+  Bap.Emu.setPc parallelMemoryEmu 0
+  Bap.Emu.switchThread parallelMemoryEmu parallelMemorySecond
+  Bap.Emu.setPc parallelMemoryEmu 0
+  let _ ← Bap.Emu.runPreemptiveParallel parallelMemoryEmu 4
+  assertTrue "Emu fork memory is copy on write"
+    ((ByteArray.mk #[2, 0, 0, 0]) == (← Bap.Emu.read parallelMemoryEmu 0x1000 4))
+  let childMemory ← parallelMemoryEmu.processMemory.get
+  let some childNativeMemory := childMemory.get? parallelMemorySecond
+    | throw <| IO.userError "missing child memory"
+  let childNative ← Jit.readMemory childNativeMemory 0x1004
+  assertEqual "Emu fork memory preserves child bytes" 12 childNative.toNat
+  Bap.Emu.save parallelMemoryEmu "native/build/emu-cow-checkpoint.sexp"
+  Bap.Emu.load parallelMemoryEmu "native/build/emu-cow-checkpoint.sexp"
+  Bap.Emu.switchThread parallelMemoryEmu 1
+  Bap.Emu.setPc parallelMemoryEmu 0
+  Bap.Emu.switchThread parallelMemoryEmu parallelMemorySecond
+  Bap.Emu.setPc parallelMemoryEmu 0
+  let _ ← Bap.Emu.runPreemptiveParallel parallelMemoryEmu 4
+  assertTrue "Emu checkpoint restores parent memory"
+    ((ByteArray.mk #[3, 0, 0, 0]) == (← Bap.Emu.read parallelMemoryEmu 0x1000 4))
+  let restoredMemory ← parallelMemoryEmu.processMemory.get
+  let some restoredNativeMemory := restoredMemory.get? parallelMemorySecond
+    | throw <| IO.userError "missing restored child memory"
+  let restoredNative ← Jit.readMemory restoredNativeMemory 0x1004
+  assertEqual "Emu checkpoint restores child memory" 13 restoredNative.toNat
 
 set_option maxRecDepth 8000 in
 def run : IO Unit := do

@@ -55,12 +55,34 @@ private partial def writePages (pages : Std.TreeMap Nat ByteArray) (address : Na
 def writeRegion (memory : Memory addressWidth) (address : Nat) (data : ByteArray) : Memory addressWidth :=
   ⟨writePages memory.pages address data 0⟩
 
-def readRegion (memory : Memory addressWidth) (address size : Nat) : ByteArray :=
-  ByteArray.mk ((List.range size).map fun offset =>
+def writeSortedCells (memory : Memory addressWidth) (cells : List (BitVec addressWidth × UInt8)) : Memory addressWidth :=
+  let groups := cells.foldl (init := ([] : List (Nat × Array UInt8))) fun groups cell =>
+    match groups with
+    | [] => [(cell.1.toNat, #[cell.2])]
+    | (start, bytes) :: rest =>
+      if cell.1.toNat = start + bytes.size then (start, bytes.push cell.2) :: rest
+      else if cell.1.toNat = start + bytes.size - 1 then (start, bytes.set! (bytes.size - 1) cell.2) :: rest
+      else (cell.1.toNat, #[cell.2]) :: (start, bytes) :: rest
+  groups.foldl (init := memory) fun memory group =>
+    writeRegion memory group.1 (ByteArray.mk group.2)
+
+def writeCells (memory : Memory addressWidth) (cells : List (BitVec addressWidth × UInt8)) : Memory addressWidth :=
+  writeSortedCells memory (cells.mergeSort fun left right => left.1.toNat ≤ right.1.toNat)
+
+private partial def readPages (pages : Std.TreeMap Nat ByteArray) (address size offset : Nat)
+    (output : Array UInt8) : Array UInt8 :=
+  if offset ≥ size then output else
     let absolute := address + offset
-    match memory.pages.get? (absolute / pageSize) with
-    | some page => page[absolute % pageSize]!
-    | none => 0).toArray
+    let index := absolute / pageSize
+    let pageOffset := absolute % pageSize
+    let count := min (pageSize - pageOffset) (size - offset)
+    let page := (pages.get? index).getD (ByteArray.mk (List.replicate pageSize 0).toArray)
+    let chunk := page.extract pageOffset (pageOffset + count)
+    let output := chunk.toList.foldl (init := output) fun output byte => output.push byte
+    readPages pages address size (offset + count) output
+
+def readRegion (memory : Memory addressWidth) (address size : Nat) : ByteArray :=
+  ByteArray.mk (readPages memory.pages address size 0 #[])
 
 private def byteAt (value : Nat) (offset : Nat) : UInt8 :=
   UInt8.ofNat ((value >>> (8 * offset)) % 256)

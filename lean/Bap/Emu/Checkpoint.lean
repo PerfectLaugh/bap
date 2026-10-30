@@ -154,6 +154,18 @@ private def decodeThread (input : Sexp) : Except String ThreadContext := do
     .ok ⟨id, { env := env }, pc, stopped, pending⟩
   | _ => .error "invalid checkpoint thread"
 
+private def encodeProcess (process : ThreadId × List Region) : Sexp :=
+  .tagged "process" [nat process.1, .list (process.2.map encodeRegion)]
+
+private def decodeProcess (input : Sexp) : Except String (ThreadId × List Region) := do
+  let args ← Sexp.expectTagged "process" 2 input
+  match args with
+  | [id, regions] =>
+    let id ← Sexp.nat id
+    let regions ← (← Sexp.asList regions).mapM decodeRegion
+    .ok (id, regions)
+  | _ => .error "invalid checkpoint process"
+
 def encodeSnapshot (snapshot : Snapshot) : Sexp :=
   .tagged "snapshot" [
     nat snapshot.pc,
@@ -163,22 +175,33 @@ def encodeSnapshot (snapshot : Snapshot) : Sexp :=
     .list (snapshot.threads.map encodeThread),
     nat snapshot.currentThread,
     nat snapshot.nextThread,
-    encodePending snapshot.pending
+    encodePending snapshot.pending,
+    .list (snapshot.processMemory.map encodeProcess)
   ]
 
 def decodeSnapshot (input : Sexp) : Except String Snapshot := do
-  let args ← Sexp.expectTagged "snapshot" 8 input
-  match args with
-  | [pc, stopped, regions, env, threads, currentThread, nextThread, pending] =>
-    let pc ← Sexp.nat pc
-    let stopped ← boolValue stopped
-    let regions ← (← Sexp.asList regions).mapM decodeRegion
-    let env ← (← Sexp.asList env).mapM decodeBinding
-    let threads ← (← Sexp.asList threads).mapM decodeThread
-    let currentThread ← Sexp.nat currentThread
-    let nextThread ← Sexp.nat nextThread
-    let pending ← decodePending pending
-    .ok ⟨{ env := env }, pc, regions, stopped, threads, currentThread, nextThread, pending⟩
+  let input ← Sexp.asList input
+  match input with
+  | .atom "snapshot" :: rest =>
+    if rest.length != 8 && rest.length != 9 then
+      .error "invalid checkpoint snapshot"
+    else
+      match rest.take 8 with
+      | [pc, stopped, regions, env, threads, currentThread, nextThread, pending] =>
+        let pc ← Sexp.nat pc
+        let stopped ← boolValue stopped
+        let regions ← (← Sexp.asList regions).mapM decodeRegion
+        let env ← (← Sexp.asList env).mapM decodeBinding
+        let threads ← (← Sexp.asList threads).mapM decodeThread
+        let currentThread ← Sexp.nat currentThread
+        let nextThread ← Sexp.nat nextThread
+        let pending ← decodePending pending
+        let processMemory ← match rest.drop 8 with
+          | [] => pure []
+          | [processes] => (← Sexp.asList processes).mapM decodeProcess
+          | _ => .error "invalid checkpoint processes"
+        .ok ⟨{ env := env }, pc, regions, stopped, threads, currentThread, nextThread, pending, processMemory⟩
+      | _ => .error "invalid checkpoint snapshot"
   | _ => .error "invalid checkpoint snapshot"
 
 private structure Writer where
@@ -246,6 +269,11 @@ private def putThreadBin (writer : Writer) (context : ThreadContext) : Writer :=
   let writer := putNat writer context.state.env.length
   let writer := context.state.env.foldl putBindingBin writer
   putPendingBin writer context.pending
+
+private def putProcessBin (writer : Writer) (process : ThreadId × List Region) : Writer :=
+  let writer := putNat writer process.1
+  let writer := putNat writer process.2.length
+  process.2.foldl putRegionBin writer
 
 private structure Reader where
   data : ByteArray
@@ -356,7 +384,12 @@ private def getThreadBin (reader : Reader) : Except String (ThreadContext × Rea
   let (pending, reader) ← getPendingBin reader
   .ok (⟨id, { env := env }, pc, stopped, pending⟩, reader)
 
-private def binaryMagic : ByteArray := "BAPCKPT1".toUTF8
+private def getProcessBin (reader : Reader) : Except String ((ThreadId × List Region) × Reader) := do
+  let (id, reader) ← getNat reader
+  let (regions, reader) ← getList reader getRegionBin
+  .ok ((id, regions), reader)
+
+private def binaryMagic : ByteArray := "BAPCKPT2".toUTF8
 
 private def encodeBinarySnapshot (snapshot : Snapshot) : ByteArray :=
   let writer := putBytes ⟨binaryMagic⟩ (natBytes snapshot.pc)
@@ -369,7 +402,9 @@ private def encodeBinarySnapshot (snapshot : Snapshot) : ByteArray :=
   let writer := snapshot.threads.foldl putThreadBin writer
   let writer := putNat writer snapshot.currentThread
   let writer := putNat writer snapshot.nextThread
-  (putPendingBin writer snapshot.pending).data
+  let writer := putPendingBin writer snapshot.pending
+  let writer := putNat writer snapshot.processMemory.length
+  (snapshot.processMemory.foldl putProcessBin writer).data
 
 private def decodeBinarySnapshot (data : ByteArray) : Except String Snapshot := do
   if data.extract 0 binaryMagic.size != binaryMagic then
@@ -384,10 +419,11 @@ private def decodeBinarySnapshot (data : ByteArray) : Except String Snapshot := 
     let (currentThread, reader) ← getNat reader
     let (nextThread, reader) ← getNat reader
     let (pending, reader) ← getPendingBin reader
+    let (processMemory, reader) ← getList reader getProcessBin
     if reader.offset != data.size then
       .error "trailing bytes in binary checkpoint"
     else
-      .ok ⟨{ env := env }, pc, regions, stopped, threads, currentThread, nextThread, pending⟩
+      .ok ⟨{ env := env }, pc, regions, stopped, threads, currentThread, nextThread, pending, processMemory⟩
 
 def materializeSnapshot (emu : Emu) (snapshot : Snapshot) : IO Snapshot := do
   if snapshot.state.env.any fun binding => binding.1 == emu.config.memory then
@@ -405,9 +441,8 @@ def materializeSnapshot (emu : Emu) (snapshot : Snapshot) : IO Snapshot := do
     }
 
 def save (emu : Emu) (path : String) : IO Unit := do
-  synchronizePersistentMemory emu
   let originalRegions ← emu.regions.get
-  refreshRegions emu
+  refreshPersistentRegions emu
   let snapshot ← snapshot emu
   let snapshot := { snapshot with
     state := { env := snapshot.state.env.filter fun binding => binding.1 != emu.config.memory }

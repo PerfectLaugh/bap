@@ -72,6 +72,9 @@ def runWithPersistentMemory (program : Program) (state : Array UInt64) (memory :
 @[extern "bap_jit_memory_dump"]
 opaque dumpMemory (memory : Memory) : IO (Array UInt64 × Array UInt8)
 
+@[extern "bap_jit_memory_clone"]
+opaque cloneMemory (memory : Memory) : IO Memory
+
 @[extern "bap_jit_memory_read"]
 opaque readMemory (memory : Memory) (address : UInt64) : IO UInt8
 
