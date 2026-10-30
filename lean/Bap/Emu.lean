@@ -6,6 +6,7 @@ import Bap.Target.MIPS
 import Bap.Target.MIPS32
 import Bap.Primus.Lifted
 import Bap.Primus.Memory
+import Std.Sync.Mutex
 
 namespace Bap.Emu
 
@@ -150,6 +151,8 @@ structure Emu where
   currentThreadRef : IO.Ref ThreadId
   nextThreadRef : IO.Ref ThreadId
   pendingRef : IO.Ref (Option PendingBranch)
+  parallelLock : IO.Ref (Option Std.BaseMutex)
+  parallelWorkers : IO.Ref (List (ThreadId × Primus.Lifted.Engine))
 
 namespace Region
 
@@ -200,6 +203,8 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     currentThreadRef := ← IO.mkRef 1
     nextThreadRef := ← IO.mkRef 2
     pendingRef := ← IO.mkRef none
+    parallelLock := ← IO.mkRef none
+    parallelWorkers := ← IO.mkRef []
   }
 
 private def saveCurrentThread (emu : Emu) : IO Unit := do
@@ -268,6 +273,7 @@ def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   emu.nextThreadRef.set snapshot.nextThread
   emu.pendingRef.set snapshot.pending
   emu.skipCode.set none
+  emu.parallelWorkers.set []
   Primus.Lifted.discardMemory emu.engine
 
 def thread (emu : Emu) : IO ThreadId := emu.currentThreadRef.get
@@ -420,8 +426,15 @@ def traceDroppedAccesses (emu : Emu) : IO Nat := do
   let current ← emu.trace.get
   pure (current.getD {}).droppedAccesses
 
+private def serialize (emu : Emu) (action : IO α) : IO α := do
+  match ← emu.parallelLock.get with
+  | some mutex =>
+    Std.BaseMutex.lock mutex
+    try action finally Std.BaseMutex.unlock mutex
+  | none => action
+
 private def recordTrace (emu : Emu) (address : Nat) : IO Unit :=
-  emu.trace.modify fun current => current.map fun state =>
+  serialize emu <| emu.trace.modify fun current => current.map fun state =>
     if state.pcCapacity = 0 then
       { state with pcsBack := address :: state.pcsBack, pcCount := state.pcCount + 1 }
     else if state.pcRetained < state.pcCapacity then
@@ -467,7 +480,7 @@ private def recordAccess (emu : Emu) (write : Bool) (address size value : Nat) :
         droppedAccesses := state.droppedAccesses + entries.length - retained.length
       }
 
-private def notifyCode (emu : Emu) (address : Nat) : IO Unit := do
+private def notifyCode (emu : Emu) (address : Nat) : IO Unit := serialize emu <| do
   let hooks ← emu.hooks.get
   (hooks.filter fun hook => hook.first ≤ address && address ≤ hook.last).forM fun hook =>
     hook.action address
@@ -484,7 +497,7 @@ private def recordFault (emu : Emu) (operation : MemoryOperation) (address : Nat
   let pc ← emu.pc.get
   emu.lastFault.set (some ⟨pc, address, operation, 1⟩)
 
-private def notifyMemory (emu : Emu) (write : Bool) (address size value : Nat) : IO Unit := do
+private def notifyMemory (emu : Emu) (write : Bool) (address size value : Nat) : IO Unit := serialize emu <| do
   let mapped ← emu.regions.get
   let invalid := (List.range size).find? fun offset =>
     let current := address + offset
@@ -522,6 +535,20 @@ private def cells (emu : Emu) (state : Bil.State) : IO (Σ width, Bap.Memory wid
   | .ok _ => throw <| IO.userError "Emu memory is not a memory value"
   | .error error => throw <| IO.userError error
 
+def synchronizePersistentMemory (emu : Emu) : IO Unit := do
+  match ← emu.engine.persistentMemory.get with
+  | none => pure ()
+  | some native =>
+    let state ← emu.state.get
+    let ⟨width, _⟩ ← cells emu state
+    let (addresses, values) ← Jit.dumpMemory native
+    let memory := Bap.Memory.ofCells ((addresses.zip values).toList.map fun cell =>
+      (BitVec.ofNat width cell.1.toNat, cell.2))
+    let contexts ← captureThreads emu
+    emu.threadsRef.set (contexts.map fun context =>
+      { context with state := { env := Bil.bind context.state.env emu.config.memory (.memory memory) } })
+    emu.state.set { env := Bil.bind state.env emu.config.memory (.memory memory) }
+
 private def readByte (emu : Emu) (address : Nat) : IO UInt8 := do
   let regions ← emu.regions.get
   match lookupRegion regions address with
@@ -529,9 +556,13 @@ private def readByte (emu : Emu) (address : Nat) : IO UInt8 := do
   | some region =>
     if !region.protection.readable then
       throw <| IO.userError s!"unreadable Emu address {address}"
-    let state ← emu.state.get
-    let ⟨width, memory⟩ ← cells emu state
-    pure (Bap.Memory.readByte memory (BitVec.ofNat width address))
+    let persistent ← emu.engine.persistentMemory.get
+    match persistent with
+    | some memory => Jit.readMemory memory (UInt64.ofNat address)
+    | none =>
+      let state ← emu.state.get
+      let ⟨width, memory⟩ ← cells emu state
+      pure (Bap.Memory.readByte memory (BitVec.ofNat width address))
 
 def read (emu : Emu) (address size : Nat) : IO ByteArray := do
   let bytes ← (List.range size).mapM fun offset => readByte emu (address + offset)
@@ -757,7 +788,7 @@ def setThreadReg (emu : Emu) (id : ThreadId) (var : Bap.Var) (value : Bap.Value)
       if context.id == id then { context with state := { env := Bil.bind context.state.env var value } }
       else context
 
-private def dispatchSyscall (emu : Emu) : IO (Option Nat) := do
+private def dispatchSyscall (emu : Emu) : IO (Option Nat) := serialize emu <| do
   let hooks ← emu.syscallHooks.get
   if hooks.isEmpty then
     pure none
@@ -776,7 +807,7 @@ private def dispatchSyscall (emu : Emu) : IO (Option Nat) := do
         | .default => serve rest
     serve hooks.reverse
 
-private def dispatchIntrinsic (emu : Emu) (name : String) : IO Bool := do
+private def dispatchIntrinsic (emu : Emu) (name : String) : IO Bool := serialize emu <| do
   let address ← emu.pc.get
   let hooks ← emu.intrinsicHooks.get
   let selected := hooks.reverse.filter fun hook => hook.name == "*" || hook.name == name
@@ -1039,6 +1070,115 @@ def runPreemptive (emu : Emu) (quantum : Nat := 100) (fuel : Nat := 100000) : IO
       simp_all
       omega
   loop fuel 0 (fuel + 1)
+
+private def makeParallelWorker (emu : Emu) (context : ThreadContext) (shared : Jit.Memory) : IO Emu := do
+  let engine ← Primus.Lifted.Engine.create emu.config.hotThreshold emu.config.cacheLimit
+    emu.config.rangeLimit 16 emu.config.jitCooldown true
+  engine.persistentMemory.set (some shared)
+  engine.persistentVariable.set (← emu.engine.persistentVariable.get)
+  pure {
+    emu with
+    engine
+    state := ← IO.mkRef context.state
+    pc := ← IO.mkRef context.pc
+    stopped := ← IO.mkRef context.stopped
+    currentThreadRef := ← IO.mkRef context.id
+    trace := ← IO.mkRef none
+    lastFault := ← IO.mkRef none
+    skipCode := ← IO.mkRef none
+    pendingRef := ← IO.mkRef context.pending
+  }
+
+private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared : Jit.Memory) : IO Emu := do
+  let existing ← emu.parallelWorkers.get
+  match existing.find? fun worker => worker.1 = context.id with
+  | some (_, engine) =>
+    engine.persistentMemory.set (some shared)
+    engine.persistentVariable.set (← emu.engine.persistentVariable.get)
+    pure {
+      emu with
+      engine
+      state := ← IO.mkRef context.state
+      pc := ← IO.mkRef context.pc
+      stopped := ← IO.mkRef context.stopped
+      currentThreadRef := ← IO.mkRef context.id
+      trace := ← IO.mkRef none
+      lastFault := ← IO.mkRef none
+      skipCode := ← IO.mkRef none
+      pendingRef := ← IO.mkRef context.pending
+    }
+  | none => makeParallelWorker emu context shared
+
+def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
+  if quantum = 0 then
+    throw <| IO.userError "Emu thread quantum must be positive"
+  if (← emu.parallelLock.get).isNone then
+    emu.parallelLock.set (some (← Std.BaseMutex.new))
+  let contexts ← captureThreads emu
+  let active := contexts.filter fun context => !context.stopped
+  if active.length ≤ 1 then
+    runPreemptive emu quantum quantum
+  else
+    let before ← snapshot emu
+    try
+      let shared ← match ← emu.engine.persistentMemory.get with
+        | some memory => pure memory
+        | none =>
+          let state ← emu.state.get
+          let ⟨_width, memory⟩ ← cells emu state
+          let cells := Bap.Memory.cells memory
+          let addresses := (cells.map fun cell => UInt64.ofNat cell.1.toNat).toArray
+          let values := (cells.map fun cell => cell.2).toArray
+          let memory ← Jit.createMemory addresses values
+          emu.engine.persistentMemory.set (some memory)
+          emu.engine.persistentVariable.set (some emu.config.memory)
+          pure memory
+      let workers ← active.mapM fun context => do
+        let worker ← resumeParallelWorker emu context shared
+        pure (context, worker)
+      let tasks ← workers.mapM fun worker => IO.asTask (run worker.2 quantum)
+      let steps ← tasks.mapM fun task => do
+        match ← IO.wait task with
+        | .ok steps => pure steps
+        | .error error => throw error
+      let statistics ← workers.mapM fun worker => Primus.Lifted.stats worker.2.engine
+      let previous ← emu.engine.statistics.get
+      emu.engine.statistics.set (statistics.foldl (init := previous) fun total current => {
+        cacheHits := total.cacheHits + current.cacheHits
+        lifts := total.lifts + current.lifts
+        nativeCompilations := total.nativeCompilations + current.nativeCompilations
+        nativeRuns := total.nativeRuns + current.nativeRuns
+        interpretedRuns := total.interpretedRuns + current.interpretedRuns
+      })
+      let merged ← (contexts.mapM fun context => do
+        match workers.find? fun worker => worker.1.id = context.id with
+        | none => pure context
+        | some (_, worker) =>
+          let state ← worker.state.get
+          pure {
+            context with
+            state
+            pc := ← worker.pc.get
+            stopped := ← worker.stopped.get
+            pending := ← worker.pendingRef.get
+          })
+      emu.threadsRef.set merged
+      let current ← emu.currentThreadRef.get
+      match merged.find? fun context => context.id = current with
+      | some context =>
+        emu.state.set context.state
+        emu.pc.set context.pc
+        emu.stopped.set context.stopped
+        emu.pendingRef.set context.pending
+      | none => pure ()
+      emu.engine.persistentMemory.set (some shared)
+      emu.engine.persistentVariable.set (some emu.config.memory)
+      emu.parallelWorkers.set (workers.map fun worker => (worker.1.id, worker.2.engine))
+      let _ ← switchNextThread emu
+      pure (steps.foldl (init := 0) fun total count => total + count)
+    catch error =>
+      restore emu before
+      throw error
 
 def runUntil (emu : Emu) (address : Nat) (fuel : Nat := 100000) : IO Nat := do
   let rec loop (remaining : Nat) (total : Nat) : IO Nat :=

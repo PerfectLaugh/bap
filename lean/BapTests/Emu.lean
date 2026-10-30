@@ -259,6 +259,32 @@ private def testThreads : IO Unit := do
     ((ByteArray.mk #[11, 0, 0, 0]) == (← Bap.Emu.read emu 0x1000 4))
   let third ← Bap.Emu.spawnThread emu 0 7
   assertEqual "Emu checkpoint preserves next thread ID" 3 third
+  let parallelCode := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++ (← LLVM.assemble "riscv64" "jal 0")
+  let parallelEmu ← Bap.Emu.riscv64 parallelCode 0 0
+  Bap.Emu.setReg parallelEmu output (.bits (BitVec.ofNat 64 0))
+  let parallelSecond ← Bap.Emu.spawnThread parallelEmu 0 10
+  let parallelSteps ← Bap.Emu.runPreemptiveParallel parallelEmu 1
+  assertEqual "Emu parallel scheduler executes both threads" 2 parallelSteps
+  assertBits "Emu parallel scheduler preserves first thread" (BitVec.ofNat 64 1)
+    (.ok (← Bap.Emu.threadReg parallelEmu 1 output))
+  assertBits "Emu parallel scheduler preserves second thread" (BitVec.ofNat 64 11)
+    (.ok (← Bap.Emu.threadReg parallelEmu parallelSecond output))
+  let parallelMemoryCode := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
+    (← LLVM.assemble "riscv64" "sw a0, 0(a1)")
+  let parallelMemoryEmu ← Bap.Emu.riscv64 parallelMemoryCode 0 0
+  Bap.Emu.map parallelMemoryEmu ⟨0x1000, ByteArray.mk (List.replicate 8 0).toArray, ⟨true, true, false⟩⟩
+  Bap.Emu.setReg parallelMemoryEmu output (.bits (BitVec.ofNat 64 0))
+  Bap.Emu.setReg parallelMemoryEmu pointer (.bits (BitVec.ofNat 64 0x1000))
+  let parallelMemorySecond ← Bap.Emu.spawnThread parallelMemoryEmu 0 10
+  Bap.Emu.setThreadReg parallelMemoryEmu parallelMemorySecond pointer (.bits (BitVec.ofNat 64 0x1004))
+  let parallelMemorySteps ← Bap.Emu.runPreemptiveParallel parallelMemoryEmu 2
+  assertEqual "Emu parallel scheduler counts memory workers" 4 parallelMemorySteps
+  assertTrue "Emu parallel scheduler joins first memory output"
+    ((ByteArray.mk #[1, 0, 0, 0]) == (← Bap.Emu.read parallelMemoryEmu 0x1000 4))
+  assertTrue "Emu parallel scheduler joins second memory output"
+    ((ByteArray.mk #[11, 0, 0, 0]) == (← Bap.Emu.read parallelMemoryEmu 0x1004 4))
+  assertBits "Emu parallel scheduler preserves second memory worker" (BitVec.ofNat 64 11)
+    (.ok (← Bap.Emu.threadReg parallelMemoryEmu parallelMemorySecond output))
 
 set_option maxRecDepth 8000 in
 def run : IO Unit := do

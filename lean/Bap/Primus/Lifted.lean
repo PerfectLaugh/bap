@@ -64,6 +64,7 @@ structure Engine where
   rangeCacheLimit : Nat
   writeCooldown : Nat
   nativeCooldown : IO.Ref Nat
+  deferMemorySync : Bool
 
 structure Result where
   state : Bil.State
@@ -73,7 +74,7 @@ structure Result where
   deriving Repr
 
 def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimit : Nat := 1)
-    (rangeCacheLimit : Nat := 16) (writeCooldown : Nat := 0) : IO Engine := do
+    (rangeCacheLimit : Nat := 16) (writeCooldown : Nat := 0) (deferMemorySync : Bool := false) : IO Engine := do
   return {
     cache := ← IO.mkRef {}
     ranges := ← IO.mkRef {}
@@ -86,6 +87,7 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
     rangeCacheLimit := max rangeCacheLimit 1
     writeCooldown
     nativeCooldown := ← IO.mkRef 0
+    deferMemorySync
   }
 
 def stats (engine : Engine) : IO Statistics := engine.statistics.get
@@ -669,7 +671,8 @@ private def runPersistent (engine : Engine) (lowering : Lowering) (following : N
   let (next, slots, addresses, values) ←
     Jit.runWithPersistentMemoryObservedCode program slots memory observer codeObserver
   let completed := atCodeStop lowering next
-  let state := syncMemoryDelta completed (syncState completed state slots) addresses values
+  let state := if engine.deferMemorySync then syncState completed state slots
+    else syncMemoryDelta completed (syncState completed state slots) addresses values
   nativeResult lowering following next state slots
 
 def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bil.State) (pc : Nat)

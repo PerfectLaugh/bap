@@ -405,6 +405,7 @@ def materializeSnapshot (emu : Emu) (snapshot : Snapshot) : IO Snapshot := do
     }
 
 def save (emu : Emu) (path : String) : IO Unit := do
+  synchronizePersistentMemory emu
   let originalRegions ← emu.regions.get
   refreshRegions emu
   let snapshot ← snapshot emu

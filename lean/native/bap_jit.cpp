@@ -20,8 +20,78 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
+
+class CellMap {
+  struct Slot {
+    uint64_t address = 0;
+    uint8_t value = 0;
+    bool occupied = false;
+  };
+
+  std::vector<Slot> slots;
+  size_t count = 0;
+
+  static uint64_t hash(uint64_t value) {
+    return (value * 0x9e3779b97f4a7c15ULL) ^ (value >> 29);
+  }
+
+  void rehash(size_t capacity) {
+    size_t size = 16;
+    while (size < capacity)
+      size *= 2;
+    std::vector<Slot> previous = std::move(slots);
+    slots.clear();
+    slots.resize(size);
+    count = 0;
+    for (const auto &slot : previous)
+      if (slot.occupied)
+        set(slot.address, slot.value);
+  }
+
+public:
+  uint8_t get(uint64_t address) const {
+    if (slots.empty())
+      return 0;
+    size_t index = hash(address) & (slots.size() - 1);
+    while (slots[index].occupied) {
+      if (slots[index].address == address)
+        return slots[index].value;
+      index = (index + 1) & (slots.size() - 1);
+    }
+    return 0;
+  }
+
+  void set(uint64_t address, uint8_t value) {
+    if (slots.empty())
+      rehash(16);
+    if ((count + 1) * 10 >= slots.size() * 7)
+      rehash(slots.size() * 2);
+    size_t index = hash(address) & (slots.size() - 1);
+    while (slots[index].occupied) {
+      if (slots[index].address == address) {
+        slots[index].value = value;
+        return;
+      }
+      index = (index + 1) & (slots.size() - 1);
+    }
+    slots[index] = Slot{address, value, true};
+    ++count;
+  }
+
+  void reserve(size_t capacity) {
+    if (capacity * 2 > slots.size())
+      rehash(capacity * 2);
+  }
+
+  size_t size() const { return count; }
+
+  template <typename F> void forEach(F &&action) const {
+    for (const auto &slot : slots)
+      if (slot.occupied)
+        action(slot.address, slot.value);
+  }
+};
 
 struct BapCell {
   uint64_t address;
@@ -34,9 +104,10 @@ struct BapCells {
   size_t capacity;
   lean_object *observer;
   lean_object *error;
-  std::unordered_map<uint64_t, uint8_t> *table;
-  std::unordered_map<uint64_t, uint8_t> *changes;
+  CellMap *table;
+  CellMap *changes;
   lean_object *codeObserver;
+  std::mutex *memoryMutex;
 };
 
 extern "C" void bap_jit_memory_notify(BapCells *cells, uint8_t write,
@@ -79,8 +150,8 @@ extern "C" uint8_t bap_jit_memory_load(BapCells *cells, uint64_t address) {
   if (cells->error != nullptr)
     return 0;
   if (cells->table != nullptr) {
-    auto found = cells->table->find(address);
-    return found == cells->table->end() ? 0 : found->second;
+    std::lock_guard<std::mutex> lock(*cells->memoryMutex);
+    return cells->table->get(address);
   }
   for (size_t index = 0; index != cells->size; ++index)
     if (cells->items[index].address == address)
@@ -93,9 +164,10 @@ extern "C" void bap_jit_memory_store(BapCells *cells, uint64_t address,
   if (cells->error != nullptr)
     return;
   if (cells->table != nullptr) {
-    (*cells->table)[address] = value;
+    std::lock_guard<std::mutex> lock(*cells->memoryMutex);
+    cells->table->set(address, value);
     if (cells->changes != nullptr)
-      (*cells->changes)[address] = value;
+      cells->changes->set(address, value);
     return;
   }
   for (size_t index = 0; index != cells->size; ++index) {
@@ -613,7 +685,7 @@ extern "C" lean_obj_res bap_jit_run(lean_obj_arg programObject,
     std::vector<uint64_t> state(size);
     for (size_t index = 0; index != size; ++index)
       state[index] = lean_unbox_uint64(lean_array_get_core(stateObject, index));
-    BapCells memory{nullptr, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr};
+    BapCells memory{nullptr, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     uint64_t next = program->function(state.data(), &memory);
     lean_obj_res resultState = lean_alloc_array(size, size);
     for (size_t index = 0; index != size; ++index)
@@ -657,7 +729,7 @@ extern "C" lean_obj_res bap_jit_run_memory_code(lean_obj_arg programObject,
         ? nullptr : lean_ctor_get(observerObject, 0);
     lean_object *codeObserver = lean_is_scalar(codeObserverObject)
         ? nullptr : lean_ctor_get(codeObserverObject, 0);
-    BapCells memory{cells.data(), addressCount, cells.capacity(), observer, nullptr, nullptr, nullptr, codeObserver};
+    BapCells memory{cells.data(), addressCount, cells.capacity(), observer, nullptr, nullptr, nullptr, codeObserver, nullptr};
     uint64_t next = program->function(state.data(), &memory);
     if (memory.error != nullptr)
       return lean_io_result_mk_error(memory.error);
@@ -700,7 +772,8 @@ extern "C" lean_obj_res bap_jit_run_memory(lean_obj_arg programObject,
 
 namespace {
 struct PersistentMemory {
-  std::unordered_map<uint64_t, uint8_t> cells;
+  CellMap cells;
+  std::mutex mutex;
 };
 
 void finalizeMemory(void *data) { delete static_cast<PersistentMemory *>(data); }
@@ -724,8 +797,8 @@ extern "C" lean_obj_res bap_jit_memory_create(lean_obj_arg addressesObject,
     auto *memory = new PersistentMemory;
     memory->cells.reserve(addressCount);
     for (size_t index = 0; index != addressCount; ++index)
-      memory->cells[lean_unbox_uint64(lean_array_get_core(addressesObject, index))] =
-          static_cast<uint8_t>(lean_unbox(lean_array_get_core(valuesObject, index)));
+      memory->cells.set(lean_unbox_uint64(lean_array_get_core(addressesObject, index)),
+                        static_cast<uint8_t>(lean_unbox(lean_array_get_core(valuesObject, index))));
     return lean_io_result_mk_ok(lean_alloc_external(memoryClass(), memory));
   } catch (const std::exception &error) {
     return ioError(std::string("JIT memory creation failed: ") + error.what());
@@ -741,9 +814,10 @@ extern "C" lean_obj_res bap_jit_memory_write(lean_obj_arg memoryObject,
     const size_t valueCount = lean_array_size(valuesObject);
     if (addressCount != valueCount)
       return ioError("JIT memory addresses and values have different lengths");
+    std::lock_guard<std::mutex> lock(persistent->mutex);
     for (size_t index = 0; index != addressCount; ++index)
-      persistent->cells[lean_unbox_uint64(lean_array_get_core(addressesObject, index))] =
-          static_cast<uint8_t>(lean_unbox(lean_array_get_core(valuesObject, index)));
+      persistent->cells.set(lean_unbox_uint64(lean_array_get_core(addressesObject, index)),
+                            static_cast<uint8_t>(lean_unbox(lean_array_get_core(valuesObject, index))));
     return lean_io_result_mk_ok(lean_box(0));
   } catch (const std::exception &error) {
     return ioError(std::string("JIT persistent memory write failed: ") + error.what());
@@ -767,8 +841,8 @@ extern "C" lean_obj_res bap_jit_run_memory_object_code(
         ? nullptr : lean_ctor_get(observerObject, 0);
     lean_object *codeObserver = lean_is_scalar(codeObserverObject)
         ? nullptr : lean_ctor_get(codeObserverObject, 0);
-    std::unordered_map<uint64_t, uint8_t> changes;
-    BapCells memory{nullptr, 0, 0, observer, nullptr, &persistent->cells, &changes, codeObserver};
+    CellMap changes;
+    BapCells memory{nullptr, 0, 0, observer, nullptr, &persistent->cells, &changes, codeObserver, &persistent->mutex};
     uint64_t next = program->function(state.data(), &memory);
     if (memory.error != nullptr)
       return lean_io_result_mk_error(memory.error);
@@ -778,11 +852,11 @@ extern "C" lean_obj_res bap_jit_run_memory_object_code(
     lean_obj_res resultAddresses = lean_alloc_array(changes.size(), changes.size());
     lean_obj_res resultValues = lean_alloc_array(changes.size(), changes.size());
     size_t index = 0;
-    for (const auto &change : changes) {
-      lean_array_set_core(resultAddresses, index, lean_box_uint64(change.first));
-      lean_array_set_core(resultValues, index, lean_box(change.second));
+    changes.forEach([&](uint64_t address, uint8_t value) {
+      lean_array_set_core(resultAddresses, index, lean_box_uint64(address));
+      lean_array_set_core(resultValues, index, lean_box(value));
       ++index;
-    }
+    });
     lean_obj_res memoryResult = lean_alloc_ctor(0, 2, 0);
     lean_ctor_set(memoryResult, 0, resultAddresses);
     lean_ctor_set(memoryResult, 1, resultValues);
@@ -807,21 +881,30 @@ extern "C" lean_obj_res bap_jit_run_memory_object(
 
 extern "C" lean_obj_res bap_jit_memory_dump(lean_obj_arg memoryObject, lean_obj_arg) {
   auto *memory = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
+  std::lock_guard<std::mutex> lock(memory->mutex);
   lean_obj_res addresses = lean_alloc_array(memory->cells.size(), memory->cells.size());
   lean_obj_res values = lean_alloc_array(memory->cells.size(), memory->cells.size());
   size_t index = 0;
-  for (const auto &cell : memory->cells) {
-    lean_array_set_core(addresses, index, lean_box_uint64(cell.first));
-    lean_array_set_core(values, index, lean_box(cell.second));
+  memory->cells.forEach([&](uint64_t address, uint8_t value) {
+    lean_array_set_core(addresses, index, lean_box_uint64(address));
+    lean_array_set_core(values, index, lean_box(value));
     ++index;
-  }
+  });
   lean_obj_res result = lean_alloc_ctor(0, 2, 0);
   lean_ctor_set(result, 0, addresses);
   lean_ctor_set(result, 1, values);
   return lean_io_result_mk_ok(result);
 }
 
+extern "C" lean_obj_res bap_jit_memory_read(lean_obj_arg memoryObject, uint64_t address, lean_obj_arg) {
+  auto *memory = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
+  std::lock_guard<std::mutex> lock(memory->mutex);
+  uint8_t value = memory->cells.get(address);
+  return lean_io_result_mk_ok(lean_uint64_to_nat(value));
+}
+
 extern "C" lean_obj_res bap_jit_memory_size(lean_obj_arg memoryObject, lean_obj_arg) {
   auto *memory = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
+  std::lock_guard<std::mutex> lock(memory->mutex);
   return lean_io_result_mk_ok(lean_uint64_to_nat(memory->cells.size()));
 }
