@@ -60,13 +60,18 @@ private structure CachedBlock where
   coverage : List (Nat × Nat) := []
   sources : List (Nat × ByteArray) := []
 
-private abbrev EvictionQueue := IO.Ref (List Nat × List Nat)
+private structure EvictionKey where
+  executions : Nat
+  address : Nat
+  deriving BEq, Ord
+
+private abbrev EvictionIndex := IO.Ref (Std.TreeMap EvictionKey Unit)
 
 structure Engine where
   cache : IO.Ref (Std.HashMap Nat CachedBlock)
   ranges : IO.Ref (Std.HashMap Nat CachedBlock)
-  cacheQueue : EvictionQueue
-  rangeQueue : EvictionQueue
+  cacheIndex : EvictionIndex
+  rangeIndex : EvictionIndex
   cacheVersions : IO.Ref (Std.HashMap Nat (List CachedBlock))
   rangeVersions : IO.Ref (Std.HashMap Nat (List CachedBlock))
   statistics : IO.Ref Statistics
@@ -96,8 +101,8 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimi
   return {
     cache := ← IO.mkRef {}
     ranges := ← IO.mkRef {}
-    cacheQueue := ← IO.mkRef ([], [])
-    rangeQueue := ← IO.mkRef ([], [])
+    cacheIndex := ← IO.mkRef {}
+    rangeIndex := ← IO.mkRef {}
     cacheVersions := ← IO.mkRef {}
     rangeVersions := ← IO.mkRef {}
     statistics := ← IO.mkRef {}
@@ -145,8 +150,8 @@ private def forgetVersions (engine : Engine) (first last : Nat) : IO Unit := do
 def clearCache (engine : Engine) : IO Unit := do
   engine.cache.set {}
   engine.ranges.set {}
-  engine.cacheQueue.set ([], [])
-  engine.rangeQueue.set ([], [])
+  engine.cacheIndex.set {}
+  engine.rangeIndex.set {}
   engine.cacheVersions.set {}
   engine.rangeVersions.set {}
   engine.nativeLive.set 0
@@ -612,37 +617,31 @@ private def compilePlan (engine : Engine) (block : Block) : IO Plan := do
         { stats with nativeCompilations := stats.nativeCompilations + 1, compileMs := stats.compileMs + elapsed }
       pure (.native lowering program block.program)
 
-private def enqueueEviction (queue : EvictionQueue) (address : Nat) : IO Unit :=
-  queue.modify fun (front, back) => (front, address :: back)
+private def indexEviction (index : EvictionIndex) (entry : CachedBlock) : IO Unit :=
+  index.modify (·.insert ⟨entry.executions, entry.address⟩ ())
 
-private def dequeueEviction (queue : EvictionQueue) : IO (Option Nat) := do
-  let (front, back) ← queue.get
-  match front with
-  | address :: rest =>
-    queue.set (rest, back)
-    pure (some address)
-  | [] =>
-    match back.reverse with
-    | [] => pure none
-    | address :: rest =>
-      queue.set (rest, [])
-      pure (some address)
+private def unindexEviction (index : EvictionIndex) (address executions : Nat) : IO Unit :=
+  index.modify (·.erase ⟨executions, address⟩)
 
-private partial def evictClock (engine : Engine)
-    (versions : IO.Ref (Std.HashMap Nat (List CachedBlock))) (queue : EvictionQueue)
-    (entries : Std.HashMap Nat CachedBlock) (skips : Nat) : IO (Std.HashMap Nat CachedBlock) := do
-  match ← dequeueEviction queue with
+private def reindexEviction (index : EvictionIndex) (previous current : CachedBlock) : IO Unit := do
+  unindexEviction index previous.address previous.executions
+  indexEviction index current
+
+private partial def evictColdest (engine : Engine)
+    (versions : IO.Ref (Std.HashMap Nat (List CachedBlock))) (index : EvictionIndex)
+    (entries : Std.HashMap Nat CachedBlock) : IO (Std.HashMap Nat CachedBlock) := do
+  let ordered ← index.get
+  match ordered.minEntry? with
   | none => pure entries
-  | some address =>
-    match entries.get? address with
-    | none => evictClock engine versions queue entries skips
+  | some (key, _) =>
+    index.set (ordered.erase key)
+    match entries.get? key.address with
     | some entry =>
-      if skips > 0 && entry.executions > 1 then
-        enqueueEviction queue address
-        evictClock engine versions queue entries (skips - 1)
-      else
+      if entry.executions = key.executions then
         rememberVersion engine versions entry
-        pure (entries.erase address)
+        pure (entries.erase key.address)
+      else evictColdest engine versions index entries
+    | none => evictColdest engine versions index entries
 
 private def restoreBlockVersion (engine : Engine) (address : Nat) (code : ByteArray) :
     IO (Option CachedBlock) := do
@@ -658,14 +657,16 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
     match restored with
     | some entry =>
       engine.statistics.modify fun stats => { stats with versionHits := stats.versionHits + 1 }
-      enqueueEviction engine.cacheQueue address
+      indexEviction engine.cacheIndex entry
       engine.cache.set (entries.insert address entry)
       return entry
     | none =>
-      entries.get? address |>.forM (rememberVersion engine engine.cacheVersions)
+      entries.get? address |>.forM fun previous => do
+        unindexEviction engine.cacheIndex previous.address previous.executions
+        rememberVersion engine engine.cacheVersions previous
       let entries ← if entries.size ≥ engine.cacheLimit then do
         engine.statistics.modify fun stats => { stats with evictions := stats.evictions + 1 }
-        evictClock engine engine.cacheVersions engine.cacheQueue entries entries.size
+        evictColdest engine engine.cacheVersions engine.cacheIndex entries
       else pure entries
       engine.statistics.modify fun stats => { stats with lifts := stats.lifts + 1 }
       let block ← lift address code
@@ -676,7 +677,7 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
       let entry : CachedBlock := {
         address, code, next := block.next, firstNext := block.next, last := address, executions := 1, plan
       }
-      enqueueEviction engine.cacheQueue address
+      indexEviction engine.cacheIndex entry
       engine.cache.set (entries.insert address entry)
       return entry
   match entries.get? address with
@@ -686,6 +687,7 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
       match entry.plan with
       | .native .. =>
         let updated := { entry with executions := entry.executions + 1 }
+        reindexEviction engine.cacheIndex entry updated
         engine.cache.set (entries.insert address updated)
         return updated
       | .interpreted program =>
@@ -694,6 +696,7 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
         let plan ← if shouldCompile then compilePlan engine ⟨entry.address, entry.next, program⟩
           else pure entry.plan
         let updated := { entry with executions, plan }
+        reindexEviction engine.cacheIndex entry updated
         engine.cache.set (entries.insert address updated)
         return updated
     else
@@ -728,6 +731,7 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
   | some entry =>
     engine.statistics.modify fun stats => { stats with cacheHits := stats.cacheHits + 1 }
     let updated := { entry with executions := entry.executions + 1 }
+    reindexEviction engine.rangeIndex entry updated
     engine.ranges.set (ranges.insert address updated)
     return updated
   | none => do
@@ -736,7 +740,7 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
     match restored with
     | some entry =>
       let updated := { entry with executions := entry.executions + 1 }
-      enqueueEviction engine.rangeQueue address
+      indexEviction engine.rangeIndex updated
       engine.ranges.set (ranges.insert address updated)
       return updated
     | none => do
@@ -782,10 +786,11 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
               }
               let ranges ← if ranges.size ≥ engine.rangeCacheLimit then do
                 engine.statistics.modify fun stats => { stats with evictions := stats.evictions + 1 }
-                evictClock engine engine.rangeVersions engine.rangeQueue ranges ranges.size
+                evictColdest engine engine.rangeVersions engine.rangeIndex ranges
               else pure ranges
-              enqueueEviction engine.rangeQueue address
+              indexEviction engine.rangeIndex entry
               engine.ranges.set (ranges.insert address entry)
+              unindexEviction engine.cacheIndex first.address first.executions
               engine.cache.modify (·.erase address)
               return entry
 
