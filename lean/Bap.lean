@@ -92,3 +92,4 @@ import Bap.Symbolic.Memory
 import Bap.Symbolic.Executor
 import Bap.FFI.Z3
 import Bap.LLVM
+import Bap.Proofs
