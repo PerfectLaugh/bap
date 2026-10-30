@@ -56,6 +56,7 @@ import Bap.Primus.Semantics
 import Bap.Primus.Scheduler
 import Bap.Primus.Checkpoint
 import Bap.Primus.System
+import Bap.Emu.Semantics
 import Bap.Emu
 import Bap.Emu.Jni
 import Bap.Emu.Checkpoint

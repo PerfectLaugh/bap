@@ -6,6 +6,7 @@ import Bap.Target.MIPS
 import Bap.Target.MIPS32
 import Bap.Primus.Lifted
 import Bap.Primus.Memory
+import Bap.Emu.Semantics
 import Std.Sync.Mutex
 
 namespace Bap.Emu
@@ -243,7 +244,7 @@ private def captureThreads (emu : Emu) : IO (List ThreadContext) := do
   let processes ← emu.processMemory.get
   let current ← emu.currentThreadRef.get
   pure (threads.map fun thread =>
-    if processes.contains thread.id || processes.contains current then thread else
+    if !shouldShareMemory processes current thread.id then thread else
       match memory with
       | some memory => { thread with state := { env := Bil.bind thread.state.env emu.config.memory memory } }
       | none => thread)
@@ -345,7 +346,7 @@ def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
     let current ← emu.state.get
     let processes ← emu.processMemory.get
     let currentId ← thread emu
-    let env := if processes.contains id || processes.contains currentId then context.state.env else
+    let env := if !shouldShareMemory processes currentId id then context.state.env else
       match Bil.lookup current.env emu.config.memory with
       | .ok memory => Bil.bind context.state.env emu.config.memory memory
       | .error _ => context.state.env
@@ -1297,7 +1298,7 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
       let control ← emu.threadControl.get
       let merged ← (contexts.mapM fun context => do
         match workers.find? fun worker => worker.1.id = context.id with
-        | none => pure { context with stopped := (control.get? context.id).getD context.stopped }
+        | none => pure { context with stopped := controlledStopped control context.id context.stopped }
         | some (_, worker) =>
           let state ← worker.state.get
           let stopped ← worker.stopped.get
@@ -1305,7 +1306,7 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
             context with
             state
             pc := ← worker.pc.get
-            stopped := (control.get? context.id).getD stopped
+            stopped := controlledStopped control context.id stopped
             pending := ← worker.pendingRef.get
           })
       emu.threadsRef.set merged
