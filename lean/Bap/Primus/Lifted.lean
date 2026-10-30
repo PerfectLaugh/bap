@@ -471,20 +471,16 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
   | some entry =>
     if entry.code == code then do
       engine.statistics.modify fun stats => { stats with cacheHits := stats.cacheHits + 1 }
-      let executions := entry.executions + 1
-      let shouldCompile := cooldown = 0 && executions ≥ engine.hotThreshold &&
-        match entry.plan with
-        | .interpreted _ => true
-        | .native _ _ _ => false
-      let plan ← if shouldCompile then
-        match entry.plan with
-        | .interpreted program => compilePlan engine ⟨entry.address, entry.next, program⟩
-        | .native .. => pure entry.plan
-      else
-        pure entry.plan
-      let updated := { entry with executions, plan }
-      engine.cache.set (entries.insert address updated)
-      return updated
+      match entry.plan with
+      | .native .. => return entry
+      | .interpreted program =>
+        let executions := entry.executions + 1
+        let shouldCompile := cooldown = 0 && executions ≥ engine.hotThreshold
+        let plan ← if shouldCompile then compilePlan engine ⟨entry.address, entry.next, program⟩
+          else pure entry.plan
+        let updated := { entry with executions, plan }
+        engine.cache.set (entries.insert address updated)
+        return updated
     else
       miss
   | none => miss
@@ -553,12 +549,13 @@ private def encodeState (lowering : Lowering) (env : Bil.Env) : Except String (A
       if lowering.inputs.contains var then .error error else .ok slots
 
 private def syncState (lowering : Lowering) (state : Bil.State) (slots : Array UInt64) : Bil.State :=
-  lowering.outputs.foldl (init := state) fun state output =>
+  let updates := lowering.outputs.foldr (init := []) fun output updates =>
     match widthOf output.1 with
     | some width =>
       let value := (slots.getD output.2 0).toNat
-      { env := Bil.bind state.env output.1 (.bits (BitVec.ofNat width value)) }
-    | none => state
+      (output.1, .bits (BitVec.ofNat width value)) :: updates
+    | none => updates
+  { env := Bil.bindMany state.env updates }
 
 private def memoryInput (lowering : Lowering) (state : Bil.State) :
     Except String (Array UInt64 × Array UInt8) := do
@@ -596,8 +593,15 @@ private def syncMemoryDelta (lowering : Lowering) (state : Bil.State)
       | .mem width 8, .ok (@Value.memory addressWidth memory) =>
         if h : width = addressWidth then
           let memory : Bap.Memory width := h ▸ memory
-          let updated := (addresses.zip values).foldl (init := memory) fun memory cell =>
-            Bap.Memory.writeByte memory (BitVec.ofNat width cell.1.toNat) cell.2
+          let cells := (addresses.zip values).toList.mergeSort fun left right => left.1.toNat ≤ right.1.toNat
+          let groups := cells.foldl (init := ([] : List (Nat × List UInt8))) fun groups cell =>
+            match groups with
+            | [] => [(cell.1.toNat, [cell.2])]
+            | (start, bytes) :: rest =>
+              if cell.1.toNat = start + bytes.length then (start, bytes ++ [cell.2]) :: rest
+              else (cell.1.toNat, [cell.2]) :: (start, bytes) :: rest
+          let updated := groups.foldl (init := memory) fun memory group =>
+            Bap.Memory.writeRegion memory group.1 (ByteArray.mk group.2.toArray)
           { env := Bil.bind state.env var (.memory updated) }
         else state
       | _, _ => state

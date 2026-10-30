@@ -13,6 +13,12 @@ def lookup (env : Env) (var : Bap.Var) : Except String Value :=
 def bind (env : Env) (var : Bap.Var) (value : Value) : Env :=
   (var, value) :: env.filter fun binding => binding.1 != var
 
+def bindMany (env : Env) (updates : List (Bap.Var × Value)) : Env :=
+  let latest := updates.foldl (init := []) fun current update =>
+    update :: current.filter (fun binding => binding.1 != update.1)
+  let variables := updates.map Prod.fst
+  latest ++ env.filter fun binding => !variables.contains binding.1
+
 private def expectMemory : Value → Except String (Σ width, Memory width)
   | .memory value => .ok ⟨_, value⟩
   | _ => .error "expected memory"

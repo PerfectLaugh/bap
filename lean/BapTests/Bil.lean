@@ -31,6 +31,19 @@ def run : IO Unit := do
   let rebound := bind (bind [] a (.bits (BitVec.ofNat 8 2))) a (.bits (BitVec.ofNat 8 3))
   assertEqual "BIL bind replaces older bindings" 1 rebound.length
   assertBits "BIL bind returns newest value" (BitVec.ofNat 8 3) (lookup rebound a)
+  let b := reg "b" 8
+  let updates := [
+    (a, Value.bits (BitVec.ofNat 8 4)),
+    (b, Value.bits (BitVec.ofNat 8 5)),
+    (a, Value.bits (BitVec.ofNat 8 6))
+  ]
+  let sequential := updates.foldl (init := rebound) fun env update => bind env update.1 update.2
+  let batch := bindMany rebound updates
+  assertEqual "BIL bindMany matches sequential order" (sequential.map fun binding => binding.1.name)
+    (batch.map fun binding => binding.1.name)
+  assertEqual "BIL bindMany matches sequential length" sequential.length batch.length
+  assertBits "BIL bindMany returns newest value" (BitVec.ofNat 8 6) (lookup batch a)
+  assertBits "BIL bindMany binds additional value" (BitVec.ofNat 8 5) (lookup batch b)
   let mem : Var := ⟨"mem", .mem 32 8, 0, false⟩
   let stored := Exp.store (.var mem) (int 32 0) (int 32 0xdeadbeef) .little 4
   let loaded := Exp.load stored (int 32 0) .big 4

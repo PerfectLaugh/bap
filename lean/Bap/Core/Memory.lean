@@ -1,11 +1,11 @@
 import Bap.Core.Types
 import Bap.Core.Word
-import Std.Data.HashMap
+import Std.Data.TreeMap
 
 namespace Bap
 
 structure Memory (addressWidth : Nat) where
-  pages : Std.HashMap Nat ByteArray := {}
+  pages : Std.TreeMap Nat ByteArray := {}
 
 namespace Memory
 
@@ -39,8 +39,8 @@ def writeByte (memory : Memory addressWidth) (address : BitVec addressWidth) (va
 def ofCells (cells : List (BitVec addressWidth × UInt8)) : Memory addressWidth :=
   cells.foldl (init := empty addressWidth) fun memory cell => writeByte memory cell.1 cell.2
 
-private partial def writePages (pages : Std.HashMap Nat ByteArray) (address : Nat)
-    (data : ByteArray) (offset : Nat) : Std.HashMap Nat ByteArray :=
+private partial def writePages (pages : Std.TreeMap Nat ByteArray) (address : Nat)
+    (data : ByteArray) (offset : Nat) : Std.TreeMap Nat ByteArray :=
   if offset ≥ data.size then pages else
     let absolute := address + offset
     let index := absolute / pageSize

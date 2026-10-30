@@ -246,6 +246,18 @@ def snapshot (emu : Emu) : IO Snapshot := do
     pending := ← emu.pendingRef.get
   }
 
+private def snapshotBlock (emu : Emu) : IO Snapshot := do
+  pure {
+    state := ← emu.state.get
+    pc := ← emu.pc.get
+    regions := ← emu.regions.get
+    stopped := ← emu.stopped.get
+    threads := ← emu.threadsRef.get
+    currentThread := ← emu.currentThreadRef.get
+    nextThread := ← emu.nextThreadRef.get
+    pending := ← emu.pendingRef.get
+  }
+
 def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   emu.state.set snapshot.state
   emu.pc.set snapshot.pc
@@ -942,7 +954,7 @@ def step (emu : Emu) : IO Bool := do
         emu.skipCode.set (some address)
       pure false
     else
-      let before ← snapshot emu
+      let before ← snapshotBlock emu
       let pendingBefore ← emu.pendingRef.get
       try
         let state ← emu.state.get
