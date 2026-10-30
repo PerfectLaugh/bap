@@ -677,6 +677,24 @@ extern "C" lean_obj_res bap_jit_memory_create(lean_obj_arg addressesObject,
   }
 }
 
+extern "C" lean_obj_res bap_jit_memory_write(lean_obj_arg memoryObject,
+                                               lean_obj_arg addressesObject,
+                                               lean_obj_arg valuesObject, lean_obj_arg) {
+  try {
+    auto *persistent = static_cast<PersistentMemory *>(lean_get_external_data(memoryObject));
+    const size_t addressCount = lean_array_size(addressesObject);
+    const size_t valueCount = lean_array_size(valuesObject);
+    if (addressCount != valueCount)
+      return ioError("JIT memory addresses and values have different lengths");
+    for (size_t index = 0; index != addressCount; ++index)
+      persistent->cells[lean_unbox_uint64(lean_array_get_core(addressesObject, index))] =
+          static_cast<uint8_t>(lean_unbox(lean_array_get_core(valuesObject, index)));
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception &error) {
+    return ioError(std::string("JIT persistent memory write failed: ") + error.what());
+  }
+}
+
 extern "C" lean_obj_res bap_jit_run_memory_object(
     lean_obj_arg programObject, lean_obj_arg stateObject,
     lean_obj_arg memoryObject, lean_obj_arg observerObject, lean_obj_arg) {

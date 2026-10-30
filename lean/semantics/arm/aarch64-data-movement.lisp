@@ -388,6 +388,7 @@
 (defun LDRSHXui (rt rn off) (ld-shx rt (+ rn (lshift off 1))))
 
 ;; the unscaled forms
+(defun LDTRSWi (rt rn off) (ld-sw rt (+ rn off)))
 (defun LDURSWi (rt rn off) (ld-sw rt (+ rn off)))
 (defun LDURSHXi (rt rn off) (ld-shx rt (+ rn off)))
 (defun LDURSHWi (rt rn off) (ld-shw rt (+ rn off)))

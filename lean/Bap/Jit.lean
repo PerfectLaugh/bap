@@ -50,6 +50,9 @@ opaque Memory : Type
 @[extern "bap_jit_memory_create"]
 opaque createMemory (addresses : Array UInt64) (values : Array UInt8) : IO Memory
 
+@[extern "bap_jit_memory_write"]
+opaque writeMemory (memory : Memory) (addresses : Array UInt64) (values : Array UInt8) : IO Unit
+
 @[extern "bap_jit_run_memory_object"]
 opaque runWithPersistentMemory (program : Program) (state : Array UInt64) (memory : Memory)
     (observer : Option MemoryObserver) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8)

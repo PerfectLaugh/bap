@@ -445,6 +445,9 @@ private def notifyMemory (emu : Emu) (write : Bool) (address size value : Nat) :
     recordFault emu operation (address + offset)
     throw <| IO.userError s!"Emu {repr operation} fault at {address + offset}"
   | none =>
+    if write && size > 0 && (List.range size).any (fun offset =>
+      mapped.any fun region => region.contains (address + offset) && region.protection.executable) then
+      Primus.Lifted.discardRange emu.engine address (address + size - 1)
     recordAccess emu write address size value
     if write then
       let hooks ← emu.writeHooks.get
@@ -493,6 +496,7 @@ private def writeByte (emu : Emu) (address : Nat) (value : UInt8) : IO Unit := d
     let ⟨width, memory⟩ ← cells emu state
     let updated := Bap.Memory.writeByte memory (BitVec.ofNat width address) value
     emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
+    if region.protection.executable then Primus.Lifted.discardRange emu.engine address address
     Primus.Lifted.discardMemory emu.engine
     emu.regions.set (mapped.map fun current =>
       if current.contains address then
@@ -514,14 +518,14 @@ def write (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
       let updated := (List.range data.size).foldl (init := memory) fun memory offset =>
         Bap.Memory.writeByte memory (BitVec.ofNat width (address + offset)) data[offset]!
       emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
+      if region.protection.executable then
+        Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
       Primus.Lifted.discardMemory emu.engine
       emu.regions.set (mapped.map fun current =>
         if current.contains address then
-          let updatedData := (List.range current.data.size).map fun offset =>
-            if offset ≥ address - current.address && offset < address + data.size - current.address then
-              data[offset - (address - current.address)]!
-            else current.data[offset]!
-          { current with data := ByteArray.mk updatedData.toArray }
+          let updatedData := (List.range data.size).foldl (init := current.data) fun bytes offset =>
+            bytes.set! (address - current.address + offset) data[offset]!
+          { current with data := updatedData }
         else current)
 
 def map (emu : Emu) (region : Region) : IO Unit := do
@@ -533,6 +537,8 @@ def map (emu : Emu) (region : Region) : IO Unit := do
   let updated := (List.range region.data.size).foldl (init := memory) fun memory offset =>
     Bap.Memory.writeByte memory (BitVec.ofNat width (region.address + offset)) region.data[offset]!
   emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
+  if region.protection.executable && region.data.size > 0 then
+    Primus.Lifted.discardRange emu.engine region.address (region.address + region.data.size - 1)
   Primus.Lifted.discardMemory emu.engine
   emu.regions.set (region :: mapped)
 
@@ -545,6 +551,8 @@ def overlay (emu : Emu) (region : Region) : IO Unit := do
   let updated := (List.range region.data.size).foldl (init := memory) fun memory offset =>
     Bap.Memory.writeByte memory (BitVec.ofNat width (region.address + offset)) region.data[offset]!
   emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
+  if region.protection.executable && region.data.size > 0 then
+    Primus.Lifted.discardRange emu.engine region.address (region.address + region.data.size - 1)
   Primus.Lifted.discardMemory emu.engine
   emu.regions.set (region :: mapped.filter fun current => current.address != region.address)
 

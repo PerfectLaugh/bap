@@ -53,6 +53,7 @@ structure Engine where
   cache : IO.Ref (Std.HashMap Nat CachedBlock)
   statistics : IO.Ref Statistics
   persistentMemory : IO.Ref (Option Jit.Memory)
+  persistentVariable : IO.Ref (Option Bap.Var)
   hotThreshold : Nat
   cacheLimit : Nat
 
@@ -68,6 +69,7 @@ def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) : IO Engin
     cache := ← IO.mkRef {}
     statistics := ← IO.mkRef {}
     persistentMemory := ← IO.mkRef none
+    persistentVariable := ← IO.mkRef none
     hotThreshold := max hotThreshold 1
     cacheLimit := max cacheLimit 1
   }
@@ -76,7 +78,12 @@ def stats (engine : Engine) : IO Statistics := engine.statistics.get
 
 def clearCache (engine : Engine) : IO Unit := engine.cache.set {}
 
-def discardMemory (engine : Engine) : IO Unit := engine.persistentMemory.set none
+def discardRange (engine : Engine) (first last : Nat) : IO Unit :=
+  engine.cache.modify fun entries => entries.filter fun address _ => address < first || last < address
+
+def discardMemory (engine : Engine) : IO Unit := do
+  engine.persistentMemory.set none
+  engine.persistentVariable.set none
 
 private def widthOf (var : Bap.Var) : Option Nat :=
   match var.typ with
@@ -519,14 +526,39 @@ private def recordInterpreted (engine : Engine) : IO Unit :=
   engine.statistics.modify fun stats =>
     { stats with interpretedRuns := stats.interpretedRuns + 1 }
 
+private def syncInterpretedWrites (engine : Engine) (writes : List (Nat × Nat))
+    (state : Bil.State) : IO Unit := do
+  let persistent ← engine.persistentMemory.get
+  let memoryVar ← engine.persistentVariable.get
+  match persistent, memoryVar with
+  | some memory, some var =>
+    match Bil.lookup state.env var with
+    | .ok (@Value.memory width cells) =>
+      writes.forM fun write => do
+        let addresses := (List.range write.2).map fun offset => UInt64.ofNat (write.1 + offset)
+        let values := (List.range write.2).map fun offset =>
+          Bap.Memory.readByte cells (BitVec.ofNat width (write.1 + offset))
+        Jit.writeMemory memory addresses.toArray values.toArray
+    | _ => discardMemory engine
+  | _, _ => pure ()
+
 private def runInterpreted (engine : Engine) (next pc : Nat) (program : Bil.Program)
     (state : Bil.State) (observer : Option Jit.MemoryObserver) : IO Result := do
+  let writes ← IO.mkRef []
+  let observed := some fun write address size value => do
+    observer.forM fun notify => notify write address size value
+    if write then writes.modify fun current => (address, size) :: current
   recordInterpreted engine
-  match ← Bil.runObserved observer program state with
-  | .error error => throw <| IO.userError error
-  | .ok (state, .normal) => return ⟨state, next, next, .normal⟩
-  | .ok (state, .jump target) => return ⟨state, target.toNat, target.toNat, .jump target⟩
-  | .ok (state, effect) => return ⟨state, pc, next, effect⟩
+  match ← Bil.runObserved observed program state with
+  | .error error =>
+    discardMemory engine
+    throw <| IO.userError error
+  | .ok (state, effect) => do
+    syncInterpretedWrites engine (← writes.get) state
+    match effect with
+    | .normal => return ⟨state, next, next, .normal⟩
+    | .jump target => return ⟨state, target.toNat, target.toNat, .jump target⟩
+    | _ => return ⟨state, pc, next, effect⟩
 
 private def runPersistent (engine : Engine) (lowering : Lowering) (following : Nat)
     (program : Jit.Program) (state : Bil.State) (slots : Array UInt64)
@@ -556,6 +588,7 @@ def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bi
           if addresses.size ≥ 100000 then do
             let memory ← Jit.createMemory addresses values
             engine.persistentMemory.set (some memory)
+            engine.persistentVariable.set lowering.memory
             runPersistent engine lowering entry.next program state slots memory observer
           else do
             recordNative engine

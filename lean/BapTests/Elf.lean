@@ -58,5 +58,15 @@ def run : IO Unit := do
   let host ← Elf.load "/bin/echo"
   assertEqual "host ELF filters non-LOAD headers" 3 host.segments.length
   assertEqual "host ELF zero-filled BSS" (some 0) (host.memory.readByte 0x900c)
+  match Elf.dynamicRelocations host with
+  | .error error => throw <| IO.userError error
+  | .ok relocations =>
+    assertTrue "host ELF has named dynamic references" (!relocations.references.isEmpty)
+    assertTrue "host ELF has relative dynamic relocations" (!relocations.relative.isEmpty)
+    match Elf.imports host relocations 0x700000 with
+    | .error error => throw <| IO.userError error
+    | .ok imports =>
+      assertTrue "host ELF has linked imports" (!imports.isEmpty)
+      assertEqual "host ELF import addresses are sequential" (some 0x700000) (imports.head?.map (·.address))
 
 end Bap.Tests.Elf

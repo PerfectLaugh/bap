@@ -468,6 +468,39 @@ def run : IO Unit := do
   assertEqual "hot cached block executes natively twice" 2 reusedStats.nativeRuns
   assertEqual "hot cached block hits cache three times" 3 reusedStats.cacheHits
 
+  let syncEngine ← Primus.Lifted.Engine.create
+  let syncPersistent ← Jit.createMemory #[0] #[1]
+  syncEngine.persistentMemory.set (some syncPersistent)
+  syncEngine.persistentVariable.set (some memoryVar)
+  let syncInitial : State := { env := [
+    (memoryVar, .memory (Memory.writeByte (Memory.empty 64) (BitVec.ofNat 64 0) 1))
+  ] }
+  let syncFallback : Primus.Lifted.Block := {
+    address := 0x12500
+    next := 0x12504
+    program := [
+      .move memoryVar (.store (.var memoryVar) (int 0) (.int (BitVec.ofNat 8 2)) .little 1),
+      .move y (.letIn x (int 2) (.var x))
+    ]
+  }
+  let (syncFallbackFetch, syncFallbackLift) := fixed syncFallback
+  let syncFallbackResult ← Primus.Lifted.runBlock syncEngine syncFallbackFetch syncFallbackLift syncInitial 0x12500
+  let (_, synchronizedValues) ← Jit.dumpMemory syncPersistent
+  assertEqual "interpreted write updates persistent memory in place" #[2] synchronizedValues
+  let byteResult : Var := ⟨"byteResult", .imm 8, 0, false⟩
+  let syncRead : Primus.Lifted.Block := {
+    address := 0x12504
+    next := 0x12508
+    program := [.move byteResult (.load (.var memoryVar) (int 0) .little 1)]
+  }
+  let (syncReadFetch, syncReadLift) := fixed syncRead
+  let syncResult ← Primus.Lifted.runBlock syncEngine syncReadFetch syncReadLift syncFallbackResult.state 0x12504
+  assertBits "native read observes synchronized interpreted write" (BitVec.ofNat 8 2)
+    (lookup syncResult.state.env byteResult)
+  let syncStats ← Primus.Lifted.stats syncEngine
+  assertEqual "memory synchronization uses both executors" (1, 1)
+    (syncStats.nativeRuns, syncStats.interpretedRuns)
+
   let evictEngine ← Primus.Lifted.Engine.create 1 2
   let evictFetch : Primus.Lifted.Fetch := fun _ => pure ByteArray.empty
   let evictLift : Primus.Lifted.Lift := fun address _ =>

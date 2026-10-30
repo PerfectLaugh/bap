@@ -76,6 +76,16 @@ def run : IO Unit := do
   let ldr32State ← execute ldr32 [(reg 0, .bits (BitVec.ofNat 64 0xffffffffffffffff)),
     (reg 1, .bits (BitVec.ofNat 64 0x1000)), (memVar, .memory memory)]
   assertReg "AArch64 32-bit LDR zero extension" 0 0x1234 ldr32State
+  let signedMemory ← match Memory.write (Memory.empty 64) (BitVec.ofNat 64 0x1063)
+    (BitVec.ofNat 32 0xfffffff6) .little 4 with
+    | .ok memory => pure memory
+    | .error error => throw <| IO.userError error
+  let ldtrsw ← decode 0xb8963b0c
+  assertTrue "AArch64 LDTRSW assembly" (ldtrsw.asm.startsWith "ldtrsw")
+  let ldtrswState ← execute ldtrsw [(reg 24, .bits (BitVec.ofNat 64 0x1100)),
+    (memVar, .memory signedMemory)]
+  assertReg "AArch64 LDTRSW sign extension" 12 0xfffffffffffffff6 ldtrswState
+  assertReg "AArch64 LDTRSW preserves base" 24 0x1100 ldtrswState
   let str ← decode 0xf9000420
   assertTrue "AArch64 STR assembly" (str.asm.startsWith "str x0,")
   let strState ← execute str [(reg 0, .bits (BitVec.ofNat 64 0x5678)),

@@ -471,6 +471,7 @@ def run : IO Unit := do
   Bap.Emu.setReg smcEmu (reg "X12") (.bits (BitVec.ofNat 64 0))
   let _ ← Bap.Emu.run smcEmu 2
   assertTrue "Emu guest store updates mapped code" (patched == (← Bap.Emu.read smcEmu 0 4))
+  assertEqual "Emu guest code write preserves unrelated JIT blocks" 1 (← smcEmu.engine.cache.get).size
   let _ ← Bap.Emu.run smcEmu 1
   assertEqual "Emu self-modifying test returns to entry" 0 (← Bap.Emu.pc smcEmu)
   let _ ← Bap.Emu.run smcEmu 1
