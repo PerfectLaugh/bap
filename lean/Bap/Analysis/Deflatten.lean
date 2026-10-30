@@ -11,15 +11,22 @@ structure Recovery where
 private def assigns (insn : Disasm.Insn) (var : Bap.Var) (value : Nat) : Bool :=
   insn.bil.any fun stmt =>
     match stmt with
-    | .move dst (.int immediate) => dst = var && immediate.toNat = value
+    | .move dst exp =>
+      if dst != var then false else
+        match Bil.evalExp [] exp with
+        | .ok result => (Bap.Value.asBits result).toOption.any fun result => result.2.toNat = value
+        | .error _ => false
     | _ => false
 
 private def assignmentAddresses (instructions : List Disasm.Insn) (var : Bap.Var) (cases : List StateMachine.Case) : List Nat :=
   instructions.filterMap fun insn =>
     if cases.any (fun current => assigns insn var current.value) then some insn.address else none
 
-def recover (entry : Nat) (instructions : List Disasm.Insn) (external : List Nat := []) : Recovery :=
-  let machine := StateMachine.analyze instructions
+def recover (entry : Nat) (instructions : List Disasm.Insn) (external : List Nat := [])
+    (stateVar : Option Bap.Var := none) : Recovery :=
+  let machine := match stateVar with
+    | some var => StateMachine.analyzeWithState instructions var
+    | none => StateMachine.analyze instructions
   match machine.stateVar with
   | none => { disasm := { entry, instructions } }
   | some var =>

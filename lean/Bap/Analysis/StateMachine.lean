@@ -21,7 +21,10 @@ private def directTarget (next : Disasm.Insn) : Option Nat :=
 private def assignments (insn : Disasm.Insn) : List (Bap.Var × Nat) :=
   insn.bil.filterMap fun stmt =>
     match stmt with
-    | .move var (.int value) => some (var, value.toNat)
+    | .move var exp =>
+      match Bil.evalExp [] exp with
+      | .ok value => (Bap.Value.asBits value).toOption.map fun value => (var, value.2.toNat)
+      | .error _ => none
     | _ => none
 
 private def simplerCandidates (instructions : List Disasm.Insn) : List (Bap.Var × Nat × Nat) :=
@@ -42,6 +45,15 @@ private def choose (instructions : List Disasm.Insn) : Option (Bap.Var × List C
     | some current =>
       if current.2.length < cases.length then some (var, cases) else best
     | none => some (var, cases)
+
+def analyzeWithState (instructions : List Disasm.Insn) (var : Bap.Var) : Result :=
+  let cases := (simplerCandidates instructions).filterMap fun triple =>
+    if triple.1 = var then some ⟨triple.2.1, triple.2.2⟩ else none
+  {
+    stateVar := some var
+    cases
+    complete := cases.length ≥ 2 && !instructions.any fun insn => insn.flow = .indirectJump
+  }
 
 def analyze (instructions : List Disasm.Insn) : Result :=
   match choose instructions with
