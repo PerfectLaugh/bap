@@ -612,15 +612,14 @@ private def coldestEntry (entries : Std.HashMap Nat CachedBlock) : Option (Nat �
       if entry.2.executions < best.2.executions ||
           (entry.2.executions = best.2.executions && entry.1 < best.1) then entry else best)
 
-private def evictColdest (entries : Std.HashMap Nat CachedBlock) : Std.HashMap Nat CachedBlock :=
-  match coldestEntry entries with
-  | none => entries
-  | some (address, _) => entries.erase address
-
-private def rememberColdest (engine : Engine)
+private def evictColdest (engine : Engine)
     (versions : IO.Ref (Std.HashMap Nat (List CachedBlock)))
-    (entries : Std.HashMap Nat CachedBlock) : IO Unit :=
-  coldestEntry entries |>.forM fun (_, entry) => rememberVersion engine versions entry
+    (entries : Std.HashMap Nat CachedBlock) : IO (Std.HashMap Nat CachedBlock) := do
+  match coldestEntry entries with
+  | none => pure entries
+  | some (address, entry) =>
+    rememberVersion engine versions entry
+    pure (entries.erase address)
 
 private def restoreBlockVersion (engine : Engine) (address : Nat) (code : ByteArray) :
     IO (Option CachedBlock) := do
@@ -642,8 +641,7 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
       entries.get? address |>.forM (rememberVersion engine engine.cacheVersions)
       let entries ← if entries.size ≥ engine.cacheLimit then do
         engine.statistics.modify fun stats => { stats with evictions := stats.evictions + 1 }
-        rememberColdest engine engine.cacheVersions entries
-        pure (evictColdest entries)
+        evictColdest engine engine.cacheVersions entries
       else pure entries
       engine.statistics.modify fun stats => { stats with lifts := stats.lifts + 1 }
       let block ← lift address code
@@ -758,8 +756,7 @@ private def prepareGraph (engine : Engine) (fetch : Fetch) (lift : Lift)
               }
               let ranges ← if ranges.size ≥ engine.rangeCacheLimit then do
                 engine.statistics.modify fun stats => { stats with evictions := stats.evictions + 1 }
-                rememberColdest engine engine.rangeVersions ranges
-                pure (evictColdest ranges)
+                evictColdest engine engine.rangeVersions ranges
               else pure ranges
               engine.ranges.set (ranges.insert address entry)
               engine.cache.modify (·.erase address)
