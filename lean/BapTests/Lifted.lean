@@ -227,6 +227,12 @@ def run : IO Unit := do
   assertEqual "Primus AArch64 ADD is native" 1 armStats.nativeRuns
   assertEqual "Primus AArch64 ADD does not fall back" 0 armStats.interpretedRuns
 
+  let cmpBytes ← LLVM.assemble "aarch64" "cmp x8, x9"
+  let cmpResult ← Primus.Lifted.runBlock armEngine (fun _ => pure cmpBytes) armLift
+    { env := [(reg "X8", .bits (BitVec.ofNat 64 0)), (reg "X9", .bits (BitVec.ofNat 64 0))] } 0x8004
+  assertBits "Primus AArch64 CMP sets ZF for equal operands" (BitVec.ofNat 1 1)
+    (lookup cmpResult.state.env ⟨"ZF", .imm 1, 0, false⟩)
+
   let clzBytes ← LLVM.assemble "aarch64" "clz x9, x9"
   let clzResult ← Primus.Lifted.runBlock armEngine (fun _ => pure clzBytes) armLift
     { env := [(reg "X9", .bits (BitVec.ofNat 64 1))] } 0x8004

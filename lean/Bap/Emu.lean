@@ -240,10 +240,13 @@ private def captureThreads (emu : Emu) : IO (List ThreadContext) := do
     | .ok value => some value
     | .error _ => none
   let threads ← emu.threadsRef.get
+  let processes ← emu.processMemory.get
+  let current ← emu.currentThreadRef.get
   pure (threads.map fun thread =>
-    match memory with
-    | some memory => { thread with state := { env := Bil.bind thread.state.env emu.config.memory memory } }
-    | none => thread)
+    if processes.contains thread.id || processes.contains current then thread else
+      match memory with
+      | some memory => { thread with state := { env := Bil.bind thread.state.env emu.config.memory memory } }
+      | none => thread)
 
 structure Snapshot where
   state : Bil.State
@@ -340,7 +343,10 @@ def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
   | none => throw <| IO.userError s!"unknown Emu thread {id}"
   | some context =>
     let current ← emu.state.get
-    let env := match Bil.lookup current.env emu.config.memory with
+    let processes ← emu.processMemory.get
+    let currentId ← thread emu
+    let env := if processes.contains id || processes.contains currentId then context.state.env else
+      match Bil.lookup current.env emu.config.memory with
       | .ok memory => Bil.bind context.state.env emu.config.memory memory
       | .error _ => context.state.env
     emu.state.set { env }
@@ -862,11 +868,20 @@ def forkThread (emu : Emu) (childPc : Nat) : IO ThreadId := do
     pure id
 
 def cloneProcessMemory (emu : Emu) (child : ThreadId) : IO Unit := do
-  match ← emu.engine.persistentMemory.get with
-  | none => throw <| IO.userError "cannot clone process memory before native memory exists"
-  | some parent =>
-    let childMemory ← Jit.cloneMemory parent
-    emu.processMemory.modify (·.insert child childMemory)
+  let parent ← match ← emu.engine.persistentMemory.get with
+    | some parent => pure parent
+    | none =>
+      let state ← emu.state.get
+      let ⟨_width, memory⟩ ← cells emu state
+      let cells := Bap.Memory.cells memory
+      let addresses := (cells.map fun cell => UInt64.ofNat cell.1.toNat).toArray
+      let values := (cells.map fun cell => cell.2).toArray
+      let parent ← Jit.createMemory addresses values
+      emu.engine.persistentMemory.set (some parent)
+      emu.engine.persistentVariable.set (some emu.config.memory)
+      pure parent
+  let childMemory ← Jit.cloneMemory parent
+  emu.processMemory.modify (·.insert child childMemory)
 
 def threadReg (emu : Emu) (id : ThreadId) (var : Bap.Var) : IO Bap.Value := do
   let contexts ← captureThreads emu
