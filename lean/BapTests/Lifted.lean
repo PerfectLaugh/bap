@@ -205,6 +205,17 @@ def run : IO Unit := do
   assertEqual "Primus AArch64 ADD is native" 1 armStats.nativeRuns
   assertEqual "Primus AArch64 ADD does not fall back" 0 armStats.interpretedRuns
 
+  let clzBytes ← LLVM.assemble "aarch64" "clz x9, x9"
+  let clzResult ← Primus.Lifted.runBlock armEngine (fun _ => pure clzBytes) armLift
+    { env := [(reg "X9", .bits (BitVec.ofNat 64 1))] } 0x8004
+  assertBits "Primus AArch64 CLZ accepts a shared destination and source" (BitVec.ofNat 64 63)
+    (lookup clzResult.state.env (reg "X9"))
+  let clzDistinctBytes ← LLVM.assemble "aarch64" "clz x9, x10"
+  let clzDistinct ← Primus.Lifted.runBlock armEngine (fun _ => pure clzDistinctBytes) armLift
+    { env := [(reg "X10", .bits (BitVec.ofNat 64 0x8000000000000000))] } 0x8008
+  assertBits "Primus AArch64 CLZ counts distinct operand bits" (BitVec.ofNat 64 0)
+    (lookup clzDistinct.state.env (reg "X9"))
+
   let ashr8 : Var := ⟨"ashr8", .imm 8, 0, false⟩
   let not8 : Var := ⟨"not8", .imm 8, 0, false⟩
   let ite8 : Var := ⟨"ite8", .imm 8, 0, false⟩

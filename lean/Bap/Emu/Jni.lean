@@ -86,6 +86,7 @@ structure Model where
   classNames : IO.Ref (Std.HashMap Identity String)
   objectClasses : IO.Ref (Std.HashMap Identity Identity)
   arrays : IO.Ref (Std.HashMap Identity (List Answer))
+  arrayAddresses : IO.Ref (Std.HashMap Identity Nat)
   methods : IO.Ref (Std.HashMap Identity MethodInfo)
   methodIds : IO.Ref (Std.HashMap BindingKey Identity)
   fields : IO.Ref (Std.HashMap Identity FieldInfo)
@@ -97,10 +98,12 @@ structure Model where
   nextDynamic : IO.Ref Nat
   readString : Nat → IO String
   allocString : String → IO Nat
+  allocBytes : ByteArray → IO Nat
   classOf : Nat → Option String
   default : Call → (Nat → IO (Option String)) → IO Answer
   log : Call → String → Nat → IO Unit
   version : Nat := 0x10006
+  exception : IO.Ref (Option Identity)
   env : IO.Ref Nat
   vm : IO.Ref Nat
 
@@ -204,6 +207,7 @@ private def registerClass (model : Model) (decl : ClassDecl) : IO Unit := do
     model.fieldIds.modify (·.insert ⟨owner, field.name, field.signature, true⟩ id)
 
 def create (readString : Nat → IO String) (allocString : String → IO Nat)
+    (allocBytes : ByteArray → IO Nat)
     (default : Call → (Nat → IO (Option String)) → IO Answer)
     (log : Call → String → Nat → IO Unit := fun _ _ _ => pure ())
     (classes : List ClassDecl := []) (objects : List ObjectDecl := [])
@@ -218,6 +222,7 @@ def create (readString : Nat → IO String) (allocString : String → IO Nat)
     classNames := ← IO.mkRef {}
     objectClasses := ← IO.mkRef {}
     arrays := ← IO.mkRef {}
+    arrayAddresses := ← IO.mkRef {}
     methods := ← IO.mkRef {}
     methodIds := ← IO.mkRef {}
     fields := ← IO.mkRef {}
@@ -227,7 +232,8 @@ def create (readString : Nat → IO String) (allocString : String → IO Nat)
     dynamicIds := ← IO.mkRef {}
     dynamicNames := ← IO.mkRef {}
     nextDynamic := ← IO.mkRef 0x10000
-    readString, allocString, classOf, default, log, version
+    readString, allocString, allocBytes, classOf, default, log, version
+    exception := ← IO.mkRef none
     env := ← IO.mkRef 0
     vm := ← IO.mkRef 0
   }
@@ -302,6 +308,28 @@ private def stringAddress (model : Model) (id : Identity) : IO Nat := do
       model.strings.modify (·.insert id { info with address := some address })
       pure address
 
+private def newArray (model : Model) (className : String) (length : Nat) : IO Nat := do
+  if length > 1000000 then throw <| IO.userError "unreasonable JNI array length"
+  let id ← freshIdentity model
+  model.objectClasses.modify (·.insert id (← classIdentity model className))
+  model.arrays.modify (·.insert id (List.replicate length (.value 0)))
+  internIdentity model .local id
+
+private def arrayAddress (model : Model) (id : Identity) (width : Nat) : IO Nat := do
+  match (← model.arrayAddresses.get).get? id with
+  | some address => pure address
+  | none =>
+    match (← model.arrays.get).get? id with
+    | none => pure 0
+    | some elements =>
+      let bytes := elements.flatMap fun element =>
+        match element with
+        | .value value => (List.range width).map fun index => UInt8.ofNat (value / 256 ^ index % 256)
+        | _ => []
+      let address ← model.allocBytes (ByteArray.mk bytes.toArray)
+      model.arrayAddresses.modify (·.insert id address)
+      pure address
+
 private def findBinding (model : Model) (call : Call) (static : Bool) (field : Bool) : IO Nat := do
   let owner ← resolve model (arg call 1)
   let name ← model.readString (arg call 2)
@@ -319,6 +347,20 @@ private def compute (model : Model) (call : Call) : IO (Nat × String) := do
   | 6 =>
     let name ← model.readString (arg call 1)
     pure (← classIdentity model name >>= internIdentity model .local, name)
+  | 13 =>
+    model.exception.set (some (← resolve model (arg call 1)))
+    pure (0, "throw")
+  | 14 =>
+    model.exception.set (some (← resolve model (arg call 1)))
+    pure (0, "throw-new")
+  | 15 =>
+    match ← model.exception.get with
+    | some id => pure (← internIdentity model .local id, "exception")
+    | none => pure (0, "")
+  | 16 => pure (0, "describe")
+  | 17 =>
+    model.exception.set none
+    pure (0, "clear")
   | 21 => pure (← resolve model (arg call 1) >>= internIdentity model .global, "")
   | 22 | 23 | 166 | 170 | 227 => pure (0, "")
   | 24 =>
@@ -368,8 +410,33 @@ private def compute (model : Model) (call : Call) : IO (Nat × String) := do
       | some element => pure (← answer model element, "")
       | none => pure (← fallback (), "")
     | none => pure (← fallback (), "")
+  | 174 =>
+    let id ← resolve model (arg call 1)
+    match (← model.arrays.get).get? id with
+    | some elements =>
+      if arg call 2 < elements.length then
+        model.arrays.modify (·.insert id (elements.set (arg call 2) (.handle (arg call 3))))
+        pure (0, "")
+      else pure (← fallback (), "")
+    | none => pure (← fallback (), "")
+  | 175 => pure (← newArray model "[Z" (arg call 1), "")
+  | 176 => pure (← newArray model "[B" (arg call 1), "")
+  | 177 => pure (← newArray model "[C" (arg call 1), "")
+  | 178 => pure (← newArray model "[S" (arg call 1), "")
+  | 179 => pure (← newArray model "[I" (arg call 1), "")
+  | 180 => pure (← newArray model "[J" (arg call 1), "")
+  | 181 => pure (← newArray model "[F" (arg call 1), "")
+  | 182 => pure (← newArray model "[D" (arg call 1), "")
+  | 183 | 184 => pure (← arrayAddress model (← resolve model (arg call 1)) 1, "")
+  | 185 | 186 => pure (← arrayAddress model (← resolve model (arg call 1)) 2, "")
+  | 187 | 188 | 189 => pure (← arrayAddress model (← resolve model (arg call 1)) 4, "")
+  | 190 => pure (← arrayAddress model (← resolve model (arg call 1)) 8, "")
   | 219 => pure (0, s!"vm-out={arg call 1}")
   | 226 => pure (← resolve model (arg call 1) >>= internIdentity model .weak, "")
+  | 228 =>
+    match ← model.exception.get with
+    | some _ => pure (1, "exception-pending")
+    | none => pure (0, "")
   | _ =>
     if call.index ≥ 34 && call.index ≤ 63 then pure (← callMethod model call false (arg call 2), "")
     else if call.index ≥ 64 && call.index ≤ 93 then pure (← callMethod model call false (arg call 3), "")

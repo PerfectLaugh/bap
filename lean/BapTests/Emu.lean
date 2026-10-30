@@ -44,6 +44,14 @@ private def testDiff : IO Unit := do
   assertEqual "Emu checkpoint diff matches snapshot" [(0, 2), (4, 1)] (← Bap.Emu.changedSince emu "native/build/emu-diff.sexp")
   Bap.Emu.restore emu saved
   assertEqual "Emu restored snapshot has no diff" [] (← Bap.Emu.diff emu saved)
+  let persistent ← Jit.createMemory #[0] #[40]
+  emu.engine.persistentMemory.set (some persistent)
+  emu.engine.persistentVariable.set (some emu.config.memory)
+  Bap.Emu.write emu 0 (ByteArray.mk #[41])
+  assertEqual "Emu script write updates persistent memory in place" true
+    ((← emu.engine.persistentMemory.get).isSome)
+  let (_, synchronizedValues) ← Jit.dumpMemory persistent
+  assertEqual "Emu persistent memory contains script-written byte" #[41] synchronizedValues
 
 private def testLiveProject : IO Unit := do
   let original := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++

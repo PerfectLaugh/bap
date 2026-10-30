@@ -84,7 +84,7 @@ private def primitiveNames : List String :=
     "word-width", "set", "set$", "set-symbol-value", "alias-base-register", "symbol", "empty",
     "load-bits", "load-byte", "load-hword", "load-word", "store-word", "store-byte", "exec-addr", "intrinsic",
     "get-program-counter", "get-current-program-counter", "get-next-program-counter",
-    "is-zero", "non-zero", "neg", "s<", "s<=", "s>", "s>=", "replicate"]
+    "is-zero", "non-zero", "neg", "s<", "s<=", "s>", "s>=", "replicate", "clz"]
 
 private def lookup (name : String) (locals : Locals) (globals : Globals) : Except String Value :=
   let primitiveName := if name.startsWith "core:" then (name.drop 5).toString else name
@@ -192,6 +192,18 @@ private def unaryNot (context : Context) (args : List Value) : Except String Val
     let (width, value) ← expectBil context value
     .ok (.bil width (.un .not value))
   | _ => .error "not expects one argument"
+
+private def leadingZeros (context : Context) (args : List Value) : Except String Value := do
+  match args with
+  | [value] =>
+    let (width, value) ← expectBil context value
+    let rec leading (index : Nat) : Bil.Exp :=
+      if index ≥ width then .int (BitVec.ofNat width width)
+      else
+        let bit := width - 1 - index
+        .ite (.extract bit bit value) (.int (BitVec.ofNat width index)) (leading (index + 1))
+    .ok (.bil width (leading 0))
+  | _ => .error "clz expects one argument"
 
 private def shift (context : Context) (op : Bil.BinOp) (args : List Value) : Except String Value := do
   match args with
@@ -302,6 +314,7 @@ private def applyPrimitive (context : Context) (name : String) (args : List Valu
   | "s>" => valueOnly (← compare context .sgt args)
   | "s>=" => valueOnly (← compare context .sge args)
   | "not" | "lnot" => valueOnly (← unaryNot context args)
+  | "clz" => valueOnly (← leadingZeros context args)
   | "logand" | "bitand" => valueOnly (← binary context .and args)
   | "logor" | "bitor" => valueOnly (← binary context .or args)
   | "logxor" | "bitxor" => valueOnly (← binary context .xor args)
@@ -556,6 +569,7 @@ private def applyPrimitiveIndex (context : Context) (operation : Nat) (args : Li
   | 59 => valueOnly (← compare context .sle args)
   | 60 => valueOnly (← compare context .sgt args)
   | 61 => valueOnly (← compare context .sge args)
+  | 63 => valueOnly (← leadingZeros context args)
   | _ => throw s!"unsupported compiled Primus primitive {operation}"
 
 private def freezeBil (state : State) (width : Nat) (expression : Bil.Exp) : Value × State :=
@@ -724,13 +738,7 @@ mutual
           .ok (.bil (width * count) repeated, state)
       | .list [.atom "clz", value] =>
         let (value, state) ← eval fuel locals context state value
-        let (width, value) ← expectBil context value
-        let rec leading (index : Nat) : Bil.Exp :=
-          if index ≥ width then .int (BitVec.ofNat width width)
-          else
-            let bit := width - 1 - index
-            .ite (.extract bit bit value) (.int (BitVec.ofNat width index)) (leading (index + 1))
-        .ok (.bil width (leading 0), state)
+        .ok (← leadingZeros context [value], state)
       | .list (.atom "if" :: [test, yes, no]) =>
         evalConditional fuel locals context state test [yes] [no]
       | .list (.atom "when" :: test :: body) =>
@@ -866,7 +874,8 @@ end
 
 private def primitiveIndex (name : String) : Option Nat := primitiveNames.findIdx? (· == name)
 
-private def compilablePrimitive (operation : Nat) : Bool := operation ≤ 12 || (20 ≤ operation && operation ≤ 61)
+private def compilablePrimitive (operation : Nat) : Bool :=
+  operation ≤ 12 || (20 ≤ operation && operation ≤ 61) || operation = 63
 
 private def quotedValue : Sexp → Value
   | .atom atom => atomValue atom
@@ -886,6 +895,9 @@ mutual
           | none => (globals.findIdx? fun binding => binding.1 == atom).map .global
       | .list [] => some (.value (.list []))
       | .list [.atom "quote", value] => some (.value (quotedValue value))
+      | .list [.atom "clz", value] => do
+        let value ← compileExp globals locals fuel value
+        some (.primitive 63 [value])
       | .list [.atom "if", test, yes, no] => do
         let test ← compileExp globals locals fuel test
         let yes ← compileExp globals locals fuel yes

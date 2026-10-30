@@ -472,16 +472,16 @@ private def readRelrRelocations (image : Image) (headers : List ProgramHeader) (
       word image.data image.endian header.is64 (offset + index * width)
     let rec decode (entries : List Nat) (base : Nat) (result : List DynamicRelocation) : List DynamicRelocation :=
       match entries with
-      | [] => result
+      | [] => result.reverse
       | entry :: rest =>
         if entry % 2 = 0 then
-          decode rest (entry + width) (result ++ [⟨entry, relativeType machine, 0, 0, false⟩])
+          decode rest (entry + width) (⟨entry, relativeType machine, 0, 0, false⟩ :: result)
         else
           let rec bits (value index : Nat) (result : List DynamicRelocation) : List DynamicRelocation :=
             if value = 0 then result
             else
               let result := if value % 2 = 1 then
-                result ++ [⟨base + index * width, relativeType machine, 0, 0, false⟩]
+                ⟨base + index * width, relativeType machine, 0, 0, false⟩ :: result
               else result
               bits (value / 2) (index + 1) result
           let result := bits (entry / 2) 0 result
@@ -494,6 +494,17 @@ private def storedWord (image : Image) (headers : List ProgramHeader) (address :
   | some offset =>
     (if image.addrWidth = 64 then IO.Reader.u64 image.data image.endian offset
       else IO.Reader.u32 image.data image.endian offset).toOption
+
+def initializerArray (image : Image) : Except String (Option (Nat × Nat)) := do
+  let header ← parseHeader image.data
+  let headers ← programHeaders image.data
+  let tags ← dynamicTags image.data headers header.is64 image.endian
+  match tagValue tags 25, tagValue tags 27 with
+  | some address, some size =>
+    if size % (image.addrWidth / 8) = 0 then .ok (some (address, size))
+    else .error "ELF initializer array size is not pointer-aligned"
+  | none, none => .ok none
+  | _, _ => .error "ELF initializer array tags are incomplete"
 
 def dynamicRelocations (image : Image) : Except String RelocationSpec := do
   let header ← parseHeader image.data
@@ -527,40 +538,47 @@ def dynamicRelocations (image : Image) : Except String RelocationSpec := do
     match tagValue tags 0x6fffe000, tagValue tags 0x6fffe001 with
     | some addr, some size => relocations := relocations ++ (← readRelrRelocations image headers addr size header.machine)
     | _, _ => pure ()
-    relocations.foldlM (init := ({} : RelocationSpec)) fun result relocation => do
+    let result ← relocations.foldlM (init := ({} : RelocationSpec)) fun result relocation => do
       let stored := storedWord image headers relocation.offset
       let addend := if relocation.explicitAddend then relocation.addend else stored.getD 0
       if relocation.symbol = 0 then
         if relocation.typ = irelativeType header.machine && irelativeType header.machine != 0 then
-          .ok { result with irelative := result.irelative ++
-            (if relocation.explicitAddend || stored.isSome then [(relocation.offset, addend)] else []) }
+          .ok { result with irelative :=
+            if relocation.explicitAddend || stored.isSome then (relocation.offset, addend) :: result.irelative
+            else result.irelative }
         else if relocation.typ != relativeType header.machine then .ok result
         else
           let relativeAddends := match stored with
             | some value => if relocation.explicitAddend && value != addend then
-                result.relativeAddends ++ [(relocation.offset, addend)]
+                (relocation.offset, addend) :: result.relativeAddends
               else result.relativeAddends
             | none => result.relativeAddends
-          .ok { result with relative := result.relative ++ [relocation.offset], relativeAddends }
+          .ok { result with relative := relocation.offset :: result.relative, relativeAddends }
       else
         match ← dynamicSymbol image headers tags relocation.symbol with
         | none => .ok result
         | some symbol =>
           let kind := symbolRelocationKind header.machine relocation.typ header.is64
           if symbol.typ = 10 && symbol.sectionIndex != 0 && kind != 0 then
-            .ok { result with irelative := result.irelative ++ [(relocation.offset, symbol.value)] }
+            .ok { result with irelative := (relocation.offset, symbol.value) :: result.irelative }
           else if ![0, 1, 2, 5].contains symbol.typ then .ok result
           else
             let weakUndefined := symbol.sectionIndex = 0 && symbol.binding = 2
             let references := if !symbol.name.isEmpty && !weakUndefined then
-              result.references ++ [(relocation.offset, symbol.name)]
+              (relocation.offset, symbol.name) :: result.references
             else result.references
             if symbol.sectionIndex = 0 || kind = 0 then .ok { result with references }
             else
               let addend := if relocation.explicitAddend then relocation.addend
                 else if kind = 1 then stored.getD 0 else 0
               let target := (symbol.value + addend) % (2 ^ image.addrWidth)
-              .ok { result with references, absolute := result.absolute ++ [(relocation.offset, target)] }
+              .ok { result with references, absolute := (relocation.offset, target) :: result.absolute }
+    .ok { result with
+      references := result.references.reverse
+      absolute := result.absolute.reverse
+      relative := result.relative.reverse
+      relativeAddends := result.relativeAddends.reverse
+      irelative := result.irelative.reverse }
 
 private def unversioned (name : String) : String :=
   (name.splitOn "@").headD name

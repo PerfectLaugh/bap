@@ -39,6 +39,22 @@ def writeByte (memory : Memory addressWidth) (address : BitVec addressWidth) (va
 def ofCells (cells : List (BitVec addressWidth × UInt8)) : Memory addressWidth :=
   cells.foldl (init := empty addressWidth) fun memory cell => writeByte memory cell.1 cell.2
 
+private partial def writePages (pages : Std.HashMap Nat ByteArray) (address : Nat)
+    (data : ByteArray) (offset : Nat) : Std.HashMap Nat ByteArray :=
+  if offset ≥ data.size then pages else
+    let absolute := address + offset
+    let index := absolute / pageSize
+    let pageOffset := absolute % pageSize
+    let count := min (pageSize - pageOffset) (data.size - offset)
+    let chunk := data.extract offset (offset + count)
+    let page := if count = pageSize then chunk else
+      let existing := (pages.get? index).getD (ByteArray.mk (List.replicate pageSize 0).toArray)
+      existing.extract 0 pageOffset ++ chunk ++ existing.extract (pageOffset + count) pageSize
+    writePages (pages.insert index page) address data (offset + count)
+
+def writeRegion (memory : Memory addressWidth) (address : Nat) (data : ByteArray) : Memory addressWidth :=
+  ⟨writePages memory.pages address data 0⟩
+
 private def byteAt (value : Nat) (offset : Nat) : UInt8 :=
   UInt8.ofNat ((value / 256 ^ offset) % 256)
 

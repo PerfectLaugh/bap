@@ -2,14 +2,9 @@ import Bap.Emu.Checkpoint
 
 namespace Bap.Emu
 
-private def byteAt (config : Config) (state : Bil.State) (regions : List Region) (address : Nat) : Option UInt8 := do
-  let _ ← regions.find? fun region => region.contains address
-  match Bil.lookup state.env config.memory with
-  | .ok (@Value.memory width memory) => some (Bap.Memory.readByte memory (BitVec.ofNat width address))
-  | _ => none
-
-private def addresses (left right : List Region) : List Nat :=
-  (left ++ right).flatMap (fun region => List.range (region.address + region.data.size) |>.drop region.address) |>.eraseDups
+private def byteAt (regions : List Region) (address : Nat) : Option UInt8 := do
+  let region ← regions.find? fun region => region.contains address
+  region.data[address - region.address]?
 
 private def coalesce (changes : List Nat) : List (Nat × Nat) :=
   let sorted := changes.mergeSort (· ≤ ·)
@@ -20,19 +15,17 @@ private def coalesce (changes : List Nat) : List (Nat × Nat) :=
     | _ => (address, 1) :: ranges).reverse
 
 def diff (emu : Emu) (saved : Snapshot) : IO (List (Nat × Nat)) := do
-  let state ← emu.state.get
+  refreshRegions emu
   let regions ← emu.regions.get
-  let changes := (addresses saved.regions regions).filter fun address =>
-    byteAt emu.config state regions address != byteAt emu.config saved.state saved.regions address
+  let candidates := (saved.regions ++ regions).foldl (init := []) fun candidates region =>
+    if candidates.any fun current => current.address = region.address then candidates else candidates ++ [region]
+  let changes := candidates.foldl (init := []) fun changes region =>
+    (List.range region.data.size).foldl (init := changes) fun changes offset =>
+      let address := region.address + offset
+      if byteAt regions address != byteAt saved.regions address then address :: changes else changes
   pure (coalesce changes)
 
 def changedSince (emu : Emu) (path : String) : IO (List (Nat × Nat)) := do
-  let input ← IO.FS.readFile path
-  match Sexp.parse input with
-  | .error error => throw <| IO.userError error
-  | .ok input =>
-    match decodeSnapshot input with
-    | .error error => throw <| IO.userError error
-    | .ok saved => diff emu (← materializeSnapshot emu saved)
+  diff emu (← loadSnapshot emu path)
 
 end Bap.Emu

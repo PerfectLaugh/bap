@@ -165,10 +165,7 @@ private def initializeMemory (config : Config) (regions : List Region) : Except 
   if regions.any fun left => regions.any fun right => left != right && overlaps left right then
     .error "Emu regions overlap"
   let cells := regions.foldl (init := Bap.Memory.empty width) fun cells region =>
-    (List.range region.data.size).foldl (init := cells) fun cells offset =>
-      match region.data[offset]? with
-      | some 0 => cells
-      | _ => Bap.Memory.writeByte cells (BitVec.ofNat width (region.address + offset)) region.data[offset]!
+    Bap.Memory.writeRegion cells region.address region.data
   .ok { env := [(config.memory, .memory cells)] }
 
 def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry : Nat) : IO Emu := do
@@ -485,6 +482,17 @@ def read (emu : Emu) (address size : Nat) : IO ByteArray := do
   let bytes ← (List.range size).mapM fun offset => readByte emu (address + offset)
   pure (ByteArray.mk bytes.toArray)
 
+private def synchronizeWrite (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
+  let persistent ← emu.engine.persistentMemory.get
+  let memoryVar ← emu.engine.persistentVariable.get
+  match persistent, memoryVar with
+  | some memory, some var =>
+    if var = emu.config.memory then
+      let addresses := (List.range data.size).map fun offset => UInt64.ofNat (address + offset)
+      Jit.writeMemory memory addresses.toArray data.toList.toArray
+    else Primus.Lifted.discardMemory emu.engine
+  | _, _ => pure ()
+
 private def writeByte (emu : Emu) (address : Nat) (value : UInt8) : IO Unit := do
   let mapped ← emu.regions.get
   match lookupRegion mapped address with
@@ -497,7 +505,7 @@ private def writeByte (emu : Emu) (address : Nat) (value : UInt8) : IO Unit := d
     let updated := Bap.Memory.writeByte memory (BitVec.ofNat width address) value
     emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
     if region.protection.executable then Primus.Lifted.discardRange emu.engine address address
-    Primus.Lifted.discardMemory emu.engine
+    synchronizeWrite emu address (ByteArray.mk #[value])
     emu.regions.set (mapped.map fun current =>
       if current.contains address then
         { current with data := current.data.set! (address - current.address) value }
@@ -514,13 +522,12 @@ def write (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
       if address + data.size > region.address + region.data.size then
         throw <| IO.userError s!"Emu write exceeds region at {address}"
       let state ← emu.state.get
-      let ⟨width, memory⟩ ← cells emu state
-      let updated := (List.range data.size).foldl (init := memory) fun memory offset =>
-        Bap.Memory.writeByte memory (BitVec.ofNat width (address + offset)) data[offset]!
+      let ⟨_, memory⟩ ← cells emu state
+      let updated := Bap.Memory.writeRegion memory address data
       emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
       if region.protection.executable then
         Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
-      Primus.Lifted.discardMemory emu.engine
+      synchronizeWrite emu address data
       emu.regions.set (mapped.map fun current =>
         if current.contains address then
           let updatedData := (List.range data.size).foldl (init := current.data) fun bytes offset =>
@@ -528,18 +535,61 @@ def write (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
           { current with data := updatedData }
         else current)
 
+private def synchronizeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
+  let persistent ← emu.engine.persistentMemory.get
+  let memoryVar ← emu.engine.persistentVariable.get
+  match persistent, memoryVar with
+  | some memory, some var =>
+    if var = emu.config.memory then
+      let addresses := writes.flatMap fun (address, data) =>
+        (List.range data.size).map fun offset => UInt64.ofNat (address + offset)
+      let bytes := writes.flatMap fun (_, data) => data.toList
+      Jit.writeMemory memory addresses.toArray bytes.toArray
+    else Primus.Lifted.discardMemory emu.engine
+  | _, _ => pure ()
+
+def writeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
+  let mapped ← emu.regions.get
+  writes.forM fun (address, data) => do
+    match lookupRegion mapped address with
+    | none => throw <| IO.userError s!"unmapped Emu address {address}"
+    | some region =>
+      if !region.protection.writable then
+        throw <| IO.userError s!"read-only Emu address {address}"
+      if address + data.size > region.address + region.data.size then
+        throw <| IO.userError s!"Emu write exceeds region at {address}"
+  let state ← emu.state.get
+  let ⟨_, memory⟩ ← cells emu state
+  let updated := writes.foldl (init := memory) fun memory (address, data) =>
+    Bap.Memory.writeRegion memory address data
+  emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
+  writes.forM fun (address, data) => do
+    match lookupRegion mapped address with
+    | some region =>
+      if region.protection.executable && data.size > 0 then
+        Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
+    | none => pure ()
+  synchronizeBatch emu writes
+  let updatedRegions := writes.foldl (init := mapped) fun regions (address, data) =>
+    regions.map fun current =>
+      if current.contains address then
+        let offset := address - current.address
+        { current with data := current.data.extract 0 offset ++ data ++
+          current.data.extract (offset + data.size) current.data.size }
+      else current
+  emu.regions.set updatedRegions
+
 def map (emu : Emu) (region : Region) : IO Unit := do
   let mapped ← emu.regions.get
   if mapped.any fun current => overlaps current region then
     throw <| IO.userError s!"Emu region overlaps an existing mapping at {region.address}"
   let state ← emu.state.get
-  let ⟨width, memory⟩ ← cells emu state
-  let updated := (List.range region.data.size).foldl (init := memory) fun memory offset =>
-    Bap.Memory.writeByte memory (BitVec.ofNat width (region.address + offset)) region.data[offset]!
+  let ⟨_, memory⟩ ← cells emu state
+  let updated := Bap.Memory.writeRegion memory region.address region.data
   emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
   if region.protection.executable && region.data.size > 0 then
     Primus.Lifted.discardRange emu.engine region.address (region.address + region.data.size - 1)
-  Primus.Lifted.discardMemory emu.engine
+  synchronizeWrite emu region.address region.data
   emu.regions.set (region :: mapped)
 
 def overlay (emu : Emu) (region : Region) : IO Unit := do
@@ -547,13 +597,12 @@ def overlay (emu : Emu) (region : Region) : IO Unit := do
   if mapped.any fun current => current.address = region.address && current.data.size != region.data.size then
     throw <| IO.userError s!"Emu overlay size mismatch at {region.address}"
   let state ← emu.state.get
-  let ⟨width, memory⟩ ← cells emu state
-  let updated := (List.range region.data.size).foldl (init := memory) fun memory offset =>
-    Bap.Memory.writeByte memory (BitVec.ofNat width (region.address + offset)) region.data[offset]!
+  let ⟨_, memory⟩ ← cells emu state
+  let updated := Bap.Memory.writeRegion memory region.address region.data
   emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
   if region.protection.executable && region.data.size > 0 then
     Primus.Lifted.discardRange emu.engine region.address (region.address + region.data.size - 1)
-  Primus.Lifted.discardMemory emu.engine
+  synchronizeWrite emu region.address region.data
   emu.regions.set (region :: mapped.filter fun current => current.address != region.address)
 
 def protect (emu : Emu) (address size : Nat) (protection : Primus.Protection) : IO Unit := do
