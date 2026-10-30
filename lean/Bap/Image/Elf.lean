@@ -46,8 +46,8 @@ private def parseHeader (data : ByteArray) : Except String Header := do
       | _ => .error s!"unsupported ELF encoding {encoding}"
     let machine ← IO.Reader.u16 data endian 18
     let entryPoint ← word data endian is64 24
-    let programOffset ← word data endian is64 (if is64 then 32 else 40)
-    let sectionOffset ← word data endian is64 (if is64 then 40 else 48)
+    let programOffset ← word data endian is64 (if is64 then 32 else 28)
+    let sectionOffset ← word data endian is64 (if is64 then 40 else 32)
     let programEntrySize ← IO.Reader.u16 data endian (if is64 then 54 else 42)
     let programCount ← IO.Reader.u16 data endian (if is64 then 56 else 44)
     let sectionEntrySize ← IO.Reader.u16 data endian (if is64 then 58 else 46)
@@ -73,11 +73,11 @@ private def parseProgramHeader (data : ByteArray) (header : Header) (offset : Na
   if kind != 1 then
     .ok none
   else
-    let flags ← IO.Reader.u32 data header.endian (offset + 4)
-    let offset' ← word data header.endian header.is64 (offset + 8)
-    let address ← word data header.endian header.is64 (offset + if header.is64 then 16 else 12)
-    let fileSize ← word data header.endian header.is64 (offset + if header.is64 then 32 else 20)
-    let memorySize ← word data header.endian header.is64 (offset + if header.is64 then 40 else 24)
+    let flags ← IO.Reader.u32 data header.endian (offset + if header.is64 then 4 else 24)
+    let offset' ← word data header.endian header.is64 (offset + if header.is64 then 8 else 4)
+    let address ← word data header.endian header.is64 (offset + if header.is64 then 16 else 8)
+    let fileSize ← word data header.endian header.is64 (offset + if header.is64 then 32 else 16)
+    let memorySize ← word data header.endian header.is64 (offset + if header.is64 then 40 else 20)
     if fileSize > memorySize then
       .error "ELF LOAD file size exceeds memory size"
     else
@@ -111,7 +111,9 @@ private def parseSections (data : ByteArray) (header : Header) : Except String (
 private def parseSegments (data : ByteArray) (header : Header) :
     Except String (List Segment × List MemRegion) := do
   let minimum := if header.is64 then 56 else 32
-  if header.programEntrySize < minimum then
+  if header.programCount = 0 then
+    .ok ([], [])
+  else if header.programEntrySize < minimum then
     .error "ELF program entries are too small"
   else
     let entries ← (List.range header.programCount).mapM fun index =>
@@ -130,6 +132,10 @@ private def resolveSectionNames (data : ByteArray) (header : Header) (sections :
         let name ← IO.Reader.cstring data (strings.offset + sh.nameOffset)
         .ok ⟨name, sh.addr, sh.offset, sh.size, sh.flags, sh.kind⟩
 
+/-- The address of a symbol: bit 0 of an ARM function's value is the Thumb flag, not part of its address. -/
+private def codeAddress (machine typ value : Nat) : Nat :=
+  if machine = 40 && typ = 2 then value - value % 2 else value
+
 private def parseSymbol (data : ByteArray) (header : Header) (strings : SectionHeader)
     (offset : Nat) : Except String (Option Symbol) := do
   let nameOffset ← IO.Reader.u32 data header.endian offset
@@ -140,7 +146,7 @@ private def parseSymbol (data : ByteArray) (header : Header) (strings : SectionH
     .ok none
   else
     let name ← IO.Reader.cstring data (strings.offset + nameOffset)
-    .ok (some ⟨name, value, size, info &&& 0xf = 2, false⟩)
+    .ok (some ⟨name, codeAddress header.machine (info &&& 0xf) value, size, info &&& 0xf = 2, false⟩)
 
 private def parseSymbols (data : ByteArray) (header : Header) (sections : List SectionHeader) :
     Except String (List Symbol) := do
@@ -232,17 +238,19 @@ structure ProgramHeader where
 def programHeaders (data : ByteArray) : Except String (List ProgramHeader) := do
   let header ← parseHeader data
   let minimum := if header.is64 then 56 else 32
-  if header.programEntrySize < minimum then
+  if header.programCount = 0 then
+    .ok []
+  else if header.programEntrySize < minimum then
     .error "ELF program entries are too small"
   else
     (List.range header.programCount).mapM fun index => do
       let entry := header.programOffset + index * header.programEntrySize
       let kind ← IO.Reader.u32 data header.endian entry
-      let flags ← IO.Reader.u32 data header.endian (entry + 4)
-      let offset ← word data header.endian header.is64 (entry + 8)
-      let addr ← word data header.endian header.is64 (entry + if header.is64 then 16 else 12)
-      let fileSize ← word data header.endian header.is64 (entry + if header.is64 then 32 else 20)
-      let memorySize ← word data header.endian header.is64 (entry + if header.is64 then 40 else 24)
+      let flags ← IO.Reader.u32 data header.endian (entry + if header.is64 then 4 else 24)
+      let offset ← word data header.endian header.is64 (entry + if header.is64 then 8 else 4)
+      let addr ← word data header.endian header.is64 (entry + if header.is64 then 16 else 8)
+      let fileSize ← word data header.endian header.is64 (entry + if header.is64 then 32 else 16)
+      let memorySize ← word data header.endian header.is64 (entry + if header.is64 then 40 else 20)
       .ok ⟨kind, flags, offset, addr, fileSize, memorySize⟩
 
 private def offsetOf (headers : List ProgramHeader) (dataSize addr size : Nat) : Option Nat :=
@@ -433,11 +441,12 @@ private def readAndroidRelocations (image : Image) (headers : List ProgramHeader
 
 private def relativeType (machine : Nat) : Nat :=
   match machine with
-  | 3 | 8 => 8
+  | 3 => 8
+  | 8 => 3
   | 40 => 23
   | 62 => 8
   | 183 => 1027
-  | 21 => 22
+  | 20 | 21 => 22
   | 243 => 3
   | _ => 0
 
@@ -447,17 +456,18 @@ private def irelativeType (machine : Nat) : Nat :=
   | 40 => 160
   | 62 => 37
   | 183 => 1032
-  | 21 => 249
+  | 20 | 21 => 248
   | 243 => 58
   | _ => 0
 
 private def symbolRelocationKind (machine typ : Nat) (is64 : Bool) : Nat :=
   match machine with
-  | 3 => if typ = 2 then 1 else if typ = 6 || typ = 7 then 2 else 0
+  | 3 => if typ = 1 then 1 else if typ = 6 || typ = 7 then 2 else 0
   | 40 => if typ = 2 then 1 else if typ = 21 || typ = 22 then 2 else 0
   | 62 => if typ = 1 then 1 else if typ = 6 || typ = 7 then 2 else 0
   | 183 => if typ = 257 then 1 else if typ = 1025 || typ = 1026 then 2 else 0
-  | 21 => if typ = 1 then 1 else if typ = 6 || typ = 10 then 2 else 0
+  | 20 => if typ = 1 then 1 else if typ = 20 || typ = 21 then 2 else 0
+  | 21 => if typ = 38 then 1 else if typ = 20 || typ = 21 then 2 else 0
   | 243 => if typ = (if is64 then 2 else 1) then 1 else if typ = 5 then 2 else 0
   | _ => 0
 
@@ -546,7 +556,7 @@ def dynamicRelocations (image : Image) : Except String RelocationSpec := do
           .ok { result with irelative :=
             if relocation.explicitAddend || stored.isSome then (relocation.offset, addend) :: result.irelative
             else result.irelative }
-        else if relocation.typ != relativeType header.machine then .ok result
+        else if relativeType header.machine = 0 || relocation.typ != relativeType header.machine then .ok result
         else
           let relativeAddends := match stored with
             | some value => if relocation.explicitAddend && value != addend then
@@ -571,7 +581,7 @@ def dynamicRelocations (image : Image) : Except String RelocationSpec := do
             else
               let addend := if relocation.explicitAddend then relocation.addend
                 else if kind = 1 then stored.getD 0 else 0
-              let target := (symbol.value + addend) % (2 ^ image.addrWidth)
+              let target := (codeAddress header.machine symbol.typ symbol.value + addend) % (2 ^ image.addrWidth)
               .ok { result with references, absolute := (relocation.offset, target) :: result.absolute }
     .ok { result with
       references := result.references.reverse

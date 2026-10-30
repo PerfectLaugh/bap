@@ -30,6 +30,21 @@ def run : IO Unit := do
   assertEqual "Lisp and short circuit" "false" (← evaluate "(and false unknown)")
   assertEqual "Lisp or short circuit" "true" (← evaluate "(or true unknown)")
   assertEqual "Lisp comparison" "true" (← evaluate "(< 1 2)")
+  assertEqual "Lisp let bindings see earlier global updates" "0x1"
+    (← evaluate "(let ((a (setq g 1)) (b g)) b)")
+  assertEqual "Lisp let keeps global updates of every binding" "0x1"
+    (← evaluate "(let ((a (setq g 1)) (b 2)) b) g")
+  assertEqual "Lisp setq updates a let binding" "0x2" (← evaluate "(let ((x 1)) (setq x 2) x)")
+  assertEqual "Lisp setq updates an enclosing let binding" "0x2"
+    (← evaluate "(let ((x 1)) (let ((y 5)) (setq x 2)) x)")
+  assertEqual "Lisp setq stops at the innermost binding" "0x1"
+    (← evaluate "(let ((x 1)) (let ((x 5)) (setq x 2)) x)")
+  assertEqual "Lisp setq of a let binding leaves the global" "0x9"
+    (← evaluate "(setq x 9) (let ((x 1)) (setq x 2)) x")
+  assertEqual "Lisp setq of a free name writes the global" "0x3"
+    (← evaluate "(let ((y 1)) (setq z 3)) z")
+  assertEqual "Lisp closure assignment stays in its call" "0x1"
+    (← evaluate "(let ((x 1)) ((lambda (y) (setq x y)) 7) x)")
   match evalString "(unknown-function 1)" with
   | .error _ => IO.println "ok: Lisp unknown symbol rejected"
   | .ok _ => throw <| IO.userError "Lisp unknown symbol accepted"

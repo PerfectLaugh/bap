@@ -37,5 +37,10 @@ def run : IO Unit := do
   assertEqual "pruned block count" 4 pruned.blocks.length
   assertTrue "pruned graph excludes unreachable" (!pruned.graph.nodes.contains 99)
   assertEqual "prune preserves entry" cfg.start pruned.start
+  let loop : Bap.Graph.Graph Nat := ⟨[0, 1], [(0, 1), (1, 0)]⟩
+  assertEqual "back edge to start in frontier of start" (some [0])
+    (Assoc.get 0 (Bap.Graph.dominanceFrontier loop 0))
+  assertEqual "back edge to start in frontier of source" (some [0])
+    (Assoc.get 1 (Bap.Graph.dominanceFrontier loop 0))
 
 end Bap.Tests.Graph

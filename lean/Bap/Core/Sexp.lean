@@ -68,7 +68,18 @@ def dropComment : List Char → List Char
   | '\n' :: rest => rest
   | _ :: rest => dropComment rest
 
-partial def skipSpace : List Char → List Char
+theorem dropComment_length_le : (input : List Char) → (dropComment input).length ≤ input.length
+  | [] => by simp [dropComment]
+  | '\n' :: rest => by simp [dropComment]
+  | c :: rest => by
+    by_cases h : c = '\n'
+    · subst h
+      simp [dropComment]
+    · have := dropComment_length_le rest
+      simp only [dropComment, List.length_cons]
+      omega
+
+def skipSpace : List Char → List Char
   | [] => []
   | c :: rest =>
     if c.isWhitespace then
@@ -77,6 +88,12 @@ partial def skipSpace : List Char → List Char
       skipSpace (dropComment rest)
     else
       c :: rest
+termination_by input => input.length
+decreasing_by
+  · simp
+  · have := dropComment_length_le rest
+    simp only [List.length_cons]
+    omega
 
 private def escape : Char → List Char
   | '"' => ['\\', '"']
@@ -162,7 +179,7 @@ def parse (input : String) : Except String Sexp := do
   | _ => .error "trailing input after S-expression"
 
 private def needsQuotes (value : String) : Bool :=
-  value.isEmpty ∨ value.toList.any fun c =>
+  value.isEmpty ∨ value.toList.head? = some '\'' ∨ value.toList.any fun c =>
     c.isWhitespace ∨ c = '(' ∨ c = ')' ∨ c = ';' ∨ c = '"' ∨ c = '\\'
 
 def render : Sexp → String

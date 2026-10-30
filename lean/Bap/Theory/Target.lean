@@ -130,13 +130,22 @@ structure Declaration where
   filetype : Option Filetype := none
   options : Option String := none
 
-private def inherited (value : Option α) (parent : Option Target) (field : Target → α) (default : α) : α :=
-  match value with
-  | some value => value
-  | none => (parent.map field).getD default
+/-- The root of the hierarchy, carrying upstream's defaults. Fields whose enumeration has no
+`unknown` constructor (`abi`, `fabi`, `filetype`) keep their structure defaults. -/
+def unknown : Target := {
+  name := "unknown"
+  bits := 32
+  byte := 8
+  dataAlignment := 8
+  codeAlignment := 8
+  data := some { name := "mem", sort := .mem 32 8 }
+  code := some { name := "mem", sort := .mem 32 8 }
+  endianness := .eb
+}
 
+/-- A target inherits from its declared parent, or from `unknown` when it names none. -/
 def declare (declaration : Declaration) : Target :=
-  let parent := declaration.parent
+  let parent := declaration.parent.getD unknown
   let specified :=
     (if declaration.bits.isSome then ["bits"] else []) ++
     (if declaration.byte.isSome then ["byte"] else []) ++
@@ -147,27 +156,25 @@ def declare (declaration : Declaration) : Target :=
   {
     name := declaration.name
     nicknames := declaration.nicknames
-    parent := parent.map Target.name
-    family := (parent.map fun target => target.name :: target.family).getD []
-    bits := inherited declaration.bits parent Target.bits 0
-    byte := inherited declaration.byte parent Target.byte 0
-    dataAlignment := inherited declaration.dataAlignment parent Target.dataAlignment 1
-    codeAlignment := inherited declaration.codeAlignment parent Target.codeAlignment 1
-    data := declaration.data.orElse fun _ => parent.bind Target.data
-    code := declaration.code.orElse fun _ => parent.bind Target.code
-    vars := inherited declaration.vars parent Target.vars []
-    regs := inherited declaration.regs parent Target.regs []
-    aliases := inherited declaration.aliases parent Target.aliases []
-    endianness := inherited declaration.endianness parent Target.endianness .bi
-    system := inherited declaration.system parent Target.system .none
-    abi := inherited declaration.abi parent Target.abi .gnu
-    fabi := inherited declaration.fabi parent Target.fabi .hard
-    filetype := inherited declaration.filetype parent Target.filetype .elf
-    options := inherited declaration.options parent Target.options ""
+    parent := some parent.name
+    family := parent.name :: parent.family
+    bits := declaration.bits.getD parent.bits
+    byte := declaration.byte.getD parent.byte
+    dataAlignment := declaration.dataAlignment.getD parent.dataAlignment
+    codeAlignment := declaration.codeAlignment.getD parent.codeAlignment
+    data := declaration.data.orElse fun _ => parent.data
+    code := declaration.code.orElse fun _ => parent.code
+    vars := declaration.vars.getD parent.vars
+    regs := declaration.regs.getD parent.regs
+    aliases := declaration.aliases.getD parent.aliases
+    endianness := declaration.endianness.getD parent.endianness
+    system := declaration.system.getD parent.system
+    abi := declaration.abi.getD parent.abi
+    fabi := declaration.fabi.getD parent.fabi
+    filetype := declaration.filetype.getD parent.filetype
+    options := declaration.options.getD parent.options
     specified := specified
   }
-
-def unknown : Target := declare { name := "unknown" }
 
 def Target.matches (target : Target) (name : String) : Bool :=
   let name := name.toLower
@@ -195,8 +202,10 @@ def Target.reg (target : Target) (role : Role) (unique : Bool := false) : Option
   | var :: _ => if unique then none else some var
   | [] => none
 
+/-- Whether `var` has every role in `roles`, each possibly through a different group. As upstream's
+`List.for_all`, this holds vacuously for any variable when `roles` is empty. -/
 def Target.hasRoles (target : Target) (roles : List Role) (var : Var) : Bool :=
-  target.regs.any fun group => roles.all fun role => role ∈ group.1 ∧ var ∈ group.2
+  roles.all fun role => target.regs.any fun group => role ∈ group.1 ∧ var ∈ group.2
 
 inductive Origin where
   | sub (reg : Var) (hi lo : Nat) (isAlias : Bool)

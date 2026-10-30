@@ -11,10 +11,7 @@ structure Result where
   deriving Repr
 
 private def writesCriterion (access : Emu.TraceAccess) (criteria : List Slice.Location) : Bool :=
-  access.write && criteria.any fun criterion =>
-    match criterion with
-    | .mem address size => access.address = address && access.size = size
-    | .reg _ => false
+  access.write && criteria.any (Slice.Location.mem access.address access.size).overlaps
 
 def backwardWithAccesses (project : Project.Project) (entry : Nat) (pcs : List Nat)
     (accesses : List Emu.TraceAccess) (criteria : List Slice.Location) : Result :=

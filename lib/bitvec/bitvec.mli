@@ -165,13 +165,13 @@ module type S = sig
                         | u if not mx /\ not my
                         | add (neg u) y mod m if mx /\ not my
                    v = <
-                        | add u x mod m if not mx /\ my
+                        | add u y mod m if not mx /\ my
                         | neg u mod m if mx /\ my
                         \
 
       where mx = msb x mod m,
         and my = msb y mod m,
-        and u = rem s t mod m.
+        and u = rem (abs x) (abs y) mod m.
       v} *)
 
   val nth : t -> int -> bool m

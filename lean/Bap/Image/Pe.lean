@@ -97,10 +97,10 @@ private def parseSymbol (data : ByteArray) (header : Header) (sections : List Se
   let sectionIndex ← IO.Reader.u16 data .little (offset + 12)
   let symbolType ← IO.Reader.u16 data .little (offset + 14)
   let storageClass ← IO.Reader.get8 data (offset + 16)
-  let address := match sections[sectionIndex - 1]? with
+  let address := match sectionOfNumber sections sectionIndex with
     | some sec => sec.addr + value
     | none => value
-  .ok ⟨name, address, 0, symbolType &&& 0x30 = 0x20, storageClass = 103⟩
+  .ok ⟨name, address, 0, sectionIndex != 0 && symbolType &&& 0x30 = 0x20, storageClass = 103⟩
 
 private def parseSymbols (data : ByteArray) (header : Header) (sections : List Section) :
     Nat → Nat → List Symbol → Except String (List Symbol)

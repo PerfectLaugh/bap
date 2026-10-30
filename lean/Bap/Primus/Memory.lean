@@ -26,6 +26,7 @@ inductive MemoryError where
   | readonly (address : Nat)
   | notExecutable (address : Nat)
   | overlap (lower upper : Nat)
+  | outOfRange (lower upper : Nat)
   deriving Repr
 
 structure Memory where
@@ -36,7 +37,11 @@ namespace Memory
 
 def empty : Memory := ⟨Bap.Memory.empty 64, []⟩
 
+/-- Cells are addressed by 64-bit words, so the address space ends here. -/
+def addressLimit : Nat := 2 ^ 64
+
 def protection (memory : Memory) (address : Nat) : Option Protection :=
+  if address ≥ addressLimit then none else
   match memory.regions.find? fun region => region.contains address with
   | some region => some region.protection
   | none => none
@@ -44,7 +49,9 @@ def protection (memory : Memory) (address : Nat) : Option Protection :=
 def isMapped (memory : Memory) (address : Nat) : Bool := (memory.protection address).isSome
 
 def addRegion (memory : Memory) (region : Region) : Except MemoryError Memory := do
-  if memory.regions.any fun old => old.lower < region.upper && region.lower < old.upper then
+  if region.upper > addressLimit then
+    .error (.outOfRange region.lower region.upper)
+  else if memory.regions.any fun old => old.lower < region.upper && region.lower < old.upper then
     .error (.overlap region.lower region.upper)
   else
     .ok { memory with regions := region :: memory.regions }
@@ -93,7 +100,8 @@ def store (memory : Memory) (address : Nat) (value : BitVec width) (endian : End
 def fetch (memory : Memory) (address : Nat) : Except MemoryError UInt8 := do
   match memory.protection address with
   | some protection =>
-    if !protection.executable then .error (.notExecutable address) else loadByte memory address
+    if !protection.executable then .error (.notExecutable address)
+    else .ok (Bap.Memory.readByte memory.cells (BitVec.ofNat 64 address))
   | none => .error (.unmapped address)
 
 def protect (memory : Memory) (lower upper : Nat) (protection : Protection) : Memory :=

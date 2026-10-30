@@ -19,9 +19,8 @@ private def usedInsns (instructions : List Disasm.Insn) : List Bap.Var :=
 
 private def functionDisasm (project : Project.Project) (symbol : Image.Symbol) : String :=
   let index := Analysis.Xrefs.create project
-  let owner := some symbol
   let instructions := project.disasm.map (fun disasm =>
-    disasm.instructions.filter fun insn => Analysis.Xrefs.functionOf index insn.address = owner) |>.getD []
+    disasm.instructions.filter fun insn => Analysis.Xrefs.owns index symbol insn.address) |>.getD []
   let code := instructions.flatMap Disasm.Insn.bil
   let used := usedInsns instructions
   let width := project.image.map (fun image => image.addrWidth) |>.getD 64

@@ -40,6 +40,8 @@ def report : Project.Pass := {
 
 def defaultRegistry : Registry := Registry.register ⟨"x86-summary", [summarize, report]⟩ {}
 
+/-- Adds `pass` and its dependencies. Marking `pass` first ends the walk on a cycle, leaving it
+for the scheduler to report. -/
 private def includePass (registry : Registry) (pass : Project.Pass) (fuel : Nat)
     (included : List Project.Pass) : Except Project.PassError (List Project.Pass) := do
   if included.any fun old => old.name = pass.name then
@@ -48,25 +50,28 @@ private def includePass (registry : Registry) (pass : Project.Pass) (fuel : Nat)
     match fuel with
     | 0 => .error (.runtime "plugins" "dependency closure fuel exhausted")
     | fuel + 1 =>
-      let included ← pass.dependencies.foldlM (init := included) fun included dependency =>
+      pass.dependencies.foldlM (init := included ++ [pass]) fun included dependency =>
         match registry.findPass dependency with
         | none => .error (.missingDependency pass.name dependency)
         | some dependencyPass => includePass registry dependencyPass fuel included
-      .ok (included ++ [pass])
   termination_by structural fuel
 
 private def includeDependencies (registry : Registry) (passes : List Project.Pass) :
     Except Project.PassError (List Project.Pass) :=
   passes.foldlM (init := []) fun included pass =>
-    includePass registry pass (registry.passes.length * 2 + 1) included
+    includePass registry pass (registry.passes.length + 1) included
 
+/-- Runs the named passes, or the autorun passes when `names` is empty, with their dependencies. -/
 def analyze (registry : Registry) (project : Project.Project) (names : List String := []) :
     Except Project.PassError Project.Project := do
-  let passes ←
+  let roots ←
     if names.isEmpty then
       .ok (registry.passes.filter fun pass => pass.autorun)
     else
-      includeDependencies registry (names.filterMap registry.findPass)
-  Project.runPasses passes project
+      names.mapM fun name =>
+        match registry.findPass name with
+        | some pass => .ok pass
+        | none => .error (.unknownPass name)
+  Project.runPasses (← includeDependencies registry roots) project
 
 end Bap.Plugin

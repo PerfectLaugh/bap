@@ -13,6 +13,7 @@ inductive PassError where
   | missingDependency (pass dependency : String)
   | cycle (pass : String)
   | runtime (pass message : String)
+  | unknownPass (name : String)
   deriving Repr
 
 private def runPass (pass : Pass) (project : Project) : Except PassError Project := do
@@ -23,44 +24,32 @@ private def runPass (pass : Pass) (project : Project) : Except PassError Project
     | .ok project => .ok (project.markPassed pass.name)
     | .error error => .error (.runtime pass.name error)
 
-mutual
-  def visitDeps (passes : List Pass) (pass : Pass) (dependencies : List String)
-      (fuel : Nat) (temporary permanent : List String) : Except PassError (List String × List String) := do
-    match fuel with
-    | 0 => .error (.runtime "scheduler" "dependency traversal fuel exhausted")
-    | fuel + 1 =>
-      match dependencies with
-      | [] => .ok (temporary, permanent)
-      | dependency :: rest =>
-        match passes.find? fun candidate => candidate.name = dependency with
-        | none => .error (.missingDependency pass.name dependency)
-        | some dependencyPass =>
-          let (temporary, permanent) ← visit passes dependencyPass fuel temporary permanent
-          visitDeps passes pass rest fuel temporary permanent
-  termination_by structural fuel
-
-  def visit (passes : List Pass) (pass : Pass) (fuel : Nat) (temporary permanent : List String) :
-      Except PassError (List String × List String) := do
-    match fuel with
-    | 0 => .error (.runtime "scheduler" "dependency traversal fuel exhausted")
-    | fuel + 1 =>
-      if permanent.contains pass.name then
-        .ok (temporary, permanent)
-      else if temporary.contains pass.name then
-        .error (.cycle pass.name)
-      else
-        let temporary := pass.name :: temporary
-        let (temporary, permanent) ← visitDeps passes pass pass.dependencies fuel temporary permanent
-        .ok (temporary, pass.name :: permanent)
-  termination_by structural fuel
-end
+/-- Depth-first traversal. Fuel bounds the depth only, and each level adds a new name to
+`temporary`, so more fuel than there are distinct names is never exhausted. -/
+def visit (passes : List Pass) (pass : Pass) (fuel : Nat) (temporary permanent : List String) :
+    Except PassError (List String × List String) := do
+  match fuel with
+  | 0 => .error (.runtime "scheduler" "dependency traversal fuel exhausted")
+  | fuel + 1 =>
+    if permanent.contains pass.name then
+      .ok (temporary, permanent)
+    else if temporary.contains pass.name then
+      .error (.cycle pass.name)
+    else
+      let (temporary, permanent) ←
+        pass.dependencies.foldlM (init := (pass.name :: temporary, permanent)) fun visited dependency =>
+          match passes.find? fun candidate => candidate.name = dependency with
+          | none => .error (.missingDependency pass.name dependency)
+          | some dependencyPass => visit passes dependencyPass fuel visited.1 visited.2
+      .ok (temporary, pass.name :: permanent)
+termination_by structural fuel
 
 private def sortPassesAux (passes remaining : List Pass) (ordered : List String) :
     Except PassError (List String) := do
   match remaining with
   | [] => .ok ordered
   | pass :: rest =>
-    let (_, ordered) ← visit passes pass (passes.length * 2 + 1) [] ordered
+    let (_, ordered) ← visit passes pass (passes.length + 1) [] ordered
     sortPassesAux passes rest ordered
 
 private def sortPasses (passes : List Pass) : Except PassError (List Pass) := do

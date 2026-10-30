@@ -92,6 +92,12 @@ def run : IO Unit := do
     pure false
   catch _ => pure true
   assertTrue "project rejects unregistered opinion slots" unregisteredOpinionFailed
+  match decodeValue (.bitvec 8) (.tagged "int" [.atom "8", .atom "ff"]) with
+  | .ok value => assertEqual "largest bitvector value accepted" 0xff value.toNat
+  | .error error => throw <| IO.userError s!"largest bitvector value rejected: {error}"
+  match decodeValue (.bitvec 8) (.tagged "int" [.atom "8", .atom "1ff"]) with
+  | .error _ => IO.println "ok: oversized bitvector rejected"
+  | .ok _ => throw <| IO.userError "oversized bitvector was truncated"
   match encodeValue .target Theory.unknown with
   | .error _ => IO.println "ok: unsupported persistence kind rejected"
   | .ok _ => throw <| IO.userError "unsupported payload was serialized"

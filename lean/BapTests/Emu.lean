@@ -350,7 +350,41 @@ private def testThreads : IO Unit := do
   assertEqual "Emu checkpoint restores child memory" 13 restoredNative.toNat
 
 set_option maxRecDepth 8000 in
-def run : IO Unit := do
+private def diffAndCodecRegressions : IO Unit := do
+  let rw : Primus.Protection := ⟨true, true, false⟩
+  let region (address : Nat) (bytes : List UInt8) : Bap.Emu.Region := ⟨address, ByteArray.mk bytes.toArray, rw⟩
+  assertEqual "diff reports bytes of a grown region" [(0x12, 2)]
+    (Bap.Emu.diffRanges [region 0x10 [1, 2]] [region 0x10 [1, 2, 3, 4]])
+  assertEqual "diff reports bytes of a shrunk region" [(0x11, 1)]
+    (Bap.Emu.diffRanges [region 0x10 [1, 2]] [region 0x10 [1]])
+  assertEqual "diff reports overlapping tables once" [(0x12, 1)]
+    (Bap.Emu.diffRanges [region 0x10 [1, 2, 3, 4]] [region 0x10 [1, 2], region 0x12 [9, 4]])
+  assertEqual "diff merges adjacent regions" [(0x10, 4)]
+    (Bap.Emu.diffRanges [region 0x10 [1, 2], region 0x12 [3, 4]] [region 0x10 [5, 6], region 0x12 [7, 8]])
+  assertEqual "diff of identical tables is empty" []
+    (Bap.Emu.diffRanges [region 0x10 [1, 2]] [region 0x10 [1, 2]])
+  let register (name : String) : Bap.Var := ⟨name, .imm 256, 0, false⟩
+  let snapshotOf (env : Bil.Env) (pc : Nat := 0x1000) : Bap.Emu.Snapshot :=
+    ⟨{ env := env }, pc, [region 0x10 [1, 2]], false, [], 0, 0, none, []⟩
+  let wide := BitVec.ofNat 256 (2 ^ 255 + 7)
+  match Bap.Emu.encodeBinarySnapshot (snapshotOf [(register "ymm", .bits wide)]) with
+  | .error error => throw <| IO.userError error
+  | .ok data =>
+    match Bap.Emu.decodeBinarySnapshot data with
+    | .error error => throw <| IO.userError error
+    | .ok decoded =>
+      assertBits "binary checkpoint keeps a 256-bit value" wide (Bil.lookup decoded.state.env (register "ymm"))
+      assertEqual "binary checkpoint keeps the pc" 0x1000 decoded.pc
+  let tooWide : Value := .bits (BitVec.ofNat 257 (2 ^ 256))
+  match Bap.Emu.encodeBinarySnapshot (snapshotOf [(register "zmm", tooWide)]) with
+  | .error _ => IO.println "ok: binary checkpoint refuses a value over 256 bits"
+  | .ok _ => throw <| IO.userError "binary checkpoint accepted a 257-bit value"
+  match Bap.Emu.encodeBinarySnapshot (snapshotOf [] (2 ^ 64)) with
+  | .error _ => IO.println "ok: binary checkpoint refuses a pc over 64 bits"
+  | .ok _ => throw <| IO.userError "binary checkpoint accepted a 65-bit pc"
+
+set_option maxRecDepth 4000 in
+private def runEmulator : IO Unit := do
   let code := (← LLVM.assemble "riscv64" "addi a0, a1, 2") ++
     (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++ (← LLVM.assemble "riscv64" "jal 4")
   assertEqual "Emu test code size" 12 code.size
@@ -763,5 +797,9 @@ def run : IO Unit := do
   assertTrue "Emu stopped step does not execute" !(← Bap.Emu.step emu)
   Bap.Emu.resume emu
   assertTrue "Emu resumed state" !(← Bap.Emu.stopped emu)
+
+def run : IO Unit := do
+  diffAndCodecRegressions
+  runEmulator
 
 end Bap.Tests.Emu

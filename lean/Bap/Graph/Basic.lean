@@ -95,11 +95,13 @@ def immediateDominators [DecidableEq α] (graph : Graph α) (start : α) : List 
           let currentSize := (Assoc.get current dominators).getD []
           if candidateSize.length > currentSize.length then some (node, candidate) else best) none
 
+/-- Walk up the dominator tree from `runner`. A node without an immediate dominator (the start) has
+`stop = none`, and then the walk ends at the root after recording it, as in Cooper et al. -/
 private def frontierWalk [DecidableEq α] (graph : Graph α) (idom : List (α × α))
-    (stop tid : α) : Nat → α → List (α × α) → List (α × α)
+    (stop : Option α) (tid : α) : Nat → α → List (α × α) → List (α × α)
   | 0, _, result => result
   | fuel + 1, runner, result =>
-    if runner = stop then
+    if some runner = stop then
       result
     else
       let result := (runner, tid) :: result
@@ -111,11 +113,8 @@ def dominanceFrontier [DecidableEq α] (graph : Graph α) (start : α) : List (�
   let idom := immediateDominators graph start
   let fuel := graph.nodes.length + 1
   let pairs := (reachable graph start).foldl (init := []) fun result tid =>
-    match Assoc.get tid idom with
-    | none => result
-    | some stop =>
-      (predecessors graph tid).foldl (fun result pred =>
-        frontierWalk graph idom stop tid fuel pred result) result
+    (predecessors graph tid).foldl (fun result pred =>
+      frontierWalk graph idom (Assoc.get tid idom) tid fuel pred result) result
   graph.nodes.map fun node => (node, (pairs.filter fun pair => pair.1 = node).map Prod.snd |>.eraseDups)
 
 @[simp] theorem successors_mem [DecidableEq α] (graph : Graph α) (source target : α) :

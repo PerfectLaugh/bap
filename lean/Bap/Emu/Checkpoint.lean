@@ -53,7 +53,9 @@ private def decodeValue (input : Sexp) : Except String Value := do
   | .atom "undefined" => .ok .undefined
   | .list [.atom "bits", width, value] =>
     let width ← Sexp.nat width
-    .ok (.bits (BitVec.ofNat width (← Bil.Wire.parseHex (← Sexp.asAtom value))))
+    let value ← Bil.Wire.parseHex (← Sexp.asAtom value)
+    if value < 2 ^ width then .ok (.bits (BitVec.ofNat width value))
+    else .error s!"checkpoint value {value} does not fit in {width} bits"
   | .list [.atom "memory", width, cells] =>
     let width ← Sexp.nat width
     .ok (.memory (Memory.ofCells (← decodeCells width cells)))
@@ -391,7 +393,7 @@ private def getProcessBin (reader : Reader) : Except String ((ThreadId × List R
 
 private def binaryMagic : ByteArray := "BAPCKPT2".toUTF8
 
-private def encodeBinarySnapshot (snapshot : Snapshot) : ByteArray :=
+private def encodeBinaryUnchecked (snapshot : Snapshot) : ByteArray :=
   let writer := putBytes ⟨binaryMagic⟩ (natBytes snapshot.pc)
   let writer := putBool writer snapshot.stopped
   let writer := putNat writer snapshot.regions.length
@@ -406,7 +408,50 @@ private def encodeBinarySnapshot (snapshot : Snapshot) : ByteArray :=
   let writer := putNat writer snapshot.processMemory.length
   (snapshot.processMemory.foldl putProcessBin writer).data
 
-private def decodeBinarySnapshot (data : ByteArray) : Except String Snapshot := do
+private def fitsWord (value : Nat) : Bool := value < 2 ^ 64
+
+private def pendingFits : Option PendingBranch → Bool
+  | none => true
+  | some pending => fitsWord pending.branch && fitsWord pending.target
+
+private def typFits : Typ → Bool
+  | .mem addressWidth valueWidth => fitsWord addressWidth && fitsWord valueWidth
+  | .imm width => fitsWord width
+  | _ => true
+
+private def valueFits : Value → Bool
+  | .undefined => true
+  | @Value.bits width _ => width ≤ 256
+  | @Value.memory addressWidth memory => addressWidth ≤ 64 && fitsWord (Memory.cells memory).length
+
+private def bindingFits (binding : Bap.Var × Value) : Bool :=
+  fitsWord binding.1.name.utf8ByteSize && typFits binding.1.typ && fitsWord binding.1.index && valueFits binding.2
+
+private def regionFits (region : Region) : Bool :=
+  fitsWord region.address && fitsWord region.data.size
+
+private def threadFits (context : ThreadContext) : Bool :=
+  fitsWord context.id && fitsWord context.pc && fitsWord context.state.env.length &&
+    context.state.env.all bindingFits && pendingFits context.pending
+
+private def processFits (process : ThreadId × List Region) : Bool :=
+  fitsWord process.1 && fitsWord process.2.length && process.2.all regionFits
+
+/-- Whether the fixed-width fields of the binary format can hold every part of the snapshot. -/
+def binaryFits (snapshot : Snapshot) : Bool :=
+  fitsWord snapshot.pc &&
+    fitsWord snapshot.regions.length && snapshot.regions.all regionFits &&
+    fitsWord snapshot.state.env.length && snapshot.state.env.all bindingFits &&
+    fitsWord snapshot.threads.length && snapshot.threads.all threadFits &&
+    fitsWord snapshot.currentThread && fitsWord snapshot.nextThread && pendingFits snapshot.pending &&
+    fitsWord snapshot.processMemory.length && snapshot.processMemory.all processFits
+
+/-- Encode a snapshot, refusing one that the binary format could only store truncated. -/
+def encodeBinarySnapshot (snapshot : Snapshot) : Except String ByteArray :=
+  if binaryFits snapshot then .ok (encodeBinaryUnchecked snapshot)
+  else .error "snapshot has a value too wide for the binary checkpoint format"
+
+def decodeBinarySnapshot (data : ByteArray) : Except String Snapshot := do
   if data.extract 0 binaryMagic.size != binaryMagic then
     .error "not a binary checkpoint"
   else
@@ -449,8 +494,11 @@ def save (emu : Emu) (path : String) : IO Unit := do
     threads := snapshot.threads.map fun thread =>
       { thread with state := { env := thread.state.env.filter fun binding => binding.1 != emu.config.memory } }
   }
-  IO.FS.writeBinFile path (encodeBinarySnapshot snapshot)
+  let encoded := encodeBinarySnapshot snapshot
   emu.regions.set originalRegions
+  match encoded with
+  | .ok data => IO.FS.writeBinFile path data
+  | .error error => throw <| IO.userError error
 
 private def timed (label : String) (action : IO α) : IO α := do
   let start ← IO.monoMsNow

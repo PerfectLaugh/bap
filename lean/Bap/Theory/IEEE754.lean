@@ -42,6 +42,7 @@ def decimal (k : Nat) : Parameters :=
 def binary16 : Parameters := ⟨2, 15, 16, 11, 5, 10⟩
 def binary32 : Parameters := ⟨2, 127, 32, 24, 8, 23⟩
 def binary64 : Parameters := binary 64
+/-- x87 extended precision: `t` counts the explicit integer bit, hence `p = t`. -/
 def binary80 : Parameters := ⟨2, 16383, 80, 64, 15, 64⟩
 def binary128 : Parameters := binary 128
 def decimal32 : Parameters := decimal 32
@@ -100,41 +101,66 @@ end Value
 private def standardBinary (parameters : Parameters) : Bool :=
   parameters.base = 2 && parameters.t + 1 = parameters.p && parameters.k = parameters.w + parameters.t + 1
 
-def encode (parameters : Parameters) (value : Value) : Option (BitVec parameters.k) := do
-  if !standardBinary parameters then
-    none
-  else
-    let sign := value.sign.toNat * 2 ^ (parameters.k - 1)
-    let fields ←
-      match value with
-      | .zero _ => some (0, 0)
-      | .subnormal _ fraction =>
-        if fraction > 0 && fraction < 2 ^ parameters.t then some (0, fraction) else none
-      | .normal _ exponent fraction =>
-        let biased := exponent + Int.ofNat parameters.bias
-        if biased ≥ 1 && biased < Int.ofNat (2 ^ parameters.w - 1) && fraction < 2 ^ parameters.t then
-          some (biased.toNat, fraction)
-        else
-          none
-      | .infinity _ => some (2 ^ parameters.w - 1, 0)
-      | .nan _ payload =>
-        if payload > 0 && payload < 2 ^ parameters.t then some (2 ^ parameters.w - 1, payload) else none
-    .some (BitVec.ofNat parameters.k (sign + fields.1 * 2 ^ parameters.t + fields.2))
+/-- A binary format whose significand field stores its integer bit, as x87 extended does. -/
+private def explicitBinary (parameters : Parameters) : Bool :=
+  parameters.base = 2 && parameters.t = parameters.p && parameters.t > 0 &&
+    parameters.k = parameters.w + parameters.t + 1
 
+/-- The exponent and significand fields of a value. `integer` is what the significand field holds
+for the integer bit of normals, infinities and NaNs, and fractions are below `2 ^ bits`. -/
+private def encodeFields (parameters : Parameters) (integer bits : Nat) : Value → Option (Nat × Nat)
+  | .zero _ => some (0, 0)
+  | .subnormal _ fraction =>
+    if fraction > 0 && fraction < 2 ^ bits then some (0, fraction) else none
+  | .normal _ exponent fraction =>
+    let biased := exponent + Int.ofNat parameters.bias
+    if biased ≥ 1 && biased < Int.ofNat (2 ^ parameters.w - 1) && fraction < 2 ^ bits then
+      some (biased.toNat, integer + fraction)
+    else
+      none
+  | .infinity _ => some (2 ^ parameters.w - 1, integer)
+  | .nan _ payload =>
+    if payload > 0 && payload < 2 ^ bits then some (2 ^ parameters.w - 1, integer + payload) else none
+
+def encode (parameters : Parameters) (value : Value) : Option (BitVec parameters.k) := do
+  let fields ←
+    if standardBinary parameters then
+      encodeFields parameters 0 parameters.t value
+    else if explicitBinary parameters then
+      encodeFields parameters (2 ^ (parameters.t - 1)) (parameters.t - 1) value
+    else
+      none
+  let sign := value.sign.toNat * 2 ^ (parameters.k - 1)
+  .some (BitVec.ofNat parameters.k (sign + fields.1 * 2 ^ parameters.t + fields.2))
+
+/-- Decoding is total on every standard or explicit-integer format. Following upstream's softfloat,
+the non-canonical encodings of explicit formats get the nearest meaning: pseudo-infinities and
+pseudo-NaNs ignore the integer bit, unnormals are NaNs, and pseudo-denormals are subnormals whose
+fraction keeps the integer bit, which `encode` then refuses. -/
 def decode (parameters : Parameters) (raw : BitVec parameters.k) : Option Value := do
-  if !standardBinary parameters then
-    none
-  else
-    let raw := raw.toNat
-    let sign := raw / 2 ^ (parameters.k - 1) % 2 = 1
-    let exponent := raw / 2 ^ parameters.t % 2 ^ parameters.w
-    let fraction := raw % 2 ^ parameters.t
+  let raw := raw.toNat
+  let sign := raw / 2 ^ (parameters.k - 1) % 2 = 1
+  let exponent := raw / 2 ^ parameters.t % 2 ^ parameters.w
+  let fraction := raw % 2 ^ parameters.t
+  if standardBinary parameters then
     if exponent = 0 then
       if fraction = 0 then some (.zero sign) else some (.subnormal sign fraction)
     else if exponent = 2 ^ parameters.w - 1 then
       if fraction = 0 then some (.infinity sign) else some (.nan sign fraction)
     else
       some (.normal sign (Int.ofNat exponent - Int.ofNat parameters.bias) fraction)
+  else if explicitBinary parameters then
+    let low := fraction % 2 ^ (parameters.t - 1)
+    if exponent = 0 then
+      if fraction = 0 then some (.zero sign) else some (.subnormal sign fraction)
+    else if exponent = 2 ^ parameters.w - 1 then
+      if low = 0 then some (.infinity sign) else some (.nan sign low)
+    else if fraction < 2 ^ (parameters.t - 1) then
+      some (.nan sign low)
+    else
+      some (.normal sign (Int.ofNat exponent - Int.ofNat parameters.bias) low)
+  else
+    none
 
 def decodeEncoded (parameters : Parameters) (raw : Option (BitVec parameters.k)) : Option Value :=
   raw.bind (decode parameters)

@@ -22,51 +22,59 @@ def evalExpObserved (observer : Option MemoryObserver) (env : Env) (exp : Exp) :
     match ← evalExpObserved observer env memory with
     | .error error => pure (.error error)
     | .ok memory =>
-      match ← evalExpObserved observer env address with
+      match expectMemory memory with
       | .error error => pure (.error error)
-      | .ok address =>
-        match expectMemory memory, Value.asBits address with
-        | .error error, _ => pure (.error error)
-        | _, .error error => pure (.error error)
-        | .ok ⟨addressWidth, memory⟩, .ok ⟨actualWidth, address⟩ =>
-          if h : actualWidth = addressWidth then
-            let address : BitVec addressWidth := h ▸ address
-            notify observer false address.toNat size 0
-            pure (.ok (.bits (Memory.read memory address endian size)))
-          else
-            pure (.error "address width does not match memory")
+      | .ok ⟨addressWidth, memory⟩ =>
+        match ← evalExpObserved observer env address with
+        | .error error => pure (.error error)
+        | .ok address =>
+          match Value.asBits address with
+          | .error error => pure (.error error)
+          | .ok ⟨actualWidth, address⟩ =>
+            if h : actualWidth = addressWidth then
+              let address : BitVec addressWidth := h ▸ address
+              notify observer false address.toNat size 0
+              pure (.ok (.bits (Memory.read memory address endian size)))
+            else
+              pure (.error "address width does not match memory")
   | .store memory address value endian size => do
     match ← evalExpObserved observer env memory with
     | .error error => pure (.error error)
     | .ok memory =>
-      match ← evalExpObserved observer env address with
+      match expectMemory memory with
       | .error error => pure (.error error)
-      | .ok address =>
-        match ← evalExpObserved observer env value with
+      | .ok ⟨addressWidth, memory⟩ =>
+        match ← evalExpObserved observer env address with
         | .error error => pure (.error error)
-        | .ok value =>
-          match expectMemory memory, Value.asBits address, Value.asBits value with
-          | .error error, _, _ => pure (.error error)
-          | _, .error error, _ => pure (.error error)
-          | _, _, .error error => pure (.error error)
-          | .ok ⟨addressWidth, memory⟩, .ok ⟨actualWidth, address⟩, .ok stored =>
-            if h : actualWidth = addressWidth then
-              let address : BitVec addressWidth := h ▸ address
-              notify observer true address.toNat size stored.2.toNat
-              pure (Memory.write memory address stored.2 endian size |>.map Value.memory)
-            else
-              pure (.error "address width does not match memory")
+        | .ok address =>
+          match Value.asBits address with
+          | .error error => pure (.error error)
+          | .ok ⟨actualWidth, address⟩ =>
+            match ← evalExpObserved observer env value with
+            | .error error => pure (.error error)
+            | .ok value =>
+              match Value.asBits value with
+              | .error error => pure (.error error)
+              | .ok stored =>
+                if h : actualWidth = addressWidth then
+                  let address : BitVec addressWidth := h ▸ address
+                  notify observer true address.toNat size stored.2.toNat
+                  pure (Memory.write memory address stored.2 endian size |>.map Value.memory)
+                else
+                  pure (.error "address width does not match memory")
   | .bin op left right => do
     match ← evalExpObserved observer env left with
     | .error error => pure (.error error)
     | .ok left =>
-      match ← evalExpObserved observer env right with
+      match Value.asBits left with
       | .error error => pure (.error error)
-      | .ok right =>
-        match Value.asBits left, Value.asBits right with
-        | .error error, _ => pure (.error error)
-        | _, .error error => pure (.error error)
-        | .ok left, .ok right => pure (evalBin op left right)
+      | .ok left =>
+        match ← evalExpObserved observer env right with
+        | .error error => pure (.error error)
+        | .ok right =>
+          match Value.asBits right with
+          | .error error => pure (.error error)
+          | .ok right => pure (evalBin op left right)
   | .un op value => do
     match ← evalExpObserved observer env value with
     | .error error => pure (.error error)
@@ -108,10 +116,13 @@ def evalExpObserved (observer : Option MemoryObserver) (env : Env) (exp : Exp) :
     match ← evalExpObserved observer env left with
     | .error error => pure (.error error)
     | .ok left =>
-      match ← evalExpObserved observer env right with
+      match Value.asBits left with
       | .error error => pure (.error error)
-      | .ok right => pure (Value.asBits left >>= fun left => Value.asBits right >>= fun right =>
-        .ok (.bits (Word.concat left.2 right.2)))
+      | .ok left =>
+        match ← evalExpObserved observer env right with
+        | .error error => pure (.error error)
+        | .ok right => pure (Value.asBits right >>= fun right =>
+          .ok (.bits (Word.concat left.2 right.2)))
   | .unknown message _ => pure (.error s!"cannot evaluate unknown value: {message}")
   termination_by exp
   decreasing_by

@@ -115,6 +115,55 @@
   (when (condition-holds pre)
     (exec-addr (+ (t2pc) off))))
 
+(defun tB (off pre _)
+  "b imm; A7-207, T2"
+  (when (condition-holds pre)
+    (exec-addr (+ (t2pc) off))))
+
+(defun tBcc (off pre _)
+  "bcc imm; A7-207, T1"
+  (when (condition-holds pre)
+    (exec-addr (+ (t2pc) off))))
+
+(defun tCBZ (rn off)
+  "cbz rn, imm; A7-219"
+  (when (is-zero rn)
+    (exec-addr (+ (t2pc) off))))
+
+(defun tCBNZ (rn off)
+  "cbnz rn, imm; A7-219"
+  (when (non-zero rn)
+    (exec-addr (+ (t2pc) off))))
+
+(defun thumb-link (size)
+  "the link is the address of the next instruction, the bit 0 set, as
+   the T32 state is kept on the return"
+  (set LR (logor (+ (get-program-counter) size) 1)))
+
+(defun tBL (pre _ off)
+  "bl imm; A7-213"
+  (when (condition-holds pre)
+    (thumb-link 4)
+    (exec-addr (logand (+ (t2pc) off) (lnot 1)))))
+
+(defun tBLXi (pre _ off)
+  "blx imm; A7-215, the A32 code is relative to the word-aligned pc"
+  (when (condition-holds pre)
+    (thumb-link 4)
+    (exec-addr (+ (logand (t2pc) (lnot 3)) off))))
+
+(defun tBLXr (pre _ rm)
+  "blx rm; A7-216"
+  (when (condition-holds pre)
+    (let ((dst rm))
+      (thumb-link 2)
+      (exec-addr (logand dst (lnot 1))))))
+
+(defun tBX (rm pre _)
+  "bx rm; A7-250"
+  (when (condition-holds pre)
+    (exec-addr (logand (if (= (symbol rm) 'PC) (t2pc) rm) (lnot 1)))))
+
 (defun t2TBB (rn rm _ _)
   "tbb [rn, rm]"
   (let ((addr (+ (t2reg rn) (t2reg rm)))

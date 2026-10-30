@@ -135,7 +135,7 @@ private def parseSymbol (data : ByteArray) (endian : Endian) (stringsOffset stri
     let kind ← IO.Reader.get8 data (offset + 4)
     let sectionIndex ← IO.Reader.get8 data (offset + 5)
     let address ← IO.Reader.u64 data endian (offset + 8)
-    let isFunction := match sections[sectionIndex - 1]? with
+    let isFunction := match sectionOfNumber sections sectionIndex with
       | some sec => sec.flags &&& 0x00000400 != 0
       | none => false
     .ok (some ⟨name, address, 0, isFunction, kind &&& 0xe0 != 0⟩)

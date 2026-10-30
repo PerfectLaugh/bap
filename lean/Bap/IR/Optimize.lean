@@ -22,7 +22,11 @@ private def replacements (env : ConstEnv) : List (Bap.Var × Bil.Exp) :=
 private def joinEnv (left right : ConstEnv) : ConstEnv :=
   left.filter fun entry => Assoc.get entry.1 right = some entry.2
 
+/-- Rewrites a block under the constants known at its entry and returns those known at its exit.
+A phi assigns its variable on entry, so an incoming constant for it no longer holds. -/
 private def propagateBlock (blk : Blk) (env : ConstEnv) : Blk × ConstEnv :=
+  let phiVars := blk.phis.map Phi.var
+  let env : ConstEnv := env.filter fun entry => entry.1 ∉ phiVars
   let phis := blk.phis.map fun phi =>
     { phi with values := phi.values.map fun input => (input.1, Bil.simplifyExp input.2) }
   let (defs, env) := blk.defs.foldl (init := ([], env)) fun state defn =>
@@ -34,30 +38,46 @@ private def propagateBlock (blk : Blk) (env : ConstEnv) : Blk × ConstEnv :=
   let jmps := blk.jmps.map (Jmp.mapExp fun exp => Bil.simplifyExp (Bil.substitute (replacements env) exp))
   ({ blk with phis := phis, defs := defs, jmps := jmps }, env)
 
-private def propagateAux (cfg : Cfg) : Nat → ExitEnvs → List Tid → Cfg × ExitEnvs
-  | 0, exits, _ => (cfg, exits)
-  | _fuel + 1, exits, [] => (cfg, exits)
+/-- Constants known on entry: nothing at the start, whose entry state is unconstrained even when it
+has predecessors, otherwise the join over the predecessors analysed so far. -/
+private def entryEnv (cfg : Cfg) (exits : ExitEnvs) (tid : Tid) : ConstEnv :=
+  if tid = cfg.start then
+    []
+  else
+    match (cfg.predecessors tid).filterMap fun pred => Assoc.get pred exits with
+    | [] => []
+    | first :: rest => rest.foldl joinEnv first
+
+/-- Optimistic forward analysis from the start. It never edits the CFG. -/
+private def propagateAux (cfg : Cfg) : Nat → ExitEnvs → List Tid → ExitEnvs
+  | 0, exits, _ => exits
+  | _fuel + 1, exits, [] => exits
   | fuel + 1, exits, tid :: work =>
-    let predecessors := cfg.predecessors tid
-    let incoming := predecessors.filterMap fun pred => Assoc.get pred exits
-    let env := match incoming with
-      | [] => []
-      | first :: rest => rest.foldl joinEnv first
     match cfg.block tid with
     | none => propagateAux cfg fuel exits work
     | some blk =>
-      let (blk, env) := propagateBlock blk env
-      let cfg := cfg.updateBlock tid fun _ => blk
+      let env := (propagateBlock blk (entryEnv cfg exits tid)).2
       if Assoc.get tid exits = some env then
         propagateAux cfg fuel exits work
       else
         propagateAux cfg fuel (Assoc.put tid env exits) (work ++ cfg.successors tid)
 
+/-- The analysis result is a fixpoint of the transfer functions on every block. -/
+private def isSolved (cfg : Cfg) (exits : ExitEnvs) : Bool :=
+  cfg.blocks.all fun blk =>
+    Assoc.get blk.tid exits = some (propagateBlock blk (entryEnv cfg exits blk.tid)).2
+
+/-- Rewrites each block once, from the fixpoint. If the analysis ran out of fuel only constants local
+to each block are used. -/
 def propagateConstants (cfg : Cfg) : Cfg :=
   let cfg := cfg.prune
   let varCount := (cfg.blocks.flatMap fun blk => blk.definedVars ++ blk.freeVars).eraseDups.length
   let fuel := (varCount + 2) * (cfg.blocks.length + 2) * (cfg.graph.edges.length + 2)
-  (propagateAux cfg fuel [] (cfg.blocks.map Blk.tid)).1
+  let exits := propagateAux cfg fuel [] [cfg.start]
+  let solved := isSolved cfg exits
+  { cfg with blocks := cfg.blocks.map fun blk =>
+    (propagateBlock blk (if solved then entryEnv cfg exits blk.tid else [])).1
+  }
 
 private def hasSideEffect : Bil.Exp → Bool
   | .store _ _ _ _ _ => true
@@ -68,12 +88,22 @@ private def hasSideEffect : Bil.Exp → Bool
   | .ite condition yes no => hasSideEffect condition || hasSideEffect yes || hasSideEffect no
   | .int _ | .var _ | .unknown _ _ => false
 
+/-- Backward scan of a block's definitions from the variables live after them. Returns the kept
+definitions and the variables live before them. -/
+private def dceDefs (defs : List Def) (live : List Bap.Var) : List Def × List Bap.Var :=
+  defs.foldr (init := ([], live)) fun defn state =>
+    if state.2.contains defn.var || hasSideEffect defn.rhs then
+      (defn :: state.1, state.2.filter (· != defn.var) ++ Bil.freeVars defn.rhs)
+    else
+      state
+
 private def dcePass (cfg : Cfg) : Cfg :=
   let outs := cfg.liveness.2
   { cfg with blocks := cfg.blocks.map fun blk =>
-    let live := ((Assoc.get blk.tid outs).getD [] ++ blk.freeVars).eraseDups
+    let (defs, live) := dceDefs blk.defs
+      ((Assoc.get blk.tid outs).getD [] ++ blk.jmps.flatMap Jmp.freeVars)
     { blk with
-      defs := blk.defs.filter fun defn => live.contains defn.var || hasSideEffect defn.rhs
+      defs := defs
       phis := blk.phis.filter fun phi => live.contains phi.var
     }
   }

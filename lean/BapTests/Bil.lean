@@ -114,6 +114,22 @@ def run : IO Unit := do
   let decompiledLoop := Decompile.program collatz
   assertTrue "decompiler renders loops" ((decompiledLoop.splitOn "while ((0x1 != a))").length > 1)
   assertTrue "decompiler renders conditionals" ((decompiledLoop.splitOn "if ((0x0 == (a % 0x2)))").length > 1)
+  let signedLess := Decompile.exp (.bin .slt (.var x) (.var y))
+  assertEqual "decompiler renders signed comparison" "slt(x, y)" signedLess
+  assertEqual "decompiler renders unsigned comparison" "(x < y)" (Decompile.exp (.bin .lt (.var x) (.var y)))
+  assertEqual "decompiler escapes punctuation" "a_0x2e_b" (Decompile.exp (.var (reg "a.b")))
+  assertEqual "decompiler keeps underscores" "a_b" (Decompile.exp (.var (reg "a_b")))
+  assertEqual "decompiler escapes a leading digit" "_0x31_x" (Decompile.exp (.var (reg "1x")))
+  assertEqual "decompiler separates variable versions" "x_0v1" (Decompile.exp (.var ⟨"x", .imm 32, 1, false⟩))
+  assertEqual "decompiler keeps a variable that looks like a version" "x_1" (Decompile.exp (.var (reg "x_1")))
+  assertEqual "decompiler renders computed jumps" "goto *x;" (Decompile.stmt 0 (.jmp (.var x)))
+  assertEqual "decompiler names a store to another memory" "other = write8_le(mem, 0x0, 0x2a);"
+    (Decompile.stmt 0 (.move ⟨"other", .mem 32 8, 0, false⟩ (.store (.var mem) (int 32 0) (int 32 42) .little 1)))
+  assertEqual "decompiler renders unknown types" "unknown(oops, uint32_t)" (Decompile.exp (.unknown "oops" (.imm 32)))
+  assertTrue "decompiler renders unusual widths"
+    (((Decompile.function "f" [⟨"b", .imm 1, 0, false⟩] []).splitOn "unsigned _BitInt(1) b").length > 1)
+  let z := reg "z"
+  let tainted := Analysis.Taint.sourceVar {} x [1]
   let z := reg "z"
   let tainted := Analysis.Taint.sourceVar {} x [1]
   let tainted := Analysis.Taint.sourceMemory tainted 0x3000 [2]
@@ -146,6 +162,74 @@ def run : IO Unit := do
     | .int value => throw <| IO.userError s!"constant propagation retained invalidated assignment {value.toNat}"
     | _ => IO.println "ok: constant propagation invalidates unknown input"
   | _ => throw <| IO.userError "constant propagation changed program shape"
+  let propagatedBranch := Analysis.Propagate.propagate [
+    .move x (int 32 1),
+    .ifElse (.int (BitVec.ofNat 1 1)) [.move x (int 32 2)] [],
+    .move y (.var x)
+  ]
+  match propagatedBranch.getLast? with
+  | some (.move _ (.var _)) => IO.println "ok: constant propagation forgets a value a branch changes"
+  | _ => throw <| IO.userError "constant propagation kept a stale value after a branch"
+  let bothBranches := Analysis.Propagate.propagate [
+    .ifElse (.var z) [.move x (int 32 2)] [.move x (int 32 2)],
+    .move y (.var x)
+  ]
+  match bothBranches.getLast? with
+  | some (.move _ (.int value)) => assertEqual "constant propagation joins equal branches" 2 value.toNat
+  | _ => throw <| IO.userError "constant propagation lost a value both branches agree on"
+  let stoppingLoop : Program := [
+    .move x (int 32 0),
+    .while (.bin .eq (.var x) (int 32 0)) [.move x (int 32 1)]
+  ]
+  let runProgram (program : Program) : IO (Bil.State × Bil.Effect) :=
+    match _root_.Bap.Bil.run program with
+    | .ok result => pure result
+    | .error error => throw <| IO.userError error
+  let (loopState, _) ← runProgram (Analysis.Propagate.propagate stoppingLoop)
+  match Bil.lookup loopState.env x with
+  | .ok (.bits value) => assertEqual "constant propagation keeps loop condition live" 1 value.toNat
+  | _ => throw <| IO.userError "propagated loop lost its variable"
+  let jumpProgram : Program := [.move x (int 32 1), .jmp (int 32 0), .move x (int 32 2)]
+  let (jumpOptimized, _) ← runProgram (Analysis.DeadCode.optimize [x] jumpProgram)
+  match Bil.lookup jumpOptimized.env x with
+  | .ok (.bits value) => assertEqual "dead code keeps writes before a jump" 1 value.toNat
+  | _ => throw <| IO.userError "dead code removed a write before a jump"
+  let k := reg "k"
+  let flag : Bil.Exp := .int (BitVec.ofNat 1 1)
+  let loopProgram : Program := [
+    .move z (int 32 7),
+    .move x (int 32 0),
+    .move k flag,
+    .while (.var k) [.move y (.var x), .move x (.var z), .move k (.int (BitVec.ofNat 1 0))]
+  ]
+  let loopOptimized := Analysis.DeadCode.optimize [y] loopProgram
+  discard <| runProgram loopOptimized
+  assertTrue "dead code keeps what later loop iterations read"
+    (loopOptimized.any fun statement => match statement with | .move dst _ => dst = z | _ => false)
+  let tainted2 := Analysis.Taint.sourceVar {} z [7]
+  let loopTaint := Analysis.Taint.run tainted2 [
+    .while (.var k) [.move x (.var y), .move y (.var z)]
+  ]
+  assertEqual "taint reaches the loop fixpoint" [7] (Analysis.Taint.labelsOfVar loopTaint x)
+  let branchTaint := Analysis.Taint.run (Analysis.Taint.sourceVar {} x [1])
+    [.ifElse (.var k) [.move x (int 32 0)] []]
+  assertEqual "taint joins branches" [1] (Analysis.Taint.labelsOfVar branchTaint x)
+  let wideLoad := Analysis.Taint.run (Analysis.Taint.sourceMemory {} 0x3001 [2])
+    [.move z (.load (.var mem) (int 32 0x3000) .little 4)]
+  assertEqual "taint load covers its width" [2] (Analysis.Taint.labelsOfVar wideLoad z)
+  let wideStore := Analysis.Taint.run (Analysis.Taint.sourceVar {} x [1])
+    [.move mem (.store (.var mem) (int 32 0x4000) (.var x) .little 4)]
+  assertEqual "taint store covers its width" [1] (Analysis.Taint.labelsOfMemory wideStore 0x4003)
+  let dynamicStore := Analysis.Taint.run (Analysis.Taint.sourceVar {} x [1])
+    [.move mem (.store (.var mem) (.var y) (.var x) .little 4)]
+  assertEqual "taint of a dynamic store reaches every address" [1]
+    (Analysis.Taint.labelsOfMemory dynamicStore 0x5000)
+  let aliased : Memory 8 := ⟨(({} : Std.TreeMap Nat ByteArray).insert 0
+    (ByteArray.mk (List.replicate 256 1).toArray)).insert 1 (ByteArray.mk (List.replicate 256 2).toArray)⟩
+  let selfCompare := Analysis.Validate.compare [] [] [] { env := [(mem, .memory aliased)] }
+  match selfCompare with
+  | .ok result => assertTrue "validation is reflexive on aliased memory" (Analysis.Validate.ok result)
+  | .error error => throw <| IO.userError error
   let deadProgram : Program := [
     .move x (int 32 40),
     .move y (plus (.var x) (int 32 2)),
@@ -178,4 +262,42 @@ def run : IO Unit := do
   assertTrue "execution validation rejects changed result" !(Analysis.Validate.ok divergent)
   assertTrue "execution validation reports register mismatch" !divergent.registers
 
+  let captured := reg "x" 8
+  let binder := reg "y" 8
+  let avoided := substitute [(captured, .var binder)] (.letIn binder (int 8 1) (.var captured))
+  assertBits "substitution avoids capture" (BitVec.ofNat 8 7)
+    (evalExp [(binder, .bits (BitVec.ofNat 8 7))] avoided)
+  let kept := substitute [(captured, .var binder)] (.letIn (reg "z" 8) (int 8 1) (.var captured))
+  assertEqual "substitution keeps a non-capturing binder"
+    (toString (Wire.printExp (.letIn (reg "z" 8) (int 8 1) (.var binder)))) (toString (Wire.printExp kept))
+  assertTrue "simplification keeps width errors"
+    ((evalExp [] (simplifyExp (plus (int 8 0) (int 16 1)))).toOption.isNone)
+  assertTrue "simplification keeps unknown errors"
+    ((evalExp [] (simplifyExp (.bin .mul (int 8 0) (.unknown "x" (.imm 8))))).toOption.isNone)
+  assertTrue "simplification keeps condition-width errors"
+    ((evalExp [] (simplifyExp (.ite (int 8 0) (int 8 1) (int 8 2)))).toOption.isNone)
+  let memoryVar : Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let rejected (exp : Exp) : Bool := (inferExp exp).toOption.isNone
+  assertTrue "unary operator on memory is rejected" (rejected (.un .neg (.var memoryVar)))
+  assertTrue "load address width mismatch is rejected" (rejected (.load (.var memoryVar) (int 32 0) .little 1))
+  assertTrue "store address width mismatch is rejected"
+    (rejected (.store (.var memoryVar) (int 32 0) (int 8 0) .little 1))
+  assertTrue "widening high cast is rejected" (rejected (.cast .high 16 (int 8 0)))
+  assertTrue "widening low cast is rejected" (rejected (.cast .low 16 (int 8 0)))
+  assertTrue "widening unsigned cast is accepted" (!rejected (.cast .unsigned 16 (int 8 0)))
+  assertTrue "well-typed load is accepted" (!rejected (.load (.var memoryVar) (int 64 0) .little 1))
+  assertTrue "oversized literal is rejected"
+    (match Wire.parseExp (.list [.atom "int", .atom "8", .atom "100"]) with
+      | .error _ => true
+      | .ok _ => false)
+  assertTrue "largest literal is accepted"
+    (match Wire.parseExp (.list [.atom "int", .atom "8", .atom "ff"]) with
+      | .ok _ => true
+      | .error _ => false)
+  let failing : Exp := .load (int 8 0) (.unknown "a" .unit) .little 1
+  let observedResult ← evalExpObserved none [] failing
+  assertTrue "observed evaluation reports the same first error"
+    (match observedResult, evalExp [] failing with
+      | .error first, .error second => first == second
+      | _, _ => false)
 end Bap.Tests.Bil

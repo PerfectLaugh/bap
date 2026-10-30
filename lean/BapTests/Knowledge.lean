@@ -38,6 +38,7 @@ def run : IO Unit := do
   match collect env answer object state with
   | .ok (value, next) =>
     assertEqual "promise computes dependent property" 21 value
+    assertEqual "refining collect increments version" (state.version + 1) next.version
     match collect env answer object next with
     | .ok (again, final) =>
       assertEqual "computed property is stable" value again

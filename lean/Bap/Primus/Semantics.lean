@@ -91,15 +91,15 @@ private def primitiveNames : List String :=
     "word-width", "set", "set$", "set-symbol-value", "alias-base-register", "symbol", "empty",
     "load-bits", "load-byte", "load-hword", "load-word", "store-word", "store-byte", "exec-addr", "intrinsic",
     "get-program-counter", "get-current-program-counter", "get-next-program-counter",
-    "is-zero", "non-zero", "neg", "s<", "s<=", "s>", "s>=", "replicate", "clz"]
+    "is-zero", "non-zero", "neg", "s<", "s<=", "s>", "s>=", "replicate", "clz", "signed-mod"]
 
 private def lookup (name : String) (locals : Locals) (globals : Globals) : Except String Value :=
   let primitiveName := if name.startsWith "core:" then (name.drop 5).toString else name
-  if primitiveName = "replicate" then .ok (.callable (.primitive "replicate"))
-  else
-    match Assoc.get name locals with
-    | some value => .ok value
-    | none =>
+  match Assoc.get name locals with
+  | some value => .ok value
+  | none =>
+    if primitiveName = "replicate" then .ok (.callable (.primitive "replicate"))
+    else
       match Assoc.get name globals with
       | some value => .ok value
       | none =>
@@ -108,11 +108,11 @@ private def lookup (name : String) (locals : Locals) (globals : Globals) : Excep
 
 private def lookupState (name : String) (locals : Locals) (state : State) : Except String Value :=
   let primitiveName := if name.startsWith "core:" then (name.drop 5).toString else name
-  if primitiveName = "replicate" then .ok (.callable (.primitive "replicate"))
-  else
-    match Assoc.get name locals with
-    | some value => .ok value
-    | none =>
+  match Assoc.get name locals with
+  | some value => .ok value
+  | none =>
+    if primitiveName = "replicate" then .ok (.callable (.primitive "replicate"))
+    else
       match state.operations.get? name with
       | some callable => .ok (.callable callable)
       | none =>
@@ -252,8 +252,8 @@ private def cast (context : Context) (kind : Bil.Cast) (args : List Value) : Exc
     | _ => .ok (.bil width (.cast kind width value))
   | _ => .error "Primus cast expects width and value"
 
-private def widthOf (_context : Context) : Value → Except String Nat
-  | .int _ => .ok 64
+private def widthOf (context : Context) : Value → Except String Nat
+  | .int _ => .ok context.bits
   | .bil width _ => .ok width
   | .bool _ => .ok 1
   | .register _ width _ => .ok width
@@ -272,11 +272,16 @@ private def valueTag : Value → String
 private def assignRegister (context : Context) (name : String) (width baseWidth : Nat)
     (value : Value) : Except String Bil.Program := do
   if name = "XZR" then return []
-  if width != baseWidth then
-    throw s!"direct writes to subregisters must use the target's alias operation: {name} width={width} base={baseWidth}"
   let (valueWidth, value) ← expectBil context value
   if valueWidth != width then throw s!"Primus assignment width mismatch: {width} versus {valueWidth}"
-  return [.move ⟨name, .imm width, 0, false⟩ value]
+  let var : Bap.Var := ⟨name, .imm baseWidth, 0, false⟩
+  if width < baseWidth then
+    -- a write through an alias keeps the other bits of the base, as Theory.Target.unalias does
+    return [.move var (.concat (.extract (baseWidth - 1) width (.var var)) value)]
+  else if width = baseWidth then
+    return [.move var value]
+  else
+    throw s!"Primus assignment wider than the register: {name} width={width} base={baseWidth}"
 
 private def assign (context : Context) (destination value : Value) : Except String Bil.Program := do
   match destination with
@@ -325,7 +330,8 @@ private def applyPrimitive (context : Context) (name : String) (args : List Valu
     | _ => throw "neg expects one argument"
   | "/" => valueOnly (← binary context .div args)
   | "s/" => valueOnly (← binary context .sdiv args)
-  | "mod" => valueOnly (← binary context .smod args)
+  | "mod" => valueOnly (← binary context .rem args)
+  | "signed-mod" => valueOnly (← binary context .srem args)
   | "=" => valueOnly (← compare context .eq args)
   | "/=" => valueOnly (← compare context .neq args)
   | "<" => valueOnly (← compare context .lt args)
@@ -483,7 +489,7 @@ private def applyPrimitiveIndex (context : Context) (operation : Nat) (args : Li
   | 2 => valueOnly (← binary context .mul args)
   | 3 => valueOnly (← binary context .div args)
   | 4 => valueOnly (← binary context .sdiv args)
-  | 5 => valueOnly (← binary context .smod args)
+  | 5 => valueOnly (← binary context .rem args)
   | 6 => valueOnly (← compare context .eq args)
   | 7 => valueOnly (← compare context .neq args)
   | 8 => valueOnly (← compare context .lt args)
@@ -918,6 +924,7 @@ mutual
           | none => (globals.findIdx? fun binding => binding.1 == atom).map .global
       | .list [] => some (.value (.list []))
       | .list [.atom "quote", value] => some (.value (quotedValue value))
+      | .list [.atom "replicate", _, _] | .list [.atom "core:replicate", _, _] => none
       | .list [.atom "clz", value] => do
         let value ← compileExp globals locals fuel value
         some (.primitive 63 [value])

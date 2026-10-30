@@ -216,7 +216,11 @@ private def normalize (env : Environment) (object : Object) : Nat → List Fact 
   | 0, _ => .error .exhausted
   | fuel + 1, facts => do
     let (changed, facts) ← runPromises env.promises object facts
-    if changed then normalize env object fuel facts else .ok (false, facts)
+    if changed then do
+      let (_, facts) ← normalize env object fuel facts
+      .ok (true, facts)
+    else
+      .ok (false, facts)
 
 def collect (env : Environment) (slot : Slot kind) (object : Object) (state : State) (fuel : Nat := 1000) :
     Except Conflict (kind.data × State) := do

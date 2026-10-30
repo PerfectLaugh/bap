@@ -115,7 +115,11 @@ def parseExp (input : Sexp) : Except String Exp := do
   match input with
   | .list [.atom "int", .atom width, .atom value] =>
     let width ← match width.toNat? with | some n => .ok n | none => .error "invalid integer width"
-    .ok (.int (BitVec.ofNat width (← parseHex value)))
+    let value ← parseHex value
+    if value < 2 ^ width then
+      .ok (.int (BitVec.ofNat width value))
+    else
+      .error "integer literal does not fit its width"
   | .list (.atom "var" :: _) => .ok (.var (← parseVar input))
   | .list [.atom "load", memory, address, endian, size] =>
     .ok (.load (← parseExp memory) (← parseExp address) (← parseEndian endian) (← Sexp.nat size))

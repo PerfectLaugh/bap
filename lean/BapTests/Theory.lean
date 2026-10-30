@@ -48,6 +48,19 @@ def run : IO Unit := do
   assertEqual "target endianness inheritance" Endianness.le child.endianness
   assertTrue "case-insensitive nickname" (child.matches "X64")
   assertTrue "target family membership" (parent.belongs child)
+  assertTrue "unknown is the implicit root" (unknown.belongs parent)
+  assertTrue "unknown is an ancestor of grandchildren" (unknown.belongs child)
+  assertEqual "target parents end at unknown" ["x86", "unknown"] child.parents
+  assertEqual "root inherits unknown width" 32 (declare { name := "bare" }).bits
+  assertEqual "root inherits unknown endianness" Endianness.eb (declare { name := "bare" }).endianness
+  let multiRole : Target := declare {
+    name := "roles"
+    regs := some [([.general], [rax]), ([.integer], [rax]), ([.general], [eax])]
+  }
+  assertTrue "roles may come from different groups" (multiRole.hasRoles [.general, .integer] rax)
+  assertEqual "missing role is rejected" false (multiRole.hasRoles [.general, .integer] eax)
+  assertEqual "absent variable has no role" false (multiRole.hasRoles [.general] of)
+  assertTrue "empty role list holds vacuously" (multiRole.hasRoles [] of)
   assertEqual "register role query" [rax] (child.registers [.general])
   assertEqual "register exclusion" [] (child.registers [] [.general])
   assertEqual "unique register query" (some rax) (child.reg .general true)
@@ -71,6 +84,16 @@ def run : IO Unit := do
   assertEqual "value resort accepts same sort" (some (ValueSort.bitv 32)) (value.resort (.bitv 32) |>.map Theory.Value.sort)
   assertEqual "value resort rejects other sort" none (value.resort (.bitv 64) |>.map Theory.Value.sort)
   assertEqual "bottom effect order" Effect.PartialOrder.less (Effect.EffectSort.order .bot Effect.rreg)
+  let readWrite := Effect.EffectSort.both Effect.rreg Effect.wreg
+  let writeRead := Effect.EffectSort.both Effect.wreg Effect.rreg
+  assertEqual "effect order ignores atom order" Effect.PartialOrder.equal
+    (Effect.EffectSort.order readWrite writeRead)
+  assertEqual "empty join equals bottom" Effect.PartialOrder.equal
+    (Effect.EffectSort.order (Effect.EffectSort.join [] []) .bot)
+  assertEqual "top absorbs both" Effect.PartialOrder.equal
+    (Effect.EffectSort.order (.both .top Effect.rreg) .top)
+  assertEqual "effects below top" Effect.PartialOrder.less
+    (Effect.EffectSort.order readWrite (.both Effect.rreg .top))
   assertEqual "combined effect order" Effect.PartialOrder.less
     (Effect.EffectSort.order Effect.rreg (.both Effect.rreg Effect.wreg))
   assertEqual "independent effects unordered" Effect.PartialOrder.unordered
@@ -97,13 +120,29 @@ def run : IO Unit := do
   assertEqual "AArch64 stack alignment" 32 (ABI.alignStack 16 33)
   let mips ← convention .mips
   assertEqual "MIPS result register" "R2" mips.result.name
-  assertEqual "MIPS fifth argument uses stack" (ABI.Location.stack 0) (ABI.argumentLocation mips 4)
+  assertEqual "MIPS n64 fifth argument register"
+    (ABI.Location.register ⟨"R8", .imm 64, 0, false⟩) (ABI.argumentLocation mips 4)
+  assertEqual "MIPS n64 ninth argument uses stack" (ABI.Location.stack 0) (ABI.argumentLocation mips 8)
+  match ABI.convention .mips 32 with
+  | some mips32 =>
+    assertEqual "MIPS o32 fifth argument uses stack" (ABI.Location.stack 0)
+      (ABI.argumentLocation mips32 4)
+  | none => throw <| IO.userError "missing MIPS o32 ABI"
+  let i386 ← convention .x86
+  assertEqual "x86 word size" 32 i386.wordSize
+  assertEqual "x86 stack slots are words" (ABI.Location.stack 4) (ABI.argumentLocation i386 1)
   let arm ← convention .arm
   assertEqual "ARM syscall number register" "R7" arm.syscallNumber.name
-  assertEqual "ARM return register" (some "R14") (arm.returnAddress.map Bap.Var.name)
+  assertEqual "ARM return register" (some "LR") (arm.returnAddress.map Bap.Var.name)
+  assertEqual "ARM stack pointer" "SP" arm.stackPointer.name
   let ppc ← convention .powerpc
   assertEqual "PowerPC result register" "R3" ppc.result.name
   assertEqual "PowerPC stack pointer" "R1" ppc.stackPointer.name
+  match API.parseHeader "int/* no space */add(int/**/x);" with
+  | .ok [glued] =>
+    assertEqual "API comment separates tokens, name" "add" glued.name
+    assertEqual "API comment separates tokens, parameter" ["x"] (glued.params.map API.Parameter.name)
+  | _ => throw <| IO.userError "a comment did not separate the tokens"
   let header := "/* API fixture */\nint add(int x, int y);\nvoid *malloc(size_t size);\nint printf(const char *fmt, ...);\n"
   IO.FS.writeFile "native/build/api-test.h" header
   let prototypes ← API.load "native/build/api-test.h"

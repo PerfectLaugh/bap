@@ -105,7 +105,7 @@ private def stripCommentsAux : Nat → List Char → List Char
   | fuel + 1, input =>
     match input with
     | [] => []
-    | '/' :: '*' :: rest => stripCommentsAux fuel (stripBlockComment rest)
+    | '/' :: '*' :: rest => ' ' :: stripCommentsAux fuel (stripBlockComment rest)
     | '/' :: '/' :: rest => stripCommentsAux fuel (stripLineComment rest)
     | c :: rest => c :: stripCommentsAux fuel rest
 

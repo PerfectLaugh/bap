@@ -26,7 +26,20 @@ private def sample : Sub :=
     ]
   }
 
+/-- Blocks 2 and 3 are siblings; block 2 assigns `x` twice and block 3 reads `x`. -/
+private def siblings : Sub :=
+  ⟨1, "siblings", [], [
+    ⟨1, [], [], [goto 1 2, goto 2 3]⟩,
+    ⟨2, [], [defn 3 x (int 1), defn 4 x (int 2)], []⟩,
+    ⟨3, [], [defn 5 y (.var x)], []⟩]⟩
+
 def run : IO Unit := do
+  match (toSsa siblings).block 3 with
+  | some block =>
+    match block.defs with
+    | [read] => assertEqual "sibling definitions are out of scope" (expString (.var x)) (expString read.rhs)
+    | _ => throw <| IO.userError "missing sibling definition"
+  | none => throw <| IO.userError "missing sibling block"
   let connected := Cfg.connected sample
   assertEqual "connected CFG pseudo entry" pseudoStart connected.start
   assertTrue "connected CFG includes disconnected component" (connected.reachable.contains 99)

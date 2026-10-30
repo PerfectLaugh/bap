@@ -692,4 +692,41 @@ def run : IO Unit := do
   assertEqual "native compilation resumes after write cooldown" 2 cooldownStats.nativeRuns
   assertEqual "write cooldown avoids repeated compilation" 2 cooldownStats.nativeCompilations
 
+  -- Graph cycles: `gatherGraph` keeps every compiled range acyclic, whatever the cycle's length.
+  let cycleX := reg "cycleX"
+  let cycleFetch : Primus.Lifted.Fetch := fun _ => pure (ByteArray.mk #[1])
+  let cycleBack (limit : Nat) (back exit : Nat) : Bil.Stmt :=
+    .ifElse (.bin .neq (.var cycleX) (int limit)) [.jmp (int back)] [.jmp (int exit)]
+  let cycleStep (next : Nat) : Bil.Program := [.move cycleX (.bin .add (.var cycleX) (int 1)), .jmp (int next)]
+  let cycleExit : Primus.Lifted.Block := ⟨0x30000, 0x30004, []⟩
+  let runCycle (name : String) (entry : Nat) (cycle : Nat → Primus.Lifted.Block) (expected : Nat) : IO Primus.Lifted.Statistics := do
+    let engine ← Primus.Lifted.Engine.create 1 128 8 16 0 false
+    let result ← Primus.Lifted.run engine cycleFetch (fun pc _ => pure (cycle pc)) (state cycleX 0) entry 50
+    assertBits s!"{name} result" (BitVec.ofNat 64 expected) (lookup result.state.env cycleX)
+    assertEqual s!"{name} leaves the cycle" 0x30004 result.pc
+    let stats ← Primus.Lifted.stats engine
+    assertEqual s!"{name} stays native" 0 stats.interpretedRuns
+    pure stats
+  let twoCycle : Nat → Primus.Lifted.Block
+    | 0x20000 => ⟨0x20000, 0x20004, cycleStep 0x20004⟩
+    | 0x20004 => ⟨0x20004, 0x20008, [cycleBack 5 0x20000 0x30000]⟩
+    | _ => cycleExit
+  let twoStats ← runCycle "two-block cycle through the seed" 0x20000 twoCycle 5
+  assertEqual "two-block cycle compiles one acyclic range" (1, 3) (twoStats.nativeCompilations, twoStats.graphBlocks)
+  let threeCycle : Nat → Primus.Lifted.Block
+    | 0x21000 => ⟨0x21000, 0x21004, cycleStep 0x21004⟩
+    | 0x21004 => ⟨0x21004, 0x21008, cycleStep 0x21008⟩
+    | 0x21008 => ⟨0x21008, 0x2100c, [cycleBack 6 0x21000 0x30000]⟩
+    | _ => cycleExit
+  let threeStats ← runCycle "three-block cycle through the seed" 0x21000 threeCycle 6
+  assertEqual "three-block cycle compiles one acyclic range" (1, 4) (threeStats.nativeCompilations, threeStats.graphBlocks)
+  let innerCycle : Nat → Primus.Lifted.Block
+    | 0x22000 => ⟨0x22000, 0x22004, [.jmp (int 0x22004)]⟩
+    | 0x22004 => ⟨0x22004, 0x22008, cycleStep 0x22008⟩
+    | 0x22008 => ⟨0x22008, 0x2200c, cycleStep 0x2200c⟩
+    | 0x2200c => ⟨0x2200c, 0x22010, [cycleBack 6 0x22004 0x30000]⟩
+    | _ => cycleExit
+  let innerStats ← runCycle "cycle behind the seed" 0x22000 innerCycle 6
+  assertEqual "inner back edge returns to the dispatcher" 4 innerStats.nativeRuns
+
 end Bap.Tests.Lifted

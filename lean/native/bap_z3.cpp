@@ -31,6 +31,8 @@ extern "C" lean_obj_res bap_z3_check_sat(lean_obj_arg script, lean_obj_arg) {
   Z3_del_config(config);
   if (!context)
     return io_error("unable to create Z3 context");
+  // The default handler exits the process on a script error.
+  Z3_set_error_handler(context, nullptr);
   Z3_solver solver = Z3_mk_solver(context);
   if (!solver) {
     Z3_del_context(context);
@@ -38,6 +40,13 @@ extern "C" lean_obj_res bap_z3_check_sat(lean_obj_arg script, lean_obj_arg) {
   }
   Z3_solver_inc_ref(context, solver);
   Z3_solver_from_string(context, solver, lean_string_cstr(script));
+  Z3_error_code code = Z3_get_error_code(context);
+  if (code != Z3_OK) {
+    std::string message = Z3_get_error_msg(context, code);
+    Z3_solver_dec_ref(context, solver);
+    Z3_del_context(context);
+    return io_error("Z3 rejected script: " + message);
+  }
   Z3_lbool result = Z3_solver_check(context, solver);
   if (result == Z3_L_UNDEF) {
     Z3_solver_dec_ref(context, solver);

@@ -94,6 +94,10 @@ def run : IO Unit := do
       assertEqual "Mach-O function symbol" true symbol.isFunction
       assertEqual "Mach-O non-debug symbol" false symbol.isDebug
     | _, _, _ => throw <| IO.userError "missing decoded Mach-O metadata"
+  match Macho.decode (fixture.set! 241 0) with
+  | .error error => throw <| IO.userError error
+  | .ok image =>
+    assertEqual "Mach-O NO_SECT symbol is not in section 1" (some false) (image.symbols[0]?.map (·.isFunction))
   let path := "/tmp/bap-lean-fixture.macho"
   IO.FS.writeBinFile path fixture
   let loaded ← Image.load path

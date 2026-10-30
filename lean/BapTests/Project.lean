@@ -172,6 +172,71 @@ def run : IO Unit := do
     [outsideAccess] [.mem 0x3000 8]
   assertEqual "dynamic slice reports outside writer" [0x2000] outsideDynamic.gaps
   assertTrue "dynamic slice outside writer is incomplete" !outsideDynamic.complete
+  match Analysis.Protobuf.fields (ByteArray.mk #[255, 255, 255, 255, 255, 255, 255, 255, 255, 127]) with
+  | .error "protobuf varint exceeds 64 bits" => IO.println "ok: protobuf rejects varints above 64 bits"
+  | .error error => throw <| IO.userError s!"wrong protobuf varint error: {error}"
+  | .ok _ => throw <| IO.userError "protobuf accepted a varint above 64 bits"
+  match Analysis.Protobuf.fields (ByteArray.mk #[8, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1]) with
+  | .ok [{ value := .varint value, .. }] => assertEqual "protobuf keeps the largest 64-bit varint" (2 ^ 64 - 1) value
+  | _ => throw <| IO.userError "protobuf rejected a 64-bit varint"
+  let flag : Var := ⟨"flag", .imm 1, 0, false⟩
+  let insn (address : Nat) (code : Bil.Program) : Disasm.Insn := ⟨address, 4, "", .normal, none, code⟩
+  let five : Bil.Exp := .int (BitVec.ofNat 64 5)
+  let conditional := Analysis.Slice.backward
+    [insn 0 [.move rax five], insn 4 [.ifElse (.var flag) [.move rax five] []]] [.reg rax]
+  assertEqual "backward slice keeps definitions a branch may skip" [0, 4] conditional.sites
+  let store (location : Bil.Exp) (size : Nat) : Bil.Stmt :=
+    .move mem (.store (.var mem) location five .little size)
+  let overlapping := Analysis.Slice.backward [insn 0 [store address 8]] [.mem 0x3000 4]
+  assertEqual "backward slice finds overlapping stores" [0] overlapping.sites
+  assertEqual "backward slice lets a covering store end liveness" [] overlapping.live
+  let partialStore := Analysis.Slice.backward [insn 0 [store address 2]] [.mem 0x3000 4]
+  assertEqual "backward slice keeps a partly overwritten location" [Analysis.Slice.Location.mem 0x3000 4] partialStore.live
+  let dynamicStore := Analysis.Slice.backward [insn 0 [store (.var rax) 8]] [.mem 0x3000 4]
+  assertEqual "backward slice includes stores that may alias" [0] dynamicStore.sites
+  assertTrue "backward slice with a dynamic store is incomplete" !dynamicStore.complete
+  let branching : Project.Project := { xrefProject with
+    disasm := some { entry := 0x1000, instructions := instructions.dropLast ++ [⟨0x100c, 4, "jcc", .conditionalJump, some 0x1004, []⟩] } }
+  assertTrue "project slice over branches is incomplete"
+    !(Analysis.Slice.backwardProject branching 0x1000 [.mem 0x3000 8]).complete
+  let overlappingWriter : Bap.Emu.TraceAccess := { outsideAccess with address := 0x3004, size := 8 }
+  assertEqual "dynamic slice reports overlapping writer" [0x2000]
+    (Analysis.DynamicSlice.backwardWithAccesses xrefProject 0x1000 [0x1004, 0x1008] [overlappingWriter] [.mem 0x3000 8]).gaps
+  let sizedIndex : Analysis.Xrefs.Index := { functions := [⟨"sized", 0x1000, 16, true, false⟩] }
+  assertEqual "xrefs ends a function at its size" (none : Option String)
+    ((Analysis.Xrefs.functionOf sizedIndex 0x1010).map Image.Symbol.name)
+  let aliasImage : Image.Image := { image with
+    symbols := [⟨"first", 0x1000, 16, true, false⟩, ⟨"second", 0x1000, 16, true, false⟩] }
+  let aliasDecompiled := Decompile.project { xrefProject with image := some aliasImage }
+  assertEqual "aliases both render their body" 3 (aliasDecompiled.splitOn "RAX = read64_le(mem, 0x3000);").length
+  let chain := ["p0", "p1", "p2", "p3", "p4"]
+  let chainPasses := (chain.zip ["p1", "p2", "p3", "p4", "a"]).map (fun pair => recordingPass pair.1 [pair.2, "a"]) ++
+    [recordingPass "a"]
+  match runPasses chainPasses {} with
+  | .ok chained => assertEqual "long dependency chains schedule" (some "ap4p3p2p1p0") (chained.get "trace")
+  | .error error => throw <| IO.userError s!"acyclic chain failed: {repr error}"
+  let regions : Project.Project := { image := some { image with
+    memory := (Image.MemoryMap.empty.add ⟨0x1000, ByteArray.mk #[1], true, false, false⟩ ()).add
+      ⟨0x1000, ByteArray.mk #[2], true, false, false⟩ () } }
+  Project.save regions "native/build/project-regions.sexp"
+  let reloaded ← Project.loadSaved "native/build/project-regions.sexp"
+  assertEqual "project reload keeps region order" [[2], [1]]
+    ((reloaded.image.map fun loaded => loaded.memory.entries.map fun entry => entry.1.data.toList.map UInt8.toNat).getD [])
+  match analyze defaultRegistry project ["no-such-pass"] with
+  | .error (.unknownPass "no-such-pass") => IO.println "ok: unknown pass name rejected"
+  | .error error => throw <| IO.userError s!"wrong unknown pass error: {repr error}"
+  | .ok _ => throw <| IO.userError "unknown pass name accepted"
+  let manual : Pass := { recordingPass "manual" with autorun := false }
+  let automatic := recordingPass "automatic" ["manual"]
+  let manualRegistry := Registry.register ⟨"manual", [manual, automatic]⟩ {}
+  match analyze manualRegistry {} with
+  | .ok done => assertEqual "autorun pass runs its manual dependency" (some "manualautomatic") (done.get "trace")
+  | .error error => throw <| IO.userError s!"autorun dependency failed: {repr error}"
+  let cyclicRegistry := Registry.register ⟨"cyclic", [recordingPass "x" ["y"], recordingPass "y" ["x"]]⟩ {}
+  match analyze cyclicRegistry {} with
+  | .error (.cycle _) => IO.println "ok: registry cycle reported as a cycle"
+  | .error error => throw <| IO.userError s!"wrong registry cycle error: {repr error}"
+  | .ok _ => throw <| IO.userError "registry cycle accepted"
   IO.FS.writeFile "native/build/plugin-test.scm"
     "(plugin demo (pass marker (set origin plugin)) (pass detailed (deps marker) (set detail ok)))"
   let registry ← Plugin.loadMany defaultRegistry ["native/build/plugin-test.scm"]

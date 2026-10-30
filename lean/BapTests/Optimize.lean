@@ -29,7 +29,67 @@ private def sample : Sub :=
     ]
   }
 
+/-- `x := z; y := x` followed by a jump that reads `y`. -/
+private def usedInBlock : Sub :=
+  ⟨1, "used-in-block", [], [
+    ⟨1, [], [defn 1 x (.var z), defn 2 y (.var x)], [goto 3 2]⟩,
+    ⟨2, [], [], [⟨4, some (.var y), .ret (.indirect (.var y))⟩]⟩]⟩
+
+/-- `x := z; x := y` followed by a jump that reads `x`: the first write is dead. -/
+private def overwritten : Sub :=
+  ⟨1, "overwritten", [], [
+    ⟨1, [], [defn 1 x (.var z), defn 2 x (.var y)], [⟨3, none, .ret (.indirect (.var x))⟩]⟩]⟩
+
+/-- `x := 1; L: y := x; x := 2; if z goto L else M; M: ret y`. -/
+private def loop : Sub :=
+  ⟨1, "loop", [], [
+    ⟨1, [], [defn 1 x (int 1)], [goto 2 2]⟩,
+    ⟨2, [], [defn 3 y (.var x), defn 4 x (int 2)], [⟨5, some (.var z), .goto (.direct 2)⟩, goto 6 3]⟩,
+    ⟨3, [], [], [⟨7, none, .ret (.indirect (.var y))⟩]⟩]⟩
+
+/-- `L: y := x; x := 1; goto L`: the entry state of `x` is unknown on the first iteration. -/
+private def entryLoop : Sub :=
+  ⟨1, "entry-loop", [], [
+    ⟨1, [], [defn 1 y (.var x), defn 2 x (int 1)], [goto 3 1]⟩]⟩
+
+/-- `x := 1; L: y := x; if z goto L else M`: `x` is 1 on every path into `L`. -/
+private def stableLoop : Sub :=
+  ⟨1, "stable-loop", [], [
+    ⟨1, [], [defn 1 x (int 1)], [goto 2 2]⟩,
+    ⟨2, [], [defn 3 y (.var x)], [⟨4, some (.var z), .goto (.direct 2)⟩, goto 5 3]⟩,
+    ⟨3, [], [], []⟩]⟩
+
+private def regressions : IO Unit := do
+  match (propagateConstants (Cfg.fromSub stableLoop)).block 2 with
+  | some block =>
+    match block.defs with
+    | [read] => assertEqual "constant stable around a loop is folded" (expString (int 1)) (expString read.rhs)
+    | _ => throw <| IO.userError "missing stable loop definition"
+  | none => throw <| IO.userError "missing stable loop block"
+  let kept := (optimize usedInBlock).block 1 |>.map (·.defs.length) |>.getD 0
+  assertEqual "definition read later in its block survives" 2 kept
+  let single := (optimize overwritten).block 1 |>.map (fun blk => blk.defs.map (expString ·.rhs)) |>.getD []
+  assertEqual "overwritten definition removed" [expString (.var y)] single
+  match (propagateConstants (Cfg.fromSub loop)).block 2 with
+  | some block =>
+    match block.defs with
+    | [read, _] => assertEqual "loop read not folded to first iteration" (expString (.var x)) (expString read.rhs)
+    | _ => throw <| IO.userError "missing loop definitions"
+  | none => throw <| IO.userError "missing loop block"
+  match (propagateConstants (Cfg.fromSub entryLoop)).block 1 with
+  | some block =>
+    match block.defs with
+    | [read, _] => assertEqual "entry state stays unknown" (expString (.var x)) (expString read.rhs)
+    | _ => throw <| IO.userError "missing entry definitions"
+  | none => throw <| IO.userError "missing entry block"
+  let straight : Sub := ⟨1, "straight", [], [⟨1, [], [], [goto 1 2]⟩, ⟨2, [], [], []⟩]⟩
+  let (ins, outs) := (Cfg.fromSub straight).livenessFrom 2 [x]
+  assertTrue "seed live out of the exit" ((Assoc.get 2 outs).getD [] |>.contains x)
+  assertTrue "seed live into the exit" ((Assoc.get 2 ins).getD [] |>.contains x)
+  assertTrue "seed reaches the predecessor" ((Assoc.get 1 ins).getD [] |>.contains x)
+
 def run : IO Unit := do
+  regressions
   let cfg := Cfg.fromSub sample
   let (ins, outs) := cfg.liveness
   assertTrue "liveness propagates across blocks" ((Assoc.get 2 outs).getD [] |>.contains y)

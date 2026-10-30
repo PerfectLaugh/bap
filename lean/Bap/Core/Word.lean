@@ -25,16 +25,8 @@ def sdiv (left right : Word width) : Word width :=
 def srem (left right : Word width) : Word width :=
   if right = 0 then left else BitVec.srem left right
 
-def smod (left right : Word width) : Word width :=
-  let remainder := urem left right
-  if remainder = 0 then
-    remainder
-  else
-    match left.msb, right.msb with
-    | false, false => remainder
-    | true, false => -remainder + right
-    | false, true => remainder + right
-    | true, true => -remainder
+/-- SMT-LIB `bvsmod`: the sign of a nonzero result follows the divisor, and `smod x 0 = x`. -/
+def smod (left right : Word width) : Word width := BitVec.smod left right
 
 def shl (value amount : Word width) : Word width := value <<< amount.toNat
 def lshr (value amount : Word width) : Word width := value >>> amount.toNat

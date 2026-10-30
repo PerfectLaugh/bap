@@ -121,8 +121,7 @@ private def decodeImage (input : Sexp) : Except String Image.Image := do
     let segments ← (← Sexp.asList segments).mapM decodeSegment
     let symbols ← (← Sexp.asList symbols).mapM decodeSymbol
     let regions ← (← Sexp.asList memory).mapM decodeRegion
-    let memory : Image.MemoryMap Unit := regions.foldl (init := Image.MemoryMap.empty) fun memory region =>
-      memory.add region ()
+    let memory : Image.MemoryMap Unit := ⟨regions.map (·, ())⟩
     .ok {
       arch
       addrWidth := width

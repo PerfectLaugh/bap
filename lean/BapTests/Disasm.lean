@@ -216,6 +216,22 @@ def run : IO Unit := do
   let linear ← Linear.sweep (← Target.X86.disassembler 0) (bytes [0x48, 0x83, 0xec, 0x08, 0xc3])
   assertEqual "linear sweep instruction count" 2 linear.instructions.length
   assertEqual "linear sweep has no errors" [] linear.errors
+  -- revisiting addresses costs no fuel, and running out of it is an error
+  let loopInsn (address : Nat) (flow : Flow) (target : Nat) : Insn :=
+    { address := address, size := 1, asm := "", flow := flow, target := some target }
+  let loopDecoder : Disassembler := ⟨"loop", fun address _ => pure <| .ok <| match address with
+    | 0 => loopInsn 0 .conditionalJump 3
+    | 1 => loopInsn 1 .conditionalJump 1
+    | 2 => loopInsn 2 .jump 1
+    | address => loopInsn address .ret 0⟩
+  let loop ← Recursive.scan loopDecoder (bytes [0, 0, 0, 0]) 0
+  assertEqual "recursive scan reaches past revisited addresses" [0, 1, 2, 3]
+    (loop.instructions.map Insn.address)
+  assertEqual "recursive scan with fuel left has no errors" [] loop.errors
+  let endless : Disassembler := ⟨"endless", fun address _ => pure <| .ok
+    { address := address, size := 1, asm := "", flow := .normal }⟩
+  let exhausted ← Recursive.scan endless (bytes [0]) 0
+  assertEqual "recursive scan reports running out of fuel" [Recursive.outOfFuel] exhausted.errors
   let branch ← Recursive.scan (← Target.X86.disassembler 0) (bytes [0xeb, 0x02, 0xc3, 0x90, 0xc3]) 0
   assertEqual "recursive branch skips unreachable" [0, 4] (branch.instructions.map Insn.address)
   assertEqual "recursive branch edges" [(0, 4)] branch.edges

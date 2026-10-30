@@ -9,9 +9,10 @@ structure Result where
   continuation : Bool
   deriving Repr
 
-private def cellsEqual (left right : List (BitVec width × UInt8)) : Bool :=
-  left.length = right.length && left.all fun cell =>
-    (right.find? fun other => other.1 == cell.1).map (fun other => other.2 == cell.2) |>.getD false
+/-- Equal contents: every address either side holds reads the same byte from both. -/
+private def memoryEqual (left right : Memory width) : Bool :=
+  (Memory.cells left ++ Memory.cells right).all fun cell =>
+    Memory.readByte left cell.1 == Memory.readByte right cell.1
 
 private def valueEq : Value → Value → Bool
   | @Value.bits leftWidth left, @Value.bits rightWidth right =>
@@ -19,7 +20,7 @@ private def valueEq : Value → Value → Bool
   | @Value.memory leftWidth left, @Value.memory rightWidth right =>
     if h : leftWidth = rightWidth then
       let right : Memory leftWidth := h ▸ right
-      cellsEqual (Memory.cells left) (Memory.cells right)
+      memoryEqual left right
     else
       false
   | .undefined, .undefined => true

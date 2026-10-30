@@ -31,6 +31,43 @@ private def current (machine : Machine) : IO Instance :=
   | some inst => pure inst
   | none => throw <| IO.userError "current machine does not exist"
 
+private def semanticsForms (bits : Nat) (input : String) : IO Primus.Semantics.State := do
+  let context : Primus.Semantics.Context := { bits }
+  let forms ← match Sexp.parseMany input with
+    | .ok forms => pure forms
+    | .error error => throw <| IO.userError error
+  match Primus.Semantics.evalForms context [("R", Primus.Semantics.register "R" bits bits)] forms with
+  | .ok state => pure state
+  | .error error => throw <| IO.userError error
+
+private def assignedConstant (state : Primus.Semantics.State) : IO Nat :=
+  match state.code with
+  | [.move _ (.int value)] => pure value.toNat
+  | _ => throw <| IO.userError s!"expected one constant move, got {repr state.code}"
+
+private def semanticsRegressions : IO Unit := do
+  assertEqual "word-width of a literal is the machine word" 32
+    (← assignedConstant (← semanticsForms 32 "(set R (word-width 5))"))
+  assertEqual "word-width of a literal agrees with arithmetic" 64
+    (← assignedConstant (← semanticsForms 64 "(set R (word-width 5))"))
+  match (← semanticsForms 32 "(set R (mod 0xfffffff9 3))").code with
+  | [.move _ (.bin .rem _ _)] => IO.println "ok: mod is the unsigned remainder"
+  | code => throw <| IO.userError s!"mod changed: {repr code}"
+  match (← semanticsForms 32 "(set R (signed-mod 0xfffffff9 3))").code with
+  | [.move _ (.bin .srem _ _)] => IO.println "ok: signed-mod takes the sign of the dividend"
+  | code => throw <| IO.userError s!"signed-mod changed: {repr code}"
+  assertEqual "local binding shadows replicate" 7
+    (← assignedConstant (← semanticsForms 64 "(let ((replicate 7)) (set R replicate))"))
+  match (← semanticsForms 64 "(let ((replicate 7)) (set R (replicate 1:32 2)))").code with
+  | [.move _ (.concat _ _)] => IO.println "ok: replicate stays callable under a local binding"
+  | code => throw <| IO.userError s!"replicate call changed: {repr code}"
+  let compiled ← semanticsForms 64 "(defun op () (let ((replicate 7)) (set R replicate)))"
+  match (← Primus.Semantics.lift compiled.globals {} "op" []) with
+  | [.move _ (.int value)] => assertEqual "compiled local shadows replicate" 7 value.toNat
+  | code => throw <| IO.userError s!"compiled replicate shadow changed: {repr code}"
+  assertEqual "hexadecimal literal parses" 16 (← assignedConstant (← semanticsForms 64 "(set R 0x10)"))
+  assertEqual "bare 0x is zero, as in Zarith" 0 (← assignedConstant (← semanticsForms 64 "(set R 0x)"))
+
 def run : IO Unit := do
   let memory ← mapped
   match memory.loadByte 0x1001 with
@@ -67,6 +104,29 @@ def run : IO Unit := do
   | .error (.notExecutable 0x3000) => IO.println "ok: non-executable fetch rejected"
   | .error error => throw <| IO.userError s!"wrong fetch error: {repr error}"
   | .ok _ => throw <| IO.userError "non-executable fetch accepted"
+  let executeOnly ← match Primus.Memory.map Primus.Memory.empty 0x4000 bytes ⟨false, false, true⟩ with
+    | .ok memory => pure memory
+    | .error error => throw <| IO.userError s!"map failed: {repr error}"
+  match executeOnly.fetch 0x4001 with
+  | .ok value => assertEqual "execute-only memory is fetchable" 2 value
+  | .error error => throw <| IO.userError s!"execute-only fetch failed: {repr error}"
+  match executeOnly.loadByte 0x4001 with
+  | .error (.unmapped 0x4001) => IO.println "ok: execute-only memory is not loadable"
+  | _ => throw <| IO.userError "execute-only load accepted"
+  match Primus.Memory.map Primus.Memory.empty (2 ^ 64 - 4) bytes rw with
+  | .ok top =>
+    match top.loadByte (2 ^ 64 - 1) with
+    | .ok value => assertEqual "last byte of the address space is mapped" 4 value
+    | .error error => throw <| IO.userError s!"top load failed: {repr error}"
+  | .error error => throw <| IO.userError s!"map at the top failed: {repr error}"
+  match Primus.Memory.map Primus.Memory.empty (2 ^ 64 - 3) bytes rw with
+  | .error (.outOfRange ..) => IO.println "ok: mapping across the end of the address space rejected"
+  | _ => throw <| IO.userError "mapping across the end of the address space accepted"
+  let aliased : Primus.Memory := ⟨Primus.Memory.empty.cells, [⟨0, 2 ^ 64 + 1, rw⟩]⟩
+  match aliased.storeByte (2 ^ 64) 7 with
+  | .error (.unmapped _) => IO.println "ok: store at 2^64 does not alias address 0"
+  | _ => throw <| IO.userError "store at 2^64 accepted"
+  semanticsRegressions
   match memory.addRegion ⟨0x1000, 0x1004, rw⟩ with
   | .error (.overlap 0x1000 0x1004) => IO.println "ok: overlapping region rejected"
   | .error error => throw <| IO.userError s!"wrong overlap error: {repr error}"

@@ -22,7 +22,12 @@ private def varint (data : ByteArray) (offset : Nat) : Except String (Nat × Nat
     else
       let byte := data[offset]!.toNat
       let value := value + (byte % 128) * 2 ^ shift
-      if byte < 128 then .ok (value, offset + 1) else loop (shift + 7) (offset + 1) value
+      if value ≥ 2 ^ 64 then
+        .error "protobuf varint exceeds 64 bits"
+      else if byte < 128 then
+        .ok (value, offset + 1)
+      else
+        loop (shift + 7) (offset + 1) value
   loop 0 offset 0
 
 def fields (data : ByteArray) : Except String (List Field) := do

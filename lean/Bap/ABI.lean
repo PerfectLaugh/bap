@@ -22,13 +22,13 @@ private def regs (width : Nat) (names : List String) : List Bap.Var := names.map
 private def numbered (name : String) (width first last : Nat) : List Bap.Var :=
   (List.range (last - first + 1)).map fun index => reg s!"{name}{first + index}" width
 
-private def x86 (width : Nat) : Convention := {
-  wordSize := width
+private def x86 : Convention := {
+  wordSize := 32
   functionArguments := []
-  result := reg "EAX" width
-  syscallNumber := reg "EAX" width
-  syscallArguments := regs width ["EBX", "ECX", "EDX", "ESI", "EDI", "EBP"]
-  stackPointer := reg "ESP" width
+  result := reg "EAX" 32
+  syscallNumber := reg "EAX" 32
+  syscallArguments := regs 32 ["EBX", "ECX", "EDX", "ESI", "EDI", "EBP"]
+  stackPointer := reg "ESP" 32
   returnAddress := none
 }
 
@@ -62,9 +62,10 @@ private def aarch64 : Convention := {
   returnAddress := some (reg "X30" 64)
 }
 
+/-- o32 passes four arguments in registers, n32 and n64 pass eight. -/
 private def mips (width : Nat) : Convention := {
   wordSize := width
-  functionArguments := numbered "R" width 4 7
+  functionArguments := numbered "R" width 4 (if width = 32 then 7 else 11)
   result := reg "R2" width
   syscallNumber := reg "R2" width
   syscallArguments := numbered "R" width 4 9
@@ -78,8 +79,8 @@ private def arm : Convention := {
   result := reg "R0" 32
   syscallNumber := reg "R7" 32
   syscallArguments := numbered "R" 32 0 5
-  stackPointer := reg "R13" 32
-  returnAddress := some (reg "R14" 32)
+  stackPointer := reg "SP" 32
+  returnAddress := some (reg "LR" 32)
 }
 
 private def powerpc (width : Nat) : Convention := {
@@ -104,7 +105,7 @@ private def systemz : Convention := {
 
 def convention (arch : Image.Arch) (wordSize : Nat := 64) : Option Convention :=
   match arch with
-  | .x86 => some (x86 wordSize)
+  | .x86 => some x86
   | .x86_64 => some x86_64
   | .riscv => some (riscv wordSize)
   | .aarch64 => some aarch64

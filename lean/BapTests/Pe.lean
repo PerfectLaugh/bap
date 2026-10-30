@@ -86,6 +86,11 @@ def run : IO Unit := do
       assertEqual "PE function symbol" true symbol.isFunction
       assertEqual "PE non-debug symbol" false symbol.isDebug
     | _, _, _ => throw <| IO.userError "missing decoded PE metadata"
+  match Pe.decode (fixture.set! 384 0) with
+  | .error error => throw <| IO.userError error
+  | .ok image =>
+    assertEqual "PE undefined symbol is not rebased onto section 1" (some 0) (image.symbols[0]?.map (·.addr))
+    assertEqual "PE undefined symbol is not a function" (some false) (image.symbols[0]?.map (·.isFunction))
   let path := "/tmp/bap-lean-fixture.exe"
   IO.FS.writeBinFile path fixture
   let loaded ← Image.load path

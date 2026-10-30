@@ -35,7 +35,10 @@ def decodeValue : (kind : PayloadKind) → Sexp → Except String kind.data
         .error "bitvector width mismatch"
       else
         let value ← Bil.Wire.parseHex (← Sexp.asAtom value)
-        .ok (BitVec.ofNat width value)
+        if value < 2 ^ width then
+          .ok (BitVec.ofNat width value)
+        else
+          .error "bitvector value exceeds its width"
     | _ => .error "invalid bitvector"
   | kind, _ => .error s!"persistent codec is not implemented for {repr kind}"
 

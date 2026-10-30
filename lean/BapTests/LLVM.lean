@@ -67,7 +67,216 @@ private def expectRoundTrip (label triple source : String) (expected : List Nat)
   assertTrue s!"{label} operands" (!decoded.operands.isEmpty)
   pure decoded
 
+private def bytes (values : List Nat) : ByteArray := ByteArray.mk (values.map UInt8.ofNat).toArray
+
+private def bit (name : String) (value : Nat) : Bap.Var × Value :=
+  (⟨name, .imm 1, 0, false⟩, .bits (BitVec.ofNat 1 value))
+
+private def word (name : String) (value : Nat) : Bap.Var × Value :=
+  (reg name, .bits (BitVec.ofNat 64 value))
+
+private def word32 (name : String) (value : Nat) : Bap.Var × Value :=
+  (⟨name, .imm 32, 0, false⟩, .bits (BitVec.ofNat 32 value))
+
+private def assertControl (label : String) (flow : Disasm.Flow) (target : Option Nat)
+    (insn : Disasm.Insn) : IO Unit := do
+  assertTrue s!"{label} flow" (insn.flow == flow)
+  assertEqual s!"{label} target" target insn.target
+
+/-- Control flow at a non-zero address, on encodings decoded by the linked LLVM. -/
+private def testBranches : IO Unit := do
+  let at0 := 0x2000
+  let arm ← Target.LLVMLift.arm32Environment
+  let decodeARM (address : Nat) (values : List Nat) :=
+    Target.LLVMLift.decodeARM32With arm address address (bytes values)
+  -- A32 immediates are relative to the pc, which is the address plus 8
+  for (label, flow, values, target) in [
+      ("Bcc", Disasm.Flow.conditionalJump, [0x04, 0, 0, 0x0a], at0 + 8 + 16),
+      ("Bcc backward", .conditionalJump, [0xfc, 0xff, 0xff, 0x0a], at0 + 8 - 16),
+      ("B self", .jump, [0xfe, 0xff, 0xff, 0xea], at0),
+      ("BL", .call, [0x04, 0, 0, 0xeb], at0 + 8 + 16),
+      ("BLX", .call, [0x04, 0, 0, 0xfa], at0 + 8 + 16)] do
+    let insn ← decodeARM at0 values
+    assertControl s!"ARM32 {label}" flow (some target) insn
+    let (_, effect) ← executeEffect insn [bit "ZF" 1]
+    assertJump s!"ARM32 {label} lifted target" target effect
+  assertEqual "ARM32 target moves with the address" (some (0x3000 + 8 + 16))
+    (← decodeARM 0x3000 [0x04, 0, 0, 0x0a]).target
+  let thumb ← Target.LLVMLift.thumbEnvironment
+  let decodeThumb (address : Nat) (values : List Nat) :=
+    Target.LLVMLift.decodeThumbWith thumb address address (bytes values)
+  -- T32 immediates are relative to the pc, which is the address plus 4
+  for (label, flow, values, target) in [
+      ("tBcc", Disasm.Flow.conditionalJump, [0x02, 0xd0], at0 + 4 + 4),
+      ("tB", .jump, [0x02, 0xe0], at0 + 4 + 4),
+      ("t2Bcc", .conditionalJump, [0x00, 0xf0, 0x08, 0x80], at0 + 4 + 16),
+      ("t2B", .jump, [0x00, 0xf0, 0x08, 0xb8], at0 + 4 + 16),
+      ("tBL", .call, [0x00, 0xf0, 0x08, 0xf8], at0 + 4 + 16)] do
+    let insn ← decodeThumb at0 values
+    assertControl s!"Thumb {label}" flow (some target) insn
+    let (_, effect) ← executeEffect insn [bit "ZF" 1]
+    assertJump s!"Thumb {label} lifted target" target effect
+  let thumbCbz ← decodeThumb at0 [0x1a, 0xb1]
+  assertControl "Thumb tCBZ" .conditionalJump (some (at0 + 4 + 6)) thumbCbz
+  let (_, thumbCbzEffect) ← executeEffect thumbCbz [word32 "R2" 0]
+  assertJump "Thumb tCBZ taken" (at0 + 4 + 6) thumbCbzEffect
+  let (_, thumbCbzNot) ← executeEffect thumbCbz [word32 "R2" 1]
+  assertNormal "Thumb tCBZ not taken" thumbCbzNot
+  let thumbBl ← decodeThumb at0 [0x00, 0xf0, 0x08, 0xf8]
+  let (thumbBlState, _) ← executeEffect thumbBl
+  assertReg32 "Thumb tBL link keeps the T32 state" "LR" (at0 + 4 + 1) thumbBlState
+  -- BLX computes from the word-aligned pc
+  let thumbBlx ← decodeThumb (at0 + 2) [0x00, 0xf0, 0x08, 0xe8]
+  assertControl "Thumb tBLXi" .call (some (at0 + 4 + 16)) thumbBlx
+  let (_, thumbBlxEffect) ← executeEffect thumbBlx
+  assertJump "Thumb tBLXi lifted target" (at0 + 4 + 16) thumbBlxEffect
+  let thumbBx ← decodeThumb at0 [0x70, 0x47]
+  assertControl "Thumb tBX" .indirectJump none thumbBx
+  let (_, thumbBxEffect) ← executeEffect thumbBx [word32 "LR" 0x1235]
+  assertJump "Thumb tBX clears the state bit" 0x1234 thumbBxEffect
+  let ppc ← Target.LLVMLift.powerpcEnvironment
+  let decodePPC (values : List Nat) :=
+    Target.LLVMLift.decodePowerPCWith ppc at0 at0 (bytes values)
+  -- the BO and BI operands of a conditional branch come before its displacement
+  let ppcCond ← decodePPC [0x08, 0, 0x82, 0x41]
+  assertControl "PowerPC conditional" .conditionalJump (some (at0 + 8)) ppcCond
+  let (_, ppcCondEffect) ← executeEffect ppcCond [bit "CR0EQ" 1]
+  assertJump "PowerPC conditional lifted target" (at0 + 8) ppcCondEffect
+  assertControl "PowerPC b" .jump (some (at0 + 16)) (← decodePPC [0x10, 0, 0, 0x48])
+  assertControl "PowerPC ba" .jump (some 16) (← decodePPC [0x12, 0, 0, 0x48])
+  assertControl "PowerPC bl" .call (some (at0 + 16)) (← decodePPC [0x11, 0, 0, 0x48])
+  assertControl "PowerPC bca" .conditionalJump (some 16) (← decodePPC [0x12, 0, 0x82, 0x41])
+  assertControl "PowerPC bdnz" .conditionalJump (some (at0 + 16)) (← decodePPC [0x10, 0, 0, 0x42])
+  assertEqual "PowerPC bclr has no static target" none (← decodePPC [0x20, 0, 0x82, 0x4d]).target
+  assertEqual "PowerPC bcctr has no static target" none (← decodePPC [0x20, 0x04, 0x82, 0x4d]).target
+  let ppc32 ← Target.LLVMLift.powerpc32Environment
+  let ppc32Cond ← Target.LLVMLift.decodePowerPC32With ppc32 at0 at0 (bytes [0x41, 0x82, 0, 0x08])
+  assertControl "PowerPC 32 conditional" .conditionalJump (some (at0 + 8)) ppc32Cond
+  let mips ← Target.LLVMLift.mipsEnvironment
+  let decodeMIPS (address : Nat) (values : List Nat) :=
+    Target.LLVMLift.decodeMIPSWith mips address address (bytes values)
+  -- the displacement of LLVM counts from the branch, and the region is of the delay slot
+  for (label, flow, values, target) in [
+      ("bgtz", Disasm.Flow.conditionalJump, [0x1c, 0x40, 0, 0x03], at0 + 16),
+      ("blez", .conditionalJump, [0x18, 0x40, 0, 0x03], at0 + 16),
+      ("bltz", .conditionalJump, [0x04, 0x40, 0, 0x03], at0 + 16),
+      ("bgez", .conditionalJump, [0x04, 0x41, 0, 0x03], at0 + 16),
+      ("beql", .conditionalJump, [0x50, 0x40, 0, 0x03], at0 + 16),
+      ("bne", .conditionalJump, [0x14, 0x40, 0, 0x03], at0 + 16),
+      ("bal", .call, [0x04, 0x11, 0, 0x03], at0 + 16),
+      ("j", .jump, [0x08, 0, 0x10, 0], 0x4000),
+      ("jal", .call, [0x0c, 0, 0x10, 0], 0x4000)] do
+    assertControl s!"MIPS {label}" flow (some target) (← decodeMIPS at0 values)
+  let mipsJ ← decodeMIPS 0x1ffffffc [0x08, 0, 0x10, 0]
+  assertEqual "MIPS j uses the region of the delay slot" (some 0x20004000) mipsJ.target
+  let (_, mipsJEffect) ← executeEffect mipsJ
+  assertJump "MIPS j lifted target" 0x20004000 mipsJEffect
+  let (_, mipsBgtzEffect) ← executeEffect (← decodeMIPS at0 [0x1c, 0x40, 0, 0x03]) [word "R2" 1]
+  assertJump "MIPS bgtz lifted target" (at0 + 16) mipsBgtzEffect
+  assertEqual "MIPS jr has no static target" none (← decodeMIPS at0 [0x03, 0xe0, 0, 0x08]).target
+  let riscv ← Target.LLVMLift.riscvEnvironment
+  let decodeRISCV (values : List Nat) :=
+    Target.LLVMLift.decodeRISCVWith riscv at0 at0 (bytes values)
+  -- LLVM has no flags for JAL and JALR
+  assertControl "RISC-V j" .jump (some (at0 + 16)) (← decodeRISCV [0x6f, 0, 0, 0x01])
+  assertControl "RISC-V jal" .call (some (at0 + 16)) (← decodeRISCV [0xef, 0, 0, 0x01])
+  assertControl "RISC-V ret" .ret none (← decodeRISCV [0x67, 0x80, 0, 0])
+  assertControl "RISC-V jr" .indirectJump none (← decodeRISCV [0x67, 0x80, 0x05, 0])
+  assertControl "RISC-V jalr" .call none (← decodeRISCV [0xe7, 0x80, 0x05, 0])
+  assertControl "RISC-V beq" .conditionalJump (some (at0 + 16)) (← decodeRISCV [0x63, 0x08, 0xb5, 0])
+  let riscv32 ← Target.LLVMLift.riscv32Environment
+  assertControl "RISC-V 32 j" .jump (some (at0 + 16))
+    (← Target.LLVMLift.decodeRISCV32With riscv32 at0 at0 (bytes [0x6f, 0, 0, 0x01]))
+  let aarch64 ← Target.LLVMLift.aarch64Environment
+  let decodeAArch64 (values : List Nat) :=
+    Target.LLVMLift.decodeAArch64With aarch64 at0 at0 (bytes values)
+  assertControl "AArch64 bl" .call (some (at0 + 16)) (← decodeAArch64 [0x04, 0, 0, 0x94])
+  assertControl "AArch64 blr" .call none (← decodeAArch64 [0x00, 0, 0x3f, 0xd6])
+  assertControl "AArch64 tbz" .conditionalJump (some (at0 + 16)) (← decodeAArch64 [0x80, 0, 0, 0x36])
+  let x86 ← Target.LLVMLift.x86Environment
+  let decodeX86 (values : List Nat) := Target.LLVMLift.decodeX86With x86 at0 at0 (bytes values)
+  assertControl "x86 jrcxz" .conditionalJump (some (at0 + 4)) (← decodeX86 [0xe3, 0x02])
+  assertControl "x86 loop" .conditionalJump (some (at0 + 4)) (← decodeX86 [0xe2, 0x02])
+  let x8632 ← Target.LLVMLift.x8632Environment
+  assertControl "x86-32 jecxz" .conditionalJump (some (at0 + 4))
+    (← Target.LLVMLift.decodeX8632With x8632 at0 at0 (bytes [0xe3, 0x02]))
+
+/-- Writes through the partial registers keep the bits that they do not cover, except that the
+writes of 32 bits clear the upper half in the 64-bit mode. -/
+private def testPartialRegisters : IO Unit := do
+  let x86 ← Target.LLVMLift.x86Environment
+  let decodeX86 (values : List Nat) := Target.LLVMLift.decodeX86With x86 0 0 (bytes values)
+  let full := 0x1122334455667788
+  for (label, values, base, expected) in [
+      ("R8D", [0x41, 0xb8, 1, 0, 0, 0], "R8", 1),
+      ("R15D", [0x41, 0xbf, 1, 0, 0, 0], "R15", 1),
+      ("EAX", [0xb8, 1, 0, 0, 0], "RAX", 1),
+      ("R8W", [0x66, 0x41, 0xb8, 1, 0], "R8", 0x1122334455660001),
+      ("R15W", [0x66, 0x41, 0xbf, 1, 0], "R15", 0x1122334455660001),
+      ("AX", [0x66, 0xb8, 1, 0], "RAX", 0x1122334455660001),
+      ("R8B", [0x41, 0xb0, 1], "R8", 0x1122334455667701),
+      ("R15B", [0x41, 0xb7, 1], "R15", 0x1122334455667701),
+      ("AL", [0xb0, 1], "RAX", 0x1122334455667701),
+      ("BL", [0xb3, 1], "RBX", 0x1122334455667701),
+      ("SIL", [0x40, 0xb6, 1], "RSI", 0x1122334455667701),
+      ("DIL", [0x40, 0xb7, 1], "RDI", 0x1122334455667701),
+      ("SPL", [0x40, 0xb4, 1], "RSP", 0x1122334455667701),
+      ("BPL", [0x40, 0xb5, 1], "RBP", 0x1122334455667701),
+      ("AH", [0xb4, 1], "RAX", 0x1122334455660188),
+      ("BH", [0xb7, 1], "RBX", 0x1122334455660188),
+      ("CH", [0xb5, 1], "RCX", 0x1122334455660188),
+      ("DH", [0xb6, 1], "RDX", 0x1122334455660188)] do
+    let state ← execute (← decodeX86 values) [word base full]
+    assertReg s!"x86 write of {label}" base expected state
+  -- mov bl, ah
+  assertReg "x86 read of AH" "RBX" 0x77
+    (← execute (← decodeX86 [0x88, 0xe3]) [word "RAX" 0x7700, word "RBX" 0])
+  -- mov al, r9b
+  assertReg "x86 read of R9B" "RAX" 0x42
+    (← execute (← decodeX86 [0x44, 0x88, 0xc8]) [word "R9" 0xff42, word "RAX" 0])
+  -- mov ax, r9w
+  assertReg "x86 read of R9W" "RAX" 0xff42
+    (← execute (← decodeX86 [0x66, 0x44, 0x89, 0xc8]) [word "R9" 0x1ff42, word "RAX" 0])
+  -- mov r9d, eax
+  assertReg "x86 read of EAX to R9D" "R9" 0x89abcdef
+    (← execute (← decodeX86 [0x41, 0x89, 0xc1]) [word "RAX" 0x1234567889abcdef, word "R9" 1])
+  -- add al, 1 keeps the upper bits and sets the flags
+  let addAl ← execute (← decodeX86 [0x04, 0x01]) [word "RAX" 0x1ff]
+  assertReg "x86 ADD8i8 result" "RAX" 0x100 addAl
+  assertFlag "x86 ADD8i8 carry" "CF" 1 addAl
+  let x8632 ← Target.LLVMLift.x8632Environment
+  let decodeX8632 (values : List Nat) := Target.LLVMLift.decodeX8632With x8632 0 0 (bytes values)
+  for (label, values, base, expected) in [
+      ("AX", [0x66, 0xb8, 1, 0], "EAX", 0x55660001),
+      ("AL", [0xb0, 1], "EAX", 0x55667701),
+      ("AH", [0xb4, 1], "EAX", 0x55660188),
+      ("BH", [0xb7, 1], "EBX", 0x55660188),
+      ("SI", [0x66, 0xbe, 1, 0], "ESI", 0x55660001)] do
+    let state ← execute (← decodeX8632 values) [word32 base 0x55667788]
+    assertReg32 s!"x86-32 write of {label}" base expected state
+  let aarch64 ← Target.LLVMLift.aarch64Environment
+  let decodeAArch64 (values : List Nat) := Target.LLVMLift.decodeAArch64With aarch64 0 0 (bytes values)
+  -- add w0, wsp, 0 reads the low half of SP
+  assertReg "AArch64 read of WSP" "X0" 0x89abcdef
+    (← execute (← decodeAArch64 [0xe0, 0x03, 0x00, 0x11]) [word "SP" 0x1234567889abcdef, word "X0" 0])
+  -- add wsp, w2, 0 writes the low half of SP and clears the upper half
+  assertReg "AArch64 write of WSP" "SP" 0x89abcdef
+    (← execute (← decodeAArch64 [0x5f, 0x00, 0x00, 0x11])
+      [word "SP" 0x1234567800000000, word "X2" 0x89abcdef])
+  -- orr w0, wzr, w1 reads the zero register at the width of the operation
+  assertReg "AArch64 read of WZR" "X0" 5
+    (← execute (← decodeAArch64 [0xe0, 0x03, 0x01, 0x2a]) [word "X1" 5, word "X0" 0])
+  let mips ← Target.LLVMLift.mipsEnvironment
+  let decodeMIPS (values : List Nat) := Target.LLVMLift.decodeMIPSWith mips 0 0 (bytes values)
+  -- LLVM names the 64-bit views of the general purpose registers with a suffix
+  assertReg "MIPS daddu of the 64-bit views" "R2" 7
+    (← execute (← decodeMIPS [0x00, 0x64, 0x10, 0x2d]) [word "R3" 3, word "R4" 4])
+  assertReg "MIPS daddu of ZERO_64" "R2" 3
+    (← execute (← decodeMIPS [0x00, 0x60, 0x10, 0x2d]) [word "R3" 3])
+
 def run : IO Unit := do
+  testBranches
+  testPartialRegisters
   let aarch64Environment ← Target.LLVMLift.aarch64Environment
   let x86Environment ← Target.LLVMLift.x86Environment
   let riscvEnvironment ← Target.LLVMLift.riscvEnvironment
@@ -334,14 +543,14 @@ def run : IO Unit := do
   let armBranchInsn ← decodeARM32 (← LLVM.assemble "armv7" "beq 16")
   let armZ : Bap.Var := ⟨"ZF", .imm 1, 0, false⟩
   let (_, armBranchTaken) ← executeEffect armBranchInsn [(armZ, .bits (BitVec.ofNat 1 1))]
-  assertJump "LLVM lifted ARM32 BEQ taken" 16 armBranchTaken
-  assertEqual "LLVM ARM32 branch metadata" (some 16) armBranchInsn.target
+  assertJump "LLVM lifted ARM32 BEQ taken" 24 armBranchTaken
+  assertEqual "LLVM ARM32 branch metadata" (some 24) armBranchInsn.target
   let (_, armBranchNotTaken) ← executeEffect armBranchInsn [(armZ, .bits (BitVec.ofNat 1 0))]
   assertNormal "LLVM lifted ARM32 BEQ not taken" armBranchNotTaken
   let armLinkInsn ← decodeARM32 (← LLVM.assemble "armv7" "bl 16")
   let (armLinkState, armLinkEffect) ← executeEffect armLinkInsn
   assertReg32 "LLVM lifted ARM32 BL link" "LR" 4 armLinkState
-  assertJump "LLVM lifted ARM32 BL target" 16 armLinkEffect
+  assertJump "LLVM lifted ARM32 BL target" 24 armLinkEffect
   let armReturnInsn ← decodeARM32 (← LLVM.assemble "armv7" "bx r0")
   let (_, armReturnEffect) ← executeEffect armReturnInsn
     [(⟨"R0", .imm 32, 0, false⟩, .bits (BitVec.ofNat 32 0x1235))]
@@ -364,8 +573,8 @@ def run : IO Unit := do
   | .error error => throw <| IO.userError error
   let thumbBranchInsn ← decodeThumb (← LLVM.assemble "thumbv7" "beq.w 16")
   let (_, thumbBranchTaken) ← executeEffect thumbBranchInsn [(armZ, .bits (BitVec.ofNat 1 1))]
-  assertJump "LLVM lifted Thumb BEQ taken" 16 thumbBranchTaken
-  assertEqual "LLVM Thumb branch metadata" (some 16) thumbBranchInsn.target
+  assertJump "LLVM lifted Thumb BEQ taken" 20 thumbBranchTaken
+  assertEqual "LLVM Thumb branch metadata" (some 20) thumbBranchInsn.target
   let (_, thumbBranchNotTaken) ← executeEffect thumbBranchInsn [(armZ, .bits (BitVec.ofNat 1 0))]
   assertNormal "LLVM lifted Thumb BEQ not taken" thumbBranchNotTaken
   let riscvSltInsn ← decodeRISCV (← LLVM.assemble "riscv64" "slt a0, a1, a2")

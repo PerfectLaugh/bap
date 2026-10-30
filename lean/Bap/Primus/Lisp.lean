@@ -274,31 +274,38 @@ private def evalPrimitive (name : String) (args : List Value) : Except String Va
     | _ => .error "list? expects one argument"
   | _ => .error s!"unknown primitive {name}"
 
+private def assignLocal (name : String) (value : Value) : Locals → Locals
+  | [] => []
+  | (key, old) :: rest =>
+    if key = name then (key, value) :: rest else (key, old) :: assignLocal name value rest
+
+/-- Evaluate `form`. Assignments to `let`-bound names change the enclosing bindings, so the
+updated locals are returned along with the value and globals. -/
 def evalExpr (fuel : Nat) (locals : Locals) (globals : Globals) (form : Sexp) :
-    Except String (Value × Globals) := do
+    Except String (Value × Locals × Globals) := do
   match fuel with
   | 0 => .error "Lisp evaluation fuel exhausted"
   | fuel + 1 =>
     let evalList (forms : List Sexp) (locals : Locals) (globals : Globals) :
-        Except String (List Value × Globals) :=
-      forms.foldlM (init := ([], globals)) fun state form => do
-        let (value, globals) ← evalExpr fuel locals state.2 form
-        .ok (state.1 ++ [value], globals)
+        Except String (List Value × Locals × Globals) :=
+      forms.foldlM (init := ([], locals, globals)) fun state form => do
+        let (value, locals, globals) ← evalExpr fuel state.2.1 state.2.2 form
+        .ok (state.1 ++ [value], locals, globals)
     match form with
     | .atom atom =>
       if atom = "true" || atom = "false" || atom.toInt?.isSome then
-        .ok (atomValue atom, globals)
+        .ok (atomValue atom, locals, globals)
       else
-        .ok (← lookup atom locals globals, globals)
-    | .list [] => .ok (.list [], globals)
+        .ok (← lookup atom locals globals, locals, globals)
+    | .list [] => .ok (.list [], locals, globals)
     | .list (.atom "quote" :: args) =>
       match args with
-      | [value] => .ok (quotedValue value, globals)
+      | [value] => .ok (quotedValue value, locals, globals)
       | _ => .error "quote expects one argument"
     | .list (.atom "if" :: args) =>
       match args with
       | [condition, yes, no] => do
-        let (condition, globals) ← evalExpr fuel locals globals condition
+        let (condition, locals, globals) ← evalExpr fuel locals globals condition
         if ← expectBool condition then
           evalExpr fuel locals globals yes
         else
@@ -309,56 +316,61 @@ def evalExpr (fuel : Nat) (locals : Locals) (globals : Globals) (form : Sexp) :
         match param with
         | .atom name => .ok name
         | _ => .error "lambda parameter must be a symbol"
-      .ok (.function (.closure params body locals), globals)
+      .ok (.function (.closure params body locals), locals, globals)
     | .list (.atom "defun" :: .atom name :: .list params :: [body]) => do
       let params ← params.mapM fun param =>
         match param with
         | .atom name => .ok name
         | _ => .error "function parameter must be a symbol"
       let callable : Value := .function (.closure params body locals)
-      .ok (callable, Assoc.put name callable globals)
+      .ok (callable, locals, Assoc.put name callable globals)
     | .list (.atom "setq" :: [.atom name, value]) => do
-      let (value, globals) ← evalExpr fuel locals globals value
-      .ok (value, Assoc.put name value globals)
+      let (value, locals, globals) ← evalExpr fuel locals globals value
+      if (Assoc.get name locals).isSome then
+        .ok (value, assignLocal name value locals, globals)
+      else
+        .ok (value, locals, Assoc.put name value globals)
     | .list (.atom "let" :: .list bindings :: body) => do
       let (locals, globals) ← bindings.foldlM (init := (locals, globals)) fun state binding =>
         match binding with
         | .list [.atom name, value] => do
-          let (value, globals) ← evalExpr fuel state.1 globals value
-          .ok ((name, value) :: state.1, globals)
+          let (value, locals, globals) ← evalExpr fuel state.1 state.2 value
+          .ok ((name, value) :: locals, globals)
         | _ => .error "invalid let binding"
-      let (values, globals) ← evalList body locals globals
-      .ok (values.getLast?.getD .unit, globals)
+      let (values, locals, globals) ← evalList body locals globals
+      .ok (values.getLast?.getD .unit, locals.drop bindings.length, globals)
     | .list (.atom "progn" :: body) => do
-      let (values, globals) ← evalList body locals globals
-      .ok (values.getLast?.getD .unit, globals)
+      let (values, locals, globals) ← evalList body locals globals
+      .ok (values.getLast?.getD .unit, locals, globals)
     | .list (.atom "and" :: body) =>
-      body.foldlM (init := (.bool true, globals)) fun state form => do
+      body.foldlM (init := (.bool true, locals, globals)) fun state form => do
         if !(← expectBool state.1) then
           .ok state
         else
-          evalExpr fuel locals state.2 form
+          evalExpr fuel state.2.1 state.2.2 form
     | .list (.atom "or" :: body) =>
-      body.foldlM (init := (.bool false, globals)) fun state form => do
+      body.foldlM (init := (.bool false, locals, globals)) fun state form => do
         if ← expectBool state.1 then
           .ok state
         else
-          evalExpr fuel locals state.2 form
+          evalExpr fuel state.2.1 state.2.2 form
     | .list (operator :: operands) => do
-      let (callable, globals) ← evalExpr fuel locals globals operator
-      let (args, globals) ← evalList operands locals globals
+      let (callable, locals, globals) ← evalExpr fuel locals globals operator
+      let (args, locals, globals) ← evalList operands locals globals
       match callable with
-      | .function (.primitive name) => .ok (← evalPrimitive name args, globals)
+      | .function (.primitive name) => .ok (← evalPrimitive name args, locals, globals)
       | .function (.closure params body env) =>
         if params.length != args.length then
           .error "closure arity mismatch"
         else
-          evalExpr fuel (params.zip args ++ env) globals body
+          let (value, _, globals) ← evalExpr fuel (params.zip args ++ env) globals body
+          .ok (value, locals, globals)
       | _ => .error "attempted to call a non-function"
 termination_by fuel
 
-def evalProgram (fuel : Nat) (globals : Globals) (forms : List Sexp) : Except String (Value × Globals) :=
-  evalExpr fuel [] globals (.list (.atom "progn" :: forms))
+def evalProgram (fuel : Nat) (globals : Globals) (forms : List Sexp) : Except String (Value × Globals) := do
+  let (value, _, globals) ← evalExpr fuel [] globals (.list (.atom "progn" :: forms))
+  .ok (value, globals)
 
 def evalString (input : String) (globals : Globals := []) (fuel : Nat := 100000) :
     Except String (Value × Globals) := do

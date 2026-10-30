@@ -67,7 +67,8 @@ private def parseSection (data : ByteArray) (header : Header) (offset : Nat) :
   let relocationOffset ← IO.Reader.u32 data .little (offset + 24)
   let relocationCount ← IO.Reader.u16 data .little (offset + 32)
   let flags ← IO.Reader.u32 data .little (offset + 36)
-  let bytes ← IO.Reader.slice data rawOffset rawSize
+  let fileSize := if rawOffset = 0 || flags &&& 0x80 != 0 then 0 else rawSize
+  let fileBytes ← IO.Reader.slice data rawOffset fileSize
   if relocationOffset + relocationCount * 10 > data.size then
     .error "COFF relocation table exceeds input"
   else
@@ -75,8 +76,10 @@ private def parseSection (data : ByteArray) (header : Header) (offset : Nat) :
     let writable := flags &&& 0x80000000 != 0
     let executable := flags &&& 0x20000000 != 0
     let size := if virtualSize = 0 then rawSize else virtualSize
+    let memorySize := max size rawSize
+    let bytes := fileBytes.append (ByteArray.mk (Array.replicate (memorySize - fileSize) 0))
     .ok ⟨⟨name, address, rawOffset, size, flags, 0⟩,
-      ⟨name, address, max size rawSize, readable, writable, executable⟩,
+      ⟨name, address, memorySize, readable, writable, executable⟩,
       ⟨address, bytes, readable, writable, executable⟩, relocationOffset, relocationCount⟩
 
 private def parseSections (data : ByteArray) (header : Header) : Except String (List ObjectSection) :=
@@ -98,10 +101,10 @@ private def parseSymbol (data : ByteArray) (header : Header) (sections : List Se
   let sectionIndex ← IO.Reader.u16 data .little (offset + 12)
   let symbolType ← IO.Reader.u16 data .little (offset + 14)
   let storageClass ← IO.Reader.get8 data (offset + 16)
-  let address := match sections[sectionIndex - 1]? with
+  let address := match sectionOfNumber sections sectionIndex with
     | some sec => sec.addr + value
     | none => value
-  .ok ⟨name, address, 0, symbolType &&& 0x30 = 0x20, storageClass = 103⟩
+  .ok ⟨name, address, 0, sectionIndex != 0 && symbolType &&& 0x30 = 0x20, storageClass = 103⟩
 
 private def parseSymbols (data : ByteArray) (header : Header) (sections : List Section) :
     Nat → Nat → List (Nat × Symbol) → Except String (List (Nat × Symbol))
@@ -132,7 +135,13 @@ private def applyRelocation (data : ByteArray) (header : Header) (symbols : List
   let (relative, size) ← match header.machine, kind with
     | 0x8664, 1 => .ok (false, 8)
     | 0x8664, 2 => .ok (false, 4)
+    | 0x8664, 3 => .ok (false, 4)
     | 0x8664, 4 => .ok (true, 4)
+    | 0x8664, 5 => .ok (true, 4)
+    | 0x8664, 6 => .ok (true, 4)
+    | 0x8664, 7 => .ok (true, 4)
+    | 0x8664, 8 => .ok (true, 4)
+    | 0x8664, 9 => .ok (true, 4)
     | _, _ => .error s!"unsupported COFF relocation type {kind}"
   match symbols.find? fun entry => entry.1 = symbolIndex with
   | none => .error s!"COFF relocation references missing symbol {symbolIndex}"
@@ -140,7 +149,8 @@ private def applyRelocation (data : ByteArray) (header : Header) (symbols : List
     let addend ← IO.Reader.read region.data .little rva size
     let modulus := 2 ^ (size * 8)
     let value := if relative then
-      (symbol.addr % modulus + addend % modulus + modulus - (object.info.addr + rva) % modulus) % modulus
+      -- REL32_n is relative to the end of the instruction, which is `kind` bytes past the field
+      (symbol.addr % modulus + addend % modulus + modulus - (object.info.addr + rva + kind) % modulus) % modulus
     else
       (symbol.addr + addend) % modulus
     let bytes ← writeNat region.data rva size value

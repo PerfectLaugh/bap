@@ -32,6 +32,14 @@ def ctrl (name : String) : EffectSort := .atom (.named .ctrl name)
 def union (sorts : List EffectSort) : EffectSort := sorts.foldl both .bot
 def join (left right : List EffectSort) : EffectSort := both (union left) (union right)
 
+/-- Whether a sort denotes the set of all effects: `top` absorbs under `both`, as in upstream's
+`both`, so a `both` that mentions `top` anywhere is `top`. -/
+def isTop : EffectSort → Bool
+  | .top => true
+  | .both left right => isTop left || isTop right
+  | _ => false
+
+/-- The named effects of a sort. This is the sort's denotation unless it `isTop`. -/
 def atoms : EffectSort → List Atom
   | .bot | .top => []
   | .atom value => [value]
@@ -40,21 +48,17 @@ def atoms : EffectSort → List Atom
 private def subset (left right : List Atom) : Bool := left.all fun atom => atom ∈ right
 
 def order (left right : EffectSort) : PartialOrder :=
-  if left = right then
-    .equal
-  else
-    match left, right with
-    | .bot, _ => .less
-    | _, .top => .less
-    | .top, _ => .greater
-    | _, .bot => .greater
-    | _, _ =>
-      let left := left.atoms
-      let right := right.atoms
-      if left = right then .equal
-      else if subset left right then .less
-      else if subset right left then .greater
-      else .unordered
+  match left.isTop, right.isTop with
+  | true, true => .equal
+  | true, false => .greater
+  | false, true => .less
+  | false, false =>
+    let left := left.atoms
+    let right := right.atoms
+    if subset left right then
+      if subset right left then .equal else .less
+    else if subset right left then .greater
+    else .unordered
 
 end EffectSort
 
@@ -71,8 +75,15 @@ def fall : EffectSort := .ctrl "fall"
 def jump : EffectSort := .ctrl "jump"
 def cjmp : EffectSort := .ctrl "cjmp"
 
-@[simp] theorem order_bot_ne (sort : EffectSort) (h : sort ≠ .bot) :
+theorem order_bot_ne (sort : EffectSort) (h : sort.isTop = true ∨ sort.atoms ≠ []) :
     EffectSort.order .bot sort = .less := by
-  cases sort <;> simp_all [EffectSort.order]
+  cases htop : sort.isTop with
+  | true => simp [EffectSort.order, EffectSort.isTop, htop]
+  | false =>
+    have hne : sort.atoms ≠ [] := by simpa [htop] using h
+    cases hatoms : sort.atoms with
+    | nil => exact absurd hatoms hne
+    | cons head tail =>
+      simp [EffectSort.order, EffectSort.isTop, EffectSort.atoms, EffectSort.subset, htop, hatoms]
 
 end Bap.Theory.Effect

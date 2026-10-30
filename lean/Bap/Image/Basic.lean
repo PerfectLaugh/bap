@@ -40,6 +40,11 @@ structure Symbol where
   isDebug : Bool
   deriving DecidableEq, Repr
 
+/-- The section of a 1-based COFF, PE or Mach-O section number; number 0 means no section. -/
+def sectionOfNumber (sections : List Section) : Nat → Option Section
+  | 0 => none
+  | number + 1 => sections[number]?
+
 structure MemRegion where
   addr : Nat
   data : ByteArray

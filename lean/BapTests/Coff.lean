@@ -68,7 +68,8 @@ def run : IO Unit := do
     assertEqual "COFF section count" 1 image.sections.length
     assertEqual "COFF symbol count excludes auxiliary" 2 image.symbols.length
     assertEqual "COFF mapped byte" (some 0x90) (image.memory.readByte 1)
-    assertEqual "COFF REL32 low byte" (some 0xfe) (image.memory.readByte 3)
+    -- S + A - (P + 4) = 1 + 0 - (3 + 4), as lld-link computes for REL32
+    assertEqual "COFF REL32 low byte" (some 0xfa) (image.memory.readByte 3)
     assertEqual "COFF REL32 sign extension" (some 0xff) (image.memory.readByte 4)
     assertEqual "COFF unmapped byte" none (image.memory.readByte 7)
     match image.sections[0]?, image.symbols with
@@ -81,6 +82,26 @@ def run : IO Unit := do
       assertEqual "COFF long symbol address" 1 long.addr
       assertEqual "COFF function symbol" true long.isFunction
     | _, _ => throw <| IO.userError "missing decoded COFF metadata"
+  match Coff.decode (fixture.set! 32 0x10 |>.set! 108 0) with
+  | .error error => throw <| IO.userError error
+  | .ok image =>
+    assertEqual "COFF undefined symbol is not rebased onto section 1" (some 1) (image.symbols[1]?.map (·.addr))
+    assertEqual "COFF undefined symbol is not a function" (some false) (image.symbols[1]?.map (·.isFunction))
+    assertEqual "COFF defined symbol is rebased" (some 0x10) (image.symbols[0]?.map (·.addr))
+  -- a .bss of an object: its size is SizeOfRawData, past the end of the file, and it has no file bytes
+  match Coff.decode (fixture.set! 36 0 |>.set! 38 1 |>.set! 40 0 |>.set! 52 0) with
+  | .error error => throw <| IO.userError error
+  | .ok image =>
+    assertEqual "COFF uninitialized segment size" (some 0x10000) (image.segments[0]?.map (·.size))
+    assertEqual "COFF uninitialized section reads zero" (some 0) (image.memory.readByte 0)
+    assertEqual "COFF uninitialized section last byte" (some 0) (image.memory.readByte 0xffff)
+    assertEqual "COFF uninitialized section end" none (image.memory.readByte 0x10000)
+  match Coff.decode (fixture.set! 28 16) with
+  | .error error => throw <| IO.userError error
+  | .ok image =>
+    assertEqual "COFF virtual segment size" (some 16) (image.segments[0]?.map (·.size))
+    assertEqual "COFF zero-filled byte" (some 0) (image.memory.readByte 15)
+    assertEqual "COFF virtual memory end" none (image.memory.readByte 16)
   let path := "/tmp/bap-lean-fixture.obj"
   IO.FS.writeBinFile path fixture
   let loaded ← Coff.load path

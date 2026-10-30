@@ -26,7 +26,7 @@ def run : IO Unit := do
   assertEqual "add-zero simplification" (expString (.var x)) (expString (simplifyExp identity))
   let zero := Exp.bin .mul (.var x) (int 0)
   assertEqual "multiply-zero simplification" (expString (int 0)) (expString (simplifyExp zero))
-  let conditional := Exp.ite (int 1) (.var x) (.var y)
+  let conditional := Exp.ite (.int (BitVec.ofNat 1 1)) (.var x) (.var y)
   assertEqual "constant condition simplification" (expString (.var x)) (expString (simplifyExp conditional))
   let block : Blk := ⟨1, [], [⟨1, y, closed⟩], []⟩
   let simplified := simplifyBlk block

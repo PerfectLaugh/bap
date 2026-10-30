@@ -20,6 +20,30 @@ import Bap.Crypto.KeyWrap
 import Bap.Symbolic.Memory
 import Bap.LLVM
 import Bap.Emu.Semantics
+import Bap.Proofs.ABI
+import Bap.Proofs.API
+import Bap.Proofs.Analysis
+import Bap.Proofs.Bil
+import Bap.Proofs.Checkpoint
+import Bap.Proofs.Core
+import Bap.Proofs.Crypto
+import Bap.Proofs.Decompile
+import Bap.Proofs.Disasm
+import Bap.Proofs.Emu
+import Bap.Proofs.FFI
+import Bap.Proofs.Graph
+import Bap.Proofs.IO
+import Bap.Proofs.IR
+import Bap.Proofs.Image
+import Bap.Proofs.Jit
+import Bap.Proofs.Knowledge
+import Bap.Proofs.LLVM
+import Bap.Proofs.Plugin
+import Bap.Proofs.Primus
+import Bap.Proofs.Project
+import Bap.Proofs.Symbolic
+import Bap.Proofs.Target
+import Bap.Proofs.Theory
 
 namespace Bap.Proofs
 
@@ -32,7 +56,7 @@ theorem readByte_empty (address : BitVec 64) :
 theorem readByte_writeByte_same :
     Memory.readByte (Memory.writeByte (Memory.empty 64) (BitVec.ofNat 64 0x1000) 0x42)
       (BitVec.ofNat 64 0x1000) = 0x42 := by
-  native_decide
+  decide +kernel
 
 theorem write_read_little_u16 :
     (Memory.write (Memory.empty 64) (BitVec.ofNat 64 0x1000) (BitVec.ofNat 16 0x1234) .little 2).toOption.map
@@ -107,7 +131,7 @@ theorem subset_self [DecidableEq α] (values : List α) : Bap.Graph.subset value
 
 theorem reachable_edge :
     1 ∈ Bap.Graph.reachable ⟨[0, 1], [(0, 1)]⟩ 0 := by
-  native_decide
+  decide +kernel
 
 end Graphs
 
@@ -120,7 +144,7 @@ theorem raw_entryPoint (data : ByteArray) (base : Nat) (endian : Bap.Endian) :
 theorem raw_readByte :
     Bap.Image.MemoryMap.readByte (Bap.Image.Raw.load (ByteArray.mk #[0x7f]) 0x1000 .little).memory 0x1000 =
       some 0x7f := by
-  native_decide
+  decide +kernel
 
 end Images
 
@@ -140,12 +164,12 @@ namespace Targets
 
 theorem aarch64_argument_count :
     (Bap.ABI.convention .aarch64).map (fun abi => abi.functionArguments.length) = some 8 := by
-  native_decide
+  decide +kernel
 
 theorem aarch64_stack_argument :
     (Bap.ABI.convention .aarch64).map (fun abi => Bap.ABI.argumentLocation abi 8) =
       some (.stack 0) := by
-  native_decide
+  decide +kernel
 
 end Targets
 
@@ -161,7 +185,7 @@ theorem roundRobin_empty :
 
 theorem roundRobin_step :
     Bap.Primus.Scheduler.roundRobin.next [1, 2] 1 0 [] = some 2 := by
-  native_decide
+  decide +kernel
 
 end Primus
 
@@ -190,7 +214,7 @@ theorem runPasses_empty (project : Bap.Project.Project) :
 
 theorem defaultRegistry_has_summarize :
     (Bap.Plugin.defaultRegistry.findPass "summarize").map Bap.Project.Pass.name = some "summarize" := by
-  native_decide
+  decide +kernel
 
 end Plugins
 
@@ -213,14 +237,14 @@ theorem aes128_fips197 :
       (ByteArray.mk #[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15])
       (ByteArray.mk #[0x69,0xc4,0xe0,0xd8,0x6a,0x7b,0x04,0x30,0xd8,0xcd,0xb7,0x80,0x70,0xb4,0xc5,0x5a])).toOption =
     some (ByteArray.mk #[0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff]) := by
-  native_decide
+  decide +kernel
 
 theorem rfc3394_vector1 :
     (Bap.Crypto.KeyWrap.unwrap
       (ByteArray.mk #[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15])
       (ByteArray.mk #[0x1f,0xa6,0x8b,0x0a,0x81,0x12,0xb4,0x47,0xae,0xf3,0x4b,0xd8,0xfb,0x5a,0x7b,0x82,0x9d,0x3e,0x86,0x23,0x71,0xd2,0xcf,0xe5])).toOption =
     some (ByteArray.mk #[0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff]) := by
-  native_decide
+  decide +kernel
 
 end Crypto
 
@@ -232,7 +256,7 @@ theorem width_concat (left right : Bap.Symbolic.Expr) :
 
 theorem readByte_writeByte_same (memory : Bap.Symbolic.Memory) (address value : Bap.Symbolic.Expr) :
     (memory.writeByte address value).readByte address = value := by
-  simp [Bap.Symbolic.Memory.readByte, Bap.Symbolic.Memory.writeByte, Bap.Symbolic.Expr.structuralEq]
+  simp [Bap.Symbolic.Memory.readByte, Bap.Symbolic.Memory.writeByte]
 
 end Symbolic
 

@@ -209,7 +209,14 @@ impl BitVec {
     }
     pub fn smod(&self, other: &Self) -> Self {
         assert_eq!(self.width, other.width);
-        let rem = self.rem(other);
+        let abs = |value: &Self| {
+            if value.msb() {
+                value.neg()
+            } else {
+                value.clone()
+            }
+        };
+        let rem = abs(self).rem(&abs(other));
         if rem.is_zero() {
             return rem;
         }
@@ -344,13 +351,19 @@ mod tests {
         let negative_five = BitVec::from_u64(8, 0xfb);
         assert_eq!(
             BitVec::from_u64(8, 5).smod(&negative_three).to_u64(),
-            Some(2)
+            Some(0xff)
         );
         assert_eq!(
             negative_five.smod(&BitVec::from_u64(8, 3)).to_u64(),
             Some(1)
         );
-        assert_eq!(negative_five.smod(&negative_three).to_u64(), Some(5));
+        assert_eq!(negative_five.smod(&negative_three).to_u64(), Some(0xfe));
+        assert_eq!(
+            BitVec::from_u64(8, 0xf9)
+                .smod(&BitVec::from_u64(8, 3))
+                .to_u64(),
+            Some(2)
+        );
         assert_eq!(
             negative_five
                 .srem(&BitVec::from_u64(8, 3))

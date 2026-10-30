@@ -308,8 +308,17 @@ private def lowerExp (lowering : Lowering) : Bil.Exp → Option (Lowering × Ope
     let (lowering, rightSign) := temporary lowering
     let lowering := { lowering with ops := lowering.ops ++
       [.bin .slt leftSign signedLeft zeroSlot, .bin .slt rightSign signedRight zeroSlot] }
+    let (lowering, negatedLeft) := temporary lowering
+    let (lowering, negatedRight) := temporary lowering
+    let lowering := { lowering with ops := lowering.ops ++ [.neg negatedLeft left.slot, .neg negatedRight right.slot] }
+    let lowering := narrow lowering left.width negatedLeft
+    let lowering := narrow lowering left.width negatedRight
+    let (lowering, absLeft) := temporary lowering
+    let (lowering, absRight) := temporary lowering
+    let lowering := { lowering with ops := lowering.ops ++
+      [.select absLeft leftSign negatedLeft left.slot, .select absRight rightSign negatedRight right.slot] }
     let (lowering, remainder) := temporary lowering
-    let lowering := { lowering with ops := lowering.ops ++ [.bin .urem remainder left.slot right.slot] }
+    let lowering := { lowering with ops := lowering.ops ++ [.bin .urem remainder absLeft absRight] }
     let (lowering, negated) := temporary lowering
     let lowering := { lowering with ops := lowering.ops ++ [.neg negated remainder] }
     let (lowering, leftAdjusted) := temporary lowering
@@ -515,7 +524,7 @@ private def reachable (edges : List (Nat × Nat)) (source target : Nat) : Bool :
         else if visited.contains current then loop fuel visited rest
         else
           let next := edges.filterMap fun (source, target) => if source = current then some target else none
-          loop (fuel - 1) (current :: visited) (next ++ rest)
+          loop fuel (current :: visited) (next ++ rest)
   loop (edges.length + 1) [] [source]
 
 private partial def gatherGraph (engine : Engine) (fetch : Fetch) (lift : Lift) (limit : Nat)

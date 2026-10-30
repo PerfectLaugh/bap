@@ -84,10 +84,14 @@ private def updatePhiInputs (source successor : Tid) (state : RenameState) (cfg 
       }
     }
 
-private def popVars (vars : List Bap.Var) (state : RenameState) : RenameState :=
+private def popVar (var : Bap.Var) (state : RenameState) : RenameState :=
   { state with stacks := state.stacks.map fun entry =>
-    if entry.1 ∈ vars then (entry.1, entry.2.dropLast) else entry
+    if entry.1 = var then (entry.1, entry.2.dropLast) else entry
   }
+
+/-- Undoes one push per listed name, so repeated names are popped repeatedly. -/
+private def popVars (vars : List Bap.Var) (state : RenameState) : RenameState :=
+  vars.foldl (fun state var => popVar var state) state
 
 private def renameBlock (idom : List (Tid × Tid)) : Nat → Tid → Cfg → RenameState → Cfg × RenameState
   | 0, _, cfg, state => (cfg, state)
@@ -95,7 +99,7 @@ private def renameBlock (idom : List (Tid × Tid)) : Nat → Tid → Cfg → Ren
     match cfg.block tid with
     | none => (cfg, state)
     | some block =>
-      let defined := block.definedVars.map Bap.Var.base
+      let pushed := block.phis.map (·.var.base) ++ block.defs.map (·.var.base)
       let (phis, state) := renamePhis block.phis state
       let (defs, state) := renameDefs block.defs state
       let jmps := block.jmps.map (Jmp.mapExp (renameExp state))
@@ -104,7 +108,7 @@ private def renameBlock (idom : List (Tid × Tid)) : Nat → Tid → Cfg → Ren
       let children := (idom.filter fun entry => entry.2 = tid).map Prod.fst
       let (cfg, state) := children.foldl (init := (cfg, state)) fun current child =>
         renameBlock idom fuel child current.1 current.2
-      (cfg, popVars defined state)
+      (cfg, popVars pushed state)
 
 def toSsa (sub : Sub) : Sub :=
   let cfg := Cfg.connected sub

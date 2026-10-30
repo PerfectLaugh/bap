@@ -14,23 +14,29 @@ def inferExp : Exp → Except String Typ
   | .var var => .ok var.typ
   | .load memory address _ size => do
     match ← inferExp memory with
-    | .mem _ valueWidth =>
+    | .mem addressWidth valueWidth =>
       if valueWidth = 8 then
-        let _ ← expectImm (← inferExp address)
-        .ok (.imm (size * 8))
+        let actual ← expectImm (← inferExp address)
+        if actual = addressWidth then
+          .ok (.imm (size * 8))
+        else
+          .error "address width does not match memory"
       else
         .error "BIL memory cells must be bytes"
     | typ => .error s!"expected memory, got {repr typ}"
   | .store memory address value _ size => do
     let memoryType ← inferExp memory
     match memoryType with
-    | .mem _ cellWidth =>
+    | .mem addressWidth cellWidth =>
       if cellWidth ≠ 8 then
         .error "BIL memory cells must be bytes"
       else
-        let _ ← expectImm (← inferExp address)
-        let valueWidth ← expectImm (← inferExp value)
-        if valueWidth = size * 8 then .ok memoryType else .error "stored value has the wrong width"
+        let actual ← expectImm (← inferExp address)
+        if actual ≠ addressWidth then
+          .error "address width does not match memory"
+        else
+          let valueWidth ← expectImm (← inferExp value)
+          if valueWidth = size * 8 then .ok memoryType else .error "stored value has the wrong width"
     | typ => .error s!"expected memory, got {repr typ}"
   | .bin op left right => do
     let leftType ← inferExp left
@@ -43,10 +49,17 @@ def inferExp : Exp → Except String Typ
       match op with
       | .eq | .neq | .lt | .le | .gt | .ge | .slt | .sle | .sgt | .sge => .ok (.imm 1)
       | _ => .ok (.imm leftWidth)
-  | .un _ value => inferExp value
-  | .cast _ width value => do
-    let _ ← expectImm (← inferExp value)
-    if width = 0 then .error "cast width must be positive" else .ok (.imm width)
+  | .un _ value => do
+    .ok (.imm (← expectImm (← inferExp value)))
+  | .cast kind width value => do
+    let source ← expectImm (← inferExp value)
+    if width = 0 then
+      .error "cast width must be positive"
+    else
+      match kind with
+      | .low | .high =>
+        if width ≤ source then .ok (.imm width) else .error "cast is wider than its operand"
+      | .signed | .unsigned => .ok (.imm width)
   | .letIn var value body => do
     let valueType ← inferExp value
     if var.typ ≠ valueType then

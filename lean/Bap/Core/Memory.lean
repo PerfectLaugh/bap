@@ -39,21 +39,27 @@ def writeByte (memory : Memory addressWidth) (address : BitVec addressWidth) (va
 def ofCells (cells : List (BitVec addressWidth × UInt8)) : Memory addressWidth :=
   cells.foldl (init := empty addressWidth) fun memory cell => writeByte memory cell.1 cell.2
 
-private partial def writePages (pages : Std.TreeMap Nat ByteArray) (address : Nat)
-    (data : ByteArray) (offset : Nat) : Std.TreeMap Nat ByteArray :=
+/-- Writes `data` to consecutive addresses, wrapping at `limit`, the size of the address space. -/
+private def writePages (limit : Nat) (hlimit : 0 < limit) (pages : Std.TreeMap Nat ByteArray)
+    (address : Nat) (data : ByteArray) (offset : Nat) : Std.TreeMap Nat ByteArray :=
   if offset ≥ data.size then pages else
-    let absolute := address + offset
+    let absolute := (address + offset) % limit
     let index := absolute / pageSize
     let pageOffset := absolute % pageSize
-    let count := min (pageSize - pageOffset) (data.size - offset)
+    let count := min (min (pageSize - pageOffset) (data.size - offset)) (limit - absolute)
     let chunk := data.extract offset (offset + count)
     let page := if count = pageSize then chunk else
       let existing := (pages.get? index).getD (ByteArray.mk (List.replicate pageSize 0).toArray)
       existing.extract 0 pageOffset ++ chunk ++ existing.extract (pageOffset + count) pageSize
-    writePages (pages.insert index page) address data (offset + count)
+    writePages limit hlimit (pages.insert index page) address data (offset + count)
+termination_by data.size - offset
+decreasing_by
+  have h1 : (address + offset) % limit < limit := Nat.mod_lt _ hlimit
+  have h2 : (address + offset) % limit % pageSize < pageSize := Nat.mod_lt _ (by decide)
+  omega
 
 def writeRegion (memory : Memory addressWidth) (address : Nat) (data : ByteArray) : Memory addressWidth :=
-  ⟨writePages memory.pages address data 0⟩
+  ⟨writePages (2 ^ addressWidth) (Nat.two_pow_pos _) memory.pages address data 0⟩
 
 def writeSortedCells (memory : Memory addressWidth) (cells : List (BitVec addressWidth × UInt8)) : Memory addressWidth :=
   let groups := cells.foldl (init := ([] : List (Nat × Array UInt8))) fun groups cell =>
@@ -69,20 +75,26 @@ def writeSortedCells (memory : Memory addressWidth) (cells : List (BitVec addres
 def writeCells (memory : Memory addressWidth) (cells : List (BitVec addressWidth × UInt8)) : Memory addressWidth :=
   writeSortedCells memory (cells.mergeSort fun left right => left.1.toNat ≤ right.1.toNat)
 
-private partial def readPages (pages : Std.TreeMap Nat ByteArray) (address size offset : Nat)
-    (output : Array UInt8) : Array UInt8 :=
+/-- Reads `size` consecutive addresses, wrapping at `limit`, the size of the address space. -/
+private def readPages (limit : Nat) (hlimit : 0 < limit) (pages : Std.TreeMap Nat ByteArray)
+    (address size offset : Nat) (output : Array UInt8) : Array UInt8 :=
   if offset ≥ size then output else
-    let absolute := address + offset
+    let absolute := (address + offset) % limit
     let index := absolute / pageSize
     let pageOffset := absolute % pageSize
-    let count := min (pageSize - pageOffset) (size - offset)
+    let count := min (min (pageSize - pageOffset) (size - offset)) (limit - absolute)
     let page := (pages.get? index).getD (ByteArray.mk (List.replicate pageSize 0).toArray)
     let chunk := page.extract pageOffset (pageOffset + count)
     let output := chunk.toList.foldl (init := output) fun output byte => output.push byte
-    readPages pages address size (offset + count) output
+    readPages limit hlimit pages address size (offset + count) output
+termination_by size - offset
+decreasing_by
+  have h1 : (address + offset) % limit < limit := Nat.mod_lt _ hlimit
+  have h2 : (address + offset) % limit % pageSize < pageSize := Nat.mod_lt _ (by decide)
+  omega
 
 def readRegion (memory : Memory addressWidth) (address size : Nat) : ByteArray :=
-  ByteArray.mk (readPages memory.pages address size 0 #[])
+  ByteArray.mk (readPages (2 ^ addressWidth) (Nat.two_pow_pos _) memory.pages address size 0 #[])
 
 private def byteAt (value : Nat) (offset : Nat) : UInt8 :=
   UInt8.ofNat ((value >>> (8 * offset)) % 256)

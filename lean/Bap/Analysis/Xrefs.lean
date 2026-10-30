@@ -59,14 +59,25 @@ def create (project : Project.Project) : Index := {
 def functionAt (index : Index) (address : Nat) : Option Image.Symbol :=
   index.functions.find? fun symbol => symbol.addr = address
 
-def functionOf (index : Index) (address : Nat) : Option Image.Symbol :=
+/-- The highest function start at or below `address`. -/
+private def nearestStart (index : Index) (address : Nat) : Option Nat :=
   index.functions.foldl (init := none) fun best symbol =>
-    if symbol.addr ≤ address && (match best with
-      | some current => current.addr ≤ symbol.addr
-      | none => true) then
-      some symbol
-    else
-      best
+    if symbol.addr ≤ address && best.all (· ≤ symbol.addr) then some symbol.addr else best
+
+/-- Whether `address` lies in `symbol`: within its size if known, else before the next function. -/
+private def spans (symbol : Image.Symbol) (nearest : Option Nat) (address : Nat) : Bool :=
+  symbol.addr ≤ address &&
+    if symbol.size = 0 then nearest = some symbol.addr else address < symbol.addr + symbol.size
+
+def functionOf (index : Index) (address : Nat) : Option Image.Symbol :=
+  let nearest := nearestStart index address
+  index.functions.foldl (init := none) fun best symbol =>
+    if spans symbol nearest address && best.all (·.addr ≤ symbol.addr) then some symbol else best
+
+/-- Whether `symbol` owns `address`. Aliases of a function own the same instructions. -/
+def owns (index : Index) (symbol : Image.Symbol) (address : Nat) : Bool :=
+  spans symbol (nearestStart index address) address &&
+    (functionOf index address).any (·.addr == symbol.addr)
 
 def functions (index : Index) : List String := index.functions.map Image.Symbol.name
 
@@ -77,6 +88,7 @@ def callers (index : Index) (target : Nat) : List Xref := references index .call
 
 def callees (index : Index) (function : String) : List Xref :=
   index.xrefs.filter fun xref =>
-    xref.kind = .call && (functionOf index xref.source).map Image.Symbol.name = some function
+    xref.kind = .call && index.functions.any fun symbol =>
+      symbol.name = function && owns index symbol xref.source
 
 end Bap.Analysis.Xrefs
