@@ -55,8 +55,15 @@ private partial def writePages (pages : Std.HashMap Nat ByteArray) (address : Na
 def writeRegion (memory : Memory addressWidth) (address : Nat) (data : ByteArray) : Memory addressWidth :=
   ⟨writePages memory.pages address data 0⟩
 
+def readRegion (memory : Memory addressWidth) (address size : Nat) : ByteArray :=
+  ByteArray.mk ((List.range size).map fun offset =>
+    let absolute := address + offset
+    match memory.pages.get? (absolute / pageSize) with
+    | some page => page[absolute % pageSize]!
+    | none => 0).toArray
+
 private def byteAt (value : Nat) (offset : Nat) : UInt8 :=
-  UInt8.ofNat ((value / 256 ^ offset) % 256)
+  UInt8.ofNat ((value >>> (8 * offset)) % 256)
 
 def write (memory : Memory addressWidth) (address : BitVec addressWidth)
     (value : BitVec valueWidth) (endian : Endian) (size : Nat) :
@@ -64,12 +71,12 @@ def write (memory : Memory addressWidth) (address : BitVec addressWidth)
   if size * 8 ≠ valueWidth then
     .error s!"expected {size * 8} bits, actual {valueWidth}"
   else
-    .ok <| (List.range size).foldl (init := memory) fun result offset =>
+    let bytes := (List.range size).map fun offset =>
       let byteOffset := match endian with
         | .little => offset
         | .big => size - 1 - offset
-      let nextAddress := address + BitVec.ofNat addressWidth offset
-      writeByte result nextAddress (byteAt value.toNat byteOffset)
+      byteAt value.toNat byteOffset
+    .ok (writeRegion memory address.toNat (ByteArray.mk bytes.toArray))
 
 def read (memory : Memory addressWidth) (address : BitVec addressWidth)
     (endian : Endian) (size : Nat) : BitVec (size * 8) :=

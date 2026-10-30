@@ -31,6 +31,9 @@ structure Config where
   syscallAbi : SyscallAbi := .riscv
   delayPolicy : DelayPolicy := .none
   hotThreshold : Nat := 1
+  cacheLimit : Nat := 128
+  rangeLimit : Nat := 1
+  jitCooldown : Nat := 0
 
 abbrev HookId := Nat
 
@@ -114,8 +117,12 @@ structure TraceAccess where
   deriving DecidableEq, Repr
 
 private structure TraceState where
-  pcs : List Nat := []
+  pcsFront : List Nat := []
+  pcsBack : List Nat := []
+  pcRetained : Nat := 0
   pcCount : Nat := 0
+  droppedPcs : Nat := 0
+  pcCapacity : Nat := 0
   accesses : List TraceAccess := []
   accessCount : Nat := 0
   droppedAccesses : Nat := 0
@@ -174,7 +181,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     | .error error => throw <| IO.userError error
   pure {
     config
-    engine := ← Primus.Lifted.Engine.create config.hotThreshold
+    engine := ← Primus.Lifted.Engine.create config.hotThreshold config.cacheLimit config.rangeLimit 16 config.jitCooldown
     state := ← IO.mkRef initial
     pc := ← IO.mkRef entry
     regions := ← IO.mkRef mapped
@@ -276,11 +283,10 @@ def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
     emu.skipCode.set none
 
 def resumeThread (emu : Emu) (id : ThreadId) : IO Unit := do
+  emu.threadsRef.modify fun threads => threads.map fun context =>
+    if context.id == id then { context with stopped := false } else context
   if (← thread emu) == id then
     emu.stopped.set false
-  else
-    emu.threadsRef.modify fun threads => threads.map fun context =>
-      if context.id == id then { context with stopped := false } else context
 
 def stopThread (emu : Emu) (id : ThreadId) : IO Unit := do
   if (← thread emu) == id then
@@ -357,10 +363,15 @@ def breakpoints (emu : Emu) : IO (List Nat) := do
   let current ← emu.breakpointsRef.get
   pure (current.map Prod.snd).reverse
 
+private def traceBeginPc (emu : Emu) (pcCapacity accessCapacity : Nat) (watch : Option (Nat × Nat)) : IO Unit :=
+  emu.trace.set (some { pcCapacity, accessCapacity, watch })
+
 private def traceBegin (emu : Emu) (capacity : Nat) (watch : Option (Nat × Nat)) : IO Unit :=
-  emu.trace.set (some { accessCapacity := capacity, watch })
+  traceBeginPc emu 0 capacity watch
 
 def traceStart (emu : Emu) : IO Unit := traceBegin emu 0 none
+
+def traceStartCapacity (emu : Emu) (capacity : Nat) : IO Unit := traceBeginPc emu capacity 0 none
 
 def traceStartAccesses (emu : Emu) (capacity : Nat) : IO Unit := traceBegin emu capacity none
 
@@ -369,14 +380,21 @@ def traceStartWatch (emu : Emu) (range : Nat × Nat) (capacity : Nat) : IO Unit 
     throw <| IO.userError "invalid Emu trace watch range"
   traceBegin emu capacity (some range)
 
+private def pcList (state : TraceState) : List Nat :=
+  state.pcsFront ++ state.pcsBack.reverse
+
 def traceStop (emu : Emu) : IO (List Nat) := do
   let current ← emu.trace.get
   emu.trace.set none
-  pure (current.getD {}).pcs.reverse
+  pure (pcList (current.getD {}))
 
 def tracePcs (emu : Emu) : IO (List Nat) := do
   let current ← emu.trace.get
-  pure (current.getD {}).pcs.reverse
+  pure (pcList (current.getD {}))
+
+def traceDroppedPcs (emu : Emu) : IO Nat := do
+  let current ← emu.trace.get
+  pure (current.getD {}).droppedPcs
 
 def traceAccesses (emu : Emu) : IO (List TraceAccess) := do
   let current ← emu.trace.get
@@ -392,7 +410,26 @@ def traceDroppedAccesses (emu : Emu) : IO Nat := do
 
 private def recordTrace (emu : Emu) (address : Nat) : IO Unit :=
   emu.trace.modify fun current => current.map fun state =>
-    { state with pcs := address :: state.pcs, pcCount := state.pcCount + 1 }
+    if state.pcCapacity = 0 then
+      { state with pcsBack := address :: state.pcsBack, pcCount := state.pcCount + 1 }
+    else if state.pcRetained < state.pcCapacity then
+      { state with
+        pcsBack := address :: state.pcsBack
+        pcRetained := state.pcRetained + 1
+        pcCount := state.pcCount + 1
+      }
+    else
+      let (front, back) := if state.pcsFront.isEmpty then (state.pcsBack.reverse, []) else (state.pcsFront, state.pcsBack)
+      match front with
+      | [] =>
+        { state with pcsBack := [address], pcCount := state.pcCount + 1, droppedPcs := state.droppedPcs + 1 }
+      | _ :: rest =>
+        { state with
+          pcsFront := rest
+          pcsBack := address :: back
+          pcCount := state.pcCount + 1
+          droppedPcs := state.droppedPcs + 1
+        }
 
 private def recordAccess (emu : Emu) (write : Bool) (address size value : Nat) : IO Unit := do
   let pc ← emu.pc.get
@@ -422,6 +459,12 @@ private def notifyCode (emu : Emu) (address : Nat) : IO Unit := do
   let hooks ← emu.hooks.get
   (hooks.filter fun hook => hook.first ≤ address && address ≤ hook.last).forM fun hook =>
     hook.action address
+
+private def observeRangeCode (emu : Emu) (address : Nat) : IO Bool := do
+  emu.pc.set address
+  recordTrace emu address
+  notifyCode emu address
+  emu.stopped.get
 
 def failure (emu : Emu) : IO (Option MemoryFault) := emu.lastFault.get
 
@@ -667,6 +710,21 @@ def spawnThread (emu : Emu) (start : Nat) (arg : Nat) : IO ThreadId := do
     emu.threadsRef.modify fun threads => ⟨id, state, start, false, none⟩ :: threads
     pure id
 
+def forkThread (emu : Emu) (childPc : Nat) : IO ThreadId := do
+  saveCurrentThread emu
+  let id ← emu.nextThreadRef.get
+  emu.nextThreadRef.set (id + 1)
+  let width ← wordWidth emu
+  let (_, arguments, _) := syscallRegisters emu.config.syscallAbi
+  match arguments.head? with
+  | none => throw <| IO.userError "target has no fork result register"
+  | some register =>
+    let current ← emu.state.get
+    let result : Bap.Var := ⟨register, .imm width, 0, false⟩
+    let state : Bil.State := { env := Bil.bind current.env result (.bits (BitVec.ofNat width 0)) }
+    emu.threadsRef.modify fun threads => ⟨id, state, childPc, true, none⟩ :: threads
+    pure id
+
 def threadReg (emu : Emu) (id : ThreadId) (var : Bap.Var) : IO Bap.Value := do
   let contexts ← captureThreads emu
   match contexts.find? fun context => context.id == id with
@@ -757,11 +815,9 @@ private def lift (emu : Emu) (address : Nat) (code : ByteArray) : IO Primus.Lift
 def refreshRegions (emu : Emu) : IO Unit := do
   let mapped ← emu.regions.get
   let state ← emu.state.get
-  let ⟨width, memory⟩ ← cells emu state
+  let ⟨_, memory⟩ ← cells emu state
   emu.regions.set (mapped.map fun region =>
-    let data := (List.range region.data.size).map fun offset =>
-      Bap.Memory.readByte memory (BitVec.ofNat width (region.address + offset))
-    { region with data := ByteArray.mk data.toArray })
+    { region with data := Bap.Memory.readRegion memory region.address region.data.size })
 
 private def mipsWord (code : ByteArray) (address : Nat) : Option Nat :=
   if address + 4 > code.size then none
@@ -895,6 +951,7 @@ def step (emu : Emu) : IO Bool := do
           | some _ => pure .none
           | none => delayFor emu address
         let result ← Primus.Lifted.runBlockObserved emu.engine (fetch emu) (lift emu) state address observer
+          (some (observeRangeCode emu))
         emu.state.set result.state
         emu.lastFault.set none
         recordTrace emu address
@@ -934,6 +991,13 @@ private def switchNextThread (emu : Emu) : IO Bool := do
     pure true
   | none => pure !(← stopped emu)
 
+def resumeNext (emu : Emu) : IO Unit := do
+  if ← stopped emu then
+    let _ ← switchNextThread emu
+    pure ()
+  else
+    resume emu
+
 def runQuantum (emu : Emu) (quantum : Nat) : IO Nat := do
   if quantum = 0 then
     throw <| IO.userError "Emu thread quantum must be positive"
@@ -951,6 +1015,8 @@ def runPreemptive (emu : Emu) (quantum : Nat := 100) (fuel : Nat := 100000) : IO
       let steps ← run emu (min quantum remaining)
       let total := total + steps
       if total = fuel then
+        pure total
+      else if ← stopped emu then
         pure total
       else if ← switchNextThread emu then
         loop (remaining - steps) total (rounds - 1)

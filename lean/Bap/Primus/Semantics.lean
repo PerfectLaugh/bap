@@ -73,8 +73,15 @@ structure Context where
 
 structure State where
   globals : Globals := []
+  operations : Std.HashMap String Callable := {}
   code : Bil.Program := []
   nextTemp : Nat := 0
+
+private def indexGlobals (globals : Globals) : Std.HashMap String Callable :=
+  globals.reverse.foldl (init := ({} : Std.HashMap String Callable)) fun result binding =>
+    match binding.2 with
+    | .callable callable => result.insert binding.1 callable
+    | _ => result
 
 private def primitiveNames : List String :=
   ["+", "-", "*", "/", "s/", "mod", "=", "/=", "<", "<=", ">", ">=", "not", "list",
@@ -98,6 +105,22 @@ private def lookup (name : String) (locals : Locals) (globals : Globals) : Excep
       | none =>
         if primitiveNames.contains primitiveName then .ok (.callable (.primitive primitiveName))
         else .error s!"unknown Primus symbol {name}"
+
+private def lookupState (name : String) (locals : Locals) (state : State) : Except String Value :=
+  let primitiveName := if name.startsWith "core:" then (name.drop 5).toString else name
+  if primitiveName = "replicate" then .ok (.callable (.primitive "replicate"))
+  else
+    match Assoc.get name locals with
+    | some value => .ok value
+    | none =>
+      match state.operations.get? name with
+      | some callable => .ok (.callable callable)
+      | none =>
+        match Assoc.get name state.globals with
+        | some value => .ok value
+        | none =>
+          if primitiveNames.contains primitiveName then .ok (.callable (.primitive primitiveName))
+          else .error s!"unknown Primus symbol {name}"
 
 private def parseBasedNat (digits : String) (base : Nat) : Option Nat :=
   digits.toList.foldlM (fun value c => do
@@ -705,7 +728,7 @@ mutual
       | .atom atom =>
         if atom = "true" || atom = "false" || atom.startsWith ":" || (parseInteger atom).isSome then
           .ok (atomValue atom, state)
-        else .ok (← lookup atom locals state.globals, state)
+        else .ok (← lookupState atom locals state, state)
       | .list [] => .ok (.list [], state)
       | .list (.atom "quote" :: [value]) =>
         let rec quoted : Sexp → Value
@@ -780,7 +803,7 @@ mutual
             if ← caseMatches key label then .ok [body] else select rest
         evalSequence fuel locals context state (← select branches)
       | .list (.atom operator :: operands) =>
-        match ← lookup operator locals state.globals with
+        match ← lookupState operator locals state with
         | .callable (.macro params body) =>
           if params.length != operands.length then .error "Primus macro arity mismatch"
           else
@@ -967,7 +990,7 @@ def evalForms (context : Context) (globals : Globals) (forms : List Sexp) :
     | .list (.atom kind :: _) =>
       kind != "declare" && kind != "defpackage" && kind != "in-package" && kind != "require"
     | _ => true
-  let (_, state) ← evalSequence 100000 [] context { globals := globals } forms
+  let (_, state) ← evalSequence 100000 [] context { globals := globals, operations := indexGlobals globals } forms
   .ok state
 
 private def readForms (path : String) : IO (List Sexp) := do
@@ -1016,7 +1039,7 @@ def liftWith (environment : Environment) (context : Context) (opcode : String)
       match Assoc.get opcode environment.globals with
       | some callable => pure callable
       | none => throw <| IO.userError s!"Primus semantics has no definition for {opcode}"
-  match apply 100000 context { globals := environment.globals } callable operands with
+  match apply 100000 context { globals := environment.globals, operations := environment.operations } callable operands with
   | .ok (_, state) => pure state.code
   | .error error => throw <| IO.userError s!"{opcode}: {error}"
 
@@ -1036,7 +1059,7 @@ def liftMC (environment : Environment) (context : Context) (opcode : Nat)
   let callable ← match environment.opcodes.get? opcode with
     | some callable => pure callable
     | none => throw <| IO.userError s!"Primus semantics has no definition for LLVM opcode {opcode}"
-  match apply 100000 context { globals := environment.globals } (.callable callable) operands with
+  match apply 100000 context { globals := environment.globals, operations := environment.operations } (.callable callable) operands with
   | .ok (_, state) => pure state.code
   | .error error => throw <| IO.userError s!"LLVM opcode {opcode}: {error}"
 

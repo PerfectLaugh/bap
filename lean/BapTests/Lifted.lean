@@ -13,6 +13,7 @@ private def state (var : Var) (value : Nat) : State :=
 private def fixed (block : Primus.Lifted.Block) : Primus.Lifted.Fetch × Primus.Lifted.Lift :=
   (fun _ => pure (ByteArray.mk #[1]), fun _ _ => pure block)
 
+set_option maxRecDepth 4000 in
 def run : IO Unit := do
   let program ← Jit.compile [.set 0 40, .add 1 0 2, .jumpSlot 1]
   let (next, slots) ← Jit.run program #[0, 0]
@@ -521,5 +522,86 @@ def run : IO Unit := do
   let evictStats ← Primus.Lifted.stats evictEngine
   assertEqual "bounded cache evicts old lifts" 4 evictStats.lifts
   assertEqual "bounded cache rejects stale entries" 0 evictStats.cacheHits
+
+  let rangeIncrement ← IO.mkRef 2
+  let rangeFetch : Primus.Lifted.Fetch := fun _ => pure (ByteArray.mk #[1])
+  let rangeLift : Primus.Lifted.Lift := fun pc _ =>
+    match pc with
+    | 0x14000 => pure ⟨pc, pc + 4, [
+        .move memoryVar (.store (.var memoryVar) (int 0) (int 40) .little 8),
+        .jmp (int 0x14004)
+      ]⟩
+    | 0x14004 => pure ⟨pc, pc + 4, [
+        .move y (.load (.var memoryVar) (int 0) .little 8),
+        .jmp (int 0x14008)
+      ]⟩
+    | 0x14008 => do
+      let increment ← rangeIncrement.get
+      pure ⟨pc, pc + 4, [.move z (.bin .add (.var y) (int increment)), .jmp (.var z)]⟩
+    | 42 => pure ⟨42, 42, []⟩
+    | _ => throw <| IO.userError s!"unexpected range lift at {pc}"
+  let rangeInitial : State := { env := [(memoryVar, .memory (Memory.empty 64))] }
+  let singleEngine ← Primus.Lifted.Engine.create
+  let singleResult ← Primus.Lifted.run singleEngine rangeFetch rangeLift rangeInitial 0x14000 10
+  assertEqual "single-block reference continuation" 42 singleResult.pc
+
+  let rangeEngine ← Primus.Lifted.Engine.create 1 128 4
+  let rangeEvents ← IO.mkRef []
+  let rangeObserver : Jit.CodeObserver := fun pc => do
+    rangeEvents.modify fun events => pc :: events
+    pure false
+  let rangeResult ← Primus.Lifted.runBlockObserved rangeEngine rangeFetch rangeLift rangeInitial 0x14000
+    none (some rangeObserver)
+  assertEqual "range preserves continuation" singleResult.pc rangeResult.pc
+  assertBits "range matches single-block result" (BitVec.ofNat 64 42) (lookup rangeResult.state.env z)
+  assertEqual "range observes each internal block" [0x14004, 0x14008] (← rangeEvents.get).reverse
+  let rangeStats ← Primus.Lifted.stats rangeEngine
+  assertEqual "range executes once natively" 1 rangeStats.nativeRuns
+  assertEqual "range lifts each block once" 3 rangeStats.lifts
+  assertEqual "range avoids interpreted fallback" 0 rangeStats.interpretedRuns
+  let cachedRange ← Primus.Lifted.runBlockObserved rangeEngine rangeFetch rangeLift rangeInitial 0x14000
+    none (some rangeObserver)
+  assertEqual "cached range preserves continuation" 42 cachedRange.pc
+  let cachedRangeStats ← Primus.Lifted.stats rangeEngine
+  assertEqual "cached range does not relift" 3 cachedRangeStats.lifts
+  assertEqual "cached range executes natively twice" 2 cachedRangeStats.nativeRuns
+
+  let stopEngine ← Primus.Lifted.Engine.create 1 128 4
+  let stopObserver : Jit.CodeObserver := fun pc => pure (pc = 0x14008)
+  let stoppedRange ← Primus.Lifted.runBlockObserved stopEngine rangeFetch rangeLift rangeInitial 0x14000
+    none (some stopObserver)
+  assertEqual "range stops before the requested internal block" 0x14008 stoppedRange.pc
+  assertEqual "range stop uses the internal continuation" 0x14008 stoppedRange.next
+  assertBits "range stop preserves earlier writes" (BitVec.ofNat 64 40) (lookup stoppedRange.state.env y)
+  match stoppedRange.effect with
+  | .normal => pure ()
+  | _ => throw <| IO.userError "range stop did not have normal effect"
+  match lookup stoppedRange.state.env z with
+  | .error _ => pure ()
+  | .ok _ => throw <| IO.userError "range stop committed a future-block output"
+
+  rangeIncrement.set 3
+  Primus.Lifted.discardRange rangeEngine 0x14008 0x14008
+  let invalidated ← Primus.Lifted.runBlockObserved rangeEngine rangeFetch rangeLift rangeInitial 0x14000
+    none (some rangeObserver)
+  assertEqual "overlapping write invalidates the whole range" 43 invalidated.pc
+  assertBits "invalidated range uses new bytes" (BitVec.ofNat 64 43) (lookup invalidated.state.env z)
+
+  let cooldownEngine ← Primus.Lifted.Engine.create 1 128 1 16 2
+  let cooldownBlock : Primus.Lifted.Block := {
+    address := 0x15000
+    next := 0x15004
+    program := [.move y (int 42)]
+  }
+  let (cooldownFetch, cooldownLift) := fixed cooldownBlock
+  let _ ← Primus.Lifted.runBlock cooldownEngine cooldownFetch cooldownLift {} 0x15000
+  Primus.Lifted.discardRange cooldownEngine 0x15000 0x15000
+  let _ ← Primus.Lifted.runBlock cooldownEngine cooldownFetch cooldownLift {} 0x15000
+  let _ ← Primus.Lifted.runBlock cooldownEngine cooldownFetch cooldownLift {} 0x15000
+  let _ ← Primus.Lifted.runBlock cooldownEngine cooldownFetch cooldownLift {} 0x15000
+  let cooldownStats ← Primus.Lifted.stats cooldownEngine
+  assertEqual "write cooldown suppresses two native runs" 2 cooldownStats.interpretedRuns
+  assertEqual "native compilation resumes after write cooldown" 2 cooldownStats.nativeRuns
+  assertEqual "write cooldown avoids repeated compilation" 2 cooldownStats.nativeCompilations
 
 end Bap.Tests.Lifted

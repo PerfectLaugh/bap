@@ -44,6 +44,9 @@ private def testDiff : IO Unit := do
   assertEqual "Emu checkpoint diff matches snapshot" [(0, 2), (4, 1)] (← Bap.Emu.changedSince emu "native/build/emu-diff.sexp")
   Bap.Emu.restore emu saved
   assertEqual "Emu restored snapshot has no diff" [] (← Bap.Emu.diff emu saved)
+  let memory := Bap.Memory.writeRegion (Bap.Memory.empty 64) 0xfe (ByteArray.mk #[1, 2, 3, 4])
+  assertTrue "Memory bulk read crosses pages and preserves zeroes"
+    (Bap.Memory.readRegion memory 0xfc 8 == ByteArray.mk #[0, 0, 1, 2, 3, 4, 0, 0])
   let persistent ← Jit.createMemory #[0] #[40]
   emu.engine.persistentMemory.set (some persistent)
   emu.engine.persistentVariable.set (some emu.config.memory)
@@ -224,6 +227,16 @@ private def testThreads : IO Unit := do
   assertBits "Emu scheduler preserves second thread" (BitVec.ofNat 64 12)
     (.ok (← Bap.Emu.threadReg emu second output))
   assertEqual "Emu scheduler stops on the quantum boundary" 2 (← Bap.Emu.thread emu)
+  Bap.Emu.stopThread emu second
+  Bap.Emu.switchThread emu 1
+  Bap.Emu.resumeThread emu second
+  assertEqual "Emu resumeThread reactivates the saved context" [⟨1, 4, false⟩, ⟨2, 4, false⟩]
+    (← Bap.Emu.threads emu)
+  Bap.Emu.stopThread emu 1
+  let stoppedSteps ← Bap.Emu.runPreemptive emu 1 1
+  assertEqual "Emu preemption yields a stopped thread to its caller" 0 stoppedSteps
+  assertEqual "Emu preemption does not abandon a stopped thread" 1 (← Bap.Emu.thread emu)
+  Bap.Emu.resumeThread emu 1
 
   let saved ← Bap.Emu.snapshot emu
   Bap.Emu.save emu "native/build/emu-threads-checkpoint.sexp"
@@ -354,6 +367,11 @@ def run : IO Unit := do
   Bap.Emu.resume emu
   let _ ← Bap.Emu.run emu 1
   assertEqual "Emu trace stops in execution order" [8] (← Bap.Emu.traceStop emu)
+  Bap.Emu.traceStartCapacity emu 2
+  Bap.Emu.setPc emu 0
+  let _ ← Bap.Emu.run emu 3
+  assertEqual "Emu bounded PC trace retains newest blocks" [4, 8] (← Bap.Emu.tracePcs emu)
+  assertEqual "Emu bounded PC trace reports evictions" 1 (← Bap.Emu.traceDroppedPcs emu)
 
   Bap.Emu.setPc emu 8
   let beforeCheckpoint ← Bap.Emu.reg emu output

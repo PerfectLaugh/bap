@@ -24,6 +24,7 @@ inductive Op where
   | branch (condition yes no : Nat)
   | memLoad (dst address size : Nat) (bigEndian : Bool)
   | memStore (address value size : Nat) (bigEndian : Bool)
+  | code (effectSlot : Nat) (pc : UInt64)
   deriving Repr
 
 opaque Program : Type
@@ -32,10 +33,16 @@ opaque Program : Type
 opaque compile (ops : List Op) : IO Program
 
 abbrev MemoryObserver := Bool → Nat → Nat → Nat → IO Unit
+abbrev CodeObserver := Nat → IO Bool
 
-@[extern "bap_jit_run_memory"]
-opaque runWithMemoryObserved (program : Program) (state addresses : Array UInt64) (values : Array UInt8)
-    (observer : Option MemoryObserver) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8)
+@[extern "bap_jit_run_memory_code"]
+opaque runWithMemoryObservedCode (program : Program) (state addresses : Array UInt64) (values : Array UInt8)
+    (observer : Option MemoryObserver) (codeObserver : Option CodeObserver) :
+    IO (Nat × Array UInt64 × Array UInt64 × Array UInt8)
+
+def runWithMemoryObserved (program : Program) (state addresses : Array UInt64) (values : Array UInt8)
+    (observer : Option MemoryObserver) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8) :=
+  runWithMemoryObservedCode program state addresses values observer none
 
 def runWithMemory (program : Program) (state addresses : Array UInt64) (values : Array UInt8) :
     IO (Nat × Array UInt64 × Array UInt64 × Array UInt8) :=
@@ -53,9 +60,14 @@ opaque createMemory (addresses : Array UInt64) (values : Array UInt8) : IO Memor
 @[extern "bap_jit_memory_write"]
 opaque writeMemory (memory : Memory) (addresses : Array UInt64) (values : Array UInt8) : IO Unit
 
-@[extern "bap_jit_run_memory_object"]
-opaque runWithPersistentMemory (program : Program) (state : Array UInt64) (memory : Memory)
-    (observer : Option MemoryObserver) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8)
+@[extern "bap_jit_run_memory_object_code"]
+opaque runWithPersistentMemoryObservedCode (program : Program) (state : Array UInt64) (memory : Memory)
+    (observer : Option MemoryObserver) (codeObserver : Option CodeObserver) :
+    IO (Nat × Array UInt64 × Array UInt64 × Array UInt8)
+
+def runWithPersistentMemory (program : Program) (state : Array UInt64) (memory : Memory)
+    (observer : Option MemoryObserver) : IO (Nat × Array UInt64 × Array UInt64 × Array UInt8) :=
+  runWithPersistentMemoryObservedCode program state memory observer none
 
 @[extern "bap_jit_memory_dump"]
 opaque dumpMemory (memory : Memory) : IO (Array UInt64 × Array UInt8)

@@ -9,7 +9,7 @@ structure Block where
   address : Nat
   next : Nat
   program : Bil.Program
-  deriving Repr
+  deriving Repr, Inhabited
 
 abbrev Fetch := Nat → IO ByteArray
 abbrev Lift := Nat → ByteArray → IO Block
@@ -27,6 +27,7 @@ private structure Lowering where
   layout : List (Bap.Var × Nat) := []
   inputs : List Bap.Var := []
   outputs : List (Bap.Var × Nat) := []
+  checkpoints : List (Nat × List (Bap.Var × Nat)) := []
   written : List Bap.Var := []
   nextSlot : Nat := 0
   nextLabel : Nat := 0
@@ -46,16 +47,23 @@ private structure CachedBlock where
   address : Nat
   code : ByteArray
   next : Nat
+  firstNext : Nat
+  last : Nat
   executions : Nat
   plan : Plan
 
 structure Engine where
   cache : IO.Ref (Std.HashMap Nat CachedBlock)
+  ranges : IO.Ref (Std.HashMap Nat CachedBlock)
   statistics : IO.Ref Statistics
   persistentMemory : IO.Ref (Option Jit.Memory)
   persistentVariable : IO.Ref (Option Bap.Var)
   hotThreshold : Nat
   cacheLimit : Nat
+  rangeLimit : Nat
+  rangeCacheLimit : Nat
+  writeCooldown : Nat
+  nativeCooldown : IO.Ref Nat
 
 structure Result where
   state : Bil.State
@@ -64,22 +72,32 @@ structure Result where
   effect : Bil.Effect
   deriving Repr
 
-def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) : IO Engine := do
+def Engine.create (hotThreshold : Nat := 1) (cacheLimit : Nat := 128) (rangeLimit : Nat := 1)
+    (rangeCacheLimit : Nat := 16) (writeCooldown : Nat := 0) : IO Engine := do
   return {
     cache := ← IO.mkRef {}
+    ranges := ← IO.mkRef {}
     statistics := ← IO.mkRef {}
     persistentMemory := ← IO.mkRef none
     persistentVariable := ← IO.mkRef none
     hotThreshold := max hotThreshold 1
     cacheLimit := max cacheLimit 1
+    rangeLimit := max rangeLimit 1
+    rangeCacheLimit := max rangeCacheLimit 1
+    writeCooldown
+    nativeCooldown := ← IO.mkRef 0
   }
 
 def stats (engine : Engine) : IO Statistics := engine.statistics.get
 
-def clearCache (engine : Engine) : IO Unit := engine.cache.set {}
+def clearCache (engine : Engine) : IO Unit := do
+  engine.cache.set {}
+  engine.ranges.set {}
 
-def discardRange (engine : Engine) (first last : Nat) : IO Unit :=
+def discardRange (engine : Engine) (first last : Nat) : IO Unit := do
   engine.cache.modify fun entries => entries.filter fun address _ => address < first || last < address
+  engine.ranges.modify fun entries => entries.filter fun _ entry => entry.last < first || last < entry.address
+  if engine.writeCooldown > 0 then engine.nativeCooldown.set (engine.writeCooldown + 1)
 
 def discardMemory (engine : Engine) : IO Unit := do
   engine.persistentMemory.set none
@@ -386,31 +404,52 @@ mutual
       if terminated then some (lowering, true) else lowerStatements lowering rest
 end
 
-private def lowerProgram (block : Block) : Option Lowering :=
-  let rec go (lowering : Lowering) : Bil.Program → Option Lowering
-    | [] => some { lowering with ops := lowering.ops ++ [.jump (UInt64.ofNat block.next)] }
-    | [.jmp (.int target)] => some (jumpConstant lowering (immediate target))
-    | [.jmp target] => do
-      let (lowering, target) ← lowerExp lowering target
-      some (jumpSlot lowering target.slot)
-    | stmt :: rest => do
-      let (lowering, terminated) ← lowerStmt lowering stmt
-      if terminated then some lowering else go lowering rest
-  let (initial, _) := setEffect { next := block.next } 0
-  go initial block.program
+private def codeSite (lowering : Lowering) (pc : Nat) : Lowering :=
+  let (lowering, slot) := setEffect lowering 0
+  { lowering with
+    ops := lowering.ops ++ [.code slot (UInt64.ofNat pc)]
+    checkpoints := lowering.checkpoints ++ [(pc, lowering.outputs)]
+  }
 
-private def compilePlan (engine : Engine) (block : Block) : IO Plan := do
-  match lowerProgram block with
-  | none => pure (.interpreted block.program)
+private def atCodeStop (lowering : Lowering) (pc : Nat) : Lowering :=
+  match lowering.checkpoints.find? fun checkpoint => checkpoint.1 = pc with
+  | some checkpoint => { lowering with outputs := checkpoint.2 }
+  | none => lowering
+
+private def lowerRange (blocks : List Block) : Option Lowering := do
+  let final ← blocks.getLast?
+  let (initial, _) := setEffect { next := final.next } 0
+  let rec go (lowering : Lowering) (remaining : List Block) : Option Lowering :=
+    match remaining with
+    | [] => some { lowering with ops := lowering.ops ++ [.jump (UInt64.ofNat final.next)] }
+    | [block] => do
+      let (lowering, terminated) ← lowerStatements lowering block.program
+      if terminated then some lowering
+      else some { lowering with ops := lowering.ops ++ [.jump (UInt64.ofNat block.next)] }
+    | block :: rest => do
+      let (lowering, terminated) ← lowerStatements lowering block.program.dropLast
+      if terminated then none
+      else go (codeSite lowering rest.head!.address) rest
+  go initial blocks
+
+private def compileRangePlan (engine : Engine) (blocks : List Block) : IO (Option Plan) := do
+  match lowerRange blocks with
+  | none => pure none
   | some lowering =>
     let program ← Jit.compile lowering.ops
     engine.statistics.modify fun stats =>
       { stats with nativeCompilations := stats.nativeCompilations + 1 }
-    pure (.native lowering program block.program)
+    pure (some (.native lowering program blocks.head!.program))
+
+private def compilePlan (engine : Engine) (block : Block) : IO Plan := do
+  match ← compileRangePlan engine [block] with
+  | some plan => pure plan
+  | none => pure (.interpreted block.program)
 
 private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : ByteArray) :
     IO CachedBlock := do
   let entries ← engine.cache.get
+  let cooldown ← engine.nativeCooldown.get
   let miss := do
     let entries ← if entries.size ≥ engine.cacheLimit then do
       clearCache engine
@@ -421,9 +460,11 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
     let block ← lift address code
     if block.address != address then
       throw <| IO.userError s!"lifted block address {block.address} does not match {address}"
-    let plan ← if engine.hotThreshold = 1 then compilePlan engine block
+    let plan ← if engine.hotThreshold = 1 && cooldown = 0 then compilePlan engine block
       else pure (.interpreted block.program)
-    let entry : CachedBlock := { address, code, next := block.next, executions := 1, plan }
+    let entry : CachedBlock := {
+      address, code, next := block.next, firstNext := block.next, last := address, executions := 1, plan
+    }
     engine.cache.set (entries.insert address entry)
     return entry
   match entries.get? address with
@@ -431,7 +472,11 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
     if entry.code == code then do
       engine.statistics.modify fun stats => { stats with cacheHits := stats.cacheHits + 1 }
       let executions := entry.executions + 1
-      let plan ← if entry.executions < engine.hotThreshold && executions ≥ engine.hotThreshold then
+      let shouldCompile := cooldown = 0 && executions ≥ engine.hotThreshold &&
+        match entry.plan with
+        | .interpreted _ => true
+        | .native _ _ _ => false
+      let plan ← if shouldCompile then
         match entry.plan with
         | .interpreted program => compilePlan engine ⟨entry.address, entry.next, program⟩
         | .native .. => pure entry.plan
@@ -443,6 +488,55 @@ private def prepare (engine : Engine) (lift : Lift) (address : Nat) (code : Byte
     else
       miss
   | none => miss
+
+private def directFallthrough (block : Block) : Bool :=
+  match block.program.getLast? with
+  | some (.jmp (.int target)) => target.toNat = block.next
+  | _ => false
+
+private def prepareRange (engine : Engine) (fetch : Fetch) (lift : Lift)
+    (address : Nat) (code : ByteArray) : IO CachedBlock := do
+  if engine.rangeLimit = 1 then prepare engine lift address code
+  else
+    let ranges ← engine.ranges.get
+    match ranges.get? address with
+    | some entry =>
+      engine.statistics.modify fun stats => { stats with cacheHits := stats.cacheHits + 1 }
+      return entry
+    | none => do
+      let first ← prepare engine lift address code
+      match first.plan with
+      | .interpreted _ => return first
+      | .native .. => do
+        let firstProgram := match first.plan with
+          | .native _ _ fallback => fallback
+          | .interpreted program => program
+        let rec gather (remaining : Nat) (previous : Block) (blocks : List Block) : IO (List Block) := do
+          match remaining with
+          | 0 | 1 => pure blocks
+          | remaining + 2 =>
+            if !directFallthrough previous then pure blocks
+            else
+              let next := previous.next
+              let nextCode ← fetch next
+              engine.statistics.modify fun stats => { stats with lifts := stats.lifts + 1 }
+              let block ← lift next nextCode
+              if block.address != next then
+                throw <| IO.userError s!"lifted range block address {block.address} does not match {next}"
+              gather (remaining + 1) block (blocks ++ [block])
+        let blocks ← gather engine.rangeLimit ⟨first.address, first.next, firstProgram⟩ []
+        if blocks.length = 0 then return first
+        else
+          match ← compileRangePlan engine (⟨first.address, first.next, firstProgram⟩ :: blocks) with
+          | none => return first
+          | some plan =>
+            let all := ⟨first.address, first.next, firstProgram⟩ :: blocks
+            let final := all.getLast!
+            let entry := { first with next := final.next, last := final.address, plan }
+            if ranges.size ≥ engine.rangeCacheLimit then engine.ranges.set {}
+            engine.ranges.modify (·.insert address entry)
+            engine.cache.modify (·.erase address)
+            return entry
 
 private def encodeState (lowering : Lowering) (env : Bil.Env) : Except String (Array UInt64) := do
   lowering.layout.foldlM (init := Array.replicate lowering.nextSlot 0) fun slots binding => do
@@ -497,15 +591,16 @@ private def syncMemoryDelta (lowering : Lowering) (state : Bil.State)
   match lowering.memory with
   | none => state
   | some var =>
-    match var.typ, Bil.lookup state.env var with
-    | .mem width 8, .ok (@Value.memory addressWidth memory) =>
-      if h : width = addressWidth then
-        let memory : Bap.Memory width := h ▸ memory
-        let updated := (addresses.zip values).foldl (init := memory) fun memory cell =>
-          Bap.Memory.writeByte memory (BitVec.ofNat width cell.1.toNat) cell.2
-        { env := Bil.bind state.env var (.memory updated) }
-      else state
-    | _, _ => state
+    if addresses.isEmpty then state else
+      match var.typ, Bil.lookup state.env var with
+      | .mem width 8, .ok (@Value.memory addressWidth memory) =>
+        if h : width = addressWidth then
+          let memory : Bap.Memory width := h ▸ memory
+          let updated := (addresses.zip values).foldl (init := memory) fun memory cell =>
+            Bap.Memory.writeByte memory (BitVec.ofNat width cell.1.toNat) cell.2
+          { env := Bil.bind state.env var (.memory updated) }
+        else state
+      | _, _ => state
 
 private def nativeResult (lowering : Lowering) (following : Nat) (next : Nat)
     (state : Bil.State) (slots : Array UInt64) : IO Result := do
@@ -516,6 +611,8 @@ private def nativeResult (lowering : Lowering) (following : Nat) (next : Nat)
     return ⟨state, next, following, .jump (BitVec.ofNat 64 next)⟩
   else if effect == 2 then
     throw <| IO.userError "Primus loop fuel exhausted"
+  else if effect == 3 then
+    return ⟨state, next, next, .normal⟩
   else
     return ⟨state, next, following, .normal⟩
 
@@ -562,39 +659,45 @@ private def runInterpreted (engine : Engine) (next pc : Nat) (program : Bil.Prog
 
 private def runPersistent (engine : Engine) (lowering : Lowering) (following : Nat)
     (program : Jit.Program) (state : Bil.State) (slots : Array UInt64)
-    (memory : Jit.Memory) (observer : Option Jit.MemoryObserver) : IO Result := do
+    (memory : Jit.Memory) (observer : Option Jit.MemoryObserver)
+    (codeObserver : Option Jit.CodeObserver) : IO Result := do
   recordNative engine
-  let (next, slots, addresses, values) ← Jit.runWithPersistentMemory program slots memory observer
-  let state := syncMemoryDelta lowering (syncState lowering state slots) addresses values
+  let (next, slots, addresses, values) ←
+    Jit.runWithPersistentMemoryObservedCode program slots memory observer codeObserver
+  let completed := atCodeStop lowering next
+  let state := syncMemoryDelta completed (syncState completed state slots) addresses values
   nativeResult lowering following next state slots
 
 def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bil.State) (pc : Nat)
-    (observer : Option Jit.MemoryObserver) : IO Result := do
+    (observer : Option Jit.MemoryObserver) (codeObserver : Option Jit.CodeObserver := none) : IO Result := do
+  engine.nativeCooldown.modify fun cooldown => if cooldown = 0 then 0 else cooldown - 1
   let code ← fetch pc
-  let entry ← prepare engine lift pc code
+  let entry ← prepareRange engine fetch lift pc code
   match entry.plan with
   | .interpreted program => runInterpreted engine entry.next pc program state observer
   | .native lowering program fallback =>
     match encodeState lowering state.env with
-    | .error _ => runInterpreted engine entry.next pc fallback state observer
+    | .error _ => runInterpreted engine entry.firstNext pc fallback state observer
     | .ok slots => do
       let persistent ← engine.persistentMemory.get
       match persistent, lowering.memory with
-      | some memory, some _ => runPersistent engine lowering entry.next program state slots memory observer
+      | some memory, some _ =>
+        runPersistent engine lowering entry.next program state slots memory observer codeObserver
       | _, _ =>
         match memoryInput lowering state with
-        | .error _ => runInterpreted engine entry.next pc fallback state observer
+        | .error _ => runInterpreted engine entry.firstNext pc fallback state observer
         | .ok (addresses, values) =>
           if addresses.size ≥ 100000 then do
             let memory ← Jit.createMemory addresses values
             engine.persistentMemory.set (some memory)
             engine.persistentVariable.set lowering.memory
-            runPersistent engine lowering entry.next program state slots memory observer
+            runPersistent engine lowering entry.next program state slots memory observer codeObserver
           else do
             recordNative engine
             let (next, slots, addresses, values) ←
-              Jit.runWithMemoryObserved program slots addresses values observer
-            let state := syncMemory lowering (syncState lowering state slots) addresses values
+              Jit.runWithMemoryObservedCode program slots addresses values observer codeObserver
+            let completed := atCodeStop lowering next
+            let state := syncMemory completed (syncState completed state slots) addresses values
             nativeResult lowering entry.next next state slots
 
 def runBlock (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bil.State) (pc : Nat) :
