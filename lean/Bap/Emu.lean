@@ -165,6 +165,7 @@ structure Emu where
   parallelLock : IO.Ref (Option Std.BaseMutex)
   parallelWorkers : IO.Ref (List (ThreadId × Primus.Lifted.Engine))
   processMemory : IO.Ref (Std.HashMap ThreadId Jit.Memory)
+  threadControl : IO.Ref (Std.HashMap ThreadId Bool)
 
 namespace Region
 
@@ -219,6 +220,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     parallelLock := ← IO.mkRef none
     parallelWorkers := ← IO.mkRef []
     processMemory := ← IO.mkRef {}
+    threadControl := ← IO.mkRef {}
   }
 
 private def saveCurrentThread (emu : Emu) : IO Unit := do
@@ -349,12 +351,14 @@ def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
     emu.skipCode.set none
 
 def resumeThread (emu : Emu) (id : ThreadId) : IO Unit := do
+  emu.threadControl.modify (·.insert id false)
   emu.threadsRef.modify fun threads => threads.map fun context =>
     if context.id == id then { context with stopped := false } else context
   if (← thread emu) == id then
     emu.stopped.set false
 
 def stopThread (emu : Emu) (id : ThreadId) : IO Unit := do
+  emu.threadControl.modify (·.insert id true)
   if (← thread emu) == id then
     emu.stopped.set true
   else
@@ -1237,6 +1241,7 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
   if active.length ≤ 1 then
     runPreemptive emu quantum quantum
   else
+    emu.threadControl.set {}
     let before ← snapshot emu
     try
       let shared ← match ← emu.engine.persistentMemory.get with
@@ -1274,16 +1279,18 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
         evictions := total.evictions + current.evictions
         graphBlocks := total.graphBlocks + current.graphBlocks
       })
+      let control ← emu.threadControl.get
       let merged ← (contexts.mapM fun context => do
         match workers.find? fun worker => worker.1.id = context.id with
-        | none => pure context
+        | none => pure { context with stopped := (control.get? context.id).getD context.stopped }
         | some (_, worker) =>
           let state ← worker.state.get
+          let stopped ← worker.stopped.get
           pure {
             context with
             state
             pc := ← worker.pc.get
-            stopped := ← worker.stopped.get
+            stopped := (control.get? context.id).getD stopped
             pending := ← worker.pendingRef.get
           })
       emu.threadsRef.set merged

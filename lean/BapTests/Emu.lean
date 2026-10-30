@@ -284,6 +284,14 @@ private def testThreads : IO Unit := do
   assertEqual "Emu context hooks observe the active worker" [(1, 1), (contextSecond, 11)] sortedEvents
   assertTrue "Emu context hooks stop each active worker"
     ((← Bap.Emu.threads contextEmu).all fun thread => thread.stopped)
+  let wakeEmu ← Bap.Emu.riscv64 parallelCode 0 0
+  let wakeSecond ← Bap.Emu.spawnThread wakeEmu 0 10
+  let _ ← Bap.Emu.onCodeWith wakeEmu (0, 0) fun current _ => do
+    if (← Bap.Emu.thread current) = 1 then Bap.Emu.resumeThread current wakeSecond
+    Bap.Emu.stop current
+  let _ ← Bap.Emu.runPreemptiveParallel wakeEmu 1
+  let wakeStates := (← Bap.Emu.threads wakeEmu).map fun thread => (thread.id, thread.stopped)
+  assertEqual "Emu parallel merge preserves cross-worker wake" [(1, true), (wakeSecond, false)] wakeStates
   let syscallContextEmu ← Bap.Emu.riscv64 ((← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
     (← LLVM.assemble "riscv64" "ecall")) 0 0
   Bap.Emu.setReg syscallContextEmu output (.bits (BitVec.ofNat 64 0))
