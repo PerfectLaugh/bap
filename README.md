@@ -47,6 +47,7 @@ lake exe bap symbolic program.bil       # paths of a BIL program
 lake exe bap mc c3                      # one instruction, from hex
 lake exe bap run program args           # an x86-64 Linux program, in a virtual Linux
 lake exe bap run --copy dir program     # the same, with a directory copied in first
+lake exe bap run --strace program       # the same, saying each system call
 ```
 
 Run `lake exe bap` for the other commands. Everything is also a library: `Bap.Runtime` has

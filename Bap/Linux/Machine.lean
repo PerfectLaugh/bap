@@ -480,9 +480,9 @@ private def mapStack (emu : Emu) (arguments environment : List String) (auxiliar
   setReg emu (word "RSP") (bits 64 pointer)
 
 /-- A machine at the start of `path`, which is in `kernel`. Its first process has the standard descriptors, on a console, with
-`input` to read. -/
+`input` to read. `watch` sees each system call before it is served. -/
 def start (kernel : Kernel) (path : String) (arguments : List String) (environment : List String := [])
-    (input : ByteArray := ByteArray.empty) : IO Machine := do
+    (input : ByteArray := ByteArray.empty) (watch : Option (Nat → List Nat → IO Unit) := none) : IO Machine := do
   let data ← IO.ofExcept ((fileOf kernel path).mapError fun errno => s!"{path}: error {errno}")
   let program ← IO.ofExcept (Elf.parse data)
   let base := if program.relocatable then programBase else 0
@@ -492,8 +492,10 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
       let bytes ← IO.ofExcept ((fileOf kernel name).mapError fun errno => s!"{name}: error {errno}")
       pure (some (bytes, ← IO.ofExcept (Elf.parse bytes)))
   -- A real program runs more code than the working set of a few thousand blocks that the default is for, and past it, each one
-  -- would be lifted each time it runs.
-  let emu ← x86_64 (ByteArray.mk (Array.replicate 16 0x90)) 0x1000 0 fun config => { config with cacheLimit := 1048576 }
+  -- would be lifted each time it runs. Most of its code runs at its start, a few times, and compiling that takes longer than
+  -- running it: with this threshold, `ls` takes a third of the time, and a long loop no longer.
+  let emu ← x86_64 (ByteArray.mk (Array.replicate 16 0x90)) 0x1000 0 fun config =>
+    { config with cacheLimit := 1048576, hotThreshold := 1024 }
   unmap emu 0x1000 16
   resetRegisters emu
   let top ← mapProgram emu data program base
@@ -513,6 +515,10 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   let kernel := kernel.withConsole first input
   let kernel := kernel.setProcess first { kernel.process first with breakStart := top, breakEnd := top }
   let machine : Machine := { emu, kernel := ← IO.mkRef kernel }
+  if let some watch := watch then
+    let _ ← onSyscall emu fun _ number args => do
+      watch number args
+      pure .default
   let _ ← serveKernelCalls machine
   let _ ← serveTaskCalls emu
   let _ ← serveRest emu
