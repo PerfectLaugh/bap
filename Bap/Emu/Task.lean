@@ -147,4 +147,47 @@ def settle (table : TaskTable) : TaskTable × List (Waiter × WaitResult) :=
 
 end TaskTable
 
+/-- What `wait4` is asked for by its first argument, a signed word: any child, one of them, or a process group, which isn't
+modelled. -/
+def waitTarget (width target : Nat) : Option (Option Nat) :=
+  if target == 2 ^ width - 1 then some none
+  else if 0 < target && target < 2 ^ (width - 1) then some (some target)
+  else none
+
+/-- How a run of tasks ended. -/
+inductive ScheduleOutcome where
+  /-- Nothing can run, and the first process ended with this status. -/
+  | finished (status : Nat)
+  /-- Nothing can run, and these threads wait for what never happens. -/
+  | deadlock (waiting : List Nat)
+  /-- The thread stopped for a reason of its own, such as a breakpoint, and it is the current one. -/
+  | stopped (id : Nat)
+  | outOfFuel
+  deriving DecidableEq, Repr
+
+/-- What the scheduler does next. -/
+inductive ScheduleStep where
+  | run
+  | switch (id : Nat)
+  | done (outcome : ScheduleOutcome)
+  deriving DecidableEq, Repr
+
+/-- The decision of the scheduler: `blocked` says that the thread that runs waits or is over, `next` is the next that can run,
+`waiting` are the waiters and `first` is the status of the first process. -/
+def scheduleStep (current fuel : Nat) (stopped blocked : Bool) (next : Option Nat) (waiting : List Nat)
+    (first : Option Nat) : ScheduleStep :=
+  if stopped then
+    if !blocked then .done (.stopped current)
+    else
+      match next with
+      | some id => .switch id
+      | none =>
+        if !waiting.isEmpty then .done (.deadlock waiting)
+        else
+          match first with
+          | some status => .done (.finished status)
+          | none => .done (.stopped current)
+  else if fuel == 0 then .done .outOfFuel
+  else .run
+
 end Bap.Emu

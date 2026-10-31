@@ -1276,11 +1276,7 @@ private def syscallReturn (emu : Emu) (result : Except Nat Nat) : IO SyscallActi
 stops here, and `runProcesses` gives it its result. -/
 private def serveWait (emu : Emu) (target status options usage : Nat) : IO SyscallAction := do
   let width ← wordWidth emu
-  let wanted : Option (Option Nat) :=
-    if target == 2 ^ width - 1 then some none
-    else if 0 < target && target < 2 ^ (width - 1) then some (some target)
-    else none
-  match wanted with
+  match waitTarget width target with
   | none => syscallReturn emu (.error einval)
   | some wanted =>
     if usage != 0 then syscallReturn emu (.error einval) else
@@ -1678,17 +1674,6 @@ def runPreemptive (emu : Emu) (quantum : Nat := 100) (fuel : Nat := 100000) : IO
     throw <| IO.userError "Emu thread quantum must be positive"
   preemptiveM (run emu ·) (stopped emu) (switchNextThread emu) quantum fuel (fuel + 1) fuel 0
 
-/-- How a run of processes ended. -/
-inductive ScheduleOutcome where
-  /-- Nothing can run, and the first process ended with this status. -/
-  | finished (status : Nat)
-  /-- Nothing can run, and these threads wait for what never happens. -/
-  | deadlock (waiting : List ThreadId)
-  /-- The thread stopped for a reason of its own, such as a breakpoint, and it is the current one. -/
-  | stopped (id : ThreadId)
-  | outOfFuel
-  deriving DecidableEq, Repr
-
 /-- Whether the thread stopped because it waits or is over, which is for the scheduler to deal with. -/
 private def blockedOrOver (emu : Emu) (id : ThreadId) : IO Bool := do
   let table ← emu.taskTable.get
@@ -1714,28 +1699,20 @@ private def scheduleLoop (emu : Emu) (quantum : Nat) : Nat → Nat → IO Schedu
   | 0, _ => pure .outOfFuel
   | rounds + 1, fuel => do
     settleWaiters emu
+    saveCurrentThread emu
     let current ← thread emu
-    if ← stopped emu then
-      if !(← blockedOrOver emu current) then
-        pure (.stopped current)
-      else
-        saveCurrentThread emu
-        match pickNext (← emu.threadsRef.get) current with
-        | some id =>
-          switchThread emu id
-          collectGone emu
-          scheduleLoop emu quantum rounds fuel
-        | none =>
-          let table ← emu.taskTable.get
-          if !table.waiters.isEmpty then
-            pure (.deadlock (table.waiters.map (·.thread)))
-          else
-            match table.tasks.head? with
-            | some { status := some status, .. } => pure (.finished status)
-            | _ => pure (.stopped current)
-    else if fuel == 0 then
-      pure .outOfFuel
-    else
+    let table ← emu.taskTable.get
+    let first := match table.tasks.head? with
+      | some task => task.status
+      | none => none
+    match scheduleStep current fuel (← stopped emu) (← blockedOrOver emu current) (pickNext (← emu.threadsRef.get) current)
+        (table.waiters.map (·.thread)) first with
+    | .done outcome => pure outcome
+    | .switch id =>
+      switchThread emu id
+      collectGone emu
+      scheduleLoop emu quantum rounds fuel
+    | .run =>
       let steps ← runGuest emu (min quantum fuel)
       if !(← stopped emu) then
         let _ ← switchNextThread emu

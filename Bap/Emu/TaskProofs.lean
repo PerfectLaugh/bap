@@ -223,3 +223,130 @@ theorem settle_woken_mem (table : TaskTable) :
   · exact hin
 
 end Bap.Emu.TaskTable
+
+namespace Bap.Emu
+
+/-- What a status says of the code it holds, as `WEXITSTATUS` reads it, and that `WIFEXITED` holds. -/
+theorem exitedStatus_code (code : Nat) : exitedStatus code / 256 = code % 256 ∧ exitedStatus code % 128 = 0 := by
+  simp only [exitedStatus]
+  omega
+
+/-- A signal, as `WTERMSIG` reads it, and what `WIFEXITED` tells from an exit. -/
+theorem signaledStatus_signal {signal : Nat} (h : signal % 128 ≠ 0) :
+    signaledStatus signal % 128 = signal % 128 ∧ signaledStatus signal % 128 ≠ 0 := by
+  simp only [signaledStatus]
+  omega
+
+/-- The word of -1 asks for any child. -/
+theorem waitTarget_any (width : Nat) : waitTarget width (2 ^ width - 1) = some none := by
+  simp [waitTarget]
+
+/-- Only a positive word asks for one process, and it asks for that one. -/
+theorem waitTarget_one {width target pid : Nat} (h : waitTarget width target = some (some pid)) :
+    pid = target ∧ 0 < target ∧ target < 2 ^ (width - 1) := by
+  simp only [waitTarget] at h
+  split at h
+  · cases h
+  · split at h
+    · next hrange =>
+      simp only [Option.some.injEq] at h
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hrange
+      exact ⟨h.symm, hrange⟩
+    · cases h
+
+/-- Nothing runs but a thread that isn't stopped, with fuel left. -/
+theorem scheduleStep_run {current fuel : Nat} {stopped blocked : Bool} {next : Option Nat} {waiting : List Nat}
+    {first : Option Nat} (h : scheduleStep current fuel stopped blocked next waiting first = .run) :
+    stopped = false ∧ fuel ≠ 0 := by
+  cases stopped with
+  | true =>
+    simp only [scheduleStep, ite_true] at h
+    split at h
+    · cases h
+    · split at h
+      · cases h
+      · split at h
+        · cases h
+        · split at h <;> cases h
+  | false =>
+    simp only [scheduleStep, Bool.false_eq_true, ite_false] at h
+    split at h
+    · cases h
+    · next hfuel => exact ⟨rfl, by simpa using hfuel⟩
+
+/-- A breakpoint isn't taken from the one who asked: a thread that stopped for a reason of its own stays current. -/
+theorem scheduleStep_own_stop (current fuel : Nat) (next : Option Nat) (waiting : List Nat) (first : Option Nat) :
+    scheduleStep current fuel true false next waiting first = .done (.stopped current) := rfl
+
+/-- The scheduler moves on from a blocked thread to the next that can run, and to nothing else. -/
+theorem scheduleStep_switch {current fuel id : Nat} {stopped blocked : Bool} {next : Option Nat} {waiting : List Nat}
+    {first : Option Nat} (h : scheduleStep current fuel stopped blocked next waiting first = .switch id) :
+    stopped = true ∧ blocked = true ∧ next = some id := by
+  cases stopped with
+  | false =>
+    simp only [scheduleStep, Bool.false_eq_true, ite_false] at h
+    split at h <;> cases h
+  | true =>
+    cases blocked with
+    | false => simp [scheduleStep] at h
+    | true =>
+      cases next with
+      | some other =>
+        simp only [scheduleStep, ite_true, Bool.not_true, Bool.false_eq_true, ite_false, ScheduleStep.switch.injEq] at h
+        exact ⟨rfl, rfl, by rw [h]⟩
+      | none =>
+        simp only [scheduleStep, ite_true, Bool.not_true, Bool.false_eq_true, ite_false] at h
+        split at h
+        · cases h
+        · split at h <;> cases h
+
+/-- A deadlock is what it says: the thread that runs can't, nor can any other, and these are the ones that wait. -/
+theorem scheduleStep_deadlock {current fuel : Nat} {stopped blocked : Bool} {next : Option Nat} {waiting found : List Nat}
+    {first : Option Nat} (h : scheduleStep current fuel stopped blocked next waiting first = .done (.deadlock found)) :
+    stopped = true ∧ blocked = true ∧ next = none ∧ found = waiting ∧ waiting ≠ [] := by
+  cases stopped with
+  | false =>
+    simp only [scheduleStep, Bool.false_eq_true, ite_false] at h
+    split at h <;> cases h
+  | true =>
+    cases blocked with
+    | false => simp [scheduleStep] at h
+    | true =>
+      cases next with
+      | some other => simp [scheduleStep] at h
+      | none =>
+        simp only [scheduleStep, ite_true, Bool.not_true, Bool.false_eq_true, ite_false] at h
+        split at h
+        · next hwait =>
+          simp only [ScheduleStep.done.injEq, ScheduleOutcome.deadlock.injEq] at h
+          refine ⟨rfl, rfl, rfl, h.symm, ?_⟩
+          intro hnil
+          simp [hnil] at hwait
+        · split at h <;> cases h
+
+/-- A run is finished only when nothing can run, nothing waits, and the first process has its status. -/
+theorem scheduleStep_finished {current fuel status : Nat} {stopped blocked : Bool} {next : Option Nat} {waiting : List Nat}
+    {first : Option Nat} (h : scheduleStep current fuel stopped blocked next waiting first = .done (.finished status)) :
+    stopped = true ∧ blocked = true ∧ next = none ∧ waiting = [] ∧ first = some status := by
+  cases stopped with
+  | false =>
+    simp only [scheduleStep, Bool.false_eq_true, ite_false] at h
+    split at h <;> cases h
+  | true =>
+    cases blocked with
+    | false => simp [scheduleStep] at h
+    | true =>
+      cases next with
+      | some other => simp [scheduleStep] at h
+      | none =>
+        simp only [scheduleStep, ite_true, Bool.not_true, Bool.false_eq_true, ite_false] at h
+        split at h
+        · cases h
+        · next hwait =>
+          cases first with
+          | none => cases h
+          | some value =>
+            simp only [ScheduleStep.done.injEq, ScheduleOutcome.finished.injEq] at h
+            exact ⟨rfl, rfl, rfl, by simpa using hwait, by rw [h]⟩
+
+end Bap.Emu
