@@ -120,6 +120,7 @@ private def collectGone (emu : Emu) : IO Unit := do
   let table ← emu.taskTable.get
   emu.threadsRef.modify (·.filter fun context => context.id == current || (table.find? context.id).isSome)
   emu.processMemory.modify (·.filter fun space _ => table.tasks.any (·.space == space))
+  emu.parkedRegions.modify (·.filter fun space _ => table.tasks.any (·.space == space))
 
 /-- What `waitpid` reports now, in the process that runs, without blocking. What it reports is gone from the table. -/
 def waitpid (emu : Emu) (target : Option Nat := none) : IO WaitResult := do
@@ -351,15 +352,24 @@ private def serveFutex (emu : Emu) (address operation value timeout target compa
   | 10 => wake (compare % 2 ^ 32)
   | _ => syscallReturn emu (.error (enosys emu))
 
-/-- Where a mapping goes that doesn't say: above everything, page aligned. -/
-private def freeAddress (emu : Emu) : IO Nat := do
-  let top := (← emu.regions.get).foldl (fun top region => max top (region.address + region.data.size)) 0x10000
-  pure ((top + 4095) / 4096 * 4096)
+/-- Where a mapping goes that doesn't say: below the others, from the top down, as in Linux. -/
+private def mappingBase : Nat := 0x7f0000000000
+
+private def freeAddress (emu : Emu) (size : Nat) : IO Nat := do
+  let taken := (← emu.regions.get).map (fun region => (region.address, region.data.size))
+  let sorted := taken.toArray.qsort (fun left right => left.1 > right.1)
+  pure (gapBelow size mappingBase (sorted.toList.filter (·.1 < mappingBase)))
 
 private def protectionOf (bits : Nat) : Primus.Protection := ⟨bits &&& 1 != 0, bits &&& 2 != 0, bits &&& 4 != 0⟩
 
-/-- `mmap` of anonymous memory, which is what the stacks of threads are. Mappings are for the whole emulator: a space sees
-zeros where another mapped and wrote. -/
+/-- Places a mapping of `pages` of `data`: at `address` if it is fixed, over what was there, and anywhere else if not. -/
+def placeMapping (emu : Emu) (address : Nat) (fixed : Bool) (data : ByteArray) (bits : Nat) : IO Nat := do
+  let start ← if fixed then pure address else freeAddress emu data.size
+  if fixed then unmap emu start data.size
+  map emu ⟨start, data, protectionOf bits⟩
+  pure start
+
+/-- `mmap` of anonymous memory, which is what the stacks of threads are. -/
 private def serveMmap (emu : Emu) (address size bits flags : Nat) : IO SyscallAction := do
   let fixed := flags &&& 0x10 != 0
   let anonymous := flags &&& (if isMips emu then 0x800 else 0x20) != 0
@@ -368,15 +378,12 @@ private def serveMmap (emu : Emu) (address size bits flags : Nat) : IO SyscallAc
   else if size == 0 then
     syscallReturn emu (.error einval)
   else
-    let start ← if fixed then pure address else freeAddress emu
     let pages := (size + 4095) / 4096 * 4096
     try
-      map emu ⟨start, ByteArray.mk (Array.replicate pages 0), protectionOf bits⟩
-      syscallReturn emu (.ok start)
+      syscallReturn emu (.ok (← placeMapping emu address fixed (ByteArray.mk (Array.replicate pages 0)) bits))
     catch _ => syscallReturn emu (.error enomem)
 
-/-- `mprotect`, and `munmap`, which takes away all access and keeps the addresses, since an emulator has few threads to run
-out of them. -/
+/-- `mprotect`. -/
 private def serveProtect (emu : Emu) (address size bits : Nat) : IO SyscallAction := do
   try
     protect emu address ((size + 4095) / 4096 * 4096) (protectionOf bits)
@@ -455,7 +462,8 @@ def serveTaskCalls (emu : Emu) : IO HookId := do
       else if is calls.mmap then
         serveMmap current (arg 0) (arg 1) (arg 2) (arg 3)
       else if is calls.munmap then
-        serveProtect current (arg 0) (arg 1) 0
+        unmap current (arg 0) ((arg 1 + 4095) / 4096 * 4096)
+        syscallReturn current (.ok 0)
       else if is calls.mprotect then
         serveProtect current (arg 0) (arg 1) (arg 2)
       else if isSome calls.archPrctl then

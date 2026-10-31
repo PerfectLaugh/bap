@@ -335,6 +335,79 @@ end Bap.Tasks.TaskTable
 
 namespace Bap.Tasks
 
+/-- What `gapBelow` finds is below where it started, and if what is taken is sorted from the highest down and there is room,
+it is clear of all of it. -/
+theorem gapBelow_le (size : Nat) : ∀ (taken : List (Nat × Nat)) (top : Nat), gapBelow size top taken ≤ top := by
+  intro taken
+  induction taken with
+  | nil => intro top; simp only [gapBelow]; omega
+  | cons head rest ih =>
+    intro top
+    simp only [gapBelow]
+    split
+    · omega
+    · have := ih (min top head.1)
+      omega
+
+private def Descending : List (Nat × Nat) → Prop
+  | [] => True
+  | head :: rest => (∀ other ∈ rest, other.1 + other.2 ≤ head.1) ∧ Descending rest
+
+theorem gapBelow_clear (size : Nat) : ∀ (taken : List (Nat × Nat)) (top : Nat), Descending taken →
+    size ≤ gapBelow size top taken + size →
+    (size ≤ (taken.foldl (fun low entry => min low entry.1) top)) →
+    ∀ entry ∈ taken, entry.1 + entry.2 ≤ gapBelow size top taken ∨ gapBelow size top taken + size ≤ entry.1 := by
+  intro taken
+  induction taken with
+  | nil => intro top _ _ _ entry hin; cases hin
+  | cons head rest ih =>
+    intro top hsorted _ hroom entry hin
+    obtain ⟨hbelow, hrest⟩ := hsorted
+    simp only [gapBelow]
+    by_cases hfit : head.1 + head.2 + size ≤ top
+    · simp only [hfit, ↓reduceIte]
+      rcases List.mem_cons.mp hin with rfl | hother
+      · left; omega
+      · have := hbelow entry hother
+        left; omega
+    · simp only [hfit, ↓reduceIte]
+      have hle := gapBelow_le size rest (min top head.1)
+      have hfold : size ≤ rest.foldl (fun low entry => min low entry.1) (min top head.1) := by
+        simpa using hroom
+      rcases List.mem_cons.mp hin with rfl | hother
+      · right
+        have hmonotone : ∀ (entries : List (Nat × Nat)) (low : Nat), entries.foldl (fun low entry => min low entry.1) low ≤ low := by
+          intro entries
+          induction entries with
+          | nil => intro low; exact Nat.le_refl _
+          | cons first others inner =>
+            intro low
+            simp only [List.foldl_cons]
+            exact Nat.le_trans (inner _) (Nat.min_le_left _ _)
+        have hbound : gapBelow size (min top entry.1) rest + size ≤ min top entry.1 := by
+          have key : ∀ (entries : List (Nat × Nat)) (start : Nat),
+              size ≤ entries.foldl (fun low entry => min low entry.1) start → gapBelow size start entries + size ≤ start := by
+            intro entries
+            induction entries with
+            | nil => intro start hs; simp only [gapBelow, List.foldl_nil] at hs ⊢; omega
+            | cons first others inner =>
+              intro start hs
+              simp only [List.foldl_cons] at hs
+              simp only [gapBelow]
+              split
+              · have : size ≤ start := by
+                  have := hmonotone others (min start first.1)
+                  have := Nat.min_le_left start first.1
+                  omega
+                omega
+              · have := inner _ hs
+                have := Nat.min_le_left start first.1
+                omega
+          exact key rest _ hfold
+        have := Nat.min_le_right top entry.1
+        omega
+      · exact ih _ hrest (by omega) hfold entry hother
+
 /-- An error is the negated number in a word, and on MIPS the number, with the flag up. -/
 theorem syscallWord_error (width errno : Nat) :
     syscallWord false width (.error errno) = (2 ^ width - errno, none) ∧ syscallWord true width (.error errno) = (errno, some 1) :=

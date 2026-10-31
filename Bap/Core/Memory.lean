@@ -147,6 +147,16 @@ decreasing_by
 def writeRegion (memory : Memory addressWidth) (address : Nat) (data : ByteArray) : Memory addressWidth :=
   ⟨writePages (2 ^ addressWidth) (Nat.two_pow_pos _) memory.pages address data 0⟩
 
+/-- The bytes of the range are zero again. It looks at the pages that are there, and adds none. -/
+def clearRange (memory : Memory addressWidth) (address size : Nat) : Memory addressWidth :=
+  memory.pages.foldl (init := memory) fun current index page =>
+    let base := index * pageSize
+    let first := max base address
+    let stop := min (base + page.size) (address + size)
+    if first < stop then
+      current.writeRegion first (ByteArray.mk (Array.replicate (stop - first) 0))
+    else current
+
 def writeSortedCells (memory : Memory addressWidth) (cells : List (BitVec addressWidth × UInt8)) : Memory addressWidth :=
   let groups := cells.foldl (init := ([] : List (Nat × Array UInt8))) fun groups cell =>
     match groups with

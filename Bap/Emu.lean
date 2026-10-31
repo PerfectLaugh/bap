@@ -150,6 +150,8 @@ structure Emu where
   watchedSteps : IO.Ref (Std.HashSet Nat)
   /-- The tasks, and which are blocked waiting for others. -/
   taskTable : IO.Ref Tasks.TaskTable
+  /-- What is mapped in the address spaces other than that of the thread that runs, whose map is `regions`. -/
+  parkedRegions : IO.Ref (Std.HashMap Nat (List Region))
   /-- Where the instruction that runs goes next, for a system call to know where a new thread starts. -/
   nextPc : IO.Ref Nat
 
@@ -230,6 +232,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     rangeStart := ← IO.mkRef none
     watchedSteps := ← IO.mkRef {}
     taskTable := ← IO.mkRef (Tasks.TaskTable.initial 1)
+    parkedRegions := ← IO.mkRef {}
     nextPc := ← IO.mkRef 0
   }
 
@@ -277,22 +280,32 @@ decreasing_by
   all_goals simp only [List.length_cons, Array.size_push]
   all_goals omega
 
-private def regionsFromNative (emu : Emu) (native : Jit.Memory) : IO (List Region) := do
+/-- The space of the first task, whose memory has no entry in `processMemory`. -/
+private def firstSpace (table : Tasks.TaskTable) : Nat :=
+  match table.tasks.head? with
+  | some first => first.space
+  | none => 1
+
+private def regionsFromNative (mapped : List Region) (native : Jit.Memory) : IO (List Region) := do
   let (addresses, values) ← Jit.dumpMemory native
   let cells := (addresses.zip values).toList.map fun cell => (cell.1.toNat, cell.2)
-  let mapped ← emu.regions.get
   pure (mapped.map fun region =>
     { region with data := ByteArray.mk (persistentRegionData cells region.address region.data.size #[]) })
 
 def snapshot (emu : Emu) : IO Snapshot := do
   let processes ← emu.processMemory.get
+  let table ← emu.taskTable.get
+  let mapped ← emu.regions.get
+  let parked ← emu.parkedRegions.get
+  let space := table.spaceOf (← emu.currentThreadRef.get)
+  let mapOf (id : Nat) : List Region := if id == space then mapped else parked.getD id mapped
   let processMemory ← processes.toList.mapM fun (id, memory) => do
-    let regions ← regionsFromNative emu memory
+    let regions ← regionsFromNative (mapOf id) memory
     pure (id, regions)
   pure {
     state := ← emu.state.get
     pc := ← emu.pc.get
-    regions := ← emu.regions.get
+    regions := mapOf (firstSpace table)
     stopped := ← emu.stopped.get
     threads := ← captureThreads emu
     currentThread := ← emu.currentThreadRef.get
@@ -355,6 +368,7 @@ private def rollbackBlock (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   if !emu.engine.deferMemorySync then
     if created != snapshot.nextThread then
       emu.processMemory.modify fun processes => processes.filter fun id _ => id < snapshot.nextThread
+      emu.parkedRegions.modify fun parked => parked.filter fun id _ => id < snapshot.nextThread
     let space := snapshot.table.spaceOf snapshot.currentThread
     if (← emu.processMemory.get).contains space then
       let native ← nativeFromState emu snapshot.state
@@ -368,7 +382,14 @@ def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   emu.parallelWorkers.set []
   emu.processMemory.set {}
   emu.sharedMemory.set none
+  emu.parkedRegions.set {}
+  -- The regions of a snapshot are those of the first space, and the others come with their memory.
+  let space := snapshot.table.spaceOf snapshot.currentThread
+  if let some mapped := snapshot.processMemory.lookup space then
+    emu.parkedRegions.modify (·.insert (firstSpace snapshot.table) snapshot.regions)
+    emu.regions.set mapped
   snapshot.processMemory.forM fun (id, regions) => do
+    if id != space then emu.parkedRegions.modify (·.insert id regions)
     let cells := regions.flatMap fun region =>
       (List.range region.data.size).filterMap fun offset =>
         let value := region.data[offset]!
@@ -394,6 +415,10 @@ private def switchNativeMemory (emu : Emu) (current next : ThreadId) : IO Unit :
   let currentSpace ← spaceOf emu current
   let nextSpace ← spaceOf emu next
   if currentSpace != nextSpace then
+    let mapped ← emu.regions.get
+    let parked ← emu.parkedRegions.get
+    emu.regions.set (parked.getD nextSpace mapped)
+    emu.parkedRegions.set (parked.insert currentSpace mapped)
     let processes ← emu.processMemory.get
     let native ← emu.engine.persistentMemory.get
     match native with
@@ -813,12 +838,6 @@ def write (emu : Emu) (address : Nat) (data : ByteArray) : IO Unit := do
       if region.protection.executable then
         Primus.Lifted.discardRange emu.engine address (address + data.size - 1)
       synchronizeWrite emu address data
-      emu.regions.set (mapped.map fun current =>
-        if current.contains address then
-          let updatedData := (List.range data.size).foldl (init := current.data) fun bytes offset =>
-            bytes.set! (address - current.address + offset) data[offset]!
-          { current with data := updatedData }
-        else current)
 
 private def synchronizeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
   let persistent ← emu.engine.persistentMemory.get
@@ -936,6 +955,25 @@ def protect (emu : Emu) (address size : Nat) (protection : Primus.Protection) : 
       if !protection.executable then Primus.Lifted.discardRange emu.engine address (address + size - 1)
     | none => throw <| IO.userError s!"unmapped Emu protection range at {address}"
 
+/-- `munmap`: the bytes in the range are gone, and read as zeros if the addresses are mapped again. -/
+def unmap (emu : Emu) (address size : Nat) : IO Unit := do
+  if size > 0 then
+    let upper := address + size
+    emu.regions.modify (·.flatMap fun region =>
+      let finish := region.address + region.data.size
+      if finish ≤ address || upper ≤ region.address then [region]
+      else regionPiece region region.address (min address finish) region.protection ++
+        regionPiece region (max upper region.address) finish region.protection)
+    Primus.Lifted.discardRange emu.engine address (upper - 1)
+    let state ← emu.state.get
+    let ⟨_, memory⟩ ← cells emu state
+    emu.state.set { env := Bil.bind state.env emu.config.memory (.memory (Bap.Memory.clearRange memory address size)) }
+    if let some native := ← emu.engine.persistentMemory.get then
+      let (addresses, values) ← Jit.dumpMemory native
+      let written := (addresses.zip values).filter fun cell =>
+        cell.2 != 0 && address ≤ cell.1.toNat && cell.1.toNat < upper
+      Jit.writeMemory native (written.map (·.1)) (written.map fun _ => 0)
+
 def regions (emu : Emu) : IO (List (Nat × Nat × Primus.Protection)) := do
   let mapped ← emu.regions.get
   pure (mapped.map fun region => (region.address, region.data.size, region.protection))
@@ -1036,6 +1074,12 @@ def cloneProcessMemory (emu : Emu) (child : ThreadId) : IO Unit := do
       attachMemory emu parent
       pure parent
   let childMemory ← Jit.cloneMemory parent
+  let mapped ← emu.regions.get
+  -- A child that runs leaves the map of the space it was in behind.
+  if (← emu.currentThreadRef.get) == child then
+    emu.parkedRegions.modify (·.insert ((← emu.taskTable.get).spaceOf child) mapped)
+  else
+    emu.parkedRegions.modify (·.insert child mapped)
   emu.taskTable.modify (·.setSpace child child)
   emu.processMemory.modify (·.insert child childMemory)
   -- The memory of the child's state follows the clone, whatever ran since the fork. A parallel worker has
@@ -1178,7 +1222,7 @@ def refreshPersistentRegions (emu : Emu) : IO Unit := do
   match ← emu.engine.persistentMemory.get with
   | none => refreshRegions emu
   | some native =>
-    emu.regions.set (← regionsFromNative emu native)
+    emu.regions.set (← regionsFromNative (← emu.regions.get) native)
 
 /-- Refreshes the regions with the bytes of the memory that threads without their own memory share. -/
 def refreshSharedRegions (emu : Emu) : IO Unit := do
@@ -1187,16 +1231,19 @@ def refreshSharedRegions (emu : Emu) : IO Unit := do
   if !processes.contains (table.spaceOf (← emu.currentThreadRef.get)) then
     refreshPersistentRegions emu
   else
-    match ← emu.sharedMemory.get with
-    | some native => emu.regions.set (← regionsFromNative emu native)
-    | none =>
-      let threads ← emu.threadsRef.get
-      match threads.find? fun context => !processes.contains (table.spaceOf context.id) with
-      | some context =>
-        let ⟨_, memory⟩ ← cells emu context.state
-        emu.regions.modify (·.map fun region =>
-          { region with data := Bap.Memory.readRegion memory region.address region.data.size })
-      | none => pure ()
+    let first := firstSpace table
+    let mapped := (← emu.parkedRegions.get).getD first []
+    let refreshed ← match ← emu.sharedMemory.get with
+      | some native => regionsFromNative mapped native
+      | none =>
+        let threads ← emu.threadsRef.get
+        match threads.find? fun context => !processes.contains (table.spaceOf context.id) with
+        | some context =>
+          let ⟨_, memory⟩ ← cells emu context.state
+          pure (mapped.map fun region =>
+            { region with data := Bap.Memory.readRegion memory region.address region.data.size })
+        | none => pure mapped
+    emu.parkedRegions.modify (·.insert first refreshed)
 
 private def mipsWord (code : ByteArray) (address : Nat) : Option Nat :=
   if address + 4 > code.size then none
@@ -1368,9 +1415,15 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
       createEngine emu.config true
   engine.persistentMemory.set (some (← workerMemory emu context shared))
   engine.persistentVariable.set (some emu.config.memory)
+  -- Workers of the space of the thread that runs share its map, and those of another have that space's.
+  let table ← emu.taskTable.get
+  let space := table.spaceOf context.id
+  let regions ← if space == table.spaceOf (← emu.currentThreadRef.get) then pure emu.regions
+    else IO.mkRef ((← emu.parkedRegions.get).getD space (← emu.regions.get))
   pure {
     emu with
     engine
+    regions
     state := ← IO.mkRef context.state
     pc := ← IO.mkRef context.pc
     stopped := ← IO.mkRef context.stopped
@@ -1496,6 +1549,12 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
           } : WorkerResult)
         let merged := mergeRound contexts (← emu.threadsRef.get) workerResults control
         let merged ← synchronizeRound emu merged workers shared
+        let table ← emu.taskTable.get
+        for worker in workers do
+          let space := table.spaceOf worker.1.id
+          if space != table.spaceOf current then
+            let mapped ← worker.2.regions.get
+            emu.parkedRegions.modify (·.insert space mapped)
         emu.threadsRef.set merged
         match merged.find? fun context => context.id = current with
         | some context =>

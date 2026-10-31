@@ -224,6 +224,11 @@ private def testDelaySlots : IO Unit := do
   let _ ← Bap.Emu.run emu 2
   assertBits "Emu checkpoint restores pending branch" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg emu r5))
 
+private def expectThrow (name : String) (action : IO α) : IO Unit := do
+  match ← action.toBaseIO with
+  | .error _ => IO.println s!"ok: {name}"
+  | .ok _ => throw <| IO.userError s!"{name}: unexpectedly succeeded"
+
 /-- Each thread pushes a value and reads it back after the other has pushed: with one stack it would read the other's. -/
 private def testCloneThread : IO Unit := do
   let code := (← LLVM.assemble "riscv64" "addi sp, sp, -8") ++
@@ -360,6 +365,27 @@ private def testProcesses : IO Unit := do
   Bap.Emu.switchThread threaded 1
   Bap.Emu.switchThread threaded sibling
   assertEqual "Emu memory of the thread survives the way through another" 43 (← Bap.Emu.read threaded 0x1001 1)[0]!.toNat
+  -- What a process maps is its own, and what it unmaps is gone, and zeros if it comes back.
+  let mapping ← clean (← Tuned.riscv64 (← rv "beq zero, zero, 0") 0 0)
+  let mappingChild ← Bap.Emu.fork mapping 0
+  Bap.Emu.map mapping ⟨0x5000, ByteArray.mk (List.replicate 0x2000 (9 : UInt8)).toArray, rw⟩
+  assertEqual "Emu a mapping is there" 9 (← Bap.Emu.read mapping 0x5000 1)[0]!.toNat
+  Bap.Emu.switchThread mapping mappingChild
+  expectThrow "Emu a mapping of another process isn't" (Bap.Emu.read mapping 0x5000 1)
+  Bap.Emu.map mapping ⟨0x5000, ByteArray.mk (List.replicate 0x1000 (7 : UInt8)).toArray, rw⟩
+  assertEqual "Emu a process can map the same address" 7 (← Bap.Emu.read mapping 0x5000 1)[0]!.toNat
+  Bap.Emu.switchThread mapping 1
+  assertEqual "Emu each has its own bytes there" 9 (← Bap.Emu.read mapping 0x5000 1)[0]!.toNat
+  let saved ← Bap.Emu.snapshot mapping
+  Bap.Emu.unmap mapping 0x5000 0x1000
+  expectThrow "Emu what is unmapped is gone" (Bap.Emu.read mapping 0x5000 1)
+  assertEqual "Emu the rest of it is there" 9 (← Bap.Emu.read mapping 0x6000 1)[0]!.toNat
+  Bap.Emu.map mapping ⟨0x5000, ByteArray.mk (List.replicate 0x1000 (0 : UInt8)).toArray, rw⟩
+  assertEqual "Emu mapped again it is zeros" 0 (← Bap.Emu.read mapping 0x5000 1)[0]!.toNat
+  Bap.Emu.restore mapping saved
+  assertEqual "Emu a snapshot has the map of each process" 9 (← Bap.Emu.read mapping 0x5000 1)[0]!.toNat
+  Bap.Emu.switchThread mapping mappingChild
+  assertEqual "Emu a snapshot has the map of the other" 7 (← Bap.Emu.read mapping 0x5000 1)[0]!.toNat
   -- Sharing memory without being a thread is a process of its own in the same space.
   let spaced ← clean (← Tuned.riscv64 (← rv "beq zero, zero, 0") 0 0)
   Bap.Emu.map spaced ⟨0x1000, zeros, rw⟩
@@ -714,11 +740,6 @@ private def riscvConfig : IO Bap.Emu.Config := do
     memory := ⟨"mem", .mem 64 8, 0, false⟩
     endian := .little
   }
-
-private def expectThrow (name : String) (action : IO α) : IO Unit := do
-  match ← action.toBaseIO with
-  | .error _ => IO.println s!"ok: {name}"
-  | .ok _ => throw <| IO.userError s!"{name}: unexpectedly succeeded"
 
 private def regionAudit : IO Unit := do
   let rw : Primus.Protection := ⟨true, true, false⟩

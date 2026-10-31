@@ -208,6 +208,13 @@ def timedOut (table : TaskTable) : TaskTable × List Nat :=
 
 end TaskTable
 
+/-- The highest address below `top` with `size` free up to it, of what is taken, as start and size, from the highest down. -/
+def gapBelow (size : Nat) : Nat → List (Nat × Nat) → Nat
+  | top, [] => top - size
+  | top, (start, length) :: rest =>
+    if start + length + size ≤ top then top - size
+    else gapBelow size (min top start) rest
+
 /-- The convention of a result: the word in the result register, and on MIPS, the register that says whether it is an
 error. Elsewhere an error is the negated number. -/
 def syscallWord (mips : Bool) (width : Nat) : Except Nat Nat → Nat × Option Nat
