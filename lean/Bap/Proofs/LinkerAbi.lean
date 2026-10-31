@@ -401,7 +401,7 @@ def mipsSpec (env : Env) (site : Site) (rd : Bool → Nat → Nat → Nat) (slot
   | 11 => st 4 (setLo16 r (slot s - gp))
   | 6 => st 4 (setLo16 r ((if sym.name == "_gp_disp" then gp - p + 4 else s) + a16))
   | 7 | 8 => st 4 (setLo16 r (s + a16 + mipsGp0 env sym - gp))
-  | 10 => st 4 (setLo16 r ((s + sext ((r &&& 0xffff) <<< 2 : Nat) 18 - p) >>> 2))
+  | 10 => st 4 (setLo16 r ((s + addendOf site (sext ((r &&& 0xffff) <<< 2 : Nat) 18) - p) >>> 2))
   | 12 => st 4 (s + a32 + mipsGp0 env sym - gp)
   | 18 => if env.width == 64 then st 8 (s + a32) else none
   | 20 =>

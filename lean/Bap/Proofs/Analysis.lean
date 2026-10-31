@@ -45,7 +45,7 @@ theorem stmtInduction {P : Bap.Bil.Stmt → Prop}
 
 section Xrefs
 open Bap.Analysis.Xrefs
-open_private Bap.Analysis.Xrefs in Bap.Analysis.Xrefs : constant memoryRefs stmtRefs insnRefs nearestStart spans
+open_private Bap.Analysis.Xrefs in Bap.Analysis.Xrefs : constant memoryRefs stmtRefs insnRefs nearestStart spans instructionAddresses
 
 theorem xrefs_memoryRefs_shape (source : Nat) (exp : Bap.Bil.Exp) :
     ∀ xref ∈ memoryRefs source exp, xref.source = source ∧ xref.kind ≠ .call ∧ xref.kind ≠ .jump := by
@@ -135,6 +135,70 @@ theorem xrefs_create_functions_iff (project : Bap.Project.Project) (symbol : Bap
       ∃ image, project.image = some image ∧ symbol ∈ image.symbols ∧ symbol.isFunction = true := by
   simp only [create]
   cases project.image <;> simp
+
+/-- The index of the functions found by a scan has the same cross-references. -/
+theorem discover_xrefs (project : Bap.Project.Project) : (discover project).xrefs = (create project).xrefs := rfl
+
+private theorem instructionAddresses_mem {project : Bap.Project.Project} {address : Nat}
+    (h : (instructionAddresses project).contains address = true) :
+    ∃ disasm insn, project.disasm = some disasm ∧ insn ∈ disasm.instructions ∧ insn.address = address := by
+  simp only [instructionAddresses] at h
+  cases hd : project.disasm with
+  | none => simp [hd] at h
+  | some disasm =>
+    simp only [hd, Option.map_some, Option.getD_some] at h
+    have key : ∀ (l : List Bap.Disasm.Insn) (init : Std.HashSet Nat),
+        (l.foldl (fun set insn => set.insert insn.address) init).contains address = true →
+        init.contains address = true ∨ ∃ insn ∈ l, insn.address = address := by
+      intro l
+      induction l with
+      | nil => exact fun _ h => .inl h
+      | cons x xs ih =>
+        intro init h
+        rcases ih _ h with h | ⟨i, hi, he⟩
+        · rw [Std.HashSet.contains_insert] at h
+          rcases Bool.or_eq_true _ _ ▸ h with h | h
+          · exact .inr ⟨x, List.mem_cons_self, by simpa using h⟩
+          · exact .inl h
+        · exact .inr ⟨i, List.mem_cons_of_mem _ hi, he⟩
+    rcases key _ _ h with h | ⟨i, hi, he⟩
+    · simp at h
+    · exact ⟨disasm, i, rfl, hi, he⟩
+
+/-- Every function a scan found is at an instruction of the project. So imports, which have no address of their own, aren't
+functions, and neither is what a call goes to but doesn't decode. -/
+theorem discover_functions_at_instructions {project : Bap.Project.Project} {symbol : Bap.Image.Symbol}
+    (h : symbol ∈ (discover project).functions) :
+    ∃ disasm insn, project.disasm = some disasm ∧ insn ∈ disasm.instructions ∧ insn.address = symbol.addr := by
+  simp only [discover, discoveredFunctions] at h
+  rcases List.mem_append.1 h with h | h
+  · exact instructionAddresses_mem (List.mem_filter.1 h).2
+  · have key : ∀ (l : List Nat) (seen : Std.HashSet Nat) (acc : List Bap.Image.Symbol),
+        (∀ s ∈ acc, (instructionAddresses project).contains s.addr = true) →
+        ∀ s ∈ (l.foldl (init := (seen, acc)) fun state address =>
+          if state.1.contains address || !(instructionAddresses project).contains address then state
+          else (state.1.insert address, (⟨subroutineName address, address, 0, true, false⟩ : Bap.Image.Symbol) :: state.2)).2,
+        (instructionAddresses project).contains s.addr = true := by
+      intro l
+      induction l with
+      | nil => exact fun _ _ h => h
+      | cons x xs ih =>
+        intro seen acc hacc
+        simp only [List.foldl_cons]
+        split
+        · exact ih _ _ hacc
+        · rename_i hc
+          refine ih _ _ fun s hs => ?_
+          rcases List.mem_cons.1 hs with rfl | hs
+          · simpa using (Bool.or_eq_false_iff.1 (Bool.eq_false_iff.2 hc)).2
+          · exact hacc s hs
+    exact instructionAddresses_mem (key _ _ [] (by simp) _ (List.mem_reverse.1 h))
+
+/-- Every function symbol with an instruction is a function of what a scan found. -/
+theorem discover_functions_symbols {project : Bap.Project.Project} {symbol : Bap.Image.Symbol}
+    (h : symbol ∈ (create project).functions) (hi : (instructionAddresses project).contains symbol.addr = true) :
+    symbol ∈ (discover project).functions :=
+  List.mem_append_left _ (List.mem_filter.2 ⟨h, hi⟩)
 
 theorem xrefs_mem_references_iff (index : Index) (kind : Kind) (target : Nat) (xref : Xref) :
     xref ∈ references index kind target ↔

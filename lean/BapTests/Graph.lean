@@ -57,5 +57,21 @@ def run : IO Unit := do
       (Bap.Graph.Fast.immediateDominators graph start)
     assertEqual "fast dominance frontier is the dominance frontier" (Bap.Graph.dominanceFrontier graph start)
       (Bap.Graph.Fast.dominanceFrontier graph start)
+  -- A graph on which the equations of dominators have more than one solution, and irreducible ones, where a walk up from two nodes may stop short.
+  for (name, graph, start) in [
+      ("a loop entered by its head", (⟨[1, 2, 3, 4], [(1, 2), (2, 3), (3, 4), (4, 3)]⟩ : Bap.Graph.Graph Nat), 1),
+      ("a loop with two entries", ⟨[1, 2, 3, 4, 5], [(1, 2), (1, 3), (2, 3), (3, 2), (2, 4), (3, 4), (4, 5), (5, 4)]⟩, 1),
+      ("a node that nothing reaches goes to one that is", ⟨[1, 2, 3, 9], [(1, 2), (2, 3), (9, 3)]⟩, 1),
+      ("the start in a loop", ⟨[1, 2, 3], [(1, 2), (2, 3), (3, 1)]⟩, 1),
+      ("a start that is not a node", ⟨[1, 2], [(1, 2)]⟩, 7)] do
+    assertEqual s!"immediate dominators of {name}" (Bap.Graph.immediateDominators graph start) (Bap.Graph.Fast.immediateDominators graph start)
+    assertEqual s!"dominance frontier of {name}" (Bap.Graph.dominanceFrontier graph start) (Bap.Graph.Fast.dominanceFrontier graph start)
+  -- Long chains and chains of diamonds take as long as they have blocks.
+  let chain (count : Nat) : Bap.Graph.Graph Nat := ⟨List.range count, (List.range (count - 1)).map fun n => (n, n + 1)⟩
+  let diamonds (count : Nat) : Bap.Graph.Graph Nat := ⟨List.range (3 * count + 1), (List.range count).flatMap fun n =>
+    [(3 * n, 3 * n + 1), (3 * n, 3 * n + 2), (3 * n + 1, 3 * n + 3), (3 * n + 2, 3 * n + 3)]⟩
+  assertEqual "the immediate dominator at the end of a long chain" (some 9998) (Bap.Assoc.get 9999 (Bap.Graph.Fast.immediateDominators (chain 10000) 0))
+  assertEqual "the immediate dominator at the end of chain of diamonds" (some (3 * 2999)) (Bap.Assoc.get (3 * 3000) (Bap.Graph.Fast.immediateDominators (diamonds 3000) 0))
+  assertEqual "the frontier of an arm of a diamond" (some [3 * 2000 + 3]) (Bap.Assoc.get (3 * 2000 + 1) (Bap.Graph.Fast.dominanceFrontier (diamonds 3000) 0))
 
 end Bap.Tests.Graph

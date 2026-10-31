@@ -87,9 +87,11 @@ def project (emu : Emu) (roots : List Nat := []) (symbols : List (String × Nat)
       let disassembler ← match emu.config.disassemblerAt with
         | some create => create region.address
         | none => pure emu.config.disassembler
-      regionRoots.foldlM (init := disasm) fun disasm root => do
-        let scanned ← Disasm.Recursive.scan disassembler region.data root
-        pure (mergeDisasm disasm scanned)
+      -- A scan follows direct calls, so one scan per root would go over the callees again.
+      let scanned ← Disasm.Recursive.scanRoots
+        (Disasm.Disassembler.ofRegions disassembler [(⟨region.address, region.data, true, false, true⟩, disassembler)])
+        ByteArray.empty region.data.size entry regionRoots
+      pure (mergeDisasm disasm scanned)
   pure { image := some image, disasm := some disasm }
 
 end Bap.Emu

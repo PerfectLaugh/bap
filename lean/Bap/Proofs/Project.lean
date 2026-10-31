@@ -3,6 +3,7 @@ import Bap.Project.Pass
 import Bap.Project.Persist
 import Bap.Proofs.Bil
 import Bap.Proofs.Knowledge
+import Bap.Proofs.Disasm
 
 namespace Bap.Proofs.Project
 
@@ -1388,5 +1389,83 @@ theorem deserialize_serialize_no_knowledge {project : Project} {text : String}
   deserialize_serialize h List.nodup_nil (by simp [hfacts]) (by simp [hopinions])
 
 end Persist
+
+/-! ## The scan of an image -/
+
+/-- The roots of an image are the candidates that are in code. -/
+theorem mem_roots_iff (image : Bap.Image.Image) (address : Nat) :
+    address ∈ Bap.Project.Project.roots image ↔
+      address ∈ (Bap.Project.Project.entryOf image :: ((image.symbols.filter (·.isFunction)).map (·.addr) ++
+        Bap.Project.Project.initFunctions image)) ∧
+      ((Bap.Project.Project.codeRegions image).map Prod.snd).any (·.contains address) = true := by
+  simp only [Bap.Project.Project.roots]
+  generalize ((Bap.Project.Project.codeRegions image).map Prod.snd) = regions
+  generalize (Bap.Project.Project.entryOf image :: ((image.symbols.filter (·.isFunction)).map (·.addr) ++
+    Bap.Project.Project.initFunctions image)) = candidates
+  have key : ∀ (l : List Nat) (seen : Std.HashSet Nat) (found : List Nat),
+      (∀ a, seen.contains a = true ↔ a ∈ found) →
+      (∀ a, a ∈ (l.foldl (init := (seen, found)) fun state address =>
+          if state.1.contains address || !regions.any (·.contains address) then state
+          else (state.1.insert address, address :: state.2)).2 ↔
+        a ∈ found ∨ (a ∈ l ∧ regions.any (·.contains a) = true)) := by
+    intro l
+    induction l with
+    | nil => intro _ _ _ a; simp
+    | cons x xs ih =>
+      intro seen found hs a
+      simp only [List.foldl_cons]
+      split
+      · rename_i hc
+        rw [ih _ _ hs]
+        constructor
+        · rintro (h | ⟨h1, h2⟩)
+          · exact .inl h
+          · exact .inr ⟨List.mem_cons_of_mem _ h1, h2⟩
+        · rintro (h | ⟨h1, h2⟩)
+          · exact .inl h
+          · rcases List.mem_cons.1 h1 with rfl | h1
+            · rcases Bool.or_eq_true _ _ ▸ hc with hc | hc
+              · exact .inl ((hs _).1 hc)
+              · rw [h2] at hc
+                cases hc
+            · exact .inr ⟨h1, h2⟩
+      · rename_i hc
+        have hc' := Bool.or_eq_false_iff.1 (Bool.eq_false_iff.2 hc)
+        rw [ih _ _ (fun b => by
+          rw [Std.HashSet.contains_insert, Bool.or_eq_true, hs, List.mem_cons]
+          simp only [beq_iff_eq]
+          exact or_congr eq_comm Iff.rfl)]
+        constructor
+        · rintro (h | ⟨h1, h2⟩)
+          · rcases List.mem_cons.1 h with rfl | h
+            · exact .inr ⟨List.mem_cons_self, by simpa using hc'.2⟩
+            · exact .inl h
+          · exact .inr ⟨List.mem_cons_of_mem _ h1, h2⟩
+        · rintro (h | ⟨h1, h2⟩)
+          · exact .inl (List.mem_cons_of_mem _ h)
+          · rcases List.mem_cons.1 h1 with rfl | h1
+            · exact .inl List.mem_cons_self
+            · exact .inr ⟨h1, h2⟩
+  rw [List.mem_reverse, key _ _ _ (by simp)]
+  simp
+
+/-- The recursive scan of an image is sound for the decoder it goes with, and starts from all the roots of the image, and
+what its sweep added. -/
+theorem scanImage_sound (image : Bap.Image.Image) :
+    Bap.Proofs.Disasm.Holds (Bap.Project.Project.scanImage image) fun result => ∀ disasm, result = some disasm →
+      disasm.entry = Bap.Project.Project.entryOf image ∧ ∃ d extra,
+        Bap.Proofs.Disasm.ScanOk d ByteArray.empty (extra ++ Bap.Project.Project.roots image) disasm.instructions disasm.edges := by
+  unfold Bap.Project.Project.scanImage
+  refine Bap.Proofs.Disasm.Holds.bind (Bap.Proofs.Disasm.Holds.true _) fun base _ _ => ?_
+  dsimp only
+  split
+  · exact Bap.Proofs.Disasm.Holds.pure (by simp)
+  · exact Bap.Proofs.Disasm.Holds.pure (by simp)
+  · refine Bap.Proofs.Disasm.Holds.bind (Bap.Proofs.Disasm.Holds.true _) fun decoders _ _ => ?_
+    refine Bap.Proofs.Disasm.Holds.bind (Bap.Proofs.Disasm.scanRegions_sound _ _ _ _ _ _) fun disasm hd _ => ?_
+    refine Bap.Proofs.Disasm.Holds.pure ?_
+    intro _ h
+    cases h
+    exact ⟨hd.1, _, hd.2⟩
 
 end Bap.Proofs.Project

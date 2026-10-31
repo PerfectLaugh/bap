@@ -572,7 +572,7 @@ theorem provide_false_conflicts {slot : Slot .bool} {source : State} (hd : slot.
   · rw [hd]; decide
 
 theorem mem_objects_iff (key : Object) (source : State) :
-    key ∈ objects source ↔ ∃ fact ∈ source.facts, fact.object = key := by
+    key ∈ objects source ↔ (∃ fact ∈ source.facts, fact.object = key) ∨ ∃ opinion ∈ source.opinions, opinion.fact.object = key := by
   simp [objects, List.mem_eraseDups]
 
 private theorem mem_objects_put (key : Object) (fact : Fact) (facts : List Fact)
@@ -597,13 +597,16 @@ theorem provide_objects (hd : Lawful slot.domain) (hne : slot.domain.eq value sl
     (h : provide slot object value state = .ok next) :
     object ∈ objects next ∧ ∀ key ∈ objects state, key ∈ objects next := by
   obtain ⟨result, hread, _⟩ := provide_read hd hne h
-  refine ⟨(mem_objects_iff _ _).2 (lookup_some_mem hread), ?_⟩
+  refine ⟨(mem_objects_iff _ _).2 (Or.inl (lookup_some_mem hread)), ?_⟩
   obtain ⟨changed, facts, hp, rfl⟩ := provide_ok_iff.1 h
   intro key hkey
   rw [mem_objects_iff] at *
-  rcases provideInFacts_cases hp with ⟨_, rfl⟩ | ⟨_, _, rfl⟩
-  · exact hkey
-  · exact mem_objects_put key _ _ hkey
+  rcases hkey with hkey | hkey
+  · refine Or.inl ?_
+    rcases provideInFacts_cases hp with ⟨_, rfl⟩ | ⟨_, _, rfl⟩
+    · exact hkey
+    · exact mem_objects_put key _ _ hkey
+  · exact Or.inr hkey
 
 end Provide
 
@@ -948,6 +951,18 @@ theorem provideWith_changed (env : Environment) (h : provide slot object value s
     (hv : next.version ≠ state.version) :
     provideWith env slot object value state = (notifyObservers env slot object next).bind fun _ => .ok next := by
   simp [provideWith, h, bind, Except.bind, hv]
+
+/-- A vote tells the observers of its slot when it is a new one, and only then: `suggest` is `provide` of opinions upstream. -/
+theorem suggestWith_changed (env : Environment) (agent : Agent) (slot : Slot kind) (object : Object) (value : kind.data) (state : State)
+    (hv : (suggest agent slot object value state).version ≠ state.version) :
+    suggestWith env agent slot object value state =
+      (notifyObservers env slot object (suggest agent slot object value state)).bind fun _ => .ok (suggest agent slot object value state) := by
+  simp [suggestWith, bind, Except.bind, hv]
+
+theorem suggestWith_unchanged (env : Environment) (agent : Agent) (slot : Slot kind) (object : Object) (value : kind.data) (state : State)
+    (hv : (suggest agent slot object value state).version = state.version) :
+    suggestWith env agent slot object value state = .ok (suggest agent slot object value state) := by
+  simp [suggestWith, hv]
 
 /-- Whatever the observers are, repeating an accepted provide neither runs them nor fails. -/
 theorem provideWith_idempotent {env : Environment} (hd : Lawful slot.domain)
@@ -1872,7 +1887,7 @@ theorem Resolves.of_nodup {registry : List AnySlot} {slot : AnySlot} (hmem : slo
 /-- Fact roundtrip, given a registry that knows the fact's slot. -/
 theorem decodeFact_encodeFact {registry : List AnySlot} {fact : Fact} {encoded : Sexp}
     (hr : Resolves registry fact.slot) (h : encodeFact fact = .ok encoded) :
-    decodeFact registry encoded = .ok fact := by
+    decodeFact registry encoded = .ok (some fact) := by
   simp only [encodeFact, bind, Except.bind] at h
   split at h
   · cases h
@@ -1889,7 +1904,7 @@ theorem decodeFact_encodeFact {registry : List AnySlot} {fact : Fact} {encoded :
 /-- Opinion roundtrip, given a registry that knows the opinion's slot. -/
 theorem decodeOpinion_encodeOpinion {registry : List AnySlot} {opinion : Opinion} {encoded : Sexp}
     (hr : Resolves registry opinion.fact.slot) (h : encodeOpinion opinion = .ok encoded) :
-    decodeOpinion registry encoded = .ok opinion := by
+    decodeOpinion registry encoded = .ok (some opinion) := by
   simp only [encodeOpinion, bind, Except.bind] at h
   split at h
   · cases h
@@ -1900,10 +1915,10 @@ theorem decodeOpinion_encodeOpinion {registry : List AnySlot} {opinion : Opinion
     simp [decodeOpinion, Sexp.tagged, Sexp.expectTagged, Sexp.asList, Sexp.asAtom, bind, Except.bind,
       nat_atom_repr, hdec]
 
-private theorem mapM_roundtrip {α : Type} {encode : α → Except String Sexp} {decode : Sexp → Except String α}
+private theorem mapM_roundtrip {α : Type} {encode : α → Except String Sexp} {decode : Sexp → Except String (Option α)}
     {values : List α} {encoded : List Sexp} (h : values.mapM encode = .ok encoded)
-    (hrt : ∀ value ∈ values, ∀ item, encode value = .ok item → decode item = .ok value) :
-    encoded.mapM decode = .ok values := by
+    (hrt : ∀ value ∈ values, ∀ item, encode value = .ok item → decode item = .ok (some value)) :
+    encoded.mapM decode = .ok (values.map some) := by
   induction values generalizing encoded with
   | nil =>
     simp only [List.mapM_nil, pure, Except.pure, Except.ok.injEq] at h
@@ -1921,7 +1936,7 @@ private theorem mapM_roundtrip {α : Type} {encode : α → Except String Sexp} 
         subst h
         have hd := hrt head List.mem_cons_self item hitem
         have ht := ih hrest fun value hv => hrt value (List.mem_cons_of_mem _ hv)
-        simp only [List.mapM_cons, bind, Except.bind, hd, ht, pure, Except.pure]
+        simp only [List.mapM_cons, bind, Except.bind, hd, ht, pure, Except.pure, List.map_cons]
 
 /-- State roundtrip: decoding what `encodeState` wrote recovers the persistent projection, including
 the version. Non-persistent slots are dropped by design. -/
@@ -1956,7 +1971,7 @@ theorem decodeState_encodeState {registry persistent : List AnySlot} {state : St
         exact decodeOpinion_encodeOpinion (hopinions opinion hm.1 (by simpa using hm.2)) hitem)
       refine ⟨_, _, ?_, rfl, rfl⟩
       simp [decodeState, Sexp.tagged, Sexp.expectTagged, Sexp.asList, bind, Except.bind,
-        nat_atom_repr, hfr, hor]
+        nat_atom_repr, hfr, hor, List.filterMap_map]
 
 /-- With every fact and opinion in a persistent, uniquely named slot, nothing at all is lost. -/
 theorem decodeState_encodeState_total {persistent : List AnySlot} {state : State} {encoded : Sexp}
@@ -1976,6 +1991,17 @@ theorem decodeState_encodeState_total {persistent : List AnySlot} {state : State
   · apply List.filter_eq_self.2
     intro opinion hmem
     simpa using ⟨_, hopinions opinion hmem, rfl⟩
+
+/-- **What nothing knows the slot of is skipped**, as upstream's `Record.of_binable`, and the rest of a state is read. -/
+theorem decodeFact_unregistered {registry : List AnySlot} {object : Sexp} {name : String} {value : Sexp} {cls id objectName : String}
+    (hobject : object = .tagged "object" [.atom cls, .atom objectName, .atom id]) (hid : ∃ n, Sexp.nat (.atom id) = .ok n)
+    (hname : ∀ slot ∈ registry, slot.2.name ≠ name) :
+    decodeFact registry (.tagged "fact" [object, .atom name, value]) = .ok none := by
+  subst hobject
+  obtain ⟨n, hn⟩ := hid
+  have hfind : registry.find? (fun slot => decide (slot.2.name = name)) = none := by
+    simpa using hname
+  simp [decodeFact, Sexp.tagged, Sexp.expectTagged, Sexp.asList, Sexp.asAtom, bind, Except.bind, hn, hfind]
 
 end Persist
 

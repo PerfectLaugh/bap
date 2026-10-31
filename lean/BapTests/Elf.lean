@@ -890,6 +890,73 @@ private def runFieldChecks : IO Unit := do
   let two := { oneRelocation 62 64 14 0x212 with relocations := [⟨0, 0, 14, 0, 0, true⟩, ⟨0, 8, 14, 0, 0, true⟩] }
   assertEqual "a warning for each relocation that doesn't fit" 2 (ElfLinker.link two).warnings.length
 
+/-- For each machine a relocation out of its range and one that loses low bits, at `.text` of 0x1000. Each of these and its neighbours went through
+`ld.lld` 22.1.8 with the same result, unless it says otherwise: what lld 22 has as `checkIntUInt` and lld 23 as `checkInt`, what lld reaches with a thunk
+or an error of its own, and what it stores in silence. -/
+private def runFieldAudit : IO Unit := do
+  let problem (input : ElfLinker.Input) : String :=
+    match (ElfLinker.link input).warnings with
+    | [] => "ok"
+    | warning :: _ =>
+      if warning.endsWith "is out of range of its field" then "range"
+      else match warning.splitOn "needs a value aligned to " with
+        | [_, alignment] => s!"align {alignment}"
+        | _ => warning
+  let withInsn (input : ElfLinker.Input) (insn : Nat) : ElfLinker.Input :=
+    let word := (List.range 4).map fun k => UInt8.ofNat (insn >>> (8 * (if input.little then k else 3 - k)))
+    { input with data := ByteArray.mk (word.toArray ++ (input.data.toList.drop 4).toArray) }
+  let p := 0x1000
+  for (name, machine, width, typ, value, little, expected) in [
+      ("R_386_16 is either", 3, 32, 20, 0xffff, true, "ok"), ("R_386_16 of 2^16", 3, 32, 20, 0x10000, true, "range"),
+      ("R_386_PC8 forward", 3, 32, 23, p + 127, true, "ok"), ("R_386_PC8 too far", 3, 32, 23, p + 128, true, "range"),
+      ("R_AARCH64_PREL16 is signed, in lld 23", 183, 64, 0x106, p + 0x8000, true, "range"),
+      ("R_AARCH64_PREL16 at the end", 183, 64, 0x106, p + 0x7fff, true, "ok"),
+      ("R_AARCH64_PREL32 is signed, in lld 23", 183, 64, 0x105, p + 0x80000000, true, "range"),
+      ("R_AARCH64_CONDBR19 off a word", 183, 64, 0x118, p + 2, true, "align 4"),
+      ("R_AARCH64_CONDBR19 too far", 183, 64, 0x118, p + 0x100000, true, "range"),
+      ("R_AARCH64_MOVW_PREL_G0", 183, 64, 0x11f, p + 0x10000, true, "range"),
+      ("R_AARCH64_MOVW_PREL_G1", 183, 64, 0x121, p + 0x100000000, true, "range"),
+      ("R_AARCH64_LDST128 off 16", 183, 64, 0x12b, 0x2008, true, "align 16"),
+      ("R_ARM_THM_JUMP8 at the end", 40, 32, 0x67, p + 0xfe, true, "ok"), ("R_ARM_THM_JUMP8 too far", 40, 32, 0x67, p + 0x100, true, "range"),
+      ("R_ARM_THM_JUMP8 to an odd address, which lld stores", 40, 32, 0x67, p + 1, true, "align 2"),
+      ("R_ARM_THM_JUMP11 too far", 40, 32, 0x66, p + 0x800, true, "range"),
+      ("R_ARM_THM_JUMP19 to an odd address, which lld stores", 40, 32, 0x33, p + 3, true, "align 2"),
+      ("R_ARM_JUMP24 off a word, which lld stores", 40, 32, 0x1d, p + 2, true, "align 4"),
+      ("R_ARM_JUMP24 too far, for which lld has a thunk", 40, 32, 0x1d, p + 0x2000000, true, "range"),
+      ("R_ARM_THM_JUMP24 to an odd address, which lld stores", 40, 32, 0x1e, p + 1, true, "align 2"),
+      ("R_ARM_PREL31 too far", 40, 32, 0x2a, p + 0x40000000, true, "range"),
+      ("R_MIPS_PC16 at the end", 8, 32, 10, p + 0x1fffc, true, "ok"), ("R_MIPS_PC16 too far", 8, 32, 10, p + 0x20000, true, "range"),
+      ("R_MIPS_PC16 off a word", 8, 32, 10, p + 2, true, "align 4"),
+      ("R_MIPS_26 in its region", 8, 32, 4, 0xffffffc, true, "ok"),
+      ("R_MIPS_26 off a word, which lld has for a change of mode or stores", 8, 32, 4, 0x2002, true, "align 4"),
+      ("R_MIPS_26 out of its region, which lld stores", 8, 32, 4, 0x10000000, true, "range"),
+      ("R_RISCV_BRANCH too far", 243, 64, 16, p + 0x1000, true, "range"), ("R_RISCV_BRANCH off a halfword", 243, 64, 16, p + 1, true, "align 2"),
+      ("R_RISCV_RVC_JUMP too far", 243, 32, 45, p + 0x800, true, "range"),
+      ("R_RISCV_32_PCREL of what wraps in 32 bits, which lld does not wrap", 243, 32, 57, 0xffffffff, true, "ok"),
+      ("R_PPC_ADDR24 too far", 20, 32, 2, 0x2000000, false, "range"), ("R_PPC_ADDR24 off a word", 20, 32, 2, 0x2002, false, "align 4"),
+      ("R_PPC_REL14 too far, for which lld has a thunk", 20, 32, 11, p + 0x8000, false, "range"), ("R_PPC_REL14 off a word", 20, 32, 11, p + 2, false, "align 4"),
+      ("R_PPC64_ADDR14 off a word", 21, 64, 7, 2, true, "align 4"),
+      ("R_PPC64_ADDR16_DS too far", 21, 64, 56, 0x8000, true, "range"), ("R_PPC64_ADDR16_DS off a word", 21, 64, 56, 2, true, "align 4"),
+      ("R_390_8 is either", 22, 64, 1, 0xff, false, "ok"), ("R_390_8 of 256", 22, 64, 1, 0x100, false, "range"),
+      ("R_390_PC16DBL too far", 22, 64, 17, p + 0x10000, false, "range"), ("R_390_PC16DBL off a halfword", 22, 64, 17, p + 1, false, "align 2"),
+      ("R_390_PC32DBL too far", 22, 64, 19, p + 0x100000000, false, "range"), ("R_390_PC32DBL off a halfword", 22, 64, 19, p + 3, false, "align 2")] do
+    assertEqual name expected (problem (oneRelocation machine width typ value (little := little)))
+  assertEqual "R_MIPS_PC16 takes an explicit addend" "ok" (problem (oneRelocation 8 64 10 (p + 0x20000) (addend := -4) (little := false)))
+  assertEqual "with which it is in words" 0x7fff
+    (relocatedBytes (oneRelocation 8 64 10 (p + 0x20000) (addend := -4) (little := false)) 4)
+  assertEqual "R_MIPS_PC16 with an addend in the instruction" "ok"
+    (problem (withInsn (oneRelocation 8 32 10 (p + 0x20000) (explicit := false)) 0xffff))
+  -- what the instruction is decides what `R_PPC64_ADDR16_DS` needs, as in `isDQFormInstruction`
+  for (name, insn, value, expected) in [
+      ("ld is DS-form", 0xe8000000, 8, "ok"), ("nor is it off a word", 0xe8000000, 2, "align 4"),
+      ("lxv is DQ-form", 0xf4000001, 16, "ok"), ("off 16", 0xf4000001, 8, "align 16"),
+      ("the other forms of its opcode are DS", 0xf4000002, 8, "ok"),
+      ("lq is DQ-form", 0xe0000000, 8, "align 16"), ("lxvp is DQ-form", 0x18000000, 4, "align 16")] do
+    assertEqual name expected (problem (withInsn (oneRelocation 21 64 56 value) insn))
+  assertEqual "on big-endian the instruction has the halfword at its end" "align 16"
+    (problem { withInsn (oneRelocation 21 64 56 8 (little := false)) 0xf4000001 with
+      relocations := [⟨0, 2, 56, 0, 0, true⟩] })
+
 /-- The special symbols of a compound record of N64, on which lld has nothing to say, and thread-local relocations that go
 through the GOT, whose relaxed form differs there. -/
 private def runCompound : IO Unit := do
@@ -1060,6 +1127,7 @@ def run : IO Unit := do
   runObjects
   runRelocations
   runFieldChecks
+  runFieldAudit
   runCompound
   runPacked
   runWholeLink

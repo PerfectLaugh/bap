@@ -194,6 +194,15 @@ def suggest (agent : Agent) (slot : Slot kind) (object : Object) (value : kind.d
       opinions := ⟨agent, object, ⟨kind, slot⟩, value⟩ :: state.opinions
       version := state.version + 1 }
 
+/-- Adds the agent's vote and tells the slot's observers, if it is a new one. Upstream's `suggest` is a `provide` of the opinions,
+which tells them; as for `provideWith`, a vote that changes nothing tells no one. -/
+def suggestWith (env : Environment) (agent : Agent) (slot : Slot kind) (object : Object) (value : kind.data)
+    (state : State) : Except Conflict State := do
+  let next := suggest agent slot object value state
+  if next.version != state.version then
+    notifyObservers env slot object next
+  .ok next
+
 /-- The distinct agents voting for a value. -/
 private def voters (slot : Slot kind) (votes : List (Agent × kind.data)) (value : kind.data) : List Agent :=
   ((votes.filter fun vote => slot.domain.eq vote.2 value).map Prod.fst).eraseDups
@@ -319,7 +328,9 @@ def require (env : Environment) (slot : Slot kind) (object : Object) (state : St
   else
     .ok (value, state)
 
-def objects (state : State) : List Object := (state.facts.map Fact.object).eraseDups
+/-- The objects that have a value in a slot, as upstream's `objects`, for which opinions are the value of a slot like any other. -/
+def objects (state : State) : List Object :=
+  (state.facts.map Fact.object ++ state.opinions.map fun opinion => opinion.fact.object).eraseDups
 
 def promise (slot : Slot kind) (compute : Object → List Fact → Except Conflict (Option kind.data))
     (deps : List String := []) : Promise :=

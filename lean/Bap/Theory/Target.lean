@@ -91,6 +91,20 @@ structure Alias where
   parts : List AliasPart
   deriving DecidableEq, Repr
 
+/-- The options of a target: properties with values, in the partial order of upstream's `Target.Options`, a value of a class
+of the Knowledge Base, whose order is pointwise on its slots. The empty options are at the bottom. -/
+abbrev Options := List (String × String)
+
+namespace Options
+
+/-- Whether `left` says nothing that `right` doesn't. -/
+def le (left right : Options) : Bool := left.all (right.contains ·)
+
+/-- The same properties, whatever their order. -/
+def same (left right : Options) : Bool := le left right && le right left
+
+end Options
+
 structure Target where
   name : String
   nicknames : List String := []
@@ -107,12 +121,14 @@ structure Target where
   vars : List Var := []
   regs : List (List Role × List Var) := []
   aliases : List Alias := []
+  /-- The registers that had the `alias` role where `aliases` was declared: what the equations are solved for. -/
+  aliased : List Var := []
   endianness : Endianness := .bi
   system : SystemKind := .unknown
   abi : Abi := .unknown
   fabi : Fabi := .unknown
   filetype : Filetype := .unknown
-  options : String := ""
+  options : Options := []
   deriving DecidableEq, Repr
 
 structure Declaration where
@@ -133,7 +149,7 @@ structure Declaration where
   abi : Option Abi := none
   fabi : Option Fabi := none
   filetype : Option Filetype := none
-  options : Option String := none
+  options : Option Options := none
 
 /-- The root of the hierarchy, carrying upstream's defaults. -/
 def unknown : Target := {
@@ -168,6 +184,11 @@ def declare (declaration : Declaration) : Target :=
     vars := (declaration.vars.getD parent.vars ++ data.toList ++ code.toList ++ regs.flatMap Prod.snd).eraseDups
     regs := regs
     aliases := declaration.aliases.getD parent.aliases
+    -- A child that does not declare aliases has those of its parent, as solved there, as `Target.extend` upstream, whatever
+    -- roles it gives its registers.
+    aliased := match declaration.aliases with
+      | some _ => (regs.filter fun group => Role.alias ∈ group.1).flatMap Prod.snd
+      | none => parent.aliased
     endianness := declaration.endianness.getD parent.endianness
     system := declaration.system.getD parent.system
     abi := declaration.abi.getD parent.abi
@@ -201,7 +222,7 @@ def Target.var (target : Target) (name : String) : Option Var :=
   target.vars.find? fun var => var.name.toLower = name
 
 def Target.hasRole (target : Target) (var : Var) (role : Role) : Bool :=
-  target.regs.any fun group => role ∈ group.1 ∧ var ∈ group.2
+  target.regs.any fun group => role ∈ group.1 ∧ group.2.any (var.sameReg ·)
 
 /-- The registers that have all of `roles` and none of `exclude`. Roles are properties of a
 register, not of a group, so they may come from different groups. -/
@@ -274,8 +295,8 @@ def Target.linked (target : Target) (var : Var) (index : Nat) : List (Var × Nat
       else
         none
 
-/-- Registers without the `alias` role are the basis, as upstream's `Alias.solve`. -/
-def Target.isAlias (target : Target) (var : Var) : Bool := target.hasRole var .alias
+/-- Registers without the `alias` role where the aliases were declared are the basis, as upstream's `Alias.solve`. -/
+def Target.isAlias (target : Target) (var : Var) : Bool := target.aliased.any (var.sameReg ·)
 
 /-- The equations of a table, each one saying that two bits are equal. -/
 def Target.equations (target : Target) : List ((Var × Nat) × (Var × Nat)) :=
@@ -506,7 +527,7 @@ structure Selection where
   abi : Abi := .unknown
   fabi : Fabi := .unknown
   filetype : Filetype := .unknown
-  options : String := ""
+  options : Options := []
   strict : Bool := false
   unique : Bool := false
 
@@ -514,6 +535,10 @@ structure Selection where
 at least as defined as the requirement in the flat domain whose bottom is `none`. -/
 def fieldMatches [DecidableEq α] (strict : Bool) (none : α) (actual wanted : α) : Bool :=
   if strict then actual = wanted else wanted = none || actual = wanted
+
+/-- The same for options, which are partially ordered: strictly the same properties, otherwise at least those wanted. -/
+def optionsMatch (strict : Bool) (actual wanted : Options) : Bool :=
+  if strict then Options.same actual wanted else Options.le wanted actual
 
 def filter (selection : Selection) (targets : List Target) : List Target :=
   targets.filter fun target =>
@@ -523,7 +548,7 @@ def filter (selection : Selection) (targets : List Target) : List Target :=
     fieldMatches selection.strict .unknown target.abi selection.abi &&
     fieldMatches selection.strict .unknown target.fabi selection.fabi &&
     fieldMatches selection.strict .unknown target.filetype selection.filetype &&
-    fieldMatches selection.strict "" target.options selection.options
+    optionsMatch selection.strict target.options selection.options
 
 /-- The candidate with the fewest ancestors, the first of those: an ancestor comes before what descends from it, however they
 were registered. -/
@@ -536,8 +561,13 @@ def select (selection : Selection) (targets : List Target) : Option Target :=
   | target :: rest => if selection.unique then none else some (closest target rest)
   | [] => none
 
-def register (target : Target) (registry : List Target) : List Target :=
-  target :: registry.filter fun registered => registered.name != target.name
+/-- Adds a target to a registry. A name is taken once, as upstream's `Target.declare` fails on one that exists: replacing a
+target would change what targets that were declared under it, and the parents they name, mean. -/
+def register (target : Target) (registry : List Target) : Except String (List Target) :=
+  if registry.any fun registered => registered.name == target.name then
+    .error s!"a target with name {target.name} already exists"
+  else
+    .ok (target :: registry)
 
 /-- The target with exactly this name. Nicknames and ancestors are for `Target.matches`. -/
 def get (name : String) (registry : List Target) : Option Target :=

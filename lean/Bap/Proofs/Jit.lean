@@ -684,7 +684,7 @@ open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.ops Lowering.
   Operand.width lowerExp lowerMove lowerStmt lowerStatements setEffect temporary jumpConstant jumpSlot immediate useMemory
   useMemoryAt writeVar slot widthOf wrapSafe recordWrite addressOf readVar readsMemory
 open_private Bap.Bil.Eval Bap.Bil expectMemory
-open_private Bap.Proofs.Primus Bap.Proofs.Primus obind pairwise_same lookup_bind_same lookup_bind_other writeVar_inv
+open_private Bap.Proofs.Primus Bap.Proofs.Primus flag obind pairwise_same lookup_bind_same lookup_bind_other writeVar_inv
   slot_fields asBits_ok bind_ok SameButInputs SameButInputs.layout
 
 /-- The operations after a label. -/
@@ -927,6 +927,9 @@ def Returns (program : List Op) (cfg : Cfg) (value : Word64) (machine : Machine)
   ∃ rest, (∃ target : UInt64, Run program cfg (.jump target :: rest, machine) ∧ value = target.toBitVec) ∨
     (∃ slot, Run program cfg (.jumpSlot slot :: rest, machine) ∧ value = machine.slots slot)
 
+/-- The iterations that a loop of native code has, which is the fuel that the interpreter gets (`Bil.runObserved`). -/
+def loopLimit : Nat := 100000
+
 /-- A run that a loop ended, out of iterations. -/
 def Exhausts (program : List Op) (cfg : Cfg) (effect : Nat) : Prop :=
   ∃ target rest machine, Run program cfg (.jump target :: rest, machine) ∧ machine.slots effect = 2
@@ -944,10 +947,11 @@ theorem FramesOut.weaken {effect low high low' high' : Nat} {global : Lowering} 
     (hl : low' ≤ low) (hh : high ≤ high') : FramesOut effect low' high' global a b :=
   ⟨h.1, fun slot he hs hv => h.2 slot he (by omega) hv⟩
 
-/-- How a run of the operations of a statement ends, given what the interpreter says about it. -/
-def Outcome (first second global : Lowering) (program : List Op) (cfg : Cfg) (tail : List Op) (effect : Nat)
+/-- How a run of the operations of a statement ends, given what the interpreter says about it. `limit` is what must hold
+of the fuel of the interpreter for a loop to run out of iterations before the interpreter ran out of fuel. -/
+def Outcome (limit : Prop) (first second global : Lowering) (program : List Op) (cfg : Cfg) (tail : List Op) (effect : Nat)
     (terminated : Bool) (result : Bil.State × Bil.Effect) : Prop :=
-  Exhausts program cfg effect ∨
+  (limit ∧ Exhausts program cfg effect) ∨
     match result.2 with
     | .normal => terminated = false ∧ ∃ machine, Run program cfg (tail, machine) ∧ Agrees result.1.env machine global ∧
         Frames (Lowering.nextSlot first) (Lowering.nextSlot second) global cfg.2 machine
@@ -966,12 +970,12 @@ structure Context (first second global : Lowering) (new : List Op) (program tail
   split : ∃ pre, program = pre ++ new ++ tail
   distinct : (labelsOf program).Nodup
 
-/-- A lowered statement, with the executions of it. -/
-def LowerOK (first second : Lowering) (new : List Op) (terminated : Bool) (exec : Nat → Bil.State → Except String (Bil.State × Bil.Effect)) :
+/-- A lowered statement, with the executions of it. A loop only runs out of iterations with `cap` fuel at least. -/
+def LowerOK (cap : Nat) (first second : Lowering) (new : List Op) (terminated : Bool) (exec : Nat → Bil.State → Except String (Bil.State × Bil.Effect)) :
     Prop :=
   ∀ (fuel : Nat) (state : Bil.State) (result : Bil.State × Bil.Effect) (global : Lowering) (program tail : List Op) (effect : Nat)
     (machine : Machine), Context first second global new program tail effect → Agrees state.env machine global →
-    exec fuel state = .ok result → Outcome first second global program (new ++ tail, machine) tail effect terminated result
+    exec fuel state = .ok result → Outcome (cap ≤ fuel) first second global program (new ++ tail, machine) tail effect terminated result
 
 /-! Inversions and frames. -/
 
@@ -1017,7 +1021,7 @@ private theorem holds_condition {slot : Word64} {condition : BitVec 1} (h : Hold
 
 private theorem exec_ifElse {fuel : Nat} {state : Bil.State} {condition : Bil.Exp} {yes no : Bil.Program}
     {result : Bil.State × Bil.Effect} (h : Bil.execStmt fuel state (.ifElse condition yes no) = .ok result) :
-    ∃ (fuel' : Nat) (bit : BitVec 1), Bil.evalExp state.env condition = .ok (.bits bit) ∧
+    ∃ (fuel' : Nat) (bit : BitVec 1), fuel = fuel' + 1 ∧ Bil.evalExp state.env condition = .ok (.bits bit) ∧
       Bil.execProgram fuel' state (if bit = 1 then yes else no) = .ok result := by
   cases fuel with
   | zero => simp [Bil.execStmt] at h
@@ -1029,7 +1033,7 @@ private theorem exec_ifElse {fuel : Nat} {state : Bil.State} {condition : Bil.Ex
     split at h4
     · next hw =>
       subst hw
-      exact ⟨fuel, bit, by rw [h1, asBits_ok h3], h4⟩
+      exact ⟨fuel, bit, rfl, by rw [h1, asBits_ok h3], h4⟩
     · simp at h4
 
 private theorem exec_while {fuel : Nat} {state : Bil.State} {condition : Bil.Exp} {body : Bil.Program}
@@ -1063,7 +1067,7 @@ private theorem exec_while {fuel : Nat} {state : Bil.State} {condition : Bil.Exp
 
 private theorem exec_cons {fuel : Nat} {state : Bil.State} {stmt : Bil.Stmt} {rest : Bil.Program}
     {result : Bil.State × Bil.Effect} (h : Bil.execProgram fuel state (stmt :: rest) = .ok result) :
-    ∃ (fuel' : Nat) (first : Bil.State × Bil.Effect), Bil.execStmt fuel' state stmt = .ok first ∧
+    ∃ (fuel' : Nat) (first : Bil.State × Bil.Effect), fuel = fuel' + 1 ∧ Bil.execStmt fuel' state stmt = .ok first ∧
       match first.2 with
       | .normal => Bil.execProgram fuel' first.1 rest = .ok result
       | other => result = (first.1, other) := by
@@ -1072,7 +1076,7 @@ private theorem exec_cons {fuel : Nat} {state : Bil.State} {stmt : Bil.Stmt} {re
   | succ fuel =>
     simp only [Bil.execProgram] at h
     obtain ⟨⟨next, effect⟩, h1, h2⟩ := bind_ok h
-    refine ⟨fuel, (next, effect), h1, ?_⟩
+    refine ⟨fuel, (next, effect), rfl, h1, ?_⟩
     cases effect <;> simp_all
 
 private theorem exec_nil {fuel : Nat} {state : Bil.State} {result : Bil.State × Bil.Effect}
@@ -1301,7 +1305,7 @@ private theorem writeVar_fields {first second : Lowering} {var : Bap.Var} {index
 /-- A move to a register. -/
 theorem lowerMove_register_ok {first second : Lowering} {dst : Bap.Var} {value : Bil.Exp} {width : Nat} (wf : LayoutWF first)
     (hw : widthOf dst = some width) (h : lowerMove first dst value = some second) :
-    ∃ new, Appended first second new ∧ LowerOK first second new false (fun fuel state => Bil.execStmt fuel state (.move dst value)) := by
+    ∃ new, Appended first second new ∧ LowerOK loopLimit first second new false (fun fuel state => Bil.execStmt fuel state (.move dst value)) := by
   have htyp := (widthOf_some_iff dst width).1 hw
   rw [lowerMove] at h
   · obtain ⟨width', hw', h⟩ := obind h
@@ -1472,7 +1476,7 @@ private theorem useMemoryAt_fields {first second : Lowering} {var : Bap.Var} {si
 theorem lowerMove_store_ok {first second : Lowering} {dst : Bap.Var} {memory address stored : Bil.Exp} {endian : Endian} {size a c : Nat}
     (wf : LayoutWF first) (hty : dst.typ = .mem a c) (h : lowerMove first dst (.store memory address stored endian size) = some second) :
     ∃ new, Appended first second new ∧
-      LowerOK first second new false (fun fuel state => Bil.execStmt fuel state (.move dst (.store memory address stored endian size))) := by
+      LowerOK loopLimit first second new false (fun fuel state => Bil.execStmt fuel state (.move dst (.store memory address stored endian size))) := by
   unfold lowerMove at h
   rw [hty] at h
   dsimp only at h
@@ -1733,12 +1737,12 @@ theorem setEffect_pushed {lowering : Lowering} {slot : Nat} (h : Lowering.effect
 private def StmtOK (stmt : Bil.Stmt) : Prop :=
   ∀ (first second : Lowering) (terminated : Bool) (effect : Nat), LayoutWF first → Lowering.effectSlot first = some effect →
     effect < Lowering.nextSlot first → lowerStmt first stmt = some (second, terminated) →
-    ∃ new, Appended first second new ∧ LowerOK first second new terminated (fun fuel state => Bil.execStmt fuel state stmt)
+    ∃ new, Appended first second new ∧ LowerOK loopLimit first second new terminated (fun fuel state => Bil.execStmt fuel state stmt)
 
 private def ProgramOK (program : Bil.Program) : Prop :=
   ∀ (first second : Lowering) (terminated : Bool) (effect : Nat), LayoutWF first → Lowering.effectSlot first = some effect →
     effect < Lowering.nextSlot first → lowerStatements first program = some (second, terminated) →
-    ∃ new, Appended first second new ∧ LowerOK first second new terminated (fun fuel state => Bil.execProgram fuel state program)
+    ∃ new, Appended first second new ∧ LowerOK (loopLimit + 1) first second new terminated (fun fuel state => Bil.execProgram fuel state program)
 
 private theorem move_ok (dst : Bap.Var) (value : Bil.Exp) : StmtOK (.move dst value) := by
   intro first second terminated effect wf _ _ h
@@ -1919,9 +1923,9 @@ private theorem program_cons_ok {stmt : Bil.Stmt} {rest : Bil.Program} (hs : Stm
     obtain ⟨rfl, rfl⟩ := h
     refine ⟨newS, a1, ?_⟩
     intro fuel state result global program tail effect' machine ctx hag hex
-    obtain ⟨fuel', ⟨st, eff⟩, h2, h3⟩ := exec_cons hex
+    obtain ⟨fuel', ⟨st, eff⟩, hfuel, h2, h3⟩ := exec_cons hex
     rcases ok1 fuel' state (st, eff) global program tail effect' machine ctx hag h2 with hx | hn
-    · exact Or.inl hx
+    · exact Or.inl ⟨by omega, hx.2⟩
     · cases eff with
       | normal => simp at hn
       | jump target =>
@@ -1936,7 +1940,7 @@ private theorem program_cons_ok {stmt : Bil.Stmt} {rest : Bil.Program} (hs : Stm
     obtain ⟨newR, a2, ok2⟩ := hr mid second terminated effect a1.wf heff2 (Nat.lt_of_lt_of_le hlow a1.next) h
     refine ⟨newS ++ newR, a1.trans a2, ?_⟩
     intro fuel state result global program tail effect' machine ctx hag hex
-    obtain ⟨fuel', ⟨st, eff⟩, h2, h3⟩ := exec_cons hex
+    obtain ⟨fuel', ⟨st, eff⟩, hfuel, h2, h3⟩ := exec_cons hex
     obtain ⟨pre, hsplit⟩ := ctx.split
     have ctx1 : Context first mid global newS program (newR ++ tail) effect' := {
       effectSlot := ctx.effectSlot
@@ -1947,10 +1951,10 @@ private theorem program_cons_ok {stmt : Bil.Stmt} {rest : Bil.Program} (hs : Stm
       split := ⟨pre, by rw [hsplit]; simp⟩
       distinct := ctx.distinct }
     have hcfg : (newS ++ newR) ++ tail = newS ++ (newR ++ tail) := by simp
-    rw [show Outcome first second global program ((newS ++ newR) ++ tail, machine) tail effect' terminated result =
-      Outcome first second global program (newS ++ (newR ++ tail), machine) tail effect' terminated result by rw [hcfg]]
+    rw [show Outcome (loopLimit + 1 ≤ fuel) first second global program ((newS ++ newR) ++ tail, machine) tail effect' terminated result =
+      Outcome (loopLimit + 1 ≤ fuel) first second global program (newS ++ (newR ++ tail), machine) tail effect' terminated result by rw [hcfg]]
     rcases ok1 fuel' state (st, eff) global program (newR ++ tail) effect' machine ctx1 hag h2 with hx | hn
-    · exact Or.inl hx
+    · exact Or.inl ⟨by omega, hx.2⟩
     · cases eff with
       | normal =>
         obtain ⟨_, m1, hrun, hag1, hf1⟩ := hn
@@ -1964,7 +1968,7 @@ private theorem program_cons_ok {stmt : Bil.Stmt} {rest : Bil.Program} (hs : Stm
           split := ⟨pre ++ newS, by rw [hsplit]; simp⟩
           distinct := ctx.distinct }
         rcases ok2 fuel' st result global program tail effect' m1 ctx2 hag1 h3 with hx | hn2
-        · exact Or.inl (Exhausts.prepend hrun hx)
+        · exact Or.inl ⟨by omega, Exhausts.prepend hrun hx.2⟩
         · refine Or.inr ?_
           obtain ⟨st2, eff2⟩ := result
           cases eff2 with
@@ -1999,7 +2003,7 @@ private theorem ifElse_core {first mid l0 yesEnd l1 noEnd second : Lowering} {co
     (p2 : Pushed noEnd second ((if noDone then [] else [.goto (Lowering.nextLabel mid + 2)]) ++
       (if yesDone && noDone then [] else [.label (Lowering.nextLabel mid + 2)])) 0) :
     ∃ new, Appended first second new ∧
-      LowerOK first second new (yesDone && noDone) (fun fuel state => Bil.execStmt fuel state (.ifElse condition yes no)) := by
+      LowerOK loopLimit first second new (yesDone && noDone) (fun fuel state => Bil.execStmt fuel state (.ifElse condition yes no)) := by
   obtain ⟨newC, he, _, _, _, hval⟩ := lowerExp_correct condition wf h1
   have aC := he.appended wf
   have wfm := aC.wf
@@ -2099,7 +2103,7 @@ private theorem ifElse_core {first mid l0 yesEnd l1 noEnd second : Lowering} {co
     rw [heff] at this
     simpa using this.symm
   subst heq
-  obtain ⟨fuel', bit, hev, hexec⟩ := exec_ifElse hex
+  obtain ⟨fuel', bit, hfuel, hev, hexec⟩ := exec_ifElse hex
   obtain ⟨pre, hsplit⟩ := ctx.split
   have subEnd := ctx.sub.before' g2
   have subL1 := subEnd.before' aN.grows
@@ -2157,9 +2161,9 @@ private theorem ifElse_core {first mid l0 yesEnd l1 noEnd second : Lowering} {co
     have hrestEq : rest = newY ++ ((gotoY ++ [.label (Lowering.nextLabel mid + 1)]) ++ (newN ++ (gotoN ++ labelD)) ++ tail) := by
       simp [rest, List.append_assoc]
     rcases okY fuel' state result global program _ effect' m1 ctxY hag1 hexec with hx | hn
-    · refine Or.inl (Exhausts.prepend hprefix ?_)
+    · refine Or.inl ⟨by omega, Exhausts.prepend hprefix ?_⟩
       rw [hrestEq]
-      exact hx
+      exact hx.2
     · refine Or.inr ?_
       obtain ⟨st, eff⟩ := result
       cases eff with
@@ -2218,9 +2222,9 @@ private theorem ifElse_core {first mid l0 yesEnd l1 noEnd second : Lowering} {co
     have hprefix := hrun0.trans hbranch
     have hrestEq : newN ++ (gotoN ++ labelD) ++ tail = newN ++ ((gotoN ++ labelD) ++ tail) := by simp [List.append_assoc]
     rcases okN fuel' state result global program _ effect' m1 ctxN hag1 hexec with hx | hn
-    · refine Or.inl (Exhausts.prepend hprefix ?_)
+    · refine Or.inl ⟨by omega, Exhausts.prepend hprefix ?_⟩
       rw [hrestEq]
-      exact hx
+      exact hx.2
     · refine Or.inr ?_
       obtain ⟨st, eff⟩ := result
       cases eff with
@@ -2276,7 +2280,7 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
     (p3 : Lowering.effectSlot l5 = some effect → Pushed l5 l6 [.set effect 2] 0)
     (p4 : Pushed l6 second [.jump exit, .label (Lowering.nextLabel first + 3)] 0) :
     ∃ new, Appended first second new ∧
-      LowerOK first second new false (fun fuel state => Bil.execStmt fuel state (.while condition body)) := by
+      LowerOK loopLimit first second new false (fun fuel state => Bil.execStmt fuel state (.while condition body)) := by
   generalize hc : Lowering.nextSlot first = c at p0
   generalize hl : Lowering.nextLabel first = l at p0 p1 p2 p4
   have g0 := p0.grows wf
@@ -2416,15 +2420,15 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
     omega
   -- one iteration and the ones after it
   have key : ∀ (fuel : Nat) (state : Bil.State) (result : Bil.State × Bil.Effect) (machine : Machine),
-      Agrees state.env machine global → Bil.execStmt fuel state (.while condition body) = .ok result →
-      Outcome first second global program (loop, machine) tail effect' false result := by
+      (machine.slots c).toNat < loopLimit → Agrees state.env machine global → Bil.execStmt fuel state (.while condition body) = .ok result →
+      Outcome (loopLimit ≤ fuel + (machine.slots c).toNat) first second global program (loop, machine) tail effect' false result := by
     intro fuel
     induction fuel with
     | zero =>
-      intro state result machine _ hex
+      intro state result machine _ _ hex
       simp [Bil.execStmt] at hex
     | succ fuel ih =>
-      intro state result machine hag hex
+      intro state result machine hcount hag hex
       obtain ⟨bit, hev, hbranch⟩ := exec_while hex
       let m0 := runOps machine [.add c c 1, .set (c + 1) 100000, .bin .ge (c + 2) c (c + 1)]
       have hrun0 : Run program (loop, machine) (.branch (c + 2) (l + 4) (l + 1) :: .label (l + 1) ::
@@ -2443,9 +2447,27 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
         intro slot hslot _
         have hne : slot ≠ c ∧ slot ≠ c + 1 ∧ slot ≠ c + 2 := by omega
         simp [m0, runOps_cons, runOps_nil, Bap.Proofs.Primus.step, Machine.write_slots, hne.1, hne.2.1, hne.2.2]
+      have hm0count : (m0.slots c).toNat = (machine.slots c).toNat + 1 ∧ (m0.slots (c + 2) ≠ 0 → loopLimit ≤ (machine.slots c).toNat + 1) ∧
+          (m0.slots (c + 2) = 0 → (machine.slots c).toNat + 1 < loopLimit) := by
+        have hsum : (machine.slots c + (1 : UInt64).toBitVec).toNat = (machine.slots c).toNat + 1 := by
+          have h1 : (1 : UInt64).toBitVec.toNat = 1 := by decide
+          rw [BitVec.toNat_add, h1, Nat.mod_eq_of_lt]
+          have : (machine.slots c).toNat < 100000 := hcount
+          omega
+        simp only [m0, runOps_cons, runOps_nil, Bap.Proofs.Primus.step, Machine.write_slots, denoteBin]
+        simp only [loopLimit] at hcount
+        have hmod : ((machine.slots c).toNat + 1) % 18446744073709551616 = (machine.slots c).toNat + 1 := Nat.mod_eq_of_lt (by omega)
+        simp [loopLimit, hmod]
+        by_cases hk : 100000 ≤ (machine.slots c).toNat + 1
+        · simp [flag]
+          omega
+        · simp [flag]
+          omega
       by_cases hlimit : m0.slots (c + 2) ≠ 0
       · -- out of iterations
-        refine Or.inl ⟨exit, .label (l + 3) :: tail, m0.write effect' (2 : UInt64).toBitVec, ?_, ?_⟩
+        refine Or.inl ⟨?_, exit, .label (l + 3) :: tail, m0.write effect' (2 : UInt64).toBitVec, ?_, ?_⟩
+        · have := hm0count.2.1 hlimit
+          omega
         · refine hrun0.trans (.step ?_ (Run.linear (op := .set effect' 2) rfl _ _))
           simp only [nextCfg, ite_eq_left hlimit, hafterExh]
           rfl
@@ -2492,7 +2514,7 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
               rw [hsplit]; simp [new, afterBody, List.append_assoc]⟩
             distinct := ctx.distinct }
           rcases okB fuel state inner global program afterBody effect' m1 ctxB hag1 hbodyExec with hx | hn
-          · exact Or.inl (Exhausts.prepend hrun3 hx)
+          · exact Or.inl ⟨by have := hx.1; omega, Exhausts.prepend hrun3 hx.2⟩
           · obtain ⟨st, eff⟩ := inner
             cases eff with
             | normal =>
@@ -2504,8 +2526,16 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
                 have hgo : goBack = [.goto l] := by simp [goBack]
                 simp only [afterBody, hgo]
                 exact Run.goto hafterLoop _
-              rcases ih st result m2 hag2 hinner with hx | hn2
-              · exact Or.inl (Exhausts.prepend hrun4 hx)
+              have hcm : (m2.slots c).toNat = (machine.slots c).toNat + 1 := by
+                have hc1 := hf1.2 c (Or.inl (by rw [hnext0]; omega)) (hfree c (by omega) (by omega))
+                have hc2 := hf.2 c (Or.inl (by have h1 := aC.next; have h2 := g1.next; rw [hnext0] at h1; omega)) (hfree c (by omega) (by omega))
+                rw [hc2, hc1]
+                exact hm0count.1
+              have hcountNext : (m2.slots c).toNat < loopLimit := by
+                have := hm0count.2.2 hzero
+                omega
+              rcases ih st result m2 hcountNext hag2 hinner with hx | hn2
+              · exact Or.inl ⟨by have := hx.1; omega, Exhausts.prepend hrun4 hx.2⟩
               · refine Or.inr ?_
                 obtain ⟨st', eff'⟩ := result
                 have hfm2 : Frames (Lowering.nextSlot first) (Lowering.nextSlot second) global machine m2 :=
@@ -2557,8 +2587,8 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
     intro slot hslot _
     have hne : slot ≠ c := by omega
     simp [Machine.write_slots, hne]
-  rcases key fuel state result _ hag' hex with hx | hn
-  · exact Or.inl (Exhausts.prepend hstart hx)
+  rcases key fuel state result (machine.write c (0 : UInt64).toBitVec) (by simp [Machine.write_slots, loopLimit]) hag' hex with hx | hn
+  · exact Or.inl ⟨by simpa [Machine.write_slots] using hx.1, Exhausts.prepend hstart hx.2⟩
   · refine Or.inr ?_
     obtain ⟨st, eff⟩ := result
     cases eff with
@@ -2627,18 +2657,18 @@ theorem lowerStmt_correct {first second : Lowering} {stmt : Bil.Stmt} {terminate
     (heff : Lowering.effectSlot first = some effect) (hlow : effect < Lowering.nextSlot first)
     (h : lowerStmt first stmt = some (second, terminated)) :
     ∃ new, Appended first second new ∧
-      LowerOK first second new terminated (fun fuel state => Bil.execStmt fuel state stmt) :=
+      LowerOK loopLimit first second new terminated (fun fuel state => Bil.execStmt fuel state stmt) :=
   lowered_all.1 stmt first second terminated effect wf heff hlow h
 
 /-- The operations of a lowered program, from a machine that holds the environment, end the way the interpreter ends on
 that program. It runs off its end with the machine holding the environment of the interpreter, or returns the target of
 its jump with 1 in the effect slot and likewise. The one other way to end is a loop that uses up its 100000 iterations,
-with 2 in the effect slot, which the runner turns into an error. -/
+with 2 in the effect slot, which the runner turns into an error, and only an interpreter with more fuel than that has a result then. -/
 theorem lowerStatements_correct {first second : Lowering} {program : Bil.Program} {terminated : Bool} {effect : Nat}
     (wf : LayoutWF first) (heff : Lowering.effectSlot first = some effect) (hlow : effect < Lowering.nextSlot first)
     (h : lowerStatements first program = some (second, terminated)) :
     ∃ new, Appended first second new ∧
-      LowerOK first second new terminated (fun fuel state => Bil.execProgram fuel state program) :=
+      LowerOK (loopLimit + 1) first second new terminated (fun fuel state => Bil.execProgram fuel state program) :=
   lowered_all.2 program first second terminated effect wf heff hlow h
 
 /-- The whole of it: from a first lowering with no operations and an effect slot that no variable has, a machine that
@@ -2649,7 +2679,7 @@ theorem lowerStatements_run {first second : Lowering} {program : Bil.Program} {t
     (h : lowerStatements first program = some (second, terminated)) (fuel : Nat) (state : Bil.State)
     (result : Bil.State × Bil.Effect) (machine : Machine) (hag : Agrees state.env machine second)
     (hex : Bil.execProgram fuel state program = .ok result) :
-    Outcome first second second (Lowering.ops second ++ []) (Lowering.ops second ++ [], machine) [] effect terminated result := by
+    Outcome (loopLimit + 1 ≤ fuel) first second second (Lowering.ops second ++ []) (Lowering.ops second ++ [], machine) [] effect terminated result := by
   obtain ⟨new, a, ok⟩ := lowerStatements_correct wf heff hlow h
   have hnew : Lowering.ops second = new := by rw [a.ops, hops]; simp
   have ctx : Context first second second new (Lowering.ops second ++ []) [] effect := {
@@ -3049,7 +3079,7 @@ def stepBlocks (blocks : List Block) (fuel : Nat) : Nat → Bil.State × Nat →
 
 private theorem exec_single {fuel : Nat} {state : Bil.State} {stmt : Bil.Stmt} {result : Bil.State × Bil.Effect}
     (h : Bil.execProgram fuel state [stmt] = .ok result) : ∃ fuel', Bil.execStmt fuel' state stmt = .ok result := by
-  obtain ⟨fuel', ⟨st, eff⟩, h1, h2⟩ := exec_cons h
+  obtain ⟨fuel', ⟨st, eff⟩, _, h1, h2⟩ := exec_cons h
   refine ⟨fuel', ?_⟩
   cases eff with
   | normal =>
@@ -3185,7 +3215,7 @@ theorem leadingMoves_bound {var : Bap.Var} (program : Bil.Program) (hm : var ∈
     cases stmt with
     | move dst value =>
       simp only [leadingMoves, List.mem_cons] at hm
-      obtain ⟨fuel', ⟨st, eff⟩, h1, h2⟩ := exec_cons h
+      obtain ⟨fuel', ⟨st, eff⟩, _, h1, h2⟩ := exec_cons h
       obtain ⟨v, _, he⟩ := exec_move h1
       simp only [Prod.mk.injEq] at he
       obtain ⟨rfl, rfl⟩ := he
@@ -3232,9 +3262,9 @@ def EdgeTo (plan : GraphPlan) (source target label : Nat) : Prop :=
     ∃ address, (GraphPlan.labels plan).find? (fun (address, _) => address = target) = some (address, label)
 
 /-- How a run of a block in a range ends, given what the interpreter says about the block. -/
-def BlockOutcome (stops : Nat → Bool) (plan : GraphPlan) (low high : Nat) (global : Lowering) (program : List Op) (cfg : Cfg)
+def BlockOutcome (limit : Prop) (stops : Nat → Bool) (plan : GraphPlan) (low high : Nat) (global : Lowering) (program : List Op) (cfg : Cfg)
     (effect : Nat) (address : Nat) (block : Block) (result : Bil.State × Bil.Effect) : Prop :=
-  ExhaustsAt stops program cfg effect ∨
+  (limit ∧ ExhaustsAt stops program cfg effect) ∨
     (∃ machine, EndsAt stops program cfg (nextPc block result.2) machine ∧ Agrees result.1.env machine global ∧
       FramesOut effect low high global cfg.2 machine ∧ (machine.slots effect = 0 ∨ machine.slots effect = 1)) ∨
     (∃ machine label rest, RunAt stops program cfg (.goto label :: rest, machine) ∧ EdgeTo plan address (nextPc block result.2) label ∧
@@ -3302,13 +3332,13 @@ private theorem Place.context {first second mid global : Lowering} {new newS mor
     distinct := place.distinct }
 
 /-- The end of a block over an edge. -/
-private theorem edge_finish {stops : Nat → Bool} {plan : GraphPlan} {lowering : Lowering} {low high : Nat} {global : Lowering}
+private theorem edge_finish {limit : Prop} {stops : Nat → Bool} {plan : GraphPlan} {lowering : Lowering} {low high : Nat} {global : Lowering}
     {program rest ops : List Op} {cfg : Cfg} {effect source target : Nat} {block : Block} {result : Bil.State × Bil.Effect} {m : Machine}
     (heff : Lowering.effectSlot lowering = some effect) (hfree : ∀ var, (var, effect) ∉ Lowering.layout global)
     (hgo : graphEdgeOps lowering (GraphPlan.labels plan) (GraphPlan.edges plan) source target = some ops) (hlt : target < 2 ^ 64)
     (hpc : nextPc block result.2 = target) (hrun : RunAt stops program cfg (ops ++ rest, m)) (hag : Agrees result.1.env m global)
     (hf : Frames low high global cfg.2 m) :
-    BlockOutcome stops plan low high global program cfg effect source block result := by
+    BlockOutcome limit stops plan low high global program cfg effect source block result := by
   rcases graphEdgeOps_sim heff hgo with ⟨label, rfl, he⟩ | rfl
   · exact Or.inr (Or.inr ⟨m, label, rest, hrun, by rw [hpc]; exact he, hag, hf⟩)
   · refine Or.inr (Or.inl ⟨m.write effect (1 : UInt64).toBitVec, ?_, hag.write_free hfree _, ?_, Or.inr ?_⟩)
@@ -3321,12 +3351,12 @@ private theorem edge_finish {stops : Nat → Bool} {plan : GraphPlan} {lowering 
       rfl
 
 /-- The end of a block that leaves with the effect it has. -/
-private theorem fall_finish {stops : Nat → Bool} {plan : GraphPlan} {low high : Nat} {global : Lowering}
+private theorem fall_finish {limit : Prop} {stops : Nat → Bool} {plan : GraphPlan} {low high : Nat} {global : Lowering}
     {program rest : List Op} {cfg : Cfg} {effect source target : Nat} {block : Block} {result : Bil.State × Bil.Effect} {m : Machine}
     (hlt : target < 2 ^ 64) (hpc : nextPc block result.2 = target)
     (hrun : RunAt stops program cfg (.jump (UInt64.ofNat target) :: rest, m)) (hag : Agrees result.1.env m global)
     (hf : Frames low high global cfg.2 m) (hzero : m.slots effect = 0) :
-    BlockOutcome stops plan low high global program cfg effect source block result := by
+    BlockOutcome limit stops plan low high global program cfg effect source block result := by
   refine Or.inr (Or.inl ⟨m, ?_, hag, ?_, Or.inl hzero⟩)
   · rw [hpc]
     refine Or.inl ⟨rest, UInt64.ofNat target, hrun, ?_⟩
@@ -3335,12 +3365,12 @@ private theorem fall_finish {stops : Nat → Bool} {plan : GraphPlan} {low high 
   · exact ⟨hf.1, fun slot _ hs hv => hf.2 slot hs hv⟩
 
 /-- A jump out of the statements of a block. -/
-private theorem inner_jump {stops : Nat → Bool} {plan : GraphPlan} {low high low' high' : Nat} {global : Lowering}
+private theorem inner_jump {limit : Prop} {stops : Nat → Bool} {plan : GraphPlan} {low high low' high' : Nat} {global : Lowering}
     {program : List Op} {cfg : Cfg} {effect source : Nat} {block : Block} {state : Bil.State} {width : Nat} {target : BitVec width}
     (hl : low ≤ low') (hh : high' ≤ high)
     (h : ∃ value machine, Returns program cfg value machine ∧ Holds value target ∧ machine.slots effect = 1 ∧
       Agrees state.env machine global ∧ FramesOut effect low' high' global cfg.2 machine) :
-    BlockOutcome stops plan low high global program cfg effect source block (state, .jump target) := by
+    BlockOutcome limit stops plan low high global program cfg effect source block (state, .jump target) := by
   obtain ⟨value, machine, hret, hheld, hone, hag, hf⟩ := h
   refine Or.inr (Or.inl ⟨machine, ?_, hag, hf.weaken hl hh, Or.inr hone⟩)
   have : value.toNat = target.toNat := hheld
@@ -3378,7 +3408,7 @@ private theorem lowerExit_direct {plan : GraphPlan} {first second : Lowering} {b
     ∃ new, Grows first second new ∧ ∀ (stops : Nat → Bool) (global : Lowering) (program tail : List Op), Place first second global new program tail effect →
       ∀ (fuel : Nat) (state : Bil.State) (result : Bil.State × Bil.Effect) (machine : Machine), Agrees state.env machine global →
       machine.slots effect = 0 → Bil.execProgram fuel state block.program = .ok result →
-      BlockOutcome stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program (new ++ tail, machine) effect block.address block result := by
+      BlockOutcome (loopLimit + 1 ≤ fuel) stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program (new ++ tail, machine) effect block.address block result := by
   obtain ⟨newS, aS, okS⟩ := lowerStatements_correct wf heff hlow h1
   have gp := p.grows aS.wf
   refine ⟨newS ++ ops, aS.grows.trans gp, ?_⟩
@@ -3390,7 +3420,7 @@ private theorem lowerExit_direct {plan : GraphPlan} {first second : Lowering} {b
   have hlts := gp.next
   have heffL : Lowering.effectSlot lowered = some effect := by rw [aS.effect]; exact heff
   rcases okS fuel state (s1, e1) global program (ops ++ tail) effect machine ctx hag hfirst with hx | hn
-  · exact Or.inl (by rw [List.append_assoc]; exact hx.toAt)
+  · exact Or.inl ⟨hx.1, by rw [List.append_assoc]; exact hx.2.toAt⟩
   · cases e1 with
     | normal =>
       obtain ⟨_, m1, hrun, hag1, hf1⟩ := hn
@@ -3429,7 +3459,7 @@ private theorem lowerExit_branch {plan : GraphPlan} {first second : Lowering} {b
     ∃ new, Grows first second new ∧ ∀ (stops : Nat → Bool) (global : Lowering) (program tail : List Op), Place first second global new program tail effect →
       ∀ (fuel : Nat) (state : Bil.State) (result : Bil.State × Bil.Effect) (machine : Machine), Agrees state.env machine global →
       machine.slots effect = 0 → Bil.execProgram fuel state block.program = .ok result →
-      BlockOutcome stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program (new ++ tail, machine) effect block.address block result := by
+      BlockOutcome (loopLimit + 1 ≤ fuel) stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program (new ++ tail, machine) effect block.address block result := by
   obtain ⟨newS, aS, okS⟩ := lowerStatements_correct wf heff hlow h1
   obtain ⟨newC, heC, _, _, _, hval⟩ := lowerExp_correct condition aS.wf h2
   have aC := heC.appended aS.wf
@@ -3455,7 +3485,7 @@ private theorem lowerExit_branch {plan : GraphPlan} {first second : Lowering} {b
       Agrees s1.env m1 global → Frames (Lowering.nextSlot first) (Lowering.nextSlot lowered) global machine m1 → m1.slots effect = 0 →
       Bil.evalExp s1.env condition = .ok (.bits bit) → result'.1 = s1 →
       (bit = 1 → nextPc block result'.2 = yes) → (bit ≠ 1 → nextPc block result'.2 = no) →
-      BlockOutcome stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program
+      BlockOutcome (loopLimit + 1 ≤ fuel) stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program
         ((newS ++ (newC ++ tailOps)) ++ tail, machine) effect block.address block result' := by
     intro s1 m1 result' bit hrun hag1 hf1 hz1 hev hst hy hn
     have hsm : SlotsAgree s1.env m1 (Lowering.layout mid) := hag1.slots.mono subMid.mono
@@ -3515,13 +3545,13 @@ private theorem lowerExit_branch {plan : GraphPlan} {first second : Lowering} {b
   obtain ⟨⟨s1, e1⟩, hfirst, hrest⟩ := exec_snoc _ _ hex
   rw [show (newS ++ (newC ++ tailOps)) ++ tail = newS ++ ((newC ++ tailOps) ++ tail) by simp [List.append_assoc]]
   rcases okS fuel state (s1, e1) global program ((newC ++ tailOps) ++ tail) effect machine ctx hag hfirst with hx | hn
-  · exact Or.inl hx.toAt
+  · exact Or.inl ⟨hx.1, hx.2.toAt⟩
   · cases e1 with
     | normal =>
       obtain ⟨_, m1, hrun, hag1, hf1⟩ := hn
       simp only at hrest
       obtain ⟨fuel', hstmt⟩ := hrest
-      obtain ⟨fuel'', bit, hev, hbranch⟩ := exec_ifElse hstmt
+      obtain ⟨fuel'', bit, _, hev, hbranch⟩ := exec_ifElse hstmt
       have hz1 : m1.slots effect = 0 := by
         rw [hf1.2 effect (Or.inl hlow) place.effectFree]
         exact hzero
@@ -3564,7 +3594,7 @@ private theorem lowerExit_other {plan : GraphPlan} {first second : Lowering} {bl
     ∃ new, Grows first second new ∧ ∀ (stops : Nat → Bool) (global : Lowering) (program tail : List Op), Place first second global new program tail effect →
       ∀ (fuel : Nat) (state : Bil.State) (result : Bil.State × Bil.Effect) (machine : Machine), Agrees state.env machine global →
       machine.slots effect = 0 → Bil.execProgram fuel state block.program = .ok result →
-      BlockOutcome stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program (new ++ tail, machine) effect block.address block result := by
+      BlockOutcome (loopLimit + 1 ≤ fuel) stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program (new ++ tail, machine) effect block.address block result := by
   obtain ⟨newS, aS, okS⟩ := lowerStatements_correct wf heff hlow h1
   have gp := p.grows aS.wf
   refine ⟨newS ++ ops, aS.grows.trans gp, ?_⟩
@@ -3575,7 +3605,7 @@ private theorem lowerExit_other {plan : GraphPlan} {first second : Lowering} {bl
   rw [List.append_assoc]
   obtain ⟨st, eff⟩ := result
   rcases okS fuel state (st, eff) global program (ops ++ tail) effect machine ctx hag hex with hx | hn
-  · exact Or.inl hx.toAt
+  · exact Or.inl ⟨hx.1, hx.2.toAt⟩
   · cases eff with
     | normal =>
       obtain ⟨ht, m1, hrun, hag1, hf1⟩ := hn
@@ -3721,7 +3751,7 @@ theorem entry_sim {stops : Nat → Bool} {program pre more : List Op} {effect bu
 def BlockOK (stops : Nat → Bool) (plan : GraphPlan) (low high : Nat) (global : Lowering) (program start : List Op) (effect : Nat) (block : Block) : Prop :=
   ∀ (fuel : Nat) (state : Bil.State) (result : Bil.State × Bil.Effect) (machine : Machine), Agrees state.env machine global →
     machine.slots effect = 0 → Bil.execProgram fuel state block.program = .ok result →
-    BlockOutcome stops plan low high global program (start, machine) effect block.address block result
+    BlockOutcome (loopLimit + 1 ≤ fuel) stops plan low high global program (start, machine) effect block.address block result
 
 /-- What lowering the end of a block makes. -/
 theorem lowerExit_spec {plan : GraphPlan} {first second : Lowering} {block : Block} {effect : Nat}
@@ -4092,13 +4122,13 @@ private theorem range_step {stops : Nat → Bool} {plan : GraphPlan} {low high e
       ∀ (start : List Op), SegOK stops plan low high global program effect block start →
       ∀ (state : Bil.State) (machine : Machine), Agrees state.env machine global → machine.slots effect = 0 →
       (machine.slots (GraphPlan.budget plan)).toNat = b → ready block.address state.env →
-      OutOfFuel blocks fuel b (state, block.address) ∨ ExhaustsAt stops program (start, machine) effect ∨
+      OutOfFuel blocks fuel b (state, block.address) ∨ (loopLimit + 1 ≤ fuel ∧ ExhaustsAt stops program (start, machine) effect) ∨
         RangeEnds stops blocks fuel b (GraphPlan.budget plan) effect global program (start, machine) (state, block.address)) :
     ∀ (block : Block), block ∈ blocks → blockAt blocks block.address = some block →
       ∀ (start : List Op), SegOK stops plan low high global program effect block start →
       ∀ (state : Bil.State) (machine : Machine), Agrees state.env machine global → machine.slots effect = 0 →
       (machine.slots (GraphPlan.budget plan)).toNat = budget → ready block.address state.env →
-      OutOfFuel blocks fuel budget (state, block.address) ∨ ExhaustsAt stops program (start, machine) effect ∨
+      OutOfFuel blocks fuel budget (state, block.address) ∨ (loopLimit + 1 ≤ fuel ∧ ExhaustsAt stops program (start, machine) effect) ∨
         RangeEnds stops blocks fuel budget (GraphPlan.budget plan) effect global program (start, machine) (state, block.address) := by
   intro block hmem hat start seg state machine hag hz hb hr0
   have hstep : ∀ result, Bil.execProgram fuel state block.program = .ok result →
@@ -4195,7 +4225,7 @@ private theorem range_step {stops : Nat → Bool} {plan : GraphPlan} {low high e
           simp only [stepBlocks, hstep result hex]
           rw [hpcT]
           exact h1
-        · exact Or.inr (Or.inl (hx.prepend hstart))
+        · exact Or.inr (Or.inl ⟨hx.1, hx.2.prepend hstart⟩)
         · obtain ⟨entered, he, st, pc, m3, h1, h2, h3, h4, h5⟩ := hends
           refine Or.inr (Or.inr ⟨entered + 1, by omega, st, pc, m3, ?_, h2.prepend hstart, h3, ?_, h5⟩)
           · rw [show entered + 1 + 1 = (entered + 1) + 1 from rfl]
@@ -4221,7 +4251,7 @@ theorem range_core {stops : Nat → Bool} {plan : GraphPlan} {low high effect : 
       ∀ (start : List Op), SegOK stops plan low high global program effect block start →
       ∀ (state : Bil.State) (machine : Machine), Agrees state.env machine global → machine.slots effect = 0 →
       (machine.slots (GraphPlan.budget plan)).toNat = budget → ready block.address state.env →
-      OutOfFuel blocks fuel budget (state, block.address) ∨ ExhaustsAt stops program (start, machine) effect ∨
+      OutOfFuel blocks fuel budget (state, block.address) ∨ (loopLimit + 1 ≤ fuel ∧ ExhaustsAt stops program (start, machine) effect) ∨
         RangeEnds stops blocks fuel budget (GraphPlan.budget plan) effect global program (start, machine) (state, block.address) := by
   intro hedges
   have hbud := hbe hedges
@@ -4946,7 +4976,7 @@ private theorem stepBlocks_first {blocks : List Block} {fuel count : Nat} {state
 
 From the slots of `encodeState` and `withControl` with any budget, and any code observer `stops`, with a machine that holds them and the
 memory of the state, the program that `lowerGraph` makes for a graph has one of three ends. A loop in it uses up its iterations, which the
-runner turns into an error, or the interpreter has no fuel within the budget, the one thing that can stop it (`graph_progress`), or the run returns. Then it has
+runner turns into an error and which takes more fuel than the interpreter runs with (`lowerGraph_interpreterFuel`), or the interpreter has no fuel within the budget, the one thing that can stop it (`graph_progress`), or the run returns. Then it has
 entered `entered` blocks after its first, what `budget` minus its budget slot says, at most `budget`. It returns the pc where the interpreter
 goes on after `entered + 1` blocks, whichever way it left: over an edge with no budget left (that block not entered), at a code site that stopped it
 (likewise, with 3 in the effect slot), at an edge to a block that is not in the range, or at a jump out of a block's statements. Variables other than
@@ -4963,7 +4993,7 @@ theorem lowerGraph_correct {blocks : List Block} {edges : List (Nat × Nat)} {wr
     Lowering.effectSlot lowering = some 0 ∧ Lowering.budget lowering = some 1 ∧ Lowering.observed lowering = some 2 ∧
     ∃ seed rest, blocks = seed :: rest ∧
     (OutOfFuel blocks fuel budget (state, seed.address) ∨
-      ExhaustsAt stops (Lowering.ops lowering) (Lowering.ops lowering, machine) 0 ∨
+      (loopLimit + 1 ≤ fuel ∧ ExhaustsAt stops (Lowering.ops lowering) (Lowering.ops lowering, machine) 0) ∨
       ∃ entered, entered ≤ budget ∧ ∃ final pc m, stepBlocks blocks fuel (entered + 1) (state, seed.address) = .ok (final, pc) ∧
         EndsAt stops (Lowering.ops lowering) (Lowering.ops lowering, machine) pc m ∧
         (m.slots 1).toNat = budget - entered ∧
@@ -5109,9 +5139,9 @@ theorem lowerGraph_correct {blocks : List Block} {edges : List (Nat × Nat)} {wr
   rw [hops]
   rcases core with hfail | hx | ⟨entered, hle, final, pc, m, hsteps, hend, hagF, hbudF, heffF⟩
   · exact Or.inl hfail
-  · obtain ⟨target, r, mx, hr, h2⟩ := hx.prepend hstart
+  · obtain ⟨hcap, target, r, mx, hr, h2⟩ := And.intro hx.1 (hx.2.prepend hstart)
     obtain ⟨hin, m', hrun, hr2⟩ := hr.withFlags hfl hfd chk.slots hin0 machine hrel0
-    refine Or.inr (Or.inl ⟨target, flagOps flags r, m', hrun, ?_⟩)
+    refine Or.inr (Or.inl ⟨hcap, target, flagOps flags r, m', hrun, ?_⟩)
     rw [hr2.slots 0 (by omega)]
     exact h2
   · obtain ⟨m', hend', hrel, horigin, hmoved⟩ := (hend.prepend hstart).withFlags hfl hfd chk.slots hrel0 hm0
@@ -5175,6 +5205,50 @@ theorem atCodeStop_flagOutputs (written : List Bap.Var) (final : Lowering) (pc :
     rw [this]
     rfl
   · rfl
+
+/-- **The limit of native loops and the fuel of the interpreter are one bound.** On the fuel that the interpreter is given (`Bil.runObserved`, or
+any less), a compiled range never gives up on a loop before the interpreter would: the end of `lowerGraph_correct` with a loop out of iterations is gone.
+A loop runs out of iterations at its 100000th test, the last that `execProgram 100000` can get to, so that the bound is exact. With more fuel, the
+interpreter goes on where native code reports an error: both fail, or neither, and with the same state. -/
+theorem lowerGraph_interpreterFuel {blocks : List Block} {edges : List (Nat × Nat)} {wrapFaults : Bool} {lowering : Lowering}
+    (h : lowerGraph blocks edges wrapFaults = some lowering) (hedges : edges ≠ []) (stops : Nat → Bool) {fuel : Nat} (hfuel : fuel ≤ loopLimit) (budget : Nat)
+    (observed : Bool) (hbudget : budget < 2 ^ 64) (state : Bil.State) {slots : Array UInt64} (machine : Machine)
+    (henc : encodeState lowering state.env = .ok slots)
+    (hslots : ∀ index, machine.slots index = ((withControl lowering slots budget observed).getD index 0).toBitVec)
+    (hmem : ∀ var, Lowering.memory lowering = some var → ∀ (width : Nat) (cells : Bap.Memory width),
+      Bil.lookup state.env var = .ok (.memory cells) → MemoryInv machine width cells)
+    (hbound : ∀ var, Lowering.memory lowering = some var → GoodMem state.env var) :
+    ∃ seed rest, blocks = seed :: rest ∧
+    (OutOfFuel blocks fuel budget (state, seed.address) ∨
+      ∃ entered, entered ≤ budget ∧ ∃ final pc m, stepBlocks blocks fuel (entered + 1) (state, seed.address) = .ok (final, pc) ∧
+        EndsAt stops (Lowering.ops lowering) (Lowering.ops lowering, machine) pc m ∧
+        (m.slots 1).toNat = budget - entered ∧
+        (m.slots 0 = 0 ∨ m.slots 0 = 1 ∨ (m.slots 0 = (3 : UInt64).toBitVec ∧ stops pc = true)) ∧
+        (∀ out : Array UInt64, (∀ index, index < Lowering.nextSlot lowering → (out.getD index 0).toBitVec = m.slots index) →
+          ∀ var, Lowering.memory lowering ≠ some var → Bil.lookup (syncState lowering state out).env var = Bil.lookup final.env var) ∧
+        (∀ var, Lowering.memory lowering = some var → ∀ (width : Nat) (cells : Bap.Memory width),
+          Bil.lookup final.env var = .ok (.memory cells) → MemoryInv m width cells)) := by
+  obtain ⟨_, _, _, seed, rest, hb, hcases⟩ := lowerGraph_correct h hedges stops fuel budget observed hbudget state machine henc hslots hmem hbound
+  refine ⟨seed, rest, hb, ?_⟩
+  rcases hcases with hout | hx | hends
+  · exact Or.inl hout
+  · have := hx.1
+    omega
+  · exact Or.inr hends
+
+/-- **No input that is not bound reaches native code as a 0.** `encodeState` fails on it, and the runner runs the interpreter instead. A variable that
+is not an input and has no value has a 0 in its slot, which nothing reads before writing it (`lowerGraph_correct`). This is why a read in a later block
+of what an earlier block only writes after a statement that can leave, which `programWrites` does not count, is at worst slower. -/
+theorem encodeState_input_unbound {lowering : Lowering} {env : Bil.Env} {var : Bap.Var} {error : String}
+    (hi : var ∈ Lowering.inputs lowering) (hb : ∃ binding ∈ Lowering.layout lowering, binding.1 = var) (hl : Bil.lookup env var = .error error) :
+    ∃ reason, encodeState lowering env = .error reason := by
+  cases he : encodeState lowering env with
+  | error reason => exact ⟨reason, rfl⟩
+  | ok slots =>
+    obtain ⟨binding, hb, rfl⟩ := hb
+    obtain ⟨value, hv⟩ := encode_bound env (Lowering.inputs lowering) (Lowering.layout lowering) _ slots he binding hb hi
+    rw [hl] at hv
+    cases hv
 
 /-- A range counts what it entered, which is what `lowerGraph_correct` says of its budget slot. -/
 theorem chainedCount_entered {lowering : Lowering} {budget entered budgetSlot : Nat} {slots : Array UInt64}
@@ -5248,7 +5322,7 @@ theorem lowerGraph_single {blocks : List Block} {wrapFaults : Bool} {lowering : 
     (hmem : ∀ var, Lowering.memory lowering = some var → ∀ (width : Nat) (cells : Bap.Memory width),
       Bil.lookup state.env var = .ok (.memory cells) → MemoryInv machine width cells) :
     Lowering.effectSlot lowering = some 0 ∧ ∃ seed rest, blocks = seed :: rest ∧ ∀ result, Bil.execProgram fuel state seed.program = .ok result →
-      ExhaustsAt stops (Lowering.ops lowering) (Lowering.ops lowering, machine) 0 ∨
+      (loopLimit + 1 ≤ fuel ∧ ExhaustsAt stops (Lowering.ops lowering) (Lowering.ops lowering, machine) 0) ∨
       ∃ m, EndsAt stops (Lowering.ops lowering) (Lowering.ops lowering, machine) (nextPc seed result.2) m ∧
         (m.slots 0 = 0 ∨ m.slots 0 = 1) ∧
         (∀ out : Array UInt64, (∀ index, index < Lowering.nextSlot lowering → (out.getD index 0).toBitVec = m.slots index) →
@@ -5338,9 +5412,9 @@ theorem lowerGraph_single {blocks : List Block} {wrapFaults : Bool} {lowering : 
   refine ⟨by rw [feffect, g.effect]; exact hieff, seed, rest, rfl, fun result hexec => ?_⟩
   rw [hops]
   rcases seg.1 fuel state result _ hag1 hz1 hexec with hx | ⟨m, hend, hagF, _, heffF⟩ | ⟨_, _, _, _, hedge, _⟩
-  · obtain ⟨target, r, mx, hr, h2⟩ := hx.prepend hstart
+  · obtain ⟨hcap, target, r, mx, hr, h2⟩ := And.intro hx.1 (hx.2.prepend hstart)
     obtain ⟨hin, m', hrun, hr2⟩ := hr.withFlags hfl hfd chk.slots hin0 machine hrel0
-    refine Or.inl ⟨target, flagOps flags r, m', hrun, ?_⟩
+    refine Or.inl ⟨hcap, target, flagOps flags r, m', hrun, ?_⟩
     rw [hr2.slots 0 hN]
     exact h2
   · obtain ⟨m', hend', hrel, horigin, hmoved⟩ := (hend.prepend hstart).withFlags hfl hfd chk.slots hrel0 hm0

@@ -293,6 +293,30 @@ def run : IO Unit := do
   assertEqual "conditional branch visits both successors" [0, 2, 4] (conditional.instructions.map Insn.address)
   let call ← Recursive.scan (← Target.X86.disassembler 0) (bytes [0xe8, 0, 0, 0, 0, 0xc3]) 0
   assertEqual "call continues to return block" [0, 5] (call.instructions.map Insn.address)
+  let called ← Recursive.scan (← Target.X86.disassembler 0) (bytes [0xe8, 0x01, 0, 0, 0, 0xc3, 0xc3]) 0
+  assertEqual "a scan follows a direct call" [0, 5, 6] (called.instructions.map Insn.address |>.mergeSort)
+  assertEqual "a call is no edge of the flow" [(0, 5)] called.edges
+  let rooted ← Recursive.scanRoots (← Target.X86.disassembler 0) (bytes [0xc3, 0x90, 0xc3]) 3 0 [0, 1]
+  assertEqual "a scan goes from all its roots" [0, 1, 2] (rooted.instructions.map Insn.address)
+  let single ← Recursive.scan (← Target.X86.disassembler 0) (bytes [0xc3, 0x90, 0xc3]) 0
+  assertEqual "a scan from one root finds what it reaches" [0] (single.instructions.map Insn.address)
+  -- `jmp` from one region to another, and from there to neither
+  let first : Image.MemRegion := { addr := 0x1000, data := bytes [0xe9, 0xfb, 0x0f, 0, 0], executable := true }
+  let second : Image.MemRegion := { addr := 0x2000, data := bytes [0xe9, 0xfb, 0x2f, 0, 0], executable := true }
+  let both := Disassembler.ofRegions (← Target.X86.disassembler 0)
+    [(first, ← Target.X86.disassembler 0x1000), (second, ← Target.X86.disassembler 0x2000)]
+  let across ← Recursive.scanRoots both ByteArray.empty 10 0x1000 [0x1000]
+  assertEqual "a scan crosses regions" [0x1000, 0x2000] (across.instructions.map Insn.address)
+  assertEqual "an address of no region is an error" ["20480 is not in code"] (across.errors)
+  let x86 ← Target.X86.disassembler 0
+  -- 0x06 doesn't decode in 64-bit mode; the sweep goes on at the next multiple of 4
+  let swept ← Recursive.scanRegions (Disassembler.ofRegions x86 [({ addr := 0, data := bytes [0xc3, 0x06, 0x06, 0x06, 0x90, 0xc3] }, x86)])
+    6 0 [0] 4 [(0, 6)]
+  assertEqual "a sweep finds what the scan doesn't and steps over what doesn't decode" [0, 4, 5] (swept.instructions.map Insn.address)
+  assertEqual "a sweep has no errors of its own" [] swept.errors
+  let plain ← Recursive.scanRegions (Disassembler.ofRegions x86 [({ addr := 0, data := bytes [0xc3, 0x06, 0x06, 0x06, 0x90, 0xc3] }, x86)])
+    6 0 [0] 4 []
+  assertEqual "without ranges there is no sweep" [0] (plain.instructions.map Insn.address)
   let host ← Image.Elf.load "/bin/echo"
   match host.memory.entries.find? fun entry => entry.1.contains host.entryPoint with
   | none => throw <| IO.userError "host entry is unmapped"

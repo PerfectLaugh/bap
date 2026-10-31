@@ -90,6 +90,33 @@ def run : IO Unit := do
   | .error error => throw <| IO.userError s!"wrong cycle error: {repr error}"
   | .ok _ => throw <| IO.userError "cyclic promise unexpectedly normalized"
   assertEqual "objects enumerated from facts" [object] (objects state)
+  -- Opinions are the value of a slot, and tell the observers of it, as upstream.
+  let voted : Object := ⟨"program", "voted", 2⟩
+  let named : Slot .string := stringSlot "named"
+  assertEqual "an object with only an opinion is an object" [object, voted]
+    (objects (suggest ⟨"agent", 1⟩ named voted "name" state))
+  let sentinel : Environment := { observers := [observe named fun _ _ => .error (.failed "told")] }
+  (match suggestWith sentinel ⟨"agent", 1⟩ named voted "name" state with
+    | .error (.failed "told") => IO.println "ok: a new vote tells the observers of its slot"
+    | _ => throw <| IO.userError "a new vote did not tell the observers of its slot")
+  let votedState := suggest ⟨"agent", 1⟩ named voted "name" state
+  (match suggestWith sentinel ⟨"agent", 1⟩ named voted "name" votedState with
+    | .ok again => assertEqual "a repeated vote tells no one" votedState.version again.version
+    | .error _ => throw <| IO.userError "a repeated vote told the observers")
+  -- A saved slot that nothing here knows is skipped, and said to be.
+  let known : List AnySlot := [⟨.nat, address⟩]
+  let both : List AnySlot := [⟨.nat, address⟩, ⟨.nat, answer⟩]
+  let saved : State := match provide answer object 7 state with | .ok next => next | .error _ => state
+  match serialize both saved with
+  | .error error => throw <| IO.userError error
+  | .ok text =>
+    match deserialize known text, Sexp.parse text with
+    | .ok loaded, .ok parsed =>
+      assertEqual "what is registered is read" (some 20) (match lookupFact address object loaded.facts with | .ok value => value | .error _ => none)
+      assertEqual "what is not registered is skipped" none (match lookupFact answer object loaded.facts with | .ok value => value | .error _ => some 0)
+      assertEqual "and said to be" ["answer"] (skippedSlots known parsed)
+      assertEqual "nothing is skipped of what is known" ([] : List String) (skippedSlots both parsed)
+    | _, _ => throw <| IO.userError "a state with a slot that is not registered does not load"
   let unrelated := natSlot "unrelated"
   let boom : Promise := promise unrelated fun _ _ => .error (.failed "boom")
   match collect { promises := [boom, computedAnswer] } answer object state with

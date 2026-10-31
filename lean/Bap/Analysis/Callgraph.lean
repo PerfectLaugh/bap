@@ -25,6 +25,13 @@ def create (index : Xrefs.Index) : Callgraph := {
 def reachable (callgraph : Callgraph) (roots : List Nat) : List Nat :=
   Graph.reachableFrom callgraph.graph roots
 
+private def reachableFast (callgraph : Callgraph) (roots : List Nat) : List Nat :=
+  Graph.Fast.reachableFrom callgraph.graph roots
+
+@[csimp] private theorem reachable_eq_fast : @reachable = @reachableFast := by
+  funext callgraph roots
+  exact (Graph.Fast.reachableFrom_eq callgraph.graph roots).symm
+
 def stronglyConnected (callgraph : Callgraph) : List (List Nat) :=
   let components := callgraph.graph.nodes.foldl (init := (callgraph.graph.nodes, [])) fun current node =>
     if !current.1.contains node then current
@@ -173,6 +180,61 @@ def recursiveFunctions (callgraph : Callgraph) : List Nat :=
   callgraph.graph.nodes.filter fun node =>
     components.any (fun component => component.length > 1 && component.contains node) ||
       callgraph.graph.edges.contains (node, node)
+
+/-- `recursiveFunctions`, with what it asks about each node in sets. -/
+private def recursiveFunctionsFast (callgraph : Callgraph) : List Nat :=
+  let components := stronglyConnected callgraph
+  let cyclic : Std.HashSet Nat := components.foldl (init := {}) fun set component =>
+    if component.length > 1 then set.insertMany component else set
+  let loops : Std.HashSet Nat := callgraph.graph.edges.foldl (init := {}) fun set edge =>
+    if edge.1 == edge.2 then set.insert edge.1 else set
+  callgraph.graph.nodes.filter fun node => cyclic.contains node || loops.contains node
+
+@[csimp] private theorem recursiveFunctions_eq_fast : @recursiveFunctions = @recursiveFunctionsFast := by
+  funext callgraph
+  simp only [recursiveFunctions, recursiveFunctionsFast]
+  apply List.filter_congr
+  intro node _
+  have hc : ∀ (l : List (List Nat)) (init : Std.HashSet Nat),
+      (l.foldl (init := init) fun set component =>
+        if component.length > 1 then set.insertMany component else set).contains node =
+      (init.contains node || l.any fun component => component.length > 1 && component.contains node) := by
+    intro l
+    induction l with
+    | nil => simp
+    | cons head tail ih =>
+      intro init
+      simp only [List.foldl_cons, ih, List.any_cons]
+      by_cases hlen : head.length > 1
+      · simp only [hlen, ↓reduceIte, Std.HashSet.contains_insertMany_list, decide_true, Bool.true_and,
+          Bool.or_assoc]
+      · simp [hlen]
+  have hl : ∀ (l : List (Nat × Nat)) (init : Std.HashSet Nat),
+      (l.foldl (init := init) fun set edge => if edge.1 == edge.2 then set.insert edge.1 else set).contains node =
+      (init.contains node || l.contains (node, node)) := by
+    intro l
+    induction l with
+    | nil => simp
+    | cons head tail ih =>
+      intro init
+      obtain ⟨a, b⟩ := head
+      simp only [List.foldl_cons, ih, List.contains_cons]
+      by_cases hab : a = b
+      · subst hab
+        simp only [beq_self_eq_true, ↓reduceIte, Std.HashSet.contains_insert]
+        by_cases hn : node = a
+        · subst hn
+          simp
+        · have : (a == node) = false := by simpa using fun h => hn h.symm
+          have h2 : ((node, node) == (a, a)) = false := by simpa using fun h => hn h
+          simp [this, h2]
+      · have hne : (a == b) = false := by simpa using hab
+        have h2 : ((node, node) == (a, b)) = false := by
+          simp only [beq_eq_false_iff_ne, ne_eq, Prod.mk.injEq]
+          exact fun h => hab (h.1.symm.trans h.2)
+        simp [hne, h2]
+  rw [hc, hl]
+  simp
 
 def render (callgraph : Callgraph) : String :=
   let lines := callgraph.graph.edges.map fun edge =>

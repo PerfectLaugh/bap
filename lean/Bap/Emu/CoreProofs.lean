@@ -2136,6 +2136,8 @@ namespace Bap.Emu
 
 section Precise
 
+variable {τ : Type}
+
 variable {ε σ : Type}
 
 /-- Single steps from a state go `count` steps and then fail with `error`, in the state `final`. -/
@@ -2180,30 +2182,31 @@ theorem FaultsIn.unique {single : EStateM ε σ Bool} {k₁ k₂ : Nat} {state :
       obtain ⟨h1, h2, h3⟩ := ih hr
       exact ⟨by omega, h2, h3⟩
 
-/-- What a step that may run a range does, as against single steps: `lowerGraph_correct` for the blocks it ran, `stepExecute_error` for its
-failure. `allow` only tells it how far it may go, and what it did not run, single steps run next. A step that ran `chained + 1`
+/-- What a step that may run a range does, as against single steps: `lowerGraph_correct` for the blocks it ran, a rollback for its
+failure. `rangeLaws_real` says that the step that runs meets these. The step has a state of more than what single steps see, which `view` takes away: where it may go, and what it was told about the last run. `allow`
+only tells it how far it may go, leaving a state that is `Ready`, and what it did not run, single steps run next. A step that ran `chained + 1`
 instructions is that many single steps, a step that reports the end of the thread has no fault to come, and a step that fails either did not chain, and
 is the single step, or has rolled back to where single steps see what they would have seen. -/
-structure RangeLaws (step single again : EStateM ε σ Bool) (allow : Nat → EStateM ε σ Unit) (chained : EStateM ε σ Nat) : Prop where
-  allow_ok : ∀ budget state, ∃ next, allow budget state = .ok () next ∧
-    ∀ count error final, FaultsIn single count state error final → FaultsIn single count next error final
+structure RangeLaws (view : σ → τ) (Ready : σ → Prop) (single : EStateM ε τ Bool) (step again : EStateM ε σ Bool) (allow : Nat → EStateM ε σ Unit)
+    (chained : EStateM ε σ Nat) : Prop where
+  allow_ok : ∀ budget state, ∃ next, allow budget state = .ok () next ∧ view next = view state ∧ Ready next
   chained_ok : ∀ state, ∃ count, chained state = .ok count state
-  ran : ∀ state next count, step state = .ok true next → chained next = .ok count next →
-    ∀ k error final, FaultsIn single k state error final → count + 1 ≤ k ∧ FaultsIn single (k - (count + 1)) next error final
-  halted : ∀ state next k error final, step state = .ok false next → ¬ FaultsIn single k state error final
-  failed : ∀ state e r k error final, step state = .error e r → FaultsIn single k state error final →
-    (∃ r', again r = .ok true r' ∧ ∃ k', k' ≤ k ∧ FaultsIn single k' r' error final) ∨ (∃ r', again r = .ok false r' ∧ e = error ∧ r' = final)
+  ran : ∀ state next count, Ready state → step state = .ok true next → chained next = .ok count next →
+    ∀ k error final, FaultsIn single k (view state) error final → count + 1 ≤ k ∧ FaultsIn single (k - (count + 1)) (view next) error final
+  halted : ∀ state next k error final, Ready state → step state = .ok false next → ¬ FaultsIn single k (view state) error final
+  failed : ∀ state e r k error final, Ready state → step state = .error e r → FaultsIn single k (view state) error final →
+    (∃ r', again r = .ok true r' ∧ ∃ k', k' ≤ k ∧ FaultsIn single k' (view r') error final) ∨ (∃ r', again r = .ok false r' ∧ e = error ∧ view r' = final)
 
-private theorem chained_faults {step single again : EStateM ε σ Bool} {allow : Nat → EStateM ε σ Unit} {chained : EStateM ε σ Nat}
-    (laws : RangeLaws step single again allow chained) {error : ε} {final : σ} (rounds remaining total k : Nat) (state : σ)
-    (hk : FaultsIn single k state error final) (hr : k < rounds) (hrem : k < remaining) :
+private theorem chained_faults {view : σ → τ} {Ready : σ → Prop} {single : EStateM ε τ Bool} {step again : EStateM ε σ Bool} {allow : Nat → EStateM ε σ Unit} {chained : EStateM ε σ Nat}
+    (laws : RangeLaws view Ready single step again allow chained) {error : ε} {final : τ} (rounds remaining total k : Nat) (state : σ)
+    (hk : FaultsIn single k (view state) error final) (hr : k < rounds) (hrem : k < remaining) :
     ∃ e r, runChainedM step allow chained rounds remaining total state = .error e r ∧
-      ((∃ r', again r = .ok true r' ∧ ∃ k', k' ≤ k ∧ FaultsIn single k' r' error final) ∨ (∃ r', again r = .ok false r' ∧ e = error ∧ r' = final)) := by
+      ((∃ r', again r = .ok true r' ∧ ∃ k', k' ≤ k ∧ FaultsIn single k' (view r') error final) ∨ (∃ r', again r = .ok false r' ∧ e = error ∧ view r' = final)) := by
   induction rounds generalizing remaining total k state with
   | zero => omega
   | succ rounds ih =>
-    obtain ⟨s1, ha, hk1⟩ := laws.allow_ok (remaining - 1) state
-    have hk1' := hk1 _ _ _ hk
+    obtain ⟨s1, ha, hv1, hready⟩ := laws.allow_ok (remaining - 1) state
+    have hk1' : FaultsIn single k (view s1) error final := by rw [hv1]; exact hk
     have hrun : runChainedM step allow chained (rounds + 1) remaining total state =
         match step s1 with
         | .ok true s2 => (do
@@ -2221,13 +2224,13 @@ private theorem chained_faults {step single again : EStateM ε σ Bool} {allow :
       | ok go s2 => cases go <;> rfl
     rw [hrun]
     cases hs : step s1 with
-    | error e r => exact ⟨e, r, rfl, laws.failed s1 e r k error final hs hk1'⟩
+    | error e r => exact ⟨e, r, rfl, laws.failed s1 e r k error final hready hs hk1'⟩
     | ok go s2 =>
       cases go with
-      | false => exact absurd hk1' (laws.halted s1 s2 k error final hs)
+      | false => exact absurd hk1' (laws.halted s1 s2 k error final hready hs)
       | true =>
         obtain ⟨c, hc⟩ := laws.chained_ok s2
-        obtain ⟨hle, hrest⟩ := laws.ran s1 s2 c hs hc k error final hk1'
+        obtain ⟨hle, hrest⟩ := laws.ran s1 s2 c hready hs hc k error final hk1'
         have hmin : min c (remaining - 1) = c := by omega
         obtain ⟨e, r, h1, h2⟩ := ih (remaining - 1 - c) (total + 1 + c) (k - (c + 1)) s2 hrest (by omega) (by omega)
         refine ⟨e, r, ?_, ?_⟩
@@ -2244,13 +2247,14 @@ private theorem tryCatch_error {α : Type} {x : EStateM ε σ α} {handle : ε �
   simp only [EStateM.tryCatch, hx]
   rfl
 
-/-- With nothing that chains, a step is a single step, and the laws hold. They are what the code that runs has to meet for ranges. -/
+/-- With nothing that chains, a step is a single step, and the laws hold. -/
 theorem rangeLaws_single (single : EStateM ε σ Bool) :
-    RangeLaws single single (pure false) (fun _ => pure ()) (pure 0) where
-  allow_ok := fun _ state => ⟨state, rfl, fun _ _ _ h => h⟩
+    RangeLaws id (fun _ => True) single single (pure false) (fun _ => pure ()) (pure 0) where
+  allow_ok := fun _ state => ⟨state, rfl, rfl, trivial⟩
   chained_ok := fun state => ⟨0, rfl⟩
   ran := by
-    intro state next count hs hc k error final hk
+    intro state next count _ hs hc k error final hk
+    simp only [id_eq] at hk ⊢
     injection hc with hc _
     subst hc
     cases hk with
@@ -2261,12 +2265,14 @@ theorem rangeLaws_single (single : EStateM ε σ Bool) :
       subst hn
       exact ⟨by omega, hr⟩
   halted := by
-    intro state next k error final hs hk
+    intro state next k error final _ hs hk
+    simp only [id_eq] at hk
     cases hk with
     | now he => rw [hs] at he; cases he
     | later he _ => rw [hs] at he; cases he
   failed := by
-    intro state e r k error final hs hk
+    intro state e r k error final _ hs hk
+    simp only [id_eq] at hk
     refine Or.inr ⟨r, rfl, ?_⟩
     cases hk with
     | now he =>
@@ -2275,22 +2281,80 @@ theorem rangeLaws_single (single : EStateM ε σ Bool) :
       exact ⟨h1, h2⟩
     | later he _ => rw [hs] at he; cases he
 
+/-- Single steps on the state of the step, which are single steps on what they see, whatever else that state has. -/
+def Projects (view : σ → τ) (lifted : EStateM ε σ Bool) (single : EStateM ε τ Bool) : Prop :=
+  ∀ state, match lifted state with
+    | .ok value next => single (view state) = .ok value (view next)
+    | .error error next => single (view state) = .error error (view next)
+
+private theorem runM_faults_view {view : σ → τ} {lifted : EStateM ε σ Bool} {single : EStateM ε τ Bool} (hp : Projects view lifted single)
+    {count : Nat} {state : σ} {error : ε} {final : τ} (h : FaultsIn single count (view state) error final) (fuel total : Nat) (hf : count < fuel) :
+    ∃ last, runM lifted fuel total state = .error error last ∧ view last = final := by
+  induction count generalizing state fuel total with
+  | zero =>
+    obtain ⟨fuel, rfl⟩ : ∃ n, fuel = n + 1 := ⟨fuel - 1, by omega⟩
+    cases h with
+    | now he =>
+      have hs := hp state
+      cases hl : lifted state with
+      | ok value next =>
+        rw [hl] at hs
+        simp only at hs
+        rw [hs] at he
+        cases he
+      | error error' next =>
+        rw [hl] at hs
+        simp only at hs
+        rw [hs] at he
+        injection he with h1 h2
+        subst h1
+        refine ⟨next, ?_, h2⟩
+        show EStateM.bind lifted _ state = _
+        simp only [EStateM.bind, hl]
+  | succ count ih =>
+    obtain ⟨fuel, rfl⟩ : ∃ n, fuel = n + 1 := ⟨fuel - 1, by omega⟩
+    cases h with
+    | later he hr =>
+      have hs := hp state
+      cases hl : lifted state with
+      | error error' next =>
+        rw [hl] at hs
+        simp only at hs
+        rw [hs] at he
+        cases he
+      | ok value next =>
+        rw [hl] at hs
+        simp only at hs
+        rw [hs] at he
+        injection he with h1 h2
+        subst h1
+        rw [← h2] at hr
+        obtain ⟨last, h3, h4⟩ := ih hr fuel (total + 1) (by omega)
+        refine ⟨last, ?_, h4⟩
+        show EStateM.bind lifted _ state = _
+        simp only [EStateM.bind, hl]
+        exact h3
+
 /-- **A fault in a range is a fault in single steps.** When single steps from a state fault within the fuel, with whatever error and in whatever state, a
 run that chains them, for the same fuel, fails with that error, in that state: registers, memory and pc as single steps leave them, which is
 what `Bap.Emu.run` does. -/
-theorem runPreciseM_fault {step single again : EStateM ε σ Bool} {allow : Nat → EStateM ε σ Unit} {chained : EStateM ε σ Nat}
-    (laws : RangeLaws step single again allow chained) {error : ε} {final : σ} {k fuel : Nat} {state : σ}
-    (hk : FaultsIn single k state error final) (hf : k < fuel) :
-    runPreciseM (runChainedM step allow chained fuel fuel 0) single again (fuel + 1) state = .error error final := by
+theorem runPreciseM_fault {view : σ → τ} {Ready : σ → Prop} {single : EStateM ε τ Bool} {lifted step again : EStateM ε σ Bool} {allow : Nat → EStateM ε σ Unit} {chained : EStateM ε σ Nat}
+    (laws : RangeLaws view Ready single step again allow chained) (hp : Projects view lifted single) {error : ε} {final : τ} {k fuel : Nat} {state : σ}
+    (hk : FaultsIn single k (view state) error final) (hf : k < fuel) :
+    ∃ last, runPreciseM (runChainedM step allow chained fuel fuel 0) lifted again (fuel + 1) state = .error error last ∧ view last = final := by
   obtain ⟨e, r, h1, h2⟩ := chained_faults laws fuel fuel 0 k state hk hf hf
   unfold runPreciseM
   rw [tryCatch_error h1]
-  show EStateM.bind again _ r = _
-  rcases h2 with ⟨r', h3, k', hk', h4⟩ | ⟨r', h3, rfl, rfl⟩
-  · simp only [EStateM.bind, h3]
-    show EStateM.bind (runM single (fuel + 1) 0) _ r' = _
-    simp only [EStateM.bind, runM_faults h4 (fuel + 1) 0 (by omega)]
-  · simp only [EStateM.bind, h3]
+  rcases h2 with ⟨r', h3, k', hk', h4⟩ | ⟨r', h3, rfl, h4⟩
+  · obtain ⟨last, h5, h6⟩ := runM_faults_view hp h4 (fuel + 1) 0 (by omega)
+    refine ⟨last, ?_, h6⟩
+    show EStateM.bind again _ r = _
+    simp only [EStateM.bind, h3]
+    show EStateM.bind (runM lifted (fuel + 1) 0) _ r' = _
+    simp only [EStateM.bind, h5]
+  · refine ⟨r', ?_, h4⟩
+    show EStateM.bind again _ r = _
+    simp only [EStateM.bind, h3]
     rfl
 
 end Precise
@@ -2333,14 +2397,14 @@ theorem accessRestarts_chained {budget : Nat} (h : budget ≠ 0) : accessRestart
 
 section Restart
 
-variable {ε σ : Type}
+variable {ε σ τ : Type}
 
 /-- What `restart` must do: tell whether the step is to run again, change nothing that single steps see, and leave a state for
 which the step, when told to run again, is as good as from where it started. `stepExecute_error` gives that for a failed step of the emulator. -/
-structure RestartLaws (step single : EStateM ε σ Bool) (restart : EStateM ε σ Bool) : Prop where
+structure RestartLaws (view : σ → τ) (Ready : σ → Prop) (step : EStateM ε σ Bool) (single : EStateM ε τ Bool) (restart : EStateM ε σ Bool) : Prop where
   restart_ok : ∀ state, ∃ again next, restart state = .ok again next ∧ (again = false → next = state)
-  taken_back : ∀ state error failed next, step state = .error error failed → restart failed = .ok true next →
-    ∀ count faultError final, FaultsIn single count state faultError final → FaultsIn single count next faultError final
+  taken_back : ∀ state error failed next, Ready state → step state = .error error failed → restart failed = .ok true next →
+    Ready next ∧ ∀ count faultError final, FaultsIn single count (view state) faultError final → FaultsIn single count (view next) faultError final
 
 private theorem restartM_run (step restart : EStateM ε σ Bool) (state : σ) :
     (restartM step restart : EStateM ε σ Bool) state =
@@ -2382,20 +2446,20 @@ theorem restartM_again {step restart : EStateM ε σ Bool} {state failed next : 
 /-- **Taking a step back keeps all that ranges promise.** If a step that may run a range meets `RangeLaws`, so does the step that runs
 again from a hook of an access, so that `runPreciseM_fault` holds of it, and for the same reason: all that ran before the
 hook was rolled back, and nothing saw it. -/
-theorem rangeLaws_restartM {step single again restart : EStateM ε σ Bool} {allow : Nat → EStateM ε σ Unit} {chained : EStateM ε σ Nat}
-    (laws : RangeLaws step single again allow chained) (hr : RestartLaws step single restart) :
-    RangeLaws (restartM step restart) single again allow chained where
+theorem rangeLaws_restartM {view : σ → τ} {Ready : σ → Prop} {step again restart : EStateM ε σ Bool} {single : EStateM ε τ Bool} {allow : Nat → EStateM ε σ Unit} {chained : EStateM ε σ Nat}
+    (laws : RangeLaws view Ready single step again allow chained) (hr : RestartLaws view Ready step single restart) :
+    RangeLaws view Ready single (restartM step restart) again allow chained where
   allow_ok := laws.allow_ok
   chained_ok := laws.chained_ok
   ran := by
-    intro state next count hs hc k error final hk
+    intro state next count hready hs hc k error final hk
     cases h1 : step state with
     | ok value mid =>
       rw [restartM_ok h1] at hs
       injection hs with hv hm
       subst hv
       subst hm
-      exact laws.ran state mid count h1 hc k error final hk
+      exact laws.ran state mid count hready h1 hc k error final hk
     | error e failed =>
       obtain ⟨go, r, h2, _⟩ := hr.restart_ok failed
       cases go with
@@ -2404,16 +2468,17 @@ theorem rangeLaws_restartM {step single again restart : EStateM ε σ Bool} {all
         cases hs
       | true =>
         rw [restartM_again h1 h2] at hs
-        exact laws.ran r next count hs hc k error final (hr.taken_back state e failed r h1 h2 k error final hk)
+        obtain ⟨hready', hback⟩ := hr.taken_back state e failed r hready h1 h2
+        exact laws.ran r next count hready' hs hc k error final (hback k error final hk)
   halted := by
-    intro state next k error final hs hk
+    intro state next k error final hready hs hk
     cases h1 : step state with
     | ok value mid =>
       rw [restartM_ok h1] at hs
       injection hs with hv hm
       subst hv
       subst hm
-      exact laws.halted state mid k error final h1 hk
+      exact laws.halted state mid k error final hready h1 hk
     | error e failed =>
       obtain ⟨go, r, h2, _⟩ := hr.restart_ok failed
       cases go with
@@ -2422,9 +2487,10 @@ theorem rangeLaws_restartM {step single again restart : EStateM ε σ Bool} {all
         cases hs
       | true =>
         rw [restartM_again h1 h2] at hs
-        exact laws.halted r next k error final hs (hr.taken_back state e failed r h1 h2 k error final hk)
+        obtain ⟨hready', hback⟩ := hr.taken_back state e failed r hready h1 h2
+        exact laws.halted r next k error final hready' hs (hback k error final hk)
   failed := by
-    intro state e r k error final hs hk
+    intro state e r k error final hready hs hk
     cases h1 : step state with
     | ok value mid =>
       rw [restartM_ok h1] at hs
@@ -2438,11 +2504,816 @@ theorem rangeLaws_restartM {step single again restart : EStateM ε σ Bool} {all
         subst he
         subst hrr
         rw [hkeep rfl]
-        exact laws.failed state e1 failed k error final h1 hk
+        exact laws.failed state e1 failed k error final hready h1 hk
       | true =>
         rw [restartM_again h1 h2] at hs
-        exact laws.failed r1 e r k error final hs (hr.taken_back state e1 failed r1 h1 h2 k error final hk)
+        obtain ⟨hready', hback⟩ := hr.taken_back state e1 failed r1 hready h1 h2
+        exact laws.failed r1 e r k error final hready' hs (hback k error final hk)
 
 end Restart
+
+/-! ### The step that runs
+
+`executeRangeM`, `rangeAllowM`, `rangeRestartM`, `rangeAgainM` and `stepOpsOf` are what `Bap.Emu` runs, on its references. Here they are on a state,
+and `rangeLaws_real` says that they meet `RangeLaws` and `RestartLaws`, on the terms of `NativeRange`. -/
+
+namespace Model
+
+/-- The references of a step that `Core` does not have, which no rollback touches. -/
+structure RangeMachine where
+  core : Core
+  budget : Nat := 0
+  lastBudget : Nat := 0
+  chained : Nat := 0
+  restarting : Bool := false
+  watched : List Nat := []
+
+abbrev R := EStateM String RangeMachine
+
+/-- What a step of the emulator calls. `delay` is `.none`: `rangeLimitOf` has ranges only without delay slots. -/
+structure RangeWorld where
+  hook : Nat → CoreM Unit
+  dispatch : String → CoreM Bool
+  /-- A run of a block at an address that may chain as many after it as a budget says, its next pc, its effect, and how many it chained. -/
+  run : Nat → Nat → CoreM (Nat × Bil.Effect × Nat)
+  /-- Whether a run that failed did so at an access that a hook watches. -/
+  restarts : Nat → Nat → Core → Bool
+  accessHooks : Bool
+  deferred : Bool
+
+namespace RangeWorld
+
+variable (w : RangeWorld)
+
+def liftCore {α : Type} (action : CoreM α) : R α := fun s =>
+  match action s.core with
+  | .ok value core => .ok value { s with core }
+  | .error error core => .error error { s with core }
+
+def get' {α : Type} (f : RangeMachine → α) : R α := fun s => .ok (f s) s
+def modify' (f : RangeMachine → RangeMachine) : R Unit := fun s => .ok () (f s)
+
+def control : ControlCells R where
+  stopped := get' (·.core.stopped)
+  setStopped := fun stopped => modify' fun s => { s with core := { s.core with stopped } }
+  pc := get' (·.core.pc)
+  skip := get' (·.core.skip)
+  setSkip := fun skip => modify' fun s => { s with core := { s.core with skip } }
+  pending := get' (·.core.pending)
+  setControl := fun pc pending => modify' fun s => { s with core := { s.core with pc, pending } }
+
+def range : RangeCells R where
+  budget := get' (·.budget)
+  setBudget := fun budget => modify' fun s => { s with budget }
+  lastBudget := get' (·.lastBudget)
+  setLastBudget := fun lastBudget => modify' fun s => { s with lastBudget }
+  chained := get' (·.chained)
+  setChained := fun chained => modify' fun s => { s with chained }
+  watched := fun address => get' (·.watched.contains address)
+  watch := fun address => modify' fun s => { s with watched := address :: s.watched }
+  restarting := get' (·.restarting)
+  setRestarting := fun restarting => modify' fun s => { s with restarting }
+  pc := get' (·.core.pc)
+  pending := get' (·.core.pending)
+  accessHooks := pure w.accessHooks
+  deferred := w.deferred
+
+/-- A run, with what it says on the references of the step. -/
+def runR (address budget : Nat) : R (Nat × Bil.Effect) := fun s =>
+  match w.run address budget s.core with
+  | .ok (next, effect, count) core => .ok (next, effect) { s with core, chained := count }
+  | .error error core => .error error { s with core, restarting := s.restarting || w.restarts address budget core }
+
+def ops : StepOps R Core :=
+  stepOpsOf control (fun address => liftCore (w.hook address)) (get' (·.core)) (fun _ => pure .none)
+    (fun address => modify' fun s => { s with core := { s.core with trace := s.core.trace ++ [address] } })
+    (executeRangeM (range w) (runR w)) (fun name => liftCore (w.dispatch name))
+    (fun before => modify' fun s => { s with core := before }) (fun _ => pure ())
+
+def step : R Bool := stepM (ε := String) (ops w)
+def restart : R Bool := rangeRestartM (range w)
+def again : R Bool := rangeAgainM (range w)
+def allow : Nat → R Unit := rangeAllowM (range w)
+def chainedCount : R Nat := (range w).chained
+/-- A single step: nothing that the last run was told counts, as in `Bap.Emu.step`. -/
+def single : R Bool := (range w).setBudget 0 *> step w
+
+def dispatchOf : Bil.Effect → CoreM Bool
+  | .special name => w.dispatch name
+  | _ => pure false
+
+/-- The instruction at an address, of a budget, on `Core`. -/
+def execC (budget address : Nat) (c : Core) : EStateM.Result String Core Bool :=
+  match w.run address budget { c with trace := c.trace ++ [address] } with
+  | .error error _ => .error error (rollback address c)
+  | .ok (next, effect, _) c₂ =>
+    match w.dispatchOf effect c₂ with
+    | .error error _ => .error error (rollback address c)
+    | .ok handled c₃ =>
+      let out := commit address next effect handled c₃.pc .none c.pending
+      .ok (!out.stop) (finish address c₃ out)
+
+/-- The hooks of the pc, as a step fires them. -/
+def hooks (c : Core) : EStateM.Result String Core Unit :=
+  if (c.skip != some c.pc) = true then w.hook c.pc { c with skip := none } else .ok () { c with skip := none }
+
+/-- A step on `Core`, with a budget for what comes after the hooks. -/
+def stepC (budget : Core → Nat) (c : Core) : EStateM.Result String Core Bool :=
+  if c.stopped = true then .ok false c
+  else
+    match w.hooks c with
+    | .error error c₁ => .error error c₁
+    | .ok _ c₁ =>
+      match afterHook c.pc c₁.pc c₁.stopped with
+      | .halt skip => .ok false { c₁ with skip }
+      | .redirect => .ok true c₁
+      | .proceed => w.execC (budget c₁) c.pc c₁
+
+/-- What single steps see: a step of no budget. -/
+def singleC : EStateM String Core Bool := w.stepC fun _ => 0
+
+/-- The budget of a step from a state. -/
+def budgetOf (s : RangeMachine) (address : Nat) (c : Core) : Nat :=
+  rangeBudgetOf s.budget (accessesWatched (s.watched.contains address) w.deferred w.accessHooks || c.pending.isSome)
+
+/-- `execC`, with what it does to the references. -/
+def execR (s : RangeMachine) (address : Nat) : EStateM.Result String RangeMachine Bool :=
+  let budget := w.budgetOf s address s.core
+  let s₂ := { s with budget := 0, lastBudget := budget }
+  match w.run address budget { s.core with trace := s.core.trace ++ [address] } with
+  | .error error c =>
+    .error error { s₂ with core := rollback address s.core, restarting := s.restarting || w.restarts address budget c }
+  | .ok (next, effect, count) c₂ =>
+    match w.dispatchOf effect c₂ with
+    | .error error _ => .error error { s₂ with core := rollback address s.core, chained := count }
+    | .ok handled c₃ =>
+      let out := commit address next effect handled c₃.pc .none s.core.pending
+      .ok (!out.stop) { s₂ with core := finish address c₃ out, chained := count }
+
+private theorem bind_get {α β : Type} (f : RangeMachine → α) (g : α → R β) (s : RangeMachine) : (get' f >>= g) s = g (f s) s := rfl
+private theorem bind_modify {β : Type} (f : RangeMachine → RangeMachine) (g : Unit → R β) (s : RangeMachine) :
+    (modify' f >>= g) s = g () (f s) := rfl
+private theorem bind_pure' {α β : Type} (x : α) (g : α → R β) (s : RangeMachine) : ((pure x : R α) >>= g) s = g x s := rfl
+private theorem run_try' {α : Type} (x : R α) (h : String → R α) (s : RangeMachine) :
+    (tryCatch x h : R α) s = match x s with
+      | .ok value next => .ok value next
+      | .error error next => h error next := by
+  show EStateM.tryCatch x h s = _
+  simp only [EStateM.tryCatch]
+  cases x s <;> rfl
+private theorem bind_lift {α β : Type} (a : CoreM α) (g : α → R β) (s : RangeMachine) :
+    (liftCore a >>= g) s = match a s.core with
+      | .ok value core => g value { s with core }
+      | .error error core => .error error { s with core } := by
+  cases h : a s.core <;> simp [bind, EStateM.bind, liftCore, h]
+private theorem bind_run {β : Type} (address budget : Nat) (g : Nat × Bil.Effect → R β) (s : RangeMachine) :
+    (w.runR address budget >>= g) s = match w.run address budget s.core with
+      | .ok (next, effect, count) core => g (next, effect) { s with core, chained := count }
+      | .error error core => .error error { s with core, restarting := s.restarting || w.restarts address budget core } := by
+  cases h : w.run address budget s.core with
+  | ok v core => obtain ⟨n, e, c⟩ := v; simp [bind, EStateM.bind, runR, h]
+  | error e core => simp [bind, EStateM.bind, runR, h]
+private theorem ite_apply' {α : Type} (c : Prop) [Decidable c] (a b : R α) (s : RangeMachine) :
+    (if c then a else b) s = if c then a s else b s := by split <;> rfl
+
+private theorem tail_commit (address : Nat) (out : Advance) (s : RangeMachine) :
+    ((do
+      modify' fun s => { s with core := { s.core with pc := out.pc, pending := out.pending } }
+      if out.stop = true then do
+        modify' fun s => { s with core := { s.core with stopped := true } }
+        modify' fun s => { s with core := { s.core with skip := some address } }
+        pure !out.stop
+      else pure !out.stop) : R Bool) s =
+      .ok (!out.stop) { s with core := finish address s.core out } := by
+  cases h : out.stop <;> simp only [bind_modify, h, finish, Bool.false_eq_true, ite_false, ite_true, Bool.false_or, Bool.true_or] <;> rfl
+
+/-- `stepExecute` of the step that runs, as a function of its state. -/
+theorem exec_eq (s : RangeMachine) (address : Nat) :
+    stepExecute (ε := String) (ops w) address s = w.execR s address := by
+  obtain ⟨⟨state, pc, regions, stopped, threads, current, nextThread, pending, skip, trace⟩, budget, last, chained, restarting, watched⟩ := s
+  simp only [stepExecute, ops, stepOpsOf, control, range, executeRangeM, execR, budgetOf, bind_assoc, pure_bind, bind_get, bind_modify, run_try']
+  cases pending with
+  | none =>
+    simp only [bind_get, bind_modify, bind_run]
+    generalize w.run address (rangeBudgetOf budget (accessesWatched (watched.contains address) w.deferred w.accessHooks || Option.isSome none))
+      { state := state, pc := pc, regions := regions, stopped := stopped, threads := threads, currentThread := current, nextThread := nextThread,
+        pending := none, skip := skip, trace := trace ++ [address] } = result
+    cases result with
+    | error e c' => rfl
+    | ok v c₂ =>
+      obtain ⟨next, effect, count⟩ := v
+      cases effect with
+      | normal =>
+        simp only [dispatchOf, bind_get, tail_commit]
+        rfl
+      | jump target =>
+        simp only [dispatchOf, bind_get, tail_commit]
+        rfl
+      | cpuExn number =>
+        simp only [dispatchOf, bind_get, tail_commit]
+        rfl
+      | special name =>
+        simp only [dispatchOf, bind_lift]
+        cases hd : w.dispatch name c₂ with
+        | error e c' => rfl
+        | ok handled c₃ =>
+          simp only [bind_get, tail_commit]
+  | some branch =>
+    simp only [bind_get, bind_modify, bind_run]
+    generalize w.run address (rangeBudgetOf budget (accessesWatched (watched.contains address) w.deferred w.accessHooks || Option.isSome (some branch)))
+      { state := state, pc := pc, regions := regions, stopped := stopped, threads := threads, currentThread := current, nextThread := nextThread,
+        pending := (some branch), skip := skip, trace := trace ++ [address] } = result
+    cases result with
+    | error e c' => rfl
+    | ok v c₂ =>
+      obtain ⟨next, effect, count⟩ := v
+      cases effect with
+      | normal =>
+        simp only [dispatchOf, bind_get, tail_commit]
+        rfl
+      | jump target =>
+        simp only [dispatchOf, bind_get, tail_commit]
+        rfl
+      | cpuExn number =>
+        simp only [dispatchOf, bind_get, tail_commit]
+        rfl
+      | special name =>
+        simp only [dispatchOf, bind_lift]
+        cases hd : w.dispatch name c₂ with
+        | error e c' => rfl
+        | ok handled c₃ =>
+          simp only [bind_get, tail_commit]
+
+/-- A step of what runs, as a function of its state. -/
+theorem step_eq (s : RangeMachine) :
+    w.step s =
+      if s.core.stopped = true then .ok false s
+      else
+        match w.hooks s.core with
+        | .error error c₁ => .error error { s with core := c₁ }
+        | .ok _ c₁ =>
+          match afterHook s.core.pc c₁.pc c₁.stopped with
+          | .halt skip => .ok false { s with core := { c₁ with skip } }
+          | .redirect => .ok true { s with core := c₁ }
+          | .proceed => w.execR { s with core := c₁ } s.core.pc := by
+  obtain ⟨c, budget, last, chained, restarting, watched⟩ := s
+  simp only [step, stepM, ops, stepOpsOf, control, bind_get, ite_apply', hooks]
+  split
+  · rfl
+  · simp only [bind_modify, ite_apply']
+    split
+    · simp only [bind_lift, bind_get]
+      cases hh : w.hook c.pc { c with skip := none } with
+      | error e c₁ => rfl
+      | ok v c₁ =>
+        simp only
+        cases afterHook c.pc c₁.pc c₁.stopped with
+        | halt skip => rfl
+        | redirect => rfl
+        | proceed => exact exec_eq w _ _
+    · simp only [bind_get]
+      cases afterHook c.pc c.pc c.stopped with
+      | halt skip => rfl
+      | redirect => rfl
+      | proceed => exact exec_eq w _ _
+
+/-- A block that ends in a fall through or a jump, as all do but the last of what `Bap.Primus.Lifted` runs by itself. -/
+def Continues : Bil.Effect → Prop
+  | .normal | .jump _ => True
+  | _ => False
+
+/-- Where a block that continues goes. -/
+def nextOf (next : Nat) : Bil.Effect → Nat
+  | .jump target => target.toNat
+  | _ => next
+
+/-- **What the theorems about the step assume of a run**, and nothing else.
+
+`chains` is `lowerGraph_correct` and `rangeSiteStops` on the terms of `Bap.Jit`: a run that chained `k + 1` blocks after its first did what its first block does
+at no budget, which went on to a block with no hooks, whose run chained `k`, and it ended in a fall through or a jump. `unchained` says that a run that chained
+none is the run of no budget, and `single_count` that one of no budget chains none. `no_restart` is `accessRestarts_single`: an access only takes back what may
+chain. `hook_skip`: hooks do not write the skip marker, which is the step's. -/
+structure NativeRange (w : RangeWorld) : Prop where
+  single_count : ∀ address c next effect count c', w.run address 0 c = .ok (next, effect, count) c' → count = 0
+  unchained : ∀ address budget c next effect c', w.run address budget c = .ok (next, effect, 0) c' → w.run address 0 c = .ok (next, effect, 0) c'
+  chains : ∀ address budget c next effect k c', w.run address budget c = .ok (next, effect, k + 1) c' →
+    Continues effect ∧ ∃ next₁ effect₁ c₁, w.run address 0 c = .ok (next₁, effect₁, 0) c₁ ∧ Continues effect₁ ∧ c₁.stopped = false ∧
+      w.hook (nextOf next₁ effect₁) { c₁ with pc := nextOf next₁ effect₁, pending := none, skip := none } =
+        .ok () { c₁ with pc := nextOf next₁ effect₁, pending := none, skip := none } ∧
+      w.run (nextOf next₁ effect₁) (budget - 1)
+        { c₁ with pc := nextOf next₁ effect₁, pending := none, skip := none, trace := c₁.trace ++ [nextOf next₁ effect₁] } = .ok (next, effect, k) c'
+  no_restart : ∀ address c, w.restarts address 0 c = false
+  hook_skip : ∀ address c u c', w.hook address c = .ok u c' → c'.skip = c.skip
+
+variable {w}
+
+private theorem commit_continues {address next : Nat} {effect : Bil.Effect} (h : Continues effect) (current : Nat) :
+    commit address next effect false current .none none = { pc := nextOf next effect } := by
+  cases effect with
+  | normal => simp [commit, advance, nextOf]
+  | jump target => simp [commit, advance, nextOf]
+  | special name => cases h
+  | cpuExn number => cases h
+
+private theorem dispatch_continues {effect : Bil.Effect} (h : Continues effect) (c : Core) : w.dispatchOf effect c = .ok false c := by
+  cases effect with
+  | normal => rfl
+  | jump target => rfl
+  | special name => cases h
+  | cpuExn number => cases h
+
+private theorem execC_budget_zero {budget : Nat} {address : Nat} {c : Core} {next : Nat} {effect : Bil.Effect} {c' : Core}
+    (h : w.run address budget { c with trace := c.trace ++ [address] } = .ok (next, effect, 0) c') (hn : NativeRange w) :
+    w.execC budget address c = w.execC 0 address c := by
+  have h0 := hn.unchained _ _ _ _ _ _ h
+  simp only [execC, h, h0]
+
+private theorem execC_continues {budget address : Nat} {c : Core} {next count : Nat} {effect : Bil.Effect} {c' : Core} (hp : c.pending = none)
+    (hc : Continues effect) (h : w.run address budget { c with trace := c.trace ++ [address] } = .ok (next, effect, count) c') :
+    w.execC budget address c = .ok true { c' with pc := nextOf next effect, pending := none, stopped := c'.stopped } := by
+  unfold execC
+  rw [h]
+  simp [dispatch_continues hc, hp, commit_continues hc, finish]
+
+/-- Steps of `singleC`, all of which went on. -/
+inductive Steps (w : RangeWorld) : Nat → Core → Core → Prop
+  | refl (c : Core) : Steps w 0 c c
+  | step {n : Nat} {x y z : Core} : w.singleC x = .ok true y → Steps w n y z → Steps w (n + 1) x z
+
+private theorem singleC_plain {c : Core} {p : Nat} (hs : c.stopped = false) (hp : c.pc = p)
+    (hook : w.hook p { c with skip := none } = .ok () { c with skip := none }) :
+    w.singleC c = w.execC 0 p { c with skip := none } := by
+  subst hp
+  have hhooks : w.hooks c = .ok () { c with skip := none } := by
+    unfold hooks
+    split
+    · exact hook
+    · rfl
+  show w.stepC _ c = _
+  unfold stepC
+  simp [hs, hhooks, afterHook]
+
+/-- **A run that chained is single steps**: its first block at no budget, then the others, the last of which ends as the run does. -/
+theorem chained_steps (hn : NativeRange w) : ∀ (k : Nat) (address budget : Nat) (c : Core) (next : Nat) (effect : Bil.Effect) (c' : Core), c.pending = none →
+    w.run address budget { c with trace := c.trace ++ [address] } = .ok (next, effect, k + 1) c' →
+    Continues effect ∧ ∃ d y, w.execC 0 address c = .ok true d ∧ Steps w k d y ∧ w.singleC y = w.execC budget address c := by
+  intro k
+  induction k with
+  | zero =>
+    intro address budget c next effect c' hp h
+    obtain ⟨hc, n₁, e₁, c₁, h0, hc₁, hstop, hhook, hrun⟩ := hn.chains _ _ _ _ _ _ _ h
+    refine ⟨hc, _, _, execC_continues hp hc₁ h0, .refl _, ?_⟩
+    have hpl := singleC_plain (w := w) (c := { c₁ with pc := nextOf n₁ e₁, pending := none, stopped := c₁.stopped }) (p := nextOf n₁ e₁) (by simpa using hstop) rfl (by simpa using hhook)
+    rw [hpl, execC_continues hp hc h]
+    have hrun0 := hn.unchained _ _ _ _ _ _ hrun
+    exact execC_continues (c' := c') (next := next) (count := 0) rfl hc hrun0
+  | succ k ih =>
+    intro address budget c next effect c' hp h
+    obtain ⟨hc, n₁, e₁, c₁, h0, hc₁, hstop, hhook, hrun⟩ := hn.chains _ _ _ _ _ _ _ h
+    have hd := execC_continues hp hc₁ h0
+    obtain ⟨_, d, y, h1, h2, h3⟩ := ih (nextOf n₁ e₁) (budget - 1) { c₁ with pc := nextOf n₁ e₁, pending := none, skip := none } next effect c' rfl hrun
+    refine ⟨hc, _, y, hd, .step ?_ h2, ?_⟩
+    · rw [singleC_plain (w := w) (c := { c₁ with pc := nextOf n₁ e₁, pending := none, stopped := c₁.stopped }) (p := nextOf n₁ e₁) (by simpa using hstop) rfl (by simpa using hhook)]
+      exact h1
+    · rw [h3, execC_continues hp hc h]
+      exact execC_continues rfl hc hrun
+
+private theorem Steps.faults {n : Nat} {x y z : Core} {error : String} {final : Core} {k : Nat} (hs : Steps w n x y) (hl : w.singleC y = .ok true z)
+    (hk : FaultsIn w.singleC k x error final) : n + 1 ≤ k ∧ FaultsIn w.singleC (k - (n + 1)) z error final := by
+  induction hs generalizing k with
+  | refl c =>
+    cases hk with
+    | now he => rw [hl] at he; cases he
+    | later he hr =>
+      rw [hl] at he
+      injection he with _ hn
+      subst hn
+      exact ⟨by omega, hr⟩
+  | step hx _ ih =>
+    cases hk with
+    | now he => rw [hx] at he; cases he
+    | later he hr =>
+      rw [hx] at he
+      injection he with _ hn
+      subst hn
+      obtain ⟨h1, h2⟩ := ih hl hr
+      exact ⟨by omega, by simpa [Nat.add_sub_add_right] using h2⟩
+
+private theorem Steps.no_fault {n : Nat} {x y z : Core} {error : String} {final : Core} {k : Nat} (hs : Steps w n x y) (hl : w.singleC y = .ok false z) :
+    ¬ FaultsIn w.singleC k x error final := by
+  induction hs generalizing k with
+  | refl c =>
+    intro hk
+    cases hk with
+    | now he => rw [hl] at he; cases he
+    | later he _ => rw [hl] at he; cases he
+  | step hx _ ih =>
+    intro hk
+    cases hk with
+    | now he => rw [hx] at he; cases he
+    | later he hr =>
+      rw [hx] at he
+      injection he with _ hn
+      subst hn
+      exact ih hl hr
+
+private theorem faults_congr {x y : Core} (h : w.singleC x = w.singleC y) {k : Nat} {error : String} {final : Core}
+    (hk : FaultsIn w.singleC k x error final) : FaultsIn w.singleC k y error final := by
+  cases hk with
+  | now he => exact .now (h ▸ he)
+  | later he hr => exact .later (h ▸ he) hr
+
+/-- What is left of `execR` on the core. -/
+private theorem execR_view (s : RangeMachine) (address : Nat) :
+    match w.execR s address with
+    | .ok value next => w.execC (w.budgetOf s address s.core) address s.core = .ok value next.core
+    | .error error next => w.execC (w.budgetOf s address s.core) address s.core = .error error next.core := by
+  simp only [execR, execC]
+  generalize w.run address (w.budgetOf s address s.core) { s.core with trace := s.core.trace ++ [address] } = result
+  cases result with
+  | error e c => rfl
+  | ok v c₂ =>
+    obtain ⟨next, effect, count⟩ := v
+    simp only
+    cases w.dispatchOf effect c₂ <;> rfl
+
+/-- What single steps do up to the instruction, from `step_eq`. -/
+private theorem singleC_eq (c : Core) :
+    w.singleC c =
+      if c.stopped = true then .ok false c
+      else
+        match w.hooks c with
+        | .error error c₁ => .error error c₁
+        | .ok _ c₁ =>
+          match afterHook c.pc c₁.pc c₁.stopped with
+          | .halt skip => .ok false { c₁ with skip }
+          | .redirect => .ok true c₁
+          | .proceed => w.execC 0 c.pc c₁ := rfl
+
+/-- A step of what runs that sets the budget to nothing is a single step on what it sees: `Projects`. -/
+theorem single_projects : Projects RangeMachine.core (single w) w.singleC := by
+  intro s
+  have hstep : single w s = step w { s with budget := 0 } := rfl
+  have hz (c : Core) (address : Nat) : w.budgetOf { s with budget := 0, core := c } address c = 0 := by simp [budgetOf, rangeBudgetOf]
+  rw [hstep, step_eq, singleC_eq]
+  by_cases hst : s.core.stopped = true
+  · simp only [hst]
+    rfl
+  · have hf : s.core.stopped = false := by simpa using hst
+    simp only [hf, Bool.false_eq_true, ↓reduceIte]
+    cases hh : w.hooks s.core with
+    | error e c => rfl
+    | ok v c₁ =>
+      simp only
+      cases hA : afterHook s.core.pc c₁.pc c₁.stopped with
+      | halt skip => rfl
+      | redirect => rfl
+      | proceed =>
+        simp only
+        have := execR_view (w := w) { s with budget := 0, core := c₁ } s.core.pc
+        simp only [hz] at this
+        cases hr : w.execR { s with budget := 0, core := c₁ } s.core.pc with
+        | ok value next =>
+          rw [hr] at this
+          simpa only [hr] using this
+        | error error next =>
+          rw [hr] at this
+          simpa only [hr] using this
+
+private theorem execR_ok {s : RangeMachine} {a : Nat} {v : Bool} {n : RangeMachine} (h : w.execR s a = .ok v n) :
+    ∃ nx ef c₂, w.run a (w.budgetOf s a s.core) { s.core with trace := s.core.trace ++ [a] } = .ok (nx, ef, n.chained) c₂ := by
+  simp only [execR] at h
+  split at h
+  · cases h
+  · rename_i nx ef cnt c₂ hrun
+    split at h
+    · cases h
+    · injection h with _ h
+      subst h
+      exact ⟨nx, ef, c₂, hrun⟩
+
+private theorem pending_of_chained (hn : NativeRange w) {s : RangeMachine} {a : Nat} {c₁ : Core} {m : Nat} {rest : Nat × Bil.Effect} {c₂ : Core} {x : Core}
+    (hrun : w.run a (w.budgetOf { s with core := c₁ } a c₁) x = .ok (rest.1, rest.2, m + 1) c₂) : c₁.pending = none := by
+  cases hp : c₁.pending with
+  | none => rfl
+  | some b =>
+    exfalso
+    have h0 : w.budgetOf { s with core := c₁ } a c₁ = 0 := by simp [budgetOf, hp, rangeBudgetOf]
+    rw [h0] at hrun
+    have := hn.single_count _ _ _ _ _ _ hrun
+    omega
+
+/-- What the state of a step has to be, for the step to say the truth about itself: what `rangeAllowM` leaves, or `rangeRestartM`. -/
+def Ready (s : RangeMachine) : Prop :=
+  s.restarting = false ∧ s.chained = 0 ∧ (s.lastBudget = 0 ∨ s.core.skip = some s.core.pc)
+
+/-- A rollback to an instruction outside a slot is the instruction again, with the hooks it had. -/
+private theorem retry (hn : NativeRange w) {a : Nat} {c₀ c₁ : Core} (hstop : c₁.stopped = false) (hpc : c₁.pc = a) (hpending : c₁.pending = none) (hskip : c₁.skip = none) :
+    w.singleC (rollback a c₁) = w.execC 0 a c₁ := by
+  have _ := hn
+  have _ := c₀
+  have hr : { rollback a c₁ with skip := none } = c₁ := by
+    obtain ⟨state, pc, regions, stopped, threads, current, nextThread, pending, skip, trace⟩ := c₁
+    simp only at hpc hpending hskip
+    subst hpc hpending hskip
+    simp [rollback, failControl]
+  rw [singleC_eq]
+  have hs : (rollback a c₁).stopped = false := hstop
+  have hrp : (rollback a c₁).pc = a := by simp [rollback, failControl, hpending]
+  have hrs : (rollback a c₁).skip = some a := by simp [rollback, failControl, hpending]
+  have hh : w.hooks (rollback a c₁) = .ok () c₁ := by
+    unfold hooks
+    have hc : ¬ ((rollback a c₁).skip != some (rollback a c₁).pc) = true := by simp [hrp, hrs]
+    rw [ite_eq_right hc]
+    exact congrArg (EStateM.Result.ok ()) hr
+  simp [hs, hh, hrp, afterHook, hstop, hpc]
+
+/-- Where the hooks of a step leave the skip marker. -/
+private theorem hooks_skip (hn : NativeRange w) {c c₁ : Core} {u : Unit} (h : w.hooks c = .ok u c₁) : c₁.skip = none := by
+  unfold hooks at h
+  split at h
+  · exact (hn.hook_skip _ _ _ _ h).trans rfl
+  · injection h with _ h
+    subst h
+    rfl
+
+/-- A hook ran, so that the skip marker did not say otherwise. -/
+private theorem hooks_error_fresh {c c₁ : Core} {error : String} (h : w.hooks c = .error error c₁) : c.skip ≠ some c.pc := by
+  intro he
+  unfold hooks at h
+  simp [he] at h
+
+/-- The cases of a step that comes to its instruction. -/
+private theorem afterHook_proceed {a b : Nat} {stopped : Bool} (h : afterHook a b stopped = .proceed) : stopped = false ∧ b = a := by
+  unfold afterHook at h
+  split at h
+  · cases h
+  · split at h
+    · rename_i h1 h2
+      exact ⟨by simpa using h1, by simpa using h2⟩
+    · cases h
+
+theorem restartLaws_real (hn : NativeRange w) (hd : w.deferred = false) :
+    RestartLaws RangeMachine.core Ready (step w) w.singleC (restart w) where
+  restart_ok := by
+    intro s
+    cases hs : s.restarting with
+    | false => exact ⟨false, s, by simp [restart, rangeRestartM, range, get', bind, EStateM.bind, hs]; rfl, fun _ => rfl⟩
+    | true => exact ⟨true, { s with restarting := false, watched := s.core.pc :: s.watched }, by simp [restart, rangeRestartM, range, get', modify', bind, EStateM.bind, hs]; rfl, fun h => by cases h⟩
+  taken_back := by
+    intro state error failed next hready hs hr
+    have _ := hd
+    obtain ⟨hre, hch, hlast⟩ := hready
+    have hfailed : failed.restarting = true ∧ next = { failed with restarting := false, watched := failed.core.pc :: failed.watched } := by
+      cases hf : failed.restarting with
+      | false =>
+        simp [restart, rangeRestartM, range, get', bind, EStateM.bind, hf] at hr
+        cases hr
+      | true =>
+        simp [restart, rangeRestartM, range, get', modify', bind, EStateM.bind, hf] at hr
+        injection hr with _ hr
+        exact ⟨rfl, hr.symm⟩
+    obtain ⟨hf1, rfl⟩ := hfailed
+    rw [step_eq] at hs
+    split at hs
+    · cases hs
+    · rename_i hnot
+      have hns : state.core.stopped = false := by simpa using hnot
+      cases hh : w.hooks state.core with
+      | error e c =>
+        rw [hh] at hs
+        injection hs with _ hs
+        subst hs
+        simp [hre] at hf1
+      | ok v c₁ =>
+        rw [hh] at hs
+        simp only at hs
+        cases hA : afterHook state.core.pc c₁.pc c₁.stopped with
+        | halt skip => rw [hA] at hs; cases hs
+        | redirect => rw [hA] at hs; cases hs
+        | proceed =>
+          rw [hA] at hs
+          simp only at hs
+          obtain ⟨hstop, hpc⟩ := afterHook_proceed hA
+          have hskip := hooks_skip hn hh
+          simp only [execR] at hs
+          split at hs
+          · rename_i e c hrun
+            injection hs with _ hs
+            subst hs
+            have hrs : w.restarts state.core.pc (w.budgetOf { state with core := c₁ } state.core.pc c₁) c = true := by simpa [hre] using hf1
+            have hB : w.budgetOf { state with core := c₁ } state.core.pc c₁ ≠ 0 := by
+              intro h0
+              rw [h0, hn.no_restart] at hrs
+              cases hrs
+            have hpend : c₁.pending = none := by
+              cases hp : c₁.pending with
+              | none => rfl
+              | some b =>
+                exfalso
+                apply hB
+                simp [budgetOf, hp, rangeBudgetOf]
+            have hrb : (rollback state.core.pc c₁).skip = some (rollback state.core.pc c₁).pc := by
+              simp [rollback, failControl, hpend]
+            refine ⟨⟨rfl, hch, Or.inr hrb⟩, fun count faultError final hk => ?_⟩
+            refine faults_congr ?_ hk
+            rw [retry hn (c₀ := c₁) hstop hpc hpend hskip, singleC_eq]
+            simp [hns, hh, hA]
+          · split at hs
+            · injection hs with _ hs
+              subst hs
+              simp [hre] at hf1
+            · cases hs
+
+/-- **The real step meets `RangeLaws`**, on the terms of `NativeRange`, for a thread that can be rolled back. -/
+theorem rangeLaws_real (hn : NativeRange w) (hd : w.deferred = false) :
+    RangeLaws RangeMachine.core Ready w.singleC (step w) (again w) (allow w) (chainedCount w) where
+  allow_ok := by
+    intro budget s
+    exact ⟨{ s with budget, lastBudget := 0, chained := 0, restarting := false }, rfl, rfl, rfl, rfl, Or.inl rfl⟩
+  chained_ok := fun s => ⟨s.chained, rfl⟩
+  ran := by
+    intro state next count hready hs hc k error final hk
+    obtain ⟨_, hch, _⟩ := hready
+    have hcount : count = next.chained := by
+      have : (chainedCount w) next = .ok next.chained next := rfl
+      rw [this] at hc
+      injection hc with h _
+      exact h.symm
+    rw [step_eq] at hs
+    split at hs
+    · cases hs
+    · rename_i hns
+      have hsingle := singleC_eq (w := w) state.core
+      rw [ite_eq_right hns] at hsingle
+      cases hh : w.hooks state.core with
+      | error e c => rw [hh] at hs; cases hs
+      | ok v c₁ =>
+        rw [hh] at hs hsingle
+        simp only at hs hsingle
+        cases hA : afterHook state.core.pc c₁.pc c₁.stopped with
+        | halt skip => rw [hA] at hs; cases hs
+        | redirect =>
+          rw [hA] at hs hsingle
+          injection hs with _ hs
+          subst hs
+          have hzero : count = 0 := by rw [hcount]; exact hch
+          subst hzero
+          exact (Steps.refl state.core).faults hsingle hk
+        | proceed =>
+          rw [hA] at hs hsingle
+          simp only at hs hsingle
+          have hv := execR_view (w := w) { state with core := c₁ } state.core.pc
+          rw [hs] at hv
+          simp only at hv
+          obtain ⟨nx, ef, c₂, hrun⟩ := execR_ok hs
+          simp only at hrun
+          rw [← hcount] at hrun
+          cases count with
+          | zero =>
+            rw [execC_budget_zero hrun hn] at hv
+            rw [hv] at hsingle
+            exact (Steps.refl state.core).faults hsingle hk
+          | succ m =>
+            have hpend : c₁.pending = none := pending_of_chained hn (rest := (nx, ef)) hrun
+            obtain ⟨_, d, y, h1, h2, h3⟩ := chained_steps hn m _ _ _ _ _ _ hpend hrun
+            rw [h1] at hsingle
+            have hlast := h3.trans hv
+            have hall : Steps w (m + 1) state.core y := .step hsingle h2
+            exact hall.faults hlast hk
+  halted := by
+    intro state next k error final _ hs hk
+    rw [step_eq] at hs
+    have hsingle := singleC_eq (w := w) state.core
+    split at hs
+    · rename_i hst
+      rw [ite_eq_left hst] at hsingle
+      exact (Steps.refl state.core).no_fault hsingle hk
+    · rename_i hns
+      rw [ite_eq_right hns] at hsingle
+      cases hh : w.hooks state.core with
+      | error e c => rw [hh] at hs; cases hs
+      | ok v c₁ =>
+        rw [hh] at hs hsingle
+        simp only at hs hsingle
+        cases hA : afterHook state.core.pc c₁.pc c₁.stopped with
+        | halt skip =>
+          rw [hA] at hs hsingle
+          exact (Steps.refl state.core).no_fault hsingle hk
+        | redirect => rw [hA] at hs; cases hs
+        | proceed =>
+          rw [hA] at hs hsingle
+          simp only at hs hsingle
+          have hv := execR_view (w := w) { state with core := c₁ } state.core.pc
+          rw [hs] at hv
+          simp only at hv
+          obtain ⟨nx, ef, c₂, hrun⟩ := execR_ok hs
+          simp only at hrun
+          cases hcnt : next.chained with
+          | zero =>
+            rw [hcnt] at hrun
+            rw [execC_budget_zero hrun hn] at hv
+            rw [hv] at hsingle
+            exact (Steps.refl state.core).no_fault hsingle hk
+          | succ m =>
+            rw [hcnt] at hrun
+            have hpend : c₁.pending = none := pending_of_chained hn (rest := (nx, ef)) hrun
+            obtain ⟨hcont, _⟩ := chained_steps hn m _ _ _ _ _ _ hpend hrun
+            have := execC_continues hpend hcont hrun
+            rw [this] at hv
+            cases hv
+  failed := by
+    intro state e r k error final hready hs hk
+    obtain ⟨_, _, hlast⟩ := hready
+    have hagain (s : RangeMachine) : again w s = .ok (s.lastBudget != 0 && !w.deferred) { s with budget := 0 } := rfl
+    rw [step_eq] at hs
+    have hsingle := singleC_eq (w := w) state.core
+    split at hs
+    · cases hs
+    · rename_i hns
+      rw [ite_eq_right hns] at hsingle
+      have hstopF : state.core.stopped = false := by simpa using hns
+      cases hh : w.hooks state.core with
+      | error e' c =>
+        rw [hh] at hs hsingle
+        injection hs with he hs
+        subst he
+        subst hs
+        have hl0 : state.lastBudget = 0 := by
+          rcases hlast with h | h
+          · exact h
+          · exact absurd h (hooks_error_fresh hh)
+        refine Or.inr ⟨{ state with core := c, budget := 0 }, ?_, ?_, ?_⟩
+        · rw [hagain]
+          simp [hl0]
+        · cases hk with
+          | now he => rw [hsingle] at he; injection he
+          | later he _ => rw [hsingle] at he; cases he
+        · cases hk with
+          | now he => rw [hsingle] at he; injection he
+          | later he _ => rw [hsingle] at he; cases he
+      | ok v c₁ =>
+        rw [hh] at hs hsingle
+        simp only at hs hsingle
+        cases hA : afterHook state.core.pc c₁.pc c₁.stopped with
+        | halt skip => rw [hA] at hs; cases hs
+        | redirect => rw [hA] at hs; cases hs
+        | proceed =>
+          rw [hA] at hs hsingle
+          simp only at hs hsingle
+          obtain ⟨hstop, hpc⟩ := afterHook_proceed hA
+          have hskip := hooks_skip hn hh
+          have hv := execR_view (w := w) { state with core := c₁ } state.core.pc
+          rw [hs] at hv
+          simp only at hv
+          have hrcore : r.core = rollback state.core.pc c₁ ∧ r.lastBudget = w.budgetOf { state with core := c₁ } state.core.pc c₁ := by
+            simp only [execR] at hs
+            split at hs
+            · injection hs with _ hs
+              subst hs
+              exact ⟨rfl, rfl⟩
+            · split at hs
+              · injection hs with _ hs
+                subst hs
+                exact ⟨rfl, rfl⟩
+              · cases hs
+          by_cases hB : w.budgetOf { state with core := c₁ } state.core.pc c₁ = 0
+          · rw [hB] at hv
+            rw [hv] at hsingle
+            refine Or.inr ⟨{ r with budget := 0 }, ?_, ?_, ?_⟩
+            · rw [hagain, hrcore.2, hB]
+              simp
+            · cases hk with
+              | now he => rw [hsingle] at he; injection he
+              | later he _ => rw [hsingle] at he; cases he
+            · cases hk with
+              | now he => rw [hsingle] at he; injection he
+              | later he _ => rw [hsingle] at he; cases he
+          · have hpend : c₁.pending = none := by
+              cases hp : c₁.pending with
+              | none => rfl
+              | some b =>
+                exfalso
+                apply hB
+                simp [budgetOf, hp, rangeBudgetOf]
+            refine Or.inl ⟨{ r with budget := 0 }, ?_, k, Nat.le_refl _, ?_⟩
+            · rw [hagain, hrcore.2]
+              simp [hB, hd]
+            · refine faults_congr ?_ hk
+              simp only
+              rw [hrcore.1, retry hn (c₀ := c₁) hstop hpc hpend hskip]
+              exact hsingle
+
+/-- **A fault in the real run is a fault of single steps**: `Bap.Emu.run`, in the model, on the terms of `NativeRange`, fails with the error that single steps from its
+state fail with, leaving what they leave. -/
+theorem run_real_fault (hn : NativeRange w) (hd : w.deferred = false) {error : String} {final : Core} {k fuel : Nat} {state : RangeMachine}
+    (hk : FaultsIn w.singleC k state.core error final) (hf : k < fuel) :
+    ∃ last, runPreciseM (runChainedM (restartM (step w) (restart w)) (allow w) (chainedCount w) fuel fuel 0) (single w) (again w) (fuel + 1) state =
+      .error error last ∧ last.core = final :=
+  runPreciseM_fault (rangeLaws_restartM (rangeLaws_real hn hd) (restartLaws_real hn hd)) single_projects hk hf
+
+end RangeWorld
+
+end Model
 
 end Bap.Emu

@@ -6,6 +6,7 @@ open Bap
 open Bap.Bil
 
 private def reg (name : String) : Var := ⟨name, .imm 64, 0, false⟩
+private def reg1 (name : String) : Var := ⟨name, .imm 1, 0, false⟩
 private def int (value : Nat) : Exp := .int (BitVec.ofNat 64 value)
 private def state (var : Var) (value : Nat) : State :=
   { env := [(var, .bits (BitVec.ofNat 64 value))] }
@@ -928,5 +929,57 @@ def run : IO Unit := do
   let byteEngine ← Primus.Lifted.Engine.create
   let _ ← Primus.Lifted.runBlock byteEngine byteFetch byteLift wrapInitial 0x44000
   assertEqual "an access of one byte cannot wrap, and runs natively" 1 (← Primus.Lifted.stats byteEngine).nativeRuns
+
+  -- A write after a statement that can leave does not count for later blocks, so that a read there is an input: unbound,
+  -- it sends the run to the interpreter, and never reads as a 0.
+  let leftFlag := reg1 "left"
+  let leaver := reg "leaver"
+  let reader := reg "reader"
+  let leaveFetch : Primus.Lifted.Fetch := fun pc => pure (ByteArray.mk #[UInt8.ofNat (pc % 251)])
+  let leaveLift : Primus.Lifted.Lift := fun pc _ =>
+    match pc with
+    | 0x45000 => pure ⟨pc, 0x45004, [.ifElse (.var leftFlag) [.jmp (int 0x46000)] [], .move leaver (int 1)]⟩
+    | 0x45004 => pure ⟨pc, 0x45008, [.move reader (.var leaver)]⟩
+    | _ => pure ⟨pc, pc + 4, [.jmp (int pc)]⟩
+  let leaveEngine ← Primus.Lifted.Engine.create (rangeLimit := 8) (chainFallthrough := true)
+  let leaveInitial : State := { env := [(leftFlag, .bits 0#1)] }
+  let leaveFirst ← Primus.Lifted.runBlock leaveEngine leaveFetch leaveLift leaveInitial 0x45000
+  assertEqual "a block whose later read is an unbound input is interpreted" 1 (← Primus.Lifted.stats leaveEngine).interpretedRuns
+  assertEqual "and it does not chain" 0x45004 leaveFirst.pc
+  assertBits "and writes what it writes" 1#64 (lookup leaveFirst.state.env leaver)
+  let leaveSecond ← Primus.Lifted.runBlock leaveEngine leaveFetch leaveLift leaveFirst.state 0x45004
+  assertBits "the later block reads the write, not a 0" 1#64 (lookup leaveSecond.state.env reader)
+  let leaveBound ← Primus.Lifted.runBlock leaveEngine leaveFetch leaveLift
+    { env := (leaver, .bits 7#64) :: leaveInitial.env } 0x45000
+  assertEqual "with the input bound the range runs natively" 2 (← Primus.Lifted.stats leaveEngine).nativeRuns
+  assertBits "and the later block reads the write" 1#64 (lookup leaveBound.state.env reader)
+
+  -- A native loop gives up at its 100000th test, and the interpreter, on the same fuel, no later.
+  let counter := reg "counter"
+  let counted (limit : Nat) : Primus.Lifted.Block :=
+    ⟨0x47000, 0x47004, [.move counter (int 0),
+      .while (.bin .lt (.var counter) (int limit)) [.move counter (.bin .add (.var counter) (int 1))]]⟩
+  let interprets (limit : Nat) : IO Bool := do
+    match ← Bil.runObserved none (counted limit).program {} with
+    | .ok _ => pure true
+    | .error _ => pure false
+  let countNative (limit : Nat) : IO (Except String Primus.Lifted.Result) := do
+    let engine ← Primus.Lifted.Engine.create
+    let (fetch, lift) := fixed (counted limit)
+    let result ← (Primus.Lifted.runBlock engine fetch lift {} 0x47000).toBaseIO
+    assertEqual "the loop is native" 1 (← Primus.Lifted.stats engine).nativeRuns
+    pure (match result with | .ok result => .ok result | .error error => .error (toString error))
+  assertTrue "the interpreter finishes a loop well within its fuel" (← interprets 99996)
+  match ← countNative 99996 with
+  | .ok result => assertBits "and so does native code" (BitVec.ofNat 64 99996) (lookup result.state.env counter)
+  | .error error => throw <| IO.userError error
+  assertTrue "the interpreter runs out of fuel first" (!(← interprets 99998))
+  match ← countNative 99998 with
+  | .ok result => assertBits "99999 tests are native code's last" (BitVec.ofNat 64 99998) (lookup result.state.env counter)
+  | .error error => throw <| IO.userError error
+  assertTrue "100000 tests are out of the interpreter's fuel" (!(← interprets 99999))
+  match ← countNative 99999 with
+  | .ok _ => throw <| IO.userError "100000 tests are too many in native code"
+  | .error error => assertEqual "native code says so" "Primus loop fuel exhausted" error
 
 end Bap.Tests.Lifted

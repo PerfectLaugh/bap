@@ -23,11 +23,13 @@ are about the flows on the model, and Lean sees no more of `IO`, `Task` and `@[e
 2. **The arguments of `stepOpsOf`.** `save`, `restore`, `execute`, `notifyCode`, `dispatch` in `stepOps` have the
    effects that `Model.World` gives them: `restore` undoes all that happened since `save`, except for what the log of
    the model keeps, what hooks did to the outside. That `save` takes all that `Snapshot` has is by reading `snapshotBlock`.
-3. **What a step of a range is on these references.** `lowerGraph_correct` is about the program and the slots that go in and come out. That
-   `executeBlock` passes them along, on the cells, and so that a range meets `RangeLaws`, is by reading it; its decisions are the proved
-   `rangeSiteStops`, `rangeBudgetOf`, `accessesWatched` and `accessRestarts`. That a step taken back at a hook of an access meets `RestartLaws`
-   is `stepExecute_error` for its rollback, and by reading `rangeRestart` for what it adds, the set of addresses that run one instruction at a time,
-   which decides how far steps chain and nothing else.
+3. **What a run of a range does.** `executeRangeM`, `rangeAllowM`, `rangeRestartM`, `rangeAgainM` and `stepOpsOf` are what both the emulator and the model
+   (`RangeWorld.ops`) make their steps with, so that the model of a step that may run a range is not a matter of reading, and `rangeLaws_real` and `restartLaws_real` prove
+   `RangeLaws` and `RestartLaws` of it, and `run_real_fault` that a fault in a range is a fault in single steps. What they assume of `runRange` is `NativeRange`, which stays
+   by reading: that its result is `lowerGraph_correct`'s (`chains`, `unchained`, `single_count`), that is, that `runBlockObserved` passes the state and the
+   slots along as that theorem says; that a chained block had no hooks (`chains`, which `observeRangeCode` sees to with the proved `rangeSiteStops`); that an access only takes back what may chain
+   (`no_restart`, which `notifyMemory` sees to with the proved `accessRestarts`); that hooks leave the skip marker (`hook_skip`). A worker of a parallel round is outside of them
+   (`deferred`), and leaves faults to the rollback of its round. The model has no delay slots, as `rangeLimitOf` has no ranges with them.
 4. **The parallel round.** `roundM` is proved on the model. `IO.asTask` runs the workers, `IO.wait` waits for them all,
    and the mutex of `serialize` gives hooks one at a time. Between the workers only the native memory is shared, by
    obligation 10 of `Bap.Jit`.
@@ -325,6 +327,60 @@ def accessesWatched (restarted deferred hasHooks : Bool) : Bool := restarted || 
 /-- Whether an access has to take back the step it is in. Its hooks read the state, which is that of the step's start, so that
 they only run in a step that runs one instruction. Other accesses, those that no hook watches, go on at full speed. -/
 def accessRestarts (hit : Bool) (budget : Nat) (deferred : Bool) : Bool := hit && budget != 0 && !deferred
+
+/-- The references of a step that may run a range, apart from where its thread is. -/
+structure RangeCells (m : Type → Type) where
+  budget : m Nat
+  setBudget : Nat → m Unit
+  /-- The budget of the run of the last step that came to one, 0 if it did not come to one since `rangeAllowM`. -/
+  lastBudget : m Nat
+  setLastBudget : Nat → m Unit
+  chained : m Nat
+  setChained : Nat → m Unit
+  watched : Nat → m Bool
+  watch : Nat → m Unit
+  restarting : m Bool
+  setRestarting : Bool → m Unit
+  pc : m Nat
+  pending : m (Option PendingBranch)
+  accessHooks : m Bool
+  deferred : Bool
+
+/-- The instruction at an address, with the budget it was allowed unless accesses are watched there, or it is in a delay slot, where
+what a rollback goes back to is the branch. -/
+@[specialize] def executeRangeM {m : Type → Type} [Monad m] (cells : RangeCells m) (run : Nat → Nat → m (Nat × Bil.Effect)) (address : Nat) :
+    m (Nat × Bil.Effect) := do
+  let allowed ← cells.budget
+  cells.setBudget 0
+  let watched ← cells.watched address
+  let hooks ← cells.accessHooks
+  let slot := (← cells.pending).isSome
+  let budget := rangeBudgetOf allowed (accessesWatched watched cells.deferred hooks || slot)
+  cells.setLastBudget budget
+  run address budget
+
+/-- What a run of chained steps says before each: how far it may go, and that nothing of the last step counts for this one, which may
+fail in a hook, or be sent elsewhere by one, before it comes to a run. -/
+@[specialize] def rangeAllowM {m : Type → Type} [Monad m] (cells : RangeCells m) (budget : Nat) : m Unit := do
+  cells.setBudget budget
+  cells.setLastBudget 0
+  cells.setChained 0
+  cells.setRestarting false
+
+/-- After a failed step, whether it was one that ran into a hook of an access. It has rolled back to its start, with the code
+hooks of its address fired and not to fire again, and its address runs one instruction at a time from now on. -/
+@[specialize] def rangeRestartM {m : Type → Type} [Monad m] (cells : RangeCells m) : m Bool := do
+  if ← cells.restarting then
+    cells.setRestarting false
+    cells.watch (← cells.pc)
+    pure true
+  else
+    pure false
+
+/-- After a failed step, whether it may have chained. -/
+@[specialize] def rangeAgainM {m : Type → Type} [Monad m] (cells : RangeCells m) : m Bool := do
+  cells.setBudget 0
+  pure ((← cells.lastBudget) != 0 && !cells.deferred)
 
 /-! ### Memory accesses -/
 

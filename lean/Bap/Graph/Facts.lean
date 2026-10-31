@@ -977,4 +977,228 @@ theorem dominators_rows :
         · rintro ⟨h, _⟩
           exact ⟨by simpa using hdn, h1.2 (h2.1 h)⟩
 
+/-! ### Immediate dominators -/
+
+/-- Size of the dominator set recorded for a node. -/
+abbrev domSize (g : Graph α) (s c : α) : Nat :=
+  ((Assoc.get c (dominators g s)).getD []).length
+
+abbrev pick (g : Graph α) (s n : α) (best : Option (α × α)) (candidate : α) : Option (α × α) :=
+  match best with
+  | none => some (n, candidate)
+  | some (_, current) =>
+    let candidateSize := (Assoc.get candidate (dominators g s)).getD []
+    let currentSize := (Assoc.get current (dominators g s)).getD []
+    if candidateSize.length > currentSize.length then some (n, candidate) else best
+
+theorem foldl_pick_some (n b₀ : α) (l : List α) :
+    ∃ b, l.foldl (pick g s n) (some (n, b₀)) = some (n, b) ∧ (b = b₀ ∨ b ∈ l) ∧
+      domSize g s b₀ ≤ domSize g s b ∧ ∀ c ∈ l, domSize g s c ≤ domSize g s b := by
+  induction l generalizing b₀ with
+  | nil => exact ⟨b₀, rfl, Or.inl rfl, Nat.le_refl _, by simp⟩
+  | cons c cs ih =>
+    simp only [List.foldl_cons]
+    by_cases hgt : domSize g s c > domSize g s b₀
+    · have hstep : pick g s n (some (n, b₀)) c = some (n, c) := by
+        simp only [pick]
+        split
+        · rfl
+        · exact absurd hgt ‹_›
+      rw [hstep]
+      obtain ⟨b, hb, hmem, hle, hall⟩ := ih c
+      refine ⟨b, hb, ?_, by omega, ?_⟩
+      · rcases hmem with rfl | h
+        · exact Or.inr (by simp)
+        · exact Or.inr (List.mem_cons_of_mem _ h)
+      · intro d hd
+        rcases List.mem_cons.1 hd with rfl | h
+        · exact hle
+        · exact hall d h
+    · have hstep : pick g s n (some (n, b₀)) c = some (n, b₀) := by
+        simp only [pick]
+        split
+        · exact absurd ‹_› hgt
+        · rfl
+      rw [hstep]
+      obtain ⟨b, hb, hmem, hle, hall⟩ := ih b₀
+      refine ⟨b, hb, ?_, hle, ?_⟩
+      · rcases hmem with h | h
+        · exact Or.inl h
+        · exact Or.inr (List.mem_cons_of_mem _ h)
+      · intro d hd
+        rcases List.mem_cons.1 hd with rfl | h
+        · omega
+        · exact hall d h
+
+theorem foldl_pick_none (n : α) (l : List α) (hne : l ≠ []) :
+    ∃ b ∈ l, l.foldl (pick g s n) none = some (n, b) ∧ ∀ c ∈ l, domSize g s c ≤ domSize g s b := by
+  match l, hne with
+  | c :: cs, _ =>
+    obtain ⟨b, hb, hmem, hle, hall⟩ := foldl_pick_some (g := g) (s := s) n c cs
+    refine ⟨b, ?_, hb, ?_⟩
+    · rcases hmem with rfl | h
+      · simp
+      · exact List.mem_cons_of_mem _ h
+    · intro d hd
+      rcases List.mem_cons.1 hd with rfl | h
+      · exact hle
+      · exact hall d h
+
+theorem foldl_pick_eq {n i : α} {l : List α} {r : Option (α × α)} (hr : ∀ a b, r = some (a, b) → a = n)
+    (h : l.foldl (pick g s n) r = some (i', i)) : i' = n := by
+  induction l generalizing r with
+  | nil => exact hr _ _ h
+  | cons c cs ih =>
+    refine ih ?_ h
+    intro a b hab
+    simp only [pick] at hab
+    split at hab
+    · simp only [Option.some.injEq, Prod.mk.injEq] at hab
+      exact hab.1.symm
+    · split at hab
+      · simp only [Option.some.injEq, Prod.mk.injEq] at hab
+        exact hab.1.symm
+      · rename_i best _ current _
+        exact hr _ _ hab
+
+theorem immediateDominators_eq :
+    immediateDominators g s = (dominators g s).filterMap fun entry =>
+      if entry.1 = s then none
+      else (entry.2.filter fun c => c != entry.1).foldl (pick g s entry.1) none := by
+  rfl
+
+theorem domSize_eq {c : α} {ds : List α} (h : Assoc.get c (dominators g s) = some ds) :
+    domSize g s c = ds.length := by
+  simp [domSize, h]
+
+/-- If `b` strictly dominates `a` then `b`'s dominator set is strictly smaller. -/
+theorem domSize_lt {a b : α} (ha : a ∈ reachable g s) (hab : Dom g s a b) (hne : a ≠ b) :
+    domSize g s b < domSize g s a := by
+  obtain ⟨p, hp⟩ := (mem_reachable_iff_walk a).1 ha
+  have hb : b ∈ reachable g s := hp.subset_reachable (hab p hp)
+  obtain ⟨da, hda⟩ := get_exists (T := dominators g s) (k := a) (by rw [dominators_keys]; exact ha)
+  obtain ⟨db, hdb⟩ := get_exists (T := dominators g s) (k := b) (by rw [dominators_keys]; exact hb)
+  rw [domSize_eq hda, domSize_eq hdb]
+  have hamem : a ∈ da := (mem_dominators_iff (get_mem hda)).2 (Dom.refl _)
+  have hnd : db.Nodup := dominators_nodup _ (get_mem hdb)
+  have hsub : db ⊆ da.erase a := by
+    intro x hx
+    have hbx := (mem_dominators_iff (get_mem hdb)).1 hx
+    have hxa : x ≠ a := by
+      rintro rfl
+      exact hne (Dom.antisymm ha hab hbx)
+    exact (List.mem_erase_of_ne hxa).2 ((mem_dominators_iff (get_mem hda)).2 (hab.trans hbx))
+  have := hnd.length_le_of_subset hsub
+  rw [List.length_erase_of_mem hamem] at this
+  have := List.length_pos_of_mem hamem
+  omega
+
+/-- Immediate dominators are the unique closest strict dominators. -/
+theorem immediateDominators_spec {n i : α} (h : (n, i) ∈ immediateDominators g s) :
+    n ∈ reachable g s ∧ n ≠ s ∧ i ≠ n ∧ Dom g s n i ∧ ∀ c, c ≠ n → Dom g s n c → Dom g s i c := by
+  rw [immediateDominators_eq] at h
+  obtain ⟨⟨m, ds⟩, hmem, hval⟩ := List.mem_filterMap.1 h
+  simp only at hval
+  have hm : m ∈ reachable g s := by
+    rw [← dominators_keys]
+    exact List.mem_map.2 ⟨_, hmem, rfl⟩
+  by_cases hms : m = s
+  · simp [hms] at hval
+  simp only [hms, ite_false] at hval
+  have hnm : n = m := foldl_pick_eq (g := g) (s := s) (n := m) (r := none) (by simp) hval
+  subst hnm
+  have hne : ds.filter (fun c => c != n) ≠ [] := by
+    apply List.ne_nil_of_mem (a := s)
+    simp only [List.mem_filter, bne_iff_ne, ne_eq]
+    exact ⟨(mem_dominators_iff hmem).2 (Dom.start _), Ne.symm hms⟩
+  obtain ⟨b, hb, hfold, hall⟩ := foldl_pick_none (g := g) (s := s) n _ hne
+  rw [hfold] at hval
+  simp only [Option.some.injEq, Prod.mk.injEq, true_and] at hval
+  subst hval
+  simp only [List.mem_filter, bne_iff_ne, ne_eq] at hb
+  have hdom : Dom g s n b := (mem_dominators_iff hmem).1 hb.1
+  refine ⟨hm, hms, hb.2, hdom, ?_⟩
+  intro c hcn hc
+  rcases Dom.chain hm hc hdom with hcb | hbc
+  · by_cases hcbe : c = b
+    · subst hcbe
+      exact Dom.refl _
+    · exfalso
+      obtain ⟨p, hp⟩ := (mem_reachable_iff_walk n).1 hm
+      have hcr : c ∈ reachable g s := hp.subset_reachable (hc p hp)
+      have hlt := domSize_lt hcr hcb hcbe
+      have hle := hall c (by simp [(mem_dominators_iff hmem).2 hc, hcn])
+      omega
+  · exact hbc
+
+theorem immediateDominators_unique {n i j : α} (hi : (n, i) ∈ immediateDominators g s)
+    (hj : (n, j) ∈ immediateDominators g s) : i = j := by
+  obtain ⟨hn, _, hin, hdi, hmi⟩ := immediateDominators_spec hi
+  obtain ⟨_, _, hjn, hdj, hmj⟩ := immediateDominators_spec hj
+  obtain ⟨p, hp⟩ := (mem_reachable_iff_walk n).1 hn
+  exact Dom.antisymm (hp.subset_reachable (hdi p hp)) (hmi j hjn hdj) (hmj i hin hdi)
+
+/-- Every reachable node other than the start has an immediate dominator. -/
+theorem immediateDominators_exists {n : α} (hn : n ∈ reachable g s) (hne : n ≠ s) :
+    ∃ i, (n, i) ∈ immediateDominators g s := by
+  obtain ⟨ds, hds⟩ := get_exists (T := dominators g s) (k := n) (by rw [dominators_keys]; exact hn)
+  have hmem := get_mem hds
+  have hf : ds.filter (fun c => c != n) ≠ [] := by
+    apply List.ne_nil_of_mem (a := s)
+    simp only [List.mem_filter, bne_iff_ne, ne_eq]
+    exact ⟨(mem_dominators_iff hmem).2 (Dom.start _), Ne.symm hne⟩
+  obtain ⟨b, _, hfold, _⟩ := foldl_pick_none (g := g) (s := s) n _ hf
+  refine ⟨b, ?_⟩
+  rw [immediateDominators_eq]
+  refine List.mem_filterMap.2 ⟨(n, ds), hmem, ?_⟩
+  simp only [hne, ite_false]
+  exact hfold
+
+theorem immediateDominators_keys_get {n : α} (hn : n ∈ reachable g s) (hne : n ≠ s) :
+    ∃ i, Assoc.get n (immediateDominators g s) = some i := by
+  obtain ⟨i, hi⟩ := immediateDominators_exists hn hne
+  exact get_exists (List.mem_map.2 ⟨_, hi, rfl⟩)
+
+private theorem filterMap_congr_of_mem {β γ : Type} {f h : β → Option γ} {l : List β} (H : ∀ x ∈ l, f x = h x) :
+    l.filterMap f = l.filterMap h := by
+  induction l with
+  | nil => rfl
+  | cons x xs ih =>
+    have hx := H x List.mem_cons_self
+    have hr := ih fun y hy => H y (List.mem_cons_of_mem _ hy)
+    simp only [List.filterMap_cons, hx, hr]
+
+/-- **The list of immediate dominators, of any function that has them**: a node's immediate dominator is a strict dominator that all its strict dominators dominate, so that
+what has that property for each reachable node gives the very list. -/
+theorem immediateDominators_of (idom : α → α)
+    (hi : ∀ n ∈ reachable g s, n ≠ s → idom n ≠ n ∧ Dom g s n (idom n) ∧ ∀ c, c ≠ n → Dom g s n c → Dom g s (idom n) c) :
+    immediateDominators g s = (reachable g s).filterMap fun n => if n = s then none else some (n, idom n) := by
+  rw [immediateDominators_eq]
+  conv => rhs; rw [← dominators_keys (g := g) (s := s), List.filterMap_map]
+  apply filterMap_congr_of_mem
+  rintro ⟨n, ds⟩ hmem
+  by_cases hns : n = s
+  · simp [hns]
+  · have hn : n ∈ reachable g s := by
+      rw [← dominators_keys (g := g) (s := s)]
+      exact List.mem_map.2 ⟨_, hmem, rfl⟩
+    simp only [hns, ↓reduceIte, Function.comp_apply]
+    obtain ⟨hne, hdom, hall⟩ := hi n hn hns
+    have hf : ds.filter (fun c => c != n) ≠ [] := by
+      apply List.ne_nil_of_mem (a := s)
+      simp only [List.mem_filter, bne_iff_ne, ne_eq]
+      exact ⟨(mem_dominators_iff hmem).2 (Dom.start _), Ne.symm hns⟩
+    obtain ⟨b, _, hfold, _⟩ := foldl_pick_none (g := g) (s := s) n _ hf
+    have hmemB : (n, b) ∈ immediateDominators g s := by
+      rw [immediateDominators_eq]
+      refine List.mem_filterMap.2 ⟨(n, ds), hmem, ?_⟩
+      simp only [hns, ite_false]
+      exact hfold
+    obtain ⟨_, _, hbn, hdb, hmin⟩ := immediateDominators_spec hmemB
+    have hreach : b ∈ reachable g s := by
+      obtain ⟨p, hp⟩ := (mem_reachable_iff_walk n).1 hn
+      exact hp.subset_reachable (hdb p hp)
+    have heq : b = idom n := Dom.antisymm hreach (hmin (idom n) hne hdom) (hall b hbn hdb)
+    rw [hfold, heq]
+
 end Bap.Proofs.Graph

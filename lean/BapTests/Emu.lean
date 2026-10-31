@@ -309,7 +309,7 @@ private def testThreads : IO Unit := do
   Bap.Emu.setReg contextEmu output (.bits (BitVec.ofNat 64 0))
   let contextSecond ← Bap.Emu.spawnThread contextEmu 0 10
   let contextEvents ← IO.mkRef []
-  let _ ← Bap.Emu.onCodeWith contextEmu (4, 4) fun current _ => do
+  let _ ← Bap.Emu.onCode contextEmu (4, 4) fun current _ => do
     let tid ← Bap.Emu.thread current
     match ← Bap.Emu.reg current output with
     | .bits value => contextEvents.modify fun events => (tid, value.toNat) :: events
@@ -328,7 +328,7 @@ private def testThreads : IO Unit := do
     Bap.Emu.setReg syscallContextEmu (reg s!"X{10 + index}") (.bits (BitVec.ofNat 64 0))
   let syscallContextSecond ← Bap.Emu.spawnThread syscallContextEmu 0 10
   let syscallContextEvents ← IO.mkRef []
-  let _ ← Bap.Emu.onSyscallWith syscallContextEmu fun current _ _ => do
+  let _ ← Bap.Emu.onSyscall syscallContextEmu fun current _ _ => do
     let tid ← Bap.Emu.thread current
     match ← Bap.Emu.reg current output with
     | .bits value => syscallContextEvents.modify fun events => (tid, value.toNat) :: events
@@ -477,9 +477,21 @@ private def regionAudit : IO Unit := do
   Bap.Emu.setReg watching a0 (.bits wide)
   Bap.Emu.setReg watching ⟨"X11", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 1))
   let hits ← IO.mkRef 0
-  let _ ← Bap.Emu.onWrite watching (0x2002, 0x2002) fun _ _ _ => hits.modify (· + 1)
+  let _ ← Bap.Emu.onWrite watching (0x2002, 0x2002) fun _ _ _ _ => hits.modify (· + 1)
   let _ ← Bap.Emu.step watching
   assertEqual "Emu write hook sees an access straddling its range" 1 (← hits.get)
+  -- Every hook is told the thread that runs it, through the emulator it gets.
+  let hookThreads ← IO.mkRef ([] : List Nat)
+  let threaded ← Tuned.riscv64 store 0 0
+  Bap.Emu.map threaded ⟨0x2000, zeros 8, rw⟩
+  Bap.Emu.setReg threaded a0 (.bits wide)
+  Bap.Emu.setReg threaded ⟨"X11", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 1))
+  let _ ← Bap.Emu.onCode threaded (0, 0) fun current _ => do
+    hookThreads.modify (· ++ [← Bap.Emu.thread current])
+  let _ ← Bap.Emu.onWrite threaded (0x2002, 0x2002) fun current _ _ _ => do
+    hookThreads.modify (· ++ [← Bap.Emu.thread current])
+  let _ ← Bap.Emu.step threaded
+  assertEqual "code and write hooks know their thread" [1, 1] (← hookThreads.get)
   -- A failed step leaves forked processes their memory.
   let forked ← Tuned.riscv64 store 0 0
   Bap.Emu.setReg forked a0 (.bits (BitVec.ofNat 64 0x9000))
@@ -549,7 +561,7 @@ private def coreRegressions : IO Unit := do
   for name in ["R4", "R5", "R6", "R7", "R8", "R9"] do Bap.Emu.setReg slotEmu (reg name) (bits 0)
   let _ ← Bap.Emu.run slotEmu 5
   assertEqual "Emu unhandled slot special keeps the pc" 4 (← Bap.Emu.pc slotEmu)
-  let _ ← Bap.Emu.onSyscall slotEmu fun _ _ => pure (.returnValue 0)
+  let _ ← Bap.Emu.onSyscall slotEmu fun _ _ _ => pure (.returnValue 0)
   Bap.Emu.resume slotEmu
   let _ ← Bap.Emu.run slotEmu 1
   assertEqual "Emu served slot special completes the branch" 12 (← Bap.Emu.pc slotEmu)
@@ -563,7 +575,7 @@ private def coreRegressions : IO Unit := do
   -- A hook that moves the pc keeps the instruction from running (afterHooks_redirect).
   let moving ← Tuned.riscv64 ((← rv "addi a0, a0, 1") ++ (← rv "addi a0, a0, 2") ++ (← rv "addi a0, a0, 4")) 0 0
   Bap.Emu.setReg moving a0 (bits 0)
-  let _ ← Bap.Emu.onCodeWith moving (0, 0) fun current _ => Bap.Emu.setPc current 8
+  let _ ← Bap.Emu.onCode moving (0, 0) fun current _ => Bap.Emu.setPc current 8
   let _ ← Bap.Emu.run moving 2
   assertEqual "Emu hook redirect reaches the new pc" 12 (← Bap.Emu.pc moving)
   assertBits "Emu hook redirect skips the instruction" (BitVec.ofNat 64 4) (.ok (← Bap.Emu.reg moving a0))
@@ -572,7 +584,7 @@ private def coreRegressions : IO Unit := do
   Bap.Emu.setReg longjmp a0 (bits 0)
   (List.range 6).forM fun index => Bap.Emu.setReg longjmp (reg s!"X{11 + index}") (bits 0)
   Bap.Emu.setReg longjmp (reg "X17") (bits 1)
-  let _ ← Bap.Emu.onIntrinsic longjmp "*" fun _ => do
+  let _ ← Bap.Emu.onIntrinsic longjmp "*" fun _ _ => do
     Bap.Emu.setPc longjmp 8
     pure .proceed
   let _ ← Bap.Emu.run longjmp 1
@@ -582,7 +594,7 @@ private def coreRegressions : IO Unit := do
   Bap.Emu.setReg spawning a0 (bits 0)
   let _ ← Bap.Emu.spawnThread spawning 0 0
   let spawned ← IO.mkRef false
-  let _ ← Bap.Emu.onCodeWith spawning (4, 4) fun current _ => do
+  let _ ← Bap.Emu.onCode spawning (4, 4) fun current _ => do
     if !(← spawned.get) then
       spawned.set true
       let _ ← Bap.Emu.spawnThread current 0 0
@@ -664,7 +676,7 @@ private def coreRegressions : IO Unit := do
     let emu ← Tuned.riscv64 code 0 0
     Bap.Emu.setReg emu a0 (bits 0)
     hits.set 0
-    let _ ← Bap.Emu.onCode emu (0, 0) fun _ => do
+    let _ ← Bap.Emu.onCode emu (0, 0) fun _ _ => do
       hits.modify (· + 1)
       Bap.Emu.stop emu
     let _ ← Bap.Emu.step emu
@@ -698,7 +710,7 @@ private def coreRegressions : IO Unit := do
   let retry ← Tuned.riscv64 (← rv "lw a0, 0(a1)") 0 0
   Bap.Emu.setReg retry a1 (bits 0x9000)
   let retries ← IO.mkRef 0
-  let _ ← Bap.Emu.onCode retry (0, 0) fun _ => retries.modify (· + 1)
+  let _ ← Bap.Emu.onCode retry (0, 0) fun _ _ => retries.modify (· + 1)
   expectThrow "Emu retried load faults" (Bap.Emu.step retry)
   Bap.Emu.map retry ⟨0x9000, zeros 8, rw⟩
   let _ ← Bap.Emu.step retry
@@ -707,7 +719,7 @@ private def coreRegressions : IO Unit := do
   -- An unhandled special stops once; resuming retries it without firing hooks again.
   let special ← Tuned.riscv64 (← rv "ecall") 0 0
   let specials ← IO.mkRef 0
-  let _ ← Bap.Emu.onCode special (0, 0) fun _ => specials.modify (· + 1)
+  let _ ← Bap.Emu.onCode special (0, 0) fun _ _ => specials.modify (· + 1)
   let _ ← Bap.Emu.step special
   Bap.Emu.resume special
   let _ ← Bap.Emu.step special
@@ -734,7 +746,7 @@ private def coreRegressions : IO Unit := do
   let ranging ← Bap.Emu.create rangeConfig [⟨0, rangeCode, ⟨true, true, true⟩⟩] { env := [(a0, bits 0)] } 0
   Bap.Emu.traceStart ranging
   let rangeHits ← IO.mkRef 0
-  let _ ← Bap.Emu.onCode ranging (8, 8) fun _ => do
+  let _ ← Bap.Emu.onCode ranging (8, 8) fun _ _ => do
     rangeHits.modify (· + 1)
     Bap.Emu.stop ranging
   let _ ← Bap.Emu.run ranging 10
@@ -751,7 +763,7 @@ private def coreRegressions : IO Unit := do
   Bap.Emu.setReg forkingRound a1 (bits 0x1000)
   let _ ← Bap.Emu.spawnThread forkingRound 4 6
   let forkedRound ← IO.mkRef none
-  let _ ← Bap.Emu.onCodeWith forkingRound (4, 4) fun current _ => do
+  let _ ← Bap.Emu.onCode forkingRound (4, 4) fun current _ => do
     if (← Bap.Emu.thread current) == 1 && (← forkedRound.get).isNone then
       let id ← Bap.Emu.forkThread current 4
       Bap.Emu.cloneProcessMemory current id
@@ -771,10 +783,10 @@ private def coreRegressions : IO Unit := do
   Bap.Emu.setReg ordered a0 (bits 0)
   Bap.Emu.setReg ordered a1 (bits 0x1000)
   let order ← IO.mkRef ([] : List Nat)
-  let _ ← Bap.Emu.onCode ordered (0, 0) fun _ => order.modify (· ++ [1])
-  let _ ← Bap.Emu.onCode ordered (0, 0) fun _ => order.modify (· ++ [2])
-  let _ ← Bap.Emu.onWrite ordered (0x1000, 0x1003) fun _ _ _ => order.modify (· ++ [3])
-  let _ ← Bap.Emu.onWrite ordered (0x1000, 0x1003) fun _ _ _ => order.modify (· ++ [4])
+  let _ ← Bap.Emu.onCode ordered (0, 0) fun _ _ => order.modify (· ++ [1])
+  let _ ← Bap.Emu.onCode ordered (0, 0) fun _ _ => order.modify (· ++ [2])
+  let _ ← Bap.Emu.onWrite ordered (0x1000, 0x1003) fun _ _ _ _ => order.modify (· ++ [3])
+  let _ ← Bap.Emu.onWrite ordered (0x1000, 0x1003) fun _ _ _ _ => order.modify (· ++ [4])
   let _ ← Bap.Emu.step ordered
   assertEqual "Emu hooks fire in registration order" [1, 2, 3, 4] (← order.get)
   -- A fork keeps its memory across a failed step of its own, and a checkpoint keeps both memories.
@@ -876,12 +888,12 @@ private def runEmulator : IO Unit := do
   Bap.Emu.write emu 0 code
   Bap.Emu.setPc emu 0
   let codeHits ← IO.mkRef 0
-  let codeHook ← Bap.Emu.onCode emu (0, 4) fun _ => codeHits.modify (· + 1)
+  let codeHook ← Bap.Emu.onCode emu (0, 4) fun _ _ => codeHits.modify (· + 1)
   let hookedSteps ← Bap.Emu.run emu 2
   assertEqual "Emu code hooks allow execution" 2 hookedSteps
   assertEqual "Emu code hook range filtering" 2 (← codeHits.get)
   assertEqual "Emu two steps stop at PC 8" 8 (← Bap.Emu.pc emu)
-  let stopHook ← Bap.Emu.onCode emu (8, 8) fun _ => Bap.Emu.stop emu
+  let stopHook ← Bap.Emu.onCode emu (8, 8) fun _ _ => Bap.Emu.stop emu
   let stoppedSteps ← Bap.Emu.run emu 10
   assertEqual "Emu code hook stops before instruction" 0 stoppedSteps
   assertTrue "Emu code hook stopped state" (← Bap.Emu.stopped emu)
@@ -937,14 +949,14 @@ private def runEmulator : IO Unit := do
   Bap.Emu.map memoryEmu ⟨0x1000, ByteArray.mk (List.replicate 4 0).toArray, ⟨true, true, false⟩⟩
   Bap.Emu.setReg memoryEmu input (.bits (BitVec.ofNat 64 0x1000))
   let memoryEvents ← IO.mkRef []
-  let writeHook ← Bap.Emu.onWrite memoryEmu (0x1000, 0x1003) fun address size value => do
+  let writeHook ← Bap.Emu.onWrite memoryEmu (0x1000, 0x1003) fun _ address size value => do
     assertTrue "Emu write hook runs before store"
       ((ByteArray.mk #[0, 0, 0, 0]) == (← Bap.Emu.read memoryEmu 0x1000 4))
     memoryEvents.modify fun events => (true, address, size, value) :: events
-  let readHook ← Bap.Emu.onRead memoryEmu (0x1000, 0x1003) fun address size => do
+  let readHook ← Bap.Emu.onRead memoryEmu (0x1000, 0x1003) fun _ address size => do
     memoryEvents.modify fun events => (false, address, size, 0) :: events
   let missedWrites ← IO.mkRef 0
-  let _ ← Bap.Emu.onWrite memoryEmu (0x2000, 0x2000) fun _ _ _ => missedWrites.modify (· + 1)
+  let _ ← Bap.Emu.onWrite memoryEmu (0x2000, 0x2000) fun _ _ _ _ => missedWrites.modify (· + 1)
   Bap.Emu.traceStartAccesses memoryEmu 4
   let memorySteps ← Bap.Emu.run memoryEmu 3
   assertEqual "Emu memory hook instruction count" 3 memorySteps
@@ -1068,12 +1080,12 @@ private def runEmulator : IO Unit := do
   (List.range 6).forM fun index =>
     Bap.Emu.setReg syscallEmu (reg s!"X{10 + index}") (.bits (BitVec.ofNat 64 (index + 1)))
   let syscallOrder ← IO.mkRef []
-  let defaultSyscallHook ← Bap.Emu.onSyscall syscallEmu fun number args => do
+  let defaultSyscallHook ← Bap.Emu.onSyscall syscallEmu fun _ number args => do
     assertEqual "Emu RISC-V syscall number" 39 number
     assertEqual "Emu RISC-V syscall arguments" [1, 2, 3, 4, 5, 6] args
     syscallOrder.modify fun order => "default" :: order
     pure .default
-  let returnSyscallHook ← Bap.Emu.onSyscall syscallEmu fun _ _ => do
+  let returnSyscallHook ← Bap.Emu.onSyscall syscallEmu fun _ _ _ => do
     syscallOrder.modify fun order => "return" :: order
     pure (.returnValue 100)
   let syscallSteps ← Bap.Emu.run syscallEmu 2
@@ -1095,7 +1107,7 @@ private def runEmulator : IO Unit := do
   Bap.Emu.setReg x86SyscallEmu (reg "RAX") (.bits (BitVec.ofNat 64 39))
   (["RDI", "RSI", "RDX", "R10", "R8", "R9"]).zip [1, 2, 3, 4, 5, 6] |>.forM fun binding =>
     Bap.Emu.setReg x86SyscallEmu (reg binding.1) (.bits (BitVec.ofNat 64 binding.2))
-  let x86SyscallHook ← Bap.Emu.onSyscall x86SyscallEmu fun number args => do
+  let x86SyscallHook ← Bap.Emu.onSyscall x86SyscallEmu fun _ number args => do
     assertEqual "Emu x86-64 syscall number" 39 number
     assertEqual "Emu x86-64 syscall arguments" [1, 2, 3, 4, 5, 6] args
     pure (.returnValue 100)
@@ -1111,7 +1123,7 @@ private def runEmulator : IO Unit := do
   Bap.Emu.setReg armSyscallEmu (reg "X8") (.bits (BitVec.ofNat 64 64))
   (List.range 6).forM fun index =>
     Bap.Emu.setReg armSyscallEmu (reg s!"X{index}") (.bits (BitVec.ofNat 64 (index + 1)))
-  let armSyscallHook ← Bap.Emu.onSyscall armSyscallEmu fun number args => do
+  let armSyscallHook ← Bap.Emu.onSyscall armSyscallEmu fun _ number args => do
     assertEqual "Emu AArch64 syscall number" 64 number
     assertEqual "Emu AArch64 syscall arguments" [1, 2, 3, 4, 5, 6] args
     pure (.returnValue 100)
@@ -1126,13 +1138,13 @@ private def runEmulator : IO Unit := do
     (← LLVM.assemble "x86_64" "addq $1, %rax")) 0 0
   Bap.Emu.setReg intrinsicEmu (reg "RAX") (.bits (BitVec.ofNat 64 40))
   let missedIntrinsics ← IO.mkRef 0
-  let _ ← Bap.Emu.onIntrinsic intrinsicEmu "other" fun _ => do
+  let _ ← Bap.Emu.onIntrinsic intrinsicEmu "other" fun _ _ => do
     missedIntrinsics.modify (· + 1)
     pure .default
-  let defaultIntrinsicHook ← Bap.Emu.onIntrinsic intrinsicEmu "hlt" fun address => do
+  let defaultIntrinsicHook ← Bap.Emu.onIntrinsic intrinsicEmu "hlt" fun _ address => do
     assertEqual "Emu intrinsic receives current PC" 0 address
     pure .default
-  let proceedIntrinsicHook ← Bap.Emu.onIntrinsic intrinsicEmu "hlt" fun _ => do
+  let proceedIntrinsicHook ← Bap.Emu.onIntrinsic intrinsicEmu "hlt" fun _ _ => do
     Bap.Emu.setReg intrinsicEmu (reg "RAX") (.bits (BitVec.ofNat 64 42))
     pure .proceed
   let intrinsicSteps ← Bap.Emu.run intrinsicEmu 2
@@ -1150,7 +1162,7 @@ private def runEmulator : IO Unit := do
 
   let wildcardEmu ← Tuned.riscv64 ((← LLVM.assemble "riscv64" "ecall") ++
     (← LLVM.assemble "riscv64" "addi a0, a0, 1")) 0 0
-  let wildcardHook ← Bap.Emu.onIntrinsic wildcardEmu "*" fun _ => do
+  let wildcardHook ← Bap.Emu.onIntrinsic wildcardEmu "*" fun _ _ => do
     Bap.Emu.setReg wildcardEmu output (.bits (BitVec.ofNat 64 100))
     pure .proceed
   let wildcardSteps ← Bap.Emu.run wildcardEmu 2
@@ -1261,6 +1273,39 @@ private def rangeRegressions : IO Unit := do
   assertBits "Emu range computes what the loop does" (BitVec.ofNat 64 834) (.ok (← Bap.Emu.reg chaining a0))
   assertBits "Emu range computes the rest of the loop" (BitVec.ofNat 64 1666) (.ok (← Bap.Emu.reg chaining a1))
   assertEqual "Emu range ends with the pc at the next instruction" 4 (← Bap.Emu.pc chaining)
+  -- What a run of a range left says nothing of the next step: a hook that fails fires once, and one that moves the pc is one instruction.
+  let failing ← make loop
+  Bap.Emu.setReg failing a3 (bits 1000)
+  let _ ← Bap.Emu.run failing 100
+  let failedAt ← Bap.Emu.pc failing
+  let fired ← IO.mkRef 0
+  let _ ← Bap.Emu.onCode failing (failedAt, failedAt) fun _ _ => do
+    fired.modify (· + 1)
+    throw <| IO.userError "a hook that fails"
+  let threw ← try
+      let _ ← Bap.Emu.run failing 100
+      pure false
+    catch _ => pure true
+  assertTrue "Emu a hook that fails fails the run" threw
+  assertEqual "Emu a hook that fails after a range fires once" 1 (← fired.get)
+  let movedRun (stepwise : Bool) : IO (Nat × Nat) := do
+    let moved ← make loop
+    Bap.Emu.setReg moved a3 (bits 1000)
+    let _ ← Bap.Emu.run moved 100
+    let at' ← Bap.Emu.pc moved
+    let once ← IO.mkRef true
+    let _ ← Bap.Emu.onCode moved (at', at') fun current _ => do
+      if ← once.get then
+        once.set false
+        current.pc.set 0
+    if stepwise then
+      let mut stepped := 0
+      for _ in [0:20] do
+        if ← Bap.Emu.step moved then stepped := stepped + 1
+      pure (stepped, ← Bap.Emu.pc moved)
+    else
+      pure (← Bap.Emu.run moved 20, ← Bap.Emu.pc moved)
+  assertEqual "Emu a hook that moves the pc after a range counts as single steps do" (← movedRun true) (← movedRun false)
   -- The fuel counts instructions, wherever it runs out, and resuming goes on from there.
   for fuel in [1, 2, 3, 4, 5, 7, 11] do
     let exact ← make loop
@@ -1285,7 +1330,7 @@ private def rangeRegressions : IO Unit := do
   -- A block that needs the interpreter stays out of the range, and the range forms around it.
   let special ← make ((← rv "addi a0, a0, 1") ++ (← rv "ecall") ++ (← rv "jal -8"))
   let served ← IO.mkRef 0
-  let _ ← Bap.Emu.onSyscall special fun _ _ => do
+  let _ ← Bap.Emu.onSyscall special fun _ _ _ => do
     served.modify (· + 1)
     pure (.returnValue 0)
   let _ ← Bap.Emu.run special 30
@@ -1300,7 +1345,7 @@ private def rangeRegressions : IO Unit := do
   let hooked ← make loop
   Bap.Emu.setReg hooked a3 (bits 1000)
   let hits ← IO.mkRef 0
-  let _ ← Bap.Emu.onCode hooked (4, 4) fun _ => hits.modify (· + 1)
+  let _ ← Bap.Emu.onCode hooked (4, 4) fun _ _ => hits.modify (· + 1)
   let _ ← Bap.Emu.run hooked 300
   assertEqual "Emu range fires the hooks of its blocks" 100 (← hits.get)
   -- A hook that a write hook adds fires at the very next instruction, in a range that started with no hooks.
@@ -1310,10 +1355,10 @@ private def rangeRegressions : IO Unit := do
   Bap.Emu.setReg late a2 (bits 0x1000)
   let lateHits ← IO.mkRef ([] : List Nat)
   let added ← IO.mkRef false
-  let _ ← Bap.Emu.onWrite late (0x1000, 0x1000) fun _ _ _ => do
+  let _ ← Bap.Emu.onWrite late (0x1000, 0x1000) fun _ _ _ _ => do
     if !(← added.get) then
       added.set true
-      let _ ← Bap.Emu.onCode late (0, 12) fun pc => lateHits.modify (· ++ [pc])
+      let _ ← Bap.Emu.onCode late (0, 12) fun _ pc => lateHits.modify (· ++ [pc])
   let _ ← Bap.Emu.run late 4
   assertEqual "Emu range fires a hook added on the way" [4, 8, 12] (← lateHits.get)
   -- A store into the code that a range runs next takes effect at the next instruction.
@@ -1349,7 +1394,7 @@ private def rangeRegressions : IO Unit := do
   let readingCode := (← rv "addi a0, a0, 1") ++ (← rv "addi a1, a1, 2") ++ (← rv "addi a2, a2, 3") ++ (← rv "jal -12")
   let readings (emu : Bap.Emu.Emu) (steps : IO Unit) : IO (List String) := do
     let seen ← IO.mkRef ([] : List String)
-    let _ ← Bap.Emu.onCode emu (8, 8) fun pc => do
+    let _ ← Bap.Emu.onCode emu (8, 8) fun _ pc => do
       let values := [← Bap.Emu.reg emu a0, ← Bap.Emu.reg emu a1, ← Bap.Emu.reg emu a2]
       seen.modify (· ++ [s!"{pc} {(repr values).pretty}"])
     steps
@@ -1366,7 +1411,7 @@ private def rangeRegressions : IO Unit := do
     Bap.Emu.map emu ⟨0x1000, zeros 8, rw⟩
     Bap.Emu.setReg emu a2 (bits 0x1000)
     let seen ← IO.mkRef ([] : List String)
-    let _ ← Bap.Emu.onWrite emu (0x1000, 0x1000) fun _ _ value => do
+    let _ ← Bap.Emu.onWrite emu (0x1000, 0x1000) fun _ _ _ value => do
       seen.modify (· ++ [s!"{value} {(repr (← Bap.Emu.reg emu a0)).pretty}"])
     steps
     seen.get
@@ -1378,7 +1423,7 @@ private def rangeRegressions : IO Unit := do
   -- A budget that no slot can hold counts all the same.
   let huge ← make loop
   Bap.Emu.setReg huge a3 (bits 1000)
-  let _ ← Bap.Emu.onCode huge (12, 12) fun _ => Bap.Emu.stop huge
+  let _ ← Bap.Emu.onCode huge (12, 12) fun _ _ => Bap.Emu.stop huge
   assertEqual "Emu range counts with any fuel" 3000 (← Bap.Emu.run huge (2 ^ 64 + 1))
   -- A fault in a range leaves the emulator as a fault in single steps does, on a table of ways to fault.
   let load := (← rv "addi a0, a0, 1") ++ (← rv "addi a1, a1, 1") ++ (← rv "lb a2, 0(a3)")
@@ -1404,7 +1449,7 @@ private def rangeRegressions : IO Unit := do
       Bap.Emu.map emu ⟨0x2000, zeros 16, ⟨true, false, false⟩⟩
       for (var, value) in registers do Bap.Emu.setReg emu var (bits value)
       if hook then
-        let _ ← Bap.Emu.onCode emu (0x8000, 0x8000) fun _ => pure ()
+        let _ ← Bap.Emu.onCode emu (0x8000, 0x8000) fun _ _ => pure ()
       pure emu
     let ranged ← setup
     let single ← setup
@@ -1516,9 +1561,9 @@ private def accessHookRanges : IO Unit := do
       let pc ← Bap.Emu.pc emu
       let value ← regValue emu "X10"
       log.modify ((kind, pc, value) :: ·)
-    let _ ← Bap.Emu.onRead emu (0x1008, 0x100f) fun _ _ => note 0
-    let _ ← Bap.Emu.onWrite emu (0x1000, 0x1007) fun _ _ _ => note 1
-    let _ ← Bap.Emu.onCode emu (12, 12) fun _ => note 2
+    let _ ← Bap.Emu.onRead emu (0x1008, 0x100f) fun _ _ _ => note 0
+    let _ ← Bap.Emu.onWrite emu (0x1000, 0x1007) fun _ _ _ _ => note 1
+    let _ ← Bap.Emu.onCode emu (12, 12) fun _ _ => note 2
     let failed ← try
         let _ ← Bap.Emu.run emu fuel
         pure false
@@ -1535,7 +1580,7 @@ private def accessHookRanges : IO Unit := do
     assertEqual s!"Emu fault after hooks in a range is the same, fuel {fuel}" expected (← trial 1 16 fuel 0x9000)
   -- A step after a run that a hook stopped is one instruction.
   let halted ← fresh 1 16 0x1000
-  let _ ← Bap.Emu.onCode halted (12, 12) fun _ => Bap.Emu.stop halted
+  let _ ← Bap.Emu.onCode halted (12, 12) fun _ _ => Bap.Emu.stop halted
   let _ ← Bap.Emu.run halted 40
   assertEqual "Emu run stops at the hook" 12 (← Bap.Emu.pc halted)
   Bap.Emu.resume halted
@@ -1544,15 +1589,15 @@ private def accessHookRanges : IO Unit := do
   -- Hooks that nothing touches leave the ranges alone.
   let far ← fresh 1 16 0x1000
   let farHits ← IO.mkRef 0
-  let _ ← Bap.Emu.onRead far (0x1018, 0x101f) fun _ _ => farHits.modify (· + 1)
-  let _ ← Bap.Emu.onWrite far (0x1018, 0x101f) fun _ _ _ => farHits.modify (· + 1)
+  let _ ← Bap.Emu.onRead far (0x1018, 0x101f) fun _ _ _ => farHits.modify (· + 1)
+  let _ ← Bap.Emu.onWrite far (0x1018, 0x101f) fun _ _ _ _ => farHits.modify (· + 1)
   assertEqual "Emu range under hooks elsewhere runs all of it" 60 (← Bap.Emu.run far 60)
   assertEqual "Emu hooks elsewhere do not fire" 0 (← farHits.get)
   assertTrue "Emu range keeps chaining under hooks elsewhere" ((← Primus.Lifted.stats far.engine).nativeRuns < 10)
   -- A hook that is hit takes its steps out of the range, and removing it brings them back.
   let hit ← fresh 1 16 0x1000
   let hits ← IO.mkRef 0
-  let hook ← Bap.Emu.onRead hit (0x1008, 0x100f) fun _ _ => hits.modify (· + 1)
+  let hook ← Bap.Emu.onRead hit (0x1008, 0x100f) fun _ _ _ => hits.modify (· + 1)
   let _ ← Bap.Emu.run hit 30
   assertEqual "Emu hit hook fires once per load" 6 (← hits.get)
   assertTrue "Emu steps that met the hook are single steps" !(← hit.watchedSteps.get).isEmpty

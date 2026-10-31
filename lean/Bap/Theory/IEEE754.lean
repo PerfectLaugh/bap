@@ -1,4 +1,5 @@
 import Bap.Core.Word
+import Bap.Theory.Value
 
 namespace Bap.Theory.IEEE754
 
@@ -10,6 +11,10 @@ structure Parameters where
   w : Nat
   t : Nat
   deriving DecidableEq, Repr
+
+/-- The sort of the values of a format. -/
+def Parameters.sort (parameters : Parameters) : ValueSort :=
+  .float parameters.base parameters.w parameters.p parameters.k
 
 private def round4Log2 (value : Nat) : Nat :=
   let lower := Nat.log2 (value ^ 4)

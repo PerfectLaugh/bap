@@ -84,20 +84,9 @@ private def mc (input : String) : IO Unit := do
       throw <| IO.userError (String.intercalate "\n" result.errors)
 
 private def disassemble (path : String) : IO Unit := do
-  let image ← Image.load path
-  match image.memory.entries.find? fun entry => entry.1.contains image.entryPoint with
-  | none => throw <| IO.userError "entry point is not mapped"
-  | some (region, _) =>
-    let result ← match image.arch with
-      | .x86_64 => Disasm.Recursive.scan (← Target.X86.disassembler region.addr) region.data image.entryPoint
-      | .x86 => Disasm.Recursive.scan (← Target.X8632.disassembler region.addr) region.data image.entryPoint
-      | .aarch64 => Disasm.Recursive.scan (← Target.AArch64.disassembler region.addr) region.data image.entryPoint
-      | .riscv => Disasm.Recursive.scan (← Target.RISCV.disassembler region.addr) region.data image.entryPoint
-      | .powerpc => Disasm.Recursive.scan (← Target.PowerPC.disassembler region.addr) region.data image.entryPoint
-      | .mips => Disasm.Recursive.scan (← Target.MIPS.disassembler region.addr) region.data image.entryPoint
-      | .arm => Disasm.Recursive.scan (← Target.ARM32.disassembler region.addr) region.data image.entryPoint
-      | _ => throw <| IO.userError "unsupported disassembly architecture"
-    IO.println result.render
+  match (← Project.Project.load path).disasm with
+  | none => throw <| IO.userError "no code to disassemble"
+  | some result => IO.println result.render
 
 private def lisp (path : String) : IO Unit := do
   let input ← IO.FS.readFile path
@@ -107,9 +96,13 @@ private def lisp (path : String) : IO Unit := do
 
 private def analyze (path : String) : IO Unit := do
   let project ← Project.Project.load path
-  let xrefs := Analysis.Xrefs.create project
+  let xrefs := Analysis.Xrefs.discover project
   let callgraph := Analysis.Callgraph.create xrefs
-  IO.println s!"instructions: {project.disasm.map (fun disasm => disasm.instructions.length) |>.getD 0}"
+  let disasm := project.disasm.getD { entry := 0 }
+  IO.println s!"instructions: {disasm.instructions.length}"
+  IO.println s!"blocks: {disasm.blocks.length}"
+  IO.println s!"errors: {disasm.errors.length}"
+  IO.println s!"functions: {xrefs.functions.length}"
   IO.println s!"xrefs: {xrefs.xrefs.length}"
   IO.println s!"callgraph edges: {callgraph.graph.edges.length}"
 
@@ -119,7 +112,7 @@ private def symbolic (path : String) : IO Unit := do
   | .ok results => IO.println s!"paths: {results.length}"
   | .error error => throw <| IO.userError error
 
-def main (args : List String) : IO Unit := do
+private def run (args : List String) : IO Unit := do
   match args with
   | ["check", path] => check path
   | ["print", path] => print path
@@ -139,3 +132,9 @@ def main (args : List String) : IO Unit := do
   | ["symbolic", path] => symbolic path
   | "mc" :: atoms => mc (String.intercalate " " atoms)
   | _ => IO.println usage
+
+/-- Runs the command. A process that is done doesn't need to free what it holds, such as all the instructions of a binary. -/
+def main (args : List String) : IO Unit := do
+  run args
+  (← IO.getStdout).flush
+  IO.Process.exit 0

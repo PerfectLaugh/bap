@@ -38,28 +38,11 @@ structure Config where
 
 abbrev HookId := Nat
 
-structure ReadHook where
-  id : HookId
-  first : Nat
-  last : Nat
-  action : Nat → Nat → IO Unit
-
-structure WriteHook where
-  id : HookId
-  first : Nat
-  last : Nat
-  action : Nat → Nat → Nat → IO Unit
-
 inductive SyscallAction where
   | default | returnValue (value : Nat)
 
 inductive IntrinsicAction where
   | default | proceed
-
-structure IntrinsicHook where
-  id : HookId
-  name : String
-  action : Nat → IO IntrinsicAction
 
 structure TraceAccess where
   insn : Nat
@@ -94,6 +77,23 @@ private structure CodeHookContext where
   lastFault : IO.Ref (Option MemoryFault)
   skipCode : IO.Ref (Option Nat)
   pendingRef : IO.Ref (Option PendingBranch)
+
+structure ReadHook where
+  id : HookId
+  first : Nat
+  last : Nat
+  action : CodeHookContext → Nat → Nat → IO Unit
+
+structure WriteHook where
+  id : HookId
+  first : Nat
+  last : Nat
+  action : CodeHookContext → Nat → Nat → Nat → IO Unit
+
+structure IntrinsicHook where
+  id : HookId
+  name : String
+  action : CodeHookContext → Nat → IO IntrinsicAction
 
 structure CodeHook where
   id : HookId
@@ -430,72 +430,73 @@ def stopThread (emu : Emu) (id : ThreadId) : IO Unit := do
   else
     emu.threadsRef.modify (setThreadStopped · id true)
 
-def onCodeWith (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → IO Unit) : IO HookId := do
+private def hookContext (emu : Emu) : CodeHookContext := {
+  engine := emu.engine
+  state := emu.state
+  pc := emu.pc
+  stopped := emu.stopped
+  currentThreadRef := emu.currentThreadRef
+  trace := emu.trace
+  lastFault := emu.lastFault
+  skipCode := emu.skipCode
+  pendingRef := emu.pendingRef
+}
+
+/-- The emulator a hook sees: its registers, memory and thread are of the thread that runs it. -/
+private def withContext (emu : Emu) (context : CodeHookContext) : Emu := {
+  emu with
+    engine := context.engine
+    state := context.state
+    pc := context.pc
+    stopped := context.stopped
+    currentThreadRef := context.currentThreadRef
+    trace := context.trace
+    lastFault := context.lastFault
+    skipCode := context.skipCode
+    pendingRef := context.pendingRef
+}
+
+private def nextHookId (emu : Emu) : IO HookId := do
+  let id ← emu.nextHook.get
+  emu.nextHook.set (id + 1)
+  pure id
+
+/-- Calls `action emu address` before each instruction of the range. -/
+def onCode (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → IO Unit) : IO HookId := do
   if range.1 > range.2 then
     throw <| IO.userError "invalid Emu code-hook range"
-  let id ← emu.nextHook.get
-  emu.nextHook.set (id + 1)
-  let contextual := fun context pc => action {
-    emu with
-    engine := context.engine
-    state := context.state
-    pc := context.pc
-    stopped := context.stopped
-    currentThreadRef := context.currentThreadRef
-    trace := context.trace
-    lastFault := context.lastFault
-    skipCode := context.skipCode
-    pendingRef := context.pendingRef
-  } pc
-  emu.hooks.modify (· ++ [⟨id, range.1, range.2, contextual⟩])
+  let id ← nextHookId emu
+  emu.hooks.modify (· ++ [⟨id, range.1, range.2, fun context => action (withContext emu context)⟩])
   pure id
 
-def onCode (emu : Emu) (range : Nat × Nat) (action : Nat → IO Unit) : IO HookId :=
-  onCodeWith emu range fun _ => action
-
-def onRead (emu : Emu) (range : Nat × Nat) (action : Nat → Nat → IO Unit) : IO HookId := do
+/-- Calls `action emu address size` before each load of the range. -/
+def onRead (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → Nat → IO Unit) : IO HookId := do
   if range.1 > range.2 then
     throw <| IO.userError "invalid Emu read-hook range"
-  let id ← emu.nextHook.get
-  emu.nextHook.set (id + 1)
-  emu.readHooks.modify (· ++ [⟨id, range.1, range.2, action⟩])
+  let id ← nextHookId emu
+  emu.readHooks.modify (· ++ [⟨id, range.1, range.2, fun context => action (withContext emu context)⟩])
   pure id
 
-def onWrite (emu : Emu) (range : Nat × Nat) (action : Nat → Nat → Nat → IO Unit) : IO HookId := do
+/-- Calls `action emu address size value` before each store of the range. -/
+def onWrite (emu : Emu) (range : Nat × Nat) (action : Emu → Nat → Nat → Nat → IO Unit) : IO HookId := do
   if range.1 > range.2 then
     throw <| IO.userError "invalid Emu write-hook range"
-  let id ← emu.nextHook.get
-  emu.nextHook.set (id + 1)
-  emu.writeHooks.modify (· ++ [⟨id, range.1, range.2, action⟩])
+  let id ← nextHookId emu
+  emu.writeHooks.modify (· ++ [⟨id, range.1, range.2, fun context => action (withContext emu context)⟩])
   pure id
 
-def onSyscallWith (emu : Emu) (action : Emu → Nat → List Nat → IO SyscallAction) : IO HookId := do
-  let id ← emu.nextHook.get
-  emu.nextHook.set (id + 1)
-  let contextual := fun context number args => action {
-    emu with
-    engine := context.engine
-    state := context.state
-    pc := context.pc
-    stopped := context.stopped
-    currentThreadRef := context.currentThreadRef
-    trace := context.trace
-    lastFault := context.lastFault
-    skipCode := context.skipCode
-    pendingRef := context.pendingRef
-  } number args
-  emu.syscallHooks.modify (· ++ [⟨id, contextual⟩])
+/-- Calls `action emu number arguments` at each system call. -/
+def onSyscall (emu : Emu) (action : Emu → Nat → List Nat → IO SyscallAction) : IO HookId := do
+  let id ← nextHookId emu
+  emu.syscallHooks.modify (· ++ [⟨id, fun context => action (withContext emu context)⟩])
   pure id
 
-def onSyscall (emu : Emu) (action : Nat → List Nat → IO SyscallAction) : IO HookId :=
-  onSyscallWith emu fun _ => action
-
-def onIntrinsic (emu : Emu) (name : String) (action : Nat → IO IntrinsicAction) : IO HookId := do
+/-- Calls `action emu address` at each intrinsic with this name, or at all of them with `"*"`. -/
+def onIntrinsic (emu : Emu) (name : String) (action : Emu → Nat → IO IntrinsicAction) : IO HookId := do
   if name.isEmpty then
     throw <| IO.userError "intrinsic hook name is empty"
-  let id ← emu.nextHook.get
-  emu.nextHook.set (id + 1)
-  emu.intrinsicHooks.modify (· ++ [⟨id, name, action⟩])
+  let id ← nextHookId emu
+  emu.intrinsicHooks.modify (· ++ [⟨id, name, fun context => action (withContext emu context)⟩])
   pure id
 
 def removeHook (emu : Emu) (id : HookId) : IO Unit := do
@@ -517,7 +518,7 @@ def clearHooks (emu : Emu) : IO Unit := do
   emu.breakpointsRef.set []
 
 def addBreakpoint (emu : Emu) (address : Nat) : IO HookId := do
-  let id ← onCodeWith emu (address, address) fun current _ => current.stopped.set true
+  let id ← onCode emu (address, address) fun current _ => current.stopped.set true
   emu.breakpointsRef.modify fun breakpoints => (id, address) :: breakpoints
   pure id
 
@@ -635,17 +636,7 @@ private def notifyCode (emu : Emu) (address : Nat) : IO Unit := do
   if (← emu.hooks.get).isEmpty then return
   serialize emu <| do
   let hooks ← emu.hooks.get
-  let context : CodeHookContext := {
-    engine := emu.engine
-    state := emu.state
-    pc := emu.pc
-    stopped := emu.stopped
-    currentThreadRef := emu.currentThreadRef
-    trace := emu.trace
-    lastFault := emu.lastFault
-    skipCode := emu.skipCode
-    pendingRef := emu.pendingRef
-  }
+  let context := hookContext emu
   (hooksForCode (·.first) (·.last) hooks address).forM fun hook =>
     hook.action context address
 
@@ -694,11 +685,11 @@ private def notifyMemory (emu : Emu) (write : Bool) (address size value : Nat) :
       | none => pure ()
       let hit := hooksForAccess (·.first) (·.last) (← emu.writeHooks.get) address size
       takeBack !hit.isEmpty
-      hit.forM fun hook => serialize emu <| hook.action address size value
+      hit.forM fun hook => serialize emu <| hook.action (hookContext emu) address size value
     else do
       let hit := hooksForAccess (·.first) (·.last) (← emu.readHooks.get) address size
       takeBack !hit.isEmpty
-      hit.forM fun hook => serialize emu <| hook.action address size
+      hit.forM fun hook => serialize emu <| hook.action (hookContext emu) address size
   notifyAccess mapped write address size fault
     (Primus.Lifted.markDirtyRange emu.engine address (address + size - 1))
     (recordAccess emu write address size value) hooks
@@ -1052,17 +1043,7 @@ private def dispatchSyscall (emu : Emu) : IO (Option Nat) := serialize emu <| do
     let (numberRegister, argumentRegisters, resultRegister) := syscallRegisters emu.config.syscallAbi
     let number ← readWord emu numberRegister
     let args ← argumentRegisters.mapM (readWord emu)
-    let context : CodeHookContext := {
-      engine := emu.engine
-      state := emu.state
-      pc := emu.pc
-      stopped := emu.stopped
-      currentThreadRef := emu.currentThreadRef
-      trace := emu.trace
-      lastFault := emu.lastFault
-      skipCode := emu.skipCode
-      pendingRef := emu.pendingRef
-    }
+    let context := hookContext emu
     let rec serve : List SyscallHook → IO (Option Nat)
       | [] => pure none
       | hook :: rest => do
@@ -1080,7 +1061,7 @@ private def dispatchIntrinsic (emu : Emu) (name : String) : IO Bool := serialize
   let rec serve : List IntrinsicHook → IO Bool
     | [] => pure false
     | hook :: rest => do
-      match ← hook.action address with
+      match ← hook.action (hookContext emu) address with
       | .proceed => pure true
       | .default => serve rest
   serve selected
@@ -1236,16 +1217,28 @@ private def dispatchSpecial (emu : Emu) (name : String) : IO Bool := do
   else
     dispatchIntrinsic emu name
 
-/-- The instruction at `address`, on the state of the emulator. -/
-private def executeBlock (emu : Emu) (address : Nat) : IO (Nat × Bil.Effect) := do
+/-- The references of a step that may run a range. -/
+@[inline] private def rangeCells (emu : Emu) : RangeCells IO where
+  budget := emu.budget.get
+  setBudget := emu.budget.set
+  lastBudget := emu.lastBudget.get
+  setLastBudget := emu.lastBudget.set
+  chained := emu.engine.chained.get
+  setChained := emu.engine.chained.set
+  watched := fun address => do pure ((← emu.watchedSteps.get).contains address)
+  watch := fun address => emu.watchedSteps.modify (·.insert address)
+  restarting := emu.restarting.get
+  setRestarting := emu.restarting.set
+  pc := emu.pc.get
+  pending := emu.pendingRef.get
+  accessHooks := do pure !((← emu.readHooks.get).isEmpty && (← emu.writeHooks.get).isEmpty)
+  deferred := emu.engine.deferMemorySync
+
+/-- A run of the instruction at `address` that may chain as many as `budget` after it, on the state of the emulator. -/
+private def runRange (emu : Emu) (address budget : Nat) : IO (Nat × Bil.Effect) := do
   let state ← emu.state.get
   let quiet ← rangeIsQuiet emu
   emu.rangeQuiet.set quiet
-  let allowed ← emu.budget.get
-  emu.budget.set 0
-  let budget := rangeBudgetOf allowed (accessesWatched ((← emu.watchedSteps.get).contains address)
-    emu.engine.deferMemorySync !((← emu.readHooks.get).isEmpty && (← emu.writeHooks.get).isEmpty))
-  emu.lastBudget.set budget
   emu.rangeStart.set (some address)
   let result ← Primus.Lifted.runBlockObserved emu.engine (fetch emu) (lift emu) state address
     (some (notifyMemory emu)) (some (observeRangeCode emu)) (!quiet) budget
@@ -1253,6 +1246,10 @@ private def executeBlock (emu : Emu) (address : Nat) : IO (Nat × Bil.Effect) :=
   emu.state.set result.state
   emu.lastFault.set none
   pure (result.next, result.effect)
+
+/-- The instruction at `address`, on the state of the emulator. -/
+private def executeBlock (emu : Emu) (address : Nat) : IO (Nat × Bil.Effect) :=
+  executeRangeM (rangeCells emu) (runRange emu) address
 
 /-- The references that say where the thread of the emulator is. -/
 @[inline] private def controlCells (emu : Emu) : ControlCells IO where
@@ -1283,29 +1280,15 @@ def step (emu : Emu) : IO Bool := do
   emu.budget.set 0
   stepM (ε := IO.Error) (stepOps emu)
 
-/-- After a failed step, whether it was one that ran into a hook of an access. It has rolled back to its start, with the code
-hooks of its address fired and not to fire again, and its address runs one instruction at a time from now on. -/
-private def rangeRestart (emu : Emu) : IO Bool := do
-  if ← emu.restarting.get then
-    emu.restarting.set false
-    let address ← emu.pc.get
-    emu.watchedSteps.modify (·.insert address)
-    pure true
-  else
-    pure false
-
 /-- Up to `maxSteps` instructions. Those of a compiled range count as well, and it stops where they run out. A fault in a
 range leaves everything as single steps do. A worker of a parallel round leaves that to the rollback of its round. -/
 def run (emu : Emu) (maxSteps : Nat := 100000) : IO Nat :=
   if rangeLimitOf emu.config ≤ 1 then
     runM (stepM (ε := IO.Error) (stepOps emu)) maxSteps 0
   else
-    runPreciseM (runChainedM (restartM (stepM (ε := IO.Error) (stepOps emu)) (rangeRestart emu)) emu.budget.set emu.engine.chained.get maxSteps maxSteps 0)
-      (stepM (ε := IO.Error) (stepOps emu))
-      (do
-        emu.budget.set 0
-        pure ((← emu.lastBudget.get) != 0 && !emu.engine.deferMemorySync))
-      (maxSteps + 1)
+    runPreciseM (runChainedM (restartM (stepM (ε := IO.Error) (stepOps emu)) (rangeRestartM (rangeCells emu))) (rangeAllowM (rangeCells emu))
+        (rangeCells emu).chained maxSteps maxSteps 0)
+      (step emu) (rangeAgainM (rangeCells emu)) (maxSteps + 1)
 
 private def switchNextThread (emu : Emu) : IO Bool := do
   saveCurrentThread emu

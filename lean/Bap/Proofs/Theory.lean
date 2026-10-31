@@ -285,6 +285,39 @@ theorem order_top_right {sort : EffectSort} (h : sort.isTop = false) : order sor
 theorem order_top_left {sort : EffectSort} (h : sort.isTop = false) : order .top sort = .greater := by
   simp [order, isTop, h]
 
+/-! The equality of what sorts denote. -/
+
+theorem Effects.ofSort_eq_iff {left right : EffectSort} : Effects.ofSort left = Effects.ofSort right ↔ Same left right :=
+  ⟨fun h => (order_eq_equal_iff _ _).1 (Quotient.exact h), fun h => Quotient.sound ((order_eq_equal_iff _ _).2 h)⟩
+
+theorem Effects.both_comm (left right : Effects) : Effects.both left right = Effects.both right left := by
+  induction left using Quotient.ind
+  induction right using Quotient.ind
+  exact Effects.ofSort_eq_iff.2 (EffectLaws.both_comm _ _)
+
+theorem Effects.both_assoc (a b c : Effects) : Effects.both (Effects.both a b) c = Effects.both a (Effects.both b c) := by
+  induction a using Quotient.ind
+  induction b using Quotient.ind
+  induction c using Quotient.ind
+  exact Effects.ofSort_eq_iff.2 (EffectLaws.both_assoc _ _ _)
+
+theorem Effects.both_idem (a : Effects) : Effects.both a a = a := by
+  induction a using Quotient.ind
+  exact Effects.ofSort_eq_iff.2 (EffectLaws.both_idem _)
+
+theorem Effects.bot_both (a : Effects) : Effects.both (Effects.ofSort .bot) a = a := by
+  induction a using Quotient.ind
+  exact Effects.ofSort_eq_iff.2 (EffectLaws.both_bot_left _)
+
+theorem Effects.top_both (a : Effects) : Effects.both (Effects.ofSort .top) a = Effects.ofSort .top := by
+  induction a using Quotient.ind
+  exact Effects.ofSort_eq_iff.2 (EffectLaws.both_top_left _)
+
+theorem Effects.order_eq_equal_iff (left right : Effects) : Effects.order left right = .equal ↔ left = right := by
+  induction left using Quotient.ind
+  induction right using Quotient.ind
+  exact ⟨fun h => Quotient.sound h, fun h => Quotient.exact h⟩
+
 end EffectLaws
 
 /-! ## Value sorts -/
@@ -1609,11 +1642,33 @@ theorem declare_inherits {declaration : Declaration} {parent : T} (hp : declarat
     let child := declare declaration
     child.bits = parent.bits ∧ child.byte = parent.byte ∧ child.dataAlignment = parent.dataAlignment ∧
       child.codeAlignment = parent.codeAlignment ∧ child.data = parent.data ∧ child.code = parent.code ∧
-      child.regs = parent.regs ∧ child.aliases = parent.aliases ∧
+      child.regs = parent.regs ∧ child.aliases = parent.aliases ∧ child.aliased = parent.aliased ∧
       child.endianness = parent.endianness ∧ child.system = parent.system ∧ child.abi = parent.abi ∧
       child.fabi = parent.fabi ∧ child.filetype = parent.filetype ∧ child.options = parent.options := by
   simp [declare, hp, hbits, hbyte, hdataAlignment, hcodeAlignment, hdata, hcode, hregs,
     haliases, hendianness, hsystem, habi, hfabi, hfiletype, hoptions]
+
+/-- What `locate` finds depends on the equations and on what was marked as an alias, and on no other field of a target. -/
+private theorem locate_congr {left right : T} (ha : left.aliases = right.aliases) (hb : left.aliased = right.aliased) (fuel : Nat)
+    (seen : List (RV × Nat)) (var : RV) (index : Nat) :
+    left.locate fuel seen var index = right.locate fuel seen var index := by
+  induction fuel generalizing seen var index with
+  | zero => rfl
+  | succ fuel ih =>
+    simp only [Target.locate, Target.isAlias, Target.linked, ha, hb, ih]
+    rfl
+
+/-- **A child that declares no aliases has the aliases of its parent as they were solved there**, as `Target.extend` upstream, whatever
+it does to the roles of its registers. -/
+theorem unalias_inherited {declaration : Declaration} {parent : T} (hp : declaration.parent = some parent)
+    (ha : declaration.aliases = none) (var : RV) : (declare declaration).unalias var = parent.unalias var := by
+  have h1 : (declare declaration).aliases = parent.aliases := by simp [declare, hp, ha]
+  have h2 : (declare declaration).aliased = parent.aliased := by simp [declare, hp, ha]
+  have hf : (declare declaration).aliasFuel = parent.aliasFuel := by simp only [Target.aliasFuel, h1]
+  have hl : (declare declaration).locate parent.aliasFuel [] var = parent.locate parent.aliasFuel [] var :=
+    funext fun index => locate_congr h1 h2 _ _ _ _
+  simp only [Target.unalias, Target.isAlias, h2, hf, hl]
+  rfl
 
 /-- Explicit fields always win over inheritance, whatever the parent is. -/
 theorem declare_overrides (declaration : Declaration) :
@@ -1830,45 +1885,40 @@ theorem matches_eq_matching_isSome (target : T) (name : String) :
 
 /-! ### The registry -/
 
-theorem mem_register (candidate target : T) (registry : List T) :
-    candidate ∈ register target registry ↔
-      candidate = target ∨ (candidate ∈ registry ∧ candidate.name ≠ target.name) := by
-  simp [register]
+/-- A name is taken once: what the registry has a target of is not replaced, as upstream's `Target.declare` fails. -/
+theorem register_taken {target : T} {registry : List T} (h : ∃ registered ∈ registry, registered.name = target.name) :
+    ∃ reason, register target registry = .error reason := by
+  have : (registry.any fun registered => registered.name == target.name) = true := by simpa using h
+  exact ⟨_, by simp only [register, this, ↓reduceIte]; rfl⟩
 
-theorem register_names_nodup (target : T) (registry : List T)
-    (h : (registry.map Target.name).Nodup) : ((register target registry).map Target.name).Nodup := by
-  simp only [register, List.map_cons, List.nodup_cons, List.mem_map, List.mem_filter, not_exists, not_and]
-  refine ⟨?_, ?_⟩
-  · rintro x ⟨_, hne⟩ heq
-    simp [heq] at hne
-  · induction registry with
-    | nil => simp
-    | cons head tail ih =>
-      simp only [List.map_cons, List.nodup_cons, List.mem_map] at h
-      simp only [List.filter_cons]
-      split
-      · simp only [List.map_cons, List.nodup_cons, List.mem_map, List.mem_filter]
-        exact ⟨fun ⟨x, ⟨hx, _⟩, heq⟩ => h.1 ⟨x, hx, heq⟩, ih h.2⟩
-      · exact ih h.2
+theorem register_fresh {target : T} {registry : List T} (h : ∀ registered ∈ registry, registered.name ≠ target.name) :
+    register target registry = .ok (target :: registry) := by
+  have : (registry.any fun registered => registered.name == target.name) = false := by
+    simpa using h
+  simp only [register, this, Bool.false_eq_true, ↓reduceIte]
 
-theorem register_idempotent (target : T) (registry : List T) :
-    register target (register target registry) = register target registry := by
-  simp only [register, List.filter_cons]
-  simp [List.filter_filter]
+/-- What `register` returns has the target in front of what was there, none of which has its name. -/
+theorem register_ok {target : T} {registry next : List T} (h : register target registry = .ok next) :
+    next = target :: registry ∧ ∀ registered ∈ registry, registered.name ≠ target.name := by
+  unfold register at h
+  split at h
+  · cases h
+  · rename_i hany
+    simp only [Except.ok.injEq] at h
+    refine ⟨h.symm, fun registered hm he => hany ?_⟩
+    simpa using ⟨registered, hm, he⟩
 
-/-- Registering different names commutes, up to list order. -/
-theorem register_comm {left right : T} (h : left.name ≠ right.name) (registry : List T) :
-    (register left (register right registry)).Perm (register right (register left registry)) := by
-  have hl : (right.name != left.name) = true := by simpa using Ne.symm h
-  have hr : (left.name != right.name) = true := by simpa using h
-  simp only [register, List.filter_cons, hl, hr, ite_true, List.filter_filter]
-  have hcomm : registry.filter (fun x => (x.name != left.name) && (x.name != right.name)) =
-      registry.filter (fun x => (x.name != right.name) && (x.name != left.name)) := by
-    apply List.filter_congr
-    intro x _
-    exact Bool.and_comm _ _
-  rw [hcomm]
-  exact List.Perm.swap _ _ _
+theorem register_names_nodup {target : T} {registry next : List T} (hr : register target registry = .ok next)
+    (h : (registry.map Target.name).Nodup) : (next.map Target.name).Nodup := by
+  obtain ⟨rfl, hfresh⟩ := register_ok hr
+  simp only [List.map_cons, List.nodup_cons, List.mem_map, not_exists, not_and]
+  exact ⟨fun x hx he => hfresh x hx he, h⟩
+
+/-- Registering a second time fails: a registration can't be repeated, which is why it needs no law of idempotence. -/
+theorem register_twice {target : T} {registry next : List T} (h : register target registry = .ok next) :
+    ∃ reason, register target next = .error reason := by
+  obtain ⟨rfl, _⟩ := register_ok h
+  exact register_taken ⟨target, List.mem_cons_self, rfl⟩
 
 theorem get_sound {name : String} {registry : List T} {target : T} (h : get name registry = some target) :
     target ∈ registry ∧ target.name = name := by
@@ -1901,32 +1951,16 @@ theorem get_ignores_nicknames (name : String) {registry : List T} (h : ∀ targe
   simp only [Bap.Theory.get, List.find?_eq_none, decide_eq_true_eq]
   exact h
 
-theorem get_register_self (target : T) (registry : List T) :
-    get target.name (register target registry) = some target := by
-  simp [Bap.Theory.get, register]
-
-private theorem find?_filter_of_false {p q : T → Bool} (values : List T)
-    (h : ∀ value ∈ values, q value = false → p value = false) :
-    (values.filter q).find? p = values.find? p := by
-  induction values with
-  | nil => rfl
-  | cons head tail ih =>
-    have htail := ih fun value hmem => h value (List.mem_cons_of_mem _ hmem)
-    simp only [List.filter_cons]
-    cases hq : q head with
-    | true => simp [List.find?_cons, htail]
-    | false =>
-      have hp := h head List.mem_cons_self hq
-      simp [hp, htail]
+theorem get_register_self {target : T} {registry next : List T} (h : register target registry = .ok next) :
+    get target.name next = some target := by
+  obtain ⟨rfl, _⟩ := register_ok h
+  simp [Bap.Theory.get]
 
 /-- Registering a target leaves every other name's lookup alone. -/
-theorem get_register_frame {target : T} {name : String} (registry : List T) (hne : target.name ≠ name) :
-    get name (register target registry) = get name registry := by
-  simp only [Bap.Theory.get, register, List.find?_cons, hne, decide_false]
-  apply find?_filter_of_false
-  intro value _ hq
-  have : value.name = target.name := by simpa using hq
-  simp [this, hne]
+theorem get_register_frame {target : T} {name : String} {registry next : List T} (h : register target registry = .ok next)
+    (hne : target.name ≠ name) : get name next = get name registry := by
+  obtain ⟨rfl, _⟩ := register_ok h
+  simp only [Bap.Theory.get, List.find?_cons, hne, decide_false]
 
 /-! ### Selection -/
 
@@ -1944,6 +1978,32 @@ theorem fieldMatches_unknown_actual [DecidableEq α] (strict : Bool) {none wante
     fieldMatches strict none none wanted = false := by
   cases strict <;> simp [fieldMatches, Ne.symm h, h]
 
+/-- The options are partially ordered, with nothing at the bottom. -/
+theorem Options.le_refl (options : Options) : Options.le options options = true := by
+  simp [Options.le]
+
+theorem Options.le_trans {a b c : Options} (hab : Options.le a b = true) (hbc : Options.le b c = true) :
+    Options.le a c = true := by
+  simp only [Options.le, List.all_eq_true, List.contains_iff_mem] at *
+  exact fun x hx => hbc x (hab x hx)
+
+theorem Options.nil_le (options : Options) : Options.le [] options = true := rfl
+
+/-- `same` is equality up to the order and repetition of properties, and so of `le`. -/
+theorem Options.same_iff (left right : Options) :
+    Options.same left right = true ↔ ∀ entry, entry ∈ left ↔ entry ∈ right := by
+  simp only [Options.same, Options.le, Bool.and_eq_true, List.all_eq_true, List.contains_iff_mem]
+  exact ⟨fun h x => ⟨h.1 x, h.2 x⟩, fun h => ⟨fun x => (h x).1, fun x => (h x).2⟩⟩
+
+theorem optionsMatch_iff (strict : Bool) (actual wanted : Options) :
+    optionsMatch strict actual wanted = true ↔
+      (∀ entry, entry ∈ wanted → entry ∈ actual) ∧ (strict = true → ∀ entry, entry ∈ actual → entry ∈ wanted) := by
+  cases strict
+  · simp [optionsMatch, Options.le]
+  · simp only [optionsMatch, ↓reduceIte, Options.same, Options.le, Bool.and_eq_true, List.all_eq_true, List.contains_iff_mem]
+    simp only [forall_const]
+    exact ⟨fun h => ⟨h.2, h.1⟩, fun h => ⟨h.2, h.1⟩⟩
+
 /-- The conditions `filter` imposes on one target. -/
 def Selected (selection : Selection) (target : T) : Prop :=
   target.name ≠ unknown.name ∧ selection.parent.belongs target = true ∧
@@ -1951,7 +2011,7 @@ def Selected (selection : Selection) (target : T) : Prop :=
     fieldMatches selection.strict .unknown target.abi selection.abi = true ∧
     fieldMatches selection.strict .unknown target.fabi selection.fabi = true ∧
     fieldMatches selection.strict .unknown target.filetype selection.filetype = true ∧
-    fieldMatches selection.strict "" target.options selection.options = true
+    optionsMatch selection.strict target.options selection.options = true
 
 theorem mem_filter (selection : Selection) (targets : List T) (target : T) :
     target ∈ filter selection targets ↔ target ∈ targets ∧ Selected selection target := by
@@ -1963,7 +2023,7 @@ theorem filter_default {targets : List T} (h : ∀ target ∈ targets, Declared 
   apply List.filter_eq_self.2
   intro target hmem
   obtain ⟨hd, hn⟩ := h target hmem
-  simp [hd.unknown_belongs, fieldMatches, hn]
+  simp [hd.unknown_belongs, fieldMatches, hn, optionsMatch, Options.le]
 
 theorem filter_idempotent (selection : Selection) (targets : List T) :
     filter selection (filter selection targets) = filter selection targets := by
@@ -1975,9 +2035,9 @@ theorem filter_strict_subset (selection : Selection) (targets : List T) {target 
     target ∈ filter { selection with strict := false } targets := by
   rw [mem_filter] at *
   obtain ⟨hmem, h₀, h₁, h₂, h₃, h₄, h₅, h₆⟩ := h
-  simp only [fieldMatches_iff] at h₂ h₃ h₄ h₅ h₆ ⊢
+  simp only [fieldMatches_iff, optionsMatch_iff] at h₂ h₃ h₄ h₅ h₆ ⊢
   refine ⟨hmem, h₀, h₁, ?_⟩
-  simp only [fieldMatches_iff, true_and] at *
+  simp only [fieldMatches_iff, optionsMatch_iff, true_and, Bool.false_eq_true, false_implies, and_true] at *
   grind
 
 /-- A strict selection demands exactly the requested properties, inherited ones included. -/
@@ -1986,8 +2046,8 @@ theorem filter_strict_iff {selection : Selection} (hstrict : selection.strict = 
     target ∈ filter selection targets ↔
       target ∈ targets ∧ target.name ≠ unknown.name ∧ selection.parent.belongs target = true ∧
         target.system = selection.system ∧ target.abi = selection.abi ∧ target.fabi = selection.fabi ∧
-        target.filetype = selection.filetype ∧ target.options = selection.options := by
-  simp [mem_filter, Selected, fieldMatches_iff, hstrict]
+        target.filetype = selection.filetype ∧ Options.same target.options selection.options = true := by
+  simp [mem_filter, Selected, fieldMatches_iff, hstrict, optionsMatch]
 
 /-- A non-strict selection only constrains the properties it names. -/
 theorem filter_nonstrict_system {selection : Selection} (hstrict : selection.strict = false) {targets : List T}
@@ -2074,8 +2134,25 @@ theorem select_nonunique_closest {selection : Selection} (hunique : selection.un
 /-! ### Registers -/
 
 theorem hasRole_iff (target : T) (var : RV) (role : Role) :
-    target.hasRole var role = true ↔ ∃ group ∈ target.regs, role ∈ group.1 ∧ var ∈ group.2 := by
+    target.hasRole var role = true ↔ ∃ group ∈ target.regs, role ∈ group.1 ∧ ∃ other ∈ group.2, var.sameReg other = true := by
   simp [Target.hasRole]
+
+theorem sameReg_self (var : RV) : var.sameReg var = true := by
+  simp [Var.sameReg]
+
+/-- A register has a role if it is in a group of it. -/
+theorem hasRole_of_mem {target : T} {var : RV} {role : Role} {group : List Role × List RV} (hg : group ∈ target.regs)
+    (hr : role ∈ group.1) (hv : var ∈ group.2) : target.hasRole var role = true :=
+  (hasRole_iff _ _ _).2 ⟨group, hg, hr, var, hv, sameReg_self var⟩
+
+/-- **The role of a register does not depend on the sort it is asked with**, as upstream's `has_roles`, which compares `Ident`s alone. -/
+theorem hasRole_sameReg (target : T) {left right : RV} (h : left.sameReg right = true) (role : Role) :
+    target.hasRole left role = target.hasRole right role := by
+  have same (other : RV) : left.sameReg other = right.sameReg other := by
+    simp only [Var.sameReg, Bool.and_eq_true, beq_iff_eq] at h
+    obtain ⟨⟨⟨h1, h2⟩, h3⟩, h4⟩ := h
+    simp only [Var.sameReg, h1, h2, h3, h4]
+  simp only [Target.hasRole, same]
 
 /-- `registers` holds what has all the requested roles and none of the excluded ones, among the
 registers that have any role at all. -/
@@ -2103,13 +2180,13 @@ theorem registers_roles_anti (target : T) (exclude : List Role) {few many : List
   rw [mem_registers] at *
   exact ⟨hv.1, fun role hr => hv.2.1 role (h role hr), hv.2.2⟩
 
+/-- A register in a group with a role, as `registers` has it, which is one of the sorts it may be asked with. -/
+def Registered (target : T) (var : RV) : Prop := ∃ group ∈ target.regs, group.1 ≠ [] ∧ var ∈ group.2
+
 theorem mem_registers_singleton (target : T) (role : Role) (var : RV) :
-    var ∈ target.registers [role] ↔ target.hasRole var role = true := by
+    var ∈ target.registers [role] ↔ Registered target var ∧ target.hasRole var role = true := by
   rw [mem_registers]
-  simp only [List.mem_singleton, forall_eq, List.not_mem_nil, false_implies, implies_true, and_true]
-  refine ⟨fun h => h.2, fun h => ⟨?_, h⟩⟩
-  obtain ⟨group, hg, hr, hv⟩ := (hasRole_iff _ _ _).1 h
-  exact ⟨group, hg, List.ne_nil_of_mem hr, hv⟩
+  simp [Registered]
 
 /-- Several roles select the intersection, not the union, of the single-role answers. -/
 theorem mem_registers_roles (target : T) {roles : List Role} (hne : roles ≠ []) (var : RV) :
@@ -2117,12 +2194,11 @@ theorem mem_registers_roles (target : T) {roles : List Role} (hne : roles ≠ []
   simp only [mem_registers_singleton]
   rw [mem_registers]
   simp only [List.not_mem_nil, false_implies, implies_true, and_true]
-  refine ⟨fun h => h.2, fun h => ⟨?_, h⟩⟩
+  refine ⟨fun h role hr => ⟨h.1, h.2 role hr⟩, fun h => ?_⟩
   cases roles with
   | nil => exact absurd rfl hne
   | cons role rest =>
-    obtain ⟨group, hg, hr, hv⟩ := (hasRole_iff _ _ _).1 (h role List.mem_cons_self)
-    exact ⟨group, hg, List.ne_nil_of_mem hr, hv⟩
+    exact ⟨(h role List.mem_cons_self).1, fun role hr => (h role hr).2⟩
 
 /-- An excluded role removes a register even when another of its groups would keep it. -/
 theorem registers_exclude_any_group {target : T} {roles exclude : List Role} {var : RV} {role : Role}
@@ -2160,30 +2236,32 @@ theorem reg_isSome_iff (target : T) (role : Role) (exclude : List Role) :
   unfold Target.reg
   split <;> simp_all
 
-/-- `hasRoles` means `var` is registered under each role, as upstream's `has_roles`. -/
+/-- `hasRoles` means `var` has each role, as upstream's `has_roles`. -/
 theorem hasRoles_iff (target : T) (roles : List Role) (var : RV) :
-    target.hasRoles roles var = true ↔ ∀ role ∈ roles, var ∈ target.registers [role] := by
-  simp [Target.hasRoles, mem_registers_singleton]
+    target.hasRoles roles var = true ↔ ∀ role ∈ roles, target.hasRole var role = true := by
+  simp [Target.hasRoles]
 
 /-- `registers` and `hasRoles` agree for any non-empty role list. -/
-theorem mem_registers_iff_hasRoles (target : T) {roles : List Role} (hne : roles ≠ []) (var : RV) :
+theorem mem_registers_iff_hasRoles (target : T) {roles : List Role} (hne : roles ≠ []) {var : RV} (hreg : Registered target var) :
     var ∈ target.registers roles ↔ target.hasRoles roles var = true := by
   rw [mem_registers_roles target hne, hasRoles_iff]
+  simp only [mem_registers_singleton]
+  exact ⟨fun h role hr => (h role hr).2, fun h role hr => ⟨hreg, h role hr⟩⟩
 
 /-- Intended, as upstream's `List.for_all`: "has all of no roles" holds for any variable. -/
 theorem hasRoles_nil (target : T) (var : RV) : target.hasRoles [] var = true := rfl
 
 /-- A variable the target does not register has none of the roles asked for. -/
 theorem hasRoles_absent {target : T} {var : RV} {roles : List Role} (hne : roles ≠ [])
-    (habsent : ∀ group ∈ target.regs, var ∉ group.2) : target.hasRoles roles var = false := by
+    (habsent : ∀ group ∈ target.regs, ∀ other ∈ group.2, var.sameReg other = false) : target.hasRoles roles var = false := by
   cases roles with
   | nil => exact absurd rfl hne
   | cons role rest =>
     apply Bool.eq_false_iff.2
     intro h
-    obtain ⟨group, hg, _, hv⟩ := (hasRole_iff ..).1 ((mem_registers_singleton ..).1
-      ((hasRoles_iff ..).1 h role List.mem_cons_self))
-    exact habsent group hg hv
+    obtain ⟨group, hg, _, other, ho, hs⟩ := (hasRole_iff ..).1 ((hasRoles_iff ..).1 h role List.mem_cons_self)
+    rw [habsent group hg other ho] at hs
+    cases hs
 
 /-- Roles accumulate independently of how the register groups are laid out. -/
 theorem hasRoles_append (target : T) (first second : List Role) (var : RV) :

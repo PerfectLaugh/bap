@@ -725,7 +725,7 @@ def mips (env : Env) (site : Site) : Outcome := do
   | 7 | 8 => store 4 (setLo16 (← ld env site 0 4) (s + (← a16) + mipsGp0 env sym - gp))
   | 10 =>
     let insn ← ld env site 0 4
-    let a := sext ((insn &&& 0xffff) <<< 2 : Nat) 18
+    let a := addendOf site (sext ((insn &&& 0xffff) <<< 2 : Nat) 18)
     store 4 (setLo16 insn ((s + a - p) >>> 2))
   | 12 => store 4 (s + (← a32) + mipsGp0 env sym - gp)
   | 18 => if env.width == 64 then store 8 (s + (← a32)) else pure none
@@ -1100,8 +1100,11 @@ def siteOf (tables : Tables) (report : Bool) (rel : Rel) : LinkM (Option Site) :
 /-! ### Field overflow
 
 What a relocation stores is cut to the bits of its field, and most psABIs make it an error if that loses anything, for the
-fields that are not explicitly a part of a bigger value (the `_NC`, `LO` and `HA` ones). These are the same checks as `ld.lld`'s
-`checkInt`, `checkUInt` and `checkIntUInt`, on values as wide as the machine's word. -/
+fields that are not explicitly a part of a bigger value (the `_NC`, `LO` and `HA` ones). These are `ld.lld`'s `checkInt`,
+`checkUInt` and `checkIntUInt` (`lld/ELF/Arch/*.cpp` of LLVM 23.1.4, each entry read against `relocate`), on values as wide as the
+machine's word. Where a relocation has a check here and none there, the psABI has one or the value does not reach what it says:
+what lld does not link at all (`R_ARM_ABS8`, `R_ARM_ABS16`, `R_MIPS_LITERAL`, `R_PPC64_ADDR24`, `R_PPC64_REL16` and the checked
+`TLSLE_*_TPREL_LO12` of AArch64), `R_PPC64_ADDR14` and `R_MIPS_26`, which lld cuts in silence. -/
 
 /-- How a field holds its value. -/
 inductive FieldKind where
@@ -1177,9 +1180,8 @@ def aarch64Field (env : Env) (state : LinkState) (site : Site) : Option FieldChe
   match site.rel.typ with
   | 0x102 => some ⟨.either, 32, x⟩
   | 0x103 => some ⟨.either, 16, x⟩
-  | 0x105 => some ⟨.either, 32, x - p⟩
-  | 0x13a => some ⟨.signed, 32, x - p⟩
-  | 0x106 => some ⟨.either, 16, x - p⟩
+  | 0x105 | 0x13a => some ⟨.signed, 32, x - p⟩
+  | 0x106 => some ⟨.signed, 16, x - p⟩
   | 0x107 => some ⟨.unsigned, 16, x⟩
   | 0x109 => some ⟨.unsigned, 32, x⟩
   | 0x10b => some ⟨.unsigned, 48, x⟩
@@ -1191,12 +1193,19 @@ def aarch64Field (env : Env) (state : LinkState) (site : Site) : Option FieldChe
   | 0x113 => some ⟨.signed, 33, page x - page p⟩
   | 0x117 => some ⟨.signed, 16, x - p⟩
   | 0x11a | 0x11b => some ⟨.signed, 28, x - p⟩
+  | 0x11f => some ⟨.signed, 17, x - p⟩
+  | 0x121 => some ⟨.signed, 33, x - p⟩
+  | 0x123 => some ⟨.signed, 49, x - p⟩
   | 0x135 => some ⟨.signed, 21, slotOf state x - p⟩
   | 0x137 => some ⟨.signed, 33, page (slotOf state x) - page p⟩
   | 0x13b => some ⟨.signed, 32, slotOf state site.s + site.a - p⟩
   | 0x21d => some ⟨.signed, 33, page (slotOf state tp) - page p⟩
   | 0x21f => some ⟨.signed, 21, slotOf state tp - p⟩
+  | 0x220 => some ⟨.signed, 49, tp⟩
+  | 0x221 => some ⟨.signed, 33, tp⟩
+  | 0x223 => some ⟨.signed, 17, tp⟩
   | 0x225 => some ⟨.unsigned, 24, tp⟩
+  | 0x226 | 0x228 | 0x22a | 0x22c | 0x22e | 0x23a => some ⟨.unsigned, 12, tp⟩
   | _ => none
 
 /-- The field a relocation of ARM is cut to. -/
@@ -1222,14 +1231,27 @@ def armField (env : Env) (state : LinkState) (site : Site) : Option FieldCheck :
   | 0x67 => some ⟨.signed, 9, s + addend (thumbShortImm 8 hw1) - p⟩
   | _ => none
 
+/-- Where an `R_MIPS_26` means to go. Its field has the low 28 bits, and the top ones are those of the place. -/
+def mips26Target (site : Site) (insn : Nat) : Int :=
+  let a : Int := addendOf site ((insn &&& 0x3ffffff) <<< 2 : Nat)
+  if site.sym.bind == stbLocal then (field a 0 28 : Nat) + site.s else sext a 28 + site.s
+
 /-- The field a relocation of MIPS is cut to. -/
 def mipsField (env : Env) (state : LinkState) (site : Site) : Option FieldCheck :=
   let gp := mipsGp env
   let insn := readNat state.memory env.little site.off 4
   let a16 : Int := addendOf site (sext (insn &&& 0xffff : Nat) 16)
+  let x16 := site.s + a16
+  let page := x16 + 0x8000
   match site.rel.typ with
+  | 4 => some ⟨.unsigned, 28, mips26Target site insn - ((site.p + 4) >>> 28) * 2 ^ 28⟩
+  | 9 => if site.sym.bind == stbLocal then none else some ⟨.signed, 16, slotOf state site.s - gp⟩
+  | 20 =>
+    if env.width == 64 && !(site.sym.bind == stbLocal && sext x16 32 == x16) then
+      some ⟨.signed, 16, slotOf state (page - page % 65536) - gp⟩
+    else none
   | 7 | 8 => some ⟨.signed, 16, site.s + a16 + mipsGp0 env site.sym - gp⟩
-  | 10 => some ⟨.signed, 18, site.s + sext ((insn &&& 0xffff) <<< 2 : Nat) 18 - site.p⟩
+  | 10 => some ⟨.signed, 18, site.s + addendOf site (sext ((insn &&& 0xffff) <<< 2 : Nat) 18) - site.p⟩
   | 11 => some ⟨.signed, 16, slotOf state site.s - gp⟩
   | 19 => some ⟨.signed, 16, slotOf state (site.s + a16) - gp⟩
   | 46 => some ⟨.signed, 16, slotOf state (tpOff env site.s) + a16 - gp⟩
@@ -1272,12 +1294,15 @@ def powerpcField (env : Env) (state : LinkState) (site : Site) : Option FieldChe
   let toc := ppcToc env
   let tp := tpOff env site.s + site.a
   match site.rel.typ with
+  | 2 => some ⟨.signed, 26, x⟩
   | 3 => some ⟨.either, 16, x⟩
+  | 7 => some ⟨.signed, 16, x⟩
   | 10 | 18 => some ⟨.signed, 26, x - p⟩
   | 11 => some ⟨.signed, 16, x - p⟩
   | 69 => some ⟨.signed, 16, tp⟩
   | typ =>
-    if env.machine != emPpc64 then none
+    if env.machine != emPpc64 then
+      if typ == 87 then some ⟨.signed, 16, slotOf state tp - toc⟩ else none
     else
       let got := slotOf state x - toc
       let gotTp := slotOf state tp - toc
@@ -1299,14 +1324,16 @@ def powerpcField (env : Env) (state : LinkState) (site : Site) : Option FieldChe
       | 89 => some ⟨.signed, 32, gotTp⟩
       | 90 => some ⟨.signed, 32, gotTp + 0x8000⟩
       | 95 => some ⟨.signed, 16, tp⟩
+      | 249 => some ⟨.signed, 16, x - p⟩
       | 251 => some ⟨.signed, 32, x - p⟩
       | 252 => some ⟨.signed, 32, x - p + 0x8000⟩
       | _ => none
 
 /-- The field a relocation of SystemZ is cut to. -/
-def systemzField (_env : Env) (_state : LinkState) (site : Site) : Option FieldCheck :=
+def systemzField (env : Env) (state : LinkState) (site : Site) : Option FieldCheck :=
   let x := site.s + site.a
   let pc := x - site.p
+  let slot := slotOf state (tpOff env site.s)
   match site.rel.typ with
   | 1 => some ⟨.either, 8, x⟩
   | 2 => some ⟨.unsigned, 12, x⟩
@@ -1316,6 +1343,10 @@ def systemzField (_env : Env) (_state : LinkState) (site : Site) : Option FieldC
   | 16 => some ⟨.signed, 16, pc⟩
   | 17 | 18 => some ⟨.signed, 17, pc⟩
   | 19 | 20 => some ⟨.signed, 33, pc⟩
+  | 43 => some ⟨.either, 32, slot - env.gotBase + site.a⟩
+  | 47 => some ⟨.either, 32, slot + site.a⟩
+  | 49 => some ⟨.signed, 33, slot + site.a - site.p⟩
+  | 50 => some ⟨.either, 32, tpOff env site.s + site.a⟩
   | _ => none
 
 /-- The field a relocation is cut to, if its psABI says that it must fit. -/
@@ -1337,38 +1368,73 @@ def fieldFits (env : Env) (state : LinkState) (site : Site) : Bool :=
   | some check => fits check.kind check.bits (wordValue env check.value)
   | none => true
 
+/-- The word of the instruction whose low halfword is at the place, as `ppcInsnOfHalf` reads it. -/
+def ppcInsnAt (env : Env) (state : LinkState) (site : Site) : Nat :=
+  if env.little then readNat state.memory env.codeLittle site.off 4
+  else if site.off < 2 then 0
+  else readNat state.memory false (site.off - 2) 4
+
 /-- What a relocation that drops the low bits of its value needs of them: their number as an alignment, and the value. An
-instruction has no place for them, so that the link would go to, or load from, somewhere else. These are the same as
-`ld.lld`'s `checkAlignment`, and those of the PowerPC `DS` forms that it does at the instruction. -/
+instruction has no place for them, so that the link would go to, or load from, somewhere else. Entries with `lld` are `checkAlignment`
+in `lld/ELF/Arch/*.cpp` of LLVM 23.1.4, read against it. Those with `stored` are the ones where lld stores what it can and says nothing,
+or that it does not link, and the bits are lost all the same. -/
 def alignCheck (env : Env) (state : LinkState) (site : Site) : Option (Nat × Int) :=
   let x := site.s + site.a
   let p := site.p
   let tp := tpOff env site.s + site.a
+  let toc := env.gotBase + 0x8000
+  let ds (value : Int) : Option (Nat × Int) :=
+    some (if ppcIsDq (ppcInsnAt env state site) then 16 else 4, value)
   match env.machine, site.rel.typ with
-  -- `LD_PREL_LO19`, `GOT_LD_PREL19`, `TSTBR14`, `CONDBR19`, `JUMP26`, `CALL26`
+  -- lld: `LD_PREL_LO19`, `CONDBR19`, `GOT_LD_PREL19`; stored: `TSTBR14`, `JUMP26`, `CALL26`, `TLSIE_LD_GOTTPREL_PREL19`
   | 183, 0x111 | 183, 0x117 | 183, 0x118 | 183, 0x11a | 183, 0x11b => some (4, x - p)
   | 183, 0x135 => some (4, slotOf state x - p)
   | 183, 0x21f => some (4, slotOf state tp - p)
-  -- `LDST16`, `LDST32`, `LDST64`, `LDST128` and the GOT ones, of an offset that is the low bits of an address
+  -- lld: `LDST16`, `LDST32`, `LDST64`, `LDST128` of an offset that is the low bits of an address, `LD64_GOT_LO12_NC`,
+  -- `TLSIE_LD64_GOTTPREL_LO12_NC`, and the `_NC` of `TLSLE_LDST*_TPREL_LO12`; stored: the checked ones of those
   | 183, 0x11c => some (2, x)
   | 183, 0x11d => some (4, x)
   | 183, 0x11e => some (8, x)
   | 183, 0x12b => some (16, x)
   | 183, 0x138 => some (8, slotOf state x)
   | 183, 0x21e => some (8, slotOf state tp)
-  -- `BRANCH`, `JAL`, `RVC_BRANCH`, `RVC_JUMP`
+  | 183, 0x22a | 183, 0x22b => some (2, tp)
+  | 183, 0x22c | 183, 0x22d => some (4, tp)
+  | 183, 0x22e | 183, 0x22f => some (8, tp)
+  | 183, 0x23a | 183, 0x23b => some (16, tp)
+  -- stored: the branches of ARM drop two bits, or one for a Thumb target. lld has no check of these, and none of the ones
+  -- it has (`THM_PC8`) is linked here
+  | 40, 1 | 40, 0x1c | 40, 0x1d =>
+    let value := armS site + addendOf site (armBranchImm (readNat state.memory env.little site.off 4)) - p
+    some (if site.rel.typ == 0x1c && isThumb site.sym then 2 else 4, value)
+  | 40, 0xa | 40, 0x1e =>
+    match armField env state site with
+    | some check =>
+      let hw2 := readNat state.memory env.little (site.off + 2) 2
+      let blx := site.rel.typ == 0xa && (if isFunctionSym site.sym then !isThumb site.sym else field hw2 12 1 == 0)
+      some (if blx then 4 else 2, check.value)
+    | none => none
+  | 40, 0x33 | 40, 0x66 | 40, 0x67 =>
+    (armField env state site).map fun check => (2, check.value)
+  -- lld: `BRANCH`, `JAL`, `RVC_BRANCH`, `RVC_JUMP`
   | 243, 16 | 243, 17 | 243, 44 | 243, 45 => some (2, x - p)
-  -- `R_MIPS_PC16`, whose value is in words
-  | 8, 10 => some (4, site.s + sext ((readNat state.memory env.little site.off 4 &&& 0xffff) <<< 2 : Nat) 18 - p)
-  -- the branches, and the `DS` forms
+  -- lld: `R_MIPS_PC16`, whose value is in words; stored: `R_MIPS_26`
+  | 8, 4 => some (4, mips26Target site (readNat state.memory env.little site.off 4))
+  | 8, 10 =>
+    let insn := readNat state.memory env.little site.off 4
+    some (4, site.s + addendOf site (sext ((insn &&& 0xffff) <<< 2 : Nat) 18) - p)
+  -- lld: `REL24`, `PLTREL24`, `REL14`, `R_PPC_ADDR24`, `R_PPC64_ADDR14`; stored: `R_PPC64_ADDR24`, `R_PPC_ADDR14`
   | 20, 10 | 21, 10 | 20, 18 | 21, 18 | 20, 11 | 21, 11 => some (4, x - p)
-  | 21, 56 | 21, 57 => some (4, x)
-  | 21, 58 | 21, 59 => some (4, slotOf state x - (env.gotBase + 0x8000))
-  | 21, 63 | 21, 64 => some (4, x - (env.gotBase + 0x8000))
-  | 21, 87 | 21, 88 => some (4, slotOf state tp - (env.gotBase + 0x8000))
-  | 21, 95 | 21, 96 => some (4, tp)
-  -- the `DBL` ones of SystemZ, whose value is in halfwords
+  | 20, 2 | 21, 2 | 20, 7 | 21, 7 => some (4, x)
+  -- lld: the `DS` forms, 16 when the instruction at the place is `DQ`, which has four low bits
+  | 21, 56 | 21, 57 => ds x
+  | 21, 58 | 21, 59 => ds (slotOf state x - toc)
+  | 21, 63 | 21, 64 => ds (x - toc)
+  | 21, 87 | 21, 88 => ds (slotOf state tp - toc)
+  | 21, 95 | 21, 96 => ds tp
+  -- lld: the `DBL` ones of SystemZ, whose value is in halfwords, and `R_390_TLS_IEENT`
   | 22, 17 | 22, 18 | 22, 19 | 22, 20 => some (2, x - p)
+  | 22, 49 => some (2, slotOf state (tpOff env site.s) + site.a - p)
   | _, _ => none
 
 /-- Whether what a relocation stores keeps its low bits. -/

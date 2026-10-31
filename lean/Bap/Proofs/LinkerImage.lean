@@ -1245,6 +1245,17 @@ theorem fieldProblem_alignment {env : Env} {state : LinkState} {site : Site} (hf
     fieldProblem env state site = s!"relocation of type {site.rel.typ} at {site.p} needs a value aligned to {alignment}" := by
   simp [fieldProblem, hf, ha]
 
+/-- **What the instruction is decides what a `DS` relocation needs**: 16 of a `DQ` form, which has four low bits of its own, and 4 of the others. -/
+theorem alignCheck_ds {env : Env} {state : LinkState} {site : Site} (hm : env.machine = 21) (ht : site.rel.typ = 56) :
+    alignCheck env state site = some (if ppcIsDq (ppcInsnAt env state site) then 16 else 4, site.s + site.a) := by
+  simp [alignCheck, hm, ht]
+
+/-- `R_MIPS_26` stores the low bits of what it means to reach: it does, if that is in the 256 MiB of the place. -/
+theorem mips26_region {env : Env} {state : LinkState} {site : Site} (hm : env.machine = 8) (ht : site.rel.typ = 4) :
+    fieldOf env state site =
+      some ⟨.unsigned, 28, mips26Target site (readNat state.memory env.little site.off 4) - ((site.p + 4) >>> 28) * 2 ^ 28⟩ := by
+  simp [fieldOf, mipsField, hm, ht]
+
 /-- What an alignment is for: a field that drops `k` low bits gives back its value only if they are 0. -/
 theorem aligned_keeps_value (value : Int) (k : Nat) : (value >>> k) * (2 : Int) ^ k = value ↔ value % (((2 ^ k : Nat)) : Int) = 0 := by
   have hp : ((2 : Int) ^ k) = ((2 ^ k : Nat) : Int) := by simp

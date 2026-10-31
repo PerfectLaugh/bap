@@ -1918,12 +1918,12 @@ theorem mips_got16 {env : Env} {site : Site} {slot : Int} {state after : LinkSta
   · have hl' : (site.sym.bind == stbLocal) = false := by simpa using hl
     link_run [mips, ht, hb, hg, hl']
 
-/-- `R_MIPS_PC16`: `S + A - P` in words, the addend being in the instruction. -/
+/-- `R_MIPS_PC16`: `S + A - P` in words, the addend being in the instruction unless the relocation has it. -/
 theorem mips_pc16 {env : Env} {site : Site} {state : LinkState} (ht : site.rel.typ = 10)
     (hb : inSection site 0 4 state.memory.size = true) :
     let insn := readNat state.memory env.little (site.off + 0) 4
     (mips env site).run state = .ok (some [stAt env site 0 4 (setLo16 insn
-      ((site.s + sext ((insn &&& 0xffff) <<< 2 : Nat) 18 - site.p) >>> 2))]) state := by
+      ((site.s + addendOf site (sext ((insn &&& 0xffff) <<< 2 : Nat) 18) - site.p) >>> 2))]) state := by
   link_run [mips, ht, hb]
   try rfl
 
@@ -5314,7 +5314,11 @@ theorem parseSegment_ok {data : ByteArray} {endian : Endian} {offset commandSize
   simp only [bind_ok_iff] at h
   rcases h with ⟨file, hfile, parsed, hp, h⟩
   cases h
-  have hl := loaded_of_slice (memorySize := memorySize) hfile (by omega)
+  have hmapped : fileSize ≤ (if (protection = 0 && fileSize = 0) = true then 0 else memorySize) := by
+    split
+    · next hc => simp only [Bool.and_eq_true, decide_eq_true_eq] at hc; omega
+    · omega
+  have hl := loaded_of_slice hfile hmapped
   have hlen := (mapM_ok hp).1
   simp only [List.length_range] at hlen
   exact ⟨rfl, hl.1.symm, rfl, rfl, rfl, rfl, hl, by rw [hlen]; omega⟩

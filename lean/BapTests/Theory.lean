@@ -166,7 +166,10 @@ def run : IO Unit := do
     ((declare { name := "unmarked", aliases := some [⟨rax, [.reg upper, .reg eax]⟩] }).unalias eax)
   assertEqual "a cycle of aliases has no origin" none
     ((aliasing [r25, r24] [⟨r25, [.reg r24]⟩, ⟨r24, [.reg r25]⟩]).unalias r25)
-  let registry := register child [parent]
+  let registry : List Target := match register child [parent] with
+    | .ok registry => registry
+    | .error _ => []
+  assertEqual "a name is registered once" true (match register child registry with | .error _ => true | .ok _ => false)
   assertEqual "registry lookup by name" (some child) (get "x86_64" registry)
   assertEqual "registry lookup is not by nickname" none (get "amd64" registry)
   assertEqual "registry lookup is not by ancestor" none (get "x86" [child])
@@ -226,6 +229,35 @@ def run : IO Unit := do
     (Effect.EffectSort.order (Effect.EffectSort.join [] []) .bot)
   assertEqual "top absorbs both" Effect.PartialOrder.equal
     (Effect.EffectSort.order (.both .top Effect.rreg) .top)
+  let readWriteOf := Effect.Effects.ofSort readWrite
+  assertTrue "equal effects are equal however they were put together" (readWriteOf = Effect.Effects.ofSort writeRead)
+  assertTrue "and others are not" (readWriteOf ≠ Effect.Effects.ofSort Effect.rreg)
+  assertTrue "both on what sorts denote commutes"
+    (Effect.Effects.both (Effect.Effects.ofSort Effect.rreg) (Effect.Effects.ofSort Effect.wreg) =
+      Effect.Effects.both (Effect.Effects.ofSort Effect.wreg) (Effect.Effects.ofSort Effect.rreg))
+  -- Formats that the widths alone do not tell apart, as `Float.Format` has both.
+  assertTrue "a sort of floats has its base" (IEEE754.binary32.sort ≠ ValueSort.float 10 IEEE754.binary32.w IEEE754.binary32.p IEEE754.binary32.k)
+  assertTrue "and its storage" (IEEE754.binary80.sort ≠ ValueSort.float 2 IEEE754.binary80.w IEEE754.binary80.p 128)
+  assertEqual "the bits of a float are those of its storage" (some 80) IEEE754.binary80.sort.storage
+  -- The role of a register goes by its name and version, as `Var.Top` upstream compares `Ident`s alone.
+  let narrow : Theory.Var := { rax with sort := .bitv 32 }
+  assertTrue "the same register in another sort has its role" (multiRole.hasRole narrow .general)
+  assertEqual "a version of it is another variable" false (multiRole.hasRole { rax with index := 1 } .general)
+  -- Options are partially ordered.
+  let fast : Options := [("mode", "fast")]
+  let fastThumb : Options := [("mode", "fast"), ("isa", "thumb")]
+  let optioned := declare { name := "optioned", options := some fastThumb }
+  assertEqual "a selection of some options takes more" (some optioned) (select { options := fast, unique := true } [optioned])
+  assertEqual "no options is the bottom" (some optioned) (select { unique := true } [optioned])
+  assertEqual "other values are not above" none (select { options := [("mode", "slow")] } [optioned])
+  assertEqual "strictly they must be the same" none (select { options := fast, strict := true } [optioned])
+  assertTrue "in any order" (Options.same fastThumb fastThumb.reverse)
+  -- A child that changes the roles of its registers but declares no aliases keeps them.
+  let unaliasing := declare { name := "unaliasing", parent := some equations, regs := some [([.general], [r25, r24, r25r24, w, whi, wlo])] }
+  assertEqual "aliases are inherited as they were solved" (equations.unalias whi) (unaliasing.unalias whi)
+  assertEqual "whatever the roles are now" false (unaliasing.hasRole whi .alias)
+  let realiased := declare { name := "realiased", parent := some equations, regs := some [([.general], [r25, r24, r25r24, w, whi, wlo])], aliases := some equations.aliases }
+  assertEqual "declaring them again solves them again" none (realiased.unalias whi)
   assertEqual "effects below top" Effect.PartialOrder.less
     (Effect.EffectSort.order readWrite (.both Effect.rreg .top))
   assertEqual "combined effect order" Effect.PartialOrder.less

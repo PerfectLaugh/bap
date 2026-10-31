@@ -73,13 +73,15 @@ private def parseSegment (data : ByteArray) (endian : Endian) (offset commandSiz
       .error "Mach-O segment file size exceeds memory size"
     else
       let fileBytes ← IO.Reader.slice data fileOffset fileSize
-      let bytes := fileBytes.append (ByteArray.mk (Array.replicate (memorySize - fileSize) 0))
+      -- __PAGEZERO reserves 4 GiB that nothing can access and no file holds: it maps nothing.
+      let mapped := if protection = 0 && fileSize = 0 then 0 else memorySize
+      let bytes := fileBytes.append (ByteArray.mk (Array.replicate (mapped - fileSize) 0))
       let sections ← (List.range sectionCount).mapM fun index =>
         parseSection data endian (offset + 72 + index * 80)
       let readable := protection &&& 1 != 0
       let writable := protection &&& 2 != 0
       let executable := protection &&& 4 != 0
-      .ok (⟨name, address, memorySize, readable, writable, executable⟩,
+      .ok (⟨name, address, mapped, readable, writable, executable⟩,
         ⟨address, bytes, readable, writable, executable⟩,
         ⟨fileOffset, fileSize, address⟩, sections)
 

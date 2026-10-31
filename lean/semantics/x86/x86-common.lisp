@@ -11,6 +11,10 @@
 (defun HLT ()
   (intrinsic 'hlt))
 
+;; LLVM decodes the prefix on its own: an effect on other threads only, so nothing here
+(defun LOCK_PREFIX ()
+  (empty))
+
 (defun NOOP ()
   (empty))
 

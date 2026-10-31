@@ -51,7 +51,9 @@ def encodeFact (fact : Fact) : Except String Sexp := do
     value
   ])
 
-def decodeFact (registry : List AnySlot) (input : Sexp) : Except String Fact := do
+/-- A fact as it was saved, `none` if nothing here knows its slot, which upstream skips too (`Record.of_binable`): a saved state
+must not depend on what is loaded when it is read. `skippedSlots` tells what was skipped. -/
+def decodeFact (registry : List AnySlot) (input : Sexp) : Except String (Option Fact) := do
   let args ← Sexp.expectTagged "fact" 3 input
   match args with
   | [object, slotName, value] =>
@@ -61,10 +63,10 @@ def decodeFact (registry : List AnySlot) (input : Sexp) : Except String Fact := 
       let object : Object := ⟨← Sexp.asAtom cls, ← Sexp.asAtom name, ← Sexp.nat id⟩
       let slotName ← Sexp.asAtom slotName
       match registry.find? fun slot => slot.2.name = slotName with
-      | none => .error s!"unknown persistent slot {slotName}"
+      | none => .ok none
       | some slot =>
         let value ← decodeValue slot.1 value
-        .ok ⟨object, slot, value⟩
+        .ok (some ⟨object, slot, value⟩)
     | _ => .error "invalid persistent object"
   | _ => .error "invalid persistent fact"
 
@@ -72,14 +74,14 @@ def encodeOpinion (opinion : Opinion) : Except String Sexp := do
   let fact ← encodeFact opinion.fact
   .ok (.tagged "opinion" [.atom opinion.agent.name, .atom (toString opinion.agent.trust), fact])
 
-def decodeOpinion (registry : List AnySlot) (input : Sexp) : Except String Opinion := do
+def decodeOpinion (registry : List AnySlot) (input : Sexp) : Except String (Option Opinion) := do
   let args ← Sexp.expectTagged "opinion" 3 input
   match args with
   | [name, trust, fact] =>
     let name ← Sexp.asAtom name
     let trust ← Sexp.nat trust
     let fact ← decodeFact registry fact
-    .ok ⟨⟨name, trust⟩, fact⟩
+    .ok (fact.map fun fact => ⟨⟨name, trust⟩, fact⟩)
   | _ => .error "invalid persistent opinion"
 
 def encodeState (persistent : List AnySlot) (state : State) : Except String Sexp := do
@@ -100,10 +102,24 @@ def decodeState (registry : List AnySlot) (input : Sexp) : Except String State :
     let version ← Sexp.nat version
     let facts ← (← Sexp.asList facts).mapM (decodeFact registry)
     let opinions ← (← Sexp.asList opinions).mapM (decodeOpinion registry)
-    .ok { facts := facts, opinions := opinions, version := version }
+    .ok { facts := facts.filterMap id, opinions := opinions.filterMap id, version := version }
   | _ => .error "invalid persistent state"
 
 def deserialize (registry : List AnySlot) (input : String) : Except String State := do
   decodeState registry (← Sexp.parse input)
+
+/-- The name of the slot of a saved fact. -/
+private def factSlotName : Sexp → Option String
+  | .list [.atom "fact", _, .atom name, _] => some name
+  | .list [.atom "opinion", _, _, fact] => factSlotName fact
+  | _ => none
+
+/-- The slots of a saved state that `decodeState` skips, each once, for a warning. -/
+def skippedSlots (registry : List AnySlot) (input : Sexp) : List String :=
+  match input with
+  | .list [.atom "state", _, .list facts, .list opinions] =>
+    ((facts ++ opinions).filterMap factSlotName).eraseDups.filter fun name =>
+      !registry.any fun slot => slot.2.name == name
+  | _ => []
 
 end Bap.Knowledge

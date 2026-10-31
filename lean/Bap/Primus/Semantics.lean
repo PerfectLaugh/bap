@@ -55,8 +55,8 @@ structure Environment where
   /-- The same, by name, for the targets whose decoder gives names, and for the opcode that LLVM has no number for. -/
   instructions : Std.HashMap String (Thunk Callable) := {}
   registers : Std.HashMap Nat Value := {}
-  signExtendedOpcodes : List Nat := []
-  relativeOpcodes : List Nat := []
+  signExtendedOpcodes : Std.HashSet Nat := {}
+  relativeOpcodes : Std.HashSet Nat := {}
 
 namespace Environment
 
@@ -349,6 +349,18 @@ private def assign (context : Context) (destination value : Value) : Except Stri
   | _ => throw s!"Primus assignment destination is not a register: {valueTag destination}"
 
 private def emit (state : State) (code : Bil.Program) : State := { state with code := state.code ++ code }
+
+/-- `emit`, which doesn't copy what the state has when nothing is emitted, as for most primitives. -/
+private def emitFast (state : State) (code : Bil.Program) : State :=
+  match code with
+  | [] => state
+  | _ => { state with code := state.code ++ code }
+
+@[csimp] private theorem emit_eq_fast : @emit = @emitFast := by
+  funext state code
+  cases code with
+  | nil => simp [emit, emitFast]
+  | cons _ _ => rfl
 
 private def loadMemory (context : Context) (bits : Nat) (args : List Value) : Except String Value := do
   match args with

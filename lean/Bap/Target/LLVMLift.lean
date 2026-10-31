@@ -540,7 +540,9 @@ def x86Environment : IO Primus.Semantics.Environment := cached x86Cache do
   let signExtendedOpcodes ← definitions.filterMapM fun binding =>
     if binding.1.endsWith "i32" then LLVM.opcodeId? "x86_64" binding.1 else pure none
   let relativeOpcodes ← x86RelativeOpcodes.filterMapM (LLVM.opcodeId? "x86_64")
-  pure { environment.withRegisters registers with signExtendedOpcodes, relativeOpcodes }
+  pure { environment.withRegisters registers with
+    signExtendedOpcodes := Std.HashSet.ofList signExtendedOpcodes
+    relativeOpcodes := Std.HashSet.ofList relativeOpcodes }
 
 /-- The names that LLVM has for the formats of a floating point register, e.g., `F10_D`, which `fpr-name` of the
 semantics takes to the register. -/
@@ -597,7 +599,7 @@ def x8632Environment : IO Primus.Semantics.Environment := cached x8632Cache do
   let registers := (0, x8632Register "Nil") ::
     (registers.map fun binding => (binding.1, x8632Register binding.2))
   let relativeOpcodes ← x86RelativeOpcodes.filterMapM (LLVM.opcodeId? "i386")
-  pure { environment.withRegisters registers with relativeOpcodes }
+  pure { environment.withRegisters registers with relativeOpcodes := Std.HashSet.ofList relativeOpcodes }
 
 private initialize riscv32Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
@@ -917,9 +919,20 @@ private def armControlFlow (flow : Disasm.Flow) (bil : Bil.Program) : Disasm.Flo
   | .normal, some false | .ret, some false | .indirectJump, some false => .conditionalJump
   | _, _ => flow
 
-private def normalizeAssembly (assembly : String) : String :=
-  let tokens := (assembly.split Char.isWhitespace).toList.map fun token => token.toString
-  String.intercalate " " (tokens.filter fun token => !token.isEmpty)
+/-- The tokens of an assembly line, with one space between them. Whitespace is of bytes that aren't in any other
+character of UTF-8, so it goes over the bytes. -/
+private def normalizeAssembly (assembly : String) : String := Id.run do
+  let mut out := ByteArray.emptyWithCapacity assembly.utf8ByteSize
+  let mut pending := false
+  for byte in assembly.toUTF8 do
+    if byte == 0x20 || byte == 0x09 || byte == 0x0a || byte == 0x0d then
+      pending := !out.isEmpty
+    else
+      if pending then
+        out := out.push 0x20
+      out := out.push byte
+      pending := false
+  (String.fromUTF8? out).getD assembly
 
 private def aarch64MCTarget (address : Nat) (flags : Nat) (operands : List LLVM.MCOperand) : Option Nat :=
   let selected := if flags &&& 32 != 0 then operands.getLast? else operands.head?
@@ -1007,7 +1020,10 @@ def x86Prefixes (long : Bool) : List Nat → List Nat
 /-- The context of an x86 instruction, which `x86-prefix` can ask for its prefixes. -/
 private def x86Context (context : Primus.Semantics.Context) (long : Bool) (bytes : ByteArray) (size : Nat) :
     Primus.Semantics.Context :=
-  { context with prefixes := some (x86Prefixes long ((bytes.toList.take size).map UInt8.toNat)) }
+  let first := (bytes.get! 0).toNat
+  -- what most instructions start with: neither a legacy prefix nor a REX one that can be before one
+  if size ≠ 0 && !x86LegacyPrefix first && first / 16 != 4 then { context with prefixes := some [] }
+  else { context with prefixes := some (x86Prefixes long ((bytes.toList.take size).map UInt8.toNat)) }
 
 def decodeX86With (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : IO Disasm.Insn := do

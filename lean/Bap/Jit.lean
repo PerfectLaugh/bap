@@ -44,7 +44,8 @@ and a whole range along its edges and back edges with its budget, code sites and
 block alone): it ends as the blocks do one at a time in the interpreter, with the same state, pc and count, on the terms above. The proof assumes
 nothing of the graph: `lowerGraphChecked` checks at compile time what it does not follow through every statement, and a lowering
 that failed the check would stay out of native code. The one thing `lowerGraph_correct` leaves out is the interpreter running out of its
-fuel: what lowers has a result otherwise, on a state that `encodeState` takes with its memory bound (`graph_progress`). `Bap.Emu.Core` lists what stays trusted around all of this. -/
+fuel: what lowers has a result otherwise, on a state that `encodeState` takes with its memory bound (`graph_progress`). The limit on native loops
+is that same bound: on the fuel the interpreter runs with, a loop out of iterations means that the interpreter ran out too (`lowerGraph_interpreterFuel`). `Bap.Emu.Core` lists what stays trusted around all of this. -/
 
 namespace Bap.Jit
 

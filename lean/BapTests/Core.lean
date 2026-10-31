@@ -119,6 +119,27 @@ def run : IO Unit := do
   memoryAccesses
   keyWrap
   let input := " ; comment\n(bil ((special \"hello\\nworld\")))"
+  -- `BitVec.ofNat` without the power of two against its meaning
+  for width in [0, 1, 8, 31, 32, 33, 64, 128] do
+    for value in [0, 1, 255, 0x7fffffff, 0xfffffffe, 0xffffffff, 0x100000000, 0xffffffffffffffff, 0x10000000000000000] do
+      assertEqual s!"BitVec.ofNat {width} {value}" (value % 2 ^ width) (BitVec.ofNat width value).toNat
+  -- the bytes against the characters
+  let byChars (input : String) : Except String Sexp := do
+    let chars := input.toList
+    let (value, rest) ← Sexp.parseOne (chars.length * 2 + 2) chars
+    match Sexp.skipSpace rest with
+    | [] => .ok value
+    | _ => .error "trailing input after S-expression"
+  let sameParse (input : String) : Bool :=
+    match Sexp.parse input, byChars input with
+    | .ok left, .ok right => left == right
+    | .error left, .error right => left == right
+    | _, _ => false
+  let cases := ["", " ", "a", "  a  ", "(a b)", "(a (b c) d)", "()", "( ; comment\n a)", "; only a comment", "a ; comment", "a b", "(", ")",
+    "(a", "a)", "'a", "'(a b)", "'", "\"a b\"", "\"", "\"a", "\"a\\", "\"a\\nb\"", "\"a\\qb\"", "(\"a\\qb\" \"c\\zd\")", "\"\\q\" x", "(a\tb\nc\rd)", ";", "; x\n; y\n z",
+    "a'b", "a\"b", "((((((a))))))", "(a . b)", "é", "(é \"ü\")", "\"é\\q\"", "(a) (b)", "(a))", "0x10"]
+  for input in cases do
+    assertTrue s!"parsing by bytes and by characters agree on {repr input}" (sameParse input)
   let parsed ← match Sexp.parse input with
     | .ok value => pure value
     | .error error => throw <| IO.userError error

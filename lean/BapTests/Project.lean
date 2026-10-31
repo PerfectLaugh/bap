@@ -28,6 +28,23 @@ private def recordingPass (name : String) (dependencies : List String := []) : P
     .ok (project.set "trace" (trace ++ name))
 }
 
+/-- `functionOf` as it is defined, against which the binary search of its table is tested. -/
+private def functionOfBySpec (functions : List Image.Symbol) (address : Nat) : Option Image.Symbol :=
+  let nearest := functions.foldl (init := (none : Option Nat)) fun best symbol =>
+    if symbol.addr ≤ address && best.all (· ≤ symbol.addr) then some symbol.addr else best
+  let spans (symbol : Image.Symbol) : Bool :=
+    symbol.addr ≤ address && if symbol.size = 0 then nearest = some symbol.addr else address < symbol.addr + symbol.size
+  functions.foldl (init := none) fun best symbol =>
+    if spans symbol && best.all (·.addr ≤ symbol.addr) then some symbol else best
+
+/-- Pseudorandom functions, of few addresses to have aliases, overlaps and functions without sizes. -/
+private def randomFunctions (seed count : Nat) : List Image.Symbol :=
+  ((List.range count).foldl (init := (seed, ([] : List Image.Symbol))) fun state index =>
+    let next := (state.1 * 1103515245 + 12345) % 2147483648
+    let addr := next / 1024 % 64
+    let size := if next % 3 == 0 then 0 else next / 65536 % 16
+    (next, ⟨s!"f{index}", addr, size, true, false⟩ :: state.2)).2
+
 /-- `stronglyConnected` as it reads. -/
 private def componentsBySpec (callgraph : Analysis.Callgraph.Callgraph) : List (List Nat) :=
   let components := callgraph.graph.nodes.foldl (init := (callgraph.graph.nodes, [])) fun current node =>
@@ -85,8 +102,8 @@ def run : IO Unit := do
   match runPasses [report, summarize] project with
   | .error error => throw <| IO.userError s!"analysis failed: {repr error}"
   | .ok analyzed =>
-    assertEqual "default instruction summary" (some "13") (analyzed.get "instructions")
-    assertEqual "default block summary" (some "2") (analyzed.get "blocks")
+    assertTrue "the summary is of the whole of the code" (((analyzed.get "instructions").bind String.toNat?).getD 0 > 1000)
+    assertTrue "and of many blocks" (((analyzed.get "blocks").bind String.toNat?).getD 0 > 100)
     assertEqual "default analysis status" (some "analyzed") (analyzed.get "status")
   let mem : Var := ⟨"mem", .mem 64 8, 0, false⟩
   let rax : Var := ⟨"RAX", .imm 64, 0, false⟩
@@ -113,6 +130,28 @@ def run : IO Unit := do
     image := some image
     disasm := some { entry := 0x1000, instructions }
   }
+  for seed in List.range 40 do
+    let functions := randomFunctions seed (seed % 13 * 4)
+    let index : Analysis.Xrefs.Index := { functions }
+    for address in List.range 90 do
+      if !((Analysis.Xrefs.functionOf index address).map (·.name) == (functionOfBySpec functions address).map (·.name)) then
+        throw <| IO.userError s!"functionOf differs from its specification, seed {seed} address {address}"
+  IO.println "ok: binary search of functions agrees with the definition"
+  let binary ← Project.load "/mnt/data/Dev/bap/testsuite/bin/x86_64-linux-gnu-crc-loop"
+  let binaryDisasm := binary.disasm.getD { entry := 0 }
+  assertEqual "whole binary: instructions" 134 binaryDisasm.instructions.length
+  assertEqual "whole binary: blocks" 32 binaryDisasm.blocks.length
+  assertEqual "whole binary: errors" [] binaryDisasm.errors
+  let binaryIndex := Analysis.Xrefs.discover binary
+  let binaryGraph := Analysis.Callgraph.create binaryIndex
+  assertEqual "whole binary: xrefs" 30 binaryIndex.xrefs.length
+  assertEqual "whole binary: functions" 10 binaryIndex.functions.length
+  assertEqual "whole binary: callgraph edges" 2 binaryGraph.graph.edges.length
+  assertTrue "whole binary: main is a function" (binaryIndex.functions.any (·.name == "main"))
+  let stripped ← Project.load "/mnt/data/Dev/bap/testsuite/bin/x86_64-linux-gnu-loader-stdin-stripped"
+  let strippedIndex := Analysis.Xrefs.discover stripped
+  assertTrue "a stripped binary has its functions from the scan"
+    (strippedIndex.functions.any fun symbol => symbol.name.startsWith "sub_")
   let xrefs := Analysis.Xrefs.create xrefProject
   assertEqual "xrefs finds direct caller" [0x1000]
     ((Analysis.Xrefs.callers xrefs 0x2000).map Analysis.Xrefs.Xref.source)

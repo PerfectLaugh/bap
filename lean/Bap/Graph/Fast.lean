@@ -868,8 +868,117 @@ theorem dominators_eq (graph : Graph Nat) (start : Nat) :
 
 /-! ### Immediate dominators and the dominance frontier -/
 
-/-- `immediateDominators`, with the sizes of the rows in a table. -/
-def immediateDominators (graph : Graph Nat) (start : Nat) : List (Nat × Nat) :=
+/-! Immediate dominators as Cooper, Harvey and Kennedy find them: an iteration from what is known of the start, each node taking what its predecessors have in common. Their
+tree has what the nodes have in common as ancestors, and a walk up from two nodes finds it, but a change of a parent changes the sets of all that hang under it, for
+which the iteration is not known to stay above the dominators on all graphs (the equations have more than one solution). So a node here has its set, and the sets share their
+tails, each with a number: the same walk stops where two sets have the same tail, and a pass that changes nothing takes as long as the edges do. -/
+
+/-- A set of positions, largest first, whose tails are shared. -/
+inductive Row where
+  | nil
+  | cons (id element : Nat) (tail : Row)
+
+namespace Row
+
+def id : Row → Nat
+  | nil => 0
+  | cons id _ _ => id
+
+def elements : Row → List Nat
+  | nil => []
+  | cons _ element tail => element :: elements tail
+
+/-- Whether a number is above all of the row. -/
+def under (element : Nat) : Row → Bool
+  | nil => true
+  | cons _ first _ => first < element
+
+/-- What two rows have in common, and the next number to give. It stops at a tail they share, and makes a row only of what they don't. -/
+def meet : Row → Row → Nat → Nat × Row
+  | nil, _, next => (next, nil)
+  | _, nil, next => (next, nil)
+  | cons ia ea ta, cons ib eb tb, next =>
+    if ia = ib then (next, cons ia ea ta)
+    else if ea = eb then
+      match meet ta tb next with
+      | (next, tail) =>
+        if tail.id = ta.id then (next, cons ia ea ta)
+        else if tail.id = tb.id then (next, cons ib eb tb)
+        else (next + 1, cons next ea tail)
+    else if ea > eb then meet ta (cons ib eb tb) next
+    else meet (cons ia ea ta) tb next
+termination_by a b => sizeOf a + sizeOf b
+
+end Row
+
+/-- What the defined predecessors have in common. -/
+private def rowMeet (table : HashMap Nat Row) (preds : List Nat) (next : Nat) : Option (Nat × Row) :=
+  match preds.filterMap table.get? with
+  | [] => none
+  | first :: rest => some (rest.foldl (fun state row => Row.meet state.2 row state.1) (next, first))
+
+private def rowStep (pos : HashMap Nat Nat) (preds : HashMap Nat (List Nat)) (start : Nat)
+    (state : HashMap Nat Row × Nat × Bool) (node : Nat) : HashMap Nat Row × Nat × Bool :=
+  if node = start then state
+  else
+    match rowMeet state.1 (preds.getD node []) state.2.1 with
+    | none => state
+    | some (next, common) =>
+      let element := pos.getD node 0
+      if common.under element then
+        match state.1.get? node with
+        | some (.cons _ old tail) =>
+          if old = element ∧ tail.id = common.id then (state.1, next, state.2.2)
+          else (state.1.insert node (.cons next element common), next + 1, true)
+        | _ => (state.1.insert node (.cons next element common), next + 1, true)
+      else (state.1, next, state.2.2)
+
+private def rowPass (pos : HashMap Nat Nat) (preds : HashMap Nat (List Nat)) (start : Nat) (nodes : List Nat)
+    (table : HashMap Nat Row) (next : Nat) : HashMap Nat Row × Nat × Bool :=
+  nodes.foldl (rowStep pos preds start) (table, next, false)
+
+private def rowLoop (pos : HashMap Nat Nat) (preds : HashMap Nat (List Nat)) (start : Nat) (nodes : List Nat) :
+    Nat → HashMap Nat Row → Nat → HashMap Nat Row × Nat
+  | 0, table, next => (table, next)
+  | fuel + 1, table, next =>
+    match rowPass pos preds start nodes table next with
+    | (table, next, true) => rowLoop pos preds start nodes fuel table next
+    | (table, next, false) => (table, next)
+
+/-- The rows are a fixpoint, with every predecessor taken into account. -/
+private def rowCheck (pos : HashMap Nat Nat) (preds : HashMap Nat (List Nat)) (start : Nat) (member : HashSet Nat) (table : HashMap Nat Row) :
+    List Nat → Nat → Bool
+  | [], _ => true
+  | node :: rest, next =>
+    if node = start then
+      (match table.get? node with
+        | some (.cons _ element .nil) => element = pos.getD node 0
+        | _ => false) &&
+      rowCheck pos preds start member table rest next
+    else
+      (preds.getD node []).all (fun pred => !member.contains pred || table.contains pred) &&
+      match rowMeet table (preds.getD node []) next with
+      | none => false
+      | some (next, common) =>
+        (match table.get? node with
+          | some (.cons _ element tail) => element = pos.getD node 0 && tail.id = common.id
+          | _ => false) &&
+        rowCheck pos preds start member table rest next
+
+/-- The immediate dominator of a node: the largest of its strict dominators, whose row is all the others. -/
+private def rowIdom (table : HashMap Nat Row) (elements : Array Nat) (node : Nat) : Option Nat :=
+  match table.get? node with
+  | some (.cons _ _ (.cons id element _)) =>
+    match elements[element]? with
+    | some parent =>
+      match table.get? parent with
+      | some row => if row.id = id then some parent else none
+      | none => none
+    | none => none
+  | _ => none
+
+/-- `immediateDominators`, with the sizes of the rows in a table. What `rowImmediateDominators` can't show correct comes here. -/
+private def slowImmediateDominators (graph : Graph Nat) (start : Nat) : List (Nat × Nat) :=
   let rows := dominators graph start
   let sizes := assocTable (rows.map fun entry => (entry.1, entry.2.length))
   rows.filterMap fun entry =>
@@ -902,9 +1011,9 @@ private theorem sizes_getD (rows : List (Nat × List Nat)) (key : Nat) :
   rw [HashMap.getD_eq_getD_getElem?, hget]
   cases Assoc.get key rows <;> rfl
 
-theorem immediateDominators_eq (graph : Graph Nat) (start : Nat) :
-    immediateDominators graph start = Bap.Graph.immediateDominators graph start := by
-  simp only [immediateDominators, Bap.Graph.immediateDominators, dominators_eq, sizes_getD]
+private theorem slowImmediateDominators_eq (graph : Graph Nat) (start : Nat) :
+    slowImmediateDominators graph start = Bap.Graph.immediateDominators graph start := by
+  simp only [slowImmediateDominators, Bap.Graph.immediateDominators, dominators_eq, sizes_getD]
   apply congrArg (fun f => List.filterMap f (Bap.Graph.dominators graph start))
   funext entry
   split
@@ -916,6 +1025,536 @@ theorem immediateDominators_eq (graph : Graph Nat) (start : Nat) :
     | some pair =>
       obtain ⟨a, c⟩ := pair
       rfl
+
+/-- `immediateDominators` from the rows. -/
+def immediateDominators (graph : Graph Nat) (start : Nat) : List (Nat × Nat) :=
+  let nodes := reachable graph start
+  let unique := dedup nodes
+  let pos := posTable 0 unique {}
+  let preds := predecessorTable graph
+  let initial : HashMap Nat Row := if unique.contains start then HashMap.insert {} start (.cons 1 (pos.getD start 0) .nil) else {}
+  let (table, next) := rowLoop pos preds start unique (unique.length + 2) initial 2
+  let elements := unique.toArray
+  if rowCheck pos preds start (HashSet.ofList unique) table unique next &&
+      unique.all (fun node => node == start || (rowIdom table elements node).isSome) then
+    nodes.filterMap fun node => if node = start then none else (rowIdom table elements node).map (node, ·)
+  else
+    slowImmediateDominators graph start
+
+/-! #### The rows are what they say -/
+
+/-- A row whose numbers a table of all rows has, largest element first. -/
+private def Row.Valid (f : Nat → Option Row) : Row → Prop
+  | .nil => True
+  | .cons id element tail => id ≠ 0 ∧ f id = some (.cons id element tail) ∧ (∀ x ∈ tail.elements, x < element) ∧ Row.Valid f tail
+
+private theorem Row.Valid.mono {f g : Nat → Option Row} (hfg : ∀ k r, f k = some r → g k = some r) : ∀ {r : Row}, Row.Valid f r → Row.Valid g r
+  | .nil, _ => trivial
+  | .cons _ _ _, ⟨h0, h1, h2, h3⟩ => ⟨h0, hfg _ _ h1, h2, Row.Valid.mono hfg h3⟩
+
+/-- Rows with the same number are the same. -/
+private theorem Row.Valid.same {f : Nat → Option Row} {a b : Row} (ha : Row.Valid f a) (hb : Row.Valid f b) (h : a.id = b.id) : a = b := by
+  cases a with
+  | nil =>
+    cases b with
+    | nil => rfl
+    | cons ib eb tb => exact absurd h.symm hb.1
+  | cons ia ea ta =>
+    cases b with
+    | nil => exact absurd h ha.1
+    | cons ib eb tb =>
+      have h' : ia = ib := h
+      subst h'
+      have := ha.2.1.symm.trans hb.2.1
+      exact Option.some.inj this
+
+private def Fresh (f : Nat → Option Row) (next : Nat) : Prop := next ≠ 0 ∧ ∀ k, next ≤ k → f k = none
+
+private theorem Fresh.extend {f : Nat → Option Row} {next : Nat} (hf : Fresh f next) (row : Row) :
+    let g : Nat → Option Row := fun k => if k = next then some row else f k
+    (∀ k r, f k = some r → g k = some r) ∧ Fresh g (next + 1) := by
+  intro g
+  refine ⟨fun k r h => ?_, by omega, fun k hk => ?_⟩
+  · have hne : k ≠ next := by
+      intro he
+      rw [he, hf.2 next (Nat.le_refl _)] at h
+      cases h
+    simp [g, hne, h]
+  · have hne : k ≠ next := by omega
+    simp only [g, hne, ↓reduceIte]
+    exact hf.2 k (by omega)
+
+private theorem meet_spec (a : Row) : ∀ (b : Row) (next : Nat) (f : Nat → Option Row), Row.Valid f a → Row.Valid f b → Fresh f next →
+    ∃ g, (∀ k r, f k = some r → g k = some r) ∧ Fresh g (Row.meet a b next).1 ∧ Row.Valid g (Row.meet a b next).2 ∧
+      ∀ x, x ∈ (Row.meet a b next).2.elements ↔ x ∈ a.elements ∧ x ∈ b.elements := by
+  induction a with
+  | nil =>
+    intro b next f _ _ hfresh
+    refine ⟨f, fun _ _ h => h, ?_, ?_, ?_⟩ <;> simp [Row.meet, Row.Valid, Row.elements, hfresh]
+  | cons ia ea ta iha =>
+    intro b
+    induction b with
+    | nil =>
+      intro next f _ _ hfresh
+      refine ⟨f, fun _ _ h => h, ?_, ?_, ?_⟩ <;> simp [Row.meet, Row.Valid, Row.elements, hfresh]
+    | cons ib eb tb ihb =>
+      intro next f hva hvb hfresh
+      rw [Row.meet]
+      by_cases hs : ia = ib
+      · simp only [hs, ↓reduceIte]
+        subst hs
+        have heq : Row.cons ia ea ta = Row.cons ia eb tb := Row.Valid.same hva hvb rfl
+        refine ⟨f, fun _ _ h => h, hfresh, hva, fun x => ?_⟩
+        rw [← heq]
+        simp
+      · simp only [hs, ↓reduceIte]
+        by_cases he : ea = eb
+        · subst he
+          simp only [↓reduceIte]
+          obtain ⟨g, hfg, hf, hv, hmem⟩ := iha tb next f hva.2.2.2 hvb.2.2.2 hfresh
+          generalize Row.meet ta tb next = result at hf hv hmem ⊢
+          obtain ⟨next', tail⟩ := result
+          simp only at hf hv hmem ⊢
+          have hmemTop (x : Nat) : (x = ea ∨ x ∈ tail.elements) ↔ (x = ea ∨ x ∈ ta.elements) ∧ (x = ea ∨ x ∈ tb.elements) := by
+            rw [hmem]
+            constructor
+            · rintro (h | ⟨h1, h2⟩)
+              · exact ⟨Or.inl h, Or.inl h⟩
+              · exact ⟨Or.inr h1, Or.inr h2⟩
+            · rintro ⟨h1 | h1, h2 | h2⟩
+              · exact Or.inl h1
+              · exact Or.inl h1
+              · exact Or.inl h2
+              · exact Or.inr ⟨h1, h2⟩
+          by_cases h1 : tail.id = ta.id
+          · simp only [h1, ↓reduceIte]
+            have hsame := Row.Valid.same hv (Row.Valid.mono hfg hva.2.2.2) h1
+            subst hsame
+            refine ⟨g, hfg, hf, Row.Valid.mono hfg hva, fun x => ?_⟩
+            have := hmemTop x
+            simpa [Row.elements] using this
+          · simp only [h1, ↓reduceIte]
+            by_cases h2 : tail.id = tb.id
+            · simp only [h2, ↓reduceIte]
+              have hsame := Row.Valid.same hv (Row.Valid.mono hfg hvb.2.2.2) h2
+              subst hsame
+              refine ⟨g, hfg, hf, Row.Valid.mono hfg hvb, fun x => ?_⟩
+              have := hmemTop x
+              simpa [Row.elements] using this
+            · simp only [h2, ↓reduceIte]
+              obtain ⟨hext, hfresh'⟩ := hf.extend (.cons next' ea tail)
+              refine ⟨_, fun k r h => hext k r (hfg k r h), hfresh', ⟨hf.1, by simp, ?_, Row.Valid.mono hext hv⟩, fun x => ?_⟩
+              · intro x hx
+                exact hva.2.2.1 x ((hmem x).1 hx).1
+              · have := hmemTop x
+                simpa [Row.elements] using this
+        · simp only [he, ↓reduceIte]
+          by_cases hgt : ea > eb
+          · simp only [hgt, ↓reduceIte]
+            obtain ⟨g, hfg, hf, hv, hmem⟩ := iha (.cons ib eb tb) next f hva.2.2.2 hvb hfresh
+            refine ⟨g, hfg, hf, hv, fun x => ?_⟩
+            rw [hmem]
+            simp only [Row.elements, List.mem_cons]
+            constructor
+            · rintro ⟨h1, h2⟩
+              exact ⟨Or.inr h1, h2⟩
+            · rintro ⟨h1 | h1, h2 | h2⟩
+              · omega
+              · have := hvb.2.2.1 x h2
+                omega
+              · exact ⟨h1, Or.inl h2⟩
+              · exact ⟨h1, Or.inr h2⟩
+          · simp only [hgt, ↓reduceIte]
+            obtain ⟨g, hfg, hf, hv, hmem⟩ := ihb next f hva hvb.2.2.2 hfresh
+            refine ⟨g, hfg, hf, hv, fun x => ?_⟩
+            rw [hmem]
+            simp only [Row.elements, List.mem_cons]
+            constructor
+            · rintro ⟨h1, h2⟩
+              exact ⟨h1, Or.inr h2⟩
+            · rintro ⟨h1 | h1, h2 | h2⟩
+              · omega
+              · exact ⟨Or.inl h1, h2⟩
+              · have := hva.2.2.1 x h1
+                omega
+              · exact ⟨Or.inr h1, h2⟩
+
+/-- A table of rows, all of them numbered, none from `next` on. -/
+private def RowInv (graph : Graph Nat) (start : Nat) (pos : Nat → Nat) (f : Nat → Option Row) (next : Nat) (table : HashMap Nat Row) : Prop :=
+  Fresh f next ∧ ∀ n row, table.get? n = some row → n ∈ Bap.Graph.reachable graph start ∧ Row.Valid f row ∧
+    ∀ d, Bap.Proofs.Graph.Dom graph start n d → pos d ∈ row.elements
+
+private theorem RowInv.mono {pos : Nat → Nat} {f g : Nat → Option Row} {next next' : Nat} {table : HashMap Nat Row}
+    (h : RowInv graph start pos f next table) (hfg : ∀ k r, f k = some r → g k = some r) (hf : Fresh g next') :
+    RowInv graph start pos g next' table :=
+  ⟨hf, fun n row hget => ⟨(h.2 n row hget).1, Row.Valid.mono hfg (h.2 n row hget).2.1, (h.2 n row hget).2.2⟩⟩
+
+private theorem foldl_meet_spec {f : Nat → Option Row} (rest : List Row) (next : Nat) (first : Row) (hf : Fresh f next) (hv : Row.Valid f first)
+    (hrest : ∀ r ∈ rest, Row.Valid f r) :
+    ∃ g, (∀ k r, f k = some r → g k = some r) ∧ Fresh g (rest.foldl (fun state row => Row.meet state.2 row state.1) (next, first)).1 ∧
+      Row.Valid g (rest.foldl (fun state row => Row.meet state.2 row state.1) (next, first)).2 ∧
+      ∀ x, x ∈ (rest.foldl (fun state row => Row.meet state.2 row state.1) (next, first)).2.elements ↔ x ∈ first.elements ∧ ∀ r ∈ rest, x ∈ r.elements := by
+  induction rest generalizing next first f with
+  | nil =>
+    refine ⟨f, fun _ _ h => h, hf, hv, fun x => ?_⟩
+    simp
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    obtain ⟨g, hfg, hfresh, hvg, hmem⟩ := meet_spec first head next f hv (hrest head List.mem_cons_self) hf
+    obtain ⟨g', hfg', hfresh', hvg', hmem'⟩ := ih _ _ hfresh hvg fun r hr => Row.Valid.mono hfg (hrest r (List.mem_cons_of_mem _ hr))
+    refine ⟨g', fun k r h => hfg' k r (hfg k r h), hfresh', hvg', fun x => ?_⟩
+    rw [hmem', hmem]
+    simp only [List.mem_cons, forall_eq_or_imp]
+    constructor
+    · rintro ⟨⟨h1, h2⟩, h3⟩
+      exact ⟨h1, h2, h3⟩
+    · rintro ⟨h1, h2, h3⟩
+      exact ⟨⟨h1, h2⟩, h3⟩
+
+private theorem rowMeet_spec {pos : Nat → Nat} {f : Nat → Option Row} {next next' : Nat} {table : HashMap Nat Row} {preds : List Nat} {common : Row}
+    (h : RowInv graph start pos f next table) (hm : rowMeet table preds next = some (next', common)) :
+    ∃ g, (∀ k r, f k = some r → g k = some r) ∧ Fresh g next' ∧ Row.Valid g common ∧
+      ∀ x, x ∈ common.elements ↔ ∀ r ∈ preds.filterMap table.get?, x ∈ r.elements := by
+  simp only [rowMeet] at hm
+  split at hm
+  · cases hm
+  · rename_i first rest he
+    injection hm with hm
+    have hvalid : ∀ r ∈ first :: rest, Row.Valid f r := by
+      intro r hr
+      rw [← he] at hr
+      obtain ⟨a, _, hget⟩ := List.mem_filterMap.1 hr
+      exact (h.2 a r hget).2.1
+    obtain ⟨g, hfg, hf, hv, hmem⟩ := foldl_meet_spec rest next first h.1 (hvalid first List.mem_cons_self)
+      (fun r hr => hvalid r (List.mem_cons_of_mem _ hr))
+    rw [hm] at hf hv hmem
+    refine ⟨g, hfg, hf, hv, fun x => ?_⟩
+    rw [he, hmem]
+    simp
+
+/-- What the predecessors have in common has all that dominates the node, but for itself. -/
+private theorem rowMeet_complete {pos : Nat → Nat} {f : Nat → Option Row} {next : Nat} {table : HashMap Nat Row} {n : Nat} {x : Nat}
+    (h : RowInv graph start pos f next table) (hnn : n ∈ graph.nodes) {d : Nat} (hx : x = pos d) (hdn : d ≠ n) (hdom : Bap.Proofs.Graph.Dom graph start n d)
+    {r : Row} (hr : r ∈ ((predecessorTable graph).getD n []).filterMap table.get?) : x ∈ r.elements := by
+  obtain ⟨a, ha, hget⟩ := List.mem_filterMap.1 hr
+  obtain ⟨_, _, hc⟩ := h.2 a r hget
+  rw [hx]
+  refine hc d fun q hq => ?_
+  have he := (mem_predecessorTable a n).1 ha
+  rcases List.mem_cons.1 (hdom _ (.cons hq he hnn)) with h' | h'
+  · exact absurd h' hdn
+  · exact h'
+
+private theorem rowStep_inv (pos : HashMap Nat Nat) {node : Nat} (hnr : node ∈ Bap.Graph.reachable graph start) {state : HashMap Nat Row × Nat × Bool} {f : Nat → Option Row}
+    (h : RowInv graph start (pos.getD · 0) f state.2.1 state.1) :
+    ∃ g, RowInv graph start (pos.getD · 0) g (rowStep pos (predecessorTable graph) start state node).2.1 (rowStep pos (predecessorTable graph) start state node).1 := by
+  have hnn : node ∈ graph.nodes := Bap.Proofs.Graph.reachableFrom_subset_nodes _ _ hnr
+  obtain ⟨table, next, changed⟩ := state
+  simp only at h
+  unfold rowStep
+  simp only
+  split
+  · exact ⟨f, h⟩
+  · split
+    · exact ⟨f, h⟩
+    · rename_i next' common hm
+      obtain ⟨g, hfg, hf, hv, hmem⟩ := rowMeet_spec h hm
+      have hstay : RowInv graph start (pos.getD · 0) g next' table := h.mono hfg hf
+      have hinsert : Row.under (pos.getD node 0) common = true →
+          ∃ g', RowInv graph start (pos.getD · 0) g' (next' + 1) (table.insert node (.cons next' (pos.getD node 0) common)) := by
+        intro hu
+        obtain ⟨hext, hfresh'⟩ := hf.extend (.cons next' (pos.getD node 0) common)
+        have hunder : ∀ x ∈ common.elements, x < pos.getD node 0 := by
+          intro x hx
+          cases common with
+          | nil => cases hx
+          | cons i first tail =>
+            have h1 : first < pos.getD node 0 := by simpa [Row.under] using hu
+            rcases List.mem_cons.1 hx with rfl | hx
+            · exact h1
+            · have := hv.2.2.1 x hx
+              omega
+        refine ⟨_, hfresh', fun n row hget => ?_⟩
+        simp only [HashMap.get?_eq_getElem?, HashMap.getElem?_insert] at hget
+        split at hget
+        · rename_i heq
+          have hnode : node = n := by simpa using heq
+          subst hnode
+          injection hget with hget
+          subst hget
+          refine ⟨hnr, ⟨hf.1, by simp, hunder, Row.Valid.mono hext hv⟩, fun d hd => ?_⟩
+          by_cases hdn : d = node
+          · subst hdn
+            simp [Row.elements]
+          · refine List.mem_cons_of_mem _ ((hmem _).2 fun r hr => ?_)
+            exact rowMeet_complete h hnn rfl hdn hd hr
+        · obtain ⟨h1, h2, h3⟩ := h.2 n row (by simpa using hget)
+          exact ⟨h1, Row.Valid.mono (fun k r hk => hext k r (hfg k r hk)) h2, h3⟩
+      split
+      · rename_i hu
+        split
+        · split
+          · exact ⟨g, hstay⟩
+          · exact hinsert hu
+        · exact hinsert hu
+      · exact ⟨g, hstay⟩
+
+private theorem rowPass_inv (pos : HashMap Nat Nat) {nodes : List Nat} {table : HashMap Nat Row} {next : Nat} {f : Nat → Option Row}
+    (hnodes : ∀ n ∈ nodes, n ∈ Bap.Graph.reachable graph start) (h : RowInv graph start (pos.getD · 0) f next table) :
+    ∃ g, RowInv graph start (pos.getD · 0) g (rowPass pos (predecessorTable graph) start nodes table next).2.1 (rowPass pos (predecessorTable graph) start nodes table next).1 := by
+  unfold rowPass
+  generalize hs : (table, next, false) = state
+  have h0 : RowInv graph start (pos.getD · 0) f state.2.1 state.1 := by subst hs; exact h
+  clear hs h
+  induction nodes generalizing state f with
+  | nil => exact ⟨f, h0⟩
+  | cons node rest ih =>
+    obtain ⟨g, hg⟩ := rowStep_inv pos (hnodes node List.mem_cons_self) h0
+    exact ih (fun n hn => hnodes n (List.mem_cons_of_mem _ hn)) _ hg
+
+private theorem rowLoop_inv (pos : HashMap Nat Nat) {nodes : List Nat} (hnodes : ∀ n ∈ nodes, n ∈ Bap.Graph.reachable graph start) (fuel : Nat)
+    {table : HashMap Nat Row} {next : Nat} {f : Nat → Option Row} (h : RowInv graph start (pos.getD · 0) f next table) :
+    ∃ g, RowInv graph start (pos.getD · 0) g (rowLoop pos (predecessorTable graph) start nodes fuel table next).2 (rowLoop pos (predecessorTable graph) start nodes fuel table next).1 := by
+  induction fuel generalizing table next f with
+  | zero => exact ⟨f, h⟩
+  | succ fuel ih =>
+    obtain ⟨g, hg⟩ := rowPass_inv pos hnodes h
+    simp only [rowLoop]
+    generalize rowPass pos (predecessorTable graph) start nodes table next = result at hg
+    obtain ⟨table', next', changed⟩ := result
+    cases changed with
+    | true => exact ih hg
+    | false => exact ⟨g, hg⟩
+
+/-- What `rowCheck` says of each node, whichever numbers its walk gives out. -/
+private theorem rowCheck_spec {pos : Nat → Nat} (posT : HashMap Nat Nat) (hpos : pos = (posT.getD · 0)) {member : HashSet Nat} {table : HashMap Nat Row} {nodes : List Nat} {next : Nat} {f : Nat → Option Row}
+    (h : RowInv graph start pos f next table) (hc : rowCheck posT (predecessorTable graph) start member table nodes next = true) :
+    ∀ node ∈ nodes,
+      (node = start → ∃ id, table.get? node = some (.cons id (pos node) .nil)) ∧
+      (node ≠ start → (∀ a ∈ (predecessorTable graph).getD node [], member.contains a = true → table.contains a = true) ∧
+        ∃ id tail, table.get? node = some (.cons id (pos node) tail) ∧
+          ∀ a ∈ (predecessorTable graph).getD node [], ∀ v, table.get? a = some v → ∀ x ∈ tail.elements, x ∈ v.elements) := by
+  subst hpos
+  induction nodes generalizing next f with
+  | nil => simp
+  | cons node rest ih =>
+    intro n hn
+    rw [rowCheck] at hc
+    split at hc
+    · rename_i hns
+      rw [Bool.and_eq_true] at hc
+      obtain ⟨h1, h2⟩ := hc
+      rcases List.mem_cons.1 hn with rfl | hn
+      · refine ⟨fun _ => ?_, fun hne => absurd hns hne⟩
+        split at h1
+        · rename_i id element hget
+          have : element = posT.getD n 0 := by simpa using h1
+          subst this
+          exact ⟨id, hget⟩
+        · cases h1
+      · exact ih h2 h n hn
+    · rename_i hns
+      rw [Bool.and_eq_true] at hc
+      obtain ⟨hall, hc⟩ := hc
+      split at hc
+      · cases hc
+      · rename_i next' common hm
+        rw [Bool.and_eq_true] at hc
+        obtain ⟨h1, h2⟩ := hc
+        obtain ⟨g, hfg, hf, hv, hmem⟩ := rowMeet_spec h hm
+        rcases List.mem_cons.1 hn with rfl | hn
+        · refine ⟨fun he => absurd he hns, fun _ => ⟨?_, ?_⟩⟩
+          · intro a ha hma
+            have := List.all_eq_true.1 hall a ha
+            simpa [hma] using this
+          · split at h1
+            · rename_i id element tail hget
+              have hh := h1
+              simp only [Bool.and_eq_true, decide_eq_true_eq] at hh
+              obtain ⟨he, hid⟩ := hh
+              subst he
+              refine ⟨id, tail, hget, fun a ha v hgetA x hx => ?_⟩
+              have hvt : Row.Valid g tail := by
+                have := (h.2 n _ hget).2.1
+                exact Row.Valid.mono hfg this.2.2.2
+              have hsame := Row.Valid.same hvt hv hid
+              subst hsame
+              exact (hmem x).1 hx v (List.mem_filterMap.2 ⟨a, ha, hgetA⟩)
+            · cases h1
+        · exact ih h2 (h.mono hfg hf) n hn
+
+/-- What a row that checks out has is a true dominator. -/
+private theorem rowCheck_sound {posT : HashMap Nat Nat} {nodes : List Nat} {table : HashMap Nat Row} {next : Nat} {f : Nat → Option Row}
+    (hnodes : ∀ n, n ∈ nodes ↔ n ∈ Bap.Graph.reachable graph start)
+    (hinj : ∀ x ∈ nodes, ∀ y ∈ nodes, posT.getD x 0 = posT.getD y 0 → x = y)
+    (h : RowInv graph start (posT.getD · 0) f next table)
+    (hc : rowCheck posT (predecessorTable graph) start (HashSet.ofList nodes) table nodes next = true) :
+    ∀ {n : Nat} {p : List Nat}, Bap.Proofs.Graph.Walk graph start n p → ∀ row d, table.get? n = some row → d ∈ nodes →
+      posT.getD d 0 ∈ row.elements → d ∈ p := by
+  intro n p hw
+  have hspec := rowCheck_spec posT rfl h hc
+  have hatStart : ∀ {row d}, start ∈ nodes → table.get? start = some row → d ∈ nodes → posT.getD d 0 ∈ row.elements → d = start := by
+    intro row d hs hget hd hmem
+    obtain ⟨id, hid⟩ := (hspec start hs).1 rfl
+    rw [hget] at hid
+    injection hid with hid
+    subst hid
+    exact hinj d hd start hs (by simpa [Row.elements] using hmem)
+  induction hw with
+  | nil hs =>
+    intro row d hget hd hmem
+    have hsr : start ∈ nodes := (hnodes _).2 ((Bap.Proofs.Graph.mem_reachable_iff_walk start).2 ⟨_, .nil hs⟩)
+    simp [hatStart hsr hget hd hmem]
+  | @cons a b q w he hbn ih =>
+    intro row d hget hd hmem
+    have hbr : b ∈ nodes := (hnodes _).2 ((Bap.Proofs.Graph.mem_reachable_iff_walk b).2 ⟨_, .cons w he hbn⟩)
+    have har : a ∈ nodes := (hnodes _).2 ((Bap.Proofs.Graph.mem_reachable_iff_walk a).2 ⟨_, w⟩)
+    by_cases hb : b = start
+    · subst hb
+      rw [hatStart hbr hget hd hmem]
+      exact List.mem_cons_self
+    · obtain ⟨hall, id, tail, hrow, hcommon⟩ := (hspec b hbr).2 hb
+      have hpred := (mem_predecessorTable a b).2 he
+      have hcontains : table.contains a = true := hall a hpred (by simpa using har)
+      obtain ⟨v, hv⟩ : ∃ v, table.get? a = some v := by
+        rw [HashMap.contains_eq_isSome_getElem?] at hcontains
+        exact Option.isSome_iff_exists.1 hcontains
+      rw [hget] at hrow
+      injection hrow with hrow
+      subst hrow
+      rcases List.mem_cons.1 hmem with heq | hin
+      · rw [hinj d hd b hbr heq]
+        exact List.mem_cons_self
+      · exact List.mem_cons_of_mem _ (ih v d hv hd (hcommon a hpred v hv _ hin))
+
+/-- **The rows give the immediate dominators**, when they check out, and otherwise the slow way does. -/
+theorem immediateDominators_eq (graph : Graph Nat) (start : Nat) :
+    immediateDominators graph start = Bap.Graph.immediateDominators graph start := by
+  unfold immediateDominators
+  dsimp only
+  simp only [reachable_eq, dedup_eq]
+  generalize hu : (Bap.Graph.reachable graph start).eraseDups = unique
+  have hund : unique.Nodup := by
+    rw [← hu]
+    exact Bap.Proofs.Graph.nodup_eraseDups _
+  have hunodes : ∀ n, n ∈ unique ↔ n ∈ Bap.Graph.reachable graph start := by
+    intro n
+    rw [← hu, List.mem_eraseDups]
+  generalize hp : posTable 0 unique {} = posT
+  have hposAt : ∀ (k : Nat) (hk : k < unique.length), posT.getD unique[k] 0 = k := by
+    intro k hk
+    have := posTable_at hund 0 {} k hk
+    rw [hp] at this
+    simpa using this
+  have hinj : ∀ x ∈ unique, ∀ y ∈ unique, posT.getD x 0 = posT.getD y 0 → x = y := by
+    intro x hx y hy he
+    obtain ⟨i, hi, rfl⟩ := List.mem_iff_getElem.1 hx
+    obtain ⟨j, hj, rfl⟩ := List.mem_iff_getElem.1 hy
+    rw [hposAt, hposAt] at he
+    subst he
+    rfl
+  have hfresh0 : Fresh (fun k => if k = 1 then some (Row.cons 1 (posT.getD start 0) .nil) else none) 2 :=
+    ⟨by omega, fun k hk => by
+      have : k ≠ 1 := by omega
+      simp [this]⟩
+  have hinitial : RowInv graph start (posT.getD · 0) (fun k => if k = 1 then some (Row.cons 1 (posT.getD start 0) .nil) else none) 2
+      (if unique.contains start then HashMap.insert {} start (.cons 1 (posT.getD start 0) .nil) else {}) := by
+    refine ⟨hfresh0, ?_⟩
+    split
+    · rename_i hcon
+      intro n row hget
+      simp only [HashMap.get?_eq_getElem?, HashMap.getElem?_insert] at hget
+      split at hget
+      · rename_i heq
+        have : start = n := by simpa using heq
+        subst this
+        cases hget
+        have hsr : start ∈ Bap.Graph.reachable graph start := (hunodes _).1 (by simpa using hcon)
+        refine ⟨hsr, ⟨by omega, by simp, by simp [Row.elements], trivial⟩, fun d hdom => ?_⟩
+        have hsn : start ∈ graph.nodes := Bap.Proofs.Graph.reachableFrom_subset_nodes _ _ hsr
+        have := hdom _ (.nil hsn)
+        simp only [List.mem_singleton] at this
+        simp [this, Row.elements]
+      · simp at hget
+    · intro n row hget
+      simp at hget
+  obtain ⟨g, hg⟩ := rowLoop_inv posT (nodes := unique) (fun n hn => (hunodes n).1 hn) (unique.length + 2) hinitial
+  generalize rowLoop posT (predecessorTable graph) start unique (unique.length + 2) (if unique.contains start then HashMap.insert {} start (.cons 1 (posT.getD start 0) .nil) else {}) 2 = result at hg ⊢
+  obtain ⟨table, next⟩ := result
+  simp only at hg ⊢
+  split
+  · rename_i hc
+    rw [Bool.and_eq_true] at hc
+    obtain ⟨hcheck, hall⟩ := hc
+    have hsound := @rowCheck_sound graph start posT unique table next g hunodes hinj hg hcheck
+    -- each node has what `immediateDominators_of` wants
+    have hnode : ∀ n ∈ Bap.Graph.reachable graph start, n ≠ start → ∃ i, rowIdom table unique.toArray n = some i ∧ i ≠ n ∧
+        Bap.Proofs.Graph.Dom graph start n i ∧ ∀ c, c ≠ n → Bap.Proofs.Graph.Dom graph start n c → Bap.Proofs.Graph.Dom graph start i c := by
+      intro n hn hns
+      have hnu := (hunodes n).2 hn
+      have hsome := List.all_eq_true.1 hall n hnu
+      have hisome : (rowIdom table unique.toArray n).isSome = true := by
+        simpa [hns] using hsome
+      obtain ⟨i, hi⟩ := Option.isSome_iff_exists.1 hisome
+      refine ⟨i, hi, ?_⟩
+      unfold rowIdom at hi
+      split at hi
+      · rename_i idn en id el rest hrow
+        split at hi
+        · rename_i parent hel
+          split at hi
+          · rename_i row hparent
+            split at hi
+            · rename_i hrid
+              injection hi with hi
+              subst hi
+              obtain ⟨_, hvn, hcomplete⟩ := hg.2 n _ hrow
+              obtain ⟨hir, hvi, _⟩ := hg.2 parent row hparent
+              have hsame : row = Row.cons id el rest := Row.Valid.same hvi hvn.2.2.2 hrid
+              subst hsame
+              have hlt : el < en := hvn.2.2.1 el List.mem_cons_self
+              have hpa : posT.getD parent 0 = el := by
+                have hel' : unique[el]? = some parent := by simpa using hel
+                obtain ⟨hk, he⟩ := List.getElem?_eq_some_iff.1 hel'
+                rw [← he]
+                exact hposAt el hk
+              have hpu : parent ∈ unique := (hunodes _).2 hir
+              have hen : en = posT.getD n 0 := by
+                obtain ⟨_, _, tail, hr, _⟩ := (rowCheck_spec posT rfl hg hcheck n hnu).2 hns
+                rw [hrow] at hr
+                injection hr with hr
+                injection hr
+              refine ⟨?_, ?_, ?_⟩
+              · intro heq
+                subst heq
+                omega
+              · intro p hw
+                refine hsound hw _ parent hrow hpu ?_
+                rw [hpa]
+                exact List.mem_cons_of_mem _ List.mem_cons_self
+              · intro c hcn hdom p hw
+                have hcr : c ∈ unique := by
+                  obtain ⟨q, hq⟩ := (Bap.Proofs.Graph.mem_reachable_iff_walk n).1 hn
+                  exact (hunodes _).2 (hq.subset_reachable (hdom q hq))
+                have hin := hcomplete c hdom
+                rcases List.mem_cons.1 hin with he | hin
+                · exact absurd (hinj c hcr n hnu (he.trans hen)) hcn
+                · exact hsound hw _ c hparent hcr hin
+            · cases hi
+          · cases hi
+        · cases hi
+      · cases hi
+    have heq := Bap.Proofs.Graph.immediateDominators_of (g := graph) (s := start) (fun n => (rowIdom table unique.toArray n).getD 0) (fun n hn hns => by
+      obtain ⟨i, hi, h1, h2, h3⟩ := hnode n hn hns
+      simpa [hi] using ⟨h1, h2, h3⟩)
+    rw [heq]
+    apply filterMap_congr_mem
+    intro n hn
+    by_cases hns : n = start
+    · simp [hns]
+    · obtain ⟨i, hi, _⟩ := hnode n hn hns
+      simp [hns, hi]
+  · exact slowImmediateDominators_eq graph start
 
 private def walk (table : HashMap Nat Nat) (stop : Option Nat) (tid : Nat) :
     Nat → Nat → List (Nat × Nat) → List (Nat × Nat)

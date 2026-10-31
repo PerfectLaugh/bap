@@ -8,7 +8,10 @@ inductive ValueSort where
   | bool
   | bitv (width : Nat)
   | mem (addressWidth valueWidth : Nat)
-  | float (exponentWidth significandWidth : Nat)
+  /-- The format of a floating point number, as `Float.Format` upstream: its representation, here the parameters of
+  `Bap.Theory.IEEE754` that tell formats apart (a decimal format and a binary format can have the same widths), and its
+  bits in storage (an 80-bit format has an explicit integer bit, and pads to 96 or 128 where it is kept). -/
+  | float (base exponentWidth significandWidth storage : Nat)
   | rmode
   | sym (name : String)
   | app (argument result : ValueSort)
@@ -25,6 +28,12 @@ def bits : ValueSort → Option Nat
   | .bitv width => some width
   | _ => none
 
+/-- The bits that a value of the sort takes, which for a float are not those of its parameters. -/
+def storage : ValueSort → Option Nat
+  | .bitv width => some width
+  | .float _ _ _ storage => some storage
+  | _ => none
+
 end ValueSort
 
 structure Var where
@@ -39,6 +48,13 @@ structure Var where
 namespace Var
 
 def base (var : Var) : Var := { var with index := 0 }
+
+/-- Whether two variables are the same register, whatever sorts they were given: upstream's `Var.Top` compares the
+`Ident` of a variable alone (`bap_core_theory_var.ml`, `Comparable.Inherit (Ident)`, whose component is `snd`), so that a set of
+registers has one element for a name and version. -/
+def sameReg (left right : Var) : Bool :=
+  left.name == right.name && left.index == right.index && left.isVirtual == right.isVirtual && left.isLet == right.isLet
+
 def version (var : Var) (index : Nat) : Var := if var.isLet then var else { var with index := index }
 def isMutable (var : Var) : Bool := !var.isLet
 

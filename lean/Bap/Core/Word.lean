@@ -1,5 +1,28 @@
 import Std
 
+/-- `BitVec.ofNat`, without the power of two when the number is small enough to be less than it. The power of 64 and more
+is a big number, to be computed each time. The bound fits 32 bits, so comparing with it is not of big numbers either. -/
+def Bap.Word.ofNatFast (width value : Nat) : BitVec width :=
+  if h : value < 0xffffffff ∧ 32 ≤ width then
+    ⟨⟨value, Nat.lt_of_lt_of_le h.1 (by
+      have : (2 : Nat) ^ 32 ≤ 2 ^ width := Nat.pow_le_pow_right (by omega) h.2
+      have h32 : (2 : Nat) ^ 32 = 4294967296 := by decide
+      omega)⟩⟩
+  else BitVec.ofNat width value
+
+@[csimp] theorem Bap.Word.ofNat_eq_fast : @BitVec.ofNat = @Bap.Word.ofNatFast := by
+  funext width value
+  unfold Bap.Word.ofNatFast
+  split
+  · rename_i h
+    have hlt : value < 2 ^ width :=
+      Nat.lt_of_lt_of_le h.1 (by
+        have : (2 : Nat) ^ 32 ≤ 2 ^ width := Nat.pow_le_pow_right (by omega) h.2
+        have h32 : (2 : Nat) ^ 32 = 4294967296 := by decide
+        omega)
+    exact BitVec.eq_of_toNat_eq (by simp [Nat.mod_eq_of_lt hlt])
+  · rfl
+
 namespace Bap
 
 abbrev Word (width : Nat) := BitVec width
