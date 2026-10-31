@@ -381,6 +381,35 @@ private def testProcesses : IO Unit := do
   let _ ← Bap.Emu.serveProcessCalls lastThread
   assertEqual "Emu parent of a threaded child finishes" (Bap.Emu.ScheduleOutcome.finished 0) (← Bap.Emu.runProcesses lastThread 2 2000)
   assertEqual "Emu the status of a process is its leader's" (Bap.Emu.exitedStatus 5) (← word lastThread 0x1000)
+  -- Tasks of a forked space in a parallel round: each writes its own byte. Both thread writes are in the space, and in the
+  -- memory of the state of each, and the first process has neither.
+  let rounds ← clean (← Tuned.riscv64 (← asm ["sb a0, 0(a1)", "beq zero, zero, 0"]) 0 0)
+  Bap.Emu.map rounds ⟨0x1000, zeros, rw⟩
+  Bap.Emu.setReg rounds (reg "X10") (.bits (BitVec.ofNat 64 1))
+  Bap.Emu.setReg rounds (reg "X11") (.bits (BitVec.ofNat 64 0x1010))
+  let forkedSpace ← Bap.Emu.fork rounds 0
+  Bap.Emu.setThreadReg rounds forkedSpace (reg "X10") (.bits (BitVec.ofNat 64 2))
+  Bap.Emu.setThreadReg rounds forkedSpace (reg "X11") (.bits (BitVec.ofNat 64 0x1000))
+  Bap.Emu.switchThread rounds forkedSpace
+  let inSpace ← Bap.Emu.clone rounds { start := 0, shareMemory := true, sameGroup := true }
+  Bap.Emu.setThreadReg rounds inSpace (reg "X10") (.bits (BitVec.ofNat 64 3))
+  Bap.Emu.setThreadReg rounds inSpace (reg "X11") (.bits (BitVec.ofNat 64 0x1001))
+  Bap.Emu.switchThread rounds 1
+  let _ ← Bap.Emu.runPreemptiveParallel rounds 2
+  let byteIn (id : Nat) (address : Nat) : IO Nat := do
+    Bap.Emu.switchThread rounds id
+    let native := (← Bap.Emu.read rounds address 1)[0]!.toNat
+    match Bil.lookup (← rounds.state.get).env rounds.config.memory with
+    | .ok (.memory memory) => assertEqual "Emu state of a task in a round has its memory" native (Bap.Memory.readRegion memory address 1)[0]!.toNat
+    | _ => throw <| IO.userError "memory variable is missing"
+    pure native
+  assertEqual "Emu round: the fork has its write" 2 (← byteIn forkedSpace 0x1000)
+  assertEqual "Emu round: the fork has its thread's write" 3 (← byteIn forkedSpace 0x1001)
+  assertEqual "Emu round: the thread has the fork's write" 2 (← byteIn inSpace 0x1000)
+  assertEqual "Emu round: the thread has its write" 3 (← byteIn inSpace 0x1001)
+  assertEqual "Emu round: the fork doesn't have the first's write" 0 (← byteIn inSpace 0x1010)
+  assertEqual "Emu round: the first has its write" 1 (← byteIn 1 0x1010)
+  assertEqual "Emu round: the first doesn't have the fork's" 0 (← byteIn 1 0x1000)
   -- x86-64: the child sees 0 in RAX, not RDI, and its parent the child.
   let x86 (text : String) := LLVM.assemble "x86_64" text
   let forking := (← x86 "movq $57, %rax") ++ (← x86 "movq $5, %rdi") ++ (← x86 "syscall") ++ (← x86 "movq %rax, %rbx") ++
@@ -393,6 +422,15 @@ private def testProcesses : IO Unit := do
   assertEqual "Emu x86-64 parent exits with the child's id" (Bap.Emu.ScheduleOutcome.finished (Bap.Emu.exitedStatus 2)) exited
   let rbx : Bap.Var := ⟨"RBX", .imm 64, 0, false⟩
   assertBits "Emu x86-64 parent gets the child" (BitVec.ofNat 64 2) (.ok (← Bap.Emu.reg intel rbx))
+  -- The child's side, stopped before anything else changes its registers.
+  let intelChild ← Bap.Emu.x86_64 forking 0 0
+  for name in ["RAX", "RBX", "RDI", "RSI", "RDX", "R10", "R8", "R9"] do
+    Bap.Emu.setReg intelChild ⟨name, .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 7))
+  let forkedIntel ← Bap.Emu.fork intelChild 0
+  assertBits "Emu x86-64 child sees 0 in RAX" (BitVec.ofNat 64 0)
+    (.ok (← Bap.Emu.threadReg intelChild forkedIntel ⟨"RAX", .imm 64, 0, false⟩))
+  assertBits "Emu x86-64 child keeps RDI" (BitVec.ofNat 64 7)
+    (.ok (← Bap.Emu.threadReg intelChild forkedIntel ⟨"RDI", .imm 64, 0, false⟩))
 
 private def testThreads : IO Unit := do
   let code := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
