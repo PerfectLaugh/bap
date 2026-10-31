@@ -19,9 +19,8 @@
   (set LR (+ (get-program-counter) 4))
   (relative-jump off))
 
-(defun BLR (reg)
-  (set LR (+ (get-program-counter) 4))
-  (exec-addr reg))
+;; the target is read before LR is written, for BLR X30
+(defun BLR (reg) (a64-call reg))
 
 (defun BR (reg)
   (exec-addr reg))
@@ -50,3 +49,23 @@
 (defun TBZX  (reg pos off) (TB** is-zero  reg pos off))
 (defun TBNZW (reg pos off) (TB** non-zero reg pos off))
 (defun TBNZX (reg pos off) (TB** non-zero reg pos off))
+
+;; The branches that authenticate their target: the authentication isn't
+;; modeled, see aarch64-special.lisp, so it succeeds and the target is the
+;; register. The target is read before LR is written, as it can be LR.
+
+(defun a64-call (target)
+  (let ((pc target))
+    (set LR (+ (get-program-counter) 4))
+    (exec-addr pc)))
+
+(defun BRAA (rn _) (exec-addr rn))
+(defun BRAB (rn _) (exec-addr rn))
+(defun BRAAZ (rn) (exec-addr rn))
+(defun BRABZ (rn) (exec-addr rn))
+(defun BLRAA (rn _) (a64-call rn))
+(defun BLRAB (rn _) (a64-call rn))
+(defun BLRAAZ (rn) (a64-call rn))
+(defun BLRABZ (rn) (a64-call rn))
+(defun RETAA (lr) (exec-addr lr))
+(defun RETAB (lr) (exec-addr lr))

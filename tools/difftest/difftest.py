@@ -330,6 +330,16 @@ def compare_case(cfg, case, layout, states, hw, lean, stats, report):
         if marker & 0xFF == 2 and marker >> 8 < 64:
             stats["faulted"] += 1
             stats[f"signal{marker >> 8}"] += 1
+            # a trap is what the instruction does: the lifter has to take it too, and on the runs that fall through not to
+            if cfg.traps(case.opcode):
+                words = lean[index].split(" ")
+                if words[0] == "O" and words[2] == "s":
+                    stats["agreements"] += 1
+                else:
+                    stats["disagreements"] += 1
+                    if len(known) < 3:
+                        known.append({"text": case.text, "bytes": case.code.hex(), "asm": case.asm, "kind": "trap", "signal": marker >> 8, "lifter": " ".join(words[:3]),
+                            "inputs": {name: hexvalue(value, dict(cfg.all_widths)[name]) for name, value in values.items()}})
             continue
         if marker > 1:
             # what the instruction did to the state of the stub itself, e.g., a store through a wild register
@@ -362,8 +372,11 @@ def compare_case(cfg, case, layout, states, hw, lean, stats, report):
                 taken_lean = 2
         elif effect != "n":
             stats["special effects"] += 1
-            continue
-        if taken_lean != expected_flow:
+            if not cfg.traps(case.opcode):
+                continue
+        if effect[0] in "sc" and cfg.traps(case.opcode):
+            differ.append(("control", "fell through", effect))
+        elif taken_lean != expected_flow:
             differ.append(("control", f"{expected_flow} (1 is taken)", f"{effect}"))
         for name, width in cfg.compared:
             theirs = lean_values.get(name, "?")
@@ -475,7 +488,7 @@ def drive(name, options):
         if reason:
             report["excluded"][opcode] = reason
             continue
-        if any(case.intrinsic for case in cases):
+        if any(case.intrinsic for case in cases) and not cfg.traps(opcode):
             report["fp"].append(opcode)
             continue
         survey.append((opcode, [case for case in cases if case.always] + [case for case in cases if not case.always][:24]))

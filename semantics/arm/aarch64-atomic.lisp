@@ -317,3 +317,81 @@
 (defun STLXPW (rs r1 r2 rn) (prog (LDST*pair st-w r1 r2 rn 4) (setw rs 0)))
 
 (defun CLREX (_) (empty))
+
+;; The compare and swap of a pair, CASP, of ARMv8.1. The pairs are lists
+;; of an even register and the next one, which the semantics take by
+;; their names; the first register of a pair is the lower half of the
+;; memory, which is little endian here. The pair of X30 ends with the
+;; zero register, whose write is dropped. The W registers are written
+;; zero extended. The ordering has no effect on a single thread.
+
+(defun a64-pair-first (p)
+  (case (symbol p)
+    'X0_X1 'X0 'X2_X3 'X2 'X4_X5 'X4 'X6_X7 'X6
+    'X8_X9 'X8 'X10_X11 'X10 'X12_X13 'X12 'X14_X15 'X14
+    'X16_X17 'X16 'X18_X19 'X18 'X20_X21 'X20 'X22_X23 'X22
+    'X24_X25 'X24 'X26_X27 'X26 'X28_FP 'X28 'LR_XZR 'X30
+    'W0_W1 'X0 'W2_W3 'X2 'W4_W5 'X4 'W6_W7 'X6
+    'W8_W9 'X8 'W10_W11 'X10 'W12_W13 'X12 'W14_W15 'X14
+    'W16_W17 'X16 'W18_W19 'X18 'W20_W21 'X20 'W22_W23 'X22
+    'W24_W25 'X24 'W26_W27 'X26 'W28_W29 'X28 'W30_WZR 'X30
+    (symbol p)))
+
+(defun a64-pair-second (p)
+  (case (symbol p)
+    'X0_X1 'X1 'X2_X3 'X3 'X4_X5 'X5 'X6_X7 'X7
+    'X8_X9 'X9 'X10_X11 'X11 'X12_X13 'X13 'X14_X15 'X15
+    'X16_X17 'X17 'X18_X19 'X19 'X20_X21 'X21 'X22_X23 'X23
+    'X24_X25 'X25 'X26_X27 'X27 'X28_FP 'X29 'LR_XZR 'XZR
+    'W0_W1 'X1 'W2_W3 'X3 'W4_W5 'X5 'W6_W7 'X7
+    'W8_W9 'X9 'W10_W11 'X11 'W12_W13 'X13 'W14_W15 'X15
+    'W16_W17 'X17 'W18_W19 'X19 'W20_W21 'X21 'W22_W23 'X23
+    'W24_W25 'X25 'W26_W27 'X27 'W28_W29 'X29 'W30_WZR 'XZR
+    (symbol p)))
+
+(defun a64-pair-value (p n)
+  "the N bits of the two registers of the pair P, the first one is the lowest"
+  (concat (cast-low n (unquote (a64-pair-second p)))
+          (cast-low n (unquote (a64-pair-first p)))))
+
+(defun a64-casp (rs rt rn n)
+  (let ((a rn)
+        (data (load-bits (* 2 n) a)))
+    (when (= data (a64-pair-value rs n))
+      (store-word a (a64-pair-value rt n)))
+    (set-symbol-value (a64-pair-first rs) (cast-unsigned 64 (cast-low n data)))
+    (set-symbol-value (a64-pair-second rs) (cast-unsigned 64 (cast-high n data)))))
+
+(defun CASPX (rs _ rt rn) (a64-casp rs rt rn 64))
+(defun CASPAX (rs _ rt rn) (a64-casp rs rt rn 64))
+(defun CASPLX (rs _ rt rn) (a64-casp rs rt rn 64))
+(defun CASPALX (rs _ rt rn) (a64-casp rs rt rn 64))
+(defun CASPW (rs _ rt rn) (a64-casp rs rt rn 32))
+(defun CASPAW (rs _ rt rn) (a64-casp rs rt rn 32))
+(defun CASPLW (rs _ rt rn) (a64-casp rs rt rn 32))
+(defun CASPALW (rs _ rt rn) (a64-casp rs rt rn 32))
+
+;; The loads and the stores of LORegions and with the unscaled offsets
+;; of RCpc, whose orderings have no effect on a single thread.
+
+(defun LDLARX (rt rn) (ld-x rt rn))
+(defun LDLARW (rt rn) (ld-w rt rn))
+(defun LDLARH (rt rn) (ld-h rt rn))
+(defun LDLARB (rt rn) (ld-b rt rn))
+(defun STLLRX (rt rn) (st-x rt rn))
+(defun STLLRW (rt rn) (st-w rt rn))
+(defun STLLRH (rt rn) (st-h rt rn))
+(defun STLLRB (rt rn) (st-b rt rn))
+(defun LDAPURXi (rt rn off) (ld-x rt (+ rn off)))
+(defun LDAPURi (rt rn off) (ld-w rt (+ rn off)))
+(defun LDAPURHi (rt rn off) (ld-h rt (+ rn off)))
+(defun LDAPURBi (rt rn off) (ld-b rt (+ rn off)))
+(defun LDAPURSWi (rt rn off) (ld-sw rt (+ rn off)))
+(defun LDAPURSHXi (rt rn off) (ld-shx rt (+ rn off)))
+(defun LDAPURSHWi (rt rn off) (ld-shw rt (+ rn off)))
+(defun LDAPURSBXi (rt rn off) (ld-sbx rt (+ rn off)))
+(defun LDAPURSBWi (rt rn off) (ld-sbw rt (+ rn off)))
+(defun STLURXi (rt rn off) (st-x rt (+ rn off)))
+(defun STLURWi (rt rn off) (st-w rt (+ rn off)))
+(defun STLURHi (rt rn off) (st-h rt (+ rn off)))
+(defun STLURBi (rt rn off) (st-b rt (+ rn off)))

@@ -2,8 +2,8 @@
 """The smoke test of what the lifters cover: `tools/smoke.py TARGET... [--work DIR]` from the root of the project.
 
 It makes encodings of a target from what LLVM has: the records of its instructions (for x86, each record is encoded from its
-fields, and a wider search is made for the records nothing reached) and the encodings in LLVM's own MC tests (every target),
-and random words for the targets of fixed sizes. `bap-smoke` decodes and lifts them. The report has, for each target, how many
+fields, and a wider search is made for the records nothing reached; for RISC-V and MIPS, from their fixed bits) and the
+encodings in LLVM's own MC tests (every target), and random words for the targets of fixed sizes. `bap-smoke` decodes and lifts them. The report has, for each target, how many
 opcodes can be disassembled at all, how many were reached, how many lift, what doesn't lift by family, and what wasn't reached.
 
 Everything is a function of the arguments and the seed. `lake build bap-smoke` first.
@@ -36,7 +36,9 @@ def records(backend, top, work):
     """The instructions of a backend from TableGen: a name to its fields, without those too large to keep."""
     compact = os.path.join(work, backend + ".records.json")
     if os.path.exists(compact):
-        return json.load(open(compact))
+        known = json.load(open(compact))
+        if all("Inst" in record for record in known.values()):
+            return known
     dump = os.path.join(work, backend + ".json")
     target = os.path.join(LLVM, "lib/Target", backend)
     subprocess.check_call([os.path.join(BUILD, "bin/llvm-tblgen"), "-I", os.path.join(LLVM, "include"), "-I", os.path.join(BUILD, "include"),
@@ -44,7 +46,7 @@ def records(backend, top, work):
     data = json.load(open(dump))
     fields = ["Opcode", "OpMap", "OpPrefix", "OpEnc", "OpSize", "AdSize", "Form", "ImmT", "hasEVEX_B", "hasEVEX_K", "hasEVEX_L2", "hasEVEX_NF",
               "hasEVEX_RC", "hasEVEX_U", "hasEVEX_Z", "hasREX_W", "hasVEX_4V", "hasVEX_L", "hasLockPrefix", "hasREPPrefix", "isCodeGenOnly",
-              "ForceDisassemble", "isAsmParserOnly", "isPseudo", "Predicates", "AsmString", "DecoderNamespace", "mayLoad", "mayStore", "hasSideEffects"]
+              "ForceDisassemble", "isAsmParserOnly", "isPseudo", "Predicates", "AsmString", "DecoderNamespace", "mayLoad", "mayStore", "hasSideEffects", "Inst"]
     out = {}
     for name in data["!instanceof"]["Instruction"]:
         record, entry = data[name], {}
@@ -54,6 +56,8 @@ def records(backend, top, work):
                 value = value.get("def")
             if field == "Opcode" and isinstance(value, list):
                 value = sum((bit or 0) << index for index, bit in enumerate(value))
+            if field == "Inst" and isinstance(value, list):
+                value = "".join(str(bit) if bit in (0, 1) else "x" for bit in value)
             if field == "Predicates" and value is not None:
                 value = [p["def"] for p in value]
             entry[field] = value
@@ -112,6 +116,25 @@ def harvest(directories, word):
                             if word and len(bytes_) in (2, 4):
                                 found.add(bytes(reversed(bytes_)))
     return found
+
+
+# the targets of fixed sizes whose records say which bits of a word are fixed: the opcode and fixed bits, with the others random
+
+RECORD_ENCODED = {"riscv64": "little", "riscv32": "little", "mips64": "big", "mips": "big"}
+RECORD_SAMPLES = 64
+
+
+def record_encodings(recs, order, rng):
+    """Encodings of each record, whose operands are random, as a decoder can also ask for values of them. Not a record of a
+    feature that isn't enabled: the decoder has the last word, which is what the report is about."""
+    for record in recs.values():
+        inst = record.get("Inst")
+        if not (decodable(record) and inst and "1" in inst and len(inst) % 8 == 0):
+            continue
+        for _ in range(RECORD_SAMPLES):
+            # the first character is the bit 0
+            word = sum(int(bit if bit != "x" else rng.getrandbits(1)) << index for index, bit in enumerate(inst))
+            yield word.to_bytes(len(inst) // 8, order)
 
 
 # x86: an encoding from the fields of a record
@@ -414,6 +437,8 @@ def run_fixed(target, recs, work, out, samples, seed, count):
     rng = random.Random(seed)
     for _ in range(count):
         encodings.add(rng.randbytes(word) + bytes(4))
+    if target in RECORD_ENCODED:
+        encodings.update(encoding + bytes(max(0, 8 - len(encoding))) for encoding in record_encodings(recs, RECORD_ENCODED[target], rng))
     write_corpus(corpus, sorted(encodings))
     tallies = smoke(target, corpus, samples, work)
     report(target, recs, tallies, out)

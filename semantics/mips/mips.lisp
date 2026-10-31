@@ -237,8 +237,13 @@
 ;; the disassembler decodes DINSM and DINSU as DINS, without the tied operand
 (defun DINS (rt rs pos size) (set$ rt (insert-field rt rs pos size)))
 
-(defun MOVN_I_I (rd rs rt _) (when (not (is-zero rt)) (set$ rd rs)))
-(defun MOVZ_I_I (rd rs rt _) (when (is-zero rt) (set$ rd rs)))
+;; the conditional moves write the register either way: what a condition
+;; of the lifter chooses between has to be a value, and a write to the
+;; zero register, which is no code, isn't one
+(defun move-if (c rd rs) (set$ rd (if c rs rd)))
+
+(defun MOVN_I_I (rd rs rt _) (move-if (not (is-zero rt)) rd rs))
+(defun MOVZ_I_I (rd rs rt _) (move-if (is-zero rt) rd rs))
 
 ;; loads and stores
 
@@ -400,12 +405,44 @@
 
 ;; the other instructions
 
+;; there are no caches, no pipeline and no other processors here, so the
+;; instructions that only order or time what those do have no effect:
+;; the barriers, SSNOP, which only takes up an issue slot, and PAUSE,
+;; which only waits for the reservation of LL, that isn't modeled, see SC
 (defun SYNC (_) (empty))
 (defun EHB () (empty))
+(defun SSNOP () (empty))
+(defun PAUSE () (empty))
+
+;; SYNCI makes the writes to the memory at the address visible to the
+;; fetches of instructions, which here always see them. The faults of its
+;; address, that a real processor can take, aren't modeled.
+(defun SYNCI (base off) (empty))
+
+;; PREF is a hint, of which the manual says it doesn't change the
+;; architectural state and doesn't fault on its address. The exceptions
+;; are the hints 25, which writes back and invalidates a cache line, of
+;; no effect here too, and 30, PrepareForStore, which can leave the bytes
+;; of the line unpredictable: they are kept, which is one of the values.
+(defun PREF (base off hint) (empty))
+(defun PREF_R6 (base off hint) (empty))
+
 (defun SYSCALL (code) (intrinsic 'syscall code))
 (defun BREAK (code _) (intrinsic 'breakpoint code :aborts))
+;; the traps, whose comparisons are of the whole registers, and in which
+;; the immediates are sign-extended also for the unsigned comparison
 (defun TEQ (rs rt code) (when (= rs rt) (intrinsic 'trap code :aborts)))
 (defun TNE (rs rt code) (when (/= rs rt) (intrinsic 'trap code :aborts)))
+(defun TGE (rs rt code) (when (s>= rs rt) (intrinsic 'trap code :aborts)))
+(defun TGEU (rs rt code) (when (>= rs rt) (intrinsic 'trap code :aborts)))
+(defun TLT (rs rt code) (when (s< rs rt) (intrinsic 'trap code :aborts)))
+(defun TLTU (rs rt code) (when (< rs rt) (intrinsic 'trap code :aborts)))
+(defun TEQI (rs imm) (when (= rs imm) (intrinsic 'trap :aborts)))
+(defun TNEI (rs imm) (when (/= rs imm) (intrinsic 'trap :aborts)))
+(defun TGEI (rs imm) (when (s>= rs imm) (intrinsic 'trap :aborts)))
+(defun TGEIU (rs imm) (when (>= rs imm) (intrinsic 'trap :aborts)))
+(defun TLTI (rs imm) (when (s< rs imm) (intrinsic 'trap :aborts)))
+(defun TTLTIU (rs imm) (when (< rs imm) (intrinsic 'trap :aborts)))
 
 ;;; FLOATING-POINT INSTRUCTIONS (COP1)
 ;;
@@ -422,10 +459,12 @@
 ;; kept when the single is written (the manual leaves it unpredictable).
 ;;
 ;; The condition codes are the registers FCC0-FCC7, the bits of FCSR,
-;; named by the operands of the instructions, FCSR itself isn't
-;; declared, so its other fields aren't modeled: the rounding
-;; mode is to nearest (the reset value of FCSR.RM), and the exceptions
-;; aren't modeled, they are disabled at the reset. The NaNs are of the
+;; named by the operands of the instructions. The register FCSR has the
+;; other fields, which only CFC1 and CTC1 read and write, see them below:
+;; the operations round to nearest (the reset value of FCSR.RM) whatever
+;; FCSR.RM says, don't flush subnormals whatever FCSR.FS says, don't set
+;; the Cause and Flags fields, and don't take the exceptions that the
+;; Enables field asks for, which are disabled at the reset. The NaNs are of the
 ;; legacy encoding of the Release 2 (FCSR.NAN2008 = 0), whose quiet
 ;; bit, the most significant bit of the fraction, is set in the
 ;; signaling NaNs: an operation, whose operand is a signaling NaN, or
@@ -523,8 +562,8 @@
   "(set-hi R X) writes X to the high word of the double of the operand R"
   (let ((s (fpr r)))
     (if (fpr64)
-        (set$ s (concat (cast-low 32 x) (cast-low 32 (unquote s))))
-      (set$ (fpr-next s) (cast-low 32 x)))))
+        (set-fpr s (concat (cast-low 32 x) (cast-low 32 (unquote s))))
+      (set-fpr (fpr-next s) (cast-low 32 x)))))
 
 ;; the condition codes, which are 1-bit
 (defun fcc (cc) (not (is-zero (unquote cc))))
@@ -645,6 +684,24 @@
 (defun FSQRT_D32 (fd fs) (set-d fd (fp-sqrt (get-d fs))))
 (defun FSQRT_D64 (fd fs) (set-d fd (fp-sqrt (get-d fs))))
 
+;; The manual leaves the accuracy of RECIP and RSQRT to the implementation.
+;; These are the most accurate RECIP, and for RSQRT, the rounded reciprocal
+;; of the rounded root, whose result can differ from the exact one in the
+;; last place. The NaNs are those of the division and of the root.
+(defun fp-one (x)
+  "the number 1 in the format of X"
+  (if (= (word-width x) 32) (cast-low 32 0x3f800000) 0x3ff0000000000000:64))
+
+(defun fp-recip (x) (fp-div (fp-one x) x))
+(defun fp-rsqrt (x) (fp-div (fp-one x) (fp-sqrt x)))
+
+(defun RECIP_S (fd fs) (set-s fd (fp-recip (get-s fs))))
+(defun RECIP_D32 (fd fs) (set-d fd (fp-recip (get-d fs))))
+(defun RECIP_D64 (fd fs) (set-d fd (fp-recip (get-d fs))))
+(defun RSQRT_S (fd fs) (set-s fd (fp-rsqrt (get-s fs))))
+(defun RSQRT_D32 (fd fs) (set-d fd (fp-rsqrt (get-d fs))))
+(defun RSQRT_D64 (fd fs) (set-d fd (fp-rsqrt (get-d fs))))
+
 ;; the sign of a NaN is changed too, as the legacy ABS and NEG do
 (defun FABS_S (fd fs) (set-s fd (fp-abs (get-s fs))))
 (defun FABS_D32 (fd fs) (set-d fd (fp-abs (get-d fs))))
@@ -684,9 +741,84 @@
 (defun DMTC1 (fs rt) (set-d fs rt))
 (defun DMFC1 (rt fs) (set$ rt (get-d fs)))
 
+;; THE CONTROL REGISTERS
+;;
+;; FCSR has, from the most significant bit: FCC7-FCC1, FS, FCC0, two bits
+;; of the implementation, a zero, ABS2008, NAN2008, Cause, Enables, Flags
+;; and RM. FCCR, FEXR and FENR are views of its fields. Those of the
+;; implementation read as zero and keep nothing, and ABS2008 and NAN2008
+;; can't be written and say what the operations do, see the NaNs above.
+;; The condition codes, which only exist before Release 6, are the
+;; registers, so the register FCSR, of a word, has the rest, which are the
+;; bits of this mask.
+(defun fcsr-rest (x) (logand x 0x0103ffff))
+
+(defun fcsr-value ()
+  "the 32 bits of FCSR"
+  (let ((rest (low32 FCSR)))
+    (if (release6)
+        (logor rest (cast-low 32 0xc0000))
+      (concat FCC7 FCC6 FCC5 FCC4 FCC3 FCC2 FCC1
+              (extract 24 24 rest) FCC0 (extract 22 0 rest)))))
+
+(defun fccr-write (x)
+  "(fccr-write X) writes the condition codes from the low 8 bits of X"
+  (set FCC0 (extract 0 0 x))
+  (set FCC1 (extract 1 1 x))
+  (set FCC2 (extract 2 2 x))
+  (set FCC3 (extract 3 3 x))
+  (set FCC4 (extract 4 4 x))
+  (set FCC5 (extract 5 5 x))
+  (set FCC6 (extract 6 6 x))
+  (set FCC7 (extract 7 7 x)))
+
+(defun fcsr-write (x)
+  "(fcsr-write X) writes the fields of FCSR but the condition codes. A
+   Cause, whose exception is enabled, or that is of the unimplemented
+   operation, which can't be disabled, takes the exception after the
+   write, the only one of the FPU that is modeled"
+  (set FCSR (zext (fcsr-rest x)))
+  (when (not (is-zero (logand (rshift x 12) (logor (rshift x 7) 0x20) 0x3f)))
+    (intrinsic 'floating-point-exception :aborts)))
+
+(defun fcr-value (fs)
+  "the value of the control register FS. FIR says what the implementation
+   is, which isn't known here. FCR1 and FCR4 are of the Release 5, which
+   this doesn't model, and the manual leaves reading the others
+   unpredictable, of which a fault is one outcome"
+  (case (symbol fs)
+    'FCR0 (intrinsic 'mips_cp1_fir :result 32)
+    'FCR25 (concat 0:24 FCC7 FCC6 FCC5 FCC4 FCC3 FCC2 FCC1 FCC0)
+    'FCR26 (logand (fcsr-value) 0x0003f07c)
+    'FCR28 (logor (logand (fcsr-value) 0x00000f83)
+                  (logand (rshift (fcsr-value) 22) 0x4))
+    'FCR31 (fcsr-value)
+    (prog (intrinsic 'undefined-instruction :aborts)
+          (cast-low 32 0))))
+
+(defun CFC1 (rt fs) (set$ rt (sext32 (fcr-value fs))))
+
+;; FIR can't be written. The upper bits of a write to one of the views have
+;; to be zero, the manual leaves anything else unpredictable, and they are
+;; ignored here. There are no FCC on the Release 6.
+(defun CTC1 (fs rt)
+  (let ((x (low32 rt))
+        (old (low32 FCSR)))
+    (case (symbol fs)
+      'FCR25 (unless (release6) (fccr-write x))
+      'FCR26 (fcsr-write (logor (logand old (lnot 0x0003f07c))
+                                (logand x 0x0003f07c)))
+      'FCR28 (fcsr-write (logor (logand old (lnot 0x01000f83))
+                                (logand x 0x00000f83)
+                                (lshift (logand x 0x4) 22)))
+      'FCR31 (prog (unless (release6)
+                     (fccr-write (concat (extract 31 25 x) (extract 23 23 x))))
+                   (fcsr-write x))
+      (intrinsic 'undefined-instruction :aborts))))
+
 ;; the conditional moves, the last operand is tied to the destination
-(defun MOVT_I (rd rs cc _) (when (fcc cc) (set$ rd rs)))
-(defun MOVF_I (rd rs cc _) (when (not (fcc cc)) (set$ rd rs)))
+(defun MOVT_I (rd rs cc _) (move-if (fcc cc) rd rs))
+(defun MOVF_I (rd rs cc _) (move-if (not (fcc cc)) rd rs))
 (defun MOVT_I64 (rd rs cc _) (MOVT_I rd rs cc _))
 (defun MOVF_I64 (rd rs cc _) (MOVF_I rd rs cc _))
 (defun MOVT_S (fd fs cc _) (when (fcc cc) (FMOV_S fd fs)))
@@ -829,6 +961,37 @@
 (defun CEIL_W_D64 (fd fs) (set-s fd (fp-to-int 'rtp 32 (get-d fs))))
 (defun CEIL_L_S (fd fs) (set-d fd (fp-to-int 'rtp 64 (get-s fs))))
 (defun CEIL_L_D64 (fd fs) (set-d fd (fp-to-int 'rtp 64 (get-d fs))))
+
+;;; PAIRED SINGLES
+;;
+;; A paired single is two singles in a 64-bit register, PU in its upper
+;; half and PL in its lower half, each of which is operated on as a
+;; single, with what is said above of those. The manual has the moves
+;; between the formats copy the values, also of a NaN, so they don't go
+;; through fp-convert. The arithmetic writes the lower half first, with
+;; the upper one kept, and then the upper half, which is only computed
+;; from upper halves, so the destination can be an operand.
+
+(defun pl (r) (get-s r))
+(defun pu (r) (get-hi r))
+
+(defun FADD_PS64 (fd fs ft)
+  (set-s fd (fp-add (pl fs) (pl ft)))
+  (set-hi fd (fp-add (pu fs) (pu ft))))
+(defun FSUB_PS64 (fd fs ft)
+  (set-s fd (fp-sub (pl fs) (pl ft)))
+  (set-hi fd (fp-sub (pu fs) (pu ft))))
+(defun FMUL_PS64 (fd fs ft)
+  (set-s fd (fp-mul (pl fs) (pl ft)))
+  (set-hi fd (fp-mul (pu fs) (pu ft))))
+
+(defun CVT_PS_S64 (fd fs ft) (set-d fd (concat (get-s fs) (get-s ft))))
+(defun PLL_PS64 (fd fs ft) (set-d fd (concat (pl fs) (pl ft))))
+(defun PLU_PS64 (fd fs ft) (set-d fd (concat (pl fs) (pu ft))))
+(defun PUL_PS64 (fd fs ft) (set-d fd (concat (pu fs) (pl ft))))
+(defun PUU_PS64 (fd fs ft) (set-d fd (concat (pu fs) (pu ft))))
+(defun CVT_S_PL64 (fd fs) (set-s fd (pl fs)))
+(defun CVT_S_PU64 (fd fs) (set-s fd (pu fs)))
 
 ;; COMPARISONS
 ;;

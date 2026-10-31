@@ -1146,11 +1146,11 @@ theorem arm32Globals_keys : (arm32Globals.map (·.1)).Nodup ∧ arm32Globals.len
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem mipsGlobals_keys : (mipsGlobals.map (·.1)).Nodup ∧ mipsGlobals.length = 77 :=
+theorem mipsGlobals_keys : (mipsGlobals.map (·.1)).Nodup ∧ mipsGlobals.length = 78 :=
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem mips32Globals_keys : (mips32Globals.map (·.1)).Nodup ∧ mips32Globals.length = 77 :=
+theorem mips32Globals_keys : (mips32Globals.map (·.1)).Nodup ∧ mips32Globals.length = 78 :=
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in

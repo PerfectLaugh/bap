@@ -423,3 +423,31 @@
   (let ((a rn)) (LDST*pair st-w r1 r2 a 4) (set$ wb (+ a (lshift off 2)))))
 (defun STPXpost (wb r1 r2 rn off)
   (let ((a rn)) (LDST*pair st-x r1 r2 a 8) (set$ wb (+ a (lshift off 3)))))
+
+;; The unprivileged loads and stores access the memory as EL0 does. The
+;; programs here run at EL0, where they are the unscaled loads and stores.
+
+(defun LDTRXi (rt rn off) (ld-x rt (+ rn off)))
+(defun LDTRWi (rt rn off) (ld-w rt (+ rn off)))
+(defun LDTRHi (rt rn off) (ld-h rt (+ rn off)))
+(defun LDTRBi (rt rn off) (ld-b rt (+ rn off)))
+(defun LDTRSWi (rt rn off) (ld-sw rt (+ rn off)))
+(defun LDTRSHXi (rt rn off) (ld-shx rt (+ rn off)))
+(defun LDTRSHWi (rt rn off) (ld-shw rt (+ rn off)))
+(defun LDTRSBXi (rt rn off) (ld-sbx rt (+ rn off)))
+(defun LDTRSBWi (rt rn off) (ld-sbw rt (+ rn off)))
+(defun STTRXi (rt rn off) (st-x rt (+ rn off)))
+(defun STTRWi (rt rn off) (st-w rt (+ rn off)))
+(defun STTRHi (rt rn off) (st-h rt (+ rn off)))
+(defun STTRBi (rt rn off) (st-b rt (+ rn off)))
+
+;; The loads that authenticate their base: the authentication isn't
+;; modeled, see aarch64-special.lisp, so it succeeds and the base is the
+;; address. The offset is of 10 bits, scaled by 8.
+
+(defun LDRAAindexed (rt rn off) (ld-x rt (+ rn (lshift off 3))))
+(defun LDRABindexed (rt rn off) (ld-x rt (+ rn (lshift off 3))))
+(defun LDRAAwriteback (wb rt rn off)
+  (let ((a (+ rn (lshift off 3)))) (ld-x rt a) (set$ wb a)))
+(defun LDRABwriteback (wb rt rn off)
+  (let ((a (+ rn (lshift off 3)))) (ld-x rt a) (set$ wb a)))

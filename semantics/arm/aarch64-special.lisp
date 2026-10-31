@@ -54,6 +54,45 @@
 (defun AUTIB1716 () (empty))
 (defun XPACLRI () (empty))
 
+;; The same goes for the forms of the other registers and for the data
+;; keys. A code is a function of a key, which the kernel chooses and the
+;; model doesn't have, so no pointer gets one: the instructions that sign
+;; keep the register, the ones that authenticate succeed and keep it, and
+;; XPACI and XPACD have nothing to strip. A pointer that was signed outside
+;; of the model keeps its code.
+(defun PACIA (_ _ _) (empty))
+(defun PACIB (_ _ _) (empty))
+(defun PACDA (_ _ _) (empty))
+(defun PACDB (_ _ _) (empty))
+(defun AUTIA (_ _ _) (empty))
+(defun AUTIB (_ _ _) (empty))
+(defun AUTDA (_ _ _) (empty))
+(defun AUTDB (_ _ _) (empty))
+(defun PACIZA (_ _) (empty))
+(defun PACIZB (_ _) (empty))
+(defun PACDZA (_ _) (empty))
+(defun PACDZB (_ _) (empty))
+(defun AUTIZA (_ _) (empty))
+(defun AUTIZB (_ _) (empty))
+(defun AUTDZA (_ _) (empty))
+(defun AUTDZB (_ _) (empty))
+(defun XPACI (_ _) (empty))
+(defun XPACD (_ _) (empty))
+
+;; PACGA has no register to keep: the upper half of its result is the
+;; code of its operands with the generic key, which is not modeled, so
+;; it is an intrinsic of them, and the lower half is zero.
+(defun PACGA (rd rn rm)
+  (set$ rd (concat (intrinsic 'pacga rn rm :result 32) (cast-unsigned 32 0))))
+
+;; CHKFEAT clears the bits of X16 of the features that are enabled. The
+;; only one is the guarded control stack, which is not modeled, so it is
+;; not enabled and X16 stays.
+(defun CHKFEAT () (empty))
+
+;; The prefetch of a range is a hint, without an architectural effect.
+(defun RPRFM (_ _ _) (empty))
+
 ;; the instruction, that the processor doesn't have, e.g., the system
 ;; register, that it doesn't have, which raises the exception of the
 ;; undefined instructions, as SIGILL of Linux
@@ -140,6 +179,11 @@
     0xc208 (if SPSel (set SP_EL0 src) (a64-undefined))
     0x1987 (empty)                              ; SB
     (a64-undefined)))
+
+;; The only SYSL allocated at EL0 is GCSPOPM of the guarded control
+;; stack, which is not modeled, so it is not enabled and is undefined,
+;; as the implementation defined ones are, which the processor doesn't have.
+(defun SYSLxt (_ _ _ _ _) (a64-undefined))
 
 ;; SMSTART and SMSTOP of SME, which the processor of Unicorn doesn't
 ;; have, as the programs, e.g., glibc, run them, only if it has SME

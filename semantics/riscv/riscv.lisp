@@ -197,6 +197,12 @@
 (defun C_JR (dst)
   (exec-addr dst))
 
+;; of RV32 only, where the encoding isn't that of C.ADDIW
+(defun C_JAL (off)
+  (let ((pc (get-program-counter)))
+    (set X1 (+ pc 2))
+    (exec-addr (+ pc off))))
+
 (defun C_J (dst)
   (exec-addr (+ (get-program-counter) dst)))
 
@@ -431,6 +437,8 @@
 (defun EBREAK () (intrinsic 'breakpoint :aborts))
 (defun C_EBREAK () (intrinsic 'breakpoint :aborts))
 (defun C_UNIMP () (intrinsic 'undefined-instruction :aborts))
+;; `csrrw x0, cycle, x0`, a write to a register that can only be read
+(defun UNIMP () (intrinsic 'undefined-instruction :aborts))
 
 
 ;;; ATOMICS, the A extension, whose orderings are of no concern here, as

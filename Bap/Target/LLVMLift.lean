@@ -251,6 +251,14 @@ private def aarch64RegisterList (name : String) : Bool :=
   | first :: _ :: _ => first.startsWith "Q" || first.startsWith "D"
   | _ => false
 
+/-- The pair of consecutive registers of CASP, e.g., `X0_X1`, `X28_FP` or `W30_WZR`. -/
+private def aarch64RegisterPair (name : String) : Bool :=
+  match name.splitOn "_" with
+  | [first, second] =>
+    let register (part : String) := part.startsWith "X" || part.startsWith "W" || part = "FP" || part = "LR"
+    register first && register second
+  | _ => false
+
 private def aarch64Globals : Primus.Semantics.Globals :=
   let registers := (List.range 31).map fun n => s!"X{n}"
   let vectors := (List.range 32).flatMap fun n => [s!"B{n}", s!"H{n}", s!"S{n}", s!"D{n}", s!"Q{n}"]
@@ -423,10 +431,11 @@ private def mipsConditionCode (name : String) : Bool :=
 private def mipsRegister (name : String) : Primus.Semantics.Value :=
   if mipsConditionCode name then .register name 1 1 else .register (mipsCanonicalName name) 64 64
 
-/-- The registers of both widths: the integer and floating point registers, which are words, and the condition codes. -/
+/-- The registers of both widths: the integer and floating point registers, which are words, and the condition codes. `FCSR`
+has the fields of that register but the condition codes, in the low half of its word on MIPS64. -/
 private def mipsRegisterNames : List String :=
   (List.range 32).map (fun n => s!"R{n}") ++ (List.range 32).map (fun n => s!"F{n}") ++
-    (List.range 8).map (fun n => s!"FCC{n}") ++ ["ZERO", "RA", "HI", "LO", "USERLOCAL"]
+    (List.range 8).map (fun n => s!"FCC{n}") ++ ["ZERO", "RA", "HI", "LO", "USERLOCAL", "FCSR"]
 
 private def mipsGlobals : Primus.Semantics.Globals :=
   mipsRegisterNames.map fun name => (name, mipsRegister name)
@@ -571,8 +580,9 @@ def aarch64Environment : IO Primus.Semantics.Environment := cached aarch64Cache 
     let llvmName := if name = "X29" then "FP" else if name = "X30" then "LR" else name
     let id ← LLVM.registerId "aarch64" llvmName
     pure (id, aarch64Register name)
-  -- the lists of registers of the loads and stores of structures and of TBL, which the semantics take by their names
-  let lists := (← LLVM.registerNames "aarch64").filter fun entry => aarch64RegisterList entry.2
+  -- the lists of registers of the loads and stores of structures, of TBL and of CASP, which the semantics take by their names
+  let lists := (← LLVM.registerNames "aarch64").filter fun entry =>
+    aarch64RegisterList entry.2 || aarch64RegisterPair entry.2
   pure (environment.withRegisters (registers ++ lists.map fun entry => (entry.1, aarch64Register entry.2)))
 
 private initialize x86Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none

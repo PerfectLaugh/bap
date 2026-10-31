@@ -94,6 +94,10 @@ class Target:
     def relevant(self, name):
         return True
 
+    def traps(self, opcode):
+        """Whether the opcode can take a trap, of which the signal of the run and the effect of the lifter are compared."""
+        return False
+
     def pad_prefix(self, code):
         return b""
 
@@ -836,7 +840,7 @@ class AArch64(Risc):
     semantics = ["arm/aarch64-arithmetic.lisp", "arm/aarch64-atomic.lisp", "arm/aarch64-branch.lisp", "arm/aarch64-data-movement.lisp", "arm/aarch64-float.lisp",
         "arm/aarch64-logical.lisp", "arm/aarch64-pstate.lisp", "arm/aarch64-simd.lisp", "arm/aarch64-special.lisp"]
     mnemonics_of = staticmethod(aarch64_stems)
-    excluded_prefix = ("SVC", "HVC", "SMC", "BRK", "HLT", "HINT", "SYS", "MSR", "MRS", "DCPS", "ERET", "DRPS", "CLREX", "WFE", "WFI", "PAC", "AUT", "XPAC", "RET", "BLRA", "BRA", "ERETA", "UDF", "GCS", "RNDR", "TSB", "CSDB", "PSB", "STXR", "STXP", "STLXR", "STLXP", "LDXR", "LDXP", "LDAXR", "LDAXP")
+    excluded_prefix = ("SVC", "HVC", "SMC", "BRK", "HLT", "HINT", "SYS", "MSR", "MRS", "DCPS", "ERET", "DRPS", "CLREX", "WFE", "WFI", "PAC", "AUT", "XPAC", "RET", "BLRA", "BRA", "ERETA", "LDRAA", "LDRAB", "UDF", "GCS", "RNDR", "TSB", "CSDB", "PSB", "STXR", "STXP", "STLXR", "STLXP", "LDXR", "LDXP", "LDAXR", "LDAXP")
     pc_mask = 0
 
     def __init__(self, scratch):
@@ -874,7 +878,27 @@ class AArch64(Risc):
             items += [(f"csel x1, x2, x3, {c}",), (f"csinc w1, w2, w3, {c}",), (f"csinv x1, x2, x3, {c}",), (f"csneg w1, w2, w3, {c}",), (f"ccmp x1, x2, #5, {c}",), (f"ccmn w1, #3, #9, {c}",), (f"cset x1, {c}",), (f"fcsel d1, d2, d3, {c}",)]
         items += [("mrs x1, nzcv",), ("msr nzcv, x1",), ("ldr x1, #8",), ("ldr w1, #8",), ("ldrsw x1, #8",), ("ldr q1, #8",), ("ldr d1, #8",), ("ldr s1, #8",)]
         cases = self.text_cases(assemble, items)
-        return cases
+        # the edges that random inputs rarely reach: a memory that holds the pair a CASP compares with half of the time, and the
+        # doubles and the halves on the bounds of what FJCVTZS and FRECPX tell apart
+        first, second = 0x1122334455667788, 0x99AABBCCDDEEFF00
+        holds = lambda word, bits=64: (lambda index, rng: word if index % 2 == 0 else rng.getrandbits(bits))
+        doubles = [0, 1 << 63, 1, 0x3FE0000000000000, 0x3FF8000000000000, 0xBFF8000000000000, 0x41DFFFFFFFC00000, 0x41E0000000000000, 0xC1E0000000000000, 0xC1E0000000200000,
+            0x41E0000000200000, 0x4330000000000001, 0x4340000000000001, 0x4450000000000001, 0x4530000000000001, 0x4630000000000000, 0x7FF0000000000000, 0xFFF0000000000000,
+            0x7FF8000000000000, 0x7FF0000000000001, 0x000FFFFFFFFFFFFF, 0x41DFFFFFFFFFFFFF, 0xC1DFFFFFFFFFFFFF, 0x41F0000000000000, 0xC1F0000000000001]
+        halves = [0, 0x8000, 1, 0x3FF, 0x400, 0x3C00, 0xFC00, 0x7C00, 0x7C01, 0x7E01, 0xFFFF]
+        singles = [0, 1 << 31, 1, 0x7FFFFF, 0x800000, 0x3F800000, 0xFF800000, 0x7F800000, 0x7F800001, 0x7FC00001, 0xFFFFFFFF]
+        wide = [0, 1 << 63, 1, 0xFFFFFFFFFFFFF, 1 << 52, 0x3FF0000000000000, 0xFFF0000000000000, 0x7FF0000000000000, 0x7FF0000000000001, 0x7FF8000000000001, (1 << 64) - 1]
+        among = lambda values: (lambda index, rng: values[index % len(values)])
+        extra = [("fjcvtzs w1, d2", {"Q2": among(doubles)}), ("frecpx h1, h2", {"Q2": among(halves)}), ("frecpx s1, s2", {"Q2": among(singles)}), ("frecpx d1, d2", {"Q2": among(wide)})]
+        for text in ("casp x0, x1, x2, x3, [x5]", "caspal x0, x1, x2, x3, [x5]"):
+            extra.append((text, {"X0": first, "X1": second, "X5": "window+240"}, {240: (holds(first), 8), 248: (holds(second), 8)}))
+        for text in ("casp w0, w1, w2, w3, [x5]", "caspal w0, w1, w2, w3, [x5]"):
+            extra.append((text, {"X0": first, "X1": second, "X5": "window+248"}, {248: (holds(first & 0xFFFFFFFF, 32), 4), 252: (holds(second & 0xFFFFFFFF, 32), 4)}))
+        extra.append(("casp x30, xzr, x2, x3, [x5]", {"X30": first, "X5": "window+240"}, {240: (holds(first), 8), 248: (holds(0), 8)}))
+        extras = self.text_cases(assemble, extra)
+        for case in extras:
+            case.always = True
+        return extras + cases
 
     def corpus_memory(self, text):
         if "<" in text:
@@ -886,7 +910,9 @@ class AArch64(Risc):
             disp = int(match.group(2), 0) if match.group(2) else 0
             if abs(disp) > 200:
                 return None
-            pins[match.group(1).upper()] = f"window+{248 - disp}"
+            # a CASP of X registers needs an address aligned to 16, and faults otherwise
+            base = 240 if re.match(r"casp[al]*\s+x", text) else 248
+            pins[match.group(1).upper()] = f"window+{base - disp}"
             if match.group(4):
                 pins[f"X{match.group(4)}"] = 8
         return pins
@@ -1063,7 +1089,7 @@ class Riscv(Risc):
     base_pins = {"X15": "window+248", "X14": 8}
     semantics = ["riscv/riscv.lisp"]
     mnemonics_of = staticmethod(riscv_stems)
-    excluded_prefix = ("ECALL", "EBREAK", "C_EBREAK", "UNIMP", "C_UNIMP", "WFI", "SRET", "MRET", "URET", "CSRR", "FENCE", "SFENCE", "HFENCE", "HLV", "HSV", "VSET", "CBO", "PREFETCH", "DRET")
+    excluded_prefix = ("ECALL", "EBREAK", "C_EBREAK", "WFI", "SRET", "MRET", "URET", "CSRR", "FENCE", "SFENCE", "HFENCE", "HLV", "HSV", "VSET", "CBO", "PREFETCH", "DRET")
     shape_list = ["", "a0, a1, a2", "a0, a1", "a0", "a0, a1, 5", "a0, a1, 3", "a0, a1, -1", "a0, a1, 1000", "a0, 5", "a0, -1", "a0, 1000", "a1, 8(a5)", "a1, -8(a5)", "a1, (a5)", "a1, 0(a5)", "a1, a2, (a5)", "a1, (a5)", "a1, a2, a3", "a1, a2, 3",
         "a0, a0", "a0, a0, a2", "a0, a0, 5", "a0, 8", "a0, 16", "a0, 4096", "sp, 16", "a0, sp, 16", "s0, s1", "s0, s0, 3", "s0, 5", "s0, s0", "a1, 8(a5)", "s0, 8(a5)", "s1, 8(a5)", "a1, 16(sp)", "sp, sp, 16", "a2, 8(a5)", "a1, 8(s1)", "s0, 8(s1)"]
     corpus_name = "riscv64"
@@ -1093,6 +1119,9 @@ class Riscv(Risc):
             return "the reservation, which the semantics leave out"
         return super().excluded(opcode, case)
 
+    def traps(self, opcode):
+        return opcode in ("UNIMP", "C_UNIMP")
+
     def _pinned(self, text):
         pins = dict(self.base_pins)
         if "(s1)" in text:
@@ -1108,7 +1137,10 @@ class Riscv(Risc):
         items = [(f"{op} a0, a1, 64",) for op in ["beq", "bne", "blt", "bge", "bltu", "bgeu"]]
         items += [("jal ra, 64",), ("jal a0, 64",), ("jalr ra, a5, 0", {"X15": "taken"}), ("jalr a0, a5, 8", {"X15": "window+0"}), ("auipc a0, 5",), ("lui a0, 5",)]
         items += [("c.j 64",), ("c.beqz a0, 64",), ("c.bnez a0, 64",), ("c.jr a5", {"X15": "taken"}), ("c.jalr a5", {"X15": "taken"})]
+        items += [("c.unimp",)] + ([("c.jal 64",)] if self.word == 4 else [])
         cases = self.text_cases(assemble, items)
+        # the assembler compresses `unimp`
+        cases.append(case_type()(code=(0xC0001073).to_bytes(4, "little"), text="unimp"))
         for case in cases:
             if case.text == "jalr a0, a5, 8":
                 case.pins = {"X15": "taken-8"}
@@ -1181,15 +1213,16 @@ class Mips(Risc):
     mnemonics_of = staticmethod(mips_stems)
     base_pins = {"R5": "window+248", "R6": 8}
     default_pins = {"R29": "window+256"}
-    excluded_prefix = ("SYSCALL", "BREAK", "TEQ", "TNE", "TGE", "TLT", "RDHWR", "SDBBP", "WAIT", "ERET", "DERET", "EI", "DI", "CTC1", "CFC1", "MFC0", "MTC0", "SYNC", "PREF", "CACHE", "SYNCI", "LL", "SC", "LLD", "SCD")
+    excluded_prefix = ("SYSCALL", "BREAK", "RDHWR", "SDBBP", "WAIT", "ERET", "DERET", "EI", "DI", "MFC0", "MTC0", "CACHE", "LL", "SC", "LLD", "SCD")
     shape_list = ["", "$2, $3, $4", "$2, $3, 5", "$2, $3, 200", "$2, $3, -1", "$2, $3", "$2", "$2, 5", "$2, 1000", "$2, 8($5)", "$2, -8($5)", "$2, ($5)", "$2, $3, 5, 6", "$2, $3, 3, 5", "$6($5)", "$2, $6($5)", "$f2, $f4", "$f2, $f4, $f6", "$f2, $f4, $f6, $f8", "$f2, $6($5)", "$f2, 8($5)", "$f2, $f4, $3", "$f2, $f4, $fcc1", "$2, $3, $fcc1", "$2, $f2", "$f2, $2", "$2, $3, $4, 2", "$2, $3, $4, 1", "$2, 8", "$f2, $f4, 1", "$f2, $f4, $f6", "$2, $3, 8", "$2, 8", "8", "$f2, 8", "$2, $3, $4, 1", "$2, $3, 8", "$2, $3, 3, 8"]
     corpus_name = ""
 
     def __init__(self, scratch):
         self.gpr_slots = [None] + [f"R{i}" for i in range(1, 32)]
-        self.gprs = [(f"R{i}", self.word * 8) for i in range(1, 32)]
+        self.gprs = [(f"R{i}", self.word * 8) for i in range(1, 32)] + [("FCSR", self.word * 8)]
         if not self.release6:
             self.gprs = self.gprs + [("HI", self.word * 8), ("LO", self.word * 8)]
+            self.flags = [(f"FCC{i}",) for i in range(8)]
         self.fpr_bytes = 8 if self.release6 else self.word
         self.vectors = [(f"F{i}", self.fpr_bytes * 8) for i in range(31)]
         super().__init__(scratch)
@@ -1208,22 +1241,38 @@ class Mips(Risc):
         spec = {"XZR": (0, self.word * 8), "USERLOCAL": (0, self.word * 8), "F31": (0, 64 if self.release6 else self.word * 8)}
         if self.release6:
             spec["HI"], spec["LO"] = (0, self.word * 8), (0, self.word * 8)
-        for i in range(8):
-            spec[f"FCC{i}"] = (0, 1)
+            for i in range(8):
+                spec[f"FCC{i}"] = (0, 1)
         return spec
 
     release6 = False
+
+    def traps(self, opcode):
+        return MIPS_TRAPS.match(opcode) is not None
 
     def shape(self, case, values, index, rng):
         if self.word == 8 and MIPS_WORD_OPERATIONS.match(case.opcode):
             for name in ("R2", "R3", "R4", "HI", "LO"):
                 if name in values:
                     values[name] = word_value(values[name])
+        # what the stub can start with: no Cause nor Enables, as those would fault in the stub
+        values["FCSR"] &= 0x0100007F
+        # the comparisons of the traps, on the edge of being true, in R2 and in the immediate or R3
+        if self.traps(case.opcode) and case.opcode != "CTC1":
+            mask = (1 << (self.word * 8)) - 1
+            step = [0, 1, -1, 0][index % 4]
+            immediate = last_immediate(case.text) if case.opcode.endswith(("I", "IU")) else None
+            if immediate is not None:
+                values["R2"] = (immediate + step) & mask
+            else:
+                values["R3"] = (values["R2"] + step) & mask
 
     def encode_extra(self, values, out):
         self.set_extra_word(out, 0, values.get("HI", 0))
         self.set_extra_word(out, 1, values.get("LO", 0))
-        base = 34 * self.word
+        fcc = 0 if self.release6 else values["FCC0"] << 23 | sum(values[f"FCC{i}"] << (24 + i) for i in range(1, 8))
+        self.set_extra_word(out, 2, values["FCSR"] | fcc)
+        base = 35 * self.word
         for index in range(31):
             out[base + index * self.fpr_bytes : base + (index + 1) * self.fpr_bytes] = values[f"F{index}"].to_bytes(self.fpr_bytes, "big" if self.endian == ">" else "little")
 
@@ -1232,7 +1281,14 @@ class Mips(Risc):
             result["HI"] = self.extra_word(data, 0)
         if not self.release6:
             result["LO"] = self.extra_word(data, 1)
-        base = 34 * self.word
+        fcsr = self.extra_word(data, 2)
+        # NAN2008 and ABS2008 are of the release and can't be written, see the semantics
+        result["FCSR"] = fcsr & 0x0103FFFF
+        if not self.release6:
+            result["FCC0"] = fcsr >> 23 & 1
+            for i in range(1, 8):
+                result[f"FCC{i}"] = fcsr >> (24 + i) & 1
+        base = 35 * self.word
         for index in range(31):
             result[f"F{index}"] = int.from_bytes(data[base + index * self.fpr_bytes : base + (index + 1) * self.fpr_bytes], "big" if self.endian == ">" else "little")
 
@@ -1251,11 +1307,42 @@ class Mips(Risc):
         result.append(Case(code=word((3 << 26) | target), text="jal taken"))
         items = [("jr $2", {"R2": "taken"}), ("jalr $2", {"R2": "taken"}), ("jalr $4, $2", {"R2": "taken"})]
         items += [("seb $2, $3",), ("seh $2, $3",), ("wsbh $2, $3",), ("clz $2, $3",), ("clo $2, $3",), ("mfhi $2",), ("mflo $2",), ("mthi $2",), ("mtlo $2",), ("movz $2, $3, $4",), ("movn $2, $3, $4",)]
+        # the instructions without an effect, and the conditional moves, also to the zero register
+        memory = {"R5": "window+248"}
+        items += [("pause",), ("ssnop",), ("sync 0",), ("synci 8($5)", memory), ("pref 1, 8($5)", memory), ("pref 30, 8($5)", memory)]
+        items += [("movn $0, $3, $4",), ("movz $0, $3, $4",)]
+        for op in ("movt", "movf"):
+            items += [(f"{op} $2, $3, $fcc0",), (f"{op} $2, $3, $fcc5",), (f"{op} $0, $3, $fcc1",)]
+        # the traps
+        for op in ("teq", "tne", "tge", "tgeu", "tlt", "tltu"):
+            items += [(f"{op} $2, $3, 7",), (f"{op} $2, $3",), (f"{op} $0, $0",)]
+        for op in ("teqi", "tnei", "tgei", "tgeiu", "tlti", "tltiu"):
+            items += [(f"{op} $2, {immediate}",) for immediate in (5, -1, 1000)]
+        # the control registers, written with what the manual allows of each, half of the time without an exception
+        no_cause = lambda mask: (lambda index, rng: rng.getrandbits(32) & mask & (0xFFFC0FFF if index % 2 == 0 else 0xFFFFFFFF))
+        items += [(f"cfc1 $2, ${number}",) for number in (25, 26, 28, 31)]
+        items += [("ctc1 $2, $25", {"R2": no_cause(0xFF)}), ("ctc1 $2, $26", {"R2": no_cause(0x3F07C)}), ("ctc1 $2, $28", {"R2": no_cause(0xF87)}), ("ctc1 $2, $31", {"R2": no_cause(0xFFFFFFFF)})]
+        items += [("mthc1 $2, $f4",), ("mfhc1 $2, $f4",), ("mthc1 $0, $f4",)]
+        if self.word == 8 and not self.release6:
+            # paired singles, also with a destination that is an operand
+            for op in ("pll.ps", "plu.ps", "pul.ps", "puu.ps", "cvt.ps.s"):
+                items += [(f"{op} $f2, $f4, $f6",), (f"{op} $f2, $f2, $f6",), (f"{op} $f2, $f4, $f2",), (f"{op} $f2, $f2, $f2",)]
+            for op in ("cvt.s.pl", "cvt.s.pu"):
+                items += [(f"{op} $f2, $f4",), (f"{op} $f2, $f2",)]
         return result + self.text_cases(assemble, items)
+
+    def corpus_memory(self, text):
+        # a base register of a run isn't where the form addressed: those are of `hand` and the shapes
+        return None if "(" in text else {}
+
+    def cases(self, opcodes, assemble, layout):
+        # only `hand` has the numbers of the control registers that exist: the manual leaves the others unpredictable
+        return [case for case in super().cases(opcodes, assemble, layout) if case.always or not case.text.startswith(("cfc1", "ctc1"))]
 
 
 class MipsBe(Mips):
     name = "mips"
+    corpus_name = "mips"
     word = 4
     endian = ">"
     runner = ["qemu-mips", "-cpu", "24Kf"]
@@ -1276,6 +1363,7 @@ class MipsLe(Mips):
     mc_args = ["--mattr=+mips32r2"]
 
 
+MIPS_TRAPS = re.compile(r"(TEQ|TNE|TGE|TGEU|TLT|TLTU|TEQI|TNEI|TGEI|TGEIU|TLTI|TTLTIU|CTC1)$")
 # of the 64-bit machine, these are of the word that is sign-extended, and UNPREDICTABLE of any other value
 MIPS_WORD_OPERATIONS = re.compile(r"(ADD|ADDi|ADDu|ADDiu|SUB|SUBu|SLL|SLLV|SRL|SRLV|SRA|SRAV|ROTR|ROTRV|MUL|MULT|MULTu|DIV|DIVU|SDIV|UDIV|MADD|MADDu|MSUB|MSUBu|CLZ|CLO|SEB|SEH|WSBH|MUH|MUHU|MULU|MOD|MODU|EXT|INS)(_MM|_R6|64)?$")
 
@@ -1287,6 +1375,7 @@ def word_value(value):
 
 class Mips64(Mips):
     name = "mips64"
+    corpus_name = "mips64"
     word = 8
     endian = ">"
     runner = ["qemu-mips64", "-cpu", "MIPS64R2-generic"]

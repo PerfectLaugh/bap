@@ -37,7 +37,7 @@
 #elif defined(__mips__)
 #define WORD unsigned long
 #define NGPR 32
-#define NEXTRA 2
+#define NEXTRA 3 // HI, LO, FCSR
 #if __mips_isa_rev >= 6
 #define VECBYTES (32 * 8)
 #else
@@ -617,13 +617,14 @@ __asm__(".text\n.set noreorder\n.set noat\n.set hardfloat\n" MIPSSET
   ".globl enter, recover\n.ent enter\nenter:\n " ADDSP " $29, $29, -256\n"
   ".irp r,16,17,18,19,20,21,22,23,28,30,31\n " S " $\\r, " W "*\\r($29)\n.endr\n"
   " lui $1, %hi(host_sp)\n " S " $29, %lo(host_sp)($1)\n"
-  " lui $1, %hi(st_in)\n addiu $1, $1, %lo(st_in)\n" HILO_IN " addiu $2, $1, 34*" W "\n"
+  " lui $1, %hi(st_in)\n addiu $1, $1, %lo(st_in)\n" HILO_IN " addiu $2, $1, 35*" W "\n"
   ".irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30\n " FL " $f\\r, " FW "*\\r($2)\n.endr\n"
+  " " L " $2, 34*" W "($1)\n ctc1 $2, $31\n"
   ".irp r,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31\n " L " $\\r, " W "*\\r($1)\n.endr\n"
   " " L " $1, " W "($1)\n j slot\n nop\n"
   ".macro SAVE\n " MOVETO " $1, $f31\n lui $1, %hi(st_out)\n addiu $1, $1, %lo(st_out)\n"
   ".irp r,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31\n " S " $\\r, " W "*\\r($1)\n.endr\n"
-  " " MOVEFROM " $2, $f31\n " S " $2, " W "($1)\n" HILO_OUT " addiu $2, $1, 34*" W "\n"
+  " " MOVEFROM " $2, $f31\n " S " $2, " W "($1)\n" HILO_OUT " cfc1 $2, $31\n " S " $2, 34*" W "($1)\n addiu $2, $1, 35*" W "\n"
   ".irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30\n " FS " $f\\r, " FW "*\\r($2)\n.endr\n.endm\n"
   "fall_save:\n SAVE\n li $3, 0\n j done\n nop\n"
   "taken_save:\n SAVE\n li $3, 1\n"

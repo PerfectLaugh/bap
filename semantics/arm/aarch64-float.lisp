@@ -539,6 +539,11 @@
       (fconvert :rne (word-width a)
                 (/. :rne x (cast-float :rne 64 (lshift (cast-unsigned 128 1) n)))))))
 
+(defun a64-festimate (op a)
+  "(a64-festimate OP A) is the intrinsic of the estimate OP of A"
+  (intrinsic (symbol-concat op 'rne 'ieee754_binary (a64-fsize-symbol a) :sep '_)
+             a :result (word-width a)))
+
 (defun a64-fop1 (op a)
   (case op
     'fneg (fp-neg a)
@@ -563,6 +568,14 @@
     'fcvtmu (a64-fcvt-int false 'm a)
     'fcvtn (fconvert :rne (/ (word-width a) 2) a)
     'fcvtl (fconvert :rne (* (word-width a) 2) a)
+    'frint32z (a64-frint-n 'z 32 a)
+    'frint32x (a64-frint-n 'n 32 a)
+    'frint64z (a64-frint-n 'z 64 a)
+    'frint64x (a64-frint-n 'n 64 a)
+    'frecpe (a64-festimate 'frecpe a)
+    'frsqrte (a64-festimate 'frsqrte a)
+    'frecpx (a64-frecpx a)
+    'fcvtxn (fconvert :rod (/ (word-width a) 2) a)
     'fcmeqz (a64-fop2 'fcmeq a (fp-zero a))
     'fcmgez (a64-fop2 'fcmge a (fp-zero a))
     'fcmgtz (a64-fop2 'fcmgt a (fp-zero a))
@@ -599,6 +612,8 @@
   (case op
     'fmla (a64-muladd d a b)
     'fmls (a64-muladd d (fp-neg a) b)
+    'fmlal (a64-muladd-h d a b)
+    'fmlsl (a64-muladd-h d (fp-neg a) b)
     d))
 
 ;; the vector operations of two registers
@@ -1054,3 +1069,280 @@
 (defun FMOVv2f32_ns (rd imm) (a64-setd rd (a64-dup (vfp-expand-imm imm 8 23) 2)))
 (defun FMOVv4f32_ns (rd imm) (set$ rd (a64-dup (vfp-expand-imm imm 8 23) 4)))
 (defun FMOVv2f64_ns (rd imm) (set$ rd (a64-dup (vfp-expand-imm imm 11 52) 2)))
+
+;;; HALF-PRECISION SCALAR INSTRUCTIONS
+;;
+;; As the single and the double precision ones, see above.
+
+(defun FADDHrr (rd rn rm) (setd rd (a64-fop2 'fadd rn rm)))
+(defun FSUBHrr (rd rn rm) (setd rd (a64-fop2 'fsub rn rm)))
+(defun FMULHrr (rd rn rm) (setd rd (a64-fop2 'fmul rn rm)))
+(defun FDIVHrr (rd rn rm) (setd rd (a64-fop2 'fdiv rn rm)))
+(defun FNMULHrr (rd rn rm) (setd rd (fp-neg (a64-fop2 'fmul rn rm))))
+(defun FMADDHrrr (rd rn rm ra) (setd rd (a64-muladd ra rn rm)))
+(defun FMSUBHrrr (rd rn rm ra) (setd rd (a64-muladd ra (fp-neg rn) rm)))
+(defun FNMADDHrrr (rd rn rm ra) (setd rd (a64-muladd (fp-neg ra) (fp-neg rn) rm)))
+(defun FNMSUBHrrr (rd rn rm ra) (setd rd (a64-muladd (fp-neg ra) rn rm)))
+(defun FSQRTHr (rd rn) (setd rd (a64-fsqrt rn)))
+(defun FABSHr (rd rn) (setd rd (fp-abs rn)))
+(defun FNEGHr (rd rn) (setd rd (fp-neg rn)))
+(defun FMINHrr (rd rn rm) (setd rd (fp-min rn rm 10)))
+(defun FMAXHrr (rd rn rm) (setd rd (fp-max rn rm 10)))
+(defun FMINNMHrr (rd rn rm) (setd rd (fp-minnm rn rm 10)))
+(defun FMAXNMHrr (rd rn rm) (setd rd (fp-maxnm rn rm 10)))
+(defun FRINTNHr (rd rn) (setd rd (a64-frint 'n rn)))
+(defun FRINTAHr (rd rn) (setd rd (a64-frint 'a rn)))
+(defun FRINTPHr (rd rn) (setd rd (a64-frint 'p rn)))
+(defun FRINTMHr (rd rn) (setd rd (a64-frint 'm rn)))
+(defun FRINTZHr (rd rn) (setd rd (a64-frint 'z rn)))
+(defun FRINTXHr (rd rn) (setd rd (a64-frint 'n rn)))
+(defun FRINTIHr (rd rn) (setd rd (a64-frint 'n rn)))
+(defun FCMPHrr (rn rm) (fp-compare rn rm))
+(defun FCMPHri (rn) (fp-compare rn (fp-zero rn)))
+(defun FCMPEHrr (rn rm) (fp-compare rn rm))
+(defun FCMPEHri (rn) (fp-compare rn (fp-zero rn)))
+(defun FCCMPHrr (rn rm nzcv cnd) (FCCMP** rn rm nzcv cnd))
+(defun FCCMPEHrr (rn rm nzcv cnd) (FCCMP** rn rm nzcv cnd))
+(defun FCSELHrrr (rd rn rm cnd) (setd rd (if (condition-holds cnd) rn rm)))
+(defun FMOVHr (rd rn) (setd rd rn))
+(defun FMOVWHr (rd rn) (setd rd (cast-low 16 rn)))
+(defun FMOVXHr (rd rn) (setd rd (cast-low 16 rn)))
+(defun FMOVHWr (rd rn) (setw rd (cast-unsigned (word) (cast-low 16 rn))))
+(defun FMOVHXr (rd rn) (set$ rd (cast-unsigned (word) (cast-low 16 rn))))
+(defun FMOVHi (rd imm) (setd rd (vfp-expand-imm imm 5 10)))
+(defun SCVTFUWHri (rd rn) (setd rd (cast-sfloat :rne 16 (cast-low 32 rn))))
+(defun SCVTFUXHri (rd rn) (setd rd (cast-sfloat :rne 16 (cast-low 64 rn))))
+(defun UCVTFUWHri (rd rn) (setd rd (cast-float :rne 16 (cast-low 32 rn))))
+(defun UCVTFUXHri (rd rn) (setd rd (cast-float :rne 16 (cast-low 64 rn))))
+
+;; The fixed-point conversions of the halves go through double
+;; precision, as neither 2^FBITS nor the integer before its scaling has
+;; to fit a half. A half is exact in double precision, and so is its
+;; product with 2^FBITS, so FCVTZS and FCVTZU round once.
+
+(defun a64-fcvt-fixed-h (signed bits a fbits)
+  (a64-fcvt-fixed signed bits (fconvert :rne 64 a) fbits))
+
+;; An integer of up to 53 significant bits is exact in double precision,
+;; and so is its quotient by 2^FBITS, so that only the conversion to the
+;; half rounds. A longer one keeps its upper 53 bits and the rest as one
+;; sticky bit, which rounds to the half as the whole of it does.
+
+(defun a64-int-to-double (signed x)
+  (if signed (cast-sfloat :rne 64 x) (cast-float :rne 64 x)))
+
+(defun a64-exact-double (signed x)
+  (if (= (word-width x) 32)
+      (a64-int-to-double signed x)
+    (let ((top (if signed (arshift x 53) (rshift x 53)))
+          (fits (logor (is-zero top) (logand signed (is-zero (lnot top)))))
+          (kept (if signed (arshift x 11) (rshift x 11)))
+          (sticky (cast-unsigned 64 (non-zero (cast-low 11 x))))
+          (d (a64-int-to-double signed (logor kept sticky))))
+      (fp-select fits (a64-int-to-double signed x) (*. :rne d (a64-fpow2 d 11))))))
+
+(defun a64-cvtf-fixed-h (signed x fbits)
+  (let ((d (a64-exact-double signed x)))
+    (fconvert :rne 16 (/. :rne d (a64-fpow2 d fbits)))))
+
+(defun FCVTZSSWHri (rd rn fbits) (setw rd (cast-unsigned (word) (a64-fcvt-fixed-h true 32 rn fbits))))
+(defun FCVTZSSXHri (rd rn fbits) (set$ rd (a64-fcvt-fixed-h true 64 rn fbits)))
+(defun FCVTZUSWHri (rd rn fbits) (setw rd (cast-unsigned (word) (a64-fcvt-fixed-h false 32 rn fbits))))
+(defun FCVTZUSXHri (rd rn fbits) (set$ rd (a64-fcvt-fixed-h false 64 rn fbits)))
+(defun SCVTFSWHri (rd rn fbits) (setd rd (a64-cvtf-fixed-h true (cast-low 32 rn) fbits)))
+(defun SCVTFSXHri (rd rn fbits) (setd rd (a64-cvtf-fixed-h true (cast-low 64 rn) fbits)))
+(defun UCVTFSWHri (rd rn fbits) (setd rd (a64-cvtf-fixed-h false (cast-low 32 rn) fbits)))
+(defun UCVTFSXHri (rd rn fbits) (setd rd (a64-cvtf-fixed-h false (cast-low 64 rn) fbits)))
+
+;;; ROUNDING TO THE INTEGERS OF 32 AND 64 BITS
+;;
+;; FPRoundIntN: a NaN, an infinity and what rounds out of the range of
+;; the integers of BITS are the most negative one of them. FRINT32X and
+;; FRINT64X use the rounding mode of FPCR, which is assumed to be to
+;; nearest.
+
+(defun a64-frint-n (mode bits a)
+  (let ((r (a64-frint mode a))
+        (top (a64-fpow2 a (- bits 1))))
+    (fp-select (logor (is-nan a) (is-inf a) (>=. r top) (<. r (fp-neg top)))
+               (fp-neg top)
+               r)))
+
+(defun FRINT32ZSr (rd rn) (setd rd (a64-frint-n 'z 32 rn)))
+(defun FRINT32ZDr (rd rn) (setd rd (a64-frint-n 'z 32 rn)))
+(defun FRINT32Zv2f32 (rd rn) (a64-setd rd (a64-map1 'frint32z 32 2 rn)))
+(defun FRINT32Zv4f32 (rd rn) (set$ rd (a64-map1 'frint32z 32 4 rn)))
+(defun FRINT32Zv2f64 (rd rn) (set$ rd (a64-map1 'frint32z 64 2 rn)))
+(defun FRINT32XSr (rd rn) (setd rd (a64-frint-n 'n 32 rn)))
+(defun FRINT32XDr (rd rn) (setd rd (a64-frint-n 'n 32 rn)))
+(defun FRINT32Xv2f32 (rd rn) (a64-setd rd (a64-map1 'frint32x 32 2 rn)))
+(defun FRINT32Xv4f32 (rd rn) (set$ rd (a64-map1 'frint32x 32 4 rn)))
+(defun FRINT32Xv2f64 (rd rn) (set$ rd (a64-map1 'frint32x 64 2 rn)))
+(defun FRINT64ZSr (rd rn) (setd rd (a64-frint-n 'z 64 rn)))
+(defun FRINT64ZDr (rd rn) (setd rd (a64-frint-n 'z 64 rn)))
+(defun FRINT64Zv2f32 (rd rn) (a64-setd rd (a64-map1 'frint64z 32 2 rn)))
+(defun FRINT64Zv4f32 (rd rn) (set$ rd (a64-map1 'frint64z 32 4 rn)))
+(defun FRINT64Zv2f64 (rd rn) (set$ rd (a64-map1 'frint64z 64 2 rn)))
+(defun FRINT64XSr (rd rn) (setd rd (a64-frint-n 'n 64 rn)))
+(defun FRINT64XDr (rd rn) (setd rd (a64-frint-n 'n 64 rn)))
+(defun FRINT64Xv2f32 (rd rn) (a64-setd rd (a64-map1 'frint64x 32 2 rn)))
+(defun FRINT64Xv4f32 (rd rn) (set$ rd (a64-map1 'frint64x 32 4 rn)))
+(defun FRINT64Xv2f64 (rd rn) (set$ rd (a64-map1 'frint64x 64 2 rn)))
+
+;;; THE ESTIMATES
+;;
+;; FRECPE and FRSQRTE are intrinsics of their lanes, frecpe and frsqrte,
+;; whose tables are not modeled. FRECPX, FPRecpX, is computed on the bits:
+;; the inverted exponent with no fraction, the exponent 11..10 of a zero or
+;; a subnormal number, whose exponent is 0, and the NaN quieted.
+
+(defun a64-frecpx (a)
+  (let ((f (a64-frac-bits a))
+        (e (a64-fexp-bits a))
+        (expn (extract (+ e f -1) f a))
+        (nan (logand (is-zero (lnot expn)) (not (is-zero (cast-low f a))))))
+    (fp-select nan (a64-quiet-nan a)
+      (concat (msb a)
+              (a64-sel (is-zero expn) (lshift (lnot (a64-zero expn)) 1) (lnot expn))
+              (cast-unsigned f 0)))))
+
+(defun FRECPEv1f16 (rd rn) (setd rd (a64-map1 'frecpe 16 1 rn)))
+(defun FRECPEv1i32 (rd rn) (setd rd (a64-map1 'frecpe 32 1 rn)))
+(defun FRECPEv1i64 (rd rn) (setd rd (a64-map1 'frecpe 64 1 rn)))
+(defun FRECPEv4f16 (rd rn) (a64-setd rd (a64-map1 'frecpe 16 4 rn)))
+(defun FRECPEv8f16 (rd rn) (set$ rd (a64-map1 'frecpe 16 8 rn)))
+(defun FRECPEv2f32 (rd rn) (a64-setd rd (a64-map1 'frecpe 32 2 rn)))
+(defun FRECPEv4f32 (rd rn) (set$ rd (a64-map1 'frecpe 32 4 rn)))
+(defun FRECPEv2f64 (rd rn) (set$ rd (a64-map1 'frecpe 64 2 rn)))
+(defun FRSQRTEv1f16 (rd rn) (setd rd (a64-map1 'frsqrte 16 1 rn)))
+(defun FRSQRTEv1i32 (rd rn) (setd rd (a64-map1 'frsqrte 32 1 rn)))
+(defun FRSQRTEv1i64 (rd rn) (setd rd (a64-map1 'frsqrte 64 1 rn)))
+(defun FRSQRTEv4f16 (rd rn) (a64-setd rd (a64-map1 'frsqrte 16 4 rn)))
+(defun FRSQRTEv8f16 (rd rn) (set$ rd (a64-map1 'frsqrte 16 8 rn)))
+(defun FRSQRTEv2f32 (rd rn) (a64-setd rd (a64-map1 'frsqrte 32 2 rn)))
+(defun FRSQRTEv4f32 (rd rn) (set$ rd (a64-map1 'frsqrte 32 4 rn)))
+(defun FRSQRTEv2f64 (rd rn) (set$ rd (a64-map1 'frsqrte 64 2 rn)))
+(defun FRECPXv1f16 (rd rn) (setd rd (a64-map1 'frecpx 16 1 rn)))
+(defun FRECPXv1i32 (rd rn) (setd rd (a64-map1 'frecpx 32 1 rn)))
+(defun FRECPXv1i64 (rd rn) (setd rd (a64-map1 'frecpx 64 1 rn)))
+
+;;; THE CONVERSION TO ODD
+;;
+;; FCVTXN narrows a double to a single, rounding to odd, which is the
+;; rounding mode rod of the intrinsic.
+
+(defun FCVTXNv1i64 (rd rn) (setd rd (a64-map1 'fcvtxn 64 1 rn)))
+(defun FCVTXNv2f32 (rd rn) (setd rd (a64-map1 'fcvtxn 64 2 rn)))
+(defun FCVTXNv4f32 (rd _ rn) (set$ rd (concat (a64-map1 'fcvtxn 64 2 rn) (cast-low 64 rd))))
+
+;;; THE CONVERSION OF JAVASCRIPT
+;;
+;; FJCVTZS is FPToFixedJS on the bits: the double truncated, modulo 2^32,
+;; 0 of a NaN and of an infinity, with Z set when the conversion is exact
+;; and in the range of the integers of 32 bits and it isn't of -0.0, and
+;; with N, C and V clear. A shift of more than 63 bits is 0.
+
+(defun FJCVTZS (rd rn)
+  (let ((expn (fp-exponent rn 11 52))
+        (frac (cast-unsigned 64 (cast-low 52 rn)))
+        (coef (logor frac (lshift (cast-unsigned 64 1) 52)))
+        (special (= expn 2047))
+        (below (< expn 1023))
+        (whole (>= expn 1075))
+        (mag (a64-sel below (cast-unsigned 64 0)
+               (a64-sel whole (lshift coef (- expn 1075)) (rshift coef (- 1075 expn)))))
+        (lost (a64-sel below (logor (non-zero expn) (non-zero frac))
+                (a64-sel whole (cast-low 1 0)
+                  (non-zero (lshift coef (- 64 (- 1075 expn)))))))
+        (in-range (logor (< expn 1054)
+                         (logand (msb rn) (= expn 1054) (is-zero frac))))
+        (negative-zero (logand (msb rn) (is-zero (cast-low 63 rn)))))
+    (setw rd (a64-sel special (cast-unsigned 64 0)
+               (a64-sel (msb rn) (neg mag) mag)))
+    (set-nzcv (lshift (cast-unsigned 4
+                        (logand (not special) (not lost) in-range (not negative-zero)))
+                      2))))
+
+;;; COMPLEX NUMBERS
+;;
+;; A complex number is a pair of lanes, the real part is the lower one.
+;; FCADD adds Y rotated by 90 or by 270 degrees, the immediate is 0 or 1.
+;; FCMLA adds the product of one part of X with Y rotated by the immediate
+;; times 90 degrees, fused, the forms by an element take the pair IDX of
+;; the whole of Rm for each pair.
+
+(defun a64-fcadd (rot es n x y)
+  (let ((i (* 2 (- n 1)))
+        (xr (a64-lane x es i))
+        (xi (a64-lane x es (+ i 1)))
+        (yr (a64-lane y es i))
+        (yi (a64-lane y es (+ i 1)))
+        (pair (concat (a64-fop2 'fadd xi (if (= rot 0) yr (fp-neg yr)))
+                      (a64-fop2 'fadd xr (if (= rot 0) (fp-neg yi) yi)))))
+    (if (= n 1) pair (concat pair (a64-fcadd rot es (- n 1) x y)))))
+
+(defun a64-fcmla (rot es n d x y)
+  (let ((i (* 2 (- n 1)))
+        (a (a64-lane x es (if (= (mod rot 2) 0) i (+ i 1))))
+        (yr (a64-lane y es i))
+        (yi (a64-lane y es (+ i 1)))
+        (pair (concat
+               (a64-muladd (a64-lane d es (+ i 1)) a
+                           (case rot 0 yi 1 yr 2 (fp-neg yi) (fp-neg yr)))
+               (a64-muladd (a64-lane d es i) a
+                           (case rot 0 yr 1 (fp-neg yi) 2 (fp-neg yr) yi)))))
+    (if (= n 1) pair (concat pair (a64-fcmla rot es (- n 1) d x y)))))
+
+(defun FCADDv4f16 (rd rn rm rot) (a64-setd rd (a64-fcadd rot 16 2 rn rm)))
+(defun FCMLAv4f16 (rd _ rn rm rot) (a64-setd rd (a64-fcmla rot 16 2 rd rn rm)))
+(defun FCADDv8f16 (rd rn rm rot) (set$ rd (a64-fcadd rot 16 4 rn rm)))
+(defun FCMLAv8f16 (rd _ rn rm rot) (set$ rd (a64-fcmla rot 16 4 rd rn rm)))
+(defun FCADDv2f32 (rd rn rm rot) (a64-setd rd (a64-fcadd rot 32 1 rn rm)))
+(defun FCMLAv2f32 (rd _ rn rm rot) (a64-setd rd (a64-fcmla rot 32 1 rd rn rm)))
+(defun FCADDv4f32 (rd rn rm rot) (set$ rd (a64-fcadd rot 32 2 rn rm)))
+(defun FCMLAv4f32 (rd _ rn rm rot) (set$ rd (a64-fcmla rot 32 2 rd rn rm)))
+(defun FCADDv2f64 (rd rn rm rot) (set$ rd (a64-fcadd rot 64 1 rn rm)))
+(defun FCMLAv2f64 (rd _ rn rm rot) (set$ rd (a64-fcmla rot 64 1 rd rn rm)))
+(defun FCMLAv4f16_indexed (rd _ rn rm idx rot) (a64-setd rd (a64-fcmla rot 16 2 rd rn (a64-dup (a64-lane rm 32 idx) 2))))
+(defun FCMLAv8f16_indexed (rd _ rn rm idx rot) (set$ rd (a64-fcmla rot 16 4 rd rn (a64-dup (a64-lane rm 32 idx) 4))))
+(defun FCMLAv4f32_indexed (rd _ rn rm idx rot) (set$ rd (a64-fcmla rot 32 2 rd rn (a64-dup (a64-lane rm 64 idx) 2))))
+
+;;; THE WIDENING MULTIPLY-ADDS OF THE HALVES
+;;
+;; FMLAL and FMLSL multiply the halves of a part of the registers, the
+;; lower half of the 64 or 128 bits of the form, or the upper one in the
+;; forms 2, into the singles of the destination, fused, as FPMulAddH: the
+;; NaNs are processed as by FPMulAdd, on the operands before they are
+;; converted, which is exact otherwise, and FMLSL negates the first one.
+
+(defun a64-h-nan-to-s (x)
+  "the NaN X of a half, quieted, as a single"
+  (concat (msb x) (cast-unsigned 8 0xff) (logor (cast-low 10 x) (cast-unsigned 10 0x200))
+          (cast-unsigned 13 0)))
+
+(defun a64-muladd-h (a x y)
+  (fp-select (a64-is-snan a) (a64-quiet-nan a)
+    (fp-select (a64-is-snan x) (a64-h-nan-to-s x)
+      (fp-select (a64-is-snan y) (a64-h-nan-to-s y)
+        (fp-select (is-nan a)
+                   (fp-select (a64-inf-times-zero x y) (a64-default-nan a) a)
+          (fp-select (is-nan x) (a64-h-nan-to-s x)
+            (fp-select (is-nan y) (a64-h-nan-to-s y)
+              (a64-muladd a (fconvert :rne 32 x) (fconvert :rne 32 y)))))))))
+
+(defun FMLALv4f16 (rd _ rn rm) (a64-setd rd (a64-mapw3 'fmlal 16 2 rd rn rm)))
+(defun FMLALv8f16 (rd _ rn rm) (set$ rd (a64-mapw3 'fmlal 16 4 rd rn rm)))
+(defun FMLAL2v4f16 (rd _ rn rm) (a64-setd rd (a64-mapw3 'fmlal 16 2 rd (extract 63 32 rn) (extract 63 32 rm))))
+(defun FMLAL2v8f16 (rd _ rn rm) (set$ rd (a64-mapw3 'fmlal 16 4 rd (cast-high 64 rn) (cast-high 64 rm))))
+(defun FMLALlanev4f16 (rd _ rn rm idx) (a64-setd rd (a64-mapw3 'fmlal 16 2 rd rn (a64-dup (a64-lane rm 16 idx) 2))))
+(defun FMLALlanev8f16 (rd _ rn rm idx) (set$ rd (a64-mapw3 'fmlal 16 4 rd rn (a64-dup (a64-lane rm 16 idx) 4))))
+(defun FMLAL2lanev4f16 (rd _ rn rm idx) (a64-setd rd (a64-mapw3 'fmlal 16 2 rd (extract 63 32 rn) (a64-dup (a64-lane rm 16 idx) 2))))
+(defun FMLAL2lanev8f16 (rd _ rn rm idx) (set$ rd (a64-mapw3 'fmlal 16 4 rd (cast-high 64 rn) (a64-dup (a64-lane rm 16 idx) 4))))
+(defun FMLSLv4f16 (rd _ rn rm) (a64-setd rd (a64-mapw3 'fmlsl 16 2 rd rn rm)))
+(defun FMLSLv8f16 (rd _ rn rm) (set$ rd (a64-mapw3 'fmlsl 16 4 rd rn rm)))
+(defun FMLSL2v4f16 (rd _ rn rm) (a64-setd rd (a64-mapw3 'fmlsl 16 2 rd (extract 63 32 rn) (extract 63 32 rm))))
+(defun FMLSL2v8f16 (rd _ rn rm) (set$ rd (a64-mapw3 'fmlsl 16 4 rd (cast-high 64 rn) (cast-high 64 rm))))
+(defun FMLSLlanev4f16 (rd _ rn rm idx) (a64-setd rd (a64-mapw3 'fmlsl 16 2 rd rn (a64-dup (a64-lane rm 16 idx) 2))))
+(defun FMLSLlanev8f16 (rd _ rn rm idx) (set$ rd (a64-mapw3 'fmlsl 16 4 rd rn (a64-dup (a64-lane rm 16 idx) 4))))
+(defun FMLSL2lanev4f16 (rd _ rn rm idx) (a64-setd rd (a64-mapw3 'fmlsl 16 2 rd (extract 63 32 rn) (a64-dup (a64-lane rm 16 idx) 2))))
+(defun FMLSL2lanev8f16 (rd _ rn rm idx) (set$ rd (a64-mapw3 'fmlsl 16 4 rd (cast-high 64 rn) (a64-dup (a64-lane rm 16 idx) 4))))
