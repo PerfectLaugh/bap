@@ -60,6 +60,7 @@ import Bap.Emu.Semantics
 import Bap.Emu
 import Bap.Emu.Tasks
 import Bap.Linux.Machine
+import Bap.Float
 import Bap.Emu.Jni
 import Bap.Emu.Checkpoint
 import Bap.Emu.Diff

@@ -1,6 +1,7 @@
 import Bap.Emu.Tasks
 import Bap.Linux.Kernel
 import Bap.Linux.Elf
+import Bap.Float
 
 /-! # A Linux machine
 
@@ -497,6 +498,7 @@ def start (kernel : Kernel) (path : String) (arguments : List String) (environme
   let emu ← x86_64 (ByteArray.mk (Array.replicate 16 0x90)) 0x1000 0 fun config =>
     { config with cacheLimit := 1048576, hotThreshold := 1024 }
   unmap emu 0x1000 16
+  emu.intrinsicServer.set (some Bap.Float.evaluate)
   resetRegisters emu
   let top ← mapProgram emu data program base
   let lowest := program.segments.foldl (fun lowest segment => min lowest segment.address) (2 ^ 63)

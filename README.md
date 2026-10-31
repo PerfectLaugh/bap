@@ -95,7 +95,7 @@ trusted or only tested, with file and line. The main items are these:
 - **That the Lisp semantics are what hardware does.** No proof can say so. `tools/difftest` tests
   it: 2,171 x86-64 and 1,920 i686 opcodes against a Ryzen 9 5950X, and the other targets against
   qemu, which is a second implementation and not silicon. Floating point lifts to named
-  intrinsics, so it has no value to compare, and a program that reaches one stops. AVX-512 was checked only against a hand-written model,
+  intrinsics, so it has no value to compare, though on x86-64 `bap run` runs them. AVX-512 was checked only against a hand-written model,
   as that machine doesn't have it.
 - **The C++ JIT, LLVM and Z3.** `Bap/Jit.lean` states the obligations the proofs rest on.
 - **The Lean kernel, compiler and runtime**, and `IO.Ref`, tasks and mutexes behaving as modelled.
@@ -109,6 +109,7 @@ trusted or only tested, with file and line. The main items are these:
 | `Bap/Image`, `Bap/Disasm`, `Bap/Target`, `Bap/LLVM.lean` | loaders, disassembly, lifting |
 | `Bap/Tasks.lean` | tasks, as the emulator and Primus share them |
 | `Bap/Linux` | the virtual kernel, the ELF loader and the Linux machine |
+| `Bap/Float.lean` | floating point in integers, which is what programs run on |
 | `Bap/Primus`, `semantics/` | the Lisp evaluator, the lifted engine, the semantics of each target |
 | `Bap/Emu.lean`, `Bap/Emu/`, `Bap/Jit.lean` | the emulator and the JIT interface |
 | `Bap/Analysis`, `Bap/Decompile`, `Bap/Symbolic`, `Bap/Project` | analyses, decompiler, symbolic execution, projects |

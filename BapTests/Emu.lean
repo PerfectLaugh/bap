@@ -611,6 +611,17 @@ private def testLinuxPrograms : IO Unit := do
       let (outcome, text) ← run kernel dynamicBinary
       assertEqual "Linux a dynamic program has its status" (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.exitedStatus 5)) outcome
       assertEqual "Linux a dynamic program finds its files" expected text
+    -- Floating point, as the machine that this runs on does it: whatever it prints, the emulator prints.
+    let floats := "native/build/libc-floats"
+    let compiled ← (IO.Process.output
+      { cmd := "gcc", args := #["-static", "-O1", "testsuite/src/libc-floats.c", "-o", floats, "-lm"] }).toBaseIO
+    if let .ok { exitCode := 0, .. } := compiled then
+      let native ← IO.Process.output { cmd := floats }
+      let written ← IO.mkRef ByteArray.empty
+      let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/f" (← IO.FS.readBinFile floats)) "/f" ["/f"]
+      let outcome ← machine.run fun data => written.modify (· ++ data)
+      assertEqual "Linux a program of floating point ends" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+      assertEqual "Linux floating point is what the machine does" native.stdout (String.fromUTF8! (← written.get))
     -- Nothing but what is in the kernel: without its libraries, a dynamic program doesn't start.
     if ← compile #[] dynamicBinary then
       let alone := Bap.Linux.Kernel.empty.addFile dynamicBinary (← IO.FS.readBinFile dynamicBinary)

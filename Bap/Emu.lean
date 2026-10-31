@@ -152,6 +152,11 @@ structure Emu where
   taskTable : IO.Ref Tasks.TaskTable
   /-- What is mapped in the address spaces other than that of the thread that runs, whose map is `regions`. -/
   parkedRegions : IO.Ref (Std.HashMap Nat (List Region))
+  /-- What serves intrinsics in the code that names them: the bits of what is computed from the name and the bits of the
+  operands, as its width and its bits. Lifted code runs up to an intrinsic, and what comes after it wouldn't run. -/
+  intrinsicServer : IO.Ref (Option (String → List Nat → Option (Nat × Nat)))
+  /-- The programs of the instructions that have such an intrinsic, by address. -/
+  servedPrograms : IO.Ref (Std.HashMap Nat Bil.Program)
   /-- What wants to know of a new process: of the one that made it, and of it. -/
   processHooks : IO.Ref (List (Nat → Nat → IO Unit))
   /-- Where the instruction that runs goes next, for a system call to know where a new thread starts. -/
@@ -235,6 +240,8 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     watchedSteps := ← IO.mkRef {}
     taskTable := ← IO.mkRef (Tasks.TaskTable.initial 1)
     parkedRegions := ← IO.mkRef {}
+    intrinsicServer := ← IO.mkRef none
+    servedPrograms := ← IO.mkRef {}
     processHooks := ← IO.mkRef []
     nextPc := ← IO.mkRef 0
   }
@@ -1205,6 +1212,16 @@ private def fetch (emu : Emu) (address : Nat) : IO ByteArray := do
     recordFault emu .fetch address
     throw error
 
+/-- Whether a program calls an intrinsic of floating point, to this depth of branches. -/
+private def namesFloat : Nat → List Bil.Stmt → Bool
+  | 0, _ => false
+  | fuel + 1, program => program.any fun stmt =>
+    match stmt with
+    | .special name => (name.splitOn "ieee754").length > 1
+    | .ifElse _ yes no => namesFloat fuel yes || namesFloat fuel no
+    | .while _ body => namesFloat fuel body
+    | _ => false
+
 private def lift (emu : Emu) (address : Nat) (code : ByteArray) : IO Primus.Lifted.Block := do
   let disassembler ← match emu.config.disassemblerAt with
     | some create => create address
@@ -1212,7 +1229,16 @@ private def lift (emu : Emu) (address : Nat) (code : ByteArray) : IO Primus.Lift
   let decoded ← disassembler.decode address code
   match decoded with
   | .error error => throw <| IO.userError s!"Emu instruction at {address}: {error}"
-  | .ok insn => pure ⟨insn.address, insn.next, insn.bil⟩
+  | .ok insn =>
+    -- An instruction that an intrinsic server serves runs as its program, which `dispatchSpecial` is sent to.
+    let served : Bool ← match ← emu.intrinsicServer.get with
+      | some _ => pure (namesFloat 64 insn.bil)
+      | none => pure false
+    if served then
+      emu.servedPrograms.modify (·.insert insn.address insn.bil)
+      pure ⟨insn.address, insn.next, [.special s!"served:{insn.address}"]⟩
+    else
+      pure ⟨insn.address, insn.next, insn.bil⟩
 
 def refreshRegions (emu : Emu) : IO Unit := do
   let mapped ← emu.regions.get
@@ -1305,8 +1331,69 @@ private def delayFor (emu : Emu) (address : Nat) : IO DelayKind := do
       else if release6 && mipsCompact word then pure .forbidden
       else pure .none
 
+/-- Runs a program in the state of the emulator, where lifted code can't go past an intrinsic. A loop has to end in `fuel`
+turns. What it writes to memory is in the state, and native memory follows it after. -/
+private def runServed (emu : Emu) (serve : String → List Nat → Option (Nat × Nat)) (program : Bil.Program) : IO Unit := do
+  let evaluate (expression : Bil.Exp) : IO Bap.Value := do
+    match Bil.evalExp (← emu.state.get).env expression with
+    | .ok value => pure value
+    | .error error => throw <| IO.userError error
+  let wroteMemory ← IO.mkRef false
+  let operands ← IO.mkRef ([] : List Nat)
+  let rec go : Nat → Bil.Program → IO Unit
+    | 0, _ => throw <| IO.userError "a served program ran out of fuel"
+    | _ + 1, [] => pure ()
+    | fuel + 1, stmt :: rest => do
+      match stmt with
+      | .move var value =>
+        let value ← evaluate value
+        if var == emu.config.memory then wroteMemory.set true
+        if var.name.startsWith "intrinsic:x" then
+          match Value.asBits value with
+          | .ok bits => operands.modify (· ++ [bits.2.toNat])
+          | .error error => throw <| IO.userError error
+        emu.state.modify fun state => { env := Bil.bind state.env var value }
+      | .special name =>
+        match serve name (← operands.get) with
+        | some (width, bits) =>
+          operands.set []
+          emu.state.modify fun state =>
+            { env := Bil.bind state.env ⟨"intrinsic:y0", .imm width, 0, false⟩ (.bits (BitVec.ofNat width bits)) }
+        | none =>
+          operands.set []
+          if !(← dispatchIntrinsic emu name) then
+            throw <| IO.userError s!"nothing serves the intrinsic {name}"
+      | .ifElse condition yes no =>
+        match Value.asBits (← evaluate condition) with
+        | .ok bits => go fuel (if bits.2.toNat != 0 then yes else no)
+        | .error error => throw <| IO.userError error
+      | .while condition body =>
+        match Value.asBits (← evaluate condition) with
+        | .ok bits =>
+          if bits.2.toNat != 0 then
+            go fuel body
+            go fuel [stmt]
+        | .error error => throw <| IO.userError error
+      | .jmp target =>
+        match Value.asBits (← evaluate target) with
+        | .ok bits => emu.pc.set bits.2.toNat
+        | .error error => throw <| IO.userError error
+      | .cpuExn number => throw <| IO.userError s!"CPU exception {number}"
+      if let .jmp _ := stmt then pure () else go fuel rest
+  go 1048576 program
+  if ← wroteMemory.get then
+    match Bil.lookup (← emu.state.get).env emu.config.memory with
+    | .ok memory => setReg emu emu.config.memory memory
+    | .error error => throw <| IO.userError error
+
 private def dispatchSpecial (emu : Emu) (name : String) : IO Bool := do
-  if name == "syscall" || name == "svc" then
+  if name.startsWith "served:" then
+    let some address := (name.drop 7).toString.toNat? | throw <| IO.userError s!"bad special {name}"
+    let some serve := ← emu.intrinsicServer.get | throw <| IO.userError "no intrinsic server"
+    let some program := (← emu.servedPrograms.get).get? address | throw <| IO.userError s!"no program at {address}"
+    runServed emu serve program
+    pure true
+  else if name == "syscall" || name == "svc" then
     match ← dispatchSyscall emu with
     | some _ => pure true
     | none => dispatchIntrinsic emu name
