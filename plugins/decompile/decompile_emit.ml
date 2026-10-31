@@ -183,9 +183,55 @@ and statements ppf indent statements =
       statement ppf indent stmt;
       Format.fprintf ppf "@\n")
 
+(* the signed modulus of BIL in C, which C has not: the sign of the result of
+   its [%] follows the dividend, and it is undefined on a zero divisor, and on
+   the overflow of the minimum by -1 *)
+let smod_helper bits =
+  let i = declaration (Ast.Int (bits, Ast.Signed)) "" |> String.strip in
+  if bits = 1 then
+    sprintf "static inline %s bir_smod1(%s x, %s y) { return x && !y; }\n" i i i
+  else
+    String.concat ~sep:"\n"
+      [
+        sprintf "static inline %s bir_smod%d(%s x, %s y) {" i bits i i;
+        "  if (y == 0) return x;";
+        "  if (y == -1) return 0;";
+        sprintf "  %s r = x %% y;" i;
+        sprintf "  return r != 0 && (r ^ y) < 0 ? (%s)(r + y) : r;" i;
+        "}\n";
+      ]
+
+let smod_widths text =
+  String.substr_index_all text ~may_overlap:false ~pattern:"bir_smod"
+  |> List.filter_map ~f:(fun start ->
+      let digits = start + String.length "bir_smod" in
+      let rest = String.drop_prefix text digits in
+      let number = String.take_while rest ~f:Char.is_digit in
+      Option.try_with (fun () -> Int.of_string number))
+  |> List.dedup_and_sort ~compare:Int.compare
+
+let pp_functions ppf program =
+  List.iter program.Ast.functions ~f:(fun func ->
+      if not func.Ast.external_ then begin
+        Format.fprintf ppf "%s {@\n"
+          (declaration (Ast.Function func.signature) func.name);
+        List.iter func.locals ~f:(fun local ->
+            Format.fprintf ppf "  %s;@\n" (declaration local.typ local.name));
+        if not (List.is_empty func.locals) then Format.fprintf ppf "@\n";
+        statements ppf 2 func.body;
+        Format.fprintf ppf "}@\n@\n"
+      end)
+
 let pp ppf program =
   Format.fprintf ppf
     "/* Recovered C pseudocode; bir_* operations require machine support. */@\n";
+  let functions = Format.asprintf "%a" pp_functions program in
+  (match smod_widths functions with
+  | [] -> ()
+  | widths ->
+      List.iter widths ~f:(fun bits ->
+          Format.pp_print_string ppf (smod_helper bits));
+      Format.pp_print_newline ppf ());
   List.iter program.Ast.structures ~f:(fun structure ->
       Format.fprintf ppf "struct %s {@\n" structure.name;
       List.iter structure.fields ~f:(fun (name, offset, typ) ->
@@ -198,15 +244,6 @@ let pp ppf program =
           (declaration (Ast.Function func.signature) func.name));
   if List.exists program.functions ~f:(fun func -> func.Ast.external_) then
     Format.fprintf ppf "@\n";
-  List.iter program.functions ~f:(fun func ->
-      if not func.Ast.external_ then begin
-        Format.fprintf ppf "%s {@\n"
-          (declaration (Ast.Function func.signature) func.name);
-        List.iter func.locals ~f:(fun local ->
-            Format.fprintf ppf "  %s;@\n" (declaration local.typ local.name));
-        if not (List.is_empty func.locals) then Format.fprintf ppf "@\n";
-        statements ppf 2 func.body;
-        Format.fprintf ppf "}@\n@\n"
-      end)
+  Format.pp_print_string ppf functions
 
 let to_string program = Format.asprintf "%a" pp program

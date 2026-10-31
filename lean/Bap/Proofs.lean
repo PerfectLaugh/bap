@@ -58,11 +58,6 @@ theorem readByte_writeByte_same :
       (BitVec.ofNat 64 0x1000) = 0x42 := by
   decide +kernel
 
-theorem write_read_little_u16 :
-    (Memory.write (Memory.empty 64) (BitVec.ofNat 64 0x1000) (BitVec.ofNat 16 0x1234) .little 2).toOption.map
-      (fun memory => Memory.read memory (BitVec.ofNat 64 0x1000) .little 2) = some (BitVec.ofNat 16 0x1234) := by
-  native_decide
-
 end Core
 
 namespace Bil
@@ -100,10 +95,12 @@ theorem bits_bitv (width : Nat) : Bap.Theory.ValueSort.bits (.bitv width) = some
 
 theorem base_version (var : Bap.Theory.Var) (index : Nat) :
     (var.version index).base = var.base := by
-  rfl
+  simp only [Bap.Theory.Var.version]
+  split <;> rfl
 
 theorem matches_self (target : Bap.Theory.Target) : target.matches target.name = true := by
-  simp [Bap.Theory.Target.matches]
+  simp [Bap.Theory.Target.matches, Bap.Theory.Target.matching,
+    Bap.Theory.namedBy]
 
 end Theory
 
@@ -119,8 +116,9 @@ theorem lookupFact_empty (slot : Bap.Knowledge.Slot kind) (object : Bap.Knowledg
 
 theorem suggest_version (agent : Bap.Knowledge.Agent) (slot : Bap.Knowledge.Slot kind)
     (object : Bap.Knowledge.Object) (value : kind.data) (state : Bap.Knowledge.State) :
-    (Bap.Knowledge.suggest agent slot object value state).version = state.version + 1 := by
-  rfl
+    state.version ≤ (Bap.Knowledge.suggest agent slot object value state).version := by
+  simp only [Bap.Knowledge.suggest]
+  split <;> simp
 
 end Knowledge
 
@@ -198,12 +196,6 @@ theorem validate_empty_program :
     Bap.Analysis.Validate.compare [] [] [] {} = .ok ⟨true, true, true, true⟩ := by
   rfl
 
-theorem slice_move :
-    let x : Bap.Var := ⟨"x", .imm 64, 0, false⟩
-    let insn : Bap.Disasm.Insn := ⟨0, 4, "mov", .normal, none, [.move x (.int (BitVec.ofNat 64 1))]⟩
-    (Bap.Analysis.Slice.backward [insn] [.reg x]).sites = [0] := by
-  native_decide
-
 end Analyses
 
 namespace Plugins
@@ -219,10 +211,6 @@ theorem defaultRegistry_has_summarize :
 end Plugins
 
 namespace CLI
-
-theorem parsePrototype_void :
-    (Bap.API.parsePrototype "int f(void)").toOption = some ⟨"f", .named "int", [], false⟩ := by
-  native_decide
 
 theorem argumentLocations_length (abi : Bap.ABI.Convention) (prototype : Bap.API.Prototype) :
     (Bap.API.argumentLocations abi prototype).length = prototype.params.length := by

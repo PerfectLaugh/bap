@@ -507,7 +507,8 @@ module Primitives (Machine : Primus.Machine.S) = struct
         def "signed-mod"
           (all a @-> a)
           "(signed-mod X Y Z ...) returns X % Y % Z % ... or 0 if the list of\n\
-          \         arguments is empty, where % is the signed modulo operation";
+          \         arguments is empty, where % is the signed modulus, whose \
+           sign follows the divisor, and X % 0 is X";
         def "lshift"
           (tuple [ a; b ] @-> a)
           "(lshift X N) logically shifts X left by N bits";

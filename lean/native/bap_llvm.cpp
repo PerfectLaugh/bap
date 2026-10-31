@@ -66,6 +66,22 @@ lean_obj_res io_bytes(const std::vector<uint8_t> &bytes) {
   return lean_io_result_mk_ok(result);
 }
 
+// The features that the upstream disassemblers enable, see plugins/riscv/riscv_main.ml and
+// lib/arm/arm_target.ml; without them, these encodings are invalid. The assembler keeps the
+// predictable sizes of the uncompressed RISC-V encodings.
+std::string targetFeatures(const Triple &triple, bool assembling) {
+  if (triple.isRISCV())
+    return assembling ? "+a,+d,+f,+m,+zba,+zbb,+zbs" : "+a,+c,+d,+f,+m,+zba,+zbb,+zbs";
+  if (triple.getArch() == Triple::arm)
+    return "+hwdiv,+hwdiv-arm,+vfp4";
+  if (triple.getArch() == Triple::thumb)
+    return "+thumb2,+hwdiv,+hwdiv-arm,+vfp4";
+  if (triple.getArch() == Triple::aarch64)
+    return "+v8.1a,+v8.2a,+v8.3a,+fullfp16,+aes,+sha2,+sha3,+sm4,+crc,+lse,+rdm,+dotprod,+fp16fml,"
+           "+flagm,+rand,+pauth,+jsconv,+complxnum,+rcpc,+rcpc-immo,+fptoint,+sb,+predres,+ccdp,+sve";
+  return "";
+}
+
 struct TargetContext {
   Triple triple;
   const Target *target = nullptr;
@@ -75,7 +91,8 @@ struct TargetContext {
   std::unique_ptr<MCInstrInfo> instructions;
   MCTargetOptions options;
 
-  explicit TargetContext(const char *name) : triple(Triple::normalize(name)) {
+  explicit TargetContext(const char *name, bool assembling = false)
+      : triple(Triple::normalize(name)) {
     std::string error;
     target = TargetRegistry::lookupTarget("", triple, error);
     if (!target)
@@ -86,7 +103,7 @@ struct TargetContext {
     asmInfo.reset(target->createMCAsmInfo(*registers, triple, options));
     if (!asmInfo)
       throw std::runtime_error("unable to create assembler information");
-    subtarget.reset(target->createMCSubtargetInfo(triple, "", ""));
+    subtarget.reset(target->createMCSubtargetInfo(triple, "", targetFeatures(triple, assembling)));
     if (!subtarget)
       throw std::runtime_error("unable to create subtarget information");
     instructions.reset(target->createMCInstrInfo());
@@ -96,7 +113,7 @@ struct TargetContext {
 };
 
 std::vector<uint8_t> assemble(const char *triple, const char *source) {
-  TargetContext context(triple);
+  TargetContext context(triple, true);
   SourceMgr sources;
   sources.AddNewSourceBuffer(
       MemoryBuffer::getMemBufferCopy(source, "<lean-assembly>"), SMLoc());

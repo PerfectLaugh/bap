@@ -41,6 +41,13 @@ local elab "lift_unfold " n:ident : tactic => do
   evalTactic (← `(tactic| unfold $p:ident))
 
 open Lean Elab Tactic in
+/-- `lift_unfold` in a hypothesis. -/
+local elab "lift_unfold " n:ident " at " h:ident : tactic => do
+  evalTactic (← `(tactic| dsimp only [$n:ident] at $h:ident))
+  let p := mkIdent (mkPrivateNameCore `Bap.Target.LLVMLift (`Bap.Target.LLVMLift ++ n.getId.eraseMacroScopes))
+  evalTactic (← `(tactic| unfold $p:ident at $h:ident))
+
+open Lean Elab Tactic in
 /-- `simp` with the equations of private `LLVMLift` definitions. -/
 local elab "lift_simp " "[" ns:ident,* "]" : tactic => do
   let ns := ns.getElems
@@ -101,16 +108,22 @@ private abbrev flow : Nat → Flow := lift% flow
 private abbrev directControl : Nat → Bool := lift% directControl
 private abbrev riscvFlow : Nat → Nat → Flow := lift% riscvFlow
 private abbrev arm32Flow : LLVM.Decoded → Flow := lift% arm32Flow
-private abbrev powerpcMCTarget : Nat → Nat → List LLVM.MCOperand → Option Nat :=
+private abbrev powerpcMCTarget : Nat → Nat → Nat → List LLVM.MCOperand → Option Nat :=
   lift% powerpcMCTarget
 private abbrev riscvIsJal : Nat → Bool := lift% riscvIsJal
-private abbrev riscvMCTarget : Nat → Nat → Nat → List LLVM.MCOperand → Option Nat :=
+private abbrev riscvMCTarget : Nat → Nat → Nat → Nat → List LLVM.MCOperand → Option Nat :=
   lift% riscvMCTarget
 private abbrev aarch64MCTarget : Nat → Nat → List LLVM.MCOperand → Option Nat :=
   lift% aarch64MCTarget
-private abbrev x86MCTarget : Primus.Semantics.Environment → Nat → Nat → List LLVM.MCOperand → Option Nat :=
+private abbrev x86MCTarget : Nat → Primus.Semantics.Environment → Nat → Nat → List LLVM.MCOperand → Option Nat :=
   lift% x86MCTarget
-private abbrev mipsTarget : Nat → LLVM.Decoded → Option Nat := lift% mipsTarget
+private abbrev mipsTarget : Nat → Nat → LLVM.Decoded → Option Nat := lift% mipsTarget
+private abbrev mipsFlow : LLVM.Decoded → Flow := lift% mipsFlow
+private abbrev wrapAddress : Nat → Int → Nat := lift% wrapAddress
+private abbrev programJump : Bil.Program → Option Bool := lift% programJump
+private abbrev armControlFlow : Flow → Bil.Program → Flow := lift% armControlFlow
+private abbrev armCondition : Int → Option Bil.Exp := lift% armCondition
+private abbrev x86VectorRegister : String → Option PValue := lift% x86VectorRegister
 private abbrev arm32Target : Nat → LLVM.Decoded → Option Nat := lift% arm32Target
 private abbrev thumbTarget : Nat → LLVM.Decoded → Option Nat := lift% thumbTarget
 private abbrev x86RelativeOpcodes : List String := lift% x86RelativeOpcodes
@@ -186,40 +199,76 @@ theorem flow_successors (flags : Nat) (insn : Insn) (hf : insn.flow = flow flags
 
 /-! ## Branch-target computation -/
 
+/-! ### Addresses modulo the width of the address space -/
+
+private theorem pow_pos_int (bits : Nat) : (0 : Int) < (2 ^ bits : Int) :=
+  Int.pow_pos (by decide)
+
+private theorem wrapAddress_int (bits : Nat) (x : Int) :
+    (wrapAddress bits x : Int) = x % (2 ^ bits : Int) :=
+  Int.toNat_of_nonneg (Int.emod_nonneg _ (Int.ne_of_gt (pow_pos_int bits)))
+
+theorem wrapAddress_lt (bits : Nat) (x : Int) : wrapAddress bits x < 2 ^ bits := by
+  have h1 := wrapAddress_int bits x
+  have h2 := Int.emod_lt_of_pos x (pow_pos_int bits)
+  rw [← h1] at h2
+  exact_mod_cast h2
+
+/-- An address that fits is kept. -/
+theorem wrapAddress_of_fits (bits : Nat) (x : Int) (h0 : 0 ≤ x) (h1 : x < (2 ^ bits : Int)) :
+    (wrapAddress bits x : Int) = x := by
+  rw [wrapAddress_int, Int.emod_eq_of_lt h0 h1]
+
+/-- A negative address comes from the top of the address space, as `0xfffffffffff6d008` does. -/
+theorem wrapAddress_of_negative (bits : Nat) (x : Int) (h0 : -(2 ^ bits : Int) ≤ x) (h1 : x < 0) :
+    (wrapAddress bits x : Int) = x + (2 ^ bits : Int) := by
+  rw [wrapAddress_int]
+  have hp := pow_pos_int bits
+  have : x % (2 ^ bits : Int) = (x + (2 ^ bits : Int)) % (2 ^ bits : Int) := by
+    rw [Int.add_emod_right]
+  rw [this, Int.emod_eq_of_lt (by omega) (by omega)]
+
+/-- Adding a distance is the same before and after wrapping. -/
+theorem wrapAddress_add (bits : Nat) (x : Int) (k : Nat) :
+    wrapAddress bits ((wrapAddress bits x + k : Nat) : Int) = wrapAddress bits (x + k) := by
+  have h : (((wrapAddress bits x + k : Nat) : Int)) % (2 ^ bits : Int) = (x + k) % (2 ^ bits : Int) := by
+    rw [Int.natCast_add, wrapAddress_int, Int.emod_add_emod]
+  have h1 := wrapAddress_int bits ((wrapAddress bits x + k : Nat) : Int)
+  have h2 := wrapAddress_int bits (x + k)
+  rw [h, ← h2] at h1
+  exact_mod_cast h1
+
+/-- Modular equality of addresses is equality of their wrapped forms. -/
+theorem wrapAddress_congr (bits : Nat) (x y : Int) (h : x % (2 ^ bits : Int) = y % (2 ^ bits : Int)) :
+    wrapAddress bits x = wrapAddress bits y := by
+  have h1 := wrapAddress_int bits x
+  have h2 := wrapAddress_int bits y
+  rw [h, ← h2] at h1
+  exact_mod_cast h1
+
 /-- The common shape of the branch-target helpers. -/
-def relTarget (cond : Bool) (disp : Option Int) (compute : Int → Int) : Option Nat :=
+def relTarget (bits : Nat) (cond : Bool) (disp : Option Int) (compute : Int → Int) : Option Nat :=
   match cond, disp with
-  | true, some d => if compute d ≥ 0 then some (compute d).toNat else none
+  | true, some d => some (wrapAddress bits (compute d))
   | _, _ => none
 
-theorem relTarget_some_iff (cond : Bool) (disp : Option Int) (compute : Int → Int) (t : Nat) :
-    relTarget cond disp compute = some t ↔
-      cond = true ∧ ∃ d, disp = some d ∧ 0 ≤ compute d ∧ (t : Int) = compute d := by
+theorem relTarget_some_iff (bits : Nat) (cond : Bool) (disp : Option Int) (compute : Int → Int)
+    (t : Nat) :
+    relTarget bits cond disp compute = some t ↔
+      cond = true ∧ ∃ d, disp = some d ∧ t = wrapAddress bits (compute d) := by
   cases cond with
   | false => simp [relTarget]
   | true =>
     cases disp with
     | none => simp [relTarget]
-    | some d =>
-      simp only [relTarget, ge_iff_le, Option.some.injEq, true_and, exists_eq_left']
-      by_cases hle : 0 ≤ compute d
-      · rw [ite_eq_left hle]
-        simp only [Option.some.injEq, hle, true_and]
-        constructor
-        · rintro rfl
-          exact Int.toNat_of_nonneg hle
-        · intro he
-          omega
-      · rw [ite_eq_right hle]
-        simp [hle]
+    | some d => simp [relTarget, eq_comm]
 
-theorem relTarget_shift (cond : Bool) (disp : Option Int) (compute compute' : Int → Int) (t k : Nat)
-    (hc : ∀ d, compute' d = compute d + k) (h : relTarget cond disp compute = some t) :
-    relTarget cond disp compute' = some (t + k) := by
-  have ⟨h1, d, h2, h3, h4⟩ := (relTarget_some_iff _ _ _ _).1 h
-  refine (relTarget_some_iff _ _ _ _).2 ⟨h1, d, h2, ?_, ?_⟩
-  · rw [hc]; omega
-  · rw [hc]; omega
+theorem relTarget_shift (bits : Nat) (cond : Bool) (disp : Option Int) (compute compute' : Int → Int)
+    (t k : Nat) (hc : ∀ d, compute' d = compute d + k) (h : relTarget bits cond disp compute = some t) :
+    relTarget bits cond disp compute' = some (wrapAddress bits ((t + k : Nat) : Int)) := by
+  have ⟨h1, d, h2, h3⟩ := (relTarget_some_iff _ _ _ _ _).1 h
+  refine (relTarget_some_iff _ _ _ _ _).2 ⟨h1, d, h2, ?_⟩
+  rw [h3, hc, wrapAddress_add]
 
 private abbrev mcImm : Option LLVM.MCOperand → Option Int
   | some (.imm value) => some value
@@ -229,15 +278,14 @@ private abbrev opImm : Option LLVM.Operand → Option Int
   | some (.imm value) => some value
   | _ => none
 
-
 theorem directControl_iff (flags : Nat) :
     directControl flags = true ↔ (flags &&& 8 ≠ 0 ∧ flags &&& 16 = 0) ∨ flags &&& 2 ≠ 0 := by
   lift_unfold directControl
   simp
 
-private theorem powerpc_eq (address word : Nat) (operands : List LLVM.MCOperand) :
-    powerpcMCTarget address word operands =
-      relTarget (word / 0x4000000 == 16 || word / 0x4000000 == 18) (mcImm operands.getLast?)
+private theorem powerpc_eq (bits address word : Nat) (operands : List LLVM.MCOperand) :
+    powerpcMCTarget bits address word operands =
+      relTarget bits (word / 0x4000000 == 16 || word / 0x4000000 == 18) (mcImm operands.getLast?)
         fun d => (if word &&& 2 != 0 then (0 : Int) else Int.ofNat address) + d * 4 := by
   lift_unfold powerpcMCTarget
   simp only []
@@ -247,12 +295,13 @@ private theorem powerpc_eq (address word : Nat) (operands : List LLVM.MCOperand)
   rename_i op
   cases op <;> rfl
 
-private theorem riscv_eq (address word flags : Nat) (operands : List LLVM.MCOperand) :
-    riscvMCTarget address word flags operands =
-      relTarget (riscvIsJal word || flags &&& 8 != 0 && flags &&& 16 == 0) (mcImm operands.getLast?)
-        fun d => Int.ofNat address + d := by
+private theorem riscv_eq (bits address word flags : Nat) (operands : List LLVM.MCOperand) :
+    riscvMCTarget bits address word flags operands =
+      relTarget bits (riscvIsJal word || flags &&& 8 != 0 && flags &&& 16 == 0)
+        (mcImm operands.getLast?) fun d => Int.ofNat address + d := by
+  dsimp only [riscvIsJal]
   lift_unfold riscvMCTarget
-  generalize (riscvIsJal word || flags &&& 8 != 0 && flags &&& 16 == 0) = c
+  generalize ((lift% riscvIsJal) word || flags &&& 8 != 0 && flags &&& 16 == 0) = c
   generalize operands.getLast? = o
   cases c <;> cases o <;> try rfl
   rename_i op
@@ -260,7 +309,7 @@ private theorem riscv_eq (address word flags : Nat) (operands : List LLVM.MCOper
 
 private theorem aarch64_eq (address flags : Nat) (operands : List LLVM.MCOperand) :
     aarch64MCTarget address flags operands =
-      relTarget (directControl flags)
+      relTarget 64 (directControl flags)
         (mcImm (if flags &&& 32 != 0 then operands.getLast? else operands.head?))
         fun d => Int.ofNat address + d * 4 := by
   dsimp only [directControl]
@@ -272,10 +321,10 @@ private theorem aarch64_eq (address flags : Nat) (operands : List LLVM.MCOperand
   rename_i op
   cases op <;> rfl
 
-private theorem x86_eq (globals : Primus.Semantics.Environment) (next opcode : Nat)
+private theorem x86_eq (bits : Nat) (globals : Primus.Semantics.Environment) (next opcode : Nat)
     (operands : List LLVM.MCOperand) :
-    x86MCTarget globals next opcode operands =
-      relTarget (globals.relativeOpcodes.contains opcode) (mcImm operands.head?)
+    x86MCTarget bits globals next opcode operands =
+      relTarget bits (globals.relativeOpcodes.contains opcode) (mcImm operands.head?)
         fun d => Int.ofNat next + d := by
   lift_unfold x86MCTarget
   generalize globals.relativeOpcodes.contains opcode = c
@@ -286,7 +335,7 @@ private theorem x86_eq (globals : Primus.Semantics.Environment) (next opcode : N
 
 private theorem arm32_eq (address : Nat) (decoded : LLVM.Decoded) :
     arm32Target address decoded =
-      relTarget (["Bcc", "BL", "BL_pred", "BLXi"].contains decoded.opcode)
+      relTarget 32 (["Bcc", "BL", "BL_pred", "BLXi"].contains decoded.opcode)
         (opImm decoded.operands.head?) fun d => Int.ofNat (address + 8) + d := by
   lift_unfold arm32Target
   generalize ["Bcc", "BL", "BL_pred", "BLXi"].contains decoded.opcode = c
@@ -303,7 +352,7 @@ def thumbDisplacement (decoded : LLVM.Decoded) : Option LLVM.Operand :=
 
 private theorem thumb_eq (address : Nat) (decoded : LLVM.Decoded) :
     thumbTarget address decoded =
-      relTarget true (opImm (thumbDisplacement decoded))
+      relTarget 32 true (opImm (thumbDisplacement decoded))
         fun d => Int.ofNat (if decoded.opcode = "tBLXi" then (address + 4) / 4 * 4 else address + 4) + d := by
   lift_unfold thumbTarget
   simp only [thumbDisplacement]
@@ -314,50 +363,55 @@ private theorem thumb_eq (address : Nat) (decoded : LLVM.Decoded) :
   | none => rfl
   | some op => cases op <;> rfl
 
-private theorem imm_iff {t : Nat} {o : Option LLVM.MCOperand} {g : Int → Int} :
-    (∃ d, mcImm o = some d ∧ 0 ≤ g d ∧ (t : Int) = g d) ↔
-      ∃ d, o = some (.imm d) ∧ 0 ≤ g d ∧ (t : Int) = g d := by
+private theorem imm_iff {t : Nat} {o : Option LLVM.MCOperand} {g : Int → Nat} :
+    (∃ d, mcImm o = some d ∧ t = g d) ↔ ∃ d, o = some (.imm d) ∧ t = g d := by
   cases o with
   | none => simp
   | some op => cases op <;> simp
 
-private theorem op_imm_iff {t : Nat} {o : Option LLVM.Operand} {g : Int → Int} :
-    (∃ d, opImm o = some d ∧ 0 ≤ g d ∧ (t : Int) = g d) ↔
-      ∃ d, o = some (.imm d) ∧ 0 ≤ g d ∧ (t : Int) = g d := by
+private theorem op_imm_iff {t : Nat} {o : Option LLVM.Operand} {g : Int → Nat} :
+    (∃ d, opImm o = some d ∧ t = g d) ↔ ∃ d, o = some (.imm d) ∧ t = g d := by
   cases o with
   | none => simp
   | some op => cases op <;> simp
 
 /-- PowerPC: only the B-form and I-form branches have a static target, from their last operand,
-which is of words: from the current pc, or from zero when the AA bit is set. -/
-theorem powerpcMCTarget_spec (address word t : Nat) (operands : List LLVM.MCOperand) :
-    powerpcMCTarget address word operands = some t ↔
+which is of words: from the current pc, or from zero when the AA bit is set. Modulo the width. -/
+theorem powerpcMCTarget_spec (bits address word t : Nat) (operands : List LLVM.MCOperand) :
+    powerpcMCTarget bits address word operands = some t ↔
       (word / 0x4000000 = 16 ∨ word / 0x4000000 = 18) ∧ ∃ d, operands.getLast? = some (.imm d) ∧
-        0 ≤ (if word &&& 2 != 0 then (0 : Int) else Int.ofNat address) + d * 4 ∧
-        (t : Int) = (if word &&& 2 != 0 then (0 : Int) else Int.ofNat address) + d * 4 := by
+        t = wrapAddress bits ((if word &&& 2 != 0 then (0 : Int) else Int.ofNat address) + d * 4) := by
   rw [powerpc_eq, relTarget_some_iff, imm_iff]
   simp
 
 /-- The displacement of a conditional branch is its last operand, whatever `BO` and `BI` are. -/
-theorem powerpc_conditional_target (bo bi d : Int) (a w : Nat)
-    (hw : w / 0x4000000 = 16) (hrel : w &&& 2 = 0) (hd : 0 ≤ (a : Int) + d * 4) (b : Nat)
-    (hb : (b : Int) = a + d * 4) :
-    powerpcMCTarget a w [.imm bo, .reg bi.toNat, .imm d] = some b := by
-  refine (powerpcMCTarget_spec a w b _).2 ⟨.inl hw, d, rfl, ?_, ?_⟩ <;> simp [hrel, hd, hb]
+theorem powerpc_conditional_target (bits : Nat) (bo bi d : Int) (a w : Nat)
+    (hw : w / 0x4000000 = 16) (hrel : w &&& 2 = 0) :
+    powerpcMCTarget bits a w [.imm bo, .reg bi.toNat, .imm d] =
+      some (wrapAddress bits ((a : Int) + d * 4)) := by
+  refine (powerpcMCTarget_spec bits a w _ _).2 ⟨.inl hw, d, rfl, ?_⟩
+  simp [hrel]
+
+/-- A negative absolute branch, as a negative `ba`, targets the top of the address space. -/
+theorem powerpc_negative_absolute_target (bits : Nat) (a w : Nat) (d : Int)
+    (hw : w / 0x4000000 = 18) (habs : w &&& 2 ≠ 0) (h0 : -(2 ^ bits : Int) ≤ d * 4) (h1 : d * 4 < 0) :
+    ∃ t, powerpcMCTarget bits a w [.imm d] = some t ∧ (t : Int) = d * 4 + (2 ^ bits : Int) := by
+  refine ⟨_, (powerpcMCTarget_spec bits a w _ _).2 ⟨.inr hw, d, rfl, rfl⟩, ?_⟩
+  simp only [habs, bne_iff_ne, ne_eq, not_false_eq_true, ite_true, Int.zero_add]
+  exact wrapAddress_of_negative bits _ h0 h1
 
 /-- `BCLR`, `BCCTR` and their kin, which LLVM marks as direct, have no static target. -/
-theorem powerpc_register_branch_no_target (address word : Nat) (operands : List LLVM.MCOperand)
+theorem powerpc_register_branch_no_target (bits address word : Nat) (operands : List LLVM.MCOperand)
     (h1 : word / 0x4000000 ≠ 16) (h2 : word / 0x4000000 ≠ 18) :
-    powerpcMCTarget address word operands = none := by
+    powerpcMCTarget bits address word operands = none := by
   rw [powerpc_eq]
   simp [relTarget, h1, h2]
 
 /-- RISC-V: JAL and the flagged direct branches have the byte displacement as the last operand. -/
-theorem riscvMCTarget_spec (address word flags t : Nat) (operands : List LLVM.MCOperand) :
-    riscvMCTarget address word flags operands = some t ↔
+theorem riscvMCTarget_spec (bits address word flags t : Nat) (operands : List LLVM.MCOperand) :
+    riscvMCTarget bits address word flags operands = some t ↔
       (riscvIsJal word = true ∨ flags &&& 8 ≠ 0 ∧ flags &&& 16 = 0) ∧
-        ∃ d, operands.getLast? = some (.imm d) ∧
-          0 ≤ Int.ofNat address + d ∧ (t : Int) = address + d := by
+        ∃ d, operands.getLast? = some (.imm d) ∧ t = wrapAddress bits (Int.ofNat address + d) := by
   rw [riscv_eq, relTarget_some_iff, imm_iff]
   simp
 
@@ -366,18 +420,16 @@ theorem aarch64MCTarget_spec (address flags t : Nat) (operands : List LLVM.MCOpe
     aarch64MCTarget address flags operands = some t ↔
       directControl flags = true ∧ ∃ d,
         (if flags &&& 32 != 0 then operands.getLast? else operands.head?) = some (.imm d) ∧
-        0 ≤ Int.ofNat address + d * 4 ∧ (t : Int) = address + d * 4 := by
+        t = wrapAddress 64 (Int.ofNat address + d * 4) := by
   rw [aarch64_eq, relTarget_some_iff, imm_iff]
-  simp
 
 /-- x86: only registered pc-relative opcodes have a target, measured from the next instruction. -/
-theorem x86MCTarget_spec (globals : Primus.Semantics.Environment) (next opcode t : Nat)
+theorem x86MCTarget_spec (bits : Nat) (globals : Primus.Semantics.Environment) (next opcode t : Nat)
     (operands : List LLVM.MCOperand) :
-    x86MCTarget globals next opcode operands = some t ↔
+    x86MCTarget bits globals next opcode operands = some t ↔
       globals.relativeOpcodes.contains opcode = true ∧ ∃ d, operands.head? = some (.imm d) ∧
-        0 ≤ Int.ofNat next + d ∧ (t : Int) = next + d := by
+        t = wrapAddress bits (Int.ofNat next + d) := by
   rw [x86_eq, relTarget_some_iff, imm_iff]
-  simp
 
 /-- The x86 pc-relative opcodes include the ones that LLVM marks as conditional besides `JCC`. -/
 theorem x86_relative_opcodes_cover_loops :
@@ -390,74 +442,76 @@ theorem arm32Target_spec (address t : Nat) (decoded : LLVM.Decoded) :
     arm32Target address decoded = some t ↔
       ["Bcc", "BL", "BL_pred", "BLXi"].contains decoded.opcode = true ∧
         ∃ d, decoded.operands.head? = some (.imm d) ∧
-          0 ≤ Int.ofNat (address + 8) + d ∧ (t : Int) = address + 8 + d := by
+          t = wrapAddress 32 (Int.ofNat (address + 8) + d) := by
   rw [arm32_eq, relTarget_some_iff, op_imm_iff]
-  simp
 
 /-- Thumb: the pc reads as the address plus four, word-aligned for `BLX`. -/
 theorem thumbTarget_spec (address t : Nat) (decoded : LLVM.Decoded) :
     thumbTarget address decoded = some t ↔
       ∃ d, thumbDisplacement decoded = some (.imm d) ∧
-        let pc := if decoded.opcode = "tBLXi" then (address + 4) / 4 * 4 else address + 4
-        0 ≤ Int.ofNat pc + d ∧ (t : Int) = pc + d := by
+        t = wrapAddress 32 (Int.ofNat
+          (if decoded.opcode = "tBLXi" then (address + 4) / 4 * 4 else address + 4) + d) := by
   rw [thumb_eq, relTarget_some_iff, op_imm_iff]
   simp
 
 /-- All Thumb branches other than `BLX` keep their distance when the code moves. -/
 theorem thumbTarget_shift (address k t : Nat) (decoded : LLVM.Decoded)
     (hb : decoded.opcode ≠ "tBLXi") (h : thumbTarget address decoded = some t) :
-    thumbTarget (address + k) decoded = some (t + k) := by
+    thumbTarget (address + k) decoded = some (wrapAddress 32 ((t + k : Nat) : Int)) := by
   rw [thumb_eq] at h ⊢
-  refine relTarget_shift _ _ _ _ _ _ (fun d => ?_) h
+  refine relTarget_shift _ _ _ _ _ _ _ (fun d => ?_) h
   simp only [hb, ite_false, Int.ofNat_eq_natCast, Int.natCast_add]
   omega
 
 theorem arm32Target_shift (address k t : Nat) (decoded : LLVM.Decoded)
     (h : arm32Target address decoded = some t) :
-    arm32Target (address + k) decoded = some (t + k) := by
+    arm32Target (address + k) decoded = some (wrapAddress 32 ((t + k : Nat) : Int)) := by
   rw [arm32_eq] at h ⊢
-  refine relTarget_shift _ _ _ _ _ _ (fun d => ?_) h
+  refine relTarget_shift _ _ _ _ _ _ _ (fun d => ?_) h
   simp only [Int.ofNat_eq_natCast, Int.natCast_add]
   omega
 
-/-- Moving a B-form or I-form branch moves a relative target and keeps an absolute one. -/
-theorem powerpcMCTarget_shift (address k word t : Nat) (operands : List LLVM.MCOperand)
-    (hrel : word &&& 2 = 0) (h : powerpcMCTarget address word operands = some t) :
-    powerpcMCTarget (address + k) word operands = some (t + k) := by
+/-- Moving a B-form or I-form branch moves a relative target. -/
+theorem powerpcMCTarget_shift (bits address k word t : Nat) (operands : List LLVM.MCOperand)
+    (hrel : word &&& 2 = 0) (h : powerpcMCTarget bits address word operands = some t) :
+    powerpcMCTarget bits (address + k) word operands =
+      some (wrapAddress bits ((t + k : Nat) : Int)) := by
   rw [powerpc_eq] at h ⊢
-  refine relTarget_shift _ _ _ _ _ _ (fun d => ?_) h
+  refine relTarget_shift _ _ _ _ _ _ _ (fun d => ?_) h
   simp only [hrel, Int.ofNat_eq_natCast, Int.natCast_add]
   simp
   omega
 
-theorem riscvMCTarget_shift (address k word flags t : Nat) (operands : List LLVM.MCOperand)
-    (h : riscvMCTarget address word flags operands = some t) :
-    riscvMCTarget (address + k) word flags operands = some (t + k) := by
+theorem riscvMCTarget_shift (bits address k word flags t : Nat) (operands : List LLVM.MCOperand)
+    (h : riscvMCTarget bits address word flags operands = some t) :
+    riscvMCTarget bits (address + k) word flags operands =
+      some (wrapAddress bits ((t + k : Nat) : Int)) := by
   rw [riscv_eq] at h ⊢
-  refine relTarget_shift _ _ _ _ _ _ (fun d => ?_) h
+  refine relTarget_shift _ _ _ _ _ _ _ (fun d => ?_) h
   simp only [Int.ofNat_eq_natCast, Int.natCast_add]
   omega
 
 theorem aarch64MCTarget_shift (address k flags t : Nat) (operands : List LLVM.MCOperand)
     (h : aarch64MCTarget address flags operands = some t) :
-    aarch64MCTarget (address + k) flags operands = some (t + k) := by
+    aarch64MCTarget (address + k) flags operands = some (wrapAddress 64 ((t + k : Nat) : Int)) := by
   rw [aarch64_eq] at h ⊢
-  refine relTarget_shift _ _ _ _ _ _ (fun d => ?_) h
+  refine relTarget_shift _ _ _ _ _ _ _ (fun d => ?_) h
   simp only [Int.ofNat_eq_natCast, Int.natCast_add]
   omega
 
-theorem x86MCTarget_shift (globals : Primus.Semantics.Environment) (next k opcode t : Nat)
-    (operands : List LLVM.MCOperand) (h : x86MCTarget globals next opcode operands = some t) :
-    x86MCTarget globals (next + k) opcode operands = some (t + k) := by
+theorem x86MCTarget_shift (bits : Nat) (globals : Primus.Semantics.Environment) (next k opcode t : Nat)
+    (operands : List LLVM.MCOperand) (h : x86MCTarget bits globals next opcode operands = some t) :
+    x86MCTarget bits globals (next + k) opcode operands =
+      some (wrapAddress bits ((t + k : Nat) : Int)) := by
   rw [x86_eq] at h ⊢
-  refine relTarget_shift _ _ _ _ _ _ (fun d => ?_) h
+  refine relTarget_shift _ _ _ _ _ _ _ (fun d => ?_) h
   simp only [Int.ofNat_eq_natCast, Int.natCast_add]
   omega
 
 /-- Register branches never get a static target on AArch64 and RISC-V. -/
-theorem indirect_has_no_target (address word flags : Nat) (operands : List LLVM.MCOperand)
+theorem indirect_has_no_target (bits address word flags : Nat) (operands : List LLVM.MCOperand)
     (h : flags &&& 16 ≠ 0) (hc : flags &&& 2 = 0) (hj : riscvIsJal word = false) :
-    riscvMCTarget address word flags operands = none ∧
+    riscvMCTarget bits address word flags operands = none ∧
       aarch64MCTarget address flags operands = none := by
   have hd : directControl flags = false := by
     lift_unfold directControl
@@ -468,16 +522,28 @@ theorem indirect_has_no_target (address word flags : Nat) (operands : List LLVM.
 /-! ### MIPS -/
 
 /-- `J`, `JAL` and `JALX` replace the low 28 bits of the delay slot's address. -/
-theorem mips_region_target (address : Nat) (decoded : LLVM.Decoded) (i : Int)
+theorem mips_region_target (bits address : Nat) (decoded : LLVM.Decoded) (i : Int)
     (hj : ["J", "JAL", "JALX"].contains decoded.opcode = true)
-    (hl : decoded.operands.getLast? = some (.imm i)) (hi : 0 ≤ i) (hb : i < 0x10000000) :
-    ∃ t, mipsTarget address decoded = some t ∧
+    (hl : decoded.operands.getLast? = some (.imm i)) (hi : 0 ≤ i) (hb : i < 0x10000000)
+    (hfits : (address + 4) / 0x10000000 * 0x10000000 + i.toNat < 2 ^ bits) :
+    ∃ t, mipsTarget bits address decoded = some t ∧
       t % 0x10000000 = i.toNat ∧ t / 0x10000000 = (address + 4) / 0x10000000 := by
+  have hx : Int.ofNat ((address + 4) / 0x10000000 * 0x10000000) + i =
+      (((address + 4) / 0x10000000 * 0x10000000 + i.toNat : Nat) : Int) := by
+    simp only [Int.ofNat_eq_natCast, Int.natCast_add]
+    omega
+  have hw : wrapAddress bits (Int.ofNat ((address + 4) / 0x10000000 * 0x10000000) + i) =
+      (address + 4) / 0x10000000 * 0x10000000 + i.toNat := by
+    have := wrapAddress_of_fits bits (Int.ofNat ((address + 4) / 0x10000000 * 0x10000000) + i)
+      (by rw [hx]; omega) (by rw [hx]; exact_mod_cast hfits)
+    rw [hx] at this ⊢
+    exact_mod_cast this
   refine ⟨(address + 4) / 0x10000000 * 0x10000000 + i.toNat, ?_, ?_, ?_⟩
   · lift_unfold mipsTarget
     rw [hl]
-    show (if _ then (if _ then _ else _) else _) = _
-    rw [ite_eq_left hj, ite_eq_left hi]
+    show (if _ then _ else _) = _
+    rw [ite_eq_left hj]
+    exact congrArg some hw
   · have : i.toNat < 0x10000000 := by omega
     omega
   · have : i.toNat < 0x10000000 := by omega
@@ -485,34 +551,56 @@ theorem mips_region_target (address : Nat) (decoded : LLVM.Decoded) (i : Int)
 
 /-- All other direct branches and calls of MIPS, conditional or not, count from the branch: LLVM
 has already added the four bytes of the delay slot. -/
-theorem mips_relative_target (address t : Nat) (decoded : LLVM.Decoded) (d : Int)
+theorem mips_relative_target (bits address : Nat) (decoded : LLVM.Decoded) (d : Int)
     (hj : ["J", "JAL", "JALX"].contains decoded.opcode = false)
-    (hf : directControl decoded.flags = true) (hl : decoded.operands.getLast? = some (.imm d))
-    (hd : 0 ≤ Int.ofNat address + d) (ht : (t : Int) = address + d) :
-    mipsTarget address decoded = some t := by
+    (hf : directControl decoded.flags = true) (hl : decoded.operands.getLast? = some (.imm d)) :
+    mipsTarget bits address decoded = some (wrapAddress bits (Int.ofNat address + d)) := by
   lift_unfold mipsTarget
   rw [hl]
   have hne : ¬["J", "JAL", "JALX"].contains decoded.opcode = true := by simp only [hj]; decide
-  show (if _ then _ else (if _ then (if _ then _ else _) else _)) = _
-  rw [ite_eq_right hne, ite_eq_left hf, ite_eq_left hd]
-  have h2 : Int.ofNat address + d = (t : Int) := ht.symm
-  rw [h2]
-  simp
+  show (if _ then _ else (if _ then _ else _)) = _
+  rw [ite_eq_right hne, ite_eq_left hf]
 
 /-- Moving a MIPS branch that counts from itself moves its target. -/
-theorem mips_relative_shift (address k t : Nat) (decoded : LLVM.Decoded) (d : Int)
+theorem mips_relative_shift (bits address k : Nat) (decoded : LLVM.Decoded) (d : Int)
     (hj : ["J", "JAL", "JALX"].contains decoded.opcode = false)
-    (hf : directControl decoded.flags = true) (hl : decoded.operands.getLast? = some (.imm d))
-    (hd : 0 ≤ Int.ofNat address + d) (ht : (t : Int) = address + d) :
-    mipsTarget (address + k) decoded = some (t + k) := by
-  refine mips_relative_target _ _ decoded d hj hf hl ?_ ?_ <;>
-    simp only [Int.ofNat_eq_natCast, Int.natCast_add] at * <;> omega
+    (hf : directControl decoded.flags = true) (hl : decoded.operands.getLast? = some (.imm d)) :
+    mipsTarget bits (address + k) decoded =
+      some (wrapAddress bits (((wrapAddress bits (Int.ofNat address + d) + k : Nat) : Int))) := by
+  rw [mips_relative_target bits _ decoded d hj hf hl, wrapAddress_add]
+  congr 2
+  simp only [Int.ofNat_eq_natCast, Int.natCast_add]
+  omega
 
 /-- A register operand in the last place, as of `JR` and `JALR`, gives no target. -/
-theorem mips_register_jump_no_target (address : Nat) (decoded : LLVM.Decoded) (name : String)
-    (hl : decoded.operands.getLast? = some (.reg name)) : mipsTarget address decoded = none := by
+theorem mips_register_jump_no_target (bits address : Nat) (decoded : LLVM.Decoded) (name : String)
+    (hl : decoded.operands.getLast? = some (.reg name)) :
+    mipsTarget bits address decoded = none := by
   lift_unfold mipsTarget
   rw [hl]
+
+/-- `BEQ` of a register with itself is the assembler's `b` and has no fall-through. -/
+theorem mips_b_is_a_jump (assembly : String) (size flags : Nat) (r immediate : LLVM.Operand) :
+    mipsFlow ⟨assembly, size, flags, "BEQ", [r, r, immediate]⟩ = .jump := by
+  lift_unfold mipsFlow
+  simp
+
+/-- The delayed jumps have a slot only if they do not fall through, as the slot of the others is
+reached by falling through. -/
+theorem mipsHasDelaySlot_no_fallthrough (insn : Insn) (h : mipsHasDelaySlot insn = true) :
+    insn.fallsThrough = false := by
+  unfold mipsHasDelaySlot at h
+  cases insn with
+  | mk a s asm flow target bil => cases flow <;> simp_all [Insn.fallsThrough]
+
+/-- All delayed jumps without fall-through have a slot, except for the exception returns. -/
+theorem mipsHasDelaySlot_of_jump (insn : Insn)
+    (hf : insn.flow = .jump ∨ insn.flow = .indirectJump ∨ insn.flow = .ret)
+    (h1 : insn.asm.startsWith "eret" = false) (h2 : insn.asm.startsWith "deret" = false) :
+    mipsHasDelaySlot insn = true := by
+  unfold mipsHasDelaySlot
+  rw [h1, h2]
+  rcases hf with hf | hf | hf <;> simp [hf]
 
 /-! ### Control flow that LLVM's flags miss -/
 
@@ -535,6 +623,101 @@ theorem arm32Flow_spec (assembly : String) (size flags : Nat) (d : LLVM.Operand)
 theorem arm32Flow_other (decoded : LLVM.Decoded) (h : decoded.opcode ≠ "Bcc") :
     arm32Flow decoded = flow decoded.flags := by
   lift_unfold arm32Flow
+  split <;> simp_all
+
+/-! ### Writes to the pc of ARM -/
+
+private theorem programJump_jmp (target : Bil.Exp) (rest : Bil.Program) :
+    programJump (.jmp target :: rest) = some true := by
+  lift_simp [programJump]
+
+private theorem programJump_move (var : Bap.Var) (value : Bil.Exp) (rest : Bil.Program) :
+    programJump (.move var value :: rest) = programJump rest := by
+  lift_simp [programJump]
+
+/-- A program with a jump at its top level always jumps. -/
+theorem programJump_of_top_jmp (bil : Bil.Program) (h : ∃ target, .jmp target ∈ bil) :
+    programJump bil = some true := by
+  induction bil with
+  | nil => simp at h
+  | cons stmt rest ih =>
+    have hr : (∃ target, Bil.Stmt.jmp target ∈ rest) → programJump rest = some true := ih
+    have ⟨t, ht⟩ := h
+    cases stmt with
+    | jmp target => exact programJump_jmp _ _
+    | move var value =>
+      rw [programJump_move]
+      exact hr ⟨t, by simpa using ht⟩
+    | special message =>
+      have h1 := hr ⟨t, by simpa using ht⟩
+      dsimp only [programJump] at h1 ⊢
+      rw [←h1]
+      lift_simp [programJump]
+    | cpuExn number =>
+      have h1 := hr ⟨t, by simpa using ht⟩
+      dsimp only [programJump] at h1 ⊢
+      rw [←h1]
+      lift_simp [programJump]
+    | «while» condition body =>
+      have h1 := hr ⟨t, by simpa using ht⟩
+      dsimp only [programJump] at h1 ⊢
+      lift_simp [programJump]
+      simp [h1]
+    | ifElse condition yes no =>
+      have h1 := hr ⟨t, by simpa using ht⟩
+      dsimp only [programJump] at h1 ⊢
+      lift_simp [programJump]
+      simp [h1]
+
+/-- A plain program does not jump. -/
+theorem programJump_moves (var : Bap.Var) (value : Bil.Exp) :
+    programJump [.move var value] = none := by
+  lift_simp [programJump]
+
+/-- A jump under a condition is conditional. -/
+theorem programJump_conditional (condition target : Bil.Exp) (rest : Bil.Program) :
+    programJump [.ifElse condition (.jmp target :: rest) []] = some false := by
+  lift_simp [programJump]
+
+/-- An instruction that LLVM calls normal doesn't fall through when its lifted program always
+jumps, e.g., `ldr pc, [sp]`, and it may fall through when it jumps under a condition. -/
+theorem armControlFlow_of_jump (bil : Bil.Program) (h : programJump bil = some true) :
+    armControlFlow .normal bil = .indirectJump := by
+  lift_unfold armControlFlow
+  dsimp only [programJump] at h
+  rw [h]
+
+theorem armControlFlow_of_conditional (flow : Flow) (bil : Bil.Program)
+    (hf : flow = .normal ∨ flow = .ret ∨ flow = .indirectJump) (h : programJump bil = some false) :
+    armControlFlow flow bil = .conditionalJump := by
+  lift_unfold armControlFlow
+  dsimp only [programJump] at h
+  rw [h]
+  rcases hf with rfl | rfl | rfl <;> rfl
+
+/-- Instructions that lift to no jump are classified by their flags. -/
+theorem armControlFlow_of_no_jump (flow : Flow) (bil : Bil.Program) (h : programJump bil = none) :
+    armControlFlow flow bil = flow := by
+  lift_unfold armControlFlow
+  dsimp only [programJump] at h
+  rw [h]
+  cases flow <;> rfl
+
+/-- What LLVM flags as a branch or call stays so. -/
+theorem armControlFlow_keeps_branches (flow : Flow) (bil : Bil.Program)
+    (hf : flow = .jump ∨ flow = .conditionalJump ∨ flow = .call ∨ flow = .barrier) :
+    armControlFlow flow bil = flow := by
+  lift_unfold armControlFlow
+  generalize (lift% programJump) bil = jump
+  rcases hf with rfl | rfl | rfl | rfl <;> cases jump <;> try rfl
+  all_goals (rename_i value; cases value <;> rfl)
+
+/-- The conditions of ARM: the codes 14 and 15 always hold. -/
+theorem armCondition_always (condition : Int) :
+    armCondition condition = none ↔ condition ≠ 0 ∧ condition ≠ 1 ∧ condition ≠ 2 ∧ condition ≠ 3 ∧
+      condition ≠ 4 ∧ condition ≠ 5 ∧ condition ≠ 6 ∧ condition ≠ 7 ∧ condition ≠ 8 ∧ condition ≠ 9 ∧
+      condition ≠ 10 ∧ condition ≠ 11 ∧ condition ≠ 12 ∧ condition ≠ 13 := by
+  lift_unfold armCondition
   split <;> simp_all
 
 /-! ## Register tables -/
@@ -567,9 +750,44 @@ theorem aarch64Register_shape (name : String) :
   repeat' refine shape_ite ?_ ?_
   all_goals exact ⟨_, _, _, rfl, by decide⟩
 
+/-- The vector registers have their architectural widths, and XMM is the low half of YMM. -/
+theorem x86VectorRegister_shape (name : String) (value : PValue)
+    (h : x86VectorRegister name = some value) :
+    ∃ n w b, value = register n w b ∧ (w, b) ∈ [(128, 256), (256, 256), (512, 512)] := by
+  lift_unfold x86VectorRegister at h
+  split at h
+  all_goals first
+    | cases h
+    | (split at h
+       · cases h
+         exact ⟨_, _, _, rfl, by decide⟩
+       · cases h)
+
+private theorem vector_getD {P : Nat → Nat → Prop} (name : String) (fallback : PValue)
+    (hd : ∃ n w b, fallback = register n w b ∧ P w b)
+    (hv : P 128 256 ∧ P 256 256 ∧ P 512 512) :
+    ∃ n w b, (x86VectorRegister name).getD fallback = register n w b ∧ P w b := by
+  cases h : x86VectorRegister name with
+  | none => exact hd
+  | some value =>
+    have ⟨n, w, b, he, hm⟩ := x86VectorRegister_shape name value h
+    refine ⟨n, w, b, he, ?_⟩
+    simp only [List.mem_cons, List.not_mem_nil, or_false, Prod.mk.injEq] at hm
+    rcases hm with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩
+    · exact hv.1
+    · exact hv.2.1
+    · exact hv.2.2
+
+/-- The registers that the semantics see as vectors. -/
+theorem x86_vector_views :
+    x86Register "XMM0" = register "YMM0" 128 256 ∧ x86Register "XMM15" = register "YMM15" 128 256 ∧
+      x86Register "YMM3" = register "YMM3" 256 256 ∧ x86Register "ZMM4" = register "ZMM4" 512 512 ∧
+      x8632Register "XMM7" = register "YMM7" 128 256 := ⟨rfl, rfl, rfl, rfl, rfl⟩
+
 theorem x86Register_shape (name : String) :
     ∃ n w b, x86Register name = register n w b ∧
-      (w, b) ∈ [(1, 1), (8, 8), (8, 64), (16, 64), (32, 64), (64, 64)] := by
+      (w, b) ∈ [(1, 1), (8, 8), (8, 64), (16, 64), (32, 64), (64, 64), (128, 256), (256, 256),
+        (512, 512)] := by
   lift_unfold x86Register
   simp only []
   generalize hc : (if (name.isEmpty || decide (name = "NoRegister")) = true then "Nil" else name) = c
@@ -579,9 +797,9 @@ theorem x86Register_shape (name : String) :
     · exact ⟨c, 8, 8, rfl, by decide⟩
     · cases hl : x86LowRegister c with
       | none =>
-        refine ⟨c, 64, 64, ?_, by decide⟩
         dsimp only [x86LowRegister] at hl
         rw [hl]
+        exact vector_getD c _ ⟨c, 64, 64, rfl, by decide⟩ (by decide)
       | some pair =>
         obtain ⟨base, width⟩ := pair
         have hw := (x86LowRegister_spec _ _ _ hl).1
@@ -592,12 +810,16 @@ theorem x86Register_shape (name : String) :
 
 theorem x8632Register_shape (name : String) :
     ∃ n w b, x8632Register name = register n w b ∧
-      (w, b) ∈ [(1, 1), (8, 8), (8, 32), (16, 32), (32, 32)] := by
+      (w, b) ∈ [(1, 1), (8, 8), (8, 32), (16, 32), (32, 32), (128, 256), (256, 256), (512, 512)] := by
   lift_unfold x8632Register
   simp only []
   generalize (if (name.isEmpty || decide (name = "NoRegister")) = true then "Nil" else name) = c
   repeat' split
-  all_goals exact ⟨_, _, _, rfl, by decide⟩
+  all_goals first
+    | exact ⟨_, 1, _, rfl, by decide⟩
+    | exact ⟨_, 8, _, rfl, by decide⟩
+    | exact ⟨_, 16, _, rfl, by decide⟩
+    | exact vector_getD c _ ⟨c, 32, 32, rfl, by decide⟩ (by decide)
 
 theorem arm32Register_shape (name : String) :
     ∃ n w, arm32Register name = register n w w ∧ (w = 1 ∨ w = 32) := by
@@ -838,6 +1060,132 @@ theorem mips_abi_names (w : Nat) (c : ABI.Convention) (h : ABI.convention .mips 
   · show some (mipsCanonicalName "R31") = _
     decide
 
+/-! ### Loads and stores of multiple registers of ARM -/
+
+private abbrev armMultiple : Nat → Primus.Semantics.Context → LLVM.Decoded → Option Bil.Program :=
+  lift% armMultiple
+private abbrev ArmMultipleKind := lift% ArmMultiple
+private abbrev armMultipleOperands : String → List LLVM.Operand →
+    Option (Bool × ArmMultipleKind × Bool × String × Int × List String) := lift% armMultipleOperands
+
+private theorem operand_names (g : LLVM.Operand → Option String) (hg : ∀ n, g (.reg n) = some n)
+    (names : List String) : (names.map LLVM.Operand.reg).mapM g = some names := by
+  induction names with
+  | nil => rfl
+  | cons name rest ih => simp only [List.map_cons, List.mapM_cons, ih, hg]; rfl
+
+/-- `pop` has the condition and the list of registers as its operands, from the stack pointer. -/
+theorem pop_operands (condition : Int) (predicate : LLVM.Operand) (names : List String) :
+    armMultipleOperands "tPOP" (.imm condition :: predicate :: names.map .reg) =
+      some (true, (lift% ArmMultiple.increaseAfter), true, "SP", condition, names) := by
+  lift_unfold armMultipleOperands
+  show Option.map _ (List.mapM _ _) = _
+  rw [operand_names _ fun _ => rfl]
+  rfl
+
+private theorem programJump_all_moves (bil : Bil.Program)
+    (h : ∀ stmt ∈ bil, ∃ var value, stmt = .move var value) : programJump bil = none := by
+  induction bil with
+  | nil =>
+    lift_simp [programJump]
+  | cons stmt rest ih =>
+    have ⟨var, value, he⟩ := h stmt (by simp)
+    subst he
+    rw [programJump_move]
+    exact ih fun s hs => h s (List.mem_cons_of_mem _ hs)
+
+private theorem mem_indexed {α} (list : List α) (x : α) (h : x ∈ list) :
+    ∃ i, (i, x) ∈ (List.range list.length).zip list := by
+  have ⟨i, hi, he⟩ := List.getElem_of_mem h
+  refine ⟨i, ?_⟩
+  have hlen : i < ((List.range list.length).zip list).length := by simpa using hi
+  have := List.getElem_mem hlen
+  simpa [he] using this
+
+/-- A load of multiple registers that holds PC always jumps, if its condition always holds, which
+is why `pop {r0, pc}` and `ldm r0, {pc}` have no fall-through. -/
+theorem armMultiple_load_pc (pc : Nat) (context : Primus.Semantics.Context) (decoded : LLVM.Decoded)
+    (addressing : ArmMultipleKind) (writeback : Bool) (base : String) (condition : Int)
+    (list : List String)
+    (h : armMultipleOperands decoded.opcode decoded.operands =
+      some (true, addressing, writeback, base, condition, list))
+    (hc : armCondition condition = none) (hpc : "PC" ∈ list) :
+    ∃ bil, armMultiple pc context decoded = some bil ∧ programJump bil = some true := by
+  dsimp only [armMultipleOperands, armCondition] at h hc
+  lift_unfold armMultiple
+  rw [h]
+  refine ⟨_, rfl, ?_⟩
+  dsimp only
+  rw [hc]
+  refine programJump_of_top_jmp _ ?_
+  have ⟨i, hi⟩ := mem_indexed list "PC" hpc
+  simp only [↓reduceIte, List.mem_cons, List.mem_append, List.mem_map, reduceCtorEq, false_or]
+  exact ⟨_, .inr ⟨(i, "PC"), hi, ite_eq_left rfl⟩⟩
+
+/-- A load of multiple registers without PC, as `pop {r0}`, has no jump and falls through. -/
+theorem armMultiple_load_no_pc (pc : Nat) (context : Primus.Semantics.Context) (decoded : LLVM.Decoded)
+    (addressing : ArmMultipleKind) (writeback : Bool) (base : String) (condition : Int)
+    (list : List String)
+    (h : armMultipleOperands decoded.opcode decoded.operands =
+      some (true, addressing, writeback, base, condition, list))
+    (hc : armCondition condition = none) (hpc : "PC" ∉ list) :
+    ∃ bil, armMultiple pc context decoded = some bil ∧ programJump bil = none := by
+  dsimp only [armMultipleOperands, armCondition] at h hc
+  lift_unfold armMultiple
+  rw [h]
+  refine ⟨_, rfl, ?_⟩
+  dsimp only
+  rw [hc]
+  refine programJump_all_moves _ ?_
+  intro stmt hs
+  rcases List.mem_cons.1 hs with rfl | hs
+  · exact ⟨_, _, rfl⟩
+  rcases List.mem_append.1 hs with hs | hs
+  · cases writeback <;> simp at hs
+    subst hs
+    exact ⟨_, _, rfl⟩
+  · rcases List.mem_map.1 hs with ⟨⟨i, name⟩, hm, rfl⟩
+    have hname : name ∈ list := (List.of_mem_zip hm).2
+    have hne : name ≠ "PC" := fun he => hpc (he ▸ hname)
+    simp only [hne, ite_false]
+    exact ⟨_, _, rfl⟩
+
+/-- A store of multiple registers never jumps, even if PC is on the list. -/
+theorem armMultiple_store (pc : Nat) (context : Primus.Semantics.Context) (decoded : LLVM.Decoded)
+    (addressing : ArmMultipleKind) (writeback : Bool) (base : String) (condition : Int)
+    (list : List String)
+    (h : armMultipleOperands decoded.opcode decoded.operands =
+      some (false, addressing, writeback, base, condition, list))
+    (hc : armCondition condition = none) :
+    ∃ bil, armMultiple pc context decoded = some bil ∧ programJump bil = none := by
+  dsimp only [armMultipleOperands, armCondition] at h hc
+  lift_unfold armMultiple
+  rw [h]
+  refine ⟨_, rfl, ?_⟩
+  dsimp only
+  rw [hc]
+  refine programJump_all_moves _ ?_
+  intro stmt hs
+  rcases List.mem_cons.1 hs with rfl | hs
+  · exact ⟨_, _, rfl⟩
+  rcases List.mem_append.1 hs with hs | hs
+  · rcases List.mem_map.1 hs with ⟨_, _, rfl⟩
+    exact ⟨_, _, rfl⟩
+  · cases writeback <;> simp at hs
+    subst hs
+    exact ⟨_, _, rfl⟩
+
+/-- `pop {.., pc}` is classified as an indirect jump, with no fall-through. -/
+theorem pop_pc_is_indirect (pc : Nat) (context : Primus.Semantics.Context) (assembly : String)
+    (size flags : Nat) (predicate : LLVM.Operand) (names : List String) (hpc : "PC" ∈ names) :
+    ∃ bil, armMultiple pc context
+        ⟨assembly, size, flags, "tPOP", .imm 14 :: predicate :: names.map .reg⟩ = some bil ∧
+      armControlFlow .normal bil = .indirectJump := by
+  have ⟨bil, h1, h2⟩ := armMultiple_load_pc pc context
+    ⟨assembly, size, flags, "tPOP", .imm 14 :: predicate :: names.map .reg⟩ _ _ _ 14 names
+    (pop_operands 14 predicate names) rfl hpc
+  exact ⟨bil, h1, armControlFlow_of_jump bil h2⟩
+
 /-! ### Writes through partial registers -/
 
 private abbrev assignRegister : Primus.Semantics.Context → String → Nat → Nat → PValue →
@@ -986,19 +1334,27 @@ theorem decodePowerPCWith_lifted (globals : Primus.Semantics.Environment) (base 
   lifted_decoder
 
 theorem decodeMIPSWith_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : Holds (decodeMIPSWith globals base address data) (Lifted (flow) address) := by
+    (data : ByteArray) : Holds (decodeMIPSWith globals base address data) (Lifted (fun flow : Flow => flow) address) := by
   unfold decodeMIPSWith
   lifted_decoder
 
 theorem decodeARM32With_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : Holds (decodeARM32With globals base address data) (Lifted (arm32Flow) address) := by
+    (data : ByteArray) : Holds (decodeARM32With globals base address data) (Lifted (fun flow : Flow => flow) address) := by
   unfold decodeARM32With
-  lifted_decoder
+  refine Holds.bind fun _ => ?_
+  dsimp only
+  split
+  · exact Holds.pure ⟨rfl, _, rfl⟩
+  · exact Holds.bind fun _ => Holds.pure ⟨rfl, _, rfl⟩
 
 theorem decodeThumbWith_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : Holds (decodeThumbWith globals base address data) (Lifted (flow) address) := by
+    (data : ByteArray) : Holds (decodeThumbWith globals base address data) (Lifted (fun flow : Flow => flow) address) := by
   unfold decodeThumbWith
-  lifted_decoder
+  refine Holds.bind fun _ => ?_
+  dsimp only
+  split
+  · exact Holds.pure ⟨rfl, _, rfl⟩
+  · exact Holds.bind fun _ => Holds.pure ⟨rfl, _, rfl⟩
 
 theorem decodeX8632With_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : Holds (decodeX8632With globals base address data) (Lifted (flow) address) := by
@@ -1011,7 +1367,7 @@ theorem decodeRISCV32With_lifted (globals : Primus.Semantics.Environment) (base 
   lifted_decoder
 
 theorem decodeMIPS32With_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
-    (data : ByteArray) : Holds (decodeMIPS32With globals base address data) (Lifted (flow) address) := by
+    (data : ByteArray) : Holds (decodeMIPS32With globals base address data) (Lifted (fun flow : Flow => flow) address) := by
   unfold decodeMIPS32With
   lifted_decoder
 
@@ -1103,7 +1459,9 @@ structure RegisteredAs (name : String) (d : Disassembler) : Prop where
 
 private theorem registeredAs_mk (name : String) (decode : Nat → ByteArray → IO (Except String Insn))
     (inner : Nat → ByteArray → IO Insn) (hd : ∀ a d, decode a d = wrap (inner a d))
-    {α} (classify : α → Flow) (hi : ∀ a d, Holds (inner a d) (Lifted classify a)) : RegisteredAs name ⟨name, decode⟩ where
+    {α} (classify : α → Flow) (hi : ∀ a d, Holds (inner a d) (Lifted classify a))
+    (delay : Insn → Bool) :
+    RegisteredAs name { name := name, decode := decode, hasDelaySlot := delay } where
   name := rfl
   total a d := by
     show NoThrow (decode a d)
@@ -1115,12 +1473,25 @@ private theorem registeredAs_mk (name : String) (decode : Nat → ByteArray → 
     have ⟨s, s', he⟩ := (wrap_returns_ok _ _).1 h
     exact (hi a d s insn s' he).1
 
+/-- MIPS scans cover their delay slots, and no other target has one. -/
+theorem mips_delay_slots (base : Nat) :
+    Holds (MIPS.disassembler base) (fun d => d.hasDelaySlot = mipsHasDelaySlot) ∧
+      Holds (MIPS32.disassembler base) (fun d => d.hasDelaySlot = mipsHasDelaySlot) ∧
+      Holds (X86.disassembler base) (fun d => ∀ insn, d.hasDelaySlot insn = false) := by
+  refine ⟨?_, ?_, ?_⟩
+  · unfold MIPS.disassembler
+    exact Holds.bind fun _ => Holds.pure rfl
+  · unfold MIPS32.disassembler
+    exact Holds.bind fun _ => Holds.pure rfl
+  · unfold X86.disassembler
+    exact Holds.bind fun _ => Holds.pure fun _ => rfl
+
 /-- Registration data of the 11 target modules. -/
 theorem x86_disassembler (base : Nat) :
     Holds (X86.disassembler base) (RegisteredAs "x86-llvm-primus") := by
   unfold X86.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeX86With globals base) (fun _ _ => rfl) _ (decodeX86With_lifted globals base)
+  exact registeredAs_mk _ _ (decodeX86With globals base) (fun _ _ => rfl) _ (decodeX86With_lifted globals base) _
 
 theorem x86_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (X86.decodeAt base address data) fun result =>
@@ -1138,7 +1509,7 @@ theorem aarch64_disassembler (base : Nat) :
     Holds (AArch64.disassembler base) (RegisteredAs "aarch64-llvm-primus") := by
   unfold AArch64.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeAArch64With globals base) (fun _ _ => rfl) _ (decodeAArch64With_lifted globals base)
+  exact registeredAs_mk _ _ (decodeAArch64With globals base) (fun _ _ => rfl) _ (decodeAArch64With_lifted globals base) _
 
 theorem aarch64_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (AArch64.decodeAt base address data) fun result =>
@@ -1156,7 +1527,7 @@ theorem riscv_disassembler (base : Nat) :
     Holds (RISCV.disassembler base) (RegisteredAs "riscv64-llvm-primus") := by
   unfold RISCV.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeRISCVWith globals base) (fun _ _ => rfl) _ (decodeRISCVWith_lifted globals base)
+  exact registeredAs_mk _ _ (decodeRISCVWith globals base) (fun _ _ => rfl) _ (decodeRISCVWith_lifted globals base) _
 
 theorem riscv_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (RISCV.decodeAt base address data) fun result =>
@@ -1174,7 +1545,7 @@ theorem powerpc_disassembler (base : Nat) :
     Holds (PowerPC.disassembler base) (RegisteredAs "powerpc64le-llvm-primus") := by
   unfold PowerPC.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodePowerPCWith globals base) (fun _ _ => rfl) _ (decodePowerPCWith_lifted globals base)
+  exact registeredAs_mk _ _ (decodePowerPCWith globals base) (fun _ _ => rfl) _ (decodePowerPCWith_lifted globals base) _
 
 theorem powerpc_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (PowerPC.decodeAt base address data) fun result =>
@@ -1192,7 +1563,7 @@ theorem mips_disassembler (base : Nat) :
     Holds (MIPS.disassembler base) (RegisteredAs "mips64-llvm-primus") := by
   unfold MIPS.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeMIPSWith globals base) (fun _ _ => rfl) _ (decodeMIPSWith_lifted globals base)
+  exact registeredAs_mk _ _ (decodeMIPSWith globals base) (fun _ _ => rfl) _ (decodeMIPSWith_lifted globals base) _
 
 theorem mips_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (MIPS.decodeAt base address data) fun result =>
@@ -1210,7 +1581,7 @@ theorem arm32_disassembler (base : Nat) :
     Holds (ARM32.disassembler base) (RegisteredAs "armv7-llvm-primus") := by
   unfold ARM32.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeARM32With globals base) (fun _ _ => rfl) _ (decodeARM32With_lifted globals base)
+  exact registeredAs_mk _ _ (decodeARM32With globals base) (fun _ _ => rfl) _ (decodeARM32With_lifted globals base) _
 
 theorem arm32_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (ARM32.decodeAt base address data) fun result =>
@@ -1228,7 +1599,7 @@ theorem thumb_disassembler (base : Nat) :
     Holds (Thumb.disassembler base) (RegisteredAs "thumbv7-llvm-primus") := by
   unfold Thumb.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeThumbWith globals base) (fun _ _ => rfl) _ (decodeThumbWith_lifted globals base)
+  exact registeredAs_mk _ _ (decodeThumbWith globals base) (fun _ _ => rfl) _ (decodeThumbWith_lifted globals base) _
 
 theorem thumb_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (Thumb.decodeAt base address data) fun result =>
@@ -1246,7 +1617,7 @@ theorem x8632_disassembler (base : Nat) :
     Holds (X8632.disassembler base) (RegisteredAs "i386-llvm-primus") := by
   unfold X8632.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeX8632With globals base) (fun _ _ => rfl) _ (decodeX8632With_lifted globals base)
+  exact registeredAs_mk _ _ (decodeX8632With globals base) (fun _ _ => rfl) _ (decodeX8632With_lifted globals base) _
 
 theorem x8632_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (X8632.decodeAt base address data) fun result =>
@@ -1264,7 +1635,7 @@ theorem riscv32_disassembler (base : Nat) :
     Holds (RISCV32.disassembler base) (RegisteredAs "riscv32-llvm-primus") := by
   unfold RISCV32.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeRISCV32With globals base) (fun _ _ => rfl) _ (decodeRISCV32With_lifted globals base)
+  exact registeredAs_mk _ _ (decodeRISCV32With globals base) (fun _ _ => rfl) _ (decodeRISCV32With_lifted globals base) _
 
 theorem riscv32_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (RISCV32.decodeAt base address data) fun result =>
@@ -1282,7 +1653,7 @@ theorem mips32_disassembler (base : Nat) :
     Holds (MIPS32.disassembler base) (RegisteredAs "mips-llvm-primus") := by
   unfold MIPS32.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodeMIPS32With globals base) (fun _ _ => rfl) _ (decodeMIPS32With_lifted globals base)
+  exact registeredAs_mk _ _ (decodeMIPS32With globals base) (fun _ _ => rfl) _ (decodeMIPS32With_lifted globals base) _
 
 theorem mips32_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (MIPS32.decodeAt base address data) fun result =>
@@ -1300,7 +1671,7 @@ theorem powerpc32_disassembler (base : Nat) :
     Holds (PowerPC32.disassembler base) (RegisteredAs "powerpc-llvm-primus") := by
   unfold PowerPC32.disassembler
   refine Holds.bind fun globals => Holds.pure ?_
-  exact registeredAs_mk _ _ (decodePowerPC32With globals base) (fun _ _ => rfl) _ (decodePowerPC32With_lifted globals base)
+  exact registeredAs_mk _ _ (decodePowerPC32With globals base) (fun _ _ => rfl) _ (decodePowerPC32With_lifted globals base) _
 
 theorem powerpc32_decodeAt (base address : Nat) (data : ByteArray) :
     Holds (PowerPC32.decodeAt base address data) fun result =>

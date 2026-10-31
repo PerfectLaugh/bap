@@ -1647,6 +1647,26 @@ theorem dceDefs_removed_unused (d : Def) (rest : List Def) (live : List Var)
       decide_eq_false_iff_not] at hc
     exact ⟨hc.2, hc.1⟩
 
+/-- The last definition of a variable live at the end of the block is kept, with everything after
+it scanned as if the prefix were absent; the kept suffix is a sublist of `post`, so it stays last. -/
+theorem dceDefs_keeps_last_def (pre post : List Def) (d : Def) (live : List Var) (hlive : d.var ∈ live)
+    (hlast : ∀ c ∈ post, c.var ≠ d.var) :
+    ∃ pre', pre'.Sublist pre ∧ (dceDefs (pre ++ d :: post) live).1 = pre' ++ d :: (dceDefs post live).1 := by
+  induction pre with
+  | nil =>
+    have hmem : d.var ∈ (dceDefs post live).2 :=
+      (mem_dceDefs_live post live d.var).2
+        (Or.inr ⟨hlive, fun c hc => hlast c ((dceDefs_sublist post live).subset hc)⟩)
+    refine ⟨[], List.Sublist.refl _, ?_⟩
+    rw [List.nil_append, dceDefs_cons]
+    simp [hmem]
+  | cons p ps ih =>
+    obtain ⟨pre', hsub, heq⟩ := ih
+    rw [List.cons_append, dceDefs_cons]
+    split
+    · exact ⟨p :: pre', hsub.cons_cons _, by simp only [heq, List.cons_append]⟩
+    · exact ⟨pre', hsub.cons _, heq⟩
+
 /-- Agreement of two environments on a set of variables. -/
 def Agree (vs : List Var) (e₁ e₂ : Env) : Prop := ∀ x ∈ vs, Bil.lookup e₁ x = Bil.lookup e₂ x
 
@@ -1703,19 +1723,19 @@ theorem dceDefs_simulation (defs : List Def) (live : List Var) {env env' : Env}
           cases hc.2
       simp only [hns, Bool.false_eq_true, ite_false, ht]
 
-private abbrev dceLive (cfg : Cfg) (blk : Blk) : List Var :=
-  (Assoc.get blk.tid cfg.liveness.2).getD [] ++ blk.jmps.flatMap Jmp.freeVars
+private abbrev dceLive (ps : List Var) (cfg : Cfg) (blk : Blk) : List Var :=
+  (Assoc.get blk.tid cfg.liveness.2).getD [] ++ blk.jmps.flatMap Jmp.freeVars ++ ps
 
-private def dceBlk (cfg : Cfg) (blk : Blk) : Blk :=
+private def dceBlk (ps : List Var) (cfg : Cfg) (blk : Blk) : Blk :=
   { blk with
-    defs := (dceDefs blk.defs (dceLive cfg blk)).1
-    phis := blk.phis.filter fun phi => (dceDefs blk.defs (dceLive cfg blk)).2.contains phi.var }
+    defs := (dceDefs blk.defs (dceLive ps cfg blk)).1
+    phis := blk.phis.filter fun phi => (dceDefs blk.defs (dceLive ps cfg blk)).2.contains phi.var }
 
-private theorem dcePass_eq (cfg : Cfg) : dcePass cfg = { cfg with blocks := cfg.blocks.map (dceBlk cfg) } := rfl
+private theorem dcePass_eq (ps : List Var) (cfg : Cfg) : dcePass ps cfg = { cfg with blocks := cfg.blocks.map (dceBlk ps cfg) } := rfl
 
 /-- A phi is removed only if its variable is not live on block entry. -/
-theorem dcePass_phi_removed_unused (cfg : Cfg) {blk : Blk} {phi : Phi} (hphi : phi ∈ blk.phis)
-    (hremoved : phi ∉ (dceBlk cfg blk).phis) : phi.var ∉ (dceDefs blk.defs (dceLive cfg blk)).2 := by
+theorem dcePass_phi_removed_unused (ps : List Var) (cfg : Cfg) {blk : Blk} {phi : Phi} (hphi : phi ∈ blk.phis)
+    (hremoved : phi ∉ (dceBlk ps cfg blk).phis) : phi.var ∉ (dceDefs blk.defs (dceLive ps cfg blk)).2 := by
   intro hlive
   apply hremoved
   exact List.mem_filter.2 ⟨hphi, by simpa using hlive⟩
@@ -1723,11 +1743,11 @@ theorem dcePass_phi_removed_unused (cfg : Cfg) {blk : Blk} {phi : Phi} (hphi : p
 private abbrev weight (blocks : List Blk) : Nat :=
   (blocks.map fun blk => blk.defs.length + blk.phis.length).sum
 
-private theorem dceAux_succ (cfg : Cfg) (fuel : Nat) :
-    dceAux cfg (fuel + 1) =
+private theorem dceAux_succ (ps : List Var) (cfg : Cfg) (fuel : Nat) :
+    dceAux ps cfg (fuel + 1) =
       if (cfg.blocks.map fun blk => (blk.defs.length, blk.phis.length)) =
-          ((dcePass cfg).blocks.map fun blk => (blk.defs.length, blk.phis.length))
-      then cfg else dceAux (dcePass cfg) fuel := rfl
+          ((dcePass ps cfg).blocks.map fun blk => (blk.defs.length, blk.phis.length))
+      then cfg else dceAux ps (dcePass ps cfg) fuel := rfl
 
 private theorem weight_cons (b : Blk) (bs : List Blk) :
     weight (b :: bs) = b.defs.length + b.phis.length + weight bs := by
@@ -1741,54 +1761,54 @@ private theorem foldl_count (blocks : List Blk) (acc : Nat) :
     simp only [List.foldl_cons, ih, weight_cons]
     omega
 
-private theorem eliminateDeadCode_eq (cfg : Cfg) : eliminateDeadCode cfg = dceAux cfg (weight cfg.blocks + 1) := by
-  show dceAux cfg (cfg.blocks.foldl _ 0 + 1) = _
+private theorem eliminateDeadCode_eq (ps : List Var) (cfg : Cfg) : eliminateDeadCode cfg ps = dceAux ps cfg (weight cfg.blocks + 1) := by
+  show dceAux ps cfg (cfg.blocks.foldl _ 0 + 1) = _
   rw [foldl_count, Nat.zero_add]
 
-private theorem dceBlk_defs_le (cfg : Cfg) (b : Blk) : (dceBlk cfg b).defs.length ≤ b.defs.length :=
+private theorem dceBlk_defs_le (ps : List Var) (cfg : Cfg) (b : Blk) : (dceBlk ps cfg b).defs.length ≤ b.defs.length :=
   (dceDefs_sublist ..).length_le
 
-private theorem dceBlk_phis_le (cfg : Cfg) (b : Blk) : (dceBlk cfg b).phis.length ≤ b.phis.length :=
+private theorem dceBlk_phis_le (ps : List Var) (cfg : Cfg) (b : Blk) : (dceBlk ps cfg b).phis.length ≤ b.phis.length :=
   List.length_filter_le ..
 
-private theorem weight_dce_le (cfg : Cfg) (l : List Blk) : weight (l.map (dceBlk cfg)) ≤ weight l := by
+private theorem weight_dce_le (ps : List Var) (cfg : Cfg) (l : List Blk) : weight (l.map (dceBlk ps cfg)) ≤ weight l := by
   induction l with
   | nil => exact Nat.le_refl _
   | cons b bs ih =>
     rw [List.map_cons, weight_cons, weight_cons]
-    have := dceBlk_defs_le cfg b
-    have := dceBlk_phis_le cfg b
+    have := dceBlk_defs_le ps cfg b
+    have := dceBlk_phis_le ps cfg b
     omega
 
-private theorem weight_dce_lt (cfg : Cfg) (l : List Blk)
+private theorem weight_dce_lt (ps : List Var) (cfg : Cfg) (l : List Blk)
     (h : (l.map fun blk => (blk.defs.length, blk.phis.length)) ≠
-      ((l.map (dceBlk cfg)).map fun blk => (blk.defs.length, blk.phis.length))) :
-    weight (l.map (dceBlk cfg)) < weight l := by
+      ((l.map (dceBlk ps cfg)).map fun blk => (blk.defs.length, blk.phis.length))) :
+    weight (l.map (dceBlk ps cfg)) < weight l := by
   induction l with
   | nil => simp at h
   | cons b bs ih =>
     rw [List.map_cons, weight_cons, weight_cons]
-    have h1 := dceBlk_defs_le cfg b
-    have h2 := dceBlk_phis_le cfg b
-    have h3 := weight_dce_le cfg bs
-    by_cases hb : (b.defs.length, b.phis.length) = ((dceBlk cfg b).defs.length, (dceBlk cfg b).phis.length)
+    have h1 := dceBlk_defs_le ps cfg b
+    have h2 := dceBlk_phis_le ps cfg b
+    have h3 := weight_dce_le ps cfg bs
+    by_cases hb : (b.defs.length, b.phis.length) = ((dceBlk ps cfg b).defs.length, (dceBlk ps cfg b).phis.length)
     · have htail : (bs.map fun blk => (blk.defs.length, blk.phis.length)) ≠
-          ((bs.map (dceBlk cfg)).map fun blk => (blk.defs.length, blk.phis.length)) := by
+          ((bs.map (dceBlk ps cfg)).map fun blk => (blk.defs.length, blk.phis.length)) := by
         intro heq
         apply h
         simp only [List.map_cons, heq, hb]
       have := ih htail
       omega
-    · have : (dceBlk cfg b).defs.length < b.defs.length ∨ (dceBlk cfg b).phis.length < b.phis.length := by
+    · have : (dceBlk ps cfg b).defs.length < b.defs.length ∨ (dceBlk ps cfg b).phis.length < b.phis.length := by
         refine Classical.byContradiction fun hc => hb ?_
         simp only [Prod.mk.injEq]
         omega
       omega
 
-private theorem dce_self_of_shape (cfg : Cfg) (l : List Blk)
+private theorem dce_self_of_shape (ps : List Var) (cfg : Cfg) (l : List Blk)
     (h : (l.map fun blk => (blk.defs.length, blk.phis.length)) =
-      ((l.map (dceBlk cfg)).map fun blk => (blk.defs.length, blk.phis.length))) :
-    l.map (dceBlk cfg) = l := by
+      ((l.map (dceBlk ps cfg)).map fun blk => (blk.defs.length, blk.phis.length))) :
+    l.map (dceBlk ps cfg) = l := by
   induction l with
   | nil => rfl
   | cons b bs ih =>
@@ -1796,14 +1816,14 @@ private theorem dce_self_of_shape (cfg : Cfg) (l : List Blk)
     obtain ⟨⟨hd, hp⟩, ht⟩ := h
     rw [List.map_cons, ih ht]
     congr 1
-    have hd' : (dceDefs b.defs (dceLive cfg b)).1 = b.defs :=
+    have hd' : (dceDefs b.defs (dceLive ps cfg b)).1 = b.defs :=
       (dceDefs_sublist ..).eq_of_length hd.symm
     have hp' := List.filter_eq_self.2 (List.length_filter_eq_length_iff.1 hp.symm)
     simp only [dceBlk, hd', hp']
 
 /-- With fuel above the number of definitions, dead-code elimination reaches a pass fixpoint. -/
-private theorem dceAux_fixpoint (cfg : Cfg) (fuel : Nat) (hfuel : weight cfg.blocks < fuel) :
-    dcePass (dceAux cfg fuel) = dceAux cfg fuel := by
+private theorem dceAux_fixpoint (ps : List Var) (cfg : Cfg) (fuel : Nat) (hfuel : weight cfg.blocks < fuel) :
+    dcePass ps (dceAux ps cfg fuel) = dceAux ps cfg fuel := by
   induction fuel generalizing cfg with
   | zero => omega
   | succ fuel ih =>
@@ -1811,52 +1831,61 @@ private theorem dceAux_fixpoint (cfg : Cfg) (fuel : Nat) (hfuel : weight cfg.blo
     split
     · rename_i heq
       rw [dcePass_eq]
-      have := dce_self_of_shape cfg cfg.blocks heq
+      have := dce_self_of_shape ps cfg cfg.blocks heq
       simp only [this]
     · rename_i hne
       apply ih
-      have := weight_dce_lt cfg cfg.blocks hne
-      show weight (cfg.blocks.map (dceBlk cfg)) < fuel
+      have := weight_dce_lt ps cfg cfg.blocks hne
+      show weight (cfg.blocks.map (dceBlk ps cfg)) < fuel
       omega
 
 /-- The output of dead-code elimination is stable under one more pass. -/
-theorem dcePass_eliminateDeadCode (cfg : Cfg) :
-    dcePass (eliminateDeadCode cfg) = eliminateDeadCode cfg := by
+theorem dcePass_eliminateDeadCode (ps : List Var) (cfg : Cfg) :
+    dcePass ps (eliminateDeadCode cfg ps) = eliminateDeadCode cfg ps := by
   rw [eliminateDeadCode_eq]
-  exact dceAux_fixpoint cfg _ (Nat.lt_succ_self _)
+  exact dceAux_fixpoint ps cfg _ (Nat.lt_succ_self _)
 
 /-- Dead-code elimination is idempotent. -/
-theorem eliminateDeadCode_idempotent (cfg : Cfg) :
-    eliminateDeadCode (eliminateDeadCode cfg) = eliminateDeadCode cfg := by
-  conv => lhs; rw [eliminateDeadCode_eq (eliminateDeadCode cfg)]
+theorem eliminateDeadCode_idempotent (ps : List Var) (cfg : Cfg) :
+    eliminateDeadCode (eliminateDeadCode cfg ps) ps = eliminateDeadCode cfg ps := by
+  conv => lhs; rw [eliminateDeadCode_eq ps (eliminateDeadCode cfg ps)]
   rw [dceAux_succ, dcePass_eliminateDeadCode]
   simp
 
 /-- Variables read by the jumps of a block. -/
 abbrev jumpVars (blk : Blk) : List Var := blk.jmps.flatMap Jmp.freeVars
 
-/-- One-to-one block relation: same identity and jumps, statements only removed, effects kept, and
-every successful run of the original is matched by the smaller block on everything the jumps read. -/
-private def DceRel (x y : Blk) : Prop :=
+/-- One-to-one block relation: same identity and jumps, statements only removed, effects kept, the
+last definition of each protected variable kept and still last, and every successful run of the
+original is matched by the smaller block on everything the jumps read and on the protected variables. -/
+private def DceRel (ps : List Var) (x y : Blk) : Prop :=
   x.tid = y.tid ∧ x.jmps = y.jmps ∧ x.defs.Sublist y.defs ∧ x.phis.Sublist y.phis ∧
     (∀ d ∈ y.defs, hasSideEffect d.rhs = true → d ∈ x.defs) ∧
+    (∀ pre d post, y.defs = pre ++ d :: post → d.var ∈ ps → (∀ c ∈ post, c.var ≠ d.var) →
+      ∃ pre' post', x.defs = pre' ++ d :: post' ∧ pre'.Sublist pre ∧ post'.Sublist post) ∧
     ∀ env r, execDefs env y.defs = .ok r → ∃ r', execDefs env x.defs = .ok r' ∧
-      Agree (jumpVars y) r.1 r'.1 ∧ r'.2 = r.2
+      Agree (jumpVars y ++ ps) r.1 r'.1 ∧ r'.2 = r.2
 
-private def Shrinks : List Blk → List Blk → Prop
+private def Shrinks (ps : List Var) : List Blk → List Blk → Prop
   | [], [] => True
-  | x :: xs, y :: ys => DceRel x y ∧ Shrinks xs ys
+  | x :: xs, y :: ys => DceRel ps x y ∧ Shrinks ps xs ys
   | _, _ => False
 
-private theorem Shrinks.refl : (l : List Blk) → Shrinks l l
+private theorem Shrinks.refl (ps : List Var) : (l : List Blk) → Shrinks ps l l
   | [] => trivial
   | b :: bs => ⟨⟨rfl, rfl, List.Sublist.refl _, List.Sublist.refl _, fun _ h _ => h,
-      fun env r h => ⟨r, h, fun _ _ => rfl, rfl⟩⟩, Shrinks.refl bs⟩
+      fun pre d post h _ _ => ⟨pre, post, h, List.Sublist.refl _, List.Sublist.refl _⟩,
+      fun env r h => ⟨r, h, fun _ _ => rfl, rfl⟩⟩, Shrinks.refl ps bs⟩
 
-private theorem DceRel.trans {a b c : Blk} (h₁ : DceRel a b) (h₂ : DceRel b c) : DceRel a c := by
-  obtain ⟨t₁, j₁, d₁, p₁, e₁, s₁⟩ := h₁
-  obtain ⟨t₂, j₂, d₂, p₂, e₂, s₂⟩ := h₂
-  refine ⟨t₁.trans t₂, j₁.trans j₂, d₁.trans d₂, p₁.trans p₂, fun d hd hs => e₁ d (e₂ d hd hs) hs, ?_⟩
+private theorem DceRel.trans {ps : List Var} {a b c : Blk} (h₁ : DceRel ps a b) (h₂ : DceRel ps b c) :
+    DceRel ps a c := by
+  obtain ⟨t₁, j₁, d₁, p₁, e₁, k₁, s₁⟩ := h₁
+  obtain ⟨t₂, j₂, d₂, p₂, e₂, k₂, s₂⟩ := h₂
+  refine ⟨t₁.trans t₂, j₁.trans j₂, d₁.trans d₂, p₁.trans p₂, fun d hd hs => e₁ d (e₂ d hd hs) hs, ?_, ?_⟩
+  · intro pre d post hy hd hl
+    obtain ⟨pre', post', hb, hp, hq⟩ := k₂ pre d post hy hd hl
+    obtain ⟨pre'', post'', ha, hp', hq'⟩ := k₁ pre' d post' hb hd fun c hc => hl c (hq.subset hc)
+    exact ⟨pre'', post'', ha, hp'.trans hp, hq'.trans hq⟩
   intro env r hr
   obtain ⟨r', hr', ha, ht⟩ := s₂ env r hr
   obtain ⟨r'', hr'', ha', ht'⟩ := s₁ env r' hr'
@@ -1864,59 +1893,74 @@ private theorem DceRel.trans {a b c : Blk} (h₁ : DceRel a b) (h₂ : DceRel b 
   rw [ha x hx]
   exact ha' x (by simp only [jumpVars, j₂] at hx ⊢; exact hx)
 
-private theorem Shrinks.trans : {a b c : List Blk} → Shrinks a b → Shrinks b c → Shrinks a c
+private theorem Shrinks.trans {ps : List Var} : {a b c : List Blk} → Shrinks ps a b → Shrinks ps b c → Shrinks ps a c
   | [], [], [], _, _ => trivial
   | _ :: _, _ :: _, _ :: _, ⟨h₁, t₁⟩, ⟨h₂, t₂⟩ => ⟨h₁.trans h₂, Shrinks.trans t₁ t₂⟩
 
-private theorem Shrinks.tids : {a b : List Blk} → Shrinks a b → a.map Blk.tid = b.map Blk.tid
+private theorem Shrinks.tids {ps : List Var} : {a b : List Blk} → Shrinks ps a b → a.map Blk.tid = b.map Blk.tid
   | [], [], _ => rfl
   | _ :: _, _ :: _, ⟨h, t⟩ => by simp [h.1, Shrinks.tids t]
 
-private theorem dceBlk_rel (cfg : Cfg) (b : Blk) : DceRel (dceBlk cfg b) b := by
-  refine ⟨rfl, rfl, dceDefs_sublist .., List.filter_sublist, ?_, ?_⟩
+/-- Agreement on the live seed of a block covers what its jumps read and the protected variables. -/
+private theorem dceLive_agree {ps : List Var} {cfg : Cfg} {b : Blk} {e₁ e₂ : Env}
+    (h : Agree (dceLive ps cfg b) e₁ e₂) : Agree (jumpVars b ++ ps) e₁ e₂ := by
+  intro x hx
+  apply h x
+  rcases List.mem_append.1 hx with hj | hp
+  · exact List.mem_append_left _ (List.mem_append_right _ hj)
+  · exact List.mem_append_right _ hp
+
+private theorem dceBlk_rel (ps : List Var) (cfg : Cfg) (b : Blk) : DceRel ps (dceBlk ps cfg b) b := by
+  refine ⟨rfl, rfl, dceDefs_sublist .., List.filter_sublist, ?_, ?_, ?_⟩
   · intro d hd hs
     exact dceDefs_keeps_effects _ _ hd hs
+  · intro pre d post hy hd hl
+    obtain ⟨pre', hs, he⟩ := dceDefs_keeps_last_def pre post d (dceLive ps cfg b) (List.mem_append_right _ hd) hl
+    refine ⟨pre', _, ?_, hs, dceDefs_sublist post (dceLive ps cfg b)⟩
+    show (dceDefs b.defs (dceLive ps cfg b)).1 = _
+    rw [hy]
+    exact he
   · intro env r hr
-    obtain ⟨r', hr', ha, ht⟩ := dceDefs_simulation b.defs (dceLive cfg b)
+    obtain ⟨r', hr', ha, ht⟩ := dceDefs_simulation b.defs (dceLive ps cfg b)
       (env := env) (env' := env) (fun _ _ => rfl) hr
-    exact ⟨r', hr', fun x hx => ha x (List.mem_append_right _ hx), ht⟩
+    exact ⟨r', hr', dceLive_agree ha, ht⟩
 
-private theorem shrinks_dce (cfg : Cfg) (l : List Blk) : Shrinks (l.map (dceBlk cfg)) l := by
+private theorem shrinks_dce (ps : List Var) (cfg : Cfg) (l : List Blk) : Shrinks ps (l.map (dceBlk ps cfg)) l := by
   induction l with
   | nil => trivial
-  | cons b bs ih => exact ⟨dceBlk_rel cfg b, ih⟩
+  | cons b bs ih => exact ⟨dceBlk_rel ps cfg b, ih⟩
 
-private structure DceFrame (a b : Cfg) : Prop where
+private structure DceFrame (ps : List Var) (a b : Cfg) : Prop where
   start : b.start = a.start
   graph : b.graph = a.graph
-  shrinks : Shrinks b.blocks a.blocks
+  shrinks : Shrinks ps b.blocks a.blocks
 
-private theorem dceAux_frame (cfg : Cfg) (fuel : Nat) : DceFrame cfg (dceAux cfg fuel) := by
+private theorem dceAux_frame (ps : List Var) (cfg : Cfg) (fuel : Nat) : DceFrame ps cfg (dceAux ps cfg fuel) := by
   induction fuel generalizing cfg with
-  | zero => exact ⟨rfl, rfl, Shrinks.refl _⟩
+  | zero => exact ⟨rfl, rfl, Shrinks.refl ps _⟩
   | succ fuel ih =>
     rw [dceAux_succ]
     split
-    · exact ⟨rfl, rfl, Shrinks.refl _⟩
-    · have h := ih (dcePass cfg)
-      exact ⟨h.start, h.graph, Shrinks.trans h.shrinks (shrinks_dce cfg cfg.blocks)⟩
+    · exact ⟨rfl, rfl, Shrinks.refl ps _⟩
+    · have h := ih (dcePass ps cfg)
+      exact ⟨h.start, h.graph, Shrinks.trans h.shrinks (shrinks_dce ps cfg cfg.blocks)⟩
 
-private theorem eliminateDeadCode_frame (cfg : Cfg) : DceFrame cfg (eliminateDeadCode cfg) := by
+private theorem eliminateDeadCode_frame (ps : List Var) (cfg : Cfg) : DceFrame ps cfg (eliminateDeadCode cfg ps) := by
   rw [eliminateDeadCode_eq]
-  exact dceAux_frame cfg _
+  exact dceAux_frame ps cfg _
 
-@[simp] theorem eliminateDeadCode_start (cfg : Cfg) : (eliminateDeadCode cfg).start = cfg.start :=
-  (eliminateDeadCode_frame cfg).start
+@[simp] theorem eliminateDeadCode_start (ps : List Var) (cfg : Cfg) : (eliminateDeadCode cfg ps).start = cfg.start :=
+  (eliminateDeadCode_frame ps cfg).start
 
-@[simp] theorem eliminateDeadCode_graph (cfg : Cfg) : (eliminateDeadCode cfg).graph = cfg.graph :=
-  (eliminateDeadCode_frame cfg).graph
+@[simp] theorem eliminateDeadCode_graph (ps : List Var) (cfg : Cfg) : (eliminateDeadCode cfg ps).graph = cfg.graph :=
+  (eliminateDeadCode_frame ps cfg).graph
 
-theorem eliminateDeadCode_tids (cfg : Cfg) :
-    (eliminateDeadCode cfg).blocks.map Blk.tid = cfg.blocks.map Blk.tid :=
-  (eliminateDeadCode_frame cfg).shrinks.tids
+theorem eliminateDeadCode_tids (ps : List Var) (cfg : Cfg) :
+    (eliminateDeadCode cfg ps).blocks.map Blk.tid = cfg.blocks.map Blk.tid :=
+  (eliminateDeadCode_frame ps cfg).shrinks.tids
 
-private theorem Shrinks.pointwise {a b : List Blk} (h : Shrinks a b) {y : Blk} (hy : y ∈ b) :
-    ∃ x ∈ a, DceRel x y := by
+private theorem Shrinks.pointwise {ps : List Var} {a b : List Blk} (h : Shrinks ps a b) {y : Blk} (hy : y ∈ b) :
+    ∃ x ∈ a, DceRel ps x y := by
   induction b generalizing a with
   | nil => simp at hy
   | cons z zs ih =>
@@ -1928,15 +1972,27 @@ private theorem Shrinks.pointwise {a b : List Blk} (h : Shrinks a b) {y : Blk} (
         exact ⟨w, List.mem_cons_of_mem _ hw, hr⟩
 
 /-- Every input block has an output block with the same tid and jumps, whose statements form a
-sublist of the input, which holds every side-effecting definition, and which simulates the input:
-any successful run succeeds on the output, agrees on what the jumps read, and stores the same. -/
-theorem eliminateDeadCode_block_spec (cfg : Cfg) {y : Blk} (hy : y ∈ cfg.blocks) :
-    ∃ x ∈ (eliminateDeadCode cfg).blocks, x.tid = y.tid ∧ x.jmps = y.jmps ∧
+sublist of the input, which holds every side-effecting definition and, still last, the last definition
+of each protected variable, and which simulates the input: any successful run succeeds on the output,
+agrees on what the jumps read and on the protected variables, and stores the same. -/
+theorem eliminateDeadCode_block_spec (ps : List Var) (cfg : Cfg) {y : Blk} (hy : y ∈ cfg.blocks) :
+    ∃ x ∈ (eliminateDeadCode cfg ps).blocks, x.tid = y.tid ∧ x.jmps = y.jmps ∧
       x.defs.Sublist y.defs ∧ x.phis.Sublist y.phis ∧
       (∀ d ∈ y.defs, hasSideEffect d.rhs = true → d ∈ x.defs) ∧
+      (∀ pre d post, y.defs = pre ++ d :: post → d.var ∈ ps → (∀ c ∈ post, c.var ≠ d.var) →
+        ∃ pre' post', x.defs = pre' ++ d :: post' ∧ pre'.Sublist pre ∧ post'.Sublist post) ∧
       ∀ env r, execDefs env y.defs = .ok r → ∃ r', execDefs env x.defs = .ok r' ∧
-        Agree (jumpVars y) r.1 r'.1 ∧ r'.2 = r.2 :=
-  (eliminateDeadCode_frame cfg).shrinks.pointwise hy
+        Agree (jumpVars y ++ ps) r.1 r'.1 ∧ r'.2 = r.2 :=
+  (eliminateDeadCode_frame ps cfg).shrinks.pointwise hy
+
+/-- The last definition of a protected variable in any block survives the whole pipeline, still last. -/
+theorem eliminateDeadCode_keeps_last_protected (ps : List Var) (cfg : Cfg) {y : Blk} (hy : y ∈ cfg.blocks)
+    {pre post : List Def} {d : Def} (hdefs : y.defs = pre ++ d :: post) (hd : d.var ∈ ps)
+    (hlast : ∀ c ∈ post, c.var ≠ d.var) :
+    ∃ x ∈ (eliminateDeadCode cfg ps).blocks, x.tid = y.tid ∧
+      ∃ pre' post', x.defs = pre' ++ d :: post' ∧ pre'.Sublist pre ∧ post'.Sublist post := by
+  obtain ⟨x, hx, ht, _, _, _, _, hk, _⟩ := eliminateDeadCode_block_spec ps cfg hy
+  exact ⟨x, hx, ht, hk pre d post hdefs hd hlast⟩
 
 /-! ### Constant propagation -/
 
@@ -2314,27 +2370,27 @@ theorem propagateBlock_shape (blk : Blk) (env : ConstEnv) :
 
 /-! ### The whole optimizer -/
 
-@[simp] theorem optimize_tid (sub : Sub) : (optimize sub).tid = sub.tid := rfl
-@[simp] theorem optimize_name (sub : Sub) : (optimize sub).name = sub.name := rfl
-@[simp] theorem optimize_args (sub : Sub) : (optimize sub).args = sub.args := rfl
+@[simp] theorem optimize_tid (sub : Sub) (ps : List Var) : (optimize sub ps).tid = sub.tid := rfl
+@[simp] theorem optimize_name (sub : Sub) (ps : List Var) : (optimize sub ps).name = sub.name := rfl
+@[simp] theorem optimize_args (sub : Sub) (ps : List Var) : (optimize sub ps).args = sub.args := rfl
 
-private theorem optimize_blks (sub : Sub) :
-    (optimize sub).blks = (eliminateDeadCode (propagateConstants (Cfg.fromSub sub))).blocks := rfl
+private theorem optimize_blks (sub : Sub) (ps : List Var) :
+    (optimize sub ps).blks = (eliminateDeadCode (propagateConstants (Cfg.fromSub sub)) ps).blocks := rfl
 
 /-- `optimize` keeps exactly the reachable blocks, in order. -/
-theorem optimize_tids (sub : Sub) :
-    (optimize sub).blks.map Blk.tid = (Cfg.fromSub sub).prune.blocks.map Blk.tid := by
+theorem optimize_tids (sub : Sub) (ps : List Var) :
+    (optimize sub ps).blks.map Blk.tid = (Cfg.fromSub sub).prune.blocks.map Blk.tid := by
   rw [optimize_blks, eliminateDeadCode_tids, propagateConstants_tids]
 
-theorem optimize_blks_reachable {sub : Sub} {blk : Blk} (h : blk ∈ (optimize sub).blks) :
+theorem optimize_blks_reachable {sub : Sub} {ps : List Var} {blk : Blk} (h : blk ∈ (optimize sub ps).blks) :
     blk.tid ∈ (Cfg.fromSub sub).reachable := by
-  have hm : blk.tid ∈ (optimize sub).blks.map Blk.tid := List.mem_map.2 ⟨blk, h, rfl⟩
+  have hm : blk.tid ∈ (optimize sub ps).blks.map Blk.tid := List.mem_map.2 ⟨blk, h, rfl⟩
   rw [optimize_tids] at hm
   obtain ⟨b, hb, heq⟩ := List.mem_map.1 hm
   rw [← heq]
   exact prune_blocks_reachable hb
 
-private theorem Shrinks.pairs : {a b : List Blk} → Shrinks a b →
+private theorem Shrinks.pairs {ps : List Var} : {a b : List Blk} → Shrinks ps a b →
     a.map (fun b => (b.tid, b.successors)) = b.map (fun b => (b.tid, b.successors))
   | [], [], _ => rfl
   | x :: xs, y :: ys, ⟨h, t⟩ => by
@@ -2342,11 +2398,11 @@ private theorem Shrinks.pairs : {a b : List Blk} → Shrinks a b →
     simp [h.1, hs, Shrinks.pairs t]
 
 /-- `optimize` leaves the control flow of reachable blocks unchanged. -/
-theorem optimize_successors (sub : Sub) :
-    (optimize sub).blks.map (fun b => (b.tid, b.successors)) =
+theorem optimize_successors (sub : Sub) (ps : List Var) :
+    (optimize sub ps).blks.map (fun b => (b.tid, b.successors)) =
       (Cfg.fromSub sub).prune.blocks.map fun b => (b.tid, b.successors) := by
   rw [optimize_blks]
-  exact ((eliminateDeadCode_frame _).shrinks.pairs).trans (propagateConstants_successors _)
+  exact ((eliminateDeadCode_frame ps _).shrinks.pairs).trans (propagateConstants_successors _)
 
 private theorem prune_single (tid : Tid) (name : String) (args : List Arg) (blk : Blk) :
     (Cfg.fromSub ⟨tid, name, args, [blk]⟩).prune.blocks = [blk] ∧
@@ -2363,12 +2419,12 @@ environment. Whenever the original definitions evaluate, the optimized ones do t
 original stores is stored in the same order; and each original jump expression that evaluates has
 a rewritten counterpart in the optimized block with the same value. The optimized block may succeed
 where the original fails, since a removed definition no longer evaluates. Variables written by the
-block and not read by its jumps are not preserved, since `optimize` has no live-out set for the
-subroutine's exit (see `optimization_main.ml` for the upstream protected-variable policy). -/
-theorem optimize_straight_line (tid : Tid) (name : String) (args : List Arg) (blk : Blk) {env : Env}
+block and not read by its jumps are preserved only if they are in `ps`: at the end of the block every
+protected variable has the same value in both runs. The caller lists the subroutine's outputs there. -/
+theorem optimize_straight_line (tid : Tid) (name : String) (args : List Arg) (blk : Blk) (ps : List Var) {env : Env}
     {r : Env × List (Var × Value)} (h : execDefs env blk.defs = .ok r) :
-    ∃ opt, (optimize ⟨tid, name, args, [blk]⟩).blks = [opt] ∧ opt.tid = blk.tid ∧
-      ∃ r', execDefs env opt.defs = .ok r' ∧ r.2.Sublist r'.2 ∧
+    ∃ opt, (optimize ⟨tid, name, args, [blk]⟩ ps).blks = [opt] ∧ opt.tid = blk.tid ∧
+      ∃ r', execDefs env opt.defs = .ok r' ∧ r.2.Sublist r'.2 ∧ Agree ps r.1 r'.1 ∧
         ∃ g, opt.jmps = blk.jmps.map (Jmp.mapExp g) ∧
           ∀ j ∈ blk.jmps, ∀ e ∈ jmpExps j, ∀ v, evalExp r.1 e = .ok v → evalExp r'.1 (g e) = .ok v := by
   let sub : Sub := ⟨tid, name, args, [blk]⟩
@@ -2389,22 +2445,25 @@ theorem optimize_straight_line (tid : Tid) (name : String) (args : List Arg) (bl
   have hblocks : (propagateConstants (Cfg.fromSub sub)).blocks = [mid] := by
     rw [propagateConstants_eq, hprune]
     rfl
-  obtain ⟨x, hx, htid, hj, _, _, _, hsem⟩ :=
-    eliminateDeadCode_block_spec (propagateConstants (Cfg.fromSub sub)) (y := mid) (by rw [hblocks]; simp)
-  have hlen : (eliminateDeadCode (propagateConstants (Cfg.fromSub sub))).blocks.map Blk.tid = [mid.tid] := by
+  obtain ⟨x, hx, htid, hj, _, _, _, _, hsem⟩ :=
+    eliminateDeadCode_block_spec ps (propagateConstants (Cfg.fromSub sub)) (y := mid) (by rw [hblocks]; simp)
+  have hlen : (eliminateDeadCode (propagateConstants (Cfg.fromSub sub)) ps).blocks.map Blk.tid = [mid.tid] := by
     rw [eliminateDeadCode_tids, hblocks]
     rfl
-  have hone : (eliminateDeadCode (propagateConstants (Cfg.fromSub sub))).blocks = [x] := by
-    match hl : (eliminateDeadCode (propagateConstants (Cfg.fromSub sub))).blocks, hx, hlen with
+  have hone : (eliminateDeadCode (propagateConstants (Cfg.fromSub sub)) ps).blocks = [x] := by
+    match hl : (eliminateDeadCode (propagateConstants (Cfg.fromSub sub)) ps).blocks, hx, hlen with
     | [a], hx, _ =>
       rw [List.mem_singleton.1 hx]
     | [], hx, _ => simp at hx
     | _ :: _ :: _, _, hlen =>
       simp at hlen
   obtain ⟨r₂, hr₂, hag, ht⟩ := hsem env r₁ hr₁
-  refine ⟨x, hone, htid, r₂, hr₂, ?_, g, ?_, ?_⟩
+  refine ⟨x, hone, htid, r₂, hr₂, ?_, ?_, g, ?_, ?_⟩
   · rw [ht]
     exact hsub
+  · intro y hy
+    rw [← heq]
+    exact hag y (List.mem_append_right _ hy)
   · rw [hj]
     exact hg
   · intro j hj' e he v hv
@@ -2414,6 +2473,7 @@ theorem optimize_straight_line (tid : Tid) (name : String) (args : List Arg) (bl
     rw [← hv₁]
     refine (Bap.Proofs.Bil.evalExp_congr_freeVars (g e) fun y hy => ?_).symm
     apply hag y
+    refine List.mem_append_left _ ?_
     simp only [jumpVars, List.mem_flatMap]
     refine ⟨j.mapExp g, ?_, ?_⟩
     · show j.mapExp g ∈ mid.jmps
@@ -2448,12 +2508,12 @@ private theorem find_map_tid (l : List Blk) (f : Blk → Blk) (hf : ∀ b, (f b)
     · rfl
     · exact ih
 
-private theorem dceBlk_tid (cfg : Cfg) (b : Blk) : (dceBlk cfg b).tid = b.tid := rfl
+private theorem dceBlk_tid (ps : List Var) (cfg : Cfg) (b : Blk) : (dceBlk ps cfg b).tid = b.tid := rfl
 
-private theorem dcePass_block (cfg : Cfg) {t : Tid} {b : Blk} (h : cfg.block t = some b) :
-    (dcePass cfg).block t = some (dceBlk cfg b) := by
-  show (cfg.blocks.map (dceBlk cfg)).find? _ = _
-  rw [find_map_tid _ _ (dceBlk_tid cfg)]
+private theorem dcePass_block (ps : List Var) (cfg : Cfg) {t : Tid} {b : Blk} (h : cfg.block t = some b) :
+    (dcePass ps cfg).block t = some (dceBlk ps cfg b) := by
+  show (cfg.blocks.map (dceBlk ps cfg)).find? _ = _
+  rw [find_map_tid _ _ (dceBlk_tid ps cfg)]
   have h' : cfg.blocks.find? (fun b => decide (b.tid = t)) = some b := h
   rw [h']
   rfl
@@ -2494,7 +2554,7 @@ private structure PhiFree (cfg : Cfg) : Prop where
   phis : ∀ b ∈ cfg.blocks, b.phis = []
   nodes : ∀ b ∈ cfg.blocks, b.tid ∈ cfg.graph.nodes
 
-private theorem PhiFree.pass {cfg : Cfg} (h : PhiFree cfg) : PhiFree (dcePass cfg) := by
+private theorem PhiFree.pass {ps : List Var} {cfg : Cfg} (h : PhiFree cfg) : PhiFree (dcePass ps cfg) := by
   refine ⟨?_, ?_⟩
   · intro b hb
     obtain ⟨c, hc, rfl⟩ := List.mem_map.1 hb
@@ -2505,34 +2565,37 @@ private theorem PhiFree.pass {cfg : Cfg} (h : PhiFree cfg) : PhiFree (dcePass cf
     obtain ⟨c, hc, rfl⟩ := List.mem_map.1 hb
     exact h.nodes c hc
 
-private theorem dce_step {cfg : Cfg} {t : Tid} {env env' : Env} (ht : t ∈ cfg.reachable)
-    (hag : Agree ((Assoc.get t cfg.liveness.1).getD []) env env') {b : Blk} {r : Env × List (Var × Value)}
+private theorem dce_step {ps : List Var} {cfg : Cfg} {t : Tid} {env env' : Env} (ht : t ∈ cfg.reachable)
+    (hag : Agree ((Assoc.get t cfg.liveness.1).getD [] ++ ps) env env') {b : Blk} {r : Env × List (Var × Value)}
     (hb : cfg.block t = some b) (hr : execDefs env b.defs = .ok r) :
-    ∃ r', execDefs env' (dceBlk cfg b).defs = .ok r' ∧ Agree (dceLive cfg b) r.1 r'.1 ∧ r'.2 = r.2 := by
-  refine dceDefs_simulation b.defs (dceLive cfg b) ?_ hr
+    ∃ r', execDefs env' (dceBlk ps cfg b).defs = .ok r' ∧ Agree (dceLive ps cfg b) r.1 r'.1 ∧ r'.2 = r.2 := by
+  refine dceDefs_simulation b.defs (dceLive ps cfg b) ?_ hr
   intro x hx
   apply hag x
   have htid : b.tid = t := (block_some hb).2
-  refine (liveness_equations cfg ht hb x).1.2 ((mem_blockIn _ _ _).2 ?_)
   rcases dceDefs_live_subset _ _ _ hx with he | ⟨hl, hall⟩
-  · exact Or.inl he
-  · rcases List.mem_append.1 hl with ho | hj
-    · rw [htid] at ho
-      exact Or.inr (Or.inr ⟨(liveness_equations cfg ht hb x).2.1 ho, hall⟩)
-    · exact Or.inr (Or.inl (List.mem_flatMap.1 hj))
+  · exact List.mem_append_left _ ((liveness_equations cfg ht hb x).1.2 ((mem_blockIn _ _ _).2 (Or.inl he)))
+  · rcases List.mem_append.1 hl with hl | hp
+    · refine List.mem_append_left _ ((liveness_equations cfg ht hb x).1.2 ((mem_blockIn _ _ _).2 ?_))
+      rcases List.mem_append.1 hl with ho | hj
+      · rw [htid] at ho
+        exact Or.inr (Or.inr ⟨(liveness_equations cfg ht hb x).2.1 ho, hall⟩)
+      · exact Or.inr (Or.inl (List.mem_flatMap.1 hj))
+    · exact List.mem_append_right _ hp
 
-/-- One dead-code pass simulates every run from an environment agreeing on the live-in set. -/
-private theorem dcePass_run {cfg : Cfg} (hwf : PhiFree cfg) {t : Tid} {env final : Env}
+/-- One dead-code pass simulates every run from an environment agreeing on the live-in set and the
+protected variables, and ends agreeing on the final jumps' reads and the protected variables. -/
+private theorem dcePass_run {ps : List Var} {cfg : Cfg} (hwf : PhiFree cfg) {t : Tid} {env final : Env}
     {tr : List (Var × Value)} {f : Blk} (h : Run cfg t env tr final f) (ht : t ∈ cfg.reachable) {env' : Env}
-    (hag : Agree ((Assoc.get t cfg.liveness.1).getD []) env env') :
-    ∃ final' f', Run (dcePass cfg) t env' tr final' f' ∧ f'.tid = f.tid ∧ f'.jmps = f.jmps ∧
-      Agree (jumpVars f) final final' := by
+    (hag : Agree ((Assoc.get t cfg.liveness.1).getD [] ++ ps) env env') :
+    ∃ final' f', Run (dcePass ps cfg) t env' tr final' f' ∧ f'.tid = f.tid ∧ f'.jmps = f.jmps ∧
+      Agree (jumpVars f ++ ps) final final' := by
   induction h generalizing env' with
   | @last t env r blk hb hr =>
     obtain ⟨r', hr', hl, ht'⟩ := dce_step ht hag hb hr
-    refine ⟨r'.1, dceBlk cfg blk, ?_, rfl, rfl, fun x hx => hl x (List.mem_append_right _ hx)⟩
+    refine ⟨r'.1, dceBlk ps cfg blk, ?_, rfl, rfl, dceLive_agree hl⟩
     rw [← ht']
-    exact .last (dcePass_block cfg hb) hr'
+    exact .last (dcePass_block ps cfg hb) hr'
   | @next t t' env r blk stores final lastBlk hb hr hsucc hrest ih =>
     obtain ⟨r', hr', hl, ht'⟩ := dce_step ht hag hb hr
     obtain ⟨b', hb'⟩ := hrest.block
@@ -2540,10 +2603,11 @@ private theorem dcePass_run {cfg : Cfg} (hwf : PhiFree cfg) {t : Tid} {env final
     have ht'' : t' ∈ cfg.reachable :=
       Bap.Proofs.Graph.reachableFrom_closed cfg.graph _ ht hedge
         ((block_some hb').2 ▸ hwf.nodes b' (block_some hb').1)
-    have hag' : Agree ((Assoc.get t' cfg.liveness.1).getD []) r.1 r'.1 := by
+    have hag' : Agree ((Assoc.get t' cfg.liveness.1).getD [] ++ ps) r.1 r'.1 := by
       intro x hx
       apply hl x
-      refine List.mem_append_left _ ?_
+      refine (List.mem_append.1 hx).elim (fun hx => ?_) (fun hp => List.mem_append_right _ hp)
+      refine List.mem_append_left _ (List.mem_append_left _ ?_)
       rw [(block_some hb).2]
       refine (liveness_equations cfg ht hb x).2.2 ((mem_blockOut _ _ _ _).2 ⟨t', hsucc, b', hb', Or.inl ⟨hx, ?_⟩⟩)
       intro phi hphi
@@ -2552,12 +2616,12 @@ private theorem dcePass_run {cfg : Cfg} (hwf : PhiFree cfg) {t : Tid} {env final
     obtain ⟨final', f', hrun, hft, hfj, hfa⟩ := ih ht'' hag'
     refine ⟨final', f', ?_, hft, hfj, hfa⟩
     rw [← ht']
-    exact .next (dcePass_block cfg hb) hr' hsucc hrun
+    exact .next (dcePass_block ps cfg hb) hr' hsucc hrun
 
-private theorem dceAux_run {cfg : Cfg} (fuel : Nat) (hwf : PhiFree cfg) {t : Tid} {env final : Env}
+private theorem dceAux_run {ps : List Var} {cfg : Cfg} (fuel : Nat) (hwf : PhiFree cfg) {t : Tid} {env final : Env}
     {tr : List (Var × Value)} {f : Blk} (h : Run cfg t env tr final f) (ht : t ∈ cfg.reachable) :
-    ∃ final' f', Run (dceAux cfg fuel) t env tr final' f' ∧ f'.tid = f.tid ∧ f'.jmps = f.jmps ∧
-      Agree (jumpVars f) final final' := by
+    ∃ final' f', Run (dceAux ps cfg fuel) t env tr final' f' ∧ f'.tid = f.tid ∧ f'.jmps = f.jmps ∧
+      Agree (jumpVars f ++ ps) final final' := by
   induction fuel generalizing cfg final f with
   | zero => exact ⟨final, f, h, rfl, rfl, fun _ _ => rfl⟩
   | succ fuel ih =>
@@ -2629,11 +2693,11 @@ private theorem propagateConstants_run (cfg : Cfg) {t : Tid} {env final : Env} {
     exact hrun'
 
 /-- Runs carry over to the CFG rebuilt from the optimized blocks, whose edges come from the jumps. -/
-private theorem run_fromSub (sub : Sub) {t : Tid} {env final : Env} {tr : List (Var × Value)} {f : Blk}
-    (h : Run (eliminateDeadCode (propagateConstants (Cfg.fromSub sub))) t env tr final f) :
-    Run (Cfg.fromSub (optimize sub)) t env tr final f := by
-  have hblock : ∀ {z : Tid} {b : Blk}, (eliminateDeadCode (propagateConstants (Cfg.fromSub sub))).block z = some b →
-      (Cfg.fromSub (optimize sub)).block z = some b := fun h => h
+private theorem run_fromSub (sub : Sub) (ps : List Var) {t : Tid} {env final : Env} {tr : List (Var × Value)} {f : Blk}
+    (h : Run (eliminateDeadCode (propagateConstants (Cfg.fromSub sub)) ps) t env tr final f) :
+    Run (Cfg.fromSub (optimize sub ps)) t env tr final f := by
+  have hblock : ∀ {z : Tid} {b : Blk}, (eliminateDeadCode (propagateConstants (Cfg.fromSub sub)) ps).block z = some b →
+      (Cfg.fromSub (optimize sub ps)).block z = some b := fun h => h
   induction h with
   | last hb hr => exact .last (hblock hb) hr
   | @next t t' env r blk stores final lastBlk hb hr hsucc hrest ih =>
@@ -2645,13 +2709,13 @@ private theorem run_fromSub (sub : Sub) {t : Tid} {env final : Env} {tr : List (
     obtain ⟨c, hc, hct, hs⟩ := (fromSub_mem_edges sub t t').1 he
     have hcp : c ∈ (Cfg.fromSub sub).prune.blocks :=
       List.mem_filter.2 ⟨hc, decide_eq_true (prune_mem_nodes.2 (hct ▸ htr))⟩
-    have hpair : (c.tid, c.successors) ∈ (optimize sub).blks.map (fun b => (b.tid, b.successors)) := by
+    have hpair : (c.tid, c.successors) ∈ (optimize sub ps).blks.map (fun b => (b.tid, b.successors)) := by
       rw [optimize_successors]
       exact List.mem_map.2 ⟨c, hcp, rfl⟩
     obtain ⟨x, hx, heq⟩ := List.mem_map.1 hpair
     simp only [Prod.mk.injEq] at heq
     refine (Bap.Graph.successors_mem _ t t').2 ?_
-    refine (fromSub_mem_edges (optimize sub) t t').2 ⟨x, hx, heq.1.trans hct, ?_⟩
+    refine (fromSub_mem_edges (optimize sub ps) t t').2 ⟨x, hx, heq.1.trans hct, ?_⟩
     rw [heq.2]
     exact hs
 
@@ -2659,12 +2723,13 @@ private theorem run_fromSub (sub : Sub) {t : Tid} {env final : Env} {tr : List (
 is also applied before SSA). For any run of the original from the entry, the optimized subroutine has
 a run through the same branch choices ending at the same block whose stores include the original's,
 in order, and whose final jump expressions have the same values wherever the original's evaluate. It
-refines rather than equals: a removed definition can no longer fail. Variables not read by a later
-jump or definition are not preserved at the end of the run, as `optimize` takes no live-out set. -/
-theorem optimize_preserves_runs (sub : Sub) (hphi : ∀ b ∈ sub.blks, b.phis = []) {env final : Env}
+refines rather than equals: a removed definition can no longer fail. At the end of the run every
+protected variable has the same value in both runs; other variables not read by a later jump or
+definition are not preserved, so the caller lists the subroutine's outputs in `ps`. -/
+theorem optimize_preserves_runs (sub : Sub) (ps : List Var) (hphi : ∀ b ∈ sub.blks, b.phis = []) {env final : Env}
     {tr : List (Var × Value)} {f : Blk} (h : Run (Cfg.fromSub sub) (Cfg.fromSub sub).start env tr final f) :
-    ∃ tr' final' f', Run (Cfg.fromSub (optimize sub)) (Cfg.fromSub sub).start env tr' final' f' ∧
-      tr.Sublist tr' ∧ f'.tid = f.tid ∧ ∃ g, f'.jmps = f.jmps.map (Jmp.mapExp g) ∧
+    ∃ tr' final' f', Run (Cfg.fromSub (optimize sub ps)) (Cfg.fromSub sub).start env tr' final' f' ∧
+      tr.Sublist tr' ∧ f'.tid = f.tid ∧ Agree ps final final' ∧ ∃ g, f'.jmps = f.jmps.map (Jmp.mapExp g) ∧
         ∀ j ∈ f.jmps, ∀ e ∈ jmpExps j, ∀ v, evalExp final e = .ok v → evalExp final' (g e) = .ok v := by
   let cfg := Cfg.fromSub sub
   have hnodes : ∀ b ∈ cfg.blocks, b.tid ∈ cfg.graph.nodes := fun b hb => List.mem_map.2 ⟨b, hb, rfl⟩
@@ -2688,14 +2753,16 @@ theorem optimize_preserves_runs (sub : Sub) (hphi : ∀ b ∈ sub.blks, b.phis =
   have hreach : cfg.start ∈ (propagateConstants cfg).reachable :=
     start_mem_reachable (prune_mem_nodes.2 hstart)
   obtain ⟨final₂, f₂, hrun₂, ht₂, hj₂, ha₂⟩ :=
-    dceAux_run (weight (propagateConstants cfg).blocks + 1) hwf hrun₁ hreach
+    dceAux_run (ps := ps) (weight (propagateConstants cfg).blocks + 1) hwf hrun₁ hreach
   rw [← eliminateDeadCode_eq] at hrun₂
-  refine ⟨tr₁, final₂, f₂, run_fromSub sub hrun₂, hsub, ht₂.trans hft, g, by rw [hj₂, hg], ?_⟩
+  refine ⟨tr₁, final₂, f₂, run_fromSub sub ps hrun₂, hsub, ht₂.trans hft,
+    fun x hx => ha₂ x (List.mem_append_right _ hx), g, by rw [hj₂, hg], ?_⟩
   intro j hj e he v hv
   have hv₁ := hgv e v hv
   rw [← hv₁]
   refine (Bap.Proofs.Bil.evalExp_congr_freeVars (g e) fun y hy => ?_).symm
   apply ha₂ y
+  refine List.mem_append_left _ ?_
   simp only [jumpVars, List.mem_flatMap]
   refine ⟨j.mapExp g, ?_, ?_⟩
   · rw [hg]
@@ -2720,6 +2787,20 @@ private def dceSample : Sub :=
 theorem optimize_keeps_used_def :
     ((optimize dceSample).blks.map fun blk =>
       blk.defs.map fun defn => (defn.var, Bil.freeVars defn.rhs)) = [[(vx, [vz]), (vy, [vx])], []] := by
+  rfl
+
+/-- `x := z; ret y`: the write to `x` is read by nothing in the subroutine. -/
+private def outputSample : Sub :=
+  ⟨1, "output", [], [⟨1, [], [⟨10, vx, .var vz⟩], [⟨11, none, .ret (.indirect (.var vy))⟩]⟩]⟩
+
+/-- `optimize` keeps an otherwise dead write to a protected output. -/
+theorem optimize_keeps_protected_output :
+    ((optimize outputSample [vx]).blks.map fun blk => blk.defs.map Def.var) = [[vx]] := by
+  rfl
+
+/-- With no protected variables that write is removed: listing outputs is the caller's responsibility. -/
+theorem optimize_removes_unprotected_output :
+    ((optimize outputSample).blks.map fun blk => blk.defs.map Def.var) = [[]] := by
   rfl
 
 /-- `x := 1; goto L; L: y := x; x := 2; if z goto L else M; M: ret y`. -/

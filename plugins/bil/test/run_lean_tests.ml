@@ -52,6 +52,15 @@ let identities =
       Bil.Concat (Bil.Extract (15, 8, wide), Bil.Extract (7, 0, wide)),
       wide );
     ("conditional", Bil.Ite (bool true, x, y), x);
+    ("signed mod of a negative", bin Bil.SMOD (word 255) (word 3), word 2);
+    ("signed mod by a negative", bin Bil.SMOD (word 1) (word 253), word 254);
+    ("signed mod of negatives", bin Bil.SMOD (word 254) (word 253), word 254);
+    ("mod is unsigned", bin Bil.MOD (word 255) (word 3), zero);
+    ("divide by zero", bin Bil.DIVIDE x zero, Bil.int (Word.ones 8));
+    ("signed divide by zero", bin Bil.SDIVIDE x zero, Bil.int (Word.ones 8));
+    ("mod by zero", bin Bil.MOD x zero, x);
+    ("signed mod by zero", bin Bil.SMOD x zero, x);
+    ("signed divide truncates", bin Bil.SDIVIDE (word 249) (word 2), word 253);
   ]
 
 let identity_test (name, before, after) = name >:: fun _ -> check before after
@@ -66,6 +75,25 @@ let false_rewrite _ =
   | Error message ->
       assert_bool message (String.is_substring message ~substring:"error")
 
+let rejected name before after =
+  name >:: fun _ ->
+  match Bil_lean.validate (program before) (program after) with
+  | Ok () -> assert_failure ("Lean accepted " ^ name)
+  | Error message ->
+      assert_bool message (String.is_substring message ~substring:"error")
+
+let wrong_semantics =
+  [
+    rejected "signed mod as a truncating remainder of a negative"
+      (bin Bil.SMOD (word 255) (word 3))
+      (word 255);
+    rejected "signed mod as a truncating remainder by a negative"
+      (bin Bil.SMOD (word 1) (word 253))
+      (word 1);
+    rejected "division by zero as zero" (bin Bil.DIVIDE x zero) zero;
+    rejected "signed division by zero as zero" (bin Bil.SDIVIDE x zero) zero;
+  ]
+
 let checked_constant_folding _ =
   match
     Bil_lean.checked_fold_consts (program (bin Bil.PLUS (word 1) (word 2)))
@@ -73,6 +101,22 @@ let checked_constant_folding _ =
   | [ Bil.Move (_, Bil.Int result) ] -> assert_equal 3 (Word.to_int_exn result)
   | _ ->
       assert_failure "constant folding did not produce the expected immediate"
+
+let checked_signed_mod_folding _ =
+  match
+    Bil_lean.checked_fold_consts (program (bin Bil.SMOD (word 255) (word 3)))
+  with
+  | [ Bil.Move (_, Bil.Int result) ] -> assert_equal 2 (Word.to_int_exn result)
+  | _ -> assert_failure "folding did not produce the expected immediate"
+
+let checked_division_by_zero_folding _ =
+  match
+    Bil_lean.checked_fold_consts (program (bin Bil.DIVIDE (word 5) zero))
+  with
+  | [ Bil.Move (_, Bil.Int result) ] ->
+      assert_equal 255 (Word.to_int_exn result)
+  | [ Bil.Move (_, Bil.BinOp (Bil.DIVIDE, _, _)) ] -> ()
+  | _ -> assert_failure "folding did not produce the expected expression"
 
 let memory_wrapper _ =
   let memory = Bil.var (Var.create "memory" (Type.mem `r32 `r8)) in
@@ -101,9 +145,13 @@ let () =
   run_test_tt_main
     ("Bil_lean_integration"
     >::: List.map identities ~f:identity_test
+         @ wrong_semantics
          @ [
              "false rewrite" >:: false_rewrite;
              "checked constant folding" >:: checked_constant_folding;
+             "checked signed mod folding" >:: checked_signed_mod_folding;
+             "checked division by zero folding"
+             >:: checked_division_by_zero_folding;
              "memory wrapper" >:: memory_wrapper;
              "assumption memory" >:: assumption_memory;
            ])

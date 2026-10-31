@@ -128,8 +128,17 @@ def run : IO Unit := do
   assertEqual "decompiler renders unknown types" "unknown(oops, uint32_t)" (Decompile.exp (.unknown "oops" (.imm 32)))
   assertTrue "decompiler renders unusual widths"
     (((Decompile.function "f" [⟨"b", .imm 1, 0, false⟩] []).splitOn "unsigned _BitInt(1) b").length > 1)
-  let z := reg "z"
-  let tainted := Analysis.Taint.sourceVar {} x [1]
+  assertEqual "decompiler escapes C keywords" "_0x69_nt" (Decompile.exp (.var (reg "int")))
+  assertEqual "decompiler keeps names near keywords" "integer" (Decompile.exp (.var (reg "integer")))
+  assertEqual "decompiler escapes keyword function names" "void _0x77_hile() {\n\n}" (Decompile.function "while" [] [])
+  let narrow : Var := ⟨"v", .imm 32, 0, false⟩
+  let wide : Var := ⟨"v", .imm 64, 0, false⟩
+  let temporary : Var := ⟨"v", .imm 32, 0, true⟩
+  let clashing := Decompile.program [.move narrow (.var wide), .move temporary (.var narrow)]
+  assertEqual "decompiler tells apart variables differing in type or virtuality"
+    "  v_0ti32 = v_0ti64;\n  v_0ti32v = v_0ti32;" clashing
+  assertEqual "decompiler keeps the plain name without a clash" "  v = 0x0;"
+    (Decompile.program [.move narrow (int 32 0)])
   let z := reg "z"
   let tainted := Analysis.Taint.sourceVar {} x [1]
   let tainted := Analysis.Taint.sourceMemory tainted 0x3000 [2]
@@ -195,6 +204,13 @@ def run : IO Unit := do
   | .ok (.bits value) => assertEqual "dead code keeps writes before a jump" 1 value.toNat
   | _ => throw <| IO.userError "dead code removed a write before a jump"
   let k := reg "k"
+  let nestedDead : Program := [
+    .move z (int 32 7),
+    .ifElse (.var k) [.move y (.var z), .move (reg "dead") (.var z)] [.while (.var k) [.move (reg "dead") (.var y)]]
+  ]
+  let once := Analysis.DeadCode.optimize [y] nestedDead
+  assertEqual "dead code optimization is idempotent" (toString (Wire.printProgram once))
+    (toString (Wire.printProgram (Analysis.DeadCode.optimize [y] once)))
   let flag : Bil.Exp := .int (BitVec.ofNat 1 1)
   let loopProgram : Program := [
     .move z (int 32 7),
@@ -214,6 +230,10 @@ def run : IO Unit := do
   let branchTaint := Analysis.Taint.run (Analysis.Taint.sourceVar {} x [1])
     [.ifElse (.var k) [.move x (int 32 0)] []]
   assertEqual "taint joins branches" [1] (Analysis.Taint.labelsOfVar branchTaint x)
+  let bigger := Analysis.Taint.sourceVar tainted2 y [8]
+  let biggerLoop := Analysis.Taint.run bigger [.while (.var k) [.move x (.var y), .move y (.var z)]]
+  assertTrue "taint stays monotone through loops"
+    ((Analysis.Taint.labelsOfVar loopTaint x).all (Analysis.Taint.labelsOfVar biggerLoop x).contains)
   let wideLoad := Analysis.Taint.run (Analysis.Taint.sourceMemory {} 0x3001 [2])
     [.move z (.load (.var mem) (int 32 0x3000) .little 4)]
   assertEqual "taint load covers its width" [2] (Analysis.Taint.labelsOfVar wideLoad z)

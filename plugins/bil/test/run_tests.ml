@@ -126,6 +126,44 @@ let exact_whole_expression _ =
       assert_bool source (String.is_substring source ~substring:" + ")
   | _ -> assert_failure "expected one whole-expression proof"
 
+(* -5 %$ 3 = 1, 5 %$ -3 = -1, -5 %$ -3 = -2, 5 %$ 3 = 2, x %$ 0 = x, min %$ -1 = 0 *)
+let apply_smod _ =
+  let check width x y expected =
+    let word = Word.of_int ~width in
+    assert_equal ~cmp:Word.equal ~printer:Word.to_string (word expected)
+      (Bil.Apply.binop Bil.SMOD (word x) (word y))
+  in
+  List.iter [ 8; 16; 32; 64 ] ~f:(fun width ->
+      check width (-5) 3 1;
+      check width 5 (-3) (-1);
+      check width (-5) (-3) (-2);
+      check width 5 3 2;
+      check width (-5) 0 (-5);
+      check width 5 0 5;
+      check width 6 3 0;
+      check width (-6) 3 0);
+  check 8 (-128) (-1) 0;
+  check 1 1 1 0;
+  check 1 1 0 1
+
+let apply_smod_agrees_with_bitvec _ =
+  let values = [ 0; 1; 2; 3; 5; 127; 128; 129; 251; 253; 254; 255 ] in
+  List.iter values ~f:(fun x ->
+      List.iter values ~f:(fun y ->
+          let word = Word.of_int ~width:8 in
+          let bits v = Word.to_bitvec (word v) in
+          assert_equal ~cmp:Word.equal ~printer:Word.to_string
+            (Word.create Bitvec.(smod (bits x) (bits y) mod modulus 8) 8)
+            (Bil.Apply.binop Bil.SMOD (word x) (word y))))
+
+(* the other signed and unsigned operations of the words stay as they are *)
+let word_mod_is_a_remainder _ =
+  let word = Word.of_int ~width:8 in
+  assert_equal ~cmp:Word.equal ~printer:Word.to_string (word (-2))
+    Word.(signed (word (-5)) mod signed (word 3));
+  assert_equal ~cmp:Word.equal ~printer:Word.to_string (word 2)
+    (Bil.Apply.binop Bil.MOD (word (-5)) (word 3))
+
 let () =
   run_test_tt_main
     ("Bil_lean"
@@ -140,4 +178,8 @@ let () =
            "propagates checker failure" >:: propagates_checker_failure;
            "variables use identity" >:: variables_use_identity;
            "exact whole expression" >:: exact_whole_expression;
+           "apply signed mod" >:: apply_smod;
+           "apply signed mod agrees with bitvec"
+           >:: apply_smod_agrees_with_bitvec;
+           "word mod is a remainder" >:: word_mod_is_a_remainder;
          ])

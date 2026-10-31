@@ -13,7 +13,7 @@ inductive Exp : Nat -> Type where
   | udiv {w : Nat} : Exp w -> Exp w -> Exp w
   | sdiv {w : Nat} : Exp w -> Exp w -> Exp w
   | urem {w : Nat} : Exp w -> Exp w -> Exp w
-  | srem {w : Nat} : Exp w -> Exp w -> Exp w
+  | smod {w : Nat} : Exp w -> Exp w -> Exp w
   | shiftLeft {w n : Nat} : Exp w -> Exp n -> Exp w
   | ushiftRight {w n : Nat} : Exp w -> Exp n -> Exp w
   | sshiftRight {w n : Nat} : Exp w -> Exp n -> Exp w
@@ -54,7 +54,7 @@ def eval (env : Env) : {w : Nat} -> Exp w -> BitVec w
   | _, .udiv x y => eval env x / eval env y
   | _, .sdiv x y => BitVec.sdiv (eval env x) (eval env y)
   | _, .urem x y => eval env x % eval env y
-  | _, .srem x y => BitVec.srem (eval env x) (eval env y)
+  | _, .smod x y => BitVec.smod (eval env x) (eval env y)
   | _, .shiftLeft x y => BitVec.shiftLeft (eval env x) (BitVec.toNat (eval env y))
   | _, .ushiftRight x y => BitVec.ushiftRight (eval env x) (BitVec.toNat (eval env y))
   | _, .sshiftRight x y => BitVec.sshiftRight (eval env x) (BitVec.toNat (eval env y))

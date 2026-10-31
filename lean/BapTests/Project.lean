@@ -142,7 +142,11 @@ def run : IO Unit := do
   let memorySlice := Analysis.Slice.backwardProject xrefProject 0x1000 [.mem 0x3000 8]
   assertEqual "backward slice follows memory stores" [0x1004, 0x1008] memorySlice.sites
   assertEqual "backward slice preserves memory input" [Analysis.Slice.Location.mem 0x3000 8] memorySlice.live
-  assertTrue "constant memory slice is complete" memorySlice.complete
+  assertTrue "constant memory slice is determined" memorySlice.determined
+  assertEqual "slice reports the call it crosses with memory live" [0x1000] memorySlice.calls
+  assertTrue "slice across a live call is incomplete" !memorySlice.complete
+  let noCallSlice := Analysis.Slice.backward instructions.tail [.mem 0x3000 8]
+  assertTrue "constant memory slice without calls is complete" noCallSlice.complete
   let registerSlice := Analysis.Slice.backwardProject xrefProject 0x1000 [.reg rax]
   assertEqual "backward slice follows stored register" [0x1004, 0x1008] registerSlice.sites
   assertEqual "backward slice replaces register with memory input" [Analysis.Slice.Location.mem 0x3000 8] registerSlice.live
@@ -159,6 +163,8 @@ def run : IO Unit := do
   assertEqual "dynamic slice with coverage includes all sites" [0x1004, 0x1008] fullDynamic.sites
   assertEqual "dynamic slice with coverage has no gaps" [] fullDynamic.gaps
   assertTrue "dynamic slice with coverage is complete" fullDynamic.complete
+  let executedCall := Analysis.DynamicSlice.backward xrefProject 0x1000 [0x1000, 0x1004, 0x1008] [.mem 0x3000 8]
+  assertTrue "dynamic slice through an executed call is incomplete" !executedCall.complete
   let outsideAccess : Bap.Emu.TraceAccess := {
     insn := 0
     pc := 0x2000
@@ -176,10 +182,54 @@ def run : IO Unit := do
   | .error "protobuf varint exceeds 64 bits" => IO.println "ok: protobuf rejects varints above 64 bits"
   | .error error => throw <| IO.userError s!"wrong protobuf varint error: {error}"
   | .ok _ => throw <| IO.userError "protobuf accepted a varint above 64 bits"
+  match Analysis.Protobuf.fields (ByteArray.mk #[128, 128, 128, 128, 16, 0]) with
+  | .error "protobuf field number above 2^29 - 1" => IO.println "ok: protobuf rejects field numbers above 2^29 - 1"
+  | .error error => throw <| IO.userError s!"wrong protobuf field number error: {error}"
+  | .ok _ => throw <| IO.userError "protobuf accepted an oversized field number"
+  match Analysis.Protobuf.fields (ByteArray.mk #[248, 255, 255, 255, 15, 7]) with
+  | .ok [{ number, .. }] => assertEqual "protobuf keeps the largest field number" (2 ^ 29 - 1) number
+  | _ => throw <| IO.userError "protobuf rejected the largest field number"
   match Analysis.Protobuf.fields (ByteArray.mk #[8, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1]) with
   | .ok [{ value := .varint value, .. }] => assertEqual "protobuf keeps the largest 64-bit varint" (2 ^ 64 - 1) value
   | _ => throw <| IO.userError "protobuf rejected a 64-bit varint"
   let flag : Var := ⟨"flag", .imm 1, 0, false⟩
+  let rbx : Var := ⟨"RBX", .imm 64, 0, false⟩
+  let value (number : Nat) : Bil.Exp := .int (BitVec.ofNat 64 number)
+  let trace : List Disasm.Insn := [
+    ⟨0, 4, "", .normal, none, [.move rax (value 5)]⟩,
+    ⟨4, 4, "", .normal, none, [.move rbx (value 7)]⟩,
+    ⟨8, 4, "", .normal, none, [.move mem (.store (.var mem) (value 0x4000) (.var rbx) .little 8)]⟩,
+    ⟨12, 4, "", .normal, none, [.move mem (.store (.var mem) (value 0x3000) (.var rax) .little 8)]⟩,
+    ⟨16, 4, "", .normal, none, [.move rbx (value 9)]⟩
+  ]
+  let endToEnd := Analysis.Slice.backward trace [.mem 0x3000 8]
+  assertEqual "slice keeps only what the criterion needs" [0, 12] endToEnd.sites
+  assertTrue "slice of a call-free trace is complete" endToEnd.complete
+  let runTrace (listed : List Disasm.Insn) : Except String Bil.State :=
+    listed.foldlM (fun state insn => do
+      let (next, _) ← Bil.execProgram 100 state insn.bil
+      .ok next) { env := [(mem, .memory (Memory.empty 64))] }
+  let readCriterion (result : Except String Bil.State) : Option Nat :=
+    match result with
+    | .ok state =>
+      match Bil.lookup state.env mem with
+      | .ok (@Value.memory width memory) =>
+        some (Memory.read memory (BitVec.ofNat width 0x3000) .little 8).toNat
+      | _ => none
+    | .error _ => none
+  assertEqual "running the whole trace writes the criterion" (some 5) (readCriterion (runTrace trace))
+  assertEqual "running only the sites reproduces the criterion" (some 5)
+    (readCriterion (runTrace (trace.filter fun insn => endToEnd.sites.contains insn.address)))
+  let wrapping := Analysis.Slice.backward
+    [⟨0, 4, "", .normal, none, [.move mem (.store (.var mem) (.int (BitVec.ofNat 64 (2 ^ 64 - 2))) (.var rax) .little 8)]⟩]
+    [.mem 0 4]
+  assertEqual "backward slice includes a store that wraps onto a location" [0] wrapping.sites
+  assertTrue "backward slice with a wrapping store is incomplete" !wrapping.complete
+  let afterExit := Analysis.Slice.backward
+    [⟨0, 4, "", .normal, none, [.move rax (.int (BitVec.ofNat 64 5))]⟩,
+     ⟨4, 4, "", .normal, none, [.jmp (.int (BitVec.ofNat 64 0x20)), .move rax (.int (BitVec.ofNat 64 6))]⟩]
+    [.reg rax]
+  assertEqual "backward slice keeps a definition a jump may skip" [0, 4] afterExit.sites
   let insn (address : Nat) (code : Bil.Program) : Disasm.Insn := ⟨address, 4, "", .normal, none, code⟩
   let five : Bil.Exp := .int (BitVec.ofNat 64 5)
   let conditional := Analysis.Slice.backward
@@ -222,6 +272,25 @@ def run : IO Unit := do
   let reloaded ← Project.loadSaved "native/build/project-regions.sexp"
   assertEqual "project reload keeps region order" [[2], [1]]
     ((reloaded.image.map fun loaded => loaded.memory.entries.map fun entry => entry.1.data.toList.map UInt8.toNat).getD [])
+  let nestedCode : Bil.Program := [.while (.var rax) [.while (.var rax) [.ifElse (.var rax) [.jmp target] []]]]
+  let nested : Project.Project := {
+    disasm := some { entry := 0, instructions := [⟨0, 4, "quoted \"asm\" (text)", .normal, some 8, nestedCode⟩] }
+    storage := [("key with space", "a\nb")]
+    passed := ["pass one"]
+  }
+  match Project.serialize nested with
+  | .error error => throw <| IO.userError error
+  | .ok text =>
+    match Project.deserialize text with
+    | .error error => throw <| IO.userError error
+    | .ok restored =>
+      assertEqual "text round trip keeps storage" nested.storage restored.storage
+      assertEqual "text round trip keeps pass history" nested.passed restored.passed
+      assertEqual "text round trip keeps instruction text" (some ["quoted \"asm\" (text)"])
+        (restored.disasm.map fun disasm => disasm.instructions.map Disasm.Insn.asm)
+      assertEqual "text round trip keeps nested code"
+        (some [toString (Bil.Wire.printProgram nestedCode)])
+        (restored.disasm.map fun disasm => disasm.instructions.map fun insn => toString (Bil.Wire.printProgram insn.bil))
   match analyze defaultRegistry project ["no-such-pass"] with
   | .error (.unknownPass "no-such-pass") => IO.println "ok: unknown pass name rejected"
   | .error error => throw <| IO.userError s!"wrong unknown pass error: {repr error}"

@@ -54,8 +54,11 @@ private def semanticsRegressions : IO Unit := do
   | [.move _ (.bin .rem _ _)] => IO.println "ok: mod is the unsigned remainder"
   | code => throw <| IO.userError s!"mod changed: {repr code}"
   match (← semanticsForms 32 "(set R (signed-mod 0xfffffff9 3))").code with
-  | [.move _ (.bin .srem _ _)] => IO.println "ok: signed-mod takes the sign of the dividend"
+  | [.move _ (.bin .smod _ _)] => IO.println "ok: signed-mod takes the sign of the divisor"
   | code => throw <| IO.userError s!"signed-mod changed: {repr code}"
+  match (← semanticsForms 32 "(set R (signed-rem 0xfffffff9 3))").code with
+  | [.move _ (.bin .srem _ _)] => IO.println "ok: signed-rem takes the sign of the dividend"
+  | code => throw <| IO.userError s!"signed-rem changed: {repr code}"
   assertEqual "local binding shadows replicate" 7
     (← assignedConstant (← semanticsForms 64 "(let ((replicate 7)) (set R replicate))"))
   match (← semanticsForms 64 "(let ((replicate 7)) (set R (replicate 1:32 2)))").code with
@@ -65,6 +68,45 @@ private def semanticsRegressions : IO Unit := do
   match (← Primus.Semantics.lift compiled.globals {} "op" []) with
   | [.move _ (.int value)] => assertEqual "compiled local shadows replicate" 7 value.toNat
   | code => throw <| IO.userError s!"compiled replicate shadow changed: {repr code}"
+  assertEqual "word-width with no arguments is the machine word" 32
+    (← assignedConstant (← semanticsForms 32 "(set R (word-width))"))
+  assertEqual "word-width is the widest argument" 16
+    (← assignedConstant (← semanticsForms 32 "(set R (word-width 1:8 1:16 1:4))"))
+  assertEqual "word-width counts a literal as a machine word" 32
+    (← assignedConstant (← semanticsForms 32 "(set R (word-width 1:8 5))"))
+  match (← semanticsForms 64 "(let ((x 1)) (set x 2) (set R x))").code with
+  | [.move slot (.int first), .move assigned (.int second), .move _ (.var read)] =>
+    assertEqual "set assigns the let variable" (1, 2) (first.toNat, second.toNat)
+    assertTrue "the assignment and the read use the let variable" (slot == assigned && assigned == read)
+  | code => throw <| IO.userError s!"let assignment changed: {repr code}"
+  match (← semanticsForms 64 "(let ((x 1)) (if (is-zero R) (set x 2) (set x 3)) (set R x))").code with
+  | [.move slot _, .ifElse _ [.move yes _] [.move no _], .move _ (.var read)] =>
+    assertTrue "both branches assign the let variable" (slot == yes && yes == no && no == read)
+  | code => throw <| IO.userError s!"conditional let assignment changed: {repr code}"
+  match (← semanticsForms 64 "(defmacro put (v e) (set v e)) (let ((x 1)) (put x 2) (set R x))").code with
+  | [.move slot _, .move assigned _, .move _ (.var read)] =>
+    assertTrue "a macro assigns the let variable" (slot == assigned && assigned == read)
+  | code => throw <| IO.userError s!"macro let assignment changed: {repr code}"
+  let assigning ← semanticsForms 64 "(defun op () (let ((x 1)) (set x 2) (set R x)))"
+  match (← Primus.Semantics.lift assigning.globals {} "op" []) with
+  | [_, _, .move _ (.var _)] => IO.println "ok: a function assigning a let variable lifts"
+  | code => throw <| IO.userError s!"let assignment in a function changed: {repr code}"
+  match (← semanticsForms 64 "(let ((x 1)) (set R x))").code with
+  | [.move _ (.int value)] => assertEqual "an unassigned let variable stays a constant" 1 value.toNat
+  | code => throw <| IO.userError s!"constant let changed: {repr code}"
+  for (source, value) in [("0o17", 15), ("0b101", 5), ("1_000", 1000), ("0x1_0", 16), ("0", 0)] do
+    assertEqual s!"literal {source} parses" value (← assignedConstant (← semanticsForms 64 s!"(set R {source})"))
+  assertEqual "negative hexadecimal literal parses" (2 ^ 64 - 16)
+    (← assignedConstant (← semanticsForms 64 "(set R -0x10)"))
+  for source in ["(set R 0xzz)", "(set R 12abc)", "(set R 1:2:3)", "(set R 5:abc)", "(set R 0x_1)",
+      "(defun unused () 0xzz)", "(defmacro unused (x) (+ x 9z))", "(set R -1q)"] do
+    match (← (semanticsForms 64 source).toBaseIO) with
+    | .error _ => IO.println s!"ok: {source} is rejected"
+    | .ok _ => throw <| IO.userError s!"{source} accepted"
+  let documented ← semanticsForms 64 "(defun op () \"64-bit add\" (set R 1))"
+  assertTrue "documentation strings are not literals" (Assoc.get "op" documented.globals).isSome
+  assertEqual "an atom not starting like a number is a symbol" 0
+    (← semanticsForms 64 "(defun x1y () 1)").code.length
   assertEqual "hexadecimal literal parses" 16 (← assignedConstant (← semanticsForms 64 "(set R 0x10)"))
   assertEqual "bare 0x is zero, as in Zarith" 0 (← assignedConstant (← semanticsForms 64 "(set R 0x)"))
 

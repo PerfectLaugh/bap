@@ -91,7 +91,7 @@ private def primitiveNames : List String :=
     "word-width", "set", "set$", "set-symbol-value", "alias-base-register", "symbol", "empty",
     "load-bits", "load-byte", "load-hword", "load-word", "store-word", "store-byte", "exec-addr", "intrinsic",
     "get-program-counter", "get-current-program-counter", "get-next-program-counter",
-    "is-zero", "non-zero", "neg", "s<", "s<=", "s>", "s>=", "replicate", "clz", "signed-mod"]
+    "is-zero", "non-zero", "neg", "s<", "s<=", "s>", "s>=", "replicate", "clz", "signed-mod", "signed-rem"]
 
 private def lookup (name : String) (locals : Locals) (globals : Globals) : Except String Value :=
   let primitiveName := if name.startsWith "core:" then (name.drop 5).toString else name
@@ -130,16 +130,78 @@ private def parseBasedNat (digits : String) (base : Nat) : Option Nat :=
       else base
     if digit < base then some (value * base + digit) else none) 0
 
+/-- `Z.of_string` of Zarith: optional sign, then an optional `0x`/`0o`/`0b` prefix, then digits that
+may contain underscores but not start with one. No digits after a prefix reads as zero. -/
+private def parseZ (text : List Char) : Option Int :=
+  let (negative, chars) := match text with
+    | '-' :: rest => (true, rest)
+    | '+' :: rest => (false, rest)
+    | chars => (false, chars)
+  let (base, digits) := match chars with
+    | '0' :: 'x' :: rest | '0' :: 'X' :: rest => (16, rest)
+    | '0' :: 'o' :: rest | '0' :: 'O' :: rest => (8, rest)
+    | '0' :: 'b' :: rest | '0' :: 'B' :: rest => (2, rest)
+    | _ => (10, chars)
+  if digits.head? = some '_' then none
+  else
+    (parseBasedNat (String.ofList (digits.filter (· != '_'))) base).map fun value =>
+      if negative then -Int.ofNat value else Int.ofNat value
+
+/-- Whether an atom starts like a number, which commits it to being one. -/
+private def startsNumeric : List Char → Bool
+  | c :: rest => c.isDigit || (c = '-' && match rest with | d :: _ => d.isDigit | [] => false)
+  | [] => false
+
+/-- Reads an atom like `bap_primus_lisp_word.ml`: `.ok none` is not a number and so a symbol, and an
+atom that starts like a number but does not parse is an error, not a symbol. -/
+private def readLiteral (atom : String) : Except String (Option (Int × Option Nat)) :=
+  if !startsNumeric atom.toList then .ok none
+  else
+    let malformed : Except String (Option (Int × Option Nat)) := .error s!"malformed Primus literal {atom}"
+    match atom.toList.span (· != ':') with
+    | (value, []) =>
+      match parseZ value with
+      | some value => .ok (some (value, none))
+      | none => malformed
+    | (value, _ :: width) =>
+      match parseZ value, parseZ width with
+      | some value, some (.ofNat width) => .ok (some (value, some width))
+      | _, _ => malformed
+
 private def parseInteger (atom : String) : Option (Int × Option Nat) :=
-  let (value, width) := match atom.splitOn ":" with
-    | [value, width] => (value, width.toNat?)
-    | _ => (atom, none)
-  let value := if value.startsWith "0x" || value.startsWith "0X" then
-    (parseBasedNat (value.drop 2).toString 16).map Int.ofNat
-  else if value.startsWith "0b" || value.startsWith "0B" then
-    (parseBasedNat (value.drop 2).toString 2).map Int.ofNat
-  else value.toInt?
-  value.map fun value => (value, width)
+  match readLiteral atom with
+  | .ok literal => literal
+  | .error _ => none
+
+mutual
+  /-- Rejects malformed literals in a parsed form, wherever they are, as the upstream parser does.
+  Quoted data, documentation and message strings are not expressions. -/
+  private def checkLiterals : Sexp → Except String Unit
+    | .atom atom => (readLiteral atom).map fun _ => ()
+    | .list [] => .ok ()
+    | .list (.atom "quote" :: _) | .list (.atom "declare" :: _) => .ok ()
+    | .list (.atom "msg" :: _) | .list (.atom "error" :: _) => .ok ()
+    | .list [.atom "assert-msg", test, .atom _] => checkLiterals test
+    | .list (.atom "defun" :: .atom _ :: .list _ :: body)
+    | .list (.atom "defmacro" :: .atom _ :: .list _ :: body)
+    | .list (.atom "defmethod" :: .atom _ :: .list _ :: body) => checkBody body
+    | .list (.atom "defparameter" :: .atom _ :: value :: _) => checkLiterals value
+    | .list (head :: rest) => do
+      checkLiterals head
+      checkForms rest
+
+  private def checkForms : List Sexp → Except String Unit
+    | [] => .ok ()
+    | form :: rest => do
+      checkLiterals form
+      checkForms rest
+
+  /-- The first atom of a longer definition body is its documentation string. -/
+  private def checkBody : List Sexp → Except String Unit
+    | .atom _ :: rest@(_ :: _) => checkForms rest
+    | .list (.atom "declare" :: _) :: rest => checkBody rest
+    | body => checkForms body
+end
 
 private def atomValue (atom : String) : Value :=
   if atom = "true" then .bool true
@@ -259,6 +321,13 @@ private def widthOf (context : Context) : Value → Except String Nat
   | .register _ width _ => .ok width
   | _ => .error "word-width expects a bitvector"
 
+/-- `(word-width X ... Z)` is the widest argument, and with no arguments the machine word. -/
+private def wordWidth (context : Context) (args : List Value) : Except String Value := do
+  let widths ← args.mapM (widthOf context)
+  .ok (.int (BitVec.ofNat 64 (match args with
+    | [] => context.bits
+    | _ => widths.foldl max 0)))
+
 private def valueTag : Value → String
   | .unit => "unit"
   | .int _ => "integer"
@@ -331,7 +400,8 @@ private def applyPrimitive (context : Context) (name : String) (args : List Valu
   | "/" => valueOnly (← binary context .div args)
   | "s/" => valueOnly (← binary context .sdiv args)
   | "mod" => valueOnly (← binary context .rem args)
-  | "signed-mod" => valueOnly (← binary context .srem args)
+  | "signed-mod" => valueOnly (← binary context .smod args)
+  | "signed-rem" => valueOnly (← binary context .srem args)
   | "=" => valueOnly (← compare context .eq args)
   | "/=" => valueOnly (← compare context .neq args)
   | "<" => valueOnly (← compare context .lt args)
@@ -354,11 +424,7 @@ private def applyPrimitive (context : Context) (name : String) (args : List Valu
   | "cast-high" => valueOnly (← cast context .high args)
   | "cast-signed" => valueOnly (← cast context .signed args)
   | "cast-unsigned" => valueOnly (← cast context .unsigned args)
-  | "word-width" =>
-    match args with
-    | [] => valueOnly (.int (BitVec.ofNat 64 context.bits))
-    | [value] => valueOnly (.int (BitVec.ofNat 64 (← widthOf context value)))
-    | _ => throw "word-width expects zero or one arguments"
+  | "word-width" => valueOnly (← wordWidth context args)
   | "extract" =>
     match args with
     | [high, low, value] =>
@@ -533,11 +599,7 @@ private def applyPrimitiveIndex (context : Context) (operation : Nat) (args : Li
   | 34 => valueOnly (← cast context .high args)
   | 35 => valueOnly (← cast context .signed args)
   | 36 => valueOnly (← cast context .unsigned args)
-  | 37 =>
-    match args with
-    | [] => valueOnly (.int (BitVec.ofNat 64 context.bits))
-    | [value] => valueOnly (.int (BitVec.ofNat 64 (← widthOf context value)))
-    | _ => throw "word-width expects zero or one arguments"
+  | 37 => valueOnly (← wordWidth context args)
   | 38 | 39 | 40 =>
     match args with
     | [destination, value] => pure (value, ← assign context destination value)
@@ -606,8 +668,7 @@ private def freezeBil (state : State) (width : Nat) (expression : Bil.Exp) : Val
   | .ok _ => (.bil width expression, state)
   | .error _ =>
     let temporary : Bap.Var := ⟨s!"_primus_{state.nextTemp}", .imm width, 0, false⟩
-    (.bil width (.var temporary), {
-      globals := state.globals
+    (.bil width (.var temporary), { state with
       code := state.code ++ [.move temporary expression]
       nextTemp := state.nextTemp + 1
     })
@@ -620,6 +681,16 @@ private def freeze (context : Context) (state : State) (value : Value) : Value �
     | .ok (width, expression) => freezeBil state width expression
     | .error _ => (value, state)
   | _ => (value, state)
+
+/-- Bind an assignable `let` variable: a machine variable of its own, so assignments in any later
+control flow are seen by later reads. Upstream's `let_` also gives the name a fresh variable. -/
+private def bindAssignable (context : Context) (state : State) (value : Value) : Except String (Value × State) := do
+  let (width, expression) ← expectBil context value
+  let name := s!"_primus_{state.nextTemp}"
+  .ok (.register name width width, { state with
+    code := state.code ++ [.move ⟨name, .imm width, 0, false⟩ expression]
+    nextTemp := state.nextTemp + 1
+  })
 
 private def substitute (bindings : List (String × Sexp)) (form : Sexp) : Sexp :=
   match form with
@@ -641,6 +712,23 @@ private def definitionBody (body : List Sexp) : List Sexp :=
   match body with
   | .atom _ :: rest@(_ :: _) => rest
   | _ => body
+
+/-- Whether evaluating `form` may assign the `let` variable `name`, seeing through macros. -/
+private def assignsLocal (globals : Globals) (name : String) : Nat → Sexp → Bool
+  | 0, _ => true
+  | _ + 1, .atom _ => false
+  | _ + 1, .list (.atom "quote" :: _) => false
+  | fuel + 1, .list (.atom operator :: operands) =>
+    let assigned := match operator, operands with
+      | "set", .atom target :: _ | "set$", .atom target :: _ | "set-symbol-value", .atom target :: _ => target = name
+      | _, _ => false
+    assigned ||
+      (match Assoc.get operator globals with
+       | some (.callable (.macro params body)) =>
+         (body.map (substitute (params.zip operands))).attach.any fun form => assignsLocal globals name fuel form.1
+       | _ => false) ||
+      operands.attach.any fun form => assignsLocal globals name fuel form.1
+  | fuel + 1, .list items => items.attach.any fun form => assignsLocal globals name fuel form.1
 
 private def caseMatches (key : Value) (form : Sexp) : Except String Bool := do
   match form with
@@ -732,7 +820,7 @@ mutual
     | fuel + 1 =>
       match form with
       | .atom atom =>
-        if atom = "true" || atom = "false" || atom.startsWith ":" || (parseInteger atom).isSome then
+        if atom = "true" || atom = "false" || atom.startsWith ":" || (← readLiteral atom).isSome then
           .ok (atomValue atom, state)
         else .ok (← lookupState atom locals state, state)
       | .list [] => .ok (.list [], state)
@@ -781,8 +869,12 @@ mutual
           match binding with
           | .list [.atom name, value] =>
             let (value, state) ← eval fuel current.1 context current.2 value
-            let (value, state) := freeze context state value
-            .ok ((name, value) :: current.1, state)
+            if (bindings ++ body).any (assignsLocal state.globals name 64) then
+              let (value, state) ← bindAssignable context state value
+              .ok ((name, value) :: current.1, state)
+            else
+              let (value, state) := freeze context state value
+              .ok ((name, value) :: current.1, state)
           | _ => .error "invalid Primus let binding"
         evalSequence fuel locals context state body
       | .list (.atom "lambda" :: .list params :: body) =>
@@ -974,6 +1066,8 @@ mutual
       match bindings with
       | [] => .sequence <$> compileSequence globals locals fuel body
       | .list [.atom name, value] :: rest => do
+        -- Compiled locals are immutable slots, so assigned ones stay with the interpreter.
+        if (bindings ++ body).any (assignsLocal globals name 64) then none
         let value ← compileExp globals locals fuel value
         .letIn value <$> compileBindings globals (name :: locals) fuel rest body
       | _ => none
@@ -997,6 +1091,7 @@ def evalForms (context : Context) (globals : Globals) (forms : List Sexp) :
     | .list (.atom kind :: _) =>
       kind != "declare" && kind != "defpackage" && kind != "in-package" && kind != "require"
     | _ => true
+  forms.forM checkLiterals
   let (_, state) ← evalSequence 100000 [] context { globals := globals, operations := indexGlobals globals } forms
   .ok state
 

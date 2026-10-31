@@ -14,6 +14,6 @@ def decodeAt (base address : Nat) (data : ByteArray) : IO (Except String Disasm.
 
 def disassembler (base : Nat := 0) : IO Disasm.Disassembler := do
   let globals ← LLVMLift.arm32Environment
-  pure ⟨"armv7-llvm-primus", decodeWith globals base⟩
+  pure { name := "armv7-llvm-primus", decode := decodeWith globals base }
 
 end Bap.Target.ARM32

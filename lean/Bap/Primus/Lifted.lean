@@ -527,7 +527,7 @@ private def reachable (edges : List (Nat × Nat)) (source target : Nat) : Bool :
           loop fuel (current :: visited) (next ++ rest)
   loop (edges.length + 1) [] [source]
 
-private partial def gatherGraph (engine : Engine) (fetch : Fetch) (lift : Lift) (limit : Nat)
+private def gatherGraph (engine : Engine) (fetch : Fetch) (lift : Lift) (limit : Nat)
     (seed : Block) (seedCode : ByteArray) : IO (List Block × List (Nat × Nat) × List (Nat × ByteArray)) := do
   let rec visit (queue : List Block) (blocks : List Block) (edges : List (Nat × Nat))
       (sources : List (Nat × ByteArray)) := do
@@ -535,15 +535,15 @@ private partial def gatherGraph (engine : Engine) (fetch : Fetch) (lift : Lift) 
     | [] => pure (blocks, edges, sources)
     | current :: rest =>
       if blocks.any fun block => block.address = current.address then visit rest blocks edges sources
-      else if blocks.length >= limit then pure (blocks, edges, sources)
+      else if _h : blocks.length >= limit then pure (blocks, edges, sources)
       else
-        let blocks := blocks ++ [current]
+        let grown := blocks ++ [current]
         let (edges, additions, sources) ← (directEdges current).foldlM (init := (edges, [], sources)) fun state target => do
           let (edges, additions, sources) := state
           if target = current.address || reachable edges target current.address then pure state
           else
-            let known := (blocks ++ queue ++ additions).any fun block => block.address = target
-            if !known && blocks.length + rest.length + additions.length >= limit then pure state
+            let known := (grown ++ queue ++ additions).any fun block => block.address = target
+            if !known && grown.length + rest.length + additions.length >= limit then pure state
             else if known then pure (edges ++ [(current.address, target)], additions, sources)
             else
               try
@@ -555,7 +555,13 @@ private partial def gatherGraph (engine : Engine) (fetch : Fetch) (lift : Lift) 
                 pure (edges ++ [(current.address, target)], additions ++ [block], sources ++ [(target, code)])
               catch _ =>
                 pure (edges, additions, sources)
-        visit (rest ++ additions) blocks edges sources
+        visit (rest ++ additions) grown edges sources
+  termination_by (limit - blocks.length, queue.length)
+  decreasing_by
+    · exact Prod.Lex.right _ (by simp)
+    · apply Prod.Lex.left
+      simp only [List.length_append, List.length_cons, List.length_nil]
+      omega
   visit [seed] [] [] [(seed.address, seedCode)]
 
 private def graphEdgeOps (lowering : Lowering) (labels : List (Nat × Nat))
@@ -636,21 +642,26 @@ private def reindexEviction (index : EvictionIndex) (previous current : CachedBl
   unindexEviction index previous.address previous.executions
   indexEviction index current
 
-private partial def evictColdest (engine : Engine)
+private def evictColdest (engine : Engine)
     (versions : IO.Ref (Std.HashMap Nat (List CachedBlock))) (index : EvictionIndex)
     (entries : Std.HashMap Nat CachedBlock) : IO (Std.HashMap Nat CachedBlock) := do
-  let ordered ← index.get
-  match ordered.minEntry? with
-  | none => pure entries
-  | some (key, _) =>
-    index.set (ordered.erase key)
-    match entries.get? key.address with
-    | some entry =>
-      if entry.executions = key.executions then
-        rememberVersion engine versions entry
-        pure (entries.erase key.address)
-      else evictColdest engine versions index entries
-    | none => evictColdest engine versions index entries
+  -- Every round erases one index entry, so the index size bounds the rounds.
+  let rec loop : Nat → IO (Std.HashMap Nat CachedBlock)
+    | 0 => pure entries
+    | rounds + 1 => do
+      let ordered ← index.get
+      match ordered.minEntry? with
+      | none => pure entries
+      | some (key, _) =>
+        index.set (ordered.erase key)
+        match entries.get? key.address with
+        | some entry =>
+          if entry.executions = key.executions then
+            rememberVersion engine versions entry
+            pure (entries.erase key.address)
+          else loop rounds
+        | none => loop rounds
+  loop (← index.get).size
 
 private def restoreBlockVersion (engine : Engine) (address : Nat) (code : ByteArray) :
     IO (Option CachedBlock) := do

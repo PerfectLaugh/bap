@@ -5,8 +5,8 @@ namespace Bap.Tests.Theory
 open Bap
 open Bap.Theory
 
-private def reg (name : String) (width : Nat) : Theory.Var := ⟨name, .bitv width, 0, false⟩
-private def flag (name : String) : Theory.Var := ⟨name, .bool, 0, false⟩
+private def reg (name : String) (width : Nat) : Theory.Var := ⟨name, .bitv width, 0, false, false⟩
+private def flag (name : String) : Theory.Var := ⟨name, .bool, 0, false, false⟩
 private def rax := reg "RAX" 64
 private def eax := reg "EAX" 32
 private def ax := reg "AX" 16
@@ -32,7 +32,7 @@ private def parent : Target := declare {
 private def child : Target := declare {
   name := "x86_64"
   parent := some parent
-  nicknames := ["amd64", "x64"]
+  nicknames := some ["amd64", "x64"]
   bits := some 64
   aliases := some [
     ⟨rax, [.reg upper, .reg eax]⟩,
@@ -58,6 +58,16 @@ def run : IO Unit := do
     regs := some [([.general], [rax]), ([.integer], [rax]), ([.general], [eax])]
   }
   assertTrue "roles may come from different groups" (multiRole.hasRoles [.general, .integer] rax)
+  assertEqual "several roles select the intersection" [rax] (multiRole.registers [.general, .integer])
+  assertEqual "a single role selects all its registers" [rax, eax] (multiRole.registers [.general])
+  assertEqual "exclusion applies across groups" [eax] (multiRole.registers [.general] [.integer])
+  assertEqual "reg honours exclusion" (some eax) (multiRole.reg .general true [.integer])
+  assertEqual "reg stays ambiguous without exclusion" none (multiRole.reg .general true)
+  assertEqual "whole-register alias is an alias" (some (.sub eax 31 0 true))
+    (Target.unalias (declare {
+      name := "full"
+      aliases := some [⟨eax, [.reg (reg "E" 32)]⟩]
+    }) (reg "E" 32))
   assertEqual "missing role is rejected" false (multiRole.hasRoles [.general, .integer] eax)
   assertEqual "absent variable has no role" false (multiRole.hasRoles [.general] of)
   assertTrue "empty role list holds vacuously" (multiRole.hasRoles [] of)
@@ -65,20 +75,55 @@ def run : IO Unit := do
   assertEqual "register exclusion" [] (child.registers [] [.general])
   assertEqual "unique register query" (some rax) (child.reg .general true)
   assertEqual "alias subregister range" (some (.sub rax 31 0 false)) (child.unalias eax)
-  assertEqual "nested alias range" (some (.sub eax 15 0 true)) (child.unalias ax)
+  assertEqual "nested alias resolved to original register" (some (.sub rax 15 0 false)) (child.unalias ax)
   assertEqual "alias superregister" (some (.sup [upper, eax])) (child.unalias rax)
   assertEqual "flag bit range" (some (.sub (reg "RFLAGS" 64) 0 0 false)) (child.unalias cf)
   assertEqual "flag set" (some (.set [of, cf])) (child.unalias (reg "RFLAGS" 64))
   let registry := register child [parent]
-  assertEqual "registry nickname lookup" (some child) (get "amd64" registry)
+  assertEqual "registry lookup by name" (some child) (get "x86_64" registry)
+  assertEqual "registry lookup is not by nickname" none (get "amd64" registry)
+  assertEqual "registry lookup is not by ancestor" none (get "x86" [child])
+  assertEqual "registry lookup is exact" none (get "X86_64" registry)
+  assertEqual "matching finds own nickname" (some "x86_64") (child.matching "AMD64")
+  assertEqual "matching finds closest ancestor" (some "x86") (child.matching "x86")
+  assertEqual "matching finds nothing" none (child.matching "arm")
+  assertTrue "matches walks to unknown" (child.matches "unknown")
+  let tagged : Target := declare { name := "base", nicknames := some ["family"] }
+  let inheriting : Target := declare { name := "middle", parent := some tagged }
+  let leaf : Target := declare { name := "leaf", parent := some inheriting, nicknames := some ["other"] }
+  assertEqual "nicknames inherited when none given" ["family"] inheriting.nicknames
+  assertEqual "nicknames replaced when given" ["other"] leaf.nicknames
+  assertEqual "ancestor nicknames still match" (some "middle") (leaf.matching "family")
   assertEqual "non-strict system selection" (some child)
-    (select { parent := some child, system := some .linux, unique := true } registry)
-  assertEqual "strict inherited system rejected" none
-    (select { system := some .linux, strict := true, unique := true } [child])
+    (select { parent := child, system := .linux, unique := true } registry)
+  assertEqual "strict inherited system accepted" (some child)
+    (select { system := .linux, strict := true, unique := true } [child])
   assertEqual "strict explicit system accepted" (some parent)
-    (select { system := some .linux, strict := true, unique := true } [parent])
+    (select { system := .linux, strict := true, unique := true } [parent])
+  assertEqual "strict other system rejected" none
+    (select { system := .darwin, strict := true } [child])
+  assertEqual "strict unknown requires unknown" none
+    (select { strict := true } [child])
   assertEqual "unique selection rejects ambiguity" none
-    (select { parent := some parent, unique := true } registry)
+    (select { parent := parent, unique := true } registry)
+  assertEqual "unknown property fails a specific requirement" none
+    (select { abi := .gnu } [child])
+  assertEqual "unknown requirement accepts any property" (some child)
+    (select { system := .unknown, unique := true } [child])
+  assertEqual "selection never returns unknown" none (select {} [unknown])
+  assertEqual "unknown has no system" SystemKind.unknown unknown.system
+  assertEqual "unknown has no abi" Abi.unknown unknown.abi
+  assertEqual "unknown has no fabi" Fabi.unknown unknown.fabi
+  assertEqual "unknown has no filetype" Filetype.unknown unknown.filetype
+  assertEqual "bare declaration inherits unknown abi" Abi.unknown (declare { name := "bare" }).abi
+  assertTrue "declared registers are variables" (rax ∈ (declare { name := "vs", regs := some [([.general], [rax])] }).vars)
+  assertTrue "memories are variables" ((declare { name := "bare" }).var "mem" |>.isSome)
+  let bound : Theory.Var := { name := "x", sort := .bool, isVirtual := true, isLet := true }
+  let temporary : Theory.Var := { name := "t", sort := .bool, isVirtual := true }
+  assertEqual "scoped variable is immutable" false bound.isMutable
+  assertEqual "scoped variable has no versions" bound (bound.version 3)
+  assertEqual "temporary variable is mutable" true temporary.isMutable
+  assertEqual "temporary variable has versions" 3 (temporary.version 3).index
   let value := Theory.Value.bits (BitVec.ofNat 32 42)
   assertEqual "Core Theory value sort" (ValueSort.bitv 32) value.sort
   assertEqual "value resort accepts same sort" (some (ValueSort.bitv 32)) (value.resort (.bitv 32) |>.map Theory.Value.sort)

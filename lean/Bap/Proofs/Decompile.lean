@@ -32,16 +32,14 @@ theorem stmtInduction {P : Bap.Bil.Stmt → Prop}
       · exact ht s hs) stmt
 
 open Bap.Bil (Exp Stmt BinOp)
-open Bap.Decompile (exp stmt program function project)
+open Bap.Decompile (exp stmt program function project expIn stmtIn)
 
 open_private Bap.Decompile in Bap.Decompile : hex identifier varName quote endianName binName
-  signedBinName unName castName indentation ctype escape escapeChars
+  signedBinName unName castName indentation ctype escape escapeChars keywords typeCode expVars stmtVars
 open_private Bap.Decompile.Project in Bap.Decompile : usedStmt usedInsns functionDisasm
 open_private Bap.Analysis.Xrefs in Bap.Analysis.Xrefs : spans nearestStart
 open_private Bap.Core.Sexp in Bap.Sexp : needsQuotes
 open_private Bap.Core.Sexp in Bap : Sexp.escape
-
-/-! ### Identifiers and indentation -/
 
 /-! ### Identifiers and indentation -/
 
@@ -95,7 +93,8 @@ private theorem parseHex_digits (ds rest : List Char) (acc : Nat) (h : ∀ c ∈
     simp only [h c (by simp), ↓reduceIte]
     exact ih _ fun d hd => h d (by simp [hd])
 
-/-- Inverse of the identifier encoding: the decoded name and whatever follows a `_0v` marker. -/
+/-- Inverse of the identifier encoding: the decoded name, and the rest from the first `_0v` or
+`_0t` marker on. -/
 private def decode : Nat → List Char → List Char × List Char
   | 0, _ => ([], [])
   | _ + 1, [] => ([], [])
@@ -106,7 +105,7 @@ private def decode : Nat → List Char → List Char × List Char
         let parsed := parseHex 0 (rest.drop 2)
         let tail := decode fuel parsed.2
         (Char.ofNat parsed.1 :: tail.1, tail.2)
-    else if c = '_' ∧ rest.take 2 = ['0', 'v'] then ([], rest.drop 2)
+    else if c = '_' ∧ (rest.take 2 = ['0', 'v'] ∨ rest.take 2 = ['0', 't']) then ([], c :: rest)
     else
       let tail := decode fuel rest
       (c :: tail.1, tail.2)
@@ -140,19 +139,27 @@ private theorem escapeChars_v (rest : List Char) :
     escapeChars ('_' :: '0' :: 'v' :: rest) = escape '_' ++ '0' :: 'v' :: escapeChars rest := by
   rw [escapeChars]
 
+private theorem escapeChars_t (rest : List Char) :
+    escapeChars ('_' :: '0' :: 't' :: rest) = escape '_' ++ '0' :: 't' :: escapeChars rest := by
+  rw [escapeChars]
+
 private theorem escapeChars_other {c : Char} {rest : List Char}
     (hx : ∀ r, c = '_' → rest = '0' :: 'x' :: r → False)
-    (hv : ∀ r, c = '_' → rest = '0' :: 'v' :: r → False) :
+    (hv : ∀ r, c = '_' → rest = '0' :: 'v' :: r → False)
+    (ht : ∀ r, c = '_' → rest = '0' :: 't' :: r → False) :
     escapeChars (c :: rest) =
       if c.isAlphanum || c = '_' then c :: escapeChars rest else escape c ++ escapeChars rest := by
   rw [escapeChars]
   · exact fun r h1 h2 => hx r (by simpa using h1) (by simpa using h2)
   · exact fun r h1 h2 => hv r (by simpa using h1) (by simpa using h2)
+  · exact fun r h1 h2 => ht r (by simpa using h1) (by simpa using h2)
 
 private theorem escapeChars_induct {P : List Char → Prop} (nil : P [])
     (x : ∀ r, P r → P ('_' :: '0' :: 'x' :: r)) (v : ∀ r, P r → P ('_' :: '0' :: 'v' :: r))
+    (t : ∀ r, P r → P ('_' :: '0' :: 't' :: r))
     (other : ∀ c rest, (∀ r, c = '_' → rest = '0' :: 'x' :: r → False) →
-      (∀ r, c = '_' → rest = '0' :: 'v' :: r → False) → P rest → P (c :: rest))
+      (∀ r, c = '_' → rest = '0' :: 'v' :: r → False) →
+      (∀ r, c = '_' → rest = '0' :: 't' :: r → False) → P rest → P (c :: rest))
     (cs : List Char) : P cs := by
   generalize hn : cs.length = n
   induction n using Nat.strongRecOn generalizing cs with
@@ -167,11 +174,14 @@ private theorem escapeChars_induct {P : List Char → Prop} (nil : P [])
       · by_cases hv : ∃ r, c = '_' ∧ rest = '0' :: 'v' :: r
         · obtain ⟨r, rfl, rfl⟩ := hv
           exact v r (ih _ (by simp at hn; omega) r rfl)
-        · exact other c rest (fun r a b => hx ⟨r, a, b⟩) (fun r a b => hv ⟨r, a, b⟩)
-            (ih _ (by omega) rest rfl)
+        · by_cases ht : ∃ r, c = '_' ∧ rest = '0' :: 't' :: r
+          · obtain ⟨r, rfl, rfl⟩ := ht
+            exact t r (ih _ (by simp at hn; omega) r rfl)
+          · exact other c rest (fun r a b => hx ⟨r, a, b⟩) (fun r a b => hv ⟨r, a, b⟩)
+              (fun r a b => ht ⟨r, a, b⟩) (ih _ (by omega) rest rfl)
 
 private theorem escapeChars_zero (r : List Char) : escapeChars ('0' :: r) = '0' :: escapeChars r := by
-  rw [escapeChars_other (by simp) (by simp)]
+  rw [escapeChars_other (by simp) (by simp) (by simp)]
   simp
 
 private theorem escape_head (c : Char) (suffix : List Char) :
@@ -189,8 +199,11 @@ private theorem head_escapeChars (r suffix : List Char) (hs : ∀ c, suffix.head
   | v r _ =>
     rw [escapeChars_v, List.append_assoc, escape_head] at h
     exact Or.inl (Option.some.inj h).symm
-  | other d rest hx hv _ =>
-    rw [escapeChars_other hx hv] at h
+  | t r _ =>
+    rw [escapeChars_t, List.append_assoc, escape_head] at h
+    exact Or.inl (Option.some.inj h).symm
+  | other d rest hx hv ht _ =>
+    rw [escapeChars_other hx hv ht] at h
     split at h
     · right; simpa using h
     · rw [List.append_assoc, escape_head] at h
@@ -209,7 +222,8 @@ private theorem decode_literals (m : Char) (rest : List Char) (fuel : Nat) :
 /-- A literal `_` is not read as a marker unless the source text had one. -/
 private theorem no_marker {rest suffix : List Char} (hs : ∀ c, suffix.head? = some c → c = '_')
     (hx : ∀ r, rest = '0' :: 'x' :: r → False) (hv : ∀ r, rest = '0' :: 'v' :: r → False)
-    (m : Char) (hm : m = 'x' ∨ m = 'v') : (escapeChars rest ++ suffix).take 2 ≠ ['0', m] := by
+    (ht : ∀ r, rest = '0' :: 't' :: r → False)
+    (m : Char) (hm : m = 'x' ∨ m = 'v' ∨ m = 't') : (escapeChars rest ++ suffix).take 2 ≠ ['0', m] := by
   intro htake
   cases hl : escapeChars rest ++ suffix with
   | nil => simp [hl] at htake
@@ -229,7 +243,7 @@ private theorem no_marker {rest suffix : List Char} (hs : ∀ c, suffix.head? = 
         rw [escapeChars_zero] at hl
         simp at hl
         have hm' := head_escapeChars r suffix hs b (by simp [hl])
-        rcases hm with rfl | rfl
+        rcases hm with rfl | rfl | rfl
         · simp at hm'
           cases r with
           | nil => simp at hm'
@@ -238,6 +252,10 @@ private theorem no_marker {rest suffix : List Char} (hs : ∀ c, suffix.head? = 
           cases r with
           | nil => simp at hm'
           | cons a'' r => simp at hm'; subst hm'; exact hv r rfl
+        · simp at hm'
+          cases r with
+          | nil => simp at hm'
+          | cons a'' r => simp at hm'; subst hm'; exact ht r rfl
 
 /-- `decode` undoes `escapeChars`, up to a tail which starts with `_` or is empty. -/
 private theorem decode_escapeChars (cs suffix tail : List Char)
@@ -263,17 +281,31 @@ private theorem decode_escapeChars (cs suffix tail : List Char)
     obtain ⟨fuel, rfl⟩ : ∃ k, fuel = k + 3 := ⟨fuel - 3, by omega⟩
     rw [decode_escape, decode_literals]
     simp [decode, ih fuel (by omega)]
-  | other c rest hx hv ih =>
-    rw [escapeChars_other hx hv] at hf ⊢
+  | t rest ih =>
+    rw [escapeChars_t, List.append_assoc] at hf ⊢
+    simp only [List.cons_append] at hf ⊢
+    have h1 := length_escape_pos '_' ('0' :: 't' :: (escapeChars rest ++ suffix))
+    simp only [List.length_cons] at h1
+    obtain ⟨fuel, rfl⟩ : ∃ k, fuel = k + 3 := ⟨fuel - 3, by omega⟩
+    rw [decode_escape, decode_literals]
+    simp [decode, ih fuel (by omega)]
+  | other c rest hx hv htt ih =>
+    rw [escapeChars_other hx hv htt] at hf ⊢
     by_cases hvalid : (c.isAlphanum || decide (c = '_')) = true
     · simp only [hvalid, ↓reduceIte, List.cons_append, List.length_cons] at hf ⊢
       obtain ⟨fuel, rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by omega⟩
-      have nomark : ∀ m, m = 'x' ∨ m = 'v' → ¬ (c = '_' ∧
-          (escapeChars rest ++ suffix).take 2 = ['0', m]) := by
-        rintro m hm ⟨hc, htake⟩
-        exact no_marker hs (fun r => hx r hc) (fun r => hv r hc) m hm htake
+      have nomark : ∀ m, m = 'x' ∨ m = 'v' ∨ m = 't' → c = '_' →
+          (escapeChars rest ++ suffix).take 2 ≠ ['0', m] := fun m hm hc =>
+        no_marker hs (fun r => hx r hc) (fun r => hv r hc) (fun r => htt r hc) m hm
+      have n1 : ¬ (c = '_' ∧ (escapeChars rest ++ suffix).take 2 = ['0', 'x']) :=
+        fun h => nomark 'x' (by simp) h.1 h.2
+      have n2 : ¬ (c = '_' ∧ ((escapeChars rest ++ suffix).take 2 = ['0', 'v'] ∨
+          (escapeChars rest ++ suffix).take 2 = ['0', 't'])) := by
+        rintro ⟨hc, h | h⟩
+        · exact nomark 'v' (by simp) hc h
+        · exact nomark 't' (by simp) hc h
       rw [decode]
-      simp only [nomark 'x' (Or.inl rfl), nomark 'v' (Or.inr rfl), ↓reduceIte]
+      simp only [n1, n2, ↓reduceIte]
       simp [ih fuel (by omega)]
     · simp only [hvalid, Bool.false_eq_true, ↓reduceIte] at hf ⊢
       rw [List.append_assoc] at hf ⊢
@@ -285,7 +317,9 @@ private theorem decode_escapeChars (cs suffix tail : List Char)
 private theorem identifier_toList (name : String) :
     (identifier name).toList = match name.toList with
       | [] => ['_', '0', 'x', '_']
-      | c :: rest => if c.isDigit then escape c ++ escapeChars rest else escapeChars (c :: rest) := by
+      | c :: rest =>
+        if c.isDigit || keywords.contains name then escape c ++ escapeChars rest
+        else escapeChars (c :: rest) := by
   simp only [identifier, String.toList_ofList]
   rfl
 
@@ -320,50 +354,234 @@ theorem identifier_injective {a b : String} (h : identifier a = identifier b) : 
   rw [h, key b] at ha
   exact String.toList_inj.mp (Prod.mk.inj ha).1.symm
 
-private theorem indexSuffix_decode (index : Nat) (fuel : Nat)
-    (hf : (('_' :: '0' :: 'v' :: (toString index).toList)).length ≤ fuel) :
-    decode fuel ('_' :: '0' :: 'v' :: (toString index).toList) = ([], (toString index).toList) := by
+private theorem toString_string' (text : String) : toString text = text := rfl
+
+/-- Whether another variable in `scope` would render the same but for its type and virtuality. -/
+private def clash (scope : List Bap.Var) (var : Bap.Var) : Bool :=
+  scope.any fun other => other.name = var.name && other.index = var.index && other != var
+
+private def indexChars (index : Nat) : List Char :=
+  if index = 0 then [] else '_' :: '0' :: 'v' :: (toString index).toList
+
+private def typeChars (var : Bap.Var) : List Char :=
+  (typeCode var.typ ++ if var.isVirtual then "v" else "").toList
+
+private def qualChars (var : Bap.Var) : List Char :=
+  '_' :: '0' :: 't' :: (typeCode var.typ ++ if var.isVirtual then "v" else "").toList
+
+private theorem varName_toList (scope : List Bap.Var) (var : Bap.Var) :
+    (varName scope var).toList =
+      (identifier var.name).toList ++ indexChars var.index ++ if clash scope var then qualChars var else [] := by
+  generalize hf : clash scope var = flag
+  unfold clash at hf
+  unfold varName
+  simp only [hf]
+  cases flag <;> by_cases h0 : var.index = 0 <;>
+    simp [h0, indexChars, qualChars, String.toList_append, toString_string']
+
+/-- A suffix from a marker on is not part of the name. -/
+private theorem decode_marker {m : Char} (hm : m = 'v' ∨ m = 't') (rest : List Char) (fuel : Nat)
+    (hf : ('_' :: '0' :: m :: rest).length ≤ fuel) :
+    decode fuel ('_' :: '0' :: m :: rest) = ([], '_' :: '0' :: m :: rest) := by
   obtain ⟨fuel, rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by simp at hf; omega⟩
-  simp [decode]
+  rcases hm with rfl | rfl <;> simp [decode]
 
-private theorem varName_decode (var : Bap.Var) :
-    decode (varName var).toList.length (varName var).toList =
-      (var.name.toList, if var.index = 0 then [] else (toString var.index).toList) := by
-  by_cases h : var.index = 0
-  · have := decode_identifier var.name [] [] (by simp) (fun fuel _ => decode_nil fuel)
-    simpa [varName, h] using this
-  · have := decode_identifier var.name ('_' :: '0' :: 'v' :: (toString var.index).toList)
-      (toString var.index).toList (by simp) (indexSuffix_decode var.index)
-    have e : (varName var).toList =
-        (identifier var.name).toList ++ '_' :: '0' :: 'v' :: (toString var.index).toList := by
-      simp [varName, h, String.toList_append, toString]
-    rw [e, this]
-    simp [h]
+/-- A cut at the first `sep` is unique. -/
+private theorem cut_unique {sep : Char} {xs ys q q' : List Char} (hx : ∀ c ∈ xs, c ≠ sep)
+    (hy : ∀ c ∈ ys, c ≠ sep) (hq : ∀ c, q.head? = some c → c = sep) (hq' : ∀ c, q'.head? = some c → c = sep)
+    (h : xs ++ q = ys ++ q') : xs = ys ∧ q = q' := by
+  induction xs generalizing ys with
+  | nil =>
+    cases ys with
+    | nil => simpa using h
+    | cons y ys =>
+      exfalso
+      simp only [List.nil_append, List.cons_append] at h
+      subst h
+      exact hy y (by simp) (hq y (by simp))
+  | cons x xs ih =>
+    cases ys with
+    | nil =>
+      exfalso
+      simp only [List.nil_append, List.cons_append] at h
+      subst h
+      exact hx x (by simp) (hq' x (by simp))
+    | cons y ys =>
+      simp only [List.cons_append, List.cons.injEq] at h
+      obtain ⟨rfl, h⟩ := h
+      obtain ⟨e, e'⟩ := ih (fun c hc => hx c (by simp [hc])) (fun c hc => hy c (by simp [hc])) h
+      exact ⟨by rw [e], e'⟩
 
-/-- Distinct name and index pairs render as distinct variable names. -/
-theorem varName_injective {a b : Bap.Var} (h : varName a = varName b) :
+private theorem digit_ne {c sep : Char} (hs : sep.isDigit = false) (h : c.isDigit = true) : c ≠ sep := by
+  rintro rfl
+  simp [h] at hs
+
+private theorem toString_chars {n : Nat} {c : Char} (h : c ∈ (toString n).toList) : c.isDigit = true :=
+  Nat.isDigit_of_mem_toDigits (b := 10) (by decide) (by decide)
+    (by simpa [Nat.toString_eq_ofList_toDigits] using h)
+
+private theorem toString_inj {a b : Nat} (h : (toString a).toList = (toString b).toList) : a = b := by
+  have := congrArg (fun chars => (String.ofList chars).toNat?) h
+  simp only [String.ofList_toList] at this
+  have ra := Nat.toNat?_repr a
+  have rb := Nat.toNat?_repr b
+  simp only [toString] at this
+  rw [rb, ra] at this
+  simpa using this
+
+/-- Digits are cut off from what follows them by any non-digit separator. -/
+private theorem digits_cut {sep : Char} (hs : sep.isDigit = false) {a b : Nat} {q q' : List Char}
+    (hq : ∀ c, q.head? = some c → c = sep) (hq' : ∀ c, q'.head? = some c → c = sep)
+    (h : (toString a).toList ++ q = (toString b).toList ++ q') : a = b ∧ q = q' := by
+  obtain ⟨e, e'⟩ := cut_unique (sep := sep) (fun c hc => digit_ne hs (toString_chars hc))
+    (fun c hc => digit_ne hs (toString_chars hc)) hq hq' h
+  exact ⟨toString_inj e, e'⟩
+
+private theorem index_cut {a b : Nat} {q q' : List Char}
+    (hq : ∀ c, q.head? = some c → c = '_') (hq' : ∀ c, q'.head? = some c → c = '_')
+    (hm : ∀ r, q = '_' :: r → ∃ s, r = '0' :: 't' :: s) (hm' : ∀ r, q' = '_' :: r → ∃ s, r = '0' :: 't' :: s)
+    (h : indexChars a ++ q = indexChars b ++ q') : a = b ∧ q = q' := by
+  have digit : ('_' : Char).isDigit = false := by decide
+  simp only [indexChars] at h
+  by_cases ha : a = 0 <;> by_cases hb : b = 0
+  · subst ha; subst hb; simpa using h
+  · exfalso
+    simp only [ha, hb, ↓reduceIte, List.nil_append, List.cons_append] at h
+    obtain ⟨s, hs⟩ := hm _ h
+    simp at hs
+  · exfalso
+    simp only [ha, hb, ↓reduceIte, List.nil_append, List.cons_append] at h
+    obtain ⟨s, hs⟩ := hm' _ h.symm
+    simp at hs
+  · simp only [ha, hb, ↓reduceIte, List.cons_append, List.cons.injEq, true_and] at h
+    exact digits_cut digit hq hq' h
+
+private theorem digits10_cut {sep : Char} (hs : sep.isDigit = false) {a b : Nat} {q q' : List Char}
+    (hq : ∀ c, q.head? = some c → c = sep) (hq' : ∀ c, q'.head? = some c → c = sep)
+    (h : Nat.toDigits 10 a ++ q = Nat.toDigits 10 b ++ q') : a = b ∧ q = q' :=
+  digits_cut hs hq hq' (by simpa [Nat.toString_eq_ofList_toDigits] using h)
+
+private theorem digits10_inj {a b : Nat} (h : Nat.toDigits 10 a = Nat.toDigits 10 b) : a = b :=
+  toString_inj (by simpa [Nat.toString_eq_ofList_toDigits] using h)
+
+private theorem digits10_ne_v (a b : Nat) : Nat.toDigits 10 a ≠ Nat.toDigits 10 b ++ ['v'] := by
+  intro h
+  have hv : 'v' ∈ Nat.toDigits 10 a := by simp [h]
+  have := Nat.isDigit_of_mem_toDigits (b := 10) (by decide) (by decide) hv
+  revert this
+  decide
+
+private theorem typeChars_injective {a b : Bap.Var} (h : typeChars a = typeChars b) :
+    a.typ = b.typ ∧ a.isVirtual = b.isVirtual := by
+  have vdigit : ('v' : Char).isDigit = false := by decide
+  have xdigit : ('x' : Char).isDigit = false := by decide
+  rcases a with ⟨_, ta, _, va⟩
+  rcases b with ⟨_, tb, _, vb⟩
+  simp only [typeChars, typeCode, String.toList_append, toString_string'] at h
+  cases ta <;> cases tb <;> cases va <;> cases vb <;>
+    simp [String.toList_append] at h ⊢
+  all_goals first
+    | (exfalso; have := digits_cut (sep := 'v') vdigit (a := _) (b := _) (q := []) (q' := ['v']) (by simp) (by simp) (by simpa using h); simp at this; done)
+    | (exfalso; have := digits_cut (sep := 'v') vdigit (a := _) (b := _) (q := ['v']) (q' := []) (by simp) (by simp) (by simpa using h); simp at this; done)
+    | (exact (digits_cut (sep := 'v') vdigit (q := []) (q' := []) (by simp) (by simp) (by simpa using h)).1)
+    | (exact (digits_cut (sep := 'v') vdigit (q := ['v']) (q' := ['v']) (by simp) (by simp) (by simpa using h)).1)
+    | skip
+  all_goals
+    have c := digits10_cut xdigit (by simp) (by simp) h
+    have tail := c.2
+    simp only [List.cons.injEq, true_and] at tail
+  · exact ⟨c.1, digits10_inj tail⟩
+  · exact absurd tail (digits10_ne_v _ _)
+  · exact absurd tail.symm (digits10_ne_v _ _)
+  · exact ⟨c.1, digits10_inj (List.append_cancel_right tail)⟩
+
+/-- Decoding the rendered name recovers the name, and the rest is the index and the qualifier. -/
+private theorem varName_decode (scope : List Bap.Var) (var : Bap.Var) :
+    decode (varName scope var).toList.length (varName scope var).toList =
+      (var.name.toList, indexChars var.index ++ if clash scope var then qualChars var else []) := by
+  rw [varName_toList, List.append_assoc]
+  apply decode_identifier
+  · intro c hc
+    simp only [indexChars] at hc
+    split at hc
+    · split at hc
+      · simp [qualChars] at hc; exact hc.symm
+      · simp at hc
+    · simp at hc; exact hc.symm
+  · intro fuel hf
+    by_cases h0 : var.index = 0
+    · by_cases hc : clash scope var = true
+      · simp only [indexChars, h0, ↓reduceIte, hc, List.nil_append, qualChars] at hf ⊢
+        exact decode_marker (Or.inr rfl) _ _ hf
+      · simp only [indexChars, h0, ↓reduceIte, hc, List.nil_append, Bool.false_eq_true]
+        exact decode_nil fuel
+    · simp only [indexChars, h0, ↓reduceIte, List.cons_append] at hf ⊢
+      exact decode_marker (Or.inl rfl) _ _ hf
+
+/-- The name and index of a variable can be read back from its name in any scope. -/
+theorem varName_name_index {scope : List Bap.Var} {a b : Bap.Var} (h : varName scope a = varName scope b) :
     a.name = b.name ∧ a.index = b.index := by
-  have ha := varName_decode a
-  rw [h, varName_decode b] at ha
+  have ha := varName_decode scope a
+  rw [h, varName_decode scope b] at ha
   obtain ⟨hn, hi⟩ := Prod.mk.inj ha
-  refine ⟨String.toList_inj.mp hn.symm, ?_⟩
-  have digits : ∀ n : Nat, (toString n).toList ≠ [] := by
-    intro n
-    simp
-  by_cases h0 : a.index = 0 <;> by_cases h1 : b.index = 0
-  · omega
-  · simp only [h0, h1, ↓reduceIte] at hi
-    exact absurd hi.symm (Ne.symm (digits _))
-  · simp only [h0, h1, ↓reduceIte] at hi
-    exact absurd hi (Ne.symm (digits _))
-  · simp only [h0, h1, ↓reduceIte] at hi
-    have := congrArg (fun chars => (String.ofList chars).toNat?) hi
-    simp only [String.ofList_toList] at this
-    have ra := Nat.toNat?_repr a.index
-    have rb := Nat.toNat?_repr b.index
-    simp only [toString] at this
-    rw [rb, ra] at this
-    simpa using this.symm
+  have q : ∀ v : Bap.Var, ∀ c, (if clash scope v then qualChars v else []).head? = some c → c = '_' := by
+    intro v c hc
+    split at hc
+    · simp [qualChars] at hc; exact hc.symm
+    · simp at hc
+  have m : ∀ v : Bap.Var, ∀ r, (if clash scope v then qualChars v else []) = '_' :: r →
+      ∃ s, r = '0' :: 't' :: s := by
+    intro v r hr
+    split at hr
+    · simp [qualChars] at hr; exact ⟨_, hr.symm⟩
+    · simp at hr
+  exact ⟨String.toList_inj.mp hn.symm, (index_cut (q b) (q a) (m b) (m a) hi).1.symm⟩
+
+/-- With no other variable of that name and index in sight, the name is the plain one, so most
+output does not change. -/
+theorem varName_plain {scope : List Bap.Var} {var : Bap.Var} (h : ∀ other ∈ scope, other.name = var.name →
+    other.index = var.index → other = var) :
+    varName scope var = identifier var.name ++ if var.index = 0 then "" else s!"_0v{var.index}" := by
+  have : clash scope var = false := by
+    simp only [clash, List.any_eq_false]
+    intro other ho
+    by_cases hn : other.name = var.name <;> by_cases hi : other.index = var.index <;> simp [hn, hi]
+    exact h other ho hn hi
+  simp only [clash] at this
+  simp [varName, this]
+
+/-- Variables in sight never share a name: every field counts, the type and virtuality too.
+Upstream `lib/bap_types/bap_var.ml` compares by ident only, so type and virtuality distinguish
+variables here on a clash, which is more than upstream does. -/
+theorem varName_injective_in_scope {scope : List Bap.Var} {a b : Bap.Var} (ha : a ∈ scope) (hb : b ∈ scope)
+    (h : varName scope a = varName scope b) : a = b := by
+  obtain ⟨hn, hidx⟩ := varName_name_index h
+  apply Classical.byContradiction
+  intro hne
+  have ca : clash scope a = true := by
+    simp only [clash, List.any_eq_true]
+    exact ⟨b, hb, by simp [hn, hidx, Ne.symm hne]⟩
+  have cb : clash scope b = true := by
+    simp only [clash, List.any_eq_true]
+    exact ⟨a, ha, by simp [hn, hidx, hne]⟩
+  have e := congrArg String.toList h
+  rw [varName_toList, varName_toList, ca, cb, hn, hidx] at e
+  simp only [ite_true, List.append_assoc, List.append_cancel_left_eq, qualChars] at e
+  simp only [List.cons.injEq, true_and] at e
+  obtain ⟨ht, hv⟩ := typeChars_injective (a := a) (b := b) e
+  apply hne
+  rcases a with ⟨_, _, _, _⟩
+  rcases b with ⟨_, _, _, _⟩
+  simp_all
+
+/-- Regression: same name and index, told apart by type and by virtuality. -/
+theorem varName_clash_examples :
+    let a : Bap.Var := ⟨"x", .imm 32, 0, false⟩
+    let b : Bap.Var := ⟨"x", .imm 64, 0, false⟩
+    let c : Bap.Var := ⟨"x", .imm 64, 0, true⟩
+    varName [a, b, c] a = "x_0ti32" ∧ varName [a, b, c] b = "x_0ti64" ∧ varName [a, b, c] c = "x_0ti64v" ∧
+      varName [a] a = "x" := by
+  decide +kernel
 
 /-! ### Identifier validity -/
 
@@ -387,6 +605,7 @@ private theorem escapeChars_valid (cs : List Char) : ∀ d ∈ escapeChars cs, V
   have zero : ValidChar '0' := Or.inl (by decide)
   have x : ValidChar 'x' := Or.inl (by decide)
   have v : ValidChar 'v' := Or.inl (by decide)
+  have t : ValidChar 't' := Or.inl (by decide)
   induction cs using escapeChars_induct with
   | nil => simp [escapeChars]
   | x r ih =>
@@ -407,8 +626,17 @@ private theorem escapeChars_valid (cs : List Char) : ∀ d ∈ escapeChars cs, V
     · exact zero
     · exact v
     · exact ih d hd
-  | other c rest hx hv ih =>
-    rw [escapeChars_other hx hv]
+  | t r ih =>
+    rw [escapeChars_t]
+    intro d hd
+    simp only [List.mem_append, List.mem_cons] at hd
+    rcases hd with hd | rfl | rfl | hd
+    · exact escape_valid _ d hd
+    · exact zero
+    · exact t
+    · exact ih d hd
+  | other c rest hx hv ht ih =>
+    rw [escapeChars_other hx hv ht]
     intro d hd
     split at hd
     · rename_i hc
@@ -470,58 +698,144 @@ theorem identifier_no_leading_digit (name : String) (c : Char)
       · exact under
       · simp at this
         subst this
-        simpa using hd
+        simp only [Bool.or_eq_true, not_or] at hd
+        simpa using hd.1
 
 private theorem escapeChars_of_valid (cs : List Char) (valid : ∀ c ∈ cs, ValidChar c)
-    (hx : ¬ ['_', '0', 'x'] <:+: cs) (hv : ¬ ['_', '0', 'v'] <:+: cs) : escapeChars cs = cs := by
+    (hx : ¬ ['_', '0', 'x'] <:+: cs) (hv : ¬ ['_', '0', 'v'] <:+: cs) (ht : ¬ ['_', '0', 't'] <:+: cs) :
+    escapeChars cs = cs := by
   induction cs using escapeChars_induct with
   | nil => simp [escapeChars]
   | x r _ => exact absurd ⟨[], r, rfl⟩ hx
   | v r _ => exact absurd ⟨[], r, rfl⟩ hv
-  | other c rest ex ev ih =>
-    rw [escapeChars_other ex ev]
+  | t r _ => exact absurd ⟨[], r, rfl⟩ ht
+  | other c rest ex ev et ih =>
+    rw [escapeChars_other ex ev et]
     have hc := valid c (by simp)
     have : (c.isAlphanum || decide (c = '_')) = true := by simpa using hc
     simp only [this, ↓reduceIte]
     rw [ih (fun d hd => valid d (by simp [hd]))
       (fun h => hx (h.trans (List.suffix_cons c rest).isInfix))
-      (fun h => hv (h.trans (List.suffix_cons c rest).isInfix))]
+      (fun h => hv (h.trans (List.suffix_cons c rest).isInfix))
+      (fun h => ht (h.trans (List.suffix_cons c rest).isInfix))]
 
 /-- Names which already are valid C identifiers without a marker render as themselves. -/
 theorem identifier_of_valid (name : String) (nonempty : name ≠ "")
     (start : ∀ c, name.toList.head? = some c → c.isDigit = false)
     (valid : ∀ c ∈ name.toList, c.isAlphanum = true ∨ c = '_')
     (noEscape : ¬ ['_', '0', 'x'] <:+: name.toList)
-    (noIndex : ¬ ['_', '0', 'v'] <:+: name.toList) : identifier name = name := by
+    (noIndex : ¬ ['_', '0', 'v'] <:+: name.toList) (noType : ¬ ['_', '0', 't'] <:+: name.toList)
+    (notKeyword : name ∉ keywords) : identifier name = name := by
   apply String.toList_inj.mp
   rw [identifier_toList]
   cases hn : name.toList with
   | nil => exact absurd (String.toList_inj.mp (by simpa using hn)) nonempty
   | cons c rest =>
     have hc : c.isDigit = false := start c (by simp [hn])
-    simp only [hc, Bool.false_eq_true, ↓reduceIte]
-    rw [hn] at valid noEscape noIndex
-    exact escapeChars_of_valid _ valid noEscape noIndex
+    have hk : keywords.contains name = false := by simpa using notKeyword
+    simp only [hc, hk, Bool.or_self, Bool.false_eq_true, ↓reduceIte]
+    rw [hn] at valid noEscape noIndex noType
+    exact escapeChars_of_valid _ valid noEscape noIndex noType
 
-theorem varName_chars (var : Bap.Var) :
-    ∀ c ∈ (varName var).toList, c.isAlphanum = true ∨ c = '_' := by
-  by_cases h : var.index = 0
-  · simpa [varName, h] using identifier_chars var.name
-  · intro c hc
-    have e : (varName var).toList =
-        (identifier var.name).toList ++ '_' :: '0' :: 'v' :: (toString var.index).toList := by
-      simp [varName, h, String.toList_append, toString]
-    rw [e] at hc
+/-- What `decode` undoes also says `escapeChars` itself loses nothing. -/
+private theorem escapeChars_injective {a b : List Char} (h : escapeChars a = escapeChars b) : a = b := by
+  have key := fun cs => decode_escapeChars cs [] [] (by simp) (fun fuel _ => decode_nil fuel)
+    (escapeChars cs ++ []).length (Nat.le_refl _)
+  have ha := key a
+  simp only [List.append_nil] at ha
+  rw [h] at ha
+  have hb := key b
+  simp only [List.append_nil] at hb
+  rw [hb] at ha
+  exact (Prod.mk.inj ha).1.symm
+
+private theorem keywords_fixed :
+    keywords.all (fun k => decide (escapeChars k.toList = k.toList)) = true := by
+  decide +kernel
+
+private theorem keywords_no_escape :
+    keywords.all (fun k => decide (k.toList.take 3 ≠ ['_', '0', 'x'])) = true := by
+  decide +kernel
+
+/-- Keywords never survive: the rendering of any name, keywords included, is not a C keyword. -/
+theorem identifier_not_keyword (name : String) : identifier name ∉ keywords := by
+  intro hk
+  have fixed := List.all_eq_true.mp keywords_fixed _ hk
+  have noesc := List.all_eq_true.mp keywords_no_escape _ hk
+  simp only [decide_eq_true_eq] at fixed noesc
+  have hl := identifier_toList name
+  cases hn : name.toList with
+  | nil =>
+    rw [hn] at hl
+    simp only at hl
+    rw [hl] at noesc
+    simp at noesc
+  | cons c rest =>
+    rw [hn] at hl
+    simp only at hl
+    split at hl
+    · rw [hl] at noesc
+      simp [escape] at noesc
+    · rename_i hd
+      simp only [Bool.or_eq_true, not_or] at hd
+      have : escapeChars (identifier name).toList = escapeChars name.toList := by
+        rw [fixed, hl, hn]
+      have e := escapeChars_injective this
+      have en : identifier name = name := String.toList_inj.mp e
+      rw [en] at hk
+      exact hd.2 (by simpa using hk)
+
+theorem identifier_int : identifier "int" = "_0x69_nt" := by decide +kernel
+
+theorem identifier_rax : identifier "RAX" = "RAX" := by decide +kernel
+
+private theorem digit_valid {c : Char} (h : c.isDigit = true) : c.isAlphanum = true := by
+  simp [Char.isAlphanum, h]
+
+private theorem qualChars_valid (var : Bap.Var) : ∀ c ∈ qualChars var, ValidChar c := by
+  intro c hc
+  simp only [qualChars, List.mem_cons] at hc
+  rcases hc with rfl | rfl | rfl | hc
+  · exact Or.inr rfl
+  · exact Or.inl (by decide)
+  · exact Or.inl (by decide)
+  · rw [String.toList_append] at hc
     rcases List.mem_append.mp hc with hc | hc
-    · exact identifier_chars _ c hc
+    · rcases var with ⟨_, typ, _, _⟩
+      cases typ <;> simp [typeCode, toString_string', String.toList_append] at hc
+      · subst hc; exact Or.inl (by decide)
+      · subst hc; exact Or.inl (by decide)
+      · rcases hc with rfl | hc | rfl | hc
+        · exact Or.inl (by decide)
+        · exact Or.inl (digit_valid (toString_chars (by simpa using hc)))
+        · exact Or.inl (by decide)
+        · exact Or.inl (digit_valid (toString_chars (by simpa using hc)))
+      · rcases hc with rfl | hc
+        · exact Or.inl (by decide)
+        · exact Or.inl (digit_valid (toString_chars (by simpa using hc)))
+    · split at hc
+      · simp at hc; subst hc; exact Or.inl (by decide)
+      · simp at hc
+
+theorem varName_chars (scope : List Bap.Var) (var : Bap.Var) :
+    ∀ c ∈ (varName scope var).toList, c.isAlphanum = true ∨ c = '_' := by
+  rw [varName_toList]
+  intro c hc
+  simp only [List.mem_append] at hc
+  rcases hc with (hc | hc) | hc
+  · exact identifier_chars _ c hc
+  · simp only [indexChars] at hc
+    split at hc
+    · simp at hc
     · simp only [List.mem_cons] at hc
       rcases hc with rfl | rfl | rfl | hc
       · exact Or.inr rfl
       · exact Or.inl (by decide)
       · exact Or.inl (by decide)
-      · have hd := Nat.isDigit_of_mem_toDigits (b := 10) (by decide) (by decide)
-          (by simpa [Nat.toString_eq_ofList_toDigits] using hc)
-        exact Or.inl (by simp [Char.isAlphanum, hd])
+      · exact Or.inl (digit_valid (toString_chars hc))
+  · split at hc
+    · exact qualChars_valid var c hc
+    · simp at hc
 
 theorem indentation_toList (level : Nat) : (indentation level).toList = List.replicate level ' ' := by
   simp [indentation]
@@ -661,10 +975,10 @@ theorem balanced_identifier (name : String) : Balanced (identifier name) := by
   · refine ⟨?_, ?_, ?_, ?_⟩ <;> (rintro rfl; revert h; decide)
   · decide
 
-theorem balanced_varName (var : Bap.Var) : Balanced (varName var) := by
+theorem balanced_varName (scope : List Bap.Var) (var : Bap.Var) : Balanced (varName scope var) := by
   apply balanced_of_no_brackets
   intro c hc
-  rcases varName_chars var c hc with h | rfl
+  rcases varName_chars scope var c hc with h | rfl
   · refine ⟨?_, ?_, ?_, ?_⟩ <;> (rintro rfl; revert h; decide)
   · decide
 
@@ -709,25 +1023,26 @@ theorem balanced_ctype (typ : Bap.Typ) : Balanced (ctype typ) := by
   split <;> (intro stack; simp [toString_string, String.toList_append, scan_append, scan, scan_digits])
 
 /-- Round and curly brackets of `exp` always nest properly when the free text does. -/
-theorem exp_balanced (e : Exp) (h : ∀ m ∈ messages e, Balanced (quote m)) : Balanced (exp e) := by
+theorem expIn_balanced (scope : List Bap.Var) (e : Exp) (h : ∀ m ∈ messages e, Balanced (quote m)) :
+    Balanced (expIn scope e) := by
   induction e with
   | int value =>
     intro stack
-    simp [toString_string, exp, String.toList_append, scan, hex, scan_digits]
-  | var var => simpa [exp] using balanced_varName var
+    simp [toString_string, expIn, String.toList_append, scan, hex, scan_digits]
+  | var var => simpa [expIn] using balanced_varName scope var
   | load memory address endian size ihm iha =>
     have hm := ihm fun m hm => h m (by simp [messages, hm])
     have ha := iha fun m hm => h m (by simp [messages, hm])
     have he := balanced_endianName endian
     intro stack
-    simp [toString_string, exp, String.toList_append, scan_append, scan, scan_digits, hm _, ha _, he _]
+    simp [toString_string, expIn, String.toList_append, scan_append, scan, scan_digits, hm _, ha _, he _]
   | store memory address value endian size ihm iha ihv =>
     have hm := ihm fun m hm => h m (by simp [messages, hm])
     have ha := iha fun m hm => h m (by simp [messages, hm])
     have hv := ihv fun m hm => h m (by simp [messages, hm])
     have he := balanced_endianName endian
     intro stack
-    simp [toString_string, exp, String.toList_append, scan_append, scan, scan_digits, hm _, ha _, hv _, he _]
+    simp [toString_string, expIn, String.toList_append, scan_append, scan, scan_digits, hm _, ha _, hv _, he _]
   | bin op left right ihl ihr =>
     have hl := ihl fun m hm => h m (by simp [messages, hm])
     have hr := ihr fun m hm => h m (by simp [messages, hm])
@@ -735,44 +1050,47 @@ theorem exp_balanced (e : Exp) (h : ∀ m ∈ messages e, Balanced (quote m)) : 
     cases hs : signedBinName op with
     | none =>
       have hb := balanced_binName op
-      simp [toString_string, exp, hs, String.toList_append, scan_append, scan, hl _, hr _, hb _]
+      simp [toString_string, expIn, hs, String.toList_append, scan_append, scan, hl _, hr _, hb _]
     | some name =>
       have hn := balanced_signedBinName hs
-      simp [toString_string, exp, hs, String.toList_append, scan_append, scan, hl _, hr _, hn _]
+      simp [toString_string, expIn, hs, String.toList_append, scan_append, scan, hl _, hr _, hn _]
   | un op value ih =>
     have hv := ih fun m hm => h m (by simp [messages, hm])
     intro stack
-    cases op <;> simp [toString_string, exp, unName, String.toList_append, scan_append, scan, hv _]
+    cases op <;> simp [toString_string, expIn, unName, String.toList_append, scan_append, scan, hv _]
   | cast kind width value ih =>
     have hv := ih fun m hm => h m (by simp [messages, hm])
     intro stack
-    cases kind <;> simp [toString_string, exp, castName, String.toList_append, scan_append, scan, scan_digits, hv _]
+    cases kind <;> simp [toString_string, expIn, castName, String.toList_append, scan_append, scan, scan_digits, hv _]
   | letIn var value body ihv ihb =>
     have hv := ihv fun m hm => h m (by simp [messages, hm])
     have hb := ihb fun m hm => h m (by simp [messages, hm])
-    have hn := balanced_varName var
+    have hn := balanced_varName scope var
     intro stack
-    simp [toString_string, exp, String.toList_append, scan_append, scan, hv _, hb _, hn _]
+    simp [toString_string, expIn, String.toList_append, scan_append, scan, hv _, hb _, hn _]
   | ite condition yes no ihc ihy ihn =>
     have hc := ihc fun m hm => h m (by simp [messages, hm])
     have hy := ihy fun m hm => h m (by simp [messages, hm])
     have hn := ihn fun m hm => h m (by simp [messages, hm])
     intro stack
-    simp [toString_string, exp, String.toList_append, scan_append, scan, hc _, hy _, hn _]
+    simp [toString_string, expIn, String.toList_append, scan_append, scan, hc _, hy _, hn _]
   | extract high low value ih =>
     have hv := ih fun m hm => h m (by simp [messages, hm])
     intro stack
-    simp [toString_string, exp, String.toList_append, scan_append, scan, scan_digits, hv _]
+    simp [toString_string, expIn, String.toList_append, scan_append, scan, scan_digits, hv _]
   | concat left right ihl ihr =>
     have hl := ihl fun m hm => h m (by simp [messages, hm])
     have hr := ihr fun m hm => h m (by simp [messages, hm])
     intro stack
-    simp [toString_string, exp, String.toList_append, scan_append, scan, hl _, hr _]
+    simp [toString_string, expIn, String.toList_append, scan_append, scan, hl _, hr _]
   | unknown message typ =>
     have hq := h message (by simp [messages])
     have ht := balanced_ctype typ
     intro stack
-    simp [toString_string, exp, String.toList_append, scan_append, scan, hq _, ht _]
+    simp [toString_string, expIn, String.toList_append, scan_append, scan, hq _, ht _]
+
+theorem exp_balanced (e : Exp) (h : ∀ m ∈ messages e, Balanced (quote m)) : Balanced (exp e) :=
+  expIn_balanced _ e h
 
 /-- A bracket in free text is rendered verbatim inside a C string, so bare bracket balance
 of `exp` needs the side condition of `exp_balanced`. -/
@@ -782,7 +1100,7 @@ theorem exp_unknown_unbalanced (typ : Bap.Typ) : ¬ Balanced (exp (.unknown "(" 
     simp only [quote, Bap.Sexp.render, needsQuotes]
     decide
   have := h []
-  simp [toString_string, exp, String.toList_append, scan_append, scan, hq, balanced_ctype typ _] at this
+  simp [toString_string, exp, expIn, String.toList_append, scan_append, scan, hq, balanced_ctype typ _] at this
 
 theorem quote_balanced_of_no_brackets {message : String}
     (h : ∀ c ∈ message.toList, c ≠ '(' ∧ c ≠ '{' ∧ c ≠ ')' ∧ c ≠ '}') : Balanced (quote message) := by
@@ -819,11 +1137,11 @@ private theorem no_newline_digits (base n : Nat) : '\n' ∉ Nat.toDigits base n 
   obtain ⟨d, hd⟩ := mem_toDigits h
   exact digitChar_ne_newline d hd.symm
 
-private theorem no_newline_varName (var : Bap.Var) : '\n' ∉ (varName var).toList := by
+private theorem no_newline_varName (scope : List Bap.Var) (var : Bap.Var) : '\n' ∉ (varName scope var).toList := by
   intro h
   have : ∀ c : Char, c = '\n' → ¬ (c.isAlphanum = true ∨ c = '_') := by
     rintro c rfl; decide
-  exact this _ rfl (varName_chars var _ h)
+  exact this _ rfl (varName_chars scope var _ h)
 
 private theorem no_newline_quote (message : String) : '\n' ∉ (quote message).toList := by
   simp only [quote, Bap.Sexp.render]
@@ -845,60 +1163,62 @@ private theorem no_newline_ctype (typ : Bap.Typ) : '\n' ∉ (ctype typ).toList :
   split <;> simp [toString_string, String.toList_append, no_newline_digits]
 
 /-- Free text is escaped and names are sanitised, so an expression renders on one line. -/
-theorem exp_no_newline (e : Exp) : '\n' ∉ (exp e).toList := by
+theorem expIn_no_newline (scope : List Bap.Var) (e : Exp) : '\n' ∉ (expIn scope e).toList := by
   induction e with
-  | int value => simp [toString_string, exp, String.toList_append, hex, no_newline_digits]
-  | var var => simpa [exp] using no_newline_varName var
+  | int value => simp [toString_string, expIn, String.toList_append, hex, no_newline_digits]
+  | var var => simpa [expIn] using no_newline_varName scope var
   | load memory address endian size ihm iha =>
     cases endian <;>
-      simp [toString_string, exp, endianName, String.toList_append, no_newline_digits, ihm, iha]
+      simp [toString_string, expIn, endianName, String.toList_append, no_newline_digits, ihm, iha]
   | store memory address value endian size ihm iha ihv =>
     cases endian <;>
-      simp [toString_string, exp, endianName, String.toList_append, no_newline_digits, ihm, iha, ihv]
+      simp [toString_string, expIn, endianName, String.toList_append, no_newline_digits, ihm, iha, ihv]
   | bin op left right ihl ihr =>
-    cases op <;> simp [toString_string, exp, signedBinName, binName, String.toList_append, ihl, ihr]
+    cases op <;> simp [toString_string, expIn, signedBinName, binName, String.toList_append, ihl, ihr]
   | un op value ih =>
-    cases op <;> simp [toString_string, exp, unName, String.toList_append, ih]
+    cases op <;> simp [toString_string, expIn, unName, String.toList_append, ih]
   | cast kind width value ih =>
     cases kind <;>
-      simp [toString_string, exp, castName, String.toList_append, no_newline_digits, ih]
+      simp [toString_string, expIn, castName, String.toList_append, no_newline_digits, ih]
   | letIn var value body ihv ihb =>
-    simp [toString_string, exp, String.toList_append, no_newline_varName, ihv, ihb]
+    simp [toString_string, expIn, String.toList_append, no_newline_varName scope, ihv, ihb]
   | ite condition yes no ihc ihy ihn =>
-    simp [toString_string, exp, String.toList_append, ihc, ihy, ihn]
+    simp [toString_string, expIn, String.toList_append, ihc, ihy, ihn]
   | extract high low value ih =>
-    simp [toString_string, exp, String.toList_append, no_newline_digits, ih]
+    simp [toString_string, expIn, String.toList_append, no_newline_digits, ih]
   | concat left right ihl ihr =>
-    simp [toString_string, exp, String.toList_append, ihl, ihr]
+    simp [toString_string, expIn, String.toList_append, ihl, ihr]
   | unknown message typ =>
-    simp [toString_string, exp, String.toList_append, no_newline_quote, no_newline_ctype]
+    simp [toString_string, expIn, String.toList_append, no_newline_quote, no_newline_ctype]
 
-private def writeText (memory address value : Exp) (endian : Bap.Endian) (size : Nat) : String :=
-  s!"write{size * 8}_{endianName endian}({exp memory}, {exp address}, {exp value});"
+theorem exp_no_newline (e : Exp) : '\n' ∉ (exp e).toList := expIn_no_newline _ e
+
+private def writeText (scope : List Bap.Var) (memory address value : Exp) (endian : Bap.Endian) (size : Nat) : String :=
+  s!"write{size * 8}_{endianName endian}({expIn scope memory}, {expIn scope address}, {expIn scope value});"
 
 /-- Whether a store updates the memory variable it reads. -/
 private def inPlace (var : Bap.Var) : Exp → Bool
   | .var source => source = var
   | _ => false
 
-private theorem stmt_store_eq (level : Nat) (var : Bap.Var) (memory address value : Exp)
+private theorem stmt_store_eq (scope : List Bap.Var) (level : Nat) (var : Bap.Var) (memory address value : Exp)
     (endian : Bap.Endian) (size : Nat) :
-    stmt level (.move var (.store memory address value endian size)) =
-      if inPlace var memory then indentation level ++ writeText memory address value endian size
-      else indentation level ++ varName var ++ " = " ++ writeText memory address value endian size := by
-  rw [stmt.eq_def]
+    stmtIn scope level (.move var (.store memory address value endian size)) =
+      if inPlace var memory then indentation level ++ writeText scope memory address value endian size
+      else indentation level ++ varName scope var ++ " = " ++ writeText scope memory address value endian size := by
+  rw [stmtIn.eq_def]
   simp only [writeText, inPlace]
   cases memory <;> rfl
 
-private theorem no_newline_writeText (memory address value : Exp) (endian : Bap.Endian) (size : Nat) :
-    '\n' ∉ (writeText memory address value endian size).toList := by
+private theorem no_newline_writeText (scope : List Bap.Var) (memory address value : Exp) (endian : Bap.Endian) (size : Nat) :
+    '\n' ∉ (writeText scope memory address value endian size).toList := by
   cases endian <;> simp [writeText, toString_string, endianName, String.toList_append,
-    no_newline_digits, exp_no_newline]
+    no_newline_digits, expIn_no_newline]
 
 /-- Statements without nested blocks render as exactly one line. -/
-theorem stmt_single_line (level : Nat) (s : Stmt)
+theorem stmtIn_single_line (scope : List Bap.Var) (level : Nat) (s : Stmt)
     (h : match s with | .while _ _ | .ifElse _ _ _ => False | _ => True) :
-    '\n' ∉ (stmt level s).toList := by
+    '\n' ∉ (stmtIn scope level s).toList := by
   have hi : '\n' ∉ (indentation level).toList := by
     rw [indentation_toList]
     intro hm
@@ -908,16 +1228,20 @@ theorem stmt_single_line (level : Nat) (s : Stmt)
     cases value with
     | store memory address value endian size =>
       rw [stmt_store_eq]
-      split <;> simp [String.toList_append, hi, no_newline_varName, no_newline_writeText]
-    | _ => simp [toString_string, stmt, String.toList_append, no_newline_varName, hi, exp_no_newline]
+      split <;> simp [String.toList_append, hi, no_newline_varName scope, no_newline_writeText]
+    | _ => simp [toString_string, stmtIn, String.toList_append, no_newline_varName scope, hi, expIn_no_newline]
   | jmp target =>
     cases target with
-    | int value => simp [toString_string, stmt, String.toList_append, hex, no_newline_digits, hi]
-    | _ => simp [toString_string, stmt, String.toList_append, hi, exp_no_newline]
-  | special message => simp [toString_string, stmt, String.toList_append, hi, no_newline_quote]
-  | cpuExn number => simp [toString_string, stmt, String.toList_append, hi, no_newline_digits]
+    | int value => simp [toString_string, stmtIn, String.toList_append, hex, no_newline_digits, hi]
+    | _ => simp [toString_string, stmtIn, String.toList_append, hi, expIn_no_newline]
+  | special message => simp [toString_string, stmtIn, String.toList_append, hi, no_newline_quote]
+  | cpuExn number => simp [toString_string, stmtIn, String.toList_append, hi, no_newline_digits]
   | «while» condition body => exact h.elim
   | ifElse condition yes no => exact h.elim
+
+theorem stmt_single_line (level : Nat) (s : Stmt)
+    (h : match s with | .while _ _ | .ifElse _ _ _ => False | _ => True) :
+    '\n' ∉ (stmt level s).toList := stmtIn_single_line _ level s h
 
 /-! ### Statements -/
 
@@ -946,22 +1270,23 @@ theorem balanced_intercalate {separator : String} {items : List String}
       refine (hi head (by simp)).append (hs.append ?_)
       exact ih fun item hm => hi item (by simp [hm])
 
-private theorem exp_scan {e : Exp} (h : ∀ m ∈ messages e, Balanced (quote m)) (stack : List Char) :
-    scan stack (exp e).toList = some stack := exp_balanced e h stack
+private theorem exp_scan (scope : List Bap.Var) {e : Exp} (h : ∀ m ∈ messages e, Balanced (quote m)) (stack : List Char) :
+    scan stack (expIn scope e).toList = some stack := expIn_balanced scope e h stack
 
 /-- A statement renders with properly nested brackets when its free text does. -/
-theorem stmt_balanced {s : Stmt} (h : StmtBalanced s) (level : Nat) : Balanced (stmt level s) := by
+theorem stmtIn_balanced (scope : List Bap.Var) {s : Stmt} (h : StmtBalanced s) (level : Nat) :
+    Balanced (stmtIn scope level s) := by
   induction h generalizing level with
   | move var value hv =>
     have hi := balanced_indentation level
     cases value with
     | store memory address value endian size =>
-      have hm := exp_scan (e := memory) fun m hm => hv m (by simp [messages, hm])
-      have ha := exp_scan (e := address) fun m hm => hv m (by simp [messages, hm])
-      have hw := exp_scan (e := value) fun m hm => hv m (by simp [messages, hm])
+      have hm := exp_scan scope (e := memory) fun m hm => hv m (by simp [messages, hm])
+      have ha := exp_scan scope (e := address) fun m hm => hv m (by simp [messages, hm])
+      have hw := exp_scan scope (e := value) fun m hm => hv m (by simp [messages, hm])
       have he := balanced_endianName endian
-      have hn := balanced_varName var
-      have hwrite : Balanced (writeText memory address value endian size) := by
+      have hn := balanced_varName scope var
+      have hwrite : Balanced (writeText scope memory address value endian size) := by
         intro stack
         simp [writeText, toString_string, String.toList_append, scan_append, scan, scan_digits,
           hm _, ha _, hw _, he _]
@@ -969,81 +1294,87 @@ theorem stmt_balanced {s : Stmt} (h : StmtBalanced s) (level : Nat) : Balanced (
       intro stack
       split <;> simp [String.toList_append, scan_append, scan, hi _, hn _, hwrite _]
     | _ =>
-      have he := exp_scan hv
-      have hn := balanced_varName var
+      have he := exp_scan scope hv
+      have hn := balanced_varName scope var
       intro stack
-      simp [toString_string, stmt, String.toList_append, scan_append, scan, hi _, hn _, he _]
+      simp [toString_string, stmtIn, String.toList_append, scan_append, scan, hi _, hn _, he _]
   | jmp target ht =>
     have hi := balanced_indentation level
     cases target with
     | int value =>
       intro stack
-      simp [toString_string, stmt, String.toList_append, scan_append, scan, hi _, hex, scan_digits]
+      simp [toString_string, stmtIn, String.toList_append, scan_append, scan, hi _, hex, scan_digits]
     | _ =>
-      have he := exp_scan ht
+      have he := exp_scan scope ht
       intro stack
-      simp [toString_string, stmt, String.toList_append, scan_append, scan, hi _, he _]
+      simp [toString_string, stmtIn, String.toList_append, scan_append, scan, hi _, he _]
   | special message hq =>
     have hi := balanced_indentation level
     intro stack
-    simp [toString_string, stmt, String.toList_append, scan_append, scan, hi _, hq _]
+    simp [toString_string, stmtIn, String.toList_append, scan_append, scan, hi _, hq _]
   | cpuExn number =>
     have hi := balanced_indentation level
     intro stack
-    simp [toString_string, stmt, String.toList_append, scan_append, scan, scan_digits, hi _]
+    simp [toString_string, stmtIn, String.toList_append, scan_append, scan, scan_digits, hi _]
   | while_ condition body hc _ ih =>
     have hi := balanced_indentation level
-    have he := exp_scan hc
-    have hb : Balanced (String.intercalate "\n" (body.map (stmt (level + 2)))) :=
+    have he := exp_scan scope hc
+    have hb : Balanced (String.intercalate "\n" (body.map (stmtIn scope (level + 2)))) :=
       balanced_intercalate (by intro stack; simp [scan]) (by
         intro item hm
         obtain ⟨s, hs, rfl⟩ := List.mem_map.mp hm
         exact ih s hs _)
     intro stack
-    have hb' : ∀ st, scan st (['\n'].intercalate (List.map (String.toList ∘ stmt (level + 2)) body))
+    have hb' : ∀ st, scan st (['\n'].intercalate (List.map (String.toList ∘ stmtIn scope (level + 2)) body))
         = some st := fun st => by simpa using hb st
-    simp only [stmt, String.toList_append, scan_append]
+    simp only [stmtIn, String.toList_append, scan_append]
     simp [scan, hi _, he _, hb' _]
   | ifElse condition yes no hc _ _ ihy ihn =>
     have hi := balanced_indentation level
-    have he := exp_scan hc
-    have hy : Balanced (String.intercalate "\n" (yes.map (stmt (level + 2)))) :=
+    have he := exp_scan scope hc
+    have hy : Balanced (String.intercalate "\n" (yes.map (stmtIn scope (level + 2)))) :=
       balanced_intercalate (by intro stack; simp [scan]) (by
         intro item hm
         obtain ⟨s, hs, rfl⟩ := List.mem_map.mp hm
         exact ihy s hs _)
-    have hn : Balanced (String.intercalate "\n" (no.map (stmt (level + 2)))) :=
+    have hn : Balanced (String.intercalate "\n" (no.map (stmtIn scope (level + 2)))) :=
       balanced_intercalate (by intro stack; simp [scan]) (by
         intro item hm
         obtain ⟨s, hs, rfl⟩ := List.mem_map.mp hm
         exact ihn s hs _)
     intro stack
-    have hy' : ∀ st, scan st (['\n'].intercalate (List.map (String.toList ∘ stmt (level + 2)) yes))
+    have hy' : ∀ st, scan st (['\n'].intercalate (List.map (String.toList ∘ stmtIn scope (level + 2)) yes))
         = some st := fun st => by simpa using hy st
-    simp only [stmt, String.toList_append, scan_append]
+    simp only [stmtIn, String.toList_append, scan_append]
     cases no with
     | nil => simp [scan, hi _, he _, hy' _]
     | cons head tail =>
       have hn' : ∀ st, scan st (['\n'].intercalate
-          ((stmt (level + 2) head).toList :: List.map (String.toList ∘ stmt (level + 2)) tail))
+          ((stmtIn scope (level + 2) head).toList :: List.map (String.toList ∘ stmtIn scope (level + 2)) tail))
           = some st := fun st => by simpa using hn st
       simp [scan, scan_append, hi _, he _, hy' _, hn' _]
 
+theorem stmt_balanced {s : Stmt} (h : StmtBalanced s) (level : Nat) : Balanced (stmt level s) :=
+  stmtIn_balanced _ h level
+
 /-- Every statement starts with its own indentation. -/
-theorem stmt_prefix (level : Nat) (s : Stmt) :
-    (indentation level).toList <+: (stmt level s).toList := by
+theorem stmtIn_prefix (scope : List Bap.Var) (level : Nat) (s : Stmt) :
+    (indentation level).toList <+: (stmtIn scope level s).toList := by
   cases s with
   | move var value =>
     cases value with
     | store memory address value endian size =>
       rw [stmt_store_eq]
       split <;> simp [String.toList_append]
-    | _ => simp [toString_string, stmt, String.toList_append]
-  | jmp target => cases target <;> simp [toString_string, stmt, String.toList_append]
-  | special message => simp [toString_string, stmt, String.toList_append]
-  | cpuExn number => simp [toString_string, stmt, String.toList_append]
-  | «while» condition body => simp [stmt, String.toList_append]
-  | ifElse condition yes no => simp [stmt, String.toList_append]
+    | _ => simp [toString_string, stmtIn, String.toList_append]
+  | jmp target => cases target <;> simp [toString_string, stmtIn, String.toList_append]
+  | special message => simp [toString_string, stmtIn, String.toList_append]
+  | cpuExn number => simp [toString_string, stmtIn, String.toList_append]
+  | «while» condition body => simp [stmtIn, String.toList_append]
+  | ifElse condition yes no => simp [stmtIn, String.toList_append]
+
+theorem stmt_prefix (level : Nat) (s : Stmt) :
+    (indentation level).toList <+: (stmt level s).toList := stmtIn_prefix _ level s
 
 theorem stmt_eq_indentation_append (level : Nat) (s : Stmt) :
     ∃ rest, stmt level s = indentation level ++ rest := by
@@ -1052,73 +1383,136 @@ theorem stmt_eq_indentation_append (level : Nat) (s : Stmt) :
   simpa [String.toList_append] using h.symm
 
 /-- Statements without nested blocks only shift when indented further. -/
-theorem stmt_shift (level extra : Nat) (s : Stmt)
+theorem stmtIn_shift (scope : List Bap.Var) (level extra : Nat) (s : Stmt)
     (h : match s with | .while _ _ | .ifElse _ _ _ => False | _ => True) :
-    stmt (extra + level) s = indentation extra ++ stmt level s := by
+    stmtIn scope (extra + level) s = indentation extra ++ stmtIn scope level s := by
   cases s with
   | move var value =>
     cases value with
     | store memory address value endian size =>
       simp only [stmt_store_eq]
       split <;> simp [indentation_add, String.append_assoc]
-    | _ => simp [toString_string, stmt, indentation_add, String.append_assoc]
-  | jmp target => cases target <;> simp [toString_string, stmt, indentation_add, String.append_assoc]
-  | special message => simp [toString_string, stmt, indentation_add, String.append_assoc]
-  | cpuExn number => simp [toString_string, stmt, indentation_add, String.append_assoc]
+    | _ => simp [toString_string, stmtIn, indentation_add, String.append_assoc]
+  | jmp target => cases target <;> simp [toString_string, stmtIn, indentation_add, String.append_assoc]
+  | special message => simp [toString_string, stmtIn, indentation_add, String.append_assoc]
+  | cpuExn number => simp [toString_string, stmtIn, indentation_add, String.append_assoc]
   | «while» condition body => exact h.elim
   | ifElse condition yes no => exact h.elim
 
+theorem stmt_shift (level extra : Nat) (s : Stmt)
+    (h : match s with | .while _ _ | .ifElse _ _ _ => False | _ => True) :
+    stmt (extra + level) s = indentation extra ++ stmt level s := stmtIn_shift _ level extra s h
+
+/-- The statements of a body at the indentation of a function, with names from `scope`. -/
+private def bodyIn (scope : List Bap.Var) (code : List Stmt) : String :=
+  String.intercalate "\n" (code.map (stmtIn scope 2))
+
+private theorem program_eq (code : List Stmt) : program code = bodyIn (code.flatMap stmtVars).eraseDups code := rfl
+
 theorem program_nil : program [] = "" := by simp [program]
 
-theorem program_cons_cons (head next : Stmt) (tail : List Stmt) :
-    program (head :: next :: tail) = stmt 2 head ++ "\n" ++ program (next :: tail) := by
-  simp [program, String.intercalate_cons_cons, String.append_assoc]
+private theorem bodyIn_cons_cons (scope : List Bap.Var) (head next : Stmt) (tail : List Stmt) :
+    bodyIn scope (head :: next :: tail) = stmtIn scope 2 head ++ "\n" ++ bodyIn scope (next :: tail) := by
+  simp [bodyIn, String.intercalate_cons_cons, String.append_assoc]
 
-theorem program_balanced {code : List Stmt} (h : ∀ s ∈ code, StmtBalanced s) :
-    Balanced (program code) :=
+/-- A program's first statement and the rest share one scope, so names agree across statements. -/
+theorem program_cons_cons (head next : Stmt) (tail : List Stmt) :
+    program (head :: next :: tail) =
+      stmtIn ((head :: next :: tail).flatMap stmtVars).eraseDups 2 head ++ "\n" ++
+        String.intercalate "\n" ((next :: tail).map (stmtIn ((head :: next :: tail).flatMap stmtVars).eraseDups 2)) :=
+  bodyIn_cons_cons _ head next tail
+
+private theorem bodyIn_balanced (scope : List Bap.Var) {code : List Stmt} (h : ∀ s ∈ code, StmtBalanced s) :
+    Balanced (bodyIn scope code) :=
   balanced_intercalate (by intro stack; simp [scan]) (by
     intro item hm
     obtain ⟨s, hs, rfl⟩ := List.mem_map.mp hm
-    exact stmt_balanced (h s hs) _)
+    exact stmtIn_balanced scope (h s hs) _)
+
+theorem program_balanced {code : List Stmt} (h : ∀ s ∈ code, StmtBalanced s) :
+    Balanced (program code) :=
+  bodyIn_balanced _ h
+
+/-! ### Names of a rendered unit -/
+
+/-- All the variables of a program are in the scope its statements are rendered with, and no two of
+them render with the same name. -/
+theorem program_names_injective {code : List Stmt} {a b : Bap.Var} (ha : a ∈ code.flatMap stmtVars)
+    (hb : b ∈ code.flatMap stmtVars)
+    (h : varName (code.flatMap stmtVars).eraseDups a = varName (code.flatMap stmtVars).eraseDups b) : a = b :=
+  varName_injective_in_scope (List.mem_eraseDups.mpr ha) (List.mem_eraseDups.mpr hb) h
+
+theorem function_names_injective {params : List Bap.Var} {code : List Stmt} {a b : Bap.Var}
+    (ha : a ∈ params ++ code.flatMap stmtVars) (hb : b ∈ params ++ code.flatMap stmtVars)
+    (h : varName (params ++ code.flatMap stmtVars).eraseDups a =
+      varName (params ++ code.flatMap stmtVars).eraseDups b) : a = b :=
+  varName_injective_in_scope (List.mem_eraseDups.mpr ha) (List.mem_eraseDups.mpr hb) h
+
+theorem exp_var_in_scope {value : Exp} {x : Bap.Var} (h : x ∈ expVars value) : x ∈ (expVars value).eraseDups :=
+  List.mem_eraseDups.mpr h
+
+/-- Every destination and every read variable of a statement is in its scope. -/
+theorem stmt_move_in_scope (var : Bap.Var) (value : Exp) {x : Bap.Var} (h : x = var ∨ x ∈ expVars value) :
+    x ∈ (stmtVars (.move var value)).eraseDups := by
+  apply List.mem_eraseDups.mpr
+  simpa [stmtVars] using h
+
+theorem stmt_blocks_in_scope {condition : Exp} {body : List Stmt} {x : Bap.Var} {s : Stmt} (hs : s ∈ body)
+    (h : x ∈ stmtVars s) : x ∈ (stmtVars (.while condition body)).eraseDups := by
+  apply List.mem_eraseDups.mpr
+  simp only [stmtVars, List.mem_append, List.mem_flatMap]
+  exact Or.inr ⟨s, hs, h⟩
+
+/-- Variables that only differ in type, or in virtuality, render differently side by side. -/
+theorem varName_typ_distinct {scope : List Bap.Var} {a b : Bap.Var} (ha : a ∈ scope) (hb : b ∈ scope)
+    (hne : a.typ ≠ b.typ ∨ a.isVirtual ≠ b.isVirtual) : varName scope a ≠ varName scope b := by
+  intro h
+  have := varName_injective_in_scope ha hb h
+  subst this
+  simp at hne
 
 /-! ### Functions -/
 
-private def paramList (params : List Bap.Var) : String :=
-  String.intercalate ", " (params.map fun var => s!"{ctype var.typ} {varName var}")
+private def paramList (scope params : List Bap.Var) : String :=
+  String.intercalate ", " (params.map fun var => s!"{ctype var.typ} {varName scope var}")
 
 private theorem function_eq (name : String) (params : List Bap.Var) (code : Bap.Bil.Program) :
     function name params code =
-      "void " ++ identifier name ++ "(" ++ paramList params ++ ") {" ++ "\n" ++ program code ++ "\n}" :=
+      "void " ++ identifier name ++ "(" ++ paramList (params ++ code.flatMap stmtVars).eraseDups params ++ ") {" ++
+        "\n" ++ bodyIn (params ++ code.flatMap stmtVars).eraseDups code ++ "\n}" :=
   rfl
 
 theorem function_shape (name : String) (params : List Bap.Var) (code : Bap.Bil.Program) :
     ∃ rest, function name params code = "void " ++ identifier name ++ "(" ++ rest :=
-  ⟨paramList params ++ ") {" ++ "\n" ++ program code ++ "\n}", by
+  ⟨paramList (params ++ code.flatMap stmtVars).eraseDups params ++ ") {" ++ "\n" ++
+      bodyIn (params ++ code.flatMap stmtVars).eraseDups code ++ "\n}", by
     rw [function_eq]; simp only [String.append_assoc]⟩
 
 /-- A function with no parameters and no code. -/
 theorem function_empty (name : String) :
     function name [] [] = "void " ++ identifier name ++ "() {\n\n}" := by
   rw [function_eq]
-  simp only [paramList, program, List.map_nil, String.intercalate_nil]
+  simp only [paramList, bodyIn, List.map_nil, String.intercalate_nil]
   simp [String.append_assoc]
 
 /-- A whole rendered function has properly nested brackets. -/
 theorem function_balanced (name : String) (params : List Bap.Var) {code : Bap.Bil.Program}
     (h : ∀ s ∈ code, StmtBalanced s) : Balanced (function name params code) := by
   have hn := balanced_identifier name
-  have hp : Balanced (paramList params) := by
+  have hp : ∀ scope, Balanced (paramList scope params) := by
+    intro scope
     apply balanced_intercalate (by intro stack; simp [scan])
     intro item hm
     obtain ⟨var, _, rfl⟩ := List.mem_map.mp hm
     have ht := balanced_ctype var.typ
-    have hv := balanced_varName var
+    have hv := balanced_varName scope var
     intro stack
     simp [toString_string, String.toList_append, scan_append, scan, ht _, hv _]
-  have hb := program_balanced h
+  have hb := bodyIn_balanced (params ++ code.flatMap stmtVars).eraseDups h
+  have hp := hp (params ++ code.flatMap stmtVars).eraseDups
   rw [function_eq]
-  generalize paramList params = P at hp
-  generalize program code = B at hb
+  generalize paramList _ params = P at hp
+  generalize bodyIn _ code = B at hb
   intro stack
   simp [String.toList_append, scan_append, scan, hn _, hp _, hb _]
 
@@ -1301,10 +1695,10 @@ private theorem signedBinName_no_paren {op : BinOp} {name : String} (h : signedB
   cases op <;> simp [signedBinName] at h <;> subst h <;> simp
 
 /-- A binary operation's rendering determines its operator: `slt` is not `<`. -/
-theorem exp_bin_op_injective (left right : Exp) {a b : BinOp}
-    (h : exp (.bin a left right) = exp (.bin b left right)) : a = b := by
+theorem expIn_bin_op_injective (scope : List Bap.Var) (left right : Exp) {a b : BinOp}
+    (h : expIn scope (.bin a left right) = expIn scope (.bin b left right)) : a = b := by
   have hl := congrArg String.toList h
-  simp only [exp] at hl
+  simp only [expIn] at hl
   apply opName_injective
   cases ha : signedBinName a with
   | some na =>
@@ -1338,6 +1732,10 @@ theorem exp_bin_op_injective (left right : Exp) {a b : BinOp}
       have e : (binName a).toList = (binName b).toList := by simpa using hl
       simp [opName, ha, hb, String.toList_inj.mp e]
 
+theorem exp_bin_op_injective (left right : Exp) {a b : BinOp}
+    (h : exp (.bin a left right) = exp (.bin b left right)) : a = b :=
+  expIn_bin_op_injective _ left right h
+
 /-- Signed comparisons render distinctly from their unsigned twins. -/
 theorem exp_signed_distinct (left right : Exp) {signed unsigned : BinOp}
     (h : (signed, unsigned) ∈ [(BinOp.slt, BinOp.lt), (.sle, .le), (.sgt, .gt), (.sge, .ge)]) :
@@ -1348,33 +1746,33 @@ theorem exp_signed_distinct (left right : Exp) {signed unsigned : BinOp}
   simp at h
   rcases h with ⟨h1, h2⟩ | ⟨h1, h2⟩ | ⟨h1, h2⟩ | ⟨h1, h2⟩ <;> (rw [h1] at h2; cases h2)
 
-theorem exp_slt (left right : Exp) :
-    exp (.bin .slt left right) = "slt(" ++ exp left ++ ", " ++ exp right ++ ")" := by
-  simp [exp, signedBinName, toString_string, String.append_assoc]
+theorem exp_slt (scope : List Bap.Var) (left right : Exp) :
+    expIn scope (.bin .slt left right) = "slt(" ++ expIn scope left ++ ", " ++ expIn scope right ++ ")" := by
+  simp [expIn, signedBinName, toString_string, String.append_assoc]
 
 /-- Literal widths are intentionally not rendered: a C literal takes its type from the context,
 and the operand widths of a well-typed expression agree. -/
 theorem exp_int_forgets_width (n w w' : Nat) (h : n < 2 ^ w) (h' : n < 2 ^ w') :
     exp (.int (BitVec.ofNat w n)) = exp (.int (BitVec.ofNat w' n)) := by
-  simp [exp, BitVec.toNat_ofNat, Nat.mod_eq_of_lt h, Nat.mod_eq_of_lt h']
+  simp [exp, expIn, BitVec.toNat_ofNat, Nat.mod_eq_of_lt h, Nat.mod_eq_of_lt h']
 
 /-- An unknown value renders with its type. -/
 theorem exp_unknown (message : String) (typ : Bap.Typ) :
     exp (.unknown message typ) = "unknown(" ++ quote message ++ ", " ++ ctype typ ++ ")" := by
-  simp [exp, toString_string, String.append_assoc]
+  simp [exp, expIn, toString_string, String.append_assoc]
 
 /-- A store to the memory it reads renders as a bare write. -/
-theorem stmt_store_in_place (level : Nat) (var : Bap.Var) (address value : Exp)
+theorem stmt_store_in_place (scope : List Bap.Var) (level : Nat) (var : Bap.Var) (address value : Exp)
     (endian : Bap.Endian) (size : Nat) :
-    stmt level (.move var (.store (.var var) address value endian size)) =
-      indentation level ++ writeText (.var var) address value endian size := by
+    stmtIn scope level (.move var (.store (.var var) address value endian size)) =
+      indentation level ++ writeText scope (.var var) address value endian size := by
   rw [stmt_store_eq]; simp [inPlace]
 
 /-- Any other store names its destination. -/
-theorem stmt_store_other_memory (level : Nat) (var : Bap.Var) (memory address value : Exp)
+theorem stmt_store_other_memory (scope : List Bap.Var) (level : Nat) (var : Bap.Var) (memory address value : Exp)
     (endian : Bap.Endian) (size : Nat) (h : ∀ source, memory = .var source → source ≠ var) :
-    stmt level (.move var (.store memory address value endian size)) =
-      indentation level ++ varName var ++ " = " ++ writeText memory address value endian size := by
+    stmtIn scope level (.move var (.store memory address value endian size)) =
+      indentation level ++ varName scope var ++ " = " ++ writeText scope memory address value endian size := by
   rw [stmt_store_eq]
   have : inPlace var memory = false := by
     cases memory <;> simp [inPlace]
@@ -1382,47 +1780,48 @@ theorem stmt_store_other_memory (level : Nat) (var : Bap.Var) (memory address va
   simp [this]
 
 /-- The destination of a store can be read back from its rendering. -/
-theorem stmt_store_destination (level : Nat) {var var' : Bap.Var} (memory address value : Exp)
+theorem stmt_store_destination {scope : List Bap.Var} (level : Nat) {var var' : Bap.Var}
+    (hv : var ∈ scope) (hv' : var' ∈ scope) (memory address value : Exp)
     (endian : Bap.Endian) (size : Nat)
-    (h : stmt level (.move var (.store memory address value endian size)) =
-      stmt level (.move var' (.store memory address value endian size))) :
-    var.name = var'.name ∧ var.index = var'.index := by
+    (h : stmtIn scope level (.move var (.store memory address value endian size)) =
+      stmtIn scope level (.move var' (.store memory address value endian size))) :
+    var = var' := by
   simp only [stmt_store_eq] at h
-  have longer : ∀ (v : Bap.Var) (w : String), ¬ w = varName v ++ " = " ++ w := by
+  have longer : ∀ (v : Bap.Var) (w : String), ¬ w = varName scope v ++ " = " ++ w := by
     intro v w e
     have := congrArg String.length e
     simp at this
-  generalize writeText memory address value endian size = w at h
-  cases hv : inPlace var memory <;> cases hv' : inPlace var' memory <;> simp only [hv, hv', Bool.false_eq_true, ↓reduceIte] at h
+  generalize writeText scope memory address value endian size = w at h
+  cases hp : inPlace var memory <;> cases hp' : inPlace var' memory <;> simp only [hp, hp', Bool.false_eq_true, ↓reduceIte] at h
   · have hl := congrArg String.toList h
     simp only [String.toList_append, List.append_assoc, List.append_cancel_left_eq] at hl
-    have e : (varName var).toList = (varName var').toList := by simpa using hl
-    exact varName_injective (String.toList_inj.mp e)
+    have e : (varName scope var).toList = (varName scope var').toList := by simpa using hl
+    exact varName_injective_in_scope hv hv' (String.toList_inj.mp e)
   · exfalso
-    have e : varName var ++ " = " ++ w = w := by
+    have e : varName scope var ++ " = " ++ w = w := by
       have hl := congrArg String.toList h
       apply String.toList_inj.mp
       simpa [String.toList_append, List.append_assoc] using hl
     exact longer var w e.symm
   · exfalso
-    have e : w = varName var' ++ " = " ++ w := by
+    have e : w = varName scope var' ++ " = " ++ w := by
       have hl := congrArg String.toList h
       apply String.toList_inj.mp
       simpa [String.toList_append, List.append_assoc] using hl
     exact longer var' w e
-  · cases memory <;> simp [inPlace] at hv hv'
-    rw [← hv, hv']; exact ⟨rfl, rfl⟩
+  · cases memory <;> simp [inPlace] at hp hp'
+    rw [← hp, hp']
 
 /-- A direct jump renders as a `goto` to its label. -/
-theorem stmt_jmp_direct {width : Nat} (level : Nat) (target : BitVec width) :
-    stmt level (.jmp (.int target)) = indentation level ++ "goto loc_" ++ hex target.toNat ++ ";" := by
-  simp [toString_string, stmt]
+theorem stmt_jmp_direct {width : Nat} (scope : List Bap.Var) (level : Nat) (target : BitVec width) :
+    stmtIn scope level (.jmp (.int target)) = indentation level ++ "goto loc_" ++ hex target.toNat ++ ";" := by
+  simp [toString_string, stmtIn]
 
 /-- A computed jump renders as a computed `goto`, not as a `return`. -/
-theorem stmt_jmp_computed (level : Nat) (target : Exp)
+theorem stmt_jmp_computed (scope : List Bap.Var) (level : Nat) (target : Exp)
     (h : match target with | .int _ => False | _ => True) :
-    stmt level (.jmp target) = indentation level ++ "goto *" ++ exp target ++ ";" := by
-  cases target <;> first | exact h.elim | simp [toString_string, stmt]
+    stmtIn scope level (.jmp target) = indentation level ++ "goto *" ++ expIn scope target ++ ";" := by
+  cases target <;> first | exact h.elim | simp [toString_string, stmtIn]
 
 theorem ctype_standard :
     ctype (.imm 8) = "uint8_t" ∧ ctype (.imm 16) = "uint16_t" ∧

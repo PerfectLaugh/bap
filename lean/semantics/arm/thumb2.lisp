@@ -265,6 +265,112 @@
 ;; LLVM 23 names the register forms of CMN without z
 (defun tCMN (rn rm cnd _) (tCMNz rn rm cnd _))
 
+;; THE 16-BIT INSTRUCTIONS OF plugins/thumb
+;;
+;; The flags are set outside of an IT block, where the condition is AL.
+;; The results are bound, and the flags are set, before the destination
+;; is written, as a source can be the destination.
+
+(defmacro t16-add (rd x y c cnd)
+  (when (condition-holds cnd)
+    (let ((a x) (b y) (r (+ a b c)))
+      (when (is-unconditional cnd) (set-nzcv-from-registers r a b))
+      (set$ rd r))))
+
+(defmacro t16-shift (rd rm r c cnd)
+  (when (condition-holds cnd)
+    (let ((carry c) (x r))
+      (when (is-unconditional cnd)
+        (set CF carry)
+        (set NF (msb x))
+        (set ZF (is-zero x)))
+      (set$ rd x))))
+
+(defun tMOVi8 (rd _ imm cnd _)
+  (when (condition-holds cnd)
+    (when (is-unconditional cnd)
+      (set NF (msb imm))
+      (set ZF (is-zero imm)))
+    (set$ rd imm)))
+(defun tMOVSr (rd rn)
+  (let ((x rn))
+    (set NF (msb x))
+    (set ZF (is-zero x))
+    (set$ rd x)))
+
+(defun tADDi3 (rd _ rn imm cnd _) (t16-add rd rn imm (cast-unsigned 32 0) cnd))
+(defun tADDi8 (rd _ rn imm cnd _) (t16-add rd rn imm (cast-unsigned 32 0) cnd))
+(defun tADDrr (rd _ rn rm cnd _) (t16-add rd rn rm (cast-unsigned 32 0) cnd))
+(defun tADC (rd _ rn rm cnd _) (t16-add rd rn rm (cast-unsigned 32 CF) cnd))
+(defun tSUBi3 (rd _ rn imm cnd _) (t16-add rd rn (lnot imm) (cast-unsigned 32 1) cnd))
+(defun tSUBi8 (rd _ rn imm cnd _) (t16-add rd rn (lnot imm) (cast-unsigned 32 1) cnd))
+(defun tSUBrr (rd _ rn rm cnd _) (t16-add rd rn (lnot rm) (cast-unsigned 32 1) cnd))
+(defun tCMPi8 (rn imm cnd _) (t2-compare rn (lnot imm) (cast-unsigned 32 1) cnd))
+(defun tCMPr (rn rm cnd _) (t2-compare rn (lnot rm) (cast-unsigned 32 1) cnd))
+(defun tORR (rd _ rn rm cnd _) (tLOGs logor rd rn rm cnd))
+
+(defun tADDrSPi (rd _ imm cnd _)
+  (when (condition-holds cnd) (set$ rd (+ SP (* imm 4)))))
+(defun tADDspi (_ _ imm cnd _)
+  (when (condition-holds cnd) (set SP (+ SP (* imm 4)))))
+(defun tSUBspi (_ _ imm cnd _)
+  (when (condition-holds cnd) (set SP (- SP (* imm 4)))))
+
+;; the immediate 0 of the right shifts encodes a shift of 32
+(defun tLSLri (rd _ rm n cnd _)
+  (t16-shift rd rm (lshift rm n) (if (= n 0) CF (msb (lshift rm (- n 1)))) cnd))
+(defun tLSRri (rd _ rm n cnd _)
+  (t16-shift rd rm (if (= n 0) (cast-unsigned 32 0) (rshift rm n))
+             (if (= n 0) (msb rm) (msb (lshift rm (- 32 n)))) cnd))
+(defun tASRri (rd _ rm n cnd _)
+  (t16-shift rd rm (if (= n 0) (arshift rm 31) (arshift rm n))
+             (if (= n 0) (msb rm) (msb (lshift rm (- 32 n)))) cnd))
+
+(defun tSXTB (rd rm cnd _)
+  (when (condition-holds cnd) (set$ rd (cast-signed 32 (cast-low 8 rm)))))
+(defun tSXTH (rd rm cnd _)
+  (when (condition-holds cnd) (set$ rd (cast-signed 32 (cast-low 16 rm)))))
+(defun tUXTB (rd rm cnd _)
+  (when (condition-holds cnd) (set$ rd (cast-unsigned 32 (cast-low 8 rm)))))
+(defun tUXTH (rd rm cnd _)
+  (when (condition-holds cnd) (set$ rd (cast-unsigned 32 (cast-low 16 rm)))))
+
+(defun tLDRi (rd rn imm cnd _)
+  (when (condition-holds cnd) (set$ rd (load-word (+ rn (* imm 4))))))
+(defun tLDRspi (rd rn imm cnd _) (tLDRi rd rn imm cnd _))
+(defun tLDRr (rd rn rm cnd _)
+  (when (condition-holds cnd) (set$ rd (load-word (+ rn rm)))))
+(defun tLDRpci (rd imm cnd _)
+  (when (condition-holds cnd) (set$ rd (load-word (+ (logand (t2pc) 0xfffffffc) imm)))))
+(defun tLDRBi (rd rn imm cnd _)
+  (when (condition-holds cnd) (set$ rd (cast-unsigned 32 (load-bits 8 (+ rn imm))))))
+(defun tLDRBr (rd rn rm cnd _)
+  (when (condition-holds cnd) (set$ rd (cast-unsigned 32 (load-bits 8 (+ rn rm))))))
+(defun tLDRSB (rd rn rm cnd _)
+  (when (condition-holds cnd) (set$ rd (cast-signed 32 (load-bits 8 (+ rn rm))))))
+(defun tLDRHi (rd rn imm cnd _)
+  (when (condition-holds cnd) (set$ rd (cast-unsigned 32 (load-bits 16 (+ rn (* imm 2)))))))
+(defun tLDRHr (rd rn rm cnd _)
+  (when (condition-holds cnd) (set$ rd (cast-unsigned 32 (load-bits 16 (+ rn rm))))))
+(defun tLDRSH (rd rn rm cnd _)
+  (when (condition-holds cnd) (set$ rd (cast-signed 32 (load-bits 16 (+ rn rm))))))
+(defun tSTRi (rd rn imm cnd _)
+  (when (condition-holds cnd) (store-word (+ rn (* imm 4)) rd)))
+(defun tSTRspi (rd rn imm cnd _) (tSTRi rd rn imm cnd _))
+(defun tSTRr (rd rn rm cnd _)
+  (when (condition-holds cnd) (store-word (+ rn rm) rd)))
+(defun tSTRBi (rd rn imm cnd _)
+  (when (condition-holds cnd) (store-word (+ rn imm) (cast-low 8 rd))))
+(defun tSTRBr (rd rn rm cnd _)
+  (when (condition-holds cnd) (store-word (+ rn rm) (cast-low 8 rd))))
+(defun tSTRHi (rd rn imm cnd _)
+  (when (condition-holds cnd) (store-word (+ rn (* imm 2)) (cast-low 16 rd))))
+(defun tSTRHr (rd rn rm cnd _)
+  (when (condition-holds cnd) (store-word (+ rn rm) (cast-low 16 rd))))
+
+(defun t2LDRpci (rd imm cnd _)
+  (when (condition-holds cnd) (t2set rd (load-word (+ (logand (t2pc) 0xfffffffc) imm)))))
+
 ;; THE T32 INSTRUCTIONS OF THE A32 ONES
 ;;
 ;; The T32 versions of the A32 instructions in arm-a32 and arm-a32-mem,

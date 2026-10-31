@@ -1229,7 +1229,14 @@ let binop (op : binop) x y =
       | MOD when same -> S (w, norm w (Stdlib.Int64.unsigned_rem a b))
       | SDIVIDE when same ->
           S (w, norm w (Stdlib.Int64.div (sext w a) (sext w' b)))
-      | SMOD when same -> S (w, norm w (Stdlib.Int64.rem (sext w a) (sext w' b)))
+      | SMOD when same ->
+          (* the sign follows the divisor, and [smod x 0 = x] *)
+          let a = sext w a and b = sext w' b in
+          let r = if equal b 0L then a else Stdlib.Int64.rem a b in
+          let adjust =
+            (not (equal b 0L)) && (not (equal r 0L)) && r lxor b < 0L
+          in
+          S (w, norm w (if adjust then r + b else r))
       | LSHIFT ->
           shift (fun over n -> S (w, if over then 0L else norm w (a lsl n)))
       | RSHIFT -> shift (fun over n -> S (w, if over then 0L else a lsr n))
@@ -1604,7 +1611,7 @@ and compile_plain ctx : exp -> unit -> value = function
   | BinOp (op, x, y) -> (
       let x = compile_exp ctx x and y = compile_exp ctx y in
       match op with
-      | DIVIDE | SDIVIDE | MOD | SMOD ->
+      | DIVIDE | SDIVIDE | MOD ->
           fun () ->
             let x = x () and y = y () in
             (* the division by zero is the exception of the target, e.g.,
@@ -1683,7 +1690,7 @@ and compile_tainted ctx s : exp -> unit -> value = function
       let x = compile_exp ctx x and y = compile_exp ctx y in
       let apply =
         match op with
-        | DIVIDE | SDIVIDE | MOD | SMOD ->
+        | DIVIDE | SDIVIDE | MOD ->
             fun a b ->
               if is_zero b then raise (Unsupported_insn "a division by zero")
               else binop op a b
@@ -3134,3 +3141,8 @@ let restore t ((regs, others) : context) =
         ~len:(Int.min (String.length data) (Bytes.length b)));
   Hashtbl.clear t.others;
   List.iter others ~f:(fun (name, x) -> Hashtbl.set t.others ~key:name ~data:x)
+
+module For_tests = struct
+  let binop op x y = word (binop op (of_word x) (of_word y))
+  let jit_binop = Bap_lifted_jit.binop_module
+end

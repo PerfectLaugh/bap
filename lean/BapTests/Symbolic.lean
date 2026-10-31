@@ -116,6 +116,108 @@ private def checkSorts : IO Unit := do
   assertEqual "assert of a literal" true (← FFI.Z3.isUnsat [.const (BitVec.ofNat 1 0)])
   assertEqual "assert of a true literal" true (← FFI.Z3.isSat [.const (BitVec.ofNat 1 1)])
 
+private def nodeCount : Expr → Nat
+  | .var .. | .const .. => 1
+  | .app _ _ args => 1 + (args.attach.map fun ⟨a, _⟩ => nodeCount a).sum
+  | .extract _ _ value => 1 + nodeCount value
+  | .concat left right => 1 + nodeCount left + nodeCount right
+  | .ite condition yes no => 1 + nodeCount condition + nodeCount yes + nodeCount no
+  | .select _ address => 1 + nodeCount address
+
+private def inputs : IO Unit := do
+  match Bap.Symbolic.run [.move y (.bin .add (.var x) (int 2))] with
+  | .ok [⟨state, .normal⟩] =>
+    match Assoc.get y state.env with
+    | some value =>
+      let input : Expr := .var "x#0" 64
+      assertEqual "unset register is an input" true
+        (← FFI.Z3.isUnsat [different value (.app "bvadd" 64 [input, .const (BitVec.ofNat 64 2)])])
+      assertEqual "input is unconstrained" true
+        (← FFI.Z3.isSat [equal input (.const (BitVec.ofNat 64 7))])
+    | none => throw <| IO.userError "missing assigned register"
+  | _ => throw <| IO.userError "reading an unset register should succeed"
+  match evalExp {} (.var x), evalExp {} (.var x) with
+  | .ok first, .ok second => assertEqual "an input is one value" true (← FFI.Z3.isUnsat [different first second])
+  | _, _ => throw <| IO.userError "input evaluation failed"
+  let mem : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  match evalExp {} (.var mem) with
+  | .error _ => IO.println "ok: memory is not a bitvector input"
+  | .ok _ => throw <| IO.userError "memory read as a bitvector"
+
+private def rejected (name : String) (result : Except String α) : IO Unit :=
+  match result with
+  | .error _ => IO.println s!"ok: {name}"
+  | .ok _ => throw <| IO.userError s!"{name}: accepted"
+
+private def zeroWidth : IO Unit := do
+  let mem : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let empty : Bap.Var := ⟨"empty", .imm 0, 0, false⟩
+  rejected "zero-size load rejected" (evalExp {} (.load (.var mem) (int 0) .little 0))
+  rejected "zero-width constant rejected" (evalExp {} (.int (BitVec.ofNat 0 0)))
+  rejected "zero-width input rejected" (evalExp {} (.var empty))
+  rejected "zero-width unknown rejected" (evalExp {} (.unknown "u" (.imm 0)))
+  rejected "zero-size store rejected" (Bap.Symbolic.run [.move mem (.store (.var mem) (int 0) (.int (BitVec.ofNat 8 1)) .little 0)])
+  rejected "overlapping store rejected"
+    (Bap.Symbolic.run [.move ⟨"small", .mem 1 8, 0, false⟩
+      (.store (.var ⟨"small", .mem 1 8, 0, false⟩) (.int (BitVec.ofNat 1 0)) (.int (BitVec.ofNat 24 1)) .little 3)])
+
+private def memoryChoice : IO Unit := do
+  let mem : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let result : Bap.Var := ⟨"r", .imm 8, 0, false⟩
+  let at0 := int 0
+  let stored (value : Nat) : Bil.Exp := .store (.var mem) at0 (.int (BitVec.ofNat 8 value)) .little 1
+  let byteAt (value : Nat) : Expr := .const (BitVec.ofNat 8 value)
+  match evalExp {} (.load (.ite (.var bit) (stored 1) (stored 2)) at0 .little 1) with
+  | .ok loaded =>
+    let c : Expr := .var "c#0" 1
+    assertEqual "conditional memory, then" true (← FFI.Z3.isUnsat [Expr.eqOne c, different loaded (byteAt 1)])
+    assertEqual "conditional memory, else" true (← FFI.Z3.isUnsat [Expr.eqZero c, different loaded (byteAt 2)])
+    assertEqual "conditional memory, either" true (← FFI.Z3.isSat [equal loaded (byteAt 1)])
+  | .error error => throw <| IO.userError error
+  match evalExp {} (.load (.ite (.int (BitVec.ofNat 1 1)) (stored 1) (stored 2)) at0 .little 1) with
+  | .ok loaded => assertEqual "known condition picks a memory" "((_ extract 7 0) (_ bv1 8))" loaded.render
+  | .error error => throw <| IO.userError error
+  let _ := result
+
+private def sameBase : IO Unit := do
+  let base : Expr := .var "b" 64
+  let offset (value : Nat) : Expr := .app "bvadd" 64 [base, .const (BitVec.ofNat 64 value)]
+  let lowered (value : Nat) : Expr := .app "bvsub" 64 [base, .const (BitVec.ofNat 64 value)]
+  let byteAt (value : Nat) : Expr := .const (BitVec.ofNat 8 value)
+  let written := Bap.Symbolic.Memory.empty.writeByte (offset 1) (byteAt 7)
+  assertEqual "different offsets need no guard" (Bap.Symbolic.Memory.empty.readByte (offset 2)).render (written.readByte (offset 2)).render
+  assertEqual "offset from the base itself needs no guard" (Bap.Symbolic.Memory.empty.readByte base).render (written.readByte base).render
+  let below := Bap.Symbolic.Memory.empty.writeByte (lowered 8) (byteAt 7)
+  assertEqual "lowered offsets need no guard" (Bap.Symbolic.Memory.empty.readByte (lowered 16)).render (below.readByte (lowered 16)).render
+  assertEqual "same offset by another route is the same byte" true
+    (← FFI.Z3.isUnsat [different ((Bap.Symbolic.Memory.empty.writeByte (offset (2 ^ 64 - 8)) (byteAt 7)).readByte (lowered 8)) (byteAt 7)])
+  assertEqual "other bases still alias" true
+    (← FFI.Z3.isUnsat [equal base (.var "other" 64),
+      different (written.readByte (.app "bvadd" 64 [.var "other" 64, .const (BitVec.ofNat 64 1)])) (byteAt 7)])
+  let sp : Bap.Var := ⟨"sp", .imm 64, 0, false⟩
+  let mem : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let result : Bap.Var := ⟨"r", .imm 64, 0, false⟩
+  let slot (index : Nat) : Bil.Exp := .bin .add (.var sp) (int (8 * index))
+  let program (count : Nat) : Bil.Program :=
+    (List.range count).map (fun index => .move mem (.store (.var mem) (slot index) (int index) .little 8)) ++
+      [.move result (.load (.var mem) (slot 0) .little 8)]
+  match Bap.Symbolic.run (program 64) with
+  | .ok [⟨state, .normal⟩] =>
+    match Assoc.get result state.env with
+    | some loaded =>
+      assertTrue s!"read through 64 stack slots stays small: {nodeCount loaded}" (nodeCount loaded < 500)
+      assertEqual "read through 64 stack slots" true (← FFI.Z3.isUnsat [different loaded (.const (BitVec.ofNat 64 0))])
+    | none => throw <| IO.userError "missing load"
+  | _ => throw <| IO.userError "unexpected stack results"
+
+private def fuelStability : IO Unit := do
+  let branching : Bil.Program := [.ifElse (.var bit) [.move y (int 1)] [.ifElse (.var bit) [] [.jmp (int 2)]], .special "end"]
+  match Bap.Symbolic.run branching {} 8, Bap.Symbolic.run branching {} 100 with
+  | .ok small, .ok large =>
+    assertTrue "no path is exhausted" (small.all fun result => !(result.outcome matches .exhausted))
+    assertEqual "more fuel changes nothing" (repr small).pretty (repr large).pretty
+  | _, _ => throw <| IO.userError "fuel stability run failed"
+
 def run : IO Unit := do
   let script := renderScript [Expr.eqOne xExpr]
   assertTrue "SMT declares symbolic xExpr" ((script.splitOn "declare-const |x!64| (_ BitVec 64)").length > 1)
@@ -165,6 +267,11 @@ def run : IO Unit := do
   | .error _ => IO.println "ok: inverted symbolic extract rejected"
   | .ok _ => throw <| IO.userError "inverted symbolic extract succeeded"
   paths
+  inputs
+  zeroWidth
+  memoryChoice
+  sameBase
+  fuelStability
   naming
   checkOperators
   checkSorts

@@ -350,13 +350,24 @@ theorem app_ne_result (argument result : ValueSort) : ValueSort.app argument res
 theorem var_version_laws (var : Bap.Theory.Var) (first second : Nat) :
     (var.version first).version second = var.version second ∧
       (var.version first).base = var.base ∧ var.version var.index = var ∧ var.base.base = var.base ∧
-      (var.version first).isMutable = var.isMutable :=
-  ⟨rfl, rfl, rfl, rfl, rfl⟩
+      (var.version first).isMutable = var.isMutable := by
+  cases var with
+  | mk name sort index isVirtual isLet =>
+    cases isLet <;> simp [Bap.Theory.Var.version, Bap.Theory.Var.base, Bap.Theory.Var.isMutable]
+
+/-- Scoped variables are immutable and have no versions, as upstream's `Let`. -/
+theorem let_laws {var : Bap.Theory.Var} (h : var.isLet = true) (index : Nat) :
+    var.version index = var ∧ var.isMutable = false := by
+  simp [Bap.Theory.Var.version, Bap.Theory.Var.isMutable, h]
+
+/-- Registers and temporaries are mutable, whether or not they are virtual. -/
+theorem isMutable_iff (var : Bap.Theory.Var) : var.isMutable = true ↔ var.isLet = false := by
+  simp [Bap.Theory.Var.isMutable]
 
 /-- Versions of one variable are equal exactly when their indices are. -/
-theorem version_injective (var : Bap.Theory.Var) {first second : Nat} :
+theorem version_injective (var : Bap.Theory.Var) (h : var.isLet = false) {first second : Nat} :
     var.version first = var.version second ↔ first = second := by
-  simp [Bap.Theory.Var.version]
+  simp [Bap.Theory.Var.version, h]
 
 /-- Two variables agree when their bases and indices do. -/
 theorem var_ext_base {left right : Bap.Theory.Var} (hbase : left.base = right.base)
@@ -1567,6 +1578,7 @@ open_private Bap.Theory.Target Bap.Theory.aliasPartVar as aliasPartVar
 open_private Bap.Theory.Target Bap.Theory.partWidth as partWidth
 open_private Bap.Theory.Target Bap.Theory.findSub as findSub
 open_private Bap.Theory.Target Bap.Theory.findSub.find as findSubFind
+open_private Bap.Theory.Target Bap.Theory.resolveBase as resolveBase
 
 /-! ### Declarations -/
 
@@ -1593,17 +1605,17 @@ theorem declare_inherits {declaration : Declaration} {parent : T} (hp : declarat
     (hbits : declaration.bits = none) (hbyte : declaration.byte = none)
     (hdataAlignment : declaration.dataAlignment = none) (hcodeAlignment : declaration.codeAlignment = none)
     (hdata : declaration.data = none) (hcode : declaration.code = none)
-    (hvars : declaration.vars = none) (hregs : declaration.regs = none)
+    (hregs : declaration.regs = none)
     (haliases : declaration.aliases = none) (hendianness : declaration.endianness = none)
     (hsystem : declaration.system = none) (habi : declaration.abi = none) (hfabi : declaration.fabi = none)
     (hfiletype : declaration.filetype = none) (hoptions : declaration.options = none) :
     let child := declare declaration
     child.bits = parent.bits ∧ child.byte = parent.byte ∧ child.dataAlignment = parent.dataAlignment ∧
       child.codeAlignment = parent.codeAlignment ∧ child.data = parent.data ∧ child.code = parent.code ∧
-      child.vars = parent.vars ∧ child.regs = parent.regs ∧ child.aliases = parent.aliases ∧
+      child.regs = parent.regs ∧ child.aliases = parent.aliases ∧
       child.endianness = parent.endianness ∧ child.system = parent.system ∧ child.abi = parent.abi ∧
       child.fabi = parent.fabi ∧ child.filetype = parent.filetype ∧ child.options = parent.options := by
-  simp [declare, hp, hbits, hbyte, hdataAlignment, hcodeAlignment, hdata, hcode, hvars, hregs,
+  simp [declare, hp, hbits, hbyte, hdataAlignment, hcodeAlignment, hdata, hcode, hregs,
     haliases, hendianness, hsystem, habi, hfabi, hfiletype, hoptions]
 
 /-- Explicit fields always win over inheritance, whatever the parent is. -/
@@ -1611,22 +1623,24 @@ theorem declare_overrides (declaration : Declaration) :
     (∀ value, declaration.bits = some value → (declare declaration).bits = value) ∧
       (∀ value, declaration.byte = some value → (declare declaration).byte = value) ∧
       (∀ value, declaration.data = some value → (declare declaration).data = some value) ∧
-      (∀ value, declaration.vars = some value → (declare declaration).vars = value) ∧
+      (∀ value, declaration.vars = some value → ∀ var ∈ value, var ∈ (declare declaration).vars) ∧
       (∀ value, declaration.endianness = some value → (declare declaration).endianness = value) ∧
       (∀ value, declaration.system = some value → (declare declaration).system = value) := by
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩ <;> intro value h <;> simp [declare, h]
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩ <;> intro value h
+  · simp [declare, h]
+  · simp [declare, h]
+  · simp [declare, h]
+  · intro var hv
+    simp [declare, h, List.mem_eraseDups, hv]
+  · simp [declare, h]
+  · simp [declare, h]
 
-/-- `specified` records exactly the fields a declaration sets itself, never inherited ones. -/
-theorem specified_declare (declaration : Declaration) :
-    ("bits" ∈ (declare declaration).specified ↔ declaration.bits.isSome = true) ∧
-      ("byte" ∈ (declare declaration).specified ↔ declaration.byte.isSome = true) ∧
-      ("system" ∈ (declare declaration).specified ↔ declaration.system.isSome = true) ∧
-      ("abi" ∈ (declare declaration).specified ↔ declaration.abi.isSome = true) ∧
-      ("fabi" ∈ (declare declaration).specified ↔ declaration.fabi.isSome = true) ∧
-      ("filetype" ∈ (declare declaration).specified ↔ declaration.filetype.isSome = true) := by
-  simp only [declare]
-  cases declaration.bits <;> cases declaration.byte <;> cases declaration.system <;>
-    cases declaration.abi <;> cases declaration.fabi <;> cases declaration.filetype <;> simp
+theorem mem_vars_declare (declaration : Declaration) (var : RV) :
+    var ∈ (declare declaration).vars ↔
+      var ∈ declaration.vars.getD (parentOf declaration).vars ∨
+        (declare declaration).data = some var ∨ (declare declaration).code = some var ∨
+        ∃ group ∈ (declare declaration).regs, var ∈ group.2 := by
+  simp [declare, List.mem_eraseDups, or_assoc]
 
 /-! ### The hierarchy -/
 
@@ -1730,7 +1744,9 @@ theorem Declared.parents_end_unknown {target : T} (h : Declared target) :
 theorem declare_bare_defaults (name : String) :
     let target := declare { name := name }
     target.bits = 32 ∧ target.byte = 8 ∧ target.dataAlignment = 8 ∧ target.codeAlignment = 8 ∧
-      target.endianness = .eb ∧ target.data = unknown.data ∧ target.code = unknown.code := by
+      target.endianness = .eb ∧ target.data = unknown.data ∧ target.code = unknown.code ∧
+      target.system = .unknown ∧ target.abi = .unknown ∧ target.fabi = .unknown ∧
+      target.filetype = .unknown := by
   simp [declare, unknown]
 
 /-! ### Name matching -/
@@ -1749,14 +1765,21 @@ private theorem toLower_idem (name : String) : name.toLower.toLower = name.toLow
 
 theorem matches_iff (target : T) (name : String) :
     target.matches name = true ↔
-      target.name.toLower = name.toLower ∨
-        ∃ nickname ∈ target.nicknames, nickname.toLower = name.toLower := by
-  simp [Target.matches]
+      ∃ entry ∈ (target.name, target.nicknames) :: target.lineage, namedBy name entry = true := by
+  simp only [Target.matches, Target.matching, Option.isSome_map, List.find?_isSome]
+
+theorem namedBy_iff (name : String) (entry : String × List String) :
+    namedBy name entry = true ↔
+      entry.1.toLower = name.toLower ∨ ∃ nickname ∈ entry.2, nickname.toLower = name.toLower := by
+  simp [namedBy]
 
 /-- Matching depends on the query only through its lower-cased form. -/
 theorem matches_congr (target : T) {left right : String} (h : left.toLower = right.toLower) :
     target.matches left = target.matches right := by
-  simp only [Target.matches, h]
+  have hsame : namedBy left = namedBy right := by
+    funext entry
+    simp [namedBy, h]
+  simp only [Target.matches, Target.matching, hsame]
 
 theorem matches_toLower (target : T) (name : String) :
     target.matches name.toLower = target.matches name :=
@@ -1764,7 +1787,49 @@ theorem matches_toLower (target : T) (name : String) :
 
 theorem matches_nickname {target : T} {nickname : String} (h : nickname ∈ target.nicknames) :
     target.matches nickname = true :=
-  (matches_iff _ _).2 (Or.inr ⟨nickname, h, rfl⟩)
+  (matches_iff _ _).2 ⟨_, List.mem_cons_self, (namedBy_iff _ _).2 (Or.inr ⟨nickname, h, rfl⟩)⟩
+
+/-- A declaration matches what its own names match, or whatever its parent matches: upstream's
+walk up the hierarchy. -/
+theorem matches_declare_iff (declaration : Declaration) (name : String) :
+    (declare declaration).matches name = true ↔
+      namedBy name (declaration.name, (declare declaration).nicknames) = true ∨
+        (parentOf declaration).matches name = true := by
+  simp only [matches_iff]
+  simp [declare]
+
+theorem Descends.matches {child ancestor : T} {name : String} (h : Descends child ancestor)
+    (hm : ancestor.matches name = true) : child.matches name = true := by
+  induction h with
+  | refl => exact hm
+  | step _ ih => exact (matches_declare_iff _ _).2 (Or.inr (ih hm))
+
+/-- Without nicknames of its own, a declaration keeps its parent's. -/
+theorem nicknames_inherited {declaration : Declaration} (h : declaration.nicknames = none) :
+    (declare declaration).nicknames = (parentOf declaration).nicknames := by
+  simp [declare, h]
+
+/-- Everything declared matches every ancestor's name, up to `unknown`. -/
+theorem Declared.matches_unknown {target : T} (h : Declared target) : target.matches "unknown" = true := by
+  apply h.descends_unknown.matches
+  exact (matches_iff _ _).2 ⟨_, List.mem_cons_self, (namedBy_iff _ _).2 (Or.inl rfl)⟩
+
+/-- `matching` prefers the target itself over any ancestor. -/
+theorem matching_self {target : T} {name : String} (h : namedBy name (target.name, target.nicknames) = true) :
+    target.matching name = some target.name := by
+  simp [Target.matching, h]
+
+/-- Otherwise it answers with the closest ancestor. -/
+theorem matching_declare {declaration : Declaration} {name : String}
+    (h : namedBy name (declaration.name, (declare declaration).nicknames) = false) :
+    (declare declaration).matching name = (parentOf declaration).matching name := by
+  simp only [Target.matching]
+  have hdecl : (declare declaration).name = declaration.name := rfl
+  rw [List.find?_cons, hdecl, h]
+  simp [declare]
+
+theorem matches_eq_matching_isSome (target : T) (name : String) :
+    target.matches name = (target.matching name).isSome := rfl
 
 /-! ### The registry -/
 
@@ -1809,17 +1874,39 @@ theorem register_comm {left right : T} (h : left.name ≠ right.name) (registry 
   exact List.Perm.swap _ _ _
 
 theorem get_sound {name : String} {registry : List T} {target : T} (h : get name registry = some target) :
-    target ∈ registry ∧ target.matches name = true := by
+    target ∈ registry ∧ target.name = name := by
   have := List.find?_some h
-  exact ⟨List.mem_of_find?_eq_some h, this⟩
+  exact ⟨List.mem_of_find?_eq_some h, by simpa using this⟩
 
 theorem get_isSome_iff (name : String) (registry : List T) :
-    (get name registry).isSome = true ↔ ∃ target ∈ registry, target.matches name = true := by
+    (get name registry).isSome = true ↔ ∃ target ∈ registry, target.name = name := by
   simp [Bap.Theory.get, List.find?_isSome]
 
-theorem get_register_self {target : T} {name : String} (h : target.matches name = true) (registry : List T) :
-    get name (register target registry) = some target := by
-  simp [Bap.Theory.get, register, h]
+/-- On a registry with unique names, `get` finds exactly the named target. -/
+theorem get_eq_some_iff {registry : List T} (hnames : (registry.map Target.name).Nodup) (name : String)
+    (target : T) : get name registry = some target ↔ target ∈ registry ∧ target.name = name := by
+  refine ⟨get_sound, ?_⟩
+  rintro ⟨hmem, rfl⟩
+  induction registry with
+  | nil => cases hmem
+  | cons head tail ih =>
+    simp only [List.map_cons, List.nodup_cons, List.mem_map, not_exists, not_and] at hnames
+    simp only [Bap.Theory.get, List.find?_cons]
+    rcases List.mem_cons.1 hmem with rfl | hmem
+    · simp
+    · have hne : head.name ≠ target.name := fun h => hnames.1 target hmem h.symm
+      simp only [hne, decide_false]
+      exact ih hnames.2 hmem
+
+/-- `get` is by name only: a nickname, or an ancestor's name, is not a name. -/
+theorem get_ignores_nicknames (name : String) {registry : List T} (h : ∀ target ∈ registry, target.name ≠ name) :
+    get name registry = none := by
+  simp only [Bap.Theory.get, List.find?_eq_none, decide_eq_true_eq]
+  exact h
+
+theorem get_register_self (target : T) (registry : List T) :
+    get target.name (register target registry) = some target := by
+  simp [Bap.Theory.get, register]
 
 private theorem find?_filter_of_false {p q : T → Bool} (values : List T)
     (h : ∀ value ∈ values, q value = false → p value = false) :
@@ -1835,37 +1922,51 @@ private theorem find?_filter_of_false {p q : T → Bool} (values : List T)
       have hp := h head List.mem_cons_self hq
       simp [hp, htail]
 
-/-- Registering a target leaves lookups of names unrelated to it, or to what it replaces, alone. -/
-theorem get_register_frame {target : T} {name : String} (registry : List T)
-    (hnew : target.matches name = false)
-    (hold : ∀ old ∈ registry, old.name = target.name → old.matches name = false) :
+/-- Registering a target leaves every other name's lookup alone. -/
+theorem get_register_frame {target : T} {name : String} (registry : List T) (hne : target.name ≠ name) :
     get name (register target registry) = get name registry := by
-  simp only [Bap.Theory.get, register, List.find?_cons, hnew]
+  simp only [Bap.Theory.get, register, List.find?_cons, hne, decide_false]
   apply find?_filter_of_false
-  intro value hmem hq
-  exact hold value hmem (by simpa using hq)
+  intro value _ hq
+  have : value.name = target.name := by simpa using hq
+  simp [this, hne]
 
 /-! ### Selection -/
 
+theorem fieldMatches_iff [DecidableEq α] (strict : Bool) (none actual wanted : α) :
+    fieldMatches strict none actual wanted = true ↔
+      actual = wanted ∨ (strict = false ∧ wanted = none) := by
+  cases strict <;> simp [fieldMatches, or_comm]
+
+/-- An unknown requirement accepts anything, unless strict. -/
+theorem fieldMatches_unknown [DecidableEq α] (none actual : α) : fieldMatches false none actual none = true := by
+  simp [fieldMatches]
+
+/-- An unknown property satisfies no specific requirement, as in upstream's flat domain. -/
+theorem fieldMatches_unknown_actual [DecidableEq α] (strict : Bool) {none wanted : α} (h : wanted ≠ none) :
+    fieldMatches strict none none wanted = false := by
+  cases strict <;> simp [fieldMatches, Ne.symm h, h]
+
 /-- The conditions `filter` imposes on one target. -/
 def Selected (selection : Selection) (target : T) : Prop :=
-  (selection.parent.all fun parent => parent.belongs target) = true ∧
-    (selection.system.all fun system => target.system = system) = true ∧
-    (selection.abi.all fun abi => target.abi = abi) = true ∧
-    (selection.fabi.all fun fabi => target.fabi = fabi) = true ∧
-    (selection.filetype.all fun filetype => target.filetype = filetype) = true ∧
-    (selection.strict = false ∨
-      (selection.system.isSome = false ∨ "system" ∈ target.specified) ∧
-      (selection.abi.isSome = false ∨ "abi" ∈ target.specified) ∧
-      (selection.fabi.isSome = false ∨ "fabi" ∈ target.specified) ∧
-      (selection.filetype.isSome = false ∨ "filetype" ∈ target.specified))
+  target.name ≠ unknown.name ∧ selection.parent.belongs target = true ∧
+    fieldMatches selection.strict .unknown target.system selection.system = true ∧
+    fieldMatches selection.strict .unknown target.abi selection.abi = true ∧
+    fieldMatches selection.strict .unknown target.fabi selection.fabi = true ∧
+    fieldMatches selection.strict .unknown target.filetype selection.filetype = true ∧
+    fieldMatches selection.strict "" target.options selection.options = true
 
 theorem mem_filter (selection : Selection) (targets : List T) (target : T) :
     target ∈ filter selection targets ↔ target ∈ targets ∧ Selected selection target := by
   simp [filter, Selected, and_assoc]
 
-theorem filter_default (targets : List T) : filter {} targets = targets := by
-  simp [filter]
+/-- The default selection keeps every declared target, and never `unknown` itself. -/
+theorem filter_default {targets : List T} (h : ∀ target ∈ targets, Declared target ∧ target.name ≠ unknown.name) :
+    filter {} targets = targets := by
+  apply List.filter_eq_self.2
+  intro target hmem
+  obtain ⟨hd, hn⟩ := h target hmem
+  simp [hd.unknown_belongs, fieldMatches, hn]
 
 theorem filter_idempotent (selection : Selection) (targets : List T) :
     filter selection (filter selection targets) = filter selection targets := by
@@ -1876,29 +1977,34 @@ theorem filter_strict_subset (selection : Selection) (targets : List T) {target 
     (h : target ∈ filter { selection with strict := true } targets) :
     target ∈ filter { selection with strict := false } targets := by
   rw [mem_filter] at *
-  obtain ⟨hmem, h₁, h₂, h₃, h₄, h₅, _⟩ := h
-  exact ⟨hmem, h₁, h₂, h₃, h₄, h₅, Or.inl rfl⟩
+  obtain ⟨hmem, h₀, h₁, h₂, h₃, h₄, h₅, h₆⟩ := h
+  simp only [fieldMatches_iff] at h₂ h₃ h₄ h₅ h₆ ⊢
+  refine ⟨hmem, h₀, h₁, ?_⟩
+  simp only [fieldMatches_iff, true_and] at *
+  grind
 
-/-- Every target passing a `parent` selection belongs to that parent. -/
-theorem filter_belongs {selection : Selection} {targets : List T} {target parent : T}
-    (hp : selection.parent = some parent) (h : target ∈ filter selection targets) :
-    parent.belongs target = true := by
-  obtain ⟨_, h₁, _⟩ := (mem_filter _ _ _).1 h
-  simpa [hp] using h₁
+/-- A strict selection demands exactly the requested properties, inherited ones included. -/
+theorem filter_strict_iff {selection : Selection} (hstrict : selection.strict = true) (targets : List T)
+    (target : T) :
+    target ∈ filter selection targets ↔
+      target ∈ targets ∧ target.name ≠ unknown.name ∧ selection.parent.belongs target = true ∧
+        target.system = selection.system ∧ target.abi = selection.abi ∧ target.fabi = selection.fabi ∧
+        target.filetype = selection.filetype ∧ target.options = selection.options := by
+  simp [mem_filter, Selected, fieldMatches_iff, hstrict]
 
-/-- A strict selection never accepts a value the target merely inherited. -/
-theorem filter_strict_rejects_inherited {selection : Selection} {targets : List T}
-    {declaration : Declaration} {system : SystemKind} (hstrict : selection.strict = true)
-    (hsystem : selection.system = some system) (hnone : declaration.system = none) :
-    declare declaration ∉ filter selection targets := by
-  intro h
-  obtain ⟨_, _, _, _, _, _, hs⟩ := (mem_filter _ _ _).1 h
-  rcases hs with hs | ⟨hs, _⟩
-  · simp [hstrict] at hs
-  · rcases hs with hs | hs
-    · simp [hsystem] at hs
-    · have := (specified_declare declaration).2.2.1.1 hs
-      simp [hnone] at this
+/-- A non-strict selection only constrains the properties it names. -/
+theorem filter_nonstrict_system {selection : Selection} (hstrict : selection.strict = false) {targets : List T}
+    {target : T} (h : target ∈ filter selection targets) :
+    selection.system = .unknown ∨ target.system = selection.system := by
+  obtain ⟨_, _, _, hs, _⟩ := (mem_filter _ _ _).1 h
+  have := (fieldMatches_iff _ _ _ _).1 hs
+  simp only [hstrict, true_and] at this
+  exact this.symm
+
+/-- Every target passing a selection belongs to its `parent`. -/
+theorem filter_belongs {selection : Selection} {targets : List T} {target : T}
+    (h : target ∈ filter selection targets) : selection.parent.belongs target = true :=
+  ((mem_filter _ _ _).1 h).2.2.1
 
 theorem select_sound {selection : Selection} {targets : List T} {target : T}
     (h : select selection targets = some target) : target ∈ filter selection targets := by
@@ -1927,33 +2033,69 @@ theorem select_nonunique_eq_head {selection : Selection} (hunique : selection.un
 
 /-! ### Registers -/
 
+theorem hasRole_iff (target : T) (var : RV) (role : Role) :
+    target.hasRole var role = true ↔ ∃ group ∈ target.regs, role ∈ group.1 ∧ var ∈ group.2 := by
+  simp [Target.hasRole]
+
+/-- `registers` holds what has all the requested roles and none of the excluded ones, among the
+registers that have any role at all. -/
 theorem mem_registers (target : T) (roles exclude : List Role) (var : RV) :
     var ∈ target.registers roles exclude ↔
-      ∃ group ∈ target.regs, (∀ role ∈ group.1, role ∉ exclude) ∧
-        (roles = [] ∨ ∃ role ∈ group.1, role ∈ roles) ∧ var ∈ group.2 := by
-  simp only [Target.registers, List.mem_eraseDups, List.mem_flatMap, List.mem_filter,
-    Bool.and_eq_true, List.all_eq_true, decide_eq_true_eq, Bool.or_eq_true, List.isEmpty_iff,
-    List.any_eq_true]
-  constructor
-  · rintro ⟨group, ⟨hg, hex, hrole⟩, hv⟩
-    exact ⟨group, hg, hex, hrole, hv⟩
-  · rintro ⟨group, hg, hex, hrole, hv⟩
-    exact ⟨group, ⟨hg, hex, hrole⟩, hv⟩
+      (∃ group ∈ target.regs, group.1 ≠ [] ∧ var ∈ group.2) ∧
+        (∀ role ∈ roles, target.hasRole var role = true) ∧
+        ∀ role ∈ exclude, target.hasRole var role = false := by
+  simp [Target.registers, List.mem_eraseDups, and_assoc]
 
 theorem registers_nodup (target : T) (roles exclude : List Role) :
     (target.registers roles exclude).Nodup :=
-  nodup_eraseDups _
+  (nodup_eraseDups _).filter _
 
 theorem registers_exclude_anti (target : T) (roles : List Role) {narrow wide : List Role}
     (h : ∀ role ∈ narrow, role ∈ wide) {var : RV} (hv : var ∈ target.registers roles wide) :
     var ∈ target.registers roles narrow := by
   rw [mem_registers] at *
-  obtain ⟨group, hg, hex, hrole, hvar⟩ := hv
-  exact ⟨group, hg, fun role hr hn => hex role hr (h role hn), hrole, hvar⟩
+  exact ⟨hv.1, hv.2.1, fun role hr => hv.2.2 role (h role hr)⟩
 
-theorem reg_sound {target : T} {role : Role} {unique : Bool} {var : RV}
-    (h : target.reg role unique = some var) : var ∈ target.registers [role] := by
-  cases hr : target.registers [role] with
+/-- Asking for more roles narrows the answer: each register has all of them. -/
+theorem registers_roles_anti (target : T) (exclude : List Role) {few many : List Role}
+    (h : ∀ role ∈ few, role ∈ many) {var : RV} (hv : var ∈ target.registers many exclude) :
+    var ∈ target.registers few exclude := by
+  rw [mem_registers] at *
+  exact ⟨hv.1, fun role hr => hv.2.1 role (h role hr), hv.2.2⟩
+
+theorem mem_registers_singleton (target : T) (role : Role) (var : RV) :
+    var ∈ target.registers [role] ↔ target.hasRole var role = true := by
+  rw [mem_registers]
+  simp only [List.mem_singleton, forall_eq, List.not_mem_nil, false_implies, implies_true, and_true]
+  refine ⟨fun h => h.2, fun h => ⟨?_, h⟩⟩
+  obtain ⟨group, hg, hr, hv⟩ := (hasRole_iff _ _ _).1 h
+  exact ⟨group, hg, List.ne_nil_of_mem hr, hv⟩
+
+/-- Several roles select the intersection, not the union, of the single-role answers. -/
+theorem mem_registers_roles (target : T) {roles : List Role} (hne : roles ≠ []) (var : RV) :
+    var ∈ target.registers roles ↔ ∀ role ∈ roles, var ∈ target.registers [role] := by
+  simp only [mem_registers_singleton]
+  rw [mem_registers]
+  simp only [List.not_mem_nil, false_implies, implies_true, and_true]
+  refine ⟨fun h => h.2, fun h => ⟨?_, h⟩⟩
+  cases roles with
+  | nil => exact absurd rfl hne
+  | cons role rest =>
+    obtain ⟨group, hg, hr, hv⟩ := (hasRole_iff _ _ _).1 (h role List.mem_cons_self)
+    exact ⟨group, hg, List.ne_nil_of_mem hr, hv⟩
+
+/-- An excluded role removes a register even when another of its groups would keep it. -/
+theorem registers_exclude_any_group {target : T} {roles exclude : List Role} {var : RV} {role : Role}
+    (hrole : role ∈ exclude) (has : target.hasRole var role = true) :
+    var ∉ target.registers roles exclude := by
+  intro hv
+  have := ((mem_registers _ _ _ _).1 hv).2.2 role hrole
+  rw [has] at this
+  cases this
+
+theorem reg_sound {target : T} {role : Role} {unique : Bool} {exclude : List Role} {var : RV}
+    (h : target.reg role unique exclude = some var) : var ∈ target.registers [role] exclude := by
+  cases hr : target.registers [role] exclude with
   | nil => simp [Target.reg, hr] at h
   | cons head tail =>
     cases tail with
@@ -1968,30 +2110,25 @@ theorem reg_sound {target : T} {role : Role} {unique : Bool} {var : RV}
         simp
 
 /-- With `unique`, a role resolves only when exactly one register carries it. -/
-theorem reg_unique_iff (target : T) (role : Role) (var : RV) :
-    target.reg role true = some var ↔ target.registers [role] = [var] := by
+theorem reg_unique_iff (target : T) (role : Role) (exclude : List Role) (var : RV) :
+    target.reg role true exclude = some var ↔ target.registers [role] exclude = [var] := by
   unfold Target.reg
   split <;> simp_all
 
-theorem reg_isSome_iff (target : T) (role : Role) :
-    (target.reg role).isSome = true ↔ target.registers [role] ≠ [] := by
+theorem reg_isSome_iff (target : T) (role : Role) (exclude : List Role) :
+    (target.reg role false exclude).isSome = true ↔ target.registers [role] exclude ≠ [] := by
   unfold Target.reg
   split <;> simp_all
 
 /-- `hasRoles` means `var` is registered under each role, as upstream's `has_roles`. -/
 theorem hasRoles_iff (target : T) (roles : List Role) (var : RV) :
     target.hasRoles roles var = true ↔ ∀ role ∈ roles, var ∈ target.registers [role] := by
-  simp only [Target.hasRoles, List.all_eq_true, List.any_eq_true, decide_eq_true_eq, mem_registers]
-  constructor
-  · intro h role hrole
-    obtain ⟨group, hg, hr, hv⟩ := h role hrole
-    exact ⟨group, hg, by simp, Or.inr ⟨role, hr, by simp⟩, hv⟩
-  · intro h role hrole
-    obtain ⟨group, hg, _, hr, hv⟩ := h role hrole
-    rcases hr with hr | ⟨r, hr, hmem⟩
-    · cases hr
-    · simp only [List.mem_singleton] at hmem
-      exact ⟨group, hg, hmem ▸ hr, hv⟩
+  simp [Target.hasRoles, mem_registers_singleton]
+
+/-- `registers` and `hasRoles` agree for any non-empty role list. -/
+theorem mem_registers_iff_hasRoles (target : T) {roles : List Role} (hne : roles ≠ []) (var : RV) :
+    var ∈ target.registers roles ↔ target.hasRoles roles var = true := by
+  rw [mem_registers_roles target hne, hasRoles_iff]
 
 /-- Intended, as upstream's `List.for_all`: "has all of no roles" holds for any variable. -/
 theorem hasRoles_nil (target : T) (var : RV) : target.hasRoles [] var = true := rfl
@@ -2004,7 +2141,8 @@ theorem hasRoles_absent {target : T} {var : RV} {roles : List Role} (hne : roles
   | cons role rest =>
     apply Bool.eq_false_iff.2
     intro h
-    obtain ⟨group, hg, _, _, hv⟩ := (mem_registers ..).1 ((hasRoles_iff ..).1 h role List.mem_cons_self)
+    obtain ⟨group, hg, _, hv⟩ := (hasRole_iff ..).1 ((mem_registers_singleton ..).1
+      ((hasRoles_iff ..).1 h role List.mem_cons_self))
     exact habsent group hg hv
 
 /-- Roles accumulate independently of how the register groups are laid out. -/
@@ -2023,8 +2161,8 @@ theorem var_isSome_iff (target : T) (name : String) :
 
 /-! ### Aliases -/
 
-private theorem find_sub_layout (target : T) (var : RV) (alias : Alias) (parts : List AliasPart)
-    {origin : Origin} (h : findSubFind target var alias parts = some origin) :
+private theorem find_sub_layout (var : RV) (alias : Alias) (parts : List AliasPart)
+    {origin : Origin} (h : findSubFind var alias parts = some origin) :
     ∃ pre part tail widths width reg hi lo isAlias,
       origin = .sub reg hi lo isAlias ∧ reg = alias.target ∧
       parts = pre ++ part :: tail ∧ aliasPartVar part = some var ∧
@@ -2069,8 +2207,8 @@ private theorem find_sub_layout (target : T) (var : RV) (alias : Alias) (parts :
         exact ⟨.bit partValue :: pre, part, rest, widths, width, reg, hi, lo, isAlias, h₁, h₂,
           by simp [h₃], h₄⟩
 
-private theorem findSub_layout (target : T) (var : RV) (aliases : List Alias) {origin : Origin}
-    (h : findSub target var aliases = some origin) :
+private theorem findSub_layout (var : RV) (aliases : List Alias) {origin : Origin}
+    (h : findSub var aliases = some origin) :
     ∃ alias ∈ aliases, ∃ pre part tail widths width hi lo isAlias,
       origin = .sub alias.target hi lo isAlias ∧
       alias.parts = pre ++ part :: tail ∧ aliasPartVar part = some var ∧
@@ -2084,28 +2222,92 @@ private theorem findSub_layout (target : T) (var : RV) (aliases : List Alias) {o
     · rename_i found hfound
       cases h
       obtain ⟨pre, part, tail, widths, width, reg, hi, lo, isAlias, h₁, rfl, h₃⟩ :=
-        find_sub_layout target var alias alias.parts hfound
+        find_sub_layout var alias alias.parts hfound
       exact ⟨alias, List.mem_cons_self, pre, part, tail, widths, width, hi, lo, isAlias, h₁, h₃⟩
     · obtain ⟨found, hmem, hrest⟩ := ih h
       exact ⟨found, List.mem_cons_of_mem _ hmem, hrest⟩
 
-/-- A `sub` origin locates the register inside a real alias: `lo` is the total width of the less
-significant parts and `hi` closes the slice at the part's own width. -/
+/-- `Inside target var base offset`: following alias definitions from `var` reaches `base`, with
+`var` starting `offset` bits into it. -/
+inductive Inside (target : T) : RV → RV → Nat → Prop where
+  | refl (var : RV) : Inside target var var 0
+  | step {var outer base : RV} {hi inner offset : Nat} {flag : Bool} :
+      findSub var target.aliases = some (.sub outer hi inner flag) →
+      Inside target outer base offset → Inside target var base (inner + offset)
+
+private theorem Inside.append {target : T} {a b c : RV} {m n : Nat} (hab : Inside target a b m)
+    (hbc : Inside target b c n) : Inside target a c (m + n) := by
+  induction hab with
+  | refl => simpa using hbc
+  | step hsub _ ih =>
+    rw [Nat.add_assoc]
+    exact .step hsub (ih hbc)
+
+private theorem resolveBase_inside (target : T) (fuel : Nat) (base : RV) (low : Nat) :
+    let result := resolveBase target fuel base low
+    ∃ offset, Inside target base result.1 offset ∧ result.2 = low + offset := by
+  induction fuel generalizing base low with
+  | zero => exact ⟨0, .refl _, rfl⟩
+  | succ fuel ih =>
+    simp only [resolveBase]
+    split
+    · rename_i outer _ inner _ hsub
+      obtain ⟨offset, hin, heq⟩ := ih outer (low + inner)
+      refine ⟨inner + offset, .step hsub hin, ?_⟩
+      rw [heq, Nat.add_assoc]
+    · exact ⟨0, .refl _, rfl⟩
+
+/-- A `sub` origin locates the register inside the original register, through a real alias: its
+own width comes from the part that defines it, and the bits sit `lo` into the base. -/
 theorem unalias_sub_layout {target : T} {var reg : RV} {hi lo : Nat} {isAlias : Bool}
     (h : target.unalias var = some (.sub reg hi lo isAlias)) :
-    ∃ alias ∈ target.aliases, alias.target = reg ∧ ∃ pre part tail widths width,
+    Inside target var reg lo ∧ ∃ alias ∈ target.aliases, ∃ pre part tail widths width,
       alias.parts = pre ++ part :: tail ∧ aliasPartVar part = some var ∧
       partWidth part = some width ∧ tail.mapM partWidth = some widths ∧
-      lo = widths.sum ∧ hi = lo + width - 1 := by
+      hi = lo + (widths.sum + width - 1 - widths.sum) := by
   unfold Target.unalias at h
   split at h
-  · rename_i origin hfound
-    cases h
-    obtain ⟨alias, hmem, pre, part, tail, widths, width, hi', lo', isAlias', h₁, h₂⟩ :=
-      findSub_layout target var target.aliases hfound
+  · rename_i base hi' lo' flag hfound
+    simp only [Option.some.injEq] at h
+    obtain ⟨alias, hmem, pre, part, tail, widths, width, hi'', lo'', isAlias', h₁, h₂, h₃, h₄, h₅, h₆, h₇⟩ :=
+      findSub_layout var target.aliases hfound
     simp only [Origin.sub.injEq] at h₁
-    obtain ⟨rfl, rfl, rfl, _⟩ := h₁
-    exact ⟨alias, hmem, rfl, pre, part, tail, widths, width, h₂⟩
+    obtain ⟨rfl, rfl, rfl, rfl⟩ := h₁
+    obtain ⟨offset, hin, heq⟩ := resolveBase_inside target target.aliases.length alias.target lo'
+    generalize hres : resolveBase target target.aliases.length alias.target lo' = result at h hin heq
+    obtain ⟨root, low⟩ := result
+    simp only [Origin.sub.injEq] at h
+    obtain ⟨rfl, rfl, rfl, _⟩ := h
+    simp only at hin heq
+    refine ⟨?_, alias, hmem, pre, part, tail, widths, width, h₂, h₃, h₄, h₅, ?_⟩
+    · rw [heq]
+      exact .step hfound hin
+    · subst h₆ h₇
+      rfl
+  · rename_i origin hne hfound
+    obtain ⟨alias, _, _, _, _, _, _, hi', lo', flag, h₁, _⟩ := findSub_layout var target.aliases hfound
+    exact (hne _ _ _ _ h₁).elim
+  · obtain ⟨alias, _, hval⟩ := List.exists_of_findSome?_eq_some h
+    repeat' split at hval
+    all_goals cases hval
+
+/-- `isAlias` says that the register covers the whole of its base, as upstream's `Origin.is_alias`. -/
+theorem unalias_isAlias {target : T} {var reg : RV} {hi lo : Nat} {isAlias : Bool}
+    (h : target.unalias var = some (.sub reg hi lo isAlias)) :
+    isAlias = true ↔ reg.sort.bits = some (hi - lo + 1) := by
+  unfold Target.unalias at h
+  split at h
+  · rename_i base hi' lo' flag hfound
+    simp only [Option.some.injEq] at h
+    generalize resolveBase target target.aliases.length base lo' = result at h
+    obtain ⟨root, low⟩ := result
+    simp only [Origin.sub.injEq] at h
+    obtain ⟨rfl, rfl, rfl, rfl⟩ := h
+    have hsub : low + (hi' - lo') - low = hi' - lo' := by omega
+    simp [hsub]
+  · rename_i origin hne hfound
+    obtain ⟨alias, _, _, _, _, _, _, hi', lo', flag, h₁, _⟩ := findSub_layout var target.aliases hfound
+    exact (hne _ _ _ _ h₁).elim
   · obtain ⟨alias, _, hval⟩ := List.exists_of_findSome?_eq_some h
     repeat' split at hval
     all_goals cases hval
@@ -2148,57 +2350,70 @@ private theorem parts_of_all_bit (parts : List AliasPart) {vars : List RV}
     | reg var => simp at ha
     | unknown => simp at ha
 
+/-- A whole-register origin comes from an alias defining the register itself. -/
+private theorem unalias_whole {target : T} {var : RV} {origin : Origin}
+    (hshape : (∃ regs, origin = .sup regs) ∨ (∃ bits, origin = .set bits))
+    (h : target.unalias var = some origin) :
+    target.aliases.findSome? (fun alias =>
+      if alias.target = var then
+        match alias.parts.mapM aliasPartVar with
+        | some vars =>
+          if alias.parts.all fun part => match part with | .reg _ => true | _ => false then
+            some (.sup vars)
+          else if alias.parts.all fun part => match part with | .bit _ => true | _ => false then
+            some (.set vars)
+          else
+            none
+        | none => none
+      else
+        none) = some origin := by
+  unfold Target.unalias at h
+  split at h
+  · rcases hshape with ⟨_, rfl⟩ | ⟨_, rfl⟩ <;> cases h
+  · rename_i other hne hfound
+    obtain ⟨alias, _, _, _, _, _, _, _, _, _, h₁, _⟩ := findSub_layout var target.aliases hfound
+    exact (hne _ _ _ _ h₁).elim
+  · exact h
+
 /-- A `sup` origin reads off an alias of this very register whose parts are all whole registers. -/
 theorem unalias_sup_sound {target : T} {var : RV} {regs : List RV}
     (h : target.unalias var = some (.sup regs)) :
     ∃ alias ∈ target.aliases, alias.target = var ∧ alias.parts = regs.map AliasPart.reg := by
-  unfold Target.unalias at h
-  split at h
-  · rename_i origin hfound
-    cases h
-    obtain ⟨alias, _, _, _, _, _, _, _, _, _, h₁, _⟩ := findSub_layout target var target.aliases hfound
-    cases h₁
-  · obtain ⟨alias, hmem, hval⟩ := List.exists_of_findSome?_eq_some h
-    refine ⟨alias, hmem, ?_⟩
+  obtain ⟨alias, hmem, hval⟩ := List.exists_of_findSome?_eq_some (unalias_whole (.inl ⟨regs, rfl⟩) h)
+  refine ⟨alias, hmem, ?_⟩
+  split at hval
+  · rename_i heq
     split at hval
-    · rename_i heq
+    · rename_i vars hvars
       split at hval
-      · rename_i vars hvars
-        split at hval
-        · rename_i hall
-          simp only [Option.some.injEq, Origin.sup.injEq] at hval
-          subst hval
-          exact ⟨heq, parts_of_all_reg _ hvars hall⟩
-        · split at hval <;> cases hval
-      · cases hval
+      · rename_i hall
+        simp only [Option.some.injEq, Origin.sup.injEq] at hval
+        subst hval
+        exact ⟨heq, parts_of_all_reg _ hvars hall⟩
+      · split at hval <;> cases hval
     · cases hval
+  · cases hval
 
 /-- A `set` origin reads off an alias of this very register whose parts are all single bits. -/
 theorem unalias_set_sound {target : T} {var : RV} {bits : List RV}
     (h : target.unalias var = some (.set bits)) :
     ∃ alias ∈ target.aliases, alias.target = var ∧ alias.parts = bits.map AliasPart.bit := by
-  unfold Target.unalias at h
-  split at h
-  · rename_i origin hfound
-    cases h
-    obtain ⟨alias, _, _, _, _, _, _, _, _, _, h₁, _⟩ := findSub_layout target var target.aliases hfound
-    cases h₁
-  · obtain ⟨alias, hmem, hval⟩ := List.exists_of_findSome?_eq_some h
-    refine ⟨alias, hmem, ?_⟩
+  obtain ⟨alias, hmem, hval⟩ := List.exists_of_findSome?_eq_some (unalias_whole (.inr ⟨bits, rfl⟩) h)
+  refine ⟨alias, hmem, ?_⟩
+  split at hval
+  · rename_i heq
     split at hval
-    · rename_i heq
+    · rename_i vars hvars
       split at hval
-      · rename_i vars hvars
-        split at hval
-        · cases hval
-        · split at hval
-          · rename_i hall
-            simp only [Option.some.injEq, Origin.set.injEq] at hval
-            subst hval
-            exact ⟨heq, parts_of_all_bit _ hvars hall⟩
-          · cases hval
       · cases hval
+      · split at hval
+        · rename_i hall
+          simp only [Option.some.injEq, Origin.set.injEq] at hval
+          subst hval
+          exact ⟨heq, parts_of_all_bit _ hvars hall⟩
+        · cases hval
     · cases hval
+  · cases hval
 
 theorem unalias_no_aliases {target : T} (h : target.aliases = []) (var : RV) :
     target.unalias var = none := by

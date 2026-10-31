@@ -355,6 +355,27 @@ struct
         let x = instr "shl %s %s, %d" (ty n) x wy in
         (instr "or %s %s, %s" (ty n) x y, n)
 
+  (* LLVM has no signed modulus, and [srem] gives the remainder, whose sign follows
+     the dividend, and is undefined on a zero divisor, and on the overflow of the
+     minimum by -1. These two divide by 1 here, whose remainder is the result of
+     -1, and [smod x 0 = x]. In one bit 1 is -1, so there is no safe divisor. *)
+  and smod x y w =
+    if w = 1 then instr "and i1 %s, %s" x (instr "xor i1 %s, true" y)
+    else
+      let i = ty w in
+      let zero = instr "icmp eq %s %s, 0" i y in
+      let minus1 = instr "icmp eq %s %s, -1" i y in
+      let unsafe = instr "or i1 %s, %s" zero minus1 in
+      let d = instr "select i1 %s, %s 1, %s %s" unsafe i i y in
+      let r = instr "srem %s %s, %s" i x d in
+      let differs = instr "xor %s %s, %s" i r y in
+      let differs = instr "icmp slt %s %s, 0" i differs in
+      let inexact = instr "icmp ne %s %s, 0" i r in
+      let adjust = instr "and i1 %s, %s" differs inexact in
+      let sum = instr "add %s %s, %s" i r y in
+      let m = instr "select i1 %s, %s %s, %s %s" adjust i sum i r in
+      instr "select i1 %s, %s %s, %s %s" zero i x i m
+
   and binop env op x y =
     let x, wx = exp env x in
     let y, wy = exp env y in
@@ -374,7 +395,7 @@ struct
         | DIVIDE -> arith "udiv"
         | SDIVIDE -> arith "sdiv"
         | MOD -> arith "urem"
-        | SMOD -> arith "srem"
+        | SMOD -> (smod x y w, w)
         | AND -> arith "and"
         | OR -> arith "or"
         | XOR -> arith "xor"

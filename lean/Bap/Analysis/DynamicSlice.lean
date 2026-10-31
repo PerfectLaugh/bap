@@ -24,7 +24,7 @@ def backwardWithAccesses (project : Project.Project) (entry : Nat) (pcs : List N
     sites
     live := static.live
     gaps
-    complete := static.complete && gaps.isEmpty
+    complete := static.determined && !static.calls.any pcs.contains && gaps.isEmpty
   }
 
 def backward (project : Project.Project) (entry : Nat) (pcs : List Nat)

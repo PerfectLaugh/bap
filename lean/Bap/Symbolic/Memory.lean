@@ -7,6 +7,8 @@ namespace Bap.Symbolic
 first. An image is loaded by writing its bytes at their concrete addresses. -/
 structure Memory where
   name : String := "mem"
+  /-- A memory chosen by a condition: its initial contents are those of one of two others. -/
+  branch : Option (Expr × Memory × Memory) := none
   cells : List (Expr × Expr) := []
   deriving Repr
 
@@ -14,26 +16,51 @@ namespace Memory
 
 def empty : Memory := {}
 
-/-- Two addresses that denote different locations under every assignment. -/
+/-- An address as a base expression and a constant offset, modulo the size of the address space. -/
+def baseOffset : Expr → Expr × Nat
+  | e@(.app "bvadd" width [base, @Expr.const constWidth value]) =>
+    if constWidth = width ∧ base.width = width then
+      let (inner, offset) := baseOffset base
+      (inner, (offset + value.toNat) % 2 ^ width)
+    else (e, 0)
+  | e@(.app "bvsub" width [base, @Expr.const constWidth value]) =>
+    if constWidth = width ∧ base.width = width then
+      let (inner, offset) := baseOffset base
+      (inner, (offset + (2 ^ width - value.toNat)) % 2 ^ width)
+    else (e, 0)
+  | e => (e, 0)
+
+/-- Two addresses that denote different locations under every assignment: different constants, or different
+offsets from one base. -/
 def definitelyDistinct : Expr → Expr → Bool
   | @Expr.const width value, @Expr.const width' value' => !(width == width' && value.toNat == value'.toNat)
-  | _, _ => false
+  | left, right =>
+    let (leftBase, leftOffset) := baseOffset left
+    let (rightBase, rightOffset) := baseOffset right
+    left.width == right.width && leftOffset != rightOffset && Expr.structuralEq leftBase rightBase
 
 /-- Reads an address through a list of writes: the newest write whose address equals the read address
 provides the byte, so writes through addresses that are not known to differ guard it with an equality. -/
-def readCells (name : String) (address : Expr) : List (Expr × Expr) → Expr
-  | [] => .select name address
+def readCells (initial address : Expr) : List (Expr × Expr) → Expr
+  | [] => initial
   | cell :: rest =>
     if Expr.structuralEq cell.1 address then cell.2
-    else if definitelyDistinct cell.1 address then readCells name address rest
-    else .ite (.app "=" 1 [cell.1, address]) cell.2 (readCells name address rest)
+    else if definitelyDistinct cell.1 address then readCells initial address rest
+    else .ite (.app "=" 1 [cell.1, address]) cell.2 (readCells initial address rest)
 
-@[simp] theorem readCells_cons_same (name : String) (address value : Expr) (rest : List (Expr × Expr)) :
-    readCells name address ((address, value) :: rest) = value := by
+@[simp] theorem readCells_cons_same (initial address value : Expr) (rest : List (Expr × Expr)) :
+    readCells initial address ((address, value) :: rest) = value := by
   simp [readCells, Expr.eq_of_structuralEq]
 
+/-- The byte a memory holds at an address before any of its own writes. -/
+def readInitial : Memory → Expr → Expr
+  | ⟨name, none, _⟩, address => .select name address
+  | ⟨_, some (condition, yes, no), _⟩, address =>
+    .ite condition (readCells (readInitial yes address) address yes.cells)
+      (readCells (readInitial no address) address no.cells)
+
 def readByte (memory : Memory) (address : Expr) : Expr :=
-  readCells memory.name address memory.cells
+  readCells (readInitial memory address) address memory.cells
 
 def writeByte (memory : Memory) (address value : Expr) : Memory :=
   { memory with cells := (address, value) :: memory.cells.filter fun cell => !Expr.structuralEq cell.1 address }

@@ -419,12 +419,36 @@ let addr64 t x w = resize t x w 64
 
 (* the division, which stops the instruction, if it divides by zero,
    which is the exception of the target, that Primus raises *)
-let nonzero t s y w =
+let nonzero t k y w =
   if w > 128 then unsupported "a division of %d bits" w;
   let zero = assign t "icmp eq %s %s, 0" (ty w) y in
   let l = label t in
-  emit t "  br i1 %s, label %%i%d.stop, label %%%s\n" zero s.k l;
+  emit t "  br i1 %s, label %%i%d.stop, label %%%s\n" zero k l;
   start t l
+
+(* the signed modulus, which the division, that truncates, gives: its remainder
+   has the sign of the dividend, so it takes the divisor, if the signs differ.
+   The operation is total, while [srem] is undefined on a zero divisor, and on
+   the overflow of the minimum by -1, so it divides by 1 in them, whose
+   remainder is the result of -1, and [smod x 0 = x]. In one bit, 1 is -1, so
+   there is no safe divisor, and the result is [x] by 0 and 0 by -1. *)
+let smod t x y w =
+  if w > 128 then unsupported "a division of %d bits" w;
+  if w = 1 then assign t "and i1 %s, %s" x (assign t "xor i1 %s, true" y)
+  else
+    let i = ty w in
+    let zero = assign t "icmp eq %s %s, 0" i y in
+    let minus1 = assign t "icmp eq %s %s, -1" i y in
+    let unsafe = assign t "or i1 %s, %s" zero minus1 in
+    let d = assign t "select i1 %s, %s 1, %s %s" unsafe i i y in
+    let r = assign t "srem %s %s, %s" i x d in
+    let differs = assign t "xor %s %s, %s" i r y in
+    let differs = assign t "icmp slt %s %s, 0" i differs in
+    let inexact = assign t "icmp ne %s %s, 0" i r in
+    let adjust = assign t "and i1 %s, %s" differs inexact in
+    let sum = assign t "add %s %s, %s" i r y in
+    let m = assign t "select i1 %s, %s %s, %s %s" adjust i sum i r in
+    assign t "select i1 %s, %s %s, %s %s" zero i x i m
 
 let shift t op x w a wa =
   let wide = Int.max w wa in
@@ -443,7 +467,7 @@ let shift t op x w a wa =
   in
   assign t "select i1 %s, %s %s, %s %s" over (ty w) saturated (ty w) shifted
 
-let binop t s (op : binop) (x, w) (y, w') =
+let binop t k (op : binop) (x, w) (y, w') =
   let same () =
     if w <> w' then unsupported "the operands of %d and %d bits" w w'
   in
@@ -460,29 +484,31 @@ let binop t s (op : binop) (x, w) (y, w') =
   | TIMES -> arith "mul"
   | DIVIDE ->
       same ();
-      nonzero t s y w;
+      nonzero t k y w;
       arith "udiv"
   | MOD ->
       same ();
-      nonzero t s y w;
+      nonzero t k y w;
       arith "urem"
-  | SDIVIDE | SMOD ->
+  | SDIVIDE when w = 1 ->
       same ();
-      nonzero t s y w;
+      nonzero t k y w;
+      (* the divisor is -1, whose quotient is -x = x, where the 1 below is -1 *)
+      Val (x, w)
+  | SDIVIDE ->
+      same ();
+      nonzero t k y w;
       (* the overflow, of the minimum by -1, wraps, as in the closures,
          where LLVM is undefined *)
       let minus1 = assign t "icmp eq %s %s, -1" (ty w) y in
       let y' = assign t "select i1 %s, %s 1, %s %s" minus1 (ty w) (ty w) y in
-      let r =
-        assign t "%s %s %s, %s"
-          (if Poly.equal op SDIVIDE then "sdiv" else "srem")
-          (ty w) x y'
-      in
-      let special =
-        if Poly.equal op SDIVIDE then assign t "sub %s 0, %s" (ty w) x else "0"
-      in
+      let r = assign t "sdiv %s %s, %s" (ty w) x y' in
+      let special = assign t "sub %s 0, %s" (ty w) x in
       Val
         (assign t "select i1 %s, %s %s, %s %s" minus1 (ty w) special (ty w) r, w)
+  | SMOD ->
+      same ();
+      Val (smod t x y w, w)
   | LSHIFT -> Val (shift t `shl x w y w', w)
   | RSHIFT -> Val (shift t `lshr x w y w', w)
   | ARSHIFT -> Val (shift t `ashr x w y w', w)
@@ -495,6 +521,36 @@ let binop t s (op : binop) (x, w) (y, w') =
   | LE -> cmp "ule"
   | SLT -> cmp "slt"
   | SLE -> cmp "sle"
+
+(* the operation alone, in the function, that the tests run *)
+let binop_module op w =
+  let t =
+    {
+      locate = (fun _ -> None);
+      reg_size = (fun _ -> 0);
+      global = (fun i -> i);
+      body = Buffer.create 256;
+      slots = Hashtbl.create (module Int);
+      temps = 0;
+      vars = [];
+      decls = String.Set.empty;
+      written_before = Int.Set.empty;
+      exits = [];
+      outs = [];
+      loop = None;
+      fields = Hashtbl.create (module Int);
+    }
+  in
+  let r, width = value (binop t 0 op ("%x", w) ("%y", w)) in
+  sprintf
+    "define i1 @binop(%s %%x, %s %%y, ptr %%out) {\n\
+     entry:\n\
+     %s  store %s %s, ptr %%out\n\
+    \  ret i1 true\n\
+     i0.stop:\n\
+    \  ret i1 false\n\
+     }\n"
+    (ty w) (ty w) (Buffer.contents t.body) (ty width) r
 
 let rec exp t s : exp -> value = function
   | Var v -> read_var t s v
@@ -517,7 +573,7 @@ let rec exp t s : exp -> value = function
   | BinOp (op, x, y) ->
       let x = value (exp t s x) in
       let y = value (exp t s y) in
-      binop t s op x y
+      binop t s.k op x y
   | UnOp (op, x) -> (
       let x, w = value (exp t s x) in
       match op with
@@ -724,7 +780,7 @@ let undoable blks =
       method! enter_store ~mem:_ ~addr:_ ~exp:_ _ _ n = n + 1
 
       method! enter_binop op _ _ n =
-        match op with Bil.DIVIDE | SDIVIDE | MOD | SMOD -> n + 2 | _ -> n
+        match op with Bil.DIVIDE | SDIVIDE | MOD -> n + 2 | _ -> n
     end
   in
   let count e n = fallible#visit_exp e n in

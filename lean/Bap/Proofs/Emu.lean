@@ -450,6 +450,396 @@ theorem mipsDelayed_jump (release6 : Bool) (word : Nat) (h : (word / 2 ^ 26) % 6
 
 end Regions
 
+/-! ### Address space, protection and fetch -/
+
+section Audit
+
+open_private Bap.Emu Bap.Emu overlaps lookupRegion memoryWidth initializeMemory regionPiece persistentRegionData
+  coversRange.loop fetchSpan.extend
+
+/-- A region past the end of the address space is refused at construction. -/
+theorem initializeMemory_rejects_out_of_space (config : Config) (regions : List Bap.Emu.Region)
+    (region : Bap.Emu.Region) (width : Nat) (hw : memoryWidth config = .ok width) (hr : region ∈ regions)
+    (hs : regionInSpace width region = false) : ∃ e, initializeMemory config regions = .error e := by
+  have hall : regions.all (regionInSpace width) = false :=
+    List.all_eq_false.2 ⟨region, hr, by simp [hs]⟩
+  simp only [initializeMemory, hw, bind, Except.bind]
+  split
+  · exact ⟨_, rfl⟩
+  · simp [hall, pure, Except.pure]
+
+/-- Every address of a region accepted by the check is representable in `width` bits, so none aliases. -/
+theorem regionInSpace_contains {width : Nat} {region : Bap.Emu.Region} (h : regionInSpace width region = true)
+    {address : Nat} (hc : region.contains address = true) : address < 2 ^ width := by
+  have hb : region.address + region.data.size ≤ 2 ^ width := by simpa [regionInSpace] using h
+  have := ((region_contains_iff _ _).1 hc).2
+  omega
+
+/-- An accepted overlay only ever replaces a same-sized region at its own address. -/
+theorem overlayConflict_false {mapped : List Bap.Emu.Region} {region current : Bap.Emu.Region}
+    (h : overlayConflict mapped region = false) (hm : current ∈ mapped) :
+    (current.address = region.address ∧ current.data.size = region.data.size) ∨
+      (current.address ≠ region.address ∧ overlaps current region = false) := by
+  have := List.any_eq_false.1 h current hm
+  by_cases he : current.address = region.address
+  · simp only [he, ↓reduceIte, bne_iff_ne, ne_eq, Decidable.not_not, Bool.not_eq_true] at this
+    exact Or.inl ⟨he, by simpa using this⟩
+  · simp only [he, ↓reduceIte, Bool.not_eq_true] at this
+    exact Or.inr ⟨he, this⟩
+
+/-- An access touches a range iff one of its bytes lies in the range; a straddling access counts. -/
+theorem accessTouches_iff (first last address size : Nat) (hr : first ≤ last) :
+    accessTouches first last address size = true ↔
+      ∃ byte, address ≤ byte ∧ byte < address + max size 1 ∧ first ≤ byte ∧ byte ≤ last := by
+  simp only [accessTouches, Bool.and_eq_true, decide_eq_true_eq]
+  constructor
+  · rintro ⟨h1, h2⟩
+    exact ⟨max first address, by omega, by omega, by omega, by omega⟩
+  · rintro ⟨b, h1, h2, h3, h4⟩
+    exact ⟨by omega, by omega⟩
+
+theorem stackAfterPush_of_room (sp : Nat) (h : 8 ≤ sp) (hb : sp < 2 ^ 64) : stackAfterPush sp = sp - 8 := by
+  simp only [stackAfterPush]
+  rw [show sp + 2 ^ 64 - 8 = (sp - 8) + 2 ^ 64 by omega, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+
+/-- Pushing near zero wraps like the hardware instead of sticking at zero. -/
+theorem stackAfterPush_wraps (sp : Nat) (h : sp < 8) : stackAfterPush sp = 2 ^ 64 + sp - 8 := by
+  simp only [stackAfterPush]
+  rw [Nat.mod_eq_of_lt (by omega)]
+  omega
+
+theorem joinWorkers_all_ok {ε : Type} (steps : List Nat) :
+    joinWorkers (steps.map (.ok : Nat → Except ε Nat)) = .ok steps.sum := by
+  induction steps with
+  | nil => rfl
+  | cons head rest ih => simp [joinWorkers, ih]
+
+/-- A failed worker fails the round with the error of the first failure in thread order. -/
+theorem joinWorkers_first_error {ε : Type} (steps : List Nat) (error : ε) (rest : List (Except ε Nat)) :
+    joinWorkers (steps.map (.ok : Nat → Except ε Nat) ++ .error error :: rest) = .error error := by
+  induction steps with
+  | nil => rfl
+  | cons head tail ih => simp [joinWorkers, ih]
+
+/-- Rebuilding a region from a memory dump always yields a region of the same size. -/
+theorem persistentRegionData_size (cells : List (Nat × UInt8)) (address size : Nat) (output : Array UInt8)
+    (h : output.size ≤ size) : (persistentRegionData cells address size output).size = size := by
+  induction hm : cells.length + (size - output.size) using Nat.strongRecOn generalizing cells output with
+  | ind measure ih =>
+    rw [persistentRegionData]
+    by_cases hg : output.size ≥ size
+    · simp only [hg, ↓reduceDIte]
+      omega
+    · simp only [hg, ↓reduceDIte]
+      cases cells with
+      | nil =>
+        simp only [Array.size_append, Array.size_replicate]
+        omega
+      | cons cell rest =>
+        obtain ⟨current, value⟩ := cell
+        simp only [List.length_cons] at hm
+        simp only
+        split
+        · exact ih _ (by omega) _ _ h rfl
+        · split
+          · exact ih _ (by simp only [Array.size_push]; omega) _ _ (by simp only [Array.size_push]; omega) rfl
+          · exact ih _ (by simp only [List.length_cons, Array.size_push]; omega) _ _
+              (by simp only [Array.size_push]; omega) rfl
+
+/-! `mprotect` splitting. -/
+
+private theorem piece_mem {region piece : Bap.Emu.Region} {first last : Nat} {p : Primus.Protection}
+    (h : piece ∈ regionPiece region first last p) :
+    first < last ∧ piece = ⟨first, region.data.extract (first - region.address) (last - region.address), p⟩ := by
+  simp only [regionPiece] at h
+  split at h
+  · exact ⟨by assumption, by simpa using h⟩
+  · simp at h
+
+/-- A piece holds the same bytes as the region it was cut from. -/
+private theorem piece_contains {region piece : Bap.Emu.Region} {first last address : Nat} {p : Primus.Protection}
+    (h : piece ∈ regionPiece region first last p) (hl : region.address ≤ first)
+    (hu : last ≤ region.address + region.data.size) (hc : piece.contains address = true) :
+    first ≤ address ∧ address < last ∧ piece.protection = p ∧
+      piece.data[address - piece.address]? = region.data[address - region.address]? := by
+  obtain ⟨hlt, rfl⟩ := piece_mem h
+  generalize hd : region.data.extract (first - region.address) (last - region.address) = data at hc
+  have hsize : data.size = last - first := by
+    rw [← hd, ByteArray.size_extract]
+    omega
+  obtain ⟨h1, h2⟩ := (region_contains_iff _ _).1 hc
+  have h1' : first ≤ address := h1
+  have h2' : address < first + data.size := h2
+  refine ⟨h1', by omega, rfl, ?_⟩
+  subst hd
+  have hi : address - first < (region.data.extract (first - region.address) (last - region.address)).size := by
+    omega
+  have hj : address - region.address < region.data.size := by omega
+  show (region.data.extract (first - region.address) (last - region.address))[address - first]? = _
+  rw [getElem?_pos (region.data.extract (first - region.address) (last - region.address)) _ hi,
+    getElem?_pos region.data _ hj, ByteArray.getElem_extract]
+  simp only [Option.some.injEq]
+  congr 1
+  omega
+
+private theorem piece_has {region : Bap.Emu.Region} {first last address : Nat} {p : Primus.Protection}
+    (hl : region.address ≤ first) (hu : last ≤ region.address + region.data.size) (h1 : first ≤ address) (h2 : address < last) :
+    ∃ piece ∈ regionPiece region first last p, piece.contains address = true := by
+  have hlt : first < last := Nat.lt_of_le_of_lt h1 h2
+  refine ⟨⟨first, region.data.extract (first - region.address) (last - region.address), p⟩, ?_, ?_⟩
+  · simp [regionPiece, hlt]
+  · refine (region_contains_iff _ _).2 ⟨h1, ?_⟩
+    show address < first + (region.data.extract _ _).size
+    rw [ByteArray.size_extract]
+    omega
+
+private theorem split_spec (lower upper : Nat) (p : Primus.Protection) (region : Bap.Emu.Region) (address : Nat) :
+    (∀ piece ∈ splitRegion lower upper p region, piece.contains address = true →
+        region.contains address = true ∧ piece.protection = (if lower ≤ address ∧ address < upper then p else region.protection) ∧
+        piece.data[address - piece.address]? = region.data[address - region.address]?) ∧
+      (region.contains address = true → ∃ piece ∈ splitRegion lower upper p region, piece.contains address = true) := by
+  simp only [splitRegion]
+  by_cases hempty : min upper (region.address + region.data.size) ≤ max lower region.address
+  · simp only [hempty, ↓reduceIte, List.mem_singleton, forall_eq]
+    refine ⟨fun hc => ?_, fun hc => ⟨region, by simp, hc⟩⟩
+    obtain ⟨h1, h2⟩ := (region_contains_iff _ _).1 hc
+    refine ⟨hc, ?_, trivial⟩
+    have : ¬ (lower ≤ address ∧ address < upper) := by omega
+    simp [this]
+  · simp only [hempty, ↓reduceIte]
+    by_cases hwhole : (max lower region.address = region.address ∧
+        min upper (region.address + region.data.size) = region.address + region.data.size)
+    · have hb : (decide (max lower region.address = region.address) &&
+          decide (min upper (region.address + region.data.size) = region.address + region.data.size)) = true := by
+        simp only [Bool.and_eq_true, decide_eq_true_eq]
+        exact hwhole
+      simp only [hb, ↓reduceIte, List.mem_singleton, forall_eq]
+      have hsame : ({ region with protection := p } : Bap.Emu.Region).contains address = region.contains address := rfl
+      refine ⟨fun hc => ?_, fun hc => ⟨{ region with protection := p }, rfl, by rwa [hsame]⟩⟩
+      rw [hsame] at hc
+      obtain ⟨h1, h2⟩ := (region_contains_iff _ _).1 hc
+      have : lower ≤ address ∧ address < upper := by omega
+      exact ⟨hc, by simp [this], trivial⟩
+    · have hb : (decide (max lower region.address = region.address) &&
+          decide (min upper (region.address + region.data.size) = region.address + region.data.size)) = false := by
+        simp only [Bool.and_eq_false_iff, decide_eq_false_iff_not]
+        omega
+      simp only [hb, Bool.false_eq_true, ↓reduceIte]
+      constructor
+      · intro piece hp hc
+        simp only [List.mem_append] at hp
+        rcases hp with (hp | hp) | hp
+        · obtain ⟨h1, h2, h3, h4⟩ := piece_contains hp (by omega) (by omega) hc
+          refine ⟨(region_contains_iff _ _).2 ⟨h1, by omega⟩, ?_, h4⟩
+          have : ¬ (lower ≤ address ∧ address < upper) := by omega
+          simp [this, h3]
+        · obtain ⟨h1, h2, h3, h4⟩ := piece_contains hp (by omega) (by omega) hc
+          refine ⟨(region_contains_iff _ _).2 ⟨by omega, by omega⟩, ?_, h4⟩
+          have : lower ≤ address ∧ address < upper := by omega
+          simp [this, h3]
+        · obtain ⟨h1, h2, h3, h4⟩ := piece_contains hp (by omega) (Nat.le_refl _) hc
+          refine ⟨(region_contains_iff _ _).2 ⟨by omega, by omega⟩, ?_, h4⟩
+          have : ¬ (lower ≤ address ∧ address < upper) := by omega
+          simp [this, h3]
+      · intro hc
+        obtain ⟨h1, h2⟩ := (region_contains_iff _ _).1 hc
+        by_cases hs : address < max lower region.address
+        · obtain ⟨q, hq, hqc⟩ := piece_has (p := region.protection) (region := region) (first := region.address)
+            (last := max lower region.address) (Nat.le_refl _) (by omega) h1 hs
+          exact ⟨q, by simp only [List.mem_append]; exact Or.inl (Or.inl hq), hqc⟩
+        · by_cases ht : address < min upper (region.address + region.data.size)
+          · obtain ⟨q, hq, hqc⟩ := piece_has (p := p) (region := region) (first := max lower region.address)
+              (last := min upper (region.address + region.data.size)) (by omega) (by omega) (by omega) ht
+            exact ⟨q, by simp only [List.mem_append]; exact Or.inl (Or.inr hq), hqc⟩
+          · obtain ⟨q, hq, hqc⟩ := piece_has (p := region.protection) (region := region)
+              (first := min upper (region.address + region.data.size)) (last := region.address + region.data.size)
+              (by omega) (Nat.le_refl _) (by omega) h2
+            exact ⟨q, by simp only [List.mem_append]; exact Or.inr hq, hqc⟩
+
+private theorem lookup_flatMap (lower upper : Nat) (p : Primus.Protection) (regions : List Bap.Emu.Region) (address : Nat) :
+    lookupRegion (regions.flatMap (splitRegion lower upper p)) address =
+      (lookupRegion regions address).bind fun region => lookupRegion (splitRegion lower upper p region) address := by
+  simp only [lookupRegion]
+  induction regions with
+  | nil => rfl
+  | cons head rest ih =>
+    simp only [List.flatMap_cons, List.find?_append, List.find?_cons]
+    cases hc : head.contains address with
+    | true => 
+      obtain ⟨piece, hp, hpc⟩ := (split_spec lower upper p head address).2 hc
+      have : (splitRegion lower upper p head).find? (fun region => region.contains address) ≠ none := by
+        intro hn
+        have := List.find?_eq_none.1 hn piece hp
+        simp [hpc] at this
+      obtain ⟨found, hf⟩ := Option.ne_none_iff_exists'.1 this
+      simp [hf]
+    | false =>
+      have : (splitRegion lower upper p head).find? (fun region => region.contains address) = none := by
+        apply List.find?_eq_none.2
+        intro piece hp hpc
+        have := ((split_spec lower upper p head address).1 piece hp (by simpa using hpc)).1
+        simp [hc] at this
+      simp [this, ih]
+
+/-- `protect` is exact: bytes in the range get the new protection, all others keep theirs, every byte keeps
+its value, and no address becomes mapped or unmapped. -/
+theorem protectRegions_spec {regions result : List Bap.Emu.Region} {address size : Nat} {p : Primus.Protection}
+    (h : protectRegions regions address size p = some result) (query : Nat) :
+    match lookupRegion regions query with
+    | none => lookupRegion result query = none
+    | some region =>
+      ∃ piece, lookupRegion result query = some piece ∧
+        piece.protection = (if address ≤ query ∧ query < address + size then p else region.protection) ∧
+        piece.data[query - piece.address]? = region.data[query - region.address]? := by
+  simp only [protectRegions] at h
+  split at h
+  · simp only [Option.some.injEq] at h
+    subst h
+    rw [lookup_flatMap]
+    cases hl : lookupRegion regions query with
+    | none => rfl
+    | some region =>
+      obtain ⟨_, hc⟩ := lookupRegion_sound hl
+      simp only [Option.bind_some]
+      obtain ⟨hall, hex⟩ := split_spec address (address + size) p region query
+      obtain ⟨piece, hp, hpc⟩ := hex hc
+      have : (splitRegion address (address + size) p region).find? (fun r => r.contains query) ≠ none := by
+        intro hn
+        have := List.find?_eq_none.1 hn piece hp
+        simp [hpc] at this
+      obtain ⟨found, hf⟩ := Option.ne_none_iff_exists'.1 this
+      have hfm := List.mem_of_find?_eq_some hf
+      have hfc := List.find?_some hf
+      obtain ⟨_, h2, h3⟩ := hall found hfm hfc
+      exact ⟨found, hf, h2, h3⟩
+  · simp at h
+
+private theorem covers_loop {regions : List Bap.Emu.Region} {upper : Nat} {fuel position : Nat}
+    (h : coversRange.loop regions upper fuel position = true) (query : Nat) (h1 : position ≤ query) (h2 : query < upper) :
+    (lookupRegion regions query).isSome = true := by
+  induction fuel generalizing position with
+  | zero =>
+    unfold coversRange.loop at h
+    split at h
+    · omega
+    · simp at h
+  | succ fuel ih =>
+    unfold coversRange.loop at h
+    split at h
+    · omega
+    · simp only at h
+      split at h
+      · rename_i region hl
+        obtain ⟨hm, hc⟩ := lookupRegion_sound hl
+        by_cases hq : query < region.address + region.data.size
+        · have : region.contains query = true := by
+            have := (region_contains_iff _ _).1 hc
+            exact (region_contains_iff _ _).2 ⟨by omega, hq⟩
+          cases hq' : lookupRegion regions query with
+          | some _ => rfl
+          | none =>
+            have := (lookupRegion_none_iff _ _).1 hq' region hm
+            simp_all
+        · exact ih h (by omega)
+      · simp at h
+
+/-- A protected range is entirely mapped: protection never silently skips a hole. -/
+theorem protectRegions_covered {regions result : List Bap.Emu.Region} {address size : Nat} {p : Primus.Protection}
+    (h : protectRegions regions address size p = some result) (query : Nat) (h1 : address ≤ query)
+    (h2 : query < address + size) : (lookupRegion regions query).isSome = true := by
+  simp only [protectRegions] at h
+  split at h
+  · rename_i hc
+    exact covers_loop hc query h1 h2
+  · simp at h
+
+/-! Instruction fetch. -/
+
+private theorem extend_spec {regions : List Bap.Emu.Region} {address limit : Nat}
+    (hd : regions.Pairwise fun l r => ∀ a, ¬ (l.contains a = true ∧ r.contains a = true)) (fuel position : Nat)
+    (hp : address ≤ position)
+    (hprefix : ∀ a, address ≤ a → a < position →
+      ∃ r, lookupRegion regions a = some r ∧ r.protection.executable = true) :
+    let span := fetchSpan.extend regions address limit fuel position
+    span ≤ limit ∧ min limit (position - address) ≤ span ∧ ∀ offset, offset < span →
+      ∃ r, lookupRegion regions (address + offset) = some r ∧ r.protection.executable = true := by
+  intro span
+  induction fuel generalizing position with
+  | zero =>
+    simp only [span]
+    unfold fetchSpan.extend
+    split
+    · exact ⟨Nat.le_refl _, by omega, fun o ho => hprefix _ (by omega) (by omega)⟩
+    · cases lookupRegion regions position <;> dsimp only <;>
+        exact ⟨by omega, by omega, fun o ho => hprefix _ (by omega) (by omega)⟩
+  | succ fuel ih =>
+    simp only [span]
+    unfold fetchSpan.extend
+    split
+    · exact ⟨Nat.le_refl _, by omega, fun o ho => hprefix _ (by omega) (by omega)⟩
+    · cases hl : lookupRegion regions position with
+      | none =>
+        dsimp only
+        exact ⟨by omega, by omega, fun o ho => hprefix _ (by omega) (by omega)⟩
+      | some region =>
+        dsimp only
+        split
+        · rename_i hx
+          obtain ⟨hm, hc⟩ := lookupRegion_sound hl
+          obtain ⟨h1, h2⟩ := (region_contains_iff _ _).1 hc
+          obtain ⟨r1, r2, r3⟩ := ih (region.address + region.data.size) (by omega) (by
+            intro a ha hb
+            by_cases hq : a < position
+            · exact hprefix a ha hq
+            · refine ⟨region, lookupRegion_disjoint hd hm ((region_contains_iff _ _).2 ⟨by omega, hb⟩), hx⟩)
+          exact ⟨r1, by omega, r3⟩
+        · exact ⟨by omega, by omega, fun o ho => hprefix _ (by omega) (by omega)⟩
+
+/-- Fetch is sound: every fetched byte is in an executable region, whatever its other permissions. -/
+theorem fetchSpan_sound {regions : List Bap.Emu.Region} {address limit span : Nat}
+    (hd : regions.Pairwise fun l r => ∀ a, ¬ (l.contains a = true ∧ r.contains a = true))
+    (h : fetchSpan regions address limit = .ok span) :
+    span ≤ limit ∧ ∀ offset, offset < span →
+      ∃ r, lookupRegion regions (address + offset) = some r ∧ r.protection.executable = true := by
+  simp only [fetchSpan] at h
+  split at h
+  · simp at h
+  · rename_i region hl
+    split at h
+    · simp at h
+    · rename_i hx
+      simp only [Except.ok.injEq] at h
+      subst h
+      have hxe : region.protection.executable = true := by simpa using hx
+      obtain ⟨hm, hc⟩ := lookupRegion_sound hl
+      obtain ⟨h1, _⟩ := (region_contains_iff _ _).1 hc
+      obtain ⟨r1, _, r3⟩ := extend_spec (limit := limit) (address := address) hd regions.length
+        (region.address + region.data.size) (by omega) (fun a ha hb =>
+          ⟨region, lookupRegion_disjoint hd hm ((region_contains_iff _ _).2 ⟨by omega, hb⟩), hxe⟩)
+      exact ⟨r1, r3⟩
+
+/-- Execute permission alone is enough: `readable` plays no part, and the whole window inside the region
+is fetched. -/
+theorem fetchSpan_executable {regions : List Bap.Emu.Region} {region : Bap.Emu.Region} {address : Nat} (limit : Nat)
+    (hd : regions.Pairwise fun l r => ∀ a, ¬ (l.contains a = true ∧ r.contains a = true))
+    (hl : lookupRegion regions address = some region) (hx : region.protection.executable = true) :
+    ∃ span, fetchSpan regions address limit = .ok span ∧
+      min limit (region.address + region.data.size - address) ≤ span := by
+  obtain ⟨hm, hc⟩ := lookupRegion_sound hl
+  obtain ⟨h1, _⟩ := (region_contains_iff _ _).1 hc
+  obtain ⟨_, r2, _⟩ := extend_spec (limit := limit) (address := address) hd regions.length
+    (region.address + region.data.size) (by omega) (fun a ha hb =>
+      ⟨region, lookupRegion_disjoint hd hm ((region_contains_iff _ _).2 ⟨by omega, hb⟩), hx⟩)
+  exact ⟨_, by simp [fetchSpan, hl, hx], r2⟩
+
+/-- A non-executable region is never fetched. -/
+theorem fetchSpan_not_executable {regions : List Bap.Emu.Region} {region : Bap.Emu.Region} {address limit : Nat}
+    (hl : lookupRegion regions address = some region) (hx : region.protection.executable = false) :
+    ∃ e, fetchSpan regions address limit = .error e :=
+  ⟨s!"non-executable Emu instruction address {address}", by simp [fetchSpan, hl, hx]⟩
+
+end Audit
+
 /-! ### Memory isolation -/
 
 section Isolation

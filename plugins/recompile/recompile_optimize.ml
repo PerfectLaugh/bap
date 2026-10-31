@@ -279,7 +279,6 @@ struct
       ("udiv", Bil.DIVIDE);
       ("sdiv", Bil.SDIVIDE);
       ("urem", Bil.MOD);
-      ("srem", Bil.SMOD);
       ("and", Bil.AND);
       ("or", Bil.OR);
       ("xor", Bil.XOR);
@@ -354,6 +353,13 @@ struct
           (Bil.binop
              (List.Assoc.find_exn binops op ~equal:String.equal)
              (as_exp x) (as_exp y))
+    | "srem" ->
+        (* the remainder of the truncating division, which BIL doesn't have, as
+           its SMOD is the modulus, whose sign follows the divisor *)
+        let x, w, rest = typed rest in
+        let y, _ = operand w (comma rest) in
+        let x = as_exp x and y = as_exp y in
+        def w Bil.(x - (x /$ y * y))
     | "icmp" -> (
         match skip_flags rest with
         | pred :: rest ->

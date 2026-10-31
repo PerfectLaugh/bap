@@ -1,5 +1,5 @@
 (tests
- (names test_unicorn test_regs test_native test_engine test_checkpoint)
+ (names test_unicorn test_regs test_native test_engine test_checkpoint test_smod)
  (package bap-primus-native)
  (preprocess
   (pps ppx_bap))
@@ -14,6 +14,7 @@
   bap-primus-native.engine
   bap-primus-native.engine-lifted
   bap-primus-native.engine-unicorn
+  bap-primus-native.lifted
   bap-primus-native.emu
   bap-riscv
   bap-x86

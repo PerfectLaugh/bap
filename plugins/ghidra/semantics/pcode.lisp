@@ -169,11 +169,13 @@
 (defun INT_SDIV (tr r tx x ty y)
   (set# tr r (get# s/ tx x ty y)))
 
-(defun INT_MOD (tr r tx x ty y)
+;; the remainder of the truncating division, whose sign follows the
+;; dividend, as in OpBehaviorIntSrem of Ghidra
+(defun INT_REM (tr r tx x ty y)
   (set# tr r (get# mod tx x ty y)))
 
-(defun INT_SMOD (tr r tx x ty y)
-  (set# tr r (get# signed-mod tx x ty y)))
+(defun INT_SREM (tr r tx x ty y)
+  (set# tr r (get# signed-rem tx x ty y)))
 
 (defun BOOL_NEGATE (tr r tx x)
   (set# tr r (get# not tx x)))

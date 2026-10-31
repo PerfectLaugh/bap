@@ -125,6 +125,13 @@ let rec render context exp =
     binary left right (fun left right ->
         sprintf "%s %s %s" name left right |> parens)
   in
+  (* Lean divides by zero to zero, Bitvec to all ones. The remainders agree. *)
+  let division divide left right =
+    imm_width right >>= fun width ->
+    binary left right (fun x y ->
+        sprintf "(if %s = BitVec.ofNat %d 0 then BitVec.allOnes %d else %s)" y
+          width width (divide x y))
+  in
   match exp with
   | Bil.Var variable -> variable_name context variable
   | Bil.Int word ->
@@ -135,10 +142,10 @@ let rec render context exp =
       | Bil.PLUS -> binary left right (fun x y -> sprintf "(%s + %s)" x y)
       | Bil.MINUS -> binary left right (fun x y -> sprintf "(%s - %s)" x y)
       | Bil.TIMES -> binary left right (fun x y -> sprintf "(%s * %s)" x y)
-      | Bil.DIVIDE -> binary left right (fun x y -> sprintf "(%s / %s)" x y)
-      | Bil.SDIVIDE -> bitvector_binop "BitVec.sdiv" left right
+      | Bil.DIVIDE -> division (sprintf "(%s / %s)") left right
+      | Bil.SDIVIDE -> division (sprintf "(BitVec.sdiv %s %s)") left right
       | Bil.MOD -> binary left right (fun x y -> sprintf "(%s %% %s)" x y)
-      | Bil.SMOD -> bitvector_binop "BitVec.srem" left right
+      | Bil.SMOD -> bitvector_binop "BitVec.smod" left right
       | Bil.LSHIFT ->
           binary left right (fun x y ->
               sprintf "(BitVec.shiftLeft %s (BitVec.toNat %s))" x y)

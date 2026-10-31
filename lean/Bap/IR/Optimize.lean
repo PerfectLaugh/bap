@@ -97,32 +97,35 @@ private def dceDefs (defs : List Def) (live : List Bap.Var) : List Def × List B
     else
       state
 
-private def dcePass (cfg : Cfg) : Cfg :=
+/-- One backward pass over every block, with `protectedVars` live at the end of each block. -/
+private def dcePass (protectedVars : List Bap.Var) (cfg : Cfg) : Cfg :=
   let outs := cfg.liveness.2
   { cfg with blocks := cfg.blocks.map fun blk =>
     let (defs, live) := dceDefs blk.defs
-      ((Assoc.get blk.tid outs).getD [] ++ blk.jmps.flatMap Jmp.freeVars)
+      ((Assoc.get blk.tid outs).getD [] ++ blk.jmps.flatMap Jmp.freeVars ++ protectedVars)
     { blk with
       defs := defs
       phis := blk.phis.filter fun phi => live.contains phi.var
     }
   }
 
-private def dceAux (cfg : Cfg) : Nat → Cfg
+private def dceAux (protectedVars : List Bap.Var) (cfg : Cfg) : Nat → Cfg
   | 0 => cfg
   | fuel + 1 =>
-    let next := dcePass cfg
+    let next := dcePass protectedVars cfg
     let before : List (Nat × Nat) := cfg.blocks.map fun blk => (blk.defs.length, blk.phis.length)
     let after : List (Nat × Nat) := next.blocks.map fun blk => (blk.defs.length, blk.phis.length)
-    if before = after then cfg else dceAux next fuel
+    if before = after then cfg else dceAux protectedVars next fuel
 
-def eliminateDeadCode (cfg : Cfg) : Cfg :=
+/-- Removes dead code. `[]` means nothing is read after the CFG: callers must pass their outputs, as exact variables. -/
+def eliminateDeadCode (cfg : Cfg) (protectedVars : List Bap.Var := []) : Cfg :=
   let count := cfg.blocks.foldl (fun count blk => count + blk.defs.length + blk.phis.length) 0
-  dceAux cfg (count + 1)
+  dceAux protectedVars cfg (count + 1)
 
-def optimize (sub : Sub) : Sub :=
+/-- Folds and removes dead code. `[]` means nothing is read on return: callers must pass their outputs, as exact variables. -/
+def optimize (sub : Sub) (protectedVars : List Bap.Var := []) : Sub :=
   let cfg := propagateConstants (Cfg.fromSub sub)
-  (eliminateDeadCode cfg).intoSub sub
+  (eliminateDeadCode cfg protectedVars).intoSub sub
 
 theorem eval_constant_toExp (constant : Constant) :
     Bil.evalExp [] constant.toExp = .ok (.bits (BitVec.ofNat constant.width constant.value)) := by

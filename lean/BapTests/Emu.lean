@@ -383,6 +383,86 @@ private def diffAndCodecRegressions : IO Unit := do
   | .error _ => IO.println "ok: binary checkpoint refuses a pc over 64 bits"
   | .ok _ => throw <| IO.userError "binary checkpoint accepted a 65-bit pc"
 
+private def riscvConfig : IO Bap.Emu.Config := do
+  let disassembler ← Target.RISCV.disassembler 0
+  pure {
+    disassembler
+    disassemblerAt := some (fun base => Target.RISCV.disassembler base)
+    memory := ⟨"mem", .mem 64 8, 0, false⟩
+    endian := .little
+  }
+
+private def expectThrow (name : String) (action : IO α) : IO Unit := do
+  match ← action.toBaseIO with
+  | .error _ => IO.println s!"ok: {name}"
+  | .ok _ => throw <| IO.userError s!"{name}: unexpectedly succeeded"
+
+private def regionAudit : IO Unit := do
+  let rw : Primus.Protection := ⟨true, true, false⟩
+  let ro : Primus.Protection := ⟨true, false, false⟩
+  let zeros (size : Nat) := ByteArray.mk (List.replicate size 0).toArray
+  let code ← LLVM.assemble "riscv64" "addi a0, a0, 1"
+  let a0 : Bap.Var := ⟨"X10", .imm 64, 0, false⟩
+  -- Instruction fetch needs execute permission only.
+  let executeOnly ← Bap.Emu.create (← riscvConfig) [⟨0, code, ⟨false, false, true⟩⟩] { env := [(a0, .bits (BitVec.ofNat 64 0))] } 0
+  assertTrue "Emu fetches execute-only memory" (← Bap.Emu.step executeOnly)
+  assertBits "Emu runs execute-only code" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg executeOnly a0))
+  expectThrow "Emu execute-only memory is not readable" (Bap.Emu.read executeOnly 0 4)
+  -- Protection applies to the requested bytes only.
+  let emu ← Bap.Emu.riscv64 code 0 0
+  Bap.Emu.map emu ⟨0x1000, zeros 0x30, rw⟩
+  Bap.Emu.map emu ⟨0x1030, zeros 0x10, rw⟩
+  Bap.Emu.write emu 0x1014 (ByteArray.mk #[7])
+  Bap.Emu.protect emu 0x1010 0x10 ro
+  expectThrow "Emu protect covers the requested bytes" (Bap.Emu.write emu 0x1010 (ByteArray.mk #[1]))
+  Bap.Emu.write emu 0x100f (ByteArray.mk #[1])
+  Bap.Emu.write emu 0x1020 (ByteArray.mk #[1])
+  assertEqual "Emu protect keeps the bytes" #[7] (← Bap.Emu.read emu 0x1014 1).data
+  Bap.Emu.protect emu 0x1028 0x10 ro
+  expectThrow "Emu protect crosses adjacent regions" (Bap.Emu.write emu 0x1030 (ByteArray.mk #[1]))
+  expectThrow "Emu protect refuses an unmapped range" (Bap.Emu.protect emu 0x1038 0x10 ro)
+  -- Regions stay inside the address space.
+  let narrow ← Bap.Emu.riscv32 code 0 0
+  expectThrow "Emu map refuses a region past the address space" (Bap.Emu.map narrow ⟨2 ^ 32 - 2, zeros 4, rw⟩)
+  Bap.Emu.map narrow ⟨2 ^ 32 - 4, zeros 4, rw⟩
+  -- An overlay replaces a region and nothing else.
+  expectThrow "Emu overlay refuses to overlap another region" (Bap.Emu.overlay emu ⟨0x1038, zeros 0x10, rw⟩)
+  Bap.Emu.overlay emu ⟨0x1030, ByteArray.mk (List.replicate 8 9).toArray, rw⟩
+  -- Accesses that straddle a watched range are seen.
+  let store ← LLVM.assemble "riscv64" "sw a1, 0(a0)"
+  let watching ← Bap.Emu.riscv64 store 0 0
+  let wide := BitVec.ofNat 64 0x2000
+  Bap.Emu.map watching ⟨0x2000, zeros 8, rw⟩
+  Bap.Emu.setReg watching a0 (.bits wide)
+  Bap.Emu.setReg watching ⟨"X11", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 1))
+  let hits ← IO.mkRef 0
+  let _ ← Bap.Emu.onWrite watching (0x2002, 0x2002) fun _ _ _ => hits.modify (· + 1)
+  let _ ← Bap.Emu.step watching
+  assertEqual "Emu write hook sees an access straddling its range" 1 (← hits.get)
+  -- A failed step leaves forked processes their memory.
+  let forked ← Bap.Emu.riscv64 store 0 0
+  Bap.Emu.setReg forked a0 (.bits (BitVec.ofNat 64 0x9000))
+  Bap.Emu.setReg forked ⟨"X11", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 1))
+  let child ← Bap.Emu.forkThread forked 0
+  Bap.Emu.cloneProcessMemory forked child
+  expectThrow "Emu faulting store fails" (Bap.Emu.step forked)
+  assertEqual "Emu fault keeps forked process memory" 1 (← forked.processMemory.get).size
+  -- A call does not disturb a pending delay slot.
+  let calling ← Bap.Emu.riscv64 ((← LLVM.assemble "riscv64" "addi a0, a0, 1") ++ (← LLVM.assemble "riscv64" "ret")) 0 0
+  Bap.Emu.setReg calling a0 (.bits (BitVec.ofNat 64 0))
+  calling.pendingRef.set (some ⟨0x40, 0x44⟩)
+  calling.skipCode.set (some 0x48)
+  let _ ← Bap.Emu.call calling 0 0x1000 []
+  assertEqual "Emu call preserves a pending branch" (some ⟨0x40, 0x44⟩) (← calling.pendingRef.get)
+  assertEqual "Emu call preserves a skipped hook" (some 0x48) (← calling.skipCode.get)
+  -- A failing parallel worker rolls the round back only after every worker has finished.
+  let spinning ← LLVM.assemble "riscv64" "addi a0, a0, 1"
+  let failing ← Bap.Emu.riscv64 spinning 0 0
+  Bap.Emu.setReg failing a0 (.bits (BitVec.ofNat 64 0))
+  let _ ← Bap.Emu.spawnThread failing 0x7000 0
+  expectThrow "Emu parallel round reports a worker failure" (Bap.Emu.runPreemptiveParallel failing 1)
+  assertBits "Emu parallel failure rolls the first worker back" (BitVec.ofNat 64 0) (.ok (← Bap.Emu.threadReg failing 1 a0))
+
 set_option maxRecDepth 4000 in
 private def runEmulator : IO Unit := do
   let code := (← LLVM.assemble "riscv64" "addi a0, a1, 2") ++
@@ -800,6 +880,7 @@ private def runEmulator : IO Unit := do
 
 def run : IO Unit := do
   diffAndCodecRegressions
+  regionAudit
   runEmulator
 
 end Bap.Tests.Emu

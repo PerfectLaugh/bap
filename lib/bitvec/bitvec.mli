@@ -149,7 +149,7 @@ module type S = sig
       v} *)
 
   val smod : t -> t -> t m
-  (** [smod x y mod m] is the signed remainder of [x / y] modulo [m].
+  (** [smod x y mod m] is the signed modulus of [x] by [y] modulo [m].
 
       This version of the signed remainder where the sign follows the divisor,
       and is defined in terms of the [rem] operation as follows:

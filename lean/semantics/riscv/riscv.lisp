@@ -399,7 +399,7 @@
         (d (fsel (logor zero m1) (cast-unsigned (word-width y) 1) y)))
     (fsel zero x
           (fsel m1 (cast-unsigned (word-width y) 0)
-                (if signed (signed-mod x d) (mod x d))))))
+                (if signed (signed-rem x d) (mod x d))))))
 
 (defun DIVU (rd r1 r2) (set$ rd (divide false r1 r2)))
 (defun REMU (rd r1 r2) (set$ rd (remainder false r1 r2)))

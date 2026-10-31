@@ -960,6 +960,77 @@ let test_external_and_emitter () =
   if not (String.is_substring output ~substring:"(v_x + v_y) *") then
     failwith ("emitter precedence\n" ^ output)
 
+(* the [%] of C truncates, so SMOD is the helper, which is checked in C, if
+   there is its compiler, on the table of the modulus, whose signs follow
+   the divisor, and on the divisors, where [%] is undefined *)
+let test_signed_modulus () =
+  let x = physical "x" 32 and y = physical "y" 32 in
+  let z = physical "RAX" 32 in
+  let def = Def.create z (Bil.BinOp (SMOD, Bil.var x, Bil.var y)) in
+  let sub =
+    Sub.create ~name:"modulus"
+      ~args:[ Arg.create ~intent:Out z (Bil.var z) ]
+      ~blks:[ block ~defs:[ def ] [ return () ] ]
+      ()
+  in
+  let output =
+    decompile ~target:(target ()) (Program.create ~subs:[ sub ] ()) |> to_string
+  in
+  check
+    ("signed modulus is not %\n" ^ output)
+    (String.is_substring output ~substring:"bir_smod32(");
+  check
+    ("no truncating remainder\n" ^ output)
+    (not (String.is_substring output ~substring:"v_x % "));
+  let start = String.substr_index_exn output ~pattern:"static inline" in
+  let finish = String.substr_index_exn ~pos:start output ~pattern:"\n}\n" + 3 in
+  let helper = String.sub output ~pos:start ~len:(finish - start) in
+  if Stdlib.Sys.command "command -v cc >/dev/null" = 0 then begin
+    let path = Stdlib.Filename.temp_file "bap-smod" ".c" in
+    let exe = path ^ ".exe" in
+    let cases =
+      [
+        (-5, 3, 1);
+        (5, -3, -1);
+        (-5, -3, -2);
+        (5, 3, 2);
+        (6, 3, 0);
+        (-6, 3, 0);
+        (7, 0, 7);
+        (-7, 0, -7);
+        (5, -1, 0);
+      ]
+    in
+    let checks =
+      List.map cases ~f:(fun (x, y, r) ->
+          sprintf "  if (bir_smod32(%d, %d) != %d) return 1;" x y r)
+    in
+    Out_channel.write_all path
+      ~data:
+        (String.concat ~sep:"\n"
+           ([ "#include <stdint.h>"; helper; "int main(void) {" ]
+           @ checks
+           @ [
+               "  if (bir_smod32(INT32_MIN, -1) != 0) return 2;";
+               "  if (bir_smod32(-2, INT32_MIN) != -2) return 3;";
+               "  if (bir_smod32(2, INT32_MIN) != 2 + INT32_MIN) return 4;";
+               "  return 0;";
+               "}";
+             ]));
+    let status =
+      Stdlib.Sys.command
+        (sprintf
+           "cc -std=c11 -fsanitize=undefined \
+            -fsanitize-undefined-trap-on-error -o %s %s && %s"
+           exe path exe)
+    in
+    Stdlib.Sys.remove path;
+    if Stdlib.Sys.file_exists exe then Stdlib.Sys.remove exe;
+    check
+      (sprintf "the helper in C exited with %d\n%s" status helper)
+      (status = 0)
+  end
+
 let test_ranges_and_conditional_move () =
   let sum = Bil.BinOp (PLUS, int 1, int 2) in
   check "range exact arithmetic"
@@ -1302,6 +1373,7 @@ let () =
   test_concise ();
   test_multi_return ();
   test_external_and_emitter ();
+  test_signed_modulus ();
   test_ranges_and_conditional_move ();
   test_rule_scheduler ();
   test_high_variables ();

@@ -54,7 +54,58 @@ private def fixture : ByteArray :=
   let b := appendNat b 2 4
   appendNat b 4 2
 
+private def ofHex (text : String) : ByteArray :=
+  let digit (c : Char) : Nat := if c.isDigit then c.toNat - 48 else c.toNat - 87
+  let rec go : List Char → ByteArray → ByteArray
+    | high :: low :: rest, bytes => go rest (bytes.push (UInt8.ofNat (digit high * 16 + digit low)))
+    | _, bytes => bytes
+  go text.toList ByteArray.empty
+
+/-- `llvm-mc -triple=x86_64-pc-windows-msvc` of: `start: call ext; movl value(%rip), %eax; movl tv@SECREL32(%rax), %eax;
+ret`, `.data` with `value: .long 7` and `ptr: .quad start`, `.tls$` with `tv: .long 1`, `.debug$S` with `.secrel32 start`
+and `.secidx start`, and a `.bss` of 16 bytes. -/
+private def objectFixture : ByteArray := ofHex (
+  "64860500000000004401000010000000000000002e74657874000000000000000000000012000000dc000000ee000000" ++
+  "0000000003000000200030602e6461746100000000000000000000000c0000000c010000180100000000000001000000" ++
+  "400030c02e6273730000000000000000000000001000000000000000000000000000000000000000800030c02e746c73" ++
+  "2400000000000000000000000400000022010000000000000000000000000000400010c02e6465627567245300000000" ++
+  "000000000a0000002601000030010000000000000200000040001042e8000000008b05000000008b8000000000c30100" ++
+  "00000b0000000400070000000c00000004000d0000000d0000000b00070000000000000000000000040000000a000000" ++
+  "01000100000004000000000000000000040000000a0000000b00080000000a0000000a002e7465787400000000000000" ++
+  "0100000003011200000003000000a3543d170100000000002e64617461000000000000000200000003010c0000000100" ++
+  "00008fe998740200000000002e6273730000000000000000030000000301100000000000000000000000030000000000" ++
+  "2e746c73240000000000000004000000030104000000000000006567bcb80400000000002e6465627567245300000000" ++
+  "0500000003010a000000020000007aa0eb09050000000000737461727400000000000000010000000200657874000000" ++
+  "00000000000000000000020076616c756500000000000000020000000300747600000000000000000000040000000300" ++
+  "7074720000000000040000000200000003007a65726f730000000000000003000000030004000000")
+
+private def runObject : IO Unit := do
+  match Coff.decodeReport objectFixture with
+  | .error error => throw <| IO.userError error
+  | .ok (image, errors) =>
+    assertEqual "COFF object applied every relocation" ([] : List String) errors
+    assertEqual "COFF object maps what occupies memory, without .debug$S"
+      [".text", ".data", ".bss", ".tls$", "EXTERNAL"] (image.segments.map (·.name))
+    assertEqual "COFF object lays sections out" [0, 20, 32, 48, 56] (image.segments.map (·.addr))
+    assertEqual "COFF object sizes" [18, 12, 16, 4, 8] (image.segments.map (·.size))
+    assertEqual "COFF object keeps the section list" 5 image.sections.length
+    assertEqual "COFF undefined symbol has a slot" (some 56) ((image.symbols.find? (·.name == "ext")).map (·.addr))
+    assertEqual "COFF symbol moves with its section" (some 24) ((image.symbols.find? (·.name == "ptr")).map (·.addr))
+    assertEqual "COFF REL32 to an external" (some 0x33) (image.memory.readByte 1)
+    assertEqual "COFF REL32 across sections" (some 9) (image.memory.readByte 7)
+    assertEqual "COFF SECREL is from the section start" (some 0) (image.memory.readByte 13)
+    assertEqual "COFF ADDR64 across sections" (some 0) (image.memory.readByte 24)
+  -- the relocations of an unknown machine are errors of their own, and the rest of the file decodes
+  match Coff.decodeReport (objectFixture.set! 0 0x64 |>.set! 1 0xaa) with
+  | .error error => throw <| IO.userError error
+  | .ok (image, errors) =>
+    assertEqual "COFF AArch64 relocations are reported one by one" 4 errors.length
+    assertEqual "COFF AArch64 object still decodes" Arch.aarch64 image.arch
+    assertEqual "COFF unrelocated bytes stay" (some 0) (image.memory.readByte 1)
+  assertTrue "COFF decode drops the report" (Coff.decode (objectFixture.set! 0 0x64 |>.set! 1 0xaa) matches .ok _)
+
 def run : IO Unit := do
+  runObject
   assertEqual "COFF fixture size" 164 fixture.size
   match Coff.decode (ByteArray.mk #[1, 2, 3, 4]) with
   | .error _ => IO.println "ok: malformed COFF rejected"
@@ -85,7 +136,8 @@ def run : IO Unit := do
   match Coff.decode (fixture.set! 32 0x10 |>.set! 108 0) with
   | .error error => throw <| IO.userError error
   | .ok image =>
-    assertEqual "COFF undefined symbol is not rebased onto section 1" (some 1) (image.symbols[1]?.map (·.addr))
+    -- a nonzero value of an undefined symbol is the size of a common block, placed after the sections
+    assertEqual "COFF undefined symbol is not rebased onto section 1" (some 0x18) (image.symbols[1]?.map (·.addr))
     assertEqual "COFF undefined symbol is not a function" (some false) (image.symbols[1]?.map (·.isFunction))
     assertEqual "COFF defined symbol is rebased" (some 0x10) (image.symbols[0]?.map (·.addr))
   -- a .bss of an object: its size is SizeOfRawData, past the end of the file, and it has no file bytes

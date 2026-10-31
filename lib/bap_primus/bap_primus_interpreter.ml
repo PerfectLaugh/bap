@@ -410,8 +410,9 @@ module Make (Machine : Machine) = struct
 
   let binop op x y =
     match op with
-    | (Bil.DIVIDE | Bil.SDIVIDE | Bil.MOD | Bil.SMOD) when Word.is_zero y.value
-      ->
+    (* the signed modulus is total, [smod x 0 = x], and no target has it as an
+       instruction, that may trap *)
+    | (Bil.DIVIDE | Bil.SDIVIDE | Bil.MOD) when Word.is_zero y.value ->
         !!will_divide_by_zero () >>= fun () ->
         call_when_provided division_by_zero_handler >>= fun called ->
         if called then undefined (Type.Imm (Word.bitwidth x.value))

@@ -168,12 +168,23 @@ private def encodeInsn (insn : Disasm.Insn) : Sexp :=
   .tagged "insn" [nat insn.address, nat insn.size, .atom insn.asm,
     encodeFlow insn.flow, encodeTarget insn.target, Bil.Wire.printProgram insn.bil]
 
+mutual
+  /-- Nesting depth of an S-expression: fuel enough for any statement parsed out of it. -/
+  private def depth : Sexp → Nat
+    | .atom _ => 0
+    | .list items => 1 + depthOfList items
+
+  private def depthOfList : List Sexp → Nat
+    | [] => 0
+    | item :: rest => max (depth item) (depthOfList rest)
+end
+
 private def decodeInsn (input : Sexp) : Except String Disasm.Insn := do
   let args ← Sexp.expectTagged "insn" 6 input
   match args with
   | [address, size, assembly, flow, target, bil] =>
     .ok ⟨← Sexp.nat address, ← Sexp.nat size, ← Sexp.asAtom assembly,
-      ← decodeFlow flow, ← decodeTarget target, ← Bil.Wire.parseStmts 1000000 bil⟩
+      ← decodeFlow flow, ← decodeTarget target, ← Bil.Wire.parseStmts (depth bil) bil⟩
   | _ => .error "invalid project instruction"
 
 private def encodeEdge (edge : Nat × Nat) : Sexp :=
@@ -252,18 +263,20 @@ def decode (input : Sexp) (persistent : List Knowledge.AnySlot := []) : Except S
     .ok { image, disasm, knowledge, storage, passed }
   | _ => .error "invalid project"
 
+def serialize (project : Project) (persistent : List Knowledge.AnySlot := []) : Except String String := do
+  .ok (toString (← encode project persistent))
+
+def deserialize (input : String) (persistent : List Knowledge.AnySlot := []) : Except String Project := do
+  decode (← Sexp.parse input) persistent
+
 def save (project : Project) (path : String) (persistent : List Knowledge.AnySlot := []) : IO Unit := do
-  match encode project persistent with
+  match serialize project persistent with
   | .error error => throw <| IO.userError error
-  | .ok encoded => IO.FS.writeFile path (toString encoded)
+  | .ok text => IO.FS.writeFile path text
 
 def loadSaved (path : String) (persistent : List Knowledge.AnySlot := []) : IO Project := do
-  let input ← IO.FS.readFile path
-  match Sexp.parse input with
+  match deserialize (← IO.FS.readFile path) persistent with
   | .error error => throw <| IO.userError error
-  | .ok input =>
-    match decode input persistent with
-    | .error error => throw <| IO.userError error
-    | .ok project => pure project
+  | .ok project => pure project
 
 end Bap.Project

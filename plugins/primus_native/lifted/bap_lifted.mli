@@ -254,3 +254,18 @@ type context
 
 val save : t -> context
 val restore : t -> context -> unit
+
+(** {2 Tests} *)
+
+module For_tests : sig
+  val binop : Bap.Std.binop -> Bap.Std.word -> Bap.Std.word -> Bap.Std.word
+  (** [binop op x y] the result of [op] in the closures *)
+
+  val jit_binop : Bap.Std.binop -> int -> string
+  (** [jit_binop op w] the module of LLVM with the function
+
+      [i1 @binop(iw %x, iw %y, ptr %out)]
+
+      that the JIT compiles [op] to, which stores the result, and returns true,
+      or returns false, if the instruction stops on a zero divisor. *)
+end

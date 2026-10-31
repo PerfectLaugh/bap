@@ -184,10 +184,23 @@ private def overlaps (left right : Region) : Bool :=
   left.address < right.address + right.data.size &&
     right.address < left.address + left.data.size
 
+/-- Whether every byte of `region` is addressable with `width` address bits. -/
+def regionInSpace (width : Nat) (region : Region) : Bool :=
+  region.address + region.data.size ≤ 2 ^ width
+
+/-- Whether `region` can overlay `mapped`: it replaces a same-sized region at its own address and
+touches no other. -/
+def overlayConflict (mapped : List Region) (region : Region) : Bool :=
+  mapped.any fun current =>
+    if current.address = region.address then current.data.size != region.data.size
+    else overlaps current region
+
 private def initializeMemory (config : Config) (regions : List Region) : Except String Bil.State := do
   let width ← memoryWidth config
   if regions.any fun left => regions.any fun right => left != right && overlaps left right then
     .error "Emu regions overlap"
+  if !regions.all (regionInSpace width) then
+    .error "Emu region exceeds the address space"
   let cells := regions.foldl (init := Bap.Memory.empty width) fun cells region =>
     Bap.Memory.writeRegion cells region.address region.data
   .ok { env := [(config.memory, .memory cells)] }
@@ -260,16 +273,20 @@ structure Snapshot where
   pending : Option PendingBranch
   processMemory : List (ThreadId × List Region) := []
 
-private partial def persistentRegionData (cells : List (Nat × UInt8)) (address size : Nat)
+private def persistentRegionData (cells : List (Nat × UInt8)) (address size : Nat)
     (output : Array UInt8) : Array UInt8 :=
-  if output.size ≥ size then output else
+  if _h : output.size ≥ size then output else
     let expected := address + output.size
     match cells with
     | [] => output ++ Array.replicate (size - output.size) 0
     | (current, value) :: rest =>
       if current < expected then persistentRegionData rest address size output
       else if current = expected then persistentRegionData rest address size (output.push value)
-      else persistentRegionData cells address size (output.push 0)
+      else persistentRegionData ((current, value) :: rest) address size (output.push 0)
+termination_by cells.length + (size - output.size)
+decreasing_by
+  all_goals simp only [List.length_cons, Array.size_push]
+  all_goals omega
 
 private def regionsFromNative (emu : Emu) (native : Jit.Memory) : IO (List Region) := do
   let (addresses, values) ← Jit.dumpMemory native
@@ -307,7 +324,7 @@ private def snapshotBlock (emu : Emu) : IO Snapshot := do
     pending := ← emu.pendingRef.get
   }
 
-def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
+private def restoreThreads (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   emu.state.set snapshot.state
   emu.pc.set snapshot.pc
   emu.regions.set snapshot.regions
@@ -317,6 +334,14 @@ def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   emu.nextThreadRef.set snapshot.nextThread
   emu.pendingRef.set snapshot.pending
   emu.skipCode.set none
+
+/-- Undo a failed step. Forked processes keep their memory: `snapshotBlock` does not capture it. -/
+private def rollbackBlock (emu : Emu) (snapshot : Snapshot) : IO Unit := do
+  restoreThreads emu snapshot
+  Primus.Lifted.discardMemory emu.engine
+
+def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
+  restoreThreads emu snapshot
   emu.parallelWorkers.set []
   emu.processMemory.set {}
   snapshot.processMemory.forM fun (id, regions) => do
@@ -545,12 +570,16 @@ private def recordTrace (emu : Emu) (address : Nat) : IO Unit :=
           droppedPcs := state.droppedPcs + 1
         }
 
+/-- Whether an access of `size` bytes at `address` touches the inclusive range `first`..`last`. -/
+def accessTouches (first last address size : Nat) : Bool :=
+  address ≤ last && first < address + max size 1
+
 private def recordAccess (emu : Emu) (write : Bool) (address size value : Nat) : IO Unit := do
   let pc ← emu.pc.get
   let thread ← emu.currentThreadRef.get
   emu.trace.modify fun current => current.map fun state =>
     if state.accessCapacity = 0 then state
-    else if state.watch.any fun range => address < range.1 || range.2 < address then state
+    else if state.watch.any fun range => !accessTouches range.1 range.2 address size then state
     else
       let access : TraceAccess := {
         insn := state.pcCount
@@ -616,11 +645,11 @@ private def notifyMemory (emu : Emu) (write : Bool) (address size value : Nat) :
     recordAccess emu write address size value
     if write then
       let hooks ← emu.writeHooks.get
-      (hooks.filter fun hook => hook.first ≤ address && address ≤ hook.last).forM fun hook =>
+      (hooks.filter fun hook => accessTouches hook.first hook.last address size).forM fun hook =>
         serialize emu <| hook.action address size value
     else
       let hooks ← emu.readHooks.get
-      (hooks.filter fun hook => hook.first ≤ address && address ≤ hook.last).forM fun hook =>
+      (hooks.filter fun hook => accessTouches hook.first hook.last address size).forM fun hook =>
         serialize emu <| hook.action address size
 
 private def memoryObserver (emu : Emu) : IO (Option Jit.MemoryObserver) :=
@@ -649,6 +678,14 @@ def synchronizePersistentMemory (emu : Emu) : IO Unit := do
       { context with state := { env := Bil.bind context.state.env emu.config.memory (.memory memory) } })
     emu.state.set { env := Bil.bind state.env emu.config.memory (.memory memory) }
 
+private def rawByte (emu : Emu) (address : Nat) : IO UInt8 := do
+  match ← emu.engine.persistentMemory.get with
+  | some memory => Jit.readMemory memory (UInt64.ofNat address)
+  | none =>
+    let state ← emu.state.get
+    let ⟨width, memory⟩ ← cells emu state
+    pure (Bap.Memory.readByte memory (BitVec.ofNat width address))
+
 private def readByte (emu : Emu) (address : Nat) : IO UInt8 := do
   let regions ← emu.regions.get
   match lookupRegion regions address with
@@ -656,13 +693,7 @@ private def readByte (emu : Emu) (address : Nat) : IO UInt8 := do
   | some region =>
     if !region.protection.readable then
       throw <| IO.userError s!"unreadable Emu address {address}"
-    let persistent ← emu.engine.persistentMemory.get
-    match persistent with
-    | some memory => Jit.readMemory memory (UInt64.ofNat address)
-    | none =>
-      let state ← emu.state.get
-      let ⟨width, memory⟩ ← cells emu state
-      pure (Bap.Memory.readByte memory (BitVec.ofNat width address))
+    rawByte emu address
 
 def read (emu : Emu) (address size : Nat) : IO ByteArray := do
   let bytes ← (List.range size).mapM fun offset => readByte emu (address + offset)
@@ -765,7 +796,15 @@ def writeBatch (emu : Emu) (writes : List (Nat × ByteArray)) : IO Unit := do
       else current
   emu.regions.set updatedRegions
 
+private def checkInSpace (emu : Emu) (region : Region) : IO Unit := do
+  match memoryWidth emu.config with
+  | .ok width =>
+    if !regionInSpace width region then
+      throw <| IO.userError s!"Emu region at {region.address} exceeds the address space"
+  | .error error => throw <| IO.userError error
+
 def map (emu : Emu) (region : Region) : IO Unit := do
+  checkInSpace emu region
   let mapped ← emu.regions.get
   if mapped.any fun current => overlaps current region then
     throw <| IO.userError s!"Emu region overlaps an existing mapping at {region.address}"
@@ -779,8 +818,9 @@ def map (emu : Emu) (region : Region) : IO Unit := do
   emu.regions.set (region :: mapped)
 
 def overlay (emu : Emu) (region : Region) : IO Unit := do
+  checkInSpace emu region
   let mapped ← emu.regions.get
-  if mapped.any fun current => current.address = region.address && current.data.size != region.data.size then
+  if overlayConflict mapped region then
     throw <| IO.userError s!"Emu overlay size mismatch at {region.address}"
   let state ← emu.state.get
   let ⟨_, memory⟩ ← cells emu state
@@ -791,19 +831,48 @@ def overlay (emu : Emu) (region : Region) : IO Unit := do
   synchronizeWrite emu region.address region.data
   emu.regions.set (region :: mapped.filter fun current => current.address != region.address)
 
+private def regionPiece (region : Region) (first last : Nat) (protection : Primus.Protection) : List Region :=
+  if first < last then
+    [⟨first, region.data.extract (first - region.address) (last - region.address), protection⟩]
+  else []
+
+/-- Replace the protection of the bytes of `region` within `lower`..`upper`, keeping the rest. -/
+def splitRegion (lower upper : Nat) (protection : Primus.Protection) (region : Region) : List Region :=
+  let finish := region.address + region.data.size
+  let start := max lower region.address
+  let stop := min upper finish
+  if stop ≤ start then [region]
+  else if start = region.address && stop = finish then [{ region with protection }]
+  else
+    regionPiece region region.address start region.protection ++ regionPiece region start stop protection ++
+      regionPiece region stop finish region.protection
+
+/-- Whether every address in `lower`..`upper` lies in a region. -/
+def coversRange (regions : List Region) (lower upper : Nat) : Bool :=
+  let rec loop (fuel position : Nat) : Bool :=
+    if position ≥ upper then true
+    else
+      match fuel with
+      | 0 => false
+      | fuel + 1 =>
+        match lookupRegion regions position with
+        | some region => loop fuel (region.address + region.data.size)
+        | none => false
+  loop regions.length lower
+
+/-- `mprotect`: only the bytes in the range change protection, and all of them must be mapped. -/
+def protectRegions (regions : List Region) (address size : Nat) (protection : Primus.Protection) :
+    Option (List Region) :=
+  if coversRange regions address (address + size) then
+    some (regions.flatMap (splitRegion address (address + size) protection))
+  else none
+
 def protect (emu : Emu) (address size : Nat) (protection : Primus.Protection) : IO Unit := do
   if size = 0 then pure ()
   else
-    let mapped ← emu.regions.get
-    let rec update (regions : List Region) : IO (List Region) := do
-      match regions with
-      | [] => throw <| IO.userError s!"unmapped Emu protection range at {address}"
-      | region :: rest =>
-        if region.address ≤ address && address + size ≤ region.address + region.data.size then
-          pure ({ region with protection } :: rest)
-        else
-          pure (region :: (← update rest))
-    emu.regions.set (← update mapped)
+    match protectRegions (← emu.regions.get) address size protection with
+    | some regions => emu.regions.set regions
+    | none => throw <| IO.userError s!"unmapped Emu protection range at {address}"
 
 def regions (emu : Emu) : IO (List (Nat × Nat × Primus.Protection)) := do
   let mapped ← emu.regions.get
@@ -959,16 +1028,33 @@ def resume (emu : Emu) : IO Unit := emu.stopped.set false
 
 def stopped (emu : Emu) : IO Bool := emu.stopped.get
 
+/-- How many bytes from `address` may be fetched, up to `limit`, through adjacent executable regions.
+Only execute permission matters: instruction fetch does not read data. -/
+def fetchSpan (regions : List Region) (address limit : Nat) : Except String Nat :=
+  let rec extend (fuel position : Nat) : Nat :=
+    if position ≥ address + limit then limit
+    else
+      match fuel, lookupRegion regions position with
+      | fuel + 1, some region =>
+        if region.protection.executable then extend fuel (region.address + region.data.size)
+        else position - address
+      | _, _ => position - address
+  match lookupRegion regions address with
+  | none => .error s!"unmapped Emu instruction address {address}"
+  | some region =>
+    if !region.protection.executable then
+      .error s!"non-executable Emu instruction address {address}"
+    else
+      .ok (extend regions.length (region.address + region.data.size))
+
 private def fetch (emu : Emu) (address : Nat) : IO ByteArray := do
   try
-    let mapped ← emu.regions.get
-    match lookupRegion mapped address with
-    | none => throw <| IO.userError s!"unmapped Emu instruction address {address}"
-    | some region =>
-      if !region.protection.executable then
-        throw <| IO.userError s!"non-executable Emu instruction address {address}"
-      let size := match emu.config.syscallAbi with | .x86_64 => 16 | _ => 4
-      read emu address (min size (region.address + region.data.size - address))
+    let limit := match emu.config.syscallAbi with | .x86_64 => 16 | _ => 4
+    match fetchSpan (← emu.regions.get) address limit with
+    | .error error => throw <| IO.userError error
+    | .ok span =>
+      let bytes ← (List.range span).mapM fun offset => rawByte emu (address + offset)
+      pure (ByteArray.mk bytes.toArray)
   catch error =>
     recordFault emu .fetch address
     throw error
@@ -1134,7 +1220,7 @@ def step (emu : Emu) : IO Bool := do
         recordTrace emu address
         advanceControl emu address result.next result delay pendingBefore
       catch error =>
-        restore emu before
+        rollbackBlock emu before
         match pendingBefore with
         | some branch =>
           match ← emu.lastFault.get with
@@ -1204,6 +1290,15 @@ def runPreemptive (emu : Emu) (quantum : Nat := 100) (fuel : Nat := 100000) : IO
       simp_all
       omega
   loop fuel 0 (fuel + 1)
+
+/-- Total steps of a parallel round, or the first worker's error in thread order. -/
+def joinWorkers {ε : Type} : List (Except ε Nat) → Except ε Nat
+  | [] => .ok 0
+  | .error error :: _ => .error error
+  | .ok steps :: rest =>
+    match joinWorkers rest with
+    | .ok total => .ok (steps + total)
+    | .error error => .error error
 
 private def workerMemory (emu : Emu) (context : ThreadContext) (fallback : Jit.Memory) : IO Jit.Memory := do
   let memories ← emu.processMemory.get
@@ -1275,11 +1370,14 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
       let workers ← active.mapM fun context => do
         let worker ← resumeParallelWorker emu context shared
         pure (context, worker)
-      let tasks ← workers.mapM fun worker => IO.asTask (run worker.2 quantum)
-      let steps ← tasks.mapM fun task => do
-        match ← IO.wait task with
-        | .ok steps => pure steps
-        | .error error => throw error
+      -- Workers need threads of their own: once the task manager shuts down, nothing runs queued
+      -- tasks, and waiting for one would block the process exit forever.
+      let tasks ← workers.tail.mapM fun worker => IO.asTask (prio := .dedicated) (run worker.2 quantum)
+      -- The first worker runs here, which saves a thread each round.
+      let first ← (workers.head?.elim (pure 0) fun worker => run worker.2 quantum).toBaseIO
+      -- Every worker finishes before the round is judged, so none outlives a rollback.
+      let results ← tasks.mapM fun task => IO.wait task
+      let steps ← IO.ofExcept (joinWorkers (first :: results))
       let statistics ← workers.mapM fun worker => Primus.Lifted.stats worker.2.engine
       let previous ← emu.engine.statistics.get
       emu.engine.statistics.set (statistics.foldl (init := previous) fun total current => {
@@ -1322,7 +1420,7 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
       emu.engine.persistentVariable.set (some emu.config.memory)
       emu.parallelWorkers.set (workers.map fun worker => (worker.1.id, worker.2.engine))
       let _ ← switchNextThread emu
-      pure (steps.foldl (init := 0) fun total count => total + count)
+      pure steps
     catch error =>
       restore emu before
       throw error
@@ -1345,6 +1443,10 @@ private def restoreRegisters (emu : Emu) (saved : Snapshot) : IO Unit := do
   emu.state.set { env := memory ++ saved.state.env }
   emu.pc.set saved.pc
   emu.stopped.set saved.stopped
+  emu.pendingRef.set saved.pending
+
+/-- The stack pointer after an x86-64 push, which wraps like the hardware. -/
+def stackAfterPush (sp : Nat) : Nat := (sp + 2 ^ 64 - 8) % 2 ^ 64
 
 private def callAbi : SyscallAbi → List String × String × String × Bool
   | .riscv => (["X10", "X11", "X12", "X13", "X14", "X15", "X16", "X17"], "X1", "X10", false)
@@ -1358,15 +1460,16 @@ def call (emu : Emu) (address returnTo : Nat) (args : List UInt64) (fuel : Nat :
   if args.length > arguments.length then
     throw <| IO.userError "Emu.call has too many integer arguments for the target ABI"
   let saved ← snapshot emu
+  let skipped ← emu.skipCode.get
   try
     (List.range args.length).forM fun index => do
       let var : Bap.Var := ⟨arguments[index]!, .imm 64, 0, false⟩
       setReg emu var (.bits (BitVec.ofNat 64 args[index]!.toNat))
     if stackReturn then
-      let sp ← readWord emu "RSP"
-      write emu (sp - 8) (ByteArray.mk ((List.range 8).map fun index =>
+      let sp := stackAfterPush (← readWord emu "RSP")
+      write emu sp (ByteArray.mk ((List.range 8).map fun index =>
         UInt8.ofNat (returnTo / 256 ^ index % 256)).toArray)
-      setReg emu ⟨"RSP", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 (sp - 8)))
+      setReg emu ⟨"RSP", .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 sp))
     else
       setReg emu ⟨link, .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 returnTo))
     setPc emu address
@@ -1376,9 +1479,11 @@ def call (emu : Emu) (address returnTo : Nat) (args : List UInt64) (fuel : Nat :
       throw <| IO.userError s!"Emu.call stopped before returning at {reached}"
     let result ← reg emu ⟨result, .imm 64, 0, false⟩
     restoreRegisters emu saved
+    emu.skipCode.set skipped
     pure result
   catch error =>
     restoreRegisters emu saved
+    emu.skipCode.set skipped
     throw error
 
 def stub (emu : Emu) (address returnTo : Nat) (args : List UInt64) (fuel : Nat := 100000) :

@@ -1867,7 +1867,11 @@ module Std : sig
         | DIVIDE  (** Unsigned integer division. *)
         | SDIVIDE  (** Signed integer division. *)
         | MOD  (** Unsigned modulus. *)
-        | SMOD  (** Signed modulus. *)
+        | SMOD
+            (** Signed modulus. The sign of a nonzero result follows the
+                divisor, as in SMT-LIB [bvsmod], and [x smod 0 = x]. It is not
+                the truncating remainder, e.g., of [%] of C, whose sign follows
+                the dividend: [-5 %$ 3 = 1], while [-5 rem 3 = -2]. *)
         | LSHIFT  (** Left shift. *)
         | RSHIFT  (** Right shift, zero padding. *)
         | ARSHIFT  (** Right shift, sign extend. *)
@@ -2005,7 +2009,7 @@ module Std : sig
       (** [x mod y -> BinOp (MOD,x,y)] *)
 
       val ( %$ ) : exp -> exp -> exp
-      (** [x %$ y -> BinOp (SMOD,x,y)] *)
+      (** [x %$ y -> BinOp (SMOD,x,y)], the signed modulus, see {!binop}. *)
 
       (** {2 Bit operations} *)
 
@@ -2124,7 +2128,8 @@ module Std : sig
     (** [modulo -> MOD] *)
 
     val smodulo : binop
-    (** [smodulo -> SMOD] *)
+    (** [smodulo -> SMOD], the signed modulus, whose sign follows the divisor.
+    *)
 
     val lshift : binop
     (** [lshift -> LSHIFT] *)

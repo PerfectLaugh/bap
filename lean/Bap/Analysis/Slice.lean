@@ -10,6 +10,11 @@ inductive Location where
 structure Result where
   sites : List Nat := []
   live : List Location := []
+  /-- Every site's effect on live locations is known, leaving aside what calls do. -/
+  determined : Bool := true
+  /-- Calls with something live after them. Callees are not modelled and may change it. -/
+  calls : List Nat := []
+  /-- `determined` with no such call: running only the sites reproduces the criteria. -/
   complete : Bool := true
   deriving Repr
 
@@ -43,18 +48,25 @@ private structure Info where
   dynamic : Bool := false
   always : Bool := false
   unknownWrite : Bool := false
+  /-- May leave the instruction early, so what follows may not run. -/
+  exits : Bool := false
 
-private def constant (exp : Bil.Exp) : Option Nat :=
+/-- The constant address of a `size`-byte access. An access that wraps around the address space
+is not one contiguous `Location`, and counts as dynamic. -/
+private def constantRange (exp : Bil.Exp) (size : Nat) : Option Nat :=
   match Bil.evalExp [] exp with
-  | .ok value => (Bap.Value.asBits value).toOption.map fun value => value.2.toNat
+  | .ok value =>
+    match Bap.Value.asBits value with
+    | .ok address => if address.2.toNat + size ≤ 2 ^ address.1 then some address.2.toNat else none
+    | .error _ => none
   | .error _ => none
 
 private def usesExp : Bil.Exp → Info
   | .int _ => {}
   | .var var => if var.typ matches .imm _ then { uses := [.reg var] } else {}
   | .load memory address _ size =>
-    let dynamic := (constant address).isNone
-    let uses := (constant address).toList.map (fun address => Location.mem address size)
+    let dynamic := (constantRange address size).isNone
+    let uses := (constantRange address size).toList.map (fun address => Location.mem address size)
     { uses := uses ++ (usesExp memory).uses ++ (usesExp address).uses,
       dynamic := dynamic || (usesExp memory).dynamic || (usesExp address).dynamic }
   | .store memory address value _ _ =>
@@ -85,19 +97,20 @@ private def usesExp : Bil.Exp → Info
   | .unknown _ _ => { dynamic := true, always := true }
 
 private def merge (left right : Info) : Info := {
-  defs := left.defs ++ right.defs
-  mayDefs := left.mayDefs ++ right.mayDefs
+  defs := left.defs ++ if left.exits then [] else right.defs
+  mayDefs := left.mayDefs ++ right.mayDefs ++ if left.exits then right.defs else []
   uses := left.uses ++ right.uses
   dynamic := left.dynamic || right.dynamic
   always := left.always || right.always
   unknownWrite := left.unknownWrite || right.unknownWrite
+  exits := left.exits || right.exits
 }
 
 /-- The locations `value` writes when assigned to `dst`, and whether it writes anywhere else. -/
 private def memoryWrites (dst : Bap.Var) : Bil.Exp → List Location × Bool
   | .store memory address _ _ size =>
     let inner := memoryWrites dst memory
-    match constant address with
+    match constantRange address size with
     | some address => (.mem address size :: inner.1, inner.2)
     | none => (inner.1, true)
   | .var source => ([], source != dst)
@@ -116,14 +129,15 @@ private def stmtInfo : Bil.Stmt → Info
         unknownWrite := writes.2 }
     else
       { defs := [.reg var], uses := (usesExp value).uses, dynamic := (usesExp value).dynamic }
-  | .jmp target => usesExp target
+  | .jmp target => { usesExp target with exits := true }
   | .special _ => { dynamic := true, always := true }
   | .cpuExn _ => { dynamic := true, always := true }
   | .while condition body =>
     let condition := usesExp condition
     let body := body.foldl (fun info stmt => merge info (stmtInfo stmt)) {}
     merge condition { uses := body.uses, mayDefs := body.defs ++ body.mayDefs,
-                      unknownWrite := body.unknownWrite, always := true, dynamic := true }
+                      unknownWrite := body.unknownWrite, always := true, dynamic := true,
+                      exits := body.exits }
   | .ifElse condition yes no =>
     let condition := usesExp condition
     let yes := yes.foldl (fun info stmt => merge info (stmtInfo stmt)) {}
@@ -135,6 +149,7 @@ private def stmtInfo : Bil.Stmt → Info
       dynamic := yes.dynamic || no.dynamic
       always := yes.always || no.always
       unknownWrite := yes.unknownWrite || no.unknownWrite
+      exits := yes.exits || no.exits
     }
 
 private def addUnique (values : List Location) (value : Location) : List Location :=
@@ -154,16 +169,22 @@ private def backwardInstruction (live : List Location) (info : Info) : List Loca
   let live := removeDefinitions live info.defs
   info.uses.foldl addUnique live
 
-/-- Slices `instructions`, taken as a linear execution order. `complete` means no site's effect on
-a live location was undetermined. -/
+/-- Slices `instructions`, taken as a linear execution order. -/
 def backward (instructions : List Disasm.Insn) (criteria : List Location) : Result :=
-  let final := instructions.reverse.foldl (init := (criteria, [], true)) fun current insn =>
+  let final := instructions.reverse.foldl (init := (criteria, [], true, [])) fun current insn =>
+    let calls := if insn.flow = .call && !current.1.isEmpty then current.2.2.2 ++ [insn.address] else current.2.2.2
     let info := insn.bil.foldl (fun info stmt => merge info (stmtInfo stmt)) {}
     if relevant current.1 info then
-      (backwardInstruction current.1 info, current.2.1 ++ [insn.address], current.2.2 && !info.dynamic)
+      (backwardInstruction current.1 info, current.2.1 ++ [insn.address], current.2.2.1 && !info.dynamic, calls)
     else
-      current
-  { sites := final.2.1.reverse, live := final.1, complete := final.2.2 }
+      (current.1, current.2.1, current.2.2.1, calls)
+  {
+    sites := final.2.1.reverse
+    live := final.1
+    determined := final.2.2.1
+    calls := final.2.2.2.reverse
+    complete := final.2.2.1 && final.2.2.2.isEmpty
+  }
 
 /-- Whether the listing order of `instructions` is an execution order: no branch can skip or
 repeat a listed instruction. -/
@@ -185,6 +206,8 @@ def backwardProject (project : Project.Project) (entry : Nat) (criteria : List L
     else
       disasm.instructions) |>.getD []
   let result := backward instructions criteria
-  { result with complete := result.complete && linear instructions }
+  { result with
+    determined := result.determined && linear instructions
+    complete := result.complete && linear instructions }
 
 end Bap.Analysis.Slice

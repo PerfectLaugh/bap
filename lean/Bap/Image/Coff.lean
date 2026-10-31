@@ -126,41 +126,117 @@ private def writeNat (data : ByteArray) (offset size value : Nat) : Except Strin
     .ok ((List.range size).foldl (init := data) fun result index =>
       result.set! (offset + index) (UInt8.ofNat (value / 256 ^ index % 256)))
 
-private def applyRelocation (data : ByteArray) (header : Header) (symbols : List (Nat × Symbol))
-    (object : ObjectSection) (region : MemRegion) (index : Nat) : Except String MemRegion := do
+/-- What a relocation stores. The numbers are `IMAGE_REL_*` of the machine. -/
+inductive RelocationKind where
+  /-- `S + A` in `size` bytes: an object has no image base, so `ADDR` and `ADDR_NB` agree. -/
+  | absolute (size : Nat)
+  /-- `S + A - (P + extra)`: displacements count from the end of the instruction. -/
+  | relative (extra : Nat)
+  /-- The number of the symbol's section plus `A`, in 16 bits (debug information). -/
+  | section
+  /-- `S + A` from the start of the symbol's section (debug information and thread-local storage). -/
+  | sectionRelative
+  deriving DecidableEq, Repr
+
+/-- The relocations that can be applied; ARM and AArch64 ones patch instructions and are reported instead. -/
+def relocationKind (machine kind : Nat) : Option RelocationKind :=
+  match machine, kind with
+  | 0x8664, 1 => some (.absolute 8)
+  | 0x8664, 2 => some (.absolute 4)
+  | 0x8664, 3 => some (.absolute 4)
+  | 0x8664, 4 => some (.relative 4)
+  | 0x8664, 5 => some (.relative 5)
+  | 0x8664, 6 => some (.relative 6)
+  | 0x8664, 7 => some (.relative 7)
+  | 0x8664, 8 => some (.relative 8)
+  | 0x8664, 9 => some (.relative 9)
+  | 0x8664, 0xa => some .section
+  | 0x8664, 0xb => some .sectionRelative
+  | 0x014c, 6 => some (.absolute 4)
+  | 0x014c, 7 => some (.absolute 4)
+  | 0x014c, 0xa => some .section
+  | 0x014c, 0xb => some .sectionRelative
+  | 0x014c, 0x14 => some (.relative 4)
+  | _, _ => none
+
+/-- The value and width that a relocation stores. -/
+def relocationValue (kind : RelocationKind) (symbol place addend sectionNumber sectionAddr : Nat) : Nat × Nat :=
+  match kind with
+  | .absolute size => ((symbol + addend) % 2 ^ (size * 8), size)
+  | .relative extra =>
+    let modulus := 2 ^ 32
+    ((symbol % modulus + addend % modulus + modulus - (place + extra) % modulus) % modulus, 4)
+  | .section => ((sectionNumber + addend) % 2 ^ 16, 2)
+  | .sectionRelative => ((symbol - sectionAddr + addend) % 2 ^ 32, 4)
+
+private def relocationSize : RelocationKind → Nat
+  | .absolute size => size
+  | .relative _ => 4
+  | .section => 2
+  | .sectionRelative => 4
+
+private def applyRelocation (data : ByteArray) (header : Header) (sections : List Section)
+    (symbols : List (Nat × Symbol)) (object : ObjectSection) (region : MemRegion) (index : Nat) :
+    Except String MemRegion := do
   let offset := object.relocationOffset + index * 10
   let rva ← IO.Reader.u32 data .little offset
   let symbolIndex ← IO.Reader.u32 data .little (offset + 4)
-  let kind ← IO.Reader.u16 data .little (offset + 8)
-  let (relative, size) ← match header.machine, kind with
-    | 0x8664, 1 => .ok (false, 8)
-    | 0x8664, 2 => .ok (false, 4)
-    | 0x8664, 3 => .ok (false, 4)
-    | 0x8664, 4 => .ok (true, 4)
-    | 0x8664, 5 => .ok (true, 4)
-    | 0x8664, 6 => .ok (true, 4)
-    | 0x8664, 7 => .ok (true, 4)
-    | 0x8664, 8 => .ok (true, 4)
-    | 0x8664, 9 => .ok (true, 4)
-    | _, _ => .error s!"unsupported COFF relocation type {kind}"
-  match symbols.find? fun entry => entry.1 = symbolIndex with
-  | none => .error s!"COFF relocation references missing symbol {symbolIndex}"
-  | some (_, symbol) =>
-    let addend ← IO.Reader.read region.data .little rva size
-    let modulus := 2 ^ (size * 8)
-    let value := if relative then
-      -- REL32_n is relative to the end of the instruction, which is `kind` bytes past the field
-      (symbol.addr % modulus + addend % modulus + modulus - (object.info.addr + rva + kind) % modulus) % modulus
-    else
-      (symbol.addr + addend) % modulus
-    let bytes ← writeNat region.data rva size value
-    .ok { region with data := bytes }
+  let number ← IO.Reader.u16 data .little (offset + 8)
+  match relocationKind header.machine number with
+  | none => .error s!"unsupported COFF relocation type {number} at {region.addr + rva}"
+  | some kind =>
+    match symbols.find? fun entry => entry.1 = symbolIndex with
+    | none => .error s!"COFF relocation references missing symbol {symbolIndex}"
+    | some (_, symbol) =>
+      let sectionNumber ← IO.Reader.u16 data .little (header.symbolOffset + symbolIndex * 18 + 12)
+      let sectionAddr := match sectionOfNumber sections sectionNumber with
+        | some sec => sec.addr
+        | none => 0
+      let addend ← IO.Reader.read region.data .little rva (relocationSize kind)
+      let (value, size) := relocationValue kind symbol.addr (object.info.addr + rva) addend sectionNumber sectionAddr
+      let bytes ← writeNat region.data rva size value
+      .ok { region with data := bytes }
 
-private def applyRelocations (data : ByteArray) (header : Header) (symbols : List (Nat × Symbol))
-    (object : ObjectSection) : Except String ObjectSection := do
-  let region ← (List.range object.relocationCount).foldlM (init := object.region) fun region index =>
-    applyRelocation data header symbols object region index
-  .ok { object with region := region }
+/-- Applies the relocations of a section, one failing leaving its place as it is and adding an error. -/
+private def applyRelocations (data : ByteArray) (header : Header) (sections : List Section)
+    (symbols : List (Nat × Symbol)) (object : ObjectSection) : ObjectSection × List String :=
+  let (region, errors) := (List.range object.relocationCount).foldl (init := (object.region, []))
+    fun (region, errors) index =>
+      match applyRelocation data header sections symbols object region index with
+      | .ok next => (next, errors)
+      | .error error => (region, error :: errors)
+  ({ object with region := region }, errors.reverse)
+
+/-- Sections that do not occupy memory: `IMAGE_SCN_LNK_REMOVE`, `IMAGE_SCN_LNK_INFO`, `IMAGE_SCN_MEM_DISCARDABLE`. -/
+private def isDiscarded (flags : Nat) : Bool :=
+  flags &&& 0x800 != 0 || flags &&& 0x200 != 0 || flags &&& 0x02000000 != 0
+
+private def isMapped (object : ObjectSection) : Bool :=
+  !isDiscarded object.info.flags
+
+/-- `IMAGE_SCN_ALIGN_*`: bits 20-23 hold the logarithm of the alignment plus one. -/
+private def sectionAlignment (flags : Nat) : Nat :=
+  match (flags >>> 20) % 16 with
+  | 0 => 1
+  | shift + 1 => 2 ^ shift
+
+/-- Lays a section out at the cursor. All sections of an object claim address 0, so unlike an image's they have to be
+placed for relocations between them to mean anything. A nonzero `VirtualAddress` is a lower bound. -/
+private def placeObject (cursor : Nat) (object : ObjectSection) : ObjectSection × Nat :=
+  if isMapped object then
+    let addr := alignUp (max cursor object.info.addr) (sectionAlignment object.info.flags)
+    ({ object with
+      info := { object.info with addr }
+      segment := { object.segment with addr }
+      region := { object.region with addr } }, addr + object.segment.size)
+  else
+    (object, cursor)
+
+private def placeObjects (cursor : Nat) : List ObjectSection → List ObjectSection
+  | [] => []
+  | object :: rest =>
+    let (placed, cursor) := placeObject cursor object
+    placed :: placeObjects cursor rest
 
 private def architecture (machine : Nat) : Arch × Nat :=
   match machine with
@@ -172,18 +248,56 @@ private def architecture (machine : Nat) : Arch × Nat :=
   | 0x5064 => (.riscv, 64)
   | _ => (.unknown, 32)
 
-def decode (data : ByteArray) : Except String Image := do
+/-- Whether a symbol is undefined, as its section number says. -/
+private def isUndefined (data : ByteArray) (header : Header) (entry : Nat × Symbol) : Bool :=
+  !entry.2.name.isEmpty && (IO.Reader.u16 data .little (header.symbolOffset + entry.1 * 18 + 12)).toOption == some 0
+
+/-- Gives the undefined symbols that `select` picks storage after the cursor, each of `size` bytes, so that nothing
+relocated against them lands on a section. The storage is reported as a region, of which they are the only contents. -/
+private def placeUndefined (data : ByteArray) (header : Header) (word : Nat) (select : Nat → Bool) (size : Nat → Nat)
+    (cursor : Nat) : List (Nat × Symbol) → List (Nat × Symbol) × Nat
+  | [] => ([], cursor)
+  | entry :: rest =>
+    if isUndefined data header entry && select entry.2.addr then
+      let addr := alignUp cursor word
+      let (placed, cursor) := placeUndefined data header word select size (addr + size entry.2.addr) rest
+      ((entry.1, { entry.2 with addr }) :: placed, cursor)
+    else
+      let (placed, cursor) := placeUndefined data header word select size cursor rest
+      (entry :: placed, cursor)
+
+private def zeroRegion (name : String) (start stop : Nat) (writable : Bool) : List (Segment × MemRegion) :=
+  if stop > start then
+    [(⟨name, start, stop - start, true, writable, false⟩,
+      ⟨start, ByteArray.mk (Array.replicate (stop - start) 0), true, writable, false⟩)]
+  else []
+
+/-- Decodes an object file, with the relocations that could not be applied. Like upstream's linker for ELF files,
+it maps what occupies memory after laying it out, then commons (undefined symbols with a size) in `%common` and
+externals in `EXTERNAL`. Upstream's COFF loader instead hides all but the executable sections, as they all have the
+same address, and applies no relocations; once the sections are laid out there is nothing left to hide. -/
+def decodeReport (data : ByteArray) : Except String (Image × List String) := do
   let header ← parseHeader data
-  let objects ← parseSections data header
-  let sections := objects.map fun object => object.info
-  let indexedSymbols ← parseSymbols data header sections 0 header.symbolCount []
-  let objects ← objects.mapM (applyRelocations data header indexedSymbols)
-  let segments := objects.map fun object => object.segment
-  let regions := objects.map fun object => object.region
+  let parsed ← parseSections data header
+  let placed := placeObjects 0 parsed
+  let sections := placed.map fun object => object.info
+  let word := (architecture header.machine).2 / 8
+  let parsedSymbols ← parseSymbols data header sections 0 header.symbolCount []
+  let commonsStart := alignUp (placed.foldl (fun cursor object =>
+    if isMapped object then max cursor (object.info.addr + object.segment.size) else cursor) 0) word
+  let (commons, commonsEnd) := placeUndefined data header word (· != 0) id commonsStart parsedSymbols
+  let externalsStart := alignUp commonsEnd word
+  let (indexedSymbols, externalsEnd) := placeUndefined data header word (· == 0) (fun _ => word) externalsStart commons
+  let relocated := placed.map fun object =>
+    if isMapped object then applyRelocations data header sections indexedSymbols object else (object, [])
+  let mapped := (relocated.map Prod.fst).filter fun object => isMapped object && object.segment.size != 0
+  let extra := zeroRegion "%common" commonsStart commonsEnd true ++ zeroRegion "EXTERNAL" externalsStart externalsEnd false
+  let segments := mapped.map (fun object => object.segment) ++ extra.map Prod.fst
+  let regions := mapped.map (fun object => object.region) ++ extra.map Prod.snd
   let symbols := indexedSymbols.map Prod.snd
   let memory := regions.foldl (fun memory region => MemoryMap.add region () memory) {}
   let (arch, addrWidth) := architecture header.machine
-  .ok {
+  .ok ({
     arch := arch
     addrWidth := addrWidth
     endian := .little
@@ -193,7 +307,11 @@ def decode (data : ByteArray) : Except String Image := do
     segments := segments
     symbols := symbols
     memory := memory
-  }
+  }, relocated.flatMap Prod.snd)
+
+def decode (data : ByteArray) : Except String Image := do
+  let (image, _) ← decodeReport data
+  .ok image
 
 def load (path : String) : IO Image := do
   let data ← IO.FS.readBinFile path

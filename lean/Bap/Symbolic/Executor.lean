@@ -30,19 +30,29 @@ structure Result where
   outcome : Outcome
   deriving Repr
 
+/-- The width of a value of a type; a value of a type that isn't an immediate has one bit, as upstream. -/
+def typeWidth : Typ → Nat
+  | .imm width => width
+  | _ => 1
+
+/-- The name of the input a variable holds until it is first assigned. -/
+def inputName (var : Bap.Var) : String := s!"{var.name}#{var.index}"
+
 private def lookup (env : Env) (var : Bap.Var) : Except String Expr :=
   if var.typ matches .mem _ _ then
     .error s!"memory variable {var.name} used as a bitvector"
   else
     match Assoc.get var env with
     | some value => .ok value
-    | none => .error s!"unbound symbolic variable {var.name}"
+    | none =>
+      if typeWidth var.typ = 0 then .error s!"variable {var.name} has no bits"
+      else .ok (.var (inputName var) (typeWidth var.typ))
 
 /-- The memory of a variable that holds one; each has its own initial contents. -/
 def memoryOf (state : State) (var : Bap.Var) : Memory :=
   match Assoc.get var state.memories with
   | some memory => memory
-  | none => { name := s!"{var.name}#{var.index}" }
+  | none => { name := inputName var }
 
 private def binaryApp (op : Bil.BinOp) (left right : Expr) : Expr :=
   let name := match op with
@@ -110,6 +120,11 @@ private def isMemoryType : Typ → Bool
   | .mem _ _ => true
   | _ => false
 
+/-- The value of a condition when it does not depend on the assignment. -/
+def Expr.knownCondition : Expr → Option Bool
+  | @Expr.const width value => if width = 1 then some (value.toNat == 1) else none
+  | _ => none
+
 mutual
   private def evalMemory (state : State) : Bil.Exp → Except String Memory
   | .var var =>
@@ -118,8 +133,12 @@ mutual
     let memory ← evalMemory state memory
     let address ← evalExp state address
     let value ← evalExp state value
-    if value.width ≠ size * 8 then
+    if size = 0 then
+      .error "a store must have at least one byte"
+    else if value.width ≠ size * 8 then
       .error "stored value has the wrong width"
+    else if size > 2 ^ address.width then
+      .error "a store must not overlap itself"
     else
       .ok (Memory.write memory address value endian size)
   | .letIn var value body =>
@@ -129,10 +148,23 @@ mutual
     else do
       let value ← evalExp state value
       evalMemory { state with env := (var, value) :: state.env } body
+  | .ite condition yes no => do
+    let condition ← evalExp state condition
+    let yes ← evalMemory state yes
+    let no ← evalMemory state no
+    if condition.width ≠ 1 then
+      .error "condition must be one bit"
+    else
+      match condition.knownCondition with
+      | some true => .ok yes
+      | some false => .ok no
+      | none => .ok { name := yes.name, branch := some (condition, yes, no) }
+  | .unknown message _ => .ok { name := s!"unknown_{message}?" }
   | _ => .error "expected symbolic memory"
 
 def evalExp (state : State) : Bil.Exp → Except String Expr
-  | .int value => .ok (.const value)
+  | @Bil.Exp.int width value =>
+    if width = 0 then .error "a constant must have at least one bit" else .ok (.const value)
   | .var var => lookup state.env var
   | .bin op left right => do
     let left ← evalExp state left
@@ -174,12 +206,15 @@ def evalExp (state : State) : Bil.Exp → Except String Expr
     let right ← evalExp state right
     .ok (.concat left right)
   | .unknown message typ =>
-    let width := match typ with | .imm width => width | _ => 64
-    .ok (.var s!"unknown_{message}" width)
+    if typeWidth typ = 0 then .error "an unknown value must have at least one bit"
+    else .ok (.var s!"unknown_{message}?" (typeWidth typ))
   | .load memory address endian size => do
     let memory ← evalMemory state memory
     let address ← evalExp state address
-    .ok (Memory.read memory address endian size)
+    if size = 0 then
+      .error "a load must have at least one byte"
+    else
+      .ok (Memory.read memory address endian size)
   | .store _ _ _ _ _ => .error "memory expression used as a bitvector"
 end
 
@@ -230,11 +265,6 @@ private def freshen (state : State) (exp : Bil.Exp) : State × Bil.Exp :=
 
 private def withConstraint (state : State) (constraint : Expr) : State :=
   { state with constraints := state.constraints ++ [constraint] }
-
-/-- The value of a condition when it does not depend on the assignment. -/
-def Expr.knownCondition : Expr → Option Bool
-  | @Expr.const width value => if width = 1 then some (value.toNat == 1) else none
-  | _ => none
 
 private def expectCondition (condition : Expr) : Except String Expr :=
   if condition.width = 1 then .ok condition else .error "condition must be one bit"

@@ -81,7 +81,7 @@ let rec render_exp context exp =
       | Bil.DIVIDE -> binop "udiv" left right
       | Bil.SDIVIDE -> binop "sdiv" left right
       | Bil.MOD -> binop "urem" left right
-      | Bil.SMOD -> binop "srem" left right
+      | Bil.SMOD -> binop "smod" left right
       | Bil.LSHIFT -> binop "shiftLeft" left right
       | Bil.RSHIFT -> binop "ushiftRight" left right
       | Bil.ARSHIFT -> binop "sshiftRight" left right

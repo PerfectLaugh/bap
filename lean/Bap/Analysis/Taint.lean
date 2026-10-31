@@ -110,8 +110,8 @@ def join (left right : State) : State := {
 
 /-- Whether every label of `left` is also in `right`. -/
 def subsumed (left right : State) : Bool :=
-  left.vars.all (fun binding => binding.2.all (labelsOfVar right binding.1).contains) &&
-    left.memory.all (fun binding => binding.2.all (labelsOfMemory right binding.1).contains) &&
+  left.vars.all (fun binding => (labelsOfVar left binding.1).all (labelsOfVar right binding.1).contains) &&
+    left.memory.all (fun binding => (byteLabels left binding.1).all (labelsOfMemory right binding.1).contains) &&
     left.anywhere.all right.anywhere.contains
 
 /-- Everything `statement` can assign, at any depth. -/

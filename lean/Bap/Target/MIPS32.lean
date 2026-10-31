@@ -14,6 +14,6 @@ def decodeAt (base address : Nat) (data : ByteArray) : IO (Except String Disasm.
 
 def disassembler (base : Nat := 0) : IO Disasm.Disassembler := do
   let globals ← LLVMLift.mips32Environment
-  pure ⟨"mips-llvm-primus", decodeWith globals base⟩
+  pure { name := "mips-llvm-primus", decode := decodeWith globals base, hasDelaySlot := LLVMLift.mipsHasDelaySlot }
 
 end Bap.Target.MIPS32

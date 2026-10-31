@@ -64,9 +64,18 @@ impl Cfg {
         }
         cfg
     }
+    /// Keeps the block order of `sub`, whose first block is the entry. Blocks that `sub` doesn't
+    /// have follow in tid order.
     pub fn into_sub(self, sub: &Sub) -> Sub {
+        let mut blocks = self.blocks;
+        let mut blks = sub
+            .blks
+            .iter()
+            .filter_map(|blk| blocks.remove(&blk.tid))
+            .collect::<Vec<_>>();
+        blks.extend(blocks.into_values());
         Sub {
-            blks: self.blocks.into_values().collect(),
+            blks,
             ..sub.clone()
         }
     }
@@ -172,16 +181,16 @@ impl Cfg {
         }
         result
     }
+    /// A node without an immediate dominator (the start) has no node to stop at, so the walk from
+    /// its predecessors ends after recording the root, as in `Dom_frontier_cooper` of graphlib.
     pub fn dominance_frontier(&self) -> BTreeMap<Tid, BTreeSet<Tid>> {
         let idom = self.immediate_dominators();
         let mut frontier = BTreeMap::<Tid, BTreeSet<Tid>>::new();
         for tid in self.reachable() {
-            let Some(stop) = idom.get(&tid).copied() else {
-                continue;
-            };
+            let stop = idom.get(&tid).copied();
             for pred in self.predecessors(tid) {
                 let mut runner = pred;
-                while runner != stop {
+                while Some(runner) != stop {
                     frontier.entry(runner).or_default().insert(tid);
                     let Some(next) = idom.get(&runner) else { break };
                     runner = *next;
@@ -227,9 +236,6 @@ impl Cfg {
         loop {
             let mut changed = false;
             for tid in reachable.iter().rev() {
-                if initial.as_ref().is_some_and(|(exit, _)| exit == tid) {
-                    continue;
-                }
                 let block = &self.blocks[tid];
                 let mut out = BTreeSet::new();
                 for succ in self
@@ -249,6 +255,9 @@ impl Cfg {
                             out.extend(value.free_vars());
                         }
                     }
+                }
+                if let Some((_, vars)) = initial.as_ref().filter(|(exit, _)| exit == tid) {
+                    out.extend(vars.iter().cloned());
                 }
                 let mut input = BTreeSet::new();
                 let mut defined = BTreeSet::new();

@@ -34,6 +34,22 @@ def run : IO Unit := do
     assertEqual "collect reads provided fact" 20 value
     assertEqual "stable collect preserves version" state.version next.version
   | .error error => throw <| IO.userError s!"collect failed: {repr error}"
+  assertEqual "empty provide is a no-op" state.version (← provideOrFail address 0 state).version
+  assertEqual "empty provide stores no fact" 1 (← provideOrFail (natSlot "fresh") 0 state).facts.length
+  let rejecting : Promise := promise answer fun _ _ => .error (.empty "dependency")
+  match collect { promises := [rejecting, computedAnswer] } answer object state with
+  | .ok (value, _) => assertEqual "failed require leaves other promises running" 21 value
+  | .error error => throw <| IO.userError s!"empty promise was fatal: {repr error}"
+  let failing : Promise := promise answer fun _ _ => .error (.failed "boom")
+  match collect { promises := [failing] } answer object state with
+  | .error (.failed "boom") => IO.println "ok: promise failure is fatal"
+  | .error error => throw <| IO.userError s!"wrong promise failure: {repr error}"
+  | .ok _ => throw <| IO.userError "promise failure was ignored"
+  let vetoing : Observer := observe answer fun _ _ => .error (.failed "observed")
+  match collect { promises := [computedAnswer], observers := [vetoing] } answer object state with
+  | .error (.failed "observed") => IO.println "ok: promised refinement notifies observers"
+  | .error error => throw <| IO.userError s!"wrong observer failure: {repr error}"
+  | .ok _ => throw <| IO.userError "observer was not notified of a promised value"
   let env : Environment := { promises := [computedAnswer] }
   match collect env answer object state with
   | .ok (value, next) =>

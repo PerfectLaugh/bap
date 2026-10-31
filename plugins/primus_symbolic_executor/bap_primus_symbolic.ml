@@ -223,14 +223,29 @@ end = struct
       let y = Bitv.mk_zero_ext ctxt (sx - sy) y in
       op ctxt x y
 
+  let do_simpl x = try Expr.simplify x None with Z3.Error "canceled" -> x
+
+  (* SMT-LIB defines [bvsdiv x 0] as [1] for a negative [x], while Bitvec.sdiv
+     gives all ones for any [x]. The other divisions and remainders agree on a
+     zero divisor: [bvudiv] gives all ones, and the remainders, including [bvsmod], give [x]. *)
+  let sdiv ctxt x y =
+    let zero = Expr.mk_numeral_int ctxt 0 (Expr.get_sort y) in
+    let by_zero = Bool.mk_eq ctxt y zero in
+    let by_zero = if Expr.is_numeral y then do_simpl by_zero else by_zero in
+    if Bool.is_false by_zero then Bitv.mk_sdiv ctxt x y
+    else
+      let ones = Bitv.mk_not ctxt zero in
+      if Bool.is_true by_zero then do_simpl ones
+      else Bool.mk_ite ctxt by_zero ones (Bitv.mk_sdiv ctxt x y)
+
   let z3_of_binop : binop -> _ = function
     | PLUS -> Bitv.mk_add
     | MINUS -> Bitv.mk_sub
     | TIMES -> Bitv.mk_mul
     | DIVIDE -> Bitv.mk_udiv
-    | SDIVIDE -> Bitv.mk_sdiv
-    | MOD -> Bitv.mk_srem
-    | SMOD -> Bitv.mk_urem
+    | SDIVIDE -> sdiv
+    | MOD -> Bitv.mk_urem
+    | SMOD -> Bitv.mk_smod
     | LSHIFT -> coerce_shift Bitv.mk_shl
     | RSHIFT -> coerce_shift Bitv.mk_lshr
     | ARSHIFT -> coerce_shift Bitv.mk_ashr
@@ -246,7 +261,6 @@ end = struct
           Bitv.mk_not ctxt @@ Bitv.mk_redor ctxt @@ Bitv.mk_xor ctxt x y
     | NEQ -> fun ctxt x y -> Bitv.mk_redor ctxt @@ Bitv.mk_xor ctxt x y
 
-  let do_simpl x = try Expr.simplify x None with Z3.Error "canceled" -> x
   let is_literal x = Expr.is_numeral x || Bool.is_true x || Bool.is_false x
 
   (* simplifies [x] only when all its operands are literals, i.e., folds

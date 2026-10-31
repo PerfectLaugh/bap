@@ -12,6 +12,23 @@
   "(lsb X) is the least significant bit of X."
   (select 0 x))
 
+(defun signed-rem (x y)
+  "(signed-rem X Y) is the truncating remainder of X by Y: the sign of
+   a nonzero result follows X, and it is X if Y is zero. BIL has only
+   the modulus, signed-mod, whose sign follows Y. It has no branches,
+   as Primus evaluates both arms of an expression, and fails on the
+   division by zero."
+  (let ((width (word-width x))
+        (sign-x (cast-signed width (msb x)))
+        (sign-y (cast-signed width (msb y)))
+        (zero (cast-signed width (is-zero y)))
+        (mag-x (- (logxor x sign-x) sign-x))
+        (mag-y (logor (- (logxor y sign-y) sign-y)
+                      (cast-unsigned width (is-zero y))))
+        (rem (mod mag-x mag-y)))
+    (logor (logand zero x)
+           (logand (lnot zero) (- (logxor rem sign-x) sign-x)))))
+
 (defun carry (rd rn rm)
   "(carry RD RN RM) is true if the sum RD = RN + RM causes
    the carry out of the msb bit."

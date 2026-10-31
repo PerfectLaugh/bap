@@ -509,6 +509,15 @@ theorem mips_argument_registers (w : Nat) (c : Convention) (h : convention .mips
     c.functionArguments.length = if w = 32 then 4 else 8 :=
   functionArguments_length .mips w c h
 
+/-- Intended, as in `plugins/mips/mips_abi.ml`, where the memory arguments are allocated from the
+stack pointer: the convention doesn't model the 16-byte home area of the o32 psABI, so the first
+stack argument is at offset 0 for the 32-bit and the 64-bit MIPS. -/
+theorem mips_first_stack_argument (w : Nat) (c : Convention) (h : convention .mips w = some c) :
+    argumentLocation c (if w = 32 then 4 else 8) = .stack 0 := by
+  have hl := mips_argument_registers w c h
+  rw [← hl]
+  exact first_stack_argument c
+
 /-- x86 is a 32-bit target, whatever word size is asked of it, including the default: registers
 are 32 bits wide and the arguments, all on the stack, take four bytes each. -/
 theorem x86_is_32_bit (w index : Nat) (c : Convention) (h : convention .x86 w = some c) :

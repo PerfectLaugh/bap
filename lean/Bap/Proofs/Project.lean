@@ -1,6 +1,8 @@
 import Lean.Elab.Command
 import Bap.Project.Pass
 import Bap.Project.Persist
+import Bap.Proofs.Bil
+import Bap.Proofs.Knowledge
 
 namespace Bap.Proofs.Project
 
@@ -1028,7 +1030,7 @@ open_private Bap.Project.Persist in Bap.Project :
   nat bool boolValue encodeBytes decodeBytes encodeArch decodeArch encodeSection decodeSection
   encodeSegment decodeSegment encodeSymbol decodeSymbol encodeRegion decodeRegion encodeImage
   decodeImage encodeFlow decodeFlow encodeTarget decodeTarget encodeInsn decodeInsn encodeEdge
-  decodeEdge encodeDisasm decodeDisasm encodeBinding decodeBinding
+  decodeEdge encodeDisasm decodeDisasm encodeBinding decodeBinding depth depthOfList
 
 @[local simp] theorem nat_roundtrip (value : Nat) : Sexp.nat (nat value) = .ok value := by
   simp [nat, Sexp.nat, Sexp.asAtom, bind, Except.bind]
@@ -1149,23 +1151,68 @@ theorem decodeBinding_roundtrip (binding : String × String) :
   simp [decodeBinding, encodeBinding, Sexp.expectTagged, Sexp.tagged, Sexp.asList, Sexp.asAtom,
     bind, Except.bind]
 
-/-- Instruction BIL goes through `Bil.Wire`, whose own roundtrip is taken as a hypothesis. -/
-theorem decodeInsn_roundtrip (insn : Bap.Disasm.Insn)
-    (hbil : Bap.Bil.Wire.parseStmts 1000000 (Bap.Bil.Wire.printProgram insn.bil) = .ok insn.bil) :
-    decodeInsn (encodeInsn insn) = .ok insn := by
+private theorem le_depthOfList {item : Sexp} {items : List Sexp} (h : item ∈ items) :
+    depth item ≤ depthOfList items := by
+  induction items with
+  | nil => simp at h
+  | cons head tail ih =>
+    rcases List.mem_cons.mp h with rfl | h
+    · simp only [depthOfList]
+      omega
+    · have := ih h
+      simp only [depthOfList]
+      omega
+
+mutual
+  private theorem stmtDepth_le : (stmt : Bap.Bil.Stmt) →
+      Bap.Proofs.Bil.WireLaws.stmtDepth stmt ≤ depth (Bap.Bil.Wire.printStmt stmt)
+    | .move _ _ | .jmp _ | .special _ | .cpuExn _ => by
+      simp [Bap.Proofs.Bil.WireLaws.stmtDepth, Bap.Bil.Wire.printStmt, Sexp.tagged, depth]
+    | .while condition body => by
+      have hb := programDepth_le body
+      simp only [Bap.Proofs.Bil.WireLaws.stmtDepth, Bap.Bil.Wire.printStmt, Sexp.tagged, depth, depthOfList]
+      omega
+    | .ifElse condition yes no => by
+      have hy := programDepth_le yes
+      have hn := programDepth_le no
+      simp only [Bap.Proofs.Bil.WireLaws.stmtDepth, Bap.Bil.Wire.printStmt, Sexp.tagged, depth, depthOfList]
+      omega
+
+  private theorem programDepth_le : (program : List Bap.Bil.Stmt) →
+      Bap.Proofs.Bil.WireLaws.programDepth program ≤ depthOfList (program.map Bap.Bil.Wire.printStmt)
+    | [] => by simp [Bap.Proofs.Bil.WireLaws.programDepth, depthOfList]
+    | stmt :: rest => by
+      have hs := stmtDepth_le stmt
+      have hr := programDepth_le rest
+      simp only [Bap.Proofs.Bil.WireLaws.programDepth, List.map_cons, depthOfList]
+      omega
+end
+
+/-- Parser fuel from the input's own depth always suffices, so no nesting limit remains. -/
+theorem parseStmts_depth (program : Bap.Bil.Program) :
+    Bap.Bil.Wire.parseStmts (depth (Bap.Bil.Wire.printProgram program)) (Bap.Bil.Wire.printProgram program) =
+      .ok program := by
+  have h : Bap.Proofs.Bil.WireLaws.programDepth program ≤ depth (Bap.Bil.Wire.printProgram program) := by
+    have := programDepth_le program
+    simp only [Bap.Bil.Wire.printProgram, depth]
+    omega
+  have hl := Bap.Proofs.Bil.WireLaws.parseStmtList_print program _ h
+  simp only [Bap.Bil.Wire.printProgram] at hl ⊢
+  simp [Bap.Bil.Wire.parseStmts, Sexp.asList, hl, bind, Except.bind]
+
+/-- An instruction roundtrips exactly, whatever its BIL and however deep. -/
+theorem decodeInsn_roundtrip (insn : Bap.Disasm.Insn) : decodeInsn (encodeInsn insn) = .ok insn := by
   simp [decodeInsn, encodeInsn, Sexp.expectTagged, Sexp.tagged, Sexp.asList, Sexp.asAtom,
-    decodeFlow_roundtrip, decodeTarget_roundtrip, hbil, bind, Except.bind]
+    decodeFlow_roundtrip, decodeTarget_roundtrip, parseStmts_depth, bind, Except.bind]
 
 private theorem mapM_atom_roundtrip (xs : List String) :
     (xs.map Sexp.atom).mapM Sexp.asAtom = .ok xs :=
   mapM_roundtrip _ _ _ fun _ _ => rfl
 
-theorem decodeDisasm_roundtrip (disasm : Bap.Disasm.Disasm)
-    (hbil : ∀ insn ∈ disasm.instructions,
-      Bap.Bil.Wire.parseStmts 1000000 (Bap.Bil.Wire.printProgram insn.bil) = .ok insn.bil) :
+theorem decodeDisasm_roundtrip (disasm : Bap.Disasm.Disasm) :
     decodeDisasm (encodeDisasm disasm) = .ok disasm := by
   have hi := mapM_roundtrip encodeInsn decodeInsn disasm.instructions
-    fun insn hm => decodeInsn_roundtrip insn (hbil insn hm)
+    fun insn _ => decodeInsn_roundtrip insn
   have he := mapM_roundtrip encodeEdge decodeEdge disasm.edges fun edge _ => decodeEdge_roundtrip edge
   have hs := mapM_atom_roundtrip disasm.errors
   simp only [decodeDisasm, encodeDisasm, Sexp.expectTagged, Sexp.tagged, Sexp.asList]
@@ -1251,13 +1298,13 @@ theorem decode_shape {input : Sexp} {persistent : List Bap.Knowledge.AnySlot} {p
       exact ⟨image, disasm, storage, passed, knowledge, hinput⟩
     · cases h
 
-/-- Exact roundtrip of a project, modulo the Wire and Knowledge codecs (hypotheses). -/
+/-- Exact roundtrip of a project. Facts and opinions must live in slots of `persistent`, uniquely
+named: `encode` can only check a slot's name, and decoding a value needs the slot's own codec. -/
 theorem decode_encode {project : Project} {persistent : List Bap.Knowledge.AnySlot} {encoded : Sexp}
     (h : encode project persistent = .ok encoded)
-    (hk : ∀ k, Bap.Knowledge.encodeState persistent project.knowledge = .ok k →
-      Bap.Knowledge.decodeState persistent k = .ok project.knowledge)
-    (hbil : ∀ disasm, project.disasm = some disasm → ∀ insn ∈ disasm.instructions,
-      Bap.Bil.Wire.parseStmts 1000000 (Bap.Bil.Wire.printProgram insn.bil) = .ok insn.bil) :
+    (hnames : (persistent.map fun slot => slot.2.name).Nodup)
+    (hfacts : ∀ fact ∈ project.knowledge.facts, fact.slot ∈ persistent)
+    (hopinions : ∀ opinion ∈ project.knowledge.opinions, opinion.fact.slot ∈ persistent) :
     decode encoded persistent = .ok project := by
   simp only [encode, bind, Except.bind] at h
   split at h
@@ -1267,19 +1314,25 @@ theorem decode_encode {project : Project} {persistent : List Bap.Knowledge.AnySl
     · rename_i knowledge hknowledge
       simp only [Except.ok.injEq] at h
       subst h
-      have hkd := hk _ hknowledge
+      have hkd : Bap.Knowledge.decodeState persistent knowledge = .ok project.knowledge := by
+        obtain ⟨decoded, hdec, hf, ho, hv⟩ :=
+          Bap.Proofs.Knowledge.decodeState_encodeState_total hnames hfacts hopinions hknowledge
+        rw [hdec]
+        cases decoded
+        cases hk : project.knowledge
+        simp_all
       have hst := mapM_roundtrip encodeBinding decodeBinding project.storage
         fun binding _ => decodeBinding_roundtrip binding
       have hpa := mapM_atom_roundtrip project.passed
       obtain ⟨image, disasm, kn, storage, passed⟩ := project
-      simp only at hkd hst hpa hbil
+      simp only at hkd hst hpa
       cases image with
       | none =>
         cases disasm with
         | none =>
           simp [decode, Sexp.expectTagged, Sexp.tagged, Sexp.asList, bind, Except.bind, hst, hpa, hkd]
         | some d =>
-          have hd := decodeDisasm_roundtrip d (hbil d rfl)
+          have hd := decodeDisasm_roundtrip d
           simp [decode, Sexp.expectTagged, Sexp.tagged, Sexp.asList, bind, Except.bind, hst, hpa, hkd, hd]
       | some i =>
         have hi := decodeImage_roundtrip i
@@ -1287,8 +1340,52 @@ theorem decode_encode {project : Project} {persistent : List Bap.Knowledge.AnySl
         | none =>
           simp [decode, Sexp.expectTagged, Sexp.tagged, Sexp.asList, bind, Except.bind, hst, hpa, hkd, hi]
         | some d =>
-          have hd := decodeDisasm_roundtrip d (hbil d rfl)
+          have hd := decodeDisasm_roundtrip d
           simp [decode, Sexp.expectTagged, Sexp.tagged, Sexp.asList, bind, Except.bind, hst, hpa, hkd, hi, hd]
+
+/-- The roundtrip through text: parsing the rendered document and decoding it gives the project. -/
+theorem decode_parse_encode {project : Project} {persistent : List Bap.Knowledge.AnySlot} {encoded : Sexp}
+    (h : encode project persistent = .ok encoded)
+    (hnames : (persistent.map fun slot => slot.2.name).Nodup)
+    (hfacts : ∀ fact ∈ project.knowledge.facts, fact.slot ∈ persistent)
+    (hopinions : ∀ opinion ∈ project.knowledge.opinions, opinion.fact.slot ∈ persistent) :
+    (Sexp.parse (toString encoded)).bind (decode · persistent) = .ok project := by
+  rw [show Sexp.parse (toString encoded) = .ok encoded from Bap.Proofs.Core.SexpLaws.parse_render _]
+  exact decode_encode h hnames hfacts hopinions
+
+/-- What `save` writes, `deserialize` reads back: the whole file format, end to end. -/
+theorem deserialize_serialize {project : Project} {persistent : List Bap.Knowledge.AnySlot} {text : String}
+    (h : serialize project persistent = .ok text)
+    (hnames : (persistent.map fun slot => slot.2.name).Nodup)
+    (hfacts : ∀ fact ∈ project.knowledge.facts, fact.slot ∈ persistent)
+    (hopinions : ∀ opinion ∈ project.knowledge.opinions, opinion.fact.slot ∈ persistent) :
+    deserialize text persistent = .ok project := by
+  simp only [serialize, bind, Except.bind] at h
+  split at h
+  · cases h
+  · rename_i encoded hencoded
+    simp only [Except.ok.injEq] at h
+    subst h
+    exact decode_parse_encode hencoded hnames hfacts hopinions
+
+/-- `save` writes exactly what `serialize` produces, and fails only as it does. -/
+theorem save_eq (project : Project) (path : String) (persistent : List Bap.Knowledge.AnySlot) :
+    save project path persistent = match serialize project persistent with
+      | .error error => throw (IO.userError error)
+      | .ok text => IO.FS.writeFile path text := rfl
+
+/-- `loadSaved` returns exactly what `deserialize` makes of the file. -/
+theorem loadSaved_eq (path : String) (persistent : List Bap.Knowledge.AnySlot) :
+    loadSaved path persistent = (IO.FS.readFile path >>= fun input =>
+      match deserialize input persistent with
+      | .error error => throw (IO.userError error)
+      | .ok project => pure project) := rfl
+
+/-- Without Knowledge facts the file format needs no registry at all. -/
+theorem deserialize_serialize_no_knowledge {project : Project} {text : String}
+    (h : serialize project [] = .ok text) (hfacts : project.knowledge.facts = [])
+    (hopinions : project.knowledge.opinions = []) : deserialize text [] = .ok project :=
+  deserialize_serialize h List.nodup_nil (by simp [hfacts]) (by simp [hopinions])
 
 end Persist
 

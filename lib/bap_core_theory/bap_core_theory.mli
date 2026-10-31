@@ -2527,22 +2527,26 @@ module Theory : sig
     (** [modulo x y] is the remainder of [div x y] modulo [2^'s]. *)
 
     val smodulo : 's bitv -> 's bitv -> 's bitv
-    (** [smodulo x y] is the signed remainder of [div x y] modulo [2^'s].
+    (** [smodulo x y] is the signed modulus of [x] by [y] modulo [2^'s].
 
-        This version of the signed remainder where the sign follows the
-        dividend, and is defined via the [% = modulo] operation as follows
+        The sign of a nonzero result follows the divisor, as in SMT-LIB
+        [bvsmod], unlike the truncating remainder, whose sign follows the
+        dividend. It is defined via the [% = modulo] operation as follows
 
         {v
                            /
-                           | x % y : if not mx /\ not my
-                           | neg (neg x % y) if mx /\ not my
+                           | u : if u = 0
             x smodulo y = <
-                           | neg (x % (neg y)) if not mx /\ my
-                           | neg (neg x % neg y) mod m if mx /\ my
+                           | u : if not mx /\ not my
+                           | y - u : if mx /\ not my
+                           | u + y : if not mx /\ my
+                           | neg u : if mx /\ my
                            \
 
-            where mx = msb x  and my = msb y.
-        v} *)
+            where mx = msb x, my = msb y, and u = abs x % abs y.
+        v}
+
+        In particular, [x smodulo 0 = x]. *)
 
     val logand : 's bitv -> 's bitv -> 's bitv
     (** [logand x y] is a bitwise logical and of [x] and [y]. *)

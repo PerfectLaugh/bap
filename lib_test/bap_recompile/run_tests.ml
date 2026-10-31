@@ -325,6 +325,84 @@ let test_select_is_not_threaded _ =
       assert_bool "a symbolic select was redirected without a split proof"
         (not (List.mem !predecessors "pred1" ~equal:String.equal))
 
+(* the defs of the only block, on the values of the variables *)
+let eval_defs sub env =
+  let blk = Seq.hd_exn (Term.enum blk_t sub) in
+  Term.enum def_t blk
+  |> Seq.fold ~init:env ~f:(fun env def ->
+      let rhs =
+        List.fold env ~init:(Def.rhs def) ~f:(fun e (v, x) ->
+            Exp.substitute (Bil.var v) (Bil.int x) e)
+      in
+      match Exp.fold_consts rhs with
+      | Bil.Int x -> (Def.lhs def, x) :: env
+      | e -> assert_failure (Exp.to_string e))
+
+let value_of env name =
+  List.find_map_exn env ~f:(fun (v, x) ->
+      Option.some_if (String.equal (Var.name v) name) x)
+
+let signed_table = [ 0; 1; 2; 3; 5; -1; -2; -3; -5; 127; -128 ]
+
+let srem_ir =
+  "define void @f0() {\n\
+   entry:\n\
+  \  %x = load i8, ptr @bap_x\n\
+  \  %y = load i8, ptr @bap_y\n\
+  \  %r = srem i8 %x, %y\n\
+  \  store i8 %r, ptr @bap_r\n\
+  \  call void @f0.exit.0()\n\
+  \  unreachable\n\
+   }\n"
+
+let modulus_source () =
+  let imm name = Var.create name (Type.imm 8) in
+  let x = imm "x" and y = imm "y" and r = imm "r" in
+  ( sub "t"
+      [
+        Blk.create
+          ~defs:[ Def.create r Bil.(var x %$ var y) ]
+          ~jmps:[ ret (Tid.create ()) ]
+          ();
+      ],
+    x,
+    y )
+
+(* LLVM's srem truncates, so it isn't SMOD, which follows the divisor *)
+let test_srem_is_truncating _ =
+  let source, x, y = modulus_source () in
+  match optimize srem_ir source with
+  | Error err -> assert_failure (Error.to_string_hum err)
+  | Ok optimized ->
+      List.iter signed_table ~f:(fun a ->
+          List.iter signed_table ~f:(fun b ->
+              if b <> 0 then
+                let word = Word.of_int ~width:8 in
+                let env = eval_defs optimized [ (x, word a); (y, word b) ] in
+                let expected = Int.rem a b in
+                assert_equal ~cmp:Word.equal ~printer:Word.to_string
+                  ~msg:(sprintf "%d srem %d" a b) (word expected)
+                  (value_of env "r")))
+
+(* the expansion of SMOD, through the real opt, which folds what it may assume
+   of srem, on the signs, the zero divisor, and the minimum by -1 *)
+let test_smod_through_opt _ =
+  if Stdlib.Sys.command "command -v opt >/dev/null" = 0 then
+    let source, x, y = modulus_source () in
+    match Bap_recompile.optimize ~opt:"opt" source with
+    | Error err -> assert_failure (Error.to_string_hum err)
+    | Ok optimized ->
+        List.iter signed_table ~f:(fun a ->
+            List.iter signed_table ~f:(fun b ->
+                let word = Word.of_int ~width:8 in
+                let bits v = Word.to_bitvec (word v) in
+                let expected =
+                  Word.create Bitvec.(smod (bits a) (bits b) mod modulus 8) 8
+                in
+                let env = eval_defs optimized [ (x, word a); (y, word b) ] in
+                assert_equal ~cmp:Word.equal ~printer:Word.to_string
+                  ~msg:(sprintf "%d smod %d" a b) expected (value_of env "r")))
+
 let optimized_count ?validate ?validate_thread ?validate_split source =
   match
     deflatten_with ?validate ?validate_thread ?validate_split select_ir source
@@ -390,6 +468,8 @@ let suite =
          "thread cache is separate" >:: test_thread_cache_is_separate;
          "thread validation failure" >:: test_thread_validation_failure;
          "select is not threaded" >:: test_select_is_not_threaded;
+         "srem is truncating" >:: test_srem_is_truncating;
+         "smod through opt" >:: test_smod_through_opt;
          "split cache is separate" >:: test_split_cache_is_separate;
          "split rejection rolls back" >:: test_split_rejection_rolls_back;
          "second edge rejection rolls back"

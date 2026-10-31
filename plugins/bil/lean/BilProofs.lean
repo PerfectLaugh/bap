@@ -6,7 +6,7 @@ example (x : BitVec 8) : x * 1#8 = x := by bv_decide
 example (x : BitVec 8) : x / 1#8 = x := by bv_decide
 example (x : BitVec 8) : BitVec.sdiv x 1#8 = x := by bv_decide
 example (x : BitVec 8) : x % 1#8 = 0#8 := by bv_decide
-example (x : BitVec 8) : BitVec.srem x 1#8 = 0#8 := by bv_decide
+example (x : BitVec 8) : BitVec.smod x 1#8 = 0#8 := by bv_decide
 example (x : BitVec 8) : BitVec.shiftLeft x (BitVec.toNat 0#8) = x := by bv_decide
 example (x : BitVec 8) : BitVec.ushiftRight x (BitVec.toNat 0#8) = x := by bv_decide
 example (x : BitVec 8) : BitVec.sshiftRight x (BitVec.toNat 0#8) = x := by bv_decide

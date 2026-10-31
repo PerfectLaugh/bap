@@ -14,6 +14,6 @@ def decodeAt (base address : Nat) (data : ByteArray) : IO (Except String Disasm.
 
 def disassembler (base : Nat := 0) : IO Disasm.Disassembler := do
   let globals ← LLVMLift.x86Environment
-  pure ⟨"x86-llvm-primus", decodeWith globals base⟩
+  pure { name := "x86-llvm-primus", decode := decodeWith globals base }
 
 end Bap.Target.X86

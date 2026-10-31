@@ -3547,6 +3547,20 @@ let lifters data =
               ("checks Primus", "primus: vxrm write/read passed");
               ("checks the lifted engine", "lifted: vxrm write/read passed");
             ]);
+      case "lifters/riscv64-rem" (fun env ->
+          let out =
+            bap env
+              [
+                "script";
+                input "lifters/riscv_rem.ml";
+                path data "bin/riscv64-linux-gnu-echo";
+              ]
+          in
+          sequence env out
+            [
+              ("checks Primus", "primus: rem passed");
+              ("checks the lifted engine", "lifted: rem passed");
+            ]);
     ]
 
 (* the traces of the lifted engine, see engines.ml, are the ones of

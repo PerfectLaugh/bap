@@ -19,7 +19,8 @@ let binop (operation : binop) =
   | MINUS -> "-"
   | TIMES -> "*"
   | DIVIDE | SDIVIDE -> "/"
-  | MOD | SMOD -> "%"
+  | MOD -> "%"
+  | SMOD -> assert false
   | LSHIFT -> "<<"
   | RSHIFT | ARSHIFT -> ">>"
   | AND -> "&"
@@ -195,7 +196,14 @@ let rec lower_exp env state exp =
           | _ -> exp
         else exp
       in
-      expr (Ast.Binary (binop op, signed x', signed y'))
+      if Poly.equal op SMOD then
+        (* the [%] of C truncates, so its sign follows the dividend, and it is
+           undefined on a zero divisor, see [Decompile_emit.smod_helper] *)
+        let bits =
+          match Type.infer exp with Ok (Type.Imm bits) -> bits | _ -> 64
+        in
+        expr (Ast.Machine (sprintf "bir_smod%d" bits, [ signed x'; signed y' ]))
+      else expr (Ast.Binary (binop op, signed x', signed y'))
   | Bil.UnOp (NEG, x) -> expr (Ast.Unary ("-", lower x))
   | Bil.UnOp (NOT, x) ->
       let operator =

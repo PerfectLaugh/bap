@@ -14,8 +14,13 @@ namespace Bap.Proofs.Knowledge
 open Bap.Knowledge
 
 open_private Bap.Knowledge.Core Bap.Knowledge.putFact as putFact
-open_private Bap.Knowledge.Core Bap.Knowledge.putOpinion as putOpinion
-open_private Bap.Knowledge.Core Bap.Knowledge.joinOpinions as joinOpinions
+open_private Bap.Knowledge.Core Bap.Knowledge.isVote as isVote
+open_private Bap.Knowledge.Core Bap.Knowledge.voters as voters
+open_private Bap.Knowledge.Core Bap.Knowledge.weight as weight
+open_private Bap.Knowledge.Core Bap.Knowledge.outweighs as outweighs
+open_private Bap.Knowledge.Core Bap.Knowledge.chooseVote as chooseVote
+open_private Bap.Knowledge.Core Bap.Knowledge.promiseValue as promiseValue
+open_private Bap.Knowledge.Core Bap.Knowledge.providePromised as providePromised
 open_private Bap.Knowledge.Core Bap.Knowledge.runPromises as runPromises
 open_private Bap.Knowledge.Core Bap.Knowledge.normalize as normalize
 open_private Bap.Bil.Wire Bap.Bil.Wire.hexDigit as hexDigit
@@ -207,69 +212,98 @@ private theorem lookup_putFact_frame (reader : Slot other) (key : Object) (fact 
     · exact Or.inl ho
   simp only [lookupFact, hfind]
 
-theorem provideInFacts_fresh (slot : Slot kind) (object : Object) (value : kind.data) (facts : List Fact)
+/-- Providing the empty value is a no-op, as upstream: no fact, no conflict, no version bump. -/
+theorem provideInFacts_empty (slot : Slot kind) (object : Object) {value : kind.data} (facts : List Fact)
+    (h : slot.domain.eq value slot.domain.empty = true) :
+    provideInFacts slot object value facts = .ok (false, facts) := by
+  simp only [provideInFacts, h, ↓reduceIte]
+  rfl
+
+theorem provideInFacts_fresh (slot : Slot kind) (object : Object) {value : kind.data} (facts : List Fact)
+    (hne : slot.domain.eq value slot.domain.empty = false)
     (h : lookupFact slot object facts = .ok none) :
     provideInFacts slot object value facts = .ok (true, putFact ⟨object, ⟨kind, slot⟩, value⟩ facts) := by
-  simp only [provideInFacts, bind, Except.bind, h]
+  simp only [provideInFacts, hne, bind, Except.bind, h, Bool.false_eq_true, ↓reduceIte]
 
-theorem provideInFacts_existing (slot : Slot kind) (object : Object) (value existing : kind.data)
-    (facts : List Fact) (h : lookupFact slot object facts = .ok (some existing)) :
+theorem provideInFacts_existing (slot : Slot kind) (object : Object) {value : kind.data} (existing : kind.data)
+    (facts : List Fact) (hne : slot.domain.eq value slot.domain.empty = false)
+    (h : lookupFact slot object facts = .ok (some existing)) :
     provideInFacts slot object value facts =
       match slot.domain.join existing value with
       | none => .error (.incompatible slot.name)
       | some joined =>
         if slot.domain.eq existing joined then .ok (false, facts)
         else .ok (true, putFact ⟨object, ⟨kind, slot⟩, joined⟩ facts) := by
-  simp only [provideInFacts, bind, Except.bind, h]
+  simp only [provideInFacts, hne, bind, Except.bind, h, Bool.false_eq_true, ↓reduceIte]
   rfl
 
 /-- A slot name used at another payload kind is reported, never reinterpreted. -/
-theorem provideInFacts_mismatch (slot : Slot kind) (object : Object) (value : kind.data)
-    (facts : List Fact) {conflict : Conflict} (h : lookupFact slot object facts = .error conflict) :
+theorem provideInFacts_mismatch (slot : Slot kind) (object : Object) {value : kind.data}
+    (facts : List Fact) (hne : slot.domain.eq value slot.domain.empty = false) {conflict : Conflict}
+    (h : lookupFact slot object facts = .error conflict) :
     provideInFacts slot object value facts = .error conflict := by
-  simp only [provideInFacts, bind, Except.bind, h]
+  simp only [provideInFacts, hne, bind, Except.bind, h, Bool.false_eq_true, ↓reduceIte]
 
 theorem provideInFacts_conflict (slot : Slot kind) (object : Object) {value existing : kind.data}
-    {facts : List Fact} (h : lookupFact slot object facts = .ok (some existing))
+    {facts : List Fact} (hne : slot.domain.eq value slot.domain.empty = false)
+    (h : lookupFact slot object facts = .ok (some existing))
     (hj : slot.domain.join existing value = none) :
     provideInFacts slot object value facts = .error (.incompatible slot.name) := by
-  rw [provideInFacts_existing slot object value existing facts h, hj]
+  rw [provideInFacts_existing slot object existing facts hne h, hj]
+
+/-- Every outcome of a successful provide: nothing happened, or the cell was written. -/
+private theorem provideInFacts_cases {slot : Slot kind} {object : Object} {value : kind.data}
+    {facts next : List Fact} {changed : Bool} (h : provideInFacts slot object value facts = .ok (changed, next)) :
+    (changed = false ∧ next = facts) ∨
+      (changed = true ∧ ∃ result, next = putFact ⟨object, ⟨kind, slot⟩, result⟩ facts) := by
+  cases hempty : slot.domain.eq value slot.domain.empty with
+  | true =>
+    rw [provideInFacts_empty slot object facts hempty] at h
+    cases h
+    exact Or.inl ⟨rfl, rfl⟩
+  | false =>
+    cases hl : lookupFact slot object facts with
+    | error conflict => rw [provideInFacts_mismatch slot object facts hempty hl] at h; cases h
+    | ok found =>
+      cases found with
+      | none =>
+        rw [provideInFacts_fresh slot object facts hempty hl] at h
+        cases h
+        exact Or.inr ⟨rfl, value, rfl⟩
+      | some existing =>
+        rw [provideInFacts_existing slot object existing facts hempty hl] at h
+        split at h
+        · cases h
+        · split at h
+          · cases h; exact Or.inl ⟨rfl, rfl⟩
+          · cases h; exact Or.inr ⟨rfl, _, rfl⟩
 
 /-- A `false` change flag really means the table was left untouched. -/
 theorem provideInFacts_unchanged {slot : Slot kind} {object : Object} {value : kind.data}
     {facts next : List Fact} (h : provideInFacts slot object value facts = .ok (false, next)) :
     next = facts := by
-  cases hl : lookupFact slot object facts with
-  | error conflict => rw [provideInFacts_mismatch slot object value facts hl] at h; cases h
-  | ok result =>
-    cases result with
-    | none => rw [provideInFacts_fresh slot object value facts hl] at h; cases h
-    | some existing =>
-      rw [provideInFacts_existing slot object value existing facts hl] at h
-      split at h
-      · cases h
-      · split at h
-        · cases h; rfl
-        · cases h
+  rcases provideInFacts_cases h with ⟨_, rfl⟩ | ⟨hc, _⟩
+  · rfl
+  · cases hc
 
-/-- What a successful `provideInFacts` leaves at the cell it wrote. -/
+/-- What a successful `provideInFacts` of a non-empty value leaves at the cell it wrote. -/
 private theorem provideInFacts_read {slot : Slot kind} {object : Object} {value : kind.data}
     {facts next : List Fact} {changed : Bool} (h : provideInFacts slot object value facts = .ok (changed, next))
-    (heq : Lawful slot.domain) :
+    (heq : Lawful slot.domain) (hne : slot.domain.eq value slot.domain.empty = false) :
     ∃ result, lookupFact slot object next = .ok (some result) ∧
       ((lookupFact slot object facts = .ok none ∧ result = value ∧ changed = true) ∨
         ∃ existing, lookupFact slot object facts = .ok (some existing) ∧
           slot.domain.join existing value = some result ∧ (changed = true ↔ existing ≠ result)) := by
   cases hl : lookupFact slot object facts with
-  | error conflict => rw [provideInFacts_mismatch slot object value facts hl] at h; cases h
+  | error conflict => rw [provideInFacts_mismatch slot object facts hne hl] at h; cases h
   | ok found =>
     cases found with
     | none =>
-      rw [provideInFacts_fresh slot object value facts hl] at h
+      rw [provideInFacts_fresh slot object facts hne hl] at h
       cases h
       exact ⟨value, lookup_putFact_self slot slot object value facts rfl, Or.inl ⟨rfl, rfl, rfl⟩⟩
     | some existing =>
-      rw [provideInFacts_existing slot object value existing facts hl] at h
+      rw [provideInFacts_existing slot object existing facts hne hl] at h
       split at h
       · cases h
       · rename_i joined hj
@@ -281,24 +315,35 @@ private theorem provideInFacts_read {slot : Slot kind} {object : Object} {value 
           exact ⟨existing, hl, Or.inr ⟨existing, rfl, hj, by simp⟩⟩
         · rename_i he
           cases h
-          have hne : existing ≠ joined := fun hs => he ((heq.eq_iff _ _).2 hs)
+          have hne' : existing ≠ joined := fun hs => he ((heq.eq_iff _ _).2 hs)
           exact ⟨joined, lookup_putFact_self slot slot object joined facts rfl,
-            Or.inr ⟨existing, rfl, hj, by simp [hne]⟩⟩
+            Or.inr ⟨existing, rfl, hj, by simp [hne']⟩⟩
 
-/-- A successful provide never loses information: the cell afterwards refines both the old
-contents and the provided value. -/
+/-- A successful provide never loses information: a non-empty value is stored, and the cell
+afterwards refines both the old contents and the provided value. -/
 theorem provideInFacts_monotone {slot : Slot kind} {object : Object} {value : kind.data}
     {facts next : List Fact} {changed : Bool} (hd : Lawful slot.domain)
     (h : provideInFacts slot object value facts = .ok (changed, next)) :
-    ∃ result, lookupFact slot object next = .ok (some result) ∧ Refines slot.domain value result ∧
-      ∀ existing, lookupFact slot object facts = .ok (some existing) →
-        Refines slot.domain existing result := by
-  obtain ⟨result, hread, hcase⟩ := provideInFacts_read h hd
-  refine ⟨result, hread, ?_, ?_⟩
-  · rcases hcase with ⟨_, rfl, _⟩ | ⟨existing, _, hj, _⟩
-    · exact hd.refines_refl _
-    · exact (hd.join_upper hj).2
-  · intro existing hex
+    (slot.domain.eq value slot.domain.empty = false →
+      ∃ result, lookupFact slot object next = .ok (some result) ∧ Refines slot.domain value result) ∧
+    ∀ existing, lookupFact slot object facts = .ok (some existing) →
+      ∃ result, lookupFact slot object next = .ok (some result) ∧ Refines slot.domain existing result ∧
+        Refines slot.domain value result := by
+  cases hempty : slot.domain.eq value slot.domain.empty with
+  | true =>
+    rw [provideInFacts_empty slot object facts hempty] at h
+    cases h
+    have hvalue := (hd.eq_iff _ _).1 hempty
+    refine ⟨fun hf => (by cases hf), fun existing hex => ⟨existing, hex, hd.refines_refl _, ?_⟩⟩
+    rw [hvalue]
+    exact hd.empty_refines _
+  | false =>
+    obtain ⟨result, hread, hcase⟩ := provideInFacts_read h hd hempty
+    have hval : Refines slot.domain value result := by
+      rcases hcase with ⟨_, rfl, _⟩ | ⟨existing, _, hj, _⟩
+      · exact hd.refines_refl _
+      · exact (hd.join_upper hj).2
+    refine ⟨fun _ => ⟨result, hread, hval⟩, fun existing hex => ⟨result, hread, ?_, hval⟩⟩
     rcases hcase with ⟨hnone, _⟩ | ⟨old, hold, hj, _⟩
     · rw [hnone] at hex; cases hex
     · rw [hold] at hex
@@ -310,29 +355,14 @@ theorem provideInFacts_frame {slot : Slot kind} {object : Object} {value : kind.
     {facts next : List Fact} {changed : Bool} (h : provideInFacts slot object value facts = .ok (changed, next))
     (reader : Slot other) (key : Object) (hkey : key ≠ object ∨ reader.name ≠ slot.name) :
     lookupFact reader key next = lookupFact reader key facts := by
-  have hfresh (val : kind.data) :
-      lookupFact reader key (putFact ⟨object, ⟨kind, slot⟩, val⟩ facts) = lookupFact reader key facts := by
-    apply lookup_putFact_frame
+  rcases provideInFacts_cases h with ⟨_, rfl⟩ | ⟨_, result, rfl⟩
+  · rfl
+  · apply lookup_putFact_frame
     intro he
     simp only [factKey, Prod.mk.injEq] at he
     rcases hkey with hk | hk
     · exact hk he.1
     · exact hk he.2
-  cases hl : lookupFact slot object facts with
-  | error conflict => rw [provideInFacts_mismatch slot object value facts hl] at h; cases h
-  | ok found =>
-    cases found with
-    | none =>
-      rw [provideInFacts_fresh slot object value facts hl] at h
-      cases h
-      exact hfresh value
-    | some existing =>
-      rw [provideInFacts_existing slot object value existing facts hl] at h
-      split at h
-      · cases h
-      · split at h
-        · cases h; rfl
-        · cases h; exact hfresh _
 
 /-- The table holds at most one fact per object and slot name. -/
 private theorem putFact_keys_nodup (fact : Fact) (facts : List Fact) (h : (facts.map factKey).Nodup) :
@@ -351,21 +381,9 @@ private theorem putFact_keys_nodup (fact : Fact) (facts : List Fact) (h : (facts
 theorem provideInFacts_keys_nodup {slot : Slot kind} {object : Object} {value : kind.data}
     {facts next : List Fact} {changed : Bool} (h : provideInFacts slot object value facts = .ok (changed, next))
     (hkeys : (facts.map factKey).Nodup) : (next.map factKey).Nodup := by
-  cases hl : lookupFact slot object facts with
-  | error conflict => rw [provideInFacts_mismatch slot object value facts hl] at h; cases h
-  | ok found =>
-    cases found with
-    | none =>
-      rw [provideInFacts_fresh slot object value facts hl] at h
-      cases h
-      exact putFact_keys_nodup _ _ hkeys
-    | some existing =>
-      rw [provideInFacts_existing slot object value existing facts hl] at h
-      split at h
-      · cases h
-      · split at h
-        · cases h; exact hkeys
-        · cases h; exact putFact_keys_nodup _ _ hkeys
+  rcases provideInFacts_cases h with ⟨_, rfl⟩ | ⟨_, result, rfl⟩
+  · exact hkeys
+  · exact putFact_keys_nodup _ _ hkeys
 
 end Facts
 
@@ -407,19 +425,33 @@ theorem provide_facts_of_version_eq (h : provide slot object value state = .ok n
   | false => exact provideInFacts_unchanged hp
   | true => simp at hv
 
-theorem provide_read (hd : Lawful slot.domain) (h : provide slot object value state = .ok next) :
+/-- Providing the empty value leaves the state as it is. -/
+theorem provide_empty (h : slot.domain.eq value slot.domain.empty = true) (source : State) :
+    provide slot object value source = .ok source := by
+  simp only [provide, bind, Except.bind, provideInFacts_empty slot object _ h]
+  rfl
+
+theorem provide_read (hd : Lawful slot.domain) (hne : slot.domain.eq value slot.domain.empty = false)
+    (h : provide slot object value state = .ok next) :
     ∃ result, lookupFact slot object next.facts = .ok (some result) ∧ Refines slot.domain value result ∧
       ∀ existing, lookupFact slot object state.facts = .ok (some existing) →
         Refines slot.domain existing result := by
   obtain ⟨changed, facts, hp, rfl⟩ := provide_ok_iff.1 h
-  exact provideInFacts_monotone hd hp
+  obtain ⟨hsome, hold⟩ := provideInFacts_monotone hd hp
+  obtain ⟨result, hread, hval⟩ := hsome hne
+  refine ⟨result, hread, hval, fun existing hex => ?_⟩
+  obtain ⟨result', hread', hre, _⟩ := hold existing hex
+  rw [hread] at hread'
+  cases hread'
+  exact hre
 
 /-- A successful provide on an empty cell reads back the exact value. -/
-theorem provide_read_fresh (h : provide slot object value state = .ok next)
+theorem provide_read_fresh (hne : slot.domain.eq value slot.domain.empty = false)
+    (h : provide slot object value state = .ok next)
     (hnone : lookupFact slot object state.facts = .ok none) :
     lookupFact slot object next.facts = .ok (some value) ∧ next.version = state.version + 1 := by
   obtain ⟨changed, facts, hp, rfl⟩ := provide_ok_iff.1 h
-  rw [provideInFacts_fresh slot object value _ hnone] at hp
+  rw [provideInFacts_fresh slot object _ hne hnone] at hp
   cases hp
   exact ⟨lookup_putFact_self slot slot object value _ rfl, rfl⟩
 
@@ -432,23 +464,26 @@ theorem provide_frame (h : provide slot object value state = .ok next) (reader :
 /-- Providing the same value twice changes nothing the second time. -/
 theorem provide_idempotent (hd : Lawful slot.domain) (h : provide slot object value state = .ok next) :
     provide slot object value next = .ok next := by
-  obtain ⟨result, hread, hval, _⟩ := provide_read hd h
-  have hj : slot.domain.join result value = some result := by
-    rw [hd.comm]
-    exact hval
-  have hself : slot.domain.eq result result = true := (hd.eq_iff _ _).2 rfl
-  simp only [provide, bind, Except.bind]
-  rw [provideInFacts_existing slot object value result _ hread, hj]
-  simp [hself]
+  cases hempty : slot.domain.eq value slot.domain.empty with
+  | true => exact provide_empty hempty next
+  | false =>
+    obtain ⟨result, hread, hval, _⟩ := provide_read hd hempty h
+    have hj : slot.domain.join result value = some result := by
+      rw [hd.comm]
+      exact hval
+    have hself : slot.domain.eq result result = true := (hd.eq_iff _ _).2 rfl
+    simp only [provide, bind, Except.bind]
+    rw [provideInFacts_existing slot object result _ hempty hread, hj]
+    simp [hself]
 
 private theorem provide_read_cases {v : kind.data} {source target : State} (hd : Lawful slot.domain)
-    (hs : provide slot object v source = .ok target) :
+    (hne : slot.domain.eq v slot.domain.empty = false) (hs : provide slot object v source = .ok target) :
     ∃ result, lookupFact slot object target.facts = .ok (some result) ∧
       ((lookupFact slot object source.facts = .ok none ∧ result = v) ∨
         ∃ existing, lookupFact slot object source.facts = .ok (some existing) ∧
           slot.domain.join existing v = some result) := by
   obtain ⟨changed, facts, hp, rfl⟩ := provide_ok_iff.1 hs
-  obtain ⟨result, hread, hcase⟩ := provideInFacts_read hp hd
+  obtain ⟨result, hread, hcase⟩ := provideInFacts_read hp hd hne
   refine ⟨result, hread, ?_⟩
   rcases hcase with ⟨h₁, h₂, _⟩ | ⟨existing, h₁, h₂, _⟩
   · exact Or.inl ⟨h₁, h₂⟩
@@ -456,15 +491,16 @@ private theorem provide_read_cases {v : kind.data} {source target : State} (hd :
 
 /-- Two successful provides read back the same contents in either order. -/
 theorem provide_provide_comm (hd : Lawful slot.domain) {first second : kind.data}
-    {state₁ state₁₂ state₂ state₂₁ : State} (h₁ : provide slot object first state = .ok state₁)
+    (hfirst : slot.domain.eq first slot.domain.empty = false)
+    (hsecond : slot.domain.eq second slot.domain.empty = false) {state₁ state₁₂ state₂ state₂₁ : State} (h₁ : provide slot object first state = .ok state₁)
     (h₁₂ : provide slot object second state₁ = .ok state₁₂)
     (h₂ : provide slot object second state = .ok state₂)
     (h₂₁ : provide slot object first state₂ = .ok state₂₁) :
     lookupFact slot object state₁₂.facts = lookupFact slot object state₂₁.facts := by
-  obtain ⟨r₁, hr₁, c₁⟩ := provide_read_cases hd h₁
-  obtain ⟨r₁₂, hr₁₂, c₁₂⟩ := provide_read_cases hd h₁₂
-  obtain ⟨r₂, hr₂, c₂⟩ := provide_read_cases hd h₂
-  obtain ⟨r₂₁, hr₂₁, c₂₁⟩ := provide_read_cases hd h₂₁
+  obtain ⟨r₁, hr₁, c₁⟩ := provide_read_cases hd hfirst h₁
+  obtain ⟨r₁₂, hr₁₂, c₁₂⟩ := provide_read_cases hd hsecond h₁₂
+  obtain ⟨r₂, hr₂, c₂⟩ := provide_read_cases hd hsecond h₂
+  obtain ⟨r₂₁, hr₂₁, c₂₁⟩ := provide_read_cases hd hfirst h₂₁
   rw [hr₁₂, hr₂₁]
   rcases c₁₂ with ⟨hn, _⟩ | ⟨e₁, he₁, hj₁⟩
   · rw [hr₁] at hn; cases hn
@@ -489,11 +525,12 @@ theorem provide_provide_comm (hd : Lawful slot.domain) {first second : kind.data
     rw [Option.some.inj hassoc]
 
 /-- Conflicting data is rejected by the state, not silently merged. -/
-theorem provide_conflict {existing : kind.data} (hl : lookupFact slot object state.facts = .ok (some existing))
+theorem provide_conflict {existing : kind.data} (hne : slot.domain.eq value slot.domain.empty = false)
+    (hl : lookupFact slot object state.facts = .ok (some existing))
     (hj : slot.domain.join existing value = none) :
     provide slot object value state = .error (.incompatible slot.name) := by
   simp only [provide, bind, Except.bind]
-  rw [provideInFacts_conflict slot object hl hj]
+  rw [provideInFacts_conflict slot object hne hl hj]
 
 theorem mem_objects_iff (key : Object) (source : State) :
     key ∈ objects source ↔ ∃ fact ∈ source.facts, fact.object = key := by
@@ -516,34 +553,16 @@ private theorem lookup_some_mem {reader : Slot other} {key : Object} {facts : Li
     simp only [decide_eq_true_eq] at hp
     exact ⟨fact, List.mem_of_find?_eq_some hfind, hp.1⟩
 
-private theorem provideInFacts_shape {facts next : List Fact} {changed : Bool}
-    (h : provideInFacts slot object value facts = .ok (changed, next)) :
-    next = facts ∨ ∃ result, next = putFact ⟨object, ⟨kind, slot⟩, result⟩ facts := by
-  cases hl : lookupFact slot object facts with
-  | error conflict => rw [provideInFacts_mismatch slot object value facts hl] at h; cases h
-  | ok found =>
-    cases found with
-    | none =>
-      rw [provideInFacts_fresh slot object value facts hl] at h
-      cases h
-      exact Or.inr ⟨value, rfl⟩
-    | some existing =>
-      rw [provideInFacts_existing slot object value existing facts hl] at h
-      split at h
-      · cases h
-      · split at h
-        · cases h; exact Or.inl rfl
-        · cases h; exact Or.inr ⟨_, rfl⟩
-
 /-- Every known object stays known, and the provided object becomes known. -/
-theorem provide_objects (hd : Lawful slot.domain) (h : provide slot object value state = .ok next) :
+theorem provide_objects (hd : Lawful slot.domain) (hne : slot.domain.eq value slot.domain.empty = false)
+    (h : provide slot object value state = .ok next) :
     object ∈ objects next ∧ ∀ key ∈ objects state, key ∈ objects next := by
-  obtain ⟨result, hread, _⟩ := provide_read hd h
+  obtain ⟨result, hread, _⟩ := provide_read hd hne h
   refine ⟨(mem_objects_iff _ _).2 (lookup_some_mem hread), ?_⟩
   obtain ⟨changed, facts, hp, rfl⟩ := provide_ok_iff.1 h
   intro key hkey
   rw [mem_objects_iff] at *
-  rcases provideInFacts_shape hp with rfl | ⟨_, rfl⟩
+  rcases provideInFacts_cases hp with ⟨_, rfl⟩ | ⟨_, _, rfl⟩
   · exact hkey
   · exact mem_objects_put key _ _ hkey
 
@@ -559,228 +578,304 @@ variable {kind other : PayloadKind} {slot : Slot kind} {object : Object} {value 
 def relevant (slot : Slot kind) (object : Object) : Opinion → Bool :=
   fun opinion => decide (opinion.fact.object = object ∧ opinion.fact.slot.2.name = slot.name)
 
+/-- An opinion as a vote for a value of the slot's kind. -/
+def castVote (slot : Slot kind) (opinion : Opinion) : Except Conflict (Agent × kind.data) :=
+  if h : opinion.fact.slot.1 = kind then
+    .ok (opinion.agent, h ▸ opinion.fact.value)
+  else
+    .error (.typeMismatch slot.name)
+
 /-- `resolve` as a function of the relevant opinions alone. -/
 def resolveOf (slot : Slot kind) (opinions : List Opinion) : Except Conflict kind.data :=
-  if opinions.isEmpty then
-    .ok slot.domain.empty
-  else
-    let trust := opinions.foldl (fun trust opinion => max trust opinion.agent.trust) 0
-    joinOpinions slot slot.domain.empty (opinions.filter fun opinion => opinion.agent.trust = trust)
+  match opinions.mapM (castVote slot) with
+  | .error conflict => .error conflict
+  | .ok [] => .ok slot.domain.empty
+  | .ok (vote :: rest) => .ok (chooseVote slot (vote :: rest) vote.2 rest)
 
 theorem resolve_eq_resolveOf (state : State) :
-    resolve slot object state = resolveOf slot (state.opinions.filter (relevant slot object)) := rfl
+    resolve slot object state = resolveOf slot (state.opinions.filter (relevant slot object)) := by
+  simp only [resolve, resolveOf, bind, Except.bind]
+  have hcast : (fun opinion : Opinion =>
+      if h : opinion.fact.slot.1 = kind then
+        (Except.ok (opinion.agent, h ▸ opinion.fact.value) : Except Conflict (Agent × kind.data))
+      else .error (.typeMismatch slot.name)) = castVote slot := rfl
+  have hrel : (fun opinion : Opinion =>
+      decide (opinion.fact.object = object ∧ opinion.fact.slot.2.name = slot.name)) = relevant slot object := rfl
+  rw [hcast, hrel]
+  cases (state.opinions.filter (relevant slot object)).mapM (castVote slot) with
+  | error conflict => rfl
+  | ok votes => cases votes <;> rfl
 
-/-- Suggesting always bumps the version and never touches the fact table. -/
+/-- Suggesting nothing, or repeating a vote, changes nothing. -/
+theorem suggest_empty (agent : Agent) (state : State) (h : slot.domain.eq value slot.domain.empty = true) :
+    suggest agent slot object value state = state := by
+  simp [suggest, h]
+
+private theorem suggest_fresh {agent : Agent} {state : State} (hne : slot.domain.eq value slot.domain.empty = false)
+    (hfresh : state.opinions.any (isVote agent slot object value) = false) :
+    suggest agent slot object value state =
+      { state with
+        opinions := ⟨agent, object, ⟨kind, slot⟩, value⟩ :: state.opinions
+        version := state.version + 1 } := by
+  simp [suggest, hne, hfresh]
+
+/-- A suggestion never touches the facts, and bumps the version exactly when it records a vote. -/
 theorem suggest_frame (agent : Agent) (state : State) :
     (suggest agent slot object value state).facts = state.facts ∧
-      state.version < (suggest agent slot object value state).version :=
-  ⟨rfl, Nat.lt_succ_self _⟩
+      ((suggest agent slot object value state).version = state.version ∧
+          (suggest agent slot object value state).opinions = state.opinions ∨
+        (suggest agent slot object value state).version = state.version + 1 ∧
+          (suggest agent slot object value state).opinions =
+            ⟨agent, object, ⟨kind, slot⟩, value⟩ :: state.opinions) := by
+  simp only [suggest]
+  split <;> simp
 
-theorem mem_suggest_opinions (agent : Agent) (state : State) (opinion : Opinion) :
-    opinion ∈ (suggest agent slot object value state).opinions ↔
-      opinion = ⟨agent, object, ⟨kind, slot⟩, value⟩ ∨
-        (opinion ∈ state.opinions ∧
-          (opinion.agent.name ≠ agent.name ∨ opinion.fact.object ≠ object ∨
-            opinion.fact.slot.2.name ≠ slot.name)) := by
-  simp [suggest, putOpinion, or_assoc]
+/-- Votes are never forgotten: an agent may hold several opinions, unlike a replaced fact. -/
+theorem suggest_keeps_votes (agent : Agent) (state : State) {old : Opinion} (hold : old ∈ state.opinions) :
+    old ∈ (suggest agent slot object value state).opinions := by
+  rcases (suggest_frame (slot := slot) (object := object) (value := value) agent state).2 with ⟨_, h⟩ | ⟨_, h⟩
+  · rw [h]; exact hold
+  · rw [h]; exact List.mem_cons_of_mem _ hold
 
-/-- An agent's later suggestion for a slot replaces its earlier one outright. -/
-theorem suggest_suggest_same (agent : Agent) (first second : kind.data) (state : State) :
-    (suggest agent slot object second (suggest agent slot object first state)).opinions =
-      (suggest agent slot object second state).opinions := by
-  simp [suggest, putOpinion, List.filter_filter]
+/-- A repeated suggestion by the same agent has no further effect. -/
+theorem suggest_idempotent (hd : Lawful slot.domain) (agent : Agent) (state : State) :
+    suggest agent slot object value (suggest agent slot object value state) =
+      suggest agent slot object value state := by
+  have hself : slot.domain.eq value value = true := (hd.eq_iff _ _).2 rfl
+  by_cases hnop : (slot.domain.eq value slot.domain.empty || state.opinions.any (isVote agent slot object value)) = true
+  · have hsame : suggest agent slot object value state = state := by simp only [suggest, hnop, ↓reduceIte]
+    rw [hsame, hsame]
+  · have hhead : isVote agent slot object value ⟨agent, object, ⟨kind, slot⟩, value⟩ = true := by
+      simp [isVote, hself]
+    have hnew : suggest agent slot object value state =
+        { state with
+          opinions := ⟨agent, object, ⟨kind, slot⟩, value⟩ :: state.opinions
+          version := state.version + 1 } := by simp only [suggest, hnop, Bool.false_eq_true, ↓reduceIte]
+    rw [hnew]
+    simp only [suggest, List.any_cons, hhead, Bool.true_or, Bool.or_true, ↓reduceIte]
 
-private theorem filter_putOpinion_of_other (opinion : Opinion) (opinions : List Opinion) (reader : Slot other)
-    (key : Object) (hkey : opinion.fact.object ≠ key ∨ opinion.fact.slot.2.name ≠ reader.name) :
-    (putOpinion opinion opinions).filter (relevant reader key) = opinions.filter (relevant reader key) := by
-  have hhead : relevant reader key opinion = false := by
-    simp only [relevant, decide_eq_false_iff_not, not_and]
-    rcases hkey with h | h
-    · exact fun e => absurd e h
-    · exact fun _ => h
-  simp only [putOpinion, List.filter_cons, hhead, List.filter_filter]
-  simp only [Bool.false_eq_true, ↓reduceIte]
-  apply List.filter_congr
-  intro old _
-  by_cases hr : relevant reader key old = true
-  · simp only [hr, Bool.true_and, Bool.or_eq_true, bne_iff_ne, ne_eq]
-    simp only [relevant, decide_eq_true_eq] at hr
-    simp only [hr.1, hr.2]
-    rcases hkey with h | h
-    · simp [Ne.symm h]
-    · simp [Ne.symm h]
-  · simp [hr]
+theorem resolve_no_opinions {state : State} (h : state.opinions.filter (relevant slot object) = []) :
+    resolve slot object state = .ok slot.domain.empty := by
+  rw [resolve_eq_resolveOf, h]
+  rfl
 
 /-- A suggestion about another object or slot cannot change what `resolve` returns. -/
 theorem resolve_suggest_frame (agent : Agent) (state : State) (reader : Slot other) (key : Object)
     (hkey : object ≠ key ∨ slot.name ≠ reader.name) :
     resolve reader key (suggest agent slot object value state) = resolve reader key state := by
   rw [resolve_eq_resolveOf, resolve_eq_resolveOf]
-  exact congrArg _ (filter_putOpinion_of_other _ _ reader key hkey)
+  have hhead : relevant reader key ⟨agent, object, ⟨kind, slot⟩, value⟩ = false := by
+    simp only [relevant, decide_eq_false_iff_not, not_and]
+    rcases hkey with h | h
+    · exact fun e => absurd e h
+    · exact fun _ => h
+  rcases (suggest_frame (slot := slot) (object := object) (value := value) agent state).2 with ⟨_, h⟩ | ⟨_, h⟩
+  · rw [h]
+  · rw [h, List.filter_cons, hhead]
+    rfl
 
-private theorem foldl_max_le (opinions : List Opinion) (init bound : Nat) (hinit : init ≤ bound)
-    (h : ∀ opinion ∈ opinions, opinion.agent.trust ≤ bound) :
-    opinions.foldl (fun trust opinion => max trust opinion.agent.trust) init ≤ bound := by
-  induction opinions generalizing init with
-  | nil => exact hinit
-  | cons head tail ih =>
-    simp only [List.foldl_cons]
-    apply ih
-    · have := h head List.mem_cons_self
-      omega
-    · exact fun opinion hm => h opinion (List.mem_cons_of_mem _ hm)
-
-private theorem le_foldl_max (opinions : List Opinion) (init : Nat) :
-    init ≤ opinions.foldl (fun trust opinion => max trust opinion.agent.trust) init ∧
-      ∀ opinion ∈ opinions,
-        opinion.agent.trust ≤ opinions.foldl (fun trust opinion => max trust opinion.agent.trust) init := by
-  induction opinions generalizing init with
-  | nil => simp
-  | cons head tail ih =>
-    simp only [List.foldl_cons, List.mem_cons, forall_eq_or_imp]
-    obtain ⟨h₁, h₂⟩ := ih (max init head.agent.trust)
-    refine ⟨by omega, by omega, h₂⟩
-
-private theorem foldl_max_absorb (opinions : List Opinion) {init : Nat}
-    (h : init ≤ opinions.foldl (fun trust opinion => max trust opinion.agent.trust) 0) :
-    opinions.foldl (fun trust opinion => max trust opinion.agent.trust) init =
-      opinions.foldl (fun trust opinion => max trust opinion.agent.trust) 0 := by
-  apply Nat.le_antisymm
-  · exact foldl_max_le _ _ _ h (le_foldl_max opinions 0).2
-  · apply foldl_max_le
-    · exact Nat.zero_le _
-    · exact (le_foldl_max opinions init).2
-
-/-- A strictly most trusted agent decides the slot on its own. -/
-theorem resolve_suggest_dominant (hd : Lawful slot.domain) (agent : Agent) (state : State)
-    (hdom : ∀ old ∈ state.opinions, relevant slot object old = true → old.agent.trust < agent.trust) :
-    resolve slot object (suggest agent slot object value state) = .ok value := by
-  rw [resolve_eq_resolveOf]
-  let opinion : Opinion := ⟨agent, object, ⟨kind, slot⟩, value⟩
-  have hhead : relevant slot object opinion = true := by simp [relevant, opinion]
-  have hshape : (suggest agent slot object value state).opinions.filter (relevant slot object) =
-      opinion :: (state.opinions.filter fun old => old.agent.name != agent.name ||
-          old.fact.object != object || old.fact.slot.2.name != slot.name).filter (relevant slot object) := by
-    simp only [suggest, putOpinion, List.filter_cons, hhead, ↓reduceIte, opinion]
-  rw [hshape]
-  generalize hrest : (state.opinions.filter fun old => old.agent.name != agent.name ||
-    old.fact.object != object || old.fact.slot.2.name != slot.name).filter (relevant slot object) = rest
-  have hlt : ∀ old ∈ rest, old.agent.trust < agent.trust := by
-    intro old hold
-    rw [← hrest, List.mem_filter, List.mem_filter] at hold
-    exact hdom old hold.1.1 hold.2
-  have htrust : (opinion :: rest).foldl (fun trust opinion => max trust opinion.agent.trust) 0 =
-      agent.trust := by
-    simp only [List.foldl_cons, opinion]
-    apply Nat.le_antisymm
-    · exact foldl_max_le _ _ _ (by omega) (fun old hm => Nat.le_of_lt (hlt old hm))
-    · exact Nat.le_trans (by omega) (le_foldl_max rest (max 0 agent.trust)).1
-  have hfilter : (rest.filter fun old => decide (old.agent.trust = agent.trust)) = [] := by
-    apply List.filter_eq_nil_iff.2
-    intro old hold
-    have := hlt old hold
-    simp only [decide_eq_true_eq]
-    omega
-  simp only [resolveOf, List.isEmpty_cons, Bool.false_eq_true, ↓reduceIte, htrust]
-  simp only [List.filter_cons, opinion, decide_true, ↓reduceIte, hfilter]
-  simp [joinOpinions, hd.empty_left]
-
-/-- An agent outranked by another relevant opinion has no influence on the result. -/
-theorem resolve_suggest_outranked (agent : Agent) (state : State) {ranked : Opinion}
-    (hmem : ranked ∈ state.opinions) (hrel : relevant slot object ranked = true)
-    (hlt : agent.trust < ranked.agent.trust)
-    (hfresh : ∀ old ∈ state.opinions, relevant slot object old = true → old.agent.name ≠ agent.name) :
-    resolve slot object (suggest agent slot object value state) = resolve slot object state := by
-  rw [resolve_eq_resolveOf, resolve_eq_resolveOf]
-  let opinion : Opinion := ⟨agent, object, ⟨kind, slot⟩, value⟩
-  have hhead : relevant slot object opinion = true := by simp [relevant, opinion]
-  have hsame : (state.opinions.filter fun old => old.agent.name != agent.name ||
-      old.fact.object != object || old.fact.slot.2.name != slot.name).filter (relevant slot object) =
-      state.opinions.filter (relevant slot object) := by
-    rw [List.filter_filter]
-    apply List.filter_congr
-    intro old hold
-    by_cases hr : relevant slot object old = true
-    · have := hfresh old hold hr
-      simp [hr, this]
-    · simp [hr]
-  have hshape : (suggest agent slot object value state).opinions.filter (relevant slot object) =
-      opinion :: state.opinions.filter (relevant slot object) := by
-    simp only [suggest, putOpinion, List.filter_cons, hhead, ↓reduceIte, opinion]
-    rw [hsame]
-  rw [hshape]
-  generalize hrest : state.opinions.filter (relevant slot object) = rest
-  have hranked : ranked ∈ rest := by
-    rw [← hrest]
-    exact List.mem_filter.2 ⟨hmem, hrel⟩
-  have hbound := (le_foldl_max rest 0).2 ranked hranked
-  have hne : rest ≠ [] := List.ne_nil_of_mem hranked
-  have htrust : (opinion :: rest).foldl (fun trust opinion => max trust opinion.agent.trust) 0 =
-      rest.foldl (fun trust opinion => max trust opinion.agent.trust) 0 := by
-    simp only [List.foldl_cons, opinion]
-    apply foldl_max_absorb
-    omega
-  have hempty : rest.isEmpty = false := by
-    cases rest with
-    | nil => exact absurd rfl hne
-    | cons _ _ => rfl
-  simp only [resolveOf, List.isEmpty_cons, Bool.false_eq_true, ↓reduceIte, hempty, htrust]
-  have hskip : decide (opinion.agent.trust = rest.foldl (fun trust opinion => max trust opinion.agent.trust) 0) = false := by
-    simp only [decide_eq_false_iff_not, opinion]
-    omega
-  simp only [List.filter_cons, hskip, Bool.false_eq_true, ↓reduceIte]
-
-private theorem joinOpinions_refines (hd : Lawful slot.domain) {current result : kind.data} (opinions : List Opinion)
-    (h : joinOpinions slot current opinions = .ok result) :
-    Refines slot.domain current result ∧
-      ∀ opinion ∈ opinions, ∀ hk : opinion.fact.slot.1 = kind,
-        Refines slot.domain (hk ▸ opinion.fact.value) result := by
-  induction opinions generalizing current with
+private theorem mapM_castVote_fst {opinions : List Opinion} {votes : List (Agent × kind.data)}
+    (h : opinions.mapM (castVote slot) = .ok votes) : votes.map Prod.fst = opinions.map Opinion.agent := by
+  induction opinions generalizing votes with
   | nil =>
-    simp only [joinOpinions, Except.ok.injEq] at h
+    simp only [List.mapM_nil, pure, Except.pure, Except.ok.injEq] at h
     subst h
-    exact ⟨hd.refines_refl _, by simp⟩
+    rfl
   | cons head tail ih =>
-    simp only [joinOpinions] at h
+    simp only [List.mapM_cons, bind, Except.bind] at h
     split at h
-    · rename_i hk
-      split at h
-      · rename_i joined hj
-        obtain ⟨h₁, h₂⟩ := ih h
-        obtain ⟨u₁, u₂⟩ := hd.join_upper hj
-        refine ⟨hd.refines_trans u₁ h₁, ?_⟩
-        intro opinion hmem hk'
-        rcases List.mem_cons.1 hmem with rfl | hmem
-        · exact hd.refines_trans u₂ h₁
-        · exact h₂ opinion hmem hk'
-      · cases h
     · cases h
+    · rename_i vote hvote
+      split at h
+      · cases h
+      · rename_i rest hrest
+        simp only [pure, Except.pure, Except.ok.injEq] at h
+        subst h
+        simp only [castVote] at hvote
+        split at hvote
+        · simp only [Except.ok.injEq] at hvote
+          subst hvote
+          simp [ih hrest]
+        · cases hvote
 
-/-- Whatever `resolve` returns refines the opinion of every most-trusted relevant agent. -/
-theorem resolve_refines (hd : Lawful slot.domain) {state : State} {result : kind.data}
-    (h : resolve slot object state = .ok result) {opinion : Opinion} (hmem : opinion ∈ state.opinions)
-    (hrel : relevant slot object opinion = true)
-    (htop : ∀ other ∈ state.opinions, relevant slot object other = true →
-      other.agent.trust ≤ opinion.agent.trust)
-    (hk : opinion.fact.slot.1 = kind) :
-    Refines slot.domain (hk ▸ opinion.fact.value) result := by
-  rw [resolve_eq_resolveOf] at h
-  have hin : opinion ∈ state.opinions.filter (relevant slot object) := List.mem_filter.2 ⟨hmem, hrel⟩
-  generalize hrest : state.opinions.filter (relevant slot object) = rest at h hin
-  have hempty : rest.isEmpty = false := by
-    cases rest with
-    | nil => cases hin
-    | cons _ _ => rfl
-  simp only [resolveOf, hempty, Bool.false_eq_true, ↓reduceIte] at h
-  have htrust : rest.foldl (fun trust opinion => max trust opinion.agent.trust) 0 = opinion.agent.trust := by
-    apply Nat.le_antisymm
-    · apply foldl_max_le _ _ _ (Nat.zero_le _)
-      intro other hother
-      rw [← hrest, List.mem_filter] at hother
-      exact htop other hother.1 hother.2
-    · exact (le_foldl_max rest 0).2 opinion hin
-  rw [htrust] at h
-  exact (joinOpinions_refines hd _ h).2 opinion (List.mem_filter.2 ⟨hin, by simp⟩) hk
+/-- `resolve` fails exactly when a relevant opinion is at another payload kind. -/
+theorem mapM_castVote_ok_iff (opinions : List Opinion) :
+    (∃ votes, opinions.mapM (castVote slot) = .ok votes) ↔
+      ∀ opinion ∈ opinions, opinion.fact.slot.1 = kind := by
+  induction opinions with
+  | nil => exact ⟨fun _ _ h => (by cases h), fun _ => ⟨[], rfl⟩⟩
+  | cons head tail ih =>
+    simp only [List.mapM_cons, bind, Except.bind, List.mem_cons, forall_eq_or_imp]
+    by_cases hk : head.fact.slot.1 = kind
+    · have hcast : castVote slot head = .ok (head.agent, hk ▸ head.fact.value) := by
+        simp [castVote, hk]
+      simp only [hcast, hk, true_and, ← ih]
+      constructor
+      · rintro ⟨votes, h⟩
+        split at h
+        · cases h
+        · exact ⟨_, ‹_›⟩
+      · rintro ⟨votes, h⟩
+        simp only [h]
+        exact ⟨_, rfl⟩
+    · have hcast : castVote slot head = .error (.typeMismatch slot.name) := by
+        simp [castVote, hk]
+      simp [hcast, hk]
+
+private theorem chooseVote_spec (slot : Slot kind) (votes rest : List (Agent × kind.data)) (best : kind.data) :
+    let result := chooseVote slot votes best rest
+    (result = best ∨ ∃ vote ∈ rest, result = vote.2) ∧
+      weight (voters slot votes best) ≤ weight (voters slot votes result) ∧
+      ∀ vote ∈ rest, weight (voters slot votes vote.2) ≤ weight (voters slot votes result) := by
+  induction rest generalizing best with
+  | nil => exact ⟨Or.inl rfl, Nat.le_refl _, by simp⟩
+  | cons head tail ih =>
+    simp only [chooseVote, List.foldl_cons]
+    generalize hstep : (if outweighs (voters slot votes head.2) (voters slot votes best) then head.2 else best) = step
+    obtain ⟨hin, hge, hall⟩ := ih step
+    simp only [chooseVote] at hin hge hall
+    have hweights : weight (voters slot votes best) ≤ weight (voters slot votes step) ∧
+        weight (voters slot votes head.2) ≤ weight (voters slot votes step) := by
+      rw [← hstep]
+      by_cases hout : outweighs (voters slot votes head.2) (voters slot votes best) = true
+      · simp only [hout, ↓reduceIte, Nat.le_refl, and_true]
+        simp only [outweighs, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq] at hout
+        omega
+      · simp only [hout, Bool.false_eq_true, ↓reduceIte, Nat.le_refl, true_and]
+        simp only [outweighs, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq, not_or, not_and] at hout
+        omega
+    refine ⟨?_, Nat.le_trans hweights.1 hge, ?_⟩
+    · rcases hin with hin | ⟨vote, hv, hin⟩
+      · rw [hin, ← hstep]
+        split
+        · exact Or.inr ⟨head, List.mem_cons_self, rfl⟩
+        · exact Or.inl rfl
+      · exact Or.inr ⟨vote, List.mem_cons_of_mem _ hv, hin⟩
+    · intro vote hv
+      rcases List.mem_cons.1 hv with rfl | hv
+      · exact Nat.le_trans hweights.2 hge
+      · exact hall vote hv
+
+/-- The result of a vote is one of the candidates, and no candidate has more weight behind it. -/
+theorem resolveOf_maximal {opinions : List Opinion} {votes : List (Agent × kind.data)} {result : kind.data}
+    (hvotes : opinions.mapM (castVote slot) = .ok votes) (hne : votes ≠ [])
+    (h : resolveOf slot opinions = .ok result) :
+    (∃ vote ∈ votes, result = vote.2) ∧
+      ∀ vote ∈ votes, weight (voters slot votes vote.2) ≤ weight (voters slot votes result) := by
+  cases votes with
+  | nil => exact absurd rfl hne
+  | cons head rest =>
+    simp only [resolveOf, hvotes, Except.ok.injEq] at h
+    subst h
+    obtain ⟨hin, hge, hall⟩ := chooseVote_spec slot (head :: rest) rest head.2
+    refine ⟨?_, ?_⟩
+    · rcases hin with hin | ⟨vote, hv, hin⟩
+      · exact ⟨head, List.mem_cons_self, hin⟩
+      · exact ⟨vote, List.mem_cons_of_mem _ hv, hin⟩
+    · intro vote hv
+      rcases List.mem_cons.1 hv with rfl | hv
+      · exact hge
+      · exact hall vote hv
+
+/-- When all votes agree, that is the outcome. -/
+theorem resolveOf_unanimous {opinions : List Opinion} {votes : List (Agent × kind.data)}
+    {result winner : kind.data} (hvotes : opinions.mapM (castVote slot) = .ok votes) (hne : votes ≠ [])
+    (hall : ∀ vote ∈ votes, vote.2 = winner) (h : resolveOf slot opinions = .ok result) : result = winner := by
+  obtain ⟨⟨vote, hv, rfl⟩, _⟩ := resolveOf_maximal hvotes hne h
+  exact hall vote hv
+
+private theorem sum_filter_le (agents : List Agent) (p : Agent → Bool) :
+    ((agents.filter p).map Agent.trust).sum ≤ (agents.map Agent.trust).sum := by
+  induction agents with
+  | nil => exact Nat.le_refl _
+  | cons head tail ih =>
+    simp only [List.filter_cons]
+    split <;> simp only [List.map_cons, List.sum_cons] <;> omega
+
+private theorem weight_eraseDups_le (agents : List Agent) :
+    weight agents.eraseDups ≤ (agents.map Agent.trust).sum := by
+  generalize hn : agents.length = n
+  induction n using Nat.strongRecOn generalizing agents with
+  | _ n ih =>
+    cases agents with
+    | nil => simp [weight]
+    | cons head tail =>
+      rw [List.eraseDups_cons]
+      have hlen : (tail.filter fun other => !other == head).length < n := by
+        have := List.length_filter_le (fun other => !other == head) tail
+        simp at hn
+        omega
+      have h₁ := ih _ hlen _ rfl
+      have h₂ := sum_filter_le tail fun other => !other == head
+      simp only [weight, List.map_cons, List.sum_cons] at h₁ ⊢
+      omega
+
+private theorem trust_le_weight {agents : List Agent} {agent : Agent} (h : agent ∈ agents) :
+    agent.trust ≤ (agents.map Agent.trust).sum := by
+  induction agents with
+  | nil => cases h
+  | cons head tail ih =>
+    simp only [List.map_cons, List.sum_cons]
+    rcases List.mem_cons.1 h with rfl | h
+    · omega
+    · have := ih h
+      omega
+
+private theorem sum_voters_le (slot : Slot kind) (votes : List (Agent × kind.data)) (value : kind.data) :
+    weight (voters slot votes value) ≤ ((votes.map Prod.fst).map Agent.trust).sum := by
+  refine Nat.le_trans (weight_eraseDups_le _) ?_
+  induction votes with
+  | nil => exact Nat.le_refl _
+  | cons head tail ih =>
+    simp only [List.filter_cons]
+    split <;> simp only [List.map_cons, List.sum_cons] <;> omega
+
+/-- An agent whose trust exceeds all other relevant opinions together decides the slot, whatever
+they say. -/
+theorem resolve_suggest_dominant (hd : Lawful slot.domain) (agent : Agent) (state : State)
+    (hne : slot.domain.eq value slot.domain.empty = false)
+    (hfresh : state.opinions.any (isVote agent slot object value) = false)
+    (hkinds : ∀ old ∈ state.opinions, relevant slot object old = true → old.fact.slot.1 = kind)
+    (hdom : ((state.opinions.filter (relevant slot object)).map fun old => old.agent.trust).sum < agent.trust) :
+    resolve slot object (suggest agent slot object value state) = .ok value := by
+  rw [resolve_eq_resolveOf, suggest_fresh hne hfresh]
+  let opinion : Opinion := ⟨agent, object, ⟨kind, slot⟩, value⟩
+  have hhead : relevant slot object opinion = true := by simp [relevant, opinion]
+  simp only [List.filter_cons]
+  rw [show relevant slot object ⟨agent, object, ⟨kind, slot⟩, value⟩ = true from hhead]
+  simp only [↓reduceIte]
+  generalize hrest : state.opinions.filter (relevant slot object) = others at hdom
+  obtain ⟨rest, hmap⟩ := (mapM_castVote_ok_iff (slot := slot) others).2 (by
+    intro old hold
+    rw [← hrest, List.mem_filter] at hold
+    exact hkinds old hold.1 hold.2)
+  have hsum : ((rest.map Prod.fst).map Agent.trust).sum = (others.map fun old => old.agent.trust).sum := by
+    rw [mapM_castVote_fst hmap, List.map_map]
+    rfl
+  have hcast : castVote slot opinion = .ok (agent, value) := by simp [castVote, opinion]
+  have hvotes : (opinion :: others).mapM (castVote slot) = .ok ((agent, value) :: rest) := by
+    simp [List.mapM_cons, bind, Except.bind, hcast, hmap, pure, Except.pure]
+  cases hresult : resolveOf slot (opinion :: others) with
+  | error conflict =>
+    simp [resolveOf, hvotes] at hresult
+  | ok winner =>
+    obtain ⟨_, hmax⟩ := resolveOf_maximal hvotes (by simp) hresult
+    have hself : slot.domain.eq value value = true := (hd.eq_iff _ _).2 rfl
+    have hagent : agent.trust ≤ weight (voters slot ((agent, value) :: rest) value) := by
+      apply trust_le_weight
+      simp [voters, hself, List.mem_eraseDups]
+    have hge := hmax (agent, value) List.mem_cons_self
+    by_cases heq : slot.domain.eq value winner = true
+    · have : value = winner := (hd.eq_iff _ _).1 heq
+      rw [← this]
+    · have hle : weight (voters slot ((agent, value) :: rest) winner) ≤
+          ((rest.map Prod.fst).map Agent.trust).sum := by
+        have hskip : voters slot ((agent, value) :: rest) winner = voters slot rest winner := by
+          simp [voters, heq]
+        rw [hskip]
+        exact sum_voters_le slot rest winner
+      simp only at hge
+      omega
 
 end Opinions
 
@@ -826,61 +921,99 @@ section Normalize
 
 variable {kind other : PayloadKind}
 
+/-- A failed `require` in a promise is that promise having nothing to say, not a conflict. -/
+theorem promiseValue_empty {promise : Promise} {object : Object} {facts : List Fact} {name : String}
+    (h : promise.compute object facts = .error (.empty name)) :
+    promiseValue promise object facts = .ok none := by
+  simp [promiseValue, h]
+
+/-- Observers can only veto a promised value, and see it only when it refines the cell. -/
+theorem providePromised_ok {env : Environment} {slot : Slot kind} {object : Object} {value : kind.data}
+    {facts next : List Fact} {refined : Bool}
+    (h : providePromised env slot object value facts = .ok (refined, next)) :
+    provideInFacts slot object value facts = .ok (refined, next) := by
+  simp only [providePromised, bind, Except.bind] at h
+  split at h
+  · cases h
+  · rename_i result hp
+    obtain ⟨flag, after⟩ := result
+    simp only at h
+    split at h
+    · split at h
+      · cases h
+      · cases h; exact hp
+    · cases h; exact hp
+
+theorem providePromised_unchanged {env : Environment} {slot : Slot kind} {object : Object} {value : kind.data}
+    {facts : List Fact} (h : provideInFacts slot object value facts = .ok (false, facts)) :
+    providePromised env slot object value facts = .ok (false, facts) := by
+  simp [providePromised, h, bind, Except.bind]
+
+/-- A rejecting observer of a refined slot fails the promise, as a failing `provide` would. -/
+theorem providePromised_rejected {env : Environment} {slot : Slot kind} {object : Object} {value : kind.data}
+    {facts next : List Fact} {conflict : Conflict}
+    (h : provideInFacts slot object value facts = .ok (true, next))
+    (hn : notifyObservers env slot object { facts := next } = .error conflict) :
+    providePromised env slot object value facts = .error conflict := by
+  simp [providePromised, h, hn, bind, Except.bind]
+
 /-- First-order presentation of the promise loop in `runPromises`. -/
-def runList (object : Object) : List Promise → Bool → List Fact → Except Conflict (Bool × List Fact)
+def runList (env : Environment) (object : Object) : List Promise → Bool → List Fact →
+    Except Conflict (Bool × List Fact)
   | [], changed, facts => .ok (changed, facts)
   | promise :: rest, changed, facts =>
-    match promise.compute object facts with
+    match promiseValue promise object facts with
     | .error conflict => .error conflict
-    | .ok none => runList object rest changed facts
+    | .ok none => runList env object rest changed facts
     | .ok (some value) =>
-      match provideInFacts promise.slot.2 object value facts with
+      match providePromised env promise.slot.2 object value facts with
       | .error conflict => .error conflict
-      | .ok (refined, next) => runList object rest (changed || refined) next
+      | .ok (refined, next) => runList env object rest (changed || refined) next
 
 /-- The body of the loop in `runPromises`. -/
-def loopBody (object : Object) (promise : Promise) (s : Bool × List Fact) :
+def loopBody (env : Environment) (object : Object) (promise : Promise) (s : Bool × List Fact) :
     Except Conflict (ForInStep (Bool × List Fact)) := do
-  let value ← promise.compute object s.2
+  let value ← promiseValue promise object s.2
   match value with
   | some value => do
-    let x ← provideInFacts promise.slot.2 object value s.2
+    let x ← providePromised env promise.slot.2 object value s.2
     match x with
     | (refined, next) => pure (ForInStep.yield (s.1 || refined, next))
   | _ => pure (ForInStep.yield (s.1, s.2))
 
-private theorem forIn_runList (object : Object) (promises : List Promise) (changed : Bool) (facts : List Fact) :
-    forIn promises (changed, facts) (loopBody object) = runList object promises changed facts := by
+private theorem forIn_runList (env : Environment) (object : Object) (promises : List Promise) (changed : Bool)
+    (facts : List Fact) :
+    forIn promises (changed, facts) (loopBody env object) = runList env object promises changed facts := by
   induction promises generalizing changed facts with
   | nil => rfl
   | cons promise rest ih =>
     simp only [List.forIn_cons, runList, bind, Except.bind, loopBody]
-    cases hc : promise.compute object facts with
+    cases hc : promiseValue promise object facts with
     | error conflict => rfl
     | ok value =>
       cases value with
       | none => exact ih changed facts
       | some value =>
-        cases hp : provideInFacts promise.slot.2 object value facts with
+        cases hp : providePromised env promise.slot.2 object value facts with
         | error conflict => simp only [hp]
         | ok result =>
           obtain ⟨refined, next⟩ := result
           simp only [hp]
           exact ih _ _
 
-theorem runPromises_eq (promises : List Promise) (object : Object) (facts : List Fact) :
-    runPromises promises object facts = runList object promises false facts := by
-  have hdef : runPromises promises object facts =
+theorem runPromises_eq (env : Environment) (object : Object) (facts : List Fact) :
+    runPromises env object facts = runList env object env.promises false facts := by
+  have hdef : runPromises env object facts =
       (do
-        let s ← forIn promises (false, facts) (loopBody object)
+        let s ← forIn env.promises (false, facts) (loopBody env object)
         .ok (s.1, s.2)) := rfl
   rw [hdef, forIn_runList]
-  cases runList object promises false facts with
+  cases runList env object env.promises false facts with
   | error conflict => rfl
   | ok result => rfl
 
-private theorem runList_changed_mono {object : Object} {promises : List Promise} {changed : Bool}
-    {facts next : List Fact} {result : Bool} (h : runList object promises changed facts = .ok (result, next))
+private theorem runList_changed_mono {env : Environment} {object : Object} {promises : List Promise} {changed : Bool}
+    {facts next : List Fact} {result : Bool} (h : runList env object promises changed facts = .ok (result, next))
     (hfalse : result = false) : changed = false ∧ next = facts := by
   induction promises generalizing changed facts with
   | nil =>
@@ -898,18 +1031,18 @@ private theorem runList_changed_mono {object : Object} {promises : List Promise}
         simp only [Bool.or_eq_false_iff] at h₁
         obtain ⟨hc, hr⟩ := h₁
         subst hc hr
-        have := provideInFacts_unchanged hp
+        have := provideInFacts_unchanged (providePromised_ok hp)
         exact ⟨rfl, h₂.trans this⟩
 
 /-- A round of promises reporting no change has left the table exactly as it was. -/
-theorem runPromises_unchanged {promises : List Promise} {object : Object} {facts next : List Fact}
-    (h : runPromises promises object facts = .ok (false, next)) : next = facts := by
+theorem runPromises_unchanged {env : Environment} {object : Object} {facts next : List Fact}
+    (h : runPromises env object facts = .ok (false, next)) : next = facts := by
   rw [runPromises_eq] at h
   exact (runList_changed_mono h rfl).2
 
 private theorem normalize_succ (env : Environment) (object : Object) (fuel : Nat) (facts : List Fact) :
     normalize env object (fuel + 1) facts =
-      match runPromises env.promises object facts with
+      match runPromises env object facts with
       | .error conflict => .error conflict
       | .ok (changed, next) =>
         if changed then
@@ -919,7 +1052,7 @@ private theorem normalize_succ (env : Environment) (object : Object) (fuel : Nat
         else
           .ok (false, next) := by
   simp only [normalize, bind, Except.bind]
-  cases runPromises env.promises object facts with
+  cases runPromises env object facts with
   | error conflict => rfl
   | ok result =>
     obtain ⟨changed, next⟩ := result
@@ -933,11 +1066,11 @@ private theorem normalize_succ (env : Environment) (object : Object) (fuel : Nat
 
 private theorem normalize_succ_cases {env : Environment} {object : Object} {fuel : Nat} {facts final : List Fact}
     {changed : Bool} (h : normalize env object (fuel + 1) facts = .ok (changed, final)) :
-    ∃ flag after, runPromises env.promises object facts = .ok (flag, after) ∧
+    ∃ flag after, runPromises env object facts = .ok (flag, after) ∧
       ((flag = false ∧ changed = false ∧ final = after) ∨
         (flag = true ∧ changed = true ∧ ∃ inner, normalize env object fuel after = .ok (inner, final))) := by
   rw [normalize_succ] at h
-  cases hrun : runPromises env.promises object facts with
+  cases hrun : runPromises env object facts with
   | error conflict =>
     simp only [hrun] at h
     cases h
@@ -984,7 +1117,7 @@ theorem normalize_false_unchanged {env : Environment} {object : Object} {fuel : 
 /-- A terminating `normalize` has reached a genuine fixpoint of the promises. -/
 theorem normalize_fixpoint {env : Environment} {object : Object} {fuel : Nat} {facts next : List Fact}
     {changed : Bool} (h : normalize env object fuel facts = .ok (changed, next)) :
-    runPromises env.promises object next = .ok (false, next) := by
+    runPromises env object next = .ok (false, next) := by
   induction fuel generalizing facts changed with
   | zero => rw [normalize_zero] at h; cases h
   | succ fuel ih =>
@@ -1010,9 +1143,9 @@ theorem normalize_fuel_mono {env : Environment} {object : Object} {fuel extra : 
     · simp only [↓reduceIte, ih hinner]
 
 /-- Promises for one object leave every other object's facts untouched. -/
-private theorem runList_frame {object key : Object} (hkey : key ≠ object) (reader : Slot other)
+private theorem runList_frame {env : Environment} {object key : Object} (hkey : key ≠ object) (reader : Slot other)
     {promises : List Promise} {changed result : Bool} {facts next : List Fact}
-    (h : runList object promises changed facts = .ok (result, next)) :
+    (h : runList env object promises changed facts = .ok (result, next)) :
     lookupFact reader key next = lookupFact reader key facts := by
   induction promises generalizing changed facts with
   | nil =>
@@ -1027,7 +1160,7 @@ private theorem runList_frame {object key : Object} (hkey : key ≠ object) (rea
       · cases h
       · rename_i hp
         rw [ih h]
-        exact provideInFacts_frame hp reader key (Or.inl hkey)
+        exact provideInFacts_frame (providePromised_ok hp) reader key (Or.inl hkey)
 
 theorem normalize_frame {env : Environment} {object key : Object} (hkey : key ≠ object) (reader : Slot other)
     {fuel : Nat} {facts next : List Fact} {changed : Bool}
@@ -1063,9 +1196,9 @@ private theorem CellRefines.trans {slot : Slot kind} (hd : Lawful slot.domain) {
   obtain ⟨result, hr, hrr⟩ := hbc middle hm
   exact ⟨result, hr, hd.refines_trans hrm hrr⟩
 
-private theorem runList_refines {slot : Slot kind} (hd : Lawful slot.domain) {object : Object}
+private theorem runList_refines {env : Environment} {slot : Slot kind} (hd : Lawful slot.domain) {object : Object}
     {promises : List Promise} (hc : Coherent slot promises) {changed result : Bool} {facts next : List Fact}
-    (h : runList object promises changed facts = .ok (result, next)) :
+    (h : runList env object promises changed facts = .ok (result, next)) :
     CellRefines slot object facts next := by
   induction promises generalizing changed facts with
   | nil =>
@@ -1085,14 +1218,15 @@ private theorem runList_refines {slot : Slot kind} (hd : Lawful slot.domain) {ob
         rcases hc promise List.mem_cons_self with hname | hslot
         · intro existing hex
           exact ⟨existing, by
-            rw [provideInFacts_frame hp slot object (Or.inr (Ne.symm hname))]
+            rw [provideInFacts_frame (providePromised_ok hp) slot object (Or.inr (Ne.symm hname))]
             exact hex, hd.refines_refl _⟩
         · obtain ⟨pkind, pslot⟩ := promise
           simp only at hslot hp
           cases hslot
           intro existing hex
-          obtain ⟨res, hr, _, hre⟩ := provideInFacts_monotone hd hp
-          exact ⟨res, hr, hre existing hex⟩
+          obtain ⟨_, hold⟩ := provideInFacts_monotone hd (providePromised_ok hp)
+          obtain ⟨res, hr, hre, _⟩ := hold existing hex
+          exact ⟨res, hr, hre⟩
 
 /-- Running coherent promises to a fixpoint never loses what a cell already knew. -/
 theorem normalize_refines {slot : Slot kind} (hd : Lawful slot.domain) {env : Environment} {object : Object}
@@ -1139,7 +1273,13 @@ private theorem CellGrows.refine {slot : Slot kind} (hd : Lawful slot.domain) {o
 private theorem provideInFacts_grows {slot : Slot kind} (hd : Lawful slot.domain) {object : Object}
     {value : kind.data} {facts next : List Fact}
     (h : provideInFacts slot object value facts = .ok (true, next)) : CellGrows slot object facts next := by
-  obtain ⟨result, hread, hcase⟩ := provideInFacts_read h hd
+  have hne : slot.domain.eq value slot.domain.empty = false := by
+    cases hempty : slot.domain.eq value slot.domain.empty with
+    | false => rfl
+    | true =>
+      rw [provideInFacts_empty slot object facts hempty] at h
+      cases h
+  obtain ⟨result, hread, hcase⟩ := provideInFacts_read h hd hne
   rcases hcase with ⟨hnone, _, _⟩ | ⟨existing, hex, hj, hchanged⟩
   · exact Or.inl ⟨hnone, result, hread⟩
   · exact Or.inr ⟨existing, result, hex, hread, (hd.join_upper hj).1, hchanged.1 rfl⟩
@@ -1148,8 +1288,8 @@ private theorem provideInFacts_grows {slot : Slot kind} (hd : Lawful slot.domain
 def Coordinated (promises : List Promise) : Prop :=
   ∀ promise ∈ promises, Lawful promise.slot.2.domain ∧ Coherent promise.slot.2 promises
 
-private theorem runList_grows {object : Object} {promises : List Promise} (hw : Coordinated promises)
-    {facts next : List Fact} {changed : Bool} (h : runList object promises changed facts = .ok (true, next))
+private theorem runList_grows {env : Environment} {object : Object} {promises : List Promise} (hw : Coordinated promises)
+    {facts next : List Fact} {changed : Bool} (h : runList env object promises changed facts = .ok (true, next))
     (hfalse : changed = false) :
     ∃ promise ∈ promises, CellGrows promise.slot.2 object facts next := by
   induction promises generalizing changed facts with
@@ -1176,13 +1316,13 @@ private theorem runList_grows {object : Object} {promises : List Promise} (hw : 
       · rename_i refined after hp
         cases refined with
         | false =>
-          rw [provideInFacts_unchanged hp] at h
+          rw [provideInFacts_unchanged (providePromised_ok hp)] at h
           exact hweaken (ih hrest h rfl)
         | true =>
           obtain ⟨hlaw, hcoh⟩ := hw head List.mem_cons_self
           have hcoh' : Coherent head.slot.2 rest := fun q hq => hcoh q (List.mem_cons_of_mem _ hq)
           exact ⟨head, List.mem_cons_self,
-            (provideInFacts_grows hlaw hp).refine hlaw (runList_refines hlaw hcoh' h)⟩
+            (provideInFacts_grows hlaw (providePromised_ok hp)).refine hlaw (runList_refines hlaw hcoh' h)⟩
 
 /-- A `true` flag from `normalize` is a real change: some promise's cell gained information, which
 later rounds cannot undo on coordinated promises. -/

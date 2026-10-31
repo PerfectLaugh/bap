@@ -43,6 +43,8 @@ def fields (data : ByteArray) : Except String (List Field) := do
         let wire := tag % 8
         if number = 0 then
           .error "protobuf field zero"
+        else if number ≥ 2 ^ 29 then
+          .error "protobuf field number above 2^29 - 1"
         else
           match wire with
           | 0 =>

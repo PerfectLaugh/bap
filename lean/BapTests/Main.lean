@@ -60,11 +60,10 @@ def main : IO Unit := do
     Bap.Tests.Emu.run,
     Bap.Tests.Jni.run
   ]
-  -- A failure exits at once: Emu worker tasks would otherwise block the task manager's shutdown.
   let tasks ← tests.mapM fun test => liftM <| IO.asTask do
     try test catch error =>
       IO.eprintln s!"FAILED: {error}"
-      IO.Process.exit 1
+      throw error
   tasks.forM fun task =>
     match task.get with
     | .ok _ => pure ()

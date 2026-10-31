@@ -34,11 +34,20 @@ def successors (insn : Insn) : List Nat :=
   | .conditionalJump => insn.next :: insn.target.toList
   | .indirectJump | .ret | .barrier => []
 
+/-- Control can continue at the next instruction. -/
+def fallsThrough (insn : Insn) : Bool :=
+  match insn.flow with
+  | .normal | .call | .conditionalJump => true
+  | .jump | .indirectJump | .ret | .barrier => false
+
 end Insn
 
 structure Disassembler where
   name : String
   decode : Nat → ByteArray → IO (Except String Insn)
+  /-- The next instruction runs before this one transfers control, although control doesn't fall
+  through to it, as in the delay slot of a MIPS `J`. -/
+  hasDelaySlot : Insn → Bool := fun _ => false
 
 structure Disasm where
   entry : Nat

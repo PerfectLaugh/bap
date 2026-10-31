@@ -69,7 +69,7 @@
 
 (defun tADDhirr (rd rn rm cnd _)
   (when (condition-holds cnd)
-    (set$ rd (+ rn (t2reg rm)))))
+    (t2set rd (+ (t2reg rn) (t2reg rm)))))
 
 (defun tMUL (rd _ rn rm cnd _)
   (when (condition-holds cnd)

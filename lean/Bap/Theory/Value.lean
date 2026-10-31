@@ -32,13 +32,15 @@ structure Var where
   sort : ValueSort
   index : Nat := 0
   isVirtual : Bool := false
+  /-- Bound by a scope, as upstream's `Var.scoped`: virtual, immutable and never versioned. -/
+  isLet : Bool := false
   deriving DecidableEq, Repr
 
 namespace Var
 
 def base (var : Var) : Var := { var with index := 0 }
-def version (var : Var) (index : Nat) : Var := { var with index := index }
-def isMutable (var : Var) : Bool := !var.isVirtual
+def version (var : Var) (index : Nat) : Var := if var.isLet then var else { var with index := index }
+def isMutable (var : Var) : Bool := !var.isLet
 
 end Var
 

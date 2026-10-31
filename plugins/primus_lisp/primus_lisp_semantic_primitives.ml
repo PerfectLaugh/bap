@@ -62,10 +62,12 @@ let export =
          one number is provided returns that number." );
       ( "signed-mod",
         all any @-> any,
-        "(/ X Y ... Z) returns signed mod(X,Y) Y mod ... mod Z, performing any \
-         necessary type conversions in the process. Where `X mod Y` is the \
-         remainder of [X / Y]. If no numbers are supplied, 1 is returned. If \
-         one number is provided returns that number." );
+        "(signed-mod X Y ... Z) returns smod(X,Y) smod ... smod Z, performing \
+         any necessary type conversions in the process. Where `X smod Y` is \
+         the signed modulus: the sign of a nonzero result follows Y, as in \
+         SMT-LIB bvsmod, and `X smod 0` is X. It is not the truncating \
+         remainder, see signed-rem. If no numbers are supplied, 1 is returned. \
+         If one number is provided returns that number." );
       ( "lshift",
         all any @-> any,
         "(lshift X Y ... Z) returns X << Y << ... << Z, performing any \
@@ -1400,7 +1402,7 @@ module Primitives (CT : Theory.Core) (T : Target) = struct
     | "s/", _ -> pure @@ monoid s join Z.sdiv CT.sdiv (Z.int 1) args
     | "mod", _ -> pure @@ monoid s join Z.rem CT.modulo (Z.int 1) args
     | "lnot", [ x ] -> pure @@ lnot x
-    | "signed-mod", _ -> pure @@ monoid s join Z.srem CT.smodulo (Z.int 1) args
+    | "signed-mod", _ -> pure @@ monoid s join Z.smod CT.smodulo (Z.int 1) args
     | "lshift", _ -> pure @@ monoid s first Z.lshift CT.lshift (Z.int 1) args
     | "rshift", _ -> pure @@ monoid s first Z.rshift CT.rshift (Z.int 1) args
     | "arshift", _ -> pure @@ monoid s first Z.arshift CT.arshift (Z.int 1) args

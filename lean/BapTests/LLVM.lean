@@ -17,6 +17,28 @@ private def execute (insn : Disasm.Insn) (env : Bil.Env := []) : IO Bil.State :=
   let (state, _) ← executeEffect insn env
   pure state
 
+private def testRiscvRem : IO Unit := do
+  let riscv ← Target.LLVMLift.riscvEnvironment
+  -- rem a0, a1, a2 truncates: the result takes the sign of the dividend.
+  let insn ← Target.LLVMLift.decodeRISCVWith riscv 0 0 (ByteArray.mk #[0x33, 0xe5, 0xc5, 0x02])
+  -- c.addi a0, 1 is a two-byte compressed instruction.
+  let compressed ← Target.LLVMLift.decodeRISCVWith riscv 0 0 (ByteArray.mk #[0x05, 0x05])
+  assertEqual "RISC-V compressed instruction size" 2 compressed.next
+  let reg (name : String) : Bap.Var := ⟨name, .imm 64, 0, false⟩
+  let cases : List (Int × Int × Int) := [(-7, 3, -1), (7, -3, 1), (-7, -3, -1), (7, 3, 1), (-7, 0, -7)]
+  for (dividend, divisor, expected) in cases do
+    let env : Bil.Env := [
+      (reg "X11", .bits (BitVec.ofInt 64 dividend)),
+      (reg "X12", .bits (BitVec.ofInt 64 divisor))]
+    let state ← execute insn env
+    match Bil.lookup state.env (reg "X10") with
+    | .ok (.bits (width := 64) value) =>
+      if value = BitVec.ofInt 64 expected then
+        IO.println s!"ok: RISC-V rem {dividend} {divisor}"
+      else
+        throw <| IO.userError s!"RISC-V rem {dividend} {divisor}: {value.toInt}"
+    | _ => throw <| IO.userError "RISC-V rem result missing"
+
 private def assertReg (label name : String) (expected : Nat) (state : Bil.State) : IO Unit :=
   match Bil.lookup state.env (reg name) with
   | .ok (.bits value) => assertEqual label expected value.toNat
@@ -82,6 +104,17 @@ private def assertControl (label : String) (flow : Disasm.Flow) (target : Option
     (insn : Disasm.Insn) : IO Unit := do
   assertTrue s!"{label} flow" (insn.flow == flow)
   assertEqual s!"{label} target" target insn.target
+
+private def thumbMemVar : Bap.Var := ⟨"mem", .mem 32 8, 0, false⟩
+
+/-- A 32-bit stack at 0x1000 that holds the given words. -/
+private def thumbStack (values : List Nat) : IO Bil.Env := do
+  let mut memory : Memory 32 := Memory.empty 32
+  for (index, value) in (List.range values.length).zip values do
+    match Memory.write memory (BitVec.ofNat 32 (0x1000 + 4 * index)) (BitVec.ofNat 32 value) .little 4 with
+    | .ok updated => memory := updated
+    | .error error => throw <| IO.userError error
+  pure [(thumbMemVar, .memory memory), word32 "SP" 0x1000]
 
 /-- Control flow at a non-zero address, on encodings decoded by the linked LLVM. -/
 private def testBranches : IO Unit := do
@@ -274,7 +307,183 @@ private def testPartialRegisters : IO Unit := do
   assertReg "MIPS daddu of ZERO_64" "R2" 3
     (← execute (← decodeMIPS [0x00, 0x60, 0x10, 0x2d]) [word "R3" 3])
 
+/-- Writes to PC that LLVM doesn't flag, on encodings decoded by the linked LLVM. -/
+private def testPcWrites : IO Unit := do
+  let arm ← Target.LLVMLift.arm32Environment
+  let decodeARM (values : List Nat) := Target.LLVMLift.decodeARM32With arm 0x2000 0x2000 (bytes values)
+  for (label, values) in [
+      ("mov pc, r1", [0x01, 0xf0, 0xa0, 0xe1]),
+      ("ldr pc, [sp], 4", [0x04, 0xf0, 0x9d, 0xe4]),
+      ("ldr pc, [r0]", [0x00, 0xf0, 0x90, 0xe5]),
+      ("ldm r0, {pc}", [0x00, 0x80, 0x90, 0xe8]),
+      ("add pc, r0, r1", [0x01, 0xf0, 0x80, 0xe0])] do
+    let insn ← decodeARM values
+    assertTrue s!"ARM32 {label} is indirect" (insn.flow == .indirectJump)
+    assertEqual s!"ARM32 {label} has no successors" [] insn.successors
+  assertTrue "ARM32 pop pc does not fall through"
+    (!(← decodeARM [0x00, 0x80, 0xbd, 0xe8]).fallsThrough)
+  assertTrue "ARM32 mov pc, lr does not fall through"
+    (!(← decodeARM [0x0e, 0xf0, 0xa0, 0xe1]).fallsThrough)
+  for (label, values) in [
+      ("moveq pc, lr", [0x0e, 0xf0, 0xa0, 0x01]),
+      ("bxeq lr", [0x1e, 0xff, 0x2f, 0x01]),
+      ("ldreq pc, [r0]", [0x00, 0xf0, 0x90, 0x05]),
+      ("ldmeq r0, {pc}", [0x00, 0x80, 0x90, 0x08])] do
+    assertTrue s!"ARM32 {label} is conditional" ((← decodeARM values).flow == .conditionalJump)
+  let (armPopState, armPopEffect) ← executeEffect (← decodeARM [0x03, 0x80, 0xbd, 0xe8])
+    (← thumbStack [0x11, 0x22, 0x1235])
+  assertReg32 "ARM32 pop {r0, r1, pc} first" "R0" 0x11 armPopState
+  assertReg32 "ARM32 pop {r0, r1, pc} second" "R1" 0x22 armPopState
+  assertReg32 "ARM32 pop {r0, r1, pc} sp" "SP" 0x100c armPopState
+  assertJump "ARM32 pop {r0, r1, pc} jumps" 0x1234 armPopEffect
+  let armPushed ← execute (← decodeARM [0x03, 0x40, 0x2d, 0xe9])
+    ((← thumbStack []) ++ [word32 "R0" 1, word32 "R1" 2, word32 "LR" 3])
+  assertReg32 "ARM32 push {r0, r1, lr} sp" "SP" 0xff4 armPushed
+  let armReload ← execute (← decodeARM [0x07, 0x00, 0xbd, 0xe8]) armPushed.env
+  assertReg32 "ARM32 pop after push, the lowest register at the lowest address" "R0" 1 armReload
+  assertReg32 "ARM32 pop after push, third" "R2" 3 armReload
+  -- a loaded base keeps the loaded value
+  let loadedBase ← execute (← decodeARM [0x03, 0x00, 0x90, 0xe8])
+    ((← thumbStack [0x11, 0x22]) ++ [word32 "R0" 0x1000])
+  assertReg32 "ARM32 ldm r0, {r0, r1} loads the base" "R0" 0x11 loadedBase
+  assertReg32 "ARM32 ldm r0, {r0, r1} uses the old base" "R1" 0x22 loadedBase
+  for (label, values) in [
+      ("mov r0, r1", [0x01, 0x00, 0xa0, 0xe1]),
+      ("str pc, [sp]", [0x00, 0xf0, 0x8d, 0xe5]),
+      ("cmp pc, 0", [0x00, 0x00, 0x5f, 0xe3]),
+      ("ldr r0, [sp]", [0x00, 0x00, 0x9d, 0xe5])] do
+    assertTrue s!"ARM32 {label} is normal" ((← decodeARM values).flow == .normal)
+  let thumb ← Target.LLVMLift.thumbEnvironment
+  let decodeThumb (values : List Nat) :=
+    Target.LLVMLift.decodeThumbWith thumb 0x2000 0x2000 (bytes values)
+  for (label, values) in [
+      ("mov pc, lr", [0xf7, 0x46]),
+      ("add pc, r0", [0x87, 0x44]),
+      ("ldr pc, [pc, 4]", [0xdf, 0xf8, 0x04, 0xf0]),
+      ("ldr.w pc, [r0]", [0xd0, 0xf8, 0x00, 0xf0]),
+      ("pop.w {pc}", [0xbd, 0xe8, 0x00, 0x80]),
+      ("pop {r0, pc}", [0x01, 0xbd])] do
+    let insn ← decodeThumb values
+    assertTrue s!"Thumb {label} does not fall through" (!insn.fallsThrough)
+    assertEqual s!"Thumb {label} has no successors" [] insn.successors
+  assertTrue "Thumb pop {r0} is normal" ((← decodeThumb [0x01, 0xbc]).flow == .normal)
+  let (popState, popEffect) ← executeEffect (← decodeThumb [0x01, 0xbd]) (← thumbStack [0x11, 0x1235])
+  assertReg32 "Thumb pop {r0, pc} loads r0" "R0" 0x11 popState
+  assertReg32 "Thumb pop {r0, pc} moves sp" "SP" 0x1008 popState
+  assertJump "Thumb pop {r0, pc} jumps" 0x1234 popEffect
+
+/-- Targets wrap around the address space, as they do in the lifted program. -/
+private def testWrappedTargets : IO Unit := do
+  let top64 := 2 ^ 64
+  let top32 := 2 ^ 32
+  let check (label : String) (target : Nat) (insn : Disasm.Insn) : IO Unit := do
+    assertEqual s!"{label} target wraps" (some target) insn.target
+  let ppc ← Target.LLVMLift.powerpcEnvironment
+  let ppcBa ← Target.LLVMLift.decodePowerPCWith ppc 0x2000 0x2000 (bytes [0xf2, 0xff, 0xff, 0x4b])
+  check "PowerPC negative ba" (top64 - 16) ppcBa
+  let (_, ppcBaEffect) ← executeEffect ppcBa
+  assertJump "PowerPC negative ba lifted target" (top64 - 16) ppcBaEffect
+  check "PowerPC negative bca" (top64 - 16)
+    (← Target.LLVMLift.decodePowerPCWith ppc 0x2000 0x2000 (bytes [0xf2, 0xff, 0x82, 0x41]))
+  let ppc32 ← Target.LLVMLift.powerpc32Environment
+  check "PowerPC 32 negative ba" (top32 - 16)
+    (← Target.LLVMLift.decodePowerPC32With ppc32 0x2000 0x2000 (bytes [0x4b, 0xff, 0xff, 0xf2]))
+  let x86 ← Target.LLVMLift.x86Environment
+  let x86Jmp ← Target.LLVMLift.decodeX86With x86 0 0 (bytes [0xeb, 0xfb])
+  check "x86 backward jmp" (top64 - 3) x86Jmp
+  let (_, x86Effect) ← executeEffect x86Jmp
+  assertJump "x86 backward jmp lifted target" (top64 - 3) x86Effect
+  let x8632 ← Target.LLVMLift.x8632Environment
+  check "x86-32 backward jmp" (top32 - 3)
+    (← Target.LLVMLift.decodeX8632With x8632 0 0 (bytes [0xeb, 0xfb]))
+  let arm ← Target.LLVMLift.arm32Environment
+  let armB ← Target.LLVMLift.decodeARM32With arm 0 0 (bytes [0xfc, 0xff, 0xff, 0xea])
+  check "ARM32 backward b" (top32 - 8) armB
+  let (_, armEffect) ← executeEffect armB
+  assertJump "ARM32 backward b lifted target" (top32 - 8) armEffect
+  let thumb ← Target.LLVMLift.thumbEnvironment
+  let thumbB ← Target.LLVMLift.decodeThumbWith thumb 0 0 (bytes [0xfc, 0xe7])
+  check "Thumb backward b" (top32 - 4) thumbB
+  let (_, thumbEffect) ← executeEffect thumbB
+  assertJump "Thumb backward b lifted target" (top32 - 4) thumbEffect
+  let riscv ← Target.LLVMLift.riscvEnvironment
+  check "RISC-V backward j" (top64 - 16)
+    (← Target.LLVMLift.decodeRISCVWith riscv 0 0 (bytes [0x6f, 0xf0, 0x1f, 0xff]))
+  let riscv32 ← Target.LLVMLift.riscv32Environment
+  check "RISC-V 32 backward j" (top32 - 16)
+    (← Target.LLVMLift.decodeRISCV32With riscv32 0 0 (bytes [0x6f, 0xf0, 0x1f, 0xff]))
+  let aarch64 ← Target.LLVMLift.aarch64Environment
+  check "AArch64 backward b" (top64 - 16)
+    (← Target.LLVMLift.decodeAArch64With aarch64 0 0 (bytes [0xfc, 0xff, 0xff, 0x17]))
+  let mips ← Target.LLVMLift.mipsEnvironment
+  check "MIPS backward beq" (top64 - 12)
+    (← Target.LLVMLift.decodeMIPSWith mips 0 0 (bytes [0x10, 0x82, 0xff, 0xfc]))
+  let mips32 ← Target.LLVMLift.mips32Environment
+  check "MIPS 32 backward beq" (top32 - 12)
+    (← Target.LLVMLift.decodeMIPS32With mips32 0 0 (bytes [0x10, 0x82, 0xff, 0xfc]))
+
+/-- The vector registers have their widths, XMM is the low half of YMM. -/
+private def testVectorRegisters : IO Unit := do
+  let x86 ← Target.LLVMLift.x86Environment
+  let view (triple name : String) (environment : Primus.Semantics.Environment) : IO String := do
+    match environment.registers.get? (← LLVM.registerId triple name) with
+    | some (.register base width baseWidth) => pure s!"{base} {width} {baseWidth}"
+    | _ => throw <| IO.userError s!"{name} is not a register"
+  assertEqual "x86 XMM0" "YMM0 128 256" (← view "x86_64" "XMM0" x86)
+  assertEqual "x86 XMM15" "YMM15 128 256" (← view "x86_64" "XMM15" x86)
+  assertEqual "x86 YMM1" "YMM1 256 256" (← view "x86_64" "YMM1" x86)
+  assertEqual "x86 ZMM2" "ZMM2 512 512" (← view "x86_64" "ZMM2" x86)
+  let x8632 ← Target.LLVMLift.x8632Environment
+  assertEqual "x86-32 XMM7" "YMM7 128 256" (← view "i386" "XMM7" x8632)
+
+/-- The 16-bit Thumb instructions, on encodings decoded by the linked LLVM. -/
+private def testThumbNarrow : IO Unit := do
+  let thumb ← Target.LLVMLift.thumbEnvironment
+  let decode (values : List Nat) := Target.LLVMLift.decodeThumbWith thumb 0x2000 0x2000 (bytes values)
+  let run (values : List Nat) (env : Bil.Env) := do execute (← decode values) env
+  let r (name : String) (value : Nat) := word32 name value
+  assertReg32 "tMOVi8" "R0" 1 (← run [0x01, 0x20] [])
+  let adds ← run [0x01, 0x30] [r "R0" 0xffffffff]
+  assertReg32 "tADDi8" "R0" 0 adds
+  assertFlag "tADDi8 carry" "CF" 1 adds
+  assertFlag "tADDi8 zero" "ZF" 1 adds
+  let subs ← run [0x01, 0x38] [r "R0" 0]
+  assertReg32 "tSUBi8" "R0" 0xffffffff subs
+  assertFlag "tSUBi8 no carry after a borrow" "CF" 0 subs
+  assertFlag "tSUBi8 negative" "NF" 1 subs
+  assertReg32 "tADDrr" "R0" 7 (← run [0x88, 0x18] [r "R1" 3, r "R2" 4, r "R0" 0])
+  assertReg32 "tADDi3" "R0" 4 (← run [0xc8, 0x1c] [r "R1" 1, r "R0" 0])
+  assertReg32 "tSUBrr" "R0" 1 (← run [0x88, 0x1a] [r "R1" 4, r "R2" 3, r "R0" 0])
+  assertFlag "tCMPi8 equal" "ZF" 1 (← run [0x01, 0x28] [r "R0" 1])
+  assertFlag "tCMPr carry" "CF" 1 (← run [0x88, 0x42] [r "R0" 1, r "R1" 1])
+  assertReg32 "tLSLri" "R0" 12 (← run [0x88, 0x00] [r "R1" 3, r "R0" 0])
+  assertReg32 "tLSRri" "R0" 3 (← run [0x88, 0x08] [r "R1" 12, r "R0" 0])
+  assertFlag "tLSRri carry" "CF" 1 (← run [0x88, 0x08] [r "R1" 2, r "R0" 0])
+  assertReg32 "tASRri" "R0" 0xffffffff (← run [0x88, 0x10] [r "R1" 0xfffffffc, r "R0" 0])
+  assertReg32 "tORR" "R0" 3 (← run [0x08, 0x43] [r "R0" 1, r "R1" 2])
+  assertReg32 "tADC" "R0" 4 (← run [0x48, 0x41] [r "R0" 1, r "R1" 2, bit "CF" 1])
+  assertReg32 "tUXTB" "R0" 0xff (← run [0xc8, 0xb2] [r "R1" 0x1ff, r "R0" 0])
+  assertReg32 "tSXTB" "R0" 0xffffffff (← run [0x48, 0xb2] [r "R1" 0xff, r "R0" 0])
+  assertReg32 "tADDspi" "SP" 0x1008 (← run [0x02, 0xb0] [r "SP" 0x1000])
+  assertReg32 "tSUBspi" "SP" 0xff8 (← run [0x82, 0xb0] [r "SP" 0x1000])
+  assertReg32 "tADDrSPi" "R0" 0x1004 (← run [0x01, 0xa8] [r "SP" 0x1000, r "R0" 0])
+  let stack ← thumbStack [0x11, 0x22]
+  assertReg32 "tLDRspi" "R0" 0x22 (← run [0x01, 0x98] (r "R0" 0 :: stack))
+  assertReg32 "tLDRi" "R0" 0x22 (← run [0x48, 0x68] (r "R1" 0x1000 :: r "R0" 0 :: stack))
+  assertReg32 "tLDRBi" "R0" 0x11 (← run [0x08, 0x78] (r "R1" 0x1000 :: r "R0" 0 :: stack))
+  let pushed ← run [0x01, 0xb5] (r "R0" 0x55 :: r "LR" 0x77 :: stack)
+  assertReg32 "tPUSH" "SP" 0xff8 pushed
+  assertReg32 "tPOP after tPUSH" "R1" 0x55
+    (← run [0x02, 0xbc] (pushed.env ++ [r "R1" 0]))
+  assertReg32 "tSTRspi then tLDRspi" "R2" 0x99
+    (← run [0x01, 0x9a] ((← run [0x01, 0x90] (r "R0" 0x99 :: r "R2" 0 :: stack)).env))
+
 def run : IO Unit := do
+  testRiscvRem
+  testPcWrites
+  testWrappedTargets
+  testVectorRegisters
+  testThumbNarrow
   testBranches
   testPartialRegisters
   let aarch64Environment ← Target.LLVMLift.aarch64Environment

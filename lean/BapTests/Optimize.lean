@@ -59,7 +59,62 @@ private def stableLoop : Sub :=
     ⟨2, [], [defn 3 y (.var x)], [⟨4, some (.var z), .goto (.direct 2)⟩, goto 5 3]⟩,
     ⟨3, [], [], []⟩]⟩
 
+/-- `x := z; y := 7; ret z`: nothing in the subroutine reads `x` or `y`. -/
+private def deadOutputs : Sub :=
+  ⟨1, "dead-outputs", [], [
+    ⟨1, [], [defn 1 x (.var z), defn 2 y (int 7)], [⟨3, none, .ret (.indirect (.var z))⟩]⟩]⟩
+
+/-- `x := z; goto L; L: y := 1; ret z`: `x` is written in the block before the exit. -/
+private def outputAcrossBlocks : Sub :=
+  ⟨1, "output-across-blocks", [], [
+    ⟨1, [], [defn 1 x (.var z)], [goto 2 2]⟩,
+    ⟨2, [], [defn 3 y (int 1)], [⟨4, none, .ret (.indirect (.var z))⟩]⟩]⟩
+
+/-- `x := y; x := z; ret z`: only the last write to `x` reaches the end of the block. -/
+private def overwrittenOutput : Sub :=
+  ⟨1, "overwritten-output", [], [
+    ⟨1, [], [defn 1 x (.var y), defn 2 x (.var z)], [⟨3, none, .ret (.indirect (.var z))⟩]⟩]⟩
+
+/-- `y := z; x := y; ret z`: the protected `x` keeps the write to `y` that feeds it alive. -/
+private def outputChain : Sub :=
+  ⟨1, "output-chain", [], [
+    ⟨1, [], [defn 1 y (.var z), defn 2 x (.var y)], [⟨3, none, .ret (.indirect (.var z))⟩]⟩]⟩
+
+/-- `x := z; ret x`: the jump alone reads `x`. -/
+private def readByJump : Sub :=
+  ⟨1, "read-by-jump", [], [⟨1, [], [defn 1 x (.var z)], [⟨2, none, .ret (.indirect (.var x))⟩]⟩]⟩
+
+private def definedVars (sub : Sub) (tid : Tid) : List String :=
+  (sub.block tid).map (fun blk => blk.defs.map (·.var.name)) |>.getD []
+
+private def protectedRegressions : IO Unit := do
+  assertEqual "protected write survives" ["x"] (definedVars (optimize deadOutputs [x]) 1)
+  assertEqual "unprotected dead writes removed" [] (definedVars (optimize deadOutputs) 1)
+  assertEqual "protected constant write survives, unprotected removed" ["y"] (definedVars (optimize deadOutputs [y]) 1)
+  let across := optimize outputAcrossBlocks [x]
+  assertEqual "protected write survives before a successor" ["x"] (definedVars across 1)
+  assertEqual "dead write in the successor removed" [] (definedVars across 2)
+  assertEqual "without protection the write across blocks is removed" []
+    (definedVars (optimize outputAcrossBlocks) 1)
+  match (optimize overwrittenOutput [x]).block 1 with
+  | some blk =>
+    assertEqual "only the last protected write survives" [expString (.var z)] (blk.defs.map (expString ·.rhs))
+  | none => throw <| IO.userError "missing overwritten block"
+  assertEqual "a protected write keeps what it reads" ["y", "x"] (definedVars (optimize outputChain [x]) 1)
+  assertEqual "the chain dies without protection" [] (definedVars (optimize outputChain) 1)
+  assertEqual "a read through a jump keeps the write" ["x"] (definedVars (optimize readByJump) 1)
+  assertEqual "a read through a jump keeps the write when protected too" ["x"]
+    (definedVars (optimize readByJump [x]) 1)
+  let versioned : Var := x.version 1
+  assertEqual "protection matches the exact variable" [] (definedVars (optimize deadOutputs [versioned]) 1)
+  let cfg := Cfg.fromSub deadOutputs
+  assertEqual "eliminateDeadCode takes the protected list" 1
+    ((eliminateDeadCode cfg [x]).block 1 |>.map (·.defs.length) |>.getD 0)
+  assertEqual "eliminateDeadCode defaults to none" 0
+    ((eliminateDeadCode cfg).block 1 |>.map (·.defs.length) |>.getD 999)
+
 private def regressions : IO Unit := do
+  protectedRegressions
   match (propagateConstants (Cfg.fromSub stableLoop)).block 2 with
   | some block =>
     match block.defs with

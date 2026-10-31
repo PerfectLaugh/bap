@@ -1,6 +1,7 @@
 import Lean
 import Bap.Image.Loader
 import Bap.Image.Coff
+import Bap.Proofs.Core
 
 namespace Bap.Proofs.Image
 
@@ -465,12 +466,556 @@ theorem decode_short (data : ByteArray) (h : data.size < 2) :
 
 end Dispatch
 
+/-! ## The linker of relocatable ELF files -/
+
+namespace LinkerLaws
+
+open ElfLinker Reader
+
+theorem alignUp_ge (value alignment : Nat) : value ≤ alignUp value alignment := by
+  unfold alignUp
+  split
+  · exact Nat.le_refl _
+  · rename_i ha
+    have hpos : 0 < alignment := by omega
+    have hdiv := Nat.div_add_mod (value + alignment - 1) alignment
+    have hmod := Nat.mod_lt (value + alignment - 1) hpos
+    have hcomm : (value + alignment - 1) / alignment * alignment = alignment * ((value + alignment - 1) / alignment) :=
+      Nat.mul_comm ..
+    omega
+
+/-- A region ends before the next one starts. -/
+def Before (left right : Region) : Prop := left.addr + left.size ≤ right.addr
+
+/-- The layout so far: regions in reverse, inside `[base, cursor)`, in order and coming from the sections. -/
+def LayoutOk (sections : List ElfLinker.Section) (base : Nat) (layout : Layout) : Prop :=
+  base ≤ layout.cursor ∧ layout.addrs.size = sections.length ∧
+    layout.regions.reverse.Pairwise Before ∧
+    (∀ region ∈ layout.regions, base ≤ region.addr ∧ region.addr + region.size ≤ layout.cursor ∧ 0 < region.size ∧
+      region.isSection = true) ∧
+    ∀ region ∈ layout.regions, ∃ sec ∈ sections, region.name = sec.name ∧ region.size = sec.size ∧
+      hasFlag sec.flags shfAlloc = true ∧ region.addr = alignUp region.addr sec.align
+
+theorem alignUp_idempotent (value alignment : Nat) : alignUp (alignUp value alignment) alignment = alignUp value alignment := by
+  unfold alignUp
+  split
+  · rfl
+  · rename_i ha
+    have hpos : 0 < alignment := by omega
+    generalize (value + alignment - 1) / alignment = q
+    have hstep : q * alignment + alignment - 1 = (alignment - 1) + alignment * q := by
+      rw [Nat.mul_comm q alignment]; omega
+    rw [hstep, Nat.add_mul_div_left _ _ hpos, Nat.div_eq_of_lt (by omega)]
+    simp
+
+theorem placeSection_ok {sections : List ElfLinker.Section} {base : Nat} {layout : Layout} (sec : ElfLinker.Section)
+    (h : LayoutOk sections base layout) : LayoutOk (sections ++ [sec]) base (placeSection layout sec) := by
+  obtain ⟨h1, h2, h3, h4, h5⟩ := h
+  unfold placeSection
+  split
+  · rename_i halloc
+    have hge := alignUp_ge layout.cursor sec.align
+    have hbefore : ∀ region ∈ layout.regions, region.addr + region.size ≤ alignUp layout.cursor sec.align :=
+      fun region hr => by have := (h4 region hr).2.1; omega
+    refine ⟨by simp only; omega, by simp [h2], ?_, ?_, ?_⟩
+    · simp only
+      split
+      · rw [List.reverse_cons, List.pairwise_append]
+        refine ⟨h3, by simp, ?_⟩
+        intro left hl right hr
+        simp only [List.mem_singleton] at hr
+        subst hr
+        exact hbefore left (by simpa using hl)
+      · exact h3
+    · intro region hr
+      simp only at hr ⊢
+      split at hr
+      · rename_i hsize
+        simp only [List.mem_cons] at hr
+        rcases hr with rfl | hr
+        · exact ⟨by simp only; omega, by simp, hsize, rfl⟩
+        · have ⟨a, b, c, d⟩ := h4 region hr
+          exact ⟨a, by omega, c, d⟩
+      · have ⟨a, b, c, d⟩ := h4 region hr
+        exact ⟨a, by omega, c, d⟩
+    · intro region hr
+      simp only at hr
+      split at hr
+      · simp only [List.mem_cons] at hr
+        rcases hr with rfl | hr
+        · exact ⟨sec, by simp, rfl, rfl, halloc, (alignUp_idempotent _ _).symm⟩
+        · have ⟨other, ho, a, b, c, d⟩ := h5 region hr
+          exact ⟨other, by simp [ho], a, b, c, d⟩
+      · have ⟨other, ho, a, b, c, d⟩ := h5 region hr
+        exact ⟨other, by simp [ho], a, b, c, d⟩
+  · refine ⟨h1, by simp [h2], h3, h4, ?_⟩
+    intro region hr
+    have ⟨other, ho, a, b, c, d⟩ := h5 region hr
+    exact ⟨other, by simp [ho], a, b, c, d⟩
+
+/-- The layout assigns an entry to every section, and allocated sections to regions in order, without overlap. -/
+theorem layoutSections_ok (sections : List ElfLinker.Section) (base : Nat) :
+    LayoutOk sections base (layoutSections sections base) := by
+  have step : ∀ (rest done : List ElfLinker.Section) (layout : Layout), LayoutOk done base layout →
+      LayoutOk (done ++ rest) base (rest.foldl placeSection layout) := by
+    intro rest
+    induction rest with
+    | nil => intro done layout h; simpa using h
+    | cons sec rest ih =>
+      intro done layout h
+      have := ih (done ++ [sec]) _ (placeSection_ok sec h)
+      simpa using this
+  have := step sections [] { cursor := base } ⟨Nat.le_refl _, rfl, by simp, by simp, by simp⟩
+  simpa [layoutSections] using this
+
+theorem synthetic_spec {name : String} {start cursor : Nat} {off : Option Nat} {w : Bool} :
+    ∀ region ∈ synthetic name start cursor off w, region.addr = start ∧ region.addr + region.size = cursor ∧
+      start < cursor := by
+  intro region hr
+  unfold synthetic at hr
+  split at hr
+  · rename_i hlt
+    simp only [List.mem_singleton] at hr
+    subst hr
+    exact ⟨rfl, by simp only; omega, hlt⟩
+  · cases hr
+
+theorem placeCommons_mono : ∀ (symbols : List Sym) (commons : Array (Option Nat)) (cursor : Nat),
+    cursor ≤ (symbols.foldl (init := (commons, cursor)) fun (commons, cursor) sym =>
+      if special sym shnCommon then
+        let addr := alignUp cursor sym.value
+        (commons.push (some addr), addr + sym.size)
+      else
+        (commons.push none, cursor)).2
+  | [], _, _ => Nat.le_refl _
+  | sym :: rest, commons, cursor => by
+    simp only [List.foldl_cons]
+    split
+    · have := placeCommons_mono rest (commons.push (some (alignUp cursor sym.value))) (alignUp cursor sym.value + sym.size)
+      have := alignUp_ge cursor sym.value
+      simp only at *
+      omega
+    · exact placeCommons_mono rest _ _
+
+theorem placeExternals_mono {machine word : Nat} : ∀ (symbols : List Sym) (externals : Std.HashMap String Nat) (cursor : Nat),
+    cursor ≤ (symbols.foldl (init := (externals, cursor)) fun (externals, cursor) sym =>
+      if isExternal machine sym && !externals.contains sym.name then
+        let addr := alignUp cursor word
+        (externals.insert sym.name addr, addr + word)
+      else
+        (externals, cursor)).2
+  | [], _, _ => Nat.le_refl _
+  | sym :: rest, externals, cursor => by
+    simp only [List.foldl_cons]
+    split
+    · have := placeExternals_mono (machine := machine) (word := word) rest
+        (externals.insert sym.name (alignUp cursor word)) (alignUp cursor word + word)
+      have := alignUp_ge cursor word
+      simp only at *
+      omega
+    · exact placeExternals_mono rest _ _
+
+private theorem pairwise_append_before {left right : List Region} {middle : Nat} (hl : left.Pairwise Before)
+    (hr : right.Pairwise Before) (h1 : ∀ region ∈ left, region.addr + region.size ≤ middle)
+    (h2 : ∀ region ∈ right, middle ≤ region.addr) : (left ++ right).Pairwise Before := by
+  rw [List.pairwise_append]
+  refine ⟨hl, hr, ?_⟩
+  intro a ha b hb
+  have := h1 a ha
+  have := h2 b hb
+  unfold Before
+  omega
+
+private theorem synthetic_pairwise {name : String} {start cursor : Nat} {off : Option Nat} {w : Bool} :
+    (synthetic name start cursor off w).Pairwise Before := by
+  unfold synthetic
+  split <;> simp
+
+/-- The regions of a linked file do not overlap: sections, then commons, externals, and the GOT, in that order. -/
+theorem link_regions_disjoint (input : Input) : (link input).regions.Pairwise Before := by
+  have hl := layoutSections_ok input.sections.toList input.base
+  simp only [link]
+  generalize hlayout : layoutSections input.sections.toList input.base = layout at hl
+  obtain ⟨_, _, h3, h4, _⟩ := hl
+  have hc0 := alignUp_ge layout.cursor (input.width / 8)
+  have hc1 := placeCommons_mono input.symbols.toList #[] (alignUp layout.cursor (input.width / 8))
+  generalize hcommons : placeCommons input.symbols.toList (alignUp layout.cursor (input.width / 8)) = commons
+  have hc1' : alignUp layout.cursor (input.width / 8) ≤ commons.2 := by
+    rw [← hcommons]; exact hc1
+  have hc2 := alignUp_ge commons.2 (input.width / 8)
+  have hc3 := placeExternals_mono (machine := input.machine) (word := input.width / 8) input.symbols.toList {}
+    (alignUp commons.2 (input.width / 8))
+  generalize hexternals : placeExternals input.machine (input.width / 8) input.symbols.toList
+    (alignUp commons.2 (input.width / 8)) = externals
+  have hc3' : alignUp commons.2 (input.width / 8) ≤ externals.2 := by
+    rw [← hexternals]; exact hc3
+  have hc4 := alignUp_ge externals.2 (input.width / 8)
+  generalize alignUp externals.2 (input.width / 8) + _ = gotEnd
+  have hsections : ∀ region ∈ layout.regions.reverse, region.addr + region.size ≤ alignUp layout.cursor (input.width / 8) := by
+    intro region hr
+    have := (h4 region (by simpa using hr)).2.1
+    omega
+  refine pairwise_append_before (middle := alignUp externals.2 (input.width / 8))
+    (pairwise_append_before (middle := alignUp commons.2 (input.width / 8))
+      (pairwise_append_before (middle := alignUp layout.cursor (input.width / 8)) h3 synthetic_pairwise hsections ?_)
+      synthetic_pairwise ?_ ?_) synthetic_pairwise ?_ ?_
+  · intro region hr
+    exact Nat.le_of_eq (synthetic_spec region hr).1.symm
+  · intro region hr
+    rcases List.mem_append.mp hr with hr | hr
+    · have := hsections region hr
+      omega
+    · have := (synthetic_spec region hr).2.1
+      omega
+  · intro region hr
+    exact Nat.le_of_eq (synthetic_spec region hr).1.symm
+  · intro region hr
+    rcases List.mem_append.mp hr with hr | hr
+    · rcases List.mem_append.mp hr with hr | hr
+      · have := hsections region hr
+        omega
+      · have := (synthetic_spec region hr).2.1
+        omega
+    · have := (synthetic_spec region hr).2.1
+      omega
+  · intro region hr
+    exact Nat.le_of_eq (synthetic_spec region hr).1.symm
+
+/-- The contents of a region are always of its size, whatever the file holds. -/
+theorem regionBytes_size (memory : ByteArray) (fileSize : Nat) (region : Region) :
+    (regionBytes memory fileSize region).size = region.size := by
+  unfold regionBytes
+  split
+  · show (Array.replicate region.size 0).size = _
+    simp
+  · rename_i off _
+    simp only
+    rw [size_zeroFilled]
+    simp only [ByteArray.size_extract]
+    generalize hl : (if region.isSection = true then min fileSize memory.size else memory.size) = limit
+    have hlimit : limit ≤ memory.size := by
+      rw [← hl]; split <;> omega
+    have hb : min (off + min region.size (limit - off)) memory.size - off = min region.size (limit - off) := by omega
+    rw [hb]
+    omega
+
+/-- A region reads as its bytes in memory, as far as they go, then as zeros. -/
+theorem regionBytes_get {memory : ByteArray} {fileSize off : Nat} {region : Region} (ho : region.off = some off) {i : Nat}
+    (hi : i < region.size) :
+    let limit := if region.isSection = true then min fileSize memory.size else memory.size
+    (i < limit - off → (regionBytes memory fileSize region).get! i = memory.get! (off + i)) ∧
+      (limit - off ≤ i → (regionBytes memory fileSize region).get! i = 0) := by
+  intro limit
+  have hlimit : limit ≤ memory.size := by
+    show (if region.isSection = true then min fileSize memory.size else memory.size) ≤ _
+    split <;> omega
+  have hdef : regionBytes memory fileSize region =
+      (memory.extract off (off + min region.size (limit - off))).append
+        (ByteArray.mk (Array.replicate (region.size - min region.size (limit - off)) 0)) := by
+    unfold regionBytes
+    simp only [ho]
+    rfl
+  have hfile : (memory.extract off (off + min region.size (limit - off))).size = min region.size (limit - off) := by
+    simp only [ByteArray.size_extract]
+    omega
+  rw [hdef]
+  constructor
+  · intro hl
+    have hin : i < min region.size (limit - off) := by omega
+    rw [get!_zeroFilled_left (by omega), get!_extract (by omega) hin]
+  · intro hl
+    exact get!_zeroFilled_right (by omega) (by omega)
+
+theorem regionBytes_unmapped {memory : ByteArray} {fileSize : Nat} {region : Region} (ho : region.off = none) {i : Nat}
+    (hi : i < region.size) : (regionBytes memory fileSize region).get! i = 0 := by
+  have hdef : regionBytes memory fileSize region = ByteArray.mk (Array.replicate region.size 0) := by
+    unfold regionBytes
+    simp only [ho]
+  rw [hdef]
+  show (Array.replicate region.size (0 : UInt8))[i]! = 0
+  rw [getElem!_pos (Array.replicate region.size (0 : UInt8)) i (by simpa using hi)]
+  simp
+
+/-- A linked segment and its mapped region describe the same memory. -/
+theorem toSegment_toMemRegion (memory : ByteArray) (fileSize : Nat) (region : Region) :
+    (toSegment region).addr = (toMemRegion memory fileSize region).addr ∧
+      (toSegment region).size = (toMemRegion memory fileSize region).size ∧
+      (toSegment region).readable = (toMemRegion memory fileSize region).readable ∧
+      (toSegment region).writable = (toMemRegion memory fileSize region).writable ∧
+      (toSegment region).executable = (toMemRegion memory fileSize region).executable :=
+  ⟨rfl, (regionBytes_size memory fileSize region).symm, rfl, rfl, rfl⟩
+
+/-! ### Fields -/
+
+theorem field_lt (value : Int) (lo n : Nat) : field value lo n < 2 ^ n := by
+  unfold field
+  have hpos : (0 : Int) < ((2 ^ n : Nat) : Int) := by exact_mod_cast Nat.pow_pos (by decide)
+  have h1 := Int.emod_lt_of_pos (value >>> lo) hpos
+  have h2 := Int.emod_nonneg (value >>> lo) (Int.ne_of_gt hpos)
+  omega
+
+/-- The low `m + 8` bits of a value are its low `m` bits and the byte above them. -/
+theorem field_succ (value : Int) (m : Nat) :
+    field value 0 (m + 8) = field value 0 m + field value m 8 * 2 ^ m := by
+  have hP : (0 : Int) < ((2 ^ m : Nat) : Int) := by exact_mod_cast Nat.pow_pos (by decide)
+  have hQ : (0 : Int) < ((2 ^ 8 : Nat) : Int) := by decide
+  have hcast : ((2 ^ (m + 8) : Nat) : Int) = ((2 ^ m : Nat) : Int) * ((2 ^ 8 : Nat) : Int) := by
+    rw [Nat.pow_add]; simp
+  have hshift : value >>> m = value / ((2 ^ m : Nat) : Int) := by
+    rw [Int.shiftRight_eq_div_pow]
+  have hzero : value >>> 0 = value := by
+    rw [Int.shiftRight_eq_div_pow]; simp
+  unfold field
+  rw [hzero, hshift, hcast]
+  generalize hPdef : ((2 ^ m : Nat) : Int) = P at *
+  generalize hQdef : ((2 ^ 8 : Nat) : Int) = Q at *
+  have h1 := Int.emod_add_mul_ediv value P
+  have h2 := Int.emod_add_mul_ediv (value / P) Q
+  have ha0 := Int.emod_nonneg value (Int.ne_of_gt hP)
+  have ha1 := Int.emod_lt_of_pos value hP
+  have hb0 := Int.emod_nonneg (value / P) (Int.ne_of_gt hQ)
+  have hb1 := Int.emod_lt_of_pos (value / P) hQ
+  generalize ha : value % P = a at *
+  generalize hb : (value / P) % Q = b at *
+  generalize hc : (value / P) / Q = c at *
+  generalize hq : value / P = q at *
+  have hvalue : value = (a + P * b) + P * Q * c := by
+    rw [← h1, ← h2, Int.mul_add, Int.mul_assoc, Int.add_assoc]
+  have hbound : P * b ≤ P * (Q - 1) := Int.mul_le_mul_of_nonneg_left (by omega) (by omega)
+  have hb0' : 0 ≤ P * b := Int.mul_nonneg (by omega) hb0
+  rw [Int.mul_sub, Int.mul_one] at hbound
+  have hmod : value % (P * Q) = a + P * b := by
+    rw [hvalue, Int.add_mul_emod_self_left, Int.emod_eq_of_lt (by omega) (by omega)]
+  rw [hmod]
+  have e1 : ((a.toNat : Nat) : Int) = a := Int.toNat_of_nonneg ha0
+  have e2 : ((b.toNat : Nat) : Int) = b := Int.toNat_of_nonneg hb0
+  have hcast2 : ((a + P * b).toNat : Int) = ((a.toNat + b.toNat * 2 ^ m : Nat) : Int) := by
+    rw [Int.toNat_of_nonneg (by omega), Int.natCast_add, Int.natCast_mul, e1, e2, hPdef, Int.mul_comm b P]
+  exact Int.ofNat.inj hcast2
+
+/-! ### Stores -/
+
+theorem get!_set! (bytes : ByteArray) (i j : Nat) (value : UInt8) (hi : i < bytes.size) :
+    (bytes.set! i value).get! j = if i = j then value else bytes.get! j := by
+  cases bytes with
+  | mk array =>
+    have hi : i < array.size := hi
+    show (array.setIfInBounds i value)[j]! = if i = j then value else array[j]!
+    by_cases hj : j < array.size
+    · have hj' : j < (array.setIfInBounds i value).size := by simpa using hj
+      rw [getElem!_pos (array.setIfInBounds i value) j hj', getElem!_pos array j hj,
+        Array.getElem_setIfInBounds hj]
+    · have hne : ¬ i = j := by omega
+      rw [ite_eq_right hne, getElem!_neg (array.setIfInBounds i value) j (by simpa using hj),
+        getElem!_neg array j hj]
+
+theorem size_set! (bytes : ByteArray) (i : Nat) (value : UInt8) : (bytes.set! i value).size = bytes.size := by
+  cases bytes
+  show (Array.setIfInBounds _ _ _).size = _
+  simp
+  rfl
+
+/-- The position of byte `index` of an `n`-byte number. -/
+def bytePosition (little : Bool) (n index : Nat) : Nat := if little then index else n - index - 1
+
+private def writesUpTo (memory : ByteArray) (little : Bool) (off n : Nat) (value : Int) (k : Nat) : ByteArray :=
+  (List.range k).foldl (init := memory) fun result index =>
+    result.set! (off + index) (UInt8.ofNat (field value (8 * if little then index else n - index - 1) 8))
+
+private theorem writesUpTo_succ (memory : ByteArray) (little : Bool) (off n : Nat) (value : Int) (k : Nat) :
+    writesUpTo memory little off n value (k + 1) =
+      (writesUpTo memory little off n value k).set! (off + k)
+        (UInt8.ofNat (field value (8 * if little then k else n - k - 1) 8)) := by
+  simp [writesUpTo, List.range_succ, List.foldl_append]
+
+private theorem writesUpTo_spec {memory : ByteArray} {little : Bool} {off n : Nat} {value : Int} :
+    ∀ k, off + k ≤ memory.size →
+      (writesUpTo memory little off n value k).size = memory.size ∧
+      (∀ j, j < off ∨ off + k ≤ j → (writesUpTo memory little off n value k).get! j = memory.get! j) ∧
+      ∀ i, i < k → ((writesUpTo memory little off n value k).get! (off + i)).toNat =
+        field value (8 * bytePosition little n i) 8
+  | 0, _ => ⟨rfl, fun _ _ => rfl, fun _ h => absurd h (by omega)⟩
+  | k + 1, hb => by
+    have ⟨hs, hf, hw⟩ := writesUpTo_spec (memory := memory) (little := little) (off := off) (n := n) (value := value) k
+      (by omega)
+    rw [writesUpTo_succ]
+    have hlt : off + k < (writesUpTo memory little off n value k).size := by omega
+    refine ⟨by rw [size_set!, hs], ?_, ?_⟩
+    · intro j hj
+      rw [get!_set! _ _ _ _ hlt, ite_eq_right (by omega), hf j (by omega)]
+    · intro i hi
+      rw [get!_set! _ _ _ _ hlt]
+      by_cases hik : i = k
+      · subst hik
+        simp only [↓reduceIte]
+        have hu := field_lt value (8 * if little then i else n - i - 1) 8
+        rw [UInt8.toNat_ofNat', Nat.mod_eq_of_lt hu]
+        rfl
+      · rw [ite_eq_right (by omega), hw i (by omega)]
+
+/-- A store of `n` in-range bytes changes exactly those, to the bytes of the value in the file's order. -/
+theorem writeNat_spec {memory : ByteArray} {little : Bool} {off n : Nat} {value : Int} (h : off + n ≤ memory.size) :
+    (writeNat memory little off n value).size = memory.size ∧
+      (∀ j, j < off ∨ off + n ≤ j → (writeNat memory little off n value).get! j = memory.get! j) ∧
+      ∀ i, i < n → ((writeNat memory little off n value).get! (off + i)).toNat =
+        field value (8 * bytePosition little n i) 8 :=
+  writesUpTo_spec n h
+
+private def foldWrites (memory : ByteArray) (writes : List Write) : ByteArray :=
+  writes.foldl (init := memory) fun memory write =>
+    writeNat memory write.little write.off write.n write.value
+
+private theorem commit_run (site : Site) (writes : List Write) (state : LinkState) :
+    (commit site writes).run state =
+      if writes.all (fun write => site.off ≤ write.off && write.off + write.n ≤ site.limit &&
+          write.off + write.n ≤ state.memory.size) = true then
+        .ok () { state with memory := foldWrites state.memory writes }
+      else .error (outside site) state := by
+  show commit site writes state = _
+  simp only [commit, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get]
+  split <;> rfl
+
+private theorem commit_fold : ∀ (writes : List Write) (memory : ByteArray),
+    (∀ write ∈ writes, write.off + write.n ≤ memory.size) →
+    let result := writes.foldl (init := memory) fun memory write =>
+      writeNat memory write.little write.off write.n write.value
+    result.size = memory.size ∧
+      ∀ j, (∀ write ∈ writes, j < write.off ∨ write.off + write.n ≤ j) → result.get! j = memory.get! j
+  | [], _, _ => ⟨rfl, fun _ _ => rfl⟩
+  | write :: rest, memory, h => by
+    have ⟨s1, f1, _⟩ := writeNat_spec (little := write.little) (value := write.value) (h write (by simp))
+    have ⟨s2, f2⟩ := commit_fold rest (writeNat memory write.little write.off write.n write.value) (by
+      intro other ho
+      rw [s1]
+      exact h other (by simp [ho]))
+    refine ⟨s2.trans s1, ?_⟩
+    intro j hj
+    rw [List.foldl_cons, f2 j (fun other ho => hj other (by simp [ho])), f1 j (hj write (by simp))]
+
+/-- All the stores of a committed site stay in its section, and everything else in memory is left alone. -/
+theorem commit_ok {site : Site} {writes : List Write} {state after : LinkState} {result : Unit}
+    (h : (commit site writes).run state = .ok result after) :
+    after.memory.size = state.memory.size ∧
+      (∀ j, (∀ write ∈ writes, j < write.off ∨ write.off + write.n ≤ j) → after.memory.get! j = state.memory.get! j) ∧
+      ∀ write ∈ writes, site.off ≤ write.off ∧ write.off + write.n ≤ site.limit := by
+  rw [commit_run] at h
+  split at h
+  · rename_i hall
+    cases h
+    have hb : ∀ write ∈ writes, site.off ≤ write.off ∧ write.off + write.n ≤ site.limit ∧
+        write.off + write.n ≤ state.memory.size := by
+      intro write hw
+      have := List.all_eq_true.mp hall write hw
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at this
+      exact ⟨this.1.1, this.1.2, this.2⟩
+    have ⟨s, f⟩ := commit_fold writes state.memory fun write hw => (hb write hw).2.2
+    exact ⟨s, f, fun write hw => ⟨(hb write hw).1, (hb write hw).2.1⟩⟩
+  · cases h
+
+/-- A site out of its section stores nothing. -/
+theorem commit_outside {site : Site} {writes : List Write} {state : LinkState} {write : Write} (hw : write ∈ writes)
+    (hout : site.limit < write.off + write.n) :
+    (commit site writes).run state = .error (outside site) state := by
+  rw [commit_run, ite_eq_right]
+  intro hall
+  have := List.all_eq_true.mp hall write hw
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at this
+  omega
+
+private theorem readNat_little_fold {memory : ByteArray} {off : Nat} {value : Int} :
+    ∀ k, (∀ i, i < k → (memory.get! (off + i)).toNat = field value (8 * i) 8) →
+      (List.range k).foldl (init := 0) (fun sum index => sum + (memory.get! (off + index)).toNat * 256 ^ index) =
+        field value 0 (8 * k)
+  | 0, _ => by
+    simp [field]
+  | k + 1, h => by
+    rw [List.range_succ, List.foldl_append, readNat_little_fold k (fun i hi => h i (by omega))]
+    simp only [List.foldl_cons, List.foldl_nil]
+    rw [h k (by omega), show 8 * (k + 1) = 8 * k + 8 by omega, field_succ, Nat.pow_mul]
+
+/-- A little-endian store reads back as the value, cut to its width. -/
+theorem readNat_writeNat_little {memory : ByteArray} {off n : Nat} {value : Int} (h : off + n ≤ memory.size) :
+    readNat (writeNat memory true off n value) true off n = field value 0 (8 * n) := by
+  have ⟨_, _, hw⟩ := writeNat_spec (little := true) (value := value) h
+  simp only [readNat, ↓reduceIte]
+  exact readNat_little_fold n fun i hi => by
+    rw [hw i hi]
+    simp [bytePosition]
+
+/-- `value` and its two's complement field agree modulo the width, and it is back in range. -/
+theorem sext_range (value : Int) {n : Nat} (hn : 0 < n) :
+    -((2 ^ (n - 1) : Nat) : Int) ≤ sext value n ∧ sext value n < ((2 ^ (n - 1) : Nat) : Int) := by
+  have hl := field_lt value 0 n
+  have hp : 2 ^ n = 2 * 2 ^ (n - 1) := by
+    rw [← Nat.pow_succ']
+    congr 1
+    omega
+  unfold sext
+  simp only
+  split <;> omega
+
+/-! ### Handlers -/
+
+/-- `R_X86_64_PC32`: S + A - P in 4 bytes. -/
+theorem x86_64_pc32 {env : Env} {site : Site} (ht : site.rel.typ = 2) (state : LinkState) :
+    (x86_64 env site).run state = .ok (some [stAt env site 0 4 (site.s + site.a - site.p)]) state := by
+  simp only [x86_64, ht]
+  rfl
+
+/-- `R_X86_64_PC32` end to end: once committed, the place holds S + A - P, cut to 32 bits. -/
+theorem x86_64_pc32_resolves {env : Env} {site : Site} {state after : LinkState} {result : Unit}
+    (hl : env.little = true) (hb : site.off + 4 ≤ state.memory.size)
+    (h : (commit site [stAt env site 0 4 (site.s + site.a - site.p)]).run state = .ok result after) :
+    readNat after.memory true site.off 4 = field (site.s + site.a - site.p) 0 32 := by
+  rw [commit_run] at h
+  split at h
+  · cases h
+    change readNat (writeNat state.memory env.little (site.off + 0) 4 (site.s + site.a - site.p)) true site.off 4 = _
+    rw [hl]
+    exact readNat_writeNat_little (off := site.off) (n := 4) hb
+  · cases h
+
+/-- Loads are in the section or not at all. -/
+theorem load_run (site : Site) (at' n : Nat) (little : Bool) (state : LinkState) :
+    (load site at' n little).run state =
+      if inSection site at' n state.memory.size = true then
+        .ok (readNat state.memory little (site.off + at') n) state
+      else .error (outside site) state := by
+  show load site at' n little state = _
+  simp only [ElfLinker.load, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get]
+  split <;> rfl
+
+/-- The same value always shares its GOT entry. -/
+theorem gotEntry_hit {env : Env} {value : Int} {state : LinkState} {slot : Nat}
+    (h : state.got[field value 0 64]? = some slot) :
+    (gotEntry env value).run state = .ok (slot : Int) state := by
+  show gotEntry env value state = _
+  simp only [gotEntry, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get, h]
+  rfl
+
+/-- A new GOT entry is the next word after the entries so far. -/
+theorem gotEntry_new {env : Env} {value : Int} {state after : LinkState} {slot : Int}
+    (h : state.got[field value 0 64]? = none) (hr : (gotEntry env value).run state = .ok slot after) :
+    slot = (env.gotBase + state.gotCount * (env.width / 8) : Nat) ∧ after.gotCount = state.gotCount + 1 := by
+  change gotEntry env value state = _ at hr
+  simp only [gotEntry, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get, h] at hr
+  cases hr
+  exact ⟨rfl, rfl⟩
+
+end LinkerLaws
+
 /-! ## ELF -/
 
 namespace ElfParser
 
 open_private Bap.Image.Elf Bap.Image.Elf word parseHeader parseProgramHeader parseSections parseSegments
-  offsetOf tagValue sleb128 sleb128.loop alignUp codeAddress parseSymbol relativeType irelativeType symbolRelocationKind
+  offsetOf tagValue sleb128 sleb128.loop codeAddress parseSymbol relativeType irelativeType symbolRelocationKind
+  isMips64el decodeRelocatable linkInput rawRelocations sectionRelocations relocatesMemory
+  AndroidGroup AndroidGroup.is64 AndroidGroup.rela AndroidGroup.byOffset AndroidGroup.offsetDelta AndroidState AndroidState.mk AndroidState.cursor AndroidState.offset
+  AndroidState.addend AndroidState.result
+  androidField androidEntry androidEntries androidGroupHeader androidGroups decodeAndroid readAndroidRelocations
+  relrBits relrDecode readRelrRelocations isRelativeType classifyRelocation storedWord dynamicSymbol
+  mipsGotReferences mipsGotReferences.loop collectRelocations
 
 open Reader
 
@@ -482,6 +1027,7 @@ theorem word_bound {data : ByteArray} {endian : Endian} {is64 : Bool} {offset va
 
 /-- The field-reading tail of `parseHeader`, once class and encoding are known. -/
 def headerFields (data : ByteArray) (endian : Endian) (is64 : Bool) : Except String Elf.Header := do
+  let fileType ← IO.Reader.u16 data endian 16
   let machine ← IO.Reader.u16 data endian 18
   let entryPoint ← word data endian is64 24
   let programOffset ← word data endian is64 (if is64 then 32 else 28)
@@ -503,6 +1049,7 @@ def headerFields (data : ByteArray) (endian : Endian) (is64 : Bool) : Except Str
     sectionEntrySize := sectionEntrySize
     sectionCount := sectionCount
     stringSectionIndex := stringSectionIndex
+    fileType := fileType
   }
 
 /-- An accepted header starts with the magic and valid class and encoding bytes, then reads its fields. -/
@@ -564,7 +1111,7 @@ theorem headerFields_ok {data : ByteArray} {endian : Endian} {is64 : Bool} {head
       IO.Reader.u16 data endian (if is64 then 62 else 50) = .ok header.stringSectionIndex ∧
       (if is64 then 64 else 52) ≤ data.size := by
   simp only [headerFields, bind_ok_iff] at h
-  rcases h with ⟨m, h1, e, h2, po, h3, so, h4, pes, h5, pc, h6, ses, h7, sc, h8, ssi, h9, h⟩
+  rcases h with ⟨t, h0, m, h1, e, h2, po, h3, so, h4, pes, h5, pc, h6, ses, h7, sc, h8, ssi, h9, h⟩
   cases h
   have hb := read_bound h9
   refine ⟨rfl, rfl, h1, h2, h3, h4, h5, h6, h7, h8, h9, ?_⟩
@@ -738,29 +1285,66 @@ theorem parseSegments_rejects_small_entry {data : ByteArray} {header : Elf.Heade
 
 /-! ### decode -/
 
-/-- Everything `Elf.decode` promises about an accepted file. -/
-theorem decode_ok {data : ByteArray} {image : Image} (h : Elf.decode data = .ok image) :
-    ∃ header, parseHeader data = .ok header ∧ image.data = data ∧
-      image.addrWidth = (if header.is64 then 64 else 32) ∧ image.endian = header.endian ∧
+/-- Segments and mapped regions correspond one to one, at the same address and of the same size. -/
+def SegmentsAgree (image : Image) : Prop :=
+  ∃ pairs : List (Segment × MemRegion), image.segments = pairs.map Prod.fst ∧
+    image.memory.entries = (pairs.map Prod.snd).reverse.map (fun region => (region, ())) ∧
+    ∀ pair ∈ pairs, pair.1.addr = pair.2.addr ∧ pair.1.size = pair.2.size
+
+/-- An executable or shared object: its segments are its LOAD entries, with the bytes of the file. -/
+theorem decode_loaded {data : ByteArray} {image : Image} {header : Elf.Header} (h : Elf.decode data = .ok image)
+    (hh : parseHeader data = .ok header) (ht : header.fileType ≠ 1) :
+    image.data = data ∧ image.addrWidth = (if header.is64 then 64 else 32) ∧ image.endian = header.endian ∧
       image.entryPoint = header.entryPoint ∧
       ∃ entries : List (Segment × MemRegion), image.segments = entries.map Prod.fst ∧
         image.memory.entries = (entries.map Prod.snd).reverse.map (fun region => (region, ())) ∧
         ∀ entry ∈ entries, LoadPair data entry := by
-  simp only [Elf.decode, bind_ok_iff] at h
-  rcases h with ⟨header, h1, ⟨segments, regions⟩, h2, sh, _, sections, _, symbols, _, h⟩
+  simp only [Elf.decode, bind_ok_iff, hh] at h
+  rcases h with ⟨_, he, h⟩
+  cases he
+  have hne : ¬ (header.fileType == 1) = true := by simpa using ht
+  rw [ite_eq_right hne] at h
+  simp only [bind_ok_iff] at h
+  rcases h with ⟨⟨segments, regions⟩, h2, sh, _, sections, _, symbols, _, h⟩
   cases h
   have ⟨entries, hs, hr, hp⟩ := parseSegments_ok h2
-  refine ⟨header, h1, rfl, rfl, rfl, rfl, entries, hs, ?_, hp⟩
+  refine ⟨rfl, rfl, rfl, rfl, entries, hs, ?_, hp⟩
   rw [Map.foldl_add_entries, hr]
   simp
 
-/-- A file with no program headers, like a relocatable object, decodes with no segments and no mapped memory. -/
+/-- A relocatable file: its segments are the regions that the linker laid out. -/
+theorem decode_relocatable {data : ByteArray} {image : Image} {header : Elf.Header} (h : Elf.decode data = .ok image)
+    (hh : parseHeader data = .ok header) (ht : header.fileType = 1) :
+    image.data = data ∧ image.addrWidth = (if header.is64 then 64 else 32) ∧ image.endian = header.endian ∧
+      ∃ sections names, parseSections data header = .ok sections ∧
+        let output := ElfLinker.link (linkInput data header sections names)
+        image.segments = output.regions.map ElfLinker.toSegment ∧
+        image.memory.entries = ((output.regions.map (ElfLinker.toMemRegion output.memory data.size)).reverse.map
+          fun region => (region, ())) := by
+  simp only [Elf.decode, bind_ok_iff, hh] at h
+  rcases h with ⟨_, he, h⟩
+  cases he
+  have hy : (header.fileType == 1) = true := by simpa using ht
+  rw [ite_eq_left hy] at h
+  simp only [bind_ok_iff, decodeRelocatable] at h
+  rcases h with ⟨sections, h2, names, _, h⟩
+  cases h
+  refine ⟨rfl, rfl, rfl, sections, names, h2, rfl, ?_⟩
+  rw [Map.foldl_add_entries]
+  exact List.append_nil _
+
+/-- A file with no program headers that is not relocatable decodes with no segments and no mapped memory. -/
 theorem decode_no_program_headers {data : ByteArray} {image : Image} {header : Elf.Header}
-    (h : Elf.decode data = .ok image) (hh : parseHeader data = .ok header) (h0 : header.programCount = 0) :
+    (h : Elf.decode data = .ok image) (hh : parseHeader data = .ok header) (ht : header.fileType ≠ 1)
+    (h0 : header.programCount = 0) :
     image.segments = [] ∧ image.memory.entries = [] ∧ Elf.programHeaders data = .ok [] := by
   simp only [Elf.decode, bind_ok_iff, hh] at h
-  rcases h with ⟨_, he, ⟨segments, regions⟩, h2, sh, _, _, _, _, _, h⟩
+  rcases h with ⟨_, he, h⟩
   cases he
+  have hne : ¬ (header.fileType == 1) = true := by simpa using ht
+  rw [ite_eq_right hne] at h
+  simp only [bind_ok_iff] at h
+  rcases h with ⟨⟨segments, regions⟩, h2, sh, _, _, _, _, _, h⟩
   rw [parseSegments_no_entries h0] at h2
   cases h2
   cases h
@@ -768,11 +1352,17 @@ theorem decode_no_program_headers {data : ByteArray} {image : Image} {header : E
   simp only [Elf.programHeaders, hh, Reader.ok_bind]
   rw [ite_eq_left h0]
 
+theorem decode_header {data : ByteArray} {image : Image} (h : Elf.decode data = .ok image) :
+    ∃ header, parseHeader data = .ok header := by
+  simp only [Elf.decode, bind_ok_iff] at h
+  rcases h with ⟨header, h1, _⟩
+  exact ⟨header, h1⟩
+
 theorem decode_rejects_short {data : ByteArray} (h : data.size < 52) : (Elf.decode data).isOk = false := by
   cases hd : Elf.decode data with
   | error e => rfl
   | ok image =>
-    have ⟨_, hp, _⟩ := decode_ok hd
+    have ⟨_, hp⟩ := decode_header hd
     have := parseHeader_rejects_short (data := data) h
     simp [hp, Except.isOk, Except.toBool] at this
 
@@ -782,22 +1372,22 @@ theorem decode_rejects_magic {data : ByteArray}
   cases hd : Elf.decode data with
   | error e => rfl
   | ok image =>
-    have ⟨_, hp, _⟩ := decode_ok hd
+    have ⟨_, hp⟩ := decode_header hd
     have := parseHeader_rejects_magic h
     simp [hp, Except.isOk, Except.toBool] at this
 
-/-- Every byte mapped by a decoded ELF lies inside one of its LOAD segments. -/
-theorem decode_readByte_in_segment {data : ByteArray} {image : Image} {address : Nat} {byte : UInt8}
-    (h : Elf.decode data = .ok image) (hr : image.memory.readByte address = some byte) :
+/-- Every byte mapped by an image with agreeing segments lies inside one of them. -/
+theorem readByte_in_segment {image : Image} {address : Nat} {byte : UInt8} (ha : SegmentsAgree image)
+    (hr : image.memory.readByte address = some byte) :
     ∃ segment ∈ image.segments, segment.addr ≤ address ∧ address < segment.addr + segment.size := by
-  have ⟨_, _, _, _, _, _, entries, hs, hm, hp⟩ := decode_ok h
+  obtain ⟨pairs, hs, hm, hp⟩ := ha
   have ⟨entry, hentry, hc, _⟩ := Map.readByte_some hr
   rw [hm] at hentry
   simp only [List.mem_map, List.mem_reverse] at hentry
   rcases hentry with ⟨region, ⟨pair, hpair, rfl⟩, rfl⟩
   refine ⟨pair.1, ?_, ?_⟩
   · rw [hs]; exact List.mem_map_of_mem hpair
-  · have ⟨h1, h2, _⟩ := hp pair hpair
+  · have ⟨h1, h2⟩ := hp pair hpair
     have := Region.contains_iff.mp hc
     simp only at this
     omega
@@ -1053,10 +1643,52 @@ theorem parseSymbol_layout {data : ByteArray} {header : Elf.Header} {strings : E
   exact ⟨nameOffset, info, value, h1, h0, h2, h3, h4, rfl, rfl, h5⟩
 
 /-- `r_info` splits exactly into symbol and type: at bit 8 for ELF32 and bit 32 for ELF64. -/
-theorem relocationInfo_split (info : Nat) :
-    info = info / 0x100 * 0x100 + info % 0x100 ∧ info % 0x100 < 0x100 ∧
-      info = info / 0x100000000 * 0x100000000 + info % 0x100000000 ∧ info % 0x100000000 < 0x100000000 := by
+theorem splitInfo_elf32 (info : Nat) :
+    (Elf.splitInfo false false info).1 < 0x100 ∧
+      info = (Elf.splitInfo false false info).2 * 0x100 + (Elf.splitInfo false false info).1 := by
+  simp only [Elf.splitInfo, Bool.false_eq_true, ↓reduceIte]
   omega
+
+theorem splitInfo_elf64 (info : Nat) :
+    (Elf.splitInfo true false info).1 < 0x100000000 ∧
+      info = (Elf.splitInfo true false info).2 * 0x100000000 + (Elf.splitInfo true false info).1 := by
+  simp only [Elf.splitInfo, Bool.false_eq_true, ↓reduceIte]
+  omega
+
+/-- mips64el stores `r_sym` in the low word of `r_info` and then `r_ssym, r_type3, r_type2, r_type`, one byte each.
+The split reads the same type and symbol as the big-endian layout, `sym:ssym:type3:type2:type`. -/
+theorem splitInfo_mips64el {symbol ssym type3 type2 typ : Nat} (hsym : symbol < 4294967296) (h4 : ssym < 256)
+    (h3 : type3 < 256) (h2 : type2 < 256) (h1 : typ < 256) :
+    Elf.splitInfo true true (symbol + ssym * 4294967296 + type3 * 1099511627776 + type2 * 281474976710656 +
+        typ * 72057594037927936) =
+      Elf.splitInfo true false (symbol * 4294967296 + ssym * 16777216 + type3 * 65536 + type2 * 256 + typ) := by
+  generalize hinfo : symbol + ssym * 4294967296 + type3 * 1099511627776 + type2 * 281474976710656 +
+    typ * 72057594037927936 = info
+  generalize hbig : symbol * 4294967296 + ssym * 16777216 + type3 * 65536 + type2 * 256 + typ = big
+  have little : Elf.splitInfo true true info = ((info >>> 32) % 256 * 2 ^ 24 + (info >>> 40) % 256 * 2 ^ 16 +
+      (info >>> 48) % 256 * 2 ^ 8 + (info >>> 56) % 256, info % 0x100000000) := rfl
+  have bigEndian : Elf.splitInfo true false big = (big % 0x100000000, big / 0x100000000) := rfl
+  have s0 : info >>> 32 = info / 4294967296 := by rw [Nat.shiftRight_eq_div_pow]
+  have s1 : info >>> 40 = info / 4294967296 / 256 := by
+    rw [Nat.shiftRight_eq_div_pow, Nat.div_div_eq_div_mul]
+  have s2 : info >>> 48 = info / 4294967296 / 256 / 256 := by
+    rw [Nat.shiftRight_eq_div_pow, Nat.div_div_eq_div_mul, Nat.div_div_eq_div_mul]
+  have s3 : info >>> 56 = info / 4294967296 / 256 / 256 / 256 := by
+    rw [Nat.shiftRight_eq_div_pow, Nat.div_div_eq_div_mul, Nat.div_div_eq_div_mul, Nat.div_div_eq_div_mul]
+  have b6 : info % 4294967296 = symbol := by omega
+  have q0 : info / 4294967296 = ssym + type3 * 256 + type2 * 65536 + typ * 16777216 := by omega
+  have b0 : info / 4294967296 % 256 = ssym := by omega
+  have q1 : info / 4294967296 / 256 = type3 + type2 * 256 + typ * 65536 := by omega
+  have b1 : info / 4294967296 / 256 % 256 = type3 := by omega
+  have q2 : info / 4294967296 / 256 / 256 = type2 + typ * 256 := by omega
+  have b2 : info / 4294967296 / 256 / 256 % 256 = type2 := by omega
+  have b3 : info / 4294967296 / 256 / 256 / 256 % 256 = typ := by omega
+  have b4 : big % 4294967296 = ssym * 16777216 + type3 * 65536 + type2 * 256 + typ := by omega
+  have b5 : big / 4294967296 = symbol := by omega
+  rw [little, bigEndian, s0, s1, s2, s3, b0, b1, b2, b3]
+  show (ssym * 16777216 + type3 * 65536 + type2 * 256 + typ, info % 4294967296) =
+    (big % 4294967296, big / 4294967296)
+  rw [b4, b5, b6]
 
 /-- A relocation table holds one record per entry of its class and `REL` or `RELA` kind. Each is read at its own
 slot, with `r_info` split at the class's bit, and an addend exactly for `RELA`. -/
@@ -1073,8 +1705,7 @@ theorem readRelocationTable_ok {image : Image} {headers : List Elf.ProgramHeader
         word image.data image.endian header.is64 entry = .ok relocation.offset ∧
         relocation.explicitAddend = rela ∧
         ∃ info, word image.data image.endian header.is64 (entry + if header.is64 then 8 else 4) = .ok info ∧
-          relocation.typ = (if header.is64 then info % 0x100000000 else info % 0x100) ∧
-          relocation.symbol = (if header.is64 then info / 0x100000000 else info / 0x100) ∧
+          (relocation.typ, relocation.symbol) = Elf.splitInfo header.is64 (isMips64el header) info ∧
           (rela = true → word image.data image.endian header.is64
             (entry + if header.is64 then 16 else 8) = .ok relocation.addend) ∧
           (rela = false → relocation.addend = 0) := by
@@ -1090,16 +1721,17 @@ theorem readRelocationTable_ok {image : Image} {headers : List Elf.ProgramHeader
   simp only [List.getElem_range, bind_ok_iff] at hk
   rcases hk with ⟨relOffset, h1, info, h2, hk⟩
   simp only
+  rcases hsplit : Elf.splitInfo header.is64 (isMips64el header) info with ⟨typ, symbol⟩
   cases rela with
   | true =>
-    simp only [↓reduceIte, bind_ok_iff] at hk
+    simp only [↓reduceIte, bind_ok_iff, hsplit] at hk
     rcases hk with ⟨addend, h3, hk⟩
     rw [← Except.ok.inj hk]
-    exact ⟨h1, rfl, info, h2, rfl, rfl, fun _ => h3, fun e => by cases e⟩
+    exact ⟨h1, rfl, info, h2, hsplit.symm, fun _ => h3, fun e => by cases e⟩
   | false =>
-    simp only [Bool.false_eq_true, ↓reduceIte, Reader.ok_bind] at hk
+    simp only [Bool.false_eq_true, ↓reduceIte, Reader.ok_bind, hsplit] at hk
     rw [← Except.ok.inj hk]
-    exact ⟨h1, rfl, info, h2, rfl, rfl, (fun e => by cases e), fun _ => rfl⟩
+    exact ⟨h1, rfl, info, h2, hsplit.symm, (fun e => by cases e), fun _ => rfl⟩
 
 /-- The relocation numbers against `elf.h` and LLVM's `ELFRelocs`. -/
 theorem relocation_numbers :
@@ -1114,6 +1746,533 @@ theorem relocation_numbers :
       symbolRelocationKind 40 2 false = 1 ∧ symbolRelocationKind 40 21 false = 2 ∧ symbolRelocationKind 40 22 false = 2 ∧
       symbolRelocationKind 243 1 false = 1 ∧ symbolRelocationKind 243 2 true = 1 ∧ symbolRelocationKind 243 5 false = 2 := by
   decide
+
+/-! ### Packed relocations -/
+
+private theorem option_bind_ok {α β : Type} {x : Option α} {f : α → Option β} {v : β} :
+    (x >>= f) = some v ↔ ∃ a, x = some a ∧ f a = some v := by
+  cases x <;> simp [bind, Option.bind]
+
+/-- A packed relocation advances the offset by its delta in 64 bits, and carries the running addend. -/
+theorem androidEntry_ok {bytes : ByteArray} {group : AndroidGroup} {cursor offset addend : Nat}
+    {relocation : Elf.DynamicRelocation} {cursor' offset' addend' : Nat} (ha : addend < 2 ^ 64)
+    (h : androidEntry bytes group cursor offset addend = some (relocation, cursor', offset', addend')) :
+    offset' < 2 ^ 64 ∧ addend' < 2 ^ 64 ∧ relocation.offset = offset' ∧ relocation.addend = addend' ∧
+      relocation.explicitAddend = AndroidGroup.rela group ∧
+      ∃ delta next, androidField bytes (AndroidGroup.byOffset group) (AndroidGroup.offsetDelta group) cursor =
+        some (delta, next) ∧ offset' = (offset + delta) % 0x10000000000000000 := by
+  simp only [androidEntry, option_bind_ok] at h
+  rcases h with ⟨⟨delta, next⟩, hd, ⟨info, next2⟩, _, h⟩
+  have hmod : (offset + delta) % 0x10000000000000000 < 2 ^ 64 := Nat.mod_lt _ (by decide)
+  split at h
+  · simp only [option_bind_ok, Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨⟨addendDelta, next3⟩, _, _, rfl, rfl, _, rfl, rfl⟩ := h
+    exact ⟨hmod, Nat.mod_lt _ (by decide), rfl, rfl, rfl, delta, next, hd, rfl⟩
+  · simp only [Option.some.injEq, Prod.mk.injEq, option_bind_ok] at h
+    obtain ⟨_, rfl, rfl, _, rfl, rfl⟩ := h
+    exact ⟨hmod, ha, rfl, rfl, rfl, delta, next, hd, rfl⟩
+
+/-- The relocations that decoding produces: 64-bit offsets and addends, and an addend exactly for `RELA`. -/
+def PackedBounds (rela : Bool) (relocation : Elf.DynamicRelocation) : Prop :=
+  relocation.offset < 2 ^ 64 ∧ relocation.addend < 2 ^ 64 ∧ relocation.explicitAddend = rela
+
+/-- A group yields exactly its size of relocations unless the input ends in it, when what was read stays. -/
+theorem androidEntries_ok {bytes : ByteArray} {group : AndroidGroup} :
+    ∀ (left : Nat) (state : AndroidState), AndroidState.addend state < 2 ^ 64 →
+      let (complete, next) := androidEntries bytes group left state
+      AndroidState.addend next < 2 ^ 64 ∧
+        ∃ added, AndroidState.result next = added ++ AndroidState.result state ∧ added.length ≤ left ∧
+          (complete = true → added.length = left) ∧ ∀ relocation ∈ added, PackedBounds (AndroidGroup.rela group) relocation
+  | 0, state, ha => by
+    simp only [androidEntries]
+    exact ⟨ha, [], by simp, by simp, by simp, by simp⟩
+  | left + 1, state, ha => by
+    simp only [androidEntries]
+    split
+    · exact ⟨ha, [], by simp, by simp, by simp, by simp⟩
+    · rename_i relocation cursor offset addend hentry
+      have ⟨h1, h2, h3, h4, h5, _⟩ := androidEntry_ok ha hentry
+      have hrec := androidEntries_ok (bytes := bytes) (group := group) left
+        (AndroidState.mk cursor offset addend (relocation :: AndroidState.result state)) h2
+      rcases hr : androidEntries bytes group left
+        (AndroidState.mk cursor offset addend (relocation :: AndroidState.result state)) with ⟨complete, next⟩
+      rw [hr] at hrec
+      obtain ⟨h6, added, ha1, ha2, ha3, ha4⟩ := hrec
+      refine ⟨h6, added ++ [relocation], by simpa using ha1, by simp; omega, ?_, ?_⟩
+      · intro hc
+        have := ha3 hc
+        simp
+        omega
+      · intro other ho
+        rcases List.mem_append.mp ho with ho | ho
+        · exact ha4 other ho
+        · simp only [List.mem_singleton] at ho
+          subst ho
+          exact ⟨h3 ▸ h1, h4 ▸ h2, h5⟩
+
+/-- A decoded group header belongs to the file's class and kind, and keeps the addend in 64 bits. -/
+theorem androidGroupHeader_ok {bytes : ByteArray} {is64 rela : Bool} {cursor addend size cursor' addend' : Nat}
+    {group : AndroidGroup} (ha : addend < 2 ^ 64)
+    (h : androidGroupHeader bytes is64 rela cursor addend = some (size, group, cursor', addend')) :
+    AndroidGroup.rela group = rela ∧ AndroidGroup.is64 group = is64 ∧ addend' < 2 ^ 64 := by
+  simp only [androidGroupHeader, option_bind_ok] at h
+  rcases h with ⟨⟨s, c1⟩, _, ⟨flags, c2⟩, _, ⟨d, c3⟩, _, ⟨i, c4⟩, _, h⟩
+  split at h
+  · simp only [option_bind_ok] at h
+    rcases h with ⟨⟨delta, c5⟩, _, h⟩
+    simp only [Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨_, rfl, _, rfl, _, rfl⟩ := h
+    refine ⟨rfl, rfl, ?_⟩
+    split
+    · exact Nat.mod_lt _ (by decide)
+    · decide
+  · simp only [Option.some.injEq, Prod.mk.injEq, option_bind_ok] at h
+    obtain ⟨_, rfl, _, rfl, _, rfl⟩ := h
+    refine ⟨rfl, rfl, ?_⟩
+    split
+    · exact ha
+    · decide
+
+/-- Decoding never yields more relocations than the table announces, however the groups are sized. -/
+theorem androidGroups_ok {bytes : ByteArray} {is64 rela : Bool} :
+    ∀ (fuel remaining : Nat) (state : AndroidState), AndroidState.addend state < 2 ^ 64 →
+      ∃ added, androidGroups bytes is64 rela fuel remaining state = added ++ AndroidState.result state ∧
+        added.length ≤ remaining ∧ ∀ relocation ∈ added, PackedBounds rela relocation
+  | 0, _, state, _ => ⟨[], by simp [androidGroups], by simp, by simp⟩
+  | fuel + 1, remaining, state, ha => by
+    unfold androidGroups
+    split
+    · exact ⟨[], by simp, by simp, by simp⟩
+    rename_i hr
+    split
+    · exact ⟨[], by simp, by simp, by simp⟩
+    rename_i size group cursor addend hheader
+    have ⟨hrela, _, hadd⟩ := androidGroupHeader_ok ha hheader
+    split
+    · exact ⟨[], by simp, by simp, by simp⟩
+    rename_i hsize
+    simp only [Bool.or_eq_true, decide_eq_true_eq, not_or] at hsize
+    have hentries := androidEntries_ok (bytes := bytes) (group := group) size
+      (AndroidState.mk cursor (AndroidState.offset state) addend (AndroidState.result state)) hadd
+    rcases he : androidEntries bytes group size
+      (AndroidState.mk cursor (AndroidState.offset state) addend (AndroidState.result state)) with ⟨complete, next⟩
+    rw [he] at hentries
+    obtain ⟨h1, added, h2, h3, _, h4⟩ := hentries
+    simp only at h2
+    cases complete with
+    | true =>
+      have ⟨more, h5, h6, h7⟩ := androidGroups_ok (bytes := bytes) (is64 := is64) (rela := rela) fuel
+        (remaining - size) next h1
+      simp only [↓reduceIte]
+      refine ⟨more ++ added, by rw [h5, h2, List.append_assoc], by simp; omega, ?_⟩
+      intro relocation hm
+      rcases List.mem_append.mp hm with hm | hm
+      · exact h7 relocation hm
+      · exact hrela ▸ h4 relocation hm
+    | false =>
+      simp only [Bool.false_eq_true, ↓reduceIte]
+      refine ⟨added, h2, by omega, ?_⟩
+      intro relocation hm
+      exact hrela ▸ h4 relocation hm
+
+private theorem packedTop {bytes : ByteArray} {is64 rela : Bool} {count cursor initial limit : Nat}
+    (hlimit : count ≤ limit) :
+    (androidGroups bytes is64 rela count count (AndroidState.mk cursor initial 0 [])).reverse.length ≤ limit ∧
+      ∀ relocation ∈ (androidGroups bytes is64 rela count count (AndroidState.mk cursor initial 0 [])).reverse,
+        PackedBounds rela relocation := by
+  have ⟨added, h1, h2, h3⟩ := androidGroups_ok (bytes := bytes) (is64 := is64) (rela := rela) count count
+    (AndroidState.mk cursor initial 0 []) (by show 0 < 2 ^ 64; decide)
+  have hr : androidGroups bytes is64 rela count count (AndroidState.mk cursor initial 0 []) = added := by
+    simpa using h1
+  rw [hr]
+  refine ⟨by simp; omega, ?_⟩
+  intro relocation hm
+  exact h3 relocation (by simpa using hm)
+
+/-- A packed table never yields more than the limit, and what it yields is in bounds. -/
+theorem decodeAndroid_ok (bytes : ByteArray) (is64 rela : Bool) :
+    (decodeAndroid bytes is64 rela).length ≤ Elf.maxPackedRelocations ∧
+      ∀ relocation ∈ decodeAndroid bytes is64 rela, PackedBounds rela relocation := by
+  unfold decodeAndroid
+  split
+  · simp [Elf.maxPackedRelocations]
+  split
+  · simp [Elf.maxPackedRelocations]
+  split
+  · simp [Elf.maxPackedRelocations]
+  split
+  · simp [Elf.maxPackedRelocations]
+  rename_i hcount
+  exact packedTop (by omega)
+
+/-- A table without the `APS2` magic is empty, however long. -/
+theorem decodeAndroid_requires_magic {bytes : ByteArray} {is64 rela : Bool}
+    (h : bytes.size < 4 ∨ (bytes.extract 0 4 != ByteArray.mk #[65, 80, 83, 50]) = true) :
+    decodeAndroid bytes is64 rela = [] := by
+  unfold decodeAndroid
+  rw [ite_eq_left]
+  simpa only [Bool.or_eq_true, decide_eq_true_eq] using h
+
+/-! ### RELR -/
+
+/-- A RELR bitmap marks exactly the words of its set bits: bit `i` at `base + (index + i) * width`. -/
+theorem mem_relrBits {typ base width : Nat} :
+    ∀ (value index : Nat) (result : List Elf.DynamicRelocation) (relocation : Elf.DynamicRelocation),
+      relocation ∈ relrBits typ base width value index result ↔
+        relocation ∈ result ∨ ∃ i, value.testBit i = true ∧
+          relocation = ⟨base + (index + i) * width, typ, 0, 0, false⟩ := by
+  intro value
+  induction value using Nat.strongRecOn with
+  | ind value ih =>
+    intro index result relocation
+    rw [relrBits]
+    split
+    · rename_i h0
+      subst h0
+      simp
+    rename_i h0
+    have hlt : value / 2 < value := by omega
+    rw [ih (value / 2) hlt]
+    constructor
+    · rintro (hm | ⟨i, hb, rfl⟩)
+      · split at hm
+        · rename_i hodd
+          simp only [List.mem_cons] at hm
+          rcases hm with rfl | hm
+          · refine .inr ⟨0, ?_, by simp⟩
+            simp [Nat.testBit_zero, hodd]
+          · exact .inl hm
+        · exact .inl hm
+      · refine .inr ⟨i + 1, ?_, ?_⟩
+        · rw [Nat.testBit_succ]; exact hb
+        · rw [show index + (i + 1) = index + 1 + i by omega]
+    · rintro (hm | ⟨i, hb, rfl⟩)
+      · refine .inl ?_
+        split
+        · exact List.mem_cons_of_mem _ hm
+        · exact hm
+      · cases i with
+        | zero =>
+          have hodd : value % 2 = 1 := by simpa [Nat.testBit_zero] using hb
+          refine .inl ?_
+          rw [ite_eq_left hodd]
+          simp
+        | succ i =>
+          refine .inr ⟨i, by rwa [Nat.testBit_succ] at hb, ?_⟩
+          rw [show index + (i + 1) = index + 1 + i by omega]
+
+/-- An address entry relocates that word and the next base follows it. -/
+theorem relrDecode_address {typ width entry base : Nat} {rest : List Nat} {result : List Elf.DynamicRelocation}
+    (h : entry % 2 = 0) :
+    relrDecode typ width (entry :: rest) base result =
+      relrDecode typ width rest (entry + width) (⟨entry, typ, 0, 0, false⟩ :: result) := by
+  rw [relrDecode, ite_eq_left h]
+
+/-- A bitmap entry relocates the words it marks and moves the base by the `8 * width - 1` words it can mark. -/
+theorem relrDecode_bitmap {typ width entry base : Nat} {rest : List Nat} {result : List Elf.DynamicRelocation}
+    (h : entry % 2 ≠ 0) :
+    relrDecode typ width (entry :: rest) base result =
+      relrDecode typ width rest (base + (8 * width - 1) * width) (relrBits typ base width (entry / 2) 0 result) := by
+  rw [relrDecode, ite_eq_right h]
+
+/-- All RELR relocations are relative, and have no symbol and no explicit addend. -/
+theorem relrDecode_sound {typ width : Nat} :
+    ∀ (entries : List Nat) (base : Nat) (result : List Elf.DynamicRelocation),
+      (∀ relocation ∈ result, relocation.typ = typ ∧ relocation.symbol = 0 ∧ relocation.explicitAddend = false) →
+      ∀ relocation ∈ relrDecode typ width entries base result,
+        relocation.typ = typ ∧ relocation.symbol = 0 ∧ relocation.explicitAddend = false
+  | [], base, result, h, relocation, hm => by
+    rw [relrDecode] at hm
+    exact h relocation (by simpa using hm)
+  | entry :: rest, base, result, h, relocation, hm => by
+    rw [relrDecode] at hm
+    split at hm
+    · refine relrDecode_sound rest _ _ ?_ relocation hm
+      intro other ho
+      simp only [List.mem_cons] at ho
+      rcases ho with rfl | ho
+      · exact ⟨rfl, rfl, rfl⟩
+      · exact h other ho
+    · refine relrDecode_sound rest _ _ ?_ relocation hm
+      intro other ho
+      rcases (mem_relrBits _ _ _ _).mp ho with ho | ⟨_, _, rfl⟩
+      · exact h other ho
+      · exact ⟨rfl, rfl, rfl⟩
+
+/-! ### Classifying dynamic relocations -/
+
+private theorem reference_choice (named notWeak : Bool) (offset : Nat) (name : String) (references : List (Nat × String))
+    {symbolIndex : Nat} (hsym : ¬ symbolIndex = 0) (hn : named = !name.isEmpty) :
+    (if (named && notWeak) = true then (offset, name) :: references else references) = references ∨
+      ∃ name', (if (named && notWeak) = true then (offset, name) :: references else references) =
+        (offset, name') :: references ∧ name' ≠ "" ∧ symbolIndex ≠ 0 := by
+  by_cases hc : (named && notWeak) = true
+  · refine .inr ⟨name, by simp [hc], ?_, hsym⟩
+    simp only [Bool.and_eq_true] at hc
+    rw [hn] at hc
+    intro he
+    subst he
+    simp at hc
+  · exact .inl (by rw [ite_eq_right hc])
+
+/-- How one relocation can add to the facts: nothing, or the entry its kind justifies. -/
+def ClassifiedBy (machine width : Nat) (relocation : Elf.DynamicRelocation) (result next : Elf.RelocationSpec) : Prop :=
+  (next.relative = result.relative ∨ (next.relative = relocation.offset :: result.relative ∧ relocation.symbol = 0 ∧
+      isRelativeType machine relocation.typ = true)) ∧
+    (next.absolute = result.absolute ∨ ∃ target, next.absolute = (relocation.offset, target) :: result.absolute ∧
+      target < 2 ^ width ∧ relocation.symbol ≠ 0) ∧
+    (next.references = result.references ∨ ∃ name, next.references = (relocation.offset, name) :: result.references ∧
+      name ≠ "" ∧ relocation.symbol ≠ 0)
+
+theorem classifyRelocation_ok {image : Image} {headers : List Elf.ProgramHeader} {tags : List (Nat × Nat)}
+    {header : Elf.Header} {result next : Elf.RelocationSpec} {relocation : Elf.DynamicRelocation}
+    (h : classifyRelocation image headers tags header result relocation = .ok next) :
+    ClassifiedBy header.machine image.addrWidth relocation result next := by
+  unfold classifyRelocation at h
+  simp only at h
+  split at h
+  · rename_i hsym
+    split at h
+    · cases h
+      exact ⟨.inl rfl, .inl rfl, .inl rfl⟩
+    · split at h
+      · cases h
+        exact ⟨.inl rfl, .inl rfl, .inl rfl⟩
+      · rename_i hrelative
+        cases h
+        have hr : isRelativeType header.machine relocation.typ = true := by simpa using hrelative
+        exact ⟨.inr ⟨rfl, hsym, hr⟩, .inl rfl, .inl rfl⟩
+  · rename_i hsym
+    simp only [bind_ok_iff] at h
+    rcases h with ⟨symbol, _, h⟩
+    split at h
+    · cases h
+      exact ⟨.inl rfl, .inl rfl, .inl rfl⟩
+    rename_i dynamic _
+    split at h
+    · cases h
+      exact ⟨.inl rfl, .inl rfl, .inl rfl⟩
+    split at h
+    · cases h
+      exact ⟨.inl rfl, .inl rfl, .inl rfl⟩
+    have hrefs := reference_choice (!dynamic.name.isEmpty) (!(decide (dynamic.sectionIndex = 0) &&
+      decide (dynamic.binding = 2))) relocation.offset dynamic.name result.references hsym rfl
+    split at h
+    · cases h
+      exact ⟨.inl rfl, .inl rfl, hrefs⟩
+    · cases h
+      exact ⟨.inl rfl, .inr ⟨_, rfl, Nat.mod_lt _ (Nat.pow_pos (by decide)), hsym⟩, hrefs⟩
+
+/-- Folding the classification: every fact comes from a relocation that justifies it. -/
+theorem foldClassify_ok {image : Image} {headers : List Elf.ProgramHeader} {tags : List (Nat × Nat)} {header : Elf.Header} :
+    ∀ (relocations : List Elf.DynamicRelocation) (result next : Elf.RelocationSpec),
+      relocations.foldlM (classifyRelocation image headers tags header) result = .ok next →
+      (∀ offset ∈ next.relative, offset ∈ result.relative ∨ ∃ relocation ∈ relocations, relocation.offset = offset ∧
+        relocation.symbol = 0 ∧ isRelativeType header.machine relocation.typ = true) ∧
+      (∀ entry ∈ next.absolute, entry ∈ result.absolute ∨ (entry.2 < 2 ^ image.addrWidth ∧
+        ∃ relocation ∈ relocations, relocation.offset = entry.1 ∧ relocation.symbol ≠ 0)) ∧
+      (∀ entry ∈ next.references, entry ∈ result.references ∨ (entry.2 ≠ "" ∧
+        ∃ relocation ∈ relocations, relocation.offset = entry.1 ∧ relocation.symbol ≠ 0))
+  | [], result, next, h => by
+    simp only [List.foldlM_nil] at h
+    cases h
+    exact ⟨fun _ hm => .inl hm, fun _ hm => .inl hm, fun _ hm => .inl hm⟩
+  | head :: rest, result, next, h => by
+    simp only [List.foldlM_cons, bind_ok_iff] at h
+    rcases h with ⟨middle, hm, hrest⟩
+    have ⟨c1, c2, c3⟩ := classifyRelocation_ok hm
+    have ⟨f1, f2, f3⟩ := foldClassify_ok rest middle next hrest
+    refine ⟨?_, ?_, ?_⟩
+    · intro offset ho
+      rcases f1 offset ho with ho | ⟨relocation, hr, a, b, c⟩
+      · rcases c1 with e | ⟨e, a', b'⟩
+        · rw [e] at ho; exact .inl ho
+        · rw [e] at ho
+          simp only [List.mem_cons] at ho
+          rcases ho with rfl | ho
+          · exact .inr ⟨head, by simp, rfl, a', b'⟩
+          · exact .inl ho
+      · exact .inr ⟨relocation, by simp [hr], a, b, c⟩
+    · intro entry ho
+      rcases f2 entry ho with ho | ⟨hw, relocation, hr, a, b⟩
+      · rcases c2 with e | ⟨t, e, a', b'⟩
+        · rw [e] at ho; exact .inl ho
+        · rw [e] at ho
+          simp only [List.mem_cons] at ho
+          rcases ho with rfl | ho
+          · exact .inr ⟨a', head, by simp, rfl, b'⟩
+          · exact .inl ho
+      · exact .inr ⟨hw, relocation, by simp [hr], a, b⟩
+    · intro entry ho
+      rcases f3 entry ho with ho | ⟨hw, relocation, hr, a, b⟩
+      · rcases c3 with e | ⟨t, e, a', b'⟩
+        · rw [e] at ho; exact .inl ho
+        · rw [e] at ho
+          simp only [List.mem_cons] at ho
+          rcases ho with rfl | ho
+          · exact .inr ⟨a', head, by simp, rfl, b'⟩
+          · exact .inl ho
+      · exact .inr ⟨hw, relocation, by simp [hr], a, b⟩
+
+/-- The MIPS global GOT entries: each reference is the slot of an imported dynamic symbol from `DT_MIPS_GOTSYM` on,
+past the `DT_MIPS_LOCAL_GOTNO` local entries. -/
+theorem mipsGotLoop_ok {image : Image} {headers : List Elf.ProgramHeader} {tags : List (Nat × Nat)}
+    {pltgot localCount gotsym width : Nat} :
+    ∀ (remaining index : Nat) (result output : List (Nat × String)),
+      mipsGotReferences.loop image headers tags pltgot localCount gotsym width remaining index result = .ok output →
+      ∀ entry ∈ output, entry ∈ result ∨ ∃ i, index ≤ i ∧ i < index + remaining ∧
+        entry.1 = pltgot + (localCount + i - gotsym) * width ∧
+        ∃ symbol : Elf.DynamicSymbol, Elf.dynamicSymbol image headers tags i = .ok (some symbol) ∧ symbol.name = entry.2 ∧
+          symbol.name ≠ "" ∧ symbol.sectionIndex = 0 ∧ symbol.binding ≠ 2
+  | 0, index, result, output, h, entry, hm => by
+    simp only [mipsGotReferences.loop] at h
+    cases h
+    exact .inl (by simpa using hm)
+  | remaining + 1, index, result, output, h, entry, hm => by
+    simp only [mipsGotReferences.loop, bind_ok_iff] at h
+    rcases h with ⟨none | symbol, hd, h⟩
+    · simp only at h
+      cases h
+      exact .inl (by simpa using hm)
+    simp only at h
+    have hrec := mipsGotLoop_ok remaining (index + 1) _ output h entry hm
+    rcases hrec with hr | ⟨i, h1, h2, h3, h4⟩
+    · split at hr
+      · rename_i himported
+        simp only [List.mem_cons] at hr
+        rcases hr with rfl | hr
+        · simp only [Bool.and_eq_true, decide_eq_true_eq, bne_iff_ne, ne_eq, Bool.not_eq_true'] at himported
+          obtain ⟨⟨⟨h0, hw⟩, _⟩, hn⟩ := himported
+          refine .inr ⟨index, Nat.le_refl _, by omega, rfl, symbol, hd, rfl, ?_, h0, hw⟩
+          intro he
+          rw [he] at hn
+          simp at hn
+        · exact .inl hr
+      · exact .inl hr
+    · exact .inr ⟨i, by omega, by omega, h3, h4⟩
+
+/-- Everything `dynamicRelocations` reports comes from a dynamic table: relative offsets from symbol-less relocations
+of the relative type, absolute targets are in the address space, and named references have names. -/
+theorem dynamicRelocations_sound {image : Image} {spec : Elf.RelocationSpec} (h : Elf.dynamicRelocations image = .ok spec) :
+    ∃ header, ∃ relocations : List Elf.DynamicRelocation, parseHeader image.data = .ok header ∧
+      (∀ offset ∈ spec.relative, ∃ relocation ∈ relocations, relocation.offset = offset ∧ relocation.symbol = 0 ∧
+        isRelativeType header.machine relocation.typ = true) ∧
+      (∀ entry ∈ spec.absolute, entry.2 < 2 ^ image.addrWidth ∧
+        ∃ relocation ∈ relocations, relocation.offset = entry.1 ∧ relocation.symbol ≠ 0) := by
+  simp only [Elf.dynamicRelocations, bind_ok_iff] at h
+  rcases h with ⟨header, h1, headers, _, tags, _, h⟩
+  split at h
+  · cases h
+    exact ⟨header, [], h1, by simp, by simp⟩
+  simp only [bind_ok_iff] at h
+  rcases h with ⟨relocations, _, result, hfold, got, _, h⟩
+  cases h
+  have ⟨f1, f2, _⟩ := foldClassify_ok relocations {} result hfold
+  refine ⟨header, relocations, h1, ?_, ?_⟩
+  · intro offset hm
+    rcases f1 offset (by simpa using hm) with ho | hr
+    · cases ho
+    · exact hr
+  · intro entry hm
+    rcases f2 entry (by simpa using hm) with ho | hr
+    · cases ho
+    · exact hr
+
+/-- Android tables are read through the program headers: an address that is not in the file yields nothing. -/
+theorem readAndroidRelocations_unmapped {image : Image} {headers : List Elf.ProgramHeader} {addr size : Nat} {rela : Bool}
+    (h : offsetOf headers image.data.size addr size = none) :
+    readAndroidRelocations image headers addr size rela = [] := by
+  simp [readAndroidRelocations, h]
+
+theorem readAndroidRelocations_ok (image : Image) (headers : List Elf.ProgramHeader) (addr size : Nat) (rela : Bool) :
+    (readAndroidRelocations image headers addr size rela).length ≤ Elf.maxPackedRelocations ∧
+      ∀ relocation ∈ readAndroidRelocations image headers addr size rela, PackedBounds rela relocation := by
+  simp only [readAndroidRelocations]
+  split
+  · simp [Elf.maxPackedRelocations]
+  · exact decodeAndroid_ok _ _ _
+
+/-- RELR tables are read a word at a time, and all their relocations are relative. -/
+theorem readRelrRelocations_ok {image : Image} {headers : List Elf.ProgramHeader} {addr size machine : Nat}
+    {result : List Elf.DynamicRelocation} (h : readRelrRelocations image headers addr size machine = .ok result) :
+    ∀ relocation ∈ result, relocation.typ = relativeType machine ∧ relocation.symbol = 0 ∧
+      relocation.explicitAddend = false := by
+  simp only [readRelrRelocations, bind_ok_iff] at h
+  rcases h with ⟨header, _, h⟩
+  split at h
+  · cases h
+    simp
+  simp only [bind_ok_iff] at h
+  rcases h with ⟨entries, _, h⟩
+  cases h
+  exact relrDecode_sound _ _ _ (by simp)
+
+/-- The SLEB128 reader consumes a continuation byte and goes on. -/
+theorem sleb128_loop_continue {data : ByteArray} {fuel offset shift value : Nat} (h : offset < data.size)
+    (hc : (data[offset]!.toNat &&& 0x80 != 0) = true) :
+    sleb128.loop data (fuel + 1) offset shift value =
+      sleb128.loop data fuel (offset + 1) (shift + 7)
+        ((value + if shift < 64 then (data[offset]!.toNat &&& 0x7f) * 2 ^ shift else 0) % 0x10000000000000000) := by
+  rw [sleb128.loop]
+  rw [ite_eq_right (by omega)]
+  simp only [hc, ↓reduceIte]
+
+/-- The segments and mapped regions of every decoded ELF correspond one to one, relocatable or not. -/
+theorem decode_agree {data : ByteArray} {image : Image} (h : Elf.decode data = .ok image) : SegmentsAgree image := by
+  have ⟨header, hh⟩ := decode_header h
+  by_cases ht : header.fileType = 1
+  · obtain ⟨_, _, _, sections, names, _, hseg, hmem⟩ := decode_relocatable h hh ht
+    generalize hoh : ElfLinker.link (linkInput data header sections names) = output at hseg hmem
+    refine ⟨output.regions.map fun region =>
+      (ElfLinker.toSegment region, ElfLinker.toMemRegion output.memory data.size region), ?_, ?_, ?_⟩
+    · rw [hseg]; simp [Function.comp_def]
+    · rw [hmem]; simp [Function.comp_def]
+    · intro pair hp
+      simp only [List.mem_map] at hp
+      rcases hp with ⟨region, _, rfl⟩
+      have ⟨a, b, _⟩ := LinkerLaws.toSegment_toMemRegion output.memory data.size region
+      exact ⟨a, b⟩
+  · have ⟨_, _, _, _, entries, hs, hm, hp⟩ := decode_loaded h hh ht
+    exact ⟨entries, hs, hm, fun pair hpair => ⟨(hp pair hpair).1, (hp pair hpair).2.1⟩⟩
+
+/-- Every byte mapped by a decoded ELF lies inside one of its segments. -/
+theorem decode_readByte_in_segment {data : ByteArray} {image : Image} {address : Nat} {byte : UInt8}
+    (h : Elf.decode data = .ok image) (hr : image.memory.readByte address = some byte) :
+    ∃ segment ∈ image.segments, segment.addr ≤ address ∧ address < segment.addr + segment.size :=
+  readByte_in_segment (decode_agree h) hr
+
+/-- Only the relocations of allocated sections are linked, as upstream: `-g` relocations cannot reach memory. -/
+theorem rawRelocations_allocated {data : ByteArray} {header : Elf.Header} {sections : List Elf.SectionHeader}
+    {relocation : ElfLinker.Rel} (h : relocation ∈ rawRelocations data header sections) :
+    ∃ target, sections[relocation.target]? = some target ∧ ElfLinker.hasFlag target.flags ElfLinker.shfAlloc = true := by
+  simp only [rawRelocations, List.mem_flatMap, List.mem_filter] at h
+  rcases h with ⟨sec, ⟨_, hrelocates⟩, h⟩
+  cases hr : sectionRelocations data header sec with
+  | error e =>
+    rw [hr] at h
+    cases h
+  | ok list =>
+    rw [hr] at h
+    have hm : relocation ∈ list := h
+    have hentries : relocation.target = sec.info := by
+      have ⟨hl, hf⟩ := mapM_ok hr
+      have ⟨i, hi1, hi2⟩ := List.getElem_of_mem hm
+      have hk := hf i hi1 (hl ▸ hi1)
+      rw [hi2] at hk
+      simp only [bind_ok_iff] at hk
+      rcases hk with ⟨_, _, _, _, hk⟩
+      split at hk
+      · simp only [bind_ok_iff] at hk
+        rcases hk with ⟨_, _, hk⟩
+        rw [← Except.ok.inj hk]
+      · rw [← Except.ok.inj hk]
+    simp only [relocatesMemory, Bool.and_eq_true] at hrelocates
+    rw [hentries]
+    have halloc := hrelocates.2
+    split at halloc
+    · rename_i target ht
+      exact ⟨target, ht, halloc⟩
+    · cases halloc
 
 /-! ### Worked files -/
 
@@ -1584,6 +2743,7 @@ open_private Bap.Image.Coff Bap.Image.Coff Header Header.mk Header.machine Heade
   ObjectSection ObjectSection.mk ObjectSection.info ObjectSection.segment ObjectSection.region
   ObjectSection.relocationCount ObjectSection.relocationOffset
   parseHeader parseSection parseSections parseSymbol parseSymbols writeNat applyRelocation applyRelocations architecture
+  isMapped isDiscarded sectionAlignment placeObject placeObjects placeUndefined isUndefined zeroRegion
 
 open Reader
 
@@ -1765,88 +2925,213 @@ private theorem resolves_mod (s a q m : Nat) (hm : 0 < m) :
     omega
   rw [Nat.mod_add_mod, hsum, Nat.add_mul_mod_self_left, Nat.add_mod s a]
 
-/-- Applying a relocation keeps its region's address and size, and only changes the relocated field. -/
-theorem applyRelocation_frame {data : ByteArray} {header : Header} {symbols : List (Nat × Symbol)}
-    {object : ObjectSection} {region out : MemRegion} {index : Nat}
-    (h : applyRelocation data header symbols object region index = .ok out) :
-    out.addr = region.addr ∧ out.size = region.size := by
+/-- A displacement, added to the address `extra` bytes past the place, reaches the symbol plus the addend
+(`S + A - (P + extra)`, as lld-link computes it). -/
+theorem relocationValue_relative (extra symbol place addend number sectionAddr : Nat) :
+    let value := (Coff.relocationValue (.relative extra) symbol place addend number sectionAddr).1
+    value < 2 ^ 32 ∧ (value + (place + extra)) % 2 ^ 32 = (symbol + addend) % 2 ^ 32 := by
+  exact ⟨Nat.mod_lt _ (by decide), resolves_mod _ _ _ _ (by decide)⟩
+
+/-- `IMAGE_REL_*_SECREL`: the offset of the symbol from the start of its section, plus the addend. -/
+theorem relocationValue_sectionRelative (symbol place addend number sectionAddr : Nat) :
+    Coff.relocationValue .sectionRelative symbol place addend number sectionAddr =
+      ((symbol - sectionAddr + addend) % 2 ^ 32, 4) := rfl
+
+/-- `IMAGE_REL_*_SECTION`: the number of the symbol's section, plus the addend. -/
+theorem relocationValue_section (symbol place addend number sectionAddr : Nat) :
+    Coff.relocationValue .section symbol place addend number sectionAddr = ((number + addend) % 2 ^ 16, 2) := rfl
+
+theorem relocationValue_absolute (size symbol place addend number sectionAddr : Nat) :
+    Coff.relocationValue (.absolute size) symbol place addend number sectionAddr =
+      ((symbol + addend) % 2 ^ (size * 8), size) := rfl
+
+/-- The `IMAGE_REL_*` numbers against `llvm/BinaryFormat/COFF.h`. -/
+theorem relocationKind_numbers :
+    Coff.relocationKind 0x8664 1 = some (.absolute 8) ∧ Coff.relocationKind 0x8664 2 = some (.absolute 4) ∧
+      Coff.relocationKind 0x8664 3 = some (.absolute 4) ∧ Coff.relocationKind 0x8664 4 = some (.relative 4) ∧
+      Coff.relocationKind 0x8664 9 = some (.relative 9) ∧ Coff.relocationKind 0x8664 0xa = some .section ∧
+      Coff.relocationKind 0x8664 0xb = some .sectionRelative ∧ Coff.relocationKind 0x014c 6 = some (.absolute 4) ∧
+      Coff.relocationKind 0x014c 7 = some (.absolute 4) ∧ Coff.relocationKind 0x014c 0xa = some .section ∧
+      Coff.relocationKind 0x014c 0xb = some .sectionRelative ∧ Coff.relocationKind 0x014c 0x14 = some (.relative 4) ∧
+      Coff.relocationKind 0xaa64 3 = none ∧ Coff.relocationKind 0x01c4 3 = none := by
+  decide
+
+/-- A successful relocation writes what `relocationValue` computes over the bytes at the place. -/
+theorem applyRelocation_ok {data : ByteArray} {header : Header} {sections : List Section}
+    {symbols : List (Nat × Symbol)} {object : ObjectSection} {region out : MemRegion} {index : Nat}
+    (h : applyRelocation data header sections symbols object region index = .ok out) :
+    out.addr = region.addr ∧ out.size = region.size ∧
+      ∃ rva number kind, ∃ symbol : Symbol, ∃ sectionNumber sectionAddr addend,
+        IO.Reader.u16 data .little (ObjectSection.relocationOffset object + index * 10 + 8) = .ok number ∧
+        IO.Reader.u32 data .little (ObjectSection.relocationOffset object + index * 10) = .ok rva ∧
+        Coff.relocationKind (Header.machine header) number = some kind ∧
+        writeNat region.data rva
+          (Coff.relocationValue kind symbol.addr ((ObjectSection.info object).addr + rva) addend sectionNumber sectionAddr).2
+          (Coff.relocationValue kind symbol.addr ((ObjectSection.info object).addr + rva) addend sectionNumber sectionAddr).1 =
+          .ok out.data := by
   simp only [applyRelocation, bind_ok_iff] at h
-  rcases h with ⟨rva, _, symbolIndex, _, kind, _, h⟩
-  split at h <;> first
-    | (simp only [error_bind] at h; cases h)
-    | (simp only [ok_bind] at h
-       split at h
-       · cases h
-       · simp only [bind_ok_iff] at h
-         rcases h with ⟨addend, _, bytes, hw, h⟩
-         cases h
-         exact ⟨rfl, (writeNat_ok hw).2.1⟩)
+  rcases h with ⟨rva, hrva, symbolIndex, _, number, hnumber, h⟩
+  split at h
+  · cases h
+  rename_i kind hkind
+  split at h
+  · cases h
+  rename_i symbol _
+  simp only [bind_ok_iff] at h
+  rcases h with ⟨sectionNumber, _, addend, _, h⟩
+  generalize hs : Coff.relocationValue kind symbol.addr _ addend sectionNumber _ = pair at h
+  obtain ⟨value, size⟩ := pair
+  simp only at h
+  rcases h with ⟨bytes, hw, h⟩
+  cases h
+  have ⟨sectionAddr, hs'⟩ : ∃ sectionAddr, Coff.relocationValue kind symbol.addr
+      ((ObjectSection.info object).addr + rva) addend sectionNumber sectionAddr = (value, size) := ⟨_, hs⟩
+  refine ⟨rfl, (writeNat_ok hw).2.1, rva, number, kind, symbol, sectionNumber, sectionAddr, addend, hnumber, hrva,
+    hkind, ?_⟩
+  rw [hs']
+  exact hw
 
-/-- `IMAGE_REL_AMD64_REL32` and `REL32_1` to `REL32_5`: the stored displacement, added to the address `kind` bytes
-past the field, reaches the symbol plus the addend (`S + A - (P + kind)`, as lld-link computes it). -/
-theorem applyRelocation_rel32 {data : ByteArray} {header : Header} {symbols : List (Nat × Symbol)}
-    {object : ObjectSection} {region out : MemRegion} {index rva symbolIndex kind addend : Nat} {symbol : Symbol}
-    (hm : Header.machine header = 0x8664)
-    (hrva : IO.Reader.u32 data .little (ObjectSection.relocationOffset object + index * 10) = .ok rva)
-    (hsym : IO.Reader.u32 data .little (ObjectSection.relocationOffset object + index * 10 + 4) = .ok symbolIndex)
-    (hkind : IO.Reader.u16 data .little (ObjectSection.relocationOffset object + index * 10 + 8) = .ok kind)
-    (hk : 4 ≤ kind ∧ kind ≤ 9)
-    (hfind : symbols.find? (fun entry => entry.1 = symbolIndex) = some (symbolIndex, symbol))
-    (hadd : IO.Reader.read region.data .little rva 4 = .ok addend)
-    (h : applyRelocation data header symbols object region index = .ok out) :
-    ∃ value, value < 2 ^ 32 ∧
-      (value + ((ObjectSection.info object).addr + rva + kind)) % 2 ^ 32 = (symbol.addr + addend) % 2 ^ 32 ∧
-      writeNat region.data rva 4 value = .ok out.data := by
-  simp only [applyRelocation, bind_ok_iff, hrva, hsym, hkind, hm] at h
-  rcases h with ⟨_, e1, _, e2, _, e3, h⟩
-  cases e1
-  cases e2
-  cases e3
-  have hk' : kind = 4 ∨ kind = 5 ∨ kind = 6 ∨ kind = 7 ∨ kind = 8 ∨ kind = 9 := by omega
-  rcases hk' with rfl | rfl | rfl | rfl | rfl | rfl <;>
-    (simp only [hfind, hadd, ok_bind, ↓reduceIte, bind_ok_iff] at h
-     rcases h with ⟨bytes, hw, h⟩
-     cases h
-     exact ⟨_, Nat.mod_lt _ (by decide), resolves_mod _ _ _ _ (by decide), hw⟩)
-
-private def rel32Input : ByteArray := ByteArray.mk #[1, 0, 0, 0, 0, 0, 0, 0, 4, 0]
+private def rel32Input : ByteArray := ByteArray.mk #[1, 0, 0, 0, 0, 0, 0, 0, 4, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
 set_option maxRecDepth 100000 in
 /-- A `call` at 0 (`e8 rel32`, field at `P = 1`) to the instruction after it (`S = 5`) gets displacement 0. -/
 theorem rel32_call_next_instruction :
     let object := ObjectSection.mk ⟨".text", 0, 0, 5, 0, 0⟩ ⟨".text", 0, 5, true, false, true⟩
       ⟨0, ByteArray.mk #[0xe8, 0, 0, 0, 0], true, false, true⟩ 0 1
-    (applyRelocation rel32Input (Header.mk 0x8664 1 0 0 0 0) [(0, ⟨"f", 5, 0, true, false⟩)] object
+    (applyRelocation rel32Input (Header.mk 0x8664 1 0 10 1 0) [] [(0, ⟨"f", 5, 0, true, false⟩)] object
       (ObjectSection.region object) 0).toOption.map (fun region => (region.data.get! 1).toNat) = some 0 := by
   rfl
 
-theorem applyRelocations_frame {data : ByteArray} {header : Header} {symbols : List (Nat × Symbol)}
-    {object out : ObjectSection} (h : applyRelocations data header symbols object = .ok out) :
+/-- Relocating a section keeps its metadata, the region's address and size, and adds at most an error a relocation. -/
+theorem applyRelocations_frame {data : ByteArray} {header : Header} {sections : List Section}
+    {symbols : List (Nat × Symbol)} (object : ObjectSection) :
+    let (out, errors) := applyRelocations data header sections symbols object
     ObjectSection.segment out = ObjectSection.segment object ∧ ObjectSection.info out = ObjectSection.info object ∧
       (ObjectSection.region out).addr = (ObjectSection.region object).addr ∧
-      (ObjectSection.region out).size = (ObjectSection.region object).size := by
-  have fold : ∀ (indices : List Nat) (region result : MemRegion),
-      indices.foldlM (m := Except String) (fun region index => applyRelocation data header symbols object region index)
-        region = .ok result → result.addr = region.addr ∧ result.size = region.size := by
+      (ObjectSection.region out).size = (ObjectSection.region object).size ∧
+      errors.length ≤ ObjectSection.relocationCount object := by
+  have fold : ∀ (indices : List Nat) (region : MemRegion) (errors : List String),
+      let result := indices.foldl (init := (region, errors)) fun x index =>
+        match applyRelocation data header sections symbols object x.1 index with
+        | .ok next => (next, x.2)
+        | .error error => (x.1, error :: x.2)
+      result.1.addr = region.addr ∧ result.1.size = region.size ∧ result.2.length ≤ errors.length + indices.length := by
     intro indices
     induction indices with
-    | nil =>
-      intro region result hf
-      simp only [List.foldlM_nil] at hf
-      cases hf
-      exact ⟨rfl, rfl⟩
+    | nil => intro region errors; exact ⟨rfl, rfl, by simp⟩
     | cons index rest ih =>
-      intro region result hf
-      simp only [List.foldlM_cons, bind_ok_iff] at hf
-      rcases hf with ⟨next, hn, hf⟩
-      have ⟨a1, s1⟩ := applyRelocation_frame hn
-      have ⟨a2, s2⟩ := ih next result hf
-      exact ⟨a2.trans a1, s2.trans s1⟩
-  simp only [applyRelocations, bind_ok_iff] at h
-  rcases h with ⟨region, hr, h⟩
-  cases h
-  have ⟨a, b⟩ := fold _ _ _ hr
-  exact ⟨rfl, rfl, a, b⟩
+      intro region errors
+      simp only [List.foldl_cons]
+      cases hr : applyRelocation data header sections symbols object region index with
+      | ok next =>
+        have ⟨a1, s1, _⟩ := applyRelocation_ok hr
+        have ⟨a2, s2, l2⟩ := ih next errors
+        simp only
+        refine ⟨a2.trans a1, s2.trans s1, ?_⟩
+        simp only [List.length_cons] at l2 ⊢
+        omega
+      | error error =>
+        have ⟨a2, s2, l2⟩ := ih region (error :: errors)
+        simp only
+        refine ⟨a2, s2, ?_⟩
+        simp only [List.length_cons] at l2 ⊢
+        omega
+  have ⟨a, s, l⟩ := fold (List.range (ObjectSection.relocationCount object)) (ObjectSection.region object) []
+  simp only [applyRelocations]
+  rw [List.length_range, List.length_nil, Nat.zero_add] at l
+  exact ⟨trivial, trivial, a, s, by rw [List.length_reverse]; exact l⟩
+
+/-! ### Layout -/
+
+/-- A section's segment and region describe the same memory. -/
+def GoodObject (object : ObjectSection) : Prop :=
+  (ObjectSection.segment object).addr = (ObjectSection.region object).addr ∧
+    (ObjectSection.segment object).size = (ObjectSection.region object).size
+
+theorem placeObject_good {cursor : Nat} {object : ObjectSection} (h : GoodObject object) :
+    GoodObject (placeObject cursor object).1 := by
+  unfold placeObject
+  split
+  · exact ⟨rfl, h.2⟩
+  · exact h
+
+theorem placeObject_flags (cursor : Nat) (object : ObjectSection) :
+    (ObjectSection.info (placeObject cursor object).1).flags = (ObjectSection.info object).flags ∧
+      (ObjectSection.segment (placeObject cursor object).1).size = (ObjectSection.segment object).size := by
+  unfold placeObject
+  split <;> exact ⟨rfl, rfl⟩
+
+/-- A mapped section goes at or after the cursor, at its alignment, and the cursor moves past it. -/
+theorem placeObject_mapped {cursor : Nat} {object : ObjectSection} (h : isMapped object = true) :
+    let placed := (placeObject cursor object).1
+    cursor ≤ (ObjectSection.info placed).addr ∧ (ObjectSection.segment placed).addr = (ObjectSection.info placed).addr ∧
+      (placeObject cursor object).2 = (ObjectSection.info placed).addr + (ObjectSection.segment object).size := by
+  simp only [placeObject, h, ↓reduceIte]
+  refine ⟨?_, trivial, trivial⟩
+  show cursor ≤ alignUp _ _
+  have hle : max cursor (ObjectSection.info object).addr ≤
+      alignUp (max cursor (ObjectSection.info object).addr) (sectionAlignment (ObjectSection.info object).flags) := by
+    unfold alignUp
+    split
+    · exact Nat.le_refl _
+    · rename_i ha
+      have hpos : 0 < sectionAlignment (ObjectSection.info object).flags := by omega
+      generalize sectionAlignment (ObjectSection.info object).flags = n at *
+      generalize max cursor (ObjectSection.info object).addr = v at *
+      have hdiv := Nat.div_add_mod (v + n - 1) n
+      have hmod := Nat.mod_lt (v + n - 1) hpos
+      have hcomm : (v + n - 1) / n * n = n * ((v + n - 1) / n) := Nat.mul_comm ..
+      omega
+  have : cursor ≤ max cursor (ObjectSection.info object).addr := Nat.le_max_left ..
+  omega
+
+theorem placeObject_cursor (cursor : Nat) (object : ObjectSection) : cursor ≤ (placeObject cursor object).2 := by
+  by_cases h : isMapped object = true
+  · have ⟨h1, _, h3⟩ := placeObject_mapped (cursor := cursor) h
+    omega
+  · simp [placeObject, h]
+
+private theorem placeObjects_after :
+    ∀ (objects : List ObjectSection) (cursor : Nat) (placed : ObjectSection), placed ∈ placeObjects cursor objects →
+      isMapped placed = true → cursor ≤ (ObjectSection.segment placed).addr
+  | [], _, _, h, _ => by simp [placeObjects] at h
+  | object :: rest, cursor, placed, h, hm => by
+    simp only [placeObjects, List.mem_cons] at h
+    rcases h with rfl | h
+    · have hflags := (placeObject_flags cursor object).1
+      have hmapped : isMapped object = true := by
+        simp only [isMapped] at hm ⊢
+        rw [hflags] at hm
+        exact hm
+      have ⟨h1, h2, _⟩ := placeObject_mapped (cursor := cursor) hmapped
+      rw [h2]
+      exact h1
+    · have := placeObjects_after rest _ placed h hm
+      have := placeObject_cursor cursor object
+      omega
+
+/-- The sections of an object are laid out one after the other: no two mapped sections overlap. -/
+theorem placeObjects_disjoint :
+    ∀ (objects : List ObjectSection) (cursor : Nat),
+      (placeObjects cursor objects).Pairwise fun left right =>
+        isMapped left = true → isMapped right = true →
+          (ObjectSection.segment left).addr + (ObjectSection.segment left).size ≤ (ObjectSection.segment right).addr
+  | [], _ => by simp [placeObjects]
+  | object :: rest, cursor => by
+    simp only [placeObjects, List.pairwise_cons]
+    refine ⟨?_, placeObjects_disjoint rest _⟩
+    intro right hr hl hrm
+    have hflags := (placeObject_flags cursor object).1
+    have hmapped : isMapped object = true := by
+      simp only [isMapped] at hl ⊢
+      rw [hflags] at hl
+      exact hl
+    have ⟨_, ha, hc⟩ := placeObject_mapped (cursor := cursor) hmapped
+    have hafter := placeObjects_after rest _ right hr hrm
+    have hsize := (placeObject_flags cursor object).2
+    rw [hsize, ha]
+    omega
 
 /-! ### Symbols -/
 
@@ -1880,42 +3165,168 @@ theorem parseSymbol_undefined {data : ByteArray} {header : Header} {sections : L
   cases h
   exact ⟨rfl, rfl⟩
 
-/-- Everything `Coff.decode` promises: no entry point, little-endian, and one mapped region per section, of the size
-of its segment even after relocation. -/
-theorem decode_ok {data : ByteArray} {image : Image} (h : Coff.decode data = .ok image) :
+theorem placeObjects_good : ∀ {objects : List ObjectSection} {cursor : Nat}, (∀ object ∈ objects, GoodObject object) →
+    ∀ object ∈ placeObjects cursor objects, GoodObject object
+  | [], _, _, _, h => by simp [placeObjects] at h
+  | head :: rest, cursor, hg, object, h => by
+    simp only [placeObjects, List.mem_cons] at h
+    rcases h with rfl | h
+    · exact placeObject_good (hg head (by simp))
+    · exact placeObjects_good (fun o ho => hg o (by simp [ho])) _ h
+
+theorem placeObjects_length : ∀ (objects : List ObjectSection) (cursor : Nat),
+    (placeObjects cursor objects).length = objects.length
+  | [], _ => rfl
+  | _ :: rest, _ => by simp [placeObjects, placeObjects_length rest]
+
+theorem zeroRegion_agree (name : String) (start stop : Nat) (writable : Bool) :
+    ∀ pair ∈ zeroRegion name start stop writable, pair.1.addr = pair.2.addr ∧ pair.1.size = pair.2.size := by
+  intro pair hm
+  unfold zeroRegion at hm
+  split at hm
+  · simp only [List.mem_singleton] at hm
+    subst hm
+    refine ⟨rfl, ?_⟩
+    show stop - start = (Array.replicate (stop - start) 0).size
+    simp
+  · cases hm
+
+/-- Placing undefined symbols moves the cursor forward and keeps the symbol list's shape. -/
+theorem placeUndefined_spec {data : ByteArray} {header : Header} {word : Nat} {select : Nat → Bool} {size : Nat → Nat} :
+    ∀ (symbols : List (Nat × Symbol)) (cursor : Nat),
+      cursor ≤ (placeUndefined data header word select size cursor symbols).2 ∧
+        (placeUndefined data header word select size cursor symbols).1.map (fun entry => (entry.1, entry.2.name)) =
+          symbols.map (fun entry => (entry.1, entry.2.name)) ∧
+        ∀ entry ∈ (placeUndefined data header word select size cursor symbols).1, entry ∈ symbols ∨
+          (cursor ≤ entry.2.addr ∧ entry.2.addr ≤ (placeUndefined data header word select size cursor symbols).2 ∧
+            ∃ original ∈ symbols, isUndefined data header original = true ∧ original.1 = entry.1)
+  | [], cursor => by simp [placeUndefined]
+  | head :: rest, cursor => by
+    unfold placeUndefined
+    by_cases hc : (isUndefined data header head && select head.2.addr) = true
+    · have hle : cursor ≤ alignUp cursor word := by
+        unfold alignUp
+        split
+        · exact Nat.le_refl _
+        · rename_i ha
+          have hpos : 0 < word := by omega
+          have hdiv := Nat.div_add_mod (cursor + word - 1) word
+          have hmod := Nat.mod_lt (cursor + word - 1) hpos
+          have hcomm : (cursor + word - 1) / word * word = word * ((cursor + word - 1) / word) := Nat.mul_comm ..
+          omega
+      have ⟨h1, h2, h3⟩ := placeUndefined_spec (data := data) (header := header) (word := word) (select := select)
+        (size := size) rest (alignUp cursor word + size head.2.addr)
+      rcases hrec : placeUndefined data header word select size (alignUp cursor word + size head.2.addr) rest with
+        ⟨placed, stop⟩
+      rw [hrec] at h1 h2 h3
+      simp only [hc, ↓reduceIte, hrec]
+      refine ⟨by omega, by simpa using h2, ?_⟩
+      intro entry hm
+      simp only [List.mem_cons] at hm
+      rcases hm with rfl | hm
+      · refine .inr ⟨hle, by simp only at h1 ⊢; omega, head, by simp, ?_, rfl⟩
+        simp only [Bool.and_eq_true] at hc
+        exact hc.1
+      · rcases h3 entry hm with h | ⟨a, b, original, ho, hu, hi⟩
+        · exact .inl (by simp [h])
+        · exact .inr ⟨by omega, b, original, by simp [ho], hu, hi⟩
+    · have ⟨h1, h2, h3⟩ := placeUndefined_spec (data := data) (header := header) (word := word) (select := select)
+        (size := size) rest cursor
+      rcases hrec : placeUndefined data header word select size cursor rest with ⟨placed, stop⟩
+      rw [hrec] at h1 h2 h3
+      have hf : (isUndefined data header head && select head.2.addr) = false := by simpa using hc
+      simp only [hf, Bool.false_eq_true, ↓reduceIte]
+      refine ⟨h1, by simpa using h2, ?_⟩
+      intro entry hm
+      simp only [List.mem_cons] at hm
+      rcases hm with rfl | hm
+      · exact .inl (by simp)
+      · rcases h3 entry hm with h | ⟨a, b, original, ho, hu, hi⟩
+        · exact .inl (by simp [h])
+        · exact .inr ⟨a, b, original, by simp [ho], hu, hi⟩
+
+/-- Everything `Coff.decode` promises: no entry point, little-endian, and regions and segments that agree, also after
+relocation and for the synthetic regions. -/
+theorem decodeReport_ok {data : ByteArray} {image : Image} {errors : List String}
+    (h : Coff.decodeReport data = .ok (image, errors)) :
     ∃ header, parseHeader data = .ok header ∧ image.data = data ∧ image.endian = .little ∧ image.entryPoint = 0 ∧
       image.addrWidth = (architecture (Header.machine header)).2 ∧
       image.sections.length = Header.sectionCount header ∧
-      image.segments.length = Header.sectionCount header ∧
-      ∃ objects : List ObjectSection, image.segments = objects.map ObjectSection.segment ∧
-        image.memory.entries = (objects.map ObjectSection.region).reverse.map (fun region => (region, ())) ∧
-        ∀ object ∈ objects, (ObjectSection.segment object).addr = (ObjectSection.region object).addr ∧
-          (ObjectSection.segment object).size = (ObjectSection.region object).size := by
-  simp only [Coff.decode, bind_ok_iff] at h
-  rcases h with ⟨header, h1, objects, h2, indexed, _, relocated, h3, h⟩
-  cases h
-  have ⟨hl, hp⟩ := mapM_ok h2
-  simp only [List.length_range] at hl
-  have ⟨hl', hr⟩ := mapM_ok h3
-  refine ⟨header, h1, rfl, rfl, rfl, rfl, by simpa using hl, by simpa using hl'.trans hl, relocated, rfl, ?_, ?_⟩
-  · rw [Map.foldl_add_entries]
-    exact List.append_nil _
-  · intro object hm
+      ∃ pairs : List (Segment × MemRegion), image.segments = pairs.map Prod.fst ∧
+        image.memory.entries = (pairs.map Prod.snd).reverse.map (fun region => (region, ())) ∧
+        ∀ pair ∈ pairs, pair.1.addr = pair.2.addr ∧ pair.1.size = pair.2.size := by
+  simp only [Coff.decodeReport, bind_ok_iff] at h
+  rcases h with ⟨header, h1, parsed, h2, parsedSymbols, _, h⟩
+  have hgood : ∀ object ∈ parsed, GoodObject object := by
+    intro object hm
+    have ⟨hl, hp⟩ := mapM_ok h2
     have ⟨i, hi1, hi2⟩ := List.getElem_of_mem hm
-    have hi3 : i < objects.length := hl' ▸ hi1
-    have ha := hr i hi1 hi3
-    rw [hi2] at ha
-    have ⟨fs, _, fa, fz⟩ := applyRelocations_frame ha
-    have hi4 : i < (List.range (Header.sectionCount header)).length := by simpa [hl] using hi3
-    have hs := parseSection_ok (hp i hi3 hi4)
-    rw [fs, fa, fz]
+    have hi3 : i < (List.range (Header.sectionCount header)).length := hl ▸ hi1
+    have := hp i hi1 hi3
+    rw [hi2] at this
+    have hs := parseSection_ok this
     exact ⟨hs.1, hs.2.2.1⟩
+  have hplaced := placeObjects_good (cursor := 0) hgood
+  have hlength : (placeObjects 0 parsed).length = Header.sectionCount header := by
+    have hl := (mapM_ok h2).1
+    simp only [List.length_range] at hl
+    rw [placeObjects_length, hl]
+  cases h
+  generalize (placeUndefined data header ((architecture (Header.machine header)).snd / 8) (fun x => x == 0) _ _ _).fst = symbols
+  generalize hplacedList : placeObjects 0 parsed = placed at hplaced hlength ⊢
+  have hzero : ∀ a b c d, ∀ pair ∈ zeroRegion "%common" a b true ++ zeroRegion "EXTERNAL" c d false,
+      pair.1.addr = pair.2.addr ∧ pair.1.size = pair.2.size := by
+    intro a b c d pair hm
+    rcases List.mem_append.mp hm with hm | hm
+    · exact zeroRegion_agree _ _ _ _ _ hm
+    · exact zeroRegion_agree _ _ _ _ _ hm
+  generalize hx : zeroRegion "%common" _ _ true ++ zeroRegion "EXTERNAL" _ _ false = extra
+  have hextra : ∀ pair ∈ extra, pair.1.addr = pair.2.addr ∧ pair.1.size = pair.2.size := by
+    rw [← hx]
+    exact hzero _ _ _ _
+  generalize hm : List.filter (fun object => isMapped object && (ObjectSection.segment object).size != 0)
+    (List.map Prod.fst (List.map _ placed)) = mapped
+  have hmapped : ∀ object ∈ mapped, GoodObject object := by
+    intro object hobject
+    rw [← hm] at hobject
+    simp only [List.mem_filter, List.mem_map] at hobject
+    rcases hobject with ⟨⟨_, ⟨source, hsource, rfl⟩, rfl⟩, _⟩
+    have hgoodSource := hplaced source hsource
+    split
+    · rename_i _
+      have hf := applyRelocations_frame (data := data) (header := header)
+        (sections := List.map (fun object => ObjectSection.info object) placed) (symbols := symbols) source
+      rcases hrel : applyRelocations data header (List.map (fun object => ObjectSection.info object) placed) symbols source
+        with ⟨out, errors'⟩
+      rw [hrel] at hf
+      have ⟨f1, _, f3, f4, _⟩ := hf
+      exact ⟨by simp only [f1, f3]; exact hgoodSource.1, by simp only [f1, f4]; exact hgoodSource.2⟩
+    · exact hgoodSource
+  refine ⟨header, h1, rfl, rfl, rfl, rfl, by simpa using hlength,
+    mapped.map (fun object => (ObjectSection.segment object, ObjectSection.region object)) ++ extra, ?_, ?_, ?_⟩
+  · simp [List.map_append, List.map_map, Function.comp_def]
+  · simp only [Map.foldl_add_entries]
+    simp [List.map_append, List.map_map, Function.comp_def]
+  · intro pair hp
+    rcases List.mem_append.mp hp with hp | hp
+    · simp only [List.mem_map] at hp
+      rcases hp with ⟨object, ho, rfl⟩
+      exact hmapped object ho
+    · exact hextra pair hp
+
+theorem decode_ok {data : ByteArray} {image : Image} (h : Coff.decode data = .ok image) :
+    ∃ errors, Coff.decodeReport data = .ok (image, errors) := by
+  simp only [Coff.decode, bind_ok_iff] at h
+  rcases h with ⟨⟨out, errors⟩, h1, h⟩
+  cases h
+  exact ⟨errors, h1⟩
 
 theorem decode_rejects_short {data : ByteArray} (h : data.size < 20) : (Coff.decode data).isOk = false := by
   cases hd : Coff.decode data with
   | error e => rfl
   | ok image =>
-    have ⟨_, hp, _⟩ := decode_ok hd
+    have ⟨_, hr⟩ := decode_ok hd
+    have ⟨_, hp, _⟩ := decodeReport_ok hr
     have := parseHeader_rejects_short (data := data) h
     simp [hp, Except.isOk, Except.toBool] at this
 
@@ -2080,14 +3491,13 @@ theorem decodeFacts_fields (fields : List Field) :
     rw [List.flatMap_cons, List.mapM_append, hh, ht]
     rfl
 
-/-- The printer/parser roundtrip, conditional only on the S-expression layer reading back what it printed.
-`Sexp.parse` depends on the `partial` `Sexp.skipSpace`, so that condition cannot be discharged here. -/
-theorem parse_render {doc : Doc}
-    (h : Sexp.parse (render doc) = .ok (.list (doc.fields.flatMap encodeField))) :
-    parse (render doc) = .ok doc := by
+/-- The printer and parser are inverses, on every document. -/
+theorem parse_render (doc : Doc) : parse (render doc) = .ok doc := by
   obtain ⟨decoded, hd, hf⟩ := decodeFacts_fields doc.fields
   have hl : Sexp.asList (.list (doc.fields.flatMap encodeField)) = .ok (doc.fields.flatMap encodeField) := rfl
-  simp only [parse, h, hl, hd, Reader.ok_bind, hf]
+  have hp : Sexp.parse (render doc) = .ok (.list (doc.fields.flatMap encodeField)) :=
+    Bap.Proofs.Core.SexpLaws.parse_render _
+  simp only [parse, hp, hl, hd, Reader.ok_bind, hf]
 
 /-- A region built from Ogre metadata: the file contents are not part of the document. -/
 def zeroRegion (region : MemRegion) : MemRegion :=

@@ -131,6 +131,8 @@ private def putFact (fact : Fact) (facts : List Fact) : List Fact :=
 
 def provideInFacts (slot : Slot kind) (object : Object) (value : kind.data) (facts : List Fact) :
     Except Conflict (Bool × List Fact) := do
+  if slot.domain.eq value slot.domain.empty then
+    return (false, facts)
   match ← lookupFact slot object facts with
   | none => .ok (true, putFact ⟨object, ⟨kind, slot⟩, value⟩ facts)
   | some existing =>
@@ -163,50 +165,83 @@ def provideWith (env : Environment) (slot : Slot kind) (object : Object) (value 
     notifyObservers env slot object next
   .ok next
 
-private def putOpinion (opinion : Opinion) (opinions : List Opinion) : List Opinion :=
-  opinion :: opinions.filter fun old =>
-    old.agent.name != opinion.agent.name ||
-    old.fact.object != opinion.fact.object ||
-    old.fact.slot.2.name != opinion.fact.slot.2.name
+/-- Whether an opinion already records this agent's vote for this value. -/
+private def isVote (agent : Agent) (slot : Slot kind) (object : Object) (value : kind.data) (old : Opinion) :
+    Bool :=
+  decide (old.agent.name = agent.name ∧ old.fact.object = object ∧ old.fact.slot.2.name = slot.name) &&
+    if h : old.fact.slot.1 = kind then slot.domain.eq (h ▸ old.fact.value) value else false
 
+/-- Adds the agent's vote. An agent may vote for several values, as upstream's `Opinions.add`, and an
+empty opinion or a repeated vote changes nothing. -/
 def suggest (agent : Agent) (slot : Slot kind) (object : Object) (value : kind.data) (state : State) :
     State :=
-  let opinion : Opinion := ⟨agent, object, ⟨kind, slot⟩, value⟩
-  { state with opinions := putOpinion opinion state.opinions, version := state.version + 1 }
+  if slot.domain.eq value slot.domain.empty || state.opinions.any (isVote agent slot object value) then
+    state
+  else
+    { state with
+      opinions := ⟨agent, object, ⟨kind, slot⟩, value⟩ :: state.opinions
+      version := state.version + 1 }
 
-private def joinOpinions (slot : Slot kind) (current : kind.data) : List Opinion →
-    Except Conflict kind.data
-  | [] => .ok current
-  | opinion :: rest =>
-    if h : opinion.fact.slot.1 = kind then
-      match slot.domain.join current (h ▸ opinion.fact.value) with
-      | some joined => joinOpinions slot joined rest
-      | none => .error (.incompatible slot.name)
-    else
-      .error (.typeMismatch slot.name)
+/-- The distinct agents voting for a value. -/
+private def voters (slot : Slot kind) (votes : List (Agent × kind.data)) (value : kind.data) : List Agent :=
+  ((votes.filter fun vote => slot.domain.eq vote.2 value).map Prod.fst).eraseDups
 
+/-- The weight of a set of votes is the sum of the voters' trust. -/
+private def weight (agents : List Agent) : Nat :=
+  (agents.map Agent.trust).sum
+
+/-- More weight wins. Equal weights fall back on the voters' names, a total choice like upstream's
+comparison of vote sets, which orders agents by the digest of their names. -/
+private def outweighs (left right : List Agent) : Bool :=
+  let names (agents : List Agent) := (agents.map Agent.name).mergeSort
+  weight left > weight right || (weight left = weight right && names left > names right)
+
+private def chooseVote (slot : Slot kind) (votes : List (Agent × kind.data)) (best : kind.data)
+    (rest : List (Agent × kind.data)) : kind.data :=
+  rest.foldl (fun best vote =>
+    if outweighs (voters slot votes vote.2) (voters slot votes best) then vote.2 else best) best
+
+/-- The value whose voters weigh the most, as upstream's `Opinions.choice`. It never conflicts: a
+disagreement is settled by the vote. -/
 def resolve (slot : Slot kind) (object : Object) (state : State) : Except Conflict kind.data := do
   let relevant := state.opinions.filter fun opinion =>
     opinion.fact.object = object ∧ opinion.fact.slot.2.name = slot.name
-  if relevant.isEmpty then
-    .ok slot.domain.empty
-  else
-    let trust := relevant.foldl (fun trust opinion => max trust opinion.agent.trust) 0
-    let selected := relevant.filter fun opinion => opinion.agent.trust = trust
-    joinOpinions slot slot.domain.empty selected
+  let votes ← relevant.mapM fun opinion =>
+    if h : opinion.fact.slot.1 = kind then
+      .ok (opinion.agent, h ▸ opinion.fact.value)
+    else
+      .error (.typeMismatch slot.name)
+  match votes with
+  | [] => .ok slot.domain.empty
+  | vote :: rest => .ok (chooseVote slot (vote :: rest) vote.2 rest)
 
 @[simp] theorem resolve_empty (slot : Slot kind) (object : Object) :
     resolve slot object {} = .ok slot.domain.empty := by
   rfl
 
-private def runPromises (promises : List Promise) (object : Object) (facts : List Fact) :
+/-- A promise's value. A failed `require` inside a promise means the promise has nothing to say. -/
+private def promiseValue (promise : Promise) (object : Object) (facts : List Fact) :
+    Except Conflict (Option promise.slot.1.data) :=
+  match promise.compute object facts with
+  | .error (.empty _) => .ok none
+  | result => result
+
+/-- Provides a promised value, notifying the slot's observers when that refines it. -/
+private def providePromised (env : Environment) (slot : Slot kind) (object : Object) (value : kind.data)
+    (facts : List Fact) : Except Conflict (Bool × List Fact) := do
+  let (refined, next) ← provideInFacts slot object value facts
+  if refined then
+    notifyObservers env slot object { facts := next }
+  .ok (refined, next)
+
+private def runPromises (env : Environment) (object : Object) (facts : List Fact) :
     Except Conflict (Bool × List Fact) := do
   let mut changed := false
   let mut current := facts
-  for promise in promises do
-    let value ← promise.compute object current
+  for promise in env.promises do
+    let value ← promiseValue promise object current
     if let some value := value then
-      let (refined, next) ← provideInFacts promise.slot.2 object value current
+      let (refined, next) ← providePromised env promise.slot.2 object value current
       changed := changed || refined
       current := next
   .ok (changed, current)
@@ -215,7 +250,7 @@ private def normalize (env : Environment) (object : Object) : Nat → List Fact 
     Except Conflict (Bool × List Fact)
   | 0, _ => .error .exhausted
   | fuel + 1, facts => do
-    let (changed, facts) ← runPromises env.promises object facts
+    let (changed, facts) ← runPromises env object facts
     if changed then do
       let (_, facts) ← normalize env object fuel facts
       .ok (true, facts)

@@ -1,6 +1,7 @@
 import Lean.Elab.Command
 import Bap.Symbolic.Executor
 import Bap.Bil.Typecheck
+import Bap.Proofs.Core
 
 namespace Bap.Proofs.Symbolic
 
@@ -240,29 +241,147 @@ theorem denote_of_width8 {σ : Assignment} {value : Expr} (h : (denote σ value)
   simp
 
 /-- The concrete bytes of a list of writes over the initial contents of a memory. -/
-def byteMap (σ : Assignment) (name : String) : List (Expr × Expr) → Bits → BitVec 8
-  | [], target => σ.memory name target.1 target.2
+def byteMap (σ : Assignment) (initial : Bits → BitVec 8) : List (Expr × Expr) → Bits → BitVec 8
+  | [], target => initial target
   | cell :: rest, target =>
-    if sameBits (denote σ cell.1) target then byteOf σ cell.2 else byteMap σ name rest target
+    if sameBits (denote σ cell.1) target then byteOf σ cell.2 else byteMap σ initial rest target
+
+/-- The initial contents of a memory: the assignment's, or the chosen memory's for a conditional one. -/
+def baseByte (σ : Assignment) : Bap.Symbolic.Memory → Bits → BitVec 8
+  | ⟨name, none, _⟩, target => σ.memory name target.1 target.2
+  | ⟨_, some (condition, yes, no), _⟩, target =>
+    if isOne (denote σ condition) then byteMap σ (baseByte σ yes) yes.cells target
+    else byteMap σ (baseByte σ no) no.cells target
+
+/-- The concrete bytes of a symbolic memory. -/
+def memoryByte (σ : Assignment) (memory : Bap.Symbolic.Memory) : Bits → BitVec 8 :=
+  byteMap σ (baseByte σ memory) memory.cells
 
 def CellsSized (σ : Assignment) (cells : List (Expr × Expr)) : Prop :=
-  ∀ cell ∈ cells, (denote σ cell.2).1 = 8 ∧ cell.2.width = 8
+  ∀ cell ∈ cells, (denote σ cell.2).1 = 8 ∧ cell.2.width = 8 ∧ (denote σ cell.1).1 = cell.1.width
 
-theorem definitelyDistinct_sound (σ : Assignment) {a b : Expr} (h : Memory.definitelyDistinct a b = true) :
+private theorem toNat_lt_of_width {b : Bits} {n : Nat} (h : b.1 = n) : b.2.toNat < 2 ^ n := by
+  obtain ⟨w, x⟩ := b
+  simp only at h
+  subst h
+  exact x.isLt
+
+private theorem denote_offset_parts {σ : Assignment} (name : String) {width v : Nat} {base : Expr} {c : BitVec v}
+    (hname : Expr.isPredicate name = false) (hop : ∀ {w} (x y : BitVec w), (wordOp name x y).1 = w) (_ : v = width)
+    (hs : (denote σ (.app name width [base, .const c])).1 = width) :
+    (denote σ base).1 = width := by
+  rw [denote_binary, denote_const] at hs
+  unfold denoteBinary at hs
+  split at hs
+  · rw [hop] at hs; exact hs
+  · simpa [hname] using hs
+
+/-- `baseOffset` splits an address into a base and an offset with the same value, modulo the address space. -/
+theorem baseOffset_spec (σ : Assignment) (e : Expr) (h : (denote σ e).1 = e.width) :
+    (denote σ (Memory.baseOffset e).1).1 = e.width ∧ (Memory.baseOffset e).2 < 2 ^ e.width ∧
+      (denote σ e).2.toNat = ((denote σ (Memory.baseOffset e).1).2.toNat + (Memory.baseOffset e).2) % 2 ^ e.width := by
+  have hrefl : ∀ {e : Expr}, (denote σ e).1 = e.width →
+      (denote σ e).1 = e.width ∧ 0 < 2 ^ e.width ∧
+        (denote σ e).2.toNat = ((denote σ e).2.toNat + 0) % 2 ^ e.width := by
+    intro e h
+    exact ⟨h, Nat.two_pow_pos _, by simp [Nat.mod_eq_of_lt (toNat_lt_of_width h)]⟩
+  fun_induction Memory.baseOffset e with
+  | case1 width base constWidth value hguard inner offset hsplit ih =>
+    obtain ⟨hv, hbw⟩ := hguard
+    subst hv
+    have hb := denote_offset_parts (σ := σ) "bvadd" (by decide) (by intros; simp [wordOp]) rfl h
+    obtain ⟨h1, h2, h3⟩ := ih (by rw [hb, hbw])
+    rw [hsplit] at h1 h2 h3
+    simp only at h1 h2 h3 ⊢
+    rw [hbw] at h1 h2 h3
+    have hnat : (denote σ (.app "bvadd" constWidth [base, .const value])).2.toNat =
+        ((denote σ base).2.toNat + value.toNat) % 2 ^ constWidth := by
+      rw [denote_binary, denote_const]
+      generalize denote σ base = d at hb
+      obtain ⟨dw, x⟩ := d
+      simp only at hb
+      subst hb
+      have hop : denoteBinary "bvadd" ⟨dw, x⟩ ⟨dw, value⟩ = ⟨dw, x + value⟩ := by simp [denoteBinary, wordOp]
+      rw [hop]
+      simp [BitVec.toNat_add]
+    refine ⟨h1, Nat.mod_lt _ (Nat.two_pow_pos _), ?_⟩
+    simp only [Expr.width]
+    rw [hnat, h3]
+    simp [Nat.add_assoc]
+  | case2 => exact hrefl h
+  | case3 width base constWidth value hguard inner offset hsplit ih =>
+    obtain ⟨hv, hbw⟩ := hguard
+    subst hv
+    have hb := denote_offset_parts (σ := σ) "bvsub" (by decide) (by intros; simp [wordOp]) rfl h
+    obtain ⟨h1, h2, h3⟩ := ih (by rw [hb, hbw])
+    rw [hsplit] at h1 h2 h3
+    simp only at h1 h2 h3 ⊢
+    rw [hbw] at h1 h2 h3
+    have hnat : (denote σ (.app "bvsub" constWidth [base, .const value])).2.toNat =
+        ((denote σ base).2.toNat + (2 ^ constWidth - value.toNat)) % 2 ^ constWidth := by
+      rw [denote_binary, denote_const]
+      generalize denote σ base = d at hb
+      obtain ⟨dw, x⟩ := d
+      simp only at hb
+      subst hb
+      have hop : denoteBinary "bvsub" ⟨dw, x⟩ ⟨dw, value⟩ = ⟨dw, x - value⟩ := by simp [denoteBinary, wordOp]
+      rw [hop]
+      simp [BitVec.toNat_sub, Nat.add_comm]
+    refine ⟨h1, Nat.mod_lt _ (Nat.two_pow_pos _), ?_⟩
+    simp only [Expr.width]
+    rw [hnat, h3]
+    simp [Nat.add_assoc]
+  | case4 => exact hrefl h
+  | case5 => exact hrefl h
+
+private theorem add_mod_ne {b x y m : Nat} (hx : x < m) (hy : y < m) (hne : x ≠ y) : (b + x) % m ≠ (b + y) % m := by
+  intro he
+  have hm : 0 < m := by omega
+  have key : ∀ {p q : Nat}, p < q → q < m → (b + p) % m = (b + q) % m → False := by
+    intro p q hpq hq e
+    have hd : m ∣ (b + q) - (b + p) := Nat.dvd_of_mod_eq_zero (Nat.sub_mod_eq_zero_of_mod_eq e.symm)
+    have := Nat.le_of_dvd (by omega) hd
+    omega
+  rcases Nat.lt_or_gt_of_ne hne with h | h
+  · exact key h hy he
+  · exact key h hx he.symm
+
+/-- The static resolution of addresses is sound: addresses it calls distinct never denote the same location,
+which covers different constants and different offsets from one base. -/
+theorem definitelyDistinct_sound (σ : Assignment) {a b : Expr} (ha : (denote σ a).1 = a.width)
+    (hb : (denote σ b).1 = b.width) (h : Memory.definitelyDistinct a b = true) :
     sameBits (denote σ a) (denote σ b) = false := by
-  cases a <;> cases b <;> simp only [Memory.definitelyDistinct, reduceCtorEq] at h
+  have hgeneral : (a.width == b.width && (Memory.baseOffset a).2 != (Memory.baseOffset b).2 &&
+      Expr.structuralEq (Memory.baseOffset a).1 (Memory.baseOffset b).1) = true →
+      sameBits (denote σ a) (denote σ b) = false := by
+    intro hg
+    simp only [Bool.and_eq_true, beq_iff_eq, bne_iff_ne, ne_eq] at hg
+    obtain ⟨⟨hw, hne⟩, hbase⟩ := hg
+    have hsame := structuralEq_iff.mp hbase
+    obtain ⟨_, a2, a3⟩ := baseOffset_spec σ a ha
+    obtain ⟨_, b2, b3⟩ := baseOffset_spec σ b hb
+    cases hs : sameBits (denote σ a) (denote σ b) with
+    | false => rfl
+    | true =>
+      exfalso
+      have he := sameBits_iff.mp hs
+      rw [he, b3, hsame, ← hw] at a3
+      rw [← hw] at b2
+      exact add_mod_ne a2 b2 hne a3.symm
+  cases a <;> cases b <;> first | exact hgeneral h | skip
   rw [denote_const, denote_const]
-  simp at h
+  simp [Memory.definitelyDistinct] at h
   simp only [sameBits, Bool.and_eq_false_iff, beq_eq_false_iff_ne, ne_eq]
   exact h
 
 /-- Soundness under aliasing: for any assignment, a symbolic read denotes the byte the writes leave at
 the location its address denotes. -/
-theorem denote_readCells (σ : Assignment) (name : String) (address : Expr) (cells : List (Expr × Expr))
-    (h : CellsSized σ cells) :
-    denote σ (Memory.readCells name address cells) = ⟨8, byteMap σ name cells (denote σ address)⟩ := by
+theorem denote_readCells (σ : Assignment) {initial : Expr} {base : Bits → BitVec 8} {address : Expr}
+    (ha : (denote σ address).1 = address.width) (cells : List (Expr × Expr)) (h : CellsSized σ cells)
+    (hinitial : denote σ initial = ⟨8, base (denote σ address)⟩) :
+    denote σ (Memory.readCells initial address cells) = ⟨8, byteMap σ base cells (denote σ address)⟩ := by
   induction cells with
-  | nil => simp [Memory.readCells, byteMap, denote]
+  | nil => simpa [Memory.readCells, byteMap] using hinitial
   | cons cell rest ih =>
     have ih' := ih fun c hc => h c (List.mem_cons_of_mem _ hc)
     have hcell := denote_of_width8 (h cell (by simp)).1
@@ -275,7 +394,7 @@ theorem denote_readCells (σ : Assignment) (name : String) (address : Expr) (cel
     | false =>
       cases hd : Memory.definitelyDistinct cell.1 address with
       | true =>
-        have := definitelyDistinct_sound σ hd
+        have := definitelyDistinct_sound σ (h cell (by simp)).2.2 ha hd
         simp only [this, ↓reduceIte, Bool.false_eq_true, ih']
       | false =>
         simp only [Bool.false_eq_true, ↓reduceIte, denote_ite, isOne_denote_eq]
@@ -283,16 +402,37 @@ theorem denote_readCells (σ : Assignment) (name : String) (address : Expr) (cel
         | true => simp only [↓reduceIte, hcell]
         | false => simp only [↓reduceIte, Bool.false_eq_true, ih']
 
-theorem denote_readByte (σ : Assignment) (memory : Bap.Symbolic.Memory) (address : Expr)
-    (h : CellsSized σ memory.cells) :
-    denote σ (memory.readByte address) = ⟨8, byteMap σ memory.name memory.cells (denote σ address)⟩ :=
-  denote_readCells σ _ _ _ h
+/-- The memories whose stored bytes are all bytes, down through any conditional initial contents. -/
+inductive MemorySized (σ : Assignment) : Bap.Symbolic.Memory → Prop where
+  | plain (name cells) : CellsSized σ cells → MemorySized σ ⟨name, none, cells⟩
+  | branch (name condition yes no cells) : MemorySized σ yes → MemorySized σ no → CellsSized σ cells →
+      MemorySized σ ⟨name, some (condition, yes, no), cells⟩
+
+theorem MemorySized.cellsSized {σ : Assignment} {memory : Bap.Symbolic.Memory} (h : MemorySized σ memory) :
+    CellsSized σ memory.cells := by
+  cases h <;> assumption
+
+theorem denote_readInitial (σ : Assignment) {memory : Bap.Symbolic.Memory} (h : MemorySized σ memory)
+    {address : Expr} (ha : (denote σ address).1 = address.width) :
+    denote σ (Memory.readInitial memory address) = ⟨8, baseByte σ memory (denote σ address)⟩ := by
+  induction h with
+  | plain name cells _ => simp [Memory.readInitial, baseByte, denote]
+  | branch name condition yes no cells hy hn _ ihy ihn =>
+    simp only [Memory.readInitial, baseByte, denote_ite]
+    rw [denote_readCells σ ha _ hy.cellsSized ihy, denote_readCells σ ha _ hn.cellsSized ihn]
+    split <;> rfl
+
+theorem denote_readByte (σ : Assignment) {memory : Bap.Symbolic.Memory} {address : Expr}
+    (ha : (denote σ address).1 = address.width) (h : MemorySized σ memory) :
+    denote σ (memory.readByte address) = ⟨8, memoryByte σ memory (denote σ address)⟩ :=
+  denote_readCells σ ha _ h.cellsSized (denote_readInitial σ h ha)
 
 /-- A byte write updates the byte map at the one location its address denotes. -/
-theorem byteMap_writeByte (σ : Assignment) (memory : Bap.Symbolic.Memory) (address value : Expr) (target : Bits) :
-    byteMap σ memory.name (memory.writeByte address value).cells target =
+theorem byteMap_writeByte (σ : Assignment) (initial : Bits → BitVec 8) (memory : Bap.Symbolic.Memory)
+    (address value : Expr) (target : Bits) :
+    byteMap σ initial (memory.writeByte address value).cells target =
       if sameBits (denote σ address) target then byteOf σ value
-      else byteMap σ memory.name memory.cells target := by
+      else byteMap σ initial memory.cells target := by
   simp only [Bap.Symbolic.Memory.writeByte, byteMap]
   split
   · rfl
@@ -308,13 +448,28 @@ theorem byteMap_writeByte (σ : Assignment) (memory : Bap.Symbolic.Memory) (addr
         simp only [List.filter_cons, hc, Bool.not_true, Bool.false_eq_true, ↓reduceIte, byteMap, hsb, ih]
       · simp only [List.filter_cons, hc, Bool.not_false, ↓reduceIte, byteMap, ih]
 
+theorem baseByte_writeByte (σ : Assignment) (memory : Bap.Symbolic.Memory) (address value : Expr) :
+    baseByte σ (memory.writeByte address value) = baseByte σ memory := by
+  obtain ⟨name, branch, cells⟩ := memory
+  cases branch with
+  | none => rfl
+  | some b => obtain ⟨_, _, _⟩ := b; rfl
+
 theorem cellsSized_writeByte {σ : Assignment} {memory : Bap.Symbolic.Memory} (h : CellsSized σ memory.cells)
-    (address : Expr) {value : Expr} (hv : (denote σ value).1 = 8) (hw : value.width = 8) :
-    CellsSized σ (memory.writeByte address value).cells := by
+    {address : Expr} (ha : (denote σ address).1 = address.width) {value : Expr} (hv : (denote σ value).1 = 8)
+    (hw : value.width = 8) : CellsSized σ (memory.writeByte address value).cells := by
   intro cell hcell
   rcases List.mem_cons.mp hcell with rfl | hcell
-  · exact ⟨hv, hw⟩
+  · exact ⟨hv, hw, ha⟩
   · exact h cell (List.mem_filter.mp hcell).1
+
+theorem memorySized_writeByte {σ : Assignment} {memory : Bap.Symbolic.Memory} (h : MemorySized σ memory)
+    {address : Expr} (ha : (denote σ address).1 = address.width) {value : Expr} (hv : (denote σ value).1 = 8)
+    (hw : value.width = 8) : MemorySized σ (memory.writeByte address value) := by
+  have hc := cellsSized_writeByte h.cellsSized ha hv hw
+  cases h with
+  | plain name cells _ => exact .plain _ _ hc
+  | branch name condition yes no cells hy hn _ => exact .branch _ _ _ _ _ hy hn hc
 
 /-- The cell addresses stay pairwise distinct, so a write can't be shadowed by a stale equal address. -/
 theorem writeByte_keys_distinct (memory : Bap.Symbolic.Memory) (address value : Expr)
@@ -374,6 +529,18 @@ theorem denote_offsetAddress (σ : Assignment) (address : Expr) (offset : Nat)
       rw [← h]
       simp [denoteBinary, wordOp, offsetBits]
 
+theorem width_offsetAddress (address : Expr) (offset : Nat) : (offsetAddress address offset).width = address.width := by
+  unfold offsetAddress
+  split
+  · rfl
+  · split <;> rfl
+
+theorem fst_offsetAddress (σ : Assignment) (address : Expr) (offset : Nat)
+    (h : (denote σ address).1 = address.width) :
+    (denote σ (offsetAddress address offset)).1 = (offsetAddress address offset).width := by
+  rw [denote_offsetAddress σ address offset h, width_offsetAddress]
+  exact h
+
 theorem byteOf_byteAt (σ : Assignment) (value : Expr) (index : Nat) :
     byteOf σ (byteAt value index) = valueByte (denote σ value) index := by
   simp only [byteOf, byteAt, valueByte, denote, BitVec.extractLsb_toNat]
@@ -403,27 +570,24 @@ private theorem writePrefix_succ (memory : Bap.Symbolic.Memory) (address value :
       writeStep address value endian size (writePrefix memory address value endian size k) k := by
   simp [writePrefix, List.range_succ, List.foldl_append]
 
-private theorem name_writePrefix (memory : Bap.Symbolic.Memory) (address value : Expr) (endian : Endian) (size k : Nat) :
-    (writePrefix memory address value endian size k).name = memory.name := by
+private theorem base_writePrefix (σ : Assignment) (memory : Bap.Symbolic.Memory) (address value : Expr)
+    (endian : Endian) (size k : Nat) :
+    baseByte σ (writePrefix memory address value endian size k) = baseByte σ memory := by
   induction k with
   | zero => rfl
-  | succ k ih => rw [writePrefix_succ]; exact ih
+  | succ k ih => rw [writePrefix_succ, writeStep, baseByte_writeByte, ih]
 
-theorem name_write (memory : Bap.Symbolic.Memory) (address value : Expr) (endian : Endian) (size : Nat) :
-    (memory.write address value endian size).name = memory.name :=
-  name_writePrefix ..
-
-theorem cellsSized_write {σ : Assignment} {memory : Bap.Symbolic.Memory} (h : CellsSized σ memory.cells)
-    (address value : Expr) (endian : Endian) (size : Nat) :
-    CellsSized σ (memory.write address value endian size).cells := by
+theorem memorySized_write {σ : Assignment} {memory : Bap.Symbolic.Memory} (h : MemorySized σ memory)
+    {address : Expr} (ha : (denote σ address).1 = address.width) (value : Expr) (endian : Endian) (size : Nat) :
+    MemorySized σ (memory.write address value endian size) := by
   rw [write_eq_prefix]
-  have : ∀ k, CellsSized σ (writePrefix memory address value endian size k).cells := by
+  have : ∀ k, MemorySized σ (writePrefix memory address value endian size k) := by
     intro k
     induction k with
     | zero => exact h
     | succ k ih =>
       rw [writePrefix_succ]
-      exact cellsSized_writeByte ih _ (width_denote_byteAt ..) (by simp only [byteAt, Expr.width]; omega)
+      exact memorySized_writeByte ih (fst_offsetAddress σ address k ha) (width_denote_byteAt ..) (by simp only [byteAt, Expr.width]; omega)
   exact this size
 
 private theorem modelWrite_succ (bytes : ByteMap) (target value : Bits) (endian : Endian) (size k : Nat) :
@@ -440,13 +604,13 @@ private theorem modelWrite_succ (bytes : ByteMap) (target value : Bits) (endian 
   simp [List.range_succ, List.foldl_append]
 
 /-- A multi-byte write updates the byte map exactly as the concrete write does, for any assignment. -/
-theorem byteMap_write (σ : Assignment) (memory : Bap.Symbolic.Memory) (address value : Expr) (endian : Endian)
+theorem memoryByte_write (σ : Assignment) (memory : Bap.Symbolic.Memory) (address value : Expr) (endian : Endian)
     (size : Nat) (h : (denote σ address).1 = address.width) (target : Bits) :
-    byteMap σ memory.name (memory.write address value endian size).cells target =
-      modelWrite (byteMap σ memory.name memory.cells) (denote σ address) (denote σ value) endian size target := by
+    memoryByte σ (memory.write address value endian size) target =
+      modelWrite (memoryByte σ memory) (denote σ address) (denote σ value) endian size target := by
   rw [write_eq_prefix]
-  have : ∀ k target, byteMap σ memory.name (writePrefix memory address value endian size k).cells target =
-      (List.range k).foldl (init := byteMap σ memory.name memory.cells) (fun bytes offset location =>
+  have : ∀ k target, memoryByte σ (writePrefix memory address value endian size k) target =
+      (List.range k).foldl (init := memoryByte σ memory) (fun bytes offset location =>
         if sameBits (offsetBits (denote σ address) offset) location then
           valueByte (denote σ value) (match endian with | .little => offset | .big => size - 1 - offset)
         else bytes location) target := by
@@ -457,20 +621,10 @@ theorem byteMap_write (σ : Assignment) (memory : Bap.Symbolic.Memory) (address 
       intro target
       rw [modelWrite_succ, writePrefix_succ]
       simp only
-      have hname := name_writePrefix memory address value endian size k
-      have := byteMap_writeByte σ (writePrefix memory address value endian size k)
-        (offsetAddress address k)
-        (byteAt value (if endian = Bap.Endian.little then k else size - 1 - k)) target
-      rw [hname] at this
-      rw [writeStep, this, denote_offsetAddress σ address k h, byteOf_byteAt, ih]
+      simp only [memoryByte] at ih ⊢
+      rw [writeStep, baseByte_writeByte, byteMap_writeByte, denote_offsetAddress σ address k h, byteOf_byteAt, ih]
       cases endian <;> rfl
   exact this size target
-
-private theorem toNat_lt_of_width {b : Bits} {n : Nat} (h : b.1 = n) : b.2.toNat < 2 ^ n := by
-  obtain ⟨w, x⟩ := b
-  simp only at h
-  subst h
-  exact x.isLt
 
 /-- The bytes of a read, most significant first, as a chain of concatenations. -/
 def chainBytes : List Expr → Expr
@@ -516,18 +670,18 @@ private theorem chain_denote (σ : Assignment) (rest : List Expr) (first : Expr)
 /-- Soundness of multi-byte reads under aliasing, for any assignment: the expression denotes the value
 that a concrete read of the byte map would produce, with the width the type checker promises. -/
 theorem denote_read (σ : Assignment) (memory : Bap.Symbolic.Memory) (address : Expr) (endian : Endian) (size : Nat)
-    (hcells : CellsSized σ memory.cells) (h : (denote σ address).1 = address.width) :
+    (hcells : MemorySized σ memory) (h : (denote σ address).1 = address.width) :
     (denote σ (memory.read address endian size)).1 = size * 8 ∧
       (denote σ (memory.read address endian size)).2.toNat =
-        modelRead (byteMap σ memory.name memory.cells) (denote σ address) endian size := by
+        modelRead (memoryByte σ memory) (denote σ address) endian size := by
   have hbyte : ∀ offset, denote σ (memory.readByte (offsetAddress address offset)) =
-      ⟨8, byteMap σ memory.name memory.cells (offsetBits (denote σ address) offset)⟩ := by
+      ⟨8, memoryByte σ memory (offsetBits (denote σ address) offset)⟩ := by
     intro offset
-    rw [denote_readByte σ memory _ hcells, denote_offsetAddress σ address offset h]
+    rw [denote_readByte σ (fst_offsetAddress σ address offset h) hcells, denote_offsetAddress σ address offset h]
   let exprs := (List.range size).map fun offset => memory.readByte (offsetAddress address offset)
   have hbytes : exprs.map (byteOf σ) =
       (List.range size).map fun offset =>
-        byteMap σ memory.name memory.cells (offsetBits (denote σ address) offset) := by
+        memoryByte σ memory (offsetBits (denote σ address) offset) := by
     simp only [exprs, List.map_map]
     apply List.map_congr_left
     intro offset _
@@ -587,12 +741,17 @@ open_private_decls Bap.Bil.Eval Bap.Bil expectMemory evalUn
 /-- A symbolic memory stands for a concrete one when the bytes agree at every location. -/
 def MemRel (σ : Assignment) (memory : Bap.Symbolic.Memory) {w : Nat} (concrete : Bap.Memory w) : Prop :=
   ∀ address : BitVec w, (Bap.Memory.readByte concrete address).toBitVec =
-    byteMap σ memory.name memory.cells ⟨w, address⟩
+    memoryByte σ memory ⟨w, address⟩
+
+open Bap.Proofs.Core.MemoryLaws (PagesSized write_eq write_pagesSized readByte_write_frame image
+  readByte_writeRegion_inside)
+open_private_decls Bap.Proofs.Core Bap.Proofs.Core.MemoryLaws page_getBang toNat_add_ofNat
+open_private_decls Bap.Core.Memory Bap Memory.byteAt
 
 /-- The expressions and memories of a state are sized as their `width`s claim. -/
 structure WellSized (σ : Assignment) (s : State) : Prop where
   envSized : ∀ entry ∈ s.env, (denote σ entry.2).1 = entry.2.width
-  cellsSized : ∀ entry ∈ s.memories, CellsSized σ entry.2.cells
+  memoriesSized : ∀ entry ∈ s.memories, MemorySized σ entry.2
 
 /-- A symbolic state stands for a concrete environment under an assignment. -/
 structure Rel (σ : Assignment) (s : State) (env : Bil.Env) : Prop extends WellSized σ s where
@@ -600,6 +759,9 @@ structure Rel (σ : Assignment) (s : State) (env : Bil.Env) : Prop extends WellS
     Bil.lookup env var = .ok (.bits v) → denote σ x = ⟨w, v⟩
   mems : ∀ var w (concrete : Bap.Memory w), isMemoryType var.typ = true →
     Bil.lookup env var = .ok (.memory concrete) → MemRel σ (memoryOf s var) concrete
+  inputs : ∀ var w (v : BitVec w), isMemoryType var.typ = false → Assoc.get var s.env = none →
+    Bil.lookup env var = .ok (.bits v) → denote σ (.var (inputName var) (typeWidth var.typ)) = ⟨w, v⟩
+  pages : ∀ var w (concrete : Bap.Memory w), Bil.lookup env var = .ok (.memory concrete) → PagesSized concrete
 
 private theorem bind_ok {α β : Type} {x : Except String α} {f : α → Except String β} {y : β} :
     (x >>= f) = .ok y ↔ ∃ a, x = .ok a ∧ f a = .ok y := by
@@ -619,22 +781,29 @@ private theorem get_mem {α β : Type} [DecidableEq α] {l : List (α × β)} {k
       exact List.mem_cons_of_mem _ (ih (by simpa [Assoc.get, List.lookup, hb] using h))
 
 private theorem lookup_ok {env : Env} {var : Bap.Var} {x : Expr} (h : lookup env var = .ok x) :
-    isMemoryType var.typ = false ∧ Assoc.get var env = some x := by
+    isMemoryType var.typ = false ∧ (Assoc.get var env = some x ∨
+      Assoc.get var env = none ∧ x = .var (inputName var) (typeWidth var.typ) ∧ typeWidth var.typ ≠ 0) := by
   unfold lookup at h
   cases ht : var.typ <;> simp only [isMemoryType, true_and] <;> simp only [ht] at h
   case mem => cases h
   all_goals
     simp only [↓reduceIte, Bool.false_eq_true] at h
     split at h
-    · next heq => cases h; exact heq
-    · cases h
+    · next heq => cases h; exact .inl heq
+    · next heq =>
+      refine .inr ⟨heq, ?_⟩
+      split at h
+      · cases h
+      · next hz =>
+        cases h
+        exact ⟨by simp only, by simpa only [ht] using hz⟩
 
-theorem cells_memoryOf {σ : Assignment} {s : State} (h : WellSized σ s) (var : Bap.Var) :
-    CellsSized σ (memoryOf s var).cells := by
+theorem memorySized_memoryOf {σ : Assignment} {s : State} (h : WellSized σ s) (var : Bap.Var) :
+    MemorySized σ (memoryOf s var) := by
   unfold memoryOf
   split
-  · next memory heq => exact h.cellsSized _ (get_mem heq)
-  · intro _ hc; cases hc
+  · next memory heq => exact h.memoriesSized _ (get_mem heq)
+  · exact .plain _ _ (fun _ hc => by cases hc)
 
 def symbolicBinary (op : Bil.BinOp) (left right : Expr) : Expr :=
   match op with
@@ -836,9 +1005,9 @@ theorem fst_evalCast {σ : Assignment} {kind : Bil.Cast} {width : Nat} {value re
       · exact hunary _ _ (by split <;> simp)
 
 theorem width_readCells {cells : List (Expr × Expr)} (h : ∀ cell ∈ cells, cell.2.width = 8)
-    (name : String) (address : Expr) : (Memory.readCells name address cells).width = 8 := by
+    {initial : Expr} (hi : initial.width = 8) (address : Expr) : (Memory.readCells initial address cells).width = 8 := by
   induction cells with
-  | nil => rfl
+  | nil => exact hi
   | cons cell rest ih =>
     have hc := h cell (by simp)
     have hr := ih fun c hc => h c (List.mem_cons_of_mem _ hc)
@@ -848,8 +1017,15 @@ theorem width_readCells {cells : List (Expr × Expr)} (h : ∀ cell ∈ cells, c
     · exact hr
     · exact hc
 
+theorem width_readInitial {σ : Assignment} {memory : Bap.Symbolic.Memory} (h : MemorySized σ memory) (address : Expr) :
+    (Memory.readInitial memory address).width = 8 := by
+  induction h with
+  | plain name cells _ => rfl
+  | branch name condition yes no cells hy _ _ ihy _ =>
+    exact width_readCells (fun c hc => (hy.cellsSized c hc).2.1) ihy address
+
 /-- Loads have the width the type checker assigns them. -/
-theorem width_read {memory : Bap.Symbolic.Memory} (h : ∀ cell ∈ memory.cells, cell.2.width = 8) (address : Expr)
+theorem width_read {σ : Assignment} {memory : Bap.Symbolic.Memory} (h : MemorySized σ memory) (address : Expr)
     (endian : Endian) (size : Nat) : (memory.read address endian size).width = size * 8 := by
   simp only [Bap.Symbolic.Memory.read]
   have hchain : ∀ (bytes : List Expr) (first : Expr),
@@ -868,7 +1044,7 @@ theorem width_read {memory : Bap.Symbolic.Memory} (h : ∀ cell ∈ memory.cells
       b.width = 8 := by
     intro b hb
     obtain ⟨_, _, rfl⟩ := List.mem_map.mp hb
-    exact width_readCells h _ _
+    exact width_readCells (fun c hc => (h.cellsSized c hc).2.1) (width_readInitial h _) _
   generalize hl : (List.range size).map (fun offset => memory.readByte (offsetAddress address offset)) = bytes at hbytes ⊢
   have hlen : bytes.length = size := by rw [← hl]; simp
   have horder : (if endian = Bap.Endian.little then bytes.reverse else bytes).length = size ∧
@@ -894,52 +1070,74 @@ private theorem wellSized_bind {σ : Assignment} {s : State} (h : WellSized σ s
       rcases List.mem_cons.mp he with rfl | he
       · exact hx
       · exact h.envSized entry he,
-    h.cellsSized⟩
+    h.memoriesSized⟩
 
 private theorem wellSized_bindMemory {σ : Assignment} {s : State} (h : WellSized σ s) (var : Bap.Var)
-    {m : Bap.Symbolic.Memory} (hm : CellsSized σ m.cells) : WellSized σ { s with memories := (var, m) :: s.memories } :=
+    {m : Bap.Symbolic.Memory} (hm : MemorySized σ m) : WellSized σ { s with memories := (var, m) :: s.memories } :=
   ⟨h.envSized, fun entry he => by
       rcases List.mem_cons.mp he with rfl | he
       · exact hm
-      · exact h.cellsSized entry he⟩
+      · exact h.memoriesSized entry he⟩
+
+private theorem memoryIte_sized {σ : Assignment} {c : Expr} {yes no result : Bap.Symbolic.Memory}
+    (hy : MemorySized σ yes) (hn : MemorySized σ no)
+    (h : (match c.knownCondition with
+      | some true => Except.ok yes
+      | some false => .ok no
+      | none => .ok { name := yes.name, branch := some (c, yes, no) } : Except String Bap.Symbolic.Memory) = .ok result) :
+    MemorySized σ result := by
+  split at h
+  · cases h; exact hy
+  · cases h; exact hn
+  · cases h; exact .branch _ _ _ _ _ hy hn (fun _ hc => by cases hc)
 
 theorem sized_eval (σ : Assignment) (e : Bil.Exp) :
     (∀ {s : State} {x : Expr}, WellSized σ s → evalExp s e = .ok x → (denote σ x).1 = x.width) ∧
       (∀ {s : State} {memory : Bap.Symbolic.Memory}, WellSized σ s → evalMemory s e = .ok memory →
-        CellsSized σ memory.cells) := by
+        MemorySized σ memory) := by
   induction e with
   | int value =>
     refine ⟨fun _ h => ?_, fun _ h => by simp [evalMemory] at h⟩
-    simp only [evalExp, Except.ok.injEq] at h
-    subst h; simp [Expr.width]
+    simp only [evalExp] at h
+    split at h
+    · cases h
+    · cases h; simp [Expr.width]
   | var var =>
     refine ⟨fun hs h => ?_, fun hs h => ?_⟩
     · simp only [evalExp] at h
-      exact hs.envSized _ (get_mem (lookup_ok h).2)
+      rcases (lookup_ok h).2 with hg | ⟨_, rfl, _⟩
+      · exact hs.envSized _ (get_mem hg)
+      · simp [Expr.width]
     · simp only [evalMemory] at h
       split at h
       · cases h
-        exact cells_memoryOf hs var
+        exact memorySized_memoryOf hs var
       · cases h
   | load memory address endian size ihm iha =>
     refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
     simp only [evalExp, bind_ok] at h
     obtain ⟨m, hm, a, ha, h⟩ := h
-    cases h
-    have hc := ihm.2 hs hm
-    rw [(denote_read σ m a endian size hc (iha.1 hs ha)).1, width_read fun c hcell => (hc c hcell).2]
-  | store memory address value endian size ihm iha ihv =>
-    refine ⟨fun _ h => by simp [evalExp] at h, fun hs h => ?_⟩
-    simp only [evalMemory, bind_ok] at h
-    obtain ⟨m, hm, a, _, v, _, h⟩ := h
     split at h
     · cases h
     · cases h
-      exact cellsSized_write (ihm.2 hs hm) _ _ _ _
+      have hc := ihm.2 hs hm
+      rw [(denote_read σ m a endian size hc (iha.1 hs ha)).1, width_read hc]
+  | store memory address value endian size ihm iha ihv =>
+    refine ⟨fun _ h => by simp [evalExp] at h, fun hs h => ?_⟩
+    simp only [evalMemory, bind_ok] at h
+    obtain ⟨m, hm, a, ha, v, _, h⟩ := h
+    split at h
+    · cases h
+    · split at h
+      · cases h
+      · split at h
+        · cases h
+        · cases h
+          exact memorySized_write (ihm.2 hs hm) (iha.1 hs ha) _ _ _
   | bin op left right ihl ihr =>
     refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
     simp only [evalExp, bind_ok] at h
-    obtain ⟨l, hl, r, _, h⟩ := h
+    obtain ⟨l, hl, r, hrr, h⟩ := h
     cases h
     exact fst_binary σ op (ihl.1 hs hl)
   | un op value ih =>
@@ -969,20 +1167,25 @@ theorem sized_eval (σ : Assignment) (e : Bil.Exp) :
       · obtain ⟨x, hx, h⟩ := bind_ok.mp h
         exact ihb.2 (wellSized_bind hs var (ihv.1 hs hx)) h
   | ite condition yes no _ ihy ihn =>
-    refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
-    simp only [evalExp, bind_ok] at h
-    obtain ⟨c, _, y, hy, n, hn, h⟩ := h
-    split at h
-    · cases h
-    · split at h
+    refine ⟨fun hs h => ?_, fun hs h => ?_⟩
+    · simp only [evalExp, bind_ok] at h
+      obtain ⟨c, _, y, hy, n, hn, h⟩ := h
+      split at h
       · cases h
-      · next hne =>
-        cases h
-        have hne' : y.width = n.width := by simpa using hne
-        simp only [denote, Expr.width]
-        split
-        · exact ihy.1 hs hy
-        · rw [ihn.1 hs hn, hne']
+      · split at h
+        · cases h
+        · next hne =>
+          cases h
+          have hne' : y.width = n.width := by simpa using hne
+          simp only [denote, Expr.width]
+          split
+          · exact ihy.1 hs hy
+          · rw [ihn.1 hs hn, hne']
+    · simp only [evalMemory, bind_ok] at h
+      obtain ⟨c, _, y, hy, n, hn, h⟩ := h
+      split at h
+      · cases h
+      · exact memoryIte_sized (ihy.2 hs hy) (ihn.2 hs hn) h
   | extract high low value _ =>
     refine ⟨fun _ h => ?_, fun _ h => by simp [evalMemory] at h⟩
     simp only [evalExp, bind_ok] at h
@@ -1001,29 +1204,14 @@ theorem sized_eval (σ : Assignment) (e : Bil.Exp) :
     cases h
     simp only [denote, Expr.width, ihl.1 hs hl, ihr.1 hs hr]
   | unknown message typ =>
-    refine ⟨fun _ h => ?_, fun _ h => by simp [evalMemory] at h⟩
-    simp only [evalExp, Except.ok.injEq] at h
-    subst h; simp [Expr.width]
-
-/-- Expressions without stores: everything in `Bap.Memory.write` is `partial`, so nothing can be proved of it. -/
-def noStore : Bil.Exp → Bool
-  | .int _ | .var _ | .unknown _ _ => true
-  | .load memory address _ _ => noStore memory && noStore address
-  | .store _ _ _ _ _ => false
-  | .bin _ left right | .concat left right => noStore left && noStore right
-  | .un _ value | .cast _ _ value | .extract _ _ value => noStore value
-  | .letIn _ value body => noStore value && noStore body
-  | .ite condition yes no => noStore condition && noStore yes && noStore no
-
-/-- What soundness needs of `Bap.Memory.write`, which is built on a `partial` helper and so can't be
-proved here. Reads wrap around the address space, and so does the symbolic model; this says writes do too,
-which `Bap.Memory.write` doesn't do yet: a store soundness result is only as good as this premise. -/
-def StoreSpec : Prop :=
-  ∀ {w vw : Nat} (m m' : Bap.Memory w) (a : BitVec w) (v : BitVec vw) (endian : Endian) (size : Nat),
-    Bap.Memory.write m a v endian size = .ok m' →
-    ∀ address : BitVec w, (Bap.Memory.readByte m' address).toBitVec =
-      modelWrite (fun location => if h : location.1 = w then (Bap.Memory.readByte m (h ▸ location.2)).toBitVec else 0)
-        ⟨w, a⟩ ⟨vw, v⟩ endian size ⟨w, address⟩
+    refine ⟨fun _ h => ?_, fun _ h => ?_⟩
+    · simp only [evalExp] at h
+      split at h
+      · cases h
+      · cases h; simp [Expr.width]
+    · simp only [evalMemory] at h
+      cases h
+      exact .plain _ _ (fun _ hc => by cases hc)
 
 private theorem find_bind_same (env : Bil.Env) (var : Bap.Var) (value : Value) :
     Bil.lookup (Bil.bind env var value) var = .ok value := by
@@ -1062,10 +1250,25 @@ private theorem get_cons_same {β : Type} (l : List (Bap.Var × β)) (var : Bap.
     Assoc.get var ((var, x) :: l) = some x := by
   simp [Assoc.get]
 
+private theorem pages_bind {env : Bil.Env} {var : Bap.Var} {value : Value}
+    (h : ∀ var w (concrete : Bap.Memory w), Bil.lookup env var = .ok (.memory concrete) → PagesSized concrete)
+    (hv : ∀ {w} {c : Bap.Memory w}, value = .memory c → PagesSized c) :
+    ∀ var' w (concrete : Bap.Memory w), Bil.lookup (Bil.bind env var value) var' = .ok (.memory concrete) →
+      PagesSized concrete := by
+  intro var' w c hl
+  by_cases he : var' = var
+  · subst he
+    rw [find_bind_same] at hl
+    cases hl
+    exact hv rfl
+  · rw [lookup_bind_ne _ _ he] at hl
+    exact h _ _ _ hl
+
 /-- Binding a bitvector variable keeps a state related to its concrete environment. -/
 theorem rel_bind {σ : Assignment} {s : State} {env : Bil.Env} (h : Rel σ s env) {var : Bap.Var} {x : Expr}
     {value : Value} (hmem : isMemoryType var.typ = false) (hx : (denote σ x).1 = x.width)
-    (hv : ∀ {w} {v : BitVec w}, value = .bits v → denote σ x = ⟨w, v⟩) :
+    (hv : ∀ {w} {v : BitVec w}, value = .bits v → denote σ x = ⟨w, v⟩)
+    (hp : ∀ {w} {c : Bap.Memory w}, value = .memory c → PagesSized c) :
     Rel σ { s with env := (var, x) :: s.env } (Bil.bind env var value) where
   toWellSized := wellSized_bind h.toWellSized var hx
   vars := by
@@ -1087,11 +1290,22 @@ theorem rel_bind {σ : Assignment} {s : State} {env : Bil.Env} (h : Rel σ s env
       rw [hm] at hmem; cases hmem
     rw [lookup_bind_ne _ _ he] at hl
     exact h.mems _ _ _ hm hl
+  inputs := by
+    intro var' w v hm hg hl
+    by_cases he : var' = var
+    · subst he
+      rw [get_cons_same] at hg
+      cases hg
+    · rw [get_cons_ne _ _ he] at hg
+      rw [lookup_bind_ne _ _ he] at hl
+      exact h.inputs _ _ _ hm hg hl
+  pages := pages_bind h.pages hp
 
 /-- Binding a memory variable keeps a state related to its concrete environment. -/
 theorem rel_bindMemory {σ : Assignment} {s : State} {env : Bil.Env} (h : Rel σ s env) {var : Bap.Var}
-    {m : Bap.Symbolic.Memory} {value : Value} (hmem : isMemoryType var.typ = true) (hm : CellsSized σ m.cells)
-    (hv : ∀ {w} {c : Bap.Memory w}, value = .memory c → MemRel σ m c) :
+    {m : Bap.Symbolic.Memory} {value : Value} (hmem : isMemoryType var.typ = true) (hm : MemorySized σ m)
+    (hv : ∀ {w} {c : Bap.Memory w}, value = .memory c → MemRel σ m c)
+    (hp : ∀ {w} {c : Bap.Memory w}, value = .memory c → PagesSized c) :
     Rel σ { s with memories := (var, m) :: s.memories } (Bil.bind env var value) where
   toWellSized := wellSized_bindMemory h.toWellSized var hm
   vars := by
@@ -1112,6 +1326,95 @@ theorem rel_bindMemory {σ : Assignment} {s : State} {env : Bil.Env} (h : Rel σ
     · rw [memoryOf_bind_ne _ _ he]
       rw [lookup_bind_ne _ _ he] at hl
       exact h.mems _ _ _ ht hl
+  inputs := by
+    intro var' w v ht hg hl
+    have he : var' ≠ var := by
+      rintro rfl
+      rw [ht] at hmem; cases hmem
+    rw [lookup_bind_ne _ _ he] at hl
+    exact h.inputs _ _ _ ht hg hl
+  pages := pages_bind h.pages hp
+
+/-- Memories in the concrete evaluator keep their pages whole: the side condition of the `Bap.Memory` laws is
+an invariant of evaluation. -/
+theorem pages_evalExp (e : Bil.Exp) : ∀ {env : Bil.Env} {w : Nat} {c : Bap.Memory w},
+    (∀ var w (concrete : Bap.Memory w), Bil.lookup env var = .ok (.memory concrete) → PagesSized concrete) →
+    Bil.evalExp env e = .ok (.memory c) → PagesSized c := by
+  induction e with
+  | var var => intro env w c h hc; exact h var w c hc
+  | store memory address value endian size ihm =>
+    intro env w c h hc
+    simp only [Bil.evalExp, bind_ok] at hc
+    obtain ⟨mv, hmv, ⟨mw, cm⟩, hexp, av, hav, ⟨aw, addr⟩, hbits, vv, hvv, ⟨vw, val⟩, hvbits, hc⟩ := hc
+    cases mv <;> simp only [expectMemory, reduceCtorEq] at hexp
+    cases hexp
+    simp only at hc
+    by_cases hw : aw = mw
+    · subst hw
+      simp only [↓reduceDIte] at hc
+      obtain ⟨updated, hu, hc⟩ := bind_ok.mp hc
+      cases hc
+      exact write_pagesSized (ihm h hmv) hu
+    · simp [hw] at hc
+  | letIn var value body ihv ihb =>
+    intro env w c h hc
+    simp only [Bil.evalExp, bind_ok] at hc
+    obtain ⟨cv, hcv, hc⟩ := hc
+    exact ihb (pages_bind h (fun he => ihv h (he ▸ hcv))) hc
+  | ite condition yes no _ ihy ihn =>
+    intro env w c h hc
+    simp only [Bil.evalExp, bind_ok] at hc
+    obtain ⟨cv, hcv, ⟨cw, cb⟩, hcb, hc⟩ := hc
+    simp only at hc
+    by_cases hw : cw = 1
+    · subst hw
+      simp only [↓reduceDIte] at hc
+      split at hc
+      · exact ihy h hc
+      · exact ihn h hc
+    · simp [hw] at hc
+  | int value => intro env w c h hc; simp [Bil.evalExp] at hc
+  | load memory address endian size =>
+    intro env w c h hc
+    simp only [Bil.evalExp, bind_ok] at hc
+    obtain ⟨_, _, _, _, _, _, ⟨aw, _⟩, _, hc⟩ := hc
+    simp only at hc
+    split at hc <;> cases hc
+  | bin op left right =>
+    intro env w c h hc
+    simp only [Bil.evalExp, bind_ok] at hc
+    obtain ⟨_, _, ⟨lw, lv⟩, _, _, _, ⟨rw, rv⟩, _, hc⟩ := hc
+    by_cases hwidth : lw = rw
+    · subst hwidth
+      obtain ⟨v', hv', _⟩ := evalBin_same op lv rv
+      rw [hv'] at hc
+      cases hc
+    · simp [Bil.evalBin, hwidth] at hc
+  | un op value =>
+    intro env w c h hc
+    simp only [Bil.evalExp, bind_ok] at hc
+    obtain ⟨_, _, ⟨_, _⟩, _, hc⟩ := hc
+    cases op <;> simp only [evalUn, Except.ok.injEq] at hc <;> cases hc
+  | cast kind width value =>
+    intro env w c h hc
+    simp only [Bil.evalExp, bind_ok] at hc
+    obtain ⟨_, _, ⟨_, _⟩, _, hc⟩ := hc
+    cases kind
+    case high =>
+      obtain ⟨_, _, hc⟩ := bind_ok.mp hc
+      cases hc
+    all_goals cases hc
+  | extract high low value =>
+    intro env w c h hc
+    simp only [Bil.evalExp, bind_ok] at hc
+    obtain ⟨_, _, ⟨_, _⟩, _, _, _, hc⟩ := hc
+    cases hc
+  | concat left right =>
+    intro env w c h hc
+    simp only [Bil.evalExp, bind_ok] at hc
+    obtain ⟨_, _, ⟨_, _⟩, _, _, _, ⟨_, _⟩, _, hc⟩ := hc
+    cases hc
+  | unknown message typ => intro env w c h hc; simp [Bil.evalExp] at hc
 
 private theorem modelWrite_congr {f g : ByteMap} {location : Bits} (h : f location = g location)
     (target value : Bits) (endian : Endian) (size : Nat) :
@@ -1133,6 +1436,112 @@ private theorem modelWrite_congr {f g : ByteMap} {location : Bits} (h : f locati
       simp only [ih]
   exact this size
 
+/-- A write leaves a location alone that none of its bytes touch. -/
+theorem modelWrite_outside (bytes : ByteMap) (target value : Bits) (endian : Endian) {size : Nat} {location : Bits}
+    (h : ∀ k < size, sameBits (offsetBits target k) location = false) :
+    modelWrite bytes target value endian size location = bytes location := by
+  simp only [modelWrite]
+  have : ∀ n, n ≤ size → (List.range n).foldl (init := bytes) (fun bytes offset location =>
+        if sameBits (offsetBits target offset) location then
+          valueByte value (match endian with | .little => offset | .big => size - 1 - offset)
+        else bytes location) location = bytes location := by
+    intro n
+    induction n with
+    | zero => intro _; rfl
+    | succ n ih =>
+      intro hn
+      rw [modelWrite_succ]
+      simp only [h n (by omega), Bool.false_eq_true, ↓reduceIte]
+      exact ih (by omega)
+  exact this size (Nat.le_refl _)
+
+private theorem sameBits_offset_ne {t : Bits} {j k : Nat} (hj : j < 2 ^ t.1) (hk : k < 2 ^ t.1) (h : j ≠ k) :
+    sameBits (offsetBits t j) (offsetBits t k) = false := by
+  obtain ⟨w, x⟩ := t
+  cases he : sameBits (offsetBits ⟨w, x⟩ j) (offsetBits ⟨w, x⟩ k) with
+  | false => rfl
+  | true =>
+    have e := sameBits_iff.mp he
+    simp only [offsetBits, Sigma.mk.injEq, heq_eq_eq, true_and] at e
+    have e' : BitVec.ofNat w j = BitVec.ofNat w k := by simpa using e
+    have := congrArg BitVec.toNat e'
+    simp only [BitVec.toNat_ofNat, Nat.mod_eq_of_lt hj, Nat.mod_eq_of_lt hk] at this
+    exact absurd this h
+
+/-- A write covers each of its offsets with the matching byte, while it doesn't wrap around the addresses. -/
+theorem modelWrite_offset (bytes : ByteMap) (target value : Bits) (endian : Endian) {size k : Nat}
+    (hsize : size ≤ 2 ^ target.1) (hk : k < size) :
+    modelWrite bytes target value endian size (offsetBits target k) =
+      valueByte value (match endian with | .little => k | .big => size - 1 - k) := by
+  simp only [modelWrite]
+  have : ∀ n, n ≤ size → k < n →
+      (List.range n).foldl (init := bytes) (fun bytes offset location =>
+        if sameBits (offsetBits target offset) location then
+          valueByte value (match endian with | .little => offset | .big => size - 1 - offset)
+        else bytes location) (offsetBits target k) =
+      valueByte value (match endian with | .little => k | .big => size - 1 - k) := by
+    intro n
+    induction n with
+    | zero => intro _ h; omega
+    | succ n ih =>
+      intro hn hlt
+      rw [modelWrite_succ]
+      simp only
+      by_cases he : n = k
+      · subst he
+        have : sameBits (offsetBits target n) (offsetBits target n) = true := sameBits_iff.mpr rfl
+        rw [ite_eq_left this]
+      · rw [ite_eq_right (by simp [sameBits_offset_ne (t := target) (j := n) (k := k) (by omega) (by omega) he])]
+        exact ih (by omega) (by omega)
+  exact this size (Nat.le_refl _) hk
+
+/-- The store law: the real `Bap.Memory.write` has the bytes of the symbolic model, wrapping included, as long
+as its pages are whole, which `pages_evalExp` keeps, and the store does not overlap itself, which the executor
+rejects. -/
+theorem memRel_write {σ : Assignment} {memory : Bap.Symbolic.Memory} {w vw : Nat} {concrete updated : Bap.Memory w}
+    {a x : Expr} {address : BitVec w} {value : BitVec vw} {endian : Endian} {size : Nat}
+    (hrel : MemRel σ memory concrete) (hpages : PagesSized concrete) (hda : denote σ a = ⟨w, address⟩)
+    (hwa : a.width = w) (hdx : denote σ x = ⟨vw, value⟩) (hsize : size ≤ 2 ^ w)
+    (hu : Bap.Memory.write concrete address value endian size = .ok updated) :
+    MemRel σ (memory.write a x endian size) updated := by
+  intro location
+  rw [memoryByte_write σ memory a x endian size (by rw [hda, hwa]), hda, hdx]
+  by_cases hin : ∃ k, k < size ∧ location = address + BitVec.ofNat w k
+  · obtain ⟨k, hk, rfl⟩ := hin
+    have hs : size * 8 = vw := by
+      by_cases hne : size * 8 = vw
+      · exact hne
+      · simp [Bap.Memory.write, hne] at hu
+    rw [write_eq hs endian] at hu
+    simp only [Except.ok.injEq] at hu
+    subst hu
+    have himage : (image value endian size).length = size := by simp [image]
+    have hdata : (ByteArray.mk (image value endian size).toArray).size = size := by
+      show (image value endian size).toArray.size = size
+      simp [himage]
+    have hbyte := readByte_writeRegion_inside hpages address.toNat (ByteArray.mk (image value endian size).toArray)
+      (by rw [hdata]; exact hsize) (j := k) (by rw [hdata]; exact hk) (address + BitVec.ofNat w k)
+      (toNat_add_ofNat address k)
+    rw [hbyte, page_getBang]
+    have hmodel := modelWrite_offset (memoryByte σ memory) ⟨w, address⟩ ⟨vw, value⟩ endian (size := size) (k := k) hsize hk
+    simp only [offsetBits] at hmodel
+    rw [hmodel]
+    show ((image value endian size).toArray[k]!).toBitVec = _
+    rw [getElem!_pos _ k (by simpa [himage] using hk)]
+    apply BitVec.eq_of_toNat_eq
+    cases endian <;> simp [image, Memory.byteAt, valueByte, Nat.mul_comm 8]
+  · have hne : ∀ k, k < size → location ≠ address + BitVec.ofNat w k := by
+      intro k hk he
+      exact hin ⟨k, hk, he⟩
+    rw [readByte_write_frame hpages hu hne, hrel location, modelWrite_outside]
+    intro k hk
+    cases hb : sameBits (offsetBits ⟨w, address⟩ k) ⟨w, location⟩ with
+    | false => rfl
+    | true =>
+      have e := sameBits_iff.mp hb
+      simp only [offsetBits, Sigma.mk.injEq, heq_eq_eq, true_and] at e
+      exact absurd e.symm (hne k hk)
+
 private theorem fold_toBitVec (bytes : List UInt8) :
     bytes.foldl (fun result byte => result * 256 + byte.toNat) 0 =
       (bytes.map UInt8.toBitVec).foldl (fun result byte => result * 256 + byte.toNat) 0 := by
@@ -1141,7 +1550,7 @@ private theorem fold_toBitVec (bytes : List UInt8) :
 
 /-- A load through related memories denotes the concrete load. -/
 theorem denote_read_concrete {σ : Assignment} {memory : Bap.Symbolic.Memory} {w : Nat} {concrete : Bap.Memory w}
-    (hrel : MemRel σ memory concrete) (hcells : CellsSized σ memory.cells) {address : Expr} {a : BitVec w}
+    (hrel : MemRel σ memory concrete) (hcells : MemorySized σ memory) {address : Expr} {a : BitVec w}
     (hd : denote σ address = ⟨w, a⟩) (hw : address.width = w) (endian : Endian) (size : Nat) :
     denote σ (memory.read address endian size) = ⟨size * 8, Bap.Memory.read concrete a endian size⟩ := by
   obtain ⟨h1, h2⟩ := denote_read σ memory address endian size hcells (by rw [hd, hw])
@@ -1152,7 +1561,7 @@ theorem denote_read_concrete {σ : Assignment} {memory : Bap.Symbolic.Memory} {w
   have hbytes : ((List.range size).map fun offset =>
       Bap.Memory.readByte concrete (a + BitVec.ofNat w offset)).map UInt8.toBitVec =
       (List.range size).map fun offset =>
-        byteMap σ memory.name memory.cells (offsetBits ⟨w, a⟩ offset) := by
+        memoryByte σ memory (offsetBits ⟨w, a⟩ offset) := by
     rw [List.map_map]
     apply List.map_congr_left
     intro offset _
@@ -1259,9 +1668,24 @@ private theorem isOne_one_iff (c : BitVec 1) : isOne ⟨1, c⟩ = true ↔ c = 1
   · intro h; exact BitVec.eq_of_toNat_eq (by simpa using h)
   · rintro rfl; rfl
 
+private theorem known_sound {σ : Assignment} {x : Expr} {b : Bool} {c : BitVec 1}
+    (hk : x.knownCondition = some b) (hd : denote σ x = ⟨1, c⟩) : c = 1 ↔ b = true := by
+  cases x <;> simp only [Expr.knownCondition, reduceCtorEq] at hk
+  next w v =>
+    split at hk
+    · next hw =>
+      subst hw
+      rw [denote_const] at hd
+      cases hd
+      simp only [Option.some.injEq] at hk
+      subst hk
+      simp only [beq_iff_eq]
+      exact ⟨fun e => by rw [e]; rfl, fun e => BitVec.eq_of_toNat_eq (by simpa using e)⟩
+    · cases hk
+
 /-- Soundness of expression evaluation: under any assignment related to the concrete environment, the
 symbolic value of an expression denotes its concrete value. -/
-theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) (hs : StoreSpec ∨ noStore e = true) :
+theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) :
     (∀ {s : State} {env : Bil.Env} {x : Expr} {w : Nat} {v : BitVec w}, Rel σ s env → evalExp s e = .ok x →
       Bil.evalExp env e = .ok (.bits v) → denote σ x = ⟨w, v⟩) ∧
     (∀ {s : State} {env : Bil.Env} {memory : Bap.Symbolic.Memory} {w : Nat} {c : Bap.Memory w}, Rel σ s env →
@@ -1269,17 +1693,21 @@ theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) (hs : StoreSpec ∨ noStor
   induction e with
   | int value =>
     refine ⟨fun _ h hc => ?_, fun _ h _ => by simp [evalMemory] at h⟩
-    simp only [evalExp, Except.ok.injEq] at h
-    simp only [Bil.evalExp, Except.ok.injEq] at hc
-    subst h
-    cases hc
-    simp
+    simp only [evalExp] at h
+    split at h
+    · cases h
+    · cases h
+      simp only [Bil.evalExp, Except.ok.injEq] at hc
+      cases hc
+      simp
   | var var =>
     refine ⟨fun hr h hc => ?_, fun hr h hc => ?_⟩
     · simp only [evalExp] at h
       obtain ⟨hm, hg⟩ := lookup_ok h
       simp only [Bil.evalExp] at hc
-      exact hr.vars _ _ _ _ hm hg hc
+      rcases hg with hg | ⟨hg, rfl, _⟩
+      · exact hr.vars _ _ _ _ hm hg hc
+      · exact hr.inputs _ _ _ hm hg hc
     · simp only [evalMemory] at h
       split at h
       · next hm =>
@@ -1288,12 +1716,14 @@ theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) (hs : StoreSpec ∨ noStor
         exact hr.mems _ _ _ hm hc
       · cases h
   | load memory address endian size ihm iha =>
-    have hs' : StoreSpec ∨ noStore memory = true := hs.imp id (fun h => by simp_all [noStore])
-    have hsa : StoreSpec ∨ noStore address = true := hs.imp id (fun h => by simp_all [noStore])
-    refine ⟨fun hr h hc => ?_, fun _ h _ => by simp [evalMemory] at h⟩
+    refine ⟨@fun s env x w v hr h hc => ?_, fun _ h _ => by simp [evalMemory] at h⟩
     simp only [evalExp, bind_ok] at h
     obtain ⟨m, hm, a, ha, h⟩ := h
-    cases h
+    have h' : Bap.Symbolic.Memory.read m a endian size = x := by
+      split at h
+      · cases h
+      · cases h; rfl
+    subst h'
     simp only [Bil.evalExp, bind_ok] at hc
     obtain ⟨mv, hmv, ⟨mw, cm⟩, hexp, av, hav, ⟨aw, addr⟩, hbits, hc⟩ := hc
     cases mv <;> simp only [expectMemory, reduceCtorEq] at hexp
@@ -1305,44 +1735,48 @@ theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) (hs : StoreSpec ∨ noStor
     · subst hw
       simp only [↓reduceDIte, Except.ok.injEq] at hc
       cases hc
-      have hma := (iha hsa).1 hr ha hav
+      have hma := iha.1 hr ha hav
       have hsa' := (sized_eval σ address).1 hr.toWellSized ha
       rw [hma] at hsa'
-      exact denote_read_concrete ((ihm hs').2 hr hm hmv) ((sized_eval σ memory).2 hr.toWellSized hm) hma hsa'.symm _ _
+      exact denote_read_concrete (ihm.2 hr hm hmv) ((sized_eval σ memory).2 hr.toWellSized hm) hma hsa'.symm _ _
     · simp [hw] at hc
   | store memory address value endian size ihm iha ihv =>
     refine ⟨fun _ h _ => by simp [evalExp] at h, fun hr h hc => ?_⟩
-    have hspec : StoreSpec := hs.resolve_right (by simp [noStore])
     simp only [evalMemory, bind_ok] at h
     obtain ⟨m, hm, a, ha, x, hx, h⟩ := h
     split at h
     · cases h
-    · cases h
-      simp only [Bil.evalExp, bind_ok] at hc
-      obtain ⟨mv, hmv, ⟨mw, cm⟩, hexp, av, hav, ⟨aw, addr⟩, hbits, vv, hvv, ⟨vw, val⟩, hvbits, hc⟩ := hc
-      cases mv <;> simp only [expectMemory, reduceCtorEq] at hexp
-      cases hexp
-      cases av <;> simp only [Value.asBits, reduceCtorEq] at hbits
-      cases hbits
-      cases vv <;> simp only [Value.asBits, reduceCtorEq] at hvbits
-      cases hvbits
-      simp only at hc
-      by_cases hw : aw = mw
-      · subst hw
-        simp only [↓reduceDIte] at hc
-        obtain ⟨updated, hu, hc⟩ := bind_ok.mp hc
-        cases hc
-        have hma := (iha (.inl hspec)).1 hr ha hav
-        have hmx := (ihv (.inl hspec)).1 hr hx hvv
-        have hrelm := (ihm (.inl hspec)).2 hr hm hmv
-        have hsa := (sized_eval σ address).1 hr.toWellSized ha
-        intro location
-        rw [hspec _ _ _ _ _ _ hu location, name_write, byteMap_write σ m a x endian size hsa, hma, hmx]
-        exact (modelWrite_congr (by simpa using (hrelm location).symm) _ _ _ _).symm
-      · simp [hw] at hc
+    · split at h
+      · cases h
+      · split at h
+        · cases h
+        · next hfit =>
+          cases h
+          simp only [Bil.evalExp, bind_ok] at hc
+          obtain ⟨mv, hmv, ⟨mw, cm⟩, hexp, av, hav, ⟨aw, addr⟩, hbits, vv, hvv, ⟨vw, val⟩, hvbits, hc⟩ := hc
+          cases mv <;> simp only [expectMemory, reduceCtorEq] at hexp
+          cases hexp
+          cases av <;> simp only [Value.asBits, reduceCtorEq] at hbits
+          cases hbits
+          cases vv <;> simp only [Value.asBits, reduceCtorEq] at hvbits
+          cases hvbits
+          simp only at hc
+          by_cases hw : aw = mw
+          · subst hw
+            simp only [↓reduceDIte] at hc
+            obtain ⟨updated, hu, hc⟩ := bind_ok.mp hc
+            cases hc
+            have hma := iha.1 hr ha hav
+            have hmx := ihv.1 hr hx hvv
+            have hsa := (sized_eval σ address).1 hr.toWellSized ha
+            rw [hma] at hsa
+            have hsa' := hsa.symm
+            simp only at hsa'
+            rw [hsa'] at hfit
+            exact memRel_write (ihm.2 hr hm hmv) (pages_evalExp memory hr.pages hmv) hma hsa' hmx
+              (by simpa using hfit) hu
+          · simp [hw] at hc
   | bin op left right ihl ihr =>
-    have hsl : StoreSpec ∨ noStore left = true := hs.imp id (fun h => by simp_all [noStore])
-    have hsr : StoreSpec ∨ noStore right = true := hs.imp id (fun h => by simp_all [noStore])
     refine ⟨fun hr' h hc => ?_, fun _ h _ => by simp [evalMemory] at h⟩
     simp only [evalExp, bind_ok] at h
     obtain ⟨l, hl, r, hrr, h⟩ := h
@@ -1353,15 +1787,14 @@ theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) (hs : StoreSpec ∨ noStor
     cases hlb
     cases rv <;> simp only [Value.asBits, reduceCtorEq] at hrb
     cases hrb
-    have hdl := (ihl hsl).1 hr' hl hlv
-    have hdr := (ihr hsr).1 hr' hrr hrv
+    have hdl := ihl.1 hr' hl hlv
+    have hdr := ihr.1 hr' hrr hrv
     have hwl := (sized_eval σ left).1 hr'.toWellSized hl
     have hwr := (sized_eval σ right).1 hr'.toWellSized hrr
     rw [hdl] at hwl
     rw [hdr] at hwr
     exact denote_binary_sound hdl hdr hwl.symm hwr.symm hc
   | un op value ih =>
-    have hs' : StoreSpec ∨ noStore value = true := hs.imp id (fun h => by simp_all [noStore])
     refine ⟨fun hr h hc => ?_, fun _ h _ => by simp [evalMemory] at h⟩
     simp only [evalExp, bind_ok] at h
     obtain ⟨x, hx, h⟩ := h
@@ -1370,13 +1803,12 @@ theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) (hs : StoreSpec ∨ noStor
     obtain ⟨cv, hcv, ⟨cw, cb⟩, hcb, hc⟩ := hc
     cases cv <;> simp only [Value.asBits, reduceCtorEq] at hcb
     cases hcb
-    have hdx := (ih hs').1 hr hx hcv
+    have hdx := ih.1 hr hx hcv
     have hunary : ∀ name k, denote σ (.app name k [x]) = denoteUnary name k (denote σ x) := by
       intro name k; simp [denote]
     rw [hunary, hdx]
     cases op <;> simp only [evalUn, Except.ok.injEq] at hc <;> cases hc <;> simp [denoteUnary]
   | cast kind width value ih =>
-    have hs' : StoreSpec ∨ noStore value = true := hs.imp id (fun h => by simp_all [noStore])
     refine ⟨fun hr h hc => ?_, fun _ h _ => by simp [evalMemory] at h⟩
     simp only [evalExp, bind_ok] at h
     obtain ⟨x, hx, h⟩ := h
@@ -1384,7 +1816,7 @@ theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) (hs : StoreSpec ∨ noStor
     obtain ⟨cv, hcv, ⟨cw, cb⟩, hcb, hc⟩ := hc
     cases cv <;> simp only [Value.asBits, reduceCtorEq] at hcb
     cases hcb
-    have hdx := (ih hs').1 hr hx hcv
+    have hdx := ih.1 hr hx hcv
     have hwx := (sized_eval σ value).1 hr.toWellSized hx
     rw [hdx] at hwx
     have := denote_evalCast hdx hwx.symm kind h
@@ -1397,20 +1829,18 @@ theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) (hs : StoreSpec ∨ noStor
       cases hc
       exact this
   | letIn var value body ihv ihb =>
-    have hsv : StoreSpec ∨ noStore value = true := hs.imp id (fun h => by simp_all [noStore])
-    have hsb : StoreSpec ∨ noStore body = true := hs.imp id (fun h => by simp_all [noStore])
     have bits : ∀ {s : State} {env : Bil.Env} {x : Expr} {cv : Value}, Rel σ s env →
         isMemoryType var.typ = false → evalExp s value = .ok x → Bil.evalExp env value = .ok cv →
         Rel σ { s with env := (var, x) :: s.env } (Bil.bind env var cv) := by
       intro s env x cv hr hmem hx hcv
       exact rel_bind hr hmem ((sized_eval σ value).1 hr.toWellSized hx)
-        (fun he => (ihv hsv).1 hr hx (he ▸ hcv))
+        (fun he => ihv.1 hr hx (he ▸ hcv)) (fun he => pages_evalExp value hr.pages (he ▸ hcv))
     have mem : ∀ {s : State} {env : Bil.Env} {m : Bap.Symbolic.Memory} {cv : Value}, Rel σ s env →
         isMemoryType var.typ = true → evalMemory s value = .ok m → Bil.evalExp env value = .ok cv →
         Rel σ { s with memories := (var, m) :: s.memories } (Bil.bind env var cv) := by
       intro s env m cv hr hmem hm hcv
       exact rel_bindMemory hr hmem ((sized_eval σ value).2 hr.toWellSized hm)
-        (fun he => (ihv hsv).2 hr hm (he ▸ hcv))
+        (fun he => ihv.2 hr hm (he ▸ hcv)) (fun he => pages_evalExp value hr.pages (he ▸ hcv))
     refine ⟨fun hr h hc => ?_, fun hr h hc => ?_⟩
     · simp only [evalExp] at h
       simp only [Bil.evalExp, bind_ok] at hc
@@ -1418,25 +1848,68 @@ theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) (hs : StoreSpec ∨ noStor
       split at h
       · next hm =>
         obtain ⟨m, hm', h⟩ := bind_ok.mp h
-        exact (ihb hsb).1 (mem hr hm hm' hcv) h hc
+        exact ihb.1 (mem hr hm hm' hcv) h hc
       · next hm =>
         obtain ⟨x, hx, h⟩ := bind_ok.mp h
-        exact (ihb hsb).1 (bits hr (by simpa using hm) hx hcv) h hc
+        exact ihb.1 (bits hr (by simpa using hm) hx hcv) h hc
     · simp only [evalMemory] at h
       simp only [Bil.evalExp, bind_ok] at hc
       obtain ⟨cv, hcv, hc⟩ := hc
       split at h
       · next hm =>
         obtain ⟨m, hm', h⟩ := bind_ok.mp h
-        exact (ihb hsb).2 (mem hr hm hm' hcv) h hc
+        exact ihb.2 (mem hr hm hm' hcv) h hc
       · next hm =>
         obtain ⟨x, hx, h⟩ := bind_ok.mp h
-        exact (ihb hsb).2 (bits hr (by simpa using hm) hx hcv) h hc
+        exact ihb.2 (bits hr (by simpa using hm) hx hcv) h hc
   | ite condition yes no ihc ihy ihn =>
-    have hsc : StoreSpec ∨ noStore condition = true := hs.imp id (fun h => by simp_all [noStore])
-    have hsy : StoreSpec ∨ noStore yes = true := hs.imp id (fun h => by simp_all [noStore])
-    have hsn : StoreSpec ∨ noStore no = true := hs.imp id (fun h => by simp_all [noStore])
-    refine ⟨fun hr h hc => ?_, fun _ h _ => by simp [evalMemory] at h⟩
+    refine ⟨fun hr h hc => ?_, fun hr h hc => ?_⟩
+    rotate_left
+    · simp only [evalMemory, bind_ok] at h
+      obtain ⟨c, hcond, y, hy, n, hn, h⟩ := h
+      split at h
+      · cases h
+      · next hcw =>
+        simp only [Bil.evalExp, bind_ok] at hc
+        obtain ⟨cv, hcv, ⟨cw, cb⟩, hcb, hc⟩ := hc
+        cases cv <;> simp only [Value.asBits, reduceCtorEq] at hcb
+        cases hcb
+        simp only at hc
+        by_cases hw : cw = 1
+        · subst hw
+          simp only [↓reduceDIte] at hc
+          have hdc := ihc.1 hr hcond hcv
+          have hsy := (sized_eval σ yes).2 hr.toWellSized hy
+          have hsn := (sized_eval σ no).2 hr.toWellSized hn
+          by_cases h1 : cb = 1
+          · rw [ite_eq_left h1] at hc
+            have hrel := ihy.2 hr hy hc
+            have hone : isOne (denote σ c) = true := by rw [hdc]; exact (isOne_one_iff cb).mpr h1
+            split at h
+            · cases h; exact hrel
+            · next hk =>
+              have := (known_sound hk hdc).mp h1
+              cases this
+            · cases h
+              intro location
+              rw [hrel location]
+              simp [memoryByte, baseByte, byteMap, hone]
+          · rw [ite_eq_right h1] at hc
+            have hrel := ihn.2 hr hn hc
+            have hone : isOne (denote σ c) = false := by
+              rw [hdc]
+              cases he : isOne ⟨1, cb⟩ with
+              | false => rfl
+              | true => exact absurd ((isOne_one_iff cb).mp he) h1
+            split at h
+            · next hk =>
+              exact absurd ((known_sound hk hdc).mpr rfl) h1
+            · cases h; exact hrel
+            · cases h
+              intro location
+              rw [hrel location]
+              simp [memoryByte, baseByte, byteMap, hone]
+        · simp [hw] at hc
     simp only [evalExp, bind_ok] at h
     obtain ⟨c, hcond, y, hy, n, hn, h⟩ := h
     split at h
@@ -1451,19 +1924,18 @@ theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) (hs : StoreSpec ∨ noStor
         simp only at hc
         by_cases hw : cw = 1
         · subst hw
-          have hdc := (ihc hsc).1 hr hcond hcv
+          have hdc := ihc.1 hr hcond hcv
           rw [denote_ite, hdc]
           simp only [↓reduceDIte] at hc
           by_cases h1 : cb = 1
           · rw [ite_eq_left h1] at hc
             rw [ite_eq_left ((isOne_one_iff cb).mpr h1)]
-            exact (ihy hsy).1 hr hy hc
+            exact ihy.1 hr hy hc
           · rw [ite_eq_right h1] at hc
             rw [ite_eq_right (fun e => h1 ((isOne_one_iff cb).mp e))]
-            exact (ihn hsn).1 hr hn hc
+            exact ihn.1 hr hn hc
         · simp [hw] at hc
   | extract high low value ih =>
-    have hs' : StoreSpec ∨ noStore value = true := hs.imp id (fun h => by simp_all [noStore])
     refine ⟨fun hr h hc => ?_, fun _ h _ => by simp [evalMemory] at h⟩
     simp only [evalExp, bind_ok] at h
     obtain ⟨x, hx, h⟩ := h
@@ -1477,7 +1949,7 @@ theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) (hs : StoreSpec ∨ noStor
         cases cv <;> simp only [Value.asBits, reduceCtorEq] at hcb
         cases hcb
         cases hc
-        have hdx := (ih hs').1 hr hx hcv
+        have hdx := ih.1 hr hx hcv
         rw [denote_extract_of hdx]
         simp only [Word.extract] at hres
         split at hres
@@ -1486,8 +1958,6 @@ theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) (hs : StoreSpec ∨ noStor
           · cases hres
           · cases hres; rfl
   | concat left right ihl ihr =>
-    have hsl : StoreSpec ∨ noStore left = true := hs.imp id (fun h => by simp_all [noStore])
-    have hsr : StoreSpec ∨ noStore right = true := hs.imp id (fun h => by simp_all [noStore])
     refine ⟨fun hr h hc => ?_, fun _ h _ => by simp [evalMemory] at h⟩
     simp only [evalExp, bind_ok] at h
     obtain ⟨l, hl, r, hrr, h⟩ := h
@@ -1499,14 +1969,13 @@ theorem evalExp_sound (σ : Assignment) (e : Bil.Exp) (hs : StoreSpec ∨ noStor
     cases rv <;> simp only [Value.asBits, reduceCtorEq] at hrb
     cases hrb
     cases hc
-    have hdl := (ihl hsl).1 hr hl hlv
-    have hdr := (ihr hsr).1 hr hrr hrv
+    have hdl := ihl.1 hr hl hlv
+    have hdr := ihr.1 hr hrr hrv
     simp only [denote]
     rw [hdl, hdr]
     rfl
   | unknown message typ =>
-    refine ⟨fun _ _ hc => ?_, fun _ h _ => by simp [evalMemory] at h⟩
-    simp [Bil.evalExp] at hc
+    refine ⟨fun _ _ hc => ?_, fun _ _ hc => ?_⟩ <;> simp [Bil.evalExp] at hc
 
 /-! ### Execution: every concrete run is covered by a path -/
 
@@ -1529,8 +1998,8 @@ theorem freshenUnknowns_of_noUnknown (e : Bil.Exp) (next : Nat) (h : noUnknown e
 private theorem freshen_of_noUnknown (s : State) (e : Bil.Exp) (h : noUnknown e = true) : freshen s e = (s, e) := by
   simp [freshen, freshenUnknowns_of_noUnknown e _ h]
 
-/-- The programs covered: every expression is free of `unknown`, and either free of stores or `StoreSpec` holds. -/
-def ExpFragment (e : Bil.Exp) : Prop := noUnknown e = true ∧ (StoreSpec ∨ noStore e = true)
+/-- The programs covered: every expression is free of `unknown`. -/
+def ExpFragment (e : Bil.Exp) : Prop := noUnknown e = true
 
 mutual
   def stmtFragment : Bil.Stmt → Prop
@@ -1569,7 +2038,8 @@ private theorem covers_of_subset {σ : Assignment} {as bs : List Result} {final 
 
 private theorem rel_withConstraint {σ : Assignment} {s : State} {env : Bil.Env} (h : Rel σ s env) (c : Expr) :
     Rel σ (withConstraint s c) env :=
-  { envSized := h.envSized, cellsSized := h.cellsSized, vars := h.vars, mems := h.mems }
+  { envSized := h.envSized, memoriesSized := h.memoriesSized, vars := h.vars, mems := h.mems,
+    inputs := h.inputs, pages := h.pages }
 
 private theorem pathHolds_withConstraint {σ : Assignment} {s : State} (h : PathHolds σ s) {c : Expr}
     (hc : Holds σ c) : PathHolds σ (withConstraint s c) := by
@@ -1590,21 +2060,6 @@ private theorem bit_cases (c : BitVec 1) : c = 1 ∨ c = 0 := by
   by_cases h : c.toNat = 1
   · exact .inl (BitVec.eq_of_toNat_eq (by simpa using h))
   · exact .inr (BitVec.eq_of_toNat_eq (by simp; omega))
-
-private theorem known_sound {σ : Assignment} {x : Expr} {b : Bool} {c : BitVec 1}
-    (hk : x.knownCondition = some b) (hd : denote σ x = ⟨1, c⟩) : c = 1 ↔ b = true := by
-  cases x <;> simp only [Expr.knownCondition, reduceCtorEq] at hk
-  next w v =>
-    split at hk
-    · next hw =>
-      subst hw
-      rw [denote_const] at hd
-      cases hd
-      simp only [Option.some.injEq] at hk
-      subst hk
-      simp only [beq_iff_eq]
-      exact ⟨fun e => by rw [e]; rfl, fun e => BitVec.eq_of_toNat_eq (by simpa using e)⟩
-    · cases hk
 
 private theorem holds_eqOne {σ : Assignment} {x : Expr} (hw : x.width = 1) (hd : denote σ x = ⟨1, 1⟩) :
     Holds σ (Expr.eqOne x) := by
@@ -1768,12 +2223,13 @@ theorem execute_sound (σ : Assignment) (cf : Nat) :
       | succ sf =>
         cases stmt with
         | move var value =>
-          obtain ⟨hu, hst⟩ : ExpFragment value := hfrag
+          have hu : ExpFragment value := hfrag
           rw [executeStmt, freshen_of_noUnknown _ _ hu] at hsym
           rw [Bil.execStmt] at hc
           obtain ⟨cv, hcv, hc⟩ := bind_ok.mp hc
           cases hc
-          have hsound := evalExp_sound σ value hst
+          have hsound := evalExp_sound σ value
+          have hpg := fun {w} {c : Bap.Memory w} (he : cv = .memory c) => pages_evalExp value hrel.pages (he ▸ hcv)
           simp only at hsym
           split at hsym
           · next hm =>
@@ -1781,15 +2237,15 @@ theorem execute_sound (σ : Assignment) (cf : Nat) :
             cases hsym
             refine ⟨_, List.mem_singleton.mpr rfl, hpath, .inr ⟨?_, trivial⟩⟩
             exact rel_bindMemory hrel hm ((sized_eval σ value).2 hrel.toWellSized hm')
-              (fun he => hsound.2 hrel hm' (he ▸ hcv))
+              (fun he => hsound.2 hrel hm' (he ▸ hcv)) hpg
           · next hm =>
             obtain ⟨x, hx, hsym⟩ := bind_ok.mp hsym
             cases hsym
             refine ⟨_, List.mem_singleton.mpr rfl, hpath, .inr ⟨?_, trivial⟩⟩
             exact rel_bind hrel (by simpa using hm) ((sized_eval σ value).1 hrel.toWellSized hx)
-              (fun he => hsound.1 hrel hx (he ▸ hcv))
+              (fun he => hsound.1 hrel hx (he ▸ hcv)) hpg
         | jmp target =>
-          obtain ⟨hu, hst⟩ : ExpFragment target := hfrag
+          have hu : ExpFragment target := hfrag
           rw [executeStmt, freshen_of_noUnknown _ _ hu] at hsym
           rw [Bil.execStmt] at hc
           simp only [bind_ok] at hc
@@ -1799,7 +2255,7 @@ theorem execute_sound (σ : Assignment) (cf : Nat) :
           cases hc
           obtain ⟨x, hx, hsym⟩ := bind_ok.mp hsym
           cases hsym
-          exact ⟨_, List.mem_singleton.mpr rfl, hpath, .inr ⟨hrel, (evalExp_sound σ target hst).1 hrel hx hcv⟩⟩
+          exact ⟨_, List.mem_singleton.mpr rfl, hpath, .inr ⟨hrel, (evalExp_sound σ target).1 hrel hx hcv⟩⟩
         | special message =>
           rw [executeStmt] at hsym
           rw [Bil.execStmt] at hc
@@ -1813,7 +2269,7 @@ theorem execute_sound (σ : Assignment) (cf : Nat) :
           cases hc
           exact ⟨_, List.mem_singleton.mpr rfl, hpath, .inr ⟨hrel, rfl⟩⟩
         | ifElse condition yes no =>
-          obtain ⟨⟨hu, hst⟩, hfy, hfn⟩ : ExpFragment condition ∧ programFragment yes ∧ programFragment no := hfrag
+          obtain ⟨hu, hfy, hfn⟩ : ExpFragment condition ∧ programFragment yes ∧ programFragment no := hfrag
           rw [executeStmt, freshen_of_noUnknown _ _ hu] at hsym
           rw [Bil.execStmt] at hc
           simp only [bind_ok] at hc
@@ -1827,7 +2283,7 @@ theorem execute_sound (σ : Assignment) (cf : Nat) :
             simp only [bind_ok] at hsym
             obtain ⟨x0, hx0, x, hx, hsym⟩ := hsym
             obtain ⟨rfl, hxw⟩ := expectCondition_ok hx
-            have hd := (evalExp_sound σ condition hst).1 hrel hx0 hcv
+            have hd := (evalExp_sound σ condition).1 hrel hx0 hcv
             cases hk : x.knownCondition with
             | some b =>
               rw [hk] at hsym
@@ -1856,7 +2312,7 @@ theorem execute_sound (σ : Assignment) (cf : Nat) :
           · simp [hw] at hc
         | «while» condition body =>
           have hfrag' := hfrag
-          obtain ⟨⟨hu, hst⟩, hfb⟩ : ExpFragment condition ∧ programFragment body := hfrag
+          obtain ⟨hu, hfb⟩ : ExpFragment condition ∧ programFragment body := hfrag
           rw [executeStmt, freshen_of_noUnknown _ _ hu] at hsym
           rw [Bil.execStmt] at hc
           simp only [bind_ok] at hc
@@ -1870,7 +2326,7 @@ theorem execute_sound (σ : Assignment) (cf : Nat) :
             simp only [bind_ok] at hsym
             obtain ⟨x0, hx0, x, hx, hsym⟩ := hsym
             obtain ⟨rfl, hxw⟩ := expectCondition_ok hx
-            have hd := (evalExp_sound σ condition hst).1 hrel hx0 hcv
+            have hd := (evalExp_sound σ condition).1 hrel hx0 hcv
             have hloop : ∀ {results qs : List Result} {next : Bil.State × Bil.Effect},
                 Covers σ results next →
                 executeStmt.continueResults sf condition body results = .ok qs →
@@ -1946,23 +2402,6 @@ theorem execute_sound (σ : Assignment) (cf : Nat) :
           exact covers_sequence (next := { env := nextEnv }) (effect := effect)
             (fun s' rs' final' hr hp hsy hcn => ihp _ _ _ _ _ _ hfr hr hp hsy hcn)
             (ihs _ _ _ _ _ _ hfs hrel hpath hres hstmt) hq hc
-
-/-- The states an assignment can stand for: its variables are inputs with the assignment's values, and the
-memories hold the assignment's initial contents. -/
-theorem rel_inputs (σ : Assignment) (env : Bil.Env) (inputs : Env) (hinputs : ∀ entry ∈ inputs,
-      (denote σ entry.2).1 = entry.2.width ∧ ∀ w (v : BitVec w), isMemoryType entry.1.typ = false →
-        Bil.lookup env entry.1 = .ok (.bits v) → denote σ entry.2 = ⟨w, v⟩)
-    (hmemory : ∀ var w (c : Bap.Memory w), isMemoryType var.typ = true → Bil.lookup env var = .ok (.memory c) →
-      ∀ address : BitVec w, (Bap.Memory.readByte c address).toBitVec = σ.memory s!"{var.name}#{var.index}" w address) :
-    Rel σ { env := inputs } env where
-  envSized := fun entry he => (hinputs entry he).1
-  cellsSized := fun entry he => by cases he
-  vars := by
-    intro var x w v hm hg hl
-    exact (hinputs (var, x) (get_mem hg)).2 w v hm hl
-  mems := by
-    intro var w c hm hl address
-    simpa [memoryOf, Assoc.get, byteMap] using hmemory var w c hm hl address
 
 /-! ### Loop-free programs are explored completely -/
 
@@ -2224,7 +2663,7 @@ theorem executeStmt_while_true_exhausted (f : Nat) (s : State) :
   | succ f ih =>
     have he : expectCondition (.const (1#1)) = .ok (.const (1#1)) := rfl
     rw [executeStmt, freshen_of_noUnknown _ _ rfl]
-    simp only [evalExp, bind, Except.bind, he]
+    simp only [evalExp, bind, Except.bind]
     show (executeProgram f s [] >>= _) = _
     rw [executeProgram_nil]
     simp only [bind, Except.bind, continueWhile_cons, ih]
@@ -2246,14 +2685,14 @@ theorem memoryOf_write_frame (s : State) {var other : Bap.Var} (m : Bap.Symbolic
 
 /-- The initial contents of different memory variables are different functions. -/
 theorem memoryOf_initial_name (s : State) (var : Bap.Var) (h : Assoc.get var s.memories = none) :
-    (memoryOf s var).name = s!"{var.name}#{var.index}" ∧ (memoryOf s var).cells = [] := by
+    (memoryOf s var).name = inputName var ∧ (memoryOf s var).cells = [] := by
   simp [memoryOf, h]
 
 /-! ### Invariants of execution -/
 
 /-- A property of states preserved by every primitive state change the executor makes. -/
 structure StepInvariant (Inv : State → Prop) : Prop where
-  constraint : ∀ s (x : Expr), x.width = 1 → Inv s →
+  constraint : ∀ s e (x : Expr), evalExp s e = .ok x → x.width = 1 → Inv s →
     Inv (withConstraint s x.eqOne) ∧ Inv (withConstraint s x.eqZero)
   unknowns : ∀ s n, Inv s → Inv { s with unknowns := n }
   move : ∀ s var value x, Inv s → evalExp s value = .ok x → Inv { s with env := (var, x) :: s.env }
@@ -2319,7 +2758,7 @@ theorem execute_preserves {Inv : State → Prop} (hinv : StepInvariant Inv) (f :
         rw [executeStmt, freshen_eq] at h
         have hs' := hinv.unknowns s (freshenUnknowns s.unknowns condition).2 hs
         simp only [bind_ok] at h
-        obtain ⟨x0, _, x, hx, h⟩ := h
+        obtain ⟨x0, hx0, x, hx, h⟩ := h
         obtain ⟨rfl, hw⟩ := expectCondition_ok hx
         split at h
         · exact ihp _ _ _ hs' h
@@ -2329,13 +2768,13 @@ theorem execute_preserves {Inv : State → Prop} (hinv : StepInvariant Inv) (f :
           cases he
           intro r hr
           rcases List.mem_append.mp hr with hr | hr
-          · exact ihp _ _ _ (hinv.constraint _ _ hw hs').1 hy r hr
-          · exact ihp _ _ _ (hinv.constraint _ _ hw hs').2 hn r hr
+          · exact ihp _ _ _ (hinv.constraint _ _ _ hx0 hw hs').1 hy r hr
+          · exact ihp _ _ _ (hinv.constraint _ _ _ hx0 hw hs').2 hn r hr
       | «while» condition body =>
         rw [executeStmt, freshen_eq] at h
         have hs' := hinv.unknowns s (freshenUnknowns s.unknowns condition).2 hs
         simp only [bind_ok] at h
-        obtain ⟨x0, _, x, hx, h⟩ := h
+        obtain ⟨x0, hx0, x, hx, h⟩ := h
         obtain ⟨rfl, hw⟩ := expectCondition_ok hx
         have hcont : ∀ {results qs : List Result}, (∀ r ∈ results, Inv r.state) →
             executeStmt.continueResults f condition body results = .ok qs → ∀ q ∈ qs, Inv q.state := by
@@ -2354,8 +2793,8 @@ theorem execute_preserves {Inv : State → Prop} (hinv : StepInvariant Inv) (f :
           cases he
           intro r hr
           rcases List.mem_append.mp hr with hr | hr
-          · exact hcont (ihp _ _ _ (hinv.constraint _ _ hw hs').1 hb) hq r hr
-          · exact single (hinv.constraint _ _ hw hs').2 hr
+          · exact hcont (ihp _ _ _ (hinv.constraint _ _ _ hx0 hw hs').1 hb) hq r hr
+          · exact single (hinv.constraint _ _ _ hx0 hw hs').2 hr
     · cases program with
       | nil =>
         rw [executeProgram_nil] at h
@@ -2372,7 +2811,7 @@ theorem execute_preserves {Inv : State → Prop} (hinv : StepInvariant Inv) (f :
 
 private theorem prefix_invariant (base : List Expr) :
     StepInvariant fun s => base <+: s.constraints where
-  constraint := fun _ _ _ h => ⟨h.trans (List.prefix_append _ _), h.trans (List.prefix_append _ _)⟩
+  constraint := fun _ _ _ _ _ h => ⟨h.trans (List.prefix_append _ _), h.trans (List.prefix_append _ _)⟩
   unknowns := fun _ _ h => h
   move := fun _ _ _ _ h _ => h
   memory := fun _ _ _ _ h _ => h
@@ -2391,7 +2830,7 @@ theorem executeProgram_constraints_one_bit {f : Nat} {s : State} {program : Bil.
     (h : executeProgram f s program = .ok rs) (hs : ∀ c ∈ s.constraints, c.width = 1) :
     ∀ r ∈ rs, ∀ c ∈ r.state.constraints, c.width = 1 := by
   refine (execute_preserves (Inv := fun s => ∀ c ∈ s.constraints, c.width = 1) ⟨?_, ?_, ?_, ?_⟩ f).2 s program rs hs h
-  · intro s x hw hs
+  · intro s _ x _ hw hs
     constructor <;> intro y hy <;> simp only [withConstraint, List.mem_append, List.mem_singleton] at hy
     · rcases hy with hy | rfl
       · exact hs y hy
@@ -2407,8 +2846,8 @@ theorem executeProgram_constraints_one_bit {f : Nat} {s : State} {program : Bil.
 theorem executeProgram_wellSized (σ : Assignment) {f : Nat} {s : State} {program : Bil.Program} {rs : List Result}
     (h : executeProgram f s program = .ok rs) (hs : WellSized σ s) : ∀ r ∈ rs, WellSized σ r.state := by
   refine (execute_preserves (Inv := WellSized σ) ⟨?_, ?_, ?_, ?_⟩ f).2 s program rs hs h
-  · exact fun _ _ _ h => ⟨⟨h.envSized, h.cellsSized⟩, ⟨h.envSized, h.cellsSized⟩⟩
-  · exact fun _ _ h => ⟨h.envSized, h.cellsSized⟩
+  · exact fun _ _ _ _ _ h => ⟨⟨h.envSized, h.memoriesSized⟩, ⟨h.envSized, h.memoriesSized⟩⟩
+  · exact fun _ _ h => ⟨h.envSized, h.memoriesSized⟩
   · intro s var value x h hx
     exact wellSized_bind h var ((sized_eval σ value).1 h hx)
   · intro s var value m h hm
@@ -2423,46 +2862,6 @@ theorem executeStmt_cpuExn (f : Nat) (s : State) (number : Nat) :
   rw [executeStmt]
 
 /-! ### Reading back a write -/
-
-private theorem sameBits_offset_ne {t : Bits} {j k : Nat} (hj : j < 2 ^ t.1) (hk : k < 2 ^ t.1) (h : j ≠ k) :
-    sameBits (offsetBits t j) (offsetBits t k) = false := by
-  obtain ⟨w, x⟩ := t
-  cases he : sameBits (offsetBits ⟨w, x⟩ j) (offsetBits ⟨w, x⟩ k) with
-  | false => rfl
-  | true =>
-    have e := sameBits_iff.mp he
-    simp only [offsetBits, Sigma.mk.injEq, heq_eq_eq, true_and] at e
-    have e' : BitVec.ofNat w j = BitVec.ofNat w k := by simpa using e
-    have := congrArg BitVec.toNat e'
-    simp only [BitVec.toNat_ofNat, Nat.mod_eq_of_lt hj, Nat.mod_eq_of_lt hk] at this
-    exact absurd this h
-
-/-- A write covers each of its offsets with the matching byte, while it doesn't wrap around the addresses. -/
-theorem modelWrite_offset (bytes : ByteMap) (target value : Bits) (endian : Endian) {size k : Nat}
-    (hsize : size ≤ 2 ^ target.1) (hk : k < size) :
-    modelWrite bytes target value endian size (offsetBits target k) =
-      valueByte value (match endian with | .little => k | .big => size - 1 - k) := by
-  simp only [modelWrite]
-  have : ∀ n, n ≤ size → k < n →
-      (List.range n).foldl (init := bytes) (fun bytes offset location =>
-        if sameBits (offsetBits target offset) location then
-          valueByte value (match endian with | .little => offset | .big => size - 1 - offset)
-        else bytes location) (offsetBits target k) =
-      valueByte value (match endian with | .little => k | .big => size - 1 - k) := by
-    intro n
-    induction n with
-    | zero => intro _ h; omega
-    | succ n ih =>
-      intro hn hlt
-      rw [modelWrite_succ]
-      simp only
-      by_cases he : n = k
-      · subst he
-        have : sameBits (offsetBits target n) (offsetBits target n) = true := sameBits_iff.mpr rfl
-        rw [ite_eq_left this]
-      · rw [ite_eq_right (by simp [sameBits_offset_ne (t := target) (j := n) (k := k) (by omega) (by omega) he])]
-        exact ih (by omega) (by omega)
-  exact this size (Nat.le_refl _) hk
 
 private theorem fold_bytes (value : Nat) (k : Nat) (acc : Nat) :
     (((List.range k).reverse.map fun index => BitVec.ofNat 8 (value >>> (index * 8))).foldl
@@ -2497,19 +2896,19 @@ private theorem reverse_range_eq (n : Nat) :
 as long as the write does not wrap around the address space. Writes through other addresses are not assumed away:
 this is about the byte map, and any aliasing is in it. -/
 theorem read_write_denote (σ : Assignment) (memory : Bap.Symbolic.Memory) (address value : Expr) (endian : Endian)
-    {size : Nat} (hcells : CellsSized σ memory.cells) (ha : (denote σ address).1 = address.width)
+    {size : Nat} (hcells : MemorySized σ memory) (ha : (denote σ address).1 = address.width)
     (hsize : size ≤ 2 ^ address.width) :
     (denote σ ((memory.write address value endian size).read address endian size)).2.toNat =
       (denote σ value).2.toNat % 2 ^ (8 * size) := by
-  rw [(denote_read σ _ address endian size (cellsSized_write hcells _ _ _ _) ha).2, name_write]
+  rw [(denote_read σ _ address endian size (memorySized_write hcells ha _ _ _) ha).2]
   simp only [modelRead]
   have hbytes : ((List.range size).map fun offset =>
-      byteMap σ memory.name (memory.write address value endian size).cells (offsetBits (denote σ address) offset)) =
+      memoryByte σ (memory.write address value endian size) (offsetBits (denote σ address) offset)) =
       (List.range size).map fun offset =>
         valueByte (denote σ value) (match endian with | .little => offset | .big => size - 1 - offset) := by
     apply List.map_congr_left
     intro offset hoff
-    rw [byteMap_write σ memory address value endian size ha,
+    rw [memoryByte_write σ memory address value endian size ha,
       modelWrite_offset _ _ _ _ (by rw [ha]; exact hsize) (List.mem_range.mp hoff)]
     cases endian <;> rfl
   have hfold := fold_bytes (denote σ value).2.toNat size 0
@@ -2523,5 +2922,1344 @@ theorem read_write_denote (σ : Assignment) (memory : Bap.Symbolic.Memory) (addr
     simp only [valueByte]
     rw [← hfold, reverse_range_eq, List.map_map]
     rfl
+
+/-! ### More fuel changes nothing once no path is exhausted -/
+
+/-- No path of a result list was stopped by the bound. -/
+def Finished (results : List Result) : Prop := ∀ r ∈ results, r.outcome ≠ .exhausted
+
+private theorem finished_append {a b : List Result} (h : Finished (a ++ b)) : Finished a ∧ Finished b :=
+  ⟨fun r hr => h r (List.mem_append_left _ hr), fun r hr => h r (List.mem_append_right _ hr)⟩
+
+private theorem continueProgram_stable {f : Nat} {rest : Bil.Program}
+    (ih : ∀ s rs, executeProgram f s rest = .ok rs → Finished rs → executeProgram (f + 1) s rest = .ok rs) :
+    ∀ (results qs : List Result), executeProgram.continueResults f rest results = .ok qs → Finished qs →
+      executeProgram.continueResults (f + 1) rest results = .ok qs := by
+  intro results
+  induction results with
+  | nil =>
+    intro qs h _
+    rw [executeProgram.continueResults] at h ⊢
+    exact h
+  | cons r others ihr =>
+    intro qs h hf
+    rw [continueProgram_cons] at h ⊢
+    obtain ⟨first, hfirst, others', ho, h⟩ := by simpa only [bind_ok] using h
+    cases h
+    obtain ⟨hf1, hf2⟩ := finished_append hf
+    simp only [bind_ok]
+    refine ⟨first, ?_, others', ihr _ ho hf2, rfl⟩
+    cases hn : r.outcome
+    case normal =>
+      rw [hn] at hfirst
+      exact ih _ _ hfirst hf1
+    all_goals
+      rw [hn] at hfirst
+      exact hfirst
+
+private theorem continueWhile_stable {f : Nat} {c : Bil.Exp} {body : Bil.Program}
+    (ih : ∀ s rs, executeStmt f s (.while c body) = .ok rs → Finished rs →
+      executeStmt (f + 1) s (.while c body) = .ok rs) :
+    ∀ (results qs : List Result), executeStmt.continueResults f c body results = .ok qs → Finished qs →
+      executeStmt.continueResults (f + 1) c body results = .ok qs := by
+  intro results
+  induction results with
+  | nil =>
+    intro qs h _
+    rw [executeStmt.continueResults] at h ⊢
+    exact h
+  | cons r others ihr =>
+    intro qs h hf
+    rw [continueWhile_cons] at h ⊢
+    obtain ⟨first, hfirst, others', ho, h⟩ := by simpa only [bind_ok] using h
+    cases h
+    obtain ⟨hf1, hf2⟩ := finished_append hf
+    simp only [bind_ok]
+    refine ⟨first, ?_, others', ihr _ ho hf2, rfl⟩
+    cases hn : r.outcome
+    case normal =>
+      rw [hn] at hfirst
+      exact ih _ _ hfirst hf1
+    all_goals
+      rw [hn] at hfirst
+      exact hfirst
+
+/-- A successful run in which no path was stopped by the bound is the same with any more fuel. -/
+theorem execute_fuel_stable (f : Nat) :
+    (∀ s stmt rs, executeStmt f s stmt = .ok rs → Finished rs → executeStmt (f + 1) s stmt = .ok rs) ∧
+      (∀ s program rs, executeProgram f s program = .ok rs → Finished rs →
+        executeProgram (f + 1) s program = .ok rs) := by
+  induction f with
+  | zero =>
+    refine ⟨fun s stmt rs h hf => ?_, fun s program rs h hf => ?_⟩
+    · rw [executeStmt_zero] at h
+      cases h
+      exact absurd rfl (hf _ (List.mem_singleton.mpr rfl))
+    · cases program with
+      | nil => rw [executeProgram_nil] at h ⊢; exact h
+      | cons stmt rest =>
+        rw [executeProgram_zero_cons] at h
+        cases h
+        exact absurd rfl (hf _ (List.mem_singleton.mpr rfl))
+  | succ f ih =>
+    obtain ⟨ihs, ihp⟩ := ih
+    refine ⟨fun s stmt rs h hf => ?_, fun s program rs h hf => ?_⟩
+    · cases stmt with
+      | move var value => rw [executeStmt] at h ⊢; exact h
+      | jmp target => rw [executeStmt] at h ⊢; exact h
+      | special message => rw [executeStmt] at h ⊢; exact h
+      | cpuExn number => rw [executeStmt] at h ⊢; exact h
+      | ifElse condition yes no =>
+        rw [executeStmt, freshen_eq] at h ⊢
+        simp only [bind_ok] at h ⊢
+        obtain ⟨x0, hx0, x, hx, h⟩ := h
+        refine ⟨x0, hx0, x, hx, ?_⟩
+        cases hk : x.knownCondition with
+        | some b =>
+          rw [hk] at h
+          cases b
+          · exact ihp _ _ _ h hf
+          · exact ihp _ _ _ h hf
+        | none =>
+          rw [hk] at h
+          simp only [bind_ok] at h ⊢
+          obtain ⟨ys, hy, ns, hn, he⟩ := h
+          cases he
+          obtain ⟨hf1, hf2⟩ := finished_append hf
+          exact ⟨ys, ihp _ _ _ hy hf1, ns, ihp _ _ _ hn hf2, rfl⟩
+      | «while» condition body =>
+        rw [executeStmt, freshen_eq] at h ⊢
+        simp only [bind_ok] at h ⊢
+        obtain ⟨x0, hx0, x, hx, h⟩ := h
+        refine ⟨x0, hx0, x, hx, ?_⟩
+        have hbody : ∀ {results : List Result} {qs : List Result},
+            executeStmt.continueResults f condition body results = .ok qs → Finished qs →
+            (∀ r ∈ results, r.outcome ≠ .exhausted) := by
+          intro results qs hq hfq r hr he
+          exact hfq r (continueWhile_other hq hr (by rw [he]; simp)) he
+        have hnormal : ∀ {results : List Result} {qs : List Result},
+            executeStmt.continueResults f condition body results = .ok qs → Finished qs →
+            executeStmt.continueResults (f + 1) condition body results = .ok qs :=
+          fun hq hfq => continueWhile_stable (ihs · _) _ _ hq hfq
+        cases hk : x.knownCondition with
+        | some b =>
+          rw [hk] at h
+          cases b
+          · exact h
+          · simp only [bind_ok] at h ⊢
+            obtain ⟨bs, hb, hq⟩ := h
+            exact ⟨bs, ihp _ _ _ hb (hbody hq hf), hnormal hq hf⟩
+        | none =>
+          rw [hk] at h
+          simp only [bind_ok] at h ⊢
+          obtain ⟨bs, hb, qs, hq, he⟩ := h
+          cases he
+          obtain ⟨hf1, _⟩ := finished_append hf
+          exact ⟨bs, ihp _ _ _ hb (hbody hq hf1), qs, hnormal hq hf1, rfl⟩
+    · cases program with
+      | nil => rw [executeProgram_nil] at h ⊢; exact h
+      | cons stmt rest =>
+        rw [executeProgram] at h ⊢
+        obtain ⟨results, hres, hq⟩ := bind_ok.mp h
+        have hresf : Finished results := by
+          intro r hr he
+          exact hf r (continueProgram_other hq hr (by rw [he]; simp)) he
+        exact bind_ok.mpr ⟨results, ihs _ _ _ hres hresf, continueProgram_stable (ihp · rest) _ _ hq hf⟩
+
+/-- So a finished exploration is the exploration, for any fuel from there on. -/
+theorem run_fuel_stable {program : Bil.Program} {s : State} {f g : Nat} {rs : List Result} (hfg : f ≤ g)
+    (h : run program s f = .ok rs) (hf : Finished rs) : run program s g = .ok rs := by
+  induction hfg with
+  | refl => exact h
+  | step _ ih => exact (execute_fuel_stable _).2 _ _ _ ih hf
+
+/-! ### Inputs: from the empty state, any concrete environment has its assignment -/
+
+/-- The assignment that gives each input the value a concrete environment binds it to. -/
+def inputAssignment (env : Bil.Env) : Assignment where
+  var name width :=
+    match env.find? fun binding => inputName binding.1 == name with
+    | some ⟨_, @Value.bits w v⟩ => if h : w = width then h ▸ v else 0
+    | _ => 0
+  memory name width address :=
+    match env.find? fun binding => inputName binding.1 == name with
+    | some ⟨_, @Value.memory w c⟩ =>
+      if h : width = w then (Bap.Memory.readByte c (h ▸ address)).toBitVec else 0
+    | _ => 0
+
+/-- What a concrete environment must look like to be an input: distinct variables have distinct input names,
+each register is as wide as its type says, and its memories have whole pages. -/
+structure InputEnv (env : Bil.Env) : Prop where
+  distinct : ∀ b ∈ env, ∀ b' ∈ env, inputName b.1 = inputName b'.1 → b.1 = b'.1
+  widths : ∀ var w (v : BitVec w), isMemoryType var.typ = false → Bil.lookup env var = .ok (.bits v) →
+    typeWidth var.typ = w
+  pages : ∀ var w (concrete : Bap.Memory w), Bil.lookup env var = .ok (.memory concrete) → PagesSized concrete
+
+private theorem find?_congr {α : Type} {p q : α → Bool} {l : List α} (h : ∀ x ∈ l, p x = q x) :
+    l.find? p = l.find? q := by
+  induction l with
+  | nil => rfl
+  | cons a l ih =>
+    simp only [List.find?_cons, h a (by simp)]
+    rw [ih fun x hx => h x (by simp [hx])]
+
+private theorem find_input {env : Bil.Env} (h : InputEnv env) {var : Bap.Var} {value : Value}
+    (hl : Bil.lookup env var = .ok value) :
+    (env.find? fun binding => inputName binding.1 == inputName var) = some (var, value) := by
+  unfold Bil.lookup at hl
+  split at hl
+  · next b hfind =>
+    cases hl
+    have hb := List.mem_of_find?_eq_some hfind
+    have hvar : b.1 = var := by simpa using List.find?_some hfind
+    have hcongr : (env.find? fun binding => inputName binding.1 == inputName var) =
+        env.find? fun binding => binding.1 == var := by
+      apply find?_congr
+      intro x hx
+      show (inputName x.1 == inputName var) = (x.1 == var)
+      by_cases hxv : x.1 = var
+      · simp [hxv]
+      · have : inputName x.1 ≠ inputName var := by
+          intro he
+          exact hxv ((h.distinct x hx b hb (by rw [he, hvar])).trans hvar)
+        rw [beq_eq_false_iff_ne.mpr this, beq_eq_false_iff_ne.mpr hxv]
+    rw [hcongr, hfind]
+    obtain ⟨b1, b2⟩ := b
+    cases (show b1 = var from hvar)
+    rfl
+  · cases hl
+
+/-- Every concrete input environment is related to the empty symbolic state, by its own assignment: all of
+its registers and memories start as unconstrained inputs. -/
+theorem rel_initial {env : Bil.Env} (h : InputEnv env) : Rel (inputAssignment env) {} env where
+  envSized := fun _ he => by cases he
+  memoriesSized := fun _ he => by cases he
+  vars := fun _ _ _ _ _ hg _ => by simp [Assoc.get] at hg
+  mems := by
+    intro var w c _ hl address
+    have hm : memoryOf ({} : State) var = { name := inputName var } := by simp [memoryOf, Assoc.get]
+    simp only [hm, memoryByte, byteMap, baseByte, inputAssignment, find_input h hl]
+    simp
+  inputs := by
+    intro var w v hm _ hl
+    have hw := h.widths var w v hm hl
+    rw [denote_var, hw]
+    simp [inputAssignment, find_input h hl]
+  pages := h.pages
+
+/-- The headline, from the empty state: `bap symbolic` covers every concrete run from every input. -/
+theorem run_sound_from_inputs {env : Bil.Env} (h : InputEnv env) {program : Bil.Program} {sf cf : Nat}
+    {rs : List Result} {final : Bil.State × Bil.Effect} (hfrag : programFragment program)
+    (hsym : run program {} sf = .ok rs) (hc : Bil.run program { env := env } cf = .ok final) :
+    Covers (inputAssignment env) rs final :=
+  (execute_sound _ cf).2 sf {} program env rs final hfrag (rel_initial h) (fun _ hc => by cases hc) hsym hc
+
+/-! ### Well-typed programs don't fail
+
+`Bil.inferExp` accepts a little that the executor rejects. `Runnable` names those cases: a store that overlaps
+itself, and anything with no bits, which SMT-LIB has no sort for. -/
+
+open Bap.Bil (inferExp checkStmt checkProgram)
+open_private_decls Bap.Bil.Typecheck Bap.Bil expectImm expectSameType checkCondition
+
+def Runnable : Bil.Exp → Prop
+  | @Bil.Exp.int width _ => width ≠ 0
+  | .var var => isMemoryType var.typ = true ∨ typeWidth var.typ ≠ 0
+  | .load memory address _ size => size ≠ 0 ∧ Runnable memory ∧ Runnable address
+  | .store memory address value _ size =>
+    size ≠ 0 ∧ (∀ w, inferExp address = .ok (.imm w) → size ≤ 2 ^ w) ∧
+      Runnable memory ∧ Runnable address ∧ Runnable value
+  | .bin _ left right => Runnable left ∧ Runnable right
+  | .un _ value => Runnable value
+  | .cast _ _ value => Runnable value
+  | .letIn _ value body => Runnable value ∧ Runnable body
+  | .ite condition yes no => Runnable condition ∧ Runnable yes ∧ Runnable no
+  | .extract _ _ value => Runnable value
+  | .concat left right => Runnable left ∧ Runnable right
+  | .unknown _ typ => isMemoryType typ = true ∨ typeWidth typ ≠ 0
+
+/-- The cells of a memory, all the way down, are declared as bytes. -/
+inductive MemoryBytes : Bap.Symbolic.Memory → Prop where
+  | plain (name cells) : (∀ cell ∈ cells, cell.2.width = 8) → MemoryBytes ⟨name, none, cells⟩
+  | branch (name condition yes no cells) : MemoryBytes yes → MemoryBytes no → (∀ cell ∈ cells, cell.2.width = 8) →
+      MemoryBytes ⟨name, some (condition, yes, no), cells⟩
+
+theorem MemoryBytes.cells {memory : Bap.Symbolic.Memory} (h : MemoryBytes memory) :
+    ∀ cell ∈ memory.cells, cell.2.width = 8 := by
+  cases h <;> assumption
+
+theorem width_readInitial' {memory : Bap.Symbolic.Memory} (h : MemoryBytes memory) (address : Expr) :
+    (Memory.readInitial memory address).width = 8 := by
+  induction h with
+  | plain name cells _ => rfl
+  | branch name condition yes no cells hy _ _ ihy _ => exact width_readCells hy.cells ihy address
+
+theorem memoryBytes_writeByte {memory : Bap.Symbolic.Memory} (h : MemoryBytes memory) (address : Expr) {value : Expr}
+    (hv : value.width = 8) : MemoryBytes (memory.writeByte address value) := by
+  have hc : ∀ cell ∈ (memory.writeByte address value).cells, cell.2.width = 8 := by
+    intro cell hcell
+    rcases List.mem_cons.mp hcell with rfl | hcell
+    · exact hv
+    · exact h.cells cell (List.mem_filter.mp hcell).1
+  cases h with
+  | plain name cells _ => exact .plain _ _ hc
+  | branch name condition yes no cells hy hn _ => exact .branch _ _ _ _ _ hy hn hc
+
+theorem memoryBytes_write {memory : Bap.Symbolic.Memory} (h : MemoryBytes memory) (address value : Expr)
+    (endian : Endian) (size : Nat) : MemoryBytes (memory.write address value endian size) := by
+  rw [write_eq_prefix]
+  have : ∀ k, MemoryBytes (writePrefix memory address value endian size k) := by
+    intro k
+    induction k with
+    | zero => exact h
+    | succ k ih =>
+      rw [writePrefix_succ]
+      exact memoryBytes_writeByte ih _ (by simp only [byteAt, Expr.width]; omega)
+  exact this size
+
+/-- The state a well-typed program can run from: registers are as wide as their types. -/
+structure Typed (s : State) : Prop where
+  env : ∀ var x, Assoc.get var s.env = some x → isMemoryType var.typ = false → x.width = typeWidth var.typ
+  memories : ∀ entry ∈ s.memories, MemoryBytes entry.2
+
+theorem memoryBytes_memoryOf {s : State} (h : Typed s) (var : Bap.Var) : MemoryBytes (memoryOf s var) := by
+  unfold memoryOf
+  split
+  · next memory heq => exact h.memories _ (get_mem heq)
+  · exact .plain _ _ (fun _ hc => by cases hc)
+
+private theorem typed_bind {s : State} (h : Typed s) {var : Bap.Var} {x : Expr}
+    (hx : isMemoryType var.typ = false → x.width = typeWidth var.typ) : Typed { s with env := (var, x) :: s.env } :=
+  ⟨by
+    intro var' y hg hm
+    by_cases he : var' = var
+    · subst he
+      rw [get_cons_same] at hg
+      cases hg
+      exact hx hm
+    · rw [get_cons_ne _ _ he] at hg
+      exact h.env _ _ hg hm, h.memories⟩
+
+private theorem typed_bindMemory {s : State} (h : Typed s) (var : Bap.Var) {m : Bap.Symbolic.Memory}
+    (hm : MemoryBytes m) : Typed { s with memories := (var, m) :: s.memories } :=
+  ⟨h.env, fun entry he => by
+    rcases List.mem_cons.mp he with rfl | he
+    · exact hm
+    · exact h.memories entry he⟩
+
+private theorem lookup_bound {env : Env} {var : Bap.Var} {x : Expr} (hm : isMemoryType var.typ = false)
+    (hg : Assoc.get var env = some x) : lookup env var = .ok x := by
+  unfold lookup
+  cases ht : var.typ <;> simp_all [isMemoryType]
+
+private theorem lookup_input {env : Env} {var : Bap.Var} (hm : isMemoryType var.typ = false)
+    (hg : Assoc.get var env = none) (hw : typeWidth var.typ ≠ 0) :
+    lookup env var = .ok (.var (inputName var) (typeWidth var.typ)) := by
+  unfold lookup
+  cases ht : var.typ <;> simp_all [isMemoryType]
+
+private theorem expectImm_ok {t : Typ} {n : Nat} : expectImm t = .ok n ↔ t = .imm n := by
+  cases t <;> simp [expectImm]
+
+/-- Whatever the widths, `binary` has the width of its operator. -/
+private theorem width_binary (op : Bil.BinOp) {left right : Expr} {w : Nat} (hl : left.width = w) (hr : right.width = w) :
+    (binary op left right).width =
+      typeWidth (if op matches .eq | .neq | .lt | .le | .gt | .ge | .slt | .sle | .sgt | .sge then .imm 1 else .imm w) := by
+  rcases binary_cases op left right with h | ⟨a, av, b, bv, c, cv, rfl, rfl, hf, h⟩
+  · rw [h]
+    cases op <;> simp [symbolicBinary, signedDivision, binaryApp, Expr.width, typeWidth, hl]
+  · rw [h]
+    simp only [Expr.width] at hl hr
+    subst hl
+    subst hr
+    obtain ⟨v', hv', hb⟩ := evalBin_same op av bv
+    rw [hv'] at hf
+    cases hf
+    show (bilBinary op av bv).1 = _
+    cases op <;> rfl
+
+/-- Loads have the width the type checker assigns them. -/
+theorem width_read' {memory : Bap.Symbolic.Memory} (h : MemoryBytes memory) (address : Expr)
+    (endian : Endian) (size : Nat) : (memory.read address endian size).width = typeWidth (.imm (size * 8)) := by
+  simp only [Bap.Symbolic.Memory.read, typeWidth]
+  have hchain : ∀ (bytes : List Expr) (first : Expr),
+      (∀ b ∈ bytes, b.width = 8) →
+      (bytes.foldl (fun result byte => .concat result byte) first).width = first.width + 8 * bytes.length := by
+    intro bytes
+    induction bytes with
+    | nil => intro first _; simp
+    | cons b rest ih =>
+      intro first hb
+      simp only [List.foldl_cons]
+      rw [ih _ fun x hx => hb x (by simp [hx])]
+      simp only [Expr.width, List.length_cons, hb b (by simp)]
+      omega
+  have hbytes : ∀ b ∈ (List.range size).map (fun offset => memory.readByte (offsetAddress address offset)),
+      b.width = 8 := by
+    intro b hb
+    obtain ⟨_, _, rfl⟩ := List.mem_map.mp hb
+    exact width_readCells h.cells (width_readInitial' h _) _
+  generalize hl : (List.range size).map (fun offset => memory.readByte (offsetAddress address offset)) = bytes at hbytes ⊢
+  have hlen : bytes.length = size := by rw [← hl]; simp
+  have horder : (if endian = Bap.Endian.little then bytes.reverse else bytes).length = size ∧
+      ∀ b ∈ (if endian = Bap.Endian.little then bytes.reverse else bytes), b.width = 8 := by
+    split <;> simp [hlen] <;> simpa using hbytes
+  generalize (if endian = Bap.Endian.little then bytes.reverse else bytes) = ordered at horder ⊢
+  cases ordered with
+  | nil =>
+    have := horder.1
+    simp at this
+    subst this
+    rfl
+  | cons first rest =>
+    simp only
+    rw [hchain _ _ fun x hx => horder.2 x (by simp [hx]), horder.2 first (by simp)]
+    have := horder.1
+    simp at this
+    omega
+
+/-- Totality: the symbolic evaluation of a well-typed, runnable expression succeeds, at the type's width. -/
+theorem eval_total (e : Bil.Exp) : ∀ {s : State} {t : Typ}, Typed s → Runnable e → inferExp e = .ok t →
+    (isMemoryType t = false → ∃ x, evalExp s e = .ok x ∧ x.width = typeWidth t) ∧
+      (isMemoryType t = true → ∃ m, evalMemory s e = .ok m ∧ MemoryBytes m) := by
+  induction e with
+  | int value =>
+    intro s t _ hr ht
+    simp only [Runnable] at hr
+    simp only [inferExp, Except.ok.injEq] at ht
+    subst ht
+    refine ⟨fun _ => ⟨.const value, by simp [evalExp, hr], rfl⟩, fun hm => by cases hm⟩
+  | var var =>
+    intro s t hs hr ht
+    simp only [inferExp, Except.ok.injEq] at ht
+    subst ht
+    simp only [Runnable] at hr
+    refine ⟨fun hm => ?_, fun hm => ⟨_, by simp [evalMemory, hm], memoryBytes_memoryOf hs var⟩⟩
+    have hw : typeWidth var.typ ≠ 0 := by simpa [hm] using hr
+    cases hg : Assoc.get var s.env with
+    | some x => exact ⟨x, lookup_bound hm hg, hs.env _ _ hg hm⟩
+    | none => exact ⟨_, lookup_input hm hg hw, rfl⟩
+  | load memory address endian size ihm iha =>
+    intro s t hs hr ht
+    obtain ⟨hz, hrm, hra⟩ : size ≠ 0 ∧ Runnable memory ∧ Runnable address := hr
+    simp only [inferExp, bind_ok] at ht
+    obtain ⟨tm, htm, ht⟩ := ht
+    cases tm
+    case mem aw vw =>
+      simp only at ht
+      split at ht
+      · simp only [bind_ok] at ht
+        obtain ⟨ta, hta, actual, hia, ht⟩ := ht
+        split at ht
+        · simp only [Except.ok.injEq] at ht
+          subst ht
+          rw [expectImm_ok] at hia
+          subst hia
+          refine ⟨fun _ => ?_, fun hm => by cases hm⟩
+          obtain ⟨m, hm, hmb⟩ := (ihm hs hrm htm).2 rfl
+          obtain ⟨a, ha, _⟩ := (iha hs hra hta).1 rfl
+          refine ⟨_, by simp [evalExp, hm, ha, hz, bind, Except.bind]; rfl, ?_⟩
+          exact width_read' hmb a endian size
+        · cases ht
+      · cases ht
+    all_goals cases ht
+  | store memory address value endian size ihm iha ihv =>
+    intro s t hs hr ht
+    obtain ⟨hz, hfit, hrm, hra, hrv⟩ : size ≠ 0 ∧ (∀ w, inferExp address = .ok (.imm w) → size ≤ 2 ^ w) ∧
+      Runnable memory ∧ Runnable address ∧ Runnable value := hr
+    simp only [inferExp, bind_ok] at ht
+    obtain ⟨tm, htm, ht⟩ := ht
+    cases tm
+    case mem aw vw =>
+      simp only at ht
+      split at ht
+      · cases ht
+      · simp only [bind_ok] at ht
+        obtain ⟨ta, hta, actual, hia, ht⟩ := ht
+        split at ht
+        · cases ht
+        · simp only [bind_ok] at ht
+          obtain ⟨tv, htv, vbits, hiv, ht⟩ := ht
+          split at ht
+          · next hvw =>
+            simp only [Except.ok.injEq] at ht
+            subst ht
+            rw [expectImm_ok] at hia hiv
+            subst hia hiv
+            refine ⟨fun hm => (by cases hm), fun _ => ?_⟩
+            obtain ⟨m, hm, hmb⟩ := (ihm hs hrm htm).2 rfl
+            obtain ⟨a, ha, haw⟩ := (iha hs hra hta).1 rfl
+            obtain ⟨x, hx, hxw⟩ := (ihv hs hrv htv).1 rfl
+            have hw1 : x.width = size * 8 := by rw [hxw, hvw]; rfl
+            have hw2 : size ≤ 2 ^ a.width := by rw [haw]; exact hfit _ hta
+            refine ⟨_, ?_, memoryBytes_write hmb a x endian size⟩
+            simp [evalMemory, hm, ha, hx, hz, hw1, bind, Except.bind, Nat.not_lt.mpr hw2]
+          · cases ht
+    all_goals cases ht
+  | bin op left right ihl ihr =>
+    intro s t hs hr ht
+    obtain ⟨hrl, hrr⟩ : Runnable left ∧ Runnable right := hr
+    simp only [inferExp, bind_ok] at ht
+    obtain ⟨tl, htl, tr, htr, lw, hil, rw', hir, ht⟩ := ht
+    rw [expectImm_ok] at hil hir
+    subst hil hir
+    split at ht
+    · cases ht
+    · next hne =>
+      have hsame : lw = rw' := by simpa using hne
+      subst hsame
+      obtain ⟨l, hl, hlw⟩ := (ihl hs hrl htl).1 rfl
+      obtain ⟨r, hrr', hrw⟩ := (ihr hs hrr htr).1 rfl
+      have hwidth := width_binary op (w := lw) hlw hrw
+      have heval : evalExp s (.bin op left right) = .ok (binary op l r) := by
+        simp [evalExp, hl, hrr', bind, Except.bind]
+      cases op <;> simp only [Except.ok.injEq] at ht <;> subst ht <;>
+        exact ⟨fun _ => ⟨_, heval, hwidth⟩, fun hm => by cases hm⟩
+  | un op value ih =>
+    intro s t hs hr ht
+    have hrv : Runnable value := hr
+    simp only [inferExp, bind_ok] at ht
+    obtain ⟨tv, htv, w, hiv, ht⟩ := ht
+    rw [expectImm_ok] at hiv
+    subst hiv
+    simp only [Except.ok.injEq] at ht
+    subst ht
+    obtain ⟨x, hx, hxw⟩ := (ih hs hrv htv).1 rfl
+    have he : evalExp s (.un op value) =
+        .ok (.app (match op with | .neg => "bvneg" | .not => "bvnot") x.width [x]) := by
+      cases op <;> simp [evalExp, hx, bind, Except.bind]
+    exact ⟨fun _ => ⟨_, he, hxw⟩, fun hm => by cases hm⟩
+  | cast kind width value ih =>
+    intro s t hs hr ht
+    have hrv : Runnable value := hr
+    simp only [inferExp, bind_ok] at ht
+    obtain ⟨tv, htv, w, hiv, ht⟩ := ht
+    rw [expectImm_ok] at hiv
+    subst hiv
+    split at ht
+    · cases ht
+    · next hz =>
+      obtain ⟨x, hx, hxw⟩ := (ih hs hrv htv).1 rfl
+      have hxw' : x.width = w := hxw
+      have hresult : ∃ r, evalCast kind width x = .ok r ∧ t = .imm width := by
+        unfold evalCast
+        rw [ite_eq_right hz]
+        cases kind
+        case high =>
+          simp only at ht
+          split at ht
+          · next hle =>
+            simp only [Except.ok.injEq] at ht
+            simp only
+            rw [ite_eq_right (by rw [hxw']; exact Nat.not_lt.mpr hle)]
+            exact ⟨_, rfl, ht.symm⟩
+          · cases ht
+        case low =>
+          simp only at ht
+          split at ht
+          · next hle =>
+            simp only [Except.ok.injEq] at ht
+            simp only
+            split <;> exact ⟨_, rfl, ht.symm⟩
+          · cases ht
+        all_goals
+          simp only [Except.ok.injEq] at ht
+          simp only
+          split <;> exact ⟨_, rfl, ht.symm⟩
+      obtain ⟨r, hr, rfl⟩ := hresult
+      exact ⟨fun _ => ⟨r, by simp [evalExp, hx, hr, bind, Except.bind], width_evalCast hr⟩, fun hm => by cases hm⟩
+  | letIn var value body ihv ihb =>
+    intro s t hs hr ht
+    obtain ⟨hrv, hrb⟩ : Runnable value ∧ Runnable body := hr
+    simp only [inferExp, bind_ok] at ht
+    obtain ⟨tv, htv, ht⟩ := ht
+    split at ht
+    · cases ht
+    · next hne =>
+      have htype : var.typ = tv := by simpa using hne
+      cases hm : isMemoryType var.typ with
+      | true =>
+        obtain ⟨m, hmem, hmb⟩ := (ihv hs hrv htv).2 (htype ▸ hm)
+        have hb := ihb (typed_bindMemory hs var hmb) hrb ht
+        constructor
+        · intro ht'
+          obtain ⟨x, hx, hxw⟩ := hb.1 ht'
+          exact ⟨x, by simp [evalExp, hm, hmem, hx, bind, Except.bind], hxw⟩
+        · intro ht'
+          obtain ⟨y, hy, hyb⟩ := hb.2 ht'
+          exact ⟨y, by simp [evalMemory, hm, hmem, hy, bind, Except.bind], hyb⟩
+      | false =>
+        obtain ⟨x, hx, hxw⟩ := (ihv hs hrv htv).1 (htype ▸ hm)
+        have hb := ihb (typed_bind hs (fun _ => by rw [hxw, htype])) hrb ht
+        constructor
+        · intro ht'
+          obtain ⟨y, hy, hyw⟩ := hb.1 ht'
+          exact ⟨y, by simp [evalExp, hm, hx, hy, bind, Except.bind], hyw⟩
+        · intro ht'
+          obtain ⟨y, hy, hyb⟩ := hb.2 ht'
+          exact ⟨y, by simp [evalMemory, hm, hx, hy, bind, Except.bind], hyb⟩
+  | ite condition yes no ihc ihy ihn =>
+    intro s t hs hr ht
+    obtain ⟨hrc, hry, hrn⟩ : Runnable condition ∧ Runnable yes ∧ Runnable no := hr
+    simp only [inferExp, bind_ok] at ht
+    obtain ⟨tc, htc, cw, hic, ht⟩ := ht
+    rw [expectImm_ok] at hic
+    subst hic
+    split at ht
+    · cases ht
+    · next hc1 =>
+      have hcw : cw = 1 := by simpa using hc1
+      subst hcw
+      simp only [bind_ok] at ht
+      obtain ⟨ty, hty, tn, htn, _, hsame, ht⟩ := ht
+      simp only [Except.ok.injEq] at ht
+      subst ht
+      have htn' : tn = ty := by
+        unfold expectSameType at hsame
+        split at hsame
+        · next he => exact he.symm
+        · cases hsame
+      subst htn'
+      obtain ⟨c, hc, hcw'⟩ := (ihc hs hrc htc).1 rfl
+      have hcw1 : c.width = 1 := hcw'
+      constructor
+      · intro hm
+        obtain ⟨y, hy, hyw⟩ := (ihy hs hry hty).1 hm
+        obtain ⟨n, hn, hnw⟩ := (ihn hs hrn htn).1 hm
+        refine ⟨.ite c y n, ?_, hyw⟩
+        simp [evalExp, hc, hy, hn, hcw1, hyw, hnw, bind, Except.bind]
+      · intro hm
+        obtain ⟨y, hy, hyb⟩ := (ihy hs hry hty).2 hm
+        obtain ⟨n, hn, hnb⟩ := (ihn hs hrn htn).2 hm
+        cases hk : c.knownCondition with
+        | some b =>
+          cases b
+          · exact ⟨n, by simp [evalMemory, hc, hy, hn, hcw1, hk, bind, Except.bind], hnb⟩
+          · exact ⟨y, by simp [evalMemory, hc, hy, hn, hcw1, hk, bind, Except.bind], hyb⟩
+        | none =>
+          exact ⟨{ name := y.name, branch := some (c, y, n) },
+            by simp [evalMemory, hc, hy, hn, hcw1, hk, bind, Except.bind],
+            .branch _ _ _ _ _ hyb hnb (fun _ hc => by cases hc)⟩
+  | extract high low value ih =>
+    intro s t hs hr ht
+    have hrv : Runnable value := hr
+    simp only [inferExp, bind_ok] at ht
+    obtain ⟨tv, htv, w, hiv, ht⟩ := ht
+    rw [expectImm_ok] at hiv
+    subst hiv
+    split at ht
+    · cases ht
+    · next hlow =>
+      split at ht
+      · cases ht
+      · next hhigh =>
+        simp only [Except.ok.injEq] at ht
+        subst ht
+        obtain ⟨x, hx, hxw⟩ := (ih hs hrv htv).1 rfl
+        have hxw' : x.width = w := hxw
+        refine ⟨fun _ => ⟨_, by simp [evalExp, hx, hlow, hxw', hhigh, bind, Except.bind]; rfl, ?_⟩, fun hm => by cases hm⟩
+        simp only [Expr.width, typeWidth]
+        omega
+  | concat left right ihl ihr =>
+    intro s t hs hr ht
+    obtain ⟨hrl, hrr⟩ : Runnable left ∧ Runnable right := hr
+    simp only [inferExp, bind_ok] at ht
+    obtain ⟨tl, htl, lw, hil, tr, htr, rw', hir, ht⟩ := ht
+    rw [expectImm_ok] at hil hir
+    subst hil hir
+    simp only [Except.ok.injEq] at ht
+    subst ht
+    obtain ⟨l, hl, hlw⟩ := (ihl hs hrl htl).1 rfl
+    obtain ⟨r, hrr', hrw⟩ := (ihr hs hrr htr).1 rfl
+    refine ⟨fun _ => ⟨_, by simp [evalExp, hl, hrr', bind, Except.bind]; rfl, ?_⟩, fun hm => by cases hm⟩
+    simp only [Expr.width, hlw, hrw, typeWidth]
+  | unknown message typ =>
+    intro s t hs hr ht
+    simp only [inferExp, Except.ok.injEq] at ht
+    subst ht
+    simp only [Runnable] at hr
+    refine ⟨fun hm => ?_, fun hm => ⟨{ name := s!"unknown_{message}?" }, by simp [evalMemory],
+      .plain _ _ (fun _ hc => by cases hc)⟩⟩
+    have hw : typeWidth typ ≠ 0 := by simpa [hm] using hr
+    exact ⟨.var s!"unknown_{message}?" (typeWidth typ), by simp [evalExp, hw], rfl⟩
+
+private theorem infer_freshen (e : Bil.Exp) (next : Nat) : inferExp (freshenUnknowns next e).1 = inferExp e := by
+  induction e generalizing next with
+  | int value => rfl
+  | var var => rfl
+  | unknown message typ => rfl
+  | load memory address endian size ihm iha =>
+    show inferExp (.load (freshenUnknowns next memory).1 (freshenUnknowns _ address).1 endian size) = _
+    simp only [inferExp, ihm, iha]
+  | store memory address value endian size ihm iha ihv =>
+    show inferExp (.store (freshenUnknowns next memory).1 (freshenUnknowns _ address).1
+      (freshenUnknowns _ value).1 endian size) = _
+    simp only [inferExp, ihm, iha, ihv]
+  | bin op left right ihl ihr =>
+    show inferExp (.bin op (freshenUnknowns next left).1 (freshenUnknowns _ right).1) = _
+    simp only [inferExp, ihl, ihr]
+  | un op value ih =>
+    show inferExp (.un op (freshenUnknowns next value).1) = _
+    simp only [inferExp, ih]
+  | cast kind width value ih =>
+    show inferExp (.cast kind width (freshenUnknowns next value).1) = _
+    simp only [inferExp, ih]
+  | letIn var value body ihv ihb =>
+    show inferExp (.letIn var (freshenUnknowns next value).1 (freshenUnknowns _ body).1) = _
+    simp only [inferExp, ihv, ihb]
+  | ite condition yes no ihc ihy ihn =>
+    show inferExp (.ite (freshenUnknowns next condition).1 (freshenUnknowns _ yes).1 (freshenUnknowns _ no).1) = _
+    simp only [inferExp, ihc, ihy, ihn]
+  | extract high low value ih =>
+    show inferExp (.extract high low (freshenUnknowns next value).1) = _
+    simp only [inferExp, ih]
+  | concat left right ihl ihr =>
+    show inferExp (.concat (freshenUnknowns next left).1 (freshenUnknowns _ right).1) = _
+    simp only [inferExp, ihl, ihr]
+
+private theorem runnable_freshen {e : Bil.Exp} (next : Nat) (h : Runnable e) :
+    Runnable (freshenUnknowns next e).1 := by
+  induction e generalizing next with
+  | int value => exact h
+  | var var => exact h
+  | unknown message typ => exact h
+  | load memory address endian size ihm iha =>
+    obtain ⟨hz, hm, ha⟩ : size ≠ 0 ∧ Runnable memory ∧ Runnable address := h
+    exact (⟨hz, ihm _ hm, iha _ ha⟩ : size ≠ 0 ∧ _ ∧ _)
+  | store memory address value endian size ihm iha ihv =>
+    obtain ⟨hz, hf, hm, ha, hv⟩ : size ≠ 0 ∧ (∀ w, inferExp address = .ok (.imm w) → size ≤ 2 ^ w) ∧
+      Runnable memory ∧ Runnable address ∧ Runnable value := h
+    exact (⟨hz, fun w hw => hf w (by rwa [infer_freshen] at hw), ihm _ hm, iha _ ha, ihv _ hv⟩ :
+      size ≠ 0 ∧ (∀ w, inferExp (freshenUnknowns _ address).1 = .ok (.imm w) → size ≤ 2 ^ w) ∧ _ ∧ _ ∧ _)
+  | bin op left right ihl ihr =>
+    obtain ⟨hl, hr⟩ : Runnable left ∧ Runnable right := h
+    exact (⟨ihl _ hl, ihr _ hr⟩ : _ ∧ _)
+  | un op value ih => exact (ih _ h : Runnable (freshenUnknowns next value).1)
+  | cast kind width value ih => exact (ih _ h : Runnable (freshenUnknowns next value).1)
+  | letIn var value body ihv ihb =>
+    obtain ⟨hv, hb⟩ : Runnable value ∧ Runnable body := h
+    exact (⟨ihv _ hv, ihb _ hb⟩ : _ ∧ _)
+  | ite condition yes no ihc ihy ihn =>
+    obtain ⟨hc, hy, hn⟩ : Runnable condition ∧ Runnable yes ∧ Runnable no := h
+    exact (⟨ihc _ hc, ihy _ hy, ihn _ hn⟩ : _ ∧ _ ∧ _)
+  | extract high low value ih => exact (ih _ h : Runnable (freshenUnknowns next value).1)
+  | concat left right ihl ihr =>
+    obtain ⟨hl, hr⟩ : Runnable left ∧ Runnable right := h
+    exact (⟨ihl _ hl, ihr _ hr⟩ : _ ∧ _)
+
+mutual
+  def stmtRunnable : Bil.Stmt → Prop
+    | .move _ value => Runnable value
+    | .jmp target => Runnable target
+    | .special _ | .cpuExn _ => True
+    | .ifElse condition yes no => Runnable condition ∧ programRunnable yes ∧ programRunnable no
+    | .while condition body => Runnable condition ∧ programRunnable body
+
+  def programRunnable : Bil.Program → Prop
+    | [] => True
+    | stmt :: rest => stmtRunnable stmt ∧ programRunnable rest
+end
+
+private theorem typed_withConstraint {s : State} (h : Typed s) (c : Expr) : Typed (withConstraint s c) :=
+  ⟨h.env, h.memories⟩
+
+private theorem typed_unknowns {s : State} (h : Typed s) (n : Nat) : Typed { s with unknowns := n } :=
+  ⟨h.env, h.memories⟩
+
+private theorem condition_ok {condition : Bil.Exp} {s : State} (next : Nat) (hs : Typed s) (hr : Runnable condition)
+    (hc : checkCondition condition = .ok ()) :
+    ∃ x, evalExp s (freshenUnknowns next condition).1 = .ok x ∧ expectCondition x = .ok x := by
+  unfold checkCondition at hc
+  simp only [bind_ok] at hc
+  obtain ⟨t, ht, w, hi, hc⟩ := hc
+  rw [expectImm_ok] at hi
+  subst hi
+  have hw : w = 1 := by
+    split at hc
+    · assumption
+    · cases hc
+  subst hw
+  obtain ⟨x, hx, hxw⟩ := (eval_total _ (s := s) hs (runnable_freshen next hr)
+    (by rw [infer_freshen]; exact ht)).1 rfl
+  refine ⟨x, hx, ?_⟩
+  simp [expectCondition, show x.width = 1 from hxw]
+
+/-- Totality of execution: at any fuel, a well-typed runnable program from a typed state never fails. -/
+theorem execute_total (f : Nat) :
+    (∀ s stmt, Typed s → checkStmt stmt = .ok () → stmtRunnable stmt →
+      ∃ rs, executeStmt f s stmt = .ok rs ∧ ∀ r ∈ rs, Typed r.state) ∧
+    (∀ s program, Typed s → checkProgram program = .ok () → programRunnable program →
+      ∃ rs, executeProgram f s program = .ok rs ∧ ∀ r ∈ rs, Typed r.state) := by
+  have single : ∀ {t : State} {o : Outcome}, Typed t → ∀ r ∈ [(⟨t, o⟩ : Result)], Typed r.state := by
+    intro t o ht r hr
+    rw [List.mem_singleton.mp hr]
+    exact ht
+  induction f with
+  | zero =>
+    refine ⟨fun s stmt hs _ _ => ⟨_, executeStmt_zero s stmt, single hs⟩, fun s program hs _ _ => ?_⟩
+    cases program with
+    | nil => exact ⟨_, executeProgram_nil 0 s, single hs⟩
+    | cons stmt rest => exact ⟨_, executeProgram_zero_cons s stmt rest, single hs⟩
+  | succ f ih =>
+    obtain ⟨ihs, ihp⟩ := ih
+    refine ⟨fun s stmt hs hc hr => ?_, fun s program hs hc hr => ?_⟩
+    · cases stmt with
+      | move var value =>
+        rw [checkStmt] at hc
+        simp only [bind_ok] at hc
+        obtain ⟨t, ht, hc⟩ := hc
+        have htype : var.typ = t := by
+          split at hc
+          · assumption
+          · cases hc
+        have hs' := typed_unknowns hs (freshenUnknowns s.unknowns value).2
+        have hr' := runnable_freshen s.unknowns (e := value) hr
+        have ht' : inferExp (freshenUnknowns s.unknowns value).1 = .ok t := by rw [infer_freshen]; exact ht
+        rw [executeStmt, freshen_eq]
+        simp only
+        cases hm : isMemoryType var.typ with
+        | true =>
+          obtain ⟨m, hm', hb⟩ := (eval_total _ hs' hr' ht').2 (htype ▸ hm)
+          exact ⟨[⟨{ { s with unknowns := (freshenUnknowns s.unknowns value).2 } with
+              memories := (var, m) :: s.memories }, .normal⟩], by simp [hm', bind, Except.bind],
+            single (typed_bindMemory hs' var hb)⟩
+        | false =>
+          obtain ⟨x, hx, hxw⟩ := (eval_total _ hs' hr' ht').1 (htype ▸ hm)
+          exact ⟨[⟨{ { s with unknowns := (freshenUnknowns s.unknowns value).2 } with
+              env := (var, x) :: s.env }, .normal⟩], by simp [hx, bind, Except.bind],
+            single (typed_bind hs' (fun _ => by rw [hxw, htype]))⟩
+      | jmp target =>
+        rw [checkStmt] at hc
+        simp only [bind_ok] at hc
+        obtain ⟨t, ht, w, hi, _⟩ := hc
+        rw [expectImm_ok] at hi
+        subst hi
+        have hs' := typed_unknowns hs (freshenUnknowns s.unknowns target).2
+        obtain ⟨x, hx, _⟩ := (eval_total _ hs' (runnable_freshen s.unknowns (e := target) hr)
+          (by rw [infer_freshen]; exact ht)).1 rfl
+        rw [executeStmt, freshen_eq]
+        exact ⟨[⟨{ s with unknowns := (freshenUnknowns s.unknowns target).2 }, .jump x⟩],
+          by simp [hx, bind, Except.bind], single hs'⟩
+      | special message =>
+        rw [executeStmt]
+        exact ⟨_, rfl, single hs⟩
+      | cpuExn number =>
+        rw [executeStmt]
+        exact ⟨_, rfl, single hs⟩
+      | ifElse condition yes no =>
+        obtain ⟨hrc, hry, hrn⟩ : Runnable condition ∧ programRunnable yes ∧ programRunnable no := hr
+        rw [checkStmt] at hc
+        simp only [bind_ok] at hc
+        obtain ⟨_, hcc, _, hcy, hcn⟩ := hc
+        have hs' := typed_unknowns hs (freshenUnknowns s.unknowns condition).2
+        obtain ⟨x, hx, he⟩ := condition_ok s.unknowns hs' hrc hcc
+        rw [executeStmt, freshen_eq]
+        simp only [hx, he, bind, Except.bind]
+        cases hk : x.knownCondition with
+        | some b =>
+          cases b
+          · simpa using ihp _ no hs' hcn hrn
+          · simpa using ihp _ yes hs' hcy hry
+        | none =>
+          obtain ⟨ys, hy, hyt⟩ := ihp _ yes (typed_withConstraint hs' x.eqOne) hcy hry
+          obtain ⟨ns, hn, hnt⟩ := ihp _ no (typed_withConstraint hs' x.eqZero) hcn hrn
+          refine ⟨ys ++ ns, by simp [hy, hn], ?_⟩
+          intro r hr
+          rcases List.mem_append.mp hr with h | h
+          · exact hyt r h
+          · exact hnt r h
+      | «while» condition body =>
+        have hcwhile := hc
+        have hrwhile := hr
+        obtain ⟨hrc, hrb⟩ : Runnable condition ∧ programRunnable body := hr
+        rw [checkStmt] at hc
+        simp only [bind_ok] at hc
+        obtain ⟨_, hcc, hcb⟩ := hc
+        have hs' := typed_unknowns hs (freshenUnknowns s.unknowns condition).2
+        obtain ⟨x, hx, he⟩ := condition_ok s.unknowns hs' hrc hcc
+        have hcont : ∀ (results : List Result), (∀ r ∈ results, Typed r.state) →
+            ∃ qs, executeStmt.continueResults f condition body results = .ok qs ∧ ∀ q ∈ qs, Typed q.state := by
+          intro results
+          induction results with
+          | nil =>
+            intro _
+            exact ⟨[], by rw [executeStmt.continueResults], fun _ hq => by cases hq⟩
+          | cons r others ih =>
+            intro hall
+            obtain ⟨qs, hq, hqt⟩ := ih fun x hx => hall x (List.mem_cons_of_mem _ hx)
+            have hr := hall r (by simp)
+            rw [continueWhile_cons]
+            cases hn : r.outcome
+            case normal =>
+              obtain ⟨first, hf, hft⟩ := ihs r.state _ hr hcwhile hrwhile
+              refine ⟨first ++ qs, by simp [hf, hq, bind, Except.bind], ?_⟩
+              intro q hq'
+              rcases List.mem_append.mp hq' with h | h
+              · exact hft q h
+              · exact hqt q h
+            all_goals
+              refine ⟨r :: qs, by simp [hq, bind, Except.bind], ?_⟩
+              intro q hq'
+              rcases List.mem_cons.mp hq' with rfl | h
+              · exact hr
+              · exact hqt q h
+        rw [executeStmt, freshen_eq]
+        simp only [hx, he, bind, Except.bind]
+        cases hk : x.knownCondition with
+        | some b =>
+          cases b
+          · exact ⟨_, rfl, single hs'⟩
+          · obtain ⟨bs, hb, hbt⟩ := ihp _ body hs' hcb hrb
+            obtain ⟨qs, hq, hqt⟩ := hcont bs hbt
+            exact ⟨qs, by simp [hb, hq], hqt⟩
+        | none =>
+          obtain ⟨bs, hb, hbt⟩ := ihp _ body (typed_withConstraint hs' x.eqOne) hcb hrb
+          obtain ⟨qs, hq, hqt⟩ := hcont bs hbt
+          refine ⟨qs ++ [⟨withConstraint { s with unknowns := (freshenUnknowns s.unknowns condition).2 } x.eqZero,
+            .normal⟩], by simp [hb, hq], ?_⟩
+          intro r hr
+          rcases List.mem_append.mp hr with h | h
+          · exact hqt r h
+          · exact single (typed_withConstraint hs' x.eqZero) r h
+    · cases program with
+      | nil => exact ⟨_, executeProgram_nil _ s, single hs⟩
+      | cons stmt rest =>
+        obtain ⟨hrs, hrr⟩ : stmtRunnable stmt ∧ programRunnable rest := hr
+        rw [checkProgram] at hc
+        simp only [bind_ok] at hc
+        obtain ⟨_, hcs, hcr⟩ := hc
+        obtain ⟨results, hres, hall⟩ := ihs s stmt hs hcs hrs
+        have hcont : ∀ (results : List Result), (∀ r ∈ results, Typed r.state) →
+            ∃ qs, executeProgram.continueResults f rest results = .ok qs ∧ ∀ q ∈ qs, Typed q.state := by
+          intro results
+          induction results with
+          | nil =>
+            intro _
+            exact ⟨[], by rw [executeProgram.continueResults], fun _ hq => by cases hq⟩
+          | cons r others ih =>
+            intro hall
+            obtain ⟨qs, hq, hqt⟩ := ih fun x hx => hall x (List.mem_cons_of_mem _ hx)
+            have hr := hall r (by simp)
+            rw [continueProgram_cons]
+            cases hn : r.outcome
+            case normal =>
+              obtain ⟨first, hf, hft⟩ := ihp r.state rest hr hcr hrr
+              refine ⟨first ++ qs, by simp [hf, hq, bind, Except.bind], ?_⟩
+              intro q hq'
+              rcases List.mem_append.mp hq' with h | h
+              · exact hft q h
+              · exact hqt q h
+            all_goals
+              refine ⟨r :: qs, by simp [hq, bind, Except.bind], ?_⟩
+              intro q hq'
+              rcases List.mem_cons.mp hq' with rfl | h
+              · exact hr
+              · exact hqt q h
+        obtain ⟨qs, hq, hqt⟩ := hcont results hall
+        rw [executeProgram]
+        exact ⟨qs, by simp [hres, hq, bind, Except.bind], hqt⟩
+
+/-- `bap symbolic` never fails on a well-typed runnable program: unset registers are inputs, and running out of
+fuel is a result. -/
+theorem run_total {program : Bil.Program} (hc : checkProgram program = .ok ()) (hr : programRunnable program)
+    (f : Nat) : ∃ rs, run program {} f = .ok rs :=
+  let ⟨rs, h, _⟩ := (execute_total f).2 {} program ⟨fun _ _ hg => by simp [Assoc.get] at hg, fun _ he => by cases he⟩ hc hr
+  ⟨rs, h⟩
+
+/-- So the premise of soundness that the symbolic run succeeded can go, for such programs: each concrete run
+from each input is covered, with no assumption about the symbolic run at all. -/
+theorem run_covers_every_input {env : Bil.Env} (h : InputEnv env) {program : Bil.Program} {cf : Nat}
+    {final : Bil.State × Bil.Effect} (hfrag : programFragment program) (hc : checkProgram program = .ok ())
+    (hr : programRunnable program) (sf : Nat) (hrun : Bil.run program { env := env } cf = .ok final) :
+    ∃ rs, run program {} sf = .ok rs ∧ Covers (inputAssignment env) rs final :=
+  let ⟨rs, hsym⟩ := run_total hc hr sf
+  ⟨rs, hsym, run_sound_from_inputs h hfrag hsym hrun⟩
+
+/-! ### Nothing has zero width
+
+SMT-LIB has no bitvector sort of width zero, so `(_ bv0 0)` must never reach a script. The executor rejects each
+way of making one, so no expression it builds contains one. -/
+
+theorem evalExp_load_zero (s : State) (memory address : Bil.Exp) (endian : Endian) {m : Bap.Symbolic.Memory} {a : Expr}
+    (hm : evalMemory s memory = .ok m) (ha : evalExp s address = .ok a) :
+    evalExp s (.load memory address endian 0) = .error "a load must have at least one byte" := by
+  simp [evalExp, hm, ha, bind, Except.bind]
+
+theorem evalMemory_store_zero (s : State) (memory address value : Bil.Exp) (endian : Endian) {m : Bap.Symbolic.Memory}
+    {a x : Expr} (hm : evalMemory s memory = .ok m) (ha : evalExp s address = .ok a) (hx : evalExp s value = .ok x) :
+    evalMemory s (.store memory address value endian 0) = .error "a store must have at least one byte" := by
+  simp [evalMemory, hm, ha, hx, bind, Except.bind]
+
+/-- Every constant and variable in an expression has at least one bit. -/
+inductive NonEmpty : Expr → Prop where
+  | var (name) {width : Nat} : 0 < width → NonEmpty (.var name width)
+  | const {width : Nat} (value : BitVec width) : 0 < width → NonEmpty (.const value)
+  | app (name width) {args : List Expr} : (∀ a ∈ args, NonEmpty a) → NonEmpty (.app name width args)
+  | extract (high low) {value : Expr} : NonEmpty value → NonEmpty (.extract high low value)
+  | concat {left right : Expr} : NonEmpty left → NonEmpty right → NonEmpty (.concat left right)
+  | ite {c yes no : Expr} : NonEmpty c → NonEmpty yes → NonEmpty no → NonEmpty (.ite c yes no)
+  | select (memory) {address : Expr} : NonEmpty address → NonEmpty (.select memory address)
+
+/-- A memory holding only such expressions. -/
+inductive MemoryNonEmpty : Bap.Symbolic.Memory → Prop where
+  | plain (name cells) : (∀ cell ∈ cells, NonEmpty cell.1 ∧ NonEmpty cell.2) → MemoryNonEmpty ⟨name, none, cells⟩
+  | branch (name) {condition yes no cells} : NonEmpty condition → MemoryNonEmpty yes → MemoryNonEmpty no →
+      (∀ cell ∈ cells, NonEmpty cell.1 ∧ NonEmpty cell.2) → MemoryNonEmpty ⟨name, some (condition, yes, no), cells⟩
+
+theorem MemoryNonEmpty.cells {memory : Bap.Symbolic.Memory} (h : MemoryNonEmpty memory) :
+    ∀ cell ∈ memory.cells, NonEmpty cell.1 ∧ NonEmpty cell.2 := by
+  cases h <;> assumption
+
+/-- A state whose registers and memories hold such expressions. -/
+structure StateNonEmpty (s : State) : Prop where
+  env : ∀ entry ∈ s.env, NonEmpty entry.2 ∧ 0 < entry.2.width
+  memories : ∀ entry ∈ s.memories, MemoryNonEmpty entry.2 ∧ MemoryBytes entry.2
+
+private theorem nonEmpty_readCells {initial address : Expr} {cells : List (Expr × Expr)}
+    (hi : NonEmpty initial) (ha : NonEmpty address) (h : ∀ cell ∈ cells, NonEmpty cell.1 ∧ NonEmpty cell.2) :
+    NonEmpty (Memory.readCells initial address cells) := by
+  induction cells with
+  | nil => exact hi
+  | cons cell rest ih =>
+    have hc := h cell (by simp)
+    have hr := ih fun c hc => h c (List.mem_cons_of_mem _ hc)
+    simp only [Memory.readCells]
+    split
+    · exact hc.2
+    · split
+      · exact hr
+      · refine .ite (.app _ _ ?_) hc.2 hr
+        intro a hm
+        simp only [List.mem_cons, List.not_mem_nil, or_false] at hm
+        rcases hm with rfl | rfl
+        · exact hc.1
+        · exact ha
+
+private theorem nonEmpty_readByte {memory : Bap.Symbolic.Memory} {address : Expr} (h : MemoryNonEmpty memory)
+    (ha : NonEmpty address) : NonEmpty (memory.readByte address) := by
+  have hinit : NonEmpty (Memory.readInitial memory address) := by
+    induction h with
+    | plain name cells _ => exact .select _ ha
+    | branch name hc _ _ _ hy' hn' =>
+      rename_i condition yes no cells hyes hno hcells
+      exact .ite hc (nonEmpty_readCells hy' ha hyes.cells) (nonEmpty_readCells hn' ha hno.cells)
+  exact nonEmpty_readCells hinit ha h.cells
+
+private theorem nonEmpty_offsetAddress {address : Expr} (ha : NonEmpty address) (hw : 0 < address.width)
+    (offset : Nat) : NonEmpty (offsetAddress address offset) := by
+  unfold offsetAddress
+  split
+  · exact .const _ (by simpa [Expr.width] using hw)
+  · split
+    · exact ha
+    · refine .app _ _ ?_
+      intro a hm
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hm
+      rcases hm with rfl | rfl
+      · exact ha
+      · exact .const _ hw
+
+private theorem nonEmpty_read {memory : Bap.Symbolic.Memory} {address : Expr} (h : MemoryNonEmpty memory)
+    (ha : NonEmpty address) (hw : 0 < address.width) (endian : Endian) {size : Nat} (hz : size ≠ 0) :
+    NonEmpty (memory.read address endian size) := by
+  simp only [Bap.Symbolic.Memory.read]
+  have hchain : ∀ (bytes : List Expr) (first : Expr), NonEmpty first → (∀ b ∈ bytes, NonEmpty b) →
+      NonEmpty (bytes.foldl (fun result byte => .concat result byte) first) := by
+    intro bytes
+    induction bytes with
+    | nil => intro first hf _; exact hf
+    | cons b rest ih =>
+      intro first hf hb
+      exact ih _ (.concat hf (hb b (by simp))) fun x hx => hb x (by simp [hx])
+  have hbytes : ∀ b ∈ (List.range size).map (fun offset => memory.readByte (offsetAddress address offset)),
+      NonEmpty b := by
+    intro b hb
+    obtain ⟨_, _, rfl⟩ := List.mem_map.mp hb
+    exact nonEmpty_readByte h (nonEmpty_offsetAddress ha hw _)
+  generalize hl : (List.range size).map (fun offset => memory.readByte (offsetAddress address offset)) = bytes at hbytes ⊢
+  have hlen : bytes.length = size := by rw [← hl]; simp
+  have horder : (if endian = Bap.Endian.little then bytes.reverse else bytes).length = size ∧
+      ∀ b ∈ (if endian = Bap.Endian.little then bytes.reverse else bytes), NonEmpty b := by
+    split <;> simp [hlen] <;> simpa using hbytes
+  generalize (if endian = Bap.Endian.little then bytes.reverse else bytes) = ordered at horder ⊢
+  cases ordered with
+  | nil =>
+    have := horder.1
+    simp at this
+    exact absurd this.symm hz
+  | cons first rest =>
+    exact hchain _ _ (horder.2 first (by simp)) fun x hx => horder.2 x (by simp [hx])
+
+private theorem memoryNonEmpty_writeByte {memory : Bap.Symbolic.Memory} {address value : Expr}
+    (h : MemoryNonEmpty memory) (ha : NonEmpty address) (hv : NonEmpty value) :
+    MemoryNonEmpty (memory.writeByte address value) := by
+  have hc : ∀ cell ∈ (memory.writeByte address value).cells, NonEmpty cell.1 ∧ NonEmpty cell.2 := by
+    intro cell hcell
+    rcases List.mem_cons.mp hcell with rfl | hcell
+    · exact ⟨ha, hv⟩
+    · exact h.cells cell (List.mem_filter.mp hcell).1
+  cases h with
+  | plain name cells _ => exact .plain _ _ hc
+  | branch name hc' hy hn _ => exact .branch _ hc' hy hn hc
+
+private theorem memoryNonEmpty_write {memory : Bap.Symbolic.Memory} {address value : Expr}
+    (h : MemoryNonEmpty memory) (ha : NonEmpty address) (hw : 0 < address.width) (hv : NonEmpty value)
+    (endian : Endian) (size : Nat) : MemoryNonEmpty (memory.write address value endian size) := by
+  rw [write_eq_prefix]
+  have : ∀ k, MemoryNonEmpty (writePrefix memory address value endian size k) := by
+    intro k
+    induction k with
+    | zero => exact h
+    | succ k ih =>
+      rw [writePrefix_succ]
+      exact memoryNonEmpty_writeByte ih (nonEmpty_offsetAddress ha hw _) (.extract _ _ hv)
+  exact this size
+
+private theorem nonEmpty_pair {name : String} {k : Nat} {l r : Expr} (hl : NonEmpty l) (hr : NonEmpty r) :
+    NonEmpty (.app name k [l, r]) := by
+  refine .app _ _ ?_
+  intro a hm
+  simp only [List.mem_cons, List.not_mem_nil, or_false] at hm
+  rcases hm with rfl | rfl
+  · exact hl
+  · exact hr
+
+private theorem nonEmpty_binary (op : Bil.BinOp) {l r : Expr} (hl : NonEmpty l) (hr : NonEmpty r) (hlw : 0 < l.width)
+    (hrw : 0 < r.width) : NonEmpty (binary op l r) ∧ 0 < (binary op l r).width := by
+  rcases binary_cases op l r with h | ⟨a, av, b, bv, c, cv, rfl, rfl, hf, h⟩
+  · rw [h]
+    cases op
+    case sdiv =>
+      refine ⟨.ite (nonEmpty_pair hr (.const _ hrw)) (.const _ hlw) (nonEmpty_pair hl hr), hlw⟩
+    all_goals
+      exact ⟨nonEmpty_pair hl hr, by simp [symbolicBinary, binaryApp, Expr.width, hlw]⟩
+  · rw [h]
+    simp only [Expr.width] at hlw hrw
+    by_cases hwidth : a = b
+    · subst hwidth
+      obtain ⟨v', hv', hb⟩ := evalBin_same op av bv
+      rw [hv'] at hf
+      cases hf
+      have hpos : 0 < (bilBinary op av bv).1 := by cases op <;> first | exact hlw | exact Nat.one_pos
+      exact ⟨.const _ hpos, hpos⟩
+    · simp [Bil.evalBin, hwidth] at hf
+
+private theorem nonEmpty_evalCast {kind : Bil.Cast} {width : Nat} {value result : Expr} (hv : NonEmpty value)
+    (h : evalCast kind width value = .ok result) : NonEmpty result ∧ 0 < result.width := by
+  have hw := width_evalCast h
+  unfold evalCast at h
+  split at h
+  · cases h
+  · next hz =>
+    have hpos : 0 < result.width := by omega
+    refine ⟨?_, hpos⟩
+    split at h
+    · split at h
+      · cases h
+      · cases h; exact .extract _ _ hv
+    all_goals
+      split at h <;> cases h
+      · exact .extract _ _ hv
+      · refine .app _ _ ?_
+        intro a hm
+        rw [List.mem_singleton.mp hm]
+        exact hv
+
+/-- No expression the evaluator builds from non-empty parts contains anything of zero width. -/
+theorem eval_nonEmpty (e : Bil.Exp) :
+    (∀ {s : State} {x : Expr}, StateNonEmpty s → evalExp s e = .ok x → NonEmpty x ∧ 0 < x.width) ∧
+      (∀ {s : State} {m : Bap.Symbolic.Memory}, StateNonEmpty s → evalMemory s e = .ok m →
+        MemoryNonEmpty m ∧ MemoryBytes m) := by
+  induction e with
+  | int value =>
+    refine ⟨fun _ h => ?_, fun _ h => by simp [evalMemory] at h⟩
+    simp only [evalExp] at h
+    split at h
+    · cases h
+    · next hz =>
+      cases h
+      have : 0 < _ := Nat.pos_of_ne_zero hz
+      exact ⟨.const _ this, this⟩
+  | var var =>
+    refine ⟨fun hs h => ?_, fun hs h => ?_⟩
+    · simp only [evalExp] at h
+      rcases (lookup_ok h).2 with hg | ⟨_, rfl, hw⟩
+      · exact hs.env _ (get_mem hg)
+      · have : 0 < typeWidth var.typ := Nat.pos_of_ne_zero hw
+        exact ⟨.var _ this, this⟩
+    · simp only [evalMemory] at h
+      split at h
+      · cases h
+        unfold memoryOf
+        split
+        · next memory heq => exact hs.memories _ (get_mem heq)
+        · exact ⟨.plain _ _ (fun _ hc => by cases hc), .plain _ _ (fun _ hc => by cases hc)⟩
+      · cases h
+  | load memory address endian size ihm iha =>
+    refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
+    simp only [evalExp, bind_ok] at h
+    obtain ⟨m, hm, a, ha, h⟩ := h
+    split at h
+    · cases h
+    · next hz =>
+      cases h
+      obtain ⟨hne, hb⟩ := ihm.2 hs hm
+      obtain ⟨hane, haw⟩ := iha.1 hs ha
+      refine ⟨nonEmpty_read hne hane haw endian hz, ?_⟩
+      rw [width_read' hb]
+      simp only [typeWidth]
+      omega
+  | store memory address value endian size ihm iha ihv =>
+    refine ⟨fun _ h => by simp [evalExp] at h, fun hs h => ?_⟩
+    simp only [evalMemory, bind_ok] at h
+    obtain ⟨m, hm, a, ha, v, hv, h⟩ := h
+    split at h
+    · cases h
+    · split at h
+      · cases h
+      · split at h
+        · cases h
+        · cases h
+          obtain ⟨hne, hb⟩ := ihm.2 hs hm
+          obtain ⟨hane, haw⟩ := iha.1 hs ha
+          exact ⟨memoryNonEmpty_write hne hane haw (ihv.1 hs hv).1 _ _, memoryBytes_write hb _ _ _ _⟩
+  | bin op left right ihl ihr =>
+    refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
+    simp only [evalExp, bind_ok] at h
+    obtain ⟨l, hl, r, hr, h⟩ := h
+    cases h
+    obtain ⟨h1, h2⟩ := ihl.1 hs hl
+    obtain ⟨h3, h4⟩ := ihr.1 hs hr
+    exact nonEmpty_binary op h1 h3 h2 h4
+  | un op value ih =>
+    refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
+    simp only [evalExp, bind_ok] at h
+    obtain ⟨v, hv, h⟩ := h
+    cases h
+    obtain ⟨h1, h2⟩ := ih.1 hs hv
+    refine ⟨.app _ _ ?_, h2⟩
+    intro a hm
+    rw [List.mem_singleton.mp hm]
+    exact h1
+  | cast kind width value ih =>
+    refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
+    simp only [evalExp, bind_ok] at h
+    obtain ⟨v, hv, h⟩ := h
+    exact nonEmpty_evalCast (ih.1 hs hv).1 h
+  | letIn var value body ihv ihb =>
+    have hmem : ∀ {s : State} {m : Bap.Symbolic.Memory}, StateNonEmpty s → (MemoryNonEmpty m ∧ MemoryBytes m) →
+        StateNonEmpty { s with memories := (var, m) :: s.memories } := by
+      intro s m hs hm
+      exact ⟨hs.env, fun entry he => by
+        rcases List.mem_cons.mp he with rfl | he
+        · exact hm
+        · exact hs.memories entry he⟩
+    have hbits : ∀ {s : State} {x : Expr}, StateNonEmpty s → (NonEmpty x ∧ 0 < x.width) →
+        StateNonEmpty { s with env := (var, x) :: s.env } := by
+      intro s x hs hx
+      exact ⟨fun entry he => by
+        rcases List.mem_cons.mp he with rfl | he
+        · exact hx
+        · exact hs.env entry he, hs.memories⟩
+    refine ⟨fun hs h => ?_, fun hs h => ?_⟩
+    · simp only [evalExp] at h
+      split at h
+      · obtain ⟨m, hm, h⟩ := bind_ok.mp h
+        exact ihb.1 (hmem hs (ihv.2 hs hm)) h
+      · obtain ⟨x, hx, h⟩ := bind_ok.mp h
+        exact ihb.1 (hbits hs (ihv.1 hs hx)) h
+    · simp only [evalMemory] at h
+      split at h
+      · obtain ⟨m, hm, h⟩ := bind_ok.mp h
+        exact ihb.2 (hmem hs (ihv.2 hs hm)) h
+      · obtain ⟨x, hx, h⟩ := bind_ok.mp h
+        exact ihb.2 (hbits hs (ihv.1 hs hx)) h
+  | ite condition yes no ihc ihy ihn =>
+    refine ⟨fun hs h => ?_, fun hs h => ?_⟩
+    · simp only [evalExp, bind_ok] at h
+      obtain ⟨c, hc, y, hy, n, hn, h⟩ := h
+      split at h
+      · cases h
+      · split at h
+        · cases h
+        · cases h
+          obtain ⟨h1, h2⟩ := ihy.1 hs hy
+          exact ⟨.ite (ihc.1 hs hc).1 h1 (ihn.1 hs hn).1, h2⟩
+    · simp only [evalMemory, bind_ok] at h
+      obtain ⟨c, hc, y, hy, n, hn, h⟩ := h
+      split at h
+      · cases h
+      · obtain ⟨y1, y2⟩ := ihy.2 hs hy
+        obtain ⟨n1, n2⟩ := ihn.2 hs hn
+        split at h
+        · cases h; exact ⟨y1, y2⟩
+        · cases h; exact ⟨n1, n2⟩
+        · cases h
+          exact ⟨.branch _ (ihc.1 hs hc).1 y1 n1 (fun _ hc => by cases hc),
+            .branch _ _ _ _ _ y2 n2 (fun _ hc => by cases hc)⟩
+  | extract high low value ih =>
+    refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
+    simp only [evalExp, bind_ok] at h
+    obtain ⟨x, hx, h⟩ := h
+    split at h
+    · cases h
+    · split at h
+      · cases h
+      · cases h
+        refine ⟨.extract _ _ (ih.1 hs hx).1, ?_⟩
+        simp only [Expr.width]
+        omega
+  | concat left right ihl ihr =>
+    refine ⟨fun hs h => ?_, fun _ h => by simp [evalMemory] at h⟩
+    simp only [evalExp, bind_ok] at h
+    obtain ⟨l, hl, r, hr, h⟩ := h
+    cases h
+    obtain ⟨h1, h2⟩ := ihl.1 hs hl
+    obtain ⟨h3, _⟩ := ihr.1 hs hr
+    exact ⟨.concat h1 h3, by simp only [Expr.width]; omega⟩
+  | unknown message typ =>
+    refine ⟨fun _ h => ?_, fun _ h => ?_⟩
+    · simp only [evalExp] at h
+      split at h
+      · cases h
+      · next hz =>
+        cases h
+        have : 0 < typeWidth typ := Nat.pos_of_ne_zero hz
+        exact ⟨.var _ this, this⟩
+    · simp only [evalMemory] at h
+      cases h
+      exact ⟨.plain _ _ (fun _ hc => by cases hc), .plain _ _ (fun _ hc => by cases hc)⟩
+
+/-- So from the empty state, nothing of zero width ever reaches a path condition, and so a script. -/
+theorem run_constraints_nonEmpty {program : Bil.Program} {f : Nat} {rs : List Result}
+    (h : run program {} f = .ok rs) : ∀ r ∈ rs, ∀ c ∈ r.state.constraints, NonEmpty c := by
+  have hinv : StepInvariant fun s => StateNonEmpty s ∧ ∀ c ∈ s.constraints, NonEmpty c := by
+    refine ⟨?_, ?_, ?_, ?_⟩
+    · intro s e x he hw hs
+      have hx := (eval_nonEmpty e).1 hs.1 he
+      have add : ∀ {y : Expr}, NonEmpty y → StateNonEmpty (withConstraint s y) ∧
+          ∀ c ∈ (withConstraint s y).constraints, NonEmpty c := by
+        intro y hy
+        refine ⟨⟨hs.1.env, hs.1.memories⟩, fun c hc => ?_⟩
+        simp only [withConstraint, List.mem_append, List.mem_singleton] at hc
+        rcases hc with hc | rfl
+        · exact hs.2 c hc
+        · exact hy
+      refine ⟨add (by rw [eqOne_of_width_one hw]; exact hx.1), add ?_⟩
+      exact nonEmpty_pair hx.1 (.const _ hx.2)
+    · exact fun _ _ hs => ⟨⟨hs.1.env, hs.1.memories⟩, hs.2⟩
+    · intro s var value x hs hx
+      exact ⟨⟨fun entry he => by
+        rcases List.mem_cons.mp he with rfl | he
+        · exact (eval_nonEmpty value).1 hs.1 hx
+        · exact hs.1.env entry he, hs.1.memories⟩, hs.2⟩
+    · intro s var value m hs hm
+      exact ⟨⟨hs.1.env, fun entry he => by
+        rcases List.mem_cons.mp he with rfl | he
+        · exact (eval_nonEmpty value).2 hs.1 hm
+        · exact hs.1.memories entry he⟩, hs.2⟩
+  intro r hr
+  exact ((execute_preserves hinv f).2 {} program rs
+    ⟨⟨fun _ he => (by cases he), fun _ he => (by cases he)⟩, fun _ he => (by cases he)⟩ h r hr).2
 
 end Bap.Proofs.Symbolic

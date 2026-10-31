@@ -40,6 +40,10 @@ structure Symbol where
   isDebug : Bool
   deriving DecidableEq, Repr
 
+/-- The least multiple of `alignment` at or above `value`; an alignment of 0 or 1 asks for nothing. -/
+def alignUp (value alignment : Nat) : Nat :=
+  if alignment ≤ 1 then value else (value + alignment - 1) / alignment * alignment
+
 /-- The section of a 1-based COFF, PE or Mach-O section number; number 0 means no section. -/
 def sectionOfNumber (sections : List Section) : Nat → Option Section
   | 0 => none

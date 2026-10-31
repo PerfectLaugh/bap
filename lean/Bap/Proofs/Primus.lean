@@ -1568,7 +1568,8 @@ open Bap.Primus.Semantics
 open_private Bap.Primus.Semantics Bap.Primus.Semantics lookup lookupState primitiveNames primitiveIndex parseBasedNat
   parseInteger atomValue expectBil expectNat truth condition extend binary widthOf assignRegister assign emit
   substitute contextMatches definitionBody compilablePrimitive applyPrimitive applyPrimitiveIndex valueOnly unaryNot
-  shift cast loadMemory storeMemory leadingZeros
+  shift cast loadMemory storeMemory leadingZeros parseZ startsNumeric readLiteral checkLiterals checkForms checkBody
+  wordWidth bindAssignable assignsLocal eval evalList evalSequence apply
 
 open_private_as Bap.Primus.Semantics Bap.Primus.Semantics.compare primCompare
 
@@ -1672,25 +1673,13 @@ theorem parseBasedNat_some_iff (digits : String) (base : Nat) :
     · simp [digitStep, hd, ih]
     · simp [digitStep, hd]
 
-private theorem splitOn_0x : "0x".splitOn ":" = ["0x"] := by
-  simp only [String.splitOn]
-  rw [ite_eq_right (by decide +kernel)]
-  rw [String.splitOnAux, ite_eq_right (by decide +kernel), ite_eq_right (by decide +kernel)]
-  rw [String.splitOnAux, ite_eq_right (by decide +kernel), ite_eq_right (by decide +kernel)]
-  rw [String.splitOnAux, ite_eq_left (by decide +kernel)]
-  decide +kernel
-
 theorem parseBasedNat_empty (base : Nat) : parseBasedNat "" base = some 0 := by
   rfl
 
 /-- Intended: a bare `0x` is the integer zero. Upstream literals go through `Z.of_string`
 (`bap_primus_lisp_word.ml`), and Zarith parses `"0x"` as 0 (`caml_z.c`, `ml_z_of_substring_base`). -/
 theorem atomValue_bare_hex_prefix : atomValue "0x" = .int 0 := by
-  have h1 : "0x".startsWith "0x" = true := by decide +kernel
-  have h2 : ("0x".drop 2).toString = "" := by decide +kernel
-  have h3 : parseInteger "0x" = some (0, none) := by
-    simp only [parseInteger, splitOn_0x, h1, Bool.true_or, ↓reduceIte, h2, parseBasedNat_empty]
-    rfl
+  have h3 : parseInteger "0x" = some (0, none) := by decide +kernel
   have h4 : ("0x" = "true") = False := by simp
   have h5 : ("0x" = "false") = False := by simp
   simp only [atomValue, h4, h5, ↓reduceIte, h3]
@@ -1959,6 +1948,282 @@ theorem primitive_tables_agree (context : Context) (index : Nat) (args : List SV
   | 63, _, _ => rfl
   | 13, _, hc | 14, _, hc | 15, _, hc | 16, _, hc | 17, _, hc | 18, _, hc | 19, _, hc | 62, _, hc => exact absurd hc (by decide)
   | n + 64, hi, _ => exact absurd hi (by omega)
+
+/-! Literals, following `bap_primus_lisp_word.ml` and Zarith's `Z.of_string`. -/
+
+theorem parseZ_bare_prefixes : parseZ ['0', 'x'] = some 0 ∧ parseZ ['0', 'b'] = some 0 ∧ parseZ ['-', '0', 'o'] = some 0 := by
+  decide +kernel
+
+private theorem digits_no_underscore (base n : Nat) (h2 : 1 < base) (h16 : base ≤ 16) (c : Char)
+    (hc : c ∈ Nat.toDigits base n) : c ≠ '_' := by
+  have hd : ∀ d : Fin 16, Nat.digitChar d ≠ '_' := by decide
+  induction n using Nat.strongRecOn with
+  | ind n ih =>
+    rw [Nat.toDigits_eq_ite h2] at hc
+    split at hc
+    · rename_i hlt
+      simp only [List.mem_singleton] at hc
+      subst hc
+      exact hd ⟨n, by omega⟩
+    · rcases List.mem_append.1 hc with hl | hl
+      · exact ih _ (Nat.div_lt_self (by omega) h2) hl
+      · simp only [List.mem_singleton] at hl
+        subst hl
+        exact hd ⟨n % base, by have := Nat.mod_lt n (show 0 < base by omega); omega⟩
+
+private theorem filter_digits (base n : Nat) (h2 : 1 < base) (h16 : base ≤ 16) :
+    (Nat.toDigits base n).filter (· != '_') = Nat.toDigits base n := by
+  apply List.filter_eq_self.2
+  intro c hc
+  simpa using digits_no_underscore base n h2 h16 c hc
+
+private theorem digits_head (base n : Nat) (h2 : 1 < base) (h16 : base ≤ 16) :
+    (Nat.toDigits base n).head? ≠ some '_' := by
+  intro h
+  exact digits_no_underscore base n h2 h16 _ (List.mem_of_head? h) rfl
+
+/-- Printed numbers read back through the literal parser, in each prefixed base. -/
+theorem parseZ_hex (n : Nat) : parseZ ('0' :: 'x' :: Nat.toDigits 16 n) = some (Int.ofNat n) := by
+  simp [parseZ, digits_head 16 n (by decide) (by decide), filter_digits 16 n (by decide) (by decide),
+    parseBasedNat_toDigits 16 n (by decide) (by decide)]
+
+theorem parseZ_binary (n : Nat) : parseZ ('0' :: 'b' :: Nat.toDigits 2 n) = some (Int.ofNat n) := by
+  simp [parseZ, digits_head 2 n (by decide) (by decide), filter_digits 2 n (by decide) (by decide),
+    parseBasedNat_toDigits 2 n (by decide) (by decide)]
+
+theorem parseZ_negative_hex (n : Nat) : parseZ ('-' :: '0' :: 'x' :: Nat.toDigits 16 n) = some (-Int.ofNat n) := by
+  simp [parseZ, digits_head 16 n (by decide) (by decide), filter_digits 16 n (by decide) (by decide),
+    parseBasedNat_toDigits 16 n (by decide) (by decide)]
+
+/-- An atom that does not start like a number is a symbol, never an error. -/
+theorem readLiteral_symbol (atom : String) (h : startsNumeric atom.toList = false) : readLiteral atom = .ok none := by
+  simp [readLiteral, h]
+
+private theorem span_no_colon {atom : String} (h : ':' ∉ atom.toList) :
+    atom.toList.span (· != ':') = (atom.toList, []) := by
+  have hall : ∀ c ∈ atom.toList, (c != ':') = true := by
+    intro c hc
+    have : c ≠ ':' := fun e => h (e ▸ hc)
+    simpa using this
+  have key : ∀ (chars acc : List Char), (∀ c ∈ chars, (c != ':') = true) →
+      List.span.loop (· != ':') chars acc = (acc.reverse ++ chars, []) := by
+    intro chars
+    induction chars with
+    | nil => intro acc _; simp [List.span.loop]
+    | cons head rest ih =>
+      intro acc hh
+      have hhead := hh head (by simp)
+      simp only [List.span.loop, hhead, ih (head :: acc) fun c hc => hh c (List.mem_cons_of_mem _ hc)]
+      simp
+  exact (key atom.toList [] hall).trans (by simp)
+
+/-- An atom starting like a number either parses or is rejected: it never falls through to a symbol. -/
+theorem readLiteral_numeric {atom : String} (hn : startsNumeric atom.toList = true) (hc : ':' ∉ atom.toList) :
+    (∃ value, parseZ atom.toList = some value ∧ readLiteral atom = .ok (some (value, none))) ∨
+      (parseZ atom.toList = none ∧ ∃ e, readLiteral atom = .error e) := by
+  cases hz : parseZ atom.toList with
+  | none =>
+    refine Or.inr ⟨rfl, s!"malformed Primus literal {atom}", ?_⟩
+    simp only [readLiteral, hn, Bool.not_true, Bool.false_eq_true, ↓reduceIte, span_no_colon hc, hz]
+  | some value =>
+    refine Or.inl ⟨value, rfl, ?_⟩
+    simp only [readLiteral, hn, Bool.not_true, Bool.false_eq_true, ↓reduceIte, span_no_colon hc, hz]
+
+private def isRejected (atom : String) : Bool :=
+  match readLiteral atom with
+  | .error _ => true
+  | .ok _ => false
+
+/-- Malformed literals, and that bare prefixes are not among them. -/
+theorem readLiteral_examples :
+    isRejected "0xzz" = true ∧ isRejected "12abc" = true ∧ isRejected "1:2:3" = true ∧ isRejected "5:abc" = true ∧
+      isRejected "0x_1" = true ∧ parseInteger "0x" = some (0, none) ∧ parseInteger "1:8" = some (1, some 8) ∧
+      parseInteger "-0x10" = some (-16, none) ∧ parseInteger "x1" = none := by
+  decide +kernel
+
+/-- Evaluation rejects a malformed atom rather than looking it up as a symbol. -/
+theorem eval_rejects_malformed (fuel : Nat) (locals : Locals) (context : Context) (state : State) {atom e : String}
+    (h : readLiteral atom = .error e) : eval (fuel + 1) locals context state (.atom atom) = .error e := by
+  rw [eval]
+  simp [h, bind, Except.bind]
+
+theorem checkForms_rejects {forms : List Sexp} {form : Sexp} {e : String} (hm : form ∈ forms)
+    (h : checkLiterals form = .error e) : ∃ e', checkForms forms = .error e' := by
+  induction forms with
+  | nil => simp at hm
+  | cons head rest ih =>
+    rw [checkForms]
+    cases hh : checkLiterals head with
+    | error e' => exact ⟨e', by simp [bind, Except.bind, hh]⟩
+    | ok _ =>
+      rcases List.mem_cons.1 hm with rfl | hm'
+      · simp [h] at hh
+      · obtain ⟨e', he⟩ := ih hm'
+        exact ⟨e', by simp [bind, Except.bind, hh, he]⟩
+
+/-- Definitions are checked when loaded, even if never called; their documentation strings are not. -/
+theorem checkLiterals_definition (name : String) (params : List Sexp) (body : Sexp) (rest : List Sexp) (doc : String) :
+    checkLiterals (.list (.atom "defun" :: .atom name :: .list params :: .atom doc :: body :: rest)) =
+      checkForms (body :: rest) := by
+  rw [checkLiterals, checkBody]
+
+theorem checkLiterals_atom (atom : String) (e : String) (h : readLiteral atom = .error e) :
+    checkLiterals (.atom atom) = .error e := by
+  simp [checkLiterals, h, Functor.map, Except.map]
+
+/-! `word-width`. -/
+
+theorem wordWidth_nil (context : Context) : wordWidth context [] = .ok (.int (BitVec.ofNat 64 context.bits)) := rfl
+
+theorem wordWidth_cons {context : Context} {head : SV} {rest : List SV} {widths : List Nat}
+    (h : (head :: rest).mapM (widthOf context) = .ok widths) :
+    wordWidth context (head :: rest) = .ok (.int (BitVec.ofNat 64 (widths.foldl max 0))) := by
+  simp only [wordWidth, bind, Except.bind, h]
+
+private theorem foldl_max_bound (widths : List Nat) (start : Nat) :
+    start ≤ widths.foldl max start ∧ ∀ w ∈ widths, w ≤ widths.foldl max start := by
+  induction widths generalizing start with
+  | nil => simp
+  | cons head rest ih =>
+    simp only [List.foldl_cons, List.mem_cons, forall_eq_or_imp]
+    obtain ⟨h1, h2⟩ := ih (max start head)
+    exact ⟨by omega, by omega, h2⟩
+
+private theorem foldl_max_mem (widths : List Nat) (start : Nat) :
+    widths.foldl max start = start ∨ widths.foldl max start ∈ widths := by
+  induction widths generalizing start with
+  | nil => simp
+  | cons head rest ih =>
+    simp only [List.foldl_cons, List.mem_cons]
+    rcases ih (max start head) with h | h
+    · rw [h]
+      omega
+    · exact Or.inr (Or.inr h)
+
+/-- The maximum of the argument widths: at least each of them, and equal to one of them. -/
+theorem wordWidth_is_maximum (widths : List Nat) (hne : widths ≠ []) :
+    (∀ w ∈ widths, w ≤ widths.foldl max 0) ∧ widths.foldl max 0 ∈ widths := by
+  refine ⟨(foldl_max_bound widths 0).2, ?_⟩
+  rcases foldl_max_mem widths 0 with h | h
+  · cases widths with
+    | nil => exact absurd rfl hne
+    | cons head rest =>
+      have := (foldl_max_bound (head :: rest) 0).2 head (by simp)
+      have hz : head = 0 := by omega
+      subst hz
+      rw [h]
+      simp
+  · exact h
+
+/-! Assignment to `let` variables. -/
+
+theorem bindAssignable_spec (context : Context) (state : State) {value : SV} {width : Nat} {exp : Bil.Exp}
+    (h : expectBil context value = .ok (width, exp)) :
+    bindAssignable context state value =
+      .ok (.register s!"_primus_{state.nextTemp}" width width, { state with
+        code := state.code ++ [.move ⟨s!"_primus_{state.nextTemp}", .imm width, 0, false⟩ exp]
+        nextTemp := state.nextTemp + 1 }) := by
+  simp [bindAssignable, h, bind, Except.bind]
+
+private theorem primus_name_not_zero (n : Nat) : toString "_primus_" ++ n.repr ≠ "XZR" := by
+  intro h
+  have hl := congrArg String.toList h
+  have hp : (toString "_primus_").toList = ['_', 'p', 'r', 'i', 'm', 'u', 's', '_'] := by decide +kernel
+  have hx : "XZR".toList = ['X', 'Z', 'R'] := by decide +kernel
+  rw [String.toList_append, hp, hx] at hl
+  simp at hl
+
+/-- Reads of an assignable variable see the machine variable that assignments write. -/
+theorem assignable_read (context : Context) (n width : Nat) :
+    expectBil context (.register s!"_primus_{n}" width width) =
+      .ok (width, .var ⟨s!"_primus_{n}", .imm width, 0, false⟩) := by
+  simp [expectBil, primus_name_not_zero]
+
+theorem assignable_write (context : Context) (n width : Nat) {value : SV} {exp : Bil.Exp}
+    (h : expectBil context value = .ok (width, exp)) :
+    assign context (.register s!"_primus_{n}" width width) value =
+      .ok [.move ⟨s!"_primus_{n}", .imm width, 0, false⟩ exp] := by
+  simp [assign, assignRegister, primus_name_not_zero, h, bind, Except.bind, pure, Except.pure, throw, throwThe,
+    MonadExceptOf.throw]
+
+/-- `let` gives a name assigned in its scope a variable of its own, directly or through a macro argument. -/
+theorem assignsLocal_set (globals : Globals) (name : String) (fuel : Nat) (value : Sexp) :
+    assignsLocal globals name (fuel + 1) (.list [.atom "set", .atom name, value]) = true := by
+  rw [assignsLocal]
+  simp
+
+private theorem eval_atom_lookup {fuel : Nat} {locals : Locals} {context : Context} {state : State} {name : String} {value : SV}
+    (hsym : readLiteral name = .ok none) (ht : name ≠ "true") (hf : name ≠ "false") (hc : name.startsWith ":" = false)
+    (hl : lookupState name locals state = .ok value) :
+    eval (fuel + 1) locals context state (.atom name) = .ok (value, state) := by
+  rw [eval]
+  simp [hsym, ht, hf, hc, hl, bind, Except.bind, pure, Except.pure]
+
+/-- Reading a `let` variable sees its machine variable, whatever globals are called. -/
+theorem eval_let_variable (fuel : Nat) (locals : Locals) (context : Context) (state : State) {name target : String}
+    {width : Nat} (hsym : readLiteral name = .ok none) (ht : name ≠ "true") (hf : name ≠ "false")
+    (hc : name.startsWith ":" = false) (hl : Assoc.get name locals = some (.register target width width)) :
+    eval (fuel + 1) locals context state (.atom name) = .ok (.register target width width, state) :=
+  eval_atom_lookup hsym ht hf hc (by simp [lookupState, hl])
+
+/-- `(set x value)` on a `let` variable emits one move to that variable's machine variable, as upstream's
+`set_` assigns the scoped variable when the name is bound. -/
+theorem eval_set_let_variable (fuel : Nat) (locals : Locals) (context : Context) (state after : State)
+    {name target : String} {width : Nat} {form : Sexp} {value : SV} {exp : Bil.Exp}
+    (hsym : readLiteral name = .ok none) (ht : name ≠ "true") (hf : name ≠ "false") (hc : name.startsWith ":" = false)
+    (hbound : Assoc.get name locals = some (.register target width width)) (hzero : target ≠ "XZR")
+    (hset : Assoc.get "set" locals = none) (hops : state.operations.get? "set" = none)
+    (hglobal : Assoc.get "set" state.globals = none)
+    (hform : eval (fuel + 1) locals context state form = .ok (value, after))
+    (hvalue : expectBil context value = .ok (width, exp)) :
+    eval (fuel + 4) locals context state (.list [.atom "set", .atom name, form]) =
+      .ok (value, emit after [.move ⟨target, .imm width, 0, false⟩ exp]) := by
+  have hprimitive : lookupState "set" locals state = .ok (.callable (.primitive "set")) := by
+    have h0 : "set".startsWith "core:" = false := by decide +kernel
+    have h1 : ("set" = "replicate") = False := by simp
+    have h2 : "set" ∈ primitiveNames := by decide
+    have hops' : state.operations["set"]? = none := by simpa using hops
+    simp [lookupState, h0, hset, hops', hglobal, h2]
+  have hsymset : readLiteral "set" = .ok none := by
+    apply readLiteral_symbol
+    decide +kernel
+  have hcolon : "set".startsWith ":" = false := by decide +kernel
+  have hatom : eval (fuel + 3) locals context state (.atom "set") = .ok (.callable (.primitive "set"), state) :=
+    eval_atom_lookup hsymset (by simp) (by simp) hcolon hprimitive
+  have hname := eval_let_variable (fuel + 1) locals context state hsym ht hf hc hbound
+  have hlist : evalList (fuel + 3) locals context state [.atom name, form] =
+      .ok ([.register target width width, value], after) := by
+    unfold evalList
+    simp only [bind, Except.bind, hname]
+    unfold evalList
+    simp only [bind, Except.bind, hform]
+    unfold evalList
+    simp only [pure, Except.pure]
+  have hassign : applyPrimitive context "set" [.register target width width, value] =
+      .ok (value, [.move ⟨target, .imm width, 0, false⟩ exp]) := by
+    simp [applyPrimitive, assign, assignRegister, hzero, hvalue, valueOnly, bind, Except.bind, pure, Except.pure]
+  rw [eval]
+  simp only [bind, Except.bind, hprimitive, hatom, hlist]
+  · rw [apply]
+    simp only [bind, Except.bind, hassign, pure, Except.pure]
+  all_goals (intros; simp_all)
+
+/-- A `let` whose scope assigns its name binds it to a fresh machine variable and evaluates the body with
+that binding, initialised from the bound value. -/
+theorem eval_let_assignable (fuel : Nat) (locals : Locals) (context : Context) (state after : State)
+    {name : String} {form : Sexp} {body : List Sexp} {value : SV} {width : Nat} {exp : Bil.Exp}
+    (hform : eval fuel locals context state form = .ok (value, after))
+    (hvalue : expectBil context value = .ok (width, exp))
+    (hassigned : ([Sexp.list [.atom name, form]] ++ body).any (assignsLocal after.globals name 64) = true) :
+    eval (fuel + 1) locals context state (.list (.atom "let" :: .list [.list [.atom name, form]] :: body)) =
+      evalSequence fuel ((name, .register s!"_primus_{after.nextTemp}" width width) :: locals) context
+        { after with
+          code := after.code ++ [.move ⟨s!"_primus_{after.nextTemp}", .imm width, 0, false⟩ exp]
+          nextTemp := after.nextTemp + 1 } body := by
+  rw [eval]
+  · simp only [List.foldlM_cons, List.foldlM_nil, bind, Except.bind, hform, hassigned, ↓reduceIte,
+      bindAssignable_spec context after hvalue, pure, Except.pure]
+  all_goals (intros; simp_all)
 
 end Semantics
 

@@ -130,6 +130,14 @@ module Apply = struct
   let is_shift = function LSHIFT | RSHIFT | ARSHIFT -> true | _ -> false
   let unop op u = match op with NEG -> Word.neg u | NOT -> Word.lnot u
 
+  (* the sign of the result follows the divisor, and [smod x 0 = x], which isn't
+     the [mod] of the signed words, whose sign follows the dividend *)
+  let smod u v =
+    let w = Word.bitwidth u in
+    Word.create
+      Bitvec.(smod (Word.to_bitvec u) (Word.to_bitvec v) mod modulus w)
+      w
+
   let binop op u v =
     let open Word in
     match op with
@@ -146,7 +154,7 @@ module Apply = struct
         | DIVIDE -> u / v
         | SDIVIDE -> signed u / signed v
         | MOD -> u mod v
-        | SMOD -> signed u mod signed v
+        | SMOD -> smod u v
         | AND -> u land v
         | OR -> u lor v
         | XOR -> u lxor v

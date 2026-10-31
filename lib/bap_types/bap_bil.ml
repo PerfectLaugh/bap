@@ -25,7 +25,11 @@ module Binop = struct
     | DIVIDE  (** Unsigned integer division. *)
     | SDIVIDE  (** Signed integer division. *)
     | MOD  (** Unsigned modulus. *)
-    | SMOD  (** Signed modulus. *)
+    | SMOD
+        (** Signed modulus. The sign of a nonzero result follows the divisor, as
+            in SMT-LIB [bvsmod], and [x smod 0 = x]. It is not the truncating
+            remainder, e.g., of [%] of C, whose sign follows the dividend:
+            [-5 %$ 3 = 1], while [-5 rem 3 = -2]. *)
     | LSHIFT  (** Left shift. *)
     | RSHIFT  (** Right shift, fill with 0. *)
     | ARSHIFT  (** Right shift, sign extend. *)

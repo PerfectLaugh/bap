@@ -31,6 +31,19 @@ private def aarch64Register (name : String) : Primus.Semantics.Value :=
   else
     .register name 64 64
 
+/-- XMM is the low half of YMM, as in `x86_target` of the reference implementation. -/
+private def x86VectorRegister (name : String) : Option Primus.Semantics.Value :=
+  match name.toList with
+  | 'X' :: 'M' :: 'M' :: digit :: digits =>
+    if (digit :: digits).all Char.isDigit then
+      some (.register ("YMM" ++ String.ofList (digit :: digits)) 128 256)
+    else none
+  | 'Y' :: 'M' :: 'M' :: digit :: digits =>
+    if (digit :: digits).all Char.isDigit then some (.register name 256 256) else none
+  | 'Z' :: 'M' :: 'M' :: digit :: digits =>
+    if (digit :: digits).all Char.isDigit then some (.register name 512 512) else none
+  | _ => none
+
 /-- The 64-bit base and the width of a low partial x86 general purpose register. -/
 private def x86LowRegister (name : String) : Option (String × Nat) :=
   match name with
@@ -75,7 +88,7 @@ private def x86Register (name : String) : Primus.Semantics.Value :=
   else
     match x86LowRegister name with
     | some (base, width) => .register base width 64
-    | none => .register name 64 64
+    | none => (x86VectorRegister name).getD (.register name 64 64)
 
 mutual
   private def highBytesExp (base : String → Option String) (width : Nat) : Bil.Exp → Bil.Exp
@@ -152,7 +165,7 @@ private def x8632Register (name : String) : Primus.Semantics.Value :=
     | "DX" => .register "EDX" 16 32 | "DL" => .register "EDX" 8 32
     | "SI" => .register "ESI" 16 32 | "DI" => .register "EDI" 16 32
     | "BP" => .register "EBP" 16 32 | "SP" => .register "ESP" 16 32
-    | _ => .register name 32 32
+    | _ => (x86VectorRegister name).getD (.register name 32 32)
 
 private def x8632Globals : Primus.Semantics.Globals :=
   let registers := ["EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP", "EIP",
@@ -432,6 +445,121 @@ def thumbEnvironment : IO Primus.Semantics.Environment := do
   let definitions ← Primus.Semantics.loadMany (← pluginDirectories "arm") ["thumb2"] context
   pure (makeEnvironment definitions arm32Globals)
 
+/-- The addressing of an ARM load or store of multiple registers. -/
+private inductive ArmMultiple where
+  | increaseAfter | increaseBefore | decreaseAfter | decreaseBefore
+  deriving DecidableEq, Repr
+
+/-- Parses the operands of an ARM load or store of multiple registers: whether it is a load, the
+addressing, whether the base is written back, the base, the condition and the list of registers. -/
+private def armMultipleOperands (opcode : String) (operands : List LLVM.Operand) :
+    Option (Bool × ArmMultiple × Bool × String × Int × List String) :=
+  let names (rest : List LLVM.Operand) : Option (List String) :=
+    rest.mapM fun operand =>
+      match operand with
+      | .reg name => some name
+      | .imm _ => none
+  let mode : Option (Bool × ArmMultiple × Bool) :=
+    match opcode with
+    | "LDMIA" | "t2LDMIA" | "tLDMIA" => some (true, .increaseAfter, false)
+    | "LDMIA_UPD" | "LDMIA_RET" | "t2LDMIA_UPD" | "t2LDMIA_RET" | "tLDMIA_UPD" =>
+      some (true, .increaseAfter, true)
+    | "LDMIB" => some (true, .increaseBefore, false)
+    | "LDMIB_UPD" => some (true, .increaseBefore, true)
+    | "LDMDA" => some (true, .decreaseAfter, false)
+    | "LDMDA_UPD" => some (true, .decreaseAfter, true)
+    | "LDMDB" | "t2LDMDB" => some (true, .decreaseBefore, false)
+    | "LDMDB_UPD" | "t2LDMDB_UPD" => some (true, .decreaseBefore, true)
+    | "STMIA" | "t2STMIA" => some (false, .increaseAfter, false)
+    | "STMIA_UPD" | "t2STMIA_UPD" | "tSTMIA_UPD" => some (false, .increaseAfter, true)
+    | "STMIB" => some (false, .increaseBefore, false)
+    | "STMIB_UPD" => some (false, .increaseBefore, true)
+    | "STMDA" => some (false, .decreaseAfter, false)
+    | "STMDA_UPD" => some (false, .decreaseAfter, true)
+    | "STMDB" | "t2STMDB" => some (false, .decreaseBefore, false)
+    | "STMDB_UPD" | "t2STMDB_UPD" => some (false, .decreaseBefore, true)
+    | _ => none
+  match opcode, operands with
+  | "tPOP", .imm condition :: _ :: rest =>
+    (names rest).map fun list => (true, .increaseAfter, true, "SP", condition, list)
+  | "tPUSH", .imm condition :: _ :: rest =>
+    (names rest).map fun list => (false, .decreaseBefore, true, "SP", condition, list)
+  | _, operands =>
+    mode.bind fun (load, addressing, writeback) =>
+      match writeback, operands with
+      | true, _ :: .reg base :: .imm condition :: _ :: rest
+      | false, .reg base :: .imm condition :: _ :: rest =>
+        (names rest).map fun list => (load, addressing, writeback, base, condition, list)
+      | _, _ => none
+
+/-- The condition of an A32 or T32 instruction, as `condition-holds` of `arm-bits`, `none` if it
+always holds. -/
+private def armCondition (condition : Int) : Option Bil.Exp :=
+  let flag (name : String) : Bil.Exp := .var ⟨name, .imm 1, 0, false⟩
+  let same : Bil.Exp := .bin .eq (flag "NF") (flag "VF")
+  let different : Bil.Exp := .bin .neq (flag "NF") (flag "VF")
+  match condition with
+  | 0 => some (flag "ZF")
+  | 1 => some (.un .not (flag "ZF"))
+  | 2 => some (flag "CF")
+  | 3 => some (.un .not (flag "CF"))
+  | 4 => some (flag "NF")
+  | 5 => some (.un .not (flag "NF"))
+  | 6 => some (flag "VF")
+  | 7 => some (.un .not (flag "VF"))
+  | 8 => some (.bin .and (flag "CF") (.un .not (flag "ZF")))
+  | 9 => some (.bin .or (.un .not (flag "CF")) (flag "ZF"))
+  | 10 => some same
+  | 11 => some different
+  | 12 => some (.bin .and same (.un .not (flag "ZF")))
+  | 13 => some (.bin .or different (flag "ZF"))
+  | _ => none
+
+/-- The base register of the address computations of a load or store of multiple registers. -/
+private def armMultipleBase : Bap.Var := ⟨"_arm_multiple_base", .imm 32, 0, false⟩
+
+private def armWord (value : Nat) : Bil.Exp := .int (BitVec.ofNat 32 value)
+
+/-- The accesses of a load or store of multiple registers, the lowest register at the lowest
+address, where a load of PC is a branch. As in `arm-a32-multiple`, the base is written back before
+the loads, so a loaded base keeps the loaded value, and after the stores. The Lean evaluator of the
+Primus semantics has no definitions by arity, which that file relies on, so this is built here. -/
+private def armMultiple (pc : Nat) (context : Primus.Semantics.Context) (decoded : LLVM.Decoded) :
+    Option Bil.Program :=
+  (armMultipleOperands decoded.opcode decoded.operands).map
+    fun (load, addressing, writeback, base, condition, list) =>
+      let baseVar : Bap.Var := ⟨base, .imm 32, 0, false⟩
+      let size := 4 * list.length
+      let first : Bil.Exp :=
+        match addressing with
+        | .increaseAfter => .var armMultipleBase
+        | .increaseBefore => .bin .add (.var armMultipleBase) (armWord 4)
+        | .decreaseAfter => .bin .sub (.bin .add (.var armMultipleBase) (armWord 4)) (armWord size)
+        | .decreaseBefore => .bin .sub (.var armMultipleBase) (armWord size)
+      let after : Bil.Exp :=
+        match addressing with
+        | .increaseAfter | .increaseBefore => .bin .add (.var armMultipleBase) (armWord size)
+        | .decreaseAfter | .decreaseBefore => .bin .sub (.var armMultipleBase) (armWord size)
+      let address (index : Nat) : Bil.Exp := .bin .add first (armWord (4 * index))
+      let memory : Bil.Exp := .var context.memory
+      let write : Bil.Program := if writeback then [.move baseVar after] else []
+      let loads := (List.range list.length).zip list |>.map fun (index, name) =>
+        let value : Bil.Exp := .load memory (address index) context.endian 4
+        if name = "PC" then Bil.Stmt.jmp (.bin .and value (armWord 0xfffffffe))
+        else .move ⟨name, .imm 32, 0, false⟩ value
+      let stores := (List.range list.length).zip list |>.map fun (index, name) =>
+        let value : Bil.Exp := if name = "PC" then armWord pc else .var ⟨name, .imm 32, 0, false⟩
+        Bil.Stmt.move context.memory (.store memory (address index) value context.endian 4)
+      let body : Bil.Program :=
+        .move armMultipleBase (.var baseVar) ::
+          (if load then write ++ loads else stores ++ write)
+      match armCondition condition with
+      | some holds => [.ifElse holds body []]
+      | none => body
+
+/-- An address is computed modulo the width of the address space, as the hardware does. -/
+private def wrapAddress (bits : Nat) (target : Int) : Nat := (target % (2 ^ bits : Int)).toNat
+
 /-- A Thumb branch or call: its displacement operand, from the pc, the address plus four. LLVM
 gives BLX an A32 target, which is relative to the word-aligned pc. -/
 private def thumbTarget (address : Nat) (decoded : LLVM.Decoded) : Option Nat :=
@@ -441,17 +569,13 @@ private def thumbTarget (address : Nat) (decoded : LLVM.Decoded) : Option Nat :=
     else none
   let pc := if decoded.opcode = "tBLXi" then (address + 4) / 4 * 4 else address + 4
   match displacement with
-  | some (.imm displacement) =>
-    let target := Int.ofNat pc + displacement
-    if target ≥ 0 then some target.toNat else none
+  | some (.imm displacement) => some (wrapAddress 32 (Int.ofNat pc + displacement))
   | _ => none
 
 /-- An A32 branch or call: its displacement operand, from the pc, the address plus eight. -/
 private def arm32Target (address : Nat) (decoded : LLVM.Decoded) : Option Nat :=
   match ["Bcc", "BL", "BL_pred", "BLXi"].contains decoded.opcode, decoded.operands.head? with
-  | true, some (.imm displacement) =>
-    let target := Int.ofNat (address + 8) + displacement
-    if target ≥ 0 then some target.toNat else none
+  | true, some (.imm displacement) => some (wrapAddress 32 (Int.ofNat (address + 8) + displacement))
   | _, _ => none
 
 /-- A direct branch or call by the flags of LLVM. -/
@@ -461,17 +585,21 @@ private def directControl (flags : Nat) : Bool :=
 /-- `J`, `JAL` and `JALX` give the low 28 bits of the target, the upper bits are of the delay slot.
 The other direct branches and calls give a displacement from the branch, which LLVM has already
 adjusted for the delay slot. -/
-private def mipsTarget (address : Nat) (decoded : LLVM.Decoded) : Option Nat :=
+private def mipsTarget (bits address : Nat) (decoded : LLVM.Decoded) : Option Nat :=
   match decoded.operands.getLast? with
   | some (.imm immediate) =>
     if ["J", "JAL", "JALX"].contains decoded.opcode then
-      if immediate ≥ 0 then some ((address + 4) / 0x10000000 * 0x10000000 + immediate.toNat)
-      else none
+      some (wrapAddress bits (Int.ofNat ((address + 4) / 0x10000000 * 0x10000000) + immediate))
     else if directControl decoded.flags then
-      let target := Int.ofNat address + immediate
-      if target ≥ 0 then some target.toNat else none
+      some (wrapAddress bits (Int.ofNat address + immediate))
     else none
   | _ => none
+
+/-- The MIPS jumps without fall-through run their delay slot before the transfer. The other delayed
+branches and calls reach the slot by falling through. `ERET` has no delay slot. -/
+def mipsHasDelaySlot (insn : Disasm.Insn) : Bool :=
+  (insn.flow == .jump || insn.flow == .indirectJump || insn.flow == .ret) &&
+    !insn.asm.startsWith "eret" && !insn.asm.startsWith "deret"
 
 /-- The instruction word at the start of `data`. -/
 private def instructionWord (endian : Endian) (data : ByteArray) : Nat :=
@@ -483,23 +611,20 @@ private def instructionWord (endian : Endian) (data : ByteArray) : Nat :=
 /-- The I-form and B-form branches have the displacement, of words, as the last operand, and the
 absolute variants have the AA bit, which is what tells BA from B. The other branches that LLVM
 marks as direct, e.g., `gBCLR`, go through a register. -/
-private def powerpcMCTarget (address word : Nat) (operands : List LLVM.MCOperand) : Option Nat :=
+private def powerpcMCTarget (bits address word : Nat) (operands : List LLVM.MCOperand) : Option Nat :=
   let primary := word / 0x4000000
   match primary == 16 || primary == 18, operands.getLast? with
   | true, some (.imm displacement) =>
     let origin : Int := if word &&& 2 != 0 then 0 else Int.ofNat address
-    let target := origin + displacement * 4
-    if target ≥ 0 then some target.toNat else none
+    some (wrapAddress bits (origin + displacement * 4))
   | _, _ => none
 
 /-- LLVM has no flags for `JAL`, whose major opcode this is. -/
 private def riscvIsJal (word : Nat) : Bool := word % 0x80 == 0x6f
 
-private def riscvMCTarget (address word flags : Nat) (operands : List LLVM.MCOperand) : Option Nat :=
+private def riscvMCTarget (bits address word flags : Nat) (operands : List LLVM.MCOperand) : Option Nat :=
   match riscvIsJal word || flags &&& 8 != 0 && flags &&& 16 == 0, operands.getLast? with
-  | true, some (.imm displacement) =>
-    let target := Int.ofNat address + displacement
-    if target ≥ 0 then some target.toNat else none
+  | true, some (.imm displacement) => some (wrapAddress bits (Int.ofNat address + displacement))
   | _, _ => none
 
 private def flow (flags : Nat) : Disasm.Flow :=
@@ -531,6 +656,39 @@ private def arm32Flow (decoded : LLVM.Decoded) : Disasm.Flow :=
   | "Bcc", _ :: .imm 14 :: _ => .jump
   | _, _ => flow decoded.flags
 
+/-- `BEQ` of a register with itself and `BGEZ` of the zero register are the assembler's `b`, which
+always branches. -/
+private def mipsFlow (decoded : LLVM.Decoded) : Disasm.Flow :=
+  match decoded.opcode, decoded.operands with
+  | "BEQ", [left, right, _] | "BEQL", [left, right, _] =>
+    if left == right then .jump else flow decoded.flags
+  | "BGEZ", [.reg "ZERO", _] | "BGEZ", [.reg "ZERO_64", _]
+  | "BGEZL", [.reg "ZERO", _] | "BGEZL", [.reg "ZERO_64", _] => .jump
+  | _, _ => flow decoded.flags
+
+/-- A lifted program transfers control: `some true` if always, `some false` under some condition. -/
+private def programJump : Bil.Program → Option Bool
+  | [] => none
+  | .jmp _ :: _ => some true
+  | .while _ body :: rest =>
+    match programJump rest with
+    | some true => some true
+    | jump => if (programJump body).isSome then some false else jump
+  | .ifElse _ yes no :: rest =>
+    match programJump rest with
+    | some true => some true
+    | jump => if (programJump yes).isSome || (programJump no).isSome then some false else jump
+  | _ :: rest => programJump rest
+
+/-- LLVM has no flags for most writes to PC, e.g., `ldr pc, [sp]`, and it calls `bxeq lr` and
+`moveq pc, lr` returns. The semantics lift all of them to jumps, under the condition if there is
+one, so the lifted program decides whether control can fall through. -/
+private def armControlFlow (flow : Disasm.Flow) (bil : Bil.Program) : Disasm.Flow :=
+  match flow, programJump bil with
+  | .normal, some true => .indirectJump
+  | .normal, some false | .ret, some false | .indirectJump, some false => .conditionalJump
+  | _, _ => flow
+
 private def normalizeAssembly (assembly : String) : String :=
   let tokens := (assembly.split Char.isWhitespace).toList.map fun token => token.toString
   String.intercalate " " (tokens.filter fun token => !token.isEmpty)
@@ -538,9 +696,7 @@ private def normalizeAssembly (assembly : String) : String :=
 private def aarch64MCTarget (address : Nat) (flags : Nat) (operands : List LLVM.MCOperand) : Option Nat :=
   let selected := if flags &&& 32 != 0 then operands.getLast? else operands.head?
   match directControl flags, selected with
-  | true, some (.imm displacement) =>
-    let target := Int.ofNat address + displacement * 4
-    if target ≥ 0 then some target.toNat else none
+  | true, some (.imm displacement) => some (wrapAddress 64 (Int.ofNat address + displacement * 4))
   | _, _ => none
 
 private def aarch64MCOperands (globals : Primus.Semantics.Environment)
@@ -594,12 +750,10 @@ private def x86MCOperands (globals : Primus.Semantics.Environment)
       else
         pure (.bil 64 (.int (BitVec.ofInt 64 value)))
 
-private def x86MCTarget (globals : Primus.Semantics.Environment) (next : Nat) (opcode : Nat)
+private def x86MCTarget (bits : Nat) (globals : Primus.Semantics.Environment) (next : Nat) (opcode : Nat)
     (operands : List LLVM.MCOperand) : Option Nat :=
   match globals.relativeOpcodes.contains opcode, operands.head? with
-  | true, some (.imm displacement) =>
-    let target := Int.ofNat next + displacement
-    if target ≥ 0 then some target.toNat else none
+  | true, some (.imm displacement) => some (wrapAddress bits (Int.ofNat next + displacement))
   | _, _ => none
 
 def decodeX86With (globals : Primus.Semantics.Environment) (base address : Nat)
@@ -615,7 +769,7 @@ def decodeX86With (globals : Primus.Semantics.Environment) (base address : Nat)
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
     flow := flow decoded.flags
-    target := x86MCTarget globals (address + decoded.size) opcode machineOperands
+    target := x86MCTarget 64 globals (address + decoded.size) opcode machineOperands
     bil := resolveHighBytes x86HighByteBase 64 bil
   }
 
@@ -638,7 +792,7 @@ def decodeX8632With (globals : Primus.Semantics.Environment) (base address : Nat
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
     flow := flow decoded.flags
-    target := x86MCTarget globals (address + decoded.size) opcode machineOperands
+    target := x86MCTarget 32 globals (address + decoded.size) opcode machineOperands
     bil := resolveHighBytes x8632HighByteBase 32 bil
   }
 
@@ -662,7 +816,7 @@ def decodeRISCVWith (globals : Primus.Semantics.Environment) (base address : Nat
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
     flow := riscvFlow word decoded.flags
-    target := riscvMCTarget address word decoded.flags machineOperands
+    target := riscvMCTarget 64 address word decoded.flags machineOperands
     bil := bil
   }
 
@@ -686,7 +840,7 @@ def decodeRISCV32With (globals : Primus.Semantics.Environment) (base address : N
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
     flow := riscvFlow word decoded.flags
-    target := riscvMCTarget address word decoded.flags machineOperands
+    target := riscvMCTarget 32 address word decoded.flags machineOperands
     bil := bil
   }
 
@@ -710,7 +864,7 @@ def decodePowerPCWith (globals : Primus.Semantics.Environment) (base address : N
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
     flow := flow decoded.flags
-    target := powerpcMCTarget address word machineOperands
+    target := powerpcMCTarget 64 address word machineOperands
     bil := bil
   }
 
@@ -734,7 +888,7 @@ def decodePowerPC32With (globals : Primus.Semantics.Environment) (base address :
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
     flow := flow decoded.flags
-    target := powerpcMCTarget address word machineOperands
+    target := powerpcMCTarget 32 address word machineOperands
     bil := bil
   }
 
@@ -751,8 +905,8 @@ def decodeMIPSWith (globals : Primus.Semantics.Environment) (base address : Nat)
     address := address
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
-    flow := flow decoded.flags
-    target := mipsTarget address decoded
+    flow := mipsFlow decoded
+    target := mipsTarget 64 address decoded
     bil := bil
   }
 
@@ -769,8 +923,8 @@ def decodeMIPS32With (globals : Primus.Semantics.Environment) (base address : Na
     address := address
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
-    flow := flow decoded.flags
-    target := mipsTarget address decoded
+    flow := mipsFlow decoded
+    target := mipsTarget 32 address decoded
     bil := bil
   }
 
@@ -781,13 +935,15 @@ def decodeARM32With (globals : Primus.Semantics.Environment) (base address : Nat
     (data : ByteArray) : IO Disasm.Insn := do
   let decoded ← LLVM.disassemble "armv7" (data.extract (address - base) data.size) address
   let context := arm32Context address (address + decoded.size)
-  let bil ← Primus.Semantics.liftWith globals context decoded.opcode
-    (decoded.operands.map arm32Operand)
+  let bil ← match armMultiple (address + 8) context decoded with
+    | some bil => pure bil
+    | none =>
+      Primus.Semantics.liftWith globals context decoded.opcode (decoded.operands.map arm32Operand)
   pure {
     address := address
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
-    flow := arm32Flow decoded
+    flow := armControlFlow (arm32Flow decoded) bil
     target := arm32Target address decoded
     bil := bil
   }
@@ -799,13 +955,15 @@ def decodeThumbWith (globals : Primus.Semantics.Environment) (base address : Nat
     (data : ByteArray) : IO Disasm.Insn := do
   let decoded ← LLVM.disassemble "thumbv7" (data.extract (address - base) data.size) address
   let context := arm32Context address (address + decoded.size)
-  let bil ← Primus.Semantics.liftWith globals context decoded.opcode
-    (decoded.operands.map arm32Operand)
+  let bil ← match armMultiple (address + 4) context decoded with
+    | some bil => pure bil
+    | none =>
+      Primus.Semantics.liftWith globals context decoded.opcode (decoded.operands.map arm32Operand)
   pure {
     address := address
     size := decoded.size
     asm := normalizeAssembly decoded.assembly
-    flow := flow decoded.flags
+    flow := armControlFlow (flow decoded.flags) bil
     target := thumbTarget address decoded
     bil := bil
   }

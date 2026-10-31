@@ -219,19 +219,45 @@ def run : IO Unit := do
   -- revisiting addresses costs no fuel, and running out of it is an error
   let loopInsn (address : Nat) (flow : Flow) (target : Nat) : Insn :=
     { address := address, size := 1, asm := "", flow := flow, target := some target }
-  let loopDecoder : Disassembler := ⟨"loop", fun address _ => pure <| .ok <| match address with
+  let loopDecoder : Disassembler := { name := "loop", decode := fun address _ => pure <| .ok <|
+    match address with
     | 0 => loopInsn 0 .conditionalJump 3
     | 1 => loopInsn 1 .conditionalJump 1
     | 2 => loopInsn 2 .jump 1
-    | address => loopInsn address .ret 0⟩
+    | address => loopInsn address .ret 0 }
   let loop ← Recursive.scan loopDecoder (bytes [0, 0, 0, 0]) 0
   assertEqual "recursive scan reaches past revisited addresses" [0, 1, 2, 3]
     (loop.instructions.map Insn.address)
   assertEqual "recursive scan with fuel left has no errors" [] loop.errors
-  let endless : Disassembler := ⟨"endless", fun address _ => pure <| .ok
-    { address := address, size := 1, asm := "", flow := .normal }⟩
+  let endlessInsn (address : Nat) : Insn := { address := address, size := 1, asm := "" }
+  let endless : Disassembler := { name := "endless", decode := fun address _ => pure (.ok (endlessInsn address)) }
   let exhausted ← Recursive.scan endless (bytes [0]) 0
   assertEqual "recursive scan reports running out of fuel" [Recursive.outOfFuel] exhausted.errors
+  -- a delay slot is listed and is on the path to the target, without a fall-through edge
+  let mips ← Target.MIPS.disassembler 0
+  let mipsCode := bytes [0x08, 0, 0, 0x04, 0x24, 0x42, 0, 0x01, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0x03, 0xe0, 0, 0x08, 0x24, 0x63, 0, 0x01]
+  let delayed ← Recursive.scan mips mipsCode 0
+  assertEqual "scan covers delay slots" [0, 4, 16, 20] (delayed.instructions.map Insn.address)
+  assertEqual "scan goes through delay slots" [(0, 4), (4, 16), (16, 20)] delayed.edges
+  assertEqual "scan of delay slots has no errors" [] delayed.errors
+  -- a slot that is also reached by a branch keeps its own fall-through
+  let reached ← Recursive.scan mips (bytes [0x10, 0, 0, 0x01, 0x24, 0x42, 0, 0x01, 0x03, 0xe0, 0, 0x08,
+    0x24, 0x63, 0, 0x01]) 0
+  assertEqual "scan of an assembler b" [0, 4, 8, 12] (reached.instructions.map Insn.address)
+  assertEqual "scan of an assembler b edges" [(0, 4), (4, 8), (8, 12)] reached.edges
+  let slotTwice : Disassembler := {
+    name := "slot", decode := fun address _ => pure <| .ok <|
+      match address with
+      | 0 => { address := 0, size := 1, asm := "", flow := .jump, target := some 3 }
+      | 3 => { address := 3, size := 1, asm := "", flow := .jump, target := some 1 }
+      | 1 => { address := 1, size := 1, asm := "", flow := .normal }
+      | address => { address := address, size := 1, asm := "", flow := .ret }
+    hasDelaySlot := fun insn => insn.address == 0 }
+  let twice ← Recursive.scan slotTwice (bytes [0, 0, 0, 0]) 0
+  assertEqual "a slot reached twice is listed once" [0, 1, 3, 2]
+    (twice.instructions.map Insn.address)
+  assertEqual "a slot reached on its own falls through" [(0, 1), (1, 3), (3, 1), (1, 2)] twice.edges
   let branch ← Recursive.scan (← Target.X86.disassembler 0) (bytes [0xeb, 0x02, 0xc3, 0x90, 0xc3]) 0
   assertEqual "recursive branch skips unreachable" [0, 4] (branch.instructions.map Insn.address)
   assertEqual "recursive branch edges" [(0, 4)] branch.edges
