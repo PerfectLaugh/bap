@@ -493,7 +493,7 @@ joins. It is 3 s, most of it compiling hot code. -/
 private def testRealPthreads : IO Unit := do
   let binary := "native/build/pthreads-test"
   let compiled ← IO.Process.output
-    { cmd := "gcc", args := #["-static", "-O1", "-pthread", "testsuite/src/pthreads.c", "-o", binary] } |>.toBaseIO
+    { cmd := "gcc", args := #["-static", "-O1", "-pthread", "testsuite/src/libc-threads.c", "-o", binary] } |>.toBaseIO
   match compiled with
   | .ok { exitCode := 0, .. } =>
     let written ← IO.mkRef ByteArray.empty
@@ -1512,7 +1512,6 @@ private def runEmulator : IO Unit := do
   testThreads
   testCloneThread
   testProcesses
-  testRealPthreads
   testDelaySlots
   testLiveProject
   testDiff
@@ -1930,6 +1929,7 @@ chain, so that they say the same of native code, ranges and the interpreter. -/
 def run : IO Unit := do
   nopInLoop
   mipsLittle
+  testRealPthreads
   allEmulatorTests
   tuningRef.set (some (1, 4096, 16))
   allEmulatorTests
