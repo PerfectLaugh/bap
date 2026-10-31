@@ -111,7 +111,8 @@ private abbrev resolveAliases : (String → Option Alias) → Bil.Program → Bi
 private abbrev aliasExp : (String → Option Alias) → Bil.Exp → Bil.Exp := lift% aliasExp
 private abbrev x86Aliases : (String → Option String) → Nat → String → Option Alias := lift% x86Aliases
 private abbrev armAliases : String → Option Alias := lift% armAliases
-private abbrev powerpcAliases : String → Option Alias := lift% powerpcAliases
+private abbrev powerpcAliases : Nat → String → Option Alias := lift% powerpcAliases
+private abbrev powerpcVectorWidth : Nat → String → Option Nat := lift% powerpcVectorWidth
 private abbrev x86FlagBits : List String := lift% x86FlagBits
 private abbrev x86FloatRegister : String → Option PValue := lift% x86FloatRegister
 private abbrev x86Register : String → PValue := lift% x86Register
@@ -952,19 +953,31 @@ theorem arm32Register_shape (name : String) :
   repeat' split
   all_goals exact ⟨_, _, rfl, by simp⟩
 
+private theorem powerpcVectorWidth_cases {bits : Nat} (hb : bits = 32 ∨ bits = 64) {name : String} {w : Nat}
+    (h : powerpcVectorWidth bits name = some w) : w = 1 ∨ w = 4 ∨ w = 32 ∨ w = 64 ∨ w = 128 ∨ w = 256 ∨ w = 512 := by
+  lift_unfold powerpcVectorWidth at h
+  repeat' split at h
+  all_goals first
+    | (simp only [Option.some.injEq] at h; subst h; rcases hb with rfl | rfl <;> decide)
+    | contradiction
+
 theorem powerpcRegister_shape (name : String) :
-    ∃ n w, powerpcRegister name = register n w w ∧ (w = 1 ∨ w = 4 ∨ w = 64 ∨ w = 128) := by
+    ∃ n w, powerpcRegister name = register n w w ∧ (w = 1 ∨ w = 4 ∨ w = 32 ∨ w = 64 ∨ w = 128 ∨ w = 256 ∨ w = 512) := by
   lift_unfold powerpcRegister
   simp only []
   repeat' split
-  all_goals exact ⟨_, _, rfl, by decide⟩
+  all_goals first
+    | exact ⟨_, _, rfl, by decide⟩
+    | exact ⟨_, _, rfl, powerpcVectorWidth_cases (.inr rfl) ‹_›⟩
 
 theorem powerpc32Register_shape (name : String) :
-    ∃ n w, powerpc32Register name = register n w w ∧ (w = 1 ∨ w = 4 ∨ w = 32 ∨ w = 64 ∨ w = 128) := by
+    ∃ n w, powerpc32Register name = register n w w ∧ (w = 1 ∨ w = 4 ∨ w = 32 ∨ w = 64 ∨ w = 128 ∨ w = 256 ∨ w = 512) := by
   lift_unfold powerpc32Register
   simp only []
   repeat' split
-  all_goals exact ⟨_, _, rfl, by decide⟩
+  all_goals first
+    | exact ⟨_, _, rfl, by decide⟩
+    | exact ⟨_, _, rfl, powerpcVectorWidth_cases (.inl rfl) ‹_›⟩
 
 /-- The 32-bit and 64-bit RISC-V tables differ in width only. -/
 theorem riscvRegister_widths (name : String) :
@@ -1154,11 +1167,11 @@ theorem mips32Globals_keys : (mips32Globals.map (·.1)).Nodup ∧ mips32Globals.
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem powerpcGlobals_keys : (powerpcGlobals.map (·.1)).Nodup ∧ powerpcGlobals.length = 85 :=
+theorem powerpcGlobals_keys : (powerpcGlobals.map (·.1)).Nodup ∧ powerpcGlobals.length = 183 :=
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem powerpc32Globals_keys : (powerpc32Globals.map (·.1)).Nodup ∧ powerpc32Globals.length = 85 :=
+theorem powerpc32Globals_keys : (powerpc32Globals.map (·.1)).Nodup ∧ powerpc32Globals.length = 183 :=
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 100000 in
@@ -2262,7 +2275,7 @@ theorem decodePowerPCWith_fields (globals : Primus.Semantics.Environment) (base 
     Holds (decodePowerPCWith globals base address data)
       (FromMC address (flow ·.flags)
         (fun _ operands => powerpcMCTarget 64 address (riscvAddress address data base) operands)
-        (resolveAliases powerpcAliases)) := by
+        (resolveAliases (powerpcAliases 64))) := by
   unfold decodePowerPCWith
   fields_decoder
 
@@ -2270,7 +2283,7 @@ theorem decodePowerPC32With_fields (globals : Primus.Semantics.Environment) (bas
     Holds (decodePowerPC32With globals base address data)
       (FromMC address (flow ·.flags)
         (fun _ operands => powerpcMCTarget 32 address (instructionWord .big (instructionBytes data (address - base))) operands)
-        (resolveAliases powerpcAliases)) := by
+        (resolveAliases (powerpcAliases 32))) := by
   unfold decodePowerPC32With
   fields_decoder
 
@@ -2523,10 +2536,10 @@ private theorem field_case (lt gt eq un : String) (hnodup : [lt, gt, eq, un].Nod
   exact ⟨state', hrun, hlt ▸ hread⟩
 
 /-- A field of the condition register of PowerPC is its bits: what is written to it is what is read from it. -/
-theorem powerpc_field_write_read (name : String) (h : name ∈ ["CR0", "CR1", "CR2", "CR3", "CR4", "CR5", "CR6", "CR7"])
+theorem powerpc_field_write_read (bits : Nat) (name : String) (h : name ∈ ["CR0", "CR1", "CR2", "CR3", "CR4", "CR5", "CR6", "CR7"])
     (typ : Typ) (value : Bil.Exp) (state : Bil.State) (rest : Bil.Program) (fuel : Nat) (x : BitVec 4)
     (hvalue : Bil.evalExp state.env value = .ok (.bits x)) :
-    ∃ alias state', (lift% powerpcAliases) name = some alias ∧
+    ∃ alias state', (lift% powerpcAliases) bits name = some alias ∧
       Bil.execProgram (fuel + 7) state (aliasWrite typ value alias ++ rest) = Bil.execProgram (fuel + 2) state' rest ∧
       Reads state'.env (aliasRead alias) 4 x.toNat := by
   simp only [List.mem_cons, List.not_mem_nil, or_false] at h
@@ -2774,8 +2787,8 @@ theorem powerpc_status_registers :
       powerpcRegister "FE" = register "FE" 1 1 ∧ powerpcRegister "FG" = register "FG" 1 1 ∧
       powerpcRegister "FL" = register "FL" 1 1 ∧ powerpcRegister "FU" = register "FU" 1 1 ∧
       powerpc32Register "CR0" = register "CR0" 4 4 ∧ powerpc32Register "FE" = register "FE" 1 1 ∧
-      powerpcAliases "CR2" = some (⟨"CR2LT", 1, 0, 0⟩, [⟨"CR2GT", 1, 0, 0⟩, ⟨"CR2EQ", 1, 0, 0⟩, ⟨"CR2UN", 1, 0, 0⟩]) ∧
-      powerpcAliases "CR2LT" = none := by
+      powerpcAliases 64 "CR2" = some (⟨"CR2LT", 1, 0, 0⟩, [⟨"CR2GT", 1, 0, 0⟩, ⟨"CR2EQ", 1, 0, 0⟩, ⟨"CR2UN", 1, 0, 0⟩]) ∧
+      powerpcAliases 64 "CR2LT" = none := by
   and_intros <;> rfl
 
 set_option maxRecDepth 20000 in

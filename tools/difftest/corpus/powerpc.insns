@@ -195,3 +195,293 @@ b4 a3 00 02  # sthu 5, 2(3)
 #   Unicorn faults: Segmentation fault at 0 / paused
 # 7d 40 29 2d  # stwcx. 10, 0, 5 
 #   memory at 3ffe10b0
+
+# the forms of the instructions of the ISA 2.06 to 3.1, for those that the shapes of targets.py don't reach or that take the
+# registers of VSX 32 to 63; see make_inputs for what R5 and R6 are
+7c 64 3e 14  # addo 3, 4, 7
+7c 64 3e 15  # addo. 3, 4, 7
+fc 60 22 10  # fabs 3, 4
+fc 60 22 11  # fabs. 3, 4
+fc 60 21 10  # fnabs 3, 4
+fc 60 21 11  # fnabs. 3, 4
+fc 60 20 50  # fneg 3, 4
+fc 60 20 51  # fneg. 3, 4
+fc 64 41 ee  # fsel 3, 4, 7, 8
+fc 64 41 ef  # fsel. 3, 4, 7, 8
+fc 64 38 10  # fcpsgn 3, 4, 7
+fc 64 38 11  # fcpsgn. 3, 4, 7
+fd 84 38 00  # fcmpu 3, 4, 7
+fd 84 38 40  # fcmpo 3, 4, 7
+fc 60 23 10  # frin 3, 4
+fc 60 23 50  # friz 3, 4
+fc 60 23 90  # frip 3, 4
+fc 60 23 d0  # frim 3, 4
+fc 60 23 11  # frin. 3, 4
+f8 85 00 0a  # stq 4, 8(5)
+7c a5 32 9a  # lxvpx 36, 5, 6
+7c a5 33 9a  # stxvpx 36, 5, 6
+7c 65 32 19  # lxvx 35, 5, 6
+7c 65 33 19  # stxvx 35, 5, 6
+7c 65 36 99  # lxvd2x 35, 5, 6
+7c 65 36 19  # lxvw4x 35, 5, 6
+7c 65 36 59  # lxvh8x 35, 5, 6
+7c 65 36 d9  # lxvb16x 35, 5, 6
+7c 65 37 99  # stxvd2x 35, 5, 6
+7c 65 37 19  # stxvw4x 35, 5, 6
+7c 65 37 59  # stxvh8x 35, 5, 6
+7c 65 37 d9  # stxvb16x 35, 5, 6
+7c 65 32 99  # lxvdsx 35, 5, 6
+7c 65 32 d9  # lxvwsx 35, 5, 6
+7c 65 32 1b  # lxvl 35, 5, 6
+7c 65 32 5b  # lxvll 35, 5, 6
+7c 65 33 1b  # stxvl 35, 5, 6
+7c 65 33 5b  # stxvll 35, 5, 6
+7c 65 3a 1a  # lxvl 3, 5, 7
+7c 65 3a 5a  # lxvll 3, 5, 7
+7c 65 3b 1a  # stxvl 3, 5, 7
+7c 65 3b 5a  # stxvll 3, 5, 7
+e4 65 00 0a  # lxsd 3, 8(5)
+f4 65 00 0a  # stxsd 3, 8(5)
+e4 65 00 0b  # lxssp 3, 8(5)
+f4 65 00 0b  # stxssp 3, 8(5)
+7c 65 35 99  # stxsdx 35, 5, 6
+7c 65 35 19  # stxsspx 35, 5, 6
+7c 65 31 19  # stxsiwx 35, 5, 6
+7c 65 37 5b  # stxsihx 35, 5, 6
+7c 65 37 1b  # stxsibx 35, 5, 6
+7c 65 30 1b  # lxvrbx 35, 5, 6
+7c 65 30 5b  # lxvrhx 35, 5, 6
+7c 65 30 9b  # lxvrwx 35, 5, 6
+7c 65 30 db  # lxvrdx 35, 5, 6
+7c 65 31 1b  # stxvrbx 35, 5, 6
+7c 65 31 5b  # stxvrhx 35, 5, 6
+7c 65 31 9b  # stxvrwx 35, 5, 6
+7c 65 31 db  # stxvrdx 35, 5, 6
+f0 7f 0a d0  # lxvkq 3, 1
+f0 7f 12 d0  # lxvkq 3, 2
+f0 7f 1a d0  # lxvkq 3, 3
+f0 7f 22 d0  # lxvkq 3, 4
+f0 7f 2a d0  # lxvkq 3, 5
+f0 7f 32 d0  # lxvkq 3, 6
+f0 7f 3a d0  # lxvkq 3, 7
+f0 7f 42 d0  # lxvkq 3, 8
+f0 7f 4a d0  # lxvkq 3, 9
+f0 7f 82 d0  # lxvkq 3, 16
+f0 7f 8a d0  # lxvkq 3, 17
+f0 7f 92 d0  # lxvkq 3, 18
+f0 7f 9a d0  # lxvkq 3, 19
+f0 7f a2 d0  # lxvkq 3, 20
+f0 7f aa d0  # lxvkq 3, 21
+f0 7f b2 d0  # lxvkq 3, 22
+f0 7f ba d0  # lxvkq 3, 23
+f0 7f c2 d0  # lxvkq 3, 24
+f0 7f ca d0  # lxvkq 3, 25
+04 00 00 00 e4 65 00 08  # pld 3, 8(5)
+04 10 00 00 e4 60 00 08  # pld 3, 8(0), 1
+04 00 00 00 f4 65 00 08  # pstd 3, 8(5)
+06 00 00 00 88 65 00 08  # plbz 3, 8(5)
+06 00 00 00 a0 65 00 08  # plhz 3, 8(5)
+06 00 00 00 a8 65 00 08  # plha 3, 8(5)
+06 00 00 00 80 65 00 08  # plwz 3, 8(5)
+04 00 00 00 a4 65 00 08  # plwa 3, 8(5)
+06 00 00 00 98 65 00 08  # pstb 3, 8(5)
+06 00 00 00 b0 65 00 08  # psth 3, 8(5)
+06 00 00 00 90 65 00 08  # pstw 3, 8(5)
+06 00 00 00 c0 65 00 08  # plfs 3, 8(5)
+06 00 00 00 c8 65 00 08  # plfd 3, 8(5)
+06 00 00 00 d0 65 00 08  # pstfs 3, 8(5)
+06 00 00 00 d8 65 00 08  # pstfd 3, 8(5)
+04 00 00 00 a8 65 00 08  # plxsd 3, 8(5)
+04 00 00 00 ac 65 00 08  # plxssp 3, 8(5)
+04 00 00 00 b8 65 00 08  # pstxsd 3, 8(5)
+04 00 00 00 bc 65 00 08  # pstxssp 3, 8(5)
+04 00 00 00 cc 65 00 08  # plxv 35, 8(5)
+04 00 00 00 dc 65 00 08  # pstxv 35, 8(5)
+04 00 00 00 e8 a5 00 08  # plxvp 36, 8(5)
+04 00 00 00 f8 a5 00 08  # pstxvp 36, 8(5)
+06 00 00 00 38 64 03 e8  # paddi 3, 4, 1000, 0
+06 03 ff f0 38 64 bd c0  # paddi 3, 4, -1000000, 0
+06 10 00 00 38 60 03 e8  # paddi 3, 0, 1000, 1
+06 00 00 01 38 60 86 a0  # pli 3, 100000
+06 10 00 00 98 60 00 08  # pstb 3, 8(0), 1
+10 78 3e 42  # vcntmbb 3, 7, 0
+10 79 3e 42  # vcntmbb 3, 7, 1
+10 7a 3e 42  # vcntmbh 3, 7, 0
+10 7d 3e 42  # vcntmbw 3, 7, 1
+10 7e 3e 42  # vcntmbd 3, 7, 0
+10 64 06 82  # vshasigmaw 3, 4, 0, 0
+10 64 7e 82  # vshasigmaw 3, 4, 0, 15
+10 64 86 82  # vshasigmaw 3, 4, 1, 0
+10 64 fe 82  # vshasigmaw 3, 4, 1, 15
+10 64 06 c2  # vshasigmad 3, 4, 0, 0
+10 64 7e c2  # vshasigmad 3, 4, 0, 15
+10 64 86 c2  # vshasigmad 3, 4, 1, 0
+10 64 fe c2  # vshasigmad 3, 4, 1, 15
+10 62 3c cc  # vgnb 3, 7, 2
+10 63 3c cc  # vgnb 3, 7, 3
+10 67 3c cc  # vgnb 3, 7, 7
+05 00 00 00 84 64 29 8f  # xxblendvb 35, 36, 37, 38
+05 00 00 00 84 64 29 9f  # xxblendvh 35, 36, 37, 38
+05 00 00 00 84 64 29 af  # xxblendvw 35, 36, 37, 38
+05 00 00 00 84 64 29 bf  # xxblendvd 35, 36, 37, 38
+05 00 00 01 88 64 29 9f  # xxeval 35, 36, 37, 38, 1
+05 00 00 55 88 64 29 9f  # xxeval 35, 36, 37, 38, 85
+05 00 00 96 88 64 29 9f  # xxeval 35, 36, 37, 38, 150
+05 00 00 ff 88 64 29 9f  # xxeval 35, 36, 37, 38, 255
+05 00 00 01 88 64 29 8f  # xxpermx 35, 36, 37, 38, 1
+05 00 00 00 80 67 00 64  # xxspltiw 35, 100
+05 00 3f 80 80 65 00 00  # xxspltidp 35, 1065353216
+05 00 00 01 80 61 86 a0  # xxsplti32dx 35, 0, 100000
+05 00 00 01 80 63 86 a0  # xxsplti32dx 35, 1, 100000
+f0 64 3c 97  # xxlor 35, 36, 39
+f0 64 3c 17  # xxland 35, 36, 39
+f0 64 3c d7  # xxlxor 35, 36, 39
+f0 64 3a 3f  # xxsel 35, 36, 39, 40
+f0 64 38 d7  # xxperm 35, 36, 39
+f0 64 39 d7  # xxpermr 35, 36, 39
+f0 64 38 57  # xxpermdi 35, 36, 39, 0
+f0 64 39 57  # xxpermdi 35, 36, 39, 1
+f0 64 3a 57  # xxpermdi 35, 36, 39, 2
+f0 64 3b 57  # xxpermdi 35, 36, 39, 3
+f0 64 39 17  # xxsldwi 35, 36, 39, 1
+f0 64 3b 17  # xxsldwi 35, 36, 39, 3
+f0 61 22 93  # xxspltw 35, 36, 1
+f0 63 22 d1  # xxspltib 35, 100
+f0 64 22 d7  # xxinsertw 35, 36, 4
+f0 64 22 97  # xxextractuw 35, 36, 4
+f0 64 38 97  # xxmrghw 35, 36, 39
+f0 64 39 97  # xxmrglw 35, 36, 39
+f0 7f 27 6f  # xxbrq 35, 36
+f0 77 27 6f  # xxbrd 35, 36
+f0 6f 27 6f  # xxbrw 35, 36
+f0 67 27 6f  # xxbrh 35, 36
+f1 82 27 6e  # xvtlsbb 3, 36
+f0 60 3f 29  # xxgenpcvbm 35, 7, 0
+7c 83 00 67  # mfvsrd 3, 36
+7c 83 02 67  # mfvsrld 3, 36
+7c 83 00 e7  # mfvsrwz 3, 36
+7c 83 01 67  # mtvsrd 36, 3
+7c 83 01 a7  # mtvsrwa 36, 3
+7c 83 01 e7  # mtvsrwz 36, 3
+7c 83 23 67  # mtvsrdd 36, 3, 4
+7c 83 03 27  # mtvsrws 36, 3
+10 72 00 54  # mtvsrbmi 3, 100
+10 63 3b 0d  # vinsertb 3, 7, 3
+10 62 3b 4d  # vinserth 3, 7, 2
+10 64 3b 8d  # vinsertw 3, 7, 4
+10 68 3b cd  # vinsertd 3, 7, 8
+10 63 3a 0d  # vextractub 3, 7, 3
+10 62 3a 4d  # vextractuh 3, 7, 2
+10 64 3a 8d  # vextractuw 3, 7, 4
+10 68 3a cd  # vextractd 3, 7, 8
+10 64 20 cf  # vinsw 3, 4, 4
+10 68 21 cf  # vinsd 3, 4, 8
+10 68 3e 42  # vextractbm 3, 7
+10 69 3e 42  # vextracthm 3, 7
+10 6a 3e 42  # vextractwm 3, 7
+10 6b 3e 42  # vextractdm 3, 7
+10 6c 3e 42  # vextractqm 3, 7
+10 60 3c 0d  # vstribl. 3, 7
+10 61 3c 0d  # vstribr. 3, 7
+10 62 3c 0d  # vstrihl. 3, 7
+10 63 3c 0d  # vstrihr. 3, 7
+ec 60 26 44  # dcffix 3, 4
+bb 85 00 08  # lmw 28, 8(5)
+bf 85 00 08  # stmw 28, 8(5)
+7f 85 5c aa  # lswi 28, 5, 11
+7f 85 5d aa  # stswi 28, 5, 11
+7c e5 04 aa  # lswi 7, 5, 0
+7c e5 05 aa  # stswi 7, 5, 0
+f1 ff 24 aa  # xststdcsp 3, 36, 127
+f1 ff 25 aa  # xststdcdp 3, 36, 127
+fd ff 25 88  # xststdcqp 3, 4, 127
+f0 7f 27 ef  # xvtstdcdp 35, 36, 127
+f0 7f 26 ef  # xvtstdcsp 35, 36, 127
+f0 68 27 ab  # xvtstdcdp 35, 36, 8
+f0 62 26 ab  # xvtstdcsp 35, 36, 2
+f1 84 29 1e  # xscmpudp 3, 36, 37
+f1 84 29 5e  # xscmpodp 3, 36, 37
+f1 84 29 de  # xscmpexpdp 3, 36, 37
+f0 64 2d 07  # xsmaxdp 35, 36, 37
+f0 64 2d 47  # xsmindp 35, 36, 37
+f0 64 2c 07  # xsmaxcdp 35, 36, 37
+f0 64 2c 47  # xsmincdp 35, 36, 37
+f0 64 2c 87  # xsmaxjdp 35, 36, 37
+f0 64 2c c7  # xsminjdp 35, 36, 37
+f0 64 2f 07  # xvmaxdp 35, 36, 37
+f0 64 2f 47  # xvmindp 35, 36, 37
+f0 64 2e 07  # xvmaxsp 35, 36, 37
+f0 64 2e 47  # xvminsp 35, 36, 37
+f0 64 2b 1f  # xvcmpeqdp 35, 36, 37
+f0 64 2f 5f  # xvcmpgtdp. 35, 36, 37
+f0 64 2a 9f  # xvcmpgesp 35, 36, 37
+f0 64 2e 1f  # xvcmpeqsp. 35, 36, 37
+f0 60 25 63  # xscvdpsxds 35, 36
+f0 60 25 23  # xscvdpuxds 35, 36
+f0 60 21 63  # xscvdpsxws 35, 36
+f0 60 21 23  # xscvdpuxws 35, 36
+f0 60 27 63  # xvcvdpsxds 35, 36
+f0 60 27 23  # xvcvdpuxds 35, 36
+f0 60 23 63  # xvcvdpsxws 35, 36
+f0 60 23 23  # xvcvdpuxws 35, 36
+f0 60 26 63  # xvcvspsxds 35, 36
+f0 60 26 23  # xvcvspuxds 35, 36
+f0 60 22 63  # xvcvspsxws 35, 36
+f0 60 22 23  # xvcvspuxws 35, 36
+f0 60 27 27  # xvcvspdp 35, 36
+f0 60 25 27  # xscvspdp 35, 36
+f0 60 25 2f  # xscvspdpn 35, 36
+f0 60 25 67  # xsabsdp 35, 36
+f0 60 25 a7  # xsnabsdp 35, 36
+f0 60 25 e7  # xsnegdp 35, 36
+f0 64 2d 87  # xscpsgndp 35, 36, 37
+f0 60 27 67  # xvabsdp 35, 36
+f0 60 26 a7  # xvnabssp 35, 36
+f0 60 27 e7  # xvnegdp 35, 36
+f0 64 2e 87  # xvcpsgnsp 35, 36, 37
+f0 60 25 6e  # xsxexpdp 3, 36
+f0 61 25 6e  # xsxsigdp 3, 36
+f0 63 27 2d  # xsiexpdp 35, 3, 4
+f0 60 27 6f  # xvxexpdp 35, 36
+f0 68 27 6f  # xvxexpsp 35, 36
+f0 61 27 6f  # xvxsigdp 35, 36
+f0 69 27 6f  # xvxsigsp 35, 36
+f0 64 2f c7  # xviexpdp 35, 36, 37
+f0 64 2e c7  # xviexpsp 35, 36, 37
+fc 62 26 48  # xsxexpqp 3, 4
+fc 72 26 48  # xsxsigqp 3, 4
+fc 60 26 48  # xsabsqp 3, 4
+fc 68 26 48  # xsnabsqp 3, 4
+fc 70 26 48  # xsnegqp 3, 4
+fc 64 38 c8  # xscpsgnqp 3, 4, 7
+fd 84 3d 08  # xscmpuqp 3, 4, 7
+fd 84 39 08  # xscmpoqp 3, 4, 7
+fd 84 39 48  # xscmpexpqp 3, 4, 7
+f1 84 29 ee  # xstdivdp 3, 36, 37
+f1 80 21 aa  # xstsqrtdp 3, 36
+f1 84 2b ee  # xvtdivdp 3, 36, 37
+f1 84 2a ee  # xvtdivsp 3, 36, 37
+f1 80 23 aa  # xvtsqrtdp 3, 36
+f1 80 22 aa  # xvtsqrtsp 3, 36
+fd 84 39 00  # ftdiv 3, 4, 7
+fd 80 21 40  # ftsqrt 3, 4
+7c 00 01 62  # xxmfacc 0
+7c 01 01 62  # xxmtacc 0
+7c 03 01 62  # xxsetaccz 0
+e0 85 00 10  # lq 4, 16(5)
+f8 85 00 12  # stq 4, 16(5)
+18 a5 00 10  # lxvp 36, 16(5)
+18 a5 00 11  # stxvp 36, 16(5)
+18 85 00 10  # lxvp 4, 16(5)
+18 85 00 11  # stxvp 4, 16(5)
+f4 65 00 11  # lxv 3, 16(5)
+f4 65 00 19  # lxv 35, 16(5)
+f4 65 00 15  # stxv 3, 16(5)
+f4 65 00 1d  # stxv 35, 16(5)
+f1 c0 24 a8  # xststdcsp 3, 4, 64
+f1 a0 24 a8  # xststdcsp 3, 4, 32
+f1 90 24 a8  # xststdcsp 3, 4, 16
+f1 88 24 a8  # xststdcsp 3, 4, 8
+f1 84 24 a8  # xststdcsp 3, 4, 4
+f1 82 24 a8  # xststdcsp 3, 4, 2
+f1 81 24 a8  # xststdcsp 3, 4, 1

@@ -48,7 +48,11 @@
 #define WORD unsigned long
 #define NGPR 32
 #define NEXTRA 4
+#if defined(__powerpc64__)
+#define VECBYTES (32 * 8 + 32 * 16 + 32 * 8)
+#else
 #define VECBYTES (32 * 8 + 32 * 16)
+#endif
 #endif
 
 #define STATE (sizeof(WORD) * (NGPR + NEXTRA) + VECBYTES)
@@ -663,6 +667,9 @@ __asm__(".text\n.set noreorder\n.set noat\n.set hardfloat\n" MIPSSET
 #define START_ALIGN " rldicr 1, 1, 0, 59\n stdu 1, -64(1)\n"
 #define PUSH " stdu 1, -512(1)\n"
 #define START_TOC " lis 2, .TOC.@ha\n addi 2, 2, .TOC.@l\n"
+/* the second doublewords of the VSX registers 0 to 31, after the AltiVec registers, through V0, before it is loaded and after it is saved */
+#define LOAD_VSL " addi 6, 4, 512\n.machine power9\n.irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31\n li 5, 8*\\r\n lxsdx 32, 6, 5\n xxpermdi \\r, \\r, 32, 0\n.endr\n.machine altivec\n"
+#define SAVE_VSL " addi 6, 4, 512\n.machine power9\n.irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31\n li 5, 8*\\r\n xxpermdi 32, \\r, \\r, 2\n stxsdx 32, 6, 5\n.endr\n.machine altivec\n"
 #else
 #define L "lwz"
 #define S "stw"
@@ -671,6 +678,8 @@ __asm__(".text\n.set noreorder\n.set noat\n.set hardfloat\n" MIPSSET
 #define START_ALIGN " clrrwi 1, 1, 4\n stwu 1, -64(1)\n"
 #define PUSH " stwu 1, -512(1)\n"
 #define START_TOC
+#define LOAD_VSL
+#define SAVE_VSL
 #endif
 __asm__(".machine altivec\n.text\n.globl _start\n_start:\n" START_TOC START_ALIGN " bl cmain\n"
   ".globl enter, recover\nenter:\n" PUSH " mflr 0\n " S " 0, 8*" W "(1)\n mfcr 0\n " S " 0, 9*" W "(1)\n " S " 2, 10*" W "(1)\n"
@@ -679,7 +688,7 @@ __asm__(".machine altivec\n.text\n.globl _start\n_start:\n" START_TOC START_ALIG
   " lis 3, st_in@ha\n addi 3, 3, st_in@l\n"
   " addi 4, 3, 36*" W "\n"
   ".irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31\n lfd \\r, 8*\\r(4)\n.endr\n"
-  " addi 4, 4, 256\n"
+  " addi 4, 4, 256\n" LOAD_VSL
   ".irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31\n li 5, 16*\\r\n lvx \\r, 4, 5\n.endr\n"
   " " L " 0, 32*" W "(3)\n mtcrf 255, 0\n " L " 0, 33*" W "(3)\n mtxer 0\n " L " 0, 34*" W "(3)\n mtlr 0\n " L " 0, 35*" W "(3)\n mtctr 0\n"
   " " L " 0, 0(3)\n"
@@ -690,7 +699,7 @@ __asm__(".machine altivec\n.text\n.globl _start\n_start:\n" START_TOC START_ALIG
   " mfspr 0, " HOLD "\n " S " 0, 3*" W "(3)\n mfcr 0\n " S " 0, 32*" W "(3)\n mfxer 0\n " S " 0, 33*" W "(3)\n mflr 0\n " S " 0, 34*" W "(3)\n mfctr 0\n " S " 0, 35*" W "(3)\n addi 4, 3, 36*" W "\n"
   ".irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31\n stfd \\r, 8*\\r(4)\n.endr\n"
   " addi 4, 4, 256\n"
-  ".irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31\n li 5, 16*\\r\n stvx \\r, 4, 5\n.endr\n.endm\n"
+  ".irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31\n li 5, 16*\\r\n stvx \\r, 4, 5\n.endr\n" SAVE_VSL ".endm\n"
   "fall_save:\n SAVE\n li 4, 0\n b done\n"
   "taken_save:\n SAVE\n li 4, 1\n"
   "done:\n lis 3, marker@ha\n addi 3, 3, marker@l\n li 0, 0\n stw 0, 0(3)\n stw 0, 4(3)\n"

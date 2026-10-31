@@ -153,9 +153,9 @@
   (let ((p (mul64 cast-signed ra rb))
         (ov (/= p (cast-signed 128 (cast-low 64 p)))))
     (set-ov ov ov)
-    (set$ rt (cast-low 64 p))))
-(defun MULHD (rt ra rb) (set$ rt (cast-high 64 (mul64 cast-signed ra rb))))
-(defun MULHDU (rt ra rb) (set$ rt (cast-high 64 (mul64 cast-unsigned ra rb))))
+    (set$ rt (zext (cast-low 64 p)))))
+(defun MULHD (rt ra rb) (set$ rt (zext (cast-high 64 (mul64 cast-signed ra rb)))))
+(defun MULHDU (rt ra rb) (set$ rt (zext (cast-high 64 (mul64 cast-unsigned ra rb)))))
 
 (defun MULLW_rec (rt ra rb) (MULLW rt ra rb) (record rt))
 (defun MULLWO_rec (rt ra rb) (MULLWO rt ra rb) (record rt))
@@ -335,11 +335,11 @@
 ;; the bit I of the result is the bit of RB, in the big-endian numbering,
 ;; that the byte I of RS selects
 (defun permuted-bit (rs rb i)
-  (let ((k (cast-unsigned 64 (extract (- 63 (* 8 i)) (- 56 (* 8 i)) rs))))
-    (if (< k 64) (cast-low 1 (rshift rb (- 63 k))) 0:1)))
+  (let ((k (cast-unsigned 64 (extract (- 63 (* 8 i)) (- 56 (* 8 i)) (u64 rs)))))
+    (if (< k 64) (cast-low 1 (rshift (u64 rb) (- 63 k))) 0:1)))
 
 (defun BPERMD (ra rs rb)
-  (set$ ra (cast-unsigned 64
+  (set$ ra (zext
                          (concat (permuted-bit rs rb 0) (permuted-bit rs rb 1)
                                  (permuted-bit rs rb 2) (permuted-bit rs rb 3)
                                  (permuted-bit rs rb 4) (permuted-bit rs rb 5)
@@ -545,7 +545,7 @@
     8 (set$ rt LR)
     9 (set$ rt CTR)
     815 (set$ rt TAR)
-    (set$ rt (intrinsic 'move-from-special-register spr))))
+    (set$ rt (intrinsic 'move-from-special-register spr :result (word-width)))))
 
 (defun MTSPR (spr rs)
   (case spr
@@ -794,8 +794,9 @@
 ;;
 ;; The floating-point registers F0 to F31 hold doubles, the operations
 ;; round to nearest with ties to even, the mode of FPSCR after reset,
-;; FPSCR itself, its exceptions and its other controls are not modeled,
-;; except FPCC, the flags FL, FG, FE and FU, that the comparisons set.
+;; they don't update FPSCR nor obey its controls, except for FPCC, the
+;; flags FL, FG, FE and FU, that the comparisons set. The moves to and
+;; from FPSCR are near the end of this file.
 ;; The operands of the multiply-add instructions are FRT, FRA, FRC and
 ;; FRB, they are fused, i.e., FRA * FRC + FRB is rounded once. The
 ;; single-precision forms, e.g., FADDS, round the double result to
@@ -1631,3 +1632,641 @@
 (defun VSUBUBS (vd va vb) (set$ vd (lanes8 sub-usat va vb)))
 (defun VSUBUHS (vd va vb) (set$ vd (lanes16 sub-usat va vb)))
 (defun VSUBUWS (vd va vb) (set$ vd (lanes32 sub-usat va vb)))
+
+;;; THE OTHER FIXED-POINT INSTRUCTIONS OF THE ISA 3.0 AND 3.1
+;;
+;; In the 32-bit mode, the instructions on doublewords, which the
+;; disassembler takes in all modes, read the registers zero-extended
+;; and write the low word of the result.
+
+;; ADDEX with CY = 0 uses OV as the carry; the other values of CY are
+;; reserved, and are treated as 0
+(defun ADDEX (rt ra rb _)
+  (let ((r (sum ra rb OV)))
+    (set OV (carry r ra rb))
+    (set OV32 (carry (low32 r) (low32 ra) (low32 rb)))
+    (set$ rt r)))
+
+;; the digit K of the result is 6 if the addition of the digits up to K
+;; of RA and RB has no carry out of K
+(defun nibble-ones (w) (cast-low w 0x1111111111111111:64))
+(defun ADDG6S (rt ra rb)
+  (let ((w (word-width))
+        (x (cast-unsigned (+ w 1) ra))
+        (y (cast-unsigned (+ w 1) rb))
+        (c (logxor x y (+ x y))))
+    (set$ rt (* (logand (lnot (cast-low w (rshift c 4))) (nibble-ones w)) (cast-unsigned w 6:4)))))
+
+(defun bswap16-of-64 (x)
+  (concat (byte-reversed (extract 63 48 x)) (byte-reversed (extract 47 32 x))
+          (byte-reversed (extract 31 16 x)) (byte-reversed (extract 15 0 x))))
+(defun bswap32-of-64 (x)
+  (concat (byte-reversed (extract 63 32 x)) (byte-reversed (extract 31 0 x))))
+
+(defun BRD (ra rs) (set$ ra (zext (byte-reversed (u64 rs)))))
+(defun BRH (ra rs) (set$ ra (zext (bswap16-of-64 (u64 rs)))))
+(defun BRW (ra rs) (set$ ra (zext (bswap32-of-64 (u64 rs)))))
+
+;; the comparisons of a byte with bytes: the GT bit of the field is the
+;; result, the others are clear
+
+(defun in-range (x lo hi) (logand (>= x lo) (<= x hi)))
+
+(defun CMPRB (bf l ra rb)
+  (let ((x (cast-low 8 ra))
+        (y (u64 rb))
+        (first (in-range x (extract 7 0 y) (extract 15 8 y)))
+        (second (in-range x (extract 23 16 y) (extract 31 24 y))))
+    (set$ bf (concat 0:1 (logor first (logand (non-zero l) second)) 0:2))))
+
+(defun CMPEQB (bf ra rb)
+  (let ((x (cast-low 8 ra))
+        (y (u64 rb)))
+    (set$ bf (concat 0:1
+                     (logor (= x (extract 7 0 y)) (= x (extract 15 8 y))
+                            (= x (extract 23 16 y)) (= x (extract 31 24 y))
+                            (= x (extract 39 32 y)) (= x (extract 47 40 y))
+                            (= x (extract 55 48 y)) (= x (extract 63 56 y)))
+                     0:2))))
+
+;; the counts of the zeros under a mask: the bits of the mask before the
+;; first bit that is set in both
+
+(defun popcount-64 (x) (cast-unsigned 64 (popcount x)))
+(defun ctz-64 (x) (cast-unsigned 64 (clz (reverse-bits x))))
+(defun clz-64 (x) (cast-unsigned 64 (clz x)))
+
+(defun cntlzdm (x m)
+  (popcount-64 (rshift m (- (u64 64) (clz-64 (logand x m))))))
+(defun cnttzdm (x m)
+  (popcount-64 (lshift m (- (u64 64) (ctz-64 (logand x m))))))
+
+(defun CNTLZDM (ra rs rb) (set$ ra (zext (cntlzdm (u64 rs) (u64 rb)))))
+(defun CNTTZDM (ra rs rb) (set$ ra (zext (cnttzdm (u64 rs) (u64 rb)))))
+
+;; the parallel bits deposit and extract, from the least significant bit
+;; of the mask, K is the number of the bits taken so far
+
+(defun bit-of (x i) (u64 (select i x)))
+
+(defun pdep-from (x m i k r)
+  (if (= i 64) r
+    (let ((b (bit-of m i))
+          (d (logand (rshift x k) b))
+          (r2 (logor r (lshift d (u64 i))))
+          (k2 (+ k b)))
+      (pdep-from x m (+ i 1) k2 r2))))
+
+(defun pext-from (x m i k r)
+  (if (= i 64) r
+    (let ((b (bit-of m i))
+          (d (logand (bit-of x i) b))
+          (r2 (logor r (lshift d k)))
+          (k2 (+ k b)))
+      (pext-from x m (+ i 1) k2 r2))))
+
+(defun pdep (x m) (pdep-from x m 0 (u64 0) (u64 0)))
+(defun pext (x m) (pext-from x m 0 (u64 0) (u64 0)))
+
+;; the bits under the mask go to the right, the others to the left
+(defun cfuge (x m)
+  (logor (pext x m) (lshift (pext x (lnot m)) (popcount-64 m))))
+
+(defun PDEPD (ra rs rb) (set$ ra (zext (pdep (u64 rs) (u64 rb)))))
+(defun PEXTD (ra rs rb) (set$ ra (zext (pext (u64 rs) (u64 rb)))))
+(defun CFUGED (ra rs rb) (set$ ra (zext (cfuge (u64 rs) (u64 rb)))))
+
+;; the conversions between BCD and DPD, of three digits and of a declet,
+;; by the equations of the appendix of the ISA
+
+(defun bcd-to-declet (x)
+  (let ((a (select 11 x)) (b (select 10 x)) (c (select 9 x)) (d (select 8 x))
+        (e (select 7 x)) (f (select 6 x)) (g (select 5 x)) (h (select 4 x))
+        (i (select 3 x)) (j (select 2 x)) (k (select 1 x)) (m (select 0 x))
+        (na (lnot a)) (ne (lnot e)) (ni (lnot i)))
+    (concat (logor (logand f a i ne) (logand j a ni) (logand b na))
+            (logor (logand g a i ne) (logand k a ni) (logand c na))
+            d
+            (logor (logand j na e ni) (logand f ni ne) (logand f na ne) (logand e i))
+            (logor (logand k na e ni) (logand g ni ne) (logand g na ne) (logand a i))
+            h
+            (logor a e i)
+            (logor (logand ne j ni) (logand e i) a)
+            (logor (logand na k ni) (logand a i) e)
+            m)))
+
+;; the digits are big, 8 or 9, by V, W, X and the bits S and T, then the
+;; other bits are, in the three digits: PQ, ST and WX, unless the big ones
+;; take those places, see the table of the appendix of the ISA
+(defun declet-to-bcd (z)
+  (let ((p (select 9 z)) (q (select 8 z)) (r (select 7 z)) (s (select 6 z))
+        (t0 (select 5 z)) (u (select 4 z)) (v (select 3 z)) (w (select 2 z))
+        (x (select 1 z)) (y (select 0 z))
+        (nv (lnot v)) (nw (lnot w)) (nx (lnot x)) (ns (lnot s)) (nt (lnot t0))
+        (a (logand v w (logor nx ns t0)))
+        (e (logand v x (logor nw nt s)))
+        (i (logand v (logor (logand nw nx) (logand w x (logor s t0)))))
+        (mid-pq (logand v w x ns t0))
+        (low-wx nv)
+        (low-st (logand v nw x))
+        (low-pq (logand v w (logor nx (logand x ns nt)))))
+    (concat a (logand p (lnot a)) (logand q (lnot a)) r
+            e
+            (logand (lnot e) (logor (logand p mid-pq) (logand s (lnot mid-pq))))
+            (logand (lnot e) (logor (logand q mid-pq) (logand t0 (lnot mid-pq))))
+            u
+            i
+            (logand (lnot i) (logor (logand w low-wx) (logand s low-st) (logand p low-pq)))
+            (logand (lnot i) (logor (logand x low-wx) (logand t0 low-st) (logand q low-pq)))
+            y)))
+
+(defun word-to-dpd (x)
+  (concat 0:12 (bcd-to-declet (extract 23 12 x)) (bcd-to-declet (extract 11 0 x))))
+(defun word-to-bcd (x)
+  (concat 0:8 (declet-to-bcd (extract 19 10 x)) (declet-to-bcd (extract 9 0 x))))
+
+(defun CBCDTD (ra rs)
+  (let ((x (u64 rs)))
+    (set$ ra (zext (concat (word-to-dpd (cast-high 32 x)) (word-to-dpd (cast-low 32 x)))))))
+(defun CDTBCD (ra rs)
+  (let ((x (u64 rs)))
+    (set$ ra (zext (concat (word-to-bcd (cast-high 32 x)) (word-to-bcd (cast-low 32 x)))))))
+
+(defun MADDLD (rt ra rb rc) (set$ rt (+ (* ra rb) rc)))
+(defun MADDHD (rt ra rb rc)
+  (set$ rt (zext (cast-high 64 (+ (mul64 cast-signed ra rb) (cast-signed 128 rc))))))
+(defun MADDHDU (rt ra rb rc)
+  (set$ rt (zext (cast-high 64 (+ (mul64 cast-unsigned ra rb) (cast-unsigned 128 rc))))))
+
+;; the condition bit as a word
+(defun SETBC (rt bi) (set$ rt (zext bi)))
+(defun SETBCR (rt bi) (set$ rt (zext (lnot bi))))
+(defun SETNBC (rt bi) (set$ rt (sext bi)))
+(defun SETNBCR (rt bi) (set$ rt (sext (lnot bi))))
+
+;; the 64-bit subtraction RA - RB, or of the words if L is set, that is
+;; zero if it borrows. This is of the LLVM's definition, not of the
+;; published ISA, there is nothing to compare it with
+(defun SUBFUS (rt ra rb l)
+  (let ((x (if (non-zero l) (u64 (low32 ra)) (u64 ra)))
+        (y (if (non-zero l) (u64 (low32 rb)) (u64 rb))))
+    (set$ rt (zext (pick (< x y) (u64 0) (- x y))))))
+(defun SUBFUS_rec (rt ra rb l) (SUBFUS rt ra rb l) (record rt))
+
+;; the random number generator and the hashes of the return addresses
+;; depend on what isn't in the state; a failed HASHCHK traps
+(defun DARN (rt l) (set$ rt (intrinsic 'darn l :result (word-width))))
+(defun HASHST (rb d ra) (intrinsic 'hashst ra rb d))
+(defun HASHSTP (rb d ra) (intrinsic 'hashstp ra rb d))
+(defun HASHCHK (rb d ra) (intrinsic 'hashchk ra rb d))
+(defun HASHCHKP (rb d ra) (intrinsic 'hashchkp ra rb d))
+
+;; the time base, the data stream control register, the system call and
+;; the event-based branches, none of which are in the state, the target
+;; of RFEBB is in EBBRR
+(defun MFTB (rt spr) (set$ rt (intrinsic 'move-from-time-base spr :result (word-width))))
+(defun MFUDSCR (rt) (MFSPR rt 3))
+(defun MTUDSCR (rs) (MTSPR 3 rs))
+(defun SCV (lev) (intrinsic 'syscall-vectored lev))
+(defun RFEBB (s) (exec-addr (intrinsic 'rfebb s :result (word-width))))
+
+;; the branch history rolling buffer isn't in the state
+(defun CLRBHRB () (intrinsic 'clrbhrb))
+(defun MFBHRBE (rt imm) (set$ rt (intrinsic 'mfbhrbe imm :result (word-width))))
+
+;; the cache hints, the barrier of the ISA 3.1 and the waiting for an
+;; event change nothing in the state of a program
+(defun ICBT (_ _ _) (empty))
+(defun DCBA (_ _) (empty))
+(defun MBAR (_) (empty))
+(defun SYNCP10 (_ _) (empty))
+(defun WAIT (_) (empty))
+(defun WAITP10 (_ _) (empty))
+
+;; the size of the block that DCBZ clears is of the implementation, it
+;; is the store of zeros that the intrinsic stands for
+(defun DCBZ (ra rb) (intrinsic 'data-cache-block-zero (+ ra rb)))
+(defun DCBZL (ra rb) (intrinsic 'data-cache-block-zero (+ ra rb)))
+
+;; the copy-paste facility, whose buffer isn't in the state; PASTE sets
+;; CR0 by the result of the transaction
+(defun CP_ABORT () (intrinsic 'cp-abort))
+(defun CP_COPY (ra rb) (intrinsic 'copy (+ ra rb)))
+(defun CP_PASTE_rec (ra rb l)
+  (set CR0 (intrinsic 'paste (+ ra rb) l :result 4)))
+
+;; the transactional memory facility, a transaction and its failure are
+;; of the intrinsics, which give CR0 as the instructions do
+(defun TBEGIN (r) (set CR0 (intrinsic 'tbegin r :result 4)))
+(defun TEND (a) (set CR0 (intrinsic 'tend a :result 4)))
+(defun TSR (l) (set CR0 (intrinsic 'tsr l :result 4)))
+(defun TABORT (ra) (set CR0 (intrinsic 'tabort ra :result 4)))
+(defun TABORTWC (to ra rb) (set CR0 (intrinsic 'tabortwc to ra rb :result 4)))
+(defun TABORTWCI (to ra si) (set CR0 (intrinsic 'tabortwci to ra si :result 4)))
+(defun TABORTDC (to ra rb) (set CR0 (intrinsic 'tabortdc to ra rb :result 4)))
+(defun TABORTDCI (to ra si) (set CR0 (intrinsic 'tabortdci to ra si :result 4)))
+(defun TCHECK (bf) (set$ bf (intrinsic 'tcheck :result 4)))
+
+;;; THE OTHER LOADS AND STORES
+
+;; (RA|0) of the operands that the disassembler doesn't name ZERO
+(defun ra-or-zero (ra)
+  (case (symbol ra)
+    'R0 (cast-unsigned (word-width) 0:1)
+    ra))
+
+(defun gpr-index (r)
+  (case (symbol r)
+    'R0 0 'R1 1 'R2 2 'R3 3 'R4 4 'R5 5 'R6 6 'R7 7
+    'R8 8 'R9 9 'R10 10 'R11 11 'R12 12 'R13 13 'R14 14 'R15 15
+    'R16 16 'R17 17 'R18 18 'R19 19 'R20 20 'R21 21 'R22 22 'R23 23
+    'R24 24 'R25 25 'R26 26 'R27 27 'R28 28 'R29 29 'R30 30 'R31 31))
+
+(defun gpr-name (n)
+  (case n
+    0 'R0 1 'R1 2 'R2 3 'R3 4 'R4 5 'R5 6 'R6 7 'R7
+    8 'R8 9 'R9 10 'R10 11 'R11 12 'R12 13 'R13 14 'R14 15 'R15
+    16 'R16 17 'R17 18 'R18 19 'R19 20 'R20 21 'R21 22 'R22 23 'R23
+    24 'R24 25 'R25 26 'R26 27 'R27 28 'R28 29 'R29 30 'R30 31 'R31))
+
+;; the multiple words, from the register N to R31, and the strings of
+;; bytes, from the most significant one of each word, from the register
+;; N on, which wraps around to R0. The bytes of the strings are in this
+;; order in both modes, as the ISA allows them in the big-endian one only.
+
+(defun load-multiple (n a)
+  (when (< n 32)
+    (set-symbol-value (gpr-name n) (zext (load-bits 32 a)))
+    (load-multiple (+ n 1) (+ a 4))))
+
+(defun store-multiple (n a)
+  (when (< n 32)
+    (store-word a (low32 (unquote (gpr-name n))))
+    (store-multiple (+ n 1) (+ a 4))))
+
+(defun LMW (rt d ra) (let ((a (ea ra d))) (load-multiple (gpr-index rt) a)))
+(defun STMW (rs d ra) (let ((a (ea ra d))) (store-multiple (gpr-index rs) a)))
+
+(defun string-byte (a i k) (if (< i k) (load-bits 8 (+ a i)) 0:8))
+(defun string-word (a k)
+  (concat (string-byte a 0 k) (string-byte a 1 k) (string-byte a 2 k) (string-byte a 3 k)))
+
+(defun load-string (n a k)
+  (when (> k 0)
+    (set-symbol-value (gpr-name n) (zext (string-word a k)))
+    (load-string (mod (+ n 1) 32) (+ a 4) (if (< k 4) 0 (- k 4)))))
+
+(defun store-string-bytes (x a i k)
+  (when (< i k)
+    (store-word (+ a i) (extract (- 31 (* 8 i)) (- 24 (* 8 i)) x))
+    (store-string-bytes x a (+ i 1) k)))
+
+(defun store-string (n a k)
+  (when (> k 0)
+    (store-string-bytes (low32 (unquote (gpr-name n))) a 0 (if (< k 4) k 4))
+    (store-string (mod (+ n 1) 32) (+ a 4) (if (< k 4) 0 (- k 4)))))
+
+(defun string-size (nb) (if (= nb 0) 32 nb))
+
+(defun LSWI (rt ra nb)
+  (let ((a (ra-or-zero ra)))
+    (load-string (gpr-index rt) a (string-size nb))))
+(defun STSWI (rs ra nb)
+  (let ((a (ra-or-zero ra)))
+    (store-string (gpr-index rs) a (string-size nb))))
+
+;; the quadwords, in the even and the next odd register, the even one is
+;; the more significant one in both modes. The disassembler names the
+;; even register.
+(defun load-pair (rt a)
+  (let ((x (load-bits 128 a))
+        (n (gpr-index rt)))
+    (set$ rt (zext (cast-high 64 x)))
+    (set-symbol-value (gpr-name (mod (+ n 1) 32)) (zext (cast-low 64 x)))))
+(defun store-pair (rs a)
+  (store-word a (concat (u64 rs) (u64 (unquote (gpr-name (mod (+ (gpr-index rs) 1) 32)))))))
+(defun LQ (rt d ra) (load-pair rt (+ ra d)))
+(defun STQ (rs d ra) (store-pair rs (+ ra d)))
+(defun LQARX (rt ra rb) (load-pair rt (+ ra rb)))
+(defun LQARXL (rt ra rb) (load-pair rt (+ ra rb)))
+(defun STQCX (rs ra rb)
+  (store-pair rs (+ ra rb))
+  (set-field 'CR0 false false true))
+
+;; EH, the hint that is the last bit of these, changes nothing
+(defun LBARXL (rt ra rb) (LBARX rt ra rb))
+(defun LHARXL (rt ra rb) (LHARX rt ra rb))
+(defun LWARXL (rt ra rb) (LWARX rt ra rb))
+(defun LDARXL (rt ra rb) (LDARX rt ra rb))
+
+;; the atomic operations of the ISA 3.0, whose function code selects the
+;; operation, on the memory and on the registers after RT, are intrinsics
+(defun LWAT (rt rti ra fc) (set$ rt (intrinsic 'lwat rti ra fc :result (word-width rt))))
+(defun LDAT (rt rti ra fc) (set$ rt (intrinsic 'ldat rti ra fc :result (word-width rt))))
+(defun STWAT (rs ra fc) (intrinsic 'stwat rs ra fc))
+(defun STDAT (rs ra fc) (intrinsic 'stdat rs ra fc))
+
+;; the prefixed forms: the displacements have 34 bits, and with a PC
+;; relative one, which the disassembler gives without a base register,
+;; the displacement is added to the address of the instruction
+
+(defun ea34 (ra d) (+ ra (cast-low (word-width) d)))
+(defun pcrel (d) (+ (get-program-counter) (cast-low (word-width) d)))
+
+(defun PLI (rt si) (set$ rt (cast-low (word-width) si)))
+(defun PADDI (rt ra si) (set$ rt (ea34 ra si)))
+(defun PADDIS (rt ra si) (set$ rt (+ ra (high-imm si))))
+(defun PADDIpc (rt _ si) (set$ rt (pcrel si)))
+(defun PADDISpc (rt _ si) (set$ rt (+ (get-program-counter) (high-imm si))))
+(defun PLBZ (rt d ra) (load-zero rt 8 (ea34 ra d)))
+(defun PLHZ (rt d ra) (load-zero rt 16 (ea34 ra d)))
+(defun PLHA (rt d ra) (load-sign rt 16 (ea34 ra d)))
+(defun PLWZ (rt d ra) (load-zero rt 32 (ea34 ra d)))
+(defun PLWA (rt d ra) (load-sign rt 32 (ea34 ra d)))
+(defun PLD (rt d ra) (load-zero rt 64 (ea34 ra d)))
+(defun PLFS (rt d ra) (load-single rt (ea34 ra d)))
+(defun PLFD (rt d ra) (load-double rt (ea34 ra d)))
+(defun PSTB (rs d ra) (store-size 8 rs (ea34 ra d)))
+(defun PSTH (rs d ra) (store-size 16 rs (ea34 ra d)))
+(defun PSTW (rs d ra) (store-size 32 rs (ea34 ra d)))
+(defun PSTD (rs d ra) (store-size 64 rs (ea34 ra d)))
+(defun PSTFS (rs d ra) (store-single rs (ea34 ra d)))
+(defun PSTFD (rs d ra) (store-double rs (ea34 ra d)))
+(defun PLBZpc (rt d _) (load-zero rt 8 (pcrel d)))
+(defun PLHZpc (rt d _) (load-zero rt 16 (pcrel d)))
+(defun PLHApc (rt d _) (load-sign rt 16 (pcrel d)))
+(defun PLWZpc (rt d _) (load-zero rt 32 (pcrel d)))
+(defun PLWApc (rt d _) (load-sign rt 32 (pcrel d)))
+(defun PLDpc (rt d _) (load-zero rt 64 (pcrel d)))
+(defun PLFSpc (rt d _) (load-single rt (pcrel d)))
+(defun PLFDpc (rt d _) (load-double rt (pcrel d)))
+(defun PSTBpc (rs d _) (store-size 8 rs (pcrel d)))
+(defun PSTHpc (rs d _) (store-size 16 rs (pcrel d)))
+(defun PSTWpc (rs d _) (store-size 32 rs (pcrel d)))
+(defun PSTDpc (rs d _) (store-size 64 rs (pcrel d)))
+(defun PSTFSpc (rs d _) (store-single rs (pcrel d)))
+(defun PSTFDpc (rs d _) (store-double rs (pcrel d)))
+
+;;; THE OTHER FLOATING-POINT INSTRUCTIONS
+;;
+;; The record forms set CR1 to the bits FX, FEX, VX and OX of FPSCR. As
+;; the arithmetic doesn't model the exceptions, they are what the moves
+;; to FPSCR made them.
+
+(defun record-fp () (set CR1 (extract 31 28 FPSCR)))
+
+(defun FMR_rec (rt rb) (FMR rt rb) (record-fp))
+(defun FNEGS_rec (rt rb) (FNEGS rt rb) (record-fp))
+(defun FABSS_rec (rt rb) (FABSS rt rb) (record-fp))
+(defun FNABSS_rec (rt rb) (FNABSS rt rb) (record-fp))
+(defun FADD_rec (rt ra rb) (FADD rt ra rb) (record-fp))
+(defun FSUB_rec (rt ra rb) (FSUB rt ra rb) (record-fp))
+(defun FMUL_rec (rt ra rc) (FMUL rt ra rc) (record-fp))
+(defun FDIV_rec (rt ra rb) (FDIV rt ra rb) (record-fp))
+(defun FSQRT_rec (rt rb) (FSQRT rt rb) (record-fp))
+(defun FADDS_rec (rt ra rb) (FADDS rt ra rb) (record-fp))
+(defun FSUBS_rec (rt ra rb) (FSUBS rt ra rb) (record-fp))
+(defun FMULS_rec (rt ra rc) (FMULS rt ra rc) (record-fp))
+(defun FDIVS_rec (rt ra rb) (FDIVS rt ra rb) (record-fp))
+(defun FSQRTS_rec (rt rb) (FSQRTS rt rb) (record-fp))
+(defun FMADD_rec (rt ra rc rb) (FMADD rt ra rc rb) (record-fp))
+(defun FMSUB_rec (rt ra rc rb) (FMSUB rt ra rc rb) (record-fp))
+(defun FNMADD_rec (rt ra rc rb) (FNMADD rt ra rc rb) (record-fp))
+(defun FNMSUB_rec (rt ra rc rb) (FNMSUB rt ra rc rb) (record-fp))
+(defun FMADDS_rec (rt ra rc rb) (FMADDS rt ra rc rb) (record-fp))
+(defun FMSUBS_rec (rt ra rc rb) (FMSUBS rt ra rc rb) (record-fp))
+(defun FNMADDS_rec (rt ra rc rb) (FNMADDS rt ra rc rb) (record-fp))
+(defun FNMSUBS_rec (rt ra rc rb) (FNMSUBS rt ra rc rb) (record-fp))
+(defun FRES_rec (rt rb) (FRES rt rb) (record-fp))
+(defun FRSQRTE_rec (rt rb) (FRSQRTE rt rb) (record-fp))
+(defun FRSP_rec (rt rb) (FRSP rt rb) (record-fp))
+(defun FSELS_rec (rt ra rc rb) (FSELS rt ra rc rb) (record-fp))
+
+;; the same estimates as FRES and FRSQRTE, see there
+(defun FRE (rt rb) (set$ rt (fp-div 0x3ff0000000000000:64 rb)))
+(defun FRE_rec (rt rb) (FRE rt rb) (record-fp))
+(defun FRSQRTES (rt rb) (set$ rt (fp-single (fp-div 0x3ff0000000000000:64 (fp-sqrt rb)))))
+(defun FRSQRTES_rec (rt rb) (FRSQRTES rt rb) (record-fp))
+
+(defun FCPSGNS (rt ra rb) (set$ rt (concat (msb ra) (cast-low 63 rb))))
+(defun FCPSGNS_rec (rt ra rb) (FCPSGNS rt ra rb) (record-fp))
+
+;; the rounding to an integral value, ties of FRIN go away from zero,
+;; which is what the mode rna says, a NaN is the result, quiet
+(defun round-with-nan (r x) (pick (is-nan x) (quiet64 x) r))
+(defun FRINS (rt rb) (set$ rt (round-with-nan (fround :rna rb) rb)))
+(defun FRIZS (rt rb) (set$ rt (round-with-nan (fround :rtz rb) rb)))
+(defun FRIPS (rt rb) (set$ rt (round-with-nan (fround :rtp rb) rb)))
+(defun FRIMS (rt rb) (set$ rt (round-with-nan (fround :rtn rb) rb)))
+(defun FRINS_rec (rt rb) (FRINS rt rb) (record-fp))
+(defun FRIZS_rec (rt rb) (FRIZS rt rb) (record-fp))
+(defun FRIPS_rec (rt rb) (FRIPS rt rb) (record-fp))
+(defun FRIMS_rec (rt rb) (FRIMS rt rb) (record-fp))
+
+;; the bits of the class of a float of any size, without intrinsics
+
+(defun fraction-size (x)
+  (case (word-width x)
+    16 10
+    32 23
+    64 52
+    128 112))
+(defun exponent-size (x) (- (word-width x) (fraction-size x) 1))
+(defun low-ones (x n) (lnot (lshift (lnot (cast-unsigned (word-width x) 0:1)) n)))
+(defun fp-magnitude (x) (logand x (lnot (most-negative x))))
+(defun fp-infinity (x) (lshift (low-ones x (exponent-size x)) (fraction-size x)))
+(defun fp-nan (x) (> (fp-magnitude x) (fp-infinity x)))
+(defun fp-inf (x) (= (fp-magnitude x) (fp-infinity x)))
+(defun fp-zero (x) (is-zero (fp-magnitude x)))
+(defun fp-exponent-zero (x) (< (fp-magnitude x) (lshift (one-like x) (fraction-size x))))
+(defun fp-denormal (x) (logand (fp-exponent-zero x) (not (fp-zero x))))
+(defun fp-exponent (x)
+  (logand (rshift x (fraction-size x)) (low-ones x (exponent-size x))))
+(defun fp-fraction (x) (logand x (low-ones x (fraction-size x))))
+(defun fp-quiet (x) (logor x (lshift (one-like x) (- (fraction-size x) 1))))
+(defun fp-snan (x) (logand (fp-nan x) (is-zero (logand x (fp-quiet (cast-unsigned (word-width x) 0:1))))))
+
+;; the order of the numbers, none is a NaN, by their signs and magnitudes
+(defun fp-eq-bits (x y)
+  (logor (= x y) (logand (fp-zero x) (fp-zero y))))
+(defun fp-lt-bits (x y)
+  (let ((mx (fp-magnitude x)) (my (fp-magnitude y)))
+    (pick (logand (fp-zero x) (fp-zero y)) false
+          (pick (msb x)
+                (pick (msb y) (> mx my) true)
+                (pick (msb y) false (< mx my))))))
+
+;; the conversions to integers: X is a double, it is rounded toward
+;; zero, what is out of range saturates; the result is 64-bit, the
+;; signed one is sign-extended. A NaN is the value of NAN.
+
+(defun fp-integer-part (x)
+  (let ((expn (fp-exponent x))
+        (coef (logor (fp-fraction x) (lshift (u64 1) 52))))
+    (pick (< expn (u64 1023)) (u64 0)
+          (pick (>= expn (u64 1075))
+                (lshift coef (- expn (u64 1075)))
+                (rshift coef (- (u64 1075) expn))))))
+
+(defun fp-to-signed (x size nan)
+  (let ((expn (fp-exponent x))
+        (mag (fp-integer-part x))
+        (lowest (lshift (lnot (u64 0)) (- size 1)))
+        (big (>= expn (u64 (+ 1023 (- size 1))))))
+    (pick (fp-nan x) nan
+          (pick big
+                (pick (msb x) lowest (lnot lowest))
+                (pick (msb x) (neg mag) mag)))))
+
+(defun fp-to-unsigned (x size nan)
+  (let ((expn (fp-exponent x))
+        (highest (if (= size 64) (lnot (u64 0)) (low-ones (u64 0) size)))
+        (big (>= expn (u64 (+ 1023 size)))))
+    (pick (fp-nan x) nan
+          (pick (msb x) (u64 0)
+                (pick big highest (fp-integer-part x))))))
+
+(defun lowest-dword () 0x8000000000000000:64)
+(defun lowest-word () 0x0000000080000000:64)
+
+(defun to-sd (x) (fp-to-signed x 64 (lowest-dword)))
+(defun to-ud (x) (fp-to-unsigned x 64 (u64 0)))
+(defun to-uw (x) (fp-to-unsigned x 32 (u64 0)))
+
+(defun FCTID (rt rb) (set$ rt (to-sd (fround :rne rb))))
+(defun FCTIDZ (rt rb) (set$ rt (to-sd rb)))
+(defun FCTIDU (rt rb) (set$ rt (to-ud (fround :rne rb))))
+(defun FCTIDUZ (rt rb) (set$ rt (to-ud rb)))
+(defun FCTIWU (rt rb) (set$ rt (to-uw (fround :rne rb))))
+(defun FCTIWUZ (rt rb) (set$ rt (to-uw rb)))
+(defun FCTID_rec (rt rb) (FCTID rt rb) (record-fp))
+(defun FCTIDZ_rec (rt rb) (FCTIDZ rt rb) (record-fp))
+(defun FCTIDU_rec (rt rb) (FCTIDU rt rb) (record-fp))
+(defun FCTIDUZ_rec (rt rb) (FCTIDUZ rt rb) (record-fp))
+(defun FCTIW_rec (rt rb) (FCTIW rt rb) (record-fp))
+(defun FCTIWZ_rec (rt rb) (FCTIWZ rt rb) (record-fp))
+(defun FCTIWU_rec (rt rb) (FCTIWU rt rb) (record-fp))
+(defun FCTIWUZ_rec (rt rb) (FCTIWUZ rt rb) (record-fp))
+
+(defun FCFIDS (rt rb) (set$ rt (fconvert :rne 64 (cast-sfloat :rne 32 rb))))
+(defun FCFIDU (rt rb) (set$ rt (cast-float :rne 64 rb)))
+(defun FCFIDUS (rt rb) (set$ rt (fconvert :rne 64 (cast-float :rne 32 rb))))
+(defun FCFID_rec (rt rb) (FCFID rt rb) (record-fp))
+(defun FCFIDS_rec (rt rb) (FCFIDS rt rb) (record-fp))
+(defun FCFIDU_rec (rt rb) (FCFIDU rt rb) (record-fp))
+(defun FCFIDUS_rec (rt rb) (FCFIDUS rt rb) (record-fp))
+
+;; the tests for the software division and square root: the field is
+;; 1, FG, FE and 0. The exponents are unbiased, in 16 bits
+
+(defun signed-exponent (x)
+  (let ((bias (- (lshift 1 (- (exponent-size x) 1)) 1)))
+    (- (cast-low 16 (fp-exponent x)) (cast-low 16 (cast-unsigned 64 bias)))))
+(defun s16 (n) (cast-low 16 (cast-unsigned 64 n)))
+
+(defun tdiv-fg (a b)
+  (logor (fp-inf a) (fp-inf b) (fp-zero b) (fp-denormal b)))
+
+(defun tdiv-fe (a b)
+  (let ((bias (s16 (- (lshift 1 (- (exponent-size a) 1)) 1)))
+        (ea (signed-exponent a))
+        (eb (signed-exponent b))
+        (diff (- ea eb))
+        (digits (s16 (+ (fraction-size a) 1))))
+    (logor (fp-inf a) (fp-inf b) (fp-zero b) (fp-nan a) (fp-nan b)
+           (s<= eb (- (s16 1) bias))
+           (s>= eb (- bias (s16 2)))
+           (logand (not (fp-zero a))
+                   (logor (s>= diff bias)
+                          (s<= diff (- (s16 2) bias))
+                          (s<= ea (- digits bias)))))))
+
+(defun tsqrt-fg (b) (logor (fp-inf b) (fp-zero b) (fp-denormal b)))
+
+(defun tsqrt-fe (b)
+  (let ((bias (s16 (- (lshift 1 (- (exponent-size b) 1)) 1)))
+        (digits (s16 (+ (fraction-size b) 1))))
+    (logor (fp-inf b) (fp-zero b) (fp-nan b) (msb b)
+           (s<= (signed-exponent b) (- digits bias)))))
+
+(defun FTDIV (bf ra rb) (set$ bf (concat 1:1 (tdiv-fg ra rb) (tdiv-fe ra rb) 0:1)))
+(defun FTSQRT (bf rb) (set$ bf (concat 1:1 (tsqrt-fg rb) (tsqrt-fe rb) 0:1)))
+
+;;; FPSCR
+;;
+;; The register holds what the moves wrote to it, but for FPCC that is
+;; in the flags FL, FG, FE and FU. The arithmetic doesn't set its other
+;; status bits, and doesn't obey its modes, see above. The bits are
+;; numbered from the least significant one here.
+
+(defun fpscr ()
+  (logor (logand FPSCR (lnot 0xf000:64))
+         (lshift (u64 (concat FL FG FE FU)) 12)))
+
+;; VX and FEX are not written directly, they are of the other bits
+(defun set-fpscr (x)
+  (let ((vx (non-zero (logand x 0x0000000001f80700:64)))
+        (fex (logor (logand vx (select 7 x))
+                    (logand (select 28 x) (select 6 x))
+                    (logand (select 27 x) (select 5 x))
+                    (logand (select 26 x) (select 4 x))
+                    (logand (select 25 x) (select 3 x))))
+        (y (logand x (lnot 0x0000000060000000:64))))
+    (set FPSCR (logor y (lshift (u64 fex) 30) (lshift (u64 vx) 29)))
+    (set FL (select 15 x))
+    (set FG (select 14 x))
+    (set FE (select 13 x))
+    (set FU (select 12 x))))
+
+(defun MFFS (rt) (set$ rt (fpscr)))
+(defun MFFS_rec (rt) (MFFS rt) (record-fp))
+
+;; what these give and set is in the masks of the ISA 3.0: DRN, the
+;; enables, NI, RN and the status bits, FR, FI and FPRF
+(defun MFFSL (rt) (set$ rt (logand (fpscr) 0x000000070007f0ff:64)))
+(defun MFFSCE (rt)
+  (let ((x (fpscr)))
+    (set$ rt x)
+    (set-fpscr (logand x (lnot 0xf8:64)))))
+
+(defun set-control (rt x)
+  (let ((old (fpscr)))
+    (set$ rt (logand old 0x00000007000000ff:64))
+    (set-fpscr x)))
+(defun with-rn (old rn) (logor (logand old (lnot 3:64)) (logand rn 3:64)))
+(defun with-drn (old drn)
+  (logor (logand old (lnot 0x0000000700000000:64)) (lshift (logand drn 7:64) 32)))
+(defun MFFSCRN (rt rb) (set-control rt (with-rn (fpscr) rb)))
+(defun MFFSCDRN (rt rb)
+  (set-control rt (with-drn (fpscr) (rshift rb 32))))
+(defun MFFSCRNI (rt rm) (set-control rt (with-rn (fpscr) (u64 rm))))
+(defun MFFSCDRNI (rt drm) (set-control rt (with-drn (fpscr) (u64 drm))))
+
+(defun MTFSB0 (bt) (set-fpscr (logand (fpscr) (lnot (lshift (u64 1) (- 31 bt))))))
+(defun MTFSB1 (bt) (set-fpscr (logor (fpscr) (lshift (u64 1) (- 31 bt)))))
+
+;; the fields are numbered from the most significant one of the word W
+(defun field-mask (flm i w)
+  (if (non-zero (logand flm (lshift 1 (- 7 i))))
+      (lshift (u64 15) (+ (* 4 (- 7 i)) (* 32 (- 1 w))))
+    (u64 0)))
+(defun fields-mask (flm w)
+  (logor (field-mask flm 0 w) (field-mask flm 1 w) (field-mask flm 2 w) (field-mask flm 3 w)
+         (field-mask flm 4 w) (field-mask flm 5 w) (field-mask flm 6 w) (field-mask flm 7 w)))
+(defun insert-fields (x m) (logor (logand x m) (logand (fpscr) (lnot m))))
+
+(defun MTFSF (flm rb l w)
+  (set-fpscr (if (non-zero l) rb (insert-fields rb (fields-mask flm w)))))
+(defun MTFSF_rec (flm rb l w) (MTFSF flm rb l w) (record-fp))
+
+(defun MTFSFI (bf u w)
+  (let ((sh (+ (* 4 (- 7 bf)) (* 32 (- 1 w)))))
+    (set-fpscr (insert-fields (lshift (u64 u) sh) (lshift (u64 15) sh)))))
+(defun MTFSFI_rec (bf u w) (MTFSFI bf u w) (record-fp))
+
+;; the exception bits of the field are cleared
+(defun MCRFS (bf bfa)
+  (let ((old (fpscr))
+        (sh (* 4 (- 7 (field-index bfa)))))
+    (set$ bf (cast-low 4 (rshift old sh)))
+    (set-fpscr (logand old (lnot (logand 0x000000009ff80700:64 (lshift (u64 15) sh)))))))

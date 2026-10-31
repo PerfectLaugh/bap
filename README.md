@@ -95,7 +95,7 @@ trusted or only tested, with file and line. The main items are these:
 - **That the Lisp semantics are what hardware does.** No proof can say so. `tools/difftest` tests
   it: 2,171 x86-64 and 1,920 i686 opcodes against a Ryzen 9 5950X, and the other targets against
   qemu, which is a second implementation and not silicon. Floating point lifts to named
-  intrinsics, so it has no value to compare. AVX-512 was checked only against a hand-written model,
+  intrinsics, so it has no value to compare, and a program that reaches one stops. AVX-512 was checked only against a hand-written model,
   as that machine doesn't have it.
 - **The C++ JIT, LLVM and Z3.** `Bap/Jit.lean` states the obligations the proofs rest on.
 - **The Lean kernel, compiler and runtime**, and `IO.Ref`, tasks and mutexes behaving as modelled.

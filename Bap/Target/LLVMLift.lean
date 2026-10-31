@@ -356,10 +356,73 @@ private def powerpcFloatFlags : List String := ["FL", "FG", "FE", "FU"]
 private def powerpcConditionField (name : String) : Bool :=
   ["CR0", "CR1", "CR2", "CR3", "CR4", "CR5", "CR6", "CR7"].contains name
 
-private def powerpcAliases (name : String) : Option Alias :=
+/-- The number that digits make, of which there must be one. -/
+private def powerpcDigits : List Char → Nat → Option Nat
+  | [], value => some value
+  | digit :: rest, value => if digit.isDigit then powerpcDigits rest (10 * value + (digit.toNat - 48)) else none
+
+/-- The number of the characters of a name after a prefix. -/
+private def powerpcNumberOf (pre : String) (chars : List Char) : Option Nat :=
+  let pre := pre.toList
+  if pre.isPrefixOf chars && chars.length != pre.length then powerpcDigits (chars.drop pre.length) 0 else none
+
+/-- The number of a name that is a prefix and digits. -/
+private def powerpcNumber (pre name : String) : Option Nat := powerpcNumberOf pre name.toList
+
+/-- The number of a name that is a prefix, digits and `L`. -/
+private def powerpcNumberL (pre name : String) : Option Nat :=
+  let chars := name.toList
+  if chars.getLast? == some 'L' then powerpcNumberOf pre chars.dropLast else none
+
+/-- The whole of a floating point register, its other doubleword, and the doublewords of an AltiVec register. -/
+private def powerpcFloatPart (name : String) : AliasPart := ⟨name, 64, 63, 0⟩
+private def powerpcVectorHigh (number : Nat) : AliasPart := ⟨s!"V{number}", 128, 127, 64⟩
+private def powerpcVectorLow (number : Nat) : AliasPart := ⟨s!"V{number}", 128, 63, 0⟩
+
+/-- The doublewords, from the most significant, of the VSX register of a number: 0 to 31 are `F0` to `F31` with a doubleword
+of their own, `F0L` to `F31L`, and 32 to 63 are the AltiVec registers. -/
+private def powerpcVsxParts (number : Nat) : List AliasPart :=
+  if number < 32 then [powerpcFloatPart s!"F{number}", powerpcFloatPart s!"F{number}L"]
+  else [powerpcVectorHigh (number - 32), powerpcVectorLow (number - 32)]
+
+/-- The parts of a register that has no variable of its own: of VSX, a pair of them (`VSRp`), an accumulator, which is
+four of them, a pair of floating point registers (`Fpair`), or a pair of general registers (`G8p`). -/
+private def powerpcVectorAlias (bits : Nat) (name : String) : Option Alias :=
+  let parts : List AliasPart :=
+    if let some n := powerpcNumber "VSRp" name then powerpcVsxParts (2 * n) ++ powerpcVsxParts (2 * n + 1)
+    else if let some n := (powerpcNumber "UACC" name).or (powerpcNumber "ACC" name) then
+      (List.range 4).flatMap fun k => powerpcVsxParts (4 * n + k)
+    else if let some n := powerpcNumber "Fpair" name then [powerpcFloatPart s!"F{n}", powerpcFloatPart s!"F{n + 1}"]
+    else if let some n := powerpcNumber "G8p" name then
+      [⟨s!"R{2 * n}", bits, bits - 1, 0⟩, ⟨s!"R{2 * n + 1}", bits, bits - 1, 0⟩]
+    else if let some n := powerpcNumber "VSL" name then powerpcVsxParts n
+    else if let some n := powerpcNumber "VF" name then [powerpcVectorHigh n]
+    else if let some n := powerpcNumberL "VF" name then [powerpcVectorLow n]
+    else []
+  match parts with
+  | [] => none
+  | part :: rest => some (part, rest)
+
+private def powerpcAliases (bits : Nat) (name : String) : Option Alias :=
   if powerpcConditionField name then
     some (flagPart s!"{name}LT", [flagPart s!"{name}GT", flagPart s!"{name}EQ", flagPart s!"{name}UN"])
+  else powerpcVectorAlias bits name
+
+/-- The width of a register of VSX or of what views it, in both word sizes, whose `G8p` are of two words. -/
+private def powerpcVectorWidth (bits : Nat) (name : String) : Option Nat :=
+  if (powerpcNumber "VSRp" name).isSome then some 256
+  else if (powerpcNumber "UACC" name).isSome || (powerpcNumber "ACC" name).isSome then some 512
+  else if (powerpcNumber "Fpair" name).isSome || (powerpcNumber "VSL" name).isSome then some 128
+  else if (powerpcNumber "G8p" name).isSome then some (2 * bits)
+  else if (powerpcNumber "VF" name).isSome || (powerpcNumberL "VF" name).isSome || name = "FPSCR" then some 64
+  else if (powerpcNumberL "F" name).isSome then some 64
+  else if name = "VSCR" then some 32
   else none
+
+/-- What the semantics name, besides the operands: the status registers, the scalars of the AltiVec registers, and the
+second doubleword of a scalar. -/
+private def powerpcVectorGlobals : List String :=
+  ["FPSCR", "VSCR"] ++ (List.range 32).flatMap fun n => [s!"F{n}L", s!"VF{n}", s!"VF{n}L"]
 
 /-- A register of AltiVec, which has 128 bits, and a floating point one, which has 64, in both word sizes. -/
 private def powerpcNumbered (first : Char) (name : String) : Bool :=
@@ -374,18 +437,22 @@ private def powerpcRegister (name : String) : Primus.Semantics.Value :=
   if powerpcFloatFlags.contains name then .register name 1 1
   else if powerpcConditionField name then .register name 4 4
   else if isConditionBit then .register name 1 1
-  else if name = "ZERO" then .register "XZR" 64 64
+  else if name = "ZERO" || name = "ZERO8" then .register "XZR" 64 64
   else if name.startsWith "X" && (name.drop 1).all Char.isDigit then
     .register ("R" ++ (name.drop 1).toString) 64 64
   else if powerpcNumbered 'V' name then .register name 128 128
-  else .register name 64 64
+  else
+    match powerpcVectorWidth 64 name with
+    | some width => .register name width width
+    | none => .register name 64 64
 
 private def powerpcGlobals : Primus.Semantics.Globals :=
   let registers := (List.range 32).map fun n => s!"R{n}"
   let conditionFields := (List.range 8).flatMap fun n =>
     [s!"CR{n}LT", s!"CR{n}GT", s!"CR{n}EQ", s!"CR{n}UN"]
   let fields := (List.range 8).map fun n => s!"CR{n}"
-  (registers ++ conditionFields ++ fields ++ powerpcFloatFlags ++ ["ZERO", "LR", "CTR", "TAR", "SO", "OV", "CA", "OV32", "CA32"]).map
+  (registers ++ conditionFields ++ fields ++ powerpcFloatFlags ++ powerpcVectorGlobals ++
+    ["ZERO", "LR", "CTR", "TAR", "SO", "OV", "CA", "OV32", "CA32"]).map
     fun name => (name, powerpcRegister name)
 
 private def powerpc32Register (name : String) : Primus.Semantics.Value :=
@@ -395,19 +462,23 @@ private def powerpc32Register (name : String) : Primus.Semantics.Value :=
   if powerpcFloatFlags.contains name then .register name 1 1
   else if powerpcConditionField name then .register name 4 4
   else if isConditionBit then .register name 1 1
-  else if name = "ZERO" then .register "XZR" 32 32
+  else if name = "ZERO" || name = "ZERO8" then .register "XZR" 32 32
   else if name.startsWith "X" && (name.drop 1).all Char.isDigit then
     .register ("R" ++ (name.drop 1).toString) 32 32
   else if powerpcNumbered 'V' name then .register name 128 128
   else if powerpcNumbered 'F' name then .register name 64 64
-  else .register name 32 32
+  else
+    match powerpcVectorWidth 32 name with
+    | some width => .register name width width
+    | none => .register name 32 32
 
 private def powerpc32Globals : Primus.Semantics.Globals :=
   let registers := (List.range 32).map fun n => s!"R{n}"
   let conditionFields := (List.range 8).flatMap fun n =>
     [s!"CR{n}LT", s!"CR{n}GT", s!"CR{n}EQ", s!"CR{n}UN"]
   let fields := (List.range 8).map fun n => s!"CR{n}"
-  (registers ++ conditionFields ++ fields ++ powerpcFloatFlags ++ ["ZERO", "LR", "CTR", "TAR", "SO", "OV", "CA", "OV32", "CA32"]).map
+  (registers ++ conditionFields ++ fields ++ powerpcFloatFlags ++ powerpcVectorGlobals ++
+    ["ZERO", "LR", "CTR", "TAR", "SO", "OV", "CA", "OV32", "CA32"]).map
     fun name => (name, powerpc32Register name)
 
 private def mipsRegisterName (name : String) : String :=
@@ -705,7 +776,7 @@ private initialize powerpcCache : IO.Ref (List (PowerPCVariant × Primus.Semanti
 
 def powerpcEnvironmentOf (variant : PowerPCVariant) : IO Primus.Semantics.Environment :=
   cachedVariant powerpcCache variant do
-    let definitions ← Primus.Semantics.loadMany (← pluginDirectories "powerpc") ["bits", "powerpc"]
+    let definitions ← Primus.Semantics.loadMany (← pluginDirectories "powerpc") ["bits", "powerpc", "powerpc-vector", "powerpc-vsx", "powerpc-decimal"]
       (wordContext variant.bits variant.endian 0 0)
     let globals := if variant.bits == 64 then powerpcGlobals else powerpc32Globals
     let register := if variant.bits == 64 then powerpcRegister else powerpc32Register
@@ -1660,7 +1731,7 @@ def decodePowerPCOf (variant : PowerPCVariant) (globals : Primus.Semantics.Envir
     asm := normalizeAssembly decoded.assembly
     flow := flow decoded.flags
     target := powerpcMCTarget variant.bits address word machineOperands
-    bil := resolveAliases powerpcAliases bil
+    bil := resolveAliases (powerpcAliases variant.bits) bil
   }
 
 def decodePowerPCWith : Primus.Semantics.Environment → Nat → Nat → ByteArray → IO Disasm.Insn :=

@@ -740,6 +740,9 @@ class Risc(Target):
         """The registers to hold for the upstream's forms, or None if it can't be run here."""
         return {}
 
+    def corpus_code(self, code):
+        return code
+
     def cases(self, opcodes, assemble, layout):
         Case = case_type()
         result = self.hand(assemble, layout)
@@ -752,7 +755,7 @@ class Risc(Target):
         for code, text in corpus_lines(self.corpus_name):
             pins = self.corpus_memory(text)
             if pins is not None:
-                result.append(Case(code=code, text=text, pins=pins))
+                result.append(Case(code=self.corpus_code(code), text=text, pins=pins))
         return result
 
     def text_cases(self, assemble, items):
@@ -1489,13 +1492,22 @@ def powerpc_stems(name):
 class Ppc(Risc):
     base_pins = {"R5": "window+248", "R6": 8}
     default_pins = {"R1": "window+256"}
-    semantics = ["powerpc/powerpc.lisp"]
+    semantics = ["powerpc/powerpc.lisp", "powerpc/powerpc-vector.lisp", "powerpc/powerpc-vsx.lisp", "powerpc/powerpc-decimal.lisp"]
     mnemonics_of = staticmethod(powerpc_stems)
-    excluded_prefix = ("SC", "TW", "TD", "TRAP", "ATTN", "MFMSR", "MTMSR", "MFSPR", "MTSPR", "MFTB", "SYNC", "ISYNC", "EIEIO", "DCB", "ICB", "MFVSCR", "MTVSCR", "MFFS", "MTFS", "MCRFS", "RFI", "TLB", "HRFID", "NAP", "MFOCRF", "MTOCRF", "DSS", "LWARX", "STWCX", "LDARX", "STDCX", "LBARX", "LHARX", "STBCX", "STHCX", "MSG")
+    excluded_prefix = ("SC", "TW", "TD", "TRAP", "ATTN", "MFMSR", "MTMSR", "MFSPR", "MTSPR", "MFTB", "SYNC", "ISYNC", "EIEIO", "DCB", "ICB", "MFVSCR", "MTVSCR", "MFFS", "MTFS", "MCRFS", "RFI", "TLB", "HRFID", "NAP", "MFOCRF", "MTOCRF", "DSS", "LWARX", "STWCX", "LDARX", "STDCX", "LBARX", "LHARX", "STBCX", "STHCX", "MSG", "LQARX", "STQCX", "WAIT", "DARN", "HASH", "CP_", "TBEGIN", "TEND", "TABORT", "TCHECK", "TSR", "RFEBB", "CLRBHRB", "MFBHRBE", "MFUDSCR", "MTUDSCR")
     shape_list = ["", "3, 4, 7", "3, 4", "3", "3, 4, 100", "3, 4, -1", "3, 4, 1000", "3, 100", "3, -1", "3, 8(5)", "3, -8(5)", "3, 0(5)", "3, 5, 6", "3, 4, 7, 8", "3, 4, 7, 8, 9", "3, 4, 5, 6, 7", "3, 4, 3, 5, 7", "3, 4, 3, 5", "3, 4, 3", "3, 4, 7, 5", "0, 3, 4", "3, 3, 4", "0, 0, 3, 4", "0, 1, 3, 4", "0, 1, 3, 100", "0, 3, 100", "0, 3", "2, 3, 4", "1, 3, 4", "1, 3", "3, 0", "3, 1", "7, 1, 2, 3", "1, 2, 3"]
-    corpus_name = ""
+    corpus_name = "powerpc"
 
     def _pinned(self, _text):
+        return dict(self.base_pins)
+
+    def corpus_code(self, code):
+        """The corpus has the words in the big-endian order."""
+        if self.endian == ">":
+            return code
+        return b"".join(code[index : index + 4][::-1] for index in range(0, len(code), 4))
+
+    def corpus_memory(self, text):
         return dict(self.base_pins)
 
     def __init__(self, scratch):
@@ -1505,30 +1517,58 @@ class Ppc(Risc):
         self.xer = [("SO", 31), ("OV", 30), ("CA", 29)]
         self.flags = self.flags + self.xer + self.xer32()
         self.gprs = self.gprs + [("LR", self.word * 8), ("CTR", self.word * 8)]
-        self.vectors = [(f"F{i}", 64) for i in range(32)] + [(f"V{i}", 128) for i in range(32)]
+        self.vectors = [(f"F{i}", 64) for i in range(32)] + [(f"V{i}", 128) for i in range(32)] + self.vsx_low()
         super().__init__(scratch)
 
     def xer32(self):
         return []
 
+    def vsx_low(self):
+        """The second doublewords of the VSX registers 0 to 31, of the machines that have VSX."""
+        return [(f"F{i}L", 64) for i in range(32)] if self.word == 8 else []
+
+    # what writes a scalar in F0 to F31 and whose second doubleword the ISA leaves undefined: qemu clears it for the first
+    # group and keeps it for the second, and the lifter keeps it in the first and clears it in the second, as ISA 3.0 does
+    undefined_second = re.compile(r"F(ABS|NABS|NEG|MR|CTI|CFID|ADD|SUB|MUL|DIV|SQRT|MADD|MSUB|NMADD|NMSUB|RE|RSQRTE|RSP|SEL|RI|CPSGN)|LF[SDI]|PLF[SD]|MFFS|LXS(DX|SPX|IBZX|IHZX|IWAX|IWZX)$|MTVSR(D|WA|WZ)$")
+
     def undefined(self, case, values, final):
         """The extended division whose quotient doesn't fit has an undefined result, and the ISA says OV is set, which
         qemu-user doesn't, on a positive quotient of the upper half of the 64 bits, so qemu is no evidence here."""
+        numbers = re.findall(r"\d+", case.asm)
+        masked = set()
+        if self.undefined_second.match(case.opcode) and numbers:
+            masked.add(f"F{numbers[0]}L")
+        # CR1 of the record forms has the exception bits of FPSCR, that the arithmetic doesn't model
+        if case.opcode.endswith("_rec") and case.opcode.startswith(("F", "D", "MTFS", "MFFS")) and not case.opcode.startswith("DIV"):
+            masked |= {"CR1LT", "CR1GT", "CR1EQ", "CR1UN"}
+        # the offsets of the element out of the register are undefined, and qemu wraps them around
+        size = {"VEXTUH": 2, "VEXTUW": 4}.get(case.opcode[:6])
+        if size and values[f"R{numbers[1]}"] & 15 > 16 - size:
+            masked.add(f"R{numbers[0]}")
+        size = {"VINSH": 2, "VINSW": 4, "VINSD": 8}.get(case.opcode[:5])
+        if size and case.opcode[5:] in ("LX", "RX", "VLX", "VRX") and values[f"R{numbers[1]}"] & 15 > 16 - size:
+            masked.add(f"V{numbers[0]}")
+        # qemu takes a small number, that would be a denormal single, as of any class that DCMX has, not only of the two
+        if case.opcode == "XSTSTDCSP" and 0 < (values[f"F{numbers[1]}"] >> 52) & 0x7FF < 0x381:
+            masked.add(f"CR{numbers[0]}EQ")
+        # the quotient of an extended division that doesn't fit is undefined
+        if re.match(r"VDIVE[SU][DQ]$", case.opcode):
+            masked.add(f"V{numbers[0]}")
         if not case.opcode.startswith("DIVDE") or case.opcode.startswith("DIVDEU"):
-            return set()
+            return masked
         signed = lambda value: value - (1 << 64) if value >> 63 else value
         rt, ra, rb = re.findall(r"\d+", case.asm)[:3]
         rt, ra, rb = f"R{rt}", signed(values[f"R{ra}"]), signed(values[f"R{rb}"])
         if rb == 0:
-            return set()
+            return masked
         magnitude = (abs(ra) << 64) // abs(rb)
         quotient = -magnitude if (ra < 0) != (rb < 0) else magnitude
         if -(1 << 63) <= quotient < (1 << 63):
-            return set()
-        return {rt, "OV", "SO", "OV32", "CR0LT", "CR0GT", "CR0EQ", "CR0UN"}
+            return masked
+        return masked | {rt, "OV", "SO", "OV32", "CR0LT", "CR0GT", "CR0EQ", "CR0UN"}
 
     def aux_spec(self):
-        spec = {"XZR": (0, self.word * 8), "TAR": (0, self.word * 8), "FL": (0, 1), "FG": (0, 1), "FE": (0, 1), "FU": (0, 1), "OV32": (0, 1), "CA32": (0, 1)}
+        spec = {"XZR": (0, self.word * 8), "TAR": (0, self.word * 8), "FL": (0, 1), "FG": (0, 1), "FE": (0, 1), "FU": (0, 1), "OV32": (0, 1), "CA32": (0, 1), "FPSCR": (0, 64), "VSCR": (0, 32)}
         return {k: v for k, v in spec.items() if k not in dict(self.xer32())}
 
     def encode_extra(self, values, out):
@@ -1549,6 +1589,9 @@ class Ppc(Risc):
         base += 256
         for index in range(32):
             out[base + index * 16 : base + (index + 1) * 16] = values[f"V{index}"].to_bytes(16, "big" if self.endian == ">" else "little")
+        base += 512
+        for index in range(32 if self.vsx_low() else 0):
+            out[base + index * 8 : base + (index + 1) * 8] = values[f"F{index}L"].to_bytes(8, "big" if self.endian == ">" else "little")
 
     def decode_extra(self, data, result):
         cr = self.extra_word(data, 0)
@@ -1566,6 +1609,9 @@ class Ppc(Risc):
         base += 256
         for index in range(32):
             result[f"V{index}"] = int.from_bytes(data[base + index * 16 : base + (index + 1) * 16], "big" if self.endian == ">" else "little")
+        base += 512
+        for index in range(32 if self.vsx_low() else 0):
+            result[f"F{index}L"] = int.from_bytes(data[base + index * 8 : base + (index + 1) * 8], "big" if self.endian == ">" else "little")
 
     def hand(self, assemble, layout):
         Case = case_type()
@@ -1604,12 +1650,20 @@ class Ppc32(Ppc):
     mc_triple = "powerpc-linux-gnu"
     nop = bytes.fromhex("60000000")
 
+    def excluded(self, opcode, case):
+        # of the later ISAs, which this CPU doesn't have: qemu runs other instructions of its own on their encodings
+        if opcode in ("VCMPEQUD", "VCMPEQUD_rec", "VCMPGTSD", "VCMPGTSD_rec", "VCMPGTUD", "VCMPGTUD_rec", "VCNTMBB", "VCNTMBD", "VCNTMBH", "VCNTMBW", "VDIVESW", "VDIVUQ",
+                      "VINSBRX", "VINSBVLX", "VINSBVRX", "VINSD", "VINSERTB", "VINSERTH", "VINSERTW", "VINSHVLX", "VINSHVRX", "VINSW", "VINSWVLX", "VINSWVRX", "VRLDNM",
+                      "VSTRIBL", "VSTRIBL_rec", "VSTRIBR", "VSTRIBR_rec", "VSTRIHL", "VSTRIHL_rec", "VSTRIHR", "VSTRIHR_rec"):
+            return "of a later ISA than the CPU of qemu-ppc"
+        return super().excluded(opcode, case)
+
 
 class Ppc64(Ppc):
     name = "ppc64"
     word = 8
     endian = ">"
-    runner = ["qemu-ppc64", "-cpu", "power9"]
+    runner = ["qemu-ppc64", "-cpu", "power10"]
     cflags = ["--target=powerpc64-linux-gnu", "-mabi=elfv2"]
     lean = "ppc64"
     mc_triple = "powerpc64-linux-gnu"
@@ -1623,7 +1677,7 @@ class Ppc64Le(Ppc):
     name = "ppc64le"
     word = 8
     endian = "<"
-    runner = ["qemu-ppc64le", "-cpu", "power9"]
+    runner = ["qemu-ppc64le", "-cpu", "power10"]
     cflags = ["--target=powerpc64le-linux-gnu"]
     lean = "ppc64le"
     mc_triple = "powerpc64le-linux-gnu"
