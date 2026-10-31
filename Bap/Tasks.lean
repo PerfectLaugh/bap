@@ -1,4 +1,4 @@
-namespace Bap.Emu
+namespace Bap.Tasks
 
 /-! # Tasks
 
@@ -7,8 +7,8 @@ a group are the threads of a process, whose id is that of the group's first task
 their memory. `clone` says what a new one shares. In Windows terms a process is a group with its space, and a thread is a
 task in it.
 
-This is the table of the tasks and what `waitpid` sees of it. It is about ids and nothing else: registers, memory and the
-running of tasks are what `Bap.Emu` does with it. -/
+This is the table of the tasks, what `waitpid` sees of it and who waits on a futex. It is about ids and nothing else:
+registers, memory and the running of tasks are what `Bap.Emu` and `Bap.Primus` do with it. -/
 
 /-- The status that `waitpid` reports for a process that called `exit` with `code`. -/
 def exitedStatus (code : Nat) : Nat := (code % 256) * 256
@@ -16,7 +16,7 @@ def exitedStatus (code : Nat) : Nat := (code % 256) * 256
 /-- The status that `waitpid` reports for a process that a signal killed. -/
 def signaledStatus (signal : Nat) : Nat := signal % 128
 
-structure Task where
+structure Entry where
   tid : Nat
   /-- The id of its process: `getpid` says this, and `gettid` says `tid`. -/
   group : Nat
@@ -27,6 +27,19 @@ structure Task where
   /-- Set when it has exited. For a leader, it is what `waitpid` reports: it stays, as a zombie, until its group is over and
   something has waited for it. Another task goes once it isn't the one that runs, as what runs needs its space. -/
   status : Option Nat := none
+  /-- Where its exit writes 0 and wakes a futex, as `set_tid_address` and `CLONE_CHILD_CLEARTID` say: this is what
+  `pthread_join` waits on. -/
+  clearTid : Option Nat := none
+  deriving DecidableEq, Repr
+
+/-- A task blocked on a futex, which is the word at `address` of `space`. -/
+structure FutexWaiter where
+  thread : Nat
+  space : Nat
+  address : Nat
+  bitset : Nat
+  /-- Whether it asked for a timeout. There is no clock: it times out when nothing else can run. -/
+  timed : Bool := false
   deriving DecidableEq, Repr
 
 /-- A task blocked in `waitpid`. -/
@@ -39,8 +52,9 @@ structure Waiter where
   deriving DecidableEq, Repr
 
 structure TaskTable where
-  tasks : List Task := []
+  tasks : List Entry := []
   waiters : List Waiter := []
+  futexes : List FutexWaiter := []
   deriving DecidableEq, Repr
 
 /-- What waiting finds. -/
@@ -57,7 +71,7 @@ namespace TaskTable
 /-- The first task, which is a process with its memory. -/
 def initial (tid : Nat) : TaskTable := { tasks := [{ tid, group := tid, parent := 0, space := tid }] }
 
-def find? (table : TaskTable) (tid : Nat) : Option Task := table.tasks.find? (·.tid == tid)
+def find? (table : TaskTable) (tid : Nat) : Option Entry := table.tasks.find? (·.tid == tid)
 
 /-- The address space of a task. One the table doesn't have is on its own. -/
 def spaceOf (table : TaskTable) (tid : Nat) : Nat :=
@@ -65,21 +79,21 @@ def spaceOf (table : TaskTable) (tid : Nat) : Nat :=
   | some task => task.space
   | none => tid
 
-def addTask (table : TaskTable) (task : Task) : TaskTable := { table with tasks := table.tasks ++ [task] }
+def addTask (table : TaskTable) (task : Entry) : TaskTable := { table with tasks := table.tasks ++ [task] }
 
 def setSpace (table : TaskTable) (tid space : Nat) : TaskTable :=
   { table with tasks := table.tasks.map fun task => if task.tid == tid then { task with space } else task }
 
 /-- Whether `leader` is the only one of its group that may still be running. -/
-def alone (table : TaskTable) (leader : Task) : Bool :=
+def alone (table : TaskTable) (leader : Entry) : Bool :=
   table.tasks.all fun other => other.group != leader.group || other.tid == leader.tid || other.status.isSome
 
 /-- Whether `task` is the leader of a child of `parent` that `target` asks for. -/
-def asked (parent : Nat) (target : Option Nat) (task : Task) : Bool :=
+def asked (parent : Nat) (target : Option Nat) (task : Entry) : Bool :=
   task.tid == task.group && task.parent == parent && (match target with | some pid => task.tid == pid | none => true)
 
 /-- What can be reported of a leader: its group is over. -/
-def report (table : TaskTable) (leader : Task) : Option (Nat × Nat) :=
+def report (table : TaskTable) (leader : Entry) : Option (Nat × Nat) :=
   if table.alone leader then leader.status.map (leader.tid, ·) else none
 
 /-- The result of `waitpid` in the process `parent`, which changes nothing. -/
@@ -101,13 +115,14 @@ def exitTask (table : TaskTable) (tid status init : Nat) : TaskTable :=
   | some task =>
     let left : TaskTable :=
       { tasks := table.tasks.map fun other => if other.tid == tid then { other with status := some status } else other
-        waiters := table.waiters.filter (·.thread != tid) }
+        waiters := table.waiters.filter (·.thread != tid)
+        futexes := table.futexes.filter (·.thread != tid) }
     match left.find? task.group with
     | some leader => if leader.status.isSome && left.alone leader then left.reparent task.group init else left
     | none => left
 
 /-- What `exitGroup` makes of a task. -/
-def exited (group status init : Nat) (task : Task) : Task :=
+def exited (group status init : Nat) (task : Entry) : Entry :=
   if task.group == group then { task with status := some status }
   else if task.parent == group then { task with parent := init }
   else task
@@ -116,6 +131,10 @@ def exited (group status init : Nat) (task : Task) : Task :=
 def exitGroup (table : TaskTable) (group status init : Nat) : TaskTable :=
   { tasks := table.tasks.map (exited group status init)
     waiters := table.waiters.filter fun waiter =>
+      match table.find? waiter.thread with
+      | some task => task.group != group
+      | none => true
+    futexes := table.futexes.filter fun waiter =>
       match table.find? waiter.thread with
       | some task => task.group != group
       | none => true }
@@ -145,7 +164,55 @@ def settleOne (current : TaskTable × List (Waiter × WaitResult)) (waiter : Wai
 def settle (table : TaskTable) : TaskTable × List (Waiter × WaitResult) :=
   table.waiters.foldl settleOne ({ table with waiters := [] }, [])
 
+/-- Whether the task is blocked, in `waitpid` or on a futex. -/
+def blocked (table : TaskTable) (tid : Nat) : Bool :=
+  table.waiters.any (·.thread == tid) || table.futexes.any (·.thread == tid)
+
+/-- The tasks that are blocked. -/
+def blockedTasks (table : TaskTable) : List Nat :=
+  table.waiters.map (·.thread) ++ table.futexes.map (·.thread)
+
+def setClearTid (table : TaskTable) (tid address : Nat) : TaskTable :=
+  { table with tasks := table.tasks.map fun task => if task.tid == tid then { task with clearTid := some address } else task }
+
+def futexWait (table : TaskTable) (waiter : FutexWaiter) : TaskTable :=
+  { table with futexes := table.futexes ++ [waiter] }
+
+/-- Whether a wake of the word, with this mask, is for `waiter`. -/
+def futexAsked (space address bitset : Nat) (waiter : FutexWaiter) : Bool :=
+  waiter.space == space && waiter.address == address && waiter.bitset &&& bitset != 0
+
+/-- One waiter on the way through a wake, with who stays and who woke. -/
+def wakeStep (space address bitset count : Nat) (current : List FutexWaiter × List Nat) (waiter : FutexWaiter) :
+    List FutexWaiter × List Nat :=
+  if futexAsked space address bitset waiter && current.2.length < count then (current.1, current.2 ++ [waiter.thread])
+  else (current.1 ++ [waiter], current.2)
+
+/-- Wakes up to `count` of those that wait on the word, the first to wait first. -/
+def futexWake (table : TaskTable) (space address bitset count : Nat) : TaskTable × List Nat :=
+  let (kept, woken) := table.futexes.foldl (wakeStep space address bitset count) ([], [])
+  ({ table with futexes := kept }, woken)
+
+/-- Wakes up to `wake` of those that wait on `source`, and moves up to `move` of the others to `target`. -/
+def futexRequeue (table : TaskTable) (space source target wake move : Nat) : TaskTable × List Nat × Nat :=
+  let (table, woken) := table.futexWake space source (2 ^ 32 - 1) wake
+  let (kept, moved) := table.futexes.foldl (init := (([] : List FutexWaiter), 0)) fun current waiter =>
+    if waiter.space == space && waiter.address == source && current.2 < move then
+      (current.1 ++ [{ waiter with address := target }], current.2 + 1)
+    else (current.1 ++ [waiter], current.2)
+  ({ table with futexes := kept }, woken, moved)
+
+/-- Those whose timeout is up, since nothing else can run. -/
+def timedOut (table : TaskTable) : TaskTable × List Nat :=
+  ({ table with futexes := table.futexes.filter (!·.timed) }, (table.futexes.filter (·.timed)).map (·.thread))
+
 end TaskTable
+
+/-- The convention of a result: the word in the result register, and on MIPS, the register that says whether it is an
+error. Elsewhere an error is the negated number. -/
+def syscallWord (mips : Bool) (width : Nat) : Except Nat Nat → Nat × Option Nat
+  | .ok value => (value, if mips then some 0 else none)
+  | .error errno => if mips then (errno, some 1) else (2 ^ width - errno, none)
 
 /-- What `wait4` is asked for by its first argument, a signed word: any child, one of them, or a process group, which isn't
 modelled. -/
@@ -190,4 +257,4 @@ def scheduleStep (current fuel : Nat) (stopped blocked : Bool) (next : Option Na
   else if fuel == 0 then .done .outOfFuel
   else .run
 
-end Bap.Emu
+end Bap.Tasks

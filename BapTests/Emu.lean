@@ -282,12 +282,12 @@ private def testProcesses : IO Unit := do
     "addi a0, zero, 3", "addi a7, zero, 94", "ecall"]
   let emu ← clean (← Tuned.riscv64 program 0 0)
   Bap.Emu.map emu ⟨0x1000, zeros, rw⟩
-  let _ ← Bap.Emu.serveProcessCalls emu
-  assertEqual "Emu process finishes with its status" (Bap.Emu.ScheduleOutcome.finished (Bap.Emu.exitedStatus 3))
+  let _ ← Bap.Emu.serveTaskCalls emu
+  assertEqual "Emu process finishes with its status" (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.exitedStatus 3))
     (← Bap.Emu.runProcesses emu 3 1000)
   assertBits "Emu waitpid returns the child" (BitVec.ofNat 64 2) (.ok (← Bap.Emu.reg emu (reg "X18")))
   assertBits "Emu parent sees what fork returned" (BitVec.ofNat 64 2) (.ok (← Bap.Emu.reg emu (reg "X9")))
-  assertEqual "Emu waitpid writes the status" (Bap.Emu.exitedStatus 7) (← word emu 0x1000)
+  assertEqual "Emu waitpid writes the status" (Bap.Tasks.exitedStatus 7) (← word emu 0x1000)
   assertBits "Emu child's write stays in the child" (BitVec.ofNat 64 0) (.ok (← Bap.Emu.reg emu (reg "X19")))
   assertBits "Emu second waitpid has no child" (BitVec.ofNat 64 (2 ^ 64 - 10)) (.ok (← Bap.Emu.reg emu (reg "X20")))
   assertBits "Emu getpid is the first process" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg emu (reg "X21")))
@@ -301,18 +301,18 @@ private def testProcesses : IO Unit := do
     "addi a0, zero, 0", "addi a7, zero, 93", "ecall", "beq zero, zero, 0", "beq zero, zero, 0", "beq zero, zero, 0",
     "addi s1, a0, 0", "addi a0, zero, 0", "addi a7, zero, 94", "ecall"]
   let nohang ← clean (← Tuned.riscv64 polling 0 0)
-  let _ ← Bap.Emu.serveProcessCalls nohang
+  let _ ← Bap.Emu.serveTaskCalls nohang
   let _ ← Bap.Emu.runProcesses nohang 100 1000
   assertBits "Emu WNOHANG returns 0 while the child runs" (BitVec.ofNat 64 0) (.ok (← Bap.Emu.reg nohang (reg "X9")))
   -- The host side: a child that loops can be killed, and then waited for.
   let spinning ← clean (← Tuned.riscv64 (← rv "beq zero, zero, 0") 0 0)
   let spinner ← Bap.Emu.fork spinning 0
-  assertEqual "Emu waitpid of a running child" Bap.Emu.WaitResult.running (← Bap.Emu.waitpid spinning (some spinner))
+  assertEqual "Emu waitpid of a running child" Bap.Tasks.WaitResult.running (← Bap.Emu.waitpid spinning (some spinner))
   assertEqual "Emu parent of a fork" [(1, 0), (spinner, 1)] ((← Bap.Emu.tasks spinning).map fun task => (task.tid, task.parent))
   Bap.Emu.kill spinning spinner 9
-  assertEqual "Emu waitpid of a killed child" (Bap.Emu.WaitResult.exited spinner (Bap.Emu.signaledStatus 9))
+  assertEqual "Emu waitpid of a killed child" (Bap.Tasks.WaitResult.exited spinner (Bap.Tasks.signaledStatus 9))
     (← Bap.Emu.waitpid spinning (some spinner))
-  assertEqual "Emu waitpid after the report" Bap.Emu.WaitResult.noChild (← Bap.Emu.waitpid spinning (some spinner))
+  assertEqual "Emu waitpid after the report" Bap.Tasks.WaitResult.noChild (← Bap.Emu.waitpid spinning (some spinner))
   -- A child that faults ends with SIGSEGV, and its parent goes on.
   let faulting ← asm [
     "addi a7, zero, 220", "addi a0, zero, 17", "addi a1, zero, 0", "ecall",
@@ -321,16 +321,16 @@ private def testProcesses : IO Unit := do
     "addi a0, zero, 0", "addi a7, zero, 94", "ecall"]
   let faults ← clean (← Tuned.riscv64 faulting 0 0)
   Bap.Emu.map faults ⟨0x1000, zeros, rw⟩
-  let _ ← Bap.Emu.serveProcessCalls faults
-  assertEqual "Emu parent of a child that faults finishes" (Bap.Emu.ScheduleOutcome.finished 0) (← Bap.Emu.runProcesses faults 5 1000)
-  assertEqual "Emu fault is SIGSEGV" (Bap.Emu.signaledStatus 11) (← word faults 0x1000)
+  let _ ← Bap.Emu.serveTaskCalls faults
+  assertEqual "Emu parent of a child that faults finishes" (Bap.Tasks.ScheduleOutcome.finished 0) (← Bap.Emu.runProcesses faults 5 1000)
+  assertEqual "Emu fault is SIGSEGV" (Bap.Tasks.signaledStatus 11) (← word faults 0x1000)
   -- Waiting for a child that is stopped for good is a deadlock.
   let waiting ← asm [
     "addi a7, zero, 220", "addi a0, zero, 17", "addi a1, zero, 0", "ecall",
     "addi a0, zero, -1", "addi a1, zero, 0", "addi a2, zero, 0", "addi a3, zero, 0", "addi a7, zero, 260", "ecall",
     "addi a0, zero, 0", "addi a7, zero, 94", "ecall"]
   let blocked ← clean (← Tuned.riscv64 waiting 0 0)
-  let _ ← Bap.Emu.serveProcessCalls blocked
+  let _ ← Bap.Emu.serveTaskCalls blocked
   let stopChild ← IO.mkRef true
   let _ ← Bap.Emu.onCode blocked (16, 16) fun current _ => do
     if (← Bap.Emu.pid current) != 1 && (← stopChild.get) then
@@ -340,7 +340,7 @@ private def testProcesses : IO Unit := do
   | .stopped id => assertEqual "Emu a hook stops the child" 2 id
   | outcome => throw <| IO.userError s!"expected a stopped child, got {repr outcome}"
   Bap.Emu.switchThread blocked 1
-  assertEqual "Emu a child stopped for good is a deadlock" (Bap.Emu.ScheduleOutcome.deadlock [1]) (← Bap.Emu.runProcesses blocked 1 100)
+  assertEqual "Emu a child stopped for good is a deadlock" (Bap.Tasks.ScheduleOutcome.deadlock [1]) (← Bap.Emu.runProcesses blocked 1 100)
   -- A thread of a forked process shares that process's memory, and not its parent's. It is a task like any other.
   let threaded ← clean (← Tuned.riscv64 (← asm ["addi t0, t0, 1", "beq zero, zero, -4"]) 0 0)
   Bap.Emu.map threaded ⟨0x1000, zeros, rw⟩
@@ -378,9 +378,9 @@ private def testProcesses : IO Unit := do
     "addi a0, zero, 0", "addi a7, zero, 94", "ecall"]
   let lastThread ← clean (← Tuned.riscv64 leaderExits 0 0)
   Bap.Emu.map lastThread ⟨0x1000, zeros, rw⟩
-  let _ ← Bap.Emu.serveProcessCalls lastThread
-  assertEqual "Emu parent of a threaded child finishes" (Bap.Emu.ScheduleOutcome.finished 0) (← Bap.Emu.runProcesses lastThread 2 2000)
-  assertEqual "Emu the status of a process is its leader's" (Bap.Emu.exitedStatus 5) (← word lastThread 0x1000)
+  let _ ← Bap.Emu.serveTaskCalls lastThread
+  assertEqual "Emu parent of a threaded child finishes" (Bap.Tasks.ScheduleOutcome.finished 0) (← Bap.Emu.runProcesses lastThread 2 2000)
+  assertEqual "Emu the status of a process is its leader's" (Bap.Tasks.exitedStatus 5) (← word lastThread 0x1000)
   -- Tasks of a forked space in a parallel round: each writes its own byte. Both thread writes are in the space, and in the
   -- memory of the state of each, and the first process has neither.
   let rounds ← clean (← Tuned.riscv64 (← asm ["sb a0, 0(a1)", "beq zero, zero, 0"]) 0 0)
@@ -410,6 +410,62 @@ private def testProcesses : IO Unit := do
   assertEqual "Emu round: the fork doesn't have the first's write" 0 (← byteIn inSpace 0x1010)
   assertEqual "Emu round: the first has its write" 1 (← byteIn 1 0x1010)
   assertEqual "Emu round: the first doesn't have the fork's" 0 (← byteIn 1 0x1000)
+  -- pthread_create and pthread_join, as libc makes them of system calls: a stack from mmap, clone with the flags of a thread,
+  -- and a futex on the word that the exit of the thread clears. In each order: the thread may be over before the join starts.
+  let joining ← asm [
+    "addi a7, zero, 222", "addi a0, zero, 0", "lui a1, 4", "addi a2, zero, 3", "addi a3, zero, 0x22", "addi a4, zero, -1",
+    "addi a5, zero, 0", "ecall",
+    "addi s1, a0, 0", "lui t0, 4", "add a1, s1, t0",
+    "lui a0, 0x1210", "addi a0, a0, 0x100", "addi a2, zero, 0", "addi a3, zero, 0", "lui a4, 1", "addi a7, zero, 220", "ecall",
+    "bne a0, zero, 32",
+    "addi sp, sp, -8", "sd a2, 0(sp)", "addi t0, zero, 77", "lui t1, 1", "sw t0, 8(t1)", "addi a7, zero, 93", "ecall",
+    "addi s2, a0, 0",
+    "lui a0, 1", "lw a2, 0(a0)", "beq a2, zero, 24",
+    "addi a1, zero, 128", "addi a3, zero, 0", "addi a7, zero, 98", "ecall", "beq zero, zero, -28",
+    "lui t1, 1", "lw s3, 8(t1)", "lw s4, 0(t1)",
+    "addi a0, zero, 0", "addi a7, zero, 94", "ecall"]
+  for quantum in [1, 2, 3, 5, 8, 13, 21, 100] do
+    let pthreads ← clean (← Tuned.riscv64 joining 0 0)
+    Bap.Emu.map pthreads ⟨0x1000, zeros, rw⟩
+    let _ ← Bap.Emu.serveTaskCalls pthreads
+    assertEqual s!"Emu pthread program finishes, quantum {quantum}" (Bap.Tasks.ScheduleOutcome.finished 0) (← Bap.Emu.runProcesses pthreads quantum 2000)
+    assertBits s!"Emu clone returns the thread, quantum {quantum}" (BitVec.ofNat 64 2) (.ok (← Bap.Emu.reg pthreads (reg "X18")))
+    assertBits s!"Emu join sees what the thread wrote, quantum {quantum}" (BitVec.ofNat 64 77) (.ok (← Bap.Emu.reg pthreads (reg "X19")))
+    assertBits s!"Emu the exit of a thread clears its id, quantum {quantum}" (BitVec.ofNat 64 0) (.ok (← Bap.Emu.reg pthreads (reg "X20")))
+  -- A word that isn't what the caller thinks is EAGAIN, and a wait that nothing can end is a deadlock unless it has a timeout.
+  let futexing (timeout : Nat) (expected : Nat) : IO ByteArray := asm [
+    "lui a0, 1", "addi a1, zero, 128", s!"addi a2, zero, {expected}", s!"addi a3, zero, {timeout}", "addi a7, zero, 98", "ecall",
+    "addi s1, a0, 0", "addi a0, zero, 0", "addi a7, zero, 94", "ecall"]
+  let oneFutex (timeout expected : Nat) : IO (Bap.Emu.Emu × Bap.Tasks.ScheduleOutcome) := do
+    let emu ← clean (← Tuned.riscv64 (← futexing timeout expected) 0 0)
+    Bap.Emu.map emu ⟨0x1000, zeros, rw⟩
+    let _ ← Bap.Emu.serveTaskCalls emu
+    let outcome ← Bap.Emu.runProcesses emu 4 200
+    pure (emu, outcome)
+  let (changed, changedOutcome) ← oneFutex 0 5
+  assertEqual "Emu futex of another value goes on" (Bap.Tasks.ScheduleOutcome.finished 0) changedOutcome
+  assertBits "Emu futex of another value is EAGAIN" (BitVec.ofNat 64 (2 ^ 64 - 11)) (.ok (← Bap.Emu.reg changed (reg "X9")))
+  let (_, stuck) ← oneFutex 0 0
+  assertEqual "Emu futex that nothing wakes is a deadlock" (Bap.Tasks.ScheduleOutcome.deadlock [1]) stuck
+  let (timedEmu, timed) ← oneFutex 16 0
+  assertEqual "Emu futex with a timeout goes on" (Bap.Tasks.ScheduleOutcome.finished 0) timed
+  assertBits "Emu futex with a timeout is ETIMEDOUT" (BitVec.ofNat 64 (2 ^ 64 - 110)) (.ok (← Bap.Emu.reg timedEmu (reg "X9")))
+  -- The table: the first to wait wakes first, no more than asked, and only those of the word and of the space.
+  let waiter (thread space address : Nat) : Bap.Tasks.FutexWaiter := { thread, space, address, bitset := 2 ^ 32 - 1 }
+  let table : Bap.Tasks.TaskTable := { futexes := [waiter 3 1 0x10, waiter 4 2 0x10, waiter 5 1 0x20, waiter 6 1 0x10] }
+  assertEqual "Emu futex wakes in order and no more than asked" [3] (table.futexWake 1 0x10 (2 ^ 32 - 1) 1).2
+  assertEqual "Emu futex wakes only its word in its space" [3, 6] (table.futexWake 1 0x10 (2 ^ 32 - 1) 9).2
+  let (requeued, woken, moved) := table.futexRequeue 1 0x10 0x20 1 1
+  assertEqual "Emu futex requeue wakes one" [3] woken
+  assertEqual "Emu futex requeue moves one" 1 moved
+  assertEqual "Emu futex requeue leaves it on the other word" [5, 6] (requeued.futexWake 1 0x20 (2 ^ 32 - 1) 9).2
+  -- A task that is blocked stays so across a checkpoint, with what it needs to wake.
+  let (blockedEmu, _) ← oneFutex 0 0
+  Bap.Emu.save blockedEmu "native/build/emu-task-checkpoint.bin"
+  let restored ← clean (← Tuned.riscv64 (← futexing 0 0) 0 0)
+  Bap.Emu.map restored ⟨0x1000, zeros, rw⟩
+  Bap.Emu.load restored "native/build/emu-task-checkpoint.bin"
+  assertEqual "Emu checkpoint keeps who waits on a futex" [1] ((← restored.taskTable.get).futexes.map (·.thread))
   -- x86-64: the child sees 0 in RAX, not RDI, and its parent the child.
   let x86 (text : String) := LLVM.assemble "x86_64" text
   let forking := (← x86 "movq $57, %rax") ++ (← x86 "movq $5, %rdi") ++ (← x86 "syscall") ++ (← x86 "movq %rax, %rbx") ++
@@ -417,9 +473,9 @@ private def testProcesses : IO Unit := do
   let intel ← Bap.Emu.x86_64 forking 0 0
   for name in ["RAX", "RBX", "RDI", "RSI", "RDX", "R10", "R8", "R9"] do
     Bap.Emu.setReg intel ⟨name, .imm 64, 0, false⟩ (.bits (BitVec.ofNat 64 0))
-  let _ ← Bap.Emu.serveProcessCalls intel
+  let _ ← Bap.Emu.serveTaskCalls intel
   let exited ← Bap.Emu.runProcesses intel 2 100
-  assertEqual "Emu x86-64 parent exits with the child's id" (Bap.Emu.ScheduleOutcome.finished (Bap.Emu.exitedStatus 2)) exited
+  assertEqual "Emu x86-64 parent exits with the child's id" (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.exitedStatus 2)) exited
   let rbx : Bap.Var := ⟨"RBX", .imm 64, 0, false⟩
   assertBits "Emu x86-64 parent gets the child" (BitVec.ofNat 64 2) (.ok (← Bap.Emu.reg intel rbx))
   -- The child's side, stopped before anything else changes its registers.

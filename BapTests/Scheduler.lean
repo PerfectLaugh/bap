@@ -23,13 +23,15 @@ def run : IO Unit := do
   assertEqual "exploring chooses unvisited" (some 1) (Scheduler.exploring.next [0, 1] 0 0 [0])
   assertEqual "wandering is deterministic" (Scheduler.wandering.next [0, 1, 2] 0 4 [])
     (Scheduler.wandering.next [0, 1, 2] 0 4 [])
-  let (machine, id) := Machine.newMachine {}
+  let (machine, id) ← match Machine.clone {} with
+    | .ok result => pure result
+    | .error error => throw <| IO.userError error
   let machine ← modify machine fun inst => { inst with state := { env := [(x, .bits (BitVec.ofNat 64 40))] } }
   let machine ← match machine.switch id with
     | .ok machine => pure machine
     | .error error => throw <| IO.userError error
   let machine ← modify machine fun inst => { inst with state := { env := [(x, .bits (BitVec.ofNat 64 41))] } }
-  let machine ← match machine.switch 0 with
+  let machine ← match machine.switch 1 with
     | .ok machine => pure machine
     | .error error => throw <| IO.userError error
   let program : Bil.Program := [.move y (.bin .add (.var x) (int 1)), .jmp (.var y)]
@@ -38,11 +40,42 @@ def run : IO Unit := do
   | .ok (_, results) =>
     match results with
     | [(firstId, .jump first), (secondId, .jump second)] =>
-      assertEqual "round-robin first machine" 1 firstId
+      assertEqual "round-robin first machine" id firstId
       assertEqual "round-robin first result" 42 first.toNat
-      assertEqual "round-robin second machine" 0 secondId
+      assertEqual "round-robin second machine" 1 secondId
       assertEqual "round-robin second result" 41 second.toNat
     | _ => throw <| IO.userError "unexpected scheduler results"
+  -- A parent that waits runs after its child, and finds its status; a task in the same space is another process.
+  let (waiting, child) ← match Machine.clone {} with
+    | .ok result => pure result
+    | .error error => throw <| IO.userError error
+  let waiting := waiting.blockInWait (some child)
+  assertEqual "a task that waits isn't runnable" [child] waiting.runnable
+  match Scheduler.runAll waiting {} Scheduler.roundRobin [] with
+  | .error error => throw <| IO.userError error
+  | .ok (after, order) =>
+    assertEqual "a parent runs after the child it waits for" [child, 1] (order.map (·.1))
+    assertEqual "a parent finds the status of its child" [(1, Bap.Tasks.WaitResult.exited child (Bap.Tasks.exitedStatus 0))] after.waited
+    assertEqual "a reported child is gone" [1] (after.insts.map (·.id))
+  let (blocked, _) ← match Machine.clone {} with
+    | .ok result => pure result
+    | .error error => throw <| IO.userError error
+  let blocked := (blocked.blockInWait (some 99))
+  assertEqual "no such child wakes with nothing" [1] ((Machine.settle blocked).waited.map (·.1))
+  let (sharing, sibling) ← match Machine.clone {} (shareMemory := true) (sameGroup := true) with
+    | .ok result => pure result
+    | .error error => throw <| IO.userError error
+  assertEqual "a thread is in its process" [(1, 1), (sibling, 1)] (sharing.tasks.tasks.map fun task => (task.tid, task.group))
+  assertEqual "a thread is in its space" (sharing.tasks.spaceOf 1) (sharing.tasks.spaceOf sibling)
+  let mem : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let filled ← modify sharing fun inst =>
+    { inst with state := { env := [(mem, .memory (Bap.Memory.empty 64))] } }
+  match Machine.step filled {} (.move mem (.store (.var mem) (int 0x10) (int 7) .little 8)) with
+  | .error error => throw <| IO.userError error
+  | .ok (after, _) =>
+    match after.insts.find? (·.id == sibling) with
+    | some thread => assertEqual "a thread sees what its process writes" 7 (Bap.Memory.readByte thread.memory.cells (BitVec.ofNat 64 0x10)).toNat
+    | none => throw <| IO.userError "the thread is gone"
   let bytes : ByteArray := ByteArray.mk #[1, 2, 3]
   let original ← match Primus.Memory.map Primus.Memory.empty 0x1000 bytes rw with
     | .ok memory => pure memory

@@ -6,7 +6,7 @@ import Bap.Emu.Project
 import Bap.Emu.Jni
 import Bap.Emu.CoreProofs
 import Bap.Emu.ObserveProofs
-import Bap.Emu.TaskProofs
+import Bap.Proofs.Tasks
 import Std.Data.String.ToNat
 
 open Lean Elab Command in
@@ -1537,7 +1537,7 @@ open_private Bap.Emu.Checkpoint Bap.Emu encodeBinaryUnchecked fitsWord pendingFi
   putBytes putByte natBytes putNat putBool putText putPendingBin putSkipBin putTypBin putCellsBin putValueBin putBindingBin
   putRegionBin putThreadBin putProcessBin takeBytes getByte getNat getBool getText getList getList.loop getPendingBin getSkipBin
   getTypBin getValueBin getBindingBin getRegionBin getThreadBin getProcessBin binaryMagic
-  putTask putWaiter getTask getWaiter taskFits waiterFits
+  putTask putWaiter putFutex getTask getWaiter getFutex taskFits waiterFits futexFits
 
 /-- `encoded` sits in `data` at `offset`. -/
 def At (data : ByteArray) (offset : Nat) (encoded : ByteArray) : Prop :=
@@ -2033,22 +2033,25 @@ theorem getProcess_decodes (process : ThreadId × List Bap.Emu.Region) (h : Proc
   simp only [ByteArray.size_append, Nat.add_assoc, List.map_id] at d1 d2
   simp only [getProcessBin, bind, Except.bind, d1, d2, encProcess, ByteArray.size_append]
 
-private def encTask (task : Task) : ByteArray :=
-  natBytes task.tid ++ natBytes task.group ++ natBytes task.parent ++ natBytes task.space ++ encSkip task.status
+private def encTask (task : Tasks.Entry) : ByteArray :=
+  natBytes task.tid ++ natBytes task.group ++ natBytes task.parent ++ natBytes task.space ++ encSkip task.status ++
+    encSkip task.clearTid
 
 /-- A task representable in the binary format. -/
-def TaskSafe (task : Task) : Prop :=
-  task.tid < 2 ^ 64 ∧ task.group < 2 ^ 64 ∧ task.parent < 2 ^ 64 ∧ task.space < 2 ^ 64 ∧ SkipSafe task.status
+def TaskSafe (task : Tasks.Entry) : Prop :=
+  task.tid < 2 ^ 64 ∧ task.group < 2 ^ 64 ∧ task.parent < 2 ^ 64 ∧ task.space < 2 ^ 64 ∧ SkipSafe task.status ∧
+    SkipSafe task.clearTid
 
-private theorem data_putTask (writer : Writer) (task : Task) :
+private theorem data_putTask (writer : Writer) (task : Tasks.Entry) :
     Writer.data (putTask writer task) = Writer.data writer ++ encTask task := by
   simp only [putTask, encTask, data_putSkip, data_putNat, ByteArray.append_assoc]
 
-theorem getTask_decodes (task : Task) (h : TaskSafe task) : Decodes getTask (encTask task) task := by
+theorem getTask_decodes (task : Tasks.Entry) (h : TaskSafe task) : Decodes getTask (encTask task) task := by
   intro data offset hat
-  obtain ⟨tid, group, parent, space, status⟩ := task
-  obtain ⟨h1, h2, h3, h4, h5⟩ := h
-  obtain ⟨hl, hs⟩ := At.split hat
+  obtain ⟨tid, group, parent, space, status, clearTid⟩ := task
+  obtain ⟨h1, h2, h3, h4, h5, h6⟩ := h
+  obtain ⟨hl, hc⟩ := At.split hat
+  obtain ⟨hl, hs⟩ := At.split hl
   obtain ⟨hl, hsp⟩ := At.split hl
   obtain ⟨hl, hp⟩ := At.split hl
   obtain ⟨ht, hg⟩ := At.split hl
@@ -2057,21 +2060,50 @@ theorem getTask_decodes (task : Task) (h : TaskSafe task) : Decodes getTask (enc
   have d3 := natBytes_decodes parent h3 data _ hp
   have d4 := natBytes_decodes space h4 data _ hsp
   have d5 := getSkip_decodes status h5 data _ hs
-  simp only [ByteArray.size_append, Nat.add_assoc] at d1 d2 d3 d4 d5
-  simp only [getTask, bind, Except.bind, d1, d2, d3, d4, d5, encTask, ByteArray.size_append, Nat.add_assoc]
+  have d6 := getSkip_decodes clearTid h6 data _ hc
+  simp only [ByteArray.size_append, Nat.add_assoc] at d1 d2 d3 d4 d5 d6
+  simp only [getTask, bind, Except.bind, d1, d2, d3, d4, d5, d6, encTask, ByteArray.size_append, Nat.add_assoc]
 
-private def encWaiter (waiter : Waiter) : ByteArray :=
+private def encFutex (waiter : Tasks.FutexWaiter) : ByteArray :=
+  natBytes waiter.thread ++ natBytes waiter.space ++ natBytes waiter.address ++ natBytes waiter.bitset ++
+    byteEnc (if waiter.timed then 1 else 0)
+
+/-- A waiter on a futex representable in the binary format. -/
+def FutexSafe (waiter : Tasks.FutexWaiter) : Prop :=
+  waiter.thread < 2 ^ 64 ∧ waiter.space < 2 ^ 64 ∧ waiter.address < 2 ^ 64 ∧ waiter.bitset < 2 ^ 64
+
+private theorem data_putFutex (writer : Writer) (waiter : Tasks.FutexWaiter) :
+    Writer.data (putFutex writer waiter) = Writer.data writer ++ encFutex waiter := by
+  simp only [putFutex, encFutex, data_putBool, data_putNat, ByteArray.append_assoc]
+
+theorem getFutex_decodes (waiter : Tasks.FutexWaiter) (h : FutexSafe waiter) : Decodes getFutex (encFutex waiter) waiter := by
+  intro data offset hat
+  obtain ⟨thread, space, address, bitset, timed⟩ := waiter
+  obtain ⟨h1, h2, h3, h4⟩ := h
+  obtain ⟨hl, hb⟩ := At.split hat
+  obtain ⟨hl, hm⟩ := At.split hl
+  obtain ⟨hl, ha⟩ := At.split hl
+  obtain ⟨ht, hs⟩ := At.split hl
+  have d1 := natBytes_decodes thread h1 data offset ht
+  have d2 := natBytes_decodes space h2 data _ hs
+  have d3 := natBytes_decodes address h3 data _ ha
+  have d4 := natBytes_decodes bitset h4 data _ hm
+  have d5 := getBool_decodes timed data _ hb
+  simp only [ByteArray.size_append, natBytes_size, byteEnc_size, Nat.add_assoc] at d1 d2 d3 d4 d5
+  simp only [getFutex, bind, Except.bind, d1, d2, d3, d4, d5, encFutex, ByteArray.size_append, natBytes_size, byteEnc_size, Nat.add_assoc]
+
+private def encWaiter (waiter : Tasks.Waiter) : ByteArray :=
   natBytes waiter.thread ++ encSkip waiter.target ++ encSkip waiter.statusAddress
 
 /-- A waiter representable in the binary format. -/
-def WaiterSafe (waiter : Waiter) : Prop :=
+def WaiterSafe (waiter : Tasks.Waiter) : Prop :=
   waiter.thread < 2 ^ 64 ∧ SkipSafe waiter.target ∧ SkipSafe waiter.statusAddress
 
-private theorem data_putWaiter (writer : Writer) (waiter : Waiter) :
+private theorem data_putWaiter (writer : Writer) (waiter : Tasks.Waiter) :
     Writer.data (putWaiter writer waiter) = Writer.data writer ++ encWaiter waiter := by
   simp only [putWaiter, encWaiter, data_putSkip, data_putNat, ByteArray.append_assoc]
 
-theorem getWaiter_decodes (waiter : Waiter) (h : WaiterSafe waiter) : Decodes getWaiter (encWaiter waiter) waiter := by
+theorem getWaiter_decodes (waiter : Tasks.Waiter) (h : WaiterSafe waiter) : Decodes getWaiter (encWaiter waiter) waiter := by
   intro data offset hat
   obtain ⟨thread, target, statusAddress⟩ := waiter
   obtain ⟨h1, h2, h3⟩ := h
@@ -2102,6 +2134,8 @@ structure SnapshotSafe (snapshot : Snapshot) : Prop where
   table : ∀ task ∈ snapshot.table.tasks, TaskSafe task
   waitersLength : snapshot.table.waiters.length < 2 ^ 64
   waiters : ∀ waiter ∈ snapshot.table.waiters, WaiterSafe waiter
+  futexesLength : snapshot.table.futexes.length < 2 ^ 64
+  futexes : ∀ waiter ∈ snapshot.table.futexes, FutexSafe waiter
 
 private def encBody (snapshot : Snapshot) : ByteArray :=
   natBytes snapshot.pc ++ byteEnc (if snapshot.stopped then 1 else 0) ++
@@ -2111,11 +2145,14 @@ private def encBody (snapshot : Snapshot) : ByteArray :=
     natBytes snapshot.currentThread ++ natBytes snapshot.nextThread ++ encPending snapshot.pending ++
     (natBytes snapshot.processMemory.length ++ body encProcess snapshot.processMemory) ++ encSkip snapshot.skip ++
     (natBytes snapshot.table.tasks.length ++ body encTask snapshot.table.tasks) ++
-    (natBytes snapshot.table.waiters.length ++ body encWaiter snapshot.table.waiters)
+    (natBytes snapshot.table.waiters.length ++ body encWaiter snapshot.table.waiters) ++
+    (natBytes snapshot.table.futexes.length ++ body encFutex snapshot.table.futexes)
 
 private theorem encodeBinary_eq (snapshot : Snapshot) :
     encodeBinaryUnchecked snapshot = binaryMagic ++ encBody snapshot := by
   simp only [encodeBinaryUnchecked, encBody]
+  rw [foldl_writer _ encFutex data_putFutex]
+  simp only [data_putNat]
   rw [foldl_writer _ encWaiter data_putWaiter]
   simp only [data_putNat]
   rw [foldl_writer _ encTask data_putTask]
@@ -2151,9 +2188,10 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
   simp only [decodeBinarySnapshot, hmagic, hne, Bool.false_eq_true, ↓reduceIte]
   clear hmagic hdata hne
   generalize binaryMagic.size = start at hat hsize ⊢
-  obtain ⟨⟨env⟩, pc, regions, stopped, threads, current, next, pending, processes, skip, ⟨table, waiters⟩⟩ := snapshot
+  obtain ⟨⟨env⟩, pc, regions, stopped, threads, current, next, pending, processes, skip, ⟨table, waiters, futexes⟩⟩ := snapshot
   simp only [encBody] at hat hsize
-  obtain ⟨hup, h12t⟩ := At.split hat
+  obtain ⟨hup, h13t⟩ := At.split hat
+  obtain ⟨hup, h12t⟩ := At.split hup
   obtain ⟨hup, h11⟩ := At.split hup
   obtain ⟨h89, h10⟩ := At.split hup
   obtain ⟨h8, h9⟩ := At.split h89
@@ -2182,7 +2220,9 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
     fun t ht => getTask_decodes t (h.table t ht)
   have d12 := getList_decodes (decode := getWaiter) encWaiter id waiters h.waitersLength h12t
     fun w hw => getWaiter_decodes w (h.waiters w hw)
-  simp only [ByteArray.size_append, natBytes_size, byteEnc_size, Nat.add_assoc, List.map_id] at d1 d2 d3 d4 d5 d6 d7 d8 d9 d10 d11 d12 hsize
+  have d13 := getList_decodes (decode := getFutex) encFutex id futexes h.futexesLength h13t
+    fun w hw => getFutex_decodes w (h.futexes w hw)
+  simp only [ByteArray.size_append, natBytes_size, byteEnc_size, Nat.add_assoc, List.map_id] at d1 d2 d3 d4 d5 d6 d7 d8 d9 d10 d11 d12 d13 hsize
   rw [bind_ok_eq d1]
   dsimp only
   rw [bind_ok_eq d2]
@@ -2206,6 +2246,8 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
   rw [bind_ok_eq d11]
   dsimp only
   rw [bind_ok_eq d12]
+  dsimp only
+  rw [bind_ok_eq d13]
   dsimp only
   simp only [hsize, bne_self_eq_false, Bool.false_eq_true, ↓reduceIte]
   rfl
@@ -2247,26 +2289,33 @@ private theorem fits_process {process : ThreadId × List Bap.Emu.Region} (h : pr
   obtain ⟨⟨h1, h2⟩, h3⟩ := h
   exact ⟨by simpa [fitsWord] using h1, by simpa [fitsWord] using h2, fun r hr => fits_region (h3 r hr)⟩
 
-private theorem fits_task {task : Task} (h : taskFits task = true) : TaskSafe task := by
+private theorem fits_task {task : Tasks.Entry} (h : taskFits task = true) : TaskSafe task := by
   simp only [taskFits, Bool.and_eq_true] at h
-  obtain ⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩ := h
+  obtain ⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩ := h
   exact ⟨by simpa [fitsWord] using h1, by simpa [fitsWord] using h2, by simpa [fitsWord] using h3,
-    by simpa [fitsWord] using h4, fits_skip h5⟩
+    by simpa [fitsWord] using h4, fits_skip h5, fits_skip h6⟩
 
-private theorem fits_waiter {waiter : Waiter} (h : waiterFits waiter = true) : WaiterSafe waiter := by
+private theorem fits_futex {waiter : Tasks.FutexWaiter} (h : futexFits waiter = true) : FutexSafe waiter := by
+  simp only [futexFits, Bool.and_eq_true] at h
+  obtain ⟨⟨⟨h1, h2⟩, h3⟩, h4⟩ := h
+  exact ⟨by simpa [fitsWord] using h1, by simpa [fitsWord] using h2, by simpa [fitsWord] using h3,
+    by simpa [fitsWord] using h4⟩
+
+private theorem fits_waiter {waiter : Tasks.Waiter} (h : waiterFits waiter = true) : WaiterSafe waiter := by
   simp only [waiterFits, Bool.and_eq_true] at h
   obtain ⟨⟨h1, h2⟩, h3⟩ := h
   exact ⟨by simpa [fitsWord] using h1, fits_skip h2, fits_skip h3⟩
 
 private theorem fits_snapshot {snapshot : Snapshot} (h : binaryFits snapshot = true) : SnapshotSafe snapshot := by
   simp only [binaryFits, Bool.and_eq_true, List.all_eq_true] at h
-  obtain ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩, h10⟩, h11⟩, h12⟩, h13⟩, h14⟩, h15⟩, h16⟩, h17⟩ := h
+  obtain ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩, h10⟩, h11⟩, h12⟩, h13⟩, h14⟩, h15⟩, h16⟩, h17⟩, h18⟩, h19⟩ := h
   exact ⟨by simpa [fitsWord] using h1, by simpa [fitsWord] using h2, fun r hr => fits_region (h3 r hr),
     by simpa [fitsWord] using h4, fun b hb => fits_binding (h5 b hb), by simpa [fitsWord] using h6,
     fun t ht => fits_thread (h7 t ht), by simpa [fitsWord] using h8, by simpa [fitsWord] using h9, fits_pending h10,
     by simpa [fitsWord] using h11, fun p hp => fits_process (h12 p hp), fits_skip h13,
     by simpa [fitsWord] using h14, fun t ht => fits_task (h15 t ht),
-    by simpa [fitsWord] using h16, fun w hw => fits_waiter (h17 w hw)⟩
+    by simpa [fitsWord] using h16, fun w hw => fits_waiter (h17 w hw),
+    by simpa [fitsWord] using h18, fun w hw => fits_futex (h19 w hw)⟩
 
 private theorem encode_rejects {snapshot : Snapshot} (h : binaryFits snapshot = false) :
     ∃ error, encodeBinarySnapshot snapshot = .error error :=

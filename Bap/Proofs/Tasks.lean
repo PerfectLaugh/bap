@@ -1,11 +1,11 @@
-import Bap.Emu.Task
+import Bap.Tasks
 
-namespace Bap.Emu.TaskTable
+namespace Bap.Tasks.TaskTable
 
 /-! `poll` says what `waitpid` may say and nothing else, a process isn't over while a thread of it runs, what `exitGroup`
 leaves is what a parent finds, a child is reported once, and no child is left with a parent that is gone. -/
 
-private theorem report_some {table : TaskTable} {leader : Task} {pid status : Nat}
+private theorem report_some {table : TaskTable} {leader : Entry} {pid status : Nat}
     (h : table.report leader = some (pid, status)) :
     table.alone leader = true ∧ leader.tid = pid ∧ leader.status = some status := by
   simp only [report] at h
@@ -39,7 +39,7 @@ theorem poll_exited {table : TaskTable} {parent : Nat} {target : Option Nat} {pi
   · split at h <;> cases h
 
 /-- A process isn't over while another of its tasks runs. -/
-theorem poll_thread_left {table : TaskTable} {parent : Nat} {target : Option Nat} {pid status : Nat} {other : Task}
+theorem poll_thread_left {table : TaskTable} {parent : Nat} {target : Option Nat} {pid status : Nat} {other : Entry}
     (hother : other ∈ table.tasks) (hgroup : other.group = pid) (htid : other.tid ≠ pid) (hlive : other.status = none) :
     table.poll parent target ≠ .exited pid status := by
   intro h
@@ -93,18 +93,18 @@ theorem poll_running {table : TaskTable} {parent : Nat} {target : Option Nat}
         rw [List.findSome?_eq_none_iff] at hnone
         exact hnone task (List.mem_filter.mpr ⟨hmem, hasked⟩)
 
-@[simp] private theorem exited_tid (group status init : Nat) (task : Task) : (exited group status init task).tid = task.tid := by
+@[simp] private theorem exited_tid (group status init : Nat) (task : Entry) : (exited group status init task).tid = task.tid := by
   simp only [exited]
   split
   · rfl
   · split <;> rfl
 
-private theorem asked_other {parent pid : Nat} {task : Task} (h : task.tid ≠ pid) : asked parent (some pid) task = false := by
+private theorem asked_other {parent pid : Nat} {task : Entry} (h : task.tid ≠ pid) : asked parent (some pid) task = false := by
   simp [asked, h]
 
-private theorem filter_exited {group status init parent : Nat} {leader : Task} (hleader : leader.tid = group)
+private theorem filter_exited {group status init parent : Nat} {leader : Entry} (hleader : leader.tid = group)
     (hgroup : leader.group = group) (hparent : leader.parent = parent) :
-    ∀ (tasks : List Task), (tasks.map (·.tid)).Nodup → leader ∈ tasks →
+    ∀ (tasks : List Entry), (tasks.map (·.tid)).Nodup → leader ∈ tasks →
       (tasks.map (exited group status init)).filter (asked parent (some group)) = [{ leader with status := some status }] := by
   intro tasks
   induction tasks with
@@ -133,7 +133,7 @@ private theorem filter_exited {group status init parent : Nat} {leader : Task} (
 
 /-- A parent that waits for a child that has exited finds its status, when the ids of the table are different. -/
 theorem poll_after_exitGroup {table : TaskTable} {pid parent status init : Nat}
-    (hnodup : (table.tasks.map (·.tid)).Nodup) {leader : Task} (hmem : leader ∈ table.tasks)
+    (hnodup : (table.tasks.map (·.tid)).Nodup) {leader : Entry} (hmem : leader ∈ table.tasks)
     (hpid : leader.tid = pid) (hgroup : leader.group = pid) (hparent : leader.parent = parent) :
     (table.exitGroup pid status init).poll parent (some pid) = .exited pid status := by
   have hfilter := filter_exited (status := status) (init := init) hpid hgroup hparent table.tasks hnodup hmem
@@ -175,7 +175,7 @@ theorem exitGroup_reparents (table : TaskTable) {pid status init : Nat} (hinit :
     · next hq => exact hq (by simpa using hparent)
 
 /-- A process that exited leaves no waiter behind. -/
-theorem exitGroup_no_waiter (table : TaskTable) {pid status init : Nat} {task : Task} :
+theorem exitGroup_no_waiter (table : TaskTable) {pid status init : Nat} {task : Entry} :
     ∀ waiter ∈ (table.exitGroup pid status init).waiters, table.find? waiter.thread = some task → task.group ≠ pid := by
   intro waiter hmem hfind
   simp only [exitGroup] at hmem
@@ -184,13 +184,122 @@ theorem exitGroup_no_waiter (table : TaskTable) {pid status init : Nat} {task : 
   simpa using this
 
 /-- A new task has the space it was made with: that of its parent for a thread, and its own for a process. -/
-theorem spaceOf_addTask (table : TaskTable) (task : Task) (hfresh : ∀ other ∈ table.tasks, other.tid ≠ task.tid) :
+theorem spaceOf_addTask (table : TaskTable) (task : Entry) (hfresh : ∀ other ∈ table.tasks, other.tid ≠ task.tid) :
     (table.addTask task).spaceOf task.tid = task.space := by
   have hnone : table.tasks.find? (·.tid == task.tid) = none := by
     rw [List.find?_eq_none]
     intro other hother
     simpa using hfresh other hother
   simp [spaceOf, find?, addTask, List.find?_append, hnone]
+
+private theorem foldl_keeps_woken (space address bitset count : Nat) (waiters : List FutexWaiter)
+    (start : List FutexWaiter × List Nat) {thread : Nat} (h : thread ∈ start.2) :
+    thread ∈ (waiters.foldl (wakeStep space address bitset count) start).2 := by
+  induction waiters generalizing start with
+  | nil => exact h
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    apply ih
+    simp only [wakeStep]
+    split <;> simp [h]
+
+private theorem foldl_keeps_kept (space address bitset count : Nat) (waiters : List FutexWaiter)
+    (start : List FutexWaiter × List Nat) {waiter : FutexWaiter} (h : waiter ∈ start.1) :
+    waiter ∈ (waiters.foldl (wakeStep space address bitset count) start).1 := by
+  induction waiters generalizing start with
+  | nil => exact h
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    apply ih
+    simp only [wakeStep]
+    split <;> simp [h]
+
+private theorem wakeStep_foldl (space address bitset count : Nat) (waiters : List FutexWaiter) :
+    ∀ start : List FutexWaiter × List Nat, start.2.length ≤ count →
+      let result := waiters.foldl (wakeStep space address bitset count) start
+      result.2.length ≤ count ∧
+        (∀ thread ∈ result.2, thread ∈ start.2 ∨
+          ∃ waiter ∈ waiters, waiter.thread = thread ∧ futexAsked space address bitset waiter = true) ∧
+        ∀ waiter ∈ waiters, waiter ∈ result.1 ∨ (waiter.thread ∈ result.2 ∧ futexAsked space address bitset waiter = true) := by
+  induction waiters with
+  | nil =>
+    intro start h
+    exact ⟨h, fun thread hin => Or.inl hin, by simp⟩
+  | cons head tail ih =>
+    intro start h
+    simp only [List.foldl_cons]
+    by_cases hstep : (futexAsked space address bitset head && decide (start.2.length < count)) = true
+    · simp only [wakeStep, hstep, ↓reduceIte]
+      obtain ⟨hasked, hroom⟩ : futexAsked space address bitset head = true ∧ start.2.length < count := by simpa using hstep
+      have hnext := ih (start.1, start.2 ++ [head.thread]) (by simp; omega)
+      obtain ⟨h1, h2, h3⟩ := hnext
+      refine ⟨h1, ?_, ?_⟩
+      · intro thread hin
+        rcases h2 thread hin with hold | ⟨waiter, hw, ht, ha⟩
+        · rcases List.mem_append.mp hold with hs | hn
+          · exact Or.inl hs
+          · simp only [List.mem_singleton] at hn
+            exact Or.inr ⟨head, by simp, hn.symm, hasked⟩
+        · exact Or.inr ⟨waiter, List.mem_cons_of_mem _ hw, ht, ha⟩
+      · intro waiter hw
+        rcases List.mem_cons.mp hw with rfl | htail
+        · refine Or.inr ⟨?_, hasked⟩
+          have hmem : waiter.thread ∈ (start.2 ++ [waiter.thread]) := by simp
+          exact foldl_keeps_woken _ _ _ _ _ _ hmem
+        · exact h3 waiter htail
+    · simp only [wakeStep, hstep]
+      obtain ⟨h1, h2, h3⟩ := ih (start.1 ++ [head], start.2) h
+      refine ⟨h1, ?_, ?_⟩
+      · intro thread hin
+        rcases h2 thread hin with hold | ⟨waiter, hw, ht, ha⟩
+        · exact Or.inl hold
+        · exact Or.inr ⟨waiter, List.mem_cons_of_mem _ hw, ht, ha⟩
+      · intro waiter hw
+        rcases List.mem_cons.mp hw with rfl | htail
+        · have hmem : waiter ∈ start.1 ++ [waiter] := by simp
+          exact Or.inl (foldl_keeps_kept _ _ _ _ _ _ hmem)
+        · exact h3 waiter htail
+
+/-- A wake wakes no more than it was asked to. -/
+theorem futexWake_count (table : TaskTable) (space address bitset count : Nat) :
+    (table.futexWake space address bitset count).2.length ≤ count :=
+  (wakeStep_foldl space address bitset count table.futexes ([], []) (by simp)).1
+
+/-- A wake wakes only those that wait on that word, with a bit of the mask. -/
+theorem futexWake_woken (table : TaskTable) (space address bitset count : Nat) :
+    ∀ thread ∈ (table.futexWake space address bitset count).2,
+      ∃ waiter ∈ table.futexes, waiter.thread = thread ∧ waiter.space = space ∧ waiter.address = address ∧
+        waiter.bitset &&& bitset ≠ 0 := by
+  intro thread hin
+  rcases (wakeStep_foldl space address bitset count table.futexes ([], []) (by simp)).2.1 thread hin with hnil | ⟨waiter, hw, ht, ha⟩
+  · simp at hnil
+  · simp only [futexAsked, Bool.and_eq_true, beq_iff_eq, bne_iff_ne] at ha
+    exact ⟨waiter, hw, ht, ha.1.1, ha.1.2, ha.2⟩
+
+/-- A waiter isn't lost: it stays, or a wake that was for it woke it. -/
+theorem futexWake_kept (table : TaskTable) (space address bitset count : Nat) :
+    ∀ waiter ∈ table.futexes, waiter ∈ (table.futexWake space address bitset count).1.futexes ∨
+      (waiter.thread ∈ (table.futexWake space address bitset count).2 ∧ futexAsked space address bitset waiter = true) :=
+  (wakeStep_foldl space address bitset count table.futexes ([], []) (by simp)).2.2
+
+/-- A process that exited leaves nothing on a futex. -/
+theorem exitGroup_no_futex (table : TaskTable) {pid status init : Nat} {task : Entry} :
+    ∀ waiter ∈ (table.exitGroup pid status init).futexes, table.find? waiter.thread = some task → task.group ≠ pid := by
+  intro waiter hmem hfind
+  simp only [exitGroup] at hmem
+  have := (List.mem_filter.mp hmem).2
+  simp only [hfind] at this
+  simpa using this
+
+/-- A timeout leaves only those that have none, and wakes the others. -/
+theorem timedOut_spec (table : TaskTable) :
+    (∀ waiter ∈ table.timedOut.1.futexes, waiter.timed = false) ∧
+      ∀ waiter ∈ table.futexes, waiter.timed = true → waiter.thread ∈ table.timedOut.2 := by
+  constructor
+  · intro waiter hmem
+    simpa using (List.mem_filter.mp hmem).2
+  · intro waiter hmem htimed
+    exact List.mem_map_of_mem (List.mem_filter.mpr ⟨hmem, htimed⟩)
 
 /-- Settling wakes no waiter that isn't there. -/
 theorem settle_woken_mem (table : TaskTable) :
@@ -222,9 +331,14 @@ theorem settle_woken_mem (table : TaskTable) :
   · simp at hin
   · exact hin
 
-end Bap.Emu.TaskTable
+end Bap.Tasks.TaskTable
 
-namespace Bap.Emu
+namespace Bap.Tasks
+
+/-- An error is the negated number in a word, and on MIPS the number, with the flag up. -/
+theorem syscallWord_error (width errno : Nat) :
+    syscallWord false width (.error errno) = (2 ^ width - errno, none) ∧ syscallWord true width (.error errno) = (errno, some 1) :=
+  ⟨rfl, rfl⟩
 
 /-- What a status says of the code it holds, as `WEXITSTATUS` reads it, and that `WIFEXITED` holds. -/
 theorem exitedStatus_code (code : Nat) : exitedStatus code / 256 = code % 256 ∧ exitedStatus code % 128 = 0 := by
@@ -349,4 +463,4 @@ theorem scheduleStep_finished {current fuel status : Nat} {stopped blocked : Boo
             simp only [ScheduleStep.done.injEq, ScheduleOutcome.finished.injEq] at h
             exact ⟨rfl, rfl, rfl, by simpa using hwait, by rw [h]⟩
 
-end Bap.Emu
+end Bap.Tasks

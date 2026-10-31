@@ -17,7 +17,8 @@ The OCaml and Rust implementation it came from is on the
 - **Analyzes**: control flow, SSA, liveness, dead code, constant propagation, cross references,
   call graphs, backward slicing, taint, strings and decompilation to C-like text.
 - **Emulates** with a JIT, hooks and checkpoints. Tasks follow the Linux model: a thread and a process are tasks that differ
-  in what `clone` shares, with a scheduler and `fork`, `clone`, `waitpid` and `exit` for guests.
+  in what `clone` shares. `runProcesses` schedules them, and `serveTaskCalls` gives guests the system calls of processes and
+  pthreads: `fork`, `clone`, `waitpid`, `exit`, `futex`, `mmap` and others.
 - **Executes symbolically**, solving path conditions with Z3.
 
 ## Building
@@ -101,6 +102,7 @@ trusted or only tested, with file and line. The main items are these:
 |---|---|
 | `Bap/Core`, `Bap/Bil`, `Bap/IR`, `Bap/Graph` | words, memory, BIL and its evaluator, IR and CFG |
 | `Bap/Image`, `Bap/Disasm`, `Bap/Target`, `Bap/LLVM.lean` | loaders, disassembly, lifting |
+| `Bap/Tasks.lean` | tasks, as the emulator and Primus share them |
 | `Bap/Primus`, `semantics/` | the Lisp evaluator, the lifted engine, the semantics of each target |
 | `Bap/Emu.lean`, `Bap/Emu/`, `Bap/Jit.lean` | the emulator and the JIT interface |
 | `Bap/Analysis`, `Bap/Decompile`, `Bap/Symbolic`, `Bap/Project` | analyses, decompiler, symbolic execution, projects |

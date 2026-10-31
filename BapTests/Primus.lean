@@ -607,12 +607,14 @@ def run : IO Unit := do
   assertEqual "Primus fuel exhaustion restores time" initial.time exhausted.machine.time
   assertEqual "Primus fuel exhaustion restores log" initial.log exhausted.machine.log
 
-  let (machines, id) := Machine.newMachine {}
+  let (machines, id) ← match Machine.clone {} with
+    | .ok result => pure result
+    | .error error => throw <| IO.userError error
   let machines ← match machines.switch id with
     | .ok machine => pure machine
     | .error error => throw <| IO.userError error
   let machines ← modify machines fun inst => { inst with state := { env := [(x, .bits (BitVec.ofNat 64 1))] } }
-  let machines ← match machines.switch 0 with
+  let machines ← match machines.switch 1 with
     | .ok machine => pure machine
     | .error error => throw <| IO.userError error
   let machines ← modify machines fun inst => { inst with state := { env := [(x, .bits (BitVec.ofNat 64 2))] } }

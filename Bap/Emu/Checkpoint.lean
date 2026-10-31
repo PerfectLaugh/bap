@@ -82,14 +82,21 @@ private def putProcessBin (writer : Writer) (process : ThreadId × List Region) 
   let writer := putNat writer process.2.length
   process.2.foldl putRegionBin writer
 
-private def putTask (writer : Writer) (task : Task) : Writer :=
+private def putTask (writer : Writer) (task : Tasks.Entry) : Writer :=
   let writer := putNat writer task.tid
   let writer := putNat writer task.group
   let writer := putNat writer task.parent
   let writer := putNat writer task.space
-  putSkipBin writer task.status
+  putSkipBin (putSkipBin writer task.status) task.clearTid
 
-private def putWaiter (writer : Writer) (waiter : Waiter) : Writer :=
+private def putFutex (writer : Writer) (waiter : Tasks.FutexWaiter) : Writer :=
+  let writer := putNat writer waiter.thread
+  let writer := putNat writer waiter.space
+  let writer := putNat writer waiter.address
+  let writer := putNat writer waiter.bitset
+  putBool writer waiter.timed
+
+private def putWaiter (writer : Writer) (waiter : Tasks.Waiter) : Writer :=
   let writer := putNat writer waiter.thread
   let writer := putSkipBin writer waiter.target
   putSkipBin writer waiter.statusAddress
@@ -219,21 +226,30 @@ private def getProcessBin (reader : Reader) : Except String ((ThreadId × List R
   let (regions, reader) ← getList reader getRegionBin
   .ok ((id, regions), reader)
 
-private def getTask (reader : Reader) : Except String (Task × Reader) := do
+private def getTask (reader : Reader) : Except String (Tasks.Entry × Reader) := do
   let (tid, reader) ← getNat reader
   let (group, reader) ← getNat reader
   let (parent, reader) ← getNat reader
   let (space, reader) ← getNat reader
   let (status, reader) ← getSkipBin reader
-  .ok (⟨tid, group, parent, space, status⟩, reader)
+  let (clearTid, reader) ← getSkipBin reader
+  .ok (⟨tid, group, parent, space, status, clearTid⟩, reader)
 
-private def getWaiter (reader : Reader) : Except String (Waiter × Reader) := do
+private def getFutex (reader : Reader) : Except String (Tasks.FutexWaiter × Reader) := do
+  let (thread, reader) ← getNat reader
+  let (space, reader) ← getNat reader
+  let (address, reader) ← getNat reader
+  let (bitset, reader) ← getNat reader
+  let (timed, reader) ← getBool reader
+  .ok (⟨thread, space, address, bitset, timed⟩, reader)
+
+private def getWaiter (reader : Reader) : Except String (Tasks.Waiter × Reader) := do
   let (thread, reader) ← getNat reader
   let (target, reader) ← getSkipBin reader
   let (statusAddress, reader) ← getSkipBin reader
   .ok (⟨thread, target, statusAddress⟩, reader)
 
-private def binaryMagic : ByteArray := "BAPCKPT4".toUTF8
+private def binaryMagic : ByteArray := "BAPCKPT5".toUTF8
 
 private def encodeBinaryUnchecked (snapshot : Snapshot) : ByteArray :=
   let writer := putBytes ⟨binaryMagic⟩ (natBytes snapshot.pc)
@@ -252,7 +268,9 @@ private def encodeBinaryUnchecked (snapshot : Snapshot) : ByteArray :=
   let writer := putNat writer snapshot.table.tasks.length
   let writer := snapshot.table.tasks.foldl putTask writer
   let writer := putNat writer snapshot.table.waiters.length
-  (snapshot.table.waiters.foldl putWaiter writer).data
+  let writer := snapshot.table.waiters.foldl putWaiter writer
+  let writer := putNat writer snapshot.table.futexes.length
+  (snapshot.table.futexes.foldl putFutex writer).data
 
 private def fitsWord (value : Nat) : Bool := value < 2 ^ 64
 
@@ -287,10 +305,14 @@ private def threadFits (context : ThreadContext) : Bool :=
 private def processFits (process : ThreadId × List Region) : Bool :=
   fitsWord process.1 && fitsWord process.2.length && process.2.all regionFits
 
-private def taskFits (task : Task) : Bool :=
-  fitsWord task.tid && fitsWord task.group && fitsWord task.parent && fitsWord task.space && skipFits task.status
+private def taskFits (task : Tasks.Entry) : Bool :=
+  fitsWord task.tid && fitsWord task.group && fitsWord task.parent && fitsWord task.space && skipFits task.status &&
+    skipFits task.clearTid
 
-private def waiterFits (waiter : Waiter) : Bool :=
+private def futexFits (waiter : Tasks.FutexWaiter) : Bool :=
+  fitsWord waiter.thread && fitsWord waiter.space && fitsWord waiter.address && fitsWord waiter.bitset
+
+private def waiterFits (waiter : Tasks.Waiter) : Bool :=
   fitsWord waiter.thread && skipFits waiter.target && skipFits waiter.statusAddress
 
 /-- Whether the fixed-width fields of the binary format can hold every part of the snapshot. -/
@@ -302,7 +324,8 @@ def binaryFits (snapshot : Snapshot) : Bool :=
     fitsWord snapshot.currentThread && fitsWord snapshot.nextThread && pendingFits snapshot.pending &&
     fitsWord snapshot.processMemory.length && snapshot.processMemory.all processFits && skipFits snapshot.skip &&
     fitsWord snapshot.table.tasks.length && snapshot.table.tasks.all taskFits &&
-    fitsWord snapshot.table.waiters.length && snapshot.table.waiters.all waiterFits
+    fitsWord snapshot.table.waiters.length && snapshot.table.waiters.all waiterFits &&
+    fitsWord snapshot.table.futexes.length && snapshot.table.futexes.all futexFits
 
 /-- Encode a snapshot, refusing one that the binary format could only store truncated. -/
 def encodeBinarySnapshot (snapshot : Snapshot) : Except String ByteArray :=
@@ -326,10 +349,11 @@ def decodeBinarySnapshot (data : ByteArray) : Except String Snapshot := do
     let (skip, reader) ← getSkipBin reader
     let (tasks, reader) ← getList reader getTask
     let (waiters, reader) ← getList reader getWaiter
+    let (futexes, reader) ← getList reader getFutex
     if reader.offset != data.size then
       .error "trailing bytes in binary checkpoint"
     else
-      .ok ⟨{ env := env }, pc, regions, stopped, threads, currentThread, nextThread, pending, processMemory, skip, ⟨tasks, waiters⟩⟩
+      .ok ⟨{ env := env }, pc, regions, stopped, threads, currentThread, nextThread, pending, processMemory, skip, ⟨tasks, waiters, futexes⟩⟩
 
 /-- The memory holding the bytes of `regions`. -/
 def regionsMemory (width : Nat) (regions : List Region) : Bap.Memory width :=

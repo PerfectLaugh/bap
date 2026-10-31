@@ -1,7 +1,7 @@
 import Bap.Bil.Eval
 import Bap.Primus.Memory
 import Bap.Emu.Semantics
-import Bap.Emu.Task
+import Bap.Tasks
 
 /-! The pure core of emulator execution.
 
@@ -109,7 +109,7 @@ structure Snapshot where
   pending : Option PendingBranch
   processMemory : List (ThreadId × List Region) := []
   skip : Option Nat := none
-  table : TaskTable := {}
+  table : Tasks.TaskTable := {}
 
 /-! ### One instruction -/
 
@@ -476,8 +476,8 @@ def pickNext (threads : List ThreadContext) (current : Nat) : Option Nat :=
 
 /-- All-stop preemption: threads take turns of `quantum` steps until the fuel runs out, or the thread
 that runs stops. A stop returns to the caller at once with that thread current, so that a breakpoint can
-be inspected in the thread that hit it, and the threads behind it stay where they are. `runQuantum` and
-`resumeNext` move on past a stopped thread. -/
+be inspected in the thread that hit it, and the threads behind it stay where they are. `runProcesses` moves on
+past a thread that is blocked or over. -/
 @[specialize] def preemptiveM {m : Type → Type} [Monad m] (run : Nat → m Nat) (stopped : m Bool)
     (switchNext : m Bool) (quantum fuel : Nat) : Nat → Nat → Nat → m Nat
   | 0, _, total => pure total
