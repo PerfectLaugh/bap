@@ -527,10 +527,94 @@ private def testRealPthreads : IO Unit := do
   match compiled with
   | .ok { exitCode := 0, .. } =>
     let written ← IO.mkRef ByteArray.empty
-    let outcome ← Bap.Emu.runExecutable binary fun data => written.modify (· ++ data)
+    let machine ← Bap.Linux.start (Bap.Linux.Kernel.empty.addFile "/test" (← IO.FS.readBinFile binary)) "/test" ["/test"]
+    let outcome ← machine.run fun data => written.modify (· ++ data)
     assertEqual "Emu runs a libc pthread program to its end" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
     assertEqual "Emu threads of libc count to what they should" "y" (String.fromUTF8! (← written.get))
   | _ => IO.println "ok: skipped the libc pthread program, as nothing here compiles one statically"
+
+/-- `blr x30` goes where X30 said, and X30 is then where to come back to. -/
+private def testBlrLink : IO Unit := do
+  let emu ← Bap.Emu.aarch64 ((← LLVM.assemble "aarch64" "blr x30") ++ (← LLVM.assemble "aarch64" "nop") ++ (← LLVM.assemble "aarch64" "nop")) 0 0
+  let x30 : Bap.Var := ⟨"X30", .imm 64, 0, false⟩
+  Bap.Emu.setReg emu x30 (.bits (BitVec.ofNat 64 8))
+  let _ ← Bap.Emu.step emu
+  assertEqual "Emu blr x30 goes where it said" 8 (← Bap.Emu.pc emu)
+  assertBits "Emu blr x30 links" (BitVec.ofNat 64 4) (.ok (← Bap.Emu.reg emu x30))
+
+/-- The kernel itself: a program isn't needed to say what it does. -/
+private def testKernel : IO Unit := do
+  let unwrap {α} (result : Bap.Linux.Result α) : IO α := match result with
+    | .ok value => pure value
+    | .error errno => throw <| IO.userError s!"errno {errno}"
+  let start := (Bap.Linux.Kernel.empty.addFile "/etc/name" "bap".toUTF8).addSymlink "/link" "/etc/name"
+  assertEqual "Kernel a path is cleaned" ["a", "c"] (Bap.Linux.Path.parts "/" "/a/./b/../c/")
+  assertEqual "Kernel .. of the root is the root" ([] : List String) (Bap.Linux.Path.parts "/" "/../..")
+  let (kernel, fd) ← unwrap (start.openPath 1 "/" "/link" 0 0)
+  assertEqual "Kernel a descriptor is the lowest" 0 fd
+  let (kernel, first) ← unwrap (kernel.read 1 fd 2)
+  assertEqual "Kernel reads through a link" "ba" (String.fromUTF8! first)
+  let (kernel, duplicate) ← unwrap (kernel.dup 1 fd)
+  let (kernel, rest) ← unwrap (kernel.read 1 duplicate 9)
+  assertEqual "Kernel a dup shares the offset" "p" (String.fromUTF8! rest)
+  let forked := kernel.fork 1 2
+  let (forked, position) ← unwrap (forked.seek 2 fd false 1 0)
+  assertEqual "Kernel seek" 1 position
+  let (_, moved) ← unwrap (forked.read 1 fd 9)
+  assertEqual "Kernel a fork shares the offset" "ap" (String.fromUTF8! moved)
+  let forked ← unwrap (forked.close 2 fd)
+  assertTrue "Kernel a fork closes its own" (forked.read 1 fd 1 |>.toOption).isSome
+  assertEqual "Kernel a closed descriptor is EBADF" (some Bap.Linux.Errno.ebadf)
+    (match forked.read 2 fd 1 with | .error errno => some errno | .ok _ => none)
+  let errnoOf {α} (result : Bap.Linux.Result α) : Option Nat := match result with
+    | .error errno => some errno
+    | .ok _ => none
+  assertEqual "Kernel no such file" (some Bap.Linux.Errno.enoent) (errnoOf (start.openPath 1 "/" "/none" 0 0))
+  assertEqual "Kernel a file isn't a directory on the way" (some Bap.Linux.Errno.enotdir)
+    (errnoOf (start.openPath 1 "/" "/etc/name/x" 0 0))
+  let looped := (start.addSymlink "/a" "/b").addSymlink "/b" "/a"
+  assertEqual "Kernel links that go round are ELOOP" (some Bap.Linux.Errno.eloop) (errnoOf (looped.openPath 1 "/" "/a" 0 0))
+  let (written, out) ← unwrap (start.openPath 1 "/" "/new" (0x40 ||| 2) 0o644)
+  let (written, _) ← unwrap (written.writeTo 1 out "abc".toUTF8 5)
+  let hole ← unwrap (written.readFrom 1 out 8 3)
+  assertEqual "Kernel a write past the end leaves zeros" [0, 0, 97, 98, 99] (hole.toList.map (·.toNat))
+  let renamed ← unwrap (start.rename "/" "/etc" "/conf")
+  assertTrue "Kernel a directory moves with what is in it" ((renamed.statPath "/" "/conf/name").toOption).isSome
+  assertTrue "Kernel it isn't where it was" ((renamed.statPath "/" "/etc/name").toOption).isNone
+  assertEqual "Kernel a directory with something in it stays" (some Bap.Linux.Errno.enotempty)
+    (errnoOf (start.remove "/" "/etc" true))
+  assertEqual "Kernel the entries are sorted" ["etc", "link"] ((start.children "/").map (·.1))
+  assertEqual "Kernel struct stat" 144 (Bap.Linux.Abi.stat { inode := 1, mode := 0, size := 0, links := 1, time := 0 }).size
+  match Bap.Linux.Elf.parse "not an elf".toUTF8 with
+  | .error _ => IO.println "ok: Kernel what isn't ELF doesn't start"
+  | .ok _ => throw <| IO.userError "Kernel started what isn't ELF"
+
+/-- Programs of libc under the virtual kernel, dynamic, if there is a compiler to make them. The program does all of
+what it does to files in the kernel's, and says what it found. -/
+private def testLinuxPrograms : IO Unit := do
+  if System.Platform.isWindows || !System.Platform.target.startsWith "x86_64" then
+    IO.println "ok: skipped the programs of libc, as nothing here compiles them"
+  else
+    let expected := "args 2 arg1\ncwd /\nread hello 42\nsize 9 dir 0\nseek yz\ndup x\nlink c\nentries 3\ngone -1\ntime 1\nmalloc 1\nnope 1\n"
+    let compile (extra : Array String) (binary : String) : IO Bool := do
+      match ← (IO.Process.output { cmd := "gcc", args := extra ++ #["-O1", "testsuite/src/libc-files.c", "-o", binary] }).toBaseIO with
+      | .ok { exitCode := 0, .. } => pure true
+      | _ => pure false
+    let run (kernel : Bap.Linux.Kernel) (path : String) : IO (Bap.Tasks.ScheduleOutcome × String) := do
+      let written ← IO.mkRef ByteArray.empty
+      let machine ← Bap.Linux.start kernel path [path, "arg1"]
+      let outcome ← machine.run fun data => written.modify (· ++ data)
+      pure (outcome, String.fromUTF8! (← written.get))
+    let dynamicBinary := "native/build/libc-files-dynamic"
+    if ← compile #[] dynamicBinary then
+      let kernel ← Bap.Linux.Kernel.empty.copyProgramFromHost dynamicBinary
+      let (outcome, text) ← run kernel dynamicBinary
+      assertEqual "Linux a dynamic program has its status" (Bap.Tasks.ScheduleOutcome.finished (Bap.Tasks.exitedStatus 5)) outcome
+      assertEqual "Linux a dynamic program finds its files" expected text
+    -- Nothing but what is in the kernel: without its libraries, a dynamic program doesn't start.
+    if ← compile #[] dynamicBinary then
+      let alone := Bap.Linux.Kernel.empty.addFile dynamicBinary (← IO.FS.readBinFile dynamicBinary)
+      expectThrow "Linux what isn't in the kernel isn't there" (Bap.Linux.start alone dynamicBinary [dynamicBinary])
 
 private def testThreads : IO Unit := do
   let code := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
@@ -1955,6 +2039,9 @@ def run : IO Unit := do
   nopInLoop
   mipsLittle
   testRealPthreads
+  testBlrLink
+  testKernel
+  testLinuxPrograms
   allEmulatorTests
   tuningRef.set (some (1, 4096, 16))
   allEmulatorTests

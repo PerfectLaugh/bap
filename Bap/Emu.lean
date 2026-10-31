@@ -152,6 +152,8 @@ structure Emu where
   taskTable : IO.Ref Tasks.TaskTable
   /-- What is mapped in the address spaces other than that of the thread that runs, whose map is `regions`. -/
   parkedRegions : IO.Ref (Std.HashMap Nat (List Region))
+  /-- What wants to know of a new process: of the one that made it, and of it. -/
+  processHooks : IO.Ref (List (Nat → Nat → IO Unit))
   /-- Where the instruction that runs goes next, for a system call to know where a new thread starts. -/
   nextPc : IO.Ref Nat
 
@@ -233,6 +235,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     watchedSteps := ← IO.mkRef {}
     taskTable := ← IO.mkRef (Tasks.TaskTable.initial 1)
     parkedRegions := ← IO.mkRef {}
+    processHooks := ← IO.mkRef []
     nextPc := ← IO.mkRef 0
   }
 

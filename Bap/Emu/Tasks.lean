@@ -52,6 +52,8 @@ def clone (emu : Emu) (options : CloneOptions) : IO ThreadId := do
   let env := bindIn (bindIn current.env stackRegister options.stack) threadRegister options.threadPointer
   emu.threadsRef.modify (spawnContext id { env } (wordVar width result) (wordOf width 0) options.start :: ·)
   if !options.shareMemory then cloneProcessMemory emu id
+  if !options.sameGroup then
+    for hook in ← emu.processHooks.get do hook task.group id
   pure id
 
 /-- A new process at `childPc`, with a copy of the memory. -/
