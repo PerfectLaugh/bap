@@ -25,8 +25,10 @@
 ;;
 ;; A lane of a masked source in memory is loaded only if its bit of the
 ;; mask is set, as a lane that is masked out doesn't fault, and each
-;; lane of a masked store is stored only if its bit is set. All these
-;; instructions clear the bits of the ZMM register above the result.
+;; lane of a masked store is stored only if its bit is set. What a lane
+;; reads any of the source for is loaded only if a bit of the mask is
+;; set, see `evex-full`. All these instructions clear the bits of the
+;; ZMM register above the result.
 ;;
 ;; The list operations and lambda can't be compiled and an instruction
 ;; has up to 64 lanes, so what happens for each lane has no lists and is
@@ -209,13 +211,21 @@
         (load-n e (evex-ea s))
       (if (select 0 k) (load-n e (evex-ea s)) (zeros e)))))
 
-(defun evex-full (o e s)
-  "(evex-full O E S) is the whole of the source at the head of S, as for
-   a permutation, which doesn't suppress faults by the mask"
+(defun evex-if-any (o e k x w)
+  "X of W bits, or zeros if the mask K of (evex-count O E) lanes lets none through"
+  (if (= (evex-m o) 0) x
+    (if (non-zero (cast-low (evex-count o e) k)) x (zeros w))))
+
+(defun evex-full (o e k s)
+  "(evex-full O E K S) is the whole of the source at the head of S, as for
+   a permutation, where any lane can read any of it. Under the mask K, the
+   load is in the branch of whether a lane is let through: with none, nothing
+   that the instruction does depends on the source, and a load has no effect
+   but its fault. No lane of it is the lane of a bit to guard it alone"
   (case (evex-mem o)
     0 (car s)
-    1 (evex-freeze (load-n (evex-w o) (evex-ea s)))
-    2 (evex-replicate (evex-freeze (load-n e (evex-ea s))) (evex-count o e))
+    1 (evex-freeze (evex-if-any o e k (load-n (evex-w o) (evex-ea s)) (evex-w o)))
+    2 (evex-replicate (evex-freeze (evex-if-any o e k (load-n e (evex-ea s)) e)) (evex-count o e))
     (car s)))
 
 ;; the shapes of the instructions
@@ -527,13 +537,15 @@
 
 (defun evex-lane-count (f e x c _ _ _ i) (f (evex-lane e x i) c))
 
-(defun evex-count-source (o s)
+(defun evex-count-source (o e s)
+  "the count of a shift, which all lanes read: under the mask, the load is
+   in the branch of whether a lane is let through"
   (if (= (evex-mem o) 0) (cast-low 64 (car s))
-    (evex-freeze (load-n 64 (evex-ea s)))))
+    (evex-freeze (evex-if-any o e (evex-k o) (load-n 64 (evex-ea s)) 64))))
 
 (defun evex-shift-count-of (f e o s)
   (evex-put o e evex-lane-count f e (car s)
-            (evex-freeze (clamped-count e (evex-count-source o (cdr s)))) 0 0 0))
+            (evex-freeze (clamped-count e (evex-count-source o e (cdr s)))) 0 0 0))
 (defun evex-shift-count (f e o) (evex-shift-count-of f e o (evex-sources o)))
 
 (defun evex-shift (f e o)
@@ -917,7 +929,7 @@
              (mod i 16)))
 
 (defun evex-palignr-of (o s)
-  (evex-put o 8 evex-lane-palignr (car s) (evex-full o 8 (cdr s))
+  (evex-put o 8 evex-lane-palignr (car s) (evex-full o 8 (evex-k o) (cdr s))
             (cast-unsigned 256 (* 8 (cast-unsigned 16 (cast-low 8 (evex-imm o))))) 0 0 0 0))
 (defun evex-palignr (o) (evex-palignr-of o (evex-sources o)))
 
@@ -931,7 +943,7 @@
                                     (* e (logand (evex-imm o) (- (evex-count o e) 1))))))))
 
 (defun evex-align-of (e o s)
-  (evex-put o e evex-lane-move e 0 (evex-aligned o e (car s) (evex-full o e (cdr s))) 0 0 0 0))
+  (evex-put o e evex-lane-move e 0 (evex-aligned o e (car s) (evex-full o e (evex-k o) (cdr s))) 0 0 0 0))
 (defun evex-align (e o) (evex-align-of e o (evex-sources o)))
 
 (defun evex:VALIGND (o) (evex-align 32 o))
@@ -948,7 +960,7 @@
   (evex-dyn e y (logand (evex-lane e c i) (resize e (- n 1)))))
 
 (defun evex-perm-of (e o s)
-  (evex-put o e evex-lane-perm e (evex-count o e) (car s) (evex-full o e (cdr s)) 0 0 0))
+  (evex-put o e evex-lane-perm e (evex-count o e) (car s) (evex-full o e (evex-k o) (cdr s)) 0 0 0))
 (defun evex-perm (e o)
   "(RD C Y): the lanes of Y by the lanes of C"
   (evex-perm-of e o (evex-sources o)))
@@ -979,13 +991,13 @@
   (evex-two-tables e n a b (evex-lane e c i)))
 
 (defun evex-permi2-of (e o s)
-  (evex-put-tied o e evex-lane-two-tables e (evex-count o e) (car s) (evex-full o e (cdr s)) (evex-pass o) 0 0))
+  (evex-put-tied o e evex-lane-two-tables e (evex-count o e) (car s) (evex-full o e (evex-k-tied o) (cdr s)) (evex-pass o) 0 0))
 (defun evex-permi2 (e o)
   "(RD C A B), with C = RD: the lanes of the tables A and B by C"
   (evex-permi2-of e o (evex-sources-tied o)))
 
 (defun evex-permt2-of (e o s)
-  (evex-put-tied o e evex-lane-two-tables e (evex-count o e) (evex-pass o) (evex-full o e (cdr s)) (car s) 0 0))
+  (evex-put-tied o e evex-lane-two-tables e (evex-count o e) (evex-pass o) (evex-full o e (evex-k-tied o) (cdr s)) (car s) 0 0))
 (defun evex-permt2 (e o)
   "(RD A C B), with A = RD: the lanes of the tables A and B by C"
   (evex-permt2-of e o (evex-sources-tied o)))
@@ -1394,7 +1406,9 @@
       (evex-dup128 o)
     (evex-dup evex-lane-dup-low 64 o)))
 (defun evex-dup128 (o)
-  (evex-put o 64 evex-lane-value (evex-freeze (cast-low 64 (evex-dup128-source o (evex-sources o)))) 0 0 0 0 0 0))
+  (if (and (= (evex-mem o) 1) (/= (evex-m o) 0))
+      (evex-put o 64 evex-lane-element 64 (evex-ea (evex-sources o)) 0 0 0 0 0)
+    (evex-put o 64 evex-lane-value (evex-freeze (cast-low 64 (evex-dup128-source o (evex-sources o)))) 0 0 0 0 0 0)))
 (defun evex-dup128-source (o s)
   (if (= (evex-mem o) 0) (car s) (load-n 64 (evex-ea s))))
 (defun evex:VMOVSLDUP (o) (evex-dup evex-lane-dup-low 32 o))
@@ -1443,7 +1457,7 @@
 (defun evex-lane-conflict (e x _ _ _ _ _ i) (evex-conflict-bits e x i i))
 
 (defun evex-conflict (e o)
-  (evex-put o e evex-lane-conflict e (evex-full o e (evex-sources o)) 0 0 0 0 0))
+  (evex-put o e evex-lane-conflict e (evex-full o e (evex-k o) (evex-sources o)) 0 0 0 0 0))
 
 (defun evex:VPCONFLICTD (o) (evex-conflict 32 o))
 (defun evex:VPCONFLICTQ (o) (evex-conflict 64 o))
@@ -1467,7 +1481,7 @@
                       (cast-unsigned 128 (logand (evex-lane 8 c i) 63:8)))))
 
 (defun evex-multishift-of (o s)
-  (evex-put o 8 evex-lane-multishift (car s) 0 (evex-full o 64 (cdr s)) 0 0 0 0))
+  (evex-put o 8 evex-lane-multishift (car s) (evex-mode o) (evex-src o 64 (cdr s)) 0 0 0 0))
 (defun evex:VPMULTISHIFTQB (o) (evex-multishift-of o (evex-sources o)))
 
 ;; the scalar compare to a mask
@@ -1976,7 +1990,7 @@
   (evex-dbp-sum x y imm (/ i 8) (+ (* 16 (/ i 8)) (* 8 (/ (mod i 8) 4)) (* 4 (/ (mod (mod i 8) 4) 2)))
                 (+ (* 8 (/ (mod i 8) 4)) (mod (mod i 8) 4))))
 (defun evex-dbp-of (o s)
-  (evex-put o 16 evex-lane-dbp (car s) (evex-full o 16 (cdr s)) (cast-low 8 (evex-imm o)) 0 0 0 0))
+  (evex-put o 16 evex-lane-dbp (car s) (evex-full o 16 (evex-k o) (cdr s)) (cast-low 8 (evex-imm o)) 0 0 0 0))
 (defun evex:VDBPSADBW (o) (evex-dbp-of o (evex-sources o)))
 
 ;; what has no family

@@ -98,9 +98,16 @@ def hasUnknown : Exp → Bool
   | .un _ value | .cast _ _ value | .extract _ _ value => hasUnknown value
   | .letIn _ value body => hasUnknown value || hasUnknown body
 
+/-- A literal zero, of any width. -/
+def isZeroLiteral : Exp → Bool
+  | @Exp.int _ value => value.toNat == 0
+  | _ => false
+
 /-- Identity and annihilator rules, as in the reference `Exp.simpl`, but only where the dropped
 operation could not have failed: an identity must keep the literal's width and an annihilator
-must discard an expression that is sure to evaluate once its variables are bound. -/
+must discard an expression that is sure to evaluate once its variables are bound. A literal times
+a literal zero is zero whichever rule looks first, so that knowing a factor never loses a `x * 0`
+(`Bap.Proofs.IR.simplify_mono`). -/
 def simplifyExp (exp : Exp) : Exp :=
   match evalExp [] exp with
   | .ok (.bits value) => .int value
@@ -124,6 +131,7 @@ def simplifyExp (exp : Exp) : Exp :=
         if !hasImmWidth right width then .bin op left right
         else if one = 1 then right
         else if one = 0 ∧ !hasUnknown right then left
+        else if isZeroLiteral right then right
         else .bin op left right
       | .mul, _, @Exp.int width one =>
         if !hasImmWidth left width then .bin op left right
@@ -225,6 +233,7 @@ private def binRule (op : BinOp) (left right : Exp) : Exp :=
     if !hasImmWidth right width then .bin op left right
     else if one = 1 then right
     else if one = 0 ∧ !hasUnknown right then left
+    else if isZeroLiteral right then right
     else .bin op left right
   | .mul, _, @Exp.int width one =>
     if !hasImmWidth left width then .bin op left right

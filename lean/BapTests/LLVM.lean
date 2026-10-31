@@ -1803,6 +1803,28 @@ private def testX86EvexModel : IO Unit := do
     pure (insn.bil.all fun stmt => match stmt with
       | .move _ value => loose value == 0
       | _ => true)
+  -- What reads any of its source has it loaded in the branch of whether a lane is let through. Its lanes are what the form
+  -- of a register with the same value has, and under a mask of nothing, nothing happens.
+  let same := (zmm 2 evexM) :: (zmm 0 evexC) :: start
+  let zmm0Of (state : Bil.State) : IO Nat := do
+    match Bil.lookup state.env ⟨"ZMM0", .imm 512, 0, false⟩ with
+    | .ok (.bits value) => pure value.toNat
+    | _ => throw <| IO.userError "no ZMM0"
+  for (name, p0, p1, length, op, imm) in [
+      ("vpermd", 0xf2, 0x75, 0x40, 0x36, ([] : List Nat)), ("vpermi2d", 0xf2, 0x75, 0x40, 0x76, []),
+      ("vpconflictd", 0xf2, 0x7d, 0x40, 0xc4, []), ("valignd", 0xf3, 0x75, 0x40, 0x03, [3]),
+      ("vpalignr", 0xf3, 0x75, 0x40, 0x0f, [3]), ("vdbpsadbw", 0xf3, 0x75, 0x40, 0x42, [3]),
+      ("vpmultishiftqb", 0xf2, 0xf5, 0x40, 0x83, []), ("vpsllw", 0xf1, 0x75, 0x40, 0xf1, []),
+      ("vmovddup", 0xf1, 0xff, 0x00, 0x12, [])] do
+    let encode (mask modrm : Nat) : List Nat := [0x62, p0, p1, length + 8 + mask, op, modrm] ++ imm
+    assertTrue s!"masked {name} only loads under its mask" (← hasGuarded (encode 1 0x00))
+    let withMemory ← Target.LLVMLift.decodeX86With x86 0 0 (bytes (encode 1 0x00))
+    let withRegister ← Target.LLVMLift.decodeX86With x86 0 0 (bytes (encode 1 0xc2))
+    assertEqual s!"masked {name} of memory is that of a register" (← zmm0Of (← execute withRegister same)) (← zmm0Of (← execute withMemory same))
+    let none ← Target.LLVMLift.decodeX86With x86 0 0 (bytes (encode 2 0x00))
+    -- the bits above the size of the vector are clear, as for any of them
+    let kept := if length = 0 then evexC % 2 ^ 128 else evexC
+    assertEqual s!"{name} under a mask of nothing keeps its destination" kept (← zmm0Of (← execute none same))
   for (name, encoding) in [
       ("vpshldvd", [0x62, 0xf2, 0x75, 0x49, 0x71, 0x00]), ("vpmulhrsw", [0x62, 0xf2, 0x75, 0x49, 0x0b, 0x00]),
       ("vaddps", [0x62, 0xf1, 0x74, 0x49, 0x58, 0x00]), ("vfmadd132ps", [0x62, 0xf2, 0x75, 0x49, 0x98, 0x00]),

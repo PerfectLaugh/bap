@@ -89,6 +89,9 @@ structure Context where
   memory : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
   /-- The prefix bytes of the instruction, when the decoder provides them. -/
   prefixes : Option (List Nat) := none
+  /-- Whether `pc` and `nextPc` are known. If not, reading either is an error, and what a run gets without an error it gets
+  at every address (`Bap.Proofs.Primus.apply_anywhere`): this is how code is known not to depend on where it is. -/
+  addressed : Bool := true
 
 structure State where
   globals : Globals := []
@@ -391,6 +394,13 @@ private def concatStep (context : Context) (current : Nat × Bil.Exp) (value : V
 
 private def valueOnly (value : Value) : Except String (Value × Bil.Program) := pure (value, [])
 
+/-- The address of the instruction, or of the one after it. -/
+private def addressPrimitive (context : Context) (next : Bool) : Except String (Value × Bil.Program) :=
+  if context.addressed then
+    valueOnly (.bil context.bits (.int (BitVec.ofNat context.bits (if next then context.nextPc else context.pc))))
+  else
+    throw "the address of the instruction is not known here"
+
 private def intrinsicVar (kind : String) (index width : Nat) : Bap.Var :=
   ⟨s!"intrinsic:{kind}{index}", .imm width, 0, false⟩
 
@@ -653,10 +663,8 @@ private def applyPrimitive (context : Context) (name : String) (args : List Valu
   | "+." | "-." | "*." | "/." | "fsqrt" | "fround" | "fconvert" | "cast-float" | "cast-sfloat" | "cast-int"
   | "cast-sint" | "<." | ">." | ">=." | "=." | "is-nan" | "is-inf" | "is-fzero" =>
     floatOperation context name args
-  | "get-program-counter" | "get-current-program-counter" =>
-    valueOnly (.bil context.bits (.int (BitVec.ofNat context.bits context.pc)))
-  | "get-next-program-counter" =>
-    valueOnly (.bil context.bits (.int (BitVec.ofNat context.bits context.nextPc)))
+  | "get-program-counter" | "get-current-program-counter" => addressPrimitive context false
+  | "get-next-program-counter" => addressPrimitive context true
   | "is-zero" | "non-zero" =>
     match args with
     | [value] =>
@@ -783,9 +791,8 @@ private def applyPrimitiveIndex (context : Context) (operation : Nat) (args : Li
       if width != context.bits then throw "Primus jump target has the wrong width"
       pure (.unit, [.jmp target])
     | _ => throw "exec-addr expects a target"
-  | 52 | 53 =>
-    valueOnly (.bil context.bits (.int (BitVec.ofNat context.bits context.pc)))
-  | 54 => valueOnly (.bil context.bits (.int (BitVec.ofNat context.bits context.nextPc)))
+  | 52 | 53 => addressPrimitive context false
+  | 54 => addressPrimitive context true
   | 55 | 56 =>
     match args with
     | [value] =>
@@ -1569,20 +1576,36 @@ def loadMany (directories entries : List String) (context : Context) : IO Global
 def load (directories : List String) (entry : String) (context : Context) : IO Globals :=
   loadMany directories [entry] context
 
-def liftWith (environment : Environment) (context : Context) (opcode : String)
-    (operands : List Value) : IO Bil.Program := do
-  let callable ← match environment.instructions.get? opcode with
-    | some callable => pure (.callable callable.get)
-    | none =>
-      match environment.operations.get? opcode with
-      | some callable => pure (.callable callable)
-      | none =>
-        match Assoc.get opcode environment.globals with
-        | some callable => pure callable
-        | none => throw <| IO.userError s!"Primus semantics has no definition for {opcode}"
+/-- The code of a run of an instruction's definition. -/
+def liftCode (environment : Environment) (context : Context) (callable : Value) (operands : List Value) :
+    Except String Bil.Program :=
   match apply 100000 context { globals := environment.globals, operations := environment.operations } callable operands with
-  | .ok (_, state) => pure (Bil.dropDeadTemps state.code)
-  | .error error => throw <| IO.userError s!"{opcode}: {error}"
+  | .ok (_, state) => .ok (Bil.dropDeadTemps state.code)
+  | .error error => .error error
+
+/-- What an instruction of a name is defined as. -/
+def instructionValue (environment : Environment) (opcode : String) : Except String Value :=
+  match environment.instructions.get? opcode with
+  | some callable => .ok (.callable callable.get)
+  | none =>
+    match environment.operations.get? opcode with
+    | some callable => .ok (.callable callable)
+    | none =>
+      match Assoc.get opcode environment.globals with
+      | some callable => .ok callable
+      | none => .error s!"Primus semantics has no definition for {opcode}"
+
+/-- The code of the instruction of a name. -/
+def liftWithCode (environment : Environment) (context : Context) (opcode : String) (operands : List Value) :
+    Except String Bil.Program := do
+  let callable ← instructionValue environment opcode
+  match liftCode environment context callable operands with
+  | .ok program => .ok program
+  | .error error => .error s!"{opcode}: {error}"
+
+def liftWith (environment : Environment) (context : Context) (opcode : String)
+    (operands : List Value) : IO Bil.Program :=
+  IO.ofExcept (liftWithCode environment context opcode operands)
 
 def lift (globals : Globals) (context : Context) (opcode : String) (operands : List Value) :
     IO Bil.Program :=
@@ -1595,14 +1618,23 @@ def machineOperand (environment : Environment) (context : Context) : LLVM.MCOper
     | none => .error s!"Primus semantics has no register for LLVM ID {id}"
   | .imm value => .ok (.bil context.bits (.int (BitVec.ofInt context.bits value)))
 
+/-- What the instruction of an LLVM opcode is defined as. -/
+def opcodeValue (environment : Environment) (opcode : Nat) : Except String Value :=
+  match environment.opcodes.get? opcode with
+  | some callable => .ok (.callable callable.get)
+  | none => .error s!"Primus semantics has no definition for LLVM opcode {opcode}"
+
+/-- The code of the instruction of an LLVM opcode. -/
+def liftMCCode (environment : Environment) (context : Context) (opcode : Nat) (operands : List Value) :
+    Except String Bil.Program := do
+  let callable ← opcodeValue environment opcode
+  match liftCode environment context callable operands with
+  | .ok program => .ok program
+  | .error error => .error s!"LLVM opcode {opcode}: {error}"
+
 def liftMC (environment : Environment) (context : Context) (opcode : Nat)
-    (operands : List Value) : IO Bil.Program := do
-  let callable ← match environment.opcodes.get? opcode with
-    | some callable => pure callable.get
-    | none => throw <| IO.userError s!"Primus semantics has no definition for LLVM opcode {opcode}"
-  match apply 100000 context { globals := environment.globals, operations := environment.operations } (.callable callable) operands with
-  | .ok (_, state) => pure (Bil.dropDeadTemps state.code)
-  | .error error => throw <| IO.userError s!"LLVM opcode {opcode}: {error}"
+    (operands : List Value) : IO Bil.Program :=
+  IO.ofExcept (liftMCCode environment context opcode operands)
 
 /-- The number of arguments a primitive takes, at least and, if bounded, at most. -/
 private def primitiveArity (name : String) : Nat × Option Nat :=

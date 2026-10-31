@@ -1303,6 +1303,15 @@ private theorem bin_inv_right {env : Env} {op : BinOp} {z : BitVec w} {L : Exp} 
   cases evalBin_width he
   exact ⟨a, hl, he⟩
 
+private theorem isZeroLiteral_inv {R : Exp} (h : isZeroLiteral R = true) : ∃ w, R = .int (0#w) := by
+  cases R with
+  | @int w value =>
+    simp only [isZeroLiteral, beq_iff_eq] at h
+    refine ⟨w, ?_⟩
+    congr 1
+    exact BitVec.eq_of_toNat_eq (by simpa using h)
+  | _ => simp [isZeroLiteral] at h
+
 /-- Simplification refines evaluation: every successful result is preserved. -/
 theorem evalExp_simplifyExp (env : Env) (exp : Exp) {result : Value} (h : evalExp env exp = .ok result) :
     evalExp env (simplifyExp exp) = .ok result := by
@@ -1422,7 +1431,14 @@ theorem evalExp_simplifyExp (env : Env) (exp : Exp) {result : Value} (h : evalEx
               simp [evalBin] at he
               rw [← he, hz.1]
               rfl
-            · exact hbase
+            · split
+              · rename_i hz
+                obtain ⟨w, rfl⟩ := isZeroLiteral_inv hz
+                obtain ⟨a', ha', he⟩ := bin_inv_right hbase
+                simp [evalBin] at he
+                rw [← he]
+                rfl
+              · exact hbase
       · split
         · exact hbase
         · split
@@ -1701,7 +1717,14 @@ theorem evalExp_simplifyExp_exact (exp : Exp) {t : Typ} (hi : inferExp exp = .ok
               obtain ⟨x, hx, hty⟩ := evalExp_progress R (by simpa using hu) hw' hwt hbR
               obtain ⟨b, rfl⟩ := bits_of_type hty
               exact (eval_bin_iff.mpr ⟨_, _, _, b, rfl, hx, by simp [evalBin]⟩).symm
-            · rfl
+            · split
+              · rename_i hz
+                obtain ⟨w, rfl⟩ := isZeroLiteral_inv hz
+                have hty := evalExp_type_sound hwt _ hw' (rfl : evalExp env (.int (0#w)) = _)
+                simp only [Value.type, Typ.imm.injEq] at hty
+                subst hty
+                exact (eval_bin_iff.mpr ⟨_, _, _, 0#w, rfl, rfl, by simp [evalBin]⟩).symm
+              · rfl
       · split
         · rfl
         · rename_i hw
@@ -1746,7 +1769,7 @@ theorem simplify_keeps_unknown_error :
   have horig : evalExp [] (.bin .mul (.int (0#8)) (.unknown "x" (.imm 8))) =
       .error "cannot evaluate unknown value: x" := rfl
   rw [simplifyExp, horig]
-  simp [simplifyExp, evalExp, hasImmWidth, inferExp, expectBits, hasUnknown, Bind.bind, Except.bind, Value.asBits]
+  simp [simplifyExp, evalExp, hasImmWidth, inferExp, expectBits, hasUnknown, isZeroLiteral]
   rfl
 
 /-! ## The fuel interpreter -/

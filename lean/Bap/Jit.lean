@@ -36,7 +36,7 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
     memory. Multi-byte accesses are not atomic across threads, like on hardware.
 
 Everything else in `Bap.Emu`, from what the code hooks see to what a rollback restores, is proved against
-these. No theorem assumes anything of LLVM beyond them.
+these. No theorem assumes anything of LLVM beyond them, and nothing depends on `memorySize`, which has no obligation.
 
 **What is proved about lowering.** Expressions (`lowerExp_correct`), statements with their branches, loops and stores
 (`lowerStatements_correct`), the way into native code (`encodeState_holds`), the way out (`syncState_output`, `syncState_flags`),
@@ -45,7 +45,7 @@ block alone): it ends as the blocks do one at a time in the interpreter, with th
 nothing of the graph: `lowerGraphChecked` checks at compile time what it does not follow through every statement, and a lowering
 that failed the check would stay out of native code. The one thing `lowerGraph_correct` leaves out is the interpreter running out of its
 fuel: what lowers has a result otherwise, on a state that `encodeState` takes with its memory bound (`graph_progress`). The limit on native loops
-is that same bound: on the fuel the interpreter runs with, a loop out of iterations means that the interpreter ran out too (`lowerGraph_interpreterFuel`). `Bap.Emu.Core` lists what stays trusted around all of this. -/
+is that same bound: on the fuel the interpreter runs with, a loop out of iterations means that the interpreter ran out too (`lowerGraph_interpreterFuel`). `Bap.Emu.Core` lists what stays trusted around all of this, and `Bap.Proofs` all of it for the project. -/
 
 namespace Bap.Jit
 

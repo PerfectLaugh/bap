@@ -22,7 +22,7 @@ are about the flows on the model, and Lean sees no more of `IO`, `Task` and `@[e
    `Bap.Primus.Lifted`, whose code around native runs is plumbing of the proved `encodeState`, `withControl`, `chainedCount`, `syncState` and `nativeOutcome`.
 2. **The arguments of `stepOpsOf`.** `save`, `restore`, `execute`, `notifyCode`, `dispatch` in `stepOps` have the
    effects that `Model.World` gives them: `restore` undoes all that happened since `save`, except for what the log of
-   the model keeps, what hooks did to the outside. That `save` takes all that `Snapshot` has is by reading `snapshotBlock`.
+   the model keeps, what hooks did to the outside. That `save` takes all that `Snapshot` has but `processMemory`, which `rollbackBlock` goes without as it remakes the native memory of the thread, is by reading `snapshotBlock`.
 3. **What a run of a range does.** `executeRangeM`, `rangeAllowM`, `rangeRestartM`, `rangeAgainM` and `stepOpsOf` are what both the emulator and the model
    (`RangeWorld.ops`) make their steps with, so that the model of a step that may run a range is not a matter of reading, and `rangeLaws_real` and `restartLaws_real` prove
    `RangeLaws` and `RestartLaws` of it, and `run_real_fault` that a fault in a range is a fault in single steps. What they assume of `runRange` is `NativeRange`, which stays
@@ -35,7 +35,10 @@ are about the flows on the model, and Lean sees no more of `IO`, `Task` and `@[e
    obligation 10 of `Bap.Jit`.
 5. **Native code**, on the terms of `Bap.Jit`: the C++ and LLVM are not verified.
 6. **Lifting.** The blocks a range is made of are what the lifter makes of the bytes, and it makes the same of the same bytes.
-   `sameBytes_eq` and the versions of ranges go by that. -/
+   `sameBytes_eq` and the versions of ranges go by that. That the memo of x86 code doesn't change what it makes is proved
+   (`Bap.Proofs.Target.x86MemoStep_sound`); what it rests on is that LLVM decodes the same bytes the same.
+
+The whole list for the project, of which this is the part about the emulator, is in `Bap.Proofs`. -/
 
 namespace Bap.Emu
 

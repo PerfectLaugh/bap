@@ -19,6 +19,14 @@ def Constant.ofExp : Bil.Exp → Option Constant
 
 def Constant.toExp (constant : Constant) : Bil.Exp := .int (BitVec.ofNat constant.width constant.value)
 
+/-- What a definition makes its variable: a constant, if the value is of the variable's own type. Knowing more can only make
+the rewrite know more if every constant has the type of its variable (`Bap.Proofs.IR.simplify_mono`): `x * 0#64` is 0 for a
+variable `x` of 64 bits, but is ill typed once `x` is replaced by a value of 8. -/
+def Constant.ofDef (var : Bap.Var) (rhs : Bil.Exp) : Option Constant :=
+  match Constant.ofExp rhs with
+  | some constant => if var.typ = .imm constant.width then some constant else none
+  | none => none
+
 private def replacements (env : ConstEnv) : List (Bap.Var × Bil.Exp) :=
   env.map fun entry => (entry.1, entry.2.toExp)
 
@@ -34,7 +42,7 @@ private def propagateBlock (blk : Blk) (env : ConstEnv) : Blk × ConstEnv :=
     { phi with values := phi.values.map fun input => (input.1, Bil.simplifyExp input.2) }
   let (defs, env) := blk.defs.foldl (init := ([], env)) fun state defn =>
     let rhs := Bil.simplifyExp (Bil.substitute (replacements state.2) defn.rhs)
-    let env := match Constant.ofExp rhs with
+    let env := match Constant.ofDef defn.var rhs with
       | some constant => Assoc.put defn.var constant state.2
       | none => Assoc.remove defn.var state.2
     (state.1 ++ [{ defn with rhs := rhs }], env)
@@ -105,7 +113,7 @@ private theorem removeConst_eq (var : Bap.Var) (env : ConstEnv) : removeConst va
 
 /-- The constants after a definition. -/
 private def constStep (env : ConstEnv) (var : Bap.Var) (rhs : Bil.Exp) : ConstEnv :=
-  match Constant.ofExp rhs with
+  match Constant.ofDef var rhs with
   | some constant => Assoc.put var constant env
   | none => removeConst var env
 
@@ -127,7 +135,7 @@ private theorem propagateExit_eq (blk : Blk) (env : ConstEnv) : (propagateBlock 
     · rfl
   have key : ∀ (defs acc : List Def) (e : ConstEnv), (defs.foldl (init := (acc, e)) fun state defn =>
         let rhs := Bil.simplifyExp (Bil.substitute (replacements state.2) defn.rhs)
-        let env := match Constant.ofExp rhs with
+        let env := match Constant.ofDef defn.var rhs with
           | some constant => Assoc.put defn.var constant state.2
           | none => Assoc.remove defn.var state.2
         (state.1 ++ [{ defn with rhs := rhs }], env)).2 =
@@ -168,7 +176,7 @@ private def propagateBlockFast (blk : Blk) (env : ConstEnv) : Blk × ConstEnv :=
     · rfl
   have key : ∀ (defs acc : List Def) (e : ConstEnv), (defs.foldl (init := (acc, e)) fun state defn =>
         let rhs := Bil.simplifyExp (Bil.substitute (replacements state.2) defn.rhs)
-        let env := match Constant.ofExp rhs with
+        let env := match Constant.ofDef defn.var rhs with
           | some constant => Assoc.put defn.var constant state.2
           | none => Assoc.remove defn.var state.2
         (state.1 ++ [{ defn with rhs := rhs }], env)) =
@@ -202,8 +210,8 @@ private def entryEnv (cfg : Cfg) (exits : ExitEnvs) (tid : Tid) : ConstEnv :=
 
 /-- For each block, what can read a constant after it: the liveness of the blocks without their phis, as a phi's inputs
 aren't rewritten and what a phi assigns is forgotten anyway. Constants of anything else are only carried along, and cost a
-list of every constant so far at the end of every block. Dropping any constant is sound, which is all that the correctness of
-the rewrite needs of this table. -/
+list of every constant so far at the end of every block. Dropping any constant is sound, and dropping these changes nothing:
+the rewrite is the one from all constants (`Bap.Proofs.IR.propagateConstants_unrestricted`). -/
 private def constReads (cfg : Cfg) : List (Tid × List Bap.Var) :=
   ({ cfg with blocks := cfg.blocks.map fun blk => { blk with phis := [] } } : Cfg).liveness.2
 
@@ -211,6 +219,19 @@ private def constReads (cfg : Cfg) : List (Tid × List Bap.Var) :=
 private def keepReads (reads : List (Tid × List Bap.Var)) (tid : Tid) (env : ConstEnv) : ConstEnv :=
   let row := (Assoc.get tid reads).getD []
   env.filter fun entry => decide (entry.1 ∈ row)
+
+/-- Whether two tables say the same of every variable. The order of the entries says nothing, and a block must not be
+counted as changed for it: each change must lose a constant for the fuel to be enough (`Bap.Proofs.IR.propagateAux_finishes`). -/
+private def sameConsts (left right : ConstEnv) : Bool :=
+  left == right ||
+    (left.all (fun entry => Assoc.get entry.1 right == some entry.2) &&
+      right.all (fun entry => Assoc.get entry.1 left == some entry.2))
+
+/-- Whether a block already has these constants at its end. -/
+private def settled (known : Option ConstEnv) (env : ConstEnv) : Bool :=
+  match known with
+  | some known => sameConsts known env
+  | none => false
 
 /-- Optimistic forward analysis from the start. It never edits the CFG. -/
 private def propagateAux (cfg : Cfg) (reads : List (Tid × List Bap.Var)) : Nat → ExitEnvs → List Tid → ExitEnvs
@@ -221,7 +242,7 @@ private def propagateAux (cfg : Cfg) (reads : List (Tid × List Bap.Var)) : Nat 
     | none => propagateAux cfg reads fuel exits work
     | some blk =>
       let env := keepReads reads tid (propagateBlock blk (entryEnv cfg exits tid)).2
-      if Assoc.get tid exits = some env then
+      if settled (Assoc.get tid exits) env then
         propagateAux cfg reads fuel exits work
       else
         propagateAux cfg reads fuel (Assoc.put tid env exits) (work ++ cfg.successors tid)
@@ -229,7 +250,7 @@ private def propagateAux (cfg : Cfg) (reads : List (Tid × List Bap.Var)) : Nat 
 /-- The analysis result is a fixpoint of the transfer functions on every block. -/
 private def isSolved (cfg : Cfg) (reads : List (Tid × List Bap.Var)) (exits : ExitEnvs) : Bool :=
   cfg.blocks.all fun blk =>
-    Assoc.get blk.tid exits = some (keepReads reads blk.tid (propagateBlock blk (entryEnv cfg exits blk.tid)).2)
+    settled (Assoc.get blk.tid exits) (keepReads reads blk.tid (propagateBlock blk (entryEnv cfg exits blk.tid)).2)
 
 /-- Rounds of the analysis: a block goes back on the list when its constants change, and they only go. -/
 private def propagateFuel (cfg : Cfg) : Nat :=
@@ -346,7 +367,7 @@ private def propagateAuxT (cfg : Cfg) (tables : PropTables) :
     | none => propagateAuxT cfg tables fuel exits work
     | some blk =>
       let env := keepReadsT tables tid (propagateExit blk (entryEnvT cfg tables exits tid))
-      if exits.get? tid = some env then
+      if settled (exits.get? tid) env then
         propagateAuxT cfg tables fuel exits work
       else
         propagateAuxT cfg tables fuel (exits.insert tid env) (work ++ dedup (tables.succs.getD tid []))
@@ -356,7 +377,7 @@ private def propagateConstantsFast (cfg : Cfg) : Cfg :=
   let tables := propTablesOf cfg (constReads cfg)
   let exits := propagateAuxT cfg tables (propagateFuel cfg) {} [cfg.start]
   let solved := cfg.blocks.all fun blk =>
-    exits.get? blk.tid = some (keepReadsT tables blk.tid (propagateExit blk (entryEnvT cfg tables exits blk.tid)))
+    settled (exits.get? blk.tid) (keepReadsT tables blk.tid (propagateExit blk (entryEnvT cfg tables exits blk.tid)))
   { cfg with blocks := cfg.blocks.map fun blk =>
     (propagateBlock blk (if solved then entryEnvT cfg tables exits blk.tid else [])).1
   }

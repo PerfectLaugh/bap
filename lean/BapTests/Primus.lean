@@ -419,6 +419,31 @@ private def conditionalValues : IO Unit := do
   assertTrue "no temporary a lifted instruction assigns is unread"
     ((Bil.programTemporaries cmpxchg.bil).all fun var => (Bil.readsOfProgram cmpxchg.bil).contains var)
 
+/-- A run that doesn't know the address fails where it reads it, and what the memo reuses is what lifting afresh gives, which
+`x86MemoStep_sound` proves. -/
+private def memoRegressions : IO Unit := do
+  let reader ← semanticsForms 64 "(defun op () (set R (get-next-program-counter)))"
+  let known ← Primus.Semantics.lift reader.globals { nextPc := 7 } "op" []
+  match known with
+  | [.move _ (.int value)] => assertEqual "an address read with the address known" 7 value.toNat
+  | code => throw <| IO.userError s!"address read changed: {repr code}"
+  let unknown ← (Primus.Semantics.lift reader.globals { addressed := false } "op" []).toBaseIO
+  match unknown with
+  | .error _ => IO.println "ok: an address read without the address known fails"
+  | .ok code => throw <| IO.userError s!"read an unknown address: {repr code}"
+  let x86 ← Target.LLVMLift.x86Environment
+  let memo ← IO.mkRef {}
+  let sources := ["addq %rbx, %rax", "leaq 16(%rip), %rax", "movq 8(%rbx,%rcx,4), %rdx", "pushq %rbp",
+    "vpaddd %zmm1, %zmm2, %zmm3", "movl $5, %eax", "rep movsb"]
+  for source in sources do
+    let bytes ← LLVM.assemble "x86_64" source
+    -- at more than one address, and of more than one size with a prefix that says nothing
+    for address in [0x1000, 0x2000, 0x123456] do
+      let memoized ← Target.LLVMLift.decodeX86Memo memo x86 address address bytes
+      let fresh ← Target.LLVMLift.decodeX86With x86 address address bytes
+      assertEqual s!"memo of {source} at {address}" (repr fresh.bil).pretty (repr memoized.bil).pretty
+  assertTrue "the memo was used" (0 < (← memo.get).size)
+
 /-- Instructions of a thunked environment lift as they do written out, which `thunked_opcode_agrees` proves. -/
 private def thunkedRegressions : IO Unit := do
   let forms ← match Sexp.parseMany "(defmacro twice (x) (+ x x)) (defun helper (x) (twice x)) (defun insn (r x) (set$ r (helper x)))" with
@@ -452,6 +477,7 @@ private def thunkedRegressions : IO Unit := do
 def run : IO Unit := do
   conditionalValues
   thunkedRegressions
+  memoRegressions
   -- A binding that is no function shadows a function of the same name further on, in the index as in the definitions.
   let shadowed := Primus.Semantics.Environment.ofGlobals
     [("f", .int 1#64), ("f", .callable (.primitive "+")), ("g", .callable (.primitive "-"))]

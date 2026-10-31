@@ -25,6 +25,7 @@ import Bap.Proofs.Analysis
 import Bap.Proofs.Bil
 import Bap.Proofs.Binary
 import Bap.Proofs.Checkpoint
+import Bap.Proofs.ConstProp
 import Bap.Proofs.Core
 import Bap.Proofs.Crypto
 import Bap.Proofs.CryptoVectors
@@ -46,11 +47,50 @@ import Bap.Proofs.Primus
 import Bap.Proofs.PrimusRelated
 import Bap.Proofs.PrimusBisim
 import Bap.Proofs.PrimusLoad
+import Bap.Proofs.PrimusAddress
 import Bap.Proofs.Project
 import Bap.Proofs.Symbolic
 import Bap.Proofs.SmtReader
 import Bap.Proofs.Target
 import Bap.Proofs.Theory
+import Bap.Proofs.X86Memo
+
+/-! # What the proofs rest on
+
+This is everything in the project that is trusted, or only tested, and not proved. Every other claim is a theorem whose
+`#print axioms` is `propext`, `Classical.choice` and `Quot.sound`. A file and line says where each is written down at more length.
+
+## Trusted: outside of what Lean can see
+
+1. **Lean itself.** The kernel, and for the running program the compiler and the runtime: the theorems are about the definitions, not the generated code (Bap/Proofs/Crypto.lean:1518). A `@[csimp]` swap is a theorem; `@[extern]` is an `opaque` that nothing can unfold.
+2. **The native code of the JIT**, `native/bap_jit.cpp` and LLVM's code generation: obligations 1 to 10 (Bap/Jit.lean:1). `Bap.Proofs.Jit` proves the Lean side against them on a model.
+3. **The emulator's plumbing in `IO`**: refs, `save` and `restore`, `IO.asTask`, the mutex of hooks (Bap/Emu/Core.lean:13, items 1, 2, 4 and 5).
+4. **`NativeRange`**: what a native run of a range does, by reading `runBlockObserved` (Bap/Emu/CoreProofs.lean:2796, Bap/Emu/Core.lean:26). `rangeLaws_real` and `restartLaws_real` follow from it.
+5. **LLVM's decoder and assembler** (Bap/LLVM.lean:16, Bap/Proofs/LLVM.lean:7). What instruction the bytes are, and that the same bytes are the same instruction (Bap/Emu/Core.lean:37), is what LLVM says. The wrappers are proved to pass it on, not that it is right.
+6. **Z3's answers** (Bap/FFI/Z3.lean:5, Bap/Proofs/FFI.lean:19). What is sent and how the answer is read are proved.
+7. **Refs and files around lifting.** A cached environment (Bap/Target/LLVMLift.lean:507) and the memo of x86 code (Bap/Target/LLVMLift.lean:1289) hand back what was put in them: `x86MemoStep_sound` (Bap/Proofs/X86Memo.lean:83) is about the pure step between the read and the write, as Lean can't see a ref. The semantics are the files on disk (Bap/Target/LLVMLift.lean:454).
+8. **Standards read by a person.** That `Spec` says what FIPS-197 and RFC 3394 say is by reading, with their printed vectors checked by the kernel (Bap/Proofs/Crypto.lean:837, Bap/Proofs/Crypto.lean:1511). The formats of ELF, PE, COFF and DWARF are the same: what is proved is of the parsers as written, against no text of the standards.
+
+## Modelled, not proved of a machine
+
+9. **That the Lisp semantics are what the hardware does.** Lifting is proved to mean the Lisp source (Bap/Proofs/PrimusLoad.lean:290), so the source is where the ISA is trusted; `BapTests` runs instructions against expected values, on samples.
+10. **Masked EVEX sources that no lane owns** (semantics/x86/x86-avx512.lisp:219): VPERM*, VPERMI2*, VPERMT2*, VALIGN*, VPALIGNR, VDBPSADBW, VPCONFLICT* and the count of VPSLL* and its kin load only if some lane is let through. This rests on a load having no effect but its fault, and on faults of these not being modelled (semantics/x86/x86-avx512.lisp:162), and not on the SDM, which isn't here; LLVM's tables say nothing of fault suppression. The values are the same either way (BapTests/LLVM.lean:1806). If the SDM's class for one of these is "no fault suppression", as is remembered of them, hardware would fault where this doesn't, with a masked lane on an unmapped page.
+11. **What each target leaves out**, each as a comment where it is: x86 exceptions (semantics/x86/x86-avx512.lisp:162) and `x86-sse-intrinsics.lisp` (semantics/x86/x86-sse-intrinsics.lisp:14 on); reservations and FPSCR on PowerPC (semantics/powerpc/powerpc.lisp:621 on); reservations and hardware registers on MIPS (semantics/mips/mips.lisp:261 on); the exclusive monitor on ARM (semantics/arm/arm-a32-mem.lisp:170, semantics/arm/thumb2.lisp:244); AArch64 (semantics/arm/aarch64-special.lisp:39 on, semantics/arm/aarch64-float.lisp:11); extensions and counters on RISC-V (semantics/riscv/riscv.lisp:1503).
+12. **Callees in the analyses and the IR**: a call is taken to leave the environment as it is (Bap/Analysis/Slice.lean:375, Bap/Proofs/IR.lean:2572).
+
+## Premises of theorems
+
+These aren't trusted, but a theorem says nothing where they fail.
+
+13. `propagateConstants_fromSub` (Bap/Proofs/ConstProp.lean:2032) needs the blocks of a function to have different ids. Two blocks of one id can differ: `isSolved` of the unrestricted analysis fails and the restricted one's may not.
+14. `Bap.Proofs.Analysis` (Bap/Proofs/Analysis.lean:3201, Bap/Proofs/Analysis.lean:4929), and writes that don't wrap around the address space in `Bap.Proofs.Symbolic` (Bap/Proofs/Symbolic.lean:3271), which says what happens if they do.
+
+## Tested, not proved
+
+15. **The reader of SMT scripts on concrete text** (Bap/Proofs/SmtReader.lean:4): deliberately tested and not `decide`d, for the time it would take. Its laws are proved.
+16. **`BapTests` as a whole, for what its comparisons go beyond the theorems**: goldens of real binaries and the comparisons with upstream's output. Anything a theorem also says, as `propagateConstants` against its specification, is only a check that the two stay connected.
+
+Constant propagation with only what can be read (`propagateConstants_unrestricted`) and the x86 memo (`x86MemoStep_sound`, `apply_anywhere`) were on this list until they were proved. -/
 
 namespace Bap.Proofs
 

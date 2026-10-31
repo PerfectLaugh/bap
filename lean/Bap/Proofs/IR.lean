@@ -64,6 +64,8 @@ local macro "propagateAux" : term =>
   return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.propagateAux)
 local macro "keepReads" : term =>
   return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.keepReads)
+local macro "sameConsts" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.sameConsts)
 local macro "constReads" : term =>
   return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.constReads)
 local macro "hasSideEffect" : term =>
@@ -1359,7 +1361,7 @@ theorem eliminateDeadCode_keeps_last_protected (ps : List Var) (cfg : Cfg) {y : 
 
 private abbrev propStep (state : List Def × ConstEnv) (defn : Def) : List Def × ConstEnv :=
   let rhs := Bil.simplifyExp (Bil.substitute (constReplacements state.2) defn.rhs)
-  let env := match Constant.ofExp rhs with
+  let env := match Constant.ofDef defn.var rhs with
     | some constant => Assoc.put defn.var constant state.2
     | none => Assoc.remove defn.var state.2
   (state.1 ++ [{ defn with rhs := rhs }], env)
@@ -1718,7 +1720,14 @@ private theorem propStep_sim (defs : List Def) (acc : List Def) (c : ConstEnv) (
       intro k cst hm
       simp only at hm
       split at hm
-      · rename_i cc hof
+      · rename_i cc hof'
+        have hof : Constant.ofExp (Bil.simplifyExp (Bil.substitute (constReplacements c) d.rhs)) = some cc := by
+          simp only [Constant.ofDef] at hof'
+          split at hof'
+          · split at hof'
+            · exact hof' ▸ (by assumption)
+            · cases hof'
+          · cases hof'
         by_cases hk : k = d.var
         · subst hk
           rw [lookup_bind_same]
@@ -1876,11 +1885,29 @@ private theorem entryEnv_mem {cfg : Cfg} {exits : ExitEnvs} {t pred : Tid} {E : 
       · exact h₁
       · exact h₂ _ hm
 
+private theorem sameConsts_mem {a b : ConstEnv} (h : sameConsts a b = true) {e : Var × Constant} (he : e ∈ a) : e ∈ b := by
+  have hd : sameConsts a b = (a == b || (a.all (fun entry => Assoc.get entry.1 b == some entry.2) &&
+      b.all (fun entry => Assoc.get entry.1 a == some entry.2))) := rfl
+  rw [hd] at h
+  simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at h
+  rcases h with rfl | ⟨h, _⟩
+  · exact he
+  · have hg := List.all_eq_true.1 h e he
+    simp only [beq_iff_eq] at hg
+    exact get_mem_env' hg
+
 private theorem isSolved_spec {cfg : Cfg} {reads : List (Tid × List Var)} {exits : ExitEnvs} (h : isSolved cfg reads exits = true) {blk : Blk}
     (hb : blk ∈ cfg.blocks) :
-    Assoc.get blk.tid exits = some (keepReads reads blk.tid (propagateBlock blk (entryEnv cfg exits blk.tid)).2) := by
-  have := List.all_eq_true.1 h blk hb
-  simpa using this
+    ∃ known, Assoc.get blk.tid exits = some known ∧
+      ∀ e ∈ known, e ∈ keepReads reads blk.tid (propagateBlock blk (entryEnv cfg exits blk.tid)).2 := by
+  have h₁ := List.all_eq_true.1 h blk hb
+  cases hget : Assoc.get blk.tid exits with
+  | none =>
+    rw [hget] at h₁
+    cases h₁
+  | some known =>
+    rw [hget] at h₁
+    exact ⟨known, rfl, fun e he => sameConsts_mem h₁ he⟩
 
 /-- At a fixpoint, the constants the analysis assigns to a block entry hold on every run. -/
 theorem fixpoint_constants_hold {cfg : Cfg} {reads : List (Tid × List Var)} {exits : ExitEnvs} (hsolved : isSolved cfg reads exits = true)
@@ -1906,13 +1933,13 @@ theorem fixpoint_constants_hold {cfg : Cfg} {reads : List (Tid × List Var)} {ex
     rw [hagree k hnot']
     have hc := ih hp
     obtain ⟨hmem, htid⟩ := block_some hp
-    have hget := isSolved_spec hsolved hmem
-    rw [htid] at hget
+    obtain ⟨known, hget, hsub⟩ := isSolved_spec hsolved hmem
+    rw [htid] at hget hsub
     obtain ⟨_, _, _, _, hout, _⟩ := propagateBlock_sim hc hexec
     have hpred : t ∈ cfg.predecessors t' := by
       have := (Bap.Graph.successors_mem cfg.graph t t').1 hsucc
       exact (mem_predecessors' _ _ _).2 this
-    exact hout k c (List.mem_filter.1 (entryEnv_mem hentry hpred hget)).1
+    exact hout k c (List.mem_filter.1 (hsub _ (entryEnv_mem hentry hpred hget))).1
 
 private abbrev solution (cfg : Cfg) : ExitEnvs :=
   propagateAux cfg.prune (constReads cfg.prune)

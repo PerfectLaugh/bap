@@ -165,6 +165,19 @@ private def regressions : IO Unit := do
     | [read, _] => assertEqual "entry state stays unknown" (expString (.var x)) (expString read.rhs)
     | _ => throw <| IO.userError "missing entry definitions"
   | none => throw <| IO.userError "missing entry block"
+  -- Knowing a factor keeps `x * 0`: this is what `Bap.Proofs.IR.simplify_mono` needs of the rules.
+  let stuckZero : Bil.Exp := .ite (.bin .mul (.var (Var.mk "u" (.imm 1) 0 false)) (.int (0#1))) (.int (5#8)) (.int (0#8))
+  assertEqual "literal times literal zero, under a stuck operand" (expString (.int (0#8)))
+    (expString (Bil.simplifyExp (.bin .mul (.bin .add stuckZero (.int (7#8))) (.int (0#8)))))
+  -- A value of the wrong type isn't a constant of the variable: `x * 0` of 64 bits stays 0.
+  let wide : Var := Var.mk "wide" (.imm 64) 0 false
+  let narrowed : Sub := ⟨1, "narrowed", [], [⟨1, [], [⟨1, wide, .int (5#8)⟩, ⟨2, x, .bin .mul (.var wide) (.int (0#64))⟩], []⟩]⟩
+  match (propagateConstants (Cfg.fromSub narrowed)).block 1 with
+  | some block =>
+    match block.defs with
+    | [_, read] => assertEqual "ill-typed value not propagated" (expString (.int (0#64))) (expString read.rhs)
+    | _ => throw <| IO.userError "missing narrowed definitions"
+  | none => throw <| IO.userError "missing narrowed block"
   let straight : Sub := ⟨1, "straight", [], [⟨1, [], [], [goto 1 2]⟩, ⟨2, [], [], []⟩]⟩
   let (ins, outs) := (Cfg.fromSub straight).livenessFrom 2 [x]
   assertTrue "seed live out of the exit" ((Assoc.get 2 outs).getD [] |>.contains x)

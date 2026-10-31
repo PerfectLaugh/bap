@@ -1050,20 +1050,25 @@ def decodeAArch64With (globals : Primus.Semantics.Environment) (base address : N
 def decodeAArch64 (base address : Nat) (data : ByteArray) : IO Disasm.Insn := do
   decodeAArch64With (← aarch64Environment) base address data
 
-private def x86MCOperands (globals : Primus.Semantics.Environment)
-    (opcode : Nat) (operands : List LLVM.MCOperand) :
-    IO (List Primus.Semantics.Value) := do
+/-- What the operands of the machine are to the semantics, which is a function of what the memo has for them. -/
+private def x86OperandValues (globals : Primus.Semantics.Environment) (opcode : Nat) (operands : List LLVM.MCOperand) :
+    Except String (List Primus.Semantics.Value) :=
   operands.mapM fun value =>
     match value with
     | .reg id =>
       match globals.registers.get? id with
-      | some value => pure value
-      | none => throw <| IO.userError s!"unknown x86 register ID {id}"
+      | some value => .ok value
+      | none => .error s!"unknown x86 register ID {id}"
     | .imm value =>
       if globals.signExtendedOpcodes.contains opcode then
-        pure (.bil 64 (.int (BitVec.signExtend 64 (BitVec.ofInt 32 value))))
+        .ok (.bil 64 (.int (BitVec.signExtend 64 (BitVec.ofInt 32 value))))
       else
-        pure (.bil 64 (.int (BitVec.ofInt 64 value)))
+        .ok (.bil 64 (.int (BitVec.ofInt 64 value)))
+
+private def x86MCOperands (globals : Primus.Semantics.Environment)
+    (opcode : Nat) (operands : List LLVM.MCOperand) :
+    IO (List Primus.Semantics.Value) :=
+  IO.ofExcept (x86OperandValues globals opcode operands)
 
 private def x86MCTarget (bits : Nat) (globals : Primus.Semantics.Environment) (next : Nat) (opcode : Nat)
     (operands : List LLVM.MCOperand) : Option Nat :=
@@ -1167,19 +1172,17 @@ def evexOpcode? (name : String) : Option EvexOpcode :=
 A mask instruction is defined by its name. Another opcode is a form of a family, which is a definition that takes the form
 and the operands, or the same as an opcode without EVEX, unless it has a register that only AVX-512 has. Anything else has
 no semantics, which is an error. -/
-private def liftAvx (triple : String) (environment : IO Primus.Semantics.Environment) (context : Primus.Semantics.Context)
-    (bytes : ByteArray) (address : Nat) (operands : List Primus.Semantics.Value) : IO Bil.Program := do
-  let name := (← LLVM.disassemble triple bytes address).opcode
-  let globals ← environment
-  let undefined := IO.userError s!"Primus semantics has no definition for LLVM opcode {name}"
+private def avxCode (globals : Primus.Semantics.Environment) (context : Primus.Semantics.Context) (name : String)
+    (operands : List Primus.Semantics.Value) : Except String Bil.Program :=
+  let undefined := s!"Primus semantics has no definition for LLVM opcode {name}"
   if globals.instructions.contains name then
-    Primus.Semantics.liftWith globals context name operands
+    Primus.Semantics.liftWithCode globals context name operands
   else if name.endsWith "_EVEX" && globals.instructions.contains ((name.dropEnd 5).toString) then
     -- the same instruction with the prefix of APX, of the same operands
-    Primus.Semantics.liftWith globals context ((name.dropEnd 5).toString) operands
+    Primus.Semantics.liftWithCode globals context ((name.dropEnd 5).toString) operands
   else
     match evexOpcode? name with
-    | none => throw undefined
+    | none => .error undefined
     | some opcode =>
       let family := s!"evex:{opcode.family}"
       if globals.operations.contains family then
@@ -1202,7 +1205,7 @@ private def liftAvx (triple : String) (environment : IO Primus.Semantics.Environ
         let globals := match rounding ++ format with
           | [] => globals
           | bound => { globals with globals := bound ++ globals.globals }
-        Primus.Semantics.liftWith globals context family
+        Primus.Semantics.liftWithCode globals context family
           [.list (word opcode.width :: word opcode.memory :: word opcode.masking :: word opcode.immediate :: operands)]
       else
         let vexRegisters := operands.all fun operand =>
@@ -1210,16 +1213,36 @@ private def liftAvx (triple : String) (environment : IO Primus.Semantics.Environ
           | .register name width _ => width ≠ 512 && !name.startsWith "K"
           | _ => true
         if vexRegisters && globals.instructions.contains opcode.vexName then
-          Primus.Semantics.liftWith globals context opcode.vexName operands
+          Primus.Semantics.liftWithCode globals context opcode.vexName operands
         else
-          throw undefined
+          .error undefined
 
-/-- The code of an instruction: what its opcode is defined as, or else what AVX-512 has. -/
+/-- The code of an x86 instruction: what its opcode is defined as, or, with the name of an opcode that isn't, what AVX-512 has. -/
+private def x86Code (globals avx : Primus.Semantics.Environment) (context : Primus.Semantics.Context) (opcode : Nat)
+    (name : Option String) (operands : List Primus.Semantics.Value) : Except String Bil.Program :=
+  match name with
+  | none => Primus.Semantics.liftMCCode globals context opcode operands
+  | some name => avxCode avx context name operands
+
+/-- The name of an opcode that its environment doesn't define. -/
+private def x86AvxName (triple : String) (globals : Primus.Semantics.Environment) (bytes : ByteArray) (address opcode : Nat) :
+    IO (Option String) :=
+  if globals.opcodes.contains opcode then pure none
+  else return some (← LLVM.disassemble triple bytes address).opcode
+
+/-- The environment of AVX-512, if it is what the code is from. -/
+private def x86AvxOf (avx : IO Primus.Semantics.Environment) (globals : Primus.Semantics.Environment) (name : Option String) :
+    IO Primus.Semantics.Environment :=
+  match name with
+  | none => pure globals
+  | some _ => avx
+
+/-- The code of an instruction, wherever it is. -/
 private def x86Lift (triple : String) (avx : IO Primus.Semantics.Environment) (globals : Primus.Semantics.Environment)
     (context : Primus.Semantics.Context) (bytes : ByteArray) (address opcode : Nat)
-    (operands : List Primus.Semantics.Value) : IO Bil.Program :=
-  if globals.opcodes.contains opcode then Primus.Semantics.liftMC globals context opcode operands
-  else liftAvx triple avx context bytes address operands
+    (operands : List Primus.Semantics.Value) : IO Bil.Program := do
+  let name ← x86AvxName triple globals bytes address opcode
+  IO.ofExcept (x86Code globals (← x86AvxOf avx globals name) context opcode name operands)
 
 instance : Hashable LLVM.MCOperand where
   hash
@@ -1231,14 +1254,17 @@ structure LiftKey where
   opcode : Nat
   operands : List LLVM.MCOperand
   prefixes : Option (List Nat)
-  deriving BEq, Hashable
+  name : Option String
+  deriving DecidableEq, Hashable
 
-/-- The code of the x86 instructions of one disassembler so far: most of a binary is the same few instructions. -/
-abbrev LiftMemo := Std.HashMap LiftKey Bil.Program
+/-- The code of the x86 instructions of one disassembler so far: most of a binary is the same few instructions. It has
+`none` for an instruction whose code depends on where it is. -/
+abbrev LiftMemo := Std.HashMap LiftKey (Option Bil.Program)
 
-/-- Whether the code of an instruction doesn't depend on its address. The semantics of x86 only ask for the program counter
-in `relative`, for the opcodes in `relativeOpcodes`, in `call`, whose flow says so, and in `ea` for the base register RIP. -/
-private def x86AnywhereCode (globals : Primus.Semantics.Environment) (decoded : LLVM.MCDecoded) (opcode : Nat)
+/-- Whether it is worth looking for an instruction in the memo. This is only for speed: most of these don't depend on their
+address, and every other one would be lifted twice the first time it is seen, as jumps have an operand of their own. Whether
+the code depends on the address is what `x86Memoized` finds out. -/
+private def x86WorthMemo (globals : Primus.Semantics.Environment) (decoded : LLVM.MCDecoded) (opcode : Nat)
     (operands : List Primus.Semantics.Value) : Bool :=
   (match flow decoded.flags with | .normal => true | _ => false) && !globals.relativeOpcodes.contains opcode &&
     operands.all fun operand =>
@@ -1246,19 +1272,33 @@ private def x86AnywhereCode (globals : Primus.Semantics.Environment) (decoded : 
       | .register name _ _ => name != "RIP"
       | _ => true
 
-/-- `lift`, unless it was done for the same instruction and it can't depend on where this one is. -/
-private def x86Memoized (memo : IO.Ref LiftMemo) (anywhere : Bool) (key : LiftKey) (lift : IO Bil.Program) : IO Bil.Program := do
-  if anywhere then
-    match (← memo.get).get? key with
-    | some program => pure program
+/-- What is known of an instruction, what to use of it instead of lifting at its address, and what to add to the memo: the
+code from a run that doesn't know the address if it succeeds, as it is the code at every address. -/
+private def x86MemoStep (known : Option (Option Bil.Program)) (worth : Bool) (anywhere : Unit → Except String Bil.Program) :
+    Option Bil.Program × Option (Option Bil.Program) :=
+  if worth then
+    match known with
+    | some program => (program, none)
     | none =>
-      let program ← lift
-      memo.modify (·.insert key program)
-      pure program
-  else
-    lift
+      match anywhere () with
+      | .ok program => (some program, some (some program))
+      | .error _ => (none, some none)
+  else (none, none)
 
-/-- `decodeX86With`, which it is for all that the tests compare, looking up what the same instruction was lifted to before. -/
+/-- The code of an instruction from the memo, or lifted at its address. -/
+private def x86Memoized (memo : IO.Ref LiftMemo) (worth : Bool) (key : LiftKey) (finish : Bil.Program → Bil.Program)
+    (code : Primus.Semantics.Context → Except String Bil.Program) (context : Primus.Semantics.Context) : IO Bil.Program := do
+  let (reused, record) := x86MemoStep ((← memo.get).get? key) worth
+    fun _ => (code { context with addressed := false }).map finish
+  match record with
+  | some entry => memo.modify (·.insert key entry)
+  | none => pure ()
+  match reused with
+  | some program => pure program
+  | none => return finish (← IO.ofExcept (code context))
+
+/-- `decodeX86With`, looking up what the same instruction was lifted to before. Only what has its code from a run that doesn't
+know the address is ever in the memo, which is the code at every address (`Bap.Proofs.Target.x86MemoStep_sound`). -/
 def decodeX86Memo (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : IO Disasm.Insn := do
   let bytes := instructionBytes data (address - base)
@@ -1267,8 +1307,10 @@ def decodeX86Memo (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environme
   let opcode := LLVM.mcOpcode decoded.instruction
   let machineOperands ← LLVM.mcOperands decoded.instruction
   let operands ← x86MCOperands globals opcode machineOperands
-  let bil ← x86Memoized memo (x86AnywhereCode globals decoded opcode operands) ⟨opcode, machineOperands, context.prefixes⟩ do
-    pure (resolveAliases (x86Aliases x86HighByteBase 64) (← x86Lift "x86_64" x86AvxEnvironment globals context bytes address opcode operands))
+  let name ← x86AvxName "x86_64" globals bytes address opcode
+  let avx ← x86AvxOf x86AvxEnvironment globals name
+  let bil ← x86Memoized memo (x86WorthMemo globals decoded opcode operands) ⟨opcode, machineOperands, context.prefixes, name⟩
+    (resolveAliases (x86Aliases x86HighByteBase 64)) (x86Code globals avx · opcode name operands) context
   pure {
     address := address
     size := decoded.size
@@ -1332,8 +1374,10 @@ def decodeX8632Memo (memo : IO.Ref LiftMemo) (globals : Primus.Semantics.Environ
     match Primus.Semantics.machineOperand globals context value with
     | .ok operand => pure operand
     | .error error => throw <| IO.userError error
-  let bil ← x86Memoized memo (x86AnywhereCode globals decoded opcode operands) ⟨opcode, machineOperands, context.prefixes⟩ do
-    pure (resolveAliases (x86Aliases x8632HighByteBase 32) (← x86Lift "i386" x8632AvxEnvironment globals context bytes address opcode operands))
+  let name ← x86AvxName "i386" globals bytes address opcode
+  let avx ← x86AvxOf x8632AvxEnvironment globals name
+  let bil ← x86Memoized memo (x86WorthMemo globals decoded opcode operands) ⟨opcode, machineOperands, context.prefixes, name⟩
+    (resolveAliases (x86Aliases x8632HighByteBase 32)) (x86Code globals avx · opcode name operands) context
   pure {
     address := address
     size := decoded.size
