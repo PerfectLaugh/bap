@@ -821,10 +821,14 @@ def aarch64_shapes():
     return shapes
 
 
+SVE_PREDICATES = [f"P{i}" for i in range(16)] + ["FFR"]
+
+
 class AArch64(Risc):
     name = "aarch64"
     word = 8
-    runner = ["qemu-aarch64", "-cpu", "max"]
+    # SVE has a vector length of 128 bits in the lifter, see semantics/arm/aarch64-sve.lisp
+    runner = ["qemu-aarch64", "-cpu", "max,sve-max-vq=1"]
     cflags = ["--target=aarch64-linux-gnu"]
     lean = "aarch64"
     mc_triple = "aarch64-linux-gnu"
@@ -834,11 +838,11 @@ class AArch64(Risc):
     gpr_slots = [f"X{i}" for i in range(31)] + ["SP"]
     gprs = [(f"X{i}", 64) for i in range(31)] + [("SP", 64)]
     flags = [("NF", 31), ("ZF", 30), ("CF", 29), ("VF", 28)]
-    vectors = [(f"Q{i}", 128) for i in range(32)]
+    vectors = [(f"Q{i}", 128) for i in range(32)] + [(f"P{i}", 16) for i in range(16)] + [("FFR", 16)]
     default_pins = {"SP": "window+256"}
     base_pins = {"X5": "window+248", "X6": 8}
     semantics = ["arm/aarch64-arithmetic.lisp", "arm/aarch64-atomic.lisp", "arm/aarch64-branch.lisp", "arm/aarch64-data-movement.lisp", "arm/aarch64-float.lisp",
-        "arm/aarch64-logical.lisp", "arm/aarch64-pstate.lisp", "arm/aarch64-simd.lisp", "arm/aarch64-special.lisp"]
+        "arm/aarch64-logical.lisp", "arm/aarch64-pstate.lisp", "arm/aarch64-simd.lisp", "arm/aarch64-special.lisp", "arm/aarch64-sve.lisp"]
     mnemonics_of = staticmethod(aarch64_stems)
     excluded_prefix = ("SVC", "HVC", "SMC", "BRK", "HLT", "HINT", "SYS", "MSR", "MRS", "DCPS", "ERET", "DRPS", "CLREX", "WFE", "WFI", "PAC", "AUT", "XPAC", "RET", "BLRA", "BRA", "ERETA", "LDRAA", "LDRAB", "UDF", "GCS", "RNDR", "TSB", "CSDB", "PSB", "STXR", "STXP", "STLXR", "STLXP", "LDXR", "LDXP", "LDAXR", "LDAXP")
     pc_mask = 0
@@ -859,6 +863,9 @@ class AArch64(Risc):
         base = (32 + 2) * 8
         for index in range(32):
             out[base + index * 16 : base + (index + 1) * 16] = values[f"Q{index}"].to_bytes(16, "little")
+        base += 32 * 16
+        for index, name in enumerate(SVE_PREDICATES):
+            out[base + index * 2 : base + (index + 1) * 2] = values[name].to_bytes(2, "little")
 
     def decode_extra(self, data, result):
         word = self.extra_word(data, 0)
@@ -867,6 +874,87 @@ class AArch64(Risc):
         base = (32 + 2) * 8
         for index in range(32):
             result[f"Q{index}"] = int.from_bytes(data[base + index * 16 : base + (index + 1) * 16], "little")
+        base += 32 * 16
+        for index, name in enumerate(SVE_PREDICATES):
+            result[name] = int.from_bytes(data[base + index * 2 : base + (index + 1) * 2], "little")
+
+    def shape(self, case, values, index, rng):
+        """The predicates: of each size of an element, of the edges, and any. FFR is monotonic, as what writes it must be."""
+        for name in SVE_PREDICATES[:-1]:
+            values[name] = rng.choice([0xFFFF, 0x5555, 0x1111, 0x0101, 0, (1 << rng.randrange(17)) - 1, rng.getrandbits(16), rng.getrandbits(16)])
+        values["FFR"] = (1 << rng.randrange(17)) - 1
+        # what a first-fault load leaves after a clear bit of FFR is constrained unpredictable
+        if case.text.startswith(("ldff1", "ldnf1")):
+            values["FFR"] = 0xFFFF
+            # qemu 10.2 reads all zeros, with FFR as it was, if the element 0 of a contiguous one is inactive, which the Arm ARM
+            # doesn't allow, so that isn't compared; gathers don't do this
+            if "z" not in re.search(r"\[[^\]]*\]", case.text).group(0):
+                governing = "P" + re.search(r"p(\d+)/z", case.text).group(1)
+                values[governing] |= 1
+        written = re.match(r"wrffr\s+p(\d+)", case.text)
+        if written:
+            values[f"P{written.group(1)}"] = (1 << rng.randrange(17)) - 1
+
+    def cases(self, opcodes, assemble, layout):
+        # the operand forms of the assembler are of the others, SVE has a corpus of its own
+        self.sve_opcodes = {name for name, path in opcodes.items() if path.endswith("-sve.lisp")}
+        Case = case_type()
+        result = super().cases({name: path for name, path in opcodes.items() if name not in self.sve_opcodes}, assemble, layout)
+        for code, text in corpus_lines("aarch64-sve"):
+            pins = self.sve_memory(text, layout)
+            if pins is not None:
+                result.append(Case(code=code, text=text, pins=pins))
+        return result
+
+    def excluded(self, opcode, case):
+        return None if opcode in self.sve_opcodes else super().excluded(opcode, case)
+
+    def sve_memory(self, text, layout):
+        """The registers of the addressing of an SVE instruction, held to the window, or None if it can't be run here."""
+        found = re.search(r"\[([^\]]*)\]", text)
+        if not found or text.startswith(("adr", "prf")):
+            return {}
+        parts = [part.strip() for part in found.group(1).split(",")]
+        base, pins = parts[0], {}
+
+        def number(token):
+            return int(token.lstrip("#"), 0)
+
+        def lanes(register, make):
+            bits = {"s": 32, "d": 64}[register.split(".")[1]]
+
+            def value(index, rng):
+                return sum((make(rng) & ((1 << bits) - 1)) << (lane * bits) for lane in range(128 // bits))
+
+            return {"Q" + register.split(".")[0][1:]: value}
+
+        if base.startswith("z"):
+            # the elements of the vector are the addresses, and the immediate goes up to 248
+            window = layout["window"]
+            pins.update(lanes(base, lambda rng: window + rng.randrange(128)))
+            return pins
+        offset = parts[1] if len(parts) > 1 else ""
+        if offset.startswith("z"):
+            # the offsets are small either way, a scale is up to 8
+            low = 0 if "uxtw" in found.group(1) else -16
+            pins.update(lanes(offset, lambda rng: rng.randrange(low, 24)))
+            displacement = 128
+        elif offset.startswith(("x", "w")):
+            if offset == base:
+                return None
+            pins[offset.upper()] = 8
+            displacement = 240
+        elif offset:
+            displacement = 240 - number(offset) * (16 if "mul" in found.group(1) else 1)
+            if not 0 <= displacement <= 400:
+                return None
+        else:
+            displacement = 240
+        if base != "sp":
+            pins[base.upper()] = f"window+{displacement}"
+        elif displacement != 240:
+            pins["SP"] = f"window+{displacement}"
+        return pins
 
     def hand(self, assemble, layout):
         conds = ["eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al", "nv"]

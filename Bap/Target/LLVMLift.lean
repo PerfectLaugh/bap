@@ -245,6 +245,21 @@ private def x86Aliases (base : String → Option String) (width : Nat) (name : S
   else
     (base name).map fun base => (⟨base, width, 15, 8⟩, [])
 
+/-- A list of Z registers of the loads and stores of structures, e.g., `Z31_Z0`. -/
+private def aarch64SveList (name : String) : Bool :=
+  match name.splitOn "_" with
+  | parts@(_ :: _ :: _) => parts.all fun part =>
+    part.startsWith "Z" && !(part.drop 1).isEmpty && (part.drop 1).all Char.isDigit
+  | _ => false
+
+/-- The registers of SVE, at the vector length of 128 bits that `*sve-vl*` of `aarch64-sve.lisp` has too: Zn is the variable of
+Vn, a list of them is the list of the Q registers, which the semantics take by its name, and Pn and FFR have a bit for each byte
+of a vector. -/
+private def aarch64SveRegister (name : String) : Primus.Semantics.Value :=
+  if aarch64SveList name then .register (name.replace "Z" "Q") 64 64
+  else if name.startsWith "Z" then .register ("Q" ++ name.drop 1) 128 128
+  else .register name 16 16
+
 /-- The list of consecutive registers, e.g., `Q31_Q0` or `D2_D3_D4`. -/
 private def aarch64RegisterList (name : String) : Bool :=
   match name.splitOn "_" with
@@ -571,8 +586,8 @@ private initialize aarch64Cache : IO.Ref (Option Primus.Semantics.Environment) �
 
 def aarch64Environment : IO Primus.Semantics.Environment := cached aarch64Cache do
   let context := semanticsContext 0 0
-  let definitions ← Primus.Semantics.loadMany (← pluginDirectories "arm") ["aarch64"] context
-  let environment ← compiledDefinitions [] "aarch64" aarch64Globals definitions
+  let definitions ← Primus.Semantics.loadMany (← pluginDirectories "arm") ["aarch64", "aarch64-sve"] context
+  let environment ← compiledDefinitions [] "aarch64" (aarch64Globals ++ [("FFR", aarch64SveRegister "FFR")]) definitions
   let names := (List.range 31).flatMap (fun n => [s!"X{n}", s!"W{n}"]) ++
     (List.range 32).flatMap (fun n => [s!"B{n}", s!"H{n}", s!"S{n}", s!"D{n}", s!"Q{n}"]) ++
     ["SP", "WSP", "XZR", "WZR"]
@@ -581,9 +596,12 @@ def aarch64Environment : IO Primus.Semantics.Environment := cached aarch64Cache 
     let id ← LLVM.registerId "aarch64" llvmName
     pure (id, aarch64Register name)
   -- the lists of registers of the loads and stores of structures, of TBL and of CASP, which the semantics take by their names
-  let lists := (← LLVM.registerNames "aarch64").filter fun entry =>
-    aarch64RegisterList entry.2 || aarch64RegisterPair entry.2
-  pure (environment.withRegisters (registers ++ lists.map fun entry => (entry.1, aarch64Register entry.2)))
+  let all ← LLVM.registerNames "aarch64"
+  let lists := all.filter fun entry => aarch64RegisterList entry.2 || aarch64RegisterPair entry.2
+  let sve := all.filter fun entry =>
+    aarch64SveList entry.2 || ((List.range 32).map (s!"Z{·}") ++ (List.range 16).map (s!"P{·}")).contains entry.2
+  pure (environment.withRegisters (registers ++ lists.map (fun entry => (entry.1, aarch64Register entry.2)) ++
+    sve.map fun entry => (entry.1, aarch64SveRegister entry.2)))
 
 private initialize x86Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 

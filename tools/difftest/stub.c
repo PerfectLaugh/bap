@@ -23,7 +23,8 @@
 #define WORD unsigned long long
 #define NGPR 32
 #define NEXTRA 2
-#define VECBYTES (32 * 16)
+// the V registers, which are the Z registers at a vector length of 128 bits, P0 to P15, FFR, and padding
+#define VECBYTES (32 * 16 + 40)
 #elif defined(__arm__)
 #define WORD unsigned int
 #define NGPR 16
@@ -369,6 +370,7 @@ taken:
 )ASM");
 #elif defined(__aarch64__)
 __asm__(R"ASM(
+  .arch_extension sve
   .text
   .globl _start
 _start:
@@ -393,6 +395,13 @@ enter:
   add x0, x30, #272
   .irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
   ldr q\r, [x0], #16
+  .endr
+  add x1, x0, #32
+  ldr p0, [x1]
+  wrffr p0.b
+  .irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+  ldr p\r, [x0]
+  add x0, x0, #2
   .endr
   ldr x0, [x30, #256]
   msr nzcv, x0
@@ -420,6 +429,12 @@ enter:
   .irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
   str q\r, [x0], #16
   .endr
+  .irp r,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+  str p\r, [x0]
+  add x0, x0, #2
+  .endr
+  rdffr p0.b
+  str p0, [x0]
   .endm
 fall_save:
   SAVE
