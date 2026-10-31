@@ -1,5 +1,6 @@
 import Bap.Analysis.Xrefs
 import Std.Data.HashMap
+import Std.Data.HashSet
 
 namespace Bap.Analysis.Slice
 
@@ -15,6 +16,14 @@ inductive Location where
   /-- All of one memory variable, which is what a read at an address that is not known needs. -/
   | whole (memory : Bap.Var)
   deriving DecidableEq, Repr
+
+instance : Hashable Location where
+  hash
+    | .reg var => mixHash 1 (hash var)
+    | .mem address size => mixHash 2 (mixHash (hash address) (hash size))
+    | .memOf memory address size => mixHash 3 (mixHash (hash memory) (mixHash (hash address) (hash size)))
+    | .rel memory base offset size => mixHash 4 (mixHash (hash memory) (mixHash (hash base) (mixHash (hash offset) (hash size))))
+    | .whole memory => mixHash 5 (hash memory)
 
 namespace Location
 
@@ -474,79 +483,327 @@ private def successorTable (instructions : List Disasm.Insn) (edges : List (Nat 
   edges.foldl (fun table edge =>
     if listed.contains edge.2 then table.insert edge.1 (edge.2 :: table.getD edge.1 []) else table) {}
 
-/-- The union of two sets kept as lists, the first in its order. -/
-private def addAll (live additions : List Location) : List Location :=
-  additions.foldl (fun live location => if live.contains location then live else location :: live) live
+/-! The solver. It computes what passes over the listing would, with an entry per address, each pass going through the
+listing backwards and an instruction taking what it finds as it stands then, so the lists it ends with are the same ones
+in the same order and a budget of passes runs out in the same place. Three things keep it from doing that work:
 
-/-- One backward pass over the sites and liveness: an instruction joins the sites when it writes
-something live after it, and the tables only ever grow. Returns whether anything changed. -/
-private def livenessPass (code : List Disasm.Insn) (successors : Std.HashMap Nat (List Nat))
-    (criteria : List Location) (table : Std.HashMap Nat Entry) : Std.HashMap Nat Entry × Bool :=
-  code.foldl (init := (table, false)) fun state insn =>
-    let (table, changed) := state
-    let entry := table.getD insn.address {}
-    let next := successors.getD insn.address []
-    let after := next.foldl (fun live target => addAll live (table.getD target {}).before) entry.after
-    let after := if mayEnd insn next then addAll after criteria else after
-    let site := entry.site || relevant after (blockInfo insn.bil)
-    let before := addAll entry.before (if site then insnBefore insn.bil after else after)
-    let grew := site != entry.site || before.length != entry.before.length || after.length != entry.after.length
-    (table.insert insn.address { entry with site, before, after }, changed || grew)
+- Locations are numbered once per slice, and a set of them is a list of numbers and a bitset of what it holds.
+- An instruction is only visited if something it reads changed. Visiting any other changes nothing.
+- The sets only grow by putting locations in front, so what an instruction has not seen of a set is a prefix of it. What
+  must agree before it is some fixed locations and images of each location live after it, one at a time, so what a set
+  gained is all it needs to take through its code, once it has taken it all there once. Most locations are not what an
+  instruction assigns, which tells without going through the code. -/
 
-private def livenessFix (code : List Disasm.Insn) (successors : Std.HashMap Nat (List Nat))
-    (criteria : List Location) : Nat → Std.HashMap Nat Entry → Std.HashMap Nat Entry
-  | 0, table => table
-  | fuel + 1, table =>
-    let (table, changed) := livenessPass code successors criteria table
-    if changed then livenessFix code successors criteria fuel table else table
+/-- Locations by number. `marks` has a bit per variable of each location, and all of them for one that is in no variable
+in particular, so that a location and a set of variables with no bit in common have no variable in common. -/
+private structure Numbering where
+  numbers : Std.HashMap Location Nat := {}
+  locations : Array Location := #[]
+  marks : Array UInt64 := #[]
+  variables : Std.HashMap Bap.Var UInt64 := {}
 
-/-- One backward pass of what runs next, given the sites. -/
-private def nextPass (code : List Disasm.Insn) (successors : Std.HashMap Nat (List Nat))
-    (table : Std.HashMap Nat Entry) : Std.HashMap Nat Entry × Bool :=
-  code.foldl (init := (table, false)) fun state insn =>
-    let (table, changed) := state
-    let entry := table.getD insn.address {}
-    if entry.site then
-      let next := .site insn.address
-      (table.insert insn.address { entry with next }, changed || entry.next != next)
+/-- The bit of a variable. Past 64 of them they share. -/
+private def Numbering.bit (numbering : Numbering) (var : Bap.Var) : UInt64 × Numbering :=
+  match numbering with
+  | ⟨numbers, locations, marks, variables⟩ =>
+    match variables[var]? with
+    | some bit => (bit, ⟨numbers, locations, marks, variables⟩)
+    | none =>
+      let bit : UInt64 := 1 <<< UInt64.ofNat (variables.size % 64)
+      (bit, ⟨numbers, locations, marks, variables.insert var bit⟩)
+
+/-- The bits of some variables. -/
+private def Numbering.bits (numbering : Numbering) (vars : List Bap.Var) : UInt64 × Numbering :=
+  vars.foldl (init := (0, numbering)) fun state var =>
+    let (bit, numbering) := state.2.bit var
+    (state.1 ||| bit, numbering)
+
+private def Location.mark (location : Location) (numbering : Numbering) : UInt64 × Numbering :=
+  match location with
+  | .reg var | .whole var | .memOf var _ _ => numbering.bit var
+  | .rel memory base _ _ => numbering.bits [memory, base]
+  | .mem _ _ => (UInt64.ofNat (2 ^ 64 - 1), numbering)
+
+private def Numbering.number (numbering : Numbering) (location : Location) : Nat × Numbering :=
+  match numbering.numbers[location]? with
+  | some number => (number, numbering)
+  | none =>
+    let (mark, numbering) := location.mark numbering
+    match numbering with
+    | ⟨numbers, locations, marks, variables⟩ =>
+      (locations.size, ⟨numbers.insert location locations.size, locations.push location, marks.push mark, variables⟩)
+
+/-- The location of a number. -/
+private def Numbering.named (numbering : Numbering) (number : Nat) : Location :=
+  numbering.locations.getD number (.mem 0 0)
+
+/-- A set of numbers: `list` has its elements, each once and the last added first, `size` of them, and `bits` tells. -/
+private structure LiveSet where
+  list : List Nat := []
+  size : Nat := 0
+  bits : ByteArray := ByteArray.empty
+
+instance : Inhabited LiveSet := ⟨{}⟩
+
+/-- `bits` with room for the byte `index`. -/
+private def roomFor (bits : ByteArray) (index : Nat) : ByteArray :=
+  if index < bits.size then bits
+  else bits ++ ByteArray.mk (Array.replicate (2 * index + 16 - bits.size) 0)
+
+private def LiveSet.add (set : LiveSet) (number : Nat) : LiveSet :=
+  match set with
+  | ⟨list, size, bits⟩ =>
+    let index := number / 8
+    let mask : UInt8 := 1 <<< (UInt8.ofNat (number % 8))
+    let bits := roomFor bits index
+    let byte := bits.get! index
+    if byte &&& mask == 0 then ⟨number :: list, size + 1, bits.set! index (byte ||| mask)⟩ else ⟨list, size, bits⟩
+
+private def LiveSet.addAll (set : LiveSet) (numbers : List Nat) : LiveSet :=
+  numbers.foldl LiveSet.add set
+
+/-- `set` with `locations` numbered and added, in order. -/
+private def LiveSet.addLocations (set : LiveSet) (numbering : Numbering) :
+    List Location → LiveSet × Numbering
+  | [] => (set, numbering)
+  | location :: rest =>
+    let (number, numbering) := numbering.number location
+    LiveSet.addLocations (set.add number) numbering rest
+
+/-- The variables a statement assigns. -/
+private def stmtAssigned : Bil.Stmt → List Bap.Var
+  | .move var _ => [var]
+  | .jmp _ | .special _ | .cpuExn _ => []
+  | .while _ body => body.flatMap stmtAssigned
+  | .ifElse _ yes no => yes.flatMap stmtAssigned ++ no.flatMap stmtAssigned
+
+private def isPlain : Bil.Stmt → Bool
+  | .move .. | .jmp _ => true
+  | _ => false
+
+/-- An element of the listing, as `code` has them. `slot` is the place of its address in the tables. -/
+private structure Visit where
+  address : Nat
+  slot : Nat
+  bil : Bil.Program
+  info : Info
+  ends : Bool
+  /-- The bits of the variables it assigns. -/
+  moved : UInt64
+  /-- Nothing but assignments and jumps: what must agree before it is some fixed locations, then one location or none
+  for each location live after it, in order, and the same one if it has no bit in common with `moved`. -/
+  plain : Bool
+
+instance : Inhabited Visit := ⟨⟨0, 0, [], {}, false, 0, false⟩⟩
+
+/-- What does not change as the tables fill up. By slot: `edges` has the slots an address goes to, each with its number
+among all edges, `readers` the visits with an edge to it, and `peers` its own, more than one if the listing has an
+address twice. -/
+private structure Plan where
+  code : Array Visit
+  edges : Array (List (Nat × Nat))
+  readers : Array (List Nat)
+  peers : Array (List Nat)
+  criteria : List Nat
+
+/-- The tables, by slot, and how far each visit got, by visit: `done` is how much of `after` it took, `taken` whether it
+has been through its code, as `pending` and `ended` whether it has anything to look at or the criteria yet. `seen` is
+how much of what an edge goes to it got. -/
+private structure Tables where
+  after : Array LiveSet
+  before : Array LiveSet
+  site : Array Bool
+  next : Array Next
+  seen : Array Nat
+  done : Array Nat
+  taken : Array Bool
+  ended : Array Bool
+  pending : Array Bool
+  numbering : Numbering
+
+/-- What the edges in `edges` add to `set`, of which only what `seen` has not been told is news. -/
+private def pull (before : Array LiveSet) (edges : List (Nat × Nat)) (set : LiveSet) (seen : Array Nat) :
+    LiveSet × Array Nat :=
+  match edges with
+  | [] => (set, seen)
+  | (edge, target) :: rest =>
+    let source := before[target]!
+    let news := source.size - seen[edge]!
+    if news == 0 then pull before rest set seen
+    else pull before rest (set.addAll (source.list.take news)) (seen.set! edge source.size)
+
+private def mark (flags : Array Bool) (visits : List Nat) : Array Bool :=
+  visits.foldl (fun flags visit => flags.set! visit true) flags
+
+/-- `set` with what must agree before a plain instruction for `numbers` to agree after it, leaving aside what it reads
+whatever is live. -/
+private def LiveSet.addThrough (visit : Visit) (set : LiveSet) (numbering : Numbering) :
+    List Nat → LiveSet × Numbering
+  | [] => (set, numbering)
+  | number :: rest =>
+    if numbering.marks[number]! &&& visit.moved == 0 then
+      LiveSet.addThrough visit (set.add number) numbering rest
     else
-      let targets := successors.getD insn.address []
-      let start := if mayEnd insn targets then Next.exit else Next.never
-      let next := targets.foldl (fun next target => Next.join next (table.getD target {}).next) start
-      (table.insert insn.address { entry with next }, changed || entry.next != next)
+      let (set, numbering) := set.addLocations numbering (insnBefore visit.bil [numbering.named number])
+      LiveSet.addThrough visit set numbering rest
 
-private def nextFix (code : List Disasm.Insn) (successors : Std.HashMap Nat (List Nat)) :
-    Nat → Std.HashMap Nat Entry → Std.HashMap Nat Entry
-  | 0, table => table
-  | fuel + 1, table =>
-    let (table, changed) := nextPass code successors table
-    if changed then nextFix code successors fuel table else table
+/-- Visits an instruction: `true` if a table changed. -/
+private def livenessVisit (plan : Plan) (position : Nat) (tables : Tables) : Tables × Bool :=
+  match tables with
+  | ⟨after, before, site, next, seen, done, taken, ended, pending, numbering⟩ =>
+    let pending := pending.set! position false
+    let visit := plan.code[position]!
+    let slot := visit.slot
+    let set := after[slot]!
+    let after := after.set! slot {}
+    let sizeAfter := set.size
+    let (set, seen) := pull before plan.edges[slot]! set seen
+    let (set, ended) :=
+      if visit.ends && !ended[position]! then (set.addAll plan.criteria, ended.set! position true) else (set, ended)
+    let news := set.list.take (set.size - done[position]!)
+    let done := done.set! position set.size
+    let wasSite := site[slot]!
+    let isSite := wasSite || visit.info.always || news.any fun number =>
+      numbering.marks[number]! &&& visit.moved != 0 && relevant [numbering.named number] visit.info
+    let inputs := set.list
+    let sizeNow := set.size
+    let after := after.set! slot set
+    let gained := before[slot]!
+    let before := before.set! slot {}
+    let sizeBefore := gained.size
+    let first := isSite && !taken[position]!
+    let taken := if first then taken.set! position true else taken
+    let (gained, numbering) :=
+      if !isSite then (gained.addAll news, numbering)
+      else if visit.plain then
+        if first then
+          let (gained, numbering) := gained.addLocations numbering (insnBefore visit.bil [])
+          gained.addThrough visit numbering inputs
+        else gained.addThrough visit numbering news
+      else if first then gained.addLocations numbering (insnBefore visit.bil (inputs.map numbering.named))
+      else if news.isEmpty then (gained, numbering)
+      else gained.addLocations numbering (insnBefore visit.bil (news.map numbering.named))
+    let grewBefore := gained.size != sizeBefore
+    let before := before.set! slot gained
+    let site := if isSite != wasSite then site.set! slot isSite else site
+    let grew := isSite != wasSite || grewBefore || sizeNow != sizeAfter
+    let pending := if grewBefore then mark pending plan.readers[slot]! else pending
+    let pending :=
+      match plan.peers[slot]! with
+      | [_] => pending
+      | peers => if grew then mark pending (peers.filter (· != position)) else pending
+    (⟨after, before, site, next, seen, done, taken, ended, pending, numbering⟩, grew)
+
+/-- One pass over visits from `position`, the ones that are pending. -/
+private def livenessPass (plan : Plan) : Nat → Nat → Tables → Bool → Tables × Bool
+  | 0, _, tables, changed => (tables, changed)
+  | count + 1, position, tables, changed =>
+    if tables.pending[position]! then
+      let (tables, grew) := livenessVisit plan position tables
+      livenessPass plan count (position + 1) tables (changed || grew)
+    else
+      livenessPass plan count (position + 1) tables changed
+
+private def livenessFix (plan : Plan) : Nat → Tables → Tables
+  | 0, tables => tables
+  | fuel + 1, tables =>
+    let (tables, changed) := livenessPass plan plan.code.size 0 tables false
+    if changed then livenessFix plan fuel tables else tables
+
+/-- One pass of what runs next, given the sites, over the visits that are pending. -/
+private def nextPass (plan : Plan) (site : Array Bool) :
+    Nat → Nat → Array Next → Array Bool → Bool → Array Next × Array Bool × Bool
+  | 0, _, next, pending, changed => (next, pending, changed)
+  | count + 1, position, next, pending, changed =>
+    if pending[position]! then
+      let pending := pending.set! position false
+      let visit := plan.code[position]!
+      let slot := visit.slot
+      let found : Next :=
+        if site[slot]! then .site visit.address
+        else
+          (plan.edges[slot]!).foldl (fun found edge => Next.join found next[edge.2]!)
+            (if visit.ends then Next.exit else Next.never)
+      if next[slot]! == found then
+        nextPass plan site count (position + 1) next pending changed
+      else
+        let pending := mark pending plan.readers[slot]!
+        let pending :=
+          match plan.peers[slot]! with
+          | [_] => pending
+          | peers => mark pending (peers.filter (· != position))
+        nextPass plan site count (position + 1) (next.set! slot found) pending true
+    else
+      nextPass plan site count (position + 1) next pending changed
+
+private def nextFix (plan : Plan) (site : Array Bool) : Nat → Array Next → Array Bool → Array Next
+  | 0, next, _ => next
+  | fuel + 1, next, pending =>
+    let (next, pending, changed) := nextPass plan site plan.code.size 0 next pending false
+    if changed then nextFix plan site fuel next pending else next
 
 /-- The choices that have to become sites: where what runs next depends on the path taken. Those whose
 successors agree on no conflict come first, as making them sites may settle the ones before them. -/
-private def conflicts (code : List Disasm.Insn) (successors : Std.HashMap Nat (List Nat))
-    (table : Std.HashMap Nat Entry) : List Nat :=
-  let all := code.filter fun insn => (table.getD insn.address {}).next == .conflict
-  let origins := all.filter fun insn =>
-    (successors.getD insn.address []).all fun target => (table.getD target {}).next != .conflict
-  (if origins.isEmpty then all else origins).map (·.address)
+private def conflicts (plan : Plan) (next : Array Next) : List Nat :=
+  let all := plan.code.toList.filter fun visit => next[visit.slot]! == .conflict
+  let origins := all.filter fun visit =>
+    (plan.edges[visit.slot]!).all fun edge => next[edge.2]! != .conflict
+  (if origins.isEmpty then all else origins).map (·.slot)
 
 /-- Liveness and sites to a fixpoint, then what runs next; a choice that conflicts joins the sites,
 and all of it again. Out of fuel, `check` finds the tables wanting. -/
-private def solve (code : List Disasm.Insn) (successors : Std.HashMap Nat (List Nat))
-    (criteria : List Location) (passes : Nat) : Nat → Std.HashMap Nat Entry → Std.HashMap Nat Entry
-  | 0, table => table
-  | fuel + 1, table =>
-    let table := livenessFix code successors criteria passes table
-    let cleared := code.foldl (fun table insn =>
-      table.insert insn.address { table.getD insn.address {} with next := .never }) table
-    let table := nextFix code successors passes cleared
-    match conflicts code successors table with
-    | [] => table
+private def solve (plan : Plan) (passes : Nat) : Nat → Tables → Tables
+  | 0, tables => tables
+  | fuel + 1, tables =>
+    let tables := livenessFix plan passes tables
+    let slots := plan.edges.size
+    let next := nextFix plan tables.site passes (Array.replicate slots Next.never)
+      (Array.replicate plan.code.size true)
+    match conflicts plan next with
+    | [] => { tables with next }
     | added =>
-      let table := added.foldl (fun table address =>
-        table.insert address { table.getD address {} with site := true }) table
-      solve code successors criteria passes fuel table
+      let site := added.foldl (fun site slot => site.set! slot true) tables.site
+      let pending := added.foldl (fun pending slot => mark pending plan.peers[slot]!) tables.pending
+      solve plan passes fuel { tables with next, site, pending }
+
+/-- Lays out what `solve` works on, the listing being given backwards. -/
+private def planOf (code : List Disasm.Insn) (successors : Std.HashMap Nat (List Nat)) (criteria : List Location) :
+    Plan × Tables :=
+  let (slots, count) := code.foldl (init := (({} : Std.HashMap Nat Nat), 0)) fun state insn =>
+    if state.1.contains insn.address then state else (state.1.insert insn.address state.2, state.2 + 1)
+  let (visits, numbering) := code.foldl (init := ((#[] : Array Visit), ({} : Numbering))) fun state insn =>
+    let next := successors.getD insn.address []
+    let (moved, numbering) := state.2.bits (insn.bil.flatMap stmtAssigned)
+    (state.1.push { address := insn.address, slot := slots.getD insn.address 0, bil := insn.bil, info := blockInfo insn.bil
+                    ends := mayEnd insn next, moved, plain := insn.bil.all isPlain }, numbering)
+  let (edges, edgeCount) := code.foldl (init := (Array.replicate count [], 0)) fun state insn =>
+    let slot := slots.getD insn.address 0
+    if state.1[slot]!.isEmpty then
+      let targets := (successors.getD insn.address []).map (slots.getD · 0)
+      (state.1.set! slot (targets.zipIdx state.2 |>.map fun edge => (edge.2, edge.1)), state.2 + targets.length)
+    else state
+  let peers := (visits.zipIdx.foldr (init := Array.replicate count []) fun visit peers =>
+    peers.modify visit.1.slot (visit.2 :: ·))
+  let readers := visits.zipIdx.foldr (init := Array.replicate count []) fun visit readers =>
+    (edges[visit.1.slot]!).foldl (fun readers edge => readers.modify edge.2 (visit.2 :: ·)) readers
+  let numbering := criteria.foldl (fun numbering location => (numbering.number location).2) numbering
+  ({ code := visits, edges, readers, peers
+     criteria := criteria.map fun location => (numbering.number location).1 },
+   { after := Array.replicate count {}, before := Array.replicate count {}, site := Array.replicate count false
+     next := Array.replicate count .never, seen := Array.replicate edgeCount 0, done := Array.replicate visits.size 0
+     taken := Array.replicate visits.size false, ended := Array.replicate visits.size false
+     pending := Array.replicate visits.size true, numbering })
+
+/-- The entries of what `solve` found, for `code`, in the order an entry is first written by a pass. -/
+private def tableOf (plan : Plan) (tables : Tables) : Std.HashMap Nat Entry :=
+  plan.code.foldl (init := {}) fun table visit =>
+    let slot := visit.slot
+    if table.contains visit.address then table
+    else table.insert visit.address {
+      site := tables.site[slot]!
+      before := tables.before[slot]!.list.map tables.numbering.named
+      after := tables.after[slot]!.list.map tables.numbering.named
+      next := tables.next[slot]! }
 
 /-- The tables are a solution of the equations: this and nothing else is what soundness rests on. -/
 private def checkInsn (entry : Nat → Entry) (next : List Nat) (criteria : List Location)
@@ -562,12 +819,61 @@ private def checkInsn (entry : Nat → Entry) (next : List Nat) (criteria : List
     (!mayEnd insn next || here.next == .exit) &&
     next.all fun target => (entry target).next == here.next || (entry target).next == .never)
 
+/-- `checkInsn`, with what it looks in hashed. -/
+private def checkInsnFast (entry : Nat → Entry) (next : List Nat) (criteria : List Location)
+    (insn : Disasm.Insn) : Bool :=
+  let here := entry insn.address
+  let after : Std.HashSet Location := Std.HashSet.ofList here.after
+  let before : Std.HashSet Location := Std.HashSet.ofList here.before
+  next.all (fun target => (entry target).before.all after.contains) &&
+  (!mayEnd insn next || criteria.all after.contains) &&
+  (!relevant here.after (blockInfo insn.bil) || here.site) &&
+  (if here.site then
+    (insnBefore insn.bil here.after).all before.contains && here.next == .site insn.address
+  else
+    here.after.all before.contains &&
+    (!mayEnd insn next || here.next == .exit) &&
+    next.all fun target => (entry target).next == here.next || (entry target).next == .never)
+
+private theorem contains_hashed (list : List Location) :
+    (Std.HashSet.ofList list).contains = list.contains := by
+  funext location
+  simp [Std.HashSet.contains_ofList]
+
+@[csimp] private theorem checkInsn_eq_fast : @checkInsn = @checkInsnFast := by
+  funext entry next criteria insn
+  simp only [checkInsn, checkInsnFast, contains_hashed]
+
 /-- Every constant jump into the listing is an edge of the CFG, or the CFG does not describe the code. -/
 private def checkEdges (listed : Nat → Bool) (next : List Nat) (insn : Disasm.Insn) : Bool :=
   insn.flow == .call || (codeExits insn.bil).targets.all fun target => next.contains target || !listed target
 
 /-- An indirect jump goes anywhere, and the CFG has no edges for it. -/
 private def checkFlow (insn : Disasm.Insn) : Bool := insn.flow != .indirectJump
+
+/-! The equations and the checks of `backwardCfg`, for a test to hold its solver against another. -/
+namespace Equations
+
+def successors (instructions : List Disasm.Insn) (edges : List (Nat × Nat)) : Std.HashMap Nat (List Nat) :=
+  successorTable instructions edges
+
+def mayEnd (insn : Disasm.Insn) (successors : List Nat) : Bool := Slice.mayEnd insn successors
+
+def relevant (live : List Location) (code : Bil.Program) : Bool := Slice.relevant live (blockInfo code)
+
+def before (code : Bil.Program) (live : List Location) : List Location := insnBefore code live
+
+/-- `Result.determined` of tables. -/
+def determined (instructions : List Disasm.Insn) (edges : List (Nat × Nat)) (criteria : List Location)
+    (entry : Nat → Entry) : Bool :=
+  let successors := successorTable instructions edges
+  let listed : Std.HashMap Nat Unit := instructions.foldl (fun table insn => table.insert insn.address ()) {}
+  ((instructions.filter fun insn => (entry insn.address).site).all fun insn => !(blockInfo insn.bil).dynamic) &&
+    instructions.all fun insn =>
+      let next := successors.getD insn.address []
+      checkInsn entry next criteria insn && checkEdges (listed.contains ·) next insn && checkFlow insn
+
+end Equations
 
 /-- Slices `instructions` over the CFG `edges`, as of `entry`. An instruction is a site if it writes
 something live after it, or if what runs next depends on it: `Result.nextSite` tells what follows
@@ -579,7 +885,8 @@ def backwardCfg (instructions : List Disasm.Insn) (edges : List (Nat × Nat)) (e
   -- Backwards through the listing, so most facts need only one pass.
   let code := instructions.reverse
   let passes := 4 * (instructions.length + 2) * (criteria.length + (instructions.map (·.bil.length)).sum + 2)
-  let table := solve code successors criteria passes (instructions.length + 1) {}
+  let (plan, start) := planOf code successors criteria
+  let table := tableOf plan (solve plan passes (instructions.length + 1) start)
   let lookup (address : Nat) : Entry := table.getD address {}
   let listed : Std.HashMap Nat Unit := instructions.foldl (fun table insn => table.insert insn.address ()) {}
   let sited := instructions.filter fun insn => (lookup insn.address).site

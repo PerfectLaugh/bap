@@ -275,7 +275,181 @@ private def binaryRegressions : IO Unit := do
   assertEqual "with its symbols" (real.image.map (·.symbols)) (reloaded.image.map (·.symbols))
   assertTrue "with its bytes" ((real.image.map (·.data)) == (reloaded.image.map (·.data)))
 
+/-! The solver of `Slice.backwardCfg` against passes over plain lists, which it says it computes. `limit` bounds the work
+of the passes, which is quadratic in what is live; `none` is that it ran out. -/
+namespace SliceSpec
+
+open Analysis.Slice
+
+private abbrev Table := Std.HashMap Nat Entry
+
+private def addAll (live additions : List Location) : List Location :=
+  additions.foldl (fun live location => if live.contains location then live else location :: live) live
+
+private def livenessPass (code : List Disasm.Insn) (successors : Std.HashMap Nat (List Nat))
+    (criteria : List Location) (table : Table) : Table × Bool :=
+  code.foldl (init := (table, false)) fun state insn =>
+    let (table, changed) := state
+    let entry := table.getD insn.address {}
+    let next := successors.getD insn.address []
+    let after := next.foldl (fun live target => addAll live (table.getD target {}).before) entry.after
+    let after := if Equations.mayEnd insn next then addAll after criteria else after
+    let site := entry.site || Equations.relevant after insn.bil
+    let before := addAll entry.before (if site then Equations.before insn.bil after else after)
+    let grew := site != entry.site || before.length != entry.before.length || after.length != entry.after.length
+    (table.insert insn.address { entry with site, before, after }, changed || grew)
+
+private def livenessFix (code : List Disasm.Insn) (successors : Std.HashMap Nat (List Nat)) (criteria : List Location)
+    (limit : Nat) : Nat → Table → Option Table
+  | 0, table => some table
+  | fuel + 1, table =>
+    let (table, changed) := livenessPass code successors criteria table
+    let spent := table.fold (fun spent _ entry => spent + entry.after.length ^ 2 + 1) 0
+    if spent > limit then none
+    else if changed then livenessFix code successors criteria (limit - spent) fuel table
+    else some table
+
+private def nextPass (code : List Disasm.Insn) (successors : Std.HashMap Nat (List Nat)) (table : Table) : Table × Bool :=
+  code.foldl (init := (table, false)) fun state insn =>
+    let (table, changed) := state
+    let entry := table.getD insn.address {}
+    if entry.site then
+      let next := Next.site insn.address
+      (table.insert insn.address { entry with next }, changed || entry.next != next)
+    else
+      let targets := successors.getD insn.address []
+      let start := if Equations.mayEnd insn targets then Next.exit else Next.never
+      let next := targets.foldl (fun next target => Next.join next (table.getD target {}).next) start
+      (table.insert insn.address { entry with next }, changed || entry.next != next)
+
+private def nextFix (code : List Disasm.Insn) (successors : Std.HashMap Nat (List Nat)) : Nat → Table → Table
+  | 0, table => table
+  | fuel + 1, table =>
+    let (table, changed) := nextPass code successors table
+    if changed then nextFix code successors fuel table else table
+
+private def conflicts (code : List Disasm.Insn) (successors : Std.HashMap Nat (List Nat)) (table : Table) : List Nat :=
+  let all := code.filter fun insn => (table.getD insn.address {}).next == .conflict
+  let origins := all.filter fun insn =>
+    (successors.getD insn.address []).all fun target => (table.getD target {}).next != .conflict
+  (if origins.isEmpty then all else origins).map (·.address)
+
+private def solve (code : List Disasm.Insn) (successors : Std.HashMap Nat (List Nat)) (criteria : List Location)
+    (passes limit : Nat) : Nat → Table → Option Table
+  | 0, table => some table
+  | fuel + 1, table => do
+    let table ← livenessFix code successors criteria limit passes table
+    let cleared := code.foldl (fun table insn =>
+      table.insert insn.address { table.getD insn.address {} with next := .never }) table
+    let table := nextFix code successors passes cleared
+    match conflicts code successors table with
+    | [] => some table
+    | added =>
+      let table := added.foldl (fun table address =>
+        table.insert address { table.getD address {} with site := true }) table
+      solve code successors criteria passes limit fuel table
+
+/-- Whether `Slice.backwardCfg` answers as the passes do, to the last list: `none` if they ran out. -/
+private def agrees (instructions : List Disasm.Insn) (edges : List (Nat × Nat)) (criteria : List Location)
+    (limit : Nat := 200000) : Option Bool := do
+  let expanded := expandCriteria instructions criteria
+  let passes := 4 * (instructions.length + 2) * (expanded.length + (instructions.map (·.bil.length)).sum + 2)
+  let table ← solve instructions.reverse (Equations.successors instructions edges) expanded passes limit
+    (instructions.length + 1) {}
+  let lookup (address : Nat) : Entry := table.getD address {}
+  let result := backwardCfg instructions edges none criteria
+  let sameEntry (address : Nat) : Bool :=
+    let left := lookup address
+    let right := result.entry address
+    left.site == right.site && left.before == right.before && left.after == right.after && left.next == right.next
+  let sites := (instructions.filter fun insn => (lookup insn.address).site).map (·.address)
+  let calls := (instructions.filter fun insn =>
+    insn.flow = .call && !(lookup insn.address).after.isEmpty).map (·.address)
+  let live := match instructions.head? with
+    | some insn => (lookup insn.address).before
+    | none => expanded
+  let determined := Equations.determined instructions edges expanded lookup
+  return result.table.size == table.size && instructions.all (fun insn => sameEntry insn.address) &&
+    result.sites == sites && result.calls == calls && result.live == live && result.determined == determined &&
+    result.complete == (determined && calls.isEmpty) &&
+    result.table.toList.map (·.1) == table.toList.map (·.1)
+
+/-- The variables a listing assigns, at most `count` of them. -/
+private def assigned (instructions : List Disasm.Insn) (count : Nat) : List Bap.Var :=
+  ((instructions.flatMap (·.bil)).filterMap fun stmt =>
+    match stmt with
+    | .move var _ => if var.typ matches .imm _ then some var else none
+    | _ => none).eraseDups.take count
+
+/-- Every function of a binary, with registers it assigns and memory for criteria. The count is of those compared. -/
+private def overBinary (path : String) : IO Nat := do
+  let project ← Project.load path
+  let index := Analysis.Xrefs.create project
+  let disasm := project.disasm.getD { entry := 0 }
+  let owners := disasm.instructions.map fun insn => (insn, (Analysis.Xrefs.functionOf index insn.address).map (·.addr))
+  let functions := (owners.filterMap (·.2)).eraseDups
+  let mut compared := 0
+  for function in functions do
+    let instructions := owners.filterMap fun pair => if pair.2 == some function then some pair.1 else none
+    let edges := disasm.edges ++ flowEdges instructions
+    let memories := memories instructions
+    let registers := assigned instructions 4
+    let criteria : List (List Location) :=
+      registers.map (fun var => [.reg var]) ++ memories.map (fun memory => [.whole memory]) ++ [[.mem 0x10000 8]] ++
+        [registers.map .reg] ++ (registers.take 1).flatMap fun base => memories.map fun memory => [.rel memory base 8 8]
+    for criterion in criteria do
+      match agrees instructions edges criterion with
+      | some same =>
+        unless same do
+          assertTrue s!"the solver and the passes agree at {function} on {criterion.length} criteria" same
+        compared := compared + 1
+      | none => pure ()
+  return compared
+
 def run : IO Unit := do
+  let rsp : Bap.Var := ⟨"RSP", .imm 64, 0, false⟩
+  let x : Bap.Var := ⟨"x", .imm 64, 0, false⟩
+  let y : Bap.Var := ⟨"y", .imm 64, 0, false⟩
+  let c : Bap.Var := ⟨"c", .imm 1, 0, false⟩
+  let mem : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let word (value : Nat) : Bil.Exp := .int (BitVec.ofNat 64 value)
+  let at' (address : Nat) (bil : Bil.Program) : Disasm.Insn := ⟨address, 1, "", .normal, none, bil⟩
+  let readAt (var : Bap.Var) : Bil.Stmt := .move var (.load (.var mem) (.var rsp) .little 8)
+  let bump : Bil.Stmt := .move rsp (.bin .add (.var rsp) (word 8))
+  -- A pointer walks: what is live keeps moving, past what the passes may take.
+  let walk : List Disasm.Insn := [
+    at' 0 [bump, readAt x],
+    ⟨1, 1, "", .conditionalJump, some 0, [.ifElse (.var c) [.jmp (word 0)] []]⟩,
+    at' 2 [.move y (.var x)]]
+  let walked := backward walk [.rel mem rsp 0 8]
+  assertTrue "a walking pointer runs out of passes" !walked.determined
+  assertEqual "the solver runs out as the passes do" (some true) (agrees walk (flowEdges walk) [.rel mem rsp 0 8] 20000000)
+  assertEqual "a walking pointer, from a register" (some true) (agrees walk (flowEdges walk) [.reg y] 20000000)
+  -- An address twice, whose elements see the same entry.
+  let twice : List Disasm.Insn := [at' 0 [.move x (word 1)], at' 0 [.move y (.var x)], at' 1 [.move x (.var y)]]
+  assertEqual "an address listed twice" (some true) (agrees twice (flowEdges twice) [.reg x])
+  -- A branch that has to become a site, a loop on itself, statements that end a run, and stores.
+  let choice : List Disasm.Insn := [
+    ⟨0, 1, "", .conditionalJump, some 2, [.ifElse (.var c) [.jmp (word 2)] []]⟩,
+    at' 1 [.move x (word 1)],
+    at' 2 [.move y (.var x)],
+    ⟨3, 1, "", .conditionalJump, some 3, [.ifElse (.var c) [.jmp (word 3)] []]⟩,
+    at' 4 [.special "hlt"],
+    at' 5 [.move mem (.store (.var mem) (.var rsp) (word 1) .little 8), .while (.var c) [bump]],
+    at' 6 [.move mem (.store (.var mem) (.var x) (word 1) .little 8)],
+    ⟨7, 1, "", .call, some 0, [.jmp (word 0)]⟩]
+  for criterion in ([[.reg x], [.reg y], [.reg rsp], [.whole mem], [.mem 0x3000 8], [.rel mem rsp 0 8], [.memOf mem 0x3000 8]] :
+      List (List Location)) do
+    assertEqual "branches, loops, ends and stores" (some true) (agrees choice (flowEdges choice) criterion)
+  assertEqual "nothing to slice" (some true) (agrees [] [] [.reg x])
+  let binaries := ["x86_64-linux-gnu-echo", "aarch64-linux-gnu-echo", "arm-linux-gnueabi-echo"]
+  let compared ← binaries.mapM fun name => overBinary s!"../testsuite/bin/{name}"
+  assertTrue "the passes finish on most of real code" (compared.all (· > 50))
+
+end SliceSpec
+
+def run : IO Unit := do
+  SliceSpec.run
   targetSelection
   interworking
   withoutSections
