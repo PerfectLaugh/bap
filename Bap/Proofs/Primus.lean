@@ -2076,7 +2076,7 @@ theorem primitiveIndex_complete (index : Nat) (h : index < primitiveNames.length
 /-- The compiled evaluator's numeric dispatch implements the same primitive as the interpreter's
 name dispatch, for every compilable operation and all arguments. -/
 theorem primitive_tables_agree (context : Context) (index : Nat) (args : List SV)
-    (hi : index < 64) (hc : compilablePrimitive index = true) :
+    (hi : index < 70) (hc : compilablePrimitive index = true) :
     applyPrimitive context (primitiveNames[index]'(Nat.lt_of_lt_of_le hi (by decide))) args = applyPrimitiveIndex context index args := by
   match index, hi, hc with
   | 0, _, _ => rfl
@@ -2134,8 +2134,10 @@ theorem primitive_tables_agree (context : Context) (index : Nat) (args : List SV
   | 60, _, _ => rfl
   | 61, _, _ => rfl
   | 63, _, _ => rfl
-  | 13, _, hc | 14, _, hc | 15, _, hc | 16, _, hc | 17, _, hc | 18, _, hc | 19, _, hc | 62, _, hc => exact absurd hc (by decide)
-  | n + 64, hi, _ => exact absurd hi (by omega)
+  | 69, _, _ => rfl
+  | 13, _, hc | 14, _, hc | 15, _, hc | 16, _, hc | 17, _, hc | 18, _, hc | 19, _, hc | 62, _, hc
+  | 64, _, hc | 65, _, hc | 66, _, hc | 67, _, hc | 68, _, hc => exact absurd hc (by decide)
+  | n + 70, hi, _ => exact absurd hi (by omega)
 
 /-! Literals, following `bap_primus_lisp_word.ml` and Zarith's `Z.of_string`. -/
 
@@ -4513,7 +4515,7 @@ private theorem call_agrees {context : Context} {globals : Globals} {clocals loc
     exact ⟨x, (hatom s hs x).2 ⟨g, hg⟩, (inner x hc).2 hrest⟩
 
 /-- The compilable primitives need neither a copy of their result nor a symbol resolved, but for the assignments. -/
-private theorem compilable_properties : ∀ index : Fin 64, compilablePrimitive index.1 = true →
+private theorem compilable_properties : ∀ index : Fin 70, compilablePrimitive index.1 = true →
     intrinsicResult (primitiveNames[index.1]'(Nat.lt_of_lt_of_le index.2 (by decide))) = false ∧
     ((primitiveNames[index.1]'(Nat.lt_of_lt_of_le index.2 (by decide))) = "unquote") = False ∧
     (((primitiveNames[index.1]'(Nat.lt_of_lt_of_le index.2 (by decide))) = "set" ∨
@@ -4623,7 +4625,7 @@ private theorem primitive_step {context : Context} {name : String} {operation : 
       (applyPrimitiveIndex context operation
         (if (operation = 38 || operation = 39 || operation = 40) then resolveSymbol s args else args) >>= fun p =>
         (.ok (p.1, emit s p.2) : Except String (SV × State))) := by
-  have hle : operation < 64 := by
+  have hle : operation < 70 := by
     simp only [compilablePrimitive, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq] at hc
     omega
   have hlen : operation < primitiveNames.length := Nat.lt_of_lt_of_le hle (by decide)

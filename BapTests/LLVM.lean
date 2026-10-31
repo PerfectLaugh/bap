@@ -1924,6 +1924,15 @@ private def assertByte (bits : Nat) (label : String) (address expected : Nat) (s
   | .ok _ => throw <| IO.userError "memory is not mapped"
   | .error error => throw <| IO.userError error
 
+/-- What every memory operand goes through has to stay compiled: interpreted, it costs libc a tenth of its analysis. -/
+private def testHotPathCompiled : IO Unit := do
+  let env ← Bap.Target.LLVMLift.x86Environment
+  for name in ["operand-address", "ea"] do
+    match env.operations.get? name with
+    | some (.compiled ..) => pure ()
+    | _ => throw <| IO.userError s!"{name} is not compiled"
+  IO.println "ok: the address of a memory operand is compiled"
+
 /-- What the machine does, of each instruction whose semantics were found to differ from it. -/
 private def testHardware : IO Unit := do
   let x86 ← Target.LLVMLift.x86Environment
@@ -2295,6 +2304,7 @@ private def testX86Rest : IO Unit := do
     assertTrue s!"{name} is {part}" (1 < ((Bil.Wire.renderProgram insn.bil).splitOn part).length)
 
 def run : IO Unit := do
+  testHotPathCompiled
   testHardware
   testX86Memo
   testX86Rest

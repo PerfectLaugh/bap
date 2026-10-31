@@ -532,6 +532,12 @@ private def castSaturate (context : Context) (args : List Value) : Except String
     .ok (.bil width (.cast .low width (.ite fits value (.bin .add upper sign))))
   | _ => throw "cast-saturate expects a kind, width, and value"
 
+private def x86Prefix (context : Context) (args : List Value) : Except String (Value × Bil.Program) :=
+  match args, context.prefixes with
+  | [byte], some prefixes => do valueOnly (.bool (prefixes.contains (← expectNat byte)))
+  | [_], none => throw "the instruction prefixes are not available"
+  | _, _ => throw "x86-prefix expects a byte"
+
 private def applyPrimitive (context : Context) (name : String) (args : List Value) :
     Except String (Value × Bil.Program) := do
   match name with
@@ -659,11 +665,7 @@ private def applyPrimitive (context : Context) (name : String) (args : List Valu
     | _ => throw "unquote expects a symbol"
   | "symbol-concat" => valueOnly (← symbolConcat args)
   | "cast-saturate" => valueOnly (← castSaturate context args)
-  | "x86-prefix" =>
-    match args, context.prefixes with
-    | [byte], some prefixes => valueOnly (.bool (prefixes.contains (← expectNat byte)))
-    | [_], none => throw "the instruction prefixes are not available"
-    | _, _ => throw "x86-prefix expects a byte"
+  | "x86-prefix" => x86Prefix context args
   | "+." | "-." | "*." | "/." | "fsqrt" | "fround" | "fconvert" | "cast-float" | "cast-sfloat" | "cast-int"
   | "cast-sint" | "<." | ">." | ">=." | "=." | "is-nan" | "is-inf" | "is-fzero" =>
     floatOperation context name args
@@ -815,6 +817,7 @@ private def applyPrimitiveIndex (context : Context) (operation : Nat) (args : Li
   | 60 => valueOnly (← compare context .sgt args)
   | 61 => valueOnly (← compare context .sge args)
   | 63 => valueOnly (← leadingZeros context args)
+  | 69 => x86Prefix context args
   | _ => throw s!"unsupported compiled Primus primitive {operation}"
 
 private def freezeBil (state : State) (width : Nat) (expression : Bil.Exp) : Value × State :=
@@ -1316,7 +1319,8 @@ end
 private def primitiveIndex (name : String) : Option Nat := primitiveNames.findIdx? (· == name)
 
 private def compilablePrimitive (operation : Nat) : Bool :=
-  operation ≤ 12 || (20 ≤ operation && operation ≤ 50) || (52 ≤ operation && operation ≤ 61) || operation = 63
+  operation ≤ 12 || (20 ≤ operation && operation ≤ 50) || (52 ≤ operation && operation ≤ 61) || operation = 63 ||
+    operation = 69
 
 private def isSymbol (atom : String) : Bool :=
   match readLiteral atom with

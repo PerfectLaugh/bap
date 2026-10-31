@@ -20,7 +20,7 @@ open Bap.Primus.Semantics
 open_private Bap.Primus.Semantics Bap.Primus.Semantics compileFunction compileCallable compileValue expectBil expectNat truth condition widthOf binary unaryNot leadingZeros
   shift wordWidth assign assignRegister loadMemory storeMemory concatStep symbolText symbolConcat castSaturate floatOperation
   floatCall roundingMode intrinsicCall intrinsicParams intrinsicGroup assignInputs mapIndexedM valueOnly applyPrimitive
-  applyPrimitiveIndex caseMatches selectForm selectArm
+  applyPrimitiveIndex caseMatches selectForm selectArm x86Prefix
 open_private Bap.Primus.Semantics Bap.Primus.Semantics.floatOperation match_1 match_3 match_5
 open_private_as Bap.Primus.Semantics Bap.Primus.Semantics.compare primCompare
 open_private_as Bap.Primus.Semantics Bap.Primus.Semantics.cast primCast
@@ -570,6 +570,17 @@ theorem set_rel (context : Context) {a b c d : SV} (h1 : ValueRel names a b) (h2
     obtain ⟨rfl, rfl⟩ := he
     exact ⟨_, rfl, h2⟩
 
+theorem x86Prefix_rel (context : Context) {a b : List SV} (h : ListRel names a b) :
+    PrimRel names (x86Prefix context a) (x86Prefix context b) := by
+  unfold x86Prefix
+  cases context.prefixes <;> rcases h with _ | ⟨h1, _ | ⟨h2, t⟩⟩
+  · exact PrimRel.of_eq rfl
+  · exact PrimRel.of_eq rfl
+  · exact PrimRel.of_eq rfl
+  · exact PrimRel.of_eq rfl
+  · exact PrimRel.of_eq (by simp only [expectNat_rel h1])
+  · exact PrimRel.of_eq rfl
+
 theorem applyPrimitive_rel (context : Context) (name : String) {a b : List SV} (h : ListRel names a b) :
     PrimRel names (applyPrimitive context name a) (applyPrimitive context name b) := by
   unfold applyPrimitive
@@ -645,14 +656,7 @@ theorem applyPrimitive_rel (context : Context) (name : String) {a b : List SV} (
     · exact PrimRel.of_eq rfl
     · cases h1 <;> exact PrimRel.of_eq rfl
     · cases h1 <;> exact PrimRel.of_eq rfl
-  case h_58 =>
-    cases context.prefixes <;> rcases h with _ | ⟨h1, _ | ⟨h2, t⟩⟩
-    · exact PrimRel.of_eq rfl
-    · exact PrimRel.of_eq rfl
-    · exact PrimRel.of_eq rfl
-    · exact PrimRel.of_eq rfl
-    · exact PrimRel.of_eq (by simp only [expectNat_rel h1])
-    · exact PrimRel.of_eq rfl
+  case h_58 => exact x86Prefix_rel context h
   case h_82 => exact PrimRel.value (.list h)
   case h_83 =>
     rcases h with _ | ⟨h1, _ | ⟨h2, _ | ⟨h3, t⟩⟩⟩
@@ -726,6 +730,7 @@ theorem applyPrimitiveIndex_rel (context : Context) (operation : Nat) {a b : Lis
        · rfl
        done)
     | skip
+  case h_56 => exact x86Prefix_rel context h
   case h_2 =>
     rcases h with _ | ⟨h1, _ | ⟨h2, t⟩⟩
     · exact PrimRel.of_eq rfl
