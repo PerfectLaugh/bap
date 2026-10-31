@@ -43,6 +43,7 @@ lake exe bap disassemble /usr/bin/bash  # instructions and their BIL
 lake exe bap image /usr/bin/bash        # what the loader sees
 lake exe bap symbolic program.bil       # paths of a BIL program
 lake exe bap mc c3                      # one instruction, from hex
+lake exe bap run program                # a static x86-64 Linux program, threads and all, in the emulator
 ```
 
 Run `lake exe bap` for the other commands. Everything is also a library: `Bap.Runtime` has

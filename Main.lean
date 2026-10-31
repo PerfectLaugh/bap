@@ -5,6 +5,7 @@ import Bap.Image.Raw
 import Bap.Disasm.Linear
 import Bap.Disasm.Recursive
 import Bap.Target.X86
+import Bap.Emu.Run
 import Bap.Target.X8632
 import Bap.Target.AArch64
 import Bap.Target.RISCV
@@ -21,7 +22,7 @@ open Bap
 open Bap.Bil
 
 private def usage : String :=
-  "usage: bap check FILE | bap print FILE | bap eval FILE [FUEL] | bap image FILE | bap raw FILE BASE | bap mc HEX | bap disassemble FILE | bap lisp FILE | bap analyze FILE | bap symbolic FILE"
+  "usage: bap check FILE | bap run PROGRAM | bap print FILE | bap eval FILE [FUEL] | bap image FILE | bap raw FILE BASE | bap mc HEX | bap disassemble FILE | bap lisp FILE | bap analyze FILE | bap symbolic FILE"
 
 private def loadProgram (path : String) : IO Program := do
   let input ← IO.FS.readFile path
@@ -106,6 +107,15 @@ private def analyze (path : String) : IO Unit := do
   IO.println s!"xrefs: {xrefs.xrefs.length}"
   IO.println s!"callgraph edges: {callgraph.graph.edges.length}"
 
+/-- Runs a static x86-64 executable in the emulator, with the status of its first process as ours. -/
+private def runProgram (path : String) : IO Unit := do
+  let stdout ← IO.getStdout
+  match ← Emu.runExecutable path stdout.write with
+  | .finished status =>
+    stdout.flush
+    IO.Process.exit (if status % 128 != 0 then 128 + (status % 128).toUInt8 else (status / 256).toUInt8)
+  | outcome => throw <| IO.userError s!"the program didn't finish: {repr outcome}"
+
 private def symbolic (path : String) : IO Unit := do
   let program ← loadProgram path
   match Symbolic.run program with
@@ -129,6 +139,7 @@ private def run (args : List String) : IO Unit := do
   | ["disassemble", path] => disassemble path
   | ["lisp", path] => lisp path
   | ["analyze", path] => analyze path
+  | ["run", path] => runProgram path
   | ["symbolic", path] => symbolic path
   | "mc" :: atoms => mc (String.intercalate " " atoms)
   | _ => IO.println usage

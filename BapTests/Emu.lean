@@ -488,6 +488,20 @@ private def testProcesses : IO Unit := do
   assertBits "Emu x86-64 child keeps RDI" (BitVec.ofNat 64 7)
     (.ok (← Bap.Emu.threadReg intelChild forkedIntel ⟨"RDI", .imm 64, 0, false⟩))
 
+/-- A real pthread program under real libc, if there is a compiler to make one: threads, a mutex that they fight over, and
+joins. It is 3 s, most of it compiling hot code. -/
+private def testRealPthreads : IO Unit := do
+  let binary := "native/build/pthreads-test"
+  let compiled ← IO.Process.output
+    { cmd := "gcc", args := #["-static", "-O1", "-pthread", "testsuite/src/pthreads.c", "-o", binary] } |>.toBaseIO
+  match compiled with
+  | .ok { exitCode := 0, .. } =>
+    let written ← IO.mkRef ByteArray.empty
+    let outcome ← Bap.Emu.runExecutable binary fun data => written.modify (· ++ data)
+    assertEqual "Emu runs a libc pthread program to its end" (Bap.Tasks.ScheduleOutcome.finished 0) outcome
+    assertEqual "Emu threads of libc count to what they should" "y" (String.fromUTF8! (← written.get))
+  | _ => IO.println "ok: skipped the libc pthread program, as nothing here compiles one statically"
+
 private def testThreads : IO Unit := do
   let code := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
     (← LLVM.assemble "riscv64" "sw a0, 0(a1)") ++
@@ -1498,6 +1512,7 @@ private def runEmulator : IO Unit := do
   testThreads
   testCloneThread
   testProcesses
+  testRealPthreads
   testDelaySlots
   testLiveProject
   testDiff

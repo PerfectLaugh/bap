@@ -876,13 +876,17 @@ def map (emu : Emu) (region : Region) : IO Unit := do
   let mapped ← emu.regions.get
   if mapped.any fun current => overlaps current region then
     throw <| IO.userError s!"Emu region overlaps an existing mapping at {region.address}"
-  let state ← emu.state.get
-  let ⟨_, memory⟩ ← cells emu state
-  let updated := Bap.Memory.writeRegion memory region.address region.data
-  emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
+  -- Memory holds zeros where nothing was written, and nothing was where nothing was mapped, so a mapping of zeros, such as
+  -- the stack of a thread, has nothing to write.
+  let written := region.data.data.any (· != 0)
+  if written then
+    let state ← emu.state.get
+    let ⟨_, memory⟩ ← cells emu state
+    let updated := Bap.Memory.writeRegion memory region.address region.data
+    emu.state.set { env := Bil.bind state.env emu.config.memory (.memory updated) }
   if region.protection.executable && region.data.size > 0 then
     Primus.Lifted.discardRange emu.engine region.address (region.address + region.data.size - 1)
-  synchronizeWrite emu region.address region.data
+  if written then synchronizeWrite emu region.address region.data
   emu.regions.set (region :: mapped)
 
 def overlay (emu : Emu) (region : Region) : IO Unit := do
