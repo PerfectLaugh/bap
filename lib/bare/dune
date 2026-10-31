@@ -1,5 +1,0 @@
-(library
- (name bare)
- (public_name bare)
- (wrapped false)
- (libraries core parsexp))

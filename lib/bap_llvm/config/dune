@@ -1,3 +1,0 @@
-(executable
- (name llvm_configurator)
- (libraries base stdio dune-configurator))

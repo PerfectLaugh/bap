@@ -1,1 +1,0 @@
-ppx-jane -as-ppx -inline-test-lib bap $@

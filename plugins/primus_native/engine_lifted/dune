@@ -1,5 +1,0 @@
-(library
- (name bap_engine_lifted)
- (public_name bap-primus-native.engine-lifted)
- (modules bap_engine_lifted)
- (libraries bap-primus-native.engine bap-primus-native.lifted))

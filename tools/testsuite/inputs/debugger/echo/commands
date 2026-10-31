@@ -1,4 +1,0 @@
-call arg-length
-step
-d print_endline
-c

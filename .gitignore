@@ -91,3 +91,18 @@ llvm-project-*.src.tar.xz
 .vscode/
 /compile_commands.json
 /rust/target/
+
+# Lean
+/.lake/
+/_deps/
+/native/build/
+/native/*.log
+__pycache__/
+
+# what the OCaml branch leaves in a checkout
+/plugins/
+/rust/
+/_build/
+/_destdir/
+/doc/
+/lean/

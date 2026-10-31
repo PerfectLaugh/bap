@@ -1,7 +1,0 @@
-(library
- (name bap_bundle)
- (public_name bap-bundle)
- (wrapped false)
- (preprocess
-  (pps ppx_bap))
- (libraries uri zipc core core_kernel.caml_unix))

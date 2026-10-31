@@ -1,4 +1,0 @@
-(library
- (name bap_relation)
- (public_name bap-relation)
- (libraries base))

@@ -1,7 +1,0 @@
-(library
- (name bap_abi)
- (public_name bap-abi)
- (wrapped false)
- (preprocess
-  (pps ppx_bap))
- (libraries bap core))

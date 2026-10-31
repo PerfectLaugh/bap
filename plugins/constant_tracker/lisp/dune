@@ -1,6 +1,0 @@
-(install
- (files check-hardcoded-values.lisp check-null-pointers.lisp)
- (package bap-constant-tracker)
- (section
-  (site
-   (bap-common site_lisp))))

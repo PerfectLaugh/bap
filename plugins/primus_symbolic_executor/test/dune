@@ -1,3 +1,0 @@
-(test
- (name run_tests)
- (libraries bap bap-primus-symbolic-executor.symbolic bitvec core ounit2))

@@ -1,3 +1,0 @@
-(executable
- (name cxx_runtime)
- (libraries base dune-configurator))

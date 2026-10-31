@@ -1,8 +1,0 @@
-; The engines, that run the native code, see bap_engine.mli.
-
-(library
- (name bap_engine)
- (public_name bap-primus-native.engine)
- (modules bap_engine bap_engine_registers)
- (private_modules bap_engine_registers)
- (libraries bap bap-primus-native.trace))

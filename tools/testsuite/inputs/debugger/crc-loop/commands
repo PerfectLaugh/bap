@@ -1,5 +1,0 @@
-reg RAX
-set RAX 0
-step
-step
-c

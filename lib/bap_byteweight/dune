@@ -1,7 +1,0 @@
-(library
- (name bap_byteweight)
- (public_name bap-byteweight)
- (preprocess
-  (pps ppx_bap))
- (wrapped false)
- (libraries bap bap-common bap-main bap-core-theory bap-knowledge core zipc))

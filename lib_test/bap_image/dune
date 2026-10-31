@@ -1,6 +1,0 @@
-(library
- (name test_image)
- (preprocess
-  (pps ppx_bap))
- (wrapped false)
- (libraries bap core ogre ounit2))

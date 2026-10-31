@@ -1,5 +1,0 @@
-(library
- (name bap_systemz)
- (public_name bap-systemz)
- (wrapped false)
- (libraries bap-core-theory core))
