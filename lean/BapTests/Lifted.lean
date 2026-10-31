@@ -52,6 +52,22 @@ def run : IO Unit := do
 
   let x := reg "x"
   let y := reg "y"
+  -- A jump out of a block before a write leaves the variable as it was, here without a value, like the interpreter.
+  let early ← Primus.Lifted.Engine.create
+  let earlyBlock : Primus.Lifted.Block := {
+    address := 0x1000
+    next := 0x1004
+    program := [.ifElse (.var (⟨"c", .imm 1, 0, false⟩ : Var)) [.jmp (int 0x2000)] [], .move x (int 40), .jmp (int 0x3000)]
+  }
+  let earlyState (bit : Nat) : State := { env := [(⟨"c", .imm 1, 0, false⟩, .bits (BitVec.ofNat 1 bit))] }
+  let (earlyFetch, earlyLift) := fixed earlyBlock
+  let earlyTaken ← Primus.Lifted.runBlock early earlyFetch earlyLift (earlyState 1) 0x1000
+  assertEqual "native jump before a write has the target" 0x2000 earlyTaken.pc
+  assertTrue "native jump before a write leaves it unbound" (match Bil.lookup earlyTaken.state.env x with | .error _ => true | .ok _ => false)
+  assertEqual "the block ran natively" 1 (← Primus.Lifted.stats early).nativeRuns
+  let earlyFall ← Primus.Lifted.runBlock early earlyFetch earlyLift (earlyState 0) 0x1000
+  assertEqual "native run past the branch has the target" 0x3000 earlyFall.pc
+  assertBits "native run past the branch writes" (BitVec.ofNat 64 40) (Bil.lookup earlyFall.state.env x)
   let engine ← Primus.Lifted.Engine.create
   let block : Primus.Lifted.Block := {
     address := 0x1000

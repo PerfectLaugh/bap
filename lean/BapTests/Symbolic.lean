@@ -302,7 +302,48 @@ private def fuelStability : IO Unit := do
     assertEqual "more fuel changes nothing" (repr small).pretty (repr large).pretty
   | _, _ => throw <| IO.userError "fuel stability run failed"
 
+mutual
+  /-- `Expr.render` as it reads, where every level copies what is under it. -/
+  private def renderBySpec : Expr → String
+    | .var name width => Expr.variableSymbol name width
+    | @Expr.const width value => s!"(_ bv{value.toNat} {width})"
+    | .app name _ args =>
+      if args.isEmpty then name
+      else
+        let term := "(" ++ String.intercalate " " (name :: renderListBySpec args) ++ ")"
+        if Expr.isPredicate name then s!"(ite {term} #b1 #b0)" else term
+    | .extract high low value => s!"((_ extract {high} {low}) {renderBySpec value})"
+    | .concat left right => s!"(concat {renderBySpec left} {renderBySpec right})"
+    | .ite condition yes no => s!"(ite (= {renderBySpec condition} #b1) {renderBySpec yes} {renderBySpec no})"
+    | .select memory address => s!"({Expr.memorySymbol memory address.width} {renderBySpec address})"
+
+  private def renderListBySpec : List Expr → List String
+    | [] => []
+    | arg :: rest => renderBySpec arg :: renderListBySpec rest
+end
+
+private def renderFastPath : IO Unit := do
+  let x : Expr := .var "x" 8
+  let c : Expr := .var "c" 1
+  let samples : List Expr := [x, .const (BitVec.ofNat 8 7), .app "f" 8 [], .app "bvadd" 8 [x, x], .app "bvult" 1 [x, x],
+    .app "distinct" 1 [x, x, x], .app "f" 8 [x], .extract 3 1 x, .concat x x, .ite c x x, .select "m" x,
+    .ite (.app "=" 1 [x, .const (BitVec.ofNat 8 1)]) (.extract 7 0 (.concat x (.select "m" x))) (.app "g" 8 [x, .ite c x x, x])]
+  for sample in samples do
+    assertEqual s!"render {renderBySpec sample}" (renderBySpec sample) sample.render
+  let deep := (List.range 300).foldl (fun value i => Expr.ite (.var s!"c{i % 7}" 1) value (.app "f" 8 [x, x])) x
+  assertEqual "render of a deep term" (renderBySpec deep) deep.render
+  let constraints : List Expr := (List.range 300).map fun i =>
+    .app "bvult" 1 [.var s!"v{i % 50}" 64, .select s!"m{i % 3}" (.var s!"v{(i + 1) % 50}" 32)]
+  let variables := (constraints.flatMap Expr.vars).eraseDups
+  let memories := (constraints.flatMap Expr.memories).eraseDups
+  let text := String.intercalate "\n" ([s!"(set-logic QF_UFBV)"] ++
+    (memories.map fun (name, width) => s!"(declare-fun {Expr.memorySymbol name width} ((_ BitVec {width})) (_ BitVec 8))") ++
+    (variables.map fun (name, width) => s!"(declare-const {Expr.variableSymbol name width} (_ BitVec {width}))") ++
+    (constraints.map fun constraint => s!"(assert {constraint.renderFormula})") ++ ["(check-sat)"])
+  assertEqual "a script declares what it uses once, in order" text (renderScript constraints)
+
 def run : IO Unit := do
+  renderFastPath
   reader
   let script := renderScript [Expr.eqOne xExpr]
   assertTrue "SMT declares symbolic xExpr" ((script.splitOn "declare-const |x!64| (_ BitVec 64)").length > 1)

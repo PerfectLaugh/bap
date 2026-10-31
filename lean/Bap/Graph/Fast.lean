@@ -189,7 +189,7 @@ private theorem reachLoop_eq (graph : Graph Nat) (fuel : Nat) (seen waiting : Li
             rw [hw]
             exact List.mem_filter.2 ⟨hx, by simpa using hs⟩
           have hd : x ∈ waiting.filter hits.contains ↔ hits.contains x = true := by simp [List.mem_filter, hmem]
-          cases hc : hits.contains x <;> simp [hs, hd, hc, hx]
+          cases hc : hits.contains x <;> simp [hs, hc, hx]
       · intro x
         rw [mem_insertAll, hh x]
         simp only [mem_successorTable, List.mem_append]

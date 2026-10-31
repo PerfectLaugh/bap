@@ -1011,14 +1011,14 @@ private def testArmMultipleAgree : IO Unit := do
     | .reg name => .register (if name.isEmpty || name = "NoRegister" then "Nil" else name) 32 32
     | .imm value => .bil 32 (.int (BitVec.ofInt 32 value))
   let names := (List.range 13).map (s!"R{·}") ++ ["SP", "LR", "PC"]
-  let initial (zero : Nat) : IO Bil.Env := do
+  let initial (flag : Nat) : IO Bil.Env := do
     let mut memory := Memory.empty 32
     for index in List.range 0x100 do
       let address := 0x1000 + index * 4
       match Memory.write memory (BitVec.ofNat 32 address) (BitVec.ofNat 32 (0xa0000000 + address * 3)) .little 4 with
       | .ok updated => memory := updated
       | .error error => throw <| IO.userError error
-    pure ((thumbMemVar, .memory memory) :: bit "ZF" zero :: bit "NF" 0 :: bit "CF" 0 :: bit "VF" 0 ::
+    pure ((thumbMemVar, .memory memory) :: bit "ZF" flag :: bit "NF" 0 :: bit "CF" 0 :: bit "VF" 0 ::
       (List.range names.length |>.zip names).map fun (index, name) => word32 name (0x1200 + index * 16))
   let observe (state : Bil.State × Bil.Effect) : IO (List Nat × Option Nat) := do
     let registers ← names.mapM fun name =>
@@ -1044,13 +1044,13 @@ private def testArmMultipleAgree : IO Unit := do
     let decoded ← LLVM.disassemble "armv7" data 0
     let lifted ← Target.LLVMLift.decodeARM32With arm 0 0 data
     let semantics ← Primus.Semantics.liftWith arm { context with nextPc := 4 } decoded.opcode (decoded.operands.map operand)
-    for zero in [0, 1] do
-      let env ← initial zero
+    for flag in [0, 1] do
+      let env ← initial flag
       let first ← executeEffect lifted env
       let second ← match Bil.run semantics { env := env } with
         | .ok result => pure result
         | .error error => throw <| IO.userError error
-      assertEqual s!"{decoded.opcode} does the same in both, ZF={zero}" (← observe first) (← observe second)
+      assertEqual s!"{decoded.opcode} does the same in both, ZF={flag}" (← observe first) (← observe second)
 
 def run : IO Unit := do
   testStatusRegisters

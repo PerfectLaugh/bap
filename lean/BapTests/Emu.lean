@@ -1309,13 +1309,101 @@ private def rangeRegressions : IO Unit := do
   let _ ← Bap.Emu.restore rewinding start
   let _ ← Bap.Emu.run rewinding 3
   assertBits "Emu range after a restore runs the restored code" (BitVec.ofNat 64 2) (.ok (← Bap.Emu.reg rewinding a0))
-  -- A fault in a range leaves the emulator where it started the run, as a failed step does, with the fault's pc.
-  let faulting ← make ((← rv "addi a0, a0, 1") ++ (← rv "addi a1, a1, 1") ++ (← rv "lb a2, 0(a3)"))
+  -- A hook reads the state of its block, as in single steps, with the range around it.
+  let readingCode := (← rv "addi a0, a0, 1") ++ (← rv "addi a1, a1, 2") ++ (← rv "addi a2, a2, 3") ++ (← rv "jal -12")
+  let readings (emu : Bap.Emu.Emu) (steps : IO Unit) : IO (List String) := do
+    let seen ← IO.mkRef ([] : List String)
+    let _ ← Bap.Emu.onCode emu (8, 8) fun pc => do
+      let values := [← Bap.Emu.reg emu a0, ← Bap.Emu.reg emu a1, ← Bap.Emu.reg emu a2]
+      seen.modify (· ++ [s!"{pc} {(repr values).pretty}"])
+    steps
+    seen.get
+  let hookedRange ← make readingCode
+  let hookedSingle ← make readingCode
+  let inRange ← readings hookedRange (do let _ ← Bap.Emu.run hookedRange 25)
+  let inSteps ← readings hookedSingle (do for _ in [0:25] do let _ ← Bap.Emu.step hookedSingle)
+  assertEqual "Emu code hook in a range reads what single steps have" inSteps inRange
+  assertTrue "Emu range keeps chaining around a hook" ((← Primus.Lifted.stats hookedRange.engine).nativeRuns < 25)
+  -- So does a hook of an access, which comes in the middle of a block.
+  let accessCode := (← rv "addi a0, a0, 1") ++ (← rv "sb a0, 0(a2)") ++ (← rv "jal -8")
+  let watching (emu : Bap.Emu.Emu) (steps : IO Unit) : IO (List String) := do
+    Bap.Emu.map emu ⟨0x1000, zeros 8, rw⟩
+    Bap.Emu.setReg emu a2 (bits 0x1000)
+    let seen ← IO.mkRef ([] : List String)
+    let _ ← Bap.Emu.onWrite emu (0x1000, 0x1000) fun _ _ value => do
+      seen.modify (· ++ [s!"{value} {(repr (← Bap.Emu.reg emu a0)).pretty}"])
+    steps
+    seen.get
+  let watchedRange ← make accessCode
+  let watchedSingle ← make accessCode
+  let watched ← watching watchedRange (do let _ ← Bap.Emu.run watchedRange 16)
+  assertEqual "Emu access hook in a run reads what single steps have"
+    (← watching watchedSingle (do for _ in [0:16] do let _ ← Bap.Emu.step watchedSingle)) watched
+  -- A budget that no slot can hold counts all the same.
+  let huge ← make loop
+  Bap.Emu.setReg huge a3 (bits 1000)
+  let _ ← Bap.Emu.onCode huge (12, 12) fun _ => Bap.Emu.stop huge
+  assertEqual "Emu range counts with any fuel" 3000 (← Bap.Emu.run huge (2 ^ 64 + 1))
+  -- A fault in a range leaves the emulator as a fault in single steps does, on a table of ways to fault.
+  let load := (← rv "addi a0, a0, 1") ++ (← rv "addi a1, a1, 1") ++ (← rv "lb a2, 0(a3)")
+  let walk := (← rv "lb a0, 0(a1)") ++ (← rv "addi a1, a1, 1") ++ (← rv "addi a2, a2, 1") ++ (← rv "bne a2, a3, -12")
+  let table : List (String × ByteArray × List (Var × Nat) × Bool) := [
+    ("a load after two instructions", load, [(a3, 0x9000)], false),
+    ("the first instruction", (← rv "lb a2, 0(a3)") ++ (← rv "addi a0, a0, 1"), [(a3, 0x9000)], false),
+    ("a store after a store", (← rv "addi a0, a0, 7") ++ (← rv "sb a0, 0(a1)") ++ (← rv "addi a0, a0, 1") ++ (← rv "sb a0, 0(a3)"),
+      [(a1, 0x1000), (a3, 0x9000)], false),
+    ("a pointer that walks off a region in a loop", walk, [(a1, 0x1000), (a3, 1000)], false),
+    ("a store that walks off a region in a loop", (← rv "sb a2, 0(a1)") ++ (← rv "addi a1, a1, 1") ++ (← rv "addi a2, a2, 1") ++ (← rv "bne a2, a3, -12"),
+      [(a1, 0x1000), (a3, 1000)], false),
+    ("a store to read-only memory", (← rv "addi a0, a0, 1") ++ (← rv "sb a0, 0(a1)") ++ (← rv "addi a0, a0, 1") ++ (← rv "sb a0, 0(a3)"),
+      [(a1, 0x1000), (a3, 0x2000)], false),
+    ("a load that passes the end of a region", (← rv "addi a0, a0, 1") ++ (← rv "lw a2, 0(a1)"), [(a1, 0x1000 + 14)], false),
+    ("past jumps", (← rv "jal 8") ++ (← rv "addi a0, a0, 100") ++ (← rv "addi a1, a1, 1") ++ (← rv "lb a2, 0(a3)"), [(a3, 0x9000)], false),
+    ("with a hook out of the way", load, [(a3, 0x9000)], true)
+  ]
+  for (name, code, registers, hook) in table do
+    let setup : IO Bap.Emu.Emu := do
+      let emu ← make code
+      Bap.Emu.map emu ⟨0x1000, zeros 16, rw⟩
+      Bap.Emu.map emu ⟨0x2000, zeros 16, ⟨true, false, false⟩⟩
+      for (var, value) in registers do Bap.Emu.setReg emu var (bits value)
+      if hook then
+        let _ ← Bap.Emu.onCode emu (0x8000, 0x8000) fun _ => pure ()
+      pure emu
+    let ranged ← setup
+    let single ← setup
+    expectThrow s!"Emu range faults at {name}" (do let _ ← Bap.Emu.run ranged 100000)
+    let mut count := 0
+    let mut failed := false
+    while !failed do
+      try
+        let _ ← Bap.Emu.step single
+        count := count + 1
+      catch _ =>
+        failed := true
+    let chained ← Primus.Lifted.stats ranged.engine
+    if count > 1 then
+      assertTrue s!"Emu range at {name} chained: {chained.nativeRuns} of {count + 2}" (chained.nativeRuns ≤ count + 2)
+    let view (emu : Bap.Emu.Emu) : IO String := do
+      let values ← [a0, a1, a2, a3].mapM (Bap.Emu.reg emu)
+      let fault ← Bap.Emu.failure emu
+      let bytes ← Bap.Emu.read emu 0x1000 16
+      pure s!"{(repr values).pretty} {← Bap.Emu.pc emu} {repr fault} {bytes.toList} {← Bap.Emu.stopped emu}"
+    assertEqual s!"Emu range fault at {name} has the state of single steps" (← view single) (← view ranged)
+    -- And it goes on the same: it faults again where it was.
+    expectThrow s!"Emu range fault at {name} recurs" (do let _ ← Bap.Emu.run ranged 100000)
+    expectThrow s!"Emu single-step fault at {name} recurs" (do let _ ← Bap.Emu.step single)
+    assertEqual s!"Emu range fault at {name} recurs the same way" (← view single) (← view ranged)
+  -- What it is told in so many words: the two instructions before the fault have happened.
+  let faulting ← make load
   Bap.Emu.setReg faulting a3 (bits 0x9000)
   expectThrow "Emu range faults" (do let _ ← Bap.Emu.run faulting 10)
   let some fault := ← Bap.Emu.failure faulting | throw <| IO.userError "the range recorded no fault"
   assertEqual "Emu range fault has the pc of the access" 8 fault.pc
   assertEqual "Emu range fault has the address of the access" 0x9000 fault.address
+  assertEqual "Emu range fault leaves the pc at the access" 8 (← Bap.Emu.pc faulting)
+  assertBits "Emu range fault has run what came before" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg faulting a0))
+  assertBits "Emu range fault has run all that came before" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg faulting a1))
 
 /-- A parallel worker reads what native code wrote in the same round, also in an instruction that it interprets. -/
 private def parallelReadThrough : IO Unit := do

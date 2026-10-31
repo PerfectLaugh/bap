@@ -315,14 +315,15 @@ def linkObject (data : ByteArray) : Except String ElfLinker.Output := do
   let header ← parseHeader data
   let sections ← parseSections data header
   let names ← resolveSectionNames data header sections
-  .ok (ElfLinker.link (linkInput data header sections names))
+  .ok (ElfLinker.link (ElfLinker.prepare (linkInput data header sections names)))
 
 /-- The image of a relocatable file, whose regions are what the linker laid out. -/
 private def decodeRelocatable (data : ByteArray) (header : Header) (sections : List SectionHeader) :
     Except String Image := do
   let names ← resolveSectionNames data header sections
-  let output := ElfLinker.link (linkInput data header sections names)
-  let regions := output.regions.map (ElfLinker.toMemRegion output.memory data.size)
+  let prepared := ElfLinker.prepare (linkInput data header sections names)
+  let output := ElfLinker.link prepared
+  let regions := output.regions.map (ElfLinker.toMemRegion output.memory prepared.data.size)
   .ok {
     arch := architecture header.machine
     addrWidth := if header.is64 then 64 else 32
@@ -330,7 +331,10 @@ private def decodeRelocatable (data : ByteArray) (header : Header) (sections : L
     entryPoint := header.entryPoint
     data := data
     sections := names.zipIdx.map fun (sec, index) =>
-      { sec with addr := ((output.sectionAddrs[index]?).join).getD sec.addr }
+      let moved := match prepared.thunksAt with
+        | some thunks => if index ≥ thunks then index + 1 else index
+        | none => index
+      { sec with addr := ((output.sectionAddrs[moved]?).join).getD sec.addr }
     segments := output.regions.map ElfLinker.toSegment
     symbols := output.symbols
     memory := regions.foldl (fun memory region => MemoryMap.add region () memory) {}

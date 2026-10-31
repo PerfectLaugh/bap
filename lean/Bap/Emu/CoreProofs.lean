@@ -9,7 +9,6 @@ of an emulator. `Bap.Emu.step` is `stepM` itself (`stepOps` only says which refe
 holds of `stepM` for arbitrary hooks and blocks holds of the code that runs, given that references behave
 as state and that native code computes the semantics of its BIL (see `Bap.Jit`). -/
 
-set_option linter.unusedSimpArgs false
 
 namespace Bap.Emu.Model
 
@@ -695,7 +694,7 @@ private theorem exec_frame (fuel : Nat) :
         cases hv : Bil.execExp state value with
         | error e => simp [hv] at h
         | ok v =>
-          simp only [hv, pure, Except.pure, Except.ok.injEq] at h
+          simp only [hv, Except.ok.injEq] at h
           subst h
           simp only [stmtWrites, List.mem_singleton] at hvar
           exact Proofs.Bil.lookup_bind_other _ _ hvar
@@ -704,7 +703,7 @@ private theorem exec_frame (fuel : Nat) :
         cases hv : Bil.execExp state target with
         | error e => simp [hv] at h
         | ok v =>
-          cases v <;> simp [hv, Value.asBits, pure, Except.pure] at h
+          cases v <;> simp [hv, Value.asBits] at h
           rw [← h]
       | special message =>
         simp only [Bil.execStmt, Except.ok.injEq] at h
@@ -765,7 +764,7 @@ private theorem exec_frame (fuel : Nat) :
                     simp only [Except.ok.injEq] at h
                     rw [← h]
                     exact h1
-              · simp only [pure, Except.pure, Except.ok.injEq] at h
+              · simp only [Except.ok.injEq] at h
                 rw [← h]
             · simp [hw] at h
     · intro state program result h var hvar
@@ -1300,7 +1299,7 @@ theorem schedule_turns (halts : Nat → Bool) (n quantum fuel : Nat) (hq : 0 < q
             schedule halts n quantum fuel rounds (remaining - min quantum remaining) (total + min quantum remaining)
               { s with current := (s.current + 1) % n, turns := (s.current, min quantum remaining) :: s.turns } := by
           simp [schedule, preemptiveM, hr, bind, StateT.bind, hrun, hdone, schedStopped, hstopped, schedSwitch,
-            pure, StateT.pure]
+            pure]
         simp only [hunfold]
         have := ih (remaining - min quantum remaining) (total + min quantum remaining)
           { s with current := (s.current + 1) % n, turns := (s.current, min quantum remaining) :: s.turns }
@@ -1436,7 +1435,7 @@ theorem runChainedM_no_chain {m : Type → Type} [Monad m] [LawfulMonad m] (step
     cases remaining with
     | zero => simp [runChainedM, runM]
     | succ remaining =>
-      rw [runChainedM, runM, if_neg (by omega)]
+      rw [runChainedM, runM, ite_eq_right (by omega)]
       simp only [Nat.add_sub_cancel, pure_bind, Nat.zero_min, Nat.sub_zero, Nat.add_zero]
       congr 1
       funext go
@@ -1459,7 +1458,7 @@ theorem runChainedM_total {σ : Type} (step : StateM σ Bool) (allow : Nat → S
     cases remaining with
     | zero => simp [runChainedM, pure, StateT.pure]
     | succ remaining =>
-      rw [runChainedM, if_neg (by omega)]
+      rw [runChainedM, ite_eq_right (by omega)]
       simp only [Nat.add_sub_cancel]
       generalize hs1 : (allow remaining s).2 = s1
       generalize hg : step s1 = g
@@ -1499,7 +1498,7 @@ theorem roundM_commits {σ τ ω : Type} {save : EStateM String σ τ} {restore 
     {results : List (Except String Nat)} {steps : Nat} (h0 : save s = .ok before s1) (h1 : setUp s1 = .ok workers s2)
     (h2 : runAll workers s2 = .ok results s3) (hj : joinWorkers results = .ok steps) (h3 : commit workers s3 = .ok () s4) :
     roundM (ε := String) save restore setUp runAll report commit s = .ok steps s4 := by
-  simp [roundM, bind, EStateM.bind, h0, tryCatch, tryCatchThe, MonadExceptOf.tryCatch, EStateM.tryCatch, EStateM.Backtrackable.save,
+  simp [roundM, bind, EStateM.bind, h0, tryCatch, tryCatchThe, MonadExceptOf.tryCatch, EStateM.tryCatch,
     h1, h2, hj, h3, pure, EStateM.pure]
 
 /-- A round where a worker failed does not commit, reports the fault, undoes all of it after all ran, and fails. -/
@@ -1510,7 +1509,7 @@ theorem roundM_undoes {σ τ ω : Type} {save : EStateM String σ τ} {restore :
     (h2 : runAll workers s2 = .ok results s3) (hj : joinWorkers results = .error error) (h3 : report workers s3 = .ok () s4)
     (h4 : restore before s4 = .ok () s5) :
     roundM (ε := String) save restore setUp runAll report commit s = .error error s5 := by
-  simp [roundM, bind, EStateM.bind, h0, tryCatch, tryCatchThe, MonadExceptOf.tryCatch, EStateM.tryCatch, EStateM.Backtrackable.save,
+  simp [roundM, bind, EStateM.bind, h0, tryCatch, tryCatchThe, MonadExceptOf.tryCatch, EStateM.tryCatch,
     EStateM.Backtrackable.restore, EStateM.dummyRestore, h1, h2, hj, h3, h4, throw, throwThe, MonadExceptOf.throw, EStateM.throw]
 
 /-- A commit that fails undoes the round as well, as does a set-up that fails. -/
@@ -1521,7 +1520,7 @@ theorem roundM_commit_fails {σ τ ω : Type} {save : EStateM String σ τ} {res
     (h1 : setUp s1 = .ok workers s2) (h2 : runAll workers s2 = .ok results s3) (hj : joinWorkers results = .ok steps)
     (h3 : commit workers s3 = .error error s4) (h4 : restore before s4 = .ok () s5) :
     roundM (ε := String) save restore setUp runAll report commit s = .error error s5 := by
-  simp [roundM, bind, EStateM.bind, h0, tryCatch, tryCatchThe, MonadExceptOf.tryCatch, EStateM.tryCatch, EStateM.Backtrackable.save,
+  simp [roundM, bind, EStateM.bind, h0, tryCatch, tryCatchThe, MonadExceptOf.tryCatch, EStateM.tryCatch,
     EStateM.Backtrackable.restore, EStateM.dummyRestore, h1, h2, hj, h3, h4, throw, throwThe, MonadExceptOf.throw, EStateM.throw]
 
 /-! ### Reading through to native memory -/
@@ -1539,14 +1538,14 @@ private theorem patchRange_unchanged {width : Nat} (native : Nat → UInt8) (sta
   | cons head rest ih =>
     simp only [patchRange] at h
     by_cases he : Bap.Memory.readByte memory (BitVec.ofNat width (start + head)) == native (start + head)
-    · simp only [pure, Id.run, bind, he, ↓reduceIte] at h
+    · simp only [pure, bind, he, ↓reduceIte] at h
       obtain ⟨h1, h2, h3⟩ := ih memory changed h
       refine ⟨h1, h2, ?_⟩
       intro offset ho
       rcases List.mem_cons.1 ho with rfl | ho
       · exact eq_of_beq he
       · exact h3 offset ho
-    · simp only [pure, Id.run, bind, he, Bool.false_eq_true, ↓reduceIte] at h
+    · simp only [pure, bind, he, Bool.false_eq_true, ↓reduceIte] at h
       have := ih _ true h
       simp at this
 
@@ -1712,7 +1711,7 @@ theorem find_saveContext_other (threads : List ThreadContext) (context : ThreadC
     simp only [List.filter_cons, bne_iff_ne, ne_eq]
     by_cases hh : head.id = context.id
     · have hb' : (head.id == id) = false := by simpa using (by omega : head.id ≠ id)
-      simp [hh, ih, List.find?_cons, hb]
+      simp [hh, ih, hb]
     · simp only [hh, not_false_eq_true, ↓reduceIte, List.find?_cons, ih]
 
 /-- A thread parked at a breakpoint gets its skip marker back: switching threads causes no re-fire. -/
@@ -1772,7 +1771,7 @@ private theorem read_shared {s : Spaces α} {id : Nat} (h : s.processes.contains
 /-- A store is seen by the thread that made it. -/
 theorem Spaces.read_write_same (s : Spaces α) (id : Nat) (value : α) : (s.write id value).read id = value := by
   cases h : s.processes.contains id with
-  | true => simp [Spaces.write, h, Spaces.read, Std.HashMap.getElem?_insert]
+  | true => simp [Spaces.write, h, Spaces.read]
   | false => simp [Spaces.write, h, Spaces.read, getElem?_none h]
 
 /-- Isolation: a store does not reach a thread of another address space. -/
@@ -1799,7 +1798,7 @@ theorem Spaces.read_write_shared (s : Spaces α) {id other : Nat} (value : α)
 
 /-- A fork starts from what its parent sees. -/
 theorem Spaces.read_fork_child (s : Spaces α) (parent child : Nat) : (s.fork parent child).read child = s.read parent := by
-  simp [Spaces.fork, Spaces.read, Std.HashMap.getElem?_insert]
+  simp [Spaces.fork, Spaces.read]
 
 /-- A fork leaves everybody else where they are, its parent first of all. -/
 theorem Spaces.read_fork_other (s : Spaces α) (parent child : Nat) {other : Nat} (h : other ≠ child) :
@@ -2070,7 +2069,7 @@ private theorem count_filter (key : β → Nat) (p : β → Bool) (hooks : List 
         intro other ho
         have := hnone other (List.mem_filter.1 ho).1
         simp [this]
-      cases hp : p hook <;> simp [List.filter_cons, hp, hzero]
+      cases hp : p hook <;> simp [hp, hzero]
     · have hne : (key head == key hook) = false := by
         have := hhead hook hm'
         exact beq_false_of_ne (Ne.symm this)
@@ -2100,9 +2099,9 @@ theorem forM_logs {γ : Type} (hooks : List β) (act : β → γ) (log : List γ
     (hooks.forM (fun hook => (modify (· ++ [act hook]) : StateM (List γ) Unit))).run log =
       ((), log ++ hooks.map act) := by
   induction hooks generalizing log with
-  | nil => simp [pure, StateT.run, StateT.pure, Id.run]
+  | nil => simp [pure, StateT.run, StateT.pure]
   | cons head tail ih =>
-    simp only [List.forM_cons, List.map_cons]
+    simp only [List.map_cons]
     show (tail.forM (fun hook => (modify (· ++ [act hook]) : StateM (List γ) Unit))).run (log ++ [act head]) = _
     rw [ih]
     simp
@@ -2130,3 +2129,179 @@ theorem register_nodup (key : β → Nat) (hooks : List β) (next : Nat) (hook :
 end Hooks
 
 end Bap.Emu.Model
+
+namespace Bap.Emu
+
+/-! ### Precise faults -/
+
+section Precise
+
+variable {ε σ : Type}
+
+/-- Single steps from a state go `count` steps and then fail with `error`, in the state `final`. -/
+inductive FaultsIn (single : EStateM ε σ Bool) : Nat → σ → ε → σ → Prop
+  | now {state error final} : single state = .error error final → FaultsIn single 0 state error final
+  | later {count state next error final} : single state = .ok true next → FaultsIn single count next error final →
+      FaultsIn single (count + 1) state error final
+
+/-- What a run of single steps comes to on such a state: the failure, with its state, whatever else the run was given. -/
+theorem runM_faults {single : EStateM ε σ Bool} {count : Nat} {state : σ} {error : ε} {final : σ} (h : FaultsIn single count state error final)
+    (fuel total : Nat) (hf : count < fuel) : runM single fuel total state = .error error final := by
+  induction h generalizing fuel total with
+  | now he =>
+    cases fuel with
+    | zero => omega
+    | succ fuel => simp [runM, bind, EStateM.bind, he]
+  | later he _ ih =>
+    cases fuel with
+    | zero => omega
+    | succ fuel =>
+      simp only [runM, bind, EStateM.bind, he]
+      exact ih fuel (total + 1) (by omega)
+
+/-- Single steps are a function of the state. -/
+theorem FaultsIn.unique {single : EStateM ε σ Bool} {k₁ k₂ : Nat} {state : σ} {e₁ e₂ : ε} {f₁ f₂ : σ} (h₁ : FaultsIn single k₁ state e₁ f₁)
+    (h₂ : FaultsIn single k₂ state e₂ f₂) : k₁ = k₂ ∧ e₁ = e₂ ∧ f₁ = f₂ := by
+  induction h₁ generalizing k₂ with
+  | now he =>
+    cases h₂ with
+    | now he' =>
+      rw [he] at he'
+      injection he' with h1 h2
+      exact ⟨rfl, h1, h2⟩
+    | later he' _ => rw [he] at he'; cases he'
+  | later he _ ih =>
+    cases h₂ with
+    | now he' => rw [he] at he'; cases he'
+    | later he' hr =>
+      rw [he] at he'
+      injection he' with _ hs
+      subst hs
+      obtain ⟨h1, h2, h3⟩ := ih hr
+      exact ⟨by omega, h2, h3⟩
+
+/-- What a step that may run a range does, as against single steps: `lowerGraph_correct` for the blocks it ran, `stepExecute_error` for its
+failure. `allow` only tells it how far it may go, and what it did not run, single steps run next. A step that ran `chained + 1`
+instructions is that many single steps, a step that reports the end of the thread has no fault to come, and a step that fails either did not chain, and
+is the single step, or has rolled back to where single steps see what they would have seen. -/
+structure RangeLaws (step single again : EStateM ε σ Bool) (allow : Nat → EStateM ε σ Unit) (chained : EStateM ε σ Nat) : Prop where
+  allow_ok : ∀ budget state, ∃ next, allow budget state = .ok () next ∧
+    ∀ count error final, FaultsIn single count state error final → FaultsIn single count next error final
+  chained_ok : ∀ state, ∃ count, chained state = .ok count state
+  ran : ∀ state next count, step state = .ok true next → chained next = .ok count next →
+    ∀ k error final, FaultsIn single k state error final → count + 1 ≤ k ∧ FaultsIn single (k - (count + 1)) next error final
+  halted : ∀ state next k error final, step state = .ok false next → ¬ FaultsIn single k state error final
+  failed : ∀ state e r k error final, step state = .error e r → FaultsIn single k state error final →
+    (∃ r', again r = .ok true r' ∧ ∃ k', k' ≤ k ∧ FaultsIn single k' r' error final) ∨ (∃ r', again r = .ok false r' ∧ e = error ∧ r' = final)
+
+private theorem chained_faults {step single again : EStateM ε σ Bool} {allow : Nat → EStateM ε σ Unit} {chained : EStateM ε σ Nat}
+    (laws : RangeLaws step single again allow chained) {error : ε} {final : σ} (rounds remaining total k : Nat) (state : σ)
+    (hk : FaultsIn single k state error final) (hr : k < rounds) (hrem : k < remaining) :
+    ∃ e r, runChainedM step allow chained rounds remaining total state = .error e r ∧
+      ((∃ r', again r = .ok true r' ∧ ∃ k', k' ≤ k ∧ FaultsIn single k' r' error final) ∨ (∃ r', again r = .ok false r' ∧ e = error ∧ r' = final)) := by
+  induction rounds generalizing remaining total k state with
+  | zero => omega
+  | succ rounds ih =>
+    obtain ⟨s1, ha, hk1⟩ := laws.allow_ok (remaining - 1) state
+    have hk1' := hk1 _ _ _ hk
+    have hrun : runChainedM step allow chained (rounds + 1) remaining total state =
+        match step s1 with
+        | .ok true s2 => (do
+            let extra := min (← chained) (remaining - 1)
+            runChainedM step allow chained rounds (remaining - 1 - extra) (total + 1 + extra)) s2
+        | .ok false s2 => .ok total s2
+        | .error e r => .error e r := by
+      rw [runChainedM, ite_eq_right (by omega)]
+      show EStateM.bind (allow _) _ state = _
+      simp only [EStateM.bind, ha]
+      show EStateM.bind step _ s1 = _
+      simp only [EStateM.bind]
+      cases step s1 with
+      | error e r => rfl
+      | ok go s2 => cases go <;> rfl
+    rw [hrun]
+    cases hs : step s1 with
+    | error e r => exact ⟨e, r, rfl, laws.failed s1 e r k error final hs hk1'⟩
+    | ok go s2 =>
+      cases go with
+      | false => exact absurd hk1' (laws.halted s1 s2 k error final hs)
+      | true =>
+        obtain ⟨c, hc⟩ := laws.chained_ok s2
+        obtain ⟨hle, hrest⟩ := laws.ran s1 s2 c hs hc k error final hk1'
+        have hmin : min c (remaining - 1) = c := by omega
+        obtain ⟨e, r, h1, h2⟩ := ih (remaining - 1 - c) (total + 1 + c) (k - (c + 1)) s2 hrest (by omega) (by omega)
+        refine ⟨e, r, ?_, ?_⟩
+        · show EStateM.bind chained _ s2 = _
+          simp only [EStateM.bind, hc, hmin]
+          exact h1
+        · rcases h2 with ⟨r', h3, k', hk', h4⟩ | h2
+          · exact Or.inl ⟨r', h3, k', by omega, h4⟩
+          · exact Or.inr h2
+
+private theorem tryCatch_error {α : Type} {x : EStateM ε σ α} {handle : ε → EStateM ε σ α} {s r : σ} {e : ε} (hx : x s = .error e r) :
+    (tryCatch x handle : EStateM ε σ α) s = handle e r := by
+  show EStateM.tryCatch x handle s = _
+  simp only [EStateM.tryCatch, hx]
+  rfl
+
+/-- With nothing that chains, a step is a single step, and the laws hold. They are what the code that runs has to meet for ranges. -/
+theorem rangeLaws_single (single : EStateM ε σ Bool) :
+    RangeLaws single single (pure false) (fun _ => pure ()) (pure 0) where
+  allow_ok := fun _ state => ⟨state, rfl, fun _ _ _ h => h⟩
+  chained_ok := fun state => ⟨0, rfl⟩
+  ran := by
+    intro state next count hs hc k error final hk
+    injection hc with hc _
+    subst hc
+    cases hk with
+    | now he => rw [hs] at he; cases he
+    | later he hr =>
+      rw [hs] at he
+      injection he with _ hn
+      subst hn
+      exact ⟨by omega, hr⟩
+  halted := by
+    intro state next k error final hs hk
+    cases hk with
+    | now he => rw [hs] at he; cases he
+    | later he _ => rw [hs] at he; cases he
+  failed := by
+    intro state e r k error final hs hk
+    refine Or.inr ⟨r, rfl, ?_⟩
+    cases hk with
+    | now he =>
+      rw [hs] at he
+      injection he with h1 h2
+      exact ⟨h1, h2⟩
+    | later he _ => rw [hs] at he; cases he
+
+/-- **A fault in a range is a fault in single steps.** When single steps from a state fault within the fuel, with whatever error and in whatever state, a
+run that chains them, for the same fuel, fails with that error, in that state: registers, memory and pc as single steps leave them, which is
+what `Bap.Emu.run` does. -/
+theorem runPreciseM_fault {step single again : EStateM ε σ Bool} {allow : Nat → EStateM ε σ Unit} {chained : EStateM ε σ Nat}
+    (laws : RangeLaws step single again allow chained) {error : ε} {final : σ} {k fuel : Nat} {state : σ}
+    (hk : FaultsIn single k state error final) (hf : k < fuel) :
+    runPreciseM (runChainedM step allow chained fuel fuel 0) single again (fuel + 1) state = .error error final := by
+  obtain ⟨e, r, h1, h2⟩ := chained_faults laws fuel fuel 0 k state hk hf hf
+  unfold runPreciseM
+  rw [tryCatch_error h1]
+  show EStateM.bind again _ r = _
+  rcases h2 with ⟨r', h3, k', hk', h4⟩ | ⟨r', h3, rfl, rfl⟩
+  · simp only [EStateM.bind, h3]
+    show EStateM.bind (runM single (fuel + 1) 0) _ r' = _
+    simp only [EStateM.bind, runM_faults h4 (fuel + 1) 0 (by omega)]
+  · simp only [EStateM.bind, h3]
+    rfl
+
+end Precise
+
+theorem rangeSiteStops_hooked (dirty late : Bool) : rangeSiteStops dirty late true = true := by simp [rangeSiteStops]
+
+/-- A block with no hook is entered, when no code was written and no hook arrived. -/
+theorem rangeSiteStops_quiet : rangeSiteStops false false false = false := rfl
+
+theorem rangeBudgetOf_watched (budget : Nat) : rangeBudgetOf budget true = 0 := rfl
+
+theorem rangeBudgetOf_unwatched (budget : Nat) : rangeBudgetOf budget false = budget := rfl
+
+end Bap.Emu

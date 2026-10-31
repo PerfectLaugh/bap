@@ -24,7 +24,58 @@ private def collatz : Program :=
     ]
   ]
 
+/-- `run` works on a map, and `execStmt` of a block on the list: they have to agree on all of the result. -/
+private def sameAsList (name : String) (program : Program) (env : Env := []) (fuel : Nat := 100000) : IO Unit := do
+  let viaList := match execStmt (fuel + 1) { env := env } (.ifElse (.int (1 : BitVec 1)) program []) with
+    | .ok (state, effect) => s!"{repr state.env} {repr effect}"
+    | .error error => error
+  let viaRun := match run program { env := env } fuel with
+    | .ok (state, effect) => s!"{repr state.env} {repr effect}"
+    | .error error => error
+  assertEqual name viaList viaRun
+
+/-- Long enough to be run on a map. -/
+private def padding (count : Nat) : Program :=
+  (List.range count).map fun i => .move (reg s!"p{i}" 8) (int 8 i)
+
+private def mapPath : IO Unit := do
+  let a := reg "a" 8
+  let b := reg "b" 8
+  let c := reg "c" 8
+  let m : Bap.Var := ⟨"m", .mem 32 8, 0, false⟩
+  let bindings (var : Bap.Var) (value : Nat) : Bap.Var × Value := (var, .bits (BitVec.ofNat 8 value))
+  let shadowed : Env := [bindings a 1, bindings b 2, bindings a 3, bindings c 4, bindings b 5]
+  sameAsList "an environment with shadowed bindings" (padding 20) shadowed
+  sameAsList "reads see the first binding" (padding 20 ++ [.move c (.bin .add (.var a) (.var b))]) shadowed
+  sameAsList "a move drops all older bindings" (.move a (int 8 9) :: padding 20 ++ [.move a (.bin .add (.var a) (int 8 1))]) shadowed
+  sameAsList "bindings move to the front" (padding 20 ++ [.move c (int 8 1), .move b (int 8 2), .move c (int 8 3)]) shadowed
+  sameAsList "a let shadows and ends" (padding 20 ++ [.move c (.bin .add (.letIn a (int 8 7) (.letIn a (plus (.var a) (int 8 1)) (.var a))) (.var a))]) shadowed
+  sameAsList "a let over a read of a bound variable" (padding 20 ++ [.move c (.letIn b (.var a) (.bin .add (.var b) (.var a)))]) shadowed
+  sameAsList "an unbound variable" (padding 20 ++ [.move c (.var (reg "nothing" 8))]) shadowed
+  sameAsList "an unbound variable in a let" (padding 20 ++ [.move c (.letIn a (int 8 1) (.var (reg "nothing" 8)))]) shadowed
+  sameAsList "a jump stops the program" (padding 20 ++ [.jmp (int 8 7), .move a (int 8 1)]) shadowed
+  sameAsList "a special stops the program" (padding 20 ++ [.special "stop", .move a (int 8 1)]) shadowed
+  sameAsList "an exception stops the program" (padding 20 ++ [.cpuExn 3, .move a (int 8 1)]) shadowed
+  sameAsList "branches" (padding 20 ++ [.ifElse (.int (1 : BitVec 1)) [.move a (int 8 1)] [.move b (int 8 2)],
+    .ifElse (.int (0 : BitVec 1)) [.move a (int 8 3)] [.move b (int 8 4)]]) shadowed
+  sameAsList "a bad condition" (padding 20 ++ [.ifElse (int 8 1) [] []]) shadowed
+  sameAsList "a jump in a branch" (padding 20 ++ [.ifElse (.int (1 : BitVec 1)) [.jmp (int 8 1)] [], .move a (int 8 1)]) shadowed
+  sameAsList "memory" (padding 20 ++ [.move m (.store (.var m) (int 32 4) (int 8 7) .little 1),
+    .move c (.load (.var m) (int 32 4) .little 1)]) ((m, .memory (Memory.empty 32)) :: shadowed)
+  sameAsList "no fuel" (padding 20) shadowed 0
+  sameAsList "little fuel" (padding 20) shadowed 10
+  sameAsList "just enough fuel" (padding 20) shadowed 21
+  -- a loop that binds more than the log holds before it is reduced
+  let counter := reg "counter" 16
+  let loop := Stmt.while (.bin .lt (.var counter) (int 16 3000))
+    [.move counter (plus (.var counter) (int 16 1)), .move a (.cast .low 8 (.var counter)), .move b (.var a)]
+  sameAsList "a loop that keeps binding" [.move counter (int 16 0), loop] shadowed
+  sameAsList "a loop out of fuel" [.move counter (int 16 0), loop] shadowed 500
+  sameAsList "a jump out of a loop" [.move counter (int 16 0), .while (int 1 1) [.move counter (plus (.var counter) (int 16 1)), .jmp (.var counter)]] shadowed
+  sameAsList "a long environment" (padding 100 ++ [.move c (.var (reg "e50" 8))]) ((List.range 2000).map fun i => bindings (reg s!"e{i % 1500}" 8) i)
+
 def run : IO Unit := do
+  mapPath
   let a := reg "a" 8
   let nested := Exp.letIn a (int 8 2) (.letIn a (plus (.var a) (int 8 3)) (.bin .mul (.var a) (int 8 2)))
   assertBits "nested lexical let" (BitVec.ofNat 8 10) (evalExp [] nested)

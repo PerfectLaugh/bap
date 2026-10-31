@@ -112,9 +112,6 @@ private def expandKey (key : List UInt8) : Except String (Nat × List UInt8) := 
     let words := loop nk ((List.range nk).map fun index => key.extract (index * 4) (index * 4 + 4))
     .ok (rounds, words.flatten)
 
-private def roundsDescending (count : Nat) : List Nat :=
-  (List.range count).map fun index => count - index
-
 def decryptBlock (key input : ByteArray) : Except String ByteArray := do
   if input.size != 16 then
     .error "AES block must contain 16 bytes"

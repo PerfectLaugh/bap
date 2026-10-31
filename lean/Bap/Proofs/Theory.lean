@@ -2618,37 +2618,274 @@ theorem unalias_sub_of_chains {target : T} (hfree : Free target) {var reg : RV} 
 
 /-! ### Discharging `Free` and the fuel bound
 
-`Free` has one checkable form, for any concrete table: following the equations from either side of each equation gets to
-the same bit of the basis. And a chain that doesn't come back to a register fits in the fuel. -/
+`Free` is false in general: two aliases that share a part make their registers equal in part, and a table can say that outright.
+It holds exactly when no equations make two bits of the basis equal, which `Target.resolves` checks of any table. And a chain
+that doesn't come back to a register fits in the fuel. -/
 
-/-- The bit of the basis the search finds for a bit, or the bit itself. -/
-def resolveBit (target : T) (reg : RV) (index : Nat) : RV × Nat :=
-  (target.locate target.aliasFuel [] reg index).getD (reg, index)
+theorem mem_equations {target : T} {equation : (RV × Nat) × (RV × Nat)} : equation ∈ target.equations ↔
+    ∃ alias ∈ target.aliases, ∃ span ∈ alias.spans.getD [], ∃ index < span.width,
+      equation = ((span.var, index), (alias.target, span.offset + index)) := by
+  simp only [Target.equations, List.mem_flatMap, List.mem_map, List.mem_range]
+  constructor
+  · rintro ⟨alias, halias, span, hspan, index, hindex, rfl⟩
+    exact ⟨alias, halias, span, hspan, index, hindex, rfl⟩
+  · rintro ⟨alias, halias, span, hspan, index, hindex, rfl⟩
+    exact ⟨alias, halias, span, hspan, index, hindex, rfl⟩
 
-/-- Both sides of each equation of a table find the same bit of the basis. -/
-def Resolves (target : T) : Bool :=
-  target.aliases.all fun alias => (alias.spans.getD []).all fun span =>
-    (List.range span.width).all fun index =>
-      resolveBit target span.var index == resolveBit target alias.target (span.offset + index)
+/-- A model is what all the equations hold of. -/
+theorem model_iff_equations {target : T} {value : RV → Nat → Bool} : Model target value ↔
+    ∀ equation ∈ target.equations, value equation.1.1 equation.1.2 = value equation.2.1 equation.2.2 := by
+  constructor
+  · intro hm equation he
+    obtain ⟨alias, halias, span, hspan, index, hindex, rfl⟩ := mem_equations.mp he
+    exact hm alias halias span hspan index hindex
+  · intro h alias halias span hspan index hindex
+    exact h _ (mem_equations.mpr ⟨alias, halias, span, hspan, index, hindex, rfl⟩)
 
-theorem aliasFuel_pos (target : T) : 0 < target.aliasFuel := by
-  simp [Target.aliasFuel]
+private abbrev Bit := RV × Nat
 
-/-- A table on which the search agrees with the equations leaves the basis free. -/
-theorem free_of_resolves {target : T} (h : Resolves target = true) : Free target := by
-  refine Free.of_resolution (resolveBit target) ?_ ?_
+/-- Bits in a class stay in one. -/
+private theorem foldl_mergeBits_same (edges : List (Bit × Bit)) (rep : Bit → Bit) {x y : Bit} (h : rep x = rep y) :
+    edges.foldl mergeBits rep x = edges.foldl mergeBits rep y := by
+  induction edges generalizing rep with
+  | nil => exact h
+  | cons edge rest ih =>
+    refine ih (mergeBits rep edge) ?_
+    simp only [mergeBits, h]
+
+/-- The bits of an equation are in one class. -/
+private theorem foldl_mergeBits_equal (edges : List (Bit × Bit)) (rep : Bit → Bit) {edge : Bit × Bit} (he : edge ∈ edges) :
+    edges.foldl mergeBits rep edge.1 = edges.foldl mergeBits rep edge.2 := by
+  induction edges generalizing rep with
+  | nil => cases he
+  | cons head rest ih =>
+    rcases List.mem_cons.mp he with rfl | he
+    · refine foldl_mergeBits_same rest _ ?_
+      simp only [mergeBits]
+      by_cases h : rep edge.2 = rep edge.1
+      · simp [h]
+      · simp [h]
+    · exact ih _ he
+
+/-- What the equations hold of holds of a bit and its representative. -/
+private theorem foldl_mergeBits_sound {value : Bit → Bool} (edges : List (Bit × Bit)) (hedges : ∀ edge ∈ edges, value edge.1 = value edge.2)
+    (rep : Bit → Bit) (hrep : ∀ x, value x = value (rep x)) (x : Bit) : value x = value (edges.foldl mergeBits rep x) := by
+  induction edges generalizing rep with
+  | nil => exact hrep x
+  | cons edge rest ih =>
+    refine ih (fun e he => hedges e (List.mem_cons_of_mem _ he)) (mergeBits rep edge) fun y => ?_
+    simp only [mergeBits]
+    split
+    · next h =>
+      have h1 := hrep edge.1
+      have h2 := hrep edge.2
+      have h3 := hedges edge (by simp)
+      rw [hrep y, h, ← h1, h3, h2]
+    · exact hrep y
+
+/-- A representative is of the bits of the equations, unless it is the bit itself. -/
+private theorem foldl_mergeBits_range (M : List Bit) (edges : List (Bit × Bit)) (hedges : ∀ edge ∈ edges, edge.1 ∈ M ∧ edge.2 ∈ M) (rep : Bit → Bit)
+    (hin : ∀ x ∈ M, rep x ∈ M) (hout : ∀ x, x ∉ M → rep x = x) :
+    (∀ x ∈ M, edges.foldl mergeBits rep x ∈ M) ∧ ∀ x, x ∉ M → edges.foldl mergeBits rep x = x := by
+  induction edges generalizing rep with
+  | nil => exact ⟨hin, hout⟩
+  | cons edge rest ih =>
+    obtain ⟨he1, he2⟩ := hedges edge (by simp)
+    refine ih (fun e he => hedges e (List.mem_cons_of_mem _ he)) (mergeBits rep edge) (fun x hx => ?_) fun x hx => ?_
+    · simp only [mergeBits]
+      split
+      · exact hin _ he2
+      · exact hin _ hx
+    · simp only [mergeBits]
+      have hx' := hout x hx
+      have hne : rep x ≠ rep edge.1 := by
+        rw [hx']
+        intro h
+        exact hx (h ▸ hin _ he1)
+      rw [ite_eq_right hne, hx']
+
+private theorem conflictsOf_nil_iff (rep : Bit → Bit) (bits : List Bit) :
+    conflictsOf rep bits = [] ↔ ∀ p ∈ bits, ∀ q ∈ bits, rep p = rep q → p = q := by
+  induction bits with
+  | nil => simp [conflictsOf]
+  | cons bit rest ih =>
+    simp only [conflictsOf, List.append_eq_nil_iff, List.map_eq_nil_iff, List.filter_eq_nil_iff, ih, List.mem_cons]
+    constructor
+    · rintro ⟨h1, h2⟩ p hp q hq heq
+      have key : ∀ other ∈ rest, rep other = rep bit → other = bit := by
+        intro other ho hr
+        have := h1 other ho
+        simp only [Bool.and_eq_true, bne_iff_ne, beq_iff_eq, not_and] at this
+        exact Classical.byContradiction fun hne => (this hne) hr
+      rcases hp with rfl | hp <;> rcases hq with rfl | hq
+      · rfl
+      · exact (key q hq heq.symm).symm
+      · exact key p hp heq
+      · exact h2 p hp q hq heq
+    · intro h
+      refine ⟨fun other ho => ?_, fun p hp q hq => h p (.inr hp) q (.inr hq)⟩
+      simp only [Bool.and_eq_true, bne_iff_ne, beq_iff_eq, not_and]
+      exact fun hne hr => hne (h other (.inr ho) bit (.inl rfl) hr)
+
+/-- The bits of the equations. -/
+private def bitsOf (target : T) : List Bit := target.equations.flatMap fun equation => [equation.1, equation.2]
+
+private theorem representative_range (target : T) :
+    (∀ x ∈ bitsOf target, target.representative x ∈ bitsOf target) ∧ ∀ x, x ∉ bitsOf target → target.representative x = x :=
+  foldl_mergeBits_range _ _ (fun edge he => by
+    simp only [bitsOf, List.mem_flatMap, List.mem_cons, List.not_mem_nil, or_false]
+    exact ⟨⟨edge, he, .inl rfl⟩, ⟨edge, he, .inr rfl⟩⟩) id (fun _ h => h) (fun _ _ => rfl)
+
+/-- A bit of the basis, as `Free` means it. -/
+def BasisBit (target : T) (bit : Bit) : Prop :=
+  target.isAlias bit.1 = false ∧ ∃ size, regWidth bit.1 = some size ∧ bit.2 < size
+
+theorem isBasisBit_iff {target : T} {bit : Bit} : target.isBasisBit bit = true ↔ BasisBit target bit := by
+  simp only [Target.isBasisBit, Bool.and_eq_true, Bool.not_eq_true', BasisBit]
+  cases regWidth bit.1 <;> simp
+
+/-- **An independent basis**: no two different bits of the basis are forced to be equal by the equations. -/
+def IndependentBasis (target : T) : Prop :=
+  ∀ p q, BasisBit target p → BasisBit target q → (∀ value, Model target value → value p.1 p.2 = value q.1 q.2) → p = q
+
+/-- A model of the equations has the value of a bit in its representative. -/
+theorem model_representative {target : T} {value : RV → Nat → Bool} (hm : Model target value) (x : RV × Nat) :
+    value x.1 x.2 = value (target.representative x).1 (target.representative x).2 :=
+  foldl_mergeBits_sound (value := fun bit => value bit.1 bit.2) _ (model_iff_equations.mp hm) id (fun _ => rfl) x
+
+private theorem basisBits_mem {target : T} {x : Bit} : x ∈ target.basisBits ↔ x ∈ bitsOf target ∧ target.isBasisBit x = true := by
+  simp only [Target.basisBits, List.mem_eraseDups, List.mem_filter]
+  rfl
+
+/-- The basis is independent if what the check finds is empty. -/
+theorem free_of_resolves {target : T} (h : target.resolves = true) : Free target := by
+  have hno : ∀ p ∈ target.basisBits, ∀ q ∈ target.basisBits, target.representative p = target.representative q → p = q :=
+    (conflictsOf_nil_iff _ _).mp (by simpa [Target.resolves, Target.conflicts] using h)
+  intro basis
+  -- the value of a bit is the one of the bit of the basis in its class, if any
+  let holder (x : Bit) : Option Bit := target.basisBits.find? fun p => target.representative p == target.representative x
+  refine ⟨fun reg index => match holder (reg, index) with
+    | some p => basis p.1 p.2
+    | none => if target.isBasisBit (reg, index) then basis reg index else false, ?_, ?_⟩
+  · refine model_iff_equations.mpr fun equation he => ?_
+    have hsame : target.representative equation.1 = target.representative equation.2 := foldl_mergeBits_equal _ _ he
+    have hh : holder equation.1 = holder equation.2 := by simp only [holder, hsame]
+    have hnotbasis : ∀ x, x ∈ bitsOf target → holder x = none → target.isBasisBit x = false := by
+      intro x hx hn
+      cases hb : target.isBasisBit x with
+      | false => rfl
+      | true =>
+        have hmem : x ∈ target.basisBits := basisBits_mem.mpr ⟨hx, hb⟩
+        have := List.find?_eq_none.mp hn x hmem
+        simp at this
+    have h1 : equation.1 ∈ bitsOf target := by
+      simp only [bitsOf, List.mem_flatMap, List.mem_cons]
+      exact ⟨equation, he, .inl rfl⟩
+    have h2 : equation.2 ∈ bitsOf target := by
+      simp only [bitsOf, List.mem_flatMap, List.mem_cons]
+      exact ⟨equation, he, .inr (.inl rfl)⟩
+    show (match holder (equation.1.1, equation.1.2) with
+      | some p => basis p.1 p.2
+      | none => if target.isBasisBit (equation.1.1, equation.1.2) then basis equation.1.1 equation.1.2 else false) =
+      (match holder (equation.2.1, equation.2.2) with
+      | some p => basis p.1 p.2
+      | none => if target.isBasisBit (equation.2.1, equation.2.2) then basis equation.2.1 equation.2.2 else false)
+    simp only [Prod.eta]
+    rw [hh]
+    cases hc : holder equation.2 with
+    | some p => rfl
+    | none =>
+      simp only [hnotbasis _ h1 (hh.trans hc), hnotbasis _ h2 hc, Bool.false_eq_true, ite_false]
   · intro base hb at' size hsize hrange
-    obtain ⟨fuel, hfuel⟩ : ∃ fuel, target.aliasFuel = fuel + 1 :=
-      ⟨target.aliasFuel - 1, by have := aliasFuel_pos target; omega⟩
-    simp only [resolveBit, hfuel, Target.locate, hb, Bool.false_eq_true, ↓reduceIte, hsize, Option.any_some,
-      decide_eq_true_eq, hrange, Option.getD_some]
-  · intro alias halias span hspan index hindex
-    simp only [Resolves, List.all_eq_true, beq_iff_eq, List.mem_range] at h
-    exact h alias halias span hspan index hindex
+    have hbasis : target.isBasisBit (base, at') = true := isBasisBit_iff.mpr ⟨hb, size, hsize, hrange⟩
+    dsimp only
+    cases hc : holder (base, at') with
+    | none => simp [hbasis]
+    | some p =>
+      have hfound := List.find?_some hc
+      have hp := List.mem_of_find?_eq_some hc
+      have hreq : target.representative p = target.representative (base, at') := by simpa using hfound
+      have heq : p = (base, at') := by
+        by_cases hin : (base, at') ∈ bitsOf target
+        · exact hno p hp _ (basisBits_mem.mpr ⟨hin, hbasis⟩) hreq
+        · exfalso
+          have h1 := (representative_range target).2 _ hin
+          have h2 := (representative_range target).1 p (basisBits_mem.mp hp).1
+          rw [hreq, h1] at h2
+          exact hin h2
+      rw [heq]
+
+/-- **The check is complete**, and the characterization of `Free`: the equations have an independent basis exactly if the check
+finds nothing wrong, exactly if the basis is free. -/
+theorem free_iff_independent (target : T) : Free target ↔ IndependentBasis target := by
+  constructor
+  · intro hfree p q hp hq hforced
+    obtain ⟨hpb, ps, hps, hpr⟩ := hp
+    obtain ⟨hqb, qs, hqs, hqr⟩ := hq
+    refine Classical.byContradiction fun hne => ?_
+    obtain ⟨value, hm, hbasis⟩ := hfree fun reg index => decide ((reg, index) = p)
+    have h1 := hbasis _ hpb _ _ hps hpr
+    have h2 := hbasis _ hqb _ _ hqs hqr
+    have h3 := hforced value hm
+    rw [h1, h2] at h3
+    have hne' : ¬ q = p := fun h => hne h.symm
+    simp [hne'] at h3
+  · intro hind
+    refine free_of_resolves ?_
+    simp only [Target.resolves, Target.conflicts, List.isEmpty_iff]
+    refine (conflictsOf_nil_iff _ _).mpr fun p hp q hq heq => ?_
+    refine hind p q (isBasisBit_iff.mp (basisBits_mem.mp hp).2) (isBasisBit_iff.mp (basisBits_mem.mp hq).2) fun value hm => ?_
+    rw [model_representative hm p, model_representative hm q, heq]
+
+/-- `Target.resolves` is sound and complete for `Free`. -/
+theorem resolves_iff_free (target : T) : target.resolves = true ↔ Free target := by
+  refine ⟨free_of_resolves, fun hfree => ?_⟩
+  have hind := (free_iff_independent target).mp hfree
+  simp only [Target.resolves, Target.conflicts, List.isEmpty_iff]
+  refine (conflictsOf_nil_iff _ _).mpr fun p hp q hq heq => ?_
+  refine hind p q (isBasisBit_iff.mp (basisBits_mem.mp hp).2) (isBasisBit_iff.mp (basisBits_mem.mp hq).2) fun value hm => ?_
+  rw [model_representative hm p, model_representative hm q, heq]
+
+/-- `Resolves` is the decidable form of `Free`. -/
+abbrev Resolves (target : T) : Bool := target.resolves
+
+/-- **`validate` reports exactly the tables that aren't free**, and passes the others as they are. -/
+theorem validate_ok_iff (target : T) : (∃ checked, target.validate = .ok checked) ↔ Free target := by
+  rw [← resolves_iff_free]
+  simp only [Target.validate, Target.resolves, List.isEmpty_iff]
+  split
+  · next h => simp [h]
+  · next h =>
+    simp only [h, reduceCtorEq, iff_false, not_exists]
+    exact fun _ h' => by cases h'
+
+theorem validate_ok_self {target checked : T} (h : target.validate = .ok checked) : checked = target := by
+  simp only [Target.validate] at h
+  split at h <;> cases h
+  rfl
+
+/-- What `validate` reports are different bits of the basis that no model tells apart. -/
+theorem conflicts_forced {target : T} {p q : RV × Nat} (h : (p, q) ∈ target.conflicts) :
+    p ≠ q ∧ BasisBit target p ∧ BasisBit target q ∧ ∀ value, Model target value → value p.1 p.2 = value q.1 q.2 := by
+  have key : ∀ bits : List Bit, (p, q) ∈ conflictsOf target.representative bits →
+      p ∈ bits ∧ q ∈ bits ∧ q ≠ p ∧ target.representative q = target.representative p := by
+    intro bits
+    induction bits with
+    | nil => simp [conflictsOf]
+    | cons bit rest ih =>
+      simp only [conflictsOf, List.mem_append, List.mem_map, List.mem_filter, Prod.mk.injEq]
+      rintro (⟨other, ⟨ho, hc⟩, rfl, rfl⟩ | h)
+      · simp only [Bool.and_eq_true, bne_iff_ne, beq_iff_eq] at hc
+        exact ⟨by simp, List.mem_cons_of_mem _ ho, hc.1, hc.2⟩
+      · obtain ⟨h1, h2, h3, h4⟩ := ih h
+        exact ⟨List.mem_cons_of_mem _ h1, List.mem_cons_of_mem _ h2, h3, h4⟩
+  obtain ⟨hp, hq, hne, hreq⟩ := key _ h
+  refine ⟨fun he => hne he.symm, isBasisBit_iff.mp (basisBits_mem.mp hp).2, isBasisBit_iff.mp (basisBits_mem.mp hq).2, fun value hm => ?_⟩
+  rw [model_representative hm p, model_representative hm q, hreq]
 
 /-- Without aliases there is nothing to constrain the basis. -/
 theorem free_of_no_aliases {target : T} (h : target.aliases = []) : Free target :=
-  free_of_resolves (by simp [Resolves, h])
+  free_of_resolves (by simp [Target.resolves, Target.conflicts, Target.basisBits, Target.equations, h, conflictsOf])
 
 /-- The registers the equations mention. -/
 def mentioned (target : T) : List RV :=
@@ -2765,7 +3002,7 @@ theorem Chain.length_lt_aliasFuel {target : T} {bit final : RV × Nat} {path : L
 
 /-- **Completeness for nested sub-registers, on a table that resolves**: `Free` and the fuel bound of
 `unalias_sub_of_chains` hold when the table passes the check and the chains don't come back to a register. -/
-theorem unalias_sub_of_resolving_chains {target : T} (hresolves : Resolves target = true) {var reg : RV} {width lo : Nat}
+theorem unalias_sub_of_resolving_chains {target : T} (hresolves : target.resolves = true) {var reg : RV} {width lo : Nat}
     (halias : target.isAlias var = true) (hwidth : regWidth var = some width) (hpos : 0 < width)
     (hchains : ∀ index < width, ∃ path, Chain target (var, index) path (reg, lo + index) ∧
       (((var, index) :: path).map Prod.fst).Nodup) :
@@ -2799,7 +3036,7 @@ def table : T := declare {
   aliases := some [⟨rax, [.reg upper, .reg eax]⟩, ⟨eax, [.unknown, .reg ax]⟩, ⟨ax, [.reg ah, .reg al]⟩]
 }
 
-theorem table_resolves : Resolves table = true := by decide +kernel
+theorem table_resolves : table.resolves = true := by decide +kernel
 
 theorem table_free : Free table := free_of_resolves table_resolves
 

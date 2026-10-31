@@ -44,7 +44,40 @@ private def status := reg "STATUS" 2
 /-- The check that discharges `Free` for a concrete table, on the examples. -/
 private def resolving : IO Unit := do
   let table := Proofs.Theory.TargetLaws.X86Table.table
-  assertTrue "the table of RAX resolves" (Proofs.Theory.TargetLaws.Resolves table)
+  assertTrue "the table of RAX resolves" table.resolves
+  assertEqual "the table of RAX has nothing to report" true (match table.validate with | .ok _ => true | .error _ => false)
+  let general (name : String) (width : Nat) : Theory.Var := ⟨name, .bitv width, 0, false, false⟩
+  -- two registers that share a part: the equations make bits of the basis equal, and `declare` stays total
+  let shared : Target := declare {
+    name := "shared"
+    regs := some [([.general], [general "A" 16, general "B" 16]), ([.alias], [general "HI" 8, general "LA" 8, general "LB" 8])]
+    aliases := some [⟨general "A" 16, [.reg (general "HI" 8), .reg (general "LA" 8)]⟩,
+      ⟨general "B" 16, [.reg (general "HI" 8), .reg (general "LB" 8)]⟩] }
+  assertEqual "a table that makes bits of the basis equal doesn't resolve" false shared.resolves
+  assertEqual "it makes the eight high bits of its registers equal" 8 shared.conflicts.length
+  assertEqual "validate reports the first pair"
+    (some "the aliases of shared are overdetermined: they make bit 8 of A and bit 8 of B equal")
+    (match shared.validate with | .ok _ => none | .error message => some message)
+  -- equations between aliases only say nothing of the basis, which the search found no end for
+  let closed : Target := declare {
+    name := "closed"
+    regs := some [([.alias], [general "X" 8, general "Y" 8])]
+    aliases := some [⟨general "X" 8, [.reg (general "Y" 8)]⟩] }
+  assertEqual "aliases without a basis leave the basis free" true closed.resolves
+  -- a lookup through the classes is linear in the equations: a full 64-bit table of nested halves takes no time
+  let nestedRegs := (List.range 8).flatMap fun i =>
+    [general s!"R{i}" 64, general s!"E{i}" 32, general s!"U{i}" 32, general s!"W{i}" 16, general s!"H{i}" 8, general s!"L{i}" 8]
+  let wide : Target := declare {
+    name := "wide"
+    regs := some [([.general], (List.range 8).map fun i => general s!"R{i}" 64), ([.alias], nestedRegs.filter fun reg => reg.sort != .bitv 64)]
+    aliases := some ((List.range 8).flatMap fun i =>
+      [⟨general s!"R{i}" 64, [.reg (general s!"U{i}" 32), .reg (general s!"E{i}" 32)]⟩,
+       ⟨general s!"E{i}" 32, [.unknown, .reg (general s!"W{i}" 16)]⟩,
+       ⟨general s!"W{i}" 16, [.reg (general s!"H{i}" 8), .reg (general s!"L{i}" 8)]⟩]) }
+  let start ← IO.monoMsNow
+  assertEqual "a table of eight 64-bit registers resolves" true wide.resolves
+  let elapsed := (← IO.monoMsNow) - start
+  assertTrue s!"and at once ({elapsed} ms)" (elapsed < 5000)
   assertEqual "AH in RAX" (some (.sub Proofs.Theory.TargetLaws.X86Table.rax 15 8 false))
     (table.unalias Proofs.Theory.TargetLaws.X86Table.ah)
 

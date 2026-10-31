@@ -25,7 +25,6 @@ local elab "realize_eq_defs " mod:ident ns:ident ids:ident* : command => do
   for id in ids.toList do
     liftCoreM <| executeReservedNameAction (mkPrivateNameCore mod.getId (ns.getId ++ id.getId ++ `eq_def))
 
-set_option linter.unusedSimpArgs false
 
 namespace Bap.Proofs.Primus
 
@@ -386,11 +385,11 @@ theorem addRegion_ok_iff (memory : PMemory) (region : Region) (result : PMemory)
         result = { memory with regions := region :: memory.regions } := by
   simp only [Bap.Primus.Memory.addRegion, gt_iff_lt]
   by_cases hu : Bap.Primus.Memory.addressLimit < region.upper
-  · simp [hu, Nat.not_le.2 hu, bind, Except.bind]
+  · simp [hu, Nat.not_le.2 hu]
   · simp only [hu, ↓reduceIte, Nat.not_lt.1 hu, true_and]
     split <;> rename_i h
-    · simp [h, bind, Except.bind]
-    · simp [h, eq_comm, pure, Except.pure]
+    · simp [h]
+    · simp [h, eq_comm]
 
 /-- A region crossing the end of the address space is refused. -/
 theorem addRegion_out_of_range (memory : PMemory) (region : Region) (h : Bap.Primus.Memory.addressLimit < region.upper) :
@@ -446,15 +445,15 @@ theorem loadByte_ok_iff (memory : PMemory) (address : Nat) (value : UInt8) :
         Bap.Memory.readByte memory.cells (BitVec.ofNat 64 address) = value := by
   simp only [Bap.Primus.Memory.loadByte]
   cases hp : memory.protection address with
-  | none => simp [bind, Except.bind]
+  | none => simp
   | some p =>
-    cases hr : p.readable <;> simp [hr, pure, Except.pure]
+    cases hr : p.readable <;> simp [hr]
 
 theorem loadByte_unmapped (memory : PMemory) (address : Nat) (h : memory.isMapped address = false) :
     ∃ e, memory.loadByte address = .error e := by
   have : memory.protection address = none := by
     simpa [Bap.Primus.Memory.isMapped] using h
-  simp [Bap.Primus.Memory.loadByte, this, bind, Except.bind]
+  simp [Bap.Primus.Memory.loadByte, this]
 
 theorem storeByte_ok_iff (memory : PMemory) (address : Nat) (value : UInt8) (result : PMemory) :
     memory.storeByte address value = .ok result ↔
@@ -462,18 +461,18 @@ theorem storeByte_ok_iff (memory : PMemory) (address : Nat) (value : UInt8) (res
         result = { memory with cells := Bap.Memory.writeByte memory.cells (BitVec.ofNat 64 address) value } := by
   simp only [Bap.Primus.Memory.storeByte]
   cases hp : memory.protection address with
-  | none => simp [bind, Except.bind]
+  | none => simp
   | some p =>
     cases hr : p.writable
-    · simp [hr, bind, Except.bind]
+    · simp [hr]
     · simp only [hr, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-      simp only [pure, Except.pure, Except.ok.injEq, Option.some.injEq, exists_eq_left', hr, true_and]
+      simp only [Except.ok.injEq, Option.some.injEq, exists_eq_left', hr, true_and]
       exact eq_comm
 
 theorem storeByte_readonly (memory : PMemory) (address : Nat) (value : UInt8) (p : Protection)
     (hp : memory.protection address = some p) (hw : p.writable = false) :
     ∃ e, memory.storeByte address value = .error e := by
-  simp [Bap.Primus.Memory.storeByte, hp, hw, bind, Except.bind]
+  simp [Bap.Primus.Memory.storeByte, hp, hw]
 
 /-- Writes never change the region table, hence never change permissions. -/
 theorem storeByte_protection {memory result : PMemory} {address other : Nat} {value : UInt8}
@@ -510,17 +509,17 @@ theorem loadByte_storeByte_other {memory result : PMemory} {address other : Nat}
       rwa [Nat.mod_eq_of_lt ha', Nat.mod_eq_of_lt hb'] at this
     simp only [Bap.Primus.Memory.loadByte, Bap.Primus.Memory.protection, readByte_writeByte_other _ _ _ _ hbv]
   · have hge := Nat.not_lt.1 hb
-    simp [Bap.Primus.Memory.loadByte, protection_out_of_space _ _ hge, bind, Except.bind]
+    simp [Bap.Primus.Memory.loadByte, protection_out_of_space _ _ hge]
 
 /-- A store at or above `2^64` fails, so it cannot alias a low address. -/
 theorem storeByte_out_of_space (memory : PMemory) (address : Nat) (value : UInt8)
     (h : Bap.Primus.Memory.addressLimit ≤ address) :
     memory.storeByte address value = .error (.unmapped address) := by
-  simp [Bap.Primus.Memory.storeByte, protection_out_of_space _ _ h, bind, Except.bind]
+  simp [Bap.Primus.Memory.storeByte, protection_out_of_space _ _ h]
 
 theorem loadByte_out_of_space (memory : PMemory) (address : Nat) (h : Bap.Primus.Memory.addressLimit ≤ address) :
     memory.loadByte address = .error (.unmapped address) := by
-  simp [Bap.Primus.Memory.loadByte, protection_out_of_space _ _ h, bind, Except.bind]
+  simp [Bap.Primus.Memory.loadByte, protection_out_of_space _ _ h]
 
 /-- Fetching needs execute permission only. -/
 theorem fetch_ok_iff (memory : PMemory) (address : Nat) (value : UInt8) :
@@ -529,25 +528,25 @@ theorem fetch_ok_iff (memory : PMemory) (address : Nat) (value : UInt8) :
         Bap.Memory.readByte memory.cells (BitVec.ofNat 64 address) = value := by
   simp only [Bap.Primus.Memory.fetch]
   cases hp : memory.protection address with
-  | none => simp [bind, Except.bind]
+  | none => simp
   | some p =>
     cases hx : p.executable
-    · simp [hx, bind, Except.bind]
-    · simp [hx, pure, Except.pure]
+    · simp [hx]
+    · simp [hx]
 
 /-- Execute-only memory can be fetched, but not read as data. -/
 theorem execute_only_fetch_without_load (memory : PMemory) (address : Nat) (p : Protection)
     (hp : memory.protection address = some p) (hx : p.executable = true) (hr : p.readable = false) :
     memory.fetch address = .ok (Bap.Memory.readByte memory.cells (BitVec.ofNat 64 address)) ∧
       memory.loadByte address = .error (.unmapped address) := by
-  simp [Bap.Primus.Memory.fetch, Bap.Primus.Memory.loadByte, hp, hx, hr, bind, Except.bind, pure, Except.pure]
+  simp [Bap.Primus.Memory.fetch, Bap.Primus.Memory.loadByte, hp, hx, hr]
 
 /-- Readable but not executable memory is loadable, not fetchable. -/
 theorem data_only_load_without_fetch (memory : PMemory) (address : Nat) (p : Protection)
     (hp : memory.protection address = some p) (hx : p.executable = false) (hr : p.readable = true) :
     memory.fetch address = .error (.notExecutable address) ∧
       memory.loadByte address = .ok (Bap.Memory.readByte memory.cells (BitVec.ofNat 64 address)) := by
-  simp [Bap.Primus.Memory.fetch, Bap.Primus.Memory.loadByte, hp, hx, hr, bind, Except.bind, pure, Except.pure]
+  simp [Bap.Primus.Memory.fetch, Bap.Primus.Memory.loadByte, hp, hx, hr]
 
 /-! `load` and `store` validate every byte. -/
 
@@ -582,7 +581,7 @@ private theorem mapM_ok_all {α β ε : Type} {f : α → Except ε β} {items :
 theorem load_ok_iff (memory : PMemory) (address : Nat) (endian : Bap.Endian) (size : Nat) :
     (∃ value, memory.load address endian size = .ok value) ↔
       ∀ offset, offset < size → ∃ byte, memory.loadByte (address + offset) = .ok byte := by
-  simp only [Bap.Primus.Memory.load, bind, Except.bind, pure, Except.pure]
+  simp only [Bap.Primus.Memory.load, bind, Except.bind]
   constructor
   · rintro ⟨value, hv⟩ offset ho
     cases hm : (List.range size).mapM (fun offset => memory.loadByte (address + offset)) with
@@ -606,7 +605,7 @@ theorem load_in_space {memory : PMemory} {address size : Nat} {endian : Bap.Endi
 theorem load_value {memory : PMemory} {address size : Nat} {endian : Bap.Endian} {value : BitVec (size * 8)}
     (h : memory.load address endian size = .ok value) :
     value = Bap.Memory.read memory.cells (BitVec.ofNat 64 address) endian size := by
-  simp only [Bap.Primus.Memory.load, bind, Except.bind, pure, Except.pure] at h
+  simp only [Bap.Primus.Memory.load, bind, Except.bind] at h
   cases hm : (List.range size).mapM (fun offset => memory.loadByte (address + offset)) with
   | error e => simp [hm] at h
   | ok r =>
@@ -627,7 +626,7 @@ theorem store_ok_sound {memory result : PMemory} {address size : Nat} {endian : 
     · cases hw : Bap.Memory.write memory.cells (BitVec.ofNat 64 address) value endian size with
       | error e => simp [hw] at h
       | ok cells =>
-        simp only [hw, pure, Except.pure, Except.ok.injEq] at h
+        simp only [hw, Except.ok.injEq] at h
         subst h
         rfl
     · intro offset ho
@@ -655,7 +654,7 @@ theorem store_width_mismatch (memory : PMemory) (address size : Nat) (endian : B
     ∃ e, memory.store address value endian size = .error e := by
   have hw : Bap.Memory.write memory.cells (BitVec.ofNat 64 address) value endian size =
       .error s!"expected {size * 8} bits, actual {width}" := by
-    simp [Bap.Memory.write, h, bind, Except.bind]
+    simp [Bap.Memory.write, h]
   simp only [Bap.Primus.Memory.store, bind, Except.bind, hw]
   cases (List.range size).mapM (fun offset =>
       match memory.protection (address + offset) with
@@ -680,7 +679,7 @@ theorem map_ok_iff (memory : PMemory) (address : Nat) (data : ByteArray) (p : Pr
     simp [h] at this
   | ok added =>
     obtain ⟨h1, h2, _⟩ := (addRegion_ok_iff _ _ _).1 h
-    simp only [pure, Except.pure, Except.ok.injEq, exists_eq', true_iff]
+    simp only [Except.ok.injEq, exists_eq', true_iff]
     exact ⟨h1, h2⟩
 
 private theorem map_result {memory result : PMemory} {address : Nat} {data : ByteArray} {p : Protection}
@@ -695,7 +694,7 @@ private theorem map_result {memory result : PMemory} {address : Nat} {data : Byt
   cases hadd : Bap.Primus.Memory.addRegion memory ⟨address, address + data.size, p⟩ with
   | error e => simp [hadd] at h
   | ok added =>
-    simp only [hadd, pure, Except.pure, Except.ok.injEq] at h
+    simp only [hadd, Except.ok.injEq] at h
     obtain ⟨hu, _, rfl⟩ := (addRegion_ok_iff _ _ _).1 hadd
     subst h
     exact ⟨rfl, hu, rfl, rfl⟩
@@ -913,7 +912,7 @@ theorem protect_spec {memory : PMemory} {lower upper address : Nat} {p q : Prote
       ∃ region ∈ memory.regions, region.contains address = true ∧ region.protection = q := by
     have hb : address < Bap.Primus.Memory.addressLimit := protection_some_in_space hq
     unfold Bap.Primus.Memory.protection at hq
-    rw [if_neg (Nat.not_le.2 hb)] at hq
+    rw [ite_eq_right (Nat.not_le.2 hb)] at hq
     split at hq
     · next region hfind =>
       simp only [Option.some.injEq] at hq
@@ -1115,7 +1114,7 @@ private theorem lookup_filter_other (key other : String) (entries : List (String
     by_cases hk : k = key
     · subst hk
       have hne : (other == k) = false := by simpa using Ne.symm h
-      simp [List.filter_cons, List.lookup_cons, hne, ih]
+      simp [List.lookup_cons, hne, ih]
     · have hne : (k != key) = true := by simpa using hk
       simp only [List.filter_cons, hne, ↓reduceIte, List.lookup_cons, ih]
 
@@ -1162,10 +1161,10 @@ theorem evalExpr_symbol (fuel : Nat) (locals : Locals) (globals : Globals) (atom
 /-- An atom that starts like a number but is not one is an error, not a symbol, as `Bad_word_literal`
 upstream, even if a variable of that name exists. -/
 theorem evalExpr_malformed (fuel : Nat) (locals : Locals) (globals : Globals) {atom error : String}
-    (ht : atom ≠ "true") (hf : atom ≠ "false") (hi : readLiteral atom = .error error) :
+    (_ht : atom ≠ "true") (_hf : atom ≠ "false") (hi : readLiteral atom = .error error) :
     evalExpr (fuel + 1) locals globals (.atom atom) = .error error := by
   rw [evalExpr]
-  simp [ht, hf, hi, bind, Except.bind]
+  simp [hi, bind, Except.bind]
 
 /-- A character literal is the 8-bit code of the character. -/
 private theorem readLiteral_literal_true : readLiteral "true" = .ok none := by
@@ -1233,7 +1232,7 @@ theorem assignLocal_get_same (name : String) (value : LV) (locals : Locals) (h :
     · subst hk
       simp [assignLocal, Assoc.get]
     · have hne : (name == key) = false := by simpa using Ne.symm hk
-      simp only [Assoc.get, List.lookup_cons, hne, Bool.cond_false] at h ih
+      simp only [Assoc.get, List.lookup_cons, hne] at h ih
       simp [assignLocal, hk, Assoc.get, List.lookup_cons, hne, ih h]
 
 theorem assignLocal_get_other (name other : String) (value : LV) (locals : Locals) (h : name ≠ other) :
@@ -1269,7 +1268,7 @@ theorem evalExpr_setq_local {fuel : Nat} {locals after : Locals} {globals later 
     evalExpr (fuel + 1) locals globals (.list [.atom "setq", .atom name, form]) =
       .ok (value, assignLocal name value after, later) := by
   rw [evalExpr]
-  simp [h, bound, bind, Except.bind, pure, Except.pure]
+  simp [h, bound, bind, Except.bind]
 
 /-- `setq` of any other name writes the global, which later lookups see. -/
 theorem evalExpr_setq_global {fuel : Nat} {locals after : Locals} {globals later : Globals} {name : String}
@@ -1278,7 +1277,7 @@ theorem evalExpr_setq_global {fuel : Nat} {locals after : Locals} {globals later
     evalExpr (fuel + 1) locals globals (.list [.atom "setq", .atom name, form]) =
       .ok (value, after, Assoc.put name value later) := by
   rw [evalExpr]
-  simp [h, unbound, bind, Except.bind, pure, Except.pure]
+  simp [h, unbound, bind, Except.bind]
 
 theorem evalExpr_lambda_captures (fuel : Nat) (locals : Locals) (globals : Globals) (params : List String) (body : Sexp) :
     evalExpr (fuel + 1) locals globals (.list [.atom "lambda", .list (params.map .atom), body]) =
@@ -1290,7 +1289,7 @@ theorem evalExpr_lambda_captures (fuel : Nat) (locals : Locals) (globals : Globa
     induction params with
     | nil => rfl
     | cons p rest ih => simp only [List.map_cons, List.mapM_cons, hf, ih]; rfl
-  simp only [bind, Except.bind, pure, Except.pure]
+  simp only [bind, Except.bind]
   rw [key _ (fun _ => rfl)]
 
 /-- `progn` over nothing is unit; the environments stay as they were. -/
@@ -1314,7 +1313,7 @@ theorem evalExpr_and_short_circuit {fuel : Nat} {locals after : Locals} {globals
     (rest : List Sexp) (h : evalExpr fuel locals globals head = .ok (.bool false, after, later)) :
     evalExpr (fuel + 1) locals globals (.list (.atom "and" :: head :: rest)) = .ok (.bool false, after, later) := by
   rw [evalExpr]
-  simp only [List.foldlM_cons, expectBool, bind, Except.bind, pure, Except.pure, Bool.not_true,
+  simp only [List.foldlM_cons, expectBool, bind, Except.bind, Bool.not_true,
     Bool.false_eq_true, ↓reduceIte, h]
   exact and_short_circuit fuel rest after later
 
@@ -1333,7 +1332,7 @@ theorem evalExpr_or_short_circuit {fuel : Nat} {locals after : Locals} {globals 
     (rest : List Sexp) (h : evalExpr fuel locals globals head = .ok (.bool true, after, later)) :
     evalExpr (fuel + 1) locals globals (.list (.atom "or" :: head :: rest)) = .ok (.bool true, after, later) := by
   rw [evalExpr]
-  simp only [List.foldlM_cons, expectBool, bind, Except.bind, pure, Except.pure, Bool.false_eq_true, ↓reduceIte, h]
+  simp only [List.foldlM_cons, expectBool, bind, Except.bind, Bool.false_eq_true, ↓reduceIte, h]
   exact or_short_circuit fuel rest after later
 
 /-! Primitive arithmetic agrees with `BitVec`. -/
@@ -1351,12 +1350,12 @@ private theorem mapM_expectInt (values : List (BitVec 64)) :
 
 theorem primitive_add (values : List (BitVec 64)) :
     evalPrimitive "+" (values.map .int) = .ok (.int (values.foldl (· + ·) 0)) := by
-  simp only [evalPrimitive, any_symbolic_ints, mapM_expectInt, bind, Except.bind, pure, Except.pure]
+  simp only [evalPrimitive, any_symbolic_ints, mapM_expectInt, bind, Except.bind]
   rfl
 
 theorem primitive_mul (values : List (BitVec 64)) :
     evalPrimitive "*" (values.map .int) = .ok (.int (values.foldl (· * ·) 1)) := by
-  simp only [evalPrimitive, any_symbolic_ints, mapM_expectInt, bind, Except.bind, pure, Except.pure]
+  simp only [evalPrimitive, any_symbolic_ints, mapM_expectInt, bind, Except.bind]
   rfl
 
 theorem primitive_sub (first : BitVec 64) (rest : List (BitVec 64)) (h : rest ≠ []) :
@@ -1377,7 +1376,7 @@ theorem primitive_udiv (first : BitVec 64) (rest : List (BitVec 64)) :
   have := mapM_expectInt (first :: rest)
   have hs := any_symbolic_ints (first :: rest)
   simp only [List.map_cons] at this hs
-  simp only [evalPrimitive, hs, this, bind, Except.bind, pure, Except.pure, Bool.false_eq_true, ↓reduceIte]
+  simp only [evalPrimitive, hs, this, bind, Except.bind, Bool.false_eq_true, ↓reduceIte]
 
 /-- Division by zero follows the machine convention: all ones. -/
 theorem primitive_div_zero (value : BitVec 64) :
@@ -1400,7 +1399,7 @@ theorem primitive_bit_operations (values : List (BitVec 64)) :
     evalPrimitive "bitand" (values.map .int) = .ok (.int (values.foldl (· &&& ·) 0xffffffffffffffff)) ∧
       evalPrimitive "bitor" (values.map .int) = .ok (.int (values.foldl (· ||| ·) 0)) ∧
       evalPrimitive "bitxor" (values.map .int) = .ok (.int (values.foldl (· ^^^ ·) 0)) := by
-  simp only [evalPrimitive, bitOperation, any_symbolic_ints, mapM_expectInt, bind, Except.bind, pure, Except.pure]
+  simp only [evalPrimitive, bitOperation, any_symbolic_ints, mapM_expectInt, bind, Except.bind]
   exact ⟨rfl, rfl, rfl⟩
 
 /-- Pair algebra of the list primitives. -/
@@ -1921,7 +1920,7 @@ theorem condition_ok_iff (context : Context) (value : SV) (exp : Bil.Exp) :
     obtain ⟨w, e⟩ := pair
     by_cases hw : w = 1
     · subst hw
-      simp [pure, Except.pure]
+      simp
     · simp [hw, Except.ok.injEq]
 
 /-! Arithmetic widening. -/
@@ -1964,11 +1963,11 @@ theorem binary_width {context : Context} {op : Bil.BinOp} {args : List SV} {firs
 
 theorem compare_symbols_eq (context : Context) (left right : String) :
     primCompare context .eq [.symbol left, .symbol right] = .ok (.bool (decide (left = right))) := by
-  simp [primCompare, pure, Except.pure]
+  simp [primCompare]
 
 theorem compare_symbols_neq (context : Context) (left right : String) :
     primCompare context .neq [.symbol left, .symbol right] = .ok (.bool (decide (left ≠ right))) := by
-  simp [primCompare, pure, Except.pure]
+  simp [primCompare]
 
 /-- Only equality tests are defined on symbols. -/
 theorem compare_symbols_ordered (context : Context) (op : Bil.BinOp) (left right : String)
@@ -2281,12 +2280,12 @@ theorem checkForms_rejects {forms : List Sexp} {form : Sexp} {e : String} (hm : 
   | cons head rest ih =>
     rw [checkForms]
     cases hh : checkLiterals head with
-    | error e' => exact ⟨e', by simp [bind, Except.bind, hh]⟩
+    | error e' => exact ⟨e', by simp [bind, Except.bind]⟩
     | ok _ =>
       rcases List.mem_cons.1 hm with rfl | hm'
       · simp [h] at hh
       · obtain ⟨e', he⟩ := ih hm'
-        exact ⟨e', by simp [bind, Except.bind, hh, he]⟩
+        exact ⟨e', by simp [bind, Except.bind, he]⟩
 
 /-- Definitions are checked when loaded, even if never called; their documentation strings are not. -/
 theorem checkLiterals_definition (name : String) (params : List Sexp) (body : Sexp) (rest : List Sexp) (doc : String) :
@@ -2296,7 +2295,7 @@ theorem checkLiterals_definition (name : String) (params : List Sexp) (body : Se
 
 theorem checkLiterals_atom (atom : String) (e : String) (h : readLiteral atom = .error e) :
     checkLiterals (.atom atom) = .error e := by
-  simp [checkLiterals, h, Functor.map, Except.map]
+  simp [checkLiterals, h, Except.map]
 
 /-! `word-width`. -/
 
@@ -2370,8 +2369,8 @@ theorem assignable_write (context : Context) (n width : Nat) {value : SV} {exp :
     (h : expectBil context value = .ok (width, exp)) :
     assign context (.register s!"_primus_{n}" width width) value =
       .ok [.move ⟨s!"_primus_{n}", .imm width, 0, false⟩ exp] := by
-  simp [assign, assignRegister, primus_name_not_zero, h, bind, Except.bind, pure, Except.pure, throw, throwThe,
-    MonadExceptOf.throw]
+  simp [assign, assignRegister, primus_name_not_zero, h, bind, Except.bind, pure, Except.pure
+]
 
 /-- `let` gives a name assigned in its scope a variable of its own, directly or through a macro argument. -/
 theorem assignsLocal_set (globals : Globals) (name : String) (fuel : Nat) (value : Sexp) :
@@ -2384,7 +2383,7 @@ private theorem eval_atom_lookup {fuel : Nat} {locals : Locals} {context : Conte
     (hl : lookupState name locals state = .ok value) :
     eval (fuel + 1) locals context state (.atom name) = .ok (value, state) := by
   rw [eval]
-  simp [hsym, ht, hf, hc, hl, bind, Except.bind, pure, Except.pure]
+  simp [hsym, ht, hf, hc, hl, bind, Except.bind]
 
 /-- Reading a `let` variable sees its machine variable, whatever globals are called. -/
 theorem eval_let_variable (fuel : Nat) (locals : Locals) (context : Context) (state : State) {name target : String}
@@ -2424,10 +2423,10 @@ theorem eval_set_let_variable (fuel : Nat) (locals : Locals) (context : Context)
     unfold evalList
     simp only [bind, Except.bind, hform]
     unfold evalList
-    simp only [pure, Except.pure]
+    simp only
   have hassign : applyPrimitive context "set" [.register target width width, value] =
       .ok (value, [.move ⟨target, .imm width, 0, false⟩ exp]) := by
-    simp [applyPrimitive, assign, assignRegister, hzero, hvalue, valueOnly, bind, Except.bind, pure, Except.pure]
+    simp [applyPrimitive, assign, assignRegister, hzero, hvalue, bind, Except.bind, pure, Except.pure]
   have hresult : intrinsicResult "set" = false := by decide +kernel
   have hdestination : resolveDestination after "set" [.register target width width, value] =
       [.register target width width, value] := rfl
@@ -2435,7 +2434,7 @@ theorem eval_set_let_variable (fuel : Nat) (locals : Locals) (context : Context)
   simp only [bind, Except.bind, hprimitive, hatom, hlist, hset, Option.isSome_none, Bool.false_eq_true, ↓reduceIte,
     macroExpansion, macroCandidates]
   · rw [apply]
-    simp only [bind, Except.bind, hassign, hdestination, hresult, Bool.false_eq_true, ↓reduceIte, pure, Except.pure]
+    simp only [bind, Except.bind, hassign, hdestination, hresult, Bool.false_eq_true, ↓reduceIte]
   all_goals (intros; simp_all)
 
 /-- A `let` whose scope assigns its name binds it to a fresh machine variable and evaluates the body with
@@ -2528,10 +2527,10 @@ theorem eval_family_fuel_succ (fuel : Nat) :
         · exact h
       · split at h
         · simp only [reduceCtorEq] at h
-        · next hne => simp only [hne, ↓reduceIte]; exact iSeq h
+        · next hne => simp only [hne]; exact iSeq h
       · split at h
         · simp only [reduceCtorEq] at h
-        · next hne => simp only [hne, ↓reduceIte]; exact iCSeq h
+        · next hne => simp only [hne]; exact iCSeq h
       · exact h
       · exact h
     · intro locals context state form r h
@@ -2591,7 +2590,7 @@ theorem eval_family_fuel_succ (fuel : Nat) :
           dsimp only at hb ⊢
           split at hb
           · next hl => simp only [hl, ↓reduceIte]; exact tail hb
-          · next hl => simp only [hl, ↓reduceIte]; exact tail hb
+          · next hl => simp only [hl]; exact tail hb
         all_goals exact tail hb
       · exact bind_mono (fun _ hv => iEval hv) (fun _ _ hb =>
           bind_mono (fun _ hw => iList hw) (fun _ _ hc => iApply hc) hb) h
@@ -2852,8 +2851,8 @@ theorem resolveMacro_complete {operands : List Sexp} {candidates : List Callable
       · simp only [Callable.macro.injEq] at he
         obtain ⟨rfl, rfl⟩ := he
         cases hr : resolveMacro operands tail with
-        | none => simp [hb, hr]
-        | some other => simp only [hb, hr]; split <;> rfl
+        | none => simp [hb]
+        | some other => simp only [hb]; split <;> rfl
       · have := ih hm'
         cases hr : resolveMacro operands tail with
         | none => simp [hr] at this
@@ -3167,7 +3166,7 @@ private theorem binary_two {context : Context} {bop : Bil.BinOp} {a b : SV} {w�
     (ha : expectBil context a = .ok (w₁, e₁)) (hb : expectBil context b = .ok (w₂, e₂)) :
     binary context bop [a, b] =
       .ok (.bil (max w₁ w₂) (.bin bop (.cast .unsigned (max w₁ w₂) e₁) (.cast .unsigned (max w₁ w₂) e₂))) := by
-  simp [binary, List.mapM_cons, ha, hb, bind, Except.bind, pure, Except.pure, extend, List.foldlM, Nat.max_self]
+  simp [binary, List.mapM_cons, ha, hb, bind, Except.bind, pure, Except.pure, extend, List.foldlM]
 
 private theorem emit_nil (state : State) : emit state [] = state := by
   cases state
@@ -3261,14 +3260,14 @@ theorem eval_arithmetic_sound {env : Bil.Env} {context : Context} {locals : Loca
               cases fuel with
               | zero => simp at hev
               | succ fuel =>
-                simp only [pure, Except.pure] at hev
+                simp only at hev
                 rw [apply] at hev
                 obtain ⟨hdest, happ⟩ := hprim context state va vb
                 simp only [bind, Except.bind, hdest, happ, binary_two hea heb, valueOnly, pure, Except.pure, hint,
                   Bool.false_eq_true, ↓reduceIte, emit_nil, Except.ok.injEq, Prod.mk.injEq] at hev
                 obtain ⟨rfl, hst⟩ := hev
                 refine ⟨hst.symm, _, rfl, ?_⟩
-                simp only [Bil.evalExp, hxa, hyb, bind, Except.bind, Value.asBits, pure, Except.pure]
+                simp only [Bil.evalExp, hxa, hyb, bind, Except.bind, Value.asBits]
                 exact hb
   | @load op bits address location result hop hbyte _ hr ih =>
     intro fuel state after value hvis hev
@@ -3306,12 +3305,12 @@ theorem eval_arithmetic_sound {env : Bil.Env} {context : Context} {locals : Loca
           cases fuel with
           | zero => simp at hev
           | succ fuel =>
-            simp only [pure, Except.pure] at hev
+            simp only at hev
             rw [apply] at hev
             obtain ⟨hdest, happ⟩ := hprim state va
             have hload : loadMemory context bits [va] =
                 .ok (.bil bits (.load (.var context.memory) ea context.endian (bits / 8))) := by
-              simp [loadMemory, hbyte, hea, bind, Except.bind, pure, Except.pure]
+              simp [loadMemory, hbyte, hea, bind, Except.bind]
             simp only [bind, Except.bind, hdest, happ, hload, valueOnly, pure, Except.pure, hint,
               Bool.false_eq_true, ↓reduceIte, emit_nil, Except.ok.injEq, Prod.mk.injEq] at hev
             obtain ⟨rfl, hst⟩ := hev
@@ -3693,7 +3692,7 @@ private theorem FuelMono.bind {α β : Type} {family : Nat → Except String α}
     FuelMono fun fuel => family fuel >>= next fuel := by
   intro fuel result h
   obtain ⟨x, h1, h2⟩ := bind_ok h
-  simp only [hf h1, bind, Except.bind]
+  simp only [hf h1]
   exact hn x h2
 
 /-- A success of a composition is a success of its parts, at the larger fuel. -/
@@ -3900,7 +3899,7 @@ private theorem local_slot {atom : String} {names : List String} {locals clocals
         subst hs
         exact ⟨chead, rfl, by simp [Assoc.get, h2.1]⟩
       · have hb : (key == atom) = false := by simpa using hk
-        simp only [List.map_cons, List.findIdx?_cons, hb, Bool.cond_false] at hs
+        simp only [List.map_cons, List.findIdx?_cons, hb] at hs
         cases hrest : List.findIdx? (· == atom) (rest.map Prod.fst) with
         | none => simp [hrest] at hs
         | some inner =>
@@ -3927,7 +3926,7 @@ private theorem local_none {atom : String} {names : List String} {locals clocals
       subst e
       simp [List.findIdx?_cons] at hs
     have hb : (key == atom) = false := by simpa using hk
-    simp only [List.map_cons, List.findIdx?_cons, hb, Bool.cond_false] at hs
+    simp only [List.map_cons, List.findIdx?_cons, hb] at hs
     have hrest : List.findIdx? (· == atom) (rest.map Prod.fst) = none := by
       cases hr : List.findIdx? (· == atom) (rest.map Prod.fst) with
       | none => rfl
@@ -3950,7 +3949,7 @@ private theorem global_slot {atom : String} {globals table : Globals} {slot : Na
       subst hs
       exact ⟨_, rfl, by simp [Assoc.get]⟩
     · have hb : (key == atom) = false := by simpa using hk
-      simp only [List.findIdx?_cons, hb, Bool.cond_false] at hs
+      simp only [List.findIdx?_cons, hb] at hs
       cases hrest : List.findIdx? (fun binding : String × SV => binding.1 == atom) rest with
       | none => simp [hrest] at hs
       | some inner =>
@@ -4264,7 +4263,7 @@ private theorem lookup_visible_some {name : String} {names : List String} {local
     cases hk : name == key
     · simp only [hk] at hl ⊢
       exact ih hl
-    · simp only [hk]
+    · simp only
 
 /-- A name resolves to the compiled form of what it resolves to in the definitions compiled from. -/
 private theorem lookup_compile (globals : Globals) (name : String) (locals : Locals)
@@ -4285,7 +4284,7 @@ private theorem lookup_compile (globals : Globals) (name : String) (locals : Loc
       by_cases hp : primitiveNames.contains primitive = true
       · simp only [hp, ↓reduceIte]
         rfl
-      · simp only [hp, ↓reduceIte]
+      · simp only [hp]
         rfl
 
 /-- The part of the operator case after the expansion, on the two sides. -/
@@ -4396,7 +4395,7 @@ private theorem single_list {context : Context} {clocals : Locals} {s : State} {
       show (evalCompiledList 1 clocals context x.2 [] >>= fun y =>
         (Except.ok (x.1 :: y.1, y.2) : Except String (List SV × State))) = .ok r
       rw [evalCompiledList.eq_def]
-      simp only [bind, Except.bind, e, pure, Except.pure]
+      simp only [bind, Except.bind, e]
   constructor
   · rintro ⟨x, hx, hr⟩
     exact ⟨x, hx, (hnil x).1 hr⟩
@@ -4774,7 +4773,7 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
           have hcond : (decide (operator = "true") || decide (operator = "false") || operator.startsWith ":") = false := by
             cases hb : (decide (operator = "true") || decide (operator = "false") || operator.startsWith ":")
             · rfl
-            · simp only [hb, Bool.true_or, Bool.not_eq_true'] at hsym
+            · simp only [hb, Bool.true_or] at hsym
               simp at hsym
           have hlit : readLiteral operator = .ok none := by
             cases hb : isSymbol operator
@@ -4855,7 +4854,7 @@ theorem compile_agrees (globals : Globals) (context : Context) (n : Nat) :
               cases hc : compilablePrimitive operation
               · simp [hc] at h
               · rfl
-            simp only [hcomp, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at h
+            simp only [hcomp] at h
             obtain ⟨cargs, hcargs, h⟩ := oget h
             simp only [Option.some.injEq] at h
             subst h
@@ -5115,7 +5114,7 @@ theorem ofGlobals_operations (globals : Globals) (name : String) :
       simp only [hb]
       simp only [Std.HashMap.get?_eq_getElem?] at ih ⊢
       cases value <;>
-        simp only [Std.HashMap.getElem?_insert, Std.HashMap.getElem?_erase, hb', Bool.false_eq_true, ↓reduceIte, cond_false] <;>
+        simp only [Std.HashMap.getElem?_insert, Std.HashMap.getElem?_erase, hb', Bool.false_eq_true, ↓reduceIte] <;>
         exact ih
 
 /-- The state a function is lifted in by `liftWith`, for definitions compiled by `compileGlobals`, as in `lift`. -/
@@ -5150,7 +5149,7 @@ theorem evalConditional_dynamic {fuel : Nat} {locals : Locals} {context : Contex
       .ok (.bil (max yesWidth noWidth) (.ite exp (extend (max yesWidth noWidth) yesExp) (extend (max yesWidth noWidth) noExp)),
         { tested with nextTemp := max yesState.nextTemp noState.nextTemp }) := by
   rw [evalConditional]
-  simp [ht, hn, hc, hy, hno, hyc, hnc, hye, hne, bind, Except.bind, pure, Except.pure]
+  simp [ht, hn, hc, hy, hno, hyc, hnc, hye, hne, bind, Except.bind]
 
 /-- Which is what the evaluation of the conditional says, at any environment. -/
 theorem evalExp_conditional {env : Bil.Env} {exp yes no : Bil.Exp} {width : Nat} {bit : BitVec 1} {value : Bap.Value}
@@ -5502,7 +5501,7 @@ theorem writeVar_records {lowering result : Lowering} {var : Bap.Var} {index : N
   cases hw : widthOf var with
   | none => simp [writeVar, hw] at h
   | some width =>
-    simp only [writeVar, hw, Option.bind_eq_bind, bind, pure, Option.bind_some, Option.some.injEq,
+    simp only [writeVar, hw, bind, Option.bind_some, Option.some.injEq,
       Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     refine ⟨?_, ?_, rfl⟩
@@ -5530,7 +5529,7 @@ theorem readVar_after_write_not_input {lowering result : Lowering} {var : Bap.Va
         split <;> rfl
       rw [hmem]
       simpa using hw
-    simp only [readVar, hv, Option.bind_eq_bind, bind, pure, Option.bind_some, hw', Bool.true_or, ↓reduceIte,
+    simp only [readVar, hv, bind, Option.bind_some, hw', Bool.true_or, ↓reduceIte,
       Option.some.injEq, Prod.mk.injEq] at h
     rw [← h.1]
 
@@ -5684,7 +5683,7 @@ private theorem find?_withoutBindings (env : Bil.Env) (pending : List Bap.Var) {
           exact hv (he ▸ (by simpa using hc))
         have hb : (head.1 == var) = false := by simpa using hne
         rw [ih _ (fun hm => hv (List.mem_of_mem_erase hm))]
-        simp [List.find?_cons, hb]
+        simp [hb]
       · simp only [List.find?_cons, ih _ hv]
 
 /-- Native execution writes back only declared outputs: every other variable is untouched. -/
@@ -5908,6 +5907,10 @@ structure Machine where
   slots : Nat → Word64
   memory : Word64 → UInt8
   view : Word64 → Word64 := id
+  /-- Which slots a `move` wrote. No native code keeps this: it is what the proofs say about the flags of a range with. -/
+  moved : Nat → Bool := fun _ => false
+  /-- The environment that a run started from, likewise. -/
+  origin : Bil.Env := []
 
 def Machine.write (machine : Machine) (slot : Nat) (value : Word64) : Machine :=
   { machine with slots := fun other => if other = slot then value else machine.slots other }
@@ -5917,6 +5920,16 @@ def Machine.write (machine : Machine) (slot : Nat) (value : Word64) : Machine :=
 
 @[simp] theorem Machine.write_memory (machine : Machine) (slot : Nat) (value : Word64) :
     (machine.write slot value).memory = machine.memory := rfl
+
+/-- A `move`: a write that counts as one of a variable. -/
+def Machine.markMove (machine : Machine) (slot : Nat) (value : Word64) : Machine :=
+  { machine.write slot value with moved := fun other => other == slot || machine.moved other }
+
+@[simp] theorem Machine.markMove_slots (machine : Machine) (slot other : Nat) (value : Word64) :
+    (machine.markMove slot value).slots other = if other = slot then value else machine.slots other := rfl
+
+@[simp] theorem Machine.markMove_memory (machine : Machine) (slot : Nat) (value : Word64) :
+    (machine.markMove slot value).memory = machine.memory := rfl
 
 private def flag (condition : Bool) : Word64 := if condition then 1 else 0
 
@@ -5972,7 +5985,7 @@ def denoteStore (memory : Word64 → UInt8) (view : Word64 → Word64) (base val
 /-- The effect of an operation on the machine, for the operations that continue with the next one. -/
 def step (machine : Machine) : Jit.Op → Machine
   | .set dst immediate => machine.write dst immediate.toBitVec
-  | .move dst src => machine.write dst (machine.slots src)
+  | .move dst src => machine.markMove dst (machine.slots src)
   | .add dst src immediate => machine.write dst (machine.slots src + immediate.toBitVec)
   | .bin op dst left right => machine.write dst (denoteBin op (machine.slots left) (machine.slots right))
   | .andImm dst src immediate => machine.write dst (machine.slots src &&& immediate.toBitVec)
@@ -6015,7 +6028,7 @@ private theorem mod_narrow (hw : w ≤ 64) (n : Nat) : n % 2 ^ 64 % 2 ^ w = n % 
 theorem mask_toBitVec_toNat (hw : w ≤ 64) : (mask w).toBitVec.toNat = 2 ^ w - 1 := by
   have h1 : 2 ^ w ≤ 2 ^ 64 := Nat.pow_le_pow_right (by decide) hw
   have h2 : 0 < 2 ^ w := Nat.two_pow_pos w
-  simp only [mask, UInt64.toBitVec_ofNat, BitVec.toNat_ofNat]
+  simp only [mask]
   exact Nat.mod_eq_of_lt (by omega)
 
 /-- Narrowing is the remainder. -/
@@ -6150,7 +6163,7 @@ theorem narrow_udiv (hw : w ≤ 64) (hl : Holds l a) (hr : Holds r b) :
   · simp only [BitVec.toNat_udiv, hl, hr]
     exact Nat.mod_eq_of_lt (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) ha)
 
-theorem narrow_urem (hw : w ≤ 64) (hl : Holds l a) (hr : Holds r b) :
+theorem narrow_urem (_hw : w ≤ 64) (hl : Holds l a) (hr : Holds r b) :
     narrowed w (denoteBin .urem l r) = (Word.urem a b).toNat := by
   simp only [Holds] at hl hr
   have ha := a.isLt
@@ -6296,7 +6309,7 @@ private theorem smtSDiv_zero (a : BitVec w) : a.smtSDiv 0 = if a.msb then 1 else
   unfold BitVec.smtSDiv BitVec.smtUDiv
   cases h : a.msb
   · simp [BitVec.msb_zero]
-  · simp only [BitVec.msb_zero, ite_true, BitVec.neg_zero]
+  · simp only [ite_true]
     simp [← BitVec.neg_one_eq_allOnes]
 
 private theorem smtSDiv_of_ne (a b : BitVec w) (hb : b ≠ 0) : a.smtSDiv b = a.sdiv b := by
@@ -6439,12 +6452,12 @@ def isExpressionOp : Jit.Op → Bool
 
 theorem step_slot_other {machine : Machine} {op : Jit.Op} {slot : Nat} (hp : isExpressionOp op = true)
     (hd : ∀ dst, opDst op = some dst → dst ≠ slot) : (step machine op).slots slot = machine.slots slot := by
-  cases op <;> simp only [isExpressionOp, reduceCtorEq, Bool.false_eq_true] at hp <;>
+  cases op <;> simp only [isExpressionOp, Bool.false_eq_true] at hp <;>
     simp only [opDst, Option.some.injEq, forall_eq'] at hd <;> simp [step, hd.symm]
 
 theorem step_memory {machine : Machine} {op : Jit.Op} (hp : isExpressionOp op = true) :
     (step machine op).memory = machine.memory := by
-  cases op <;> simp only [isExpressionOp, reduceCtorEq, Bool.false_eq_true] at hp <;> simp [step]
+  cases op <;> simp only [isExpressionOp, Bool.false_eq_true] at hp <;> simp [step]
 
 theorem runOps_slot_other {machine : Machine} {ops : List Jit.Op} {slot : Nat}
     (hp : ∀ op ∈ ops, isExpressionOp op = true) (hd : ∀ op ∈ ops, ∀ dst, opDst op = some dst → dst ≠ slot) :
@@ -6462,6 +6475,44 @@ theorem runOps_view (machine : Machine) (ops : List Jit.Op) : (runOps machine op
   induction ops generalizing machine with
   | nil => rfl
   | cons op rest ih => rw [runOps_cons, ih, step_view]
+
+theorem step_origin (machine : Machine) (op : Jit.Op) : (step machine op).origin = machine.origin := by
+  cases op <;> rfl
+
+theorem runOps_origin (machine : Machine) (ops : List Jit.Op) : (runOps machine ops).origin = machine.origin := by
+  induction ops generalizing machine with
+  | nil => rfl
+  | cons op rest ih => rw [runOps_cons, ih, step_origin]
+
+theorem step_moved_mono {machine : Machine} (op : Jit.Op) {slot : Nat} (h : machine.moved slot = true) :
+    (step machine op).moved slot = true := by
+  cases op <;> first | exact h | simp [step, Machine.markMove, h]
+
+theorem runOps_moved_mono {machine : Machine} (ops : List Jit.Op) {slot : Nat} (h : machine.moved slot = true) :
+    (runOps machine ops).moved slot = true := by
+  induction ops generalizing machine with
+  | nil => exact h
+  | cons op rest ih => exact ih (step_moved_mono op h)
+
+theorem step_moved_new {machine : Machine} {op : Jit.Op} {slot : Nat} (h : (step machine op).moved slot = true) :
+    machine.moved slot = true ∨ opDst op = some slot := by
+  cases op <;> first
+    | exact Or.inl h
+    | (simp only [step, Machine.markMove, Bool.or_eq_true, beq_iff_eq] at h
+       rcases h with h | h
+       · exact Or.inr (by simp [opDst, h])
+       · exact Or.inl h)
+
+theorem runOps_moved_new {machine : Machine} {ops : List Jit.Op} {slot : Nat} (h : (runOps machine ops).moved slot = true) :
+    machine.moved slot = true ∨ ∃ op ∈ ops, opDst op = some slot := by
+  induction ops generalizing machine with
+  | nil => exact Or.inl h
+  | cons op rest ih =>
+    rcases ih h with h | ⟨o, ho, hd⟩
+    · rcases step_moved_new h with h | h
+      · exact Or.inl h
+      · exact Or.inr ⟨op, List.mem_cons_self, h⟩
+    · exact Or.inr ⟨o, List.mem_cons_of_mem _ ho, hd⟩
 
 theorem runOps_memory {machine : Machine} {ops : List Jit.Op} (hp : ∀ op ∈ ops, isExpressionOp op = true) :
     (runOps machine ops).memory = machine.memory := by
@@ -6558,7 +6609,7 @@ theorem Extends.tail {first second : Lowering} {new : List Jit.Op} (count : Nat)
   stable := hstable
 
 theorem Extends.trans {first second third : Lowering} {left right : List Jit.Op}
-    (hl : Extends first second left) (hr : Extends second third right) (wf : LayoutWF first) :
+    (hl : Extends first second left) (hr : Extends second third right) (_wf : LayoutWF first) :
     Extends first third (left ++ right) where
   ops := by rw [hr.ops, hl.ops, List.append_assoc]
   next := Nat.le_trans hl.next hr.next
@@ -6655,7 +6706,7 @@ theorem SlotsAgree.after {env : Bil.Env} {machine : Machine} {first second : Low
   exact h3
 
 theorem Extends.laterLayout {first second third : Lowering} {new : List Jit.Op}
-    (h1 : Extends first second new) (h2 : Extends second third new') :
+    (_h1 : Extends first second new) (h2 : Extends second third new') :
     ∀ b ∈ Lowering.layout third, b ∈ Lowering.layout second ∨ Lowering.nextSlot second ≤ b.2 := by
   obtain ⟨e, he, hx⟩ := h2.extra
   intro b hb
@@ -6756,7 +6807,7 @@ theorem evalExp_un_inv {env : Bil.Env} {op : Bil.UnOp} {exp : Bil.Exp} {value : 
   rw [Bil.evalExp] at h
   obtain ⟨v, h1, h2⟩ := bind_ok h
   obtain ⟨r, h3, h4⟩ := bind_ok h2
-  simp only [Except.ok.injEq, pure, Except.pure] at h4
+  simp only [Except.ok.injEq] at h4
   refine ⟨r.1, r.2, by rw [h1, asBits_ok h3], ?_⟩
   cases op <;> exact h4.symm
 
@@ -6794,7 +6845,7 @@ theorem evalExp_extract_inv {env : Bil.Env} {high low : Nat} {exp : Bil.Exp} {va
   obtain ⟨v, h1, h2⟩ := bind_ok h
   obtain ⟨r, h3, h4⟩ := bind_ok h2
   obtain ⟨x, h5, h6⟩ := bind_ok h4
-  simp only [Except.ok.injEq, pure, Except.pure] at h6
+  simp only [Except.ok.injEq] at h6
   exact ⟨r.1, r.2, x, by rw [h1, asBits_ok h3], h5, h6.symm⟩
 
 theorem evalExp_cast_inv {env : Bil.Env} {kind : Bil.Cast} {target : Nat} {exp : Bil.Exp} {value : Bap.Value}
@@ -6809,10 +6860,10 @@ theorem evalExp_cast_inv {env : Bil.Env} {kind : Bil.Cast} {target : Nat} {exp :
   obtain ⟨v, h1, h2⟩ := bind_ok h
   obtain ⟨r, h3, h4⟩ := bind_ok h2
   refine ⟨r.1, r.2, by rw [h1, asBits_ok h3], ?_⟩
-  cases kind <;> simp only [Except.ok.injEq, pure, Except.pure] at h4
+  cases kind <;> simp only [Except.ok.injEq] at h4
   · exact h4.symm
   · obtain ⟨x, h5, h6⟩ := bind_ok h4
-    simp only [Except.ok.injEq, pure, Except.pure] at h6
+    simp only [Except.ok.injEq] at h6
     exact ⟨x, h5, h6.symm⟩
   · exact h4.symm
   · exact h4.symm
@@ -6847,7 +6898,7 @@ private theorem bits_inj {w₁ w₂ : Nat} {x : BitVec w₁} {y : BitVec w₂}
 
 theorem immediate_toNat {width : Nat} (hw : width ≤ 64) (value : BitVec width) :
     (immediate value).toBitVec.toNat = value.toNat := by
-  simp only [immediate, UInt64.toBitVec_ofNat, BitVec.toNat_ofNat]
+  simp only [immediate]
   exact Nat.mod_eq_of_lt (Nat.lt_of_lt_of_le value.isLt (Nat.pow_le_pow_right (by decide) hw))
 
 /-- A lowered operand: the operations, and that they compute the value of the expression. -/
@@ -6942,7 +6993,7 @@ theorem readVar_inv {first second : Lowering} {var : Bap.Var} {index : Nat} (h :
   cases hw : widthOf var with
   | none => simp [readVar, hw] at h
   | some width =>
-    simp only [readVar, hw, Option.bind_eq_bind, bind, pure, Option.bind_some] at h
+    simp only [readVar, hw, bind, Option.bind_some] at h
     split at h <;> simp only [Option.some.injEq, Prod.mk.injEq] at h <;> obtain ⟨rfl, rfl⟩ := h <;>
       exact ⟨rfl, ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩⟩
 
@@ -6968,7 +7019,7 @@ theorem lowered_var {var : Bap.Var} {first second : Lowering} {operand : Operand
   rw [lowerExp] at h
   obtain ⟨width, hw, h⟩ := obind h
   obtain ⟨⟨result, index⟩, hrv, h⟩ := obind h
-  simp only [pure, Option.some.injEq, Prod.mk.injEq] at h
+  simp only [Option.some.injEq, Prod.mk.injEq] at h
   obtain ⟨rfl, rfl⟩ := h
   obtain ⟨hindex, hsame⟩ := readVar_inv hrv
   subst hindex
@@ -7001,7 +7052,7 @@ private theorem operand_after {second third : Lowering} {new later : List Jit.Op
 
 /-- A sub-expression reads the machine in the state where its operations start. -/
 private theorem agree_first {env : Bil.Env} {machine : Machine} {first second third : Lowering} {new later : List Jit.Op}
-    (h1 : Extends first second new) (h2 : Extends second third later) (hs : SlotsAgree env machine (Lowering.layout third)) :
+    (_h1 : Extends first second new) (h2 : Extends second third later) (hs : SlotsAgree env machine (Lowering.layout third)) :
     SlotsAgree env machine (Lowering.layout second) := by
   obtain ⟨e, he, _⟩ := h2.extra
   exact SlotsAgree.mono hs fun b hb => by rw [he]; exact List.mem_append_left _ hb
@@ -7106,7 +7157,7 @@ theorem lowered_un {op : Bil.UnOp} {value : Bil.Exp} {first second : Lowering} {
     rw [hop] at hd
     simp only [Option.some.injEq] at hd
     omega
-  cases op <;> simp only [temporary, bind, Option.bind, pure, Option.some.injEq, Prod.mk.injEq] at h <;>
+  cases op <;> simp only [temporary, bind, Option.bind, Option.some.injEq, Prod.mk.injEq] at h <;>
     obtain ⟨rfl, rfl⟩ := h
   case neg =>
     refine lowered_tail wf he (extends_narrow (pre := [.neg (Lowering.nextSlot l1) (Operand.slot o1)]) (count := 1)
@@ -7202,7 +7253,7 @@ theorem lowered_binary {op : Bil.BinOp} {left right : Bil.Exp} {first second : L
       by_cases hc : Operand.width o1 = Operand.width o2
       · exact hc
       · simp [hc] at h
-    simp only [hwidth, bne_self_eq_false, Bool.false_eq_true, ite_false, signExtend, temporary, pure, bind,
+    simp only [hwidth, bne_self_eq_false, Bool.false_eq_true, ite_false, signExtend, temporary, bind,
       Option.bind, Option.some.injEq, Prod.mk.injEq] at h
     have hsL2 : Operand.slot o1 < Lowering.nextSlot l2 := Nat.lt_of_lt_of_le hsL heR.next
     have hheL := heL.trans heR wf
@@ -7292,7 +7343,7 @@ theorem lowered_ashift {left right : Bil.Exp} {first second : Lowering} {operand
     by_cases hc : Operand.width o1 = Operand.width o2
     · exact hc
     · simp [hc] at h
-  simp only [hwidth, bne_self_eq_false, Bool.false_eq_true, ite_false, signExtend, temporary, pure, bind,
+  simp only [hwidth, bne_self_eq_false, Bool.false_eq_true, ite_false, signExtend, temporary, bind,
     Option.bind, Option.some.injEq, Prod.mk.injEq] at h
   obtain ⟨rfl, rfl⟩ := h
   have hsL2 : Operand.slot o1 < Lowering.nextSlot l2 := Nat.lt_of_lt_of_le hsL heR.next
@@ -7311,7 +7362,7 @@ theorem lowered_ashift {left right : Bil.Exp} {first second : Lowering} {operand
   obtain ⟨hw1, hw2, hxv, hyv⟩ := operands_hold heL heR hsL vL vR hs hm hx hy
   subst hw1
   obtain rfl : w₂ = Operand.width o1 := by omega
-  simp only [Bil.evalBin, Except.ok.injEq, dite_true, reduceCtorEq] at hb
+  simp only [Bil.evalBin, Except.ok.injEq, dite_true] at hb
   cases hb
   rw [← hwidth]
   refine ⟨rfl, ?_⟩
@@ -7355,7 +7406,7 @@ theorem lowered_ite {condition yes no : Bil.Exp} {first second : Lowering} {oper
     by_cases hc : Operand.width o2 = Operand.width o3
     · exact hc
     · simp [hc] at h
-  simp only [hc1, hwidth, bne_self_eq_false, Bool.or_self, Bool.false_eq_true, ite_false, temporary, pure, bind,
+  simp only [hc1, hwidth, bne_self_eq_false, Bool.or_self, Bool.false_eq_true, ite_false, temporary, bind,
     Option.bind, Option.some.injEq, Prod.mk.injEq] at h
   obtain ⟨rfl, rfl⟩ := h
   have heYN := heY.trans heN wf1
@@ -7437,7 +7488,7 @@ theorem lowered_extract {high low : Nat} {value : Bil.Exp} {first second : Lower
     have : (decide (high < low) || decide (high ≥ Operand.width o1)) = true := by simpa using hc
     simp [this] at h
   have hb : (decide (high < low) || decide (high ≥ Operand.width o1)) = false := by simpa using hc
-  simp only [hb, Bool.false_eq_true, ite_false, temporary, pure, bind, Option.bind, Option.some.injEq, Prod.mk.injEq] at h
+  simp only [hb, Bool.false_eq_true, ite_false, temporary, bind, Option.bind, Option.some.injEq, Prod.mk.injEq] at h
   obtain ⟨rfl, rfl⟩ := h
   have hcount : ∀ o ∈ [Jit.Op.set (Lowering.nextSlot l1) (UInt64.ofNat low),
         Jit.Op.bin .rshift (Lowering.nextSlot l1 + 1) (Operand.slot o1) (Lowering.nextSlot l1),
@@ -7465,7 +7516,7 @@ theorem lowered_extract {high low : Nat} {value : Bil.Exp} {first second : Lower
   have n1 : Operand.slot o1 ≠ Lowering.nextSlot l1 := by omega
   have a1 : Lowering.nextSlot l1 + 1 ≠ Lowering.nextSlot l1 := by omega
   have a2 : Lowering.nextSlot l1 ≠ Lowering.nextSlot l1 + 1 := by omega
-  simp only [runOps_cons, runOps_nil, step, Machine.write_slots, ite_true, n1, ite_false, a1, a2, Holds]
+  simp only [runOps_cons, runOps_nil, step, Machine.write_slots, ite_true, n1, ite_false, a1, Holds]
   rw [shifted_mask (by omega) (by omega), hbits, BitVec.extractLsb_toNat, hxv]
 
 theorem lowered_cast_high {target : Nat} {value : Bil.Exp} {first second : Lowering} {operand : Operand}
@@ -7483,7 +7534,7 @@ theorem lowered_cast_high {target : Nat} {value : Bil.Exp} {first second : Lower
     have : (decide (target = 0) || decide (target > Operand.width o1)) = true := by simpa using hc
     simp [this] at h
   have hb : (decide (target = 0) || decide (target > Operand.width o1)) = false := by simpa using hc
-  simp only [hb, Bool.false_eq_true, ite_false, temporary, pure, bind, Option.bind, Option.some.injEq, Prod.mk.injEq] at h
+  simp only [hb, Bool.false_eq_true, ite_false, temporary, bind, Option.bind, Option.some.injEq, Prod.mk.injEq] at h
   obtain ⟨rfl, rfl⟩ := h
   have hcount : ∀ o ∈ [Jit.Op.set (Lowering.nextSlot l1) (UInt64.ofNat (Operand.width o1 - target)),
         Jit.Op.bin .rshift (Lowering.nextSlot l1 + 1) (Operand.slot o1) (Lowering.nextSlot l1),
@@ -7510,7 +7561,7 @@ theorem lowered_cast_high {target : Nat} {value : Bil.Exp} {first second : Lower
   have n1 : Operand.slot o1 ≠ Lowering.nextSlot l1 := by omega
   have a1 : Lowering.nextSlot l1 + 1 ≠ Lowering.nextSlot l1 := by omega
   have a2 : Lowering.nextSlot l1 ≠ Lowering.nextSlot l1 + 1 := by omega
-  simp only [runOps_cons, runOps_nil, step, Machine.write_slots, ite_true, n1, ite_false, a1, a2, Holds]
+  simp only [runOps_cons, runOps_nil, step, Machine.write_slots, ite_true, n1, ite_false, a1, Holds]
   rw [shifted_mask (by omega) (by omega), hbits]
   simp only [Holds] at hxv
   simp [BitVec.toNat_setWidth, hxv]
@@ -7783,7 +7834,7 @@ private theorem read_little (g : Nat → UInt8) (k init : Nat) :
 
 /-- The native load of at most 8 bytes reads what the interpreter reads, in either byte order. -/
 theorem denoteLoad_read {width size : Nat} {cells : Bap.Memory width} {address : BitVec width} {memory : Word64 → UInt8}
-    (endian : Endian) (hs : size ≤ 8) (hw : width ≤ 64)
+    (endian : Endian) (hs : size ≤ 8) (_hw : width ≤ 64)
     (hagree : ∀ offset, offset < 8 → memory (address.setWidth 64 + BitVec.ofNat 64 offset) =
       Bap.Memory.readByte cells (address + BitVec.ofNat width offset)) :
     (denoteLoad memory (address.setWidth 64) size (endian == .big)).toNat =
@@ -7867,7 +7918,7 @@ theorem lowered_load {var : Bap.Var} {address : Bil.Exp} {endian : Endian} {size
     · exact hd
     · simp only [Bool.not_eq_false] at hd
       simp [hd] at h
-  simp only [hb, Bool.false_eq_true, ite_false, temporary, pure, bind, Option.bind, Option.some.injEq, Prod.mk.injEq] at h
+  simp only [hb, Bool.false_eq_true, ite_false, temporary, bind, Option.bind, Option.some.injEq, Prod.mk.injEq] at h
   obtain ⟨rfl, rfl⟩ := h
   have hcount : ∀ o ∈ [Jit.Op.memLoad (Lowering.nextSlot l1) (Operand.slot o1) size (endian == .big)],
       ∀ d, opDst o = some d → Lowering.nextSlot l1 ≤ d ∧ d < Lowering.nextSlot l1 + 1 := by
@@ -7917,7 +7968,7 @@ private theorem slt_zero_ne {w : Nat} (a : BitVec w) (hw : w ≤ 64) :
   have hneg : a.toInt < 0 ↔ a.msb = true := by
     rw [BitVec.msb_eq_toInt]
     simp
-  simp only [denoteBin, flag, hval, BitVec.toInt_zero]
+  simp only [denoteBin, flag, hval]
   by_cases h : a.toInt < 0
   · simp [h, hneg.1 h]
   · have : a.msb = false := by
@@ -8051,7 +8102,7 @@ theorem lowered_smod {left right : Bil.Exp} {first second : Lowering} {operand :
     by_cases hc : Operand.width o1 = Operand.width o2
     · exact hc
     · simp [hc] at h
-  simp only [hwidth, bne_self_eq_false, Bool.false_eq_true, ite_false, signExtend, temporary, pure, bind,
+  simp only [hwidth, bne_self_eq_false, Bool.false_eq_true, ite_false, signExtend, temporary, bind,
     Option.bind, Option.some.injEq, Prod.mk.injEq] at h
   obtain ⟨rfl, rfl⟩ := h
   have hsL2 : Operand.slot o1 < Lowering.nextSlot l2 := Nat.lt_of_lt_of_le hsL heR.next
@@ -8107,7 +8158,7 @@ theorem lowered_smod {left right : Bil.Exp} {first second : Lowering} {operand :
     (fun e m a c wi bi he => by have := vR e m a c wi bi he; rwa [← hw] at this) hs hm hx hy
   obtain rfl : w = w₁ := by omega
   obtain rfl : w = w₂ := by omega
-  simp only [Bil.evalBin, Except.ok.injEq, dite_true, reduceCtorEq] at hb
+  simp only [Bil.evalBin, Except.ok.injEq, dite_true] at hb
   cases hb
   refine ⟨rfl, ?_⟩
   have h64w : w ≤ 64 := by omega
@@ -8177,8 +8228,8 @@ theorem lowered_smod {left right : Bil.Exp} {first second : Lowering} {operand :
   have key := smod_tail h64w hls hrs hnx hny hxh3 hyh3
   have hz3 : M3.slots n = 0 := by
     rw [hframe _ (by omega) (by omega), m0]
-  simp only [runOps_cons, runOps_nil, step, Machine.write_slots, Nat.add_left_cancel_iff, Nat.reduceEqDiff, hLk, hRk,
-    Nat.left_eq_add, hz3, reduceCtorEq, Nat.reduceEqDiff, Nat.add_eq_zero_iff, ite_true, ite_false, reduceIte]
+  simp only [runOps_cons, runOps_nil, step, Machine.write_slots, Nat.add_left_cancel_iff, Nat.reduceEqDiff, hRk,
+    Nat.left_eq_add, hz3, reduceCtorEq, Nat.reduceEqDiff, ite_true, ite_false]
   exact key
 
 /-- Lowering of expressions is correct: the operations appended for an expression leave its value, in the
@@ -8244,7 +8295,7 @@ private theorem writeVar_inv {first second : Lowering} {var : Bap.Var} {index : 
   cases hw : widthOf var with
   | none => simp [writeVar, hw] at h
   | some width =>
-    simp only [writeVar, hw, Option.bind_eq_bind, bind, pure, Option.bind_some, Option.some.injEq,
+    simp only [writeVar, hw, bind, Option.bind_some, Option.some.injEq,
       Prod.mk.injEq] at h
     obtain ⟨f1, f2, _⟩ := slot_fields first var
     obtain ⟨rfl, rfl⟩ := h
@@ -8287,8 +8338,8 @@ private theorem lookup_bind_other {env : Bil.Env} {var other : Bap.Var} {value :
       by_cases hv : head.1 = var
       · have h1 : (head.1 != var) = false := by simp [hv]
         have h2 : (head.1 == other) = false := by simp [hbe, hv, Ne.symm h]
-        simp [List.filter_cons, h1, List.find?_cons, h2, ih]
-      · have h1 : (head.1 != var) = true := by simp [hbe, hv]
+        simp [h1, h2, ih]
+      · have h1 : (head.1 != var) = true := by simp [hv]
         simp only [List.filter_cons, h1, ↓reduceIte, List.find?_cons, ih]
   rw [hfilter]
 
@@ -8319,7 +8370,7 @@ theorem lowerMove_register {first second : Lowering} {dst : Bap.Var} {value : Bi
       · simp [hc] at h
     simp only [hwidth, bne_self_eq_false, Bool.false_eq_true, ↓reduceIte] at h
     obtain ⟨⟨after, index⟩, h2, h⟩ := obind h
-    simp only [pure, Option.some.injEq] at h
+    simp only [Option.some.injEq] at h
     subst h
     obtain ⟨hindex, hops, hnext, hlayout, hmemory⟩ := writeVar_inv h2
     subst hindex
@@ -8347,7 +8398,7 @@ theorem lowerMove_register {first second : Lowering} {dst : Bap.Var} {value : Bi
         simp only [Except.ok.injEq] at hlookup
         subst hlookup
         refine ⟨width, bits, rfl, hw, ?_⟩
-        simp only [runOps_cons, runOps_nil, step, Machine.write_slots, ↓reduceIte]
+        simp only [runOps_cons, runOps_nil, step, Machine.markMove_slots, ↓reduceIte]
         exact hvalue
       · rw [lookup_bind_other hbd] at hlookup
         obtain ⟨w, x, hv, hwb, hholds⟩ := hs' _ hb' _ hlookup
@@ -8355,7 +8406,7 @@ theorem lowerMove_register {first second : Lowering} {dst : Bap.Var} {value : Bi
         have hne : binding.2 ≠ (slot mid dst).2 := by
           intro e
           exact hbd (congrArg Prod.fst (pairwise_same hwfs.slotsDistinct hb' hdst e))
-        simp only [runOps_cons, runOps_nil, step, Machine.write_slots, hne, ↓reduceIte]
+        simp only [runOps_cons, runOps_nil, step, Machine.markMove_slots, hne, ↓reduceIte]
         have hframe : (runOps machine newE).slots binding.2 = machine.slots binding.2 := by
           apply he.frame
           obtain ⟨extra, hx, hxs⟩ := hext.extra
@@ -8378,7 +8429,7 @@ theorem lowerStmt_jump {first second : Lowering} {target : Bil.Exp} {terminated 
           Holds ((runOps machine new).slots (Operand.slot operand)) bits := by
   rw [lowerStmt] at h
   · obtain ⟨⟨mid, operand⟩, h1, h⟩ := obind h
-    simp only [pure, Option.some.injEq, Prod.mk.injEq] at h
+    simp only [Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     obtain ⟨new, he, _, _, _, hval⟩ := lowerExp_correct target wf h1
     refine ⟨rfl, mid, operand, new, he, ?_, fun env machine hs hm width bits hev => (hval env machine hs hm width bits hev).2⟩
@@ -8457,7 +8508,7 @@ theorem lowerStmt_while_continues {first second : Lowering} {condition : Bil.Exp
   obtain ⟨⟨l2, t⟩, _, h⟩ := obind h
   split at h
   · simp at h
-  · simp only [setEffect, pure, Bind.bind, Option.bind] at h
+  · simp only [setEffect] at h
     split at h <;> simp only [temporary, Option.some.injEq, Prod.mk.injEq] at h <;> obtain ⟨rfl, rfl⟩ := h <;> simp
 
 /-- A conditional keeps what its else branch allocated, also when only that branch jumps: the slots, the inputs it
@@ -8478,7 +8529,7 @@ theorem lowerStmt_ifElse_keeps {first second : Lowering} {condition : Bil.Exp} {
   obtain ⟨⟨l3, t2⟩, h3, h⟩ := obind h
   split at h
   · simp at h
-  · simp only [pure, Option.some.injEq, Prod.mk.injEq] at h
+  · simp only [Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     exact ⟨_, l3, t2, h3, rfl, rfl, rfl, rfl⟩
 

@@ -15,7 +15,8 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
    rejects it first (`accessFault_past_end`). Any other access is the same on the model whose `view` wraps
    (`denoteLoad_view`, `denoteStore_view`, `wrap_in_range`).
 3. `code` calls the code observer once with its pc. When that returns `true`, the program returns that pc at
-   once, with 3 in the effect slot, and no op after it has run.
+   once, with 3 in the effect slot, and no op after it has run. When it returns `false`, the program goes on with the next
+   op (`Bap.Proofs.Jit.nextCfgAt`).
 4. Once an observer has thrown, no further load, store or observer call takes effect, and the runner returns
    that error, whatever the program did next. The memory the failed program wrote before stays written,
    which is why `Lifted.discardMemory` follows every failure.
@@ -37,13 +38,13 @@ C++, and on nothing else of it. `Bap.Proofs.Jit` states them on a model and prov
 Everything else in `Bap.Emu`, from what the code hooks see to what a rollback restores, is proved against
 these. No theorem assumes anything of LLVM beyond them.
 
-**What is proved about lowering, and what is not.** Expressions (`lowerExp_correct`), statements with their
-branches, loops and stores (`lowerStatements_correct`), the way into native code (`encodeState_holds`) and the way
-out (`syncState_output`, `syncState_frame`) are proved. A compiled range of several blocks is built of those, with
-`enterBlock` between them. That the blocks of a range compose to what the instructions do one at a time, along the
-back edges, is not proved as a whole: `closedTarget_sound`, `definitelyWritten_seed`, `reachedOutputs_unflagged` and
-`enterBlock_starts` are its parts, the tests of `rangeRegressions` compare it with single steps, and otherwise it is
-trusted. `Bap.Emu.Core` says what is trusted of the emulator around native code. -/
+**What is proved about lowering.** Expressions (`lowerExp_correct`), statements with their branches, loops and stores
+(`lowerStatements_correct`), the way into native code (`encodeState_holds`), the way out (`syncState_output`, `syncState_flags`),
+and a whole range along its edges and back edges with its budget, code sites and flags (`lowerGraph_correct`, and `lowerGraph_single` for a
+block alone): it ends as the blocks do one at a time in the interpreter, with the same state, pc and count, on the terms above. The proof assumes
+nothing of the graph: `lowerGraphChecked` checks at compile time what it does not follow through every statement, and a lowering
+that failed the check would stay out of native code. `lowerGraph_correct` leaves out what the interpreter has no result for, an unbound
+variable that `encodeState` let pass or running out of its fuel, where it says nothing. `Bap.Emu.Core` lists what stays trusted around all of this. -/
 
 namespace Bap.Jit
 

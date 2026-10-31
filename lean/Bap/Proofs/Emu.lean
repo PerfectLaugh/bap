@@ -15,7 +15,6 @@ local elab "open_private " mod:ident ns:ident ids:ident* : command => do
     OpenDecl.explicit id.getId (mkPrivateNameCore mod.getId (ns.getId ++ id.getId))
   modifyScope fun scope => { scope with openDecls := decls ++ scope.openDecls }
 
-set_option linter.unusedSimpArgs false
 
 namespace Bap.Proofs.Emu
 
@@ -361,7 +360,7 @@ theorem initializeMemory_rejects_overlap (config : Config) (regions : List Bap.E
   simp only [initializeMemory, bind, Except.bind]
   cases memoryWidth config with
   | error e => exact ⟨e, rfl⟩
-  | ok w => simp [hany, throw, throwThe, MonadExceptOf.throw]
+  | ok w => simp [hany]
 
 /-! ABI tables and MIPS delay-slot decoding. -/
 
@@ -468,7 +467,7 @@ theorem initializeMemory_rejects_out_of_space (config : Config) (regions : List 
   simp only [initializeMemory, hw, bind, Except.bind]
   split
   · exact ⟨_, rfl⟩
-  · simp [hall, pure, Except.pure]
+  · simp [hall]
 
 /-- Every address of a region accepted by the check is representable in `width` bits, so none aliases. -/
 theorem regionInSpace_contains {width : Nat} {region : Bap.Emu.Region} (h : regionInSpace width region = true)
@@ -484,7 +483,7 @@ theorem overlayConflict_false {mapped : List Bap.Emu.Region} {region current : B
       (current.address ≠ region.address ∧ overlaps current region = false) := by
   have := List.any_eq_false.1 h current hm
   by_cases he : current.address = region.address
-  · simp only [he, ↓reduceIte, bne_iff_ne, ne_eq, Decidable.not_not, Bool.not_eq_true] at this
+  · simp only [he, ↓reduceIte, bne_iff_ne, ne_eq, Decidable.not_not] at this
     exact Or.inl ⟨he, by simpa using this⟩
   · simp only [he, ↓reduceIte, Bool.not_eq_true] at this
     exact Or.inr ⟨he, this⟩
@@ -557,7 +556,7 @@ def cellAt (cells : List (Nat × UInt8)) (address : Nat) : UInt8 :=
 private theorem cellAt_of_lt {current : Nat} {value : UInt8} {rest : List (Nat × UInt8)} {address : Nat}
     (h : address ≠ current) : cellAt ((current, value) :: rest) address = cellAt rest address := by
   have : (current == address) = false := by simpa using fun he => h he.symm
-  simp [cellAt, List.find?_cons, this]
+  simp [cellAt, this]
 
 private theorem cellAt_same (current : Nat) (value : UInt8) (rest : List (Nat × UInt8)) :
     cellAt ((current, value) :: rest) current = value := by
@@ -593,7 +592,7 @@ theorem persistentRegionData_get (cells : List (Nat × UInt8)) (address size : N
         · simp [Array.getElem?_append, h]
         · have : ¬ index < output.size := by omega
           have hlt : index - output.size < size - output.size := by omega
-          simp [Array.getElem?_append, this, Array.getElem?_replicate, hlt, cellAt]
+          simp [Array.getElem?_append, this, hlt, cellAt]
       | cons cell rest =>
         obtain ⟨current, value⟩ := cell
         simp only [List.length_cons] at hm
@@ -615,7 +614,7 @@ theorem persistentRegionData_get (cells : List (Nat × UInt8)) (address size : N
             · by_cases he : index = output.size
               · subst he
                 rw [h1 _ (by omega), heq, cellAt_same]
-                simp [Array.getElem?_push]
+                simp
               · rw [h2 index (by omega) hl, cellAt_of_lt (by omega)]
           · rename_i hnlt hne
             have hsize : (output.push 0).size = output.size + 1 := Array.size_push ..
@@ -636,7 +635,7 @@ theorem persistentRegionData_get (cells : List (Nat × UInt8)) (address size : N
                   · have := hhead cell hc
                     omega
                 rw [hzero]
-                simp [Array.getElem?_push]
+                simp
               · exact h2 index (by omega) hl
 
 /-- What a region holds after a snapshot of native memory: exactly the bytes of the dump at its addresses. -/
@@ -1004,7 +1003,7 @@ open_private Bap.Emu.Diff Bap.Emu byteAt coalesce
 
 theorem byteAt_some_iff (regions : List Bap.Emu.Region) (address : Nat) :
     (byteAt regions address).isSome = true ↔ ∃ region ∈ regions, region.contains address = true := by
-  simp only [byteAt, bind, Option.bind_eq_bind]
+  simp only [byteAt, bind]
   cases hf : regions.find? (fun region => region.contains address) with
   | none =>
     simp only [Option.bind_none, Option.isSome_none, Bool.false_eq_true, false_iff]
@@ -1415,9 +1414,6 @@ end Diff
 section TextCheckpoint
 
 open_private Bap.Bil.Wire Bap.Bil.Wire hexDigit parseHexLoop
-open_private Bap.Emu.Checkpoint Bap.Emu nat bool hex boolValue encodeTyp decodeTyp encodeValue decodeValue decodeCells
-  encodeBinding decodeBinding encodeBytes decodeHex decodeHex.loop decodeRegionBytes encodeRegion decodeRegion encodePending
-  decodePending encodeSkip decodeSkip encodeThread decodeThread encodeProcess decodeProcess
 
 theorem toNat?_toString (n : Nat) : (toString n).toNat? = some n := by
   have hdig : ∀ c ∈ Nat.toDigits 10 n, c.isDigit = true := fun c hc =>
@@ -1438,12 +1434,6 @@ theorem toNat?_toString (n : Nat) : (toString n).toNat? = some n := by
     rintro rfl
     exact this hc
   simp [hf, Nat.ofDigitChars_ten_toDigits]
-
-theorem sexp_nat_roundtrip (n : Nat) : Sexp.nat (nat n) = .ok n := by
-  simp [Sexp.nat, nat, Sexp.asAtom, toNat?_toString, bind, Except.bind]
-
-theorem boolValue_roundtrip (value : Bool) : boolValue (bool value) = .ok value := by
-  cases value <;> rfl
 
 private theorem hexDigit_digitChar_fin : ∀ d : Fin 16, hexDigit (Nat.digitChar d) = some d := by decide
 
@@ -1490,55 +1480,10 @@ theorem parseHex_toDigits (n : Nat) : Bil.Wire.parseHex (String.ofList (Nat.toDi
   rw [this]
   exact parseHexLoop_toDigits n
 
-theorem typ_roundtrip (typ : Typ) : decodeTyp (encodeTyp typ) = .ok typ := by
-  cases typ with
-  | unknown => rfl
-  | unit => rfl
-  | imm width =>
-    simp only [encodeTyp, Sexp.tagged, decodeTyp, sexp_nat_roundtrip, bind, Except.bind]
-  | mem address value =>
-    simp only [encodeTyp, Sexp.tagged, decodeTyp, sexp_nat_roundtrip, bind, Except.bind]
-
 /-- Decoding a memory value rebuilds it from its sparse cells. -/
 def normalizeValue : Value → Value
   | .memory memory => .memory (Bap.Memory.ofCells (Bap.Memory.cells memory))
   | value => value
-
-private theorem mapM_map_ok {α β γ ε : Type} {f : α → β} {g : β → Except ε γ} {n : α → γ} {items : List α}
-    (h : ∀ x ∈ items, g (f x) = .ok (n x)) : (items.map f).mapM g = .ok (items.map n) := by
-  induction items with
-  | nil => rfl
-  | cons head rest ih =>
-    simp only [List.map_cons, List.mapM_cons, h head (by simp), bind, Except.bind]
-    simp only [ih fun x hx => h x (List.mem_cons_of_mem _ hx), pure, Except.pure]
-
-private theorem mapM_map_self {α β ε : Type} {f : α → β} {g : β → Except ε α} {items : List α}
-    (h : ∀ x ∈ items, g (f x) = .ok x) : (items.map f).mapM g = .ok items := by
-  have := mapM_map_ok (n := id) h
-  simpa using this
-
-theorem value_roundtrip (value : Value) : decodeValue (encodeValue value) = .ok (normalizeValue value) := by
-  cases value with
-  | undefined => rfl
-  | bits value =>
-    simp only [encodeValue, Sexp.tagged, decodeValue, sexp_nat_roundtrip, bind, Except.bind, hex, Sexp.asAtom,
-      parseHex_toDigits]
-    simp [normalizeValue, pure, Except.pure, value.isLt]
-  | @memory width memory =>
-    have hcells : decodeCells width (.list ((Bap.Memory.cells memory).map fun cell =>
-        Sexp.tagged "cell" [hex cell.1.toNat, nat cell.2.toNat])) = .ok (Bap.Memory.cells memory) := by
-      simp only [decodeCells, Sexp.asList, bind, Except.bind]
-      apply mapM_map_self
-      intro cell _
-      obtain ⟨a, b⟩ := cell
-      have hb := b.toNat_lt
-      simp [Sexp.expectTagged, Sexp.tagged, Sexp.asList, Sexp.asAtom, hex, parseHex_toDigits, sexp_nat_roundtrip,
-        bind, Except.bind, pure, Except.pure]
-      exact hb
-    simp only [encodeValue, decodeValue, Sexp.tagged, sexp_nat_roundtrip, bind, Except.bind]
-    simp only [Sexp.tagged] at hcells
-    rw [hcells]
-    rfl
 
 /-- Normalising a well-formed memory value preserves every byte it holds. -/
 theorem readByte_normalizeValue {width : Nat} {memory : Bap.Memory width} (wf : PagesWF memory) (address : BitVec width) :
@@ -1547,16 +1492,6 @@ theorem readByte_normalizeValue {width : Nat} {memory : Bap.Memory width} (wf : 
 
 /-- Bindings survive up to memory normalisation. -/
 def normalizeBinding (binding : Bap.Var × Value) : Bap.Var × Value := (binding.1, normalizeValue binding.2)
-
-theorem binding_roundtrip (binding : Bap.Var × Value) :
-    decodeBinding (encodeBinding binding) = .ok (normalizeBinding binding) := by
-  obtain ⟨var, value⟩ := binding
-  obtain ⟨name, typ, index, isVirtual⟩ := var
-  simp only [encodeBinding, decodeBinding, Sexp.tagged, Sexp.expectTagged, Sexp.asList, Sexp.asAtom, bind, Except.bind,
-    typ_roundtrip, sexp_nat_roundtrip, boolValue_roundtrip, value_roundtrip, normalizeBinding]
-  simp [typ_roundtrip, sexp_nat_roundtrip, boolValue_roundtrip, value_roundtrip, pure, Except.pure]
-
-/-! Region bytes. -/
 
 private theorem byteArray_toList_loop (data : ByteArray) (index : Nat) (acc : List UInt8) (h : index ≤ data.size) :
     ByteArray.toList.loop data index acc = acc.reverse ++ data.data.toList.drop index := by
@@ -1575,124 +1510,20 @@ private theorem byteArray_toList_loop (data : ByteArray) (index : Nat) (acc : Li
     congr 2
     cases data with | mk bytes =>
     simp only [ByteArray.get!]
-    simp [Array.get!Internal_eq_getElem!, getElem!_pos, show index < bytes.size from hlt]
+    simp [getElem!_pos, show index < bytes.size from hlt]
 
 theorem byteArray_toList (data : ByteArray) : data.toList = data.data.toList :=
   (byteArray_toList_loop data 0 [] (Nat.zero_le _)).trans (by simp)
 
-private def byteDigits (byte : UInt8) : List Char :=
-  let digits := Nat.toDigits 16 byte.toNat
-  if digits.length = 1 then ['0'] ++ digits else digits
-
-private theorem byteDigits_pair (byte : UInt8) :
-    ∃ high low, byteDigits byte = [high, low] ∧ parseHexLoop [high, low] 0 = .ok byte.toNat := by
-  have hb : byte.toNat < 256 := byte.toNat_lt
-  by_cases hs : byte.toNat < 16
-  · refine ⟨'0', Nat.digitChar byte.toNat, ?_, ?_⟩
-    · simp [byteDigits, Nat.toDigits_of_lt_base hs]
-    · have h0 : hexDigit '0' = some 0 := by decide
-      simp [parseHexLoop, h0, hexDigit_digitChar _ hs]
-  · have hdiv : byte.toNat / 16 < 16 := by omega
-    have hmod : byte.toNat % 16 < 16 := Nat.mod_lt _ (by decide)
-    have hd : Nat.toDigits 16 byte.toNat = [Nat.digitChar (byte.toNat / 16), Nat.digitChar (byte.toNat % 16)] := by
-      rw [Nat.toDigits_eq_ite (by decide), ite_eq_right hs, Nat.toDigits_of_lt_base hdiv]
-      rfl
-    refine ⟨Nat.digitChar (byte.toNat / 16), Nat.digitChar (byte.toNat % 16), by simp [byteDigits, hd], ?_⟩
-    simp only [parseHexLoop, hexDigit_digitChar _ hdiv, hexDigit_digitChar _ hmod]
-    congr 1
-    omega
-
-private theorem encodeBytes_toList (data : ByteArray) :
-    (encodeBytes data).toList = data.data.toList.flatMap byteDigits := by
-  simp only [encodeBytes, String.toList_intercalate, byteArray_toList]
-  generalize data.data.toList = bytes
-  induction bytes with
-  | nil => rfl
-  | cons head rest ih =>
-    simp only [List.map_cons, List.flatMap_cons]
-    cases rest with
-    | nil => simp [List.intercalate, byteDigits]
-    | cons second tail =>
-      rw [List.intercalate_cons_of_ne_nil (by simp), ih]
-      simp [byteDigits]
-
-private theorem decodeHex_loop (bytes : List UInt8) (acc : List UInt8) :
-    decodeHex.loop (bytes.flatMap byteDigits) acc = .ok (ByteArray.mk (acc.reverse ++ bytes).toArray) := by
-  induction bytes generalizing acc with
-  | nil => simp [decodeHex.loop, pure, Except.pure]
-  | cons head rest ih =>
-    obtain ⟨high, low, hd, hp⟩ := byteDigits_pair head
-    have hparse : Bil.Wire.parseHex (String.ofList [high, low]) = .ok head.toNat := by
-      simp only [Bil.Wire.parseHex, String.toList_ofList]
-      have : (String.ofList [high, low]).isEmpty = false := by simp
-      rw [this]
-      exact hp
-    have hb : ¬ head.toNat ≥ 256 := by
-      have := head.toNat_lt
-      omega
-    simp only [List.flatMap_cons, hd, List.cons_append, List.nil_append, decodeHex.loop, hparse, bind, Except.bind, hb,
-      ↓reduceIte, ih]
-    simp
-
-/-- The text encoding of region bytes is lossless. -/
-theorem decodeHex_encodeBytes (data : ByteArray) : decodeHex (encodeBytes data) = .ok data := by
-  simp only [decodeHex, encodeBytes_toList, decodeHex_loop]
-  simp
-
-/-! Whole-record round trips. -/
-
-theorem region_roundtrip (region : Bap.Emu.Region) : decodeRegion (encodeRegion region) = .ok region := by
-  obtain ⟨address, data, ⟨r, w, x⟩⟩ := region
-  simp only [encodeRegion, decodeRegion, Sexp.tagged, Sexp.expectTagged, Sexp.asList, bind, Except.bind]
-  simp [sexp_nat_roundtrip, boolValue_roundtrip, decodeRegionBytes, decodeHex_encodeBytes, pure, Except.pure]
-
-theorem pending_roundtrip (pending : Option PendingBranch) : decodePending (encodePending pending) = .ok pending := by
-  cases pending with
-  | none => rfl
-  | some pending =>
-    obtain ⟨branch, target⟩ := pending
-    simp only [encodePending, decodePending, Sexp.tagged, Sexp.expectTagged, Sexp.asList, bind, Except.bind]
-    simp [sexp_nat_roundtrip, pure, Except.pure]
-
 /-- A thread with its memory values normalised. -/
 def normalizeThread (context : ThreadContext) : ThreadContext :=
   { context with state := { env := context.state.env.map normalizeBinding } }
-
-theorem skip_roundtrip (skip : Option Nat) : decodeSkip (encodeSkip skip) = .ok skip := by
-  cases skip with
-  | none => rfl
-  | some address =>
-    simp only [encodeSkip, decodeSkip, Sexp.tagged, Sexp.expectTagged, Sexp.asList, bind, Except.bind]
-    simp [sexp_nat_roundtrip, pure, Except.pure]
-
-theorem thread_roundtrip (context : ThreadContext) :
-    decodeThread (encodeThread context) = .ok (normalizeThread context) := by
-  obtain ⟨id, ⟨env⟩, pc, stopped, pending, skip⟩ := context
-  simp only [encodeThread, decodeThread, Sexp.tagged, Sexp.expectTagged, Sexp.asList, bind, Except.bind]
-  simp [sexp_nat_roundtrip, boolValue_roundtrip, pending_roundtrip, skip_roundtrip,
-    mapM_map_ok (fun x _ => binding_roundtrip x), normalizeThread, pure, Except.pure]
-
-theorem process_roundtrip (process : ThreadId × List Bap.Emu.Region) :
-    decodeProcess (encodeProcess process) = .ok process := by
-  obtain ⟨id, regions⟩ := process
-  simp only [encodeProcess, decodeProcess, Sexp.tagged, Sexp.expectTagged, Sexp.asList, bind, Except.bind]
-  simp [sexp_nat_roundtrip, mapM_map_self (fun x _ => region_roundtrip x), pure, Except.pure]
 
 /-- A snapshot with its memory values normalised. -/
 def normalizeSnapshot (snapshot : Snapshot) : Snapshot :=
   { snapshot with
     state := { env := snapshot.state.env.map normalizeBinding }
     threads := snapshot.threads.map normalizeThread }
-
-/-- The text checkpoint format is lossless: decoding an encoded snapshot returns it, with memory values
-rebuilt from their sparse cells (see `readByte_normalizeValue`). -/
-theorem snapshot_roundtrip (snapshot : Snapshot) :
-    decodeSnapshot (encodeSnapshot snapshot) = .ok (normalizeSnapshot snapshot) := by
-  obtain ⟨⟨env⟩, pc, regions, stopped, threads, current, next, pending, processes, skip⟩ := snapshot
-  simp only [encodeSnapshot, decodeSnapshot, Sexp.tagged, Sexp.asList, bind, Except.bind]
-  simp [sexp_nat_roundtrip, boolValue_roundtrip, pending_roundtrip, skip_roundtrip, mapM_map_ok (fun x _ => binding_roundtrip x),
-    mapM_map_ok (fun x _ => thread_roundtrip x), mapM_map_self (fun x _ => region_roundtrip x),
-    mapM_map_self (fun x _ => process_roundtrip x), normalizeSnapshot, pure, Except.pure]
 
 end TextCheckpoint
 
@@ -1738,7 +1569,7 @@ theorem takeBytes_at {data encoded : ByteArray} {offset : Nat} (h : At data offs
     takeBytes (Reader.mk data offset) encoded.size = .ok (encoded, Reader.mk data (offset + encoded.size)) := by
   obtain ⟨hs, he⟩ := h
   have hn : ¬ offset + encoded.size > data.size := by omega
-  simp only [takeBytes, bind, Except.bind, Reader.offset, Reader.data, hn, ↓reduceIte, he]
+  simp only [takeBytes, hn, ↓reduceIte, he]
 
 private def byteEnc (value : Nat) : ByteArray := ByteArray.mk #[UInt8.ofNat value]
 
@@ -1832,7 +1663,7 @@ private theorem getList_loop {α β : Type} (decode : Reader → Except String (
     getList.loop decode items.length (Reader.mk data offset) acc =
       .ok (acc.reverse ++ items.map n, Reader.mk data (offset + (body f items).size)) := by
   induction items generalizing offset acc with
-  | nil => simp [getList.loop, body, pure, Except.pure, ByteArray.size_empty]
+  | nil => simp [getList.loop, body, ByteArray.size_empty]
   | cons head rest ih =>
     obtain ⟨h1, h2⟩ := At.split (left := f head) (right := body f rest) hat
     have hd := hdec head (by simp) data offset h1
@@ -1929,9 +1760,9 @@ theorem getSkip_decodes (skip : Option Nat) (h : SkipSafe skip) :
     obtain ⟨h1, h2⟩ := At.split hat
     have d1 := getByte_decodes 1 (by decide) data offset h1
     have d2 := natBytes_decodes _ h data _ h2
-    simp only [ByteArray.size_append, byteEnc_size, natBytes_size, Nat.add_assoc] at d1 d2
-    simp only [getSkipBin, bind, Except.bind, d1, d2, encSkip, ByteArray.size_append, byteEnc_size, natBytes_size,
-      Nat.add_assoc]
+    simp only [byteEnc_size, natBytes_size, Nat.add_assoc] at d1 d2
+    simp only [getSkipBin, bind, Except.bind, d1, d2, encSkip, ByteArray.size_append, byteEnc_size, natBytes_size
+]
 
 private def encTyp : Typ → ByteArray
   | .unknown => byteEnc 0
@@ -1973,9 +1804,9 @@ theorem getTyp_decodes (typ : Typ) (h : TypSafe typ) : Decodes getTypBin (encTyp
     obtain ⟨h1, h2⟩ := At.split hat
     have d1 := getByte_decodes 3 (by decide) data offset h1
     have d2 := natBytes_decodes _ h data _ h2
-    simp only [ByteArray.size_append, byteEnc_size, natBytes_size, Nat.add_assoc] at d1 d2
-    simp only [getTypBin, bind, Except.bind, d1, d2, encTyp, ByteArray.size_append, byteEnc_size, natBytes_size,
-      Nat.add_assoc]
+    simp only [byteEnc_size, natBytes_size, Nat.add_assoc] at d1 d2
+    simp only [getTypBin, bind, Except.bind, d1, d2, encTyp, ByteArray.size_append, byteEnc_size, natBytes_size
+]
 
 /-! Values and bindings. -/
 
@@ -2048,7 +1879,7 @@ theorem getValue_decodes (value : Value) (h : ValueSafe value) :
         rw [Nat.pow_mul]
       omega
     rw [Nat.mod_eq_of_lt hlt]
-    simp [normalizeValue, pure, Except.pure]
+    simp [normalizeValue]
   | @memory width memory =>
     obtain ⟨hw, hlen⟩ := h
     obtain ⟨h12, h3⟩ := At.split hat
@@ -2059,7 +1890,7 @@ theorem getValue_decodes (value : Value) (h : ValueSafe value) :
     simp only [getValueBin, bind, Except.bind, d1, d2, encValue, ByteArray.size_append, byteEnc_size, natBytes_size,
       Nat.add_assoc]
     rw [getList_decodes encCell id (Bap.Memory.cells memory) hlen h3]
-    · simp [normalizeValue, pure, Except.pure, ByteArray.size_append, natBytes_size]
+    · simp [normalizeValue, ByteArray.size_append, natBytes_size]
       omega
     · rintro ⟨a, b⟩ _ dt ot hc
       obtain ⟨c1, c2⟩ := At.split hc
@@ -2069,7 +1900,7 @@ theorem getValue_decodes (value : Value) (h : ValueSafe value) :
         omega
       have e1 := natBytes_decodes _ hlt dt ot c1
       have e2 := getByte_decodes b.toNat b.toNat_lt dt _ c2
-      simp only [e1, e2, bind, Except.bind, pure, Except.pure, encCell, ByteArray.size_append, byteEnc_size]
+      simp only [e1, e2, encCell, ByteArray.size_append, byteEnc_size]
       simp [id]
       omega
 
@@ -2150,7 +1981,7 @@ def ThreadSafe (context : ThreadContext) : Prop :=
 
 private theorem data_putThread (writer : Writer) (context : ThreadContext) :
     Writer.data (putThreadBin writer context) = Writer.data writer ++ encThread context := by
-  simp only [putThreadBin, data_putSkip, data_putPending, data_putBool, data_putNat, encThread, ByteArray.append_assoc]
+  simp only [putThreadBin, data_putSkip, data_putPending, encThread, ByteArray.append_assoc]
   rw [foldl_writer _ encBinding data_putBinding]
   simp only [data_putBool, data_putNat, ByteArray.append_assoc]
 
@@ -2198,7 +2029,7 @@ theorem getProcess_decodes (process : ThreadId × List Bap.Emu.Region) (h : Proc
   have d1 := natBytes_decodes pid hi data offset h1
   have d2 := getList_decodes (decode := getRegionBin) encRegion id regions hl h2 fun r hr' => getRegion_decodes r (hr r hr')
   simp only [ByteArray.size_append, Nat.add_assoc, List.map_id] at d1 d2
-  simp only [getProcessBin, bind, Except.bind, d1, d2, encProcess, ByteArray.size_append, Nat.add_assoc]
+  simp only [getProcessBin, bind, Except.bind, d1, d2, encProcess, ByteArray.size_append]
 
 /-- A snapshot representable in the binary format: 64-bit counters and 64-bit addresses. -/
 structure SnapshotSafe (snapshot : Snapshot) : Prop where
@@ -2304,7 +2135,7 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
   dsimp only
   rw [bind_ok_eq d10]
   dsimp only
-  simp only [hsize, Reader.offset, bne_self_eq_false, Bool.false_eq_true, ↓reduceIte]
+  simp only [hsize, bne_self_eq_false, Bool.false_eq_true, ↓reduceIte]
   rfl
 
 private theorem fits_pending {pending : Option PendingBranch} (h : pendingFits pending = true) : PendingSafe pending := by
@@ -2428,7 +2259,7 @@ private theorem lookup_cons_other (env : Bil.Env) (memoryVar var : Bap.Var) (val
   have hne : (memoryVar == var) = false := by
     simp only [beq_eq_false_iff_ne, ne_eq]
     exact fun he => h he.symm
-  simp [Bil.lookup, List.find?_cons, hne]
+  simp [Bil.lookup, hne]
 
 /-- Saving and restoring through the binary format gives back exactly the emulator that was saved: pc,
 stopped flag, regions, thread ids, pending branch, skip marker and forked memories, all threads with their
@@ -2498,7 +2329,7 @@ theorem byteHex_length (value : UInt8) : (byteHex value).length = 2 := by
   · have : String.length (String.ofList (Nat.toDigits 16 value.toNat)) < 2 := by
       simp [Nat.toDigits_of_lt_base hs]
     have h0 : "0".length = 1 := by decide
-    simp [this, Nat.toDigits_of_lt_base hs, h0]
+    simp [Nat.toDigits_of_lt_base hs, h0]
   · have hdiv : value.toNat / 16 < 16 := by omega
     have hd : Nat.toDigits 16 value.toNat = [Nat.digitChar (value.toNat / 16), Nat.digitChar (value.toNat % 16)] := by
       rw [Nat.toDigits_eq_ite (by decide), ite_eq_right hs, Nat.toDigits_of_lt_base hdiv]
@@ -2925,8 +2756,9 @@ theorem run_is_runM (emu : Bap.Emu.Emu) (fuel : Nat) (h : rangeLimitOf emu.confi
 
 /-- With compiled ranges, the same step, with the fuel counting the instructions it chains. -/
 theorem run_is_runChainedM (emu : Bap.Emu.Emu) (fuel : Nat) (h : ¬ rangeLimitOf emu.config ≤ 1) :
-    Bap.Emu.run emu fuel = runChainedM (stepM (ε := IO.Error) (stepOps emu)) emu.budget.set
-      emu.engine.chained.get fuel fuel 0 := by
+    Bap.Emu.run emu fuel = runPreciseM (runChainedM (stepM (ε := IO.Error) (stepOps emu)) emu.budget.set
+      emu.engine.chained.get fuel fuel 0) (stepM (ε := IO.Error) (stepOps emu))
+      (do pure ((← emu.lastBudget.get) != 0 && !emu.engine.deferMemorySync)) (fuel + 1) := by
   simp [Bap.Emu.run, h]
 
 end Links
@@ -3021,11 +2853,11 @@ theorem parseCommand_words (command : Command) (hwrite : ∀ address bytes, comm
   | restore => rfl
   | reg name => simp [commandWords, parseCommand]
   | save path => simp [commandWords, parseCommand]
-  | set name value => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind, pure, Except.pure]
-  | examine address size => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind, pure, Except.pure]
-  | proceedTo address => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind, pure, Except.pure]
-  | breakAt address => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind, pure, Except.pure]
-  | delete address => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind, pure, Except.pure]
+  | set name value => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind]
+  | examine address size => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind]
+  | proceedTo address => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind]
+  | breakAt address => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind]
+  | delete address => simp [commandWords, parseCommand, parseNumber_repr, bind, Except.bind]
   | write address bytes =>
     have hne := hwrite address bytes rfl
     cases bytes with
@@ -3034,12 +2866,12 @@ theorem parseCommand_words (command : Command) (hwrite : ∀ address bytes, comm
       have := mapM_parseByte (head :: tail)
       simp only [commandWords, parseCommand, List.isEmpty, parseNumber_decimal, List.map_cons]
       simp only [List.map_cons] at this
-      simp [bind, Except.bind, this, pure, Except.pure, parseNumber_repr]
+      simp [bind, Except.bind, this]
 
 /-- `x ADDR` examines one byte. -/
 theorem parseCommand_examine_one (address : Nat) :
     parseCommand ["x", toString address] = .ok (.examine address 1) := by
-  simp [parseCommand, parseNumber_repr, bind, Except.bind, pure, Except.pure]
+  simp [parseCommand, parseNumber_repr, bind, Except.bind]
 
 /-- `write` without bytes is refused. -/
 theorem parseCommand_write_nothing (address : String) : ∃ error, parseCommand ["write", address] = .error error :=
@@ -3186,7 +3018,7 @@ theorem mem_projectRoots (entry : Nat) (roots : List Nat) (symbols : List (Strin
   have := (roots_foldl (entry :: roots ++ symbols.map Prod.snd) [] List.nodup_nil).2.2 root
   simp only [projectRoots]
   rw [this]
-  simp [List.mem_append, or_assoc]
+  simp [List.mem_append]
 
 /-- The pc comes first. -/
 theorem projectRoots_head (entry : Nat) (roots : List Nat) (symbols : List (String × Nat)) :

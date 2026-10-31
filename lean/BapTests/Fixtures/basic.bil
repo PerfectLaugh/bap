@@ -1,5 +1,0 @@
-(bil (
-  (move
-    (var result 0 (imm 32) 0)
-    (binop PLUS (int 32 2a) (int 32 1)))
-))

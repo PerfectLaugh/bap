@@ -129,8 +129,8 @@ structure Emu where
   sharedMemory : IO.Ref (Option Jit.Memory)
   /-- The ranges that a parallel worker wrote. Workers leave the memory of their state behind. -/
   journal : Option (IO.Ref (List (Nat × Nat))) := none
-  /-- Where a code hook inside a compiled range moved the pc. -/
-  rangeRedirect : IO.Ref (Option Nat)
+  /-- How many blocks the last step could chain, which says whether its failure is the fault itself. -/
+  lastBudget : IO.Ref Nat
   /-- Whether the compiled range that runs started with nothing to observe it. -/
   rangeQuiet : IO.Ref Bool
   /-- How many instructions the next step may run after its first, for `run`: a step on its own runs one. -/
@@ -206,7 +206,7 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     processMemory := ← IO.mkRef {}
     threadControl := ← IO.mkRef {}
     sharedMemory := ← IO.mkRef none
-    rangeRedirect := ← IO.mkRef none
+    lastBudget := ← IO.mkRef 0
     rangeQuiet := ← IO.mkRef false
     budget := ← IO.mkRef 0
   }
@@ -636,27 +636,16 @@ private def notifyCode (emu : Emu) (address : Nat) : IO Unit := do
 private def rangeIsQuiet (emu : Emu) : IO Bool := do
   pure ((← emu.hooks.get).isEmpty && (← emu.trace.get).isNone)
 
-/-- The code hooks of a block inside a compiled range, whose first block is the step's. As in a step, the
-hooks run first, and a stop or a move of the pc leaves the block unexecuted and untraced. -/
+/-- The code site of a block inside a compiled range, whose first block is the step's. A block with hooks ends the range, with
+the block not entered and its hooks not fired: they are the next step's, which has the state that they read. -/
 private def observeRangeCode (emu : Emu) (address : Nat) : IO Bool := do
   emu.pc.set address
-  -- Code that the block before wrote, or a hook that arrived while none of the code sites was observed: the
-  -- dispatcher takes it from here, with the block not entered and its hooks not fired.
-  if (← emu.engine.dirtyCode.get).isSome then return true
-  if (← emu.rangeQuiet.get) && !(← rangeIsQuiet emu) then return true
-  notifyCode emu address
-  let current ← emu.pc.get
-  let stopped ← emu.stopped.get
-  match afterHook address current stopped with
-  | .proceed =>
-    recordTrace emu address
-    pure false
-  | .halt skip =>
-    emu.skipCode.set skip
-    pure true
-  | .redirect =>
-    emu.rangeRedirect.set (some current)
-    pure true
+  let dirty := (← emu.engine.dirtyCode.get).isSome
+  let late := (← emu.rangeQuiet.get) && !(← rangeIsQuiet emu)
+  let hooked := !(hooksForCode (·.first) (·.last) (← emu.hooks.get) address).isEmpty
+  if rangeSiteStops dirty late hooked then return true
+  recordTrace emu address
+  pure false
 
 def failure (emu : Emu) : IO (Option MemoryFault) := emu.lastFault.get
 
@@ -1223,18 +1212,16 @@ private def executeBlock (emu : Emu) (address : Nat) : IO (Nat × Bil.Effect) :=
   let state ← emu.state.get
   let quiet ← rangeIsQuiet emu
   emu.rangeQuiet.set quiet
-  let budget ← emu.budget.get
+  let allowed ← emu.budget.get
   emu.budget.set 0
+  let budget := rangeBudgetOf allowed !((← emu.readHooks.get).isEmpty && (← emu.writeHooks.get).isEmpty)
+  emu.lastBudget.set budget
   let result ← Primus.Lifted.runBlockObserved emu.engine (fetch emu) (lift emu) state address
     (some (notifyMemory emu)) (some (observeRangeCode emu)) (!quiet) budget
   Primus.Lifted.flushDirtyRange emu.engine
   emu.state.set result.state
   emu.lastFault.set none
-  match ← emu.rangeRedirect.get with
-  | some target =>
-    emu.rangeRedirect.set none
-    pure (target, .normal)
-  | none => pure (result.next, result.effect)
+  pure (result.next, result.effect)
 
 /-- The references that say where the thread of the emulator is. -/
 @[inline] private def controlCells (emu : Emu) : ControlCells IO where
@@ -1254,8 +1241,7 @@ private def executeBlock (emu : Emu) (address : Nat) : IO (Nat × Bil.Effect) :=
     (recordTrace emu) (executeBlock emu) (dispatchSpecial emu)
     (fun before => do
       rollbackBlock emu before.1
-      emu.trace.set before.2
-      emu.rangeRedirect.set none)
+      emu.trace.set before.2)
     (fun pc => do
       match ← emu.lastFault.get with
       | some fault => emu.lastFault.set (some { fault with pc })
@@ -1264,12 +1250,16 @@ private def executeBlock (emu : Emu) (address : Nat) : IO (Nat × Bil.Effect) :=
 def step (emu : Emu) : IO Bool :=
   stepM (ε := IO.Error) (stepOps emu)
 
-/-- Up to `maxSteps` instructions. Those of a compiled range count as well, and it stops where they run out. -/
+/-- Up to `maxSteps` instructions. Those of a compiled range count as well, and it stops where they run out. A fault in a
+range leaves everything as single steps do. A worker of a parallel round leaves that to the rollback of its round. -/
 def run (emu : Emu) (maxSteps : Nat := 100000) : IO Nat :=
   if rangeLimitOf emu.config ≤ 1 then
     runM (stepM (ε := IO.Error) (stepOps emu)) maxSteps 0
   else
-    runChainedM (stepM (ε := IO.Error) (stepOps emu)) emu.budget.set emu.engine.chained.get maxSteps maxSteps 0
+    runPreciseM (runChainedM (stepM (ε := IO.Error) (stepOps emu)) emu.budget.set emu.engine.chained.get maxSteps maxSteps 0)
+      (stepM (ε := IO.Error) (stepOps emu))
+      (do pure ((← emu.lastBudget.get) != 0 && !emu.engine.deferMemorySync))
+      (maxSteps + 1)
 
 private def switchNextThread (emu : Emu) : IO Bool := do
   saveCurrentThread emu
@@ -1323,7 +1313,7 @@ private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared :
     skipCode := ← IO.mkRef context.skip
     pendingRef := ← IO.mkRef context.pending
     journal := some (← IO.mkRef [])
-    rangeRedirect := ← IO.mkRef none
+    lastBudget := ← IO.mkRef 0
     rangeQuiet := ← IO.mkRef false
     budget := ← IO.mkRef 0
   }

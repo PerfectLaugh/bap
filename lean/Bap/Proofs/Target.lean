@@ -1111,7 +1111,7 @@ theorem mipsRegisterName_idempotent (name : String) :
     mipsRegisterName (mipsRegisterName name) = mipsRegisterName name := by
   by_cases h : name ∈ ["R0", "ZERO", "$zero", "AT", "V0", "V1", "A0", "A1", "A2", "A3", "T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "T8", "T9", "K0", "K1", "GP", "SP", "FP", "S8", "RA", "$ra"]
   · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
-    rcases h with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> rfl
+    rcases h with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> decide +kernel
   · simp only [List.mem_cons, List.not_mem_nil, or_false, not_or] at h
     have hfix : mipsRegisterName name = name := by
       lift_unfold mipsRegisterName
@@ -1123,42 +1123,42 @@ theorem mipsRegisterName_idempotent (name : String) :
 set_option maxRecDepth 20000 in
 /-- `riscvGlobals` binds each `Xn` for n below 32, once. -/
 theorem riscvGlobals_keys : (riscvGlobals.map (·.1)).Nodup ∧ riscvGlobals.length = 66 :=
-  ⟨by decide, rfl⟩
+  ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
 theorem riscv32Globals_keys : (riscv32Globals.map (·.1)).Nodup ∧ riscv32Globals.length = 66 :=
-  ⟨by decide, rfl⟩
+  ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem x86Globals_keys : (x86Globals.map (·.1)).Nodup ∧ x86Globals.length = 92 := ⟨by decide, rfl⟩
+theorem x86Globals_keys : (x86Globals.map (·.1)).Nodup ∧ x86Globals.length = 92 := ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
 theorem x8632Globals_keys : (x8632Globals.map (·.1)).Nodup ∧ x8632Globals.length = 64 :=
-  ⟨by decide, rfl⟩
+  ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
 theorem arm32Globals_keys : (arm32Globals.map (·.1)).Nodup ∧ arm32Globals.length = 61 :=
-  ⟨by decide, rfl⟩
+  ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
 theorem mipsGlobals_keys : (mipsGlobals.map (·.1)).Nodup ∧ mipsGlobals.length = 77 :=
-  ⟨by decide, rfl⟩
+  ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
 theorem mips32Globals_keys : (mips32Globals.map (·.1)).Nodup ∧ mips32Globals.length = 77 :=
-  ⟨by decide, rfl⟩
+  ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
 theorem powerpcGlobals_keys : (powerpcGlobals.map (·.1)).Nodup ∧ powerpcGlobals.length = 85 :=
-  ⟨by decide, rfl⟩
+  ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
 theorem powerpc32Globals_keys : (powerpc32Globals.map (·.1)).Nodup ∧ powerpc32Globals.length = 85 :=
-  ⟨by decide, rfl⟩
+  ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 100000 in
 theorem aarch64Globals_keys : (aarch64Globals.map (·.1)).Nodup ∧ aarch64Globals.length = 210 :=
-  ⟨by decide, rfl⟩
+  ⟨by decide +kernel, rfl⟩
 
 
 /-! ### Canonical names -/
@@ -1986,8 +1986,8 @@ theorem decodeRISCVWith_flow (globals : Primus.Semantics.Environment) (base addr
       (fun insn => insn.address = address ∧ ∃ word flags, insn.flow = riscvFlow word flags) := by
   unfold decodeRISCVWith
   repeat' first
-    | exact Holds.pure ⟨rfl, _, _, rfl⟩
-    | refine Holds.bind fun _ => ?_
+    | with_reducible refine Holds.bind fun _ => ?_
+    | with_reducible exact Holds.pure ⟨rfl, _, _, rfl⟩
 
 theorem decodeRISCVWith_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : Holds (decodeRISCVWith globals base address data) (Lifted (fun flow : Flow => flow) address) :=
@@ -2140,8 +2140,8 @@ theorem decodeRISCV32With_flow (globals : Primus.Semantics.Environment) (base ad
       (fun insn => insn.address = address ∧ ∃ word flags, insn.flow = riscvFlow word flags) := by
   unfold decodeRISCV32With
   repeat' first
-    | exact Holds.pure ⟨rfl, _, _, rfl⟩
-    | refine Holds.bind fun _ => ?_
+    | with_reducible refine Holds.bind fun _ => ?_
+    | with_reducible exact Holds.pure ⟨rfl, _, _, rfl⟩
 
 theorem decodeRISCV32With_lifted (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : Holds (decodeRISCV32With globals base address data) (Lifted (fun flow : Flow => flow) address) :=

@@ -65,7 +65,57 @@ private def keyWrap : IO Unit := do
     | .ok _ => false
     | .error _ => true)
 
+/-- The fast parser against what the fuelled one does, error for error. -/
+private def sexpFastPaths : IO Unit := do
+  let parseError (input : String) : String := match Sexp.parse input with
+    | .ok _ => "parsed"
+    | .error error => error
+  assertEqual "an unterminated atom" "unterminated quoted atom" (parseError "\"abc")
+  assertEqual "an escape at the end" "unterminated quoted atom" (parseError "\"abc\\")
+  assertEqual "a bad escape" "unsupported escape sequence \\q" (parseError "\"a\\qb\"")
+  assertEqual "the end of the atom comes before a bad escape" "unterminated quoted atom" (parseError "\"a\\qb")
+  assertEqual "the last bad escape comes first" "unsupported escape sequence \\z" (parseError "\"\\q\\z\"")
+  let fuelError (fuel : Nat) (input : String) : String := match Sexp.parseOne fuel input.toList with
+    | .ok (value, rest) => s!"{value} [{String.ofList rest}]"
+    | .error error => error
+  assertEqual "no fuel" "S-expression parser fuel exhausted" (fuelError 0 "a")
+  assertEqual "no fuel for a list" "unterminated S-expression list" (fuelError 1 "(a)")
+  assertEqual "no fuel for an item" "S-expression parser fuel exhausted" (fuelError 2 "(a)")
+  assertEqual "fuel enough for a list" "(a) [ b]" (fuelError 4 "(a) b")
+  assertEqual "a quote takes fuel" "S-expression parser fuel exhausted" (fuelError 1 "'a")
+  assertEqual "what follows a list stays" "(a \"b c\" (quote d)) [ e]" (fuelError 9 "(a \"b c\" 'd) e")
+  let parseList (fuel : Nat) (input : String) : String := match Sexp.parseList fuel input.toList with
+    | .ok (items, rest) => s!"{Sexp.render (.list items)} [{String.ofList rest}]"
+    | .error error => error
+  assertEqual "a list from its items" "(a b) [c]" (parseList 4 "a b)c")
+  assertEqual "a list out of fuel" "unterminated S-expression list" (parseList 0 ")")
+  assertEqual "an item of a list out of fuel" "S-expression parser fuel exhausted" (parseList 2 "a b)")
+  let roundTrip (name : String) (value : Sexp) : IO Unit :=
+    assertTrue name (match Sexp.parse (Sexp.render value) with
+      | .ok again => decide (again = value)
+      | .error _ => false)
+  let long := String.ofList ((List.range 200000).map fun i => if i % 100 = 0 then '\n' else if i % 37 = 0 then '"' else 'x')
+  roundTrip "a long atom with escapes" (.atom long)
+  roundTrip "a long list" (.list ((List.range 200000).map fun i => .atom (toString i)))
+  roundTrip "deep lists" ((List.range 2000).foldl (fun value i => .list [.atom (toString i), value, .atom "(", .list []]) (.atom ""))
+  assertEqual "rendering of the kinds of atoms" "(a \"b c\" \"\" \"\\n\" () (\"'d\"))"
+    (Sexp.render (.list [.atom "a", .atom "b c", .atom "", .atom "\n", .list [], .list [.atom "'d"]]))
+
+/-- `writeByte` is `TreeMap.modify` on a page there is: the same tree as `insert`, by the proof. Here, the same contents. -/
+private def writeByteFastPath : IO Unit := do
+  let insertWrite (memory : Memory 32) (address : Nat) (value : UInt8) : Memory 32 :=
+    let index := address / Memory.pageSize
+    let page := (memory.pages.get? index).getD (ByteArray.mk (List.replicate Memory.pageSize 0).toArray)
+    ⟨memory.pages.insert index (page.set! (address % Memory.pageSize) value)⟩
+  let writes := (List.range 20000).map fun i => ((i * 7919) % 300000, UInt8.ofNat (i * 13))
+  let fast := writes.foldl (fun memory write => Memory.writeByte memory (BitVec.ofNat 32 write.1) write.2) (Memory.empty 32)
+  let slow := writes.foldl (fun memory write => insertWrite memory write.1 write.2) (Memory.empty 32)
+  assertEqual "writeByte has the pages of insert" (slow.pages.toList.map fun entry => (entry.1, entry.2.toList))
+    (fast.pages.toList.map fun entry => (entry.1, entry.2.toList))
+
 def run : IO Unit := do
+  sexpFastPaths
+  writeByteFastPath
   memoryAccesses
   keyWrap
   let input := " ; comment\n(bil ((special \"hello\\nworld\")))"

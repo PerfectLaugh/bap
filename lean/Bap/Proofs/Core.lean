@@ -6,7 +6,6 @@ import Bap.Core.Word
 import Std.Data.TreeMap.Lemmas
 import Lean.Elab.Command
 
-set_option linter.unusedSimpArgs false
 
 namespace Bap.Proofs.Core
 
@@ -1107,7 +1106,7 @@ theorem write_eq {memory : Memory addressWidth} {address : BitVec addressWidth} 
     (hs : size * 8 = valueWidth) (endian : Endian) :
     Memory.write memory address value endian size =
       .ok (writeRegion memory address.toNat (ByteArray.mk (image value endian size).toArray)) := by
-  simp [Memory.write, image, hs, Pure.pure, Except.pure]
+  simp [Memory.write, image, hs]
   rfl
 
 /-- The width check is the only way `Memory.write` can fail. -/
@@ -1298,7 +1297,7 @@ theorem nat_atom_toString (n : Nat) : Sexp.nat (.atom (toString n)) = .ok n := b
   have : (toString n).toNat? = some n := by
     rw [String.toNat?_eq_some_ofDigitChars hisNat, hfilter, Nat.toString_eq_repr, Nat.toList_repr,
       Nat.ofDigitChars_ten_toDigits]
-  simp [Sexp.nat, asAtom, this, bind, Except.bind]
+  simp [Sexp.nat, asAtom, bind, Except.bind]
 
 theorem dropComment_suffix (input : List Char) : dropComment input <:+ input := by
   induction input with
@@ -1306,7 +1305,7 @@ theorem dropComment_suffix (input : List Char) : dropComment input <:+ input := 
   | cons c rest ih =>
     by_cases h : c = '\n'
     · subst h; simp [dropComment]
-    · simp only [dropComment, h]
+    · simp only [dropComment]
       exact ih.trans (List.suffix_cons _ _)
 
 /-- A comment ends after the first newline, whatever follows it. -/
@@ -1317,7 +1316,7 @@ theorem dropComment_append (comment rest : List Char) (h : '\n' ∉ comment) :
   | cons c tail ih =>
     simp only [List.mem_cons, not_or] at h
     have hc : c ≠ '\n' := fun e => h.1 e.symm
-    simp only [List.cons_append, dropComment, hc]
+    simp only [List.cons_append, dropComment]
     exact ih h.2
 
 /-- Every character the printer escapes is read back by the quoted-atom parser. -/
@@ -1336,7 +1335,7 @@ private theorem parseQuoted_escape (fuel : Nat) (chars rest : List Char)
       simp only [List.length_cons, Nat.add_lt_add_iff_right] at hfuel
       have iht := ih f hfuel
       have happend : String.ofList [c] ++ String.ofList tail = String.ofList (c :: tail) := by
-        simp [← String.toList_inj]
+        simp
       simp only [List.flatMap_cons, List.append_assoc]
       by_cases h1 : c = '"'
       · subst h1
@@ -1353,8 +1352,8 @@ private theorem parseQuoted_escape (fuel : Nat) (chars rest : List Char)
       by_cases h5 : c = '\t'
       · subst h5
         simp [escape, parseQuoted, iht, parseEscaped, bind, Except.bind, ← happend]
-      have hesc : escape c = [c] := by simp [escape, h1, h2, h3, h4, h5]
-      simp [hesc, parseQuoted, iht, h1, h2, bind, Except.bind, ← happend]
+      have hesc : escape c = [c] := by simp [escape]
+      simp [hesc, parseQuoted, iht, h2, bind, Except.bind, ← happend]
 
 /-- Atoms the printer leaves unquoted contain no delimiter the atom parser would stop at. -/
 private theorem needsQuotes_false_iff (value : String) :
@@ -1377,7 +1376,7 @@ private theorem parseAtom_delimited (chars rest : List Char)
       | cons d tail =>
         have := hrest d rfl
         simp only [Unquoted] at this
-        simp [List.takeWhile, this]
+        simp [List.takeWhile]
         grind
     | cons c tail ih =>
       have hc := hchars c (by simp)

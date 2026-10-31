@@ -729,6 +729,134 @@ private def outOfRange (input : ElfLinker.Input) : Bool :=
 private def relocatedBytes (input : ElfLinker.Input) (n : Nat) : Nat :=
   ElfLinker.readNat (ElfLinker.link input).memory input.little 0 n
 
+/-- What `relocate_image` says of a link: each store of its log reads back, and the bytes that nothing stored to are the input's. -/
+private def checkImage (name : String) (input : ElfLinker.Input) : IO Unit := do
+  let output := ElfLinker.link input
+  let writes := output.applied.flatMap (·.2)
+  for w in writes do
+    assertEqual s!"{name}: a store reads back at {w.off}" (ElfLinker.field w.value 0 (8 * w.n))
+      (ElfLinker.readNat output.memory w.little w.off w.n)
+  for o in List.range input.data.size do
+    if writes.all fun w => o < w.off || w.off + w.n ≤ o then
+      assertEqual s!"{name}: byte {o} is the input's" (input.data.get! o) (output.memory.get! o)
+
+/-- The stores of a whole link, of relocations of several machines. A deferred half is stored with the addend of its pair, or at
+the end without one, and every one of them only once. -/
+private def runWholeLink : IO Unit := do
+  let bytes := ByteArray.mk (Array.replicate 24 0xaa)
+  let sym : ElfLinker.Sym := ⟨"sym", ElfLinker.shnAbs, false, 0x12348000, 0, 0, 1, 0⟩
+  let text : ElfLinker.Section := ⟨".text", 1, ElfLinker.shfAlloc, 0, 24, 16⟩
+  let input (machine width : Nat) (little : Bool) (rels : List ElfLinker.Rel) : ElfLinker.Input :=
+    { machine, width, little, base := 0x1000, data := bytes, sections := #[text], symbols := #[sym], relocations := rels }
+  let x86 := input 62 64 true [⟨0, 0, 2, 0, -4, true⟩, ⟨0, 8, 1, 0, 1, true⟩, ⟨0, 16, 9, 0, -4, true⟩]
+  checkImage "x86-64" x86
+  assertEqual "x86-64 stores each site once" 3 (ElfLinker.link x86).applied.length
+  assertEqual "x86-64 has no warning" 0 (ElfLinker.link x86).warnings.length
+  let thumb := input 40 32 true [⟨0, 0, 0x2f, 0, 0, true⟩, ⟨0, 4, 0x30, 0, 0, true⟩, ⟨0, 8, 2, 0, 0, true⟩]
+  checkImage "ARM" thumb
+  assertEqual "ARM stores two halves of an instruction in one site" [2, 2, 1]
+    ((ElfLinker.link thumb).applied.map (·.2.length))
+  -- `HI16` is stored when its `LO16` comes, then the `LO16` and what comes without a pair at the end
+  let mips := input 8 32 false [⟨0, 0, 5, 0, 0, false⟩, ⟨0, 4, 6, 0, 0, false⟩, ⟨0, 8, 5, 0, 0, false⟩]
+  checkImage "MIPS" mips
+  let output := ElfLinker.link mips
+  assertEqual "MIPS stores in the order of its pairs" [([] : List Nat), [0], [4], [], [8]]
+    (output.applied.map fun e => e.2.map (·.off))
+  let hi := ElfLinker.readNat output.memory false 0 4
+  let lo := ElfLinker.readNat output.memory false 4 4
+  assertEqual "HI16 keeps the instruction and has the half of its pair" (0xaaaa0000 + 0xaaab * 0 + ((0xaaaa0000 + ElfLinker.sext (0xaaaa : Nat) 16 + 0x12348000 + 0x8000) >>> 16 : Int).toNat % 65536 : Nat) hi
+  assertEqual "LO16 keeps the instruction" 0xaaaa0000 (lo - lo % 65536)
+
+/-- A file with an instruction sequence and thread-local data: a symbol at the start of `.tdata` of eight bytes, and one after it. -/
+private def tlsInput (machine width : Nat) (code : List UInt8) (relocations : List ElfLinker.Rel) : ElfLinker.Input :=
+  let size := code.length
+  { machine, width, little := true, base := 0x1000, data := ByteArray.mk (code ++ List.replicate 8 0).toArray
+    sections := #[⟨".text", 1, ElfLinker.shfAlloc + ElfLinker.shfExecinstr, 0, size, 16⟩,
+      ⟨".tdata", 1, ElfLinker.shfAlloc + ElfLinker.shfWrite + ElfLinker.shfTls, size, 8, 8⟩]
+    symbols := #[⟨"x", 1, false, 0, 8, 6, 1, 0⟩, ⟨"__tls_get_addr", ElfLinker.shnAbs, false, 0, 0, 2, 1, 0⟩]
+    relocations }
+
+private def relaxedCode (input : ElfLinker.Input) (size : Nat) : List UInt8 :=
+  let output := ElfLinker.link (ElfLinker.relaxTls input)
+  ((output.memory.extract 0 size).toList)
+
+/-- The relaxations of thread-local accesses, against the bytes `ld.lld -static` leaves of each. -/
+private def runTlsRelax : IO Unit := do
+  let gd : List UInt8 := [0x66, 0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0x66, 0x66, 0x48, 0xe8, 0, 0, 0, 0]
+  let input := tlsInput 62 64 gd [⟨0, 4, 19, 0, -4, true⟩, ⟨0, 12, 4, 1, -4, true⟩]
+  assertEqual "R_X86_64_TLSGD becomes local-exec" [0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, 0x48, 0x8d, 0x80, 0xf8, 0xff, 0xff, 0xff]
+    (relaxedCode input 16)
+  assertEqual "without a warning" 0 (ElfLinker.link (ElfLinker.relaxTls input)).warnings.length
+  assertEqual "the plain link of it warns" 2 (ElfLinker.link { input with relocations := [⟨0, 4, 19, 0, -4, true⟩, ⟨0, 4, 20, 0, -4, true⟩] }).warnings.length
+  let ld : List UInt8 := [0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0x48, 0x8d, 0x88, 0, 0, 0, 0]
+  assertEqual "R_X86_64_TLSLD and DTPOFF32"
+    [0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, 0x48, 0x8d, 0x88, 0xf8, 0xff, 0xff, 0xff]
+    (relaxedCode (tlsInput 62 64 ld [⟨0, 3, 20, 0, -4, true⟩, ⟨0, 8, 4, 1, -4, true⟩, ⟨0, 15, 21, 0, 0, true⟩]) 19)
+  let desc : List UInt8 := [0x4c, 0x8d, 0x25, 0, 0, 0, 0, 0xff, 0x10]
+  assertEqual "R_X86_64_GOTPC32_TLSDESC keeps its register" [0x49, 0xc7, 0xc4, 0xf8, 0xff, 0xff, 0xff, 0x66, 0x90]
+    (relaxedCode (tlsInput 62 64 desc [⟨0, 3, 34, 0, -4, true⟩, ⟨0, 7, 35, 0, 0, true⟩]) 9)
+  let otherOpcode : List UInt8 := [0x66, 0x48, 0x8b, 0x3d, 0, 0, 0, 0, 0x66, 0x66, 0x48, 0xe8, 0, 0, 0, 0]
+  assertTrue "another instruction than the sequence isn't rewritten, and warns"
+    ((ElfLinker.link (ElfLinker.relaxTls (tlsInput 62 64 otherOpcode [⟨0, 4, 19, 0, -4, true⟩, ⟨0, 12, 4, 1, -4, true⟩]))).warnings.length > 0)
+  let i386gd : List UInt8 := [0x8d, 0x04, 0x1d, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0]
+  assertEqual "R_386_TLS_GD with an index" [0x65, 0xa1, 0, 0, 0, 0, 0x81, 0xe8, 0x08, 0, 0, 0]
+    (relaxedCode (tlsInput 3 32 i386gd [⟨0, 3, 18, 0, 0, false⟩, ⟨0, 8, 4, 1, 0, false⟩]) 12)
+  let i386ld : List UInt8 := [0x8d, 0x83, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0]
+  assertEqual "R_386_TLS_LDM" [0x65, 0xa1, 0, 0, 0, 0, 0x90, 0x8d, 0x74, 0x26, 0x00]
+    (relaxedCode (tlsInput 3 32 i386ld [⟨0, 2, 19, 0, 0, false⟩, ⟨0, 7, 4, 1, 0, false⟩]) 11)
+  let a64 : List UInt8 := List.replicate 16 0
+  -- `TPREL` of the first byte of a block of alignment eight is sixteen on AArch64
+  assertEqual "the TLSDESC sequence of AArch64"
+    [0x00, 0x00, 0xa0, 0xd2, 0x00, 0x02, 0x80, 0xf2, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5]
+    (relaxedCode (tlsInput 183 64 a64 [⟨0, 0, 0x232, 0, 0, true⟩, ⟨0, 4, 0x233, 0, 0, true⟩, ⟨0, 8, 0x234, 0, 0, true⟩, ⟨0, 12, 0x239, 0, 0, true⟩]) 16)
+  -- the `_NC` halves of AArch64 leave the opcode: a bit 16 doesn't make the `movk` a `movn`
+  let big := { tlsInput 183 64 [0x00, 0x00, 0x80, 0xf2] [⟨0, 0, 0x224, 0, 0x10000, true⟩] with little := true }
+  assertEqual "R_AARCH64_TLSLE_MOVW_TPREL_G0_NC keeps a movk" [0x00, 0x02, 0x80, 0xf2] (relaxedCode big 4)
+  -- ARM has no relaxation in `ld.lld`: what needs a loader stays
+  let arm := tlsInput 40 32 (List.replicate 4 0) [⟨0, 0, 0x68, 0, 0, false⟩]
+  assertEqual "R_ARM_TLS_GD32 warns" 1 (ElfLinker.link (ElfLinker.relaxTls arm)).warnings.length
+
+/-- Thunks, of branches that are out of range across a section without contents. What they come to is decoded with `llvm-objdump`
+and has the targets and the Thumb bits that `ld.lld`'s have, in a harness of the sources of this port. -/
+private def runThunks : IO Unit := do
+  let gap : ElfLinker.Section := ⟨".gap", ElfLinker.shtNobits, ElfLinker.shfAlloc + ElfLinker.shfExecinstr, 16, 0x9000000, 16⟩
+  let far : ElfLinker.Section := ⟨".far", 1, ElfLinker.shfAlloc + ElfLinker.shfExecinstr, 16, 16, 16⟩
+  let text : ElfLinker.Section := ⟨".text", 1, ElfLinker.shfAlloc + ElfLinker.shfExecinstr, 0, 16, 16⟩
+  let file (machine width : Nat) (sym : ElfLinker.Sym) (rels : List ElfLinker.Rel) : ElfLinker.Input :=
+    { machine, width, little := true, base := 0, data := ByteArray.mk (Array.replicate 32 0)
+      sections := #[text, gap, far], symbols := #[sym], relocations := rels }
+  let a64 := file 183 64 ⟨"f", 2, false, 0, 0, 2, 1, 0⟩ [⟨0, 0, 0x11b, 0, 8, true⟩, ⟨0, 4, 0x11a, 0, 8, true⟩]
+  assertEqual "CALL26 and JUMP26 out of range warn without thunks" 2 (ElfLinker.link a64).warnings.length
+  let prepared := ElfLinker.prepare a64
+  let linked := ElfLinker.link prepared
+  assertEqual "with thunks they don't" 0 linked.warnings.length
+  assertEqual "the thunks are a section after the text" (some ".thunks") (prepared.sections[1]?.map (·.name))
+  assertEqual "at the aligned end of it" (some 16) (linked.sectionAddrs[1]?.join)
+  assertEqual "both go to the one thunk" (ElfLinker.setBits 0 0 26 (16 >>> 2 : Int)) (ElfLinker.readNat linked.memory true 0 4)
+  assertEqual "the second from four bytes on" (ElfLinker.setBits 0 0 26 (12 >>> 2 : Int)) (ElfLinker.readNat linked.memory true 4 4)
+  assertEqual "ldr x16, #8" 0x58000050 (ElfLinker.readNat linked.memory true 32 4)
+  assertEqual "br x16" 0xd61f0200 (ElfLinker.readNat linked.memory true 36 4)
+  assertEqual "the word is the target with its addend" (((linked.sectionAddrs[3]?).join.getD 0) + 8) (ElfLinker.readNat linked.memory true 40 8)
+  let near := { a64 with sections := #[text, ⟨".far", 1, ElfLinker.shfAlloc + ElfLinker.shfExecinstr, 16, 16, 16⟩] , symbols := #[⟨"f", 1, false, 0, 0, 2, 1, 0⟩] }
+  assertEqual "a branch in range has no thunk" 2 (ElfLinker.prepare near).sections.size
+  -- ARM, whose jumps need a veneer to change the instruction set even if in range
+  let armTarget (value : Nat) : ElfLinker.Sym := ⟨"t", 1, false, value, 0, 2, 1, 0⟩
+  let inRange : ElfLinker.Input :=
+    { machine := 40, width := 32, little := true, base := 0, data := ByteArray.mk (Array.replicate 32 0)
+      sections := #[text, far], symbols := #[armTarget 1], relocations := [⟨0, 0, 0x1d, 0, -8, true⟩] }
+  let veneer := ElfLinker.prepare inRange
+  assertEqual "R_ARM_JUMP24 to Thumb has a veneer" 3 veneer.sections.size
+  let linkedArm := ElfLinker.link veneer
+  assertEqual "ldr pc, [pc, #-4]" 0xe51ff004 (ElfLinker.readNat linkedArm.memory true 32 4)
+  assertEqual "the word has the Thumb bit" (((linkedArm.sectionAddrs[2]?).join.getD 0) + 1) (ElfLinker.readNat linkedArm.memory true 36 4)
+  let called := { inRange with relocations := [⟨0, 0, 0x1c, 0, -8, true⟩] }
+  assertEqual "R_ARM_CALL to Thumb is a BLX in range" 2 (ElfLinker.prepare called).sections.size
+  let thumbJump := { inRange with symbols := #[armTarget 0], relocations := [⟨0, 0, 0x1e, 0, -4, true⟩] }
+  let linkedThumb := ElfLinker.link (ElfLinker.prepare thumbJump)
+  assertEqual "movw ip of a veneer from Thumb" 0xf240 (ElfLinker.readNat linkedThumb.memory true 32 2 &&& 0xfbf0)
+  assertEqual "bx ip" 0x4760 (ElfLinker.readNat linkedThumb.memory true 40 2)
+  assertEqual "no warning" 0 linkedThumb.warnings.length
+
 /-- The fields of relocations against what `ld.lld` reports: every relocation type of every machine is compared with it at the
 ends of the ranges by a harness of the sources of this port, and these are a few of that. -/
 private def runFieldChecks : IO Unit := do
@@ -771,7 +899,7 @@ private def runCompound : IO Unit := do
   let le := relocatedBytes (oneRelocation 62 64 23 0 (shndx := 1) (tls := true)) 4
   assertEqual "R_X86_64_TPOFF32 is the offset from the thread pointer" (ElfLinker.field (-8 : Int) 0 32) le
   let aarch64 := relocatedBytes (oneRelocation 183 64 0x224 0 (shndx := 1) (tls := true)) 4
-  assertEqual "R_AARCH64_TLSLE_MOVW_TPREL_G0_NC is past the control block" (2 ^ 30 + 16 * 2 ^ 5) aarch64
+  assertEqual "R_AARCH64_TLSLE_MOVW_TPREL_G0_NC is past the control block, and leaves the opcode as ld.lld does" (16 * 2 ^ 5) aarch64
   assertEqual "R_RISCV_TPREL_ADD stores nothing" 0 (relocatedBytes (oneRelocation 243 64 32 0 (shndx := 1) (tls := true)) 4)
   let gd := ElfLinker.link (oneRelocation 62 64 19 0 (shndx := 1) (tls := true))
   assertTrue "a thread-local relocation that needs a loader isn't applied" (gd.warnings.any (·.endsWith "was not applied"))
@@ -923,6 +1051,9 @@ def run : IO Unit := do
   runFieldChecks
   runCompound
   runPacked
+  runWholeLink
+  runTlsRelax
+  runThunks
   let spec ← relocationsOf mipsGotFixture
   assertEqual "MIPS global GOT entries of imports are references" [(0x408, "x")] spec.references
   runElf32

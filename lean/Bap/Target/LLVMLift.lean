@@ -344,10 +344,6 @@ private def powerpc32Globals : Primus.Semantics.Globals :=
   (registers ++ conditionFields ++ fields ++ powerpcFloatFlags ++ ["ZERO", "LR", "CTR", "TAR", "SO", "OV", "CA", "OV32", "CA32"]).map
     fun name => (name, powerpc32Register name)
 
-private def powerpc32Operand : LLVM.Operand → Primus.Semantics.Value
-  | .reg name => powerpc32Register name
-  | .imm value => .bil 32 (.int (BitVec.ofInt 32 value))
-
 private def mipsRegisterName (name : String) : String :=
   match name with
   | "R0" | "ZERO" | "$zero" => "XZR"

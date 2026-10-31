@@ -21,6 +21,9 @@ structure Var where
   isVirtual : Bool := false
   deriving DecidableEq, Repr
 
+instance : Hashable Var where
+  hash var := mixHash (hash var.name) (hash var.index)
+
 namespace Var
 
 def base (var : Var) : Var := { var with index := 0 }

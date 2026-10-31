@@ -10,7 +10,6 @@ local elab "open_private " mod:ident ns:ident ids:ident* : command => do
     OpenDecl.explicit id.getId (mkPrivateNameCore mod.getId (ns.getId ++ id.getId))
   modifyScope fun scope => { scope with openDecls := decls ++ scope.openDecls }
 
-set_option linter.unusedSimpArgs false
 
 namespace Bap.Proofs.Jit
 
@@ -195,35 +194,35 @@ open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.ops Lowering.
 theorem jumpConstant_ops (lowering : Lowering) (target : UInt64) :
     Lowering.ops (jumpConstant lowering target) =
       Lowering.ops lowering ++ [.set (setEffect lowering 1).2 1] ++ [.jump target] := by
-  cases h : Lowering.effectSlot lowering <;> simp [jumpConstant, setEffect, h, temporary, Lowering.ops]
+  cases h : Lowering.effectSlot lowering <;> simp [jumpConstant, setEffect, h, temporary]
 
 theorem jumpSlot_ops (lowering : Lowering) (target : Nat) :
     Lowering.ops (jumpSlot lowering target) =
       Lowering.ops lowering ++ [.set (setEffect lowering 1).2 1] ++ [.jumpSlot target] := by
-  cases h : Lowering.effectSlot lowering <;> simp [jumpSlot, setEffect, h, temporary, Lowering.ops]
+  cases h : Lowering.effectSlot lowering <;> simp [jumpSlot, setEffect, h, temporary]
 
 /-- The jump effect slot is the one `nativeResult` later reads back. -/
 theorem jumpConstant_effect (lowering : Lowering) (target : UInt64) :
     Lowering.effectSlot (jumpConstant lowering target) = some (setEffect lowering 1).2 := by
-  cases h : Lowering.effectSlot lowering <;> simp [jumpConstant, setEffect, h, temporary, Lowering.effectSlot]
+  cases h : Lowering.effectSlot lowering <;> simp [jumpConstant, setEffect, h, temporary]
 
 /-- Code sites clear the effect, publish the pc to the observer, and checkpoint the outputs. -/
 theorem codeSite_ops (lowering : Lowering) (pc : Nat) :
     Lowering.ops (codeSite lowering pc) =
       Lowering.ops lowering ++ [.set (setEffect lowering 0).2 0] ++ [.code (setEffect lowering 0).2 (UInt64.ofNat pc)] := by
-  cases h : Lowering.effectSlot lowering <;> simp [codeSite, setEffect, h, temporary, Lowering.ops]
+  cases h : Lowering.effectSlot lowering <;> simp [codeSite, setEffect, h, temporary]
 
 theorem codeSite_checkpoint (lowering : Lowering) (pc : Nat) :
     Lowering.checkpoints (codeSite lowering pc) =
       Lowering.checkpoints lowering ++ [(pc, Lowering.outputs lowering)] := by
-  cases h : Lowering.effectSlot lowering <;> simp [codeSite, setEffect, h, temporary, Lowering.checkpoints, Lowering.outputs]
+  cases h : Lowering.effectSlot lowering <;> simp [codeSite, setEffect, h, temporary]
 
 /-- Sign extension writes to a fresh temporary and never clobbers its source slot. -/
 theorem signExtend_fresh (lowering : Lowering) (width source : Nat) :
     (signExtend lowering width source).2 = Lowering.nextSlot lowering ∧
       Lowering.ops (signExtend lowering width source).1 =
         Lowering.ops lowering ++ [.signExtend width (Lowering.nextSlot lowering) source] := by
-  simp [signExtend, temporary, Lowering.ops]
+  simp [signExtend, temporary]
 
 /-- Edges leaving the compiled range exit through the jump protocol rather than a goto. -/
 theorem graphEdgeOps_external (lowering : Lowering) (labels : List (Nat × Nat)) (edges : List (Nat × Nat))
@@ -231,7 +230,7 @@ theorem graphEdgeOps_external (lowering : Lowering) (labels : List (Nat × Nat))
     ∃ ops, graphEdgeOps lowering labels edges source target = some ops ∧ ops.getLast? = some (.jump (UInt64.ofNat target)) := by
   simp only [graphEdgeOps, he, Bool.false_eq_true, ↓reduceIte]
   refine ⟨_, rfl, ?_⟩
-  cases h : Lowering.effectSlot lowering <;> simp [jumpConstant, setEffect, h, temporary, Lowering.ops]
+  cases h : Lowering.effectSlot lowering <;> simp [jumpConstant, setEffect, temporary]
 
 end Emission
 
@@ -574,7 +573,7 @@ private theorem storeUpTo_at {memory : Word64 → UInt8} {view : Word64 → Word
     · subst hjn
       simp [storeUpTo]
     · simp only [storeUpTo]
-      rw [ite_cond_eq_false _ _ (eq_false (hne n (by omega) (by omega)))]
+      rw [ite_eq_right_of_eq_false _ _ (eq_false (hne n (by omega) (by omega)))]
       exact ih (by omega) fun k h1 h2 => hne k h1 (by omega)
 
 private theorem byteAt_stored {w : Nat} {v : Word64} {value : BitVec w} (hv : v.toNat = value.toNat) (shift : Nat) :
@@ -644,7 +643,7 @@ theorem memStore_correct {machine : Machine} {width size : Nat} {cells updated :
       rfl
     rw [hget, getElem!_pos _ j0 (by simp [image, hj0])]
     simp only [image, List.getElem_map, List.getElem_range, storedByte]
-    cases endian <;> simp only [reduceCtorEq, beq_self_eq_true, Bool.false_eq_true, ↓reduceIte] <;>
+    cases endian <;> simp only [beq_self_eq_true, ↓reduceIte] <;>
       first
         | exact byteAt_stored hstored _
         | (simp; exact byteAt_stored hstored _)
@@ -793,6 +792,11 @@ structure Agrees (env : Bil.Env) (machine : Machine) (global : Lowering) : Prop 
   slots : SlotsAgree env machine (Lowering.layout global)
   memory : ∀ var, Lowering.memory global = some var → ∀ (width : Nat) (cells : Bap.Memory width),
     Bil.lookup env var = .ok (.memory cells) → MemoryInv machine width cells
+  /-- What is not what the run started from was moved to, or is the memory. -/
+  changed : ∀ var, Bil.lookup env var ≠ Bil.lookup machine.origin var →
+    Lowering.memory global = some var ∨ ∃ slot, (var, slot) ∈ Lowering.layout global ∧ machine.moved slot = true
+  /-- What was moved to has a value. -/
+  bound : ∀ binding ∈ Lowering.layout global, machine.moved binding.2 = true → ∃ value, Bil.lookup env binding.1 = .ok value
 
 /-- A lowering on the way to a global one. -/
 structure Sub (lowering global : Lowering) : Prop where
@@ -867,7 +871,7 @@ private theorem labelsOf_expression {new : List Op} (h : ∀ op ∈ new, isExpre
   | cons op rest ih =>
     have hop := h op List.mem_cons_self
     have hrest := ih fun o ho => h o (List.mem_cons_of_mem _ ho)
-    cases op <;> first | (exfalso; simpa [isExpressionOp] using hop) | (rw [labelsOf_other (by intro l; simp)]; exact hrest)
+    cases op <;> first | (exfalso; simp [isExpressionOp] at hop; done) | (rw [labelsOf_other (by intro l; simp)]; exact hrest)
 
 theorem _root_.Bap.Proofs.Primus.Extends.appended {first second : Lowering} {new : List Op} (h : Extends first second new) (wf : LayoutWF first) :
     Appended first second new where
@@ -926,6 +930,19 @@ def Returns (program : List Op) (cfg : Cfg) (value : Word64) (machine : Machine)
 def Exhausts (program : List Op) (cfg : Cfg) (effect : Nat) : Prop :=
   ∃ target rest machine, Run program cfg (.jump target :: rest, machine) ∧ machine.slots effect = 2
 
+/-- Like `Frames`, for a run that left, which set the effect. -/
+def FramesOut (effect low high : Nat) (global : Lowering) (first second : Machine) : Prop :=
+  second.view = first.view ∧ ∀ slot, slot ≠ effect → (slot < low ∨ high ≤ slot) → (∀ var, (var, slot) ∉ Lowering.layout global) →
+    second.slots slot = first.slots slot
+
+theorem Frames.thenOut {effect low high : Nat} {global : Lowering} {a b c : Machine} (h1 : Frames low high global a b)
+    (h2 : FramesOut effect low high global b c) : FramesOut effect low high global a c :=
+  ⟨h2.1.trans h1.1, fun slot he hs hv => (h2.2 slot he hs hv).trans (h1.2 slot hs hv)⟩
+
+theorem FramesOut.weaken {effect low high low' high' : Nat} {global : Lowering} {a b : Machine} (h : FramesOut effect low high global a b)
+    (hl : low' ≤ low) (hh : high ≤ high') : FramesOut effect low' high' global a b :=
+  ⟨h.1, fun slot he hs hv => h.2 slot he (by omega) hv⟩
+
 /-- How a run of the operations of a statement ends, given what the interpreter says about it. -/
 def Outcome (first second global : Lowering) (program : List Op) (cfg : Cfg) (tail : List Op) (effect : Nat)
     (terminated : Bool) (result : Bil.State × Bil.Effect) : Prop :=
@@ -934,7 +951,8 @@ def Outcome (first second global : Lowering) (program : List Op) (cfg : Cfg) (ta
     | .normal => terminated = false ∧ ∃ machine, Run program cfg (tail, machine) ∧ Agrees result.1.env machine global ∧
         Frames (Lowering.nextSlot first) (Lowering.nextSlot second) global cfg.2 machine
     | .jump target => ∃ value machine, Returns program cfg value machine ∧ Holds value target ∧
-        machine.slots effect = 1 ∧ Agrees result.1.env machine global
+        machine.slots effect = 1 ∧ Agrees result.1.env machine global ∧
+        FramesOut effect (Lowering.nextSlot first) (Lowering.nextSlot second) global cfg.2 machine
     | _ => False
 
 /-- What a run of a statement needs of where it runs. -/
@@ -1034,11 +1052,11 @@ private theorem exec_while {fuel : Nat} {state : Bil.State} {condition : Bil.Exp
     split at h4
     · next hb =>
       obtain ⟨⟨next, effect⟩, h5, h6⟩ := bind_ok h4
-      rw [if_pos hb]
+      rw [ite_eq_left hb]
       refine ⟨(next, effect), h5, ?_⟩
       cases effect <;> simp_all
     · next hb =>
-      rw [if_neg hb]
+      rw [ite_eq_right hb]
       simpa using h4.symm
   · simp at h4
 
@@ -1084,8 +1102,22 @@ theorem Agrees.after {env : Bil.Env} {machine : Machine} {global first second : 
       exact hview address
     · rw [WindowOf, runOps_memory he.pure]
       exact hwin
+  changed := by
+    intro var hne
+    rw [runOps_origin] at hne
+    rcases h.changed var hne with hm | ⟨slot, hm, hmoved⟩
+    · exact Or.inl hm
+    · exact Or.inr ⟨slot, hm, runOps_moved_mono _ hmoved⟩
+  bound := by
+    intro binding hb hmoved
+    rcases runOps_moved_new hmoved with hm | ⟨op, hop, hd⟩
+    · exact h.bound binding hb hm
+    · obtain ⟨_, hlt, hfree⟩ := he.writes op hop _ hd
+      rcases hs.later binding hb with hl | hl
+      · exact absurd hl (hfree binding.1)
+      · omega
 
-theorem _root_.Bap.Proofs.Primus.Extends.frames {first second global : Lowering} {new : List Op} (he : Extends first second new) (hs : Sub second global)
+theorem _root_.Bap.Proofs.Primus.Extends.frames {first second global : Lowering} {new : List Op} (he : Extends first second new) (_hs : Sub second global)
     (machine : Machine) : Frames (Lowering.nextSlot first) (Lowering.nextSlot second) global machine (runOps machine new) := by
   refine ⟨runOps_view _ _, ?_⟩
   intro slot hslot _
@@ -1120,7 +1152,7 @@ theorem operand_ne_effect {first second : Lowering} {new : List Op} {operand : O
       rw [← this]
       exact hb
     show Holds (if binding.2 = Operand.slot operand then _ else _) x
-    rw [if_neg hne]
+    rw [ite_eq_right hne]
     exact c
   have hmOther : MemoryAgrees env other second := by
     intro var hv w cells hl address offset ho
@@ -1167,7 +1199,7 @@ theorem lowered_value_bits (exp : Bil.Exp) : ∀ {first second : Lowering} {oper
     rw [lowerExp] at h
     obtain ⟨width, hw, h⟩ := obind h
     obtain ⟨⟨result, index⟩, hrv, h⟩ := obind h
-    simp only [pure, Option.some.injEq, Prod.mk.injEq] at h
+    simp only [Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     obtain ⟨hindex, hsame⟩ := readVar_inv hrv
     subst hindex
@@ -1216,7 +1248,7 @@ theorem lowered_value_bits (exp : Bil.Exp) : ∀ {first second : Lowering} {oper
       by_cases hc : (readsMemory yes || readsMemory no) = true
       · simp [hc] at h
       · simpa using hc
-    simp only [hpure, Bool.false_eq_true, ite_false, pure_bind] at h
+    simp only [hpure, Bool.false_eq_true, ite_false] at h
     obtain ⟨⟨l1, o1⟩, h1, h⟩ := obind h
     obtain ⟨⟨l2, o2⟩, h2, h⟩ := obind h
     obtain ⟨⟨l3, o3⟩, h3, h⟩ := obind h
@@ -1228,7 +1260,7 @@ theorem lowered_value_bits (exp : Bil.Exp) : ∀ {first second : Lowering} {oper
     have hlayout : Lowering.layout second = Lowering.layout l3 := by
       split at h
       · simp at h
-      · simp only [temporary, pure, Option.some.injEq, Prod.mk.injEq] at h
+      · simp only [temporary, Option.some.injEq, Prod.mk.injEq] at h
         obtain ⟨rfl, rfl⟩ := h
         rfl
     rw [hlayout] at hs
@@ -1260,7 +1292,7 @@ private theorem writeVar_fields {first second : Lowering} {var : Bap.Var} {index
   cases hw : widthOf var with
   | none => simp [writeVar, hw] at h
   | some width =>
-    simp only [writeVar, hw, Option.bind_eq_bind, bind, pure, Option.bind_some, Option.some.injEq, Prod.mk.injEq] at h
+    simp only [writeVar, hw, bind, Option.bind_some, Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨f1, f2, f3, f4, f5, f6, f7⟩ := slot_fields first var
     obtain ⟨rfl, rfl⟩ := h
     exact ⟨f5, f6⟩
@@ -1284,7 +1316,7 @@ theorem lowerMove_register_ok {first second : Lowering} {dst : Bap.Var} {value :
       · simp [hc] at h
     simp only [hwidth, bne_self_eq_false, Bool.false_eq_true, ↓reduceIte] at h
     obtain ⟨⟨after, index⟩, h2, h⟩ := obind h
-    simp only [pure, Option.some.injEq] at h
+    simp only [Option.some.injEq] at h
     have fOps : Lowering.ops second = Lowering.ops after ++ [.move index (Operand.slot operand)] := by rw [← h]
     have fNext : Lowering.nextSlot second = Lowering.nextSlot after := by rw [← h]
     have fLayout : Lowering.layout second = Lowering.layout after := by rw [← h]
@@ -1339,7 +1371,7 @@ theorem lowerMove_register_ok {first second : Lowering} {dst : Bap.Var} {value :
         exact hdstMem)
       rw [runOps_append]
       simp only [runOps_cons, runOps_nil, Bap.Proofs.Primus.step]
-      refine ⟨?_, ?_⟩
+      refine ⟨?_, ?_, ?_, ?_⟩
       · intro binding hb val hlookup
         by_cases hbd : binding.1 = dst
         · have hsame : binding = (dst, (slot mid dst).2) := pairwise_same ctx.wfGlobal.varsDistinct hb hdstG hbd
@@ -1348,7 +1380,7 @@ theorem lowerMove_register_ok {first second : Lowering} {dst : Bap.Var} {value :
           simp only [Except.ok.injEq] at hlookup
           subst hlookup
           refine ⟨w, bits, rfl, hw, ?_⟩
-          simp only [Machine.write_slots, ↓reduceIte]
+          simp only [Machine.markMove_slots, ↓reduceIte]
           exact hvalue
         · rw [lookup_bind_other hbd] at hlookup
           obtain ⟨w', x, hv, hwb, hholds⟩ := hafter.slots _ hb _ hlookup
@@ -1356,7 +1388,7 @@ theorem lowerMove_register_ok {first second : Lowering} {dst : Bap.Var} {value :
           have hne : binding.2 ≠ (slot mid dst).2 := by
             intro e
             exact hbd (congrArg Prod.fst (pairwise_same ctx.wfGlobal.slotsDistinct hb hdstG e))
-          simp only [Machine.write_slots, hne, ↓reduceIte]
+          simp only [Machine.markMove_slots, hne, ↓reduceIte]
           exact hholds
       · intro var hv w' cells hl
         have hne : var ≠ dst := by
@@ -1365,7 +1397,24 @@ theorem lowerMove_register_ok {first second : Lowering} {dst : Bap.Var} {value :
           rw [lookup_bind_same] at hl
           simp at hl
         rw [lookup_bind_other hne] at hl
-        exact MemoryInv.write (hafter.memory var hv w' cells hl) _ _
+        exact hafter.memory var hv w' cells hl
+      · intro var hne
+        by_cases hvd : var = dst
+        · rw [hvd]
+          exact Or.inr ⟨(slot mid dst).2, hdstG, by simp [Machine.markMove]⟩
+        · rw [lookup_bind_other hvd] at hne
+          rcases hafter.changed var hne with hm | ⟨s, hm, hmoved⟩
+          · exact Or.inl hm
+          · exact Or.inr ⟨s, hm, by simp [Machine.markMove, hmoved]⟩
+      · intro binding hb hmoved
+        by_cases hbd : binding.1 = dst
+        · rw [hbd, lookup_bind_same]
+          exact ⟨_, rfl⟩
+        · rw [lookup_bind_other hbd]
+          simp only [Machine.markMove, Bool.or_eq_true, beq_iff_eq] at hmoved
+          rcases hmoved with he' | hmoved
+          · exact absurd (congrArg Prod.fst (pairwise_same ctx.wfGlobal.slotsDistinct hb hdstG he')) hbd
+          · exact hafter.bound binding hb hmoved
     · have hf := he.frames hsubMid machine
       rw [runOps_append]
       simp only [runOps_cons, runOps_nil, Bap.Proofs.Primus.step]
@@ -1375,7 +1424,7 @@ theorem lowerMove_register_ok {first second : Lowering} {dst : Bap.Var} {value :
         rw [fLayout, hlayout]
         exact hdstMem)
       have hne : slot' ≠ (slot mid dst).2 := fun e => hfree dst (e ▸ hdstG)
-      simp only [Machine.write_slots, hne, ↓reduceIte]
+      simp only [Machine.markMove_slots, hne, ↓reduceIte]
       refine hf.2 slot' ?_ hfree
       rcases hslot' with h' | h'
       · exact Or.inl h'
@@ -1456,7 +1505,7 @@ theorem lowerMove_store_ok {first second : Lowering} {dst : Bap.Var} {memory add
     · exact hc
     · simp only [Bool.not_eq_false] at hc
       simp [hc] at h
-  simp only [hchecks, Bool.false_eq_true, ↓reduceIte, pure, Option.some.injEq] at h
+  simp only [hchecks, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at h
   have fOps : Lowering.ops second = Lowering.ops l2 ++ [.memStore (Operand.slot o1) (Operand.slot o2) size (endian == .big)] := by rw [← h]
   have fNext : Lowering.nextSlot second = Lowering.nextSlot l2 := by rw [← h]
   have fLayout : Lowering.layout second = Lowering.layout l2 := by rw [← h]
@@ -1525,7 +1574,7 @@ theorem lowerMove_store_ok {first second : Lowering} {dst : Bap.Var} {memory add
         rfl) tail machine
   · rw [List.nil_append, runOps_append, runOps_append]
     simp only [runOps_cons, runOps_nil]
-    refine ⟨?_, ?_⟩
+    refine ⟨?_, ?_, ?_, ?_⟩
     · intro binding hb val hl
       have hne : binding.1 ≠ dst := by
         intro he'
@@ -1544,6 +1593,19 @@ theorem lowerMove_store_ok {first second : Lowering} {dst : Bap.Var} {memory add
       have hc := eq_of_heq hc
       subst hc
       exact ⟨hps, hw, hbig, hview, hupdated⟩
+    · intro var hne
+      by_cases hvd : var = dst
+      · subst hvd
+        exact Or.inl hmemVar
+      · rw [lookup_bind_other hvd] at hne
+        exact hag2.changed var hne
+    · intro binding hb hmoved
+      have hne : binding.1 ≠ dst := by
+        intro he'
+        obtain ⟨_, _, hbits, _, _⟩ := hag.slots binding hb (.memory cells) (he' ▸ hlookup)
+        simp at hbits
+      rw [lookup_bind_other hne]
+      exact hag2.bound binding hb hmoved
   · have f1 := heA.frames hsub1 machine
     have f2 := heS.frames hsub2 (runOps machine newA)
     rw [List.nil_append, runOps_append, runOps_append]
@@ -1580,6 +1642,8 @@ theorem Agrees.write_free {env : Bil.Env} {machine : Machine} {global : Lowering
     simp only [Holds, Machine.write_slots, hne, ↓reduceIte]
     exact c
   memory := fun var hv w cells hl => MemoryInv.write (h.memory var hv w cells hl) _ _
+  changed := h.changed
+  bound := h.bound
 
 theorem Exhausts.prepend {program : List Op} {a b : Cfg} {effect : Nat} (hr : Run program a b) (h : Exhausts program b effect) :
     Exhausts program a effect := by
@@ -1739,14 +1803,15 @@ private theorem jmp_constant_ok {width : Nat} (target : BitVec width) : StmtOK (
     obtain ⟨rfl, hb⟩ := hev
     have hb := eq_of_heq hb
     subst hb
-    refine Or.inr ⟨(immediate target : UInt64).toBitVec, machine.write effect' (1 : UInt64).toBitVec, ?_, ?_, ?_, ?_⟩
+    refine Or.inr ⟨(immediate target : UInt64).toBitVec, machine.write effect' (1 : UInt64).toBitVec, ?_, ?_, ?_, ?_, ?_⟩
     · exact ⟨tail, Or.inl ⟨immediate target, Run.linear (op := .set effect' 1) rfl _ _, rfl⟩⟩
     · show (immediate target).toBitVec.toNat = target.toNat
-      simp only [immediate, UInt64.toBitVec_ofNat, BitVec.toNat_ofNat]
+      simp only [immediate]
       exact Nat.mod_eq_of_lt (Nat.lt_of_lt_of_le target.isLt (Nat.pow_le_pow_right (by decide) hw))
     · simp only [Machine.write_slots, ↓reduceIte]
       rfl
     · exact hag.write_free ctx.effectFree _
+    · exact ⟨rfl, fun slot he _ _ => by simp [Machine.write_slots, he]⟩
   · simp at h
 
 private theorem jmp_slot_ok (target : Bil.Exp) (hnot : ∀ (width : Nat) (value : BitVec width), target ≠ .int value) :
@@ -1754,7 +1819,7 @@ private theorem jmp_slot_ok (target : Bil.Exp) (hnot : ∀ (width : Nat) (value 
   intro first second terminated effect wf heff hlow h
   rw [lowerStmt] at h
   · obtain ⟨⟨mid, operand⟩, h1, h⟩ := obind h
-    simp only [pure, Option.some.injEq, Prod.mk.injEq] at h
+    simp only [Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     obtain ⟨newE, he, hslot, _, h64, hval⟩ := lowerExp_correct target wf h1
     have a1 := he.appended wf
@@ -1794,17 +1859,22 @@ private theorem jmp_slot_ok (target : Bil.Exp) (hnot : ∀ (width : Nat) (value 
       operand_ne_effect he hval hsm hmm hev hlow fun var hv => ctx.effectFree var (hsub.mono _ hv)
     have hafter := hag.after he hsub
     refine Or.inr ⟨((runOps machine newE).write effect' (1 : UInt64).toBitVec).slots (Operand.slot operand),
-      (runOps machine newE).write effect' (1 : UInt64).toBitVec, ?_, ?_, ?_, ?_⟩
+      (runOps machine newE).write effect' (1 : UInt64).toBitVec, ?_, ?_, ?_, ?_, ?_⟩
     · refine ⟨tail, Or.inr ⟨Operand.slot operand, ?_, rfl⟩⟩
       rw [List.append_assoc]
       exact (Run.ops (fun op hop => linear_of_expression (he.pure op hop)) _ machine).trans
         (Run.linear (op := .set effect' 1) rfl _ _)
     · show Holds (if Operand.slot operand = effect' then _ else _) bits
-      rw [if_neg hne]
+      rw [ite_eq_right hne]
       exact hvalue
     · simp only [Machine.write_slots, ↓reduceIte]
       rfl
     · exact hafter.write_free ctx.effectFree _
+    · have hfm := he.frames hsub machine
+      have hg2 : Lowering.nextSlot mid ≤ Lowering.nextSlot (jumpSlot mid (Operand.slot operand)) := a2.next
+      refine ⟨hfm.1, fun slot hne hs hfree => ?_⟩
+      simp only [Machine.write_slots, hne, ↓reduceIte]
+      exact hfm.2 slot (by omega) hfree
   · intro width value he
     exact hnot width value he
 
@@ -1902,14 +1972,16 @@ private theorem program_cons_ok {stmt : Bil.Stmt} {rest : Bil.Program} (hs : Stm
             refine ⟨ht, m2, hrun.trans hrun2, hag2, ?_⟩
             exact (hf1.weaken (Nat.le_refl _) a2.next).trans (hf2.weaken a1.next (Nat.le_refl _))
           | jump target =>
-            obtain ⟨value, m2, hret, hheld, hone, hag2⟩ := hn2
-            exact ⟨value, m2, Returns.prepend hrun hret, hheld, hone, hag2⟩
+            obtain ⟨value, m2, hret, hheld, hone, hag2, hf2⟩ := hn2
+            exact ⟨value, m2, Returns.prepend hrun hret, hheld, hone, hag2,
+              (hf1.weaken (Nat.le_refl _) a2.next).thenOut (hf2.weaken a1.next (Nat.le_refl _))⟩
           | special message => exact absurd hn2 (by simp)
           | cpuExn number => exact absurd hn2 (by simp)
       | jump target =>
         simp only at h3
         subst h3
-        exact Or.inr hn
+        obtain ⟨value, m2, hret, hheld, hone, hag2, hf2⟩ := hn
+        exact Or.inr ⟨value, m2, hret, hheld, hone, hag2, hf2.weaken (Nat.le_refl _) a2.next⟩
       | special message => exact absurd hn (by simp)
       | cpuExn number => exact absurd hn (by simp)
 
@@ -1917,7 +1989,7 @@ private theorem program_cons_ok {stmt : Bil.Stmt} {rest : Bil.Program} (hs : Stm
 private theorem ifElse_core {first mid l0 yesEnd l1 noEnd second : Lowering} {condition : Bil.Exp} {yes no : Bil.Program}
     {operand : Operand} {yesDone noDone : Bool} {effect : Nat} (hyesOK : ProgramOK yes) (hnoOK : ProgramOK no)
     (wf : LayoutWF first) (heff : Lowering.effectSlot first = some effect) (hlow : effect < Lowering.nextSlot first)
-    (h1 : lowerExp first condition = some (mid, operand)) (hw : Operand.width operand = 1)
+    (h1 : lowerExp first condition = some (mid, operand)) (_hw : Operand.width operand = 1)
     (p0 : Pushed mid l0 [.branch (Operand.slot operand) (Lowering.nextLabel mid) (Lowering.nextLabel mid + 1),
       .label (Lowering.nextLabel mid)] 3)
     (hyes : lowerStatements l0 yes = some (yesEnd, yesDone))
@@ -2066,11 +2138,11 @@ private theorem ifElse_core {first mid l0 yesEnd l1 noEnd second : Lowering} {co
   have hflow : ∀ {a b c : Nat}, a < b → b ≤ c → a < c := fun h1 h2 => Nat.lt_of_lt_of_le h1 h2
   by_cases hbit : bit = 1
   · -- the branch that was taken
-    rw [if_pos hbit] at hexec
+    rw [ite_eq_left hbit] at hexec
     have hne : m1.slots (Operand.slot operand) ≠ 0 := (holds_condition hvalue).2 hbit
     have hbranch : Run program (.branch (Operand.slot operand) (Lowering.nextLabel mid) (Lowering.nextLabel mid + 1) ::
         .label (Lowering.nextLabel mid) :: rest, m1) (rest, m1) :=
-      Run.branch (by rw [if_pos hne]; exact hafterY)
+      Run.branch (by rw [ite_eq_left hne]; exact hafterY)
     have ctxY : Context l0 yesEnd global newY program ((gotoY ++ [.label (Lowering.nextLabel mid + 1)]) ++ (newN ++ (gotoN ++ labelD)) ++ tail) effect' := {
       effectSlot := heff0
       effectLow := hlow0
@@ -2109,13 +2181,20 @@ private theorem ifElse_core {first mid l0 yesEnd l1 noEnd second : Lowering} {co
           have hs3 := g2.next
           exact (hf0.weaken (Nat.le_refl _) (by omega)).trans (hf.weaken (by omega) (by omega))
       | jump target =>
-        obtain ⟨value, m2, hret, hheld, hone, hag2⟩ := hn
-        refine ⟨value, m2, Returns.prepend hprefix ?_, hheld, hone, hag2⟩
-        rw [hrestEq]
-        exact hret
+        obtain ⟨value, m2, hret, hheld, hone, hag2, hf⟩ := hn
+        refine ⟨value, m2, Returns.prepend hprefix ?_, hheld, hone, hag2, ?_⟩
+        · rw [hrestEq]
+          exact hret
+        · have hg := g0.next
+          have hn1 := aC.next
+          have hs1 := g1.next
+          have hs0 := aY.next
+          have hs2 := aN.next
+          have hs3 := g2.next
+          exact (hf0.weaken (Nat.le_refl _) (by omega)).thenOut (hf.weaken (by omega) (by omega))
       | special message => exact absurd hn (by simp)
       | cpuExn number => exact absurd hn (by simp)
-  · rw [if_neg hbit] at hexec
+  · rw [ite_eq_right hbit] at hexec
     have hzero : m1.slots (Operand.slot operand) = 0 := by
       by_cases hz : m1.slots (Operand.slot operand) = 0
       · exact hz
@@ -2123,7 +2202,7 @@ private theorem ifElse_core {first mid l0 yesEnd l1 noEnd second : Lowering} {co
     have hbranch : Run program (.branch (Operand.slot operand) (Lowering.nextLabel mid) (Lowering.nextLabel mid + 1) ::
         .label (Lowering.nextLabel mid) :: rest, m1) (newN ++ (gotoN ++ labelD) ++ tail, m1) :=
       Run.branch (by
-        rw [if_neg (by simpa using hzero)]
+        rw [ite_eq_right (by simpa using hzero)]
         exact hafterN)
     have ctxN : Context l1 noEnd global newN program ((gotoN ++ labelD) ++ tail) effect' := {
       effectSlot := heff1
@@ -2164,10 +2243,17 @@ private theorem ifElse_core {first mid l0 yesEnd l1 noEnd second : Lowering} {co
           have hs3 := g2.next
           exact (hf0.weaken (Nat.le_refl _) (by omega)).trans (hf.weaken (by omega) (by omega))
       | jump target =>
-        obtain ⟨value, m2, hret, hheld, hone, hag2⟩ := hn
-        refine ⟨value, m2, Returns.prepend hprefix ?_, hheld, hone, hag2⟩
-        rw [hrestEq]
-        exact hret
+        obtain ⟨value, m2, hret, hheld, hone, hag2, hf⟩ := hn
+        refine ⟨value, m2, Returns.prepend hprefix ?_, hheld, hone, hag2, ?_⟩
+        · rw [hrestEq]
+          exact hret
+        · have hg := g0.next
+          have hn1 := aC.next
+          have hs1 := g1.next
+          have hs0 := aY.next
+          have hs2 := aN.next
+          have hs3 := g2.next
+          exact (hf0.weaken (Nat.le_refl _) (by omega)).thenOut (hf.weaken (by omega) (by omega))
       | special message => exact absurd hn (by simp)
       | cpuExn number => exact absurd hn (by simp)
 
@@ -2181,7 +2267,7 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
         .bin .ge (Lowering.nextSlot first + 2) (Lowering.nextSlot first) (Lowering.nextSlot first + 1),
         .branch (Lowering.nextSlot first + 2) (Lowering.nextLabel first + 4) (Lowering.nextLabel first + 1),
         .label (Lowering.nextLabel first + 1)] 5 3)
-    (h1 : lowerExp l3 condition = some (mid, operand)) (hw : Operand.width operand = 1)
+    (h1 : lowerExp l3 condition = some (mid, operand)) (_hw : Operand.width operand = 1)
     (p1 : Pushed mid l4 [.branch (Operand.slot operand) (Lowering.nextLabel first + 2) (Lowering.nextLabel first + 3),
       .label (Lowering.nextLabel first + 2)] 0)
     (hbody : lowerStatements l4 body = some (bodyEnd, bodyDone))
@@ -2360,14 +2446,14 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
       · -- out of iterations
         refine Or.inl ⟨exit, .label (l + 3) :: tail, m0.write effect' (2 : UInt64).toBitVec, ?_, ?_⟩
         · refine hrun0.trans (.step ?_ (Run.linear (op := .set effect' 2) rfl _ _))
-          simp only [nextCfg, if_pos hlimit, hafterExh]
+          simp only [nextCfg, ite_eq_left hlimit, hafterExh]
           rfl
         · simp only [Machine.write_slots, ↓reduceIte]
           rfl
       · have hzero : m0.slots (c + 2) = 0 := by simpa using hlimit
         have hrun1 : Run program (loop, machine) (newC ++ [.branch (Operand.slot operand) (l + 2) (l + 3), .label (l + 2)] ++ newB ++ afterBody, m0) := by
           refine hrun0.trans (.step ?_ (.refl _))
-          simp only [nextCfg, if_neg hlimit, hafterCheck]
+          simp only [nextCfg, ite_eq_right hlimit, hafterCheck]
           rfl
         have hsm : SlotsAgree state.env m0 (Lowering.layout mid) := hag0.slots.mono subMid.mono
         obtain ⟨_, hvalue⟩ := hval state.env m0 hsm (hag0.memoryAgrees subMid) 1 bit hev
@@ -2388,12 +2474,12 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
             have h4 := aB.next
             omega
         by_cases hbit : bit = 1
-        · rw [if_pos hbit] at hbranch
+        · rw [ite_eq_left hbit] at hbranch
           obtain ⟨inner, hbodyExec, hinner⟩ := hbranch
           have hne : m1.slots (Operand.slot operand) ≠ 0 := (holds_condition hvalue).2 hbit
           have hrun3 : Run program (loop, machine) (newB ++ afterBody, m1) := by
             refine hrun2.trans (.step ?_ (.refl _))
-            simp only [nextCfg, if_pos hne, hafterBody]
+            simp only [nextCfg, ite_eq_left hne, hafterBody]
             rfl
           have ctxB : Context l4 bodyEnd global newB program afterBody effect' := {
             effectSlot := heff4
@@ -2432,18 +2518,22 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
                   obtain ⟨ht, m3, hrun5, hag3, hf3⟩ := hn2
                   exact ⟨ht, m3, hrun4.trans hrun5, hag3, hfm2.trans hf3⟩
                 | jump target =>
-                  obtain ⟨value, m3, hret, hheld, hone, hag3⟩ := hn2
-                  exact ⟨value, m3, Returns.prepend hrun4 hret, hheld, hone, hag3⟩
+                  obtain ⟨value, m3, hret, hheld, hone, hag3, hf3⟩ := hn2
+                  exact ⟨value, m3, Returns.prepend hrun4 hret, hheld, hone, hag3, hfm2.thenOut hf3⟩
                 | special message => exact absurd hn2 (by simp)
                 | cpuExn number => exact absurd hn2 (by simp)
             | jump target =>
               simp only at hinner
               subst hinner
-              obtain ⟨value, m3, hret, hheld, hone, hag3⟩ := hn
-              exact Or.inr ⟨value, m3, Returns.prepend hrun3 hret, hheld, hone, hag3⟩
+              obtain ⟨value, m3, hret, hheld, hone, hag3, hf3⟩ := hn
+              exact Or.inr ⟨value, m3, Returns.prepend hrun3 hret, hheld, hone, hag3, hfm1.thenOut (hf3.weaken (by
+                have h1 := g0.next
+                have h2 := aC.next
+                have h3 := g1.next
+                omega) hEndNext)⟩
             | special message => exact absurd hn (by simp)
             | cpuExn number => exact absurd hn (by simp)
-        · rw [if_neg hbit] at hbranch
+        · rw [ite_eq_right hbit] at hbranch
           subst hbranch
           have hzero1 : m1.slots (Operand.slot operand) = 0 := by
             by_cases hz : m1.slots (Operand.slot operand) = 0
@@ -2452,7 +2542,7 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
           refine Or.inr ⟨rfl, m1, ?_, hag1, hfm1⟩
           refine hrun2.trans (.step ?_ (.refl _))
           have hnz : ¬ (m1.slots (Operand.slot operand) ≠ 0) := by simpa using hzero1
-          simp only [nextCfg, if_neg hnz, hafterDone]
+          simp only [nextCfg, ite_eq_right hnz, hafterDone]
           rfl
   -- the way into the loop
   have hstart : Run program (new ++ tail, machine) (loop, machine.write c (0 : UInt64).toBitVec) := by
@@ -2475,8 +2565,8 @@ private theorem while_core {first l3 mid l4 bodyEnd l5 l6 second : Lowering} {co
       obtain ⟨ht, m3, hrun5, hag3, hf3⟩ := hn
       exact ⟨ht, m3, hstart.trans hrun5, hag3, hfs.trans hf3⟩
     | jump target =>
-      obtain ⟨value, m3, hret, hheld, hone, hag3⟩ := hn
-      exact ⟨value, m3, Returns.prepend hstart hret, hheld, hone, hag3⟩
+      obtain ⟨value, m3, hret, hheld, hone, hag3, hf3⟩ := hn
+      exact ⟨value, m3, Returns.prepend hstart hret, hheld, hone, hag3, hfs.thenOut hf3⟩
     | special message => exact absurd hn (by simp)
     | cpuExn number => exact absurd hn (by simp)
 
@@ -2494,7 +2584,7 @@ private theorem ifElse_ok {condition : Bil.Exp} {yes no : Bil.Program} (hy : Pro
   obtain ⟨⟨noEnd, noDone⟩, hno, h⟩ := obind h
   split at h
   · simp at h
-  · simp only [pure, Option.some.injEq, Prod.mk.injEq] at h
+  · simp only [Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     refine ifElse_core hy hn wf heff hlow h1 hw ?_ hyes ?_ hno ?_
     · exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
@@ -2514,7 +2604,7 @@ private theorem while_ok {condition : Bil.Exp} {body : Bil.Program} (hb : Progra
   obtain ⟨⟨bodyEnd, bodyDone⟩, hbody, h⟩ := obind h
   split at h
   · simp at h
-  · simp only [pure, Option.some.injEq, Prod.mk.injEq] at h
+  · simp only [Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     refine while_core hb wf heff hlow ?_ h1 hw ?_ hbody ?_ (fun he => (setEffect_pushed he 2).2) ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
     · exact ⟨List.append_assoc _ _ _, rfl, rfl, rfl, rfl, rfl⟩
@@ -2729,7 +2819,7 @@ private theorem encode_fold (env : Bil.Env) (inputs : List Bap.Var) (layout : Li
           rw [hget]
           have hle := ((widthOf_some_iff _ _).1 hw).2.2
           show (immediate bits).toBitVec.toNat = bits.toNat
-          simp only [immediate, UInt64.toBitVec_ofNat, BitVec.toNat_ofNat]
+          simp only [immediate]
           exact Nat.mod_eq_of_lt (Nat.lt_of_lt_of_le bits.isLt (Nat.pow_le_pow_right (by decide) hle))
       · exact r2 b hmem value hl
     · intro index hi
@@ -2737,7 +2827,7 @@ private theorem encode_fold (env : Bil.Env) (inputs : List Bap.Var) (layout : Li
       obtain ⟨_, ⟨rfl, _⟩ | ⟨_, _, _, _, _, rfl⟩⟩ := hsame
       · rfl
       · have hne' : head.2 ≠ index := hi head List.mem_cons_self
-        simp [Array.getD_eq_getD_getElem?, Array.set!_eq_setIfInBounds, Array.getElem?_setIfInBounds, hne']
+        simp [Array.getD_eq_getD_getElem?, Array.set!_eq_setIfInBounds, hne']
 
 /-- `encodeState` makes a machine that holds the environment: each variable with a value has it in its slot. -/
 theorem encodeState_holds {lowering : Lowering} {env : Bil.Env} {slots : Array UInt64} (wf : LayoutWF lowering)
@@ -2776,7 +2866,7 @@ theorem syncState_output {lowering : Lowering} {state : Bil.State} {slots : Arra
         cases hwv : widthOf hv with
         | none => simpa [hwv] using hi
         | some w =>
-          simp only [hwv, List.find?_cons, hb]
+          simp only [List.find?_cons, hb]
           exact hi
   simp only [syncState, Bil.lookup, List.find?_append, key]
   rfl
@@ -2870,5 +2960,2412 @@ theorem enterBlock_starts {lowering : Lowering} {effect : Nat} (budget observed 
   split <;> simp [codeSite, setEffect, List.append_assoc]
 
 end Accesses
+
+/-! ### Whole ranges -/
+
+section Graph
+open Bap.Primus.Lifted Bap.Proofs.Primus Bap.Emu
+open_private Bap.Primus.Lifted Bap.Primus.Lifted Lowering Lowering.ops Lowering.layout Lowering.nextSlot Lowering.memory
+  Lowering.effectSlot Lowering.nextLabel Lowering.next Lowering.written Lowering.outputs Lowering.inputs Lowering.flags
+  Lowering.checkpoints Lowering.budget Lowering.observed Lowering.wrapFaults Lowering.push Lowering.withWritten
+  Operand Operand.slot Operand.width lowerExp lowerStatements setEffect temporary jumpConstant immediate widthOf
+  blockExit BlockExit BlockExit.direct BlockExit.branch BlockExit.other BlockExit.fall closedTarget graphEdgeOps freshLabel enterBlock codeSite GraphPlan GraphPlan.seed GraphPlan.labels GraphPlan.edges
+  GraphPlan.budget GraphPlan.observed GraphPlan.chained GraphPlan.definite GraphPlan.guarded lowerEntry lowerExit lowerBlock lowerBlocks lowerGraph
+  lowerGraphChecked leadingMoves opSlots opLabels flagOutputs encodeState syncState syncUpdates reachedOutputs slotBits withoutBindings atCodeStop
+  definitelyWritten flagged flagSlots withControl graphInitial graphPlan chainedCount nativeOutcome
+open_private Bap.Proofs.Primus Bap.Proofs.Primus obind pairwise_same lookup_bind_same lookup_bind_other bind_ok asBits_ok
+
+/-- What runs after one step, where a code site goes on unless its observer stops the run. -/
+def nextCfgAt (stops : Nat → Bool) (program : List Op) (cfg : Cfg) : Option Cfg :=
+  match cfg with
+  | (.code _ pc :: rest, machine) => if stops pc.toNat then none else some (rest, machine)
+  | _ => nextCfg program cfg
+
+/-- A run through code sites, which `nextCfgAt` makes deterministic as well. -/
+inductive RunAt (stops : Nat → Bool) (program : List Op) : Cfg → Cfg → Prop
+  | refl (cfg : Cfg) : RunAt stops program cfg cfg
+  | step {first second last : Cfg} : nextCfgAt stops program first = some second → RunAt stops program second last →
+      RunAt stops program first last
+
+theorem RunAt.trans {stops : Nat → Bool} {program : List Op} {a b c : Cfg} (h1 : RunAt stops program a b)
+    (h2 : RunAt stops program b c) : RunAt stops program a c := by
+  induction h1 with
+  | refl => exact h2
+  | step hn _ ih => exact .step hn (ih h2)
+
+theorem nextCfgAt_of_next {stops : Nat → Bool} {program : List Op} {a b : Cfg} (h : nextCfg program a = some b) :
+    nextCfgAt stops program a = some b := by
+  obtain ⟨ops, machine⟩ := a
+  cases ops with
+  | nil => simp [nextCfg] at h
+  | cons op rest =>
+    cases op
+    case code => simp [nextCfg] at h
+    all_goals exact h
+
+theorem Run.toAt {stops : Nat → Bool} {program : List Op} {a b : Cfg} (h : Run program a b) : RunAt stops program a b := by
+  induction h with
+  | refl => exact .refl _
+  | step hn _ ih => exact .step (nextCfgAt_of_next hn) ih
+
+/-- A run that a loop ended, out of iterations. -/
+def ExhaustsAt (stops : Nat → Bool) (program : List Op) (cfg : Cfg) (effect : Nat) : Prop :=
+  ∃ target rest machine, RunAt stops program cfg (.jump target :: rest, machine) ∧ machine.slots effect = 2
+
+theorem ExhaustsAt.prepend {stops : Nat → Bool} {program : List Op} {a b : Cfg} {effect : Nat} (hr : RunAt stops program a b)
+    (h : ExhaustsAt stops program b effect) : ExhaustsAt stops program a effect := by
+  obtain ⟨t, rest, m, h1, h2⟩ := h
+  exact ⟨t, rest, m, hr.trans h1, h2⟩
+
+theorem Exhausts.toAt {stops : Nat → Bool} {program : List Op} {cfg : Cfg} {effect : Nat} (h : Exhausts program cfg effect) :
+    ExhaustsAt stops program cfg effect := by
+  obtain ⟨t, rest, m, h1, h2⟩ := h
+  exact ⟨t, rest, m, h1.toAt, h2⟩
+
+/-- Where a run returns to the dispatcher, with `pc` and the machine it leaves: at a jump, or at a code site whose observer
+stopped it, which then has 3 in the effect slot it names. -/
+def EndsAt (stops : Nat → Bool) (program : List Op) (cfg : Cfg) (pc : Nat) (machine : Machine) : Prop :=
+  (∃ rest target, RunAt stops program cfg (.jump target :: rest, machine) ∧ target.toNat = pc) ∨
+  (∃ rest slot, RunAt stops program cfg (.jumpSlot slot :: rest, machine) ∧ (machine.slots slot).toNat = pc) ∨
+  (∃ rest effect target before, RunAt stops program cfg (.code effect target :: rest, before) ∧ stops target.toNat = true ∧
+    machine = before.write effect (3 : UInt64).toBitVec ∧ target.toNat = pc)
+
+theorem EndsAt.prepend {stops : Nat → Bool} {program : List Op} {a b : Cfg} {pc : Nat} {machine : Machine}
+    (hr : RunAt stops program a b) (h : EndsAt stops program b pc machine) : EndsAt stops program a pc machine := by
+  rcases h with ⟨rest, t, h1, h2⟩ | ⟨rest, s, h1, h2⟩ | ⟨rest, e, t, b', h1, h2, h3, h4⟩
+  · exact Or.inl ⟨rest, t, hr.trans h1, h2⟩
+  · exact Or.inr (Or.inl ⟨rest, s, hr.trans h1, h2⟩)
+  · exact Or.inr (Or.inr ⟨rest, e, t, b', hr.trans h1, h2, h3, h4⟩)
+
+/-- A run that returned is at its end: no step follows, so that the run from a configuration is the one run. -/
+theorem nextCfgAt_jump (stops : Nat → Bool) (program : List Op) (target : UInt64) (rest : List Op) (machine : Machine) :
+    nextCfgAt stops program (.jump target :: rest, machine) = none := rfl
+
+theorem nextCfgAt_jumpSlot (stops : Nat → Bool) (program : List Op) (slot : Nat) (rest : List Op) (machine : Machine) :
+    nextCfgAt stops program (.jumpSlot slot :: rest, machine) = none := rfl
+
+theorem nextCfgAt_stop {stops : Nat → Bool} (program : List Op) {effect : Nat} {target : UInt64} (rest : List Op) (machine : Machine)
+    (h : stops target.toNat = true) : nextCfgAt stops program (.code effect target :: rest, machine) = none := by
+  simp [nextCfgAt, h]
+
+/-- Two runs from one configuration to configurations where nothing follows are the same run. -/
+theorem RunAt.unique {stops : Nat → Bool} {program : List Op} {a b c : Cfg} (h1 : RunAt stops program a b)
+    (h2 : RunAt stops program a c) (hb : nextCfgAt stops program b = none) (hc : nextCfgAt stops program c = none) : b = c := by
+  induction h1 with
+  | refl =>
+    cases h2 with
+    | refl => rfl
+    | step hn _ => rw [hb] at hn; simp at hn
+  | step hn _ ih =>
+    cases h2 with
+    | refl => rw [hc] at hn; simp at hn
+    | step hn' hr =>
+      rw [hn] at hn'
+      simp only [Option.some.injEq] at hn'
+      subst hn'
+      exact ih hr hb
+
+/-! What one instruction at a time does. -/
+
+/-- Where the interpreter goes on after a block, which is what `runInterpreted` returns. -/
+def nextPc (block : Block) : Bil.Effect → Nat
+  | .jump target => target.toNat
+  | _ => block.next
+
+def blockAt (blocks : List Block) (pc : Nat) : Option Block :=
+  blocks.find? fun block => block.address == pc
+
+/-- One block in the interpreter. -/
+def stepBlock (blocks : List Block) (fuel : Nat) (cfg : Bil.State × Nat) : Except String (Bil.State × Nat) :=
+  match blockAt blocks cfg.2 with
+  | none => .error "no block"
+  | some block =>
+    match Bil.execProgram fuel cfg.1 block.program with
+    | .error error => .error error
+    | .ok result => .ok (result.1, nextPc block result.2)
+
+/-- `count` blocks in the interpreter, one at a time. -/
+def stepBlocks (blocks : List Block) (fuel : Nat) : Nat → Bil.State × Nat → Except String (Bil.State × Nat)
+  | 0, cfg => .ok cfg
+  | count + 1, cfg =>
+    match stepBlock blocks fuel cfg with
+    | .error error => .error error
+    | .ok next => stepBlocks blocks fuel count next
+
+private theorem exec_single {fuel : Nat} {state : Bil.State} {stmt : Bil.Stmt} {result : Bil.State × Bil.Effect}
+    (h : Bil.execProgram fuel state [stmt] = .ok result) : ∃ fuel', Bil.execStmt fuel' state stmt = .ok result := by
+  obtain ⟨fuel', ⟨st, eff⟩, h1, h2⟩ := exec_cons h
+  refine ⟨fuel', ?_⟩
+  cases eff with
+  | normal =>
+    have := exec_nil h2
+    rw [this]
+    exact h1
+  | jump t => simp only at h2; rw [h2]; exact h1
+  | special t => simp only at h2; rw [h2]; exact h1
+  | cpuExn t => simp only at h2; rw [h2]; exact h1
+
+/-- A program with its last statement apart. -/
+private theorem exec_snoc (xs : Bil.Program) (y : Bil.Stmt) {fuel : Nat} {state : Bil.State} {result : Bil.State × Bil.Effect}
+    (h : Bil.execProgram fuel state (xs ++ [y]) = .ok result) :
+    ∃ first : Bil.State × Bil.Effect, Bil.execProgram fuel state xs = .ok first ∧
+      match first.2 with
+      | .normal => ∃ fuel', Bil.execStmt fuel' first.1 y = .ok result
+      | _ => result = first := by
+  induction xs generalizing fuel state with
+  | nil =>
+    cases fuel with
+    | zero => simp [Bil.execProgram] at h
+    | succ fuel =>
+      exact ⟨(state, .normal), by simp [Bil.execProgram], exec_single h⟩
+  | cons x rest ih =>
+    cases fuel with
+    | zero => simp [Bil.execProgram] at h
+    | succ fuel =>
+      simp only [List.cons_append, Bil.execProgram] at h
+      obtain ⟨⟨st, eff⟩, h1, h2⟩ := bind_ok h
+      simp only at h2
+      cases eff with
+      | normal =>
+        obtain ⟨first, h3, h4⟩ := ih h2
+        refine ⟨first, ?_, h4⟩
+        simp only [Bil.execProgram, h1]
+        exact h3
+      | jump t =>
+        simp only [Except.ok.injEq] at h2
+        subst h2
+        exact ⟨_, by simp only [Bil.execProgram, h1]; rfl, rfl⟩
+      | special t =>
+        simp only [Except.ok.injEq] at h2
+        subst h2
+        exact ⟨_, by simp only [Bil.execProgram, h1]; rfl, rfl⟩
+      | cpuExn t =>
+        simp only [Except.ok.injEq] at h2
+        subst h2
+        exact ⟨_, by simp only [Bil.execProgram, h1]; rfl, rfl⟩
+
+/-- A bound variable stays bound. -/
+private theorem exec_stays_bound (var : Bap.Var) : ∀ fuel : Nat,
+    (∀ (state : Bil.State) (stmt : Bil.Stmt) (result : Bil.State × Bil.Effect), Bil.execStmt fuel state stmt = .ok result →
+      (∃ value, Bil.lookup state.env var = .ok value) → ∃ value, Bil.lookup result.1.env var = .ok value) ∧
+    (∀ (state : Bil.State) (program : Bil.Program) (result : Bil.State × Bil.Effect), Bil.execProgram fuel state program = .ok result →
+      (∃ value, Bil.lookup state.env var = .ok value) → ∃ value, Bil.lookup result.1.env var = .ok value) := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    refine ⟨fun _ _ _ h => ?_, fun _ _ _ h => ?_⟩ <;> simp [Bil.execStmt, Bil.execProgram] at h
+  | succ fuel ih =>
+    obtain ⟨ihS, ihP⟩ := ih
+    refine ⟨?_, ?_⟩
+    · intro state stmt result h hb
+      cases stmt with
+      | move dst value =>
+        obtain ⟨v, _, rfl⟩ := exec_move h
+        by_cases hd : var = dst
+        · subst hd
+          exact ⟨_, lookup_bind_same _ _ _⟩
+        · simpa only [lookup_bind_other hd] using hb
+      | jmp target =>
+        obtain ⟨_, _, _, rfl⟩ := exec_jmp h
+        exact hb
+      | special message =>
+        simp only [Bil.execStmt, Except.ok.injEq] at h
+        subst h
+        exact hb
+      | cpuExn number =>
+        simp only [Bil.execStmt, Except.ok.injEq] at h
+        subst h
+        exact hb
+      | ifElse condition yes no =>
+        simp only [Bil.execStmt, Bil.execExp] at h
+        obtain ⟨v, _, h⟩ := bind_ok h
+        obtain ⟨⟨w, bits⟩, _, h⟩ := bind_ok h
+        simp only at h
+        split at h
+        · exact ihP _ _ _ h hb
+        · simp at h
+      | «while» condition body =>
+        simp only [Bil.execStmt, Bil.execExp] at h
+        obtain ⟨v, _, h⟩ := bind_ok h
+        obtain ⟨⟨w, bits⟩, _, h⟩ := bind_ok h
+        simp only at h
+        split at h
+        · split at h
+          · obtain ⟨⟨st, eff⟩, h1, h2⟩ := bind_ok h
+            have hb1 := ihP _ _ _ h1 hb
+            simp only at h2
+            cases eff with
+            | normal => exact ihS _ _ _ h2 hb1
+            | jump t => simp only [Except.ok.injEq] at h2; subst h2; exact hb1
+            | special t => simp only [Except.ok.injEq] at h2; subst h2; exact hb1
+            | cpuExn t => simp only [Except.ok.injEq] at h2; subst h2; exact hb1
+          · simp only [Except.ok.injEq] at h
+            subst h
+            exact hb
+        · simp at h
+    · intro state program result h hb
+      cases program with
+      | nil =>
+        simp only [Bil.execProgram, Except.ok.injEq] at h
+        subst h
+        exact hb
+      | cons stmt rest =>
+        simp only [Bil.execProgram] at h
+        obtain ⟨⟨st, eff⟩, h1, h2⟩ := bind_ok h
+        have hb1 := ihS _ _ _ h1 hb
+        simp only at h2
+        cases eff with
+        | normal => exact ihP _ _ _ h2 hb1
+        | jump t => simp only [Except.ok.injEq] at h2; subst h2; exact hb1
+        | special t => simp only [Except.ok.injEq] at h2; subst h2; exact hb1
+        | cpuExn t => simp only [Except.ok.injEq] at h2; subst h2; exact hb1
+
+/-- What a program moves to first has a value at every end of it. -/
+theorem leadingMoves_bound {var : Bap.Var} (program : Bil.Program) (hm : var ∈ leadingMoves program) {fuel : Nat} {state : Bil.State}
+    {result : Bil.State × Bil.Effect} (h : Bil.execProgram fuel state program = .ok result) :
+    ∃ value, Bil.lookup result.1.env var = .ok value := by
+  induction program generalizing fuel state with
+  | nil => simp [leadingMoves] at hm
+  | cons stmt rest ih =>
+    cases stmt with
+    | move dst value =>
+      simp only [leadingMoves, List.mem_cons] at hm
+      obtain ⟨fuel', ⟨st, eff⟩, h1, h2⟩ := exec_cons h
+      obtain ⟨v, _, he⟩ := exec_move h1
+      simp only [Prod.mk.injEq] at he
+      obtain ⟨rfl, rfl⟩ := he
+      simp only at h2
+      rcases hm with rfl | hm
+      · exact (exec_stays_bound var fuel').2 _ _ _ h2 ⟨_, lookup_bind_same _ _ _⟩
+      · exact ih hm h2
+    | _ => simp [leadingMoves] at hm
+
+theorem stepBlocks_stays_bound {blocks : List Block} {fuel : Nat} {var : Bap.Var} (count : Nat) {cfg result : Bil.State × Nat}
+    (h : stepBlocks blocks fuel count cfg = .ok result) (hb : ∃ value, Bil.lookup cfg.1.env var = .ok value) :
+    ∃ value, Bil.lookup result.1.env var = .ok value := by
+  induction count generalizing cfg with
+  | zero =>
+    simp only [stepBlocks, Except.ok.injEq] at h
+    subst h
+    exact hb
+  | succ count ih =>
+    simp only [stepBlocks] at h
+    split at h
+    · simp at h
+    · next next' hs =>
+      refine ih h ?_
+      simp only [stepBlock] at hs
+      split at hs
+      · simp at hs
+      · split at hs
+        · simp at hs
+        · next result' he =>
+          simp only [Except.ok.injEq] at hs
+          subst hs
+          exact (exec_stays_bound var fuel).2 _ _ _ he hb
+
+/-- Where a jump goes. -/
+def nextPcOf : Bil.Effect → Option Nat
+  | .jump target => some target.toNat
+  | _ => none
+
+/-! How a block ends in a range. -/
+
+/-- An edge of the graph to `target`, whose block has `label`. -/
+def EdgeTo (plan : GraphPlan) (source target label : Nat) : Prop :=
+  (source, target) ∈ GraphPlan.edges plan ∧
+    ∃ address, (GraphPlan.labels plan).find? (fun (address, _) => address = target) = some (address, label)
+
+/-- How a run of a block in a range ends, given what the interpreter says about the block. -/
+def BlockOutcome (stops : Nat → Bool) (plan : GraphPlan) (low high : Nat) (global : Lowering) (program : List Op) (cfg : Cfg)
+    (effect : Nat) (address : Nat) (block : Block) (result : Bil.State × Bil.Effect) : Prop :=
+  ExhaustsAt stops program cfg effect ∨
+    (∃ machine, EndsAt stops program cfg (nextPc block result.2) machine ∧ Agrees result.1.env machine global ∧
+      FramesOut effect low high global cfg.2 machine ∧ (machine.slots effect = 0 ∨ machine.slots effect = 1)) ∨
+    (∃ machine label rest, RunAt stops program cfg (.goto label :: rest, machine) ∧ EdgeTo plan address (nextPc block result.2) label ∧
+      Agrees result.1.env machine global ∧ Frames low high global cfg.2 machine)
+
+/-- What a part of a program needs of where it runs. -/
+structure Place (first second global : Lowering) (new program tail : List Op) (effect : Nat) : Prop where
+  effectFree : ∀ var, (var, effect) ∉ Lowering.layout global
+  wfGlobal : LayoutWF global
+  sub : Sub second global
+  split : ∃ pre, program = pre ++ new ++ tail
+  distinct : (labelsOf program).Nodup
+
+private theorem one_toBitVec_ne : (1 : UInt64).toBitVec ≠ (0 : Word64) := by decide
+
+/-- The operations of an edge either go to the label of its target or leave for it. -/
+private theorem graphEdgeOps_sim {lowering : Lowering} {plan : GraphPlan} {source target effect : Nat} {ops : List Op}
+    (heff : Lowering.effectSlot lowering = some effect)
+    (h : graphEdgeOps lowering (GraphPlan.labels plan) (GraphPlan.edges plan) source target = some ops) :
+    (∃ label, ops = [.goto label] ∧ EdgeTo plan source target label) ∨ ops = [.set effect 1, .jump (UInt64.ofNat target)] := by
+  unfold graphEdgeOps at h
+  split at h
+  · next he =>
+    split at h
+    · next address label hf =>
+      simp only [Option.some.injEq] at h
+      exact Or.inl ⟨label, h.symm, by simpa using he, address, hf⟩
+    · simp at h
+  · simp only [Option.some.injEq] at h
+    refine Or.inr ?_
+    rw [← h]
+    simp [jumpConstant, setEffect, heff]
+
+private theorem snoc_of_getLast? {α : Type} {items : List α} {last : α} (h : items.getLast? = some last) :
+    items = items.dropLast ++ [last] := by
+  obtain ⟨ys, rfl⟩ := List.getLast?_eq_some_iff.1 h
+  simp
+
+/-- `blockExit` goes by the last statement. -/
+private theorem blockExit_direct {block : Block} {target : Nat} (h : blockExit block = BlockExit.direct target) :
+    ∃ exp, block.program = block.program.dropLast ++ [.jmp exp] ∧ closedTarget exp = some target := by
+  unfold blockExit at h
+  split at h
+  · next exp hl =>
+    split at h
+    · next t ht =>
+      injection h with h
+      subst h
+      exact ⟨exp, snoc_of_getLast? hl, ht⟩
+    · cases h
+  all_goals first
+    | (split at h <;> cases h)
+    | cases h
+
+private theorem blockExit_branch {block : Block} {condition : Bil.Exp} {yes no : Nat} {falls : Bool}
+    (h : blockExit block = BlockExit.branch condition yes no falls) :
+    ∃ yesExp, closedTarget yesExp = some yes ∧
+      ((falls = true ∧ no = block.next ∧ block.program = block.program.dropLast ++ [.ifElse condition [.jmp yesExp] []]) ∨
+       (falls = false ∧ ∃ noExp, closedTarget noExp = some no ∧
+         block.program = block.program.dropLast ++ [.ifElse condition [.jmp yesExp] [.jmp noExp]])) := by
+  unfold blockExit at h
+  split at h
+  · split at h <;> cases h
+  · next cond yesExp hl =>
+    split at h
+    · next t ht =>
+      injection h with h1 h2 h3 h4
+      subst h1 h2 h3 h4
+      exact ⟨yesExp, ht, Or.inl ⟨rfl, rfl, snoc_of_getLast? hl⟩⟩
+    · cases h
+  · next cond yesExp noExp hl =>
+    split at h
+    · next t f ht hf =>
+      injection h with h1 h2 h3 h4
+      subst h1 h2 h3 h4
+      exact ⟨yesExp, ht, Or.inr ⟨rfl, noExp, hf, snoc_of_getLast? hl⟩⟩
+    · cases h
+  all_goals cases h
+
+/-- The jump to a closed target. -/
+private theorem exec_closed {fuel : Nat} {state : Bil.State} {exp : Bil.Exp} {target : Nat} {result : Bil.State × Bil.Effect}
+    (hc : closedTarget exp = some target) (h : Bil.execStmt fuel state (.jmp exp) = .ok result) :
+    result.1 = state ∧ nextPcOf result.2 = some target := by
+  obtain ⟨w, bits, hev, rfl⟩ := exec_jmp h
+  obtain ⟨w', value, hev', _, hv⟩ := closedTarget_sound hc state.env
+  rw [hev] at hev'
+  simp only [Except.ok.injEq, Bap.Value.bits.injEq] at hev'
+  obtain ⟨rfl, hb⟩ := hev'
+  have hb := eq_of_heq hb
+  subst hb
+  exact ⟨rfl, by simp [nextPcOf, hv]⟩
+
+theorem Returns.endsAt {stops : Nat → Bool} {program : List Op} {cfg : Cfg} {value : Word64} {machine : Machine}
+    (h : Returns program cfg value machine) : EndsAt stops program cfg value.toNat machine := by
+  obtain ⟨rest, ⟨t, h1, h2⟩ | ⟨s, h1, h2⟩⟩ := h
+  · exact Or.inl ⟨rest, t, h1.toAt, by rw [h2]; rfl⟩
+  · exact Or.inr (Or.inl ⟨rest, s, h1.toAt, by rw [h2]⟩)
+
+private theorem Place.context {first second mid global : Lowering} {new newS more program tail : List Op} {effect : Nat}
+    (place : Place first second global new program tail effect) (heff : Lowering.effectSlot first = some effect)
+    (hlow : effect < Lowering.nextSlot first) (hsub : Sub mid global) (hnew : new = newS ++ more) :
+    Context first mid global newS program (more ++ tail) effect := by
+  obtain ⟨pre, hsplit⟩ := place.split
+  exact {
+    effectSlot := heff
+    effectLow := hlow
+    effectFree := place.effectFree
+    wfGlobal := place.wfGlobal
+    sub := hsub
+    split := ⟨pre, by rw [hsplit, hnew]; simp [List.append_assoc]⟩
+    distinct := place.distinct }
+
+/-- The end of a block over an edge. -/
+private theorem edge_finish {stops : Nat → Bool} {plan : GraphPlan} {lowering : Lowering} {low high : Nat} {global : Lowering}
+    {program rest ops : List Op} {cfg : Cfg} {effect source target : Nat} {block : Block} {result : Bil.State × Bil.Effect} {m : Machine}
+    (heff : Lowering.effectSlot lowering = some effect) (hfree : ∀ var, (var, effect) ∉ Lowering.layout global)
+    (hgo : graphEdgeOps lowering (GraphPlan.labels plan) (GraphPlan.edges plan) source target = some ops) (hlt : target < 2 ^ 64)
+    (hpc : nextPc block result.2 = target) (hrun : RunAt stops program cfg (ops ++ rest, m)) (hag : Agrees result.1.env m global)
+    (hf : Frames low high global cfg.2 m) :
+    BlockOutcome stops plan low high global program cfg effect source block result := by
+  rcases graphEdgeOps_sim heff hgo with ⟨label, rfl, he⟩ | rfl
+  · exact Or.inr (Or.inr ⟨m, label, rest, hrun, by rw [hpc]; exact he, hag, hf⟩)
+  · refine Or.inr (Or.inl ⟨m.write effect (1 : UInt64).toBitVec, ?_, hag.write_free hfree _, ?_, Or.inr ?_⟩)
+    · rw [hpc]
+      refine Or.inl ⟨rest, UInt64.ofNat target, hrun.trans ((Run.linear (op := .set effect 1) rfl _ _).toAt), ?_⟩
+      simp only [UInt64.toNat_ofNat']
+      exact Nat.mod_eq_of_lt hlt
+    · exact Frames.thenOut hf ⟨rfl, fun slot he _ _ => by simp [Machine.write_slots, he]⟩
+    · simp only [Machine.write_slots, ↓reduceIte]
+      rfl
+
+/-- The end of a block that leaves with the effect it has. -/
+private theorem fall_finish {stops : Nat → Bool} {plan : GraphPlan} {low high : Nat} {global : Lowering}
+    {program rest : List Op} {cfg : Cfg} {effect source target : Nat} {block : Block} {result : Bil.State × Bil.Effect} {m : Machine}
+    (hlt : target < 2 ^ 64) (hpc : nextPc block result.2 = target)
+    (hrun : RunAt stops program cfg (.jump (UInt64.ofNat target) :: rest, m)) (hag : Agrees result.1.env m global)
+    (hf : Frames low high global cfg.2 m) (hzero : m.slots effect = 0) :
+    BlockOutcome stops plan low high global program cfg effect source block result := by
+  refine Or.inr (Or.inl ⟨m, ?_, hag, ?_, Or.inl hzero⟩)
+  · rw [hpc]
+    refine Or.inl ⟨rest, UInt64.ofNat target, hrun, ?_⟩
+    simp only [UInt64.toNat_ofNat']
+    exact Nat.mod_eq_of_lt hlt
+  · exact ⟨hf.1, fun slot _ hs hv => hf.2 slot hs hv⟩
+
+/-- A jump out of the statements of a block. -/
+private theorem inner_jump {stops : Nat → Bool} {plan : GraphPlan} {low high low' high' : Nat} {global : Lowering}
+    {program : List Op} {cfg : Cfg} {effect source : Nat} {block : Block} {state : Bil.State} {width : Nat} {target : BitVec width}
+    (hl : low ≤ low') (hh : high' ≤ high)
+    (h : ∃ value machine, Returns program cfg value machine ∧ Holds value target ∧ machine.slots effect = 1 ∧
+      Agrees state.env machine global ∧ FramesOut effect low' high' global cfg.2 machine) :
+    BlockOutcome stops plan low high global program cfg effect source block (state, .jump target) := by
+  obtain ⟨value, machine, hret, hheld, hone, hag, hf⟩ := h
+  refine Or.inr (Or.inl ⟨machine, ?_, hag, hf.weaken hl hh, Or.inr hone⟩)
+  have : value.toNat = target.toNat := hheld
+  simp only [nextPc]
+  rw [← this]
+  exact hret.endsAt
+
+private theorem closed_lt {target : Bil.Exp} {address : Nat} (h : closedTarget target = some address) : address < 2 ^ 64 := by
+  obtain ⟨w, value, _, hw, hv⟩ := closedTarget_sound h []
+  rw [← hv]
+  exact Nat.lt_of_lt_of_le value.isLt (Nat.pow_le_pow_right (by decide) hw)
+
+private theorem Pushed.ops_only {lowering : Lowering} (more : List Op) (mk : Lowering)
+    (h1 : Lowering.ops mk = Lowering.ops lowering ++ more) (h2 : Lowering.layout mk = Lowering.layout lowering)
+    (h3 : Lowering.nextSlot mk = Lowering.nextSlot lowering) (h4 : Lowering.memory mk = Lowering.memory lowering)
+    (h5 : Lowering.effectSlot mk = Lowering.effectSlot lowering) (h6 : Lowering.nextLabel mk = Lowering.nextLabel lowering) :
+    Pushed lowering mk more 0 0 := ⟨h1, h2, h3, h4, h5, h6⟩
+
+private theorem nextPc_of_jump {block : Block} {eff : Bil.Effect} {target : Nat} (h : nextPcOf eff = some target) :
+    nextPc block eff = target := by
+  cases eff with
+  | jump t => simpa [nextPcOf, nextPc] using h
+  | normal => simp [nextPcOf] at h
+  | special t => simp [nextPcOf] at h
+  | cpuExn t => simp [nextPcOf] at h
+
+/-- A block whose last statement jumps, with what comes before it lowered. -/
+private theorem lowerExit_direct {plan : GraphPlan} {first second : Lowering} {block : Block} {target effect : Nat}
+    (wf : LayoutWF first) (heff : Lowering.effectSlot first = some effect) (hlow : effect < Lowering.nextSlot first)
+    (he : blockExit block = BlockExit.direct target)
+    {lowered : Lowering} {ops : List Op}
+    (h1 : lowerStatements first block.program.dropLast = some (lowered, false))
+    (hgo : graphEdgeOps lowered (GraphPlan.labels plan) (GraphPlan.edges plan) block.address target = some ops)
+    (p : Pushed lowered second ops 0 0) :
+    ∃ new, Grows first second new ∧ ∀ (stops : Nat → Bool) (global : Lowering) (program tail : List Op), Place first second global new program tail effect →
+      ∀ (fuel : Nat) (state : Bil.State) (result : Bil.State × Bil.Effect) (machine : Machine), Agrees state.env machine global →
+      machine.slots effect = 0 → Bil.execProgram fuel state block.program = .ok result →
+      BlockOutcome stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program (new ++ tail, machine) effect block.address block result := by
+  obtain ⟨newS, aS, okS⟩ := lowerStatements_correct wf heff hlow h1
+  have gp := p.grows aS.wf
+  refine ⟨newS ++ ops, aS.grows.trans gp, ?_⟩
+  intro stops global program tail place fuel state result machine hag _ hex
+  obtain ⟨exp, hprog, hc⟩ := blockExit_direct he
+  rw [hprog] at hex
+  obtain ⟨⟨s1, e1⟩, hfirst, hrest⟩ := exec_snoc _ _ hex
+  have ctx := place.context heff hlow (place.sub.before' gp) rfl
+  have hlts := gp.next
+  have heffL : Lowering.effectSlot lowered = some effect := by rw [aS.effect]; exact heff
+  rcases okS fuel state (s1, e1) global program (ops ++ tail) effect machine ctx hag hfirst with hx | hn
+  · exact Or.inl (by rw [List.append_assoc]; exact hx.toAt)
+  · cases e1 with
+    | normal =>
+      obtain ⟨_, m1, hrun, hag1, hf1⟩ := hn
+      simp only at hrest
+      obtain ⟨fuel', hj⟩ := hrest
+      obtain ⟨hs, hpc⟩ := exec_closed hc hj
+      obtain ⟨st, eff⟩ := result
+      simp only at hs
+      subst hs
+      have hpc' : nextPc block eff = target := nextPc_of_jump hpc
+      rw [List.append_assoc]
+      exact edge_finish (rest := tail) heffL place.effectFree hgo (closed_lt hc) hpc' hrun.toAt hag1
+        (hf1.weaken (Nat.le_refl _) hlts)
+    | jump t =>
+      simp only at hrest
+      subst hrest
+      rw [List.append_assoc]
+      exact inner_jump (Nat.le_refl _) hlts hn
+    | special t => exact absurd hn (by simp)
+    | cpuExn t => exact absurd hn (by simp)
+
+/-- A block whose last statement is a branch, with what comes before it lowered. -/
+private theorem lowerExit_branch {plan : GraphPlan} {first second : Lowering} {block : Block} {condition : Bil.Exp} {yes no : Nat}
+    {falls : Bool} {effect : Nat} (wf : LayoutWF first) (heff : Lowering.effectSlot first = some effect)
+    (hlow : effect < Lowering.nextSlot first) (he : blockExit block = BlockExit.branch condition yes no falls) (hnextLt : block.next < 2 ^ 64)
+    {lowered mid after yesLowering noLowering : Lowering} {operand : Operand} {yesOps noOps : List Op}
+    (h1 : lowerStatements first block.program.dropLast = some (lowered, false))
+    (h2 : lowerExp lowered condition = some (mid, operand))
+    (hyes : graphEdgeOps yesLowering (GraphPlan.labels plan) (GraphPlan.edges plan) block.address yes = some yesOps)
+    (hno : (noOps = [.jump (UInt64.ofNat no)] ∧ falls = true) ∨
+      graphEdgeOps noLowering (GraphPlan.labels plan) (GraphPlan.edges plan) block.address no = some noOps)
+    (hyesEff : Lowering.effectSlot yesLowering = some effect) (hnoEff : Lowering.effectSlot noLowering = some effect)
+    (p : Pushed mid after ([.branch (Operand.slot operand) (Lowering.nextLabel mid) (Lowering.nextLabel mid + 1),
+        .label (Lowering.nextLabel mid)] ++ yesOps ++ [.label (Lowering.nextLabel mid + 1)]) 2 0)
+    (q : Pushed after second noOps 0 0) :
+    ∃ new, Grows first second new ∧ ∀ (stops : Nat → Bool) (global : Lowering) (program tail : List Op), Place first second global new program tail effect →
+      ∀ (fuel : Nat) (state : Bil.State) (result : Bil.State × Bil.Effect) (machine : Machine), Agrees state.env machine global →
+      machine.slots effect = 0 → Bil.execProgram fuel state block.program = .ok result →
+      BlockOutcome stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program (new ++ tail, machine) effect block.address block result := by
+  obtain ⟨newS, aS, okS⟩ := lowerStatements_correct wf heff hlow h1
+  obtain ⟨newC, heC, _, _, _, hval⟩ := lowerExp_correct condition aS.wf h2
+  have aC := heC.appended aS.wf
+  have gp := p.grows aC.wf
+  have gq := q.grows gp.wf
+  let yl := Lowering.nextLabel mid
+  let nl := Lowering.nextLabel mid + 1
+  let tailOps : List Op := [.branch (Operand.slot operand) yl nl, .label yl] ++ yesOps ++ [.label nl] ++ noOps
+  refine ⟨newS ++ (newC ++ tailOps), aS.grows.trans (aC.grows.trans (by
+    have := gp.trans gq
+    simpa [tailOps, yl, nl, List.append_assoc] using this)), ?_⟩
+  intro stops global program tail place fuel state result machine hag hzero hex
+  obtain ⟨yesExp, hcy, hshape⟩ := blockExit_branch he
+  have subMid := (place.sub.before' gq).before' gp
+  have subL := subMid.before' aC.grows
+  have hnxC := aC.next
+  have hnxP := gp.next
+  have hnxQ := gq.next
+  have ctx := place.context (newS := newS) (more := newC ++ tailOps) heff hlow subL rfl
+  obtain ⟨pre, hsplit⟩ := place.split
+  have hcont : ∀ (s1 : Bil.State) (m1 : Machine) (result' : Bil.State × Bil.Effect) (bit : BitVec 1),
+      RunAt stops program ((newS ++ (newC ++ tailOps)) ++ tail, machine) ((newC ++ tailOps) ++ tail, m1) →
+      Agrees s1.env m1 global → Frames (Lowering.nextSlot first) (Lowering.nextSlot lowered) global machine m1 → m1.slots effect = 0 →
+      Bil.evalExp s1.env condition = .ok (.bits bit) → result'.1 = s1 →
+      (bit = 1 → nextPc block result'.2 = yes) → (bit ≠ 1 → nextPc block result'.2 = no) →
+      BlockOutcome stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program
+        ((newS ++ (newC ++ tailOps)) ++ tail, machine) effect block.address block result' := by
+    intro s1 m1 result' bit hrun hag1 hf1 hz1 hev hst hy hn
+    have hsm : SlotsAgree s1.env m1 (Lowering.layout mid) := hag1.slots.mono subMid.mono
+    obtain ⟨_, hvalue⟩ := hval s1.env m1 hsm (hag1.memoryAgrees subMid) 1 bit hev
+    have hag2 := hag1.after heC subMid
+    have hf2 := heC.frames subMid m1
+    have hfA : Frames (Lowering.nextSlot first) (Lowering.nextSlot second) global machine (runOps m1 newC) :=
+      (hf1.weaken (Nat.le_refl _) (by omega)).trans (hf2.weaken aS.next (by omega))
+    have hz2 : (runOps m1 newC).slots effect = 0 := by
+      rw [heC.frame m1 (Or.inl (Nat.lt_of_lt_of_le hlow aS.next))]
+      exact hz1
+    have hrun2 : RunAt stops program ((newS ++ (newC ++ tailOps)) ++ tail, machine)
+        (.branch (Operand.slot operand) yl nl :: .label yl :: (yesOps ++ [.label nl] ++ noOps ++ tail), runOps m1 newC) := by
+      refine hrun.trans ?_
+      have heq : (newC ++ tailOps) ++ tail = newC ++ (.branch (Operand.slot operand) yl nl :: .label yl :: (yesOps ++ [.label nl] ++ noOps ++ tail)) := by
+        simp [tailOps, List.append_assoc]
+      rw [heq]
+      exact (Run.ops (fun op hop => linear_of_expression (heC.pure op hop)) _ m1).toAt
+    have hagR : Agrees result'.1.env (runOps m1 newC) global := by rw [hst]; exact hag2
+    by_cases hbit : bit = 1
+    · have hne : (runOps m1 newC).slots (Operand.slot operand) ≠ 0 := (holds_condition hvalue).2 hbit
+      have hprogY : program = (pre ++ newS ++ newC ++ [.branch (Operand.slot operand) yl nl]) ++ .label yl :: (yesOps ++ [.label nl] ++ noOps ++ tail) := by
+        rw [hsplit]; simp [tailOps, List.append_assoc]
+      have hstep : RunAt stops program (.branch (Operand.slot operand) yl nl :: .label yl :: (yesOps ++ [.label nl] ++ noOps ++ tail), runOps m1 newC)
+          (yesOps ++ [.label nl] ++ noOps ++ tail, runOps m1 newC) :=
+        (Run.branch (by rw [ite_eq_left hne]; exact afterLabel_split _ hprogY place.distinct)).toAt
+      have hzz : yesOps ++ [.label nl] ++ noOps ++ tail = yesOps ++ ([.label nl] ++ noOps ++ tail) := by simp [List.append_assoc]
+      have hrun3 := hrun2.trans hstep
+      rw [hzz] at hrun3
+      exact edge_finish (rest := [.label nl] ++ noOps ++ tail) hyesEff place.effectFree hyes (closed_lt hcy) (hy hbit) hrun3 hagR hfA
+    · have hzc : (runOps m1 newC).slots (Operand.slot operand) = 0 := by
+        by_cases hz : (runOps m1 newC).slots (Operand.slot operand) = 0
+        · exact hz
+        · exact absurd ((holds_condition hvalue).1 hz) hbit
+      have hprogN : program = (pre ++ newS ++ newC ++ [.branch (Operand.slot operand) yl nl, .label yl] ++ yesOps) ++ .label nl :: (noOps ++ tail) := by
+        rw [hsplit]; simp [tailOps, List.append_assoc]
+      have hstep : RunAt stops program (.branch (Operand.slot operand) yl nl :: .label yl :: (yesOps ++ [.label nl] ++ noOps ++ tail), runOps m1 newC)
+          (noOps ++ tail, runOps m1 newC) :=
+        (Run.branch (by
+          rw [ite_eq_right (by simpa using hzc)]
+          exact afterLabel_split _ hprogN place.distinct)).toAt
+      have hrun3 := hrun2.trans hstep
+      have hnoLt : no < 2 ^ 64 := by
+        rcases hshape with ⟨_, hn', _⟩ | ⟨_, nExp, hcn, _⟩
+        · rw [hn']; exact hnextLt
+        · exact closed_lt hcn
+      rcases hno with ⟨rfl, _⟩ | hgo
+      · exact fall_finish hnoLt (hn hbit) hrun3 hagR hfA hz2
+      · exact edge_finish (rest := tail) hnoEff place.effectFree hgo hnoLt (hn hbit) hrun3 hagR hfA
+  have hdecomp : ∃ noStmts : Bil.Program, block.program = block.program.dropLast ++ [.ifElse condition [.jmp yesExp] noStmts] ∧
+      ((noStmts = [] ∧ no = block.next) ∨ ∃ noExp, noStmts = [.jmp noExp] ∧ closedTarget noExp = some no) := by
+    rcases hshape with ⟨_, hn', hp⟩ | ⟨_, nExp, hcn, hp⟩
+    · exact ⟨[], hp, Or.inl ⟨rfl, hn'⟩⟩
+    · exact ⟨[.jmp nExp], hp, Or.inr ⟨nExp, rfl, hcn⟩⟩
+  obtain ⟨noStmts, hprog, hnoShape⟩ := hdecomp
+  rw [hprog] at hex
+  obtain ⟨⟨s1, e1⟩, hfirst, hrest⟩ := exec_snoc _ _ hex
+  rw [show (newS ++ (newC ++ tailOps)) ++ tail = newS ++ ((newC ++ tailOps) ++ tail) by simp [List.append_assoc]]
+  rcases okS fuel state (s1, e1) global program ((newC ++ tailOps) ++ tail) effect machine ctx hag hfirst with hx | hn
+  · exact Or.inl hx.toAt
+  · cases e1 with
+    | normal =>
+      obtain ⟨_, m1, hrun, hag1, hf1⟩ := hn
+      simp only at hrest
+      obtain ⟨fuel', hstmt⟩ := hrest
+      obtain ⟨fuel'', bit, hev, hbranch⟩ := exec_ifElse hstmt
+      have hz1 : m1.slots effect = 0 := by
+        rw [hf1.2 effect (Or.inl hlow) place.effectFree]
+        exact hzero
+      have key := hcont s1 m1 result bit
+        (by rw [show (newS ++ (newC ++ tailOps)) ++ tail = newS ++ ((newC ++ tailOps) ++ tail) by simp [List.append_assoc]]; exact hrun.toAt)
+        hag1 hf1 hz1 hev
+      rw [show (newS ++ (newC ++ tailOps)) ++ tail = newS ++ ((newC ++ tailOps) ++ tail) by simp [List.append_assoc]] at key
+      have hjmp : ∀ {exp : Bil.Exp} {t : Nat}, closedTarget exp = some t → ∀ {f : Nat}, Bil.execProgram f s1 [.jmp exp] = .ok result →
+          result.1 = s1 ∧ nextPc block result.2 = t := by
+        intro exp t hc f he'
+        obtain ⟨f', hj⟩ := exec_single he'
+        obtain ⟨h1', h2'⟩ := exec_closed hc hj
+        exact ⟨h1', nextPc_of_jump h2'⟩
+      by_cases hbit : bit = 1
+      · rw [ite_eq_left hbit] at hbranch
+        obtain ⟨hs, hpc⟩ := hjmp hcy hbranch
+        exact key hs (fun _ => hpc) (fun hne => absurd hbit hne)
+      · rw [ite_eq_right hbit] at hbranch
+        rcases hnoShape with ⟨rfl, hnn⟩ | ⟨nExp, rfl, hcn⟩
+        · have hres := exec_nil hbranch
+          subst hres
+          exact key rfl (fun hb => absurd hb hbit) (fun _ => hnn.symm)
+        · obtain ⟨hs, hpc⟩ := hjmp hcn hbranch
+          exact key hs (fun hb => absurd hb hbit) (fun _ => hpc)
+    | jump t =>
+      simp only at hrest
+      subst hrest
+      exact inner_jump (Nat.le_refl _) (by omega) hn
+    | special t => exact absurd hn (by simp)
+    | cpuExn t => exact absurd hn (by simp)
+
+/-- A block that ends any other way, with its statements lowered. -/
+private theorem lowerExit_other {plan : GraphPlan} {first second : Lowering} {block : Block} {effect : Nat}
+    (wf : LayoutWF first) (heff : Lowering.effectSlot first = some effect) (hlow : effect < Lowering.nextSlot first)
+    (hnextLt : block.next < 2 ^ 64) {lowered : Lowering} {terminated : Bool} {ops : List Op}
+    (h1 : lowerStatements first block.program = some (lowered, terminated))
+    (hops : (terminated = true ∧ ops = []) ∨ (ops = [.jump (UInt64.ofNat block.next)]) ∨
+      graphEdgeOps lowered (GraphPlan.labels plan) (GraphPlan.edges plan) block.address block.next = some ops)
+    (p : Pushed lowered second ops 0 0) :
+    ∃ new, Grows first second new ∧ ∀ (stops : Nat → Bool) (global : Lowering) (program tail : List Op), Place first second global new program tail effect →
+      ∀ (fuel : Nat) (state : Bil.State) (result : Bil.State × Bil.Effect) (machine : Machine), Agrees state.env machine global →
+      machine.slots effect = 0 → Bil.execProgram fuel state block.program = .ok result →
+      BlockOutcome stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program (new ++ tail, machine) effect block.address block result := by
+  obtain ⟨newS, aS, okS⟩ := lowerStatements_correct wf heff hlow h1
+  have gp := p.grows aS.wf
+  refine ⟨newS ++ ops, aS.grows.trans gp, ?_⟩
+  intro stops global program tail place fuel state result machine hag hzero hex
+  have ctx := place.context heff hlow (place.sub.before' gp) rfl
+  have hlts := gp.next
+  have heffL : Lowering.effectSlot lowered = some effect := by rw [aS.effect]; exact heff
+  rw [List.append_assoc]
+  obtain ⟨st, eff⟩ := result
+  rcases okS fuel state (st, eff) global program (ops ++ tail) effect machine ctx hag hex with hx | hn
+  · exact Or.inl hx.toAt
+  · cases eff with
+    | normal =>
+      obtain ⟨ht, m1, hrun, hag1, hf1⟩ := hn
+      have hz1 : m1.slots effect = 0 := by
+        rw [hf1.2 effect (Or.inl hlow) place.effectFree]
+        exact hzero
+      rcases hops with ⟨hd, _⟩ | rfl | hgo
+      · rw [ht] at hd
+        cases hd
+      · exact fall_finish hnextLt rfl hrun.toAt hag1 (hf1.weaken (Nat.le_refl _) hlts) hz1
+      · exact edge_finish (rest := tail) heffL place.effectFree hgo hnextLt rfl hrun.toAt hag1 (hf1.weaken (Nat.le_refl _) hlts)
+    | jump t => exact inner_jump (Nat.le_refl _) hlts hn
+    | special t => exact absurd hn (by simp)
+    | cpuExn t => exact absurd hn (by simp)
+
+/-! The way into a block. -/
+
+private def siteOps (effect observed : Nat) (label : Nat) (address : Nat) (guarded : Bool) : List Op :=
+  if guarded then
+    [.branch observed label (label + 1), .label label, .set effect 0, .code effect (UInt64.ofNat address),
+      .goto (label + 1), .label (label + 1)]
+  else [.set effect 0, .code effect (UInt64.ofNat address)]
+
+private def entryOps (effect budget observed go address : Nat) (guarded : Bool) : List Op :=
+  [.branch budget go (go + 1), .label (go + 1), .set effect 1, .jump (UInt64.ofNat address), .label go] ++
+    siteOps effect observed (go + 2) address guarded ++ [.add budget budget (UInt64.ofNat (2 ^ 64 - 1))]
+
+private theorem enterBlock_pushed {lowering : Lowering} {effect : Nat} (budget observed address : Nat) (guarded : Bool)
+    (h : Lowering.effectSlot lowering = some effect) :
+    Pushed lowering (enterBlock lowering budget observed address guarded)
+      (entryOps effect budget observed (Lowering.nextLabel lowering) address guarded) (if guarded then 4 else 2) 0 := by
+  cases guarded <;>
+    (constructor <;> simp [enterBlock, freshLabel, jumpConstant, setEffect, h, codeSite, entryOps, siteOps, List.append_assoc])
+
+private theorem RunAt.pass {stops : Nat → Bool} {program rest : List Op} {effect : Nat} {target : UInt64} {m : Machine}
+    (h : ¬ stops target.toNat = true) : RunAt stops program (.code effect target :: rest, m) (rest, m) :=
+  .step (by simp [nextCfgAt, h]) (.refl _)
+
+/-- What running the way into a block does: with no budget left it leaves for the block, a code site may stop it, and
+otherwise it counts the block and goes on, with the effect slot 0 and all other slots as they were. -/
+theorem entry_sim {stops : Nat → Bool} {program pre more : List Op} {effect budget observed go address : Nat} {guarded : Bool}
+    (hsplit : program = pre ++ entryOps effect budget observed go address guarded ++ more) (hd : (labelsOf program).Nodup)
+    (hbe : budget ≠ effect) (m : Machine) (hz : m.slots effect = 0) :
+    (m.slots budget = 0 ∧ ∃ rest, RunAt stops program (entryOps effect budget observed go address guarded ++ more, m)
+        (.jump (UInt64.ofNat address) :: rest, m.write effect (1 : UInt64).toBitVec)) ∨
+    (m.slots budget ≠ 0 ∧ stops (UInt64.ofNat address).toNat = true ∧ ∃ rest, RunAt stops program (entryOps effect budget observed go address guarded ++ more, m)
+        (.code effect (UInt64.ofNat address) :: rest, m.write effect (0 : UInt64).toBitVec)) ∨
+    (m.slots budget ≠ 0 ∧ RunAt stops program (entryOps effect budget observed go address guarded ++ more, m)
+        (more, ((m.write effect (0 : UInt64).toBitVec).write budget (m.slots budget + (UInt64.ofNat (2 ^ 64 - 1)).toBitVec)))) := by
+  by_cases hb : m.slots budget = 0
+  · refine Or.inl ⟨hb, .label go :: (siteOps effect observed (go + 2) address guarded ++ [.add budget budget (UInt64.ofNat (2 ^ 64 - 1))] ++ more), ?_⟩
+    have hp : program = (pre ++ [.branch budget go (go + 1)]) ++ .label (go + 1) ::
+        (.set effect 1 :: .jump (UInt64.ofNat address) :: .label go ::
+          (siteOps effect observed (go + 2) address guarded ++ [.add budget budget (UInt64.ofNat (2 ^ 64 - 1))] ++ more)) := by
+      rw [hsplit]; simp [entryOps, List.append_assoc]
+    have h1 : Run program (entryOps effect budget observed go address guarded ++ more, m) (.set effect 1 :: .jump (UInt64.ofNat address) :: .label go ::
+          (siteOps effect observed (go + 2) address guarded ++ [.add budget budget (UInt64.ofNat (2 ^ 64 - 1))] ++ more), m) := by
+      rw [show entryOps effect budget observed go address guarded ++ more = .branch budget go (go + 1) :: .label (go + 1) ::
+          .set effect 1 :: .jump (UInt64.ofNat address) :: .label go ::
+          (siteOps effect observed (go + 2) address guarded ++ [.add budget budget (UInt64.ofNat (2 ^ 64 - 1))] ++ more) by
+        simp [entryOps, List.append_assoc]]
+      refine Run.branch ?_
+      rw [ite_eq_right (by simpa using hb)]
+      exact afterLabel_split _ hp hd
+    exact (h1.trans (Run.linear (op := .set effect 1) rfl _ _)).toAt
+  · have hp : program = (pre ++ [.branch budget go (go + 1), .label (go + 1), .set effect 1, .jump (UInt64.ofNat address)]) ++ .label go ::
+        (siteOps effect observed (go + 2) address guarded ++ [.add budget budget (UInt64.ofNat (2 ^ 64 - 1))] ++ more) := by
+      rw [hsplit]; simp [entryOps, List.append_assoc]
+    have h1 : Run program (entryOps effect budget observed go address guarded ++ more, m)
+        (siteOps effect observed (go + 2) address guarded ++ [.add budget budget (UInt64.ofNat (2 ^ 64 - 1))] ++ more, m) := by
+      rw [show entryOps effect budget observed go address guarded ++ more = .branch budget go (go + 1) :: .label (go + 1) ::
+          .set effect 1 :: .jump (UInt64.ofNat address) :: .label go ::
+          (siteOps effect observed (go + 2) address guarded ++ [.add budget budget (UInt64.ofNat (2 ^ 64 - 1))] ++ more) by
+        simp [entryOps, List.append_assoc]]
+      refine Run.branch ?_
+      rw [ite_eq_left hb]
+      exact afterLabel_split _ hp hd
+    have hadd : ∀ (n : Machine), n.slots budget = m.slots budget → Run program (.add budget budget (UInt64.ofNat (2 ^ 64 - 1)) :: more, n)
+        (more, n.write budget (m.slots budget + (UInt64.ofNat (2 ^ 64 - 1)).toBitVec)) := by
+      intro n hn
+      have := Run.linear (program := program) (op := .add budget budget (UInt64.ofNat (2 ^ 64 - 1))) rfl more n
+      simpa [Bap.Proofs.Primus.step, hn] using this
+    by_cases hg : guarded = true
+    · subst hg
+      have hsplitS : siteOps effect observed (go + 2) address true ++ [.add budget budget (UInt64.ofNat (2 ^ 64 - 1))] ++ more =
+          .branch observed (go + 2) (go + 3) :: .label (go + 2) :: .set effect 0 :: .code effect (UInt64.ofNat address) ::
+            .goto (go + 3) :: .label (go + 3) :: .add budget budget (UInt64.ofNat (2 ^ 64 - 1)) :: more := by
+        simp [siteOps]
+      have hpSite : program = (pre ++ [.branch budget go (go + 1), .label (go + 1), .set effect 1, .jump (UInt64.ofNat address), .label go,
+          .branch observed (go + 2) (go + 3)]) ++ .label (go + 2) :: (.set effect 0 :: .code effect (UInt64.ofNat address) ::
+            .goto (go + 3) :: .label (go + 3) :: .add budget budget (UInt64.ofNat (2 ^ 64 - 1)) :: more) := by
+        rw [hsplit]; simp [entryOps, siteOps, List.append_assoc]
+      have hpDone : program = (pre ++ [.branch budget go (go + 1), .label (go + 1), .set effect 1, .jump (UInt64.ofNat address), .label go,
+          .branch observed (go + 2) (go + 3), .label (go + 2), .set effect 0, .code effect (UInt64.ofNat address), .goto (go + 3)]) ++
+            .label (go + 3) :: (.add budget budget (UInt64.ofNat (2 ^ 64 - 1)) :: more) := by
+        rw [hsplit]; simp [entryOps, siteOps, List.append_assoc]
+      rw [hsplitS] at h1
+      by_cases ho : m.slots observed = 0
+      · -- nothing observes the site, which leaves the effect, and that is 0 already
+        refine Or.inr (Or.inr ⟨hb, ?_⟩)
+        have h2 : Run program (.branch observed (go + 2) (go + 3) :: .label (go + 2) :: .set effect 0 :: .code effect (UInt64.ofNat address) ::
+            .goto (go + 3) :: .label (go + 3) :: .add budget budget (UInt64.ofNat (2 ^ 64 - 1)) :: more, m)
+            (.add budget budget (UInt64.ofNat (2 ^ 64 - 1)) :: more, m) :=
+          Run.branch (by
+            rw [ite_eq_right (by simpa using ho)]
+            exact afterLabel_split _ hpDone hd)
+        have hsame : (m.write effect (0 : UInt64).toBitVec) = m := by
+          have hfun : (fun other => if other = effect then (0 : UInt64).toBitVec else m.slots other) = m.slots := by
+            funext other
+            by_cases ho' : other = effect
+            · rw [ite_eq_left ho', ho', hz]
+              rfl
+            · rw [ite_eq_right ho']
+          simp only [Machine.write, hfun]
+        rw [hsame]
+        exact ((h1.trans h2).trans (hadd m rfl)).toAt
+      · have h2 : Run program (.branch observed (go + 2) (go + 3) :: .label (go + 2) :: .set effect 0 :: .code effect (UInt64.ofNat address) ::
+            .goto (go + 3) :: .label (go + 3) :: .add budget budget (UInt64.ofNat (2 ^ 64 - 1)) :: more, m)
+            (.code effect (UInt64.ofNat address) :: .goto (go + 3) :: .label (go + 3) :: .add budget budget (UInt64.ofNat (2 ^ 64 - 1)) :: more,
+              m.write effect (0 : UInt64).toBitVec) :=
+          (Run.branch (by
+            rw [ite_eq_left ho]
+            exact afterLabel_split _ hpSite hd)).trans (Run.linear (op := .set effect 0) rfl _ _)
+        have hrun := (h1.trans h2).toAt (stops := stops)
+        by_cases hs : stops (UInt64.ofNat address).toNat = true
+        · exact Or.inr (Or.inl ⟨hb, hs, _, hrun⟩)
+        · refine Or.inr (Or.inr ⟨hb, (hrun.trans (RunAt.pass hs)).trans ?_⟩)
+          refine (Run.goto (afterLabel_split _ hpDone hd) _).toAt.trans ?_
+          exact (hadd (m.write effect (0 : UInt64).toBitVec) (by simp [Machine.write_slots, hbe])).toAt
+    · have hgf : guarded = false := by simpa using hg
+      subst hgf
+      have hsplitS : siteOps effect observed (go + 2) address false ++ [.add budget budget (UInt64.ofNat (2 ^ 64 - 1))] ++ more =
+          .set effect 0 :: .code effect (UInt64.ofNat address) :: .add budget budget (UInt64.ofNat (2 ^ 64 - 1)) :: more := by
+        simp [siteOps]
+      rw [hsplitS] at h1
+      have hrun := (h1.trans (Run.linear (op := .set effect 0) rfl _ _)).toAt (stops := stops)
+      by_cases hs : stops (UInt64.ofNat address).toNat = true
+      · exact Or.inr (Or.inl ⟨hb, hs, _, hrun⟩)
+      · refine Or.inr (Or.inr ⟨hb, (hrun.trans (RunAt.pass hs)).trans ?_⟩)
+        exact (hadd (m.write effect (0 : UInt64).toBitVec) (by simp [Machine.write_slots, hbe])).toAt
+
+/-- What a lowered block does, from where its statements start. -/
+def BlockOK (stops : Nat → Bool) (plan : GraphPlan) (low high : Nat) (global : Lowering) (program start : List Op) (effect : Nat) (block : Block) : Prop :=
+  ∀ (fuel : Nat) (state : Bil.State) (result : Bil.State × Bil.Effect) (machine : Machine), Agrees state.env machine global →
+    machine.slots effect = 0 → Bil.execProgram fuel state block.program = .ok result →
+    BlockOutcome stops plan low high global program (start, machine) effect block.address block result
+
+/-- What lowering the end of a block makes. -/
+theorem lowerExit_spec {plan : GraphPlan} {first second : Lowering} {block : Block} {effect : Nat}
+    (wf : LayoutWF first) (heff : Lowering.effectSlot first = some effect) (hlow : effect < Lowering.nextSlot first)
+    (hnextLt : block.next < 2 ^ 64) (h : lowerExit plan first block = some second) :
+    ∃ new, Grows first second new ∧ ∀ (stops : Nat → Bool) (global : Lowering) (program tail : List Op), Place first second global new program tail effect →
+      BlockOK stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program (new ++ tail) effect block := by
+  unfold lowerExit at h
+  split at h
+  · next target he =>
+    obtain ⟨⟨lowered, terminated⟩, h1, h⟩ := obind h
+    cases terminated with
+    | true => simp at h
+    | false =>
+      simp only [Bool.false_eq_true, ↓reduceIte] at h
+      obtain ⟨ops, hgo, h⟩ := obind h
+      simp only [Option.some.injEq] at h
+      subst h
+      exact lowerExit_direct wf heff hlow he h1 hgo ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+  · next condition yes no falls he =>
+    obtain ⟨⟨lowered, terminated⟩, h1, h⟩ := obind h
+    cases terminated with
+    | true => simp at h
+    | false =>
+      simp only [Bool.false_eq_true, ↓reduceIte] at h
+      obtain ⟨⟨mid, operand⟩, h2, h⟩ := obind h
+      simp only at h
+      by_cases hw : (Operand.width operand != 1) = true
+      · simp [hw] at h
+      · simp only [hw, Bool.false_eq_true, ↓reduceIte, freshLabel] at h
+        obtain ⟨yesOps, hyes, h⟩ := obind h
+        obtain ⟨new0, a1, _⟩ := lowerStatements_correct wf heff hlow h1
+        obtain ⟨_, heC, _⟩ := lowerExp_correct condition a1.wf h2
+        have hmidEff : Lowering.effectSlot mid = some effect := by rw [heC.effect, a1.effect]; exact heff
+        have p : Pushed mid (Lowering.push (freshLabel (freshLabel mid).1).1 ([.branch (Operand.slot operand) (Lowering.nextLabel mid) (Lowering.nextLabel mid + 1),
+              .label (Lowering.nextLabel mid)] ++ yesOps ++ [.label (Lowering.nextLabel mid + 1)]))
+            ([.branch (Operand.slot operand) (Lowering.nextLabel mid) (Lowering.nextLabel mid + 1),
+              .label (Lowering.nextLabel mid)] ++ yesOps ++ [.label (Lowering.nextLabel mid + 1)]) 2 0 :=
+          ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+        split at h
+        · next hc =>
+          obtain ⟨noOps, hno, h⟩ := obind h
+          simp only [Option.some.injEq] at h hno
+          subst hno
+          simp only [Bool.and_eq_true] at hc
+          subst h
+          exact lowerExit_branch wf heff hlow he hnextLt h1 h2 hyes (noLowering := mid) (Or.inl ⟨rfl, hc.1⟩) hmidEff hmidEff
+            p ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+        · obtain ⟨noOps, hno, h⟩ := obind h
+          simp only [Option.some.injEq] at h
+          subst h
+          exact lowerExit_branch wf heff hlow he hnextLt h1 h2 hyes (Or.inr hno) hmidEff hmidEff
+            p ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+  · obtain ⟨⟨lowered, terminated⟩, h1, h⟩ := obind h
+    simp only at h
+    split at h
+    · next ht =>
+      simp only [Option.some.injEq] at h
+      subst h
+      exact lowerExit_other (plan := plan) (ops := []) wf heff hlow hnextLt h1 (Or.inl ⟨ht, rfl⟩)
+        ⟨by simp, rfl, rfl, rfl, rfl, rfl⟩
+    · split at h
+      · obtain ⟨ops, hgo, h⟩ := obind h
+        simp only [Option.some.injEq] at h
+        subst h
+        exact lowerExit_other wf heff hlow hnextLt h1 (Or.inr (Or.inr hgo)) ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+      · simp only [Option.some.injEq] at h
+        subst h
+        exact lowerExit_other (plan := plan) wf heff hlow hnextLt h1 (Or.inr (Or.inl rfl)) ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- What the way into a lowered block does, in a program. -/
+def EntryOK (stops : Nat → Bool) (program start body : List Op) (effect budget address : Nat) : Prop :=
+  ∀ m : Machine, m.slots effect = 0 →
+    (m.slots budget = 0 ∧ ∃ rest, RunAt stops program (start, m)
+        (.jump (UInt64.ofNat address) :: rest, m.write effect (1 : UInt64).toBitVec)) ∨
+    (m.slots budget ≠ 0 ∧ stops (UInt64.ofNat address).toNat = true ∧ ∃ rest, RunAt stops program (start, m)
+        (.code effect (UInt64.ofNat address) :: rest, m.write effect (0 : UInt64).toBitVec)) ∨
+    (m.slots budget ≠ 0 ∧ RunAt stops program (start, m)
+        (body, ((m.write effect (0 : UInt64).toBitVec).write budget (m.slots budget + (UInt64.ofNat (2 ^ 64 - 1)).toBitVec))))
+
+/-- A block in a program: where its statements start, and how they are reached over edges. -/
+def SegOK (stops : Nat → Bool) (plan : GraphPlan) (low high : Nat) (global : Lowering) (program : List Op) (effect : Nat) (block : Block)
+    (start : List Op) : Prop :=
+  BlockOK stops plan low high global program start effect block ∧
+    ((GraphPlan.edges plan).any (fun edge => edge.2 == block.address) = true → ∀ label address,
+      (GraphPlan.labels plan).find? (fun (address, _) => address = block.address) = some (address, label) →
+      ∃ entry, afterLabel program label = some entry ∧ EntryOK stops program entry start effect (GraphPlan.budget plan) block.address)
+
+theorem BlockOK.weaken {stops : Nat → Bool} {plan : GraphPlan} {low high low' high' : Nat} {global : Lowering} {program start : List Op}
+    {effect : Nat} {block : Block} (h : BlockOK stops plan low high global program start effect block) (hl : low' ≤ low) (hh : high ≤ high') :
+    BlockOK stops plan low' high' global program start effect block := by
+  intro fuel state result machine hag hz hex
+  rcases h fuel state result machine hag hz hex with hx | ⟨m, h1, h2, h3, h4⟩ | ⟨m, l, r, h1, h2, h3, h4⟩
+  · exact Or.inl hx
+  · exact Or.inr (Or.inl ⟨m, h1, h2, h3.weaken hl hh, h4⟩)
+  · exact Or.inr (Or.inr ⟨m, l, r, h1, h2, h3, h4.weaken hl hh⟩)
+
+theorem SegOK.weaken {stops : Nat → Bool} {plan : GraphPlan} {low high low' high' : Nat} {global : Lowering} {program start : List Op}
+    {effect : Nat} {block : Block} (h : SegOK stops plan low high global program effect block start) (hl : low' ≤ low) (hh : high ≤ high') :
+    SegOK stops plan low' high' global program effect block start :=
+  ⟨h.1.weaken hl hh, h.2⟩
+
+private theorem lowerEntry_cases {plan : GraphPlan} {lowering second : Lowering} {block : Block} {hasEdge : Bool} {effect : Nat}
+    (heff : Lowering.effectSlot lowering = some effect) (h : lowerEntry plan lowering block hasEdge = some second) :
+    (hasEdge = false ∧ second = lowering) ∨
+    (hasEdge = true ∧ ∃ address label, (GraphPlan.labels plan).find? (fun (address, _) => address = block.address) = some (address, label) ∧
+      Pushed lowering second (.label label :: entryOps effect (GraphPlan.budget plan) (GraphPlan.observed plan) (Lowering.nextLabel lowering) block.address (GraphPlan.guarded plan block))
+        (if GraphPlan.guarded plan block then 4 else 2) 0) := by
+  unfold lowerEntry at h
+  cases hasEdge with
+  | false =>
+    simp only [Bool.not_false, ↓reduceIte] at h
+    split at h
+    · exact Or.inl ⟨rfl, by simpa using h.symm⟩
+    · simp at h
+  | true =>
+    simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at h
+    split at h
+    · next address label hf =>
+      simp only [Option.some.injEq] at h
+      subst h
+      refine Or.inr ⟨rfl, address, label, hf, ?_⟩
+      have p := enterBlock_pushed (lowering := Lowering.push lowering [.label label]) (effect := effect)
+        (GraphPlan.budget plan) (GraphPlan.observed plan) block.address (GraphPlan.guarded plan block) heff
+      exact ⟨by rw [p.ops]; simp [Lowering.push], p.layout, p.next, p.memory, p.effect, p.label⟩
+    · simp at h
+
+private theorem find_same {plan : GraphPlan} {address : Nat} {a b l l' : Nat}
+    (h1 : (GraphPlan.labels plan).find? (fun (address', _) => address' = address) = some (a, l))
+    (h2 : (GraphPlan.labels plan).find? (fun (address', _) => address' = address) = some (b, l')) : l = l' := by
+  rw [h1] at h2
+  simp only [Option.some.injEq, Prod.mk.injEq] at h2
+  exact h2.2
+
+/-- What lowering a block makes. -/
+theorem lowerBlock_spec {plan : GraphPlan} {first second : Lowering} {block : Block} {effect : Nat}
+    (wf : LayoutWF first) (heff : Lowering.effectSlot first = some effect) (hlow : effect < Lowering.nextSlot first)
+    (hnextLt : block.next < 2 ^ 64) (hbudget : GraphPlan.edges plan ≠ [] → GraphPlan.budget plan ≠ effect)
+    (h : lowerBlock plan first block = some second) :
+    ∃ new, Grows first second new ∧ ∀ (stops : Nat → Bool) (global : Lowering) (program tail : List Op),
+      Place first second global new program tail effect →
+      ∃ start, SegOK stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program effect block start ∧
+        (block.address = GraphPlan.seed plan → ∀ m, RunAt stops program (new ++ tail, m) (start, m)) := by
+  unfold lowerBlock at h
+  -- the variables a block has written do not matter to what it does
+  generalize hl0 : (if GraphPlan.chained plan = true then Lowering.withWritten first (GraphPlan.definite plan block.address) else first) = l0 at h
+  have g0 : Grows first l0 [] := by
+    rw [← hl0]
+    split
+    · exact (show Pushed first (Lowering.withWritten first (GraphPlan.definite plan block.address)) [] 0 0 from
+        ⟨by simp [Lowering.withWritten], rfl, rfl, rfl, rfl, rfl⟩).grows wf
+    · exact (show Pushed first first [] 0 0 from ⟨by simp, rfl, rfl, rfl, rfl, rfl⟩).grows wf
+  have heff0 : Lowering.effectSlot l0 = some effect := by rw [g0.effect]; exact heff
+  have hbudgetE : (GraphPlan.edges plan).any (fun edge => edge.2 == block.address) = true → GraphPlan.budget plan ≠ effect := by
+    intro hany
+    apply hbudget
+    intro hnil
+    rw [hnil] at hany
+    simp at hany
+  dsimp only at h
+  split at h
+  · next hboth =>
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hboth
+    obtain ⟨hseed, hany⟩ := hboth
+    simp only [freshLabel] at h
+    obtain ⟨l2, h2, h⟩ := obind h
+    rw [hany] at h2
+    let body := Lowering.nextLabel l0
+    have p1 : Pushed l0 (Lowering.push (freshLabel l0).1 [.goto body]) [.goto body] 1 0 := ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+    have g1 := p1.grows g0.wf
+    have heff1 : Lowering.effectSlot (Lowering.push (freshLabel l0).1 [.goto body]) = some effect := heff0
+    rcases lowerEntry_cases heff1 h2 with ⟨hf, _⟩ | ⟨_, address, label, hfind, p2⟩
+    · simp at hf
+    · have g2 := p2.grows g1.wf
+      have p3 : Pushed l2 (Lowering.push l2 [.goto body, .label body]) [.goto body, .label body] 0 0 := ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+      have g3 := p3.grows g2.wf
+      have gAll := ((g0.trans g1).trans g2).trans g3
+      have heff3 : Lowering.effectSlot (Lowering.push l2 [.goto body, .label body]) = some effect := by rw [gAll.effect]; exact heff
+      have hlow3 : effect < Lowering.nextSlot (Lowering.push l2 [.goto body, .label body]) := Nat.lt_of_lt_of_le hlow gAll.next
+      obtain ⟨newE, gE, okE⟩ := lowerExit_spec gAll.wf heff3 hlow3 hnextLt h
+      refine ⟨_, gAll.trans gE, ?_⟩
+      intro stops global program tail place
+      obtain ⟨pre, hsplit⟩ := place.split
+      have hbud := hbudgetE hany
+      let entry := entryOps effect (GraphPlan.budget plan) (GraphPlan.observed plan) (Lowering.nextLabel (Lowering.push (freshLabel l0).1 [.goto body])) block.address (GraphPlan.guarded plan block)
+      let start := newE ++ tail
+      have placeE : Place (Lowering.push l2 [.goto body, .label body]) second global newE program tail effect := {
+        effectFree := place.effectFree
+        wfGlobal := place.wfGlobal
+        sub := place.sub
+        split := ⟨pre ++ [.goto body] ++ .label label :: entry ++ [.goto body, .label body], by rw [hsplit]; simp [entry, List.append_assoc]⟩
+        distinct := place.distinct }
+      have hbodyLabel : afterLabel program body = some start := by
+        refine afterLabel_split (pre ++ [.goto body] ++ .label label :: entry ++ [.goto body]) ?_ place.distinct
+        rw [hsplit]; simp [entry, start, List.append_assoc]
+      refine ⟨start, ⟨(okE stops global program tail placeE).weaken ?_ (Nat.le_refl _), ?_⟩, ?_⟩
+      · exact gAll.next
+      · intro _ label' address' hfind'
+        have hl := find_same hfind hfind'
+        subst hl
+        refine ⟨entry ++ ([.goto body, .label body] ++ start), ?_, ?_⟩
+        · refine afterLabel_split (pre ++ [.goto body]) ?_ place.distinct
+          rw [hsplit]; simp [entry, start, List.append_assoc]
+        · intro m hz
+          have hsim := entry_sim (stops := stops) (program := program) (pre := pre ++ [.goto body, .label label])
+            (observed := GraphPlan.observed plan) (go := Lowering.nextLabel (Lowering.push (freshLabel l0).1 [.goto body]))
+            (address := block.address) (guarded := GraphPlan.guarded plan block)
+            (more := [.goto body, .label body] ++ start) (by rw [hsplit]; simp [start, List.append_assoc]) place.distinct hbud m hz
+          rcases hsim with hs | hs | ⟨hb, hs⟩
+          · exact Or.inl hs
+          · exact Or.inr (Or.inl hs)
+          · refine Or.inr (Or.inr ⟨hb, hs.trans ?_⟩)
+            exact (Run.goto hbodyLabel _).toAt
+      · intro _ m
+        have : (([] ++ [.goto body]) ++ (.label label :: entry) ++ [.goto body, .label body] ++ newE) ++ tail =
+            .goto body :: (.label label :: entry ++ [.goto body, .label body] ++ start) := by
+          simp [start, List.append_assoc]
+        rw [this]
+        exact (Run.goto hbodyLabel _).toAt
+  · next hnot =>
+    obtain ⟨l1, h1, hx⟩ := obind h
+    rcases lowerEntry_cases heff0 h1 with ⟨hf, rfl⟩ | ⟨hany, address, label, hfind, p1⟩
+    · have heff1 := heff0
+      have hlow1 : effect < Lowering.nextSlot l1 := Nat.lt_of_lt_of_le hlow g0.next
+      obtain ⟨newE, gE, okE⟩ := lowerExit_spec g0.wf heff0 hlow1 hnextLt hx
+      refine ⟨_, g0.trans gE, ?_⟩
+      intro stops global program tail place
+      obtain ⟨pre, hsplit⟩ := place.split
+      have placeE : Place l1 second global newE program tail effect := {
+        effectFree := place.effectFree
+        wfGlobal := place.wfGlobal
+        sub := place.sub
+        split := ⟨pre, by rw [hsplit]; simp⟩
+        distinct := place.distinct }
+      refine ⟨newE ++ tail, ⟨(okE stops global program tail placeE).weaken g0.next (Nat.le_refl _), ?_⟩, ?_⟩
+      · intro hany'
+        rw [hf] at hany'
+        simp at hany'
+      · intro _ m
+        exact .refl _
+    · have g1 := p1.grows g0.wf
+      have gAll := g0.trans g1
+      have heff1 : Lowering.effectSlot l1 = some effect := by rw [gAll.effect]; exact heff
+      have hlow1 : effect < Lowering.nextSlot l1 := Nat.lt_of_lt_of_le hlow gAll.next
+      obtain ⟨newE, gE, okE⟩ := lowerExit_spec gAll.wf heff1 hlow1 hnextLt hx
+      refine ⟨_, gAll.trans gE, ?_⟩
+      intro stops global program tail place
+      obtain ⟨pre, hsplit⟩ := place.split
+      have hbud := hbudgetE hany
+      let entry := entryOps effect (GraphPlan.budget plan) (GraphPlan.observed plan) (Lowering.nextLabel l0) block.address (GraphPlan.guarded plan block)
+      let start := newE ++ tail
+      have placeE : Place l1 second global newE program tail effect := {
+        effectFree := place.effectFree
+        wfGlobal := place.wfGlobal
+        sub := place.sub
+        split := ⟨pre ++ .label label :: entry, by rw [hsplit]; simp [entry, List.append_assoc]⟩
+        distinct := place.distinct }
+      refine ⟨start, ⟨(okE stops global program tail placeE).weaken gAll.next (Nat.le_refl _), ?_⟩, ?_⟩
+      · intro _ label' address' hfind'
+        have hl := find_same hfind hfind'
+        subst hl
+        refine ⟨entry ++ start, ?_, ?_⟩
+        · refine afterLabel_split pre ?_ place.distinct
+          rw [hsplit]; simp [entry, start, List.append_assoc]
+        · intro m hz
+          exact entry_sim (stops := stops) (program := program) (pre := pre ++ [.label label]) (more := start)
+            (observed := GraphPlan.observed plan) (go := Lowering.nextLabel l0)
+            (address := block.address) (guarded := GraphPlan.guarded plan block)
+            (by rw [hsplit]; simp [start, List.append_assoc]) place.distinct hbud m hz
+      · intro hseed
+        exfalso
+        simp only [Bool.and_eq_true, decide_eq_true_eq, not_and] at hnot
+        exact hnot hseed hany
+
+/-- What lowering blocks makes. -/
+theorem lowerBlocks_spec {plan : GraphPlan} {effect : Nat} (blocks : List Block) {first second : Lowering}
+    (wf : LayoutWF first) (heff : Lowering.effectSlot first = some effect) (hlow : effect < Lowering.nextSlot first)
+    (hnext : ∀ block ∈ blocks, block.next < 2 ^ 64) (hbudget : GraphPlan.edges plan ≠ [] → GraphPlan.budget plan ≠ effect)
+    (h : lowerBlocks plan first blocks = some second) :
+    ∃ new, Grows first second new ∧ ∀ (stops : Nat → Bool) (global : Lowering) (program tail : List Op),
+      Place first second global new program tail effect →
+      (∀ block ∈ blocks, ∃ start, SegOK stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program effect block start) ∧
+      ∀ block rest, blocks = block :: rest → block.address = GraphPlan.seed plan →
+        ∃ start, SegOK stops plan (Lowering.nextSlot first) (Lowering.nextSlot second) global program effect block start ∧
+          ∀ m, RunAt stops program (new ++ tail, m) (start, m) := by
+  induction blocks generalizing first with
+  | nil =>
+    simp only [lowerBlocks, Option.some.injEq] at h
+    subst h
+    refine ⟨[], (show Pushed first first [] 0 0 from ⟨by simp, rfl, rfl, rfl, rfl, rfl⟩).grows wf, ?_⟩
+    intro stops global program tail _
+    exact ⟨by simp, by simp⟩
+  | cons block rest ih =>
+    simp only [lowerBlocks] at h
+    obtain ⟨mid, h1, h2⟩ := obind h
+    obtain ⟨newB, g1, ok1⟩ := lowerBlock_spec wf heff hlow (hnext block List.mem_cons_self) hbudget h1
+    obtain ⟨newR, g2, ok2⟩ := ih g1.wf (by rw [g1.effect]; exact heff) (Nat.lt_of_lt_of_le hlow g1.next)
+      (fun b hb => hnext b (List.mem_cons_of_mem _ hb)) h2
+    refine ⟨newB ++ newR, g1.trans g2, ?_⟩
+    intro stops global program tail place
+    obtain ⟨pre, hsplit⟩ := place.split
+    have place1 : Place first mid global newB program (newR ++ tail) effect := {
+      effectFree := place.effectFree
+      wfGlobal := place.wfGlobal
+      sub := place.sub.before' g2
+      split := ⟨pre, by rw [hsplit]; simp [List.append_assoc]⟩
+      distinct := place.distinct }
+    have place2 : Place mid second global newR program tail effect := {
+      effectFree := place.effectFree
+      wfGlobal := place.wfGlobal
+      sub := place.sub
+      split := ⟨pre ++ newB, by rw [hsplit]; simp [List.append_assoc]⟩
+      distinct := place.distinct }
+    obtain ⟨start, seg, hrun⟩ := ok1 stops global program (newR ++ tail) place1
+    obtain ⟨all2, _⟩ := ok2 stops global program tail place2
+    have seg' := seg.weaken (low' := Lowering.nextSlot first) (high' := Lowering.nextSlot second) (Nat.le_refl _) g2.next
+    refine ⟨?_, ?_⟩
+    · intro b hb
+      rcases List.mem_cons.1 hb with rfl | hb
+      · exact ⟨start, seg'⟩
+      · obtain ⟨s, hs⟩ := all2 b hb
+        exact ⟨s, hs.weaken g1.next (Nat.le_refl _)⟩
+    · intro b r hbs hseed
+      simp only [List.cons.injEq] at hbs
+      obtain ⟨rfl, rfl⟩ := hbs
+      refine ⟨start, seg', fun m => ?_⟩
+      rw [List.append_assoc]
+      exact hrun hseed m
+
+private theorem decrement_toNat {slot : Word64} (h : slot ≠ 0) :
+    (slot + (UInt64.ofNat (2 ^ 64 - 1)).toBitVec).toNat = slot.toNat - 1 := by
+  have hpos : 0 < slot.toNat := by
+    apply Nat.pos_of_ne_zero
+    intro hz
+    apply h
+    apply BitVec.eq_of_toNat_eq
+    simpa using hz
+  have hlt := slot.isLt
+  rw [BitVec.toNat_add]
+  have : (UInt64.ofNat (2 ^ 64 - 1)).toBitVec.toNat = 2 ^ 64 - 1 := by decide
+  rw [this]
+  omega
+
+/-- The interpreter stopped before the run could tell where it ends: there, nothing is claimed. -/
+def InterpreterFails (blocks : List Block) (fuel budget : Nat) (cfg : Bil.State × Nat) : Prop :=
+  ∃ count, count ≤ budget ∧ ∃ reached error, stepBlocks blocks fuel count cfg = .ok reached ∧ stepBlock blocks fuel reached = .error error
+
+/-- Where a run of a range ends: with `entered` blocks after the first, as many as the budget allows at most, and what the
+interpreter has after that many and one blocks, at the pc that it goes on with. -/
+def RangeEnds (stops : Nat → Bool) (blocks : List Block) (fuel budget budgetSlot effect : Nat) (global : Lowering) (program : List Op) (start : Cfg)
+    (cfg : Bil.State × Nat) : Prop :=
+  ∃ entered, entered ≤ budget ∧ ∃ state pc machine, stepBlocks blocks fuel (entered + 1) cfg = .ok (state, pc) ∧
+    EndsAt stops program start pc machine ∧ Agrees state.env machine global ∧ (machine.slots budgetSlot).toNat = budget - entered ∧
+    (machine.slots effect = 0 ∨ machine.slots effect = 1 ∨ (machine.slots effect = (3 : UInt64).toBitVec ∧ stops pc = true))
+
+
+private theorem range_step {stops : Nat → Bool} {plan : GraphPlan} {low high effect : Nat} {global : Lowering} {program : List Op} {blocks : List Block}
+    (hseg : ∀ block ∈ blocks, ∃ start, SegOK stops plan low high global program effect block start)
+    (hlabel : ∀ source target label, EdgeTo plan source target label → ∃ block ∈ blocks, block.address = target ∧
+      blockAt blocks target = some block ∧ ∃ address, (GraphPlan.labels plan).find? (fun (address, _) => address = block.address) = some (address, label))
+    (hfits : ∀ block ∈ blocks, block.address < 2 ^ 64)
+    (hfree : ∀ var, (var, effect) ∉ Lowering.layout global) (hbudgetFree : ∀ var, (var, GraphPlan.budget plan) ∉ Lowering.layout global)
+    (hbud : GraphPlan.budget plan ≠ effect) (hbudgetLow : GraphPlan.budget plan < low) (heffLow : effect < low) (fuel budget : Nat)
+    (ih : ∀ b, b + 1 = budget → ∀ (block : Block), block ∈ blocks → blockAt blocks block.address = some block →
+      ∀ (start : List Op), SegOK stops plan low high global program effect block start →
+      ∀ (state : Bil.State) (machine : Machine), Agrees state.env machine global → machine.slots effect = 0 →
+      (machine.slots (GraphPlan.budget plan)).toNat = b →
+      InterpreterFails blocks fuel b (state, block.address) ∨ ExhaustsAt stops program (start, machine) effect ∨
+        RangeEnds stops blocks fuel b (GraphPlan.budget plan) effect global program (start, machine) (state, block.address)) :
+    ∀ (block : Block), block ∈ blocks → blockAt blocks block.address = some block →
+      ∀ (start : List Op), SegOK stops plan low high global program effect block start →
+      ∀ (state : Bil.State) (machine : Machine), Agrees state.env machine global → machine.slots effect = 0 →
+      (machine.slots (GraphPlan.budget plan)).toNat = budget →
+      InterpreterFails blocks fuel budget (state, block.address) ∨ ExhaustsAt stops program (start, machine) effect ∨
+        RangeEnds stops blocks fuel budget (GraphPlan.budget plan) effect global program (start, machine) (state, block.address) := by
+  intro block hmem hat start seg state machine hag hz hb
+  have hstep : ∀ result, Bil.execProgram fuel state block.program = .ok result →
+      stepBlock blocks fuel (state, block.address) = .ok (result.1, nextPc block result.2) := by
+    intro result he
+    simp [stepBlock, hat, he]
+  cases hex : Bil.execProgram fuel state block.program with
+  | error error =>
+    refine Or.inl ⟨0, Nat.zero_le _, (state, block.address), error, rfl, ?_⟩
+    simp [stepBlock, hat, hex]
+  | ok result =>
+    have hone : stepBlocks blocks fuel 1 (state, block.address) = .ok (result.1, nextPc block result.2) := by
+      simp [stepBlocks, hstep result hex]
+    rcases seg.1 fuel state result machine hag hz hex with hx | ⟨m1, hend, hag1, hf1, heff1⟩ | ⟨m1, label, rest, hrun, hedge, hag1, hf1⟩
+    · exact Or.inr (Or.inl hx)
+    · refine Or.inr (Or.inr ⟨0, Nat.zero_le _, result.1, nextPc block result.2, m1, hone, hend, hag1, ?_, ?_⟩)
+      · rw [hf1.2 _ hbud (Or.inl hbudgetLow) hbudgetFree, hb]
+        simp
+      · rcases heff1 with h | h
+        · exact Or.inl h
+        · exact Or.inr (Or.inl h)
+    · obtain ⟨target, htmem, haddr, hatT, address, hfind⟩ := hlabel _ _ _ hedge
+      have hbudget1 : m1.slots (GraphPlan.budget plan) = machine.slots (GraphPlan.budget plan) :=
+        hf1.2 _ (Or.inl hbudgetLow) hbudgetFree
+      have hz1 : m1.slots effect = 0 := by rw [hf1.2 effect (Or.inl heffLow) hfree]; exact hz
+      have hlt : target.address < 2 ^ 64 := hfits _ htmem
+      have htoNat : (UInt64.ofNat target.address).toNat = target.address := by
+        simp only [UInt64.toNat_ofNat']
+        exact Nat.mod_eq_of_lt hlt
+      obtain ⟨startT, segT⟩ := hseg target htmem
+      have hany : (GraphPlan.edges plan).any (fun edge => edge.2 == target.address) = true := by
+        rw [List.any_eq_true]
+        exact ⟨_, hedge.1, by simp [haddr]⟩
+      obtain ⟨entry, hafter, henter⟩ := segT.2 hany label address hfind
+      have hgoto : RunAt stops program (start, machine) (entry, m1) :=
+        hrun.trans (Run.goto hafter _).toAt
+      have hpcT : nextPc block result.2 = target.address := haddr.symm
+      rcases henter m1 hz1 with ⟨hzero, r, hr⟩ | ⟨hne, hstop, r, hr⟩ | ⟨hne, hr⟩
+      · -- the budget is used up
+        refine Or.inr (Or.inr ⟨0, Nat.zero_le _, result.1, target.address, m1.write effect (1 : UInt64).toBitVec, ?_, ?_, hag1.write_free hfree _, ?_, ?_⟩)
+        · rw [← hpcT]; exact hone
+        · exact Or.inl ⟨r, _, hgoto.trans hr, htoNat⟩
+        · simp only [Machine.write_slots, hbud, ↓reduceIte, hzero]
+          rw [← hb, ← hbudget1, hzero]
+          rfl
+        · refine Or.inr (Or.inl ?_)
+          simp only [Machine.write_slots, ↓reduceIte]
+          rfl
+      · -- a code site stops the run
+        refine Or.inr (Or.inr ⟨0, Nat.zero_le _, result.1, target.address, (m1.write effect (0 : UInt64).toBitVec).write effect (3 : UInt64).toBitVec, ?_, ?_, ?_, ?_, ?_⟩)
+        · rw [← hpcT]; exact hone
+        · exact Or.inr (Or.inr ⟨r, effect, _, _, hgoto.trans hr, hstop, rfl, htoNat⟩)
+        · exact (hag1.write_free hfree _).write_free hfree _
+        · simp only [Machine.write_slots, hbud, ↓reduceIte, hbudget1, hb]
+          simp
+        · refine Or.inr (Or.inr ⟨?_, by rw [htoNat] at hstop; exact hstop⟩)
+          simp only [Machine.write_slots, ↓reduceIte]
+      · -- the block counts, and the run goes on in it
+        have hbudPos : 0 < budget := by
+          apply Nat.pos_of_ne_zero
+          intro hb0
+          apply hne
+          apply BitVec.eq_of_toNat_eq
+          rw [hbudget1, hb, hb0]
+          rfl
+        obtain ⟨b, rfl⟩ : ∃ b, budget = b + 1 := ⟨budget - 1, by omega⟩
+        let m2 := (m1.write effect (0 : UInt64).toBitVec).write (GraphPlan.budget plan) (m1.slots (GraphPlan.budget plan) + (UInt64.ofNat (2 ^ 64 - 1)).toBitVec)
+        have hag2 : Agrees result.1.env m2 global := (hag1.write_free hfree _).write_free hbudgetFree _
+        have hz2 : m2.slots effect = 0 := by
+          simp only [m2, Machine.write_slots, Ne.symm hbud, ↓reduceIte]
+          rfl
+        have hb2 : (m2.slots (GraphPlan.budget plan)).toNat = b := by
+          simp only [m2, Machine.write_slots, ↓reduceIte]
+          rw [decrement_toNat hne, hbudget1, hb]
+          simp
+        have hstart := (hgoto.trans hr)
+        rcases ih b rfl target htmem (by rw [haddr]; exact hatT) startT segT result.1 m2 hag2 hz2 hb2 with hfail | hx | hends
+        · obtain ⟨count, hc, reached, error, h1, h2⟩ := hfail
+          refine Or.inl ⟨count + 1, by omega, reached, error, ?_, h2⟩
+          simp only [stepBlocks, hstep result hex]
+          rw [hpcT]
+          exact h1
+        · exact Or.inr (Or.inl (hx.prepend hstart))
+        · obtain ⟨entered, he, st, pc, m3, h1, h2, h3, h4, h5⟩ := hends
+          refine Or.inr (Or.inr ⟨entered + 1, by omega, st, pc, m3, ?_, h2.prepend hstart, h3, ?_, h5⟩)
+          · rw [show entered + 1 + 1 = (entered + 1) + 1 from rfl]
+            simp only [stepBlocks, hstep result hex]
+            rw [hpcT]
+            simpa only [stepBlocks] using h1
+          · rw [h4]
+            omega
+
+/-- Blocks run one after the other along edges, with a budget: a run from the statements of a block, whose budget slot has `budget`, ends as
+many blocks later as `RangeEnds` says, unless a loop in it uses up its iterations or the interpreter has no result. -/
+theorem range_core {stops : Nat → Bool} {plan : GraphPlan} {low high effect : Nat} {global : Lowering} {program : List Op} {blocks : List Block}
+    (hseg : ∀ block ∈ blocks, ∃ start, SegOK stops plan low high global program effect block start)
+    (hlabel : ∀ source target label, EdgeTo plan source target label → ∃ block ∈ blocks, block.address = target ∧
+      blockAt blocks target = some block ∧ ∃ address, (GraphPlan.labels plan).find? (fun (address, _) => address = block.address) = some (address, label))
+    (hfits : ∀ block ∈ blocks, block.address < 2 ^ 64)
+    (hfree : ∀ var, (var, effect) ∉ Lowering.layout global) (hbudgetFree : ∀ var, (var, GraphPlan.budget plan) ∉ Lowering.layout global)
+    (hbe : GraphPlan.edges plan ≠ [] → GraphPlan.budget plan ≠ effect) (hbudgetLow : GraphPlan.budget plan < low) (heffLow : effect < low) (fuel : Nat) (budget : Nat) :
+    GraphPlan.edges plan ≠ [] → ∀ (block : Block), block ∈ blocks → blockAt blocks block.address = some block →
+      ∀ (start : List Op), SegOK stops plan low high global program effect block start →
+      ∀ (state : Bil.State) (machine : Machine), Agrees state.env machine global → machine.slots effect = 0 →
+      (machine.slots (GraphPlan.budget plan)).toNat = budget →
+      InterpreterFails blocks fuel budget (state, block.address) ∨ ExhaustsAt stops program (start, machine) effect ∨
+        RangeEnds stops blocks fuel budget (GraphPlan.budget plan) effect global program (start, machine) (state, block.address) := by
+  intro hedges
+  have hbud := hbe hedges
+  induction budget with
+  | zero => exact range_step hseg hlabel hfits hfree hbudgetFree hbud hbudgetLow heffLow fuel 0 (fun _ h => by omega)
+  | succ budget ih =>
+    refine range_step hseg hlabel hfits hfree hbudgetFree hbud hbudgetLow heffLow fuel (budget + 1) ?_
+    intro b hb
+    obtain rfl : b = budget := by omega
+    exact ih
+
+/-! The flags. -/
+
+/-- The operations that have flags set next to the moves. -/
+def flagOps (flags : List (Nat × Nat)) (ops : List Op) : List Op := ops.flatMap (flagged flags)
+
+@[simp] theorem flagOps_nil (flags : List (Nat × Nat)) : flagOps flags [] = [] := rfl
+
+theorem flagOps_cons (flags : List (Nat × Nat)) (op : Op) (ops : List Op) :
+    flagOps flags (op :: ops) = flagged flags op ++ flagOps flags ops := rfl
+
+theorem afterLabel_flagOps (flags : List (Nat × Nat)) (program : List Op) (id : Nat) :
+    afterLabel (flagOps flags program) id = (afterLabel program id).map (flagOps flags) := by
+  induction program with
+  | nil => rfl
+  | cons op rest ih =>
+    rw [flagOps_cons]
+    cases op
+    case move dst src =>
+      simp only [flagged]
+      split <;> simpa [afterLabel] using ih
+    case label l =>
+      simp only [flagged, List.singleton_append, afterLabel]
+      split
+      · rfl
+      · exact ih
+    all_goals
+      simp only [flagged, List.singleton_append, afterLabel]
+      exact ih
+
+theorem afterLabel_sub {program target : List Op} {id : Nat} (h : afterLabel program id = some target) :
+    ∀ op ∈ target, op ∈ program := by
+  induction program with
+  | nil => simp [afterLabel] at h
+  | cons head rest ih =>
+    intro op hop
+    cases head
+    case label l =>
+      simp only [afterLabel] at h
+      split at h
+      · simp only [Option.some.injEq] at h
+        subst h
+        exact List.mem_cons_of_mem _ hop
+      · exact List.mem_cons_of_mem _ (ih h op hop)
+    all_goals exact List.mem_cons_of_mem _ (ih h op hop)
+
+/-- A machine of the operations with flags, and the same machine without them. -/
+structure FlagRel (limit : Nat) (flags : List (Nat × Nat)) (m m' : Machine) : Prop where
+  slots : ∀ slot, slot < limit → m'.slots slot = m.slots slot
+  memory : m'.memory = m.memory
+  view : m'.view = m.view
+  flag : ∀ slot f, flags.find? (fun flag => flag.1 == slot) = some f → (m'.slots f.2 ≠ 0 ↔ m.moved slot = true)
+
+theorem FlagRel.write {limit : Nat} {flags : List (Nat × Nat)} {m m' : Machine} (h : FlagRel limit flags m m') (hf : ∀ f ∈ flags, limit ≤ f.2)
+    {slot : Nat} (hs : slot < limit) (value : Word64) : FlagRel limit flags (m.write slot value) (m'.write slot value) where
+  slots := fun other ho => by simp only [Machine.write_slots, h.slots other ho]
+  memory := h.memory
+  view := h.view
+  flag := fun other f hfind => by
+    have hne : f.2 ≠ slot := by
+      have := hf f (List.mem_of_find?_eq_some hfind)
+      omega
+    simp only [Machine.write_slots, hne, ↓reduceIte]
+    exact h.flag other f hfind
+
+private theorem denoteLoad_congr {m m' : Machine} (hm : m'.memory = m.memory) (hv : m'.view = m.view) (base : Word64) (size : Nat) (big : Bool) :
+    denoteLoad (fun address => m'.memory (m'.view address)) base size big = denoteLoad (fun address => m.memory (m.view address)) base size big := by
+  rw [hm, hv]
+
+/-- An operation that is not a move does the same on both machines, when it stays in the slots. -/
+theorem FlagRel.step {limit : Nat} {flags : List (Nat × Nat)} {m m' : Machine} (h : FlagRel limit flags m m') (hf : ∀ f ∈ flags, limit ≤ f.2)
+    {op : Op} (hslots : ∀ slot ∈ opSlots op, slot < limit) (hmove : ∀ dst src, op ≠ .move dst src) :
+    FlagRel limit flags (Bap.Proofs.Primus.step m op) (Bap.Proofs.Primus.step m' op) := by
+  have hs : ∀ {slot}, slot ∈ opSlots op → m'.slots slot = m.slots slot := fun hm => h.slots _ (hslots _ hm)
+  cases op
+  case set dst imm =>
+    exact h.write hf (hslots dst (by simp [opSlots])) _
+  case move dst src => exact absurd rfl (hmove dst src)
+  case add dst src imm =>
+    have := hs (slot := src) (by simp [opSlots])
+    simp only [Bap.Proofs.Primus.step, this]
+    exact h.write hf (hslots dst (by simp [opSlots])) _
+  case bin op dst left right =>
+    have h1 := hs (slot := left) (by simp [opSlots])
+    have h2 := hs (slot := right) (by simp [opSlots])
+    simp only [Bap.Proofs.Primus.step, h1, h2]
+    exact h.write hf (hslots dst (by simp [opSlots])) _
+  case andImm dst src imm =>
+    have := hs (slot := src) (by simp [opSlots])
+    simp only [Bap.Proofs.Primus.step, this]
+    exact h.write hf (hslots dst (by simp [opSlots])) _
+  case signExtend width dst src =>
+    have := hs (slot := src) (by simp [opSlots])
+    simp only [Bap.Proofs.Primus.step, this]
+    exact h.write hf (hslots dst (by simp [opSlots])) _
+  case select dst condition yes no =>
+    have h1 := hs (slot := condition) (by simp [opSlots])
+    have h2 := hs (slot := yes) (by simp [opSlots])
+    have h3 := hs (slot := no) (by simp [opSlots])
+    simp only [Bap.Proofs.Primus.step, h1, h2, h3]
+    exact h.write hf (hslots dst (by simp [opSlots])) _
+  case neg dst src =>
+    have := hs (slot := src) (by simp [opSlots])
+    simp only [Bap.Proofs.Primus.step, this]
+    exact h.write hf (hslots dst (by simp [opSlots])) _
+  case not dst src =>
+    have := hs (slot := src) (by simp [opSlots])
+    simp only [Bap.Proofs.Primus.step, this]
+    exact h.write hf (hslots dst (by simp [opSlots])) _
+  case ashr width dst left right =>
+    have h1 := hs (slot := left) (by simp [opSlots])
+    have h2 := hs (slot := right) (by simp [opSlots])
+    simp only [Bap.Proofs.Primus.step, h1, h2]
+    exact h.write hf (hslots dst (by simp [opSlots])) _
+  case memLoad dst address size big =>
+    have h1 := hs (slot := address) (by simp [opSlots])
+    simp only [Bap.Proofs.Primus.step, h1, denoteLoad_congr h.memory h.view]
+    exact h.write hf (hslots dst (by simp [opSlots])) _
+  case memStore address value size big =>
+    have h1 := hs (slot := address) (by simp [opSlots])
+    have h2 := hs (slot := value) (by simp [opSlots])
+    refine ⟨h.slots, ?_, h.view, h.flag⟩
+    simp only [Bap.Proofs.Primus.step, h1, h2, h.memory, h.view]
+  all_goals exact h
+
+private theorem flagSlots_spec (outputs : List (Bap.Var × Nat)) {limit start next : Nat} {init flags : List (Nat × Nat)}
+    (h : outputs.foldl (init := (start, init)) (fun (next, flags) output => (next + 1, (output.2, next) :: flags)) = (next, flags))
+    (hl : limit ≤ start) (hi : ∀ f ∈ init, limit ≤ f.2 ∧ f.2 < start) (hd : init.Pairwise fun a b => a.2 ≠ b.2) :
+    start ≤ next ∧ (∀ f ∈ flags, limit ≤ f.2 ∧ f.2 < next) ∧ (flags.Pairwise fun a b => a.2 ≠ b.2) ∧ (∀ f ∈ init, f ∈ flags) ∧
+      ∀ output ∈ outputs, ∃ f ∈ flags, f.1 = output.2 := by
+  induction outputs generalizing start init with
+  | nil =>
+    simp only [List.foldl_nil, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    exact ⟨Nat.le_refl _, hi, hd, fun _ h => h, by simp⟩
+  | cons head rest ih =>
+    simp only [List.foldl_cons] at h
+    obtain ⟨h1, h2, h3, h4, h5⟩ := ih h (by omega)
+      (by
+        intro f hm
+        rcases List.mem_cons.1 hm with rfl | hm
+        · simpa using hl
+        · have := hi f hm
+          omega)
+      (by
+        refine List.pairwise_cons.2 ⟨?_, hd⟩
+        intro f hm
+        have := hi f hm
+        simp only
+        omega)
+    refine ⟨by omega, h2, h3, fun f hm => h4 f (List.mem_cons_of_mem _ hm), ?_⟩
+    intro output hm
+    rcases List.mem_cons.1 hm with rfl | hm
+    · exact ⟨_, h4 _ List.mem_cons_self, rfl⟩
+    · exact h5 output hm
+
+/-- A move does the same on both machines, and sets the flag. -/
+theorem FlagRel.move {limit : Nat} {flags : List (Nat × Nat)} {m m' : Machine} (h : FlagRel limit flags m m') (hf : ∀ f ∈ flags, limit ≤ f.2)
+    (hd : flags.Pairwise fun a b => a.2 ≠ b.2) {dst src : Nat} (hdst : dst < limit) (hsrc : src < limit) :
+    ∃ m2', (∀ {stops : Nat → Bool} {program rest : List Op}, RunAt stops program (flagged flags (.move dst src) ++ rest, m') (rest, m2')) ∧
+      FlagRel limit flags (Bap.Proofs.Primus.step m (.move dst src)) m2' := by
+  have hv : m'.slots src = m.slots src := h.slots src hsrc
+  simp only [Bap.Proofs.Primus.step]
+  cases hfind : flags.find? (fun flag => flag.1 == dst) with
+  | none =>
+    refine ⟨Bap.Proofs.Primus.step m' (.move dst src), ?_, ?_⟩
+    · intro stops program rest
+      simp only [flagged, hfind, List.singleton_append]
+      exact (Run.linear (op := .move dst src) rfl rest m').toAt
+    · refine ⟨fun other ho => ?_, h.memory, h.view, fun other f hfo => ?_⟩
+      · simp only [Bap.Proofs.Primus.step, Machine.markMove_slots, hv, h.slots other ho]
+      · have hne : f.2 ≠ dst := by
+          have := hf f (List.mem_of_find?_eq_some hfo)
+          omega
+        have hod : other ≠ dst := by
+          intro he
+          subst he
+          rw [hfind] at hfo
+          simp at hfo
+        have hslot : (Bap.Proofs.Primus.step m' (.move dst src)).slots f.2 = m'.slots f.2 := by
+          simp [Bap.Proofs.Primus.step, hne]
+        have hm : (m.markMove dst (m.slots src)).moved other = m.moved other := by simp [Machine.markMove, hod]
+        rw [hslot, hm]
+        exact h.flag other f hfo
+  | some f0 =>
+    refine ⟨(Bap.Proofs.Primus.step m' (.move dst src)).write f0.2 (1 : UInt64).toBitVec, ?_, ?_⟩
+    · intro stops program rest
+      simp only [flagged, hfind, List.cons_append, List.nil_append]
+      exact ((Run.linear (op := .move dst src) rfl _ m').trans (Run.linear (op := .set f0.2 1) rfl rest _)).toAt
+    · have hf0 := hf f0 (List.mem_of_find?_eq_some hfind)
+      refine ⟨fun other ho => ?_, h.memory, h.view, fun other f hfo => ?_⟩
+      · have hne : other ≠ f0.2 := by omega
+        simp only [Machine.write_slots, hne, ↓reduceIte, Bap.Proofs.Primus.step, Machine.markMove_slots, hv, h.slots other ho]
+      · have hne : f.2 ≠ dst := by
+          have := hf f (List.mem_of_find?_eq_some hfo)
+          omega
+        by_cases hod : other = dst
+        · subst hod
+          rw [hfind] at hfo
+          simp only [Option.some.injEq] at hfo
+          subst hfo
+          simp [Machine.markMove, Machine.write_slots]
+        · have hkey : f.1 = other := by simpa using List.find?_some hfo
+          have hkey0 : f0.1 = dst := by simpa using List.find?_some hfind
+          have hne0 : f.2 ≠ f0.2 := by
+            intro he
+            have hsame := pairwise_same hd (List.mem_of_find?_eq_some hfo) (List.mem_of_find?_eq_some hfind) he
+            apply hod
+            rw [← hkey, ← hkey0, hsame]
+          have hslot : ((Bap.Proofs.Primus.step m' (.move dst src)).write f0.2 (1 : UInt64).toBitVec).slots f.2 = m'.slots f.2 := by
+            simp [Bap.Proofs.Primus.step, hne, hne0, Machine.write_slots]
+          have hm : (m.markMove dst (m.slots src)).moved other = m.moved other := by simp [Machine.markMove, hod]
+          rw [hslot, hm]
+          exact h.flag other f hfo
+
+/-- A run without flags is a run with them. -/
+theorem RunAt.withFlags {stops : Nat → Bool} {program : List Op} {limit : Nat} {flags : List (Nat × Nat)} {a b : Cfg}
+    (hr : RunAt stops program a b) (hf : ∀ f ∈ flags, limit ≤ f.2) (hd : flags.Pairwise fun a b => a.2 ≠ b.2)
+    (hslots : ∀ op ∈ program, ∀ slot ∈ opSlots op, slot < limit) :
+    (∀ op ∈ a.1, op ∈ program) → ∀ m', FlagRel limit flags a.2 m' →
+      (∀ op ∈ b.1, op ∈ program) ∧ ∃ m2', RunAt stops (flagOps flags program) (flagOps flags a.1, m') (flagOps flags b.1, m2') ∧ FlagRel limit flags b.2 m2' := by
+  induction hr with
+  | refl cfg =>
+    intro hin m' hrel
+    exact ⟨hin, m', .refl _, hrel⟩
+  | @step first second last hn _ ih =>
+    intro hin m' hrel
+    obtain ⟨ops, m⟩ := first
+    cases ops with
+    | nil => simp [nextCfgAt, nextCfg] at hn
+    | cons op rest =>
+      have hop : op ∈ program := hin op List.mem_cons_self
+      have hrest : ∀ o ∈ rest, o ∈ program := fun o ho => hin o (List.mem_cons_of_mem _ ho)
+      have hcont : ∀ {m2 : Machine} {m2' : Machine}, FlagRel limit flags m2 m2' → second = (rest, m2) →
+          (∀ op ∈ last.1, op ∈ program) ∧ ∃ m3', RunAt stops (flagOps flags program) (flagOps flags rest, m2') (flagOps flags last.1, m3') ∧
+            FlagRel limit flags last.2 m3' := by
+        intro m2 m2' hr2 he
+        subst he
+        exact ih hrest m2' hr2
+      cases op
+      case goto id =>
+        simp only [nextCfgAt, nextCfg] at hn
+        cases hl : afterLabel program id with
+        | none => simp [hl] at hn
+        | some target =>
+          simp only [hl, Option.map_some, Option.some.injEq] at hn
+          subst hn
+          obtain ⟨h1, m3, h2, h3⟩ := ih (afterLabel_sub hl) m' hrel
+          refine ⟨h1, m3, ?_, h3⟩
+          refine .step ?_ h2
+          simp [nextCfgAt, nextCfg, flagOps_cons, flagged, afterLabel_flagOps, hl]
+      case branch condition yes no =>
+        simp only [nextCfgAt, nextCfg] at hn
+        have hc : m'.slots condition = m.slots condition := hrel.slots _ (hslots _ hop condition (by simp [opSlots]))
+        cases hl : afterLabel program (if m.slots condition ≠ 0 then yes else no) with
+        | none =>
+          rw [hl] at hn
+          simp at hn
+        | some target =>
+          rw [hl] at hn
+          simp only [Option.map_some, Option.some.injEq] at hn
+          subst hn
+          obtain ⟨h1, m3, h2, h3⟩ := ih (afterLabel_sub hl) m' hrel
+          refine ⟨h1, m3, ?_, h3⟩
+          refine .step ?_ h2
+          show nextCfg (flagOps flags program) (.branch condition yes no :: flagOps flags rest, m') = _
+          simp only [nextCfg, hc, afterLabel_flagOps, hl, Option.map_some]
+      case jump t => simp [nextCfgAt, nextCfg] at hn
+      case jumpSlot s => simp [nextCfgAt, nextCfg] at hn
+      case code e t =>
+        simp only [nextCfgAt] at hn
+        split at hn
+        · simp at hn
+        · next hs =>
+          simp only [Option.some.injEq] at hn
+          subst hn
+          obtain ⟨h1, m3, h2, h3⟩ := ih hrest m' hrel
+          exact ⟨h1, m3, (RunAt.pass hs).trans h2, h3⟩
+      case move dst src =>
+        have hn' : second = (rest, Bap.Proofs.Primus.step m (.move dst src)) := by
+          simpa [nextCfgAt, nextCfg] using hn.symm
+        obtain ⟨m2', hrun, hr2⟩ := FlagRel.move hrel hf hd (hslots _ hop dst (by simp [opSlots])) (hslots _ hop src (by simp [opSlots]))
+        obtain ⟨h1, m3, h2, h3⟩ := hcont hr2 hn'
+        exact ⟨h1, m3, by rw [flagOps_cons]; exact hrun.trans h2, h3⟩
+      all_goals
+        have hn' := Option.some.inj ((nextCfgAt_of_next (stops := stops) (program := program) (a := (_, m)) (b := (rest, _)) rfl).symm.trans hn)
+        have hr2 := FlagRel.step hrel hf (hslots _ hop) (by intro _ _ he; cases he)
+        obtain ⟨h1, m3, h2, h3⟩ := hcont hr2 hn'.symm
+        refine ⟨h1, m3, ?_, h3⟩
+        rw [flagOps_cons]
+        exact (Run.linear rfl _ m').toAt.trans h2
+
+private theorem withoutBindings_lookup (var : Bap.Var) (env : Bil.Env) (pending : List Bap.Var) (h : var ∉ pending) :
+    Bil.lookup (withoutBindings pending env) var = Bil.lookup env var := by
+  induction env generalizing pending with
+  | nil => rfl
+  | cons binding rest ih =>
+    simp only [withoutBindings]
+    split
+    · rfl
+    · split
+      · next hc =>
+        rw [ih _ (fun hm => h (List.mem_of_mem_erase hm))]
+        have hne : (binding.1 == var) = false := by
+          simp only [beq_eq_false_iff_ne, ne_eq]
+          intro he
+          subst he
+          exact h (by simpa using hc)
+        simp [Bil.lookup, hne]
+      · have hl := ih pending h
+        simp only [Bil.lookup, List.find?_cons] at hl ⊢
+        cases (binding.1 == var) with
+        | true => rfl
+        | false => exact hl
+
+private theorem syncUpdates_names {outputs : List (Bap.Var × Nat)} {slots : Array UInt64} {update : Bap.Var × Bap.Value}
+    (h : update ∈ syncUpdates outputs slots) : ∃ slot, (update.1, slot) ∈ outputs := by
+  induction outputs with
+  | nil => simp [syncUpdates] at h
+  | cons head rest ih =>
+    simp only [syncUpdates, List.foldr_cons] at h
+    split at h
+    · rcases List.mem_cons.1 h with rfl | h
+      · exact ⟨head.2, List.mem_cons_self⟩
+      · obtain ⟨s, hs⟩ := ih h
+        exact ⟨s, List.mem_cons_of_mem _ hs⟩
+    · obtain ⟨s, hs⟩ := ih h
+      exact ⟨s, List.mem_cons_of_mem _ hs⟩
+
+/-- A variable that the run did not reach keeps what it had. -/
+theorem syncState_other {lowering : Lowering} {state : Bil.State} {slots : Array UInt64} {var : Bap.Var}
+    (h : ∀ slot, (var, slot) ∉ reachedOutputs lowering slots) :
+    Bil.lookup (syncState lowering state slots).env var = Bil.lookup state.env var := by
+  have hnames : ∀ update ∈ syncUpdates (reachedOutputs lowering slots) slots, update.1 ≠ var := by
+    intro update hu he
+    obtain ⟨s, hs⟩ := syncUpdates_names hu
+    rw [he] at hs
+    exact h s hs
+  have hnot : var ∉ (syncUpdates (reachedOutputs lowering slots) slots).map Prod.fst := by
+    intro hm
+    obtain ⟨u, hu, he⟩ := List.mem_map.1 hm
+    exact hnames u hu he
+  simp only [syncState]
+  rw [← withoutBindings_lookup var state.env _ hnot]
+  generalize withoutBindings _ state.env = rest
+  generalize syncUpdates (reachedOutputs lowering slots) slots = updates at hnames hnot ⊢
+  simp only [Bil.lookup, List.find?_append]
+  have : updates.find? (fun binding => binding.1 == var) = none := by
+    apply List.find?_eq_none.2
+    intro u hu
+    simpa using hnames u hu
+  simp [this]
+
+/-- The way out of a range: the variables have what the interpreter has, if only a flag may say that one was not written, and what
+is not flagged has a value. -/
+theorem syncState_flags {lowering global : Lowering} {state : Bil.State} {env : Bil.Env} {m m' : Machine} {out : Array UInt64}
+    (hflagKeys : (∀ output ∈ Lowering.outputs lowering, (Lowering.flags lowering).find? (fun flag => flag.1 == output.2) = none →
+      ∃ value, Bil.lookup env output.1 = .ok value))
+    (hagree : Agrees env m global) (hlayout : Lowering.layout global = Lowering.layout lowering)
+    (hwf : LayoutWF lowering) (hsub : ∀ output ∈ Lowering.outputs lowering, output ∈ Lowering.layout lowering)
+    (hrel : FlagRel (Lowering.nextSlot global) (Lowering.flags lowering) m m') (hnext : Lowering.nextSlot global ≤ Lowering.nextSlot lowering)
+    (hbound : ∀ binding ∈ Lowering.layout lowering, binding.2 < Lowering.nextSlot global)
+    (hflagsLow : ∀ f ∈ Lowering.flags lowering, f.2 < Lowering.nextSlot lowering)
+    (horigin : m.origin = state.env) (hmoved : ∀ binding ∈ Lowering.layout lowering, m.moved binding.2 = true → binding ∈ Lowering.outputs lowering)
+    (hout : ∀ index, index < Lowering.nextSlot lowering → (out.getD index 0).toBitVec = m'.slots index)
+    {var : Bap.Var} (hmem : Lowering.memory global ≠ some var) :
+    Bil.lookup (syncState lowering state out).env var = Bil.lookup env var := by
+  have hflagOf : ∀ f ∈ Lowering.flags lowering, (out.getD f.2 0 != 0) = true → m'.slots f.2 ≠ 0 := by
+    intro f hf hne he
+    have := hout f.2 (hflagsLow f hf)
+    rw [he] at this
+    simp only [bne_iff_ne, ne_eq] at hne
+    apply hne
+    exact UInt64.eq_of_toBitVec_eq (by simpa using this)
+  by_cases hin : ∃ slot, (var, slot) ∈ reachedOutputs lowering out
+  · obtain ⟨slot, hslot⟩ := hin
+    have hoput : (var, slot) ∈ Lowering.outputs lowering := by
+      unfold reachedOutputs at hslot
+      split at hslot
+      · exact hslot
+      · exact (List.mem_filter.1 hslot).1
+    have hlay := hsub _ hoput
+    have hvalue : ∃ value, Bil.lookup env var = .ok value := by
+      cases hfind : (Lowering.flags lowering).find? (fun flag => flag.1 == slot) with
+      | none => exact hflagKeys _ hoput hfind
+      | some f =>
+        have hnotEmpty : (Lowering.flags lowering).isEmpty = false := by
+          cases hfl : Lowering.flags lowering with
+          | nil => rw [hfl] at hfind; simp at hfind
+          | cons _ _ => rfl
+        unfold reachedOutputs at hslot
+        simp only [hnotEmpty, Bool.false_eq_true, ↓reduceIte, List.mem_filter] at hslot
+        have hset := hslot.2
+        simp only [hfind] at hset
+        have hne := hflagOf f (List.mem_of_find?_eq_some hfind) hset
+        have hmv := (hrel.flag slot f hfind).1 hne
+        exact hagree.bound (var, slot) (by rw [hlayout]; exact hlay) hmv
+    obtain ⟨value, hv⟩ := hvalue
+    obtain ⟨width, bits, rfl, hw, hholds⟩ := hagree.slots (var, slot) (by rw [hlayout]; exact hlay) value hv
+    have hu : ∀ other, (var, other) ∈ reachedOutputs lowering out → other = slot := by
+      intro other ho
+      have hoo : (var, other) ∈ Lowering.outputs lowering := by
+        unfold reachedOutputs at ho
+        split at ho
+        · exact ho
+        · exact (List.mem_filter.1 ho).1
+      have := pairwise_same hwf.varsDistinct (hsub _ hoo) hlay rfl
+      exact congrArg Prod.snd this
+    rw [syncState_output hslot hw hu, hv]
+    have hsl := hbound _ hlay
+    have heq : (out.getD slot 0).toBitVec = m.slots slot := by
+      rw [hout slot (Nat.lt_of_lt_of_le hsl hnext), hrel.slots slot hsl]
+    have : Holds (out.getD slot 0).toBitVec bits := by
+      rw [heq]
+      exact hholds
+    rw [slotBits_holds this]
+  · have hnone : ∀ slot, (var, slot) ∉ reachedOutputs lowering out := fun slot hs => hin ⟨slot, hs⟩
+    rw [syncState_other hnone]
+    refine Classical.byContradiction fun hne => ?_
+    have hne' : Bil.lookup env var ≠ Bil.lookup m.origin var := by
+      rw [horigin]
+      exact fun he => hne he.symm
+    rcases hagree.changed var hne' with hm | ⟨slot, hl, hmv⟩
+    · exact hmem hm
+    · have hl' : (var, slot) ∈ Lowering.layout lowering := by rw [← hlayout]; exact hl
+      have hoput := hmoved _ hl' hmv
+      apply hnone slot
+      unfold reachedOutputs
+      split
+      · exact hoput
+      · refine List.mem_filter.2 ⟨hoput, ?_⟩
+        cases hfind : (Lowering.flags lowering).find? (fun flag => flag.1 == slot) with
+        | none => simp
+        | some f =>
+          have hset := (hrel.flag slot f hfind).2 hmv
+          have := hout f.2 (hflagsLow f (List.mem_of_find?_eq_some hfind))
+          simp only [bne_iff_ne, ne_eq]
+          intro hz
+          rw [hz] at this
+          apply hset
+          simpa using this.symm
+
+/-! The whole of it. -/
+
+/-- A step within a program stays in it, and only a move marks a slot. -/
+private theorem nextCfgAt_inside {stops : Nat → Bool} {program : List Op} {a b : Cfg} (h : nextCfgAt stops program a = some b)
+    (hin : ∀ op ∈ a.1, op ∈ program) (hm : ∀ slot, a.2.moved slot = true → ∃ src, Op.move slot src ∈ program) :
+    b.2.origin = a.2.origin ∧ (∀ op ∈ b.1, op ∈ program) ∧ ∀ slot, b.2.moved slot = true → ∃ src, Op.move slot src ∈ program := by
+  obtain ⟨ops, m⟩ := a
+  cases ops with
+  | nil => simp [nextCfgAt, nextCfg] at h
+  | cons op rest =>
+    have hrest : ∀ o ∈ rest, o ∈ program := fun o ho => hin o (List.mem_cons_of_mem _ ho)
+    have hop : op ∈ program := hin op List.mem_cons_self
+    cases op
+    case goto id =>
+      simp only [nextCfgAt, nextCfg] at h
+      cases hl : afterLabel program id with
+      | none => simp [hl] at h
+      | some target =>
+        simp only [hl, Option.map_some, Option.some.injEq] at h
+        subst h
+        exact ⟨rfl, afterLabel_sub hl, hm⟩
+    case branch condition yes no =>
+      simp only [nextCfgAt, nextCfg] at h
+      cases hl : afterLabel program (if m.slots condition ≠ 0 then yes else no) with
+      | none => rw [hl] at h; simp at h
+      | some target =>
+        rw [hl] at h
+        simp only [Option.map_some, Option.some.injEq] at h
+        subst h
+        exact ⟨rfl, afterLabel_sub hl, hm⟩
+    case jump t => simp [nextCfgAt, nextCfg] at h
+    case jumpSlot s => simp [nextCfgAt, nextCfg] at h
+    case code e t =>
+      simp only [nextCfgAt] at h
+      split at h
+      · simp at h
+      · simp only [Option.some.injEq] at h
+        subst h
+        exact ⟨rfl, hrest, hm⟩
+    case move dst src =>
+      have hb : b = (rest, Bap.Proofs.Primus.step m (.move dst src)) := by
+        simpa [nextCfgAt, nextCfg] using h.symm
+      subst hb
+      refine ⟨rfl, hrest, fun slot hs => ?_⟩
+      simp only [Bap.Proofs.Primus.step, Machine.markMove, Bool.or_eq_true, beq_iff_eq] at hs
+      rcases hs with rfl | hs
+      · exact ⟨src, hop⟩
+      · exact hm slot hs
+    all_goals
+      have hb := Option.some.inj ((nextCfgAt_of_next (stops := stops) (program := program) (a := (_, m)) (b := (rest, _)) rfl).symm.trans h)
+      subst hb
+      exact ⟨step_origin _ _, hrest, hm⟩
+
+private theorem RunAt.inside {stops : Nat → Bool} {program : List Op} {a b : Cfg} (h : RunAt stops program a b)
+    (hin : ∀ op ∈ a.1, op ∈ program) (hm : ∀ slot, a.2.moved slot = true → ∃ src, Op.move slot src ∈ program) :
+    b.2.origin = a.2.origin ∧ (∀ op ∈ b.1, op ∈ program) ∧ ∀ slot, b.2.moved slot = true → ∃ src, Op.move slot src ∈ program := by
+  induction h with
+  | refl => exact ⟨rfl, hin, hm⟩
+  | step hn _ ih =>
+    obtain ⟨h0, h1, h2⟩ := nextCfgAt_inside hn hin hm
+    obtain ⟨h3, h4, h5⟩ := ih h1 h2
+    exact ⟨h3.trans h0, h4, h5⟩
+
+/-- A run that ends in the operations without flags ends the same way in those with them. -/
+private theorem EndsAt.withFlags {stops : Nat → Bool} {program : List Op} {limit : Nat} {flags : List (Nat × Nat)} {m0 m0' m : Machine} {pc : Nat}
+    (hend : EndsAt stops program (program, m0) pc m) (hf : ∀ f ∈ flags, limit ≤ f.2) (hd : flags.Pairwise fun a b => a.2 ≠ b.2)
+    (hslots : ∀ op ∈ program, ∀ slot ∈ opSlots op, slot < limit) (hrel : FlagRel limit flags m0 m0')
+    (hm0 : ∀ slot, m0.moved slot = true → ∃ src, Op.move slot src ∈ program) :
+    ∃ m', EndsAt stops (flagOps flags program) (flagOps flags program, m0') pc m' ∧ FlagRel limit flags m m' ∧
+      m.origin = m0.origin ∧ ∀ slot, m.moved slot = true → ∃ src, Op.move slot src ∈ program := by
+  have hin0 : ∀ op ∈ program, op ∈ program := fun _ h => h
+  rcases hend with ⟨rest, target, hr, hpc⟩ | ⟨rest, slot, hr, hpc⟩ | ⟨rest, effect, target, before, hr, hstop, rfl, hpc⟩
+  · obtain ⟨_, m', h2, h3⟩ := hr.withFlags hf hd hslots hin0 m0' hrel
+    have hi := hr.inside hin0 hm0
+    exact ⟨m', Or.inl ⟨flagOps flags rest, target, h2, hpc⟩, h3, hi.1, hi.2.2⟩
+  · obtain ⟨hin, m', h2, h3⟩ := hr.withFlags hf hd hslots hin0 m0' hrel
+    have hs : m'.slots slot = m.slots slot := h3.slots _ (hslots _ (hin _ List.mem_cons_self) slot (by simp [opSlots]))
+    have hi := hr.inside hin0 hm0
+    exact ⟨m', Or.inr (Or.inl ⟨flagOps flags rest, slot, h2, by rw [hs]; exact hpc⟩), h3, hi.1, hi.2.2⟩
+  · obtain ⟨hin, m', h2, h3⟩ := hr.withFlags hf hd hslots hin0 m0' hrel
+    have he : effect < limit := hslots _ (hin _ List.mem_cons_self) effect (by simp [opSlots])
+    exact ⟨m'.write effect (3 : UInt64).toBitVec, Or.inr (Or.inr ⟨flagOps flags rest, effect, target, m', h2, hstop, rfl, hpc⟩),
+      h3.write hf he _, (hr.inside hin0 hm0).1, (hr.inside hin0 hm0).2.2⟩
+
+private theorem opLabels_eq (ops : List Op) : opLabels ops = labelsOf ops := rfl
+
+/-- What the check of a lowering says. -/
+private structure Checked (blocks : List Block) (initial lowering : Lowering) : Prop where
+  budget : Lowering.budget lowering = Lowering.budget initial
+  observed : Lowering.observed lowering = Lowering.observed initial
+  addresses : (blocks.map Block.address).Nodup
+  fits : ∀ block ∈ blocks, block.address < 2 ^ 64 ∧ block.next < 2 ^ 64
+  labels : (labelsOf (Lowering.ops lowering)).Nodup
+  slots : ∀ op ∈ Lowering.ops lowering, ∀ slot ∈ opSlots op, slot < Lowering.nextSlot lowering
+  outputs : ∀ output ∈ Lowering.outputs lowering, output ∈ Lowering.layout lowering
+  moves : ∀ dst src, Op.move dst src ∈ Lowering.ops lowering → ∀ binding ∈ Lowering.layout lowering, binding.2 = dst → binding ∈ Lowering.outputs lowering
+
+private theorem checked_of {blocks : List Block} {initial lowering : Lowering} (h : lowerGraphChecked blocks initial lowering = true) :
+    Checked blocks initial lowering := by
+  simp only [lowerGraphChecked, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true, beq_iff_eq] at h
+  obtain ⟨⟨⟨⟨⟨⟨⟨h7, h8⟩, h1⟩, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩ := h
+  refine ⟨h7, h8, h1, ?_, by rw [← opLabels_eq]; exact h3, ?_, ?_, ?_⟩
+  · intro block hb
+    exact h2 block hb
+  · intro op hop slot hs
+    simpa using h4 op hop slot hs
+  · intro output ho
+    simpa using h5 output ho
+  · intro dst src hm binding hb hd
+    have := h6 _ hm
+    simp only [List.all_eq_true] at this
+    have := this binding hb
+    simp only [Bool.or_eq_true, bne_iff_ne, ne_eq, List.contains_iff_mem] at this
+    rcases this with h | h
+    · exact absurd hd h
+    · exact h
+
+private theorem blockAt_of_mem {blocks : List Block} {block : Block} (hd : (blocks.map Block.address).Nodup) (hm : block ∈ blocks) :
+    blockAt blocks block.address = some block := by
+  induction blocks with
+  | nil => simp at hm
+  | cons head rest ih =>
+    simp only [List.map_cons, List.nodup_cons] at hd
+    simp only [blockAt, List.find?_cons]
+    rcases List.mem_cons.1 hm with rfl | hm
+    · simp
+    · have hne : head.address ≠ block.address := fun he => hd.1 (he ▸ List.mem_map_of_mem hm)
+      have hb : (head.address == block.address) = false := by simpa using hne
+      simp only [hb]
+      exact ih hd.2 hm
+
+/-- The labels of a graph are those of its blocks. -/
+private theorem labels_block {blocks : List Block} {target address label : Nat}
+    (h : ((List.range blocks.length).map fun index => (blocks[index]!.address, index)).find? (fun (address, _) => address = target) = some (address, label)) :
+    ∃ block ∈ blocks, block.address = target := by
+  have hmem := List.mem_of_find?_eq_some h
+  have hsat := List.find?_some h
+  simp only [decide_eq_true_eq] at hsat
+  obtain ⟨index, hi, he⟩ := List.mem_map.1 hmem
+  simp only [Prod.mk.injEq] at he
+  have hlt := List.mem_range.1 hi
+  refine ⟨blocks[index], List.getElem_mem hlt, ?_⟩
+  rw [← hsat, ← he.1]
+  simp [getElem!_pos, hlt]
+
+/-- What `lowerGraph` is made of. -/
+private theorem lowerGraph_parts {blocks : List Block} {edges : List (Nat × Nat)} {wrapFaults : Bool} {lowering : Lowering}
+    (h : lowerGraph blocks edges wrapFaults = some lowering) :
+    ∃ seed rest plan initial final, blocks = seed :: rest ∧ lowering = flagOutputs (leadingMoves seed.program) final ∧
+      lowerBlocks plan initial blocks = some final ∧ lowerGraphChecked blocks initial final = true ∧
+      GraphPlan.edges plan = edges ∧ GraphPlan.seed plan = seed.address ∧
+      GraphPlan.labels plan = (List.range blocks.length).map (fun index => (blocks[index]!.address, index)) ∧
+      Lowering.ops initial = [.set 0 0] ∧ Lowering.layout initial = [] ∧ Lowering.effectSlot initial = some 0 ∧ 0 < Lowering.nextSlot initial ∧
+      Lowering.flags initial = [] ∧
+      (edges ≠ [] → GraphPlan.budget plan = 1 ∧ Lowering.nextSlot initial = 3 ∧ Lowering.budget initial = some 1 ∧ Lowering.observed initial = some 2) := by
+  unfold lowerGraph at h
+  cases blocks with
+  | nil => simp at h
+  | cons seed rest =>
+    simp only [List.head?_cons, bind, Option.bind_some] at h
+    obtain ⟨final, h1, h⟩ := obind h
+    by_cases hc : lowerGraphChecked (seed :: rest) (graphInitial seed (seed :: rest).length wrapFaults !edges.isEmpty) final = true
+    · rw [ite_eq_left hc] at h
+      simp only [Option.some.injEq] at h
+      refine ⟨seed, rest, _, _, final, rfl, h.symm, h1, hc, rfl, rfl, rfl, ?_⟩
+      cases edges with
+      | nil => simp [graphInitial, setEffect, temporary]
+      | cons e es => simp [graphInitial, graphPlan, setEffect, temporary]
+    · rw [ite_eq_right hc] at h
+      cases h
+
+/-- The fields of a lowering with flags. -/
+private theorem flagOutputs_parts (written : List Bap.Var) (final : Lowering) :
+    let later := (Lowering.outputs final).filter fun output => !written.contains output.1
+    Lowering.ops (flagOutputs written final) = flagOps (flagSlots later (Lowering.nextSlot final)).2 (Lowering.ops final) ∧
+    Lowering.flags (flagOutputs written final) = (flagSlots later (Lowering.nextSlot final)).2 ∧
+    Lowering.nextSlot (flagOutputs written final) = (flagSlots later (Lowering.nextSlot final)).1 ∧
+    Lowering.layout (flagOutputs written final) = Lowering.layout final ∧
+    Lowering.outputs (flagOutputs written final) = Lowering.outputs final ∧
+    Lowering.memory (flagOutputs written final) = Lowering.memory final ∧
+    Lowering.effectSlot (flagOutputs written final) = Lowering.effectSlot final ∧
+    Lowering.budget (flagOutputs written final) = Lowering.budget final ∧
+    Lowering.observed (flagOutputs written final) = Lowering.observed final ∧
+    Lowering.inputs (flagOutputs written final) = Lowering.inputs final :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- What the encoding of a state gives to the slots. -/
+private theorem encodeState_slots {lowering : Lowering} {env : Bil.Env} {slots : Array UInt64} (wf : LayoutWF lowering)
+    (h : encodeState lowering env = .ok slots) :
+    slots.size = Lowering.nextSlot lowering ∧ ∀ index, (∀ binding ∈ Lowering.layout lowering, binding.2 ≠ index) → slots.getD index 0 = 0 := by
+  obtain ⟨h1, _, h3⟩ := encode_fold env (Lowering.inputs lowering) (Lowering.layout lowering) _ slots
+    (fun b hm => by simpa using wf.bound b hm) wf.slotsDistinct h
+  refine ⟨by simpa using h1, fun index hi => ?_⟩
+  rw [h3 index hi]
+  simp only [Array.getD_eq_getD_getElem?, Array.getElem?_replicate]
+  split <;> simp
+
+/-- A slot of `withControl`. -/
+private theorem withControl_other {lowering : Lowering} {slots : Array UInt64} {budget : Nat} {observed : Bool} {index : Nat}
+    (h1 : ∀ slot, Lowering.budget lowering = some slot → slot ≠ index) (h2 : ∀ slot, Lowering.observed lowering = some slot → slot ≠ index) :
+    (withControl lowering slots budget observed).getD index 0 = slots.getD index 0 := by
+  unfold withControl
+  have hset : ∀ (a : Array UInt64) (slot : Nat) (value : UInt64), slot ≠ index → (a.set! slot value).getD index 0 = a.getD index 0 := by
+    intro a slot value hne
+    simp [Array.getD_eq_getD_getElem?, Array.set!_eq_setIfInBounds, hne]
+  dsimp only
+  cases hb : Lowering.budget lowering with
+  | none =>
+    cases ho : Lowering.observed lowering with
+    | none => rfl
+    | some o => exact hset _ _ _ (h2 o ho)
+  | some b =>
+    cases ho : Lowering.observed lowering with
+    | none => exact hset _ _ _ (h1 b hb)
+    | some o => rw [hset _ _ _ (h2 o ho)]; exact hset _ _ _ (h1 b hb)
+
+private theorem stepBlocks_first {blocks : List Block} {fuel count : Nat} {state : Bil.State} {block : Block} {result : Bil.State × Nat}
+    (h : stepBlocks blocks fuel (count + 1) (state, block.address) = .ok result) (hat : blockAt blocks block.address = some block) :
+    ∃ first, Bil.execProgram fuel state block.program = .ok first ∧ stepBlocks blocks fuel count (first.1, nextPc block first.2) = .ok result := by
+  simp only [stepBlocks, stepBlock, hat] at h
+  cases he : Bil.execProgram fuel state block.program with
+  | error error => simp [he] at h
+  | ok first =>
+    simp only [he] at h
+    exact ⟨first, rfl, h⟩
+
+/-- **A compiled range does what its blocks do, one at a time in the interpreter.**
+
+From the slots of `encodeState` and `withControl` with any budget, and any code observer `stops`, with a machine that holds them and the
+memory of the state, the program that `lowerGraph` makes for a graph has one of three ends. A loop in it uses up its iterations, which the
+runner turns into an error, or the interpreter has no result within the budget, about which nothing is claimed, or the run returns. Then it has
+entered `entered` blocks after its first, what `budget` minus its budget slot says, at most `budget`. It returns the pc where the interpreter
+goes on after `entered + 1` blocks, whichever way it left: over an edge with no budget left (that block not entered), at a code site that stopped it
+(likewise, with 3 in the effect slot), at an edge to a block that is not in the range, or at a jump out of a block's statements. Variables other than
+the memory then read in `syncState` what the interpreter has for them, whether their flags say they were written or not, and the machine holds the
+memory of the interpreter. Native code does this on the terms of `Bap.Jit`, and `nextCfgAt` is those terms for code sites. -/
+theorem lowerGraph_correct {blocks : List Block} {edges : List (Nat × Nat)} {wrapFaults : Bool} {lowering : Lowering}
+    (h : lowerGraph blocks edges wrapFaults = some lowering) (hedges : edges ≠ []) (stops : Nat → Bool) (fuel budget : Nat) (observed : Bool)
+    (hbudget : budget < 2 ^ 64) (state : Bil.State) {slots : Array UInt64} (machine : Machine)
+    (henc : encodeState lowering state.env = .ok slots)
+    (hslots : ∀ index, machine.slots index = ((withControl lowering slots budget observed).getD index 0).toBitVec)
+    (hmem : ∀ var, Lowering.memory lowering = some var → ∀ (width : Nat) (cells : Bap.Memory width),
+      Bil.lookup state.env var = .ok (.memory cells) → MemoryInv machine width cells) :
+    Lowering.effectSlot lowering = some 0 ∧ Lowering.budget lowering = some 1 ∧ Lowering.observed lowering = some 2 ∧
+    ∃ seed rest, blocks = seed :: rest ∧
+    (InterpreterFails blocks fuel budget (state, seed.address) ∨
+      ExhaustsAt stops (Lowering.ops lowering) (Lowering.ops lowering, machine) 0 ∨
+      ∃ entered, entered ≤ budget ∧ ∃ final pc m, stepBlocks blocks fuel (entered + 1) (state, seed.address) = .ok (final, pc) ∧
+        EndsAt stops (Lowering.ops lowering) (Lowering.ops lowering, machine) pc m ∧
+        (m.slots 1).toNat = budget - entered ∧
+        (m.slots 0 = 0 ∨ m.slots 0 = 1 ∨ (m.slots 0 = (3 : UInt64).toBitVec ∧ stops pc = true)) ∧
+        (∀ out : Array UInt64, (∀ index, index < Lowering.nextSlot lowering → (out.getD index 0).toBitVec = m.slots index) →
+          ∀ var, Lowering.memory lowering ≠ some var → Bil.lookup (syncState lowering state out).env var = Bil.lookup final.env var) ∧
+        (∀ var, Lowering.memory lowering = some var → ∀ (width : Nat) (cells : Bap.Memory width),
+          Bil.lookup final.env var = .ok (.memory cells) → MemoryInv m width cells)) := by
+  obtain ⟨seed, rest, plan, initial, inner, hblocks, hl, hlower, hcheck, hplanEdges, hplanSeed, hplanLabels, hiops, hilayout, hieff, hinext, _, hichained⟩ :=
+    lowerGraph_parts h
+  obtain ⟨hpb, hin3, hib, hio⟩ := hichained hedges
+  obtain ⟨fops, fflags, fnext, flayout, foutputs, fmemory, feffect, fbudget, fobserved, _⟩ := flagOutputs_parts (leadingMoves seed.program) inner
+  rw [← hl] at fops fflags fnext flayout foutputs fmemory feffect fbudget fobserved
+  have chk := checked_of hcheck
+  have wfi : LayoutWF initial := layoutWF_of_nil _ hilayout
+  have hedgesP : GraphPlan.edges plan ≠ [] := by rw [hplanEdges]; exact hedges
+  obtain ⟨new, g, ok⟩ := lowerBlocks_spec (effect := 0) (plan := plan) blocks wfi hieff hinext (fun b hb => (chk.fits b hb).2)
+    (fun _ => by rw [hpb]; decide) hlower
+  have hprog : Lowering.ops inner = .set 0 0 :: new := by rw [g.ops, hiops]; rfl
+  have hsmall : ∀ slot, slot < 3 → ∀ var, (var, slot) ∉ Lowering.layout inner := by
+    intro slot hs var hm
+    rcases g.later _ hm with hm' | hm'
+    · rw [hilayout] at hm'
+      simp at hm'
+    · simp only at hm'
+      omega
+  have place : Place initial inner inner new (Lowering.ops inner) [] 0 := {
+    effectFree := hsmall 0 (by decide)
+    wfGlobal := g.wf
+    sub := Sub.refl inner
+    split := ⟨[.set 0 0], by rw [hprog]; simp⟩
+    distinct := chk.labels }
+  obtain ⟨all, seedFact⟩ := ok stops inner (Lowering.ops inner) [] place
+  obtain ⟨start, seg, hrunSeed⟩ := seedFact seed rest hblocks hplanSeed.symm
+  subst hblocks
+  have hseedMem : seed ∈ seed :: rest := List.mem_cons_self
+  have hat := blockAt_of_mem chk.addresses hseedMem
+  -- the machines
+  obtain ⟨hflagNext, hflagLow, hflagDistinct, _, hflagKeys⟩ := flagSlots_spec
+    ((Lowering.outputs inner).filter fun output => !(leadingMoves seed.program).contains output.1)
+    (limit := Lowering.nextSlot inner) (start := Lowering.nextSlot inner) (init := []) (next := (flagSlots _ _).1) (flags := (flagSlots _ _).2)
+    rfl (Nat.le_refl _) (by simp) (by simp)
+  have wfL : LayoutWF lowering := ⟨fun b hb => by
+      rw [flayout] at hb
+      rw [fnext]
+      exact Nat.lt_of_lt_of_le (g.wf.bound b hb) hflagNext,
+    by rw [flayout]; exact g.wf.slotsDistinct, by rw [flayout]; exact g.wf.varsDistinct⟩
+  obtain ⟨_, hzero⟩ := encodeState_slots wfL henc
+  have hb1 : Lowering.budget lowering = some 1 := by rw [fbudget, chk.budget]; exact hib
+  have ho1 : Lowering.observed lowering = some 2 := by rw [fobserved, chk.observed]; exact hio
+  have hN : 3 ≤ Lowering.nextSlot inner := by have := g.next; omega
+  have hsize : slots.size = Lowering.nextSlot lowering := (encodeState_slots wfL henc).1
+  have hN' : 3 ≤ Lowering.nextSlot lowering := by rw [fnext]; omega
+  have hhigh : ∀ index, 3 ≤ index → machine.slots index = (slots.getD index 0).toBitVec := by
+    intro index hi
+    rw [hslots, withControl_other (by intro s hs; rw [hb1] at hs; simp only [Option.some.injEq] at hs; omega)
+      (by intro s hs; rw [ho1] at hs; simp only [Option.some.injEq] at hs; omega)]
+  have hbudgetSlot : (machine.slots 1).toNat = budget := by
+    rw [hslots]
+    simp only [withControl, hb1, ho1]
+    have h1 : 1 < slots.size := by omega
+    have : ((slots.set! 1 (UInt64.ofNat budget)).set! 2 (if observed = true then 1 else 0)).getD 1 0 = UInt64.ofNat budget := by
+      simp [Array.getD_eq_getD_getElem?, Array.set!_eq_setIfInBounds, h1]
+    rw [this]
+    show (UInt64.ofNat budget).toNat = budget
+    simp only [UInt64.toNat_ofNat']
+    exact Nat.mod_eq_of_lt hbudget
+  let flags := Lowering.flags lowering
+  have hfl : ∀ f ∈ flags, Lowering.nextSlot inner ≤ f.2 := fun f hf => (hflagLow f (by rw [← fflags]; exact hf)).1
+  have hfd : flags.Pairwise fun a b => a.2 ≠ b.2 := by simp only [flags, fflags]; exact hflagDistinct
+  let m0 : Machine := { slots := machine.slots, memory := machine.memory, view := machine.view, moved := fun _ => false, origin := state.env }
+  have hrel0 : FlagRel (Lowering.nextSlot inner) flags m0 machine := by
+    refine ⟨fun _ _ => rfl, rfl, rfl, fun slot f hf => ?_⟩
+    have hlow := hfl f (List.mem_of_find?_eq_some hf)
+    have hz : machine.slots f.2 = 0 := by
+      rw [hhigh _ (by omega), hzero]
+      · rfl
+      · intro b hb he
+        rw [flayout] at hb
+        have := g.wf.bound b hb
+        omega
+    simp [hz, m0]
+  have hag0 : Agrees state.env m0 inner := by
+    refine ⟨?_, ?_, ?_, ?_⟩
+    · intro binding hb value hv
+      obtain ⟨w, bits, h1, h2, h3⟩ := encodeState_holds wfL henc binding (by rw [flayout]; exact hb) value hv
+      refine ⟨w, bits, h1, h2, ?_⟩
+      have hge : 3 ≤ binding.2 := by
+        refine Classical.byContradiction fun hlt => ?_
+        exact hsmall binding.2 (by omega) binding.1 hb
+      show Holds (machine.slots binding.2) bits
+      rw [hhigh _ hge]
+      exact h3
+    · intro var hv w cells hl
+      exact hmem var (by rw [fmemory]; exact hv) w cells hl
+    · intro var hne
+      exact absurd rfl hne
+    · intro binding _ hm
+      simp [m0] at hm
+  have hag1 := hag0.write_free (hsmall 0 (by decide)) (0 : UInt64).toBitVec
+  have hz1 : (m0.write 0 (0 : UInt64).toBitVec).slots 0 = 0 := by
+    simp only [Machine.write_slots, ↓reduceIte]
+    rfl
+  have hb1' : ((m0.write 0 (0 : UInt64).toBitVec).slots 1).toNat = budget := by
+    simpa [Machine.write_slots, m0] using hbudgetSlot
+  have hstart : RunAt stops (Lowering.ops inner) (Lowering.ops inner, m0) (start, m0.write 0 (0 : UInt64).toBitVec) := by
+    have h1 := hrunSeed (m0.write 0 (0 : UInt64).toBitVec)
+    rw [List.append_nil] at h1
+    refine RunAt.trans ?_ h1
+    conv => lhs; rw [hprog]
+    exact (Run.linear (program := Lowering.ops inner) (op := .set 0 0) rfl new m0).toAt
+  have hlabel : ∀ source target label, EdgeTo plan source target label → ∃ block ∈ seed :: rest, block.address = target ∧
+      blockAt (seed :: rest) target = some block ∧ ∃ address, (GraphPlan.labels plan).find? (fun (address, _) => address = block.address) = some (address, label) := by
+    intro source target label ⟨_, address, hfind⟩
+    rw [hplanLabels] at hfind
+    obtain ⟨block, hmemB, haddr⟩ := labels_block hfind
+    subst haddr
+    exact ⟨block, hmemB, rfl, blockAt_of_mem chk.addresses hmemB, address, by rw [hplanLabels]; exact hfind⟩
+  have hin3' : GraphPlan.budget plan < Lowering.nextSlot initial := by rw [hpb, hin3]; decide
+  have core := range_core all hlabel (fun b hb => (chk.fits b hb).1) (hsmall 0 (by decide))
+    (by rw [hpb]; exact hsmall 1 (by decide)) (fun _ => by rw [hpb]; decide) hin3' hinext fuel budget hedgesP
+    seed hseedMem hat start seg state _ hag1 hz1 (by rw [hpb]; exact hb1')
+  have hm0 : ∀ slot, m0.moved slot = true → ∃ src, Op.move slot src ∈ Lowering.ops inner := by
+    intro slot hs
+    simp [m0] at hs
+  have hin0 : ∀ op ∈ Lowering.ops inner, op ∈ Lowering.ops inner := fun _ h => h
+  have hops : Lowering.ops lowering = flagOps flags (Lowering.ops inner) := by simp only [flags, fflags]; exact fops
+  refine ⟨by rw [feffect, g.effect]; exact hieff, hb1, ho1, seed, rest, rfl, ?_⟩
+  rw [hops]
+  rcases core with hfail | hx | ⟨entered, hle, final, pc, m, hsteps, hend, hagF, hbudF, heffF⟩
+  · exact Or.inl hfail
+  · obtain ⟨target, r, mx, hr, h2⟩ := hx.prepend hstart
+    obtain ⟨hin, m', hrun, hr2⟩ := hr.withFlags hfl hfd chk.slots hin0 machine hrel0
+    refine Or.inr (Or.inl ⟨target, flagOps flags r, m', hrun, ?_⟩)
+    rw [hr2.slots 0 (by omega)]
+    exact h2
+  · obtain ⟨m', hend', hrel, horigin, hmoved⟩ := (hend.prepend hstart).withFlags hfl hfd chk.slots hrel0 hm0
+    rw [hpb] at hbudF
+    refine Or.inr (Or.inr ⟨entered, hle, final, pc, m', hsteps, hend', ?_, ?_, ?_, ?_⟩)
+    · rw [hrel.slots 1 (by omega)]
+      exact hbudF
+    · rw [hrel.slots 0 (by omega)]
+      exact heffF
+    · intro out hout var hvar
+      refine syncState_flags (global := inner) (m := m) (m' := m') ?_ hagF flayout.symm wfL ?_ hrel ?_ ?_ ?_ ?_ ?_ hout (by rw [← fmemory]; exact hvar)
+      · intro output ho hfind
+        by_cases hlead : output.1 ∈ leadingMoves seed.program
+        · obtain ⟨res, hexec, hrest⟩ := stepBlocks_first hsteps hat
+          have hb := leadingMoves_bound seed.program hlead hexec
+          exact stepBlocks_stays_bound entered hrest hb
+        · exfalso
+          rw [foutputs] at ho
+          have hf : output ∈ (Lowering.outputs inner).filter fun output => !(leadingMoves seed.program).contains output.1 := by
+            refine List.mem_filter.2 ⟨ho, ?_⟩
+            simpa using hlead
+          obtain ⟨f, hfm, hfk⟩ := hflagKeys output hf
+          have hne := (List.find?_eq_none.1 hfind) f (by rw [fflags]; exact hfm)
+          simp [hfk] at hne
+      · intro output ho
+        rw [flayout]
+        rw [foutputs] at ho
+        exact chk.outputs output ho
+      · rw [fnext]; exact hflagNext
+      · intro b hb
+        rw [flayout] at hb
+        exact g.wf.bound b hb
+      · intro f hf
+        rw [fnext]
+        exact (hflagLow f (by rw [← fflags]; exact hf)).2
+      · exact horigin
+      · intro binding hb hmv
+        obtain ⟨src, hsrc⟩ := hmoved binding.2 hmv
+        rw [foutputs]
+        rw [flayout] at hb
+        exact chk.moves _ src hsrc binding hb rfl
+    · intro var hv w cells hl
+      obtain ⟨h1, h2, h3, h4, h5⟩ := hagF.memory var (by rw [← fmemory]; exact hv) w cells hl
+      refine ⟨h1, h2, h3, ?_, ?_⟩
+      · intro address
+        rw [hrel.view]
+        exact h4 address
+      · rw [WindowOf, hrel.memory]
+        exact h5
+
+/-- The pc of a stop changes nothing in what is written back of a range: all of its stops see all of its outputs, with their flags. -/
+theorem atCodeStop_flagOutputs (written : List Bap.Var) (final : Lowering) (pc : Nat) :
+    atCodeStop (flagOutputs written final) pc = flagOutputs written final := by
+  unfold atCodeStop
+  split
+  · next checkpoint hfind =>
+    have hmem := List.mem_of_find?_eq_some hfind
+    have : checkpoint.2 = Lowering.outputs final := by
+      obtain ⟨c, _, he⟩ := List.mem_map.1 hmem
+      rw [← he]
+    rw [this]
+    rfl
+  · rfl
+
+/-- A range counts what it entered, which is what `lowerGraph_correct` says of its budget slot. -/
+theorem chainedCount_entered {lowering : Lowering} {budget entered budgetSlot : Nat} {slots : Array UInt64}
+    (hb : Lowering.budget lowering = some budgetSlot) (hs : ((slots.getD budgetSlot 0).toBitVec).toNat = budget - entered) (hle : entered ≤ budget) :
+    chainedCount lowering budget slots = some entered := by
+  have hs' : (slots.getD budgetSlot 0).toNat = budget - entered := hs
+  simp only [chainedCount, hb, Option.map_some, Option.some.injEq]
+  omega
+
+/-- What is left of a run is what `EndsAt` says: 1 in the effect slot is a jump to the pc, 2 the error of an exhausted loop, and any other effect goes
+on at the pc with a normal effect. -/
+theorem nativeOutcome_jump {lowering : Lowering} {following next : Nat} {state : Bil.State} {slots : Array UInt64} {slot : Nat}
+    (he : Lowering.effectSlot lowering = some slot) (h : slots.getD slot 0 = 1) :
+    nativeOutcome lowering following next state slots = .ok ⟨state, next, following, .jump (BitVec.ofNat 64 next)⟩ := by
+  simp [nativeOutcome, he, h]
+
+theorem nativeOutcome_exhausted {lowering : Lowering} {following next : Nat} {state : Bil.State} {slots : Array UInt64} {slot : Nat}
+    (he : Lowering.effectSlot lowering = some slot) (h : slots.getD slot 0 = 2) :
+    nativeOutcome lowering following next state slots = .error "Primus loop fuel exhausted" := by
+  simp [nativeOutcome, he, h]
+
+theorem nativeOutcome_normal {lowering : Lowering} {following next : Nat} {state : Bil.State} {slots : Array UInt64} {slot : Nat}
+    (he : Lowering.effectSlot lowering = some slot) (h1 : slots.getD slot 0 ≠ 1) (h2 : slots.getD slot 0 ≠ 2) :
+    nativeOutcome lowering following next state slots = .ok ⟨state, next, next, .normal⟩ := by
+  simp only [nativeOutcome, he, beq_iff_eq, h1, h2, ↓reduceIte]
+
+/-- **A compiled block does what the interpreter does**, as `lowerGraph_correct` says for a range, for a block on its own, which has no budget and no
+code sites: a jump out of it with an output not written yet leaves that output as it was. -/
+theorem lowerGraph_single {blocks : List Block} {wrapFaults : Bool} {lowering : Lowering}
+    (h : lowerGraph blocks [] wrapFaults = some lowering) (stops : Nat → Bool) (fuel : Nat) (state : Bil.State) {slots : Array UInt64} (machine : Machine)
+    (henc : encodeState lowering state.env = .ok slots)
+    (hslots : ∀ index, machine.slots index = (slots.getD index 0).toBitVec)
+    (hmem : ∀ var, Lowering.memory lowering = some var → ∀ (width : Nat) (cells : Bap.Memory width),
+      Bil.lookup state.env var = .ok (.memory cells) → MemoryInv machine width cells) :
+    Lowering.effectSlot lowering = some 0 ∧ ∃ seed rest, blocks = seed :: rest ∧ ∀ result, Bil.execProgram fuel state seed.program = .ok result →
+      ExhaustsAt stops (Lowering.ops lowering) (Lowering.ops lowering, machine) 0 ∨
+      ∃ m, EndsAt stops (Lowering.ops lowering) (Lowering.ops lowering, machine) (nextPc seed result.2) m ∧
+        (m.slots 0 = 0 ∨ m.slots 0 = 1) ∧
+        (∀ out : Array UInt64, (∀ index, index < Lowering.nextSlot lowering → (out.getD index 0).toBitVec = m.slots index) →
+          ∀ var, Lowering.memory lowering ≠ some var → Bil.lookup (syncState lowering state out).env var = Bil.lookup result.1.env var) ∧
+        (∀ var, Lowering.memory lowering = some var → ∀ (width : Nat) (cells : Bap.Memory width),
+          Bil.lookup result.1.env var = .ok (.memory cells) → MemoryInv m width cells) := by
+  obtain ⟨seed, rest, plan, initial, inner, hblocks, hl, hlower, hcheck, hplanEdges, hplanSeed, _, hiops, hilayout, hieff, hinext, _, _⟩ :=
+    lowerGraph_parts h
+  obtain ⟨fops, fflags, fnext, flayout, foutputs, fmemory, feffect, _, _, _⟩ := flagOutputs_parts (leadingMoves seed.program) inner
+  rw [← hl] at fops fflags fnext flayout foutputs fmemory feffect
+  have chk := checked_of hcheck
+  have wfi : LayoutWF initial := layoutWF_of_nil _ hilayout
+  obtain ⟨new, g, ok⟩ := lowerBlocks_spec (effect := 0) (plan := plan) blocks wfi hieff hinext (fun b hb => (chk.fits b hb).2)
+    (fun he => absurd hplanEdges he) hlower
+  have hprog : Lowering.ops inner = .set 0 0 :: new := by rw [g.ops, hiops]; rfl
+  have hsmall : ∀ var, (var, 0) ∉ Lowering.layout inner := by
+    intro var hm
+    rcases g.later _ hm with hm' | hm'
+    · rw [hilayout] at hm'
+      simp at hm'
+    · simp only at hm'
+      omega
+  have place : Place initial inner inner new (Lowering.ops inner) [] 0 := {
+    effectFree := hsmall
+    wfGlobal := g.wf
+    sub := Sub.refl inner
+    split := ⟨[.set 0 0], by rw [hprog]; simp⟩
+    distinct := chk.labels }
+  obtain ⟨_, seedFact⟩ := ok stops inner (Lowering.ops inner) [] place
+  obtain ⟨start, seg, hrunSeed⟩ := seedFact seed rest hblocks hplanSeed.symm
+  subst hblocks
+  obtain ⟨hflagNext, hflagLow, hflagDistinct, _, hflagKeys⟩ := flagSlots_spec
+    ((Lowering.outputs inner).filter fun output => !(leadingMoves seed.program).contains output.1)
+    (limit := Lowering.nextSlot inner) (start := Lowering.nextSlot inner) (init := []) (next := (flagSlots _ _).1) (flags := (flagSlots _ _).2)
+    rfl (Nat.le_refl _) (by simp) (by simp)
+  have wfL : LayoutWF lowering := ⟨fun b hb => by
+      rw [flayout] at hb
+      rw [fnext]
+      exact Nat.lt_of_lt_of_le (g.wf.bound b hb) hflagNext,
+    by rw [flayout]; exact g.wf.slotsDistinct, by rw [flayout]; exact g.wf.varsDistinct⟩
+  obtain ⟨_, hzero⟩ := encodeState_slots wfL henc
+  have hN : 0 < Lowering.nextSlot inner := by have := g.next; omega
+  let flags := Lowering.flags lowering
+  have hfl : ∀ f ∈ flags, Lowering.nextSlot inner ≤ f.2 := fun f hf => (hflagLow f (by rw [← fflags]; exact hf)).1
+  have hfd : flags.Pairwise fun a b => a.2 ≠ b.2 := by simp only [flags, fflags]; exact hflagDistinct
+  let m0 : Machine := { slots := machine.slots, memory := machine.memory, view := machine.view, moved := fun _ => false, origin := state.env }
+  have hrel0 : FlagRel (Lowering.nextSlot inner) flags m0 machine := by
+    refine ⟨fun _ _ => rfl, rfl, rfl, fun slot f hf => ?_⟩
+    have hlow := hfl f (List.mem_of_find?_eq_some hf)
+    have hz : machine.slots f.2 = 0 := by
+      rw [hslots, hzero]
+      · rfl
+      · intro b hb he
+        rw [flayout] at hb
+        have := g.wf.bound b hb
+        omega
+    simp [hz, m0]
+  have hag0 : Agrees state.env m0 inner := by
+    refine ⟨?_, ?_, ?_, ?_⟩
+    · intro binding hb value hv
+      obtain ⟨w, bits, h1, h2, h3⟩ := encodeState_holds wfL henc binding (by rw [flayout]; exact hb) value hv
+      refine ⟨w, bits, h1, h2, ?_⟩
+      show Holds (machine.slots binding.2) bits
+      rw [hslots]
+      exact h3
+    · intro var hv w cells hl
+      exact hmem var (by rw [fmemory]; exact hv) w cells hl
+    · intro var hne
+      exact absurd rfl hne
+    · intro binding _ hm
+      simp [m0] at hm
+  have hag1 := hag0.write_free hsmall (0 : UInt64).toBitVec
+  have hz1 : (m0.write 0 (0 : UInt64).toBitVec).slots 0 = 0 := by
+    simp only [Machine.write_slots, ↓reduceIte]
+    rfl
+  have hstart : RunAt stops (Lowering.ops inner) (Lowering.ops inner, m0) (start, m0.write 0 (0 : UInt64).toBitVec) := by
+    have h1 := hrunSeed (m0.write 0 (0 : UInt64).toBitVec)
+    rw [List.append_nil] at h1
+    refine RunAt.trans ?_ h1
+    conv => lhs; rw [hprog]
+    exact (Run.linear (program := Lowering.ops inner) (op := .set 0 0) rfl new m0).toAt
+  have hm0 : ∀ slot, m0.moved slot = true → ∃ src, Op.move slot src ∈ Lowering.ops inner := by
+    intro slot hs
+    simp [m0] at hs
+  have hin0 : ∀ op ∈ Lowering.ops inner, op ∈ Lowering.ops inner := fun _ h => h
+  have hops : Lowering.ops lowering = flagOps flags (Lowering.ops inner) := by simp only [flags, fflags]; exact fops
+  refine ⟨by rw [feffect, g.effect]; exact hieff, seed, rest, rfl, fun result hexec => ?_⟩
+  rw [hops]
+  rcases seg.1 fuel state result _ hag1 hz1 hexec with hx | ⟨m, hend, hagF, _, heffF⟩ | ⟨_, _, _, _, hedge, _⟩
+  · obtain ⟨target, r, mx, hr, h2⟩ := hx.prepend hstart
+    obtain ⟨hin, m', hrun, hr2⟩ := hr.withFlags hfl hfd chk.slots hin0 machine hrel0
+    refine Or.inl ⟨target, flagOps flags r, m', hrun, ?_⟩
+    rw [hr2.slots 0 hN]
+    exact h2
+  · obtain ⟨m', hend', hrel, horigin, hmoved⟩ := (hend.prepend hstart).withFlags hfl hfd chk.slots hrel0 hm0
+    refine Or.inr ⟨m', hend', ?_, ?_, ?_⟩
+    · rw [hrel.slots 0 hN]
+      exact heffF
+    · intro out hout var hvar
+      refine syncState_flags (global := inner) (m := m) (m' := m') ?_ hagF flayout.symm wfL ?_ hrel ?_ ?_ ?_ ?_ ?_ hout (by rw [← fmemory]; exact hvar)
+      · intro output ho hfind
+        by_cases hlead : output.1 ∈ leadingMoves seed.program
+        · exact leadingMoves_bound seed.program hlead hexec
+        · exfalso
+          rw [foutputs] at ho
+          have hf : output ∈ (Lowering.outputs inner).filter fun output => !(leadingMoves seed.program).contains output.1 := by
+            refine List.mem_filter.2 ⟨ho, ?_⟩
+            simpa using hlead
+          obtain ⟨f, hfm, hfk⟩ := hflagKeys output hf
+          have hne := (List.find?_eq_none.1 hfind) f (by rw [fflags]; exact hfm)
+          simp [hfk] at hne
+      · intro output ho
+        rw [flayout]
+        rw [foutputs] at ho
+        exact chk.outputs output ho
+      · rw [fnext]; exact hflagNext
+      · intro b hb
+        rw [flayout] at hb
+        exact g.wf.bound b hb
+      · intro f hf
+        rw [fnext]
+        exact (hflagLow f (by rw [← fflags]; exact hf)).2
+      · exact horigin
+      · intro binding hb hmv
+        obtain ⟨src, hsrc⟩ := hmoved binding.2 hmv
+        rw [foutputs]
+        rw [flayout] at hb
+        exact chk.moves _ src hsrc binding hb rfl
+    · intro var hv w cells hl
+      obtain ⟨h1, h2, h3, h4, h5⟩ := hagF.memory var (by rw [← fmemory]; exact hv) w cells hl
+      refine ⟨h1, h2, h3, ?_, ?_⟩
+      · intro address
+        rw [hrel.view]
+        exact h4 address
+      · rw [WindowOf, hrel.memory]
+        exact h5
+  · exfalso
+    have := hedge.1
+    rw [hplanEdges] at this
+    simp at this
+
+end Graph
 
 end Bap.Proofs.Jit

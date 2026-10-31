@@ -3,7 +3,6 @@ import Bap.Symbolic.Executor
 import Bap.Bil.Typecheck
 import Bap.Proofs.Core
 
-set_option linter.unusedSimpArgs false
 
 namespace Bap.Proofs.Symbolic
 
@@ -917,7 +916,7 @@ theorem fst_binaryApp (σ : Assignment) (op : Bil.BinOp) {left right : Expr}
     unfold denoteBinary
     split
     · rw [hw, hk]
-    · simp [hk, hp]
+    · simp [hk]
   have hplain : ∀ name (l r : Expr), Expr.isPredicate name = false → (denote σ l).1 = l.width →
       (∀ {w} (x y : BitVec w), (wordOp name x y).1 = w) →
       (denote σ (.app name l.width [l, r])).1 = l.width := by
@@ -2592,13 +2591,13 @@ theorem execute_sound_oracle (σ : Assignment) {o : Oracle} (ho : Agrees σ o) (
           · next hm =>
             obtain ⟨m, hm', hsym⟩ := bind_ok.mp hsym
             cases hsym
-            refine ⟨_, List.mem_singleton.mpr rfl, hpath, .inr ⟨?_, by simp [hfresh], trivial⟩⟩
+            refine ⟨_, List.mem_singleton.mpr rfl, hpath, .inr ⟨?_, by simp, trivial⟩⟩
             exact rel_bindMemory hrel' hm ((sized_eval σ value').2 hrel'.toWellSized hm')
               (fun he => hsound.2 hrel' hm' (he ▸ hcv)) hpg
           · next hm =>
             obtain ⟨x, hx, hsym⟩ := bind_ok.mp hsym
             cases hsym
-            refine ⟨_, List.mem_singleton.mpr rfl, hpath, .inr ⟨?_, by simp [hfresh], trivial⟩⟩
+            refine ⟨_, List.mem_singleton.mpr rfl, hpath, .inr ⟨?_, by simp, trivial⟩⟩
             exact rel_bind hrel' (by simpa using hm) ((sized_eval σ value').1 hrel'.toWellSized hx)
               (fun he => hsound.1 hrel' hx (he ▸ hcv)) hpg
         | jmp target =>
@@ -3509,7 +3508,7 @@ private theorem typeName_toList (typ : Typ) : (typeName typ).toList = match typ 
     | .unit => ['u']
     | .mem a v => 'm' :: Nat.toDigits 10 a ++ '_' :: Nat.toDigits 10 v
     | .imm w => 'b' :: Nat.toDigits 10 w := by
-  cases typ <;> simp [typeName, String.toList_append, toList_toString] <;> rfl
+  cases typ <;> simp [typeName, String.toList_append] <;> rfl
 
 private theorem hash_not_mem_typeName (typ : Typ) : '#' ∉ (typeName typ).toList := by
   rw [typeName_toList]
@@ -4534,14 +4533,14 @@ private theorem render_unary {name : String} {width : Nat} {value : Expr} (h : E
   rw [Expr.render]
   simp [h]
   apply str_ext
-  simp [String.toList_append, String.toList_intercalate, toString]
+  simp [String.toList_append, toString]
 
 private theorem render_binary {name : String} {width : Nat} {left right : Expr} (h : Expr.isPredicate name = false) :
     (Expr.app name width [left, right]).render = s!"({name} {left.render} {right.render})" := by
   rw [Expr.render]
   simp [h]
   apply str_ext
-  simp [String.toList_append, String.toList_intercalate, toString]
+  simp [String.toList_append, toString]
 
 private theorem render_predicate {name : String} {width : Nat} {left right : Expr} (h : Expr.isPredicate name = true) :
     (Expr.app name width [left, right]).render =
@@ -4549,7 +4548,7 @@ private theorem render_predicate {name : String} {width : Nat} {left right : Exp
   rw [Expr.render]
   simp [h, SmtTerm.print]
   apply str_ext
-  simp [String.toList_append, String.toList_intercalate, toString]
+  simp [String.toList_append, toString]
 
 /-- The term of a condition: the formula that a one-bit term is one. -/
 private def conditionTerm (t : SmtTerm) : SmtTerm := .app2 "=" t (.bit true)
@@ -4684,7 +4683,7 @@ theorem renderFormula_hasSort {Γ : SmtSignature} {e : Expr} (h : WellSorted e) 
     refine ⟨.app2 name l r, ?_, ?_⟩
     · simp only [Expr.renderFormula, hname, List.isEmpty_cons, Bool.not_false, Bool.and_self, ↓reduceIte]
       apply str_ext
-      simp [SmtTerm.print, hlp, hrp, String.toList_append, String.toList_intercalate, toString]
+      simp [SmtTerm.print, hlp, hrp, String.toList_append, toString]
     · rcases isPredicate_cases hname with hc | he | he
       · exact .comparison hc hls (hw ▸ hrs)
       · exact .equal (.inl he) hls (hw ▸ hrs)
@@ -4699,7 +4698,7 @@ theorem renderFormula_hasSort {Γ : SmtSignature} {e : Expr} (h : WellSorted e) 
     exact hf
   | extension hkind hv hw =>
     refine ⟨f, ?_, hfs⟩
-    simp [Expr.renderFormula, extension_not_predicate] at hf ⊢
+    simp [Expr.renderFormula] at hf ⊢
     exact hf
   | var name hw => exact ⟨f, by simpa [Expr.renderFormula] using hf, hfs⟩
   | const value hw => exact ⟨f, by simpa [Expr.renderFormula] using hf, hfs⟩
@@ -4719,7 +4718,7 @@ private theorem escapeChar_good {c : Char} (h : (c.isAlphanum || c = '_') = true
 
 private theorem escapeChar_bad {c : Char} (h : ¬ (c.isAlphanum || c = '_') = true) :
     (escapeChar c).toList = '$' :: Nat.toDigits 10 c.toNat ++ ['$'] := by
-  simp only [escapeChar, if_neg h, String.toList_append, toList_toString]
+  simp only [escapeChar, ite_eq_right h, String.toList_append, toList_toString]
   simp [toString]
 
 private theorem dollar_not_good : ¬ ('$'.isAlphanum || '$' = '_') = true := by decide
@@ -4770,15 +4769,15 @@ private theorem escape_inj : ∀ {xs ys : List Char},
       simp only [List.singleton_append, List.cons.injEq] at h
       rw [h.1, escape_inj h.2]
     · rw [escapeChar_good hx, escapeChar_bad hy] at h
-      simp only [List.cons_append, List.singleton_append, List.cons.injEq] at h
+      simp only [List.cons_append, List.cons.injEq] at h
       rw [h.1] at hx
       exact absurd hx (by decide)
     · rw [escapeChar_bad hx, escapeChar_good hy] at h
-      simp only [List.cons_append, List.singleton_append, List.cons.injEq] at h
+      simp only [List.cons_append, List.cons.injEq] at h
       rw [← h.1] at hy
       exact absurd hy (by decide)
     · rw [escapeChar_bad hx, escapeChar_bad hy] at h
-      simp only [List.cons_append, List.append_assoc, List.singleton_append, List.cons.injEq, true_and] at h
+      simp only [List.cons_append, List.append_assoc, List.cons.injEq, true_and] at h
       have hd : ∀ {n : Nat}, '$' ∉ Nat.toDigits 10 n := not_mem_digits (by decide)
       obtain ⟨h1, h2⟩ := split_at hd hd h
       have hc : x = y := Char.toNat_inj.mp (digits_inj h1)
@@ -4794,11 +4793,11 @@ theorem escapeName_injective {a b : String} (h : Expr.escapeName a = Expr.escape
 
 private theorem variableSymbol_toList (name : String) (width : Nat) : (Expr.variableSymbol name width).toList =
     '|' :: ((Expr.escapeName name).toList ++ '!' :: Nat.toDigits 10 width) ++ ['|'] := by
-  simp [Expr.variableSymbol, String.toList_append, toList_toString, toString]
+  simp [Expr.variableSymbol, String.toList_append, toString]
 
 private theorem memorySymbol_toList (name : String) (width : Nat) : (Expr.memorySymbol name width).toList =
     '|' :: ((Expr.escapeName name).toList ++ '@' :: Nat.toDigits 10 width) ++ ['|'] := by
-  simp [Expr.memorySymbol, String.toList_append, toList_toString, toString]
+  simp [Expr.memorySymbol, String.toList_append, toString]
 
 private theorem not_mem_escape {name : String} {c : Char} (h : safeChar c = false) :
     c ∉ (Expr.escapeName name).toList :=

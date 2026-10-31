@@ -35,6 +35,9 @@ import Bap.Proofs.Graph
 import Bap.Proofs.IO
 import Bap.Proofs.IR
 import Bap.Proofs.Image
+import Bap.Proofs.Linker
+import Bap.Proofs.LinkerAbi
+import Bap.Proofs.LinkerImage
 import Bap.Proofs.Jit
 import Bap.Proofs.Knowledge
 import Bap.Proofs.LLVM

@@ -12,20 +12,26 @@ state-monad model.
 
 ## What stays trusted
 
-The proofs are about the flows on the model. For them to be about the emulator, these are taken on trust, by reading
-`Bap.Emu`, and nothing else of it is:
+Everything that the theorems about the emulator and native code rest on and that Lean cannot prove is in this list, and nothing else. All of the proofs
+are about the flows on the model, and Lean sees no more of `IO`, `Task` and `@[extern]` than an `opaque` that it cannot unfold:
 
 1. **The cells.** `controlCells` is `ControlCells` on five `IO.Ref`s, and a ref returns what was last set in it, with
    no thread writing to it meanwhile. Each worker of a parallel round has refs of its own. `stepOpsOf` is what both
    the emulator and the model make their operations with, so that which reference is which is not a matter of
-   reading: the model's operations are `stepOpsOf` of its cells (`Model.ops_is_stepOpsOf`).
+   reading: the model's operations are `stepOpsOf` of its cells (`Model.ops_is_stepOpsOf`). The same goes for the refs of
+   `Bap.Primus.Lifted`, whose code around native runs is plumbing of the proved `encodeState`, `withControl`, `chainedCount`, `syncState` and `nativeOutcome`.
 2. **The arguments of `stepOpsOf`.** `save`, `restore`, `execute`, `notifyCode`, `dispatch` in `stepOps` have the
    effects that `Model.World` gives them: `restore` undoes all that happened since `save`, except for what the log of
-   the model keeps, what hooks did to the outside.
-3. **The parallel round.** `roundM` is proved on the model. `IO.asTask` runs the workers, `IO.wait` waits for them all,
+   the model keeps, what hooks did to the outside. That `save` takes all that `Snapshot` has is by reading `snapshotBlock`.
+3. **What a step of a range is on these references.** `lowerGraph_correct` is about the program and the slots that go in and come out. That
+   `executeBlock` passes them along, on the cells, and so that a range meets `RangeLaws`, is by reading it; its decisions are the proved
+   `rangeSiteStops` and `rangeBudgetOf`.
+4. **The parallel round.** `roundM` is proved on the model. `IO.asTask` runs the workers, `IO.wait` waits for them all,
    and the mutex of `serialize` gives hooks one at a time. Between the workers only the native memory is shared, by
    obligation 10 of `Bap.Jit`.
-4. **Native code**, on the terms of `Bap.Jit`. -/
+5. **Native code**, on the terms of `Bap.Jit`: the C++ and LLVM are not verified.
+6. **Lifting.** The blocks a range is made of are what the lifter makes of the bytes, and it makes the same of the same bytes.
+   `sameBytes_eq` and the versions of ranges go by that. -/
 
 namespace Bap.Emu
 
@@ -284,6 +290,25 @@ and `chained` how many it did, so that the instructions, and not the steps, are 
         let extra := min (← chained) (remaining - 1)
         runChainedM step allow chained rounds (remaining - 1 - extra) (total + 1 + extra)
       else pure total
+
+/-- `run` with precise faults: when a step that may have chained fails, it has rolled back to where it started, which is
+not where the fault was. Then `again`, if it says that it did chain, and single steps from there on, the first to fail being the fault itself,
+which leaves everything as single steps do. This costs nothing on the way to a fault. Nothing that a range ran is
+observed, which `rangeSiteStops` and `rangeBudgetOf` see to, so that running it again is not seen either. -/
+@[specialize] def runPreciseM {m : Type → Type} {ε : Type} [Monad m] [MonadExcept ε m] (chained : m Nat) (single again : m Bool) (bound : Nat) :
+    m Nat :=
+  tryCatch chained fun error => do
+    if ← again then
+      let _ ← runM single bound 0
+    throw error
+
+/-- Whether a code site inside a range ends the run before its block: code that was written, a hook that arrived while nothing
+observed the sites, or a hook of the block. Hooks read the state, which only the step that starts at the block has up to date. -/
+def rangeSiteStops (dirty late hooked : Bool) : Bool := dirty || late || hooked
+
+/-- How many blocks a step may chain. A hook of an access runs in the middle of a block and reads the state, which is
+that of a step's start, so that with one a step is one instruction. -/
+def rangeBudgetOf (budget : Nat) (accessesWatched : Bool) : Nat := if accessesWatched then 0 else budget
 
 /-! ### Memory accesses -/
 

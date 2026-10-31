@@ -4,7 +4,6 @@ namespace Bap.Proofs.Graph
 
 open Bap.Graph
 
-set_option linter.unusedSectionVars false
 
 variable {α : Type} [DecidableEq α]
 
@@ -101,6 +100,7 @@ inductive Reaches (g : Graph α) (seeds : List α) : α → Prop where
   | seed {a} : a ∈ seeds → a ∈ g.nodes → Reaches g seeds a
   | step {a b} : Reaches g seeds a → (a, b) ∈ g.edges → b ∈ g.nodes → Reaches g seeds b
 
+omit [DecidableEq α] in
 theorem Reaches.mem_nodes {g : Graph α} {seeds : List α} {x : α} (h : Reaches g seeds x) :
     x ∈ g.nodes := by
   cases h <;> assumption
@@ -295,20 +295,25 @@ inductive Walk (g : Graph α) (s : α) : α → List α → Prop where
 
 variable {g : Graph α} {s : α}
 
+omit [DecidableEq α] in
 theorem Walk.head_mem {x : α} {p : List α} (h : Walk g s x p) : x ∈ p := by
   cases h <;> simp
 
+omit [DecidableEq α] in
 theorem Walk.start_mem {x : α} {p : List α} (h : Walk g s x p) : s ∈ p := by
   induction h with
   | nil => simp
   | cons _ _ _ ih => exact List.mem_cons_of_mem _ ih
 
+omit [DecidableEq α] in
 theorem Walk.ne_nil {x : α} {p : List α} (h : Walk g s x p) : p ≠ [] := by
   cases h <;> simp
 
+omit [DecidableEq α] in
 theorem Walk.length_pos {x : α} {p : List α} (h : Walk g s x p) : 0 < p.length :=
   List.length_pos_of_mem h.head_mem
 
+omit [DecidableEq α] in
 theorem Walk.mem_nodes {x : α} {p : List α} (h : Walk g s x p) : x ∈ g.nodes := by
   cases h <;> assumption
 
@@ -341,6 +346,7 @@ theorem mem_reachable_iff_walk (x : α) : x ∈ reachable g s ↔ ∃ p, Walk g 
   · rintro ⟨p, hp⟩
     exact hp.subset_reachable hp.head_mem
 
+omit [DecidableEq α] in
 /-- Every vertex on a walk splits it, with a walk ending at that vertex as the tail. -/
 theorem Walk.split {x d : α} {p : List α} (h : Walk g s x p) (hd : d ∈ p) :
     ∃ u q, p = u ++ q ∧ Walk g s d q := by
@@ -355,6 +361,7 @@ theorem Walk.split {x d : α} {p : List α} (h : Walk g s x p) (hd : d ∈ p) :
     · obtain ⟨u, q, rfl, hq⟩ := ih hd
       exact ⟨b :: u, q, rfl, hq⟩
 
+omit [DecidableEq α] in
 /-- Replacing the tail of a walk at `d` by any other walk to `d` gives a walk. -/
 theorem Walk.graft {x d : α} {p r q : List α} (h : Walk g s x p) (u : List α)
     (hp : p = u ++ d :: q) (hr : Walk g s d r) : Walk g s x (u ++ r) := by
@@ -463,15 +470,19 @@ theorem prune_all_reachable {x : α} (hx : x ∈ (prune g s).nodes) : x ∈ reac
 /-- `d` dominates `n`: every walk from `s` to `n` visits `d`. -/
 def Dom (g : Graph α) (s n d : α) : Prop := ∀ p, Walk g s n p → d ∈ p
 
+omit [DecidableEq α] in
 theorem Dom.refl (n : α) : Dom g s n n := fun _ h => h.head_mem
 
+omit [DecidableEq α] in
 theorem Dom.start (n : α) : Dom g s n s := fun _ h => h.start_mem
 
+omit [DecidableEq α] in
 theorem Dom.trans {a b c : α} (hab : Dom g s a b) (hbc : Dom g s b c) : Dom g s a c := by
   intro p hp
   obtain ⟨u, q, rfl, hq⟩ := hp.split (hab p hp)
   exact List.mem_append_right _ (hbc q hq)
 
+omit [DecidableEq α] in
 /-- On a simple walk to `n`, a dominator of `n` lying before `x` also dominates `x`. -/
 private theorem dom_of_simple {n x y : α} {a b : List α} (hw : Walk g s n (a ++ x :: b))
     (hnd : (a ++ x :: b).Nodup) (hy : y ∈ b) (hdom : Dom g s n y) : Dom g s x y := by
@@ -912,7 +923,7 @@ theorem dominators_rows :
   rw [List.map_map]
   apply List.map_congr_left
   rintro ⟨n, old⟩ hold
-  simp only [Function.comp, Prod.mk.injEq, true_and]
+  simp only [Function.comp]
   have hn : n ∈ reachable g s := by
     rw [← hT.keys]
     exact List.mem_map.2 ⟨_, hold, rfl⟩

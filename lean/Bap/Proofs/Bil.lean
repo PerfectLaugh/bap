@@ -5,7 +5,6 @@ import Bap.Bil.Wire
 import Bap.Proofs.Core
 import Lean.Elab.Command
 
-set_option linter.unusedSimpArgs false
 
 namespace Bap.Proofs.Bil
 open Bap.Bil
@@ -40,7 +39,7 @@ private theorem find?_bind_other (env : Env) {var other : Bap.Var} (value : Valu
       simp [hv, ih]
     · by_cases hko : k = other
       · subst hko; simp [hk]
-      · simp [List.filter_cons, hk, hko, ih]
+      · simp [hk, hko, ih]
 
 theorem lookup_bind_other (env : Env) {var other : Bap.Var} (value : Value) (h : other ≠ var) :
     lookup (Bap.Bil.bind env var value) other = lookup env other := by
@@ -753,7 +752,7 @@ theorem evalExp_substitute_single (exp replacement : Exp) (var : Bap.Var) (env :
   · subst he
     simp [Assoc.get, hvalue, lookup_bind_eq]
   · have : Assoc.get v [(var, replacement)] = none := by
-      simp [get_cons, he, Assoc.get]
+      simp [he, Assoc.get]
     simp [this, lookup_bind_other _ _ he]
 
 /-- Where no `let` could capture, `substitute` keeps the binder like the reference `Exp.substitute`. -/
@@ -866,7 +865,7 @@ private theorem evalBin_width {op : BinOp} {a : BitVec w} {b : BitVec w'} {r : V
     (h : evalBin op ⟨w, a⟩ ⟨w', b⟩ = .ok r) : w = w' := by
   by_cases hne : w = w'
   · exact hne
-  · simp [evalBin, hne, Bind.bind, Except.bind] at h
+  · simp [evalBin, hne] at h
 
 private theorem bit_cases (c : BitVec 1) : c = 1 ∨ c = 0 := by
   have := c.isLt
@@ -1173,7 +1172,7 @@ private theorem evalExp_progress_aux (exp : Exp) (hu : hasUnknown exp = false) {
   | unknown message typ => simp [hasUnknown] at hu
   | var var => exact hb var (by simp [occursFree])
   | load memory address endian size ihm iha =>
-    simp only [hasUnknown, Bool.or_eq_false_iff, and_assoc] at hu
+    simp only [hasUnknown, Bool.or_eq_false_iff] at hu
     obtain ⟨hu1, hu2⟩ := hu
     obtain ⟨w, hmt, hat, _⟩ := infer_load_inv hi
     obtain ⟨mv, hm⟩ := ihm hu1 hmt hwt (fun v h => hb v (by simp [occursFree, h]))
@@ -1193,7 +1192,7 @@ private theorem evalExp_progress_aux (exp : Exp) (hu : hasUnknown exp = false) {
     obtain ⟨x, rfl⟩ := bits_of_type (evalExp_type_sound hwt _ hvt hv)
     exact ⟨_, eval_store_iff.mpr ⟨w, m, a, _, x, _, hm, ha, hv, Bap.Proofs.Core.MemoryLaws.write_eq rfl endian, rfl⟩⟩
   | bin op left right ihl ihr =>
-    simp only [hasUnknown, Bool.or_eq_false_iff, and_assoc] at hu
+    simp only [hasUnknown, Bool.or_eq_false_iff] at hu
     obtain ⟨hu1, hu2⟩ := hu
     obtain ⟨w, hil, hir, _⟩ := infer_bin_inv hi
     obtain ⟨lv, hl⟩ := ihl hu1 hil hwt (fun v h => hb v (by simp [occursFree, h]))
@@ -1224,7 +1223,7 @@ private theorem evalExp_progress_aux (exp : Exp) (hu : hasUnknown exp = false) {
         simp only [castValue, hhigh]
         rfl⟩⟩
   | letIn var value body ihv ihb =>
-    simp only [hasUnknown, Bool.or_eq_false_iff, and_assoc] at hu
+    simp only [hasUnknown, Bool.or_eq_false_iff] at hu
     obtain ⟨hu1, hu2⟩ := hu
     obtain ⟨hvt, hbt⟩ := infer_let_inv hi
     obtain ⟨x, hv⟩ := ihv hu1 hvt hwt (fun v h => hb v (by simp [occursFree, h]))
@@ -1254,7 +1253,7 @@ private theorem evalExp_progress_aux (exp : Exp) (hu : hasUnknown exp = false) {
       simp [Word.extract, show ¬ high < low by omega, show ¬ w ≤ high by omega]
     exact ⟨_, eval_extract_iff.mpr ⟨w, b, _, hv, hok, rfl⟩⟩
   | concat left right ihl ihr =>
-    simp only [hasUnknown, Bool.or_eq_false_iff, and_assoc] at hu
+    simp only [hasUnknown, Bool.or_eq_false_iff] at hu
     obtain ⟨hu1, hu2⟩ := hu
     obtain ⟨lw, rw, hlt, hrt, _⟩ := infer_concat_inv hi
     obtain ⟨lv, hl⟩ := ihl hu1 hlt hwt (fun v h => hb v (by simp [occursFree, h]))
@@ -1730,7 +1729,7 @@ theorem simplify_drops_unbound_variable (var : Bap.Var) (h : var.typ = .imm 8) :
     simp [evalExp, lookup, Bind.bind, Except.bind, Value.asBits]
   refine ⟨by rw [horig]; rfl, ?_⟩
   rw [simplifyExp, horig]
-  simp [simplifyExp, evalExp, lookup, hasImmWidth, inferExp, expectBits, h, hasUnknown, Bind.bind, Except.bind, Value.asBits]
+  simp [simplifyExp, evalExp, lookup, hasImmWidth, inferExp, expectBits, h, hasUnknown]
 
 /-- Width errors survive simplification. -/
 theorem simplify_keeps_width_error :
@@ -1768,7 +1767,7 @@ private theorem exec_step_mono (f : Nat)
   | ifElse condition yes no =>
     simp only [execStmt, Bind.bind, Except.bind] at h ⊢
     cases hc : execExp state condition with
-    | error e => simp only [hc]
+    | error e => simp only
     | ok v =>
       simp only [hc] at h ⊢
       cases v with
@@ -1784,7 +1783,7 @@ private theorem exec_step_mono (f : Nat)
   | «while» condition body =>
     simp only [execStmt, Bind.bind, Except.bind] at h ⊢
     cases hc : execExp state condition with
-    | error e => simp only [hc]
+    | error e => simp only
     | ok v =>
       simp only [hc] at h ⊢
       cases v with
@@ -3092,7 +3091,7 @@ theorem evalExpObserved_none (env : Env) (exp : Exp) :
               | memory x => observed_simp
               | undefined => observed_simp
               | @bits vw stored =>
-                simp only [Value.asBits]
+                simp only
                 by_cases hw : aw = mw
                 · subst hw
                   simp only [↓reduceDIte, notify]

@@ -869,7 +869,7 @@ theorem commit_run (site : Site) (writes : List Write) (state : LinkState) :
     (commit site writes).run state =
       if writes.all (fun write => site.off ≤ write.off && write.off + write.n ≤ site.limit &&
           write.off + write.n ≤ state.memory.size) = true then
-        .ok () { state with memory := foldWrites state.memory writes }
+        .ok () { state with memory := foldWrites state.memory writes, applied := (site, writes) :: state.applied }
       else .error (outside site) state := by
   show commit site writes state = _
   simp only [commit, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get]
@@ -1254,7 +1254,7 @@ theorem readNat_congr {a b : ByteArray} {little : Bool} {off n : Nat}
       exact ih _ fun i hi => hl i (by simp [hi])
   exact key _ _ fun i hi => List.mem_range.1 hi
 
-private theorem foldWrites_read : ∀ (writes : List Write) (memory : ByteArray) (write : Write),
+theorem foldWrites_read : ∀ (writes : List Write) (memory : ByteArray) (write : Write),
     write ∈ writes → (∀ w ∈ writes, w.off + w.n ≤ memory.size) →
     writes.Pairwise (fun a b => a.off + a.n ≤ b.off ∨ b.off + b.n ≤ a.off) →
     readNat (writes.foldl (init := memory) fun memory write =>
@@ -1962,12 +1962,12 @@ theorem mipsApplyHi_got16 {env : Env} {site : Site} {ahl slot : Int} {state afte
 
 /-- `R_MIPS_LO16`: after the pending halves of its symbol are done, `S + A`, and for `_gp_disp` the `GP - P + 4` of the pair. -/
 theorem mips_lo16 {env : Env} {site : Site} {state after : LinkState} {result : Unit} (ht : site.rel.typ = 6)
-    (hb : inSection site 0 4 state.memory.size = true) (hb' : inSection site 0 4 after.memory.size = true)
+    (hb : inSection site 0 4 state.memory.size = true)
     (hf : mipsFlush env (mipsA16 env site state) site.rel.symbol state = .ok result after) :
-    (mips env site).run state = .ok (some [stAt env site 0 4 (setLo16 (readNat after.memory env.little (site.off + 0) 4)
+    (mips env site).run state = .ok (some [stAt env site 0 4 (setLo16 (readNat state.memory env.little (site.off + 0) 4)
       ((if site.sym.name == "_gp_disp" then mipsGp env - site.p + 4 else site.s) + mipsA16 env site state))]) after := by
   cases he : site.rel.isExplicit <;>
-    (simp only [mipsA16, he, ite_true, ite_false, Bool.false_eq_true] at hf ⊢; link_run [mips, ht, hb, hb', he, hf]; try rfl)
+    (simp only [mipsA16, he, ite_true, ite_false, Bool.false_eq_true] at hf ⊢; link_run [mips, ht, hb, he, hf]; try rfl)
 
 /-- The middle of a compound record, on the special symbol: `R_MIPS_SUB` is `S - A`, `R_MIPS_64` is `S + A`, and `R_MIPS_NONE`
 leaves the value. -/
@@ -2335,7 +2335,7 @@ theorem ulebBytes_value (value : Int) : ∀ k, (List.range k).foldl (init := 0)
     have e2 : (128 : Nat) = 2 ^ 7 := rfl
     rw [e, field_split, Nat.zero_add, e2, ← Nat.pow_mul]
 
-private theorem uleb_read_loop {env : Env} {site : Site} {state : LinkState} :
+theorem uleb_read_loop {env : Env} {site : Site} {state : LinkState} :
     ∀ (l : List Nat) (init : Nat), (∀ i ∈ l, inSection site i 1 state.memory.size = true) →
       (forIn l init (fun i (r : Nat) =>
         (do
@@ -2486,10 +2486,13 @@ theorem ppcInsnOfHalf_little {env : Env} {site : Site} {state : LinkState} (hl :
   rfl
 
 /-- On big-endian, the halfword is the second half of the word. -/
-theorem ppcInsnOfHalf_big {env : Env} {site : Site} (hl : env.little = false) (state : LinkState) :
-    ppcInsnOfHalf env site state = .ok (readNat state.memory false (site.off - 2) 4) state := by
-  simp only [ppcInsnOfHalf, hl, Bool.false_eq_true, ite_false, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get,
-    pure, EStateM.pure]
+theorem ppcInsnOfHalf_big {env : Env} {site : Site} {state : LinkState} (hl : env.little = false) (ho : 2 ≤ site.off)
+    (hb : inSection { site with off := site.off - 2 } 0 4 state.memory.size = true) :
+    ppcInsnOfHalf env site state = .ok (readNat state.memory false (site.off - 2 + 0) 4) state := by
+  have hn : ¬ site.off < 2 := by omega
+  simp only [ppcInsnOfHalf, hl, Bool.false_eq_true, ite_false, hn, ElfLinker.load, bind, EStateM.bind, get, getThe,
+    MonadStateOf.get, EStateM.get, hb, ite_true]
+  rfl
 
 /-- `R_PPC64_ADDR16_DS`, `R_PPC64_TOC16_DS` and `R_PPC64_TOC16_LO_DS`: the value goes in the offset of a DS-form or DQ-form
 instruction. -/
@@ -2982,7 +2985,7 @@ theorem frame_commit {site : Site} (hs : SiteIn P site) (writes : List Write) : 
     · refine .inr (Classical.byContradiction fun h2 => hn (hs o ?_ ?_)) <;> omega
   · exact ⟨hp, Nat.le_refl _, fun _ _ _ => rfl⟩
 
-private theorem pushes_spec (memory : ByteArray) (list : List Nat) :
+theorem pushes_spec (memory : ByteArray) (list : List Nat) :
     let padded := list.foldl (init := memory) fun memory _ => memory.push 0
     padded.size = memory.size + list.length ∧ ∀ o, o < memory.size → padded.get! o = memory.get! o := by
   induction list generalizing memory with
@@ -3018,21 +3021,31 @@ theorem frame_gotEntry {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (value
     have hlt : o < env.gotOff := Nat.lt_of_not_le fun h => hn (hg o h)
     rw [w2 o (.inl (by omega)), hk o ho]
 
-/-- What every handler is made of. -/
+theorem frame_ld (env : Env) (site : Site) (at' n : Nat) : Frame P S (ld env site at' n) := frame_load _ _ _ _
+
+theorem frame_ldInt (env : Env) (site : Site) (at' n : Nat) : Frame P S (ldInt env site at' n) :=
+  Frame.bind (frame_ld _ _ _ _) fun _ => Frame.pure _
+
+theorem frame_ldi (env : Env) (site : Site) (at' n : Nat) : Frame P S (ldi env site at' n) := frame_load _ _ _ _
+
+theorem frame_done (writes : List Write) : Frame P S (done writes) := Frame.pure _
+
+/-- What every handler is made of. Only reducible unification: a failing `exact` at default transparency unfolds all of
+`EStateM`, which is what this took a minute for. -/
 local macro "frame_auto" : tactic => `(tactic|
   repeat' first
     | assumption
-    | exact Frame.pure _
-    | exact Frame.throw _
-    | exact Frame.get
-    | exact frame_load _ _ _ _
-    | exact frame_gotEntry ‹_› _
-    | apply Frame.bind
-    | apply Frame.forIn
-    | (unfold ElfLinker.ld; skip)
-    | (unfold ElfLinker.ldInt; skip)
-    | (unfold ElfLinker.ldi; skip)
-    | (unfold ElfLinker.done; skip)
+    | with_reducible apply Frame.bind
+    | with_reducible apply Frame.forIn
+    | with_reducible exact Frame.pure _
+    | with_reducible exact Frame.throw _
+    | with_reducible exact Frame.get
+    | with_reducible exact frame_done _
+    | with_reducible exact frame_ld _ _ _ _
+    | with_reducible exact frame_ldInt _ _ _ _
+    | with_reducible exact frame_ldi _ _ _ _
+    | with_reducible exact frame_load _ _ _ _
+    | with_reducible exact frame_gotEntry ‹_› _
     | split
     | intro _)
 
@@ -3131,14 +3144,13 @@ theorem frame_mipsCompound {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (s
   dsimp only
   frame_auto
 
-private theorem frame_pending {site : Site} (hs : SiteIn P site) (stored : Nat) :
+theorem frame_pending {site : Site} (hs : SiteIn P site) (stored : Nat) :
     Frame P (SiteIn P) (modify fun state : LinkState => { state with mipsPending := (site, stored) :: state.mipsPending } : LinkM PUnit) :=
   Frame.modify (fun _ hp entry hentry => by
     rcases List.mem_cons.mp hentry with rfl | hentry
     · exact hs
     · exact hp _ hentry) (fun _ => rfl)
 
-set_option maxHeartbeats 4000000 in
 theorem frame_mips {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) {site : Site} (hs : SiteIn P site) :
     Frame P (SiteIn P) (mips env site) := by
   unfold mips
@@ -3148,19 +3160,19 @@ theorem frame_mips {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) {site : Si
   have hcompound := frame_mipsCompound (P := P) (S := SiteIn P) hg site
   have hpend := frame_pending (P := P) hs
   split <;> repeat' first
-    | exact hflush _ _
-    | exact happly _
-    | exact hcompound
-    | exact hpend _
-    | exact Frame.pure _
-    | exact Frame.throw _
-    | exact Frame.get
-    | exact frame_load _ _ _ _
-    | exact frame_gotEntry ‹_› _
-    | apply Frame.bind
-    | (unfold ElfLinker.ld; skip)
-    | (unfold ElfLinker.ldInt; skip)
-    | (unfold ElfLinker.done; skip)
+    | with_reducible apply Frame.bind
+    | with_reducible exact Frame.pure _
+    | with_reducible exact hflush _ _
+    | with_reducible exact happly _
+    | with_reducible exact hcompound
+    | with_reducible exact hpend _
+    | with_reducible exact Frame.throw _
+    | with_reducible exact Frame.get
+    | with_reducible exact frame_done _
+    | with_reducible exact frame_ld _ _ _ _
+    | with_reducible exact frame_ldInt _ _ _ _
+    | with_reducible exact frame_load _ _ _ _
+    | with_reducible exact frame_gotEntry ‹_› _
     | split
     | intro _
 
@@ -3222,7 +3234,7 @@ def MayChange (tables : Tables) (o : Nat) : Prop :=
     sec.off ≤ o ∧ o < sec.off + sec.size
 
 /-- A site of a relocation is in the section of the relocation. -/
-private theorem relocatedSection_some {tables : Tables} {index : Nat} {sec : ElfLinker.Section} {addr : Nat}
+theorem relocatedSection_some {tables : Tables} {index : Nat} {sec : ElfLinker.Section} {addr : Nat}
     (h : relocatedSection tables index = some (sec, addr)) : tables.input.sections[index]? = some sec := by
   unfold relocatedSection at h
   cases hs : tables.input.sections[index]? with
@@ -3283,7 +3295,7 @@ theorem siteOf_in {tables : Tables} {report : Bool} {rel : Rel} (hrel : rel ∈ 
   simp only at hlo hhi
   exact .inr ⟨rel, hrel, sec, relocatedSection_some hsec, by omega, by omega⟩
 
-private theorem Frame.bind_some {m : LinkM (Option α)} {f : Option α → LinkM β} {Q : α → Prop} (hm : Frame P S m)
+theorem Frame.bind_some {m : LinkM (Option α)} {f : Option α → LinkM β} {Q : α → Prop} (hm : Frame P S m)
     (hspec : ∀ state after a, m state = .ok (some a) after → Q a) (hnone : Frame P S (f none)) (hf : ∀ a, Q a → Frame P S (f (some a))) :
     Frame P S (m >>= f) := by
   intro state hp
@@ -3306,7 +3318,7 @@ private theorem Frame.bind_some {m : LinkM (Option α)} {f : Option α → LinkM
     obtain ⟨p2, s2, f2⟩ := hf' after p1
     exact ⟨p2, Nat.le_trans s1 s2, fun o ho hn => (f2 o (Nat.lt_of_lt_of_le ho s1) hn).trans (f1 o ho hn)⟩
 
-private theorem gotOff_may (tables : Tables) : ∀ o, tables.env.gotOff ≤ o → MayChange tables o := fun _ h => .inl h
+theorem gotOff_may (tables : Tables) : ∀ o, tables.env.gotOff ≤ o → MayChange tables o := fun _ h => .inl h
 
 theorem frame_riscvPrescan {env : Env} (hg : ∀ o, env.gotOff ≤ o → P o) (site : Site) : Frame P S (riscvPrescan env site) := by
   unfold riscvPrescan
@@ -3371,7 +3383,8 @@ theorem link_relocate (input : Input) :
       let after := stateOf (relocate tables { memory := input.data })
       (link input).memory = after.memory ∧ (link input).warnings = after.warnings.reverse ∧
         (link input).references = after.references.reverse ∧
-        (link input).sectionAddrs = (layoutSections input.sections.toList input.base).addrs := by
+        (link input).sectionAddrs = (layoutSections input.sections.toList input.base).addrs ∧
+        (link input).applied = after.applied.reverse := by
   generalize hl : layoutSections input.sections.toList input.base = layout
   cases hc : placeCommons input.symbols.toList (alignUp layout.cursor (input.width / 8)) with
   | mk commons commonsEnd =>
@@ -3386,7 +3399,7 @@ theorem link_relocate (input : Input) :
       dsimp only
       rw [he]
       dsimp only [EStateM.run]
-      split <;> (rename_i heq; rw [heq]; exact ⟨rfl, rfl, rfl, rfl⟩)
+      split <;> (rename_i heq; rw [heq]; exact ⟨rfl, rfl, rfl, rfl, rfl⟩)
 
 /-- **What a link leaves of the input**: its bytes, but for the sections with a relocation; and the GOT goes after them. -/
 theorem link_keeps_bytes (input : Input) {o : Nat} (ho : o < input.data.size)
@@ -3466,7 +3479,7 @@ def placedSite (tables : Tables) (rel : Rel) (sec : ElfLinker.Section) (base s :
   ⟨rel, (tables.input.symbols[rel.symbol]?).getD nullSym, sec.name, ((base + rel.offset : Nat) : Int), s,
     if rel.isExplicit then rel.addend else 0, sec.off + rel.offset, min (sec.off + sec.size) tables.env.gotOff⟩
 
-private theorem siteOf_placed {tables : Tables} {rel : Rel} {n : Nat} {sec : ElfLinker.Section} {base s : Nat}
+theorem siteOf_placed {tables : Tables} {rel : Rel} {n : Nat} {sec : ElfLinker.Section} {base s : Nat}
     (h : Placed tables rel n sec base s) (state : LinkState) :
     siteOf tables false rel state = .ok (some (placedSite tables rel sec base s)) state := by
   have hb := h.bounds
@@ -3613,7 +3626,7 @@ theorem link_x86_64_pc32 (input : Input) (hm : input.machine = 62) (hl : input.l
 
 /-! `R_MIPS_LO16` resolves what is pending of its symbol, and that succeeds. -/
 
-private theorem commit_bounds {site : Site} {writes : List Write} {state : LinkState}
+theorem commit_bounds {site : Site} {writes : List Write} {state : LinkState}
     (h : ∀ w ∈ writes, site.off ≤ w.off ∧ w.off + w.n ≤ site.limit ∧ w.off + w.n ≤ state.memory.size) :
     ∃ after, commit site writes state = .ok () after ∧ state.memory.size ≤ after.memory.size ∧
       after.mipsPending = state.mipsPending := by
@@ -3623,13 +3636,13 @@ private theorem commit_bounds {site : Site} {writes : List Write} {state : LinkS
     exact fun w hw => ⟨⟨(h w hw).1, (h w hw).2.1⟩, (h w hw).2.2⟩)] at hc
   exact ⟨_, hc, Nat.le_of_eq (commit_fold writes state.memory fun w hw => (h w hw).2.2).1.symm, rfl⟩
 
-private theorem gotEntry_ok (env : Env) (value : Int) (state : LinkState) :
+theorem gotEntry_ok (env : Env) (value : Int) (state : LinkState) :
     ∃ slot after, gotEntry env value state = .ok slot after ∧ state.memory.size ≤ after.memory.size ∧
       after.mipsPending = state.mipsPending := by
   have hf := (frame_gotEntry (P := fun o => env.gotOff ≤ o) (S := fun _ => True) (env := env) (fun _ h => h) value state (fun _ _ => trivial)).2.1
   simp only [gotEntry, bind, EStateM.bind, get, getThe, MonadStateOf.get, EStateM.get] at hf ⊢
   cases hc : state.got[field value 0 64]? with
-  | some slot => exact ⟨slot, state, by simp only [hc]; rfl, Nat.le_refl _, rfl⟩
+  | some slot => exact ⟨slot, state, rfl, Nat.le_refl _, rfl⟩
   | none =>
     simp only [hc] at hf ⊢
     exact ⟨_, _, rfl, hf, rfl⟩
@@ -3665,7 +3678,7 @@ theorem mipsApplyHi_ok (env : Env) {site : Site} (ahl : Int) {state : LinkState}
 /-- The sites that are pending can be resolved: their places were read when they were deferred, and memory only grows. -/
 def PendingOk (state : LinkState) : Prop := ∀ entry ∈ state.mipsPending, inSection entry.1 0 4 state.memory.size = true
 
-private theorem inSection_mono {site : Site} {at' n small large : Nat} (h : inSection site at' n small = true) (hle : small ≤ large) :
+theorem inSection_mono {site : Site} {at' n small large : Nat} (h : inSection site at' n small = true) (hle : small ≤ large) :
     inSection site at' n large = true := by
   simp only [inSection, Bool.and_eq_true, decide_eq_true_eq] at h ⊢
   exact ⟨h.1, by omega⟩
@@ -3713,10 +3726,10 @@ theorem mips_lo16_resolves {env : Env} {site : Site} {state : LinkState} (ht : s
     (hb : inSection site 0 4 state.memory.size = true) (hp : PendingOk state) :
     ∃ after, mipsFlush env (mipsA16 env site state) site.rel.symbol state = .ok () after ∧
       after.mipsPending = (state.mipsPending.filter fun entry => !(entry.1.rel.symbol == site.rel.symbol)) ∧
-      (mips env site).run state = .ok (some [stAt env site 0 4 (setLo16 (readNat after.memory env.little (site.off + 0) 4)
+      (mips env site).run state = .ok (some [stAt env site 0 4 (setLo16 (readNat state.memory env.little (site.off + 0) 4)
         ((if site.sym.name == "_gp_disp" then mipsGp env - site.p + 4 else site.s) + mipsA16 env site state))]) after := by
-  obtain ⟨after, hf, hs, hpend⟩ := mipsFlush_ok env (mipsA16 env site state) site.rel.symbol hp
-  exact ⟨after, hf, hpend, mips_lo16 ht hb (inSection_mono hb hs) hf⟩
+  obtain ⟨after, hf, _, hpend⟩ := mipsFlush_ok env (mipsA16 env site state) site.rel.symbol hp
+  exact ⟨after, hf, hpend, mips_lo16 ht hb hf⟩
 
 /-- What is deferred stays good: the place of `R_MIPS_HI16` was read before it was deferred. -/
 theorem PendingOk.push {state : LinkState} (h : PendingOk state) {site : Site} (stored : Nat)
@@ -4223,9 +4236,10 @@ theorem decode_relocatable {data : ByteArray} {image : Image} {header : Elf.Head
     (hh : parseHeader data = .ok header) (ht : header.fileType = 1) :
     image.data = data ∧ image.addrWidth = (if header.is64 then 64 else 32) ∧ image.endian = header.endian ∧
       ∃ sections names, parseSections data header = .ok sections ∧
-        let output := ElfLinker.link (linkInput data header sections names)
+        let prepared := ElfLinker.prepare (linkInput data header sections names)
+        let output := ElfLinker.link prepared
         image.segments = output.regions.map ElfLinker.toSegment ∧
-        image.memory.entries = ((output.regions.map (ElfLinker.toMemRegion output.memory data.size)).reverse.map
+        image.memory.entries = ((output.regions.map (ElfLinker.toMemRegion output.memory prepared.data.size)).reverse.map
           fun region => (region, ())) := by
   simp only [Elf.decode, bind_ok_iff, hh] at h
   rcases h with ⟨_, he, h⟩
@@ -5128,15 +5142,16 @@ theorem decode_agree {data : ByteArray} {image : Image} (h : Elf.decode data = .
   have ⟨header, hh⟩ := decode_header h
   by_cases ht : header.fileType = 1
   · obtain ⟨_, _, _, sections, names, _, hseg, hmem⟩ := decode_relocatable h hh ht
-    generalize hoh : ElfLinker.link (linkInput data header sections names) = output at hseg hmem
+    generalize hprep : (ElfLinker.prepare (linkInput data header sections names)).data.size = size at hmem
+    generalize hoh : ElfLinker.link (ElfLinker.prepare (linkInput data header sections names)) = output at hseg hmem
     refine ⟨output.regions.map fun region =>
-      (ElfLinker.toSegment region, ElfLinker.toMemRegion output.memory data.size region), ?_, ?_, ?_⟩
+      (ElfLinker.toSegment region, ElfLinker.toMemRegion output.memory size region), ?_, ?_, ?_⟩
     · rw [hseg]; simp [Function.comp_def]
     · rw [hmem]; simp [Function.comp_def]
     · intro pair hp
       simp only [List.mem_map] at hp
       rcases hp with ⟨region, _, rfl⟩
-      have ⟨a, b, _⟩ := LinkerLaws.toSegment_toMemRegion output.memory data.size region
+      have ⟨a, b, _⟩ := LinkerLaws.toSegment_toMemRegion output.memory size region
       exact ⟨a, b⟩
   · have ⟨_, _, _, _, entries, hs, hm, hp⟩ := decode_loaded h hh ht
     exact ⟨entries, hs, hm, fun pair hpair => ⟨(hp pair hpair).1, (hp pair hpair).2.1⟩⟩
@@ -5549,7 +5564,7 @@ theorem parseHeader_ok {data : ByteArray} {header : Header} (h : parseHeader dat
   subst hsg
   simp only [bind_ok_iff] at h
   rcases h with ⟨machine, _, count, _, symOff, _, symCount, _, optSize, _, ⟨width, base⟩, hopt, h⟩
-  simp only [bind_ok_iff] at h
+  dsimp only at h
   rcases h with ⟨entryRva, hentry, h⟩
   by_cases hsec : peOffset + 4 + 20 + optSize + count * 40 > data.size
   · rw [ite_eq_left hsec] at h; cases h

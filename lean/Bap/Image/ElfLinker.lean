@@ -54,6 +54,8 @@ structure Input where
   relocations : List Rel
   /-- The global pointer the object was assembled for, of its `.reginfo` or `.MIPS.options`. -/
   gp0 : Int := 0
+  /-- The index of the section of thunks, which the sections from there on moved one up for. -/
+  thunksAt : Option Nat := none
 
 structure Region where
   name : String
@@ -65,16 +67,6 @@ structure Region where
   w : Bool
   x : Bool
   isSection : Bool
-
-structure Output where
-  regions : List Region
-  symbols : List Symbol
-  references : List (Nat × String)
-  /-- The addresses of the sections, by section index. -/
-  sectionAddrs : Array (Option Nat)
-  /-- The input with the relocations applied, followed by the GOT. -/
-  memory : ByteArray
-  warnings : List String
 
 /-! ### Constants of the ELF gABI -/
 
@@ -184,6 +176,18 @@ structure Write where
   value : Int
   little : Bool
 
+structure Output where
+  regions : List Region
+  symbols : List Symbol
+  references : List (Nat × String)
+  /-- The addresses of the sections, by section index. -/
+  sectionAddrs : Array (Option Nat)
+  /-- The input with the relocations applied, followed by the GOT. -/
+  memory : ByteArray
+  warnings : List String
+  /-- The stores of the relocations in the order they were done, a site at a time. -/
+  applied : List (Site × List Write) := []
+
 /-- The thread-local storage of the image, as a `PT_TLS` segment says it. -/
 structure TlsBlock where
   start : Nat := 0
@@ -213,6 +217,8 @@ structure LinkState where
   riscvHi : Std.HashMap Int Int := {}
   references : List (Nat × String) := []
   warnings : List String := []
+  /-- The stores done so far, the latest first, a site at a time. -/
+  applied : List (Site × List Write) := []
 
 abbrev LinkM := EStateM String LinkState
 
@@ -237,7 +243,7 @@ def commit (site : Site) (writes : List Write) : LinkM Unit := do
       write.off + write.n ≤ state.memory.size then
     let memory := writes.foldl (init := state.memory) fun memory write =>
       writeNat memory write.little write.off write.n write.value
-    set { state with memory }
+    set { state with memory, applied := (site, writes) :: state.applied }
   else
     throw (outside site)
 
@@ -422,8 +428,10 @@ def aarch64 (env : Env) (site : Site) : Outcome := do
     let entry ← gotEntry env (tpOff env s + a)
     update fun insn => setBits insn 5 19 ((entry - p) >>> 2)
   | 0x220 => update (aarch64SMov ((tpOff env s + a) >>> 32))
-  | 0x221 | 0x222 => update (aarch64SMov ((tpOff env s + a) >>> 16))
-  | 0x223 | 0x224 => update (aarch64SMov (tpOff env s + a))
+  | 0x221 => update (aarch64SMov ((tpOff env s + a) >>> 16))
+  | 0x222 => update fun insn => setBits insn 5 16 ((tpOff env s + a) >>> 16)
+  | 0x223 => update (aarch64SMov (tpOff env s + a))
+  | 0x224 => update fun insn => setBits insn 5 16 (tpOff env s + a)
   | 0x225 => update (aarch64Lo12 0 ((tpOff env s + a) >>> 12))
   | 0x226 | 0x227 => lo12 0 (tpOff env s + a)
   | 0x228 | 0x229 => lo12 0 (tpOff env s + a)
@@ -710,9 +718,10 @@ def mips (env : Env) (site : Site) : Outcome := do
   | 11 => store 4 (setLo16 (← ld env site 0 4) ((← gotEntry env s) - gp))
   | 6 =>
     let lo ← a16
+    let insn ← ld env site 0 4
     mipsFlush env lo rel.symbol
     let s := if sym.name == "_gp_disp" then gp - p + 4 else s
-    store 4 (setLo16 (← ld env site 0 4) (s + lo))
+    store 4 (setLo16 insn (s + lo))
   | 7 | 8 => store 4 (setLo16 (← ld env site 0 4) (s + (← a16) + mipsGp0 env sym - gp))
   | 10 =>
     let insn ← ld env site 0 4
@@ -887,7 +896,8 @@ def ppcDsHalf (dq : Bool) (old : Nat) (value : Int) : Nat :=
 /-- The word of the instruction whose low halfword is at the place: the place is in its second half on big-endian. -/
 def ppcInsnOfHalf (env : Env) (site : Site) : LinkM Nat := do
   if env.little then ldi env site 0
-  else pure (readNat (← get).memory false (site.off - 2) 4)
+  else if site.off < 2 then throw (outside site)
+  else load { site with off := site.off - 2 } 0 4 false
 
 def powerpc (env : Env) (site : Site) : Outcome := do
   let p := site.p
@@ -1451,7 +1461,352 @@ def link (input : Input) : Output :=
     references := state.references.reverse
     sectionAddrs := layout.addrs
     memory := state.memory
-    warnings := state.warnings.reverse }
+    warnings := state.warnings.reverse
+    applied := state.applied.reverse }
+
+/-! ### Relaxing thread-local accesses
+
+An image has one module, whose thread-local block the local-exec model reaches without a loader, so what the general-dynamic,
+local-dynamic and TLSDESC models ask a loader for is known at link time. These rewrite the instructions the way `ld.lld` does for
+an executable and go through the relocations of local-exec. On machines where `ld.lld` doesn't relax, ARM among them, what needs
+a loader stays and warns. -/
+
+/-- Stores bytes at an offset. -/
+def writeBytes (memory : ByteArray) (off : Nat) (bytes : List Nat) : ByteArray :=
+  bytes.zipIdx.foldl (init := memory) fun memory (byte, index) => memory.set! (off + index) (UInt8.ofNat byte)
+
+/-- The byte at an offset, or zero past the end of a malformed file. -/
+def peek (memory : ByteArray) (off : Nat) : Nat := if off < memory.size then (memory.get! off).toNat else 0
+
+/-- Whether bytes are at an offset. -/
+def hasBytes (memory : ByteArray) (off : Nat) (bytes : List Nat) : Bool :=
+  bytes.zipIdx.all fun (byte, index) => peek memory (off + index) == byte
+
+/-- What relaxing a relocation does: the bytes it rewrites, what it becomes, and if it takes the relocation that follows with it. -/
+structure Relaxed where
+  patches : List (Nat × List Nat) := []
+  rels : List Rel := []
+  skip : Bool := false
+
+/-- `mov %fs:0,%rax; lea x@tpoff(%rax),%rax`, for `.byte 0x66; leaq x@tlsgd(%rip),%rdi; .word 0x6666; rex64; call __tls_get_addr`. -/
+def x86_64GdInsns : List Nat := [0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, 0x48, 0x8d, 0x80, 0, 0, 0, 0]
+
+/-- `.word 0x6666; .byte 0x66; mov %fs:0,%rax`, for `leaq x@tlsld(%rip),%rdi; call __tls_get_addr`. -/
+def x86_64LdInsns : List Nat := [0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0]
+
+/-- The same for `call *__tls_get_addr@GOTPCREL(%rip)`. -/
+def x86_64LdIndirectInsns : List Nat := [0x66, 0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0]
+
+/-- `movl %gs:0,%eax; subl $x@ntpoff,%eax`, for `leal x@tlsgd(%ebx),%eax; call ___tls_get_addr`. -/
+def i386GdInsns : List Nat := [0x65, 0xa1, 0, 0, 0, 0, 0x81, 0xe8, 0, 0, 0, 0]
+
+/-- `movl %gs:0,%eax; nop; leal 0(%esi,1),%esi`, for `leal x@tlsldm(%ebx),%eax; call ___tls_get_addr`. -/
+def i386LdInsns : List Nat := [0x65, 0xa1, 0, 0, 0, 0, 0x90, 0x8d, 0x74, 0x26, 0x00]
+
+/-- The two-byte `nop` that replaces a call through a TLS descriptor. -/
+def x86Nop : List Nat := [0x66, 0x90]
+
+def wordBytes (word : Nat) : List Nat := (List.range 4).map fun i => (word >>> (8 * i)) % 256
+
+/-- `movz x0, #:tprel_g1:x`, `movk x0, #:tprel_g0_nc:x`, and the `nop` that replaces the rest of a TLSDESC sequence of AArch64. -/
+def aarch64Movz : Nat := 0xd2a00000
+def aarch64Movk : Nat := 0xf2800000
+def aarch64Nop : Nat := 0xd503201f
+
+/-- A relocation that goes through local-exec at another offset, with another type. -/
+def relocated (rel : Rel) (offset typ : Nat) (addend : Int) : Rel := { rel with offset, typ, addend, isExplicit := true }
+
+def relaxX86_64 (data : ByteArray) (sec : Section) (rel : Rel) (next : Option Rel) : Option Relaxed :=
+  let loc := sec.off + rel.offset
+  let inSec (off n : Nat) : Bool := sec.off ≤ off && off + n ≤ sec.off + sec.size
+  let follows (at' : Nat) (typs : List Nat) : Bool := match next with
+    | some call => call.target == rel.target && call.offset == rel.offset + at' && typs.contains call.typ
+    | none => false
+  match rel.typ with
+  | 19 =>
+    if 4 ≤ loc && inSec (loc - 4) 16 && hasBytes data (loc - 4) [0x66, 0x48, 0x8d, 0x3d] &&
+        follows 8 [2, 4, 9, 41, 42] then
+      some { patches := [(loc - 4, x86_64GdInsns)], rels := [relocated rel (rel.offset + 8) 23 (rel.addend + 4)], skip := true }
+    else none
+  | 20 =>
+    if 3 ≤ loc && hasBytes data (loc - 3) [0x48, 0x8d, 0x3d] then
+      if follows 5 [2, 4] && inSec (loc - 3) 12 then
+        some { patches := [(loc - 3, x86_64LdInsns)], skip := true }
+      else if follows 6 [9, 41, 42] && inSec (loc - 3) 13 then
+        some { patches := [(loc - 3, x86_64LdIndirectInsns)], skip := true }
+      else none
+    else none
+  | 17 => some { rels := [{ rel with typ := 18 }] }
+  | 21 => some { rels := [{ rel with typ := 23 }] }
+  | 34 =>
+    let rex := peek data (loc - 3)
+    let modrm := peek data (loc - 1)
+    if 3 ≤ loc && inSec (loc - 3) 7 && (rex == 0x48 || rex == 0x4c) && peek data (loc - 2) == 0x8d && modrm % 8 == 5 &&
+        modrm >>> 6 == 0 then
+      some { patches := [(loc - 3, [0x48 + (rex >>> 2) % 2, 0xc7, 0xc0 + (modrm >>> 3) % 8])],
+             rels := [relocated rel rel.offset 23 (rel.addend + 4)] }
+    else none
+  | 35 => if inSec loc 2 then some { patches := [(loc, x86Nop)] } else none
+  | _ => none
+
+def relaxI386 (data : ByteArray) (sec : Section) (rel : Rel) (next : Option Rel) : Option Relaxed :=
+  let loc := sec.off + rel.offset
+  let inSec (off n : Nat) : Bool := sec.off ≤ off && off + n ≤ sec.off + sec.size
+  let calls := match next with
+    | some call => call.target == rel.target && [2, 4, 43].contains call.typ
+    | none => false
+  match rel.typ with
+  | 18 =>
+    let start := if peek data (loc - 2) == 0x04 then loc - 3 else loc - 2
+    if 3 ≤ loc && calls && inSec start 12 && start ≥ sec.off && loc + 4 ≤ data.size then
+      let inPlace : Int := if rel.isExplicit then rel.addend else sext (readNat data true loc 4) 32
+      some { patches := [(start, i386GdInsns)], rels := [relocated rel (start + 8 - sec.off) 34 (-inPlace)], skip := true }
+    else none
+  | 19 =>
+    if 2 ≤ loc && calls && inSec (loc - 2) 11 then some { patches := [(loc - 2, i386LdInsns)], skip := true } else none
+  | 32 => some { rels := [{ rel with typ := 17 }] }
+  | 39 =>
+    if 2 ≤ loc && inSec (loc - 2) 6 && peek data (loc - 2) == 0x8d then
+      some { patches := [(loc - 1, [0x05 + (peek data (loc - 1) &&& 0x38)])], rels := [{ rel with typ := 17 }] }
+    else none
+  | 40 => if inSec loc 2 then some { patches := [(loc, x86Nop)] } else none
+  | _ => none
+
+def relaxAArch64 (sec : Section) (rel : Rel) : Option Relaxed :=
+  let loc := sec.off + rel.offset
+  if loc + 4 ≤ sec.off + sec.size then
+    match rel.typ with
+    | 0x232 => some { patches := [(loc, wordBytes aarch64Movz)], rels := [{ rel with typ := 0x222 }] }
+    | 0x233 => some { patches := [(loc, wordBytes aarch64Movk)], rels := [{ rel with typ := 0x224 }] }
+    | 0x234 | 0x239 => some { patches := [(loc, wordBytes aarch64Nop)] }
+    | _ => none
+  else none
+
+/-- What relaxing a relocation does on a machine, if anything. -/
+def relaxOne (input : Input) (data : ByteArray) (rel : Rel) (next : Option Rel) : Option Relaxed :=
+  match input.sections[rel.target]? with
+  | none => none
+  | some sec =>
+    match input.machine with
+    | 62 => relaxX86_64 data sec rel next
+    | 3 => relaxI386 data sec rel next
+    | 183 => relaxAArch64 sec rel
+    | _ => none
+
+/-- The state of the pass: the bytes, the relocations in reverse, and whether a call has to go. -/
+structure RelaxState where
+  data : ByteArray
+  rels : List Rel := []
+  skip : Bool := false
+
+def relaxStep (input : Input) (state : RelaxState) (entry : Rel × Option Rel) : RelaxState :=
+  if state.skip then { state with skip := false }
+  else match relaxOne input state.data entry.1 entry.2 with
+    | some relaxed =>
+      { data := relaxed.patches.foldl (fun data patch => writeBytes data patch.1 patch.2) state.data
+        rels := relaxed.rels.reverse ++ state.rels
+        skip := relaxed.skip }
+    | none => { state with rels := entry.1 :: state.rels }
+
+/-- A file with its thread-local accesses relaxed to local-exec. -/
+def relaxTls (input : Input) : Input :=
+  let nexts := input.relocations.tail.map some ++ [none]
+  let done := (input.relocations.zip nexts).foldl (relaxStep input) { data := input.data }
+  { input with data := done.data, relocations := done.rels.reverse }
+
+/-! ### Range-extension thunks
+
+A branch whose target is out of its range goes to a thunk in a section of its own at the end of the sections, which goes to the
+target whatever its address. The thunk of a branch that changes the instruction set is the veneer that `ld.lld` adds, since its
+`BX` also changes the state, as a jump can't by itself. The thunks are ordinary code with ordinary relocations against the symbol
+of the branch, and each branch only gets a new symbol, so all there is to know of a link holds of a link with thunks. -/
+
+/-- A word as bytes, in a byte order. -/
+def bytesOf (little : Bool) (n value : Nat) : List Nat :=
+  (List.range n).map fun i => (value >>> (8 * if little then i else n - i - 1)) % 256
+
+/-- `ldr x16, #8; br x16; .quad target`, always little-endian for its instructions. -/
+def aarch64Thunk : List Nat := bytesOf true 4 0x58000050 ++ bytesOf true 4 0xd61f0200 ++ List.replicate 8 0
+
+/-- `ldr pc, [pc, #-4]; .word target`. The word has the Thumb bit of the target, which makes it interwork. -/
+def armThunk (little : Bool) : List Nat := bytesOf little 4 0xe51ff004 ++ List.replicate 4 0
+
+/-- `movw ip, #lo; movt ip, #hi; bx ip; nop`. The address has the Thumb bit of the target, which makes it interwork. -/
+def thumbThunk (little : Bool) : List Nat :=
+  [0xf240, 0x0c00, 0xf2c0, 0x0c00, 0x4760, 0xbf00].flatMap (bytesOf little 2)
+
+/-- What a branch needs of a thunk. -/
+structure ThunkKind where
+  /-- The instruction set of the thunk, that of the branch. -/
+  thumb : Bool
+  /-- What the branch has in its addend for the pipeline. -/
+  bias : Int
+  /-- The bits of the offset of the branch. -/
+  bits : Nat
+
+/-- The branches with a thunk: `R_AARCH64_JUMP26` and `CALL26`, and `R_ARM_PC24`, `CALL`, `JUMP24`, `THM_CALL`, `THM_JUMP24` and
+`THM_JUMP19`. -/
+def thunkKind (machine typ : Nat) : Option ThunkKind :=
+  match machine, typ with
+  | 183, 0x11a | 183, 0x11b => some ⟨false, 0, 28⟩
+  | 40, 1 | 40, 0x1c | 40, 0x1d => some ⟨false, -8, 26⟩
+  | 40, 0xa | 40, 0x1e => some ⟨true, -4, 25⟩
+  | 40, 0x33 => some ⟨true, -4, 21⟩
+  | _, _ => none
+
+/-- Whether the target of a branch is Thumb code, as far as its symbol or its instruction tell, which an ARM branch reads from
+its `BLX` and a Thumb one from its `BL`. -/
+def targetIsThumb (memory : ByteArray) (little : Bool) (site : Site) (kind : ThunkKind) : Bool :=
+  if isFunctionSym site.sym then isThumb site.sym
+  else if kind.thumb then
+    site.rel.typ != 0xa || field (readNat memory little (site.off + 2) 2) 12 1 == 1
+  else site.rel.typ == 0x1c && field (readNat memory little site.off 4) 28 4 == 0xf
+
+/-- The branch can't do it by itself: a jump that changes the instruction set, or a target out of its range. -/
+def needsThunk (env : Env) (state : LinkState) (site : Site) (kind : ThunkKind) : Bool :=
+  let interworks := env.machine == emArm && site.rel.typ != 0x1c && site.rel.typ != 0xa &&
+    targetIsThumb state.memory env.little site kind != kind.thumb
+  interworks || !fieldFits env state site
+
+/-- The thunks so far, by the symbol, the target's addend and the instruction set of the branch. -/
+structure ThunkState where
+  /-- Where the thunks start. -/
+  base : Nat
+  /-- The first of the new symbols. -/
+  symbols : Nat
+  known : List ((Nat × Int × Bool) × Nat) := []
+  bytes : List Nat := []
+  newSyms : List Sym := []
+  newRels : List Rel := []
+  rels : List Rel := []
+
+def thunkSize (kind : ThunkKind) (machine : Nat) : Nat :=
+  if machine == emArm then (if kind.thumb then 12 else 8) else 16
+
+/-- A thunk's code, and its relocations against the target. -/
+def thunkCode (machine : Nat) (little : Bool) (kind : ThunkKind) (secIndex offset symbol : Nat) (addend : Int) : List Nat × List Rel :=
+  let rel (at' typ : Nat) : Rel := ⟨secIndex, offset + at', typ, symbol, addend, true⟩
+  if machine == emArm then
+    if kind.thumb then (thumbThunk little, [rel 0 0x2f, rel 4 0x30])
+    else (armThunk little, [rel 4 2])
+  else (aarch64Thunk, [rel 8 0x101])
+
+/-- What a thunk goes to from its symbol: the branch's target, without its pipeline, and with the bit of its instruction set. -/
+def thunkTargetAddend (tables : Tables) (data : ByteArray) (site : Site) (kind : ThunkKind) : Int :=
+  let decoded : Int :=
+    if tables.input.machine == emArm then
+      if kind.thumb then
+        let hw1 := readNat data tables.env.little site.off 2
+        let hw2 := readNat data tables.env.little (site.off + 2) 2
+        addendOf site (if site.rel.typ == 0x33 then thumbJump19Imm hw1 hw2 else thumbBranchImm hw1 hw2)
+      else addendOf site (armBranchImm (readNat data tables.env.little site.off 4))
+    else site.a
+  let wantThumb := tables.input.machine == emArm && targetIsThumb data tables.env.little site kind
+  decoded - kind.bias + (if wantThumb && !isThumb site.sym then 1 else 0)
+
+/-- Where the thunk of a key is, or will be. -/
+def thunkOffset (state : ThunkState) (key : Nat × Int × Bool) : Nat :=
+  ((state.known.find? (·.1 == key)).map (·.2)).getD state.bytes.length
+
+def thunkIsNew (state : ThunkState) (key : Nat × Int × Bool) : Bool := (state.known.find? (·.1 == key)).isNone
+
+/-- Sends a branch to its thunk, if it has to and the thunk is in its range. -/
+def thunkStep (tables : Tables) (data : ByteArray) (secIndex : Nat) (state : ThunkState) (rel : Rel) : ThunkState :=
+  let keep := { state with rels := rel :: state.rels }
+  match thunkKind tables.input.machine rel.typ with
+  | none => keep
+  | some kind =>
+    let linkState : LinkState := { memory := data }
+    match siteOf tables false rel linkState with
+    | .ok (some site) _ =>
+      if needsThunk tables.env linkState site kind && site.off + 4 ≤ data.size then
+        let targetAddend := thunkTargetAddend tables data site kind
+        let key := (rel.symbol, targetAddend, kind.thumb)
+        let offset := thunkOffset state key
+        let reached := (state.base + offset : Int) + kind.bias - site.p
+        if fits .signed kind.bits reached then
+          let symbolIndex := state.symbols + offset / 4
+          let branch : Rel := { rel with symbol := symbolIndex, addend := kind.bias, isExplicit := true }
+          if thunkIsNew state key then
+            let (code, thunkRels) := thunkCode tables.input.machine tables.env.little kind secIndex offset rel.symbol targetAddend
+            let padded := code
+            let value := offset + if kind.thumb then 1 else 0
+            let sym : Sym := ⟨s!"__thunk_{site.sym.name}_{offset}", secIndex, false, value, padded.length, sttFunc, stbLocal, 0⟩
+            -- a symbol for every word of the secIndex, so that the index of one is known from its offset
+            let fillers := (List.range (padded.length / 4 - 1)).map fun _ => nullSym
+            { state with
+              known := (key, offset) :: state.known
+              bytes := state.bytes ++ padded
+              newSyms := state.newSyms ++ sym :: fillers
+              newRels := state.newRels ++ thunkRels
+              rels := branch :: state.rels }
+          else { state with rels := branch :: state.rels }
+        else keep
+      else keep
+    | _ => keep
+
+/-- The tables of a layout, as `link` makes them. -/
+def layoutTables (input : Input) : Tables :=
+  let word := input.width / 8
+  let layout := layoutSections input.sections.toList input.base
+  let symbols := input.symbols.toList
+  let (commons, commonsEnd) := placeCommons symbols (alignUp layout.cursor word)
+  let (externals, externalsEnd) := placeExternals input.machine word symbols (alignUp commonsEnd word)
+  let env : Env := { machine := input.machine, width := input.width, little := input.little
+                     codeLittle := input.little || input.machine == 183, gotBase := alignUp externalsEnd word
+                     gotOff := input.data.size, tls := tlsBlock input.sections.toList layout.addrs, gp0 := input.gp0 }
+  ⟨input, env, layout.addrs, commons, externals⟩
+
+/-- A file with `size` bytes more of executable section after the section `at'`, whose number the sections after it move up for. -/
+def withThunkSection (input : Input) (at' size : Nat) : Input :=
+  let up (index : Nat) : Nat := if index > at' then index + 1 else index
+  let thunks : Section := ⟨".thunks", 1, shfAlloc + shfExecinstr, input.data.size, size, 16⟩
+  let sections := input.sections.toList
+  { input with
+    sections := (sections.take (at' + 1) ++ thunks :: sections.drop (at' + 1)).toArray
+    symbols := input.symbols.map fun sym =>
+      if sym.extended || sym.shndx < shnLoreserve then { sym with shndx := up sym.shndx } else sym
+    relocations := input.relocations.map fun rel => { rel with target := up rel.target }
+    thunksAt := some (at' + 1) }
+
+/-- What the thunks of a file with a section of `reserved` bytes for them come to. -/
+def thunkPass (input : Input) (at' reserved : Nat) : ThunkState :=
+  let laid := withThunkSection input at' reserved
+  let tables := layoutTables laid
+  let base := ((tables.addrs[at' + 1]?).join).getD 0
+  laid.relocations.foldl (thunkStep tables laid.data (at' + 1)) { base, symbols := laid.symbols.size }
+
+/-- The first branch that needs a thunk, which the thunks go after the section of. -/
+def firstThunked (input : Input) : Option Nat :=
+  let tables := layoutTables input
+  let linkState : LinkState := { memory := input.data }
+  (input.relocations.find? fun rel =>
+    match thunkKind input.machine rel.typ, siteOf tables false rel linkState with
+    | some kind, .ok (some site) _ => needsThunk tables.env linkState site kind
+    | _, _ => false).map (·.target)
+
+/-- Adds a section of thunks to a file for the branches that need them, right after the section of the first of them. The section
+is as big as it takes for what the layout says, and the layout is the one with it, so a second round settles what the first one
+left out of the space it reserved. A file without any stays as it is. -/
+def addThunks (input : Input) : Input :=
+  match firstThunked input with
+  | none => input
+  | some at' =>
+    let first := thunkPass input at' (input.relocations.length * 16)
+    let second := thunkPass input at' first.bytes.length
+    let (reserved, done) := if second.bytes.length ≤ first.bytes.length then (first.bytes.length, second)
+      else (input.relocations.length * 16, first)
+    if done.bytes.isEmpty then input
+    else
+      let laid := withThunkSection input at' reserved
+      let padded := done.bytes ++ List.replicate (reserved - done.bytes.length) 0
+      { laid with
+        data := input.data ++ ByteArray.mk (padded.map UInt8.ofNat).toArray
+        symbols := laid.symbols ++ done.newSyms.toArray
+        relocations := done.rels.reverse ++ done.newRels }
+
+/-- What a file goes through before it is linked. -/
+def prepare (input : Input) : Input := addThunks (relaxTls input)
 
 /-- The contents of a region: its bytes in `memory`, padded with zeros to its size. A section never reads past
 the file's `fileSize` bytes into the GOT that follows them. -/

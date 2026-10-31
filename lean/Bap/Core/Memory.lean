@@ -36,6 +36,92 @@ def writeByte (memory : Memory addressWidth) (address : BitVec addressWidth) (va
   let page := (memory.pages.get? index).getD (ByteArray.mk (List.replicate pageSize 0).toArray)
   ⟨memory.pages.insert index (page.set! (address % pageSize) value)⟩
 
+/-! `writeByte` through `TreeMap.modify`: `insert` copies the page, as the map still holds it when it is written to.
+On a key the map has, both make the same tree: nothing rebalances, as the sizes stay. -/
+
+section Fast
+
+open Std DTreeMap Internal Impl
+
+private theorem balanceM_inner {α β : Type} (k : α) (v : β) (l r : Impl α fun _ => β) (h : BalancedAtRoot l.size r.size) :
+    balanceₘ k v l r = bin k v l r := by
+  simp only [balanceₘ]
+  split
+  · rfl
+  · rename_i h0
+    have h' : l.size ≤ delta * r.size ∧ r.size ≤ delta * l.size := by
+      rcases h with h | h
+      · exact absurd h h0
+      · exact h
+    rw [dite_eq_right (by omega), dite_eq_right (by omega)]
+
+private theorem balanceL_inner {α β : Type} (k : α) (v : β) (l r : Impl α fun _ => β) (hl hr hp)
+    (h : BalancedAtRoot l.size r.size) : balanceL k v l r hl hr hp = bin k v l r := by
+  rw [balanceL_eq_balance, balance_eq_balance!, balance!_eq_balanceₘ hl hr (Or.inl hp.erase), balanceM_inner _ _ _ _ h]
+
+private theorem balanceR_inner {α β : Type} (k : α) (v : β) (l r : Impl α fun _ => β) (hl hr hp)
+    (h : BalancedAtRoot l.size r.size) : balanceR k v l r hl hr hp = bin k v l r := by
+  rw [balanceR_eq_balance, balance_eq_balance!, balance!_eq_balanceₘ hl hr (Or.inr hp.erase), balanceM_inner _ _ _ _ h]
+
+private theorem insert_eq_modify {α β : Type} [Ord α] (t : Impl α fun _ => β) (hb : t.Balanced) (k : α) (old : β) (f : β → β)
+    (hget : Impl.Const.get? t k = some old) : (Impl.insert k (f old) t hb).impl = Impl.Const.modify k f t := by
+  induction t with
+  | leaf => simp [Impl.Const.get?] at hget
+  | inner sz k' v' l r ihl ihr =>
+    obtain ⟨hl, hr, hroot, hsz⟩ := balanced_inner_iff.1 hb
+    rw [Impl.Const.get?] at hget
+    rw [Impl.insert, Impl.Const.modify]
+    cases hc : compare k k' with
+    | lt =>
+      simp only [hc] at hget ⊢
+      have ih := ihl hl hget
+      rw [balanceL_inner _ _ _ _ _ _ _ (by rw [ih, Impl.Const.aux_size_modify]; exact hroot), ih]
+      simp [bin, Impl.Const.aux_size_modify, hsz]
+    | gt =>
+      simp only [hc] at hget ⊢
+      have ih := ihr hr hget
+      rw [balanceR_inner _ _ _ _ _ _ _ (by rw [ih, Impl.Const.aux_size_modify]; exact hroot), ih]
+      simp [bin, Impl.Const.aux_size_modify, hsz]
+    | eq =>
+      simp only [hc] at hget ⊢
+      simp only [Option.some.injEq] at hget
+      subst hget
+      rfl
+
+private theorem insert_eq_modify' {α β : Type} {cmp : α → α → Ordering} (t : TreeMap α β cmp) (k : α) (old : β) (f : β → β)
+    (h : t.get? k = some old) : t.insert k (f old) = t.modify k f := by
+  letI : Ord α := ⟨cmp⟩
+  have := insert_eq_modify t.inner.inner t.inner.wf.balanced k old f h
+  show TreeMap.mk (DTreeMap.mk _ _) = TreeMap.mk (DTreeMap.mk _ _)
+  congr 2
+
+private def writeByteFast (memory : Memory addressWidth) (address : BitVec addressWidth) (value : UInt8) :
+    Memory addressWidth :=
+  let address := address.toNat
+  let index := address / pageSize
+  if memory.pages.contains index then
+    ⟨memory.pages.modify index fun page => page.set! (address % pageSize) value⟩
+  else
+    ⟨memory.pages.insert index ((ByteArray.mk (List.replicate pageSize 0).toArray).set! (address % pageSize) value)⟩
+
+@[csimp] private theorem writeByte_eq_fast : @writeByte = @writeByteFast := by
+  funext addressWidth memory address value
+  simp only [writeByte, writeByteFast]
+  cases h : memory.pages.get? (address.toNat / pageSize) with
+  | none =>
+    have hc : memory.pages.contains (address.toNat / pageSize) = false := by
+      rw [← Std.TreeMap.isSome_getElem?_eq_contains, ← Std.TreeMap.get?_eq_getElem?, h]
+      rfl
+    simp [hc]
+  | some page =>
+    have hc : memory.pages.contains (address.toNat / pageSize) = true := by
+      rw [← Std.TreeMap.isSome_getElem?_eq_contains, ← Std.TreeMap.get?_eq_getElem?, h]
+      rfl
+    simp only [Option.getD_some, hc, ite_true]
+    rw [insert_eq_modify' memory.pages _ page (fun page => page.set! (address.toNat % pageSize) value) h]
+
+end Fast
+
 def ofCells (cells : List (BitVec addressWidth × UInt8)) : Memory addressWidth :=
   cells.foldl (init := empty addressWidth) fun memory cell => writeByte memory cell.1 cell.2
 

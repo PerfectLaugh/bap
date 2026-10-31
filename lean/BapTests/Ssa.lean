@@ -199,7 +199,62 @@ private def regressions : IO Unit := do
   let straight : Sub := ⟨1, "straight", [], [⟨1, [], [defn 1 x (int 1)], [goto 2 2]⟩, ⟨2, [], [defn 3 y (.var x)], []⟩]⟩
   assertEqual "no phi without a join" [0, 0] ((toSsa straight).blks.map (·.phis.length))
 
+local macro "insertAllPhis" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Ssa) 0 ++ `Bap.IR.insertAllPhis)
+local macro "renameBlock" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Ssa) 0 ++ `Bap.IR.renameBlock)
+local macro "initialState" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Ssa) 0 ++ `Bap.IR.initialState)
+
+/-- `toSsa` as it reads, where each phi goes over all the blocks: the code it runs places them from tables. -/
+private def ssaBySpec (sub : Sub) : Sub :=
+  let cfg := Cfg.connected sub
+  let idom := cfg.immediateDominators
+  let frontier := cfg.dominanceFrontier
+  let state := initialState cfg.blocks
+  let cfg := insertAllPhis cfg frontier (cfg.blocks.flatMap Blk.definedVars).eraseDups
+  let (cfg, _) := renameBlock idom (cfg.blocks.length + 1) cfg.start cfg state
+  { sub with blks := sub.blks.filterMap fun blk => cfg.block blk.tid }
+
+private def sameSsa (name : String) (sub : Sub) : IO Unit :=
+  assertEqual s!"SSA of {name}" (toString (Wire.printSub (ssaBySpec sub))) (toString (Wire.printSub (toSsa sub)))
+
+private def moves : Bil.Program → List Def
+  | [] => []
+  | .move var value :: rest => ⟨0, var, value⟩ :: moves rest
+  | _ :: rest => moves rest
+
+private def ssaFastPath : IO Unit := do
+  sameSsa "a loop" entryLoop
+  sameSsa "versioned input" versionedInput
+  sameSsa "computed input" computedInput
+  sameSsa "existing phis" existingPhi
+  sameSsa "siblings" siblings
+  sameSsa "SSA again" (toSsa sample)
+  let sameTids : Sub := ⟨1, "same", [], [
+    ⟨1, [], [⟨1, x, .var y⟩], [⟨2, some (.var y), .goto (.direct 2)⟩, ⟨3, none, .goto (.direct 3)⟩]⟩,
+    ⟨2, [], [⟨4, x, .var x⟩], [⟨5, none, .goto (.direct 3)⟩]⟩,
+    ⟨3, [], [⟨6, y, .var x⟩], []⟩,
+    ⟨3, [], [⟨7, x, .var y⟩], []⟩]⟩
+  sameSsa "blocks with the same tid" sameTids
+  let path := "/bin/ls"
+  if ← System.FilePath.pathExists path then
+    let image ← Image.load path
+    match image.sections.find? (·.name == ".text") with
+    | none => pure ()
+    | some text =>
+      let data := image.data.extract text.offset (text.offset + min text.size 4000)
+      let disasm ← Disasm.Linear.sweep (← Target.X86.disassembler text.addr) data text.addr
+      let flag : Var := ⟨"ZF", .imm 1, 0, false⟩
+      let blks : List Blk := disasm.blocks.map fun block =>
+        let successors := (block.instructions.getLast?.map (·.successors)).getD []
+        { tid := block.start, defs := block.instructions.flatMap fun insn => moves insn.bil,
+          jmps := successors.map fun next => ⟨next, some (.var flag), .goto (.direct next)⟩ }
+      let entry : Blk := { tid := 7, jmps := blks.map fun blk => ⟨blk.tid, some (.var flag), .goto (.direct blk.tid)⟩ }
+      sameSsa "real code" ⟨1, "real", [], entry :: blks⟩
+
 def run : IO Unit := do
+  ssaFastPath
   regressions
   match (toSsa siblings).block 3 with
   | some block =>

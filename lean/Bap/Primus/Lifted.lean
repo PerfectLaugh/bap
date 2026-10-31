@@ -709,100 +709,182 @@ private def definitelyWritten (seed : Nat) (blocks : List Block) (edges : List (
         kept.filter reaching.contains
   (List.range blocks.length).foldl (init := fun _ => all) fun current _ address => round current address
 
-/-- Outputs of the blocks after the seed need not have been written where a range ended. Each gets a slot, set
+/-- A flag for each of `outputs`, each with a slot of its own from `start` on. -/
+private def flagSlots (outputs : List (Bap.Var × Nat)) (start : Nat) : Nat × List (Nat × Nat) :=
+  outputs.foldl (init := (start, [])) fun (next, flags) output => (next + 1, (output.2, next) :: flags)
+
+/-- An operation, and if it is a move to a slot with a flag, the setting of the flag. -/
+private def flagged (flags : List (Nat × Nat)) (op : Jit.Op) : List Jit.Op :=
+  match op with
+  | .move dst _ =>
+    match flags.find? fun flag => flag.1 == dst with
+    | some flag => [op, .set flag.2 1]
+    | none => [op]
+  | _ => [op]
+
+/-- Outputs need not have been written where a run ended, other than those of `seedWritten`. Each gets a slot, set
 next to the moves to it, which says whether it was. A move only ever goes to the slot of a variable. -/
 private def flagOutputs (seedWritten : List Bap.Var) (lowering : Lowering) : Lowering :=
   let later := lowering.outputs.filter fun output => !seedWritten.contains output.1
-  let (next, flags) := later.foldl (init := (lowering.nextSlot, [])) fun (next, flags) output =>
-    (next + 1, (output.2, next) :: flags)
+  let (next, flags) := flagSlots later lowering.nextSlot
   { lowering with
     nextSlot := next
     flags
-    ops := lowering.ops.flatMap fun op =>
-      match op with
-      | .move dst _ =>
-        match flags.find? fun flag => flag.1 == dst with
-        | some flag => [op, .set flag.2 1]
-        | none => [op]
-      | _ => [op]
+    ops := lowering.ops.flatMap (flagged flags)
     checkpoints := lowering.checkpoints.map fun checkpoint => (checkpoint.1, lowering.outputs) }
 
-private def lowerGraph (blocks : List Block) (edges : List (Nat × Nat)) (wrapFaults : Bool := false) :
-    Option Lowering := do
-  let seed ← blocks.head?
-  let labels := (List.range blocks.length).map fun index => (blocks[index]!.address, index)
-  let chained := !edges.isEmpty
-  let (initial, _) := setEffect
-    { next := seed.next, nextLabel := labels.length, wrapFaults } 0
-  let (initial, budget) := if chained then temporary initial else (initial, 0)
-  let (initial, observed) := if chained then temporary initial else (initial, 0)
-  let initial := if chained then { initial with budget := some budget, observed := some observed } else initial
+/-- The variables that a program writes before it can do anything else, and so at every end of it. The others of
+a run may not have been written where it ended. -/
+private def leadingMoves (program : Bil.Program) : List Bap.Var :=
+  match program with
+  | .move dst _ :: rest => dst :: leadingMoves rest
+  | _ => []
+
+/-- The slots an operation reads or writes. -/
+private def opSlots : Jit.Op → List Nat
+  | .set dst _ => [dst]
+  | .move dst src | .add dst src _ | .andImm dst src _ | .signExtend _ dst src | .neg dst src | .not dst src => [dst, src]
+  | .jump _ | .label _ | .goto _ => []
+  | .jumpSlot src => [src]
+  | .bin _ dst left right | .ashr _ dst left right => [dst, left, right]
+  | .select dst condition yes no => [dst, condition, yes, no]
+  | .branch condition _ _ => [condition]
+  | .memLoad dst address _ _ => [dst, address]
+  | .memStore address value _ _ => [address, value]
+  | .code effectSlot _ => [effectSlot]
+
+private def opLabels (ops : List Jit.Op) : List Nat :=
+  ops.filterMap fun op =>
+    match op with
+    | .label id => some id
+    | _ => none
+
+/-- What the proof of a whole range checks of what it lowered, rather than follows through every statement: blocks
+have an address each and it fits, a label is where it is once, operations stay in the slots allocated, which leaves
+the slots after them to the flags, what is moved to, if it is a variable's, is an output, and the control slots stay.
+All hold of what lowering makes. A lowering that did not would stay out of native code. -/
+private def lowerGraphChecked (blocks : List Block) (initial lowering : Lowering) : Bool :=
+  lowering.budget == initial.budget && lowering.observed == initial.observed &&
+    decide (blocks.map Block.address).Nodup &&
+    blocks.all (fun block => decide (block.address < 2 ^ 64) && decide (block.next < 2 ^ 64)) &&
+    decide (opLabels lowering.ops).Nodup &&
+    lowering.ops.all (fun op => (opSlots op).all (· < lowering.nextSlot)) &&
+    lowering.outputs.all lowering.layout.contains &&
+    lowering.ops.all fun op =>
+      match op with
+      | .move dst _ => lowering.layout.all fun binding => binding.2 != dst || lowering.outputs.contains binding
+      | _ => true
+
+/-- What stays the same while the blocks of a range are lowered. -/
+private structure GraphPlan where
+  seed : Nat
+  labels : List (Nat × Nat)
+  edges : List (Nat × Nat)
+  budget : Nat
+  observed : Nat
+  chained : Bool
+  definite : Nat → List Bap.Var
+  guarded : Block → Bool
+
+private def Lowering.push (lowering : Lowering) (ops : List Jit.Op) : Lowering :=
+  { lowering with ops := lowering.ops ++ ops }
+
+private def Lowering.withWritten (lowering : Lowering) (written : List Bap.Var) : Lowering :=
+  { lowering with written }
+
+/-- The way into a block: over an edge, there is one. A block with no edge to it can only be the seed. -/
+private def lowerEntry (plan : GraphPlan) (lowering : Lowering) (block : Block) (hasEdge : Bool) : Option Lowering :=
+  if !hasEdge then
+    if block.address = plan.seed then some lowering else none
+  else
+    match plan.labels.find? fun (address, _) => address = block.address with
+    | some (_, label) =>
+      some (enterBlock (lowering.push [.label label]) plan.budget plan.observed block.address
+        (plan.guarded block))
+    | none => none
+
+/-- What a block does, and where it goes. -/
+private def lowerExit (plan : GraphPlan) (lowering : Lowering) (block : Block) : Option Lowering :=
+  match blockExit block with
+  | .direct target => do
+    let (lowered, terminated) ← lowerStatements lowering block.program.dropLast
+    if terminated then none
+    else
+      let ops ← graphEdgeOps lowered plan.labels plan.edges block.address target
+      some (lowered.push ops)
+  | .branch condition yes no falls => do
+    let (lowered, terminated) ← lowerStatements lowering block.program.dropLast
+    if terminated then none
+    else
+      let (lowered, condition) ← lowerExp lowered condition
+      if condition.width != 1 then none
+      else
+        let (lowered, yesLabel) := freshLabel lowered
+        let (lowered, noLabel) := freshLabel lowered
+        let yesOps ← graphEdgeOps lowered plan.labels plan.edges block.address yes
+        let lowered := lowered.push ([.branch condition.slot yesLabel noLabel, .label yesLabel] ++ yesOps ++ [.label noLabel])
+        -- The else of a branch without one is no jump: its effect stays a normal one.
+        let noOps ←
+          if falls && !plan.edges.contains (block.address, no) then some [.jump (UInt64.ofNat no)]
+          else graphEdgeOps lowered plan.labels plan.edges block.address no
+        some (lowered.push noOps)
+  | _ => do
+    let (lowered, terminated) ← lowerStatements lowering block.program
+    if terminated then some lowered
+    else if plan.edges.contains (block.address, block.next) then
+      let ops ← graphEdgeOps lowered plan.labels plan.edges block.address block.next
+      some (lowered.push ops)
+    else some (lowered.push [.jump (UInt64.ofNat block.next)])
+
+private def lowerBlock (plan : GraphPlan) (lowering : Lowering) (block : Block) : Option Lowering := do
+  -- A read of what the block does not have written on all ways to it is an input.
+  let lowering := if plan.chained then lowering.withWritten (plan.definite block.address) else lowering
+  let incoming := plan.edges.any fun edge => edge.2 == block.address
+  if block.address = plan.seed && incoming then
+    -- A seed that an edge leads back to has an entry and a body, which the first run goes to directly.
+    let (lowering, body) := freshLabel lowering
+    let lowering ← lowerEntry plan (lowering.push [.goto body]) block incoming
+    lowerExit plan (lowering.push [.goto body, .label body]) block
+  else
+    let lowering ← lowerEntry plan lowering block incoming
+    lowerExit plan lowering block
+
+private def lowerBlocks (plan : GraphPlan) (lowering : Lowering) : List Block → Option Lowering
+  | [] => some lowering
+  | block :: rest => do
+    let lowering ← lowerBlock plan lowering block
+    lowerBlocks plan lowering rest
+
+/-- The lowering that the blocks of a graph start from: the effect, and for a chained range what controls it. -/
+private def graphInitial (seed : Block) (labelCount : Nat) (wrapFaults chained : Bool) : Lowering :=
+  let initial := (setEffect { next := seed.next, nextLabel := labelCount, wrapFaults } 0).1
+  if chained then
+    let (initial, budget) := temporary initial
+    let (initial, observed) := temporary initial
+    { initial with budget := some budget, observed := some observed }
+  else initial
+
+private def graphPlan (blocks : List Block) (edges : List (Nat × Nat)) (wrapFaults : Bool) (seed : Block) (initial : Lowering) : GraphPlan :=
   -- The label of a block heads the entry over an edge; a run starts in the seed without one.
   let alone (block : Block) := lowerStatements { wrapFaults } block.program
   let touches (block : Block) : Bool := (alone block).elim true fun lowered => lowered.1.memory.isSome
   let writes (block : Block) : List Bap.Var := (alone block).elim [] fun lowered => lowered.1.written
-  let definite := definitelyWritten seed.address blocks edges writes
-  let guarded (block : Block) : Bool :=
-    !touches block && !(edges.any fun edge => edge.2 == block.address &&
-      blocks.any fun other => other.address == edge.1 && touches other)
-  let enter (lowering : Lowering) (block : Block) (hasEdge : Bool) : Option Lowering :=
-    if !hasEdge then
-      if block.address = seed.address then some lowering else none
-    else
-      match labels.find? fun (address, _) => address = block.address with
-      | some (_, label) =>
-        some (enterBlock { lowering with ops := lowering.ops ++ [.label label] } budget observed block.address
-          (guarded block))
-      | none => none
-  let rec go (lowering : Lowering) (remaining : List Block) : Option Lowering :=
-    match remaining with
-    | [] => some lowering
-    | block :: rest => do
-      let isSeed := block.address = seed.address
-      -- A read of what the block does not have written on all ways to it is an input.
-      let lowering := if chained then { lowering with written := definite block.address } else lowering
-      let incoming := edges.any fun edge => edge.2 == block.address
-      -- A seed that an edge leads back to has an entry and a body, which the first run goes to directly.
-      let (lowering, body) := if isSeed && incoming then freshLabel lowering else (lowering, 0)
-      let lowering := if isSeed && incoming then { lowering with ops := lowering.ops ++ [.goto body] } else lowering
-      let lowering ← enter lowering block incoming
-      let lowering := if isSeed && incoming then
-          { lowering with ops := lowering.ops ++ [.goto body, .label body] }
-        else lowering
-      let lowering ← match blockExit block with
-        | .direct target => do
-          let (lowered, terminated) ← lowerStatements lowering block.program.dropLast
-          if terminated then none
-          else
-            let ops ← graphEdgeOps lowered labels edges block.address target
-            some { lowered with ops := lowered.ops ++ ops }
-        | .branch condition yes no falls => do
-          let (lowered, terminated) ← lowerStatements lowering block.program.dropLast
-          if terminated then none
-          else
-            let (lowered, condition) ← lowerExp lowered condition
-            if condition.width != 1 then none
-            else
-              let (lowered, yesLabel) := freshLabel lowered
-              let (lowered, noLabel) := freshLabel lowered
-              let yesOps ← graphEdgeOps lowered labels edges block.address yes
-              let lowered := { lowered with ops := lowered.ops ++
-                [.branch condition.slot yesLabel noLabel, .label yesLabel] ++ yesOps ++ [.label noLabel] }
-              -- The else of a branch without one is no jump: its effect stays a normal one.
-              let noOps ←
-                if falls && !edges.contains (block.address, no) then some [.jump (UInt64.ofNat no)]
-                else graphEdgeOps lowered labels edges block.address no
-              some { lowered with ops := lowered.ops ++ noOps }
-        | _ => do
-          let (lowered, terminated) ← lowerStatements lowering block.program
-          if terminated then some lowered
-          else if edges.contains (block.address, block.next) then
-            let ops ← graphEdgeOps lowered labels edges block.address block.next
-            some { lowered with ops := lowered.ops ++ ops }
-          else some { lowered with ops := lowered.ops ++ [.jump (UInt64.ofNat block.next)] }
-      go lowering rest
-  let lowering ← go initial blocks
-  some (if chained then flagOutputs (writes seed) lowering else lowering)
+  { seed := seed.address
+    labels := (List.range blocks.length).map fun index => (blocks[index]!.address, index)
+    edges
+    budget := initial.budget.getD 0
+    observed := initial.observed.getD 0
+    chained := !edges.isEmpty
+    definite := definitelyWritten seed.address blocks edges writes
+    guarded := fun block => !touches block && !(edges.any fun edge => edge.2 == block.address &&
+      blocks.any fun other => other.address == edge.1 && touches other) }
+
+private def lowerGraph (blocks : List Block) (edges : List (Nat × Nat)) (wrapFaults : Bool := false) :
+    Option Lowering := do
+  let seed ← blocks.head?
+  let initial := graphInitial seed blocks.length wrapFaults !edges.isEmpty
+  let lowering ← lowerBlocks (graphPlan blocks edges wrapFaults seed initial) initial blocks
+  if lowerGraphChecked blocks initial lowering then some (flagOutputs (leadingMoves seed.program) lowering) else none
 
 private def compilePlan (engine : Engine) (block : Block) : IO Plan := do
   if (← engine.nativeLive.get) ≥ engine.nativeLimit then pure (.interpreted block.program)
@@ -1073,18 +1155,25 @@ private def syncMemoryDelta (lowering : Lowering) (state : Bil.State)
         else state
       | _, _ => state
 
-private def nativeResult (lowering : Lowering) (following : Nat) (next : Nat)
-    (state : Bil.State) (slots : Array UInt64) : IO Result := do
+/-- What a native run comes to, by its effect slot. -/
+private def nativeOutcome (lowering : Lowering) (following : Nat) (next : Nat) (state : Bil.State) (slots : Array UInt64) :
+    Except String Result :=
   let effect : UInt64 := match lowering.effectSlot with
     | some slot => slots.getD slot 0
     | none => 0
   if effect == 1 then
-    return ⟨state, next, following, .jump (BitVec.ofNat 64 next)⟩
+    .ok ⟨state, next, following, .jump (BitVec.ofNat 64 next)⟩
   else if effect == 2 then
-    throw <| IO.userError "Primus loop fuel exhausted"
+    .error "Primus loop fuel exhausted"
   else
     -- A range runs off the end of whichever block it ended in, and a code stop has its pc.
-    return ⟨state, next, next, .normal⟩
+    .ok ⟨state, next, next, .normal⟩
+
+private def nativeResult (lowering : Lowering) (following : Nat) (next : Nat)
+    (state : Bil.State) (slots : Array UInt64) : IO Result :=
+  match nativeOutcome lowering following next state slots with
+  | .ok result => pure result
+  | .error error => throw <| IO.userError error
 
 private def recordNative (engine : Engine) : IO Unit :=
   engine.statistics.modify fun stats => { stats with nativeRuns := stats.nativeRuns + 1 }
@@ -1166,10 +1255,11 @@ private def withControl (lowering : Lowering) (slots : Array UInt64) (budget : N
   | none => slots
 
 /-- The blocks that a run entered after its first, out of its budget. -/
+private def chainedCount (lowering : Lowering) (budget : Nat) (slots : Array UInt64) : Option Nat :=
+  lowering.budget.map fun slot => budget - (slots.getD slot 0).toNat
+
 private def recordChained (engine : Engine) (lowering : Lowering) (budget : Nat) (slots : Array UInt64) : IO Unit :=
-  match lowering.budget with
-  | some slot => engine.chained.set (budget - (slots.getD slot 0).toNat)
-  | none => pure ()
+  (chainedCount lowering budget slots).forM engine.chained.set
 
 private def runPersistent (engine : Engine) (lowering : Lowering) (following : Nat)
     (program : Jit.Program) (state : Bil.State) (slots : Array UInt64)
@@ -1187,6 +1277,8 @@ private def runPersistent (engine : Engine) (lowering : Lowering) (following : N
 def runBlockObserved (engine : Engine) (fetch : Fetch) (lift : Lift) (state : Bil.State) (pc : Nat)
     (observer : Option Jit.MemoryObserver) (codeObserver : Option Jit.CodeObserver := none)
     (observed : Bool := true) (budget : Nat := engine.rangeLimit) : IO Result := do
+  -- A run cannot chain more than the slot that counts them holds.
+  let budget := min budget (2 ^ 64 - 1)
   engine.nativeCooldown.modify fun cooldown => if cooldown = 0 then 0 else cooldown - 1
   engine.chained.set 0
   let code ← fetch pc

@@ -34,10 +34,6 @@ def covers (outer inner : Location) : Bool :=
       outerAddress ≤ innerAddress && innerAddress + innerSize ≤ outerAddress + outerSize
     | _, _ => true
 
-def isMemory : Location → Bool
-  | .reg _ => false
-  | _ => true
-
 /-- Whether this is a location of the memory variable `memory`. -/
 def inMemory (memory : Bap.Var) : Location → Bool
   | .memOf other _ _ => other == memory

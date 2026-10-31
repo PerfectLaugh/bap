@@ -1,4 +1,5 @@
 import Bap.Core.Sexp
+import Bap.Graph.Fast
 
 namespace Bap.Symbolic
 
@@ -139,6 +140,78 @@ def render : Expr → String
     s!"(ite (= {render condition} #b1) {render yes} {render no})"
   | .select memory address => s!"({memorySymbol memory address.width} {render address})"
 
+/-! `render` into one string: otherwise each level of a term copies what is under it. -/
+
+mutual
+  private def renderTo (acc : String) : Expr → String
+    | .var name width => acc ++ variableSymbol name width
+    | @Expr.const width value => acc ++ s!"(_ bv{value.toNat} {width})"
+    | .app name _ args =>
+      match args with
+      | [] => acc ++ name
+      | first :: rest =>
+        let term := renderArgsTo (renderTo (acc ++ (if isPredicate name then "(ite (" else "(") ++ name ++ " ") first) rest
+        term ++ (if isPredicate name then ") #b1 #b0)" else ")")
+    | .extract high low value => renderTo (acc ++ s!"((_ extract {high} {low}) ") value |>.push ')'
+    | .concat left right => (renderTo ((renderTo (acc ++ "(concat ") left).push ' ') right).push ')'
+    | .ite condition yes no =>
+      (renderTo ((renderTo (renderTo (acc ++ "(ite (= ") condition ++ " #b1) ") yes).push ' ') no).push ')'
+    | .select memory address => (renderTo (acc ++ "(" ++ memorySymbol memory address.width ++ " ") address).push ')'
+
+  /-- The arguments after the first one, each with its separator. -/
+  private def renderArgsTo (acc : String) : List Expr → String
+    | [] => acc
+    | arg :: rest => renderArgsTo (renderTo (acc.push ' ') arg) rest
+end
+
+private theorem toString_self (value : String) : toString value = value := rfl
+
+mutual
+  private theorem renderTo_eq (acc : String) : (value : Expr) → renderTo acc value = acc ++ render value
+    | .var _ _ => by rw [renderTo, render]
+    | .const _ => by rw [renderTo, render]
+    | .app name _ [] => by rw [renderTo, render]; simp
+    | .app name _ (first :: rest) => by
+      rw [renderTo, render]
+      simp only [List.isEmpty_cons, Bool.false_eq_true, ↓reduceIte, List.map_cons]
+      have hargs := renderArgsTo_eq (acc ++ (if isPredicate name then "(ite (" else "(") ++ name ++ " ") (render first) rest
+      rw [renderTo_eq _ first, hargs, String.intercalate_cons_cons]
+      apply String.toList_injective
+      by_cases hp : isPredicate name = true <;> simp [hp, toString_self]
+    | .extract high low value => by
+      rw [renderTo, render, renderTo_eq]
+      apply String.toList_injective
+      simp [toString_self]
+    | .concat left right => by
+      rw [renderTo, render, renderTo_eq, renderTo_eq]
+      apply String.toList_injective
+      simp [toString_self]
+    | .ite condition yes no => by
+      rw [renderTo, render, renderTo_eq, renderTo_eq, renderTo_eq]
+      apply String.toList_injective
+      simp [toString_self]
+    | .select memory address => by
+      rw [renderTo, render, renderTo_eq]
+      apply String.toList_injective
+      simp [toString_self]
+
+  private theorem renderArgsTo_eq (acc first : String) : (args : List Expr) →
+      renderArgsTo (acc ++ first) args = acc ++ String.intercalate " " (first :: args.map render)
+    | [] => by simp [renderArgsTo, String.intercalate_singleton]
+    | arg :: rest => by
+      have happ : (acc ++ first).push ' ' ++ render arg = acc ++ (first ++ " " ++ render arg) := by
+        apply String.toList_injective
+        simp
+      rw [renderArgsTo, renderTo_eq _ arg, happ, renderArgsTo_eq acc _ rest, List.map_cons,
+        String.intercalate_cons_cons, String.intercalate_cons_append]
+end
+
+private def renderFast (value : Expr) : String := renderTo "" value
+
+@[csimp] private theorem render_eq_fast : @render = @renderFast := by
+  funext value
+  simp [renderFast, renderTo_eq]
+
 /-- The SMT-LIB formula that an expression is true, for use as an assertion. -/
 def renderFormula (value : Expr) : String :=
   match value with
@@ -176,6 +249,17 @@ def eqZero (value : Expr) : Expr :=
 
 end Expr
 
+private def renderScriptFast (constraints : List Expr) : String :=
+  let variables := Bap.Graph.Fast.dedup (constraints.flatMap Expr.vars)
+  let memories := Bap.Graph.Fast.dedup (constraints.flatMap Expr.memories)
+  let logic := if memories.isEmpty then "QF_BV" else "QF_UFBV"
+  let functions := memories.map fun (name, width) =>
+    s!"(declare-fun {Expr.memorySymbol name width} ((_ BitVec {width})) (_ BitVec 8))"
+  let declarations := variables.map fun (name, width) =>
+    s!"(declare-const {Expr.variableSymbol name width} (_ BitVec {width}))"
+  let assertions := constraints.map fun constraint => s!"(assert {constraint.renderFormula})"
+  String.intercalate "\n" ([s!"(set-logic {logic})"] ++ functions ++ declarations ++ assertions ++ ["(check-sat)"])
+
 def renderScript (constraints : List Expr) : String :=
   let variables := (constraints.flatMap Expr.vars).eraseDups
   let memories := (constraints.flatMap Expr.memories).eraseDups
@@ -186,5 +270,9 @@ def renderScript (constraints : List Expr) : String :=
     s!"(declare-const {Expr.variableSymbol name width} (_ BitVec {width}))"
   let assertions := constraints.map fun constraint => s!"(assert {constraint.renderFormula})"
   String.intercalate "\n" ([s!"(set-logic {logic})"] ++ functions ++ declarations ++ assertions ++ ["(check-sat)"])
+
+@[csimp] private theorem renderScript_eq_fast : @renderScript = @renderScriptFast := by
+  funext constraints
+  simp only [renderScript, renderScriptFast, Bap.Graph.Fast.dedup_eq]
 
 end Bap.Symbolic

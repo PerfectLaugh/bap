@@ -56,15 +56,12 @@ def Blk.freeVars (blk : Blk) : List Bap.Var :=
   ((step.1 ++ blk.phis.flatMap (fun phi => phi.values.flatMap (Bil.freeVars ∘ Prod.snd)) ++
     (blk.jmps.flatMap Jmp.freeVars).filter fun var => var ∉ step.2)).eraseDups
 
-instance : Hashable Bap.Var where
-  hash var := mixHash (hash var.name) (hash var.index)
-
 /-- `Blk.definedVars`, without comparing every pair: a phi per variable makes for long lists. -/
 private def Blk.definedVarsFast (blk : Blk) : List Bap.Var :=
   Bap.Graph.Fast.dedup ((blk.phis.map Phi.var) ++ (blk.defs.map Def.var))
 
 @[csimp] private theorem Blk.definedVars_eq_fast : @Blk.definedVars = @Blk.definedVarsFast :=
-  funext fun blk => (Bap.Graph.Fast.dedup_eq _).symm
+  funext fun _blk => (Bap.Graph.Fast.dedup_eq _).symm
 
 /-- `Blk.freeVars`, without comparing every pair. -/
 private def Blk.freeVarsFast (blk : Blk) : List Bap.Var :=
@@ -75,7 +72,7 @@ private def Blk.freeVarsFast (blk : Blk) : List Bap.Var :=
     (blk.jmps.flatMap Jmp.freeVars).filter fun var => var ∉ step.2))
 
 @[csimp] private theorem Blk.freeVars_eq_fast : @Blk.freeVars = @Blk.freeVarsFast :=
-  funext fun blk => (Bap.Graph.Fast.dedup_eq _).symm
+  funext fun _blk => (Bap.Graph.Fast.dedup_eq _).symm
 
 def pruneSub (sub : Sub) : Sub := (Cfg.fromSub sub).prune.intoSub sub
 

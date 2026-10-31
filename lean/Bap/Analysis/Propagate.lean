@@ -72,6 +72,4 @@ end
 
 def propagate (code : Bil.Program) : Bil.Program := (program {} code).2
 
-def propagateWithState (known : Known) (code : Bil.Program) : Known × Bil.Program := program known code
-
 end Bap.Analysis.Propagate

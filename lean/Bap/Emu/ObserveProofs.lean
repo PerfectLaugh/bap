@@ -14,7 +14,6 @@ local elab "open_private " mod:ident ns:ident ids:ident* : command => do
     OpenDecl.explicit id.getId (mkPrivateNameCore mod.getId (ns.getId ++ id.getId))
   modifyScope fun scope => { scope with openDecls := decls ++ scope.openDecls }
 
-set_option linter.unusedSimpArgs false
 
 namespace Bap.Emu.Observe
 
@@ -256,9 +255,9 @@ theorem evalExpObserved_obs (observer : MemoryObserver) (env : Env) (exp : Exp) 
       | @bits aw a =>
         by_cases hw : aw = w
         · subst hw
-          simp only [Value.asBits, ↓reduceDIte, Traced.ofExcept, Traced.bind, List.nil_append, memoryOf]
+          simp only [Value.asBits, ↓reduceDIte, Traced.ofExcept, Traced.bind, List.nil_append]
           exact notify_some observer false a.toNat size 0 _
-        · simp only [Value.asBits, hw, ↓reduceDIte, Traced.ofExcept, Traced.bind, List.nil_append, memoryOf]
+        · simp only [Value.asBits, hw, ↓reduceDIte, Traced.ofExcept, Traced.bind, List.nil_append]
           rfl
   | store memory address value endian size ihm iha ihv =>
     rw [evalExpObserved]
@@ -280,9 +279,9 @@ theorem evalExpObserved_obs (observer : MemoryObserver) (env : Env) (exp : Exp) 
         | @bits vw v =>
           by_cases hw : aw = w
           · subst hw
-            simp only [Value.asBits, ↓reduceDIte, Traced.ofExcept, Traced.bind, List.nil_append, memoryOf]
+            simp only [Value.asBits, ↓reduceDIte, Traced.ofExcept, Traced.bind, List.nil_append]
             exact notify_some observer true a.toNat size v.toNat _
-          · simp only [Value.asBits, hw, ↓reduceDIte, Traced.ofExcept, Traced.bind, List.nil_append, memoryOf]
+          · simp only [Value.asBits, hw, ↓reduceDIte, Traced.ofExcept, Traced.bind, List.nil_append]
             rfl
 
 end Observed

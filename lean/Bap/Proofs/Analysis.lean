@@ -1788,7 +1788,7 @@ private theorem slice_exec_agree {Ms : List Bap.Var} (hM : slice_Memories Ms) (e
           · have hmoved : ∀ l, l ∈ after → (∀ y address n, l ≠ .memOf y address n ∨ y ≠ x) →
                 l ∈ moveBefore x value after := by
               intro l hl hne
-              simp only [moveBefore, htm, reduceCtorEq, ↓reduceIte, List.mem_filterMap]
+              simp only [moveBefore, htm, ↓reduceIte, List.mem_filterMap]
               refine ⟨l, hl, ?_⟩
               cases l with
               | reg y => rfl
@@ -1814,7 +1814,7 @@ private theorem slice_exec_agree {Ms : List Bap.Var} (hM : slice_Memories Ms) (e
                   obtain ⟨_, h9, h10⟩ := slice_covers_mem hcov p h6 h7
                   exact .inr ⟨n', s', hd', h9, h10⟩
                 · refine .inl (h5 address n (List.mem_append_right _ ?_) p h6 h7 h8)
-                  simp only [moveBefore, htm, reduceCtorEq, ↓reduceIte, List.mem_filterMap]
+                  simp only [moveBefore, htm, ↓reduceIte, List.mem_filterMap]
                   refine ⟨.memOf m address n, hp, ?_⟩
                   simp [hc, hrootEq]
               · obtain ⟨w', vw₁, Ma1, Mb1, kt, k1, k2, k3, k4, k5⟩ := hab.2 m hm
@@ -2172,11 +2172,11 @@ private theorem slice_mayEnd_of_stop {fuel : Nat} {insn : Bap.Disasm.Insn} {a a'
     have ht := hstop _ rfl
     by_cases hc : insn.flow = .call
     · simp only [hc, ite_true] at ht
-      simp only [hc, ↓reduceIte, Bool.not_eq_true', List.contains_eq_mem, decide_eq_false_iff_not]
+      simp only [hc, ↓reduceIte, Bool.not_eq_true', decide_eq_false_iff_not]
       exact .inr ht
     · simp only [hc, ite_false] at ht
       rcases hallow with hallow | hallow
-      · simp only [hc, ↓reduceIte, List.any_eq_true, Bool.not_eq_true', List.contains_eq_mem, decide_eq_false_iff_not]
+      · simp only [hc, ↓reduceIte, List.any_eq_true, Bool.not_eq_true', decide_eq_false_iff_not]
         exact .inr ⟨_, hallow, ht⟩
       · exact .inl (.inl hallow)
 
@@ -2601,7 +2601,7 @@ private def slice_c : Bap.Var := ⟨"c", .imm 1, 0, false⟩
 private def slice_m : Bap.Var := ⟨"m", .mem 64 8, 0, false⟩
 private def slice_n : Bap.Var := ⟨"n", .mem 64 8, 0, false⟩
 
-private def slice_store (memory root : Bap.Var) (address size : Nat) : Bap.Bil.Exp :=
+private def slice_store (_memory root : Bap.Var) (address size : Nat) : Bap.Bil.Exp :=
   .store (.var root) (.int (BitVec.ofNat 64 address)) (.int (BitVec.ofNat (size * 8) 7)) .little size
 
 private theorem slice_constantRange_int {address size : Nat} (h : address + size ≤ 2 ^ 64) :
@@ -2609,9 +2609,9 @@ private theorem slice_constantRange_int {address size : Nat} (h : address + size
   simp only [constantRange, Bap.Bil.evalExp, Bap.Value.asBits]
   have hlt : address < 2 ^ 64 ∨ size = 0 := by omega
   rcases hlt with hlt | rfl
-  · rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt hlt, if_pos h]
+  · rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt hlt, ite_eq_left h]
   · simp only [Nat.add_zero]
-    rw [if_pos (Nat.le_of_lt (BitVec.isLt (BitVec.ofNat 64 address)))]
+    rw [ite_eq_left (Nat.le_of_lt (BitVec.isLt (BitVec.ofNat 64 address)))]
 
 /-- A store that covers a live range ends its liveness: nothing before it matters. -/
 theorem slice_covering_store_kills :
@@ -2793,7 +2793,6 @@ end DynamicSlice
 
 section Propagate
 
-set_option linter.unusedSimpArgs false
 
 open Bap.Bil
 open Bap.Analysis.Propagate
@@ -2810,11 +2809,11 @@ private theorem propagate_find_filter (env : Env) (k w : Bap.Var) (h : w ≠ k) 
   | cons head tail ih =>
     by_cases hv : head.1 = k
     · have : head.1 ≠ w := fun e => h (e.symm.trans hv)
-      simp [hv, List.filter_cons, List.find?_cons, h.symm, this] at ih ⊢
+      simp [hv, h.symm] at ih ⊢
       exact ih
     · by_cases hw : head.1 = w
-      · simp [hv, hw, List.filter_cons, List.find?_cons, h]
-      · simp [hv, hw, List.filter_cons, List.find?_cons, ih] at ih ⊢
+      · simp [hw, h]
+      · simp [hv, hw, ih] at ih ⊢
 
 theorem propagate_lookup_bind (env : Env) (v w : Bap.Var) (r : Value) :
     lookup (Bil.bind env v r) w = if w = v then .ok r else lookup env w := by
@@ -3449,7 +3448,6 @@ end Propagate
 
 section DeadCode
 
-set_option linter.unusedSimpArgs false
 
 open Bap.Bil
 open Bap.Analysis.DeadCode
@@ -4195,10 +4193,10 @@ theorem deadcode_keeps_write_before_jump (x : Bap.Var) (a t b : Exp) (hfree : fr
   show (program [x] [x] _).2 = _
   simp only [deadcode_program_cons, deadcode_program_nil, deadcode_stmtLive_jmp, hfree]
   cases hm : deadcode_isMem x.typ with
-  | true => simp [deadcode_move_mem _ _ hm, deadcode_stmtLive_jmp, hfree]
+  | true => simp [deadcode_move_mem _ _ hm]
   | false =>
     have hl : x ∈ addVars [x] [] := (deadcode_mem_addVars _ _ _).mpr (Or.inl (by simp))
-    simp [deadcode_move_live _ _ hm, deadcode_stmtLive_jmp, hfree, hl]
+    simp [deadcode_move_live _ _ hm, hl]
 
 /-- Everything an exit needs is live before a jump, a special or a CPU exception. -/
 theorem deadcode_outputs_live_at_exit (l : List Bap.Var) (t : Exp) (m : String) (n : Nat) :
@@ -4530,7 +4528,6 @@ end DeadCode
 
 section Taint
 
-set_option linter.unusedSimpArgs false
 
 section Evaluation
 
@@ -4547,11 +4544,11 @@ private theorem taint_env_find_filter (env : Env) (k w : Bap.Var) (h : w ≠ k) 
   | cons head tail ih =>
     by_cases hv : head.1 = k
     · have : head.1 ≠ w := fun e => h (e.symm.trans hv)
-      simp [hv, List.filter_cons, List.find?_cons, h.symm, this] at ih ⊢
+      simp [hv, h.symm] at ih ⊢
       exact ih
     · by_cases hw : head.1 = w
-      · simp [hv, hw, List.filter_cons, List.find?_cons, h]
-      · simp [hv, hw, List.filter_cons, List.find?_cons, ih] at ih ⊢
+      · simp [hw, h]
+      · simp [hv, hw, ih] at ih ⊢
 
 theorem taint_lookup_bind (env : Env) (v w : Bap.Var) (r : Value) :
     lookup (Bil.bind env v r) w = if w = v then .ok r else lookup env w := by
@@ -4678,12 +4675,12 @@ private theorem taint_find_filter {α β : Type} [DecidableEq α] (bs : List (α
   | nil => simp
   | cons head tail ih =>
     by_cases hk : head.1 = k <;> by_cases hw : head.1 = w
-    · subst hk; subst hw; simp [List.filter_cons, ih]
+    · subst hk; subst hw; simp [ih]
     · subst hk
       have : w ≠ head.1 := fun h => hw h.symm
-      simp [List.filter_cons, List.find?_cons, ih, hw, this]
-    · subst hw; simp [List.filter_cons, List.find?_cons, hk]
-    · simp [List.filter_cons, List.find?_cons, hk, hw, ih]
+      simp [ih, hw, this]
+    · subst hw; simp [hk]
+    · simp [hk, hw, ih]
 
 theorem taint_labelsOfVar_putVar (s : State) (v w : Bap.Var) (l : Labels) :
     labelsOfVar (putVar v l s) w = if w = v then l else labelsOfVar s w := by
@@ -4758,7 +4755,7 @@ theorem taint_mem_labelsOfMemory_sourceMemory (s : State) (a b : Nat) (l : Label
     taint_byteLabels_putMemory]
   by_cases hw : b = a
   · subst hw
-    simp [taint_mem_union, or_assoc, or_comm, or_left_comm]
+    simp [taint_mem_union, or_comm, or_left_comm]
   · simp [hw]
 
 theorem taint_labelsOfMemory_sourceVar (s : State) (v : Bap.Var) (l : Labels) (a : Nat) :
@@ -5025,7 +5022,7 @@ private theorem taint_look_filter {α : Type} [DecidableEq α] (bs : List (α ×
   | nil => rfl
   | cons b t it =>
     by_cases hk : b.1 = k
-    · simp [taint_look, List.filter_cons, h b hk, hk]
+    · simp [taint_look, h b hk, hk]
     · by_cases hp : p b = true
       · simpa [taint_look, List.filter_cons, hp, hk, List.find?_cons] using it
       · simpa [taint_look, List.filter_cons, hp, hk, List.find?_cons] using it
@@ -5158,7 +5155,7 @@ def taint_labels (s : State) : Labels :=
 
 private theorem taint_mem_labels (s : State) (n : Nat) :
     n ∈ taint_labels s ↔ (∃ b ∈ s.vars, n ∈ b.2) ∨ (∃ b ∈ s.memory, n ∈ b.2) ∨ n ∈ s.anywhere := by
-  simp [taint_labels, List.mem_flatMap, or_assoc]
+  simp [taint_labels, List.mem_flatMap]
 
 private theorem taint_labelsOfVar_subset (s : State) (v : Bap.Var) : labelsOfVar s v ⊆ taint_labels s := by
   intro n hn
@@ -5322,7 +5319,7 @@ private theorem taint_satVars_var (labels : Labels) (vars : List Bap.Var) (s : S
     rw [this, taint_labelsOfVar_putVar]
     by_cases hw : w = h
     · subst hw
-      by_cases hl : n ∈ labels <;> simp [taint_mem_union, or_assoc, hl]
+      by_cases hl : n ∈ labels <;> simp [taint_mem_union, hl]
     · simp [hw]
 
 @[simp] private theorem taint_satVars_memory (labels : Labels) (vars : List Bap.Var) (s : State) :
@@ -6215,7 +6212,7 @@ theorem taint_store_covers_changes {w : Nat} {M U : Memory w} (hM : PagesSized M
             cases hw : Memory.write M a value.2 en z with
             | error e => simp [hw] at h
             | ok updated =>
-              simp [hw, Pure.pure, Except.pure] at h
+              simp [hw] at h
               subst h
               have hx : taint_address env ad = some ⟨aw, a⟩ := by
                 simp [taint_address, ha, hb, Except.toOption]
@@ -6247,7 +6244,7 @@ theorem taint_load_covers_read {w : Nat} {M : Memory w} (T : State) (env : Bil.E
       split at h
       · rename_i hwd
         subst hwd
-        simp [Pure.pure, Except.pure] at h
+        simp at h
         subst h
         have hx : taint_address env ad = some ⟨aw, a⟩ := by
           simp [taint_address, ha, hb, Except.toOption]
@@ -7203,7 +7200,7 @@ theorem taint_while_second_iteration (x y z : Bap.Var) (c : Bil.Exp) (l : Nat) (
   simp only [taint_labelsOfVar_putVar]
   have hzx : z ≠ x := fun e => hxz e.symm
   have hzy : z ≠ y := fun e => hyz e.symm
-  simp [hxy, hzx, hzy, hz]
+  simp [hxy, hzx, hz]
 
 /-- A branch never loses taint: whatever either arm's analysis reports survives the join. -/
 theorem taint_ifElse_var (S : State) (c : Bil.Exp) (y n : List Bil.Stmt) (v : Bap.Var) (l : Nat) :
@@ -7332,7 +7329,6 @@ end Taint
 
 section Validate
 
-set_option linter.unusedSimpArgs false
 
 open Bap.Bil
 open Bap.Analysis.Validate
@@ -7348,7 +7344,7 @@ theorem validate_effectEq_refl (e : Effect) : effectEq e e = true := by
   cases e <;> simp [effectEq]
 
 theorem validate_effectEq_symm (a b : Effect) : effectEq a b = effectEq b a := by
-  cases a <;> cases b <;> simp [effectEq, eq_comm, Bool.and_comm]
+  cases a <;> cases b <;> simp [effectEq, eq_comm]
 
 /-- `effectEq` is exact equality of control-flow outcomes. -/
 theorem validate_effectEq_sound {a b : Effect} (h : effectEq a b = true) : a = b := by

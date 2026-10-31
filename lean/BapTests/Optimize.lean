@@ -171,7 +171,93 @@ private def regressions : IO Unit := do
   assertTrue "seed live into the exit" ((Assoc.get 2 ins).getD [] |>.contains x)
   assertTrue "seed reaches the predecessor" ((Assoc.get 1 ins).getD [] |>.contains x)
 
+local macro "dcePass" : term =>
+  return Lean.mkIdent (.num (`_private ++ `Bap.IR.Optimize) 0 ++ `Bap.IR.dcePass)
+
+/-- `eliminateDeadCode` as it reads: a pass over everything until a pass changes nothing. -/
+private def deadCodeBySpec (protectedVars : List Var) (cfg : Cfg) : Nat → Cfg
+  | 0 => cfg
+  | fuel + 1 =>
+    let next := dcePass protectedVars cfg
+    let sizes (cfg : Cfg) : List (Nat × Nat) := cfg.blocks.map fun blk => (blk.defs.length, blk.phis.length)
+    if sizes cfg = sizes next then cfg else deadCodeBySpec protectedVars next fuel
+
+private def sameDeadCode (name : String) (sub : Sub) (protectedVars : List Var := []) : IO Unit := do
+  let cfg := Cfg.fromSub sub
+  let count := cfg.blocks.foldl (fun count blk => count + blk.defs.length + blk.phis.length) 0
+  let expected := Wire.printSub ((deadCodeBySpec protectedVars cfg (count + 1)).intoSub sub)
+  assertEqual name (toString expected) (toString (Wire.printSub ((eliminateDeadCode cfg protectedVars).intoSub sub)))
+
+/-- From a real instruction sequence: a block per basic block and its moves, jumps by flow. -/
+private def stmtDefs : Nat → Bil.Program → List Def
+  | _, [] => []
+  | t, .move v e :: rest => ⟨t, v, e⟩ :: stmtDefs (t + 1) rest
+  | t, _ :: rest => stmtDefs (t + 1) rest
+
+private def subOfDisasm (disasm : Disasm.Disasm) : Sub :=
+  let blocks := disasm.blocks
+  let flag := reg "ZF"
+  let blks : List Blk := blocks.map fun block =>
+    let defs := block.instructions.flatMap fun insn => stmtDefs (insn.address * 100) insn.bil
+    let successors := (block.instructions.getLast?.map (·.successors)).getD []
+    let jmps : List Jmp := match successors with
+      | [] => [⟨block.start * 100 + 90, none, .ret (.indirect (.var (reg "RAX")))⟩]
+      | [next] => [goto (block.start * 100 + 90) next]
+      | next :: other :: _ => [⟨block.start * 100 + 90, some (.var flag), .goto (.direct other)⟩, goto (block.start * 100 + 91) next]
+    { tid := block.start, defs := defs, jmps := jmps }
+  let entry : Blk := { tid := 7, jmps := blks.map fun blk => ⟨blk.tid * 100 + 99, some (.var flag), .goto (.direct blk.tid)⟩ }
+  ⟨1, "real", [], entry :: blks⟩
+
+/-- A dead chain over the blocks of a loop and a phi of each kind, for many passes that each remove little. -/
+private def chainSub (length : Nat) : Sub :=
+  let temp (i : Nat) : Var := reg s!"t{i}"
+  ⟨1, "chain", [], (List.range length).map fun i =>
+    let phi : List Phi := if i % 3 = 2 then [⟨i, temp (i + 1000), [(i, .var (temp i)), (i + 1, .var (temp (i + 1000 - 3)))]⟩] else []
+    { tid := i + 1, phis := phi, defs := [defn (i * 10) (temp i) (if i = 0 then int 1 else .bin .add (.var (temp (i - 1))) (int 1))],
+      jmps := if i + 1 = length then [⟨i * 10 + 1, none, .ret (.indirect (.var x))⟩]
+        else if i % 5 = 4 then [⟨i * 10 + 1, some (.var y), .goto (.direct (i - 2))⟩, goto (i * 10 + 2) (i + 2)]
+        else [goto (i * 10 + 1) (i + 2)] }⟩
+
+private def deadCodeFastPath : IO Unit := do
+  sameDeadCode "dead code: a sample" sample
+  sameDeadCode "dead code: a loop" loop
+  sameDeadCode "dead code: an entry loop" entryLoop
+  sameDeadCode "dead code: a stable loop" stableLoop
+  sameDeadCode "dead code: protected variables" sample [x, reg "unused"]
+  sameDeadCode "dead code: a chain" (chainSub 60)
+  sameDeadCode "dead code: a protected chain" (chainSub 60) [reg "t20", reg "t1020"]
+  sameDeadCode "dead code: the SSA of a chain" (toSsa (chainSub 60))
+  sameDeadCode "dead code: the SSA of a chain, protected" (toSsa (chainSub 60)) [reg "t3.1"]
+  -- a variable kept alive only by itself around a loop, and blocks of the same tid
+  let selfLoop : Sub := ⟨1, "self", [], [
+    ⟨1, [], [defn 1 x (.bin .add (.var x) (int 1)), defn 2 y (.var z)], [⟨3, some (.var y), .goto (.direct 1)⟩, goto 4 2]⟩,
+    ⟨2, [], [defn 5 z (.var y)], []⟩]⟩
+  sameDeadCode "dead code: a variable that only reads itself" selfLoop
+  let sameTids : Sub := ⟨1, "same", [], [
+    ⟨1, [], [defn 1 x (int 1), defn 2 y (.var x)], [goto 3 2]⟩,
+    ⟨2, [], [defn 4 z (.var y)], [⟨5, none, .ret (.indirect (.var z))⟩]⟩,
+    ⟨2, [], [defn 6 y (int 2), defn 7 x (.var y)], []⟩,
+    ⟨99, [], [defn 8 z (int 3)], [goto 9 2]⟩]⟩
+  sameDeadCode "dead code: blocks with the same tid, and one out of reach" sameTids
+  sameDeadCode "dead code: blocks with the same tid, protected" sameTids [z]
+  -- real code, if there is any to read
+  let path := "/bin/ls"
+  if ← System.FilePath.pathExists path then
+    let image ← Image.load path
+    match image.sections.find? (·.name == ".text") with
+    | none => pure ()
+    | some text =>
+      let data := image.data.extract text.offset (text.offset + min text.size 6000)
+      let disasm ← Disasm.Linear.sweep (← Target.X86.disassembler text.addr) data text.addr
+      let sub := subOfDisasm disasm
+      sameDeadCode "dead code: real code" sub
+      sameDeadCode "dead code: real code, protected" sub [reg "RAX"]
+      sameDeadCode "dead code: real code in SSA" (toSsa sub)
+      sameDeadCode "dead code: real code in SSA, protected" (toSsa sub) [reg "RAX"]
+      sameDeadCode "dead code: real code, folded" (Cfg.intoSub (propagateConstants (Cfg.fromSub (toSsa sub))) sub)
+
 def run : IO Unit := do
+  deadCodeFastPath
   regressions
   -- a definition that would fail is gone from the output, which is why `optimize` only refines runs
   let failing : Sub := ⟨1, "failing", [], [⟨1, [], [defn 10 x (.var y)], []⟩]⟩

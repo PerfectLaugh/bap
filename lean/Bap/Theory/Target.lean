@@ -275,6 +275,163 @@ def Target.linked (target : Target) (var : Var) (index : Nat) : List (Var × Nat
 /-- Registers without the `alias` role are the basis, as upstream's `Alias.solve`. -/
 def Target.isAlias (target : Target) (var : Var) : Bool := target.hasRole var .alias
 
+/-- The equations of a table, each one saying that two bits are equal. -/
+def Target.equations (target : Target) : List ((Var × Nat) × (Var × Nat)) :=
+  target.aliases.flatMap fun alias =>
+    (alias.spans.getD []).flatMap fun span =>
+      (List.range span.width).map fun index => ((span.var, index), (alias.target, span.offset + index))
+
+/-- Adds an equation to a partition, given by the representative of each bit: the classes of its bits become one. -/
+def mergeBits (rep : Var × Nat → Var × Nat) (equation : (Var × Nat) × (Var × Nat)) : Var × Nat → Var × Nat :=
+  let left := rep equation.1
+  let right := rep equation.2
+  fun bit =>
+    let current := rep bit
+    if current = left then right else current
+
+/-- The representative of each bit, when bits that equations relate are the same. -/
+def Target.representative (target : Target) : Var × Nat → Var × Nat := target.equations.foldl mergeBits id
+
+/-- Whether a bit is a bit of a register of the basis. -/
+def Target.isBasisBit (target : Target) (bit : Var × Nat) : Bool :=
+  !target.isAlias bit.1 && (regWidth bit.1).any (bit.2 < ·)
+
+/-- The bits of the basis the equations mention. -/
+def Target.basisBits (target : Target) : List (Var × Nat) :=
+  ((target.equations.flatMap fun equation => [equation.1, equation.2]).filter target.isBasisBit).eraseDups
+
+/-- The pairs of different bits of a list that have the same representative. -/
+def conflictsOf (rep : Var × Nat → Var × Nat) : List (Var × Nat) → List ((Var × Nat) × (Var × Nat))
+  | [] => []
+  | bit :: rest =>
+    (rest.filter fun other => other != bit && rep other == rep bit).map (bit, ·) ++ conflictsOf rep rest
+
+/-- The same of bits with their representatives, each one found once. -/
+def conflictsOfTagged : List ((Var × Nat) × (Var × Nat)) → List ((Var × Nat) × (Var × Nat))
+  | [] => []
+  | (bit, rep) :: rest =>
+    (rest.filter fun other => other.2 == rep && other.1 != bit).map (fun other => (bit, other.1)) ++ conflictsOfTagged rest
+
+def conflictsOfFast (rep : Var × Nat → Var × Nat) (bits : List (Var × Nat)) : List ((Var × Nat) × (Var × Nat)) :=
+  conflictsOfTagged (bits.map fun bit => (bit, rep bit))
+
+/-- A representative takes a walk through all the equations, so the pairs of bits don't ask for it again. -/
+@[csimp] theorem conflictsOf_eq_fast : @conflictsOf = @conflictsOfFast := by
+  funext rep bits
+  unfold conflictsOfFast
+  induction bits with
+  | nil => rfl
+  | cons bit rest ih =>
+    simp only [conflictsOf, List.map_cons, conflictsOfTagged, ih, List.filter_map, List.map_map]
+    congr 2
+    refine List.filter_congr fun other _ => ?_
+    simp only [Function.comp_apply, Bool.and_comm]
+
+/-- The pairs of different bits of the basis that the equations of a table make equal. A table with such a pair is overdetermined:
+its aliases can't be solved for the basis, which is not free. -/
+def Target.conflicts (target : Target) : List ((Var × Nat) × (Var × Nat)) :=
+  conflictsOf target.representative target.basisBits
+
+/-- A representative through a table of the bits that aren't their own. -/
+def bitLookup : List ((Var × Nat) × (Var × Nat)) → Var × Nat → Var × Nat
+  | [], bit => bit
+  | entry :: rest, bit => if bit = entry.1 then entry.2 else bitLookup rest bit
+
+/-- `mergeBits` on a table. The closures of `mergeBits` walk every equation on each lookup, three times over, as the
+compiler moves its `let`s under the lambda. -/
+def mergeTable (table : List ((Var × Nat) × (Var × Nat))) (equation : (Var × Nat) × (Var × Nat)) :
+    List ((Var × Nat) × (Var × Nat)) :=
+  let left := bitLookup table equation.1
+  let right := bitLookup table equation.2
+  let mapped := table.map fun entry => (entry.1, if entry.2 = left then right else entry.2)
+  if table.any (fun entry => entry.1 = left) then mapped else (left, right) :: mapped
+
+private theorem bitLookup_absent {table : List ((Var × Nat) × (Var × Nat))} {bit : Var × Nat}
+    (h : (table.any fun entry => entry.1 = bit) = false) : bitLookup table bit = bit := by
+  induction table with
+  | nil => rfl
+  | cons entry rest ih =>
+    simp only [List.any_cons, Bool.or_eq_false_iff, decide_eq_false_iff_not] at h
+    have hne : bit ≠ entry.1 := Ne.symm h.1
+    simp only [bitLookup, hne, ↓reduceIte]
+    exact ih h.2
+
+private theorem bitLookup_map (table : List ((Var × Nat) × (Var × Nat))) (f : Var × Nat → Var × Nat) (bit : Var × Nat) :
+    bitLookup (table.map fun entry => (entry.1, f entry.2)) bit =
+      if (table.any fun entry => entry.1 = bit) = true then f (bitLookup table bit) else bit := by
+  induction table with
+  | nil => simp [bitLookup]
+  | cons entry rest ih =>
+    simp only [List.map_cons, bitLookup, List.any_cons, ih]
+    by_cases h : bit = entry.1
+    · simp [h]
+    · have h' : decide (entry.1 = bit) = false := decide_eq_false (Ne.symm h)
+      simp only [h, ↓reduceIte, h', Bool.false_or]
+
+theorem bitLookup_mergeTable (table : List ((Var × Nat) × (Var × Nat))) (equation : (Var × Nat) × (Var × Nat)) :
+    bitLookup (mergeTable table equation) = mergeBits (bitLookup table) equation := by
+  funext bit
+  simp only [mergeTable, mergeBits]
+  generalize bitLookup table equation.1 = left
+  generalize bitLookup table equation.2 = right
+  have hmap := bitLookup_map table (fun value => if value = left then right else value) bit
+  by_cases hb : (table.any fun entry => entry.1 = bit) = true
+  · simp only [hb, ↓reduceIte] at hmap
+    by_cases hk : (table.any fun entry => entry.1 = left) = true
+    · simp only [hk, ↓reduceIte]
+      exact hmap
+    · have hk' := Bool.eq_false_iff.2 hk
+      have hne : bit ≠ left := fun e => hk (e ▸ hb)
+      simp only [hk', Bool.false_eq_true, ↓reduceIte, bitLookup, hne]
+      exact hmap
+  · have hb' := Bool.eq_false_iff.2 hb
+    simp only [hb', Bool.false_eq_true, ↓reduceIte] at hmap
+    rw [bitLookup_absent hb']
+    by_cases hk : (table.any fun entry => entry.1 = left) = true
+    · have hne : bit ≠ left := fun e => hb (e ▸ hk)
+      simp only [hk, ↓reduceIte, hne]
+      exact hmap
+    · have hk' := Bool.eq_false_iff.2 hk
+      by_cases he : bit = left
+      · simp [hk', he, bitLookup]
+      · simp only [hk', Bool.false_eq_true, ↓reduceIte, bitLookup, he]
+        exact hmap
+
+private theorem foldl_mergeTable (equations : List ((Var × Nat) × (Var × Nat)))
+    (table : List ((Var × Nat) × (Var × Nat))) :
+    bitLookup (equations.foldl mergeTable table) = equations.foldl mergeBits (bitLookup table) := by
+  induction equations generalizing table with
+  | nil => rfl
+  | cons equation rest ih =>
+    simp only [List.foldl_cons]
+    rw [ih, bitLookup_mergeTable]
+
+/-- `Target.conflicts` that finds each representative once, through one table. -/
+def Target.conflictsFast (target : Target) : List ((Var × Nat) × (Var × Nat)) :=
+  let table := target.equations.foldl mergeTable []
+  conflictsOfTagged (target.basisBits.map fun bit => (bit, bitLookup table bit))
+
+@[csimp] theorem Target.conflicts_eq_fast : @Target.conflicts = @Target.conflictsFast := by
+  funext target
+  have hrep : target.representative = bitLookup (target.equations.foldl mergeTable []) := by
+    rw [foldl_mergeTable]
+    have : bitLookup [] = id := by
+      funext bit
+      rfl
+    rw [this]
+    rfl
+  simp only [Target.conflicts, Target.conflictsFast, conflictsOf_eq_fast, conflictsOfFast, hrep]
+
+/-- Whether the equations of a table have an independent basis, as upstream's `Alias.solve` assumes without a check. -/
+def Target.resolves (target : Target) : Bool := target.conflicts.isEmpty
+
+/-- A table with an independent basis, or what its equations make equal that should not be. -/
+def Target.validate (target : Target) : Except String Target :=
+  match target.conflicts with
+  | [] => .ok target
+  | ((left, at₁), (right, at₂)) :: _ =>
+    .error s!"the aliases of {target.name} are overdetermined: they make bit {at₁} of {left.name} and bit {at₂} of {right.name} equal"
+
 /-- Searches the equations for the bit of a basis register that a bit of a register is equal to. -/
 def Target.locate (target : Target) : Nat → List (Var × Nat) → Var → Nat → Option (Var × Nat)
   | 0, _, _, _ => none
