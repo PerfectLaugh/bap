@@ -6,6 +6,7 @@ import Bap.Emu.Project
 import Bap.Emu.Jni
 import Bap.Emu.CoreProofs
 import Bap.Emu.ObserveProofs
+import Bap.Emu.TaskProofs
 import Std.Data.String.ToNat
 
 open Lean Elab Command in
@@ -1536,6 +1537,7 @@ open_private Bap.Emu.Checkpoint Bap.Emu encodeBinaryUnchecked fitsWord pendingFi
   putBytes putByte natBytes putNat putBool putText putPendingBin putSkipBin putTypBin putCellsBin putValueBin putBindingBin
   putRegionBin putThreadBin putProcessBin takeBytes getByte getNat getBool getText getList getList.loop getPendingBin getSkipBin
   getTypBin getValueBin getBindingBin getRegionBin getThreadBin getProcessBin binaryMagic
+  putTask putWaiter getTask getWaiter taskFits waiterFits
 
 /-- `encoded` sits in `data` at `offset`. -/
 def At (data : ByteArray) (offset : Nat) (encoded : ByteArray) : Prop :=
@@ -2031,6 +2033,56 @@ theorem getProcess_decodes (process : ThreadId × List Bap.Emu.Region) (h : Proc
   simp only [ByteArray.size_append, Nat.add_assoc, List.map_id] at d1 d2
   simp only [getProcessBin, bind, Except.bind, d1, d2, encProcess, ByteArray.size_append]
 
+private def encTask (task : Task) : ByteArray :=
+  natBytes task.tid ++ natBytes task.group ++ natBytes task.parent ++ natBytes task.space ++ encSkip task.status
+
+/-- A task representable in the binary format. -/
+def TaskSafe (task : Task) : Prop :=
+  task.tid < 2 ^ 64 ∧ task.group < 2 ^ 64 ∧ task.parent < 2 ^ 64 ∧ task.space < 2 ^ 64 ∧ SkipSafe task.status
+
+private theorem data_putTask (writer : Writer) (task : Task) :
+    Writer.data (putTask writer task) = Writer.data writer ++ encTask task := by
+  simp only [putTask, encTask, data_putSkip, data_putNat, ByteArray.append_assoc]
+
+theorem getTask_decodes (task : Task) (h : TaskSafe task) : Decodes getTask (encTask task) task := by
+  intro data offset hat
+  obtain ⟨tid, group, parent, space, status⟩ := task
+  obtain ⟨h1, h2, h3, h4, h5⟩ := h
+  obtain ⟨hl, hs⟩ := At.split hat
+  obtain ⟨hl, hsp⟩ := At.split hl
+  obtain ⟨hl, hp⟩ := At.split hl
+  obtain ⟨ht, hg⟩ := At.split hl
+  have d1 := natBytes_decodes tid h1 data offset ht
+  have d2 := natBytes_decodes group h2 data _ hg
+  have d3 := natBytes_decodes parent h3 data _ hp
+  have d4 := natBytes_decodes space h4 data _ hsp
+  have d5 := getSkip_decodes status h5 data _ hs
+  simp only [ByteArray.size_append, Nat.add_assoc] at d1 d2 d3 d4 d5
+  simp only [getTask, bind, Except.bind, d1, d2, d3, d4, d5, encTask, ByteArray.size_append, Nat.add_assoc]
+
+private def encWaiter (waiter : Waiter) : ByteArray :=
+  natBytes waiter.thread ++ encSkip waiter.target ++ encSkip waiter.statusAddress
+
+/-- A waiter representable in the binary format. -/
+def WaiterSafe (waiter : Waiter) : Prop :=
+  waiter.thread < 2 ^ 64 ∧ SkipSafe waiter.target ∧ SkipSafe waiter.statusAddress
+
+private theorem data_putWaiter (writer : Writer) (waiter : Waiter) :
+    Writer.data (putWaiter writer waiter) = Writer.data writer ++ encWaiter waiter := by
+  simp only [putWaiter, encWaiter, data_putSkip, data_putNat, ByteArray.append_assoc]
+
+theorem getWaiter_decodes (waiter : Waiter) (h : WaiterSafe waiter) : Decodes getWaiter (encWaiter waiter) waiter := by
+  intro data offset hat
+  obtain ⟨thread, target, statusAddress⟩ := waiter
+  obtain ⟨h1, h2, h3⟩ := h
+  obtain ⟨hl, hs⟩ := At.split hat
+  obtain ⟨ht, hq⟩ := At.split hl
+  have d1 := natBytes_decodes thread h1 data offset ht
+  have d2 := getSkip_decodes target h2 data _ hq
+  have d3 := getSkip_decodes statusAddress h3 data _ hs
+  simp only [ByteArray.size_append, Nat.add_assoc] at d1 d2 d3
+  simp only [getWaiter, bind, Except.bind, d1, d2, d3, encWaiter, ByteArray.size_append, Nat.add_assoc]
+
 /-- A snapshot representable in the binary format: 64-bit counters and 64-bit addresses. -/
 structure SnapshotSafe (snapshot : Snapshot) : Prop where
   pc : snapshot.pc < 2 ^ 64
@@ -2046,6 +2098,10 @@ structure SnapshotSafe (snapshot : Snapshot) : Prop where
   processesLength : snapshot.processMemory.length < 2 ^ 64
   processes : ∀ process ∈ snapshot.processMemory, ProcessSafe process
   skip : SkipSafe snapshot.skip
+  tableLength : snapshot.table.tasks.length < 2 ^ 64
+  table : ∀ task ∈ snapshot.table.tasks, TaskSafe task
+  waitersLength : snapshot.table.waiters.length < 2 ^ 64
+  waiters : ∀ waiter ∈ snapshot.table.waiters, WaiterSafe waiter
 
 private def encBody (snapshot : Snapshot) : ByteArray :=
   natBytes snapshot.pc ++ byteEnc (if snapshot.stopped then 1 else 0) ++
@@ -2053,11 +2109,17 @@ private def encBody (snapshot : Snapshot) : ByteArray :=
     (natBytes snapshot.state.env.length ++ body encBinding snapshot.state.env) ++
     (natBytes snapshot.threads.length ++ body encThread snapshot.threads) ++
     natBytes snapshot.currentThread ++ natBytes snapshot.nextThread ++ encPending snapshot.pending ++
-    (natBytes snapshot.processMemory.length ++ body encProcess snapshot.processMemory) ++ encSkip snapshot.skip
+    (natBytes snapshot.processMemory.length ++ body encProcess snapshot.processMemory) ++ encSkip snapshot.skip ++
+    (natBytes snapshot.table.tasks.length ++ body encTask snapshot.table.tasks) ++
+    (natBytes snapshot.table.waiters.length ++ body encWaiter snapshot.table.waiters)
 
 private theorem encodeBinary_eq (snapshot : Snapshot) :
     encodeBinaryUnchecked snapshot = binaryMagic ++ encBody snapshot := by
-  simp only [encodeBinaryUnchecked, encBody, data_putSkip]
+  simp only [encodeBinaryUnchecked, encBody]
+  rw [foldl_writer _ encWaiter data_putWaiter]
+  simp only [data_putNat]
+  rw [foldl_writer _ encTask data_putTask]
+  simp only [data_putNat, data_putSkip]
   rw [foldl_writer _ encProcess data_putProcess]
   simp only [data_putPending, data_putNat]
   rw [foldl_writer _ encThread data_putThread]
@@ -2089,9 +2151,11 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
   simp only [decodeBinarySnapshot, hmagic, hne, Bool.false_eq_true, ↓reduceIte]
   clear hmagic hdata hne
   generalize binaryMagic.size = start at hat hsize ⊢
-  obtain ⟨⟨env⟩, pc, regions, stopped, threads, current, next, pending, processes, skip⟩ := snapshot
+  obtain ⟨⟨env⟩, pc, regions, stopped, threads, current, next, pending, processes, skip, ⟨table, waiters⟩⟩ := snapshot
   simp only [encBody] at hat hsize
-  obtain ⟨h89, h10⟩ := At.split hat
+  obtain ⟨hup, h12t⟩ := At.split hat
+  obtain ⟨hup, h11⟩ := At.split hup
+  obtain ⟨h89, h10⟩ := At.split hup
   obtain ⟨h8, h9⟩ := At.split h89
   obtain ⟨h7, h78⟩ := At.split h8
   obtain ⟨h6, h67⟩ := At.split h7
@@ -2114,7 +2178,11 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
   have d9 := getList_decodes (decode := getProcessBin) encProcess id processes h.processesLength h9
     fun p hp => getProcess_decodes p (h.processes p hp)
   have d10 := getSkip_decodes skip h.skip data _ h10
-  simp only [ByteArray.size_append, natBytes_size, byteEnc_size, Nat.add_assoc, List.map_id] at d1 d2 d3 d4 d5 d6 d7 d8 d9 d10 hsize
+  have d11 := getList_decodes (decode := getTask) encTask id table h.tableLength h11
+    fun t ht => getTask_decodes t (h.table t ht)
+  have d12 := getList_decodes (decode := getWaiter) encWaiter id waiters h.waitersLength h12t
+    fun w hw => getWaiter_decodes w (h.waiters w hw)
+  simp only [ByteArray.size_append, natBytes_size, byteEnc_size, Nat.add_assoc, List.map_id] at d1 d2 d3 d4 d5 d6 d7 d8 d9 d10 d11 d12 hsize
   rw [bind_ok_eq d1]
   dsimp only
   rw [bind_ok_eq d2]
@@ -2134,6 +2202,10 @@ private theorem unchecked_roundtrip (snapshot : Snapshot) (h : SnapshotSafe snap
   rw [bind_ok_eq d9]
   dsimp only
   rw [bind_ok_eq d10]
+  dsimp only
+  rw [bind_ok_eq d11]
+  dsimp only
+  rw [bind_ok_eq d12]
   dsimp only
   simp only [hsize, bne_self_eq_false, Bool.false_eq_true, ↓reduceIte]
   rfl
@@ -2175,13 +2247,26 @@ private theorem fits_process {process : ThreadId × List Bap.Emu.Region} (h : pr
   obtain ⟨⟨h1, h2⟩, h3⟩ := h
   exact ⟨by simpa [fitsWord] using h1, by simpa [fitsWord] using h2, fun r hr => fits_region (h3 r hr)⟩
 
+private theorem fits_task {task : Task} (h : taskFits task = true) : TaskSafe task := by
+  simp only [taskFits, Bool.and_eq_true] at h
+  obtain ⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩ := h
+  exact ⟨by simpa [fitsWord] using h1, by simpa [fitsWord] using h2, by simpa [fitsWord] using h3,
+    by simpa [fitsWord] using h4, fits_skip h5⟩
+
+private theorem fits_waiter {waiter : Waiter} (h : waiterFits waiter = true) : WaiterSafe waiter := by
+  simp only [waiterFits, Bool.and_eq_true] at h
+  obtain ⟨⟨h1, h2⟩, h3⟩ := h
+  exact ⟨by simpa [fitsWord] using h1, fits_skip h2, fits_skip h3⟩
+
 private theorem fits_snapshot {snapshot : Snapshot} (h : binaryFits snapshot = true) : SnapshotSafe snapshot := by
   simp only [binaryFits, Bool.and_eq_true, List.all_eq_true] at h
-  obtain ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩, h10⟩, h11⟩, h12⟩, h13⟩ := h
+  obtain ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩, h10⟩, h11⟩, h12⟩, h13⟩, h14⟩, h15⟩, h16⟩, h17⟩ := h
   exact ⟨by simpa [fitsWord] using h1, by simpa [fitsWord] using h2, fun r hr => fits_region (h3 r hr),
     by simpa [fitsWord] using h4, fun b hb => fits_binding (h5 b hb), by simpa [fitsWord] using h6,
     fun t ht => fits_thread (h7 t ht), by simpa [fitsWord] using h8, by simpa [fitsWord] using h9, fits_pending h10,
-    by simpa [fitsWord] using h11, fun p hp => fits_process (h12 p hp), fits_skip h13⟩
+    by simpa [fitsWord] using h11, fun p hp => fits_process (h12 p hp), fits_skip h13,
+    by simpa [fitsWord] using h14, fun t ht => fits_task (h15 t ht),
+    by simpa [fitsWord] using h16, fun w hw => fits_waiter (h17 w hw)⟩
 
 private theorem encode_rejects {snapshot : Snapshot} (h : binaryFits snapshot = false) :
     ∃ error, encodeBinarySnapshot snapshot = .error error :=
@@ -2723,11 +2808,11 @@ theorem regionsMemory_byte {width : Nat} (regions : List Bap.Emu.Region)
 
 /-- A forked process finds its own bytes in a restored checkpoint, not its parent's. -/
 theorem spaceRegions_process (snapshot : Snapshot) {id : ThreadId} {regions : List Bap.Emu.Region}
-    (h : snapshot.processMemory.lookup id = some regions) : spaceRegions snapshot id = regions := by
+    (h : snapshot.processMemory.lookup (snapshot.table.spaceOf id) = some regions) : spaceRegions snapshot id = regions := by
   simp [spaceRegions, h]
 
 /-- A thread without a process of its own finds the shared bytes. -/
-theorem spaceRegions_shared (snapshot : Snapshot) {id : ThreadId} (h : snapshot.processMemory.lookup id = none) :
+theorem spaceRegions_shared (snapshot : Snapshot) {id : ThreadId} (h : snapshot.processMemory.lookup (snapshot.table.spaceOf id) = none) :
     spaceRegions snapshot id = snapshot.regions := by
   simp [spaceRegions, h]
 

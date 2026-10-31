@@ -555,7 +555,7 @@ theorem rollback_slot (address : Nat) (before : Core) (branch : PendingBranch) (
 /-- What `snapshot` reads from the references. -/
 def capture (core : Core) (processMemory : List (Nat × List Region) := []) : Snapshot :=
   ⟨core.state, core.pc, core.regions, core.stopped, core.threads, core.currentThread, core.nextThread, core.pending,
-    processMemory, core.skip⟩
+    processMemory, core.skip, {}⟩
 
 /-- What `restore` writes to the references. -/
 def restoreCore (snapshot : Snapshot) (core : Core) : Core :=
@@ -1391,30 +1391,13 @@ theorem spawnContext_registers (id : Nat) (state : Bil.State) (argument : Bap.Va
       if var = argument then .ok value else Bil.lookup state.env var :=
   Proofs.Bil.lookup_bind_eq _ _ _ _
 
-/-- A cloned thread runs at once, at its start. -/
-theorem cloneContext_fields (id : Nat) (state : Bil.State) (result : Bap.Var) (value : Value) (stack : Bap.Var)
-    (top : Value) (start : Nat) :
-    (cloneContext id state result value stack top start).stopped = false ∧
-    (cloneContext id state result value stack top start).pc = start ∧
-    (cloneContext id state result value stack top start).pending = none ∧
-    (cloneContext id state result value stack top start).skip = none :=
-  ⟨rfl, rfl, rfl, rfl⟩
-
-/-- It has the stack it was given and its parent's registers, except for the result. -/
-theorem cloneContext_registers (id : Nat) (state : Bil.State) (result : Bap.Var) (value : Value) (stack : Bap.Var)
-    (top : Value) (start : Nat) (var : Bap.Var) :
-    Bil.lookup (cloneContext id state result value stack top start).state.env var =
-      if var = stack then .ok top else if var = result then .ok value else Bil.lookup state.env var := by
-  show Bil.lookup (Bil.bind (Bil.bind state.env result value) stack top) var = _
-  rw [Proofs.Bil.lookup_bind_eq, Proofs.Bil.lookup_bind_eq]
-
-/-- `parkShared` gives the threads of the shared address space the memory, and leaves processes alone. -/
-theorem parkShared_spec {β : Type} (threads : List ThreadContext) (processes : Std.HashMap Nat β) (memoryVar : Bap.Var)
+/-- `parkShared` gives the threads of the address space the memory, and leaves the others alone. -/
+theorem parkShared_spec (threads : List ThreadContext) (elsewhere : Nat → Bool) (memoryVar : Bap.Var)
     (memory : Value) (context : ThreadContext) (hm : context ∈ threads) :
-    (processes.contains context.id = true → context ∈ parkShared threads processes memoryVar memory) ∧
-    (processes.contains context.id = false →
+    (elsewhere context.id = true → context ∈ parkShared threads elsewhere memoryVar memory) ∧
+    (elsewhere context.id = false →
       { context with state := { env := Bil.bind context.state.env memoryVar memory } } ∈
-        parkShared threads processes memoryVar memory) := by
+        parkShared threads elsewhere memoryVar memory) := by
   simp only [parkShared, List.mem_map]
   exact ⟨fun h => ⟨context, hm, by simp [h]⟩, fun h => ⟨context, hm, by simp [h]⟩⟩
 

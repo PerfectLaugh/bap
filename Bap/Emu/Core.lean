@@ -1,6 +1,7 @@
 import Bap.Bil.Eval
 import Bap.Primus.Memory
 import Bap.Emu.Semantics
+import Bap.Emu.Task
 
 /-! The pure core of emulator execution.
 
@@ -108,6 +109,7 @@ structure Snapshot where
   pending : Option PendingBranch
   processMemory : List (ThreadId × List Region) := []
   skip : Option Nat := none
+  table : TaskTable := {}
 
 /-! ### One instruction -/
 
@@ -456,12 +458,6 @@ def forkContext (id : Nat) (state : Bil.State) (result : Bap.Var) (value : Value
     ThreadContext :=
   ⟨id, { env := Bil.bind state.env result value }, childPc, true, none, none⟩
 
-/-- The context of a thread that `cloneThread` starts: the parent's registers but the result register and the
-stack pointer, runnable at once. -/
-def cloneContext (id : Nat) (state : Bil.State) (result : Bap.Var) (value : Value) (stack : Bap.Var) (top : Value)
-    (start : Nat) : ThreadContext :=
-  ⟨id, { env := Bil.bind (Bil.bind state.env result value) stack top }, start, false, none, none⟩
-
 def lowerId (best : Option Nat) (id : Nat) : Option Nat :=
   match best with
   | some other => if other ≤ id then some other else some id
@@ -500,12 +496,12 @@ be inspected in the thread that hit it, and the threads behind it stay where the
       else
         pure total
 
-/-- The table on the way out of the shared address space: what all its threads hold is what the thread
-that leaves holds, since threads there do not keep their contexts up to date for each other. -/
-def parkShared {β : Type} (threads : List ThreadContext) (processes : Std.HashMap Nat β) (memoryVar : Bap.Var)
+/-- The table on the way out of an address space: what all its threads hold is what the thread that leaves holds, since
+threads there do not keep their contexts up to date for each other. `elsewhere` says which threads are in another space. -/
+def parkShared (threads : List ThreadContext) (elsewhere : Nat → Bool) (memoryVar : Bap.Var)
     (memory : Value) : List ThreadContext :=
   threads.map fun context =>
-    if processes.contains context.id then context
+    if elsewhere context.id then context
     else { context with state := { env := Bil.bind context.state.env memoryVar memory } }
 
 /-- Total steps of a parallel round, or the first worker's error in thread order. -/

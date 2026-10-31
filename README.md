@@ -16,7 +16,8 @@ The OCaml and Rust implementation it came from is on the
 - **Lifts** to BIL through Primus Lisp semantics in `semantics/`.
 - **Analyzes**: control flow, SSA, liveness, dead code, constant propagation, cross references,
   call graphs, backward slicing, taint, strings and decompilation to C-like text.
-- **Emulates** with a JIT, threads, forks, hooks and checkpoints.
+- **Emulates** with a JIT, hooks and checkpoints. Tasks follow the Linux model: a thread and a process are tasks that differ
+  in what `clone` shares, with a scheduler and `fork`, `clone`, `waitpid` and `exit` for guests.
 - **Executes symbolically**, solving path conditions with Z3.
 
 ## Building

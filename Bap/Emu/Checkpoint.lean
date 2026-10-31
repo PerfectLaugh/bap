@@ -82,6 +82,18 @@ private def putProcessBin (writer : Writer) (process : ThreadId × List Region) 
   let writer := putNat writer process.2.length
   process.2.foldl putRegionBin writer
 
+private def putTask (writer : Writer) (task : Task) : Writer :=
+  let writer := putNat writer task.tid
+  let writer := putNat writer task.group
+  let writer := putNat writer task.parent
+  let writer := putNat writer task.space
+  putSkipBin writer task.status
+
+private def putWaiter (writer : Writer) (waiter : Waiter) : Writer :=
+  let writer := putNat writer waiter.thread
+  let writer := putSkipBin writer waiter.target
+  putSkipBin writer waiter.statusAddress
+
 private structure Reader where
   data : ByteArray
   offset : Nat := 0
@@ -207,7 +219,21 @@ private def getProcessBin (reader : Reader) : Except String ((ThreadId × List R
   let (regions, reader) ← getList reader getRegionBin
   .ok ((id, regions), reader)
 
-private def binaryMagic : ByteArray := "BAPCKPT3".toUTF8
+private def getTask (reader : Reader) : Except String (Task × Reader) := do
+  let (tid, reader) ← getNat reader
+  let (group, reader) ← getNat reader
+  let (parent, reader) ← getNat reader
+  let (space, reader) ← getNat reader
+  let (status, reader) ← getSkipBin reader
+  .ok (⟨tid, group, parent, space, status⟩, reader)
+
+private def getWaiter (reader : Reader) : Except String (Waiter × Reader) := do
+  let (thread, reader) ← getNat reader
+  let (target, reader) ← getSkipBin reader
+  let (statusAddress, reader) ← getSkipBin reader
+  .ok (⟨thread, target, statusAddress⟩, reader)
+
+private def binaryMagic : ByteArray := "BAPCKPT4".toUTF8
 
 private def encodeBinaryUnchecked (snapshot : Snapshot) : ByteArray :=
   let writer := putBytes ⟨binaryMagic⟩ (natBytes snapshot.pc)
@@ -222,7 +248,11 @@ private def encodeBinaryUnchecked (snapshot : Snapshot) : ByteArray :=
   let writer := putNat writer snapshot.nextThread
   let writer := putPendingBin writer snapshot.pending
   let writer := putNat writer snapshot.processMemory.length
-  (putSkipBin (snapshot.processMemory.foldl putProcessBin writer) snapshot.skip).data
+  let writer := putSkipBin (snapshot.processMemory.foldl putProcessBin writer) snapshot.skip
+  let writer := putNat writer snapshot.table.tasks.length
+  let writer := snapshot.table.tasks.foldl putTask writer
+  let writer := putNat writer snapshot.table.waiters.length
+  (snapshot.table.waiters.foldl putWaiter writer).data
 
 private def fitsWord (value : Nat) : Bool := value < 2 ^ 64
 
@@ -257,6 +287,12 @@ private def threadFits (context : ThreadContext) : Bool :=
 private def processFits (process : ThreadId × List Region) : Bool :=
   fitsWord process.1 && fitsWord process.2.length && process.2.all regionFits
 
+private def taskFits (task : Task) : Bool :=
+  fitsWord task.tid && fitsWord task.group && fitsWord task.parent && fitsWord task.space && skipFits task.status
+
+private def waiterFits (waiter : Waiter) : Bool :=
+  fitsWord waiter.thread && skipFits waiter.target && skipFits waiter.statusAddress
+
 /-- Whether the fixed-width fields of the binary format can hold every part of the snapshot. -/
 def binaryFits (snapshot : Snapshot) : Bool :=
   fitsWord snapshot.pc &&
@@ -264,7 +300,9 @@ def binaryFits (snapshot : Snapshot) : Bool :=
     fitsWord snapshot.state.env.length && snapshot.state.env.all bindingFits &&
     fitsWord snapshot.threads.length && snapshot.threads.all threadFits &&
     fitsWord snapshot.currentThread && fitsWord snapshot.nextThread && pendingFits snapshot.pending &&
-    fitsWord snapshot.processMemory.length && snapshot.processMemory.all processFits && skipFits snapshot.skip
+    fitsWord snapshot.processMemory.length && snapshot.processMemory.all processFits && skipFits snapshot.skip &&
+    fitsWord snapshot.table.tasks.length && snapshot.table.tasks.all taskFits &&
+    fitsWord snapshot.table.waiters.length && snapshot.table.waiters.all waiterFits
 
 /-- Encode a snapshot, refusing one that the binary format could only store truncated. -/
 def encodeBinarySnapshot (snapshot : Snapshot) : Except String ByteArray :=
@@ -286,10 +324,12 @@ def decodeBinarySnapshot (data : ByteArray) : Except String Snapshot := do
     let (pending, reader) ← getPendingBin reader
     let (processMemory, reader) ← getList reader getProcessBin
     let (skip, reader) ← getSkipBin reader
+    let (tasks, reader) ← getList reader getTask
+    let (waiters, reader) ← getList reader getWaiter
     if reader.offset != data.size then
       .error "trailing bytes in binary checkpoint"
     else
-      .ok ⟨{ env := env }, pc, regions, stopped, threads, currentThread, nextThread, pending, processMemory, skip⟩
+      .ok ⟨{ env := env }, pc, regions, stopped, threads, currentThread, nextThread, pending, processMemory, skip, ⟨tasks, waiters⟩⟩
 
 /-- The memory holding the bytes of `regions`. -/
 def regionsMemory (width : Nat) (regions : List Region) : Bap.Memory width :=
@@ -298,7 +338,7 @@ def regionsMemory (width : Nat) (regions : List Region) : Bap.Memory width :=
 
 /-- The bytes of the address space of thread `id`: its own, or else the shared ones. -/
 def spaceRegions (snapshot : Snapshot) (id : ThreadId) : List Region :=
-  (snapshot.processMemory.lookup id).getD snapshot.regions
+  (snapshot.processMemory.lookup (snapshot.table.spaceOf id)).getD snapshot.regions
 
 /-- Gives a loaded snapshot the memory that `save` left out: every thread gets that of its address space,
 and a forked process does not get the memory of its parent. -/

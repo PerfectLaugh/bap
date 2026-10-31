@@ -128,6 +128,7 @@ structure Emu where
   pendingRef : IO.Ref (Option PendingBranch)
   parallelLock : IO.Ref (Option Std.BaseMutex)
   parallelWorkers : IO.Ref (List (ThreadId × Primus.Lifted.Engine))
+  /-- The memory of each address space other than the first, by the id of the space. -/
   processMemory : IO.Ref (Std.HashMap ThreadId Jit.Memory)
   threadControl : IO.Ref (Std.HashMap ThreadId Bool)
   /-- The memory of the threads without their own, while a thread with its own runs. -/
@@ -147,6 +148,10 @@ structure Emu where
   /-- The addresses whose steps met a hook of an access, which run as one instruction from then on. Nothing else depends on
   it: which steps chain changes how fast the emulator runs and not what it does. -/
   watchedSteps : IO.Ref (Std.HashSet Nat)
+  /-- The tasks, and which are blocked waiting for others. -/
+  taskTable : IO.Ref TaskTable
+  /-- Where the instruction that runs goes next, for a system call to know where a new thread starts. -/
+  nextPc : IO.Ref Nat
 
 /-- Compiled ranges chain blocks along their branches, which leaves delay slots out. -/
 private def rangeLimitOf (config : Config) : Nat :=
@@ -224,7 +229,12 @@ def create (config : Config) (mapped : List Region) (initial : Bil.State) (entry
     restarting := ← IO.mkRef false
     rangeStart := ← IO.mkRef none
     watchedSteps := ← IO.mkRef {}
+    taskTable := ← IO.mkRef (TaskTable.initial 1)
+    nextPc := ← IO.mkRef 0
   }
+
+/-- The address space of a thread. -/
+private def spaceOf (emu : Emu) (id : ThreadId) : IO Nat := do pure ((← emu.taskTable.get).spaceOf id)
 
 private def saveCurrentThread (emu : Emu) : IO Unit := do
   let context : ThreadContext := {
@@ -244,10 +254,10 @@ private def captureThreads (emu : Emu) : IO (List ThreadContext) := do
     | .ok value => some value
     | .error _ => none
   let threads ← emu.threadsRef.get
-  let processes ← emu.processMemory.get
-  let current ← emu.currentThreadRef.get
+  let table ← emu.taskTable.get
+  let space := table.spaceOf (← emu.currentThreadRef.get)
   pure (threads.map fun thread =>
-    if !shouldShareMemory processes current thread.id then thread else
+    if table.spaceOf thread.id != space then thread else
       match memory with
       | some memory => { thread with state := { env := Bil.bind thread.state.env emu.config.memory memory } }
       | none => thread)
@@ -290,6 +300,7 @@ def snapshot (emu : Emu) : IO Snapshot := do
     pending := ← emu.pendingRef.get
     processMemory
     skip := ← emu.skipCode.get
+    table := ← emu.taskTable.get
   }
 
 private def snapshotBlock (emu : Emu) : IO Snapshot := do
@@ -303,6 +314,7 @@ private def snapshotBlock (emu : Emu) : IO Snapshot := do
     nextThread := ← emu.nextThreadRef.get
     pending := ← emu.pendingRef.get
     skip := ← emu.skipCode.get
+    table := ← emu.taskTable.get
   }
 
 private def restoreThreads (emu : Emu) (snapshot : Snapshot) : IO Unit := do
@@ -315,6 +327,7 @@ private def restoreThreads (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   emu.nextThreadRef.set snapshot.nextThread
   emu.pendingRef.set snapshot.pending
   emu.skipCode.set snapshot.skip
+  emu.taskTable.set snapshot.table
 
 /-- A native memory with the bytes of the memory variable of `state`. -/
 private def nativeFromState (emu : Emu) (state : Bil.State) : IO Jit.Memory := do
@@ -342,9 +355,10 @@ private def rollbackBlock (emu : Emu) (snapshot : Snapshot) : IO Unit := do
   if !emu.engine.deferMemorySync then
     if created != snapshot.nextThread then
       emu.processMemory.modify fun processes => processes.filter fun id _ => id < snapshot.nextThread
-    if (← emu.processMemory.get).contains snapshot.currentThread then
+    let space := snapshot.table.spaceOf snapshot.currentThread
+    if (← emu.processMemory.get).contains space then
       let native ← nativeFromState emu snapshot.state
-      emu.processMemory.modify (·.insert snapshot.currentThread native)
+      emu.processMemory.modify (·.insert space native)
       attachMemory emu native
 
 def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
@@ -364,7 +378,7 @@ def restore (emu : Emu) (snapshot : Snapshot) : IO Unit := do
     let memory ← Jit.createMemory addresses values
     emu.processMemory.modify (·.insert id memory)
   Primus.Lifted.discardMemory emu.engine
-  match (← emu.processMemory.get).get? snapshot.currentThread with
+  match (← emu.processMemory.get).get? (snapshot.table.spaceOf snapshot.currentThread) with
   | some native => attachMemory emu native
   | none => pure ()
 
@@ -377,39 +391,41 @@ def threads (emu : Emu) : IO (List ThreadInfo) := do
 
 /-- Gives the engine the native memory of thread `next`, when it is not the one of `current`. -/
 private def switchNativeMemory (emu : Emu) (current next : ThreadId) : IO Unit := do
-  let processes ← emu.processMemory.get
-  if !shouldShareMemory processes current next then
+  let currentSpace ← spaceOf emu current
+  let nextSpace ← spaceOf emu next
+  if currentSpace != nextSpace then
+    let processes ← emu.processMemory.get
     let native ← emu.engine.persistentMemory.get
     match native with
     | some native =>
-      if processes.contains current then emu.processMemory.modify (·.insert current native)
+      if processes.contains currentSpace then emu.processMemory.modify (·.insert currentSpace native)
       else emu.sharedMemory.set (some native)
     | none => pure ()
     let processes ← emu.processMemory.get
-    match nativeFor processes (← emu.sharedMemory.get) next with
+    match nativeFor processes (← emu.sharedMemory.get) nextSpace with
     | some native => attachMemory emu native
     | none => Primus.Lifted.discardMemory emu.engine
 
 def switchThread (emu : Emu) (id : ThreadId) : IO Unit := do
   saveCurrentThread emu
-  let processes ← emu.processMemory.get
+  let table ← emu.taskTable.get
   let leaving ← thread emu
-  if !shouldShareMemory processes leaving id && !processes.contains leaving then
+  let leavingSpace := table.spaceOf leaving
+  if table.spaceOf id != leavingSpace then
     match Bil.lookup (← emu.state.get).env emu.config.memory with
-    | .ok memory => emu.threadsRef.modify (parkShared · processes emu.config.memory memory)
+    | .ok memory =>
+      emu.threadsRef.modify (parkShared · (fun other => table.spaceOf other != leavingSpace) emu.config.memory memory)
     | .error _ => pure ()
   let contexts ← emu.threadsRef.get
   match contexts.find? fun context => context.id == id with
   | none => throw <| IO.userError s!"unknown Emu thread {id}"
   | some context =>
     let current ← emu.state.get
-    let processes ← emu.processMemory.get
-    let currentId ← thread emu
-    let env := if !shouldShareMemory processes currentId id then context.state.env else
+    let env := if table.spaceOf id != leavingSpace then context.state.env else
       match Bil.lookup current.env emu.config.memory with
       | .ok memory => Bil.bind context.state.env emu.config.memory memory
       | .error _ => context.state.env
-    switchNativeMemory emu currentId id
+    switchNativeMemory emu leaving id
     emu.state.set { env }
     emu.pc.set context.pc
     emu.stopped.set context.stopped
@@ -933,9 +949,10 @@ def setReg (emu : Emu) (var : Bap.Var) (value : Bap.Value) : IO Unit := do
   -- The state now has the memory: what native memory has follows it, on the next access.
   if var == emu.config.memory then
     Primus.Lifted.discardMemory emu.engine
-    if (← emu.processMemory.get).contains (← emu.currentThreadRef.get) then
+    let space ← spaceOf emu (← emu.currentThreadRef.get)
+    if (← emu.processMemory.get).contains space then
       let native ← nativeFromState emu (← emu.state.get)
-      emu.processMemory.modify (·.insert (← emu.currentThreadRef.get) native)
+      emu.processMemory.modify (·.insert space native)
       attachMemory emu native
 
 private def syscallRegisters : SyscallAbi → String × List String × String
@@ -956,10 +973,24 @@ private def readWord (emu : Emu) (name : String) : IO Nat := do
   | .ok value => pure value.2.toNat
   | .error error => throw <| IO.userError error
 
-def spawnThread (emu : Emu) (start : Nat) (arg : Nat) : IO ThreadId := do
+/-- The task that runs. -/
+private def currentTask (emu : Emu) : IO Task := do
+  let id ← thread emu
+  match (← emu.taskTable.get).find? id with
+  | some task => pure task
+  | none => throw <| IO.userError s!"Emu thread {id} has no task"
+
+/-- A new thread of the process that runs, in its address space. -/
+private def newThread (emu : Emu) : IO ThreadId := do
+  let task ← currentTask emu
   saveCurrentThread emu
   let id ← emu.nextThreadRef.get
   emu.nextThreadRef.set (id + 1)
+  emu.taskTable.modify (·.addTask { task with tid := id, status := none })
+  pure id
+
+def spawnThread (emu : Emu) (start : Nat) (arg : Nat) : IO ThreadId := do
+  let id ← newThread emu
   let width ← wordWidth emu
   let (_, arguments, _) := syscallRegisters emu.config.syscallAbi
   match arguments.head? with
@@ -972,19 +1003,19 @@ def spawnThread (emu : Emu) (start : Nat) (arg : Nat) : IO ThreadId := do
     pure id
 
 def forkThread (emu : Emu) (childPc : Nat) : IO ThreadId := do
+  let task ← currentTask emu
   saveCurrentThread emu
   let id ← emu.nextThreadRef.get
   emu.nextThreadRef.set (id + 1)
+  -- Its address space is that of its parent, until `cloneProcessMemory` gives it its own.
+  emu.taskTable.modify (·.addTask { tid := id, group := id, parent := task.group, space := task.space })
   let width ← wordWidth emu
-  let (_, arguments, _) := syscallRegisters emu.config.syscallAbi
-  match arguments.head? with
-  | none => throw <| IO.userError "target has no fork result register"
-  | some register =>
-    let current ← emu.state.get
-    let result : Bap.Var := ⟨register, .imm width, 0, false⟩
-    let context := forkContext id current result (.bits (BitVec.ofNat width 0)) childPc
-    emu.threadsRef.modify (context :: ·)
-    pure id
+  let (_, _, register) := syscallRegisters emu.config.syscallAbi
+  let current ← emu.state.get
+  let result : Bap.Var := ⟨register, .imm width, 0, false⟩
+  let context := forkContext id current result (.bits (BitVec.ofNat width 0)) childPc
+  emu.threadsRef.modify (context :: ·)
+  pure id
 
 /-- The stack pointer and the thread pointer of a target. -/
 private def threadRegisters : SyscallAbi → String × String
@@ -992,26 +1023,6 @@ private def threadRegisters : SyscallAbi → String × String
   | .x86_64 => ("RSP", "FS_BASE")
   | .aarch64 => ("SP", "TPIDR_EL0")
   | .mips => ("R29", "USERLOCAL")
-
-/-- A thread as `clone(2)` makes one: it shares the memory and has a copy of the registers, as `spawnThread`'s does,
-but it runs on `stack`, sees 0 in the result register, and has its own thread-local storage if `threadPointer` is
-given. `spawnThread` keeps the parent's stack pointer, so that the two would overwrite each other's frames. -/
-def cloneThread (emu : Emu) (start : Nat) (stack : Nat) (threadPointer : Option Nat := none) : IO ThreadId := do
-  saveCurrentThread emu
-  let id ← emu.nextThreadRef.get
-  emu.nextThreadRef.set (id + 1)
-  let width ← wordWidth emu
-  let word (value : Nat) : Bap.Value := .bits (BitVec.ofNat width value)
-  let var (name : String) : Bap.Var := ⟨name, .imm width, 0, false⟩
-  let (_, _, result) := syscallRegisters emu.config.syscallAbi
-  let (stackRegister, threadRegister) := threadRegisters emu.config.syscallAbi
-  let current ← emu.state.get
-  let current : Bil.State := match threadPointer with
-    | some value => { env := Bil.bind current.env (var threadRegister) (word value) }
-    | none => current
-  let context := cloneContext id current (var result) (word 0) (var stackRegister) (word stack) start
-  emu.threadsRef.modify (context :: ·)
-  pure id
 
 def cloneProcessMemory (emu : Emu) (child : ThreadId) : IO Unit := do
   let parent ← match ← emu.engine.persistentMemory.get with
@@ -1021,6 +1032,7 @@ def cloneProcessMemory (emu : Emu) (child : ThreadId) : IO Unit := do
       attachMemory emu parent
       pure parent
   let childMemory ← Jit.cloneMemory parent
+  emu.taskTable.modify (·.setSpace child child)
   emu.processMemory.modify (·.insert child childMemory)
   -- The memory of the child's state follows the clone, whatever ran since the fork. A parallel worker has
   -- it in native memory only, and the rest of the emulator expects the state to be exact.
@@ -1060,6 +1072,319 @@ def setThreadReg (emu : Emu) (id : ThreadId) (var : Bap.Var) (value : Bap.Value)
     emu.threadsRef.modify fun threads => threads.map fun context =>
       if context.id == id then { context with state := { env := Bil.bind context.state.env var value } }
       else context
+
+/-! ### Tasks -/
+
+/-- The process that runs: the id of its group. -/
+def pid (emu : Emu) : IO Nat := do pure (← currentTask emu).group
+
+/-- The parent of the process that runs, or 0 for the first. -/
+def parentPid (emu : Emu) : IO Nat := do pure (← currentTask emu).parent
+
+def tasks (emu : Emu) : IO (List Task) := do pure (← emu.taskTable.get).tasks
+
+/-- What a new task shares, as the flags of `clone(2)` say it. -/
+structure CloneOptions where
+  start : Nat
+  /-- The stack it runs on. Without one it keeps the stack pointer of its parent, and tasks with the same memory then
+  overwrite each other's frames. -/
+  stack : Option Nat := none
+  threadPointer : Option Nat := none
+  /-- `CLONE_VM`: the same address space, and otherwise a copy of it. -/
+  shareMemory : Bool := false
+  /-- `CLONE_THREAD`: a thread of the same process, and otherwise a process of its own. -/
+  sameGroup : Bool := false
+
+/-- A new task, which runs at once with a copy of the registers and sees 0 in the result register. A thread and a process
+are this, with different options. -/
+def clone (emu : Emu) (options : CloneOptions) : IO ThreadId := do
+  if options.sameGroup && !options.shareMemory then
+    throw <| IO.userError "a thread of a process shares its memory"
+  let task ← currentTask emu
+  saveCurrentThread emu
+  let id ← emu.nextThreadRef.get
+  emu.nextThreadRef.set (id + 1)
+  let group := if options.sameGroup then task.group else id
+  let parent := if options.sameGroup then task.parent else task.group
+  emu.taskTable.modify (·.addTask { tid := id, group, parent, space := task.space })
+  let width ← wordWidth emu
+  let word (value : Nat) : Bap.Value := .bits (BitVec.ofNat width value)
+  let var (name : String) : Bap.Var := ⟨name, .imm width, 0, false⟩
+  let (_, _, result) := syscallRegisters emu.config.syscallAbi
+  let (stackRegister, threadRegister) := threadRegisters emu.config.syscallAbi
+  let current ← emu.state.get
+  let bindIn (env : List (Bap.Var × Bap.Value)) (name : String) : Option Nat → List (Bap.Var × Bap.Value)
+    | some value => Bil.bind env (var name) (word value)
+    | none => env
+  let env := bindIn (bindIn current.env stackRegister options.stack) threadRegister options.threadPointer
+  emu.threadsRef.modify (spawnContext id { env } (var result) (word 0) options.start :: ·)
+  if !options.shareMemory then cloneProcessMemory emu id
+  pure id
+
+/-- A new process at `childPc`, with a copy of the memory. -/
+def fork (emu : Emu) (childPc : Nat) : IO ThreadId := clone emu { start := childPc }
+
+/-- All of the process has exited: its threads stop, its children go to the first process and it waits as a zombie. -/
+private def markExited (emu : Emu) (group status : Nat) : IO Unit := do
+  let table ← emu.taskTable.get
+  let init := match table.tasks.head? with
+    | some first => first.tid
+    | none => group
+  emu.taskTable.set (table.exitGroup group status init)
+  let current ← thread emu
+  for task in table.tasks do
+    if task.group == group then
+      if task.tid == current then emu.stopped.set true
+      else emu.threadsRef.modify (setThreadStopped · task.tid true)
+
+/-- The process that runs calls `exit_group` with `code`. -/
+def exitProcess (emu : Emu) (code : Nat) : IO Unit := do
+  markExited emu (← currentTask emu).group (exitedStatus code)
+
+/-- The thread that runs is over, and its process if that was the last of it. -/
+def exitThread (emu : Emu) (code : Nat) : IO Unit := do
+  let table ← emu.taskTable.get
+  let init := match table.tasks.head? with
+    | some first => first.tid
+    | none => 0
+  emu.taskTable.set (table.exitTask (← thread emu) (exitedStatus code) init)
+  emu.stopped.set true
+
+/-- A signal ends the process. Nothing else of signals is modelled. -/
+def kill (emu : Emu) (target signal : Nat) : IO Unit := do
+  match (← emu.taskTable.get).find? target with
+  | some { status := none, .. } => markExited emu target (signaledStatus signal)
+  | _ => throw <| IO.userError s!"no running Emu process {target}"
+
+/-- Forgets the threads and the memory of what is no longer in the table. What runs stays until it switches away, since
+switching keeps the memory it leaves. -/
+private def collectGone (emu : Emu) : IO Unit := do
+  let current ← thread emu
+  emu.taskTable.modify (·.sweep current)
+  let table ← emu.taskTable.get
+  emu.threadsRef.modify (·.filter fun context => context.id == current || (table.find? context.id).isSome)
+  emu.processMemory.modify (·.filter fun space _ => table.tasks.any (·.space == space))
+
+/-- What `waitpid` reports now, in the process that runs, without blocking. What it reports is gone from the table. -/
+def waitpid (emu : Emu) (target : Option Nat := none) : IO WaitResult := do
+  let table ← emu.taskTable.get
+  let result := table.poll (← currentTask emu).group target
+  if let .exited child _ := result then
+    emu.taskTable.set (table.reap child)
+    collectGone emu
+  pure result
+
+/-- A result in the convention of the target: an error is the negated number, except on MIPS, where the register after
+the arguments says so. -/
+private def setSyscallResult (emu : Emu) (id : ThreadId) (result : Except Nat Nat) : IO Unit := do
+  let width ← wordWidth emu
+  let word (value : Nat) : Bap.Value := .bits (BitVec.ofNat width value)
+  let var (name : String) : Bap.Var := ⟨name, .imm width, 0, false⟩
+  let (_, _, register) := syscallRegisters emu.config.syscallAbi
+  match emu.config.syscallAbi, result with
+  | .mips, .ok value =>
+    setThreadReg emu id (var "R7") (word 0)
+    setThreadReg emu id (var register) (word value)
+  | .mips, .error errno =>
+    setThreadReg emu id (var "R7") (word 1)
+    setThreadReg emu id (var register) (word errno)
+  | _, .ok value => setThreadReg emu id (var register) (word value)
+  | _, .error errno => setThreadReg emu id (var register) (word (2 ^ width - errno))
+
+private def echild : Nat := 10
+private def efault : Nat := 14
+private def einval : Nat := 22
+private def enosys (abi : SyscallAbi) : Nat := if abi == .mips then 89 else 38
+
+/-- Writes the 32 bits of a status, and says whether that address could take them. -/
+private def writeStatus (emu : Emu) (address status : Nat) : IO Bool := do
+  let bytes := [0, 1, 2, 3].map fun index => (status >>> (8 * index)).toUInt8
+  let bytes := if emu.config.endian == .big then bytes.reverse else bytes
+  try
+    write emu address (ByteArray.mk bytes.toArray)
+    pure true
+  catch _ => pure false
+
+/-- The waiters that can go on, each with its status written in its memory and its result in its registers. Not during a
+step: this switches threads. A zombie that runs and that one of them reaps stops being what runs first, as what runs needs
+its address space. -/
+private def settleWaiters (emu : Emu) : IO Unit := do
+  let (table, woken) := (← emu.taskTable.get).settle
+  if let some (first, _) := woken.head? then
+    if (table.find? (← thread emu)).isNone then switchThread emu first.thread
+  emu.taskTable.set table
+  for (waiter, found) in woken do
+    let result : Except Nat Nat ← match found with
+      | .exited child status =>
+        match waiter.statusAddress with
+        | some address =>
+          let home ← thread emu
+          switchThread emu waiter.thread
+          let written ← writeStatus emu address status
+          switchThread emu home
+          pure (if written then .ok child else .error efault)
+        | none => pure (.ok child)
+      | _ => pure (.error echild)
+    setSyscallResult emu waiter.thread result
+    resumeThread emu waiter.thread
+  if !woken.isEmpty then collectGone emu
+
+/-- The numbers of the system calls of processes, as in Linux. -/
+private structure ProcessCalls where
+  fork : Option Nat := none
+  vfork : Option Nat := none
+  clone : Nat
+  wait4 : Nat
+  waitpid : Option Nat := none
+  exit : Nat
+  exitGroup : Nat
+  getpid : Nat
+  getppid : Nat
+  gettid : Nat
+  schedYield : Nat
+
+private def processCalls (abi : SyscallAbi) (width : Nat) : ProcessCalls :=
+  match abi with
+  | .x86_64 =>
+    { fork := some 57, vfork := some 58, clone := 56, wait4 := 61, exit := 60, exitGroup := 231, getpid := 39,
+      getppid := 110, gettid := 186, schedYield := 24 }
+  | .riscv | .aarch64 =>
+    { clone := 220, wait4 := 260, exit := 93, exitGroup := 94, getpid := 172, getppid := 173, gettid := 178,
+      schedYield := 124 }
+  | .mips =>
+    if width == 32 then
+      { fork := some 4002, clone := 4120, wait4 := 4114, waitpid := some 4007, exit := 4001, exitGroup := 4246,
+        getpid := 4020, getppid := 4064, gettid := 4222, schedYield := 4162 }
+    else
+      { fork := some 5056, vfork := some 5057, clone := 5055, wait4 := 5059, exit := 5058, exitGroup := 5205,
+        getpid := 5038, getppid := 5108, gettid := 5178, schedYield := 5023 }
+
+/-- `SyscallAction` of a result. -/
+private def syscallReturn (emu : Emu) (result : Except Nat Nat) : IO SyscallAction := do
+  let width ← wordWidth emu
+  match emu.config.syscallAbi, result with
+  | .mips, .ok value =>
+    setThreadReg emu (← thread emu) ⟨"R7", .imm width, 0, false⟩ (.bits (BitVec.ofNat width 0))
+    pure (.returnValue value)
+  | .mips, .error errno =>
+    setThreadReg emu (← thread emu) ⟨"R7", .imm width, 0, false⟩ (.bits (BitVec.ofNat width 1))
+    pure (.returnValue errno)
+  | _, .ok value => pure (.returnValue value)
+  | _, .error errno => pure (.returnValue (2 ^ width - errno))
+
+/-- `wait4` without the usage of what it reports, and process groups, which aren't modelled. A thread that has to wait
+stops here, and `runProcesses` gives it its result. -/
+private def serveWait (emu : Emu) (target status options usage : Nat) : IO SyscallAction := do
+  let width ← wordWidth emu
+  let wanted : Option (Option Nat) :=
+    if target == 2 ^ width - 1 then some none
+    else if 0 < target && target < 2 ^ (width - 1) then some (some target)
+    else none
+  match wanted with
+  | none => syscallReturn emu (.error einval)
+  | some wanted =>
+    if usage != 0 then syscallReturn emu (.error einval) else
+    let table ← emu.taskTable.get
+    let found := table.poll (← currentTask emu).group wanted
+    match found with
+    | .noChild => syscallReturn emu (.error echild)
+    | .exited child value =>
+      if status != 0 then
+        if !(← writeStatus emu status value) then
+          return ← syscallReturn emu (.error efault)
+      emu.taskTable.set (table.reap child)
+      collectGone emu
+      syscallReturn emu (.ok child)
+    | .running =>
+      -- WNOHANG
+      if options &&& 1 != 0 then syscallReturn emu (.ok 0)
+      else
+        emu.taskTable.set { table with waiters := table.waiters ++ [{
+          thread := ← thread emu, target := wanted, statusAddress := if status != 0 then some status else none }] }
+        emu.stopped.set true
+        syscallReturn emu (.ok 0)
+
+/-- `clone`. `CLONE_CHILD_CLEARTID` is taken and has no effect: there is no futex to wake, so a thread that waits on it is a
+system call that nothing serves. `CLONE_VFORK` isn't taken. -/
+private def serveClone (emu : Emu) (flags stack parentTid threadPointer childTid : Nat) : IO SyscallAction := do
+  let cloneVm := 0x100
+  let cloneThreadFlag := 0x10000
+  let setTls := 0x80000
+  let setParentTid := 0x100000
+  let setChildTid := 0x1000000
+  let known := 0xff ||| cloneVm ||| 0x200 ||| 0x400 ||| 0x800 ||| cloneThreadFlag ||| 0x40000 ||| setTls ||| setParentTid |||
+    0x200000 ||| setChildTid
+  let has (flag : Nat) : Bool := flags &&& flag != 0
+  let abi := emu.config.syscallAbi
+  let tidBytes (id : Nat) : ByteArray :=
+    let bytes := [0, 1, 2, 3].map fun index => (id >>> (8 * index)).toUInt8
+    ByteArray.mk (if emu.config.endian == .big then bytes.reverse else bytes).toArray
+  if flags ||| known != known then
+    syscallReturn emu (.error (enosys abi))
+  else if has cloneThreadFlag && !has cloneVm then
+    syscallReturn emu (.error einval)
+  else
+    let next ← emu.nextPc.get
+    let options : CloneOptions := {
+      start := next
+      stack := if stack != 0 then some stack else none
+      threadPointer := if has setTls then some threadPointer else none
+      shareMemory := has cloneVm
+      sameGroup := has cloneThreadFlag }
+    if has cloneVm || !has setChildTid then
+      let id ← clone emu options
+      if has setParentTid then write emu parentTid (tidBytes id)
+      if has setChildTid then write emu childTid (tidBytes id)
+      syscallReturn emu (.ok id)
+    else
+      -- The copy holds the id of the child, and the parent keeps what was there.
+      let before ← read emu childTid 4
+      write emu childTid (tidBytes (← emu.nextThreadRef.get))
+      let id ← clone emu options
+      write emu childTid before
+      if has setParentTid then write emu parentTid (tidBytes id)
+      syscallReturn emu (.ok id)
+
+/-- The system calls of processes, as Linux has them, for programs that `runProcesses` runs: `fork`, `vfork`, which is
+`fork` as the standard allows, `clone`, `wait4`, `waitpid`, `exit`, `exit_group`, `getpid`, `getppid`, `gettid` and
+`sched_yield`, which goes on until the quantum ends. Parallel rounds can't serve them, since a worker has no thread table
+to block in, and a call from one fails. -/
+def serveProcessCalls (emu : Emu) : IO HookId := do
+  let width ← wordWidth emu
+  let calls := processCalls emu.config.syscallAbi width
+  let threadPointerIndex := if emu.config.syscallAbi == .x86_64 then 4 else 3
+  let childTidIndex := if emu.config.syscallAbi == .x86_64 then 3 else 4
+  onSyscall emu fun current number args => do
+    let arg (index : Nat) : Nat := args.getD index 0
+    let known := [some calls.clone, some calls.wait4, calls.waitpid, calls.fork, calls.vfork, some calls.exit,
+      some calls.exitGroup, some calls.getpid, some calls.getppid, some calls.gettid, some calls.schedYield]
+    if !known.contains (some number) then
+      pure .default
+    else
+      if current.engine.deferMemorySync then
+        throw <| IO.userError "process system calls need runProcesses, not a parallel round"
+      if some number == calls.fork || some number == calls.vfork then
+        syscallReturn current (.ok (← fork current (← current.nextPc.get)))
+      else if number == calls.clone then
+        serveClone current (arg 0) (arg 1) (arg 2) (arg threadPointerIndex) (arg childTidIndex)
+      else if number == calls.wait4 then
+        serveWait current (arg 0) (arg 1) (arg 2) (arg 3)
+      else if some number == calls.waitpid then
+        serveWait current (arg 0) (arg 1) (arg 2) 0
+      else if number == calls.exit then
+        exitThread current (arg 0)
+        syscallReturn current (.ok 0)
+      else if number == calls.exitGroup then
+        exitProcess current (arg 0)
+        syscallReturn current (.ok 0)
+      else if number == calls.getpid then
+        syscallReturn current (.ok (← pid current))
+      else if number == calls.getppid then
+        syscallReturn current (.ok (← parentPid current))
+      else if number == calls.gettid then
+        syscallReturn current (.ok (← thread current))
+      else
+        syscallReturn current (.ok 0)
 
 private def dispatchSyscall (emu : Emu) : IO (Option Nat) := serialize emu <| do
   let hooks ← emu.syscallHooks.get
@@ -1167,14 +1492,15 @@ def refreshPersistentRegions (emu : Emu) : IO Unit := do
 /-- Refreshes the regions with the bytes of the memory that threads without their own memory share. -/
 def refreshSharedRegions (emu : Emu) : IO Unit := do
   let processes ← emu.processMemory.get
-  if !processes.contains (← emu.currentThreadRef.get) then
+  let table ← emu.taskTable.get
+  if !processes.contains (table.spaceOf (← emu.currentThreadRef.get)) then
     refreshPersistentRegions emu
   else
     match ← emu.sharedMemory.get with
     | some native => emu.regions.set (← regionsFromNative emu native)
     | none =>
       let threads ← emu.threadsRef.get
-      match threads.find? fun context => !processes.contains context.id with
+      match threads.find? fun context => !processes.contains (table.spaceOf context.id) with
       | some context =>
         let ⟨_, memory⟩ ← cells emu context.state
         emu.regions.modify (·.map fun region =>
@@ -1295,7 +1621,12 @@ private def executeBlock (emu : Emu) (address : Nat) : IO (Nat × Bil.Effect) :=
 /-- The references of the emulator as the environment of `stepM`. -/
 @[inline] private def stepOps (emu : Emu) : StepOps IO (Snapshot × Option TraceState) :=
   stepOpsOf (controlCells emu) (notifyCode emu) (do pure (← snapshotBlock emu, ← emu.trace.get)) (delayFor emu)
-    (recordTrace emu) (executeBlock emu) (dispatchSpecial emu)
+    (recordTrace emu)
+    (fun address => do
+      let result ← executeBlock emu address
+      emu.nextPc.set result.1
+      pure result)
+    (dispatchSpecial emu)
     (fun before => do
       rollbackBlock emu before.1
       emu.trace.set before.2)
@@ -1347,9 +1678,81 @@ def runPreemptive (emu : Emu) (quantum : Nat := 100) (fuel : Nat := 100000) : IO
     throw <| IO.userError "Emu thread quantum must be positive"
   preemptiveM (run emu ·) (stopped emu) (switchNextThread emu) quantum fuel (fuel + 1) fuel 0
 
+/-- How a run of processes ended. -/
+inductive ScheduleOutcome where
+  /-- Nothing can run, and the first process ended with this status. -/
+  | finished (status : Nat)
+  /-- Nothing can run, and these threads wait for what never happens. -/
+  | deadlock (waiting : List ThreadId)
+  /-- The thread stopped for a reason of its own, such as a breakpoint, and it is the current one. -/
+  | stopped (id : ThreadId)
+  | outOfFuel
+  deriving DecidableEq, Repr
+
+/-- Whether the thread stopped because it waits or is over, which is for the scheduler to deal with. -/
+private def blockedOrOver (emu : Emu) (id : ThreadId) : IO Bool := do
+  let table ← emu.taskTable.get
+  if table.waiters.any (·.thread == id) then pure true
+  else
+    match table.find? id with
+    | some task => pure task.status.isSome
+    | none => pure true
+
+/-- A guest that faults gets SIGSEGV, which ends its process and not the others. Anything else isn't the guest's doing. -/
+private def runGuest (emu : Emu) (steps : Nat) : IO Nat := do
+  try
+    run emu steps
+  catch error =>
+    if (← failure emu).isSome then
+      markExited emu (← currentTask emu).group (signaledStatus 11)
+      emu.lastFault.set none
+      pure 1
+    else
+      throw error
+
+private def scheduleLoop (emu : Emu) (quantum : Nat) : Nat → Nat → IO ScheduleOutcome
+  | 0, _ => pure .outOfFuel
+  | rounds + 1, fuel => do
+    settleWaiters emu
+    let current ← thread emu
+    if ← stopped emu then
+      if !(← blockedOrOver emu current) then
+        pure (.stopped current)
+      else
+        saveCurrentThread emu
+        match pickNext (← emu.threadsRef.get) current with
+        | some id =>
+          switchThread emu id
+          collectGone emu
+          scheduleLoop emu quantum rounds fuel
+        | none =>
+          let table ← emu.taskTable.get
+          if !table.waiters.isEmpty then
+            pure (.deadlock (table.waiters.map (·.thread)))
+          else
+            match table.tasks.head? with
+            | some { status := some status, .. } => pure (.finished status)
+            | _ => pure (.stopped current)
+    else if fuel == 0 then
+      pure .outOfFuel
+    else
+      let steps ← runGuest emu (min quantum fuel)
+      if !(← stopped emu) then
+        let _ ← switchNextThread emu
+      scheduleLoop emu quantum rounds (fuel - steps)
+
+/-- Runs the processes and their threads in turns of `quantum` instructions, until nothing can run, a thread stops for a
+reason of its own or `fuel` instructions have run. A thread blocked in `waitpid` goes on when what it waits for has
+happened. A process that faults ends with SIGSEGV. The fuel is that of a `runPreemptive`, and each turn runs at least one
+instruction or moves on from a thread that can't, so that the rounds are enough. -/
+def runProcesses (emu : Emu) (quantum : Nat := 100) (fuel : Nat := 100000) : IO ScheduleOutcome := do
+  if quantum = 0 then
+    throw <| IO.userError "Emu thread quantum must be positive"
+  scheduleLoop emu quantum (2 * fuel + 2 * (← emu.threadsRef.get).length + 8) fuel
+
 private def workerMemory (emu : Emu) (context : ThreadContext) (fallback : Jit.Memory) : IO Jit.Memory := do
   let memories ← emu.processMemory.get
-  pure (memories.getD context.id fallback)
+  pure (memories.getD (← spaceOf emu context.id) fallback)
 
 private def resumeParallelWorker (emu : Emu) (context : ThreadContext) (shared : Jit.Memory) : IO Emu := do
   let existing ← emu.parallelWorkers.get
@@ -1389,24 +1792,25 @@ memory, relies on. -/
 private def synchronizeRound (emu : Emu) (merged : List ThreadContext)
     (workers : List (ThreadContext × Emu)) (shared : Jit.Memory) : IO (List ThreadContext) := do
   let processes ← emu.processMemory.get
+  let table ← emu.taskTable.get
   let memoryVar := emu.config.memory
-  let writesOf (id : ThreadId) : IO (List (Nat × Nat)) := do
-    match (workers.find? fun worker => worker.1.id == id).bind fun worker => worker.2.journal with
-    | some journal => journal.get
-    | none => pure []
-  -- One memory value for all threads without their own.
-  let sharedValue ← (merged.find? fun context => !processes.contains context.id).mapM fun context => do
+  let writesIn (inSpace : ThreadId → Bool) : IO (List (Nat × Nat)) :=
+    workers.foldlM (init := []) fun writes worker =>
+      match worker.2.journal with
+      | some journal => if inSpace worker.1.id then do pure ((← journal.get) ++ writes) else pure writes
+      | none => pure writes
+  -- One memory value for all threads of the first address space.
+  let sharedValue ← (merged.find? fun context => !processes.contains (table.spaceOf context.id)).mapM fun context => do
     let ⟨width, memory⟩ ← cells emu context.state
-    let writes ← workers.foldlM (init := []) fun writes worker =>
-      if processes.contains worker.1.id then pure writes
-      else do pure ((← writesOf worker.1.id) ++ writes)
+    let writes ← writesIn fun id => !processes.contains (table.spaceOf id)
     let memory ← applyJournal memory shared writes
     pure (Value.memory (addressWidth := width) memory)
   merged.mapM fun context => do
-    match processes.get? context.id with
+    let space := table.spaceOf context.id
+    match processes.get? space with
     | some native =>
       let ⟨_, memory⟩ ← cells emu context.state
-      let memory ← applyJournal memory native (← writesOf context.id)
+      let memory ← applyJournal memory native (← writesIn fun id => table.spaceOf id == space)
       pure { context with state := { env := Bil.bind context.state.env memoryVar (.memory memory) } }
     | none =>
       match sharedValue with
@@ -1434,10 +1838,11 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
         let processes ← emu.processMemory.get
         let attached ← emu.engine.persistentMemory.get
         let parked ← emu.sharedMemory.get
-        let shared ← match (if processes.contains current then parked else attached) with
+        let table ← emu.taskTable.get
+        let shared ← match (if processes.contains (table.spaceOf current) then parked else attached) with
           | some memory => pure memory
           | none =>
-            match contexts.find? fun context => !processes.contains context.id with
+            match contexts.find? fun context => !processes.contains (table.spaceOf context.id) with
             | some context => nativeFromState emu context.state
             | none => nativeFromState emu (← emu.state.get)
         let workers ← active.mapM fun context => do
@@ -1494,7 +1899,7 @@ def runPreemptiveParallel (emu : Emu) (quantum : Nat := 100) : IO Nat := do
           emu.pendingRef.set context.pending
           emu.skipCode.set context.skip
         | none => pure ()
-        match (← emu.processMemory.get).get? current with
+        match (← emu.processMemory.get).get? (← spaceOf emu current) with
         | some native =>
           emu.sharedMemory.set (some shared)
           attachMemory emu native
