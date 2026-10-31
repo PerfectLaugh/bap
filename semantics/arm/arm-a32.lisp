@@ -169,10 +169,30 @@
 (defun SDIV (rd rn rm cnd _) (a32-cond cnd (a32-div s/ rd rn rm)))
 (defun QADD (rd rm rn cnd _) (a32-cond cnd (set$ rd (a32-saturating-add rm rn))))
 (defun QSUB (rd rm rn cnd _) (a32-cond cnd (set$ rd (a32-saturating-sub rm rn))))
+;; RN is doubled with saturation first, each of the saturations sets Q
+(defun QDADD (rd rm rn cnd _)
+  (a32-cond cnd
+    (let ((d (a32-saturating-add rn rn)))
+      (set$ rd (a32-saturating-add rm d)))))
+(defun QDSUB (rd rm rn cnd _)
+  (a32-cond cnd
+    (let ((d (a32-saturating-add rn rn)))
+      (set$ rd (a32-saturating-sub rm d)))))
 (defun SSAT (rd n rn sh cnd _)
   (a32-cond cnd (set$ rd (a32-ssat (a32-sat-shift rn sh) (+ n 1)))))
 (defun USAT (rd n rn sh cnd _)
   (a32-cond cnd (set$ rd (a32-usat (a32-sat-shift rn sh) n))))
+;; the halves are saturated to N+1 signed bits, or N unsigned bits
+(defun SSAT16 (rd n rn cnd _)
+  (a32-cond cnd
+    (let ((hi (a32-ssat (a32-half rn true) (+ n 1)))
+          (lo (a32-ssat (a32-half rn false) (+ n 1))))
+      (set$ rd (concat (cast-low 16 hi) (cast-low 16 lo))))))
+(defun USAT16 (rd n rn cnd _)
+  (a32-cond cnd
+    (let ((hi (a32-usat (a32-half rn true) n))
+          (lo (a32-usat (a32-half rn false) n)))
+      (set$ rd (concat (cast-low 16 hi) (cast-low 16 lo))))))
 (defun SMULBT (rd rn rm cnd _)
   (a32-cond cnd (set$ rd (* (a32-half rn false) (a32-half rm true)))))
 (defun SMULTB (rd rn rm cnd _)
@@ -182,6 +202,19 @@
 (defun SMMUL (rd rn rm cnd _) (a32-cond cnd (set$ rd (a32-mul-high rn rm))))
 (defun SMMLA (rd rn rm ra cnd _) (a32-cond cnd (set$ rd (a32-mla-high rn rm ra))))
 (defun SMMLS (rd rn rm ra cnd _) (a32-cond cnd (set$ rd (a32-mls-high rn rm ra))))
+;; the rounding forms add 0x80000000 before they take the upper word
+(defun a32-round-high (x) (cast-high 32 (+ x (cast-unsigned 64 0x80000000))))
+(defun SMMULR (rd rn rm cnd _)
+  (a32-cond cnd
+    (set$ rd (a32-round-high (* (cast-signed 64 rn) (cast-signed 64 rm))))))
+(defun SMMLAR (rd rn rm ra cnd _)
+  (a32-cond cnd
+    (set$ rd (a32-round-high (+ (concat ra (cast-unsigned 32 0))
+                                (* (cast-signed 64 rn) (cast-signed 64 rm)))))))
+(defun SMMLSR (rd rn rm ra cnd _)
+  (a32-cond cnd
+    (set$ rd (a32-round-high (- (concat ra (cast-unsigned 32 0))
+                                (* (cast-signed 64 rn) (cast-signed 64 rm)))))))
 (defun REVSH (rd rm cnd _) (a32-cond cnd (set$ rd (a32-revsh rm))))
 
 ;; the supervisor call, as in AArch64
@@ -300,6 +333,7 @@
 
 (defun MOVi (rd imm cnd _ s) (a32-logical second rd 0 (a32-imm imm) (a32-imm-carry imm) cnd s))
 (defun MOVr (rd rm cnd _ s) (a32-logical second rd 0 (a32-reg rm) CF cnd s))
+(defun MOVr_TC (rd rm cnd _ s) (MOVr rd rm cnd _ s))
 (defun MOVsi (rd rm sh cnd _ s) (a32-logical second rd 0 (a32-op2-rsi rm sh) (shifter-carry (a32-reg rm) sh) cnd s))
 (defun MOVsr (rd rm rs typ cnd _ s) (a32-logical second rd 0 (a32-op2-rsr rm rs typ) (a32-reg-carry rm rs typ) cnd s))
 (defun MVNi (rd imm cnd _ s) (a32-logical second-not rd 0 (a32-imm imm) (a32-imm-carry imm) cnd s))
@@ -424,10 +458,18 @@
 
 (defun BFC (rd rn mask cnd _) (a32-cond cnd (set$ rd (logand rn mask))))
 (defun BFI (rd rd0 rn mask cnd _) (a32-cond cnd (set$ rd (a32-bfi rd0 rn mask))))
+;; W is the width minus one, a field past the bit 31 is UNPREDICTABLE,
+;; and it is taken as undefined
 (defun UBFX (rd rn lsb w cnd _)
-  (a32-cond cnd (set$ rd (cast-unsigned 32 (extract (+ lsb w) lsb rn)))))
+  (a32-cond cnd
+    (if (> (+ lsb w) 31)
+        (intrinsic 'undefined-instruction :aborts)
+      (set$ rd (cast-unsigned 32 (extract (+ lsb w) lsb rn))))))
 (defun SBFX (rd rn lsb w cnd _)
-  (a32-cond cnd (set$ rd (cast-signed 32 (extract (+ lsb w) lsb rn)))))
+  (a32-cond cnd
+    (if (> (+ lsb w) 31)
+        (intrinsic 'undefined-instruction :aborts)
+      (set$ rd (cast-signed 32 (extract (+ lsb w) lsb rn))))))
 (defun RBIT (rd rm cnd _) (a32-cond cnd (set$ rd (reverse-bits rm))))
 (defun REV (rd rm cnd _) (a32-cond cnd (set$ rd (a32-rev rm))))
 (defun REV16 (rd rm cnd _) (a32-cond cnd (set$ rd (a32-rev16 rm))))
@@ -441,6 +483,22 @@
 (defun UXTAH (rd rn rm rot cnd _) (a32-cond cnd (set$ rd (+ rn (a32-uxth rm rot)))))
 (defun SXTAB (rd rn rm rot cnd _) (a32-cond cnd (set$ rd (+ rn (a32-sxtb rm rot)))))
 (defun SXTAH (rd rn rm rot cnd _) (a32-cond cnd (set$ rd (+ rn (a32-sxth rm rot)))))
+
+;; the extensions of the bytes 0 and 2 to the two halves
+
+(defun a32-sxtb16 (x rot)
+  (let ((v (a32-ror x rot)))
+    (concat (cast-signed 16 (extract 23 16 v)) (cast-signed 16 (extract 7 0 v)))))
+(defun a32-uxtb16 (x rot)
+  (let ((v (a32-ror x rot)))
+    (concat (cast-unsigned 16 (extract 23 16 v)) (cast-unsigned 16 (extract 7 0 v)))))
+(defun a32-add16 (x y)
+  (concat (+ (cast-high 16 x) (cast-high 16 y)) (+ (cast-low 16 x) (cast-low 16 y))))
+
+(defun SXTB16 (rd rm rot cnd _) (a32-cond cnd (set$ rd (a32-sxtb16 rm rot))))
+(defun UXTB16 (rd rm rot cnd _) (a32-cond cnd (set$ rd (a32-uxtb16 rm rot))))
+(defun SXTAB16 (rd rn rm rot cnd _) (a32-cond cnd (set$ rd (a32-add16 rn (a32-sxtb16 rm rot)))))
+(defun UXTAB16 (rd rn rm rot cnd _) (a32-cond cnd (set$ rd (a32-add16 rn (a32-uxtb16 rm rot)))))
 
 ;; multiplications, the flag-setting ones set only N and Z
 
@@ -490,9 +548,24 @@
   (a32-cond cnd (set$ rd (* (a32-half rn false) (a32-half rm false)))))
 (defun SMLABB (rd rn rm ra cnd _)
   (a32-cond cnd (set$ rd (a32-add-q (* (a32-half rn false) (a32-half rm false)) ra))))
+(defun SMLABT (rd rn rm ra cnd _)
+  (a32-cond cnd (set$ rd (a32-add-q (* (a32-half rn false) (a32-half rm true)) ra))))
+(defun SMLATB (rd rn rm ra cnd _)
+  (a32-cond cnd (set$ rd (a32-add-q (* (a32-half rn true) (a32-half rm false)) ra))))
+(defun SMLATT (rd rn rm ra cnd _)
+  (a32-cond cnd (set$ rd (a32-add-q (* (a32-half rn true) (a32-half rm true)) ra))))
 (defun SMLAWB (rd rn rm ra cnd _)
   (a32-cond cnd
     (set$ rd (a32-add-q (extract 47 16 (* (a32-s64 rn) (a32-s64 (a32-half rm false)))) ra))))
+(defun SMLAWT (rd rn rm ra cnd _)
+  (a32-cond cnd
+    (set$ rd (a32-add-q (extract 47 16 (* (a32-s64 rn) (a32-s64 (a32-half rm true)))) ra))))
+(defun SMULWB (rd rn rm cnd _)
+  (a32-cond cnd
+    (set$ rd (extract 47 16 (* (a32-s64 rn) (a32-s64 (a32-half rm false)))))))
+(defun SMULWT (rd rn rm cnd _)
+  (a32-cond cnd
+    (set$ rd (extract 47 16 (* (a32-s64 rn) (a32-s64 (a32-half rm true)))))))
 (defun SMUAD (rd rn rm cnd _)
   (a32-cond cnd
     (set$ rd (a32-sum-q (+ (a32-s64 (* (a32-half rn false) (a32-half rm false)))
@@ -502,6 +575,36 @@
     (set$ rd (a32-sum-q (+ (a32-s64 (* (a32-half rn false) (a32-half rm false)))
                            (a32-s64 (* (a32-half rn true) (a32-half rm true)))
                            (a32-s64 ra))))))
+
+;; the products of the bottom and of the top halves, the exchanging
+;; forms swap the halves of RM first
+
+(defun a32-mul-bb (x y) (a32-s64 (* (a32-half x false) (a32-half y false))))
+(defun a32-mul-tt (x y) (a32-s64 (* (a32-half x true) (a32-half y true))))
+(defun a32-swap16 (x) (concat (cast-low 16 x) (cast-high 16 x)))
+
+;; the differences of SMUSD can't overflow a word, the sum of SMUAD can
+(defun SMUADX (rd rn rm cnd _)
+  (a32-cond cnd
+    (let ((m (a32-swap16 rm)))
+      (set$ rd (a32-sum-q (+ (a32-mul-bb rn m) (a32-mul-tt rn m)))))))
+(defun SMUSD (rd rn rm cnd _)
+  (a32-cond cnd (set$ rd (cast-low 32 (- (a32-mul-bb rn rm) (a32-mul-tt rn rm))))))
+(defun SMUSDX (rd rn rm cnd _)
+  (a32-cond cnd
+    (let ((m (a32-swap16 rm)))
+      (set$ rd (cast-low 32 (- (a32-mul-bb rn m) (a32-mul-tt rn m)))))))
+(defun SMLADX (rd rn rm ra cnd _)
+  (a32-cond cnd
+    (let ((m (a32-swap16 rm)))
+      (set$ rd (a32-sum-q (+ (a32-mul-bb rn m) (a32-mul-tt rn m) (a32-s64 ra)))))))
+(defun SMLSD (rd rn rm ra cnd _)
+  (a32-cond cnd
+    (set$ rd (a32-sum-q (+ (- (a32-mul-bb rn rm) (a32-mul-tt rn rm)) (a32-s64 ra))))))
+(defun SMLSDX (rd rn rm ra cnd _)
+  (a32-cond cnd
+    (let ((m (a32-swap16 rm)))
+      (set$ rd (a32-sum-q (+ (- (a32-mul-bb rn m) (a32-mul-tt rn m)) (a32-s64 ra)))))))
 (defmacro a32-set64 (lo hi x)
   (let ((v x))
     (set$ lo (cast-low 32 v))
@@ -511,10 +614,49 @@
   (a32-cond cnd
     (a32-set64 lo hi (+ (concat hi0 lo0)
                         (a32-s64 (* (a32-half rn false) (a32-half rm true)))))))
+(defun SMLALBB (lo hi rn rm lo0 hi0 cnd _)
+  (a32-cond cnd
+    (a32-set64 lo hi (+ (concat hi0 lo0)
+                        (a32-s64 (* (a32-half rn false) (a32-half rm false)))))))
+(defun SMLALTB (lo hi rn rm lo0 hi0 cnd _)
+  (a32-cond cnd
+    (a32-set64 lo hi (+ (concat hi0 lo0)
+                        (a32-s64 (* (a32-half rn true) (a32-half rm false)))))))
+(defun SMLALTT (lo hi rn rm lo0 hi0 cnd _)
+  (a32-cond cnd
+    (a32-set64 lo hi (+ (concat hi0 lo0)
+                        (a32-s64 (* (a32-half rn true) (a32-half rm true)))))))
+(defun SMLALD (lo hi rn rm lo0 hi0 cnd _)
+  (a32-cond cnd
+    (a32-set64 lo hi (+ (concat hi0 lo0) (a32-mul-bb rn rm) (a32-mul-tt rn rm)))))
+(defun SMLALDX (lo hi rn rm lo0 hi0 cnd _)
+  (a32-cond cnd
+    (let ((m (a32-swap16 rm)))
+      (a32-set64 lo hi (+ (concat hi0 lo0) (a32-mul-bb rn m) (a32-mul-tt rn m))))))
+(defun SMLSLD (lo hi rn rm lo0 hi0 cnd _)
+  (a32-cond cnd
+    (a32-set64 lo hi (+ (concat hi0 lo0) (- (a32-mul-bb rn rm) (a32-mul-tt rn rm))))))
+(defun SMLSLDX (lo hi rn rm lo0 hi0 cnd _)
+  (a32-cond cnd
+    (let ((m (a32-swap16 rm)))
+      (a32-set64 lo hi (+ (concat hi0 lo0) (- (a32-mul-bb rn m) (a32-mul-tt rn m)))))))
+;; the sum of the product and the two words always fits 64 bits
+(defun UMAAL (lo hi rn rm lo0 hi0 cnd _)
+  (a32-cond cnd
+    (a32-set64 lo hi (+ (* (a32-u64 rn) (a32-u64 rm)) (a32-u64 lo0) (a32-u64 hi0)))))
+
+;; the sums of the absolute differences of the bytes
+(defun a32-abd8 (x y) (cast-unsigned 32 (a32-mux (> x y) (- x y) (- y x))))
+(defun a32-sad8 (x y)
+  (+ (a32-abd8 (extract 31 24 x) (extract 31 24 y))
+     (a32-abd8 (extract 23 16 x) (extract 23 16 y))
+     (a32-abd8 (extract 15 8 x) (extract 15 8 y))
+     (a32-abd8 (extract 7 0 x) (extract 7 0 y))))
+(defun USAD8 (rd rn rm cnd _) (a32-cond cnd (set$ rd (a32-sad8 rn rm))))
+(defun USADA8 (rd rn rm ra cnd _) (a32-cond cnd (set$ rd (+ ra (a32-sad8 rn rm)))))
 
 ;; the parallel saturating and halving additions and subtractions of
-;; the halfwords and the bytes, the GE flags are not modeled, so the
-;; ones that set them, e.g., SADD16, are not defined
+;; the halfwords and the bytes, the ones that set the GE flags are below
 
 (defun a32-lane-qadds (x y)
   (let ((e (word-width x))
@@ -601,6 +743,79 @@
 (defun UHASX (rd rn rm cnd _) (a32-par rd (a32-asx a32-lane-haddu a32-lane-hsubu rn rm) cnd))
 (defun UHSAX (rd rn rm cnd _) (a32-par rd (a32-sax a32-lane-haddu a32-lane-hsubu rn rm) cnd))
 
+;; the parallel additions and subtractions that set the GE flags: a
+;; lane is computed with one more bit, which is the GE bit of the lane
+;; on top of the result. It is set if a signed result is not negative,
+;; an unsigned sum carries out, or an unsigned difference doesn't
+;; borrow. A lane of a halfword sets two of the flags.
+
+(defun a32-ge-signed (r) (concat (lnot (msb r)) (cast-low (- (word-width r) 1) r)))
+(defun a32-lane-sadd (x y)
+  (let ((w (+ (word-width x) 1)))
+    (a32-ge-signed (+ (cast-signed w x) (cast-signed w y)))))
+(defun a32-lane-ssub (x y)
+  (let ((w (+ (word-width x) 1)))
+    (a32-ge-signed (- (cast-signed w x) (cast-signed w y)))))
+(defun a32-lane-uadd (x y)
+  (let ((w (+ (word-width x) 1)))
+    (+ (cast-unsigned w x) (cast-unsigned w y))))
+(defun a32-lane-usub (x y)
+  (let ((w (+ (word-width x) 1)))
+    (a32-ge-signed (- (cast-unsigned w x) (cast-unsigned w y)))))
+
+(defmacro a32-ge16 (rd hi lo cnd)
+  (a32-cond cnd
+    (let ((h hi) (l lo))
+      (set GE3 (msb h))
+      (set GE2 (msb h))
+      (set GE1 (msb l))
+      (set GE0 (msb l))
+      (set$ rd (concat (cast-low 16 h) (cast-low 16 l))))))
+
+(defmacro a32-ge-par16 (f rd x y cnd)
+  (a32-ge16 rd (f (cast-high 16 x) (cast-high 16 y)) (f (cast-low 16 x) (cast-low 16 y)) cnd))
+
+(defmacro a32-ge-par8 (f rd x y cnd)
+  (a32-cond cnd
+    (let ((b3 (f (extract 31 24 x) (extract 31 24 y)))
+          (b2 (f (extract 23 16 x) (extract 23 16 y)))
+          (b1 (f (extract 15 8 x) (extract 15 8 y)))
+          (b0 (f (extract 7 0 x) (extract 7 0 y))))
+      (set GE3 (msb b3))
+      (set GE2 (msb b2))
+      (set GE1 (msb b1))
+      (set GE0 (msb b0))
+      (set$ rd (concat (cast-low 8 b3) (cast-low 8 b2) (cast-low 8 b1) (cast-low 8 b0))))))
+
+(defun SADD16 (rd rn rm cnd _) (a32-ge-par16 a32-lane-sadd rd rn rm cnd))
+(defun SSUB16 (rd rn rm cnd _) (a32-ge-par16 a32-lane-ssub rd rn rm cnd))
+(defun UADD16 (rd rn rm cnd _) (a32-ge-par16 a32-lane-uadd rd rn rm cnd))
+(defun USUB16 (rd rn rm cnd _) (a32-ge-par16 a32-lane-usub rd rn rm cnd))
+(defun SADD8 (rd rn rm cnd _) (a32-ge-par8 a32-lane-sadd rd rn rm cnd))
+(defun SSUB8 (rd rn rm cnd _) (a32-ge-par8 a32-lane-ssub rd rn rm cnd))
+(defun UADD8 (rd rn rm cnd _) (a32-ge-par8 a32-lane-uadd rd rn rm cnd))
+(defun USUB8 (rd rn rm cnd _) (a32-ge-par8 a32-lane-usub rd rn rm cnd))
+(defun SASX (rd rn rm cnd _)
+  (a32-ge16 rd (a32-lane-sadd (cast-high 16 rn) (cast-low 16 rm))
+            (a32-lane-ssub (cast-low 16 rn) (cast-high 16 rm)) cnd))
+(defun SSAX (rd rn rm cnd _)
+  (a32-ge16 rd (a32-lane-ssub (cast-high 16 rn) (cast-low 16 rm))
+            (a32-lane-sadd (cast-low 16 rn) (cast-high 16 rm)) cnd))
+(defun UASX (rd rn rm cnd _)
+  (a32-ge16 rd (a32-lane-uadd (cast-high 16 rn) (cast-low 16 rm))
+            (a32-lane-usub (cast-low 16 rn) (cast-high 16 rm)) cnd))
+(defun USAX (rd rn rm cnd _)
+  (a32-ge16 rd (a32-lane-usub (cast-high 16 rn) (cast-low 16 rm))
+            (a32-lane-uadd (cast-low 16 rn) (cast-high 16 rm)) cnd))
+
+;; each byte is of RN if its GE flag is set and of RM otherwise
+(defun SEL (rd rn rm cnd _)
+  (a32-cond cnd
+    (set$ rd (concat (a32-mux GE3 (extract 31 24 rn) (extract 31 24 rm))
+                     (a32-mux GE2 (extract 23 16 rn) (extract 23 16 rm))
+                     (a32-mux GE1 (extract 15 8 rn) (extract 15 8 rm))
+                     (a32-mux GE0 (extract 7 0 rn) (extract 7 0 rm))))))
+
 ;; branches, BX and BLX may change the instruction set, which is
 ;; chosen by the label of the destination, the bit 0 of the register
 ;; is not a part of the address, as in the writes to PC
@@ -619,22 +834,48 @@
 (defun BLX_pred (rm cnd _)
   (a32-cond cnd (let ((dst rm)) (a32-link) (a32-write-pc dst))))
 
-;; the status register, the GE flags are not modeled and the mode bits
-;; read as the user mode
+;; Jazelle is taken as not implemented, in which case BXJ is BX
+(defun BXJ (rm cnd _) (a32-cond cnd (a32-write-pc rm)))
 
-(defun a32-apsr () (concat NF ZF CF VF QF (cast-unsigned 27 0x10)))
+;; the status register, the mode bits read as the user mode
+
+(defun a32-apsr ()
+  (concat NF ZF CF VF QF (cast-unsigned 7 0) GE3 GE2 GE1 GE0 (cast-unsigned 16 0x10)))
+
+(defun a32-msr-flags (mask x)
+  (if (= 0 (logand mask 8)) (empty)
+    (prog
+     (set NF (select 31 x))
+     (set ZF (select 30 x))
+     (set CF (select 29 x))
+     (set VF (select 28 x))
+     (set QF (select 27 x)))))
+
+(defun a32-msr-ge (mask x)
+  (if (= 0 (logand mask 4)) (empty)
+    (prog
+     (set GE3 (select 19 x))
+     (set GE2 (select 18 x))
+     (set GE1 (select 17 x))
+     (set GE0 (select 16 x)))))
 
 (defun a32-msr (mask x)
-  (when (/= 0 (logand mask 8))
-    (set NF (select 31 x))
-    (set ZF (select 30 x))
-    (set CF (select 29 x))
-    (set VF (select 28 x))
-    (set QF (select 27 x))))
+  "(a32-msr MASK X) writes the fields of APSR that MASK selects, the
+   bit 3 is of NZCVQ and the bit 2 of GE. A write to the other fields
+   is ignored in the user mode. The bit 4 selects SPSR, which the user
+   mode doesn't have, and it is UNPREDICTABLE there"
+  (if (/= 0 (logand mask 16))
+      (intrinsic 'undefined-instruction :aborts)
+    (prog (a32-msr-flags mask x) (a32-msr-ge mask x))))
 
 (defun MRS (rd cnd _) (a32-cond cnd (set$ rd (a32-apsr))))
-(defun MSR (mask rn cnd _) (a32-cond cnd (a32-msr mask rn)))
-(defun MSRi (mask imm cnd _) (a32-cond cnd (a32-msr mask (a32-imm imm))))
+
+;; a write to none of the fields has no effect under any condition
+(defmacro a32-msr-when (mask x cnd)
+  (if (= 0 (logand mask 0x1c)) (empty) (a32-cond cnd (a32-msr mask x))))
+
+(defun MSR (mask rn cnd _) (a32-msr-when mask rn cnd))
+(defun MSRi (mask imm cnd _) (a32-msr-when mask (a32-imm imm) cnd))
 
 ;; the hints, the barriers and the instructions that have no effect in
 ;; the user mode
@@ -650,6 +891,20 @@
 (defun PLIi12 (_ _) (empty))
 (defun PLIrs (_ _ _) (empty))
 (defun CLREX () (empty))
+;; the hint to a debugger, which has no architectural effect
+(defun DBG (_ _ _) (empty))
+
+;; these take an exception, which is not modeled beyond its intrinsic:
+;; TRAP is the encoding of UDF that LLVM uses for its trap
+(defun BKPT (imm) (intrinsic 'breakpoint imm :aborts))
+(defun UDF (_) (intrinsic 'undefined-instruction :aborts))
+(defun TRAP () (intrinsic 'undefined-instruction :aborts))
+
+;; The data is little-endian in this model, so SETEND LE has no effect.
+;; The state of SETEND BE can't be represented, and it doesn't lift.
+(defun SETEND (e)
+  (case e
+    0 (empty)))
 
 ;; the moves to the coprocessors, see [write-coprocessor], and MCR2,
 ;; whose coprocessors are not modeled

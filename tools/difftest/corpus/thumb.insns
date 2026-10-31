@@ -366,3 +366,624 @@ f2 ff 25 41  # vuzp.8 d20, d21
 #   pc 8448 / 85f2
 0d ee 50 1f ; 1d ee 50 2f # mcr p15, 0, r1, c13, c0, 2|mrc p15, 0, r2, c13, c0, 2
 07 ee ba 1f # mcr p15, 0, r1, c7, c10, 5
+
+# the instructions of Advanced SIMD and of the core that the lists of the
+# shapes don't reach, the structures, the lanes and the limits of the shifts
+
+a5 f9 0f 1d  # vld2.8 {d1[], d2[]}, [r5]
+a5 f9 2f 1d  # vld2.8 {d1[], d3[]}, [r5]
+a5 f9 0f 1e  # vld3.8 {d1[], d2[], d3[]}, [r5]
+a5 f9 2f 1e  # vld3.8 {d1[], d3[], d5[]}, [r5]
+a5 f9 0f 1f  # vld4.8 {d1[], d2[], d3[], d4[]}, [r5]
+a5 f9 2f 1f  # vld4.8 {d1[], d3[], d5[], d7[]}, [r5]
+25 f9 0f 14  # vld3.8 {d1, d2, d3}, [r5]
+25 f9 0f 15  # vld3.8 {d1, d3, d5}, [r5]
+25 f9 0f 10  # vld4.8 {d1, d2, d3, d4}, [r5]
+25 f9 0f 11  # vld4.8 {d1, d3, d5, d7}, [r5]
+a5 f9 2f 11  # vld2.8 {d1[1], d2[1]}, [r5]
+a5 f9 2f 12  # vld3.8 {d1[1], d2[1], d3[1]}, [r5]
+a5 f9 2f 13  # vld4.8 {d1[1], d2[1], d3[1], d4[1]}, [r5]
+05 f9 0f 14  # vst3.8 {d1, d2, d3}, [r5]
+05 f9 0f 15  # vst3.8 {d1, d3, d5}, [r5]
+05 f9 0f 10  # vst4.8 {d1, d2, d3, d4}, [r5]
+05 f9 0f 11  # vst4.8 {d1, d3, d5, d7}, [r5]
+85 f9 2f 11  # vst2.8 {d1[1], d2[1]}, [r5]
+85 f9 2f 12  # vst3.8 {d1[1], d2[1], d3[1]}, [r5]
+85 f9 2f 13  # vst4.8 {d1[1], d2[1], d3[1], d4[1]}, [r5]
+a5 f9 0d 1d  # vld2.8 {d1[], d2[]}, [r5]!
+a5 f9 2d 1d  # vld2.8 {d1[], d3[]}, [r5]!
+a5 f9 0d 1e  # vld3.8 {d1[], d2[], d3[]}, [r5]!
+a5 f9 2d 1e  # vld3.8 {d1[], d3[], d5[]}, [r5]!
+a5 f9 0d 1f  # vld4.8 {d1[], d2[], d3[], d4[]}, [r5]!
+a5 f9 2d 1f  # vld4.8 {d1[], d3[], d5[], d7[]}, [r5]!
+25 f9 0d 14  # vld3.8 {d1, d2, d3}, [r5]!
+25 f9 0d 15  # vld3.8 {d1, d3, d5}, [r5]!
+25 f9 0d 10  # vld4.8 {d1, d2, d3, d4}, [r5]!
+25 f9 0d 11  # vld4.8 {d1, d3, d5, d7}, [r5]!
+a5 f9 2d 11  # vld2.8 {d1[1], d2[1]}, [r5]!
+a5 f9 2d 12  # vld3.8 {d1[1], d2[1], d3[1]}, [r5]!
+a5 f9 2d 13  # vld4.8 {d1[1], d2[1], d3[1], d4[1]}, [r5]!
+05 f9 0d 14  # vst3.8 {d1, d2, d3}, [r5]!
+05 f9 0d 15  # vst3.8 {d1, d3, d5}, [r5]!
+05 f9 0d 10  # vst4.8 {d1, d2, d3, d4}, [r5]!
+05 f9 0d 11  # vst4.8 {d1, d3, d5, d7}, [r5]!
+85 f9 2d 11  # vst2.8 {d1[1], d2[1]}, [r5]!
+85 f9 2d 12  # vst3.8 {d1[1], d2[1], d3[1]}, [r5]!
+85 f9 2d 13  # vst4.8 {d1[1], d2[1], d3[1], d4[1]}, [r5]!
+a5 f9 06 1d  # vld2.8 {d1[], d2[]}, [r5], r6
+a5 f9 26 1d  # vld2.8 {d1[], d3[]}, [r5], r6
+a5 f9 06 1e  # vld3.8 {d1[], d2[], d3[]}, [r5], r6
+a5 f9 26 1e  # vld3.8 {d1[], d3[], d5[]}, [r5], r6
+a5 f9 06 1f  # vld4.8 {d1[], d2[], d3[], d4[]}, [r5], r6
+a5 f9 26 1f  # vld4.8 {d1[], d3[], d5[], d7[]}, [r5], r6
+25 f9 06 14  # vld3.8 {d1, d2, d3}, [r5], r6
+25 f9 06 15  # vld3.8 {d1, d3, d5}, [r5], r6
+25 f9 06 10  # vld4.8 {d1, d2, d3, d4}, [r5], r6
+25 f9 06 11  # vld4.8 {d1, d3, d5, d7}, [r5], r6
+a5 f9 26 11  # vld2.8 {d1[1], d2[1]}, [r5], r6
+a5 f9 26 12  # vld3.8 {d1[1], d2[1], d3[1]}, [r5], r6
+a5 f9 26 13  # vld4.8 {d1[1], d2[1], d3[1], d4[1]}, [r5], r6
+05 f9 06 14  # vst3.8 {d1, d2, d3}, [r5], r6
+05 f9 06 15  # vst3.8 {d1, d3, d5}, [r5], r6
+05 f9 06 10  # vst4.8 {d1, d2, d3, d4}, [r5], r6
+05 f9 06 11  # vst4.8 {d1, d3, d5, d7}, [r5], r6
+85 f9 26 11  # vst2.8 {d1[1], d2[1]}, [r5], r6
+85 f9 26 12  # vst3.8 {d1[1], d2[1], d3[1]}, [r5], r6
+85 f9 26 13  # vst4.8 {d1[1], d2[1], d3[1], d4[1]}, [r5], r6
+a5 f9 4f 1d  # vld2.16 {d1[], d2[]}, [r5]
+a5 f9 6f 1d  # vld2.16 {d1[], d3[]}, [r5]
+a5 f9 4f 1e  # vld3.16 {d1[], d2[], d3[]}, [r5]
+a5 f9 6f 1e  # vld3.16 {d1[], d3[], d5[]}, [r5]
+a5 f9 4f 1f  # vld4.16 {d1[], d2[], d3[], d4[]}, [r5]
+a5 f9 6f 1f  # vld4.16 {d1[], d3[], d5[], d7[]}, [r5]
+25 f9 4f 14  # vld3.16 {d1, d2, d3}, [r5]
+25 f9 4f 15  # vld3.16 {d1, d3, d5}, [r5]
+25 f9 4f 10  # vld4.16 {d1, d2, d3, d4}, [r5]
+25 f9 4f 11  # vld4.16 {d1, d3, d5, d7}, [r5]
+a5 f9 4f 15  # vld2.16 {d1[1], d2[1]}, [r5]
+a5 f9 6f 15  # vld2.16 {d1[1], d3[1]}, [r5]
+a5 f9 4f 16  # vld3.16 {d1[1], d2[1], d3[1]}, [r5]
+a5 f9 6f 16  # vld3.16 {d1[1], d3[1], d5[1]}, [r5]
+a5 f9 4f 17  # vld4.16 {d1[1], d2[1], d3[1], d4[1]}, [r5]
+a5 f9 6f 17  # vld4.16 {d1[1], d3[1], d5[1], d7[1]}, [r5]
+05 f9 4f 14  # vst3.16 {d1, d2, d3}, [r5]
+05 f9 4f 15  # vst3.16 {d1, d3, d5}, [r5]
+05 f9 4f 10  # vst4.16 {d1, d2, d3, d4}, [r5]
+05 f9 4f 11  # vst4.16 {d1, d3, d5, d7}, [r5]
+85 f9 4f 15  # vst2.16 {d1[1], d2[1]}, [r5]
+85 f9 6f 15  # vst2.16 {d1[1], d3[1]}, [r5]
+85 f9 4f 16  # vst3.16 {d1[1], d2[1], d3[1]}, [r5]
+85 f9 6f 16  # vst3.16 {d1[1], d3[1], d5[1]}, [r5]
+85 f9 4f 17  # vst4.16 {d1[1], d2[1], d3[1], d4[1]}, [r5]
+85 f9 6f 17  # vst4.16 {d1[1], d3[1], d5[1], d7[1]}, [r5]
+a5 f9 4d 1d  # vld2.16 {d1[], d2[]}, [r5]!
+a5 f9 6d 1d  # vld2.16 {d1[], d3[]}, [r5]!
+a5 f9 4d 1e  # vld3.16 {d1[], d2[], d3[]}, [r5]!
+a5 f9 6d 1e  # vld3.16 {d1[], d3[], d5[]}, [r5]!
+a5 f9 4d 1f  # vld4.16 {d1[], d2[], d3[], d4[]}, [r5]!
+a5 f9 6d 1f  # vld4.16 {d1[], d3[], d5[], d7[]}, [r5]!
+25 f9 4d 14  # vld3.16 {d1, d2, d3}, [r5]!
+25 f9 4d 15  # vld3.16 {d1, d3, d5}, [r5]!
+25 f9 4d 10  # vld4.16 {d1, d2, d3, d4}, [r5]!
+25 f9 4d 11  # vld4.16 {d1, d3, d5, d7}, [r5]!
+a5 f9 4d 15  # vld2.16 {d1[1], d2[1]}, [r5]!
+a5 f9 6d 15  # vld2.16 {d1[1], d3[1]}, [r5]!
+a5 f9 4d 16  # vld3.16 {d1[1], d2[1], d3[1]}, [r5]!
+a5 f9 6d 16  # vld3.16 {d1[1], d3[1], d5[1]}, [r5]!
+a5 f9 4d 17  # vld4.16 {d1[1], d2[1], d3[1], d4[1]}, [r5]!
+a5 f9 6d 17  # vld4.16 {d1[1], d3[1], d5[1], d7[1]}, [r5]!
+05 f9 4d 14  # vst3.16 {d1, d2, d3}, [r5]!
+05 f9 4d 15  # vst3.16 {d1, d3, d5}, [r5]!
+05 f9 4d 10  # vst4.16 {d1, d2, d3, d4}, [r5]!
+05 f9 4d 11  # vst4.16 {d1, d3, d5, d7}, [r5]!
+85 f9 4d 15  # vst2.16 {d1[1], d2[1]}, [r5]!
+85 f9 6d 15  # vst2.16 {d1[1], d3[1]}, [r5]!
+85 f9 4d 16  # vst3.16 {d1[1], d2[1], d3[1]}, [r5]!
+85 f9 6d 16  # vst3.16 {d1[1], d3[1], d5[1]}, [r5]!
+85 f9 4d 17  # vst4.16 {d1[1], d2[1], d3[1], d4[1]}, [r5]!
+85 f9 6d 17  # vst4.16 {d1[1], d3[1], d5[1], d7[1]}, [r5]!
+a5 f9 46 1d  # vld2.16 {d1[], d2[]}, [r5], r6
+a5 f9 66 1d  # vld2.16 {d1[], d3[]}, [r5], r6
+a5 f9 46 1e  # vld3.16 {d1[], d2[], d3[]}, [r5], r6
+a5 f9 66 1e  # vld3.16 {d1[], d3[], d5[]}, [r5], r6
+a5 f9 46 1f  # vld4.16 {d1[], d2[], d3[], d4[]}, [r5], r6
+a5 f9 66 1f  # vld4.16 {d1[], d3[], d5[], d7[]}, [r5], r6
+25 f9 46 14  # vld3.16 {d1, d2, d3}, [r5], r6
+25 f9 46 15  # vld3.16 {d1, d3, d5}, [r5], r6
+25 f9 46 10  # vld4.16 {d1, d2, d3, d4}, [r5], r6
+25 f9 46 11  # vld4.16 {d1, d3, d5, d7}, [r5], r6
+a5 f9 46 15  # vld2.16 {d1[1], d2[1]}, [r5], r6
+a5 f9 66 15  # vld2.16 {d1[1], d3[1]}, [r5], r6
+a5 f9 46 16  # vld3.16 {d1[1], d2[1], d3[1]}, [r5], r6
+a5 f9 66 16  # vld3.16 {d1[1], d3[1], d5[1]}, [r5], r6
+a5 f9 46 17  # vld4.16 {d1[1], d2[1], d3[1], d4[1]}, [r5], r6
+a5 f9 66 17  # vld4.16 {d1[1], d3[1], d5[1], d7[1]}, [r5], r6
+05 f9 46 14  # vst3.16 {d1, d2, d3}, [r5], r6
+05 f9 46 15  # vst3.16 {d1, d3, d5}, [r5], r6
+05 f9 46 10  # vst4.16 {d1, d2, d3, d4}, [r5], r6
+05 f9 46 11  # vst4.16 {d1, d3, d5, d7}, [r5], r6
+85 f9 46 15  # vst2.16 {d1[1], d2[1]}, [r5], r6
+85 f9 66 15  # vst2.16 {d1[1], d3[1]}, [r5], r6
+85 f9 46 16  # vst3.16 {d1[1], d2[1], d3[1]}, [r5], r6
+85 f9 66 16  # vst3.16 {d1[1], d3[1], d5[1]}, [r5], r6
+85 f9 46 17  # vst4.16 {d1[1], d2[1], d3[1], d4[1]}, [r5], r6
+85 f9 66 17  # vst4.16 {d1[1], d3[1], d5[1], d7[1]}, [r5], r6
+a5 f9 8f 1d  # vld2.32 {d1[], d2[]}, [r5]
+a5 f9 af 1d  # vld2.32 {d1[], d3[]}, [r5]
+a5 f9 8f 1e  # vld3.32 {d1[], d2[], d3[]}, [r5]
+a5 f9 af 1e  # vld3.32 {d1[], d3[], d5[]}, [r5]
+a5 f9 8f 1f  # vld4.32 {d1[], d2[], d3[], d4[]}, [r5]
+a5 f9 af 1f  # vld4.32 {d1[], d3[], d5[], d7[]}, [r5]
+25 f9 8f 14  # vld3.32 {d1, d2, d3}, [r5]
+25 f9 8f 15  # vld3.32 {d1, d3, d5}, [r5]
+25 f9 8f 10  # vld4.32 {d1, d2, d3, d4}, [r5]
+25 f9 8f 11  # vld4.32 {d1, d3, d5, d7}, [r5]
+a5 f9 8f 19  # vld2.32 {d1[1], d2[1]}, [r5]
+a5 f9 cf 19  # vld2.32 {d1[1], d3[1]}, [r5]
+a5 f9 8f 1a  # vld3.32 {d1[1], d2[1], d3[1]}, [r5]
+a5 f9 cf 1a  # vld3.32 {d1[1], d3[1], d5[1]}, [r5]
+a5 f9 8f 1b  # vld4.32 {d1[1], d2[1], d3[1], d4[1]}, [r5]
+a5 f9 cf 1b  # vld4.32 {d1[1], d3[1], d5[1], d7[1]}, [r5]
+05 f9 8f 14  # vst3.32 {d1, d2, d3}, [r5]
+05 f9 8f 15  # vst3.32 {d1, d3, d5}, [r5]
+05 f9 8f 10  # vst4.32 {d1, d2, d3, d4}, [r5]
+05 f9 8f 11  # vst4.32 {d1, d3, d5, d7}, [r5]
+85 f9 8f 19  # vst2.32 {d1[1], d2[1]}, [r5]
+85 f9 cf 19  # vst2.32 {d1[1], d3[1]}, [r5]
+85 f9 8f 1a  # vst3.32 {d1[1], d2[1], d3[1]}, [r5]
+85 f9 cf 1a  # vst3.32 {d1[1], d3[1], d5[1]}, [r5]
+85 f9 8f 1b  # vst4.32 {d1[1], d2[1], d3[1], d4[1]}, [r5]
+85 f9 cf 1b  # vst4.32 {d1[1], d3[1], d5[1], d7[1]}, [r5]
+a5 f9 8d 1d  # vld2.32 {d1[], d2[]}, [r5]!
+a5 f9 ad 1d  # vld2.32 {d1[], d3[]}, [r5]!
+a5 f9 8d 1e  # vld3.32 {d1[], d2[], d3[]}, [r5]!
+a5 f9 ad 1e  # vld3.32 {d1[], d3[], d5[]}, [r5]!
+a5 f9 8d 1f  # vld4.32 {d1[], d2[], d3[], d4[]}, [r5]!
+a5 f9 ad 1f  # vld4.32 {d1[], d3[], d5[], d7[]}, [r5]!
+25 f9 8d 14  # vld3.32 {d1, d2, d3}, [r5]!
+25 f9 8d 15  # vld3.32 {d1, d3, d5}, [r5]!
+25 f9 8d 10  # vld4.32 {d1, d2, d3, d4}, [r5]!
+25 f9 8d 11  # vld4.32 {d1, d3, d5, d7}, [r5]!
+a5 f9 8d 19  # vld2.32 {d1[1], d2[1]}, [r5]!
+a5 f9 cd 19  # vld2.32 {d1[1], d3[1]}, [r5]!
+a5 f9 8d 1a  # vld3.32 {d1[1], d2[1], d3[1]}, [r5]!
+a5 f9 cd 1a  # vld3.32 {d1[1], d3[1], d5[1]}, [r5]!
+a5 f9 8d 1b  # vld4.32 {d1[1], d2[1], d3[1], d4[1]}, [r5]!
+a5 f9 cd 1b  # vld4.32 {d1[1], d3[1], d5[1], d7[1]}, [r5]!
+05 f9 8d 14  # vst3.32 {d1, d2, d3}, [r5]!
+05 f9 8d 15  # vst3.32 {d1, d3, d5}, [r5]!
+05 f9 8d 10  # vst4.32 {d1, d2, d3, d4}, [r5]!
+05 f9 8d 11  # vst4.32 {d1, d3, d5, d7}, [r5]!
+85 f9 8d 19  # vst2.32 {d1[1], d2[1]}, [r5]!
+85 f9 cd 19  # vst2.32 {d1[1], d3[1]}, [r5]!
+85 f9 8d 1a  # vst3.32 {d1[1], d2[1], d3[1]}, [r5]!
+85 f9 cd 1a  # vst3.32 {d1[1], d3[1], d5[1]}, [r5]!
+85 f9 8d 1b  # vst4.32 {d1[1], d2[1], d3[1], d4[1]}, [r5]!
+85 f9 cd 1b  # vst4.32 {d1[1], d3[1], d5[1], d7[1]}, [r5]!
+a5 f9 86 1d  # vld2.32 {d1[], d2[]}, [r5], r6
+a5 f9 a6 1d  # vld2.32 {d1[], d3[]}, [r5], r6
+a5 f9 86 1e  # vld3.32 {d1[], d2[], d3[]}, [r5], r6
+a5 f9 a6 1e  # vld3.32 {d1[], d3[], d5[]}, [r5], r6
+a5 f9 86 1f  # vld4.32 {d1[], d2[], d3[], d4[]}, [r5], r6
+a5 f9 a6 1f  # vld4.32 {d1[], d3[], d5[], d7[]}, [r5], r6
+25 f9 86 14  # vld3.32 {d1, d2, d3}, [r5], r6
+25 f9 86 15  # vld3.32 {d1, d3, d5}, [r5], r6
+25 f9 86 10  # vld4.32 {d1, d2, d3, d4}, [r5], r6
+25 f9 86 11  # vld4.32 {d1, d3, d5, d7}, [r5], r6
+a5 f9 86 19  # vld2.32 {d1[1], d2[1]}, [r5], r6
+a5 f9 c6 19  # vld2.32 {d1[1], d3[1]}, [r5], r6
+a5 f9 86 1a  # vld3.32 {d1[1], d2[1], d3[1]}, [r5], r6
+a5 f9 c6 1a  # vld3.32 {d1[1], d3[1], d5[1]}, [r5], r6
+a5 f9 86 1b  # vld4.32 {d1[1], d2[1], d3[1], d4[1]}, [r5], r6
+a5 f9 c6 1b  # vld4.32 {d1[1], d3[1], d5[1], d7[1]}, [r5], r6
+05 f9 86 14  # vst3.32 {d1, d2, d3}, [r5], r6
+05 f9 86 15  # vst3.32 {d1, d3, d5}, [r5], r6
+05 f9 86 10  # vst4.32 {d1, d2, d3, d4}, [r5], r6
+05 f9 86 11  # vst4.32 {d1, d3, d5, d7}, [r5], r6
+85 f9 86 19  # vst2.32 {d1[1], d2[1]}, [r5], r6
+85 f9 c6 19  # vst2.32 {d1[1], d3[1]}, [r5], r6
+85 f9 86 1a  # vst3.32 {d1[1], d2[1], d3[1]}, [r5], r6
+85 f9 c6 1a  # vst3.32 {d1[1], d3[1], d5[1]}, [r5], r6
+85 f9 86 1b  # vst4.32 {d1[1], d2[1], d3[1], d4[1]}, [r5], r6
+85 f9 c6 1b  # vst4.32 {d1[1], d3[1], d5[1], d7[1]}, [r5], r6
+95 ec 05 1b  # fldmiax r5, {d1, d2}
+b5 ec 05 1b  # fldmiax r5!, {d1, d2}
+35 ed 05 1b  # fldmdbx r5!, {d1, d2}
+85 ec 05 1b  # fstmiax r5, {d1, d2}
+a5 ec 05 1b  # fstmiax r5!, {d1, d2}
+25 ed 05 1b  # fstmdbx r5!, {d1, d2}
+95 ec 12 0a  # vldmia r5, {s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17}
+b5 ec 12 0a  # vldmia r5!, {s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17}
+35 ed 12 0a  # vldmdb r5!, {s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17}
+85 ec 12 0a  # vstmia r5, {s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17}
+a5 ec 12 0a  # vstmia r5!, {s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17}
+25 ed 12 0a  # vstmdb r5!, {s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17}
+82 ef 03 25  # vabal.s8 q1, d2, d3
+b0 ff 02 12  # vpaddl.s8 d1, d2
+b0 ff 44 22  # vpaddl.s8 q1, q2
+b0 ff 02 16  # vpadal.s8 d1, d2
+b0 ff 44 26  # vpadal.s8 q1, q2
+89 ef 12 2a  # vshll.s8 q1, d2, #1
+8f ef 12 2a  # vshll.s8 q1, d2, #7
+92 ef 03 29  # vqdmlal.s16 q1, d2, d3
+92 ef 03 25  # vabal.s16 q1, d2, d3
+b4 ff 02 12  # vpaddl.s16 d1, d2
+b4 ff 44 22  # vpaddl.s16 q1, q2
+b4 ff 02 16  # vpadal.s16 d1, d2
+b4 ff 44 26  # vpadal.s16 q1, q2
+91 ef 12 2a  # vshll.s16 q1, d2, #1
+9f ef 12 2a  # vshll.s16 q1, d2, #15
+a2 ef 03 29  # vqdmlal.s32 q1, d2, d3
+a2 ef 03 25  # vabal.s32 q1, d2, d3
+b8 ff 02 12  # vpaddl.s32 d1, d2
+b8 ff 44 22  # vpaddl.s32 q1, q2
+b8 ff 02 16  # vpadal.s32 d1, d2
+b8 ff 44 26  # vpadal.s32 q1, q2
+a1 ef 12 2a  # vshll.s32 q1, d2, #1
+bf ef 12 2a  # vshll.s32 q1, d2, #31
+82 ff 03 25  # vabal.u8 q1, d2, d3
+b0 ff 82 12  # vpaddl.u8 d1, d2
+b0 ff c4 22  # vpaddl.u8 q1, q2
+b0 ff 82 16  # vpadal.u8 d1, d2
+b0 ff c4 26  # vpadal.u8 q1, q2
+89 ff 12 2a  # vshll.u8 q1, d2, #1
+8f ff 12 2a  # vshll.u8 q1, d2, #7
+92 ff 03 25  # vabal.u16 q1, d2, d3
+b4 ff 82 12  # vpaddl.u16 d1, d2
+b4 ff c4 22  # vpaddl.u16 q1, q2
+b4 ff 82 16  # vpadal.u16 d1, d2
+b4 ff c4 26  # vpadal.u16 q1, q2
+91 ff 12 2a  # vshll.u16 q1, d2, #1
+9f ff 12 2a  # vshll.u16 q1, d2, #15
+a2 ff 03 25  # vabal.u32 q1, d2, d3
+b8 ff 82 12  # vpaddl.u32 d1, d2
+b8 ff c4 22  # vpaddl.u32 q1, q2
+b8 ff 82 16  # vpadal.u32 d1, d2
+b8 ff c4 26  # vpadal.u32 q1, q2
+a1 ff 12 2a  # vshll.u32 q1, d2, #1
+bf ff 12 2a  # vshll.u32 q1, d2, #31
+03 ef 02 15  # vrshl.s8 d1, d2, d3
+06 ef 44 25  # vrshl.s8 q1, q2, q3
+03 ef 12 14  # vqshl.s8 d1, d2, d3
+06 ef 54 24  # vqshl.s8 q1, q2, q3
+03 ef 12 15  # vqrshl.s8 d1, d2, d3
+06 ef 54 25  # vqrshl.s8 q1, q2, q3
+89 ef 12 17  # vqshl.s8 d1, d2, #1
+89 ef 54 27  # vqshl.s8 q1, q2, #1
+89 ff 12 16  # vqshlu.s8 d1, d2, #1
+89 ff 54 26  # vqshlu.s8 q1, q2, #1
+8f ef 12 17  # vqshl.s8 d1, d2, #7
+8f ef 54 27  # vqshl.s8 q1, q2, #7
+8f ff 12 16  # vqshlu.s8 d1, d2, #7
+8f ff 54 26  # vqshlu.s8 q1, q2, #7
+8f ef 12 13  # vrsra.s8 d1, d2, #1
+8f ef 54 23  # vrsra.s8 q1, q2, #1
+88 ef 12 13  # vrsra.s8 d1, d2, #8
+88 ef 54 23  # vrsra.s8 q1, q2, #8
+13 ef 02 15  # vrshl.s16 d1, d2, d3
+16 ef 44 25  # vrshl.s16 q1, q2, q3
+13 ef 12 14  # vqshl.s16 d1, d2, d3
+16 ef 54 24  # vqshl.s16 q1, q2, q3
+13 ef 12 15  # vqrshl.s16 d1, d2, d3
+16 ef 54 25  # vqrshl.s16 q1, q2, q3
+91 ef 12 17  # vqshl.s16 d1, d2, #1
+91 ef 54 27  # vqshl.s16 q1, q2, #1
+91 ff 12 16  # vqshlu.s16 d1, d2, #1
+91 ff 54 26  # vqshlu.s16 q1, q2, #1
+9f ef 12 17  # vqshl.s16 d1, d2, #15
+9f ef 54 27  # vqshl.s16 q1, q2, #15
+9f ff 12 16  # vqshlu.s16 d1, d2, #15
+9f ff 54 26  # vqshlu.s16 q1, q2, #15
+9f ef 12 13  # vrsra.s16 d1, d2, #1
+9f ef 54 23  # vrsra.s16 q1, q2, #1
+90 ef 12 13  # vrsra.s16 d1, d2, #16
+90 ef 54 23  # vrsra.s16 q1, q2, #16
+23 ef 02 15  # vrshl.s32 d1, d2, d3
+26 ef 44 25  # vrshl.s32 q1, q2, q3
+23 ef 12 14  # vqshl.s32 d1, d2, d3
+26 ef 54 24  # vqshl.s32 q1, q2, q3
+23 ef 12 15  # vqrshl.s32 d1, d2, d3
+26 ef 54 25  # vqrshl.s32 q1, q2, q3
+a1 ef 12 17  # vqshl.s32 d1, d2, #1
+a1 ef 54 27  # vqshl.s32 q1, q2, #1
+a1 ff 12 16  # vqshlu.s32 d1, d2, #1
+a1 ff 54 26  # vqshlu.s32 q1, q2, #1
+bf ef 12 17  # vqshl.s32 d1, d2, #31
+bf ef 54 27  # vqshl.s32 q1, q2, #31
+bf ff 12 16  # vqshlu.s32 d1, d2, #31
+bf ff 54 26  # vqshlu.s32 q1, q2, #31
+bf ef 12 13  # vrsra.s32 d1, d2, #1
+bf ef 54 23  # vrsra.s32 q1, q2, #1
+a0 ef 12 13  # vrsra.s32 d1, d2, #32
+a0 ef 54 23  # vrsra.s32 q1, q2, #32
+33 ef 02 15  # vrshl.s64 d1, d2, d3
+36 ef 44 25  # vrshl.s64 q1, q2, q3
+33 ef 12 14  # vqshl.s64 d1, d2, d3
+36 ef 54 24  # vqshl.s64 q1, q2, q3
+33 ef 12 15  # vqrshl.s64 d1, d2, d3
+36 ef 54 25  # vqrshl.s64 q1, q2, q3
+81 ef 92 17  # vqshl.s64 d1, d2, #1
+81 ef d4 27  # vqshl.s64 q1, q2, #1
+81 ff 92 16  # vqshlu.s64 d1, d2, #1
+81 ff d4 26  # vqshlu.s64 q1, q2, #1
+bf ef 92 17  # vqshl.s64 d1, d2, #63
+bf ef d4 27  # vqshl.s64 q1, q2, #63
+bf ff 92 16  # vqshlu.s64 d1, d2, #63
+bf ff d4 26  # vqshlu.s64 q1, q2, #63
+bf ef 92 13  # vrsra.s64 d1, d2, #1
+bf ef d4 23  # vrsra.s64 q1, q2, #1
+80 ef 92 13  # vrsra.s64 d1, d2, #64
+80 ef d4 23  # vrsra.s64 q1, q2, #64
+03 ff 02 15  # vrshl.u8 d1, d2, d3
+06 ff 44 25  # vrshl.u8 q1, q2, q3
+03 ff 12 14  # vqshl.u8 d1, d2, d3
+06 ff 54 24  # vqshl.u8 q1, q2, q3
+03 ff 12 15  # vqrshl.u8 d1, d2, d3
+06 ff 54 25  # vqrshl.u8 q1, q2, q3
+89 ff 12 17  # vqshl.u8 d1, d2, #1
+89 ff 54 27  # vqshl.u8 q1, q2, #1
+8f ff 12 17  # vqshl.u8 d1, d2, #7
+8f ff 54 27  # vqshl.u8 q1, q2, #7
+8f ff 12 13  # vrsra.u8 d1, d2, #1
+8f ff 54 23  # vrsra.u8 q1, q2, #1
+88 ff 12 13  # vrsra.u8 d1, d2, #8
+88 ff 54 23  # vrsra.u8 q1, q2, #8
+13 ff 02 15  # vrshl.u16 d1, d2, d3
+16 ff 44 25  # vrshl.u16 q1, q2, q3
+13 ff 12 14  # vqshl.u16 d1, d2, d3
+16 ff 54 24  # vqshl.u16 q1, q2, q3
+13 ff 12 15  # vqrshl.u16 d1, d2, d3
+16 ff 54 25  # vqrshl.u16 q1, q2, q3
+91 ff 12 17  # vqshl.u16 d1, d2, #1
+91 ff 54 27  # vqshl.u16 q1, q2, #1
+9f ff 12 17  # vqshl.u16 d1, d2, #15
+9f ff 54 27  # vqshl.u16 q1, q2, #15
+9f ff 12 13  # vrsra.u16 d1, d2, #1
+9f ff 54 23  # vrsra.u16 q1, q2, #1
+90 ff 12 13  # vrsra.u16 d1, d2, #16
+90 ff 54 23  # vrsra.u16 q1, q2, #16
+23 ff 02 15  # vrshl.u32 d1, d2, d3
+26 ff 44 25  # vrshl.u32 q1, q2, q3
+23 ff 12 14  # vqshl.u32 d1, d2, d3
+26 ff 54 24  # vqshl.u32 q1, q2, q3
+23 ff 12 15  # vqrshl.u32 d1, d2, d3
+26 ff 54 25  # vqrshl.u32 q1, q2, q3
+a1 ff 12 17  # vqshl.u32 d1, d2, #1
+a1 ff 54 27  # vqshl.u32 q1, q2, #1
+bf ff 12 17  # vqshl.u32 d1, d2, #31
+bf ff 54 27  # vqshl.u32 q1, q2, #31
+bf ff 12 13  # vrsra.u32 d1, d2, #1
+bf ff 54 23  # vrsra.u32 q1, q2, #1
+a0 ff 12 13  # vrsra.u32 d1, d2, #32
+a0 ff 54 23  # vrsra.u32 q1, q2, #32
+33 ff 02 15  # vrshl.u64 d1, d2, d3
+36 ff 44 25  # vrshl.u64 q1, q2, q3
+33 ff 12 14  # vqshl.u64 d1, d2, d3
+36 ff 54 24  # vqshl.u64 q1, q2, q3
+33 ff 12 15  # vqrshl.u64 d1, d2, d3
+36 ff 54 25  # vqrshl.u64 q1, q2, q3
+81 ff 92 17  # vqshl.u64 d1, d2, #1
+81 ff d4 27  # vqshl.u64 q1, q2, #1
+bf ff 92 17  # vqshl.u64 d1, d2, #63
+bf ff d4 27  # vqshl.u64 q1, q2, #63
+bf ff 92 13  # vrsra.u64 d1, d2, #1
+bf ff d4 23  # vrsra.u64 q1, q2, #1
+80 ff 92 13  # vrsra.u64 d1, d2, #64
+80 ff d4 23  # vrsra.u64 q1, q2, #64
+8f ef 14 19  # vqshrn.s16 d1, q2, #1
+8f ef 54 19  # vqrshrn.s16 d1, q2, #1
+8f ff 14 18  # vqshrun.s16 d1, q2, #1
+8f ff 54 18  # vqrshrun.s16 d1, q2, #1
+88 ef 14 19  # vqshrn.s16 d1, q2, #8
+88 ef 54 19  # vqrshrn.s16 d1, q2, #8
+88 ff 14 18  # vqshrun.s16 d1, q2, #8
+88 ff 54 18  # vqrshrun.s16 d1, q2, #8
+84 ef 06 14  # vaddhn.i16 d1, q2, q3
+84 ef 06 16  # vsubhn.i16 d1, q2, q3
+84 ff 06 14  # vraddhn.i16 d1, q2, q3
+84 ff 06 16  # vrsubhn.i16 d1, q2, q3
+9f ef 14 19  # vqshrn.s32 d1, q2, #1
+9f ef 54 19  # vqrshrn.s32 d1, q2, #1
+9f ff 14 18  # vqshrun.s32 d1, q2, #1
+9f ff 54 18  # vqrshrun.s32 d1, q2, #1
+90 ef 14 19  # vqshrn.s32 d1, q2, #16
+90 ef 54 19  # vqrshrn.s32 d1, q2, #16
+90 ff 14 18  # vqshrun.s32 d1, q2, #16
+90 ff 54 18  # vqrshrun.s32 d1, q2, #16
+94 ef 06 14  # vaddhn.i32 d1, q2, q3
+94 ef 06 16  # vsubhn.i32 d1, q2, q3
+94 ff 06 14  # vraddhn.i32 d1, q2, q3
+94 ff 06 16  # vrsubhn.i32 d1, q2, q3
+bf ef 14 19  # vqshrn.s64 d1, q2, #1
+bf ef 54 19  # vqrshrn.s64 d1, q2, #1
+bf ff 14 18  # vqshrun.s64 d1, q2, #1
+bf ff 54 18  # vqrshrun.s64 d1, q2, #1
+a0 ef 14 19  # vqshrn.s64 d1, q2, #32
+a0 ef 54 19  # vqrshrn.s64 d1, q2, #32
+a0 ff 14 18  # vqshrun.s64 d1, q2, #32
+a0 ff 54 18  # vqrshrun.s64 d1, q2, #32
+a4 ef 06 14  # vaddhn.i64 d1, q2, q3
+a4 ef 06 16  # vsubhn.i64 d1, q2, q3
+a4 ff 06 14  # vraddhn.i64 d1, q2, q3
+a4 ff 06 16  # vrsubhn.i64 d1, q2, q3
+8f ff 14 19  # vqshrn.u16 d1, q2, #1
+8f ff 54 19  # vqrshrn.u16 d1, q2, #1
+88 ff 14 19  # vqshrn.u16 d1, q2, #8
+88 ff 54 19  # vqrshrn.u16 d1, q2, #8
+9f ff 14 19  # vqshrn.u32 d1, q2, #1
+9f ff 54 19  # vqrshrn.u32 d1, q2, #1
+90 ff 14 19  # vqshrn.u32 d1, q2, #16
+90 ff 54 19  # vqrshrn.u32 d1, q2, #16
+bf ff 14 19  # vqshrn.u64 d1, q2, #1
+bf ff 54 19  # vqrshrn.u64 d1, q2, #1
+a0 ff 14 19  # vqshrn.u64 d1, q2, #32
+a0 ff 54 19  # vqrshrn.u64 d1, q2, #32
+92 ef 4b 2a  # vmull.s16 q1, d2, d3[1]
+92 ef 4b 22  # vmlal.s16 q1, d2, d3[1]
+92 ef 4b 26  # vmlsl.s16 q1, d2, d3[1]
+a2 ef 63 2a  # vmull.s32 q1, d2, d3[1]
+a2 ef 63 22  # vmlal.s32 q1, d2, d3[1]
+a2 ef 63 26  # vmlsl.s32 q1, d2, d3[1]
+92 ff 4b 2a  # vmull.u16 q1, d2, d3[1]
+92 ff 4b 22  # vmlal.u16 q1, d2, d3[1]
+92 ff 4b 26  # vmlsl.u16 q1, d2, d3[1]
+a2 ff 63 2a  # vmull.u32 q1, d2, d3[1]
+a2 ff 63 22  # vmlal.u32 q1, d2, d3[1]
+a2 ff 63 26  # vmlsl.u32 q1, d2, d3[1]
+92 ef 4b 23  # vqdmlal.s16 q1, d2, d3[1]
+92 ef 03 2b  # vqdmlsl.s16 q1, d2, d3
+92 ef 4b 27  # vqdmlsl.s16 q1, d2, d3[1]
+92 ef 03 2d  # vqdmull.s16 q1, d2, d3
+92 ef 4b 2b  # vqdmull.s16 q1, d2, d3[1]
+12 ef 03 1b  # vqdmulh.s16 d1, d2, d3
+14 ef 46 2b  # vqdmulh.s16 q1, q2, q3
+92 ef 4b 1c  # vqdmulh.s16 d1, d2, d3[1]
+94 ff 4b 2c  # vqdmulh.s16 q1, q2, d3[1]
+12 ff 03 1b  # vqrdmulh.s16 d1, d2, d3
+14 ff 46 2b  # vqrdmulh.s16 q1, q2, q3
+92 ef 4b 1d  # vqrdmulh.s16 d1, d2, d3[1]
+94 ff 4b 2d  # vqrdmulh.s16 q1, q2, d3[1]
+a2 ef 63 23  # vqdmlal.s32 q1, d2, d3[1]
+a2 ef 03 2b  # vqdmlsl.s32 q1, d2, d3
+a2 ef 63 27  # vqdmlsl.s32 q1, d2, d3[1]
+a2 ef 03 2d  # vqdmull.s32 q1, d2, d3
+a2 ef 63 2b  # vqdmull.s32 q1, d2, d3[1]
+22 ef 03 1b  # vqdmulh.s32 d1, d2, d3
+24 ef 46 2b  # vqdmulh.s32 q1, q2, q3
+a2 ef 63 1c  # vqdmulh.s32 d1, d2, d3[1]
+a4 ff 63 2c  # vqdmulh.s32 q1, q2, d3[1]
+22 ff 03 1b  # vqrdmulh.s32 d1, d2, d3
+24 ff 46 2b  # vqrdmulh.s32 q1, q2, q3
+a2 ef 63 1d  # vqrdmulh.s32 d1, d2, d3[1]
+a4 ff 63 2d  # vqrdmulh.s32 q1, q2, d3[1]
+b0 ff 02 17  # vqabs.s8 d1, d2
+b0 ff 44 27  # vqabs.s8 q1, q2
+b0 ff 82 17  # vqneg.s8 d1, d2
+b0 ff c4 27  # vqneg.s8 q1, q2
+b4 ff 02 17  # vqabs.s16 d1, d2
+b4 ff 44 27  # vqabs.s16 q1, q2
+b4 ff 82 17  # vqneg.s16 d1, d2
+b4 ff c4 27  # vqneg.s16 q1, q2
+b8 ff 02 17  # vqabs.s32 d1, d2
+b8 ff 44 27  # vqabs.s32 q1, q2
+b8 ff 82 17  # vqneg.s32 d1, d2
+b8 ff c4 27  # vqneg.s32 q1, q2
+02 ff 13 19  # vmul.p8 d1, d2, d3
+04 ff 56 29  # vmul.p8 q1, q2, q3
+82 ef 03 2e  # vmull.p8 q1, d2, d3
+b2 ff 02 23  # vshll.i8 q1, d2, #8
+b6 ff 02 23  # vshll.i16 q1, d2, #16
+ba ff 02 23  # vshll.i32 q1, d2, #32
+bb ff 02 14  # vrecpe.u32 d1, d2
+bb ff 44 24  # vrecpe.u32 q1, q2
+bb ff 82 14  # vrsqrte.u32 d1, d2
+bb ff c4 24  # vrsqrte.u32 q1, q2
+bd ef 12 1f  # vcvt.s32.f32 d1, d2, #3
+bd ef 54 2f  # vcvt.s32.f32 q1, q2, #3
+bd ff 12 1f  # vcvt.u32.f32 d1, d2, #3
+bd ff 54 2f  # vcvt.u32.f32 q1, q2, #3
+a0 ef 12 1f  # vcvt.s32.f32 d1, d2, #32
+a0 ff 54 2f  # vcvt.u32.f32 q1, q2, #32
+be ee 66 1b  # vcvt.s16.f64 d1, d1, #3
+fe ee 66 0a  # vcvt.s16.f32 s1, s1, #3
+bf ee 66 1b  # vcvt.u16.f64 d1, d1, #3
+ff ee 66 0a  # vcvt.u16.f32 s1, s1, #3
+be ee ee 1b  # vcvt.s32.f64 d1, d1, #3
+fe ee ee 0a  # vcvt.s32.f32 s1, s1, #3
+bf ee ee 1b  # vcvt.u32.f64 d1, d1, #3
+ff ee ee 0a  # vcvt.u32.f32 s1, s1, #3
+be ee 40 1b  # vcvt.s16.f64 d1, d1, #16
+ff ee c0 0a  # vcvt.u32.f32 s1, s1, #32
+bd ef 12 1e  # vcvt.f32.s32 d1, d2, #3
+bd ef 54 2e  # vcvt.f32.s32 q1, q2, #3
+bd ff 12 1e  # vcvt.f32.u32 d1, d2, #3
+bd ff 54 2e  # vcvt.f32.u32 q1, q2, #3
+ba ee 66 1b  # vcvt.f64.s16 d1, d1, #3
+fa ee 66 0a  # vcvt.f32.s16 s1, s1, #3
+bb ee 66 1b  # vcvt.f64.u16 d1, d1, #3
+fb ee 66 0a  # vcvt.f32.u16 s1, s1, #3
+ba ee ee 1b  # vcvt.f64.s32 d1, d1, #3
+fa ee ee 0a  # vcvt.f32.s32 s1, s1, #3
+bb ee ee 1b  # vcvt.f64.u32 d1, d1, #3
+fb ee ee 0a  # vcvt.f32.u32 s1, s1, #3
+b6 ff 04 16  # vcvt.f16.f32 d1, q2
+b6 ff 02 27  # vcvt.f32.f16 q1, d2
+f2 ee 41 0a  # vcvtb.f32.f16 s1, s2
+f2 ee c1 0a  # vcvtt.f32.f16 s1, s2
+f3 ee 41 0a  # vcvtb.f16.f32 s1, s2
+f3 ee c1 0a  # vcvtt.f16.f32 s1, s2
+2f fa 82 f1  # sxtb16 r1, r2
+2f fa 92 f1  # sxtb16 r1, r2, ror #8
+3f fa a2 f1  # uxtb16 r1, r2, ror #16
+22 fa 93 f1  # sxtab16 r1, r2, r3, ror #8
+32 fa 83 f1  # uxtab16 r1, r2, r3
+22 f3 04 01  # ssat16 r1, #5, r2
+a2 f3 05 01  # usat16 r1, #5, r2
+22 f3 0f 01  # ssat16 r1, #16, r2
+a2 f3 0f 01  # usat16 r1, #15, r2
+92 fa 03 f1  # sadd16 r1, r2, r3
+82 fa 03 f1  # sadd8 r1, r2, r3
+d2 fa 03 f1  # ssub16 r1, r2, r3
+c2 fa 03 f1  # ssub8 r1, r2, r3
+a2 fa 03 f1  # sasx r1, r2, r3
+e2 fa 03 f1  # ssax r1, r2, r3
+92 fa 43 f1  # uadd16 r1, r2, r3
+82 fa 43 f1  # uadd8 r1, r2, r3
+d2 fa 43 f1  # usub16 r1, r2, r3
+c2 fa 43 f1  # usub8 r1, r2, r3
+a2 fa 43 f1  # uasx r1, r2, r3
+e2 fa 43 f1  # usax r1, r2, r3
+a2 fa 83 f1  # sel r1, r2, r3
+83 fa 92 f1  # qdadd r1, r2, r3
+83 fa b2 f1  # qdsub r1, r2, r3
+12 fb 13 41  # smlabt r1, r2, r3, r4
+12 fb 23 41  # smlatb r1, r2, r3, r4
+12 fb 33 41  # smlatt r1, r2, r3, r4
+32 fb 13 41  # smlawt r1, r2, r3, r4
+32 fb 03 f1  # smulwb r1, r2, r3
+32 fb 13 f1  # smulwt r1, r2, r3
+22 fb 13 41  # smladx r1, r2, r3, r4
+42 fb 03 41  # smlsd r1, r2, r3, r4
+42 fb 13 41  # smlsdx r1, r2, r3, r4
+22 fb 13 f1  # smuadx r1, r2, r3
+42 fb 03 f1  # smusd r1, r2, r3
+42 fb 13 f1  # smusdx r1, r2, r3
+c3 fb 84 12  # smlalbb r1, r2, r3, r4
+c3 fb a4 12  # smlaltb r1, r2, r3, r4
+c3 fb b4 12  # smlaltt r1, r2, r3, r4
+c3 fb c4 12  # smlald r1, r2, r3, r4
+c3 fb d4 12  # smlaldx r1, r2, r3, r4
+d3 fb c4 12  # smlsld r1, r2, r3, r4
+d3 fb d4 12  # smlsldx r1, r2, r3, r4
+52 fb 13 f1  # smmulr r1, r2, r3
+52 fb 13 41  # smmlar r1, r2, r3, r4
+62 fb 13 41  # smmlsr r1, r2, r3, r4
+e3 fb 64 12  # umaal r1, r2, r3, r4
+72 fb 03 f1  # usad8 r1, r2, r3
+72 fb 03 41  # usada8 r1, r2, r3, r4
+c2 f3 07 11  # ubfx r1, r2, #4, #8
+42 f3 07 11  # sbfx r1, r2, #4, #8
+c2 f3 1f 01  # ubfx r1, r2, #0, #32
+42 f3 c0 71  # sbfx r1, r2, #31, #1
+d5 e8 7f 23  # ldrexd r2, r3, [r5]
+c5 e8 71 23  # strexd r1, r2, r3, [r5]
+ef f3 00 81  # mrs r1, apsr
+82 f3 00 84  # msr APSR_g, r2
+82 f3 00 88  # msr APSR_nzcvq, r2
+82 f3 00 8c  # msr APSR_nzcvqg, r2
+69 44  # add r1, sp, r1
+0d f1 08 0d  # add.w sp, sp, #8
+ad f1 08 0d  # sub.w sp, sp, #8
+0d f2 08 0d  # addw sp, sp, #8
+ad f2 08 0d  # subw sp, sp, #8
+a2 f2 07 41  # subw r1, r2, #1031
+95 44  # add sp, r2
+af f2 04 01  # adr.w r1, #-4
+0f f2 00 41  # adr.w r1, #1024
+af f3 f1 80  # dbg #1
+95 ec 20 0a  # vldmia r5, {s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17, s18, s19, s20, s21, s22, s23, s24, s25, s26, s27, s28, s29, s30, s31}
+b5 ec 20 0a  # vldmia r5!, {s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17, s18, s19, s20, s21, s22, s23, s24, s25, s26, s27, s28, s29, s30, s31}
+35 ed 20 0a  # vldmdb r5!, {s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17, s18, s19, s20, s21, s22, s23, s24, s25, s26, s27, s28, s29, s30, s31}
+85 ec 20 0a  # vstmia r5, {s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17, s18, s19, s20, s21, s22, s23, s24, s25, s26, s27, s28, s29, s30, s31}
+a5 ec 20 0a  # vstmia r5!, {s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17, s18, s19, s20, s21, s22, s23, s24, s25, s26, s27, s28, s29, s30, s31}
+25 ed 20 0a  # vstmdb r5!, {s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17, s18, s19, s20, s21, s22, s23, s24, s25, s26, s27, s28, s29, s30, s31}

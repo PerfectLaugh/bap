@@ -149,13 +149,102 @@
 (defun t2UHASX (rd rn rm cnd _) (UHASX rd rn rm cnd _))
 (defun t2UHSAX (rd rn rm cnd _) (UHSAX rd rn rm cnd _))
 
+(defun t2SADD16 (rd rn rm cnd _) (SADD16 rd rn rm cnd _))
+(defun t2SSUB16 (rd rn rm cnd _) (SSUB16 rd rn rm cnd _))
+(defun t2UADD16 (rd rn rm cnd _) (UADD16 rd rn rm cnd _))
+(defun t2USUB16 (rd rn rm cnd _) (USUB16 rd rn rm cnd _))
+(defun t2SADD8 (rd rn rm cnd _) (SADD8 rd rn rm cnd _))
+(defun t2SSUB8 (rd rn rm cnd _) (SSUB8 rd rn rm cnd _))
+(defun t2UADD8 (rd rn rm cnd _) (UADD8 rd rn rm cnd _))
+(defun t2USUB8 (rd rn rm cnd _) (USUB8 rd rn rm cnd _))
+(defun t2SASX (rd rn rm cnd _) (SASX rd rn rm cnd _))
+(defun t2SSAX (rd rn rm cnd _) (SSAX rd rn rm cnd _))
+(defun t2UASX (rd rn rm cnd _) (UASX rd rn rm cnd _))
+(defun t2USAX (rd rn rm cnd _) (USAX rd rn rm cnd _))
+(defun t2SEL (rd rn rm cnd _) (SEL rd rn rm cnd _))
+(defun t2QDADD (rd rm rn cnd _) (QDADD rd rm rn cnd _))
+(defun t2QDSUB (rd rm rn cnd _) (QDSUB rd rm rn cnd _))
+(defun t2SSAT16 (rd n rn cnd _) (SSAT16 rd n rn cnd _))
+(defun t2USAT16 (rd n rn cnd _) (USAT16 rd n rn cnd _))
+(defun t2SXTB16 (rd rm rot cnd _) (SXTB16 rd rm rot cnd _))
+(defun t2UXTB16 (rd rm rot cnd _) (UXTB16 rd rm rot cnd _))
+(defun t2SXTAB16 (rd rn rm rot cnd _) (SXTAB16 rd rn rm rot cnd _))
+(defun t2UXTAB16 (rd rn rm rot cnd _) (UXTAB16 rd rn rm rot cnd _))
+(defun t2SMMULR (rd rn rm cnd _) (SMMULR rd rn rm cnd _))
+(defun t2SMMLAR (rd rn rm ra cnd _) (SMMLAR rd rn rm ra cnd _))
+(defun t2SMMLSR (rd rn rm ra cnd _) (SMMLSR rd rn rm ra cnd _))
+(defun t2SMLABT (rd rn rm ra cnd _) (SMLABT rd rn rm ra cnd _))
+(defun t2SMLATB (rd rn rm ra cnd _) (SMLATB rd rn rm ra cnd _))
+(defun t2SMLATT (rd rn rm ra cnd _) (SMLATT rd rn rm ra cnd _))
+(defun t2SMLAWT (rd rn rm ra cnd _) (SMLAWT rd rn rm ra cnd _))
+(defun t2SMULWB (rd rn rm cnd _) (SMULWB rd rn rm cnd _))
+(defun t2SMULWT (rd rn rm cnd _) (SMULWT rd rn rm cnd _))
+(defun t2SMUADX (rd rn rm cnd _) (SMUADX rd rn rm cnd _))
+(defun t2SMUSD (rd rn rm cnd _) (SMUSD rd rn rm cnd _))
+(defun t2SMUSDX (rd rn rm cnd _) (SMUSDX rd rn rm cnd _))
+(defun t2SMLADX (rd rn rm ra cnd _) (SMLADX rd rn rm ra cnd _))
+(defun t2SMLSD (rd rn rm ra cnd _) (SMLSD rd rn rm ra cnd _))
+(defun t2SMLSDX (rd rn rm ra cnd _) (SMLSDX rd rn rm ra cnd _))
+(defun t2SMLALBB (lo hi rn rm lo0 hi0 cnd _) (SMLALBB lo hi rn rm lo0 hi0 cnd _))
+(defun t2SMLALTB (lo hi rn rm lo0 hi0 cnd _) (SMLALTB lo hi rn rm lo0 hi0 cnd _))
+(defun t2SMLALTT (lo hi rn rm lo0 hi0 cnd _) (SMLALTT lo hi rn rm lo0 hi0 cnd _))
+(defun t2SMLALD (lo hi rn rm lo0 hi0 cnd _) (SMLALD lo hi rn rm lo0 hi0 cnd _))
+(defun t2SMLALDX (lo hi rn rm lo0 hi0 cnd _) (SMLALDX lo hi rn rm lo0 hi0 cnd _))
+(defun t2SMLSLD (lo hi rn rm lo0 hi0 cnd _) (SMLSLD lo hi rn rm lo0 hi0 cnd _))
+(defun t2SMLSLDX (lo hi rn rm lo0 hi0 cnd _) (SMLSLDX lo hi rn rm lo0 hi0 cnd _))
+(defun t2UMAAL (lo hi rn rm lo0 hi0 cnd _) (UMAAL lo hi rn rm lo0 hi0 cnd _))
+(defun t2USAD8 (rd rn rm cnd _) (USAD8 rd rn rm cnd _))
+(defun t2USADA8 (rd rn rm ra cnd _) (USADA8 rd rn rm ra cnd _))
+
+;; the sums with SP and the wide forms without the flags
+(defun t2ADDspImm (rd rn imm cnd _ s) (t2ADDri rd rn imm cnd _ s))
+(defun t2SUBspImm (rd rn imm cnd _ s) (t2SUBri rd rn imm cnd _ s))
+(defun t2ADDspImm12 (rd rn imm cnd _) (t2ADDri12 rd rn imm cnd _))
+(defun t2SUBspImm12 (rd rn imm cnd _) (t2SUBri12 rd rn imm cnd _))
+(defun t2SUBri12 (rd rn imm cnd _)
+  (when (condition-holds cnd) (set$ rd (- rn imm))))
+(defun tADDrSP (rd _ rm cnd _)
+  (when (condition-holds cnd) (t2set rd (+ SP (t2reg rm)))))
+(defun tADDspr (_ _ rm cnd _)
+  (when (condition-holds cnd) (set SP (+ SP (t2reg rm)))))
+
+;; the offset of a subtraction is negative, and the one of zero is
+;; INT32_MIN, as the decoder has to tell it from the addition of zero
+(defun t2ADR (rd imm cnd _)
+  (when (condition-holds cnd)
+    (set$ rd (+ (logand (t2pc) (lnot 3))
+                (if (= imm 0x80000000) (cast-unsigned 32 0) imm)))))
+
+;; Jazelle is taken as not implemented, in which case BXJ is BX
+(defun t2BXJ (rm cnd _) (tBX rm cnd _))
+
+;; the hint to a debugger, which has no architectural effect, and the
+;; ones of the extensions of PACBTI of Armv8.1-M, which are in the space
+;; of the hints, and execute as NOPs on this target, which is Armv7-A
+(defun t2DBG (_ _ _) (empty))
+(defun t2BTI () (empty))
+(defun t2PAC () (empty))
+(defun t2AUT () (empty))
+(defun t2PACBTI () (empty))
+
+;; these take an exception, which is not modeled beyond its intrinsic
+(defun tBKPT (imm) (intrinsic 'breakpoint imm :aborts))
+(defun tUDF (_) (intrinsic 'undefined-instruction :aborts))
+(defun t2UDF (_) (intrinsic 'undefined-instruction :aborts))
+(defun tTRAP () (intrinsic 'undefined-instruction :aborts))
+(defun t__brkdiv0 () (intrinsic 'undefined-instruction :aborts))
+
+;; see SETEND in arm-a32.lisp
+(defun tSETEND (e) (SETEND e))
+
 ;; the condition and the mask of IT apply to the following instructions,
 ;; which the decoder gives the condition operands
 (defun t2IT (_ _) (empty))
 
 (defun t2MRS_AR (rd cnd _)
   (when (condition-holds cnd)
-    (set$ rd (concat NF ZF CF VF QF (cast-unsigned 27 0)))))
+    (set$ rd (a32-apsr))))
+(defun t2MSR_AR (mask rn cnd _) (MSR mask rn cnd _))
 
 ;; LOADS AND STORES
 
@@ -254,7 +343,7 @@
   (when (condition-holds cnd) (store-byte rn rt) (set$ rd 0)))
 (defun t2STREXH (rd rt rn cnd _)
   (when (condition-holds cnd) (store-word rn (cast-low 16 rt)) (set$ rd 0)))
-(defun t2CLREX (_) (empty))
+(defun t2CLREX (_ _) (empty))
 
 ;; the 16-bit register shifts and CMN, the flags are set outside of an
 ;; IT block, where the second operand is CPSR

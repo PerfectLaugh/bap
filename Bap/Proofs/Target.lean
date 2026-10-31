@@ -1142,7 +1142,7 @@ theorem x8632Globals_keys : (x8632Globals.map (·.1)).Nodup ∧ x8632Globals.len
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem arm32Globals_keys : (arm32Globals.map (·.1)).Nodup ∧ arm32Globals.length = 61 :=
+theorem arm32Globals_keys : (arm32Globals.map (·.1)).Nodup ∧ arm32Globals.length = 65 :=
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in

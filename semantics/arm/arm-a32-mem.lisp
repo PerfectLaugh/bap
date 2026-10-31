@@ -187,7 +187,8 @@
         'R4_R5 (a32-load-named-pair R4 R5 addr)
         'R6_R7 (a32-load-named-pair R6 R7 addr)
         'R8_R9 (a32-load-named-pair R8 R9 addr)
-        'R10_R11 (a32-load-named-pair R10 R11 addr)))))
+        'R10_R11 (a32-load-named-pair R10 R11 addr)
+        'R12_SP (a32-load-named-pair R12 SP addr)))))
 
 (defun STREXD (rd p rn cnd _)
   (a32-cond cnd
@@ -198,10 +199,16 @@
         'R4_R5 (a32-store-pair R4 R5 addr)
         'R6_R7 (a32-store-pair R6 R7 addr)
         'R8_R9 (a32-store-pair R8 R9 addr)
-        'R10_R11 (a32-store-pair R10 R11 addr))
+        'R10_R11 (a32-store-pair R10 R11 addr)
+        'R12_SP (a32-store-pair R12 SP addr))
       (set$ rd 0))))
 
 ;; the deprecated swap
+(defun SWP (rt rt2 rn cnd _)
+  (a32-cond cnd
+    (let ((addr rn) (v (load-word addr)))
+      (store-word addr rt2)
+      (set$ rt v))))
 (defun SWPB (rt rt2 rn cnd _)
   (a32-cond cnd
     (let ((addr rn) (v (load-byte32 addr)))

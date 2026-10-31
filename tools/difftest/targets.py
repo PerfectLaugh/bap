@@ -963,7 +963,7 @@ class Arm32(Risc):
     mc_args = ["--mattr=+hwdiv,+hwdiv-arm,+vfp4,+neon,+dsp,+v7,+crc,+aes,+sha2"]
     gpr_slots = [f"R{i}" for i in range(13)] + ["SP", "LR", None]
     gprs = [(f"R{i}", 32) for i in range(13)] + [("SP", 32), ("LR", 32)]
-    flags = [("NF", 31), ("ZF", 30), ("CF", 29), ("VF", 28), ("QF", 27)]
+    flags = [("NF", 31), ("ZF", 30), ("CF", 29), ("VF", 28), ("QF", 27), ("GE3", 19), ("GE2", 18), ("GE1", 17), ("GE0", 16)]
     vectors = [(f"D{i}", 64) for i in range(32)]
     runner = ["qemu-arm", "-cpu", "max"]
     default_pins = {"SP": "window+256"}
@@ -1028,7 +1028,7 @@ class Arm32(Risc):
             pins[base] = f"window+{248 - disp}"
             if match.group(3):
                 pins[match.group(3).upper()] = 8
-        if re.match(r"(ldm|stm|pop|push|vldm|vstm)", text) and not pins:
+        if re.match(r"(ldm|stm|pop|push|vldm|vstm|fldm|fstm)", text) and not pins:
             found = re.match(r"\w+\s+(r\d+)", text)
             if found:
                 pins[found.group(1).upper()] = "window+248"
@@ -1047,7 +1047,7 @@ class Arm(Arm32):
 
     def hand(self, assemble, layout):
         conds = ["eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", ""]
-        items = [(f"b{c} #56",) for c in conds] + [("bl #56",), ("bx r1", {"R1": "taken"}), ("blx r1", {"R1": "taken"}), ("mov pc, r1", {"R1": "taken"}), ("bx lr", {"LR": "taken"}), ("pop {pc}", {}, {256: ("taken", 4)}), ("ldr pc, [r5, #8]", {"R5": "window+248"}, {256: ("taken", 4)})]
+        items = [(f"b{c} #56",) for c in conds] + [("bl #56",), ("bx r1", {"R1": "taken"}), ("blx r1", {"R1": "taken"}), ("bxj r1", {"R1": "taken"}), ("mov pc, r1", {"R1": "taken"}), ("bx lr", {"LR": "taken"}), ("pop {pc}", {}, {256: ("taken", 4)}), ("ldr pc, [r5, #8]", {"R5": "window+248"}, {256: ("taken", 4)})]
         for c in conds[:-1]:
             items += [(f"add{c} r1, r2, r3",), (f"mov{c}s r1, r2",), (f"ldr{c} r1, [r5, #8]", {"R5": "window+248"})]
         items += [("adr r1, #16",), ("add r1, pc, #16",), ("mov r1, pc",), ("ldr r1, [pc, #4]",), ("ldrb r1, [pc, #4]",), ("ldrh r1, [pc, #4]",), ("ldrsb r1, [pc, #4]",), ("ldrsh r1, [pc, #4]",), ("vldr d1, [pc, #4]",), ("vldr s1, [pc, #4]",), ("add r1, r2, pc",), ("add r1, pc, r2",), ("cmp r1, pc",), ("str pc, [r5, #8]", {"R5": "window+248"}), ("ldr r1, [pc, r2]", {"R2": 4}), ("adds r1, pc, r2",), ("sub r1, pc, #4",)]
@@ -1067,7 +1067,7 @@ class Thumb(Arm32):
     def hand(self, assemble, layout):
         conds = ["eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le"]
         items = [(f"b{c} #60",) for c in conds] + [(f"b{c}.w #60",) for c in conds]
-        items += [("b #60",), ("b.w #60",), ("bl #60",), ("cbz r1, #60",), ("cbnz r1, #60",), ("bx r1", {"R1": "takenbit"}), ("blx r1", {"R1": "takenbit"}), ("bx lr", {"LR": "takenbit"}), ("mov pc, r1", {"R1": "takenbit"}), ("pop {pc}", {}, {256: ("takenbit", 4)}), ("ldr.w pc, [r5, #8]", {"R5": "window+248"}, {256: ("takenbit", 4)}), ("adr r1, #16",), ("adr.w r1, #16",), ("mov r1, pc",), ("add r1, pc",), ("ldr r1, [pc, #4]",), ("ldr.w r1, [pc, #4]",), ("ldrb.w r1, [pc, #4]",), ("ldrh.w r1, [pc, #4]",), ("ldrsb.w r1, [pc, #4]",), ("ldrsh.w r1, [pc, #4]",), ("vldr d1, [pc, #4]",), ("vldr s1, [pc, #4]",), ("cmp r1, pc",), ("add r1, r1, pc",), ("add r8, pc",), ("mov r8, pc",), ("adr r1, #4",), ("add.w r1, pc, #4",)]
+        items += [("b #60",), ("b.w #60",), ("bl #60",), ("cbz r1, #60",), ("cbnz r1, #60",), ("bx r1", {"R1": "takenbit"}), ("blx r1", {"R1": "takenbit"}), ("bx lr", {"LR": "takenbit"}), ("bxj r1", {"R1": "takenbit"}), ("mov pc, r1", {"R1": "takenbit"}), ("pop {pc}", {}, {256: ("takenbit", 4)}), ("ldr.w pc, [r5, #8]", {"R5": "window+248"}, {256: ("takenbit", 4)}), ("adr r1, #16",), ("adr.w r1, #16",), ("mov r1, pc",), ("add r1, pc",), ("ldr r1, [pc, #4]",), ("ldr.w r1, [pc, #4]",), ("ldrb.w r1, [pc, #4]",), ("ldrh.w r1, [pc, #4]",), ("ldrsb.w r1, [pc, #4]",), ("ldrsh.w r1, [pc, #4]",), ("vldr d1, [pc, #4]",), ("vldr s1, [pc, #4]",), ("cmp r1, pc",), ("add r1, r1, pc",), ("add r8, pc",), ("mov r8, pc",), ("adr r1, #4",), ("add.w r1, pc, #4",)]
         return self.text_cases(assemble, items)
 
 

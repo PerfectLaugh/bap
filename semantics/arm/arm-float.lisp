@@ -143,6 +143,40 @@
                                         (lnot (cast-unsigned 64 0))
                                         mag)))))))
 
+(defun fp-to-fixed (signed n x e f fbits)
+  "(fp-to-fixed SIGNED N X E F FBITS) is FPToFixed: X times 2^FBITS as
+   an N-bit integer rounded toward zero. It is fp-to-int with the
+   exponent raised, as scaling by a power of two is exact, and it tests
+   for NaN on the bits. SIGNED must be static."
+  (let ((bias (fp-bias e))
+        (raw (fp-exponent x e f))
+        (expn (+ raw (cast-unsigned 64 fbits)))
+        (coef (cast-unsigned 64 (concat (cast-low 1 1) (cast-low f x))))
+        (mag (fp-select (< expn bias) (cast-unsigned 64 0)
+                        (fp-select (>= expn (+ bias f))
+                                   (lshift coef (- expn (+ bias f)))
+                                   (rshift coef (- (+ bias f) expn)))))
+        (top (lshift (cast-unsigned 64 1) (- n 1)))
+        (nan (logand (= raw (- (lshift (cast-unsigned 64 1) e) 1))
+                     (not (is-zero (cast-low f x))))))
+    (cast-low n
+              (fp-select nan (cast-unsigned 64 0)
+                (if signed
+                    (fp-select (>= expn (- (+ bias n) 1))
+                               (fp-select (msb x) top (- top 1))
+                               (fp-select (msb x) (neg mag) mag))
+                  (fp-select (msb x) (cast-unsigned 64 0)
+                             (fp-select (>= expn (+ bias n))
+                                        (- (lshift (cast-unsigned 64 1) n) 1)
+                                        mag)))))))
+
+(defun fp-from-fixed (r fbits f)
+  "(fp-from-fixed R FBITS F) is the float R, that a conversion from an
+   integer gave, divided by 2^FBITS, on its exponent: R is zero, or at
+   least one, so the result is exact and normal"
+  (fp-select (is-fzero r) r
+             (- r (lshift (cast-unsigned (word-width r) fbits) f))))
+
 (defun vfp-expand-imm (imm e f)
   "(vfp-expand-imm IMM E F) is VFPExpandImm of the 8-bit IMM"
   (concat (select 7 imm)

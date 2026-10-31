@@ -467,7 +467,7 @@ private def decimalDigits (digits : List Char) : Option Nat :=
 
 private def arm32Register (name : String) : Primus.Semantics.Value :=
   let name := if name.isEmpty || name = "NoRegister" then "Nil" else name
-  if ["NF", "ZF", "CF", "VF", "QF"].contains name then .register name 1 1
+  if ["NF", "ZF", "CF", "VF", "QF", "GE0", "GE1", "GE2", "GE3"].contains name then .register name 1 1
   else
     match name.toList with
     | 'D' :: digits => .register name (if (decimalDigits digits).isSome then 64 else 32) (if (decimalDigits digits).isSome then 64 else 32)
@@ -493,7 +493,7 @@ private def armAliases (name : String) : Option Alias :=
 private def arm32Globals : Primus.Semantics.Globals :=
   let registers := (List.range 16).map fun n => s!"R{n}"
   let doubles := (List.range 32).map fun n => s!"D{n}"
-  (registers ++ doubles ++ ["SP", "LR", "PC", "CPSR", "Nil", "NF", "ZF", "CF", "VF", "QF", "FPSCR", "TPIDRURO", "TPIDRURW"]).map
+  (registers ++ doubles ++ ["SP", "LR", "PC", "CPSR", "Nil", "NF", "ZF", "CF", "VF", "QF", "GE0", "GE1", "GE2", "GE3", "FPSCR", "TPIDRURO", "TPIDRURW"]).map
     fun name => (name, arm32Register name)
 
 private def semanticsContext (address nextPc : Nat) : Primus.Semantics.Context :=
