@@ -68,7 +68,7 @@ This is everything in the project that is trusted, or only tested, and not prove
 4. **`NativeRange`**: what a native run of a range does, by reading `runBlockObserved` (Bap/Emu/CoreProofs.lean:2796, Bap/Emu/Core.lean:26). `rangeLaws_real` and `restartLaws_real` follow from it.
 5. **LLVM's decoder and assembler** (Bap/LLVM.lean:16, Bap/Proofs/LLVM.lean:7). What instruction the bytes are, and that the same bytes are the same instruction (Bap/Emu/Core.lean:37), is what LLVM says. The wrappers are proved to pass it on, not that it is right.
 6. **Z3's answers** (Bap/FFI/Z3.lean:5, Bap/Proofs/FFI.lean:19). What is sent and how the answer is read are proved.
-7. **Refs and files around lifting.** A cached environment (Bap/Target/LLVMLift.lean:523) and the memo of x86 code (Bap/Target/LLVMLift.lean:1307) hand back what was put in them: `x86MemoStep_sound` (Bap/Proofs/X86Memo.lean:83) is about the pure step between the read and the write, as Lean can't see a ref. The semantics are the files on disk (Bap/Target/LLVMLift.lean:470).
+7. **Refs and files around lifting.** A cached environment (Bap/Target/LLVMLift.lean:546) and the memo of x86 code (Bap/Target/LLVMLift.lean:1437) hand back what was put in them: `x86MemoStep_sound` (Bap/Proofs/X86Memo.lean:130) is about the pure step between the read and the write, as Lean can't see a ref. The semantics are the files on disk (Bap/Target/LLVMLift.lean:493).
 8. **Standards read by a person.** That `Spec` says what FIPS-197 and RFC 3394 say is by reading, with their printed vectors checked by the kernel (Bap/Proofs/Crypto.lean:837, Bap/Proofs/Crypto.lean:1511). The formats of ELF, PE, COFF and DWARF are the same: what is proved is of the parsers as written, against no text of the standards.
 
 ## Modelled, not proved of a machine
@@ -87,7 +87,7 @@ This is everything in the project that is trusted, or only tested, and not prove
 These aren't trusted, but a theorem says nothing where they fail.
 
 13. `propagateConstants_fromSub` (Bap/Proofs/ConstProp.lean:2032) needs the blocks of a function to have different ids. Two blocks of one id can differ: `isSolved` of the unrestricted analysis fails and the restricted one's may not.
-14. `Bap.Proofs.Analysis` (Bap/Proofs/Analysis.lean:3201, Bap/Proofs/Analysis.lean:4929), and writes that don't wrap around the address space in `Bap.Proofs.Symbolic` (Bap/Proofs/Symbolic.lean:3271), which says what happens if they do.
+14. `slice_end_to_end` (Bap/Proofs/Analysis.lean:4069) needs the memories to hold full-size pages, the code to keep to `slice_StmtWF`, and the full run to succeed, as deleting code can hide an error in it. Bytes at or above the top of the address space aren't compared. Also, writes that don't wrap around the address space in `Bap.Proofs.Symbolic` (Bap/Proofs/Symbolic.lean:3271), which says what happens if they do.
 
 ## Tested, not proved
 
