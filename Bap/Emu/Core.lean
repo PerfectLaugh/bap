@@ -456,6 +456,12 @@ def forkContext (id : Nat) (state : Bil.State) (result : Bap.Var) (value : Value
     ThreadContext :=
   ⟨id, { env := Bil.bind state.env result value }, childPc, true, none, none⟩
 
+/-- The context of a thread that `cloneThread` starts: the parent's registers but the result register and the
+stack pointer, runnable at once. -/
+def cloneContext (id : Nat) (state : Bil.State) (result : Bap.Var) (value : Value) (stack : Bap.Var) (top : Value)
+    (start : Nat) : ThreadContext :=
+  ⟨id, { env := Bil.bind (Bil.bind state.env result value) stack top }, start, false, none, none⟩
+
 def lowerId (best : Option Nat) (id : Nat) : Option Nat :=
   match best with
   | some other => if other ≤ id then some other else some id

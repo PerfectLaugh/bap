@@ -224,6 +224,34 @@ private def testDelaySlots : IO Unit := do
   let _ ← Bap.Emu.run emu 2
   assertBits "Emu checkpoint restores pending branch" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg emu r5))
 
+/-- Each thread pushes a value and reads it back after the other has pushed: with one stack it would read the other's. -/
+private def testCloneThread : IO Unit := do
+  let code := (← LLVM.assemble "riscv64" "addi sp, sp, -8") ++
+    (← LLVM.assemble "riscv64" "sd a2, 0(sp)") ++
+    (← LLVM.assemble "riscv64" "ld a3, 0(sp)")
+  let emu ← Tuned.riscv64 code 0 0
+  Bap.Emu.map emu ⟨0x1000, ByteArray.mk (List.replicate 64 0).toArray, ⟨true, true, false⟩⟩
+  let bits (value : Nat) : Bap.Value := .bits (BitVec.ofNat 64 value)
+  Bap.Emu.setReg emu (reg "X2") (bits 0x1010)
+  Bap.Emu.setReg emu (reg "X4") (bits 0x77)
+  Bap.Emu.setReg emu (reg "X10") (bits 5)
+  Bap.Emu.setReg emu (reg "X12") (bits 1)
+  let child ← Bap.Emu.cloneThread emu 0 0x1030 (some 0x88)
+  assertBits "Emu clone runs on its stack" (BitVec.ofNat 64 0x1030) (.ok (← Bap.Emu.threadReg emu child (reg "X2")))
+  assertBits "Emu clone returns 0" (BitVec.ofNat 64 0) (.ok (← Bap.Emu.threadReg emu child (reg "X10")))
+  assertBits "Emu clone has its thread pointer" (BitVec.ofNat 64 0x88) (.ok (← Bap.Emu.threadReg emu child (reg "X4")))
+  assertBits "Emu clone copies the other registers" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.threadReg emu child (reg "X12")))
+  assertBits "Emu clone leaves the parent's stack" (BitVec.ofNat 64 0x1010) (.ok (← Bap.Emu.reg emu (reg "X2")))
+  assertBits "Emu clone leaves the parent's thread pointer" (BitVec.ofNat 64 0x77) (.ok (← Bap.Emu.reg emu (reg "X4")))
+  let _ ← Bap.Emu.run emu 2
+  Bap.Emu.switchThread emu child
+  Bap.Emu.setReg emu (reg "X12") (bits 2)
+  let _ ← Bap.Emu.run emu 3
+  assertBits "Emu clone reads its own frame" (BitVec.ofNat 64 2) (.ok (← Bap.Emu.reg emu (reg "X13")))
+  Bap.Emu.switchThread emu 1
+  let _ ← Bap.Emu.run emu 1
+  assertBits "Emu parent of a clone reads its own frame" (BitVec.ofNat 64 1) (.ok (← Bap.Emu.reg emu (reg "X13")))
+
 private def testThreads : IO Unit := do
   let code := (← LLVM.assemble "riscv64" "addi a0, a0, 1") ++
     (← LLVM.assemble "riscv64" "sw a0, 0(a1)") ++
@@ -1232,6 +1260,7 @@ private def runEmulator : IO Unit := do
     (Bap.Emu.parseCommand ["x", "16", "2"]).toOption
 
   testThreads
+  testCloneThread
   testDelaySlots
   testLiveProject
   testDiff

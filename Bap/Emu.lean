@@ -986,6 +986,33 @@ def forkThread (emu : Emu) (childPc : Nat) : IO ThreadId := do
     emu.threadsRef.modify (context :: ·)
     pure id
 
+/-- The stack pointer and the thread pointer of a target. -/
+private def threadRegisters : SyscallAbi → String × String
+  | .riscv => ("X2", "X4")
+  | .x86_64 => ("RSP", "FS_BASE")
+  | .aarch64 => ("SP", "TPIDR_EL0")
+  | .mips => ("R29", "USERLOCAL")
+
+/-- A thread as `clone(2)` makes one: it shares the memory and has a copy of the registers, as `spawnThread`'s does,
+but it runs on `stack`, sees 0 in the result register, and has its own thread-local storage if `threadPointer` is
+given. `spawnThread` keeps the parent's stack pointer, so that the two would overwrite each other's frames. -/
+def cloneThread (emu : Emu) (start : Nat) (stack : Nat) (threadPointer : Option Nat := none) : IO ThreadId := do
+  saveCurrentThread emu
+  let id ← emu.nextThreadRef.get
+  emu.nextThreadRef.set (id + 1)
+  let width ← wordWidth emu
+  let word (value : Nat) : Bap.Value := .bits (BitVec.ofNat width value)
+  let var (name : String) : Bap.Var := ⟨name, .imm width, 0, false⟩
+  let (_, _, result) := syscallRegisters emu.config.syscallAbi
+  let (stackRegister, threadRegister) := threadRegisters emu.config.syscallAbi
+  let current ← emu.state.get
+  let current : Bil.State := match threadPointer with
+    | some value => { env := Bil.bind current.env (var threadRegister) (word value) }
+    | none => current
+  let context := cloneContext id current (var result) (word 0) (var stackRegister) (word stack) start
+  emu.threadsRef.modify (context :: ·)
+  pure id
+
 def cloneProcessMemory (emu : Emu) (child : ThreadId) : IO Unit := do
   let parent ← match ← emu.engine.persistentMemory.get with
     | some parent => pure parent

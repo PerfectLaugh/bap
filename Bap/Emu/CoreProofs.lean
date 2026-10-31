@@ -1391,6 +1391,23 @@ theorem spawnContext_registers (id : Nat) (state : Bil.State) (argument : Bap.Va
       if var = argument then .ok value else Bil.lookup state.env var :=
   Proofs.Bil.lookup_bind_eq _ _ _ _
 
+/-- A cloned thread runs at once, at its start. -/
+theorem cloneContext_fields (id : Nat) (state : Bil.State) (result : Bap.Var) (value : Value) (stack : Bap.Var)
+    (top : Value) (start : Nat) :
+    (cloneContext id state result value stack top start).stopped = false ∧
+    (cloneContext id state result value stack top start).pc = start ∧
+    (cloneContext id state result value stack top start).pending = none ∧
+    (cloneContext id state result value stack top start).skip = none :=
+  ⟨rfl, rfl, rfl, rfl⟩
+
+/-- It has the stack it was given and its parent's registers, except for the result. -/
+theorem cloneContext_registers (id : Nat) (state : Bil.State) (result : Bap.Var) (value : Value) (stack : Bap.Var)
+    (top : Value) (start : Nat) (var : Bap.Var) :
+    Bil.lookup (cloneContext id state result value stack top start).state.env var =
+      if var = stack then .ok top else if var = result then .ok value else Bil.lookup state.env var := by
+  show Bil.lookup (Bil.bind (Bil.bind state.env result value) stack top) var = _
+  rw [Proofs.Bil.lookup_bind_eq, Proofs.Bil.lookup_bind_eq]
+
 /-- `parkShared` gives the threads of the shared address space the memory, and leaves processes alone. -/
 theorem parkShared_spec {β : Type} (threads : List ThreadContext) (processes : Std.HashMap Nat β) (memoryVar : Bap.Var)
     (memory : Value) (context : ThreadContext) (hm : context ∈ threads) :
