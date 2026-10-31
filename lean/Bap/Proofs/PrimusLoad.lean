@@ -252,4 +252,29 @@ theorem thunked_instruction_agrees (eager : Globals) (lazy : List ((String × Ca
   exact apply_compileCallable (thunked_compat eager lazy) _ args
 
 
+/-! ### The state with no compiled definitions
+
+What is proved of it: a thunk has the same successes as its instruction as written in this state too, as in the one of the environment.
+What is not: that the instruction as written has the same successes in the two states. A helper it calls is compiled in the one and written in the other, so
+results differ in the callables they hold, and a run of the compiled helper turns into a run of the written one at a fuel with no bound in the first (`apply_compileCallable`),
+so that a simulation can't go by induction on the fuel in that direction. -/
+
+/-- All of the definitions as they were written. -/
+def writtenState (eager : Globals) (lazy : List ((String × Callable) × Nat)) : State :=
+  Environment.state (Environment.ofGlobals (thunkedAll eager lazy))
+
+theorem written_compat (eager : Globals) (lazy : List ((String × Callable) × Nat)) :
+    Compat (thunkedAll eager lazy) (writtenState eager lazy) where
+  definitions name := ⟨false, by
+    simp only [writtenState, Environment.state, Environment.ofGlobals]
+    cases Assoc.get name (thunkedAll eager lazy) <;> rfl⟩
+  index := ofGlobals_operations _
+
+/-- **Compiling an instruction doesn't change its successes in the state with no compiled definitions either.** -/
+theorem written_instruction_agrees (eager : Globals) (lazy : List ((String × Callable) × Nat)) (callable : Callable) (context : Context)
+    (args : List Bap.Primus.Semantics.Value) :
+    SameResults (fun fuel => apply fuel context (writtenState eager lazy) (.callable (compileCallable (namesOf (thunkedAll eager lazy)) callable)) args)
+      (fun fuel => apply fuel context (writtenState eager lazy) (.callable callable) args) :=
+  apply_compileCallable (written_compat eager lazy) _ args
+
 end Bap.Proofs.Primus

@@ -393,6 +393,31 @@ private def conditionalValues : IO Unit := do
       | .error error => throw <| IO.userError error
     | .error error => throw <| IO.userError error
   assertEqual "compiled, it makes the same code" (toString (Bil.Wire.printProgram program)) (toString (Bil.Wire.printProgram compiled))
+  -- Nothing reads the value of this one, so what is lifted has no variable for it, nor for what only that reads.
+  let unread ← match Sexp.parseMany "(defun h () (if (= R 1) (set S 2) (set S 3))) (defun i () (let ((a (if (= R 1) (set S 2) (set S 3)))) (if (= R 2) (set S 4) (set S a)) 1))" with
+    | .ok forms =>
+      match Primus.Semantics.evalForms {} globals forms with
+      | .ok state => pure state.globals
+      | .error error => throw <| IO.userError error
+    | .error error => throw <| IO.userError error
+  let unreadCode ← Primus.Semantics.lift unread {} "h" []
+  assertEqual "the value of a conditional nothing reads has no variable"
+    "((if (binop EQ (cast UNSIGNED 64 (var R 0 (imm 64) 0)) (cast UNSIGNED 64 (int 64 1))) ((move (var S 0 (imm 64) 0) (int 64 2))) ((move (var S 0 (imm 64) 0) (int 64 3)))))"
+    (toString (Bil.Wire.printProgram unreadCode))
+  let readCode ← Primus.Semantics.lift unread {} "i" []
+  let runs (code : Bil.Program) (r : Nat) : IO (Option Nat) := do
+    let state ← runProgram code { env := [(⟨"R", .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 r))] }
+    match Bil.evalExp state.env (.var ⟨"S", .imm 64, 0, false⟩) with
+    | .ok (.bits value) => pure (some value.toNat)
+    | _ => pure none
+  assertEqual "and it does what it did" (some 2) (← runs unreadCode 1)
+  assertEqual "and what it did on the other branch" (some 3) (← runs unreadCode 0)
+  assertEqual "the value of a conditional something reads is still there" (some 3) (← runs readCode 0)
+  assertEqual "the other value of it" (some 4) (← runs readCode 2)
+  -- on a real instruction, whose branches assign and yield
+  let cmpxchg ← Target.LLVMLift.decodeX86 0 0 (← LLVM.assemble "x86_64" "cmpxchgq %rcx, %rdx")
+  assertTrue "no temporary a lifted instruction assigns is unread"
+    ((Bil.programTemporaries cmpxchg.bil).all fun var => (Bil.readsOfProgram cmpxchg.bil).contains var)
 
 /-- Instructions of a thunked environment lift as they do written out, which `thunked_opcode_agrees` proves. -/
 private def thunkedRegressions : IO Unit := do

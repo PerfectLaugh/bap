@@ -422,19 +422,22 @@ private def testWrappedTargets : IO Unit := do
   check "MIPS 32 backward beq" (top32 - 12)
     (← Target.LLVMLift.decodeMIPS32With mips32 0 0 (bytes [0x10, 0x82, 0xff, 0xfc]))
 
-/-- The vector registers have their widths, XMM is the low half of YMM. -/
+/-- The vector registers have their widths, XMM and YMM are the low bits of ZMM. -/
 private def testVectorRegisters : IO Unit := do
   let x86 ← Target.LLVMLift.x86Environment
   let view (triple name : String) (environment : Primus.Semantics.Environment) : IO String := do
     match environment.registers.get? (← LLVM.registerId triple name) with
     | some (.register base width baseWidth) => pure s!"{base} {width} {baseWidth}"
     | _ => throw <| IO.userError s!"{name} is not a register"
-  assertEqual "x86 XMM0" "YMM0 128 256" (← view "x86_64" "XMM0" x86)
-  assertEqual "x86 XMM15" "YMM15 128 256" (← view "x86_64" "XMM15" x86)
-  assertEqual "x86 YMM1" "YMM1 256 256" (← view "x86_64" "YMM1" x86)
+  assertEqual "x86 XMM0" "ZMM0 128 512" (← view "x86_64" "XMM0" x86)
+  assertEqual "x86 XMM31" "ZMM31 128 512" (← view "x86_64" "XMM31" x86)
+  assertEqual "x86 YMM1" "ZMM1 256 512" (← view "x86_64" "YMM1" x86)
+  assertEqual "x86 YMM31" "ZMM31 256 512" (← view "x86_64" "YMM31" x86)
   assertEqual "x86 ZMM2" "ZMM2 512 512" (← view "x86_64" "ZMM2" x86)
+  assertEqual "x86 K7" "K7 64 64" (← view "x86_64" "K7" x86)
   let x8632 ← Target.LLVMLift.x8632Environment
-  assertEqual "x86-32 XMM7" "YMM7 128 256" (← view "i386" "XMM7" x8632)
+  assertEqual "x86-32 XMM7" "ZMM7 128 512" (← view "i386" "XMM7" x8632)
+  assertEqual "x86-32 K1" "K1 64 64" (← view "i386" "K1" x8632)
 
 /-- A memory with one word at an address. -/
 private def thumbMemAt (address value : Nat) : IO Bil.Env :=
@@ -613,23 +616,23 @@ private def testThumbIt : IO Unit := do
   let scan ← Disasm.Recursive.scan (← Target.Thumb.disassembler 0) (bytes (ite ++ [0x70, 0x47])) 0
   assertEqual "scan treats a block as an instruction" [0, 6] (scan.instructions.map (·.address))
 
-/-- The moves and the integer arithmetic of SSE, on the XMM registers in the low halves of YMM. -/
+/-- The moves and the integer arithmetic of SSE, on the XMM registers in the low bits of ZMM. -/
 private def testX86Sse : IO Unit := do
   for (label, env) in [("x86-64", ← Target.LLVMLift.x86Environment), ("x86-32", ← Target.LLVMLift.x8632Environment)] do
     let decode (values : List Nat) :=
       if label == "x86-64" then Target.LLVMLift.decodeX86With env 0 0 (bytes values)
       else Target.LLVMLift.decodeX8632With env 0 0 (bytes values)
     let ymm (name : String) (value : Nat) : Bap.Var × Bap.Value :=
-      (⟨name, .imm 256, 0, false⟩, .bits (BitVec.ofNat 256 value))
-    let upper := 0xdddddddddddddddd_cccccccccccccccc * 2 ^ 128
+      (⟨name, .imm 512, 0, false⟩, .bits (BitVec.ofNat 512 value))
+    let upper := 0xdddddddddddddddd_cccccccccccccccc_bbbbbbbbbbbbbbbb_aaaaaaaaaaaaaaaa_9999999999999999_8888888888888888 * 2 ^ 128
     let x := 0x0000000400000003_0000000200000001
     let y := 0xffffffff00000010_0000002000000030
     let check (name : String) (values : List Nat) (expected : Nat) : IO Unit := do
-      let state ← execute (← decode values) [ymm "YMM0" (upper + x), ymm "YMM1" y]
-      match Bil.lookup state.env ⟨"YMM0", .imm 256, 0, false⟩ with
+      let state ← execute (← decode values) [ymm "ZMM0" (upper + x), ymm "ZMM1" y]
+      match Bil.lookup state.env ⟨"ZMM0", .imm 512, 0, false⟩ with
       | .ok (.bits value) => assertEqual s!"{label} {name}" (upper + expected) value.toNat
-      | _ => throw <| IO.userError s!"{label} {name}: no YMM0"
-    -- the moves between registers keep the upper half of YMM, as the instructions without a VEX prefix do
+      | _ => throw <| IO.userError s!"{label} {name}: no ZMM0"
+    -- the moves between registers keep the upper bits of ZMM, as the instructions without a VEX prefix do
     check "movaps" [0x0f, 0x28, 0xc1] y
     check "movups" [0x0f, 0x10, 0xc1] y
     check "movapd" [0x66, 0x0f, 0x28, 0xc1] y
@@ -655,46 +658,679 @@ private def testX86Sse : IO Unit := do
   let word64 (name : String) (value : Nat) : Bap.Var × Bap.Value :=
     (⟨name, .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 value))
   let ymm (name : String) (value : Nat) : Bap.Var × Bap.Value :=
-    (⟨name, .imm 256, 0, false⟩, .bits (BitVec.ofNat 256 value))
+    (⟨name, .imm 512, 0, false⟩, .bits (BitVec.ofNat 512 value))
   let readYmm (state : Bil.State) (name : String) : IO Nat :=
-    match Bil.lookup state.env ⟨name, .imm 256, 0, false⟩ with
+    match Bil.lookup state.env ⟨name, .imm 512, 0, false⟩ with
     | .ok (.bits value) => pure value.toNat
     | _ => throw <| IO.userError s!"no {name}"
-  let upper := 0xdddddddddddddddd_cccccccccccccccc * 2 ^ 128
+  let upper := 0xdddddddddddddddd_cccccccccccccccc_bbbbbbbbbbbbbbbb_aaaaaaaaaaaaaaaa_9999999999999999_8888888888888888 * 2 ^ 128
   assertEqual "movd to xmm clears the rest of xmm" (upper + 0x11223344)
-    (← readYmm (← execute (← decode [0x66, 0x0f, 0x6e, 0xc0]) [ymm "YMM0" (upper + 0xffff * 2 ^ 64), word64 "RAX" 0x55667788_11223344]) "YMM0")
+    (← readYmm (← execute (← decode [0x66, 0x0f, 0x6e, 0xc0]) [ymm "ZMM0" (upper + 0xffff * 2 ^ 64), word64 "RAX" 0x55667788_11223344]) "ZMM0")
   assertEqual "movq to xmm clears the rest of xmm" (upper + 0x5566778811223344)
-    (← readYmm (← execute (← decode [0x66, 0x48, 0x0f, 0x6e, 0xc0]) [ymm "YMM0" (upper + 0xffff * 2 ^ 64), word64 "RAX" 0x5566778811223344]) "YMM0")
+    (← readYmm (← execute (← decode [0x66, 0x48, 0x0f, 0x6e, 0xc0]) [ymm "ZMM0" (upper + 0xffff * 2 ^ 64), word64 "RAX" 0x5566778811223344]) "ZMM0")
   assertReg "movd from xmm clears the upper half of RAX" "RAX" 0x44332211
-    (← execute (← decode [0x66, 0x0f, 0x7e, 0xc0]) [ymm "YMM0" 0x8877665544332211, word64 "RAX" (2 ^ 64 - 1)])
+    (← execute (← decode [0x66, 0x0f, 0x7e, 0xc0]) [ymm "ZMM0" 0x8877665544332211, word64 "RAX" (2 ^ 64 - 1)])
   assertReg "movq from xmm" "RAX" 0x8877665544332211
-    (← execute (← decode [0x66, 0x48, 0x0f, 0x7e, 0xc0]) [ymm "YMM0" (0x99 * 2 ^ 64 + 0x8877665544332211), word64 "RAX" 0])
-  -- with a VEX prefix, the upper half of YMM is cleared
-  assertEqual "vmovaps clears the upper half" 0x1234
-    (← readYmm (← execute (← decode [0xc5, 0xf8, 0x28, 0xc1]) [ymm "YMM0" upper, ymm "YMM1" 0x1234]) "YMM0")
+    (← execute (← decode [0x66, 0x48, 0x0f, 0x7e, 0xc0]) [ymm "ZMM0" (0x99 * 2 ^ 64 + 0x8877665544332211), word64 "RAX" 0])
+  -- with a VEX prefix, the upper bits of ZMM are cleared
+  assertEqual "vmovaps clears the upper bits" 0x1234
+    (← readYmm (← execute (← decode [0xc5, 0xf8, 0x28, 0xc1]) [ymm "ZMM0" upper, ymm "ZMM1" 0x1234]) "ZMM0")
   -- memory: a load and the store of what it loaded
   let cell : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
   let value := 0x00112233445566778899aabbccddeeff
   let memory ← match Memory.write (Memory.empty 64) (BitVec.ofNat 64 0x1000) (BitVec.ofNat 128 value) .little 16 with
     | .ok memory => pure memory
     | .error error => throw <| IO.userError error
-  let start : Bil.Env := [(cell, .memory memory), word64 "RAX" 0x1000, ymm "YMM0" upper, word64 "RBX" 0x2000]
-  assertEqual "movaps from memory" (upper + value) (← readYmm (← execute (← decode [0x0f, 0x28, 0x00]) start) "YMM0")
-  assertEqual "movdqu from memory" (upper + value) (← readYmm (← execute (← decode [0xf3, 0x0f, 0x6f, 0x00]) start) "YMM0")
+  let start : Bil.Env := [(cell, .memory memory), word64 "RAX" 0x1000, ymm "ZMM0" upper, word64 "RBX" 0x2000]
+  assertEqual "movaps from memory" (upper + value) (← readYmm (← execute (← decode [0x0f, 0x28, 0x00]) start) "ZMM0")
+  assertEqual "movdqu from memory" (upper + value) (← readYmm (← execute (← decode [0xf3, 0x0f, 0x6f, 0x00]) start) "ZMM0")
   assertEqual "movss from memory clears the rest of xmm" (upper + 0xccddeeff)
-    (← readYmm (← execute (← decode [0xf3, 0x0f, 0x10, 0x00]) start) "YMM0")
+    (← readYmm (← execute (← decode [0xf3, 0x0f, 0x10, 0x00]) start) "ZMM0")
   assertEqual "movsd from memory clears the rest of xmm" (upper + 0x8899aabbccddeeff)
-    (← readYmm (← execute (← decode [0xf2, 0x0f, 0x10, 0x00]) start) "YMM0")
+    (← readYmm (← execute (← decode [0xf2, 0x0f, 0x10, 0x00]) start) "ZMM0")
   let loaded ← execute (← decode [0x0f, 0x28, 0x00]) start
   let stored ← execute (← decode [0x0f, 0x11, 0x03]) loaded.env
   assertEqual "movups to memory, read back" (upper * 0 + upper + value)
-    (← readYmm (← execute (← decode [0xf3, 0x0f, 0x6f, 0x0b]) (ymm "YMM1" upper :: stored.env)) "YMM1")
+    (← readYmm (← execute (← decode [0xf3, 0x0f, 0x6f, 0x0b]) (ymm "ZMM1" upper :: stored.env)) "ZMM1")
   -- BIL has no floats: the floating point of SSE lifts to named intrinsics.
   let addsd ← decode [0xf2, 0x0f, 0x58, 0xc1]
   assertTrue "addsd calls its intrinsic" (addsd.bil.any fun stmt =>
     match stmt with
     | .special "fadd_rne_ieee754_binary_64" => true
     | _ => false)
+
+/-- The state that the cases of `evexCases` start from. -/
+private def evexA : Nat := 0xa0ffe2d5c77dfd034364cb6a8a9c41fccd092b886c15951b0aec2476b28c1f78a7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619
+private def evexB : Nat := 0xa0ac7bd5c77dfd030164ed938a9c41fc28f52bd56c15951b0a86b476b28c1f7880b5ae31db1d9c270213f007776d462e7aa37783f99dd2ecaffcaa53b0dd1619
+private def evexC : Nat := 0xdf4f406786042943bd319236dfdfc8c97e0584637f6b39e9b07a36ac998603dbbdb773e8d770f2d156547302f808b9301e894a8f389ce1b0e8c68886c211741e
+private def evexM : Nat := 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b7480b5ae31a3669cfd0213f00775238f327aa377836c9d91a5affcaa53a9c98a19
+private def evexZ16 : Nat := 0x27ed33963dbc17d4f6f343e8e81a7666bea39fd950c2ea80b97745e81dfe28bc1cb7dfcb531f2da2a200ffdaf94dc306410873405d0c3044e2b1608296e343fb
+private def evexK1 : Nat := 0x5a3c96f01e78d2b5
+private def evexK3 : Nat := 0xf0f0cc33aa5581c7
+private def evexRcx : Nat := 0x8877665544332211
+
+/-- All the AVX-512 opcodes of glibc on real encodings: the opcode, its bytes, the registers and the flags after it, and
+the 64 bytes of memory at RAX. The results are computed by hand from the architecture, not from the semantics. -/
+private def evexCases : List (String × List Nat × List (String × Nat) × List (String × Nat) × Option Nat) :=
+  [
+  ("KMOVDkr", [0xc5, 0xfb, 0x92, 0xd1],
+    [("K2", 0x44332211)],
+    [], none),
+  ("KMOVDrk", [0xc5, 0xfb, 0x93, 0xc9],
+    [("RCX", 0x1e78d2b5)],
+    [], none),
+  ("KMOVQkr", [0xc4, 0xe1, 0xfb, 0x92, 0xd1],
+    [("K2", 0x8877665544332211)],
+    [], none),
+  ("KMOVQrk", [0xc4, 0xe1, 0xfb, 0x93, 0xc9],
+    [("RCX", 0x5a3c96f01e78d2b5)],
+    [], none),
+  ("KORDkk", [0xc4, 0xe1, 0xf5, 0x45, 0xd3],
+    [("K2", 0xbe7dd3f7)],
+    [], none),
+  ("KORTESTBkk", [0xc5, 0xf9, 0x98, 0xcb],
+    [],
+    [("ZF", 0), ("CF", 0), ("OF", 0), ("SF", 0), ("PF", 0), ("AF", 0)], none),
+  ("KORTESTDkk", [0xc4, 0xe1, 0xf9, 0x98, 0xcb],
+    [],
+    [("ZF", 0), ("CF", 0), ("OF", 0), ("SF", 0), ("PF", 0), ("AF", 0)], none),
+  ("KORTESTQkk", [0xc4, 0xe1, 0xf8, 0x98, 0xcb],
+    [],
+    [("ZF", 0), ("CF", 0), ("OF", 0), ("SF", 0), ("PF", 0), ("AF", 0)], none),
+  ("KORTESTWkk", [0xc5, 0xf8, 0x98, 0xcb],
+    [],
+    [("ZF", 0), ("CF", 0), ("OF", 0), ("SF", 0), ("PF", 0), ("AF", 0)], none),
+  ("VBROADCASTSSZrr", [0x62, 0xa2, 0x7d, 0x48, 0x18, 0xd9],
+    [("ZMM19", 0xb0dd1619b0dd1619b0dd1619b0dd1619b0dd1619b0dd1619b0dd1619b0dd1619b0dd1619b0dd1619b0dd1619b0dd1619b0dd1619b0dd1619b0dd1619b0dd1619)],
+    [], none),
+  ("VMOVAPSZmr", [0x62, 0xe1, 0x7c, 0x48, 0x29, 0x8],
+    [],
+    [], some 0xa0ffe2d5c77dfd034364cb6a8a9c41fccd092b886c15951b0aec2476b28c1f78a7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619),
+  ("VMOVDQA64Z256mr", [0x62, 0xe1, 0xfd, 0x28, 0x7f, 0x8],
+    [],
+    [], some 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b74a7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619),
+  ("VMOVDQA64Z256rm", [0x62, 0xe1, 0xfd, 0x28, 0x6f, 0x18],
+    [("ZMM19", 0x80b5ae31a3669cfd0213f00775238f327aa377836c9d91a5affcaa53a9c98a19)],
+    [], none),
+  ("VMOVDQA64Z256rr", [0x62, 0xa1, 0xfd, 0x28, 0x6f, 0xd9],
+    [("ZMM19", 0xa7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619)],
+    [], none),
+  ("VMOVDQA64Zmr", [0x62, 0xe1, 0xfd, 0x48, 0x7f, 0x8],
+    [],
+    [], some 0xa0ffe2d5c77dfd034364cb6a8a9c41fccd092b886c15951b0aec2476b28c1f78a7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619),
+  ("VMOVDQA64Zrm", [0x62, 0xe1, 0xfd, 0x48, 0x6f, 0x18],
+    [("ZMM19", 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b7480b5ae31a3669cfd0213f00775238f327aa377836c9d91a5affcaa53a9c98a19)],
+    [], none),
+  ("VMOVDQA64Zrr", [0x62, 0xa1, 0xfd, 0x48, 0x6f, 0xd9],
+    [("ZMM19", 0xa0ffe2d5c77dfd034364cb6a8a9c41fccd092b886c15951b0aec2476b28c1f78a7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619)],
+    [], none),
+  ("VMOVDQU32Z256rmkz", [0x62, 0xe1, 0x7e, 0xa9, 0x6f, 0x18],
+    [("ZMM19", 0x80b5ae31000000000213f00775238f32000000006c9d91a500000000a9c98a19)],
+    [], none),
+  ("VMOVDQU64Z128mr", [0x62, 0xe1, 0xfe, 0x8, 0x7f, 0x8],
+    [],
+    [], some 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b7480b5ae31a3669cfd0213f00775238f327a5a3083f99dd2ec08fc3786b0dd1619),
+  ("VMOVDQU64Z128rm", [0x62, 0xe1, 0xfe, 0x8, 0x6f, 0x18],
+    [("ZMM19", 0x7aa377836c9d91a5affcaa53a9c98a19)],
+    [], none),
+  ("VMOVDQU64Z256mr", [0x62, 0xe1, 0xfe, 0x28, 0x7f, 0x8],
+    [],
+    [], some 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b74a7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619),
+  ("VMOVDQU64Z256rm", [0x62, 0xe1, 0xfe, 0x28, 0x6f, 0x18],
+    [("ZMM19", 0x80b5ae31a3669cfd0213f00775238f327aa377836c9d91a5affcaa53a9c98a19)],
+    [], none),
+  ("VMOVDQU64Zmr", [0x62, 0xe1, 0xfe, 0x48, 0x7f, 0x8],
+    [],
+    [], some 0xa0ffe2d5c77dfd034364cb6a8a9c41fccd092b886c15951b0aec2476b28c1f78a7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619),
+  ("VMOVDQU64Zrm", [0x62, 0xe1, 0xfe, 0x48, 0x6f, 0x18],
+    [("ZMM19", 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b7480b5ae31a3669cfd0213f00775238f327aa377836c9d91a5affcaa53a9c98a19)],
+    [], none),
+  ("VMOVDQU8Z256mrk", [0x62, 0xe1, 0x7f, 0x29, 0x7f, 0x8],
+    [],
+    [], some 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b7480b5ae5edb1d9cfd029cf0b977238f327a5a77836c9dd2a508fc3786a9dd8a19),
+  ("VMOVDQU8Z256rmkz", [0x62, 0xe1, 0x7f, 0xa9, 0x6f, 0x18],
+    [("ZMM19", 0x31a3669c000013f007750000007aa3008300009100af00aa5300c90019)],
+    [], none),
+  ("VMOVDQU8Zmrk", [0x62, 0xe1, 0x7f, 0x49, 0x7f, 0x8],
+    [],
+    [], some 0xa0ff7bd5c74efda80164cb6a8a9c27b7cdf52b88bd15951b0aec2476b2695b7480b5ae5edb1d9cfd029cf0b977238f327a5a77836c9dd2a508fc3786a9dd8a19),
+  ("VMOVNTDQZ256mr", [0x62, 0xe1, 0x7d, 0x28, 0xe7, 0x8],
+    [],
+    [], some 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b74a7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619),
+  ("VMOVNTDQZmr", [0x62, 0xe1, 0x7d, 0x48, 0xe7, 0x8],
+    [],
+    [], some 0xa0ffe2d5c77dfd034364cb6a8a9c41fccd092b886c15951b0aec2476b28c1f78a7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619),
+  ("VMOVPDI2DIZmr", [0x62, 0xe1, 0x7d, 0x8, 0x7e, 0x0],
+    [],
+    [], some 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b7480b5ae31a3669cfd0213f00775238f327aa377836c9d91a5affcaa5396e343fb),
+  ("VMOVPDI2DIZrr", [0x62, 0xe1, 0x7d, 0x8, 0x7e, 0xc1],
+    [("RCX", 0x96e343fb)],
+    [], none),
+  ("VMOVPQIto64Zmr", [0x62, 0xe1, 0xfd, 0x8, 0x7e, 0x0],
+    [],
+    [], some 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b7480b5ae31a3669cfd0213f00775238f327aa377836c9d91a5e2b1608296e343fb),
+  ("VMOVPQIto64Zrr", [0x62, 0xe1, 0xfd, 0x8, 0x7e, 0xc1],
+    [("RCX", 0xe2b1608296e343fb)],
+    [], none),
+  ("VMOVUPSZmr", [0x62, 0xe1, 0x7c, 0x48, 0x11, 0x8],
+    [],
+    [], some 0xa0ffe2d5c77dfd034364cb6a8a9c41fccd092b886c15951b0aec2476b28c1f78a7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619),
+  ("VMOVUPSZrm", [0x62, 0xe1, 0x7c, 0x48, 0x10, 0x18],
+    [("ZMM19", 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b7480b5ae31a3669cfd0213f00775238f327aa377836c9d91a5affcaa53a9c98a19)],
+    [], none),
+  ("VPADDBZ128rrk", [0x62, 0xa1, 0x6d, 0x1, 0xfc, 0xd9],
+    [("ZMM19", 0xf4fd4a06389ca4b0b7c6e1d9c2ba7432)],
+    [], none),
+  ("VPADDBZ256rrk", [0x62, 0xa1, 0x6d, 0x21, 0xfc, 0xd9],
+    [("ZMM19", 0xbdb7738fb63a38d156afe0c0ee08b930f4fd4a06389ca4b0b7c6e1d9c2ba7432)],
+    [], none),
+  ("VPBROADCASTBrZ256rr", [0x62, 0xe2, 0x7d, 0x28, 0x7a, 0xd9],
+    [("ZMM19", 0x1111111111111111111111111111111111111111111111111111111111111111)],
+    [], none),
+  ("VPBROADCASTBrZrr", [0x62, 0xe2, 0x7d, 0x48, 0x7a, 0xd9],
+    [("ZMM19", 0x11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111)],
+    [], none),
+  ("VPBROADCASTDrZ256rr", [0x62, 0xe2, 0x7d, 0x28, 0x7c, 0xd9],
+    [("ZMM19", 0x4433221144332211443322114433221144332211443322114433221144332211)],
+    [], none),
+  ("VPBROADCASTDrZrr", [0x62, 0xe2, 0x7d, 0x48, 0x7c, 0xd9],
+    [("ZMM19", 0x44332211443322114433221144332211443322114433221144332211443322114433221144332211443322114433221144332211443322114433221144332211)],
+    [], none),
+  ("VPCMPBZ256rmi", [0x62, 0xf3, 0x6d, 0x20, 0x3f, 0x10, 0x1],
+    [("K2", 0x4010800)],
+    [], none),
+  ("VPCMPBZ256rmik", [0x62, 0xf3, 0x6d, 0x23, 0x3f, 0x10, 0x1],
+    [("K2", 0x10000)],
+    [], none),
+  ("VPCMPBZ256rri", [0x62, 0xb3, 0x6d, 0x20, 0x3f, 0xd1, 0x1],
+    [("K2", 0xb08040a0)],
+    [], none),
+  ("VPCMPBZ256rrik", [0x62, 0xb3, 0x6d, 0x23, 0x3f, 0xd1, 0x1],
+    [("K2", 0xa0000080)],
+    [], none),
+  ("VPCMPBZrmi", [0x62, 0xf3, 0x6d, 0x40, 0x3f, 0x10, 0x1],
+    [("K2", 0xa08020604010800)],
+    [], none),
+  ("VPCMPBZrri", [0x62, 0xb3, 0x6d, 0x40, 0x3f, 0xd1, 0x1],
+    [("K2", 0x40904060b08040a0)],
+    [], none),
+  ("VPCMPBZrrik", [0x62, 0xb3, 0x6d, 0x43, 0x3f, 0xd1, 0x1],
+    [("K2", 0x40904020a0000080)],
+    [], none),
+  ("VPCMPDZ256rmi", [0x62, 0xf3, 0x6d, 0x20, 0x1f, 0x10, 0x6],
+    [("K2", 0x51)],
+    [], none),
+  ("VPCMPDZ256rmik", [0x62, 0xf3, 0x6d, 0x23, 0x1f, 0x10, 0x6],
+    [("K2", 0x41)],
+    [], none),
+  ("VPCMPDZ256rri", [0x62, 0xb3, 0x6d, 0x20, 0x1f, 0xd1, 0x6],
+    [("K2", 0x8)],
+    [], none),
+  ("VPCMPDZ256rrik", [0x62, 0xb3, 0x6d, 0x23, 0x1f, 0xd1, 0x6],
+    [("K2", 0x0)],
+    [], none),
+  ("VPCMPDZrmi", [0x62, 0xf3, 0x6d, 0x40, 0x1f, 0x10, 0x6],
+    [("K2", 0x551)],
+    [], none),
+  ("VPCMPDZrri", [0x62, 0xb3, 0x6d, 0x40, 0x1f, 0xd1, 0x6],
+    [("K2", 0x808)],
+    [], none),
+  ("VPCMPDZrrik", [0x62, 0xb3, 0x6d, 0x43, 0x1f, 0xd1, 0x6],
+    [("K2", 0x0)],
+    [], none),
+  ("VPCMPEQBZ128rmk", [0x62, 0xf1, 0x6d, 0x3, 0x74, 0x10],
+    [("K2", 0x80c1)],
+    [], none),
+  ("VPCMPEQBZ128rrk", [0x62, 0xb1, 0x6d, 0x3, 0x74, 0xd1],
+    [("K2", 0x8147)],
+    [], none),
+  ("VPCMPEQBZ256rm", [0x62, 0xf1, 0x6d, 0x20, 0x74, 0x10],
+    [("K2", 0xf2f0f4f1)],
+    [], none),
+  ("VPCMPEQBZ256rmk", [0x62, 0xf1, 0x6d, 0x23, 0x74, 0x10],
+    [("K2", 0xa25080c1)],
+    [], none),
+  ("VPCMPEQBZ256rr", [0x62, 0xb1, 0x6d, 0x20, 0x74, 0xd1],
+    [("K2", 0x4f2f9f4f)],
+    [], none),
+  ("VPCMPEQBZ256rrk", [0x62, 0xb1, 0x6d, 0x23, 0x74, 0xd1],
+    [("K2", 0xa058147)],
+    [], none),
+  ("VPCMPEQBZrm", [0x62, 0xf1, 0x6d, 0x40, 0x74, 0x10],
+    [("K2", 0xf0f4f1f8f2f0f4f1)],
+    [], none),
+  ("VPCMPEQBZrr", [0x62, 0xb1, 0x6d, 0x40, 0x74, 0xd1],
+    [("K2", 0x9f4f2f9f4f2f9f4f)],
+    [], none),
+  ("VPCMPEQDZ128rmk", [0x62, 0xf1, 0x6d, 0x3, 0x76, 0x10],
+    [("K2", 0x2)],
+    [], none),
+  ("VPCMPEQDZ128rrk", [0x62, 0xb1, 0x6d, 0x3, 0x76, 0xd1],
+    [("K2", 0x5)],
+    [], none),
+  ("VPCMPEQDZ256rm", [0x62, 0xf1, 0x6d, 0x20, 0x76, 0x10],
+    [("K2", 0xaa)],
+    [], none),
+  ("VPCMPEQDZ256rmk", [0x62, 0xf1, 0x6d, 0x23, 0x76, 0x10],
+    [("K2", 0x82)],
+    [], none),
+  ("VPCMPEQDZ256rr", [0x62, 0xb1, 0x6d, 0x20, 0x76, 0xd1],
+    [("K2", 0x55)],
+    [], none),
+  ("VPCMPEQDZrm", [0x62, 0xf1, 0x6d, 0x40, 0x76, 0x10],
+    [("K2", 0xaaaa)],
+    [], none),
+  ("VPCMPEQDZrr", [0x62, 0xb1, 0x6d, 0x40, 0x76, 0xd1],
+    [("K2", 0x5555)],
+    [], none),
+  ("VPCMPUBZ128rri", [0x62, 0xb3, 0x6d, 0x0, 0x3e, 0xd1, 0x6],
+    [("K2", 0x60a0)],
+    [], none),
+  ("VPCMPUBZ256rmi", [0x62, 0xf3, 0x6d, 0x20, 0x3e, 0x10, 0x6],
+    [("K2", 0x80c0b0c)],
+    [], none),
+  ("VPCMPUBZ256rmik", [0x62, 0xf3, 0x6d, 0x23, 0x3e, 0x10, 0x6],
+    [("K2", 0x8040104)],
+    [], none),
+  ("VPCMPUBZ256rri", [0x62, 0xb3, 0x6d, 0x20, 0x3e, 0xd1, 0x6],
+    [("K2", 0x200060a0)],
+    [], none),
+  ("VPMINUBZ256rm", [0x62, 0xe1, 0x6d, 0x20, 0xda, 0x18],
+    [("ZMM19", 0x80b5ae31a31d9c270213f0077523462e7aa377836c9d91a5affcaa53a9c91619)],
+    [], none),
+  ("VPMINUBZ256rr", [0x62, 0xa1, 0x6d, 0x20, 0xda, 0xd9],
+    [("ZMM19", 0x80b56131db1d9c270213f007776d462e7a5a3083f99dd2ec08fc3753b0dd1619)],
+    [], none),
+  ("VPMINUBZ256rrkz", [0x62, 0xa1, 0x6d, 0xa1, 0xda, 0xd9],
+    [("ZMM19", 0x31db1d9c000013f007770000007a5a00830000d2000800375300dd0019)],
+    [], none),
+  ("VPMINUBZrm", [0x62, 0xe1, 0x6d, 0x40, 0xda, 0x18],
+    [("ZMM19", 0xa0ac7bd5c74e1c030164ed938a9c27b728f52bd56c150c1b0a86b476b2691f7480b5ae31a31d9c270213f0077523462e7aa377836c9d91a5affcaa53a9c91619)],
+    [], none),
+  ("VPMINUBZrr", [0x62, 0xa1, 0x6d, 0x40, 0xda, 0xd9],
+    [("ZMM19", 0xa0ac7bd5c77dfd030164cb6a8a9c41fc28092b886c15951b0a862476b28c1f7880b56131db1d9c270213f007776d462e7a5a3083f99dd2ec08fc3753b0dd1619)],
+    [], none),
+  ("VPMINUBZrrkz", [0x62, 0xa1, 0x6d, 0xc1, 0xda, 0xd9],
+    [("ZMM19", 0xac00d5c700fd000000cb6a8a9c000028000088001595000a8624760000000000000031db1d9c000013f007770000007a5a00830000d2000800375300dd0019)],
+    [], none),
+  ("VPMINUDZ256rm", [0x62, 0xe2, 0x6d, 0x20, 0x3b, 0x18],
+    [("ZMM19", 0x80b5ae31a3669cfd0213f00775238f327aa377836c9d91a5affcaa53a9c98a19)],
+    [], none),
+  ("VPMINUDZ256rr", [0x62, 0xa2, 0x6d, 0x20, 0x3b, 0xd9],
+    [("ZMM19", 0x80b5ae31db1d9c270213f007776d462e7a5a3083f99dd2ec08fc3786b0dd1619)],
+    [], none),
+  ("VPMINUDZ256rrkz", [0x62, 0xa2, 0x6d, 0xa1, 0x3b, 0xd9],
+    [("ZMM19", 0x80b5ae31000000000213f007776d462e00000000f99dd2ec00000000b0dd1619)],
+    [], none),
+  ("VPMINUDZrm", [0x62, 0xe2, 0x6d, 0x40, 0x3b, 0x18],
+    [("ZMM19", 0xa0ac7bd5c77dfd030164ed938a9c41fc28f52bd56c15951b0a86b476b2695b7480b5ae31a3669cfd0213f00775238f327aa377836c9d91a5affcaa53a9c98a19)],
+    [], none),
+  ("VPMINUDZrr", [0x62, 0xa2, 0x6d, 0x40, 0x3b, 0xd9],
+    [("ZMM19", 0xa0ac7bd5c77dfd030164ed938a9c41fc28f52bd56c15951b0a86b476b28c1f7880b5ae31db1d9c270213f007776d462e7a5a3083f99dd2ec08fc3786b0dd1619)],
+    [], none),
+  ("VPMINUDZrrkz", [0x62, 0xa2, 0x6d, 0xc1, 0x3b, 0xd9],
+    [("ZMM19", 0xa0ac7bd5c77dfd03000000008a9c41fc00000000000000000a86b4760000000080b5ae31000000000213f007776d462e00000000f99dd2ec00000000b0dd1619)],
+    [], none),
+  ("VPSUBBZ128rr", [0x62, 0xa1, 0x6d, 0x0, 0xf8, 0xd9],
+    [("ZMM19", 0x49470000000000a70073cd00000000)],
+    [], none),
+  ("VPSUBBZ256rr", [0x62, 0xa1, 0x6d, 0x20, 0xf8, 0xd9],
+    [("ZMM19", 0xd9004dd300000000e677004e000000000049470000000000a70073cd00000000)],
+    [], none),
+  ("VPTERNLOGDZ256rmi", [0x62, 0xe3, 0x6d, 0x20, 0x25, 0x18, 0xde],
+    [("ZMM19", 0xbdb7fff9ff1ffe2f5657f307ff6f762e7eab7f8ffd9df2fdeffeaad7fbddfe1f)],
+    [], none),
+  ("VPTERNLOGDZ256rri", [0x62, 0xa3, 0x6d, 0x20, 0x25, 0xd9, 0xde],
+    [("ZMM19", 0x9ab7beb7df7dfef74adbf3bfff6dff3e7ef37f8ff99df3fceffebf53f2dd761f)],
+    [], none),
+  ("VPTERNLOGDZ256rrikz", [0x62, 0xa3, 0x6d, 0xa1, 0x25, 0xd9, 0xde],
+    [("ZMM19", 0x9ab7beb7000000004adbf3bfff6dff3e00000000f99df3fc00000000f2dd761f)],
+    [], none),
+  ("VPTESTMBZ128rr", [0x62, 0xb2, 0x6d, 0x0, 0x26, 0xd1],
+    [("K2", 0xffff)],
+    [], none),
+  ("VPTESTMBZ256rr", [0x62, 0xb2, 0x6d, 0x20, 0x26, 0xd1],
+    [("K2", 0xff7fffff)],
+    [], none),
+  ("VPTESTMBZ256rrk", [0x62, 0xb2, 0x6d, 0x23, 0x26, 0xd1],
+    [("K2", 0xaa5581c7)],
+    [], none),
+  ("VPTESTMBZrrk", [0x62, 0xb2, 0x6d, 0x43, 0x26, 0xd1],
+    [("K2", 0xf0f0cc33aa5581c7)],
+    [], none),
+  ("VPTESTMDZ128rr", [0x62, 0xb2, 0x6d, 0x0, 0x27, 0xd1],
+    [("K2", 0xf)],
+    [], none),
+  ("VPTESTMDZ256rr", [0x62, 0xb2, 0x6d, 0x20, 0x27, 0xd1],
+    [("K2", 0xff)],
+    [], none),
+  ("VPTESTMDZ256rrk", [0x62, 0xb2, 0x6d, 0x23, 0x27, 0xd1],
+    [("K2", 0xc7)],
+    [], none),
+  ("VPTESTMDZrrk", [0x62, 0xb2, 0x6d, 0x43, 0x27, 0xd1],
+    [("K2", 0x81c7)],
+    [], none),
+  ("VPTESTNMBZ256rr", [0x62, 0xb2, 0x6e, 0x20, 0x26, 0xd1],
+    [("K2", 0x800000)],
+    [], none),
+  ("VPTESTNMBZ256rrk", [0x62, 0xb2, 0x6e, 0x23, 0x26, 0xd1],
+    [("K2", 0x0)],
+    [], none),
+  ("VPTESTNMBZrr", [0x62, 0xb2, 0x6e, 0x40, 0x26, 0xd1],
+    [("K2", 0x800000)],
+    [], none),
+  ("VPTESTNMDZ256rr", [0x62, 0xb2, 0x6e, 0x20, 0x27, 0xd1],
+    [("K2", 0x0)],
+    [], none),
+  ("VPTESTNMDZ256rrk", [0x62, 0xb2, 0x6e, 0x23, 0x27, 0xd1],
+    [("K2", 0x0)],
+    [], none),
+  ("VPTESTNMDZrr", [0x62, 0xb2, 0x6e, 0x40, 0x27, 0xd1],
+    [("K2", 0x0)],
+    [], none),
+  ("VPXORQZ128rr", [0x62, 0xa1, 0xed, 0x0, 0xef, 0xd9],
+    [("ZMM19", 0xf9470000000000a7009dd500000000)],
+    [], none),
+  ("VPXORQZ256rm", [0x62, 0xe1, 0xed, 0x20, 0xef, 0x18],
+    [("ZMM19", 0x787b00da00000000024ec91c00000000950043490000000019149c00)],
+    [], none),
+  ("VPXORQZ256rr", [0x62, 0xa1, 0xed, 0x20, 0xef, 0xd9],
+    [("ZMM19", 0x2700cf6f000000001e8f00be0000000000f9470000000000a7009dd500000000)],
+    [], none),
+  ("VPXORQZrm", [0x62, 0xe1, 0xed, 0x40, 0xef, 0x18],
+    [("ZMM19", 0x2233e1ab000000005000664b00000000d1f999000000000000e5440c00000000787b00da00000000024ec91c00000000950043490000000019149c00)],
+    [], none),
+  ("VPADDDZ256rmbk", [0x62, 0xe1, 0x6d, 0x31, 0xfe, 0x18],
+    [("ZMM19", 0x2a7f384ad770f2d1abdd7a202136d0471e894a8fa3675d05e8c688865aa6a032)],
+    [], none),
+  ("VPADDDZ256rmbkz", [0x62, 0xe1, 0x6d, 0xb1, 0xfe, 0x18],
+    [("ZMM19", 0x2a7f384a00000000abdd7a202136d04700000000a3675d05000000005aa6a032)],
+    [], none),
+  ("VPSRLDZrik", [0x62, 0xb1, 0x65, 0x41, 0x72, 0xd1, 0x3],
+    [("ZMM19", 0x141ffc5a18efbfa0bd3192361153883f7e0584637f6b39e9015d848e998603db14f6ac2bd770f2d103939e170eeda8c51e894a8f1f33ba5de8c68886161ba2c3)],
+    [], none),
+  ("VPSRLDZrr", [0x62, 0xa1, 0x6d, 0x40, 0xd2, 0xd9],
+    [("ZMM19", 0x0)],
+    [], none),
+  ("VPSLLQZ256mik", [0x62, 0xf1, 0xe5, 0x21, 0x73, 0x30, 0x3c],
+    [("ZMM19", 0xbdb773e8d770f2d120000000000000001e894a8f389ce1b09000000000000000)],
+    [], none),
+  ("VPSRAVDZrr", [0x62, 0xa2, 0x6d, 0x40, 0x46, 0xd9],
+    [("ZMM19", 0xffffffffffffffff00000000ffffffff000000000000000000000000ffffffffffffffffffffffff000000000000000000000000ffffffffffffffffffffffff)],
+    [], none),
+  ("VPERMDZrr", [0x62, 0xa2, 0x75, 0x40, 0x36, 0xda],
+    [("ZMM19", 0x213f0077aa377836c15951b8a9c41fcb28c1f7828f52bd5db1d9c27b28c1f78c77dfd0380b5ae310a86b476c77dfd037aa377838a9c41fcdb1d9c270a86b476)],
+    [], none),
+  ("VPERMT2DZrrk", [0x62, 0xa2, 0x6d, 0x41, 0x7e, 0xd9],
+    [("ZMM19", 0x1c9cf0b91e894a8fbd3192368a9c41fc7e0584637f6b39e9db1d9c27998603db08fc3786d770f2d1bdb773e8860429431e894a8fdfdfc8c9e8c688860aec2476)],
+    [], none),
+  ("VPERMI2DZrrkz", [0x62, 0xa2, 0x6d, 0xc1, 0x76, 0xd9],
+    [("ZMM19", 0x80b5ae317aa37783000000000a86b47600000000000000008a9c41fc00000000b28c1f7800000000f99dd2ecb0dd161900000000b0dd161900000000c77dfd03)],
+    [], none),
+  ("VPALIGNRZ256rri", [0x62, 0xa3, 0x6d, 0x20, 0xf, 0xd9, 0x5],
+    [("ZMM19", 0x7776d462ea7b5615edb1d9c271c9cf053b0dd16197a5a3083f99dd2ec08fc37)],
+    [], none),
+  ("VEXTRACTI32X4Zrrik", [0x62, 0xa3, 0x7d, 0x49, 0x39, 0xcb, 0x1],
+    [("ZMM19", 0x1e894a8fdb1d9c27e8c68886776d462e)],
+    [], none),
+  ("VEXTRACTI64X4Zmri", [0x62, 0xe3, 0xfd, 0x48, 0x3b, 0x8, 0x1],
+    [],
+    [], some 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b74a0ffe2d5c77dfd034364cb6a8a9c41fccd092b886c15951b0aec2476b28c1f78),
+  ("VINSERTI64X2Z256rri", [0x62, 0xa3, 0xed, 0x20, 0x38, 0xd9, 0x1],
+    [("ZMM19", 0x7a5a3083f99dd2ec08fc3786b0dd16197aa37783f99dd2ecaffcaa53b0dd1619)],
+    [], none),
+  ("VPMOVZXBWZ256rrk", [0x62, 0xa2, 0x7d, 0x29, 0x30, 0xd9],
+    [("ZMM19", 0x7a005ad77000835654730200d2b93000084a8f00370086e8c600ddc2110019)],
+    [], none),
+  ("VPMOVSXDQZrmkz", [0x62, 0xe2, 0x7d, 0xc9, 0x25, 0x18],
+    [("ZMM19", 0xffffffff80b5ae310000000000000000000000000213f0070000000075238f320000000000000000000000006c9d91a50000000000000000ffffffffa9c98a19)],
+    [], none),
+  ("VPMOVDBZrr", [0x62, 0xa2, 0x7e, 0x48, 0x31, 0xcb],
+    [("ZMM19", 0xd5036afc881b76785e27b92e83ec8619)],
+    [], none),
+  ("VPMOVSDBZ256rr", [0x62, 0xa2, 0x7e, 0x28, 0x21, 0xcb],
+    [("ZMM19", 0x80807f7f7f807f80)],
+    [], none),
+  ("VPMOVUSQDZrr", [0x62, 0xa2, 0x7e, 0x48, 0x15, 0xcb],
+    [("ZMM19", 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)],
+    [], none),
+  ("VPMOVQWZmrk", [0x62, 0xe2, 0x7e, 0x49, 0x34, 0x8],
+    [],
+    [], some 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b7480b5ae31a3669cfd0213f00775238f32fd037783951b1f78affc462ea9c91619),
+  ("VPMOVM2BZ128rk", [0x62, 0xe2, 0x7e, 0x8, 0x28, 0xd9],
+    [("ZMM19", 0xffff00ff0000ff00ff00ffff00ff00ff)],
+    [], none),
+  ("VPMOVB2MZ128kr", [0x62, 0xb2, 0x7e, 0x8, 0x29, 0xd1],
+    [("K2", 0x1f5c)],
+    [], none),
+  ("VPCOMPRESSDZrrkz", [0x62, 0xa2, 0x7d, 0xc9, 0x8b, 0xcb],
+    [("ZMM19", 0xa0ffe2d5c77dfd038a9c41fc0aec2476a7b5615e1c9cf0b9776d462ef99dd2ecb0dd1619)],
+    [], none),
+  ("VPCOMPRESSDZrrk", [0x62, 0xa2, 0x7d, 0x49, 0x8b, 0xcb],
+    [("ZMM19", 0xdf4f406786042943bd319236dfdfc8c97e0584637f6b39e9b07a36aca0ffe2d5c77dfd038a9c41fc0aec2476a7b5615e1c9cf0b9776d462ef99dd2ecb0dd1619)],
+    [], none),
+  ("VPEXPANDDZrrk", [0x62, 0xa2, 0x7d, 0x49, 0x89, 0xd9],
+    [("ZMM19", 0xb28c1f78a7b5615ebd319236db1d9c277e0584637f6b39e91c9cf0b9998603db776d462ed770f2d17a5a3083f99dd2ec1e894a8f08fc3786e8c68886b0dd1619)],
+    [], none),
+  ("VPEXPANDDZrmkz", [0x62, 0xe2, 0x7d, 0xc9, 0x89, 0x18],
+    [("ZMM19", 0xb2695b7480b5ae3100000000a3669cfd00000000000000000213f0070000000075238f32000000007aa377836c9d91a500000000affcaa5300000000a9c98a19)],
+    [], none),
+  ("VPSHUFBZ256rr", [0x62, 0xa2, 0x6d, 0x20, 0x0, 0xd9],
+    [("ZMM19", 0x46b500ae00023100000002ae13b59d9d190000000000ec00af000000fcd2)],
+    [], none),
+  ("VPSHUFDZrik", [0x62, 0xa1, 0x7d, 0x49, 0x70, 0xd9, 0x1b],
+    [("ZMM19", 0x8a9c41fc4364cb6abd319236a0ffe2d57e0584637f6b39e96c15951b998603db776d462ed770f2d1db1d9c27a7b5615e1e894a8f08fc3786e8c688867a5a3083)],
+    [], none),
+  ("VPSHUFLWZ128ri", [0x62, 0xa1, 0x7f, 0x8, 0x70, 0xd9, 0x1b],
+    [("ZMM19", 0x7a5a3083f99dd2ec1619b0dd378608fc)],
+    [], none),
+  ("VPSHUFHWZ128ri", [0x62, 0xa1, 0x7e, 0x8, 0x70, 0xd9, 0x1b],
+    [("ZMM19", 0xd2ecf99d30837a5a08fc3786b0dd1619)],
+    [], none),
+  ("VPUNPCKHDQZrr", [0x62, 0xa1, 0x6d, 0x40, 0x6a, 0xd9],
+    [("ZMM19", 0xa0ffe2d5a0ac7bd5c77dfd03c77dfd03cd092b8828f52bd56c15951b6c15951ba7b5615e80b5ae31db1d9c27db1d9c277a5a30837aa37783f99dd2ecf99dd2ec)],
+    [], none),
+  ("VPUNPCKLBWZ128rr", [0x62, 0xa1, 0x6d, 0x0, 0x60, 0xd9],
+    [("ZMM19", 0x8affcfc37aa8653b0b0dddd16161919)],
+    [], none),
+  ("VPACKSSDWZ256rr", [0x62, 0xa1, 0x6d, 0x20, 0x6b, 0xd9],
+    [("ZMM19", 0x800080007fff7fff800080007fff7fff7fff80007fff80007fff800080008000)],
+    [], none),
+  ("VSHUFI32X4Zrri", [0x62, 0xa3, 0x6d, 0x40, 0x43, 0xd9, 0x1b],
+    [("ZMM19", 0x7a5a3083f99dd2ec08fc3786b0dd1619a7b5615edb1d9c271c9cf0b9776d462e28f52bd56c15951b0a86b476b28c1f78a0ac7bd5c77dfd030164ed938a9c41fc)],
+    [], none),
+  ("VSHUFI64X2Z256rri", [0x62, 0xa3, 0xed, 0x20, 0x43, 0xd9, 0x1],
+    [("ZMM19", 0x7a5a3083f99dd2ec08fc3786b0dd161980b5ae31db1d9c270213f007776d462e)],
+    [], none),
+  ("VSHUFPSZrri", [0x62, 0xa1, 0x6c, 0x40, 0xc6, 0xd9, 0x1b],
+    [("ZMM19", 0x8a9c41fc4364cb6ac77dfd03a0ac7bd5b28c1f780aec24766c15951b28f52bd5776d462e1c9cf0b9db1d9c2780b5ae31b0dd161908fc3786f99dd2ec7aa37783)],
+    [], none),
+  ("VALIGNDZ256rri", [0x62, 0xa3, 0x6d, 0x20, 0x3, 0xd9, 0x3],
+    [("ZMM19", 0xf99dd2ecaffcaa53b0dd1619a7b5615edb1d9c271c9cf0b9776d462e7a5a3083)],
+    [], none),
+  ("VPBLENDMDZ256rrk", [0x62, 0xa2, 0x6d, 0x21, 0x64, 0xd9],
+    [("ZMM19", 0xa7b5615edb1d9c271c9cf0b9776d462e7aa37783f99dd2ecaffcaa53b0dd1619)],
+    [], none),
+  ("VPBLENDMDZ256rrkz", [0x62, 0xa2, 0x6d, 0xa1, 0x64, 0xd9],
+    [("ZMM19", 0xa7b5615e000000001c9cf0b9776d462e00000000f99dd2ec00000000b0dd1619)],
+    [], none),
+  ("VPROLDZ256ri", [0x62, 0xb1, 0x65, 0x20, 0x72, 0xc9, 0x5],
+    [("ZMM19", 0xf6ac2bd463b384fb939e1723eda8c5ce4b46106f33ba5d9f1f86f0c11ba2c336)],
+    [], none),
+  ("VPROLVQZrr", [0x62, 0xa2, 0xed, 0x40, 0x15, 0xd9],
+    [("ZMM19", 0x563deae3befe81dc0164ed938a9c41fab60aca8d947a95e780a86b476b28c1f8ece13c05ad718ed518b8084fc01dddbdd2ec7aa37783f99a761ba2c335ff954)],
+    [], none),
+  ("VPOPCNTDZ256rr", [0x62, 0xa2, 0x7d, 0x28, 0x55, 0xd9],
+    [("ZMM19", 0x120000001200000010000000120000000e000000140000000f0000000f)],
+    [], none),
+  ("VPLZCNTDZ256rr", [0x62, 0xa2, 0x7d, 0x28, 0x44, 0xd9],
+    [("ZMM19", 0x30000000100000001000000000000000400000000)],
+    [], none),
+  ("VPABSWZrr", [0x62, 0xa2, 0x7d, 0x48, 0x1d, 0xd9],
+    [("ZMM19", 0x5f011d2b388302fd43643496756441fc32f72b886c156ae50aec24764d741f78584b615e24e363d91c9c0f47776d462e7a5a308306632d1408fc37864f231619)],
+    [], none),
+  ("VPTERNLOGQZ128rrik", [0x62, 0xa3, 0xed, 0x1, 0x25, 0xd9, 0xf0],
+    [("ZMM19", 0x1e894a8f389ce1b0e8c68886c211741e)],
+    [], none),
+  ("VPMULLQZ128rr", [0x62, 0xa2, 0xed, 0x0, 0x40, 0xd9],
+    [("ZMM19", 0xc2be37237b400990163c718289124e71)],
+    [], none),
+  ("VPMULUDQZrr", [0x62, 0xa1, 0xed, 0x40, 0xf4, 0xd9],
+    [("ZMM19", 0x9b751d5bb8fcee094b0cd6842c21f0102da237a0954670d97c8728754f1e4840bb8bac977a158df137b6c5e39a693044f364659b7b4009907a30bd5189124e71)],
+    [], none),
+  ("VPADDSBZ128rr", [0x62, 0xa1, 0x6d, 0x0, 0xec, 0xd9],
+    [("ZMM19", 0x7ffd7f80f280a4d8b7f8e1d980ba2c32)],
+    [], none),
+  ("VPAVGBZ128rr", [0x62, 0xa1, 0x6d, 0x0, 0xe0, 0xd9],
+    [("ZMM19", 0x7a7f5483f99dd2ec5cfc716db0dd1619)],
+    [], none),
+  ("VPMAXSQZ128rr", [0x62, 0xa2, 0xed, 0x0, 0x3d, 0xd9],
+    [("ZMM19", 0x7aa37783f99dd2ec08fc3786b0dd1619)],
+    [], none),
+  ("VPCMPGTQZ128rrk", [0x62, 0xb2, 0xed, 0x3, 0x37, 0xd1],
+    [("K2", 0x2)],
+    [], none),
+  ("VBROADCASTI32X4Zrmk", [0x62, 0xe2, 0x7d, 0x49, 0x5a, 0x18],
+    [("ZMM19", 0x7aa377836c9d91a5bd319236a9c98a197e0584637f6b39e9affcaa53998603db7aa37783d770f2d1affcaa53a9c98a191e894a8f6c9d91a5e8c68886a9c98a19)],
+    [], none),
+  ("VBROADCASTI64X4Zrm", [0x62, 0xe2, 0xfd, 0x48, 0x5b, 0x18],
+    [("ZMM19", 0x80b5ae31a3669cfd0213f00775238f327aa377836c9d91a5affcaa53a9c98a1980b5ae31a3669cfd0213f00775238f327aa377836c9d91a5affcaa53a9c98a19)],
+    [], none),
+  ("VPBROADCASTQZ256rmk", [0x62, 0xe2, 0xfd, 0x29, 0x59, 0x18],
+    [("ZMM19", 0xbdb773e8d770f2d1affcaa53a9c98a191e894a8f389ce1b0affcaa53a9c98a19)],
+    [], none),
+  ("VMOVSSZrmk", [0x62, 0xe1, 0x7e, 0x9, 0x10, 0x18],
+    [("ZMM19", 0xa9c98a19)],
+    [], none),
+  ("VMOVSDZrrkz", [0x62, 0xa1, 0xef, 0x81, 0x10, 0xd9],
+    [("ZMM19", 0x7aa37783f99dd2ec08fc3786b0dd1619)],
+    [], none),
+  ("VMOVSSZmrk", [0x62, 0xe1, 0x7e, 0x9, 0x11, 0x8],
+    [],
+    [], some 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b7480b5ae31a3669cfd0213f00775238f327aa377836c9d91a5affcaa53b0dd1619),
+  ("KSHIFTLWki", [0xc4, 0xe3, 0xf9, 0x32, 0xd1, 0x3],
+    [("K2", 0x95a8)],
+    [], none),
+  ("KSHIFTRQki", [0xc4, 0xe3, 0xf9, 0x31, 0xd1, 0x46],
+    [("K2", 0x0)],
+    [], none),
+  ("KUNPCKBWkk", [0xc5, 0xe5, 0x4b, 0xd1],
+    [("K2", 0xc7b5)],
+    [], none),
+  ("KNOTWkk", [0xc5, 0xf8, 0x44, 0xd1],
+    [("K2", 0x2d4a)],
+    [], none),
+  ("KXNORDkk", [0xc4, 0xe1, 0xe5, 0x46, 0xd1],
+    [("K2", 0x4bd2ac8d)],
+    [], none),
+  ("KADDBkk", [0xc5, 0xe5, 0x4a, 0xd1],
+    [("K2", 0x7c)],
+    [], none),
+  ("KTESTWkk", [0xc5, 0xf8, 0x99, 0xd9],
+    [],
+    [("ZF", 0), ("CF", 0), ("OF", 0), ("SF", 0), ("PF", 0), ("AF", 0)], none),
+  ("KMOVQkm", [0xc4, 0xe1, 0xf8, 0x90, 0x10],
+    [("K2", 0xaffcaa53a9c98a19)],
+    [], none),
+  ("KMOVWmk", [0xc5, 0xf8, 0x91, 0x8],
+    [],
+    [], some 0xa0ac7bd5e54e1ca80164ed93da9c27b728f52bd5bdec0c1b0a86b476b2695b7480b5ae31a3669cfd0213f00775238f327aa377836c9d91a5affcaa53a9c9d2b5),
+  ("legacy movaps keeps the upper bits of ZMM", [0xf, 0x28, 0xd9],
+    [("ZMM3", 0xdf4f406786042943bd319236dfdfc8c97e0584637f6b39e9b07a36ac998603dbbdb773e8d770f2d156547302f808b9307a5a3083f99dd2ec08fc3786b0dd1619)],
+    [], none),
+  ("VEX 128 clears the upper bits of ZMM", [0xc5, 0xf8, 0x28, 0xd9],
+    [("ZMM3", 0x7a5a3083f99dd2ec08fc3786b0dd1619)],
+    [], none),
+  ("VEX 256 clears the upper bits of ZMM", [0xc5, 0xfc, 0x28, 0xd9],
+    [("ZMM3", 0xa7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619)],
+    [], none),
+  ("VEX vpaddq 256 clears the upper bits of ZMM", [0xc5, 0xed, 0xd4, 0xd9],
+    [("ZMM3", 0x286b0f90b63b384e1eb0e0c0eeda8c5cf4fda807f33ba5d8b8f8e1da61ba2c32)],
+    [], none),
+  ("legacy paddq keeps the upper bits of ZMM", [0x66, 0xf, 0xd4, 0xd1],
+    [("ZMM2", 0xa0ac7bd5c77dfd030164ed938a9c41fc28f52bd56c15951b0a86b476b28c1f7880b5ae31db1d9c270213f007776d462ef4fda807f33ba5d8b8f8e1da61ba2c32)],
+    [], none),
+  ("vzeroupper leaves 128 bits", [0xc5, 0xf8, 0x77],
+    [("ZMM3", 0x1e894a8f389ce1b0e8c68886c211741e), ("ZMM1", 0x7a5a3083f99dd2ec08fc3786b0dd1619), ("ZMM17", 0xa0ffe2d5c77dfd034364cb6a8a9c41fccd092b886c15951b0aec2476b28c1f78a7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619)],
+    [], none),
+  ("vzeroall clears", [0xc5, 0xfc, 0x77],
+    [("ZMM3", 0x0), ("ZMM17", 0xa0ffe2d5c77dfd034364cb6a8a9c41fccd092b886c15951b0aec2476b28c1f78a7b5615edb1d9c271c9cf0b9776d462e7a5a3083f99dd2ec08fc3786b0dd1619)],
+    [], none)
+  ]
+
+/-- The cases on the registers of AVX-512: each result is the one computed by hand, all the other bits of ZMM included. -/
+private def testX86Evex : IO Unit := do
+  let x86 ← Target.LLVMLift.x86Environment
+  let cell : Bap.Var := ⟨"mem", .mem 64 8, 0, false⟩
+  let memory ← match Memory.write (Memory.empty 64) (BitVec.ofNat 64 0x1000) (BitVec.ofNat 512 evexM) .little 64 with
+    | .ok memory => pure memory
+    | .error error => throw <| IO.userError error
+  let zmm (number value : Nat) : Bap.Var × Bap.Value :=
+    (⟨s!"ZMM{number}", .imm 512, 0, false⟩, .bits (BitVec.ofNat 512 value))
+  let word (name : String) (value : Nat) : Bap.Var × Bap.Value :=
+    (⟨name, .imm 64, 0, false⟩, .bits (BitVec.ofNat 64 value))
+  let start : Bil.Env :=
+    [(cell, .memory memory), word "RAX" 0x1000, word "RCX" evexRcx, word "K1" evexK1, word "K3" evexK3, word "K2" 0,
+      zmm 1 evexA, zmm 2 evexB, zmm 3 evexC, zmm 16 evexZ16, zmm 17 evexA, zmm 18 evexB, zmm 19 evexC] ++
+    ((List.range 32).filter (fun n => ![1, 2, 3, 16, 17, 18, 19].contains n)).map (zmm · 0)
+  for (name, encoding, registers, flags, stored) in evexCases do
+    let insn ← Target.LLVMLift.decodeX86With x86 0 0 (bytes encoding)
+    assertEqual s!"{name} has its size" encoding.length insn.size
+    let state ← execute insn start
+    for (register, expected) in registers do
+      let width := if register.startsWith "ZMM" then 512 else 64
+      match Bil.lookup state.env ⟨register, .imm width, 0, false⟩ with
+      | .ok (.bits value) => assertEqual s!"{name}: {register}" expected value.toNat
+      | _ => throw <| IO.userError s!"{name}: no {register}"
+    for (flag, expected) in flags do
+      match Bil.lookup state.env ⟨flag, .imm 1, 0, false⟩ with
+      | .ok (.bits value) => assertEqual s!"{name}: {flag}" expected value.toNat
+      | _ => throw <| IO.userError s!"{name}: no {flag}"
+    if let some expected := stored then
+      match Bil.lookup state.env cell with
+      | .ok (@Value.memory 64 memory) =>
+        assertEqual s!"{name}: memory" expected (Memory.read memory (BitVec.ofNat 64 0x1000) .little 64).toNat
+      | _ => throw <| IO.userError s!"{name}: no memory"
+  -- a lane that is masked out isn't loaded, so that it doesn't fault: the load is in the branch of its bit
+  let rec loads : Bil.Exp → List (Nat × Bool)
+    | .load _ _ _ size => [(size, false)]
+    | .ite _ yes no => (loads yes ++ loads no).map fun load => (load.1, true)
+    | .concat left right => loads left ++ loads right
+    | .cast _ _ value => loads value
+    | _ => []
+  let moved (insn : Disasm.Insn) : List (Nat × Bool) := insn.bil.flatMap fun stmt =>
+    match stmt with
+    | .move _ value => loads value
+    | _ => []
+  -- vmovdqu32 (%rax),%ymm19{%k1}{z}, and without the mask
+  let maskedLoad ← Target.LLVMLift.decodeX86With x86 0 0 (bytes [0x62, 0xe1, 0x7e, 0xa9, 0x6f, 0x18])
+  assertEqual "a masked load has a guarded load of each lane" (List.replicate 8 (4, true)) (moved maskedLoad)
+  let wholeLoad ← Target.LLVMLift.decodeX86With x86 0 0 (bytes [0x62, 0xe1, 0x7e, 0x28, 0x6f, 0x18])
+  assertEqual "a load without a mask is one load" [(32, false)] (moved wholeLoad)
+  -- the same in the 32-bit mode: vpaddd %zmm1,%zmm2,%zmm3{%k1} and kmovd %ecx,%k2
+  let x8632 ← Target.LLVMLift.x8632Environment
+  let start32 : Bil.Env := [word "K1" 0b101, word "K2" 0, zmm 1 7, zmm 2 (2 ^ 40 + 5), zmm 3 (9 * 2 ^ 32),
+    (⟨"ECX", .imm 32, 0, false⟩, .bits (BitVec.ofNat 32 0x12345678))]
+  let added ← execute (← Target.LLVMLift.decodeX8632With x8632 0 0 (bytes [0x62, 0xf1, 0x6d, 0x49, 0xfe, 0xd9])) start32
+  match Bil.lookup added.env ⟨"ZMM3", .imm 512, 0, false⟩ with
+  | .ok (.bits value) => assertEqual "x86-32 masked vpaddd" (9 * 2 ^ 32 + 12) value.toNat
+  | _ => throw <| IO.userError "x86-32: no ZMM3"
+  let moved32 ← execute (← Target.LLVMLift.decodeX8632With x8632 0 0 (bytes [0xc5, 0xfb, 0x92, 0xd1])) start32
+  match Bil.lookup moved32.env ⟨"K2", .imm 64, 0, false⟩ with
+  | .ok (.bits value) => assertEqual "x86-32 kmovd" 0x12345678 value.toNat
+  | _ => throw <| IO.userError "x86-32: no K2"
+  -- a segment register has 16 bits: movl %eax, %gs in both modes
+  let segment : Bap.Var := ⟨"GS", .imm 16, 0, false⟩
+  let moved64 ← execute (← Target.LLVMLift.decodeX86With x86 0 0 (bytes [0x8e, 0xe8])) [word "RAX" 0x12345678]
+  assertEqual "x86-64 mov to a segment" true ((Bil.lookup moved64.env segment) matches .ok (.bits _))
+  let movedGs ← execute (← Target.LLVMLift.decodeX8632With x8632 0 0 (bytes [0x8e, 0xe8]))
+    [(⟨"EAX", .imm 32, 0, false⟩, .bits (BitVec.ofNat 32 0x12345678))]
+  match Bil.lookup movedGs.env segment with
+  | .ok (.bits value) => assertEqual "x86-32 mov to a segment" 0x5678 value.toNat
+  | _ => throw <| IO.userError "x86-32: no GS"
+  -- what has no semantics stays an error: a static rounding mode is not modeled in a lane
+  let rounded ← (Target.LLVMLift.decodeX86With x86 0 0 (bytes [0x62, 0xf1, 0x6c, 0x18, 0x58, 0xd9])).toBaseIO
+  assertTrue "a static rounding mode is an error" (rounded matches .error _)
 
 /-- A memory of an address width with bytes at an address. -/
 private def bytesAt {width : Nat} (start : Nat) (values : List Nat) (memory : Memory width := Memory.empty width) :
@@ -1101,6 +1737,7 @@ def run : IO Unit := do
   testArmVfpRegisters
   testPowerPCFields
   testX86Sse
+  testX86Evex
   testRiscvRem
   testPcWrites
   testWrappedTargets

@@ -199,12 +199,12 @@ private def sweeping : IO Unit := do
   let padded ← Disasm.Recursive.scanRegions one 17 0 [] { skip := fun address => if address < 4 then some 4 else none }
     [(0, 17)]
   assertEqual "a sweep doesn't decode padding" 4 ((padded.instructions.map (·.address)).head?.getD 0)
-  -- vpxorq xmm16, xmm16, xmm16 and ret
-  let evex := bytesOf [0x62, 0xa1, 0xfd, 0x00, 0xef, 0xc0, 0xc3]
+  -- vaddps zmm3, zmm2, zmm1, {rn-sae}, whose static rounding has no semantics, and ret
+  let evex := bytesOf [0x62, 0xf1, 0x6c, 0x18, 0x58, 0xd9, 0xc3]
   let lifted := Disasm.Disassembler.ofRegions x86 [({ addr := 0, data := evex }, x86)]
   match ← x86.decode 0 evex with
   | .error error => assertTrue s!"no semantics is an error: {error}" (error.endsWith "" && !error.isEmpty)
-  | .ok insn => throw <| IO.userError s!"EVEX lifted to {insn.asm}"
+  | .ok insn => throw <| IO.userError s!"a static rounding mode lifted to {insn.asm}"
   assertEqual "what has no semantics has its size" (some 6) (← x86.sizeAt 0 evex)
   let past ← Disasm.Recursive.scanRegions lifted 7 0 [0] (plan fun _ => false) [(0, 7)]
   assertEqual "a sweep goes on past what it can't lift" [6] (past.instructions.map (·.address))

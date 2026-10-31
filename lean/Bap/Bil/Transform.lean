@@ -445,6 +445,71 @@ def foldStmt : Stmt → Stmt
 
 def foldProgram (program : Program) : Program := program.map foldStmt
 
+/-! ### Temporaries nothing reads
+
+The lifter gives the value of a conditional, and of what it freezes, a variable of its own, not knowing if anything will read it. -/
+
+mutual
+  /-- All the variables a statement reads, however it runs. -/
+  def readsOfStmt : Stmt → List Bap.Var
+    | .move _ value => freeVars value
+    | .jmp target => freeVars target
+    | .while condition body => freeVars condition ++ readsOfProgram body
+    | .ifElse condition yes no => freeVars condition ++ readsOfProgram yes ++ readsOfProgram no
+    | .special _ | .cpuExn _ => []
+
+  def readsOfProgram : Program → List Bap.Var
+    | [] => []
+    | stmt :: rest => readsOfStmt stmt ++ readsOfProgram rest
+end
+
+mutual
+  /-- A statement without the assignments to what is `dead`. An assignment is nothing then. -/
+  def dropStmt (dead : Bap.Var → Bool) : Stmt → Option Stmt
+    | .move var value => if dead var then none else some (.move var value)
+    | .while condition body => some (.while condition (dropProgram dead body))
+    | .ifElse condition yes no => some (.ifElse condition (dropProgram dead yes) (dropProgram dead no))
+    | stmt => some stmt
+
+  def dropProgram (dead : Bap.Var → Bool) : Program → Program
+    | [] => []
+    | stmt :: rest =>
+      match dropStmt dead stmt with
+      | some kept => kept :: dropProgram dead rest
+      | none => dropProgram dead rest
+end
+
+/-- What the lifter names for itself: `freeze`, `let` and the value of a conditional. -/
+def isTemporary (var : Bap.Var) : Bool := var.name.startsWith "_primus_"
+
+mutual
+  /-- The temporaries a statement assigns. -/
+  def stmtTemporaries : Stmt → List Bap.Var
+    | .move var _ => if isTemporary var then [var] else []
+    | .while _ body => programTemporaries body
+    | .ifElse _ yes no => programTemporaries yes ++ programTemporaries no
+    | _ => []
+
+  def programTemporaries : Program → List Bap.Var
+    | [] => []
+    | stmt :: rest => stmtTemporaries stmt ++ programTemporaries rest
+end
+
+/-- A temporary is dead if the program reads it nowhere. -/
+def deadTemporary (reads : Std.HashSet Bap.Var) (var : Bap.Var) : Bool := isTemporary var && !reads.contains var
+
+def dropDeadTempsAux : Nat → Program → Program
+  | 0, program => program
+  | fuel + 1, program =>
+    let temporaries := programTemporaries program
+    if temporaries.isEmpty then program else
+    let reads := Std.HashSet.ofList (readsOfProgram program)
+    if temporaries.any (deadTemporary reads) then dropDeadTempsAux fuel (dropProgram (deadTemporary reads) program)
+    else program
+
+/-- A program without the temporaries nothing reads: those that only such a temporary reads go with them. -/
+def dropDeadTemps (program : Program) : Program := dropDeadTempsAux (programTemporaries program).length program
+
 @[simp] theorem substitute_empty (exp : Exp) : substitute [] exp = exp := by
   induction exp <;> simp [substitute, *]
 

@@ -1,3 +1,4 @@
+import Bap.Bil.Transform
 import Bap.Core.Assoc
 import Bap.Core.Sexp
 import Bap.Bil.Syntax
@@ -1580,7 +1581,7 @@ def liftWith (environment : Environment) (context : Context) (opcode : String)
         | some callable => pure callable
         | none => throw <| IO.userError s!"Primus semantics has no definition for {opcode}"
   match apply 100000 context { globals := environment.globals, operations := environment.operations } callable operands with
-  | .ok (_, state) => pure state.code
+  | .ok (_, state) => pure (Bil.dropDeadTemps state.code)
   | .error error => throw <| IO.userError s!"{opcode}: {error}"
 
 def lift (globals : Globals) (context : Context) (opcode : String) (operands : List Value) :
@@ -1600,7 +1601,7 @@ def liftMC (environment : Environment) (context : Context) (opcode : Nat)
     | some callable => pure callable.get
     | none => throw <| IO.userError s!"Primus semantics has no definition for LLVM opcode {opcode}"
   match apply 100000 context { globals := environment.globals, operations := environment.operations } (.callable callable) operands with
-  | .ok (_, state) => pure state.code
+  | .ok (_, state) => pure (Bil.dropDeadTemps state.code)
   | .error error => throw <| IO.userError s!"LLVM opcode {opcode}: {error}"
 
 /-- The number of arguments a primitive takes, at least and, if bounded, at most. -/

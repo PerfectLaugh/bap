@@ -243,11 +243,81 @@ private def chainSub (length : Nat) : Sub :=
         else if i % 5 = 4 then [⟨i * 10 + 1, some (.var y), .goto (.direct (i - 2))⟩, goto (i * 10 + 2) (i + 2)]
         else [goto (i * 10 + 1) (i + 2)] }⟩
 
+/-- `x := x + 1` over a line of blocks: one assignment dies per pass, and all of them mention the one variable. -/
+private def selfChain (length : Nat) : Sub :=
+  ⟨1, "self-chain", [], (List.range length).map fun i =>
+    { tid := i + 1, defs := [defn (i * 2 + 100) x (.bin .add (.var x) (int 1))],
+      jmps := if i + 1 = length then [] else [goto (i * 2 + 101) (i + 2)] }⟩
+
+/-- Each block reads the last one's variable and one that all of them read, assigned in the first block or nowhere. -/
+private def hubChain (assignHub : Bool) (length : Nat) : Sub :=
+  ⟨1, "hub-chain", [], (List.range length).map fun i =>
+    let hub : List Def := if assignHub && i = 0 then [defn 99 z (.var y)] else []
+    { tid := i + 1, defs := hub ++ [defn (i * 2 + 100) (reg s!"v{i}") (if i = 0 then .var z else .bin .add (.var (reg s!"v{i - 1}")) (.var z))],
+      jmps := if i + 1 = length then [] else [goto (i * 2 + 101) (i + 2)] }⟩
+
+/-- A small pseudorandom generator: a linear congruence. -/
+private def nextRandom (seed : Nat) : Nat := (seed * 1103515245 + 12345) % 2147483648
+
+/-- A pseudorandom CFG over a few variables, with loops, phis and memory, that has dead code of every kind: its
+blocks reuse their variables, so that passes remove assignments of what other blocks read. -/
+private def randomSub (seed : Nat) : Sub := Id.run do
+  let mut seed := seed
+  let mut blks : Array Blk := #[]
+  let var (r : Nat) : Var := reg s!"r{r % 5}"
+  let count := 3 + seed % 10
+  for i in [0:count] do
+    let mut phis : List Phi := []
+    let mut defs : List Def := []
+    seed := nextRandom seed
+    if seed / 16 % 4 == 0 then
+      seed := nextRandom seed
+      phis := [⟨i * 100 + 90, var (seed / 16), [(1 + seed / 32 % count, .var (var (seed / 64))), (1 + seed / 128 % count, .var (var (seed / 512)))]⟩]
+    seed := nextRandom seed
+    for j in [0:seed / 16 % 4] do
+      seed := nextRandom seed
+      let rhs : Exp := match seed / 16 % 5 with
+        | 0 => int (seed / 64 % 7)
+        | 1 => .var (var (seed / 64))
+        | 2 => .bin .add (.var (var (seed / 64))) (.var (var (seed / 512)))
+        | 3 => .store (.var mem) (int 0) (.var (var (seed / 64))) .little 4
+        | _ => .bin .add (.var (var (seed / 64))) (int 1)
+      let target := if seed / 16 % 5 == 3 then mem else var (seed / 4096)
+      defs := defs ++ [defn (i * 100 + j) target rhs]
+    seed := nextRandom seed
+    let next := 1 + seed / 16 % count
+    let other := 1 + seed / 256 % count
+    let jmps : List Jmp := match seed / 4096 % 4 with
+      | 0 => [⟨i * 100 + 80, some (.var (var (seed / 65536))), .goto (.direct next)⟩, goto (i * 100 + 81) other]
+      | 1 => [goto (i * 100 + 80) next]
+      | 2 => [⟨i * 100 + 80, none, .ret (.indirect (.var (var (seed / 65536))))⟩]
+      | _ => if i + 1 = count then [] else [goto (i * 100 + 80) (i + 2)]
+    blks := blks.push { tid := i + 1, phis := phis, defs := defs, jmps := jmps }
+  return ⟨1, s!"random", [], blks.toList⟩
+
 private def deadCodeFastPath : IO Unit := do
   sameConstants "a sample" sample
   sameConstants "a loop" loop
   sameConstants "a chain" (chainSub 30)
   sameConstants "the SSA of a chain" (toSsa (chainSub 30))
+  sameDeadCode "dead code: a line of one variable" (selfChain 40)
+  sameDeadCode "dead code: a line of one variable, protected" (selfChain 40) [x]
+  sameDeadCode "dead code: what all read, not assigned" (hubChain false 40)
+  sameDeadCode "dead code: what all read, assigned" (hubChain true 40)
+  sameDeadCode "dead code: what all read, protected" (hubChain true 40) [reg "v20"]
+  let agrees (protectedVars : List Var) (sub : Sub) : Bool :=
+    let cfg := Cfg.fromSub sub
+    let count := cfg.blocks.foldl (fun count blk => count + blk.defs.length + blk.phis.length) 0
+    toString (Wire.printSub ((deadCodeBySpec protectedVars cfg (count + 1)).intoSub sub)) ==
+      toString (Wire.printSub ((eliminateDeadCode cfg protectedVars).intoSub sub))
+  assertEqual "dead code: 1000 random CFGs" ([] : List Nat)
+    ((List.range 1000).filter fun seed => !agrees [] (randomSub seed) || !agrees [reg "r1"] (randomSub seed) || !agrees [] (toSsa (randomSub seed)))
+  -- a pass costs what it removes: these take a pass a block, and many blocks mention the one variable
+  let started ← IO.monoMsNow
+  for sub in [selfChain 7000, hubChain false 7000, hubChain true 7000] do
+    assertEqual "a line of 7000 blocks dies" 0 ((optimize sub).blks.foldl (fun count blk => count + blk.defs.length) 0)
+  let elapsed := (← IO.monoMsNow) - started
+  assertTrue s!"a line of 7000 blocks takes a pass a block in under a second, not {elapsed} ms" (elapsed < 1000)
   sameDeadCode "dead code: a sample" sample
   sameDeadCode "dead code: a loop" loop
   sameDeadCode "dead code: an entry loop" entryLoop

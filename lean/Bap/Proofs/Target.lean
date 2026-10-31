@@ -851,10 +851,10 @@ theorem aarch64Register_shape (name : String) :
     · repeat' refine shape_ite ?_ ?_
       all_goals exact ⟨_, _, _, rfl, by decide⟩
 
-/-- The vector registers have their architectural widths, and XMM is the low half of YMM. -/
+/-- The vector registers have their architectural widths, XMM and YMM are the low bits of ZMM, and a mask has 64 bits. -/
 theorem x86VectorRegister_shape (name : String) (value : PValue)
     (h : x86VectorRegister name = some value) :
-    ∃ n w b, value = register n w b ∧ (w, b) ∈ [(128, 256), (256, 256), (512, 512)] := by
+    ∃ n w b, value = register n w b ∧ (w, b) ∈ [(128, 512), (256, 512), (512, 512), (64, 64)] := by
   lift_unfold x86VectorRegister at h
   split at h
   all_goals first
@@ -866,7 +866,7 @@ theorem x86VectorRegister_shape (name : String) (value : PValue)
 
 private theorem vector_getD {P : Nat → Nat → Prop} (name : String) (fallback : PValue)
     (hd : ∃ n w b, fallback = register n w b ∧ P w b)
-    (hv : P 128 256 ∧ P 256 256 ∧ P 512 512) :
+    (hv : P 128 512 ∧ P 256 512 ∧ P 512 512 ∧ P 64 64) :
     ∃ n w b, (x86VectorRegister name).getD fallback = register n w b ∧ P w b := by
   cases h : x86VectorRegister name with
   | none => exact hd
@@ -874,16 +874,19 @@ private theorem vector_getD {P : Nat → Nat → Prop} (name : String) (fallback
     have ⟨n, w, b, he, hm⟩ := x86VectorRegister_shape name value h
     refine ⟨n, w, b, he, ?_⟩
     simp only [List.mem_cons, List.not_mem_nil, or_false, Prod.mk.injEq] at hm
-    rcases hm with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩
+    rcases hm with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩
     · exact hv.1
     · exact hv.2.1
-    · exact hv.2.2
+    · exact hv.2.2.1
+    · exact hv.2.2.2
 
 /-- The registers that the semantics see as vectors. -/
 theorem x86_vector_views :
-    x86Register "XMM0" = register "YMM0" 128 256 ∧ x86Register "XMM15" = register "YMM15" 128 256 ∧
-      x86Register "YMM3" = register "YMM3" 256 256 ∧ x86Register "ZMM4" = register "ZMM4" 512 512 ∧
-      x8632Register "XMM7" = register "YMM7" 128 256 := ⟨rfl, rfl, rfl, rfl, rfl⟩
+    x86Register "XMM0" = register "ZMM0" 128 512 ∧ x86Register "XMM31" = register "ZMM31" 128 512 ∧
+      x86Register "YMM3" = register "ZMM3" 256 512 ∧ x86Register "YMM31" = register "ZMM31" 256 512 ∧
+      x86Register "ZMM4" = register "ZMM4" 512 512 ∧ x86Register "K7" = register "K7" 64 64 ∧
+      x8632Register "XMM7" = register "ZMM7" 128 512 ∧ x8632Register "K1" = register "K1" 64 64 :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
 
 /-- The registers of x87 have 80 bits, the control words 16, and MXCSR and EFLAGS 32, as they have no bases. -/
 private theorem float_shape {P : Nat → Nat → Prop} (name : String) (value : PValue)
@@ -901,8 +904,8 @@ private theorem float_shape {P : Nat → Nat → Prop} (name : String) (value : 
 
 theorem x86Register_shape (name : String) :
     ∃ n w b, x86Register name = register n w b ∧
-      (w, b) ∈ [(1, 1), (8, 8), (8, 64), (16, 16), (16, 64), (32, 32), (32, 64), (64, 64), (80, 80), (128, 256),
-        (256, 256), (512, 512)] := by
+      (w, b) ∈ [(1, 1), (8, 8), (8, 64), (16, 16), (16, 64), (32, 32), (32, 64), (64, 64), (80, 80), (128, 512),
+        (256, 512), (512, 512)] := by
   lift_unfold x86Register
   simp only []
   generalize hc : (if (name.isEmpty || decide (name = "NoRegister")) = true then "Nil" else name) = c
@@ -928,8 +931,8 @@ theorem x86Register_shape (name : String) :
 
 theorem x8632Register_shape (name : String) :
     ∃ n w b, x8632Register name = register n w b ∧
-      (w, b) ∈ [(1, 1), (8, 8), (8, 32), (16, 16), (16, 32), (32, 32), (80, 80), (128, 256), (256, 256),
-        (512, 512)] := by
+      (w, b) ∈ [(1, 1), (8, 8), (8, 32), (16, 16), (16, 32), (32, 32), (64, 64), (80, 80), (128, 512),
+        (256, 512), (512, 512)] := by
   lift_unfold x8632Register
   simp only []
   generalize (if (name.isEmpty || decide (name = "NoRegister")) = true then "Nil" else name) = c
@@ -1130,10 +1133,10 @@ theorem riscv32Globals_keys : (riscv32Globals.map (·.1)).Nodup ∧ riscv32Globa
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem x86Globals_keys : (x86Globals.map (·.1)).Nodup ∧ x86Globals.length = 92 := ⟨by decide +kernel, rfl⟩
+theorem x86Globals_keys : (x86Globals.map (·.1)).Nodup ∧ x86Globals.length = 156 := ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
-theorem x8632Globals_keys : (x8632Globals.map (·.1)).Nodup ∧ x8632Globals.length = 64 :=
+theorem x8632Globals_keys : (x8632Globals.map (·.1)).Nodup ∧ x8632Globals.length = 72 :=
   ⟨by decide +kernel, rfl⟩
 
 set_option maxRecDepth 20000 in
@@ -2624,6 +2627,94 @@ theorem aliasPart_write_read (part : AliasPart) (hlow : part.low ≤ part.high) 
     exact Reads.var (lookup_bind_same _ _ _)
   · intro other hother
     exact lookup_bind_ne _ _ hother
+
+/-- The part of a ZMM register that its XMM or YMM register is: the low `size` bits. -/
+def zmmPart (number size : Nat) : AliasPart := ⟨s!"ZMM{number}", 512, size - 1, 0⟩
+
+/-- A legacy SSE write to XMM: what is written is what is read, the upper bits of ZMM stay, and all else stays. -/
+theorem xmm_legacy_write_read (number : Nat) (value : Bil.Exp) (state : Bil.State) (rest : Bil.Program) (fuel : Nat)
+    (b : BitVec 512) (v : BitVec 128) (hbase : Bil.lookup state.env (zmmPart number 128).var = .ok (.bits b))
+    (hvalue : Bil.evalExp state.env value = .ok (.bits v)) :
+    ∃ state', Bil.execProgram (fuel + 2) state ((zmmPart number 128).write value :: rest) = Bil.execProgram (fuel + 1) state' rest ∧
+      Reads state'.env (zmmPart number 128).read 128 v.toNat ∧
+      Reads state'.env (.var (zmmPart number 128).var) 512 (2 ^ 128 * (b.toNat / 2 ^ 128) + v.toNat) ∧
+      ∀ other, other ≠ (zmmPart number 128).var → Bil.lookup state'.env other = Bil.lookup state.env other := by
+  obtain ⟨s, h1, h2, h3, h4⟩ := aliasPart_write_read (zmmPart number 128) (by simp [zmmPart]) (by simp [zmmPart])
+    value state rest fuel b v hbase hvalue
+  refine ⟨s, h1, h2, ?_, h4⟩
+  simpa [zmmPart, Nat.mod_one] using h3
+
+private theorem setWidth_toNat_of_le {size width : Nat} (h : size ≤ width) (v : BitVec size) :
+    (BitVec.setWidth width v).toNat = v.toNat := by
+  rw [BitVec.toNat_setWidth]
+  exact Nat.mod_eq_of_lt (Nat.lt_of_lt_of_le v.isLt (Nat.pow_le_pow_right (by decide) h))
+
+/-- A write of a VEX or EVEX instruction, which is the value zero-extended to the base as `set-vex` does: the view has
+what is written, all of the other bits of ZMM are clear, whatever they were, and all else stays. -/
+theorem vector_vex_write_read (number size : Nat) (hsize : 0 < size) (hle : size ≤ 512) (value : Bil.Exp) (state : Bil.State)
+    (rest : Bil.Program) (fuel : Nat) (v : BitVec size) (hvalue : Bil.evalExp state.env value = .ok (.bits v)) :
+    ∃ state', Bil.execProgram (fuel + 2) state (.move (zmmPart number size).var (.cast .unsigned 512 value) :: rest) =
+        Bil.execProgram (fuel + 1) state' rest ∧
+      Reads state'.env (.var (zmmPart number size).var) 512 v.toNat ∧
+      Reads state'.env (zmmPart number size).read size v.toNat ∧
+      ∀ other, other ≠ (zmmPart number size).var → Bil.lookup state'.env other = Bil.lookup state.env other := by
+  have hcast : Bil.evalExp state.env (.cast .unsigned 512 value) = .ok (.bits (BitVec.setWidth 512 v)) := by
+    simp [Bil.evalExp, hvalue, Bap.Value.asBits, bind, Except.bind, Word.unsigned]
+  have hlt : v.toNat < 2 ^ size := v.isLt
+  have htoNat : (BitVec.setWidth 512 v).toNat = v.toNat := setWidth_toNat_of_le hle v
+  have hnew : Reads (Bil.bind state.env (zmmPart number size).var (.bits (BitVec.setWidth 512 v)))
+      (.var (zmmPart number size).var) 512 v.toNat := by
+    have := Reads.var (env := Bil.bind state.env (zmmPart number size).var (.bits (BitVec.setWidth 512 v)))
+      (var := (zmmPart number size).var) (lookup_bind_same _ _ _)
+    rwa [htoNat] at this
+  refine ⟨{ env := Bil.bind state.env (zmmPart number size).var (.bits (BitVec.setWidth 512 v)) }, exec_move hcast, hnew, ?_, ?_⟩
+  · have hx := Reads.extract hnew (Nat.zero_le (size - 1)) (show size - 1 < 512 by omega)
+    have hs : size - 1 - 0 + 1 = size := by omega
+    rw [hs, Nat.pow_zero, Nat.div_one, Nat.mod_eq_of_lt hlt] at hx
+    show Reads _ (if (0 : Nat) = 0 ∧ size - 1 + 1 = 512 then _ else _) _ _
+    split
+    · rename_i hw
+      have hs512 : size = 512 := by omega
+      subst hs512
+      exact hnew
+    · exact hx
+  · intro other hother
+    exact lookup_bind_ne _ _ hother
+
+/-- Names the same register by its numbers, of all that AVX-512 has: XMM and YMM are the low bits of ZMM, and the base of
+each is the same one in both modes. -/
+theorem x86_vector_aliases :
+    (List.range 32).all (fun n =>
+      (match x86Register s!"XMM{n}", x86Register s!"YMM{n}", x86Register s!"ZMM{n}" with
+       | .register a 128 512, .register b 256 512, .register c 512 512 =>
+         a == s!"ZMM{n}" && b == s!"ZMM{n}" && c == s!"ZMM{n}"
+       | _, _, _ => false)) = true ∧
+    (List.range 8).all (fun n =>
+      (match x86Register s!"K{n}", x8632Register s!"K{n}", x8632Register s!"XMM{n}" with
+       | .register a 64 64, .register b 64 64, .register c 128 512 =>
+         a == s!"K{n}" && b == s!"K{n}" && c == s!"ZMM{n}"
+       | _, _, _ => false)) = true := by
+  decide +kernel
+
+/-- What the names of AVX-512 opcodes say. -/
+theorem evexOpcode_names :
+    evexOpcode? "VMOVDQU64Z256rm" = some ⟨"VMOVDQU64", 256, "rm"⟩ ∧
+    evexOpcode? "VPXORQZ128rr" = some ⟨"VPXORQ", 128, "rr"⟩ ∧
+    evexOpcode? "VPBROADCASTBrZrr" = some ⟨"VPBROADCASTBr", 512, "rr"⟩ ∧
+    evexOpcode? "VPLZCNTDZ128rmbkz" = some ⟨"VPLZCNTD", 128, "rmbkz"⟩ ∧
+    evexOpcode? "VADDSSZrrk_Int" = some ⟨"VADDSS", 512, "rrk_Int"⟩ ∧
+    evexOpcode? "KMOVDkr" = none ∧ evexOpcode? "MOV64rr" = none ∧ evexOpcode? "VZEROUPPER" = none := by
+  decide +kernel
+
+/-- The form, the masking and the operand of memory that they say. -/
+theorem evexOpcode_forms :
+    (EvexOpcode.mk "VPADDD" 256 "rmbkz").masking = 2 ∧ (EvexOpcode.mk "VPADDD" 256 "rmbkz").memory = 2 ∧
+    (EvexOpcode.mk "VPADDB" 128 "rrk").masking = 1 ∧ (EvexOpcode.mk "VPADDB" 128 "rrk").memory = 0 ∧
+    (EvexOpcode.mk "VMOVDQU8" 512 "mrk").masking = 1 ∧ (EvexOpcode.mk "VMOVDQU8" 512 "mrk").memory = 3 ∧
+    (EvexOpcode.mk "VPMINUB" 256 "rmkz").memory = 1 ∧ (EvexOpcode.mk "VADDPS" 512 "rrb").memory = 4 ∧
+    (EvexOpcode.mk "VADDSS" 512 "rrk_Int").masking = 1 ∧ (EvexOpcode.mk "VPSRLD" 128 "mbik").memory = 2 ∧
+    (EvexOpcode.mk "VPADDD" 256 "rr").vexName = "VPADDDYrr" ∧ (EvexOpcode.mk "VADDSS" 512 "rr_Int").vexName = "VADDSSrr_Int" := by
+  decide +kernel
 
 /-! ### The tables of the registers -/
 

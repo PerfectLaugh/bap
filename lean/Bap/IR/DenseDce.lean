@@ -102,22 +102,22 @@ def exposedD (kills : Marks) (d : DBlk) : List Nat × Marks :=
     (defn.reads.foldl (fun out y => if state.2.contains y then out else y :: out) state.1, state.2.add defn.var)
   (d.jmpReads.foldl (fun out y => if step.2.contains y then out else y :: out) step.1, step.2)
 
-def visitPredsD (blocks : Array DBlk) (x : Nat) (preds : List Nat) (state : Marks × List Nat × List Nat) : Marks × List Nat × List Nat :=
+@[specialize] def visitPredsD (skip : Nat → Bool) (preds : List Nat) (state : Marks × List Nat × List Nat) : Marks × List Nat × List Nat :=
   preds.foldl (init := state) fun state p =>
     if state.1.contains p then state
-    else if killedD (blkAt blocks p) x then state
+    else if skip p then state
     else (state.1.add p, p :: state.2.1, p :: state.2.2)
 
-/-- The blocks that `x` is live in, from what starts it. -/
-def floodD (blocks : Array DBlk) (preds : Array (List Nat)) (x : Nat) : Nat → Marks → List Nat → List Nat → Option (List Nat × Marks)
+/-- The blocks that `x` is live in, from what starts it, going back through what `skip` lets through. -/
+@[specialize] def floodD (blocks : Array DBlk) (preds : Array (List Nat)) (x : Nat) (skip : Nat → Bool) : Nat → Marks → List Nat → List Nat → Option (List Nat × Marks)
   | 0, _, _, _ => none
   | _ + 1, seen, row, [] => some (row, seen)
   | fuel + 1, seen, row, t :: work =>
     if hasPhiD (blkAt blocks t) x then
-      floodD blocks preds x fuel seen row work
+      floodD blocks preds x skip fuel seen row work
     else
-      let next := visitPredsD blocks x (preds.getD t []) (seen, row, work)
-      floodD blocks preds x fuel next.1 next.2.1 next.2.2
+      let next := visitPredsD skip (preds.getD t []) (seen, row, work)
+      floodD blocks preds x skip fuel next.1 next.2.1 next.2.2
 
 /-- What starts each variable of `affected`. -/
 def seedsD (g : Graphs) (blocks : Array DBlk) (affected : Array Bool) (kills : Marks) (sites : List Nat) (seeds : Array (List Nat)) :
@@ -144,7 +144,7 @@ def refreshRows (blocks : Array DBlk) (preds : Array (List Nat)) (seeds : Array 
     match seeds.getD x [] with
     | [] => refreshRows blocks preds seeds (rows.setIfInBounds x (.short [])) seen rest
     | start =>
-      match floodD blocks preds x (start.length + blocks.size + 1) (start.foldl Marks.add seen.clear) start start with
+      match floodD blocks preds x (fun p => killedD (blkAt blocks p) x) (start.length + blocks.size + 1) (start.foldl Marks.add seen.clear) start start with
       | none => none
       | some (row, seen) => refreshRows blocks preds seeds (rows.setIfInBounds x (Row.ofList row)) seen rest
 
@@ -200,27 +200,93 @@ def scanD (g : Graphs) (blocks : Array DBlk) (rows : Array Row) (i : Nat) (d : D
   let lost := (d.phis.filter fun phi => !live.contains phi.var).flatMap phiMentionsD
   ({ d with defs := result.1, phis := phis }, result.2.2 ++ lost, reads, live)
 
-/-- The blocks of the dirty list, scanned, and what the definitions they removed mention. -/
+/-- The blocks of the dirty list, scanned, and what the definitions they removed mention, with where. -/
 def scanAll (g : Graphs) (blocks : Array DBlk) (rows : Array Row) (dirty : List Nat) (reads live : Marks) :
-    Array DBlk × List Nat × Marks × Marks :=
-  dirty.foldl (init := (blocks, [], reads, live)) fun state i =>
+    Array DBlk × List (Nat × Nat) × Marks × Marks :=
+  let result := dirty.foldl (init := (([] : List (Nat × DBlk)), ([] : List (Nat × Nat)), reads, live)) fun state i =>
     let r := scanD g blocks rows i (blkAt blocks i) state.2.2.1 state.2.2.2
-    (state.1.setIfInBounds i r.1, r.2.1 ++ state.2.1, r.2.2.1, r.2.2.2)
+    ((i, r.1) :: state.1, r.2.1.map (fun y => (y, i)) ++ state.2.1, r.2.2.1, r.2.2.2)
+  (result.1.foldl (fun blocks update => blocks.setIfInBounds update.1 update.2) blocks, result.2)
+
+/-! A removed read can only take a variable out of the blocks that read it first, and those it was only live in because of them:
+going back from where it was read, as far as the blocks that read it themselves or assign it. A removed assignment has no effect on
+where it is live, as it went because nothing was to read it. So a pass costs what it removes, however many blocks mention a variable. -/
+
+/-- Whether a variable is read before any assignment to it, in what is left of a block. -/
+def exposedDefsD (x : Nat) (jmpReads : List Nat) : List DDef → Bool
+  | [] => jmpReads.contains x
+  | defn :: rest => defn.reads.contains x || (defn.var != x && exposedDefsD x jmpReads rest)
+
+/-- Whether a block needs a variable live at its start, whatever comes after it. -/
+def exposesD (d : DBlk) (x : Nat) : Bool := !hasPhiD d x && exposedDefsD x d.jmpReads d.defs
+
+def Row.erase : Row → Nat → Row
+  | .short blocks, b => .short (blocks.filter (· != b))
+  | .long blocks, b => .long (blocks.erase b)
+
+/-- The blocks that can lose `x`: those of `sites`, what is before them, and what is only live through those. -/
+def lostD (g : Graphs) (blocks : Array DBlk) (row : Row) (x : Nat) (sites : List Nat) (seen : Marks) : Option (List Nat × Marks) :=
+  let first := visitPredsD (fun p => !row.contains p || exposesD (blkAt blocks p) x)
+    (sites ++ sites.flatMap fun s => g.preds.getD s []) (seen.clear, [], [])
+  floodD blocks g.preds x (fun p => !row.contains p || killedD (blkAt blocks p) x || exposesD (blkAt blocks p) x)
+    (first.2.1.length + blocks.size + 1) first.1 first.2.1 first.2.1
+
+/-- Whether a block that can lose `x` keeps it on its own, from a block after it that can't lose it or a phi that reads it. -/
+def survivesD (g : Graphs) (blocks : Array DBlk) (row : Row) (lost : Marks) (x : Nat) (t : Nat) : Bool :=
+  !killedD (blkAt blocks t) x && (g.succs.getD t []).any fun s =>
+    (row.contains s && !lost.contains s && !hasPhiD (blkAt blocks s) x) || (phiReadsD (g.tids.getD t 0) (blkAt blocks s)).contains x
+
+/-- The blocks that can lose `x` and don't. -/
+def keptD (g : Graphs) (blocks : Array DBlk) (row : Row) (x : Nat) (lostList : List Nat) (lost seen : Marks) : Option (List Nat × Marks) :=
+  let start := lostList.filter (survivesD g blocks row lost x)
+  floodD blocks g.preds x (fun p => !lost.contains p || killedD (blkAt blocks p) x)
+    (start.length + blocks.size + 1) (start.foldl Marks.add seen.clear) start start
+
+/-- What assigns `x` right before the blocks of a list, on top of `dirty`. -/
+def addKillers (g : Graphs) (blocks : Array DBlk) (x : Nat) (l : List Nat) (dirty : List Nat) : List Nat :=
+  l.foldl (fun dirty t => (g.preds.getD t []).foldl (fun dirty p => if killedD (blkAt blocks p) x then p :: dirty else dirty) dirty) dirty
+
+/-- The row of `x`, after what mentions it went from `sites`, and the blocks to look at again for it. -/
+def updateVar (g : Graphs) (blocks : Array DBlk) (x : Nat) (sites : List Nat) (rows : Array Row) (dirty : List Nat) (seen seen2 : Marks) :
+    Option (Array Row × List Nat × Marks × Marks) :=
+  let row := rows.getD x (.short [])
+  match lostD g blocks row x sites seen with
+  | none => none
+  | some (lostList, lost) =>
+    match keptD g blocks row x lostList lost seen2 with
+    | none => none
+    | some (_, kept) =>
+      let erased := lostList.filter fun t => !kept.contains t
+      some (rows.modify x (fun row => erased.foldl Row.erase row), addKillers g blocks x (erased ++ sites) dirty, lost, kept)
+
+/-- `updateVar` for all that the last pass removed. A variable with several is done the first time. -/
+def updateAll (g : Graphs) (blocks : Array DBlk) : List (Nat × Nat) → Array Row → Array (List Nat) → List Nat → Marks → Marks →
+    Option (Array Row × Array (List Nat) × List Nat × Marks × Marks)
+  | [], rows, groups, dirty, seen, seen2 => some (rows, groups, dirty, seen, seen2)
+  | pair :: rest, rows, groups, dirty, seen, seen2 =>
+    match groups.getD pair.1 [] with
+    | [] => updateAll g blocks rest rows groups dirty seen seen2
+    | sites =>
+      match updateVar g blocks pair.1 sites rows dirty seen seen2 with
+      | none => none
+      | some (rows, dirty, seen, seen2) => updateAll g blocks rest rows (groups.setIfInBounds pair.1 []) dirty seen seen2
+
+def addGroups (pairs : List (Nat × Nat)) (groups : Array (List Nat)) : Array (List Nat) :=
+  pairs.foldl (fun groups pair => groups.modify pair.1 (pair.2 :: ·)) groups
 
 def loopD (g : Graphs) (fallback : Array DBlk → Nat → Cfg) (ofBlocks : Array DBlk → Cfg) :
-    Nat → Array DBlk → Array Row → List Nat → List Nat → Marks → Marks → Marks → Marks → Cfg
+    Nat → Array DBlk → Array Row → List Nat → Array (List Nat) → Marks → Marks → Marks → Marks → Cfg
   | 0, blocks, _, _, _, _, _, _, _ => ofBlocks blocks
-  | fuel + 1, blocks, rows, affected, dirty, kills, seen, reads, live =>
-    match refreshD g blocks rows affected kills seen with
-    | none => fallback blocks (fuel + 1)
-    | some (rows, kills, seen) =>
-      let result := scanAll g blocks rows dirty reads live
-      match result.2.1 with
-      | [] => ofBlocks blocks
-      | dropped =>
-        let affected := nodup seen dropped
-        let dirtyList := nodup affected.2 (affected.1.flatMap fun x => g.definers.getD x [])
-        loopD g fallback ofBlocks fuel result.1 rows affected.1 dirtyList.1 kills dirtyList.2 result.2.2.1 result.2.2.2
+  | fuel + 1, blocks, rows, dirty, groups, seen, seen2, reads, live =>
+    let result := scanAll g blocks rows dirty reads live
+    match result.2.1 with
+    | [] => ofBlocks result.1
+    | dropped =>
+      match updateAll g result.1 dropped rows (addGroups dropped groups) [] seen seen2 with
+      | none => fallback result.1 fuel
+      | some (rows, groups, next, seen, seen2) =>
+        let dirtyList := nodup seen next
+        loopD g fallback ofBlocks fuel result.1 rows dirtyList.1 groups dirtyList.2 seen2 result.2.2.1 result.2.2.2
 
 /-- The position of each tid. -/
 def indexOf : Nat → List Blk → Std.HashMap Tid Nat → Std.HashMap Tid Nat
@@ -275,10 +341,13 @@ def run (effect : Bil.Exp → Bool) (protectedVars : List Bap.Var) (cfg : Cfg) (
   let nVars := ids.size
   let n := cfg.blocks.length
   let blocks : Array DBlk := (cfg.blocks.map (denseBlk effect ids)).toArray
-  let ofBlocks (blocks : Array DBlk) : Cfg := { cfg with blocks := blocks.toList.map DBlk.toBlk }
-  loopD (graphsOf ids protectedVars cfg index) (fun blocks fuel => fallback (ofBlocks blocks) fuel) ofBlocks fuel blocks
-    (Array.replicate nVars (.short [])) (List.range nVars) (List.range n)
-    (Marks.empty nVars) (Marks.empty (max nVars n)) (Marks.empty nVars) (Marks.empty nVars)
+  let g := graphsOf ids protectedVars cfg index
+  match refreshD g blocks (Array.replicate nVars (.short [])) (List.range nVars) (Marks.empty nVars) (Marks.empty (max nVars n)) with
+  | none => fallback cfg fuel
+  | some (rows, _, seen) =>
+    loopD g (fun blocks fuel => fallback { cfg with blocks := blocks.toList.map DBlk.toBlk } fuel)
+      (fun blocks => { cfg with blocks := blocks.toList.map DBlk.toBlk }) fuel blocks rows (List.range n) (Array.replicate nVars [])
+      seen (Marks.empty (max nVars n)) (Marks.empty nVars) (Marks.empty nVars)
 
 /-! ### Marks -/
 
@@ -495,26 +564,26 @@ theorem contains_internAll (ids : Ids) (vars : List Bap.Var) (x : Bap.Var) :
 
 section Flood
 
-variable {blocks : Array DBlk} {preds : Array (List Nat)} {x : Nat}
+variable {blocks : Array DBlk} {preds : Array (List Nat)} {x : Nat} {skip : Nat → Bool}
 
 /-- The blocks where a variable is live, as far as `floodD` goes. -/
-structure FloodSpec (blocks : Array DBlk) (preds : Array (List Nat)) (x : Nat) (live : Nat → Prop) : Prop where
-  step : ∀ t, live t → hasPhiD (blkAt blocks t) x = false → ∀ p ∈ preds.getD t [], killedD (blkAt blocks p) x = false → live p
+structure FloodSpec (blocks : Array DBlk) (preds : Array (List Nat)) (x : Nat) (skip : Nat → Bool) (live : Nat → Prop) : Prop where
+  step : ∀ t, live t → hasPhiD (blkAt blocks t) x = false → ∀ p ∈ preds.getD t [], skip p = false → live p
 
-private structure FloodInv (blocks : Array DBlk) (preds : Array (List Nat)) (x : Nat) (live : Nat → Prop) (seen : Marks) (row work : List Nat) : Prop where
+private structure FloodInv (blocks : Array DBlk) (preds : Array (List Nat)) (x : Nat) (skip : Nat → Bool) (live : Nat → Prop) (seen : Marks) (row work : List Nat) : Prop where
   sound : ∀ t ∈ row, live t
   marked : ∀ t, seen.contains t = true → t ∈ row
   closed : ∀ t ∈ row, t ∉ work → hasPhiD (blkAt blocks t) x = false → ∀ p ∈ preds.getD t [],
-    killedD (blkAt blocks p) x = false → p ∈ row
+    skip p = false → p ∈ row
   work : ∀ t ∈ work, t ∈ row
 
-private theorem visitPreds_inv {live : Nat → Prop} {n : Nat} (ps : List Nat) (hlive : ∀ p ∈ ps, killedD (blkAt blocks p) x = false → live p)
+private theorem visitPreds_inv {live : Nat → Prop} {n : Nat} (ps : List Nat) (hlive : ∀ p ∈ ps, skip p = false → live p)
     (state : Marks × List Nat × List Nat) (hw : state.1.WF n) (hsound : ∀ t ∈ state.2.1, live t)
     (hmarked : ∀ t, state.1.contains t = true → t ∈ state.2.1) (hwork : ∀ t ∈ state.2.2, t ∈ state.2.1) :
-    let next := visitPredsD blocks x ps state
+    let next := visitPredsD skip ps state
     next.1.WF n ∧ (∀ t ∈ next.2.1, live t) ∧ (∀ t, next.1.contains t = true → t ∈ next.2.1) ∧ (∀ t ∈ next.2.2, t ∈ next.2.1) ∧
       (∀ t ∈ state.2.1, t ∈ next.2.1) ∧ (∀ t ∈ state.2.2, t ∈ next.2.2) ∧ (∀ t ∈ next.2.1, t ∈ state.2.1 ∨ t ∈ next.2.2) ∧
-      ∀ p ∈ ps, killedD (blkAt blocks p) x = false → p ∈ next.2.1 := by
+      ∀ p ∈ ps, skip p = false → p ∈ next.2.1 := by
   induction ps generalizing state with
   | nil => exact ⟨hw, hsound, hmarked, hwork, fun _ h => h, fun _ h => h, fun _ h => Or.inl h, by simp⟩
   | cons p rest ih =>
@@ -535,7 +604,7 @@ private theorem visitPreds_inv {live : Nat → Prop} {n : Nat} (ps : List Nat) (
           cases hk'
         · exact this.2.2.2.2.2.2.2 q hq hk'
       · rename_i hk
-        have hk' : killedD (blkAt blocks p) x = false := by simpa using hk
+        have hk' : skip p = false := by simpa using hk
         have := ih (fun q hq => hlive q (List.mem_cons_of_mem _ hq)) (state.1.add p, p :: state.2.1, p :: state.2.2) (hw.add p)
           (by
             intro t ht
@@ -563,10 +632,10 @@ private theorem visitPreds_inv {live : Nat → Prop} {n : Nat} (ps : List Nat) (
           · exact this.2.2.2.2.1 _ List.mem_cons_self
           · exact this.2.2.2.2.2.2.2 q hq hk2
 
-private theorem floodD_inv {live : Nat → Prop} {n : Nat} (hspec : FloodSpec blocks preds x live) (fuel : Nat) (seen : Marks) (row work : List Nat)
-    (result : List Nat) (seen' : Marks) (hw : seen.WF n) (hinv : FloodInv blocks preds x live seen row work)
-    (hr : floodD blocks preds x fuel seen row work = some (result, seen')) :
-    seen'.WF n ∧ FloodInv blocks preds x live seen' result [] ∧ ∀ t ∈ row, t ∈ result := by
+private theorem floodD_inv {live : Nat → Prop} {n : Nat} (hspec : FloodSpec blocks preds x skip live) (fuel : Nat) (seen : Marks) (row work : List Nat)
+    (result : List Nat) (seen' : Marks) (hw : seen.WF n) (hinv : FloodInv blocks preds x skip live seen row work)
+    (hr : floodD blocks preds x skip fuel seen row work = some (result, seen')) :
+    seen'.WF n ∧ FloodInv blocks preds x skip live seen' result [] ∧ ∀ t ∈ row, t ∈ result := by
   induction fuel generalizing seen row work with
   | zero => simp [floodD] at hr
   | succ fuel ih =>
@@ -589,7 +658,7 @@ private theorem floodD_inv {live : Nat → Prop} {n : Nat} (hspec : FloodSpec bl
       · rename_i hphi
         have hphi' : hasPhiD (blkAt blocks t) x = false := by simpa using hphi
         have htr := hinv.work t List.mem_cons_self
-        obtain ⟨n1, n2, n3, n4, n5, n6, n7, n8⟩ := visitPreds_inv (blocks := blocks) (x := x) (live := live) (n := n) (preds.getD t [])
+        obtain ⟨n1, n2, n3, n4, n5, n6, n7, n8⟩ := visitPreds_inv (skip := skip) (live := live) (n := n) (preds.getD t [])
           (fun p hp hk => hspec.step t (hinv.sound t htr) hphi' p hp hk) (seen, row, work) hw hinv.sound hinv.marked
           (fun q hq => hinv.work q (List.mem_cons_of_mem _ hq))
         obtain ⟨h1, h2, h3⟩ := ih _ _ _ n1 ⟨n2, n3, fun q hq hn hp p hps hk => by
@@ -605,11 +674,11 @@ private theorem floodD_inv {live : Nat → Prop} {n : Nat} (hspec : FloodSpec bl
         exact ⟨h1, h2, fun q hq => h3 q (n5 q hq)⟩
 
 /-- What `floodD` finds, from what starts a variable: if the fuel lasts, all that is live, and nothing else. -/
-theorem floodD_spec {live : Nat → Prop} {n : Nat} (hspec : FloodSpec blocks preds x live) {fuel : Nat} {seen seen' : Marks} {start result : List Nat}
+theorem floodD_spec {live : Nat → Prop} {n : Nat} (hspec : FloodSpec blocks preds x skip live) {fuel : Nat} {seen seen' : Marks} {start result : List Nat}
     (hw : seen.WF n) (hmarked : ∀ t, seen.contains t = true → t ∈ start) (hstart : ∀ t ∈ start, live t)
     (hleast : ∀ Row : Nat → Prop, (∀ t ∈ start, Row t) →
-      (∀ t, Row t → hasPhiD (blkAt blocks t) x = false → ∀ p ∈ preds.getD t [], killedD (blkAt blocks p) x = false → Row p) → ∀ t, live t → Row t)
-    (hr : floodD blocks preds x fuel seen start start = some (result, seen')) :
+      (∀ t, Row t → hasPhiD (blkAt blocks t) x = false → ∀ p ∈ preds.getD t [], skip p = false → Row p) → ∀ t, live t → Row t)
+    (hr : floodD blocks preds x skip fuel seen start start = some (result, seen')) :
     seen'.WF n ∧ ∀ t, t ∈ result ↔ live t := by
   obtain ⟨h1, h2, h3⟩ := floodD_inv hspec fuel seen start start result seen' hw ⟨hstart, hmarked, fun _ _ hn => (hn (by assumption)).elim, fun _ h => h⟩ hr
   refine ⟨h1, fun t => ⟨h2.sound t, hleast (· ∈ result) h3 ?_ t⟩⟩
@@ -935,7 +1004,7 @@ theorem exposedD_wf {m : Marks} {N : Nat} (hm : m.WF N) (d : DBlk) : (exposedD m
     | cons a as ih => exact fun o m h => ih _ _ (h.add _)
   exact hd _ _ _ (hp _ _ hm.clear)
 
-private theorem getD_modify (a : Array (List Nat)) (y j : Nat) (f : List Nat → List Nat) :
+theorem getD_modify (a : Array (List Nat)) (y j : Nat) (f : List Nat → List Nat) :
     (a.modify y f).getD j [] = if j = y ∧ y < a.size then f (a.getD j []) else a.getD j [] := by
   simp only [Array.getD_eq_getD_getElem?, Array.getElem?_modify]
   by_cases h : y = j
@@ -1100,7 +1169,7 @@ theorem size_affectedMarks (size : Nat) (affected : List Nat) : (affectedMarks s
 
 /-- The rows for numbers `xs`, as far as `floodD` goes. `L y i` says what the row of `y` has to be. -/
 theorem refreshRows_spec {preds : Array (List Nat)} {seeds : Array (List Nat)} {n : Nat} (L : Nat → Nat → Prop)
-    (xs : List Nat) (hflood : ∀ y ∈ xs, FloodSpec blocks preds y (L y)) (hsound : ∀ y ∈ xs, ∀ i, i ∈ seeds.getD y [] → L y i)
+    (xs : List Nat) (hflood : ∀ y ∈ xs, FloodSpec blocks preds y (fun p => killedD (Bap.IR.DenseDce.blkAt blocks p) y) (L y)) (hsound : ∀ y ∈ xs, ∀ i, i ∈ seeds.getD y [] → L y i)
     (hleast : ∀ y ∈ xs, ∀ (Row : Nat → Prop), (∀ t ∈ seeds.getD y [], Row t) →
       (∀ t, Row t → hasPhiD (Bap.IR.DenseDce.blkAt blocks t) y = false → ∀ p ∈ preds.getD t [], killedD (Bap.IR.DenseDce.blkAt blocks p) y = false → Row p) →
       ∀ t, L y t → Row t)
@@ -1157,7 +1226,7 @@ theorem refreshRows_spec {preds : Array (List Nat)} {seeds : Array (List Nat)} {
       rw [hs] at hr
       dsimp only at hr
       rw [← hs] at hr
-      cases hf : floodD blocks preds x ((seeds.getD x []).length + blocks.size + 1) ((seeds.getD x []).foldl Marks.add seen.clear) (seeds.getD x []) (seeds.getD x []) with
+      cases hf : floodD blocks preds x (fun p => killedD (Bap.IR.DenseDce.blkAt blocks p) x) ((seeds.getD x []).length + blocks.size + 1) ((seeds.getD x []).foldl Marks.add seen.clear) (seeds.getD x []) (seeds.getD x []) with
       | none =>
         rw [hf] at hr
         cases hr
@@ -1246,7 +1315,7 @@ theorem refreshD_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} (hm : Mirror 
       intro x hx ha
       exact (mem_affectedMarks _ _ _).2 ⟨ha, hsize ▸ hids.lt x hx⟩
     let L : Nat → Nat → Prop := fun y i => ∃ x b, ids.contains x = true ∧ idOf ids x = y ∧ At cfg i b ∧ x ∈ liveIn cfg b.tid
-    have hstep : ∀ y ∈ affected, FloodSpec blocks g.preds y (L y) := by
+    have hstep : ∀ y ∈ affected, FloodSpec blocks g.preds y (fun p => killedD (Bap.IR.DenseDce.blkAt blocks p) y) (L y) := by
       intro y _
       refine ⟨?_⟩
       rintro t ⟨x, b, hx, rfl, hb, hl⟩ hp p hps hk'
@@ -1771,5 +1840,658 @@ theorem internBlocks_spec (l : List Blk) (ids : Ids) (hw : IdsWF ids) (ho : ∀ 
     · exact h4 blk hb y hy
 
 end Refresh
+
+/-! ### What a removal takes out of a row -/
+
+section Losses
+
+variable {effect : Bil.Exp → Bool} {ids : Ids} {blocks : Array DBlk} {cfg old : Cfg}
+
+theorem Row.contains_erase (r : Row) (b i : Nat) : (r.erase b).contains i = true ↔ r.contains i = true ∧ i ≠ b := by
+  cases r with
+  | short l => simp [Row.erase, Row.contains]
+  | long s =>
+    simp only [Row.erase, Row.contains, Std.HashSet.contains_erase, Bool.and_eq_true, Bool.not_eq_true', beq_eq_false_iff_ne]
+    exact ⟨fun h => ⟨h.2, h.1.symm⟩, fun h => ⟨h.2.symm, h.1⟩⟩
+
+theorem Row.contains_eraseAll (l : List Nat) (r : Row) (i : Nat) :
+    (l.foldl Row.erase r).contains i = true ↔ r.contains i = true ∧ i ∉ l := by
+  induction l generalizing r with
+  | nil => simp
+  | cons a as ih =>
+    simp only [List.foldl_cons, ih, Row.contains_erase, List.mem_cons, not_or]
+    exact and_assoc
+
+private theorem exposedDefsD_dense (h : IdsWF ids) {x : Bap.Var} (hx : ids.contains x = true) (jmps : List Nat)
+    (defs : List Def) (hd : ∀ d ∈ defs, ids.contains d.var = true ∧ ∀ y ∈ Bil.freeVars d.rhs, ids.contains y = true) :
+    exposedDefsD (idOf ids x) jmps (defs.map (denseDef effect ids)) = true ↔
+      Bap.Proofs.IR.Exposed defs x ∨ (idOf ids x ∈ jmps ∧ ∀ d ∈ defs, d.var ≠ x) := by
+  induction defs with
+  | nil => simp [exposedDefsD, Bap.Proofs.IR.Exposed]
+  | cons d ds ih =>
+    obtain ⟨hv, hr⟩ := hd d List.mem_cons_self
+    have hmem : idOf ids x ∈ (Bil.freeVars d.rhs).map (idOf ids) ↔ x ∈ Bil.freeVars d.rhs := by
+      simp only [List.mem_map]
+      exact ⟨fun ⟨y, hy, he⟩ => h.inj y x (hr y hy) hx he ▸ hy, fun hy => ⟨x, hy, rfl⟩⟩
+    have hne : idOf ids d.var = idOf ids x ↔ d.var = x := ⟨h.inj _ _ hv hx, fun e => e ▸ rfl⟩
+    simp only [List.map_cons, exposedDefsD, denseDef, Bool.or_eq_true, Bool.and_eq_true, List.contains_eq_mem, decide_eq_true_eq,
+      bne_iff_ne, ne_eq, hmem, hne, ih fun e he => hd e (List.mem_cons_of_mem _ he), Bap.Proofs.IR.Exposed, List.mem_cons, forall_eq_or_imp]
+    grind
+
+theorem exposesD_dense (h : IdsWF ids) {blk : Blk} (hv : ∀ y ∈ vocabulary blk, ids.contains y = true) {x : Bap.Var}
+    (hx : ids.contains x = true) : exposesD (denseBlk effect ids blk) (idOf ids x) = true ↔ x ∈ blockIn blk [] := by
+  have hd : ∀ d ∈ blk.defs, ids.contains d.var = true ∧ ∀ y ∈ Bil.freeVars d.rhs, ids.contains y = true := by
+    intro d hd
+    constructor
+    · exact hv _ (by
+        simp only [vocabulary, List.mem_append, List.mem_flatMap, List.mem_cons]
+        exact Or.inl (Or.inr ⟨d, hd, Or.inl rfl⟩))
+    · intro y hy
+      exact hv _ (by
+        simp only [vocabulary, List.mem_append, List.mem_flatMap, List.mem_cons]
+        exact Or.inl (Or.inr ⟨d, hd, Or.inr hy⟩))
+  have hj : idOf ids x ∈ (blk.jmps.flatMap Jmp.freeVars).map (idOf ids) ↔ ∃ jmp ∈ blk.jmps, x ∈ jmp.freeVars := by
+    simp only [List.mem_map, List.mem_flatMap]
+    constructor
+    · rintro ⟨y, ⟨j, hj, hy⟩, he⟩
+      have := h.inj y x (hv y (by
+        simp only [vocabulary, List.mem_append, List.mem_flatMap]
+        exact Or.inr ⟨j, hj, hy⟩)) hx he
+      exact ⟨j, hj, this ▸ hy⟩
+    · rintro ⟨j, hj, hy⟩
+      exact ⟨x, ⟨j, hj, hy⟩, rfl⟩
+  have hp := hasPhiD_dense (effect := effect) h hv hx
+  simp only [exposesD, Bool.and_eq_true, Bool.not_eq_true', hp, hasPhi_false_iff]
+  have he := exposedDefsD_dense (effect := effect) h hx ((blk.jmps.flatMap Jmp.freeVars).map (idOf ids)) blk.defs hd
+  simp only [denseBlk]
+  rw [he, Bap.Proofs.IR.mem_blockIn, hj]
+  simp
+
+/-- The marks of the blocks a visit has seen. -/
+private theorem visitPreds_marks {n : Nat} {skip : Nat → Bool} (ps : List Nat) (hlt : ∀ p ∈ ps, p < n) (state : Marks × List Nat × List Nat)
+    (hw : state.1.WF n) (hall : ∀ t ∈ state.2.1, state.1.contains t = true) :
+    ∀ t ∈ (visitPredsD skip ps state).2.1, (visitPredsD skip ps state).1.contains t = true := by
+  induction ps generalizing state with
+  | nil => exact hall
+  | cons p rest ih =>
+    simp only [visitPredsD, List.foldl_cons]
+    have hrest := fun q hq => hlt q (List.mem_cons_of_mem _ hq)
+    split
+    · exact ih hrest state hw hall
+    · split
+      · exact ih hrest state hw hall
+      · refine ih hrest (state.1.add p, p :: state.2.1, p :: state.2.2) (hw.add p) ?_
+        intro t ht
+        rw [Marks.contains_add hw (hlt p List.mem_cons_self)]
+        rcases List.mem_cons.1 ht with rfl | ht
+        · exact Or.inl rfl
+        · exact Or.inr (hall t ht)
+
+private theorem visitPreds_wf {n : Nat} {skip : Nat → Bool} (ps : List Nat) (state : Marks × List Nat × List Nat) (hw : state.1.WF n) :
+    (visitPredsD skip ps state).1.WF n := by
+  induction ps generalizing state with
+  | nil => exact hw
+  | cons p rest ih =>
+    simp only [visitPredsD, List.foldl_cons]
+    split
+    · exact ih state hw
+    · split
+      · exact ih state hw
+      · exact ih _ (hw.add p)
+
+private theorem floodD_marks {preds : Array (List Nat)} {x n : Nat} {skip : Nat → Bool} (hp : ∀ t, ∀ p ∈ preds.getD t [], p < n)
+    (fuel : Nat) (seen : Marks) (row work : List Nat) (result : List Nat) (seen' : Marks) (hw : seen.WF n)
+    (hall : ∀ t ∈ row, seen.contains t = true) (hr : floodD blocks preds x skip fuel seen row work = some (result, seen')) :
+    ∀ t ∈ result, seen'.contains t = true := by
+  induction fuel generalizing seen row work with
+  | zero => simp [floodD] at hr
+  | succ fuel ih =>
+    cases work with
+    | nil =>
+      simp only [floodD, Option.some.injEq, Prod.mk.injEq] at hr
+      obtain ⟨rfl, rfl⟩ := hr
+      exact hall
+    | cons t work =>
+      simp only [floodD] at hr
+      split at hr
+      · exact ih seen row work hw hall hr
+      · exact ih _ _ _ (visitPreds_wf _ (seen, row, work) hw) (visitPreds_marks _ (hp t) (seen, row, work) hw hall) hr
+
+/-- What `lostD` finds. -/
+private theorem lostD_spec {g : Graphs} {row : Row} {x n N : Nat} {sites : List Nat} {seen seen' : Marks} {lost : List Nat} (hNn : N ≤ n)
+    (hp : ∀ t, ∀ p ∈ g.preds.getD t [], p < N) (hs : ∀ s ∈ sites, s < N) (hw : seen.WF n)
+    (hr : lostD g blocks row x sites seen = some (lost, seen')) :
+    seen'.WF n ∧ (∀ t, seen'.contains t = true ↔ t ∈ lost) ∧ (∀ t ∈ lost, t < N ∧ row.contains t = true ∧ exposesD (blkAt blocks t) x = false) ∧
+      (∀ s ∈ sites ++ sites.flatMap (fun s => g.preds.getD s []), row.contains s = true → exposesD (blkAt blocks s) x = false → s ∈ lost) ∧
+      ∀ t ∈ lost, hasPhiD (blkAt blocks t) x = false → ∀ p ∈ g.preds.getD t [], row.contains p = true → killedD (blkAt blocks p) x = false →
+        exposesD (blkAt blocks p) x = false → p ∈ lost := by
+  simp only [lostD] at hr
+  generalize hps : sites ++ sites.flatMap (fun s => g.preds.getD s []) = ps at hr
+  have hlt : ∀ p ∈ ps, p < N := by
+    intro p hm
+    rw [← hps] at hm
+    rcases List.mem_append.1 hm with h | h
+    · exact hs p h
+    · obtain ⟨s, _, h⟩ := List.mem_flatMap.1 h
+      exact hp s p h
+  have hpn : ∀ t, ∀ p ∈ g.preds.getD t [], p < n := fun t p h => Nat.lt_of_lt_of_le (hp t p h) hNn
+  let live : Nat → Prop := fun t => t < N ∧ row.contains t = true ∧ exposesD (blkAt blocks t) x = false
+  generalize hfirst : visitPredsD (fun p => !row.contains p || exposesD (blkAt blocks p) x) ps (seen.clear, [], []) = first at hr
+  obtain ⟨n1, n2, n3, _, _, _, _, n8⟩ := visitPreds_inv (skip := fun p => !row.contains p || exposesD (blkAt blocks p) x)
+    (live := live) (n := n) ps
+    (fun p hm hk => ⟨hlt p hm, by simpa using hk⟩) (seen.clear, [], []) hw.clear (by simp)
+    (fun t ht => by
+      have := Marks.contains_clear hw t
+      simp only at ht
+      rw [this] at ht
+      cases ht) (by simp)
+  rw [hfirst] at n1 n2 n3 n8
+  have hm0 := visitPreds_marks (skip := fun p => !row.contains p || exposesD (blkAt blocks p) x) ps (fun p h => Nat.lt_of_lt_of_le (hlt p h) hNn) (seen.clear, [], []) hw.clear (by simp)
+  rw [hfirst] at hm0
+  have hspec : FloodSpec blocks g.preds x (fun p => !row.contains p || killedD (blkAt blocks p) x || exposesD (blkAt blocks p) x) live := by
+    refine ⟨fun t _ _ p hpp hk => ?_⟩
+    have hk' : row.contains p = true ∧ killedD (blkAt blocks p) x = false ∧ exposesD (blkAt blocks p) x = false := by
+      simpa [and_assoc] using hk
+    exact ⟨hp t p hpp, hk'.1, hk'.2.2⟩
+  obtain ⟨h1, h2, h3⟩ := floodD_inv (n := n) hspec _ first.1 first.2.1 first.2.1 lost seen' n1 ⟨n2, n3, fun _ h hn => (hn h).elim, fun _ h => h⟩ hr
+  have hm := floodD_marks (hp := hpn) (blocks := blocks) _ first.1 first.2.1 first.2.1 lost seen' n1 hm0 hr
+  refine ⟨h1, fun t => ⟨h2.marked t, hm t⟩, h2.sound, ?_, ?_⟩
+  · intro s hm hc he
+    exact h3 s (n8 s hm (by simp [hc, he]))
+  · intro t ht hph p hps hc hk he
+    exact h2.closed t ht (by simp) hph p hps (by simp [hc, hk, he])
+
+/-- What `keptD` finds. -/
+private theorem keptD_spec {g : Graphs} {row : Row} {x n : Nat} {lostList : List Nat} {lost seen seen' : Marks} {kept : List Nat}
+    (hp : ∀ t, ∀ p ∈ g.preds.getD t [], p < n) (hl : ∀ t ∈ lostList, t < n) (hw : seen.WF n) {live : Nat → Prop}
+    (hstart : ∀ t ∈ lostList, survivesD g blocks row lost x t = true → live t)
+    (hstep : ∀ t, live t → hasPhiD (blkAt blocks t) x = false → ∀ p ∈ g.preds.getD t [], lost.contains p = true → killedD (blkAt blocks p) x = false → live p)
+    (hr : keptD g blocks row x lostList lost seen = some (kept, seen')) :
+    seen'.WF n ∧ (∀ t, seen'.contains t = true ↔ t ∈ kept) ∧ (∀ t ∈ kept, live t) ∧
+      (∀ t ∈ lostList, survivesD g blocks row lost x t = true → t ∈ kept) ∧
+      ∀ t ∈ kept, hasPhiD (blkAt blocks t) x = false → ∀ p ∈ g.preds.getD t [], lost.contains p = true → killedD (blkAt blocks p) x = false → p ∈ kept := by
+  simp only [keptD] at hr
+  generalize hst : lostList.filter (survivesD g blocks row lost x) = start at hr
+  have hin : ∀ t ∈ start, t < n := fun t ht => hl t (List.mem_filter.1 (hst ▸ ht)).1
+  have hwc : (start.foldl Marks.add seen.clear).WF n := hw.clear.foldl_add _
+  have hmk : ∀ t, (start.foldl Marks.add seen.clear).contains t = true ↔ t ∈ start := by
+    intro t
+    rw [Marks.contains_foldl_add hw.clear hin, Marks.contains_clear hw]
+    simp
+  have hspec : FloodSpec blocks g.preds x (fun p => !lost.contains p || killedD (blkAt blocks p) x) live := by
+    refine ⟨fun t hl hph p hps hk => ?_⟩
+    have : lost.contains p = true ∧ killedD (blkAt blocks p) x = false := by simpa using hk
+    exact hstep t hl hph p hps this.1 this.2
+  have hstarts : ∀ t ∈ start, live t := by
+    intro t ht
+    rw [← hst] at ht
+    exact hstart t (List.mem_filter.1 ht).1 (List.mem_filter.1 ht).2
+  obtain ⟨h1, h2, h3⟩ := floodD_inv (n := n) hspec _ _ start start kept seen' hwc ⟨hstarts, fun t ht => (hmk t).1 ht, fun _ h hn => (hn h).elim, fun _ h => h⟩ hr
+  have hm := floodD_marks (hp := hp) (blocks := blocks) _ _ start start kept seen' hwc (fun t ht => (hmk t).2 ht) hr
+  refine ⟨h1, fun t => ⟨h2.marked t, hm t⟩, h2.sound, ?_, ?_⟩
+  · intro t ht hs
+    exact h3 t (hst ▸ List.mem_filter.2 ⟨ht, hs⟩)
+  · intro t ht hph p hps hc hk
+    exact h2.closed t ht (by simp) hph p hps (by simp [hc, hk])
+
+private theorem addKillers_spec {g : Graphs} {x : Nat} (l dirty : List Nat) :
+    (∀ d ∈ dirty, d ∈ addKillers g blocks x l dirty) ∧
+      (∀ t ∈ l, ∀ p ∈ g.preds.getD t [], killedD (blkAt blocks p) x = true → p ∈ addKillers g blocks x l dirty) ∧
+      ∀ d ∈ addKillers g blocks x l dirty, d ∈ dirty ∨ ∃ t ∈ l, d ∈ g.preds.getD t [] := by
+  have hin : ∀ (ps acc : List Nat), (∀ d ∈ acc, d ∈ ps.foldl (fun dirty p => if killedD (blkAt blocks p) x then p :: dirty else dirty) acc) ∧
+      (∀ p ∈ ps, killedD (blkAt blocks p) x = true → p ∈ ps.foldl (fun dirty p => if killedD (blkAt blocks p) x then p :: dirty else dirty) acc) ∧
+      ∀ d ∈ ps.foldl (fun dirty p => if killedD (blkAt blocks p) x then p :: dirty else dirty) acc, d ∈ acc ∨ d ∈ ps := by
+    intro ps
+    induction ps with
+    | nil => simp
+    | cons a as ih =>
+      intro acc
+      simp only [List.foldl_cons]
+      split
+      · rename_i hk
+        obtain ⟨i1, i2, i3⟩ := ih (a :: acc)
+        refine ⟨fun d hd => i1 d (List.mem_cons_of_mem _ hd), fun p hp hk' => ?_, fun d hd => ?_⟩
+        · rcases List.mem_cons.1 hp with rfl | hp
+          · exact i1 _ List.mem_cons_self
+          · exact i2 p hp hk'
+        · rcases i3 d hd with h | h
+          · rcases List.mem_cons.1 h with rfl | h
+            · exact Or.inr List.mem_cons_self
+            · exact Or.inl h
+          · exact Or.inr (List.mem_cons_of_mem _ h)
+      · rename_i hk
+        obtain ⟨i1, i2, i3⟩ := ih acc
+        refine ⟨i1, fun p hp hk' => ?_, fun d hd => ?_⟩
+        · rcases List.mem_cons.1 hp with rfl | hp
+          · exact (hk hk').elim
+          · exact i2 p hp hk'
+        · rcases i3 d hd with h | h
+          · exact Or.inl h
+          · exact Or.inr (List.mem_cons_of_mem _ h)
+  simp only [addKillers]
+  induction l generalizing dirty with
+  | nil => simp
+  | cons a as ih =>
+    simp only [List.foldl_cons]
+    obtain ⟨j1, j2, j3⟩ := hin (g.preds.getD a []) dirty
+    obtain ⟨i1, i2, i3⟩ := ih ((g.preds.getD a []).foldl (fun dirty p => if killedD (blkAt blocks p) x then p :: dirty else dirty) dirty)
+    refine ⟨fun d hd => i1 d (j1 d hd), fun t ht p hp hk => ?_, fun d hd => ?_⟩
+    · rcases List.mem_cons.1 ht with rfl | ht
+      · exact i1 p (j2 p hp hk)
+      · exact i2 t ht p hp hk
+    · rcases i3 d hd with h | ⟨t, ht, h⟩
+      · rcases j3 d h with h | h
+        · exact Or.inl h
+        · exact Or.inr ⟨a, List.mem_cons_self, h⟩
+      · exact Or.inr ⟨t, List.mem_cons_of_mem _ ht, h⟩
+
+/-- A block that can only have less to say about a variable. -/
+structure Shrinks (x : Bap.Var) (before after : Blk) : Prop where
+  kill : Killed after x → Killed before x
+  phi : (∀ phi ∈ before.phis, phi.var ≠ x) → ∀ phi ∈ after.phis, phi.var ≠ x
+
+/-- How the CFG before a removal goes with the one after it, as far as a variable goes, where `sites` are the blocks that lost a mention of it. -/
+structure Removal (old cfg : Cfg) (x : Bap.Var) (sites : List Nat) : Prop where
+  reach : old.reachable = cfg.reachable
+  succs : ∀ t, old.successors t = cfg.successors t
+  block : ∀ t before, old.block t = some before → ∃ i after, At cfg i after ∧ after.tid = t ∧ Shrinks x before after ∧ (i ∉ sites → Agree x before after)
+  sub : ∀ t, x ∈ liveIn cfg t → x ∈ liveIn old t
+
+/-- Where a variable was live and may not be any more is what goes back from what lost it. -/
+private theorem removal_cover {g : Graphs} {ps : List Bap.Var} {n : Nat} {x : Bap.Var} {sites : List Nat} (hg : GraphsOK g ids cfg ps n)
+    (hrm : Removal old cfg x sites) (C : Nat → Prop) (R : Nat → Prop) (hrow : ∀ i b, At cfg i b → (R i ↔ x ∈ liveIn old b.tid))
+    (hseed : ∀ i b, At cfg i b → R i → x ∉ blockIn b [] → i ∈ sites → C i)
+    (hpred : ∀ s ∈ sites, ∀ p ∈ g.preds.getD s [], ∀ b, At cfg p b → R p → x ∉ blockIn b [] → C p)
+    (hclosed : ∀ t b, At cfg t b → C t → (∀ phi ∈ b.phis, phi.var ≠ x) → ∀ p ∈ g.preds.getD t [], ∀ c, At cfg p c → R p → ¬ Killed c x → x ∉ blockIn c [] → C p)
+    {i : Nat} {b : Blk} (hb : At cfg i b) (hl : x ∈ liveIn old b.tid) : C i ∨ x ∈ liveIn cfg b.tid := by
+  have hkey := live_least old x (fun τ => x ∈ liveIn old τ ∧ ∀ i b, At cfg i b → b.tid = τ → C i ∨ x ∈ liveIn cfg τ) ?_ ?_ hl
+  · exact hkey.2 i b hb rfl
+  · intro τ hτ before hbefore hgen
+    have hlo : x ∈ liveIn old τ := live_of_gen hτ hbefore hgen
+    refine ⟨hlo, ?_⟩
+    obtain ⟨j, after, hj, htid, _, hag⟩ := hrm.block τ before hbefore
+    subst htid
+    intro k c hc hct
+    have hkj := hg.unique k j c after hc hj hct
+    subst hkj
+    have hsame : c = after := by
+      simp only [At] at hc hj
+      rw [hc] at hj
+      exact Option.some.inj hj
+    subst hsame
+    have hreachNew : c.tid ∈ cfg.reachable := hrm.reach ▸ hτ
+    by_cases hgn : x ∈ blockIn c []
+    · exact Or.inr (live_of_gen hreachNew (hg.block k c hc) hgn)
+    · by_cases hs : k ∈ sites
+      · exact Or.inl (hseed k c hc ((hrow k c hc).2 hlo) hgn hs)
+      · exact (hgn ((hag hs).gen.1 hgen)).elim
+  · intro τ hτ before hbefore hk σ hσ he
+    obtain ⟨obs, hobs, hcase⟩ := he
+    have hlo : x ∈ liveIn old τ := live_of_edge hτ hbefore hk hσ ⟨obs, hobs, by
+      rcases hcase with ⟨h1, h2⟩ | h1
+      · exact Or.inl ⟨h1.1, h2⟩
+      · exact Or.inr h1⟩
+    refine ⟨hlo, ?_⟩
+    obtain ⟨j, after, hj, htid, hsh, _⟩ := hrm.block τ before hbefore
+    subst htid
+    obtain ⟨js, bs, hjs, hst, hshs, hags⟩ := hrm.block σ obs hobs
+    subst hst
+    intro k c hc hct
+    have hkj := hg.unique k j c after hc hj hct
+    subst hkj
+    have hsame : c = after := by
+      simp only [At] at hc hj
+      rw [hc] at hj
+      exact Option.some.inj hj
+    subst hsame
+    have hreachNew : c.tid ∈ cfg.reachable := hrm.reach ▸ hτ
+    have hkn : ¬ Killed c x := fun h => hk (hsh.kill h)
+    have hsucc : bs.tid ∈ cfg.successors c.tid := by rw [← hrm.succs]; exact hσ
+    have hip : k ∈ g.preds.getD js [] := (hg.preds js bs k c hjs hc).2 ⟨hreachNew, hsucc⟩
+    by_cases hgn : x ∈ blockIn c []
+    · exact Or.inr (live_of_gen hreachNew (hg.block k c hc) hgn)
+    have hbsb := hg.block js bs hjs
+    rcases hcase with ⟨hr, hp⟩ | hr
+    · have hpn := hshs.phi hp
+      rcases hr.2 js bs hjs rfl with hC | hnew
+      · exact Or.inl (hclosed js bs hjs hC hpn k hip c hc ((hrow k c hc).2 hlo) hkn hgn)
+      · exact Or.inr (live_of_edge hreachNew (hg.block k c hc) hkn hsucc ⟨bs, hbsb, Or.inl ⟨hnew, hpn⟩⟩)
+    · by_cases hs : js ∈ sites
+      · exact Or.inl (hpred js hs k hip c hc ((hrow k c hc).2 hlo) hgn)
+      · exact Or.inr (live_of_edge hreachNew (hg.block k c hc) hkn hsucc ⟨bs, hbsb, Or.inr (((hags hs).reads c.tid).1 hr)⟩)
+
+/-- The row of a variable after a removal, from the one before it, what can lose it and what doesn't. -/
+private theorem removal_exact {g : Graphs} {ps : List Bap.Var} {n : Nat} {x : Bap.Var} {sites : List Nat} (hg : GraphsOK g ids cfg ps n)
+    (hrm : Removal old cfg x sites) (C K R : Nat → Prop) (hrow : ∀ i b, At cfg i b → (R i ↔ x ∈ liveIn old b.tid))
+    (hcover : ∀ i b, At cfg i b → x ∈ liveIn old b.tid → C i ∨ x ∈ liveIn cfg b.tid)
+    (hgen : ∀ i b, At cfg i b → C i → x ∉ blockIn b [])
+    (hKsound : ∀ i b, At cfg i b → K i → x ∈ liveIn cfg b.tid)
+    (hsurvive : ∀ i b, At cfg i b → C i → ¬ Killed b x → ∀ is bs, At cfg is bs → bs.tid ∈ cfg.successors b.tid →
+      ((R is ∧ ¬ C is ∧ ∀ phi ∈ bs.phis, phi.var ≠ x) ∨ x ∈ phiReads b.tid bs) → K i)
+    (hKclosed : ∀ t b, At cfg t b → K t → (∀ phi ∈ b.phis, phi.var ≠ x) → ∀ p c, At cfg p c → c.tid ∈ cfg.reachable → b.tid ∈ cfg.successors c.tid → C p → ¬ Killed c x → K p)
+    {i : Nat} {b : Blk} (hb : At cfg i b) : (R i ∧ (¬ C i ∨ K i)) ↔ x ∈ liveIn cfg b.tid := by
+  constructor
+  · rintro ⟨hr, hc | hc⟩
+    · rcases hcover i b hb ((hrow i b hb).1 hr) with h | h
+      · exact (hc h).elim
+      · exact h
+    · exact hKsound i b hb hc
+  · intro hl
+    have hkey := live_least cfg x (fun τ => x ∈ liveIn cfg τ ∧ ∀ i b, At cfg i b → b.tid = τ → ¬ C i ∨ K i) ?_ ?_ hl
+    · exact ⟨(hrow i b hb).2 (hrm.sub _ hl), hkey.2 i b hb rfl⟩
+    · intro τ hτ blk hblk hgn
+      refine ⟨live_of_gen hτ hblk hgn, ?_⟩
+      intro k c hc hct
+      obtain rfl : blk = c := Option.some.inj (by rw [← hblk, ← hct]; exact hg.block k c hc)
+      exact Or.inl fun hC => hgen k blk hc hC hgn
+    · intro τ hτ blk hblk hk σ hσ he
+      have hlv : x ∈ liveIn cfg τ := live_of_edge hτ hblk hk hσ (by
+        obtain ⟨bs, hbs, hc⟩ := he
+        refine ⟨bs, hbs, ?_⟩
+        rcases hc with ⟨h1, h2⟩ | h1
+        · exact Or.inl ⟨h1.1, h2⟩
+        · exact Or.inr h1)
+      refine ⟨hlv, ?_⟩
+      intro k c hc hct
+      obtain rfl : blk = c := Option.some.inj (by rw [← hblk, ← hct]; exact hg.block k c hc)
+      by_cases hC : C k
+      · refine Or.inr ?_
+        obtain ⟨bs, hbs, hcase⟩ := he
+        obtain ⟨is, his, hst⟩ := hg.index σ bs hbs
+        subst hst
+        subst hct
+        rcases hcase with ⟨h1, h2⟩ | h1
+        · rcases h1.2 is bs his rfl with hn | hK
+          · exact hsurvive k blk hc hC hk is bs his hσ (Or.inl ⟨(hrow is bs his).2 (hrm.sub _ h1.1), hn, h2⟩)
+          · exact hKclosed is bs his hK h2 k blk hc hτ hσ hC hk
+        · exact hsurvive k blk hc hC hk is bs his hσ (Or.inr h1)
+      · exact Or.inl hC
+
+private theorem getD_modify_row (a : Array Row) (y j : Nat) (f : Row → Row) (d : Row) :
+    (a.modify y f).getD j d = if j = y ∧ y < a.size then f (a.getD j d) else a.getD j d := by
+  simp only [Array.getD_eq_getD_getElem?, Array.getElem?_modify]
+  by_cases h : y = j
+  · subst h
+    by_cases hs : y < a.size
+    · simp [hs]
+    · simp [hs]
+  · have : j ≠ y := fun e => h e.symm
+    simp [h, this]
+
+/-- What `updateVar` leaves. -/
+theorem updateVar_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} {x : Bap.Var} {sites : List Nat} {rows rows' : Array Row} {dirty dirty' : List Nat}
+    {seen seen2 s1 s2 : Marks} (hm : Mirror effect ids blocks cfg) (hg : GraphsOK g ids cfg ps n) (hnM : n ≤ M) (hx : ids.contains x = true) (hxs : idOf ids x < rows.size)
+    (hrm : Removal old cfg x sites) (hsites : ∀ s ∈ sites, s < n) (hrow : ∀ i b, At cfg i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ x ∈ liveIn old b.tid))
+    (hs1 : seen.WF M) (hs2 : seen2.WF M)
+    (hr : updateVar g blocks (idOf ids x) sites rows dirty seen seen2 = some (rows', dirty', s1, s2)) :
+    s1.WF M ∧ s2.WF M ∧ rows'.size = rows.size ∧ (∀ y, y ≠ idOf ids x → rows'.getD y (.short []) = rows.getD y (.short [])) ∧
+      (∀ i b, At cfg i b → ((rows'.getD (idOf ids x) (.short [])).contains i = true ↔ x ∈ liveIn cfg b.tid)) ∧
+      (∀ d ∈ dirty, d ∈ dirty') ∧ (∀ d ∈ dirty', d ∈ dirty ∨ d < n) ∧
+      ∀ t b, At cfg t b → (t ∈ sites ∨ (x ∈ liveIn old b.tid ∧ x ∉ liveIn cfg b.tid)) →
+        ∀ p ∈ g.preds.getD t [], killedD (Bap.IR.DenseDce.blkAt blocks p) (idOf ids x) = true → p ∈ dirty' := by
+  have hids := hm.wf
+  have hnamed : ∀ {j b}, At cfg j b → ∀ y ∈ vocabulary b, ids.contains y = true := fun hj => hm.named _ hj.mem
+  have hat : ∀ {i}, i < n → ∃ b, At cfg i b := by
+    intro i hi
+    have hl : i < cfg.blocks.length := hg.count ▸ hi
+    exact ⟨cfg.blocks[i], by simp only [At]; simp [hl]⟩
+  have hpM : ∀ t, ∀ p ∈ g.preds.getD t [], p < M := fun t p hp => Nat.lt_of_lt_of_le (hg.preds_in t p hp) hnM
+  simp only [updateVar] at hr
+  generalize hrowv : rows.getD (idOf ids x) (.short []) = row at hr hrow
+  cases hl : lostD g blocks row (idOf ids x) sites seen with
+  | none => rw [hl] at hr; cases hr
+  | some lostPair =>
+    rw [hl] at hr
+    obtain ⟨lost, lostM⟩ := lostPair
+    dsimp only at hr
+    obtain ⟨l1, l2, l3, l4, l5⟩ := lostD_spec hnM (hg.preds_in) hsites hs1 hl
+    have hphiIff : ∀ {i b}, At cfg i b → (hasPhiD (Bap.IR.DenseDce.blkAt blocks i) (idOf ids x) = false ↔ ∀ phi ∈ b.phis, phi.var ≠ x) := by
+      intro i b hb
+      rw [hm.blkAt hb, hasPhiD_dense hids (hnamed hb) hx, hasPhi_false_iff]
+    have hkillIff : ∀ {i b}, At cfg i b → (killedD (Bap.IR.DenseDce.blkAt blocks i) (idOf ids x) = true ↔ Killed b x) := by
+      intro i b hb
+      rw [hm.blkAt hb, killedD_dense hids (hnamed hb) hx, killed_iff]
+    have hkillF : ∀ {i b}, At cfg i b → (killedD (Bap.IR.DenseDce.blkAt blocks i) (idOf ids x) = false ↔ ¬ Killed b x) := by
+      intro i b hb
+      rw [← hkillIff hb, Bool.not_eq_true]
+    have hexpF : ∀ {i b}, At cfg i b → (exposesD (Bap.IR.DenseDce.blkAt blocks i) (idOf ids x) = false ↔ x ∉ blockIn b []) := by
+      intro i b hb
+      rw [hm.blkAt hb, ← exposesD_dense (effect := effect) hids (hnamed hb) hx, Bool.not_eq_true]
+    have hcover : ∀ i b, At cfg i b → x ∈ liveIn old b.tid → i ∈ lost ∨ x ∈ liveIn cfg b.tid := by
+      intro i b hb hlv
+      refine removal_cover (R := fun i => row.contains i = true) hg hrm (fun t => t ∈ lost) hrow ?_ ?_ ?_ hb hlv
+      · intro i b hb hr hn hs
+        exact l4 i (List.mem_append_left _ hs) hr ((hexpF hb).2 hn)
+      · intro s hs p hp b hb hr hn
+        exact l4 p (List.mem_append_right _ (List.mem_flatMap.2 ⟨s, hs, hp⟩)) hr ((hexpF hb).2 hn)
+      · intro t b hb hC hph p hp c hc hr hk hn
+        exact l5 t hC ((hphiIff hb).2 hph) p hp hr ((hkillF hc).2 hk) ((hexpF hc).2 hn)
+    cases hk : keptD g blocks row (idOf ids x) lost lostM seen2 with
+    | none => rw [hk] at hr; cases hr
+    | some keptPair =>
+      rw [hk] at hr
+      obtain ⟨kept, keptM⟩ := keptPair
+      dsimp only at hr
+      simp only [Option.some.injEq, Prod.mk.injEq] at hr
+      obtain ⟨rfl, rfl, rfl, rfl⟩ := hr
+      let live : Nat → Prop := fun t => ∃ b, At cfg t b ∧ x ∈ liveIn cfg b.tid
+      obtain ⟨k1, k2, k3, k4, k5⟩ := keptD_spec (live := live) hpM (fun t ht => Nat.lt_of_lt_of_le (l3 t ht).1 hnM) hs2 (by
+          intro t ht hsv
+          obtain ⟨b, hb⟩ := hat (l3 t ht).1
+          refine ⟨b, hb, ?_⟩
+          simp only [survivesD, Bool.and_eq_true, Bool.not_eq_true', List.any_eq_true, Bool.or_eq_true] at hsv
+          obtain ⟨hkf, s, hs, hcase⟩ := hsv
+          obtain ⟨c, hc⟩ := hat (hg.succs_in t s hs)
+          have hreach : b.tid ∈ cfg.reachable := hrm.reach ▸ reachable_of_live ((hrow t b hb).1 (l3 t ht).2.1)
+          have hsucc := (hg.succs t b s c hb hc).1 hs
+          refine live_of_edge hreach (hg.block t b hb) ((hkillF hb).1 hkf) hsucc ⟨c, hg.block s c hc, ?_⟩
+          rcases hcase with ⟨⟨h1, h2⟩, h3⟩ | h1
+          · refine Or.inl ⟨?_, (hphiIff hc).1 h3⟩
+            rcases hcover s c hc ((hrow s c hc).1 h1) with hC | hn
+            · have : lostM.contains s = true := (l2 s).2 hC
+              rw [h2] at this
+              cases this
+            · exact hn
+          · refine Or.inr ?_
+            rw [hm.blkAt hc, hg.tids t b hb] at h1
+            exact (phiReadsD_dense hids (hnamed hc) _ hx).1 (by simpa using h1)) (by
+          rintro t ⟨b, hb, hlv⟩ hph p hp _ hkf
+          obtain ⟨c, hc⟩ := hat (hg.preds_in t p hp)
+          obtain ⟨h1, h2⟩ := (hg.preds t b p c hb hc).1 hp
+          exact ⟨c, hc, live_of_edge h1 (hg.block p c hc) ((hkillF hc).1 hkf) h2 ⟨b, hg.block t b hb, Or.inl ⟨hlv, (hphiIff hb).1 hph⟩⟩⟩) hk
+      have hexact : ∀ {i b}, At cfg i b → ((row.contains i = true ∧ (i ∉ lost ∨ i ∈ kept)) ↔ x ∈ liveIn cfg b.tid) := by
+        intro i b hb
+        refine removal_exact (R := fun i => row.contains i = true) (C := fun t => t ∈ lost) (K := fun t => t ∈ kept) hg hrm hrow hcover ?_ ?_ ?_ ?_ hb
+        · intro i b hb hC
+          exact (hexpF hb).1 (l3 i hC).2.2
+        · intro i b hb hK
+          obtain ⟨c, hc, hl⟩ := k3 i hK
+          have : c = b := by
+            simp only [At] at hc hb
+            rw [hc] at hb
+            exact Option.some.inj hb
+          exact this ▸ hl
+        · intro i b hb hC hkn is bs his hsucc hcase
+          refine k4 i hC ?_
+          simp only [survivesD, Bool.and_eq_true, Bool.not_eq_true', List.any_eq_true, Bool.or_eq_true]
+          refine ⟨(hkillF hb).2 hkn, is, (hg.succs i b is bs hb his).2 hsucc, ?_⟩
+          rcases hcase with ⟨h1, h2, h3⟩ | h1
+          · refine Or.inl ⟨⟨h1, ?_⟩, (hphiIff his).2 h3⟩
+            rw [Bool.eq_false_iff]
+            exact fun hc => h2 ((l2 is).1 hc)
+          · refine Or.inr ?_
+            rw [hm.blkAt his, hg.tids i b hb]
+            simpa using (phiReadsD_dense hids (hnamed his) _ hx).2 h1
+        · intro t b hb hK hph p c hc hreach hsucc hC hkn
+          exact k5 t hK ((hphiIff hb).2 hph) p ((hg.preds t b p c hb hc).2 ⟨hreach, hsucc⟩) ((l2 p).2 hC) ((hkillF hc).2 hkn)
+      obtain ⟨a1, a2, a3⟩ := addKillers_spec (blocks := blocks) (g := g) (x := idOf ids x) ((lost.filter fun t => !keptM.contains t) ++ sites) dirty
+      have hrowNew : ∀ i, ((rows.modify (idOf ids x) fun row => (lost.filter fun t => !keptM.contains t).foldl Row.erase row).getD (idOf ids x) (.short [])).contains i = true ↔
+          row.contains i = true ∧ (i ∉ lost ∨ i ∈ kept) := by
+        intro i
+        rw [getD_modify_row, ite_eq_left ⟨rfl, hxs⟩, hrowv, Row.contains_eraseAll, List.mem_filter]
+        rw [← k2 i]
+        simp only [Bool.not_eq_true', not_and, Bool.not_eq_false]
+        by_cases h1 : i ∈ lost <;> simp [h1]
+      refine ⟨l1, k1, by simp, ?_, ?_, a1, ?_, ?_⟩
+      · intro y hy
+        rw [getD_modify_row, ite_eq_right fun h => hy h.1]
+      · intro i b hb
+        rw [hrowNew, hexact hb]
+      · intro d hd
+        rcases a3 d hd with h | ⟨t, _, h⟩
+        · exact Or.inl h
+        · exact Or.inr (hg.preds_in t d h)
+      · intro t b hb hcase p hp hkp
+        refine a2 t ?_ p hp hkp
+        rcases hcase with hs | ⟨h1, h2⟩
+        · exact List.mem_append_right _ hs
+        · refine List.mem_append_left _ (List.mem_filter.2 ?_)
+          rcases hcover t b hb h1 with hC | hn
+          · refine ⟨hC, ?_⟩
+            simp only [Bool.not_eq_eq_eq_not, Bool.not_true]
+            rw [Bool.eq_false_iff]
+            intro hkm
+            exact h2 ((hexact hb).1 ⟨(hrow t b hb).2 h1, Or.inr ((k2 t).1 hkm)⟩)
+          · exact (h2 hn).elim
+
+/-- A variable that has its row, and the blocks to look at again for it. -/
+structure VarDone (g : Graphs) (blocks : Array DBlk) (ids : Ids) (old cfg : Cfg) (rows : Array Row) (dirty : List Nat) (x : Bap.Var) (sites : List Nat) : Prop where
+  row : ∀ i b, At cfg i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ x ∈ liveIn cfg b.tid)
+  dirty : ∀ t b, At cfg t b → (t ∈ sites ∨ (x ∈ liveIn old b.tid ∧ x ∉ liveIn cfg b.tid)) →
+    ∀ p ∈ g.preds.getD t [], killedD (Bap.IR.DenseDce.blkAt blocks p) (idOf ids x) = true → p ∈ dirty
+
+private theorem getD_set_groups (a : Array (List Nat)) (y j : Nat) (v : List Nat) :
+    (a.setIfInBounds y v).getD j [] = if y = j ∧ y < a.size then v else a.getD j [] := by
+  simp only [Array.getD_eq_getD_getElem?, Array.getElem?_setIfInBounds]
+  by_cases h : y = j
+  · subst h
+    by_cases hs : y < a.size
+    · simp [hs]
+    · simp [hs]
+  · simp [h]
+
+/-- What `updateAll` leaves. -/
+theorem updateAll_spec {g : Graphs} {ps : List Bap.Var} {n M : Nat} (orig : Nat → List Nat) (hm : Mirror effect ids blocks cfg) (hg : GraphsOK g ids cfg ps n) (hnM : n ≤ M)
+    (hrm : ∀ x, ids.contains x = true → Removal old cfg x (orig (idOf ids x))) (hin : ∀ y, ∀ s ∈ orig y, s < n)
+    (pairs : List (Nat × Nat)) (rows : Array Row) (groups : Array (List Nat)) (dirty : List Nat) (seen seen2 : Marks)
+    (hsize : rows.size = ids.size) (hgsize : groups.size = ids.size) (hs1 : seen.WF M) (hs2 : seen2.WF M)
+    (hnames : ∀ p ∈ pairs, ∃ x, ids.contains x = true ∧ idOf ids x = p.1)
+    (hstate : ∀ x, ids.contains x = true → (VarDone g blocks ids old cfg rows dirty x (orig (idOf ids x)) ∧ groups.getD (idOf ids x) [] = []) ∨
+      (groups.getD (idOf ids x) [] = orig (idOf ids x) ∧ orig (idOf ids x) ≠ [] ∧ (∀ i b, At cfg i b → ((rows.getD (idOf ids x) (.short [])).contains i = true ↔ x ∈ liveIn old b.tid))))
+    (hleft : ∀ y, groups.getD y [] ≠ [] → ∃ p ∈ pairs, p.1 = y)
+    {rows' : Array Row} {groups' : Array (List Nat)} {dirty' : List Nat} {s1 s2 : Marks}
+    (hr : updateAll g blocks pairs rows groups dirty seen seen2 = some (rows', groups', dirty', s1, s2)) :
+    s1.WF M ∧ s2.WF M ∧ rows'.size = ids.size ∧ groups'.size = ids.size ∧ (∀ y, groups'.getD y [] = []) ∧
+      (∀ x, ids.contains x = true → VarDone g blocks ids old cfg rows' dirty' x (orig (idOf ids x))) ∧ (∀ d ∈ dirty', d ∈ dirty ∨ d < n) := by
+  have hids := hm.wf
+  induction pairs generalizing rows groups dirty seen seen2 with
+  | nil =>
+    simp only [updateAll, Option.some.injEq, Prod.mk.injEq] at hr
+    obtain ⟨rfl, rfl, rfl, rfl, rfl⟩ := hr
+    have hempty : ∀ y, groups.getD y [] = [] := by
+      intro y
+      refine Classical.byContradiction fun hne => ?_
+      obtain ⟨p, hp, _⟩ := hleft y hne
+      cases hp
+    refine ⟨hs1, hs2, hsize, hgsize, hempty, fun x hx => ?_, fun d hd => Or.inl hd⟩
+    rcases hstate x hx with h | ⟨h1, h2, _⟩
+    · exact h.1
+    · exact (h2 (h1 ▸ hempty _)).elim
+  | cons pair rest ih =>
+    have hnamesRest := fun p hp => hnames p (List.mem_cons_of_mem _ hp)
+    simp only [updateAll] at hr
+    cases hg0 : groups.getD pair.1 [] with
+    | nil =>
+      rw [hg0] at hr
+      refine ih rows groups dirty seen seen2 hsize hgsize hs1 hs2 hnamesRest hstate ?_ hr
+      intro y hy
+      obtain ⟨p, hp, hpy⟩ := hleft y hy
+      rcases List.mem_cons.1 hp with rfl | hp
+      · subst hpy
+        exact (hy hg0).elim
+      · exact ⟨p, hp, hpy⟩
+    | cons first others =>
+      rw [hg0] at hr
+      dsimp only at hr
+      rw [← hg0] at hr
+      obtain ⟨x0, hx0, hid⟩ := hnames pair List.mem_cons_self
+      rw [← hid] at hr hg0
+      cases hu : updateVar g blocks (idOf ids x0) (groups.getD (idOf ids x0) []) rows dirty seen seen2 with
+      | none => rw [hu] at hr; cases hr
+      | some result =>
+        rw [hu] at hr
+        obtain ⟨r2, d2, m1, m2⟩ := result
+        dsimp only at hr
+        have hltx : idOf ids x0 < ids.size := hids.lt x0 hx0
+        have hold : groups.getD (idOf ids x0) [] = orig (idOf ids x0) ∧
+            ∀ i b, At cfg i b → ((rows.getD (idOf ids x0) (.short [])).contains i = true ↔ x0 ∈ liveIn old b.tid) := by
+          rcases hstate x0 hx0 with h | ⟨h1, _, h3⟩
+          · rw [h.2] at hg0
+            cases hg0
+          · exact ⟨h1, h3⟩
+        obtain ⟨u1, u2, u3, u4, u5, u6, u7, u8⟩ := updateVar_spec (old := old) hm hg hnM hx0 (hsize ▸ hltx) (by rw [hold.1]; exact hrm x0 hx0)
+          (by rw [hold.1]; exact hin _) hold.2 hs1 hs2 hu
+        refine (fun hdone => ?_) (ih r2 (groups.setIfInBounds (idOf ids x0) []) d2 m1 m2 (u3.trans hsize) (by simpa using hgsize) u1 u2 hnamesRest ?_ ?_ hr)
+        · obtain ⟨z1, z2, z3, z4, z5, z6, z7⟩ := hdone
+          refine ⟨z1, z2, z3, z4, z5, z6, fun d hd => ?_⟩
+          rcases z7 d hd with h | h
+          · rcases u7 d h with h | h
+            · exact Or.inl h
+            · exact Or.inr h
+          · exact Or.inr h
+        · intro x hx
+          by_cases hxe : idOf ids x = idOf ids x0
+          · have hxx := hids.inj x x0 hx hx0 hxe
+            subst hxx
+            refine Or.inl ⟨⟨u5, ?_⟩, ?_⟩
+            · intro t b hb hc p hp hk
+              exact u8 t b hb (by rw [hold.1]; exact hc) p hp hk
+            · rw [getD_set_groups, ite_eq_left ⟨rfl, hgsize ▸ hltx⟩]
+          · have hne : ¬ (idOf ids x0 = idOf ids x ∧ idOf ids x0 < groups.size) := fun h => hxe h.1.symm
+            rw [getD_set_groups, ite_eq_right hne, u4 _ hxe]
+            rcases hstate x hx with h | h
+            · refine Or.inl ⟨⟨?_, ?_⟩, h.2⟩
+              · intro i b hb
+                rw [u4 _ hxe]
+                exact h.1.row i b hb
+              · intro t b hb hc p hp hk
+                exact u6 p (h.1.dirty t b hb hc p hp hk)
+            · exact Or.inr h
+        · intro y hy
+          by_cases hye : y = idOf ids x0
+          · subst hye
+            rw [getD_set_groups, ite_eq_left ⟨rfl, hgsize ▸ hltx⟩] at hy
+            exact (hy rfl).elim
+          · have hne : ¬ (idOf ids x0 = y ∧ idOf ids x0 < groups.size) := fun h => hye h.1.symm
+            rw [getD_set_groups, ite_eq_right hne] at hy
+            obtain ⟨p, hp, hpy⟩ := hleft y hy
+            rcases List.mem_cons.1 hp with rfl | hp
+            · exact (hye (hpy.symm.trans hid.symm)).elim
+            · exact ⟨p, hp, hpy⟩
+
+/-- What `addGroups` builds. -/
+theorem addGroups_spec (pairs : List (Nat × Nat)) (groups : Array (List Nat)) (hlt : ∀ p ∈ pairs, p.1 < groups.size) :
+    (addGroups pairs groups).size = groups.size ∧
+      ∀ y s, s ∈ (addGroups pairs groups).getD y [] ↔ s ∈ groups.getD y [] ∨ (y, s) ∈ pairs := by
+  simp only [addGroups]
+  induction pairs generalizing groups with
+  | nil => simp
+  | cons p ps ih =>
+    simp only [List.foldl_cons]
+    obtain ⟨i1, i2⟩ := ih (groups.modify p.1 (p.2 :: ·)) (by
+      intro q hq
+      simpa using hlt q (List.mem_cons_of_mem _ hq))
+    refine ⟨by simpa using i1, fun y s => ?_⟩
+    rw [i2, getD_modify]
+    have hp := hlt p List.mem_cons_self
+    by_cases hy : y = p.1
+    · subst hy
+      simp only [hp, and_self, ↓reduceIte, List.mem_cons, Prod.ext_iff]
+      grind
+    · simp only [hy, false_and, ↓reduceIte, List.mem_cons]
+      have : (y, s) ≠ p := fun e => hy (by rw [← e])
+      simp [this]
+
+end Losses
 
 end Bap.IR.DenseDce

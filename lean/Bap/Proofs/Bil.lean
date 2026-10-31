@@ -3927,4 +3927,277 @@ theorem mathBin_lt (op : BinOp) {w a b : Nat} (ha : a < 2 ^ w) (hb : b < 2 ^ w) 
 
 end WordMath
 
+/-! ## Temporaries nothing reads -/
+
+section DeadTemps
+
+/-- States with the same variables, other than what is `dead`. -/
+def SameOff (dead : Bap.Var → Bool) (a b : State) : Prop := ∀ v, dead v = false → lookup a.env v = lookup b.env v
+
+private theorem sameOff_bind {dead : Bap.Var → Bool} {a b : State} (h : SameOff dead a b) (var : Bap.Var) (value : Value) :
+    SameOff dead ⟨Bap.Bil.bind a.env var value⟩ ⟨Bap.Bil.bind b.env var value⟩ := by
+  intro v hv
+  by_cases he : v = var
+  · subst he
+    simp only [lookup_bind_eq, ite_true]
+  · simp only [lookup_bind_other _ _ he]
+    exact h v hv
+
+private theorem sameOff_bind_dead {dead : Bap.Var → Bool} {a b : State} (h : SameOff dead a b) {var : Bap.Var} (value : Value) (hd : dead var = true) :
+    SameOff dead ⟨Bap.Bil.bind a.env var value⟩ b := by
+  intro v hv
+  have he : v ≠ var := fun e => by rw [e, hd] at hv; cases hv
+  simp only [lookup_bind_other _ _ he]
+  exact h v hv
+
+private theorem dropBind_ok {α β : Type} {x : Except String α} {f : α → Except String β} {r : β} (h : x >>= f = .ok r) : ∃ a, x = .ok a ∧ f a = .ok r := by
+  cases x with
+  | error e => cases h
+  | ok a => exact ⟨a, rfl, h⟩
+
+private theorem dropAsBits_ok {v : Value} {r : Σ width, BitVec width} (h : Value.asBits v = .ok r) : v = .bits r.2 := by
+  cases v with
+  | bits b =>
+    simp only [Value.asBits, Except.ok.injEq] at h
+    subst h
+    rfl
+  | memory m => simp [Value.asBits] at h
+  | undefined => simp [Value.asBits] at h
+
+private theorem dropExec_ifElse {f : Nat} {state : State} {condition : Exp} {bit : BitVec 1} (yes no : Program) (hc : evalExp state.env condition = .ok (.bits bit)) :
+    execStmt (f + 1) state (.ifElse condition yes no) = execProgram f state (if bit = 1 then yes else no) := by
+  simp only [execStmt, execExp, hc]
+  rfl
+
+private theorem dropExec_while {f : Nat} {state : State} {condition : Exp} {bit : BitVec 1} (body : Program) (hc : evalExp state.env condition = .ok (.bits bit)) :
+    execStmt (f + 1) state (.while condition body) =
+      if bit = 1 then
+        execProgram f state body >>= fun inner =>
+          match inner.2 with
+          | .normal => execStmt f inner.1 (.while condition body)
+          | other => .ok (inner.1, other)
+      else .ok (state, .normal) := by
+  simp only [execStmt, execExp, hc]
+  rfl
+
+private theorem drop_exec (dead : Bap.Var → Bool) (fuel : Nat) :
+    (∀ (stmt : Stmt) (a b t : State) (e : Effect), (∀ v ∈ readsOfStmt stmt, dead v = false) → SameOff dead a b → execStmt fuel a stmt = .ok (t, e) →
+      match dropStmt dead stmt with
+      | none => e = .normal ∧ SameOff dead t b
+      | some kept => ∃ t', execStmt fuel b kept = .ok (t', e) ∧ SameOff dead t t') ∧
+    (∀ (program : Program) (a b t : State) (e : Effect), (∀ v ∈ readsOfProgram program, dead v = false) → SameOff dead a b → execProgram fuel a program = .ok (t, e) →
+      ∃ t', execProgram fuel b (dropProgram dead program) = .ok (t', e) ∧ SameOff dead t t') := by
+  induction fuel with
+  | zero =>
+    refine ⟨fun _ _ _ _ _ _ _ h => ?_, fun _ _ _ _ _ _ _ h => ?_⟩
+    · simp [execStmt] at h
+    · simp [execProgram] at h
+  | succ f ih =>
+    obtain ⟨ih1, ih2⟩ := ih
+    have hexp : ∀ (exp : Exp) (a b : State), (∀ v ∈ freeVars exp, dead v = false) → SameOff dead a b → evalExp a.env exp = evalExp b.env exp :=
+      fun exp a b hr hs => evalExp_congr_freeVars exp fun v hv => hs v (hr v hv)
+    refine ⟨fun stmt a b t e hr hs h => ?_, fun program a b t e hr hs h => ?_⟩
+    · cases stmt with
+      | move var value =>
+        simp only [readsOfStmt] at hr
+        simp only [execStmt, execExp] at h
+        obtain ⟨v, h1, h2⟩ := dropBind_ok h
+        simp only [Except.ok.injEq, Prod.mk.injEq] at h2
+        obtain ⟨rfl, rfl⟩ := h2
+        by_cases hd : dead var = true
+        · simp only [dropStmt, hd, ↓reduceIte]
+          exact ⟨trivial, sameOff_bind_dead hs v hd⟩
+        · simp only [dropStmt, hd]
+          refine ⟨_, ?_, sameOff_bind hs var v⟩
+          have h1b : evalExp b.env value = .ok v := by rw [← hexp value a b hr hs]; exact h1
+          simp only [execStmt, execExp, h1b]
+          rfl
+      | jmp target =>
+        simp only [readsOfStmt] at hr
+        simp only [execStmt, execExp] at h
+        obtain ⟨v, h1, h2⟩ := dropBind_ok h
+        obtain ⟨r, h3, h4⟩ := dropBind_ok h2
+        simp only [Except.ok.injEq, Prod.mk.injEq] at h4
+        obtain ⟨rfl, rfl⟩ := h4
+        have h1b : evalExp b.env target = .ok v := by rw [← hexp target a b hr hs]; exact h1
+        refine ⟨b, ?_, hs⟩
+        simp only [execStmt, execExp, h1b]
+        show Value.asBits v >>= _ = _
+        rw [h3]
+        rfl
+      | special message =>
+        simp only [execStmt, Except.ok.injEq, Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        exact ⟨b, by simp [execStmt], hs⟩
+      | cpuExn number =>
+        simp only [execStmt, Except.ok.injEq, Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        exact ⟨b, by simp [execStmt], hs⟩
+      | ifElse condition yes no =>
+        simp only [readsOfStmt, List.mem_append] at hr
+        simp only [dropStmt]
+        have hc := hexp condition a b (fun v hv => hr v (Or.inl (Or.inl hv))) hs
+        have h0 := h
+        simp only [execStmt, execExp] at h
+        obtain ⟨v, h1, h2⟩ := dropBind_ok h
+        obtain ⟨⟨width, bit⟩, h3, h4⟩ := dropBind_ok h2
+        have hvb := dropAsBits_ok h3
+        subst hvb
+        simp only at h4
+        split at h4
+        · rename_i hw
+          subst hw
+          rw [dropExec_ifElse yes no h1] at h0
+          rw [dropExec_ifElse _ _ (by rw [← hc]; exact h1)]
+          by_cases hone : bit = 1
+          · simp only [hone, ↓reduceIte] at h0 ⊢
+            exact ih2 yes a b t e (fun v hm => hr v (Or.inl (Or.inr hm))) hs h0
+          · simp only [hone, ↓reduceIte] at h0 ⊢
+            exact ih2 no a b t e (fun v hm => hr v (Or.inr hm)) hs h0
+        · cases h4
+      | «while» condition body =>
+        simp only [readsOfStmt, List.mem_append] at hr
+        simp only [dropStmt]
+        have hc := hexp condition a b (fun v hv => hr v (Or.inl hv)) hs
+        have h0 := h
+        simp only [execStmt, execExp] at h
+        obtain ⟨v, h1, h2⟩ := dropBind_ok h
+        obtain ⟨⟨width, bit⟩, h3, h4⟩ := dropBind_ok h2
+        have hvb := dropAsBits_ok h3
+        subst hvb
+        simp only at h4
+        split at h4
+        · rename_i hw
+          subst hw
+          rw [dropExec_while body h1] at h0
+          rw [dropExec_while _ (by rw [← hc]; exact h1)]
+          by_cases hone : bit = 1
+          · simp only [hone, ↓reduceIte] at h0 ⊢
+            obtain ⟨⟨next, effect⟩, h5, h6⟩ := dropBind_ok h0
+            obtain ⟨t1, h7, s1⟩ := ih2 body a b next effect (fun v hm => hr v (Or.inr hm)) hs h5
+            rw [h7]
+            cases effect with
+            | normal =>
+              have := ih1 (.while condition body) next t1 t e (fun v hm => by
+                simp only [readsOfStmt, List.mem_append] at hm
+                exact hr v hm) s1 h6
+              simp only [dropStmt] at this
+              exact this
+            | jump target =>
+              simp only [Except.ok.injEq, Prod.mk.injEq] at h6
+              obtain ⟨rfl, rfl⟩ := h6
+              exact ⟨t1, rfl, s1⟩
+            | special message =>
+              simp only [Except.ok.injEq, Prod.mk.injEq] at h6
+              obtain ⟨rfl, rfl⟩ := h6
+              exact ⟨t1, rfl, s1⟩
+            | cpuExn number =>
+              simp only [Except.ok.injEq, Prod.mk.injEq] at h6
+              obtain ⟨rfl, rfl⟩ := h6
+              exact ⟨t1, rfl, s1⟩
+          · simp only [hone, ↓reduceIte, Except.ok.injEq, Prod.mk.injEq] at h0 ⊢
+            obtain ⟨rfl, rfl⟩ := h0
+            exact ⟨b, ⟨rfl, rfl⟩, hs⟩
+        · cases h4
+    · cases program with
+      | nil =>
+        simp only [execProgram, Except.ok.injEq, Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        exact ⟨b, by simp [dropProgram, execProgram], hs⟩
+      | cons stmt rest =>
+        simp only [readsOfProgram, List.mem_append] at hr
+        simp only [execProgram] at h
+        obtain ⟨⟨next, effect⟩, h1, h2⟩ := dropBind_ok h
+        have hd := ih1 stmt a b next effect (fun v hm => hr v (Or.inl hm)) hs h1
+        simp only [dropProgram]
+        cases hk : dropStmt dead stmt with
+        | none =>
+          rw [hk] at hd
+          obtain ⟨rfl, s1⟩ := hd
+          simp only at h2
+          obtain ⟨t1, h3, s2⟩ := ih2 rest next b t e (fun v hm => hr v (Or.inr hm)) s1 h2
+          exact ⟨t1, execProgram_ok_mono (Nat.le_succ f) h3, s2⟩
+        | some kept =>
+          rw [hk] at hd
+          obtain ⟨t1, h3, s1⟩ := hd
+          simp only [execProgram, h3]
+          cases effect with
+          | normal =>
+            simp only at h2
+            exact ih2 rest next t1 t e (fun v hm => hr v (Or.inr hm)) s1 h2
+          | jump target =>
+            simp only [Except.ok.injEq, Prod.mk.injEq] at h2
+            obtain ⟨rfl, rfl⟩ := h2
+            exact ⟨t1, rfl, s1⟩
+          | special message =>
+            simp only [Except.ok.injEq, Prod.mk.injEq] at h2
+            obtain ⟨rfl, rfl⟩ := h2
+            exact ⟨t1, rfl, s1⟩
+          | cpuExn number =>
+            simp only [Except.ok.injEq, Prod.mk.injEq] at h2
+            obtain ⟨rfl, rfl⟩ := h2
+            exact ⟨t1, rfl, s1⟩
+
+/-- **Assignments to what a program never reads make no difference to the rest**: all that ran still runs and ends the same way, on all else. -/
+theorem execProgram_dropProgram (dead : Bap.Var → Bool) {program : Program} {fuel : Nat} {state t : State} {e : Effect}
+    (hunread : ∀ v ∈ readsOfProgram program, dead v = false) (h : execProgram fuel state program = .ok (t, e)) :
+    ∃ t', execProgram fuel state (dropProgram dead program) = .ok (t', e) ∧ SameOff dead t t' :=
+  (drop_exec dead fuel).2 program state state t e hunread (fun _ _ => rfl) h
+
+private theorem deadTemps_aux (n : Nat) (program : Program) (fuel : Nat) (state t : State) (e : Effect) (h : execProgram fuel state program = .ok (t, e)) :
+    ∃ t', execProgram fuel state (dropDeadTempsAux n program) = .ok (t', e) ∧ ∀ v, isTemporary v = false → lookup t.env v = lookup t'.env v := by
+  induction n generalizing program t with
+  | zero => exact ⟨t, h, fun _ _ => rfl⟩
+  | succ n ih =>
+    rw [dropDeadTempsAux]
+    dsimp only
+    split
+    · exact ⟨t, h, fun _ _ => rfl⟩
+    · split
+      · have hunread : ∀ v ∈ readsOfProgram program, deadTemporary (Std.HashSet.ofList (readsOfProgram program)) v = false := by
+          intro v hv
+          simp only [deadTemporary, Bool.and_eq_false_iff, Bool.not_eq_false', Std.HashSet.contains_ofList, List.contains_eq_mem, decide_eq_true_eq]
+          exact Or.inr hv
+        obtain ⟨t1, h1, s1⟩ := execProgram_dropProgram _ hunread h
+        obtain ⟨t2, h2, s2⟩ := ih _ t1 h1
+        refine ⟨t2, h2, fun v hv => ?_⟩
+        rw [s1 v (by simp [deadTemporary, hv]), s2 v hv]
+      · exact ⟨t, h, fun _ _ => rfl⟩
+
+/-- **The temporaries that `dropDeadTemps` takes out make no difference to `run`**: a run that succeeds still does, with the same effect, and the same value in every
+variable the lifter didn't name for itself. As with `optimize`, what could only fail by computing a value nobody reads no longer does. -/
+theorem run_dropDeadTemps {program : Program} {initial t : State} {fuel : Nat} {e : Effect} (h : run program initial fuel = .ok (t, e)) :
+    ∃ t', run (dropDeadTemps program) initial fuel = .ok (t', e) ∧ ∀ v, isTemporary v = false → lookup t.env v = lookup t'.env v :=
+  deadTemps_aux _ program fuel initial t e h
+
+end DeadTemps
+
+/-- A move at the end of a program that goes on to its end. -/
+theorem execProgram_snoc_move {fuel : Nat} {state after : State} {program : Program} (var : Bap.Var) {exp : Exp} {value : Value}
+    (h : execProgram fuel state program = .ok (after, .normal)) (he : evalExp after.env exp = .ok value) :
+    execProgram (fuel + 1) state (program ++ [.move var exp]) = .ok ({ env := Bap.Bil.bind after.env var value }, .normal) := by
+  induction program generalizing fuel state with
+  | nil =>
+    cases fuel with
+    | zero => simp [execProgram] at h
+    | succ fuel =>
+      simp only [execProgram, Except.ok.injEq, Prod.mk.injEq] at h
+      obtain ⟨rfl, _⟩ := h
+      cases fuel <;> simp [execProgram, execStmt, execExp, he, Bind.bind, Except.bind]
+  | cons stmt rest ih =>
+    cases fuel with
+    | zero => simp [execProgram] at h
+    | succ fuel =>
+      simp only [execProgram] at h
+      obtain ⟨⟨next, effect⟩, h1, h2⟩ := dropBind_ok h
+      cases effect with
+      | normal =>
+        simp only [List.cons_append]
+        rw [execProgram]
+        simp only [execStmt_ok_mono (Nat.le_succ fuel) h1]
+        exact ih h2
+      | jump target => simp at h2
+      | special message => simp at h2
+      | cpuExn number => simp at h2
+
 end Bap.Proofs.Bil

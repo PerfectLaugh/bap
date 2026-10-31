@@ -121,7 +121,7 @@
 
 (defun pstr-size (n) (if (pstr-words n) 16 8))
 
-(defun set-ymm0-vex (x) (set YMM0 (concat 0:128 x)))
+(defun set-xmm0-vex (x) (set-vex XMM0 x))
 
 (defun PCMPISTRIrri (a b n)
   (let ((x b)) (pcmpstri n a x (pstr-implicit (pstr-size n) a) (pstr-implicit (pstr-size n) x))))
@@ -144,14 +144,14 @@
 (defun VPCMPESTRIrri (a b n)
   (let ((x b)) (pcmpstri n a x (pstr-explicit (pstr-elements n) EAX) (pstr-explicit (pstr-elements n) EDX))))
 (defun VPCMPISTRMrri (a b n)
-  (let ((x b)) (set-ymm0-vex (pcmpstrm n a x (pstr-implicit (pstr-size n) a) (pstr-implicit (pstr-size n) x)))))
+  (let ((x b)) (set-xmm0-vex (pcmpstrm n a x (pstr-implicit (pstr-size n) a) (pstr-implicit (pstr-size n) x)))))
 (defun VPCMPESTRMrri (a b n)
-  (let ((x b)) (set-ymm0-vex (pcmpstrm n a x (pstr-explicit (pstr-elements n) EAX) (pstr-explicit (pstr-elements n) EDX)))))
+  (let ((x b)) (set-xmm0-vex (pcmpstrm n a x (pstr-explicit (pstr-elements n) EAX) (pstr-explicit (pstr-elements n) EDX)))))
 (defun VPCMPISTRIrmi (a base scale index off seg n)
   (let ((x (load-n 128 (ea base scale index off seg)))) (pcmpstri n a x (pstr-implicit (pstr-size n) a) (pstr-implicit (pstr-size n) x))))
 (defun VPCMPESTRIrmi (a base scale index off seg n)
   (let ((x (load-n 128 (ea base scale index off seg)))) (pcmpstri n a x (pstr-explicit (pstr-elements n) EAX) (pstr-explicit (pstr-elements n) EDX))))
 (defun VPCMPISTRMrmi (a base scale index off seg n)
-  (let ((x (load-n 128 (ea base scale index off seg)))) (set-ymm0-vex (pcmpstrm n a x (pstr-implicit (pstr-size n) a) (pstr-implicit (pstr-size n) x)))))
+  (let ((x (load-n 128 (ea base scale index off seg)))) (set-xmm0-vex (pcmpstrm n a x (pstr-implicit (pstr-size n) a) (pstr-implicit (pstr-size n) x)))))
 (defun VPCMPESTRMrmi (a base scale index off seg n)
-  (let ((x (load-n 128 (ea base scale index off seg)))) (set-ymm0-vex (pcmpstrm n a x (pstr-explicit (pstr-elements n) EAX) (pstr-explicit (pstr-elements n) EDX)))))
+  (let ((x (load-n 128 (ea base scale index off seg)))) (set-xmm0-vex (pcmpstrm n a x (pstr-explicit (pstr-elements n) EAX) (pstr-explicit (pstr-elements n) EDX)))))

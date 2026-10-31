@@ -38,6 +38,13 @@
   (declare (context (bits 32)))
   (set$ rd x))
 
+(defun set-vex (rd x)
+  "(set-vex RD X) sets the vector register RD, a view of a ZMM register,
+   to X and clears the other bits of the ZMM register, as all VEX and
+   EVEX instructions do"
+  (set$ (alias-base-register rd)
+        (cast-unsigned (word-width (alias-base-register rd)) x)))
+
 ;; the writes of EAX and EDX, which clear the upper halves of RAX and
 ;; RDX in the 64-bit mode
 (defun set-eax (x) (declare (context (bits 64))) (set RAX (cast-unsigned 64 x)))

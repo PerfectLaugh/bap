@@ -220,8 +220,10 @@ private def endOfData (region : Image.MemRegion) : Nat :=
 /-- What a linear sweep goes through after the recursive scan, as starts and ends: the stubs, and all the code of an image
 without a symbol table with sizes, which only has its exports to go by, where upstream finds its functions with byte
 patterns: its sections or its executable segments. An image with one says where its functions are, and the sweep finds the
-targets of their jump tables in them, and not the padding between them. ARM has its constant pools among the instructions,
-so what is not a stub is swept where its mapping symbols say that it is code. -/
+targets of their jump tables in them, and not the padding between them. The linker of PowerPC puts its stubs in `.text`
+with no symbols, and its instructions all have one size and it has no padding but zeros, which a sweep skips, so all its
+code is swept. ARM has its constant pools among the instructions, so what is not a stub is swept where its mapping symbols
+say that it is code. -/
 def sweepRanges (image : Image.Image) : List (Nat × Nat) :=
   let regions := codeRegions image
   let stubs := regions.filter fun part => stubSections.contains part.1
@@ -233,7 +235,7 @@ def sweepRanges (image : Image.Image) : List (Nat × Nat) :=
       | .data => none
   else
     let code :=
-      if image.sections.any (·.name == ".symtab") then
+      if image.arch != .powerpc && image.sections.any (·.name == ".symtab") then
         (image.symbols.filter fun symbol => symbol.isFunction && symbol.size != 0).filterMap fun symbol =>
           if regions.any (·.2.contains symbol.addr) then some (symbol.addr, symbol.addr + symbol.size) else none
       else

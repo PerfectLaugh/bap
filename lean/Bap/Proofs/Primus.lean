@@ -5,6 +5,7 @@ import Bap.Primus.Lifted
 import Bap.Primus.Lisp
 import Bap.Primus.Literal
 import Bap.Primus.Semantics
+import Bap.Proofs.Bil
 
 open Lean Elab Command in
 /-- Bring private declarations of module `mod`, namespace `ns`, into scope by short name. -/
@@ -3116,6 +3117,12 @@ inductive Denotes (env : Bil.Env) (context : Context) (locals : Locals) : Sexp �
       (hr : ∀ exp, Bil.evalExp env exp = .ok (.bits location) →
         Bil.evalExp env (.load (.var context.memory) exp context.endian (bits / 8)) = .ok (.bits result)) :
       Denotes env context locals (.list [.atom op, address]) ⟨bits, result⟩
+  /-- An `if` is the branch that its condition says, as long as the condition can't be a number of a word of one bit, which is
+  true of more than the bit it holds. Its branches have the one width, as a condition known when lifting doesn't widen one. -/
+  | conditional {test yes no : Sexp} {width : Nat} {tested : BitVec 1} {first second : BitVec width} (hbits : context.bits ≠ 1)
+      (ht : Denotes env context locals test ⟨1, tested⟩) (hy : Denotes env context locals yes ⟨width, first⟩)
+      (hn : Denotes env context locals no ⟨width, second⟩) :
+      Denotes env context locals (.list [.atom "if", test, yes, no]) ⟨width, if tested = 1 then first else second⟩
 
 private theorem loadBits_props {context : Context} {op : String} {bits : Nat} (h : loadBits context op = some bits) :
     specialHead op = false ∧ readLiteral op = .ok none ∧ op ≠ "true" ∧ op ≠ "false" ∧ op.startsWith ":" = false ∧
@@ -3180,6 +3187,61 @@ def VisiblePrimitives (locals : Locals) (state : State) : Prop :=
     Assoc.get op locals = none ∧ state.operations.get? op = none ∧ Assoc.get op state.globals = none) ∧
   ∀ op, op = "load-byte" ∨ op = "load-hword" ∨ op = "load-word" →
     Assoc.get op locals = none ∧ state.operations.get? op = none ∧ Assoc.get op state.globals = none
+
+/-- What the evaluation of a BIL conditional says, at any environment. -/
+theorem evalExp_conditional {env : Bil.Env} {exp yes no : Bil.Exp} {width : Nat} {bit : BitVec 1} {value : Bap.Value}
+    (hc : Bil.evalExp env exp = .ok (.bits bit)) (h : Bil.evalExp env (if bit = 1 then extend width yes else extend width no) = .ok value) :
+    Bil.evalExp env (.ite exp (extend width yes) (extend width no)) = .ok value := by
+  rw [Bil.evalExp]
+  simp only [hc, bind, Except.bind, Value.asBits]
+  by_cases hb : bit = 1
+  · simp only [hb, ↓reduceDIte, ↓reduceIte] at h ⊢
+    exact h
+  · simp only [hb, ↓reduceDIte, ↓reduceIte] at h ⊢
+    exact h
+
+private theorem eval_if (fuel : Nat) (locals : Locals) (context : Context) (state : State) (test yes no : Sexp) :
+    eval (fuel + 1) locals context state (.list [.atom "if", test, yes, no]) = evalConditional fuel locals context state test [yes] [no] := by
+  rw [eval]
+
+private theorem evalSequence_one (fuel : Nat) (locals : Locals) (context : Context) (state : State) (form : Sexp) :
+    evalSequence (fuel + 1) locals context state [form] = eval fuel locals context state form := by
+  rw [evalSequence]
+
+/-- What a condition denotes is known when lifting, and is what it denotes under any environment, or else is known when running. -/
+private theorem truth_denoted {context : Context} {env : Bil.Env} {value : SV} {exp : Bil.Exp} {tested : BitVec 1} (hbits : context.bits ≠ 1)
+    (he : expectBil context value = .ok (1, exp)) (hv : Bil.evalExp env exp = .ok (.bits tested)) :
+    truth value = .ok (some (decide (tested = 1))) ∨ (truth value = .ok none ∧ condition context value = .ok exp) := by
+  have hcond : condition context value = .ok exp := by
+    simp [condition, he, bind, Except.bind]
+  cases value with
+  | int v =>
+    simp only [expectBil, Except.ok.injEq, Prod.mk.injEq] at he
+    exact (hbits he.1).elim
+  | bool b =>
+    simp only [expectBil, Except.ok.injEq, Prod.mk.injEq] at he
+    obtain ⟨_, rfl⟩ := he
+    simp only [Bil.evalExp, Except.ok.injEq] at hv
+    left
+    have ht : BitVec.ofNat 1 b.toNat = tested := by
+      injection hv
+    subst ht
+    cases b <;> simp [truth]
+  | bil width e =>
+    simp only [expectBil, Except.ok.injEq, Prod.mk.injEq] at he
+    obtain ⟨rfl, rfl⟩ := he
+    cases hc : Bil.evalExp [] e with
+    | error msg => exact Or.inr ⟨by simp [truth, hc], hcond⟩
+    | ok closed =>
+      have hclosed := Bap.Proofs.Bil.evalExp_extends (Bap.Proofs.Bil.nil_extends env) e hc
+      rw [hv] at hclosed
+      obtain rfl : Value.bits tested = closed := Except.ok.inj hclosed
+      left
+      simp only [truth, hc, Except.ok.injEq, Option.some.injEq]
+      have h1 : ∀ b : BitVec 1, (b != 0) = decide (b = 1) := by decide
+      exact h1 tested
+  | register name width baseWidth => exact Or.inr ⟨rfl, hcond⟩
+  | _ => simp [expectBil] at he
 
 /-- Evaluating an arithmetic form makes no code, and its value denotes in BIL what the form computes, at any
 fuel that suffices. -/
@@ -3317,6 +3379,72 @@ theorem eval_arithmetic_sound {env : Bil.Env} {context : Context} {locals : Loca
               Bool.false_eq_true, ↓reduceIte, emit_nil, Except.ok.injEq, Prod.mk.injEq] at hev
             obtain ⟨rfl, hst⟩ := hev
             exact ⟨hst.symm, _, rfl, hr _ hxa⟩
+  | @conditional test yes no width tested first second hbits _ _ _ iht ihy ihn =>
+    intro fuel state after value hvis hev
+    cases fuel with
+    | zero => rw [eval] at hev; simp at hev
+    | succ fuel =>
+      rw [eval_if] at hev
+      cases fuel with
+      | zero => rw [evalConditional] at hev; simp at hev
+      | succ fuel =>
+        rw [evalConditional] at hev
+        simp only [bind, Except.bind] at hev
+        cases hT : eval fuel locals context state test with
+        | error e => simp [hT] at hev
+        | ok rt =>
+          obtain ⟨tv, ts⟩ := rt
+          obtain ⟨hts, texp, hte, htv⟩ := iht hvis hT
+          obtain rfl : state = ts := hts.symm
+          simp only [hT] at hev
+          rcases truth_denoted hbits hte htv with htr | ⟨htr, hcn⟩
+          · simp only [htr] at hev
+            by_cases hone : tested = 1
+            · simp only [hone, decide_true, ite_true] at hev ⊢
+              cases fuel with
+              | zero => rw [evalSequence] at hev; simp at hev
+              | succ fuel =>
+                rw [evalSequence_one] at hev
+                exact ihy hvis hev
+            · simp only [hone, decide_false, ite_false] at hev ⊢
+              cases fuel with
+              | zero => rw [evalSequence] at hev; simp at hev
+              | succ fuel =>
+                rw [evalSequence_one] at hev
+                exact ihn hvis hev
+          · simp only [htr, hcn] at hev
+            cases fuel with
+            | zero => rw [evalSequence] at hev; simp at hev
+            | succ fuel =>
+              simp only [evalSequence_one] at hev
+              have hvis' : VisiblePrimitives locals { state with code := [] } := hvis
+              cases hY : eval fuel locals context { state with code := [] } yes with
+              | error e => simp [hY] at hev
+              | ok ry =>
+                obtain ⟨yv, ys⟩ := ry
+                obtain ⟨hys, yexp, hye, hyv⟩ := ihy hvis' hY
+                subst hys
+                simp only [hY] at hev
+                cases hN : eval fuel locals context { state with code := [] } no with
+                | error e => simp [hN] at hev
+                | ok rn =>
+                  obtain ⟨nv, ns⟩ := rn
+                  obtain ⟨hns, nexp, hne, hnv⟩ := ihn hvis' hN
+                  subst hns
+                  simp only [hN] at hev
+                  simp [hye, hne] at hev
+                  obtain ⟨rfl, rfl⟩ := hev
+                  refine ⟨rfl, _, rfl, ?_⟩
+                  have hext : ∀ {e : Bil.Exp} {bits : BitVec width}, Bil.evalExp env e = .ok (.bits bits) →
+                      Bil.evalExp env (extend width e) = .ok (.bits bits) := by
+                    intro e bits h
+                    simp [extend, Bil.evalExp, h, bind, Except.bind, Value.asBits, Word.unsigned]
+                  refine evalExp_conditional htv ?_
+                  by_cases hone : tested = 1
+                  · simp only [hone, ite_true]
+                    exact hext hyv
+                  · simp only [hone, ite_false]
+                    exact hext hnv
 
 
 /-! ### Evaluation keeps the definitions -/
@@ -5405,17 +5533,50 @@ theorem evalConditional_dynamic {fuel : Nat} {locals : Locals} {context : Contex
   rw [evalConditional]
   simp [ht, hn, hc, hy, hno, hyc, hnc, hye, hne, bind, Except.bind]
 
-/-- Which is what the evaluation of the conditional says, at any environment. -/
-theorem evalExp_conditional {env : Bil.Env} {exp yes no : Bil.Exp} {width : Nat} {bit : BitVec 1} {value : Bap.Value}
-    (hc : Bil.evalExp env exp = .ok (.bits bit)) (h : Bil.evalExp env (if bit = 1 then extend width yes else extend width no) = .ok value) :
-    Bil.evalExp env (.ite exp (extend width yes) (extend width no)) = .ok value := by
-  rw [Bil.evalExp]
-  simp only [hc, bind, Except.bind, Value.asBits]
-  by_cases hb : bit = 1
-  · simp only [hb, ↓reduceDIte, ↓reduceIte] at h ⊢
-    exact h
-  · simp only [hb, ↓reduceDIte, ↓reduceIte] at h ⊢
-    exact h
+/-- A conditional on a value not known yet, with a branch that makes code, where both have a value: the code is a BIL conditional that runs
+the code of a branch and then moves the value of that branch to a temporary of its own, in the larger of the two widths, and the value of the form is that temporary. -/
+theorem evalConditional_with_code {fuel : Nat} {locals : Locals} {context : Context} {state tested : State} {test : Sexp}
+    {yes no : List Sexp} {value yesValue noValue : SV} {exp yesExp noExp : Bil.Exp} {yesWidth noWidth : Nat}
+    {yesState noState : State} (ht : eval fuel locals context state test = .ok (value, tested))
+    (hn : truth value = .ok none) (hc : condition context value = .ok exp)
+    (hy : evalSequence fuel locals context { tested with code := [] } yes = .ok (yesValue, yesState))
+    (hno : evalSequence fuel locals context { tested with code := [] } no = .ok (noValue, noState))
+    (hcode : ¬ (yesState.code = [] ∧ noState.code = []))
+    (hye : expectBil context yesValue = .ok (yesWidth, yesExp)) (hne : expectBil context noValue = .ok (noWidth, noExp)) :
+    evalConditional (fuel + 1) locals context state test yes no =
+      let width := max yesWidth noWidth
+      let temporary : Bap.Var := ⟨s!"_primus_{max yesState.nextTemp noState.nextTemp}", .imm width, 0, false⟩
+      .ok (.bil width (.var temporary), emit { tested with nextTemp := max yesState.nextTemp noState.nextTemp + 1 }
+        [.ifElse exp (yesState.code ++ [.move temporary (extend width yesExp)]) (noState.code ++ [.move temporary (extend width noExp)])]) := by
+  have hempty : (yesState.code.isEmpty && noState.code.isEmpty) = false := by
+    rw [Bool.eq_false_iff]
+    intro h
+    simp only [Bool.and_eq_true, List.isEmpty_iff] at h
+    exact hcode h
+  rw [evalConditional]
+  simp only [bind, Except.bind, ht, hn, hc, hy, hno, hempty, hye, hne, Bool.false_eq_true, ↓reduceIte]
+
+/-- **The value of a conditional with code is the value of the branch that runs**, after that branch has run: the temporary holds what the
+expression of the branch evaluates to at the end of its code, in the larger of the two widths, whatever the other branch is. -/
+theorem conditional_branch_value {fuel : Nat} {start after : Bil.State} {exp yes no : Bil.Exp} {yesCode noCode : Bil.Program} {width : Nat} {bit : BitVec 1}
+    {result : Bap.Value} (temporary : Bap.Var) (hc : Bil.evalExp start.env exp = .ok (.bits bit))
+    (hb : Bil.execProgram fuel start (if bit = 1 then yesCode else noCode) = .ok (after, .normal))
+    (hv : Bil.evalExp after.env (extend width (if bit = 1 then yes else no)) = .ok result) :
+    Bil.execStmt (fuel + 2) start (.ifElse exp (yesCode ++ [.move temporary (extend width yes)]) (noCode ++ [.move temporary (extend width no)])) =
+        .ok ({ env := Bil.bind after.env temporary result }, .normal) ∧
+      Bil.evalExp (Bil.bind after.env temporary result) (.var temporary) = .ok result := by
+  constructor
+  · have hstep : Bil.execStmt (fuel + 2) start (.ifElse exp (yesCode ++ [.move temporary (extend width yes)]) (noCode ++ [.move temporary (extend width no)])) =
+        Bil.execProgram (fuel + 1) start (if bit = 1 then yesCode ++ [.move temporary (extend width yes)] else noCode ++ [.move temporary (extend width no)]) := by
+      simp only [Bil.execStmt, Bil.execExp, hc]
+      rfl
+    rw [hstep]
+    by_cases hone : bit = 1
+    · simp only [hone, ite_true] at hb hv ⊢
+      exact Bap.Proofs.Bil.execProgram_snoc_move temporary hb hv
+    · simp only [hone, ite_false] at hb hv ⊢
+      exact Bap.Proofs.Bil.execProgram_snoc_move temporary hb hv
+  · simp [Bil.evalExp, Bil.lookup, Bil.bind]
 
 /-- `freeze` keeps the value: either it depends on nothing, or a temporary that the code it adds moves it to, which is
 fresh when `nextTemp` is, holds it from then on. This is what a `let` binding evaluates to. -/

@@ -43,17 +43,21 @@ private def aarch64Register (name : String) : Primus.Semantics.Value :=
   else
     .register name 64 64
 
-/-- XMM is the low half of YMM, as in `x86_target` of the reference implementation. -/
+/-- XMM and YMM are the low bits of ZMM, the one register they name. A mask register is a register of its own, of the
+64 bits it has in both modes. -/
 private def x86VectorRegister (name : String) : Option Primus.Semantics.Value :=
   match name.toList with
   | 'X' :: 'M' :: 'M' :: digit :: digits =>
     if (digit :: digits).all Char.isDigit then
-      some (.register ("YMM" ++ String.ofList (digit :: digits)) 128 256)
+      some (.register ("ZMM" ++ String.ofList (digit :: digits)) 128 512)
     else none
   | 'Y' :: 'M' :: 'M' :: digit :: digits =>
-    if (digit :: digits).all Char.isDigit then some (.register name 256 256) else none
+    if (digit :: digits).all Char.isDigit then
+      some (.register ("ZMM" ++ String.ofList (digit :: digits)) 256 512)
+    else none
   | 'Z' :: 'M' :: 'M' :: digit :: digits =>
     if (digit :: digits).all Char.isDigit then some (.register name 512 512) else none
+  | ['K', digit] => if digit.isDigit then some (.register name 64 64) else none
   | _ => none
 
 /-- The 64-bit base and the width of a low partial x86 general purpose register. -/
@@ -89,12 +93,12 @@ private def x8632HighByteBase (name : String) : Option String :=
   | "AH" => some "EAX" | "BH" => some "EBX" | "CH" => some "ECX" | "DH" => some "EDX"
   | _ => none
 
-/-- The registers of x87 and the control and status words, which have the same widths in both modes,
+/-- The registers of x87, the control and status words and the segments, which have the same widths in both modes,
 as in `x86_target` of the reference implementation. -/
 private def x86FloatRegister (name : String) : Option Primus.Semantics.Value :=
   match name with
   | "ST0" | "ST1" | "ST2" | "ST3" | "ST4" | "ST5" | "ST6" | "ST7" => some (.register name 80 80)
-  | "FPU_CONTROL" | "FPU_STATUS" | "FPU_TAG" => some (.register name 16 16)
+  | "FPU_CONTROL" | "FPU_STATUS" | "FPU_TAG" | "CS" | "DS" | "ES" | "FS" | "GS" | "SS" => some (.register name 16 16)
   | "MXCSR" | "EFLAGS" => some (.register name 32 32)
   | _ => none
 
@@ -237,14 +241,14 @@ private def x86FloatNames : List String :=
 
 /-- The vector registers that the semantics can name directly, e.g., the implicit result of `PCMPISTRM`. -/
 private def x86VectorNames (count : Nat) : List String :=
-  (List.range count).flatMap fun n => [s!"XMM{n}", s!"YMM{n}"]
+  (List.range count).flatMap fun n => [s!"XMM{n}", s!"YMM{n}", s!"ZMM{n}"]
 
 private def x86Globals : Primus.Semantics.Globals :=
   let registers := ["RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP",
     "EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP", "RIP",
     "AX", "BX", "CX", "DX", "SI", "DI", "BP", "SP",
     "AL", "BL", "CL", "DL", "SIL", "DIL", "BPL", "SPL", "AH", "BH", "CH", "DH",
-    "CF", "OF", "SF", "ZF", "AF", "PF", "DF", "IF", "FS_BASE", "GS_BASE"] ++ x86FloatNames ++ x86VectorNames 16
+    "CF", "OF", "SF", "ZF", "AF", "PF", "DF", "IF", "FS_BASE", "GS_BASE"] ++ x86FloatNames ++ x86VectorNames 32
   registers.map fun name => (name, x86Register name)
 
 private def x8632Register (name : String) : Primus.Semantics.Value :=
@@ -532,11 +536,11 @@ def aarch64Environment : IO Primus.Semantics.Environment := cached aarch64Cache 
 
 private initialize x86Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
-def x86Environment : IO Primus.Semantics.Environment := cached x86Cache do
+private def x86EnvironmentWith (extra : List String) : IO Primus.Semantics.Environment := do
   let context := semanticsContext 0 0
   let definitions ← Primus.Semantics.loadMany (← pluginDirectories "x86")
-    ["bits", "x86-64", "x86-bits", "x86-move", "x86-arith", "x86-control", "x86-shift", "x86-bmi", "x86-sse", "x86-simd",
-      "x86-pcmpstr", "x86-sse-intrinsics"] context
+    (["bits", "x86-64", "x86-bits", "x86-move", "x86-arith", "x86-control", "x86-shift", "x86-bmi", "x86-sse", "x86-simd",
+      "x86-pcmpstr", "x86-sse-intrinsics"] ++ extra) context
   let environment ← compiledDefinitions [("RETQ", "RET64"), ("NOP", "NOOP")] "x86_64" x86Globals definitions
   let registers ← LLVM.registerNames "x86_64"
   let registers := (0, x86Register "Nil") ::
@@ -547,6 +551,13 @@ def x86Environment : IO Primus.Semantics.Environment := cached x86Cache do
   pure { environment.withRegisters registers with
     signExtendedOpcodes := Std.HashSet.ofList signExtendedOpcodes
     relativeOpcodes := Std.HashSet.ofList relativeOpcodes }
+
+def x86Environment : IO Primus.Semantics.Environment := cached x86Cache (x86EnvironmentWith [])
+
+private initialize x86AvxCache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
+
+/-- With AVX-512. It is loaded when an instruction first needs it, as most programs have none of them. -/
+def x86AvxEnvironment : IO Primus.Semantics.Environment := cached x86AvxCache (x86EnvironmentWith ["x86-avx512"])
 
 /-- The names that LLVM has for the formats of a floating point register, e.g., `F10_D`, which `fpr-name` of the
 semantics takes to the register. -/
@@ -654,11 +665,11 @@ def mips32Environment : IO Primus.Semantics.Environment := mipsEnvironmentOf { b
 
 private initialize x8632Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
-def x8632Environment : IO Primus.Semantics.Environment := cached x8632Cache do
+private def x8632EnvironmentWith (extra : List String) : IO Primus.Semantics.Environment := do
   let context := arm32Context 0 0
   let definitions ← Primus.Semantics.loadMany (← pluginDirectories "x86")
-    ["bits", "x86-32", "x86-bits", "x86-move", "x86-arith", "x86-control", "x86-shift", "x86-bmi", "x86-sse", "x86-simd",
-      "x86-pcmpstr", "x86-sse-intrinsics"] context
+    (["bits", "x86-32", "x86-bits", "x86-move", "x86-arith", "x86-control", "x86-shift", "x86-bmi", "x86-sse", "x86-simd",
+      "x86-pcmpstr", "x86-sse-intrinsics"] ++ extra) context
   let environment ← compiledDefinitions
     [("RETQ", "RET32"), ("RETL", "RET32"), ("NOP", "NOOP")] "i386" x8632Globals definitions
   let registers ← LLVM.registerNames "i386"
@@ -666,6 +677,13 @@ def x8632Environment : IO Primus.Semantics.Environment := cached x8632Cache do
     (registers.map fun binding => (binding.1, x8632Register binding.2))
   let relativeOpcodes ← x86RelativeOpcodes.filterMapM (LLVM.opcodeId? "i386")
   pure { environment.withRegisters registers with relativeOpcodes := Std.HashSet.ofList relativeOpcodes }
+
+def x8632Environment : IO Primus.Semantics.Environment := cached x8632Cache (x8632EnvironmentWith [])
+
+private initialize x8632AvxCache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
+
+/-- With AVX-512, as `x86AvxEnvironment`. -/
+def x8632AvxEnvironment : IO Primus.Semantics.Environment := cached x8632AvxCache (x8632EnvironmentWith ["x86-avx512"])
 
 private initialize riscv32Cache : IO.Ref (Option Primus.Semantics.Environment) ← IO.mkRef none
 
@@ -1081,6 +1099,107 @@ private def x86Context (context : Primus.Semantics.Context) (long : Bool) (bytes
   if size ≠ 0 && !x86LegacyPrefix first && first / 16 != 4 then { context with prefixes := some [] }
   else { context with prefixes := some (x86Prefixes long ((bytes.toList.take size).map UInt8.toNat)) }
 
+/-- What the name of an AVX-512 opcode says: `VPADDDZ256rmbkz` is the family `VPADDD` on 256 bits with a form `rmbkz`. -/
+structure EvexOpcode where
+  family : String
+  /-- The size of the vector: `Z128`, `Z256` and `Z`, which is also the name of the scalar forms. -/
+  width : Nat
+  /-- All of the name after the size. -/
+  suffix : String
+  deriving DecidableEq, Repr
+
+namespace EvexOpcode
+
+/-- The form with its mask, without what follows a `_`, as `_Int` or `_REV`. -/
+def maskedForm (opcode : EvexOpcode) : List Char := opcode.suffix.toList.takeWhile (· != '_')
+
+/-- The masking: 0 none, 1 merging, 2 zeroing. -/
+def masking (opcode : EvexOpcode) : Nat :=
+  match opcode.maskedForm.reverse with
+  | 'z' :: 'k' :: _ => 2
+  | 'k' :: _ => 1
+  | _ => 0
+
+/-- The form without the mask. -/
+def form (opcode : EvexOpcode) : List Char := opcode.maskedForm.take (opcode.maskedForm.length - opcode.masking)
+
+/-- How the last source is given, the argument `MEM` of the semantics. -/
+def memory (opcode : EvexOpcode) : Nat :=
+  match opcode.form with
+  | 'm' :: 'r' :: _ => 3
+  | form =>
+    if form.contains 'm' then (if form.contains 'b' then 2 else 1)
+    else if form.getLast? == some 'b' then 4
+    else 0
+
+/-- Whether the last operand is an immediate, the argument `I` of the semantics. -/
+def immediate (opcode : EvexOpcode) : Nat := if opcode.form.contains 'i' then 1 else 0
+
+/-- The opcode of the same semantics with a VEX prefix or none, if the registers of an instruction are of the size it
+has: the operands are the same. -/
+def vexName (opcode : EvexOpcode) : String :=
+  opcode.family ++ (if opcode.width = 256 then "Y" else "") ++ opcode.suffix
+
+end EvexOpcode
+
+/-- What is before and after the last `Z`, of reversed characters and of those after them. -/
+def evexSplit : List Char → List Char → Option (List Char × List Char)
+  | [], _ => none
+  | 'Z' :: before, after => some (before.reverse, after)
+  | char :: before, after => evexSplit before (char :: after)
+
+/-- The parts of the name of an AVX-512 opcode: the `Z` is the last one, a size and a form follow it. -/
+def evexOpcode? (name : String) : Option EvexOpcode :=
+  match evexSplit name.toList.reverse [] with
+  | none => none
+  | some (family, after) =>
+    let (width, suffix) :=
+      match after with
+      | '1' :: '2' :: '8' :: rest => (128, rest)
+      | '2' :: '5' :: '6' :: rest => (256, rest)
+      | rest => (512, rest)
+    match family, suffix with
+    | _ :: _, char :: _ =>
+      if char.isLower then some ⟨String.ofList family, width, String.ofList suffix⟩ else none
+    | _, _ => none
+
+/-- The instructions that aren't defined in the environment of a program: those of AVX-512, whose semantics it loads now.
+A mask instruction is defined by its name. Another opcode is a form of a family, which is a definition that takes the form
+and the operands, or the same as an opcode without EVEX, unless it has a register that only AVX-512 has. Anything else has
+no semantics, which is an error. -/
+private def liftAvx (triple : String) (environment : IO Primus.Semantics.Environment) (context : Primus.Semantics.Context)
+    (bytes : ByteArray) (address : Nat) (operands : List Primus.Semantics.Value) : IO Bil.Program := do
+  let name := (← LLVM.disassemble triple bytes address).opcode
+  let globals ← environment
+  let undefined := IO.userError s!"Primus semantics has no definition for LLVM opcode {name}"
+  if globals.instructions.contains name then
+    Primus.Semantics.liftWith globals context name operands
+  else
+    match evexOpcode? name with
+    | none => throw undefined
+    | some opcode =>
+      let family := s!"evex:{opcode.family}"
+      if globals.operations.contains family then
+        let word (value : Nat) : Primus.Semantics.Value := .int (BitVec.ofNat 64 value)
+        Primus.Semantics.liftWith globals context family
+          [.list (word opcode.width :: word opcode.memory :: word opcode.masking :: word opcode.immediate :: operands)]
+      else
+        let vexRegisters := operands.all fun operand =>
+          match operand with
+          | .register name width _ => width ≠ 512 && !name.startsWith "K"
+          | _ => true
+        if vexRegisters && globals.instructions.contains opcode.vexName then
+          Primus.Semantics.liftWith globals context opcode.vexName operands
+        else
+          throw undefined
+
+/-- The code of an instruction: what its opcode is defined as, or else what AVX-512 has. -/
+private def x86Lift (triple : String) (avx : IO Primus.Semantics.Environment) (globals : Primus.Semantics.Environment)
+    (context : Primus.Semantics.Context) (bytes : ByteArray) (address opcode : Nat)
+    (operands : List Primus.Semantics.Value) : IO Bil.Program :=
+  if globals.opcodes.contains opcode then Primus.Semantics.liftMC globals context opcode operands
+  else liftAvx triple avx context bytes address operands
+
 def decodeX86With (globals : Primus.Semantics.Environment) (base address : Nat)
     (data : ByteArray) : IO Disasm.Insn := do
   let bytes := instructionBytes data (address - base)
@@ -1089,7 +1208,7 @@ def decodeX86With (globals : Primus.Semantics.Environment) (base address : Nat)
   let opcode := LLVM.mcOpcode decoded.instruction
   let machineOperands ← LLVM.mcOperands decoded.instruction
   let operands ← x86MCOperands globals opcode machineOperands
-  let bil ← Primus.Semantics.liftMC globals context opcode operands
+  let bil ← x86Lift "x86_64" x86AvxEnvironment globals context bytes address opcode operands
   pure {
     address := address
     size := decoded.size
@@ -1113,7 +1232,7 @@ def decodeX8632With (globals : Primus.Semantics.Environment) (base address : Nat
     match Primus.Semantics.machineOperand globals context value with
     | .ok operand => pure operand
     | .error error => throw <| IO.userError error
-  let bil ← Primus.Semantics.liftMC globals context opcode operands
+  let bil ← x86Lift "i386" x8632AvxEnvironment globals context bytes address opcode operands
   pure {
     address := address
     size := decoded.size
